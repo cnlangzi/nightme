@@ -573,53 +573,18 @@ jobs:
   # surfaced `//go:build` mismatches that `go vet` in `test` would
   # catch on the relevant native runner anyway.
   #
-  # Exception: windows/arm64 STT cannot be exercised by the `test`
-  # matrix because (a) windows-latest is amd64 only, and (b) cross-
-  # compiling cgo to windows/arm64 from an amd64 host breaks for the
-  # same reason that bit release.yml — Go's cgo auto-detects the
-  # system `gcc`, and the cross toolchain isn't a target we maintain.
-  # A dedicated job on windows-11-arm mirrors the release leg so a
-  # toolchain mismatch surfaces as a CI failure rather than a
-  # release-time blast radius.
-  build-stt-windows-arm64:
-    needs: []
-    runs-on: windows-11-arm
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      # Git for Windows on windows-11-arm ships MSYS2 minimal whose
-      # default `gcc` is NOT an AArch64 cross-compiler. Go's cgo
-      # finds `gcc` via PATH and invokes it to assemble
-      # `runtime/cgo/gcc_arm64.S` (AArch64 mnemonics: `stp x29,x30,
-      # [sp,`, `blr x20`, …). The wrong assembler rejects those
-      # with `Error: no such instruction` — the exact failure that
-      # bit release.yml. Installing mingw-w64-aarch64-gcc gives us
-      # the right toolchain; pinning CC makes cgo's compiler lookup
-      # deterministic instead of PATH-order-dependent.
-      - name: Install AArch64 MinGW toolchain
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: CLANGARM64
-          update: true
-          install: >-
-            git
-            mingw-w64-aarch64-gcc
-
-      - name: Build STT
-        env:
-          GOOS: windows
-          GOARCH: arm64
-          CC: aarch64-w64-mingw32-gcc
-        shell: bash
-        run: |
-          set -euo pipefail
-          make build-stt
-
+  # Exception: the `windows-11-arm` matrix leg in this job is NOT
+  # an agent-smoke branch — it's a windows/arm64 STT build gate.
+  # windows-latest (amd64) can't exercise that target: cgo to
+  # windows/arm64 needs aarch64 mingw, which Go's cgo auto-detects
+  # from PATH but is absent on a default amd64 runner (and on
+  # Git for Windows' MSYS2 minimal even on windows-11-arm). The
+  # build-stt-specific steps below are gated to windows-11-arm; the
+  # rest of this job's steps (npm install, agent spawn smoke) are
+  # gated to the OTHER three legs. Same job keeps the cheap-first
+  # ordering — startup is still last in the dependency chain, but
+  # the windows/arm64 toolchain regression now fails here instead
+  # of in release.
   startup:
     needs: test
     runs-on: ${{ matrix.os }}
@@ -635,7 +600,17 @@ jobs:
         # same OS layer with negligible signal. Each runner
         # reports independently so a Linux-only npm registry
         # hiccup doesn't gate Windows / macOS.
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        #
+        # The runner labels here mirror release.yml's main
+        # `build` and `stt` matrix 1:1 — same five host labels,
+        # in the same order — so a runner-image change (label
+        # rename, deprecation) updates both workflows in lock-
+        # step. Only the three amd64 legs participate in agent-
+        # smoke; the two arm64 legs (ubuntu-24.04-arm for linux,
+        # windows-11-arm for windows) run the STT build gate and
+        # nothing else — npm-distributed agents are amd64-only,
+        # so spawning them on arm64 would just fail.
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest, windows-11-arm]
     steps:
       - uses: actions/checkout@v5
 
@@ -643,6 +618,57 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+
+      # Git for Windows on windows-11-arm ships MSYS2 minimal whose
+      # default `gcc` is NOT an AArch64 cross-compiler. Go's cgo
+      # finds `gcc` via PATH and invokes it to assemble
+      # `runtime/cgo/gcc_arm64.S` (AArch64 mnemonics: `stp x29,x30,
+      # [sp,`, `blr x20`, …). The wrong assembler rejects those
+      # with `Error: no such instruction` — the exact failure that
+      # bit release.yml.
+      #
+      # `msystem: MINGW64` (not CLANGARM64) is intentional: the
+      # `mingw-w64-aarch64-gcc` package lives in the MINGW64 repo
+      # as an x86_64-hosted aarch64 cross-compiler. CLANGARM64's
+      # repo has no such package (it ships clang-only for native
+      # aarch64 build). On aarch64 host the MINGW64 installer runs
+      # via Windows 11 ARM64's x86_64 emulation — slower than native
+      # but the package set is what we need.
+      #
+      # Gated to the windows-11-arm leg; the agent-smoke steps below
+      # are gated to the other three legs. Two step groups within
+      # one job is cheaper than a separate job (no second runner
+      # spin-up, shared checkout + go cache).
+      - name: Install AArch64 MinGW toolchain
+        if: matrix.os == 'windows-11-arm'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git
+            mingw-w64-aarch64-gcc
+
+      # Single Build STT step covers BOTH arm64 legs.
+      #   - windows-11-arm: GOOS=windows, CC=aarch64-w64-mingw32-gcc
+      #     (mingw toolchain installed one step above).
+      #   - ubuntu-24.04-arm: GOOS=linux, default host gcc
+      #     (gcc-aarch64-linux-gnu is preinstalled; no apt step
+      #     needed).
+      # The conditional CC export keeps the Makefile invocation
+      # identical across both legs.
+      - name: Build STT
+        if: matrix.os == 'windows-11-arm' || matrix.os == 'ubuntu-24.04-arm'
+        env:
+          GOOS: ${{ matrix.os == 'windows-11-arm' && 'windows' || 'linux' }}
+          GOARCH: arm64
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.os }}" = "windows-11-arm" ]; then
+            export CC=aarch64-w64-mingw32-gcc
+          fi
+          make build-stt
 
       # setup-node is needed for the npm-distributed agents. Node
       # 22 LTS is the floor: as of mid-2026, several transitive
@@ -659,7 +685,8 @@ jobs:
       # resolution — actions/setup-node@v6 already caches
       # by exact version internally so a future runner-image
       # bump won't silently drift the smoke gate.
-      - uses: actions/setup-node@v6
+      - if: matrix.os != 'windows-11-arm' && matrix.os != 'ubuntu-24.04-arm'
+        uses: actions/setup-node@v6
         with:
           node-version: '22'
 
@@ -672,6 +699,7 @@ jobs:
       # The -gui variant is compiled and link-checked in the `test`
       # job's "Verify Linux tray split" step, which does install them.
       - name: Build nightme
+        if: matrix.os != 'windows-11-arm' && matrix.os != 'ubuntu-24.04-arm'
         shell: bash
         env:
           VERSION: "0.0.0"
@@ -727,6 +755,7 @@ jobs:
       # channel (the WS connection then fails+reconnects in a
       # goroutine, non-fatal) and the daemon reaches "ready".
       - name: Install agents (officially-supported methods per agent)
+        if: matrix.os != 'windows-11-arm' && matrix.os != 'ubuntu-24.04-arm'
         shell: bash
         run: |
           set -e
@@ -895,6 +924,7 @@ jobs:
           Write-Host "OK: appended $agentPath to GITHUB_PATH"
 
       - name: Verify daemon lifecycle (start/stop/restart/status)
+        if: matrix.os != 'windows-11-arm' && matrix.os != 'ubuntu-24.04-arm'
         shell: bash
         env:
           NIGHTME_FEISHU_APP_ID: ci
@@ -998,6 +1028,7 @@ jobs:
           echo "OK: daemon lifecycle (start/stop/restart/status) green on ${{ matrix.os }}"
 
       - name: Verify each agent binary is on PATH
+        if: matrix.os != 'windows-11-arm' && matrix.os != 'ubuntu-24.04-arm'
         shell: bash
         run: |
           set -e
@@ -1071,6 +1102,7 @@ jobs:
           done
 
       - name: Verify each agent CLI responds to --help
+        if: matrix.os != 'windows-11-arm' && matrix.os != 'ubuntu-24.04-arm'
         shell: bash
         run: |
           set -e
@@ -1127,6 +1159,7 @@ jobs:
           done
 
       - name: Verify nightme config lists every builtin
+        if: matrix.os != 'windows-11-arm' && matrix.os != 'ubuntu-24.04-arm'
         shell: bash
         run: |
           set -e
@@ -1158,6 +1191,7 @@ jobs:
           done
 
       - name: Verify nightme bridge spawns each agent (response required)
+        if: matrix.os != 'windows-11-arm' && matrix.os != 'ubuntu-24.04-arm'
         shell: bash
         run: |
           set -e

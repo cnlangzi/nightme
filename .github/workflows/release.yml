@@ -492,15 +492,24 @@ jobs:
       # `runtime/cgo/gcc_arm64.S` (AArch64 mnemonics:
       # `stp x29,x30,[sp,`, `blr x20`, …), which the wrong
       # assembler rejects with `Error: no such instruction`.
-      # Installing mingw-w64-aarch64-gcc and pinning CC
-      # sidesteps that lookup. Linux / darwin legs have a
-      # correct default gcc already, so the step is gated to
-      # the windows/arm64 leg only.
+      #
+      # `msystem: MINGW64` (not CLANGARM64) is intentional:
+      # the `mingw-w64-aarch64-gcc` package lives in the
+      # MINGW64 repo as an x86_64-hosted aarch64 cross-
+      # compiler. CLANGARM64's repo has no such package
+      # (it ships clang-only for native aarch64 build). On
+      # aarch64 host the MINGW64 installer runs via Windows
+      # 11 ARM64's x86_64 emulation — slower than native but
+      # the package set is what we need.
+      #
+      # Linux / darwin legs have a correct default gcc
+      # already, so the step is gated to the windows/arm64
+      # leg only.
       - name: Install AArch64 MinGW toolchain
         if: matrix.goos == 'windows' && matrix.goarch == 'arm64'
         uses: msys2/setup-msys2@v2
         with:
-          msystem: CLANGARM64
+          msystem: MINGW64
           update: true
           install: >-
             git

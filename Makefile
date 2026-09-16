@@ -182,6 +182,60 @@ release: winres ## Build a versioned binary into dist/nightme-<GOOS>-<GOARCH>[.e
 	@mkdir -p $(BIN_DIR)
 	GOOS=$(GOOS) GOARCH=$(GOARCH) $(GO) build -tags '$(GO_TAGS)' -ldflags '$(LDFLAGS)' -o $(RELEASE_BIN) ./cmd/nightme
 
+# build-stt compiles the nightme-stt worker into bin/nightme-stt[.exe].
+# The worker is a SEPARATE binary from `nightme` — NightMe core spawns
+# it on demand as a child process (see internal/stt/spawner.go + issue
+# #381). Two non-default knobs from `make build`:
+#
+#   -tags cgo_sherpa  selects cmd/nightme-stt/internal/sherpa/sherpa_onnx.go
+#                     (the real SenseVoice binding) instead of the
+#                     stub at cmd/nightme-stt/internal/sherpa/stub.go.
+#                     Without this tag the worker compiles but every
+#                     transcription returns the placeholder text —
+#                     fine for `make test` smoke runs, useless in
+#                     production.
+#   CGO_ENABLED=1     required by the cgo_sherpa binding. The platform
+#                     native lib (.a/.dylib/.lib) ships inside the
+#                     sherpa-onnx-go-{linux,macos,windows} Go modules
+#                     (go.mod), so no system .so/.dylib/.dll is needed
+#                     at run time — the produced binary is self-
+#                     contained.
+#
+# BIN_NAME=nightme-stt + the existing $(EXT) knob produce the right
+# suffix on every platform (`.exe` on Windows, empty elsewhere),
+# matching what internal/stt/spawner.go expects to find via
+# FindNightmeSTT.
+#
+# Native-only matrix in release.yml (no cross-compile): the
+# sherpa-onnx-go native libs are per-arch, and cgo cannot cross-
+# compile between arches without a target sysroot. The release
+# matrix's `os:` axis points at the matching native runner for
+# each goos/goarch pair, same as the main `nightme` release matrix.
+.PHONY: build-stt
+build-stt: ## Compile nightme-stt worker to bin/nightme-stt[.exe] (CGO + cgo_sherpa).
+	@mkdir -p bin
+	CGO_ENABLED=1 $(GO) build -tags cgo_sherpa -ldflags '$(LDFLAGS)' \
+		-o bin/nightme-stt$(EXT) ./cmd/nightme-stt
+
+# release-stt: same shape as `release` but for the worker. Used by
+# dev / manual release checks; release.yml calls `make build-stt`
+# directly (it already controls the surrounding stage/archive/upload
+# steps and only needs the produced bin/nightme-stt[.exe]).
+.PHONY: release-stt
+release-stt: ## Build a versioned nightme-stt into dist/nightme-stt-<GOOS>-<GOARCH>[.exe] (host-only).
+	@mkdir -p $(BIN_DIR)
+	CGO_ENABLED=1 GOOS=$(GOOS) GOARCH=$(GOARCH) \
+		$(GO) build -tags cgo_sherpa -ldflags '$(LDFLAGS)' \
+		-o $(BIN_DIR)/nightme-stt-$(GOOS)-$(GOARCH)$(EXT) ./cmd/nightme-stt
+
+# install-stt mirrors `install` for the worker. Useful for local dev
+# against a $$GOPATH/bin that nightme's manager will later discover
+# (the manager's FindNightmeSTT walks $$GOPATH/bin as a fallback
+# before bailing to the user-facing "nightme stt install" prompt).
+.PHONY: install-stt
+install-stt: ## Install nightme-stt worker to $$GOBIN (CGO + cgo_sherpa).
+	CGO_ENABLED=1 $(GO) install -tags cgo_sherpa -ldflags '$(LDFLAGS)' ./cmd/nightme-stt
+
 # tray-assets is intentionally NOT in the build/release dependency
 # chain. The tray-icon byte payload that //go:embed resolves in
 # cmd/nightme/tray_assets.go is committed to the repo (Linux:

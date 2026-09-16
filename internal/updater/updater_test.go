@@ -133,7 +133,7 @@ func TestExtractArchive_WritesToStagingDir(t *testing.T) {
 		t.Fatalf("write archive: %v", err)
 	}
 
-	got, err := extractZIP(archivePath, stagingDir)
+	got, err := extractZIP(archivePath, stagingDir, []string{"nightme.exe"})
 	if err != nil {
 		t.Fatalf("extractZIP: %v", err)
 	}

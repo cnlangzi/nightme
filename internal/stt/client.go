@@ -25,6 +25,13 @@ type Transcriber interface {
 	// ProtocolVersion — see issue #381 §4 protocol/version
 	// mismatch must fail clearly.
 	Version(ctx context.Context) (int, error)
+	// WorkerStatus queries the worker's OpStatus RPC and returns
+	// its runtime snapshot (PID, StartedAt, Endpoint, Version,
+	// BuildVer). The same struct is consumed by `nightme stt
+	// status` directly via ProbeWorkerStatus, and merged into
+	// the in-process Manager.Status so doctor / status surfaces
+	// see the same shape.
+	WorkerStatus(ctx context.Context) (WorkerStatus, error)
 	// Transcribe sends audio bytes to the worker and waits for
 	// the text result. Format is the audio container hint
 	// ("ogg", "wav", ...).
@@ -67,6 +74,18 @@ func (c *RPCClient) Version(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	return resp.Version, nil
+}
+
+// WorkerStatus implements Transcriber.
+func (c *RPCClient) WorkerStatus(ctx context.Context) (WorkerStatus, error) {
+	resp, err := c.call(ctx, &Request{Version: ProtocolVersion, Op: OpStatus})
+	if err != nil {
+		return WorkerStatus{}, err
+	}
+	if resp.WorkerStatus == nil {
+		return WorkerStatus{}, NewError(CodeInternal, "worker returned empty status")
+	}
+	return *resp.WorkerStatus, nil
 }
 
 // Transcribe implements Transcriber.

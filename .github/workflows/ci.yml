@@ -954,13 +954,21 @@ jobs:
           # Cursor CLI on unix: official curl-pipe bash installer.
           # Drops `agent` into ~/.local/bin/agent (primary) plus
           # `cursor-agent` legacy symlink alongside — both on
-          # PATH for the hosted runner user. The Windows leg
-          # uses the separate pwsh step below; running the bash
+          # PATH for the hosted runner user. The Windows legs
+          # use the separate pwsh step below; running the bash
           # installer from Git Bash would fail with "Unsupported
           # operating system: MINGW64_NT-..." because the bash
           # branch has no Windows code path (case "${OS}" in
-          # Linux*|Darwin*)).
-          if [ "${{ matrix.os }}" != "windows-latest" ]; then
+          # Linux*|Darwin*) — applies to BOTH windows-latest and
+          # windows-11-arm. Cursor CLI does not yet publish a
+          # Windows ARM64 native binary, so the Windows legs
+          # fall through to the pwsh installer; that one only
+          # runs on windows-latest (downloads the x64 zip which
+          # runs under x86_64 emulation on ARM64 Windows, but we
+          # don't exercise that path here — the cross-compile
+          # workflow isn't a core CI smoke target). On windows-11-
+          # arm cursor is intentionally not installed at all.
+          if [ "${{ matrix.os }}" != "windows-latest" ] && [ "${{ matrix.os }}" != "windows-11-arm" ]; then
             curl -fsSL https://cursor.com/install | bash
           fi
 

@@ -644,6 +644,17 @@ jobs:
         if: matrix.os == 'windows-11-arm'
         uses: msys2/setup-msys2@v2
         with:
+          # The default install-dir `C:\msys64` is occupied on
+          # windows-11-arm runners by the Git for Windows-bundled
+          # MSYS2, which is too old to have the CLANGARM64 env
+          # (that env was added in MSYS2 ~2022). The action's
+          # `update: true` can refresh packages but can't enable
+          # an env that doesn't exist on disk, so `pacman -S
+          # clang` in CLANGARM64 msystem silently fails to land
+          # in `<root>/clangarm64/bin/`. Force a fresh install
+          # under `C:\a\msys64` so the action drops a current
+          # MSYS2 with the CLANGARM64 env intact.
+          install-dir: 'C:\a\msys64'
           msystem: CLANGARM64
           update: true
           install: >-
@@ -651,20 +662,20 @@ jobs:
             clang
             lld
 
-      # msys2/setup-msys2 doesn't expose its actual install path
-      # via action outputs. Default is `C:\msys64` but on some
-      # runners (incl. windows-11-arm, observed 2026-09) the
-      # install lands elsewhere — CC pinning to a hard-coded path
-      # then fails with `file does not exist`. Probe common
-      # locations and export the discovered root to env so the
-      # Build STT step can use it. Fails loudly with diagnostics
-      # if no candidate matches.
+      # The action doesn't expose its actual install path via
+      # action outputs. Probe common locations — `C:\a\msys64`
+      # is where the install step above targets, `C:\msys64`
+      # is the Git for Windows fallback (no CLANGARM64 env), and
+      # two more belt-and-braces candidates. Export the
+      # discovered root so the Build STT step's CC works
+      # regardless of where the action actually dropped MSYS2.
       - name: Locate MSYS2 CLANGARM64 clang
         if: matrix.os == 'windows-11-arm'
         shell: bash
         run: |
           set -euo pipefail
           for candidate in \
+            "C:/a/msys64" \
             "C:/msys64" \
             "C:/Program Files/msys2" \
             "C:/tools/msys64"; do
@@ -679,8 +690,11 @@ jobs:
           echo "where clang (PATH first hit):"
           where.exe clang 2>&1 || true
           echo "---"
-          echo "C:\\ root listing (looking for msys installs):"
-          ls /c/ 2>&1 | head -40 || true
+          echo "C:\\a\\msys64 (fresh install target, if exists):"
+          ls -la "C:/a/msys64/" 2>&1 | head -30 || true
+          echo "---"
+          echo "C:\\msys64 contents (Git for Windows fallback, if exists):"
+          ls -la "C:/msys64/" 2>&1 | head -30 || true
           exit 1
 
       # Build nightme runs on EVERY leg (windows-11-arm included)

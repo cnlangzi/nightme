@@ -33,6 +33,14 @@ type gatewayClient struct {
 	state  *stateStore
 	cfg    gatewaySnapshot
 
+	// metrics is the adapter's observability counters. The
+	// gateway loop bumps last_event_unix_ts on every dispatch,
+	// reconnect_count + last_reconnect_unix_ts whenever it
+	// successfully redials after a transient close, and
+	// last_close_code on every close it observes. May be nil
+	// in tests that don't exercise the metrics path.
+	metrics *healthMetrics
+
 	// Callbacks fired from the read loop. onReady receives the
 	// User object Discord returned in READY (so the adapter can
 	// cache botUserID); onMessage receives every MESSAGE_CREATE;
@@ -64,8 +72,13 @@ func (g *gatewayClient) run(ctx context.Context) error {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	backoff := 500 * time.Millisecond
-	const maxBackoff = 30 * time.Second
+	transportBackoff := 500 * time.Millisecond
+	const transportMaxBackoff = 30 * time.Second
+	// reconnectCount counts every redial after the initial connect.
+	// The first dial (sessionID == "") does not increment; each
+	// subsequent dial does. daemoncontrol surfaces this to help
+	// operators spot flapping connections.
+	firstConnect := true
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -83,11 +96,11 @@ func (g *gatewayClient) run(ctx context.Context) error {
 			gb, err := g.api.GetGatewayBot(ctx)
 			if err != nil {
 				logger.Warn("discord gateway: get gateway bot failed; backing off",
-					"err", err.Error(), "backoff_ms", backoff.Milliseconds())
-				if !sleepCtx(ctx, backoff) {
+					"err", err.Error(), "backoff_ms", transportBackoff.Milliseconds())
+				if !sleepCtx(ctx, transportBackoff) {
 					return nil
 				}
-				backoff = nextBackoff(backoff, maxBackoff)
+				transportBackoff = nextBackoff(transportBackoff, transportMaxBackoff)
 				continue
 			}
 			gatewayURL = gb.URL
@@ -96,7 +109,15 @@ func (g *gatewayClient) run(ctx context.Context) error {
 			}
 		}
 
+		if !firstConnect {
+			g.metrics.recordReconnect(time.Now())
+		}
+		firstConnect = false
+
 		terminal, code, err := g.connectOnce(ctx, gatewayURL, resumeMode, sessionID, lastSeq)
+		if code != 0 {
+			g.metrics.recordCloseCode(code)
+		}
 		if terminal {
 			return fmt.Errorf("discord gateway: terminal close code %d (%s): %w",
 				code, describeCloseCode(code), err)
@@ -105,39 +126,59 @@ func (g *gatewayClient) run(ctx context.Context) error {
 			return nil
 		}
 
-		// Backoff policy: grow only on transport errors. A clean
-		// disconnect (close code from Discord, no error) is not
-		// our fault — reset to the floor so the next reconnect
-		// doesn't pay the accumulated delay.
+		// Backoff policy: pick the schedule from decideOnCloseCode
+		// when Discord sent a close frame; otherwise fall back to
+		// the transport-error doubling curve. errInvalidSession
+		// bypasses both — Discord rejected RESUME, the next
+		// iteration will fresh-IDENTIFY.
+		var backoff time.Duration
 		switch {
-		case err == nil:
-			backoff = 500 * time.Millisecond
 		case errors.Is(err, errInvalidSession):
-			// Discord rejected RESUME; the next iteration will
-			// fresh-IDENTIFY. Don't penalise the backoff — the
-			// session_id is already cleared by connectOnce.
-			backoff = 500 * time.Millisecond
+			backoff = defaultReconnectStrategy.initialBackoff
 		case errors.Is(err, context.Canceled):
 			return nil
+		case code != 0:
+			decision := decideOnCloseCode(code)
+			switch decision.Action {
+			case reconnectActionStop:
+				// Defensive: connectOnce's terminal branch should
+				// have already returned. Treat as terminal here so
+				// any future refactor that drops the early return
+				// still surfaces the close code instead of looping.
+				return fmt.Errorf("discord gateway: terminal close code %d (%s)",
+					code, describeCloseCode(code))
+			default:
+				backoff = decision.Backoff
+				logger.Info("discord gateway: scheduling reconnect",
+					"close_code", code,
+					"close_meaning", describeCloseCode(code),
+					"decision", decision.Action.String(),
+					"reason", decision.Reason,
+					"backoff_ms", backoff.Milliseconds())
+			}
+			// A clean disconnect with a known close code is not
+			// our fault — reset the transport-error curve so the
+			// next transport hiccup doesn't inherit accumulated
+			// delay.
+			transportBackoff = 500 * time.Millisecond
+		case err == nil:
+			// Clean disconnect, no close code: also reset.
+			backoff = defaultReconnectStrategy.initialBackoff
+			transportBackoff = 500 * time.Millisecond
 		default:
 			if code != 0 {
 				logger.Warn("discord gateway: connection ended with close code; reconnecting",
 					"close_code", code,
 					"close_meaning", describeCloseCode(code),
 					"err", err.Error(),
-					"backoff_ms", backoff.Milliseconds())
+					"backoff_ms", transportBackoff.Milliseconds())
 			} else {
 				logger.Warn("discord gateway: connection ended; reconnecting",
 					"err", err.Error(),
-					"backoff_ms", backoff.Milliseconds())
+					"backoff_ms", transportBackoff.Milliseconds())
 			}
-			backoff = nextBackoff(backoff, maxBackoff)
-		}
-
-		if code != 0 && err == nil {
-			logger.Info("discord gateway: clean disconnect; reconnecting",
-				"close_code", code,
-				"close_meaning", describeCloseCode(code))
+			backoff = transportBackoff
+			transportBackoff = nextBackoff(transportBackoff, transportMaxBackoff)
 		}
 
 		if !sleepCtx(ctx, backoff) {
@@ -258,7 +299,7 @@ func (g *gatewayClient) readLoop(ctx context.Context, ws *websocket.Conn) (bool,
 		if err := readJSON(ctx, ws, &frame); err != nil {
 			closeCode := extractCloseCode(ws, err)
 			if closeCode != 0 {
-				if isTerminalCloseCode(closeCode) {
+				if decideOnCloseCode(closeCode).Action == reconnectActionStop {
 					return true, closeCode, fmt.Errorf("close code %d", closeCode)
 				}
 				return false, closeCode, nil
@@ -272,6 +313,7 @@ func (g *gatewayClient) readLoop(ctx context.Context, ws *websocket.Conn) (bool,
 
 		switch frame.Op {
 		case 0: // Dispatch
+			g.metrics.recordEvent(time.Now())
 			switch frame.T {
 			case "READY":
 				var ready Ready

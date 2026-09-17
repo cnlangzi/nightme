@@ -232,6 +232,12 @@ func (a *Adapter) onReady(u User) {
 // onMessage is wired into gatewayClient.onMessage. Maps a
 // Discord MESSAGE_CREATE into messages.InboundMessage and
 // publishes it on a.incoming.
+//
+// Blocks is left nil: the runtime dispatcher (see
+// internal/runtime/dispatcher.go) falls back to
+// ch.BuildBlocks(msg.Text, msg.Attachments) when Blocks is
+// empty, so the adapter shouldn't pre-populate — otherwise the
+// dispatcher would double-build.
 func (a *Adapter) onMessage(msg *Message) {
 	if msg == nil {
 		return
@@ -251,9 +257,6 @@ func (a *Adapter) onMessage(msg *Message) {
 		Time:       msg.Timestamp,
 		ReplyTo:    replyTargetOf(msg),
 		HasMention: a.computeHasMention(msg),
-	}
-	if inbound.Blocks == nil {
-		inbound.Blocks = a.BuildBlocks(inbound.Text, nil)
 	}
 	a.publish(inbound)
 }

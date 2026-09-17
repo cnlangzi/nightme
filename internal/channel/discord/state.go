@@ -62,13 +62,19 @@ func (s *stateStore) snapshot() (sessionID string, lastSeq int64, resumeURL stri
 }
 
 // setSession records the values Discord returned in op=0 t=READY.
-// lastSeq is reset to 0 because READY is itself a dispatch event
-// (Discord doesn't emit an `s` field for it; the FIRST post-READY
-// dispatch carries s=1).
+// LastSeq is reset to 0 because READY is itself a dispatch event
+// but carries no `s` field — the first post-READY dispatch emits
+// s=1 and the next setSeq call overwrites this zero. Without the
+// reset, a daemon that crashed between READY and the first
+// dispatch would persist a stale LastSeq from the previous
+// session, which a future code path reading LastSeq directly would
+// misread as "we have seen s=N events" when in fact none have
+// arrived on the new session.
 func (s *stateStore) setSession(sessionID, resumeURL string) error {
 	s.mu.Lock()
 	s.persisted.SessionID = sessionID
 	s.persisted.ResumeGatewayURL = resumeURL
+	s.persisted.LastSeq = 0
 	s.persisted.IntentsVersion = intentsVersion
 	s.persisted.SavedAt = time.Now().UTC()
 	s.mu.Unlock()

@@ -15,8 +15,8 @@ import (
 
 // restClient is the adapter-side abstraction over the Discord HTTP
 // API. Methods are intentionally narrow (one per REST verb we
-// use in Phase 1) so tests can implement just the surface they
-// exercise.
+// use in Phase 1 + Phase 2) so tests can implement just the
+// surface they exercise.
 type restClient interface {
 	GetGatewayBot(ctx context.Context) (GatewayBotResponse, error)
 	GetMe(ctx context.Context) (User, error)
@@ -26,6 +26,15 @@ type restClient interface {
 	AddReaction(ctx context.Context, channelID, messageID, emoji string) error
 	RemoveOwnReaction(ctx context.Context, channelID, messageID, emoji string) error
 	ClearReactions(ctx context.Context, channelID, messageID string) error
+	// Download fetches the body of a Discord CDN URL. Auth is not
+	// required (CDN URLs are signed per-URL) but the bot header is
+	// harmless; tests inject a fake that ignores the URL.
+	Download(ctx context.Context, url string) ([]byte, error)
+	// AcknowledgeInteraction POSTs the interaction callback within
+	// Discord's 3-second window. Callers must use a fresh
+	// context.WithTimeout(context.Background(), 2500*time.Millisecond)
+	// so a cancelled gateway ctx can't strand the ACK.
+	AcknowledgeInteraction(ctx context.Context, id, token string, body InteractionResponse) error
 }
 
 // apiError is the structured error returned by httpREST. StatusCode
@@ -220,4 +229,79 @@ func (c *httpREST) ClearReactions(ctx context.Context, channelID, messageID stri
 	return WithTransientRetry(ctx, RetryOpts{Op: "clear_reactions", Cfg: c.retry}, func() error {
 		return c.Call(ctx, http.MethodDelete, path, nil, nil)
 	})
+}
+
+// Download fetches a Discord CDN attachment body. CDN URLs are
+// signed per-URL, so the bot Authorization header is technically
+// unnecessary; we still attach it for consistency with the rest of
+// the REST surface and to make log lines recognisable. Retries are
+// skipped (attachments are a one-shot fetch — retrying a CDN 5xx
+// from a deleted attachment only burns the caller's ctx budget).
+func (c *httpREST) Download(ctx context.Context, rawURL string) ([]byte, error) {
+	if c == nil || c.client == nil {
+		return nil, errors.New("discord: REST client is nil")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("discord: build download request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bot "+c.token)
+	req.Header.Set("User-Agent", c.userAgent)
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("discord: download: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+	if err != nil {
+		return nil, fmt.Errorf("discord: read download: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, &apiError{
+			StatusCode: resp.StatusCode,
+			Method:     http.MethodGet,
+			Path:       rawURL,
+			Message:    strings.TrimSpace(string(body)),
+		}
+	}
+	return body, nil
+}
+
+// AcknowledgeInteraction posts the interaction callback response
+// within Discord's strict 3-second window. The path is intentionally
+// NOT routed through c.Call — the rate limiter and retry are both
+// wrong for this surface (no rate limit applies to /interactions
+// callbacks, and a retry past 3 s is useless). The body is a plain
+// JSON marshal of the supplied InteractionResponse.
+func (c *httpREST) AcknowledgeInteraction(ctx context.Context, id, token string, body InteractionResponse) error {
+	if c == nil || c.client == nil {
+		return errors.New("discord: REST client is nil")
+	}
+	path := "/interactions/" + url.PathEscape(id) + "/" + url.PathEscape(token) + "/callback"
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("discord: marshal interaction callback: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("discord: build interaction request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bot "+c.token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", c.userAgent)
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("discord: interaction callback: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+		return &apiError{
+			StatusCode: resp.StatusCode,
+			Method:     http.MethodPost,
+			Path:       path,
+			Message:    strings.TrimSpace(string(msg)),
+		}
+	}
+	return nil
 }

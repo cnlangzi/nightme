@@ -94,20 +94,51 @@ func (g *gatewayClient) run(ctx context.Context) error {
 
 		terminal, code, err := g.connectOnce(ctx, gatewayURL, resumeMode, sessionID, lastSeq)
 		if terminal {
-			return fmt.Errorf("discord gateway: terminal close code %d: %w", code, err)
+			return fmt.Errorf("discord gateway: terminal close code %d (%s): %w",
+				code, describeCloseCode(code), err)
 		}
 		if ctx.Err() != nil {
 			return nil
 		}
-		if err != nil && !errors.Is(err, errInvalidSession) && !errors.Is(err, context.Canceled) {
-			logger.Warn("discord gateway: connection ended; reconnecting",
-				"err", err.Error(), "backoff_ms", backoff.Milliseconds())
+
+		// Backoff policy: grow only on transport errors. A clean
+		// disconnect (close code from Discord, no error) is not
+		// our fault — reset to the floor so the next reconnect
+		// doesn't pay the accumulated delay.
+		switch {
+		case err == nil:
+			backoff = 500 * time.Millisecond
+		case errors.Is(err, errInvalidSession):
+			// Discord rejected RESUME; the next iteration will
+			// fresh-IDENTIFY. Don't penalise the backoff — the
+			// session_id is already cleared by connectOnce.
+			backoff = 500 * time.Millisecond
+		case errors.Is(err, context.Canceled):
+			return nil
+		default:
+			if code != 0 {
+				logger.Warn("discord gateway: connection ended with close code; reconnecting",
+					"close_code", code,
+					"close_meaning", describeCloseCode(code),
+					"err", err.Error(),
+					"backoff_ms", backoff.Milliseconds())
+			} else {
+				logger.Warn("discord gateway: connection ended; reconnecting",
+					"err", err.Error(),
+					"backoff_ms", backoff.Milliseconds())
+			}
+			backoff = nextBackoff(backoff, maxBackoff)
 		}
-		_ = code
+
+		if code != 0 && err == nil {
+			logger.Info("discord gateway: clean disconnect; reconnecting",
+				"close_code", code,
+				"close_meaning", describeCloseCode(code))
+		}
+
 		if !sleepCtx(ctx, backoff) {
 			return nil
 		}
-		backoff = nextBackoff(backoff, maxBackoff)
 	}
 }
 

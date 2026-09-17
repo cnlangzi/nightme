@@ -12,11 +12,17 @@ import (
 // downloadAttachments fetches every attachment on a Discord message
 // into a per-message directory under the adapter's data dir.
 //
-// Layout: <dataDir>/discord/<chatID>/<messageID>/<sanitised filename>
+// Layout: <dataDir>/discord/<chatID>/<messageID>/<attachmentID>-<sanitised filename>
 //
 // chatID is the session chat id (with the "dc_" prefix already
 // applied). Discord channel ids are decimal snowflakes so the
 // nested path is safe under any OS filesystem.
+//
+// The attachment ID is prepended to the filename to disambiguate
+// two attachments that share a filename on the same message
+// (Discord allows this; without disambiguation the second write
+// silently overwrites the first while both Attachment entries
+// point at the same LocalPath).
 //
 // Failed downloads still produce a messages.Attachment entry with
 // Error set so the dispatcher can surface the failure rather than
@@ -66,7 +72,10 @@ func (a *Adapter) downloadOne(ctx context.Context, att Attachment, directory str
 		base.Error = err
 		return base
 	}
-	local := filepath.Join(directory, sanitiseFilename(att.Filename))
+	// Prefix the filename with the attachment id so two
+	// attachments with the same filename on the same message
+	// don't overwrite each other on disk.
+	local := filepath.Join(directory, attachmentLocalName(att))
 	if err := os.WriteFile(local, data, 0o600); err != nil {
 		base.Error = err
 		return base
@@ -74,6 +83,14 @@ func (a *Adapter) downloadOne(ctx context.Context, att Attachment, directory str
 	base.LocalPath = local
 	base.Size = int64(len(data))
 	return base
+}
+
+// attachmentLocalName joins the attachment id and a sanitised
+// filename with a hyphen: "<id>-<name>". Both halves are kept
+// filesystem-safe (snowflakes are decimal digits; sanitiseFilename
+// strips path separators and control bytes).
+func attachmentLocalName(att Attachment) string {
+	return string(att.ID) + "-" + sanitiseFilename(att.Filename)
 }
 
 // discordAttachmentType maps a Content-Type MIME to the channel-

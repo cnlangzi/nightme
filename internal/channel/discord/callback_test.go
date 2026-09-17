@@ -100,15 +100,15 @@ func TestHandleInputClick_PopsModal(t *testing.T) {
 	if body.Type != 9 {
 		t.Errorf("ack type = %d, want 9 (MODAL)", body.Type)
 	}
-	if body.Data == nil || body.Data.Modal == nil {
+	if body.Data == nil {
 		t.Fatalf("ack body missing Modal envelope: %+v", body)
 	}
-	if body.Data.Modal.Title != "Your answer" {
-		t.Errorf("Modal.Title = %q", body.Data.Modal.Title)
+	if body.Data.Title != "Your answer" {
+		t.Errorf("Modal.Title = %q", body.Data.Title)
 	}
 	// Find the leaf TextInput with custom_id "answer".
 	var textInput *Component
-	for _, row := range body.Data.Modal.Components {
+	for _, row := range body.Data.Components {
 		for i := range row.Components {
 			if row.Components[i].CustomID == "answer" {
 				textInput = &row.Components[i]

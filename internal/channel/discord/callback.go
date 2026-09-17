@@ -3,7 +3,6 @@ package discord
 import (
 	"context"
 	"encoding/json"
-	"log/slog"
 	"strings"
 	"time"
 
@@ -185,23 +184,21 @@ func (a *Adapter) acknowledgeModal(it Interaction, modalCustomID string) {
 	defer cancel()
 	body := InteractionResponse{
 		Type: 9,
-		Data: &InteractionData{
-			Modal: &Modal{
-				Title:    "Your answer",
-				CustomID: modalCustomID,
+		Data: &ModalPayload{
+			Title:    "Your answer",
+			CustomID: modalCustomID,
+			Components: []Component{{
+				Type: ComponentActionRow,
 				Components: []Component{{
-					Type: ComponentActionRow,
-					Components: []Component{{
-						Type:        ComponentTextInput,
-						CustomID:    "answer",
-						Label:       "Your answer",
-						Style:       1, // SHORT
-						Required:    true,
-						MaxLength:   4000,
-						Placeholder: "Type your answer here",
-					}},
+					Type:        ComponentTextInput,
+					CustomID:    "answer",
+					Label:       "Your answer",
+					Style:       1, // SHORT
+					Required:    true,
+					MaxLength:   4000,
+					Placeholder: "Type your answer here",
 				}},
-			},
+			}},
 		},
 	}
 	if err := a.api.AcknowledgeInteraction(ctx, string(it.ID), it.Token, body); err != nil {
@@ -220,17 +217,29 @@ func (a *Adapter) acknowledgeModal(it Interaction, modalCustomID string) {
 // Secondary. "Type your answer" is appended as a final Secondary
 // button when the choice has at least one Question.
 //
+// Options are capped to 20 (≤4 rows of 5) so the appended
+// "Type your answer" row keeps the total ≤5 rows — Discord
+// rejects any message with more than 5 ActionRows. Mirrors
+// /docs/components/reference#actionrow (5 rows max).
+//
 // On a settled state the caller is expected to skip this and
 // pass components = []Component{} (clears the buttons in place).
 func (a *Adapter) buildChoiceComponents(state *choiceState) []Component {
 	if state == nil {
 		return nil
 	}
-	options := currentOptions(state)
+	options := state.currentOptions()
 	rows := []Component{}
 	if len(options) > 0 {
 		var row []Component
-		for i, opt := range options {
+		// Cap visible options so the input row can fit; never
+		// exceed 4 option rows × 5 buttons + 1 input row = 5 rows.
+		maxOptions := len(options)
+		if maxOptions > maxOptionButtons {
+			maxOptions = maxOptionButtons
+		}
+		for i := 0; i < maxOptions; i++ {
+			opt := options[i]
 			style := ButtonStyleSecondary
 			if i == 0 {
 				style = ButtonStylePrimary
@@ -241,13 +250,13 @@ func (a *Adapter) buildChoiceComponents(state *choiceState) []Component {
 				Label:    opt.Label,
 				CustomID: choiceCustomID(state, i),
 			})
-			if len(row) == 5 || i == len(options)-1 {
+			if len(row) == 5 || i == maxOptions-1 {
 				rows = append(rows, Component{Type: ComponentActionRow, Components: row})
 				row = nil
 			}
 		}
 	}
-	if len(state.Choice.Questions) > 0 {
+	if state.hasQuestions() {
 		rows = append(rows, Component{
 			Type: ComponentActionRow,
 			Components: []Component{{
@@ -270,10 +279,13 @@ func (a *Adapter) buildChoiceComponents(state *choiceState) []Component {
 // "Action Needed" otherwise. Body is the prompt body; for AskUser
 // questions we render the current step's question instead.
 func renderChoiceContent(state *choiceState) string {
-	if state == nil || state.Choice == nil {
+	if state == nil {
 		return ""
 	}
-	choice := state.Choice
+	choice, step := state.choiceAndStep()
+	if choice == nil {
+		return ""
+	}
 	title := choice.Title
 	if title == "" {
 		title = "Action Needed"
@@ -287,8 +299,8 @@ func renderChoiceContent(state *choiceState) string {
 	}
 	body := ""
 	if len(choice.Questions) > 0 {
-		if state.Step < len(choice.Questions) {
-			body = choice.Questions[state.Step].Question
+		if step < len(choice.Questions) {
+			body = choice.Questions[step].Question
 		}
 	} else if choice.Body != "" {
 		body = choice.Body
@@ -299,24 +311,6 @@ func renderChoiceContent(state *choiceState) string {
 	return "**" + title + "**\n\n" + body
 }
 
-// currentOptions returns the option list the user is choosing from
-// at the current step — AskUserQuestion's per-step slice for
-// multi-step choices, or the top-level Options for permissions /
-// gtw decisions. Used by both sendChoice (initial render) and
-// patchChoice (after step advance).
-func currentOptions(state *choiceState) []messages.ChoiceOption {
-	if state == nil || state.Choice == nil {
-		return nil
-	}
-	if len(state.Choice.Questions) > 0 {
-		if state.Step >= 0 && state.Step < len(state.Choice.Questions) {
-			return state.Choice.Questions[state.Step].Options
-		}
-		return nil
-	}
-	return state.Choice.Options
-}
-
 // optionIDFor returns the ChoiceOption.ID for the given index on
 // the current step's option list. Mirrors telegram's per-step
 // resolution in callback.go:handleChoiceClick.
@@ -324,7 +318,7 @@ func optionIDFor(state *choiceState, optionIndex int) string {
 	if state == nil {
 		return ""
 	}
-	options := currentOptions(state)
+	options := state.currentOptions()
 	if optionIndex < 0 || optionIndex >= len(options) {
 		return ""
 	}
@@ -380,23 +374,25 @@ func parseNonNegativeInt(s string) (int, bool) {
 }
 
 // publishActionChoice pushes an InboundMessage.Action whose Option
-// is the chosen ChoiceOption.ID. chatID / messageID are the
-// session chat id and the choice card's Discord message id (the
-// latter surfaces as ReplyTo so the chatsession can address the
-// card directly when resolving the click).
+// is the chosen ChoiceOption.ID. chatID is the session chat id
+// (derived from it.ChannelID); the choice card's Discord message
+// id is recovered from state.MessageID — never from
+// it.Message.ID, which can be absent on MODAL_SUBMIT and other
+// interaction flavours the handler must tolerate.
 func (a *Adapter) publishActionChoice(state *choiceState, optionIndex int, it Interaction) {
 	if state == nil {
 		return
 	}
-	options := currentOptions(state)
+	options := state.currentOptions()
 	if optionIndex < 0 || optionIndex >= len(options) {
 		return
 	}
+	cardID := state.MessageID
 	inbound := messages.InboundMessage{
 		ChatID:     sessionChatID(string(it.ChannelID)),
 		UserID:     string(it.User.ID),
-		MessageID:  string(it.Message.ID),
-		ReplyTo:    string(it.Message.ID),
+		MessageID:  cardID,
+		ReplyTo:    cardID,
 		HasMention: true,
 		Action: &messages.ActionPayload{
 			RequestID: state.RequestID,
@@ -412,15 +408,23 @@ func (a *Adapter) publishActionChoice(state *choiceState, optionIndex int, it In
 // Matches the Telegram ForceReply path so the chatsession
 // SendPermission / AskUserQuestion machinery picks the answer up
 // unchanged across channels.
+//
+// MODAL_SUBMIT interactions do NOT always carry the source
+// `message` field (depending on whether the modal was opened from
+// a component or via a slash command), so MessageID / ReplyTo are
+// recovered from state.MessageID, not it.Message.ID. Falling back
+// to "" would silently drop the answer; onInteraction's recover()
+// would also swallow any nil-deref, hiding the bug from the logs.
 func (a *Adapter) publishActionInput(state *choiceState, answer string, it Interaction) {
 	if state == nil {
 		return
 	}
+	cardID := state.MessageID
 	inbound := messages.InboundMessage{
 		ChatID:     sessionChatID(string(it.ChannelID)),
 		UserID:     string(it.User.ID),
-		MessageID:  string(it.Message.ID),
-		ReplyTo:    string(it.Message.ID),
+		MessageID:  cardID,
+		ReplyTo:    cardID,
 		HasMention: true,
 		Action: &messages.ActionPayload{
 			RequestID: state.RequestID,
@@ -437,19 +441,14 @@ func (a *Adapter) publishActionInput(state *choiceState, answer string, it Inter
 // store reflects the click outcome — a follow-up OutChoicePatch
 // with Settled=true then becomes a no-op edit (the buttons are
 // already cleared by the patch path).
+//
+// Field mutation goes through state.markSettledLocal so the
+// callback goroutine and the runtime patchChoice goroutine don't
+// race on the same struct.
 func (a *Adapter) markSettled(state *choiceState, selectedID string) {
 	if state == nil {
 		return
 	}
-	state.Settled = true
-	if selectedID != "" {
-		state.SelectedID = selectedID
-	}
+	state.markSettledLocal(selectedID)
 	_ = a.choiceStore.Put(state)
 }
-
-// asSlogDiscard is the zero-value logger used by tests that don't
-// care about log output. Kept here as a named helper rather than
-// inlined so the no-logger contract reads consistently across
-// callback.go and the test files.
-func asSlogDiscard() *slog.Logger { return slog.Default() }

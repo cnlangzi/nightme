@@ -90,17 +90,11 @@ type ModalPayload struct {
 // On outgoing (AcknowledgeInteraction), only Type=7 (UPDATE_MESSAGE)
 // leaves Data nil — Discord keeps the original message visible
 // until a follow-up REST edit. Type=9 (MODAL) populates Data with
-// a *ModalPayload (see AcknowledgeInteraction callers).
+// a *ModalPayload (see InteractionResponse below).
 type InteractionData struct {
 	CustomID   string      `json:"custom_id,omitempty"`
 	Components []Component `json:"components,omitempty"`
-	Modal      *Modal      `json:"-"`
 }
-
-// Modal is the polymorphic carrier for InteractionResponse.Data on
-// Type=9. Kept as a separate type from ModalPayload so future
-// components-only response types can coexist without renaming.
-type Modal = ModalPayload
 
 // InteractionResponse is the body of POST /interactions/{id}/{token}/callback.
 //
@@ -118,13 +112,18 @@ type Modal = ModalPayload
 //	                                            later via REST.
 //	9  MODAL                                   — pop up a modal.
 //
+// Data is *ModalPayload — the only outgoing payload shape nightme
+// emits (type=7 leaves it nil; type=9 carries the modal envelope).
+// Future component-only response types can introduce a separate
+// field without changing this one.
+//
 // The token expires 3 seconds after the interaction event is
 // delivered. Callers must use a fresh context.WithTimeout(
 // context.Background(), 2500*time.Millisecond) so a cancelled
 // gateway ctx can't strand the ACK.
 type InteractionResponse struct {
-	Type int              `json:"type"`
-	Data *InteractionData `json:"data,omitempty"`
+	Type int           `json:"type"`
+	Data *ModalPayload `json:"data,omitempty"`
 }
 
 // Interaction is the d-payload of op=0 t=INTERACTION_CREATE.

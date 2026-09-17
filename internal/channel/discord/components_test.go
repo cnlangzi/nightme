@@ -1,6 +1,7 @@
 package discord
 
 import (
+	"strconv"
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/messages"
@@ -59,6 +60,41 @@ func TestBuildChoiceComponents_LargeOptionSetWrapsIntoFivePerRow(t *testing.T) {
 	}
 	if len(rows[1].Components) != 2 {
 		t.Errorf("second row = %d, want 2", len(rows[1].Components))
+	}
+}
+
+// TestBuildChoiceComponents_ExcessiveOptionsCappedForRowBudget
+// verifies the >20-options case is capped to 4 rows of 5 so the
+// appended "Type your answer" row keeps the total ≤5 (Discord's
+// hard limit). The review pointed this out as a 400-rejection risk.
+func TestBuildChoiceComponents_ExcessiveOptionsCappedForRowBudget(t *testing.T) {
+	opts := make([]string, 30)
+	for i := range opts {
+		opts[i] = "opt-" + strconv.Itoa(i)
+	}
+	state := &choiceState{
+		RequestID: "req-1",
+		Choice: &messages.Choice{
+			RequestID: "req-1",
+			Questions: []messages.ChoiceQuestion{{
+				ID:      "q1",
+				Options: messages.ChoiceOptionsFromLabels(opts),
+			}},
+		},
+	}
+	a := newTestAdapter(&fakeREST{})
+	rows := a.buildChoiceComponents(state)
+	// 4 option rows + 1 input row = 5 rows. Discord rejects >5.
+	if len(rows) != 5 {
+		t.Errorf("rows = %d, want 5 (4 option + 1 input)", len(rows))
+	}
+	// Total option buttons = 20 (cap).
+	totalButtons := 0
+	for _, row := range rows[:len(rows)-1] {
+		totalButtons += len(row.Components)
+	}
+	if totalButtons != 20 {
+		t.Errorf("option buttons = %d, want 20 (cap)", totalButtons)
 	}
 }
 

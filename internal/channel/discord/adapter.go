@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/config"
@@ -21,6 +22,12 @@ import (
 // component is omitted (Discord accepts either form; the URL is
 // the part Discord's rate-limit-abuse heuristics check).
 const userAgent = "DiscordBot (https://github.com/cnlangzi/nightme)"
+
+// attachmentDownloadTimeout bounds the goroutine that fetches
+// each inbound message's attachments. Discord caps attachments
+// at 25 MiB; a CDN stall must not pin the worker indefinitely,
+// so the whole message (all attachments) shares this budget.
+const attachmentDownloadTimeout = 60 * time.Second
 
 // Adapter implements channel.Channel for Discord.
 type Adapter struct {
@@ -266,9 +273,16 @@ func (a *Adapter) onReady(u User) {
 // empty, so the adapter shouldn't pre-populate — otherwise the
 // dispatcher would double-build.
 //
-// Attachments are downloaded lazily here so the F-14 invariant
-// (messages/inbound.go:42-46) holds: LocalPath is populated
-// before the InboundMessage reaches the dispatcher.
+// Attachments are downloaded in a goroutine so a slow / stalled
+// CDN response cannot block the gateway read loop and starve
+// heartbeats (which would force a Discord disconnect). The
+// dispatcher reads from a.incoming on its own goroutine, so the
+// async publish still lands in arrival order.
+//
+// The F-14 invariant (messages/inbound.go:42-46) — LocalPath
+// populated before the InboundMessage reaches the dispatcher —
+// is upheld because downloadAndPublish only publishes after the
+// downloads complete.
 func (a *Adapter) onMessage(msg *Message) {
 	if msg == nil {
 		return
@@ -281,15 +295,30 @@ func (a *Adapter) onMessage(msg *Message) {
 	}
 	chatID := sessionChatID(string(msg.ChannelID))
 	inbound := messages.InboundMessage{
-		ChatID:      chatID,
-		UserID:      string(msg.Author.ID),
-		Text:        msg.Content,
-		MessageID:   string(msg.ID),
-		Time:        msg.Timestamp,
-		ReplyTo:     replyTargetOf(msg),
-		HasMention:  a.computeHasMention(msg),
-		Attachments: a.downloadAttachments(context.Background(), msg, chatID),
+		ChatID:     chatID,
+		UserID:     string(msg.Author.ID),
+		Text:       msg.Content,
+		MessageID:  string(msg.ID),
+		Time:       msg.Timestamp,
+		ReplyTo:    replyTargetOf(msg),
+		HasMention: a.computeHasMention(msg),
 	}
+	if len(msg.Attachments) == 0 {
+		a.publish(inbound)
+		return
+	}
+	go a.downloadAndPublish(msg, chatID, inbound)
+}
+
+// downloadAndPublish fetches every attachment off the gateway
+// goroutine and publishes the populated InboundMessage when the
+// downloads complete. Failures don't block the publish — each
+// attachment entry carries Error so the dispatcher can surface
+// the failure to the user.
+func (a *Adapter) downloadAndPublish(msg *Message, chatID string, inbound messages.InboundMessage) {
+	ctx, cancel := context.WithTimeout(context.Background(), attachmentDownloadTimeout)
+	defer cancel()
+	inbound.Attachments = a.downloadAttachments(ctx, msg, chatID)
 	a.publish(inbound)
 }
 
@@ -383,8 +412,21 @@ func (a *Adapter) rememberResultMessageID(chatID, userMsgID, messageID string) {
 // lastResultMessageID returns the recorded result message id for
 // (chatID, userMsgID), or "" when none was sent. OnPromptEnded
 // falls back to the user message id in that case.
+//
+// One-shot consumption: the entry is deleted after the read so
+// the map cannot grow unboundedly across long-running daemons.
+// A second OnPromptEnded for the same userMsgID therefore returns
+// "" and falls back to the user message id — exactly the
+// "no result was sent" semantics we want for repeat turn-end
+// events (the runtime occasionally re-emits).
 func (a *Adapter) lastResultMessageID(chatID, userMsgID string) string {
+	key := resultKey(chatID, userMsgID)
 	a.lastResultMu.Lock()
 	defer a.lastResultMu.Unlock()
-	return a.lastResultMessageIDDB[resultKey(chatID, userMsgID)]
+	value, ok := a.lastResultMessageIDDB[key]
+	if !ok {
+		return ""
+	}
+	delete(a.lastResultMessageIDDB, key)
+	return value
 }

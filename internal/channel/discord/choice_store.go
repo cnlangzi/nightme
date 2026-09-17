@@ -1,6 +1,7 @@
 package discord
 
 import (
+	"strconv"
 	"sync"
 
 	"github.com/cnlangzi/nightme/internal/messages"
@@ -18,7 +19,14 @@ import (
 // Choice pointer don't leak into the settled card. Settled and
 // SelectedID track the local view of the click outcome (set by
 // publishActionChoice / publishActionInput via markSettled).
+//
+// mu guards every field on this struct. The choiceStore's own
+// mutex only protects the map itself (insertion / lookup); per-
+// state mutation runs on the runtime / callback goroutines, so
+// each entry carries its own lock to keep the map mutex free
+// during EditMessage / AcknowledgeInteraction network calls.
 type choiceState struct {
+	mu         sync.Mutex
 	RequestID  string
 	ChannelID  string
 	MessageID  string
@@ -135,10 +143,10 @@ func shortID(value string) string {
 }
 
 // choiceCustomID encodes a choice button's interaction tag.
-// Format: "c:<short>:<idx>". At most 17 + 4 + len(strconv.Itoa(idx))
+// Format: "c:<short>:<idx>". At most 17 + len(strconv.Itoa(idx))
 // bytes — comfortably under Discord's 100-char limit.
 func choiceCustomID(state *choiceState, optionIndex int) string {
-	return "c:" + shortID(state.RequestID) + ":" + itoa(optionIndex)
+	return "c:" + shortID(state.RequestID) + ":" + strconv.Itoa(optionIndex)
 }
 
 // inputCustomID encodes the "Type your answer" button's tag.
@@ -148,29 +156,11 @@ func inputCustomID(state *choiceState) string {
 	return "i:" + shortID(state.RequestID)
 }
 
-// itoa avoids importing strconv just for option-index encoding.
-func itoa(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	negative := false
-	if i < 0 {
-		negative = true
-		i = -i
-	}
-	var buf [20]byte
-	n := len(buf)
-	for i > 0 {
-		n--
-		buf[n] = byte('0' + i%10)
-		i /= 10
-	}
-	if negative {
-		n--
-		buf[n] = '-'
-	}
-	return string(buf[n:])
-}
+// maxOptionButtons caps the number of choice buttons rendered on
+// a single card. Discord allows at most 5 ActionRows per message;
+// one row is reserved for the "Type your answer" button when
+// the choice has at least one Question. 4 rows × 5 = 20.
+const maxOptionButtons = 20
 
 // cloneChoiceValue deep-copies a *messages.Choice so the store's
 // snapshot is independent of upstream mutations. Mirrors
@@ -188,4 +178,85 @@ func cloneChoiceValue(choice *messages.Choice) *messages.Choice {
 		)
 	}
 	return &copy
+}
+
+// currentOptions returns the option list the user is choosing
+// from at the current step — AskUserQuestion's per-step slice for
+// multi-step choices, or the top-level Options for permissions /
+// gtw decisions. Locks the state's mutex while reading Choice /
+// Step so concurrent OutChoicePatch / handleChoiceClick goroutines
+// can't tear the read.
+func (s *choiceState) currentOptions() []messages.ChoiceOption {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.Choice == nil {
+		return nil
+	}
+	if len(s.Choice.Questions) > 0 {
+		if s.Step >= 0 && s.Step < len(s.Choice.Questions) {
+			return s.Choice.Questions[s.Step].Options
+		}
+		return nil
+	}
+	return s.Choice.Options
+}
+
+// choiceAndStep returns the Choice pointer and the current Step
+// under the state mutex. Used by renderChoiceContent, which needs
+// both fields atomically.
+func (s *choiceState) choiceAndStep() (*messages.Choice, int) {
+	if s == nil {
+		return nil, 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.Choice, s.Step
+}
+
+// hasQuestions reports whether the current Choice has any
+// AskUserQuestion items (used to gate the "Type your answer"
+// button row in buildChoiceComponents).
+func (s *choiceState) hasQuestions() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.Choice != nil && len(s.Choice.Questions) > 0
+}
+
+// applyPatch replaces the mutable fields with the supplied
+// choice snapshot + settled/selected-id. Called by patchChoice
+// (OutChoicePatch path) under the state mutex so the callback
+// goroutine's markSettled / publishActionChoice cannot observe a
+// half-updated state.
+func (s *choiceState) applyPatch(choice *messages.Choice, settled bool, selectedID string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Choice = choice
+	s.Settled = settled
+	if selectedID != "" || settled {
+		s.SelectedID = selectedID
+	}
+}
+
+// markSettledLocal flips the local settled flag and persists the
+// selected option id (when non-empty). Mutates the state under
+// the state mutex.
+func (s *choiceState) markSettledLocal(selectedID string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Settled = true
+	if selectedID != "" {
+		s.SelectedID = selectedID
+	}
 }

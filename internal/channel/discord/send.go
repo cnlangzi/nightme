@@ -243,6 +243,10 @@ func (a *Adapter) sendChoice(ctx context.Context, rawChannelID string, msg messa
 // to match feishu / telegram's behaviour — the runtime has already
 // moved on, and a 4xx from Discord would only surface a confusing
 // log line.
+//
+// State mutation goes through state.applyPatch so the callback
+// goroutine's markSettled / publishActionChoice cannot observe a
+// half-updated state under a concurrent click.
 func (a *Adapter) patchChoice(ctx context.Context, rawChannelID string, msg messages.OutboundMessage) error {
 	if msg.Choice == nil || msg.Choice.RequestID == "" {
 		return errors.New("discord: OutChoicePatch missing Choice or RequestID")
@@ -251,11 +255,9 @@ func (a *Adapter) patchChoice(ctx context.Context, rawChannelID string, msg mess
 	if !ok {
 		return nil
 	}
-	state.Choice = cloneChoiceValue(msg.Choice)
-	state.Settled = msg.Choice.Settled
-	state.SelectedID = msg.Choice.SelectedID
+	state.applyPatch(cloneChoiceValue(msg.Choice), msg.Choice.Settled, msg.Choice.SelectedID)
 	var components []Component
-	if !state.Settled {
+	if !msg.Choice.Settled {
 		components = a.buildChoiceComponents(state)
 	}
 	_, err := a.api.EditMessage(ctx, state.ChannelID, state.MessageID, EditMessagePayload{

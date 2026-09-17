@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -397,7 +398,7 @@ func TestSend_OutToolEnd_EmitsResultLine(t *testing.T) {
 	if len(rest.creates) != 1 {
 		t.Fatalf("creates = %d, want 1", len(rest.creates))
 	}
-	if got := rest.creates[0].Content; got != "⎿  🔧 mcp_unknown → "+itoa(len(raw))+" bytes" {
+	if got := rest.creates[0].Content; got != "⎿  🔧 mcp_unknown → "+strconv.Itoa(len(raw))+" bytes" {
 		t.Errorf("content = %q", got)
 	}
 	if strings.Contains(rest.creates[0].Content, raw) {

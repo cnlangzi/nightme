@@ -98,6 +98,14 @@ type Credentials struct {
 	// Feishu / Telegram.
 	AppToken string `json:"app_token,omitempty"`
 
+	// ApplicationID is the OAuth2 Application ID (NOT the bot user
+	// id). Discord uses this to render the OAuth authorize URL at
+	// login time. /users/@me only returns the bot user id, so the
+	// value cannot be derived automatically — the login provider
+	// surfaces it as a required field. Empty for Feishu / Telegram
+	// / Slack.
+	ApplicationID string `json:"application_id,omitempty"`
+
 	// AppName is the human-readable application name chosen on the
 	// channel's consent page (Feishu) or via /setname in BotFather
 	// (Telegram).
@@ -263,6 +271,12 @@ func LoginWith(ctx context.Context, provider Provider, out, errOut io.Writer) er
 		// app-level token for the Socket Mode connection.
 		cfg.Slack.BotToken = creds.BotToken
 		cfg.Slack.AppToken = creds.AppToken
+	case "discord":
+		// Discord needs two: the bot token for Web API + Gateway
+		// auth, and the application id for the OAuth authorize URL
+		// (which cannot be derived from /users/@me).
+		cfg.Discord.BotToken = creds.BotToken
+		cfg.Discord.ApplicationID = creds.ApplicationID
 	default:
 		return fmt.Errorf("login: unknown provider %q", provider.Name())
 	}
@@ -286,6 +300,9 @@ func LoginWith(ctx context.Context, provider Provider, out, errOut io.Writer) er
 		case "slack":
 			fmt.Fprintf(errOut, "  bot_token:  %s\n", creds.BotToken)
 			fmt.Fprintf(errOut, "  app_token:  %s\n", creds.AppToken)
+		case "discord":
+			fmt.Fprintf(errOut, "  bot_token:       %s\n", creds.BotToken)
+			fmt.Fprintf(errOut, "  application_id:  %s\n", creds.ApplicationID)
 		}
 		if creds.AppName != "" {
 			fmt.Fprintf(errOut, "  app_name:   %s\n", creds.AppName)
@@ -312,6 +329,11 @@ func LoginWith(ctx context.Context, provider Provider, out, errOut io.Writer) er
 		fmt.Fprintf(out, "  Bot:       %s\n", creds.AppName)
 	case "slack":
 		fmt.Fprintf(out, "  Bot:       %s\n", creds.AppName)
+	case "discord":
+		fmt.Fprintf(out, "  Bot:       %s\n", creds.AppName)
+		if creds.ApplicationID != "" {
+			fmt.Fprintf(out, "  App ID:    %s\n", creds.ApplicationID)
+		}
 	}
 	fmt.Fprintf(out, "  Saved to:  %s\n", config.DefaultPath())
 	fmt.Fprintf(out, "\nNext: run `nightme start` to launch the gateway daemon.\n")

@@ -34,6 +34,7 @@ import (
 	// The blank import keeps the registry populated when the
 	// CLI binary starts; new channels are added by appending to
 	// this list (or via a build-tag-gated package).
+	_ "github.com/cnlangzi/nightme/internal/login/discord"
 	_ "github.com/cnlangzi/nightme/internal/login/feishu"
 	_ "github.com/cnlangzi/nightme/internal/login/slack"
 	_ "github.com/cnlangzi/nightme/internal/login/telegram"

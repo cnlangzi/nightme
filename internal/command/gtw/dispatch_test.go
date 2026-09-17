@@ -152,8 +152,7 @@ func TestBuildIssueDispatchText_Execute_AuthorisesEdits(t *testing.T) {
 		"untrusted input",                                          // §16.I boundary
 		"Do not invent functionality",                              // boundary
 		"Do not refactor unrelated code",                           // boundary
-		"Do not skip, suppress, or mark-expected",                  // boundary (test suppression)
-		"Never suppress, skip, or mark a failing test as expected", // §16.G (§9 spec wording)
+		"Never suppress, skip, or mark a failing test as expected", // §16.G (§9 spec wording) — single sentence per simplify review
 		"pre-existing failures",                                    // baseline-vs-introduced
 		"git diff --check",                                         // §16.H final diff review
 		"genuine product/requirement",                              // §16.E decision-gate target
@@ -591,7 +590,6 @@ func TestBuildIssueDispatchText_Execute_Methodology(t *testing.T) {
 			// failures; do not claim green when failures remain.
 			name: "G. no test suppression",
 			must: []string{
-				"Do not skip, suppress, or mark-expected failing tests",
 				"Never suppress, skip, or mark a failing test as expected",
 				"do not claim tests pass", // "do not claim green when failures remain"
 				"Do not claim success merely because files were edited",

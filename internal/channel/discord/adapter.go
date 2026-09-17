@@ -77,6 +77,101 @@ type Adapter struct {
 	started     bool
 	stopped     bool
 	gatewayDone chan struct{}
+
+	// metrics is the adapter's observability surface. The
+	// gateway loop bumps reconnect / event / close-code fields;
+	// the attachment layer bumps download failures. Served
+	// verbatim by HealthSnapshot — the daemoncontrol "health"
+	// RPC is the only consumer. Pointer so the helper methods
+	// can mutate it without copying.
+	metrics *healthMetrics
+}
+
+// healthMetrics is the observability payload surfaced via
+// HealthSnapshot. Field names double as JSON keys (matches
+// feishu's WSHealthSnapshot so the daemoncontrol UI doesn't need
+// per-channel rendering). Zero-valued on a fresh process; the
+// JSON zero-values for time.Time marshal as "0001-01-01T00:00:00Z".
+type healthMetrics struct {
+	mu                      sync.Mutex
+	ReconnectCount          int       `json:"reconnect_count"`
+	LastEventUnixTS         time.Time `json:"last_event_unix_ts"`
+	LastCloseCode           int       `json:"last_close_code"`
+	LastReconnectUnixTS     time.Time `json:"last_reconnect_unix_ts"`
+	AttachmentDownloadFails int       `json:"attachment_download_failures_total"`
+}
+
+func newHealthMetrics() *healthMetrics { return &healthMetrics{} }
+
+// snapshot returns a value copy safe to read without holding mu.
+// The daemoncontrol "health" RPC reads it from the gateway
+// goroutine; this copy avoids a JSON encode under the lock.
+func (m *healthMetrics) snapshot() healthMetrics {
+	if m == nil {
+		return healthMetrics{}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return healthMetrics{
+		ReconnectCount:          m.ReconnectCount,
+		LastEventUnixTS:         m.LastEventUnixTS,
+		LastCloseCode:           m.LastCloseCode,
+		LastReconnectUnixTS:     m.LastReconnectUnixTS,
+		AttachmentDownloadFails: m.AttachmentDownloadFails,
+	}
+}
+
+// recordEvent stamps the moment of the most recent gateway
+// dispatch. Drives the lag probe (now − LastEventUnixTS = time
+// since last server-sent event).
+func (m *healthMetrics) recordEvent(at time.Time) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.LastEventUnixTS = at
+	m.mu.Unlock()
+}
+
+// recordReconnect bumps reconnect_count and stamps
+// last_reconnect_unix_ts. Called by the gateway loop when it
+// commits to a redial (not on the first dial).
+func (m *healthMetrics) recordReconnect(at time.Time) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.ReconnectCount++
+	m.LastReconnectUnixTS = at
+	m.mu.Unlock()
+}
+
+// recordCloseCode stamps the most recent gateway close frame.
+// Helps operators diagnose 4004 / 4013 / 4014 from a passive
+// daemoncontrol "health" RPC without grepping logs.
+func (m *healthMetrics) recordCloseCode(code int) {
+	if m == nil {
+		return
+	}
+	if code == 0 {
+		return
+	}
+	m.mu.Lock()
+	m.LastCloseCode = code
+	m.mu.Unlock()
+}
+
+// recordDownloadFailure bumps the all-failed-attachment counter.
+// One bump per user-visible failure notice (not per attachment),
+// so the metric tracks the F-61 escalation rate rather than the
+// per-file CDN error rate.
+func (m *healthMetrics) recordDownloadFailure() {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.AttachmentDownloadFails++
+	m.mu.Unlock()
 }
 
 // NewAdapter constructs a Discord adapter. Returns an error
@@ -103,22 +198,10 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 
 	limiter := NewLimiter(nil, nil)
 	rest := newRESTClient(token, limiter, DefaultRetryConfig, userAgent)
-	gw := &gatewayClient{
-		logger: nil,
-		api:    rest,
-		state:  state,
-		cfg: gatewaySnapshot{
-			Token:     token,
-			Intents:   cfg.Discord.Intents,
-			UserAgent: userAgent,
-		},
-	}
-
 	a := &Adapter{
 		name:                  "discord",
 		cfg:                   cfg.Discord,
 		api:                   rest,
-		gw:                    gw,
 		state:                 state,
 		incoming:              make(chan messages.InboundMessage, 64),
 		logger:                slog.Default(),
@@ -126,7 +209,20 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 		choiceStore:           newChoiceStore(),
 		lastMessageStateDB:    make(map[string]string),
 		lastResultMessageIDDB: make(map[string]string),
+		metrics:               newHealthMetrics(),
 	}
+	gw := &gatewayClient{
+		logger:  nil,
+		api:     rest,
+		state:   state,
+		metrics: a.metrics,
+		cfg: gatewaySnapshot{
+			Token:     token,
+			Intents:   cfg.Discord.Intents,
+			UserAgent: userAgent,
+		},
+	}
+	a.gw = gw
 	gw.onReady = a.onReady
 	gw.onMessage = a.onMessage
 	gw.onInteraction = a.onInteraction
@@ -237,14 +333,20 @@ func (a *Adapter) HealthSnapshot() (string, json.RawMessage, error) {
 	a.startStopMu.Unlock()
 
 	sessionID, lastSeq, _, intentsVersion := a.state.snapshot()
+	metrics := a.metrics.snapshot()
 	payload, err := json.Marshal(map[string]any{
-		"username":        a.botName,
-		"bot_id":          a.botUserID,
-		"connected":       connected,
-		"session_id":      sessionID,
-		"last_seq":        lastSeq,
-		"intents":         a.cfg.Intents,
-		"intents_version": intentsVersion,
+		"username":                           a.botName,
+		"bot_id":                             a.botUserID,
+		"connected":                          connected,
+		"session_id":                         sessionID,
+		"last_seq":                           lastSeq,
+		"intents":                            a.cfg.Intents,
+		"intents_version":                    intentsVersion,
+		"reconnect_count":                    metrics.ReconnectCount,
+		"last_event_unix_ts":                 metrics.LastEventUnixTS,
+		"last_close_code":                    metrics.LastCloseCode,
+		"last_reconnect_unix_ts":             metrics.LastReconnectUnixTS,
+		"attachment_download_failures_total": metrics.AttachmentDownloadFails,
 	})
 	if err != nil {
 		return a.name, nil, err
@@ -312,13 +414,31 @@ func (a *Adapter) onMessage(msg *Message) {
 
 // downloadAndPublish fetches every attachment off the gateway
 // goroutine and publishes the populated InboundMessage when the
-// downloads complete. Failures don't block the publish — each
-// attachment entry carries Error so the dispatcher can surface
-// the failure to the user.
+// downloads complete. Wraps the F-61 outer ladder (3 attempts,
+// 0/5/15 s backoff) and escalates total failures to a
+// user-visible OutError notice — pure-image messages are dropped,
+// text-bearing messages degrade to text-only.
+//
+// Failures don't block the publish — each attachment entry carries
+// Error so the dispatcher can surface the failure to the agent
+// when partial-failure occurred.
 func (a *Adapter) downloadAndPublish(msg *Message, chatID string, inbound messages.InboundMessage) {
 	ctx, cancel := context.WithTimeout(context.Background(), attachmentDownloadTimeout)
 	defer cancel()
-	inbound.Attachments = a.downloadAttachments(ctx, msg, chatID)
+	res := a.downloadAttachmentsWithRetry(ctx, msg, chatID)
+	if res.AllFailed {
+		// Total failure. Pure-image messages drop; text-bearing
+		// messages publish text-only with a user-visible notice.
+		if inbound.Text == "" {
+			a.notifyDownloadFailure(rawChannelIDFromSession(chatID), inbound.MessageID, res, true)
+			return
+		}
+		a.notifyDownloadFailure(rawChannelIDFromSession(chatID), inbound.MessageID, res, false)
+		inbound.Attachments = nil
+		a.publish(inbound)
+		return
+	}
+	inbound.Attachments = res.Atts
 	a.publish(inbound)
 }
 

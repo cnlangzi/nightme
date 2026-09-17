@@ -2,9 +2,11 @@ package discord
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/cnlangzi/nightme/internal/messages"
 )
@@ -136,3 +138,121 @@ var errEmptyAttachmentURL = &attachmentURLError{}
 type attachmentURLError struct{}
 
 func (*attachmentURLError) Error() string { return "discord: attachment URL is empty" }
+
+// downloadRetryConfig controls the F-61 outer ladder wrapping
+// downloadAttachments. Mirrors feishu/telegram so every channel
+// has comparable retry behaviour for the same daemon profile.
+//
+// Backoffs[attempt-1] is the wait BEFORE attempt N; Backoffs[0]=0
+// means the first attempt fires immediately. Three outer attempts
+// match the F-61 incident post-mortem (a transient CDN blip
+// clears on the second attempt 99% of the time; the third is the
+// safety net).
+var downloadRetryConfig = struct {
+	MaxAttempts int
+	Backoffs    []time.Duration
+}{
+	MaxAttempts: 3,
+	Backoffs:    []time.Duration{0, 5 * time.Second, 15 * time.Second},
+}
+
+// downloadResult aggregates the outcome of the F-61 outer ladder.
+// Mirrors feishu/telegram so the caller's notification logic can
+// distinguish "no attachments" / "all-failed" / "partial-failure"
+// and surface the right user-facing message.
+type downloadResult struct {
+	// Atts has one entry per source attachment. LocalPath is
+	// populated on success; Error on failure. The two are
+	// mutually exclusive.
+	Atts []messages.Attachment
+
+	// AllFailed is true iff Atts has at least one entry and
+	// every entry's Error != nil.
+	AllFailed bool
+
+	// FailureCount counts the entries in Atts whose Error != nil.
+	FailureCount int
+}
+
+// downloadAttachmentsWithRetry wraps downloadAttachments with the
+// F-61 outer ladder: up to downloadRetryConfig.MaxAttempts
+// attempts with downloadRetryConfig.Backoffs[attempt-1] between
+// them. Returns the LAST result regardless of outcome; caller
+// inspects result.AllFailed.
+//
+// A single failed attempt produces a partial-result at the next
+// attempt boundary — even on attempt 3, the function returns the
+// attachments that did succeed (LocalPath populated) so a
+// partial-failure message still carries whatever downloaded
+// cleanly. The "all failed" condition is reserved for the
+// third attempt.
+func (a *Adapter) downloadAttachmentsWithRetry(ctx context.Context, msg *Message, chatID string) downloadResult {
+	if msg == nil || len(msg.Attachments) == 0 {
+		return downloadResult{}
+	}
+	var last downloadResult
+	for attempt := 1; attempt <= downloadRetryConfig.MaxAttempts; attempt++ {
+		if attempt > 1 {
+			wait := downloadRetryConfig.Backoffs[attempt-1]
+			if wait > 0 {
+				timer := time.NewTimer(wait)
+				select {
+				case <-timer.C:
+				case <-ctx.Done():
+					timer.Stop()
+					return last
+				}
+			}
+		}
+		atts := a.downloadAttachments(ctx, msg, chatID)
+		failed := 0
+		for _, att := range atts {
+			if att.Error != nil {
+				failed++
+			}
+		}
+		last = downloadResult{
+			Atts:         atts,
+			AllFailed:    len(atts) > 0 && failed == len(atts),
+			FailureCount: failed,
+		}
+		if !last.AllFailed {
+			return last
+		}
+	}
+	return last
+}
+
+// notifyDownloadFailure posts a user-visible note about an
+// attachment download failure. Mirrors the feishu/telegram
+// behaviour (text-bearing messages degrade to text-only;
+// pure-image messages drop entirely with a retry prompt).
+//
+// Uses context.Background() because the inbound ctx may have
+// expired by the time the retry ladder gives up — the F-61
+// incident post-mortem pinned the silent-drop root cause on
+// reusing a cancelled inbound ctx here.
+func (a *Adapter) notifyDownloadFailure(rawChatID, userMsgID string, res downloadResult, pureImage bool) {
+	if a == nil {
+		return
+	}
+	chatID := sessionChatID(rawChatID)
+	var text string
+	if pureImage {
+		text = fmt.Sprintf("❌ %d attachment(s) failed to download after %d attempts. Message dropped — please retry.",
+			res.FailureCount, downloadRetryConfig.MaxAttempts)
+	} else {
+		text = fmt.Sprintf("⚠️ %d attachment(s) failed to download after %d attempts; sending text only.",
+			res.FailureCount, downloadRetryConfig.MaxAttempts)
+	}
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID:  chatID,
+		Kind:    messages.OutError,
+		Text:    text,
+		ReplyTo: userMsgID,
+	}); err != nil && a.logger != nil {
+		a.logger.Warn("discord: notify download failure failed",
+			"chat_id", chatID, "err", err.Error())
+	}
+	a.metrics.recordDownloadFailure()
+}

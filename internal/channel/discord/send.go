@@ -71,7 +71,10 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		if msg.Diagnostic != nil && msg.Diagnostic.StderrTail != "" {
 			body += "\n```\n" + msg.Diagnostic.StderrTail + "\n```"
 		}
-		_, err := a.api.CreateMessage(ctx, raw, CreateMessagePayload{Content: body})
+		_, err := a.api.CreateMessage(ctx, raw, CreateMessagePayload{
+			Content:         body,
+			AllowedMentions: &AllowedMentions{Parse: []string{}},
+		})
 		return err
 	default:
 		// Phase 1 silent-drop for OutThinking / OutToolStart /
@@ -84,21 +87,25 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 
 // sendInit is the Discord analogue of feishu's receipt-footer
 // stamping. Feishu PATCHes an existing card; Discord has no
-// receipt concept, so when the adapter has not yet emitted any
-// message in this chat (no prior OutboundMessage), it sends a
-// short header card announcing the session. When a message has
-// already been sent, OutInit is a silent-drop (mirroring
-// feishu's "stamp existing receipt" behaviour without a card to
-// stamp).
+// receipt concept, so the adapter sends a single header message
+// announcing the session / agent / model / workspace.
+//
+// The runtime emits OutInit once per session — the adapter does
+// NOT track per-chat "have we already sent an init?" state, so
+// repeated OutInit events would currently produce repeated
+// header messages. The runtime's "once per session" contract is
+// what keeps this from spamming the chat today; if that ever
+// changes, introduce a small per-chat "init sent" set here
+// (mirroring feishu's "stamp existing receipt" no-op path).
 //
 // The header is intentionally terse — Discord messages are
 // first-class surface area, not a card footer.
 func (a *Adapter) sendInit(ctx context.Context, rawChannelID string, msg messages.OutboundMessage) error {
-	agent := strings.TrimSpace(msg.AgentName)
-	if agent == "" {
-		agent = "assistant"
+	agentName := strings.TrimSpace(msg.AgentName)
+	if agentName == "" {
+		agentName = "assistant"
 	}
-	body := "🤖 " + agent + " ready"
+	body := "🤖 " + agentName + " ready"
 	if msg.Model != "" {
 		body += " · model " + msg.Model
 	}

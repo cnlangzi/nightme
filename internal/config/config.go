@@ -69,6 +69,7 @@ type Config struct {
 	Feishu   FeishuConfig   `yaml:"feishu"`
 	Telegram TelegramConfig `yaml:"telegram"`
 	Slack    SlackConfig    `yaml:"slack"`
+	Discord  DiscordConfig  `yaml:"discord"`
 	Primary  string         `yaml:"primary"`
 	Agents   []AgentEntry   `yaml:"agents"`
 	Session  SessionConfig  `yaml:"session"`
@@ -125,6 +126,48 @@ type FeishuRateLimitConfig struct {
 type TelegramConfig struct {
 	BotToken       string `yaml:"bot_token"`
 	PollingTimeout int    `yaml:"polling_timeout"`
+}
+
+// defaultDiscordIntents is the Phase 1 intent mask sent in
+// IDENTIFY. Bitfield composition:
+//
+//	1<<0   GUILDS
+//	1<<9   GUILD_MESSAGES
+//	1<<10  GUILD_MESSAGE_REACTIONS
+//	1<<12  DIRECT_MESSAGES
+//	1<<13  DIRECT_MESSAGE_REACTIONS
+//	1<<15  MESSAGE_CONTENT (privileged — must be enabled in the
+//	                       Developer Portal, see docs/channel/discord.md
+//	                       Phase 3)
+const defaultDiscordIntents = 1 + 512 + 1024 + 4096 + 8192 + 32768
+
+// DiscordConfig holds credentials for the Discord channel.
+//
+// BotToken is the literal "<bot-user-id>.<timestamp>.<hmac>" string
+// from the Developer Portal → Bot → Reset Token. Never log it.
+//
+// ApplicationID is the OAuth2 Application ID (NOT the bot user id).
+// Discord's /users/@me response returns only the bot user id, so
+// the application id cannot be derived at login time; the user
+// supplies it via `nightme login discord --application-id` (or
+// NIGHTME_DISCORD_APPLICATION_ID). Required for printing the
+// authorize URL during login; if empty at login time the CLI
+// refuses to print the URL.
+//
+// Intents is the bitfield sent in op=2 IDENTIFY. Zero falls back
+// to defaultDiscordIntents via applyDefaults. Operators override
+// the mask by setting this directly in config.yaml or via the
+// NIGHTME_DISCORD_INTENTS env var.
+type DiscordConfig struct {
+	BotToken      string `yaml:"bot_token"`
+	ApplicationID string `yaml:"application_id"`
+	Intents       int    `yaml:"intents"`
+
+	// ReconnectMaxBackoffSec bounds the Gateway reconnect backoff.
+	// Phase 3 picks this up; Phase 1 uses a fixed exponential curve
+	// capped at 30s. Exposed here so the field is reserved in the
+	// schema from day one.
+	ReconnectMaxBackoffSec int `yaml:"reconnect_max_backoff_sec"`
 }
 
 // SlackConfig holds credentials for the Slack channel.
@@ -424,6 +467,9 @@ func applyDefaults(c *Config) {
 	if c.Slack.StreamThrottleMs == 0 {
 		c.Slack.StreamThrottleMs = 3000
 	}
+	if c.Discord.Intents == 0 {
+		c.Discord.Intents = defaultDiscordIntents
+	}
 }
 
 // applyEnvOverrides looks at every NIGHTME_<SECTION>_<KEY> variable
@@ -459,6 +505,17 @@ func applyEnvOverrides(c *Config) {
 	if v := os.Getenv("NIGHTME_SLACK_STREAM_THROTTLE_MS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			c.Slack.StreamThrottleMs = n
+		}
+	}
+	if v := os.Getenv("NIGHTME_DISCORD_BOT_TOKEN"); v != "" {
+		c.Discord.BotToken = v
+	}
+	if v := os.Getenv("NIGHTME_DISCORD_APPLICATION_ID"); v != "" {
+		c.Discord.ApplicationID = v
+	}
+	if v := os.Getenv("NIGHTME_DISCORD_INTENTS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Discord.Intents = n
 		}
 	}
 	if v := os.Getenv("NIGHTME_PRIMARY"); v != "" {

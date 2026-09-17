@@ -13,6 +13,7 @@ import (
 	// sees every available channel. Drop the blank assignment if
 	// the test build needs to disable one; production runtime
 	// always uses all of them.
+	_ "github.com/cnlangzi/nightme/internal/channel/discord"
 	_ "github.com/cnlangzi/nightme/internal/channel/feishu"
 	_ "github.com/cnlangzi/nightme/internal/channel/slack"
 	_ "github.com/cnlangzi/nightme/internal/channel/telegram"

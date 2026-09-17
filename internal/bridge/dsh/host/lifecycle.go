@@ -72,8 +72,13 @@ import (
 )
 
 // webURLParseTimeout bounds waiting for dsh web to print its bound
-// URL on stdout. Real-machine cold start is ~1.5s; 10s is generous.
-const webURLParseTimeout = 10 * time.Second
+// URL on stdout. Real-machine cold start is ~1.5s; environments
+// that export SOCKS proxy vars (all_proxy / ALL_PROXY) push dsh's
+// startup measurably higher because dsh refuses SOCKS and runs a
+// fallback path. 30s is generous even on those hosts and gives the
+// workspace-init scan enough room without bumping into a false
+// timeout that loses the stderr diagnostic on /review failures.
+const webURLParseTimeout = 30 * time.Second
 
 // stderrCaptureCap bounds the ring of recent stderr lines the
 // parseWebURL failure path attaches to its error chain. 64 lines

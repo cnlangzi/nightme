@@ -80,43 +80,6 @@ import (
 // timeout that loses the stderr diagnostic on /review failures.
 const webURLParseTimeout = 30 * time.Second
 
-// envForDSHHost returns the env slice to hand to a spawned dsh
-// subprocess. It strips SOCKS proxy vars (all_proxy / ALL_PROXY)
-// because dsh refuses to honour SOCKS: it logs
-//
-//	"all_proxy names a SOCKS proxy, which is not supported;
-//	 connecting directly for that scheme"
-//
-// and then runs a direct-connect fallback path that measurably
-// slows startup past the spawn's wait-for-listen budget on hosts
-// that export it (typical developer shells that route traffic via
-// a local SOCKS tunnel). http/https proxy vars are preserved
-// because dsh honours those natively. Everything else from
-// os.Environ() passes through verbatim. extra is appended after
-// the filtered env so callers can layer DSH_PERMISSION_MODE etc.
-// on top without duplicating the filter logic at each callsite.
-//
-// Comparison is case-insensitive and key-only: env entries that
-// don't contain '=' (corrupt env) are preserved unchanged rather
-// than silently dropped, matching how the Go runtime tolerates
-// them.
-func envForDSHHost(hostEnv []string, extra ...string) []string {
-	out := make([]string, 0, len(hostEnv)+len(extra))
-	for _, e := range hostEnv {
-		name, _, ok := strings.Cut(e, "=")
-		if !ok {
-			out = append(out, e)
-			continue
-		}
-		if strings.EqualFold(name, "all_proxy") {
-			continue
-		}
-		out = append(out, e)
-	}
-	out = append(out, extra...)
-	return out
-}
-
 // stderrCaptureCap bounds the ring of recent stderr lines the
 // parseWebURL failure path attaches to its error chain. 64 lines
 // is enough to surface dsh's plugin / profile errors without
@@ -1468,7 +1431,7 @@ func spawnAndWire(ctx context.Context, opts SharedHostOptions, port int, logger 
 	child := proc.New(ctx, opts.HostCmd, "--profile", "web",
 		"--port", strconv.Itoa(port))
 	child.Dir = opts.Workspace
-	child.Env = envForDSHHost(os.Environ(),
+	child.Env = append(os.Environ(),
 		"DSH_PERMISSION_MODE="+opts.PermissionMode,
 	)
 

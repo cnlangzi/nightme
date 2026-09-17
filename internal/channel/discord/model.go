@@ -139,6 +139,11 @@ type SessionStartLimit struct {
 // AllowedMentions controls whether the message pings @users /
 // @roles / @everyone; default-suppressing Parse is what every
 // other adapter does to avoid accidental pings.
+//
+// Components is the Message Components V1 surface — used by the
+// OutChoice path to attach ActionRows of Buttons. The V2
+// IS_COMPONENTS_V2 flag is NOT set; V1 is the default and
+// content + embeds + components coexist on a single message.
 type CreateMessagePayload struct {
 	Content          string            `json:"content,omitempty"`
 	Nonce            string            `json:"nonce,omitempty"`
@@ -146,6 +151,7 @@ type CreateMessagePayload struct {
 	Embeds           []json.RawMessage `json:"embeds,omitempty"`
 	AllowedMentions  *AllowedMentions  `json:"allowed_mentions,omitempty"`
 	MessageReference *MessageReference `json:"message_reference,omitempty"`
+	Components       []Component       `json:"components,omitempty"`
 }
 
 type AllowedMentions struct {
@@ -156,10 +162,13 @@ type AllowedMentions struct {
 }
 
 // EditMessagePayload is the body of PATCH /channels/{id}/messages/{id}.
+// Components is the V1 component surface — OutChoicePatch uses it
+// to settle a choice card (empty Components clears the buttons).
 type EditMessagePayload struct {
 	Content         string            `json:"content,omitempty"`
 	Embeds          []json.RawMessage `json:"embeds,omitempty"`
 	AllowedMentions *AllowedMentions  `json:"allowed_mentions,omitempty"`
+	Components      []Component       `json:"components,omitempty"`
 }
 
 // isSupportedChannelType reports whether the adapter should

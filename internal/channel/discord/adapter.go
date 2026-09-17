@@ -36,12 +36,35 @@ type Adapter struct {
 	botUserID string
 	botName   string
 
+	// dataDir is the parent directory for both the persisted state
+	// file (state.json) and the per-chat attachment cache
+	// (dataDir/discord/<chatID>/<messageID>/). Empty when the
+	// operator did not configure Paths.DataDir; attachment
+	// downloads then become best-effort (WriteFile fails and the
+	// error surfaces on Attachment.Error).
+	dataDir string
+
+	// choiceStore maps RequestID → in-flight choice state.
+	// Populated by sendChoice (OutChoice path) and read by the
+	// INTERACTION_CREATE handler (callback.go). In-memory only;
+	// Discord's 3 s interaction-token TTL means stale entries
+	// wouldn't be useful across restarts anyway.
+	choiceStore *choiceStore
+
 	// lastMessageState records the most recent MessageState
 	// stamped on a user message id. Used to suppress redundant
 	// 👌 reactions when the runtime emits the same transition
 	// twice in a row.
 	lastStateMu        sync.Mutex
 	lastMessageStateDB map[string]string
+
+	// lastResultMessageID records the most recent OutResult
+	// message id per (chatID, userMsgID) pair so OnPromptEnded
+	// can stamp 🎉 / ❌ on the result bubble instead of the user
+	// bubble. Falls back to the user message id when no result
+	// was sent (bridge crash, /think off turn, etc.).
+	lastResultMu          sync.Mutex
+	lastResultMessageIDDB map[string]string
 
 	startStopMu sync.Mutex
 	started     bool
@@ -85,17 +108,21 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 	}
 
 	a := &Adapter{
-		name:               "discord",
-		cfg:                cfg.Discord,
-		api:                rest,
-		gw:                 gw,
-		state:              state,
-		incoming:           make(chan messages.InboundMessage, 64),
-		logger:             slog.Default(),
-		lastMessageStateDB: make(map[string]string),
+		name:                  "discord",
+		cfg:                   cfg.Discord,
+		api:                   rest,
+		gw:                    gw,
+		state:                 state,
+		incoming:              make(chan messages.InboundMessage, 64),
+		logger:                slog.Default(),
+		dataDir:               cfg.Paths.DataDir,
+		choiceStore:           newChoiceStore(),
+		lastMessageStateDB:    make(map[string]string),
+		lastResultMessageIDDB: make(map[string]string),
 	}
 	gw.onReady = a.onReady
 	gw.onMessage = a.onMessage
+	gw.onInteraction = a.onInteraction
 	return a, nil
 }
 
@@ -238,6 +265,10 @@ func (a *Adapter) onReady(u User) {
 // ch.BuildBlocks(msg.Text, msg.Attachments) when Blocks is
 // empty, so the adapter shouldn't pre-populate — otherwise the
 // dispatcher would double-build.
+//
+// Attachments are downloaded lazily here so the F-14 invariant
+// (messages/inbound.go:42-46) holds: LocalPath is populated
+// before the InboundMessage reaches the dispatcher.
 func (a *Adapter) onMessage(msg *Message) {
 	if msg == nil {
 		return
@@ -250,13 +281,14 @@ func (a *Adapter) onMessage(msg *Message) {
 	}
 	chatID := sessionChatID(string(msg.ChannelID))
 	inbound := messages.InboundMessage{
-		ChatID:     chatID,
-		UserID:     string(msg.Author.ID),
-		Text:       msg.Content,
-		MessageID:  string(msg.ID),
-		Time:       msg.Timestamp,
-		ReplyTo:    replyTargetOf(msg),
-		HasMention: a.computeHasMention(msg),
+		ChatID:      chatID,
+		UserID:      string(msg.Author.ID),
+		Text:        msg.Content,
+		MessageID:   string(msg.ID),
+		Time:        msg.Timestamp,
+		ReplyTo:     replyTargetOf(msg),
+		HasMention:  a.computeHasMention(msg),
+		Attachments: a.downloadAttachments(context.Background(), msg, chatID),
 	}
 	a.publish(inbound)
 }
@@ -325,4 +357,34 @@ func (a *Adapter) previousMessageState(messageID string) (string, bool) {
 	defer a.lastStateMu.Unlock()
 	s, ok := a.lastMessageStateDB[messageID]
 	return s, ok
+}
+
+// resultKey is the (chatID, userMsgID) tuple used to remember
+// which result message id corresponds to a user message. The two
+// fields are joined with a NUL byte — neither side ever carries
+// one in practice, so the concatenation is unambiguous.
+func resultKey(chatID, userMsgID string) string {
+	return chatID + "\x00" + userMsgID
+}
+
+// rememberResultMessageID records the most recent OutResult
+// message id for a (chatID, userMsgID) pair so OnPromptEnded can
+// stamp 🎉 / ❌ on the result bubble. Called from sendResult
+// (send.go) on every successful OutResult.
+func (a *Adapter) rememberResultMessageID(chatID, userMsgID, messageID string) {
+	if chatID == "" || messageID == "" {
+		return
+	}
+	a.lastResultMu.Lock()
+	defer a.lastResultMu.Unlock()
+	a.lastResultMessageIDDB[resultKey(chatID, userMsgID)] = messageID
+}
+
+// lastResultMessageID returns the recorded result message id for
+// (chatID, userMsgID), or "" when none was sent. OnPromptEnded
+// falls back to the user message id in that case.
+func (a *Adapter) lastResultMessageID(chatID, userMsgID string) string {
+	a.lastResultMu.Lock()
+	defer a.lastResultMu.Unlock()
+	return a.lastResultMessageIDDB[resultKey(chatID, userMsgID)]
 }

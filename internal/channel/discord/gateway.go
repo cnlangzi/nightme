@@ -35,9 +35,13 @@ type gatewayClient struct {
 
 	// Callbacks fired from the read loop. onReady receives the
 	// User object Discord returned in READY (so the adapter can
-	// cache botUserID); onMessage receives every MESSAGE_CREATE.
-	onReady   func(User)
-	onMessage func(*Message)
+	// cache botUserID); onMessage receives every MESSAGE_CREATE;
+	// onInteraction receives the raw d-payload of every
+	// INTERACTION_CREATE so the callback handler can ACK within
+	// Discord's 3-second window.
+	onReady       func(User)
+	onMessage     func(*Message)
+	onInteraction func(json.RawMessage)
 }
 
 // errInvalidSession is returned by run when Discord replies with
@@ -293,6 +297,10 @@ func (g *gatewayClient) readLoop(ctx context.Context, ws *websocket.Conn) (bool,
 				}
 				if g.onMessage != nil {
 					g.onMessage(&msg)
+				}
+			case "INTERACTION_CREATE":
+				if g.onInteraction != nil {
+					g.onInteraction(frame.D)
 				}
 			case "RESUMED":
 				logger.Info("discord gateway: RESUMED")

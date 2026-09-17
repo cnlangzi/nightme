@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/cnlangzi/nightme/internal/pathutil"
 )
@@ -217,12 +218,12 @@ func CurrentBranch(ctx context.Context, dir string, git GitRunner) (string, erro
 //     fastest path, no network.
 //  2. `git ls-remote --symref origin HEAD` — asks the remote
 //     directly. Catches skinny / fresh clones that haven't
-//     pulled origin/HEAD into the local cache yet, plus
-//     clones where step 1 was never run.
+//     pulled origin/HEAD into the local cache yet.
 //
 // Returns the bare branch name (no `origin/` prefix). Errors
-// when both strategies yield nothing — caller surfaces a hint
-// about `git remote set-head origin --auto` / `git fetch origin`.
+// when both strategies yield nothing; the message is tailored
+// to the actual failure mode (no origin vs. unreachable remote)
+// so the remediation hint applies.
 //
 // We deliberately do NOT guess "main" / "master" by name: a
 // silent default would pick the wrong branch on repos whose
@@ -231,15 +232,40 @@ func DefaultBranch(ctx context.Context, dir string, git GitRunner) (string, erro
 	if branch, ok := defaultBranchFromOriginHead(ctx, dir, git); ok {
 		return branch, nil
 	}
-	if branch, ok := defaultBranchFromRemoteSymref(ctx, dir, git); ok {
+	branch, stderr, ok := defaultBranchFromRemoteSymref(ctx, dir, git)
+	if ok {
 		return branch, nil
 	}
-	return "", fmt.Errorf(
-		"could not determine default branch: refs/remotes/origin/HEAD " +
-			"is not set and `git ls-remote --symref origin HEAD` did not " +
-			"return a symref (run `git remote set-head origin --auto` " +
-			"or `git fetch origin` to populate it)",
-	)
+	switch {
+	case strings.Contains(stderr, "no origin remote"):
+		// Pre-check already explained the failure: origin was
+		// never configured. Suggest the right fix (not the
+		// generic "set-head" hint, which can't help here).
+		return "", fmt.Errorf(
+			"could not determine default branch: no origin remote " +
+				"configured (run `git remote add origin <url>` then " +
+				"`git fetch origin`)",
+		)
+	case stderr != "":
+		// ls-remote failed for a reason other than "no origin"
+		// (auth, network, DNS, …). Fold the real stderr into
+		// the message so the user knows what actually went
+		// wrong before retrying.
+		return "", fmt.Errorf(
+			"could not determine default branch: refs/remotes/origin/HEAD "+
+				"is not set and `git ls-remote --symref origin HEAD` failed "+
+				"(%s); run `git remote set-head origin --auto` or "+
+				"`git fetch origin` to populate it",
+			stderr,
+		)
+	default:
+		return "", fmt.Errorf(
+			"could not determine default branch: refs/remotes/origin/HEAD " +
+				"is not set and `git ls-remote --symref origin HEAD` did not " +
+				"return a symref (run `git remote set-head origin --auto` " +
+				"or `git fetch origin` to populate it)",
+		)
+	}
 }
 
 // defaultBranchFromOriginHead reads the locally cached
@@ -271,11 +297,29 @@ func defaultBranchFromOriginHead(ctx context.Context, dir string, git GitRunner)
 // remote's default. Older / non-standard remotes that don't
 // advertise HEAD return only the SHA line; we treat that as
 // "no result" so the caller can surface a clean error.
-func defaultBranchFromRemoteSymref(ctx context.Context, dir string, git GitRunner) (string, bool) {
-	out, _, err := git.Run(ctx, dir,
+//
+// Returns (branch, stderr, ok):
+//   - (branch, "", true) on hit;
+//   - ("", "no origin remote", false) when origin isn't even
+//     configured (caught by the cheap pre-check, no network);
+//   - ("", <real stderr>, false) when the call failed for
+//     auth / network / DNS reasons — caller folds the stderr
+//     into the user-facing error.
+//
+// The ls-remote call is bounded by a short context deadline
+// so a hung credential prompt (private remote, no
+// credential helper, daemon has no TTY) fails fast instead
+// of parking /gtw sync on the runCmd CLI timeout.
+func defaultBranchFromRemoteSymref(ctx context.Context, dir string, git GitRunner) (string, string, bool) {
+	if _, _, err := git.Run(ctx, dir, "remote", "get-url", "origin"); err != nil {
+		return "", "no origin remote", false
+	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	out, stderr, err := git.Run(ctx, dir,
 		"ls-remote", "--symref", "origin", "HEAD")
 	if err != nil {
-		return "", false
+		return "", stderr, false
 	}
 	for _, line := range strings.Split(out, "\n") {
 		rest, ok := strings.CutPrefix(line, "ref: refs/heads/")
@@ -283,12 +327,16 @@ func defaultBranchFromRemoteSymref(ctx context.Context, dir string, git GitRunne
 			continue
 		}
 		branch, _, _ := strings.Cut(rest, "\t")
+		// TrimSpace guards against CRLF line endings: runCmd
+		// strips trailing `\n` but not `\r`, so a Windows-side
+		// `ls-remote` could leave `\r` between the branch and
+		// the `\t` separator.
 		branch = strings.TrimSpace(branch)
 		if branch != "" {
-			return branch, true
+			return branch, "", true
 		}
 	}
-	return "", false
+	return "", "", false
 }
 
 // RefreshDefaultBranch brings repoRoot (which MUST be the

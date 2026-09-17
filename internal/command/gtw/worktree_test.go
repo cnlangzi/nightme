@@ -229,6 +229,7 @@ func TestDefaultBranch_SymbolicRefHit(t *testing.T) {
 func TestDefaultBranch_SymbolicRefFails_LsRemoteSymref(t *testing.T) {
 	git := newScriptedGit()
 	git.on("symbolic-ref", "", "fatal: not a symbolic ref", errors.New("exit 128"))
+	git.on("remote", "git@example.com:foo/bar.git\n", "", nil)
 	git.on("ls-remote", "ref: refs/heads/develop\tHEAD\nabc123\tHEAD\n", "", nil)
 
 	got, err := DefaultBranch(context.Background(), "", git)
@@ -247,6 +248,7 @@ func TestDefaultBranch_SymbolicRefFails_LsRemoteSymref(t *testing.T) {
 func TestDefaultBranch_SymbolicRefMalformed(t *testing.T) {
 	git := newScriptedGit()
 	git.on("symbolic-ref", "origin/\n", "", nil)
+	git.on("remote", "git@example.com:foo/bar.git\n", "", nil)
 	git.on("ls-remote", "ref: refs/heads/main\tHEAD\n", "", nil)
 
 	got, err := DefaultBranch(context.Background(), "", git)
@@ -265,6 +267,7 @@ func TestDefaultBranch_SymbolicRefMalformed(t *testing.T) {
 func TestDefaultBranch_LsRemoteNoSymref(t *testing.T) {
 	git := newScriptedGit()
 	git.on("symbolic-ref", "", "fatal: not a symbolic ref", errors.New("exit 128"))
+	git.on("remote", "git@example.com:foo/bar.git\n", "", nil)
 	git.on("ls-remote", "abc123def456\tHEAD\n", "", nil)
 
 	_, err := DefaultBranch(context.Background(), "", git)
@@ -276,13 +279,16 @@ func TestDefaultBranch_LsRemoteNoSymref(t *testing.T) {
 	}
 }
 
-// TestDefaultBranch_AllFail covers the bare-repo / no-origin
-// case: every strategy errors. The error message must mention
-// `default branch` (general signal) AND give a remediation hint
-// (run `git remote set-head origin --auto` / `git fetch origin`).
+// TestDefaultBranch_AllFail covers the case where origin IS
+// configured but unreachable (auth / DNS / network). Both
+// strategies error; the final message must mention `default
+// branch` AND include the real stderr so the user sees what
+// actually went wrong before retrying — NOT a generic hint
+// that mis-suggests `git remote set-head origin --auto`.
 func TestDefaultBranch_AllFail(t *testing.T) {
 	git := newScriptedGit()
 	git.on("symbolic-ref", "", "fatal: not a symbolic ref", errors.New("exit 128"))
+	git.on("remote", "git@example.com:foo/bar.git\n", "", nil)
 	git.on("ls-remote", "", "fatal: could not read from remote", errors.New("exit 128"))
 
 	_, err := DefaultBranch(context.Background(), "", git)
@@ -294,5 +300,37 @@ func TestDefaultBranch_AllFail(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "git remote set-head") {
 		t.Errorf("error should include a remediation hint: %v", err)
+	}
+	if !strings.Contains(err.Error(), "could not read from remote") {
+		t.Errorf("error should include the real ls-remote stderr: %v", err)
+	}
+}
+
+// TestDefaultBranch_NoOriginRemote covers the local-only repo
+// case: no `origin` configured at all. The pre-check (git
+// remote get-url origin) fails before we ever touch the
+// network, and the error message tells the user to add an
+// origin — NOT `git remote set-head origin --auto`, which
+// can't succeed without an upstream.
+func TestDefaultBranch_NoOriginRemote(t *testing.T) {
+	git := newScriptedGit()
+	git.on("symbolic-ref", "", "fatal: not a symbolic ref", errors.New("exit 128"))
+	// No `remote` mock → git.Run fails for `git remote get-url
+	// origin` → pre-check returns "no origin remote".
+
+	_, err := DefaultBranch(context.Background(), "", git)
+	if err == nil {
+		t.Fatal("DefaultBranch: want error when no origin configured")
+	}
+	if !strings.Contains(err.Error(), "no origin") {
+		t.Errorf("error should mention 'no origin': %v", err)
+	}
+	if !strings.Contains(err.Error(), "git remote add origin") {
+		t.Errorf("error should suggest `git remote add origin`: %v", err)
+	}
+	// Crucially: must NOT suggest `git remote set-head`, which
+	// would fail for the same reason the lookup failed.
+	if strings.Contains(err.Error(), "git remote set-head") {
+		t.Errorf("error should NOT suggest `git remote set-head` when no origin: %v", err)
 	}
 }

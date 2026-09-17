@@ -949,8 +949,7 @@ func TestDispatchPR_DefaultBranchFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
-	if !strings.Contains(s.lastText(), "discover default branch") &&
-		!strings.Contains(s.lastText(), "origin remote") {
+	if !strings.Contains(s.lastText(), "default branch") {
 		t.Fatalf("expected default-branch error, got:\n%s", s.lastText())
 	}
 }

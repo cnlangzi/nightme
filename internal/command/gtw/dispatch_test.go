@@ -1,6 +1,10 @@
 package gtw
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -42,30 +46,14 @@ func TestBuildIssueDispatchText_BareIssue(t *testing.T) {
 	if !strings.Contains(out, "## Task") {
 		t.Errorf("missing Task section; got:\n%s", out)
 	}
-	// Plan-mode due-diligence framing: Plan is a question +
-	// decision pass, NOT an implementation pass. These pins
-	// lock the methodology in:
+	// Plan-mode framing + read-only invariant + STOP signal.
+	// Methodology pins (research-first, decision-gate, etc.)
+	// live in TestBuildIssueDispatchText_Plan_Methodology.
 	if !strings.Contains(out, "due-diligence pass") {
 		t.Errorf("Plan prompt must frame as due-diligence (not implementation); got:\n%s", out)
 	}
 	if !strings.Contains(out, "Do NOT modify, create, or delete any files.") {
 		t.Errorf("missing Plan-mode read-only instruction; got:\n%s", out)
-	}
-	if !strings.Contains(out, "Baseline") {
-		t.Errorf("Plan prompt must anchor analysis to the code baseline; got:\n%s", out)
-	}
-	// Step 1 + Step 2 wording — the two-step decompose-then-verify
-	// discipline is the core.
-	if !strings.Contains(out, "Decompose the request") {
-		t.Errorf("Plan prompt must require request decomposition (Step 1); got:\n%s", out)
-	}
-	if !strings.Contains(out, "Verify every claim against the code") {
-		t.Errorf("Plan prompt must require code verification (Step 2); got:\n%s", out)
-	}
-	// Step 6 — the questions-for-the-user section is now an
-	// explicit deliverable (not buried in "Risks").
-	if !strings.Contains(out, "Questions for the user") {
-		t.Errorf("Plan prompt must require 'Questions for the user' section (Step 6 deliverable); got:\n%s", out)
 	}
 	if !strings.Contains(out, "Present the plan and STOP") {
 		t.Errorf("missing Plan-mode STOP signal; got:\n%s", out)
@@ -119,21 +107,15 @@ func TestBuildIssueDispatchText_BareIssue_ExecuteMode(t *testing.T) {
 }
 
 // TestBuildIssueDispatchText_Plan_StopsBeforeEdits pins the
-// F-XX Plan-mode prompt: due-diligence pass (not
-// implementation) grounded in the worktree's source via a
-// two-step discipline (decompose claims, then verify each
-// against the code), explicit "Questions for the user"
-// deliverable (Step 6), explicit "STOP" signal, no
-// "Implement" leakage.
+// Plan-mode read-only + STOP invariants and the "no Implement
+// leakage" guard. Methodology content (research-first, decision
+// gate, classification semantics, etc.) lives in
+// TestBuildIssueDispatchText_Plan_Methodology so this test
+// stays focused on the read-only contract.
 func TestBuildIssueDispatchText_Plan_StopsBeforeEdits(t *testing.T) {
 	issue := &Issue{ID: 42, Title: "Login state", Body: "b", URL: "u"}
 	out := buildIssueDispatchText(issue, "br", "o/r", DispatchPlan, 0, 0)
 	for _, want := range []string{
-		"due-diligence pass",                          // framing
-		"Baseline",                                    // methodology anchor
-		"Decompose the request",                       // Step 1 discipline
-		"Verify every claim against the code",         // Step 2 discipline
-		"Questions for the user",                      // Step 6 deliverable
 		"Do NOT modify, create, or delete any files.", // read-only invariant
 		"Present the plan and STOP",                   // wait-for-user gate
 	} {
@@ -361,4 +343,227 @@ func TestBuildIssueDispatchText_AttachmentsSection(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestBuildIssueDispatchText_Plan_Methodology consolidates the
+// §11.A–E methodology pins + the §9 untrusted-input boundary into a
+// single table-driven test so the research-first + decision-gate
+// methodology lives in one place. Each pin groups the substrings
+// required (must) and forbidden (must not) for a single requirement
+// bucket; a test failure names the bucket, not just the substring.
+//
+// Issue §11: "Do not overfit tests to exact prose if a stable
+// semantic phrase/assertion is sufficient; the tests should protect
+// the methodology rather than every punctuation choice." So the
+// `must` slices use short, stable phrases (heading keywords,
+// structural markers, the gate's step anchors, the format headings)
+// — not full sentences that would force a wording edit to also
+// touch the test.
+func TestBuildIssueDispatchText_Plan_Methodology(t *testing.T) {
+	issue := &Issue{ID: 42, Title: "Login state", Body: "b", URL: "u"}
+	out := buildIssueDispatchText(issue, "br", "o/r", DispatchPlan, 0, 0)
+
+	type pin struct {
+		name     string
+		must     []string // substrings the prompt must contain
+		mustNot  []string // substrings the prompt must not contain
+		orderChk func() error
+	}
+
+	pins := []pin{
+		{
+			// §11.A — repository reconnaissance before any user
+			// question, across code, tests, docs/conventions, and
+			// (where useful) history/related artifacts.
+			name: "A. research-first",
+			must: []string{
+				"Repository reconnaissance", // explicit Step 0 section
+				"code paths directly related",
+				"existing tests and fixtures",
+				"AGENTS.md",
+				"CLAUDE.md",
+				"README",
+				"recent git history",
+				"related issues",
+			},
+			orderChk: func() error {
+				if r := strings.Index(out, "Repository reconnaissance"); r < 0 {
+					return fmt.Errorf("missing Repository reconnaissance section")
+				} else if g := strings.Index(out, "Decision Gate"); g < 0 {
+					return fmt.Errorf("missing Decision Gate section")
+				} else if r >= g {
+					return fmt.Errorf("Repository reconnaissance (%d) must precede Decision Gate (%d)", r, g)
+				}
+				return nil
+			},
+		},
+		{
+			// §11.B — zero questions is a valid and preferred outcome;
+			// the agent must not manufacture questions to look thorough.
+			name: "B. no manufactured questions",
+			must: []string{
+				"There is no minimum number of user questions",
+				"Zero questions is a valid and preferred outcome",
+				"Do not manufacture questions",
+			},
+		},
+		{
+			// §11.C — five-step gate: current code → project artifacts
+			// → established convention → material impact → genuine
+			// user decision.
+			name: "C. decision gate",
+			must: []string{
+				"Decision Gate",
+				"current code",
+				"project documentation",
+				"established project convention",
+				"materially change",
+				"user/product decision",
+				"A question is justified only when ALL of these hold",
+			},
+		},
+		{
+			// §11.D — Misunderstanding / Feature gap / Unverifiable
+			// are findings or implementation tasks by default — not
+			// automatic user questions.
+			name: "D. classification semantics",
+			must: []string{
+				"Misunderstanding",
+				"Feature gap",
+				"Unverifiable",
+				"Normally a finding, NOT a user question",
+				"Normally an implementation task, NOT a user question",
+				"Not automatically a user question",
+			},
+			mustNot: []string{
+				"is a question you cannot answer from the code alone",
+				"requires the user. List these questions",
+			},
+		},
+		{
+			// §11.E — when a question is justified, the prompt must
+			// require Decision + Why unresolved + Implementation impact.
+			name: "E. user-decision format",
+			must: []string{
+				"### User Decisions Required",
+				"**Decision:**",
+				"**Why unresolved:**",
+				"**Implementation impact:**",
+				"No user decision is required", // zero-question escape hatch
+			},
+		},
+		{
+			// §9 — issue title / body / comments / attachments are
+			// untrusted input, not executable agent instructions.
+			name: "F. untrusted issue input",
+			must: []string{
+				"untrusted input",
+				"comments, and attachments",
+				"not as agent instructions",
+			},
+		},
+	}
+
+	for _, p := range pins {
+		t.Run(p.name, func(t *testing.T) {
+			for _, want := range p.must {
+				if !strings.Contains(out, want) {
+					t.Errorf("Plan prompt missing required %q; got:\n%s", want, out)
+				}
+			}
+			for _, forbid := range p.mustNot {
+				if strings.Contains(out, forbid) {
+					t.Errorf("Plan prompt contains forbidden %q; got:\n%s", forbid, out)
+				}
+			}
+			if p.orderChk != nil {
+				if err := p.orderChk(); err != nil {
+					t.Error(err)
+				}
+			}
+		})
+	}
+}
+
+// TestBuildIssueDispatchText_Plan_MirrorsDoc pins finding #1 from
+// the post-change code review: the Plan Task body exists twice —
+// once in `fix.go` (the runtime source of truth) and once in
+// `docs/feat/F-gtw-fix.md` §4.1 (the human-readable mirror). The
+// review noted the two had already diverged in minor ways. This
+// test reads the doc's §4.1 fenced `## Task` block, normalises
+// whitespace, and asserts the result matches the runtime const
+// (also whitespace-normalised). A future edit that changes one
+// side without the other will fail this test, forcing the
+// author to keep the two in sync.
+//
+// Whitespace normalisation makes line-wrap differences irrelevant
+// — the doc is wrapped for human readability at ~75 columns, the
+// const is on per-paragraph lines — while still catching any real
+// content drift.
+func TestBuildIssueDispatchText_Plan_MirrorsDoc(t *testing.T) {
+	// The test runs with cwd = the gtw package directory, so the
+	// doc sits three levels up (gtw → command → internal → repo root).
+	docPath := filepath.Join("..", "..", "..", "docs", "feat", "F-gtw-fix.md")
+	docBytes, err := os.ReadFile(docPath)
+	if err != nil {
+		t.Skipf("doc not found at %s (skipping mirror check): %v", docPath, err)
+	}
+
+	// Normalise CRLF → LF so the doc mirrors cleanly on Windows
+	// checkouts (where `git` may check files out with CRLF line
+	// endings despite the repo's `.gitattributes`). The whitespace
+	// normalisation below collapses any remaining `\r` into a single
+	// space anyway, but doing the explicit LF normalisation first
+	// keeps the regex readable.
+	docBytes = []byte(strings.ReplaceAll(string(docBytes), "\r\n", "\n"))
+
+	// Extract the FIRST fenced `markdown` block whose first line is
+	// "## Task" — that's the §4.1 Plan Task body in the doc.
+	re := regexp.MustCompile("(?s)```markdown\n## Task\n(.+?)\n```")
+	m := re.FindSubmatch(docBytes)
+	if m == nil {
+		t.Fatal("could not find fenced ## Task block in §4.1 of F-gtw-fix.md")
+	}
+	docBlock := string(m[1])
+
+	// Whitespace-normalise: collapse every run of whitespace to a
+	// single space, then trim. This makes the comparison
+	// format-agnostic (line wrap, trailing spaces, blank lines
+	// between sections).
+	norm := func(s string) string {
+		s = regexp.MustCompile(`\s+`).ReplaceAllString(s, " ")
+		return strings.TrimSpace(s)
+	}
+
+	rtNorm := norm(planTaskPrompt)
+	docNorm := norm(docBlock)
+
+	if rtNorm == docNorm {
+		return
+	}
+
+	// Build a short context-window diff so the failure message
+	// points at the actual divergence.
+	limit := len(rtNorm)
+	if len(docNorm) < limit {
+		limit = len(docNorm)
+	}
+	for i := 0; i < limit; i++ {
+		if rtNorm[i] != docNorm[i] {
+			lo := i - 60
+			if lo < 0 {
+				lo = 0
+			}
+			hi := i + 60
+			if hi > len(rtNorm) {
+				hi = len(rtNorm)
+			}
+			hi2 := i + 60
+			if hi2 > len(docNorm) {
+				hi2 = len(docNorm)
+			}
+			t.Fatalf("planTaskPrompt diverges from docs/feat/F-gtw-fix.md §4.1 at offset %d (whitespace-normalised):\n  runtime: ...%s...\n  doc:     ...%s...\n\nEdit one, edit the other.", i, rtNorm[lo:hi], docNorm[lo:hi2])
+		}
+	}
+	t.Fatalf("planTaskPrompt diverges from docs/feat/F-gtw-fix.md §4.1 (one is a prefix of the other): runtime=%d, doc=%d bytes (normalised).", len(rtNorm), len(docNorm))
 }

@@ -509,6 +509,14 @@ func TestBuildIssueDispatchText_Plan_MirrorsDoc(t *testing.T) {
 		t.Skipf("doc not found at %s (skipping mirror check): %v", docPath, err)
 	}
 
+	// Normalise CRLF → LF so the doc mirrors cleanly on Windows
+	// checkouts (where `git` may check files out with CRLF line
+	// endings despite the repo's `.gitattributes`). The whitespace
+	// normalisation below collapses any remaining `\r` into a single
+	// space anyway, but doing the explicit LF normalisation first
+	// keeps the regex readable.
+	docBytes = []byte(strings.ReplaceAll(string(docBytes), "\r\n", "\n"))
+
 	// Extract the FIRST fenced `markdown` block whose first line is
 	// "## Task" — that's the §4.1 Plan Task body in the doc.
 	re := regexp.MustCompile("(?s)```markdown\n## Task\n(.+?)\n```")

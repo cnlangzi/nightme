@@ -10,8 +10,7 @@
 // the singleton pointer matches the legacy contract (tests and
 // diagnostic tools that read GetSharedHost). Closing the host is
 // delegated to the OS — when the daemon exits, the spawned dsh
-// stays alive (intended; it's a persistent service on port 3080
-// or a fallback in [3081, 3099]).
+// stays alive (intended; it's a persistent service on port 3080).
 //
 // Concurrency: the package's `globalClient` and `sharedHostGlobal`
 // are protected by their own mutexes; this helper layers a

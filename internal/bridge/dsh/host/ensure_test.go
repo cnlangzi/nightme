@@ -16,13 +16,10 @@ package host_test
 
 import (
 	"context"
-	"net"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/cnlangzi/nightme/internal/bridge/dsh/host"
 )
@@ -188,50 +185,5 @@ func TestEnsureSharedHost_MissingBinary(t *testing.T) {
 	if !strings.Contains(err.Error(), "dsh") &&
 		!strings.Contains(err.Error(), filepath.Base(binary)) {
 		t.Logf("error message lacks binary name; err=%v", err)
-	}
-}
-
-// TestEnsureSharedHost_PinnedPort3080 covers the pinned-port
-// contract: when 3080 is occupied by a non-dsh service,
-// StartSharedHost refuses to spawn (no fallback to 3081-3099)
-// and returns an error pointing the operator at the foreign
-// listener. nightme dsh service is pinned to 3080 by design
-// (see host/lifecycle.go::StartSharedHost docstring).
-//
-// Skipped by default: requires the test runner to bring up a
-// foreign HTTP server on 3080 first. See the test body for the
-// exact prerequisite command.
-func TestEnsureSharedHost_PinnedPort3080(t *testing.T) {
-	host.UnsetGlobal()
-	host.UnsetSharedHost()
-	host.ResetEnsureForTest()
-	t.Cleanup(func() {
-		host.UnsetGlobal()
-		host.UnsetSharedHost()
-		host.ResetEnsureForTest()
-	})
-
-	// Sanity: confirm 3080 is held by a non-dsh service. If not,
-	// this test asserts the wrong thing (it would see ErrNotRunning
-	// and spawn on 3080 directly). Skip so the user knows to start
-	// the foreign server.
-	c, err := net.DialTimeout("tcp", "127.0.0.1:3080", 200*time.Millisecond)
-	if err != nil {
-		t.Skip("no foreign server on 3080; rerun with one started externally")
-	}
-	c.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	_, err = host.EnsureSharedHost(ctx, host.SharedHostOptions{
-		Workspace:      "/tmp",
-		HostCmd:        "dsh",
-		PermissionMode: "danger-full-access",
-	})
-	if err == nil {
-		t.Fatalf("EnsureSharedHost: expected error since 3080 is foreign; got nil")
-	}
-	if !strings.Contains(err.Error(), "port 3080 already in use") {
-		t.Errorf("expected pin-3080 error; got %v", err)
 	}
 }

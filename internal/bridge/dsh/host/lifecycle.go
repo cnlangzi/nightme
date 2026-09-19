@@ -28,9 +28,10 @@
 //	  2. Construct *Client with the minted cookie jar. The jar is
 //	     the same shape dsh itself emits, so every /api/* and WS
 //	     upgrade carries the cookie.
-//	  3. Pick a port (3080 default, fallback sweep [3081, 3099]
-//	     if 3080 is held by a non-dsh service).
-//	  4. spawnAndWire spawns `dsh --profile web --port <port>`,
+//	  3. Bind port 3080. If something is already listening, attach
+//	     with the minted cookie. A real dsh on this account accepts
+//	     it. If the probe is rejected, kill that listener and spawn.
+//	  4. spawnAndWire spawns `dsh --profile web --port 3080`,
 //	     dials /api/remote.mux, and the Hub's auth cookie is
 //	     already in place.
 //	  5. Install via SetGlobal so dsh.newDriver can find it.
@@ -264,31 +265,20 @@ func (h *SharedHost) PID() int {
 	return h.cmd.Process.Pid
 }
 
-// StartSharedHost spawns a fresh dsh web daemon and installs the
-// resulting *Client as the process-wide singleton via SetGlobal.
+// StartSharedHost installs the process-wide *Client via SetGlobal.
 //
-// Always-spawn contract (replaces the previous reuse-or-spawn):
+// Port 3080 is the only bind address.
 //
-//  1. TCP-dial 127.0.0.1:3080.
-//     - dial succeeds → 3080 is occupied by SOMETHING (could be
-//     another dsh or a foreign service — we treat them the
-//     same). Spawn on findFreePort(3081, 3099).
-//     - dial fails (refused/timeout) → 3080 is ours. Spawn there.
-//  2. spawnAndWire spawns `dsh --profile web --port <port>`, parses
-//     the launch token from stdout, GETs /?token=... to mint the
-//     dsh-auth cookie, and constructs a Client that carries the
-//     cookie jar through both RPC and WS.
-//  3. SetGlobal installs the Client; watchdog respawns on crash.
+//  1. If 3080 accepts a cookie minted from ~/.dsh/.credentials.yaml,
+//     attach to that dsh. No subprocess.
+//  2. If 3080 is not listening, spawn `dsh --profile web --port 3080`.
+//  3. If 3080 is listening but the cookie is rejected, kill the
+//     listener and spawn. The cookie is an HMAC of the account
+//     secret, so a dsh that loaded ~/.dsh/ accepts it; a reject
+//     means the listener is not that dsh.
 //
-// Why "always spawn" replaces "reuse existing": dsh 0.1.2-rc.1
-// enforces per-process signed-cookie auth. The launch token is
-// process-internal and never written to a file, so attaching to a
-// dsh we didn't spawn gives us no way to mint a valid cookie —
-// every /api/* and WS call gets 401. Reusing would only be
-// reachable if dsh itself added a token-sharing mechanism.
-//
-// Errors are fatal-startup semantics: callers should treat them as
-// hard-fail boot conditions (no per-session fallback).
+// SetGlobal installs the Client. The watchdog attaches, or kills
+// and respawns, on the same rule when the port is taken again.
 func StartSharedHost(ctx context.Context, opts SharedHostOptions) (*SharedHost, error) {
 	if opts.Workspace == "" {
 		return nil, errors.New("dsh.host: workspace is required")
@@ -333,20 +323,18 @@ func StartSharedHost(ctx context.Context, opts SharedHostOptions) (*SharedHost, 
 			host.opts.Port = attachedPort
 		}
 	} else {
-		// Step 2: cookie validate on the foreign dsh failed (or
-		// none is listening on 3080). Spawn our own. nightme dsh
-		// service is pinned to port 3080 — no fallback. Operators
-		// running both a user dsh and nightme dsh must coordinate
-		// on the port (stop the user dsh before launching nightme,
-		// or run nightme on a separate machine).
+		// Attach missed. 3080 free → spawn. 3080 taken but the
+		// minted cookie was rejected → the listener is not a dsh
+		// that loaded this account's secret. Kill it and spawn.
 		port := defaultDSHPort
-		if dialReachable(defaultDSHPort) {
-			return nil, fmt.Errorf(
-				"dsh.host: port %d already in use; "+
-					"nightme dsh service does not fall back to "+
-					"alternate ports — stop the foreign listener "+
-					"or move nightme to a separate machine",
-				defaultDSHPort)
+		if dialReachable(port) {
+			if err := cookieMintable(port); err != nil {
+				return nil, fmt.Errorf("dsh.host: port %d occupied and cookie mint failed: %w", port, err)
+			}
+			logger.Warn("dsh.host: attach failed; reclaiming port", "port", port)
+			if err := reclaimPort(ctx, logger, port); err != nil {
+				return nil, err
+			}
 		}
 
 		cmd, cli, err := spawnAndWire(ctx, opts, port, logger)
@@ -940,10 +928,7 @@ func ShutdownSharedHost(h *SharedHost) {
 }
 
 // dialReachable reports whether a TCP connection to 127.0.0.1:port
-// is accepted (regardless of what's on the other end). Used by
-// StartSharedHost to decide whether 3080 is occupied; we don't care
-// whether the responder is dsh or a foreign service — the policy
-// is "always spawn our own on a fresh port".
+// is accepted (regardless of what's on the other end).
 func dialReachable(port int) bool {
 	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
 	d := net.Dialer{Timeout: 500 * time.Millisecond}
@@ -964,9 +949,9 @@ func dialReachable(port int) bool {
 // to mint the dsh-auth cookie (see mintAuthCookie).
 var dshURLPattern = regexp.MustCompile(`dsh web:\s+(http://[^\s]+)`)
 
-// defaultDSHPort is the canonical port both `dsh web` and the
-// spawned dsh subprocess default to. The fallback sweep in
-// StartSharedHost covers [3081, 3099] when this port is occupied.
+// defaultDSHPort is the only port nightme's dsh service binds.
+// An occupant is attached to, or killed and replaced. There is
+// no alternate-port sweep.
 const defaultDSHPort = 3080
 
 // mintAuthCookie does the dsh 0.1.2-rc.1 launch-token → cookie
@@ -1378,8 +1363,12 @@ func (h *SharedHost) tryRespawn() error {
 			// the old one left off.
 			oldCli.Close()
 		}
+		pid := -1
+		if cmd != nil && cmd.Process != nil {
+			pid = cmd.Process.Pid
+		}
 		h.logger.Info("dsh.host: respawn success",
-			"pid", cmd.Process.Pid,
+			"pid", pid,
 			"attempt", attempt)
 		return nil
 	}
@@ -1398,10 +1387,8 @@ func (h *SharedHost) tryRespawn() error {
 //
 // --port is always explicit (no reliance on dsh's default) so the
 // daemon owns the bind. Host is always 127.0.0.1; nothing in this
-// code path supports remote hosts. The fallback-port sweep in
-// StartSharedHost picks a port from findFreePort(3081, 3099) when
-// 3080 is held by something that isn't dsh; spawnAndWire doesn't
-// choose the port itself, the caller does.
+// code path supports remote hosts. The caller passes the port;
+// production always passes defaultDSHPort.
 func spawnAndWire(ctx context.Context, opts SharedHostOptions, port int, logger *slog.Logger) (*exec.Cmd, *Client, error) {
 	if logger == nil {
 		// Match StartSharedHost's nil-guard so callers and tests
@@ -1595,43 +1582,102 @@ func spawnAndWire(ctx context.Context, opts SharedHostOptions, port int, logger 
 	return child, cli, nil
 }
 
-// spawnOnce spawns nightme's own dsh subprocess. It prefers
-// h.opts.Port (the port nightme captured at Start) when that
-// port is currently free — dsh died and the kernel released
-// the TCP socket, so reuse it. If the port is still occupied
-// (previous dsh somehow still alive, or a foreign service
-// grabbed it during the dead window), fall back to the first
-// free port in [defaultPortScanMin, defaultPortScanMax] and
-// persist that as the new h.opts.Port via the caller's
-// bookkeeping.
+// spawnOnce brings a dsh up on h.opts.Port (defaultDSHPort when
+// unset). If that port already accepts connections, try to attach
+// with the credentials-minted cookie. Attach success returns a
+// nil cmd — the caller is in attached mode. Attach failure kills
+// the listener and spawns. A dsh that loaded ~/.dsh/ accepts the
+// cookie; rejection means the listener is not that dsh.
 //
-// Returns the actual port the new dsh bound to so the caller
-// can update h.opts.Port. Without this, every respawn would
-// re-evaluate the (now stale) captured port and drift to a
-// different fallback port — see findings 6-7 in the lifecycle
-// refactor review.
-//
-// Why port == 0 → no fallback (not the other way around):
-// h.opts.Port = 0 means "dsh never bound a port here yet"
-// (e.g. attached mode with a foreign dsh, or a fresh
-// StartSharedHost that went down the spawn path with
-// opts.Port still at the zero value). Forcing findFreePort
-// in that case would discard the user's deploy-time port
-// preference.
+// Returns the port the client is bound to so the caller can store
+// it on h.opts.Port.
 func (h *SharedHost) spawnOnce() (*exec.Cmd, *Client, int, error) {
 	port := h.opts.Port
-	if port > 0 && dialReachable(port) {
-		// Captured port is held by something — previous dsh
-		// still alive, or foreign service grabbed it
-		// during the dead window. nightme dsh service is pinned
-		// to 3080 — no port fallback during respawn. Operator
-		// must resolve the foreign listener before nightme
-		// can recover.
-		h.logger.Warn("dsh.host: captured port occupied during respawn",
-			"captured_port", h.opts.Port)
+	if port <= 0 {
+		port = defaultDSHPort
+	}
+	if dialReachable(port) {
+		if port == defaultDSHPort {
+			if cli, attachedPort, ok := tryAttachExistingDSH(context.Background(), h.logger, h.opts); ok {
+				if h.logger != nil {
+					h.logger.Info("dsh.host: respawn attached to existing dsh", "port", attachedPort)
+				}
+				return nil, cli, attachedPort, nil
+			}
+		}
+		if err := cookieMintable(port); err != nil {
+			return nil, nil, 0, fmt.Errorf("dsh.host: port %d occupied and cookie mint failed: %w", port, err)
+		}
+		if h.logger != nil {
+			h.logger.Warn("dsh.host: attach failed; reclaiming port", "port", port)
+		}
+		if err := reclaimPort(context.Background(), h.logger, port); err != nil {
+			return nil, nil, 0, err
+		}
 	}
 	cmd, cli, err := spawnAndWire(context.Background(), h.opts, port, h.logger)
 	return cmd, cli, port, err
+}
+
+// cookieMintable reports whether ~/.dsh/.credentials.yaml can mint
+// a cookie for port. Reclaim kills the listener only after this
+// succeeds: a dsh that loaded the same secret would have accepted
+// the cookie, so a failed attach means the listener is not that dsh.
+func cookieMintable(port int) error {
+	authority := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	_, err := mintDSHAuthCookieFromCredentials(authority)
+	return err
+}
+
+// one, then waits until the port stops accepting connections.
+// Called only after tryAttachExistingDSH rejected the listener.
+func reclaimPort(ctx context.Context, logger *slog.Logger, port int) error {
+	pids, err := listenerPIDs(port)
+	if err != nil {
+		return fmt.Errorf("dsh.host: listeners on %d: %w", port, err)
+	}
+	self := os.Getpid()
+	killed := false
+	for _, pid := range pids {
+		if pid <= 0 || pid == self {
+			continue
+		}
+		if logger != nil {
+			logger.Warn("dsh.host: killing listener that rejected attach",
+				"port", port, "pid", pid)
+		}
+		if err := killPID(pid); err != nil {
+			return fmt.Errorf("dsh.host: kill listener pid %d on port %d: %w", pid, port, err)
+		}
+		killed = true
+	}
+	if !killed {
+		if !dialReachable(port) {
+			return nil
+		}
+		return fmt.Errorf("dsh.host: port %d is in use but no listener pid to kill", port)
+	}
+	return waitPortFree(ctx, port)
+}
+
+// waitPortFree polls until port stops accepting TCP, or 5s elapses.
+func waitPortFree(ctx context.Context, port int) error {
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	tick := time.NewTicker(50 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if !dialReachable(port) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("dsh.host: reclaim port %d: %w", port, ctx.Err())
+		case <-timer.C:
+			return fmt.Errorf("dsh.host: port %d still in use after killing listener", port)
+		case <-tick.C:
+		}
+	}
 }
 
 // waitForListen polls 127.0.0.1:port until TCP accepts a connection
@@ -1665,9 +1711,8 @@ func waitForListen(ctx context.Context, port int) error {
 }
 
 // findFreePort scans [start, end] (inclusive) for the first TCP
-// port not bound by anything on 127.0.0.1. Used by StartSharedHost
-// when 3080 is occupied by a non-dsh service: spawn dsh on the
-// first free port in [3081, 3099] instead of failing loudly.
+// port not bound by anything on 127.0.0.1. Production bind policy
+// does not call this; tests use it to pick an unused port.
 //
 // Implementation: try `net.Listen("tcp", "127.0.0.1:N")` for each
 // N; EADDRINUSE → next, anything else → error. We close the

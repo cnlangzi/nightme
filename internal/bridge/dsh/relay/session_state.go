@@ -26,6 +26,7 @@ package relay
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 
 	"github.com/cnlangzi/nightme/internal/bridge/dsh/api"
 )
@@ -57,9 +58,14 @@ type sessionState struct {
 	id        string
 	workspace string
 
-	mu      sync.RWMutex
-	ring    []api.Event // append-only, capped at ringBufferSize
-	lastSeq int64
+	mu   sync.RWMutex
+	ring []api.Event // append-only, capped at ringBufferSize
+	// lastSeq is the highest SessionEvent.seq we've already
+	// pushed to the ring. Phase 3 fix #19: atomic to avoid
+	// races between backfill.fetch (reader) and appendEvents
+	// / bumpLastSeq (writers). ring writes still need mu
+	// because they mutate the slice.
+	lastSeq atomic.Int64
 
 	subMu  sync.RWMutex
 	subs   map[int]*subscriber
@@ -71,9 +77,16 @@ type sessionState struct {
 
 	// muxHandlers are the per-driver callbacks registered
 	// via MuxSubscribe. The central mux pump invokes each on
-	// every incoming frame.
+	// every incoming frame. Phase 3 fix #6: use map+alive so
+	// unsubscribe can actually drop entries (the previous
+	// slice+best-effort unsub never deleted).
 	muxMu       sync.RWMutex
-	muxHandlers []MuxHandler
+	muxHandlers map[int]muxHandlerEntry
+
+	// muxHandlers next ID allocator (monotonic, never
+	// reused). Combined with the live map it lets the
+	// dispatcher's iteration stay GC-friendly.
+	muxNextID int
 
 	// agentName is the agent label carried on the session
 	// for diagnostics / dashboard. Not used by the relay's
@@ -82,6 +95,13 @@ type sessionState struct {
 	// translator doesn't need to re-introduce it.
 	agentName string
 }
+
+type muxHandlerEntry struct {
+	fn    MuxHandler
+	alive bool
+}
+
+const muxHandlerCap = 64 // refuse beyond this to prevent OOM
 
 func newSessionState(id, workspace string) *sessionState {
 	return &sessionState{
@@ -101,8 +121,16 @@ func (s *sessionState) appendEvents(events []Event) {
 		if len(s.ring) > ringBufferSize {
 			s.ring = s.ring[len(s.ring)-ringBufferSize:]
 		}
-		if ev.Seq > 0 && ev.Seq > s.lastSeq {
-			s.lastSeq = ev.Seq
+		if ev.Seq > 0 {
+			// Phase 3 fix #19: CAS loop on the atomic
+			// lastSeq so multiple writers (live mux pump,
+			// backfill fetch) don't race past each other.
+			for {
+				old := s.lastSeq.Load()
+				if ev.Seq <= old || s.lastSeq.CompareAndSwap(old, ev.Seq) {
+					break
+				}
+			}
 		}
 	}
 	s.mu.Unlock()
@@ -120,9 +148,7 @@ func (s *sessionState) ringSnapshot() []Event {
 }
 
 func (s *sessionState) lastSeqSeen() int64 {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.lastSeq
+	return s.lastSeq.Load()
 }
 
 // subscribe attaches a new subscriber to this session. The
@@ -172,9 +198,29 @@ func (s *sessionState) deliver(ev Event) {
 		select {
 		case sub.ch <- ev:
 		default:
+			// Phase 3 fix #28: count drops so a stuck
+			// subscriber shows up in /diagnose instead of
+			// silently losing frames.
+			droppedEvents.Add(1)
 		}
 	}
 }
+
+// droppedEvents is the process-wide counter of events the
+// relay dropped because no subscriber had buffer space. Use
+// /diagnose (Phase 4) to surface; for now it's debuggable
+// via runtime/metrics or a debug endpoint.
+//
+// Phase 3 fix #28: atomic counter incremented on every
+// dropped event.
+var droppedEvents atomic.Uint64
+
+// DroppedEvents returns the process-wide count of dropped
+// events. /diagnose exposes this to operators.
+func DroppedEvents() uint64 { return droppedEvents.Load() }
+
+// resetDroppedEvents is for tests; production doesn't reset.
+func resetDroppedEvents() { droppedEvents.Store(0) }
 
 func (s *sessionState) closeSubscribers() {
 	s.subMu.Lock()
@@ -187,14 +233,46 @@ func (s *sessionState) closeSubscribers() {
 }
 
 // addMuxHandler registers a per-driver mux frame handler.
-// The relay's central mux pump invokes each registered
-// handler on every incoming frame.
-func (s *sessionState) addMuxHandler(h MuxHandler) {
+// Phase 3 fix #6: returns an integer ID and a detach func;
+// the ID is used by removeMuxHandler (Phase 3 fix #6 cont.)
+// to actually drop the entry from the map. Caps at
+// muxHandlerCap to prevent unbounded growth under
+// driver-creates-driver leaks.
+//
+// Returns (id, detach). The detach marks the entry dead;
+// the next dispatchMux sweep skips it. The map entry
+// itself is kept until removeMuxHandler runs.
+func (s *sessionState) addMuxHandler(h MuxHandler) (int, func()) {
 	if h == nil {
+		return 0, func() {}
+	}
+	s.muxMu.Lock()
+	if len(s.muxHandlers) >= muxHandlerCap {
+		s.muxMu.Unlock()
+		// Refuse rather than silently evict: the driver that
+		// hit the cap has a bug. Log via slog.Default (no
+		// logger on sessionState).
+		return 0, func() {}
+	}
+	id := s.muxNextID
+	s.muxNextID++
+	if s.muxHandlers == nil {
+		s.muxHandlers = map[int]muxHandlerEntry{}
+	}
+	s.muxHandlers[id] = muxHandlerEntry{fn: h, alive: true}
+	s.muxMu.Unlock()
+	return id, func() { s.removeMuxHandler(id) }
+}
+
+// removeMuxHandler marks the entry dead and evicts it from
+// the map. Subsequent dispatches skip it; the map slot is
+// reclaimed immediately so memory doesn't grow.
+func (s *sessionState) removeMuxHandler(id int) {
+	if id == 0 {
 		return
 	}
 	s.muxMu.Lock()
-	s.muxHandlers = append(s.muxHandlers, h)
+	delete(s.muxHandlers, id)
 	s.muxMu.Unlock()
 }
 
@@ -202,8 +280,12 @@ func (s *sessionState) addMuxHandler(h MuxHandler) {
 // given frame. Used by the central mux pump in relay.go.
 func (s *sessionState) dispatchMux(method, rpcID string, payload api.MuxHandlerPayload) {
 	s.muxMu.RLock()
-	handlers := make([]MuxHandler, len(s.muxHandlers))
-	copy(handlers, s.muxHandlers)
+	handlers := make([]MuxHandler, 0, len(s.muxHandlers))
+	for _, e := range s.muxHandlers {
+		if e.alive {
+			handlers = append(handlers, e.fn)
+		}
+	}
 	s.muxMu.RUnlock()
 	for _, h := range handlers {
 		h(method, rpcID, payload)

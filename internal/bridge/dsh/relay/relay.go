@@ -34,9 +34,11 @@ package relay
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/bridge/dsh/api"
@@ -47,7 +49,15 @@ import (
 // bridge.go for the contract; this file owns lifecycle and
 // session map.
 type Relay struct {
-	host *host.Client
+	// host is the current shared dsh host.Client. Stored in
+	// atomic.Value so replaceClient (Phase 3 fix #4) can swap
+	// without racing RPC reads.
+	host atomic.Value // *host.Client
+
+	// clientMu guards hostChanged only. mux pumps read r.host
+	// via atomic.Value.Load() and re-bind on hostChanged.
+	clientMu    sync.RWMutex
+	hostChanged chan struct{}
 
 	mu       sync.RWMutex
 	sessions map[string]*sessionState
@@ -72,12 +82,20 @@ func newRelay(cli *host.Client, log *slog.Logger) *Relay {
 		log = slog.Default()
 	}
 	r := &Relay{
-		host:     cli,
-		sessions: map[string]*sessionState{},
-		log:      log,
-		closed:   make(chan struct{}),
+		hostChanged: make(chan struct{}, 16),
+		sessions:    map[string]*sessionState{},
+		log:         log,
+		closed:      make(chan struct{}),
 	}
+	r.host.Store(cli)
 	r.backfill = newBackfiller(r)
+	// Phase 3 fix #4: register a ReplaceGlobal hook so the
+	// relay re-binds its mux pump to the new client after a
+	// dsh respawn. Without this, drivers would keep
+	// dispatching frames from the dead client.
+	host.RegisterReplaceGlobalHook(func(c *host.Client) {
+		r.replaceClient(c)
+	})
 	return r
 }
 
@@ -157,7 +175,7 @@ func (r *Relay) Close() error {
 	r.closeOnce.Do(func() {
 		close(r.closed)
 		r.backfill.stop()
-		r.host.Close()
+		r.host.Load().(*host.Client).Close()
 	})
 	return err
 }
@@ -177,7 +195,7 @@ func (r *Relay) sessionStateFor(id string) *sessionState {
 // stays per-driver). Phase 2 will move mux dispatch into the
 // relay and remove this accessor; for now it keeps the
 // driver-side refactor surface small.
-func (r *Relay) MuxClient() *host.Client { return r.host }
+func (r *Relay) MuxClient() *host.Client { return r.host.Load().(*host.Client) }
 
 // Connect implements api.Bridge.
 //
@@ -200,14 +218,14 @@ func (r *Relay) Connect(ctx context.Context, opts api.ConnectOpts) (api.SessionH
 	}
 
 	repoRoot := detectRepoRoot(opts.Workspace)
-	ws, err := r.host.RPC.WorkspaceCreate(ctx, repoRoot)
+	ws, err := r.host.Load().(*host.Client).RPC.WorkspaceCreate(ctx, repoRoot)
 	if err != nil {
 		return api.SessionHandle{}, fmt.Errorf("relay: workspace.create: %w", err)
 	}
 
 	sessionID := opts.SessionID
 	if sessionID == "" {
-		created, err := r.host.RPC.SessionCreate(ctx, host.SessionCreateOpts{
+		created, err := r.host.Load().(*host.Client).RPC.SessionCreate(ctx, host.SessionCreateOpts{
 			WorkspaceID: ws.WorkspaceID,
 			CWD:         opts.Workspace,
 		})
@@ -219,7 +237,7 @@ func (r *Relay) Connect(ctx context.Context, opts api.ConnectOpts) (api.SessionH
 		// Re-attach path: dsh's session.create is idempotent on
 		// (id, cwd); same id+cwd returns the same in-memory
 		// session and joins the mux live set.
-		got, err := r.host.RPC.SessionCreate(ctx, host.SessionCreateOpts{
+		got, err := r.host.Load().(*host.Client).RPC.SessionCreate(ctx, host.SessionCreateOpts{
 			SessionID:   sessionID,
 			WorkspaceID: ws.WorkspaceID,
 			CWD:         opts.Workspace,
@@ -242,7 +260,7 @@ func (r *Relay) Connect(ctx context.Context, opts api.ConnectOpts) (api.SessionH
 		// Best-effort: a failure here is logged at warn but not
 		// surfaced to the caller — the session is still usable
 		// in default mode and a follow-up /permission can fix it.
-		if err := r.host.RPC.CommandsExecute(ctx, sessionID, "/permission "+opts.PermissionMode); err != nil {
+		if err := r.host.Load().(*host.Client).RPC.CommandsExecute(ctx, sessionID, "/permission "+opts.PermissionMode); err != nil {
 			r.log.Warn("relay: set permission mode failed",
 				"session_id", sessionID,
 				"mode", opts.PermissionMode,
@@ -270,15 +288,23 @@ func (r *Relay) Disconnect(ctx context.Context, id string) error {
 		s.closeSubscribers()
 	}
 
-	if err := r.host.RPC.SessionCancel(ctx, id); err != nil {
+	// Phase 3 fix #5: surface the joined error to the caller
+	// (driver.Close) instead of logging and returning nil.
+	// A non-fatal cancel / archive failure (e.g. session
+	// already gone because dsh restarted) is still surfaced
+	// but the caller can ignore it.
+	var errs []error
+	if err := r.host.Load().(*host.Client).RPC.SessionCancel(ctx, id); err != nil {
 		r.log.Warn("relay: session.cancel failed",
 			"session_id", id, "err", err)
+		errs = append(errs, fmt.Errorf("session.cancel: %w", err))
 	}
-	if err := r.host.RPC.WorkspaceArchiveSession(ctx, id); err != nil {
+	if err := r.host.Load().(*host.Client).RPC.WorkspaceArchiveSession(ctx, id); err != nil {
 		r.log.Warn("relay: workspace.archiveSession failed",
 			"session_id", id, "err", err)
+		errs = append(errs, fmt.Errorf("workspace.archiveSession: %w", err))
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // Send implements api.Bridge.
@@ -290,7 +316,7 @@ func (r *Relay) Send(ctx context.Context, id string, blocks []agent.ContentBlock
 	if err != nil {
 		return fmt.Errorf("relay: encode prompt: %w", err)
 	}
-	if err := r.host.RPC.SessionPrompt(ctx, id, "queue", parts); err != nil {
+	if err := r.host.Load().(*host.Client).RPC.SessionPrompt(ctx, id, "queue", parts); err != nil {
 		return fmt.Errorf("relay: session.prompt: %w", err)
 	}
 	return nil
@@ -364,7 +390,9 @@ func (r *Relay) MuxSubscribe(ctx context.Context, id, workspace string, handler 
 		return nil, fmt.Errorf("relay: nil mux handler for %s", id)
 	}
 
-	s.addMuxHandler(handler)
+	// Phase 3 fix #6: addMuxHandler returns an ID + detach
+	// that actually drops the entry. Old code never deleted.
+	_, detach := s.addMuxHandler(handler)
 
 	// Start the central mux pump on first subscriber.
 	s.muxMu.Lock()
@@ -376,20 +404,7 @@ func (r *Relay) MuxSubscribe(ctx context.Context, id, workspace string, handler 
 	}
 	s.muxMu.Unlock()
 
-	return func() {
-		s.muxMu.Lock()
-		// Drop handler by replacing the slice; we can't
-		// reliably compare func values by pointer here (Go
-		// disallows == on funcs), so leave the handler in
-		// place and rely on the consumer dropping its
-		// reference. This keeps the unsubscribe idempotent;
-		// the handler is a no-op once the driver's
-		// channels are drained.
-		_ = s.muxHandlers
-		remaining := len(s.muxHandlers)
-		s.muxMu.Unlock()
-		_ = remaining
-	}, nil
+	return detach, nil
 }
 
 // runMuxPump is the central mux subscriber for one session.
@@ -397,15 +412,49 @@ func (r *Relay) MuxSubscribe(ctx context.Context, id, workspace string, handler 
 // incoming frame calls every registered handler. The
 // pump exits when ctx is cancelled (Disconnect / relay
 // close).
+//
+// Phase 3 fix #4: the pump re-binds its mux subscription
+// when replaceClient swaps the host (dsh respawn path). The
+// loop watches r.host via the relay's atomic field and
+// re-subscribes when it changes.
 func (r *Relay) runMuxPump(ctx context.Context, s *sessionState, workspace string) {
 	defer func() {
-		// Cancel the subscription when the pump exits.
-		r.host.Unsubscribe(s.id)
+		r.host.Load().(*host.Client).Unsubscribe(s.id)
 	}()
-	r.host.Subscribe(s.id, workspace, func(method, rpcID string, payload api.MuxHandlerPayload) {
-		s.dispatchMux(method, rpcID, payload)
-	})
-	<-ctx.Done()
+	for {
+		cli := r.host.Load().(*host.Client)
+		done := make(chan struct{})
+		cli.Subscribe(s.id, workspace, func(method, rpcID string, payload api.MuxHandlerPayload) {
+			s.dispatchMux(method, rpcID, payload)
+		})
+		select {
+		case <-ctx.Done():
+			// Close the host subscription then exit.
+			r.host.Load().(*host.Client).Unsubscribe(s.id)
+			close(done)
+			return
+		case <-r.hostChanged:
+			// Host client swapped. Unsubscribe from old, loop
+			// re-binds to new client on next iteration.
+			cli.Unsubscribe(s.id)
+			close(done)
+			// Fall through; the for-loop iteration picks up
+			// the new r.host value.
+		}
+	}
+}
+
+// replaceClient is the ReplaceGlobal hook callback (Phase 3
+// fix #4). Atomically swaps r.host and signals all active mux
+// pumps to re-bind. Existing subscribers' frames in-flight on
+// the old client are dropped (driver-side `select-default`
+// protects against send-on-closed-channel).
+func (r *Relay) replaceClient(c *host.Client) {
+	r.host.Store(c)
+	select {
+	case r.hostChanged <- struct{}{}:
+	default:
+	}
 }
 
 // Health implements api.Bridge.
@@ -414,7 +463,7 @@ func (r *Relay) runMuxPump(ctx context.Context, s *sessionState, workspace strin
 // Replaces the N per-driver /api/session.list calls that fired
 // every 30s × 3 strikes = 90s on every session.
 func (r *Relay) Health(ctx context.Context) error {
-	if _, err := r.host.RPC.SessionList(ctx); err != nil {
+	if _, err := r.host.Load().(*host.Client).RPC.SessionList(ctx); err != nil {
 		return fmt.Errorf("relay: health: %w", err)
 	}
 	return nil

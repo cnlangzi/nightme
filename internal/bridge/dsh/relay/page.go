@@ -71,7 +71,7 @@ func (r *Relay) fetchPage(ctx context.Context, sessionID string, throughSeq int6
 	// session/page is unary, not stream — go through RPCClient.Post
 	// directly (not SessionPrompt / SessionList which use typed
 	// helpers built around their own request shape).
-	resp, err := r.host.RPC.Post(ctx, "session.page", map[string]any{
+	resp, err := r.host.Load().(*host.Client).RPC.Post(ctx, "session.page", map[string]any{
 		"request": json.RawMessage(body),
 	})
 	if err != nil {

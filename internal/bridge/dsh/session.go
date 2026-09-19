@@ -254,39 +254,12 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 		return nil, fmt.Errorf("dsh: workspace is required")
 	}
 
-	cli := host.GetGlobal()
-	if cli == nil {
-		// Lazy start. The daemon does not pre-start dsh — a user
-		// who never uses dsh (or doesn't have it installed) pays
-		// nothing at startup. The first dsh agent-session spin-up
-		// pays the spawn cost (typically 1-3s); every subsequent
-		// one reuses the cached client.
-		//
-		// Per-session re-attachment: when this user later messages
-		// a chat whose persisted sessionId points at a dsh
-		// session, dsh's own resume-attach in handshakeSession
-		// below re-attaches to the existing in-memory session —
-		// no boot-time RecoverAll is needed.
-		//
-		// Permission mode is fixed at danger-full-access per
-		// [[agent-no-config-tampering]] (we only inject transport
-		// + permissions — never model / provider / credentials).
-		var err error
-		cli, err = host.EnsureSharedHost(ctx, host.SharedHostOptions{
-			Workspace:      cfg.Workspace,
-			HostCmd:        "dsh",
-			PermissionMode: "danger-full-access",
-		})
-		if err != nil {
-			return nil, fmt.Errorf("dsh: shared host not available: %w", err)
-		}
-	}
-
-	// Phase 3: get the relay singleton (lazy starts the
-	// shared dsh host on first call, same singleton for
-	// every subsequent driver in the process). relay.Get
-	// returns the same instance as host.EnsureSharedHost
-	// (both share the global host.Client).
+	// Phase 3 fix #3: relay.Get owns the host singleton. Don't
+	// call host.GetGlobal/EnsureSharedHost here — that would
+	// race with the relay's lazy init and could yield two
+	// distinct host.Client instances (one for the driver,
+	// one for the relay), with mismatched mux subscriptions
+	// and RPC paths.
 	br, err := relay.Get(host.SharedHostOptions{
 		Workspace:      cfg.Workspace,
 		HostCmd:        "dsh",
@@ -305,7 +278,11 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	// handshakeSession + deleteWorkspace for the wire flow.
 
 	d := &driver{
-		cli:       cli,
+		// cli is the same client relay.Get owns; used by the mux
+		// subscription path only (bridge.MuxSubscribe calls
+		// cli.Subscribe under the hood). All other dsh
+		// interaction goes through `bridge`.
+		cli:       br.MuxClient(),
 		bridge:    br,
 		workspace: cfg.Workspace,
 		agentName: s.name,
@@ -906,56 +883,39 @@ func (d *driver) ListSessions(ctx context.Context) ([]Session, error) {
 // responsibility (host.Client.Close), and it lives for the full
 // daemon lifetime.
 func (d *driver) Close() error {
+	var closeErr error
 	d.closeOnce.Do(func() {
 		close(d.closed)
-		// Stop the backfill poller first so it doesn't try to push
-		// events into the events channel after we close it (next
-		// deliver would hit the closed branch and drop, but the
-		// goroutine would still be running).
-		if d.backfillCancel != nil {
-			d.backfillCancel()
+
+		// 1. Stop receiving new frames from the relay mux pump.
+		if d.muxUnsub != nil {
+			d.muxUnsub()
+			d.muxUnsub = nil
 		}
-		// Stop the host from routing future frames for this session.
-		// Drop pending-approval channels for this session too — the
-		// runtime's permission handlers would otherwise wait forever
-		// on a sessionId nobody can answer anymore.
-		// Unregister from the host waterfall demux map BEFORE
-		// Unsubscribe so a waterfall racing in this window is dropped
-		// (debug-logged) instead of handed to a closing driver.
+
+		// 2. Host waterfall demux.
 		unregisterDriverForWaterfall(d)
-		// Detach the session/control modelSelection projection
-		// watcher. unregisterControlProjection invokes modelUnsub
-		// so the host store stops firing on a closed driver.
+
+		// 3. Model projection.
 		unregisterControlProjection(d, d.modelUnsub)
 		d.modelUnsub = nil
-		d.cli.Unsubscribe(d.sessionID)
+
+		// 4. Relay-side disconnect (cancel + archive + close subs).
 		if d.sessionID != "" {
-			cancelCtx, cancelCancel := context.WithTimeout(context.Background(), 3*time.Second)
-			if err := d.cli.RPC.SessionCancel(cancelCtx, d.sessionID); err != nil && !isBenignCancelErr(err) {
-				dLog("dsh: session.cancel on close: %v", err)
+			discCtx, discCancel := context.WithTimeout(context.Background(), 3*time.Second)
+			if err := d.bridge.Disconnect(discCtx, d.sessionID); err != nil {
+				dLog("dsh: bridge disconnect on close: %v", err)
+				closeErr = err
 			}
-			cancelCancel()
-			// archiveSession: drops the session row from dsh's left
-			// list (and the workspace's sessionIds), keeps the
-			// repo-scoped workspace alive for sibling / future
-			// drivers. Reverting from workspace.delete (02da551 /
-			// 5a6bee0) was wrong: delete tore down the shared
-			// workspace, wiping every other driver's session.
-			archiveCtx, archiveCancel := context.WithTimeout(context.Background(), 3*time.Second)
-			if err := d.cli.RPC.WorkspaceArchiveSession(archiveCtx, d.sessionID); err != nil && !isBenignCancelErr(err) {
-				dLog("dsh: workspace.archiveSession on close: %v", err)
-			} else {
-				slogDefault().Info("dsh: session archived", "session_id", d.sessionID)
-			}
-			archiveCancel()
+			discCancel()
 		}
-		// Close events AFTER unsubscribe so the runtime drains any
-		// frames already routed to handleMuxFrame (and thus into
-		// deliver) before exiting. drain → close ordering matches
-		// the pre-fix lifecycle pattern.
+
+		// 5. Signal events channel end-of-stream. Must be the
+		// last step so the runtime's readpump drains any frames
+		// that landed just before step 1.
 		close(d.events)
 	})
-	return nil
+	return closeErr
 }
 
 // Stop cancels an in-flight turn without closing the bridge session.

@@ -93,14 +93,6 @@ const stderrCaptureCap = 64
 // one line at typical pipe speeds reach our ring.
 const stderrFlushGrace = 200 * time.Millisecond
 
-// portScanRange bounds the fallback port sweep when 3080 is held
-// by a non-dsh service. Default = [3081, 3099] (20 ports). Configurable
-// via SharedHostOptions if a deployment needs more headroom.
-const (
-	defaultPortScanMin = 3081
-	defaultPortScanMax = 3099
-)
-
 // Probe tuning for the monitor's attached-mode branch. The
 // monitor probes /api/session.list at defaultAttachedProbeInterval
 // and on defaultAttachedProbeStrikes consecutive failures
@@ -341,22 +333,20 @@ func StartSharedHost(ctx context.Context, opts SharedHostOptions) (*SharedHost, 
 			host.opts.Port = attachedPort
 		}
 	} else {
-		// Step 2: port 3080 free (or cookie rejected on the foreign
-		// dsh). Spawn our own.
+		// Step 2: cookie validate on the foreign dsh failed (or
+		// none is listening on 3080). Spawn our own. nightme dsh
+		// service is pinned to port 3080 — no fallback. Operators
+		// running both a user dsh and nightme dsh must coordinate
+		// on the port (stop the user dsh before launching nightme,
+		// or run nightme on a separate machine).
 		port := defaultDSHPort
 		if dialReachable(defaultDSHPort) {
-			scanMin, scanMax := defaultPortScanMin, defaultPortScanMax
-			found, scanErr := findFreePort(scanMin, scanMax)
-			if scanErr != nil {
-				return nil, fmt.Errorf(
-					"dsh.host: port %d occupied and no free port in range %d-%d: %w",
-					defaultDSHPort, scanMin, scanMax, scanErr)
-			}
-			port = found
-			logger.Warn("dsh.host: port 3080 occupied; spawning on fallback",
-				"foreign_port", defaultDSHPort,
-				"fallback_port", port,
-			)
+			return nil, fmt.Errorf(
+				"dsh.host: port %d already in use; "+
+					"nightme dsh service does not fall back to "+
+					"alternate ports — stop the foreign listener "+
+					"or move nightme to a separate machine",
+				defaultDSHPort)
 		}
 
 		cmd, cli, err := spawnAndWire(ctx, opts, port, logger)
@@ -454,72 +444,64 @@ func tryAttachExistingDSH(ctx context.Context, logger *slog.Logger, opts SharedH
 	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	for _, port := range append([]int{defaultDSHPort}, fallbackPorts()...) {
-		if !dialReachable(port) {
-			continue
-		}
-		baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
-		authority := strings.TrimPrefix(baseURL, "http://")
-		jar, err := mintDSHAuthCookieFromCredentials(authority)
-		if err != nil {
-			logger.Debug("dsh.host: attach probe: mint cookie failed",
-				"port", port, "err", err)
-			continue
-		}
-		probe := &http.Client{Jar: jar, Timeout: 3 * time.Second}
-		// session.list is a typed POST (args._request); see
-		// @deepseek-ai/dsh-api-session-controller/lib/typert.host.js.
-		// Use POST + the canonical typert envelope so the gateway
-		// routes on namespace = "session" + method = "list".
-		body := []byte(`{"type":"client-request","rpcId":"probe","method":"session/list","payload":{"args":{"_request":{}}}}`)
-		req, _ := http.NewRequestWithContext(probeCtx, http.MethodPost,
-			baseURL+"/api/session/list", bytes.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
-		resp, err := probe.Do(req)
-		if err != nil {
-			logger.Debug("dsh.host: attach probe: dial failed",
-				"port", port, "err", err)
-			continue
-		}
-		_ = resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			logger.Debug("dsh.host: attach probe: cookie rejected",
-				"port", port, "status", resp.StatusCode)
-			continue
-		}
-		// Cookie validates — build the production *Client and start
-		// its WS pump. We didn't spawn this dsh so cmd is nil and
-		// the monitor starts in attached mode.
-		cli := NewWithJar(baseURL, jar, logger)
-		// Install the host waterfall handler BEFORE Start — dsh
-		// sends the host $events `ready` frame immediately after
-		// the WS upgrade, so the handler must be wired before we
-		// dial.
-		OnLifecycleInstall(cli)
-		// Use the caller's long-lived ctx (StartSharedHost's), NOT
-		// probeCtx (10s timeout): the Hub's WS reconnect loop has
-		// to outlive the attach probe or it'll die mid-session.
-		if err := cli.Start(ctx); err != nil {
-			logger.Warn("dsh.host: attach probe: cli.Start failed",
-				"port", port, "err", err)
-			continue
-		}
-		// SetGlobal is the caller's job (StartSharedHost does it once
-		// after tryAttachExistingDSH returns); we don't install the
-		// client here.
-		return cli, port, true
+	// nightme dsh service is pinned to 3080 — no port fallback.
+	// Operators running both a user dsh and nightme dsh must
+	// coordinate on the port. If port 3080 isn't reachable,
+	// attach fails and StartSharedHost falls through to spawn.
+	port := defaultDSHPort
+	if !dialReachable(port) {
+		return nil, 0, false
 	}
-	return nil, 0, false
-}
-
-// fallbackPorts returns [3081, 3082, …, 3099] for the attach
-// probe sweep. 3080 is tried first by the caller before iterating.
-func fallbackPorts() []int {
-	out := make([]int, 0, defaultPortScanMax-defaultPortScanMin+1)
-	for p := defaultPortScanMin; p <= defaultPortScanMax; p++ {
-		out = append(out, p)
+	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+	authority := strings.TrimPrefix(baseURL, "http://")
+	jar, err := mintDSHAuthCookieFromCredentials(authority)
+	if err != nil {
+		logger.Debug("dsh.host: attach probe: mint cookie failed",
+			"port", port, "err", err)
+		return nil, 0, false
 	}
-	return out
+	probe := &http.Client{Jar: jar, Timeout: 3 * time.Second}
+	// session.list is a typed POST (args._request); see
+	// @deepseek-ai/dsh-api-session-controller/lib/typert.host.js.
+	// Use POST + the canonical typert envelope so the gateway
+	// routes on namespace = "session" + method = "list".
+	body := []byte(`{"type":"client-request","rpcId":"probe","method":"session/list","payload":{"args":{"_request":{}}}}`)
+	req, _ := http.NewRequestWithContext(probeCtx, http.MethodPost,
+		baseURL+"/api/session/list", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := probe.Do(req)
+	if err != nil {
+		logger.Debug("dsh.host: attach probe: dial failed",
+			"port", port, "err", err)
+		return nil, 0, false
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		logger.Debug("dsh.host: attach probe: cookie rejected",
+			"port", port, "status", resp.StatusCode)
+		return nil, 0, false
+	}
+	// Cookie validates — build the production *Client and start
+	// its WS pump. We didn't spawn this dsh so cmd is nil and
+	// the monitor starts in attached mode.
+	cli := NewWithJar(baseURL, jar, logger)
+	// Install the host waterfall handler BEFORE Start — dsh
+	// sends the host $events `ready` frame immediately after
+	// the WS upgrade, so the handler must be wired before we
+	// dial.
+	OnLifecycleInstall(cli)
+	// Use the caller's long-lived ctx (StartSharedHost's), NOT
+	// probeCtx (10s timeout): the Hub's WS reconnect loop has
+	// to outlive the attach probe or it'll die mid-session.
+	if err := cli.Start(ctx); err != nil {
+		logger.Warn("dsh.host: attach probe: cli.Start failed",
+			"port", port, "err", err)
+		return nil, 0, false
+	}
+	// SetGlobal is the caller's job (StartSharedHost does it once
+	// after tryAttachExistingDSH returns); we don't install the
+	// client here.
+	return cli, port, true
 }
 
 // runMonitor is the single unified watchdog goroutine. It
@@ -1641,15 +1623,12 @@ func (h *SharedHost) spawnOnce() (*exec.Cmd, *Client, int, error) {
 	if port > 0 && dialReachable(port) {
 		// Captured port is held by something — previous dsh
 		// still alive, or foreign service grabbed it
-		// during the dead window. Fall back to the next
-		// free port.
-		if found, err := findFreePort(defaultPortScanMin, defaultPortScanMax); err == nil {
-			h.logger.Warn("dsh.host: captured port occupied during respawn; falling back",
-				"captured_port", h.opts.Port,
-				"respawn_port", found,
-			)
-			port = found
-		}
+		// during the dead window. nightme dsh service is pinned
+		// to 3080 — no port fallback during respawn. Operator
+		// must resolve the foreign listener before nightme
+		// can recover.
+		h.logger.Warn("dsh.host: captured port occupied during respawn",
+			"captured_port", h.opts.Port)
 	}
 	cmd, cli, err := spawnAndWire(context.Background(), h.opts, port, h.logger)
 	return cmd, cli, port, err

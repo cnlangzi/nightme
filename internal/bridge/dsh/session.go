@@ -29,13 +29,14 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/bridge/dsh/api"
 	"github.com/cnlangzi/nightme/internal/bridge/dsh/host"
+	"github.com/cnlangzi/nightme/internal/bridge/dsh/relay"
 	"github.com/cnlangzi/nightme/internal/proc"
 )
 
@@ -106,7 +107,23 @@ func dLog(msg string, args ...any) {
 // the HTTP RPC client, and the per-sessionId mux subscription table
 // (Router). The driver interacts with all of these through cli.
 type driver struct {
+	// cli is the shared *host.Client used for the mux
+	// subscription path only (bridge.MuxSubscribe calls
+	// cli.Subscribe under the hood). All other dsh
+	// interaction goes through `bridge` — the centralised
+	// capability surface defined in
+	// internal/bridge/dsh/api.
 	cli *host.Client
+
+	// bridge is the in-process capability surface every
+	// dsh driver talks to. Created lazily by relay.Get();
+	// every driver in the process shares the same Relay.
+	bridge api.Bridge
+
+	// muxUnsub detaches the mux subscription returned by
+	// bridge.MuxSubscribe. Held here so close() can detach
+	// before the relay tears down the WS.
+	muxUnsub func()
 
 	sessionID string
 	workspace string
@@ -265,6 +282,20 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 		}
 	}
 
+	// Phase 3: get the relay singleton (lazy starts the
+	// shared dsh host on first call, same singleton for
+	// every subsequent driver in the process). relay.Get
+	// returns the same instance as host.EnsureSharedHost
+	// (both share the global host.Client).
+	br, err := relay.Get(host.SharedHostOptions{
+		Workspace:      cfg.Workspace,
+		HostCmd:        "dsh",
+		PermissionMode: firstNonEmpty(cfg.PermissionMode, "danger-full-access"),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("dsh: shared host not available: %w", err)
+	}
+
 	// Lazy-create a dsh workspace for this daemon and attach every
 	// Workspace creation lives in handshakeSession (per-session,
 	// keyed by cfg.Workspace). This mirrors the dsh dashboard's
@@ -275,19 +306,12 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 
 	d := &driver{
 		cli:       cli,
+		bridge:    br,
 		workspace: cfg.Workspace,
 		agentName: s.name,
-		// Default to "danger-full-access" — the dsh permission
-		// preset that drops every approval gate. Pre-fix this was
-		// baked into the dsh subprocess via DSH_PERMISSION_MODE
-		// env; F-dsh-preset-1 moved it onto the per-session
-		// /permission command so it survives /new (Reset) and
-		// works regardless of dsh startup env. Empty cfg
-		// continues to default here so callers that don't set
-		// PermissionMode see the same chat-time behaviour as
-		// before the refactor; callers that want a stricter mode
-		// ("read-only", "workspace-write", "default") set the
-		// field explicitly.
+		// Default to "danger-full-access" — see permissionMode
+		// field doc. Callers that want a stricter mode set
+		// cfg.PermissionMode explicitly.
 		permissionMode:   firstNonEmpty(cfg.PermissionMode, "danger-full-access"),
 		pendingApprovals: map[string]chan string{},
 		pendingQuestions: map[string][]questionPayload{},
@@ -323,54 +347,56 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	// The driver just needs to register itself in the demux map
 	// once its sessionID is known (after handshakeSession).
 
-	// Session handshake: resume is dashboard "click a session in
-	// the left list" — POST session.create({sessionId, cwd})
-	// re-attaches the existing agent (dsh-api.md §2.1.3 /
-	// dsh-shared-host.md §2.6). Empty SessionID creates a fresh
-	// session. Both go through the shared RPC client.
-	resumed, hsErr := d.handshakeSession(ctx, cfg)
-	if hsErr != nil {
-		return nil, hsErr
+	// Session handshake: bridge.Connect does workspace.create +
+	// session.create (idempotent on sessionId+cwd) + the
+	// /permission <mode> command. Empty SessionID creates a fresh
+	// session; non-empty re-attaches the existing one
+	// (dashboard "click a session in the left list" semantics).
+	handle, err := br.Connect(ctx, api.ConnectOpts{
+		SessionID:      cfg.SessionID,
+		Workspace:      cfg.Workspace,
+		CWD:            cfg.Workspace,
+		PermissionMode: d.permissionMode,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("dsh: connect: %w", err)
 	}
-	_ = resumed // surface is EventAgentReady.SessionID, not a log line
+	d.sessionID = handle.ID
+	slogDefault().Info("dsh: session created",
+		"session_id", d.sessionID,
+		"cwd", cfg.Workspace)
 
-	// Per-session permission mode. The dashboard's "Full access"
-	// picker fires /api/commands/execute with line "/permission
-	// <mode>" — same shape as the user typing a slash command in
-	// the input box. Firing the slash command here makes every
-	// nightme session default to the configured mode regardless of
-	// dsh startup env, and the reset path replays the same command.
-	// Empty cfg.PermissionMode is auto-defaulted to "danger-full-access"
-	// above so every nightme chat session lands in Full access by
-	// default.
-	permCtx, permCancel := context.WithTimeout(ctx, handshakeTimeout)
-	permErr := d.cli.RPC.CommandsExecute(permCtx, d.sessionID,
-		"/permission "+d.permissionMode)
-	permCancel()
-	if permErr != nil {
-		// Non-fatal: log and continue. The runtime's approval
-		// auto-allow (see starter.go::autoAllowRunOncePermission)
-		// picks up the slack on RunOnce / Review paths.
-		dLog("dsh: /permission %s failed: %v", d.permissionMode, errStr(permErr))
+	// Seed lastSeq from bridge.History BEFORE subscribing so
+	// resume does not replay the whole log as new Feishu
+	// bubbles. bridge.History uses session/page (the real
+	// endpoint) with a ring-buffer fast path — replaces the
+	// pre-fix per-driver runBackfillLoop that polled a non-
+	// existent session.history endpoint and 404'd silently.
+	histCtx, histCancel := context.WithTimeout(ctx, handshakeTimeout)
+	if events, histErr := br.History(histCtx, d.sessionID, -1); histErr != nil {
+		// Non-fatal: log and continue. The mux live path is
+		// the authoritative source; cursor advancement is
+		// best-effort. Old code logged the same way and
+		// continued.
+		dLog("dsh: history seed failed: %v", errStr(histErr))
 	} else {
-		slogDefault().Info("dsh: session permission set",
-			"session_id", d.sessionID,
-			"mode", d.permissionMode)
+		for _, ev := range events {
+			if ev.Seq > d.lastSeq {
+				d.lastSeq = ev.Seq
+			}
+		}
 	}
+	histCancel()
 
-	// Seed lastSeq from session.history BEFORE subscribing so
-	// resume does not replay the whole log as new Feishu bubbles.
-	// Mux is the live path from here; backfill only fills gaps.
-	d.seedLastSeq(ctx)
-
-	// Subscribe immediately after attach/create. Use Client.Subscribe
-	// (not Router.Subscribe directly) so the StreamHub also opens a
-	// session/follow stream on the mux connection — Router-only
-	// would register the handler but never tell dsh which session
-	// to follow, and we'd silently miss every turn event. cwd is
-	// tracked so Client.RecoverSubscriptions can re-attach after a
-	// dsh respawn (session.create is keyed on sessionId+cwd).
-	cli.Subscribe(d.sessionID, cfg.Workspace, d.handleMuxFrame)
+	// Subscribe to mux frames for protocol translation. Use
+	// bridge.MuxSubscribe (the relay's single-point mux hook)
+	// rather than cli.Subscribe directly so the relay can
+	// own the mux lifecycle (reconnect, recovery).
+	unsubscribeMux, err := br.MuxSubscribe(ctx, d.sessionID, cfg.Workspace, d.handleMuxFrame)
+	if err != nil {
+		return nil, fmt.Errorf("dsh: mux subscribe: %w", err)
+	}
+	d.muxUnsub = unsubscribeMux
 
 	// Register the driver in the package-level host waterfall demux
 	// map. d.sessionID is the dsh session id (== runtime Agent.id
@@ -437,141 +463,12 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	// mux frame still lands. Cancel is owned by Close().
 	bfCtx, bfCancel := context.WithCancel(context.Background())
 	d.backfillCancel = bfCancel
-	go d.runBackfillLoop(bfCtx)
+	_ = bfCtx
+	_ = bfCancel
 
 	return d, nil
 }
 
-// handshakeSession runs the resume-or-create handshake against the
-// shared dsh host.
-//
-// Resume (cfg.SessionID != "") is dashboard "select a session in the
-// left list": POST /api/session.create {sessionId, cwd}. Same id+cwd
-// returns the same session and attaches this client so mux starts
-// pushing live session/event. session-conflict / transport / a
-// different returned id → resumeUnhealthyError (runtime clears the
-// stale id and retries fresh). We do NOT fork — session.fork mints a
-// child and abandons the parent (F-DSH-NO-FORK).
-//
-// Fresh start (cfg.SessionID == "") creates a workspace keyed by cwd
-// then session.create {workspaceId}. agentPreset is left empty —
-// dsh's session/create has no preset argument today, so the
-// server applies its configured default (e.g. "standard" on a
-// full install). When dsh grows a way to name the preset from
-// the client, that's a dsh-specific knob and belongs in the
-// dsh bridge, not the shared agent.StartConfig.
-func (d *driver) handshakeSession(ctx context.Context, cfg agent.StartConfig) (bool, error) {
-	if cfg.SessionID != "" {
-		if err := d.attachSession(ctx, cfg.SessionID, cfg.Workspace); err != nil {
-			return false, err
-		}
-		return true, nil
-	}
-
-	sid, err := d.createFreshSession(ctx, cfg.Workspace)
-	if err != nil {
-		return false, err
-	}
-	d.sessionID = sid
-	return false, nil
-}
-
-// attachSession re-attaches an existing dsh session the way the
-// dashboard does: session.create({sessionId, cwd}). Same id+cwd is
-// a no-op create that returns the original sessionId and joins the
-// mux live set (dsh-shared-host.md §2.6).
-func (d *driver) attachSession(ctx context.Context, sessionID, cwd string) error {
-	createCtx, createCancel := context.WithTimeout(ctx, handshakeTimeout)
-	defer createCancel()
-	got, err := d.cli.RPC.SessionCreate(createCtx, host.SessionCreateOpts{
-		SessionID: sessionID,
-		CWD:       cwd,
-	})
-	if err != nil {
-		return resumeUnhealthyError{reason: err.Error(), session: sessionID}
-	}
-	if got != sessionID {
-		return resumeUnhealthyError{
-			reason:  fmt.Sprintf("session.create returned %q, want attach of %q", got, sessionID),
-			session: sessionID,
-		}
-	}
-	d.sessionID = got
-	slogDefault().Info("dsh: session attached",
-		"session_id", d.sessionID,
-		"cwd", cwd)
-	return nil
-}
-
-// createFreshSession allocates a new dsh session in a workspace
-// keyed by the GIT REPO root (not cwd — see detectRepoRoot).
-// Workspace is repo-scoped, so a chat session and a /review run
-// in different subdirs of the same repo share the workspace,
-// and the workspace survives across sessions (Close uses
-// workspace.archiveSession, never delete). workspace.create
-// is idempotent by path: an already-owned repo returns the
-// existing workspace with `created == false` (dsh-api.md
-// §2.4.2); the driver doesn't care who created it.
-//
-// agentPreset is intentionally NOT sent — dsh's server applies its
-// configured default ("standard" on a full install, named presets
-// per the agent-presets plugin's roster). When dsh grows a client-
-// side preset picker, that's a dsh-specific knob and belongs in
-// the dsh bridge's own config, not in shared agent.StartConfig.
-//
-// Does not mutate d.sessionID — callers assign on success so
-// Reset can create the replacement before dropping the old
-// subscription.
-func (d *driver) createFreshSession(ctx context.Context, workspace string) (string, error) {
-	repoRoot := detectRepoRoot(workspace)
-	wsCtx, wsCancel := context.WithTimeout(ctx, handshakeTimeout)
-	ws, err := d.cli.RPC.WorkspaceCreate(wsCtx, repoRoot)
-	wsCancel()
-	if err != nil {
-		return "", fmt.Errorf("dsh: workspace.create: %w", err)
-	}
-
-	createCtx, createCancel := context.WithTimeout(ctx, handshakeTimeout)
-	createResp, err := d.cli.RPC.PostWithReconnect(createCtx, "session.create", map[string]any{
-		"request": map[string]any{
-			"workspaceId": ws.WorkspaceID,
-		},
-	})
-	createCancel()
-	if err != nil {
-		return "", fmt.Errorf("dsh: session.create: %w", err)
-	}
-	if !createResp.Result.OK {
-		return "", fmt.Errorf("dsh: session.create rejected: %s",
-			createResp.Result.ErrorMessage())
-	}
-	var scVal sessionCreateValue
-	if err := json.Unmarshal(createResp.Result.Value, &scVal); err != nil {
-		return "", fmt.Errorf("dsh: decode session.create value: %w", err)
-	}
-	if scVal.SessionID == "" {
-		return "", errors.New("dsh: session.create: empty sessionId in response")
-	}
-	slogDefault().Info("dsh: session created",
-		"session_id", scVal.SessionID,
-		"workspace_id", ws.WorkspaceID,
-		"cwd", workspace,
-		"repo_root", repoRoot,
-		"agent_preset", scVal.AgentPreset)
-	// Workspace is repo-scoped and shared across drivers.
-	// archiveSession on Close takes sessionId (hides our row)
-	// and leaves the workspace alive for sibling / future
-	// drivers in the same repo.
-	return scVal.SessionID, nil
-}
-
-// resumeUnhealthyError is returned by handshakeSession when the
-// caller asked for resume (cfg.SessionID != "") and session.create
-// attach refused (session-conflict, transport, mismatched id).
-// It satisfies errors.Is for both agent.ErrResumeUnhealthy (the
-// cross-package sentinel the chat layer uses to drive auto-recovery
-// at chatsession.go §1624) AND ErrResumeUnhealthy (the bridge-local
-// mirror, for symmetry with the claudecode bridge).
 type resumeUnhealthyError struct {
 	reason  string
 	session string
@@ -651,136 +548,6 @@ func (d *driver) bumpLastSeq(seq int64) {
 	d.seqMu.Unlock()
 }
 
-func (d *driver) peekLastSeq() int64 {
-	d.seqMu.Lock()
-	defer d.seqMu.Unlock()
-	return d.lastSeq
-}
-
-func (d *driver) resetLastSeq() {
-	d.seqMu.Lock()
-	d.lastSeq = -1
-	d.seqMu.Unlock()
-}
-
-// runBackfillLoop polls session.history on a fixed interval and
-// dispatches any new events through dispatchEvent. Stops when
-// the driver closes or the backfill context is cancelled.
-//
-// Mux session/event is the live path (dashboard select). This loop
-// is gap-fill only: seedLastSeq already advanced lastSeq to the
-// attach cursor, so we only dispatch seq the mux pump missed.
-func (d *driver) runBackfillLoop(ctx context.Context) {
-	defer func() {
-		// Panic recover: any handler panic in fetchHistory would
-		// otherwise silently kill this goroutine and the bridge
-		// would stop receiving events forever (verified in the
-		// 9a3bad91 session where the loop died silently after
-		// events=34, last_seq=10). Log + restart the loop in a
-		// tight retry cycle so a bad event in one tick doesn't
-		// permanently break the bridge.
-		//
-		// Bounds: 1s cooldown between recoveries so a tight
-		// panic-loop doesn't burn CPU; ctx.Done / d.closed still
-		// bail us out cleanly.
-		if r := recover(); r != nil {
-			slogDefault().Error("dsh: backfill loop panic recovered",
-				"session_id", d.sessionID,
-				"panic", fmt.Sprintf("%v", r),
-				"stack", string(debug.Stack()))
-			// Re-launch the loop with the SAME context. If ctx
-			// is cancelled (session close), this call returns
-			// immediately.
-			go func() {
-				time.Sleep(1 * time.Second)
-				d.runBackfillLoop(ctx)
-			}()
-		}
-	}()
-	slogDefault().Info("dsh: backfill loop start",
-		"session_id", d.sessionID)
-	d.fetchHistory(ctx)
-
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-d.closed:
-			return
-		case <-ticker.C:
-			d.fetchHistory(ctx)
-		}
-	}
-}
-
-// fetchHistory pulls session.history and dispatches seq > lastSeq.
-func (d *driver) fetchHistory(ctx context.Context) {
-	d.observeHistory(ctx, true)
-}
-
-// seedLastSeq advances lastSeq to the server's current cursor
-// without dispatching. Used after attach/create so resume does not
-// replay the whole log as new Feishu bubbles; mux + later backfill
-// only deliver events after this cursor.
-func (d *driver) seedLastSeq(ctx context.Context) {
-	d.observeHistory(ctx, false)
-}
-
-func (d *driver) observeHistory(ctx context.Context, dispatch bool) {
-	if d.sessionID == "" {
-		return
-	}
-	// dsh's session.history wire only carries `beforeSeq` (exclusive
-	// upper bound) — there is no `sinceSeq`. Don't send beforeSeq;
-	// dsh returns the most recent page. Dedup is by lastSeq.
-	payload := map[string]any{
-		"request": map[string]any{"sessionId": d.sessionID},
-	}
-	resp, err := d.cli.RPC.Post(ctx, "session.history", payload)
-	if err != nil {
-		dLog("dsh: backfill history: %v", err)
-		return
-	}
-	if !resp.Result.OK {
-		dLog("dsh: backfill history rejected: %s", resp.Result.ErrorMessage())
-		return
-	}
-	type histEntry struct {
-		Event json.RawMessage `json:"event"`
-		View  json.RawMessage `json:"view,omitempty"`
-	}
-	type histResp struct {
-		Events []histEntry `json:"events"`
-	}
-	var history histResp
-	if err := json.Unmarshal(resp.Result.Value, &history); err != nil {
-		dLog("dsh: backfill history unmarshal: %v", err)
-		return
-	}
-	slogDefault().Info("dsh: history observed",
-		"session_id", d.sessionID,
-		"events", len(history.Events),
-		"last_seq", d.peekLastSeq(),
-		"dispatch", dispatch)
-	for _, entry := range history.Events {
-		var env sessionEventEnvelope
-		if err := json.Unmarshal(entry.Event, &env); err != nil {
-			dLog("dsh: backfill event decode: %v", err)
-			continue
-		}
-		if dispatch {
-			d.dispatchEvent(env, entry.View)
-			continue
-		}
-		d.bumpLastSeq(env.Seq)
-	}
-}
-
-// SendBlocks forwards user content to dsh via /api/session.prompt on
-// the shared host. We send and return — the actual turn events arrive
-// asynchronously on d.events via the host's mux pump.
 func (d *driver) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) error {
 	if d.sessionID == "" {
 		return errors.New("dsh: session not initialized")
@@ -968,12 +735,22 @@ func (d *driver) Reset(ctx context.Context) error {
 	// Workspace is repo-scoped and shared — Reset does NOT tear
 	// down the old workspace. The /new semantics are "fresh
 	// session in the same repo", not "fresh repo". The new
-	// session composes from dsh's configured default preset
-	// (see createFreshSession's agentPreset comment).
-	newID, err := d.createFreshSession(ctx, d.workspace)
+	// session composes from dsh's configured default preset.
+	//
+	// Phase 3: bridge.Connect replaces the legacy createFreshSession
+	// path (which called workspace.create + session.create with
+	// PostWithReconnect). Connect does both, plus the /permission
+	// priming, in one bridge call.
+	handle, err := d.bridge.Connect(ctx, api.ConnectOpts{
+		SessionID:      "", // empty → fresh session (was createFreshSession's path)
+		Workspace:      d.workspace,
+		CWD:            d.workspace,
+		PermissionMode: d.permissionMode,
+	})
 	if err != nil {
-		return err
+		return fmt.Errorf("dsh: reset connect: %w", err)
 	}
+	newID := handle.ID
 
 	if oldID != "" && oldID != newID {
 		d.cli.Unsubscribe(oldID)
@@ -989,7 +766,7 @@ func (d *driver) Reset(ctx context.Context) error {
 	}
 
 	d.sessionID = newID
-	d.resetLastSeq()
+	d.lastSeq = -1
 	d.translate = newTranslator(d.agentName, d.workspace)
 	d.wireState = newWireState()
 	d.dispatcher = newDispatcher(d.translate, d.wireState, d, d.deliver)
@@ -1001,7 +778,12 @@ func (d *driver) Reset(ctx context.Context) error {
 	d.pendingSource = map[string]string{}
 	d.pendingMu.Unlock()
 
-	d.cli.Subscribe(newID, d.workspace, d.handleMuxFrame)
+	// Phase 3: bridge.MuxSubscribe (single mux subscription per
+	// session via the relay's central mux pump) replaces the direct
+	// cli.Subscribe call.
+	if _, err := d.bridge.MuxSubscribe(ctx, newID, d.workspace, d.handleMuxFrame); err != nil {
+		return fmt.Errorf("dsh: reset mux subscribe: %w", err)
+	}
 
 	// Re-bind the new sessionID in the host waterfall demux map.
 	registerDriverForWaterfall(d)
@@ -1011,15 +793,10 @@ func (d *driver) Reset(ctx context.Context) error {
 	// session.create, so without this step the /new session
 	// would drop back to the dsh default and the next approval
 	// wedge until the runtime's auto-allow kicks in.
-	if d.permissionMode != "" {
-		permCtx, permCancel := context.WithTimeout(ctx, handshakeTimeout)
-		if err := d.cli.RPC.CommandsExecute(permCtx, newID,
-			"/permission "+d.permissionMode); err != nil {
-			dLog("dsh: /permission %s replay failed after reset: %v",
-				d.permissionMode, errStr(err))
-		}
-		permCancel()
-	}
+	//
+	// Phase 3: bridge.Connect already primed the permission
+	// mode on the new session during the Connect call above; no
+	// separate /permission replay needed here.
 
 	// The session/control modelSelection projection is keyed by
 	// sessionId; the baseline from the next connection may not yet
@@ -1040,8 +817,6 @@ func (d *driver) Reset(ctx context.Context) error {
 	d.model = ""
 	d.modelMu.Unlock()
 	d.modelUnsub = registerControlProjection(d)
-
-	d.seedLastSeq(ctx)
 
 	// Wait briefly for the projection store to deliver the new
 	// session's model before emitting Ready. In the common case

@@ -988,7 +988,12 @@ func (c *RPCClient) SendWaterfallResult(ctx context.Context, clientID, eventID s
 // newRPCID mints a client-request id. crypto/rand + RFC 4122 §4.4
 // — same recipe as dsh/http.go so concurrent calls from both layers
 // use the same id shape.
-func newRPCID() string {
+func newRPCID() string { return NewRPCID() }
+
+// NewRPCID is the package-exported alias for newRPCID. The
+// relay package (and tests outside host) need to mint the
+// same id shape for session.prompt's requestId field.
+func NewRPCID() string {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		// crypto/rand.Read never errors on Linux/macOS; if it does

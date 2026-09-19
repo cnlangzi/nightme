@@ -1,0 +1,219 @@
+// session_state.go — per-dsh-session state inside the relay.
+//
+// One sessionState per dsh session id. Holds:
+//   - the ring buffer (Phase 1; used by History ring path)
+//   - the subscriber table (Phase 1; fans translated events
+//     out to drivers via Bridge.Subscribe)
+//   - the mux-pump handler list (Phase 2; drivers register
+//     handlers via MuxSubscribe; the central mux pump fans
+//     frames out to all of them)
+//
+// The translator / wireState / dispatcher state stays in
+// each driver (dsh package). Phase 3 explicitly does NOT move
+// it — single-goroutine access in driver means locks add no
+// value, and centralising it would force a major surface
+// rewrite for the protocol-translation code. See
+// bridge.go header for the full design conversation.
+//
+// Phase 3 add-on: each session has a per-session
+// agentName (carried on EventAgentReady stamps) and a
+// runMuxPump goroutine managed by MuxSubscribe / Disconnect.
+// Driver's translator uses its own translator/wireState;
+// relay's mux pump just routes frames to drivers via the
+// handler list.
+package relay
+
+import (
+	"context"
+	"sync"
+
+	"github.com/cnlangzi/nightme/internal/bridge/dsh/api"
+)
+
+const ringBufferSize = 1024
+
+// Event is one dsh wire event as seen by relay consumers.
+//
+// Aliased to api.Event so the bridge interface and the relay
+// implementation share the same shape — drivers compile
+// against bridge.Event and the relay passes them straight
+// through.
+type Event = api.Event
+
+// MuxHandler is the per-driver callback the relay invokes
+// for each mux frame destined for the session. The relay
+// owns the mux subscription; multiple drivers attach their
+// own handler and all receive every frame. MuxHandler
+// matches api.MuxHandler / host.MuxFrameHandler so the
+// relay can pass through without re-decoding.
+type MuxHandler = api.MuxHandler
+
+type subscriber struct {
+	ch     chan Event
+	cancel context.CancelFunc
+}
+
+type sessionState struct {
+	id        string
+	workspace string
+
+	mu      sync.RWMutex
+	ring    []api.Event // append-only, capped at ringBufferSize
+	lastSeq int64
+
+	subMu  sync.RWMutex
+	subs   map[int]*subscriber
+	nextID int
+
+	// mux pump goroutine cancel — set by runMuxPump. nil
+	// before first Subscribe.
+	muxCancel context.CancelFunc
+
+	// muxHandlers are the per-driver callbacks registered
+	// via MuxSubscribe. The central mux pump invokes each on
+	// every incoming frame.
+	muxMu       sync.RWMutex
+	muxHandlers []MuxHandler
+
+	// agentName is the agent label carried on the session
+	// for diagnostics / dashboard. Not used by the relay's
+	// translator pipeline (Phase 3 keeps translator in driver);
+	// kept here so future Phase 4+ work that lifts
+	// translator doesn't need to re-introduce it.
+	agentName string
+}
+
+func newSessionState(id, workspace string) *sessionState {
+	return &sessionState{
+		id:        id,
+		workspace: workspace,
+		subs:      map[int]*subscriber{},
+	}
+}
+
+func (s *sessionState) appendEvents(events []Event) {
+	if len(events) == 0 {
+		return
+	}
+	s.mu.Lock()
+	for _, ev := range events {
+		s.ring = append(s.ring, ev)
+		if len(s.ring) > ringBufferSize {
+			s.ring = s.ring[len(s.ring)-ringBufferSize:]
+		}
+		if ev.Seq > 0 && ev.Seq > s.lastSeq {
+			s.lastSeq = ev.Seq
+		}
+	}
+	s.mu.Unlock()
+}
+
+func (s *sessionState) ringSnapshot() []Event {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.ring) == 0 {
+		return nil
+	}
+	out := make([]Event, len(s.ring))
+	copy(out, s.ring)
+	return out
+}
+
+func (s *sessionState) lastSeqSeen() int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.lastSeq
+}
+
+// subscribe attaches a new subscriber to this session. The
+// returned channel gets a replay of the current ring buffer
+// (in order) followed by live events delivered by the
+// central mux dispatch goroutine. The unsub func detaches
+// and closes the channel.
+//
+// Caller's ctx cancellation is honored: when ctx fires, the
+// channel is closed (after draining any pending replay).
+func (s *sessionState) subscribe(ctx context.Context) (<-chan Event, func(), error) {
+	subCtx, cancel := context.WithCancel(ctx)
+	ch := make(chan Event, 64)
+
+	s.subMu.Lock()
+	subID := s.nextID
+	s.nextID++
+	s.subs[subID] = &subscriber{ch: ch, cancel: cancel}
+	s.subMu.Unlock()
+
+	replay := s.ringSnapshot()
+	if len(replay) > 0 {
+		go func() {
+			for _, ev := range replay {
+				select {
+				case <-subCtx.Done():
+					return
+				case ch <- ev:
+				}
+			}
+		}()
+	}
+
+	unsub := func() {
+		s.subMu.Lock()
+		delete(s.subs, subID)
+		s.subMu.Unlock()
+		cancel()
+	}
+	return ch, unsub, nil
+}
+
+func (s *sessionState) deliver(ev Event) {
+	s.subMu.RLock()
+	defer s.subMu.RUnlock()
+	for _, sub := range s.subs {
+		select {
+		case sub.ch <- ev:
+		default:
+		}
+	}
+}
+
+func (s *sessionState) closeSubscribers() {
+	s.subMu.Lock()
+	subs := s.subs
+	s.subs = map[int]*subscriber{}
+	s.subMu.Unlock()
+	for _, sub := range subs {
+		sub.cancel()
+	}
+}
+
+// addMuxHandler registers a per-driver mux frame handler.
+// The relay's central mux pump invokes each registered
+// handler on every incoming frame.
+func (s *sessionState) addMuxHandler(h MuxHandler) {
+	if h == nil {
+		return
+	}
+	s.muxMu.Lock()
+	s.muxHandlers = append(s.muxHandlers, h)
+	s.muxMu.Unlock()
+}
+
+// dispatchMux invokes every registered mux handler with the
+// given frame. Used by the central mux pump in relay.go.
+func (s *sessionState) dispatchMux(method, rpcID string, payload api.MuxHandlerPayload) {
+	s.muxMu.RLock()
+	handlers := make([]MuxHandler, len(s.muxHandlers))
+	copy(handlers, s.muxHandlers)
+	s.muxMu.RUnlock()
+	for _, h := range handlers {
+		h(method, rpcID, payload)
+	}
+}
+
+// respond is a Phase 1 shim — see bridge.go header for the
+// overall design. The per-driver pending* maps in session.go
+// remain authoritative until the follow-up refactor moves
+// FIFO routing into the relay.
+func (s *sessionState) respond(_ context.Context, _ string) error {
+	return nil
+}

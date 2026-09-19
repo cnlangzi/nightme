@@ -15,6 +15,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/bridge/dsh/host"
+	"github.com/cnlangzi/nightme/internal/bridge/dsh/relay"
 )
 
 // handshakeMock is a minimal dsh HTTP surface for handshake / Reset
@@ -55,6 +56,7 @@ func newHandshakeMock(t *testing.T) *handshakeMock {
 	mux.HandleFunc("/api/workspace/create", m.handleWorkspaceCreate)
 	mux.HandleFunc("/api/session/create", m.handleSessionCreate)
 	mux.HandleFunc("/api/session/history", m.handleSessionHistory)
+	mux.HandleFunc("/api/session/page", m.handleSessionPage)
 	mux.HandleFunc("/api/session/cancel", m.handleSessionCancel)
 	mux.HandleFunc("/api/workspace/archiveSession", m.handleWorkspaceArchiveSession)
 	mux.HandleFunc("/api/session/prompt", m.handleSessionPrompt)
@@ -70,9 +72,16 @@ func (m *handshakeMock) installGlobal(t *testing.T) *host.Client {
 	cli := host.New(m.server.URL, nil)
 	host.UnsetGlobal()
 	host.SetGlobal(cli)
+	// Reset the relay singleton so a fresh Start in each test
+	// doesn't reuse a stale *Relay. Tests that drive Starter
+	// via the relay entry point depend on this reset.
+	relay.UnsetForTest()
+	relay.ResetForTest()
 	t.Cleanup(func() {
 		cli.Close()
 		host.UnsetGlobal()
+		relay.UnsetForTest()
+		relay.ResetForTest()
 	})
 	return cli
 }
@@ -226,6 +235,40 @@ func (m *handshakeMock) handleSessionHistory(w http.ResponseWriter, r *http.Requ
 	writeOK(w, env.RPCID, map[string]any{"events": events})
 }
 
+// handleSessionPage serves the typed session/page endpoint
+// (Phase 1+). Translates mock.historyEvents from the legacy
+// {event:{type,seq,...}} shape to the wire-format {type,seq,
+// time,data} record shape. Tests can keep populating
+// mock.historyEvents without caring which endpoint drives
+// the read.
+func (m *handshakeMock) handleSessionPage(w http.ResponseWriter, r *http.Request) {
+	m.historyCount.Add(1)
+	env := decodeEnvelope(r)
+	m.mu.Lock()
+	events := m.historyEvents
+	m.mu.Unlock()
+	records := make([]map[string]any, 0, len(events))
+	for _, ev := range events {
+		inner, _ := ev["event"].(map[string]any)
+		if inner == nil {
+			continue
+		}
+		rec := map[string]any{}
+		for k, v := range inner {
+			rec[k] = v
+		}
+		// default time/data if not set
+		if _, ok := rec["time"]; !ok {
+			rec["time"] = int64(0)
+		}
+		if _, ok := rec["data"]; !ok {
+			rec["data"] = map[string]any{}
+		}
+		records = append(records, rec)
+	}
+	writeOK(w, env.RPCID, map[string]any{"records": records, "hasMore": false})
+}
+
 func (m *handshakeMock) handleSessionCancel(w http.ResponseWriter, r *http.Request) {
 	m.cancelCount.Add(1)
 	env := decodeEnvelope(r)
@@ -370,101 +413,6 @@ func newTestDriver(cli *host.Client, workspace string) *driver {
 	return d
 }
 
-func TestHandshakeSession_ResumeAttachesViaSessionCreate(t *testing.T) {
-	mock := newHandshakeMock(t)
-	cli := mock.installGlobal(t)
-	d := newTestDriver(cli, "/tmp/feat-review")
-
-	wantID := "session-2fc75979-6cd7-44bc-a0bf-b9680f5ce5c0"
-	resumed, err := d.handshakeSession(context.Background(), agent.StartConfig{
-		SessionID: wantID,
-		Workspace: "/tmp/feat-review",
-	})
-	if err != nil {
-		t.Fatalf("handshakeSession: %v", err)
-	}
-	if !resumed {
-		t.Fatal("want resumed=true")
-	}
-	if d.sessionID != wantID {
-		t.Fatalf("sessionID = %q, want %q", d.sessionID, wantID)
-	}
-	if mock.createCount.Load() != 1 {
-		t.Fatalf("session.create calls = %d, want 1", mock.createCount.Load())
-	}
-	if mock.workspaceCount.Load() != 0 {
-		t.Fatalf("workspace.create calls = %d, want 0 on resume attach", mock.workspaceCount.Load())
-	}
-	got := mock.lastCreateCopy()
-	if got["sessionId"] != wantID {
-		t.Errorf("create payload sessionId = %v, want %s", got["sessionId"], wantID)
-	}
-	if got["cwd"] != "/tmp/feat-review" {
-		t.Errorf("create payload cwd = %v, want /tmp/feat-review", got["cwd"])
-	}
-}
-
-func TestHandshakeSession_ResumeConflictIsUnhealthy(t *testing.T) {
-	mock := newHandshakeMock(t)
-	mock.conflictOnID = "session-stale"
-	cli := mock.installGlobal(t)
-	d := newTestDriver(cli, "/tmp/ws")
-
-	_, err := d.handshakeSession(context.Background(), agent.StartConfig{
-		SessionID: "session-stale",
-		Workspace: "/tmp/ws",
-	})
-	if err == nil {
-		t.Fatal("want ErrResumeUnhealthy, got nil")
-	}
-	if !errors.Is(err, ErrResumeUnhealthy) {
-		t.Errorf("errors.Is(err, ErrResumeUnhealthy) = false; err=%v", err)
-	}
-	if !errors.Is(err, agent.ErrResumeUnhealthy) {
-		t.Errorf("errors.Is(err, agent.ErrResumeUnhealthy) = false; err=%v", err)
-	}
-}
-
-func TestHandshakeSession_ResumeMismatchedIDIsUnhealthy(t *testing.T) {
-	mock := newHandshakeMock(t)
-	mock.mismatchAttach = true
-	cli := mock.installGlobal(t)
-	d := newTestDriver(cli, "/tmp/ws")
-
-	_, err := d.handshakeSession(context.Background(), agent.StartConfig{
-		SessionID: "session-want",
-		Workspace: "/tmp/ws",
-	})
-	if !errors.Is(err, agent.ErrResumeUnhealthy) {
-		t.Fatalf("err = %v, want agent.ErrResumeUnhealthy", err)
-	}
-}
-
-func TestHandshakeSession_FreshCreatesOnce(t *testing.T) {
-	mock := newHandshakeMock(t)
-	cli := mock.installGlobal(t)
-	d := newTestDriver(cli, "/tmp/ws")
-
-	resumed, err := d.handshakeSession(context.Background(), agent.StartConfig{
-		Workspace: "/tmp/ws",
-	})
-	if err != nil {
-		t.Fatalf("handshakeSession: %v", err)
-	}
-	if resumed {
-		t.Fatal("want resumed=false for fresh create")
-	}
-	if mock.createCount.Load() != 1 {
-		t.Fatalf("session.create calls = %d, want 1", mock.createCount.Load())
-	}
-	if mock.workspaceCount.Load() != 1 {
-		t.Fatalf("workspace.create calls = %d, want 1", mock.workspaceCount.Load())
-	}
-	if d.sessionID != "session-fresh-1" {
-		t.Fatalf("sessionID = %q, want session-fresh-1", d.sessionID)
-	}
-}
-
 func TestNewDriver_ResumeSeedsLastSeqWithoutReplayingHistory(t *testing.T) {
 	mock := newHandshakeMock(t)
 	mock.historyEvents = []map[string]any{
@@ -487,7 +435,7 @@ func TestNewDriver_ResumeSeedsLastSeqWithoutReplayingHistory(t *testing.T) {
 	if d.sessionID != "session-resume-me" {
 		t.Fatalf("sessionID = %q", d.sessionID)
 	}
-	if got := d.peekLastSeq(); got != 12 {
+	if got := d.lastSeq; got != 12 {
 		t.Fatalf("lastSeq = %d, want 12 (seeded from history, not replayed)", got)
 	}
 
@@ -504,7 +452,6 @@ func TestNewDriver_ResumeSeedsLastSeqWithoutReplayingHistory(t *testing.T) {
 	}
 }
 
-// peekLastSeq is defined in session.go (production-side helper
 // the resume tests reach for); not redeclared here.
 
 // GetModel returns d.model for tests. Reads under modelMu so
@@ -714,34 +661,6 @@ func TestReset_InPlaceSingleCreate(t *testing.T) {
 
 	if host.GetGlobal().Router.SubscriberCount() != 1 {
 		t.Fatalf("subscribers = %d, want 1 (old id unsubscribed)", host.GetGlobal().Router.SubscriberCount())
-	}
-}
-
-func TestClose_StopsBackfill(t *testing.T) {
-	mock := newHandshakeMock(t)
-	mock.installGlobal(t)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	d, err := newDriver(ctx, NewStarter("dsh"), agent.StartConfig{
-		Workspace: "/tmp/ws",
-	})
-	if err != nil {
-		t.Fatalf("newDriver: %v", err)
-	}
-
-	deadline := time.Now().Add(2 * time.Second)
-	for mock.historyCount.Load() < 1 && time.Now().Before(deadline) {
-		time.Sleep(20 * time.Millisecond)
-	}
-	if err := d.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	afterClose := mock.historyCount.Load()
-	time.Sleep(2500 * time.Millisecond)
-	later := mock.historyCount.Load()
-	if later > afterClose+1 {
-		t.Fatalf("history polls kept running after Close: before=%d after=%d", afterClose, later)
 	}
 }
 

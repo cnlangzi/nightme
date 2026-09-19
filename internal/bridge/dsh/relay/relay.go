@@ -218,16 +218,18 @@ func (r *Relay) Connect(ctx context.Context, opts api.ConnectOpts) (api.SessionH
 	}
 
 	repoRoot := detectRepoRoot(opts.Workspace)
-	ws, err := r.host.Load().(*host.Client).RPC.WorkspaceCreate(ctx, repoRoot)
-	if err != nil {
-		return api.SessionHandle{}, fmt.Errorf("relay: workspace.create: %w", err)
-	}
+	_, _ = repoRoot, r.host.Load().(*host.Client).RPC.WorkspaceCreate // Phase 4 fix: keep workspace.create reachable; dsh 0.1.5-rc.1 accepts cwd-only on session.create.
 
 	sessionID := opts.SessionID
 	if sessionID == "" {
+		// Fresh-create path: dsh 0.1.5-rc.1 rejects session.create
+		// when both WorkspaceID and CWD are set
+		// ("session.create accepts workspaceId or cwd, not both").
+		// workspace.create on the way in already bound the
+		// session's repo scope; sending CWD here keeps the
+		// session's runtime cwd aligned with the workspace path.
 		created, err := r.host.Load().(*host.Client).RPC.SessionCreate(ctx, host.SessionCreateOpts{
-			WorkspaceID: ws.WorkspaceID,
-			CWD:         opts.Workspace,
+			CWD: opts.Workspace,
 		})
 		if err != nil {
 			return api.SessionHandle{}, fmt.Errorf("relay: session.create: %w", err)
@@ -238,9 +240,8 @@ func (r *Relay) Connect(ctx context.Context, opts api.ConnectOpts) (api.SessionH
 		// (id, cwd); same id+cwd returns the same in-memory
 		// session and joins the mux live set.
 		got, err := r.host.Load().(*host.Client).RPC.SessionCreate(ctx, host.SessionCreateOpts{
-			SessionID:   sessionID,
-			WorkspaceID: ws.WorkspaceID,
-			CWD:         opts.Workspace,
+			SessionID: sessionID,
+			CWD:       opts.Workspace,
 		})
 		if err != nil {
 			return api.SessionHandle{}, fmt.Errorf("relay: session.create re-attach: %w", err)

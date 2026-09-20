@@ -800,6 +800,7 @@ jobs:
       # Apple clang on darwin).
       - name: Build STT
         env:
+          VERSION: "0.0.0"
           GOOS: ${{ matrix.os == 'windows-latest' && 'windows' || matrix.os == 'windows-11-arm' && 'windows' || matrix.os == 'macos-latest' && 'darwin' || 'linux' }}
           GOARCH: ${{ matrix.goarch }}
           CC: ${{ matrix.os == 'windows-11-arm' && format('{0}/bin/clang.exe', env.LLVM_MINGW_ROOT) || '' }}

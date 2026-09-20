@@ -201,11 +201,11 @@ spawnAndWire (host/lifecycle.go):
                           ↓ secret 缺失 / 不可读 fallback
                           mintAuthCookie(baseURL, token)(GET /?token=... → 303 + Set-Cookie)
               ↓
-              WaitForDSHReady(ctx, path, attempts)     # probe workspace.create 直到 workspaceController 就绪
-              ↓
               NewWithJar(baseURL, jar)                  # 构造 *Client(RPC + Hub + Router + Control)
               ↓
               OnLifecycleInstall(cli)                   # 装 host waterfall handler(先于 WS 起来,见 §3.8)
+              ↓
+              WaitForDSHReady(ctx, path, attempts)      # probe workspace.create 直到 workspaceController 就绪
               ↓
               cli.Start(ctx)                            # 启 /api/remote.mux WS pumps
 ```
@@ -217,7 +217,7 @@ spawnAndWire (host/lifecycle.go):
 
 `WaitForDSHReady` 探测目标是 `workspace.create`(带 workspace 绝对路径),不是 `workspace.list` —— `workspace.list` 在 dsh 0.1.2-rc.1 返 HTTP 404,只有 `workspace.create` 在启动 race 期间能触发 `workspaceController` 的 `service-unavailable` 返回,从而区分"插件还没加载"与"dsh 真的坏了"。详见 `host/client.go::WaitForDSHReady`。
 
-`OnLifecycleInstall` 必须在 `cli.Start` 之前:dsh 在 WS upgrade 完成后立即推 `$events` 首帧 `ready`,host handler 没装好就会漏 capture `clientId`(见 §3.7 / §3.8 race-fix 不变量)。
+`OnLifecycleInstall` 必须在 `cli.Start` 之前:dsh 在 WS upgrade 后把 `$events` ready 握手作为 host stream item 推送,dispatch 在 item 路径捕获 `clientId`(见 §3.8),不依赖 host handler 安装时序;后续 waterfall 帧才需要 host handler 已装好。
 
 ---
 
@@ -411,7 +411,7 @@ bridge 翻译(`host/stream.go::translateHostEvent`):
 - `emit` → `method=event, rpcID=""`,payload 包 `{args:[...]}`
 - `waterfall` → `method=event, rpcID=eventId`,payload 包 `{agentId, request}`
 - `cancel` → `method="host/cancel", rpcID=eventId`,payload 包 `{eventId}`
-- `ready` → 不翻译,dispatch 路径只 log(`dsh.host: mux ready clientId=...`)
+- `ready` → dispatch 在 host-stream item 路径捕获 `clientId`(`host.SetHostClientID`)+ log(`dsh.host: mux ready clientId=...`),不进 translateHostEvent
 
 ### 3.4a `session/control` stream items
 
@@ -661,6 +661,7 @@ export function projectRemoteEventRequest(value, subject): ProjectedRemoteEventR
 - `hostWaterfallHandler` 按 frame 顶层 `agentId` 字段查 `hostWaterfallBySess map[sessionID]*driver` → `driver.handleHostFrame`(注意:**不要从 `request.agent` 读**,wire 上没有)
 - `driver.handleHostFrame` 把 waterfall envelope 适配成 mux envelope,调用现有的 `handleApprovalRequested` / `handleQuestionRequested`(`internal/bridge/dsh/permissions.go`),后者用同一份 `pendingApprovals` / `pendingQuestions` FIFO,reply key 仍是 waterfall 的 `eventId`
 - 回复走 `/api/$events/result`(`$events/result` 标准 typed RPC,见 §3.7),不是 `/api/respond`
+- **clientId 捕获不变量**:dsh 把 `$events` ready 握手作为 host stream item 推送(`{type:"item", streamId:"host-$events", value:{type:"ready", clientId, host}}`)。`host/stream.go::dispatch` 在 host-stream item 路径解出 `value.clientId` 调 `host.SetHostClientID`,**早于** `invokeOnHost` 把帧交给 host handler。在 dispatch site 捕获保证它一定被记下,不依赖 host handler 的安装时序。`SendPermission` 读 `host.GetHostClientID()` 作 `/api/$events/result` 的 `clientId`,空则直接报错不发出请求(见 host/host_state.go)。
 
 **为什么 mux 顶层 method 不再发**:旧 wire `approval/requested` / `question/requested` 在 0.1.0-rc.6 时代是 mux frame,0.1.2-rc.1 改成 Cordis waterfall 后不再发。`handleMuxFrame` 的兜底分支对任何 straggler 仍会 `recordAndCountUnknown` + warn(`"dsh: mux legacy method dropped"`),不进 permission 路径。
 
@@ -839,7 +840,7 @@ waitDispatchDrain: for count > 0: cond.Wait()
 | `{type:"emit", event, args:[...]}` | `method=event, rpcID=""`,payload=`{args:[...]}` |
 | `{type:"waterfall", event, eventId, agentId, request}` | `method=event, rpcID=eventId`,payload=`{agentId, request}` |
 | `{type:"cancel", eventId}` | `method="host/cancel", rpcID=eventId` |
-| `{type:"ready", clientId, host:{home}}` | 不翻译,dispatch log 完事 |
+| `{type:"ready", clientId, host:{home}}` | dispatch 在 host-stream item 路径捕获 `clientId`(`host.SetHostClientID`)+ log |
 
 ### 4.5 Router / Dispatch
 
@@ -1487,9 +1488,9 @@ default: // legacy mux
 }
 ```
 
-`Respond` 未删除:legacy mux `approval/requested` / `question/requested` 顶层 method 的 fallback 仍走它(dsh 0.1.2-rc.1 已不发,但兜底保留)。host 路径的 `pendingSource` 在 `handleHostFrame`(`host_waterfall.go`)设为 `"host"`,legacy mux 路径在 `handleApprovalRequested` / `handleQuestionRequested` 的 caller 处设为 `"mux"` 或默认值。
+`Respond` 未删除:作 legacy mux `approval/requested` / `question/requested` 顶层 method 的 fallback 保留。dsh 0.1.2-rc.1 已不发这些 mux method(`handle_mux.go` 的对应 case 只 `recordAndCountUnknown` + warn,不进 permission 路径),所以今天每个 pending entry 的 `pendingSource` 都由 `handleHostFrame`(`host_waterfall.go`)设为 `"host"`,`SendPermission` 恒走 `SendWaterfallResult` 分支。`default` → `Respond` 分支只在 `pendingSource` 为空/缺失或未来 dsh 回退到 mux 顶层 method 时才触达,是防御性兜底。
 
-**clientId 缓存**:不走 `translateHostEvent`。`$events` 首帧 ready 在 `host/stream.go::dispatch` 的 `case "ready"` 分支捕获,调 `host.SetHostClientID(f.ClientID)`,早于任何 host handler 安装(见 §3.8 race-fix 不变量)。`SendPermission` 读 `host.GetHostClientID()`;为空时直接报错,不发出请求。
+**clientId 缓存**:不走 `translateHostEvent`。dsh 把 `$events` ready 握手作为 host stream item 推送(`value={type:"ready", clientId, host}`),`host/stream.go::dispatch` 在 host-stream item 路径解出 `value.clientId` 调 `host.SetHostClientID`,早于任何 host handler 安装(见 §3.8)。`SendPermission` 读 `host.GetHostClientID()`;为空时直接报错,不发出请求。
 
 **测试**:`wire_waterfall_e2e_test.go` 的 approval / question e2e 走 `/api/$events/result`;`host_test.go::TestRPCClient_SendWaterfallResult_MatchesCanonicalWire` 锁 canonical wire 形状。`TestRPCClient_Respond_UsesClientResponseEnvelope` 保留锁 legacy envelope。
 

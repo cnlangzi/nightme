@@ -26,15 +26,13 @@
 //	    → hostWaterfallHandler (installed once)
 //	    → driver.handleHostFrame(method, rpcID, payload)
 //
-// Demux key: the $events `ready` frame carries a per-connection
+// Demux key: the $events `ready` handshake carries a per-connection
 // `clientId`; each remote client (nightme + dashboard) gets its own
 // when it subscribes. The bridge echoes it back on every
-// /api/$events/result RPC body. Capture happens in the dispatch path
-// (host/stream.go:case "ready" → host.SetHostClientID), NOT here —
-// the host handler installs lazily on first newDriver, and the
-// one-shot ready frame would otherwise race the install and be
-// silently dropped. See host/host_state.go for the race-fix
-// invariant.
+// /api/$events/result RPC body. dsh delivers the ready handshake as
+// a host stream item; host/stream.go::dispatch captures clientId on
+// that item path before invoking this handler. See
+// host/host_state.go for the capture invariant.
 //
 // Package-level map (`hostWaterfallBySess`) demuxes host waterfalls
 // by sessionId → driver. The shared host has at most one driver
@@ -107,22 +105,21 @@ func unregisterDriverForWaterfall(d *driver) {
 }
 
 // hostWaterfallHandler is the single cli.SetHostHandler callback.
-// The first frame on the host $events stream is `{type:"ready",
-// clientId, host:{home}}` — we stash clientId in the package state
-// so every later waterfall frame's reply can carry the same
-// clientId (the gateway correlates result → pending remote event
-// via this key). Subsequent waterfall frames carry `event` (the
-// event name) and `eventId` (the per-frame UUID) and are demuxed
-// to the right driver by `agentId` (= sessionId for root sessions).
+// dsh delivers the $events ready handshake as a host stream item;
+// host/stream.go::dispatch captures its clientId into package state
+// (so every later waterfall reply can carry the same clientId — the
+// gateway correlates result → pending remote event via this key),
+// then forwards "ready" here. Subsequent waterfall frames carry
+// `event` (the event name) and `eventId` (the per-frame UUID) and
+// are demuxed to the right driver by `agentId` (= sessionId for
+// root sessions).
 func hostWaterfallHandler(method, rpcID string, payload json.RawMessage) {
 	slogDefault().Info("dsh: hostWaterfallHandler invoked", "method", method, "rpc_id", rpcID)
-	// clientId capture is in host/stream.go:case "ready" (the
-	// dispatch site) so the one-shot ready frame is captured
-	// even if installHostHandler hasn't run yet. Nothing to do
-	// here — just early-return so the event doesn't fall through
-	// to the waterfall demux path, which would log
-	// "method=ready (no driver handler)" and bury the original
-	// signal under noise.
+	// dispatch already captured the ready clientId into package
+	// state; nothing to do here. Early-return so the ready event
+	// doesn't fall through to the waterfall demux path, which
+	// would log "method=ready (no driver handler)" and bury the
+	// original signal under noise.
 	if method == "ready" {
 		return
 	}
@@ -168,8 +165,10 @@ func hostWaterfallHandler(method, rpcID string, payload json.RawMessage) {
 // Register the host-waterfall install hook with the host package at
 // import time. spawnAndWire (host/lifecycle.go) calls
 // host.OnLifecycleInstall(cli) after constructing the Client but
-// before cli.Start(ctx), so the `ready` frame dsh sends on the new
-// WS arrives at a handler that is already wired.
+// before cli.Start(ctx), so host waterfall frames dsh sends on the
+// new WS arrive at a handler that is already wired (the ready
+// handshake itself is captured in dispatch regardless of handler
+// install timing).
 func init() {
 	host.SetLifecycleInstall(installHostHandler)
 }

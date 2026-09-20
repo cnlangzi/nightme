@@ -255,11 +255,13 @@ var wsUpgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
-// handleMuxWS is the dsh 0.1.2-rc.1 Remote mux endpoint. On
-// connect it sends `{type:"ready", clientId, host:{home:"..."}}`.
-// It then reads client frames and dispatches by streamId: open
-// frames register a push channel per session, cancel frames drop
-// the channel, item frames are queued for the matching session.
+// handleMuxWS is the dsh 0.1.5-rc.1 Remote mux endpoint. On
+// connect it sends the $events ready handshake as a host item:
+// {type:"item", streamId:"host-$events", value:{type:"ready",
+// clientId, host:{home:"..."}}}. It then reads client frames and
+// dispatches by streamId: open frames register a push channel per
+// session, cancel frames drop the channel, item frames are queued
+// for the matching session.
 func (m *mockDSH) handleMuxWS(w http.ResponseWriter, r *http.Request) {
 	m.muxConnectCount.Add(1)
 	conn, err := wsUpgrader.Upgrade(w, r, nil)
@@ -282,15 +284,20 @@ func (m *mockDSH) handleMuxWS(w http.ResponseWriter, r *http.Request) {
 	}
 	m.closeMu.Unlock()
 
-	// Send the "ready" frame every dsh 0.1.2-rc.1 connection
-	// sends on upgrade. Bridge uses it only for log correlation.
-	// clientId is read at connection time (not at mock-construction
-	// time) so tests can rotate it between connections to verify
-	// the dispatch path overwrites stale values on reconnect.
+	// dsh sends the $events ready handshake as a host item:
+	// {type:"item", streamId:"host-$events", value:{type:"ready",
+	// clientId, host}}. clientId is read at connection time (not at
+	// mock-construction) so tests can rotate it between connections
+	// to verify the dispatch path overwrites stale values on
+	// reconnect.
 	ready := map[string]any{
-		"type":     "ready",
-		"clientId": m.readyClientID.Load().(string),
-		"host":     map[string]any{"home": "/tmp/test"},
+		"type":     "item",
+		"streamId": "host-$events",
+		"value": map[string]any{
+			"type":     "ready",
+			"clientId": m.readyClientID.Load().(string),
+			"host":     map[string]any{"home": "/tmp/test"},
+		},
 	}
 	if err := conn.WriteJSON(ready); err != nil {
 		_ = conn.Close()
@@ -845,12 +852,10 @@ func TestClient_HostStreamDispatch(t *testing.T) {
 		"blank":     true,
 	})
 
-	// dsh sends a synthetic "ready" event to the host handler as
-	// soon as the mux stream connects (host/stream.go::dispatch
-	// `case "ready"` repacks clientId+host and invokes the host
-	// handler so the bridge can capture the clientId for
-	// /api/$events/result). Drain it before checking the session-added
-	// frame we actually care about.
+	// dsh sends the $events ready handshake as a host item on mux
+	// connect; dispatch captures the clientId and forwards "ready"
+	// to the host handler (which ignores it). Drain it before
+	// checking the session-added frame we actually care about.
 	got := collectFrames(t, received, 2, 2*time.Second)
 	var sessionAdded *serverFrameEnvelope
 	for i := range got {

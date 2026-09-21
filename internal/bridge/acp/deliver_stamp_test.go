@@ -507,9 +507,9 @@ func TestSetSessionID_CapturesModelFromConfigOptions(t *testing.T) {
 	}
 }
 
-// TestSetSessionID_ConfigOptionsPreferIdOverCategoryOnlyMode verifies
-// a model option matched by category alone (no id=="model") still
-// works, and raw currentValue is used when options lack a name.
+// TestSetSessionID_ConfigOptionsFallsBackToValue verifies a model
+// option matched by category alone (no id=="model") still works,
+// and raw currentValue is used when options lack a name.
 func TestSetSessionID_ConfigOptionsFallsBackToValue(t *testing.T) {
 	d := newTestDriver()
 	d.sessionID = ""
@@ -606,28 +606,54 @@ func TestSetSessionID_ConfigOptionsWinsOverModelsExtension(t *testing.T) {
 	}
 }
 
-// TestSetSessionID_NoModel_LeavesEmpty verifies session/new without
-// configOptions/models leaves d.model empty (opencode-style wire).
-func TestSetSessionID_NoModel_LeavesEmpty(t *testing.T) {
+// TestSetSessionID_NoModel_PreservesExisting verifies a session/new
+// response without configOptions/models does not clobber a model
+// already captured on the driver.
+func TestSetSessionID_NoModel_PreservesExisting(t *testing.T) {
 	d := newTestDriver()
 	d.sessionID = ""
 	d.connectedSent = false
-	d.model = ""
+	d.model = "kept-model"
 
 	err := d.setSessionID(json.RawMessage(`{"sessionId":"sess-bare"}`))
 	if err != nil {
 		t.Fatalf("setSessionID: %v", err)
 	}
-	if d.model != "" {
-		t.Errorf("d.model = %q, want \"\"", d.model)
+	if d.model != "kept-model" {
+		t.Errorf("d.model = %q, want kept-model", d.model)
 	}
 	select {
 	case ev := <-d.events:
-		if ev.Model != "" {
-			t.Errorf("Ready.Model = %q, want \"\"", ev.Model)
+		if ev.Model != "kept-model" {
+			t.Errorf("Ready.Model = %q, want kept-model", ev.Model)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for EventAgentReady")
+	}
+}
+
+// TestFinishLoadReplay_IgnoresOtherResponses verifies a matched
+// response for a different RPC id does not end session/load replay
+// suppression. Only the armed load id does.
+func TestFinishLoadReplay_IgnoresOtherResponses(t *testing.T) {
+	d := newTestDriver()
+	d.loadRequestID.Store("2")
+	d.loadingSession.Store(true)
+
+	d.finishLoadReplay(json.RawMessage("1"))
+	if !d.loadingSession.Load() {
+		t.Fatal("loadingSession cleared by a different response id")
+	}
+	if d.loadReplayID() != "2" {
+		t.Fatalf("loadReplayID = %q, want 2", d.loadReplayID())
+	}
+
+	d.finishLoadReplay(json.RawMessage("2"))
+	if d.loadingSession.Load() {
+		t.Fatal("loadingSession still set after the load response")
+	}
+	if d.loadReplayID() != "" {
+		t.Fatalf("loadReplayID = %q, want empty", d.loadReplayID())
 	}
 }
 

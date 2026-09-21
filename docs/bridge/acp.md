@@ -202,7 +202,7 @@ ACP turn-end 有**多个**可能来源，bridge 必须去重：
 
 ## 5. 设计约束 / 已知限制
 
-### 5.1 Model 在 handshake 时未知
+### 5.1 Model
 
 ACP 的 `session/new`、`session/load`、`session/resume` 响应都可以带 Session Config Options。当前模型取 `configOptions` 里 `id` 或 `category` 为 `model` 的选项（优先展示名）。Cursor 还会在同一响应里放非标准的 `models.currentModelId`，`configOptions` 没有模型项时用它兜底。
 
@@ -261,7 +261,7 @@ type SessionView struct {
 
 - ✅ generic fallback 接管 `usage_update` / `session.status` / `session_info_update` / `config_option_update`
 - ✅ `session/new` / `session/load` / `session/resume` 的 `configOptions`（及 Cursor `models`）写入 `d.model`
-- ✅ `cfg.SessionID` 走 `session/resume`，否则 `session/load`；`session/load` 的历史回放不转发
+- ✅ `cfg.SessionID`：声明了 `sessionCapabilities.resume` 走 `session/resume`，否则声明了 `loadSession` 走 `session/load`（历史回放不转发）；两者都没有或调用失败返回 `ErrResumeUnhealthy`
 - ✅ `deliver()` 自动盖 SessionID / Model / AgentName / Workspace
 - ✅ runtime `SetModel` 捕获条件放开
 - ✅ 13 个新单元测试（`deliver_stamp_test.go`）

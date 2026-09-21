@@ -101,11 +101,15 @@ type driver struct {
 	// loadingSession is set for the duration of session/load.
 	// The agent replays history as session/update (and possibly
 	// extension methods) before the load response; those must
-	// not be re-delivered to the chat. Cleared on the readPump
-	// as soon as the load response is matched, before the next
-	// frame is handled.
+	// not be re-delivered to the chat. Cleared only when the
+	// response id matches loadRequestID, so a concurrent RPC
+	// response cannot end the replay early.
 	loadingSession atomic.Bool
-	events         chan agent.AgentEvent
+	// loadRequestID is the JSON-RPC id (raw text, same key the
+	// rpc client uses) of the in-flight session/load. Empty when
+	// no load is in flight. atomic.Value holds a string.
+	loadRequestID atomic.Value
+	events        chan agent.AgentEvent
 
 	// connectedSent guards the synthesized EventAgentReady. We emit at
 	// most once per session, after the first successful session/new,
@@ -190,26 +194,28 @@ type driver struct {
 	flushGen   uint64
 
 	// model is the bridge-local cached model name. Captured from:
-	//   - session/new configOptions (ACP Session Config Options;
-	//     category/id "model") — preferred handshake path
-	//   - session/new models.currentModelId (Cursor extension,
-	//     same shape as modes) — fallback when configOptions
-	//     omit the model selector
+	//   - session/new, session/load, and session/resume
+	//     configOptions (ACP Session Config Options; category/id
+	//     "model") — preferred handshake path
+	//   - the same responses' models.currentModelId (Cursor
+	//     extension) — fallback when configOptions omit the
+	//     model selector
 	//   - sessionUpdate: usage_update.model,
 	//     session_info_update.model, config_option_update
 	// May stay empty if the server never reports one — runtime
 	// tolerates empty Model and the footer just omits the model
 	// segment.
 	//
-	// Concurrent. Writers are setSessionID (handshake) and
-	// handleUsageUpdate / handleSessionInfoUpdate /
-	// handleConfigOptionUpdate on the readPump goroutine;
-	// readers are deliver() called from any goroutine
-	// (handshake, SendBlocks via translatePromptResponse,
-	// flushTextBuffers). Without modelMu the race detector
-	// flags this as a torn string read (P1). Contention is low
-	// — writers fire at most a handful of times per turn — so a
-	// plain Mutex is fine.
+	// Concurrent. Writers are bindSession (session/new via
+	// setSessionID, and session/load / session/resume via
+	// openExistingSession) plus handleUsageUpdate /
+	// handleSessionInfoUpdate / handleConfigOptionUpdate on the
+	// readPump goroutine. Readers are deliver() on any
+	// goroutine (handshake, SendBlocks via
+	// translatePromptResponse, flushTextBuffers). Without
+	// modelMu the race detector flags this as a torn string
+	// read (P1). Contention is low — writers fire at most a
+	// handful of times per turn — so a plain Mutex is fine.
 	model   string
 	modelMu sync.Mutex
 
@@ -553,7 +559,7 @@ func (d *driver) handshake(ctx context.Context, workspace string) error {
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("bridge/acp: initialize (timeout=%s): %w", initializeTimeout, err)
+		return rpcPhaseError("initialize", initializeTimeout, err)
 	}
 
 	if d.resumeSessionID != "" {
@@ -567,7 +573,7 @@ func (d *driver) handshake(ctx context.Context, workspace string) error {
 		MCPServers: []any{},
 	})
 	if err != nil {
-		return fmt.Errorf("bridge/acp: session/new (timeout=%s): %w", newSessionTimeout, err)
+		return rpcPhaseError("session/new", newSessionTimeout, err)
 	}
 	if err := d.setSessionID(result); err != nil {
 		return err
@@ -648,23 +654,64 @@ func (d *driver) openExistingSession(ctx context.Context, workspace string, caps
 
 // requestExistingSession issues session/load or session/resume.
 // suppressReplay arms loadingSession so history replay is not
-// delivered to the chat. The flag is cleared here on the error
-// path (timeout / write failure, where readPump never sees a
-// matching response) and on the readPump when the response lands.
+// delivered to the chat. The flag is tied to this request's id
+// and cleared by defer (panic, timeout, write failure) and by
+// readPump when that id's response arrives.
 func (d *driver) requestExistingSession(ctx context.Context, method string, params existingSessionParams, suppressReplay bool) (json.RawMessage, error) {
+	var loadID string
 	if suppressReplay {
-		d.loadingSession.Store(true)
+		defer func() { d.disarmLoadReplay(loadID) }()
 	}
 	reqCtx, cancel := context.WithTimeout(ctx, newSessionTimeout)
 	defer cancel()
-	result, err := d.rpc.request(reqCtx, method, params)
-	if suppressReplay {
-		d.loadingSession.Store(false)
-	}
+	result, err := d.rpc.requestNotify(reqCtx, method, params, func(id string) {
+		if !suppressReplay {
+			return
+		}
+		loadID = id
+		d.loadRequestID.Store(id)
+		d.loadingSession.Store(true)
+	})
 	if err != nil {
-		return nil, fmt.Errorf("bridge/acp: %s (timeout=%s): %w", method, newSessionTimeout, err)
+		return nil, rpcPhaseError(method, newSessionTimeout, err)
 	}
 	return result, nil
+}
+
+// disarmLoadReplay clears replay suppression for id. An empty id
+// means the request never armed the flag. A mismatched id means a
+// newer load owns the flag; leave it alone.
+func (d *driver) disarmLoadReplay(id string) {
+	if id == "" {
+		return
+	}
+	if d.loadReplayID() != id {
+		return
+	}
+	d.loadRequestID.Store("")
+	d.loadingSession.Store(false)
+}
+
+// finishLoadReplay ends replay suppression when id is the
+// in-flight session/load response. Other responses leave the flag
+// set so their arrival cannot leak the rest of the replay.
+func (d *driver) finishLoadReplay(id json.RawMessage) {
+	d.disarmLoadReplay(string(id))
+}
+
+func (d *driver) loadReplayID() string {
+	v := d.loadRequestID.Load()
+	s, _ := v.(string)
+	return s
+}
+
+// rpcPhaseError formats a handshake RPC failure. The timeout budget
+// is included only when the context deadline or cancel fired.
+func rpcPhaseError(phase string, budget time.Duration, err error) error {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return fmt.Errorf("bridge/acp: %s (timeout=%s): %w", phase, budget, err)
+	}
+	return fmt.Errorf("bridge/acp: %s: %w", phase, err)
 }
 
 // ─── live-half methods (valid only between Start and Close) ───
@@ -1366,10 +1413,10 @@ func (d *driver) readPump() {
 			continue
 		}
 		if d.rpc.handleResponse(message) {
-			// session/load's response ends the history replay.
-			// Clear before the next frame so a live update that
-			// follows the response is delivered.
-			d.loadingSession.Store(false)
+			// End session/load replay only when this frame is
+			// that request's response. Clear before the next
+			// frame so a live update that follows is delivered.
+			d.finishLoadReplay(message.ID)
 			continue
 		}
 		if message.Method != "" {

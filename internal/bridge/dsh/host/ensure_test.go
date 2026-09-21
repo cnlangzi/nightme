@@ -163,6 +163,7 @@ func TestEnsureSharedHost_ConcurrentFirstTouch(t *testing.T) {
 // message; the test confirms the underlying exec.LookPath error
 // path is reachable.
 func TestEnsureSharedHost_MissingBinary(t *testing.T) {
+	requireExclusivePort3080(t)
 	resetEnsureState()
 	t.Cleanup(resetEnsureState)
 

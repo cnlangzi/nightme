@@ -336,6 +336,7 @@ func killFakeDSH(t *testing.T, sh *host.SharedHost) {
 // Phase 1 (crash): LIFETIME=0.1s, fake-dsh dies fast → watchdog fires.
 // Phase 2 (alive): LIFETIME=10s, watchdog respawns, new instance sticks.
 func TestSharedHost_WatchdogRespawns(t *testing.T) {
+	requireExclusivePort3080(t)
 	fake := writeFakeDSH(t)
 	dir := t.TempDir()
 

@@ -449,6 +449,244 @@ func TestHandleSessionInfoUpdate_EmptyModel_NoOp(t *testing.T) {
 	}
 }
 
+// ─── session/new + config_option_update model capture ───────────────
+
+// TestSetSessionID_CapturesModelFromConfigOptions verifies ACP
+// Session Config Options on session/new populate d.model and stamp
+// EventAgentReady (preferring the option display name).
+func TestSetSessionID_CapturesModelFromConfigOptions(t *testing.T) {
+	d := newTestDriver()
+	d.sessionID = ""
+	d.connectedSent = false
+
+	err := d.setSessionID(json.RawMessage(`{
+		"sessionId": "sess-cfg",
+		"configOptions": [
+			{
+				"id": "mode",
+				"category": "mode",
+				"type": "select",
+				"currentValue": "agent",
+				"options": [{"value": "agent", "name": "Agent"}]
+			},
+			{
+				"id": "model",
+				"category": "model",
+				"type": "select",
+				"currentValue": "default[]",
+				"options": [
+					{"value": "default[]", "name": "Auto"},
+					{"value": "composer-2.5[fast=true]", "name": "composer-2.5"}
+				]
+			}
+		]
+	}`))
+	if err != nil {
+		t.Fatalf("setSessionID: %v", err)
+	}
+	if d.sessionID != "sess-cfg" {
+		t.Errorf("sessionID = %q, want sess-cfg", d.sessionID)
+	}
+	if d.model != "Auto" {
+		t.Errorf("d.model = %q, want Auto (display name)", d.model)
+	}
+
+	select {
+	case ev := <-d.events:
+		if ev.Kind != agent.EventAgentReady {
+			t.Fatalf("kind = %v, want EventAgentReady", ev.Kind)
+		}
+		if ev.Model != "Auto" {
+			t.Errorf("Ready.Model = %q, want Auto", ev.Model)
+		}
+		if ev.SessionID != "sess-cfg" {
+			t.Errorf("Ready.SessionID = %q, want sess-cfg", ev.SessionID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for EventAgentReady")
+	}
+}
+
+// TestSetSessionID_ConfigOptionsPreferIdOverCategoryOnlyMode verifies
+// a model option matched by category alone (no id=="model") still
+// works, and raw currentValue is used when options lack a name.
+func TestSetSessionID_ConfigOptionsFallsBackToValue(t *testing.T) {
+	d := newTestDriver()
+	d.sessionID = ""
+	d.connectedSent = false
+
+	err := d.setSessionID(json.RawMessage(`{
+		"sessionId": "sess-val",
+		"configOptions": [{
+			"category": "model",
+			"type": "select",
+			"currentValue": "claude-opus-4",
+			"options": [{"value": "claude-opus-4"}]
+		}]
+	}`))
+	if err != nil {
+		t.Fatalf("setSessionID: %v", err)
+	}
+	if d.model != "claude-opus-4" {
+		t.Errorf("d.model = %q, want claude-opus-4", d.model)
+	}
+	// Drain Ready so the channel doesn't leak into later logic.
+	select {
+	case <-d.events:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for EventAgentReady")
+	}
+}
+
+// TestSetSessionID_ModelsExtensionFallback verifies Cursor's
+// non-standard models block is used when configOptions omit model.
+func TestSetSessionID_ModelsExtensionFallback(t *testing.T) {
+	d := newTestDriver()
+	d.sessionID = ""
+	d.connectedSent = false
+
+	err := d.setSessionID(json.RawMessage(`{
+		"sessionId": "sess-cursor",
+		"models": {
+			"currentModelId": "default[]",
+			"availableModels": [
+				{"modelId": "default[]", "name": "Auto"},
+				{"modelId": "composer-2.5[fast=true]", "name": "composer-2.5"}
+			]
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("setSessionID: %v", err)
+	}
+	if d.model != "Auto" {
+		t.Errorf("d.model = %q, want Auto", d.model)
+	}
+	select {
+	case <-d.events:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for EventAgentReady")
+	}
+}
+
+// TestSetSessionID_ConfigOptionsWinsOverModelsExtension verifies
+// the ACP-standard configOptions path takes precedence over Cursor's
+// models extension when both are present.
+func TestSetSessionID_ConfigOptionsWinsOverModelsExtension(t *testing.T) {
+	d := newTestDriver()
+	d.sessionID = ""
+	d.connectedSent = false
+
+	err := d.setSessionID(json.RawMessage(`{
+		"sessionId": "sess-both",
+		"configOptions": [{
+			"id": "model",
+			"category": "model",
+			"type": "select",
+			"currentValue": "composer-2.5[fast=true]",
+			"options": [
+				{"value": "default[]", "name": "Auto"},
+				{"value": "composer-2.5[fast=true]", "name": "composer-2.5"}
+			]
+		}],
+		"models": {
+			"currentModelId": "default[]",
+			"availableModels": [{"modelId": "default[]", "name": "Auto"}]
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("setSessionID: %v", err)
+	}
+	if d.model != "composer-2.5" {
+		t.Errorf("d.model = %q, want composer-2.5 (from configOptions)", d.model)
+	}
+	select {
+	case <-d.events:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for EventAgentReady")
+	}
+}
+
+// TestSetSessionID_NoModel_LeavesEmpty verifies session/new without
+// configOptions/models leaves d.model empty (opencode-style wire).
+func TestSetSessionID_NoModel_LeavesEmpty(t *testing.T) {
+	d := newTestDriver()
+	d.sessionID = ""
+	d.connectedSent = false
+	d.model = ""
+
+	err := d.setSessionID(json.RawMessage(`{"sessionId":"sess-bare"}`))
+	if err != nil {
+		t.Fatalf("setSessionID: %v", err)
+	}
+	if d.model != "" {
+		t.Errorf("d.model = %q, want \"\"", d.model)
+	}
+	select {
+	case ev := <-d.events:
+		if ev.Model != "" {
+			t.Errorf("Ready.Model = %q, want \"\"", ev.Model)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for EventAgentReady")
+	}
+}
+
+// TestHandleConfigOptionUpdate_CapturesModel verifies mid-session
+// config_option_update refreshes d.model from the snapshot.
+func TestHandleConfigOptionUpdate_CapturesModel(t *testing.T) {
+	d := newTestDriver()
+	d.model = "Auto"
+
+	d.handleConfigOptionUpdate(json.RawMessage(`{
+		"configOptions": [{
+			"id": "model",
+			"category": "model",
+			"type": "select",
+			"currentValue": "composer-2.5[fast=true]",
+			"options": [
+				{"value": "default[]", "name": "Auto"},
+				{"value": "composer-2.5[fast=true]", "name": "composer-2.5"}
+			]
+		}]
+	}`))
+
+	if d.model != "composer-2.5" {
+		t.Errorf("d.model = %q, want composer-2.5", d.model)
+	}
+
+	d.deliver(agent.AgentEvent{Kind: agent.EventAgentText, Text: "after-switch"})
+	select {
+	case ev := <-d.events:
+		if ev.Model != "composer-2.5" {
+			t.Errorf("stamped Model = %q, want composer-2.5", ev.Model)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for stamped event")
+	}
+}
+
+// TestHandleConfigOptionUpdate_EmptyModel_NoOp verifies a
+// config_option_update without a model selector does not clobber
+// d.model.
+func TestHandleConfigOptionUpdate_EmptyModel_NoOp(t *testing.T) {
+	d := newTestDriver()
+	d.model = "Auto"
+
+	d.handleConfigOptionUpdate(json.RawMessage(`{
+		"configOptions": [{
+			"id": "mode",
+			"category": "mode",
+			"type": "select",
+			"currentValue": "ask",
+			"options": [{"value": "ask", "name": "Ask"}]
+		}]
+	}`))
+
+	if d.model != "Auto" {
+		t.Errorf("d.model = %q, want Auto (preserved)", d.model)
+	}
+}
+
 // ─── translatePromptResponse usage-source precedence ─────────────────
 
 // TestTranslatePromptResponse_PrefersLastUsage verifies that when

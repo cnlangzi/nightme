@@ -113,9 +113,9 @@ func (s *Starter) Command() string { return s.command }
 // custom sessionUpdate variants, a translator can be added
 // following the opencode/update.go pattern.
 //
-// cfg.SessionID, when non-empty, is reserved for future ACP
-// session/load wiring. Today the bridge always opens a fresh
-// session.
+// cfg.SessionID, when non-empty, is forwarded to the generic ACP
+// bridge, which reopens that session via session/resume or
+// session/load.
 func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agent, error) {
 	if cfg.Workspace == "" {
 		return nil, errors.New("cursor: workspace is required")

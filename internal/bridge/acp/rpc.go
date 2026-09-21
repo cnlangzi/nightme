@@ -56,6 +56,13 @@ func newRPCClient(writer io.Writer) *rpcClient {
 }
 
 func (c *rpcClient) request(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	return c.requestNotify(ctx, method, params, nil)
+}
+
+// requestNotify is request with a hook invoked after the JSON-RPC
+// id is allocated and the call is pending, and before the frame is
+// written. The id is the pending-map key (raw JSON text).
+func (c *rpcClient) requestNotify(ctx context.Context, method string, params any, beforeWrite func(id string)) (json.RawMessage, error) {
 	id := c.nextID.Add(1)
 	idJSON, err := json.Marshal(id)
 	if err != nil {
@@ -78,6 +85,9 @@ func (c *rpcClient) request(ctx context.Context, method string, params any) (jso
 		ID:      idJSON,
 		Method:  method,
 		Params:  paramsJSON,
+	}
+	if beforeWrite != nil {
+		beforeWrite(key)
 	}
 	if err := c.write(msg); err != nil {
 		c.removePending(key)

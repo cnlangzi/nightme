@@ -93,10 +93,27 @@ type driver struct {
 	workspace string
 
 	sessionID string
-	events    chan agent.AgentEvent
+	// resumeSessionID is the caller's cfg.SessionID. Non-empty means
+	// handshake must reopen that session (session/resume when the
+	// agent advertises it, otherwise session/load) instead of
+	// session/new.
+	resumeSessionID string
+	// loadingSession is set for the duration of session/load.
+	// The agent replays history as session/update (and possibly
+	// extension methods) before the load response; those must
+	// not be re-delivered to the chat. Cleared only when the
+	// response id matches loadRequestID, so a concurrent RPC
+	// response cannot end the replay early.
+	loadingSession atomic.Bool
+	// loadRequestID is the JSON-RPC id (raw text, same key the
+	// rpc client uses) of the in-flight session/load. Empty when
+	// no load is in flight. atomic.Value holds a string.
+	loadRequestID atomic.Value
+	events        chan agent.AgentEvent
 
 	// connectedSent guards the synthesized EventAgentReady. We emit at
-	// most once per session, after the first successful session/new.
+	// most once per session, after the first successful session/new,
+	// session/load, or session/resume.
 	connectedSent bool
 
 	permissionMu sync.Mutex
@@ -176,19 +193,29 @@ type driver struct {
 	flushTimer *time.Timer
 	flushGen   uint64
 
-	// model is the bridge-local cached model name. Captured from
-	// vendor-extension sessionUpdate payloads (usage_update.model,
-	// session_info_update.model). May stay empty if the server
-	// never reports one — runtime tolerates empty Model and the
-	// footer just omits the model segment.
+	// model is the bridge-local cached model name. Captured from:
+	//   - session/new, session/load, and session/resume
+	//     configOptions (ACP Session Config Options; category/id
+	//     "model") — preferred handshake path
+	//   - the same responses' models.currentModelId (Cursor
+	//     extension) — fallback when configOptions omit the
+	//     model selector
+	//   - sessionUpdate: usage_update.model,
+	//     session_info_update.model, config_option_update
+	// May stay empty if the server never reports one — runtime
+	// tolerates empty Model and the footer just omits the model
+	// segment.
 	//
-	// Concurrent. Writers are handleUsageUpdate /
-	// handleSessionInfoUpdate on the readPump goroutine; readers
-	// are deliver() called from any goroutine (handshake,
-	// SendBlocks via translatePromptResponse, flushTextBuffers).
-	// Without modelMu the race detector flags this as a torn
-	// string read (P1). Contention is low — writers fire at most
-	// a handful of times per turn — so a plain Mutex is fine.
+	// Concurrent. Writers are bindSession (session/new via
+	// setSessionID, and session/load / session/resume via
+	// openExistingSession) plus handleUsageUpdate /
+	// handleSessionInfoUpdate / handleConfigOptionUpdate on the
+	// readPump goroutine. Readers are deliver() on any
+	// goroutine (handshake, SendBlocks via
+	// translatePromptResponse, flushTextBuffers). Without
+	// modelMu the race detector flags this as a torn string
+	// read (P1). Contention is low — writers fire at most a
+	// handful of times per turn — so a plain Mutex is fine.
 	model   string
 	modelMu sync.Mutex
 
@@ -411,15 +438,16 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 
 	parentCtx, cancel := context.WithCancel(ctx)
 	live := &driver{
-		transport:  transport,
-		rpc:        newRPCClient(transport),
-		ctx:        parentCtx,
-		cancel:     cancel,
-		agentName:  s.name,
-		workspace:  cfg.Workspace,
-		events:     make(chan agent.AgentEvent, eventBufferSize),
-		textBuf:    &strings.Builder{},
-		thoughtBuf: &strings.Builder{},
+		transport:       transport,
+		rpc:             newRPCClient(transport),
+		ctx:             parentCtx,
+		cancel:          cancel,
+		agentName:       s.name,
+		workspace:       cfg.Workspace,
+		resumeSessionID: cfg.SessionID,
+		events:          make(chan agent.AgentEvent, eventBufferSize),
+		textBuf:         &strings.Builder{},
+		thoughtBuf:      &strings.Builder{},
 	}
 	// readPump is the per-session long-lived read loop. Wrap in
 	// agent.SafeGo (outer, daemon-level safety net) +
@@ -480,10 +508,18 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	return live, nil
 }
 
-// handshake runs the ACP initialize + session/new protocol exchange
+// handshake runs the ACP initialize exchange, then opens a session
 // and seeds the synthesized EventAgentReady. Caller must have already
 // populated live.rpc, live.ctx, live.events, live.agentName, and (for
 // most callers) live.workspace.
+//
+// Session open:
+//   - resumeSessionID empty → session/new
+//   - resumeSessionID set and the agent advertises
+//     sessionCapabilities.resume → session/resume (no history replay)
+//   - otherwise, if loadSession → session/load (history replay is
+//     suppressed; model still comes from the response)
+//   - otherwise → agent.ErrResumeUnhealthy (no silent fresh session)
 //
 // Timeout policy (split by phase):
 //
@@ -510,7 +546,7 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 func (d *driver) handshake(ctx context.Context, workspace string) error {
 	initCtx, initCancel := context.WithTimeout(ctx, initializeTimeout)
 	defer initCancel()
-	if _, err := d.rpc.request(initCtx, "initialize", initializeParams{
+	initResult, err := d.rpc.request(initCtx, "initialize", initializeParams{
 		ProtocolVersion: protocolVersion,
 		ClientCapabilities: map[string]any{
 			"fs":       map[string]any{"readTextFile": false, "writeTextFile": false},
@@ -521,8 +557,13 @@ func (d *driver) handshake(ctx context.Context, workspace string) error {
 			Title:   "nightme (" + d.agentName + ")",
 			Version: clientVersion,
 		},
-	}); err != nil {
-		return fmt.Errorf("bridge/acp: initialize (timeout=%s): %w", initializeTimeout, err)
+	})
+	if err != nil {
+		return rpcPhaseError("initialize", initializeTimeout, err)
+	}
+
+	if d.resumeSessionID != "" {
+		return d.openExistingSession(ctx, workspace, parseAgentCapabilities(initResult))
 	}
 
 	newCtx, newCancel := context.WithTimeout(ctx, newSessionTimeout)
@@ -532,12 +573,145 @@ func (d *driver) handshake(ctx context.Context, workspace string) error {
 		MCPServers: []any{},
 	})
 	if err != nil {
-		return fmt.Errorf("bridge/acp: session/new (timeout=%s): %w", newSessionTimeout, err)
+		return rpcPhaseError("session/new", newSessionTimeout, err)
 	}
 	if err := d.setSessionID(result); err != nil {
 		return err
 	}
 	return nil
+}
+
+// agentCapabilities is the subset of initialize's agentCapabilities
+// the bridge uses to choose session/resume vs session/load.
+type agentCapabilities struct {
+	LoadSession         bool            `json:"loadSession"`
+	SessionCapabilities json.RawMessage `json:"sessionCapabilities"`
+}
+
+func (c agentCapabilities) supportsResume() bool {
+	if len(c.SessionCapabilities) == 0 {
+		return false
+	}
+	var caps struct {
+		Resume json.RawMessage `json:"resume"`
+	}
+	if json.Unmarshal(c.SessionCapabilities, &caps) != nil {
+		return false
+	}
+	raw := caps.Resume
+	if len(raw) == 0 || string(raw) == "null" || string(raw) == "false" {
+		return false
+	}
+	return true
+}
+
+func parseAgentCapabilities(result json.RawMessage) agentCapabilities {
+	var resp struct {
+		AgentCapabilities agentCapabilities `json:"agentCapabilities"`
+	}
+	_ = json.Unmarshal(result, &resp)
+	return resp.AgentCapabilities
+}
+
+// existingSessionParams is the shared request body for session/load
+// and session/resume.
+type existingSessionParams struct {
+	SessionID  string `json:"sessionId"`
+	CWD        string `json:"cwd"`
+	MCPServers []any  `json:"mcpServers"`
+}
+
+// openExistingSession reopens resumeSessionID. session/resume is
+// preferred (no history replay). session/load is the fallback and
+// suppresses replayed updates. A failure is agent.ErrResumeUnhealthy
+// so the chat layer can drop the stale id — we do not silently
+// open a fresh session.
+func (d *driver) openExistingSession(ctx context.Context, workspace string, caps agentCapabilities) error {
+	params := existingSessionParams{
+		SessionID:  d.resumeSessionID,
+		CWD:        workspace,
+		MCPServers: []any{},
+	}
+	resume := caps.supportsResume()
+	if resume {
+		result, err := d.requestExistingSession(ctx, "session/resume", params, false)
+		if err == nil {
+			return d.bindSession(d.resumeSessionID, result)
+		}
+		if !caps.LoadSession {
+			return fmt.Errorf("%w: session/resume %s: %v", agent.ErrResumeUnhealthy, d.resumeSessionID, err)
+		}
+	}
+	if caps.LoadSession {
+		result, err := d.requestExistingSession(ctx, "session/load", params, true)
+		if err != nil {
+			return fmt.Errorf("%w: session/load %s: %v", agent.ErrResumeUnhealthy, d.resumeSessionID, err)
+		}
+		return d.bindSession(d.resumeSessionID, result)
+	}
+	return fmt.Errorf("%w: ACP agent does not advertise session/resume or loadSession", agent.ErrResumeUnhealthy)
+}
+
+// requestExistingSession issues session/load or session/resume.
+// suppressReplay arms loadingSession so history replay is not
+// delivered to the chat. The flag is tied to this request's id
+// and cleared by defer (panic, timeout, write failure) and by
+// readPump when that id's response arrives.
+func (d *driver) requestExistingSession(ctx context.Context, method string, params existingSessionParams, suppressReplay bool) (json.RawMessage, error) {
+	var loadID string
+	if suppressReplay {
+		defer func() { d.disarmLoadReplay(loadID) }()
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, newSessionTimeout)
+	defer cancel()
+	result, err := d.rpc.requestNotify(reqCtx, method, params, func(id string) {
+		if !suppressReplay {
+			return
+		}
+		loadID = id
+		d.loadRequestID.Store(id)
+		d.loadingSession.Store(true)
+	})
+	if err != nil {
+		return nil, rpcPhaseError(method, newSessionTimeout, err)
+	}
+	return result, nil
+}
+
+// disarmLoadReplay clears replay suppression for id. An empty id
+// means the request never armed the flag. A mismatched id means a
+// newer load owns the flag; leave it alone.
+func (d *driver) disarmLoadReplay(id string) {
+	if id == "" {
+		return
+	}
+	if d.loadReplayID() != id {
+		return
+	}
+	d.loadRequestID.Store("")
+	d.loadingSession.Store(false)
+}
+
+// finishLoadReplay ends replay suppression when id is the
+// in-flight session/load response. Other responses leave the flag
+// set so their arrival cannot leak the rest of the replay.
+func (d *driver) finishLoadReplay(id json.RawMessage) {
+	d.disarmLoadReplay(string(id))
+}
+
+func (d *driver) loadReplayID() string {
+	v := d.loadRequestID.Load()
+	s, _ := v.(string)
+	return s
+}
+
+// rpcPhaseError formats a handshake RPC failure. The timeout budget
+// is included only when the context deadline or cancel fired.
+func rpcPhaseError(phase string, budget time.Duration, err error) error {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return fmt.Errorf("bridge/acp: %s (timeout=%s): %w", phase, budget, err)
+	}
+	return fmt.Errorf("bridge/acp: %s: %w", phase, err)
 }
 
 // ─── live-half methods (valid only between Start and Close) ───
@@ -1135,25 +1309,43 @@ func (d *driver) View() *SessionView {
 
 // ─── internals ───
 
-// setSessionID parses the session/new response and synthesizes the
-// EventAgentReady so the runtime can capture the resume id uniformly
-// with Claude Code / Pi. Model is captured later (via usage_update /
-// session_info_update) and stamped on subsequent events by deliver();
-// see emitConnected for the full rationale.
+// setSessionID parses a session/new response and synthesizes
+// EventAgentReady. The session id comes from the response.
 func (d *driver) setSessionID(result json.RawMessage) error {
+	return d.bindSession("", result)
+}
+
+// bindSession records the live session id and model, then emits
+// EventAgentReady. fallbackID is used when the response omits
+// sessionId — session/load and session/resume do that; the id is
+// the one the client sent. Model is taken from ACP configOptions
+// (Cursor's models extension as fallback).
+func (d *driver) bindSession(fallbackID string, result json.RawMessage) error {
 	var response struct {
-		SessionID      string `json:"sessionId"`
-		SessionIDSnake string `json:"session_id"`
+		SessionID      string          `json:"sessionId"`
+		SessionIDSnake string          `json:"session_id"`
+		ConfigOptions  json.RawMessage `json:"configOptions"`
+		Models         json.RawMessage `json:"models"`
 	}
-	if err := json.Unmarshal(result, &response); err != nil {
-		return fmt.Errorf("bridge/acp: decode session/new response: %w", err)
+	if len(result) > 0 && string(result) != "null" {
+		if err := json.Unmarshal(result, &response); err != nil {
+			return fmt.Errorf("bridge/acp: decode session response: %w", err)
+		}
 	}
 	d.sessionID = response.SessionID
 	if d.sessionID == "" {
 		d.sessionID = response.SessionIDSnake
 	}
 	if d.sessionID == "" {
-		return errors.New("bridge/acp: session/new response has no sessionId")
+		d.sessionID = fallbackID
+	}
+	if d.sessionID == "" {
+		return errors.New("bridge/acp: session response has no sessionId")
+	}
+	if model := modelFromSessionNew(response.ConfigOptions, response.Models); model != "" {
+		d.modelMu.Lock()
+		d.model = model
+		d.modelMu.Unlock()
 	}
 	// Synthesize an EventAgentReady. Idempotent via connectedSent.
 	d.emitConnected()
@@ -1169,15 +1361,12 @@ func (d *driver) emitConnected() {
 		return
 	}
 	d.connectedSent = true
-	// Model is intentionally left blank here. ACP's initialize
-	// and session/new responses do not carry a model name — it
-	// only appears in vendor-extension sessionUpdate payloads
-	// (usage_update.model, session_info_update.model) that fire
-	// AFTER handshake. deliver() stamps d.model on every event,
-	// so once the model is captured the runtime sees it on the
-	// next Text / Tool / Result / Done event (see runtime/handler.go
-	// SetModel capture path). The Empty Ready.Model is therefore
-	// benign — runtime tolerates it (SetModel no-ops on empty).
+	// Model rides on d.model via deliver(). Handshake may have
+	// already filled it from session/new configOptions; if not,
+	// Ready.Model stays empty until a later usage_update /
+	// session_info_update / config_option_update (runtime
+	// SetModel no-ops on empty and accepts any later non-empty
+	// ev.Model).
 	d.deliver(agent.AgentEvent{
 		Kind:      agent.EventAgentReady,
 		SessionID: d.sessionID,
@@ -1224,6 +1413,10 @@ func (d *driver) readPump() {
 			continue
 		}
 		if d.rpc.handleResponse(message) {
+			// End session/load replay only when this frame is
+			// that request's response. Clear before the next
+			// frame so a live update that follows is delivered.
+			d.finishLoadReplay(message.ID)
 			continue
 		}
 		if message.Method != "" {
@@ -1238,6 +1431,24 @@ func (d *driver) readPump() {
 }
 
 func (d *driver) handleMethod(message rpcMessage) {
+	switch message.Method {
+	case "initialize", "session/new", "session/prompt", "session/load", "session/resume":
+		// A PTY may echo client requests before the ACP server
+		// disables terminal echo. They are outbound methods, not
+		// server calls. Checked before the load-replay suppress
+		// so an echo of session/load is not answered as if it
+		// were a server request.
+		return
+	}
+	if d.loadingSession.Load() {
+		// session/load replays history before its response.
+		// Drop it. Requests still get an empty ack so the agent
+		// is not left waiting.
+		if len(message.ID) > 0 {
+			_ = d.rpc.respond(message.ID, map[string]any{}, nil)
+		}
+		return
+	}
 	switch message.Method {
 	case "session/update":
 		d.handleSessionUpdate(message.Params)
@@ -1261,11 +1472,6 @@ func (d *driver) handleMethod(message rpcMessage) {
 		d.handleToolEnd(message.Params)
 	case "session_end":
 		d.emit(agent.AgentEvent{Kind: agent.EventAgentDone, Done: &agent.AgentDoneEvent{ExitCode: 0}})
-	case "initialize", "session/new", "session/prompt":
-		// A PTY may echo client requests before the ACP server
-		// disables terminal echo. They are outbound methods, not
-		// server calls.
-		return
 	default:
 		// Bridge-specific extension handler. If a bridge (cursor)
 		// has installed a MethodHandler, give it first crack at
@@ -1423,6 +1629,12 @@ func (d *driver) handleSessionUpdate(raw json.RawMessage) {
 		// are reserved for future use (e.g. /rename slash
 		// command forwarding to the chat header).
 		d.handleSessionInfoUpdate(params.Update)
+	case "config_option_update":
+		// ACP Session Config Options: agent pushed a full
+		// configOptions snapshot (model switch, mode change,
+		// rate-limit fallback, …). Capture the model selector
+		// the same way session/new does.
+		d.handleConfigOptionUpdate(params.Update)
 	default:
 		// Unknown kind: leave buffers alone. Flushing here used to
 		// shatter mid-sentence text whenever a vendor extension
@@ -1606,6 +1818,107 @@ func (d *driver) handleSessionInfoUpdate(raw json.RawMessage) {
 	}
 }
 
+// handleConfigOptionUpdate parses a sessionUpdate of kind
+// "config_option_update" and captures the model selector from
+// the full configOptions snapshot into d.model. Empty / missing
+// model options leave d.model unchanged.
+func (d *driver) handleConfigOptionUpdate(raw json.RawMessage) {
+	var u struct {
+		ConfigOptions json.RawMessage `json:"configOptions"`
+	}
+	if json.Unmarshal(raw, &u) != nil {
+		return
+	}
+	if model := modelFromConfigOptions(u.ConfigOptions); model != "" {
+		d.modelMu.Lock()
+		d.model = model
+		d.modelMu.Unlock()
+	}
+}
+
+// modelFromSessionNew resolves the active model label from a
+// session/new (or session/load / session/resume) response.
+// Preference order:
+//  1. ACP configOptions model selector (standard)
+//  2. models.currentModelId (Cursor extension; mirrors modes)
+func modelFromSessionNew(configOptions, models json.RawMessage) string {
+	if m := modelFromConfigOptions(configOptions); m != "" {
+		return m
+	}
+	return modelFromModelsExtension(models)
+}
+
+// modelFromConfigOptions finds the model selector in an ACP
+// Session Config Options list and returns a display label.
+// Matches id=="model" or category=="model". Prefers the option's
+// human-readable name over the raw currentValue id.
+func modelFromConfigOptions(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var opts []struct {
+		ID           string `json:"id"`
+		Category     string `json:"category"`
+		CurrentValue any    `json:"currentValue"`
+		Options      []struct {
+			Value string `json:"value"`
+			Name  string `json:"name"`
+		} `json:"options"`
+	}
+	if json.Unmarshal(raw, &opts) != nil {
+		return ""
+	}
+	for _, opt := range opts {
+		if opt.ID != "model" && opt.Category != "model" {
+			continue
+		}
+		value, ok := configOptionString(opt.CurrentValue)
+		if !ok || value == "" {
+			return ""
+		}
+		for _, o := range opt.Options {
+			if o.Value == value && o.Name != "" {
+				return o.Name
+			}
+		}
+		return value
+	}
+	return ""
+}
+
+// modelFromModelsExtension reads Cursor's non-standard models
+// block on session/new ({currentModelId, availableModels}).
+// Prefers availableModels[].name when it matches the id.
+func modelFromModelsExtension(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var models struct {
+		CurrentModelID  string `json:"currentModelId"`
+		AvailableModels []struct {
+			ModelID string `json:"modelId"`
+			Name    string `json:"name"`
+		} `json:"availableModels"`
+	}
+	if json.Unmarshal(raw, &models) != nil || models.CurrentModelID == "" {
+		return ""
+	}
+	for _, m := range models.AvailableModels {
+		if m.ModelID == models.CurrentModelID && m.Name != "" {
+			return m.Name
+		}
+	}
+	return models.CurrentModelID
+}
+
+// configOptionString coerces a configOption currentValue to a
+// string. Model selectors are type "select" so the value is a
+// string; boolean options are ignored here.
+func configOptionString(v any) (string, bool) {
+	s, ok := v.(string)
+	return s, ok
+}
+
 func (d *driver) handlePermission(id json.RawMessage, raw json.RawMessage) {
 	var params struct {
 		Tool       json.RawMessage `json:"toolCall"`
@@ -1709,9 +2022,10 @@ func (d *driver) handleToolEnd(raw json.RawMessage) {
 // are filled from bridge-local state.
 //
 // Mirrors codex/agent.go::deliver() — the difference is that
-// acp's per-event fields are mostly captured from handshake /
-// usage_update / session_info_update rather than from explicit
-// thread/start responses. Model may be empty when the server
+// acp's per-event fields are captured from handshake
+// (session/new configOptions / models extension) and later
+// sessionUpdates (usage_update / session_info_update /
+// config_option_update). Model may be empty when the server
 // doesn't report one; runtime tolerates empty Model and the
 // footer just omits the model segment.
 //

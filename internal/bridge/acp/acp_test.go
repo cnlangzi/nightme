@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -189,6 +190,201 @@ func TestHandshake_NoSessionID_NoInit(t *testing.T) {
 	a := newAgentForTest(transport, "codex", "/tmp/ws")
 	if err := a.handshake(context.Background(), "/tmp/ws"); err == nil {
 		t.Fatal("handshake() error = nil, want non-nil")
+	}
+}
+
+const testModelConfig = `{"configOptions":[{"id":"model","category":"model","type":"select","currentValue":"default[]","options":[{"value":"default[]","name":"Auto"}]}]}`
+
+// TestHandshake_ResumePreferred verifies a non-empty resume id
+// calls session/resume when the agent advertises it, and stamps
+// the model from the response onto EventAgentReady.
+func TestHandshake_ResumePreferred(t *testing.T) {
+	client, server := net.Pipe()
+	transport := &mockTransport{Conn: client, pid: 42}
+	defer server.Close()
+
+	serverReader := bufio.NewReader(server)
+	go func() {
+		initialize := readRPCForTest(t, serverReader)
+		writeRPCForTest(t, server, rpcMessage{
+			JSONRPC: jsonRPCVersion,
+			ID:      initialize.ID,
+			Result:  json.RawMessage(`{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"resume":{}}}}`),
+		})
+		opened := readRPCForTest(t, serverReader)
+		if opened.Method != "session/resume" {
+			t.Errorf("method = %q, want session/resume", opened.Method)
+		}
+		writeRPCForTest(t, server, rpcMessage{
+			JSONRPC: jsonRPCVersion,
+			ID:      opened.ID,
+			Result:  json.RawMessage(testModelConfig),
+		})
+	}()
+
+	a := newAgentForTest(transport, "cursor", "/tmp/ws")
+	a.resumeSessionID = "sess-old"
+	if err := a.handshake(context.Background(), "/tmp/ws"); err != nil {
+		t.Fatalf("handshake() error = %v", err)
+	}
+	defer a.Close()
+
+	select {
+	case ev := <-a.Events():
+		if ev.Kind != agent.EventAgentReady {
+			t.Fatalf("kind = %v, want EventAgentReady", ev.Kind)
+		}
+		if ev.SessionID != "sess-old" {
+			t.Errorf("SessionID = %q, want sess-old", ev.SessionID)
+		}
+		if ev.Model != "Auto" {
+			t.Errorf("Model = %q, want Auto", ev.Model)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for EventAgentReady")
+	}
+}
+
+// TestHandshake_LoadSuppressesReplay verifies session/load is used
+// when resume is not advertised, the response's model is captured
+// even without a sessionId field, and replayed session/update
+// content is not delivered.
+func TestHandshake_LoadSuppressesReplay(t *testing.T) {
+	client, server := net.Pipe()
+	transport := &mockTransport{Conn: client, pid: 42}
+	defer server.Close()
+
+	serverReader := bufio.NewReader(server)
+	go func() {
+		initialize := readRPCForTest(t, serverReader)
+		writeRPCForTest(t, server, rpcMessage{
+			JSONRPC: jsonRPCVersion,
+			ID:      initialize.ID,
+			Result:  json.RawMessage(`{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"list":{}}}}`),
+		})
+		opened := readRPCForTest(t, serverReader)
+		if opened.Method != "session/load" {
+			t.Errorf("method = %q, want session/load", opened.Method)
+		}
+		writeRPCForTest(t, server, rpcMessage{
+			JSONRPC: jsonRPCVersion,
+			Method:  "session/update",
+			Params:  json.RawMessage(`{"sessionId":"sess-old","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"replayed history"}}}`),
+		})
+		writeRPCForTest(t, server, rpcMessage{
+			JSONRPC: jsonRPCVersion,
+			ID:      opened.ID,
+			Result:  json.RawMessage(testModelConfig),
+		})
+	}()
+
+	a := newAgentForTest(transport, "cursor", "/tmp/ws")
+	a.resumeSessionID = "sess-old"
+	if err := a.handshake(context.Background(), "/tmp/ws"); err != nil {
+		t.Fatalf("handshake() error = %v", err)
+	}
+	defer a.Close()
+
+	select {
+	case ev := <-a.Events():
+		if ev.Kind != agent.EventAgentReady {
+			t.Fatalf("kind = %v, want EventAgentReady", ev.Kind)
+		}
+		if ev.Model != "Auto" {
+			t.Errorf("Model = %q, want Auto", ev.Model)
+		}
+		if ev.SessionID != "sess-old" {
+			t.Errorf("SessionID = %q, want sess-old", ev.SessionID)
+		}
+		if ev.Text != "" {
+			t.Errorf("Ready.Text = %q, want empty (replay suppressed)", ev.Text)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for EventAgentReady")
+	}
+	select {
+	case ev := <-a.Events():
+		t.Fatalf("unexpected event after load: %+v", ev)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// TestHandshake_ResumeFailsFallsBackToLoad verifies a failed
+// session/resume still tries session/load when that capability
+// is advertised.
+func TestHandshake_ResumeFailsFallsBackToLoad(t *testing.T) {
+	client, server := net.Pipe()
+	transport := &mockTransport{Conn: client, pid: 42}
+	defer server.Close()
+
+	serverReader := bufio.NewReader(server)
+	go func() {
+		initialize := readRPCForTest(t, serverReader)
+		writeRPCForTest(t, server, rpcMessage{
+			JSONRPC: jsonRPCVersion,
+			ID:      initialize.ID,
+			Result:  json.RawMessage(`{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"resume":{}}}}`),
+		})
+		resume := readRPCForTest(t, serverReader)
+		if resume.Method != "session/resume" {
+			t.Errorf("first method = %q, want session/resume", resume.Method)
+		}
+		writeRPCForTest(t, server, rpcMessage{
+			JSONRPC: jsonRPCVersion,
+			ID:      resume.ID,
+			Error:   &rpcError{Code: -32601, Message: "Method not found"},
+		})
+		load := readRPCForTest(t, serverReader)
+		if load.Method != "session/load" {
+			t.Errorf("second method = %q, want session/load", load.Method)
+		}
+		writeRPCForTest(t, server, rpcMessage{
+			JSONRPC: jsonRPCVersion,
+			ID:      load.ID,
+			Result:  json.RawMessage(testModelConfig),
+		})
+	}()
+
+	a := newAgentForTest(transport, "cursor", "/tmp/ws")
+	a.resumeSessionID = "sess-old"
+	if err := a.handshake(context.Background(), "/tmp/ws"); err != nil {
+		t.Fatalf("handshake() error = %v", err)
+	}
+	defer a.Close()
+
+	select {
+	case ev := <-a.Events():
+		if ev.Kind != agent.EventAgentReady || ev.Model != "Auto" || ev.SessionID != "sess-old" {
+			t.Fatalf("event = %+v, want Ready model=Auto session=sess-old", ev)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for EventAgentReady")
+	}
+}
+
+// TestHandshake_NoResumeCapability verifies a resume id against an
+// agent that advertises neither resume nor loadSession fails with
+// ErrResumeUnhealthy instead of opening a fresh session.
+func TestHandshake_NoResumeCapability(t *testing.T) {
+	client, server := net.Pipe()
+	transport := &mockTransport{Conn: client, pid: 42}
+	defer server.Close()
+
+	serverReader := bufio.NewReader(server)
+	go func() {
+		initialize := readRPCForTest(t, serverReader)
+		writeRPCForTest(t, server, rpcMessage{
+			JSONRPC: jsonRPCVersion,
+			ID:      initialize.ID,
+			Result:  json.RawMessage(`{"protocolVersion":1}`),
+		})
+	}()
+
+	a := newAgentForTest(transport, "cursor", "/tmp/ws")
+	a.resumeSessionID = "sess-old"
+	err := a.handshake(context.Background(), "/tmp/ws")
+	if !errors.Is(err, agent.ErrResumeUnhealthy) {
+		t.Fatalf("handshake() error = %v, want ErrResumeUnhealthy", err)
 	}
 }
 

@@ -90,8 +90,8 @@ func (s *Starter) Command() string { return s.command }
 // cfg.Workspace is the child process's cwd. cfg.Args are appended
 // after the starter's defaults (user wins). cfg.Env is merged with
 // the starter's defaults (cfg wins). cfg.SessionID, when non-empty,
-// is appended as the resume id; ACP does not currently surface it
-// over the wire (the bridge synthesizes a fresh one for now).
+// is forwarded to the ACP handshake, which reopens that session
+// via session/resume (when advertised) or session/load.
 func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agent, error) {
 	d, err := newDriver(ctx, s, cfg)
 	if err != nil {

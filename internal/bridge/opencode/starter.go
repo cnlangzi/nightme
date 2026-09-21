@@ -110,10 +110,9 @@ func (s *Starter) Command() string { return s.command }
 // a thin per-bridge UpdateHandler can be installed via
 // (*driver).SetUpdateHandler(...) — see docs/bridge/acp.md §2.3.
 //
-// cfg.SessionID, when non-empty, is reserved for v2 ACP
-// session/load wiring. Today the bridge always opens a fresh
-// session; resume via cfg.SessionID is implemented in codex /
-// pi bridges already and will follow the same shape here in v2.
+// cfg.SessionID, when non-empty, is forwarded to the generic ACP
+// bridge, which reopens that session via session/resume or
+// session/load.
 func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agent, error) {
 	if cfg.Workspace == "" {
 		return nil, errors.New("opencode: workspace is required")

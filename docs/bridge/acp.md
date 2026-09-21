@@ -202,13 +202,18 @@ ACP turn-end 有**多个**可能来源，bridge 必须去重：
 
 ## 5. 设计约束 / 已知限制
 
-### 5.1 Model 在 handshake 时未知
+### 5.1 Model
 
-ACP 的 `initialize` 和 `session/new` 响应都**不带** model 字段。Model 只在后续 vendor 扩展（`usage_update.model` / `session_info_update.model`）里出现。所以：
+ACP 的 `session/new`、`session/load`、`session/resume` 响应都可以带 Session Config Options。当前模型取 `configOptions` 里 `id` 或 `category` 为 `model` 的选项（优先展示名）。Cursor 还会在同一响应里放非标准的 `models.currentModelId`，`configOptions` 没有模型项时用它兜底。
 
-- `EventAgentReady.Model` 在 handshake 时为空（runtime 容忍）
-- Model 在第一次 vendor 扩展送达后才可见（runtime 通过 §3.4 SetModel 放开自动捕获）
-- server 完全不报 model 的极端情况：footer 模型段不显示
+之后的变更走：
+
+- `config_option_update`（ACP 标准，整表快照）
+- `usage_update.model` / `session_info_update.model`（vendor 扩展）
+
+`deliver()` 把 `d.model` 盖到后续每个事件上。handshake 响应里已经有模型时，`EventAgentReady.Model` 直接带上；没有则留空，runtime 的 `SetModel` 对空值 no-op，等后续事件再捕获。
+
+有 `cfg.SessionID` 时 handshake 不发 `session/new`：agent 声明了 `sessionCapabilities.resume` 就走 `session/resume`，否则在声明了 `loadSession` 时走 `session/load`（回放的 `session/update` 不转发到聊天）。两者都没有，或调用失败，返回 `agent.ErrResumeUnhealthy`，不静默新开 session。
 
 ### 5.2 opencode 的 `used` 字段语义模糊
 
@@ -254,14 +259,15 @@ type SessionView struct {
 
 ### 7.1 已完成（v0.x）
 
-- ✅ generic fallback 接管 `usage_update` / `session.status` / `session_info_update`
+- ✅ generic fallback 接管 `usage_update` / `session.status` / `session_info_update` / `config_option_update`
+- ✅ `session/new` / `session/load` / `session/resume` 的 `configOptions`（及 Cursor `models`）写入 `d.model`
+- ✅ `cfg.SessionID`：声明了 `sessionCapabilities.resume` 走 `session/resume`，否则声明了 `loadSession` 走 `session/load`（历史回放不转发）；两者都没有或调用失败返回 `ErrResumeUnhealthy`
 - ✅ `deliver()` 自动盖 SessionID / Model / AgentName / Workspace
 - ✅ runtime `SetModel` 捕获条件放开
 - ✅ 13 个新单元测试（`deliver_stamp_test.go`）
 
 ### 7.2 v2+ 留待 issue
 
-- ACP `session/load` resume 路径（目前 `cfg.SessionID` 启动 + `setSessionMode/Option`）
 - ACP image / file block（目前 `@<path>` 兜底）
 - `setSessionModel` JSON-RPC 方法（用于 `/model` slash command）
 - `available_commands_update` → runtime slash command 路由（等 slash-command-reactions 落地）

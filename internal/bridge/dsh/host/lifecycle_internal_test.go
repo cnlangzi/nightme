@@ -16,9 +16,14 @@
 package host
 
 import (
+	"bufio"
 	"context"
+	"fmt"
+	"io"
+	"log/slog"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"testing"
@@ -272,5 +277,64 @@ func TestSanitizeBaseURL_StripsTrailingQuote(t *testing.T) {
 		if got != c.want {
 			t.Errorf("sanitizeBaseURL(%q) = %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+func TestReclaimPort_KillsForeignListener(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=^TestReclaimPortHelper$")
+	cmd.Env = append(os.Environ(), "DSH_RECLAIM_HELPER=1")
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+	})
+
+	sc := bufio.NewScanner(stdout)
+	var port int
+	for sc.Scan() {
+		p, err := strconv.Atoi(sc.Text())
+		if err == nil && p > 0 {
+			port = p
+			break
+		}
+	}
+	if port == 0 {
+		t.Fatalf("helper did not report a port: %v", sc.Err())
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	if err := reclaimPort(ctx, logger, port); err != nil {
+		t.Fatal(err)
+	}
+	if dialReachable(port) {
+		t.Fatalf("port %d still accepting after reclaim", port)
+	}
+}
+
+func TestReclaimPortHelper(t *testing.T) {
+	if os.Getenv("DSH_RECLAIM_HELPER") != "1" {
+		t.Skip()
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Println(ln.Addr().(*net.TCPAddr).Port)
+	_ = os.Stdout.Sync()
+	for {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		c.Close()
 	}
 }

@@ -1,30 +1,19 @@
-// host_state_test.go — pins the F-hostready-install-race invariant.
+// host_state_test.go — pins the host $events clientId capture.
 //
-// Before the fix, the per-WS clientId dsh sends in the `ready`
-// frame was captured by the host handler (hostWaterfallHandler
-// in the dsh/ package). The handler installs lazily on first
-// newDriver, so a WS that opens before any chat session exists
-// had its one-shot ready frame dispatched to a nil handler and
-// silently dropped — the clientId slot stayed empty for the
-// connection's lifetime, and dsh/session.go::SendPermission
-// failed with "dsh: no clientId captured from host $events ready
-// frame" so the runtime's permission answer never reached dsh.
-//
-// The fix moves the capture to the dispatch path
-// (host/stream.go:case "ready" → host.SetHostClientID), which
-// runs in the readLoop goroutine before any handler. The two
-// tests below pin that:
+// dsh delivers the $events ready handshake as a host stream item;
+// host/stream.go::dispatch captures its clientId into package state
+// in the readLoop goroutine, before any host handler runs. These
+// tests pin that:
 //
 //   - TestReadyFrame_CapturesClientIdBeforeHandlerInstall —
-//     connect, do NOT install a host handler, assert that
-//     GetHostClientID returns the id the mock dsh sent. With the
-//     pre-fix design this fails; with the post-fix design it
-//     passes regardless of whether installHostHandler has run.
+//     connect without installing a host handler, assert GetHostClientID
+//     returns the id the mock dsh sent (capture does not depend on
+//     handler install timing).
 //
-//   - TestSetHostClientID_Contract — pins the public API:
-//     round-trip, no-op on empty id, last-write-wins on multiple
-//     sets, and ResetHostClientIDForTest clears the slot for
-//     cross-package test setup.
+//   - TestSetHostClientID_Contract — pins the public API: round-trip,
+//     no-op on empty id, last-write-wins on multiple sets, and
+//     ResetHostClientIDForTest clears the slot for cross-package test
+//     setup.
 package host_test
 
 import (
@@ -45,13 +34,13 @@ import (
 // captured value matches what the mock sent.
 const mockReadyClientID = "client-mock-001"
 
-// TestReadyFrame_CapturesClientIdBeforeHandlerInstall proves the
-// race-fix invariant. The mock dsh sends a `ready` frame right
-// after the mux WS upgrades; the test deliberately does NOT call
-// cli.SetHostHandler, simulating the production window where the
-// WS opens during EnsureSharedHost but the host handler hasn't
-// been wired yet (that wiring happens lazily on the first
-// newDriver call from the runtime). The dispatch path must
+// TestReadyFrame_CapturesClientIdBeforeHandlerInstall pins the
+// capture invariant. The mock dsh sends the $events ready handshake
+// as a host stream item right after the mux WS upgrades; the test
+// deliberately does NOT call cli.SetHostHandler, mirroring the
+// production window where the WS opens during EnsureSharedHost but
+// the host handler is not wired yet (that wiring happens on the
+// first newDriver call from the runtime). The dispatch path must
 // capture the clientId anyway.
 func TestReadyFrame_CapturesClientIdBeforeHandlerInstall(t *testing.T) {
 	host.ResetHostClientIDForTest()
@@ -66,10 +55,8 @@ func TestReadyFrame_CapturesClientIdBeforeHandlerInstall(t *testing.T) {
 	}
 	t.Cleanup(c.Close)
 
-	// Deliberately do NOT call c.SetHostHandler — this is the
-	// production race window. The old design would leave
-	// hostRemoteClientID empty; the new design captures it
-	// at the dispatch site regardless of handler presence.
+	// Deliberately do NOT call c.SetHostHandler — capture happens
+	// in dispatch regardless of handler presence.
 
 	// The mock dsh sends the ready frame on connect; wait for
 	// it to be processed and observe via GetHostClientID.

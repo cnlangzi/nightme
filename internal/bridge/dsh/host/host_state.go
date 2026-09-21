@@ -1,30 +1,27 @@
 // host_state.go — package-level state for the host $events stream.
 //
-// The `ready` frame dsh sends right after WS upgrade carries a
-// per-connection clientId; the bridge echoes it back on every
-// /api/$events/result RPC. hostRemoteClientID is the single slot
-// for that id.
+// dsh delivers the $events `ready` handshake as a host stream item:
+// {type:"item", streamId:"host-$events",
 //
-// Capture is in host/stream.go:case "ready" (the dispatch path),
-// not in hostWaterfallHandler. Reason: the host handler installs
-// lazily on first newDriver, and the one-shot ready frame would
-// otherwise race the install — if the frame lands before the
-// handler is wired, it gets dispatched to a nil handler and
-// silently dropped, leaving the slot empty for the lifetime of
-// the connection. dsh/session.go::SendPermission then errors with
-// "no clientId captured from host $events ready frame" and the
-// runtime's permission answer never reaches dsh.
+//	value:{type:"ready", clientId, host:{home}}}. The per-connection
 //
-// Dispatch runs in the readLoop goroutine, before any handler —
-// it is the earliest possible capture point. SetHostClientID is
-// the single source of truth; hostWaterfallHandler no longer
-// writes this var.
+// clientId is echoed back on every /api/$events/result RPC;
+// hostRemoteClientID is the single slot for it.
+//
+// Capture happens in host/stream.go::dispatch on the host-stream
+// item path (the readLoop goroutine, before any host handler runs).
+// dsh/session.go::SendPermission reads this slot for the
+// /api/$events/result clientId field; if the slot is empty (no ready
+// captured), SendPermission errors and the runtime's permission
+// answer never reaches dsh.
+//
+// SetHostClientID is the single source of truth; hostWaterfallHandler
+// no longer writes this var.
 //
 // The RWMutex here is independent of hostWaterfallMu in the dsh
 // package (which guards the driver demux table hostWaterfallBySess).
 // The two locks never contend on the same data, so they remain
-// separate — moving clientId here does not need to drag the
-// driver-map lock along.
+// separate.
 package host
 
 import "sync"
@@ -35,15 +32,14 @@ var (
 )
 
 // SetHostClientID sets the per-WS clientId captured from the most
-// recent host $events ready frame. No-op when id is empty (a
-// malformed ready frame must not clobber a previously captured
-// good id; the next valid ready will overwrite anyway).
+// recent host $events ready handshake. No-op when id is empty (a
+// malformed ready must not clobber a previously captured good id;
+// the next valid ready will overwrite anyway).
 //
-// Called from host/stream.go:case "ready" on the dispatch path so
-// the capture happens regardless of whether the dsh-level host
-// handler (hostWaterfallHandler) has been installed yet. The
-// handler's earlier same-named write is removed; dispatch is the
-// single source of truth.
+// Called from host/stream.go::dispatch on the host-stream item
+// path (the readLoop goroutine), so the capture happens regardless
+// of whether the dsh-level host handler (hostWaterfallHandler) has
+// been installed yet. dispatch is the single source of truth.
 func SetHostClientID(id string) {
 	if id == "" {
 		return

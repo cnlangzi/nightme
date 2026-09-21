@@ -27,6 +27,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"reflect"
 	"sync"
 )
 
@@ -62,10 +63,50 @@ func SetGlobal(c *Client) {
 // the new RPC client. The caller is responsible for closing the
 // previous Client (typically after swapping, so any in-flight RPC
 // gets a clean error rather than a hung transport).
+//
+// Phase 3 fix #4: also notify the relay so its mux pump
+// re-subscribes on the new client. Without this hook, the relay
+// keeps dispatching mux frames from the dead client and drivers
+// never see the new dsh's frames.
 func ReplaceGlobal(c *Client) {
 	globalMu.Lock()
 	globalClient = c
 	globalMu.Unlock()
+	hostReplaceClientHookMu.Lock()
+	for _, hook := range hostReplaceClientHooks {
+		hook(c)
+	}
+	hostReplaceClientHookMu.Unlock()
+}
+
+var (
+	hostReplaceClientHookMu sync.Mutex
+	hostReplaceClientHooks  []func(*Client)
+)
+
+// RegisterReplaceGlobalHook adds a callback that runs every
+// time ReplaceGlobal swaps the shared dsh client. Used by the
+// dsh relay to rebind its mux pump. Tests can chain multiple
+// hooks; production wires exactly one (the relay).
+//
+// Phase 3 fix #4.
+func RegisterReplaceGlobalHook(hook func(*Client)) {
+	hostReplaceClientHookMu.Lock()
+	hostReplaceClientHooks = append(hostReplaceClientHooks, hook)
+	hostReplaceClientHookMu.Unlock()
+}
+
+// UnregisterReplaceGlobalHook removes a previously registered
+// hook (no-op if not present). Tests + daemon teardown.
+func UnregisterReplaceGlobalHook(hook func(*Client)) {
+	hostReplaceClientHookMu.Lock()
+	defer hostReplaceClientHookMu.Unlock()
+	for i, h := range hostReplaceClientHooks {
+		if reflect.ValueOf(h).Pointer() == reflect.ValueOf(hook).Pointer() {
+			hostReplaceClientHooks = append(hostReplaceClientHooks[:i], hostReplaceClientHooks[i+1:]...)
+			return
+		}
+	}
 }
 
 // GetGlobal returns the shared Client installed by SetGlobal, or nil

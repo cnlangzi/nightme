@@ -658,41 +658,32 @@ func (h *StreamHub) readLoop(conn *websocket.Conn) error {
 // streams we already closed).
 func (h *StreamHub) dispatch(f serverFrame) {
 	switch f.Type {
-	case "ready":
-		// dsh sends one {type:"ready", clientId, host:{home:"..."}}
-		// frame right after the WS upgrade completes. Log for
-		// correlation, capture the clientId at the dispatch site
-		// (so the install-race where hostWaterfallHandler hasn't
-		// been wired yet can't drop the one-shot ready frame),
-		// then forward to the host handler for any downstream
-		// consumers.
-		h.log.Info("dsh.host: mux ready",
-			"client_id", f.ClientID, "host", string(f.Host))
-		// Capture clientId at the dispatch site, BEFORE invokeOnHost.
-		// The host handler installs lazily on first newDriver; if we
-		// depended on the handler to capture, the one-shot ready
-		// frame would race the install and silently drop on every
-		// spawn/attach that opens the WS before any chat session
-		// exists. dsh/session.go::SendPermission reads this same
-		// var for the /api/$events/result clientId field. See
-		// host_state.go for the full race-fix invariant.
-		SetHostClientID(f.ClientID)
-		// Repack clientId + host into a {clientId, host} value
-		// envelope so the bridge-side handler can unmarshal it
-		// the same way it unmarshals waterfall request bodies.
-		readyValue, _ := json.Marshal(struct {
-			ClientID string          `json:"clientId"`
-			Host     json.RawMessage `json:"host"`
-		}{ClientID: f.ClientID, Host: f.Host})
-		h.markDispatchStart()
-		h.invokeOnHost("ready", "", readyValue)
-		return
-
 	case "item":
 		// Look up which handler this streamId belongs to.
 		h.mu.RLock()
 		if f.StreamID == hostStreamID {
 			h.mu.RUnlock()
+			// dsh delivers the $events ready handshake as a host
+			// item: value={type:"ready", clientId, host}. Capture
+			// the clientId at the dispatch site; SendPermission
+			// echoes it on /api/$events/result. The host handler
+			// ignores "ready" via its early-return.
+			var head struct {
+				Type string `json:"type"`
+			}
+			if json.Unmarshal(f.Value, &head) == nil && head.Type == "ready" {
+				var r struct {
+					ClientID string          `json:"clientId"`
+					Host     json.RawMessage `json:"host"`
+				}
+				_ = json.Unmarshal(f.Value, &r)
+				h.log.Info("dsh.host: mux ready",
+					"client_id", r.ClientID, "host", truncateBytes(r.Host, 120))
+				SetHostClientID(r.ClientID)
+				h.markDispatchStart()
+				h.invokeOnHost("ready", "", f.Value)
+				return
+			}
 			method, rpcID, payload := translateHostEvent(f.Value)
 			if method == "" {
 				h.log.Debug("dsh.host: untranslated host item",

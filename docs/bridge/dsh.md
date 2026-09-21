@@ -193,19 +193,31 @@ dsh --profile web --port 3080
 
 ```
 spawnAndWire (host/lifecycle.go):
-  cmd.Start ──→ drainStdout (parse launch URL)
+  cmd.Start ──→ drainStdout (parse launch URL → token) + drainStderr
               ↓
-              waitForListen(ctx, port)  # TCP-poll,每 50ms 拨号
+              waitForListen(ctx, port)                 # TCP-poll,每 50ms 拨号
               ↓
-              mintAuthCookie(baseURL, token)
+              mint cookie:先 mintDSHAuthCookieFromCredentials(本地 ~/.dsh/.credentials.yaml secret)
+                          ↓ secret 缺失 / 不可读 fallback
+                          mintAuthCookie(baseURL, token)(GET /?token=... → 303 + Set-Cookie)
               ↓
-              hub.Start(ctx)  # 启 WS pumps
+              NewWithJar(baseURL, jar)                  # 构造 *Client(RPC + Hub + Router + Control)
+              ↓
+              OnLifecycleInstall(cli)                   # 装 host waterfall handler(先于 WS 起来,见 §3.8)
+              ↓
+              WaitForDSHReady(ctx, path, attempts)      # probe workspace.create 直到 workspaceController 就绪
+              ↓
+              cli.Start(ctx)                            # 启 /api/remote.mux WS pumps
 ```
 
 **Readiness 判定用 TCP accept,不解析 stdout 文本**:
 - stdout 第一行 `dsh web: http://127.0.0.1:PORT/?token=<launchToken>` 用正则 `dsh web:\s+(http://[^\s]+)` 捕获完整 URL → `url.Query().Get("token")` 提 token
 - 但**不**用 stdout 文本判定端口(以防 dsh 漂移默认端口): `--port` 旗是 nightme 传的,自己知道
 - TCP-poll 捕获 kernel-accept-queue vs app-Accept race:`waitForListen` 在 `dsh.bind` 系统调用返回但 `app.Accept` 还没拉起时就能 TCP-dial 通过
+
+`WaitForDSHReady` 探测目标是 `workspace.create`(带 workspace 绝对路径),不是 `workspace.list` —— `workspace.list` 在 dsh 0.1.2-rc.1 返 HTTP 404,只有 `workspace.create` 在启动 race 期间能触发 `workspaceController` 的 `service-unavailable` 返回,从而区分"插件还没加载"与"dsh 真的坏了"。详见 `host/client.go::WaitForDSHReady`。
+
+`OnLifecycleInstall` 必须在 `cli.Start` 之前:dsh 在 WS upgrade 后把 `$events` ready 握手作为 host stream item 推送,dispatch 在 item 路径捕获 `clientId`(见 §3.8),不依赖 host handler 安装时序;后续 waterfall 帧才需要 host handler 已装好。
 
 ---
 
@@ -399,7 +411,7 @@ bridge 翻译(`host/stream.go::translateHostEvent`):
 - `emit` → `method=event, rpcID=""`,payload 包 `{args:[...]}`
 - `waterfall` → `method=event, rpcID=eventId`,payload 包 `{agentId, request}`
 - `cancel` → `method="host/cancel", rpcID=eventId`,payload 包 `{eventId}`
-- `ready` → 不翻译,dispatch 路径只 log(`dsh.host: mux ready clientId=...`)
+- `ready` → dispatch 在 host-stream item 路径捕获 `clientId`(`host.SetHostClientID`)+ log(`dsh.host: mux ready clientId=...`),不进 translateHostEvent
 
 ### 3.4a `session/control` stream items
 
@@ -478,26 +490,34 @@ typert `SessionFollowFrame` 一帧:
 }
 ```
 
-**session event.type 判别子**(drain 实机抓到 14 种,`request/header` 是新增的未在 dsh.md 早期版本列出的):
+**session event.type 判别子**(bridge `isSessionEventType` 白名单 + `dispatch.go::standardRegistry` 注册的 handler):
 
 | event.type | 含义 | bridge 处理 |
 |------------|------|--------------|
-| `agent/inbox/spliced` | turn inbox splice | log;不 emit event |
-| `turn/start` | 一次 turn 开始 | dispatcher 清 turn 状态 |
-| `turn/end` | 一次 turn 结束 | `EventResult` + `EventDone{Reason:"settled"}` |
-| `step/start` | 模型推理+工具链一次 | 不 emit;统计 ttft/tok-s |
-| `step/end` | 同上 | 不 emit;统计 |
-| `user/message` | 用户消息回显 | 丢弃(runtime 已从 inbound 知道) |
-| `session/title` | session 标题 | 静默 |
-| `session/title-llm-request` | 标题 LLM 请求中 | 静默 |
-| `request/header` | 推理 header | 静默 |
-| `request/context` | 上下文注入 | 静默 |
-| `usage` | token usage | 静默(汇总到 turn/end) |
-| `assistant/chunk` | 流式 chunk | `translate.go::handleAssistantChunk` 按 `chunk.type` 分流 |
-| `assistant/message` | 完整 message | `translate.go::handleAssistantMessage` |
-| `compaction/end` | 上下文压缩完成 | 静默(本期不渲染) |
-| `todo/write` | 任务条更新 | `applyTodoProjection` |
-| `approval/asked` | approval 审计 echo(`approval/asked` + `approval/decided` 配对) | session/event 上的 audit echo;**不是** respondable gate — 真正的 replyable gate 在 host `$events` waterfall 上的 `approval/request`,见 §3.8 |
+| `assistant/chunk` | 流式 chunk | `handleAssistantChunk` 按 `chunk.type` 分流(见下) |
+| `assistant/message` | 完整 message | `handleAssistantMessage` |
+| `tool/call` | 工具调用开始 | `handleToolCall` |
+| `tool/result` | 工具调用结果 | `handleToolResult` |
+| `turn/start` | 一次 turn 开始 | `handleTurnStart`:清 turn 状态 |
+| `turn/end` | 一次 turn 结束 | `handleTurnEnd`:`EventResult` + `EventDone{Reason:"settled"}` |
+| `step/start` | 模型推理+工具链一次 | `handleStepBoundary`:统计 ttft/tok-s,不 emit |
+| `step/end` | 同上 | `handleStepBoundary`:统计 |
+| `user/message` | 用户消息回显 | `handleUserMessageEcho`:丢弃(runtime 已从 inbound 知道) |
+| `session/title` | session 标题 | `handleSessionTitle` |
+| `session/title-llm-request` | 标题 LLM 请求中 | `handleDebugOnly`(静默) |
+| `request/header` | 推理 header | `handleDebugOnly`(静默) |
+| `request/context` | 上下文注入 | `handleDebugOnly`(静默) |
+| `system/message` | system prompt 注入 | `handleDebugOnly`(静默) |
+| `agent/inbox/spliced` | turn inbox splice | `handleDebugOnly`:log,不 emit |
+| `compaction/end` | 上下文压缩完成 | `handleCompactionEnd`(静默) |
+| `todo/write` | 任务条更新 | `handleTodoWrite`:`applyTodoProjection` |
+| `todo/update` | 任务条更新(dsh 未发) | `handleTodoUpdate`:no-op,提前注册 |
+| `todo/delete` | 任务条删除(dsh 未发) | `handleTodoDelete`:no-op,提前注册 |
+| `approval/asked` | approval 审计 echo | `handleApprovalAsked`:audit echo,**不是** respondable gate — 真正的 replyable gate 在 host `$events` waterfall 上的 `approval/request`,见 §3.8 |
+| `approval/decided` | approval 决议 echo | `handleApprovalDecided`:emit `EventAgentPermissionSettled`,runtime PATCH 卡片 |
+| `permission/preset` / `sandbox/mode` / `approval/policy` | dsh 内部状态 | `handleDebugOnly`(静默) |
+
+注:`usage` **不是**顶层 event.type,是 `assistant/chunk` 内部的 `chunk.type`(见下表)。若真来一个顶层 `usage` 帧,不在白名单,会走 `recordAndCountUnknown` + warn。
 
 **`assistant/chunk` 内部 `chunk.type` 子分派**(dsh 0.1.2-rc.1 实机抓):
 
@@ -529,11 +549,9 @@ if (extra.length || missing.length) throw "gateway/arguments-invalid"
 - `session.prompt mode=""` 返 `bad-request: invalid input: expected "queue"`
 - extra 字段(typert 未声明的)严格拒 — `requestId` 之外的 `requestIdLike` 字段都算 extra
 
-### 3.7 waterfall result 回环(2026-09-13 修正)
+### 3.7 waterfall result 回环
 
-旧文档写 `/api/respond` 走 `{type:'client-response', rpcId, result:{ok,value}}`,**与 0.1.5-rc.1 实测源码不一致**。
-
-canonical wire(`packages/api/gateway/src/stream-protocol.ts::parseRemoteEventResult`):
+dsh 把 approval / AskUserQuestion 的回复搬到 host `$events` waterfall 流上,回复走 typed RPC `POST /api/$events/result`(endpoint `$events/result`)。canonical wire(`packages/api/gateway/src/stream-protocol.ts::parseRemoteEventResult`):
 
 ```ts
 const REMOTE_EVENT_RESULT_ENDPOINT = '$events/result'
@@ -553,7 +571,7 @@ interface RemoteEventResult {
 }
 ```
 
-调用方式(走普通 typed RPC):
+调用方式(标准 typed RPC):
 
 ```jsonc
 POST /api/$events/result
@@ -570,26 +588,21 @@ POST /api/$events/result
 → { type:"server-response", rpcId:"<echoed>", result:{ok:true,value:undefined} }
 ```
 
-**关键差异**:
+`exactKeys(['clientId','eventId','outcome'])` 强校验三字段,缺一即拒。`clientId` 必须来自本连接 `$events` 首帧 ready,`eventId` 必须来自待回复的 waterfall 帧。
 
-| 字段 | 旧文档假设 | canonical |
-|---|---|---|
-| 端点 | `/api/respond` | `/api/$events/result`(走 typert 通用 typed RPC) |
-| envelope | 二方 `{type:'client-response'}` | 标准 `client-request` envelope + `method:"$events/result"` |
-| correlation 字段 | 顶层 `rpcId`(echo server frame rpcId) | `payload.clientId` + `payload.eventId`(两个字段都要,`exactKeys` 强校验) |
-| result 形状 | `{ok:true, value:<答案>}` | `outcome:{kind:'result', value?}` / `{kind:'next'}` / `{kind:'rejected', error}` |
+**bridge 双路回复**(`session.go::SendPermission`):回复方法的选择由 pending entry 的 `pendingSource[frameRpcID]` 字段决定:
 
-**bridge 现状**(`host/client.go::RPCClient.Respond`):按旧文档写,POST 到 `/api/respond` + 二方 envelope → dsh 0.1.5-rc.1 上返 **HTTP 404**(端点不存在)+ 即使存在 envelope 也会被 `parseRemoteEventResult` 用 `exactKeys(['clientId','eventId','outcome'])` 拒。
+| 来源 (`pendingSource`) | 回复方法 | 端点 | envelope |
+|---|---|---|---|
+| `"host"`(dsh 0.1.2-rc.1 host waterfall) | `RPCClient.SendWaterfallResult` | `/api/$events/result` | 标准 `client-request` + `method:"$events/result"`,`payload.args={clientId, eventId, outcome:{kind, value}}` |
+| `"mux"` / default(legacy dsh < 0.1.2-rc.1 mux 顶层 method) | `RPCClient.Respond` | `/api/respond` | 二方 `{type:'client-response', rpcId, result:{ok, value}}` |
 
-**修法**:把 `RPCClient.Respond(ctx, frameRpcID, value)` 改成走标准 typed RPC:
-- endpoint: `"$events/result"`
-- payload: `{clientId, eventId, outcome:{kind:'result', value}}`
-- correlation:从 `$events` 首帧 ready 缓存 `clientId`,从 waterfall 帧取 `eventId`(替代旧的 `frameRpcID` 参数)
-- 走 `RPCClient.Post(...)` 而不是单独 `PostEnvelope`(已统一)
+- host 路径:`clientId` 由 `host/host_state.go::SetHostClientID` 在 dispatch 路径捕获(见 §3.8),`eventId` = waterfall 帧的 `eventId`(即 `frameRpcID`)。`SendPermission` 在 `clientID == ""` 时直接报错,不发出请求。
+- legacy 路径:`Respond` 走 `PostEnvelope`,`rpcId` echo server-frame rpcId。dsh 0.1.2-rc.1 上 `/api/respond` 端点不存在,返 HTTP 404;该路径仅作 legacy mux fallback,host 路径不会走到。
 
-rejection 路径用 `outcome:{kind:'rejected', error:{name,message,code,details}}`;allow-then-fall-through 用 `outcome:{kind:'next'}` 让下一个 plugin listener 接手。
+rejection 用 `outcome:{kind:'rejected', error:{name,message,code,details}}`;allow-then-fall-through 用 `outcome:{kind:'next'}` 让下一个 plugin listener 接手。
 
-**对 `/review` 的影响**:RunOnce / Review 用 `autoAllowRunOncePermission`(`starter.go:262`)不调 respond,主流程 OK;但 **review agent 跑 `bash` / `edit` 之类需 approval 的工具调用**会卡在 5min decline watchdog(`permissions.go::pendingApprovals`)。
+**对 `/review` 的影响**:RunOnce / Review 用 `autoAllowRunOncePermission`(`starter.go:262`)不调 respond,主流程 OK;review agent 跑 `bash` / `edit` 之类需 approval 的工具调用会卡在 5min decline watchdog(`permissions.go::pendingApprovals`)。
 
 ---
 
@@ -644,10 +657,11 @@ export function projectRemoteEventRequest(value, subject): ProjectedRemoteEventR
 
 **bridge 适配**(`internal/bridge/dsh/host_waterfall.go`):
 
-- `installHostHandler(cli)` 在第一个 driver 构造时一次性装全局 `cli.SetHostHandler(hostWaterfallHandler)`(幂等)
+- `installHostHandler` 由 `init()` 注册进 `host.SetLifecycleInstall`,在 Client 构造时(`spawnAndWire` / `tryAttachExistingDSH` 调 `host.OnLifecycleInstall(cli)`,先于 `cli.Start`)一次性装全局 `cli.SetHostHandler(hostWaterfallHandler)`,幂等
 - `hostWaterfallHandler` 按 frame 顶层 `agentId` 字段查 `hostWaterfallBySess map[sessionID]*driver` → `driver.handleHostFrame`(注意:**不要从 `request.agent` 读**,wire 上没有)
 - `driver.handleHostFrame` 把 waterfall envelope 适配成 mux envelope,调用现有的 `handleApprovalRequested` / `handleQuestionRequested`(`internal/bridge/dsh/permissions.go`),后者用同一份 `pendingApprovals` / `pendingQuestions` FIFO,reply key 仍是 waterfall 的 `eventId`
 - 回复走 `/api/$events/result`(`$events/result` 标准 typed RPC,见 §3.7),不是 `/api/respond`
+- **clientId 捕获不变量**:dsh 把 `$events` ready 握手作为 host stream item 推送(`{type:"item", streamId:"host-$events", value:{type:"ready", clientId, host}}`)。`host/stream.go::dispatch` 在 host-stream item 路径解出 `value.clientId` 调 `host.SetHostClientID`,**早于** `invokeOnHost` 把帧交给 host handler。在 dispatch site 捕获保证它一定被记下,不依赖 host handler 的安装时序。`SendPermission` 读 `host.GetHostClientID()` 作 `/api/$events/result` 的 `clientId`,空则直接报错不发出请求(见 host/host_state.go)。
 
 **为什么 mux 顶层 method 不再发**:旧 wire `approval/requested` / `question/requested` 在 0.1.0-rc.6 时代是 mux frame,0.1.2-rc.1 改成 Cordis waterfall 后不再发。`handleMuxFrame` 的兜底分支对任何 straggler 仍会 `recordAndCountUnknown` + warn(`"dsh: mux legacy method dropped"`),不进 permission 路径。
 
@@ -660,23 +674,44 @@ export function projectRemoteEventRequest(value, subject): ProjectedRemoteEventR
 ```
 internal/bridge/dsh/
 ├── doc.go                 # package doc
-├── starter.go             # Starter + Info(ModeJSONIO) + Detect + Start + RunOnce
-├── detect.go              # exec.LookPath("dsh") + `dsh web` smoke probe
-├── session.go             # host.EnsureSharedHost + handshake + closeOnce + 翻译层
+├── starter.go             # Starter + Info(ModeJSONIO) + Detect + Start + RunOnce + Review
+├── session.go             # driver:host.Client 接入 + handshake + SendPermission + pending approval/question FIFO + closeOnce
+├── handle_mux.go          # handleMuxFrame 顶层 method 分发 + isSessionEventType 白名单 + replaySnapshot
+├── dispatch.go            # 声明式 eventRegistry + dispatcher + standardRegistry(handler 注册表)
+├── translate.go           # sessionEventEnvelope 翻译 + assistant chunk/message 流式状态机
+├── permissions.go         # approval/question 请求处理 + registerApproval 5min timeout watchdog
+├── host_waterfall.go      # host $events waterfall demux + installHostHandler(经 SetLifecycleInstall)+ handleHostFrame
+├── protocol.go            # wire 类型(mux frame / approval / question payload)
+├── state.go               # wireState:多源真相(lastSeq / 工具 / 任务 projection)
+├── control_projection.go  # driver 侧 session/control modelSelection watcher 注册(WatchSessionModel)
+├── api/
+│   └── bridge.go          # api.Bridge 接口适配(Respond 等)
+├── relay/                 # dashboard relay(mux pump + 历史回填)
+│   ├── relay.go           # relay 主循环 + ReplaceGlobal hook 重订
+│   ├── backfill.go        # session 历史回填
+│   ├── session_state.go   # relay 侧 session 状态
+│   ├── page.go            # 分页
+│   └── helpers.go         # 工具
 ├── host/                  # shared host 子包
-│   ├── client.go          # HTTP RPC client(POST /api/{ns}/{method},args 包装,slash 转换,caller-side retry on transient transport errors)
-│   ├── client_internal_test.go  # unit test for PostWithReconnect + isTransientTransportError
-│   ├── stream.go          # WebSocket client(单 /api/remote.mux,generation 跟踪,翻译)
-│   ├── router.go          # per-session 路由 + pending approval/question 表
-│   ├── lifecycle.go       # spawn + auth mint + runMonitor(unified attached/owned 循环,backoff respawn,port 复用)
-│   ├── ensure.go          # lazy 一次性 Start 全局 host(sync.Once + 并发安全)
-│   ├── health.go          # 周期性 /api/session.list health probe(strikes → SIGKILL)
-│   ├── host.go            # Client 外观(RPC + Hub + Router 三件套)+ RecoverSubscriptions
-│   ├── host_state.go      # host $events ready frame 的 clientId capture slot
-│   └── install_hook.go    # 测试可注入的 spawner / probe 钩子
-├── host/host_test.go      # StreamHub + Router mock 测试
-├── host/wire_e2e_test.go  # 真 dsh RPC e2e(门控 wire_e2e tag + NIGHTME_TEST_DSH_URL)
-└── session_test.go ...    # 翻译层 + 状态机单测
+│   ├── client.go          # HTTP RPC client(POST /api/{ns}/{method},args 包装,slash 转换,PostWithReconnect)
+│   ├── stream.go          # WebSocket client(单 /api/remote.mux,generation 跟踪,翻译,PingHandler+readDeadline)
+│   ├── router.go          # per-session 路由 + pending chan string 表 + hostHandler + Snapshot/Enumerate
+│   ├── lifecycle.go       # spawn + cookie mint(本地 secret + launch-token fallback)+ runMonitor(attached/owned)+ tryRespawn
+│   ├── ensure.go          # lazy 一次性 Start 全局 host(sync.Once)
+│   ├── health.go          # 周期性 session.list health probe(strikes → SIGKILL)
+│   ├── host.go            # Client 外观(RPC + Hub + Router + Control)+ RecoverSubscriptions + ReplaceGlobal hooks
+│   ├── host_state.go      # host $events ready frame 的 clientId capture(SetHostClientID/GetHostClientID)
+│   ├── install_hook.go    # OnLifecycleInstall / SetLifecycleInstall:在 Client 构造时装 host handler
+│   ├── control_projection.go  # session/control stream modelSelection 解析 + watcher store
+│   ├── control_wire.go    # control stream wire 类型(baseline / projection / queue / jobs)
+│   ├── port_reclaim_unix.go      # 跨平台端口回收(占 3080 非 dsh 时 kill)
+│   └── port_reclaim_windows.go
+├── host/host_test.go              # StreamHub + Router + RPCClient mock(含 SendWaterfallResult / Respond wire 锁)
+├── host/wire_e2e_test.go          # 真 dsh RPC e2e(门控 wire_e2e + NIGHTME_TEST_DSH_URL)
+├── host/wire_ws_e2e_test.go       # 真 dsh WS 全流程(auth mint → mux → session.prompt → 翻译)
+├── host/wire_waterfall_e2e_test.go # 真 dsh waterfall / approval / question e2e
+├── host/auth_mint_test.go         # cookie 签名 byte-for-byte 验证(§7.1 fixture)
+└── *_test.go                      # session/dispatch/translate/state/permissions/handle_mux/starter/handshake 单测
 ```
 
 ### 4.2 HTTP layer(`host/client.go`)
@@ -776,7 +811,7 @@ waitDispatchDrain: for count > 0: cond.Wait()
 
 `cond.Locker` 由 `Cond.init` 时懒初始化,保持 struct literal 可读。
 
-### 4.4 翻译层(`host/stream.go::translate*` + `session.go::handleMuxFrame`)
+### 4.4 翻译层(`host/stream.go::translate*` + `handle_mux.go::handleMuxFrame`)
 
 `session/follow` item 的 wire 形状 (`SessionFollowFrame`) 与 bridge 内部的 `{method, rpcID, payload}` envelope **不一样**。翻译层在 `StreamHub.dispatch` 完成:
 
@@ -805,23 +840,23 @@ waitDispatchDrain: for count > 0: cond.Wait()
 | `{type:"emit", event, args:[...]}` | `method=event, rpcID=""`,payload=`{args:[...]}` |
 | `{type:"waterfall", event, eventId, agentId, request}` | `method=event, rpcID=eventId`,payload=`{agentId, request}` |
 | `{type:"cancel", eventId}` | `method="host/cancel", rpcID=eventId` |
-| `{type:"ready", clientId, host:{home}}` | 不翻译,dispatch log 完事 |
+| `{type:"ready", clientId, host:{home}}` | dispatch 在 host-stream item 路径捕获 `clientId`(`host.SetHostClientID`)+ log |
 
 ### 4.5 Router / Dispatch
 
-`host/router.go::Router` 维护 `map[sessionID]MuxFrameHandler` + `map[(sessionID, rpcID)]chan ApprovalDecision` + `map[(sessionID, rpcID)]chan QuestionDecision`。
+`host/router.go::Router` 维护 `muxSubs map[sessionID]MuxFrameHandler`、`cwdBySess map[sessionID]string`(respawn 恢复用)、`hostHandler HostFrameHandler`、以及单张 `pending map["<sessionID>:<frameRpcID>"]chan string`(per-session 答案回环通道,`chan string` 非 typed decision)。per-driver 的多 pending 状态(`pendingApprovals` / `pendingQuestions` / `pendingOrder` / `pendingSource` / `lastApprovalID`)在 driver 里(`session.go`),不在 Router。
 
 `DispatchMux(method, rpcID, payload)`:
 
 1. `extractSessionID(payload)` → sessionID
-2. `subs[sessionID]` 命中 → `handler(method, rpcID, payload)`
+2. `muxSubs[sessionID]` 命中 → `handler(method, rpcID, payload)`
 3. miss → drop + `recordAndCountUnknown`
 
-`handler` 是 `session.go::handleMuxFrame` 的方法值,继续走 dispatcher / approval / question 等分支。
+`handler` 是 `handle_mux.go::handleMuxFrame` 的方法值,继续走 dispatcher / approval / question 等分支。
 
-approval 答案回环: `pendingApprovals[approvalId] <- decision`;`RPCClient.ReplyRemoteEvent` 发 `/api/$events/result` 用 typed RPC envelope(见 §3.7),`payload.eventId` 是 reply key(替代旧 `frameRpcID`;`approvalId` 是 audit-only,不是 answer key),`payload.clientId` 来自 `$events` 首帧 ready。
+approval 答案回环:driver 的 `pendingApprovals[frameRpcID] <- decision`;回复方法由 `pendingSource[frameRpcID]` 决定(见 §3.7):`"host"` 走 `RPCClient.SendWaterfallResult` 发 `/api/$events/result`(typed RPC envelope,`payload.eventId` = waterfall 的 `eventId`,`payload.clientId` 来自 `$events` 首帧 ready),`"mux"` / default 走 `RPCClient.Respond` 发 `/api/respond`。`approvalId` 是 audit-only,不是 answer key。
 
-**Host waterfall demux**:host `$events` 上的 waterfall(`approval/request`、`user-questions/request`)在 frame 顶层带 `agentId`(`request.agent` 在 wire 上已被 `projectRemoteEventRequest` 剥掉,见 §3.8)。`host_waterfall.go` 用包级 `hostWaterfallBySess map[sessionID]*driver` 维护 demux 表,`installHostHandler(cli)` 在第一个 driver 构造时把全局 `cli.SetHostHandler(hostWaterfallHandler)` 装好,后续 driver 只 register 自己;`registerDriverForWaterfall(d)` / `unregisterDriverForWaterfall(d)` 在 `newDriver` / `Reset` / `Close` 钩子上调。`hostWaterfallHandler` 按 frame 顶层 `agentId` 查表 → `driver.handleHostFrame`,后者把 waterfall envelope 转成 mux envelope 形状调用现有的 `handleApprovalRequested` / `handleQuestionRequested`,reply key 仍是 waterfall 的 `eventId`(`/api/$events/result` envelope 不变)。
+**Host waterfall demux**:host `$events` 上的 waterfall(`approval/request`、`user-questions/request`)在 frame 顶层带 `agentId`(`request.agent` 在 wire 上已被 `projectRemoteEventRequest` 剥掉,见 §3.8)。`host_waterfall.go` 用包级 `hostWaterfallBySess map[sessionID]*driver` 维护 demux 表;`installHostHandler` 由 `init()` 注册进 `host.SetLifecycleInstall`,在 Client 构造时(`spawnAndWire` / `tryAttachExistingDSH` 调 `host.OnLifecycleInstall(cli)`,先于 `cli.Start`)一次性装全局 `cli.SetHostHandler(hostWaterfallHandler)`,后续 driver 只 register 自己;`registerDriverForWaterfall(d)` / `unregisterDriverForWaterfall(d)` 在 `newDriver` / `Reset` / `Close` 钩子上调。`hostWaterfallHandler` 按 frame 顶层 `agentId` 查表 → `driver.handleHostFrame`,后者把 waterfall envelope 转成 mux envelope 形状调用现有的 `handleApprovalRequested` / `handleQuestionRequested`,reply key 仍是 waterfall 的 `eventId`(`/api/$events/result` envelope 不变)。
 
 ---
 
@@ -952,7 +987,7 @@ respawn 循环的 caller-side 镜像在 §4.2.1 — `PostWithReconnect` 用同�
 
 ### 6.1 为什么单独 `host/` 子包,不分到 `internal/bridge/dsh/`
 
-shared host 是**多 session 共享**的,任何 ChatSession / AgentSession 都从 `host.GetGlobal()` 拿同一个 `*Client`。`host/` 把"全局 dsh 进程 + RPC + WS + Router"封装成单例,`dsh/` 只管"单 session 生命周期 + 翻译层 + 与 agent 包的接口"。Phase 3 之前共存,Phase 3 时把 envelope 类型 / 翻译层 / session.go::handleMuxFrame 合并到 `host/` 后再删 `dsh/`。
+shared host 是**多 session 共享**的,任何 ChatSession / AgentSession 都从 `host.GetGlobal()` 拿同一个 `*Client`。`host/` 把"全局 dsh 进程 + RPC + WS + Router"封装成单例,`dsh/` 只管"单 session 生命周期 + 翻译层 + 与 agent 包的接口"。Phase 3 之前共存,Phase 3 时把 envelope 类型 / 翻译层 / `handle_mux.go::handleMuxFrame` 合并到 `host/` 后再删 `dsh/`。
 
 ### 6.2 为什么 nightme 现在可以 attach 用户自启的 dsh
 
@@ -1131,16 +1166,19 @@ if err := cli.Start(ctx); err != nil { ... }  // caller ctx, lifetime = daemon
 
 **遗留**:`session.list` 路径 404 那条 — 没在生产代码上修,只修了测试代码。生产代码用 `RPCClient.SessionList`(Post),应该没问题,但 `tryAttachExistingDSH` 用的 raw `client.Do` 路径要小心(目前已用 POST,以后改 typed method 时记得同步)。
 
-### 7.6 daemon.log 里的 "host handler installed" 是好信号
+### 7.6 daemon.log 里的 attach 成功信号
 
-attach 路径第一次触发时,`host_waterfall.go` 会 log:
+attach 路径触发后,`host/stream.go::dispatch` 的 `ready` 分支与 `host_waterfall.go::hostWaterfallHandler` 会产出这些行(顺序):
 
 ```
-INFO dsh: calling SetHostHandler
-INFO dsh: installed host waterfall handler on client
+INFO dsh.host: mux stream connected url=ws://127.0.0.1:<port>/api/remote.mux reopen_count=...
+INFO dsh.host: mux ready client_id=<uuid> host=...
+INFO dsh: hostWaterfallHandler invoked method=ready rpc_id=
 ```
 
-如果没看到这两行,说明 `installHostHandler` 没跑(可能 `cli == nil` 或被另一个 test binary 抢先 install 了 — 重复 install 是 idem-potent 的,只是 log 会写两次)。
+`dsh.host: mux ready` 带 `client_id` 是关键 —— 它意味着 `$events` 首帧 ready 被捕获到 `host/host_state.go`,`SendPermission` 的 `/api/$events/result` 才有 `clientId` 可填。`hostWaterfallHandler invoked method=ready` 之后立刻 early-return(`ready` 不进 demux),所以只看到这一行就说明全局 host handler 已装好。
+
+如果只看到 `mux stream connected` 却没有 `mux ready`,说明 WS 握手通了但 `$events` 流没被服务端推送 —— 通常 dsh 内部 plugin 未就绪或 cookie 被拒。`installHostHandler` 本身不打日志(幂等,装在 `host.OnLifecycleInstall` 钩子里);要看它是否注册过,看 `host_waterfall.go::init` 是否执行(import 链)。
 
 ### 7.7 多 worktree 共享 ~/.dsh/.credentials.yaml
 
@@ -1242,8 +1280,8 @@ NIGHTME_TEST_DSH_URL='http://127.0.0.1:3082/?token=...' \
 | `WS upgrade 400 Invalid Sec-WebSocket-Protocol` | bridge 设了自定义 `Sec-WebSocket-Protocol` | 确认 `host/stream.go::connectAndServe` 不设这个头 |
 | `WS 1008 close, invalid Remote stream request` | open 帧多/少字段(typert exactKeys) | 对照 §3.3 open 帧 shape |
 | **`ws dial ...: unexpected EOF`(每 4-8s 一次)**(2026-09-13 实测) | dsh server 端 `setInterval(ping, 2000)`,missed >= 2 次(4s 没收到 pong)→ `socket.terminate()`,client 看到 close 1006 abnormal closure | 装 pong handler:`conn.SetPingHandler(...)` 立即回 `PongMessage`;`readLoop` 加 `SetReadDeadline(60s)` + 每次 ReadMessage 后 reset,见 §6.8 |
-| **`dsh.host: health probe failed err=... HTTP 404`**(2026-09-13 实测) | dsh 不暴露 `/health` 路由(0.1.5-rc.1 源码确认,只有 `/api/remote.mux` upgrade + `/api/*` RPC) | `host/health.go::healthProbePath` 改成 `/api/session/list` via `RPCClient.SessionList(ctx)`(走 cookie auth + 判 `result.ok` 而不是 HTTP 状态) |
-| **`POST /api/respond: HTTP 404`**(2026-09-13 实测) | approval / question 回复走 `/api/$events/result`(typed RPC),不是 `/api/respond` | 改 `RPCClient.Respond` → `RPCClient.Post(ctx, "$events/result", {clientId, eventId, outcome:{kind:"result", value}})`;同时把 `eventId` 作为 reply key(替代旧 `frameRpcID`),见 §3.7 |
+| **`dsh.host: health probe failed err=... HTTP 404`**(2026-09-13 实测) | dsh 不暴露 `/health` 路由(0.1.5-rc.1 源码确认,只有 `/api/remote.mux` upgrade + `/api/*` RPC) | `host/health.go` 走 `cli.RPC.SessionList(ctx)` typed RPC(cookie auth + 判 `result.ok` 而不是 HTTP 状态),无 `healthProbePath` 字段 |
+| **`POST /api/respond: HTTP 404`**(2026-09-13 实测) | approval / question 回复走 `/api/$events/result`(typed RPC),不是 `/api/respond` | host 路径走 `RPCClient.SendWaterfallResult(ctx, clientID, eventID, outcome)`(`$events/result` typed RPC);legacy mux 路径仍走 `RPCClient.Respond`(`/api/respond`,会 404,仅兜底)。`SendPermission` 按 `pendingSource` 分派,见 §3.7 |
 | **`WARN dsh: mux unknown method method=system/message` 或 `request/header`**(2026-09-13 实测) | bridge `isSessionEventType` allow-list 没覆盖这两个 dsh event.type,它们出现在 turn 序列(seq=2-3)早于 assistant 帧 | 加到白名单(或显式 deny 不 warn);这本身不致命,但 seq=0/1 缺位会导致 `tr.active` 永不起,见 §3.5 + §6.7 |
 | **`dsh.host: post-respawn recovery complete reattached=0 orphaned=0`** 但 `reattached` 应该 > 0(2026-09-13 实测) | `tryRespawn` 把 `oldCli.Close()` 放在 `ReplaceGlobal(cli)` 之后,旧 Client 的 `Router.muxSubs` / `cwdBySess` 永远不会被新 Client 的空 Router 读到;`RecoverSubscriptions` 走的是新 Router | 把 Router 提到 `SharedHost` 上跨 respawn 复用,或 `tryRespawn` 创建新 Client 后把 `oldCli.Router` 的 entries snapshot 灌进新 Client.Router |
 | `dsh.host: item for unknown stream` | streamId 不在 `byStreamID` 里 | 通常是 reconnect 后 streamId 漂移;检查 `currentGeneration` 逻辑 |
@@ -1418,47 +1456,43 @@ for _, sub := range c.Router.EnumerateSubscriptions() {
 
 **风险**:中 — `RecoverSubscriptions` 多调一次 `Hub.Subscribe`,但 last-wins 语义保证幂等;`Client.Subscribe` 的 wrapper 提取为 `makeDispatchWrapper` 共享,行为不变。
 
-### 13.4 P2 — `$events/result` reply path(`host/client.go::RPCClient.Respond`)
+### 13.4 P2 — `$events/result` reply path(`host/client.go`)
 
-**根因**:`/api/respond` 端点不存在(`stream-protocol.ts` 只 export `REMOTE_EVENT_RESULT_ENDPOINT = '$events/result'`)。bridge `RPCClient.Respond` 走的是错的 endpoint + 错的 envelope。
+**根因**:`/api/respond` 端点不存在(`stream-protocol.ts` 只 export `REMOTE_EVENT_RESULT_ENDPOINT = '$events/result'`)。bridge 走的二方 `client-response` envelope + `/api/respond` 路径在 dsh 0.1.2-rc.1 上返 HTTP 404。
 
-**改动**(`host/client.go` + `permissions.go`):
+**落地的改动**(`host/client.go` + `session.go::SendPermission`):host waterfall 回复走新增的 typed RPC 方法 `SendWaterfallResult`,legacy mux 路径保留 `Respond` 作 fallback。`SendPermission` 按 pending entry 的 `pendingSource[frameRpcID]` 字段分派:
 
 ```go
-// host/client.go:删掉 RPCClient.Respond(或 deprecate),改走标准 Post
-func (c *RPCClient) ReplyRemoteEvent(ctx context.Context, clientID, eventID string, outcome any) error {
-    resp, err := c.Post(ctx, "$events/result", map[string]any{
-        "clientId": clientID,
-        "eventId":  eventID,
-        "outcome":  outcome,  // {kind:"result", value} 或 {kind:"next"} 或 {kind:"rejected", error:...}
+// host/client.go:新增 host waterfall 回复方法,走标准 typed RPC envelope
+func (c *RPCClient) SendWaterfallResult(ctx context.Context, clientID, eventID string, outcome WaterfallOutcomeEnvelope) error {
+    body, _ := json.Marshal(map[string]any{
+        "type":   "client-request",
+        "rpcId":  newRPCID(),
+        "method": "$events/result",
+        "payload": map[string]any{"args": WaterfallResultEnvelope{
+            ClientID: clientID,
+            EventID:  eventID,
+            Outcome:  outcome, // {kind:"result", value} | {kind:"next"} | {kind:"rejected", error}
+        }},
     })
-    if err != nil {
-        return err
-    }
-    if !resp.Result.OK {
-        return fmt.Errorf("dsh.host: $events/result rejected: %s", resp.Result.ErrorMessage())
-    }
-    return nil
+    return c.PostEnvelope(ctx, "$events/result", body)
 }
 
-// permissions.go::pendingApprovals FIFO 把 decision 写进去时,记下 (clientId, eventId)
-// clientId 来自 $events 首帧 ready,eventId 来自 waterfall 帧;都需要在 host handler 安装时缓存
+// session.go::SendPermission 按 source 分派
+clientID := host.GetHostClientID()
+switch source {
+case "host":
+    sendErr = d.cli.RPC.SendWaterfallResult(ctx, clientID, frameRpcID, envelope)
+default: // legacy mux
+    sendErr = d.cli.RPC.Respond(ctx, frameRpcID, muxValue)
+}
 ```
 
-调用方改:`approveHandler` / `rejectHandler` / `questionAnswerHandler` 不再调 `RPCClient.Respond(ctx, frameRpcID, value)`,改调 `RPCClient.ReplyRemoteEvent(ctx, readyClientID, waterfallEventID, outcome)`。
+`Respond` 未删除:作 legacy mux `approval/requested` / `question/requested` 顶层 method 的 fallback 保留。dsh 0.1.2-rc.1 已不发这些 mux method(`handle_mux.go` 的对应 case 只 `recordAndCountUnknown` + warn,不进 permission 路径),所以今天每个 pending entry 的 `pendingSource` 都由 `handleHostFrame`(`host_waterfall.go`)设为 `"host"`,`SendPermission` 恒走 `SendWaterfallResult` 分支。`default` → `Respond` 分支只在 `pendingSource` 为空/缺失或未来 dsh 回退到 mux 顶层 method 时才触达,是防御性兜底。
 
-**clientId 缓存**:`installHostHandler` 拿到 `$events` 首帧 ready 时:
+**clientId 缓存**:不走 `translateHostEvent`。dsh 把 `$events` ready 握手作为 host stream item 推送(`value={type:"ready", clientId, host}`),`host/stream.go::dispatch` 在 host-stream item 路径解出 `value.clientId` 调 `host.SetHostClientID`,早于任何 host handler 安装(见 §3.8)。`SendPermission` 读 `host.GetHostClientID()`;为空时直接报错,不发出请求。
 
-```go
-// host/stream.go::translateHostEvent,新 case:
-case ready:
-    h.readyClientID = value.clientId
-    h.logger.Info("dsh.host: mux ready clientId", "client_id", value.clientId)
-```
-
-**测试**:`wire_waterfall_e2e_test.go` 已有 approval 路径 e2e,改测试 server 接 `/api/$events/result` 而不是 `/api/respond`。
-
-**风险**:中 — 接口签名变了,所有 caller 要改;但 `RPCClient.Respond` 当前没有 caller 之外的测试断点。
+**测试**:`wire_waterfall_e2e_test.go` 的 approval / question e2e 走 `/api/$events/result`;`host_test.go::TestRPCClient_SendWaterfallResult_MatchesCanonicalWire` 锁 canonical wire 形状。`TestRPCClient_Respond_UsesClientResponseEnvelope` 保留锁 legacy envelope。
 
 ### 13.5 P3 — allow-list 加 `system/message` + `request/header`(`handle_mux.go::isSessionEventType`)
 
@@ -1502,7 +1536,7 @@ func isSessionEventType(method string) bool {
 2. **13.2 health probe** — 单文件改,改完 §13.1 联调,自激循环彻底消失
 3. **13.3 Router 移植** — 跨 respawn 不丢订阅,长会话 daemon 重启后能恢复
 4. **13.5 allow-list** — 5 行代码,补 audit + 让 `tr.active` 正确激活
-5. **13.4 $events/result** — 接口签名变,需要更新所有 caller + 测试
+5. **13.4 $events/result** — 新增 `SendWaterfallResult` 走 typed RPC,`Respond` 保留作 legacy mux fallback;`SendPermission` 按 `pendingSource` 分派,caller 不感知
 
 修完 13.1-13.3 后 `/review -a dsh` 应该能跑通(主流程不需要 approval,`autoAllowRunOncePermission` 走 auto-allow);13.4 是 review agent 跑 `bash`/`edit` 等需 approval 工具的卡点,13.5 是审计需求。
 

@@ -208,6 +208,9 @@ func driveTurn(t *testing.T, sess *agent.Agent, prompt string, deadline time.Dur
 	if err := sess.SendBlocks(context.Background(), []agent.ContentBlock{
 		{Type: agent.ContentText, Text: prompt},
 	}); err != nil {
+		if strings.Contains(err.Error(), "No API key") {
+			t.Skipf("%s: pi has no provider API key configured: %v", turnLabel, err)
+		}
 		t.Errorf("%s: SendBlocks returned %v (elapsed=%s)", turnLabel, err, time.Since(promptStartedAt))
 		return err
 	}

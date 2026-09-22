@@ -349,6 +349,52 @@ func errStr(err error) string {
 }
 ```
 
+### 3.5 Resume & Fallback
+
+cursor-agent (2026.09.x) 的 ACP `session/new` 返回的 id 与 `session/list` 列出的 chatId 同源——`session/load {chatId, cwd, mcpServers:[]}` 能恢复上下文（实测：`/tmp/cursor-acp-probe/probe_resume_e2e.py` 三步验证，模型跨进程答出 "BANANA"）。
+
+但 cfg.SessionID 偶尔不可信：
+
+- 旧版 cursor-agent 的 chatId 空间与新版不一致
+- workspace 漂移（cfg.Workspace 跟原 chat 的 cwd 不匹配）
+- 持久化字段被外部工具污染
+
+此时 `session/load` 返回 `-32602 "Session ... not found"`。cursor wrapper 在这种情况下做一次 list-and-retry：
+
+```
+Starter.Start(ctx, cfg):
+  a, err := acpStarter.Start(ctx, cfg)         # 走 session/load (cfg.SessionID)
+  if err == nil: return attachMethodHandler(a)
+  if cfg.SessionID == "" || !isResumeUnhealthy(err): return err   # 不是 resume 失败，不重试
+  drv := a.Driver().(*acp.DriverHandle)
+  sessions := drv.ListSessions(ctx, cfg.Workspace)
+  match := pickLatestMatchingSession(sessions, cfg.Workspace, cfg.SessionID)
+  if match == "": return originalErr            # 没有候选，原错上抛
+  a.Close()
+  cfg.SessionID = match                         # 用 list 出来的真 chatId 重试
+  return acpStarter.Start(ctx, cfg)              # 走 session/load (新 id)
+```
+
+`pickLatestMatchingSession` 选择规则（`internal/bridge/cursor/starter.go`）：
+
+1. 跳过 `SessionID == cfg.SessionID`（被拒的那个）
+2. CWD 必须匹配：`s.CWD == ""`（agent 未填）也算匹配
+3. 按 `UpdatedAt` 降序排；`UpdatedAt` 为空时回退到 list 顺序
+
+约束：
+
+- 只重试一次。第二次失败直接报错，不循环。
+- 原始 error 优先保留。如果 list 失败 / 没有匹配项，重试前的原始 error 透传给 chat 层（`ErrResumeUnhealthy` 语义），让上层决定 `/new` 还是手动处理。
+- 持久化字段语义不变：`agent_sessions.json` 的 `sessionID` 仍然是 session/new 返回的真 chatId——list 出来的就是它自己，不需要翻译。
+
+`acp.DriverHandle.ListSessions` 是新增方法（`internal/bridge/acp/agent.go`），封装 `session/list` RPC：
+
+- 传 `cwd` 过滤 → 优先 `s.CWD == cfg.Workspace`
+- 返 `(nil, nil)` 当 agent 不支持 list（`-32601 Method not found`）
+- 返回类型 `[]SessionInfo`，字段 `sessionId / cwd / title / updatedAt`
+
+排错提示：日志里搜 `cursor: Start: session/load rejected, attempting list+retry` 看是否进入 fallback；`cursor: Start: retrying session/load with list-discovered id` 看替换的 id 是否合理。如果两条都出现但第二次仍失败，说明 list 出来的所有候选都没匹配 cwd，需要查 cfg.Workspace 是否被 cwd-scope 字段串改。
+
 ---
 
 ## 4. 注册与配置

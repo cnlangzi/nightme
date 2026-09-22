@@ -2,11 +2,12 @@
 
 // ensure_test.go — tests for the lazy-start helper.
 //
-// Covers the three behaviors the runtime depends on:
+// Covers the behaviors the runtime depends on:
 //
-//   - First call materializes the host (sync.Once fires exactly once).
+//   - First call materializes the host.
 //   - Subsequent calls return the cached client (no second spawn).
-//   - A missing / failing binary surfaces a clear error.
+//   - A missing / failing binary surfaces a clear error, and a later
+//     call may start again.
 //
 // The tests use the same fake-dsh harness as watchdog_test.go so we
 // can drive our own subprocess path via ForceSpawn=true and avoid
@@ -67,8 +68,8 @@ func TestEnsureSharedHost_FirstCallStarts(t *testing.T) {
 	}
 }
 
-// TestEnsureSharedHost_SecondCallReturnsSame — sync.Once guarantees
-// no second spawn. Calling EnsureSharedHost twice with the same
+// TestEnsureSharedHost_SecondCallReturnsSame — a successful start
+// is cached. Calling EnsureSharedHost twice with the same
 // (or different) opts returns the same *Client both times.
 func TestEnsureSharedHost_SecondCallReturnsSame(t *testing.T) {
 	resetEnsureState()
@@ -133,7 +134,7 @@ func TestEnsureSharedHost_ConcurrentFirstTouch(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
-	// The Once means exactly one of the N goroutines actually spawned;
+	// In-flight sharing means exactly one of the N goroutines spawned;
 	// killFakeDSH now tears down that single subprocess. Doing this
 	// *after* wg.Wait ensures we capture the SharedHost pointer
 	// (it's installed by the winning goroutine). Ordered before
@@ -148,8 +149,7 @@ func TestEnsureSharedHost_ConcurrentFirstTouch(t *testing.T) {
 			t.Errorf("goroutine %d: nil client", i)
 		}
 	}
-	// All clis must be the same pointer — proves the Once fired
-	// once and StartSharedHost ran once.
+	// All clis must be the same pointer — one StartSharedHost ran.
 	for i := 1; i < N; i++ {
 		if clis[i] != clis[0] {
 			t.Errorf("clis[%d] != clis[0]: %p vs %p", i, clis[i], clis[0])
@@ -186,5 +186,37 @@ func TestEnsureSharedHost_MissingBinary(t *testing.T) {
 	if !strings.Contains(err.Error(), "dsh") &&
 		!strings.Contains(err.Error(), filepath.Base(binary)) {
 		t.Logf("error message lacks binary name; err=%v", err)
+	}
+}
+
+// TestEnsureSharedHost_RetriesAfterFailure — a failed start must
+// not stick. The next call starts again and can succeed.
+func TestEnsureSharedHost_RetriesAfterFailure(t *testing.T) {
+	requireExclusivePort3080(t)
+	resetEnsureState()
+	t.Cleanup(resetEnsureState)
+
+	missing := filepath.Join(t.TempDir(), "missing-dsh")
+	if _, err := host.EnsureSharedHost(context.Background(), host.SharedHostOptions{
+		Workspace: t.TempDir(),
+		HostCmd:   missing,
+	}); err == nil {
+		t.Fatal("expected error for missing binary")
+	}
+	if host.GetGlobal() != nil {
+		t.Fatal("failed start installed a global client")
+	}
+
+	fake := writeFakeDSH(t)
+	cli, err := host.EnsureSharedHost(context.Background(), host.SharedHostOptions{
+		Workspace: t.TempDir(),
+		HostCmd:   fake,
+	})
+	t.Cleanup(func() { killFakeDSH(t, host.GetSharedHost()) })
+	if err != nil {
+		t.Fatalf("retry EnsureSharedHost: %v", err)
+	}
+	if cli == nil {
+		t.Fatal("retry returned nil client")
 	}
 }

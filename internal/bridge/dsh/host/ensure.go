@@ -13,11 +13,11 @@
 // stays alive (intended; it's a persistent service on port 3080).
 //
 // Concurrency: the package's `globalClient` and `sharedHostGlobal`
-// are protected by their own mutexes; this helper layers a
-// sync.Once on top so concurrent first-touch callers serialize
-// through one StartSharedHost invocation. SetSharedHost panics on
-// double-set, so the Once is load-bearing — without it two chats
-// could race past the nil check and both call SetSharedHost.
+// are protected by their own mutexes. Concurrent first-touch callers
+// share one in-flight StartSharedHost. A failure is not remembered:
+// the next call starts again. SetSharedHost panics on double-set, so
+// only the in-flight owner installs the singleton, and only after
+// StartSharedHost succeeds.
 
 package host
 
@@ -26,9 +26,18 @@ import (
 	"sync"
 )
 
+// ensureCall is one in-flight StartSharedHost. Waiters block on done
+// and then read cli/err. The call is dropped when it finishes, so a
+// failed start does not stick for the process lifetime.
+type ensureCall struct {
+	done chan struct{}
+	cli  *Client
+	err  error
+}
+
 var (
-	ensureOnce sync.Once
-	ensureErr  error
+	ensureMu       sync.Mutex
+	ensureInflight *ensureCall
 )
 
 // EnsureSharedHost returns the shared dsh *Client, starting it on
@@ -38,11 +47,11 @@ var (
 //   - If GetGlobal() already returns a non-nil client (set by a
 //     previous StartSharedHost in this process), it's returned
 //     as-is.
-//   - Otherwise calls StartSharedHost(ctx, opts), which always
-//     spawns a fresh dsh --profile web (ownsProcess=true,
-//     watchdog runs and respawns on crash).
-//   - On error, returns the error verbatim. A missing dsh binary
-//     surfaces here with the underlying exec.LookPath error.
+//   - Otherwise calls StartSharedHost(ctx, opts). Concurrent
+//     callers share that attempt.
+//   - On error, returns the error verbatim and leaves no singleton.
+//     The next call tries again. A missing dsh binary surfaces here
+//     with the underlying exec.LookPath error.
 //
 // The runtime never calls this; the dsh bridge does (see
 // internal/bridge/dsh/session.go newDriver). Daemon boot succeeds
@@ -51,27 +60,41 @@ func EnsureSharedHost(ctx context.Context, opts SharedHostOptions) (*Client, err
 	if cli := GetGlobal(); cli != nil {
 		return cli, nil
 	}
-	ensureOnce.Do(func() {
-		// Re-check after acquiring the once: another goroutine may
-		// have raced past the first GetGlobal() check and installed
-		// the host before us. Without this re-check the second
-		// caller would still call SetSharedHost and panic.
-		if cli := GetGlobal(); cli != nil {
-			return
-		}
-		h, err := StartSharedHost(ctx, opts)
-		if err != nil {
-			ensureErr = err
-			return
-		}
-		SetSharedHost(h)
-		// StartSharedHost already populates the global Client via
-		// SetGlobal internally (spawn path). No-op here.
-	})
-	if ensureErr != nil {
-		return nil, ensureErr
+
+	ensureMu.Lock()
+	if cli := GetGlobal(); cli != nil {
+		ensureMu.Unlock()
+		return cli, nil
 	}
-	return GetGlobal(), nil
+	if ensureInflight != nil {
+		call := ensureInflight
+		ensureMu.Unlock()
+		<-call.done
+		return call.cli, call.err
+	}
+	call := &ensureCall{done: make(chan struct{})}
+	ensureInflight = call
+	ensureMu.Unlock()
+
+	defer func() {
+		ensureMu.Lock()
+		if ensureInflight == call {
+			ensureInflight = nil
+		}
+		ensureMu.Unlock()
+		close(call.done)
+	}()
+
+	h, err := StartSharedHost(ctx, opts)
+	if err != nil {
+		call.err = err
+		return nil, err
+	}
+	SetSharedHost(h)
+	// StartSharedHost already populates the global Client via
+	// SetGlobal internally (spawn path).
+	call.cli = h.Client()
+	return call.cli, nil
 }
 
 // ResetEnsureForTest re-initializes the lazy-start state so a
@@ -79,11 +102,8 @@ func EnsureSharedHost(ctx context.Context, opts SharedHostOptions) (*Client, err
 // helpers only — production code never invokes this. Pair with
 // UnsetGlobal + UnsetSharedHost to fully reset the host package
 // between tests.
-//
-// We need this because sync.Once has no reset method, and the
-// once-fired state would otherwise carry across tests in the same
-// binary, masking per-test regressions.
 func ResetEnsureForTest() {
-	ensureOnce = sync.Once{}
-	ensureErr = nil
+	ensureMu.Lock()
+	ensureInflight = nil
+	ensureMu.Unlock()
 }

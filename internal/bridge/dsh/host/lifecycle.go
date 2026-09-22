@@ -72,13 +72,15 @@ import (
 	"github.com/cnlangzi/nightme/internal/proc"
 )
 
-// webURLParseTimeout bounds waiting for dsh web to print its bound
-// URL on stdout. Real-machine cold start is ~1.5s; environments
-// that export SOCKS proxy vars (all_proxy / ALL_PROXY) push dsh's
-// startup measurably higher because dsh refuses SOCKS and runs a
-// fallback path. 30s is generous even on those hosts and gives the
-// workspace-init scan enough room without bumping into a false
-// timeout that loses the stderr diagnostic on /review failures.
+// listenTimeout bounds waitForListen. dsh --profile web imports
+// its plugin graph before bind and stays silent until the server
+// accepts TCP. A cold import of that graph takes longer than the
+// token-exchange budget below.
+const listenTimeout = 2 * time.Minute
+
+// webURLParseTimeout bounds the launch-token wait and the
+// token-exchange HTTP client. Those run only after the port is
+// accepting connections.
 const webURLParseTimeout = 30 * time.Second
 
 // stderrCaptureCap bounds the ring of recent stderr lines the
@@ -1441,9 +1443,13 @@ func spawnAndWire(ctx context.Context, opts SharedHostOptions, port int, logger 
 	// first URL line; we capture it into tokenCh while still
 	// logging every line at debug level for /diagnose triage.
 	// Buffered=1 so the goroutine doesn't block if the receiver
-	// already grabbed the token.
+	// already grabbed the token. stdoutEOF closes on a clean EOF
+	// so waitForListen can fail immediately when the process
+	// exits. A scanner error leaves it open: the process may
+	// still be running, and the listen budget is the backstop.
 	tokenCh := make(chan string, 1)
 	tokenErrCh := make(chan error, 1)
+	stdoutEOF := make(chan struct{})
 	go func(r io.Reader) {
 		scnr := bufio.NewScanner(r)
 		scnr.Buffer(make([]byte, 0, 4096), 16*1024)
@@ -1469,15 +1475,22 @@ func spawnAndWire(ctx context.Context, opts SharedHostOptions, port int, logger 
 				sent = true
 			}
 		}
+		if scnr.Err() == nil {
+			close(stdoutEOF)
+		}
 		if !sent {
+			if err := scnr.Err(); err != nil {
+				tokenErrCh <- fmt.Errorf("dsh.host: stdout: %w", err)
+				return
+			}
 			tokenErrCh <- errors.New("dsh.host: stdout closed before URL line appeared")
 		}
 	}(stdout)
 
 	// Wait for dsh to accept TCP on the port we asked for.
-	listenCtx, listenCancel := context.WithTimeout(ctx, webURLParseTimeout)
+	listenCtx, listenCancel := context.WithTimeout(ctx, listenTimeout)
 	defer listenCancel()
-	if err := waitForListen(listenCtx, port); err != nil {
+	if err := waitForListen(listenCtx, port, stdoutEOF); err != nil {
 		// Brief grace so the stderr goroutine can flush any
 		// output dsh was mid-writing when bind/listen failed.
 		// stderrFlushGrace keeps the user-visible error
@@ -1680,16 +1693,20 @@ func waitPortFree(ctx context.Context, port int) error {
 	}
 }
 
-// waitForListen polls 127.0.0.1:port until TCP accepts a connection
-// or ctx fires. Replaces the old parseWebURL stdout-parse path:
-// host is always 127.0.0.1 (dsh doesn't bind anywhere else) and
-// port is whatever we passed via --port, so neither needs to be
-// extracted from dsh's output. TCP accept is the actual readiness
-// signal we care about — cli.Start's HTTP handshake right after
-// catches the small kernel-accept-vs-app-Accept race window.
-func waitForListen(ctx context.Context, port int) error {
+// waitForListen polls 127.0.0.1:port until TCP accepts a connection,
+// ctx fires, or exited is closed. exited is the child's stdout EOF;
+// a clean close means the process has gone away, so the caller does
+// not sit out listenTimeout. A nil exited skips that check.
+//
+// Host is always 127.0.0.1 (dsh doesn't bind anywhere else) and
+// port is whatever we passed via --port. TCP accept is the readiness
+// signal — cli.Start's HTTP handshake right after catches the small
+// kernel-accept-vs-app-Accept race window.
+func waitForListen(ctx context.Context, port int, exited <-chan struct{}) error {
 	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
 	const tick = 50 * time.Millisecond
+	start := time.Now()
+	elapsed := func() time.Duration { return time.Since(start).Round(time.Millisecond) }
 	for {
 		// Bound the dial itself so a firewall blackhole doesn't
 		// burn the full budget on a single attempt.
@@ -1701,11 +1718,25 @@ func waitForListen(ctx context.Context, port int) error {
 			_ = conn.Close()
 			return nil
 		}
+		timer := time.NewTimer(tick)
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("dsh.host: timeout after %s waiting for dsh to listen on %s",
-				webURLParseTimeout, addr)
-		case <-time.After(tick):
+			timer.Stop()
+			if exited != nil {
+				select {
+				case <-exited:
+					return fmt.Errorf("dsh.host: dsh exited before listening on %s after %s",
+						addr, elapsed())
+				default:
+				}
+			}
+			return fmt.Errorf("dsh.host: timeout after %s waiting for dsh to listen on %s (still running)",
+				elapsed(), addr)
+		case <-exited:
+			timer.Stop()
+			return fmt.Errorf("dsh.host: dsh exited before listening on %s after %s",
+				addr, elapsed())
+		case <-timer.C:
 		}
 	}
 }

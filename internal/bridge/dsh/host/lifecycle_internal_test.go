@@ -92,7 +92,7 @@ func TestWaitForListen_HappyPath(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	if err := waitForListen(ctx, port); err != nil {
+	if err := waitForListen(ctx, port, nil); err != nil {
 		t.Fatalf("waitForListen: %v", err)
 	}
 	if d := time.Since(start); d > 500*time.Millisecond {
@@ -109,7 +109,7 @@ func TestWaitForListen_Timeout(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	err := waitForListen(ctx, 1)
+	err := waitForListen(ctx, 1, nil)
 	if err == nil {
 		t.Fatal("expected error from waitForListen on unreachable port")
 	}
@@ -198,9 +198,8 @@ func TestSpawnAndWire_TimeoutIncludesDiagnostic(t *testing.T) {
 		t.Fatalf("write fake: %v", err)
 	}
 
-	// webURLParseTimeout is a const (10s); use a tighter parent
-	// ctx so the waitForListen timeout fires within the test
-	// budget.
+	// listenTimeout is two minutes; use a tighter parent ctx so
+	// the waitForListen timeout fires within the test budget.
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
@@ -222,8 +221,50 @@ func TestSpawnAndWire_TimeoutIncludesDiagnostic(t *testing.T) {
 	if !contains(msg, "4096") {
 		t.Errorf("err = %v, want port 4096 in message", msg)
 	}
+	if !contains(msg, "still running") {
+		t.Errorf("err = %v, want 'still running'", msg)
+	}
 	// Give the kernel a moment to deliver SIGCHLD after kill+wait.
 	time.Sleep(100 * time.Millisecond)
+}
+
+// TestSpawnAndWire_ExitsBeforeListen verifies that a dsh which
+// exits without binding does not consume listenTimeout. The error
+// names the exit and keeps the stderr line the process wrote.
+func TestSpawnAndWire_ExitsBeforeListen(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "fake-dsh-exit.sh")
+	scriptBody := "#!/bin/bash\n" +
+		"echo \"boom\" >&2\n" +
+		"exit 1\n"
+	if err := os.WriteFile(script, []byte(scriptBody), 0o755); err != nil {
+		t.Fatalf("write fake: %v", err)
+	}
+	port, err := findFreePort(44000, 44020)
+	if err != nil {
+		t.Fatalf("findFreePort: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), listenTimeout)
+	defer cancel()
+	start := time.Now()
+	_, _, err = spawnAndWire(ctx, SharedHostOptions{
+		Workspace: dir,
+		HostCmd:   script,
+	}, port, nil)
+	if err == nil {
+		t.Fatal("expected exit error")
+	}
+	if d := time.Since(start); d > 3*time.Second {
+		t.Fatalf("spawnAndWire took %v, want fast fail on child exit", d)
+	}
+	msg := err.Error()
+	if !contains(msg, "exited before listening") {
+		t.Errorf("err = %v, want exited-before-listening", msg)
+	}
+	if !contains(msg, "stderr=1") {
+		t.Errorf("err = %v, want stderr=1", msg)
+	}
 }
 
 // contains is a tiny helper because we don't need strings.Contains

@@ -70,10 +70,18 @@ type Relay struct {
 	backfill *backfiller
 }
 
+// relayCall is one in-flight Get. Waiters block on done. A failed
+// start is dropped with the call so the next Get tries again.
+type relayCall struct {
+	done chan struct{}
+	r    *Relay
+	err  error
+}
+
 var (
-	relayOnce      sync.Once
+	relayMu        sync.Mutex
+	relayInflight  *relayCall
 	relayInstance  *Relay
-	relayErr       error
 	injectedBridge api.Bridge
 )
 
@@ -117,9 +125,10 @@ func UnsetForTest() { injectedBridge = nil }
 // calls this. Pair with UnsetForTest to fully reset between
 // test runs.
 func ResetForTest() {
-	relayOnce = sync.Once{}
+	relayMu.Lock()
+	relayInflight = nil
 	relayInstance = nil
-	relayErr = nil
+	relayMu.Unlock()
 }
 
 // Get returns the process-wide Relay singleton, lazily
@@ -143,18 +152,41 @@ func Get(opts host.SharedHostOptions) (*Relay, error) {
 		// should keep using installGlobal + the real relay.
 		return nil, fmt.Errorf("relay: SetForTest got non-Relay bridge; use GetBridge for fakes")
 	}
-	relayOnce.Do(func() {
-		cli, err := host.EnsureSharedHost(context.Background(), opts)
-		if err != nil {
-			relayErr = err
-			return
-		}
-		relayInstance = newRelay(cli, opts.Logger)
-	})
-	if relayErr != nil {
-		return nil, relayErr
+	relayMu.Lock()
+	if relayInstance != nil {
+		r := relayInstance
+		relayMu.Unlock()
+		return r, nil
 	}
-	return relayInstance, nil
+	if relayInflight != nil {
+		call := relayInflight
+		relayMu.Unlock()
+		<-call.done
+		return call.r, call.err
+	}
+	call := &relayCall{done: make(chan struct{})}
+	relayInflight = call
+	relayMu.Unlock()
+
+	defer func() {
+		relayMu.Lock()
+		if relayInflight == call {
+			relayInflight = nil
+		}
+		if call.err == nil && call.r != nil && relayInstance == nil {
+			relayInstance = call.r
+		}
+		relayMu.Unlock()
+		close(call.done)
+	}()
+
+	cli, err := host.EnsureSharedHost(context.Background(), opts)
+	if err != nil {
+		call.err = err
+		return nil, err
+	}
+	call.r = newRelay(cli, opts.Logger)
+	return call.r, nil
 }
 
 // GetBridge is the test-friendly form of Get that returns

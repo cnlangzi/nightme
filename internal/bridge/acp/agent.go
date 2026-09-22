@@ -705,6 +705,74 @@ func (d *driver) loadReplayID() string {
 	return s
 }
 
+// SessionInfo mirrors the ACP session/list item shape. Exported via
+// DriverHandle so bridge wrappers (e.g. cursor) can fall back to a
+// workspace-matched session when cfg.SessionID no longer resolves on
+// the agent — empirically needed for agents whose session/new id is
+// the same uuid as their local chatId (cursor 2026.09.x): a stale
+// session id from a previous CLI version / workspace swap hits
+// "Session not found" on session/load, and the wrapper needs to list
+// the workspace's live chats and retry load against the latest one.
+//
+// Empty CWD / zero-value UpdatedAt are preserved so callers can
+// detect "agent returned a partially-populated row".
+type SessionInfo struct {
+	SessionID string `json:"sessionId"`
+	CWD       string `json:"cwd"`
+	Title     string `json:"title"`
+	UpdatedAt string `json:"updatedAt"`
+}
+
+// ListSessions issues session/list with an optional cwd filter and
+// returns the agent's view of currently-known sessions. Empty cwd
+// lists everything the agent has; non-empty asks the agent to filter
+// by workspace. The agent may still return sessions from other
+// workspaces depending on implementation — callers must compare
+// SessionInfo.CWD themselves before using a returned id.
+//
+// Returns an empty slice (not nil) when the agent reports zero
+// sessions or when the response shape is unexpected; only a JSON-RPC
+// or transport failure produces a non-nil error. Method not found
+// (-32601) is treated as "agent doesn't support list" and returns
+// (nil, nil) so callers can degrade gracefully without an error path.
+//
+// Exposed via DriverHandle for cursor's session/load fallback
+// (docs/bridge/cursor.md §3.3).
+func (d *driver) ListSessions(ctx context.Context, cwd string) ([]SessionInfo, error) {
+	if d.transport == nil || d.rpc == nil {
+		return nil, errors.New("bridge/acp: driver not started")
+	}
+	listCtx, cancel := context.WithTimeout(ctx, newSessionTimeout)
+	defer cancel()
+	params := map[string]any{}
+	if cwd != "" {
+		params["cwd"] = cwd
+	}
+	result, err := d.rpc.request(listCtx, "session/list", params)
+	if err != nil {
+		// Method not found → agent doesn't support list. Treat as
+		// "nothing to fall back to" rather than a hard failure.
+		var rpcErr *rpcError
+		if errors.As(err, &rpcErr) && rpcErr.Code == -32601 {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var resp struct {
+		Sessions []SessionInfo `json:"sessions"`
+	}
+	if err := json.Unmarshal(result, &resp); err != nil {
+		// Agent may omit the field or return a different shape.
+		// Returning empty slice keeps callers' iteration loops safe
+		// while still surfacing the parsing failure for diagnostics.
+		return []SessionInfo{}, fmt.Errorf("bridge/acp: session/list parse: %w", err)
+	}
+	if resp.Sessions == nil {
+		resp.Sessions = []SessionInfo{}
+	}
+	return resp.Sessions, nil
+}
+
 // rpcPhaseError formats a handshake RPC failure. The timeout budget
 // is included only when the context deadline or cancel fired.
 func rpcPhaseError(phase string, budget time.Duration, err error) error {

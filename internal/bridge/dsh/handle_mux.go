@@ -208,9 +208,17 @@ func (d *driver) handleMuxFrame(method, rpcID string, payload json.RawMessage) {
 		if isSessionEventType(method) {
 			env := sessionEventEnvelope{
 				Type: method,
-				Seq:  parseSeqFromRPCID(rpcID),
 				Data: payload,
 			}
+			// assistant-stream chunks are process-local presentation,
+			// not durable session seqs. Feeding them through the seq
+			// watermark would drop every chunk after the first live
+			// event (and would advance lastSeq if we invented a seq).
+			if strings.HasPrefix(rpcID, "astream-") {
+				d.dispatcher.dispatch(env, nil)
+				return
+			}
+			env.Seq = parseSeqFromRPCID(rpcID)
 			d.dispatchEvent(env, nil)
 			return
 		}

@@ -85,7 +85,7 @@ func TestWireE2E(t *testing.T) {
 
 			t.Run("commands/execute", func(t *testing.T) {
 				if err := c.CommandsExecute(ctx, sid, "/permission danger-full-access"); err != nil {
-					t.Logf("commands/execute (non-fatal, may already be set): %v", err)
+					t.Fatalf("commands/execute: %v", err)
 				}
 			})
 
@@ -95,7 +95,7 @@ func TestWireE2E(t *testing.T) {
 
 			t.Run("workspace/archiveSession", func(t *testing.T) {
 				if err := c.WorkspaceArchiveSession(ctx, sid); err != nil {
-					t.Logf("workspace/archiveSession: %v", err)
+					t.Fatalf("workspace/archiveSession: %v", err)
 				}
 			})
 		})

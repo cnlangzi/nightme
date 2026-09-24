@@ -45,6 +45,7 @@ type handshakeMock struct {
 	lastPrompt       atomic.Value // map[string]any
 	lastRespond      atomic.Value // []byte of last /api/respond body
 	lastCommand      atomic.Value // map[string]any
+	lastArchive      atomic.Value // map[string]any — archive request body
 
 	respondText atomic.Value // string — when set, prompt handler synthesises a complete turn
 }
@@ -281,9 +282,9 @@ func (m *handshakeMock) handleSessionCancel(w http.ResponseWriter, r *http.Reque
 // priming line.
 //
 // commands/execute is a FLAT-ARG method (no `args.request` wrapper);
-// the typert descriptor names agentId/line/images directly under
-// `args`, so we read `env.Payload.args` instead of going through
-// the typed unwrapRequest helper.
+// the typert descriptor names agentId/line/submittedAttachments
+// directly under `args`, so we read `env.Payload.args` instead of
+// going through the typed unwrapRequest helper.
 func (m *handshakeMock) handleCommandsExecute(w http.ResponseWriter, r *http.Request) {
 	m.commandsCount.Add(1)
 	env := decodeEnvelope(r)
@@ -308,6 +309,7 @@ func (m *handshakeMock) handleWorkspaceArchiveSession(w http.ResponseWriter, r *
 	m.archiveCount.Add(1)
 	env := decodeEnvelope(r)
 	payload := unwrapRequest(env.Payload)
+	m.lastArchive.Store(payload)
 	sid, _ := payload["sessionId"].(string)
 	writeOK(w, env.RPCID, map[string]any{
 		"archivedSessionIds": []string{sid},
@@ -689,6 +691,13 @@ func TestClose_ArchivesSession(t *testing.T) {
 	if mock.cancelCount.Load() < 1 {
 		t.Fatal("Close did not POST /api/session.cancel before archive")
 	}
+	req, _ := mock.lastArchive.Load().(map[string]any)
+	if req == nil {
+		t.Fatal("archive request not captured")
+	}
+	if stop, _ := req["stopActivity"].(bool); !stop {
+		t.Errorf("archive stopActivity = %#v, want true", req["stopActivity"])
+	}
 }
 
 func TestStop_CallsSessionCancel(t *testing.T) {
@@ -763,6 +772,13 @@ func TestNewDriver_PrimesPermissionDangerFullAccess(t *testing.T) {
 	}
 	if got, _ := cmd["agentId"].(string); got != d.sessionID {
 		t.Errorf("priming agentId = %q, want %q", got, d.sessionID)
+	}
+	atts, ok := cmd["submittedAttachments"].([]any)
+	if !ok || len(atts) != 0 {
+		t.Errorf("submittedAttachments = %#v, want empty array", cmd["submittedAttachments"])
+	}
+	if _, ok := cmd["images"]; ok {
+		t.Errorf("commands/execute still sends images: %#v", cmd["images"])
 	}
 }
 

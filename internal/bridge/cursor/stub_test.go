@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -52,9 +53,15 @@ func TestEnsureStubStoreDB_WritesValidFile(t *testing.T) {
 		t.Fatalf("written size %d != embedded stub size %d", info.Size(), len(storeDBStub))
 	}
 
-	// Verify mode bits.
-	if mode := info.Mode().Perm(); mode != 0o600 {
-		t.Errorf("store.db mode = %o, want 0600", mode)
+	// Verify mode bits. Windows ignores os.WriteFile's mode
+	// parameter (it has no Unix-style permission bits) and
+	// reports a default 0666 from os.Stat; the test only makes
+	// sense on POSIX. The 0o600 in ensureStubStoreDB itself is
+	// still correct — it's a no-op on Windows but harmless.
+	if runtime.GOOS != "windows" {
+		if mode := info.Mode().Perm(); mode != 0o600 {
+			t.Errorf("store.db mode = %o, want 0600", mode)
+		}
 	}
 
 	// Verify magic on disk matches embedded bytes.

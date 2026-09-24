@@ -18,7 +18,6 @@ import (
 	"context"
 	"log/slog"
 
-	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/messages"
@@ -90,20 +89,24 @@ func NewEventHandler(
 	return func(env chatsession.AgentEventEnvelope) {
 		chatID, s, ev, userMsgID := env.ChatID, env.AgentSession, env.Event, env.UserMsgID
 		// Capture the agent's own session id so the next respawn can
-		// resume it. Most bridges can resume as soon as the handshake
-		// emits EventAgentReady, so that id is persisted immediately.
+		// replay `--resume <id>` (claude) or `session/load <id>`
+		// (cursor). We persist immediately on every non-empty
+		// SessionID different from what we already hold. Bridges
+		// decide when their id is durable to resume and stamp
+		// ev.SessionID only at that point; the runtime doesn't
+		// reason about per-bridge timing. (Cursor pre-creates
+		// store.db at session/new so its id is durable
+		// immediately — see bridge/cursor/stub.go.)
 		//
-		// cursor-agent's session/load reads store.db, which appears
-		// only after the first prompt settles. Persisting the id on
-		// Ready makes a restart before that prompt fail every later
-		// message. Cursor's id is stored when the turn settles
-		// (EventAgentDone). A crash before that leaves SessionID empty
-		// and the next spawn opens a fresh session.
+		// Guard: a blank SessionID does not wipe a previously
+		// captured id. Some bridges re-emit EventAgentReady after a
+		// child restart with a blank SessionID.
 		//
-		// Guard: a blank SessionID does not wipe a previously captured
-		// id. Some bridges re-emit EventAgentReady after a child
-		// restart with a blank SessionID.
-		if sessionIDReadyToStore(s.Agent, ev) {
+		// Guard: skip the whole block when ev.SessionID equals
+		// what we already hold, so a long-lived bridge re-emitting
+		// the same id (e.g. cursor on every Done{settled}) doesn't
+		// rewrite agent_sessions.json once per turn.
+		if ev.SessionID != "" && s.SessionID() != ev.SessionID {
 			s.SetSessionID(ev.SessionID)
 			if mgr != nil {
 				if err := mgr.PersistAgentSession(s); err != nil && logger != nil {
@@ -281,16 +284,4 @@ func NewEventHandler(
 				"text_len", len(out.Text))
 		}
 	}
-}
-
-// sessionIDReadyToStore reports whether ev carries a session id that
-// can be resumed after a process restart.
-func sessionIDReadyToStore(agentName string, ev *agent.AgentEvent) bool {
-	if ev == nil || ev.SessionID == "" {
-		return false
-	}
-	if agentName == "cursor" {
-		return ev.Kind == agent.EventAgentDone && ev.Done != nil && ev.Done.Reason == "settled"
-	}
-	return ev.Kind == agent.EventAgentReady
 }

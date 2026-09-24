@@ -2,7 +2,6 @@ package cursor
 
 import (
 	"context"
-	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -56,11 +55,15 @@ func TestE2E_ResumeAfterPrompt(t *testing.T) {
 	}
 }
 
-// TestE2E_ResumeBeforeStore_ReturnsUnhealthy closes a session before
-// any prompt. cursor-agent has only meta.json then, and session/load
-// rejects the id. Start must return ErrResumeUnhealthy instead of
-// panicking.
-func TestE2E_ResumeBeforeStore_ReturnsUnhealthy(t *testing.T) {
+// TestE2E_ResumeBeforePrompt_StubAllowsLoad closes a session before
+// any prompt lands. The bridge pre-writes a stub store.db at
+// session/new (see stub.go), so the next session/load on the same id
+// must succeed — the resumed session is empty (no prior
+// conversation), but the id is reachable. This is the e2e
+// counterpart of the timing fix: before the stub was added, the
+// same path failed -32602 "Session ... not found" and the runtime
+// couldn't safely persist the freshly-assigned id.
+func TestE2E_ResumeBeforePrompt_StubAllowsLoad(t *testing.T) {
 	skipCursorE2E(t)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
@@ -72,23 +75,11 @@ func TestE2E_ResumeBeforeStore_ReturnsUnhealthy(t *testing.T) {
 	sid := waitReady(t, first, 45*time.Second)
 	first.Close()
 
-	var err error
-	for attempt := 1; attempt <= 3; attempt++ {
-		_, err = s.Start(ctx, agent.StartConfig{Workspace: ws, SessionID: sid})
-		if err == nil || errors.Is(err, agent.ErrResumeUnhealthy) || !strings.Contains(err.Error(), "initialize") {
-			break
-		}
-		t.Logf("initialize attempt %d: %v", attempt, err)
-		time.Sleep(2 * time.Second)
-	}
-	if err == nil {
-		t.Fatal("resume before store.db succeeded, want ErrResumeUnhealthy")
-	}
-	if !errors.Is(err, agent.ErrResumeUnhealthy) {
-		t.Fatalf("resume error = %v, want ErrResumeUnhealthy", err)
-	}
-	if !strings.Contains(err.Error(), "not found") {
-		t.Fatalf("resume error = %v, want session-not-found detail", err)
+	second := startAgent(t, ctx, s, agent.StartConfig{Workspace: ws, SessionID: sid})
+	defer second.Close()
+	got := waitReady(t, second, 45*time.Second)
+	if got != sid {
+		t.Fatalf("resumed session id = %q, want %q", got, sid)
 	}
 }
 

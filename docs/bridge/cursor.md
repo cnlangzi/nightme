@@ -353,7 +353,7 @@ func errStr(err error) string {
 
 cursor-agent 的 `initialize` 声明 `loadSession: true`，`sessionCapabilities` 只有 `list`，没有 `resume`。有 `cfg.SessionID` 时握手发 `session/load`，不发 `session/resume`。
 
-`sessionId` 就是 `session/new` 的返回值。`session/load` 读取 `~/.cursor/acp-sessions/<sessionId>/store.db`。第一次 `session/prompt` 结束之后这个文件才存在。nightme 在该轮 `EventAgentDone`（reason `settled`）时才把这个 id 写入 `agent_sessions.json`。在此之前进程退出，下次 spawn 不带 session id。只有 `meta.json` 时 load 返回 `-32602`，`error.data.message` 为 `Session "<id>" not found`，bridge 包成 `agent.ErrResumeUnhealthy` 交给 chat 层。不换另一个 session。
+`sessionId` 就是 `session/new` 的返回值。`session/load` 读取 `~/.cursor/acp-sessions/<sessionId>/store.db`。第一次 `session/prompt` 结束之后这个文件才存在，所以 nightme 在该轮 `EventAgentDone`（reason `settled`）时才把 id 写入 `agent_sessions.json`。第一次 `session/prompt` 未结束就退出，下次 spawn 不带 session id。只有 `meta.json` 时 load 返回 `-32602`，`error.data.message` 为 `Session "<id>" not found`，bridge 包成 `agent.ErrResumeUnhealthy` 交给 chat 层。不换另一个 session。
 
 ```
 session/load {

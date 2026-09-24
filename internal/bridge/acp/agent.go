@@ -93,6 +93,11 @@ type driver struct {
 	workspace string
 
 	sessionID string
+	// onSessionID fires synchronously in bindSession after d.sessionID
+	// is finalized and before EventAgentReady is emitted. Used by
+	// cursor to pre-create store.db so the session/new→store.db
+	// timing gap doesn't bite. See bridge/acp/starter.go::WithSessionIDHook.
+	onSessionID OnSessionID
 	// resumeSessionID is the caller's cfg.SessionID. Non-empty means
 	// handshake must reopen that session (session/resume when the
 	// agent advertises it, otherwise session/load) instead of
@@ -445,6 +450,7 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 		agentName:       s.name,
 		workspace:       cfg.Workspace,
 		resumeSessionID: cfg.SessionID,
+		onSessionID:     s.onSessionID,
 		events:          make(chan agent.AgentEvent, eventBufferSize),
 		textBuf:         &strings.Builder{},
 		thoughtBuf:      &strings.Builder{},
@@ -1377,6 +1383,13 @@ func (d *driver) setSessionID(result json.RawMessage) error {
 // sessionId — session/load and session/resume do that; the id is
 // the one the client sent. Model is taken from ACP configOptions
 // (Cursor's models extension as fallback).
+//
+// If a StarterOpt registered an OnSessionID hook via WithSessionIDHook,
+// it fires here — synchronously, after d.sessionID is finalized and
+// before EventAgentReady is emitted. A non-nil return aborts the
+// spawn with the hook's error. Bridges use this for per-driver
+// prep at the moment the session becomes known (cursor pre-creates
+// store.db; see bridge/cursor/stub.go).
 func (d *driver) bindSession(fallbackID string, result json.RawMessage) error {
 	var response struct {
 		SessionID      string          `json:"sessionId"`
@@ -1403,6 +1416,11 @@ func (d *driver) bindSession(fallbackID string, result json.RawMessage) error {
 		d.modelMu.Lock()
 		d.model = model
 		d.modelMu.Unlock()
+	}
+	if d.onSessionID != nil {
+		if err := d.onSessionID(d.sessionID); err != nil {
+			return err
+		}
 	}
 	// Synthesize an EventAgentReady. Idempotent via connectedSent.
 	d.emitConnected()

@@ -118,14 +118,19 @@ func (s *Starter) Command() string { return s.command }
 // sessionCapabilities.resume, so the handshake reopens that id
 // with session/load. The id is the sessionId from session/new.
 // session/load succeeds after a session/prompt has written
-// ~/.cursor/acp-sessions/<id>/store.db. A load failure is
-// agent.ErrResumeUnhealthy; Start returns it and does not open
-// a different chat.
+// ~/.cursor/acp-sessions/<id>/store.db. A load failure returns
+// agent.ErrResumeUnhealthy; the chat layer handles resume rejection.
 func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agent, error) {
 	if cfg.Workspace == "" {
 		return nil, errors.New("cursor: workspace is required")
 	}
-	acpStarter := acp.NewStarter(s.name, s.command, s.args, nil, 0, 0)
+	// ensureStubStoreDB bridges cursor-agent's session/new→store.db
+	// timing gap: cursor's session/load fails -32602 until the first
+	// session/prompt writes store.db, so the runtime can't safely
+	// persist the freshly-assigned id. We pre-write a minimal stub
+	// SQLite db so session/load succeeds immediately. See stub.go.
+	acpStarter := acp.NewStarter(s.name, s.command, s.args, nil, 0, 0,
+		acp.WithSessionIDHook(ensureStubStoreDB))
 	a, err := acpStarter.Start(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("agent %s: spawn: %w", s.Info().Name, err)

@@ -22,6 +22,9 @@ func (e *rpcError) Error() string {
 	if e == nil {
 		return ""
 	}
+	if len(e.Data) > 0 && string(e.Data) != "null" {
+		return fmt.Sprintf("json-rpc error %d: %s: %s", e.Code, e.Message, e.Data)
+	}
 	return fmt.Sprintf("json-rpc error %d: %s", e.Code, e.Message)
 }
 

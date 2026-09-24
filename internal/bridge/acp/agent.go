@@ -705,17 +705,9 @@ func (d *driver) loadReplayID() string {
 	return s
 }
 
-// SessionInfo mirrors the ACP session/list item shape. Exported via
-// DriverHandle so bridge wrappers (e.g. cursor) can fall back to a
-// workspace-matched session when cfg.SessionID no longer resolves on
-// the agent — empirically needed for agents whose session/new id is
-// the same uuid as their local chatId (cursor 2026.09.x): a stale
-// session id from a previous CLI version / workspace swap hits
-// "Session not found" on session/load, and the wrapper needs to list
-// the workspace's live chats and retry load against the latest one.
-//
+// SessionInfo mirrors one ACP session/list row.
 // Empty CWD / zero-value UpdatedAt are preserved so callers can
-// detect "agent returned a partially-populated row".
+// detect a partially-populated row.
 type SessionInfo struct {
 	SessionID string `json:"sessionId"`
 	CWD       string `json:"cwd"`
@@ -735,9 +727,6 @@ type SessionInfo struct {
 // or transport failure produces a non-nil error. Method not found
 // (-32601) is treated as "agent doesn't support list" and returns
 // (nil, nil) so callers can degrade gracefully without an error path.
-//
-// Exposed via DriverHandle for cursor's session/load fallback
-// (docs/bridge/cursor.md §3.3).
 func (d *driver) ListSessions(ctx context.Context, cwd string) ([]SessionInfo, error) {
 	if d.transport == nil || d.rpc == nil {
 		return nil, errors.New("bridge/acp: driver not started")

@@ -18,6 +18,15 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 )
 
+// OnSessionID is invoked synchronously after the acp server returns
+// a sessionId from session/new and before the synthesized
+// EventAgentReady is emitted. Returning a non-nil error aborts the
+// spawn. The hook is generic — bridges that need pre-Ready prep
+// (e.g. cursor pre-creates store.db to bridge the
+// session/new→store.db timing gap) register one via
+// WithSessionIDHook. Opencode / copilot / others don't register.
+type OnSessionID func(sessionID string) error
+
 // Starter is the acp spawn recipe. Held in agent.Builtins as a
 // singleton per agent name.
 type Starter struct {
@@ -28,6 +37,18 @@ type Starter struct {
 	env            []string
 	cols           int
 	rows           int
+	onSessionID    OnSessionID
+}
+
+// StarterOpt customizes a Starter at construction time. Use
+// WithSessionIDHook to register a pre-EventAgentReady hook.
+type StarterOpt func(*Starter)
+
+// WithSessionIDHook registers a callback invoked synchronously
+// after session/new returns its id and before EventAgentReady is
+// emitted. Returns the modified Starter for chaining.
+func WithSessionIDHook(fn OnSessionID) StarterOpt {
+	return func(s *Starter) { s.onSessionID = fn }
 }
 
 // NewStarter constructs the acp spawn recipe. Entry point used at
@@ -36,9 +57,10 @@ type Starter struct {
 // args are the command's protocol flags (e.g. the ACP server flag).
 // Defensively copied. env is the spawn recipe's default env entries,
 // also defensively copied. cols/rows set the initial PTY size; values
-// <= 0 are normalized to 80x24 inside newDriver.
-func NewStarter(name, command string, args, env []string, cols, rows int) *Starter {
-	return &Starter{
+// <= 0 are normalized to 80x24 inside newDriver. Optional opts
+// customize behavior — see WithSessionIDHook.
+func NewStarter(name, command string, args, env []string, cols, rows int, opts ...StarterOpt) *Starter {
+	s := &Starter{
 		name:           name,
 		command:        command,
 		defaultCommand: command,
@@ -47,6 +69,10 @@ func NewStarter(name, command string, args, env []string, cols, rows int) *Start
 		cols:           cols,
 		rows:           rows,
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // Info returns the fixed metadata for this starter. Observable

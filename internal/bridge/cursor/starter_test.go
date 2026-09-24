@@ -5,12 +5,10 @@
 package cursor
 
 import (
-	"errors"
 	"os/exec"
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/agent"
-	"github.com/cnlangzi/nightme/internal/bridge/acp"
 )
 
 // TestStarter_Info verifies the Starter's Info() exposes the
@@ -119,110 +117,5 @@ func TestStarter_Detect_PassForRealBinary(t *testing.T) {
 	s := NewStarter("cursor", "cursor-agent", nil)
 	if err := s.Detect(); err != nil {
 		t.Errorf("Detect() error = %v, want nil", err)
-	}
-}
-
-// TestPickLatestMatchingSession pins the session/load-fallback
-// selection: pick the most recently updated session whose CWD
-// matches, skip the originally-rejected id, and never pick an
-// empty id. Mirrors the wire behaviour verified at
-// /tmp/cursor-acp-probe/probe_resume_e2e.py — cursor's session/list
-// orders entries newest-first, but we don't rely on that ordering
-// and instead use UpdatedAt so other ACP agents without that
-// ordering still work.
-func TestPickLatestMatchingSession(t *testing.T) {
-	workspace := "/Users/geax/code/geax/repo"
-	skipID := "32c7da3f-4365-4a09-a3a4-bc69ffaccff8" // the rejected id
-
-	cases := []struct {
-		name     string
-		sessions []acp.SessionInfo
-		want     string
-	}{
-		{
-			name:     "empty list returns empty",
-			sessions: nil,
-			want:     "",
-		},
-		{
-			name: "single matching session, not the rejected one",
-			sessions: []acp.SessionInfo{
-				{SessionID: "aaaa", CWD: workspace, UpdatedAt: "2026-09-22T10:00:00Z"},
-			},
-			want: "aaaa",
-		},
-		{
-			name: "only the rejected id → no candidate",
-			sessions: []acp.SessionInfo{
-				{SessionID: skipID, CWD: workspace, UpdatedAt: "2026-09-22T09:00:00Z"},
-			},
-			want: "",
-		},
-		{
-			name: "different cwd → skipped",
-			sessions: []acp.SessionInfo{
-				{SessionID: "bbbb", CWD: "/Users/other/repo", UpdatedAt: "2026-09-22T10:00:00Z"},
-			},
-			want: "",
-		},
-		{
-			name: "multiple matches, picks the newest",
-			sessions: []acp.SessionInfo{
-				{SessionID: "older", CWD: workspace, UpdatedAt: "2026-09-21T10:00:00Z"},
-				{SessionID: "newer", CWD: workspace, UpdatedAt: "2026-09-22T10:00:00Z"},
-				{SessionID: "middle", CWD: workspace, UpdatedAt: "2026-09-22T05:00:00Z"},
-			},
-			want: "newer",
-		},
-		{
-			name: "rejected id filtered even when its UpdatedAt is newest",
-			sessions: []acp.SessionInfo{
-				{SessionID: skipID, CWD: workspace, UpdatedAt: "2026-09-23T10:00:00Z"},
-				{SessionID: "fallback", CWD: workspace, UpdatedAt: "2026-09-22T10:00:00Z"},
-			},
-			want: "fallback",
-		},
-		{
-			name: "empty CWD in list entry treated as match (cursor does this on first call)",
-			sessions: []acp.SessionInfo{
-				{SessionID: "no-cwd", CWD: "", UpdatedAt: "2026-09-22T10:00:00Z"},
-			},
-			want: "no-cwd",
-		},
-		{
-			name: "empty UpdatedAt falls back to iteration order — first non-skipped wins",
-			sessions: []acp.SessionInfo{
-				{SessionID: "first", CWD: workspace, UpdatedAt: ""},
-				{SessionID: "second", CWD: workspace, UpdatedAt: ""},
-			},
-			want: "first",
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := pickLatestMatchingSession(tc.sessions, workspace, skipID)
-			if got != tc.want {
-				t.Errorf("pickLatestMatchingSession() = %q, want %q", got, tc.want)
-			}
-		})
-	}
-}
-
-// TestIsResumeUnhealthy verifies the wrapper recognises the bridge
-// error class that triggers the list-and-retry fallback. Wrapped
-// errors (fmt.Errorf with %w) must still match — that's how the acp
-// driver reports session/load / session/resume failures.
-func TestIsResumeUnhealthy(t *testing.T) {
-	if !isResumeUnhealthy(agent.ErrResumeUnhealthy) {
-		t.Error("isResumeUnhealthy(agent.ErrResumeUnhealthy) = false, want true")
-	}
-	wrapped := errors.Join(errors.New("session/load context"), agent.ErrResumeUnhealthy)
-	if !isResumeUnhealthy(wrapped) {
-		t.Error("isResumeUnhealthy(wrapped ErrResumeUnhealthy) = false, want true")
-	}
-	other := errors.New("some other failure")
-	if isResumeUnhealthy(other) {
-		t.Error("isResumeUnhealthy(other error) = true, want false")
 	}
 }

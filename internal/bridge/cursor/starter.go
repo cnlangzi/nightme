@@ -114,68 +114,24 @@ func (s *Starter) Command() string { return s.command }
 // following the opencode/update.go pattern.
 //
 // cfg.SessionID, when non-empty, is forwarded to the generic ACP
-// bridge, which reopens that session via session/resume or
-// session/load.
-//
-// Resume fallback (2026-09-22): cursor-agent 2026.09.x persists
-// the chatId that session/new returns, and session/load against
-// that id DOES restore the chat history (verified
-// /tmp/cursor-acp-probe/probe_resume_e2e.py: model remembers
-// "BANANA" across process restart). But when the id on disk
-// comes from a previous cursor-agent version whose chatId space
-// was reshuffled, or a workspace swap left a stale id, the
-// session/load returns -32602 "Session ... not found". In that
-// case we fall back to session/list {cwd} and retry session/load
-// with the latest matching chatId. If the fallback also fails, we
-// surface the original error — the chat layer's
-// ErrResumeUnhealthy handler is the authoritative escalation path,
-// and silently picking an unrelated chat would be worse than
-// failing loudly.
+// bridge. cursor-agent advertises loadSession and not
+// sessionCapabilities.resume, so the handshake reopens that id
+// with session/load. The id is the sessionId from session/new.
+// session/load succeeds after a session/prompt has written
+// ~/.cursor/acp-sessions/<id>/store.db. A load failure returns
+// agent.ErrResumeUnhealthy; the chat layer handles resume rejection.
 func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agent, error) {
 	if cfg.Workspace == "" {
 		return nil, errors.New("cursor: workspace is required")
 	}
-	acpStarter := acp.NewStarter(s.name, s.command, s.args, nil, 0, 0)
+	// ensureStubStoreDB bridges cursor-agent's session/new→store.db
+	// timing gap: cursor's session/load fails -32602 until the first
+	// session/prompt writes store.db, so the runtime can't safely
+	// persist the freshly-assigned id. We pre-write a minimal stub
+	// SQLite db so session/load succeeds immediately. See stub.go.
+	acpStarter := acp.NewStarter(s.name, s.command, s.args, nil, 0, 0,
+		acp.WithSessionIDHook(ensureStubStoreDB))
 	a, err := acpStarter.Start(ctx, cfg)
-	if err == nil {
-		return s.attachMethodHandler(a)
-	}
-	// Resume-id rejected by cursor. Try listing the workspace's
-	// live chats and retrying load against the latest matching
-	// cwd. Only triggers when cfg.SessionID was non-empty AND the
-	// failure was the bridge's resume-unhealthy class — fresh
-	// session/new failures (auth, transport, …) are not retryable
-	// here.
-	if cfg.SessionID == "" || !isResumeUnhealthy(err) {
-		return nil, fmt.Errorf("agent %s: spawn: %w", s.Info().Name, err)
-	}
-	originalErr := err
-	cLog("Start: session/load rejected, attempting list+retry",
-		"requested_session_id", cfg.SessionID,
-		"workspace", cfg.Workspace,
-		"err", err.Error())
-	drv, ok := a.Driver().(*acp.DriverHandle)
-	if !ok {
-		return nil, fmt.Errorf("agent %s: spawn: %w", s.Info().Name, originalErr)
-	}
-	sessions, lerr := drv.ListSessions(ctx, cfg.Workspace)
-	if lerr != nil {
-		cLog("Start: ListSessions failed, surfacing original error",
-			"err", lerr.Error())
-		return nil, fmt.Errorf("agent %s: spawn: %w", s.Info().Name, originalErr)
-	}
-	match := pickLatestMatchingSession(sessions, cfg.Workspace, cfg.SessionID)
-	if match == "" {
-		cLog("Start: no matching session in list, surfacing original error",
-			"list_count", len(sessions))
-		return nil, fmt.Errorf("agent %s: spawn: %w", s.Info().Name, originalErr)
-	}
-	cLog("Start: retrying session/load with list-discovered id",
-		"old_session_id", cfg.SessionID,
-		"new_session_id", match)
-	_ = a.Close()
-	cfg.SessionID = match
-	a, err = acpStarter.Start(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("agent %s: spawn: %w", s.Info().Name, err)
 	}
@@ -198,43 +154,6 @@ func (s *Starter) attachMethodHandler(a *agent.Agent) (*agent.Agent, error) {
 	}
 	drv.SetMethodHandler(NewMethodHandler(drv.View()))
 	return a, nil
-}
-
-// isResumeUnhealthy reports whether err is the bridge-class
-// resume-rejection signal. The acp driver wraps session/load and
-// session/resume failures with agent.ErrResumeUnhealthy, which the
-// chat layer also recognises for auto-recovery (see
-// internal/agentsession/session.go's long comment around the 2026-09
-// resume-rejection fix).
-func isResumeUnhealthy(err error) bool {
-	return errors.Is(err, agent.ErrResumeUnhealthy)
-}
-
-// pickLatestMatchingSession returns the sessionId of the most
-// recently-updated entry whose CWD matches the requested workspace.
-// Skips the originally-requested id (the failed one). Returns "" if
-// no other candidate exists — caller surfaces the original error.
-//
-// "Most recently updated" prefers non-empty UpdatedAt timestamps;
-// falls back to list order when the agent reports zero timestamps.
-// The cursor agent always populates UpdatedAt (ISO 8601), but the
-// fallback is defensive against other ACP agents that may not.
-func pickLatestMatchingSession(sessions []acp.SessionInfo, cwd, skipID string) string {
-	var best string
-	var bestStamp string
-	for _, s := range sessions {
-		if s.SessionID == skipID || s.SessionID == "" {
-			continue
-		}
-		if s.CWD != "" && s.CWD != cwd {
-			continue
-		}
-		if best == "" || s.UpdatedAt > bestStamp {
-			best = s.SessionID
-			bestStamp = s.UpdatedAt
-		}
-	}
-	return best
 }
 
 // RunOnce is the one-shot counterpart to Start. Spawns

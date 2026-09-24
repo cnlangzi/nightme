@@ -1230,3 +1230,75 @@ func countNonHeartbeat(msgs []messages.OutboundMessage) int {
 	}
 	return n
 }
+
+// TestPersistAgentSession_GatedBySessionID pins the runtime's
+// generic session-id capture rule: persist iff the bridge gave
+// us a non-empty SessionID different from what AS already holds.
+// Bridges own when their id is durable to resume and stamp
+// ev.SessionID only at that point (cursor pre-creates store.db
+// at session/new; see bridge/cursor/stub.go). The runtime does
+// NOT inspect bridge name, wire-level reason, or per-agent
+// timing — abstraction stays in each bridge.
+func TestPersistAgentSession_GatedBySessionID(t *testing.T) {
+	ch := echo.New("test", io.Discard)
+	mgr := chatsession.NewManager()
+	cs, _ := mgr.GetOrCreate("oc_chat", "cursor")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	h := NewEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, chatsession.GitStatusDeps{})
+
+	cases := []struct {
+		name     string
+		ev       *agent.AgentEvent
+		wantASID string
+	}{
+		{
+			name:     "empty SessionID does not capture",
+			ev:       &agent.AgentEvent{Kind: agent.EventAgentReady},
+			wantASID: "",
+		},
+		{
+			name:     "non-empty SessionID captures on Ready",
+			ev:       &agent.AgentEvent{Kind: agent.EventAgentReady, SessionID: "sid-A"},
+			wantASID: "sid-A",
+		},
+		{
+			name:     "non-empty SessionID captures on Done{settled}",
+			ev:       &agent.AgentEvent{Kind: agent.EventAgentDone, SessionID: "sid-B", Done: &agent.AgentDoneEvent{Reason: "settled"}},
+			wantASID: "sid-B",
+		},
+		{
+			name:     "non-empty SessionID captures on EventAgentError",
+			ev:       &agent.AgentEvent{Kind: agent.EventAgentError, SessionID: "sid-C"},
+			wantASID: "sid-C",
+		},
+		{
+			name:     "blank SessionID does not wipe previous",
+			ev:       &agent.AgentEvent{Kind: agent.EventAgentReady, SessionID: ""},
+			wantASID: "sid-C", // unchanged
+		},
+	}
+
+	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "cursor", "/tmp", nil)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: tc.ev})
+			if got := as.SessionID(); got != tc.wantASID {
+				t.Fatalf("SessionID = %q, want %q", got, tc.wantASID)
+			}
+		})
+	}
+
+	// Idempotency: re-delivery of the same id is a no-op (the
+	// runtime must not rewrite agent_sessions.json once per turn
+	// on long-lived bridges like cursor that re-stamp Done{settled}
+	// with the same uuid).
+	t.Run("redelivery is no-op", func(t *testing.T) {
+		before := as.SessionID()
+		h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &agent.AgentEvent{
+			Kind: agent.EventAgentDone, SessionID: before, Done: &agent.AgentDoneEvent{Reason: "settled"},
+		}})
+		if as.SessionID() != before {
+			t.Fatalf("SessionID drifted across redelivery: before=%q after=%q", before, as.SessionID())
+		}
+	})
+}

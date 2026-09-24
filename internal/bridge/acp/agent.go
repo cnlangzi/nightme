@@ -93,6 +93,11 @@ type driver struct {
 	workspace string
 
 	sessionID string
+	// onSessionID fires synchronously in bindSession after d.sessionID
+	// is finalized and before EventAgentReady is emitted. Used by
+	// cursor to pre-create store.db so the session/new→store.db
+	// timing gap doesn't bite. See bridge/acp/starter.go::WithSessionIDHook.
+	onSessionID OnSessionID
 	// resumeSessionID is the caller's cfg.SessionID. Non-empty means
 	// handshake must reopen that session (session/resume when the
 	// agent advertises it, otherwise session/load) instead of
@@ -445,6 +450,7 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 		agentName:       s.name,
 		workspace:       cfg.Workspace,
 		resumeSessionID: cfg.SessionID,
+		onSessionID:     s.onSessionID,
 		events:          make(chan agent.AgentEvent, eventBufferSize),
 		textBuf:         &strings.Builder{},
 		thoughtBuf:      &strings.Builder{},
@@ -705,17 +711,9 @@ func (d *driver) loadReplayID() string {
 	return s
 }
 
-// SessionInfo mirrors the ACP session/list item shape. Exported via
-// DriverHandle so bridge wrappers (e.g. cursor) can fall back to a
-// workspace-matched session when cfg.SessionID no longer resolves on
-// the agent — empirically needed for agents whose session/new id is
-// the same uuid as their local chatId (cursor 2026.09.x): a stale
-// session id from a previous CLI version / workspace swap hits
-// "Session not found" on session/load, and the wrapper needs to list
-// the workspace's live chats and retry load against the latest one.
-//
+// SessionInfo mirrors one ACP session/list row.
 // Empty CWD / zero-value UpdatedAt are preserved so callers can
-// detect "agent returned a partially-populated row".
+// detect a partially-populated row.
 type SessionInfo struct {
 	SessionID string `json:"sessionId"`
 	CWD       string `json:"cwd"`
@@ -735,9 +733,6 @@ type SessionInfo struct {
 // or transport failure produces a non-nil error. Method not found
 // (-32601) is treated as "agent doesn't support list" and returns
 // (nil, nil) so callers can degrade gracefully without an error path.
-//
-// Exposed via DriverHandle for cursor's session/load fallback
-// (docs/bridge/cursor.md §3.3).
 func (d *driver) ListSessions(ctx context.Context, cwd string) ([]SessionInfo, error) {
 	if d.transport == nil || d.rpc == nil {
 		return nil, errors.New("bridge/acp: driver not started")
@@ -1388,6 +1383,13 @@ func (d *driver) setSessionID(result json.RawMessage) error {
 // sessionId — session/load and session/resume do that; the id is
 // the one the client sent. Model is taken from ACP configOptions
 // (Cursor's models extension as fallback).
+//
+// If a StarterOpt registered an OnSessionID hook via WithSessionIDHook,
+// it fires here — synchronously, after d.sessionID is finalized and
+// before EventAgentReady is emitted. A non-nil return aborts the
+// spawn with the hook's error. Bridges use this for per-driver
+// prep at the moment the session becomes known (cursor pre-creates
+// store.db; see bridge/cursor/stub.go).
 func (d *driver) bindSession(fallbackID string, result json.RawMessage) error {
 	var response struct {
 		SessionID      string          `json:"sessionId"`
@@ -1414,6 +1416,11 @@ func (d *driver) bindSession(fallbackID string, result json.RawMessage) error {
 		d.modelMu.Lock()
 		d.model = model
 		d.modelMu.Unlock()
+	}
+	if d.onSessionID != nil {
+		if err := d.onSessionID(d.sessionID); err != nil {
+			return err
+		}
 	}
 	// Synthesize an EventAgentReady. Idempotent via connectedSent.
 	d.emitConnected()

@@ -18,7 +18,6 @@ import (
 	"context"
 	"log/slog"
 
-	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/messages"
@@ -89,17 +88,25 @@ func NewEventHandler(
 	}
 	return func(env chatsession.AgentEventEnvelope) {
 		chatID, s, ev, userMsgID := env.ChatID, env.AgentSession, env.Event, env.UserMsgID
-		// Capture the agent's own session id from EventAgentReady so the
-		// next respawn can replay `--resume <id>`. We persist
-		// immediately (rather than waiting for the next status
-		// transition) so a daemon crash after this event still
-		// remembers the id. The capture is idempotent.
+		// Capture the agent's own session id so the next respawn can
+		// replay `--resume <id>` (claude) or `session/load <id>`
+		// (cursor). We persist immediately on every non-empty
+		// SessionID different from what we already hold. Bridges
+		// decide when their id is durable to resume and stamp
+		// ev.SessionID only at that point; the runtime doesn't
+		// reason about per-bridge timing. (Cursor pre-creates
+		// store.db at session/new so its id is durable
+		// immediately — see bridge/cursor/stub.go.)
 		//
-		// Guard: only overwrite an existing (non-empty) SessionID when
-		// the new id is non-empty. Some bridges re-emit EventAgentReady
-		// after a child restart with a blank SessionID; we don't
-		// want to wipe a previously-captured id in that case.
-		if ev.Kind == agent.EventAgentReady && ev.SessionID != "" {
+		// Guard: a blank SessionID does not wipe a previously
+		// captured id. Some bridges re-emit EventAgentReady after a
+		// child restart with a blank SessionID.
+		//
+		// Guard: skip the whole block when ev.SessionID equals
+		// what we already hold, so a long-lived bridge re-emitting
+		// the same id (e.g. cursor on every Done{settled}) doesn't
+		// rewrite agent_sessions.json once per turn.
+		if ev.SessionID != "" && s.SessionID() != ev.SessionID {
 			s.SetSessionID(ev.SessionID)
 			if mgr != nil {
 				if err := mgr.PersistAgentSession(s); err != nil && logger != nil {

@@ -89,17 +89,21 @@ func NewEventHandler(
 	}
 	return func(env chatsession.AgentEventEnvelope) {
 		chatID, s, ev, userMsgID := env.ChatID, env.AgentSession, env.Event, env.UserMsgID
-		// Capture the agent's own session id from EventAgentReady so the
-		// next respawn can replay `--resume <id>`. We persist
-		// immediately (rather than waiting for the next status
-		// transition) so a daemon crash after this event still
-		// remembers the id. The capture is idempotent.
+		// Capture the agent's own session id so the next respawn can
+		// resume it. Most bridges can resume as soon as the handshake
+		// emits EventAgentReady, so that id is persisted immediately.
 		//
-		// Guard: only overwrite an existing (non-empty) SessionID when
-		// the new id is non-empty. Some bridges re-emit EventAgentReady
-		// after a child restart with a blank SessionID; we don't
-		// want to wipe a previously-captured id in that case.
-		if ev.Kind == agent.EventAgentReady && ev.SessionID != "" {
+		// cursor-agent's session/load reads store.db, which appears
+		// only after the first prompt settles. Persisting the id on
+		// Ready makes a restart before that prompt fail every later
+		// message. Cursor's id is stored when the turn settles
+		// (EventAgentDone). A crash before that leaves SessionID empty
+		// and the next spawn opens a fresh session.
+		//
+		// Guard: a blank SessionID does not wipe a previously captured
+		// id. Some bridges re-emit EventAgentReady after a child
+		// restart with a blank SessionID.
+		if sessionIDReadyToStore(s.Agent, ev) {
 			s.SetSessionID(ev.SessionID)
 			if mgr != nil {
 				if err := mgr.PersistAgentSession(s); err != nil && logger != nil {
@@ -277,4 +281,16 @@ func NewEventHandler(
 				"text_len", len(out.Text))
 		}
 	}
+}
+
+// sessionIDReadyToStore reports whether ev carries a session id that
+// can be resumed after a process restart.
+func sessionIDReadyToStore(agentName string, ev *agent.AgentEvent) bool {
+	if ev == nil || ev.SessionID == "" {
+		return false
+	}
+	if agentName == "cursor" {
+		return ev.Kind == agent.EventAgentDone && ev.Done != nil && ev.Done.Reason == "settled"
+	}
+	return ev.Kind == agent.EventAgentReady
 }

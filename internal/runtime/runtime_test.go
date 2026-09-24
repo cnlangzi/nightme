@@ -1230,3 +1230,46 @@ func countNonHeartbeat(msgs []messages.OutboundMessage) int {
 	}
 	return n
 }
+
+func TestSessionIDReadyToStore_CursorWaitsForSettledTurn(t *testing.T) {
+	ch := echo.New("test", io.Discard)
+	mgr := chatsession.NewManager()
+	cs, _ := mgr.GetOrCreate("oc_chat", "cursor")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	h := NewEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, chatsession.GitStatusDeps{})
+	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "cursor", "/tmp", nil)
+
+	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &agent.AgentEvent{
+		Kind:      agent.EventAgentReady,
+		SessionID: "sid-early",
+	}})
+	if as.SessionID() != "" {
+		t.Fatalf("SessionID after Ready = %q, want empty", as.SessionID())
+	}
+
+	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &agent.AgentEvent{
+		Kind:      agent.EventAgentDone,
+		SessionID: "sid-settled",
+		Done:      &agent.AgentDoneEvent{Reason: "settled"},
+	}})
+	if as.SessionID() != "sid-settled" {
+		t.Fatalf("SessionID after settled Done = %q, want sid-settled", as.SessionID())
+	}
+}
+
+func TestSessionIDReadyToStore_OtherAgentsPersistOnReady(t *testing.T) {
+	ch := echo.New("test", io.Discard)
+	mgr := chatsession.NewManager()
+	cs, _ := mgr.GetOrCreate("oc_chat", "claude")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	h := NewEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, chatsession.GitStatusDeps{})
+	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "claude", "/tmp", nil)
+
+	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &agent.AgentEvent{
+		Kind:      agent.EventAgentReady,
+		SessionID: "sid-ready",
+	}})
+	if as.SessionID() != "sid-ready" {
+		t.Fatalf("SessionID after Ready = %q, want sid-ready", as.SessionID())
+	}
+}

@@ -3,6 +3,7 @@ package cursor
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -16,8 +17,8 @@ import (
 // sessionId. cursor-agent advertises loadSession, so the second
 // Start is session/load of the same id.
 func TestE2E_ResumeAfterPrompt(t *testing.T) {
-	skipNoAgent(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	skipCursorE2E(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
 
 	s := NewStarter("cursor", "cursor-agent", DefaultACPArgs)
@@ -25,15 +26,17 @@ func TestE2E_ResumeAfterPrompt(t *testing.T) {
 	word := "BANANA-RESUME-E2E"
 
 	first := startAgent(t, ctx, s, agent.StartConfig{Workspace: ws})
+	defer first.Close()
 	sid := waitReady(t, first, 45*time.Second)
 	if err := first.SendBlocks(ctx, []agent.ContentBlock{{
 		Type: agent.ContentText,
 		Text: "Reply with exactly " + word + " and nothing else.",
 	}}); err != nil {
-		first.Close()
 		t.Fatalf("SendBlocks: %v", err)
 	}
-	waitTurn(t, first, 2*time.Minute)
+	if text := waitTurn(t, first, 2*time.Minute); !strings.Contains(text, word) {
+		t.Fatalf("first turn text = %q, want %q", text, word)
+	}
 	first.Close()
 
 	second := startAgent(t, ctx, s, agent.StartConfig{Workspace: ws, SessionID: sid})
@@ -42,6 +45,15 @@ func TestE2E_ResumeAfterPrompt(t *testing.T) {
 	if got != sid {
 		t.Fatalf("resumed session id = %q, want %q", got, sid)
 	}
+	if err := second.SendBlocks(ctx, []agent.ContentBlock{{
+		Type: agent.ContentText,
+		Text: "Repeat only the exact token I asked you to reply with in the previous message.",
+	}}); err != nil {
+		t.Fatalf("recall SendBlocks: %v", err)
+	}
+	if text := waitTurn(t, second, 2*time.Minute); !strings.Contains(text, word) {
+		t.Fatalf("recalled text = %q, want %q", text, word)
+	}
 }
 
 // TestE2E_ResumeBeforeStore_ReturnsUnhealthy closes a session before
@@ -49,13 +61,14 @@ func TestE2E_ResumeAfterPrompt(t *testing.T) {
 // rejects the id. Start must return ErrResumeUnhealthy instead of
 // panicking.
 func TestE2E_ResumeBeforeStore_ReturnsUnhealthy(t *testing.T) {
-	skipNoAgent(t)
+	skipCursorE2E(t)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 
 	s := NewStarter("cursor", "cursor-agent", DefaultACPArgs)
 	ws := t.TempDir()
 	first := startAgent(t, ctx, s, agent.StartConfig{Workspace: ws})
+	defer first.Close()
 	sid := waitReady(t, first, 45*time.Second)
 	first.Close()
 
@@ -76,6 +89,14 @@ func TestE2E_ResumeBeforeStore_ReturnsUnhealthy(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("resume error = %v, want session-not-found detail", err)
+	}
+}
+
+func skipCursorE2E(t *testing.T) {
+	t.Helper()
+	skipNoAgent(t)
+	if os.Getenv("NIGHTME_CURSOR_E2E") != "1" {
+		t.Skip("set NIGHTME_CURSOR_E2E=1 to run cursor-agent resume e2e")
 	}
 }
 
@@ -116,8 +137,9 @@ func waitReady(t *testing.T, a *agent.Agent, d time.Duration) string {
 	}
 }
 
-func waitTurn(t *testing.T, a *agent.Agent, d time.Duration) {
+func waitTurn(t *testing.T, a *agent.Agent, d time.Duration) string {
 	t.Helper()
+	var text strings.Builder
 	deadline := time.After(d)
 	for {
 		select {
@@ -125,11 +147,14 @@ func waitTurn(t *testing.T, a *agent.Agent, d time.Duration) {
 			if !ok {
 				t.Fatal("events closed before turn end")
 			}
+			if ev.Text != "" {
+				text.WriteString(ev.Text)
+			}
 			if ev.Kind == agent.EventAgentResult || ev.Kind == agent.EventAgentDone || ev.Kind == agent.EventAgentError {
 				if ev.Kind == agent.EventAgentError {
 					t.Fatalf("turn error: %s", ev.Text)
 				}
-				return
+				return text.String()
 			}
 		case <-deadline:
 			t.Fatal("timeout waiting for turn end")

@@ -109,7 +109,7 @@ precomputeReviewWithOcr                precomputeReviewWithBuiltin
 | `ocrRules` | N 个 group 的 markdown 拼好 | ""(只有一个 group)|
 | merge-base / 3 diffs | 都有(同)| 都有(同)|
 
-`ReviewWithOcr` 调 `precomputeReviewWithOcr`,`ReviewWithPrompt` 调 `precomputeReviewWithBuiltin`。两个 Runner 函数返回值都是 `RunResult`,行为形状一致。Bridge dispatcher 仍按 `OcrAvailable()` 选择调用哪个 Runner —— 这是路由决策点(不属于任何 Runner 的内部职责)。
+`ReviewWithOcr` 调 `precomputeReviewWithOcr`,`ReviewWithPrompt` 调 `precomputeReviewWithBuiltin`。两个 Runner 函数返回值都是 `RunResult`,行为形状一致。`agent.ReviewDispatch` 按 `OcrAvailable()` 选择调用哪个 Runner —— 路由决策集中在这一个 helper,不在任何 Runner 的内部职责里。
 
 
 
@@ -173,7 +173,7 @@ workspace 为空 / precompute 全失败时,fan-out 退化为 `[simplifyGroup(nil
 
 **关键收敛**:1–5 项是纯 Go 工程,两档都做;第 6 项规则匹配是 ocr / builtin 路径的差异点(ocr 拿多 pattern groups,builtin 拿 Go 合成的一个 builtinGroup);第 7 项防单 job 的 prompt 膨胀。ocr 在与不在的区别收敛到"规则匹配"一项的精度(ocr FileFilter vs Go 启发式)。
 
-`BuiltinPrompt` 本身不再携带 simplify 规则(原 `StandardPrompt` 里有这条 bullet,已删)—— simplify 作为独立并行 group 跑(`SimplifyPrompt` const),不再在 BuiltinPrompt 里冗余出现。severity 词汇统一为 `critical/high/medium/low`,跟 `assembleGroupPrompt` 的 output schema 一致 —— 不再有 `blocker/major/minor/nit` 与 `critical/high/medium/low` 跨 group 冲突。
+`BuiltinPrompt` 本身不再携带 simplify 规则(原 `StandardPrompt` 里有这条 bullet,已删)—— simplify 作为独立并行 group 跑(`simplifyPrompt` const,小写未导出),不再在 BuiltinPrompt 里冗余出现。severity 词汇统一为 `critical/high/medium/low`,跟 `assembleGroupPrompt` 的 output schema 一致 —— 不再有 `blocker/major/minor/nit` 与 `critical/high/medium/low` 跨 group 冲突。
 
 ---
 
@@ -292,7 +292,7 @@ partial failure 路径:**不**升级为 merge 整体错误,失败组以 inline m
 | 多 job 并发编排(sem cap 4,N 个 goroutine,各自独立 ctx) | `internal/agent/review_with_ocr.go::delegateReviewMultiJob` |
 | per-group 提示词(context / file list / diff / rule / how-to / schema),按 `g.Pattern` 分 header(ocr / builtin / simplify) | `internal/agent/review_with_ocr.go::assembleGroupPrompt` |
 | 按文件过滤 diff(`git diff -- <files...>`) | `internal/agent/review_with_ocr.go::groupFilteredDiff` |
-| `BuiltinPrompt` / `SimplifyPrompt` 静态 prompt 模板 | `internal/agent/review.go` |
+| `BuiltinPrompt` / `simplifyPrompt` 静态 prompt 模板 | `internal/agent/review.go` |
 | **三相状态机 + per-job 配对缓冲**(Phase 1 buffering → Phase 2 streaming → Phase 3 closed;pendingToolStarts map per-job;Task 跨 job ID 去重;异序到达容错) | `internal/agent/aggregate_sink.go::eventAggregator` |
 | **多 job 结果合并**(纯自然语言拼接 + 部分失败 inline marker,无解析/排序/去重/coverage 聚合) | `internal/agent/review_with_ocr.go::mergeRunResults` |
 | 单元测试(聚合器 / 合并 / 并发 / 配对) | `internal/agent/aggregate_sink_test.go`、`internal/agent/merge_results_test.go`、`internal/agent/fanout_test.go` |
@@ -328,7 +328,7 @@ const (
 )
 
 func simplifyGroup(files []string) reviewGroup {
-    return reviewGroup{Pattern: patternSimplify, Files: files, Rule: SimplifyPrompt}
+    return reviewGroup{Pattern: patternSimplify, Files: files, Rule: simplifyPrompt}
 }
 
 // ReviewWithOcr:precomputeReviewWithOcr → pre.ocrGroups + simplifyGroup → 风扇
@@ -341,7 +341,7 @@ groups := append(pre.ocrGroups, simplifyGroup(pre.reviewable))
 
 两个 Runner 函数**主体相同**:都 `pre := precomputeReview*(ctx, workspace); groups := append(pre.ocrGroups, simplifyGroup(pre.reviewable)); return delegateReviewMultiJob(...)`。区别只在调哪个 `precomputeReview*`。
 
-simplify group 的 prompt 通过 `assembleGroupPrompt` 渲染:`switch g.Pattern` 命中 `patternSimplify` 分支,header 是 `# Simplify review lens (nightme-owned, complementary)`,rule 文本是 `SimplifyPrompt` const。
+simplify group 的 prompt 通过 `assembleGroupPrompt` 渲染:`switch g.Pattern` 命中 `patternSimplify` 分支,header 是 `# Simplify review lens (nightme-owned, complementary)`,rule 文本是 `simplifyPrompt` const。
 
 ### Scope
 
@@ -352,15 +352,20 @@ simplify group 的 prompt 通过 `assembleGroupPrompt` 渲染:`switch g.Pattern`
 
 ### ocr 检测的位置(SRP)
 
-`OcrAvailable()` 是 agent 包导出的函数。delegate-tier 桥的 `Starter.Review` 自己做 ocr 检测,然后决定调哪个 runner:
+`OcrAvailable()` 是 agent 包导出的纯存在性检查(`exec.LookPath("ocr")`)。`agent.ReviewDispatch` 是唯一的 dispatch 点 —— 所有桥的 `Starter.Review` 都是同一行 `return agent.ReviewDispatch(ctx, s, cfg, opts...)`,内部按 `OcrAvailable()` 选 `ReviewWithOcr` 或 `ReviewWithPrompt`:
 
 ```go
-// 4 个 delegate 桥的 Starter.Review(统一形态)
-func (s *Starter) Review(ctx, cfg, opts...) (RunResult, error) {
-    if agent.OcrAvailable() {
-        return agent.ReviewWithOcr(ctx, s, cfg, opts...)
+// 全部 8 个桥的 Starter.Review(单一形态)
+func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
+    return agent.ReviewDispatch(ctx, s, cfg, opts...)
+}
+
+// agent.ReviewDispatch
+func ReviewDispatch(ctx context.Context, s Starter, cfg StartConfig, opts ...RunOnceOption) (RunResult, error) {
+    if OcrAvailable() {
+        return ReviewWithOcr(ctx, s, cfg, opts...)
     }
-    return agent.ReviewWithPrompt(ctx, s, cfg, opts...)
+    return ReviewWithPrompt(ctx, s, cfg, opts...)
 }
 ```
 

@@ -192,8 +192,10 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 //
 // If the user wants Claude Code's built-in `code-review` slash
 // command (a multi-agent review pipeline tuned for the task),
-// they send `/code-review` directly in chat — NightMe forwards
-// it transparently to the selected agent.
+// they send `/code-review` directly in chat — the chat session's
+// long-lived Start path forwards it to claude the same way it
+// forwards any prompt, and claude dispatches the slash command
+// itself.
 func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	return agent.ReviewDispatch(ctx, s, cfg, opts...)
 }

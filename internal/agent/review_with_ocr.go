@@ -51,9 +51,9 @@ const maxDiffLines = 2000
 // reasoning with its own LLM.
 //
 // Pre-conditions:
-//   - The caller (bridge Starter.Review) has already checked OcrAvailable
-//     and routed here. ReviewWithOcr does NOT re-check — single
-//     responsibility: "given ocr, do the ocr flow".
+//   - agent.ReviewDispatch has already checked OcrAvailable and routed
+//     here. ReviewWithOcr does NOT re-check — single responsibility:
+//     "given ocr, do the ocr flow".
 //
 // Flow:
 //  1. precomputeReview fills reviewable / ocrGroups / diffs.
@@ -236,9 +236,10 @@ func simplifyGroup(files []string) reviewGroup {
 
 // precomputeReviewWithOcr populates the reviewContext using the ocr CLI
 // delegation flow (ocr delegate preview + ocr delegate rule). The
-// caller (ReviewWithOcr) is responsible for verifying OcrAvailable()
-// before calling this — this function assumes ocr is on $PATH and
-// won't fall back to git-based collection if ocr subprocess fails.
+// caller (agent.ReviewDispatch → ReviewWithOcr) is responsible for
+// verifying OcrAvailable() before reaching this — this function
+// assumes ocr is on $PATH and won't fall back to git-based collection
+// if ocr subprocess fails.
 //
 // Returns a reviewContext with ocr-populated fields on success
 // (reviewable via ocr's FileFilter, ocrGroups per-pattern rule
@@ -539,10 +540,9 @@ func runOcrDelegatePreview(ctx context.Context, workspace, from, to string) (ocr
 // — no spawn, no cross-platform spawn recipe needed. LookPath honours
 // PATHEXT on Windows, so "ocr" resolves to ocr.cmd / ocr.exe.
 //
-// Exported so delegate-tier bridges can dispatch their Starter.Review
-// impl to either ReviewWithOcr (when this returns true) or
-// ReviewWithPrompt (when false). Keeping the detection here avoids
-// duplicating the LookPath call across 5 bridge packages.
+// Exported for agent.ReviewDispatch (the single in-package caller
+// that routes to ReviewWithOcr or ReviewWithPrompt). Keeping the
+// detection here avoids duplicating the LookPath call.
 func OcrAvailable() bool {
 	_, err := exec.LookPath("ocr")
 	return err == nil

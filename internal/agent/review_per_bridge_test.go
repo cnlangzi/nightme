@@ -31,14 +31,16 @@ import (
 	"github.com/cnlangzi/nightme/internal/bridge/pty"
 )
 
-// TestReview_UsesSharedPrompt is the canonical contract test for
-// the agent.Review path shared by every bridge (via
-// agent.ReviewDispatch). It verifies that the path runs the
-// shared BuiltinPrompt and wraps the result with the canonical
-// preamble. The "every Review path ends with FormatReviewMessage"
-// contract is verified structurally by the integration tests of
-// each bridge; this test exercises the dispatcher's claim that
-// the unified path delivers the shared prompt.
+// TestReview_UsesSharedPrompt pins the bridge-facing shape every
+// bridge's Starter.Review method implements: a single RunOnce
+// call carrying the BuiltinPrompt + Workspace, and the raw
+// RunResult returned (no FormatReviewMessage wrap, no Inject —
+// those are the dispatcher's job in internal/command/review/cmd.go).
+//
+// The test drives a hand-written testStarter.Review rather than
+// agent.ReviewDispatch directly. ReviewDispatch's own behavior
+// (delegateReviewMultiJob fan-out, ErrNoDiff short-circuit) is
+// tested in fanout_test.go / review_test.go.
 func TestReview_UsesSharedPrompt(t *testing.T) {
 	const workspace = "/Users/me/proj"
 

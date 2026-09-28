@@ -289,9 +289,9 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 		"image_count", countImageFlags(prefixArgs),
 		"pid", pid)
 
-	// Drain stderr concurrently via the shared helper (matches
-	// runCodexReviewPlain's stderr semantics so a future tweak to
-	// the cap / cancellation applies to both surfaces at once).
+	// Drain stderr concurrently via the shared helper. Caps
+	// stderr capture bytes and cancellation in one place so any
+	// future tweak applies to the whole bridge at once.
 	stderrDrain := startStderrDrain(ctx, stderr)
 
 	// Read stdout NDJSON events + extract metadata. runNDJSON
@@ -409,9 +409,8 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 		Subtype:    subtype,
 	}
 
-	// Shared error formatting with runCodexReviewPlain. waitErr is
-	// surfaced first (jsonReadErr is usually just "broken pipe on
-	// closed child" noise); stderr is trimmed here once.
+	// Surface waitErr first (jsonReadErr is usually just "broken
+	// pipe on closed child" noise); stderr is trimmed here once.
 	stderrStr := strings.TrimSpace(stderrDrain.bytes())
 	if err := formatCodexExitError(waitErr, stderrStr, finalText, "answer"); err != nil {
 		// Surface the failure to the sink so the chat channel
@@ -502,8 +501,7 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 	// Terminal event: hand the assembled RunResult to the sink
 	// so the chat channel can render the canonical
 	// "📝 <text> (12.3s)" line + footer tokens. Same shape as
-	// dsh's drain (starter.go:228-241) and the runCodexReview-
-	// Plain success branch.
+	// dsh's drain (starter.go:228-241).
 	if sink != nil {
 		sink(agent.AgentEvent{
 			Kind: agent.EventAgentResult,
@@ -546,11 +544,8 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 // is silently dropped, mirroring the long-lived bridge's
 // SendBlocks). If a future flag requires validation, add the
 // error return then.
-// buildPrintArgs assembles argv for `codex exec <prompt>`. Only
-// used by RunOnce. The codex review subcommand lives in
-// runCodexReviewPlain and assembles its own argv (the two
-// subcommands take disjoint flag sets — see runCodexReview for
-// why review doesn't reuse this function).
+// buildPrintArgs assembles argv for `codex exec <prompt>`. Used
+// by RunOnce only.
 func buildPrintArgs(cfg agent.StartConfig, blocks []agent.ContentBlock) (args []string, prompt string) {
 	args = []string{"exec"}
 
@@ -670,10 +665,9 @@ type codexExecEvent struct {
 //   - file_change       : Changes[]; emitted only on completed
 //   - reasoning         : Text; emitted only on completed (when
 //     model_reasoning_summary=detailed)
-//   - agent_message     : Text; emitted only on completed — this
-//     is the review's final answer and is
-//     suppressed from the sink (P1 fix — see
-//     runCodexReviewPlain doc)
+//   - agent_message     : Text; emitted only on completed —
+//     suppressed from the sink (P1 fix — single point of
+//     prose delivery is EventAgentResult)
 //   - mcp_tool_call     : Server, Tool, Arguments; emitted on
 //     started / completed
 //   - error             : Message; emitted only on completed
@@ -771,12 +765,9 @@ func extractModelFromError(msg string) string {
 }
 
 // stderrDrain captures a subprocess's stderr to a capped buffer in
-// a background goroutine. Shared between runPrintMode (exec) and
-// runCodexReviewPlain (review) so both surfaces have IDENTICAL
-// stderr capture semantics — the prior duplication (verified by
-// the bug where `codex review` was routed through runPrintMode's
-// NDJSON parser and its plain-text output was silently dropped)
-// is what made the surfaces drift; extracting here means any
+// a background goroutine. Shared so runPrintMode has IDENTICAL
+// stderr capture semantics across the bridge — extracting here
+// means any future tweak to the cap / cancellation applies at once.
 // future cap / cancellation tweak applies to both at once.
 type stderrDrain struct {
 	buf       *strings.Builder
@@ -824,12 +815,10 @@ func (d *stderrDrain) bytes() string       { return d.buf.String() }
 func (d *stderrDrain) truncatedFlag() bool { return d.truncated }
 
 // formatCodexExitError returns the canonical "codex: exit: ..." /
-// "codex: empty <label>" error for runPrintMode (exec) and
-// runCodexReviewPlain (review). Shared so both surfaces report
-// identical failure shape (same waitErr/stderr/finalText
-// precedence rules). Returns nil when both waitErr is nil and
-// finalText is non-empty (success path — caller builds the result
-// directly).
+// "codex: empty <label>" error for runPrintMode (same waitErr /
+// stderr / finalText precedence rules). Returns nil when waitErr
+// is nil and finalText is non-empty (success path — caller
+// builds the result directly).
 //
 // emptyLabel distinguishes the two paths in error messages:
 // "answer" (exec) or "review answer" (review).
@@ -910,501 +899,6 @@ func codexDiagnostic(exitKind agent.BridgeExitKind, stderr string) *agent.Bridge
 		AgentName:  "codex",
 		KilledAt:   time.Now(),
 	}
-}
-
-// runCodexReview runs `codex review --base <default>` against the
-// workspace. F-review.md §13 "codex/claude use native review" rule:
-// we invoke codex's built-in `review` subcommand instead of running
-// our generic builtinPrompt via `codex exec`.
-//
-// --base <default> gives PR-mode review (current branch vs default
-// branch). If the default branch can't be detected (no origin remote),
-// we fall back to --uncommitted (working-tree scan only) and log a
-// warning so the user knows the coverage is reduced.
-//
-// Output: stdout is the codex review text (plain text, NOT NDJSON —
-// `codex review` is a non-interactive CLI tool; its --help lists no
-// --json / -o flag). The bridge's Review method passes it through
-// FormatReviewMessage for the canonical preamble.
-//
-// Plumbing: `runCodexReviewPlain` (this file) is the right shape for
-// `review` — spawn with the review flags, read stdout to EOF, return.
-// `runPrintMode` is the `exec` shape — spawn with `--json -o <tmp>
-// runCodexReview assembles argv for `codex review` and spawns
-// the subprocess. We do NOT reuse runPrintMode's plumbing
-// because:
-//   - `codex review` rejects every exec-only flag (`--json`,
-//     `-o`, `--dangerously-bypass-…`, `--skip-git-repo-check`)
-//     with exit 2 (verified on codex-cli 0.145.0).
-//   - `codex review` outputs plain text on stdout (no NDJSON
-//     events, no `-o` tempfile write). The shared stderr-drain
-//   - exit-error formatting is the only thing the two paths
-//     have in common (handled by stderrDrain + formatCodexExitError
-//     in print.go).
-//
-// argv layout (verified on codex-cli 0.145.0):
-//
-//	`codex review
-//	   -c approval_policy=never
-//	   -c sandbox_mode=danger-full-access
-//	   --base <defaultBranch>          ← OR --uncommitted fallback
-//	   [-- <prompt>]                   ← review has no positional,
-//	                                       but `--` is harmless
-//
-// F-review.md §13 "codex/claude use native review" rule: invoking
-// the native subcommand instead of our generic builtinPrompt.
-//
-// opts is forwarded verbatim to runCodexReviewPlain so the sink
-// (typically installed via WithEventSink by the /review dispatcher)
-// sees the same Ready → Text → Result sequence the dsh bridge
-// emits. See runCodexReviewPlain for the per-call contract.
-func runCodexReview(ctx context.Context, s *Starter, cfg agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
-	// Build the review-specific extra flags. --base <default> is
-	// the important one; we detect <default> via git commands.
-	var extra []string
-	if defaultBase := agent.DetectDefaultBranch(ctx, cfg.Workspace); defaultBase != "" {
-		extra = []string{"--base", defaultBase}
-	} else {
-		cLog("codex review: no default branch detected, falling back to --uncommitted",
-			"workspace", cfg.Workspace)
-		extra = []string{"--uncommitted"}
-	}
-	return runCodexReviewPlain(ctx, s, cfg, extra, opts...)
-}
-
-// runCodexReviewPlain is the review-specific runner: spawns
-// `codex exec review` with `--json` + `-o <tmpfile>`, parses the
-// NDJSON event stream into AgentEvents for the sink, and reads
-// the final answer from the tempfile.
-//
-// Why `codex exec review` (not `codex review`): `codex review`
-// is a non-interactive CLI whose only stdout is the final report
-// — no streaming events, no `--json`, no `-o. Using
-// `codex exec review --json -o <file>` keeps codex's review-tuned
-// system prompt (review-specific rubric / output format) and adds
-// the exec surface (NDJSON event stream + tempfile for the final
-// answer). Verified on codex-cli 0.149.0: 404 NDJSON events
-// observed during a real review (thread.started + ~400
-// item.command_execution / file_change / reasoning + 1 item.agent_message
-// + turn.completed).
-//
-// Per-call sink (opts.OnEvent): when present, the bridge emits
-//   - EventAgentReady up-front (placeholder session_id/model
-//     because codex review doesn't surface them on stdout; the
-//     thread.started-driven Ready later upgrades session_id if
-//     the NDJSON stream carries one — same shape as runPrintMode).
-//   - EventAgentToolStart / ToolEnd for each command_execution
-//     item.started / item.completed, with aggregated_output on
-//     the ToolEnd. Feishu's receipt rolling-log appends these as
-//     the standard "🔧 bash -lc ls" / "⎿ output" entries.
-//   - EventAgentText for reasoning items ("[思考] " prefix —
-//     gateway.Translate maps the prefix to OutOutMessage.Kind =
-//     OutThinking, which the Feishu adapter renders as a 💭 side
-//     line).
-//   - EventAgentText for file_change items ("📝 changed X files").
-//   - EventAgentToolStart / ToolEnd for mcp_tool_call items
-//     (Server.Tool as Name).
-//   - EventAgentResult on turn.completed with the final review
-//     text (read from the -o tempfile) and Usage from the
-//     turn.completed event. F-CODEX-DOUBLE-RENDER fix: the
-//     final answer is carried ONLY in Result, not as a separate
-//     EventAgentText — outbound.Translate would otherwise
-//     render it twice (OutReply from Text + OutResult from
-//     Result). dsh follows the same single-point shape
-//     (internal/bridge/dsh/dispatch.go gates Result.Text on
-//     its own per-turn delivery flag).
-//   - EventAgentError on every failure path with a populated
-//     BridgeDiagnostic so outbound.Translate doesn't silently
-//     drop it (translate.go:188-202).
-//
-// nil sink is fully supported (no-op on every emit), matching
-// the `outbound.StreamRunOnceToEmitter` non-blocking contract.
-func runCodexReviewPlain(ctx context.Context, s *Starter, cfg agent.StartConfig, reviewFlags []string, opts ...agent.RunOnceOption) (agent.RunResult, error) {
-	workspace := cfg.Workspace
-	if workspace == "" {
-		return agent.RunResult{}, fmt.Errorf("codex: workspace is required")
-	}
-
-	command := s.command
-	agentName, _, branch := codexSinkContext(s, cfg)
-
-	sink := agent.ParseRunOnceOptions(opts).OnEvent
-
-	// Up-front EventAgentReady so the chat channel's StatusBar /
-	// receipt header can flip from "agent X" placeholder to
-	// "agent X · …" before the long review run starts. The
-	// NDJSON-driven thread.started below re-emits Ready with
-	// the now-known session id (same pattern as runPrintMode —
-	// see comment in runPrintMode's NDJSON callback for the
-	// rationale). dsh's drain does the same up-front + filled-in
-	// pattern.
-	if sink != nil {
-		sink(agent.AgentEvent{
-			Kind:      agent.EventAgentReady,
-			AgentName: agentName,
-			Workspace: workspace,
-			Branch:    branch,
-		})
-	}
-
-	startTime := time.Now()
-
-	// codex exec review argv layout (verified on codex-cli 0.149.0):
-	//
-	//   codex exec review
-	//     --dangerously-bypass-approvals-and-sandbox
-	//     -C <workspace>
-	//     --skip-git-repo-check
-	//     --json
-	//     -o <tmpfile>
-	//     [reviewFlags...]  // --base / --uncommitted / --commit
-	//     --
-	//     (no positional — review's [PROMPT] conflicts with --base)
-	//
-	// Flags rationale:
-	//   - `--dangerously-bypass-approvals-and-sandbox` is the
-	//     exec-side equivalent of `codex review`'s hard-coded
-	//     "non-interactive read-only" posture (which used to be
-	//     `-c approval_policy=never -c sandbox_mode=danger-full-access`
-	//     before codex exec review unified them). Without this
-	//     codex pauses on the first file read asking for approval,
-	//     which would hang the entire one-shot flow.
-	//   - `-C <workspace>` mirrors runPrintMode's `-C` so codex
-	//     resolves relative paths from the review target, not the
-	//     daemon's cwd.
-	//   - `--skip-git-repo-check` lets us call this from
-	//     non-git-repo workspaces (defensive; review subcommand
-	//     otherwise errors out with "/cwd is not a git
-	//     repository").
-	//   - `--json` is the streaming event stream. Without it
-	//     codex writes ONLY the final answer to stdout — same
-	//     problem we had with `codex review`.
-	//   - `-o <tmpfile>` is the final answer destination. We
-	//     read it back after turn.completed to assemble
-	//     RunResult.Text / Result.Text. Same mechanism as
-	//     runPrintMode's -o tempfile (verified on codex 0.145+
-	//     — writes ONLY the final agent_message, not tool calls).
-	//   - `[reviewFlags]` is the caller's chosen review target —
-	//     --base / --uncommitted / --commit, mutually exclusive
-	//     (verified on codex 0.149.0). Caller (runCodexReview)
-	//     picks one.
-	//   - `--` separator before the prompt is mandatory on
-	//     codex 0.149 when `--base` is present (mirrors the
-	//     runPrintMode `-i`-with-`--` fix).
-	//
-	// We DO NOT pass a positional [PROMPT]: review subcommand
-	// rejects `[PROMPT]` when `--base` / `--uncommitted` /
-	// `--commit` is also present (verified: `error: the argument
-	// '--base <BRANCH>' cannot be used with '[PROMPT]'`). The
-	// review-tuned rubric lives in codex's system prompt; we
-	// don't ship our own instructions.
-	//
-	// Create the -o target tempfile first so the path slots
-	// directly into the argv (no splice-after-the-fact). codex
-	// exec writes ONLY the final agent_message here (verified on
-	// 0.149.0); tool-call progress and "user / codex" markers go
-	// to stderr.
-	tmpOut, err := os.CreateTemp("", "codex-review-*.md")
-	if err != nil {
-		wrapped := fmt.Errorf("codex: create tempfile: %w", err)
-		if sink != nil {
-			sink(agent.AgentEvent{
-				Kind:       agent.EventAgentError,
-				Err:        wrapped,
-				Diagnostic: codexDiagnostic(agent.BridgeExitUnknown, ""),
-			})
-		}
-		return agent.RunResult{}, wrapped
-	}
-	tmpPath := tmpOut.Name()
-	_ = tmpOut.Close()
-	defer os.Remove(tmpPath)
-
-	args := []string{
-		// `-C` is a GLOBAL flag (verified by `codex --help`'s
-		// `-C, --cd <DIR>` listing) and must appear BEFORE
-		// `exec`. `--skip-git-repo-check`,
-		// `--dangerously-bypass-approvals-and-sandbox`,
-		// `--base`/`--uncommitted`/`--commit`, `--json`, `-o`,
-		// `--`, and any positional [PROMPT] are all per-subcommand
-		// (after `exec`). Placing `-C` after `exec` triggers
-		// "error: unexpected argument '-C' found" on codex 0.149
-		// — verified empirically.
-		"-C", workspace,
-		"exec", "review",
-		"--skip-git-repo-check",
-		"--dangerously-bypass-approvals-and-sandbox",
-	}
-	args = append(args, reviewFlags...)
-	args = append(args,
-		"--json",
-		"-o", tmpPath,
-		"--",
-	)
-
-	child := proc.New(ctx, command, args...)
-	child.Dir = workspace
-
-	// Early-return failures below must each emit a terminal
-	// EventAgentError to the sink — the up-front EventAgentReady
-	// is already on the wire, so the sink would otherwise observe
-	// Ready-without-terminal. Same pattern as runPrintMode's
-	// spawn-failure branches.
-	stdout, err := child.StdoutPipe()
-	if err != nil {
-		wrapped := fmt.Errorf("codex: stdout pipe: %w", err)
-		if sink != nil {
-			sink(agent.AgentEvent{
-				Kind:       agent.EventAgentError,
-				Err:        wrapped,
-				Diagnostic: codexDiagnostic(agent.BridgeExitUnknown, ""),
-			})
-		}
-		return agent.RunResult{}, wrapped
-	}
-	stderr, err := child.StderrPipe()
-	if err != nil {
-		_ = stdout.Close()
-		wrapped := fmt.Errorf("codex: stderr pipe: %w", err)
-		if sink != nil {
-			sink(agent.AgentEvent{
-				Kind:       agent.EventAgentError,
-				Err:        wrapped,
-				Diagnostic: codexDiagnostic(agent.BridgeExitUnknown, ""),
-			})
-		}
-		return agent.RunResult{}, wrapped
-	}
-	if err := child.Start(); err != nil {
-		_ = stdout.Close()
-		_ = stderr.Close()
-		wrapped := fmt.Errorf("codex: start: %w", err)
-		if sink != nil {
-			sink(agent.AgentEvent{
-				Kind:       agent.EventAgentError,
-				Err:        wrapped,
-				Diagnostic: codexDiagnostic(agent.BridgeExitUnknown, ""),
-			})
-		}
-		return agent.RunResult{}, wrapped
-	}
-	pid := child.Process.Pid
-
-	cLog("ReviewMode Start",
-		"command", command,
-		"mode", "exec-review",
-		"workspace", workspace,
-		"args_count", len(args),
-		"pid", pid)
-
-	stderrDrain := startStderrDrain(ctx, stderr)
-
-	// Parse NDJSON events from stdout. runNDJSON scans line-by-line
-	// (matches one JSON object per line) and invokes cb for each.
-	// We translate each item.* event into the AgentEvent the
-	// bridge contract expects, then sink the event. AgentMessage
-	// events are SUPPRESSED here (P1 fix — see function doc);
-	// the final text comes from the -o tempfile on turn.completed
-	// and surfaces once via EventAgentResult.
-	//
-	// State carried across callbacks (closure):
-	//   - sessionID : updated by thread.started; stamped onto
-	//     the second EventAgentReady (see runPrintMode for the
-	//     same shape).
-	//   - model : updated by the first item.completed of type
-	//     "error" (codex CLI emits "Model metadata for `…` not
-	//     found" on every run; back-tick parse — see
-	//     extractModelFromError).
-	//   - usage : updated by turn.completed (last event wins,
-	//     matches runPrintMode's behaviour).
-	var sessionID string
-	var model string
-	var usage *agent.UsageInfo
-	jsonReadErr := runNDJSON(ctx, stdout, func(ev codexExecEvent) {
-		switch ev.Type {
-		case "thread.started":
-			if sessionID == "" && ev.ThreadID != "" {
-				sessionID = ev.ThreadID
-				// Re-emit Ready with the now-known session id.
-				// Same rationale as runPrintMode's NDJSON callback.
-				if sink != nil {
-					sink(agent.AgentEvent{
-						Kind:      agent.EventAgentReady,
-						SessionID: ev.ThreadID,
-						AgentName: agentName,
-						Workspace: workspace,
-						Branch:    branch,
-					})
-				}
-			}
-		case "item.started":
-			if ev.Item == nil {
-				return
-			}
-			translateItemStarted(sink, ev.Item)
-		case "item.updated", "item.completed":
-			if ev.Item == nil {
-				return
-			}
-			translateItemCompleted(sink, ev.Item)
-		case "turn.completed":
-			if ev.Usage != nil {
-				usage = codexExecUsageToUsageInfo(ev.Usage)
-			}
-		}
-		// Suppress agent_message events from the sink — the final
-		// text surfaces exactly once via EventAgentResult after
-		// turn.completed. The legacy extractModelFromError trick
-		// (see runPrintMode) is preserved by including it in the
-		// item.completed/updated translator for error items.
-		if ev.Item != nil && ev.Item.Type == "error" && model == "" {
-			if m := extractModelFromError(ev.Item.Message); m != "" {
-				model = m
-			}
-		}
-	})
-
-	// Drain stderr BEFORE cmd.Wait — see runPrintMode's identical
-	// comment. Reaping the process via cmd.Wait triggers
-	// closeDescriptors(c.parentIOPipes) which closes our stderr
-	// read end; if the drain goroutine hasn't yet pulled data out
-	// of the kernel pipe buffer, the close discards it.
-	stderrDrain.wait()
-	waitErr := child.Wait()
-
-	elapsedMs := time.Since(startTime).Milliseconds()
-
-	// Read the -o file (final message). Missing file means the
-	// process died before writing — usually because exit was
-	// non-zero and codex only writes on a successful turn.
-	finalBytes, fileErr := os.ReadFile(tmpPath)
-	if fileErr != nil && !errors.Is(fileErr, os.ErrNotExist) {
-		wrapped := fmt.Errorf("codex: read -o file: %w", fileErr)
-		if sink != nil {
-			sink(agent.AgentEvent{
-				Kind:       agent.EventAgentError,
-				Err:        wrapped,
-				Diagnostic: codexDiagnostic(agent.BridgeExitUnknown, stderrDrain.bytes()),
-			})
-		}
-		return agent.RunResult{}, wrapped
-	}
-	finalText := strings.TrimSpace(string(finalBytes))
-
-	subtype := "completed"
-	if waitErr != nil {
-		subtype = "failed"
-	}
-
-	cLog("ReviewMode Exit",
-		"pid", pid,
-		"mode", "exec-review",
-		"elapsed_ms", elapsedMs,
-		"wait_err", errStr(waitErr),
-		"stderr_bytes", len(stderrDrain.bytes()),
-		"stderr_truncated", stderrDrain.truncatedFlag(),
-		"stdout_bytes", finalText != "",
-		"session_id", sessionID)
-
-	result := agent.RunResult{
-		Text:       finalText,
-		Usage:      usage,
-		Model:      model,
-		SessionID:  sessionID,
-		DurationMs: elapsedMs,
-		Subtype:    subtype,
-	}
-
-	// Shared error formatting with runPrintMode (see
-	// formatCodexExitError doc). Identical waitErr/stderr/
-	// finalText precedence rules so the two surfaces report the
-	// same failure shape.
-	stderrStr := strings.TrimSpace(stderrDrain.bytes())
-	if err := formatCodexExitError(waitErr, stderrStr, finalText, "review answer"); err != nil {
-		// Surface the failure to the sink so the chat channel
-		// flips its receipt to an error state. We do this
-		// BEFORE returning so the /review dispatcher (which
-		// also emits a friendly "❌ /review failed" text via
-		// emitter.Send) sees a consistent picture: the sink
-		// shows the process state, the formatted text is the
-		// deliverable.
-		//
-		// Diagnostic carries BridgeExitKind from agent.ClassifyExit
-		// when waitErr is set, else BridgeExitUnknown for the
-		// empty-answer case (subprocess exited cleanly but
-		// produced no stdout — see the matching comment in
-		// runPrintMode's analogous branch for the rationale).
-		exitKind := agent.BridgeExitUnknown
-		if waitErr != nil {
-			exitKind = agent.ClassifyExit(waitErr, false)
-		}
-		if sink != nil {
-			sink(agent.AgentEvent{
-				Kind: agent.EventAgentError,
-				Err:  err,
-				Diagnostic: codexDiagnostic(
-					exitKind,
-					stderrStr,
-				),
-			})
-		}
-		return agent.RunResult{}, err
-	}
-
-	// P2 follow-up: NDJSON parse error is symmetric with
-	// runPrintMode — protocol-level failure (truncated frame,
-	// malformed JSON, oversized line) on an otherwise-clean exit
-	// must surface as an EventAgentError with BridgeExitUnknown,
-	// not be silently swallowed. The pre-fix `_ = jsonReadErr`
-	// was misleading: the "see runPrintMode's analogous comment"
-	// pointer didn't exist because runPrintMode fails on the
-	// same condition.
-	if jsonReadErr != nil && !errors.Is(jsonReadErr, io.EOF) {
-		var err error
-		if stderrStr != "" {
-			err = fmt.Errorf("codex: stdout: %w (stderr: %s)", jsonReadErr, stderrStr)
-		} else {
-			err = fmt.Errorf("codex: stdout: %w", jsonReadErr)
-		}
-		if sink != nil {
-			sink(agent.AgentEvent{
-				Kind: agent.EventAgentError,
-				Err:  err,
-				Diagnostic: codexDiagnostic(
-					agent.BridgeExitUnknown,
-					stderrStr,
-				),
-			})
-		}
-		return agent.RunResult{}, err
-	}
-
-	// Terminal event: hand the assembled RunResult to the sink.
-	// F-CODEX-DOUBLE-RENDER fix: NO EventAgentText emit here —
-	// Result carries the final prose and outbound.Translate maps
-	// Result → OutResult → sendResultAsReply, which produces a
-	// single visible copy (vs the pre-fix double render via Text
-	// → OutReply + Result → OutResult). P2 follow-up: stamp
-	// AgentName/Workspace/Branch so statusbar renders the full
-	// three-line footer (dsh's drain shape — internal/bridge/
-	// dsh/session.go:866-873).
-	if sink != nil {
-		sink(agent.AgentEvent{
-			Kind: agent.EventAgentResult,
-			Result: &agent.AgentResultEvent{
-				Text:       result.Text,
-				DurationMs: result.DurationMs,
-				Subtype:    result.Subtype,
-				Usage:      result.Usage,
-			},
-			SessionID: result.SessionID,
-			Model:     result.Model,
-			AgentName: agentName,
-			Workspace: workspace,
-			Branch:    branch,
-		})
-	}
-	return result, nil
 }
 
 // translateItemStarted translates a `codex exec --json`

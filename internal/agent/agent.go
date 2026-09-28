@@ -1209,31 +1209,15 @@ type Starter interface {
 	// a one-field type that leaks "review is a special thing"
 	// framing into the agent package.
 	//
-	// opts configures per-call behaviour (see RunOnceOption).
-	// Bridges that don't support a given option ignore it.
-	//
-	// ===== F-review.md §13 "codex/claude use native review" rule =====
-	//
-	// Bridges that have a native review subcommand MUST invoke it
-	// directly instead of running our generic BuiltinPrompt:
-	//   - claudecode: `claude -p code-review` (built-in slash command;
-	//     note: NO leading slash in `[command]` slot — verified
-	//     2.1.220 that `claude -p /code-review` runs 0 turns and
-	//     returns empty result, while `claude -p code-review`
-	//     dispatches the slash command and fires the multi-agent
-	//     pipeline)
-	//   - codex:      `codex review --base <default-branch>` (subcommand;
-	//     review rejects exec-only flags like --json / -o /
-	//     --dangerously-bypass-approvals-and-sandbox / -C /
-	//     --skip-git-repo-check — uses its own argv assembly in
-	//     print.go, NOT runPrintMode)
-	//
-	// Bridges that have NO native review subcommand call
-	// s.RunOnce(ctx, cfg, [BuiltinPrompt()]) inline — the
-	// canonical review path is "spawn a fresh subprocess with the
-	// shared prompt" and inlining keeps the contract symmetric
-	// with RunOnce:
-	//   - dsh, opencode, pi, acp
+	// Every non-pty bridge delegates to agent.ReviewDispatch, the
+	// shared 2-line helper that picks ReviewWithOcr (when `ocr` is
+	// on $PATH) or ReviewWithPrompt (otherwise). Bridges' Review
+	// methods are all the same one-liner — uniform behaviour,
+	// uniform prompt source, uniform output format. To use an
+	// agent's built-in review subcommand (e.g. `claude -p code-review`,
+	// `codex review`, `cursor-agent -p /review-bugbot`), send the
+	// slash command directly in chat; NightMe forwards it
+	// transparently to the selected agent.
 	//
 	// Return ErrReviewNotSupported when this agent type cannot do
 	// review (e.g. pty/bash fallback). The dispatcher surfaces a

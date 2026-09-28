@@ -157,10 +157,7 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 // built-in that uses it. Review here serves both acp as a Starter
 // and any future acp-backed agent that registers itself.
 func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
-	if agent.OcrAvailable() {
-		return agent.ReviewWithOcr(ctx, s, cfg, opts...)
-	}
-	return agent.ReviewWithPrompt(ctx, s, cfg, opts...)
+	return agent.ReviewDispatch(ctx, s, cfg, opts...)
 }
 
 // collectResult sends blocks to a live *agent.Agent and drains

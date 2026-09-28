@@ -181,10 +181,7 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 // (and Close archives the session on return), Review cannot leak
 // review reasoning back into the main chat session's context.
 func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
-	if agent.OcrAvailable() {
-		return agent.ReviewWithOcr(ctx, s, cfg, opts...)
-	}
-	return agent.ReviewWithPrompt(ctx, s, cfg, opts...)
+	return agent.ReviewDispatch(ctx, s, cfg, opts...)
 }
 
 // drainForRunResult is the shared RunOnce / Review drain logic.

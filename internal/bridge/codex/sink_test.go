@@ -1,15 +1,14 @@
 // sink_test.go — unit tests for the per-call WithEventSink wiring
-// on Starter.RunOnce / Starter.Review.
+// on Starter.RunOnce.
 //
 // Background: prior to fix-codex-runonce-review-event the codex
-// bridge's print-mode and review paths (`runPrintMode` +
-// `runCodexReviewPlain`) silently dropped the `opts` argument. The
-// /review dispatcher installed a sink via `agent.WithEventSink`, but
-// the codex bridge never read it, so the chat channel saw 30s of
-// silence followed by a single text dump. These tests lock the
-// post-fix contract: bridge delivers Ready → Text → Result on the
-// success path, Error on the failure path, and is a no-op when the
-// sink is nil.
+// bridge's print-mode path (`runPrintMode`) silently dropped the
+// `opts` argument. The /review dispatcher installed a sink via
+// `agent.WithEventSink`, but the codex bridge never read it, so
+// the chat channel saw 30s of silence followed by a single text
+// dump. These tests lock the post-fix contract: bridge delivers
+// Ready → Text → Result on the success path, Error on the failure
+// path, and is a no-op when the sink is nil.
 //
 // We use a fake "codex" binary (a small shell script) instead of the
 // real `codex` CLI. This keeps the tests:
@@ -98,20 +97,15 @@ func gitInit(t *testing.T, dir, branch string) {
 }
 
 // writeFakeCodex stages a shell script that emulates a codex CLI
-// (review or exec surface) and returns its absolute path. The
-// script's behaviour is parameterised by `mode`:
+// and returns its absolute path. The script's behaviour is
+// parameterised by `mode`:
 //
-//   - "review": emulates `codex exec review --json -o <file>`
-//     — finds the `-o` flag, writes `stdout` (the final review
-//     answer) there; emits a thread.started + turn.completed NDJSON
-//     pair on stdout so runCodexReviewPlin's NDJSON parser
-//     exercises the SessionID path. Stderr + exit code are
-//     propagated from the env vars.
-//   - "exec":   emulates `codex exec --json -o <file>` — same
-//     shape as review-mode minus the review-tuned argv (see
-//     runPrintMode). Item.completed[error] is omitted — the
-//     model field on the Result is allowed to be empty per
-//     print_real_unix_test.go's tolerance.
+//   - "exec": emulates `codex exec --json -o <file>` — emits a
+//     thread.started + turn.completed NDJSON pair on stdout and
+//     writes the final agent message to the `-o` tempfile.
+//     Item.completed[error] is omitted — the model field on the
+//     Result is allowed to be empty per print_real_unix_test.go's
+//     tolerance.
 //
 // The script uses POSIX `sh` and only depends on `echo`, `printf`,
 // and shell redirection — no codex binary required.
@@ -124,19 +118,12 @@ func writeFakeCodex(t *testing.T, mode, stdout, stderr string, exitCode int) str
 	path := filepath.Join(dir, "fake-codex")
 	script := ""
 	switch mode {
-	case "review", "exec":
-		// Both surfaces share the same wire shape now: NDJSON on
-		// stdout with thread.started + turn.completed, plus the
-		// -o <tmpfile> carrying the final agent message.
-		//
-		// argv can be either:
-		//   `codex exec …` (plain exec — argv[1]=exec)
-		//   `codex -C <ws> exec review …` (exec review — argv[1]=-C,
-		//                                   argv[2]=<ws>, argv[3]=exec,
-		//                                   argv[4]=review)
-		// so the script walks the whole argv looking for the first
-		// `-o <file>` pair. Liberal by design — robust to future
-		// codex flag-order tweaks.
+	case "exec":
+		// NDJSON on stdout (thread.started + turn.completed) plus
+		// -o <tmpfile> carrying the final agent message. argv
+		// walks past `-C <ws>` and any flag-order tweaks so the
+		// script finds the first `-o <file>` pair. Liberal by
+		// design — robust to future codex flag ordering.
 		script = "#!/bin/sh\n" +
 			"# Skip argv[0] ($0 = script path).\n" +
 			"shift\n" +
@@ -172,267 +159,6 @@ func writeFakeCodex(t *testing.T, mode, stdout, stderr string, exitCode int) str
 	return path
 }
 
-// TestRunCodexReviewPlain_SinkReadyResult — happy path: the
-// review-mode fake emits "REVIEW OK" via thread.started +
-// turn.completed + writes "REVIEW OK" to the -o tempfile. The sink
-// must see Ready → Ready(thread_id) → Result(non-nil, Text=="REVIEW
-// OK") in that order. F-CODEX-DOUBLE-RENDER fix: NO Text emit —
-// Result is the single point of prose delivery (dsh gates Result.Text
-// the same way; see internal/bridge/dsh/dispatch.go).
-func TestRunCodexReviewPlain_SinkReadyResult(t *testing.T) {
-	fake := writeFakeCodex(t, "review", "REVIEW OK\n", "", 0)
-
-	rec := &eventRecorder{}
-	// Use a temp dir as workspace and seed a git repo with a
-	// known branch so detectBranch returns " main " — locks the
-	// AgentName / Workspace / Branch stamping contract (P2-#4
-	// follow-up; dsh drains emit all five fields).
-	ws := t.TempDir()
-	gitInit(t, ws, "main")
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	res, err := runCodexReviewPlain(ctx, NewStarter("codex-test", fake, nil), agent.StartConfig{Workspace: ws}, []string{"--uncommitted"}, agent.WithEventSink(rec.sink()))
-	if err != nil {
-		t.Fatalf("err = %v", err)
-	}
-	if res.Text != "REVIEW OK" {
-		t.Errorf("RunResult.Text = %q, want REVIEW OK", res.Text)
-	}
-	if res.SessionID != "thread-fake-123" {
-		t.Errorf("RunResult.SessionID = %q, want thread-fake-123", res.SessionID)
-	}
-
-	evs := rec.snapshot()
-	if len(evs) != 3 {
-		t.Fatalf("sink observed %d events %v, want 3 [Ready Ready Result] (F-CODEX-DOUBLE-RENDER fix + thread.started-driven Ready)",
-			len(evs), kinds(evs))
-	}
-	if evs[0].Kind != agent.EventAgentReady {
-		t.Errorf("ev[0] = %s, want Ready (up-front)", evs[0].Kind)
-	}
-	if evs[1].Kind != agent.EventAgentReady {
-		t.Errorf("ev[1] = %s, want Ready (thread.started-driven)", evs[1].Kind)
-	}
-	if evs[1].SessionID != "thread-fake-123" {
-		t.Errorf("ev[1].SessionID = %q, want thread-fake-123", evs[1].SessionID)
-	}
-	if evs[2].Kind != agent.EventAgentResult {
-		t.Errorf("ev[2] = %s, want Result", evs[2].Kind)
-	}
-	if evs[2].Result == nil {
-		t.Fatalf("ev[2].Result is nil")
-	}
-	if evs[2].Result.Text != "REVIEW OK" {
-		t.Errorf("ev[2].Result.Text = %q, want REVIEW OK", evs[2].Result.Text)
-	}
-	if evs[2].SessionID != "thread-fake-123" {
-		t.Errorf("ev[2].SessionID = %q, want thread-fake-123", evs[2].SessionID)
-	}
-	// P2-#4 follow-up: every codex sink event must stamp
-	// AgentName / Workspace / Branch so statusbar renders
-	// the full three-line footer (dsh's drain shape).
-	for i, ev := range evs {
-		if ev.AgentName != "codex-test" {
-			t.Errorf("ev[%d].AgentName = %q, want codex-test", i, ev.AgentName)
-		}
-		if ev.Workspace != ws {
-			t.Errorf("ev[%d].Workspace = %q, want %q", i, ev.Workspace, ws)
-		}
-		if ev.Branch != "main" {
-			t.Errorf("ev[%d].Branch = %q, want main", i, ev.Branch)
-		}
-	}
-}
-
-// TestRunCodexReviewPlain_SinkErrorOnExitFailure — failure path:
-// the fake exits 2 with stderr "boom". The sink must see Ready
-// and then Error(non-nil Err). It MUST NOT see Text or Result
-// (the review answer was empty / process died, and the /review
-// dispatcher renders the formatted failure via emitter.Send).
-func TestRunCodexReviewPlain_SinkErrorOnExitFailure(t *testing.T) {
-	fake := writeFakeCodex(t, "review", "", "boom\n", 2)
-
-	rec := &eventRecorder{}
-	ws := t.TempDir()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	_, err := runCodexReviewPlain(ctx, NewStarter("codex-test", fake, nil), agent.StartConfig{Workspace: ws}, []string{"--uncommitted"}, agent.WithEventSink(rec.sink()))
-	if err == nil {
-		t.Fatalf("expected error, got nil")
-	}
-
-	evs := rec.snapshot()
-	if len(evs) != 3 {
-		t.Fatalf("sink observed %d events %v, want 3 [Ready Ready Error] (up-front + thread.started + failure)", len(evs), kinds(evs))
-	}
-	if evs[0].Kind != agent.EventAgentReady {
-		t.Errorf("ev[0] = %s, want Ready (up-front)", evs[0].Kind)
-	}
-	if evs[1].Kind != agent.EventAgentReady {
-		t.Errorf("ev[1] = %s, want Ready (thread.started-driven)", evs[1].Kind)
-	}
-	if evs[2].Kind != agent.EventAgentError {
-		t.Errorf("ev[2] = %s, want Error", evs[2].Kind)
-	}
-	if evs[2].Err == nil {
-		t.Errorf("ev[2].Err is nil; want non-nil")
-	}
-	// Diagnostic is REQUIRED — outbound.Translate:188-202 silently
-	// drops EventAgentError events with nil Diagnostic, which would
-	// leave the chat receipt stuck at 🔄 even though the dispatcher
-	// surfaces a separate ❌ OutReply. BridgeExitNonZeroExit because
-	// the fake exits with code 2.
-	if evs[2].Diagnostic == nil {
-		t.Fatalf("ev[2].Diagnostic is nil; outbound.Translate would drop this error")
-	}
-	if evs[2].Diagnostic.ExitKind != agent.BridgeExitNonZeroExit {
-		t.Errorf("ev[2].Diagnostic.ExitKind = %s, want non-zero-exit",
-			evs[2].Diagnostic.ExitKind)
-	}
-	if evs[2].Diagnostic.AgentName != "codex" {
-		t.Errorf("ev[2].Diagnostic.AgentName = %q, want codex",
-			evs[2].Diagnostic.AgentName)
-	}
-	if !strings.Contains(evs[2].Diagnostic.StderrTail, "boom") {
-		t.Errorf("ev[2].Diagnostic.StderrTail = %q, want contains 'boom'",
-			evs[2].Diagnostic.StderrTail)
-	}
-}
-
-// TestRunCodexReviewPlain_SinkErrorOnEmptyAnswer — `codex review`
-// exits 0 cleanly but produces no stdout (e.g. running against
-// an empty branch with no diff). formatCodexExitError returns
-// non-nil because finalText is empty, so the bridge still emits
-// EventAgentError — but the title "codex bridge died (clean-exit)"
-// is misleading; the bridge didn't die. Verify the Diagnostic
-// uses BridgeExitUnknown (NOT BridgeExitCleanExit) so the
-// rendered card title stays consistent with the body "codex:
-// empty review answer".
-func TestRunCodexReviewPlain_SinkErrorOnEmptyAnswer(t *testing.T) {
-	fake := writeFakeCodex(t, "review", "", "", 0)
-
-	rec := &eventRecorder{}
-	ws := t.TempDir()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	_, err := runCodexReviewPlain(ctx, NewStarter("codex-test", fake, nil), agent.StartConfig{Workspace: ws}, []string{"--uncommitted"}, agent.WithEventSink(rec.sink()))
-	if err == nil {
-		t.Fatalf("expected error from empty answer, got nil")
-	}
-	if !strings.Contains(err.Error(), "empty review answer") {
-		t.Errorf("err = %q, want contains 'empty review answer'", err)
-	}
-
-	evs := rec.snapshot()
-	if len(evs) != 3 {
-		t.Fatalf("sink observed %d events %v, want 3 [Ready Ready Error] (up-front + thread.started + empty-answer failure)", len(evs), kinds(evs))
-	}
-	if evs[2].Kind != agent.EventAgentError {
-		t.Fatalf("ev[2].Kind = %s, want Error", evs[2].Kind)
-	}
-	if evs[2].Diagnostic == nil {
-		t.Fatalf("ev[2].Diagnostic is nil")
-	}
-	// CRITICAL: must NOT be BridgeExitCleanExit. The Feishu
-	// renderer titles the error card with the ExitKind string
-	// ("clean-exit", "non-zero-exit", etc.); CleanExit here
-	// would say "⚠️ codex bridge died (clean-exit)" while the
-	// body says "codex: empty review answer" — contradiction.
-	if evs[2].Diagnostic.ExitKind == agent.BridgeExitCleanExit {
-		t.Errorf("ev[2].Diagnostic.ExitKind = clean-exit; want anything-but-clean-exit " +
-			"so the card title doesn't claim the bridge died")
-	}
-	if evs[2].Diagnostic.ExitKind != agent.BridgeExitUnknown {
-		t.Errorf("ev[2].Diagnostic.ExitKind = %s, want unknown (empty-answer fallback)",
-			evs[2].Diagnostic.ExitKind)
-	}
-	if evs[2].Diagnostic.AgentName != "codex" {
-		t.Errorf("ev[2].Diagnostic.AgentName = %q, want codex",
-			evs[2].Diagnostic.AgentName)
-	}
-}
-
-// TestRunCodexReviewPlain_NilSink — sink=nil must not panic and
-// must NOT fabricate events. The contract is "no observer, behave
-// as before this option existed" (agent.go:1211-1213). On success
-// we still expect the underlying RunResult to be correct.
-func TestRunCodexReviewPlain_NilSink(t *testing.T) {
-	fake := writeFakeCodex(t, "review", "REVIEW OK", "", 0)
-
-	ws := t.TempDir()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	res, err := runCodexReviewPlain(ctx, NewStarter("codex-test", fake, nil), agent.StartConfig{Workspace: ws}, []string{"--uncommitted"})
-	if err != nil {
-		t.Fatalf("err = %v", err)
-	}
-	if res.Text != "REVIEW OK" {
-		t.Errorf("RunResult.Text = %q, want REVIEW OK", res.Text)
-	}
-}
-
-// TestRunCodexReviewPlain_NilSinkOnFailure — nil sink + non-zero
-// exit must also not panic. Locks the "no observer" branch on the
-// error path.
-func TestRunCodexReviewPlain_NilSinkOnFailure(t *testing.T) {
-	fake := writeFakeCodex(t, "review", "", "boom\n", 2)
-
-	ws := t.TempDir()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	_, err := runCodexReviewPlain(ctx, NewStarter("codex-test", fake, nil), agent.StartConfig{Workspace: ws}, []string{"--uncommitted"})
-	if err == nil {
-		t.Fatalf("expected error, got nil")
-	}
-}
-
-// TestStarterReview_ForwardsSink — end-to-end through the public
-// Starter.Review API: it must forward opts to runCodexReview,
-// which forwards to runCodexReviewPlain. We assert by inspecting
-// the sink that Starter.Review installs.
-func TestStarterReview_ForwardsSink(t *testing.T) {
-	fake := writeFakeCodex(t, "review", "REVIEW OK", "", 0)
-	s := NewStarter("codex-test", fake, nil)
-
-	rec := &eventRecorder{}
-	ws := t.TempDir()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	res, err := s.Review(ctx, agent.StartConfig{Workspace: ws}, agent.WithEventSink(rec.sink()))
-	if err != nil {
-		t.Fatalf("err = %v", err)
-	}
-	if res.Text != "REVIEW OK" {
-		t.Errorf("RunResult.Text = %q, want REVIEW OK", res.Text)
-	}
-	evs := rec.snapshot()
-	if len(evs) != 3 {
-		t.Fatalf("sink observed %d events %v, want 3 [Ready Ready Result] (F-CODEX-DOUBLE-RENDER fix + thread.started-driven Ready)",
-			len(evs), kinds(evs))
-	}
-	if evs[0].Kind != agent.EventAgentReady ||
-		evs[1].Kind != agent.EventAgentReady ||
-		evs[2].Kind != agent.EventAgentResult {
-		t.Errorf("event order = %v, want [Ready Ready Result]", kinds(evs))
-	}
-}
-
-// TestRunPrintMode_SinkReadyReadyResult — exec path emits
-// thread.started so the bridge re-emits Ready with the now-known
-// SessionID. Sequence: Ready(empty) → Ready(thread-fake-123) →
-// Result(Text=EXEC OK, Usage populated). F-CODEX-DOUBLE-RENDER
-// regression: pre-fix this was [Ready Ready Text Result] — see
-// TestRunCodexReviewPlain_SinkReadyResult for the rationale. The
-// two Readys are a deliberate design choice (see the comment in
-// runPrintMode's NDJSON callback): the up-front Ready flips the
-// StatusBar, the thread.started-driven Ready lets the channel
-// receipt header render the session id.
 func TestRunPrintMode_SinkReadyReadyResult(t *testing.T) {
 	fake := writeFakeCodex(t, "exec", "EXEC OK", "", 0)
 	s := NewStarter("codex-test", fake, nil)
@@ -610,71 +336,6 @@ func TestRunPrintMode_NilSinkOnStartFailure(t *testing.T) {
 	}
 }
 
-// TestRunCodexReviewPlain_SinkErrorOnStartFailure — same shape as
-// TestRunPrintMode_SinkErrorOnStartFailure but on the review path.
-// Locks the early-return fix at print.go:858-880.
-func TestRunCodexReviewPlain_SinkErrorOnStartFailure(t *testing.T) {
-	missing := "/tmp/definitely-not-a-binary-1234567890"
-
-	rec := &eventRecorder{}
-	ws := t.TempDir()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	_, err := runCodexReviewPlain(ctx, NewStarter("codex-test", missing, nil), agent.StartConfig{Workspace: ws}, []string{"--uncommitted"}, agent.WithEventSink(rec.sink()))
-	if err == nil {
-		t.Fatalf("expected error, got nil")
-	}
-
-	evs := rec.snapshot()
-	if len(evs) != 2 {
-		t.Fatalf("sink observed %d events %v, want 2 [Ready Error]", len(evs), kinds(evs))
-	}
-	if evs[0].Kind != agent.EventAgentReady {
-		t.Errorf("ev[0] = %s, want Ready", evs[0].Kind)
-	}
-	if evs[1].Kind != agent.EventAgentError {
-		t.Errorf("ev[1] = %s, want Error", evs[1].Kind)
-	}
-	if evs[1].Err == nil {
-		t.Errorf("ev[1].Err is nil; want non-nil")
-	}
-	// Diagnostic is REQUIRED — outbound.Translate:188-202 silently
-	// drops EventAgentError events with nil Diagnostic. Bridge-
-	// ExitUnknown because the review subprocess never started.
-	if evs[1].Diagnostic == nil {
-		t.Fatalf("ev[1].Diagnostic is nil; outbound.Translate would drop this error")
-	}
-	if evs[1].Diagnostic.ExitKind != agent.BridgeExitUnknown {
-		t.Errorf("ev[1].Diagnostic.ExitKind = %s, want unknown",
-			evs[1].Diagnostic.ExitKind)
-	}
-	if evs[1].Diagnostic.AgentName != "codex" {
-		t.Errorf("ev[1].Diagnostic.AgentName = %q, want codex",
-			evs[1].Diagnostic.AgentName)
-	}
-}
-
-// TestRunCodexReviewPlain_NilSinkOnStartFailure — nil sink +
-// missing binary must not panic on the review early-return
-// failure path.
-func TestRunCodexReviewPlain_NilSinkOnStartFailure(t *testing.T) {
-	missing := "/tmp/definitely-not-a-binary-1234567890"
-	ws := t.TempDir()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	_, err := runCodexReviewPlain(ctx, NewStarter("codex-test", missing, nil), agent.StartConfig{Workspace: ws}, []string{"--uncommitted"})
-	if err == nil {
-		t.Fatalf("expected error, got nil")
-	}
-}
-
-// TestRunPrintMode_SinkErrorOnCreateTempFailure — force
-// `os.CreateTemp` to fail by pointing TMPDIR at a path that is a
-// file (not a directory). CreateTemp opens its target via
-// `os.OpenFile(name, …)` and gets ENOTDIR. We then assert the sink
-// sees Ready + Error and never sees Text / Result. The TMPDIR
 // override is scoped to this test via t.Setenv.
 func TestRunPrintMode_SinkErrorOnCreateTempFailure(t *testing.T) {
 	// Make TMPDIR point at a path that exists but is a regular

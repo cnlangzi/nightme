@@ -2,15 +2,21 @@
 // the pure-prompt Review runner.
 //
 // /review runs a code review and injects findings back into the
-// main chat session. Three review strategies exist (docs/REVIEW.md §2):
+// main chat session. Two review strategies exist (docs/REVIEW.md §2):
 //
-//   - ReviewWithNative: per-bridge in bridge packages (claudecode/codex
-//     invoke their built-in /codereview / codex review commands).
-//   - ReviewWithOcr: in review_with_ocr.go; ocr delegation flow.
+//   - ReviewWithOcr: in review_with_ocr.go; ocr delegation flow
+//     (preferred when `ocr` CLI is on $PATH).
 //   - ReviewWithPrompt: in this file; pure-prompt path used when ocr
 //     isn't installed or workspace precompute fails.
 //
-// All three fans out via the same multi-job machinery in
+// All bridges dispatch uniformly via agent.ReviewDispatch (defined
+// here) — no per-bridge native-review path. If a user wants an
+// agent's built-in review subcommand (e.g. `claude -p code-review`,
+// `codex review`, `cursor-agent -p /review-bugbot`), they send the
+// slash command directly in chat — NightMe forwards it transparently
+// to the selected agent, the same way any other prompt is forwarded.
+//
+// Both Runner functions fan out via the same multi-job machinery in
 // review_with_ocr.go::delegateReviewMultiJob when ≥2 review dimensions
 // are involved. simplify is one such dimension.
 //
@@ -52,10 +58,9 @@ var ErrReviewNotSupported = errors.New("agent: /review not supported")
 // reproducibility ("which agent's review is this?") and for the
 // user when they re-`/use` between review and fix.
 //
-// Exported so bridges that override Starter.Review (e.g. claudecode
-// using its native /code-review command, codex using codex review)
-// can produce the same preamble when injecting their native output
-// into the main chat session.
+// Exported so the /review dispatcher can wrap the agent's review
+// output (produced via agent.ReviewDispatch) into the same canonical
+// preamble, regardless of which agent ran it.
 func FormatReviewMessage(workspace, agentName, review string) string {
 	return fmt.Sprintf("## Code review of %s (run by %q)\n\n"+
 		"(current branch vs default branch; run via /review)\n\n%s",
@@ -234,20 +239,6 @@ Higher-altitude observations: when a small change exposes that the surrounding s
 Findings must conform to the nightme review output schema (see host agent prompt). One finding per ` + "`path:start_line-end_line`" + ` location; cite the concrete code in ` + "`content`" + `; pick exactly one ` + "`category`" + ` (` + "`reuse`" + `, ` + "`simplification`" + `, ` + "`efficiency`" + `, or ` + "`altitude`" + `).
 `
 
-// ReviewWithPrompt runs review using only the builtin prompt, no ocr,
-// no precompute-from-delegate-review. Used by:
-//
-//   - ReviewWithOcr's fallback path when ocr isn't installed or returns
-//     no rule groups.
-//   - Direct callers who want a "no ocr" baseline review.
-//
-// Always fans out into ≥2 reviewGroups (builtin + simplify) via
-// delegateReviewMultiJob, so the per-group prompts render the full
-// workspace diff under each lens.
-//
-// When workspace is empty (no git repo / not a directory), falls back
-// to a single RunOnce with BuiltinPrompt alone (no files = no fan-out
-// payload to split across goroutines).
 // ReviewWithPrompt runs review without ocr (Go-replicated path). It
 // calls precomputeReviewWithBuiltin, which populates reviewContext
 // using Go-side git commands (collectWorkspaceFiles + a synthesized
@@ -255,20 +246,13 @@ Findings must conform to the nightme review output schema (see host agent prompt
 // matches precomputeReviewWithOcr's — so the fan-out machinery is
 // identical regardless of path.
 //
-// Used by:
-//   - delegate-tier bridges (dsh/pi/opencode/cursor/acp) when ocr
-//     isn't on $PATH. The bridge's Starter.Review dispatches:
-//     `if agent.OcrAvailable() { ReviewWithOcr } else { ReviewWithPrompt }`.
-//
-// Edge case — empty workspace: precomputeReviewWithBuiltin returns an
-// empty reviewContext (no reviewable, no ocrGroups). The function still
-// calls delegateReviewMultiJob with `groups = append(pre.ocrGroups,
-// simplifyGroup(nil))` = `[simplifyGroup(nil)]` — a one-element slice.
-// delegateReviewMultiJob does not check len(groups) >= 2; it spawns one
-// goroutine, calls assembleGroupPrompt (returns "" because rc.workspace
-// is ""), and the goroutine falls back to BuiltinPrompt text via the
-// `prompt == "" → builtinPrompt` guard. Net effect: one RunOnce with
-// BuiltinPrompt — no fan-out payload to split, no findings possible.
+// Every bridge's Starter.Review dispatches uniformly via
+// agent.ReviewDispatch: when `ocr` CLI is on $PATH, ReviewWithOcr
+// runs; otherwise ReviewWithPrompt runs. There is no per-bridge
+// native-review path — if a user wants an agent's built-in review
+// subcommand (e.g. `claude -p code-review`, `codex review`,
+// `cursor-agent -p /review-bugbot`), they send the slash command
+// directly in chat and NightMe forwards it transparently.
 //
 // simplify always runs alongside as a parallel dimension (Pattern =
 // patternSimplify), appended after pre.ocrGroups — see
@@ -289,55 +273,25 @@ func ReviewWithPrompt(ctx context.Context, s Starter, cfg StartConfig, opts ...R
 	return delegateReviewMultiJob(ctx, s, cfg, pre, groups, opts...)
 }
 
-// ReviewWithMixed runs the bridge's native review slash command(s)
-// alongside the nightme-owned simplify lens, in parallel via the
-// existing delegateReviewMultiJob + eventAggregator + mergeRunResults
-// machinery. Used by bridges whose native review subcommand does NOT
-// include the simplify axes (reuse / simplification / efficiency /
-// altitude) — currently only cursor.
+// ReviewDispatch is the single entry point every bridge's
+// Starter.Review uses. It picks ReviewWithOcr when `ocr` is on $PATH
+// and ReviewWithPrompt otherwise — one uniform mechanism across all
+// bridges (claudecode, codex, cursor, acp, opencode, copilot, dsh,
+// pi; pty/bash returns ErrReviewNotSupported from its own Review).
 //
-// Why this exists (vs ReviewWithNative single-call pattern that
-// codex / claudecode use): those bridges' native review output is
-// already the full review surface (severity grouping, confidence
-// scoring, multi-agent pipeline). Cursor's Bugbot is NOT — its
-// review covers correctness / security / etc. but NOT reuse /
-// simplification / efficiency / altitude. Verified by reading
-// ~/.cursor/skills-cursor/review-bugbot/SKILL.md (it launches a
-// `bugbot` subagent with no simplify axes; cursor-agent CLI has no
-// /simplify skill — see docs/REVIEW.md §2.1.1 for the empirical
-// verification). So we run Bugbot AND our simplifyPrompt in
-// parallel and merge via the same fan-out machinery as Tier 2/3.
+// Centralising the dispatch here means the per-bridge Review method
+// is a single line, and any future "prefer path X over Y" rule
+// (timeout tweaks, opt-in flags, etc.) lands in one place rather
+// than being copy-pasted across 8 bridge packages. The detection
+// itself (OcrAvailable) is already centralised in review_with_ocr.go
+// for the same reason.
 //
-// Why we don't reuse ReviewWithPrompt: ReviewWithPrompt always uses
-// BuiltinPrompt as the primary review group, which would bypass the
-// native slash command (cursor-agent would receive the BuiltinPrompt
-// text instead of "/review-bugbot", and Bugbot wouldn't run). The
-// caller wants the bridge-native review, not the builtin rubric.
-//
-// Each slashCommand becomes a nativeReviewGroup (patternNativeReview)
-// whose Rule is the slash command itself; the bridge's RunOnce spawns
-// its binary with the slash as the prompt, and the binary dispatches
-// it. simplifyGroup(reviewable) is always appended as the second
-// goroutine — same pattern as ReviewWithPrompt's append-simplify.
-//
-// Returns ErrNoDiff on empty diff (same contract as ReviewWithPrompt).
-func ReviewWithMixed(
-	ctx context.Context,
-	s Starter,
-	cfg StartConfig,
-	slashCommands []string,
-	opts ...RunOnceOption,
-) (RunResult, error) {
-	pre := precomputeReviewWithBuiltin(ctx, cfg.Workspace)
-	if pre.isEmptyDiff() {
-		return RunResult{}, ErrNoDiff
+// opts are forwarded verbatim to whichever Runner is selected.
+func ReviewDispatch(ctx context.Context, s Starter, cfg StartConfig, opts ...RunOnceOption) (RunResult, error) {
+	if OcrAvailable() {
+		return ReviewWithOcr(ctx, s, cfg, opts...)
 	}
-	groups := make([]reviewGroup, 0, len(slashCommands)+1)
-	for _, sc := range slashCommands {
-		groups = append(groups, nativeReviewGroup(sc))
-	}
-	groups = append(groups, simplifyGroup(pre.reviewable))
-	return delegateReviewMultiJob(ctx, s, cfg, pre, groups, opts...)
+	return ReviewWithPrompt(ctx, s, cfg, opts...)
 }
 
 // (listWorkspaceFiles deleted — precomputeReview already populates

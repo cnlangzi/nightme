@@ -649,45 +649,20 @@ func countImageFlags(args []string) int {
 type codexExecEvent struct {
 	Type     string          `json:"type"`
 	ThreadID string          `json:"thread_id,omitempty"` // thread.started
-	Item     *codexExecItem  `json:"item,omitempty"`      // item.completed
+	Item     *codexExecItem  `json:"item,omitempty"`      // item.completed — peeked for model name
 	Usage    *codexExecUsage `json:"usage,omitempty"`     // turn.completed
 }
 
-// codexExecItem is the `item` payload inside item.* events
-// (item.started / item.updated / item.completed). Only the
-// fields relevant to the current item.type are populated; the
-// JSON decoder tolerates missing / extra fields, so different
-// item variants coexist without per-type wrapper structs.
-//
-// Field map (verified against `codex exec --json` 0.145+):
-//   - command_execution : Command, AggregatedOutput, ExitCode,
-//     Status; emitted on started / completed
-//   - file_change       : Changes[]; emitted only on completed
-//   - reasoning         : Text; emitted only on completed (when
-//     model_reasoning_summary=detailed)
-//   - agent_message     : Text; emitted only on completed —
-//     suppressed from the sink (P1 fix — single point of
-//     prose delivery is EventAgentResult)
-//   - mcp_tool_call     : Server, Tool, Arguments; emitted on
-//     started / completed
-//   - error             : Message; emitted only on completed
+// codexExecItem is the `item` payload inside item.* events. Only the
+// fields runPrintMode peeks at (Type for the "error" discriminator,
+// Message for the model-name regex, ID so callers can correlate
+// started/completed pairs across event.* windows) are retained —
+// the rest of the item.* event surface was consumed by the
+// deleted translateItem* helpers.
 type codexExecItem struct {
-	ID               string                `json:"id"`
-	Type             string                `json:"type"`
-	Message          string                `json:"message,omitempty"`           // error
-	Command          string                `json:"command,omitempty"`           // command_execution
-	AggregatedOutput string                `json:"aggregated_output,omitempty"` // command_execution completed
-	ExitCode         *int                  `json:"exit_code,omitempty"`         // command_execution completed (nil while in_progress)
-	Status           string                `json:"status,omitempty"`            // command_execution: in_progress | completed | failed
-	Text             string                `json:"text,omitempty"`              // agent_message / reasoning
-	Changes          []codexExecItemChange `json:"changes,omitempty"`           // file_change
-	Server           string                `json:"server,omitempty"`            // mcp_tool_call
-	Tool             string                `json:"tool,omitempty"`              // mcp_tool_call
-}
-
-type codexExecItemChange struct {
-	Path string `json:"path"`
-	Kind string `json:"kind"` // "add" | "delete" | "update"
+	ID      string `json:"id"`
+	Type    string `json:"type"`
+	Message string `json:"message,omitempty"` // error
 }
 
 type codexExecUsage struct {
@@ -898,132 +873,5 @@ func codexDiagnostic(exitKind agent.BridgeExitKind, stderr string) *agent.Bridge
 		StderrTail: stderr,
 		AgentName:  "codex",
 		KilledAt:   time.Now(),
-	}
-}
-
-// translateItemStarted translates a `codex exec --json`
-// item.started event into one or more AgentEvents delivered to
-// the sink. Only `command_execution` and `mcp_tool_call` produce
-// a start event worth translating (the start of a shell command
-// or an MCP tool call). Other item types (reasoning, agent_message,
-// file_change, error) only emit on completed.
-//
-// Safe on nil sink / nil item — both are no-ops, matching
-// runNDJSON's tolerance for malformed lines.
-func translateItemStarted(sink func(agent.AgentEvent), item *codexExecItem) {
-	if sink == nil || item == nil {
-		return
-	}
-	switch item.Type {
-	case "command_execution":
-		sink(agent.AgentEvent{
-			Kind: agent.EventAgentToolStart,
-			ToolStart: &agent.AgentToolStartEvent{
-				ID:   item.ID,
-				Name: "bash",
-				Args: item.Command,
-			},
-		})
-	case "mcp_tool_call":
-		name := item.Server
-		if item.Tool != "" {
-			name = item.Server + "." + item.Tool
-		}
-		sink(agent.AgentEvent{
-			Kind: agent.EventAgentToolStart,
-			ToolStart: &agent.AgentToolStartEvent{
-				ID:   item.ID,
-				Name: name,
-				Args: "", // mcp_tool_call arguments are a JSON value; omit for now
-			},
-		})
-	}
-}
-
-// translateItemCompleted translates a `codex exec --json`
-// item.completed (or item.updated) event into AgentEvents.
-// Suppresses agent_message (P1 fix — final text comes from the
-// -o tempfile via EventAgentResult, not from the streaming agent_message).
-//
-// agent_message suppression rationale: emitting both an
-// EventAgentText for the agent_message AND an EventAgentResult
-// (with the same final text read from -o after turn.completed)
-// produces two visible copies via outbound.Translate
-// (OutReply from Text + OutResult from Result). Suppressing
-// here means the user sees a single copy via Result.
-func translateItemCompleted(sink func(agent.AgentEvent), item *codexExecItem) {
-	if sink == nil || item == nil {
-		return
-	}
-	switch item.Type {
-	case "command_execution":
-		// AgentToolEndEvent has no Err field; fold the exit code
-		// into the Output string when non-zero so the receipt
-		// card's "⎿ output" line shows the failure marker.
-		output := item.AggregatedOutput
-		if item.ExitCode != nil && *item.ExitCode != 0 {
-			output = fmt.Sprintf("[exit %d] %s", *item.ExitCode, output)
-		}
-		sink(agent.AgentEvent{
-			Kind: agent.EventAgentToolEnd,
-			ToolEnd: &agent.AgentToolEndEvent{
-				ID:     item.ID,
-				Name:   "bash",
-				Args:   item.Command,
-				Output: output,
-			},
-		})
-	case "file_change":
-		// Render a short summary as a single Text entry. The
-		// chat channel's outbound.Translate maps Text → OutReply,
-		// which folds into the receipt card rolling log.
-		paths := make([]string, 0, len(item.Changes))
-		for _, c := range item.Changes {
-			paths = append(paths, c.Path)
-		}
-		text := fmt.Sprintf("📝 changed %d file(s): %s",
-			len(paths), strings.Join(paths, ", "))
-		if len(paths) > 8 {
-			text = fmt.Sprintf("📝 changed %d file(s) (first 8: %s)",
-				len(paths), strings.Join(paths[:8], ", "))
-		}
-		sink(agent.AgentEvent{
-			Kind: agent.EventAgentText,
-			Text: text,
-		})
-	case "reasoning":
-		// Emit as EventAgentThinking so the gateway routes it to
-		// OutThinking directly — no string-prefix sniffing needed.
-		// Channels render this as a 💭 side line, distinct from
-		// the 💬 OutReply bubble for the agent's final answer.
-		sink(agent.AgentEvent{
-			Kind: agent.EventAgentThinking,
-			Text: item.Text,
-		})
-	case "mcp_tool_call":
-		name := item.Server
-		if item.Tool != "" {
-			name = item.Server + "." + item.Tool
-		}
-		sink(agent.AgentEvent{
-			Kind: agent.EventAgentToolEnd,
-			ToolEnd: &agent.AgentToolEndEvent{
-				ID:     item.ID,
-				Name:   name,
-				Args:   "",
-				Output: item.AggregatedOutput,
-			},
-		})
-	case "agent_message":
-		// P1 fix: deliberately dropped. Final prose surfaces once
-		// via EventAgentResult after turn.completed (the text
-		// comes from the -o tempfile, not from this streaming
-		// event). See translateItemCompleted doc.
-	case "error":
-		// Codex CLI emits "Model metadata for `…` not found" on
-		// every run; parse it for the StatusBar model field.
-		// The actual error case (review_failed item.completed)
-		// also surfaces here — extractModelFromError returns ""
-		// for non-matching shapes, so non-model errors are no-op'd.
 	}
 }

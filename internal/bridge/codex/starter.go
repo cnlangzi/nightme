@@ -115,9 +115,11 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 // BuiltinPrompt and outputs the structured review).
 //
 // If the user wants codex's built-in `codex review` subcommand
-// (review-specific rubric + structured output), they send
-// `/codex-review` directly in chat — NightMe forwards it
-// transparently to the selected agent.
+// (review-specific rubric + structured output), they send the
+// `/codex-review` slash command directly in chat — the chat
+// session's long-lived Start path forwards it to codex the same
+// way it forwards any prompt, and codex dispatches the
+// subcommand itself.
 func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	return agent.ReviewDispatch(ctx, s, cfg, opts...)
 }

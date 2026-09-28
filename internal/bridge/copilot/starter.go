@@ -157,8 +157,5 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 // prompt via print-mode one-shot — ocr delegate rules fold
 // in when ocr is on $PATH.
 func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
-	if agent.OcrAvailable() {
-		return agent.ReviewWithOcr(ctx, s, cfg, opts...)
-	}
-	return agent.ReviewWithPrompt(ctx, s, cfg, opts...)
+	return agent.ReviewDispatch(ctx, s, cfg, opts...)
 }

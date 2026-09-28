@@ -14,34 +14,24 @@ import (
 // that pass the result to `git diff` / `git merge-base` and
 // need a resolvable form should wrap with "origin/" themselves.
 //
-// Three-tier fallback (mirrors the previous per-bridge copies
-// in codex/print.go and claudecode/print.go, plus the
-// origin/-prefix variant in agent/review_with_ocr.go):
+// Three-tier fallback:
 //
 //  1. `git symbolic-ref refs/remotes/origin/HEAD` (most
 //     reliable on cloned repos).
 //  2. `git remote show origin` (shallow-clone fallback;
 //     network round-trip; only on symbolic-ref failure).
 //  3. Return "" so the caller falls back gracefully
-//     (codex → --uncommitted; claudecode → bare
-//     `code-review`; ocr → drops to workspace mode).
+//     (ocr drops to workspace mode).
 //
-// Used by:
-//
-//   - internal/bridge/codex/print.go::runCodexReview to pass
-//     `--base <defaultBranch>` to `codex review`.
-//   - internal/bridge/claudecode/print.go::runCodeReviewPrintMode
-//     to pass `<defaultBranch>...HEAD` as the positional
-//     target to `claude -p code-review`.
-//   - internal/agent/review_with_ocr.go::precomputeReviewWithOcr
-//     to compute the ocr review's merge-base / diff base.
-//     The ocr callers wrap with "origin/" since they pass the
-//     value to `git diff` and need a resolvable ref.
+// Used by internal/agent/review_with_ocr.go::resolvableDefaultBranch
+// to compute the ocr review's merge-base / diff base. The ocr
+// caller wraps with "origin/" since it passes the value to
+// `git diff` and needs a resolvable ref.
 //
 // Returning "" in tier 3 is critical: a hard-coded "main"
 // fallback would shadow the caller's else-branch and try
-// --base main on master-only / no-remote repos, failing
-// instead of gracefully scanning the working tree.
+// diffing against main on master-only / no-remote repos,
+// failing instead of gracefully scanning the working tree.
 func DetectDefaultBranch(ctx context.Context, workspace string) string {
 	c, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()

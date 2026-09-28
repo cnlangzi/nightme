@@ -330,13 +330,10 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
     return runPrintMode(ctx, s, cfg, blocks, opts...)
 }
 
-// Review delegates to the shared agent.ReviewWithOcr /
-// ReviewWithPrompt three-tier dispatch.
+// Review delegates to the shared agent.ReviewDispatch — picks
+// ReviewWithOcr when `ocr` is on $PATH, otherwise ReviewWithPrompt.
 func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
-    if agent.OcrAvailable() {
-        return agent.ReviewWithOcr(ctx, s, cfg, opts...)
-    }
-    return agent.ReviewWithPrompt(ctx, s, cfg, opts...)
+    return agent.ReviewDispatch(ctx, s, cfg, opts...)
 }
 ```
 

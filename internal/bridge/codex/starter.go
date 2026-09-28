@@ -108,36 +108,18 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 	return runPrintMode(ctx, s, cfg, blocks, opts...)
 }
 
-// Review implements /review for codex. F-review.md §13
-// "codex/claude use native review" rule: codex has a native
-// `codex review` subcommand, so we invoke it directly instead of
-// running our generic builtinPrompt via `codex exec <prompt>`.
-// The native subcommand is structured for the review task —
-// reusing it is strictly better than reverse-engineering the same
-// review into a generic prompt-mode call.
+// Review implements /review for codex via the shared
+// agent.ReviewDispatch — same uniform path every other bridge
+// uses (codex no longer invokes `codex review --base ...`
+// directly; codex's print-mode one-shot receives the nightme
+// BuiltinPrompt and outputs the structured review).
 //
-// v9: returns the raw RunResult from runCodexReview — the /review
-// dispatcher in internal/command/review/cmd.go wraps it in
-// agent.FormatReviewMessage and routes to BOTH the AS (via
-// as.SendBlocks) and the channel (via the chat session's emitter).
-// The bridge no longer owns presentation or distribution.
-//
-// Per-call sink (opts.OnEvent): forwarded to runCodexReview →
-// runCodexReviewPlain so the chat channel's StatusBar / receipt
-// shows the same Ready → Text → Result lifecycle the live-*Agent
-// bridges (dsh/acp/…) emit. Without this forward, /review on codex
-// renders 30s of silence and then dumps the final text.
+// If the user wants codex's built-in `codex review` subcommand
+// (review-specific rubric + structured output), they send the
+// `/codex-review` slash command directly in chat — the chat
+// session's long-lived Start path forwards it to codex the same
+// way it forwards any prompt, and codex dispatches the
+// subcommand itself.
 func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
-	// Forward the full cfg, not just Workspace — Review callers
-	// (/review dispatcher) build cfg from the chat session's
-	// StartConfig and may carry Args / Env / PermissionMode that
-	// future flag mappings will need. The pre-fix shape
-	// (`agent.StartConfig{Workspace: cfg.Workspace}`) silently
-	// dropped those fields; runCodexReview today only reads
-	// Workspace, so the change is observationally a no-op, but
-	// it removes a future foot-gun. opts is forwarded so the
-	// sink (typically WithEventSink) sees the bridge's
-	// Ready → Text → Result lifecycle (see runCodexReviewPlain
-	// for the contract).
-	return runCodexReview(ctx, s, cfg, opts...)
+	return agent.ReviewDispatch(ctx, s, cfg, opts...)
 }

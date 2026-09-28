@@ -2,41 +2,23 @@ package agent_test
 
 // Per-bridge Review contract tests.
 //
-// F-review.md §13 "codex/claude use native review" rule:
-// bridges that have a native review subcommand (claudecode,
-// codex) invoke it directly instead of running our generic
-// BuiltinPrompt; bridges that don't (dsh, opencode, pi, acp)
-// delegate to agent.Review which uses BuiltinPrompt.
+// All non-pty bridges share one review path: Starter.Review calls
+// agent.ReviewDispatch, which picks ReviewWithOcr (when `ocr` is
+// on $PATH) or ReviewWithPrompt. Every bridge's Review method is
+// the same one-liner — this file's TestReview_UsesSharedPrompt
+// exercises the path via fakeStarter to lock the shared contract.
 //
 // Per-bridge contract:
-//   1. claudecode: rev path = `runCodeReviewPrintMode`; the
-//      Review method must call it and wrap the result with
-//      FormatReviewMessage (so the main agent sees the canonical
-//      preamble).
-//   2. codex: rev path = `runCodexReview` (uses codex's native
-//      `codex review` subcommand, not `codex exec <prompt>`);
-//      same wrapping pattern.
-//   3. dsh/opencode/pi/acp: agent.Review → BuiltinPrompt +
-//      FormatReviewMessage.
-//   4. pty: returns ErrReviewNotSupported (bash isn't a coding
+//   1. all bridges (claudecode / codex / cursor / acp / opencode /
+//      copilot / dsh / pi): Starter.Review → agent.ReviewDispatch →
+//      BuiltinPrompt + FormatReviewMessage.
+//   2. pty: returns ErrReviewNotSupported (bash isn't a coding
 //      agent).
 //
-// This file tests the contract end-to-end via fakeStarter. Per
-// real bridges (claudecode / codex / dsh / opencode / pi / acp)
-// are tested via their own integration paths or via the "is
-// Starter satisfied" compile-time check in interface_external
-// tests; per-bridge executability needs real binaries on PATH
-// which isn't available in CI.
-//
-// The single-end-to-end test (TestReview_UsesSharedPrompt)
-// walks through agent.Review with a fakeStarter that captures
-// RunOnce params; this is the path dsh/opencode/pi/acp share.
-// claudecode / codex don't go through this path — they have
-// their own print-mode helpers and call them from their
-// respective Review methods. The "all Review paths eventually
-// call FormatReviewMessage and inject via rc.Inject" contract
-// is verified structurally by the integration tests of each
-// bridge.
+// This file tests the contract end-to-end via fakeStarter. Real
+// bridges are tested via the "is Starter satisfied" compile-time
+// check in interface_external tests; per-bridge executability
+// needs real binaries on PATH which isn't available in CI.
 
 import (
 	"context"
@@ -49,18 +31,16 @@ import (
 	"github.com/cnlangzi/nightme/internal/bridge/pty"
 )
 
-// TestReview_UsesSharedPrompt is the canonical contract test for
-// the agent.Review fallback path (used by dsh / opencode / pi /
-// acp). It verifies that this path runs the shared BuiltinPrompt
-// and wraps the result with the canonical preamble.
+// TestReview_UsesSharedPrompt pins the bridge-facing shape every
+// bridge's Starter.Review method implements: a single RunOnce
+// call carrying the BuiltinPrompt + Workspace, and the raw
+// RunResult returned (no FormatReviewMessage wrap, no Inject —
+// those are the dispatcher's job in internal/command/review/cmd.go).
 //
-// claudecode / codex have their own Review paths that don't go
-// through agent.Review; they're tested via the bridge's own
-// print-mode helpers (runCodeReviewPrintMode / runCodexReview).
-// The shared contract — every Review path must end with
-// FormatReviewMessage + rc.Inject — is verified by eye across
-// bridge starter.go files. (Per-bridge e2e tests require real
-// binaries on PATH; CI uses the fakeStarter runOnly.)
+// The test drives a hand-written testStarter.Review rather than
+// agent.ReviewDispatch directly. ReviewDispatch's own behavior
+// (delegateReviewMultiJob fan-out, ErrNoDiff short-circuit) is
+// tested in fanout_test.go / review_test.go.
 func TestReview_UsesSharedPrompt(t *testing.T) {
 	const workspace = "/Users/me/proj"
 

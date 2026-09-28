@@ -1086,22 +1086,11 @@ type RunResult struct {
 
 	// RecoveredText holds a secondary body of text that the
 	// bridge observed during the turn but did NOT propagate
-	// into Text. Empty unless the bridge detected a recoverable
-	// case (today: claudecode's /code-review plugin in `-p`
-	// mode, where the plugin finishes with an AskUserQuestion
-	// and the actual review sits in an earlier `assistant`
-	// event — the recovery layer promotes it into Text and
-	// keeps a copy here for audit).
-	//
-	// Renamed from AssistantText in v15b: "assistant" is
-	// claudecode's specific wire-event name; the field's role
-	// is semantic (a recoverable body of text), not source-
-	// specific. Future bridges that hit similar terminal-vs-
-	// stream skew can populate this without renaming again.
-	//
-	// Always empty for non-claudecode bridges and for
-	// claudecode non-review print-mode runs (see
-	// parsePrintStream's isReview gate in print.go).
+	// into Text. Reserved for future bridges that detect a
+	// recoverable case (e.g. terminal-vs-stream skew where the
+	// final result event loses the actual prose to a closing
+	// remark and the earlier assistant stream carries the
+	// substantive body). Empty today across all bridges.
 	RecoveredText string
 
 	// Model is the model name that actually produced Text.
@@ -1209,31 +1198,15 @@ type Starter interface {
 	// a one-field type that leaks "review is a special thing"
 	// framing into the agent package.
 	//
-	// opts configures per-call behaviour (see RunOnceOption).
-	// Bridges that don't support a given option ignore it.
-	//
-	// ===== F-review.md §13 "codex/claude use native review" rule =====
-	//
-	// Bridges that have a native review subcommand MUST invoke it
-	// directly instead of running our generic BuiltinPrompt:
-	//   - claudecode: `claude -p code-review` (built-in slash command;
-	//     note: NO leading slash in `[command]` slot — verified
-	//     2.1.220 that `claude -p /code-review` runs 0 turns and
-	//     returns empty result, while `claude -p code-review`
-	//     dispatches the slash command and fires the multi-agent
-	//     pipeline)
-	//   - codex:      `codex review --base <default-branch>` (subcommand;
-	//     review rejects exec-only flags like --json / -o /
-	//     --dangerously-bypass-approvals-and-sandbox / -C /
-	//     --skip-git-repo-check — uses its own argv assembly in
-	//     print.go, NOT runPrintMode)
-	//
-	// Bridges that have NO native review subcommand call
-	// s.RunOnce(ctx, cfg, [BuiltinPrompt()]) inline — the
-	// canonical review path is "spawn a fresh subprocess with the
-	// shared prompt" and inlining keeps the contract symmetric
-	// with RunOnce:
-	//   - dsh, opencode, pi, acp
+	// Every non-pty bridge delegates to agent.ReviewDispatch, the
+	// shared 2-line helper that picks ReviewWithOcr (when `ocr` is
+	// on $PATH) or ReviewWithPrompt (otherwise). Bridges' Review
+	// methods are all the same one-liner — uniform behaviour,
+	// uniform prompt source, uniform output format. To use an
+	// agent's built-in review subcommand (e.g. `claude -p code-review`,
+	// `codex review`, `cursor-agent -p /review-bugbot`), send the
+	// slash command directly in chat; NightMe forwards it
+	// transparently to the selected agent.
 	//
 	// Return ErrReviewNotSupported when this agent type cannot do
 	// review (e.g. pty/bash fallback). The dispatcher surfaces a

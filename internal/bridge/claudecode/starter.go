@@ -184,39 +184,18 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 	return result, nil
 }
 
-// Review implements /review for the claudecode bridge.
+// Review implements /review for the claudecode bridge via the
+// shared agent.ReviewDispatch — same uniform path every other
+// bridge uses (claudecode no longer invokes `claude -p code-review`
+// directly; claude's print-mode one-shot receives the nightme
+// BuiltinPrompt and outputs the structured review).
 //
-// F-review.md §13 "codex/claude use native review" rule: when the
-// underlying CLI has a built-in review pathway, we invoke it
-// directly instead of running our generic builtinPrompt. Claude
-// Code has `code-review` built in (a multi-agent review pipeline
-// tuned for the task); invoking it via `claude -p code-review`
-// (NO leading slash — verified 2.1.220) is strictly better than
-// reverse-engineering the same review into a generic prompt-mode
-// call. Runs `runCodeReviewPrintMode` which produces the same
-// wire-format output as runPrintMode (stream-json), so the
-// result handling is unchanged.
-//
-// v9: returns the raw RunResult from runCodeReviewPrintMode — the
-// /review dispatcher in internal/command/review/cmd.go wraps it
-// in agent.FormatReviewMessage and routes to BOTH the AS (via
-// as.SendBlocks) and the channel (via the chat session's
-// emitter). The bridge no longer owns presentation or
-// distribution.
-//
-// Other bridges (dsh / opencode / pi / acp) don't have native
-// review; they delegate to agent.Review which uses builtinPrompt.
-// pty returns ErrReviewNotSupported.
-//
-// v10: cfg + opts are forwarded verbatim to runCodeReviewPrintMode.
-// Pre-v10 stripped cfg to {Workspace: cfg.Workspace} and
-// dropped opts entirely, which silently disabled the chat
-// channel's WithEventSink — the sink never saw Ready/Result
-// events, so the StatusBar sat on "Working…" for the full
-// review duration and then jumped straight to the review text
-// landing in chat (no progress, no footer tokens). The pre-fix
-// shape matched codex's `runCodexReview(ctx, s, cfg, opts...)`
-// forwarding shape, so the parity is intentional.
+// If the user wants Claude Code's built-in `code-review` slash
+// command (a multi-agent review pipeline tuned for the task),
+// they send `/code-review` directly in chat — the chat session's
+// long-lived Start path forwards it to claude the same way it
+// forwards any prompt, and claude dispatches the slash command
+// itself.
 func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
-	return runCodeReviewPrintMode(ctx, s, cfg, opts...)
+	return agent.ReviewDispatch(ctx, s, cfg, opts...)
 }

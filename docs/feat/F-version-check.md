@@ -15,12 +15,14 @@ Two new entry points give operators a way to know they are on
 an out-of-date `nightme`:
 
 1. **REPL startup prompt.** When the user runs bare `nightme`,
-   the REPL does one throttled lookup against
-   `https://nightme.dev/api/version`. If a newer release is
-   available it prints a single `y/N` prompt; any answer other
-   than `y` (including EOF / Ctrl-C / read error) ends the
-   prompt immediately and falls through to the interactive
-   loop. The prompt runs at most once per startup.
+   the REPL does one throttled lookup via
+   `internal/updater.LookupLatestTag` (nightme.dev release
+   feed first, GitHub `/repos/.../releases/latest` fallback).
+   If a newer release is available it prints a single `y/N`
+   prompt; any answer other than `y` (including EOF / Ctrl-C /
+   read error) ends the prompt immediately and falls through
+   to the interactive loop. The prompt runs at most once per
+   startup.
 2. **`nightme update` subcommand.** An always-live check with
    no caching. Same comparison logic; prints current vs
    latest plus manual install instructions. Replaces
@@ -70,28 +72,34 @@ the package comments of `internal/version/check.go` and
 ### 3.1 `internal/version` additions
 
 ```go
+type LatestTagLookup func(ctx context.Context) (tag, source string, err error)
+
 type Checker struct {
-    VersionURL string         // nightme.dev endpoint; "" → default
-    HTTPClient *http.Client   // nil → &http.Client{Timeout: 5s}
-    Now        func() time.Time
-    CachePath  string         // "" disables caching
+    Lookup      LatestTagLookup  // required: nil → Check returns empty
+    HTTPTimeout time.Duration    // 0 → 5s
+    CacheTTL    time.Duration    // 0 → 24h
+    CachePath   string           // "" disables caching
+    Now         func() time.Time // nil → time.Now
 }
 
 type CheckResult struct {
     Current   string
     Latest    string
     Outdated  bool
+    Source    string
     FromCache bool
     CheckedAt time.Time
 }
 
-func DefaultChecker(dataDir string) (*Checker, string)
+func NewChecker(dataDir string, lookup LatestTagLookup) (*Checker, string)
 func (c *Checker) Check(ctx context.Context, currentVersion string, logf func(string, ...any)) CheckResult
 ```
 
 The compare path uses `golang.org/x/mod/semver`. Unparseable
 inputs (e.g. `dev` builds) fall back to a string compare so
-the prompt still has something to say.
+the prompt still has something to say. The Lookup seam
+isolates `internal/version` from any specific HTTP endpoint;
+production wires `updater.LookupLatestTag`, tests wire a stub.
 
 ### 3.2 REPL wiring
 
@@ -227,7 +235,7 @@ The actual download / verify / replace path for
 
 - `internal/version/check_test.go` (8 cases) — semver,
   cache hit/miss, network failure, rate limit, fetch decode,
-  `DefaultChecker` wiring.
+  `NewChecker` wiring.
 - `cmd/nightme/repl_update_test.go` (10 cases) — every
   row of the failure-mode table above plus the
   "no re-prompt on garbage input" guard.

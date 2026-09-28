@@ -94,12 +94,6 @@ func claudeLog(msg string, args ...any) {
 	slog.Default().Info(msg, all...)
 }
 
-// claudeDiagnostic was removed when the claudecode review path
-// (runCodeReviewPrintMode) was retired. The shared print-mode
-// path (runPrintMode) doesn't emit EventAgentError events with
-// non-nil Diagnostic on its own; failures flow through stderr
-// in the returned error instead.
-
 // runPrintMode spawns claude in `-p` print mode for one-shot
 // invocations. It owns the process from spawn to exit, streams
 // events through the standard translator, and returns a
@@ -565,9 +559,3 @@ func errStr(err error) string {
 func appendAuditFields(result agent.RunResult) string {
 	return agent.FormatSessionID(result.SessionID) + agent.FormatUsage(result.Usage)
 }
-
-// isFollowupQuestion + runCodeReviewPrintMode + claudeDiagnostic
-// were retired when the claudecode native review path was dropped.
-// Every bridge now goes through agent.ReviewDispatch; users who
-// want Claude Code's built-in `code-review` slash command send it
-// directly in chat and NightMe forwards it to the selected agent.

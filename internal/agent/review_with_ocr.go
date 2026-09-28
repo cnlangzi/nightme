@@ -1,17 +1,16 @@
 // review_with_ocr.go — ReviewWithOcr runner + multi-job fan-out
 // machinery for the ocr delegation flow (docs/REVIEW.md §2.2).
 //
-// Three review runners exist in package agent (and bridge packages):
-//   - ReviewWithNative: per-bridge in bridge packages (claudecode/codex
-//     invoke their built-in /codereview / codex review commands).
+// Two review runners exist in package agent; every bridge dispatches
+// uniformly via agent.ReviewDispatch:
 //   - ReviewWithOcr: this file; ocr delegation flow with multi-job
 //     fan-out via delegateReviewMultiJob.
 //   - ReviewWithPrompt: in review.go; pure-prompt path used when ocr
 //     isn't installed or workspace precompute fails.
 //
-// simplify runs as a parallel reviewGroup inside both ReviewWithOcr and
-// ReviewWithPrompt (see patternSimplify / simplifyGroup below) — never
-// in ReviewWithNative (per-bridge native review handles its own prompt).
+// simplify runs as a parallel reviewGroup inside both runners
+// (see patternSimplify / simplifyGroup below) — one RunOnce per
+// group, concurrently with the main dimension(s).
 //
 // ocr is an external CLI (like git), not a bridge/agent. Its delegation
 // mode is LLM-free: it emits only deterministic engineering (file list

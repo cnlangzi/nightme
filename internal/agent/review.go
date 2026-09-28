@@ -168,8 +168,7 @@ Concrete next steps, ordered by impact. One bullet per suggestion. Don't restate
 //
 // Wired into both ReviewWithOcr and ReviewWithPrompt as a parallel
 // reviewGroup (Pattern = patternSimplify), so it runs as a separate
-// RunOnce concurrently with the main dimension(s). Not in
-// ReviewWithNative (per-bridge native review handles its own prompt).
+// RunOnce concurrently with the main dimension(s).
 const simplifyPrompt = `# Simplify review lens (nightme-owned, complementary)
 
 This lens reviews the diff for **simplification opportunities** that are orthogonal to correctness/performance/security findings: code that works but can be made simpler, smaller, or more idiomatic without changing behavior.
@@ -293,7 +292,3 @@ func ReviewDispatch(ctx context.Context, s Starter, cfg StartConfig, opts ...Run
 	}
 	return ReviewWithPrompt(ctx, s, cfg, opts...)
 }
-
-// (listWorkspaceFiles deleted — precomputeReview already populates
-// reviewable via collectReviewableFiles in the no-ocr branch; see
-// review_with_ocr.go.)

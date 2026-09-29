@@ -1,29 +1,48 @@
 // Package feishu — WS *Client rebuild path.
 //
 // The larksuite/oapi-sdk-go v3 ws.Client sets an internal `terminal`
-// flag to true on any non-retryable error, specifically any
-// *ws.ClientError. The handshake codes that produce one and that we
-// see in practice are:
+// flag to true under three conditions (ws/client_lifecycle.go:125-128):
 //
-//   - 514 + ExceedConnLimit (1000040350) — the Feishu server still
-//     sees the old pre-sleep device_id as alive when our first
-//     reconnect dial lands. macOS wake + short sleep duration is the
-//     canonical trigger.
-//   - 403 — app permission revoked; once-per-process retry does not
-//     help, but a fresh *Client also won't help, so we still bound
-//     the rebuild loop below.
+//   - runStopByContext — our cancel of the run context (the prober's
+//     ReconnectSDK does this on every tick; see recordLastStartErr
+//     below for the impact).
+//   - runStopByClose — Close() called.
+//   - runStopByFailure with run.everConnected — a non-retryable
+//     *ws.ClientError from the server AFTER a successful connect.
+//     Note: an initial-connect *ClientError (server rejected the
+//     very first dial, run.everConnected=false) does NOT flip
+//     terminal; the SDK's runCoordinator returns and Start returns
+//     the *ClientError but the *Client itself is reusable. The
+//     rebuild path doesn't run in that case (no OnDisconnected
+//     callback fires before the failure).
 //
-// Once terminal, every subsequent client.Start returns
-// errClientTerminal — the *Client cannot be revived and a brand-new
-// *Client must be constructed (the SDK has no reset / rearm API).
+// The terminal flag freezes the *Client — every subsequent
+// client.Start returns errClientTerminal ("websocket client cannot
+// be restarted", ws/error.go:12) and the SDK has no reset / rearm
+// API. A brand-new *larkws.Client must be constructed.
+//
+// Two terminal signatures the rebuild path must detect:
+//
+//   - *ws.ClientError — real non-retryable server-side failure.
+//     Canonical trigger: 514 + Handshake-Autherrcode=1000040350
+//     (ExceedConnLimit) after a macOS wake, when the server still
+//     sees the old pre-sleep device_id as alive.
+//   - errClientTerminal — the sentinel returned by Start on an
+//     already-terminal client (the SDK's `errors.New(...)` is
+//     unexported, so we string-match its message). Fires on every
+//     post-terminal Start attempt. We MUST detect this too —
+//     otherwise a *ClientError → cancel → next Start → errClientTerminal
+//     cycle leaves the rebuild loop spinning forever, because
+//     lastStartErr is non-terminal (errClientTerminal) and the
+//     gate currently requires terminal to rebuild.
 //
 // This file adds the rebuild escape hatch: ReconnectSDK observes the
-// previous run's terminal error, constructs a fresh *larkws.Client
-// (with widened HandshakeTimeout / httpClient.Timeout so the first
-// dial after a wake has headroom), then spawns the new run. Cooldown
-// + max consecutive failures bound the rebuild rate: a misconfigured
-// credential that returns *ClientError every dial must not spin the
-// rebuild at the prober's 30s cadence forever.
+// previous run's terminal-class state, constructs a fresh
+// *larkws.Client (with widened HandshakeTimeout / httpClient.Timeout
+// so the first dial after a wake has headroom), then spawns the new
+// run. Cooldown + max consecutive failures bound the rebuild rate: a
+// misconfigured credential that returns *ClientError every dial must
+// not spin the rebuild at the prober's 30s cadence forever.
 package feishu
 
 import (
@@ -69,6 +88,14 @@ const (
 	// already surfaced via `nightme health` for the operator to act
 	// on.
 	sdkMaxConsecutiveRebuilds = 5
+
+	// sdkErrClientTerminalMessage is the exact string the SDK's
+	// ws/error.go:12 errClientTerminal sentinel uses. The sentinel
+	// is unexported (we can't errors.Is against it directly); the
+	// message is part of the SDK's public surface and pinned by
+	// TestIsStrandedTerminal_DetectsSDKMessage. Any SDK version
+	// that changes this string will surface as a unit test failure.
+	sdkErrClientTerminalMessage = "websocket client cannot be restarted"
 )
 
 // RebuildSnapshot is the rebuild-side mirror of WSHealthSnapshot's
@@ -83,6 +110,7 @@ type RebuildSnapshot struct {
 	SkippedMaxConsecutive int64     `json:"skipped_max_consecutive"`
 	LastTerminalErr       string    `json:"last_terminal_err"`
 	LastTerminalErrAt     time.Time `json:"last_terminal_err_at"`
+	CancelStrandedStreak  int64     `json:"cancel_stranded_streak"`
 }
 
 // rebuildState is the per-Adapter atomic state used by the rebuild
@@ -95,6 +123,29 @@ type rebuildState struct {
 	skippedMaxStreak  atomic.Int64
 	lastTerminalErr   atomic.Pointer[string]
 	lastTerminalErrAt atomic.Pointer[time.Time]
+
+	// cancelStrandedTerminal is true when the most recent Start()
+	// returned the SDK's errClientTerminal sentinel — i.e. we (or
+	// the SDK) already put the *Client into terminal state and any
+	// further Start on it will keep returning the same sentinel.
+	// maybeRebuildClient gates on this flag in addition to the
+	// *ClientError detector, because a prober tick that cancels a
+	// still-blocked Start never records a *ClientError on its own
+	// (the cancel returns context.Canceled which recordLastStartErr
+	// filters) — the next Start's errClientTerminal is the only
+	// signal we get. Reset by markSDKConnected (successful connect
+	// proves the new client is healthy) and by rebuildWSClient
+	// itself (the rebuild succeeded regardless of which terminal
+	// path triggered it).
+	cancelStrandedTerminal atomic.Bool
+
+	// strandedStreak counts how many consecutive errClientTerminal
+	// events we've recorded since the last successful rebuild. The
+	// main consecutiveFails counter only bumps on *ClientError
+	// (real server-side terminal); strandedStreak tracks the cancel-
+	// induced terminal path separately so `nightme health` can
+	// distinguish them.
+	strandedStreak atomic.Int64
 }
 
 func newRebuildState() *rebuildState { return &rebuildState{} }
@@ -105,6 +156,7 @@ func (s *rebuildState) snapshot() RebuildSnapshot {
 		ConsecutiveFailures:   s.consecutiveFails.Load(),
 		SkippedCooldown:       s.skippedCooldown.Load(),
 		SkippedMaxConsecutive: s.skippedMaxStreak.Load(),
+		CancelStrandedStreak:  s.strandedStreak.Load(),
 	}
 	if t := s.lastAt.Load(); t != nil {
 		out.LastRebuildAt = *t
@@ -118,18 +170,13 @@ func (s *rebuildState) snapshot() RebuildSnapshot {
 	return out
 }
 
-// isTerminalSDKError reports whether err is a *ws.ClientError (the
-// SDK marker for non-retryable handshake / endpoint errors, all of
-// which flip the SDK's terminal flag and freeze the *Client).
-//
-// We use errors.As because the SDK sometimes wraps the *ClientError
-// in higher-level types (and a future SDK version may wrap further).
-// The catch-all `*ws.ClientError` arm matches anything the SDK
-// classifies as non-retryable — codes that come up in practice are
-// 514 + Handshake-Autherrcode=1000040350 (ExceedConnLimit, the macOS-
-// wake signature), 403 (permission revoked), and the various
-// bootstrap / endpoint error codes from fetchEndpoint.
-func isTerminalSDKError(err error) bool {
+// isClientError reports whether err is a *ws.ClientError — the SDK's
+// marker for non-retryable handshake / endpoint errors returned from
+// the server (e.g., 514 + ExceedConnLimit, 403, endpoint bootstrap
+// errors). Each match bumps consecutiveFails in recordLastStartErr;
+// the counter feeds the max-streak guard so a misconfigured credential
+// doesn't loop forever.
+func isClientError(err error) bool {
 	if err == nil {
 		return false
 	}
@@ -137,19 +184,50 @@ func isTerminalSDKError(err error) bool {
 	return errors.As(err, &ce)
 }
 
+// isStrandedTerminal reports whether err is the SDK's
+// errClientTerminal sentinel ("websocket client cannot be restarted"
+// from ws/error.go:12). The sentinel is unexported, so we can't
+// errors.Is against it — we match by exact-message. Detection
+// triggers the rebuild path (set cancelStrandedTerminal=true in
+// recordLastStartErr) but does NOT bump consecutiveFails; that
+// counter is for *ClientError only, and an errClientTerminal fires
+// on every post-terminal Start attempt (prober ticks every 30s) —
+// bumping it would prematurely trip the max-streak limit.
+func isStrandedTerminal(err error) bool {
+	if err == nil {
+		return false
+	}
+	return err.Error() == sdkErrClientTerminalMessage
+}
+
+// isTerminalSDKError is the union of isClientError and isStrandedTerminal,
+// preserved for callers that only need to know "is this in a terminal
+// class?". The rebuild path's gate uses isClientError specifically
+// (because the consecutiveFails counter is *ClientError-only), and
+// checks the stranded flag separately.
+func isTerminalSDKError(err error) bool {
+	return isClientError(err) || isStrandedTerminal(err)
+}
+
 // recordLastStartErr is called from the goroutine that wraps
 // client.Start in Start() and ReconnectSDK(). err is the value
 // returned by client.Start — the run's final lifecycle error. We
-// only record non-nil, non-context.Cancel errors; transient context
-// cancels are noise (they happen on every normal Stop / reconnect).
+// filter nil + context.Canceled (transient cancels happen on every
+// normal Stop / prober-initiated cancel) and classify the rest:
 //
-// When the err is terminal (see isTerminalSDKError) we also stamp
-// the dedicated lastTerminalErr / lastTerminalErrAt so the snapshot
-// path can surface the "this is not going to fix itself" signal
-// and bump the consecutive-fail streak (which gates rebuild).
-// Non-terminal errs reset the streak so a long stretch of retryable
-// failures (network outage) doesn't poison the rebuild budget once
-// we finally hit a *ClientError.
+//   - *ws.ClientError (isClientError): real terminal. Stamp
+//     lastTerminalErr + bump consecutiveFails (which feeds the
+//     max-streak guard).
+//   - errClientTerminal (isStrandedTerminal): stranded terminal —
+//     the *Client was already in terminal state when Start was
+//     called. Set cancelStrandedTerminal so maybeRebuildClient
+//     knows to rebuild; bump strandedStreak for diagnostics. Do
+//     NOT touch consecutiveFails (see comment on isStrandedTerminal).
+//   - Anything else: store lastStartErr for diagnostics, do NOT
+//     touch the rebuild counters. We don't reset consecutiveFails
+//     here — only *ClientError bumps it, and a stray reset would
+//     let the rebuild loop escape its budget on the cancel-induced
+//     terminal path.
 func (a *Adapter) recordLastStartErr(err error) {
 	if err == nil {
 		return
@@ -159,7 +237,8 @@ func (a *Adapter) recordLastStartErr(err error) {
 	}
 	cp := err
 	a.lastStartErr.Store(&cp)
-	if isTerminalSDKError(err) {
+
+	if isClientError(err) {
 		now := time.Now()
 		msg := err.Error()
 		a.rebuild.lastTerminalErr.Store(&msg)
@@ -167,27 +246,52 @@ func (a *Adapter) recordLastStartErr(err error) {
 		a.rebuild.consecutiveFails.Add(1)
 		return
 	}
-	a.rebuild.consecutiveFails.Store(0)
-}
-
-// maybeRebuildClient runs once per ReconnectSDK tick. Returns nil
-// even when it declines to rebuild (cooldown / max-streak guard) so
-// the caller can always proceed with the normal Start flow. The
-// rebuild itself is gated on:
-//
-//  1. lastStartErr must be a terminal error (else nothing to fix).
-//  2. consecutive-failure streak below sdkMaxConsecutiveRebuilds.
-//  3. rebuild cooldown elapsed since the last successful rebuild.
-//
-// All three guards increment counter fields so `nightme health` can
-// see why a rebuild was skipped.
-func (a *Adapter) maybeRebuildClient() {
-	lastPtr := a.lastStartErr.Load()
-	if lastPtr == nil {
+	if isStrandedTerminal(err) {
+		a.rebuild.cancelStrandedTerminal.Store(true)
+		a.rebuild.strandedStreak.Add(1)
 		return
 	}
-	last := *lastPtr
-	if !isTerminalSDKError(last) {
+}
+
+// maybeRebuildClient runs once per ReconnectSDK tick. Returns without
+// rebuilding when:
+//
+//   - lastStartErr is nil AND cancelStrandedTerminal is false
+//     (the SDK is in its normal retry loop and we shouldn't interfere),
+//   - OR lastStartErr is non-nil but not a *ClientError AND
+//     cancelStrandedTerminal is false (network blip, retryable),
+//   - OR the consecutive-fail streak hit sdkMaxConsecutiveRebuilds
+//     (config error, give up),
+//   - OR the rebuild cooldown hasn't elapsed since the last rebuild.
+//
+// The gate fires (rebuild proceeds) when:
+//
+//   - lastStartErr is a *ws.ClientError (real server-side terminal),
+//   - OR cancelStrandedTerminal is true (the SDK is stuck on a
+//     terminal *Client; we must rebuild to escape).
+//
+// Successful rebuild clears cancelStrandedTerminal (the new client
+// is fresh and may or may not be terminal yet — that's its own
+// state to track).
+func (a *Adapter) maybeRebuildClient() {
+	lastPtr := a.lastStartErr.Load()
+	stranded := a.rebuild.cancelStrandedTerminal.Load()
+
+	if lastPtr == nil && !stranded {
+		return
+	}
+
+	terminal := stranded
+	if lastPtr != nil {
+		// isTerminalClientError gates also on *ClientError (real
+		// server-side terminal). We deliberately do NOT include
+		// isStrandedTerminal here — the cancelStrandedTerminal
+		// flag carries that signal without bumping consecutiveFails.
+		if isClientError(*lastPtr) {
+			terminal = true
+		}
+	}
+	if !terminal {
 		return
 	}
 
@@ -196,7 +300,7 @@ func (a *Adapter) maybeRebuildClient() {
 		a.logger.Error("feishu: rebuild skipped after max consecutive failures",
 			"app_id", a.appID(),
 			"consecutive_failures", a.rebuild.consecutiveFails.Load(),
-			"last_err", last.Error())
+			"last_err", errStringFor(lastPtr))
 		return
 	}
 
@@ -217,6 +321,11 @@ func (a *Adapter) maybeRebuildClient() {
 			"err", err.Error())
 		return
 	}
+	// Successful rebuild — the new *larkws.Client is non-terminal
+	// (fresh), so the stranded flag no longer applies. consecutiveFails
+	// stays — it represents how many *ClientError events we've
+	// survived, and we shouldn't forget that.
+	a.rebuild.cancelStrandedTerminal.Store(false)
 }
 
 // rebuildWSClient constructs a fresh *larkws.Client and atomically
@@ -272,6 +381,54 @@ func (a *Adapter) appID() string {
 	return a.cfg.Feishu.AppID
 }
 
+// errStringFor formats lastStartErr (or "" if nil) for log fields.
+// Tolerant of nil so callers can hand in the result of
+// a.lastStartErr.Load() without a guard.
+func errStringFor(errPtr *error) string {
+	if errPtr == nil {
+		return ""
+	}
+	return (*errPtr).Error()
+}
+
+// markSDKConnected is the OnReady / OnReconnected callback body,
+// extracted to a method so the success-state invariants are unit-
+// testable without going through the SDK's unexported callback
+// channel. Both signals mean "WS is healthy, reset rebuild state".
+//
+// Without this reset, the still-running prober (started by the
+// previous run's OnDisconnected) keeps ticking every 30s, cancels
+// the new run's context (runStopByContext → terminal), and the
+// rebuild path spins on errClientTerminal forever — exactly the
+// failure mode this feature exists to fix.
+//
+// Called from two SDK callbacks in buildWSClient (OnReady for a
+// rebuilt client's first connect, OnReconnected for every
+// subsequent reconnect).
+func (a *Adapter) markSDKConnected() {
+	now := time.Now()
+	a.health.recordConnect(now)
+	a.logger.Info("feishu: ws connected",
+		"app_id", a.appID(),
+		"reconnect_count", a.health.Snapshot().ReconnectCount)
+	// Terminal-recovery telemetry: every successful connect
+	// (initial after rebuild, or reconnect after a network blip)
+	// clears the rebuild budget so a future disconnect starts
+	// from a clean slate. Without clearing lastStartErr a future
+	// transient disconnect would rebuild against the long-since-
+	// resolved terminal error; without clearing the stranded flag
+	// a future cancel would also rebuild unnecessarily.
+	a.rebuild.consecutiveFails.Store(0)
+	a.rebuild.cancelStrandedTerminal.Store(false)
+	a.lastStartErr.Store(nil)
+	if a.prober != nil {
+		a.prober.Stop()
+		a.logger.Info("feishu: reconnect prober stopped",
+			"app_id", a.appID(),
+			"force_attempts", a.prober.Snapshot().ForceCount)
+	}
+}
+
 // buildWSClient is the single source of truth for the *larkws.Client
 // construction. NewAdapter calls it once on startup; rebuildWSClient
 // calls it on every terminal recovery. Both call sites share the
@@ -313,13 +470,7 @@ func (a *Adapter) buildWSClient(handler *larkdispatcher.EventDispatcher) *larkws
 		larkws.WithEventHandler(handler),
 		larkws.WithHttpClient(httpClient),
 		larkws.WithWebSocketDialer(dialer),
-		larkws.WithOnReady(func() {
-			now := time.Now()
-			a.health.recordConnect(now)
-			a.logger.Info("feishu: ws connected",
-				"app_id", a.appID(),
-				"reconnect_count", a.health.Snapshot().ReconnectCount)
-		}),
+		larkws.WithOnReady(a.markSDKConnected),
 		larkws.WithOnError(func(err error) {
 			if err == nil {
 				return
@@ -351,30 +502,6 @@ func (a *Adapter) buildWSClient(handler *larkdispatcher.EventDispatcher) *larkws
 				"app_id", a.appID(),
 				"reconnect_count", snap.ReconnectCount)
 		}),
-		larkws.WithOnReconnected(func() {
-			now := time.Now()
-			a.health.recordConnect(now)
-			a.logger.Info("feishu: ws reconnected",
-				"app_id", a.appID(),
-				"reconnect_count", a.health.Snapshot().ReconnectCount)
-			// Terminal-recovery telemetry: every successful
-			// reconnect-after-rebuild resets the consecutive-fail
-			// streak so a one-off *ClientError doesn't permanently
-			// burn the rebuild budget.
-			a.rebuild.consecutiveFails.Store(0)
-			// Clear lastStartErr so a future disconnect (transient
-			// network blip, server-side maintenance) doesn't trigger
-			// a spurious rebuild against the long-since-resolved
-			// terminal error. Without this, maybeRebuildClient
-			// would see the stale *ws.ClientError from yesterday's
-			// wake and tear down a perfectly healthy WS.
-			a.lastStartErr.Store(nil)
-			if a.prober != nil {
-				a.prober.Stop()
-				a.logger.Info("feishu: reconnect prober stopped",
-					"app_id", a.appID(),
-					"force_attempts", a.prober.Snapshot().ForceCount)
-			}
-		}),
+		larkws.WithOnReconnected(a.markSDKConnected),
 	)
 }

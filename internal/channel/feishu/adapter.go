@@ -3177,7 +3177,7 @@ func (a *Adapter) Health() WSHealthSnapshot {
 	// F-fix-feishu-reconnect: same pattern for the rebuild counters.
 	// Operationally a non-zero SkippedMaxConsecutive is the loudest
 	// signal that the WS is not coming back without a config fix.
-	snap.Rebuild = RebuildSnapshotFromState(a.rebuild)
+	snap.Rebuild = a.rebuild.snapshot()
 	return snap
 }
 

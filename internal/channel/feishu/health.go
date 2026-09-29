@@ -139,18 +139,6 @@ func (h *WSHealth) Snapshot() WSHealthSnapshot {
 	return snap
 }
 
-// RebuildSnapshotFromState is the WSHealth.Snapshot -> WSHealthSnapshot
-// wiring for the F-fix-feishu-reconnect rebuild counters. Adapter
-// passes its *rebuildState here so the snapshot path doesn't need to
-// reach back into adapter.go (keeps health.go independent of the
-// adapter struct shape).
-func RebuildSnapshotFromState(state *rebuildState) RebuildSnapshot {
-	if state == nil {
-		return RebuildSnapshot{}
-	}
-	return state.snapshot()
-}
-
 // WSHealthSnapshot is the cross-process wire format — it must be
 // JSON-marshalable so `nightme health` can read it via the daemon's
 // status file (or via a future daemoncontrol "health" command).

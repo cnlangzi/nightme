@@ -163,6 +163,18 @@ type WSHealthSnapshot struct {
 	// field; readers should treat this as advisory.
 	Prober ProberSnapshot `json:"prober"`
 
+	// Rebuild is the F-fix-feishu-reconnect WS *Client rebuild state.
+	// Increment-only counters (RebuildCount, ConsecutiveFailures,
+	// SkippedCooldown, SkippedMaxConsecutive) and the last terminal
+	// error string / timestamp let the operator diagnose post-sleep
+	// recovery without grepping the log file. Zero-valued until the
+	// first rebuild fires; a non-zero SkippedMaxConsecutive means the
+	// rebuild path has given up — the WS will not recover until the
+	// daemon restarts (the underlying error is almost always a bad
+	// app_id / app_secret that returns *ws.ClientError on every
+	// dial).
+	Rebuild RebuildSnapshot `json:"rebuild"`
+
 	// F-61: agent process liveness prober (fallback for readpump-
 	// missed bridge deaths). Mirrors Prober's shape but tracks
 	// pool-wide AS heartbeats rather than WS reconnect attempts.

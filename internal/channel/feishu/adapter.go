@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -130,6 +131,21 @@ type Adapter struct {
 	// prober's snapshot is merged into WSHealthSnapshot.Prober
 	// for `nightme health` output.
 	prober *prober
+
+	// rebuild holds the F-fix-feishu-reconnect WS *Client rebuild
+	// counters and last-terminal-error context. Updated from
+	// recordLastStartErr (set on every client.Start return) and
+	// maybeRebuildClient (read by ReconnectSDK every prober tick).
+	// Surface lives in WSHealthSnapshot.Rebuild.
+	rebuild *rebuildState
+
+	// lastStartErr stores the most recent error returned by
+	// client.Start (recorded from the goroutine that wraps Start
+	// in both Start() and ReconnectSDK()). It is the input the
+	// rebuild path uses to decide whether to construct a fresh
+	// *larkws.Client — a *ws.ClientError here means the SDK is in
+	// its terminal state and the *Client cannot be revived.
+	lastStartErr atomic.Pointer[error]
 
 	// limiter 全局共享 token bucket（F-35）。所有出口 SDK call 前
 	// 都过 Wait()，预防触发飞书 230001 / 230020 限流错误码。
@@ -350,72 +366,12 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 			return nil
 		})
 
-	a.client = larkws.NewClient(
-		cfg.Feishu.AppID,
-		cfg.Feishu.AppSecret,
-		larkws.WithEventHandler(handler),
-		larkws.WithOnReady(func() {
-			now := time.Now()
-			a.health.recordConnect(now)
-			a.logger.Info("feishu: ws connected",
-				"app_id", cfg.Feishu.AppID,
-				"reconnect_count", a.health.Snapshot().ReconnectCount)
-		}),
-		larkws.WithOnError(func(err error) {
-			if err == nil {
-				return
-			}
-			now := time.Now()
-			a.health.recordError(now, err.Error())
-			a.logger.Warn("feishu: ws error",
-				"app_id", cfg.Feishu.AppID,
-				"err", err.Error())
-		}),
-		larkws.WithOnDisconnected(func() {
-			now := time.Now()
-			a.health.recordDisconnect(now)
-			a.logger.Warn("feishu: ws disconnected",
-				"app_id", cfg.Feishu.AppID)
-			// F-41: start the 30s prober that force-reconnects until
-			// the SDK reports OnReconnected. Started on every
-			// disconnect — the prober is self-stopping on reconnect
-			// and idempotent (Start is a no-op when already running).
-			if a.prober != nil {
-				if a.prober.Start() {
-					a.logger.Info("feishu: reconnect prober started",
-						"app_id", cfg.Feishu.AppID,
-						"interval", defaultProberInterval.String())
-				}
-			}
-		}),
-		larkws.WithOnReconnecting(func() {
-			now := time.Now()
-			a.health.recordReconnecting(now, "")
-			snap := a.health.Snapshot()
-			a.logger.Warn("feishu: ws reconnecting",
-				"app_id", cfg.Feishu.AppID,
-				"reconnect_count", snap.ReconnectCount)
-		}),
-		larkws.WithOnReconnected(func() {
-			now := time.Now()
-			a.health.recordConnect(now)
-			a.logger.Info("feishu: ws reconnected",
-				"app_id", cfg.Feishu.AppID,
-				"reconnect_count", a.health.Snapshot().ReconnectCount)
-			// F-41: stop the prober — the WS is back, no more
-			// forced Stop+Start needed. Safe to call when the prober
-			// isn't running (no-op).
-			if a.prober != nil {
-				a.prober.Stop()
-				a.logger.Info("feishu: reconnect prober stopped",
-					"app_id", cfg.Feishu.AppID,
-					"force_attempts", a.prober.Snapshot().ForceCount)
-			}
-		}),
-	)
+	// F-fix-feishu-reconnect: the *larkws.Client construction lives
+	// in buildWSClient (rebuild.go) so the rebuild path can re-run
+	// it on every terminal-state recovery with the same dialer /
+	// httpClient configuration. NewAdapter constructs the very first
+	// one; rebuildWSClient constructs every subsequent one.
 	a.larkClient = lark.NewClient(cfg.Feishu.AppID, cfg.Feishu.AppSecret)
-	a.wsStart = a.client.Start
-	a.wsClose = a.client.Close
 	a.sendFunc = a.sendViaLark
 	a.updateFunc = a.updateViaLark
 	// F-38 §3.1.3: tool-merge PATCH path. mergeTextFunc defaults
@@ -432,6 +388,16 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 	// struct; the SDK callbacks wired above (WithOnReady / OnError /
 	// OnDisconnected / OnReconnecting / OnReconnected) update it.
 	a.health = &WSHealth{}
+
+	// F-fix-feishu-reconnect: rebuild state. See rebuild.go. Allocates
+	// the per-Adapter atomic counters used by maybeRebuildClient /
+	// recordLastStartErr, surfaced via WSHealthSnapshot.Rebuild.
+	a.rebuild = newRebuildState()
+
+	client := a.buildWSClient(handler)
+	a.client = client
+	a.wsStart = client.Start
+	a.wsClose = client.Close
 
 	// F-41: active reconnect prober. The restarter closure forces
 	// a SDK-level reconnection on every 30s tick while the WS is
@@ -513,6 +479,7 @@ func (a *Adapter) Start(ctx context.Context) error {
 	go func() {
 		defer close(wsDone)
 		if err := start(runCtx); err != nil && !errors.Is(err, context.Canceled) {
+			a.recordLastStartErr(err)
 			log.Printf("Feishu WebSocket stopped: %v", err)
 		}
 	}()
@@ -533,8 +500,16 @@ func (a *Adapter) Start(ctx context.Context) error {
 //
 //  1. Cancel a.cancel — the SDK's Start goroutine returns when
 //     runCtx is cancelled.
-//  2. Wait for a.wsDone — confirms the SDK goroutine exited.
-//  3. Re-create runCtx + a new wsDone and spawn a fresh SDK
+//  2. Wait for a.wsDone — confirms the SDK goroutine exited. By the
+//     time wsDone closes, the wrapper goroutine has already called
+//     a.recordLastStartErr with the run's terminal error (if any).
+//  3. maybeRebuildClient — if the previous run ended in a
+//     *ws.ClientError (the SDK's marker for non-retryable handshake
+//     / endpoint failures; 514 + ExceedConnLimit on the post-macOS-
+//     wake path), the SDK has set its internal `terminal` flag and
+//     a fresh *larkws.Client must be constructed. The existing
+//     *Client would otherwise return errClientTerminal forever.
+//  4. Re-create runCtx + a new wsDone and spawn a fresh SDK
 //     goroutine — same logic as Start but on a fresh context.
 //
 // a.incoming is never closed, so the gateway's pumpInbound keeps
@@ -568,6 +543,18 @@ func (a *Adapter) ReconnectSDK(ctx context.Context) error {
 			return ctx.Err()
 		}
 	}
+	// (3) — see doc above. maybeRebuildClient reads a.lastStartErr
+	// (which the just-exited goroutine populated) and, if the run
+	// ended in a *ws.ClientError, swaps a.client for a fresh
+	// *larkws.Client before we spawn the next Start. Cooldown +
+	// max-consecutive guards (see rebuild.go) prevent an
+	// invalid-credential *ClientError from spinning the rebuild at
+	// the prober's 30s cadence forever.
+	a.maybeRebuildClient()
+	// Re-read client + start — rebuild may have replaced them.
+	a.mu.Lock()
+	client = a.client
+	a.mu.Unlock()
 	// Re-spawn the SDK loop with a fresh context.
 	runCtx, runCancel := context.WithCancel(context.Background())
 	newWsDone := make(chan struct{})
@@ -585,6 +572,7 @@ func (a *Adapter) ReconnectSDK(ctx context.Context) error {
 	go func() {
 		defer close(newWsDone)
 		if err := start(runCtx); err != nil && !errors.Is(err, context.Canceled) {
+			a.recordLastStartErr(err)
 			log.Printf("feishu: reconnectSDK: %v", err)
 		}
 	}()
@@ -3186,6 +3174,10 @@ func (a *Adapter) Health() WSHealthSnapshot {
 	if a.prober != nil {
 		snap.Prober = a.prober.Snapshot()
 	}
+	// F-fix-feishu-reconnect: same pattern for the rebuild counters.
+	// Operationally a non-zero SkippedMaxConsecutive is the loudest
+	// signal that the WS is not coming back without a config fix.
+	snap.Rebuild = a.rebuild.snapshot()
 	return snap
 }
 

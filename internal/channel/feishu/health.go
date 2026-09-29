@@ -139,6 +139,18 @@ func (h *WSHealth) Snapshot() WSHealthSnapshot {
 	return snap
 }
 
+// RebuildSnapshotFromState is the WSHealth.Snapshot -> WSHealthSnapshot
+// wiring for the F-fix-feishu-reconnect rebuild counters. Adapter
+// passes its *rebuildState here so the snapshot path doesn't need to
+// reach back into adapter.go (keeps health.go independent of the
+// adapter struct shape).
+func RebuildSnapshotFromState(state *rebuildState) RebuildSnapshot {
+	if state == nil {
+		return RebuildSnapshot{}
+	}
+	return state.snapshot()
+}
+
 // WSHealthSnapshot is the cross-process wire format — it must be
 // JSON-marshalable so `nightme health` can read it via the daemon's
 // status file (or via a future daemoncontrol "health" command).
@@ -162,6 +174,18 @@ type WSHealthSnapshot struct {
 	// and Active becomes false. Set by adapter.go from a *prober
 	// field; readers should treat this as advisory.
 	Prober ProberSnapshot `json:"prober"`
+
+	// Rebuild is the F-fix-feishu-reconnect WS *Client rebuild state.
+	// Increment-only counters (RebuildCount, ConsecutiveFailures,
+	// SkippedCooldown, SkippedMaxConsecutive) and the last terminal
+	// error string / timestamp let the operator diagnose post-sleep
+	// recovery without grepping the log file. Zero-valued until the
+	// first rebuild fires; a non-zero SkippedMaxConsecutive means the
+	// rebuild path has given up — the WS will not recover until the
+	// daemon restarts (the underlying error is almost always a bad
+	// app_id / app_secret that returns *ws.ClientError on every
+	// dial).
+	Rebuild RebuildSnapshot `json:"rebuild"`
 
 	// F-61: agent process liveness prober (fallback for readpump-
 	// missed bridge deaths). Mirrors Prober's shape but tracks

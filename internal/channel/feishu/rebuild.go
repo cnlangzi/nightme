@@ -203,6 +203,10 @@ func (a *Adapter) maybeRebuildClient() {
 	if t := a.rebuild.lastAt.Load(); t != nil {
 		if time.Since(*t) < sdkRebuildCooldown {
 			a.rebuild.skippedCooldown.Add(1)
+			a.logger.Debug("feishu: rebuild skipped: cooldown",
+				"app_id", a.appID(),
+				"cooldown", sdkRebuildCooldown.String(),
+				"since_last", time.Since(*t).String())
 			return
 		}
 	}
@@ -234,10 +238,7 @@ func (a *Adapter) rebuildWSClient() error {
 		return errors.New("feishu: rebuildWSClient: no current client")
 	}
 
-	newClient, err := a.buildWSClient(cur.EventHandler())
-	if err != nil {
-		return err
-	}
+	newClient := a.buildWSClient(cur.EventHandler())
 
 	a.mu.Lock()
 	a.client = newClient
@@ -280,7 +281,9 @@ func (a *Adapter) appID() string {
 // handler is the SDK's event dispatcher — we accept it as a parameter
 // rather than reading it off Adapter so the rebuild path can pull it
 // from the about-to-be-replaced client via Client.EventHandler().
-func (a *Adapter) buildWSClient(handler *larkdispatcher.EventDispatcher) (*larkws.Client, error) {
+// nil is a valid handler for tests; the SDK accepts nil and just
+// doesn't dispatch any events on the resulting *Client.
+func (a *Adapter) buildWSClient(handler *larkdispatcher.EventDispatcher) *larkws.Client {
 	dialer := &websocket.Dialer{
 		HandshakeTimeout: sdkHandshakeTimeout,
 		NetDialContext: (&net.Dialer{
@@ -359,6 +362,13 @@ func (a *Adapter) buildWSClient(handler *larkdispatcher.EventDispatcher) (*larkw
 			// streak so a one-off *ClientError doesn't permanently
 			// burn the rebuild budget.
 			a.rebuild.consecutiveFails.Store(0)
+			// Clear lastStartErr so a future disconnect (transient
+			// network blip, server-side maintenance) doesn't trigger
+			// a spurious rebuild against the long-since-resolved
+			// terminal error. Without this, maybeRebuildClient
+			// would see the stale *ws.ClientError from yesterday's
+			// wake and tear down a perfectly healthy WS.
+			a.lastStartErr.Store(nil)
 			if a.prober != nil {
 				a.prober.Stop()
 				a.logger.Info("feishu: reconnect prober stopped",
@@ -366,5 +376,5 @@ func (a *Adapter) buildWSClient(handler *larkdispatcher.EventDispatcher) (*larkw
 					"force_attempts", a.prober.Snapshot().ForceCount)
 			}
 		}),
-	), nil
+	)
 }

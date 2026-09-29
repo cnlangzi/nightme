@@ -394,10 +394,7 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 	// recordLastStartErr, surfaced via WSHealthSnapshot.Rebuild.
 	a.rebuild = newRebuildState()
 
-	client, err := a.buildWSClient(handler)
-	if err != nil {
-		return nil, fmt.Errorf("feishu: buildWSClient: %w", err)
-	}
+	client := a.buildWSClient(handler)
 	a.client = client
 	a.wsStart = client.Start
 	a.wsClose = client.Close

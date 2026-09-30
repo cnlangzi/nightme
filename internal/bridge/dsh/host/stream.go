@@ -321,11 +321,11 @@ func (h *StreamHub) Unsubscribe(sessionID string) {
 // sessionOpenPayload returns the `{args:{...}}` payload for the
 // session/follow open frame.
 //
-// dsh 0.1.2-rc.1's session/follow typert expects the args to be
-// wrapped as `{request: SessionFollowRequest}`, not flat. The
-// assertExactArguments gate rejects the flat shape with
-// "missing 'request'; unexpected 'address'". Verified 2026-09-11
-// by direct WS probe against dsh 0.1.2-rc.1.
+// dsh's session/follow typert expects the args wrapped as
+// `{request: SessionFollowRequest}`, not flat. assistantStream
+// opts into process-local presentation frames; durable follow
+// events no longer carry assistant/chunk, and thinking arrives
+// on those frames.
 func sessionOpenPayload(sessionID string) json.RawMessage {
 	return mustJSON(map[string]any{
 		"args": map[string]any{
@@ -334,6 +334,7 @@ func sessionOpenPayload(sessionID string) json.RawMessage {
 					"kind":      "session",
 					"sessionId": sessionID,
 				},
+				"assistantStream": true,
 			},
 		},
 	})
@@ -1107,6 +1108,10 @@ func translateHostEvent(raw json.RawMessage) (method, rpcID string, payload json
 //	  → method = event.type (the top-level per-event discriminator)
 //	  → rpcId = stringified seq
 //	  → payload = event.data with sessionId added
+//	{ type:"assistant-stream", frame:{type:"chunk", chunk} }
+//	  → method = "assistant/chunk"
+//	  → rpcId = "astream-<index>" (not a session seq)
+//	  → payload = {chunk, sessionId}
 //	{ type:"end" } → not handled here (dispatcher handles "end" at the frame level)
 func translateSessionEvent(raw json.RawMessage, sessionID string) (method, rpcID string, payload json.RawMessage) {
 	var frame struct {
@@ -1143,6 +1148,24 @@ func translateSessionEvent(raw json.RawMessage, sessionID string) (method, rpcID
 			return "", "", nil
 		}
 		return ev.Type, fmt.Sprintf("seq-%d", ev.Seq), wrapped
+	case "assistant-stream":
+		var wrap struct {
+			Frame struct {
+				Type  string          `json:"type"`
+				Index int             `json:"index"`
+				Chunk json.RawMessage `json:"chunk"`
+			} `json:"frame"`
+		}
+		if err := json.Unmarshal(raw, &wrap); err != nil || wrap.Frame.Type != "chunk" || len(wrap.Frame.Chunk) == 0 || string(wrap.Frame.Chunk) == "null" {
+			return "", "", nil
+		}
+		body, err := ensureSessionID(mustJSON(map[string]any{
+			"chunk": wrap.Frame.Chunk,
+		}), sessionID)
+		if err != nil {
+			return "", "", nil
+		}
+		return "assistant/chunk", fmt.Sprintf("astream-%d", wrap.Frame.Index), body
 	default:
 		return "", "", nil
 	}

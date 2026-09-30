@@ -691,9 +691,15 @@ func (c *RPCClient) WorkspaceCreate(ctx context.Context, path string) (Workspace
 // (left list, workspace sessionIds) but keeps its log and workspace
 // accounting slot. Idempotent for an already-archived id.
 // session-not-found when the id is neither live nor persisted.
+// stopActivity asks dsh to stop a live turn (and its jobs) before
+// writing the archive set; without it an in-flight turn is
+// rejected as workspace/session-active.
 func (c *RPCClient) WorkspaceArchiveSession(ctx context.Context, sessionID string) error {
 	resp, err := c.Post(ctx, "workspace.archiveSession", map[string]any{
-		"request": map[string]any{"sessionId": sessionID},
+		"request": map[string]any{
+			"sessionId":    sessionID,
+			"stopActivity": true,
+		},
 	})
 	if err != nil {
 		return err
@@ -829,15 +835,16 @@ func (c *RPCClient) SessionCancel(ctx context.Context, sessionID string) error {
 // (dsh-api.md §3.6).
 //
 // commands/execute is a FLAT-ARG method: the typert descriptor
-// names its fields directly under `args` (agentId, line, images),
-// NOT under `args.request`. Post() is now pass-through, so we
-// hand it the bare fields here and Post adds the outer `args`
-// wrapper.
+// names its fields directly under `args` (agentId, line,
+// submittedAttachments), NOT under `args.request`. Post() is
+// pass-through, so we hand it the bare fields here and Post adds
+// the outer `args` wrapper. /permission carries no attachments;
+// the field is still required.
 func (c *RPCClient) CommandsExecute(ctx context.Context, sessionID, line string) error {
 	resp, err := c.Post(ctx, "commands/execute", map[string]any{
-		"agentId": sessionID,
-		"line":    line,
-		"images":  []any{},
+		"agentId":              sessionID,
+		"line":                 line,
+		"submittedAttachments": []any{},
 	})
 	if err != nil {
 		return err

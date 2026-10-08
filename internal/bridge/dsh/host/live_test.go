@@ -178,7 +178,7 @@ func TestLiveDshWireFormat(t *testing.T) {
 				t.Errorf("preset=%q: empty sessionId", label)
 			}
 			if _, err := rpc("workspace/archiveSession", map[string]any{
-				"request": map[string]any{"sessionId": sid},
+				"request": map[string]any{"sessionId": sid, "stopActivity": true},
 			}); err != nil {
 				t.Errorf("archive %s: %v", sid, err)
 			}
@@ -200,15 +200,15 @@ func TestLiveDshWireFormat(t *testing.T) {
 		defer func() {
 			if sid != "" {
 				_, _ = rpc("workspace/archiveSession", map[string]any{
-					"request": map[string]any{"sessionId": sid},
+					"request": map[string]any{"sessionId": sid, "stopActivity": true},
 				})
 			}
 		}()
 
 		val, err := rpc("commands/execute", map[string]any{
-			"agentId": sid,
-			"line":    "/permission danger-full-access",
-			"images":  []any{},
+			"agentId":              sid,
+			"line":                 "/permission danger-full-access",
+			"submittedAttachments": []any{},
 		})
 		if err != nil {
 			t.Fatalf("commands/execute: %v", err)
@@ -239,14 +239,14 @@ func TestLiveDshWireFormat(t *testing.T) {
 		defer func() {
 			if sid != "" {
 				_, _ = rpc("workspace/archiveSession", map[string]any{
-					"request": map[string]any{"sessionId": sid},
+					"request": map[string]any{"sessionId": sid, "stopActivity": true},
 				})
 			}
 		}()
 		val, err := rpc("commands/execute", map[string]any{
-			"agentId": sid,
-			"line":    "/permission danger-full-access",
-			"images":  []any{},
+			"agentId":              sid,
+			"line":                 "/permission danger-full-access",
+			"submittedAttachments": []any{},
 		})
 		if err != nil {
 			t.Fatalf("commands/execute: %v", err)

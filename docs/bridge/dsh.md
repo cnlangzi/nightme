@@ -1,7 +1,7 @@
 # dsh — DeepSeek Harness Bridge (shared-host only)
 
 > **Status**: 统一架构 — `Start` 与 `RunOnce` / `Review` 都走 `dsh --profile web` shared host;`dsh --profile headless` 路径已废弃。
-> **Wire 协议参考**: dsh 0.1.2-rc.1 本机已装 — 实机抓包 + 仓内 `@deepseek-ai/dsh-api-gateway` / `@deepseek-ai/dsh-api-session-controller` 源码双验。
+> **Wire 协议参考**: dsh 0.2.0-rc.2 本机已装 — 实机抓包 + 仓内 `@deepseek-ai/dsh-api-gateway` / `@deepseek-ai/dsh-api-session-controller` 源码双验;`0.1.2-rc.1` … `0.2.0-rc.2` 全线 wire 字节一致,见 §0.1。
 > **共享 host 设计 + 实现**: 1:N multiplexing、全局 watchdog + restart recovery;`workspace.archiveSession` 行为(repo-scoped workspace 跨 session 持久)。
 > **Scope**: `internal/bridge/dsh/`
 > **形态**: 一桥一端 — 全部走 shared-host web
@@ -21,21 +21,23 @@
 
 bridge 跟 dsh 用同一个 wire — `POST /api/<ns>/<method>` typed RPC + `WS /api/remote.mux` multiplex stream。bridge 是 consumer,不写 host side,所以**只要 dsh 的 wire 没动,bridge 就不用动**。
 
-### 0.1 兼容性矩阵(2026-09-13 实测)
+### 0.1 兼容性矩阵(2026-10-08 实测)
 
 矩阵从 "rc 之间 break change" 的悲观假设改成 "源码对比 + 实机 attach" 的实测结果:
 
 | dsh 版本 | bridge 状态 | 验证手段 | 失败模式 |
 |---|---|---|---|
-| **`0.1.2-rc.1`** | ✅ 支持(目标版本) | 实机抓包 + `dsh-client-connection/lib/browser-auth.js` 源码 | — |
-| `0.1.3-alpha.1` / `0.1.3-alpha.2` / `0.1.5-alpha.1` / `0.1.5-alpha.2` / **`0.1.5-rc.1`** | ✅ 兼容 — wire 没动 | `gh api repos/deepseek-ai/deepseek-harness/compare/dsh-v0.1.2-rc.1...dsh-v0.1.5-rc.1` 显示 0 个 `packages/` 改动;`packages/api/gateway/src/stream-protocol.ts` + `packages/client/connection/src/rpc.ts` 在两个 tag 字节一致 | — |
-| `0.1.5-rc.2`(2026-09-10 后) | ⚠️ 未测 — 暂列为兼容 | 待 `compare` 确认 | — |
+| **`0.2.0-rc.2`** | ✅ 支持(目标版本) | 实机抓包(2026-10-08)+ `dsh-host-webserver/lib/index.js` + `dsh-client-connection/lib/index.js` + `dsh-api-session-controller/lib/index.js` + `dsh-api-gateway/lib/index.js` 字节比对 | — |
+| `0.1.7-rc.1` / `0.1.7-rc.2` / `0.2.0-rc.1` | ✅ 兼容 — wire 字节相同 | 全部 4 个 bridge-relevant 包在 `dsh-v0.1.7-rc.1` → `dsh-v0.2.0-rc.2` 之间字节一致;`dsh-api-gateway` 加了一个非 wire 的 `hasLiveClient()` 探测方法 + `dsh-api-workspace-controller` 给 macOS `osascript` 调用加了 `"hidden"` 参数,都不影响 RPC 表面 | — |
+| `0.1.5-rc.1` | ✅ 兼容 — wire 没动 | `compare/dsh-v0.1.2-rc.1...dsh-v0.1.5-rc.1` 显示 0 个 `packages/` 改动;`packages/api/gateway/src/stream-protocol.ts` + `packages/client/connection/src/rpc.ts` 在两个 tag 字节一致 | — |
+| `0.1.3-alpha.1` / `0.1.3-alpha.2` / `0.1.5-alpha.1` / `0.1.5-alpha.2` / `0.1.5-rc.2` | ✅ 兼容 — wire 没动 | 跨 0.1.3 / 0.1.5 alpha 链全部 doc-only release,`packages/api/` `packages/client/` 字节不变 | — |
+| `0.1.2-rc.1` | ✅ 支持(原目标版本) | 实机抓包 + `dsh-client-connection/lib/browser-auth.js` 源码 | — |
 | `0.1.2-rc.2`(若日后发布) | ❌ 不支持 | 见下 | 字段可能改名;`session/follow` 形状可能变 |
 | `0.1.1-rc.2` 及更早 | ❌ 不支持 | — | launch token 在 `/` 上有效,但 cookie 没签,bridge `mintAuthCookie` 路径不通 |
 | `0.1.0-rc.6` 及更早 | ❌ 不支持 | — | WS 走两个旧端点(`/api/events.mux` + `/api/events.host`),bridge 读 `/api/remote.mux` 直接 404 |
 | `nightly` / `latest` track | ❌ 不支持 | bridge 不做版本探测 | — |
 
-**关键事实(2026-09-13 修正)**: `0.1.5-rc.1` 和 `0.1.2-rc.1` 之间跨了 `0.1.3-alpha.x` 和 `0.1.5-alpha.x` 五个 release tag,**1486 个 commit 全部在 `.agents/notes/` 内部 agent notes 文档里**;`packages/api/`、`packages/client/`、`packages/web/`、`apps/cli/` 没有任何字节改动。旧假设 "rc 之间有 break change" 是过度警告,真实情况是 dsh 团队只在内部 notes 里记录决策,wire 等公开 contract 跨多个 rc 保持稳定。
+**关键事实**: `0.1.2-rc.1` → `0.2.0-rc.2` 跨 11 个 release tag(覆盖 `0.1.3-` / `0.1.5-` / `0.1.6-` / `0.1.7-` 共 5 个 alpha 链 + 4 个 rc),bridge 相关的 4 个包(`dsh-host-webserver` / `dsh-client-connection` / `dsh-api-session-controller` / `dsh-typert-registry` / `dsh-http-proxy`)在 `dsh-v0.1.7-rc.1` 之后字节相同;`dsh-api-gateway` 和 `dsh-api-workspace-controller` 有微小改动但不影响 RPC 表面(新增的 `hasLiveClient()` 探测和 macOS `osascript` `"hidden"` 参数都是本地化增强)。旧假设 "rc 之间有 break change" 是过度警告,真实情况是 dsh 团队只在内部 notes 里记录决策,wire 等公开 contract 跨多个 rc 保持稳定。
 
 ### 0.2 attach 路径 + runtime 多版本
 
@@ -301,9 +303,9 @@ Cookie: dsh-auth-<hash>=<signed>
 | `session/follow` (stream) | `{request: {address: {kind:"session", sessionId}, maxMessages?}}` | 见 §3.5 |
 | `session/control` (stream) | `(无参)` | baseline + `projection` / `queue` / `jobs` 替换帧;`modelSelection` projection 是 per-session 当前 model 的权威源,见 §3.4a |
 | `workspace/create` | `{request: {path}}` | path 必须绝对;`created:bool` 指示是否新建 |
-| `workspace/archiveSession` | `{request: {sessionId}}` | 隐藏 session row(workspace 保留) |
+| `workspace/archiveSession` | `{request: {sessionId, stopActivity:true}}` | 隐藏 session row(workspace 保留);`stopActivity` 在 archive 前停止 in-flight turn |
 | `workspace/list` | `(无参)` | 列 workspace 视图 |
-| `commands/execute` | `{agentId, line, images?}` | **flat-arg**,不走 `request` wrapper(typert 直接接 args) |
+| `commands/execute` | `{agentId, line, submittedAttachments?}` | **flat-arg**,不走 `request` wrapper(typert 直接接 args) |
 | `settings/describe` | `(无参)` | 读 settings 树 |
 | `credentials/describe` | `(无参)` | 列 credential refs |
 | `$events/result` | `{clientId, eventId, outcome:{kind, value?\|error?}}` | waterfall(approval / question)应答回环,**不是** `/api/respond`;`exactKeys(['clientId','eventId','outcome'])` 强校验;见 §3.7 |

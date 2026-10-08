@@ -79,7 +79,7 @@ the way.
 | **Claude Code** | Available |
 | **Codex** | Available |
 | **Pi** | Available |
-| **DSH** (DeepSeek Harness) | Available — requires **`dsh@0.1.2-rc.1`**; other versions are unsupported (different wire protocol) |
+| **DSH** (DeepSeek Harness) | Available — requires **`dsh@0.2.0-rc.2`**, `dsh@0.1.2-rc.1` … `dsh@0.2.0-rc.2` all verified wire-compatible (see [docs/bridge/dsh.md §0.1](./docs/bridge/dsh.md#0-dsh-版本约束)) |
 | **Cursor** | Available |
 | **OpenCode** | Available |
 | **GitHub Copilot CLI** | Available |
@@ -99,7 +99,7 @@ the way.
   [Linux: tray-less by default](#linux-tray-less-by-default) if you want the
   system-tray icon.
 - **A chat channel** — see [Chat Channels](#chat-channels) for what's supported today. `nightme login feishu` registers via QR scan; `nightme login telegram` walks through the BotFather token setup.
-- **At least one local AI Coding Agent** — Claude Code, Pi, OpenCode, Codex, DSH (DeepSeek Harness), or GitHub Copilot CLI. Install the CLI and have it on your `$PATH`; NightMe spawns it as a subprocess. **DSH must be `dsh@0.1.2-rc.1`**; install with `npm i -g @deepseek-ai/dsh@0.1.2-rc.1` and verify with `dsh --version`.
+- **At least one local AI Coding Agent** — Claude Code, Pi, OpenCode, Codex, DSH (DeepSeek Harness), or GitHub Copilot CLI. Install the CLI and have it on your `$PATH`; NightMe spawns it as a subprocess. **DSH** — install with `npm i -g @deepseek-ai/dsh@0.2.0-rc.2` and verify with `dsh --version`. Versions `0.1.2-rc.1` … `0.2.0-rc.2` are wire-compatible; see [docs/bridge/dsh.md §0.1](./docs/bridge/dsh.md#0-dsh-版本约束).
 
   If none is on `$PATH`, NightMe's first run detects the gap and prompts you to enter the absolute path to whichever binary you have installed (e.g. `/Users/me/.local/bin/claude`). The path is saved in `~/.nightme/config.yaml` and applied on every subsequent run — no shell re-login required. In a non-interactive session (CI, supervisor, container) NightMe exits non-zero instead of prompting; configure the path before launching, or run `nightme config` interactively.
 

@@ -9,6 +9,8 @@ package dsh
 import (
 	"testing"
 	"time"
+
+	"github.com/cnlangzi/nightme/internal/agent"
 )
 
 // TestHandleMuxFrame_LegacyApprovalRequested_LogsAndDrops asserts
@@ -93,4 +95,48 @@ func TestHandleMuxFrame_LegacyQuestionRequested_LogsAndDrops(t *testing.T) {
 		"cursor": int64(0),
 	}))
 	d.handleMuxFrame("session/snapshot", "rpc-1", snapshot)
+}
+
+// TestHandleMuxFrame_AssistantStreamSkipsSeqWatermark locks the
+// presentation-frame path: chunks are not durable session seqs, so
+// a high lastSeq must not drop them and must not move.
+func TestHandleMuxFrame_AssistantStreamSkipsSeqWatermark(t *testing.T) {
+	mock := newRespondMock(t)
+	cli := mock.installGlobal(t)
+	d := newTestDriver(cli, "/tmp/astream")
+	d.sessionID = "session-astream"
+	d.lastSeq = 40
+	t.Cleanup(func() { close(d.closed) })
+
+	chunk := func(index int, text string) []byte {
+		return []byte(mustJSON(t, map[string]any{
+			"sessionId": d.sessionID,
+			"chunk": map[string]any{
+				"type":  "block-end",
+				"index": index,
+				"block": map[string]any{"type": "reasoning", "text": text},
+			},
+		}))
+	}
+	d.handleMuxFrame("assistant/chunk", "astream-0", chunk(0, "first"))
+	d.handleMuxFrame("assistant/chunk", "astream-1", chunk(1, "second"))
+
+	if d.lastSeq != 40 {
+		t.Fatalf("lastSeq = %d, want 40", d.lastSeq)
+	}
+	var got []string
+	deadline := time.After(time.Second)
+	for len(got) < 2 {
+		select {
+		case ev := <-d.events:
+			if ev.Kind == agent.EventAgentThinking {
+				got = append(got, ev.Text)
+			}
+		case <-deadline:
+			t.Fatalf("thinking events = %v, want [first second]", got)
+		}
+	}
+	if got[0] != "first" || got[1] != "second" {
+		t.Fatalf("thinking = %v", got)
+	}
 }

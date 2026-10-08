@@ -71,10 +71,16 @@ var ErrResumeUnhealthy = errors.New("dsh: resume session unhealthy")
 // / session.create in handshakeSession. Each RPC derives its own
 // timeout from this value independently.
 //
+// dsh 0.2.0-rc.2's wider plugin graph (278 packages vs 0.1.7-rc.2's
+// 278 but with deeper typert binding) can take 10–20s on first
+// workspace.create while controller warm-up completes. The 15s cap
+// that worked on 0.1.7 is too tight; 30s covers the warm path
+// without letting a hung host block /resume indefinitely.
+//
 // Exposed as a var (not const) so tests can override it via
 // `defer func(orig) { handshakeTimeout = orig }(handshakeTimeout)` —
 // see TestHandshakeSession_IndependentTimeouts for the pattern.
-var handshakeTimeout = 15 * time.Second
+var handshakeTimeout = 30 * time.Second
 
 // baselineWaitTimeout bounds how long Reset waits for the
 // session/control projection store to publish the new sessionId's

@@ -126,8 +126,14 @@ const (
 // loading — without this probe, the first workspace.create
 // after spawn returns "active Service workspaceController is
 // unavailable" and the user sees a startup-race error.
+//
+// dsh 0.2.0-rc.2 ships 278 dsh-* plugins; first-time load grew
+// from ~3s on 0.1.7-rc.2 to ~10s on 0.2.0-rc.2, exhausting the
+// 15s budget before workspaceController bound. 60s leaves the
+// 5×(0+1+2+4+8=15s) inter-attempt backoff intact and gives the
+// remaining 45s to a single probe call's controller init wait.
 const (
-	dshReadyTimeout  = 15 * time.Second
+	dshReadyTimeout  = 60 * time.Second
 	dshReadyAttempts = 5
 )
 

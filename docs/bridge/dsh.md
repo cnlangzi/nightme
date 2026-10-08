@@ -301,9 +301,9 @@ Cookie: dsh-auth-<hash>=<signed>
 | `session/follow` (stream) | `{request: {address: {kind:"session", sessionId}, maxMessages?}}` | 见 §3.5 |
 | `session/control` (stream) | `(无参)` | baseline + `projection` / `queue` / `jobs` 替换帧;`modelSelection` projection 是 per-session 当前 model 的权威源,见 §3.4a |
 | `workspace/create` | `{request: {path}}` | path 必须绝对;`created:bool` 指示是否新建 |
-| `workspace/archiveSession` | `{request: {sessionId}}` | 隐藏 session row(workspace 保留) |
+| `workspace/archiveSession` | `{request: {sessionId, stopActivity:true}}` | 隐藏 session row(workspace 保留);`stopActivity` 在 archive 前停止 in-flight turn |
 | `workspace/list` | `(无参)` | 列 workspace 视图 |
-| `commands/execute` | `{agentId, line, images?}` | **flat-arg**,不走 `request` wrapper(typert 直接接 args) |
+| `commands/execute` | `{agentId, line, submittedAttachments?}` | **flat-arg**,不走 `request` wrapper(typert 直接接 args) |
 | `settings/describe` | `(无参)` | 读 settings 树 |
 | `credentials/describe` | `(无参)` | 列 credential refs |
 | `$events/result` | `{clientId, eventId, outcome:{kind, value?\|error?}}` | waterfall(approval / question)应答回环,**不是** `/api/respond`;`exactKeys(['clientId','eventId','outcome'])` 强校验;见 §3.7 |

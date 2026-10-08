@@ -648,7 +648,7 @@ Same DOM-style ordering within the workspace's manual order. Unknown workspace â
 #### 2.4.7 `workspace.archiveSession`
 
 ```ts
-archiveSession(request: RpcRequest<{ sessionId: SessionId }>): Promise<RpcResponse<{ archivedSessionIds: SessionId[] }>>;
+archiveSession(request: RpcRequest<{ sessionId: SessionId, stopActivity: true }>): Promise<RpcResponse<{ archivedSessionIds: SessionId[] }>>;
 ```
 
 Adds one session to the registry-global archive set. Disappears from every grouping surface but keeps its session log and its workspace accounting slot. Idempotent for already-archived id. Session neither live nor in session persistence â†’ `session-not-found`.

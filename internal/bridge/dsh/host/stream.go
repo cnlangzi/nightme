@@ -324,8 +324,8 @@ func (h *StreamHub) Unsubscribe(sessionID string) {
 // dsh's session/follow typert expects the args wrapped as
 // `{request: SessionFollowRequest}`, not flat. assistantStream
 // opts into process-local presentation frames; durable follow
-// events no longer carry assistant/chunk, and thinking arrives
-// on those frames.
+// events omit assistant/chunk, and thinking arrives on those
+// frames.
 func sessionOpenPayload(sessionID string) json.RawMessage {
 	return mustJSON(map[string]any{
 		"args": map[string]any{
@@ -1108,7 +1108,7 @@ func translateHostEvent(raw json.RawMessage) (method, rpcID string, payload json
 //	  → method = event.type (the top-level per-event discriminator)
 //	  → rpcId = stringified seq
 //	  → payload = event.data with sessionId added
-//	{ type:"assistant-stream", frame:{type:"chunk", chunk} }
+//	{ type:"assistant-stream", frame:{type:"chunk", index, chunk} }
 //	  → method = "assistant/chunk"
 //	  → rpcId = "astream-<index>" (not a session seq)
 //	  → payload = {chunk, sessionId}

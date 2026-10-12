@@ -38,12 +38,13 @@ const (
 	eventBufferSize = 40960
 	// initializeTimeout bounds the ACP initialize RPC. This covers
 	// process spawn + server boot + the protocol-version handshake.
-	// 10s matches pi/codex handshakeTimeout: heavy ACP servers
+	// 60s matches newSessionTimeout: heavy ACP servers
 	// (cursor-agent Node boot, opencode) routinely exceed a couple
-	// of seconds on cold start or low-spec machines. If it still
-	// hasn't replied by then, the bridge is dead or the PTY is
-	// broken.
-	initializeTimeout = 10 * time.Second
+	// of seconds on cold start or low-spec machines, and cursor
+	// specifically can take 20–30s on first cold start in some
+	// environments. If it still hasn't replied by 60s, the bridge
+	// is dead or the PTY is broken.
+	initializeTimeout = 60 * time.Second
 	// newSessionTimeout bounds the ACP session/new RPC. This is where
 	// the ACP server does the real work. For opencode specifically,
 	// `opencode acp` boots its own internal HTTP backend and then
@@ -529,10 +530,11 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 //
 // Timeout policy (split by phase):
 //
-//   - initialize:     initializeTimeout (10s). Covers spawn +
-//     server boot + protocol-version handshake. 3s was too tight
-//     for cursor-agent cold start and low-spec machines; failing
-//     here still means the bridge is dead or the PTY is broken.
+//   - initialize:     initializeTimeout (60s). Covers spawn +
+//     server boot + protocol-version handshake. 3s, then 10s, were
+//     both too tight for cursor-agent cold start on low-spec
+//     machines; failing here still means the bridge is dead or the
+//     PTY is broken.
 //   - session/new:    newSessionTimeout (45s). Generous — this is
 //     where the ACP server does the expensive work. For opencode
 //     `opencode acp` this includes booting an internal HTTP backend

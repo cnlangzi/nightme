@@ -437,7 +437,7 @@ func (h *SharedHost) effectiveTestHooks() testHooks {
 // mintDSHAuthCookieFromCredentials), and any dsh that loaded the
 // same ~/.dsh/ directory will accept it.
 func tryAttachExistingDSH(ctx context.Context, logger *slog.Logger, opts SharedHostOptions) (*Client, int, bool) {
-	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	probeCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
 	// nightme dsh service is pinned to 3080 — no port fallback.

@@ -117,8 +117,10 @@ while IFS= read -r line; do
     *'"type":"get_state"'*)
       if [ "${MOCK_PI_SILENT:-0}" = "1" ]; then
         : # intentionally no response; sleep so the bridge
-          # sees a real timeout, not an immediate EOF.
-        sleep 30
+          # sees a real timeout, not an immediate EOF. Must
+          # exceed bridge handshakeTimeout (60s) so the test
+          # exercises the deadline path, not an early EOF.
+        sleep 90
         exit 0
       fi
       reply_get_state
@@ -135,7 +137,7 @@ while IFS= read -r line; do
       # orphan lingers between test runs.
       if [ "${MOCK_PI_SILENT:-0}" = "1" ]; then
         : # same trick -- never respond to prompts either.
-        sleep 30
+        sleep 90
         exit 0
       fi
       if [ "${MOCK_PI_PROMPT_HANG:-0}" = "1" ]; then

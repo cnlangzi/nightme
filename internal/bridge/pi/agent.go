@@ -79,8 +79,10 @@ var headlessEnv = []string{
 
 // handshakeTimeout bounds the initial get_state round-trip. Pi
 // is expected to answer within a couple of seconds even on cold
-// start; 10 s matches the acp bridge's startup deadline.
-const handshakeTimeout = 10 * time.Second
+// start; 60 s aligns with the acp bridge's initialize budget so
+// real-pi cold starts (which can take 20–30 s on first run / low-spec
+// machines) don't get killed before the runtime settles.
+const handshakeTimeout = 60 * time.Second
 
 // promptTimeout bounds a single SendBlocks turn.
 //

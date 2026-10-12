@@ -48,7 +48,7 @@ import (
 )
 
 const (
-	wsHandshakeTimeout = 10 * time.Second
+	wsHandshakeTimeout = 60 * time.Second
 	wsFrameReadLimit   = 10 * 1024 * 1024
 
 	// wsReadDeadline bounds how long a single frame can sit in the

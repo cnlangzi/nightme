@@ -41,9 +41,10 @@ import (
 // ─── constants & exported vars ───
 
 // handshakeTimeout bounds the initialize round-trip. Codex is expected
-// to answer within a couple of seconds even on cold start; 10s matches
-// the acp and pi bridges and gives plenty of room for cold model load.
-const handshakeTimeout = 10 * time.Second
+// to answer within a couple of seconds even on cold start; 60s matches
+// the acp and pi bridges and gives plenty of room for cold model load
+// on slow / first-run machines (real runs have taken >20s).
+const handshakeTimeout = 60 * time.Second
 
 // closeDrainTimeout bounds the time Close() will wait for the lifecycle
 // goroutine to reap the child and close the events channel. Beyond this

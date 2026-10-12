@@ -7,9 +7,57 @@ import (
 	"errors"
 	"os/exec"
 	"reflect"
+	"syscall"
 	"testing"
 	"time"
 )
+
+// isShellTrapRace returns true when err is the known /bin/sh
+// startup race: the shell was killed by SIGTERM before its
+// `trap 'exit 0' TERM` handler was armed. We only ever see this
+// on the synthetic /bin/sh scripts in this package — production
+// children are bound to this race via trap-arm latency, not via
+// process-killed default-action. The retry path is gated
+// entirely on this specific signal; any other error fails fast.
+func isShellTrapRace(err error) bool {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return false
+	}
+	ws, ok := exitErr.ProcessState.Sys().(syscall.WaitStatus)
+	if !ok || !ws.Signaled() {
+		return false
+	}
+	return ws.Signal() == syscall.SIGTERM
+}
+
+// runFlakyGuard is the package-level single retry layer for
+// tests that race against /bin/sh's trap-installation latency.
+// It runs body once; if body returns an error that
+// isShellTrapRace identifies as the sh-startup race, body is
+// run once more before failing. Any other error (including a
+// second-iteration failure) fails the test fast — the policy
+// is "retry once on the documented race", not a tight loop.
+//
+// Tests in this package that exercise the synthetic /bin/sh
+// scripts call runFlakyGuard so the retry-once rule lives in
+// exactly one place rather than being threaded through every
+// caller. body must establish a fresh child for each
+// invocation (a fresh ctx, a fresh exec.Cmd) — the second call
+// is otherwise a rerun against torn-down state.
+func runFlakyGuard(t *testing.T, body func(*testing.T) error) {
+	t.Helper()
+	err := body(t)
+	if err == nil {
+		return
+	}
+	if !isShellTrapRace(err) {
+		t.Fatalf("Run() = %v, want nil (trap cleaned up before grace expired)", err)
+	}
+	if err := body(t); err != nil {
+		t.Fatalf("retry after sh-trap race: %v", err)
+	}
+}
 
 // TestNew_SetsSysProcAttrSetsid pins the platform-specific
 // SysProcAttr wiring so a future regression that drops the
@@ -295,29 +343,31 @@ func TestNewGrace_SetsCancel(t *testing.T) {
 // child traps SIGTERM, exits 0. Run() must return nil (not
 // wrapped with ctx.Err()). Total wall-time well under grace.
 //
-// Sleep before cancel is generous (200 ms) so sh has time to
-// parse the script and arm the trap; on busy CI the 50 ms
-// version occasionally lost the race against sh's startup,
-// causing the child to exit via signal-killed (signal:
-// terminated) rather than via the trap (exit 0). The trap
-// behaviour itself is what we're testing, so we'd rather
-// retry internally than gate the assertion on a flaky race.
+// The 200 ms warm-up plus runFlakyGuard's one-shot retry cover
+// the sh-startup race: occasionally /bin/sh has not yet armed
+// its `trap 'exit 0' TERM` handler by the time the test sends
+// SIGTERM, and Wait reports the resulting default-action kill
+// as `signal: terminated`. The retry sees a fresh child and
+// lets the new shell reach the trap line before the next
+// signal arrives.
 func TestNewGrace_CleanExit_OnSIGTERM(t *testing.T) {
-	ctx, cancel := context.WithCancel(t.Context())
-	cmd := New(ctx, "/bin/sh", "-c", "trap 'exit 0' TERM; sleep 600")
-	done := make(chan error, 1)
-	go func() { done <- cmd.Run() }()
-	// Generous warm-up so sh's trap is armed before we signal.
-	time.Sleep(200 * time.Millisecond)
-	cancel()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("Run() = %v, want nil (trap cleaned up before grace expired)", err)
+	runFlakyGuard(t, func(t *testing.T) error {
+		ctx, cancel := context.WithCancel(t.Context())
+		cmd := New(ctx, "/bin/sh", "-c", "trap 'exit 0' TERM; sleep 600")
+		done := make(chan error, 1)
+		go func() { done <- cmd.Run() }()
+		// Warm-up so sh's trap is armed before we signal; this
+		// is the race window runFlakyGuard retries past.
+		time.Sleep(200 * time.Millisecond)
+		cancel()
+		select {
+		case err := <-done:
+			return err
+		case <-time.After(2 * time.Second):
+			t.Fatal("Run() didn't return within 2s of cancel")
+			return nil
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("Run() didn't return within 2s of cancel")
-	}
+	})
 }
 
 // TestNewGrace_SIGKILL_AfterGrace verifies the fallback path:
@@ -357,31 +407,45 @@ func TestNewGrace_SIGKILL_AfterGrace(t *testing.T) {
 // only if it has to die via SIGKILL after grace; if it sees
 // SIGTERM it exits before the `&&` runs.
 //
-// Warm-up sleep is 200 ms (same justification as CleanExit).
+// Uses runFlakyGuard like TestNewGrace_CleanExit_OnSIGTERM for
+// the same sh-trap-install race. The ProcessGroup test widens
+// the race window further: the shell must parse, install a
+// trap, fork a (sleep 600 &) grandchild, and reach `wait`
+// before SIGTERM arrives — any pause in that path before the
+// trap is registered trips the same flake.
 func TestNewGrace_ProcessGroup_BroadcastsToChildren(t *testing.T) {
-	sentinel := t.TempDir() + "/grandchild-was-orphaned"
+	runFlakyGuard(t, func(t *testing.T) error {
+		sentinel := t.TempDir() + "/grandchild-was-orphaned"
 
-	ctx, cancel := context.WithCancel(t.Context())
-	cmd := New(ctx, "/bin/sh", "-c",
-		`trap 'exit 0' TERM
+		ctx, cancel := context.WithCancel(t.Context())
+		cmd := New(ctx, "/bin/sh", "-c",
+			`trap 'exit 0' TERM
 (sleep 600 && touch '`+sentinel+`') &
 wait`,
-	)
-	done := make(chan error, 1)
-	go func() { done <- cmd.Run() }()
-	time.Sleep(200 * time.Millisecond)
-	cancel()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("Run() = %v, want nil", err)
+		)
+		done := make(chan error, 1)
+		go func() { done <- cmd.Run() }()
+		time.Sleep(200 * time.Millisecond)
+		cancel()
+		select {
+		case err := <-done:
+			if err == nil {
+				// Run() == nil means the trap fired and the
+				// shell exited 0 — the grandchild's SIGTERM
+				// propagation is observable via the sentinel
+				// NOT being created. Surface that as a
+				// failure of the assertion, not as a flake.
+				if err := exec.Command("test", "-e", sentinel).Run(); err == nil {
+					t.Fatalf("grandchild created %q — process-group SIGTERM did NOT broadcast; orphan survived", sentinel)
+				}
+				return nil
+			}
+			return err
+		case <-time.After(2 * time.Second):
+			t.Fatal("Run() didn't return within 2s of cancel")
+			return nil
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("Run() didn't return within 2s of cancel")
-	}
-	if err := exec.Command("test", "-e", sentinel).Run(); err == nil {
-		t.Fatalf("grandchild created %q — process-group SIGTERM did NOT broadcast; orphan survived", sentinel)
-	}
+	})
 }
 
 // TestNewGrace_PreCancel_NoPanic covers the edge case where ctx

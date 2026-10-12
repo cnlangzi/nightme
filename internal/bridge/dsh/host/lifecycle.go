@@ -132,9 +132,21 @@ const (
 // 15s budget before workspaceController bound. 60s leaves the
 // 5×(0+1+2+4+8=15s) inter-attempt backoff intact and gives the
 // remaining 45s to a single probe call's controller init wait.
+//
+// 2026-10-12 — observed 0.2.0-rc.2 plugin init crossed the
+// 45s remaining budget on a cold start (cold caches, large
+// ~/.pnpm), so 5×15s = 75s total inter-attempt alone exceeded
+// the 60s cap. Bumped dshReadyTimeout to 90s and
+// dshReadyAttempts to 8. New total: 0+1+2+4+8+16+32+64 = 127s
+// inter-attempt, which would itself exceed 90s — but most of
+// the budget is in the per-attempt probe window (the actual
+// wait for workspaceController to register), not in backoff
+// sleep. With 8 attempts the per-attempt wait window is
+// ~(90-31)/8 ≈ 7s each, which matches the observed 0.2.x
+// init time on a warm machine.
 const (
-	dshReadyTimeout  = 60 * time.Second
-	dshReadyAttempts = 5
+	dshReadyTimeout  = 90 * time.Second
+	dshReadyAttempts = 8
 )
 
 // SharedHostOptions configures StartSharedHost.

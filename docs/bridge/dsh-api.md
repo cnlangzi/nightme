@@ -1333,7 +1333,7 @@ The regex (`session.go:97`):
 var dshURLPattern = regexp.MustCompile(`dsh web:\s+http://([^:\s]+):(\d+)`)
 ```
 
-`parseWebURL` reads stdout line-by-line in a goroutine + channel pattern (not `bufio.Scanner`) so ctx cancellation can fire mid-read. Bound by `webURLParseTimeout = 10 s`; cold start is ~1.5 s in practice.
+`parseWebURL` reads stdout line-by-line in a goroutine + channel pattern (not `bufio.Scanner`) so ctx cancellation can fire mid-read. Bound by `webURLParseTimeout = 90 s`; the URL line is printed after plugin init, ~1 s after bind on a hot cache and ~14 s on a cold one.
 
 ### 7.3 Handshake
 
@@ -1428,7 +1428,7 @@ When `cmd.Wait()` returns:
 | WS per-frame read limit | 10 MiB | `ws.go` `wsFrameReadLimit` |
 | HTTP client timeout (default) | 30 s | `httpClientTimeout` |
 | Handshake per-call timeout | 15 s | `handshakeTimeout` |
-| Web URL parse timeout | 10 s | `webURLParseTimeout` |
+| Web URL parse timeout | 90 s | `webURLParseTimeout` |
 | Permission timeout | 5 min | `permissionTimeout` |
 | Cancel RPC timeout | 3 s | `session.go:Close` |
 | Lifecycle SIGINT grace | 5 s | `session.go:Close` |

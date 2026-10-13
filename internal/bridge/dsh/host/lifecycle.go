@@ -74,14 +74,16 @@ import (
 
 // listenTimeout bounds waitForListen. dsh --profile web imports
 // its plugin graph before bind and stays silent until the server
-// accepts TCP. A cold import of that graph takes longer than the
-// token-exchange budget below.
-const listenTimeout = 2 * time.Minute
+// accepts TCP. A cold import of that graph on a spinning disk
+// has been measured at ~140s before the port binds.
+const listenTimeout = 5 * time.Minute
 
 // webURLParseTimeout bounds the launch-token wait and the
 // token-exchange HTTP client. Those run only after the port is
-// accepting connections.
-const webURLParseTimeout = 30 * time.Second
+// accepting connections, but dsh prints the launch URL only once
+// its plugins finish loading, which trails the bind by ~14s on a
+// cold cache and longer under I/O pressure.
+const webURLParseTimeout = 90 * time.Second
 
 // stderrCaptureCap bounds the ring of recent stderr lines the
 // parseWebURL failure path attaches to its error chain. 64 lines
@@ -116,25 +118,16 @@ const (
 )
 
 // dshReadyTimeout / dshReadyAttempts bound the post-cookie
-// readiness probe in spawnAndWire. The probe is per-call
-// (workspace.list) so per-attempt wall time is small; the
-// timeout is the cap. With respawnDelay backoff (0, 1s, 2s, ...)
-// 5 attempts sums to ~3s plus per-attempt RPC time — well
-// within a 15s budget on a healthy machine. Tuned in 2026-09
-// after observing the workspaceController startup race where
-// dsh's HTTP server is up but the plugin registry is still
-// loading — without this probe, the first workspace.create
-// after spawn returns "active Service workspaceController is
-// unavailable" and the user sees a startup-race error.
-//
-// dsh 0.2.0-rc.2 ships 278 dsh-* plugins; first-time load grew
-// from ~3s on 0.1.7-rc.2 to ~10s on 0.2.0-rc.2, exhausting the
-// 15s budget before workspaceController bound. 60s leaves the
-// 5×(0+1+2+4+8=15s) inter-attempt backoff intact and gives the
-// remaining 45s to a single probe call's controller init wait.
+// readiness probe in spawnAndWire. dsh binds its port before the
+// plugin registry finishes loading, so workspace.create keeps
+// returning "service-unavailable" (workspaceController) until
+// init completes. With respawnDelay backoff (1s, 2s, 4s, 8s, 16s,
+// then 30s) ten attempts span ~151s of sleep inside the 3min cap.
+// That covers the bind-to-ready gap measured on dsh 0.2.0-rc.2:
+// ~1s hot, ~14s cold cache, longer under disk I/O pressure.
 const (
-	dshReadyTimeout  = 60 * time.Second
-	dshReadyAttempts = 5
+	dshReadyTimeout  = 3 * time.Minute
+	dshReadyAttempts = 10
 )
 
 // SharedHostOptions configures StartSharedHost.

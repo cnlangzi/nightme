@@ -1,11 +1,10 @@
 # dsh — Shared Host Architecture (1:N multiplexing)
 
-> **Status**: ✅ **已实现并落地**(2026-08-16,fix-dsh-tasks 分支)
-> **Scope**: `internal/bridge/dsh/` 改为**单一全局 dsh web 实例**服务所有 ChatSession / AgentSession
-> **实现位置**: `internal/bridge/dsh/host/{client.go, stream.go, router.go, lifecycle.go, recovery.go}`
+> **Status**: 2026-08-16 的设计稿,讲"为什么走 shared host"的架构动机与验收路径。
+> 现行契约以 [./dsh.md](./dsh.md) 为准;§3.1 API surface / §3.4 恢复机制 / §5 event 列表 / §7.1 端口策略后续已被代码取代,**不要照搬**。
 > **验证**: 2026-08-16 本机 `dsh 0.1.0-rc.6` 实机,见 `/tmp/dsh-probe/`
 > **姊妹文档**:
-> - [./dsh.md](./dsh.md) — bridge 历史形态(per-ChatSession dsh,已 deprecated)
+> - [./dsh.md](./dsh.md) — bridge 现行契约(端口策略、attach 路径、wire、recovery、test 金字塔)
 > - [./dsh-api.md](./dsh-api.md) — wire 协议权威参考(基于 TS contract + 实机)
 > - [./cli-transport.md](./cli-transport.md) — pipe / lifecycle 通用约束
 

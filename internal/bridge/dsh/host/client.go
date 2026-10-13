@@ -481,35 +481,6 @@ func (c *RPCClient) SessionList(ctx context.Context) ([]SessionSummary, error) {
 // hits "active Service workspaceController is unavailable" and
 // the user sees a startup-race error.
 //
-// Probe target: workspace.list (no args, dsh.md §2.4.5). The
-// request flows through the typert gateway and dispatches into
-// the workspaceController service; if the service is still
-// initializing, the gateway returns gateway/service-unavailable
-// (observed in the field 2026-09-13T09:38). Other failure modes:
-//
-//   - Network error: server mid-restart or socket closed.
-//     Treat as transient → retry.
-//   - gateway/service-unavailable: the documented startup race.
-//     Treat as transient → retry.
-//   - 4xx with a different error code: real config / wire
-//     mismatch. Treat as terminal → give up immediately so the
-//     caller sees the actual error (not a timeout).
-//   - 200 OK with empty list: dsh is up. Return.
-//
-// maxAttempts is the total number of tries (not retries); a value
-// of 1 disables retry. Backoff between attempts is respawnDelay
-// from the watchdog respawn path — same failure curve as the
-// attached-dsh fallback and the spawned-respawn paths.
-//
-// The context bounds the total wall time; cancel to abort early.
-// WaitForDSHReady probes dsh until its internal plugins
-// (workspaceController, etc.) finish initializing, or until
-// maxAttempts is exhausted. Called from spawnAndWire after the
-// cookie mint closes the gap between "TCP accept" and "plugins
-// loaded" — without this probe, the driver's first workspace.create
-// hits "active Service workspaceController is unavailable" and
-// the user sees a startup-race error.
-//
 // Probe target: workspace.create. Verified empirically on
 // dsh 0.1.2-rc.1 in 2026-09: workspace.list returns 404, so
 // workspace.create is the only path-level read that exercises

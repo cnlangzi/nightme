@@ -176,20 +176,20 @@ dsh --profile web --port 3080
 
 ### 2.2 端口策略
 
+3080 是 bridge 唯一绑定的端口(`defaultDSHPort`)。`StartSharedHost` 的 `tryAttachExistingDSH` 用 mint 的 cookie 探活 3080:
+
 ```
 首选 3080(显式 --port)
     ↓ TCP-dial reachable → 用 mint cookie 探 /api/session/list
-    ↓    ↓ 200 OK → attach 此 dsh(共享同一个 ~/.dsh/ secret)
-    ↓    ↓ 非 200 / 不可达 → fallback 扫 [3081, 3099]
-    ↓ 全部被占或 cookie 拒绝
-报错: "dsh.host: no free port in range 3080-3099"
+    ↓    ↓ 200 OK → attach 此 dsh(共享同一个 ~/.dsh/ secret,ownsProcess=false)
+    ↓    ↓ 不可达 → 失败,走 spawn 分支
+    ↓ 3080 可达但 cookie 拒绝 → reclaim 3080(杀掉那个非 dsh listener)+ spawn
+    ↓ spawn 成功 → owned dsh 占 3080,monitor 跑 attached/owned 双模式
 ```
-
-`findFreePort(base, range)` 用 `net.Listen` 测试,扫不到 → fail loud。
 
 **用户已启 dsh on 3080 的场景**: nightme attach 该 dsh,**复用其 session 历史**。session/cookie/WS 都由用户的 dsh 提供,nightme 不再 spawn 第二个 dsh。用户在 dashboard 看到的自己 session 与 nightme 跑的 session 走同一个 dsh 进程,**两者一致**。
 
-**特例:用户 dsh 占 3080 但用的是别的 secret**(极少见 — 比如两个独立账户),cookie 验证失败 → nightme fallback spawn 自己的 dsh(独立 secret,独立 session 历史)。
+**特例:用户 dsh 占 3080 但用的是别的 `~/.dsh/` 目录**(极少见 — 比如两个独立账户),cookie 验证失败 → `reclaimPort(3080)` 杀掉那个 listener + nightme spawn 自己的 dsh(独立 secret,独立 session 历史)。`findFreePort(base, range)` 在 prod 路径不调用,只测试用。
 
 ### 2.3 Readiness
 
@@ -289,26 +289,22 @@ Cookie: dsh-auth-<hash>=<signed>
 - `payload` 必须包 `{args: ...}`,即 `args` 是 typert 的固定 entry key,不允许省略
 - `rpcId` 必须 echo,dsh 用它关联请求-响应
 
-**常用方法**(typert 强校验,任意字段缺失就拒):
+**bridge 调用的方法**(typert 强校验,任意字段缺失就拒)。表里只列 `RPCClient` 有 typed wrapper 的方法 — bridge 不消费 `session.fork` / `session.modelCatalog` / `session.selectModel` / `commands/execute` 等:
 
 | Method | payload.args | 备注 |
 |--------|--------------|------|
-| `session/create` | `{request: {workspaceId\|cwd, sessionId?, agentPreset?}}` | `workspaceId` 与 `cwd` 互斥(typert strict) |
-| `session/list` | `{_request: {cursor?}}` | **wrapper key 是 `_request`**,不是 `request`(typert 独此一家) |
+| `session/create` | `{request: {workspaceId\|cwd, sessionId?, agentPreset?}}` | `workspaceId` 与 `cwd` 互斥(typert strict);`SessionCreate` 走 `PostWithReconnect` |
+| `session/list` | `{_request: {cursor?}}` | **wrapper key 是 `_request`**,不是 `request`(typert 独此一家);用作 health probe + recovery |
 | `session/prompt` | `{request: {requestId, sessionId, mode, content, clientTimeZone?}}` | `requestId` 必填(client-minted UUID,server 用它去重);`mode` ∈ `queue`\|`steer` |
 | `session/cancel` | `{request: {sessionId}}` | best-effort,idle 时返 `session-not-found` |
-| `session/fork` | `{request: {sessionId, atSeq?}}` | daemon 重启续接用 |
-| `session/modelCatalog` | `(无参)` | 查 host 级 catalog(`{default, routableProviders, groups, failures}`)。**不是** per-session 当前 model — 那个走 `session/control` 的 `modelSelection` projection,见 §3.4a |
-| `session/selectModel` | `{request: {sessionId, provider, model, reasoningEffort?}}` | 切 per-session model |
-| `session/follow` (stream) | `{request: {address: {kind:"session", sessionId}, maxMessages?}}` | 见 §3.5 |
+| `session/follow` (stream) | `{request: {address: {kind:"session", sessionId}, assistantStream: true, maxMessages?}}` | 见 §3.3 + §3.5;`assistantStream:true` 让 dsh 在 stream 上推 process-local presentational 帧 |
 | `session/control` (stream) | `(无参)` | baseline + `projection` / `queue` / `jobs` 替换帧;`modelSelection` projection 是 per-session 当前 model 的权威源,见 §3.4a |
-| `workspace/create` | `{request: {path}}` | path 必须绝对;`created:bool` 指示是否新建 |
+| `workspace/create` | `{request: {path}}` | path 必须绝对;dsh 按 path dedupe,重复调返回同一 workspaceId,`created:bool` 指示是否新建;`WorkspaceCreate` + `WaitForDSHReady` 都走 `PostWithReconnect` |
 | `workspace/archiveSession` | `{request: {sessionId, stopActivity:true}}` | 隐藏 session row(workspace 保留);`stopActivity` 在 archive 前停止 in-flight turn |
-| `workspace/list` | `(无参)` | 列 workspace 视图 |
-| `commands/execute` | `{agentId, line, submittedAttachments?}` | **flat-arg**,不走 `request` wrapper(typert 直接接 args) |
-| `settings/describe` | `(无参)` | 读 settings 树 |
-| `credentials/describe` | `(无参)` | 列 credential refs |
+| `workspace/delete` | `{request: {workspaceId}}` | 删 workspace + 它所有 session;RunOnce 不用(workspace 跨 session 持久) |
 | `$events/result` | `{clientId, eventId, outcome:{kind, value?\|error?}}` | waterfall(approval / question)应答回环,**不是** `/api/respond`;`exactKeys(['clientId','eventId','outcome'])` 强校验;见 §3.7 |
+
+**per-session 当前 model 不走 RPC**:`session/control` 流的 `modelSelection` projection 是权威源,见 §3.4a。`session.modelCatalog`(host 级 catalog)bridge 不调用 — 通过 watcher 从 `session/control` baseline 拿到的 `next ?? lastUsed` 即是 per-session 当前 model。
 
 **bridge 实现**: `host/client.go::RPCClient.Post(ctx, method, args)` 把 caller 传的 `args` 用 `wrapArgs` 包成 `{args: <args>}`,再 `methodDotsToSlashes(method)` 转 SLASH,最后 `json.Marshal` 进 `clientRequest` envelope。**caller 直接传 inner body**,不用关心 `args` 包装和 slash 转换。
 
@@ -383,11 +379,14 @@ type RemoteStreamServerMessage =
   "args": {
     "request": {                        // ★ 套 request wrapper(不是平铺 address)
       "address": {kind:"session", sessionId:"session-<uuid>"},
+      "assistantStream": true,          // ★ dsh 0.1.5+ 起要开,走 process-local presentational 帧
       "maxMessages": 50                 // optional
     }
   }
 }
 ```
+
+`assistantStream: true` 让 dsh 在 stream 上推 `assistant-stream` 类型的 frame,内含 `assistant/chunk` 增量(`host/stream.go::translateSessionEvent` 的 `"assistant-stream"` 分支)。durable follow events 的 `assistant/chunk` 在 stream 关闭时不重发,要走 `session.history` 拿。
 
 ### 3.4 $events stream items
 
@@ -604,7 +603,9 @@ POST /api/$events/result
 
 rejection 用 `outcome:{kind:'rejected', error:{name,message,code,details}}`;allow-then-fall-through 用 `outcome:{kind:'next'}` 让下一个 plugin listener 接手。
 
-**对 `/review` 的影响**:RunOnce / Review 用 `autoAllowRunOncePermission`(`starter.go:262`)不调 respond,主流程 OK;review agent 跑 `bash` / `edit` 之类需 approval 的工具调用会卡在 5min decline watchdog(`permissions.go::pendingApprovals`)。
+**PostEnvelope dual-decode**:`RPCClient.PostEnvelope`(`client.go::PostEnvelope`)对 200 响应同时认两套 envelope:`{type:"server-response", result:{ok:true}}`(dsh 0.1.2-rc.1+ 标准)与 `{accepted:true}`(dsh 0.1.2-rc.1 之前 receipts)。`/api/$events/result` 与 `/api/respond` 两条路都过这里 — 0.1.2-rc.1+ 实际只走 standard,legacy 双认是兜底。
+
+**对 `/review` 的影响**:RunOnce / Review 用 `autoAllowRunOncePermission`(`starter.go::autoAllowRunOncePermission`)不调 respond,主流程 OK;review agent 跑 `bash` / `edit` 之类需 approval 的工具调用会卡在 5min decline watchdog(`permissions.go::pendingApprovals`)。
 
 ---
 
@@ -848,6 +849,8 @@ waitDispatchDrain: for count > 0: cond.Wait()
 
 `host/router.go::Router` 维护 `muxSubs map[sessionID]MuxFrameHandler`、`cwdBySess map[sessionID]string`(respawn 恢复用)、`hostHandler HostFrameHandler`、以及单张 `pending map["<sessionID>:<frameRpcID>"]chan string`(per-session 答案回环通道,`chan string` 非 typed decision)。per-driver 的多 pending 状态(`pendingApprovals` / `pendingQuestions` / `pendingOrder` / `pendingSource` / `lastApprovalID`)在 driver 里(`session.go`),不在 Router。
 
+`Router.Snapshot()` 返回的 `Subscription` 带 `Handler` 字段,供 `tryRespawn` 跨 respawn 把 handler 灌进新 `Router`(`host/lifecycle.go::tryRespawn` 在 `oldCli.Close()` 之前调,见 §5.4)。`Router.EnumerateSubscriptions` 故意不暴露 `Handler` — 防止 `RecoverSubscriptions` 这类 caller 误把 handler closure 当值复制走,handler 闭包要的是*同 Client 路由表*里的同一份引用,不能跨 Client。
+
 `DispatchMux(method, rpcID, payload)`:
 
 1. `extractSessionID(payload)` → sessionID
@@ -991,21 +994,18 @@ respawn 循环的 caller-side 镜像在 §4.2.1 — `PostWithReconnect` 用同�
 
 shared host 是**多 session 共享**的,任何 ChatSession / AgentSession 都从 `host.GetGlobal()` 拿同一个 `*Client`。`host/` 把"全局 dsh 进程 + RPC + WS + Router"封装成单例,`dsh/` 只管"单 session 生命周期 + 翻译层 + 与 agent 包的接口"。Phase 3 之前共存,Phase 3 时把 envelope 类型 / 翻译层 / `handle_mux.go::handleMuxFrame` 合并到 `host/` 后再删 `dsh/`。
 
-### 6.2 为什么 nightme 现在可以 attach 用户自启的 dsh
+### 6.2 nightme 为什么能 attach 用户自启的 dsh
 
-**早期假设**(2026-09-11 之前):§3.1 论证 dsh 0.1.2-rc.1 的 launch token 是进程内私有,跨进程拿不到,所以 nightme 无法 attach 到别人跑的 dsh。
+dsh 0.1.2-rc.1 的 `@deepseek-ai/dsh-client-connection/lib/index.js::BrowserAuth` 用 `client-connection/browser-session.secret` 签 dsh-auth cookie。这个 secret 持久化在 `~/.dsh/.credentials.yaml`,**所有共享同一个 `~/.dsh/` 目录的 dsh 都加载同一份 secret**。
 
-**实测推翻**(2026-09-11):`@deepseek-ai/dsh-client-connection/lib/index.js::BrowserAuth` 不只靠 launch token — 它用 `client-connection/browser-session.secret` 签 cookie。这个 secret 持久化在 `~/.dsh/.credentials.yaml`,**所有共享同一个 `~/.dsh/` 目录的 dsh 都加载同一份 secret**。
-
-所以 nightme 可以本地读 secret + 签出 dsh-auth cookie,**跳过 launch token exchange 直接 attach**。`host/lifecycle.go::tryAttachExistingDSH` 在 `StartSharedHost` 第一步走这个路径:
+nightme 直接读 secret + 签出 cookie,**跳过 launch token exchange 直接 attach**。`host/lifecycle.go::tryAttachExistingDSH` 走这个路径:
 
 1. mint cookie from `~/.dsh/.credentials.yaml` 的 secret
 2. POST `/api/session/list` 用 minted cookie 验证
-3. 200 OK → attach,ownsProcess=false(不 kill 用户的 dsh)
-4. 非 200 → fallback sweep [3081, 3099]
-5. 都失败 → spawn 自己的 dsh
+3. 200 OK → attach(ownsProcess=false,不 kill 用户 dsh)
+4. 3080 不可达或 cookie 拒绝 → `reclaimPort(3080)` + spawn 自己 dsh(独立 secret,独立 session 历史)
 
-**好处**:daemon 重启不再丢失 session 历史(用户 worktree 持续工作),也不再有"daemon 在 3081+ 留一堆孤儿 dsh"的 sprawl 模式。
+**效果**:daemon 重启不再丢失 session 历史,也不再有"daemon 在 3081+ 留一堆孤儿 dsh"的 sprawl 模式。
 
 ### 6.3 为什么有 `host/stream.go::translateSessionEvent` 翻译层
 
@@ -1088,12 +1088,13 @@ for {
 
 幂等性边界(必须知道,因为这是 caller-visible 差异):
 
-| Endpoint | server-side 幂等? | retry 安全? |
-|---|---|---|
-| `workspace.create` | 是(按 path dedupe,重复调返回同一 workspaceId,`created:false`) | 安全 |
-| `session.create` | 否(server 按调用序 commit,transport 失败但 server 已 commit 时重试会开第二个 session,旧 sessionId 丢失,产生孤儿 row) | 产生孤儿;严格 caller 应预分配 `opts.SessionID` |
-| `session.prompt` / `session.history` / `session.list` / `session.modelCatalog` | session.prompt 是 server-side idempotent on `requestId`(client-mint),其余是 read | 安全 |
-| `workspace.archiveSession` / `workspace.delete` | 是 | 安全 |
+| Endpoint | 类别 | server-side 幂等? | retry 安全? |
+|---|---|---|---|
+| `workspace.create` | 写 | 是(按 path dedupe,重复调返回同一 workspaceId,`created:false`) | 安全 |
+| `session.create` | 写 | 否(server 按调用序 commit,transport 失败但 server 已 commit 时重试会开第二个 session,旧 sessionId 丢失,产生孤儿 row) | 产生孤儿;严格 caller 应预分配 `opts.SessionID` |
+| `session.prompt` | 写 | 是(server-side idempotent on `requestId`,client-mint) | 安全(同 requestId 不会落两次) |
+| `session.history` / `session.list` / `session.modelCatalog` | 读 | n/a(读不写,结果可重复) | 安全 |
+| `workspace.archiveSession` / `workspace.delete` | 写 | 是 | 安全 |
 
 ---
 
@@ -1170,17 +1171,16 @@ if err := cli.Start(ctx); err != nil { ... }  // caller ctx, lifetime = daemon
 
 ### 7.6 daemon.log 里的 attach 成功信号
 
-attach 路径触发后,`host/stream.go::dispatch` 的 `ready` 分支与 `host_waterfall.go::hostWaterfallHandler` 会产出这些行(顺序):
+attach 路径触发后,`host/stream.go::connectAndServe` 跟 `dispatch` 会产出这些行(顺序):
 
 ```
 INFO dsh.host: mux stream connected url=ws://127.0.0.1:<port>/api/remote.mux reopen_count=...
 INFO dsh.host: mux ready client_id=<uuid> host=...
-INFO dsh: hostWaterfallHandler invoked method=ready rpc_id=
 ```
 
-`dsh.host: mux ready` 带 `client_id` 是关键 —— 它意味着 `$events` 首帧 ready 被捕获到 `host/host_state.go`,`SendPermission` 的 `/api/$events/result` 才有 `clientId` 可填。`hostWaterfallHandler invoked method=ready` 之后立刻 early-return(`ready` 不进 demux),所以只看到这一行就说明全局 host handler 已装好。
+`dsh.host: mux ready` 带 `client_id` 是关键 —— 它意味着 `$events` 首帧 `ready` 已被 `host/stream.go::dispatch` 的 host-stream item 路径捕获并写入 `host/host_state.go::SetHostClientID`,`SendPermission` 的 `/api/$events/result` 才有 `clientId` 可填。
 
-如果只看到 `mux stream connected` 却没有 `mux ready`,说明 WS 握手通了但 `$events` 流没被服务端推送 —— 通常 dsh 内部 plugin 未就绪或 cookie 被拒。`installHostHandler` 本身不打日志(幂等,装在 `host.OnLifecycleInstall` 钩子里);要看它是否注册过,看 `host_waterfall.go::init` 是否执行(import 链)。
+`ready` 帧**不**走 `hostWaterfallHandler`(`host_waterfall.go:116` 的 handler 只处理 `emit` / `waterfall` / `cancel`,`ready` 在 dispatch 站点直接 `SetHostClientID + invokeOnHost("ready", ...)` 就 return)。所以 attach 成功的稳态日志就是上面两行,没有 `hostWaterfallHandler invoked` 行。如果只看到 `mux stream connected` 却没有 `mux ready`,说明 WS 握手通了但 `$events` 流没被服务端推送 —— 通常 dsh 内部 plugin 未就绪或 cookie 被拒。`installHostHandler` 本身不打日志(幂等,装在 `host.OnLifecycleInstall` 钩子里);要看它是否注册过,看 `host_waterfall.go::init` 是否执行(import 链)。
 
 ### 7.7 多 worktree 共享 ~/.dsh/.credentials.yaml
 

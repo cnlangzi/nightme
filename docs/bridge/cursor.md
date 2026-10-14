@@ -130,8 +130,11 @@ internal/bridge/cursor/
 //     acp bridge's fallback path.
 //
 //   - RunOnce (one-shot: /gtw commit, buildAgentPrompt) →
-//     `cursor-agent -p "prompt" --output-format text`. The
-//     process exits after the turn.
+//     `cursor-agent -p "prompt" --output-format json`. The
+//     process exits after the turn; the single-line result
+//     envelope is parsed into RunResult.{Text, Subtype,
+//     SessionID, Usage} so the channel footer renders token
+//     usage for one-shot calls.
 package cursor
 
 import (
@@ -249,8 +252,9 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 }
 
 // RunOnce is the one-shot counterpart to Start. Spawns
-// `cursor-agent -p "prompt" --output-format text` directly and returns the
-// agent's final text.
+// `cursor-agent -p "prompt" --output-format json` and returns
+// the parsed RunResult (Text + Usage + Subtype + SessionID
+// from the single-line result envelope).
 //
 // Cursor's print-mode uses `cursor-agent -p` (not ACP), which is simpler
 // and faster for one-shot invocations (/gtw commit, buildAgentPrompt).
@@ -265,9 +269,13 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 // print.go — one-shot print mode for cursor using `cursor-agent -p`.
 //
 // Cursor CLI has a built-in print-mode: `cursor-agent -p "prompt"
-// --output-format text`. The process exits after the turn —
-// no multi-turn, no events channel. This mirrors the print-mode
-// path in codex/claudecode/pi/opencode bridges.
+// --output-format json`. The process exits after the turn and
+// writes a single-line result envelope to stdout carrying the
+// final text plus the per-turn token usage. runPrintMode parses
+// the envelope into RunResult.{Text, Subtype, SessionID, Usage}
+// so the channel footer renders input / output / cache tokens
+// for one-shot calls. Older cursor versions that ignore
+// --output-format json keep working via the plain-text fallback.
 package cursor
 
 import (
@@ -295,7 +303,7 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 
 	start := time.Now()
 
-	args := []string{"-p", prompt, "--output-format", "text"}
+	args := []string{"-p", prompt, "--output-format", "json"}
 	args = append(args, cfg.Args...)
 
 	cmd := exec.CommandContext(ctx, s.command, args...)
@@ -461,7 +469,7 @@ curl https://cursor.com/install -fsS | bash
 cursor-agent login
 
 # 3. 验证本机可以正常运行
-cursor-agent -p "hello" --output-format text
+cursor-agent -p "hello" --output-format json
 ```
 
 nightme 启动时只做一件事：调用 `cursor-agent` 命令（官方 installer 在 PATH 上创建的"真名字"binary）。如果本机 CLI 能跑，nightme 就能跑。
@@ -490,7 +498,7 @@ Cursor CLI 对应关系（`cursor-agent --help`，2026.08.11-e8db854）：
 
 ```text
 cursor-agent --force --trust --sandbox disabled --approve-mcps acp
-cursor-agent --force --trust --sandbox disabled --approve-mcps -p "hello" --output-format text
+cursor-agent --force --trust --sandbox disabled --approve-mcps -p "hello" --output-format json
 ```
 
 `cursor-agent acp --force` 会被 acp 子命令当成未知参数丢掉，进程照样起来，权限仍是默认收紧。
@@ -706,7 +714,7 @@ go test ./internal/bridge/cursor/ -count=1 -timeout 120s -run 'TestE2E'
 
 ### Step 3: 实现 print.go
 
-`runPrintMode` 调用 `agent -p "prompt" --output-format text`，捕获 stdout 作为结果文本。
+`runPrintMode` 调用 `agent -p "prompt" --output-format json`，解析单行 result envelope 并把 `usage.{inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens}` 装进 `RunResult.Usage`。
 
 ### Step 4: 注册到 agents.go
 

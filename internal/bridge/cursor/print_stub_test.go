@@ -5,8 +5,18 @@
 //
 // What we lock here against the prototype parser + spawn glue:
 //
-//   - happy path: a simple prompt produces a RunResult with
-//     Text, Subtype="completed", DurationMs > 0
+//   - happy path (text fallback): a simple prompt producing plain
+//     stdout gives RunResult with Text, Subtype="completed",
+//     DurationMs > 0; Usage / SessionID stay nil/empty (the
+//     pre-fix text-only behaviour, retained for older cursor
+//     versions that ignore --output-format json)
+//   - json happy path: --output-format json envelope is parsed
+//     and Text / Subtype / SessionID / Usage all populate from
+//     the wire; channel footer can render token usage
+//   - json all-zero usage: parsed but treated as nil (mirrors
+//     the channel footer's "nil = not reported" contract)
+//   - json missing usage: envelope without usage block also
+//     yields nil Usage, no panic
 //   - exit-1 with stderr: stderr is appended to the error
 //   - exit-0 with empty answer: error includes "empty answer"
 //   - echo mode: prompt is forwarded to the child
@@ -73,7 +83,13 @@ func newStubStarter(t *testing.T, bin string) *Starter {
 }
 
 // TestRunPrintMode_HappyPath — simplest smoke: exit 0 with
-// text output. Asserts Text / Subtype / DurationMs.
+// plain text on stdout. With --output-format json the cursor
+// stub would emit a JSON envelope; this test uses the "happy"
+// behaviour (plain text) so it also doubles as the fallback
+// path coverage (older cursor / non-cursor binaries that
+// ignore --output-format json keep working). Asserts Text /
+// Subtype="completed" (the fallback default) / DurationMs;
+// Usage / SessionID stay empty.
 func TestRunPrintMode_HappyPath(t *testing.T) {
 	bin := requireStubCursor(t)
 	withStubEnv(t, "happy", "READY")
@@ -105,11 +121,134 @@ func TestRunPrintMode_HappyPath(t *testing.T) {
 	if result.Usage != nil {
 		t.Errorf("Usage = %+v, want nil", result.Usage)
 	}
+	if result.SessionID != "" {
+		t.Errorf("SessionID = %q, want \"\"", result.SessionID)
+	}
 	if result.Model != "" {
 		t.Errorf("Model = %q, want \"\"", result.Model)
 	}
 	t.Logf("result: Text=%q Subtype=%s DurationMs=%d",
 		result.Text, result.Subtype, result.DurationMs)
+}
+
+// TestRunPrintMode_JSON_HappyPath — cursor-agent's
+// --output-format json envelope is parsed and the audit
+// fields populate verbatim: Text from `result`, Subtype from
+// `subtype`, SessionID from `session_id`, Usage from the
+// nested `usage` object (inputTokens / outputTokens /
+// cacheReadTokens / cacheWriteTokens). This is the
+// production path for /gtw commit, buildAgentPrompt, etc.
+// once printModeArgs switches to --output-format json.
+func TestRunPrintMode_JSON_HappyPath(t *testing.T) {
+	bin := requireStubCursor(t)
+	withStubEnv(t, "json", "READY")
+
+	s := newStubStarter(t, bin)
+	ws := t.TempDir()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	result, err := runPrintMode(ctx, s,
+		agent.StartConfig{Workspace: ws},
+		[]agent.ContentBlock{{
+			Type: agent.ContentText,
+			Text: "Reply with the single word READY.",
+		}})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if result.Text != "READY" {
+		t.Errorf("Text = %q, want READY", result.Text)
+	}
+	if result.Subtype != "success" {
+		t.Errorf("Subtype = %q, want success (from envelope)", result.Subtype)
+	}
+	if result.SessionID != "00000000-0000-0000-0000-000000000001" {
+		t.Errorf("SessionID = %q, want from envelope", result.SessionID)
+	}
+	if result.Usage == nil {
+		t.Fatal("Usage = nil, want non-nil from envelope")
+	}
+	if result.Usage.InputTokens != 100 {
+		t.Errorf("Usage.InputTokens = %d, want 100", result.Usage.InputTokens)
+	}
+	if result.Usage.OutputTokens != 20 {
+		t.Errorf("Usage.OutputTokens = %d, want 20", result.Usage.OutputTokens)
+	}
+	if result.Usage.CacheReadInputTokens != 40 {
+		t.Errorf("Usage.CacheReadInputTokens = %d, want 40 (cursor cacheReadTokens)",
+			result.Usage.CacheReadInputTokens)
+	}
+	if result.Usage.CacheCreationInputTokens != 0 {
+		t.Errorf("Usage.CacheCreationInputTokens = %d, want 0 (cursor cacheWriteTokens default)",
+			result.Usage.CacheCreationInputTokens)
+	}
+	if result.DurationMs <= 0 {
+		t.Errorf("DurationMs = %d, want > 0", result.DurationMs)
+	}
+}
+
+// TestRunPrintMode_JSON_AllZeroUsageTreatedAsNil — cursor
+// can emit a usage block with all-zero values when the model
+// refused, errored before any tokens were billed, etc. We
+// must NOT surface that as a "0 tokens" footer line — the
+// channel contract is "nil = not reported". This matches the
+// existing nil-Usage-tolerant tests across other bridges
+// (claudecode: appendAuditFields_NilUsageDoesNotPanic, codex:
+// translate_UsageOverwrittenNotSummed, …).
+func TestRunPrintMode_JSON_AllZeroUsageTreatedAsNil(t *testing.T) {
+	bin := requireStubCursor(t)
+	t.Setenv("CURSOR_STUB_BEHAVIOR", "json")
+	t.Setenv("CURSOR_STUB_TEXT", "OK")
+	t.Setenv("CURSOR_STUB_USAGE", `{"inputTokens":0,"outputTokens":0,"cacheReadTokens":0,"cacheWriteTokens":0}`)
+
+	s := newStubStarter(t, bin)
+	ws := t.TempDir()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	result, err := runPrintMode(ctx, s,
+		agent.StartConfig{Workspace: ws},
+		[]agent.ContentBlock{{Type: agent.ContentText, Text: "hi"}})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if result.Text != "OK" {
+		t.Errorf("Text = %q, want OK", result.Text)
+	}
+	if result.Usage != nil {
+		t.Errorf("Usage = %+v, want nil for all-zero usage", result.Usage)
+	}
+}
+
+// TestRunPrintMode_JSON_NoUsageFieldIsNil — cursor can omit
+// the usage block entirely (older versions, error turns where
+// the result envelope was synthesised by a partial path). Same
+// nil-Usage contract as the all-zero case; the parser must
+// not panic on a missing field.
+func TestRunPrintMode_JSON_NoUsageFieldIsNil(t *testing.T) {
+	bin := requireStubCursor(t)
+	t.Setenv("CURSOR_STUB_BEHAVIOR", "json")
+	t.Setenv("CURSOR_STUB_TEXT", "OK")
+	// CURSOR_STUB_USAGE left empty → stub omits the field by
+	// emitting "{}" instead of an empty usage object; override
+	// the stub's default by setting the env to an empty value
+	// the stub interprets as "use default" — so we patch the
+	// stub to truly omit usage by setting CURSOR_STUB_USAGE to
+	// a literal `null` and patching the stub if needed. To
+	// keep the stub simple, this test directly exercises the
+	// parser via parseCursorOutput on a hand-crafted envelope.
+	raw := []byte(`{"type":"result","subtype":"success","is_error":false,"result":"OK","session_id":"s","request_id":"r","duration_ms":1,"duration_api_ms":1}`)
+	text, subtype, sid, usage := parseCursorOutput(raw)
+	if text != "OK" || subtype != "success" || sid != "s" {
+		t.Errorf("parsed = (%q, %q, %q), want (OK, success, s)", text, subtype, sid)
+	}
+	if usage != nil {
+		t.Errorf("Usage = %+v, want nil for missing usage block", usage)
+	}
+	_ = bin
 }
 
 // TestRunPrintMode_ExitOneWithStderr — exit 1 with stderr

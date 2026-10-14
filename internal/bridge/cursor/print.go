@@ -1,10 +1,10 @@
 // print.go — one-shot print mode for cursor using `agent -p`.
 //
-// Cursor CLI's print-mode supports three output formats (`text`,
-// `json`, `stream-json`); we use `json` so the per-turn usage block
-// is captured into RunResult.Usage and the footer can render
-// input / output / cache tokens. cursor-agent 2026.10.01+ emits
-// the full envelope on stdout:
+// Cursor CLI's `--output-format` accepts `text | json |
+// stream-json`; we use `json` so the per-turn usage block is
+// captured into RunResult.Usage and the footer can render input /
+// output / cache tokens. cursor-agent 2026.08.11+ emits the full
+// envelope on stdout:
 //
 //	{
 //	  "type":"result",
@@ -20,10 +20,15 @@
 // (update notice, MCP log) must not contaminate the JSON parse
 // and replace the assistant answer with `{...}` plus noise.
 //
-// Older / unexpected CLIs that ignore `--output-format json` will
-// emit plain text on stdout; we tolerate that and fall back to
-// treating the whole stdout blob as Text (Usage left nil — same
-// shape as the pre-fix behaviour for those rare cases).
+// Parse failure is a hard error. cursor's `--output-format json`
+// has been the supported path since 2026.08.11 (verified
+// locally against 2026.10.01-e373342) and any binary running
+// through this bridge necessarily carries the full Cursor
+// parent flags (`--force --trust --sandbox --approve-mcps`) —
+// there is no "older cursor without json" / "third-party
+// binary that ignores --output-format" surface to fall back
+// to. If the envelope shape changes, the bridge fails loudly
+// instead of silently dropping the Usage field.
 //
 // `is_error: true` envelopes (cursor's "error_max_turns" /
 // "refusal" / future error subtypes) are returned as errors so
@@ -56,9 +61,10 @@ import (
 
 // cursorResultEnvelope mirrors the single-line JSON that
 // `cursor-agent --print --output-format json` emits on stdout
-// (cursor-agent 2026.10.01+). The struct lives here (not in a
-// shared protocol package) because the JSON shape is private
-// to cursor's print-mode wire — cursor's ACP wire (separate
+// (cursor-agent 2026.08.11+; verified locally against
+// 2026.10.01-e373342). The struct lives here (not in a shared
+// protocol package) because the JSON shape is private to
+// cursor's print-mode wire — cursor's ACP wire (separate
 // `agent acp` subcommand) does NOT emit this envelope, so this
 // struct has no callers outside this file.
 //
@@ -75,10 +81,10 @@ import (
 //     cursor's failure prose as a successful body.
 //
 // Other envelope fields (`request_id`, `duration_ms`,
-// `duration_api_ms`) are dropped from the struct on purpose
-// — encoding/json ignores unknown keys by default, and we have
-// no consumer for them. Wall-clock duration is already measured
-// in runPrintMode from the spawn wrapper.
+// `duration_api_ms`) are dropped from the struct on purpose —
+// encoding/json ignores unknown keys by default, and we have no
+// consumer for them. Wall-clock duration is already measured in
+// runPrintMode from the spawn wrapper.
 type cursorResultEnvelope struct {
 	Type      string       `json:"type"`
 	Subtype   string       `json:"subtype"`
@@ -136,17 +142,11 @@ func cursorUsageToAgentInfo(u *cursorUsage) *agent.UsageInfo {
 // (/gtw commit, buildAgentPrompt).
 //
 // stdout and stderr are captured into separate buffers. stdout
-// is parsed as the cursorResultEnvelope above; on success,
-// RunResult.{Text, Subtype, SessionID, Usage} are populated and
-// `is_error: true` envelopes are surfaced as errors so callers
-// don't mistake cursor's failure prose for a successful reply.
-// On parse failure (older cursor, non-cursor binary, corrupted
-// output) the trimmed stdout becomes Text and the other audit
-// fields stay empty — same surface as the pre-fix text-only
-// path. stderr is only consulted on the spawn-error path
-// (`cmd.Run()` returned non-nil); we never feed it to the JSON
-// parser so update notices / MCP log lines cannot break the
-// parse.
+// is parsed strictly as the cursorResultEnvelope above; any
+// parse failure is returned as a hard error (no text fallback
+// — see file doc for why). stderr is only consulted on the
+// spawn-error path so update notices / MCP log lines cannot
+// break the JSON parse.
 //
 // opts (when set via WithEventSink) wires a per-call observer
 // that receives an up-front Ready + a terminal Result/Done
@@ -157,9 +157,10 @@ func cursorUsageToAgentInfo(u *cursorUsage) *agent.UsageInfo {
 // opencode print-modes.
 //
 // Failure modes:
-//   - waitErr != nil  → model / CLI failure; surface stderr
-//   - is_error envelope → wrap as error with audit fields
-//   - empty finalText → model produced nothing; surface stderr
+//   - cmd.Run() != nil          → spawn / model / CLI failure; surface stderr
+//   - parseCursorOutput != nil  → malformed envelope (return as hard error)
+//   - env.IsError               → wrap as error with audit fields
+//   - env.Result empty          → model produced nothing; surface stderr
 func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks []agent.ContentBlock, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	if cfg.Workspace == "" {
 		return agent.RunResult{}, fmt.Errorf("cursor: workspace is required")
@@ -241,7 +242,21 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 		return agent.RunResult{}, wrapped
 	}
 
-	text, subtype, sessionID, usage, isError := parseCursorOutput(stdout.Bytes())
+	env, isEnvelope, parseErr := parseCursorEnvelope(stdout.Bytes())
+	if parseErr != nil {
+		wrapped := fmt.Errorf("cursor: parse output: %w (stdout: %s)", parseErr, strings.TrimSpace(stdout.String()))
+		if sink != nil {
+			sink(agent.AgentEvent{
+				Kind:       agent.EventAgentError,
+				Err:        wrapped,
+				Diagnostic: cursorDiagnostic(agent.BridgeExitCleanExit, ""),
+			})
+		}
+		return agent.RunResult{}, wrapped
+	}
+	_ = isEnvelope // always true on the parse-success path; kept for symmetry with future error-shape envelopes
+
+	text, subtype, sessionID, usage, isError := env.Result, env.Subtype, env.SessionID, cursorUsageToAgentInfo(env.Usage), env.IsError
 
 	if isError {
 		// cursor reported the run as a failure. Surface it as
@@ -304,10 +319,12 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 		Usage:      usage,
 	}
 	if result.Subtype == "" {
-		// Fallback for older cursor / non-cursor binaries whose
-		// stdout wasn't a JSON envelope — keep the pre-fix
-		// "completed" semantics so callers that branch on
-		// Subtype don't regress.
+		// Defensive: cursor's documented envelope always
+		// carries a subtype, but a future schema change that
+		// omits it would otherwise leave Subtype as "". Keep
+		// the legacy "completed" semantics so callers that
+		// branch on Subtype don't regress on an unusual
+		// envelope.
 		result.Subtype = "completed"
 	}
 
@@ -337,54 +354,30 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 	return result, nil
 }
 
-// parseCursorOutput splits a captured stdout blob into the
-// fields RunResult cares about. The happy path is the JSON
-// envelope; anything that doesn't parse (older cursor versions
-// that emit plain text, third-party binaries that ignore
-// --output-format, etc.) falls through to treating the trimmed
-// blob as Text with no audit fields — matching the pre-fix
-// behaviour for those rare cases.
+// parseCursorEnvelope parses the captured stdout blob strictly
+// as cursor's print-mode JSON envelope. Returns the populated
+// envelope on success; an empty envelope + a non-nil error
+// otherwise. The error wraps the underlying json.Unmarshal
+// error so operators can see what went wrong (cursor schema
+// drift, binary not honouring --output-format json, etc.)
+// rather than getting a silent "no Usage" footer.
 //
-// Returns (text, subtype, sessionID, usage, isError). isError
-// is the envelope's `is_error` flag; runPrintMode turns a true
-// value into a returned error so /gtw doesn't publish cursor's
-// failure prose as a successful body. Callers should still
-// check `text == ""` for the empty-answer guard, since both
-// the JSON envelope's `result` field and a raw text body can
-// be empty.
-//
-// This function only sees stdout — stderr is captured and
-// surfaced separately on the spawn-error path so update
-// notices / MCP log lines cannot break the JSON parse.
-func parseCursorOutput(raw []byte) (text, subtype, sessionID string, usage *agent.UsageInfo, isError bool) {
+// The `isEnvelope bool` return is reserved for future cursor
+// envelopes that don't share the `result` shape (e.g. a future
+// `error` envelope); for now every parseable envelope we
+// expect is a `type:"result"`.
+func parseCursorEnvelope(raw []byte) (env cursorResultEnvelope, isEnvelope bool, err error) {
 	trimmed := strings.TrimSpace(string(raw))
 	if trimmed == "" {
-		return "", "", "", nil, false
+		return cursorResultEnvelope{}, false, fmt.Errorf("empty stdout")
 	}
-
-	// Fast path: cursor's print-mode JSON envelope. The
-	// envelope's "type" field is "result" so we can disambiguate
-	// from any future JSON shape (e.g. cursor adding a JSON
-	// `error` envelope) without invasive branching.
-	var env cursorResultEnvelope
-	if err := json.Unmarshal([]byte(trimmed), &env); err == nil && env.Type == "result" {
-		cLog("PrintMode ParseJSON",
-			"subtype", env.Subtype,
-			"is_error", env.IsError,
-			"usage_present", env.Usage != nil,
-			"session_id", env.SessionID)
-		return env.Result, env.Subtype, env.SessionID, cursorUsageToAgentInfo(env.Usage), env.IsError
+	if err := json.Unmarshal([]byte(trimmed), &env); err != nil {
+		return cursorResultEnvelope{}, false, err
 	}
-
-	// Fallback: treat the trimmed blob as plain text. We
-	// deliberately do NOT attempt partial JSON extraction
-	// (e.g. a malformed object that happens to have a "result"
-	// field) — that path is reserved for a future fix if
-	// cursor's wire shape changes mid-line. Today the wire is
-	// either a clean envelope or plain text; nothing in
-	// between.
-	cLog("PrintMode ParseFallback", "reason", "json unmarshal failed or type!=result")
-	return trimmed, "", "", nil, false
+	if env.Type != "result" {
+		return cursorResultEnvelope{}, false, fmt.Errorf("unexpected envelope type %q (want \"result\")", env.Type)
+	}
+	return env, true, nil
 }
 
 // appendCursorAuditFields mirrors claudecode/print.go:559

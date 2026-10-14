@@ -5,11 +5,6 @@
 //
 // What we lock here against the prototype parser + spawn glue:
 //
-//   - happy path (text fallback): a simple prompt producing plain
-//     stdout gives RunResult with Text, Subtype="completed",
-//     DurationMs > 0; Usage / SessionID stay nil/empty (the
-//     pre-fix text-only behaviour, retained for older cursor
-//     versions that ignore --output-format json)
 //   - json happy path: --output-format json envelope is parsed
 //     and Text / Subtype / SessionID / Usage all populate from
 //     the wire; channel footer can render token usage
@@ -26,9 +21,15 @@
 //     the channel footer's "nil = not reported" contract)
 //   - json missing usage: envelope without usage block also
 //     yields nil Usage, no panic
+//   - json empty result: valid envelope with empty `result`
+//     hits the empty-answer guard (cursor produced nothing)
+//   - parse error: non-JSON stdout is a HARD error, not a
+//     silent text-mode fallback (catches cursor schema drift
+//     or a binary that ignores --output-format json)
+//   - unknown envelope type: valid JSON with `type` !=
+//     "result" is a HARD error (cursor shipped a future
+//     envelope shape we don't know about yet)
 //   - exit-1 with stderr: stderr is appended to the error
-//   - exit-0 with empty answer: error includes "empty answer"
-//   - echo mode: prompt is forwarded to the child
 //
 // The stub is at testdata/cursor-stub (compiled by the test
 // itself if absent) and is parameterized by env vars rather
@@ -78,66 +79,9 @@ func requireStubCursor(t *testing.T) string {
 	return bin
 }
 
-// withStubEnv runs fn with CURSOR_STUB_BEHAVIOR / TEXT set
-// in the inherited process env.
-func withStubEnv(t *testing.T, behavior, text string) {
-	t.Helper()
-	t.Setenv("CURSOR_STUB_BEHAVIOR", behavior)
-	t.Setenv("CURSOR_STUB_TEXT", text)
-}
-
 func newStubStarter(t *testing.T, bin string) *Starter {
 	t.Helper()
 	return NewStarter("cursor-stub-test", bin, nil)
-}
-
-// TestRunPrintMode_HappyPath — simplest smoke: exit 0 with
-// plain text on stdout. With --output-format json the cursor
-// stub would emit a JSON envelope; this test uses the "happy"
-// behaviour (plain text) so it also doubles as the fallback
-// path coverage (older cursor / non-cursor binaries that
-// ignore --output-format json keep working). Asserts Text /
-// Subtype="completed" (the fallback default) / DurationMs;
-// Usage / SessionID stay empty.
-func TestRunPrintMode_HappyPath(t *testing.T) {
-	bin := requireStubCursor(t)
-	withStubEnv(t, "happy", "READY")
-
-	s := newStubStarter(t, bin)
-	ws := t.TempDir()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	result, err := runPrintMode(ctx, s,
-		agent.StartConfig{Workspace: ws},
-		[]agent.ContentBlock{{
-			Type: agent.ContentText,
-			Text: "Reply with the single word READY.",
-		}})
-	if err != nil {
-		t.Fatalf("err = %v", err)
-	}
-	if result.Text != "READY" {
-		t.Errorf("Text = %q, want READY", result.Text)
-	}
-	if result.Subtype != "completed" {
-		t.Errorf("Subtype = %q, want completed", result.Subtype)
-	}
-	if result.DurationMs <= 0 {
-		t.Errorf("DurationMs = %d, want > 0", result.DurationMs)
-	}
-	if result.Usage != nil {
-		t.Errorf("Usage = %+v, want nil", result.Usage)
-	}
-	if result.SessionID != "" {
-		t.Errorf("SessionID = %q, want \"\"", result.SessionID)
-	}
-	if result.Model != "" {
-		t.Errorf("Model = %q, want \"\"", result.Model)
-	}
-	t.Logf("result: Text=%q Subtype=%s DurationMs=%d",
-		result.Text, result.Subtype, result.DurationMs)
 }
 
 // TestRunPrintMode_JSON_HappyPath — cursor-agent's
@@ -150,7 +94,8 @@ func TestRunPrintMode_HappyPath(t *testing.T) {
 // once printModeArgs switches to --output-format json.
 func TestRunPrintMode_JSON_HappyPath(t *testing.T) {
 	bin := requireStubCursor(t)
-	withStubEnv(t, "json", "READY")
+	t.Setenv("CURSOR_STUB_BEHAVIOR", "json")
+	t.Setenv("CURSOR_STUB_TEXT", "READY")
 
 	s := newStubStarter(t, bin)
 	ws := t.TempDir()
@@ -241,22 +186,24 @@ func TestRunPrintMode_JSON_NoUsageFieldIsNil(t *testing.T) {
 	bin := requireStubCursor(t)
 	t.Setenv("CURSOR_STUB_BEHAVIOR", "json")
 	t.Setenv("CURSOR_STUB_TEXT", "OK")
-	// CURSOR_STUB_USAGE left empty → stub omits the field by
-	// emitting "{}" instead of an empty usage object; override
-	// the stub's default by setting the env to an empty value
-	// the stub interprets as "use default" — so we patch the
-	// stub to truly omit usage by setting CURSOR_STUB_USAGE to
-	// a literal `null` and patching the stub if needed. To
-	// keep the stub simple, this test directly exercises the
-	// parser via parseCursorOutput on a hand-crafted envelope.
-	raw := []byte(`{"type":"result","subtype":"success","is_error":false,"result":"OK","session_id":"s","request_id":"r","duration_ms":1,"duration_api_ms":1}`)
-	text, subtype, sid, usage, isError := parseCursorOutput(raw)
-	if text != "OK" || subtype != "success" || sid != "s" || isError {
-		t.Errorf("parsed = (%q, %q, %q, is_error=%v), want (OK, success, s, false)",
-			text, subtype, sid, isError)
+	// Drives the stub to emit an envelope with the default
+	// usage block, then we hand-craft an envelope without a
+	// usage field and run it directly through the parser —
+	// the stub binary can't easily omit the field without a
+	// new behaviour switch.
+	raw := []byte(`{"type":"result","subtype":"success","is_error":false,"result":"OK","session_id":"s"}`)
+	env, isEnvelope, parseErr := parseCursorEnvelope(raw)
+	if parseErr != nil {
+		t.Fatalf("parseCursorEnvelope err = %v, want nil", parseErr)
 	}
-	if usage != nil {
-		t.Errorf("Usage = %+v, want nil for missing usage block", usage)
+	if !isEnvelope {
+		t.Error("isEnvelope = false, want true for valid type:\"result\" envelope")
+	}
+	if env.Result != "OK" || env.Subtype != "success" || env.SessionID != "s" {
+		t.Errorf("parsed = (%q, %q, %q), want (OK, success, s)", env.Result, env.Subtype, env.SessionID)
+	}
+	if cursorUsageToAgentInfo(env.Usage) != nil {
+		t.Errorf("Usage = %+v, want nil for missing usage block", env.Usage)
 	}
 	_ = bin
 }
@@ -384,6 +331,160 @@ func TestRunPrintMode_JSON_StderrDoesNotContaminateParse(t *testing.T) {
 	}
 }
 
+// TestRunPrintMode_JSON_EmptyResult_ReturnsEmptyAnswer — valid
+// envelope with an empty `result` field hits the empty-answer
+// guard. The error must surface that the model produced no
+// output, NOT fall back to text mode (the text-fallback path
+// no longer exists in the JSON-only contract).
+func TestRunPrintMode_JSON_EmptyResult_ReturnsEmptyAnswer(t *testing.T) {
+	bin := requireStubCursor(t)
+	t.Setenv("CURSOR_STUB_BEHAVIOR", "json_empty_result")
+
+	s := newStubStarter(t, bin)
+	ws := t.TempDir()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	_, err := runPrintMode(ctx, s,
+		agent.StartConfig{Workspace: ws},
+		[]agent.ContentBlock{{Type: agent.ContentText, Text: "hi"}})
+	if err == nil {
+		t.Fatal("err = nil, want non-nil for empty result")
+	}
+	if !strings.Contains(err.Error(), "empty answer") {
+		t.Errorf("err = %q, want contains 'empty answer'", err.Error())
+	}
+}
+
+// TestRunPrintMode_MalformedJSON_ReturnsParseError — non-JSON
+// stdout is a HARD error. Before the JSON-only contract, this
+// would silently fall back to text mode (publishing the raw
+// blob as RunResult.Text with Usage nil, defeating the
+// footer). Today it surfaces as a parse error so operators
+// see the actual schema mismatch instead of an empty Usage.
+func TestRunPrintMode_MalformedJSON_ReturnsParseError(t *testing.T) {
+	bin := requireStubCursor(t)
+	t.Setenv("CURSOR_STUB_BEHAVIOR", "malformed_json")
+
+	s := newStubStarter(t, bin)
+	ws := t.TempDir()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	_, err := runPrintMode(ctx, s,
+		agent.StartConfig{Workspace: ws},
+		[]agent.ContentBlock{{Type: agent.ContentText, Text: "hi"}})
+	if err == nil {
+		t.Fatal("err = nil, want non-nil for malformed JSON stdout")
+	}
+	if !strings.Contains(err.Error(), "cursor: parse output") {
+		t.Errorf("err = %q, want contains 'cursor: parse output' (hard-error prefix)", err.Error())
+	}
+	if !strings.Contains(err.Error(), "not valid json") {
+		t.Errorf("err = %q, want contains underlying json error", err.Error())
+	}
+}
+
+// TestRunPrintMode_UnknownEnvelopeType_ReturnsParseError —
+// valid JSON but envelope `type` is something other than
+// "result" (cursor shipped a future envelope shape we don't
+// know about yet). Must be surfaced as an error, NOT silently
+// treated as the "result" envelope (which would publish
+// arbitrary fields into RunResult.Text).
+func TestRunPrintMode_UnknownEnvelopeType_ReturnsParseError(t *testing.T) {
+	bin := requireStubCursor(t)
+	t.Setenv("CURSOR_STUB_BEHAVIOR", "json_unknown_type")
+
+	s := newStubStarter(t, bin)
+	ws := t.TempDir()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	_, err := runPrintMode(ctx, s,
+		agent.StartConfig{Workspace: ws},
+		[]agent.ContentBlock{{Type: agent.ContentText, Text: "hi"}})
+	if err == nil {
+		t.Fatal("err = nil, want non-nil for unknown envelope type")
+	}
+	if !strings.Contains(err.Error(), "unexpected envelope type") {
+		t.Errorf("err = %q, want contains 'unexpected envelope type'", err.Error())
+	}
+	if !strings.Contains(err.Error(), "future_envelope") {
+		t.Errorf("err = %q, want contains the unknown type value", err.Error())
+	}
+}
+
+// TestRunPrintMode_ExitOneWithStderr — exit 1 with stderr
+// output. The error must surface stderr.
+func TestRunPrintMode_ExitOneWithStderr(t *testing.T) {
+	bin := requireStubCursor(t)
+	t.Setenv("CURSOR_STUB_BEHAVIOR", "exit_1")
+	t.Setenv("CURSOR_STUB_TEXT", "boom")
+
+	s := newStubStarter(t, bin)
+	ws := t.TempDir()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	_, err := runPrintMode(ctx, s,
+		agent.StartConfig{Workspace: ws},
+		[]agent.ContentBlock{{Type: agent.ContentText, Text: "hello"}})
+	if err == nil {
+		t.Fatal("err = nil, want non-nil on exit 1")
+	}
+	if !strings.Contains(err.Error(), "boom") {
+		t.Errorf("err = %q, want contains 'boom' (stderr surfaced)", err.Error())
+	}
+	if !strings.Contains(err.Error(), "cursor run:") {
+		t.Errorf("err = %q, want contains 'cursor run:' prefix", err.Error())
+	}
+}
+
+// TestRunPrintMode_MissingWorkspace — guard: cfg.Workspace
+// is required.
+func TestRunPrintMode_MissingWorkspace(t *testing.T) {
+	bin := requireStubCursor(t)
+	t.Setenv("CURSOR_STUB_BEHAVIOR", "json")
+	t.Setenv("CURSOR_STUB_TEXT", "READY")
+
+	s := newStubStarter(t, bin)
+
+	_, err := runPrintMode(context.Background(), s,
+		agent.StartConfig{Workspace: ""},
+		[]agent.ContentBlock{{Type: agent.ContentText, Text: "hi"}})
+	if err == nil {
+		t.Fatal("err = nil, want non-nil on empty workspace")
+	}
+	if !strings.Contains(err.Error(), "workspace is required") {
+		t.Errorf("err = %q, want contains 'workspace is required'", err.Error())
+	}
+}
+
+// TestRunPrintMode_EmptyPrompt — guard: empty prompt blocks
+// must be rejected before spawning.
+func TestRunPrintMode_EmptyPrompt(t *testing.T) {
+	bin := requireStubCursor(t)
+	t.Setenv("CURSOR_STUB_BEHAVIOR", "json")
+	t.Setenv("CURSOR_STUB_TEXT", "READY")
+
+	s := newStubStarter(t, bin)
+	ws := t.TempDir()
+
+	_, err := runPrintMode(context.Background(), s,
+		agent.StartConfig{Workspace: ws},
+		[]agent.ContentBlock{{Type: agent.ContentText, Text: ""}})
+	if err == nil {
+		t.Fatal("err = nil, want non-nil on empty prompt")
+	}
+	if !strings.Contains(err.Error(), "empty prompt") {
+		t.Errorf("err = %q, want contains 'empty prompt'", err.Error())
+	}
+}
+
 // TestAppendCursorAuditFields_NilSessionIDAndUsageDoesNotPanic
 // — parallels the claudecode
 // `TestAppendAuditFields_NilUsageDoesNotPanic` family. The
@@ -417,147 +518,5 @@ func TestAppendCursorAuditFields_NilSessionIDAndUsageDoesNotPanic(t *testing.T) 
 				t.Errorf("appendCursorAuditFields = %q, want %q", got, tc.want)
 			}
 		})
-	}
-}
-
-// TestRunPrintMode_ExitOneWithStderr — exit 1 with stderr
-// output. The error must surface stderr.
-func TestRunPrintMode_ExitOneWithStderr(t *testing.T) {
-	bin := requireStubCursor(t)
-	withStubEnv(t, "exit_1", "boom")
-
-	s := newStubStarter(t, bin)
-	ws := t.TempDir()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	_, err := runPrintMode(ctx, s,
-		agent.StartConfig{Workspace: ws},
-		[]agent.ContentBlock{{Type: agent.ContentText, Text: "hello"}})
-	if err == nil {
-		t.Fatal("err = nil, want non-nil on exit 1")
-	}
-	if !strings.Contains(err.Error(), "boom") {
-		t.Errorf("err = %q, want contains 'boom' (stderr surfaced)", err.Error())
-	}
-	if !strings.Contains(err.Error(), "cursor run:") {
-		t.Errorf("err = %q, want contains 'cursor run:' prefix", err.Error())
-	}
-}
-
-// TestRunPrintMode_EmptyAnswer — process exits 0 but
-// produced no output. Must return "empty answer" error.
-func TestRunPrintMode_EmptyAnswer(t *testing.T) {
-	bin := requireStubCursor(t)
-	withStubEnv(t, "empty", "")
-
-	s := newStubStarter(t, bin)
-	ws := t.TempDir()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	_, err := runPrintMode(ctx, s,
-		agent.StartConfig{Workspace: ws},
-		[]agent.ContentBlock{{Type: agent.ContentText, Text: "hi"}})
-	if err == nil {
-		t.Fatal("err = nil, want non-nil on empty answer")
-	}
-	if !strings.Contains(err.Error(), "empty answer") {
-		t.Errorf("err = %q, want contains 'empty answer'", err.Error())
-	}
-}
-
-// TestRunPrintMode_EchoPrompt — regression guard: the prompt
-// must be forwarded to the child process. The stub's "echo"
-// behavior prints the last positional arg verbatim.
-func TestRunPrintMode_EchoPrompt(t *testing.T) {
-	bin := requireStubCursor(t)
-	withStubEnv(t, "echo", "")
-
-	s := newStubStarter(t, bin)
-	ws := t.TempDir()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	const userPrompt = "PROMOTE_ME_IF_FORWARDED"
-	result, err := runPrintMode(ctx, s,
-		agent.StartConfig{Workspace: ws},
-		[]agent.ContentBlock{{Type: agent.ContentText, Text: userPrompt}})
-	if err != nil {
-		t.Fatalf("err = %v", err)
-	}
-	if !strings.Contains(result.Text, userPrompt) {
-		t.Errorf("Text = %q, want contains %q (prompt was NOT forwarded to child)", result.Text, userPrompt)
-	}
-}
-
-// TestRunPrintMode_MissingWorkspace — guard: cfg.Workspace
-// is required.
-func TestRunPrintMode_MissingWorkspace(t *testing.T) {
-	bin := requireStubCursor(t)
-	withStubEnv(t, "happy", "READY")
-
-	s := newStubStarter(t, bin)
-
-	_, err := runPrintMode(context.Background(), s,
-		agent.StartConfig{Workspace: ""},
-		[]agent.ContentBlock{{Type: agent.ContentText, Text: "hi"}})
-	if err == nil {
-		t.Fatal("err = nil, want non-nil on empty workspace")
-	}
-	if !strings.Contains(err.Error(), "workspace is required") {
-		t.Errorf("err = %q, want contains 'workspace is required'", err.Error())
-	}
-}
-
-// TestRunPrintMode_EmptyPrompt — guard: empty prompt blocks
-// must be rejected before spawning.
-func TestRunPrintMode_EmptyPrompt(t *testing.T) {
-	bin := requireStubCursor(t)
-	withStubEnv(t, "happy", "READY")
-
-	s := newStubStarter(t, bin)
-	ws := t.TempDir()
-
-	_, err := runPrintMode(context.Background(), s,
-		agent.StartConfig{Workspace: ws},
-		[]agent.ContentBlock{{Type: agent.ContentText, Text: ""}})
-	if err == nil {
-		t.Fatal("err = nil, want non-nil on empty prompt")
-	}
-	if !strings.Contains(err.Error(), "empty prompt") {
-		t.Errorf("err = %q, want contains 'empty prompt'", err.Error())
-	}
-}
-
-// TestRunPrintMode_MultipleTextBlocks — multiple text blocks
-// are joined with newlines into a single prompt.
-func TestRunPrintMode_MultipleTextBlocks(t *testing.T) {
-	bin := requireStubCursor(t)
-	withStubEnv(t, "echo", "")
-
-	s := newStubStarter(t, bin)
-	ws := t.TempDir()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	result, err := runPrintMode(ctx, s,
-		agent.StartConfig{Workspace: ws},
-		[]agent.ContentBlock{
-			{Type: agent.ContentText, Text: "line1"},
-			{Type: agent.ContentText, Text: "line2"},
-		})
-	if err != nil {
-		t.Fatalf("err = %v", err)
-	}
-	if !strings.Contains(result.Text, "line1") {
-		t.Errorf("Text = %q, want contains 'line1'", result.Text)
-	}
-	if !strings.Contains(result.Text, "line2") {
-		t.Errorf("Text = %q, want contains 'line2'", result.Text)
 	}
 }

@@ -55,10 +55,12 @@ func TestDefaultACPArgs_ForceBeforeACP(t *testing.T) {
 }
 
 // TestPrintModeArgs_PrependsFullAccess verifies print-mode
-// uses the same parent flags, still before `-p`.
+// uses the same parent flags, still before `-p`, and the JSON
+// output format so runPrintMode can parse the per-turn usage
+// envelope (see internal/bridge/cursor/print.go).
 func TestPrintModeArgs_PrependsFullAccess(t *testing.T) {
 	got := printModeArgs("hello", nil)
-	want := withFullAccess("-p", "hello", "--output-format", "text")
+	want := withFullAccess("-p", "hello", "--output-format", "json")
 	if !equalStrings(got, want) {
 		t.Errorf("printModeArgs = %v, want %v", got, want)
 	}

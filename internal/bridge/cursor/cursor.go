@@ -14,8 +14,13 @@
 //
 //   - RunOnce (one-shot: /gtw commit, buildAgentPrompt) →
 //     `cursor-agent --force --trust --sandbox disabled --approve-mcps
-//     -p "prompt" --output-format text`. The process exits after
-//     the turn.
+//     -p "prompt" --output-format json`. The process exits after
+//     the turn; stdout carries a single-line result envelope
+//     (subtype / usage / session_id / result) that runPrintMode
+//     decodes into RunResult.{Text, Subtype, SessionID, Usage}
+//     so the channel footer renders token usage for one-shot
+//     calls the same way it already does for codex / claudecode /
+//     pi / opencode print-modes.
 //
 // Permission defaults match the other ChatOps bridges (Claude
 // `--permission-mode bypassPermissions`, Codex

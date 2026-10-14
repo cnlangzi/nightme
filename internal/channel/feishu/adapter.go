@@ -3153,6 +3153,25 @@ func (a *Adapter) SetLogger(l *slog.Logger) {
 	a.mu.Unlock()
 }
 
+// WakeKick forces an immediate F-41 prober tick. Implements the
+// runtime.WakeKicker interface; called from internal/runtime
+// when the OS reports a resume-from-sleep. No-op when the
+// prober is dormant (WS already connected) — Kick returns false
+// and we skip the wakeKickCount bump so the metric reflects
+// only events that drove a real force-reconnect.
+//
+// Safe for concurrent use. Cheap — does not block on network
+// I/O. The prober's Kick synchronously calls the restarter
+// closure, which itself spawns the actual SDK cycle.
+func (a *Adapter) WakeKick() {
+	if a == nil || a.prober == nil {
+		return
+	}
+	if a.prober.Kick() {
+		a.prober.incWakeKick()
+	}
+}
+
 // Health returns a live snapshot of the WebSocket lifecycle state.
 // The snapshot is a copy (deep-enough for JSON marshaling), so
 // callers may mutate it freely without affecting the adapter's

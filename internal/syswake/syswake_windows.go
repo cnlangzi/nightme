@@ -91,7 +91,8 @@ func newPlatformDetector(cfg Config) (Detector, error) {
 
 	className, err := windows.UTF16PtrFromString("NightmeWakeWatcher")
 	if err != nil {
-		return nil, fmt.Errorf("syswake/windows: UTF16PtrFromString: %w", err)
+		cfg.Logger.Debug("syswake/windows: UTF16PtrFromString failed; wake detector disabled", "err", err)
+		return newNoopDetector(), nil
 	}
 
 	d := &windowsDetector{
@@ -122,7 +123,12 @@ func newPlatformDetector(cfg Config) (Detector, error) {
 
 	atom, _, _ := registerClassExW.Call(uintptr(unsafe.Pointer(&wc)))
 	if atom == 0 {
-		return nil, fmt.Errorf("syswake/windows: RegisterClassExW failed")
+		// Typical on Session 0 (services, CI runners without an
+		// interactive desktop): RegisterClassExW requires a window
+		// station that owns a desktop. Fall back to noop so the
+		// daemon still boots without wake detection.
+		cfg.Logger.Debug("syswake/windows: RegisterClassExW failed (Session 0?); wake detector disabled")
+		return newNoopDetector(), nil
 	}
 
 	windowName, _ := windows.UTF16PtrFromString("NightmeWakeWatcher")
@@ -188,7 +194,8 @@ func newPlatformDetector(cfg Config) (Detector, error) {
 	}
 	if d.hwnd == 0 {
 		<-d.pumpDone // let the failed goroutine exit cleanly
-		return nil, fmt.Errorf("syswake/windows: CreateWindowExW returned 0")
+		cfg.Logger.Debug("syswake/windows: CreateWindowExW returned 0; wake detector disabled")
+		return newNoopDetector(), nil
 	}
 	return d, nil
 }

@@ -5,26 +5,26 @@
 //
 //   - "exit_1"         → prints CURSOR_STUB_TEXT to stderr, exit 1
 //   - "json"           → prints a single-line cursorResultEnvelope JSON
-//                       with CURSOR_STUB_TEXT as the `result` field
-//                       and CURSOR_STUB_USAGE as a JSON-encoded usage
-//                       object (default: {"inputTokens":100,
-//                       "outputTokens":20,"cacheReadTokens":40,
-//                       "cacheWriteTokens":0}).
+//     with CURSOR_STUB_TEXT as the `result` field
+//     and CURSOR_STUB_USAGE as a JSON-encoded usage
+//     object (default: {"inputTokens":100,
+//     "outputTokens":20,"cacheReadTokens":40,
+//     "cacheWriteTokens":0}).
 //   - "json_is_error"  → same envelope shape as "json" but with
-//                       `is_error: true` and `subtype` from
-//                       CURSOR_STUB_SUBTYPE (verbatim — no default).
+//     `is_error: true` and `subtype` from
+//     CURSOR_STUB_SUBTYPE (verbatim — no default).
 //   - "json_with_stderr" → same envelope as "json" to stdout AND
-//                       a non-JSON noise line to stderr.
+//     a non-JSON noise line to stderr.
 //   - "json_empty_result" → valid envelope with empty `result`
-//                       field — covers the empty-answer guard.
+//     field — covers the empty-answer guard.
 //   - "malformed_json" → emits a non-JSON line (e.g. "{not json}")
-//                       to stdout — covers the hard parse-error
-//                       path; runPrintMode must surface this as
-//                       an error rather than silently fall back
-//                       to text mode (which was a real bug before
-//                       the JSON-only contract).
+//     to stdout — covers the hard parse-error
+//     path; runPrintMode must surface this as
+//     an error rather than silently fall back
+//     to text mode (which was a real bug before
+//     the JSON-only contract).
 //   - "json_unknown_type" → valid JSON but `type != "result"` —
-//                       covers the schema-drift guard.
+//     covers the schema-drift guard.
 package main
 
 import (

@@ -457,6 +457,16 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 		return errors.New("run: all channels failed to start; check creds and logs")
 	}
 
+	// ── Phase 3.5: OS wake-from-sleep watcher ─────────────────
+	// F-fix-os-sleep-wakeup: detect OS resume-from-sleep and
+	// immediately kick every WakeKicker channel's reconnect
+	// path. The 30s F-41 prober (and the SDK's 2-min default)
+	// are unaware of host suspension; without this watcher the
+	// post-wake reconnect waits up to 30s for the next ticker
+	// tick (or longer for the network stack to recover). No-op
+	// on platforms without a wake detector.
+	startWakeWatcher(ctx, startedChannels, logger)
+
 	// ── Phase 4: start gateway ────────────────────────────────
 	gwImpl := gateway.New(ir)
 	gwImpl.AttachPumps(pumps...)

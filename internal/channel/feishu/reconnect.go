@@ -75,6 +75,13 @@ type prober struct {
 	lastForceAt atomic.Pointer[time.Time]
 	lastError   atomic.Pointer[string]
 
+	// wakeKickCount tracks OS-wake fan-outs since daemon start.
+	// Bumped by (*Adapter).WakeKick via incWakeKick after a
+	// non-dormant Kick() returns true. Surfaced through
+	// ProberSnapshot.WakeKickCount so `nightme health` shows
+	// the wake-kick rate.
+	wakeKickCount atomic.Int64
+
 	// Started flag — guards against double-Start (which would leak
 	// a goroutine). CompareAndSwap ensures only one transition.
 	started atomic.Bool
@@ -225,12 +232,13 @@ func (p *prober) tick() {
 // goroutine. The booleans + counters come from atomic primitives;
 // the time.Time pointers are loaded atomically.
 type ProberSnapshot struct {
-	Active      bool          // prober is currently running its 30s ticker
-	Interval    time.Duration // ticker period
-	StartedAt   time.Time     // when the current cycle started (zero if inactive)
-	ForceCount  int64         // total force-reconnect attempts since daemon start
-	LastForceAt time.Time     // when the most recent attempt ran (zero if none)
-	LastError   string        // error from the most recent attempt ("" if last was clean)
+	Active        bool          // prober is currently running its 30s ticker
+	Interval      time.Duration // ticker period
+	StartedAt     time.Time     // when the current cycle started (zero if inactive)
+	ForceCount    int64         // total force-reconnect attempts since daemon start
+	LastForceAt   time.Time     // when the most recent attempt ran (zero if none)
+	LastError     string        // error from the most recent attempt ("" if last was clean)
+	WakeKickCount int64         // OS-wake fan-outs since daemon start (F-fix-os-sleep-wakeup)
 }
 
 func (p *prober) Snapshot() ProberSnapshot {
@@ -248,7 +256,54 @@ func (p *prober) Snapshot() ProberSnapshot {
 	if e := p.lastError.Load(); e != nil {
 		snap.LastError = *e
 	}
+	snap.WakeKickCount = p.wakeKickCount.Load()
 	return snap
+}
+
+// Kick fires an immediate force-reconnect cycle as if the 30s
+// ticker had fired. Returns false if the prober is dormant
+// (not running) — there is no force-reconnect to perform; the
+// WS is already up and the wake-kick is a no-op. Returns true
+// after tick() has been scheduled.
+//
+// Rationale (F-fix-os-sleep-wakeup): on macOS/Linux/Windows,
+// the host may suspend the Go process during sleep; on resume
+// the next 30s tick is up to ~30s away, and the WS reconnect
+// blocks behind network-stack recovery (TLS resume, captive
+// portal, WiFi reauth) that we cannot otherwise observe.
+// Calling Kick from an OS-wake event handler short-circuits
+// that wait.
+//
+// Blocking: Kick calls tick(), which calls ReconnectSDK.
+// ReconnectSDK takes a.mu and blocks up to ~2s waiting for
+// wsDone. A concurrent Kick + ticker therefore serializes
+// through a.mu — the second caller waits up to 2s before
+// either observing wsDone and re-spawning a fresh client, or
+// hitting the 2s timeout and returning. The wake watcher fans
+// out to each channel synchronously, so a multi-channel fan-out
+// stacks this 2s per channel. Today that is one channel
+// (feishu); add the wait to future channels' WakeKick
+// implementations or dispatch the kick onto the prober's
+// loop goroutine if it becomes a concern.
+//
+// Concurrency: safe to call concurrently with the ticker.
+// Bump wakeKickCount via the caller after a successful Kick
+// so operators can see wake fan-out rate in nightme health.
+func (p *prober) Kick() bool {
+	if p == nil || !p.started.Load() {
+		return false
+	}
+	p.tick()
+	return true
+}
+
+// incWakeKick bumps the WakeKickCount field. Called by
+// (*Adapter).WakeKick after a Kick() returned true.
+func (p *prober) incWakeKick() {
+	if p == nil {
+		return
+	}
+	p.wakeKickCount.Add(1)
 }
 
 // Compile-time guard that ProberSnapshot is the wire format

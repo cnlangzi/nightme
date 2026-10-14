@@ -4,7 +4,9 @@ go 1.27.0
 
 require (
 	github.com/aymanbagabas/go-pty v0.2.3
+	github.com/ebitengine/purego v0.11.1
 	github.com/getlantern/systray v1.2.2
+	github.com/godbus/dbus/v5 v5.2.4
 	github.com/gorilla/websocket v1.5.3
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/k2-fsa/sherpa-onnx-go v1.13.8

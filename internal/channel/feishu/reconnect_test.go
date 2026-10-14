@@ -189,3 +189,100 @@ func TestProber_StartStopSequential(t *testing.T) {
 	p.Stop()
 	p.Stop() // second Stop should be no-op
 }
+
+// TestProber_Kick exercises the F-fix-os-sleep-wakeup wake
+// kick: Kick() while running fires the restarter synchronously,
+// returning true and incrementing forceCount. We verify the
+// returned bool is correct and the restarter ran the expected
+// number of times.
+func TestProber_Kick(t *testing.T) {
+	var calls atomic.Int32
+	p := newTestProber(func(_ context.Context) error {
+		calls.Add(1)
+		return nil
+	})
+	// Always return false from isConnectedFn so the prober
+	// never self-stops on a successful tick — we want a stable
+	// "running" state to assert Kick against.
+	p.isConnectedFn = func() bool { return false }
+
+	if !p.Start() {
+		t.Fatal("Start failed")
+	}
+	defer p.Stop()
+
+	for i := 0; i < 3; i++ {
+		if !p.Kick() {
+			t.Fatalf("Kick #%d returned false (prober should be active)", i)
+		}
+	}
+	if got := calls.Load(); got != 3 {
+		t.Errorf("restarter called %d times, want 3", got)
+	}
+	if got := p.Snapshot().ForceCount; got != 3 {
+		t.Errorf("ForceCount = %d, want 3", got)
+	}
+}
+
+// TestProber_KickDormantNoop verifies Kick returns false and
+// does not invoke the restarter when the prober was never
+// started. This is the "wake event during steady state"
+// path — the WS is already up, no force-reconnect needed.
+func TestProber_KickDormantNoop(t *testing.T) {
+	var calls atomic.Int32
+	p := newTestProber(func(_ context.Context) error {
+		calls.Add(1)
+		return nil
+	})
+
+	if p.Kick() {
+		t.Error("Kick returned true on dormant prober (Start never called)")
+	}
+	if got := calls.Load(); got != 0 {
+		t.Errorf("restarter called %d times on dormant prober, want 0", got)
+	}
+	if got := p.Snapshot().ForceCount; got != 0 {
+		t.Errorf("ForceCount = %d on dormant prober, want 0", got)
+	}
+}
+
+// TestProber_KickAfterStopNoop verifies Kick returns false once
+// Stop has run — same reasoning as TestProber_KickDormantNoop
+// but exercises the Start → Stop → Wake path that can occur
+// when the SDK reports Connected=true before the OS wakes the
+// daemon (rare but possible on a fast-resume).
+func TestProber_KickAfterStopNoop(t *testing.T) {
+	var calls atomic.Int32
+	p := newTestProber(func(_ context.Context) error {
+		calls.Add(1)
+		return nil
+	})
+	p.isConnectedFn = func() bool { return false }
+	p.Start()
+	p.Stop()
+
+	if p.Kick() {
+		t.Error("Kick returned true after Stop")
+	}
+	if got := calls.Load(); got != 0 {
+		t.Errorf("restarter called %d times after Stop, want 0", got)
+	}
+}
+
+// TestProber_WakeKickCount bumps wakeKickCount via incWakeKick
+// and confirms the value surfaces through Snapshot.WakeKickCount.
+// The field is the operator-visible wake-fan-out metric shown in
+// `nightme health` output.
+func TestProber_WakeKickCount(t *testing.T) {
+	p := newTestProber(func(_ context.Context) error { return nil })
+	p.isConnectedFn = func() bool { return false }
+	p.Start()
+	defer p.Stop()
+
+	for i := 0; i < 5; i++ {
+		p.incWakeKick()
+	}
+	if got := p.Snapshot().WakeKickCount; got != 5 {
+		t.Errorf("WakeKickCount = %d, want 5", got)
+	}
+}

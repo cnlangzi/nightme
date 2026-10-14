@@ -15,7 +15,6 @@ package syswake
 // recovery is just unavailable in that environment.
 
 import (
-	"context"
 	"log/slog"
 	"sync"
 
@@ -26,13 +25,12 @@ type linuxDetector struct {
 	ch        chan struct{}
 	conn      *dbus.Conn
 	logger    *slog.Logger
-	onWake    func(context.Context)
 	sigCh     chan *dbus.Signal
 	closeOnce sync.Once
 	done      chan struct{}
 }
 
-func newPlatformDetector(ctx context.Context, cfg Config) (Detector, error) {
+func newPlatformDetector(cfg Config) (Detector, error) {
 	conn, err := dbus.SystemBus()
 	if err != nil {
 		cfg.Logger.Debug("syswake/linux: no system bus; wake detector disabled", "err", err)
@@ -58,42 +56,38 @@ func newPlatformDetector(ctx context.Context, cfg Config) (Detector, error) {
 		ch:     make(chan struct{}, 4),
 		conn:   conn,
 		logger: cfg.Logger,
-		onWake: cfg.OnWake,
 		sigCh:  sigCh,
 		done:   make(chan struct{}),
 	}
-	go d.pump(ctx)
+	// Register the signal channel BEFORE starting the pump so a
+	// PrepareForSleep signal arriving between conn creation and
+	// pump startup cannot be lost. conn.Close() later in Close()
+	// closes sigCh, which lets the pump select fall through.
+	conn.Signal(sigCh)
+	go d.pump()
 	return d, nil
 }
 
-func (d *linuxDetector) pump(ctx context.Context) {
+func (d *linuxDetector) pump() {
 	defer close(d.done)
-	d.conn.Signal(d.sigCh)
 	for {
-		select {
-		case <-ctx.Done():
+		sig, ok := <-d.sigCh
+		if !ok {
 			return
-		case sig, ok := <-d.sigCh:
-			if !ok {
-				return
-			}
-			if sig == nil || sig.Name != "PrepareForSleep" {
-				continue
-			}
-			if len(sig.Body) != 1 {
-				continue
-			}
-			sleeping, ok := sig.Body[0].(bool)
-			if !ok || sleeping {
-				continue
-			}
-			select {
-			case d.ch <- struct{}{}:
-			default:
-			}
-			if d.onWake != nil {
-				d.onWake(ctx)
-			}
+		}
+		if sig == nil || sig.Name != "PrepareForSleep" {
+			continue
+		}
+		if len(sig.Body) != 1 {
+			continue
+		}
+		sleeping, ok := sig.Body[0].(bool)
+		if !ok || sleeping {
+			continue
+		}
+		select {
+		case d.ch <- struct{}{}:
+		default:
 		}
 	}
 }
@@ -103,7 +97,8 @@ func (d *linuxDetector) WakeChan() <-chan struct{} { return d.ch }
 func (d *linuxDetector) Close() error {
 	var err error
 	d.closeOnce.Do(func() {
-		err = d.conn.Close() // also removes match rules
+		err = d.conn.Close() // also removes match rules and closes sigCh
+		<-d.done             // wait for pump to drain
 	})
 	return err
 }

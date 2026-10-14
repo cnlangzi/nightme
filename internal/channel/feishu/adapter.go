@@ -3160,9 +3160,10 @@ func (a *Adapter) SetLogger(l *slog.Logger) {
 // and we skip the wakeKickCount bump so the metric reflects
 // only events that drove a real force-reconnect.
 //
-// Safe for concurrent use. Cheap — does not block on network
-// I/O. The prober's Kick synchronously calls the restarter
-// closure, which itself spawns the actual SDK cycle.
+// Blocking: not cheap — Kick calls tick(), which runs
+// ReconnectSDK under a.mu and blocks up to ~2s on wsDone. The
+// wake watcher fans out to every WakeKicker synchronously, so
+// the 2s wait stacks per channel. See prober.Kick for details.
 func (a *Adapter) WakeKick() {
 	if a == nil || a.prober == nil {
 		return

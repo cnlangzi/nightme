@@ -274,16 +274,21 @@ func (p *prober) Snapshot() ProberSnapshot {
 // Calling Kick from an OS-wake event handler short-circuits
 // that wait.
 //
-// Concurrency: Kick is safe to call concurrently with the
-// ticker (both call tick()). Serialization is delegated to
-// ReconnectSDK's existing a.mu mutex (adapter.go:524) — a
-// concurrent Kick + ticker will at worst enqueue two
-// force-reconnect cycles back-to-back. The first to grab a.mu
-// cancels the WS; the second waits, observes wsDone, and
-// re-spawns a fresh client. Functionally correct but slightly
-// wasteful; trade-off keeps Kick non-blocking for the wake
-// handler. Bump wakeKickCount via the caller after a successful
-// Kick so operators can see wake fan-out rate in nightme health.
+// Blocking: Kick calls tick(), which calls ReconnectSDK.
+// ReconnectSDK takes a.mu and blocks up to ~2s waiting for
+// wsDone. A concurrent Kick + ticker therefore serializes
+// through a.mu — the second caller waits up to 2s before
+// either observing wsDone and re-spawning a fresh client, or
+// hitting the 2s timeout and returning. The wake watcher fans
+// out to each channel synchronously, so a multi-channel fan-out
+// stacks this 2s per channel. Today that is one channel
+// (feishu); add the wait to future channels' WakeKick
+// implementations or dispatch the kick onto the prober's
+// loop goroutine if it becomes a concern.
+//
+// Concurrency: safe to call concurrently with the ticker.
+// Bump wakeKickCount via the caller after a successful Kick
+// so operators can see wake fan-out rate in nightme health.
 func (p *prober) Kick() bool {
 	if p == nil || !p.started.Load() {
 		return false

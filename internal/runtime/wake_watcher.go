@@ -48,25 +48,25 @@ func startWakeWatcher(
 	startedChannels []channel.Channel,
 	logger *slog.Logger,
 ) {
-	anySlice := make([]any, len(startedChannels))
-	for i, ch := range startedChannels {
-		anySlice[i] = ch
+	kickers := make([]WakeKicker, 0, len(startedChannels))
+	for _, ch := range startedChannels {
+		if ch == nil {
+			continue
+		}
+		if k, ok := ch.(WakeKicker); ok {
+			kickers = append(kickers, k)
+		}
 	}
-	startWakeWatcherWithFactory(ctx, anySlice, logger, syswake.New)
+	startWakeWatcherWithFactory(ctx, kickers, logger, syswake.New)
 }
 
 // startWakeWatcherWithFactory is the test-seam form of
 // startWakeWatcher. Production callers use startWakeWatcher;
 // tests pass a factory that returns a *syswake.fakeDetector so
 // they can deterministically fire wake events.
-//
-// The slice element type is `any` (not channel.Channel) so
-// tests don't have to stub the full channel.Channel interface
-// (8 methods) just to feed a WakeKicker. Production callers
-// pass []channel.Channel which auto-satisfies `[]any`.
 func startWakeWatcherWithFactory(
 	ctx context.Context,
-	startedChannels []any,
+	kickers []WakeKicker,
 	logger *slog.Logger,
 	newDetector detectorFactory,
 ) {
@@ -74,17 +74,6 @@ func startWakeWatcherWithFactory(
 		logger = slog.Default()
 	}
 
-	var kickers []WakeKicker
-	for _, ch := range startedChannels {
-		if ch == nil {
-			continue
-		}
-		k, ok := ch.(WakeKicker)
-		if !ok {
-			continue
-		}
-		kickers = append(kickers, k)
-	}
 	if len(kickers) == 0 {
 		logger.Debug("wake: no channels implement WakeKicker; wake watcher not started")
 		return

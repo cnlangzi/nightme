@@ -5,7 +5,7 @@ package syswake
 // Windows wake detection via WM_POWERBROADCAST. A hidden
 // top-level window receives PBT_APMRESUMEAUTOMATIC whenever
 // the system resumes from sleep automatically. The WndProc
-// dispatches the event to a Go channel and invokes OnWake.
+// dispatches the event to a Go channel.
 //
 // WndProc is bound via windows.NewCallback so the goroutine
 // stays pure Go — no CGo. The window is invisible
@@ -18,10 +18,11 @@ package syswake
 // debug and falls back to a no-op in that case.
 
 import (
-	"context"
 	"fmt"
 	"log/slog"
+	"runtime"
 	"sync"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -29,6 +30,10 @@ import (
 
 const (
 	wmPowerBroadcast = 0x0218
+	// pbtApmResumeAuto and wmQuit both equal 0x0012 — a Win32
+	// quirk. PBT_APMRESUMEAUTOMATIC is a wParam value;
+	// WM_QUIT is a message id. They are never compared in the
+	// same expression.
 	pbtApmResumeAuto = 0x0012
 	wsExToolWindow   = 0x00000080
 	wmQuit           = 0x0012
@@ -64,14 +69,14 @@ type msg struct {
 type windowsDetector struct {
 	ch        chan struct{}
 	logger    *slog.Logger
-	onWake    func(context.Context)
 	hwnd      uintptr
+	threadID  uint32 // OS thread id of the pump goroutine; 0 until started is closed
 	pumpDone  chan struct{}
+	started   chan struct{} // closed once CreateWindowEx + GetCurrentThreadId have run
 	closeOnce sync.Once
-	quitOnce  sync.Once // PostQuitMessage is called once on Close
 }
 
-func newPlatformDetector(ctx context.Context, cfg Config) (Detector, error) {
+func newPlatformDetector(cfg Config) (Detector, error) {
 	user32 := windows.NewLazySystemDLL("user32.dll")
 	kernel32 := windows.NewLazySystemDLL("kernel32.dll")
 
@@ -80,10 +85,9 @@ func newPlatformDetector(ctx context.Context, cfg Config) (Detector, error) {
 	getMessageW := user32.NewProc("GetMessageW")
 	dispatchMessageW := user32.NewProc("DispatchMessageW")
 	defWindowProcW := user32.NewProc("DefWindowProcW")
-	postQuitMessage := user32.NewProc("PostQuitMessage")
-	getModuleHandleW := kernel32.NewProc("GetModuleHandleW")
+	getCurrentThreadId := kernel32.NewProc("GetCurrentThreadId")
 
-	hInstance, _, _ := getModuleHandleW.Call()
+	hInstance, _, _ := kernel32.NewProc("GetModuleHandleW").Call()
 
 	className, err := windows.UTF16PtrFromString("NightmeWakeWatcher")
 	if err != nil {
@@ -93,8 +97,8 @@ func newPlatformDetector(ctx context.Context, cfg Config) (Detector, error) {
 	d := &windowsDetector{
 		ch:       make(chan struct{}, 4),
 		logger:   cfg.Logger,
-		onWake:   cfg.OnWake,
 		pumpDone: make(chan struct{}),
+		started:  make(chan struct{}),
 	}
 
 	wndProc := func(hwnd, msgID, wParam, lParam uintptr) uintptr {
@@ -102,9 +106,6 @@ func newPlatformDetector(ctx context.Context, cfg Config) (Detector, error) {
 			select {
 			case d.ch <- struct{}{}:
 			default:
-			}
-			if d.onWake != nil {
-				d.onWake(context.Background())
 			}
 			return 0
 		}
@@ -124,62 +125,72 @@ func newPlatformDetector(ctx context.Context, cfg Config) (Detector, error) {
 		return nil, fmt.Errorf("syswake/windows: RegisterClassExW failed")
 	}
 
-	// CreateWindowExW(dwExStyle, lpClassName, lpWindowName,
-	//   dwStyle, x, y, nWidth, nHeight, hWndParent, hMenu,
-	//   hInstance, lpParam)
 	windowName, _ := windows.UTF16PtrFromString("NightmeWakeWatcher")
-	hwnd, _, _ := createWindowExW.Call(
-		wsExToolWindow,
-		uintptr(unsafe.Pointer(className)),
-		uintptr(unsafe.Pointer(windowName)),
-		0, // dwStyle = WS_OVERLAPPED | WS_HIDDEN if 0
-		0xFFFFFFFF,
-		0xFFFFFFFF,
-		0,
-		0,
-		0,
-		0,
-		hInstance,
-		0,
-	)
-	if hwnd == 0 {
+
+	// The window must be created AND pumped on the same OS thread
+	// — Windows ties a window to its creating thread, and only
+	// that thread's GetMessage/DispatchMessage pair receives the
+	// window's messages. Locking the goroutine to its OS thread
+	// for the whole lifetime (RegisterClassEx is process-global
+	// so it can run from any thread) makes the window owner and
+	// pump owner identical.
+	go func() {
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+		defer close(d.pumpDone)
+
+		hwnd, _, _ := createWindowExW.Call(
+			wsExToolWindow,
+			uintptr(unsafe.Pointer(className)),
+			uintptr(unsafe.Pointer(windowName)),
+			0, // dwStyle
+			0xFFFFFFFF,
+			0xFFFFFFFF,
+			0,
+			0,
+			0,
+			0,
+			hInstance,
+			0,
+		)
+		tid, _, _ := getCurrentThreadId.Call()
+		d.threadID = uint32(tid)
+
+		if hwnd == 0 {
+			close(d.started)
+			return
+		}
+		d.hwnd = hwnd
+		close(d.started)
+
+		m := msg{}
+		for {
+			r, _, _ := getMessageW.Call(
+				uintptr(unsafe.Pointer(&m)), 0, 0, 0,
+			)
+			if int32(r) == -1 {
+				return
+			}
+			if m.Message == wmQuit {
+				return
+			}
+			if r == 0 {
+				continue
+			}
+			_, _, _ = dispatchMessageW.Call(uintptr(unsafe.Pointer(&m)))
+		}
+	}()
+
+	select {
+	case <-d.started:
+	case <-time.After(5 * time.Second):
+		return nil, fmt.Errorf("syswake/windows: pump goroutine did not start within 5s")
+	}
+	if d.hwnd == 0 {
+		<-d.pumpDone // let the failed goroutine exit cleanly
 		return nil, fmt.Errorf("syswake/windows: CreateWindowExW returned 0")
 	}
-	d.hwnd = hwnd
-
-	go d.pump(getMessageW, dispatchMessageW, postQuitMessage, ctx)
 	return d, nil
-}
-
-func (d *windowsDetector) pump(
-	getMessageW, dispatchMessageW, postQuitMessage *windows.LazyProc,
-	ctx context.Context,
-) {
-	defer close(d.pumpDone)
-	m := msg{}
-	for {
-		// GetMessageW pumps messages. Returns -1 on error,
-		// 0 on WM_QUIT, positive on a regular message.
-		r, _, _ := getMessageW.Call(
-			uintptr(unsafe.Pointer(&m)), 0, 0, 0,
-		)
-		if int32(r) == -1 {
-			return
-		}
-		if m.Message == wmQuit {
-			return
-		}
-		if r == 0 {
-			continue
-		}
-		_, _, _ = dispatchMessageW.Call(uintptr(unsafe.Pointer(&m)))
-		// Bounded respect for ctx cancellation.
-		if ctx.Err() != nil {
-			d.quitOnce.Do(func() {
-				_, _, _ = postQuitMessage.Call(0)
-			})
-		}
-	}
 }
 
 func (d *windowsDetector) WakeChan() <-chan struct{} { return d.ch }
@@ -187,11 +198,15 @@ func (d *windowsDetector) WakeChan() <-chan struct{} { return d.ch }
 func (d *windowsDetector) Close() error {
 	var err error
 	d.closeOnce.Do(func() {
-		d.quitOnce.Do(func() {
+		// PostThreadMessage targets the pump thread directly;
+		// PostQuitMessage is thread-local and would post to
+		// whatever goroutine happens to call Close, which is
+		// not the pump.
+		if d.threadID != 0 {
 			user32 := windows.NewLazySystemDLL("user32.dll")
-			postQuitMessage := user32.NewProc("PostQuitMessage")
-			_, _, _ = postQuitMessage.Call(0)
-		})
+			postThreadMessageW := user32.NewProc("PostThreadMessageW")
+			_, _, _ = postThreadMessageW.Call(uintptr(d.threadID), wmQuit, 0, 0)
+		}
 		<-d.pumpDone
 		if d.hwnd != 0 {
 			user32 := windows.NewLazySystemDLL("user32.dll")

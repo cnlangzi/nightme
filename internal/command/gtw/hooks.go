@@ -52,6 +52,10 @@ type Config struct {
 	// three-tier precedence as /gtw commit: CLI -a > yml
 	// cfg.PR.Agent > cs.SelectedAgent() (see ResolveAgent).
 	PR CmdConfig `yaml:"pr"`
+	// New owns the /gtw new subcommand's hooks. /gtw new always
+	// runs in the chat's current agent session (the discussion
+	// it archives lives there), so Agent is ignored.
+	New CmdConfig `yaml:"new"`
 }
 
 // CmdConfig is the per-command subsection of Config. Agent is the

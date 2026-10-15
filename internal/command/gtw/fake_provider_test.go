@@ -59,6 +59,11 @@ type fakeGitProvider struct {
 	createPRResp string
 	createPRErr  error
 
+	// CreateIssue response. createIssueResp is returned when
+	// createIssueErr is nil; createIssueErr wins when non-nil.
+	createIssueResp *Issue
+	createIssueErr  error
+
 	// FindOpenPRForBranch response. findOpenPRResp is the PR
 	// the fake returns when findOpenPRErr is nil. findOpenPRErr
 	// wins when non-nil. Mirrors the prByHead / prErr split
@@ -102,6 +107,10 @@ type fakeProviderCall struct {
 	PRTitle string
 	PRBody  string
 	PRURL   string // returned URL when CreatePRResp is set
+
+	// CreateIssue-only fields.
+	IssueTitle string
+	IssueBody  string
 }
 
 // newFakeGitProvider returns a minimal provider. Tests then
@@ -219,6 +228,21 @@ func (f *fakeGitProvider) SetCreatePRErr(err error) {
 	f.createPRErr = err
 }
 
+// SetCreateIssueResp configures the issue CreateIssue returns.
+func (f *fakeGitProvider) SetCreateIssueResp(issue *Issue) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.createIssueResp = issue
+	f.createIssueErr = nil
+}
+
+// SetCreateIssueErr configures the error CreateIssue returns.
+func (f *fakeGitProvider) SetCreateIssueErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.createIssueErr = err
+}
+
 // SetFindOpenPRResp registers the response for FindOpenPRForBranch.
 // Pass nil to simulate "no PR yet" (gate 2 pass); pass a
 // non-nil PR to simulate "already open" (gate 2 fail).
@@ -308,6 +332,23 @@ func (f *fakeGitProvider) GetIssue(_ context.Context, owner, repo string, id int
 	// Defensive copy so the test's stored Issue can't be
 	// mutated by downstream code.
 	cp := *iss
+	return &cp, nil
+}
+
+func (f *fakeGitProvider) CreateIssue(_ context.Context, owner, repo, title, body string) (*Issue, error) {
+	f.mu.Lock()
+	f.calls = append(f.calls, fakeProviderCall{
+		Method: "CreateIssue", Owner: owner, Repo: repo, IssueTitle: title, IssueBody: body,
+	})
+	resp, err := f.createIssueResp, f.createIssueErr
+	f.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	if resp == nil {
+		return nil, fmt.Errorf("fake has no CreateIssue response")
+	}
+	cp := *resp
 	return &cp, nil
 }
 

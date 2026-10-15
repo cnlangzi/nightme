@@ -326,6 +326,16 @@ stdout:
 
 GitHub / GitLab issues 是任务流——每次 `/gtw fix` 钉到一个 issue，工作随着 subcommand 推进在 issue 的 state 里流动。
 
+### 从讨论到 issue：`/gtw new`
+
+和 agent 来回讨论完一个需求后，**`/gtw new`** 把这段讨论归档成一个新的 GitHub / GitLab issue，没看过聊天记录的开发者或编码 agent 拿到就能实现。和其他 subcommand 不同，它跑在 chat **当前**的 agent session 里——讨论只存在于那里。
+
+agent 从对话里提取所有需求、约束、决策和边界情况，消解前后矛盾（被否决的方案连同理由放进 *Decisions* 一节），写出结构化草稿：背景与目标、范围、术语、带验收标准的需求、方案设计、边界情况、约束、关键决策、实施计划、待定事项。NightMe 再通过 `gh` / `glab` 创建 issue，回复 issue 编号。
+
+- 还有阻塞性的问题没定时，agent 只问一次——所有问题放在一条消息里，每个附建议默认值——然后停下。在 chat 里回答后再跑一次 `/gtw new`。
+- `/gtw new -y` 跳过提问：agent 直接采用建议默认值，并在 issue 的 *Open Questions* 里列出来。
+- 下一步：`/gtw fix <id>`。
+
 ### The local dev loop: fix → hooks → close
 
 三个 subcommand 串起来就是一个完整的 **local multi-branch development workflow**。3 个可以并行跑——三个 issue、三个 worktree、三个 agent，state 不打架。

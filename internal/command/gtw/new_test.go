@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
+	"github.com/cnlangzi/nightme/internal/command"
 )
 
 // funcCLIRunner delegates Run to fn so a test can inspect the
@@ -65,25 +65,66 @@ func TestParseNewIssueArgs(t *testing.T) {
 func TestRenderNewIssuePrompt(t *testing.T) {
 	const path = "/home/u/.nightme/issue-drafts/issue-1.md"
 
-	ask := renderNewIssuePrompt(path, false)
-	defaults := renderNewIssuePrompt(path, true)
-	for name, p := range map[string]string{"ask": ask, "defaults": defaults} {
-		if strings.Contains(p, "{{") {
-			t.Errorf("%s: unsubstituted placeholder in prompt", name)
-		}
-		if !strings.Contains(p, path) {
-			t.Errorf("%s: prompt does not name the draft path", name)
-		}
-		if !strings.Contains(p, "Do NOT run gh / glab") {
-			t.Errorf("%s: prompt must forbid the agent from creating the issue", name)
+	p := renderNewIssuePrompt(path)
+	if strings.Contains(p, "{{") {
+		t.Error("unsubstituted placeholder in prompt")
+	}
+	for _, want := range []string{
+		path,
+		"Do NOT run gh / glab",
+		"STOP",
+		"print the complete content of the draft file in chat",
+		"run /gtw new -y to create the issue",
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("prompt missing %q", want)
 		}
 	}
-	if !strings.Contains(ask, "STOP") {
-		t.Error("ask mode must tell the agent to stop after asking")
+}
+
+func TestIssueDraftPath(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", os.Getenv("HOME"))
+
+	a1, err := issueDraftPath("oc_chat/a:1")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if strings.Contains(defaults, "STOP") || !strings.Contains(defaults, "Do not ask the user anything") {
-		t.Error("-y mode must take defaults instead of stopping")
+	a2, _ := issueDraftPath("oc_chat/a:1")
+	b, _ := issueDraftPath("oc_chat/b:2")
+	if a1 != a2 {
+		t.Errorf("draft path not stable per chat: %q vs %q", a1, a2)
 	}
+	if a1 == b {
+		t.Error("different chats share a draft path")
+	}
+	if base := filepath.Base(a1); strings.ContainsAny(base, `/\:`) || !strings.HasPrefix(base, "issue-") {
+		t.Errorf("unsafe draft file name %q", base)
+	}
+	if !strings.HasPrefix(a1, filepath.Join(os.Getenv("HOME"), ".nightme", issueDraftDirName)) {
+		t.Errorf("draft %q not under ~/.nightme/%s", a1, issueDraftDirName)
+	}
+}
+
+func TestResetIssueDraft(t *testing.T) {
+	draft := filepath.Join(t.TempDir(), "drafts", "issue-x.md")
+
+	if err := resetIssueDraft(draft); err != nil {
+		t.Fatalf("missing dir: %v", err)
+	}
+	if err := os.WriteFile(draft, []byte("# old\nbody\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := resetIssueDraft(draft); err != nil {
+		t.Fatalf("existing draft: %v", err)
+	}
+	if _, err := os.Stat(draft); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("stale draft should be removed (stat err = %v)", err)
+	}
+}
+
+func resolveTo(prov GitProvider) func() (GitProvider, string, string, error) {
+	return func() (GitProvider, string, string, error) { return prov, "o", "r", nil }
 }
 
 func TestParseIssueDraft(t *testing.T) {
@@ -130,22 +171,20 @@ func TestParseIssueDraft(t *testing.T) {
 	}
 }
 
-func TestFinishNewIssue_NoDraft(t *testing.T) {
+func TestCreateIssueFromDraft_NoDraft(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "absent.md")
 	prov := newFakeGitProvider(ProviderGitHub, "github.com")
 
-	if got := finishNewIssue(context.Background(), prov, "o", "r", missing, false); !strings.Contains(got, "waiting for your answers") || !strings.Contains(got, "/gtw new -y") {
-		t.Errorf("ask mode reply = %q", got)
-	}
-	if got := finishNewIssue(context.Background(), prov, "o", "r", missing, true); !strings.HasPrefix(got, "❌") {
-		t.Errorf("-y mode reply = %q, want ❌", got)
+	got := createIssueFromDraft(context.Background(), missing, resolveTo(prov))
+	if !strings.HasPrefix(got, "❌ no issue draft") || !strings.Contains(got, "`/gtw new`") {
+		t.Errorf("reply = %q", got)
 	}
 	if n := len(prov.CallsByMethod("CreateIssue")); n != 0 {
 		t.Errorf("CreateIssue called %d times without a draft", n)
 	}
 }
 
-func TestFinishNewIssue_CreatesIssueAndRemovesDraft(t *testing.T) {
+func TestCreateIssueFromDraft_CreatesIssueAndRemovesDraft(t *testing.T) {
 	draft := filepath.Join(t.TempDir(), "issue.md")
 	if err := os.WriteFile(draft, []byte("# feat(gtw): archive chats\n\n## Requirements\n- R1\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -153,7 +192,7 @@ func TestFinishNewIssue_CreatesIssueAndRemovesDraft(t *testing.T) {
 	prov := newFakeGitProvider(ProviderGitHub, "github.com")
 	prov.SetCreateIssueResp(&Issue{ID: 42, Title: "feat(gtw): archive chats", URL: "https://github.com/o/r/issues/42"})
 
-	got := finishNewIssue(context.Background(), prov, "o", "r", draft, false)
+	got := createIssueFromDraft(context.Background(), draft, resolveTo(prov))
 
 	calls := prov.CallsByMethod("CreateIssue")
 	if len(calls) != 1 {
@@ -172,7 +211,7 @@ func TestFinishNewIssue_CreatesIssueAndRemovesDraft(t *testing.T) {
 	}
 }
 
-func TestFinishNewIssue_CreateFailureKeepsDraft(t *testing.T) {
+func TestCreateIssueFromDraft_CreateFailureKeepsDraft(t *testing.T) {
 	draft := filepath.Join(t.TempDir(), "issue.md")
 	if err := os.WriteFile(draft, []byte("# fix: x\nbody\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -180,7 +219,7 @@ func TestFinishNewIssue_CreateFailureKeepsDraft(t *testing.T) {
 	prov := newFakeGitProvider(ProviderGitHub, "github.com")
 	prov.SetCreateIssueErr(errors.New("HTTP 401"))
 
-	got := finishNewIssue(context.Background(), prov, "o", "r", draft, false)
+	got := createIssueFromDraft(context.Background(), draft, resolveTo(prov))
 
 	if !strings.Contains(got, "HTTP 401") || !strings.Contains(got, draft) {
 		t.Errorf("reply = %q, want error and draft path", got)
@@ -190,14 +229,14 @@ func TestFinishNewIssue_CreateFailureKeepsDraft(t *testing.T) {
 	}
 }
 
-func TestFinishNewIssue_InvalidDraft(t *testing.T) {
+func TestCreateIssueFromDraft_InvalidDraft(t *testing.T) {
 	draft := filepath.Join(t.TempDir(), "issue.md")
 	if err := os.WriteFile(draft, []byte("no heading here\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	prov := newFakeGitProvider(ProviderGitHub, "github.com")
 
-	got := finishNewIssue(context.Background(), prov, "o", "r", draft, false)
+	got := createIssueFromDraft(context.Background(), draft, resolveTo(prov))
 
 	if !strings.HasPrefix(got, "❌ invalid issue draft") {
 		t.Errorf("reply = %q", got)
@@ -313,19 +352,150 @@ func TestGitLabProvider_CreateIssue(t *testing.T) {
 	}
 }
 
-func TestAwaitPromptEnd(t *testing.T) {
-	ch := make(chan chatsession.PromptEndedEvent, 1)
-	ch <- chatsession.PromptEndedEvent{Reason: agent.PromptEndClean}
-	if err := awaitPromptEnd(context.Background(), ch, time.Second); err != nil {
-		t.Errorf("clean end: %v", err)
+// newIssueRig is a chat session sitting in a real temp repo whose
+// origin points at github.com/o/r, with a fake provider behind it.
+type newIssueRig struct {
+	f    *Factory
+	cs   *chatsession.ChatSession
+	ch   *recordingCh
+	prov *fakeGitProvider
+}
+
+func newNewIssueRig(t *testing.T, chatID string) *newIssueRig {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	repo := initTempRepo(t)
+	mustGit(t, repo, "remote", "add", "origin", "https://github.com/o/r.git")
+
+	ch := &recordingCh{}
+	cs, err := chatsession.New(chatID, "test-agent")
+	if err != nil {
+		t.Fatalf("chatsession.New: %v", err)
+	}
+	cs.WithEmitter(ch)
+	if err := cs.SetSelectedCwd(repo); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
+	}
+	prov := newFakeGitProvider(ProviderGitHub, "github.com")
+	f := NewFactoryWithDeps(NewManager(), HandlerDeps{
+		Git:    ExecGitRunner{},
+		Detect: fakeDetect(prov),
+		Now:    time.Now,
+	})
+	return &newIssueRig{f: f, cs: cs, ch: ch, prov: prov}
+}
+
+func (r *newIssueRig) handle(t *testing.T, args ...string) {
+	t.Helper()
+	_, err := r.f.Handle(context.Background(), command.RuntimeServices{}, nil, r.cs, command.SlashInput{
+		Args:      append([]string{"gtw", "new"}, args...),
+		ChatID:    r.cs.ChatID,
+		MessageID: "msg-1",
+	})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+}
+
+func (r *newIssueRig) draftPath(t *testing.T) string {
+	t.Helper()
+	p, err := issueDraftPath(r.cs.ChatID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestFactory_NewYes_CreatesIssueFromDraft(t *testing.T) {
+	rig := newNewIssueRig(t, "chat-new-1")
+	draft := rig.draftPath(t)
+	if err := resetIssueDraft(draft); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(draft, []byte("# feat(gtw): archive chats\n\n## Requirements\n- R1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rig.prov.SetCreateIssueResp(&Issue{ID: 42, Title: "feat(gtw): archive chats", URL: "https://github.com/o/r/issues/42"})
+
+	rig.handle(t, "-y")
+
+	calls := rig.prov.CallsByMethod("CreateIssue")
+	if len(calls) != 1 || calls[0].Owner != "o" || calls[0].Repo != "r" || calls[0].IssueTitle != "feat(gtw): archive chats" {
+		t.Fatalf("CreateIssue calls = %+v", calls)
+	}
+	if got := rig.ch.lastText(); !strings.Contains(got, "✅ Issue #42 opened") {
+		t.Errorf("reply = %q", got)
+	}
+	if _, err := os.Stat(draft); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("draft should be removed (stat err = %v)", err)
+	}
+}
+
+func TestFactory_NewYes_NoDraft(t *testing.T) {
+	rig := newNewIssueRig(t, "chat-new-2")
+
+	rig.handle(t, "-y")
+
+	if got := rig.ch.lastText(); !strings.HasPrefix(got, "❌ no issue draft") {
+		t.Errorf("reply = %q", got)
+	}
+	if n := len(rig.prov.CallsByMethod("CreateIssue")); n != 0 {
+		t.Errorf("CreateIssue called %d times", n)
+	}
+}
+
+func TestFactory_NewDraft_RemovesStaleDraft(t *testing.T) {
+	rig := newNewIssueRig(t, "chat-new-3")
+	draft := rig.draftPath(t)
+	if err := resetIssueDraft(draft); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(draft, []byte("# fix: old\nold body\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 
-	ch <- chatsession.PromptEndedEvent{Reason: agent.PromptEndUserStopped}
-	if err := awaitPromptEnd(context.Background(), ch, time.Second); err == nil {
-		t.Error("stopped turn: want error")
+	rig.handle(t)
+
+	if _, err := os.Stat(draft); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("/gtw new must remove the previous draft so -y cannot submit it (stat err = %v)", err)
+	}
+	if n := len(rig.prov.CallsByMethod("CreateIssue")); n != 0 {
+		t.Errorf("drafting must not create an issue; CreateIssue called %d times", n)
+	}
+}
+
+func TestFactory_NewDraft_NotInRepo(t *testing.T) {
+	rig := newNewIssueRig(t, "chat-new-4")
+	if err := rig.cs.SetSelectedCwd(t.TempDir()); err != nil {
+		t.Fatal(err)
 	}
 
-	if err := awaitPromptEnd(context.Background(), make(chan chatsession.PromptEndedEvent), 10*time.Millisecond); err == nil {
-		t.Error("timeout: want error")
+	rig.handle(t)
+
+	if got := rig.ch.lastText(); !strings.Contains(got, "Not in a git repository") {
+		t.Errorf("reply = %q", got)
+	}
+}
+
+func TestFactory_New_TakesNoRunLock(t *testing.T) {
+	rig := newNewIssueRig(t, "chat-new-5")
+	mu := rig.f.mgr.runLockFor(rig.cs.ChatID)
+	mu.Lock()
+	defer mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = rig.f.Handle(context.Background(), command.RuntimeServices{}, nil, rig.cs, command.SlashInput{
+			Args: []string{"gtw", "new", "-y"}, ChatID: rig.cs.ChatID, MessageID: "msg-1",
+		})
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("/gtw new blocked on the per-chat run lock")
 	}
 }

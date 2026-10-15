@@ -245,7 +245,8 @@ func (f *Factory) Spec() command.Spec {
 		Name:    "gtw",
 		Aliases: []string{"team"},
 		Summary: "GTW: Git-driven team workflow (claim, label, worktree).",
-		Usage: "/gtw new [-y|--yes]               archive this chat's requirement discussion into a new issue\n" +
+		Usage: "/gtw new                          have the agent draft an issue from this chat's discussion\n" +
+			"/gtw new -y                       create the issue from the reviewed draft\n" +
 			"/gtw fix <issue-id> [-y|--yes]   claim, label, and create a worktree\n" +
 			"/gtw fix --name <branch>          create a local worktree (no issue)\n" +
 			"/gtw close                        tear down the worktree, delete the branch, and sync main\n" +
@@ -259,7 +260,7 @@ func (f *Factory) Spec() command.Spec {
 		Subcommands: []command.SubcommandSpec{
 			{
 				Name:    "new",
-				Summary: "archive this chat's requirement discussion into a new issue via the current agent",
+				Summary: "draft an issue from this chat's discussion via the current agent; `-y` creates it",
 				Usage:   newCmdSpec.Usage,
 			},
 			{
@@ -313,14 +314,18 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, mgr *c
 	//
 	// Cross-chat independence: chat A's long /gtw fix does not
 	// block chat B's /gtw commit; the lock is per chatID.
+	//
+	// /gtw new takes no lock: it touches neither the worktree nor
+	// the chat cwd, only the chat's own issue draft.
+	if input.Args[1] == "new" {
+		return f.runNew(ctx, rt, cs, input)
+	}
 	if mu := f.mgr.runLockFor(input.ChatID); mu != nil {
 		mu.Lock()
 		defer mu.Unlock()
 	}
 
 	switch input.Args[1] {
-	case "new":
-		return f.runNew(ctx, rt, cs, input)
 	case "fix":
 		return f.runFix(ctx, rt, cs, input)
 	case "close":
@@ -342,8 +347,12 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, mgr *c
 	}, nil
 }
 
-// runNew handles `/gtw new [-y]`. See RunNew (new.go) for the flow.
-// Wrapped in withHooks so new.before / new.after fire.
+// runNew handles the two steps of /gtw new: `/gtw new` asks the
+// current agent to draft the issue (RunNewDraft), `/gtw new -y`
+// creates the issue from the reviewed draft (RunNewCreate). Only
+// the creation step is wrapped in withHooks — new.before /
+// new.after describe "an issue is being created", which drafting
+// does not do.
 func (f *Factory) runNew(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 	args, err := parseNewIssueArgs(input.Args[2:])
 	if err != nil {
@@ -356,6 +365,11 @@ func (f *Factory) runNew(ctx context.Context, _ command.RuntimeServices, cs *cha
 		return failOut, nil
 	}
 
+	if !args.Yes {
+		_, _ = RunNewDraft(ctx, cs, f.deps, input.ChatID, input.MessageID)
+		return &command.SlashOutput{Consumed: true}, nil
+	}
+
 	cfg, loadNotes := Load()
 
 	hc := f.deriveHookContext(ctx, cs, "new")
@@ -363,7 +377,7 @@ func (f *Factory) runNew(ctx context.Context, _ command.RuntimeServices, cs *cha
 	err = f.withHooks(ctx, cs, input.ChatID, input.MessageID,
 		loadNotes, hcFn, cfg.New.Hooks.Before, cfg.New.Hooks.After,
 		func() error {
-			_, e := RunNew(ctx, cs, f.deps, input.ChatID, input.MessageID, args)
+			_, e := RunNewCreate(ctx, cs, f.deps, input.ChatID, input.MessageID)
 			return e
 		})
 	if err != nil {

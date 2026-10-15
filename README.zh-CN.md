@@ -330,11 +330,12 @@ GitHub / GitLab issues 是任务流——每次 `/gtw fix` 钉到一个 issue，
 
 和 agent 来回讨论完一个需求后，**`/gtw new`** 把这段讨论归档成一个新的 GitHub / GitLab issue，没看过聊天记录的开发者或编码 agent 拿到就能实现。和其他 subcommand 不同，它跑在 chat **当前**的 agent session 里——讨论只存在于那里。
 
-agent 从对话里提取所有需求、约束、决策和边界情况，消解前后矛盾（被否决的方案连同理由放进 *Decisions* 一节），写出结构化草稿：背景与目标、范围、术语、带验收标准的需求、方案设计、边界情况、约束、关键决策、实施计划、待定事项。NightMe 再通过 `gh` / `glab` 创建 issue，回复 issue 编号。
+它是两段式命令——agent 起草，人来决定：
 
-- 还有阻塞性的问题没定时，agent 只问一次——所有问题放在一条消息里，每个附建议默认值——然后停下。在 chat 里回答后再跑一次 `/gtw new`。
-- `/gtw new -y` 跳过提问：agent 直接采用建议默认值，并在 issue 的 *Open Questions* 里列出来。
-- 下一步：`/gtw fix <id>`。
+1. **`/gtw new`** — agent 从对话里提取所有需求、约束、决策和边界情况，消解前后矛盾（被否决的方案连同理由放进 *Decisions* 一节）。还有阻塞性的问题没定时，它只问一次——所有问题放在一条消息里，每个附建议默认值——然后停下；在 chat 里回答后再跑一次 `/gtw new`。没有问题时，它写出草稿并把完整文档显示在 chat 里：背景与目标、范围、术语、带验收标准的需求、方案设计、边界情况、约束、关键决策、实施计划、待定事项。想改就在 chat 里提，它会重写草稿。
+2. **`/gtw new -y`** — 确认草稿没问题后，NightMe 通过 `gh` / `glab` 用草稿创建 issue，回复 issue 编号。这一步不经过 agent。
+
+下一步：`/gtw fix <id>`。草稿存放在 `~/.nightme/issue-drafts/`，每个 chat 一份；`/gtw new` 会替换它，`/gtw new -y` 成功后删除它。
 
 ### The local dev loop: fix → hooks → close
 

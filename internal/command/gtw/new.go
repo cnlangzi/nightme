@@ -2,18 +2,18 @@ package gtw
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/nightmedir"
 	"github.com/cnlangzi/nightme/internal/pathutil"
-	"github.com/cnlangzi/nightme/internal/timeouts"
 )
 
 // issueDraftDirName is the per-user directory under
@@ -23,11 +23,10 @@ import (
 const issueDraftDirName = "issue-drafts"
 
 const placeholderDraftFileAbs = "{{DRAFT_FILE_ABS}}"
-const placeholderConfirmRule = "{{CONFIRM_RULE}}"
 
 // newIssueArgs is the parsed argv tail of `/gtw new`.
 type newIssueArgs struct {
-	Yes bool // -y / --yes: skip the confirmation stop, take recommended defaults
+	Yes bool // -y / --yes: create the issue from the reviewed draft
 }
 
 var newCmdSpec = command.CmdSpec{
@@ -49,27 +48,22 @@ func parseNewIssueArgs(argv []string) (newIssueArgs, error) {
 	return newIssueArgs{Yes: parsed.Bool("yes")}, nil
 }
 
-// RunNew archives the requirement discussion held in the chat's
-// current agent session into a new GitHub / GitLab issue.
+// RunNewDraft is the first half of /gtw new: it queues the archive
+// prompt into the chat's CURRENT agent session — not a one-shot
+// agent like /gtw commit or /gtw pr — because the discussion only
+// exists in that session's context. The agent either asks its
+// blocking questions or writes the chat's draft file and shows the
+// full document in chat. The command returns as soon as the prompt
+// is queued; it never waits on the agent.
 //
-// The archive prompt is queued into the CURRENT agent session —
-// not a one-shot agent like /gtw commit or /gtw pr — because the
-// discussion only exists in that session's context. The agent
-// writes the finished document to a per-invocation draft file;
-// when its turn ends nightme reads the draft and creates the issue
-// through the provider, so issue creation never depends on the
-// agent driving gh / glab correctly.
-//
-// A turn that ends without a draft means the agent stopped to ask
-// confirmation questions: the user answers in chat and re-runs
-// /gtw new (the prompt tells the agent to reuse those answers), or
-// runs /gtw new -y to accept the agent's recommended defaults.
-func RunNew(
+// Any previous draft of this chat is removed first so that a run
+// ending in questions cannot leave an older document behind for
+// /gtw new -y to submit.
+func RunNewDraft(
 	ctx context.Context,
 	cs *chatsession.ChatSession,
 	deps HandlerDeps,
 	chatID, messageID string,
-	args newIssueArgs,
 ) (*Result, error) {
 	if deps.Now == nil {
 		deps.Now = timeNow
@@ -79,58 +73,74 @@ func RunNew(
 			"❌ internal: missing message id; /gtw new did not enqueue"), nil
 	}
 	cwd := cs.SelectedCwd()
-	if _, err := cs.LookupSelectedAgentSession(); err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			"❌ "+err.Error()+"\nhint: /gtw new archives the discussion held with the current agent — `/use <agent>` first"), nil
-	}
 
+	// Resolve the provider up front: finding out that the repo has
+	// no usable origin only at /gtw new -y would waste the whole
+	// archive turn.
 	repoRoot, err := RepoRoot(ctx, cwd, deps.Git)
 	if err != nil {
 		return reply(ctx, cs.Emitter(), chatID, messageID,
 			"❌ Not in a git repository. Run /cwd <inside a repo> first."), nil
 	}
-	provider, owner, repo, err := resolveProvider(ctx, Context{RepoRoot: repoRoot, Worktree: cwd}, deps)
-	if err != nil {
+	if _, _, _, err := resolveProvider(ctx, Context{RepoRoot: repoRoot, Worktree: cwd}, deps); err != nil {
 		return reply(ctx, cs.Emitter(), chatID, messageID, "❌ "+err.Error()), nil
 	}
 
-	draftPath, err := prepareIssueDraftPath(deps.Now())
+	draftPath, err := issueDraftPath(chatID)
 	if err != nil {
 		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ prepare issue draft: %v", err)), nil
 	}
-
-	ended, unsub, err := subscribePromptEnd(cs, messageID)
-	if err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID, "❌ "+err.Error()), nil
+	if err := resetIssueDraft(draftPath); err != nil {
+		return reply(ctx, cs.Emitter(), chatID, messageID,
+			fmt.Sprintf("❌ prepare issue draft: %v", err)), nil
 	}
-	defer unsub()
 
-	blocks := []agent.ContentBlock{{Type: agent.ContentText, Text: renderNewIssuePrompt(draftPath, args.Yes)}}
+	blocks := []agent.ContentBlock{{Type: agent.ContentText, Text: renderNewIssuePrompt(draftPath)}}
 	if err := dispatchIssueToChatSession(ctx, cs, deps.Now, chatID, messageID, blocks); err != nil {
 		return reply(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ dispatch to agent: %v", err)), nil
+			fmt.Sprintf("❌ dispatch to agent: %v\nhint: /gtw new archives the discussion held with the current agent", err)), nil
 	}
-
-	if err := awaitPromptEnd(ctx, ended, timeouts.Agent); err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ /gtw new: %v", err)), nil
-	}
-	return reply(ctx, cs.Emitter(), chatID, messageID,
-		finishNewIssue(ctx, provider, owner, repo, draftPath, args.Yes)), nil
+	return &Result{Consumed: true}, nil
 }
 
-// finishNewIssue turns the agent's draft into an issue and returns
+// RunNewCreate is the second half of /gtw new: after the user has
+// reviewed the draft in chat, `/gtw new -y` creates the issue from
+// the draft file. No agent is involved — whether and when the issue
+// is created is the user's call, and what gets submitted is exactly
+// the file the agent wrote.
+func RunNewCreate(
+	ctx context.Context,
+	cs *chatsession.ChatSession,
+	deps HandlerDeps,
+	chatID, messageID string,
+) (*Result, error) {
+	draftPath, err := issueDraftPath(chatID)
+	if err != nil {
+		return reply(ctx, cs.Emitter(), chatID, messageID,
+			fmt.Sprintf("❌ locate issue draft: %v", err)), nil
+	}
+	cwd := cs.SelectedCwd()
+	repoRoot, err := RepoRoot(ctx, cwd, deps.Git)
+	if err != nil {
+		return reply(ctx, cs.Emitter(), chatID, messageID,
+			"❌ Not in a git repository. Run /cwd <inside a repo> first."), nil
+	}
+	resolve := func() (GitProvider, string, string, error) {
+		return resolveProvider(ctx, Context{RepoRoot: repoRoot, Worktree: cwd}, deps)
+	}
+	return reply(ctx, cs.Emitter(), chatID, messageID,
+		createIssueFromDraft(ctx, draftPath, resolve)), nil
+}
+
+// createIssueFromDraft turns the draft into an issue and returns
 // the reply text. The draft is removed once the issue exists and
-// kept on failure so the user can create the issue by hand.
-func finishNewIssue(ctx context.Context, provider GitProvider, owner, repo, draftPath string, yes bool) string {
+// kept on failure so the user can retry or create the issue by hand.
+func createIssueFromDraft(ctx context.Context, draftPath string, resolve func() (GitProvider, string, string, error)) string {
 	raw, err := os.ReadFile(draftPath)
 	if errors.Is(err, os.ErrNotExist) {
-		if yes {
-			return "❌ agent finished without writing the issue draft\n↳ re-run `/gtw new -y`"
-		}
-		return "🤖 agent is waiting for your answers\n" +
-			"↳ answer in chat, then `/gtw new` again · or `/gtw new -y` to accept its recommended defaults"
+		return "❌ no issue draft for this chat\n" +
+			"↳ run `/gtw new` first — the agent writes the draft once its questions are answered"
 	}
 	if err != nil {
 		return fmt.Sprintf("❌ read issue draft %s: %v", draftPath, err)
@@ -138,12 +148,16 @@ func finishNewIssue(ctx context.Context, provider GitProvider, owner, repo, draf
 
 	title, body, err := parseIssueDraft(string(raw))
 	if err != nil {
-		return fmt.Sprintf("❌ invalid issue draft %s: %v\n↳ fix the file and create the issue manually, or re-run `/gtw new`", draftPath, err)
+		return fmt.Sprintf("❌ invalid issue draft %s: %v\n↳ ask the agent to fix the draft, then `/gtw new -y` again", draftPath, err)
 	}
 
+	provider, owner, repo, err := resolve()
+	if err != nil {
+		return "❌ " + err.Error()
+	}
 	issue, err := provider.CreateIssue(ctx, owner, repo, title, body)
 	if err != nil {
-		return fmt.Sprintf("❌ create issue: %v\n→ draft: %s (kept)", err, draftPath)
+		return fmt.Sprintf("❌ create issue: %v\n→ draft: %s (kept)\n↳ `/gtw new -y` to retry", err, draftPath)
 	}
 	_ = os.Remove(draftPath)
 	return renderIssueOpenedCard(owner, repo, issue)
@@ -183,89 +197,49 @@ func renderIssueOpenedCard(owner, repo string, issue *Issue) string {
 	return sb.String()
 }
 
-// prepareIssueDraftPath creates $HOME/.nightme/issue-drafts and
-// returns a fresh per-invocation draft path in it. A fresh name
-// guarantees that a file found after the turn was written by this
-// run, not left over from an earlier one.
-func prepareIssueDraftPath(now time.Time) (string, error) {
+// issueDraftPath returns the chat's draft file:
+// $HOME/.nightme/issue-drafts/issue-<hash(chatID)>.md. One draft per
+// chat — a chat holds one discussion at a time — and the name is
+// stable so /gtw new -y finds what /gtw new asked the agent to
+// write. Chat IDs are hashed because channel IDs may contain
+// characters that are not safe in file names.
+func issueDraftPath(chatID string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("resolve home: %w", err)
 	}
-	dir := pathutil.Join(home, nightmedir.DirName, issueDraftDirName)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", err
-	}
-	p := pathutil.Join(dir, "issue-"+now.Format("20060102-150405.000000000")+".md")
-	if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return "", err
-	}
-	return p, nil
+	sum := sha256.Sum256([]byte(chatID))
+	name := "issue-" + hex.EncodeToString(sum[:8]) + ".md"
+	return pathutil.Join(home, nightmedir.DirName, issueDraftDirName, name), nil
 }
 
-// subscribePromptEnd registers for the PromptEnded event of
-// userMsgID. Subscribing before the message is queued closes the
-// window where a fast turn ends before anyone listens.
-func subscribePromptEnd(cs *chatsession.ChatSession, userMsgID string) (<-chan chatsession.PromptEndedEvent, func(), error) {
-	if cs == nil || cs.PromptEndBus == nil {
-		return nil, nil, errors.New("PromptEndBus unavailable")
+// resetIssueDraft creates the draft directory and removes any
+// existing draft at path.
+func resetIssueDraft(path string) error {
+	if err := os.MkdirAll(pathutil.Dir(path), 0o700); err != nil {
+		return err
 	}
-	ch := make(chan chatsession.PromptEndedEvent, 1)
-	unsub := cs.PromptEndBus.Subscribe(func(e chatsession.PromptEndedEvent) bool {
-		if e.UserMsgID != userMsgID {
-			return false
-		}
-		select {
-		case ch <- e:
-		default:
-		}
-		return true
-	})
-	return ch, unsub, nil
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
-func awaitPromptEnd(ctx context.Context, ended <-chan chatsession.PromptEndedEvent, timeout time.Duration) error {
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case ev := <-ended:
-		if ev.Reason != agent.PromptEndClean {
-			return fmt.Errorf("agent turn ended with reason %s", ev.Reason)
-		}
-		return nil
-	case <-timer.C:
-		return fmt.Errorf("agent did not finish within %s", timeout)
-	}
+func renderNewIssuePrompt(draftPath string) string {
+	return strings.ReplaceAll(newIssuePrompt, placeholderDraftFileAbs, draftPath)
 }
-
-func renderNewIssuePrompt(draftPath string, yes bool) string {
-	rule := confirmRuleAsk
-	if yes {
-		rule = confirmRuleDefaults
-	}
-	out := strings.ReplaceAll(newIssuePrompt, placeholderConfirmRule, rule)
-	return strings.ReplaceAll(out, placeholderDraftFileAbs, draftPath)
-}
-
-const confirmRuleAsk = `If step 2 produced questions whose answers change scope, behavior, interfaces, or acceptance criteria, ask them now: one chat message, numbered, each with your recommended default and a one-line reason. Then STOP — do not write the draft file in this turn. The user will answer and run /gtw new again; on that run, use the answers given in this conversation and do not ask the same questions again.
-Questions that do not block implementation are not asked — they go under "Open Questions".
-If there is nothing blocking, skip this step.`
-
-const confirmRuleDefaults = `Do not ask the user anything. For every question from step 2, adopt your recommended default and record it under "Open Questions" as "<question> — assumed: <default>" so the user can review it in the issue.`
 
 // newIssuePrompt is the archive task queued into the current agent
 // session. It runs inside the user's own agent, which cannot see
 // this repository's docs, so it is fully self-contained.
-const newIssuePrompt = `/gtw new — archive the requirement discussion in THIS conversation into an issue.
+const newIssuePrompt = `/gtw new — archive the requirement discussion in THIS conversation into an issue draft.
 
 The issue will be handed to a developer or a coding agent that has NOT seen this conversation and can only read the issue. It must be implementable from the issue alone.
 
 Draft file (absolute path):
 {{DRAFT_FILE_ABS}}
 
-nightme creates the issue from that file after your turn ends. Do NOT run gh / glab or create the issue yourself. Do NOT modify any file other than the draft file.
+The user reviews the draft in chat; when they approve, they run /gtw new -y and nightme creates the issue from that file. Do NOT run gh / glab or create the issue yourself. Do NOT modify any file other than the draft file.
 
 ## Source of truth
 - Use only this conversation, plus code and files you have actually read in it. You may read more of the repository to resolve names, paths, and interfaces precisely.
@@ -275,10 +249,13 @@ nightme creates the issue from that file after your turn ends. Do NOT run gh / g
 ## Workflow
 1. Extract (do not print). List every meaningful point of the discussion as an atomic, verifiable statement, typed as: GOAL, REQUIREMENT, CONSTRAINT, DECISION (with rationale), REJECTED (with reason), EDGE CASE, INTERFACE (API, data shape, config key, command, path), NON-GOAL, OPEN QUESTION, TERM. Note for each whether it is final, superseded (by which point), or uncertain.
 2. Reconcile (do not print). For conflicting points, the later and more explicit statement wins. If a later remark was casual and contradicts an explicit earlier decision, do not decide — turn it into an open question. A superseded DECISION becomes REJECTED and keeps its reason. Also list implicit assumptions you had to make and the information a developer would ask for before starting.
-3. Confirm.
-{{CONFIRM_RULE}}
+3. Confirm. If step 2 produced questions whose answers change scope, behavior, interfaces, or acceptance criteria, ask them now: one chat message, numbered, each with your recommended default and a one-line reason. Then STOP — do not write the draft file in this turn, and end with: "Answer the questions above, then run /gtw new again."
+   If this conversation already contains your earlier /gtw new questions and the user's answers, use those answers and do not ask again. Questions that do not block implementation are not asked — they go under "Open Questions". If nothing is blocking, continue.
 4. Write the draft file following the template below.
 5. Review the draft against the conversation and fix it before finishing: requirements, constraints, or edge cases that were agreed but are missing; statements that differ from what was agreed; content with no basis in the discussion and no [inferred] mark; rejected options appearing anywhere except "Decisions"; items a developer could not act on (missing parameters, ambiguous interfaces, unverifiable acceptance criteria).
+6. Show the draft: print the complete content of the draft file in chat, verbatim, then end with: "Reply with changes, or run /gtw new -y to create the issue."
+
+If the user asks for changes later in this conversation, rewrite the draft file, then show the complete updated content again the same way.
 
 ## Writing rules
 - Describe what the system must be, not how the discussion went. Never write phrases like "we discussed", "initially", "later changed to", "as requested".
@@ -327,8 +304,4 @@ The file starts with the title line. The title follows Conventional Commits — 
 1. <independently verifiable task> — done when: <check> — depends on: <task numbers or none>
 
 ## Open Questions
-- <question> — impact: <what it affects> — interim: <how to proceed until answered>
-
-## Output
-After writing the draft file, reply in chat with a single line: "Issue draft written: <title>". Do not print the document.
-If you stopped in step 3 to ask questions, end with: "Answer the questions above, then run /gtw new again."`
+- <question> — impact: <what it affects> — interim: <how to proceed until answered>`

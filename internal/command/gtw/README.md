@@ -353,6 +353,19 @@ abc1234 fix(gtw): hooks output uses standard ✅ title
 ↳ agent is fixing now — follow progress in chat · `/gtw commit` + `/gtw push` when done
 ```
 
+### 4.8 Format 1(`/gtw new -y`)
+
+`/gtw new` 本身没有 gtw 卡片——草稿由 agent 在 chat 里直接展示。`/gtw new -y`
+建好 issue 后:
+
+```
+✅ Issue #42 opened
+→ title: feat(gtw): archive chat discussions into issues
+→ repo:  owner/repo
+→ url:   https://github.com/owner/repo/issues/42
+↳ `/gtw fix 42` to plan it · or `/gtw fix 42 -y` to implement directly
+```
+
 ---
 
 ## 5. 何时不是 gtw reply

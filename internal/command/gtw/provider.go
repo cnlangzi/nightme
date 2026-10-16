@@ -10,7 +10,9 @@ import (
 	"io/fs"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -111,6 +113,12 @@ type GitProvider interface {
 	// GetIssue fetches the issue with the given id. Returns
 	// ErrIssueNotFound when the platform responds 404.
 	GetIssue(ctx context.Context, owner, repo string, id int) (*Issue, error)
+
+	// CreateIssue opens a new issue and returns it with ID and URL
+	// populated. The body is handed to the CLI through a temp
+	// file rather than argv: a full requirement document can
+	// exceed the Windows command-line limit (32 767 chars).
+	CreateIssue(ctx context.Context, owner, repo, title, body string) (*Issue, error)
 
 	// AddIssueLabel attaches `label` to the issue. Requires the label
 	// to already exist in the repository's label catalog — callers
@@ -362,6 +370,56 @@ func wrapListPRError(err error, stderr, providerName string) error {
 		return fmt.Errorf("%s pr/mr list: %v: %s", providerName, err, trimmed)
 	}
 	return fmt.Errorf("%s pr/mr list: %w", providerName, err)
+}
+
+// wrapCreateIssueError maps CreateIssue failures: a missing CLI
+// becomes ErrCLINotInstalled with the install hint; everything
+// else keeps the CLI's stderr verbatim.
+func wrapCreateIssueError(err error, stderr, providerName string) error {
+	if isExecutableNotFound(err) {
+		return fmt.Errorf("%w: %s — install via `brew install %s` or visit https://%s (%w)",
+			ErrCLINotInstalled, providerName, providerName,
+			providerCLIInstallURL(providerName), err)
+	}
+	if trimmed := strings.TrimSpace(stderr); trimmed != "" {
+		return fmt.Errorf("%s issue create: %v: %s", providerName, err, trimmed)
+	}
+	return fmt.Errorf("%s issue create: %w", providerName, err)
+}
+
+// writeIssueBodyFile stores body in a temp file for the CLI to
+// read. The caller removes the returned path.
+func writeIssueBodyFile(body string) (string, error) {
+	f, err := os.CreateTemp("", "nightme-issue-*.md")
+	if err != nil {
+		return "", fmt.Errorf("create issue body file: %w", err)
+	}
+	if _, err := f.WriteString(body); err != nil {
+		f.Close()
+		os.Remove(f.Name())
+		return "", fmt.Errorf("write issue body file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(f.Name())
+		return "", fmt.Errorf("write issue body file: %w", err)
+	}
+	return f.Name(), nil
+}
+
+// issueIDFromURL extracts the trailing issue number from an
+// issue URL such as https://github.com/o/r/issues/42. Returns 0
+// when the URL does not end in a number.
+func issueIDFromURL(u string) int {
+	u = strings.TrimRight(strings.TrimSpace(u), "/")
+	i := strings.LastIndex(u, "/")
+	if i < 0 {
+		return 0
+	}
+	id, err := strconv.Atoi(u[i+1:])
+	if err != nil || id <= 0 {
+		return 0
+	}
+	return id
 }
 
 // providerCLIInstallURL returns the install page for the named
@@ -947,6 +1005,34 @@ func (c *GitHubProvider) GetIssue(ctx context.Context, owner, repo string, id in
 	}, nil
 }
 
+// CreateIssue runs `gh issue create --repo <owner>/<repo> --title
+// <title> --body-file <tmp>`. gh prints the new issue URL on
+// stdout; the issue number is its last path segment.
+func (c *GitHubProvider) CreateIssue(ctx context.Context, owner, repo, title, body string) (*Issue, error) {
+	bodyFile, err := writeIssueBodyFile(body)
+	if err != nil {
+		return nil, err
+	}
+	defer os.Remove(bodyFile)
+
+	stdout, stderr, err := c.runner().Run(ctx, "gh",
+		"issue", "create",
+		"--repo", owner+"/"+repo,
+		"--title", title,
+		"--body-file", bodyFile,
+	)
+	if err != nil {
+		return nil, wrapCreateIssueError(err, stderr, "gh")
+	}
+	lines := strings.Split(strings.TrimSpace(stdout), "\n")
+	issueURL := strings.TrimSpace(lines[len(lines)-1])
+	id := issueIDFromURL(issueURL)
+	if id == 0 {
+		return nil, fmt.Errorf("gh issue create: cannot parse issue URL from output %q", strings.TrimSpace(stdout))
+	}
+	return &Issue{ID: id, Title: title, Body: body, State: "open", URL: issueURL}, nil
+}
+
 // attachmentsFromBody extracts download candidates from the
 // GitHub issue body. GitHub doesn't have a first-class issue
 // attachments API — user uploads (screenshots, logs, dumps)
@@ -1387,6 +1473,45 @@ func (c *GitLabProvider) GetIssue(ctx context.Context, owner, repo string, id in
 		URL:         raw.WebURL,
 		Attachments: c.attachmentsFromBody(raw.Body),
 	}, nil
+}
+
+// CreateIssue runs `glab api --method POST projects/<owner/repo>/issues
+// -f title=<title> -F description=@<tmp>`. `glab issue create` has
+// no body-from-file flag, while `glab api` reads `@<path>` field
+// values from disk and returns the created issue as JSON.
+func (c *GitLabProvider) CreateIssue(ctx context.Context, owner, repo, title, body string) (*Issue, error) {
+	bodyFile, err := writeIssueBodyFile(body)
+	if err != nil {
+		return nil, err
+	}
+	defer os.Remove(bodyFile)
+
+	stdout, stderr, err := c.runner().Run(ctx, "glab",
+		"api",
+		"--method", "POST",
+		"projects/"+url.PathEscape(owner+"/"+repo)+"/issues",
+		"-f", "title="+title,
+		"-F", "description=@"+bodyFile,
+	)
+	if err != nil {
+		return nil, wrapCreateIssueError(err, stderr, "glab")
+	}
+	var raw struct {
+		IID    int    `json:"iid"`
+		WebURL string `json:"web_url"`
+		State  string `json:"state"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &raw); err != nil {
+		return nil, fmt.Errorf("glab api create issue: decode json: %w", err)
+	}
+	if raw.IID <= 0 {
+		return nil, fmt.Errorf("glab api create issue: response has no iid: %s", strings.TrimSpace(stdout))
+	}
+	state := strings.ToLower(raw.State)
+	if state == "" || state == "opened" {
+		state = "open"
+	}
+	return &Issue{ID: raw.IID, Title: title, Body: body, State: state, URL: raw.WebURL}, nil
 }
 
 // attachmentsFromBody extracts download candidates from the

@@ -331,6 +331,17 @@ stdout:
 
 GitHub / GitLab issues are the task flow — each `/gtw fix` pins to an issue, and the work moves through the issue's state as the subcommands fire.
 
+### From discussion to issue: `/gtw new`
+
+After a long back-and-forth with the agent about a requirement, **`/gtw new`** archives that discussion into a new GitHub / GitLab issue that a developer or coding agent can implement without having seen the chat. Unlike the other subcommands, it runs in the chat's **current** agent session — the discussion only exists there.
+
+It is a two-step command — the agent drafts, you decide:
+
+1. **`/gtw new`** — the agent extracts every requirement, constraint, decision, and edge case from the conversation and resolves contradictions (rejected options move to a *Decisions* section with their reasons). If something blocking is still undecided, it asks once — all questions in one message, each with a recommended default — and stops; answer in chat and run `/gtw new` again. Otherwise it writes the draft and shows the full document in chat: background and goal, scope, glossary, requirements with acceptance criteria, design, edge cases, constraints, decisions, implementation plan, open questions. Ask for changes in chat and it rewrites the draft.
+2. **`/gtw new -y`** — once the draft looks right, NightMe creates the issue from it through `gh` / `glab` and replies with the number. No agent is involved in this step.
+
+Next step: `/gtw fix <id>`. The draft lives in `~/.nightme/issue-drafts/`, one per chat; `/gtw new` replaces it, a successful `/gtw new -y` deletes it.
+
 ### The local dev loop: fix → hooks → close
 
 Three subcommands chain into a complete **local multi-branch development workflow**. Run 3 of these in parallel — three issues, three worktrees, three agents, no state collision.

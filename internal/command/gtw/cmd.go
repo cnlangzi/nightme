@@ -245,7 +245,9 @@ func (f *Factory) Spec() command.Spec {
 		Name:    "gtw",
 		Aliases: []string{"team"},
 		Summary: "GTW: Git-driven team workflow (claim, label, worktree).",
-		Usage: "/gtw fix <issue-id> [-y|--yes]   claim, label, and create a worktree\n" +
+		Usage: "/gtw new                          have the agent draft an issue from this chat's discussion\n" +
+			"/gtw new -y                       create the issue from the reviewed draft\n" +
+			"/gtw fix <issue-id> [-y|--yes]   claim, label, and create a worktree\n" +
 			"/gtw fix --name <branch>          create a local worktree (no issue)\n" +
 			"/gtw close                        tear down the worktree, delete the branch, and sync main\n" +
 			"/gtw back                         exit the fix worktree (cwd → repoRoot) and sync main — worktree preserved\n" +
@@ -256,6 +258,11 @@ func (f *Factory) Spec() command.Spec {
 			"/gtw pr -a claude                 override which agent runs the one-shot\n" +
 			"/gtw sync                         checkout the default branch and pull --rebase from origin",
 		Subcommands: []command.SubcommandSpec{
+			{
+				Name:    "new",
+				Summary: "draft an issue from this chat's discussion via the current agent; `-y` creates it",
+				Usage:   newCmdSpec.Usage,
+			},
 			{
 				Name:    "fix",
 				Summary: "claim an issue, create a worktree, dispatch to the agent",
@@ -307,6 +314,12 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, mgr *c
 	//
 	// Cross-chat independence: chat A's long /gtw fix does not
 	// block chat B's /gtw commit; the lock is per chatID.
+	//
+	// /gtw new takes no lock: it touches neither the worktree nor
+	// the chat cwd, only the chat's own issue draft.
+	if input.Args[1] == "new" {
+		return f.runNew(ctx, rt, cs, input)
+	}
 	if mu := f.mgr.runLockFor(input.ChatID); mu != nil {
 		mu.Lock()
 		defer mu.Unlock()
@@ -332,6 +345,48 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, mgr *c
 		Reply:    "Unknown subcommand: " + input.Args[1] + "\n" + f.Spec().Usage,
 		Consumed: true,
 	}, nil
+}
+
+// runNew handles the two steps of /gtw new: `/gtw new` asks the
+// current agent to draft the issue (RunNewDraft), `/gtw new -y`
+// creates the issue from the reviewed draft (RunNewCreate). Only
+// the creation step is wrapped in withHooks — new.before /
+// new.after describe "an issue is being created", which drafting
+// does not do.
+func (f *Factory) runNew(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
+	args, err := parseNewIssueArgs(input.Args[2:])
+	if err != nil {
+		return &command.SlashOutput{
+			Reply:    fmt.Sprintf("❌ %v", err),
+			Consumed: true,
+		}, nil
+	}
+	if _, failOut := command.RequireActiveCwd(cs); failOut != nil {
+		return failOut, nil
+	}
+
+	if !args.Yes {
+		_, _ = RunNewDraft(ctx, cs, f.deps, input.ChatID, input.MessageID)
+		return &command.SlashOutput{Consumed: true}, nil
+	}
+
+	cfg, loadNotes := Load()
+
+	hc := f.deriveHookContext(ctx, cs, "new")
+	hcFn := func() HookContext { return hc }
+	err = f.withHooks(ctx, cs, input.ChatID, input.MessageID,
+		loadNotes, hcFn, cfg.New.Hooks.Before, cfg.New.Hooks.After,
+		func() error {
+			_, e := RunNewCreate(ctx, cs, f.deps, input.ChatID, input.MessageID)
+			return e
+		})
+	if err != nil {
+		return &command.SlashOutput{
+			Reply:    fmt.Sprintf("❌ /gtw new failed: %v", err),
+			Consumed: true,
+		}, nil
+	}
+	return &command.SlashOutput{Consumed: true}, nil
 }
 
 // runFix handles `/gtw fix <issue-id>` and `/gtw fix --name <branch>`.

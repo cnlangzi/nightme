@@ -1,21 +1,10 @@
 // Package feishu — tenant_access_token cache invalidation.
 //
-// Lark SDK's TokenManager is a process-wide singleton (see
-// lark-sdk-go core/tokenmanager.go: `var tokenManager = TokenManager{...}`).
-// Every *lark.Client created in the process shares one in-memory
-// map keyed by tenant_access_token + sha256(AppSecret) + tenantKey,
-// with a 3-minute expiry buffer (expiryDelta in core/constants.go).
-//
-// When the WS connection drops for long enough that the server
-// revokes the cached tenant_access_token, the SDK's own retry
-// loop in httptransport.go keeps reusing the same stale entry
-// until the buffered expireTime passes — observable as a burst
-// of 99991663 errors on the first REST call after WS reconnect.
-//
-// invalidateableCache is installed via WithTokenCache so nightme
-// can drop the entry proactively from markSDKConnected (which
-// fires on OnReady and OnReconnected), letting the next REST call
-// hit the cache-miss refresh path instead.
+// lark-sdk-go's TokenManager is a process-wide singleton with a
+// 3-minute expiry buffer (core/constants.go:expiryDelta). nightme
+// installs invalidateableCache via WithTokenCache and drops the
+// entry on every WS (re)connect, so the first REST call after a
+// reconnect always hits the cache-miss refresh path.
 package feishu
 
 import (
@@ -28,16 +17,12 @@ import (
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 )
 
-// invalidateableCache implements larkcore.Cache with the extra
+// invalidateableCache wraps larkcore.Cache with the extra
 // InvalidateTenant method that nightme's WS-reconnect hook uses
-// to evict a stale tenant_access_token entry. State is kept
-// in-process; matches lark-sdk-go's localCache semantics
-// (Get returns "" on miss or expiry; Set stores (value,
-// now+ttl)).
-//
-// Concurrent-safe: one mutex guards both the map and the
-// InvalidateTenant path so an in-flight Get that races with an
-// invalidation sees a coherent view.
+// to evict a tenant_access_token entry on reconnect. Matches
+// lark-sdk-go's localCache semantics: Get returns "" on miss or
+// expiry; Set stores (value, now+ttl). One mutex guards the map
+// for concurrent Get/Set/Invalidate.
 type invalidateableCache struct {
 	mu sync.Mutex
 	m  map[string]cacheEntry
@@ -73,34 +58,32 @@ func (c *invalidateableCache) Set(ctx context.Context, key, value string, ttl ti
 }
 
 // InvalidateTenant drops the cached tenant_access_token for the
-// given self-built app. Next REST call hits cache-miss → SDK
-// re-issues the token → fresh entry cached. No-op when appID or
-// appSecret is empty (shouldn't happen in practice but keeps the
-// hook defensive against partial config).
-func (c *invalidateableCache) InvalidateTenant(appID, appSecret string) {
+// given self-built app. Returns true when an entry was present and
+// evicted, false when nothing matched (empty creds or cache miss).
+// Next REST call hits cache-miss → SDK re-issues the token → fresh
+// entry cached.
+func (c *invalidateableCache) InvalidateTenant(appID, appSecret string) bool {
 	if appID == "" || appSecret == "" {
-		return
+		return false
 	}
 	key := tenantAccessTokenKey(appID, appSecret, "")
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if _, ok := c.m[key]; !ok {
+		return false
+	}
 	delete(c.m, key)
+	return true
 }
 
-// tenantAccessTokenKey mirrors lark-sdk-go
-// core/tokenmanager.go:tenantAccessTokenKey. Re-implemented here
-// because the SDK function is unexported. If a future SDK
-// release changes the prefix or hashing scheme, the key
-// compatibility assertion in cache_test.go will catch the drift.
-//
-// Format: `tenant_access_token:app_secret:<appID>:<sha256(appSecret)>:<tenantKey>`
-// (matches `tenantAccessTokenKeyPrefix` constant in core/constants.go).
+// tenantAccessTokenKey mirrors the SDK's unexported
+// core/tokenmanager.go:tenantAccessTokenKey. Format:
+// `tenant_access_token:app_secret:<appID>:<sha256(appSecret)>:<tenantKey>`.
+// KeyFormulaMatchesSDK in cache_test.go pins this against SDK drift.
 func tenantAccessTokenKey(appID, appSecret, tenantKey string) string {
 	sum := sha256.Sum256([]byte(appSecret))
 	return "tenant_access_token:app_secret:" + appID + ":" + hex.EncodeToString(sum[:]) + ":" + tenantKey
 }
 
-// Compile-time guard: invalidateableCache satisfies the SDK's
-// Cache interface. If a future SDK release changes the interface
-// signature, the build breaks here rather than at runtime.
+// Compile-time guard: invalidateableCache satisfies the SDK's Cache interface.
 var _ larkcore.Cache = (*invalidateableCache)(nil)

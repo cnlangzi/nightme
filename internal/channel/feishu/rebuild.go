@@ -111,11 +111,9 @@ type RebuildSnapshot struct {
 	LastTerminalErr       string    `json:"last_terminal_err"`
 	LastTerminalErrAt     time.Time `json:"last_terminal_err_at"`
 	CancelStrandedStreak  int64     `json:"cancel_stranded_streak"`
-	// TokenInvalidations counts how many times markSDKConnected
-	// has dropped the cached tenant_access_token since daemon
-	// start. One bump per OnReady / OnReconnected. The health
-	// surface shows wake-reconnect fan-out the user can cross-
-	// check against system wake events.
+	// TokenInvalidations counts tenant_access_token evictions
+	// performed by markSDKConnected since daemon start. Bumps
+	// only when an entry was actually present and dropped.
 	TokenInvalidations int64 `json:"token_invalidations"`
 }
 
@@ -153,10 +151,9 @@ type rebuildState struct {
 	// distinguish them.
 	strandedStreak atomic.Int64
 
-	// tokenInvalidations counts WS (re)connects that triggered
-	// markSDKConnected → invalidateableCache.InvalidateTenant.
-	// Cumulative since daemon start; never reset (unlike
-	// consecutiveFails which clears on every successful connect).
+	// tokenInvalidations counts WS (re)connects where
+	// markSDKConnected evicted a present tenant_access_token.
+	// Cumulative since daemon start.
 	tokenInvalidations atomic.Int64
 }
 
@@ -434,17 +431,16 @@ func (a *Adapter) markSDKConnected() {
 	a.rebuild.consecutiveFails.Store(0)
 	a.rebuild.cancelStrandedTerminal.Store(false)
 	a.lastStartErr.Store(nil)
-	// Drop the cached tenant_access_token on every WS (re)connect.
-	// The SDK's 3-minute expiryDelta buffer otherwise keeps a
-	// server-revoked token alive for the first batch of REST calls
-	// after reconnect, surfacing as 99991663 bursts. See cache.go
-	// for the full rationale.
+	// Drop the cached tenant_access_token on every WS (re)connect
+	// so the first REST call hits the SDK's cache-miss refresh
+	// path. See cache.go for rationale.
 	if a.larkCache != nil {
-		a.larkCache.InvalidateTenant(a.cfg.Feishu.AppID, a.cfg.Feishu.AppSecret)
-		a.rebuild.tokenInvalidations.Add(1)
-		a.logger.Debug("feishu: tenant_access_token cache invalidated on WS reconnect",
-			"app_id", a.appID(),
-			"token_invalidations", a.rebuild.tokenInvalidations.Load())
+		if invalidated := a.larkCache.InvalidateTenant(a.cfg.Feishu.AppID, a.cfg.Feishu.AppSecret); invalidated {
+			a.rebuild.tokenInvalidations.Add(1)
+			a.logger.Debug("feishu: tenant_access_token cache invalidated on WS reconnect",
+				"app_id", a.appID(),
+				"token_invalidations", a.rebuild.tokenInvalidations.Load())
+		}
 	}
 	if a.prober != nil {
 		a.prober.Stop()

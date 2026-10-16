@@ -115,9 +115,14 @@ type mergeTextMessageFunc func(ctx context.Context, messageID, merged string) er
 type Adapter struct {
 	client     *larkws.Client
 	larkClient *lark.Client
-	incoming   chan channel.Message
-	cfg        *config.Config
-	cancel     context.CancelFunc
+	// larkCache is the SDK TokenManager cache. nightme owns it
+	// (instead of letting the SDK fall back to the package-level
+	// localCache singleton) so markSDKConnected can drop a stale
+	// tenant_access_token on WS reconnect — see cache.go.
+	larkCache *invalidateableCache
+	incoming  chan channel.Message
+	cfg       *config.Config
+	cancel    context.CancelFunc
 
 	// health tracks the live WebSocket lifecycle for the
 	// `nightme health` subcommand. Updated from SDK OnReady /
@@ -371,7 +376,16 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 	// it on every terminal-state recovery with the same dialer /
 	// httpClient configuration. NewAdapter constructs the very first
 	// one; rebuildWSClient constructs every subsequent one.
-	a.larkClient = lark.NewClient(cfg.Feishu.AppID, cfg.Feishu.AppSecret)
+	//
+	// WithTokenCache hands nightme's invalidateableCache to the SDK's
+	// TokenManager singleton; markSDKConnected uses InvalidateTenant
+	// to drop the cached tenant_access_token on every WS (re)connect.
+	// Without this the SDK keeps a server-revoked token alive for
+	// its 3-minute expiryDelta window after WS reconnect, surfacing
+	// as 99991663 bursts on the next batch of REST calls.
+	a.larkCache = newInvalidatableCache()
+	a.larkClient = lark.NewClient(cfg.Feishu.AppID, cfg.Feishu.AppSecret,
+		lark.WithTokenCache(a.larkCache))
 	a.sendFunc = a.sendViaLark
 	a.updateFunc = a.updateViaLark
 	// F-38 §3.1.3: tool-merge PATCH path. mergeTextFunc defaults

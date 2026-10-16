@@ -111,6 +111,12 @@ type RebuildSnapshot struct {
 	LastTerminalErr       string    `json:"last_terminal_err"`
 	LastTerminalErrAt     time.Time `json:"last_terminal_err_at"`
 	CancelStrandedStreak  int64     `json:"cancel_stranded_streak"`
+	// TokenInvalidations counts how many times markSDKConnected
+	// has dropped the cached tenant_access_token since daemon
+	// start. One bump per OnReady / OnReconnected. The health
+	// surface shows wake-reconnect fan-out the user can cross-
+	// check against system wake events.
+	TokenInvalidations int64 `json:"token_invalidations"`
 }
 
 // rebuildState is the per-Adapter atomic state used by the rebuild
@@ -146,6 +152,12 @@ type rebuildState struct {
 	// induced terminal path separately so `nightme health` can
 	// distinguish them.
 	strandedStreak atomic.Int64
+
+	// tokenInvalidations counts WS (re)connects that triggered
+	// markSDKConnected → invalidateableCache.InvalidateTenant.
+	// Cumulative since daemon start; never reset (unlike
+	// consecutiveFails which clears on every successful connect).
+	tokenInvalidations atomic.Int64
 }
 
 func newRebuildState() *rebuildState { return &rebuildState{} }
@@ -157,6 +169,7 @@ func (s *rebuildState) snapshot() RebuildSnapshot {
 		SkippedCooldown:       s.skippedCooldown.Load(),
 		SkippedMaxConsecutive: s.skippedMaxStreak.Load(),
 		CancelStrandedStreak:  s.strandedStreak.Load(),
+		TokenInvalidations:    s.tokenInvalidations.Load(),
 	}
 	if t := s.lastAt.Load(); t != nil {
 		out.LastRebuildAt = *t
@@ -421,6 +434,18 @@ func (a *Adapter) markSDKConnected() {
 	a.rebuild.consecutiveFails.Store(0)
 	a.rebuild.cancelStrandedTerminal.Store(false)
 	a.lastStartErr.Store(nil)
+	// Drop the cached tenant_access_token on every WS (re)connect.
+	// The SDK's 3-minute expiryDelta buffer otherwise keeps a
+	// server-revoked token alive for the first batch of REST calls
+	// after reconnect, surfacing as 99991663 bursts. See cache.go
+	// for the full rationale.
+	if a.larkCache != nil {
+		a.larkCache.InvalidateTenant(a.cfg.Feishu.AppID, a.cfg.Feishu.AppSecret)
+		a.rebuild.tokenInvalidations.Add(1)
+		a.logger.Debug("feishu: tenant_access_token cache invalidated on WS reconnect",
+			"app_id", a.appID(),
+			"token_invalidations", a.rebuild.tokenInvalidations.Load())
+	}
 	if a.prober != nil {
 		a.prober.Stop()
 		a.logger.Info("feishu: reconnect prober stopped",

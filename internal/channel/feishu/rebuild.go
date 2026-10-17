@@ -111,6 +111,10 @@ type RebuildSnapshot struct {
 	LastTerminalErr       string    `json:"last_terminal_err"`
 	LastTerminalErrAt     time.Time `json:"last_terminal_err_at"`
 	CancelStrandedStreak  int64     `json:"cancel_stranded_streak"`
+	// TokenInvalidations counts tenant_access_token evictions
+	// performed by markSDKConnected since daemon start. Bumps
+	// only when an entry was actually present and dropped.
+	TokenInvalidations int64 `json:"token_invalidations"`
 }
 
 // rebuildState is the per-Adapter atomic state used by the rebuild
@@ -146,6 +150,11 @@ type rebuildState struct {
 	// induced terminal path separately so `nightme health` can
 	// distinguish them.
 	strandedStreak atomic.Int64
+
+	// tokenInvalidations counts WS (re)connects where
+	// markSDKConnected evicted a present tenant_access_token.
+	// Cumulative since daemon start.
+	tokenInvalidations atomic.Int64
 }
 
 func newRebuildState() *rebuildState { return &rebuildState{} }
@@ -157,6 +166,7 @@ func (s *rebuildState) snapshot() RebuildSnapshot {
 		SkippedCooldown:       s.skippedCooldown.Load(),
 		SkippedMaxConsecutive: s.skippedMaxStreak.Load(),
 		CancelStrandedStreak:  s.strandedStreak.Load(),
+		TokenInvalidations:    s.tokenInvalidations.Load(),
 	}
 	if t := s.lastAt.Load(); t != nil {
 		out.LastRebuildAt = *t
@@ -421,6 +431,17 @@ func (a *Adapter) markSDKConnected() {
 	a.rebuild.consecutiveFails.Store(0)
 	a.rebuild.cancelStrandedTerminal.Store(false)
 	a.lastStartErr.Store(nil)
+	// Drop the cached tenant_access_token on every WS (re)connect
+	// so the first REST call hits the SDK's cache-miss refresh
+	// path. See cache.go for rationale.
+	if a.larkCache != nil {
+		if invalidated := a.larkCache.InvalidateTenant(a.cfg.Feishu.AppID, a.cfg.Feishu.AppSecret); invalidated {
+			a.rebuild.tokenInvalidations.Add(1)
+			a.logger.Debug("feishu: tenant_access_token cache invalidated on WS reconnect",
+				"app_id", a.appID(),
+				"token_invalidations", a.rebuild.tokenInvalidations.Load())
+		}
+	}
 	if a.prober != nil {
 		a.prober.Stop()
 		a.logger.Info("feishu: reconnect prober stopped",

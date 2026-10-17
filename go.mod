@@ -10,7 +10,7 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/k2-fsa/sherpa-onnx-go v1.13.8
-	github.com/larksuite/oapi-sdk-go/v3 v3.12.0
+	github.com/larksuite/oapi-sdk-go/v3 v3.12.1
 	github.com/mattn/go-isatty v0.0.24
 	github.com/reeflective/readline v1.3.0
 	github.com/robfig/cron/v3 v3.0.1

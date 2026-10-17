@@ -262,6 +262,27 @@ func writeDoctorText(out io.Writer, payload daemoncontrol.HealthPayload) error {
 		fmt.Fprintf(tw, "  started_at:\t%s ago\n", formatAge(snap.AgentProber.StartedAt, now))
 	}
 
+	// Section 3.7: WS *Client rebuild counters. Always printed so
+	// the operator can see whether the terminal-recovery path has
+	// fired, even before any prober activity. A non-zero
+	// SkippedMaxConsecutive means the rebuild path has given up —
+	// the WS will not recover until the daemon restarts.
+	fmt.Fprintln(tw, "")
+	fmt.Fprintln(tw, "REBUILD (WS *Client terminal recovery)")
+	fmt.Fprintf(tw, "  rebuild_count:\t%d\n", snap.Rebuild.RebuildCount)
+	if !snap.Rebuild.LastRebuildAt.IsZero() {
+		fmt.Fprintf(tw, "  last_rebuild_at:\t%s ago\n", formatAge(snap.Rebuild.LastRebuildAt, now))
+	}
+	fmt.Fprintf(tw, "  consecutive_failures:\t%d\n", snap.Rebuild.ConsecutiveFailures)
+	fmt.Fprintf(tw, "  skipped_cooldown:\t%d\n", snap.Rebuild.SkippedCooldown)
+	fmt.Fprintf(tw, "  skipped_max_consecutive:\t%d\n", snap.Rebuild.SkippedMaxConsecutive)
+	fmt.Fprintf(tw, "  cancel_stranded_streak:\t%d\n", snap.Rebuild.CancelStrandedStreak)
+	fmt.Fprintf(tw, "  token_invalidations:\t%d\n", snap.Rebuild.TokenInvalidations)
+	if !snap.Rebuild.LastTerminalErrAt.IsZero() {
+		fmt.Fprintf(tw, "  last_terminal_err:\t%s\n", snap.Rebuild.LastTerminalErr)
+		fmt.Fprintf(tw, "  last_terminal_err_at:\t%s ago\n", formatAge(snap.Rebuild.LastTerminalErrAt, now))
+	}
+
 	// Section 4: event ring (most recent first)
 	if len(snap.EventRing) > 0 {
 		fmt.Fprintln(tw, "")

@@ -115,9 +115,12 @@ type mergeTextMessageFunc func(ctx context.Context, messageID, merged string) er
 type Adapter struct {
 	client     *larkws.Client
 	larkClient *lark.Client
-	incoming   chan channel.Message
-	cfg        *config.Config
-	cancel     context.CancelFunc
+	// larkCache backs the SDK TokenManager and lets markSDKConnected
+	// evict the tenant_access_token on WS (re)connect. See cache.go.
+	larkCache *invalidateableCache
+	incoming  chan channel.Message
+	cfg       *config.Config
+	cancel    context.CancelFunc
 
 	// health tracks the live WebSocket lifecycle for the
 	// `nightme health` subcommand. Updated from SDK OnReady /
@@ -371,7 +374,11 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 	// it on every terminal-state recovery with the same dialer /
 	// httpClient configuration. NewAdapter constructs the very first
 	// one; rebuildWSClient constructs every subsequent one.
-	a.larkClient = lark.NewClient(cfg.Feishu.AppID, cfg.Feishu.AppSecret)
+	// WithTokenCache hands invalidateableCache to the SDK's
+	// TokenManager; markSDKConnected evicts on WS (re)connect.
+	a.larkCache = newInvalidatableCache()
+	a.larkClient = lark.NewClient(cfg.Feishu.AppID, cfg.Feishu.AppSecret,
+		lark.WithTokenCache(a.larkCache))
 	a.sendFunc = a.sendViaLark
 	a.updateFunc = a.updateViaLark
 	// F-38 §3.1.3: tool-merge PATCH path. mergeTextFunc defaults

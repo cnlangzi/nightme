@@ -69,6 +69,9 @@ func TestRenderNewIssuePrompt(t *testing.T) {
 	if strings.Contains(p, "{{") {
 		t.Error("unsubstituted placeholder in prompt")
 	}
+	if strings.HasPrefix(strings.TrimSpace(p), "/") {
+		t.Error("prompt starts with '/'; agents would parse it as a slash command")
+	}
 	for _, want := range []string{
 		path,
 		"Do NOT run gh / glab",

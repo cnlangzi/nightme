@@ -231,8 +231,10 @@ func renderNewIssuePrompt(draftPath string) string {
 
 // newIssuePrompt is the archive task queued into the current agent
 // session. It runs inside the user's own agent, which cannot see
-// this repository's docs, so it is fully self-contained.
-const newIssuePrompt = `/gtw new — archive the requirement discussion in THIS conversation into an issue draft.
+// this repository's docs, so it is fully self-contained. It must not
+// start with "/": agents such as Claude Code parse a leading "/word"
+// as their own slash command and reject the whole prompt.
+const newIssuePrompt = `Task: archive the requirement discussion in THIS conversation into an issue draft.
 
 The issue will be handed to a developer or a coding agent that has NOT seen this conversation and can only read the issue. It must be implementable from the issue alone.
 

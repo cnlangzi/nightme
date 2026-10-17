@@ -82,6 +82,8 @@ func TestRenderNewIssuePrompt(t *testing.T) {
 		"Do NOT run gh / glab",
 		"STOP",
 		"splitting the work into several issues",
+		"One issue is the default",
+		"Never split by kind of work",
 		"print the complete content of every draft file in chat",
 		"run /gtw new -y to create the issues",
 	} {

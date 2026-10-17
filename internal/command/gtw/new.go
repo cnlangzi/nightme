@@ -445,12 +445,12 @@ func renderNewIssuePrompt(draftDir string) string {
 // prompt.
 const newIssuePrompt = `Task: archive the requirement discussion in THIS conversation into issue drafts.
 
-Each issue will be handed to a developer or a coding agent that has NOT seen this conversation and can only read that issue. It must be implementable from the issue alone.
+Each issue will be handed to a developer or a coding agent that has NOT seen this conversation and can only read that issue. It must be implementable from the issue alone. Each issue also becomes its own branch, worktree, and pull request, so an issue is a complete unit of work: the code change together with the tests, documentation, and configuration it needs.
 
 Draft directory (absolute path):
 {{DRAFT_DIR_ABS}}
 
-Write one file per issue into that directory, named 01.md, 02.md, ... in implementation order. A single issue is 01.md. Apart from the NN.created records described below, the directory holds exactly the current drafts and nothing else.
+Write each issue as its own file in that directory, named 01.md, 02.md, ... in implementation order. Most discussions produce a single issue, 01.md. Apart from the NN.created records described below, the directory holds exactly the current drafts and nothing else.
 
 The user reviews the drafts in chat; when they approve, they run /gtw new -y and nightme creates one issue per draft, in file order. Do NOT run gh / glab or create issues yourself. Do NOT modify any file outside the draft directory.
 
@@ -463,8 +463,8 @@ Each time nightme creates an issue it replaces NN.md with NN.created, whose firs
 
 ## Workflow
 1. Extract (do not print). List every meaningful point of the discussion as an atomic, verifiable statement, typed as: GOAL, REQUIREMENT, CONSTRAINT, DECISION (with rationale), REJECTED (with reason), EDGE CASE, INTERFACE (API, data shape, config key, command, path), NON-GOAL, OPEN QUESTION, TERM. Note for each whether it is final, superseded (by which point), or uncertain.
-2. Reconcile (do not print). For conflicting points, the later and more explicit statement wins. If a later remark was casual and contradicts an explicit earlier decision, do not decide — turn it into an open question. A superseded DECISION becomes REJECTED and keeps its reason. Also list implicit assumptions you had to make and the information a developer would ask for before starting. Decide whether the work is one issue or several: split only into deliverables that can each be implemented, reviewed, and merged on their own.
-3. Confirm. Ask now if step 2 produced questions whose answers change scope, behavior, interfaces, or acceptance criteria, or if you recommend splitting the work into several issues and the user has not agreed to that split yet. Ask in one chat message, numbered, each question with your recommended default and a one-line reason; a proposed split lists each issue with its title and a one-line scope. Then STOP — do not write any draft in this turn, and end with: "Answer the questions above and I will write the drafts."
+2. Reconcile (do not print). For conflicting points, the later and more explicit statement wins. If a later remark was casual and contradicts an explicit earlier decision, do not decide — turn it into an open question. A superseded DECISION becomes REJECTED and keeps its reason. Also list implicit assumptions you had to make and the information a developer would ask for before starting. Decide whether the work is one issue or several, following "One issue or several" below.
+3. Confirm. Ask now if step 2 produced questions whose answers change scope, behavior, interfaces, or acceptance criteria, or if you recommend splitting the work into several issues and the user has not agreed to that split yet. Ask in one chat message, numbered, each question with your recommended default and a one-line reason; a proposed split lists each issue with its title, a one-line scope, and why it counts as done even if the other issues are never implemented. Then STOP — do not write any draft in this turn, and end with: "Answer the questions above and I will write the drafts."
    When the user answers — in a later message, or by running /gtw new again — use those answers, do not ask again, and continue with step 4. Questions that do not block implementation are not asked — they go under "Open Questions". If nothing is blocking, continue.
 4. Write the draft files following the template below, one file per issue.
 5. Review every draft against the conversation and fix it before finishing: requirements, constraints, or edge cases that were agreed but are missing from every draft; statements that differ from what was agreed; content with no basis in the discussion and no [inferred] mark; rejected options appearing anywhere except "Decisions"; items a developer could not act on (missing parameters, ambiguous interfaces, unverifiable acceptance criteria).
@@ -472,7 +472,14 @@ Each time nightme creates an issue it replaces NN.md with NN.created, whose firs
 
 If the user asks for changes later in this conversation — including splitting or merging issues — rewrite the draft files so the directory holds exactly the current set of drafts not yet created, delete the drafts of issues that are no longer wanted, then show the complete content of every remaining draft again the same way. Give a new issue a number no file in the directory uses.
 
-## Several issues
+## One issue or several
+One issue is the default. An issue is the whole change one pull request delivers: the code together with its tests, documentation, configuration, and migration. A large issue is fine — its Implementation Plan carries the steps.
+- Never split by kind of work (code / tests / docs / refactoring / configuration) or by layer, module, or file. The tests and docs of a change belong to the issue that makes the change.
+- Propose a split only when the discussion holds unrelated goals: different problems with different outcomes, where each issue on its own delivers a result the user would accept as done even if the others were never implemented. Work that only makes sense together with another issue — a refactoring that prepares it, its tests or docs, a follow-up that completes it — is part of that issue.
+- When in doubt, keep one issue. A split rarely yields more than three issues.
+- If the user asks for a split or a merge, follow the user.
+
+When the work is split:
 - Each issue is self-contained: it repeats the background, terms, constraints, and decisions it needs. Never point to another issue for content.
 - Each requirement, edge case, and implementation task belongs to exactly one issue; list what another issue covers under "Out of scope", with its reference.
 - Reference another issue of the set as {{ISSUE:NN}}, where NN is its file number (e.g. "depends on {{ISSUE:01}}"). Only lower-numbered or already created issues may be referenced; nightme replaces the reference with the real issue number when it creates the issue. Never write guessed issue numbers.

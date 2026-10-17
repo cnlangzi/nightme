@@ -363,8 +363,8 @@ func TestBuildIssueDispatchBlocks(t *testing.T) {
 	if blocks[0].Type != agent.ContentText {
 		t.Errorf("[0] type = %v, want ContentText", blocks[0].Type)
 	}
-	if !strings.Contains(blocks[0].Text, "issue #7") {
-		t.Errorf("[0] text missing 'issue #7':\n%s", blocks[0].Text)
+	if !strings.Contains(blocks[0].Text, "Issue #7") {
+		t.Errorf("[0] text missing 'Issue #7':\n%s", blocks[0].Text)
 	}
 	for i := 1; i < 3; i++ {
 		if blocks[i].Type != agent.ContentFile {

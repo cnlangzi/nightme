@@ -23,7 +23,7 @@
 
 **NightMe** drives your local AI Coding Agents — Claude Code, Codex, DSH (DeepSeek Harness), GitHub Copilot CLI, Pi, OpenCode, etc. — from chat. Send a message in any connected chat platform; NightMe routes it to the right agent process and returns the reply as a structured card.
 
-Multiple chats run in parallel — one per project. Multiple agents work in parallel, each on its own task — switching between them is instant, no cold restart. `git` worktree work is hardened into `Git Team Workflow` (`/gtw`): fix / push / pr / close / sync — each step is one IM reply card, integrated with GitHub, GitLab, and similar platforms. NightMe doesn't replace your agent subscriptions or memory; it sits in front of them and keeps them warm.
+Multiple chats run in parallel — one per project. Multiple agents work in parallel, each on its own task — switching between them is instant, no cold restart. The whole development cycle is standardized as the [Git Team Workflow](#git-team-workflow-gtw) (`/gtw`): discussion → issue → worktree → commit → push → PR → close, each step one slash command and one IM card, integrated with GitHub and GitLab. NightMe doesn't replace your agent subscriptions or memory; it sits in front of them and keeps them warm.
 
 ## Why NightMe
 
@@ -65,6 +65,8 @@ live simultaneously.
 | **Multiple Chat Sessions in parallel** | N sessions on one machine, each running a different project or task. |
 | **CWD = project** | Each ChatSession is bound to one current working directory — that directory *is* the project. Set it with `/cwd <path>`; switch anytime. |
 | **Multi-agent, in the same Chat** | `/use <agent>` swaps the active agent. The previous one keeps running in the background — its task continues, results still come back, but new messages route to the new active agent. |
+
+> **Built on top: the [Git Team Workflow](#git-team-workflow-gtw).** Discuss a requirement → `/gtw new` turns it into an issue → `/gtw fix <id>` opens a worktree and hands the issue to the agent → `/gtw commit` · `/gtw push` · `/gtw pr` ship it with Conventional Commits → `/gtw close` cleans up. One standard for requirements, development, and Git operations across the whole team.
 
 ## Supported integrations
 
@@ -327,77 +329,73 @@ stdout:
 
 ## Git Team Workflow (`/gtw`)
 
-`git worktree` gives you isolated branches per task. `gh pr create` gives you a one-shot PR. AI agents give you on-demand coding help. `/gtw` glues the three together — each `/gtw <cmd>` is a slash command that spins up a **short-lived agent** for the heavy lifting and returns a clean IM card. The agent runs once, does the work, and exits. Your main chat stays clean.
+**`/gtw` is a complete Git team workflow — from a chat discussion to a merged PR — driven entirely from chat.** Every requirement becomes an issue, every issue gets its own branch and worktree, every commit and PR follows Conventional Commits, and the issue's state on GitHub / GitLab tracks the work. The same conventions apply no matter which teammate, or which AI agent, does the work: requirements, development, and Git operations all follow one standard.
 
-GitHub / GitLab issues are the task flow — each `/gtw fix` pins to an issue, and the work moves through the issue's state as the subcommands fire.
+```
+ discuss ──▶ /gtw new ──▶ /gtw new -y ──▶ /gtw fix <id> [-y] ──▶ /gtw commit ──▶ /gtw push ──▶ /gtw pr ──▶ /gtw close
+ (chat)      draft         issue #N        worktree + agent        commit          remote        PR          done
+                                                 ▲   │
+                                                 └───┘ /handoff <name> · /resume <name>
+                                                       (context too long, or switching agents)
+```
 
-### From discussion to issue: `/gtw new`
+| Step | Command | What it standardizes |
+|---|---|---|
+| 1. Requirement | `/gtw new` → `/gtw new -y` | The chat discussion becomes a self-contained issue: background, scope, requirements with acceptance criteria, design, decisions, implementation plan. |
+| 2. Implement | `/gtw fix <id> [-y]` | One issue = one branch = one worktree, cut from the freshly synced default branch. The issue gets the `nightme/wip` label and is dispatched to the agent. |
+| 3. Hand off *(optional)* | `/handoff <name>` · `/resume <name>` | Task state is written to a file, so a fresh session or a different agent continues without losing progress. |
+| 4. Commit | `/gtw commit [-a <agent>]` | An agent stages the changes and writes Conventional Commits messages. Local only. |
+| 5. Push | `/gtw push` | Pushes the branch to `origin`. Refuses a dirty worktree. |
+| 6. PR | `/gtw pr [-a <agent>]` | Opens a PR / MR with a Conventional Commits title, a structured body, and `Closes #<id>`. |
+| 7. Close | `/gtw close` | Removes the `nightme/wip` label, the worktree, and the local branch; returns the chat to the default branch, synced. |
 
-After a long back-and-forth with the agent about a requirement, **`/gtw new`** archives that discussion into a new GitHub / GitLab issue that a developer or coding agent can implement without having seen the chat. Unlike the other subcommands, it runs in the chat's **current** agent session — the discussion only exists there.
+Steps 1–2 run in the chat's current agent session, so you keep talking to the agent that did the analysis. `commit` and `pr` run a one-shot agent that exits when done, keeping the main conversation clean. `push`, `close`, `back`, and `sync` are pure Git / platform operations with no agent involved. Each step replies with one IM card. GitHub (`gh`) and GitLab (`glab`) are detected from `origin`; first use on a new repo needs no setup.
+
+Parallel work is the default: three issues means three worktrees, three branches, and three agents, with no shared state between them.
+
+### 1. Requirement → issue: `/gtw new`
+
+After a back-and-forth with the agent about a requirement, **`/gtw new`** archives that discussion into a GitHub / GitLab issue that a developer or coding agent can implement without having seen the chat. It runs in the chat's **current** agent session, because the discussion only exists there.
 
 It is a two-step command — the agent drafts, you decide:
 
 1. **`/gtw new`** — the agent extracts every requirement, constraint, decision, and edge case from the conversation and resolves contradictions (rejected options move to a *Decisions* section with their reasons). If something blocking is still undecided, it asks once — all questions in one message, each with a recommended default — and stops; answer in chat and run `/gtw new` again. Otherwise it writes the draft and shows the full document in chat: background and goal, scope, glossary, requirements with acceptance criteria, design, edge cases, constraints, decisions, implementation plan, open questions. Ask for changes in chat and it rewrites the draft.
 2. **`/gtw new -y`** — once the draft looks right, NightMe creates the issue from it through `gh` / `glab` and replies with the number. No agent is involved in this step.
 
-Next step: `/gtw fix <id>`. The draft lives in `~/.nightme/issue-drafts/`, one per chat; `/gtw new` replaces it, a successful `/gtw new -y` deletes it.
+The issue title follows Conventional Commits, so `/gtw fix` can derive a readable branch name from it. The draft lives in `~/.nightme/issue-drafts/`, one per chat; `/gtw new` replaces it, a successful `/gtw new -y` deletes it.
 
-### The local dev loop: fix → hooks → close
+### 2. Implement: `/gtw fix`
 
-Three subcommands chain into a complete **local multi-branch development workflow**. Run 3 of these in parallel — three issues, three worktrees, three agents, no state collision.
+**`/gtw fix <issue-id>`** syncs the default branch, creates a worktree and branch named after the issue title, labels the issue `nightme/wip`, moves the chat's CWD into the worktree, runs the `fix` hooks, and dispatches the issue (body and attachments) to the chat's current agent.
 
-> **`/gtw sync` is NOT part of this loop.** `sync` (a.k.a.
-> `git checkout main && git pull --rebase origin main`) is a
-> **main-repo operation** — it switches the current branch to
-> main and pulls. Don't call it from inside a worktree; it
-> refuses to run there by design. Both **`/gtw fix`** (step 1)
-> and **`/gtw close`** (last step) already call sync internally
-> on the main repo before / after the worktree operation, so
-> you don't need to call sync manually. After `close`, main is
-> fresh; the next `fix` starts from that.
+- **Plan first (default)** — the agent analyzes the issue and the code, posts a plan, and waits. Review it in chat, then tell the agent to proceed.
+- **`-y` / `--yes`** — the agent implements directly.
 
-1. **`/gtw fix -n <branch>`** — opens a fresh worktree named
-   `<branch>` on your just-up-to-date main, runs a one-shot
-   agent to do the work. Pure local — no GitHub issue needed.
-   You keep chatting in your main chat.
+**`/gtw fix --name <branch>`** (or `-n`) creates a local worktree without an issue; you drive the agent yourself.
 
-   For the GitHub / GitLab flow, use `/gtw fix <issue-id>` to
-   pin the worktree to a remote issue. First-time use on a new
-   repo just works — no setup needed.
+**`/gtw back`** steps out of the fix worktree without tearing it down — the chat's CWD returns to the repo root, the default branch is synced, and the worktree, branch, and uncommitted work stay on disk. **`/gtw back <worktree>`** jumps back in.
 
-2. **hooks fire automatically** — the dev environment rebuilds
-   itself in the new worktree. CodeGraph re-indexes, `npm install`
-   / `go mod download` / `cargo build` — whatever your project
-   needs. Edit `~/.nightme/gtw.yml`:
+> **`/gtw sync`** (`git checkout <default> && git pull --rebase origin <default>`) is a main-repo operation and refuses to run inside a worktree. `/gtw fix`, `/gtw back`, and `/gtw close` already sync the default branch, so the loop never needs it.
 
-   ```yaml
-   # ~/.nightme/gtw.yml
-   fix:
-     hooks:
-       after:
-         - codegraph init                # bare string = shell hook
-         - npm install
-         - go mod download
-   ```
+### 3. Hand off: `/handoff` · `/resume`
 
-3. (You work. Agent on demand. Or just edit files yourself.)
+When the agent's context is getting long, or another agent is a better fit for the rest of the task:
 
-4. **`/gtw back`** *(optional)* — when you want to step out of
-   the fix worktree temporarily without tearing it down
-   (e.g. to start a different `/gtw fix` from main). `back`
-   moves the chat's `cwd` back to the repo root, syncs main
-   (`git pull --rebase`), and leaves the worktree, branch, and
-   uncommitted work **intact** on disk. `/cwd <worktree>` to
-   resume; `/gtw close` to discard.
+1. **`/handoff <name>`** — the agent writes the task state (goal, progress, decisions, next steps) to `~/.nightme/handoff/<name>.md`.
+2. Start clean: `/new` resets the current agent's context, or `/use <agent>` switches agents.
+3. **`/resume <name>`** — the agent reads the handoff file and continues in the same worktree.
 
-5. **`/gtw close`** — when the task is done (or you decide not
-   to), `/gtw close` tears down the worktree, returns you to
-   main, and the branch is ready to ship (or discard).
+### 4–6. Ship: `/gtw commit` → `/gtw push` → `/gtw pr`
 
-**`/gtw commit [-a <agent>]`** — commit uncommitted work in the
-current worktree via the configured (or `-a <agent>`) agent. The
-in-loop step between `fix` and `push` / `pr` when you want the
-agent to stage and write the commit.
+1. **`/gtw commit [-a <agent>]`** — a one-shot agent stages the worktree's changes and commits them as one or more Conventional Commits (`<type>(<scope>): <subject>`). NightMe verifies the commit actually landed and the worktree is clean. Refuses on merge conflicts or detached HEAD; nothing to commit is a no-op. Never pushes.
+2. **`/gtw push`** — pushes the branch to `origin`. Clean worktree only: uncommitted changes are refused with a hint to run `/gtw commit` first.
+3. **`/gtw pr [-a <agent>]`** — a one-shot agent writes a Conventional Commits title and a structured body from the branch's changes; NightMe appends `Closes #<id>` for issue-backed fixes and opens the PR / MR. The branch must already be on `origin`; if a PR for it is already open, the reply links to it.
+
+The agent for `commit` and `pr` is chosen by `-a <agent>`, then `commit.agent` / `pr.agent` in `~/.nightme/gtw.yml`, then the chat's current agent.
+
+### 7. Close: `/gtw close`
+
+**`/gtw close`** finishes the task: removes the `nightme/wip` label from the issue, removes the worktree, force-deletes the local branch, moves the chat's CWD back to the repo root, and syncs the default branch. It refuses while the worktree has uncommitted changes — commit, stash, or discard first. If a step fails after the label was removed, the label is restored, so re-running `/gtw close` starts from the same state.
 
 ### Hooks — bring the dev environment with you
 
@@ -624,7 +622,7 @@ internal/
   command/                         # Slash-command Commander / Registry / Factory
     cwd/ close/ newcmd/ use/ think/ tools/ watch/ stop/ steer/ services/
     handoff/ resume/ review/ wiki/ queue/   # task-continuity / review / wiki / queue
-    gtw/                           # /gtw fix / commit / push / pr / sync / close / back (worktree workflow)
+    gtw/                           # /gtw new / fix / commit / push / pr / close / back / sync (Git team workflow)
   config/                          # YAML loader + env overrides
   daemoncontrol/                   # IPC for `nightme doctor` / `status`
   errors/                          # CodedError + ExitCode

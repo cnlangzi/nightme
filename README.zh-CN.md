@@ -23,7 +23,7 @@
 
 **NightMe** 把你的本地 AI Coding Agent（Claude Code、Codex、DeepSeek Harness (DSH)、GitHub Copilot CLI、Pi、OpenCode 等）放进聊天里跑。你在任何已接入的 IM 里发条消息，NightMe 就把消息路由到对应的 agent 进程，回复以结构化卡片形式返回。
 
-多个 chat 并行——一个项目一个，目录就是项目本身：每个 ChatSession 跑在自己的工作目录上，目录即项目本体。多个 Agent 并行工作——切换是即时的，无需冷启动。`git` worktree 操作被封装进 `Git Team Workflow`（`/gtw`）：fix / hooks / close——每一步一张 IM 回复卡，集成 GitHub、GitLab 之类平台。NightMe 不替换你的 agent 订阅或记忆，只在它们前面做一个轻量代理。
+多个 chat 并行——一个项目一个，目录就是项目本身：每个 ChatSession 跑在自己的工作目录上，目录即项目本体。多个 Agent 并行工作——切换是即时的，无需冷启动。整个开发周期被规范成 [Git Team Workflow](#git-team-workflow-gtw)（`/gtw`）：讨论 → issue → worktree → commit → push → PR → close，每一步一个斜杠命令、一张 IM 卡，集成 GitHub 和 GitLab。NightMe 不替换你的 agent 订阅或记忆，只在它们前面做一个轻量代理。
 
 ## Why NightMe
 
@@ -64,6 +64,8 @@
 | **并行多 ChatSession** | 一台机器 N 个 session，各自跑不同项目或任务。 |
 | **CWD = 项目** | 每个 ChatSession 绑定一个当前工作目录——目录 *就是* 项目。用 `/cwd <path>` 设置；随时切换。 |
 | **同 Chat 多 agent** | `/use <agent>` 切换当前 agent。前一个 agent 切到后台继续跑——任务推进、结果照常回，只是新消息不再路由给它。 |
+
+> **在此之上：[Git Team Workflow](#git-team-workflow-gtw)。** 讨论需求 → `/gtw new` 生成 issue → `/gtw fix <id>` 开 worktree 并把 issue 交给 agent → `/gtw commit` · `/gtw push` · `/gtw pr` 按 Conventional Commits 交付 → `/gtw close` 收尾。整个团队的需求、开发和 Git 操作共用一套规范。
 
 ## 支持的接入
 
@@ -322,50 +324,73 @@ stdout:
 
 ## Git Team Workflow (`/gtw`)
 
-`git worktree` 给你按任务隔离的分支。`gh pr create` 给你一次性 PR。AI agent 给你随叫随到的编码帮手。`/gtw` 把这三者粘起来——每个 `/gtw <cmd>` 是一个斜杠命令，**起一个 short-lived agent** 干重活，返回一张干净的 IM 卡。agent 跑一次就退出。主 chat 保持干净。
+**`/gtw` 是一套完整的 Git 团队工作流——从 chat 里的讨论一路走到合并的 PR，全程在 chat 里完成。** 每个需求落成一个 issue，每个 issue 独占一个分支和 worktree，每个 commit 和 PR 都遵循 Conventional Commits，issue 在 GitHub / GitLab 上的状态随工作推进。无论是哪位同事、哪个 AI agent 来做，需求、开发和 Git 操作都按同一套规范走。
 
-GitHub / GitLab issues 是任务流——每次 `/gtw fix` 钉到一个 issue，工作随着 subcommand 推进在 issue 的 state 里流动。
+```
+ 讨论 ──▶ /gtw new ──▶ /gtw new -y ──▶ /gtw fix <id> [-y] ──▶ /gtw commit ──▶ /gtw push ──▶ /gtw pr ──▶ /gtw close
+ (chat)   起草方案      创建 issue #N     worktree + agent        提交            推送远程       PR          收尾
+                                              ▲   │
+                                              └───┘ /handoff <name> · /resume <name>
+                                                    （上下文太长，或要切换 agent）
+```
 
-### 从讨论到 issue：`/gtw new`
+| 步骤 | 命令 | 规范了什么 |
+|---|---|---|
+| 1. 需求 | `/gtw new` → `/gtw new -y` | 把 chat 里的讨论变成一个自包含的 issue：背景、范围、带验收标准的需求、方案设计、关键决策、实施计划。 |
+| 2. 开发 | `/gtw fix <id> [-y]` | 一个 issue = 一个分支 = 一个 worktree，从刚 sync 过的默认分支切出。issue 打上 `nightme/wip` 标签并派发给 agent。 |
+| 3. 交接 *(可选)* | `/handoff <name>` · `/resume <name>` | 把任务状态写进文件，新 session 或另一个 agent 接着做，进度不丢。 |
+| 4. 提交 | `/gtw commit [-a <agent>]` | agent 暂存改动并写出符合 Conventional Commits 的 commit message。只在本地。 |
+| 5. 推送 | `/gtw push` | 把分支推到 `origin`。worktree 有未提交改动时拒绝。 |
+| 6. PR | `/gtw pr [-a <agent>]` | 用 Conventional Commits 标题、结构化正文和 `Closes #<id>` 创建 PR / MR。 |
+| 7. 收尾 | `/gtw close` | 移除 `nightme/wip` 标签、worktree 和本地分支；chat 回到默认分支，并 sync 到最新。 |
 
-和 agent 来回讨论完一个需求后，**`/gtw new`** 把这段讨论归档成一个新的 GitHub / GitLab issue，没看过聊天记录的开发者或编码 agent 拿到就能实现。和其他 subcommand 不同，它跑在 chat **当前**的 agent session 里——讨论只存在于那里。
+第 1–2 步跑在 chat 当前的 agent session 里，你一直在和做分析的那个 agent 对话。`commit` 和 `pr` 起一个 one-shot agent，做完就退出，不污染主对话。`push`、`close`、`back`、`sync` 是纯 Git / 平台操作，不经过 agent。每一步回复一张 IM 卡。GitHub（`gh`）和 GitLab（`glab`）根据 `origin` 自动识别；新仓库第一次用无需任何配置。
+
+默认就支持并行：三个 issue 就是三个 worktree、三个分支、三个 agent，互不共享状态。
+
+### 1. 需求 → issue：`/gtw new`
+
+和 agent 来回讨论完一个需求后，**`/gtw new`** 把这段讨论归档成一个 GitHub / GitLab issue，没看过聊天记录的开发者或编码 agent 拿到就能实现。它跑在 chat **当前**的 agent session 里，因为讨论只存在于那里。
 
 它是两段式命令——agent 起草，人来决定：
 
 1. **`/gtw new`** — agent 从对话里提取所有需求、约束、决策和边界情况，消解前后矛盾（被否决的方案连同理由放进 *Decisions* 一节）。还有阻塞性的问题没定时，它只问一次——所有问题放在一条消息里，每个附建议默认值——然后停下；在 chat 里回答后再跑一次 `/gtw new`。没有问题时，它写出草稿并把完整文档显示在 chat 里：背景与目标、范围、术语、带验收标准的需求、方案设计、边界情况、约束、关键决策、实施计划、待定事项。想改就在 chat 里提，它会重写草稿。
 2. **`/gtw new -y`** — 确认草稿没问题后，NightMe 通过 `gh` / `glab` 用草稿创建 issue，回复 issue 编号。这一步不经过 agent。
 
-下一步：`/gtw fix <id>`。草稿存放在 `~/.nightme/issue-drafts/`，每个 chat 一份；`/gtw new` 会替换它，`/gtw new -y` 成功后删除它。
+issue 标题遵循 Conventional Commits，`/gtw fix` 据此生成可读的分支名。草稿存放在 `~/.nightme/issue-drafts/`，每个 chat 一份；`/gtw new` 会替换它，`/gtw new -y` 成功后删除它。
 
-### The local dev loop: fix → hooks → close
+### 2. 开发：`/gtw fix`
 
-三个 subcommand 串起来就是一个完整的 **local multi-branch development workflow**。3 个可以并行跑——三个 issue、三个 worktree、三个 agent，state 不打架。
+**`/gtw fix <issue-id>`** 先 sync 默认分支，按 issue 标题创建 worktree 和分支，给 issue 打上 `nightme/wip` 标签，把 chat 的 CWD 切进 worktree，跑 `fix` hooks，再把 issue（正文和附件）派发给 chat 当前的 agent。
 
-> **`/gtw sync` 不在这个 loop 里。** `sync`（`git checkout main && git pull --rebase origin main`）是 **main-repo 操作**——它切当前分支到 main 并拉。从 worktree 里调 sync 是错的，代码层就 refuse。**`/gtw fix`**（第 1 步）和 **`/gtw close`**（最后一步）都已经在 main repo 上自动 sync 了，所以你不需要手动 sync。`close` 之后 main 是新的，下次 `fix` 直接基于它。
+- **先出方案（默认）** — agent 分析 issue 和代码，贴出方案后停下等你。在 chat 里审过方案，再让 agent 动手。
+- **`-y` / `--yes`** — agent 直接实现。
 
-1. **`/gtw fix -n <branch>`** — 在刚刚最新的 main 上开一个新 worktree（叫 `<branch>`），起一个 one-shot agent 干任务。纯本地——不需要 GitHub issue。你在主 chat 继续聊。
+**`/gtw fix --name <branch>`**（或 `-n`）创建一个不关联 issue 的本地 worktree，由你自己指挥 agent。
 
-   走 GitHub / GitLab 流程的话，用 `/gtw fix <issue-id>` 把 worktree 钉到远程 issue。第一次跑什么都不用配，开箱即用。
+**`/gtw back`** 临时离开 fix worktree 而不拆掉它——chat 的 CWD 回到仓库根目录并 sync 默认分支，worktree、分支和未提交的改动都留在磁盘上。**`/gtw back <worktree>`** 再切回去。
 
-2. **hooks 自动跑** — 新 worktree 里开发环境自己重新装起来。CodeGraph 重新索引，`npm install` / `go mod download` / `cargo build`——你项目要啥就装啥。编辑 `~/.nightme/gtw.yml`：
+> **`/gtw sync`**（`git checkout <default> && git pull --rebase origin <default>`）是主仓库操作，在 worktree 里会拒绝执行。`/gtw fix`、`/gtw back`、`/gtw close` 都已经自带 sync，整个流程里不需要手动调用。
 
-   ```yaml
-   # ~/.nightme/gtw.yml
-   fix:
-     hooks:
-       after:
-         - codegraph init                # bare string = shell hook
-         - npm install
-         - go mod download
-   ```
+### 3. 交接：`/handoff` · `/resume`
 
-3. （你干活。需要时让 agent 出手，或者直接自己改文件。）
+agent 的上下文太长，或者剩下的工作更适合换一个 agent 时：
 
-4. **`/gtw back`** *(可选)* — 想临时离开这个 fix worktree、但又不想拆掉它时用（比如想从 main 开另一个 `/gtw fix`）。`back` 把 chat 的 `cwd` 切回 repo 根、sync main（`git pull --rebase`），worktree、branch、未提交的修改都**留在原地**。要继续就 `/cwd <worktree>`，要丢弃就跑 `/gtw close`。
+1. **`/handoff <name>`** — agent 把任务状态（目标、已完成、未完成、下一步）写进 `~/.nightme/handoff/<name>.md`。
+2. 清空重来：`/new` 重置当前 agent 的上下文，或 `/use <agent>` 切换 agent。
+3. **`/resume <name>`** — agent 读取交接文件，在同一个 worktree 里接着做。
 
-5. **`/gtw close`** — 任务做完了（或者决定不做了），`/gtw close` 拆 worktree、回到 main，分支 ready to ship（或者 discard）。
+### 4–6. 交付：`/gtw commit` → `/gtw push` → `/gtw pr`
 
-**`/gtw commit [-a <agent>]`** — 用配置的（或 `-a <agent>` 指定的）agent 在当前 worktree 里提交未提交的改动。`fix` 之后、`push` / `pr` 之前想让 agent 暂存并写 commit 时用。
+1. **`/gtw commit [-a <agent>]`** — 一个 one-shot agent 暂存 worktree 里的改动，提交成一个或多个 Conventional Commits（`<type>(<scope>): <subject>`）。NightMe 会校验 commit 确实落地、worktree 已干净。遇到合并冲突或 detached HEAD 时拒绝；没有可提交的内容则什么都不做。不会 push。
+2. **`/gtw push`** — 把分支推到 `origin`。只接受干净的 worktree：有未提交改动时拒绝，并提示先跑 `/gtw commit`。
+3. **`/gtw pr [-a <agent>]`** — 一个 one-shot agent 根据分支改动写出 Conventional Commits 标题和结构化正文；关联 issue 的修复由 NightMe 追加 `Closes #<id>`，然后创建 PR / MR。分支必须已在 `origin` 上；该分支已有打开的 PR 时，回复里直接给出链接。
+
+`commit` 和 `pr` 使用的 agent 按优先级取：`-a <agent>`，其次 `~/.nightme/gtw.yml` 里的 `commit.agent` / `pr.agent`，最后是 chat 当前的 agent。
+
+### 7. 收尾：`/gtw close`
+
+**`/gtw close`** 结束任务：移除 issue 上的 `nightme/wip` 标签，删掉 worktree，强制删除本地分支，把 chat 的 CWD 切回仓库根目录，并 sync 默认分支。worktree 有未提交改动时拒绝——先 commit、stash 或丢弃。如果标签移除之后的某一步失败，标签会被加回去，重跑 `/gtw close` 时从同一个状态开始。
 
 ### Hooks——把开发环境一起带过去
 
@@ -552,7 +577,7 @@ internal/
   command/                         # Slash-command Commander / Registry / Factory
     cwd/ close/ newcmd/ use/ think/ tools/ watch/ stop/ steer/ services/
     handoff/ resume/ review/ wiki/ queue/   # task-continuity / review / wiki / queue
-    gtw/                           # /gtw fix / commit / push / pr / sync / close / back (worktree workflow)
+    gtw/                           # /gtw new / fix / commit / push / pr / close / back / sync (Git team workflow)
   config/                          # YAML loader + env overrides
   daemoncontrol/                   # IPC for `nightme doctor` / `status`
   errors/                          # CodedError + ExitCode

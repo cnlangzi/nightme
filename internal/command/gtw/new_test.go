@@ -3,6 +3,7 @@ package gtw
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -63,21 +64,28 @@ func TestParseNewIssueArgs(t *testing.T) {
 }
 
 func TestRenderNewIssuePrompt(t *testing.T) {
-	const path = "/home/u/.nightme/issue-drafts/issue-1.md"
+	const dir = "/home/u/.nightme/issue-drafts/issue-1"
 
-	p := renderNewIssuePrompt(path)
-	if strings.Contains(p, "{{") {
-		t.Error("unsubstituted placeholder in prompt")
+	p := renderNewIssuePrompt(dir)
+	if strings.Contains(p, placeholderDraftDirAbs) {
+		t.Error("unsubstituted draft directory placeholder in prompt")
 	}
 	if strings.HasPrefix(strings.TrimSpace(p), "/") {
 		t.Error("prompt starts with '/'; agents would parse it as a slash command")
 	}
 	for _, want := range []string{
-		path,
+		dir,
+		"01.md, 02.md",
+		"{{ISSUE:NN}}",
+		"NN.created",
+		"list the directory before every rewrite",
 		"Do NOT run gh / glab",
 		"STOP",
-		"print the complete content of the draft file in chat",
-		"run /gtw new -y to create the issue",
+		"splitting the work into several issues",
+		"One issue is the default",
+		"Never split by kind of work",
+		"print the complete content of every draft file in chat",
+		"run /gtw new -y to create the issues",
 	} {
 		if !strings.Contains(p, want) {
 			t.Errorf("prompt missing %q", want)
@@ -85,49 +93,101 @@ func TestRenderNewIssuePrompt(t *testing.T) {
 	}
 }
 
-func TestIssueDraftPath(t *testing.T) {
+func TestIssueDraftDir(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("USERPROFILE", os.Getenv("HOME"))
 
-	a1, err := issueDraftPath("oc_chat/a:1")
+	a1, err := issueDraftDir("oc_chat/a:1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	a2, _ := issueDraftPath("oc_chat/a:1")
-	b, _ := issueDraftPath("oc_chat/b:2")
+	a2, _ := issueDraftDir("oc_chat/a:1")
+	b, _ := issueDraftDir("oc_chat/b:2")
 	if a1 != a2 {
-		t.Errorf("draft path not stable per chat: %q vs %q", a1, a2)
+		t.Errorf("draft dir not stable per chat: %q vs %q", a1, a2)
 	}
 	if a1 == b {
-		t.Error("different chats share a draft path")
+		t.Error("different chats share a draft dir")
 	}
 	if base := filepath.Base(a1); strings.ContainsAny(base, `/\:`) || !strings.HasPrefix(base, "issue-") {
-		t.Errorf("unsafe draft file name %q", base)
+		t.Errorf("unsafe draft dir name %q", base)
 	}
 	if !strings.HasPrefix(a1, filepath.Join(os.Getenv("HOME"), ".nightme", issueDraftDirName)) {
-		t.Errorf("draft %q not under ~/.nightme/%s", a1, issueDraftDirName)
+		t.Errorf("draft dir %q not under ~/.nightme/%s", a1, issueDraftDirName)
 	}
 }
 
-func TestResetIssueDraft(t *testing.T) {
-	draft := filepath.Join(t.TempDir(), "drafts", "issue-x.md")
+func TestResetIssueDrafts(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "drafts", "issue-x")
 
-	if err := resetIssueDraft(draft); err != nil {
+	if err := resetIssueDrafts(dir); err != nil {
 		t.Fatalf("missing dir: %v", err)
 	}
-	if err := os.WriteFile(draft, []byte("# old\nbody\n"), 0o600); err != nil {
+	writeDrafts(t, dir, "01.created", "#42 old\n", "02.md", "# old 2\nbody\n")
+	if err := resetIssueDrafts(dir); err != nil {
+		t.Fatalf("existing drafts: %v", err)
+	}
+	if names := draftNames(t, dir); len(names) != 0 {
+		t.Errorf("stale drafts should be removed, left %v", names)
+	}
+}
+
+// writeDrafts writes name/content pairs into dir.
+func writeDrafts(t *testing.T, dir string, nameContent ...string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := resetIssueDraft(draft); err != nil {
-		t.Fatalf("existing draft: %v", err)
+	for i := 0; i+1 < len(nameContent); i += 2 {
+		if err := os.WriteFile(filepath.Join(dir, nameContent[i]), []byte(nameContent[i+1]), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if _, err := os.Stat(draft); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("stale draft should be removed (stat err = %v)", err)
+}
+
+func draftNames(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
 	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
+}
+
+func readDraft(t *testing.T, dir, name string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(dir, name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }
 
 func resolveTo(prov GitProvider) func() (GitProvider, string, string, error) {
 	return func() (GitProvider, string, string, error) { return prov, "o", "r", nil }
+}
+
+// numberIssuesFrom makes CreateIssue hand out consecutive issue
+// numbers starting at first, failing the calls listed in fail
+// (1-based).
+func numberIssuesFrom(prov *fakeGitProvider, first int, fail ...int) {
+	call := 0
+	next := first
+	prov.SetCreateIssueFunc(func(title, _ string) (*Issue, error) {
+		call++
+		for _, f := range fail {
+			if f == call {
+				return nil, errors.New("HTTP 401")
+			}
+		}
+		id := next
+		next++
+		return &Issue{ID: id, Title: title, URL: fmt.Sprintf("https://github.com/o/r/issues/%d", id)}, nil
+	})
 }
 
 func TestParseIssueDraft(t *testing.T) {
@@ -174,28 +234,32 @@ func TestParseIssueDraft(t *testing.T) {
 	}
 }
 
-func TestCreateIssueFromDraft_NoDraft(t *testing.T) {
-	missing := filepath.Join(t.TempDir(), "absent.md")
-	prov := newFakeGitProvider(ProviderGitHub, "github.com")
+func TestCreateIssuesFromDrafts_NoDraft(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "absent")
+	empty := t.TempDir()
+	for name, dir := range map[string]string{"missing dir": missing, "empty dir": empty} {
+		t.Run(name, func(t *testing.T) {
+			prov := newFakeGitProvider(ProviderGitHub, "github.com")
 
-	got := createIssueFromDraft(context.Background(), missing, resolveTo(prov))
-	if !strings.HasPrefix(got, "❌ no issue draft") || !strings.Contains(got, "`/gtw new`") {
-		t.Errorf("reply = %q", got)
-	}
-	if n := len(prov.CallsByMethod("CreateIssue")); n != 0 {
-		t.Errorf("CreateIssue called %d times without a draft", n)
+			got := createIssuesFromDrafts(context.Background(), dir, resolveTo(prov))
+
+			if !strings.HasPrefix(got, "❌ no issue draft") || !strings.Contains(got, dir) || !strings.Contains(got, "`/gtw new`") {
+				t.Errorf("reply = %q", got)
+			}
+			if n := len(prov.CallsByMethod("CreateIssue")); n != 0 {
+				t.Errorf("CreateIssue called %d times without a draft", n)
+			}
+		})
 	}
 }
 
-func TestCreateIssueFromDraft_CreatesIssueAndRemovesDraft(t *testing.T) {
-	draft := filepath.Join(t.TempDir(), "issue.md")
-	if err := os.WriteFile(draft, []byte("# feat(gtw): archive chats\n\n## Requirements\n- R1\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+func TestCreateIssuesFromDrafts_SingleDraft(t *testing.T) {
+	dir := t.TempDir()
+	writeDrafts(t, dir, "01.md", "# feat(gtw): archive chats\n\n## Requirements\n- R1\n")
 	prov := newFakeGitProvider(ProviderGitHub, "github.com")
 	prov.SetCreateIssueResp(&Issue{ID: 42, Title: "feat(gtw): archive chats", URL: "https://github.com/o/r/issues/42"})
 
-	got := createIssueFromDraft(context.Background(), draft, resolveTo(prov))
+	got := createIssuesFromDrafts(context.Background(), dir, resolveTo(prov))
 
 	calls := prov.CallsByMethod("CreateIssue")
 	if len(calls) != 1 {
@@ -209,43 +273,187 @@ func TestCreateIssueFromDraft_CreatesIssueAndRemovesDraft(t *testing.T) {
 			t.Errorf("reply missing %q:\n%s", want, got)
 		}
 	}
-	if _, err := os.Stat(draft); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("draft should be removed after the issue is created (stat err = %v)", err)
+	if names := draftNames(t, dir); strings.Join(names, ",") != "01.created" {
+		t.Errorf("draft should be replaced by its record, dir holds %v", names)
+	}
+	if rec := readDraft(t, dir, "01.created"); rec != "#42 feat(gtw): archive chats\nhttps://github.com/o/r/issues/42\n" {
+		t.Errorf("record = %q", rec)
 	}
 }
 
-func TestCreateIssueFromDraft_CreateFailureKeepsDraft(t *testing.T) {
-	draft := filepath.Join(t.TempDir(), "issue.md")
-	if err := os.WriteFile(draft, []byte("# fix: x\nbody\n"), 0o600); err != nil {
-		t.Fatal(err)
+func TestCreateIssuesFromDrafts_MultipleDraftsInOrderWithRefs(t *testing.T) {
+	dir := t.TempDir()
+	writeDrafts(t, dir,
+		"03.md", "# feat(c): third\n\n- depends on {{ISSUE:01}} and {{ISSUE:02}}\n",
+		"01.md", "# feat(a): first\n\nbody a\n",
+		"02.md", "# feat(b): second\n\n- depends on {{ISSUE:01}}\n",
+	)
+	prov := newFakeGitProvider(ProviderGitHub, "github.com")
+	numberIssuesFrom(prov, 42)
+
+	got := createIssuesFromDrafts(context.Background(), dir, resolveTo(prov))
+
+	calls := prov.CallsByMethod("CreateIssue")
+	if len(calls) != 3 {
+		t.Fatalf("CreateIssue calls = %d, want 3", len(calls))
 	}
+	for i, title := range []string{"feat(a): first", "feat(b): second", "feat(c): third"} {
+		if calls[i].IssueTitle != title {
+			t.Errorf("call %d title = %q, want %q", i, calls[i].IssueTitle, title)
+		}
+		if strings.Contains(calls[i].IssueBody, "{{ISSUE:") {
+			t.Errorf("call %d body has an unresolved reference:\n%s", i, calls[i].IssueBody)
+		}
+	}
+	if !strings.Contains(calls[1].IssueBody, "depends on #42\n") {
+		t.Errorf("second body = %q, want reference to #42", calls[1].IssueBody)
+	}
+	if !strings.Contains(calls[2].IssueBody, "depends on #42 and #43\n") {
+		t.Errorf("third body = %q, want references to #42 and #43", calls[2].IssueBody)
+	}
+	want := "✅ 3 issues opened\n" +
+		"→ repo: o/r\n" +
+		"→ #42:  feat(a): first · https://github.com/o/r/issues/42\n" +
+		"→ #43:  feat(b): second · https://github.com/o/r/issues/43\n" +
+		"→ #44:  feat(c): third · https://github.com/o/r/issues/44\n" +
+		"↳ `/gtw fix <id>` to plan one · or `/gtw fix <id> -y` to implement it directly"
+	if got != want {
+		t.Errorf("reply =\n%s\nwant\n%s", got, want)
+	}
+	if names := draftNames(t, dir); strings.Join(names, ",") != "01.created,02.created,03.created" {
+		t.Errorf("drafts should be replaced by their records, dir holds %v", names)
+	}
+}
+
+func TestCreateIssuesFromDrafts_AllCreated(t *testing.T) {
+	dir := t.TempDir()
+	writeDrafts(t, dir, "01.created", "#42 feat: a\n", "02.created", "#43 feat: b\n")
+	prov := newFakeGitProvider(ProviderGitHub, "github.com")
+
+	got := createIssuesFromDrafts(context.Background(), dir, resolveTo(prov))
+
+	if want := "✨ every issue draft of this chat is already an issue\n→ issues: #42, #43\n↳ `/gtw new` to draft from a new discussion"; got != want {
+		t.Errorf("reply =\n%s\nwant\n%s", got, want)
+	}
+	if n := len(prov.CallsByMethod("CreateIssue")); n != 0 {
+		t.Errorf("CreateIssue called %d times with nothing pending", n)
+	}
+}
+
+func TestCreateIssuesFromDrafts_PartialFailureThenRetry(t *testing.T) {
+	dir := t.TempDir()
+	writeDrafts(t, dir,
+		"01.md", "# feat(a): first\n\nbody a\n",
+		"02.md", "# feat(b): second\n\n- depends on {{ISSUE:01}}\n",
+		"03.md", "# feat(c): third\n\n- depends on {{ISSUE:02}}\n",
+	)
+	prov := newFakeGitProvider(ProviderGitHub, "github.com")
+	numberIssuesFrom(prov, 42, 2)
+
+	got := createIssuesFromDrafts(context.Background(), dir, resolveTo(prov))
+
+	for _, want := range []string{"⚠️ 1 of 3 issues opened", "→ #42:", "02.md", "HTTP 401", dir + " (2 kept)", "`/gtw new -y` to create the rest"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("reply missing %q:\n%s", want, got)
+		}
+	}
+	if names := draftNames(t, dir); strings.Join(names, ",") != "01.created,02.md,03.md" {
+		t.Fatalf("dir holds %v, want the record of 01 and the two drafts not yet created", names)
+	}
+
+	retry := newFakeGitProvider(ProviderGitHub, "github.com")
+	numberIssuesFrom(retry, 50)
+	got = createIssuesFromDrafts(context.Background(), dir, resolveTo(retry))
+
+	calls := retry.CallsByMethod("CreateIssue")
+	if len(calls) != 2 || calls[0].IssueTitle != "feat(b): second" || calls[1].IssueTitle != "feat(c): third" {
+		t.Fatalf("retry CreateIssue calls = %+v, want only the remaining two", calls)
+	}
+	if !strings.Contains(calls[0].IssueBody, "depends on #42\n") || !strings.Contains(calls[1].IssueBody, "depends on #50\n") {
+		t.Errorf("retry bodies = %q / %q", calls[0].IssueBody, calls[1].IssueBody)
+	}
+	if !strings.HasPrefix(got, "✅ 2 issues opened") {
+		t.Errorf("retry reply = %q", got)
+	}
+}
+
+func TestCreateIssuesFromDrafts_FirstFailureKeepsDrafts(t *testing.T) {
+	dir := t.TempDir()
+	writeDrafts(t, dir, "01.md", "# fix: x\nbody\n")
 	prov := newFakeGitProvider(ProviderGitHub, "github.com")
 	prov.SetCreateIssueErr(errors.New("HTTP 401"))
 
-	got := createIssueFromDraft(context.Background(), draft, resolveTo(prov))
+	got := createIssuesFromDrafts(context.Background(), dir, resolveTo(prov))
 
-	if !strings.Contains(got, "HTTP 401") || !strings.Contains(got, draft) {
-		t.Errorf("reply = %q, want error and draft path", got)
+	if want := "❌ create issue from 01.md: HTTP 401\n→ drafts: " + dir + " (1 kept)\n↳ `/gtw new -y` to retry"; got != want {
+		t.Errorf("reply =\n%s\nwant\n%s", got, want)
 	}
-	if _, err := os.Stat(draft); err != nil {
-		t.Errorf("draft should be kept on failure: %v", err)
+	if names := draftNames(t, dir); len(names) != 1 {
+		t.Errorf("draft should be kept on failure, left %v", names)
 	}
 }
 
-func TestCreateIssueFromDraft_InvalidDraft(t *testing.T) {
-	draft := filepath.Join(t.TempDir(), "issue.md")
-	if err := os.WriteFile(draft, []byte("no heading here\n"), 0o600); err != nil {
-		t.Fatal(err)
+func TestCreateIssuesFromDrafts_InvalidSetCreatesNothing(t *testing.T) {
+	cases := []struct {
+		name  string
+		files []string
+		want  string
+	}{
+		{
+			name:  "bad heading in a later draft",
+			files: []string{"01.md", "# feat: a\nbody\n", "02.md", "no heading here\n"},
+			want:  "❌ invalid issue draft 02.md: first line must be",
+		},
+		{
+			name:  "reference to a later draft",
+			files: []string{"01.md", "# feat: a\nsee {{ISSUE:02}}\n", "02.md", "# feat: b\nbody\n"},
+			want:  "❌ invalid issue draft 01.md: {{ISSUE:02}} must point to a lower-numbered draft",
+		},
+		{
+			name:  "reference to a missing draft",
+			files: []string{"01.md", "# feat: a\nbody\n", "02.md", "# feat: b\nsee {{ISSUE:07}}\n"},
+			want:  "❌ invalid issue draft 02.md: {{ISSUE:07}}",
+		},
+		{
+			name:  "self reference",
+			files: []string{"01.md", "# feat: a\nsee {{ISSUE:01}}\n"},
+			want:  "❌ invalid issue draft 01.md: {{ISSUE:01}}",
+		},
+		{
+			name:  "draft reusing the number of a created issue",
+			files: []string{"01.created", "#42 feat: a\n", "01.md", "# feat: a again\nbody\n"},
+			want:  "❌ invalid issue draft 01.md: draft 01 is already issue #42",
+		},
+		{
+			name:  "stray file",
+			files: []string{"01.md", "# feat: a\nbody\n", "issue-1.md", "# feat: b\nbody\n"},
+			want:  `❌ read issue drafts`,
+		},
+		{
+			name:  "unreadable record",
+			files: []string{"01.created", "created\n", "02.md", "# feat: b\nbody\n"},
+			want:  `❌ read issue drafts`,
+		},
 	}
-	prov := newFakeGitProvider(ProviderGitHub, "github.com")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeDrafts(t, dir, tc.files...)
+			prov := newFakeGitProvider(ProviderGitHub, "github.com")
+			prov.SetCreateIssueResp(&Issue{ID: 1})
 
-	got := createIssueFromDraft(context.Background(), draft, resolveTo(prov))
+			got := createIssuesFromDrafts(context.Background(), dir, resolveTo(prov))
 
-	if !strings.HasPrefix(got, "❌ invalid issue draft") {
-		t.Errorf("reply = %q", got)
-	}
-	if n := len(prov.CallsByMethod("CreateIssue")); n != 0 {
-		t.Errorf("CreateIssue called %d times for an invalid draft", n)
+			if !strings.HasPrefix(got, tc.want) {
+				t.Errorf("reply = %q, want prefix %q", got, tc.want)
+			}
+			if n := len(prov.CallsByMethod("CreateIssue")); n != 0 {
+				t.Errorf("CreateIssue called %d times for an invalid draft set", n)
+			}
+			if names := draftNames(t, dir); len(names) != len(tc.files)/2 {
+				t.Errorf("drafts must be kept, left %v", names)
+			}
+		})
 	}
 }
 
@@ -403,37 +611,36 @@ func (r *newIssueRig) handle(t *testing.T, args ...string) {
 	}
 }
 
-func (r *newIssueRig) draftPath(t *testing.T) string {
+func (r *newIssueRig) draftDir(t *testing.T) string {
 	t.Helper()
-	p, err := issueDraftPath(r.cs.ChatID)
+	dir, err := issueDraftDir(r.cs.ChatID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return p
+	return dir
 }
 
-func TestFactory_NewYes_CreatesIssueFromDraft(t *testing.T) {
+func TestFactory_NewYes_CreatesIssuesFromDrafts(t *testing.T) {
 	rig := newNewIssueRig(t, "chat-new-1")
-	draft := rig.draftPath(t)
-	if err := resetIssueDraft(draft); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(draft, []byte("# feat(gtw): archive chats\n\n## Requirements\n- R1\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	rig.prov.SetCreateIssueResp(&Issue{ID: 42, Title: "feat(gtw): archive chats", URL: "https://github.com/o/r/issues/42"})
+	dir := rig.draftDir(t)
+	writeDrafts(t, dir,
+		"01.md", "# feat(gtw): archive chats\n\n## Requirements\n- R1\n",
+		"02.md", "# feat(gtw): split drafts\n\n- depends on {{ISSUE:01}}\n",
+	)
+	numberIssuesFrom(rig.prov, 42)
 
 	rig.handle(t, "-y")
 
 	calls := rig.prov.CallsByMethod("CreateIssue")
-	if len(calls) != 1 || calls[0].Owner != "o" || calls[0].Repo != "r" || calls[0].IssueTitle != "feat(gtw): archive chats" {
+	if len(calls) != 2 || calls[0].Owner != "o" || calls[0].Repo != "r" ||
+		calls[0].IssueTitle != "feat(gtw): archive chats" || !strings.Contains(calls[1].IssueBody, "depends on #42") {
 		t.Fatalf("CreateIssue calls = %+v", calls)
 	}
-	if got := rig.ch.lastText(); !strings.Contains(got, "✅ Issue #42 opened") {
+	if got := rig.ch.lastText(); !strings.Contains(got, "✅ 2 issues opened") {
 		t.Errorf("reply = %q", got)
 	}
-	if _, err := os.Stat(draft); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("draft should be removed (stat err = %v)", err)
+	if names := draftNames(t, dir); strings.Join(names, ",") != "01.created,02.created" {
+		t.Errorf("drafts should be replaced by their records, dir holds %v", names)
 	}
 }
 
@@ -450,20 +657,15 @@ func TestFactory_NewYes_NoDraft(t *testing.T) {
 	}
 }
 
-func TestFactory_NewDraft_RemovesStaleDraft(t *testing.T) {
+func TestFactory_NewDraft_RemovesStaleDrafts(t *testing.T) {
 	rig := newNewIssueRig(t, "chat-new-3")
-	draft := rig.draftPath(t)
-	if err := resetIssueDraft(draft); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(draft, []byte("# fix: old\nold body\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	dir := rig.draftDir(t)
+	writeDrafts(t, dir, "01.md", "# fix: old\nold body\n", "02.md", "# fix: old 2\nold body\n")
 
 	rig.handle(t)
 
-	if _, err := os.Stat(draft); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("/gtw new must remove the previous draft so -y cannot submit it (stat err = %v)", err)
+	if names := draftNames(t, dir); len(names) != 0 {
+		t.Errorf("/gtw new must remove the previous drafts so -y cannot submit them, left %v", names)
 	}
 	if n := len(rig.prov.CallsByMethod("CreateIssue")); n != 0 {
 		t.Errorf("drafting must not create an issue; CreateIssue called %d times", n)

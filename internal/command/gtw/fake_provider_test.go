@@ -63,6 +63,7 @@ type fakeGitProvider struct {
 	// createIssueErr is nil; createIssueErr wins when non-nil.
 	createIssueResp *Issue
 	createIssueErr  error
+	createIssueFn   func(title, body string) (*Issue, error)
 
 	// FindOpenPRForBranch response. findOpenPRResp is the PR
 	// the fake returns when findOpenPRErr is nil. findOpenPRErr
@@ -243,6 +244,14 @@ func (f *fakeGitProvider) SetCreateIssueErr(err error) {
 	f.createIssueErr = err
 }
 
+// SetCreateIssueFunc makes CreateIssue answer through fn, so a test
+// can vary the response per call. fn wins over Resp / Err.
+func (f *fakeGitProvider) SetCreateIssueFunc(fn func(title, body string) (*Issue, error)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.createIssueFn = fn
+}
+
 // SetFindOpenPRResp registers the response for FindOpenPRForBranch.
 // Pass nil to simulate "no PR yet" (gate 2 pass); pass a
 // non-nil PR to simulate "already open" (gate 2 fail).
@@ -340,8 +349,11 @@ func (f *fakeGitProvider) CreateIssue(_ context.Context, owner, repo, title, bod
 	f.calls = append(f.calls, fakeProviderCall{
 		Method: "CreateIssue", Owner: owner, Repo: repo, IssueTitle: title, IssueBody: body,
 	})
-	resp, err := f.createIssueResp, f.createIssueErr
+	resp, err, fn := f.createIssueResp, f.createIssueErr, f.createIssueFn
 	f.mu.Unlock()
+	if fn != nil {
+		return fn(title, body)
+	}
 	if err != nil {
 		return nil, err
 	}

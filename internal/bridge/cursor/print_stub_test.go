@@ -520,3 +520,18 @@ func TestAppendCursorAuditFields_NilSessionIDAndUsageDoesNotPanic(t *testing.T) 
 		})
 	}
 }
+
+func TestCursorNetworkFailure(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"update notice\nError: RetriableError: Connection stalled\n", "RetriableError: Connection stalled"},
+		{"Error: RetriableError: [unavailable] PING timed out", "RetriableError: [unavailable] PING timed out"},
+		{"[cursor] update notice: just a heads-up", ""},
+	}
+	for _, tc := range cases {
+		if got := cursorNetworkFailure(tc.in); got != tc.want {
+			t.Errorf("cursorNetworkFailure(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

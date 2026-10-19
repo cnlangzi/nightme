@@ -220,10 +220,12 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 		"stderr_bytes", stderr.Len(),
 		"err", errStr(err))
 
+	stderrText := strings.TrimSpace(stderr.String())
 	if err != nil {
-		stderrText := strings.TrimSpace(stderr.String())
 		wrapped := error(err)
-		if stderrText != "" {
+		if line := cursorNetworkFailure(stderrText); line != "" {
+			wrapped = fmt.Errorf("cursor: %s", line)
+		} else if stderrText != "" {
 			wrapped = fmt.Errorf("cursor run: %w (stderr: %s)", err, stderrText)
 		} else {
 			wrapped = fmt.Errorf("cursor run: %w", err)
@@ -257,6 +259,18 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 	_ = isEnvelope // always true on the parse-success path; kept for symmetry with future error-shape envelopes
 
 	text, subtype, sessionID, usage, isError := env.Result, env.Subtype, env.SessionID, cursorUsageToAgentInfo(env.Usage), env.IsError
+
+	if line := cursorNetworkFailure(text + "\n" + stderrText); line != "" {
+		wrapped := fmt.Errorf("cursor: %s", line)
+		if sink != nil {
+			sink(agent.AgentEvent{
+				Kind:       agent.EventAgentError,
+				Err:        wrapped,
+				Diagnostic: cursorDiagnostic(agent.BridgeExitCleanExit, stderrText),
+			})
+		}
+		return agent.RunResult{}, wrapped
+	}
 
 	if isError {
 		// cursor reported the run as a failure. Surface it as
@@ -301,6 +315,9 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 
 	if text == "" {
 		wrapped := fmt.Errorf("cursor: empty answer")
+		if stderrText != "" {
+			wrapped = fmt.Errorf("cursor: empty answer (stderr: %s)", stderrText)
+		}
 		if sink != nil {
 			sink(agent.AgentEvent{
 				Kind:       agent.EventAgentError,
@@ -395,6 +412,25 @@ func appendCursorAuditFields(result agent.RunResult) string {
 // populate the audit fields. Full-access parent flags precede
 // `-p` for the same reason they precede `acp` on the
 // chat-session path.
+// cursorNetworkFailure is the assistant-visible line cursor prints
+// for a transport failure. Multi-turn ACP sends it as an
+// agent_message_chunk ("Error: RetriableError: ..."). Print mode
+// writes the same text to stderr and exits, or leaves it out of
+// the success JSON envelope entirely. Either shape should fail
+// the one-shot run instead of being treated as an answer.
+func cursorNetworkFailure(text string) string {
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		line = strings.TrimPrefix(line, "Error: ")
+		if strings.Contains(line, "RetriableError:") ||
+			strings.Contains(line, "Connection stalled") ||
+			strings.Contains(line, "PING timed out") {
+			return line
+		}
+	}
+	return ""
+}
+
 func printModeArgs(prompt string, extra []string) []string {
 	args := withFullAccess("-p", prompt, "--output-format", "json")
 	return append(args, extra...)

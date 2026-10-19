@@ -398,7 +398,6 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, mgr *c
 // describe "issues are being created", which drafting does not do.
 // They run once per `/gtw new -y`, however many drafts it creates.
 func (f *Factory) runNew(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
-	// Whole-command cap already applied in Handle — no extra wrap.
 	args, err := parseNewIssueArgs(input.Args[2:])
 	if err != nil {
 		return &command.SlashOutput{
@@ -450,7 +449,6 @@ func (f *Factory) runNew(ctx context.Context, _ command.RuntimeServices, cs *cha
 // a flag means updating fixCmdSpec; the inline-usage reply
 // (empty argv) and parse-error replies stay in lockstep.
 func (f *Factory) runFix(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
-	// Whole-command cap already applied in Handle — no extra wrap.
 	if len(input.Args) < 3 {
 		return &command.SlashOutput{
 			Reply:    fixCmdSpec.Usage,
@@ -677,7 +675,6 @@ func parseFixArgs(argv []string) (fixArgs, error) {
 // reply path is RunClose's own cs.Emitter() (no extra wiring).
 // Wrapped in withHooks so close.before / close.after fire.
 func (f *Factory) runClose(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
-	// Whole-command cap already applied in Handle — no extra wrap.
 	// Issue #291: /gtw close takes no flags and no positional
 	// args, so anything in the tail is a user mistake — most
 	// importantly `/gtw close --force`, which the F-XX removal
@@ -760,7 +757,6 @@ func (f *Factory) runClose(ctx context.Context, _ command.RuntimeServices, cs *c
 // to a still-alive worktree), and does NOT call /new (back is
 // reversible — the user might resume in minutes).
 func (f *Factory) runBack(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
-	// Whole-command cap already applied in Handle — no extra wrap.
 	parsed, err := command.ParseCmdArgs(input.Args[2:], command.CmdSpec{
 		Name:    "/gtw back",
 		Usage:   "/gtw back [<worktree>]",
@@ -864,7 +860,6 @@ func (f *Factory) runBack(ctx context.Context, _ command.RuntimeServices, cs *ch
 // withHooks so push.before / push.after from ~/.nightme/gtw.yml
 // fire.
 func (f *Factory) runPush(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
-	// Whole-command cap already applied in Handle — no extra wrap.
 	args, err := parsePushArgs(input.Args[2:])
 	if err != nil {
 		return &command.SlashOutput{
@@ -910,12 +905,6 @@ func (f *Factory) runPush(ctx context.Context, _ command.RuntimeServices, cs *ch
 // dispatcher. Doesn't touch gtw state or reaction cards, so no
 // draft shim is needed.
 func (f *Factory) runCommit(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
-	// Whole-command cap already applied in Handle — no extra wrap.
-	// /gtw commit is the most likely /gtw command to hit the
-	// outer cap — it runs a 30-min agent internally (timeouts.Agent);
-	// the wrap is the safety net when the agent returns normally
-	// but a following git verification step wedges for unrelated
-	// reasons.
 	args, err := parseCommitArgs(input.Args[2:])
 	if err != nil {
 		return &command.SlashOutput{
@@ -957,7 +946,6 @@ func (f *Factory) runCommit(ctx context.Context, _ command.RuntimeServices, cs *
 //
 // Wrapped in withHooks so sync.before / sync.after fire.
 func (f *Factory) runSync(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
-	// Whole-command cap already applied in Handle — no extra wrap.
 	// Issue #291: no flags, no positional args — reject the tail
 	// instead of silently ignoring it (`/gtw sync --rebase` used
 	// to look like it selected a strategy).
@@ -1130,11 +1118,6 @@ func parseCommitArgs(argv []string) (commitArgs, error) {
 // is a thin mirror of runPush — parse the agent override, hand
 // off, surface any dispatch error to the chat.
 func (f *Factory) runPR(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
-	// Whole-command cap already applied in Handle — no extra wrap.
-	// /gtw pr runs both an agent dispatch AND an outbound network
-	// call (gh pr create); either is a hang-vector that runCmd's
-	// 5-min CLI cap can also catch — the 30-min wrap is the
-	// outermost net.
 	args, err := parsePRArgs(input.Args[2:])
 	if err != nil {
 		return &command.SlashOutput{

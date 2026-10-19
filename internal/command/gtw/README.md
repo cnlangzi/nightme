@@ -355,7 +355,7 @@ abc1234 fix(gtw): hooks output uses standard ✅ title
 
 ### 4.8 Format 1(`/gtw new -y`)
 
-`/gtw new` 本身没有 gtw 卡片——草稿由 agent 在 chat 里直接展示。`/gtw new -y`
+`/gtw plan` 与 `/gtw new` 本身没有 gtw 卡片——plan mode 的讨论和草稿都由 agent 在 chat 里直接展示。`/gtw new -y`
 建好一个 issue 后:
 
 ```

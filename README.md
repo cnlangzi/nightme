@@ -66,7 +66,7 @@ live simultaneously.
 | **CWD = project** | Each ChatSession is bound to one current working directory — that directory *is* the project. Set it with `/cwd <path>`; switch anytime. |
 | **Multi-agent, in the same Chat** | `/use <agent>` swaps the active agent. The previous one keeps running in the background — its task continues, results still come back, but new messages route to the new active agent. |
 
-> **Built on top: the [Git Team Workflow](#git-team-workflow-gtw).** Discuss a requirement → `/gtw new` turns it into an issue → `/gtw fix <id>` opens a worktree and hands the issue to the agent → `/gtw commit` · `/gtw push` · `/gtw pr` ship it with Conventional Commits → `/gtw close` cleans up. One standard for requirements, development, and Git operations across the whole team.
+> **Built on top: the [Git Team Workflow](#git-team-workflow-gtw).** Settle a design with `/gtw plan` → `/gtw new` turns the discussion into an issue → `/gtw fix <id>` opens a worktree and hands the issue to the agent → `/gtw commit` · `/gtw push` · `/gtw pr` ship it with Conventional Commits → `/gtw close` cleans up. One standard for requirements, development, and Git operations across the whole team.
 
 ## Supported integrations
 
@@ -332,16 +332,16 @@ stdout:
 **`/gtw` is a complete Git team workflow — from a chat discussion to a merged PR — driven entirely from chat.** Every requirement becomes an issue, every issue gets its own branch and worktree, every commit and PR follows Conventional Commits, and the issue's state on GitHub / GitLab tracks the work. The same conventions apply no matter which teammate, or which AI agent, does the work: requirements, development, and Git operations all follow one standard.
 
 ```
- discuss ──▶ /gtw new ──▶ /gtw new -y ──▶ /gtw fix <id> [-y] ──▶ /gtw commit ──▶ /gtw push ──▶ /gtw pr ──▶ /gtw close
- (chat)      draft         issue #N        worktree + agent        commit          remote        PR          done
-                                                 ▲   │
-                                                 └───┘ /handoff <name> · /resume <name>
-                                                       (context too long, or switching agents)
+ /gtw plan ──▶ /gtw new ──▶ /gtw new -y ──▶ /gtw fix <id> [-y] ──▶ /gtw commit ──▶ /gtw push ──▶ /gtw pr ──▶ /gtw close
+ (design)      draft         issue #N        worktree + agent        commit          remote        PR          done
+                                                   ▲   │
+                                                   └───┘ /handoff <name> · /resume <name>
+                                                         (context too long, or switching agents)
 ```
 
 | Step | Command | What it standardizes |
 |---|---|---|
-| 1. Requirement | `/gtw new` → `/gtw new -y` | The chat discussion becomes a self-contained issue: background, scope, requirements with acceptance criteria, design, decisions, implementation plan. |
+| 1. Requirement | `/gtw plan` → `/gtw new` → `/gtw new -y` | The design is settled in chat before any code changes, then becomes a self-contained issue: background, scope, requirements with acceptance criteria, design, decisions, implementation plan. |
 | 2. Implement | `/gtw fix <id> [-y]` | One issue = one branch = one worktree, cut from the freshly synced default branch. The issue gets the `nightme/wip` label and is dispatched to the agent. |
 | 3. Hand off *(optional)* | `/handoff <name>` · `/resume <name>` | Task state is written to a file, so a fresh session or a different agent continues without losing progress. |
 | 4. Commit | `/gtw commit [-a <agent>]` | An agent stages the changes and writes Conventional Commits messages. Local only. |
@@ -353,13 +353,15 @@ Steps 1–2 run in the chat's current agent session, so you keep talking to the 
 
 Parallel work is the default: three issues means three worktrees, three branches, and three agents, with no shared state between them.
 
-### 1. Requirement → issue: `/gtw new`
+### 1. Requirement → issue: `/gtw plan` · `/gtw new`
+
+**`/gtw plan [topic]`** puts the chat's current agent into plan mode before a requirement is discussed. The agent works as a design partner: it reads only the code a decision depends on, compares options and recommends one, asks only what the repository cannot answer, and marks every settled point with a `Decision:` line. It does not edit files, run builds or tests, or write implementation code, and agreeing with a proposal does not make it start implementing — when the design is complete it tells you to run `/gtw new`. Plan mode ends when `/gtw new` drafts the issues; running `/gtw plan` again restates the rules without restarting the discussion.
 
 After a back-and-forth with the agent about a requirement, **`/gtw new`** archives that discussion into GitHub / GitLab issues that a developer or coding agent can implement without having seen the chat. It runs in the chat's **current** agent session, because the discussion only exists there.
 
 It is a two-step command — the agent drafts, you decide:
 
-1. **`/gtw new`** — the agent extracts every requirement, constraint, decision, and edge case from the conversation and resolves contradictions (rejected options move to a *Decisions* section with their reasons). If something blocking is still undecided, it asks once — all questions in one message, each with a recommended default — and stops; answer in chat and it goes on to write the drafts (running `/gtw new` again works too). A discussion becomes one issue by default — code, tests, and docs of a change always stay together. Only when the discussion holds unrelated goals, each of which counts as done without the others, does it propose splitting them into several issues in that same round of questions; once you agree, each issue gets its own draft. Otherwise it writes the draft and shows the full document in chat: background and goal, scope, glossary, requirements with acceptance criteria, design, edge cases, constraints, decisions, implementation plan, open questions. Ask for changes in chat — including splitting or merging issues — and it rewrites the drafts.
+1. **`/gtw new`** — the agent extracts every requirement, constraint, decision, and edge case from the conversation, using the `Decision:` lines of plan mode as settled points, and resolves contradictions (rejected options move to a *Decisions* section with their reasons). If something blocking is still undecided, it asks once — all questions in one message, each with a recommended default — and stops; answer in chat and it goes on to write the drafts (running `/gtw new` again works too). A discussion becomes one issue by default — code, tests, and docs of a change always stay together. Only when the discussion holds unrelated goals, each of which counts as done without the others, does it propose splitting them into several issues in that same round of questions; once you agree, each issue gets its own draft. Otherwise it writes the draft and shows the full document in chat: background and goal, scope, glossary, requirements with acceptance criteria, design, edge cases, constraints, decisions, implementation plan, open questions. Ask for changes in chat — including splitting or merging issues — and it rewrites the drafts.
 2. **`/gtw new -y`** — once the drafts look right, NightMe creates one issue per draft, in draft order, through `gh` / `glab`, ending each body with a *Generated by NightMe* line, and replies with the numbers. Drafts reference each other as `{{ISSUE:NN}}`, replaced by the real issue number on creation. Every draft is validated before the first issue is created, so an invalid draft means none are created; if creation fails partway, the issues already opened stay and the next `/gtw new -y` creates only the rest. No agent is involved in this step.
 
 Issue titles follow Conventional Commits, so `/gtw fix` can derive a readable branch name from them. Drafts live in `~/.nightme/issue-drafts/`, one directory per chat and one file per issue (`01.md`, `02.md`, …); `/gtw new` empties the directory, and `/gtw new -y` replaces each draft with an `NN.created` record once its issue exists, so the agent never rewrites an issue that is already open.
@@ -622,7 +624,7 @@ internal/
   command/                         # Slash-command Commander / Registry / Factory
     cwd/ close/ newcmd/ use/ think/ tools/ watch/ stop/ steer/ services/
     handoff/ resume/ review/ wiki/ queue/   # task-continuity / review / wiki / queue
-    gtw/                           # /gtw new / fix / commit / push / pr / close / back / sync (Git team workflow)
+    gtw/                           # /gtw plan / new / fix / commit / push / pr / close / back / sync (Git team workflow)
   config/                          # YAML loader + env overrides
   daemoncontrol/                   # IPC for `nightme doctor` / `status`
   errors/                          # CodedError + ExitCode

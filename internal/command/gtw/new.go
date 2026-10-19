@@ -447,6 +447,8 @@ const newIssuePrompt = `Task: archive the requirement discussion in THIS convers
 
 Each issue will be handed to a developer or a coding agent that has NOT seen this conversation and can only read that issue. It must be implementable from the issue alone. Each issue also becomes its own branch, worktree, and pull request, so an issue is a complete unit of work: the code change together with the tests, documentation, and configuration it needs.
 
+If this conversation is in plan mode, this task ends it: write the draft files described below, and still change nothing in the project itself.
+
 Draft directory (absolute path):
 {{DRAFT_DIR_ABS}}
 
@@ -458,6 +460,7 @@ Each time nightme creates an issue it replaces NN.md with NN.created, whose firs
 
 ## Source of truth
 - Use only this conversation, plus code and files you have actually read in it. You may read more of the repository to resolve names, paths, and interfaces precisely.
+- Lines starting with "Decision:" record settled points. A "Decision (replaces …)" line overrides the decision it names.
 - If the beginning of the discussion is no longer visible to you, say so in chat and stop without writing any draft.
 - Never invent requirements, decisions, numbers, interfaces, or file paths. When completeness forces you to add something the discussion did not state, mark it inline with [inferred].
 

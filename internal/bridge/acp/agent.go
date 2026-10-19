@@ -126,6 +126,11 @@ type driver struct {
 	permissions  []permissionCall
 	closeOnce    sync.Once
 
+	// inboundMethodID is the JSON-RPC id of the server request
+	// currently inside MethodHandler. AskUser copies it onto the
+	// permission queue. Read and written only on the read pump.
+	inboundMethodID json.RawMessage
+
 	// updateHandler, when non-nil, receives raw session/update
 	// params.update payloads BEFORE the built-in 4-case fallback
 	// runs. Used by per-agent bridges (opencode) to inject a
@@ -281,6 +286,13 @@ type SessionView struct {
 	// (no instant drop, no timeout drop; close-aware).
 	Emit func(ev agent.AgentEvent)
 
+	// AskUser turns the in-flight JSON-RPC request into an
+	// AskUserQuestion card. The user's SendPermission payload is
+	// passed to encode, and that result is the RPC response.
+	// Returns false when there is no in-flight request id — the
+	// caller must not claim the method, or the agent waits forever.
+	AskUser func(req *agent.AgentPermissionRequest, encode func(answer string) (any, error)) bool
+
 	// SessionID returns the negotiated ACP session id. Stable
 	// across multi-turn conversations on the same driver; flips
 	// to "" before handshake completes.
@@ -355,12 +367,15 @@ type MethodHandler func(method string, params json.RawMessage, respond func(id j
 // re-exporting the unexported driver struct.
 type DriverHandle = driver
 
-// permissionCall tracks an outstanding session/request_permission
-// request so SendPermission can route the answer back to the right
-// JSON-RPC call.
+// permissionCall tracks an outstanding client request so
+// SendPermission can route the answer back to the right JSON-RPC
+// call. encode, when set, builds the result for extension methods
+// (cursor/ask_question, cursor/create_plan). Nil keeps the ACP
+// session/request_permission outcome shape.
 type permissionCall struct {
 	id     json.RawMessage
 	legacy bool
+	encode func(answer string) (any, error)
 }
 
 // initializeParams / newSessionParams / promptParams / contentBlock /
@@ -1075,6 +1090,13 @@ func (d *driver) SendPermission(response string) error {
 	d.permissions = d.permissions[1:]
 	d.permissionMu.Unlock()
 
+	if call.encode != nil {
+		result, err := call.encode(response)
+		if err != nil {
+			return d.rpc.respond(call.id, nil, &rpcError{Code: -32000, Message: err.Error()})
+		}
+		return d.rpc.respond(call.id, result, nil)
+	}
 	if call.legacy {
 		return d.rpc.requestAsync("permission_response", map[string]any{
 			"response": response,
@@ -1361,6 +1383,7 @@ func (d *driver) SetMethodHandler(h MethodHandler) {
 func (d *driver) View() *SessionView {
 	return &SessionView{
 		Emit:      d.emit,
+		AskUser:   d.askUser,
 		SessionID: func() string { return d.sessionID },
 		AgentName: d.agentName,
 		Workspace: d.workspace,
@@ -1370,6 +1393,29 @@ func (d *driver) View() *SessionView {
 			}
 		},
 	}
+}
+
+// askUser registers the in-flight server request as an
+// AskUserQuestion card. SendPermission later calls encode and
+// writes that value as the JSON-RPC result. False when this call
+// is not inside a MethodHandler request — claiming the method
+// without a response leaves the agent blocked.
+func (d *driver) askUser(req *agent.AgentPermissionRequest, encode func(answer string) (any, error)) bool {
+	if req == nil || encode == nil || len(d.inboundMethodID) == 0 {
+		return false
+	}
+	if req.ResponseCh == nil {
+		req.ResponseCh = make(chan string, 1)
+	}
+	if req.Kind == "" {
+		req.Kind = agent.PermissionKindQuestion
+	}
+	id := append(json.RawMessage(nil), d.inboundMethodID...)
+	d.permissionMu.Lock()
+	d.permissions = append(d.permissions, permissionCall{id: id, encode: encode})
+	d.permissionMu.Unlock()
+	d.emit(agent.AgentEvent{Kind: agent.EventAgentPermission, Permission: req})
+	return true
 }
 
 // ─── internals ───
@@ -1555,9 +1601,16 @@ func (d *driver) handleMethod(message rpcMessage) {
 		// unrecognized methods before falling through to the
 		// default "method not found" error.
 		if h := d.methodHandler.Load(); h != nil {
+			// Handlers do not see the request id; a nil argument
+			// means "use this message's id". No id at all is a
+			// notification and needs no reply.
+			d.inboundMethodID = append(json.RawMessage(nil), message.ID...)
 			respond := func(id json.RawMessage, result any, rpcErr error) bool {
 				if len(id) == 0 {
-					return true // notification — no response needed
+					id = message.ID
+				}
+				if len(id) == 0 {
+					return true
 				}
 				if rpcErr != nil {
 					_ = d.rpc.respond(id, nil, &rpcError{Code: -32000, Message: rpcErr.Error()})
@@ -1566,7 +1619,9 @@ func (d *driver) handleMethod(message rpcMessage) {
 				}
 				return true
 			}
-			if (*h)(message.Method, message.Params, respond) {
+			handled := (*h)(message.Method, message.Params, respond)
+			d.inboundMethodID = nil
+			if handled {
 				return
 			}
 		}

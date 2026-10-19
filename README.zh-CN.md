@@ -350,7 +350,7 @@ stdout:
 
 ### 1. 需求 → issue：`/gtw plan` · `/gtw new`
 
-**`/gtw plan [topic]`** 在讨论需求之前，让 chat 当前的 agent 进入 plan mode。agent 以设计伙伴的身份工作：只读做决策需要的代码，比较方案并给出推荐，只问仓库回答不了的问题，每个定下来的点都用一行 `Decision:` 标出。它不改文件、不跑 build 或测试、不写实现代码；你同意某个方案也不会让它动手——方案定完时它会提示你执行 `/gtw new`。plan mode 在 `/gtw new` 起草 issue 时结束；再执行一次 `/gtw plan` 会重申规则，讨论接着往下走，不会从头开始。
+**`/gtw plan [topic]`** 在讨论需求之前，让 chat 当前的 agent 进入 plan mode。agent 以设计伙伴的身份工作：只读做决策需要的代码，比较方案并给出推荐，只问仓库回答不了的问题，每个定下来的点都用一行 `Decision:` 标出。它不改文件、不跑 build 或测试、不写实现代码、不把方案拆成任务清单；祈使句式的需求（"把 X 文件里的 Y 改成……"）它当作要核对的设计输入，而不是要执行的指令；你同意某个方案也不会让它动手——方案定完时它会提示你执行 `/gtw new`。plan mode 在 `/gtw new` 起草 issue 时结束；再执行一次 `/gtw plan` 会重申规则，讨论接着往下走，不会从头开始。
 
 和 agent 来回讨论完一个需求后，**`/gtw new`** 把这段讨论归档成 GitHub / GitLab issue，没看过聊天记录的开发者或编码 agent 拿到就能实现。它跑在 chat **当前**的 agent session 里，因为讨论只存在于那里。
 

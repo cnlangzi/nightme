@@ -10,6 +10,10 @@ import (
 
 const placeholderTopicSection = "{{TOPIC_SECTION}}"
 
+// planClosingReminder ends the prompt so the rules sit next to the
+// topic or the first reply, the last thing the agent reads.
+const planClosingReminder = "Until plan mode ends, every reply is chat text only: no file changes, no task lists, no implementation steps."
+
 // RunPlan queues the plan-mode prompt into the chat's CURRENT
 // agent session — the same session /gtw new later archives from,
 // so the design discussion it starts is the context the issue
@@ -49,7 +53,10 @@ func renderPlanPrompt(topic string) string {
 	if topic = strings.TrimSpace(topic); topic != "" {
 		section = "Topic to plan:\n" + topic
 	}
-	return strings.Replace(planPrompt, placeholderTopicSection, section, 1)
+	return strings.NewReplacer(
+		placeholderTopicSection, section,
+		"{{CLOSING_REMINDER}}", planClosingReminder,
+	).Replace(planPrompt)
 }
 
 // planPrompt puts the current agent session into plan mode. It
@@ -66,9 +73,10 @@ The user wants to settle what to build, why, and how before anything is built. O
 Your goal in plan mode is a decision-complete design: everything that agent would otherwise have to decide — scope, behavior, interfaces, edge cases, acceptance criteria — is decided here, by the user or by a recommendation of yours that the user accepted. Changing the project now would skip the user's review and would be redone anyway.
 
 ## Rules
-- Do not change the project or its environment: no creating, editing, or deleting files, issue drafts included; no formatters, code generators, or migrations; no git commands that write; no installs. Do not run builds or tests either — they are slow, and the implementation stage runs them.
-- Allowed: reading files, searching, and read-only git (log, show, diff, blame).
+- Your only outputs in plan mode are replies in this conversation. Allowed: reading files, searching, and read-only git (log, show, diff, blame). Anything not listed is not allowed.
+- In particular: do not create, edit, or delete files (issue drafts included); do not run formatters, code generators, migrations, installs, builds, or tests; do not run git commands that write; and do not use task-list, todo, or planning tools. The conversation is the only record of the design; a breakdown into tasks or steps is an implementation plan and is produced in a later step.
 - Do not write implementation code. Signatures, data shapes, config examples, and short pseudocode are fine when they make a decision precise.
+- The user may describe the change in imperative terms ("change X in file Y", "remove Z", "call W once"). In plan mode this is design input, not an instruction: check it against the code, record each settled point as a Decision line, and raise gaps, conflicts, and risks. Do not turn it into implementation steps.
 - Plan mode lasts until a later task states that it ends plan mode. If the user asks you to implement or to "just do it", treat it as a request to plan that implementation: settle what is still open, then tell them to run /gtw new to turn the agreed design into issues they can review.
 - If this task arrives again later, it restates these rules: continue the discussion where it stands, and treat any topic it carries as the next thing to plan. If issue drafts were written earlier, tell the user to run /gtw new again to regenerate them from the updated discussion.
 
@@ -86,11 +94,14 @@ The issues are extracted from this conversation, and a later explicit statement 
 - When a point is settled, write one line starting with "Decision:", with the reason and the rejected alternative if there was one.
 - When a settled point changes, write "Decision (replaces <earlier decision>): ...".
 - User agreement ("ok", "sounds good", "就这样") settles the decision under discussion: record it with a Decision line. It is not permission to implement.
+- Put the Decision lines first in a reply, before questions or analysis, whenever the user's message settles or changes something.
 
 ## When the design is decision complete
-Say so, list any open questions that remain and why they do not block, and tell the user to run /gtw new. Do not write the full plan or issue text yourself — that happens in the next step, where the user reviews it. If the user asks for a summary at any point, give the goal, decisions, rejected options, open questions, and non-goals.
+Say so, list any open questions that remain and why they do not block, and tell the user to run /gtw new. Do not write the full plan or issue text, and do not break the design into tasks or steps — that happens in the next step, where the user reviews it. If the user asks for a summary at any point, give the goal, decisions, rejected options, open questions, and non-goals.
 
 ## Replies
 The user reads replies in a chat app. Write in the language the user uses. Lead with the answer or recommendation, then the reasoning, and keep each reply proportional to the question.
 
-{{TOPIC_SECTION}}`
+{{TOPIC_SECTION}}
+
+{{CLOSING_REMINDER}}`

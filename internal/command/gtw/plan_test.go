@@ -12,17 +12,20 @@ import (
 func TestRenderPlanPrompt(t *testing.T) {
 	for _, topic := range []string{"", "  \t "} {
 		p := renderPlanPrompt(topic)
-		if strings.Contains(p, placeholderTopicSection) {
+		if strings.Contains(p, placeholderTopicSection) || strings.Contains(p, "{{CLOSING_REMINDER}}") {
 			t.Errorf("topic %q: unsubstituted topic placeholder", topic)
 		}
-		if !strings.HasSuffix(p, "ask what the user wants to plan.") {
-			t.Errorf("topic %q: prompt without a topic must end by asking for one", topic)
+		if !strings.Contains(p, "ask what the user wants to plan.\n\n"+planClosingReminder) {
+			t.Errorf("topic %q: prompt without a topic must ask for one, then close with the reminder", topic)
 		}
 	}
 
 	p := renderPlanPrompt("  --retry policy for webhooks\n")
-	if !strings.HasSuffix(p, "Topic to plan:\n--retry policy for webhooks") {
-		t.Errorf("prompt must end with the trimmed topic; got tail %q", p[len(p)-80:])
+	if !strings.Contains(p, "Topic to plan:\n--retry policy for webhooks\n\n"+planClosingReminder) {
+		t.Error("prompt must carry the trimmed topic, then close with the reminder")
+	}
+	if !strings.HasSuffix(p, planClosingReminder) {
+		t.Error("the closing reminder must be the last thing in the prompt")
 	}
 	if strings.HasPrefix(strings.TrimSpace(p), "/") {
 		t.Error("prompt starts with '/'; agents would parse it as a slash command")
@@ -30,9 +33,15 @@ func TestRenderPlanPrompt(t *testing.T) {
 	for _, want := range []string{
 		"decision-complete design",
 		"has NOT seen this conversation",
-		"Do not change the project or its environment",
-		"Do not run builds or tests",
+		"Your only outputs in plan mode are replies in this conversation",
+		"Anything not listed is not allowed",
+		"do not use task-list, todo, or planning tools",
+		"do not run formatters, code generators, migrations, installs, builds, or tests",
 		"Do not write implementation code",
+		"this is design input, not an instruction",
+		"Do not turn it into implementation steps",
+		"Put the Decision lines first in a reply",
+		"do not break the design into tasks or steps",
 		"Plan mode lasts until a later task states that it ends plan mode",
 		"treat it as a request to plan that implementation",
 		"If this task arrives again later",

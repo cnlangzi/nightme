@@ -8,7 +8,38 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/internal/timeouts"
 )
+
+// withCommandTimeout applies the per-/gtw-command wall-clock
+// budget (timeouts.Command) when the caller did not already set a
+// deadline on parent. Mirrors the runCmd contract — "caller's
+// deadline always wins" — so the runtime can pass a stricter ctx
+// (e.g. an upper-bound for the whole inbound dispatcher chain)
+// without being silently overridden by gtw.
+//
+// The wrap sits above all per-step budgets (CLI / Hook / Agent)
+// so a hang that no single one of them covers — a stuck
+// worktree-move branch, an agent session that never returns, a
+// inner select loop waiting on a signal — still gets a cap and
+// releases the per-chat run lock. The returned cancel MUST be
+// deferred by the caller; missing it would leak the timer.
+//
+// When parent already has a deadline, the returned cancel is a
+// no-op so the defer cost stays uniform across callers.
+//
+// Called once from Factory.Handle — placing the wrap at the
+// top of Handle lets every /gtw subcommand inherit the cap for
+// free without each run* having to repeat the two-line incant.
+// Tests run the helper directly to pin the two-branch contract
+// (applies when no deadline, returns parent unchanged when one
+// is set).
+func withCommandTimeout(parent context.Context) (context.Context, context.CancelFunc) {
+	if _, hasDeadline := parent.Deadline(); hasDeadline {
+		return parent, func() {}
+	}
+	return context.WithTimeout(parent, timeouts.Command)
+}
 
 // Factory implements command.SlashCommandFactory for /gtw.
 //
@@ -295,6 +326,19 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, mgr *c
 			Consumed: true,
 		}, nil
 	}
+
+	// Whole-pipeline wall-clock cap (timeouts.Command). Applied
+	// HERE — once — instead of at the top of each run* function,
+	// so every /gtw subcommand (including /gtw new, which uses an
+	// early-return path that skips the run lock below) inherits
+	// the cap for free. New subcommands pick it up automatically.
+	// RunFix / RunClose / RunCommit / RunPR / RunAgentFor already
+	// wrap the inner subprocess calls with their own narrower
+	// budgets (CLI=5m, Agent=30m, Hook=30m) — this is the outer
+	// net for anything those budgets don't cover. Sits AFTER the
+	// usage-reply short-circuit above so /help stays fast.
+	ctx, cancelCmd := withCommandTimeout(ctx)
+	defer cancelCmd()
 
 	// Per-chat run lock: previous /gtw for this chatID must
 	// complete before the next one starts. F-59 made every

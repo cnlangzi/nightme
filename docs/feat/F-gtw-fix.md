@@ -1,4 +1,4 @@
-# F-XX: `/gtw fix` — Plan-first dispatch + 分支硬失败
+# F-XX: `/gtw fix` — Assess-first dispatch + 分支硬失败
 
 > **Status**: 实现已落地（PR-A + PR-B 合并到 `fix-gtw-fix` 分支）
 >
@@ -14,13 +14,13 @@
 
 1. 拉取 issue → 建 worktree + 打 `nightme/wip` label
 2. 组装 issue 信息（正文 + 附件 ContentFile）
-3. 按 flag 选择 **Plan** 或 **Execute** prompt，`QueueUserMessage` 发给 agent
+3. 按 flag 选择 **Assess** 或 **Execute** prompt，`QueueUserMessage` 发给 agent
 
 **到此结束。** 后续的「看方案、确认、调整、开工」全部在 **用户 ↔ agent 普通对话** 里完成。gtw **不提供** `/gtw proceed`，也不再 dispatch 第二次 prompt。
 
 | 命令 | Agent 收到 | 用户下一步 |
 |---|---|---|
-| `/gtw fix <id>`（默认） | **Plan Prompt** — 只分析、出方案，**禁止改文件** | 在 chat 里回复 agent（「可以 / 按第 2 步做」等） |
+| `/gtw fix <id>`（默认） | **Assess Prompt** — 只分析、出方案，**禁止改文件** | 在 chat 里回复 agent（「可以 / 按第 2 步做」等） |
 | `/gtw fix <id> -y` | **Execute Prompt** — 直接实现修复 | 跟进 agent 进度 |
 
 **Branch 已存在 → 硬失败**，不再提供 🆕 -v2 / 🔗 加入 / daemon recovery re-entry。
@@ -49,7 +49,7 @@ v1.x Remote 模式在 worktree 就绪后立刻 dispatch 一条混合语义的 pr
 ### 2.1 Usage
 
 ```text
-/gtw fix <issue-id>              # plan-first（默认）
+/gtw fix <issue-id>              # assess-first（默认）
 /gtw fix <issue-id> -y           # 跳过 plan，直接 execute prompt
 /gtw fix <issue-id> --yes        # 同 -y
 /gtw fix -y <issue-id>           # -y 任意位置都行（boolean flag，无值）
@@ -68,12 +68,12 @@ token 报"unknown flag"——CLI 一致（git、kubectl 都不接受未注册 fl
 
 | Flag | 字段 | 语义 | 作用层 | 模式 |
 |---|---|---|---|---|
-| （无） | — | 默认 plan-first | Agent prompt | Remote |
+| （无） | — | 默认 assess-first | Agent prompt | Remote |
 | `-y` / `--yes` | `fixArgs.Yes` | dispatch **Execute Prompt** | 工作流 | Remote |
 | `--name` / `-n` | `fixArgs.Mode` | local 模式 | Mode | Local |
 
 **`-y` 在 Local 模式下**：被 `Factory.runFix` 静默清零（`args.Yes = false`）。
-Local mode 不 dispatch agent prompt，Plan / Execute 无意义；不报错但无效。
+Local mode 不 dispatch agent prompt，Assess / Execute 无意义；不报错但无效。
 
 **未知 flag 报错**：除 `--yes/-y/--name/-n` 外，任何 `--xxx` / `-x` 形式
 的 token（包括已删除的 `--force/-f`）都被 `parseFixArgs` 显式拒绝。
@@ -108,7 +108,7 @@ flowchart TD
     H --> I["ensureGtwLabels + AddIssueLabel"]
     I --> J["completeFixAndDispatch"]
     J --> K{"-y?"}
-    K -->|no| L["dispatch Plan Prompt"]
+    K -->|no| L["dispatch Assess Prompt"]
     K -->|yes| M["dispatch Execute Prompt"]
     L --> N["用户在 chat 与 agent 沟通"]
     M --> O["agent 直接改代码"]
@@ -146,7 +146,7 @@ Local 模式（`/gtw fix --name`）同样：branch 存在即失败，无决策�
 ```
 gtw                          agent + user chat
 ───                          ─────────────────
-建 worktree                  agent 回复 Plan（默认）
+建 worktree                  agent 回复 Assess 计划（默认）
 打 label                     用户：「OK / 改一下第 3 步」
 组装 issue blocks            agent 继续改代码（普通对话）
 dispatch 一次 prompt
@@ -187,7 +187,7 @@ Section 顺序稳定（与 v1 一致，便于 agent / 测试依赖）：
 ...
 
 ## Task
-<Plan 或 Execute 正文>
+<Assess 或 Execute 正文>
 ```
 
 附件仍为先下载到 worktree 下 `.nightme/attachments/<issue-id>/`，以 `ContentFile` blocks 跟在 text block 之后（`buildIssueDispatchBlocks`）。
@@ -197,16 +197,16 @@ Section 顺序稳定（与 v1 一致，便于 agent / 测试依赖）：
 - 派发文本不提 issue comments——`GetIssue` 不拉取评论，agent 只看到正文和附件。
 - 两套 prompt 都含 *Structured issues* 段落，与 `/gtw new` 的 issue 模板衔接：Acceptance criteria 即完成标准，Decisions 已与用户定案、不再重复提问，`[inferred]` 需对照仓库核实，Implementation Plan 需重新验证，Open Questions 优先进入 decision gate。
 
-### 4.1 Plan Prompt（默认，`-y` 未传）
+### 4.1 Assess Prompt（默认，`-y` 未传）
 
 > **运行时自包含原则**：`buildIssueDispatchText` 生成的 §Task 正文
 > 运行在用户独立 worktree 上的 standalone agent 里，**看不到本 repo 的
 > 任何文档**（F-gtw-fix.md、REVIEWER_INSTRUCTIONS.md），也不需要知道
 > 「另一个 dispatch mode」的存在。所以运行时文本**禁止**引用：节号
 > （§4.1/§4.2）、文档文件名、「Execute pass / Execute (§4.2)」、
-> 「the plan above」（Execute 假设有前置 Plan round，但 `-y` 可直接跳过 Plan），
+> 「the plan above」（Execute 假设有前置 Assess round，但 `-y` 可直接跳过 Assess），
 > 以及 CLI flag（`-y`）——agent 看不到用户敲的命令，只看到「是否已授权实现」。
-> 每条 prompt 必须自含全部所需指令。Plan prompt 末尾写明用户批准后的执行与验证要求：
+> 每条 prompt 必须自含全部所需指令。Assess prompt 末尾写明用户批准后的执行与验证要求：
 > 批准走普通 chat 对话，没有第二次 Execute dispatch。
 > `TestBuildIssueDispatchText_RuntimeSelfContained` 守住这个不变量。
 
@@ -391,7 +391,7 @@ verification evidence. Never claim success merely because files were
 edited.
 ```
 
-> **Source of truth**：上面这块 fenced markdown 与 `internal/command/gtw/fix.go` 的 `planTaskPrompt` 常量必须保持一致——`buildIssueDispatchText` 运行时按字面把这段拼到 dispatch 消息里，doc 只是给人类看的镜像。改一边必须同步另一边（`TestBuildIssueDispatchText_Plan_Methodology` 守住 §11.A–E + §9 的关键短语，doc 与 runtime 任一漂移都会让 CI 拒掉改 runtime 的 PR，反之亦然）。
+> **Source of truth**：上面这块 fenced markdown 与 `internal/command/gtw/fix.go` 的 `assessTaskPrompt` 常量必须保持一致——`buildIssueDispatchText` 运行时按字面把这段拼到 dispatch 消息里，doc 只是给人类看的镜像。改一边必须同步另一边（`TestBuildIssueDispatchText_Assess_Methodology` 守住 §11.A–E + §9 的关键短语，doc 与 runtime 任一漂移都会让 CI 拒掉改 runtime 的 PR，反之亦然）。
 
 **Methodology pin (docs/REVIEWER_INSTRUCTIONS.md)**：plan 阶段禁止
 "凭空推理"——任何 claim 必须有 file:line 或 runtime trace 支撑。Bug vs
@@ -404,12 +404,12 @@ implementation task，是先调查再决定；零问题方案是合法且首选�
 
 ### 4.2 Execute Prompt（`-y` / `--yes`）
 
-> **运行时自包含原则**：与 §4.1 Plan 同——`buildIssueDispatchText` 生成
+> **运行时自包含原则**：与 §4.1 Assess 同——`buildIssueDispatchText` 生成
 > 的 §Task 正文运行在用户独立 worktree 上的 standalone agent 里，看不到
-> 本 repo 的任何文档。Execute 也不假设有前置 Plan round（`-y` 可直接
-> 跳过 Plan dispatch），所以运行时文本禁止引用「the plan above」。
+> 本 repo 的任何文档。Execute 也不假设有前置 Assess round（`-y` 可直接
+> 跳过 Assess dispatch），所以运行时文本禁止引用「the plan above」。
 > `TestBuildIssueDispatchText_Execute_MirrorsDoc` 守住 doc ↔ runtime
-> 同步不变量，与 §4.1 的 `TestBuildIssueDispatchText_Plan_MirrorsDoc`
+> 同步不变量，与 §4.1 的 `TestBuildIssueDispatchText_Assess_MirrorsDoc`
 > 配对。
 
 ```markdown
@@ -512,11 +512,11 @@ Do not claim success merely because files were edited. State the concrete verifi
 > 运行时按字面把这段拼到 dispatch 消息里，doc 只是给人类看的镜像。
 > 改一边必须同步另一边（`TestBuildIssueDispatchText_Execute_MirrorsDoc`
 > 守住 §4.2 ↔ runtime 的关键短语，任一漂移都会让 CI 拒掉改 runtime 的
-> PR，反之亦然——与 §4.1 的 `_Plan_MirrorsDoc` 配对）。
+> PR，反之亦然——与 §4.1 的 `_Assess_MirrorsDoc` 配对）。
 
-**Methodology pin**：`#409` Execute 阶段是与 §4.1 Plan 同源的研究优先 +
+**Methodology pin**：`#409` Execute 阶段是与 §4.1 Assess 同源的研究优先 +
 decision-gated 流程：role anchor = senior engineer + maintainer；`-y` 移除
-Plan 确认 round-trip 但**不**移除调研 / 推理 / 验证 / 对真正产品决策的
+Assess 确认 round-trip 但**不**移除调研 / 推理 / 验证 / 对真正产品决策的
 边界；ordinary engineering decisions 由 agent 自决（不打扰用户）；
 只有 materially different product/requirement ambiguity 才升级到用户。
 `-y` 也**不**意味着 code 必须 change——若请求行为已正确实现，agent
@@ -532,7 +532,7 @@ verify 后报告「no code change required」即可，不编辑代码。旧规�
 
 排版遵循 [`internal/command/gtw/README.md`](../../internal/command/gtw/README.md) Format 1。
 
-### 5.1 Plan 模式（默认）
+### 5.1 Assess 模式（默认）
 
 ```text
 ✅ Fix #42 ready
@@ -561,10 +561,10 @@ verify 后报告「no code change required」即可，不编辑代码。旧规�
 |---|---|---|
 | `ensureGtwLabels` | ✅ | ❌ |
 | `AddIssueLabel` | ✅ | ❌ |
-| Agent dispatch | ✅ Plan / Execute | ❌（never dispatch） |
+| Agent dispatch | ✅ Assess / Execute | ❌（never dispatch） |
 | Branch exists | ❌ 硬失败 | ❌ 硬失败 |
 
-F-59 的 `rollbackLabelStep`、label bootstrap 顺序 **不变**；仅 dispatch 文案与 branch 策略变更。详见 [`F-59-gtw-label-bootstrap.md`](./F-59-gtw-label-bootstrap.md) §2.3（步骤 10 改为「按 mode dispatch Plan 或 Execute」）。
+F-59 的 `rollbackLabelStep`、label bootstrap 顺序 **不变**；仅 dispatch 文案与 branch 策略变更。详见 [`F-59-gtw-label-bootstrap.md`](./F-59-gtw-label-bootstrap.md) §2.3（步骤 10 改为「按 mode dispatch Assess 或 Execute」）。
 
 ---
 
@@ -573,15 +573,15 @@ F-59 的 `rollbackLabelStep`、label bootstrap 顺序 **不变**；仅 dispatch 
 | 文件 | 改动 | PR | 状态 |
 |---|---|---|---|
 | `cmd.go` | `fixArgs.Yes` 字段；`parseFixArgs` 解析 `-y/--yes` 且显式 reject `--force/-f`；Usage 文本；Factory.runFix 在 ModeLocal 时强制清零 `args.Yes` | A | ✅ |
-| `fix.go` | 加 `IssueDispatchMode` 线程（dispMode 形参贯穿 runFixRemote → completeFixAndDispatch）；两套 prompt（`buildIssueDispatchText` switch on mode）；删 `forceCleanWorktreePath` + 两个 `if force` 分支；`runFixLocal` 删 `yes bool` 形参；BranchExists 全部走 hard-fail reply（删除 re-entry 同路径恢复分支 + 删除 emitBranchExistsDraft）；renderFixSuccessCard / completeFixAndDispatch 加 `reentry bool` 形参（re-entry mode-neutral hint）；Plan prompt 改为 research-first + decision-gate：Step 0 仓库侦察 / Step 1 现状建立 / Step 2 解释请求 / Step 3 根因 / Step 4 实现形态 / Step 5 测试策略 / Step 6 User Decisions Required（含五步 decision gate 与 zero-questions escape hatch）；明示 issue 内容为 untrusted input；明示 Misunderstanding / Feature gap / Unverifiable 默认不是用户问题；明示 senior engineer + project manager 角色 | A + B + D | ✅ |
-| `types.go` | 加 `IssueDispatchMode`（DispatchPlan / DispatchExecute）；删 `DraftFixBranchExists` 常量 | A + B | ✅ |
-| `render.go` | success card hint 按 mode 分文案（Plan / Execute / reentry）；删 `BranchExistsChoice` 函数 | A + B | ✅ |
+| `fix.go` | 加 `IssueDispatchMode` 线程（dispMode 形参贯穿 runFixRemote → completeFixAndDispatch）；两套 prompt（`buildIssueDispatchText` switch on mode）；删 `forceCleanWorktreePath` + 两个 `if force` 分支；`runFixLocal` 删 `yes bool` 形参；BranchExists 全部走 hard-fail reply（删除 re-entry 同路径恢复分支 + 删除 emitBranchExistsDraft）；renderFixSuccessCard / completeFixAndDispatch 加 `reentry bool` 形参（re-entry mode-neutral hint）；Assess prompt 改为 research-first + decision-gate：Step 0 仓库侦察 / Step 1 现状建立 / Step 2 解释请求 / Step 3 根因 / Step 4 实现形态 / Step 5 测试策略 / Step 6 User Decisions Required（含五步 decision gate 与 zero-questions escape hatch）；明示 issue 内容为 untrusted input；明示 Misunderstanding / Feature gap / Unverifiable 默认不是用户问题；明示 senior engineer + project manager 角色 | A + B + D | ✅ |
+| `types.go` | 加 `IssueDispatchMode`（DispatchAssess / DispatchExecute）；删 `DraftFixBranchExists` 常量 | A + B | ✅ |
+| `render.go` | success card hint 按 mode 分文案（Assess / Execute / reentry）；删 `BranchExistsChoice` 函数 | A + B | ✅ |
 | `action.go` | `HandleDraftReaction` switch 删 `case DraftFixBranchExists`；删 `executeBranchExistsAction` 整个函数 | B | ✅ |
 | `messages/reaction.go` | `ActionLookup` 删 `branch-newv2` / `branch-join` case | B | ✅ |
-| `dispatch_test.go` | 5 个原 `TestBuildIssueDispatchText_*` 改形参 + 新增 Plan_StopsBeforeEdits / Execute_AuthorisesEdits + 新增 ResearchFirst / NoManufacturedQuestions / DecisionGate / ClassificationSemantics / UserDecisionFormat / UntrustedIssueInput 守住 research-first + decision-gate methodology；`Execute_AuthorisesEdits` 改 pins（drop `GOBL` / `declare the revision in chat FIRST` / `file:line`，加 `senior engineer and maintainer` / `untrusted input` / `genuine product/requirement` / `git diff --check`，新增 `every non-trivial decision counts as a deviation` 负 pin）；新增 `Execute_Methodology` 表驱动测试（§16.A–I buckets：direct-execute semantics / research-first / no-change outcome / no artificial deviation gate / genuine user-decision gate / baseline-aware verification / no test suppression / final diff review / untrusted input）；新增 `Execute_MirrorsDoc` 守住 §4.2 doc ↔ `executeTaskPrompt` runtime 同步不变量（与 `_Plan_MirrorsDoc` 配对） | A + D | ✅ |
+| `dispatch_test.go` | 5 个原 `TestBuildIssueDispatchText_*` 改形参 + 新增 Assess_StopsBeforeEdits / Execute_AuthorisesEdits + 新增 ResearchFirst / NoManufacturedQuestions / DecisionGate / ClassificationSemantics / UserDecisionFormat / UntrustedIssueInput 守住 research-first + decision-gate methodology；`Execute_AuthorisesEdits` 改 pins（drop `GOBL` / `declare the revision in chat FIRST` / `file:line`，加 `senior engineer and maintainer` / `untrusted input` / `genuine product/requirement` / `git diff --check`，新增 `every non-trivial decision counts as a deviation` 负 pin）；新增 `Execute_Methodology` 表驱动测试（§16.A–I buckets：direct-execute semantics / research-first / no-change outcome / no artificial deviation gate / genuine user-decision gate / baseline-aware verification / no test suppression / final diff review / untrusted input）；新增 `Execute_MirrorsDoc` 守住 §4.2 doc ↔ `executeTaskPrompt` runtime 同步不变量（与 `_Assess_MirrorsDoc` 配对） | A + D | ✅ |
 | `parse_fix_args_test.go` | 新增：`TestParseFixArgs_YesFlag` + `TestParseFixArgs_ForceFlagRejected` + `NameValueFlagShaped` + `NameMissingValue` + `PositionalOrdering` + `LocalModeTooManyArgs` + `RemoteModeTooManyArgs` + `MissingArgument` + `UnknownFlagRejected` | A | ✅ |
-| `render_fix_success_test.go` | 新增：Plan / Execute success card 测试 + reentry 测试 + empty-baseSHA | A | ✅ |
-| `attachments_test.go` | `buildIssueDispatchBlocks` 形参加 `DispatchPlan` | A | ✅ |
+| `render_fix_success_test.go` | 新增：Assess / Execute success card 测试 + reentry 测试 + empty-baseSHA | A | ✅ |
+| `attachments_test.go` | `buildIssueDispatchBlocks` 形参加 `DispatchAssess` | A | ✅ |
 | `close_integration_test.go` | `args.Force` → `args.Yes` | A | ✅ |
 | `fix_remote_integration_test.go` | `drive()` 注释更新；新增 `TestFixRemote_BranchExists_HardFails_NoSideEffects` | A + B | ✅ |
 | `preflight_test.go` | 注释更新 | A | ✅ |
@@ -630,7 +630,7 @@ F-59 的 `rollbackLabelStep`、label bootstrap 顺序 **不变**；仅 dispatch 
 2. **默认 fix** → dispatch 含 `Do NOT modify`；不含 `Proceed to fix`
 3. **`-y` fix** → dispatch 含 `Proceed to fix`；不含 `STOP`
 4. **`-y` 任意位置** → `-y 42` / `42 -y` / `--yes 42` 都正确识别 Yes=true（boolean flag 位置无关）
-5. **`-y` + worktree 已存在（同路径 re-entry）** → success card 用 Plan 措辞（不是 Execute），skipDispatch=true
+5. **`-y` + worktree 已存在（同路径 re-entry）** → success card 用 Assess 措辞（不是 Execute），skipDispatch=true
 6. **附件** → 两种 mode 均带 ContentFile
 7. **worktree add 失败** → 仍走 `WorktreeFailChoice`（与 branch 无关）
 8. **`--force` / `-f`** → 显式报错"unknown flag... removed in F-XX"（不静默 no-op）
@@ -659,13 +659,13 @@ F-59 的 `rollbackLabelStep`、label bootstrap 顺序 **不变**；仅 dispatch 
 | **`--name` / issue-id 严格 arity 检查** | `/gtw fix --name foo bar` 与 `/gtw fix 42 extra` 报错而不是 silently 丢弃多余 token；跟 git CLI 一致 |
 | branch 冲突硬失败 | 简化状态机；强制用户显式 `/gtw close` |
 | 废除 daemon recovery re-entry | 与「branch 不跳过」同一原则；避免隐式 `skipDispatch` |
-| re-entry 路径 success card 用 mode-neutral 措辞 | skipDispatch=true 时不再发 prompt；reentry=true 渲染"worktree resumed"中性 hint 而不是声称"agent is analyzing/fixing"——我们不知道上次 dispatch 是 Plan 还是 Execute，也不重新发 prompt，渲染任何一种 active 语气都不诚实；header 也不加 "(direct execute)" 后缀 |
-| local mode 忽略 `-y` | `/gtw fix --name` 不 dispatch，Plan/Execute 无意义；Factory.runFix 在 ModeLocal 时强制清零 `args.Yes` |
-| Execute 共用 Plan decision-gated methodology | `-y` 仅移除 Plan 确认 round-trip，不移除调研 / 推理 / 验证 / 真正产品决策的边界；ordinary engineering decisions 由 agent 自决（不打扰用户），只有 materially different product/requirement ambiguity 才升级到用户；`-y` 也**不**意味着 code 必须 change——请求行为已正确实现时 verify 后报告「no code change required」即可；旧规则「every non-trivial decision counts as a deviation」删除；最终 diff 必须经 `git diff --check` + scope-creep 巡查 |
+| re-entry 路径 success card 用 mode-neutral 措辞 | skipDispatch=true 时不再发 prompt；reentry=true 渲染"worktree resumed"中性 hint 而不是声称"agent is analyzing/fixing"——我们不知道上次 dispatch 是 Assess 还是 Execute，也不重新发 prompt，渲染任何一种 active 语气都不诚实；header 也不加 "(direct execute)" 后缀 |
+| local mode 忽略 `-y` | `/gtw fix --name` 不 dispatch，Assess/Execute 无意义；Factory.runFix 在 ModeLocal 时强制清零 `args.Yes` |
+| Execute 共用 Assess decision-gated methodology | `-y` 仅移除 Assess 确认 round-trip，不移除调研 / 推理 / 验证 / 真正产品决策的边界；ordinary engineering decisions 由 agent 自决（不打扰用户），只有 materially different product/requirement ambiguity 才升级到用户；`-y` 也**不**意味着 code 必须 change——请求行为已正确实现时 verify 后报告「no code change required」即可；旧规则「every non-trivial decision counts as a deviation」删除；最终 diff 必须经 `git diff --check` + scope-creep 巡查 |
 
 ---
 
 ## 11. 可选后续（非本期）
 
 - `--no-dispatch`：只建 worktree，不发给 agent（`cmd.go` 注释已预留）
-- Plan prompt 注入 repo 惯例（测试命令、目录结构）——仍只在 prompt 层
+- Assess prompt 注入 repo 惯例（测试命令、目录结构）——仍只在 prompt 层

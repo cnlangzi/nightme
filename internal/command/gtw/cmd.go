@@ -513,7 +513,7 @@ func (f *Factory) runFix(ctx context.Context, _ command.RuntimeServices, cs *cha
 type fixArgs struct {
 	Mode   Mode
 	RawArg string // issue id (ModeRemote) or branch name (ModeLocal)
-	Yes    bool   // --yes / -y: dispatch Execute Prompt instead of Plan
+	Yes    bool   // --yes / -y: dispatch Execute Prompt instead of Assess
 }
 
 // fixCmdSpec is the argv grammar for /gtw fix. Lexer is the
@@ -527,7 +527,7 @@ type fixArgs struct {
 //	--name <branch>         ModeLocal  (branch from --name value)
 //
 // Both shapes accept an optional -y/--yes to dispatch the
-// Execute prompt instead of the Plan prompt. The mutual
+// Execute prompt instead of the Assess prompt. The mutual
 // exclusion between the two shapes is enforced in
 // parseFixArgs' post-parse step (the shared lexer can't
 // express it because it doesn't know which positional pattern

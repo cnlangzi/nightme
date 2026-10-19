@@ -12,7 +12,7 @@ import (
 // TestBuildIssueDispatchText_BareIssue covers the canonical
 // shape: title / body / metadata fields all present and
 // plain-text (no special characters). F-XX: takes an explicit
-// IssueDispatchMode (Plan by default).
+// IssueDispatchMode (Assess by default).
 func TestBuildIssueDispatchText_BareIssue(t *testing.T) {
 	issue := &Issue{
 		ID:     42,
@@ -22,7 +22,7 @@ func TestBuildIssueDispatchText_BareIssue(t *testing.T) {
 		Labels: []string{"nightme/wip", "priority/high"},
 		URL:    "https://github.com/cnlangzi/nightme/issues/42",
 	}
-	out := buildIssueDispatchText(issue, "login-state-expiration", "cnlangzi/nightme", DispatchPlan, 0, 0)
+	out := buildIssueDispatchText(issue, "login-state-expiration", "cnlangzi/nightme", DispatchAssess, 0, 0)
 
 	// Header
 	if !strings.Contains(out, "📥 Issue #42 — Login state expiration") {
@@ -46,17 +46,17 @@ func TestBuildIssueDispatchText_BareIssue(t *testing.T) {
 	if !strings.Contains(out, "## Task") {
 		t.Errorf("missing Task section; got:\n%s", out)
 	}
-	// Plan-mode framing + read-only invariant + STOP signal.
+	// Assess-mode framing + read-only invariant + STOP signal.
 	// Methodology pins (research-first, decision-gate, etc.)
-	// live in TestBuildIssueDispatchText_Plan_Methodology.
+	// live in TestBuildIssueDispatchText_Assess_Methodology.
 	if !strings.Contains(out, "due-diligence pass") {
-		t.Errorf("Plan prompt must frame as due-diligence (not implementation); got:\n%s", out)
+		t.Errorf("Assess prompt must frame as due-diligence (not implementation); got:\n%s", out)
 	}
 	if !strings.Contains(out, "Do NOT modify, create, or delete any files.") {
-		t.Errorf("missing Plan-mode read-only instruction; got:\n%s", out)
+		t.Errorf("missing Assess-mode read-only instruction; got:\n%s", out)
 	}
 	if !strings.Contains(out, "Present the plan and STOP") {
-		t.Errorf("missing Plan-mode STOP signal; got:\n%s", out)
+		t.Errorf("missing Assess-mode STOP signal; got:\n%s", out)
 	}
 }
 
@@ -65,7 +65,7 @@ func TestBuildIssueDispatchText_BareIssue(t *testing.T) {
 // prompt variant: same canonical shape (header / metadata /
 // description / task), but the §Task block uses the
 // user-authorised "implement the fix" wording instead of
-// the read-only Plan prompt.
+// the read-only Assess prompt.
 func TestBuildIssueDispatchText_BareIssue_ExecuteMode(t *testing.T) {
 	issue := &Issue{
 		ID:     42,
@@ -77,7 +77,7 @@ func TestBuildIssueDispatchText_BareIssue_ExecuteMode(t *testing.T) {
 	}
 	out := buildIssueDispatchText(issue, "login-state-expiration", "cnlangzi/nightme", DispatchExecute, 0, 0)
 
-	// Header / metadata / description / task — same as Plan mode
+	// Header / metadata / description / task — same as Assess mode
 	for _, want := range []string{
 		"📥 Issue #42 — Login state expiration",
 		"- repo: cnlangzi/nightme",
@@ -92,47 +92,47 @@ func TestBuildIssueDispatchText_BareIssue_ExecuteMode(t *testing.T) {
 	}
 	// Execute-mode-specific wording (direct-implementation pass
 	// replaces the old GOBL-mode "Implement the change" framing).
-	// The lead-in must NOT assume a prior Plan turn exists in
-	// chat — `-y` can dispatch Execute directly with no Plan
+	// The lead-in must NOT assume a prior Assess turn exists in
+	// chat — `-y` can dispatch Execute directly with no Assess
 	// round.
 	if !strings.Contains(out, "direct-implementation pass") {
 		t.Errorf("Execute prompt missing 'direct-implementation pass' marker; got:\n%s", out)
 	}
 	if !strings.Contains(out, "A previous Plan may or may not exist") {
-		t.Errorf("Execute prompt must not assume a prior Plan turn; got:\n%s", out)
+		t.Errorf("Execute prompt must not assume a prior Assess turn; got:\n%s", out)
 	}
-	// Plan-mode-specific wording must NOT leak
+	// Assess-mode-specific wording must NOT leak
 	if strings.Contains(out, "Do NOT modify") || strings.Contains(out, "Present the plan and STOP") {
-		t.Errorf("Execute prompt must NOT contain Plan-mode wording; got:\n%s", out)
+		t.Errorf("Execute prompt must NOT contain Assess-mode wording; got:\n%s", out)
 	}
 }
 
-// TestBuildIssueDispatchText_Plan_StopsBeforeEdits pins the
-// Plan-mode read-only + STOP invariants and the "no Implement
+// TestBuildIssueDispatchText_Assess_StopsBeforeEdits pins the
+// Assess-mode read-only + STOP invariants and the "no Implement
 // leakage" guard. Methodology content (research-first, decision
 // gate, classification semantics, etc.) lives in
-// TestBuildIssueDispatchText_Plan_Methodology so this test
+// TestBuildIssueDispatchText_Assess_Methodology so this test
 // stays focused on the read-only contract.
-func TestBuildIssueDispatchText_Plan_StopsBeforeEdits(t *testing.T) {
+func TestBuildIssueDispatchText_Assess_StopsBeforeEdits(t *testing.T) {
 	issue := &Issue{ID: 42, Title: "Login state", Body: "b", URL: "u"}
-	out := buildIssueDispatchText(issue, "br", "o/r", DispatchPlan, 0, 0)
+	out := buildIssueDispatchText(issue, "br", "o/r", DispatchAssess, 0, 0)
 	for _, want := range []string{
 		"Do NOT modify, create, or delete any files.", // read-only invariant
 		"Present the plan and STOP",                   // wait-for-user gate
 	} {
 		if !strings.Contains(out, want) {
-			t.Errorf("Plan prompt missing %q; got:\n%s", want, out)
+			t.Errorf("Assess prompt missing %q; got:\n%s", want, out)
 		}
 	}
 	if strings.Contains(out, "Implement the change committed") {
-		t.Errorf("Plan prompt must not contain 'Implement' (that's Execute)")
+		t.Errorf("Assess prompt must not contain 'Implement' (that's Execute)")
 	}
 }
 
 // TestBuildIssueDispatchText_Execute_AuthorisesEdits pins
 // the F-XX / #409 Execute-mode prompt: research-first,
 // decision-gated, senior-engineer framing. `-y` authorises
-// direct implementation (no prior Plan required), ordinary
+// direct implementation (no prior Assess required), ordinary
 // engineering decisions are made autonomously, and only
 // genuinely material product/requirement ambiguity escalates
 // to the user. Test-suppression / scope-creep / unrelated-
@@ -148,7 +148,7 @@ func TestBuildIssueDispatchText_Execute_AuthorisesEdits(t *testing.T) {
 	issue := &Issue{ID: 42, Title: "Login state", Body: "b", URL: "u"}
 	out := buildIssueDispatchText(issue, "br", "o/r", DispatchExecute, 0, 0)
 	for _, want := range []string{
-		"senior engineer and maintainer",                           // role anchor (Plan mirrors "senior engineer and project manager")
+		"senior engineer and maintainer",                           // role anchor (Assess mirrors "senior engineer and project manager")
 		"untrusted input",                                          // §16.I boundary
 		"Do not invent functionality",                              // boundary
 		"Do not refactor unrelated code",                           // boundary
@@ -162,8 +162,8 @@ func TestBuildIssueDispatchText_Execute_AuthorisesEdits(t *testing.T) {
 		}
 	}
 	for _, forbid := range []string{
-		"Do NOT modify, create, or delete",                 // Plan-only invariant
-		"Present the plan and STOP",                        // Plan-only gate
+		"Do NOT modify, create, or delete",                 // Assess-only invariant
+		"Present the plan and STOP",                        // Assess-only gate
 		"GOBL",                                             // old methodology framing (removed)
 		"declare the revision in chat FIRST",               // old deviation discipline (removed)
 		"every non-trivial decision counts as a deviation", // §16.D — old deviation gate, must NOT survive
@@ -185,14 +185,14 @@ func TestBuildIssueDispatchText_Execute_AuthorisesEdits(t *testing.T) {
 // fully self-contained.
 func TestBuildIssueDispatchText_RuntimeSelfContained(t *testing.T) {
 	issue := &Issue{ID: 42, Title: "Login state", Body: "b", URL: "u"}
-	for _, mode := range []IssueDispatchMode{DispatchPlan, DispatchExecute} {
+	for _, mode := range []IssueDispatchMode{DispatchAssess, DispatchExecute} {
 		out := buildIssueDispatchText(issue, "br", "o/r", mode, 0, 0)
 		for _, leak := range []string{
 			"§4",                    // internal section number
 			"F-gtw-fix",             // internal design doc filename
 			"REVIEWER_INSTRUCTIONS", // internal methodology doc
-			"Execute (§",            // Plan cross-referencing Execute
-			"the plan above",        // Execute assuming a prior Plan turn
+			"Execute (§",            // Assess cross-referencing Execute
+			"the plan above",        // Execute assuming a prior Assess turn
 			"-y",                    // CLI flag the agent never sees
 			"comments",              // GetIssue does not fetch comments
 			"GitHub issue",          // header must be platform-neutral
@@ -210,7 +210,7 @@ func TestBuildIssueDispatchText_RuntimeSelfContained(t *testing.T) {
 func TestBuildIssueDispatchText_BodyDelimited(t *testing.T) {
 	body := "## Requirements\n- R1: expire sessions after 7 days\n\n## Decisions\n- keep cookie name\n"
 	issue := &Issue{ID: 3, Title: "feat(auth): expire sessions", Body: body, URL: "u"}
-	for _, mode := range []IssueDispatchMode{DispatchPlan, DispatchExecute} {
+	for _, mode := range []IssueDispatchMode{DispatchAssess, DispatchExecute} {
 		out := buildIssueDispatchText(issue, "br", "o/r", mode, 0, 0)
 		want := "## Description\n<issue_body>\n" + strings.TrimRight(body, "\n") + "\n</issue_body>\n\n"
 		if !strings.Contains(out, want) {
@@ -227,7 +227,7 @@ func TestBuildIssueDispatchText_BodyDelimited(t *testing.T) {
 // produce an empty "## Description" section header.
 func TestBuildIssueDispatchText_EmptyBody(t *testing.T) {
 	issue := &Issue{ID: 7, Title: "x", Body: "   \n\t  ", URL: "u"}
-	out := buildIssueDispatchText(issue, "x", "o/r", DispatchPlan, 0, 0)
+	out := buildIssueDispatchText(issue, "x", "o/r", DispatchAssess, 0, 0)
 	if strings.Contains(out, "## Description") {
 		t.Errorf("empty body should suppress ## Description, got:\n%s", out)
 	}
@@ -247,7 +247,7 @@ func TestBuildIssueDispatchText_BodyWithBackticks(t *testing.T) {
 		Body:  "Use `rm -rf $HOME` and ```bash\necho pwned\n``` blocks.",
 		URL:   "u",
 	}
-	out := buildIssueDispatchText(issue, "x", "o/r", DispatchPlan, 0, 0)
+	out := buildIssueDispatchText(issue, "x", "o/r", DispatchAssess, 0, 0)
 	if !strings.Contains(out, "Use `rm -rf $HOME` and ```bash\necho pwned\n```") {
 		t.Errorf("body should be embedded verbatim (no escape); got:\n%s", out)
 	}
@@ -264,7 +264,7 @@ func TestBuildIssueDispatchText_BodyWithCJK(t *testing.T) {
 		Body:  "用户登录 7 天后会话应该过期，请修复。",
 		URL:   "https://example.com/issues/99",
 	}
-	out := buildIssueDispatchText(issue, "login-expire", "o/r", DispatchPlan, 0, 0)
+	out := buildIssueDispatchText(issue, "login-expire", "o/r", DispatchAssess, 0, 0)
 	if !strings.Contains(out, "登录状态过期") {
 		t.Errorf("CJK title should be preserved in header; got:\n%s", out)
 	}
@@ -278,7 +278,7 @@ func TestBuildIssueDispatchText_BodyWithCJK(t *testing.T) {
 // so the agent template has a stable shape across all issues.
 func TestBuildIssueDispatchText_NoURL(t *testing.T) {
 	issue := &Issue{ID: 5, Title: "t", Body: "b", URL: ""}
-	out := buildIssueDispatchText(issue, "br", "o/r", DispatchPlan, 0, 0)
+	out := buildIssueDispatchText(issue, "br", "o/r", DispatchAssess, 0, 0)
 	if !strings.Contains(out, "- url: ") {
 		t.Errorf("url line should be present even when empty; got:\n%s", out)
 	}
@@ -289,7 +289,7 @@ func TestBuildIssueDispatchText_NoURL(t *testing.T) {
 // prompts rely on this stable shape (the README says so).
 func TestBuildIssueDispatchText_SectionOrder(t *testing.T) {
 	issue := &Issue{ID: 1, Title: "t", Body: "b", URL: "u"}
-	out := buildIssueDispatchText(issue, "br", "o/r", DispatchPlan, 0, 0)
+	out := buildIssueDispatchText(issue, "br", "o/r", DispatchAssess, 0, 0)
 
 	headerAt := strings.Index(out, "📥")
 	metaAt := strings.Index(out, "## Metadata")
@@ -350,7 +350,7 @@ func TestBuildIssueDispatchText_AttachmentsSection(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			out := buildIssueDispatchText(issue, "br", "o/r", DispatchPlan, tc.images, tc.files)
+			out := buildIssueDispatchText(issue, "br", "o/r", DispatchAssess, tc.images, tc.files)
 			if tc.wantSectionAbsent {
 				if strings.Contains(out, "## Attachments") {
 					t.Errorf("zero attachments should suppress ## Attachments; got:\n%s", out)
@@ -378,7 +378,7 @@ func TestBuildIssueDispatchText_AttachmentsSection(t *testing.T) {
 	}
 }
 
-// TestBuildIssueDispatchText_Plan_Methodology consolidates the
+// TestBuildIssueDispatchText_Assess_Methodology consolidates the
 // §11.A–E methodology pins + the §9 untrusted-input boundary into a
 // single table-driven test so the research-first + decision-gate
 // methodology lives in one place. Each pin groups the substrings
@@ -392,9 +392,9 @@ func TestBuildIssueDispatchText_AttachmentsSection(t *testing.T) {
 // structural markers, the gate's step anchors, the format headings)
 // — not full sentences that would force a wording edit to also
 // touch the test.
-func TestBuildIssueDispatchText_Plan_Methodology(t *testing.T) {
+func TestBuildIssueDispatchText_Assess_Methodology(t *testing.T) {
 	issue := &Issue{ID: 42, Title: "Login state", Body: "b", URL: "u"}
-	out := buildIssueDispatchText(issue, "br", "o/r", DispatchPlan, 0, 0)
+	out := buildIssueDispatchText(issue, "br", "o/r", DispatchAssess, 0, 0)
 
 	type pin struct {
 		name     string
@@ -528,12 +528,12 @@ func TestBuildIssueDispatchText_Plan_Methodology(t *testing.T) {
 		t.Run(p.name, func(t *testing.T) {
 			for _, want := range p.must {
 				if !strings.Contains(out, want) {
-					t.Errorf("Plan prompt missing required %q; got:\n%s", want, out)
+					t.Errorf("Assess prompt missing required %q; got:\n%s", want, out)
 				}
 			}
 			for _, forbid := range p.mustNot {
 				if strings.Contains(out, forbid) {
-					t.Errorf("Plan prompt contains forbidden %q; got:\n%s", forbid, out)
+					t.Errorf("Assess prompt contains forbidden %q; got:\n%s", forbid, out)
 				}
 			}
 			if p.orderChk != nil {
@@ -550,11 +550,11 @@ func TestBuildIssueDispatchText_Plan_Methodology(t *testing.T) {
 // into a single table-driven test. Each bucket groups the
 // substrings required (must) and forbidden (must not) for a
 // single requirement; a test failure names the bucket, not
-// just the substring. The Plan-side table-driven test
-// (TestBuildIssueDispatchText_Plan_Methodology) is the
+// just the substring. The Assess-side table-driven test
+// (TestBuildIssueDispatchText_Assess_Methodology) is the
 // structural template this mirrors — the parallel structure
 // keeps future methodology edits visible in both modes at
-// once. §16.J (runtime self-containment) and §16.K (Plan-mode
+// once. §16.J (runtime self-containment) and §16.K (Assess-mode
 // invariants remain intact) are pinned by separate tests
 // (RuntimeSelfContained + the Plan_* tests).
 func TestBuildIssueDispatchText_Execute_Methodology(t *testing.T) {
@@ -570,7 +570,7 @@ func TestBuildIssueDispatchText_Execute_Methodology(t *testing.T) {
 	pins := []pin{
 		{
 			// §16.A — `-y` authorises direct implementation;
-			// no prior Plan is required.
+			// no prior Assess round is required.
 			name: "A. direct-execute semantics",
 			must: []string{
 				"The user has already authorised direct implementation",
@@ -691,8 +691,8 @@ func TestBuildIssueDispatchText_Execute_Methodology(t *testing.T) {
 	}
 }
 
-// TestBuildIssueDispatchText_Plan_MirrorsDoc pins finding #1 from
-// the post-change code review: the Plan Task body exists twice —
+// TestBuildIssueDispatchText_Assess_MirrorsDoc pins finding #1 from
+// the post-change code review: the Assess Task body exists twice —
 // once in `fix.go` (the runtime source of truth) and once in
 // `docs/feat/F-gtw-fix.md` §4.1 (the human-readable mirror). The
 // review noted the two had already diverged in minor ways. This
@@ -706,7 +706,7 @@ func TestBuildIssueDispatchText_Execute_Methodology(t *testing.T) {
 // — the doc is wrapped for human readability at ~75 columns, the
 // const is on per-paragraph lines — while still catching any real
 // content drift.
-func TestBuildIssueDispatchText_Plan_MirrorsDoc(t *testing.T) {
+func TestBuildIssueDispatchText_Assess_MirrorsDoc(t *testing.T) {
 	// The test runs with cwd = the gtw package directory, so the
 	// doc sits three levels up (gtw → command → internal → repo root).
 	docPath := filepath.Join("..", "..", "..", "docs", "feat", "F-gtw-fix.md")
@@ -724,7 +724,7 @@ func TestBuildIssueDispatchText_Plan_MirrorsDoc(t *testing.T) {
 	docBytes = []byte(strings.ReplaceAll(string(docBytes), "\r\n", "\n"))
 
 	// Extract the FIRST fenced `markdown` block whose first line is
-	// "## Task" — that's the §4.1 Plan Task body in the doc.
+	// "## Task" — that's the §4.1 Assess Task body in the doc.
 	re := regexp.MustCompile("(?s)```markdown\n## Task\n(.+?)\n```")
 	m := re.FindSubmatch(docBytes)
 	if m == nil {
@@ -741,7 +741,7 @@ func TestBuildIssueDispatchText_Plan_MirrorsDoc(t *testing.T) {
 		return strings.TrimSpace(s)
 	}
 
-	rtNorm := norm(planTaskPrompt)
+	rtNorm := norm(assessTaskPrompt)
 	docNorm := norm(docBlock)
 
 	if rtNorm == docNorm {
@@ -768,14 +768,14 @@ func TestBuildIssueDispatchText_Plan_MirrorsDoc(t *testing.T) {
 			if hi2 > len(docNorm) {
 				hi2 = len(docNorm)
 			}
-			t.Fatalf("planTaskPrompt diverges from docs/feat/F-gtw-fix.md §4.1 at offset %d (whitespace-normalised):\n  runtime: ...%s...\n  doc:     ...%s...\n\nEdit one, edit the other.", i, rtNorm[lo:hi], docNorm[lo:hi2])
+			t.Fatalf("assessTaskPrompt diverges from docs/feat/F-gtw-fix.md §4.1 at offset %d (whitespace-normalised):\n  runtime: ...%s...\n  doc:     ...%s...\n\nEdit one, edit the other.", i, rtNorm[lo:hi], docNorm[lo:hi2])
 		}
 	}
-	t.Fatalf("planTaskPrompt diverges from docs/feat/F-gtw-fix.md §4.1 (one is a prefix of the other): runtime=%d, doc=%d bytes (normalised).", len(rtNorm), len(docNorm))
+	t.Fatalf("assessTaskPrompt diverges from docs/feat/F-gtw-fix.md §4.1 (one is a prefix of the other): runtime=%d, doc=%d bytes (normalised).", len(rtNorm), len(docNorm))
 }
 
 // TestBuildIssueDispatchText_Execute_MirrorsDoc is the Execute-side
-// mirror of TestBuildIssueDispatchText_Plan_MirrorsDoc: the Execute
+// mirror of TestBuildIssueDispatchText_Assess_MirrorsDoc: the Execute
 // Task body exists twice — once in `fix.go` (the runtime source of
 // truth, `executeTaskPrompt`) and once in `docs/feat/F-gtw-fix.md`
 // §4.2 (the human-readable mirror). This test reads the doc's §4.2
@@ -784,10 +784,10 @@ func TestBuildIssueDispatchText_Plan_MirrorsDoc(t *testing.T) {
 // side without the other will fail this test, forcing the author
 // to keep the two in sync.
 //
-// The doc has TWO fenced `## Task` blocks (one for §4.1 Plan, one
+// The doc has TWO fenced `## Task` blocks (one for §4.1 Assess, one
 // for §4.2 Execute). We use `FindAllSubmatch` and take the SECOND
-// match (the §4.2 Execute block); the first match is §4.1 Plan
-// and is covered by TestBuildIssueDispatchText_Plan_MirrorsDoc.
+// match (the §4.2 Execute block); the first match is §4.1 Assess
+// and is covered by TestBuildIssueDispatchText_Assess_MirrorsDoc.
 //
 // Whitespace normalisation makes line-wrap differences irrelevant
 // — the doc is wrapped for human readability at ~75 columns, the
@@ -811,12 +811,12 @@ func TestBuildIssueDispatchText_Execute_MirrorsDoc(t *testing.T) {
 	docBytes = []byte(strings.ReplaceAll(string(docBytes), "\r\n", "\n"))
 
 	// Extract BOTH fenced `markdown` blocks whose first line is
-	// "## Task" — index [0] is §4.1 Plan, index [1] is §4.2
+	// "## Task" — index [0] is §4.1 Assess, index [1] is §4.2
 	// Execute. We want the second one.
 	re := regexp.MustCompile("(?s)```markdown\n## Task\n(.+?)\n```")
 	matches := re.FindAllSubmatch(docBytes, -1)
 	if len(matches) < 2 {
-		t.Skipf("could not find two fenced ## Task blocks (need §4.1 + §4.2): found %d. The doc may not yet have been updated to wrap §4.2 in a fence — edit one, edit the other (see TestBuildIssueDispatchText_Plan_MirrorsDoc for §4.1).", len(matches))
+		t.Skipf("could not find two fenced ## Task blocks (need §4.1 + §4.2): found %d. The doc may not yet have been updated to wrap §4.2 in a fence — edit one, edit the other (see TestBuildIssueDispatchText_Assess_MirrorsDoc for §4.1).", len(matches))
 	}
 	docBlock := string(matches[1][1])
 

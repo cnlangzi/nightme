@@ -316,7 +316,7 @@ func TestCreateIssuesFromDrafts_MultipleDraftsInOrderWithRefs(t *testing.T) {
 		"→ #42:  feat(a): first · https://github.com/o/r/issues/42\n" +
 		"→ #43:  feat(b): second · https://github.com/o/r/issues/43\n" +
 		"→ #44:  feat(c): third · https://github.com/o/r/issues/44\n" +
-		"↳ `/gtw fix <id>` to plan one · or `/gtw fix <id> -y` to implement it directly"
+		"↳ `/gtw fix <id>` to assess one · or `/gtw fix <id> -y` to implement it directly"
 	if got != want {
 		t.Errorf("reply =\n%s\nwant\n%s", got, want)
 	}

@@ -46,7 +46,7 @@ func buildSyncReply(ctx context.Context, repoRoot string, deps HandlerDeps) (str
 // the "based on" line is omitted.
 //
 // F-XX: the trailing "↳ ..." hint line differs by IssueDispatchMode:
-//   - DispatchPlan     → "agent is analyzing — review the plan in
+//   - DispatchAssess   → "agent is analyzing — review the plan in
 //     chat, then tell the agent when to proceed"
 //   - DispatchExecute  → "agent is fixing now — follow progress in
 //     chat · `/gtw commit` + `/gtw push` when done"
@@ -69,7 +69,7 @@ func renderFixSuccessCard(issue *Issue, branch, worktree, repo, baseSHA string, 
 	switch mode {
 	case DispatchExecute:
 		b.WriteString("↳ agent is fixing now — follow progress in chat · `/gtw commit` + `/gtw push` when done\n")
-	case DispatchPlan:
+	case DispatchAssess:
 		b.WriteString("↳ agent is analyzing — review the plan in chat, then tell the agent when to proceed\n")
 	default:
 		// Defensive: any future IssueDispatchMode without an

@@ -347,7 +347,7 @@ func renderIssueOpenedCard(owner, repo string, issue *Issue) string {
 	if issue.URL != "" {
 		fmt.Fprintf(&sb, "→ url:   %s\n", issue.URL)
 	}
-	fmt.Fprintf(&sb, "↳ `/gtw fix %d` to plan it · or `/gtw fix %d -y` to implement directly", issue.ID, issue.ID)
+	fmt.Fprintf(&sb, "↳ `/gtw fix %d` to assess it · or `/gtw fix %d -y` to implement directly", issue.ID, issue.ID)
 	return sb.String()
 }
 
@@ -355,7 +355,7 @@ func renderIssuesOpenedCard(owner, repo string, issues []*Issue) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "✅ %d issues opened\n", len(issues))
 	sb.WriteString(renderFieldRows(issueRows(owner, repo, issues)))
-	sb.WriteString("↳ `/gtw fix <id>` to plan one · or `/gtw fix <id> -y` to implement it directly")
+	sb.WriteString("↳ `/gtw fix <id>` to assess one · or `/gtw fix <id> -y` to implement it directly")
 	return sb.String()
 }
 

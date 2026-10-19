@@ -368,7 +368,7 @@ Issue titles follow Conventional Commits, so `/gtw fix` can derive a readable br
 
 **`/gtw fix <issue-id>`** syncs the default branch, creates a worktree and branch named after the issue title, labels the issue `nightme/wip`, moves the chat's CWD into the worktree, runs the `fix` hooks, and dispatches the issue (body and attachments) to the chat's current agent.
 
-- **Plan first (default)** — the agent analyzes the issue and the code, posts a plan, and waits. Review it in chat, then tell the agent to proceed.
+- **Assess first (default)** — the agent checks the issue against the code, posts a plan, and waits. Review it in chat, then tell the agent to proceed.
 - **`-y` / `--yes`** — the agent implements directly.
 
 **`/gtw fix --name <branch>`** (or `-n`) creates a local worktree without an issue; you drive the agent yourself.

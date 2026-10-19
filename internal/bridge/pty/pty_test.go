@@ -5,6 +5,7 @@ import (
 	"io"
 	"runtime"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -48,6 +49,73 @@ func TestSetsize(t *testing.T) {
 	}
 	if err := b.Setsize(80, 24); err != nil {
 		t.Fatalf("Setsize(80, 24) returned error: %v", err)
+	}
+}
+
+// TestLongLineNotTruncated verifies a JSON-RPC sized line is
+// delivered whole. Canonical PTY mode keeps only 4096 bytes of it.
+func TestLongLineNotTruncated(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("PTY semantics differ on Windows; skip unix-only smoke test")
+	}
+	script := "import sys\nline=sys.stdin.readline()\nsys.stdout.write(str(len(line))+'\\n')\nsys.stdout.flush()\n"
+	b, err := NewTransport(t.TempDir(), "python3", []string{"-c", script}, nil, 80, 24)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+
+	line := bytes.Repeat([]byte("A"), 8000)
+	line = append(line, '\n')
+	if _, err := writeAll(b, line); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got := readWithTimeout(t, b, 2*time.Second)
+	if !bytes.Contains(got, []byte("8001")) {
+		t.Fatalf("child saw line length %q, want 8001", got)
+	}
+}
+
+func writeAll(w io.Writer, p []byte) (int, error) {
+	total := 0
+	for len(p) > 0 {
+		n, err := w.Write(p)
+		total += n
+		p = p[n:]
+		if err != nil {
+			return total, err
+		}
+		if n == 0 {
+			return total, io.ErrShortWrite
+		}
+	}
+	return total, nil
+}
+
+// TestCloseKillsChild verifies Close reaps a child that would
+// otherwise ignore PTY hangup and keep running.
+func TestCloseKillsChild(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("PTY semantics differ on Windows; skip unix-only smoke test")
+	}
+
+	b, err := NewTransport(t.TempDir(), "/bin/sleep", []string{"30"}, nil, 80, 24)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	pid := b.PID()
+	if pid <= 0 {
+		t.Fatal("PID() = 0")
+	}
+	start := time.Now()
+	if err := b.Close(); err != nil {
+		t.Fatalf("Close() returned error: %v", err)
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Fatalf("Close took %s; child was not reaped", time.Since(start))
+	}
+	if err := syscall.Kill(pid, 0); err == nil {
+		t.Fatalf("pid %d still alive after Close", pid)
 	}
 }
 

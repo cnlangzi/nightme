@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 
 	gopty "github.com/aymanbagabas/go-pty"
 
@@ -33,8 +34,10 @@ type Transport interface {
 // ptyTransport is the production implementation backed by
 // aymanbagabas/go-pty. It owns one PTY master fd and one child *Cmd.
 type ptyTransport struct {
-	ptmx gopty.Pty
-	cmd  *gopty.Cmd
+	ptmx      gopty.Pty
+	cmd       *gopty.Cmd
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // New spawns command with args inside a PTY rooted at workspace.
@@ -51,6 +54,10 @@ func NewTransport(workspace, command string, args []string, env []string, cols, 
 	// first read of TIOCGWINSZ (e.g. Claude Code / Codex render the
 	// banner at startup).
 	if err := ptmx.Resize(cols, rows); err != nil {
+		_ = ptmx.Close()
+		return nil, err
+	}
+	if err := setRaw(ptmx); err != nil {
 		_ = ptmx.Close()
 		return nil, err
 	}
@@ -79,11 +86,21 @@ func (b *ptyTransport) Read(p []byte) (int, error) { return b.ptmx.Read(p) }
 // Write forwards a write to the PTY master fd (goes to child stdin).
 func (b *ptyTransport) Write(p []byte) (int, error) { return b.ptmx.Write(p) }
 
-// Close closes the PTY master fd. The child process is not waited on
-// here; callers that need an exit code should call cmd.Wait() via the
-// underlying gopty.Cmd. In practice, the SessionManager handles
-// reaping via the AgentSession lifecycle.
-func (b *ptyTransport) Close() error { return b.ptmx.Close() }
+// Close stops the child and closes the PTY master. Closing the master
+// alone leaves the CLI running: cursor-agent ignores the SIGHUP that
+// a dropped controlling terminal delivers, and its worker stays in
+// the same process group. The child is the session leader (go-pty
+// sets Setsid), so the whole group is signalled, then reaped.
+// Idempotent.
+func (b *ptyTransport) Close() error {
+	b.closeOnce.Do(func() {
+		b.terminateChild()
+		if b.ptmx != nil {
+			b.closeErr = b.ptmx.Close()
+		}
+	})
+	return b.closeErr
+}
 
 // PID returns the child process PID, or 0 if the command has not been
 // started.

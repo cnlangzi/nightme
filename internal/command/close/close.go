@@ -73,20 +73,12 @@ type Result struct {
 	Error       error              // nil on success
 }
 
-// closeGraceTotal is the outer-bound graceful shutdown timeout.
-// Bridges that implement graceful close (close stdin + SIGINT
-// + 2s grace + SIGKILL fallback inside driver.Close) honour
-// their own watchdog and typically exit well within this bound.
-// Bridges without an internal watchdog (notably the PTY bridge,
-// whose Close() just closes the ptmx fd) rely entirely on this
-// outer bound: the orchestrator logs a "graceful shutdown
-// timeout" warning and abandons the goroutine, but the wedged
-// child process keeps running. The 5s window therefore is the
-// ONLY watchdog for PTY-class bridges.
-//
-// Tuned for "user waits for /close to confirm"; rarely
-// triggers in practice on bridges with internal watchdogs.
-const closeGraceTotal = 5 * time.Second
+// closeGraceTotal is the outer bound for /close. Bridge Close
+// signals the child and waits for it to exit (pty waits
+// childExitGrace, 5s) before SIGKILL. This bound stays above
+// that wait so a slow exit is reaped before /close reports a
+// timeout.
+const closeGraceTotal = 8 * time.Second
 
 // closeOutcome carries one goroutine's Close result back to the
 // orchestrator. idx indexes into the snapshot slice.
@@ -117,8 +109,8 @@ func isCloseAlive(as *chatsession.AgentSession) bool {
 //
 // Per-entry behavior:
 //   - StatusRunning / StatusDetached-with-handle → Close() with
-//     5s outer bound. Per-bridge 2s + SIGKILL fallback is layered
-//     inside the bridge; closeGraceTotal covers a wedged bridge
+//     8s outer bound. The bridge signals the child, waits, then
+//     SIGKILLs; closeGraceTotal covers a wedged bridge
 //     that bypasses its own watchdog.
 //   - StatusExited / StatusDetached-without-handle → "stale-cleared"
 //     (no live process to signal; the entry was already dead).
@@ -175,7 +167,7 @@ func CloseAgent(c *Cmd, agentName string) (Result, error) {
 	// message arriving during /close does NOT hit
 	// LookupSelectedAgentSession's "StatusRunning && Handle()!=nil"
 	// cache-hit branch and submit to a dying stdin. Without this,
-	// there's a 0-5s race window between /close-start and
+	// there's a race window up to closeGraceTotal between /close-start and
 	// readpump's eventual KindLifecycle{StatusExited} (which only
 	// fires once the events channel closes).
 	//

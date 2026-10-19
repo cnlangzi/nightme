@@ -847,6 +847,7 @@ func (d *driver) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) er
 	d.pendingTurnMu.Lock()
 	if d.pendingTurnActive {
 		d.pendingTurnMu.Unlock()
+		slog.Info("acp: session/prompt busy", "session_id", d.sessionID)
 		return ErrTurnBusy
 	}
 	d.pendingTurnActive = true
@@ -897,6 +898,11 @@ func (d *driver) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) er
 	if len(out) == 0 {
 		return nil
 	}
+	var promptBytes int
+	for _, block := range out {
+		promptBytes += len(block.Text)
+	}
+	slog.Info("acp: session/prompt begin", "session_id", d.sessionID, "bytes", promptBytes)
 
 	result, err := d.rpc.request(ctx, "session/prompt", promptParams{
 		SessionID: d.sessionID,
@@ -1542,9 +1548,14 @@ func (d *driver) readPump() {
 			d.finishLoadReplay(message.ID)
 			continue
 		}
-		if message.Method != "" {
-			d.handleMethod(message)
+		if message.Method == "" {
+			slog.Warn("acp: unmatched rpc response", "id", string(message.ID))
+			continue
 		}
+		if message.Method != "session/update" {
+			slog.Info("acp: inbound", "method", message.Method, "id", string(message.ID))
+		}
+		d.handleMethod(message)
 	}
 	if err := scanner.Err(); err != nil && !errors.Is(err, io.EOF) {
 		d.emit(agent.AgentEvent{Kind: agent.EventAgentError, Err: err})
@@ -1619,8 +1630,10 @@ func (d *driver) handleMethod(message rpcMessage) {
 				}
 				return true
 			}
+			start := time.Now()
 			handled := (*h)(message.Method, message.Params, respond)
 			d.inboundMethodID = nil
+			slog.Info("acp: inbound handled", "method", message.Method, "handled", handled, "wait", time.Since(start).String())
 			if handled {
 				return
 			}
@@ -1907,6 +1920,7 @@ func (d *driver) handleSessionStatus(raw json.RawMessage) {
 	if json.Unmarshal(raw, &st) != nil || st.Status != "idle" {
 		return
 	}
+	slog.Info("acp: session.status idle", "session_id", d.sessionID)
 	d.flushTextBuffers()
 	if h := d.flushHandler.Load(); h != nil {
 		(*h)(d.View())

@@ -1281,18 +1281,14 @@ func (cs *ChatSession) TryFlush() error {
 	as := cs.selectedAS
 	cs.mu.Unlock()
 	if as == nil {
-		// activeAS_nil / as_not_ready DO indicate real backpressure
-		// (a queued message waiting on an AS that isn't ready yet)
-		// — worth Debug-level visibility when actively diagnosing
-		// a stuck chat, but not Info-level noise in steady state.
-		slog.Debug("chatsession: TryFlush SKIP",
+		slog.Info("chatsession: TryFlush SKIP",
 			"chat_id", cs.ChatID, "reason", "activeAS_nil",
 			"queue_len", cs.queue.Len())
 		cs.queue.Rewind()
 		return nil
 	}
 	if !as.IsReady() {
-		slog.Debug("chatsession: TryFlush SKIP",
+		slog.Info("chatsession: TryFlush SKIP",
 			"chat_id", cs.ChatID, "reason", "as_not_ready",
 			"queue_len", cs.queue.Len(), "as_id", as.ID)
 		cs.queue.Rewind()
@@ -1305,12 +1301,14 @@ func (cs *ChatSession) TryFlush() error {
 		// LookupSelectedAgentSession call which detects
 		// StatusRunning && Handle() != nil mismatch and respawns
 		// a fresh bridge with --resume.
-		slog.Debug("chatsession: TryFlush SKIP",
+		slog.Info("chatsession: TryFlush SKIP",
 			"chat_id", cs.ChatID, "reason", "as_status_exited",
 			"queue_len", cs.queue.Len(), "as_id", as.ID)
 		cs.queue.Rewind()
 		return nil
 	}
+	slog.Info("chatsession: TryFlush submit",
+		"chat_id", cs.ChatID, "as_id", as.ID, "batch", len(batch), "message_id", batch[0].ID)
 
 	// Build the Prompt from the peek'd batch. The batch is a
 	// stable snapshot owned by us; the queue can be mutated

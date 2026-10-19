@@ -270,11 +270,13 @@ func (as *AgentSession) endPrompt(reason agent.PromptEndReason) {
 	as.asMu.Lock()
 	if as.currentPrompt == nil {
 		as.asMu.Unlock()
+		slog.Info("agentsession: endPrompt skipped", "as_id", as.ID, "reason", reason.String())
 		return
 	}
 	p := as.currentPrompt
 	p.EndedAt = time.Now()
 	p.EndReason = reason
+	slog.Info("agentsession: endPrompt", "as_id", as.ID, "prompt_id", p.ID, "user_msg_id", p.LastMessageID, "reason", reason.String())
 	as.currentPrompt = nil
 	// The override is for events emitted during the just-ended
 	// prompt's lifetime. Once the prompt is gone, the readpump

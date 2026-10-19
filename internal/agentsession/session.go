@@ -1329,7 +1329,7 @@ func (as *AgentSession) Submit(p *Prompt) error {
 	// config to enable). Every user message goes through here, so
 	// Info-level would spam the daemon log; SendBlocks failure
 	// below stays at Warn since that IS an actionable event.
-	slog.Debug("chatsession: Submit",
+	slog.Info("agentsession: SendBlocks enter",
 		"chat_id", as.ChatSessionID,
 		"as_id", as.ID,
 		"blocks", len(p.Blocks),
@@ -1345,6 +1345,7 @@ func (as *AgentSession) Submit(p *Prompt) error {
 	as.isReady.Store(false)
 
 	// SendBlocks can block on a hung prompt RPC; do NOT hold asMu.
+	sendStarted := time.Now()
 	err := h.SendBlocks(as.OpContext(), p.Blocks)
 	if err != nil {
 		slog.Warn("chatsession: Submit SendBlocks FAILED",
@@ -1363,10 +1364,11 @@ func (as *AgentSession) Submit(p *Prompt) error {
 		as.isReady.Store(true)
 		return err
 	}
-	slog.Debug("chatsession: Submit SendBlocks ok",
+	slog.Info("agentsession: SendBlocks returned",
 		"chat_id", as.ChatSessionID,
 		"as_id", as.ID,
-		"prompt_id", p.ID)
+		"prompt_id", p.ID,
+		"wait", time.Since(sendStarted).String())
 	return nil
 }
 

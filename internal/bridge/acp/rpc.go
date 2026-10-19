@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 )
@@ -94,16 +95,38 @@ func (c *rpcClient) requestNotify(ctx context.Context, method string, params any
 	}
 	if err := c.write(msg); err != nil {
 		c.removePending(key)
+		if method == "session/prompt" {
+			slog.Info("acp: session/prompt write failed", "id", key, "err", err)
+		}
 		return nil, err
+	}
+	if method == "session/prompt" {
+		slog.Info("acp: session/prompt sent", "id", key)
 	}
 
 	select {
 	case response := <-responseCh:
+		if method == "session/prompt" {
+			slog.Info("acp: session/prompt done", "id", key, "stop_reason", promptStopReason(response.result), "err", response.err)
+		}
 		return response.result, response.err
 	case <-ctx.Done():
 		c.removePending(key)
+		if method == "session/prompt" {
+			slog.Info("acp: session/prompt cancelled", "id", key, "err", ctx.Err())
+		}
 		return nil, ctx.Err()
 	}
+}
+
+func promptStopReason(raw json.RawMessage) string {
+	var peek struct {
+		StopReason string `json:"stopReason"`
+	}
+	if json.Unmarshal(raw, &peek) != nil {
+		return ""
+	}
+	return peek.StopReason
 }
 
 func (c *rpcClient) notify(method string, params any) error {
@@ -201,8 +224,24 @@ func (c *rpcClient) write(msg rpcMessage) error {
 
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	_, err = c.writer.Write(payload)
+	_, err = writeFull(c.writer, payload)
 	return err
+}
+
+func writeFull(w io.Writer, p []byte) (int, error) {
+	total := 0
+	for len(p) > 0 {
+		n, err := w.Write(p)
+		total += n
+		p = p[n:]
+		if err != nil {
+			return total, err
+		}
+		if n == 0 {
+			return total, io.ErrShortWrite
+		}
+	}
+	return total, nil
 }
 
 func decodeRPCMessage(line []byte) (rpcMessage, error) {

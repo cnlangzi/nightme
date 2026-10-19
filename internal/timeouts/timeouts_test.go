@@ -27,6 +27,7 @@ func TestTimeouts_AllSane(t *testing.T) {
 		{"CLI", CLI},
 		{"Reply", Reply},
 		{"Review", Review},
+		{"Command", Command},
 	}
 	const upperBound = 24 * time.Hour
 	for _, c := range checks {

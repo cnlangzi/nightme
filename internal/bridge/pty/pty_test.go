@@ -5,9 +5,10 @@ import (
 	"io"
 	"runtime"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
+
+	"github.com/cnlangzi/nightme/internal/agent/procutil"
 )
 
 // TestSpawnEcho spawns /bin/echo through a PTY and verifies the
@@ -114,7 +115,7 @@ func TestCloseKillsChild(t *testing.T) {
 	if time.Since(start) > 5*time.Second {
 		t.Fatalf("Close took %s; child was not reaped", time.Since(start))
 	}
-	if err := syscall.Kill(pid, 0); err == nil {
+	if procutil.AlivePID(pid) == nil {
 		t.Fatalf("pid %d still alive after Close", pid)
 	}
 }

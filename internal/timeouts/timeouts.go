@@ -54,6 +54,24 @@ const (
 	// conversation — that's no longer the case.
 	Review = 30 * time.Minute
 
+	// Command caps a single /gtw <subcommand> invocation as a
+	// whole — the entire pipeline (pre-hooks + the main RunFix /
+	// RunClose / RunCommit / RunPR / RunBack / RunSync /
+	// RunNewDraft / RunNewCreate call + post-hooks). Sits above
+	// the per-step budgets (CLI / Hook / Agent) so that a hang
+	// not covered by any single one of them — e.g. a stuck
+	// worktree-move branch, a wedged "inside the agent bridge"
+	// call, an agent session that never returns — still gets a
+	// wall-clock cap and releases the per-chat run lock.
+	//
+	// Aligned with Shell / Agent / Hook / Review (30 min) on
+	// purpose: a single /gtw fix often runs one or more
+	// 30-min agent dispatches internally, so capping the command
+	// at less than 30 min would silently truncate real work.
+	// Mirrors runCmd's "caller's deadline wins" contract: when
+	// the runtime passed a deadline'd ctx, we don't override it.
+	Command = 30 * time.Minute
+
 	// CLI caps git / gh / glab subprocess calls. 5 min is generous
 	// for normal network RTT against GitHub / GitLab APIs; anything
 	// longer is almost always a network stall — kill and surface,

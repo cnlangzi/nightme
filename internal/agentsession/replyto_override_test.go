@@ -25,7 +25,11 @@ package agentsession
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
+
+	"github.com/cnlangzi/nightme/internal/agent"
 )
 
 // TestWithReplyTo_OverridesUserMsgIDForInjectedPrompt — exercises
@@ -160,4 +164,112 @@ func TestSendBlocks_WithReplyTo_RefusesDuringUserTurn(t *testing.T) {
 	if got := as.replyToOverride(); got != "" {
 		t.Fatalf("override leaked despite refusal: got=%q", got)
 	}
+}
+
+// endingInjectDriver ends the injection prompt from inside
+// SendBlocks, matching ACP: EventAgentDone is delivered before
+// SendBlocks returns.
+type endingInjectDriver struct{ as *AgentSession }
+
+func (d *endingInjectDriver) SendBlocks(context.Context, []agent.ContentBlock) error {
+	d.as.endPrompt(agent.PromptEndClean)
+	return nil
+}
+func (d *endingInjectDriver) SendPermission(string) error { return nil }
+func (d *endingInjectDriver) Reset(context.Context) error { return nil }
+func (d *endingInjectDriver) Close() error                { return nil }
+func (d *endingInjectDriver) Stop(context.Context) error  { return nil }
+func (d *endingInjectDriver) Keepalive(context.Context, func(context.Context) error) error {
+	return nil
+}
+
+func TestEndPrompt_WithoutCurrentPromptStillPublishes(t *testing.T) {
+	as := makeBareAgentSession(t, "cursor", "/tmp")
+	as.asMu.Lock()
+	as.currentPromptOverrideUserMsgID = "om_review"
+	as.asMu.Unlock()
+
+	got := make(chan EnrichedEvent, 1)
+	as.EventBus.Subscribe(func(e EnrichedEvent) bool {
+		if e.Kind == KindPromptEnded {
+			got <- e
+		}
+		return false
+	})
+	as.endPrompt(agent.PromptEndClean)
+
+	select {
+	case e := <-got:
+		if e.UserMsgID != "om_review" {
+			t.Fatalf("UserMsgID = %q", e.UserMsgID)
+		}
+		if e.Prompt == nil || e.Prompt.LastMessageID != "om_review" {
+			t.Fatalf("prompt = %+v", e.Prompt)
+		}
+		if e.PromptEnded == nil || e.PromptEnded.EndReason != agent.PromptEndClean {
+			t.Fatalf("ended = %+v", e.PromptEnded)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("KindPromptEnded was not published")
+	}
+	if !as.IsReady() {
+		t.Fatal("IsReady false after endPrompt")
+	}
+}
+
+func TestSendBlocks_WithReplyTo_EndPromptClosesInjection(t *testing.T) {
+	as := makeBareAgentSession(t, "cursor", "/tmp")
+	as.asMu.Lock()
+	as.handle = agent.NewAgent(agent.NewInfo("cursor", agent.ModeACP, "cursor-agent", nil, nil), 1, make(chan agent.AgentEvent), &endingInjectDriver{as: as})
+	as.stat = StatusRunning
+	as.asMu.Unlock()
+	as.isReady.Store(true)
+
+	err := as.SendBlocks(context.Background(), []agent.ContentBlock{{Type: agent.ContentText, Text: "review"}}, WithReplyTo("om_review"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if as.CurrentPrompt() != nil {
+		t.Fatal("injection prompt still current after endPrompt")
+	}
+	if !as.IsReady() {
+		t.Fatal("IsReady false after the injected turn ended")
+	}
+}
+
+func TestSendBlocks_WithReplyTo_RollbackOnError(t *testing.T) {
+	as := makeBareAgentSession(t, "cursor", "/tmp")
+	want := errors.New("bridge refused")
+	as.asMu.Lock()
+	as.handle = agent.NewAgent(agent.NewInfo("cursor", agent.ModeACP, "cursor-agent", nil, nil), 1, make(chan agent.AgentEvent), &failingInjectDriver{err: want})
+	as.stat = StatusRunning
+	as.asMu.Unlock()
+	as.isReady.Store(true)
+
+	err := as.SendBlocks(context.Background(), []agent.ContentBlock{{Type: agent.ContentText, Text: "review"}}, WithReplyTo("om_review"))
+	if !errors.Is(err, want) {
+		t.Fatalf("err = %v", err)
+	}
+	if as.CurrentPrompt() != nil {
+		t.Fatal("prompt left current after failed injection")
+	}
+	if !as.IsReady() {
+		t.Fatal("IsReady false after failed injection")
+	}
+	if got := as.replyToOverride(); got != "" {
+		t.Fatalf("override = %q", got)
+	}
+}
+
+type failingInjectDriver struct{ err error }
+
+func (d *failingInjectDriver) SendBlocks(context.Context, []agent.ContentBlock) error {
+	return d.err
+}
+func (d *failingInjectDriver) SendPermission(string) error { return nil }
+func (d *failingInjectDriver) Reset(context.Context) error { return nil }
+func (d *failingInjectDriver) Close() error                { return nil }
+func (d *failingInjectDriver) Stop(context.Context) error  { return nil }
+func (d *failingInjectDriver) Keepalive(context.Context, func(context.Context) error) error {
+	return nil
 }

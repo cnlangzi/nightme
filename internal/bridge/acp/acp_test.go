@@ -421,6 +421,47 @@ func TestAcpSession_ParsePermissionRequest(t *testing.T) {
 	}
 }
 
+func TestAskUser_SendPermissionEncodesExtensionResult(t *testing.T) {
+	var output bytes.Buffer
+	a := &driver{
+		ctx:    context.Background(),
+		events: make(chan agent.AgentEvent, 2),
+		rpc:    newRPCClient(&output),
+	}
+	a.SetMethodHandler(func(method string, _ json.RawMessage, _ func(json.RawMessage, any, error) bool) bool {
+		if method != "cursor/ask_question" {
+			return false
+		}
+		return a.View().AskUser(&agent.AgentPermissionRequest{
+			Tool:    "question",
+			Kind:    agent.PermissionKindQuestion,
+			Options: []string{"Yes"},
+		}, func(answer string) (any, error) {
+			return map[string]any{"outcome": map[string]any{"outcome": "answered", "echo": answer}}, nil
+		})
+	})
+	a.handleMethod(rpcMessage{
+		JSONRPC: jsonRPCVersion,
+		ID:      json.RawMessage(`9`),
+		Method:  "cursor/ask_question",
+		Params:  json.RawMessage(`{}`),
+	})
+	event := receiveEvent(t, a.events)
+	if event.Kind != agent.EventAgentPermission || event.Permission == nil {
+		t.Fatalf("event = %+v", event)
+	}
+	if event.Permission.Kind != agent.PermissionKindQuestion {
+		t.Fatalf("kind = %q", event.Permission.Kind)
+	}
+	if err := a.SendPermission("Yes"); err != nil {
+		t.Fatal(err)
+	}
+	got := output.String()
+	if !strings.Contains(got, `"id":9`) || !strings.Contains(got, `"answered"`) || !strings.Contains(got, `"echo":"Yes"`) {
+		t.Fatalf("response = %s", got)
+	}
+}
+
 func TestAcpSession_ParseToolEvents(t *testing.T) {
 	s := testSession()
 	s.handleMethod(rpcMessage{Method: "tool_start", Params: json.RawMessage(`{"id":"tool-1","name":"Bash","rawInput":{"command":"ls"}}`)})

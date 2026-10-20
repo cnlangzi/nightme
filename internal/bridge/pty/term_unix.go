@@ -21,7 +21,7 @@ func setRaw(p gopty.Pty) error {
 		return fmt.Errorf("pty: unix pty required")
 	}
 	fd := int(u.Slave().Fd())
-	termios, err := unix.IoctlGetTermios(fd, unix.TCGETS)
+	termios, err := unix.IoctlGetTermios(fd, ioctlReadTermios)
 	if err != nil {
 		return fmt.Errorf("pty: get termios: %w", err)
 	}
@@ -33,7 +33,7 @@ func setRaw(p gopty.Pty) error {
 	termios.Cflag |= unix.CS8
 	termios.Cc[unix.VMIN] = 1
 	termios.Cc[unix.VTIME] = 0
-	if err := unix.IoctlSetTermios(fd, unix.TCSETS, termios); err != nil {
+	if err := unix.IoctlSetTermios(fd, ioctlWriteTermios, termios); err != nil {
 		return fmt.Errorf("pty: set raw: %w", err)
 	}
 	return nil

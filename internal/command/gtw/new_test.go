@@ -84,6 +84,9 @@ func TestRenderNewIssuePrompt(t *testing.T) {
 		"splitting the work into several issues",
 		"One issue is the default",
 		"Never split by kind of work",
+		"{{ISSUE:02}} inside 01.md fails",
+		"must point to a lower-numbered draft of this set",
+		"every {{ISSUE:NN}} points at a lower file number",
 		"print the complete content of every draft file in chat",
 		"run /gtw new -y to create the issues",
 	} {

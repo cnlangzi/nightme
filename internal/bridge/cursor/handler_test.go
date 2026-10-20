@@ -6,15 +6,23 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/bridge/acp"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // mockEmit captures AgentEvents emitted by the handler.
 type mockEmit struct {
 	events []agent.AgentEvent
+	asks   []*agent.AgentPermissionRequest
 }
 
 func (m *mockEmit) emit(ev agent.AgentEvent) {
 	m.events = append(m.events, ev)
+}
+
+func (m *mockEmit) askUser(req *agent.AgentPermissionRequest, _ func(string) (any, error)) bool {
+	m.asks = append(m.asks, req)
+	m.emit(agent.AgentEvent{Kind: agent.EventAgentPermission, Permission: req})
+	return true
 }
 
 // newTestHandler creates a handler bound to a mock SessionView.
@@ -22,7 +30,8 @@ func (m *mockEmit) emit(ev agent.AgentEvent) {
 func newTestHandler() (acp.MethodHandler, *mockEmit) {
 	m := &mockEmit{}
 	view := &acp.SessionView{
-		Emit: m.emit,
+		Emit:    m.emit,
+		AskUser: m.askUser,
 	}
 	return newCursorMethodHandler(view), m
 }
@@ -114,19 +123,19 @@ func TestHandleCreatePlan_EmitsTaskCreateAndResponds(t *testing.T) {
 		{"id":"p2","content":"编写测试","status":"pending"}
 	]}`
 	var respondCalled bool
-	var respondResult any
 	respond := func(id json.RawMessage, result any, err error) bool {
 		respondCalled = true
-		respondResult = result
 		return true
 	}
 	handled := h("cursor/create_plan", json.RawMessage(params), respond)
 	if !handled {
 		t.Fatal("expected handled=true")
 	}
-	// Verify event
-	if len(m.events) != 1 {
-		t.Fatalf("expected 1 event, got %d", len(m.events))
+	if respondCalled {
+		t.Fatal("create_plan must wait for AskUser, not auto-approve")
+	}
+	if len(m.events) != 2 {
+		t.Fatalf("expected task + question, got %d", len(m.events))
 	}
 	ev := m.events[0]
 	if ev.Kind != agent.EventAgentTaskCreate {
@@ -138,16 +147,21 @@ func TestHandleCreatePlan_EmitsTaskCreateAndResponds(t *testing.T) {
 	if ev.TaskList.Items[0].Subject != "拆分 auth.go" {
 		t.Errorf("expected '拆分 auth.go', got %q", ev.TaskList.Items[0].Subject)
 	}
-	// Verify respond was called with approval
-	if !respondCalled {
-		t.Fatal("expected respond to be called")
+	q := m.events[1]
+	if q.Kind != agent.EventAgentPermission || q.Permission == nil {
+		t.Fatalf("expected AskUser permission, got %+v", q)
 	}
-	result, ok := respondResult.(map[string]any)
-	if !ok {
-		t.Fatalf("expected map result, got %T", respondResult)
+	if q.Permission.Kind != agent.PermissionKindQuestion {
+		t.Errorf("kind = %q, want question", q.Permission.Kind)
 	}
-	if result["approved"] != true {
-		t.Errorf("expected approved=true, got %v", result["approved"])
+	if q.Permission.Tool != "AskUserQuestion" {
+		t.Errorf("tool = %q, want AskUserQuestion", q.Permission.Tool)
+	}
+	if q.Permission.Action != "[重构计划] Accept this plan?" {
+		t.Errorf("action = %q", q.Permission.Action)
+	}
+	if len(q.Permission.Options) != 2 || q.Permission.Options[0] != planAccept || q.Permission.Options[1] != planReject {
+		t.Errorf("options = %v", q.Permission.Options)
 	}
 }
 
@@ -202,7 +216,7 @@ func TestHandleTask_MalformedJSON(t *testing.T) {
 func TestHandleAskQuestion_EmitsPermission(t *testing.T) {
 	h, m := newTestHandler()
 	params := `{"title":"选择模型","questions":[{"id":"q1","prompt":"使用哪个模型?","options":[
-		{"id":"gpt4","label":"GPT-4"},
+		{"id":"gpt4","label":"GPT-4 (Recommended)"},
 		{"id":"claude","label":"Claude"},
 		{"id":"gemini","label":"Gemini"}
 	]}]}`
@@ -217,17 +231,41 @@ func TestHandleAskQuestion_EmitsPermission(t *testing.T) {
 	if ev.Kind != agent.EventAgentPermission {
 		t.Fatalf("expected EventAgentPermission, got %v", ev.Kind)
 	}
-	if ev.Permission.Tool != "cursor/ask_question" {
-		t.Errorf("expected tool 'cursor/ask_question', got %q", ev.Permission.Tool)
+	if ev.Permission.Tool != "AskUserQuestion" {
+		t.Errorf("expected tool 'AskUserQuestion', got %q", ev.Permission.Tool)
 	}
-	if ev.Permission.Action != "使用哪个模型?" {
-		t.Errorf("expected action '使用哪个模型?', got %q", ev.Permission.Action)
+	if ev.Permission.Action != "[选择模型] 使用哪个模型?" {
+		t.Errorf("action = %q", ev.Permission.Action)
 	}
-	if len(ev.Permission.Options) != 3 {
-		t.Fatalf("expected 3 options, got %d", len(ev.Permission.Options))
+	if ev.Permission.Kind != agent.PermissionKindQuestion {
+		t.Errorf("kind = %q, want question", ev.Permission.Kind)
 	}
-	if ev.Permission.Options[0] != "gpt4" || ev.Permission.Options[1] != "claude" || ev.Permission.Options[2] != "gemini" {
-		t.Errorf("unexpected options: %v", ev.Permission.Options)
+	if len(ev.Permission.Questions) != 1 || ev.Permission.Questions[0].ID != "q1" {
+		t.Fatalf("questions = %+v", ev.Permission.Questions)
+	}
+	opts := ev.Permission.Options
+	if len(opts) != 4 || opts[0] != "GPT-4" || opts[1] != "Claude" || opts[2] != "Gemini" || opts[3] != askOther {
+		t.Fatalf("options = %v", opts)
+	}
+}
+
+func TestHandleAskQuestion_SkipsThinQuestions(t *testing.T) {
+	h, m := newTestHandler()
+	params := `{"questions":[{"id":"q1","prompt":"only one?","options":[{"id":"a","label":"A"}]}]}`
+	var got any
+	respond := func(id json.RawMessage, result any, err error) bool {
+		got = result
+		return true
+	}
+	if !h("cursor/ask_question", json.RawMessage(params), respond) {
+		t.Fatal("expected handled=true")
+	}
+	if len(m.events) != 0 {
+		t.Fatalf("expected no card, got %d events", len(m.events))
+	}
+	out := got.(map[string]any)["outcome"].(map[string]any)
+	if out["outcome"] != "skipped" {
+		t.Fatalf("outcome = %v", out)
 	}
 }
 
@@ -317,6 +355,106 @@ func TestHandle_StandardMethod_ReturnsFalse(t *testing.T) {
 }
 
 // ─── cursorStatusToAgent ──────────────────────────────────────────
+
+func TestEncodeAskAnswer_LabelAndSkip(t *testing.T) {
+	qs := []cursorQuestion{{
+		ID:     "q1",
+		Prompt: "which?",
+		Options: []cursorOption{
+			{ID: "gpt4", Label: "GPT-4"},
+			{ID: "claude", Label: "Claude"},
+		},
+	}}
+	got, err := encodeAskAnswer(qs, "GPT-4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := got.(map[string]any)["outcome"].(map[string]any)
+	if out["outcome"] != "answered" {
+		t.Fatalf("outcome = %v", out)
+	}
+	answers := out["answers"].([]map[string]any)
+	ids := answers[0]["selectedOptionIds"].([]string)
+	if answers[0]["questionId"] != "q1" || len(ids) != 1 || ids[0] != "gpt4" {
+		t.Fatalf("answers = %v", answers)
+	}
+
+	skipped, err := encodeAskAnswer(qs, messages.EncodeQuestionPicks([]messages.QuestionPick{{
+		ID: "q1", Selected: []string{},
+	}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if skipped.(map[string]any)["outcome"].(map[string]any)["outcome"] != "skipped" {
+		t.Fatalf("skip = %v", skipped)
+	}
+
+	other, err := encodeAskAnswer(qs, askOther)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := other.(map[string]any)["outcome"].(map[string]any)
+	if o["outcome"] != "skipped" || o["reason"] != askOther {
+		t.Fatalf("other = %v", o)
+	}
+
+	rec, err := encodeAskAnswer([]cursorQuestion{{
+		ID: "q1",
+		Options: []cursorOption{
+			{ID: "gpt4", Label: "GPT-4 (Recommended)"},
+			{ID: "claude", Label: "Claude"},
+		},
+	}}, "GPT-4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids = rec.(map[string]any)["outcome"].(map[string]any)["answers"].([]map[string]any)[0]["selectedOptionIds"].([]string)
+	if len(ids) != 1 || ids[0] != "gpt4" {
+		t.Fatalf("recommended label = %v", ids)
+	}
+
+	multi, err := encodeAskAnswer([]cursorQuestion{{
+		ID:            "q1",
+		AllowMultiple: true,
+		Options: []cursorOption{
+			{ID: "gpt4", Label: "GPT-4"},
+			{ID: "claude", Label: "Claude"},
+		},
+	}}, "GPT-4, Claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids = multi.(map[string]any)["outcome"].(map[string]any)["answers"].([]map[string]any)[0]["selectedOptionIds"].([]string)
+	if len(ids) != 2 || ids[0] != "gpt4" || ids[1] != "claude" {
+		t.Fatalf("multi = %v", ids)
+	}
+}
+
+func TestEncodePlanAnswer(t *testing.T) {
+	acc, err := encodePlanAnswer(planAccept)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acc.(map[string]any)["outcome"].(map[string]any)["outcome"] != "accepted" {
+		t.Fatalf("accept = %v", acc)
+	}
+	rej, err := encodePlanAnswer(planReject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rej.(map[string]any)["outcome"].(map[string]any)["outcome"] != "rejected" {
+		t.Fatalf("reject = %v", rej)
+	}
+	cancel, err := encodePlanAnswer(messages.EncodeQuestionPicks([]messages.QuestionPick{{
+		ID: "plan", Selected: []string{},
+	}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cancel.(map[string]any)["outcome"].(map[string]any)["outcome"] != "cancelled" {
+		t.Fatalf("cancel = %v", cancel)
+	}
+}
 
 func TestCursorStatusToAgent(t *testing.T) {
 	tests := []struct {

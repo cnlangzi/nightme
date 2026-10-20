@@ -262,19 +262,34 @@ func (as *AgentSession) emitLifecycleLocked(status Status) {
 // `messagesByID` via the KindPromptEnded event — see
 // `ChatSession.writebackMessageState`.
 //
-// Re-entrant safe: a second call while currentPrompt is already
-// nil is a no-op (the channel-closed path may legitimately call
-// endPrompt twice — once for the in-flight Prompt, once for the
-// followup nothing).
+// A terminal event still publishes KindPromptEnded when no
+// currentPrompt is installed. /review injects via WithReplyTo
+// and the completion has to reach the channel either way. The
+// reply-to override is the anchor in that case.
 func (as *AgentSession) endPrompt(reason agent.PromptEndReason) {
 	as.asMu.Lock()
-	if as.currentPrompt == nil {
-		as.asMu.Unlock()
-		return
-	}
+	now := time.Now()
 	p := as.currentPrompt
-	p.EndedAt = time.Now()
-	p.EndReason = reason
+	userMsgID := as.currentPromptOverrideUserMsgID
+	if p != nil {
+		p.EndedAt = now
+		p.EndReason = reason
+		if userMsgID == "" {
+			userMsgID = p.LastMessageID
+		} else {
+			p.LastMessageID = userMsgID
+		}
+	} else {
+		p = &Prompt{
+			ID:             as.ID + "-end",
+			ChatSessionID:  as.ChatSessionID,
+			AgentSessionID: as.ID,
+			LastMessageID:  userMsgID,
+			EndedAt:        now,
+			EndReason:      reason,
+		}
+	}
+	slog.Info("agentsession: endPrompt", "as_id", as.ID, "prompt_id", p.ID, "user_msg_id", userMsgID, "reason", reason.String())
 	as.currentPrompt = nil
 	// The override is for events emitted during the just-ended
 	// prompt's lifetime. Once the prompt is gone, the readpump
@@ -297,7 +312,7 @@ func (as *AgentSession) endPrompt(reason agent.PromptEndReason) {
 	case as.eventQueue <- EnrichedEvent{
 		ChatID:         as.ChatSessionID,
 		AgentSessionID: as.ID,
-		UserMsgID:      p.LastMessageID,
+		UserMsgID:      userMsgID,
 		PromptID:       p.ID,
 		Prompt:         p,
 		Kind:           KindPromptEnded,

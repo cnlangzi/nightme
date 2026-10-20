@@ -1329,7 +1329,7 @@ func (as *AgentSession) Submit(p *Prompt) error {
 	// config to enable). Every user message goes through here, so
 	// Info-level would spam the daemon log; SendBlocks failure
 	// below stays at Warn since that IS an actionable event.
-	slog.Debug("chatsession: Submit",
+	slog.Info("agentsession: SendBlocks enter",
 		"chat_id", as.ChatSessionID,
 		"as_id", as.ID,
 		"blocks", len(p.Blocks),
@@ -1345,6 +1345,7 @@ func (as *AgentSession) Submit(p *Prompt) error {
 	as.isReady.Store(false)
 
 	// SendBlocks can block on a hung prompt RPC; do NOT hold asMu.
+	sendStarted := time.Now()
 	err := h.SendBlocks(as.OpContext(), p.Blocks)
 	if err != nil {
 		slog.Warn("chatsession: Submit SendBlocks FAILED",
@@ -1363,10 +1364,11 @@ func (as *AgentSession) Submit(p *Prompt) error {
 		as.isReady.Store(true)
 		return err
 	}
-	slog.Debug("chatsession: Submit SendBlocks ok",
+	slog.Info("agentsession: SendBlocks returned",
 		"chat_id", as.ChatSessionID,
 		"as_id", as.ID,
-		"prompt_id", p.ID)
+		"prompt_id", p.ID,
+		"wait", time.Since(sendStarted).String())
 	return nil
 }
 
@@ -1454,24 +1456,58 @@ func (as *AgentSession) SendBlocks(ctx context.Context, blocks []agent.ContentBl
 		if turnInFlight {
 			return ErrInjectionDuringTurn
 		}
-		as.asMu.Lock()
-		as.currentPromptOverrideUserMsgID = cfg.replyTo
-		as.asMu.Unlock()
 	}
 	as.asMu.RLock()
 	h := as.handle
 	as.asMu.RUnlock()
 	if h == nil {
-		if cfg.replyTo != "" {
-			as.clearReplyToOverride()
-		}
 		return ErrNotRunning
 	}
+	// WithReplyTo is a real turn: the bridge blocks until the
+	// prompt response, then emits EventAgentDone. Without a
+	// currentPrompt, endPrompt skips and the channel never
+	// receives the completion (the /review card stays running).
+	var injected *Prompt
+	if cfg.replyTo != "" {
+		now := time.Now()
+		injected = &Prompt{
+			ID:             as.NewPromptID(),
+			ChatSessionID:  as.ChatSessionID,
+			AgentSessionID: as.ID,
+			LastMessageID:  cfg.replyTo,
+			Blocks:         blocks,
+			CreatedAt:      now,
+			AckedAt:        now,
+			Messages:       []Message{{ID: cfg.replyTo, ChatID: as.ChatSessionID}},
+		}
+		as.asMu.Lock()
+		as.currentPromptOverrideUserMsgID = cfg.replyTo
+		as.currentPrompt = injected
+		as.asMu.Unlock()
+		as.isReady.Store(false)
+	}
 	err := h.SendBlocks(ctx, blocks)
-	if err != nil && cfg.replyTo != "" {
-		as.clearReplyToOverride()
+	if err != nil {
+		as.rollbackInjected(injected)
 	}
 	return err
+}
+
+// rollbackInjected drops an injection prompt that never reached
+// endPrompt. A prompt endPrompt already cleared is left alone.
+func (as *AgentSession) rollbackInjected(p *Prompt) {
+	if p == nil {
+		return
+	}
+	as.asMu.Lock()
+	if as.currentPrompt == p {
+		as.currentPrompt = nil
+		as.isReady.Store(true)
+	}
+	if as.currentPromptOverrideUserMsgID == p.LastMessageID {
+		as.currentPromptOverrideUserMsgID = ""
+	}
+	as.asMu.Unlock()
 }
 
 // New delegates to the bridge AgentSession.New(). Returns ErrNotRunning

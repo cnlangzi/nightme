@@ -193,7 +193,7 @@ func runFixRemote(
 	// mode constant. We do this once at the top of runFixRemote
 	// so the value threads through to the success card and the
 	// agent prompt without further branching downstream.
-	dispMode := DispatchPlan
+	dispMode := DispatchAssess
 	if yes {
 		dispMode = DispatchExecute
 	}
@@ -441,7 +441,7 @@ func runFixRemote(
 // that should work even in repos without an `origin`.
 //
 // F-XX: local mode has no yes/dispMode parameter — the
-// Plan / Execute split has no meaning without an agent
+// Assess / Execute split has no meaning without an agent
 // dispatch. Factory.runFix already drops args.Yes when
 // args.Mode == ModeLocal before calling RunFix.
 func runFixLocal(
@@ -502,9 +502,9 @@ func runFixLocal(
 
 	// F-XX: dispMode is unused for ModeLocal (local never
 	// dispatches and renders its own success card); pass
-	// DispatchPlan as a zero-equivalent placeholder.
+	// DispatchAssess as a zero-equivalent placeholder.
 	return completeFixAndDispatch(ctx, cs, deps, chatID, messageID,
-		branch, worktreePath, "", repoRoot, "", ModeLocal, -1, nil, "" /* baseSHA: local mode doesn't refresh */, DispatchPlan)
+		branch, worktreePath, "", repoRoot, "", ModeLocal, -1, nil, "" /* baseSHA: local mode doesn't refresh */, DispatchAssess)
 }
 
 // completeFixAndDispatch handles the common tail of both modes:
@@ -790,7 +790,7 @@ func countAttachmentBlocks(blocks []agent.ContentBlock) (images, files int) {
 //
 // Section order is stable so agent prompts can rely on it:
 // header / metadata / body / attachments / task. The Task
-// section's verb varies by mode (Plan = "analyze only, do not
+// section's verb varies by mode (Assess = "analyze only, do not
 // modify"; Execute = "implement the fix"). Metadata /
 // description / attachments sections are shared verbatim.
 //
@@ -817,10 +817,10 @@ func countAttachmentBlocks(blocks []agent.ContentBlock) (images, files int) {
 // /gtw fix; subsequent agent↔user confirmation flows through
 // the chat, never back through gtw.
 
-// planTaskPrompt is the §Task body for DispatchPlan. It is
+// assessTaskPrompt is the §Task body for DispatchAssess. It is
 // runtime self-contained (this string runs in a standalone
 // agent on the user's own worktree that cannot see this repo's
-// docs) and is the single source of truth for the Plan
+// docs) and is the single source of truth for the Assess
 // methodology — docs/feat/F-gtw-fix.md §4.1 must mirror this
 // text. Edit one, edit the other.
 //
@@ -832,7 +832,7 @@ func countAttachmentBlocks(blocks []agent.ContentBlock) (images, files int) {
 // Feature gap / Unverifiable are findings or implementation
 // tasks by default — not user questions. Zero user questions is
 // a valid and preferred outcome.
-const planTaskPrompt = `This is a due-diligence pass, not an implementation pass. Your deliverable is a *plan* that grounds the request in the worktree's current source and surfaces any genuine unresolved product/requirement decision for the user. You will NOT modify, create, or delete any files — produce the plan and stop; the user decides what happens next.
+const assessTaskPrompt = `This is a due-diligence pass, not an implementation pass. Your deliverable is a *plan* that grounds the request in the worktree's current source and surfaces any genuine unresolved product/requirement decision for the user. You will NOT modify, create, or delete any files — produce the plan and stop; the user decides what happens next.
 
 You are expected to act like a senior engineer and project manager, not a requirements interviewer. Do the research first. Use existing code, documentation, tests, history, and project conventions to resolve ordinary engineering questions yourself. Ask the user only when a genuine product or business decision remains. There is no minimum number of user questions. Zero questions is a valid and preferred outcome. Do not manufacture questions to make the plan look thorough.
 
@@ -914,10 +914,10 @@ After the user replies: if they change the plan, revise it and present it again 
 `
 
 // executeTaskPrompt is the §Task body for DispatchExecute. Mirrors
-// planTaskPrompt's runtime-self-contained contract: this string runs
+// assessTaskPrompt's runtime-self-contained contract: this string runs
 // in a standalone agent on the user's worktree that cannot see this
-// repo's docs, and it must NOT assume a prior Plan turn exists in
-// chat — `-y` can dispatch Execute directly with no Plan round.
+// repo's docs, and it must NOT assume a prior Assess turn exists in
+// chat — `-y` can dispatch Execute directly with no Assess round.
 // docs/feat/F-gtw-fix.md §4.2 must mirror this text; edit one,
 // edit the other.
 //
@@ -926,7 +926,7 @@ After the user replies: if they change the plan, revise it and present it again 
 // before editing, distinguishes pre-existing from introduced test
 // failures, and only stops to ask the user when a genuine
 // product/requirement decision remains that materially affects
-// externally visible behavior. `-y` removes the Plan confirmation
+// externally visible behavior. `-y` removes the Assess confirmation
 // round-trip; it does NOT remove investigation, reasoning,
 // verification, or the boundary around genuine product decisions.
 // `-y` also does NOT mean code must change — if the requested
@@ -1052,24 +1052,24 @@ func buildIssueDispatchText(issue *Issue, branch, repo string, mode IssueDispatc
 	}
 	b.WriteString("## Task\n")
 	switch mode {
-	case DispatchPlan:
-		b.WriteString(planTaskPrompt)
+	case DispatchAssess:
+		b.WriteString(assessTaskPrompt)
 	case DispatchExecute:
 		// F-gtw-fix.md §4.2 — Execute is the direct-implementation
 		// pass: `-y` authorises a senior engineer + maintainer to
 		// research, resolve ordinary decisions, implement the
-		// minimal correct change, and verify — without a Plan
+		// minimal correct change, and verify — without an Assess
 		// confirmation round-trip. The agent only stops on
 		// genuinely material product/requirement ambiguity. `-y`
 		// also does NOT mean code must change: if the requested
 		// behavior already exists, the agent verifies and reports
 		// "no code change required" without editing.
 		//
-		// Runtime self-containment (same caveat as Plan above):
+		// Runtime self-containment (same caveat as Assess above):
 		// this string runs in a standalone agent on the user's
 		// worktree and cannot see this repo's docs. It also
-		// cannot assume a prior Plan turn exists in the chat —
-		// `-y` can dispatch Execute directly with no Plan round.
+		// cannot assume a prior Assess turn exists in the chat —
+		// `-y` can dispatch Execute directly with no Assess round.
 		// So the runtime text must NOT say "the plan above"
 		// (there may be none) and must NOT cite §4.2.
 		b.WriteString(executeTaskPrompt)

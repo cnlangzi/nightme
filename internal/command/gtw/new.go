@@ -347,7 +347,7 @@ func renderIssueOpenedCard(owner, repo string, issue *Issue) string {
 	if issue.URL != "" {
 		fmt.Fprintf(&sb, "→ url:   %s\n", issue.URL)
 	}
-	fmt.Fprintf(&sb, "↳ `/gtw fix %d` to plan it · or `/gtw fix %d -y` to implement directly", issue.ID, issue.ID)
+	fmt.Fprintf(&sb, "↳ `/gtw fix %d` to assess it · or `/gtw fix %d -y` to implement directly", issue.ID, issue.ID)
 	return sb.String()
 }
 
@@ -355,7 +355,7 @@ func renderIssuesOpenedCard(owner, repo string, issues []*Issue) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "✅ %d issues opened\n", len(issues))
 	sb.WriteString(renderFieldRows(issueRows(owner, repo, issues)))
-	sb.WriteString("↳ `/gtw fix <id>` to plan one · or `/gtw fix <id> -y` to implement it directly")
+	sb.WriteString("↳ `/gtw fix <id>` to assess one · or `/gtw fix <id> -y` to implement it directly")
 	return sb.String()
 }
 
@@ -447,10 +447,12 @@ const newIssuePrompt = `Task: archive the requirement discussion in THIS convers
 
 Each issue will be handed to a developer or a coding agent that has NOT seen this conversation and can only read that issue. It must be implementable from the issue alone. Each issue also becomes its own branch, worktree, and pull request, so an issue is a complete unit of work: the code change together with the tests, documentation, and configuration it needs.
 
+If this conversation is in plan mode, this task ends it: write the draft files described below, and still change nothing in the project itself.
+
 Draft directory (absolute path):
 {{DRAFT_DIR_ABS}}
 
-Write each issue as its own file in that directory, named 01.md, 02.md, ... in implementation order. Most discussions produce a single issue, 01.md. Apart from the NN.created records described below, the directory holds exactly the current drafts and nothing else.
+Write each issue as its own file in that directory, named 01.md, 02.md, ... in the order they are built. That order is also dependency order: an issue another issue depends on gets the lower number. Most discussions produce a single issue, 01.md. Apart from the NN.created records described below, the directory holds exactly the current drafts and nothing else.
 
 The user reviews the drafts in chat; when they approve, they run /gtw new -y and nightme creates one issue per draft, in file order. Do NOT run gh / glab or create issues yourself. Do NOT modify any file outside the draft directory.
 
@@ -458,6 +460,7 @@ Each time nightme creates an issue it replaces NN.md with NN.created, whose firs
 
 ## Source of truth
 - Use only this conversation, plus code and files you have actually read in it. You may read more of the repository to resolve names, paths, and interfaces precisely.
+- Lines starting with "Decision:" record settled points. A "Decision (replaces …)" line overrides the decision it names.
 - If the beginning of the discussion is no longer visible to you, say so in chat and stop without writing any draft.
 - Never invent requirements, decisions, numbers, interfaces, or file paths. When completeness forces you to add something the discussion did not state, mark it inline with [inferred].
 
@@ -467,7 +470,7 @@ Each time nightme creates an issue it replaces NN.md with NN.created, whose firs
 3. Confirm. Ask now if step 2 produced questions whose answers change scope, behavior, interfaces, or acceptance criteria, or if you recommend splitting the work into several issues and the user has not agreed to that split yet. Ask in one chat message, numbered, each question with your recommended default and a one-line reason; a proposed split lists each issue with its title, a one-line scope, and why it counts as done even if the other issues are never implemented. Then STOP — do not write any draft in this turn, and end with: "Answer the questions above and I will write the drafts."
    When the user answers — in a later message, or by running /gtw new again — use those answers, do not ask again, and continue with step 4. Questions that do not block implementation are not asked — they go under "Open Questions". If nothing is blocking, continue.
 4. Write the draft files following the template below, one file per issue.
-5. Review every draft against the conversation and fix it before finishing: requirements, constraints, or edge cases that were agreed but are missing from every draft; statements that differ from what was agreed; content with no basis in the discussion and no [inferred] mark; rejected options appearing anywhere except "Decisions"; items a developer could not act on (missing parameters, ambiguous interfaces, unverifiable acceptance criteria).
+5. Review every draft against the conversation and fix it before finishing: requirements, constraints, or edge cases that were agreed but are missing from every draft; statements that differ from what was agreed; content with no basis in the discussion and no [inferred] mark; rejected options appearing anywhere except "Decisions"; items a developer could not act on (missing parameters, ambiguous interfaces, unverifiable acceptance criteria); every {{ISSUE:NN}} points at a lower file number. When one points forward, renumber so the referenced issue comes first, or drop the reference.
 6. Show the drafts: print the complete content of every draft file in chat, verbatim, in file order, each preceded by its file name, then end with: "Reply with changes, or run /gtw new -y to create the issues."
 
 If the user asks for changes later in this conversation — including splitting or merging issues — rewrite the draft files so the directory holds exactly the current set of drafts not yet created, delete the drafts of issues that are no longer wanted, then show the complete content of every remaining draft again the same way. Give a new issue a number no file in the directory uses.
@@ -481,8 +484,8 @@ One issue is the default. An issue is the whole change one pull request delivers
 
 When the work is split:
 - Each issue is self-contained: it repeats the background, terms, constraints, and decisions it needs. Never point to another issue for content.
-- Each requirement, edge case, and implementation task belongs to exactly one issue; list what another issue covers under "Out of scope", with its reference.
-- Reference another issue of the set as {{ISSUE:NN}}, where NN is its file number (e.g. "depends on {{ISSUE:01}}"). Only lower-numbered or already created issues may be referenced; nightme replaces the reference with the real issue number when it creates the issue. Never write guessed issue numbers.
+- Each requirement, edge case, and implementation task belongs to exactly one issue. Under "Out of scope", name what another issue covers. Attach {{ISSUE:NN}} only when the rule below allows it; otherwise describe that work in words, with no reference.
+- Reference another issue of this set only as {{ISSUE:NN}}, where NN is its file number. The issues are created in file order and the reference is replaced with the real issue number, so the referenced issue must already exist by then: NN must be lower than the number of the file that contains the reference, or that draft must already be an NN.created record. A reference that points forward is invalid and no issue is created — {{ISSUE:02}} inside 01.md fails with "must point to a lower-numbered draft of this set". Number the files so this holds. If the second issue depends on the first, the dependency is 01.md and the dependent issue is 02.md, which writes "depends on {{ISSUE:01}}". Never write that reference the other way, and never guess an issue number.
 
 ## Writing rules
 - Describe what the system must be, not how the discussion went. Never write phrases like "we discussed", "initially", "later changed to", "as requested".
@@ -528,7 +531,7 @@ Each file starts with the title line. The title follows Conventional Commits —
 - <decision> — why: <rationale> — rejected: <alternative> (<reason>)
 
 ## Implementation Plan
-1. <independently verifiable task> — done when: <check> — depends on: <task numbers, {{ISSUE:NN}}, or none>
+1. <independently verifiable task> — done when: <check> — depends on: <task numbers inside this issue, {{ISSUE:NN}} for a lower-numbered issue, or none>
 
 ## Open Questions
 - <question> — impact: <what it affects> — interim: <how to proceed until answered>`

@@ -37,7 +37,7 @@ func assertParseErr(t *testing.T, err error, substr string) string {
 
 // TestParseFixArgs_YesFlag pins the `-y` / `--yes` flag:
 // positional-independent boolean, "any --yes wins". Threads
-// through to RunFix for the Plan/Execute mode split.
+// through to RunFix for the Assess/Execute mode split.
 func TestParseFixArgs_YesFlag(t *testing.T) {
 	cases := []struct {
 		name string
@@ -49,7 +49,7 @@ func TestParseFixArgs_YesFlag(t *testing.T) {
 		{"yes before id", []string{"-y", "42"}, fixArgs{Mode: ModeRemote, RawArg: "42", Yes: true}},
 		{"yes long form", []string{"42", "--yes"}, fixArgs{Mode: ModeRemote, RawArg: "42", Yes: true}},
 		{"yes long form before id", []string{"--yes", "42"}, fixArgs{Mode: ModeRemote, RawArg: "42", Yes: true}},
-		{"default plan", []string{"42"}, fixArgs{Mode: ModeRemote, RawArg: "42", Yes: false}},
+		{"default assess", []string{"42"}, fixArgs{Mode: ModeRemote, RawArg: "42", Yes: false}},
 
 		// Local mode — `-y` is silently dropped by Factory.runFix,
 		// but parseFixArgs still records Yes=true so downstream

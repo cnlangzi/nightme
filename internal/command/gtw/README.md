@@ -332,7 +332,7 @@ abc1234 fix(gtw): hooks output uses standard ✅ title
 → worktree: /Users/.../fix-gtw-hooks
 ```
 
-### 4.6 Format 1(`/gtw fix` — plan-first)
+### 4.6 Format 1(`/gtw fix` — assess-first)
 
 ```
 ✅ Fix #42 ready
@@ -355,7 +355,7 @@ abc1234 fix(gtw): hooks output uses standard ✅ title
 
 ### 4.8 Format 1(`/gtw new -y`)
 
-`/gtw new` 本身没有 gtw 卡片——草稿由 agent 在 chat 里直接展示。`/gtw new -y`
+`/gtw plan` 与 `/gtw new` 本身没有 gtw 卡片——plan mode 的讨论和草稿都由 agent 在 chat 里直接展示。`/gtw new -y`
 建好一个 issue 后:
 
 ```
@@ -363,7 +363,7 @@ abc1234 fix(gtw): hooks output uses standard ✅ title
 → title: feat(gtw): archive chat discussions into issues
 → repo:  owner/repo
 → url:   https://github.com/owner/repo/issues/42
-↳ `/gtw fix 42` to plan it · or `/gtw fix 42 -y` to implement directly
+↳ `/gtw fix 42` to assess it · or `/gtw fix 42 -y` to implement directly
 ```
 
 建好多个 issue 后,每个 issue 一行,字段名就是 issue 编号:
@@ -374,7 +374,7 @@ abc1234 fix(gtw): hooks output uses standard ✅ title
 → #42:  feat(gtw): store issue drafts per chat · https://github.com/owner/repo/issues/42
 → #43:  feat(gtw): create issues from every draft · https://github.com/owner/repo/issues/43
 → #44:  docs(gtw): describe multi-issue drafts · https://github.com/owner/repo/issues/44
-↳ `/gtw fix <id>` to plan one · or `/gtw fix <id> -y` to implement it directly
+↳ `/gtw fix <id>` to assess one · or `/gtw fix <id> -y` to implement it directly
 ```
 
 中途创建失败时用 `⚠️`(部分成功),已建的 issue 照列,剩下的草稿保留:

@@ -138,15 +138,15 @@ const (
 )
 
 // IssueDispatchMode decides which prompt variant gtw hands to
-// the agent. Plan = "analyze and present a plan, do not modify
-// files". Execute = "implement the fix". gtw always dispatches
-// exactly one prompt per /gtw fix; subsequent agent↔user
-// confirmation flows through the chat, never back through gtw.
-// See F-gtw-fix.md §4 for the rationale.
+// the agent. Assess = "check the issue against the worktree and
+// present a plan, do not modify files". Execute = "implement the
+// fix". gtw always dispatches exactly one prompt per /gtw fix;
+// subsequent agent↔user confirmation flows through the chat,
+// never back through gtw. See F-gtw-fix.md §4 for the rationale.
 type IssueDispatchMode int
 
 const (
-	DispatchPlan IssueDispatchMode = iota
+	DispatchAssess IssueDispatchMode = iota
 	DispatchExecute
 )
 

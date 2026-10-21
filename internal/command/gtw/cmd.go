@@ -276,7 +276,8 @@ func (f *Factory) Spec() command.Spec {
 		Name:    "gtw",
 		Aliases: []string{"team"},
 		Summary: "GTW: Git-driven team workflow (claim, label, worktree).",
-		Usage: "/gtw new                          have the agent draft issues from this chat's discussion\n" +
+		Usage: "/gtw plan [topic]                 put the agent in plan mode: settle the design before any change\n" +
+			"/gtw new                          have the agent draft issues from this chat's discussion\n" +
 			"/gtw new -y                       create the issues from the reviewed drafts\n" +
 			"/gtw fix <issue-id> [-y|--yes]   claim, label, and create a worktree\n" +
 			"/gtw fix --name <branch>          create a local worktree (no issue)\n" +
@@ -289,6 +290,11 @@ func (f *Factory) Spec() command.Spec {
 			"/gtw pr -a claude                 override which agent runs the one-shot\n" +
 			"/gtw sync                         checkout the default branch and pull --rebase from origin",
 		Subcommands: []command.SubcommandSpec{
+			{
+				Name:    "plan",
+				Summary: "put the current agent in plan mode to settle a design before any change",
+				Usage:   "/gtw plan [topic]",
+			},
 			{
 				Name:    "new",
 				Summary: "draft issues from this chat's discussion via the current agent; `-y` creates them",
@@ -359,9 +365,13 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, mgr *c
 	// Cross-chat independence: chat A's long /gtw fix does not
 	// block chat B's /gtw commit; the lock is per chatID.
 	//
-	// /gtw new takes no lock: it touches neither the worktree nor
-	// the chat cwd, only the chat's own issue draft.
-	if input.Args[1] == "new" {
+	// /gtw plan and /gtw new take no lock: they touch neither the
+	// worktree nor the chat cwd — plan only queues a prompt, new
+	// only the chat's own issue draft.
+	switch input.Args[1] {
+	case "plan":
+		return f.runPlan(ctx, cs, input)
+	case "new":
 		return f.runNew(ctx, rt, cs, input)
 	}
 	if mu := f.mgr.runLockFor(input.ChatID); mu != nil {
@@ -389,6 +399,18 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, mgr *c
 		Reply:    "Unknown subcommand: " + input.Args[1] + "\n" + f.Spec().Usage,
 		Consumed: true,
 	}, nil
+}
+
+// runPlan handles `/gtw plan [topic]`. The topic is free-form
+// prose for the agent, so it bypasses command.ParseCmdArgs like
+// /steer does: a leading "-" is data, not a flag.
+func (f *Factory) runPlan(ctx context.Context, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
+	if _, failOut := command.RequireActiveCwd(cs); failOut != nil {
+		return failOut, nil
+	}
+	topic := strings.Join(input.Args[2:], " ")
+	_, _ = RunPlan(ctx, cs, f.deps, input.ChatID, input.MessageID, topic)
+	return &command.SlashOutput{Consumed: true}, nil
 }
 
 // runNew handles the two steps of /gtw new: `/gtw new` asks the
@@ -437,7 +459,7 @@ func (f *Factory) runNew(ctx context.Context, _ command.RuntimeServices, cs *cha
 // F-XX splits the entry into two modes at the factory boundary
 // so RunFix sees a single Mode constant.
 //
-// F-XX adds `-y` / `--yes` to bypass plan-first dispatch and
+// F-XX adds `-y` / `--yes` to bypass assess-first dispatch and
 // go straight to the Execute prompt.
 //
 // F-51: command.Commander prefixes Args with the command name
@@ -557,7 +579,7 @@ func (f *Factory) runFix(ctx context.Context, _ command.RuntimeServices, cs *cha
 type fixArgs struct {
 	Mode   Mode
 	RawArg string // issue id (ModeRemote) or branch name (ModeLocal)
-	Yes    bool   // --yes / -y: dispatch Execute Prompt instead of Plan
+	Yes    bool   // --yes / -y: dispatch Execute Prompt instead of Assess
 }
 
 // fixCmdSpec is the argv grammar for /gtw fix. Lexer is the
@@ -571,7 +593,7 @@ type fixArgs struct {
 //	--name <branch>         ModeLocal  (branch from --name value)
 //
 // Both shapes accept an optional -y/--yes to dispatch the
-// Execute prompt instead of the Plan prompt. The mutual
+// Execute prompt instead of the Assess prompt. The mutual
 // exclusion between the two shapes is enforced in
 // parseFixArgs' post-parse step (the shared lexer can't
 // express it because it doesn't know which positional pattern

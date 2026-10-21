@@ -356,7 +356,7 @@ func TestBuildIssueDispatchBlocks(t *testing.T) {
 		{Type: agent.ContentFile, Path: "/a", MediaType: "image/png"},
 		{Type: agent.ContentFile, Path: "/b", MediaType: "text/plain"},
 	}
-	blocks := buildIssueDispatchBlocks(issue, attachments, "branch-x", "owner/repo", DispatchPlan)
+	blocks := buildIssueDispatchBlocks(issue, attachments, "branch-x", "owner/repo", DispatchAssess)
 	if len(blocks) != 3 {
 		t.Fatalf("blocks = %d, want 3", len(blocks))
 	}

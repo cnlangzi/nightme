@@ -128,7 +128,7 @@ func TestFactory_Handle_UnknownSubcommand(t *testing.T) {
 // --name/-n, missing-value, and empty-argv cases are all
 // covered by the stricter TestParseFixArgs_* tests in
 // parse_fix_args_test.go — see TestParseFixArgs_YesFlag's
-// "default plan" / "yes with local" sub-cases, etc.)
+// "default assess" / "yes with local" sub-cases, etc.)
 
 // --- F-XX run-lock integration tests ---
 //

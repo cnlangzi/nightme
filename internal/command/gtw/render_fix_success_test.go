@@ -5,13 +5,13 @@ import (
 	"testing"
 )
 
-// TestRenderFixSuccessCard_PlanMode_HintWording pins the F-XX
-// Plan-mode success card: standard "✅ Fix #N ready" header
+// TestRenderFixSuccessCard_AssessMode_HintWording pins the F-XX
+// Assess-mode success card: standard "✅ Fix #N ready" header
 // (no "(direct execute)" suffix), "agent is analyzing"
 // trailing hint, NO Execute-mode phrasing.
-func TestRenderFixSuccessCard_PlanMode_HintWording(t *testing.T) {
+func TestRenderFixSuccessCard_AssessMode_HintWording(t *testing.T) {
 	issue := &Issue{ID: 42, Title: "x"}
-	card := renderFixSuccessCard(issue, "br", "/wt", "o/r", "abc1234abcd", DispatchPlan)
+	card := renderFixSuccessCard(issue, "br", "/wt", "o/r", "abc1234abcd", DispatchAssess)
 	for _, want := range []string{
 		"✅ Fix #42 ready",
 		"→ branch:   `br`",
@@ -21,11 +21,11 @@ func TestRenderFixSuccessCard_PlanMode_HintWording(t *testing.T) {
 		"↳ agent is analyzing",
 	} {
 		if !strings.Contains(card, want) {
-			t.Errorf("Plan-mode success card missing %q; got:\n%s", want, card)
+			t.Errorf("Assess-mode success card missing %q; got:\n%s", want, card)
 		}
 	}
 	if strings.Contains(card, "(direct execute)") || strings.Contains(card, "agent is fixing now") {
-		t.Errorf("Plan-mode success card must NOT carry Execute phrasing; got:\n%s", card)
+		t.Errorf("Assess-mode success card must NOT carry Execute phrasing; got:\n%s", card)
 	}
 }
 
@@ -46,23 +46,23 @@ func TestRenderFixSuccessCard_ExecuteMode_HintWording(t *testing.T) {
 		}
 	}
 	if strings.Contains(card, "agent is analyzing") || strings.Contains(card, "review the plan in chat") {
-		t.Errorf("Execute-mode success card must NOT carry Plan phrasing; got:\n%s", card)
+		t.Errorf("Execute-mode success card must NOT carry Assess phrasing; got:\n%s", card)
 	}
 }
 
-// TestRenderFixSuccessCard_PlanMode_EmptyBaseSHA pins the
+// TestRenderFixSuccessCard_AssessMode_EmptyBaseSHA pins the
 // empty-baseSHA branch (F-59 / F-45 daemon-recovery scenario
 // where RefreshDefaultBranch was skipped). The "→ base:" line
 // must be omitted.
-func TestRenderFixSuccessCard_PlanMode_EmptyBaseSHA(t *testing.T) {
+func TestRenderFixSuccessCard_AssessMode_EmptyBaseSHA(t *testing.T) {
 	issue := &Issue{ID: 1, Title: "t"}
-	card := renderFixSuccessCard(issue, "br", "/wt", "o/r", "" /* no base */, DispatchPlan)
+	card := renderFixSuccessCard(issue, "br", "/wt", "o/r", "" /* no base */, DispatchAssess)
 	if strings.Contains(card, "→ base:") {
-		t.Errorf("Plan-mode success card with empty baseSHA must omit '→ base:' line; got:\n%s", card)
+		t.Errorf("Assess-mode success card with empty baseSHA must omit '→ base:' line; got:\n%s", card)
 	}
 	for _, want := range []string{"✅ Fix #1 ready", "→ branch:   `br`", "↳ agent is analyzing"} {
 		if !strings.Contains(card, want) {
-			t.Errorf("Plan-mode card missing %q; got:\n%s", want, card)
+			t.Errorf("Assess-mode card missing %q; got:\n%s", want, card)
 		}
 	}
 }

@@ -245,10 +245,10 @@ AddIssueLabel(LabelWIP)                   ← 步骤 6（failure → rollbackLab
 WriteGTWYml                          ← 步骤 7
 slot.Store(StateFixing)              ← 步骤 8
 reply(success card)                  ← 步骤 9
-dispatch issue to agent              ← 步骤 10（F-XX：Plan 或 Execute prompt，见 F-gtw-fix.md）
+dispatch issue to agent              ← 步骤 10（F-XX：Assess 或 Execute prompt，见 F-gtw-fix.md）
 ```
 
-> **F-XX 注**：步骤 10 的 dispatch 语义见 [`F-gtw-fix.md`](./F-gtw-fix.md) — 默认 Plan
+> **F-XX 注**：步骤 10 的 dispatch 语义见 [`F-gtw-fix.md`](./F-gtw-fix.md) — 默认 Assess
 > Prompt（只读分析），`-y` 时 Execute Prompt；gtw 只投递一次，后续确认走用户 ↔ agent
 > 普通对话。Branch 冲突改为硬失败，不再经过 §5.3.1 决策卡。
 
@@ -581,7 +581,7 @@ F-59 自身不带 feature flag —— 加 flag 不值得（一次回滚够便宜
 
 ## 11. References
 
-- [`F-gtw-fix.md`](./F-gtw-fix.md) — `/gtw fix` 主流程、Plan/Execute dispatch、branch 硬失败
+- [`F-gtw-fix.md`](./F-gtw-fix.md) — `/gtw fix` 主流程、Assess/Execute dispatch、branch 硬失败
 - [`F-gtw.md`](./F-gtw.md) — gtw 命令索引；fix §5.2 是 ensureGtwLabels 的插入位置
 - [`docs/feat/F-45-gtw-fix-state-machine` 段`] — F-45 把 label
   设为 gtw 状态机的载体，本次 F-59 让 label 自举

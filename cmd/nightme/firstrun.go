@@ -39,7 +39,7 @@ import (
 // command should surface this verbatim — it carries the
 // remediation hint.
 var errNoAgentConfigured = errors.New(
-	"no AI coding agent available; install one of the built-ins (claude / codex / dsh / opencode / cursor / pi / copilot) or set cfg.Agents to override its path, then retry",
+	"no AI coding agent available; install one of the built-ins (claude / codex / dsh / opencode / cursor / pi / copilot / omp) or set cfg.Agents to override its path, then retry",
 )
 
 // EnsureAgentAvailable makes sure cfg.Primary resolves to a

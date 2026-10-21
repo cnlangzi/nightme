@@ -107,7 +107,7 @@ func TestBuild_BuiltinDrivenIgnoresUnknownNames(t *testing.T) {
 	for _, s := range reg.List() {
 		seen[s.Info().Name] = true
 	}
-	for _, want := range []string{"codex", "dsh", "opencode", "cursor", "pi", "copilot"} {
+	for _, want := range []string{"codex", "dsh", "opencode", "cursor", "pi", "copilot", "omp"} {
 		if !seen[want] {
 			t.Errorf("built-in %q missing from registry", want)
 		}

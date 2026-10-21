@@ -231,7 +231,7 @@ Chat 级别的斜杠命令。`/gtw` 子命令见 [它们自己的 section](#git-
 | 命令 | 干什么 |
 |---|---|
 | `/cwd <path>` | 绑定这个 Chat 到一个工作区。会校验路径，下次发消息时 lazy-spawn。 |
-| `/use <agent>` | 切换当前 agent（`claude` / `codex` / `dsh` / `opencode` / `copilot` / `pi`）。前一个 agent 切到后台继续跑——任务推进、结果照常回，只是新消息不再路由给它。 |
+| `/use <agent>` | 切换当前 agent（`claude` / `codex` / `dsh` / `opencode` / `copilot` / `omp` / `pi`）。前一个 agent 切到后台继续跑——任务推进、结果照常回，只是新消息不再路由给它。 |
 | `/stop` | 停掉当前 agent 上的 in-flight turn。会话留着，队列里的消息继续流。 |
 | `/steer <msg>` | 停掉 in-flight turn 并把 `<msg>` 插到队首。下个 turn agent 第一眼看到的就是这条。 |
 | `/close [agent]` | 终止当前工作区里 AgentSession 的 bridge 进程。AgentSession 记录保留——下次发消息触发 respawn 时会用 `--resume <sessionID>` 接着聊。 |
@@ -465,7 +465,7 @@ YAML schema——`on:` 触发器、`worker:`、`jobs.<name>.steps`、`${{ }}` �
 - **Gateway** 路由入站。`inbound` 子包负责斜杠命令派发链；其它都转发到 ChatSession 的 active AgentSession。
 - **ChatSession** 是每个 chat 的 context。拥有 AgentSession 池和 InputBuffer FSM。daemon 重启之间持久化。
 - **AgentSession** 是每个 CLI 进程的句柄。每个 `(agent, cwd)` 一份，`/use` 和 `/cwd` 切换之间保活。
-- **Bridge** 是每个 agent 的 transport——`acp`、`claudecode`、`codex`、`copilot`、`dsh`、`opencode`、`pi` 或 `pty`（在 `internal/bridge/` 下），按 CLI 支持情况选。
+- **Bridge** 是每个 agent 的 transport——`acp`、`claudecode`、`codex`、`copilot`、`dsh`、`omp`、`opencode`、`pi` 或 `pty`（在 `internal/bridge/` 下），按 CLI 支持情况选。
 
 完整责任表见 [`docs/SPEC.md`](./docs/SPEC.md) §1，"Channel 是 dumb renderer" 的设计动机见 §0.1。
 
@@ -495,6 +495,9 @@ agents:                                  # 列表：每项 = name / bridge / com
   - name: copilot
     bridge: copilot
     command: copilot       # bridge 默认注入 `--allow-all-tools --acp --stdio`
+  - name: omp
+    bridge: omp
+    command: omp           # bridge 默认注入 `--mode rpc --approval-mode yolo`
 
 feishu:
   app_id: "cli_xxxxxxxxxxxxxxxx"
@@ -533,7 +536,7 @@ paths:
 | [`docs/CHATSTORE.md`](./docs/CHATSTORE.md) | `chat_sessions.json` 真相源、ChatSession hydrate、AgentSessionPool。 |
 | [`docs/WFE.md`](./docs/WFE.md) | Workflow YAML + 引擎运行时架构——触发器、步骤、bot↔wfe 边界。 |
 | [`docs/feat/`](./docs/feat/) | 每个 feature 的设计文档。 |
-| [`docs/bridge/`](./docs/bridge/) | 每个 agent bridge 的设计：claude、codex、dsh、opencode、pi、copilot。 |
+| [`docs/bridge/`](./docs/bridge/) | 每个 agent bridge 的设计：claude、codex、dsh、opencode、pi、copilot、omp。 |
 | [`docs/channel/feishu.md`](./docs/channel/feishu.md) | 飞书 adapter 参考（渲染规则、卡片语义、线程路由）。 |
 | [`docs/flow/`](./docs/flow/) | 横切流程文档（如 3-layer doc model）。 |
 | [`docs/E2E_TESTING.md`](./docs/E2E_TESTING.md) | 飞书端到端手动测试 + 排错。 |
@@ -571,7 +574,7 @@ internal/
   agent/                           # Agent / AgentEvent / Info / Starter interface
   agentsession/                    # AgentSession + Prompt + Spawner (per-CLI-process runtime unit)
   bridge/                          # Bridge abstraction, one sub-package per agent
-    acp/  claudecode/  codex/  copilot/  cursor/  dsh/  opencode/  pi/  pty/
+    acp/  claudecode/  codex/  copilot/  cursor/  dsh/  omp/  opencode/  pi/  pty/
   channel/                         # Channel interface
     bot/  echo/  feishu/  slack/  telegram/   # adapters (feishu production; telegram ready; slack in development)
   chatsession/                     # ChatSession + pool manager + persistence

@@ -216,9 +216,9 @@ type SlackRateLimitConfig struct {
 //
 // v1.2 schema: name / bridge / command. The whitelist rule is
 // enforced at agentregistry.Build time — `name` MUST be a built-in
-// (claude / codex / dsh / opencode / cursor / pi / copilot); any
-// other value is logged and dropped, never silently aliased to a
-// PTY shell.
+// (claude / codex / dsh / opencode / cursor / pi / copilot / omp);
+// any other value is logged and dropped, never silently aliased
+// to a PTY shell.
 //
 // `bridge` is set automatically from `name` by nightme and is
 // preserved only for schema round-trip stability; users do not

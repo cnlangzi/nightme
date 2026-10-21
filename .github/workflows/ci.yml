@@ -975,12 +975,25 @@ jobs:
           # npm install -g @deepseek-ai/dsh  # disabled — see comment above
           npm install -g @github/copilot
           # omp CLI on unix: official install script per
-          # https://omp.sh. Drops a single `omp` binary on PATH
-          # (~/.local/bin/omp). Windows uses the separate pwsh
-          # step below; running the bash installer from Git
-          # Bash would fail with an OS-detection error similar
-          # to cursor's, because the bash branch keys off
-          # uname -s and Git Bash reports MINGW64_NT-...
+          # https://omp.sh. The installer picks one of two
+          # modes based on host env:
+          #   - binary mode (bun absent or -Binary flag):
+          #       drops `~/.local/bin/omp` on linux/macos.
+          #   - bun mode (Bun on PATH and arch matches):
+          #       runs `bun install -g` and lands
+          #       `~/.bun/bin/omp` instead.
+          # The current ubuntu-24.04 / macos-latest CI runner
+          # images ship without Bun, so the install takes the
+          # binary path and `command -v omp` resolves under
+          # `~/.local/bin/omp`. If a future image starts
+          # shipping Bun, the install location flips and the
+          # runtime PATH lookup will still find `omp` (both
+          # locations land on PATH), so the gate survives the
+          # mode change without code edits.
+          #
+          # The bash branch keys off `uname -s` and bails on
+          # Git Bash's MINGW64_NT-... output, so the Windows
+          # legs use the separate pwsh step below.
           if [ "${{ matrix.os }}" != "windows-latest" ] && [ "${{ matrix.os }}" != "windows-11-arm" ]; then
             curl -fsSL https://omp.sh/install | sh
           fi
@@ -1075,28 +1088,38 @@ jobs:
           "$agentPath" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           Write-Host "OK: appended $agentPath to GITHUB_PATH"
 
-      # omp CLI on windows-latest: official PowerShell installer
-      # per https://omp.sh. Mirrors the cursor pwsh-step shape:
-      # the bash installer bails on Git Bash's MINGW64_NT-...
-      # uname output, so this step is the only supported path
-      # on Windows runners. The install script writes the
-      # installed binary directory into GITHUB_PATH so the
-      # subsequent bash PATH/--help/spawn gates can resolve
-      # `omp.cmd` via PATHEXT — the bridge itself spawns `omp`
-      # via exec.LookPath and Go applies PATHEXT on Windows, so
-      # the bare name resolves in production.
-      - name: Install omp CLI (Windows — official PowerShell installer)
+      # omp CLI on windows-latest / windows-11-arm: official
+      # PowerShell installer per https://omp.sh. The installer
+      # has two modes — bun-preferred (when Bun is on PATH,
+      # lands `~/.bun/bin/omp.cmd`) and binary-download (lands
+      # `%LOCALAPPDATA%\omp\omp.exe`). CI forces binary mode via
+      # the `-Binary` switch so the install path is
+      # deterministic and matches what the subsequent bash
+      # gates expect (MSYS auto-resolves `omp.exe` on
+      # PATHEXT). The installer does NOT push its install dir
+      # into GITHUB_PATH itself; we do that here so the
+      # PATH/--help/spawn gates can resolve `omp` via PATHEXT.
+      #
+      # Reference lines from the live installer (verified
+      # 2026-10-21):
+      #   $InstallDir = "$env:LOCALAPPDATA\omp"     (no Programs\)
+      #   binary mode → drops omp.exe there
+      #   bun mode    → ~/.bun/bin/omp.cmd (skipped here)
+      - name: Install omp CLI (Windows — official PowerShell installer, binary mode)
         if: matrix.os == 'windows-latest' || matrix.os == 'windows-11-arm'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          irm 'https://omp.sh/install.ps1' | iex
-          $ompPath = "$env:LOCALAPPDATA\Programs\omp"
-          if (-not (Test-Path "$ompPath\omp.cmd")) {
-            Write-Host "::error::omp install did not produce $ompPath\omp.cmd"
+          # `-Binary` skips the bun install path so the install
+          # is deterministic regardless of whether Bun is on
+          # PATH on the runner image.
+          irm 'https://omp.sh/install.ps1' | iex -Binary
+          $ompPath = "$env:LOCALAPPDATA\omp"
+          if (-not (Test-Path "$ompPath\omp.exe")) {
+            Write-Host "::error::omp install did not produce $ompPath\omp.exe"
             exit 1
           }
-          Write-Host "OK: omp installed → $ompPath\omp.cmd"
+          Write-Host "OK: omp installed → $ompPath\omp.exe"
           "$ompPath" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           Write-Host "OK: appended $ompPath to GITHUB_PATH"
 

@@ -1110,10 +1110,19 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          # `-Binary` skips the bun install path so the install
-          # is deterministic regardless of whether Bun is on
+          # Fetch + invoke via [scriptblock]::Create so the
+          # `-Binary` switch actually reaches the installer
+          # script. `irm ... | iex -Binary` does NOT work:
+          # PowerShell binds `-Binary` to iex itself ("A
+          # parameter cannot be found that matches parameter
+          # name 'Binary'") and never passes it through to
+          # the script. The scriptblock form is the canonical
+          # pattern for "download a remote PS script and
+          # invoke it with explicit args". `-Binary` skips
+          # the bun-preferred install path so the install is
+          # deterministic regardless of whether Bun is on
           # PATH on the runner image.
-          irm 'https://omp.sh/install.ps1' | iex -Binary
+          & ([scriptblock]::Create((irm 'https://omp.sh/install.ps1'))) -Binary
           $ompPath = "$env:LOCALAPPDATA\omp"
           if (-not (Test-Path "$ompPath\omp.exe")) {
             Write-Host "::error::omp install did not produce $ompPath\omp.exe"

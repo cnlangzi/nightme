@@ -65,7 +65,7 @@ $ nightme run            # nothing on PATH, TTY attached
 
 ## 2. `cfg.Agents` is a path-override table, not an agent list
 
-Each entry is `{name, command}` where `name` MUST be a built-in (`claude / codex / dsh / opencode / cursor / pi / copilot`) and `command` is an absolute path to that binary. The bridge, mode, args, env, and protocol wiring stay fixed by nightme; the user only gets to point the binary at a non-PATH location.
+Each entry is `{name, command}` where `name` MUST be a built-in (`claude / codex / dsh / opencode / cursor / pi / copilot / omp`) and `command` is an absolute path to that binary. The bridge, mode, args, env, and protocol wiring stay fixed by nightme; the user only gets to point the binary at a non-PATH location.
 
 `agentregistry.Build` (`internal/agentregistry/agentregistry.go`) applies the overrides built-in-driven rather than config-driven:
 
@@ -164,7 +164,7 @@ The whitelist keeps pty out. Bare-path auto-register still works for one-off tes
 
 ```
 no AI coding agent available; install one of the built-ins
-(claude / codex / dsh / opencode / cursor / pi / copilot) or set
+(claude / codex / dsh / opencode / cursor / pi / copilot / omp) or set
 cfg.Agents to override its path, then retry
 ```
 

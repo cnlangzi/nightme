@@ -461,7 +461,7 @@ here.
 | Command | What it does |
 |---|---|
 | `/cwd <path>` | Bind this chat to a workspace. Validates the path; lazy-spawns on the next message. |
-| `/use <agent>` | Switch the active agent (`claude` / `codex` / `dsh` / `opencode` / `copilot` / `pi`). The previous one keeps running in the background — its task continues, results still come back, but new messages route to the new active agent. |
+| `/use <agent>` | Switch the active agent (`claude` / `codex` / `dsh` / `opencode` / `copilot` / `omp` / `pi`). The previous one keeps running in the background — its task continues, results still come back, but new messages route to the new active agent. |
 | `/stop` | Halt the in-flight turn on the selected agent. Session stays; queued messages still flow. |
 | `/steer <msg>` | Stop the in-flight turn and prepend `<msg>` to the queue. The steered message becomes the first thing the agent sees on the next turn. |
 | `/close [agent]` | Terminate the bridge process(es) for AgentSession(s) in the current workspace. The AgentSession entry is preserved; next user message triggers a respawn that replays `--resume <sessionID>` to continue the conversation. |
@@ -510,7 +510,7 @@ and runs its own built-in slash commands (e.g. Claude Code's
 - **Gateway** routes inbound. The `inbound` subpackage owns the slash-command dispatch chain; everything else is forwarded to the ChatSession's active AgentSession.
 - **ChatSession** is the per-chat context. Owns the AgentSession pool and the InputBuffer FSM. Persists across daemon restarts.
 - **AgentSession** is the per-CLI-process handle. One per `(agent, cwd)` pair, kept alive across `/use` and `/cwd` switches.
-- **Bridge** is the per-agent transport — one of `acp`, `claudecode`, `codex`, `copilot`, `dsh`, `opencode`, `pi`, or `pty` (under `internal/bridge/`), picked by what the CLI supports.
+- **Bridge** is the per-agent transport — one of `acp`, `claudecode`, `codex`, `copilot`, `dsh`, `omp`, `opencode`, `pi`, or `pty` (under `internal/bridge/`), picked by what the CLI supports.
 
 See [`docs/SPEC.md`](./docs/SPEC.md) §1 for the full responsibility table and [`docs/SPEC.md`](./docs/SPEC.md) §0.1 for the v1.3 "Channel is a dumb renderer" rewrite.
 
@@ -540,6 +540,9 @@ agents:                                  # each entry = name / bridge / command
   - name: copilot
     bridge: copilot
     command: copilot       # uses `--allow-all-tools --acp --stdio` per the bridge
+  - name: omp
+    bridge: omp
+    command: omp           # uses `--mode rpc --approval-mode yolo` per the bridge
 
 feishu:
   app_id: "cli_xxxxxxxxxxxxxxxx"
@@ -578,7 +581,7 @@ Logs go to `~/.nightme/nightme.log` (mode `0600`) as JSON. Attribute keys contai
 | [`docs/CHATSTORE.md`](./docs/CHATSTORE.md) | `chat_sessions.json` source of truth, ChatSession hydrate, AgentSessionPool. |
 | [`docs/WFE.md`](./docs/WFE.md) | Workflow YAML + engine runtime architecture — triggers, steps, bot↔wfe boundary. |
 | [`docs/feat/`](./docs/feat/) | Per-feature design docs. |
-| [`docs/bridge/`](./docs/bridge/) | Per-agent bridge design: claude, codex, dsh, opencode, pi, copilot. |
+| [`docs/bridge/`](./docs/bridge/) | Per-agent bridge design: claude, codex, dsh, opencode, pi, copilot, omp. |
 | [`docs/channel/feishu.md`](./docs/channel/feishu.md) | Feishu adapter reference (rendering rules, card semantics, thread routing). |
 | [`docs/flow/`](./docs/flow/) | Cross-cutting flow docs (e.g. the 3-layer doc model). |
 | [`docs/E2E_TESTING.md`](./docs/E2E_TESTING.md) | Manual Feishu round-trip + troubleshooting. |
@@ -616,7 +619,7 @@ internal/
   agent/                           # Agent / AgentEvent / Info / Starter interface
   agentsession/                    # AgentSession + Prompt + Spawner (per-CLI-process runtime unit)
   bridge/                          # Bridge abstraction, one sub-package per agent
-    acp/  claudecode/  codex/  copilot/  cursor/  dsh/  opencode/  pi/  pty/
+    acp/  claudecode/  codex/  copilot/  cursor/  dsh/  omp/  opencode/  pi/  pty/
   channel/                         # Channel interface
     bot/  echo/  feishu/  slack/  telegram/   # adapters (feishu production; telegram ready; slack in development)
   chatsession/                     # ChatSession + pool manager + persistence

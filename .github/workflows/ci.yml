@@ -962,12 +962,28 @@ jobs:
           #             @cursor/cli does not
           #             exist — the official installers are the
           #             only supported channel.
+          #   omp     → can1357/oh-my-pi. ompi is not
+          #             published on npm; the official installer
+          #             is a self-contained shell script that
+          #             drops a single `omp` binary on PATH.
+          #             unix → curl ... | sh   (this step)
+          #             windows → separate pwsh step below.
           npm install -g @anthropic-ai/claude-code
           npm install -g @openai/codex
           npm install -g opencode-ai
           npm install -g @earendil-works/pi-coding-agent
           # npm install -g @deepseek-ai/dsh  # disabled — see comment above
           npm install -g @github/copilot
+          # omp CLI on unix: official install script per
+          # https://omp.sh. Drops a single `omp` binary on PATH
+          # (~/.local/bin/omp). Windows uses the separate pwsh
+          # step below; running the bash installer from Git
+          # Bash would fail with an OS-detection error similar
+          # to cursor's, because the bash branch keys off
+          # uname -s and Git Bash reports MINGW64_NT-...
+          if [ "${{ matrix.os }}" != "windows-latest" ] && [ "${{ matrix.os }}" != "windows-11-arm" ]; then
+            curl -fsSL https://omp.sh/install | sh
+          fi
           # Cursor CLI on unix: official curl-pipe bash installer.
           # Drops `agent` into ~/.local/bin/agent (primary) plus
           # `cursor-agent` legacy symlink alongside — both on
@@ -1058,6 +1074,31 @@ jobs:
           # 32k mark.
           "$agentPath" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           Write-Host "OK: appended $agentPath to GITHUB_PATH"
+
+      # omp CLI on windows-latest: official PowerShell installer
+      # per https://omp.sh. Mirrors the cursor pwsh-step shape:
+      # the bash installer bails on Git Bash's MINGW64_NT-...
+      # uname output, so this step is the only supported path
+      # on Windows runners. The install script writes the
+      # installed binary directory into GITHUB_PATH so the
+      # subsequent bash PATH/--help/spawn gates can resolve
+      # `omp.cmd` via PATHEXT — the bridge itself spawns `omp`
+      # via exec.LookPath and Go applies PATHEXT on Windows, so
+      # the bare name resolves in production.
+      - name: Install omp CLI (Windows — official PowerShell installer)
+        if: matrix.os == 'windows-latest' || matrix.os == 'windows-11-arm'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          irm 'https://omp.sh/install.ps1' | iex
+          $ompPath = "$env:LOCALAPPDATA\Programs\omp"
+          if (-not (Test-Path "$ompPath\omp.cmd")) {
+            Write-Host "::error::omp install did not produce $ompPath\omp.cmd"
+            exit 1
+          }
+          Write-Host "OK: omp installed → $ompPath\omp.cmd"
+          "$ompPath" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          Write-Host "OK: appended $ompPath to GITHUB_PATH"
 
       - name: Verify daemon lifecycle (start/stop/restart/status)
         shell: bash
@@ -1201,7 +1242,7 @@ jobs:
           # OK line in the install step, print the resolved PATH
           # and ls the candidate dirs so the post-mortem shows
           # whether the dir was actually added.
-          for agent in claude codex opencode pi copilot cursor; do  # dsh excluded — see comment above
+          for agent in claude codex opencode pi copilot cursor omp; do  # dsh excluded — see comment above
             case "$agent" in
               cursor) bin=cursor-agent ;;
               *)      bin="$agent" ;;
@@ -1268,7 +1309,7 @@ jobs:
           # which PATHEXT resolves from Git Bash's bare `copilot`
           # invocation). The bridge spawns `copilot` directly
           # via exec.LookPath, so the bare name is correct here.
-          for agent in claude codex opencode pi copilot cursor; do  # dsh excluded — see comment above
+          for agent in claude codex opencode pi copilot cursor omp; do  # dsh excluded — see comment above
             case "$agent" in
               cursor) bin=cursor-agent ;;
               *)      bin="$agent" ;;
@@ -1314,7 +1355,7 @@ jobs:
           # copilot: a future refactor that drops the
           # `agent.Builtins.Register(copilot.NewStarter(...))`
           # line in cmd/nightme/agents.go would land here too.
-          for agent in claude codex opencode pi copilot cursor; do  # dsh excluded — see comment above
+          for agent in claude codex opencode pi copilot cursor omp; do  # dsh excluded — see comment above
             if ! echo "$out" | grep -qE "(^|[[:space:]])${agent}([[:space:]]|$)"; then
               echo "::error::nightme config Agents menu did not list $agent"
               exit 1
@@ -1364,7 +1405,7 @@ jobs:
           # exec.LookPath("cursor-agent") therefore works
           # identically on linux / macos / windows.
           workspace=$(mktemp -d)
-          for agent in claude codex opencode pi copilot cursor; do  # dsh excluded — see comment above
+          for agent in claude codex opencode pi copilot cursor omp; do  # dsh excluded — see comment above
             echo "--- bridge spawn: $agent ---"
             out_file=$(mktemp)
             # Spawn `nightme test` in the background. We feed it

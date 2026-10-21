@@ -35,6 +35,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/bridge/copilot"
 	"github.com/cnlangzi/nightme/internal/bridge/cursor"
 	"github.com/cnlangzi/nightme/internal/bridge/dsh"
+	"github.com/cnlangzi/nightme/internal/bridge/omp"
 	"github.com/cnlangzi/nightme/internal/bridge/opencode"
 	"github.com/cnlangzi/nightme/internal/bridge/pi"
 )
@@ -168,4 +169,24 @@ func init() {
 	// after the turn.
 	agent.Builtins.Register(
 		copilot.NewStarter("copilot", "copilot", copilot.DefaultACPArgs))
+
+	// omp — the long-lived `omp --mode rpc` NDJSON bridge. The
+	// omp CLI is the can1357/oh-my-pi terminal-first coding
+	// agent (binary name `omp`, see https://omp.sh). Like pi,
+	// it does not speak ACP and exposes a JSONL protocol on
+	// stdio over its official `--mode rpc` flag, with
+	// permission bypass via `--approval-mode yolo`. omp's wire
+	// is a fork of pi's but already diverged (turn-end signal is
+	// `agent_end{isTerminal:true}` rather than `agent_settled`;
+	// thinking is a dedicated content block rather than inline
+	// `<think>` tags), so the bridge lives in its own package
+	// to keep both wires independently evolvable.
+	//
+	// One-shot invocations use `omp -p --mode json
+	// --approval-mode yolo` (mirrors pi's print-mode route:
+	// same translator, no handshake, exit-after-turn). The
+	// bridge only injects transport/permission flags — model /
+	// provider / API key / MCP config flow from the user's own
+	// `~/.omp/` settings.
+	agent.Builtins.Register(omp.NewStarter("omp", "omp", nil))
 }

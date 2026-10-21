@@ -276,7 +276,7 @@ func ReviewWithPrompt(ctx context.Context, s Starter, cfg StartConfig, opts ...R
 // Starter.Review uses. It picks ReviewWithOcr when `ocr` is on $PATH
 // and ReviewWithPrompt otherwise — one uniform mechanism across all
 // bridges (claudecode, codex, cursor, acp, opencode, copilot, dsh,
-// pi; pty/bash returns ErrReviewNotSupported from its own Review).
+// pi, omp; pty/bash returns ErrReviewNotSupported from its own Review).
 //
 // Centralising the dispatch here means the per-bridge Review method
 // is a single line, and any future "prefer path X over Y" rule

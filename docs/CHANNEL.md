@@ -128,31 +128,82 @@
    shellDispatcher := shell.NewDispatcher()
    ir := inbound.New(commander, shellDispatcher, reactionRouter, cfg.Primary)
 
-3. 启动 channels，逐个 buildStack
+3. 启动 gw（不调 RestoreFromRegistry！）并宣告就绪 —— 此时还没有任何
+   channel 启动，就绪只依赖本地资源（config / stores / agent registry /
+   daemoncontrol socket）
+   gw := gateway.New(ir)
+   gw.Start(ctx)      // 允许零 pump
+   deps.OnReady()     // daemon 就绪：与任何 IM 网络往返无关
+
+4. 逐个启动 channels，每个有独立的 5s 预算（runtime.ChannelStartBudget），
+   启动成功的动态挂到 gw 上
    chs, _ := deps.NewChannels(cfg)  // channel.BuildAll(cfg)
-   var pumps []gateway.Pump
    for _, ch := range chs {
-       if err := ch.Start(ctx); err != nil {
-           logger.Error("channel start failed", "name", ch.Name(), "err", err)
-           continue
+       status := startChannel(ctx, ch)   // 超预算 → 放弃；panic → 记为 skipped
+       if status.Status != runtime.ChannelStatusConnected {
+           logger.Error("channel start failed", "name", status.Name,
+                        "status", status.Status, "err", status.Error)
+           continue                        // 跳过，不影响 daemon
        }
        ch.SetLogger(logger)
        fmt.Fprintf(out, "Channel %s connected\n", ch.Name())
-       
+
        mgr := buildStack(ch, buildStackOpts{...})
        runtime.allMgrs = append(runtime.allMgrs, mgr)
-       pumps = append(pumps, gateway.Pump{Channel: ch, Manager: mgr})
-       
+       gw.AttachPumps(gateway.Pump{Channel: ch, Manager: mgr})   // Start 之后也可 attach
+
        if deps.RegisterHealth != nil {
            deps.RegisterHealth(ch.HealthSnapshot)
        }
    }
-
-4. 启动 gw（不调 RestoreFromRegistry！）
-   gw := gateway.New(ir)
-   gw.AttachPumps(pumps...)
-   gw.Start(ctx)
+   deps.OnChannelsStarted(startup)   // 写 <DataDir>/daemon-startup.json
 ```
+
+**启动失败隔离**：channel 启动是唯一与外网通信的启动步骤，而各家适配器
+的凭据校验各有各的超时（telegram `getMe` 45s、discord `GetMe` 重试最坏
+约 91s、slack `auth.test` 45s）。因此：
+
+- **就绪不依赖任何 channel**。daemon 起来只取决于本地资源，飞书连上了就
+  不该被一个连不上的 telegram 拖死。
+- **每个 channel 独立的 5s 预算**（`runtime.ChannelStartBudget`）。预算是
+  调用方计时并放弃，不是给 `Start` 一个 deadline context：适配器普遍把
+  传入的 context 存给自己的收包循环（telegram 的 poll loop 就是从
+  `Start` 的 ctx 派生的），一个会到点的 context 会在 `Start` 刚返回时
+  就把刚连上的 channel 掐死。
+- **放弃后的补偿**。被放弃的适配器如果最终启动成功，daemon 会补一次
+  `Stop`，否则它会带着一条无人消费的收包循环常驻。
+- **panic 隔离**。`Start` 内的 panic 被转成一次普通失败（记 ERROR + 跳过），
+  适配器缺陷掀不翻主程序。
+- **零 channel 可用不阻止启动**。`channel.BuildAll` 在全部 builder 失败时
+  返回空列表并记 WARNING，daemon 照常 ready。
+- `Channel.Start(ctx)` 的方法集合不变，预算完全由调用方实现。
+
+### 3.1.1 启动结果如何回到终端
+
+子进程 stdout 是 `/dev/null`（Unix）或 NUL（Windows），所以 `nightme start`
+能知道每个 channel 的结果只有一个办法：子进程把结构化报告原子写入
+`<DataDir>/daemon-startup.json`，父进程读回来。
+
+- 成功：父进程打印每个 channel 一行 `channel <name>: <status>`，失败行附带原因。
+  status 取值：`connected` / `skipped`（`Start` 返回错误或 panic）/
+  `timeout`（超出 5s 预算）。
+- 失败：报告里的 `error` 字段并进父进程的报错文本。这是 Windows 唯一的
+  失败原因通道——Unix 还有继承的 ready 管道，Windows 只有 Ping 轮询，
+  过去所有启动失败都只显示同一句 "did not become ready within 15s"。
+- 报告带 PID：被 SIGKILL 的 daemon 会留下旧报告，父进程只认自己刚拉起
+  那个进程写的。
+
+判定原则始终是"**配了就用，没配就忽略**"：builder 报缺少凭据的 channel
+不计入报告，也不记 ERROR。
+
+### 3.1.2 出网代理
+
+`config.yaml` 顶层 `proxy: <url>` 或环境变量 `NIGHTME_PROXY`（环境变量优先），
+进程级作用于所有 channel 的出站 HTTP。两者都没配时，出站行为与没有这个
+设置时完全一致——`http.DefaultTransport` 的 `Proxy` 保持 Go 默认的
+`http.ProxyFromEnvironment`。实现见 `internal/httpclient`：
+`SetProcessProxy` 改写 `http.DefaultTransport`（覆盖所有走默认 Transport 的
+适配器），`ProxyFunc()` 给自建 Transport 的适配器（Feishu SDK client）用。
 
 ### 3.2 入站流程
 
@@ -255,8 +306,8 @@ var (
 func Register(name string, b Builder)
 func Available() []string
 func BuildAll(cfg *config.Config) ([]Channel, error) {
-    // 遍历 reg，挨个调 Builder；builder 返回 missing-creds 错误时跳过
-    // 全部失败才返回 error
+    // 遍历 reg，挨个调 Builder；builder 返回 missing-creds 错误时静默跳过
+    // 全部失败时返回空列表 + nil，并记一条 WARNING（带着每家的原因）
     // 成功构造的收集到 []Channel
 }
 ```
@@ -341,8 +392,8 @@ type Pump struct {
 }
 
 func New(dispatcher *inbound.Router) *Router
-func (r *Router) AttachPumps(pumps ...Pump)
-func (r *Router) Start(ctx context.Context) error
+func (r *Router) AttachPumps(pumps ...Pump)  // Start 之前或之后都可调用
+func (r *Router) Start(ctx context.Context) error  // 允许零 pump
 func (r *Router) Stop(ctx context.Context) error
 func (r *Router) pumpOne(ctx context.Context, p Pump) {
     defer r.wg.Done()
@@ -453,7 +504,7 @@ func (d *Dispatcher) Handle(ctx context.Context, mgr *chatsession.Manager, msg *
 
 ### 4.7 `runtime.runDaemon` —— 4 阶段 wire
 
-**文件**：`internal/runtime/runtime.go`（改）
+**文件**：`internal/runtime/runtime.go`
 
 ```go
 var allMgrs []*chatsession.Manager  // 包私有，gtw/gitStatus 用
@@ -468,8 +519,8 @@ func findChatSession(chatID string) *chatsession.ChatSession {
 func runDaemon(ctx, out, deps, sigCh, logger) error {
     // === 阶段 1: 共享资源 ===
     // 阶段 2: 共享编排
-    // 阶段 3: 启动 channels，逐个 buildStack
-    // 阶段 4: 启动 gw（不调 RestoreFromRegistry）
+    // 阶段 3: 启动 gw + 宣告就绪（零 pump，此时还没有任何 channel 启动）
+    // 阶段 4: 逐个启动 channels（各自 ChannelStartBudget 预算），动态 attach
 }
 
 func buildStack(ch channel.Channel, opts buildStackOpts) *chatsession.Manager {

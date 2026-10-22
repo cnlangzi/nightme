@@ -42,6 +42,7 @@ package channel
 
 import (
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
@@ -52,7 +53,7 @@ import (
 // Builder constructs a Channel from cfg. It should return an error
 // when cfg is missing the credentials the channel requires (e.g.
 // feishu returns error if cfg.Feishu.AppID/AppSecret is empty).
-// BuildAll treats such errors as "skip", not as fatal.
+// BuildAll treats such errors as "not configured", not as fatal.
 type Builder func(*config.Config) (Channel, error)
 
 // entry is one registry slot. The prefix is stored alongside the
@@ -149,10 +150,11 @@ func ChatIDPrefixes() []string {
 // silently (a single missing channel must not prevent the daemon
 // from starting the others).
 //
-// If every registered channel fails to construct, BuildAll returns
-// an error aggregating the per-channel messages, so the runtime
-// can surface a clear "no channels configured" diagnostic and tell
-// the user to run `nightme login <channel>` first.
+// If every registered channel fails to construct, BuildAll logs a
+// warning carrying each per-channel reason and returns an empty
+// list. Having no IM channel is not a daemon-level failure — the
+// runtime still serves the rest of its surface — so this is
+// reported, not returned.
 func BuildAll(cfg *config.Config) ([]Channel, error) {
 	mu.RLock()
 	names := make([]string, 0, len(reg))
@@ -179,10 +181,9 @@ func BuildAll(cfg *config.Config) ([]Channel, error) {
 		out = append(out, ch)
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf(
-			"no channels configured (%s); run `nightme login <channel>` first",
-			strings.Join(failures, "; "),
-		)
+		slog.Warn("no channels configured; run `nightme login <channel>` first",
+			"reason", strings.Join(failures, "; "))
+		return nil, nil
 	}
 	return out, nil
 }

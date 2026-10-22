@@ -12,10 +12,13 @@
 //     runtime.findChatSession to resolve the per-chat mgr
 //     (the per-channel mgr is the "owner" of each chatID
 //     because it's the one that bound the channel's Emitter)
-//  3. buildStack (per channel) — ch.Start + chatsession.Manager
-//     + messages.Emitter + WireRuntimeCallbacksAndRestore;
-//     stash mgr in runtime.allMgrs; build gateway.Pump
-//  4. start — gateway.AttachPumps + gateway.Start
+//  3. gateway + ready  — gateway.Start + deps.OnReady, both
+//     before any channel has started, so readiness never waits
+//     on an IM round trip
+//  4. channels (per channel) — ch.Start under a bounded budget +
+//     chatsession.Manager + messages.Emitter +
+//     WireRuntimeCallbacksAndRestore; stash mgr in
+//     runtime.allMgrs; AttachPumps
 //
 // Per-chat restore is lazy (Manager.GetOrCreate on first inbound),
 // so the daemon reaches ready without a synchronous chat_sessions
@@ -84,6 +87,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/gateway"
 	"github.com/cnlangzi/nightme/internal/gateway/inbound"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
+	"github.com/cnlangzi/nightme/internal/httpclient"
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/prcache"
 	"github.com/cnlangzi/nightme/internal/shell"
@@ -197,11 +201,13 @@ func (d Deps) fillDefaults() Deps {
 //     shellDispatcher / inbound.Router
 //     (all use runtime.findChatSession for the
 //     per-chat mgr lookup)
-//  3. buildStack        — for each registered channel with valid
-//     credentials: ch.Start + chatsession.Manager
-//     + messages.Emitter + WireCallbacks; stash
-//     mgr in runtime.allMgrs; build gateway.Pump
-//  4. start              — gateway.AttachPumps + gateway.Start
+//  3. gateway + ready   — gateway.Start, then deps.OnReady. No
+//     channel has been touched yet: readiness is a property of
+//     local resources, not of IM connectivity
+//  4. channels          — for each registered channel with valid
+//     credentials: ch.Start under ChannelStartBudget +
+//     chatsession.Manager + messages.Emitter + WireCallbacks;
+//     stash mgr in runtime.allMgrs; AttachPumps
 //
 // Per-chat restore is lazy (Manager.GetOrCreate on first inbound),
 // so the daemon reaches ready without a synchronous chat_sessions
@@ -264,13 +270,20 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	// v1.3+ multi-channel: scan the registry for every channel
 	// with valid credentials. A channel whose builder returns
 	// an error (missing creds) is skipped — runtime keeps going
-	// with whatever subset of channels did start.
+	// with whatever subset of channels did start. A cfg with no
+	// channel credentials at all is not a startup failure: the
+	// daemon still serves everything else, so it is a warning.
 	chs, err := deps.NewChannels(cfg)
 	if err != nil {
-		return fmt.Errorf("run: new channels: %w", err)
+		logger.Warn("run: new channels failed", "err", err)
+		chs = nil
 	}
 	if len(chs) == 0 {
-		return fmt.Errorf("run: no channels configured; run `nightme login <channel>` first")
+		logger.Warn("no channels configured; the daemon is running without any IM channel — run `nightme login <channel>` first")
+	}
+
+	if err := httpclient.SetProcessProxy(cfg.Proxy); err != nil {
+		logger.Warn("ignoring invalid outbound proxy", "proxy", cfg.Proxy, "err", err)
 	}
 
 	// Build the router wiring (slashCommandDispatcher +
@@ -432,45 +445,13 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 		logger:        logger,
 	}
 
-	var pumps []gateway.Pump
-	startedChannels := []channel.Channel{}
-	for _, ch := range chs {
-		if err := ch.Start(ctx); err != nil {
-			logger.Error("channel start failed",
-				"name", ch.Name(), "err", err)
-			continue
-		}
-		ch.SetLogger(logger)
-		fmt.Fprintf(out, "Channel %s connected\n", ch.Name())
-
-		pump, err := buildStack(ch, stackOpts, registerMgrInAllMgrs)
-		if err != nil {
-			return fmt.Errorf("run: build channel %s: %w", ch.Name(), err)
-		}
-		pumps = append(pumps, pump)
-		startedChannels = append(startedChannels, ch)
-
-		if deps.RegisterHealth != nil {
-			deps.RegisterHealth(ch.HealthSnapshot)
-		}
-	}
-	if len(pumps) == 0 {
-		return errors.New("run: all channels failed to start; check creds and logs")
-	}
-
-	// ── Phase 3.5: OS wake-from-sleep watcher ─────────────────
-	// F-fix-os-sleep-wakeup: detect OS resume-from-sleep and
-	// immediately kick every WakeKicker channel's reconnect
-	// path. The 30s F-41 prober (and the SDK's 2-min default)
-	// are unaware of host suspension; without this watcher the
-	// post-wake reconnect waits up to 30s for the next ticker
-	// tick (or longer for the network stack to recover). No-op
-	// on platforms without a wake detector.
-	startWakeWatcher(ctx, startedChannels, logger)
-
 	// ── Phase 4: start gateway ────────────────────────────────
+	// The gateway starts before any channel does and with no pumps
+	// attached; each channel is attached as it finishes starting.
+	// Readiness therefore depends on local resources only — config,
+	// stores, agent registry — and no IM network round trip can hold
+	// the daemon hostage.
 	gwImpl := gateway.New(ir)
-	gwImpl.AttachPumps(pumps...)
 	if err := gwImpl.Start(ctx); err != nil {
 		return fmt.Errorf("run: start gateway: %w", err)
 	}
@@ -480,8 +461,59 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 		deps.OnReady()
 	}
 
+	// ── Phase 5: start channels, one bounded budget each ───────
+	startedChannels := []channel.Channel{}
+	startup := ChannelStartup{Total: len(chs)}
+	for _, ch := range chs {
+		status := startChannel(ctx, ch)
+		if status.Status != ChannelStatusConnected {
+			logger.Error("channel start failed",
+				"name", status.Name, "status", status.Status, "err", status.Error)
+			startup.Results = append(startup.Results, status)
+			continue
+		}
+		ch.SetLogger(logger)
+		fmt.Fprintf(out, "Channel %s connected\n", ch.Name())
+
+		pump, err := buildStack(ch, stackOpts, registerMgrInAllMgrs)
+		if err != nil {
+			logger.Error("channel wiring failed", "name", ch.Name(), "err", err)
+			startup.Results = append(startup.Results, ChannelStatus{
+				Name:   ch.Name(),
+				Status: ChannelStatusSkipped,
+				Error:  err.Error(),
+			})
+			continue
+		}
+		gwImpl.AttachPumps(pump)
+		startedChannels = append(startedChannels, ch)
+		startup.Results = append(startup.Results, status)
+
+		if deps.RegisterHealth != nil {
+			deps.RegisterHealth(ch.HealthSnapshot)
+		}
+	}
+	if len(startedChannels) == 0 && len(chs) > 0 {
+		logger.Warn("no channel started; the daemon is running without any IM channel",
+			"configured", len(chs))
+	}
+	if deps.OnChannelsStarted != nil {
+		deps.OnChannelsStarted(startup)
+	}
+
+	// ── Phase 6: OS wake-from-sleep watcher ────────────────────
+	// F-fix-os-sleep-wakeup: detect OS resume-from-sleep and
+	// immediately kick every WakeKicker channel's reconnect
+	// path. The 30s F-41 prober (and the SDK's 2-min default)
+	// are unaware of host suspension; without this watcher the
+	// post-wake reconnect waits up to 30s for the next ticker
+	// tick (or longer for the network stack to recover). No-op
+	// on platforms without a wake detector.
+	startWakeWatcher(ctx, startedChannels, logger)
+
 	logger.Info("daemon running",
-		"channels", len(pumps),
+		"channels", len(startedChannels),
+		"configured", len(chs),
 		"primary", cfg.Primary)
 
 	// Block on signal or context cancellation.

@@ -17,7 +17,8 @@
 //
 // Responsibilities:
 //   - AttachPumps: register (Channel, Manager) tuples. Each
-//     tuple gets its own pumpOne goroutine on Start.
+//     tuple gets its own pumpOne goroutine, whether it is
+//     attached before or after Start.
 //   - Start / Stop lifecycle.
 //   - DispatchInbound: thin delegate to the wired
 //     *inbound.Router, used by the v0.x single-channel tests
@@ -62,6 +63,15 @@ type Router struct {
 	stopCh   chan struct{}
 	stopOnce sync.Once
 	wg       sync.WaitGroup
+
+	// startCtx is the context Start was called with. Pumps
+	// attached after Start (the daemon attaches each channel as it
+	// finishes starting) reuse it.
+	startCtx context.Context
+
+	// stopping latches once Stop has begun draining, so a late
+	// AttachPumps cannot call wg.Add while Stop is inside wg.Wait.
+	stopping bool
 
 	// v1.2 binding table (chat_id → session_id). Owned by Router.
 	bindings map[string]*BindingEntry
@@ -108,15 +118,26 @@ func New(ir *inbound.Router) *Router {
 }
 
 // AttachPumps registers one (Channel, Manager) tuple per
-// channel. Must be called before Start. The first pump's
-// Manager is captured as the mgrFallback for the legacy
-// DispatchInbound path.
+// channel. Pumps attached after Start are pumped as soon as
+// they arrive: the daemon reaches readiness before any channel
+// has started and attaches each one as it comes up, so a
+// pre-Start-only attach would drop every inbound message. The
+// first pump's Manager is captured as the mgrFallback for the
+// legacy DispatchInbound path.
 func (r *Router) AttachPumps(pumps ...Pump) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.pumps = append(r.pumps, pumps...)
 	if r.mgrFallback == nil && len(pumps) > 0 && pumps[0].Manager != nil {
 		r.mgrFallback = pumps[0].Manager
+	}
+	if r.stopCh == nil || r.stopping {
+		return
+	}
+	for _, p := range pumps {
+		p := p
+		r.wg.Add(1)
+		go r.pumpOne(r.startCtx, p)
 	}
 }
 
@@ -131,26 +152,20 @@ func (r *Router) Emitter() *struct{} { return nil }
 
 // Start launches one pumpOne goroutine per attached pump. Each
 // pump reads from its own channel and calls the shared
-// dispatch chain with its own mgr (per-channel). Blocks until
-// ctx is cancelled or Stop is called.
+// dispatch chain with its own mgr (per-channel). Starting with
+// zero pumps attached is valid — the daemon declares readiness
+// before any channel has started and attaches them as they come
+// up via AttachPumps. Blocks until ctx is cancelled or Stop is
+// called.
 func (r *Router) Start(ctx context.Context) error {
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.stopCh != nil {
-		r.mu.Unlock()
 		return errors.New("gateway: already started")
 	}
 	r.stopCh = make(chan struct{})
-	pumps := r.pumps
-	r.mu.Unlock()
-
-	if len(pumps) == 0 {
-		r.mu.Lock()
-		r.stopCh = nil
-		r.mu.Unlock()
-		return errors.New("gateway: no pumps attached")
-	}
-
-	for _, p := range pumps {
+	r.startCtx = ctx
+	for _, p := range r.pumps {
 		p := p
 		r.wg.Add(1)
 		go r.pumpOne(ctx, p)
@@ -163,6 +178,9 @@ func (r *Router) Start(ctx context.Context) error {
 func (r *Router) Stop(ctx context.Context) error {
 	r.mu.Lock()
 	stopCh := r.stopCh
+	if stopCh != nil {
+		r.stopping = true
+	}
 	r.mu.Unlock()
 	if stopCh == nil {
 		return nil

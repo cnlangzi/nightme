@@ -14,8 +14,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -105,6 +107,13 @@ func TestDetect_UnreachableErrorCarriesProbeCause(t *testing.T) {
 // TestProbe_UnreachableReasonSurvivesBothSchemes checks the
 // production prober end to end: against a closed port its error
 // keeps the per-scheme causes that Detect forwards to the user.
+//
+// The cause is asserted through errors.As / errors.Is rather than by
+// matching text. The wording is the OS's, not ours — Linux renders
+// ECONNREFUSED as "connect: connection refused", Windows as
+// "connectex: No connection could be made because the target machine
+// actively refused it" — so a text assertion here only ever passes on
+// the platform it was written on.
 func TestProbe_UnreachableReasonSurvivesBothSchemes(t *testing.T) {
 	// 127.0.0.1:1 is reserved and refuses connections, so both the
 	// HTTPS and the HTTP attempt fail without touching a network.
@@ -114,12 +123,22 @@ func TestProbe_UnreachableReasonSurvivesBothSchemes(t *testing.T) {
 	if !errors.Is(err, ErrProviderUnreachable) {
 		t.Fatalf("Detect: want ErrProviderUnreachable, got %v", err)
 	}
-	msg := err.Error()
-	if !strings.Contains(msg, "both https and http failed") {
+	if msg := err.Error(); !strings.Contains(msg, "both https and http failed") {
 		t.Errorf("Detect error %q: want the scheme-fallback summary", msg)
 	}
-	if !strings.Contains(msg, "connection refused") {
-		t.Errorf("Detect error %q: want the underlying transport cause", msg)
+
+	// Both schemes' failures must be reachable programmatically, and
+	// both must name the endpoint they came from — that is what lets
+	// the reply say which path was tried.
+	var urlErr *url.Error
+	if !errors.As(err, &urlErr) {
+		t.Fatalf("Detect error %v: want a *url.Error in the chain — the per-scheme cause was formatted as text", err)
+	}
+	if !strings.Contains(urlErr.URL, "/api/v4/version") {
+		t.Errorf("Detect error %q: want the /api/v4/version endpoint named", urlErr.URL)
+	}
+	if !errors.Is(err, syscall.ECONNREFUSED) {
+		t.Errorf("Detect error %v: want ECONNREFUSED reachable via errors.Is", err)
 	}
 }
 

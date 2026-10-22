@@ -1056,8 +1056,13 @@ func (p *ExecHTTPProber) Probe(ctx context.Context, host, path string) ([]byte, 
 	}
 	// No host/path prefix here: each `*url.Error` already spells out
 	// the URL it failed on, and the reply templates that render this
-	// string have already named the remote.
-	return nil, fmt.Errorf("both https and http failed: %s; %s",
+	// string have already named the remote. Both causes are wrapped
+	// rather than formatted, so errors.Is / errors.As keep reaching
+	// the per-scheme *url.Error underneath — unreachableError's
+	// contract says the transport cause stays in the chain, and the
+	// log-oriented callers need it there even when the chat reply
+	// only shows the text.
+	return nil, fmt.Errorf("both https and http failed: %w; %w",
 		https.err, http.err)
 }
 

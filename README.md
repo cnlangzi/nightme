@@ -562,6 +562,8 @@ logging:
 
 paths:
   data_dir: "~/.nightme"  # chat_sessions.json + agent_sessions.json root
+
+proxy: ""                  # outbound HTTP proxy for every channel; unset = HTTP_PROXY/HTTPS_PROXY as usual
 ```
 
 The `/gtw` workflow reads a **separate** file: `~/.nightme/gtw.yml` — see the [Git Team Workflow section](#git-team-workflow-gtw) above.

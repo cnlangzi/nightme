@@ -517,6 +517,8 @@ logging:
 
 paths:
   data_dir: "~/.nightme"  # chat_sessions.json + agent_sessions.json 的根
+
+proxy: ""                  # 所有 channel 的出网代理；不配 = 沿用 HTTP_PROXY / HTTPS_PROXY
 ```
 
 `/gtw` 工作流读的是 **另一个文件**：`~/.nightme/gtw.yml`——见上文的 [Hooks 那一节](#hooks把开发环境一起带过去)。

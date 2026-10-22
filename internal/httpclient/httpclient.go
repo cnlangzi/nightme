@@ -26,7 +26,10 @@
 package httpclient
 
 import (
+	"fmt"
 	"net/http"
+	"net/url"
+	"sync"
 	"time"
 )
 
@@ -35,6 +38,14 @@ import (
 // timeout we previously inlined across updater / version / dsh
 // host code paths.
 const DefaultTimeout = 45 * time.Second
+
+// processProxy holds the proxy resolver installed by
+// SetProcessProxy. nil means "nothing configured" and every
+// reader falls back to http.ProxyFromEnvironment.
+var (
+	processProxyMu sync.RWMutex
+	processProxy   func(*http.Request) (*url.URL, error)
+)
 
 // Default returns a fresh *http.Client with DefaultTimeout and
 // Go's default Transport. The default Transport uses
@@ -53,4 +64,54 @@ func Default() *http.Client {
 // latency-sensitive call (e.g. login flow probes).
 func DefaultWithTimeout(timeout time.Duration) *http.Client {
 	return &http.Client{Timeout: timeout}
+}
+
+// SetProcessProxy installs proxyURL as the outbound proxy for every
+// HTTP client that leaves its Transport at the default. It also
+// replaces the resolver on http.DefaultTransport so callers that
+// build their own &http.Client{} (every channel adapter does) are
+// covered.
+//
+// An empty proxyURL is a no-op, so a config that never sets one
+// leaves the standard HTTP_PROXY / HTTPS_PROXY handling exactly as
+// it was. Call it once during daemon startup, before the first
+// outbound request — http.DefaultTransport must not be mutated
+// while requests are in flight.
+func SetProcessProxy(proxyURL string) error {
+	if proxyURL == "" {
+		return nil
+	}
+	u, err := url.Parse(proxyURL)
+	if err != nil {
+		return fmt.Errorf("parse proxy url %q: %w", proxyURL, err)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("proxy url %q has no host", proxyURL)
+	}
+	resolve := http.ProxyURL(u)
+
+	processProxyMu.Lock()
+	processProxy = resolve
+	processProxyMu.Unlock()
+
+	if tr, ok := http.DefaultTransport.(*http.Transport); ok {
+		tr.Proxy = resolve
+	}
+	return nil
+}
+
+// ProxyFunc returns the resolver a hand-built Transport should use:
+// the process-wide proxy when one is configured, otherwise Go's
+// http.ProxyFromEnvironment. Transports that cannot use
+// http.DefaultTransport (the Feishu SDK client builds its own) wire
+// this in instead of calling http.ProxyFromEnvironment directly, so
+// cfg.Proxy / NIGHTME_PROXY reaches them too.
+func ProxyFunc() func(*http.Request) (*url.URL, error) {
+	processProxyMu.RLock()
+	fn := processProxy
+	processProxyMu.RUnlock()
+	if fn != nil {
+		return fn
+	}
+	return http.ProxyFromEnvironment
 }

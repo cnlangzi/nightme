@@ -49,6 +49,7 @@ import (
 //	session: ...
 //	logging: ...
 //	paths: ...
+//	proxy: http://127.0.0.1:7890   # optional process-wide outbound proxy
 //
 // User-configured `agents:` entries override built-in agents with the
 // same name (merge happens at runtime, not parse time).
@@ -75,6 +76,12 @@ type Config struct {
 	Session  SessionConfig  `yaml:"session"`
 	Logging  LoggingConfig  `yaml:"logging"`
 	Paths    PathsConfig    `yaml:"paths"`
+
+	// Proxy is an outbound HTTP proxy URL (e.g.
+	// http://127.0.0.1:7890) applied process-wide to every channel's
+	// outbound requests. Empty — the default — leaves the standard
+	// HTTP_PROXY / HTTPS_PROXY environment handling untouched.
+	Proxy string `yaml:"proxy,omitempty"`
 }
 
 // EffectiveName returns the configured Name, or the local machine
@@ -532,6 +539,9 @@ func applyEnvOverrides(c *Config) {
 	}
 	if v := os.Getenv("NIGHTME_PATHS_DATA_DIR"); v != "" {
 		c.Paths.DataDir = v
+	}
+	if v := os.Getenv("NIGHTME_PROXY"); v != "" {
+		c.Proxy = v
 	}
 
 	// Numeric session overrides — only set when the variable parses.

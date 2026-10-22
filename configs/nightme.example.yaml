@@ -92,3 +92,8 @@ paths:
   # Root for the v1.2 persistence stores (chat_sessions.json +
   # agent_sessions.json) and per-session scratch.
   data_dir: "~/.nightme"
+
+# Outbound HTTP proxy for every channel (http://, https://, socks5://).
+# Empty/unset -> the standard HTTP_PROXY / HTTPS_PROXY environment
+# handling, unchanged. Overridable with NIGHTME_PROXY.
+proxy: ""

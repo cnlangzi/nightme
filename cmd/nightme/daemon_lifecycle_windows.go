@@ -43,6 +43,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"runtime/debug"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -130,6 +131,11 @@ func startDaemon(ctx context.Context, out io.Writer, cfg *config.Config, paths d
 			return ctx.Err()
 		case <-ticker.C:
 			if time.Now().After(deadline) {
+				// Read the startup report before killing the child:
+				// it is the only channel this platform has for
+				// "here is why startup is stuck", and the child is
+				// still alive precisely because it is stuck.
+				reason := startupFailureReason(paths, pid)
 				_ = child.Process.Kill()
 				_ = child.Wait()
 				// Same rationale as daemon_lifecycle_unix.go: the
@@ -141,12 +147,7 @@ func startDaemon(ctx context.Context, out io.Writer, cfg *config.Config, paths d
 				// failed to open the capture file; in that case the
 				// diagnostic aid is gone, so don't promise a file the
 				// operator cannot open.
-				if stderrPath != "" {
-					return nmerrors.New(nmerrors.CodeBridgeError, fmt.Sprintf(
-						"daemon did not become ready within 15s; child stderr: %s", stderrPath))
-				}
-				return nmerrors.New(nmerrors.CodeBridgeError,
-					"daemon did not become ready within 15s (stderr capture was disabled at start; see warning above)")
+				return readinessTimeoutError(reason, stderrPath)
 			}
 			ok, err := daemoncontrol.Ping(paths.Socket, startReadyPingTimeout)
 			if err == nil && ok {
@@ -184,6 +185,7 @@ func startDaemon(ctx context.Context, out io.Writer, cfg *config.Config, paths d
 						"pid", pid, "err", err)
 				}
 				fmt.Fprintf(out, "nightme daemon started (pid=%d, channel=%s)\n", pid, opts.channel)
+				printStartupChannels(out, waitStartupChannels(paths, pid, startupReportWait))
 				if cfg.Logging.File != "" {
 					fmt.Fprintf(out, "log: %s\n", cfg.Logging.File)
 				}
@@ -196,9 +198,8 @@ func startDaemon(ctx context.Context, out io.Writer, cfg *config.Config, paths d
 			// Detect case 2 so we surface a clearer error.
 			if errors.Is(err, daemoncontrol.ErrNotRunning) {
 				if state, werr := child.Process.Wait(); werr == nil && state != nil {
-					return nmerrors.New(nmerrors.CodeBridgeError,
-						fmt.Sprintf("daemon child exited before becoming ready (code=%d); crash output: %s",
-							exitCodeOf(state), stderrPath))
+					return childExitedError(exitCodeOf(state),
+						startupFailureReason(paths, pid), stderrPath)
 				}
 			}
 		}
@@ -216,14 +217,23 @@ func exitCodeOf(state *os.ProcessState) int {
 	return state.ExitCode()
 }
 
+// childExitedError is what the parent reports when the child dies
+// before signalling readiness. Windows has no readiness pipe, so the
+// only evidence of why is the child's exit code plus whatever it
+// managed to publish in the startup report — reason, which is empty
+// when the child died before it could write one.
+func childExitedError(code int, reason, stderrPath string) error {
+	return nmerrors.New(nmerrors.CodeBridgeError,
+		fmt.Sprintf("daemon child exited before becoming ready (code=%d)%s; crash output: %s",
+			code, detailSuffix(reason), stderrPath))
+}
+
 // runDaemonChild is the Windows daemon process.
 //
-// Unlike the Unix version it installs no panic recover: there is no
-// readiness pipe here (the parent polls Ping), so a panic already
-// surfaces to the parent as "daemon child exited before becoming
-// ready (code=...)" and the stack lands in the stderr capture file.
-// The Unix recover exists only to turn an otherwise information-free
-// EOF on that pipe into a real message.
+// Windows has no readiness pipe — the parent polls Ping — so every
+// startup failure used to reach the operator as the same sentence.
+// The startup report file is what carries the reason back now, and
+// it doubles as the place the per-channel outcomes are published.
 func runDaemonChild(cmd *cobra.Command, reg *cmdRegistry) (retErr error) {
 	// Take the daemon lock ourselves. Unlike Unix, we can't
 	// inherit the parent's fd — LockFileEx is per-handle, so
@@ -237,12 +247,29 @@ func runDaemonChild(cmd *cobra.Command, reg *cmdRegistry) (retErr error) {
 	if err != nil {
 		return err
 	}
+	report := newStartupReportWriter(startupReportPath(paths))
+	// A panic here would otherwise reach the parent as nothing but
+	// an exit code. Record it in the report first, then re-panic so
+	// the stack still lands in the stderr capture and the exit
+	// status stays non-zero.
+	defer func() {
+		if r := recover(); r != nil {
+			report.SetError(fmt.Sprintf("daemon panic: %v", r))
+			loggerFromContext(cmd.Context()).Error("daemon panic",
+				"err", r, "stack", string(debug.Stack()))
+			panic(r)
+		}
+	}()
+	failStartup := func(cause error) error {
+		report.SetError(cause.Error())
+		return cause
+	}
 	lock, err := daemoncontrol.TryLock(paths.DaemonLock)
 	if err != nil {
 		if errors.Is(err, daemoncontrol.ErrLocked) {
-			return errors.New("nightme daemon is already running")
+			return failStartup(errors.New("nightme daemon is already running"))
 		}
-		return fmt.Errorf("acquire daemon lock: %w", err)
+		return failStartup(fmt.Errorf("acquire daemon lock: %w", err))
 	}
 	defer lock.Close()
 
@@ -258,7 +285,7 @@ func runDaemonChild(cmd *cobra.Command, reg *cmdRegistry) (retErr error) {
 	}
 	server, err := daemoncontrol.Listen(paths.Socket, status, cancel)
 	if err != nil {
-		return fmt.Errorf("daemoncontrol.Listen: %w", err)
+		return failStartup(fmt.Errorf("daemoncontrol.Listen: %w", err))
 	}
 	defer server.Close()
 	serveErr := make(chan error, 1)
@@ -266,8 +293,10 @@ func runDaemonChild(cmd *cobra.Command, reg *cmdRegistry) (retErr error) {
 
 	deps := runtime.DefaultDeps()
 	deps.OnReady = func() {
+		report.SetReady()
 		server.SetReady()
 	}
+	deps.OnChannelsStarted = report.SetChannels
 	deps.RegisterHealth = func(fn func() (string, json.RawMessage, error)) {
 		server.SetHealthProvider(fn)
 	}
@@ -282,6 +311,9 @@ func runDaemonChild(cmd *cobra.Command, reg *cmdRegistry) (retErr error) {
 		onStopRequest:    onStopRequestDefault,
 		onRestartRequest: onRestartRequestDefault,
 	})
+	if err != nil && server.Status().State == "starting" {
+		report.SetError(err.Error())
+	}
 	_ = server.Close()
 	// Give Serve a brief window to unwind before we return; on
 	// Windows the process-exit path is what actually unblocks

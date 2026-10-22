@@ -116,11 +116,12 @@ func TestBuildAll_IteratesInAlphabeticalOrder(t *testing.T) {
 	}
 }
 
-// TestBuildAll_AllBuildersErrorReturnsAggregate verifies that
-// when every registered builder fails (no usable credentials),
-// BuildAll returns a clear error so the runtime can surface
-// "run `nightme login <channel>` first".
-func TestBuildAll_AllBuildersErrorReturnsAggregate(t *testing.T) {
+// TestBuildAll_AllBuildersErrorReturnsEmptyList verifies that when
+// every registered builder fails (no usable credentials), BuildAll
+// returns no channels and no error. Having no IM channel configured
+// is a state the daemon serves in — it logs a warning and keeps
+// running — not a startup failure.
+func TestBuildAll_AllBuildersErrorReturnsEmptyList(t *testing.T) {
 	original := snapshot()
 	defer restore(original)
 
@@ -130,9 +131,12 @@ func TestBuildAll_AllBuildersErrorReturnsAggregate(t *testing.T) {
 
 	Register("only-failing", "o_", makeStubBuilder("only-failing", errors.New("no creds")))
 
-	_, err := BuildAll(&config.Config{})
-	if err == nil {
-		t.Fatal("BuildAll: want error (all builders fail), got nil")
+	chs, err := BuildAll(&config.Config{})
+	if err != nil {
+		t.Fatalf("BuildAll: want nil error, got %v", err)
+	}
+	if len(chs) != 0 {
+		t.Fatalf("BuildAll returned %d channels, want 0", len(chs))
 	}
 }
 

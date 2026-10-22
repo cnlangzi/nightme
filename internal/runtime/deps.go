@@ -58,6 +58,14 @@ type Deps struct {
 	// not a single shared one). The closure receives the
 	// channel's HealthSnapshot function.
 	RegisterHealth func(snapshot func() (string, json.RawMessage, error))
+
+	// OnChannelsStarted, if non-nil, is called once with the
+	// outcome of every constructed channel, after the whole
+	// channel startup phase has been decided. The daemon child
+	// uses it to publish the startup report `nightme start`
+	// prints — the child's own stdout goes to /dev/null, so the
+	// operator would otherwise never learn which channels came up.
+	OnChannelsStarted func(ChannelStartup)
 }
 
 // DefaultDeps returns the production Deps: real config loader,

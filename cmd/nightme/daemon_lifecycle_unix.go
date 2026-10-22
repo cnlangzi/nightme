@@ -110,6 +110,7 @@ func startDaemon(ctx context.Context, out io.Writer, cfg *config.Config, paths d
 		_ = child.Wait()
 		return fmt.Errorf("handoff daemon lock: %w", err)
 	}
+	pid := child.Process.Pid
 
 	msgCh := make(chan bootstrapMessage, 1)
 	errCh := make(chan error, 1)
@@ -129,6 +130,9 @@ func startDaemon(ctx context.Context, out io.Writer, cfg *config.Config, paths d
 	case msg := <-msgCh:
 		if !msg.Ready {
 			_ = child.Wait()
+			if msg.Error == "" {
+				msg.Error = startupFailureReason(paths, pid)
+			}
 			if msg.Error == "" {
 				msg.Error = "daemon startup failed"
 			}
@@ -153,6 +157,10 @@ func startDaemon(ctx context.Context, out io.Writer, cfg *config.Config, paths d
 		}
 		return fmt.Errorf("read daemon readiness: %w", err)
 	case <-timer.C:
+		// Read the startup report while the child is still alive:
+		// it is stuck, so this is its last chance to say why, and
+		// the report is the only channel Windows has for it.
+		reason := startupFailureReason(paths, pid)
 		_ = child.Process.Signal(syscall.SIGTERM)
 		_ = child.Wait()
 		// Deliberately NOT called "crash output" here: a timeout
@@ -164,12 +172,7 @@ func startDaemon(ctx context.Context, out io.Writer, cfg *config.Config, paths d
 		// to open the capture file; "/dev/null" is a real path on
 		// Unix but not one the operator can usefully read, so we
 		// skip the path suffix when capture is disabled.
-		if stderrPath != "" {
-			return nmerrors.New(nmerrors.CodeBridgeError, fmt.Sprintf(
-				"daemon did not become ready within 15s; child stderr: %s", stderrPath))
-		}
-		return nmerrors.New(nmerrors.CodeBridgeError,
-			"daemon did not become ready within 15s (stderr capture was disabled at start; see warning above)")
+		return readinessTimeoutError(reason, stderrPath)
 	case <-ctx.Done():
 		_ = child.Process.Signal(syscall.SIGTERM)
 		_ = child.Wait()
@@ -185,11 +188,11 @@ func startDaemon(ctx context.Context, out io.Writer, cfg *config.Config, paths d
 		}
 		return errors.New("verify daemon readiness: daemon is not ready")
 	}
-	pid := child.Process.Pid
 	if err := child.Process.Release(); err != nil {
 		return fmt.Errorf("release daemon process handle: %w", err)
 	}
 	fmt.Fprintf(out, "nightme daemon started (pid=%d, channel=%s)\n", pid, opts.channel)
+	printStartupChannels(out, waitStartupChannels(paths, pid, startupReportWait))
 	if cfg.Logging.File != "" {
 		fmt.Fprintf(out, "log: %s\n", cfg.Logging.File)
 	}
@@ -230,6 +233,10 @@ func runDaemonChild(cmd *cobra.Command, reg *cmdRegistry) (retErr error) {
 		_ = readyFile.Close()
 	}
 
+	// report is nil until the data directory is known; the panic
+	// handler below checks before writing to it.
+	var report *startupReportWriter
+
 	// A panic on this goroutine used to reach the parent as a bare
 	// EOF: the deferred readyFile.Close() fired during unwinding, so
 	// the pipe closed with nothing written. Turn it into a real
@@ -244,6 +251,9 @@ func runDaemonChild(cmd *cobra.Command, reg *cmdRegistry) (retErr error) {
 	// exactly why it exists.
 	defer func() {
 		if r := recover(); r != nil {
+			if report != nil {
+				report.SetError(fmt.Sprintf("daemon panic: %v", r))
+			}
 			writeBootstrap(bootstrapMessage{Error: fmt.Sprintf("daemon panic: %v", r)})
 			loggerFromContext(cmd.Context()).Error("daemon panic",
 				"err", r, "stack", string(debug.Stack()))
@@ -261,6 +271,16 @@ func runDaemonChild(cmd *cobra.Command, reg *cmdRegistry) (retErr error) {
 		writeBootstrap(bootstrapMessage{Error: err.Error()})
 		return err
 	}
+	// The startup report is the second, cross-platform source of
+	// truth for `nightme start`: it carries the per-channel outcomes
+	// the readiness pipe has no room for, and it survives the timeout
+	// path where the pipe has already been closed.
+	report = newStartupReportWriter(startupReportPath(paths))
+	failStartup := func(cause error) error {
+		report.SetError(cause.Error())
+		writeBootstrap(bootstrapMessage{Error: cause.Error()})
+		return cause
+	}
 	ctx, cancel := context.WithCancel(cmd.Context())
 	defer cancel()
 	status := daemoncontrol.Status{
@@ -272,8 +292,7 @@ func runDaemonChild(cmd *cobra.Command, reg *cmdRegistry) (retErr error) {
 	}
 	server, err := daemoncontrol.Listen(paths.Socket, status, cancel)
 	if err != nil {
-		writeBootstrap(bootstrapMessage{Error: err.Error()})
-		return err
+		return failStartup(err)
 	}
 	defer server.Close()
 	serveErr := make(chan error, 1)
@@ -281,9 +300,11 @@ func runDaemonChild(cmd *cobra.Command, reg *cmdRegistry) (retErr error) {
 
 	deps := runtime.DefaultDeps()
 	deps.OnReady = func() {
+		report.SetReady()
 		server.SetReady()
 		writeBootstrap(bootstrapMessage{Ready: true})
 	}
+	deps.OnChannelsStarted = report.SetChannels
 	// F-40: the lifecycle layer holds the daemoncontrol server
 	// reference. The runtime.Deps.RegisterHealth callback receives
 	// the channel's HealthSnapshot function (Phase 2.1: every
@@ -305,6 +326,7 @@ func runDaemonChild(cmd *cobra.Command, reg *cmdRegistry) (retErr error) {
 		onRestartRequest: onRestartRequestDefault,
 	})
 	if err != nil && server.Status().State == "starting" {
+		report.SetError(err.Error())
 		writeBootstrap(bootstrapMessage{Error: err.Error()})
 	}
 	_ = server.Close()

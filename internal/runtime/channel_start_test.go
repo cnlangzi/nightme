@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -152,6 +153,66 @@ func TestStartChannel_PanicIsIsolated(t *testing.T) {
 	}
 	if !strings.Contains(got.Error, "boom") {
 		t.Errorf("error = %q, want it to name the panic", got.Error)
+	}
+}
+
+// TestStartChannels_RunsConcurrentlyAndKeepsInputOrder is what stops
+// the parallel start from quietly regressing back to one-at-a-time.
+// Each channel takes the same 250ms; run serially the phase would
+// cost N×250ms, which at N=6 is 1.5s against a budgeted parallel run
+// of ~250ms.
+//
+// The order assertion matters as much as the timing: results must
+// come back indexed the way chs was given, not in completion order,
+// or `nightme start` would print a different channel list every run.
+func TestStartChannels_RunsConcurrentlyAndKeepsInputOrder(t *testing.T) {
+	const (
+		base     = 250 * time.Millisecond
+		channels = 6
+	)
+
+	// Descending delays so completion order is the reverse of input
+	// order — a completion-ordered implementation would fail the
+	// assertions below rather than accidentally passing.
+	chs := make([]channel.Channel, 0, channels)
+	want := make([]string, 0, channels)
+	var slowest, serialFor time.Duration
+	for i := range channels {
+		name := fmt.Sprintf("ch-%d", i)
+		delay := base + time.Duration(channels-i)*20*time.Millisecond
+		if delay > slowest {
+			slowest = delay
+		}
+		serialFor += delay
+		chs = append(chs, newStartFuncChannel(name, func(context.Context) error {
+			time.Sleep(delay)
+			return nil
+		}))
+		want = append(want, name)
+	}
+
+	begin := time.Now()
+	got := startChannels(t.Context(), chs)
+	elapsed := time.Since(begin)
+
+	// Concurrently the phase costs the slowest channel plus slack;
+	// serially it costs their sum.
+	if budget := slowest + 150*time.Millisecond; elapsed > budget {
+		t.Errorf("starting %d channels took %s; want at most %s (the slowest one), not %s — they are not running concurrently",
+			channels, elapsed, budget, serialFor)
+	}
+
+	if len(got) != channels {
+		t.Fatalf("got %d statuses, want %d", len(got), channels)
+	}
+	for i, name := range want {
+		if got[i].Name != name {
+			t.Errorf("statuses[%d].Name = %q, want %q (results must follow input order, not completion order)",
+				i, got[i].Name, name)
+		}
+		if got[i].Status != ChannelStatusConnected {
+			t.Errorf("statuses[%d].Status = %q, want %q", i, got[i].Status, ChannelStatusConnected)
+		}
 	}
 }
 

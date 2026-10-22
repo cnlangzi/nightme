@@ -47,6 +47,10 @@ const daemonStartupReportName = "daemon-startup.json"
 // the daemon's channel results after readiness was already
 // confirmed. Readiness does not depend on any channel, so running out
 // only means the report prints incomplete; the start still succeeds.
+//
+// It does have to outlast the daemon's whole channel phase, which is
+// one runtime.ChannelStartBudget because channels start concurrently.
+// TestStartupReportWaitOutlastsChannelStartBudget pins that.
 const startupReportWait = 15 * time.Second
 
 // startupReportPollInterval is how often the parent re-reads the

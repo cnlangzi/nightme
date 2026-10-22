@@ -24,6 +24,22 @@ func reportPaths(t *testing.T) daemoncontrol.Paths {
 	return daemoncontrol.Paths{Dir: t.TempDir()}
 }
 
+// TestStartupReportWaitOutlastsChannelStartBudget pins the one real
+// coupling between these two constants. The daemon's channel phase
+// lasts one runtime.ChannelStartBudget (channels start
+// concurrently); if the parent's wait were the shorter of the two,
+// `nightme start` would give up on a report that was still being
+// written and print nothing — the exact "started but says nothing"
+// failure this file exists to prevent. Raising either constant is
+// fine; inverting their order is not.
+func TestStartupReportWaitOutlastsChannelStartBudget(t *testing.T) {
+	if startupReportWait <= runtime.ChannelStartBudget {
+		t.Fatalf("startupReportWait (%s) must outlast the daemon's channel phase (%s), "+
+			"or `nightme start` stops waiting for a report that is still being written",
+			startupReportWait, runtime.ChannelStartBudget)
+	}
+}
+
 // TestStartupReport_RoundTrip covers the whole parent-side contract
 // for a daemon that came up cleanly: one line per channel, each
 // successful one without noise, each failed one with its reason.
@@ -35,7 +51,7 @@ func TestStartupReport_RoundTrip(t *testing.T) {
 		Total: 4,
 		Results: []runtime.ChannelStatus{
 			{Name: "feishu", Status: runtime.ChannelStatusConnected},
-			{Name: "telegram", Status: runtime.ChannelStatusTimeout, Error: "start exceeded 5s budget"},
+			{Name: "telegram", Status: runtime.ChannelStatusTimeout, Error: "start exceeded 10s budget"},
 			{Name: "slack", Status: runtime.ChannelStatusSkipped, Error: "auth.test: invalid_auth"},
 			{Name: "discord", Status: runtime.ChannelStatusConnected},
 		},
@@ -47,7 +63,7 @@ func TestStartupReport_RoundTrip(t *testing.T) {
 	got := buf.String()
 	for _, want := range []string{
 		"channel feishu: connected",
-		"channel telegram: timeout (start exceeded 5s budget)",
+		"channel telegram: timeout (start exceeded 10s budget)",
 		"channel slack: skipped (auth.test: invalid_auth)",
 		"channel discord: connected",
 	} {

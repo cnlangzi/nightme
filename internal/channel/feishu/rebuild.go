@@ -56,8 +56,6 @@ import (
 	"github.com/gorilla/websocket"
 	larkdispatcher "github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
-
-	"github.com/cnlangzi/nightme/internal/httpclient"
 )
 
 const (
@@ -473,7 +471,7 @@ func (a *Adapter) buildWSClient(handler *larkdispatcher.EventDispatcher) *larkws
 	}
 
 	httpTransport := &http.Transport{
-		Proxy:                 httpclient.ProxyFunc(),
+		Proxy:                 http.ProxyFromEnvironment,
 		DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
 		ForceAttemptHTTP2:     true,
 		TLSHandshakeTimeout:   30 * time.Second,

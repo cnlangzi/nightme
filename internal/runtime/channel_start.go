@@ -23,12 +23,16 @@
 // on success would kill a channel that just connected. And an adapter
 // that finishes starting after we gave up on it is stopped, otherwise
 // it would run forever with no pump draining its Incoming channel.
+//
+// Channels start concurrently, so a host that cannot reach one IM API
+// costs ChannelStartBudget once rather than once per broken channel.
 
 package runtime
 
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/channel"
@@ -37,11 +41,18 @@ import (
 // ChannelStartBudget is the wall clock a single Channel.Start may
 // consume before the daemon gives up on it and carries on without it.
 //
-// It is deliberately far below the 15s the parent process waits for
-// the readiness handshake: channel startup happens after readiness is
-// declared, so this budget bounds how long a broken channel delays
-// every channel behind it in the startup order, not the daemon.
-const ChannelStartBudget = 5 * time.Second
+// Generous on purpose. Every adapter's own credential check is a
+// network round trip to a third party (telegram 45s, slack 45s,
+// discord up to ~91s with retries), and a link that is merely slow is
+// indistinguishable from a bad token until you wait it out. Cutting a
+// channel at 5s throws away ones that would have connected at 8s; at
+// 10s the false-positive margin is worth the wait, because channels
+// start concurrently and after readiness is declared — so this budget
+// delays nothing but the startup report `nightme start` prints.
+//
+// Its ceiling is that report wait: `startupReportWait` in
+// cmd/nightme has to outlast the whole phase.
+const ChannelStartBudget = 10 * time.Second
 
 // Status values reported through ChannelStatus.Status.
 const (
@@ -73,6 +84,29 @@ type ChannelStatus struct {
 type ChannelStartup struct {
 	Total   int
 	Results []ChannelStatus
+}
+
+// startChannels runs every channel's Start concurrently under
+// ChannelStartBudget and returns one status per channel, indexed the
+// way chs was given — never in completion order, so the startup
+// report and `nightme start` output stay stable across runs.
+//
+// Only Start is concurrent. Everything the daemon does afterwards
+// (buildStack, AttachPumps, health registration) stays in one pass
+// over chs, which keeps allMgrs ordering, the health provider choice
+// and the operator-facing output deterministic.
+func startChannels(ctx context.Context, chs []channel.Channel) []ChannelStatus {
+	statuses := make([]ChannelStatus, len(chs))
+	var wg sync.WaitGroup
+	for i, ch := range chs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			statuses[i] = startChannel(ctx, ch)
+		}()
+	}
+	wg.Wait()
+	return statuses
 }
 
 // startChannel runs ch.Start under ChannelStartBudget and reports how

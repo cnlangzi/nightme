@@ -87,7 +87,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/gateway"
 	"github.com/cnlangzi/nightme/internal/gateway/inbound"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
-	"github.com/cnlangzi/nightme/internal/httpclient"
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/prcache"
 	"github.com/cnlangzi/nightme/internal/shell"
@@ -282,10 +281,6 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 		logger.Warn("no channels configured; the daemon is running without any IM channel — run `nightme login <channel>` first")
 	}
 
-	if err := httpclient.SetProcessProxy(cfg.Proxy); err != nil {
-		logger.Warn("ignoring invalid outbound proxy", "proxy", cfg.Proxy, "err", err)
-	}
-
 	// Build the router wiring (slashCommandDispatcher +
 	// messageDispatcher).
 	// messageDispatcher is constructed later (after `em` is
@@ -461,11 +456,18 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 		deps.OnReady()
 	}
 
-	// ── Phase 5: start channels, one bounded budget each ───────
+	// ── Phase 5: start channels concurrently, then wire them up ──
+	// Start is the network-bound part, so it runs in parallel: the
+	// whole phase costs ChannelStartBudget once instead of once per
+	// broken channel. Wiring stays in a single ordered pass so the
+	// per-channel managers, the health provider and the operator's
+	// startup output all come out the same way on every run.
+	statuses := startChannels(ctx, chs)
+
 	startedChannels := []channel.Channel{}
 	startup := ChannelStartup{Total: len(chs)}
-	for _, ch := range chs {
-		status := startChannel(ctx, ch)
+	for i, ch := range chs {
+		status := statuses[i]
 		if status.Status != ChannelStatusConnected {
 			logger.Error("channel start failed",
 				"name", status.Name, "status", status.Status, "err", status.Error)

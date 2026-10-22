@@ -46,7 +46,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/messages"
@@ -962,20 +961,14 @@ func resolveProvider(ctx context.Context, c Context, deps HandlerDeps) (GitProvi
 	if err != nil || remoteURL == "" {
 		return nil, "", "", fmt.Errorf("no `origin` remote — add one with `git remote add origin <url>`")
 	}
-	detect := deps.Detect
-	if detect == nil {
-		detect = Detect
-	}
-	prober := deps.Prober
-	if prober == nil {
-		prober = &ExecHTTPProber{Timeout: 3 * time.Second}
-	}
-	prov, err := detect(ctx, remoteURL, prober, c.Worktree)
+	prov, err := detectProvider(ctx, deps, remoteURL, c.Worktree)
 	if err != nil {
 		redacted := redactForDisplay(remoteURL)
 		switch {
 		case errors.Is(err, ErrInvalidRemoteURL):
 			return nil, "", "", fmt.Errorf("invalid remote URL: %s", redacted)
+		case errors.Is(err, ErrProviderUnreachable):
+			return nil, "", "", fmt.Errorf("git host unreachable (%s): %w", redacted, err)
 		default:
 			return nil, "", "", fmt.Errorf("unsupported git platform (host: %s)", redacted)
 		}

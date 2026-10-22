@@ -302,9 +302,10 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	prCacheReg := &prcache.Registry{}
 
 	gtwDeps := gtw.HandlerDeps{
-		Git:     gtw.ExecGitRunner{},
-		Prober:  &gtw.ExecHTTPProber{},
-		PRCache: prCacheReg,
+		Git:           gtw.ExecGitRunner{},
+		Prober:        &gtw.ExecHTTPProber{},
+		PRCache:       prCacheReg,
+		ProviderCache: &gtw.ProviderCache{},
 	}
 
 	// prResolver is the prcache ↔ gtw bridge: the cache

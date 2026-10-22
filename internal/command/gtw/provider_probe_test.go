@@ -1,13 +1,19 @@
 package gtw
 
 import (
+	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -252,24 +258,355 @@ func TestDetect_VersionFieldPopulatedWhenReadable(t *testing.T) {
 	}
 }
 
-// TestProbe_SharedTimeoutBoundedSchemes guarantees the ctx
-// timeout caps wall-clock across both schemes. Probe fires two
-// attempts (HTTPS then HTTP) on a server that delays each by 5s;
-// with a 500ms Timeout, Probe must return well before the second
-// scheme gets to time-out individually. Without the shared
-// context, the cumulative latency could be up to 2× Timeout.
-func TestProbe_SharedTimeoutBoundedSchemes(t *testing.T) {
-	// HTTPS scheme: server has no TLS → client.Do fails fast
-	// with TLS handshake error, no hang. So this test mainly
-	// guards against future regressions where someone splits the
-	// timeout across two independent contexts.
-	//
-	// To exercise the budget, serve the body on a slow handler
-	// under HTTP — the HTTPS attempt fails immediately, the HTTP
-	// attempt sleeps past the budget, and the shared context
-	// should cancel the in-flight request before the second
-	// scheme eats the full Timeout.
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// TestProbe_HTTPFallbackSucceedsDespiteStalledHTTPS is the regression
+// test for the self-hosted-GitLab-behind-a-dropped-443 failure: Probe
+// used to share one context across both schemes, so a host whose :443
+// is silently dropped (firewall DROP, not REJECT — no RST, so no fast
+// failure) spent the whole budget on the HTTPS attempt and the
+// plain-HTTP fallback inherited an already-expired context. A GitLab
+// that answers /api/v4/version in 30ms over plain HTTP was reported as
+// unreachable.
+//
+// stallTLSThenServeHTTP reproduces the exact shape: every HTTPS
+// connection is accepted and never spoken to, so the TLS handshake
+// hangs until its own budget expires; every plain-HTTP connection
+// is answered normally.
+//
+// Waiting out the stalled HTTPS attempt is deliberate — see Probe's
+// comment on HTTPS keeping a guaranteed first look — so what this
+// pins is that the call returns the HTTP body at all, bounded by the
+// budget rather than hanging.
+func TestProbe_HTTPFallbackSucceedsDespiteStalledHTTPS(t *testing.T) {
+	const envelope = `{"message":"401 Unauthorized"}`
+	host := stallTLSThenServeHTTP(t, http.StatusUnauthorized, "application/json", envelope)
+
+	p := &ExecHTTPProber{Timeout: 300 * time.Millisecond}
+	start := time.Now()
+	body, err := p.Probe(context.Background(), host, "/api/v4/version")
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("Probe: want the HTTP fallback to succeed, got err: %v", err)
+	}
+	if got := strings.TrimSpace(string(body)); got != envelope {
+		t.Fatalf("Probe body: want %q, got %q", envelope, got)
+	}
+	if elapsed > 2*p.Timeout {
+		t.Fatalf("Probe: elapsed=%v, want the stalled HTTPS attempt bounded by Timeout", elapsed)
+	}
+}
+
+// TestProbe_HTTPSWinsWhenBothSchemesAnswer pins the preference that
+// keeps the race from degenerating into "first answer wins". A host
+// can serve different content per port: a captive portal or login
+// redirect on :80 in front of a healthy GitLab on :443. Taking the
+// fast HTML from :80 fingerprints nothing and reports a reachable
+// GitLab as an unsupported platform.
+//
+// serveTLSAndPortal puts both on ONE address — the same host:port
+// Probe uses for both schemes — with the TLS arm slow and correct and
+// the plain arm instant and useless.
+func TestProbe_HTTPSWinsWhenBothSchemesAnswer(t *testing.T) {
+	const version = `{"version":"16.5.0"}`
+	host := serveTLSAndPortal(t, version, 250*time.Millisecond, "<html>captive portal</html>")
+
+	// Self-signed cert, so the prober must skip verification to get
+	// far enough for the preference to matter.
+	p := &ExecHTTPProber{Timeout: 2 * time.Second, InsecureSkipVerify: true}
+	body, err := p.Probe(context.Background(), host, "/api/v4/version")
+	if err != nil {
+		t.Fatalf("Probe: want the HTTPS body, got err: %v", err)
+	}
+	if got := strings.TrimSpace(string(body)); got != version {
+		t.Fatalf("Probe body: want the HTTPS response %q, got %q", version, got)
+	}
+}
+
+// TestDetect_PortalHTMLIsNotAReachabilityVerdict is the same
+// misdiagnosis one layer up: Detect fingerprints whatever Probe
+// returns, so a portal answer on both endpoints has to read as
+// "responded, unrecognised", never as "unreachable".
+func TestDetect_PortalHTMLIsNotAReachabilityVerdict(t *testing.T) {
+	host := serveTLSAndPortal(t, "", 250*time.Millisecond, "<html>captive portal</html>")
+
+	p := &ExecHTTPProber{Timeout: 2 * time.Second, InsecureSkipVerify: true}
+	_, err := Detect(context.Background(), "ssh://git@"+host+"/team/repo.git", p, "")
+	if !errors.Is(err, ErrUnsupportedProvider) {
+		t.Fatalf("Detect: want ErrUnsupportedProvider for portal HTML, got %v", err)
+	}
+	if errors.Is(err, ErrProviderUnreachable) {
+		t.Errorf("Detect: a portal answered, so it must not be reported as unreachable: %v", err)
+	}
+}
+
+// serveTLSAndPortal serves two different protocols on ONE address:
+// connections whose first byte is a TLS ClientHello are wrapped in
+// TLS and answered with tlsBody after delay; everything else gets
+// portalBody immediately. That is the captive-portal shape — a login
+// redirect on :80 in front of a healthy instance on :443 — and it
+// needs both protocols on the same host:port because Probe uses one
+// address for both schemes.
+//
+// The TLS certificate is borrowed from a throwaway httptest TLS
+// server, so callers need InsecureSkipVerify.
+func serveTLSAndPortal(t *testing.T, tlsBody string, delay time.Duration, portalBody string) string {
+	t.Helper()
+	certServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(tlsBody))
+	}))
+	defer certServer.Close()
+	cert := certServer.TLS.Certificates[0]
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	tlsHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(delay)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(tlsBody))
+	})
+	portalHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(portalBody))
+	})
+
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				br := bufio.NewReader(c)
+				first, err := br.Peek(1)
+				if err != nil {
+					_ = c.Close()
+					return
+				}
+				if first[0] == 0x16 { // TLS handshake record
+					tc := tls.Server(&prefixConn{Conn: c, r: br}, &tls.Config{
+						Certificates: []tls.Certificate{cert},
+					})
+					_ = (&http.Server{Handler: tlsHandler}).Serve(&oneConnListener{Conn: tc})
+					return
+				}
+				pc := &prefixConn{Conn: c, r: br}
+				_ = (&http.Server{Handler: portalHandler}).Serve(&oneConnListener{Conn: pc})
+			}(c)
+		}
+	}()
+
+	return ln.Addr().String()
+}
+
+// prefixConn replays already-buffered bytes before reading from the
+// underlying connection, so a handler can peek at the first byte and
+// still hand the stream to a TLS or HTTP server intact.
+type prefixConn struct {
+	net.Conn
+	r io.Reader
+}
+
+func (c *prefixConn) Read(p []byte) (int, error) { return c.r.Read(p) }
+
+// oneConnListener turns a single connection into a net.Listener so
+// http.Server can serve exactly it. Accept is called once by Serve.
+type oneConnListener struct {
+	net.Conn
+	served bool
+}
+
+func (l *oneConnListener) Accept() (net.Conn, error) {
+	if l.served {
+		return nil, io.EOF
+	}
+	l.served = true
+	return l.Conn, nil
+}
+
+func (l *oneConnListener) Addr() net.Addr { return l.Conn.LocalAddr() }
+
+func (l *oneConnListener) Close() error { return nil }
+
+// stallAllConnections accepts connections and holds every one of
+// them open without ever speaking. Unlike
+// stallTLSThenServeHTTP no attempt can succeed, so the call can only
+// end when a context expires — which is what makes it usable for
+// deadline assertions.
+func stallAllConnections(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	var held []net.Conn
+	var mu sync.Mutex
+	t.Cleanup(func() {
+		_ = ln.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range held {
+			_ = c.Close()
+		}
+	})
+
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			held = append(held, c)
+			mu.Unlock()
+		}
+	}()
+
+	return ln.Addr().String()
+}
+
+// TestProbe_CallerDeadlineStillCapsTheCall guards the other half of
+// the fix: giving each attempt its own budget must not let a caller
+// with a tighter deadline lose it. A 5s per-attempt budget under a
+// 100ms caller deadline has to return in ~100ms. Both schemes stall,
+// so only the deadline can end the call.
+func TestProbe_CallerDeadlineStillCapsTheCall(t *testing.T) {
+	host := stallAllConnections(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	p := &ExecHTTPProber{Timeout: 5 * time.Second}
+	start := time.Now()
+	_, err := p.Probe(ctx, host, "/api/v4/version")
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("Probe: want the caller's deadline to fire, got nil error")
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("Probe: elapsed=%v, want the caller's 100ms deadline to win over the 5s per-attempt budget", elapsed)
+	}
+}
+
+// TestProbe_BothSchemesStallBoundedByOneBudget pins the wall-clock
+// win of racing: with neither scheme answering, the call costs ONE
+// budget, not one per scheme. Before the race it was 2×.
+func TestProbe_BothSchemesStallBoundedByOneBudget(t *testing.T) {
+	host := stallAllConnections(t)
+
+	p := &ExecHTTPProber{Timeout: 300 * time.Millisecond}
+	start := time.Now()
+	_, err := p.Probe(context.Background(), host, "/api/v4/version")
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("Probe: want error from two stalled schemes, got nil")
+	}
+	if elapsed > 2*p.Timeout {
+		t.Fatalf("Probe: elapsed=%v, want the raced schemes bounded by one %v budget", elapsed, p.Timeout)
+	}
+}
+
+// TestProbe_DroppedHTTPSStillReachesGitLab end-to-end through Detect:
+// the 401 envelope must arrive over HTTP even though HTTPS stalls,
+// so the host is classified GitLab rather than unreachable. This is
+// the f9netcore shape from the bug report.
+func TestProbe_DroppedHTTPSStillReachesGitLab(t *testing.T) {
+	host := stallTLSThenServeHTTP(t, http.StatusUnauthorized, "application/json", `{"message":"401 Unauthorized"}`)
+
+	p := &ExecHTTPProber{Timeout: 300 * time.Millisecond}
+	prov, err := Detect(context.Background(), "ssh://git@"+host+"/f9/f9netcore.git", p, "")
+	if err != nil {
+		t.Fatalf("Detect: want GitLabProvider via the HTTP fallback, got err: %v", err)
+	}
+	if prov.Kind() != ProviderGitLab {
+		t.Fatalf("Detect.Kind: want gitlab, got %q", prov.Kind())
+	}
+	if prov.Host() != host {
+		t.Fatalf("Detect.Host: want %q, got %q", host, prov.Host())
+	}
+}
+
+// stallTLSThenServeHTTP starts a TCP listener that mimics a host
+// whose :443 is silently dropped while :80 answers normally. It
+// peeks at the first byte of every connection: a TLS ClientHello
+// (record type 0x16) is held open and never spoken to, so the
+// handshake read never returns and the attempt can only end at its
+// context deadline; anything else is answered with a fixed
+// plain-HTTP response.
+//
+// Holding a TLS connection open without writing to it is what a
+// firewall DROP looks like to a TLS client — the TCP connect
+// succeeds, then silence. httptest.NewServer cannot reproduce it:
+// it has no TLS listener, so the HTTPS attempt fails fast with a
+// handshake error and never consumes the budget the bug depended on.
+//
+// The split is per-connection rather than one-shot so it holds for
+// both of Detect's probe endpoints, not just the first.
+func stallTLSThenServeHTTP(t *testing.T, status int, contentType, body string) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	var held []net.Conn
+	var mu sync.Mutex
+	t.Cleanup(func() {
+		_ = ln.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range held {
+			_ = c.Close()
+		}
+	})
+
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				br := bufio.NewReader(c)
+				// Every client here sends something immediately —
+				// a ClientHello or a request line — so a plain
+				// blocking Read is enough to classify it.
+				first, err := br.Peek(1)
+				if err != nil {
+					_ = c.Close()
+					return
+				}
+				if first[0] == 0x16 { // TLS handshake record
+					mu.Lock()
+					held = append(held, c)
+					mu.Unlock()
+					return // never write, never close
+				}
+				defer c.Close()
+				if _, err := http.ReadRequest(br); err != nil {
+					return
+				}
+				fmt.Fprintf(c, "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
+					status, http.StatusText(status), contentType, len(body), body)
+			}(c)
+		}
+	}()
+
+	return ln.Addr().String()
+}
+
+// TestProbe_SlowServerStillTimesOut keeps a bound on the other side:
+// a host that accepts the connection and then stalls on the HTTP
+// attempt must still return within roughly its own budget, not hang.
+func TestProbe_SlowServerStillTimesOut(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		time.Sleep(800 * time.Millisecond)
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"version":"16.5.0"}`))
@@ -286,13 +623,8 @@ func TestProbe_SharedTimeoutBoundedSchemes(t *testing.T) {
 	_, err = p.Probe(context.Background(), u.Host, "/api/v4/version")
 	elapsed := time.Since(start)
 
-	// Probe should fail because the handler slept past the
-	// shared deadline. Either:
-	//   - HTTPS attempt fails fast (no TLS), HTTP attempt hits
-	//     the 200ms ctx budget → context.Canceled
-	//   - some combination that returns before 1s of wall clock
 	if err == nil {
-		t.Fatal("Probe: want error from shared timeout, got nil")
+		t.Fatal("Probe: want error from the stalled handler, got nil")
 	}
 	if elapsed > 1*time.Second {
 		t.Fatalf("Probe: exceeded reasonable bound, elapsed=%v", elapsed)
@@ -302,8 +634,9 @@ func TestProbe_SharedTimeoutBoundedSchemes(t *testing.T) {
 // TestProbeOnce_PackageHelper is a thin smoke test for the
 // unexported probeOnce. The big-end tests above already cover
 // the user-visible behaviour; this one just pins the helper's
-// contract: 2xx returns (body, true), 5xx returns (nil, false)
-// so the caller can try the next scheme.
+// contract: 2xx returns a body and no error, 5xx returns an error
+// wrapping errProbeStatus so the caller can try the next scheme AND
+// Detect can tell the host answered.
 func TestProbeOnce_PackageHelper(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -311,12 +644,15 @@ func TestProbeOnce_PackageHelper(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	body, ok := probeOnce(context.Background(), &http.Client{}, ts.URL+"/anything")
-	if ok {
-		t.Fatalf("probeOnce 5xx: want ok=false, got ok=true body=%q", body)
+	body, err := probeOnce(context.Background(), &http.Client{}, ts.URL+"/anything")
+	if err == nil {
+		t.Fatalf("probeOnce 5xx: want error, got body=%q", body)
 	}
 	if body != nil {
 		t.Fatalf("probeOnce 5xx: want nil body, got %q", body)
+	}
+	if !errors.Is(err, errProbeStatus) {
+		t.Fatalf("probeOnce 5xx: want errProbeStatus so Detect can tell a 5xx from silence, got %v", err)
 	}
 
 	ts2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -325,9 +661,12 @@ func TestProbeOnce_PackageHelper(t *testing.T) {
 	}))
 	defer ts2.Close()
 
-	body, ok = probeOnce(context.Background(), &http.Client{}, ts2.URL+"/anything")
-	if !ok {
-		t.Fatalf("probeOnce 2xx: want ok=true, got ok=false")
+	body, err = probeOnce(context.Background(), &http.Client{}, ts2.URL+"/anything")
+	if err != nil {
+		t.Fatalf("probeOnce 2xx: want body and no error, got err: %v", err)
+	}
+	if errors.Is(err, errProbeStatus) {
+		t.Fatal("probeOnce 2xx: errProbeStatus must not be set on a success")
 	}
 	var parsed map[string]any
 	if err := json.Unmarshal(body, &parsed); err != nil {

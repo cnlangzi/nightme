@@ -207,11 +207,13 @@ type GitProvider interface {
 // user as "issue #N not found in <repo>".
 var ErrIssueNotFound = errors.New("gtw: issue not found")
 
-// ErrUnsupportedProvider is returned by Detect when neither the
-// URL hint (github.com / gitlab.com substring) nor the API
-// endpoint probe (/api/v4/version for GitLab, /api/v3/meta for
-// GitHub Enterprise) recognises the host. See F-50 §1.2.2 for the
-// full failure semantics.
+// ErrUnsupportedProvider is returned by Detect when the host
+// answered but is neither GitHub nor GitLab: the URL hint
+// (github.com / gitlab.com substring) missed, and at least one of
+// the API endpoint probes (/api/v4/version for GitLab, /api/v3/meta
+// for GitHub Enterprise) returned a body that no fingerprint
+// matched. A host that never answered at all is
+// ErrProviderUnreachable instead.
 var ErrUnsupportedProvider = errors.New("gtw: unsupported git provider")
 
 // ErrInvalidRemoteURL is returned by parseRemoteURL when the input
@@ -221,6 +223,21 @@ var ErrUnsupportedProvider = errors.New("gtw: unsupported git provider")
 // (user error) from "host not on github/gitlab" (no provider
 // implementation yet — D3 split).
 var ErrInvalidRemoteURL = errors.New("gtw: invalid remote URL")
+
+// ErrProviderUnreachable is returned by Detect when BOTH Stage B
+// probes failed at the transport layer, so the daemon's machine
+// could not talk to the git host at all. The distinction from
+// ErrUnsupportedProvider is the whole point of the sentinel:
+// a user who cannot reach their GitLab needs a network
+// diagnosis, not "this platform isn't supported" — the two used
+// to share one message and sent users hunting for a platform
+// adapter that was never missing.
+//
+// The wrapped error carries the transport cause (dial timeout,
+// connection refused, proxy CONNECT refusal, …) so the reply can
+// name the actual failure. Reachability of the daemon's own
+// network is out of scope here — we only report what happened.
+var ErrProviderUnreachable = errors.New("gtw: git host unreachable")
 
 // ErrPRExists is returned by CreatePR when the platform says a
 // pull/merge request already exists for the same head→base.
@@ -689,8 +706,7 @@ func redactForDisplay(remoteURL string) string {
 }
 
 // Detect identifies the git provider for the given remote URL via
-// two-stage detection. See docs/feat/F-50-git-provider.md §1.2 for
-// the full design.
+// two-stage detection.
 //
 //	Stage A · URL hint (zero network)
 //	  - substring "github.com"  → GitHubProvider{host: <host>}
@@ -708,9 +724,31 @@ func redactForDisplay(remoteURL string) string {
 // recognise the host, because URL hint has zero latency and no
 // failure modes (no DNS, no TLS, no 5xx).
 //
-// `prober` may be nil; production uses ExecHTTPProber{} with a 3s
-// default timeout. Tests inject a fake that returns canned JSON.
+// Stage B failures are classified, not collapsed:
+//
+//   - both endpoints failed at the transport layer →
+//     ErrProviderUnreachable, carrying the transport cause (the host
+//     never answered)
+//   - at least one endpoint came back — a body with no matching
+//     fingerprint, or a 5xx, which is a response and therefore not
+//     silence → ErrUnsupportedProvider (the host answered, it just
+//     isn't GitHub / GitLab)
+//
+// `prober` may be nil; production uses ExecHTTPProber{} with a
+// defaultProbeTimeout budget per scheme attempt. Tests inject a fake
+// that returns canned JSON.
 func Detect(ctx context.Context, remoteURL string, prober HTTPProber, worktree string) (GitProvider, error) {
+	prov, _, err := detect(ctx, remoteURL, prober, worktree)
+	return prov, err
+}
+
+// detect is Detect plus one extra fact the caller cannot otherwise
+// get: whether the answer came from the live probe. Stage A's URL
+// hint is a function of the whole raw remote URL — a path segment or
+// credential containing "gitlab" decides it — so it is not a property
+// of the host and must not be memoised host-wide. Only Stage B
+// answers, which is what ProviderCache stores.
+func detect(ctx context.Context, remoteURL string, prober HTTPProber, worktree string) (GitProvider, bool, error) {
 	if prober == nil {
 		prober = &ExecHTTPProber{}
 	}
@@ -720,21 +758,24 @@ func Detect(ctx context.Context, remoteURL string, prober HTTPProber, worktree s
 		// host segment). Don't wrap with ErrUnsupportedProvider
 		// — D3 split: this is "URL error", not "provider
 		// unsupported". Callers can errors.Is(err, ErrInvalidRemoteURL).
-		return nil, err
+		return nil, false, err
 	}
 
 	// Stage A · URL hint (zero network).
 	lower := strings.ToLower(remoteURL)
 	switch {
 	case strings.Contains(lower, "github.com"):
-		return &GitHubProvider{host: host, Worktree: worktree}, nil
+		return &GitHubProvider{host: host, Worktree: worktree}, false, nil
 	case strings.Contains(lower, "gitlab"):
-		return &GitLabProvider{host: host, Worktree: worktree}, nil
+		return &GitLabProvider{host: host, Worktree: worktree}, false, nil
 	}
 
 	// Stage B · Live API probe (only when Stage A was ambiguous).
 	// Order: GitLab first (cheaper, more deterministic), then
-	// GitHub. Single-probe failure is not fatal; we move on.
+	// GitHub. Single-probe failure is not fatal; we move on, but we
+	// keep the error — whether the host answered at all is what
+	// separates "not GitHub/GitLab" from "not reachable".
+	var probeErrs []error
 	if body, err := prober.Probe(ctx, host, "/api/v4/version"); err == nil {
 		// Strong fingerprint: GitLab's version object.
 		var v struct {
@@ -742,7 +783,7 @@ func Detect(ctx context.Context, remoteURL string, prober HTTPProber, worktree s
 			Revision string `json:"revision"`
 		}
 		if json.Unmarshal(body, &v) == nil && (v.Version != "" || v.Revision != "") {
-			return &GitLabProvider{host: host, version: v.Version, Worktree: worktree}, nil
+			return &GitLabProvider{host: host, version: v.Version, Worktree: worktree}, true, nil
 		}
 		// Soft fingerprint: GitLab's auth/permission error envelope.
 		// /api/v4 is GitLab-only — GitHub Enterprise uses /api/v3, so
@@ -755,8 +796,10 @@ func Detect(ctx context.Context, remoteURL string, prober HTTPProber, worktree s
 			Message string `json:"message"`
 		}
 		if json.Unmarshal(body, &env) == nil && env.Message != "" {
-			return &GitLabProvider{host: host, Worktree: worktree}, nil
+			return &GitLabProvider{host: host, Worktree: worktree}, true, nil
 		}
+	} else {
+		probeErrs = append(probeErrs, err)
 	}
 	if body, err := prober.Probe(ctx, host, "/api/v3/meta"); err == nil {
 		var meta map[string]json.RawMessage
@@ -768,11 +811,60 @@ func Detect(ctx context.Context, remoteURL string, prober HTTPProber, worktree s
 			// GitLab answers 404 with a JSON envelope on
 			// /api/v3/meta, which would misclassify as GitHub.
 			if _, hasGH := meta["verifiable_password_authentication"]; hasGH {
-				return &GitHubProvider{host: host, Worktree: worktree}, nil
+				return &GitHubProvider{host: host, Worktree: worktree}, true, nil
 			}
 		}
+	} else {
+		probeErrs = append(probeErrs, err)
 	}
-	return nil, fmt.Errorf("%w: %s", ErrUnsupportedProvider, host)
+	if len(probeErrs) == 2 && !anyResponded(probeErrs) {
+		return nil, false, &unreachableError{errs: probeErrs}
+	}
+	return nil, false, fmt.Errorf("%w: %s", ErrUnsupportedProvider, host)
+}
+
+// anyResponded reports whether any probe error carries errProbeStatus
+// — that is, whether the host was actually reached and answered with
+// a 5xx. ErrProviderUnreachable means "nothing came back"; a 5xx
+// means something did, so it classifies as ErrUnsupportedProvider
+// (host answered, no fingerprint matched) instead of sending the user
+// after their network.
+func anyResponded(errs []error) bool {
+	for _, err := range errs {
+		if errors.Is(err, errProbeStatus) {
+			return true
+		}
+	}
+	return false
+}
+
+// unreachableError is the Detect result for "neither endpoint
+// answered". Its message is the probe text alone — the reply
+// templates supply their own lead-in, and each `*url.Error` already
+// names its own URL, so restating host and path here would repeat
+// them a third and fourth time in a reply that has to fit an IM
+// message.
+//
+// Unwrap exposes ErrProviderUnreachable alongside the underlying
+// probe errors, so callers can classify with errors.Is and the
+// transport cause stays in the chain.
+type unreachableError struct {
+	errs []error
+}
+
+func (e *unreachableError) Error() string {
+	parts := make([]string, 0, len(e.errs))
+	for _, err := range e.errs {
+		parts = append(parts, err.Error())
+	}
+	// One line per endpoint: this string is rendered verbatim under a
+	// "  → " lead-in in the chat reply, and a single-line wall of four
+	// dial errors is unreadable.
+	return strings.Join(parts, "\n")
+}
+
+func (e *unreachableError) Unwrap() []error {
+	return append([]error{ErrProviderUnreachable}, e.errs...)
 }
 
 // NewProvider is the kind+host convenience constructor. Production
@@ -803,17 +895,35 @@ type HTTPProber interface {
 	// GitHub Enterprise error envelope. Transport failure and
 	// 5xx return an error so callers (Detect) can move on.
 	//
-	// Implementations may apply scheme fallback (HTTPS then
-	// HTTP) — see ExecHTTPProber for the production behaviour.
+	// Implementations may apply scheme fallback (HTTPS raced
+	// against plain HTTP) — see ExecHTTPProber for the production
+	// behaviour.
 	Probe(ctx context.Context, host, path string) ([]byte, error)
 }
 
+// defaultProbeTimeout is the per-scheme budget ExecHTTPProber.Probe
+// uses when Timeout is zero. 5s is sized for a self-hosted GitLab /
+// GitHub Enterprise reached over a corporate link or VPN, where the
+// API round-trip plus a cold TLS handshake routinely runs past the
+// 3s that felt adequate against a datacenter instance.
+//
+// Detect probes two endpoints and the two schemes race, so a host
+// that answers nothing costs about 2× this. That cost is paid once
+// per REACHABLE host per daemon lifetime, because successful
+// detections are memoised by ProviderCache. A host that fails is
+// re-probed on every call — the cache deliberately stores successes
+// only, so a proxy that gets fixed takes effect on the next command
+// — so the 2× figure is the repeated cost for an unreachable host,
+// paid on every /gtw dispatch and every stamp-path CollectPR.
+const defaultProbeTimeout = 5 * time.Second
+
 // ExecHTTPProber is the production HTTPProber.
 type ExecHTTPProber struct {
-	// Timeout bounds the entire Probe call. Zero defaults to
-	// 3s — long enough for a healthy GitLab / GitHub Enterprise
-	// response, short enough that stalled servers don't block
-	// the /gtw message path.
+	// Timeout bounds EACH scheme attempt. Zero defaults to
+	// defaultProbeTimeout (5s) — long enough for a healthy GitLab /
+	// GitHub Enterprise response, short enough that stalled servers
+	// don't block the /gtw message path. The schemes race on
+	// independent budgets, so the loser costs nothing; see Probe.
 	Timeout time.Duration
 
 	// InsecureSkipVerify disables TLS verification. Defaults to
@@ -825,34 +935,40 @@ type ExecHTTPProber struct {
 
 // Probe implements HTTPProber.
 //
-// Scheme fallback: tries HTTPS first, then plain HTTP on the same
-// path on transport error (DNS / TCP / TLS / proxy CONNECT-tunnel
-// refusal / timeout) or 5xx. The fallback is essential for
-// internal self-hosted GitLab / GitHub Enterprise — many of those
-// instances run on bare IPs behind a corporate HTTP proxy that
-// refuses CONNECT to :443, but expose the API on plain HTTP. HTTPS
-// alone would silently fail with "502 CONNECT tunnel failed" and
-// return ErrUnsupportedProvider to /gtw pr.
+// Scheme fallback: races HTTPS against plain HTTP on the same path,
+// each with its own Timeout, and returns the first body either one
+// produces. The fallback is essential for internal self-hosted
+// GitLab / GitHub Enterprise — many of those instances run on bare
+// IPs behind a corporate HTTP proxy that refuses CONNECT to :443, or
+// behind a firewall that drops it outright, but expose the API on
+// plain HTTP. HTTPS alone would fail with "502 CONNECT tunnel
+// failed" (or hang until the budget expired) and report the host as
+// unrecognised or unreachable to /gtw pr.
 //
 // Returns the response body on 2xx/3xx/4xx (any status that proves
 // the endpoint actually responded — including 401 auth-required,
 // which Detect fingerprints as a GitLab / GitHub Enterprise error
 // envelope). 5xx and transport failure of BOTH schemes return an
-// error.
+// error that names both schemes' underlying failures — Detect
+// forwards it to the user, and "dial tcp: i/o timeout" is the only
+// thing that tells them which network problem to go fix.
 //
-// Total wall-clock is bounded by a single Timeout budget shared
-// across both schemes via context.WithTimeout — a stuck HTTPS
-// connect caps at 3s, then HTTP gets the remaining time.
+// Total wall-clock is bounded by Timeout, not 2×Timeout: the two
+// schemes race, so the call costs at most one budget. Detect probes
+// two endpoints, so a fully unreachable host still surfaces in
+// roughly 2×Timeout. The budget is per attempt rather than split
+// between them — splitting would cap a slow-but-working HTTPS
+// attempt at half, turning a healthy remote instance into a false
+// ErrProviderUnreachable. The caller's own ctx deadline still caps
+// the whole call, so a caller with a tighter budget keeps it.
 func (p *ExecHTTPProber) Probe(ctx context.Context, host, path string) ([]byte, error) {
 	if p == nil {
 		p = &ExecHTTPProber{}
 	}
 	timeout := p.Timeout
 	if timeout == 0 {
-		timeout = 3 * time.Second
+		timeout = defaultProbeTimeout
 	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 
 	var transport http.RoundTripper = http.DefaultTransport
 	if p.InsecureSkipVerify {
@@ -862,38 +978,129 @@ func (p *ExecHTTPProber) Probe(ctx context.Context, host, path string) ([]byte, 
 	}
 	cli := &http.Client{Transport: transport}
 
-	if body, ok := probeOnce(ctx, cli, "https://"+host+path); ok {
-		return body, nil
+	// Both schemes race on their own budget, derived from the
+	// caller's ctx. Two serial defects forced this shape:
+	//
+	//   - Sharing one context across the schemes meant a host whose
+	//     :443 is silently dropped (firewall DROP, not REJECT — no
+	//     RST, no fast failure) spent the entire budget on HTTPS and
+	//     handed the HTTP fallback an already-expired context. A
+	//     self-hosted GitLab answering /api/v4/version in 30ms over
+	//     plain HTTP was reported as unreachable.
+	//   - Even with independent budgets, running them one after the
+	//     other made the caller pay for the dead scheme before the
+	//     live one got its turn.
+	//
+	// The race does NOT mean "first answer wins" — HTTPS keeps a
+	// guaranteed first look. A host can serve different content per
+	// port: a captive portal or login redirect on :80 in front of a
+	// perfectly healthy GitLab on :443. Letting the fast HTTP
+	// response win there returns `<html>…</html>`, fingerprints
+	// nothing, and reports a reachable GitLab as an unsupported
+	// platform — the same misdiagnosis this whole path exists to
+	// remove. So an HTTP result is held until HTTPS has reported,
+	// and HTTPS is returned whenever it produced anything usable.
+	//
+	// The cost of that guarantee is the one the race was meant to
+	// avoid: when :443 is dropped, the caller waits out the HTTPS
+	// budget before the HTTP body is returned. That is one wait per
+	// host per daemon lifetime, because successful detections are
+	// memoised by ProviderCache.
+	//
+	// Cost the other way: every Stage B probe now issues two
+	// requests per endpoint and always includes one plaintext GET to
+	// :80, even when HTTPS would have answered. On an
+	// HTTPS-only instance that is one extra request the access log
+	// will show.
+	//
+	// Deriving each attempt from ctx keeps the caller's deadline as
+	// the outer bound; cancelling it on return aborts the loser.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	type attempt struct {
+		scheme string
+		body   []byte
+		// err is nil exactly when probeOnce returned a usable body.
+		err error
 	}
-	if body, ok := probeOnce(ctx, cli, "http://"+host+path); ok {
-		return body, nil
+	// Buffered so the losing goroutine can always report, even
+	// after the winner has returned and cancelled it.
+	done := make(chan attempt, 2)
+	for _, scheme := range []string{"https", "http"} {
+		schemeCtx, cancelScheme := context.WithTimeout(ctx, timeout)
+		go func() {
+			defer cancelScheme()
+			body, err := probeOnce(schemeCtx, cli, scheme+"://"+host+path)
+			done <- attempt{scheme: scheme, body: body, err: err}
+		}()
 	}
-	return nil, fmt.Errorf("probe %s%s: both https and http failed", host, path)
+
+	// Collected per scheme rather than in arrival order so the error
+	// text stays byte-identical regardless of which attempt failed
+	// first.
+	var https, http attempt
+	for range 2 {
+		r := <-done
+		if r.scheme == "https" {
+			https = r
+			if r.err == nil {
+				return r.body, nil
+			}
+		} else {
+			http = r
+		}
+	}
+	if http.err == nil {
+		return http.body, nil
+	}
+	// No host/path prefix here: each `*url.Error` already spells out
+	// the URL it failed on, and the reply templates that render this
+	// string have already named the remote. Both causes are wrapped
+	// rather than formatted, so errors.Is / errors.As keep reaching
+	// the per-scheme *url.Error underneath — unreachableError's
+	// contract says the transport cause stays in the chain, and the
+	// log-oriented callers need it there even when the chat reply
+	// only shows the text.
+	return nil, fmt.Errorf("both https and http failed: %w; %w",
+		https.err, http.err)
 }
 
-// probeOnce issues a single GET against url. Returns (body, true)
-// on 2xx/3xx/4xx; returns (nil, false) on transport error or 5xx
-// so the caller can try the next scheme.
-func probeOnce(ctx context.Context, cli *http.Client, url string) ([]byte, bool) {
+// errProbeStatus marks a probe that reached the host and got an HTTP
+// response, one Detect should still treat as a failure: 5xx means the
+// request landed but the answer is not a platform API response, so the
+// scheme fallback moves on. Detect needs the distinction because a
+// server answering "502 Bad Gateway" (corporate proxy, deploy window,
+// broken reverse proxy) has demonstrably NOT gone silent — reporting
+// that as ErrProviderUnreachable would send the user to debug their
+// network instead of their server.
+var errProbeStatus = errors.New("probe: endpoint returned 5xx")
+
+// probeOnce issues a single GET against url. Returns the body on
+// 2xx/3xx/4xx and a non-nil error on transport failure or 5xx so the
+// caller can try the next scheme and still report why this one didn't
+// work. A 5xx error wraps errProbeStatus; a transport error does not,
+// which is how Detect separates "unreachable" from "answered, badly".
+func probeOnce(ctx context.Context, cli *http.Client, url string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, false
+		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "nightme-git-provider-detect/1.0")
 	resp, err := cli.Do(req)
 	if err != nil {
-		return nil, false
+		return nil, err
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, false
+		return nil, err
 	}
 	if resp.StatusCode >= 500 {
-		return nil, false
+		return nil, fmt.Errorf("%w: GET %s: %s", errProbeStatus, url, resp.Status)
 	}
-	return body, true
+	return body, nil
 }
 
 // CLIRunner abstracts gh / glab. Same pattern as GitRunner: tests

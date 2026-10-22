@@ -15,9 +15,9 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -108,12 +108,22 @@ func TestDetect_UnreachableErrorCarriesProbeCause(t *testing.T) {
 // production prober end to end: against a closed port its error
 // keeps the per-scheme causes that Detect forwards to the user.
 //
-// The cause is asserted through errors.As / errors.Is rather than by
-// matching text. The wording is the OS's, not ours — Linux renders
-// ECONNREFUSED as "connect: connection refused", Windows as
-// "connectex: No connection could be made because the target machine
-// actively refused it" — so a text assertion here only ever passes on
-// the platform it was written on.
+// The cause is asserted by walking the error chain, never by matching
+// text or a named errno. Both are platform traps here:
+//
+//   - Wording is the OS's. Linux renders a refused connect as "connect:
+//     connection refused", Windows as "connectex: No connection could
+//     be made because the target machine actively refused it".
+//   - syscall.ECONNREFUSED exists on Windows but is a placeholder.
+//     syscall/zerrors_windows.go defines the POSIX names as
+//     `APPLICATION_ERROR + iota` — "invented values to support what
+//     package os and others expects" — so it is 1<<29+34, not the
+//     WSAECONNREFUSED (10061) the net stack actually returns.
+//     errors.Is against it can never succeed on Windows.
+//
+// *os.SyscallError is the layer Go wraps every syscall.Errno in,
+// whichever OS produced it, so reaching it proves the chain bottoms
+// out at the real system call without naming a single constant.
 func TestProbe_UnreachableReasonSurvivesBothSchemes(t *testing.T) {
 	// 127.0.0.1:1 is reserved and refuses connections, so both the
 	// HTTPS and the HTTP attempt fail without touching a network.
@@ -137,8 +147,9 @@ func TestProbe_UnreachableReasonSurvivesBothSchemes(t *testing.T) {
 	if !strings.Contains(urlErr.URL, "/api/v4/version") {
 		t.Errorf("Detect error %q: want the /api/v4/version endpoint named", urlErr.URL)
 	}
-	if !errors.Is(err, syscall.ECONNREFUSED) {
-		t.Errorf("Detect error %v: want ECONNREFUSED reachable via errors.Is", err)
+	var syscallErr *os.SyscallError
+	if !errors.As(err, &syscallErr) {
+		t.Errorf("Detect error %v: want the chain to bottom out at the OS system call", err)
 	}
 }
 

@@ -4,7 +4,6 @@ import (
 	"context"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/cnlangzi/nightme/internal/messages"
 )
@@ -459,15 +458,7 @@ func CollectPR(ctx context.Context, dir, head string, deps HandlerDeps) (*PR, er
 		// tail in this case.
 		return nil, nil
 	}
-	detect := deps.Detect
-	if detect == nil {
-		detect = Detect
-	}
-	prober := deps.Prober
-	if prober == nil {
-		prober = &ExecHTTPProber{Timeout: 3 * time.Second}
-	}
-	prov, err := detect(ctx, remoteURL, prober, dir)
+	prov, err := detectProvider(ctx, deps, remoteURL, dir)
 	if err != nil || prov == nil {
 		// Detection failed (invalid URL / unsupported host /
 		// probe timeout). Fail-soft: the workspace footer

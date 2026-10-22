@@ -311,12 +311,15 @@ func TestProbeOnce_PackageHelper(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	body, ok := probeOnce(context.Background(), &http.Client{}, ts.URL+"/anything")
+	body, ok, cause := probeOnce(context.Background(), &http.Client{}, ts.URL+"/anything")
 	if ok {
 		t.Fatalf("probeOnce 5xx: want ok=false, got ok=true body=%q", body)
 	}
 	if body != nil {
 		t.Fatalf("probeOnce 5xx: want nil body, got %q", body)
+	}
+	if cause == nil {
+		t.Fatal("probeOnce 5xx: want the failing status as the cause, got nil")
 	}
 
 	ts2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -325,7 +328,7 @@ func TestProbeOnce_PackageHelper(t *testing.T) {
 	}))
 	defer ts2.Close()
 
-	body, ok = probeOnce(context.Background(), &http.Client{}, ts2.URL+"/anything")
+	body, ok, cause = probeOnce(context.Background(), &http.Client{}, ts2.URL+"/anything")
 	if !ok {
 		t.Fatalf("probeOnce 2xx: want ok=true, got ok=false")
 	}

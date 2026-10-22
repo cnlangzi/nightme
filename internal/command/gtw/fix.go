@@ -51,7 +51,14 @@ type HandlerDeps struct {
 	// uses package-level Detect (URL hint + API probe). Tests
 	// override to inject a fakeProvider without running real
 	// Detect logic (see F-50 §1.4 for the injection pattern).
+	// A non-nil Detect bypasses ProviderCache — see detectProvider.
 	Detect func(ctx context.Context, remoteURL string, prober HTTPProber, worktree string) (GitProvider, error)
+	// ProviderCache memoises platform detection per remote host so
+	// the many /gtw entry points that need a provider (and the
+	// per-stamp CollectPR) don't re-probe the same host on every
+	// dispatch. nil → every call probes, the pre-cache behaviour.
+	// The runtime owns the instance, exactly like PRCache.
+	ProviderCache *ProviderCache
 	// Now is the clock. Tests override for deterministic drafts.
 	Now func() time.Time
 	// PRCache is the runtime-owned *prcache.Registry that
@@ -207,11 +214,6 @@ func runFixRemote(
 	// (clears the worktree + branch + label) before
 	// retrying /gtw fix.
 
-	prober := deps.Prober
-	if prober == nil {
-		prober = &ExecHTTPProber{}
-	}
-
 	// --- locate repo + remote (§5.2.② prep) -----------------------
 	repoRoot, err := RepoRoot(ctx, cs.SelectedCwd(), deps.Git)
 	if err != nil {
@@ -223,10 +225,6 @@ func runFixRemote(
 		return reply(ctx, cs.Emitter(), chatID, messageID,
 			"❌ No `origin` remote. Add one with `git remote add origin <url>`."), nil
 	}
-	detect := deps.Detect
-	if detect == nil {
-		detect = Detect
-	}
 	// The worktree doesn't exist yet at this point — runFixRemote
 	// runs BEFORE WorktreeAdd so we can use provider hints to name
 	// the worktree. But provider.GetIssue / AddIssueLabel calls below
@@ -234,11 +232,12 @@ func runFixRemote(
 	// — it's always a real directory (we just computed it from
 	// `git rev-parse --show-toplevel`), so the CWD contract holds
 	// even when the daemon's own CWD has been stale'd.
-	provider, err := detect(ctx, remoteURL, prober, repoRoot)
+	provider, err := detectProvider(ctx, deps, remoteURL, repoRoot)
 	if err != nil {
-		// D3 split: distinguish "URL is malformed" (user error)
-		// from "host not recognised as GitHub/GitLab". Never
-		// echo the raw remoteURL — it may carry userinfo.
+		// D3 split: distinguish "URL is malformed" (user error),
+		// "daemon can't reach the host" (network) from "host not
+		// recognised as GitHub/GitLab". Never echo the raw
+		// remoteURL — it may carry userinfo.
 		redacted := redactForDisplay(remoteURL)
 		switch {
 		case errors.Is(err, ErrInvalidRemoteURL):
@@ -248,6 +247,9 @@ func runFixRemote(
 			}
 			return reply(ctx, cs.Emitter(), chatID, messageID,
 				fmt.Sprintf("❌ 无效的 remote URL: %s\n  Expected: https://github.com/<owner>/<repo>.git, git@github.com:<owner>/<repo>.git, ssh://git@<host>/path, git://<host>/path, etc.", redacted)), nil
+		case errors.Is(err, ErrProviderUnreachable):
+			return reply(ctx, cs.Emitter(), chatID, messageID,
+				fmt.Sprintf("❌ 无法连接 Git 主机 (%s)\n  → %v", redacted, err)), nil
 		default:
 			return reply(ctx, cs.Emitter(), chatID, messageID,
 				fmt.Sprintf("❌ 暂不支持的 Git 平台 (host: %s — neither github.com/gitlab.com URL hint nor /api/v3/meta or /api/v4/version probe recognised it).", redacted)), nil

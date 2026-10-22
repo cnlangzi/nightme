@@ -207,11 +207,13 @@ type GitProvider interface {
 // user as "issue #N not found in <repo>".
 var ErrIssueNotFound = errors.New("gtw: issue not found")
 
-// ErrUnsupportedProvider is returned by Detect when neither the
-// URL hint (github.com / gitlab.com substring) nor the API
-// endpoint probe (/api/v4/version for GitLab, /api/v3/meta for
-// GitHub Enterprise) recognises the host. See F-50 §1.2.2 for the
-// full failure semantics.
+// ErrUnsupportedProvider is returned by Detect when the host
+// answered but is neither GitHub nor GitLab: the URL hint
+// (github.com / gitlab.com substring) missed, and at least one of
+// the API endpoint probes (/api/v4/version for GitLab, /api/v3/meta
+// for GitHub Enterprise) returned a body that no fingerprint
+// matched. A host that never answered at all is
+// ErrProviderUnreachable instead.
 var ErrUnsupportedProvider = errors.New("gtw: unsupported git provider")
 
 // ErrInvalidRemoteURL is returned by parseRemoteURL when the input
@@ -221,6 +223,21 @@ var ErrUnsupportedProvider = errors.New("gtw: unsupported git provider")
 // (user error) from "host not on github/gitlab" (no provider
 // implementation yet — D3 split).
 var ErrInvalidRemoteURL = errors.New("gtw: invalid remote URL")
+
+// ErrProviderUnreachable is returned by Detect when BOTH Stage B
+// probes failed at the transport layer, so the daemon's machine
+// could not talk to the git host at all. The distinction from
+// ErrUnsupportedProvider is the whole point of the sentinel:
+// a user who cannot reach their GitLab needs a network
+// diagnosis, not "this platform isn't supported" — the two used
+// to share one message and sent users hunting for a platform
+// adapter that was never missing.
+//
+// The wrapped error carries the transport cause (dial timeout,
+// connection refused, proxy CONNECT refusal, …) so the reply can
+// name the actual failure. Reachability of the daemon's own
+// network is out of scope here — we only report what happened.
+var ErrProviderUnreachable = errors.New("gtw: git host unreachable")
 
 // ErrPRExists is returned by CreatePR when the platform says a
 // pull/merge request already exists for the same head→base.
@@ -689,8 +706,7 @@ func redactForDisplay(remoteURL string) string {
 }
 
 // Detect identifies the git provider for the given remote URL via
-// two-stage detection. See docs/feat/F-50-git-provider.md §1.2 for
-// the full design.
+// two-stage detection.
 //
 //	Stage A · URL hint (zero network)
 //	  - substring "github.com"  → GitHubProvider{host: <host>}
@@ -707,6 +723,14 @@ func redactForDisplay(remoteURL string) string {
 // Stage A wins whenever it matches — even if Stage B would also
 // recognise the host, because URL hint has zero latency and no
 // failure modes (no DNS, no TLS, no 5xx).
+//
+// Stage B failures are classified, not collapsed:
+//
+//   - both probes errored → ErrProviderUnreachable, carrying the
+//     transport cause (the host never answered)
+//   - at least one probe returned a body but no fingerprint matched
+//     → ErrUnsupportedProvider (the host answered, it just isn't
+//     GitHub / GitLab)
 //
 // `prober` may be nil; production uses ExecHTTPProber{} with a 3s
 // default timeout. Tests inject a fake that returns canned JSON.
@@ -734,7 +758,10 @@ func Detect(ctx context.Context, remoteURL string, prober HTTPProber, worktree s
 
 	// Stage B · Live API probe (only when Stage A was ambiguous).
 	// Order: GitLab first (cheaper, more deterministic), then
-	// GitHub. Single-probe failure is not fatal; we move on.
+	// GitHub. Single-probe failure is not fatal; we move on, but we
+	// keep the error — whether the host answered at all is what
+	// separates "not GitHub/GitLab" from "not reachable".
+	var probeErrs []error
 	if body, err := prober.Probe(ctx, host, "/api/v4/version"); err == nil {
 		// Strong fingerprint: GitLab's version object.
 		var v struct {
@@ -757,6 +784,8 @@ func Detect(ctx context.Context, remoteURL string, prober HTTPProber, worktree s
 		if json.Unmarshal(body, &env) == nil && env.Message != "" {
 			return &GitLabProvider{host: host, Worktree: worktree}, nil
 		}
+	} else {
+		probeErrs = append(probeErrs, err)
 	}
 	if body, err := prober.Probe(ctx, host, "/api/v3/meta"); err == nil {
 		var meta map[string]json.RawMessage
@@ -771,8 +800,38 @@ func Detect(ctx context.Context, remoteURL string, prober HTTPProber, worktree s
 				return &GitHubProvider{host: host, Worktree: worktree}, nil
 			}
 		}
+	} else {
+		probeErrs = append(probeErrs, err)
+	}
+	if len(probeErrs) == 2 {
+		return nil, &unreachableError{errs: probeErrs}
 	}
 	return nil, fmt.Errorf("%w: %s", ErrUnsupportedProvider, host)
+}
+
+// unreachableError is the Detect result for "neither endpoint
+// answered". Its message is the probe text alone — the reply
+// templates supply their own lead-in, so the host would otherwise
+// be stated twice. Each probe message already names its host and
+// path.
+//
+// Unwrap exposes ErrProviderUnreachable alongside the underlying
+// probe errors, so callers can classify with errors.Is and the
+// transport cause stays in the chain.
+type unreachableError struct {
+	errs []error
+}
+
+func (e *unreachableError) Error() string {
+	parts := make([]string, 0, len(e.errs))
+	for _, err := range e.errs {
+		parts = append(parts, err.Error())
+	}
+	return strings.Join(parts, "; ")
+}
+
+func (e *unreachableError) Unwrap() []error {
+	return append([]error{ErrProviderUnreachable}, e.errs...)
 }
 
 // NewProvider is the kind+host convenience constructor. Production
@@ -838,7 +897,9 @@ type ExecHTTPProber struct {
 // the endpoint actually responded — including 401 auth-required,
 // which Detect fingerprints as a GitLab / GitHub Enterprise error
 // envelope). 5xx and transport failure of BOTH schemes return an
-// error.
+// error that names both schemes' underlying failures — Detect
+// forwards it to the user, and "dial tcp: i/o timeout" is the only
+// thing that tells them which network problem to go fix.
 //
 // Total wall-clock is bounded by a single Timeout budget shared
 // across both schemes via context.WithTimeout — a stuck HTTPS
@@ -862,38 +923,41 @@ func (p *ExecHTTPProber) Probe(ctx context.Context, host, path string) ([]byte, 
 	}
 	cli := &http.Client{Transport: transport}
 
-	if body, ok := probeOnce(ctx, cli, "https://"+host+path); ok {
-		return body, nil
+	var errs []error
+	for _, scheme := range []string{"https", "http"} {
+		body, ok, err := probeOnce(ctx, cli, scheme+"://"+host+path)
+		if ok {
+			return body, nil
+		}
+		errs = append(errs, err)
 	}
-	if body, ok := probeOnce(ctx, cli, "http://"+host+path); ok {
-		return body, nil
-	}
-	return nil, fmt.Errorf("probe %s%s: both https and http failed", host, path)
+	return nil, fmt.Errorf("probe %s%s: both https and http failed: %w", host, path, errors.Join(errs...))
 }
 
-// probeOnce issues a single GET against url. Returns (body, true)
-// on 2xx/3xx/4xx; returns (nil, false) on transport error or 5xx
-// so the caller can try the next scheme.
-func probeOnce(ctx context.Context, cli *http.Client, url string) ([]byte, bool) {
+// probeOnce issues a single GET against url. Returns (body, true,
+// nil) on 2xx/3xx/4xx; returns (nil, false, cause) on transport
+// error or 5xx so the caller can try the next scheme and still
+// report why this one didn't work.
+func probeOnce(ctx context.Context, cli *http.Client, url string) ([]byte, bool, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, false
+		return nil, false, err
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "nightme-git-provider-detect/1.0")
 	resp, err := cli.Do(req)
 	if err != nil {
-		return nil, false
+		return nil, false, err
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, false
+		return nil, false, err
 	}
 	if resp.StatusCode >= 500 {
-		return nil, false
+		return nil, false, fmt.Errorf("GET %s: %s", url, resp.Status)
 	}
-	return body, true
+	return body, true, nil
 }
 
 // CLIRunner abstracts gh / glab. Same pattern as GitRunner: tests

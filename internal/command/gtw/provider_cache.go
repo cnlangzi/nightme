@@ -36,12 +36,13 @@ func (id providerIdentity) provider(worktree string) GitProvider {
 // lifetime of the daemon process. Nothing is written to disk, so a
 // restart re-probes.
 //
-// Detection costs up to two HTTP round-trips (3s budget, HTTPS
-// with plain-HTTP fallback) and one host shows up in every repo the
-// user owns — /gtw new, /gtw fix, /gtw push, /gtw pr and the
-// per-stamp CollectPR each paid it again. Keying by host instead of
-// cwd keeps the entry count at "hosts this daemon has talked to"
-// rather than growing with every directory the user visits.
+// Detection costs up to four HTTP round-trips (two endpoints, each
+// tried over HTTPS then plain HTTP on its own defaultProbeTimeout
+// budget) and one host shows up in every repo the user owns — /gtw
+// new, /gtw fix, /gtw push, /gtw pr and the per-stamp CollectPR
+// each paid it again. Keying by host instead of cwd keeps the entry
+// count at "hosts this daemon has talked to" rather than growing
+// with every directory the user visits.
 //
 // Only successful detections are stored. A host that was
 // unreachable a minute ago may well be reachable now, and these
@@ -118,7 +119,7 @@ func detectProvider(ctx context.Context, deps HandlerDeps, remoteURL, worktree s
 
 // prober resolves HandlerDeps.Prober to the HTTPProber Detect
 // should use. nil falls back to the production prober, whose zero
-// Timeout means its own 3s default.
+// Timeout means defaultProbeTimeout per scheme attempt.
 func (d HandlerDeps) prober() HTTPProber {
 	if d.Prober != nil {
 		return d.Prober

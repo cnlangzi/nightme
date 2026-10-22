@@ -732,8 +732,9 @@ func redactForDisplay(remoteURL string) string {
 //     → ErrUnsupportedProvider (the host answered, it just isn't
 //     GitHub / GitLab)
 //
-// `prober` may be nil; production uses ExecHTTPProber{} with a 3s
-// default timeout. Tests inject a fake that returns canned JSON.
+// `prober` may be nil; production uses ExecHTTPProber{} with a
+// defaultProbeTimeout budget per scheme attempt. Tests inject a fake
+// that returns canned JSON.
 func Detect(ctx context.Context, remoteURL string, prober HTTPProber, worktree string) (GitProvider, error) {
 	if prober == nil {
 		prober = &ExecHTTPProber{}
@@ -862,17 +863,29 @@ type HTTPProber interface {
 	// GitHub Enterprise error envelope. Transport failure and
 	// 5xx return an error so callers (Detect) can move on.
 	//
-	// Implementations may apply scheme fallback (HTTPS then
-	// HTTP) — see ExecHTTPProber for the production behaviour.
+	// Implementations may apply scheme fallback (HTTPS raced
+	// against plain HTTP) — see ExecHTTPProber for the production
+	// behaviour.
 	Probe(ctx context.Context, host, path string) ([]byte, error)
 }
 
+// defaultProbeTimeout is the per-scheme budget ExecHTTPProber.Probe
+// uses when Timeout is zero. 5s is sized for a self-hosted GitLab /
+// GitHub Enterprise reached over a corporate link or VPN, where the
+// API round-trip plus a cold TLS handshake routinely runs past the
+// 3s that felt adequate against a datacenter instance. Detect probes
+// two endpoints and Probe tries two schemes, so a host that answers
+// nothing costs 4× this — bounded, and paid once per host per daemon
+// lifetime thanks to the detection cache.
+const defaultProbeTimeout = 5 * time.Second
+
 // ExecHTTPProber is the production HTTPProber.
 type ExecHTTPProber struct {
-	// Timeout bounds the entire Probe call. Zero defaults to
-	// 3s — long enough for a healthy GitLab / GitHub Enterprise
-	// response, short enough that stalled servers don't block
-	// the /gtw message path.
+	// Timeout bounds EACH scheme attempt. Zero defaults to
+	// defaultProbeTimeout (5s) — long enough for a healthy GitLab /
+	// GitHub Enterprise response, short enough that stalled servers
+	// don't block the /gtw message path. The schemes race on
+	// independent budgets, so the loser costs nothing; see Probe.
 	Timeout time.Duration
 
 	// InsecureSkipVerify disables TLS verification. Defaults to
@@ -884,14 +897,15 @@ type ExecHTTPProber struct {
 
 // Probe implements HTTPProber.
 //
-// Scheme fallback: tries HTTPS first, then plain HTTP on the same
-// path on transport error (DNS / TCP / TLS / proxy CONNECT-tunnel
-// refusal / timeout) or 5xx. The fallback is essential for
-// internal self-hosted GitLab / GitHub Enterprise — many of those
-// instances run on bare IPs behind a corporate HTTP proxy that
-// refuses CONNECT to :443, but expose the API on plain HTTP. HTTPS
-// alone would silently fail with "502 CONNECT tunnel failed" and
-// return ErrUnsupportedProvider to /gtw pr.
+// Scheme fallback: races HTTPS against plain HTTP on the same path,
+// each with its own Timeout, and returns the first body either one
+// produces. The fallback is essential for internal self-hosted
+// GitLab / GitHub Enterprise — many of those instances run on bare
+// IPs behind a corporate HTTP proxy that refuses CONNECT to :443, or
+// behind a firewall that drops it outright, but expose the API on
+// plain HTTP. HTTPS alone would fail with "502 CONNECT tunnel
+// failed" (or hang until the budget expired) and report the host as
+// unrecognised or unreachable to /gtw pr.
 //
 // Returns the response body on 2xx/3xx/4xx (any status that proves
 // the endpoint actually responded — including 401 auth-required,
@@ -901,19 +915,22 @@ type ExecHTTPProber struct {
 // forwards it to the user, and "dial tcp: i/o timeout" is the only
 // thing that tells them which network problem to go fix.
 //
-// Total wall-clock is bounded by a single Timeout budget shared
-// across both schemes via context.WithTimeout — a stuck HTTPS
-// connect caps at 3s, then HTTP gets the remaining time.
+// Total wall-clock is bounded by Timeout, not 2×Timeout: the two
+// schemes race, so the call costs at most one budget. Detect probes
+// two endpoints, so a fully unreachable host still surfaces in
+// roughly 2×Timeout. The budget is per attempt rather than split
+// between them — splitting would cap a slow-but-working HTTPS
+// attempt at half, turning a healthy remote instance into a false
+// ErrProviderUnreachable. The caller's own ctx deadline still caps
+// the whole call, so a caller with a tighter budget keeps it.
 func (p *ExecHTTPProber) Probe(ctx context.Context, host, path string) ([]byte, error) {
 	if p == nil {
 		p = &ExecHTTPProber{}
 	}
 	timeout := p.Timeout
 	if timeout == 0 {
-		timeout = 3 * time.Second
+		timeout = defaultProbeTimeout
 	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 
 	var transport http.RoundTripper = http.DefaultTransport
 	if p.InsecureSkipVerify {
@@ -923,15 +940,67 @@ func (p *ExecHTTPProber) Probe(ctx context.Context, host, path string) ([]byte, 
 	}
 	cli := &http.Client{Transport: transport}
 
-	var errs []error
-	for _, scheme := range []string{"https", "http"} {
-		body, ok, err := probeOnce(ctx, cli, scheme+"://"+host+path)
-		if ok {
-			return body, nil
-		}
-		errs = append(errs, err)
+	// Both schemes race on their own budget, derived from the
+	// caller's ctx. Two serial defects forced this shape:
+	//
+	//   - Sharing one context across the schemes meant a host whose
+	//     :443 is silently dropped (firewall DROP, not REJECT — no
+	//     RST, no fast failure) spent the entire budget on HTTPS and
+	//     handed the HTTP fallback an already-expired context. A
+	//     self-hosted GitLab answering /api/v4/version in 30ms over
+	//     plain HTTP was reported as unreachable.
+	//   - Even with independent budgets, running them one after the
+	//     other made the caller pay for the dead scheme before the
+	//     live one got its turn. Racing costs at most one budget,
+	//     and normally only the winner's round-trip.
+	//
+	// Deriving each attempt from ctx keeps the caller's deadline as
+	// the outer bound; cancelling it on return aborts the loser.
+	//
+	// Neither scheme keeps a guaranteed first look. Both hit the
+	// same host and the same path, so a normally-configured instance
+	// returns the same body either way — the case that differs is a
+	// host serving different content per port, where the winner's
+	// body is what Detect fingerprints.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	type attempt struct {
+		scheme string
+		body   []byte
+		// err is nil exactly when probeOnce returned a usable
+		// response body (ok == true).
+		err error
 	}
-	return nil, fmt.Errorf("probe %s%s: both https and http failed: %w", host, path, errors.Join(errs...))
+	// Buffered so the losing goroutine can always report, even
+	// after the winner has returned and cancelled it.
+	done := make(chan attempt, 2)
+	for _, scheme := range []string{"https", "http"} {
+		schemeCtx, cancelScheme := context.WithTimeout(ctx, timeout)
+		go func() {
+			defer cancelScheme()
+			body, _, err := probeOnce(schemeCtx, cli, scheme+"://"+host+path)
+			done <- attempt{scheme: scheme, body: body, err: err}
+		}()
+	}
+
+	// Collected per scheme rather than in arrival order so the error
+	// text stays byte-identical regardless of which attempt failed
+	// first.
+	var httpsErr, httpErr error
+	for range 2 {
+		r := <-done
+		if r.err == nil {
+			return r.body, nil
+		}
+		if r.scheme == "https" {
+			httpsErr = r.err
+		} else {
+			httpErr = r.err
+		}
+	}
+	return nil, fmt.Errorf("probe %s%s: both https and http failed: %w",
+		host, path, errors.Join(httpsErr, httpErr))
 }
 
 // probeOnce issues a single GET against url. Returns (body, true,

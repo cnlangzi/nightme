@@ -29,7 +29,7 @@
 //     first (zero network), API endpoint probe fallback for
 //     self-hosted GitHub Enterprise / GitLab on custom domains.
 //     Probed via HTTPProber (mirrors CLIRunner / GitRunner injection
-//     pattern); nil → ExecHTTPProber{} with 3s default timeout.
+//     pattern); nil → ExecHTTPProber{} with a per-scheme budget.
 //
 // All public surfaces are safe to use from a single goroutine.
 // The gtw package is stateless beyond the per-process Manager

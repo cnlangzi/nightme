@@ -44,7 +44,8 @@ type HandlerDeps struct {
 	Git GitRunner
 	// Prober is the HTTPProber for Detect's Stage B API probe
 	// (used only when the URL hint is ambiguous). nil → production
-	// uses ExecHTTPProber{} with 3s default timeout. Tests inject
+	// uses ExecHTTPProber{} with the defaultProbeTimeout budget per
+	// scheme attempt. Tests inject
 	// a fake that returns canned JSON for fixture-driven cases.
 	Prober HTTPProber
 	// Detect is the provider-detection function. nil → production

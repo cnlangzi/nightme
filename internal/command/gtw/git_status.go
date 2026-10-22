@@ -439,10 +439,14 @@ func parseBranchHeader(header string) (name string, hasUpstream bool, ahead, beh
 //
 // `deps.Detect` follows the same fallback rule the rest of
 // the gtw package uses: nil → package-level Detect (URL hint
-// + API probe). `deps.Prober` nil → ExecHTTPProber{Timeout:
-// 3s}. Both dependencies are unused when `deps.Detect` is
-// non-nil (the test-only fakeDetect path) — Detect's Stage A
-// hint + Stage B probe are the only consumers of Prober.
+// + API probe). `deps.Prober` nil → ExecHTTPProber{} with the
+// default per-scheme budget. Both fallbacks live in
+// detectProvider, which is also where the per-host detection
+// cache is applied — repeated stamps for one workspace probe
+// the same host once, not once per stamp. Neither dependency is
+// used when `deps.Detect` is non-nil (the test-only fakeDetect
+// path) — Detect's Stage A hint + Stage B probe are the only
+// consumers of Prober.
 func CollectPR(ctx context.Context, dir, head string, deps HandlerDeps) (*PR, error) {
 	if head == "" {
 		// Detached HEAD / fresh repo without a commit — the

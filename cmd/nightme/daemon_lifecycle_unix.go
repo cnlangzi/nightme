@@ -172,14 +172,7 @@ func startDaemon(ctx context.Context, out io.Writer, cfg *config.Config, paths d
 		// to open the capture file; "/dev/null" is a real path on
 		// Unix but not one the operator can usefully read, so we
 		// skip the path suffix when capture is disabled.
-		if stderrPath != "" {
-			return nmerrors.New(nmerrors.CodeBridgeError, fmt.Sprintf(
-				"daemon did not become ready within 15s%s; child stderr: %s",
-				detailSuffix(reason), stderrPath))
-		}
-		return nmerrors.New(nmerrors.CodeBridgeError,
-			fmt.Sprintf("daemon did not become ready within 15s%s (stderr capture was disabled at start; see warning above)",
-				detailSuffix(reason)))
+		return readinessTimeoutError(reason, stderrPath)
 	case <-ctx.Done():
 		_ = child.Process.Signal(syscall.SIGTERM)
 		_ = child.Wait()

@@ -147,14 +147,7 @@ func startDaemon(ctx context.Context, out io.Writer, cfg *config.Config, paths d
 				// failed to open the capture file; in that case the
 				// diagnostic aid is gone, so don't promise a file the
 				// operator cannot open.
-				if stderrPath != "" {
-					return nmerrors.New(nmerrors.CodeBridgeError, fmt.Sprintf(
-						"daemon did not become ready within 15s%s; child stderr: %s",
-						detailSuffix(reason), stderrPath))
-				}
-				return nmerrors.New(nmerrors.CodeBridgeError, fmt.Sprintf(
-					"daemon did not become ready within 15s%s (stderr capture was disabled at start; see warning above)",
-					detailSuffix(reason)))
+				return readinessTimeoutError(reason, stderrPath)
 			}
 			ok, err := daemoncontrol.Ping(paths.Socket, startReadyPingTimeout)
 			if err == nil && ok {
@@ -205,11 +198,8 @@ func startDaemon(ctx context.Context, out io.Writer, cfg *config.Config, paths d
 			// Detect case 2 so we surface a clearer error.
 			if errors.Is(err, daemoncontrol.ErrNotRunning) {
 				if state, werr := child.Process.Wait(); werr == nil && state != nil {
-					return nmerrors.New(nmerrors.CodeBridgeError,
-						fmt.Sprintf("daemon child exited before becoming ready (code=%d)%s; crash output: %s",
-							exitCodeOf(state),
-							detailSuffix(startupFailureReason(paths, pid)),
-							stderrPath))
+					return childExitedError(exitCodeOf(state),
+						startupFailureReason(paths, pid), stderrPath)
 				}
 			}
 		}
@@ -225,6 +215,17 @@ func exitCodeOf(state *os.ProcessState) int {
 		return -1
 	}
 	return state.ExitCode()
+}
+
+// childExitedError is what the parent reports when the child dies
+// before signalling readiness. Windows has no readiness pipe, so the
+// only evidence of why is the child's exit code plus whatever it
+// managed to publish in the startup report — reason, which is empty
+// when the child died before it could write one.
+func childExitedError(code int, reason, stderrPath string) error {
+	return nmerrors.New(nmerrors.CodeBridgeError,
+		fmt.Sprintf("daemon child exited before becoming ready (code=%d)%s; crash output: %s",
+			code, detailSuffix(reason), stderrPath))
 }
 
 // runDaemonChild is the Windows daemon process.

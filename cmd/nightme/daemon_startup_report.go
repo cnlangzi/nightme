@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/daemoncontrol"
+	nmerrors "github.com/cnlangzi/nightme/internal/errors"
 	"github.com/cnlangzi/nightme/internal/runtime"
 )
 
@@ -237,4 +238,23 @@ func detailSuffix(reason string) string {
 		return ""
 	}
 	return ": " + reason
+}
+
+// readinessTimeoutError is the message both platform parents report
+// when the child has not signalled readiness within startupWait.
+//
+// reason is whatever the child published in its startup report before
+// being killed. Before the report existed, every timeout read the same
+// on both platforms and told the operator nothing beyond "look at the
+// log" — which is why it is spliced in here rather than left for the
+// caller to remember.
+func readinessTimeoutError(reason, stderrPath string) error {
+	if stderrPath == "" {
+		return nmerrors.New(nmerrors.CodeBridgeError, fmt.Sprintf(
+			"daemon did not become ready within 15s%s (stderr capture was disabled at start; see warning above)",
+			detailSuffix(reason)))
+	}
+	return nmerrors.New(nmerrors.CodeBridgeError, fmt.Sprintf(
+		"daemon did not become ready within 15s%s; child stderr: %s",
+		detailSuffix(reason), stderrPath))
 }

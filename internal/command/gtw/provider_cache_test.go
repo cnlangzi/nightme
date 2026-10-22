@@ -13,6 +13,7 @@ package gtw
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -137,6 +138,63 @@ func TestDetect_HostAnsweredButUnrecognised(t *testing.T) {
 	}
 	if got := stub.calls(); len(got) != 2 {
 		t.Errorf("Detect probed %v, want both endpoints", got)
+	}
+}
+
+// TestDetect_ServerErrorIsNotUnreachable keeps a live 5xx out of the
+// unreachable bucket. probeOnce deliberately fails on 5xx so the
+// scheme fallback moves on, but the host DID answer — a reverse proxy
+// returning 502, a server mid-deploy — so "git host unreachable"
+// would send the user to debug the network instead of the server.
+func TestDetect_ServerErrorIsNotUnreachable(t *testing.T) {
+	stub := &proberStub{reply: func(_, path string) ([]byte, error) {
+		return nil, fmt.Errorf("%w: GET https://host%s: 502 Bad Gateway", errProbeStatus, path)
+	}}
+	_, err := Detect(context.Background(), "ssh://git@gateway.acme/team/repo.git", stub, "")
+	if !errors.Is(err, ErrUnsupportedProvider) {
+		t.Fatalf("Detect: want ErrUnsupportedProvider when the server answers 5xx, got %v", err)
+	}
+	if errors.Is(err, ErrProviderUnreachable) {
+		t.Errorf("Detect: a 5xx is an answer, not silence — got %v", err)
+	}
+}
+
+// TestDetectProvider_URLHintIsNotCachedHostWide stops Detect's Stage A
+// from poisoning the host-keyed cache. The URL hint matches on the
+// whole raw remote URL, so a path segment containing "gitlab" decides
+// that one remote only; memoising it host-wide would hand the same
+// verdict to every other repo on the host.
+func TestDetectProvider_URLHintIsNotCachedHostWide(t *testing.T) {
+	stub := &proberStub{reply: func(_, path string) ([]byte, error) {
+		if path == "/api/v3/meta" {
+			return []byte(`{"verifiable_password_authentication":true}`), nil
+		}
+		return []byte(`<html>not gitlab</html>`), nil
+	}}
+	deps := HandlerDeps{Prober: stub, ProviderCache: &ProviderCache{}}
+
+	// Stage A: "gitlab" in the path — answered without any probe.
+	hinted, err := detectProvider(context.Background(), deps,
+		"ssh://git@ghe.acme/orgs/gitlab-mirror/foo.git", "/tmp/a")
+	if err != nil {
+		t.Fatalf("hinted detect: %v", err)
+	}
+	if hinted.Kind() != ProviderGitLab {
+		t.Fatalf("hinted detect: kind = %q, want gitlab (Stage A)", hinted.Kind())
+	}
+	if got := len(stub.calls()); got != 0 {
+		t.Fatalf("Stage A probed %v, want no network", stub.calls())
+	}
+
+	// Same host, no hint — must reach the probe, not inherit GitLab
+	// from the cached URL-hint verdict.
+	probed, err := detectProvider(context.Background(), deps,
+		"ssh://git@ghe.acme/orgs/bar.git", "/tmp/a")
+	if err != nil {
+		t.Fatalf("probed detect: %v", err)
+	}
+	if probed.Kind() != ProviderGitHub {
+		t.Fatalf("probed detect: kind = %q, want github — the Stage A hint leaked into the host cache", probed.Kind())
 	}
 }
 

@@ -6,9 +6,11 @@ import (
 )
 
 // providerIdentity is the cacheable half of a detected provider.
-// Platform identity is a function of the host alone — Stage B
-// probes <host>/api/v4/version and <host>/api/v3/meta — so kind,
-// host and version are host-determined and safe to memoise.
+// Only probed (Stage B) detections are stored: those are a function
+// of the host alone — Stage B probes <host>/api/v4/version and
+// <host>/api/v3/meta — so kind, host and version are host-determined
+// and safe to memoise. Stage A's URL hint is deliberately excluded;
+// see detectProvider.
 type providerIdentity struct {
 	kind    ProviderKind
 	host    string
@@ -105,15 +107,22 @@ func detectProvider(ctx context.Context, deps HandlerDeps, remoteURL, worktree s
 			return prov, nil
 		}
 	}
-	prov, err := Detect(ctx, remoteURL, deps.prober(), worktree)
+	prov, probed, err := detect(ctx, remoteURL, deps.prober(), worktree)
 	if err != nil || prov == nil {
 		return prov, err
 	}
-	deps.ProviderCache.store(host, providerIdentity{
-		kind:    prov.Kind(),
-		host:    prov.Host(),
-		version: prov.Version(),
-	})
+	// Only a probed answer is host-shaped. Detect's Stage A hint reads
+	// the whole raw remote URL, so "…/gitlab-mirror/foo.git" yields a
+	// GitLab verdict that says nothing about the other repos on that
+	// host; memoising it would pin every future remote on the host to
+	// whatever substring that first URL happened to contain.
+	if probed {
+		deps.ProviderCache.store(host, providerIdentity{
+			kind:    prov.Kind(),
+			host:    prov.Host(),
+			version: prov.Version(),
+		})
+	}
 	return prov, nil
 }
 

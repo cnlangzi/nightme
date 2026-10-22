@@ -726,16 +726,29 @@ func redactForDisplay(remoteURL string) string {
 //
 // Stage B failures are classified, not collapsed:
 //
-//   - both probes errored → ErrProviderUnreachable, carrying the
-//     transport cause (the host never answered)
-//   - at least one probe returned a body but no fingerprint matched
-//     → ErrUnsupportedProvider (the host answered, it just isn't
-//     GitHub / GitLab)
+//   - both endpoints failed at the transport layer →
+//     ErrProviderUnreachable, carrying the transport cause (the host
+//     never answered)
+//   - at least one endpoint came back — a body with no matching
+//     fingerprint, or a 5xx, which is a response and therefore not
+//     silence → ErrUnsupportedProvider (the host answered, it just
+//     isn't GitHub / GitLab)
 //
 // `prober` may be nil; production uses ExecHTTPProber{} with a
 // defaultProbeTimeout budget per scheme attempt. Tests inject a fake
 // that returns canned JSON.
 func Detect(ctx context.Context, remoteURL string, prober HTTPProber, worktree string) (GitProvider, error) {
+	prov, _, err := detect(ctx, remoteURL, prober, worktree)
+	return prov, err
+}
+
+// detect is Detect plus one extra fact the caller cannot otherwise
+// get: whether the answer came from the live probe. Stage A's URL
+// hint is a function of the whole raw remote URL — a path segment or
+// credential containing "gitlab" decides it — so it is not a property
+// of the host and must not be memoised host-wide. Only Stage B
+// answers, which is what ProviderCache stores.
+func detect(ctx context.Context, remoteURL string, prober HTTPProber, worktree string) (GitProvider, bool, error) {
 	if prober == nil {
 		prober = &ExecHTTPProber{}
 	}
@@ -745,16 +758,16 @@ func Detect(ctx context.Context, remoteURL string, prober HTTPProber, worktree s
 		// host segment). Don't wrap with ErrUnsupportedProvider
 		// — D3 split: this is "URL error", not "provider
 		// unsupported". Callers can errors.Is(err, ErrInvalidRemoteURL).
-		return nil, err
+		return nil, false, err
 	}
 
 	// Stage A · URL hint (zero network).
 	lower := strings.ToLower(remoteURL)
 	switch {
 	case strings.Contains(lower, "github.com"):
-		return &GitHubProvider{host: host, Worktree: worktree}, nil
+		return &GitHubProvider{host: host, Worktree: worktree}, false, nil
 	case strings.Contains(lower, "gitlab"):
-		return &GitLabProvider{host: host, Worktree: worktree}, nil
+		return &GitLabProvider{host: host, Worktree: worktree}, false, nil
 	}
 
 	// Stage B · Live API probe (only when Stage A was ambiguous).
@@ -770,7 +783,7 @@ func Detect(ctx context.Context, remoteURL string, prober HTTPProber, worktree s
 			Revision string `json:"revision"`
 		}
 		if json.Unmarshal(body, &v) == nil && (v.Version != "" || v.Revision != "") {
-			return &GitLabProvider{host: host, version: v.Version, Worktree: worktree}, nil
+			return &GitLabProvider{host: host, version: v.Version, Worktree: worktree}, true, nil
 		}
 		// Soft fingerprint: GitLab's auth/permission error envelope.
 		// /api/v4 is GitLab-only — GitHub Enterprise uses /api/v3, so
@@ -783,7 +796,7 @@ func Detect(ctx context.Context, remoteURL string, prober HTTPProber, worktree s
 			Message string `json:"message"`
 		}
 		if json.Unmarshal(body, &env) == nil && env.Message != "" {
-			return &GitLabProvider{host: host, Worktree: worktree}, nil
+			return &GitLabProvider{host: host, Worktree: worktree}, true, nil
 		}
 	} else {
 		probeErrs = append(probeErrs, err)
@@ -798,23 +811,39 @@ func Detect(ctx context.Context, remoteURL string, prober HTTPProber, worktree s
 			// GitLab answers 404 with a JSON envelope on
 			// /api/v3/meta, which would misclassify as GitHub.
 			if _, hasGH := meta["verifiable_password_authentication"]; hasGH {
-				return &GitHubProvider{host: host, Worktree: worktree}, nil
+				return &GitHubProvider{host: host, Worktree: worktree}, true, nil
 			}
 		}
 	} else {
 		probeErrs = append(probeErrs, err)
 	}
-	if len(probeErrs) == 2 {
-		return nil, &unreachableError{errs: probeErrs}
+	if len(probeErrs) == 2 && !anyResponded(probeErrs) {
+		return nil, false, &unreachableError{errs: probeErrs}
 	}
-	return nil, fmt.Errorf("%w: %s", ErrUnsupportedProvider, host)
+	return nil, false, fmt.Errorf("%w: %s", ErrUnsupportedProvider, host)
+}
+
+// anyResponded reports whether any probe error carries errProbeStatus
+// — that is, whether the host was actually reached and answered with
+// a 5xx. ErrProviderUnreachable means "nothing came back"; a 5xx
+// means something did, so it classifies as ErrUnsupportedProvider
+// (host answered, no fingerprint matched) instead of sending the user
+// after their network.
+func anyResponded(errs []error) bool {
+	for _, err := range errs {
+		if errors.Is(err, errProbeStatus) {
+			return true
+		}
+	}
+	return false
 }
 
 // unreachableError is the Detect result for "neither endpoint
 // answered". Its message is the probe text alone — the reply
-// templates supply their own lead-in, so the host would otherwise
-// be stated twice. Each probe message already names its host and
-// path.
+// templates supply their own lead-in, and each `*url.Error` already
+// names its own URL, so restating host and path here would repeat
+// them a third and fourth time in a reply that has to fit an IM
+// message.
 //
 // Unwrap exposes ErrProviderUnreachable alongside the underlying
 // probe errors, so callers can classify with errors.Is and the
@@ -828,7 +857,10 @@ func (e *unreachableError) Error() string {
 	for _, err := range e.errs {
 		parts = append(parts, err.Error())
 	}
-	return strings.Join(parts, "; ")
+	// One line per endpoint: this string is rendered verbatim under a
+	// "  → " lead-in in the chat reply, and a single-line wall of four
+	// dial errors is unreadable.
+	return strings.Join(parts, "\n")
 }
 
 func (e *unreachableError) Unwrap() []error {
@@ -873,10 +905,16 @@ type HTTPProber interface {
 // uses when Timeout is zero. 5s is sized for a self-hosted GitLab /
 // GitHub Enterprise reached over a corporate link or VPN, where the
 // API round-trip plus a cold TLS handshake routinely runs past the
-// 3s that felt adequate against a datacenter instance. Detect probes
-// two endpoints and Probe tries two schemes, so a host that answers
-// nothing costs 4× this — bounded, and paid once per host per daemon
-// lifetime thanks to the detection cache.
+// 3s that felt adequate against a datacenter instance.
+//
+// Detect probes two endpoints and the two schemes race, so a host
+// that answers nothing costs about 2× this. That cost is paid once
+// per REACHABLE host per daemon lifetime, because successful
+// detections are memoised by ProviderCache. A host that fails is
+// re-probed on every call — the cache deliberately stores successes
+// only, so a proxy that gets fixed takes effect on the next command
+// — so the 2× figure is the repeated cost for an unreachable host,
+// paid on every /gtw dispatch and every stamp-path CollectPR.
 const defaultProbeTimeout = 5 * time.Second
 
 // ExecHTTPProber is the production HTTPProber.
@@ -951,25 +989,39 @@ func (p *ExecHTTPProber) Probe(ctx context.Context, host, path string) ([]byte, 
 	//     plain HTTP was reported as unreachable.
 	//   - Even with independent budgets, running them one after the
 	//     other made the caller pay for the dead scheme before the
-	//     live one got its turn. Racing costs at most one budget,
-	//     and normally only the winner's round-trip.
+	//     live one got its turn.
+	//
+	// The race does NOT mean "first answer wins" — HTTPS keeps a
+	// guaranteed first look. A host can serve different content per
+	// port: a captive portal or login redirect on :80 in front of a
+	// perfectly healthy GitLab on :443. Letting the fast HTTP
+	// response win there returns `<html>…</html>`, fingerprints
+	// nothing, and reports a reachable GitLab as an unsupported
+	// platform — the same misdiagnosis this whole path exists to
+	// remove. So an HTTP result is held until HTTPS has reported,
+	// and HTTPS is returned whenever it produced anything usable.
+	//
+	// The cost of that guarantee is the one the race was meant to
+	// avoid: when :443 is dropped, the caller waits out the HTTPS
+	// budget before the HTTP body is returned. That is one wait per
+	// host per daemon lifetime, because successful detections are
+	// memoised by ProviderCache.
+	//
+	// Cost the other way: every Stage B probe now issues two
+	// requests per endpoint and always includes one plaintext GET to
+	// :80, even when HTTPS would have answered. On an
+	// HTTPS-only instance that is one extra request the access log
+	// will show.
 	//
 	// Deriving each attempt from ctx keeps the caller's deadline as
 	// the outer bound; cancelling it on return aborts the loser.
-	//
-	// Neither scheme keeps a guaranteed first look. Both hit the
-	// same host and the same path, so a normally-configured instance
-	// returns the same body either way — the case that differs is a
-	// host serving different content per port, where the winner's
-	// body is what Detect fingerprints.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	type attempt struct {
 		scheme string
 		body   []byte
-		// err is nil exactly when probeOnce returned a usable
-		// response body (ok == true).
+		// err is nil exactly when probeOnce returned a usable body.
 		err error
 	}
 	// Buffered so the losing goroutine can always report, even
@@ -979,7 +1031,7 @@ func (p *ExecHTTPProber) Probe(ctx context.Context, host, path string) ([]byte, 
 		schemeCtx, cancelScheme := context.WithTimeout(ctx, timeout)
 		go func() {
 			defer cancelScheme()
-			body, _, err := probeOnce(schemeCtx, cli, scheme+"://"+host+path)
+			body, err := probeOnce(schemeCtx, cli, scheme+"://"+host+path)
 			done <- attempt{scheme: scheme, body: body, err: err}
 		}()
 	}
@@ -987,46 +1039,63 @@ func (p *ExecHTTPProber) Probe(ctx context.Context, host, path string) ([]byte, 
 	// Collected per scheme rather than in arrival order so the error
 	// text stays byte-identical regardless of which attempt failed
 	// first.
-	var httpsErr, httpErr error
+	var https, http attempt
 	for range 2 {
 		r := <-done
-		if r.err == nil {
-			return r.body, nil
-		}
 		if r.scheme == "https" {
-			httpsErr = r.err
+			https = r
+			if r.err == nil {
+				return r.body, nil
+			}
 		} else {
-			httpErr = r.err
+			http = r
 		}
 	}
-	return nil, fmt.Errorf("probe %s%s: both https and http failed: %w",
-		host, path, errors.Join(httpsErr, httpErr))
+	if http.err == nil {
+		return http.body, nil
+	}
+	// No host/path prefix here: each `*url.Error` already spells out
+	// the URL it failed on, and the reply templates that render this
+	// string have already named the remote.
+	return nil, fmt.Errorf("both https and http failed: %s; %s",
+		https.err, http.err)
 }
 
-// probeOnce issues a single GET against url. Returns (body, true,
-// nil) on 2xx/3xx/4xx; returns (nil, false, cause) on transport
-// error or 5xx so the caller can try the next scheme and still
-// report why this one didn't work.
-func probeOnce(ctx context.Context, cli *http.Client, url string) ([]byte, bool, error) {
+// errProbeStatus marks a probe that reached the host and got an HTTP
+// response, one Detect should still treat as a failure: 5xx means the
+// request landed but the answer is not a platform API response, so the
+// scheme fallback moves on. Detect needs the distinction because a
+// server answering "502 Bad Gateway" (corporate proxy, deploy window,
+// broken reverse proxy) has demonstrably NOT gone silent — reporting
+// that as ErrProviderUnreachable would send the user to debug their
+// network instead of their server.
+var errProbeStatus = errors.New("probe: endpoint returned 5xx")
+
+// probeOnce issues a single GET against url. Returns the body on
+// 2xx/3xx/4xx and a non-nil error on transport failure or 5xx so the
+// caller can try the next scheme and still report why this one didn't
+// work. A 5xx error wraps errProbeStatus; a transport error does not,
+// which is how Detect separates "unreachable" from "answered, badly".
+func probeOnce(ctx context.Context, cli *http.Client, url string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "nightme-git-provider-detect/1.0")
 	resp, err := cli.Do(req)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	if resp.StatusCode >= 500 {
-		return nil, false, fmt.Errorf("GET %s: %s", url, resp.Status)
+		return nil, fmt.Errorf("%w: GET %s: %s", errProbeStatus, url, resp.Status)
 	}
-	return body, true, nil
+	return body, nil
 }
 
 // CLIRunner abstracts gh / glab. Same pattern as GitRunner: tests

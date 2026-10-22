@@ -252,50 +252,58 @@ func TestDetect_VersionFieldPopulatedWhenReadable(t *testing.T) {
 	}
 }
 
-// TestProbe_SharedTimeoutBoundedSchemes guarantees the ctx
-// timeout caps wall-clock across both schemes. Probe fires two
-// attempts (HTTPS then HTTP) on a server that delays each by 5s;
-// with a 500ms Timeout, Probe must return well before the second
-// scheme gets to time-out individually. Without the shared
-// context, the cumulative latency could be up to 2× Timeout.
-func TestProbe_SharedTimeoutBoundedSchemes(t *testing.T) {
-	// HTTPS scheme: server has no TLS → client.Do fails fast
-	// with TLS handshake error, no hang. So this test mainly
-	// guards against future regressions where someone splits the
-	// timeout across two independent contexts.
-	//
-	// To exercise the budget, serve the body on a slow handler
-	// under HTTP — the HTTPS attempt fails immediately, the HTTP
-	// attempt sleeps past the budget, and the shared context
-	// should cancel the in-flight request before the second
-	// scheme eats the full Timeout.
+type timeoutProbeTransport struct {
+	base http.RoundTripper
+}
+
+func (tr timeoutProbeTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL.Scheme == "https" {
+		<-req.Context().Done()
+		return nil, req.Context().Err()
+	}
+	return tr.base.RoundTrip(req)
+}
+
+func TestProbe_HTTPSTimeoutFallsBackToHTTP(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(800 * time.Millisecond)
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"version":"16.5.0"}`))
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"message":"401 Unauthorized"}`))
 	}))
 	defer ts.Close()
 
+	original := http.DefaultTransport
+	http.DefaultTransport = timeoutProbeTransport{base: original}
+	t.Cleanup(func() { http.DefaultTransport = original })
+
 	u, err := url.Parse(ts.URL)
 	if err != nil {
-		t.Fatalf("parse URL: %v", err)
+		t.Fatal(err)
 	}
+	p := &ExecHTTPProber{Timeout: 50 * time.Millisecond}
+	prov, err := Detect(context.Background(), "ssh://git@"+u.Host+"/f9/repo.git", p, "")
+	if err != nil {
+		t.Fatalf("Detect after HTTPS timeout: %v", err)
+	}
+	if prov.Kind() != ProviderGitLab {
+		t.Fatalf("Detect.Kind: want gitlab, got %q", prov.Kind())
+	}
+}
 
-	p := &ExecHTTPProber{Timeout: 200 * time.Millisecond}
+func TestProbe_RespectsParentDeadline(t *testing.T) {
+	original := http.DefaultTransport
+	http.DefaultTransport = timeoutProbeTransport{base: original}
+	t.Cleanup(func() { http.DefaultTransport = original })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	p := &ExecHTTPProber{Timeout: time.Second}
 	start := time.Now()
-	_, err = p.Probe(context.Background(), u.Host, "/api/v4/version")
-	elapsed := time.Since(start)
-
-	// Probe should fail because the handler slept past the
-	// shared deadline. Either:
-	//   - HTTPS attempt fails fast (no TLS), HTTP attempt hits
-	//     the 200ms ctx budget → context.Canceled
-	//   - some combination that returns before 1s of wall clock
-	if err == nil {
-		t.Fatal("Probe: want error from shared timeout, got nil")
+	_, err := p.Probe(ctx, "127.0.0.1:1", "/api/v4/version")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Probe: want parent deadline error, got %v", err)
 	}
-	if elapsed > 1*time.Second {
-		t.Fatalf("Probe: exceeded reasonable bound, elapsed=%v", elapsed)
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("Probe exceeded parent budget: %v", elapsed)
 	}
 }
 

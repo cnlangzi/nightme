@@ -869,10 +869,8 @@ type HTTPProber interface {
 
 // ExecHTTPProber is the production HTTPProber.
 type ExecHTTPProber struct {
-	// Timeout bounds the entire Probe call. Zero defaults to
-	// 3s — long enough for a healthy GitLab / GitHub Enterprise
-	// response, short enough that stalled servers don't block
-	// the /gtw message path.
+	// Timeout bounds each scheme attempt independently. Zero defaults
+	// to 3s; the parent context still bounds the entire Probe call.
 	Timeout time.Duration
 
 	// InsecureSkipVerify disables TLS verification. Defaults to
@@ -901,9 +899,9 @@ type ExecHTTPProber struct {
 // forwards it to the user, and "dial tcp: i/o timeout" is the only
 // thing that tells them which network problem to go fix.
 //
-// Total wall-clock is bounded by a single Timeout budget shared
-// across both schemes via context.WithTimeout — a stuck HTTPS
-// connect caps at 3s, then HTTP gets the remaining time.
+// Each scheme has its own Timeout budget so a stalled HTTPS
+// connection cannot exhaust the HTTP fallback's budget. The parent
+// context can impose a shorter deadline on either attempt.
 func (p *ExecHTTPProber) Probe(ctx context.Context, host, path string) ([]byte, error) {
 	if p == nil {
 		p = &ExecHTTPProber{}
@@ -912,9 +910,6 @@ func (p *ExecHTTPProber) Probe(ctx context.Context, host, path string) ([]byte, 
 	if timeout == 0 {
 		timeout = 3 * time.Second
 	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
 	var transport http.RoundTripper = http.DefaultTransport
 	if p.InsecureSkipVerify {
 		transport = &http.Transport{
@@ -925,7 +920,9 @@ func (p *ExecHTTPProber) Probe(ctx context.Context, host, path string) ([]byte, 
 
 	var errs []error
 	for _, scheme := range []string{"https", "http"} {
-		body, ok, err := probeOnce(ctx, cli, scheme+"://"+host+path)
+		attemptCtx, cancel := context.WithTimeout(ctx, timeout)
+		body, ok, err := probeOnce(attemptCtx, cli, scheme+"://"+host+path)
+		cancel()
 		if ok {
 			return body, nil
 		}

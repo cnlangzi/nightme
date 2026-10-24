@@ -107,7 +107,7 @@ func TestRealPi_CommitPromptV2(t *testing.T) {
 		Branch:   "main",
 		Issue:    1, // exercises the Issue trailer guard
 	}
-	prompt := buildAgentPrompt(c)
+	prompt := buildAgentPrompt(c, defaultLanguage)
 	t.Logf("=== PROMPT (first 1000 chars) ===\n%s\n=== END PROMPT (head) ===",
 		truncateOutput(prompt, 1000))
 

@@ -424,6 +424,44 @@ fix:
 - stdout / stderr 全部回显，能看到实际跑过什么。
 - 单个 hook 默认 30s 超时。
 
+### 输出语言——commit / PR / issue 正文
+
+`/gtw commit`、`/gtw pr`、`/gtw new` 写出来的文本用什么语言，以前完全由模型
+自己决定——同一个仓库里中英文提交混排。设一次语言，之后生成的文本都跟着它走。
+
+语言配置在 `~/.nightme/gtw.yml`，分两个作用域：
+
+| 作用域 | 配置键 | 生效范围 |
+|---|---|---|
+| 用户级 | `lang:` | 所有仓库 |
+| 仓库级 | `repos.<host>/<owner>/<repo>.lang:` | 仅该仓库 |
+
+仓库键由 `origin` remote URL 自动解析出来，你不用手写。仓库级优先于用户级；
+两级都没设时语言是 `English`。
+
+```yaml
+# ~/.nightme/gtw.yml
+lang: 简体中文            # 所有仓库
+
+repos:
+  github.com/cnlangzi/nightme:
+    lang: zh-CN           # 仅该仓库
+```
+
+`/gtw config` 的四种形式：
+
+| 命令 | 作用 |
+|---|---|
+| `/gtw config lang` | 回显生效语言及其来源作用域 |
+| `/gtw config lang <value>` | 设置当前仓库的语言 |
+| `/gtw config -g lang <value>` | 设置所有仓库的语言 |
+| `/gtw config --unset lang` | 删除该条目（加 `-g` 删用户级） |
+
+语言值是自由文本——`简体中文`、`zh-CN`、`Simplified Chinese` 都可以。结构化
+标记不论什么语言都保持英文：`## Summary by NightMe` 标题、PR 分类标签、
+`Risk:` 行、`Issue: #<id>` 与 `Closes #N` trailer、Conventional Commits 的
+type 关键词。issue 标题保持英文 / ASCII——分支名是从它派生的。
+
 ---
 
 ## Workflow 自动化

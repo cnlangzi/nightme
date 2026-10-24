@@ -438,6 +438,49 @@ Iron rules (from the code):
 - All stdout/stderr is echoed back so you can see what actually ran.
 - 30s default timeout per hook.
 
+### Output language — commit, PR, and issue text
+
+`/gtw commit`, `/gtw pr`, and `/gtw new` used to pick the language of the text
+they wrote on their own, so one repository ended up with mixed English and
+Chinese commit messages. Set the language once and every generated text
+follows it.
+
+The language lives in `~/.nightme/gtw.yml`, with two scopes:
+
+| Scope | Key | Applies to |
+|---|---|---|
+| User | `lang:` | every repository |
+| Repo | `repos.<host>/<owner>/<repo>.lang:` | that repository only |
+
+The repo key is derived from the `origin` remote URL — you never type it. The
+repo scope wins over the user scope; when neither is set, the language is
+`English`.
+
+```yaml
+# ~/.nightme/gtw.yml
+lang: 简体中文            # every repository
+
+repos:
+  github.com/cnlangzi/nightme:
+    lang: zh-CN           # this repository only
+```
+
+Four forms of `/gtw config`:
+
+| Command | Effect |
+|---|---|
+| `/gtw config lang` | show the effective language and the scope it came from |
+| `/gtw config lang <value>` | set the language for the current repository |
+| `/gtw config -g lang <value>` | set the language for every repository |
+| `/gtw config --unset lang` | remove the entry (add `-g` for the user scope) |
+
+The value is free text — `简体中文`, `zh-CN`, and `Simplified Chinese` all
+work. Structured markers stay in English whatever the language: the
+`## Summary by NightMe` heading, the PR category labels, the `Risk:` line, the
+`Issue: #<id>` and `Closes #N` trailers, and the Conventional Commits type
+keyword. Issue titles stay English/ASCII — the branch name is derived from
+them.
+
 ## Workflow automation
 
 `nightme workflow` plans and inspects YAML-defined automations. Workflows live in `~/.nightme/workflows/*.yaml`, loaded by name.

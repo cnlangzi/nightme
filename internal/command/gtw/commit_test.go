@@ -39,7 +39,7 @@ func TestBuildAgentPrompt_Remote(t *testing.T) {
 		Branch:   "fix-42-foo",
 		Issue:    42,
 	}
-	p := buildAgentPrompt(c)
+	p := buildAgentPrompt(c, defaultLanguage)
 
 	mustContain(t, p, "release engineer")
 	mustContain(t, p, "Branch: fix-42-foo")
@@ -83,7 +83,7 @@ func TestBuildAgentPrompt_Local(t *testing.T) {
 		Branch:   "wt-local",
 		Issue:    -1, // ModeLocal
 	}
-	p := buildAgentPrompt(c)
+	p := buildAgentPrompt(c, defaultLanguage)
 
 	mustContain(t, p, "release engineer")
 	mustContain(t, p, "Branch: wt-local")
@@ -113,7 +113,7 @@ func TestBuildAgentPrompt_Local(t *testing.T) {
 // `git update-index`, `git restore --staged`).
 func TestBuildAgentPrompt_AllowlistOperations(t *testing.T) {
 	c := Context{Worktree: "/w", Branch: "feat/x", Issue: 1}
-	p := buildAgentPrompt(c)
+	p := buildAgentPrompt(c, defaultLanguage)
 
 	mustContain(t, p, "## Allowed operations (strict allowlist)")
 	mustContain(t, p, "You may only run these git commands — nothing else:")
@@ -131,7 +131,7 @@ func TestBuildAgentPrompt_AllowlistOperations(t *testing.T) {
 // committing — exactly the overstep behavior the user reported.
 func TestBuildAgentPrompt_AntiFileModification(t *testing.T) {
 	c := Context{Worktree: "/w", Branch: "feat/x", Issue: 1}
-	p := buildAgentPrompt(c)
+	p := buildAgentPrompt(c, defaultLanguage)
 
 	mustContain(t, p, "Edit, create, or delete any file in the worktree")
 }
@@ -144,7 +144,7 @@ func TestBuildAgentPrompt_AntiFileModification(t *testing.T) {
 // concerns (visible in the user's screenshot).
 func TestBuildAgentPrompt_AntiHunkSurgery(t *testing.T) {
 	c := Context{Worktree: "/w", Branch: "feat/x", Issue: 1}
-	p := buildAgentPrompt(c)
+	p := buildAgentPrompt(c, defaultLanguage)
 
 	mustContain(t, p, "`git apply`")
 	mustContain(t, p, "patch / hunk surgery")
@@ -156,7 +156,7 @@ func TestBuildAgentPrompt_AntiHunkSurgery(t *testing.T) {
 // owns post-commit verification; the LLM does not.
 func TestBuildAgentPrompt_AntiTestBuild(t *testing.T) {
 	c := Context{Worktree: "/w", Branch: "feat/x", Issue: 1}
-	p := buildAgentPrompt(c)
+	p := buildAgentPrompt(c, defaultLanguage)
 
 	mustContain(t, p, "Run tests, builds, linters, formatters")
 }
@@ -168,7 +168,7 @@ func TestBuildAgentPrompt_AntiTestBuild(t *testing.T) {
 // checks the wrapper owns.
 func TestBuildAgentPrompt_NoSelfVerify(t *testing.T) {
 	c := Context{Worktree: "/w", Branch: "feat/x", Issue: 1}
-	p := buildAgentPrompt(c)
+	p := buildAgentPrompt(c, defaultLanguage)
 
 	mustContain(t, p, "Verify your own work")
 	mustContain(t, p, "The wrapper runs HEAD-advance / clean / branch checks")
@@ -180,7 +180,7 @@ func TestBuildAgentPrompt_NoSelfVerify(t *testing.T) {
 // LLM must not "clean up" history.
 func TestBuildAgentPrompt_AntiHistoryMutation(t *testing.T) {
 	c := Context{Worktree: "/w", Branch: "feat/x", Issue: 1}
-	p := buildAgentPrompt(c)
+	p := buildAgentPrompt(c, defaultLanguage)
 
 	mustContain(t, p, "Amend, rebase, reset")
 	mustContain(t, p, "modify existing commits or history")
@@ -193,7 +193,7 @@ func TestBuildAgentPrompt_AntiHistoryMutation(t *testing.T) {
 // — silent failure mode without this guard.
 func TestBuildAgentPrompt_AntiCheckoutOtherBranch(t *testing.T) {
 	c := Context{Worktree: "/w", Branch: "feat/x", Issue: 1}
-	p := buildAgentPrompt(c)
+	p := buildAgentPrompt(c, defaultLanguage)
 
 	mustContain(t, p, "Checkout a different branch")
 	mustContain(t, p, "Stay on the current branch")
@@ -204,7 +204,7 @@ func TestBuildAgentPrompt_AntiCheckoutOtherBranch(t *testing.T) {
 // `git push`.
 func TestBuildAgentPrompt_AntiPush(t *testing.T) {
 	c := Context{Worktree: "/w", Branch: "feat/x", Issue: 1}
-	p := buildAgentPrompt(c)
+	p := buildAgentPrompt(c, defaultLanguage)
 
 	mustContain(t, p, "Push.")
 	mustContain(t, p, "Never run `git push`")
@@ -215,7 +215,7 @@ func TestBuildAgentPrompt_AntiPush(t *testing.T) {
 // or stash the user's work.
 func TestBuildAgentPrompt_AntiRevertRestoreStash(t *testing.T) {
 	c := Context{Worktree: "/w", Branch: "feat/x", Issue: 1}
-	p := buildAgentPrompt(c)
+	p := buildAgentPrompt(c, defaultLanguage)
 
 	mustContain(t, p, "Revert, restore, or stash")
 }
@@ -224,7 +224,7 @@ func TestBuildAgentPrompt_AntiRevertRestoreStash(t *testing.T) {
 // Whole-file staging only; never `git add -A` or `git add .`.
 func TestBuildAgentPrompt_AntiAddA(t *testing.T) {
 	c := Context{Worktree: "/w", Branch: "feat/x", Issue: 1}
-	p := buildAgentPrompt(c)
+	p := buildAgentPrompt(c, defaultLanguage)
 
 	mustContain(t, p, "`git add -A` or `git add .`")
 }
@@ -237,10 +237,10 @@ func TestBuildAgentPrompt_AntiAddA(t *testing.T) {
 // The no-issue branch verifies the trailer line is absent (the
 // prompt is gated on c.Issue > 0).
 func TestBuildAgentPrompt_IssueTrailerEnforced(t *testing.T) {
-	withIssue := buildAgentPrompt(Context{Worktree: "/w", Branch: "x", Issue: 42})
+	withIssue := buildAgentPrompt(Context{Worktree: "/w", Branch: "x", Issue: 42}, defaultLanguage)
 	mustContain(t, withIssue, "`Issue: #42`")
 
-	noIssue := buildAgentPrompt(Context{Worktree: "/w", Branch: "x", Issue: -1})
+	noIssue := buildAgentPrompt(Context{Worktree: "/w", Branch: "x", Issue: -1}, defaultLanguage)
 	if strings.Contains(noIssue, "`Issue: #1`") || strings.Contains(noIssue, "`Issue: #42`") {
 		t.Fatalf("no-issue prompt should not contain Issue: #N trailer line:\n%s", noIssue)
 	}
@@ -254,7 +254,7 @@ func TestBuildAgentPrompt_IssueTrailerEnforced(t *testing.T) {
 // returns within a few commits.
 func TestBuildAgentPrompt_AntiModalPattern(t *testing.T) {
 	c := Context{Worktree: "/w", Branch: "feat/x", Issue: 1}
-	p := buildAgentPrompt(c)
+	p := buildAgentPrompt(c, defaultLanguage)
 
 	mustContain(t, p, "No subject-only commit for non-trivial work")
 	mustContain(t, p, "REQUIRED")
@@ -270,7 +270,7 @@ func TestBuildAgentPrompt_AntiModalPattern(t *testing.T) {
 // by design and not affected by this anchor.)
 func TestBuildAgentPrompt_TerseFinalReply(t *testing.T) {
 	c := Context{Worktree: "/w", Branch: "feat/x", Issue: 1}
-	p := buildAgentPrompt(c)
+	p := buildAgentPrompt(c, defaultLanguage)
 
 	mustContain(t, p, "## Final reply")
 	mustContain(t, p, "<hash> <subject>")
@@ -283,7 +283,7 @@ func TestBuildAgentPrompt_TerseFinalReply(t *testing.T) {
 // keep; meaningful regression guard.
 func TestBuildAgentPrompt_OneCoherentCommit(t *testing.T) {
 	c := Context{Worktree: "/w", Branch: "feat/x", Issue: 1}
-	p := buildAgentPrompt(c)
+	p := buildAgentPrompt(c, defaultLanguage)
 
 	mustContain(t, p, "ONE coherent commit beats two forced splits")
 }
@@ -404,7 +404,7 @@ func TestRunCommit_NoWorkToDo(t *testing.T) {
 	cs := newPushChatSession(t)
 	s := captureCh(t, cs)
 	_, err := dispatchCommit(context.Background(), cs,
-		HandlerDeps{Git: git}, "chat", "msg", commitArgs{}, "")
+		HandlerDeps{Git: git}, "chat", "msg", commitArgs{}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchCommit: %v", err)
 	}
@@ -435,7 +435,7 @@ func TestRunCommit_DetachedHead(t *testing.T) {
 	cs := newPushChatSession(t)
 	s := captureCh(t, cs)
 	_, err := dispatchCommit(context.Background(), cs,
-		HandlerDeps{Git: git}, "chat", "msg", commitArgs{}, "")
+		HandlerDeps{Git: git}, "chat", "msg", commitArgs{}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchCommit: %v", err)
 	}
@@ -463,7 +463,7 @@ func TestRunCommit_ConflictState(t *testing.T) {
 	_ = cs.SetSelectedAgent("claude")
 
 	_, err := dispatchCommit(context.Background(), cs,
-		HandlerDeps{Git: git}, "chat", "msg", commitArgs{}, "")
+		HandlerDeps{Git: git}, "chat", "msg", commitArgs{}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchCommit: %v", err)
 	}
@@ -516,7 +516,7 @@ func TestRunCommit_HappyPath(t *testing.T) {
 	s := captureCh(t, cs)
 
 	_, err := dispatchCommit(context.Background(), cs,
-		HandlerDeps{Git: git}, "chat", "msg", commitArgs{}, "")
+		HandlerDeps{Git: git}, "chat", "msg", commitArgs{}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchCommit: %v", err)
 	}
@@ -591,7 +591,7 @@ func TestRunCommit_DirtyWithAgentFlag(t *testing.T) {
 	_ = cs.SetSelectedAgent("claude") // chat default = claude
 
 	_, err := dispatchCommit(context.Background(), cs,
-		HandlerDeps{Git: git}, "chat", "msg", commitArgs{Agent: "opencode"}, "")
+		HandlerDeps{Git: git}, "chat", "msg", commitArgs{Agent: "opencode"}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchCommit: %v", err)
 	}
@@ -637,7 +637,7 @@ func TestRunCommit_DirtyAgentLeavesFiles(t *testing.T) {
 	_ = cs.SetSelectedAgent("claude")
 	s := captureCh(t, cs)
 	_, err := dispatchCommit(context.Background(), cs,
-		HandlerDeps{Git: git}, "chat", "msg", commitArgs{}, "")
+		HandlerDeps{Git: git}, "chat", "msg", commitArgs{}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchCommit: %v", err)
 	}
@@ -683,7 +683,7 @@ func TestRunCommit_DirtyAgentClaimsDoneButNoCommit(t *testing.T) {
 	_ = cs.SetSelectedAgent("claude")
 	s := captureCh(t, cs)
 	_, err := dispatchCommit(context.Background(), cs,
-		HandlerDeps{Git: git}, "chat", "msg", commitArgs{}, "")
+		HandlerDeps{Git: git}, "chat", "msg", commitArgs{}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchCommit: %v", err)
 	}
@@ -725,7 +725,7 @@ func TestRunCommit_DirtyAgentSwitchesBranch(t *testing.T) {
 	_ = cs.SetSelectedAgent("claude")
 	s := captureCh(t, cs)
 	_, err := dispatchCommit(context.Background(), cs,
-		HandlerDeps{Git: git}, "chat", "msg", commitArgs{}, "")
+		HandlerDeps{Git: git}, "chat", "msg", commitArgs{}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchCommit: %v", err)
 	}
@@ -771,7 +771,7 @@ func TestRunCommit_AgentIntroducedConflicts(t *testing.T) {
 
 	s := captureCh(t, cs)
 	_, err := dispatchCommit(context.Background(), cs,
-		HandlerDeps{Git: git}, "chat", "msg", commitArgs{}, "")
+		HandlerDeps{Git: git}, "chat", "msg", commitArgs{}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchCommit: %v", err)
 	}
@@ -808,7 +808,7 @@ func TestRunCommit_NoAgentSelected(t *testing.T) {
 	s := captureCh(t, cs)
 
 	_, err := dispatchCommit(context.Background(), cs,
-		HandlerDeps{Git: git}, "chat", "msg", commitArgs{}, "")
+		HandlerDeps{Git: git}, "chat", "msg", commitArgs{}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchCommit: %v", err)
 	}
@@ -842,7 +842,7 @@ func TestRunCommit_UnknownAgent(t *testing.T) {
 	_ = cs.SetSelectedAgent("claude")
 
 	_, err := dispatchCommit(context.Background(), cs,
-		HandlerDeps{Git: git}, "chat", "msg", commitArgs{Agent: "nope"}, "")
+		HandlerDeps{Git: git}, "chat", "msg", commitArgs{Agent: "nope"}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchCommit: %v", err)
 	}
@@ -874,7 +874,7 @@ func TestRunCommit_AgentBinaryMissing(t *testing.T) {
 	_ = cs.SetSelectedAgent("claude")
 
 	_, err := dispatchCommit(context.Background(), cs,
-		HandlerDeps{Git: git}, "chat", "msg", commitArgs{}, "")
+		HandlerDeps{Git: git}, "chat", "msg", commitArgs{}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchCommit: %v", err)
 	}
@@ -908,7 +908,7 @@ func TestRunCommit_AgentRunOnceError(t *testing.T) {
 	_ = cs.SetSelectedAgent("claude")
 
 	_, err := dispatchCommit(context.Background(), cs,
-		HandlerDeps{Git: git}, "chat", "msg", commitArgs{}, "")
+		HandlerDeps{Git: git}, "chat", "msg", commitArgs{}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchCommit: %v", err)
 	}

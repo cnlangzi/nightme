@@ -42,13 +42,19 @@ import (
 // ResolveAgent call. The yml-loader lives in cmd.go's runCommit
 // wrapper so loadNotes (ymalformed yml / read errors) ride along
 // in the consolidated reply per wip/gtw-hooks.md.
+//
+// cfg carries the user-level gtw config: the default agent name
+// (cfg.Commit.Agent) and the output-language scopes. The
+// effective language is resolved from the worktree's origin
+// remote — repo scope beats global scope, English is the
+// fallback.
 func dispatchCommit(
 	ctx context.Context,
 	cs *chatsession.ChatSession,
 	deps HandlerDeps,
 	chatID, messageID string,
 	args commitArgs,
-	ymlAgent string,
+	cfg Config,
 ) (*Result, error) {
 	c, res := loadDispatchContext(ctx, cs, deps, chatID, messageID)
 	if res != nil {
@@ -111,8 +117,9 @@ func dispatchCommit(
 	// runtime event pipeline).
 	ctx, cancel := context.WithTimeout(ctx, timeouts.Agent)
 	defer cancel()
+	lang := resolveLanguage(ctx, cfg, c.Worktree, deps.Git)
 	runRes, agentName, err := runAgentFor(ctx, cs, c.Worktree,
-		buildAgentPrompt(c), chatID, messageID, args.Agent, ymlAgent,
+		buildAgentPrompt(c, lang), chatID, messageID, args.Agent, cfg.Commit.Agent,
 		// Drop OutResult; replyAgent below is the only result card.
 		messages.OutResult)
 	if err != nil {
@@ -380,7 +387,11 @@ func verifyAgentCommitted(ctx context.Context, deps HandlerDeps, c Context, head
 //     for commits that did not need it (a task-focus problem:
 //     the LLM was matching the example rather than writing
 //     for the actual change).
-func buildAgentPrompt(c Context) string {
+//
+// The commit subject and body are written in the configured output
+// language (lang); the Conventional Commits type keyword and the
+// `Issue: #<id>` trailer stay in English so they remain greppable.
+func buildAgentPrompt(c Context, lang string) string {
 	var sb strings.Builder
 
 	// --- Role + scope -------------------------------------------
@@ -418,6 +429,8 @@ func buildAgentPrompt(c Context) string {
 
 	// --- Commit message rules -----------------------------------
 	sb.WriteString("## Commit message rules\n")
+	sb.WriteString("- Write the subject and the body in " + placeholderLanguage +
+		". Keep the Conventional Commits type keyword (`feat`, `fix`, `chore`, ...) and the `Issue: #<id>` trailer in English.\n")
 	sb.WriteString("- Conventional Commits: <type>(<optional-scope>): <subject>\n")
 	sb.WriteString("- Subject ≤72 chars, imperative mood, no trailing period.\n")
 	sb.WriteString("- For `fix:` / `feat:` a 1-3 paragraph body explaining WHY this commit exists is REQUIRED.\n")
@@ -440,5 +453,5 @@ func buildAgentPrompt(c Context) string {
 	sb.WriteString("## Final reply\n")
 	sb.WriteString("The wrapper renders the success card from `git log`; your text reply is seen as a brief confirmation only. Reply with one line per commit: `<hash> <subject>`. If you produced no commits, reply `(no commits)`. Do not narrate your work.\n")
 
-	return sb.String()
+	return applyLanguage(sb.String(), lang)
 }

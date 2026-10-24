@@ -75,7 +75,7 @@ func TestRealPi_PRPromptV2(t *testing.T) {
 		RepoRoot: repoRoot,
 	}
 
-	prompt := buildPRPrompt(c, baseBranch)
+	prompt := buildPRPrompt(c, baseBranch, defaultLanguage)
 	t.Logf("=== PROMPT (first 800 chars) ===\n%s\n=== END PROMPT (head) ===",
 		truncateOutput(prompt, 800))
 

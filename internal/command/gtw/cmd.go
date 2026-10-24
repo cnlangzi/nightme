@@ -288,6 +288,8 @@ func (f *Factory) Spec() command.Spec {
 			"/gtw push                         push the worktree branch (clean only — refuses dirty)\n" +
 			"/gtw pr                           generate PR title+body, then open the PR\n" +
 			"/gtw pr -a claude                 override which agent runs the one-shot\n" +
+			"/gtw config lang [value]          show or set the output language for this repository\n" +
+			"/gtw config -g lang [value]       show or set the user-level output language\n" +
 			"/gtw sync                         checkout the default branch and pull --rebase from origin",
 		Subcommands: []command.SubcommandSpec{
 			{
@@ -310,6 +312,7 @@ func (f *Factory) Spec() command.Spec {
 			{Name: "commit", Summary: "commit uncommitted work via the configured agent", Usage: "/gtw commit [-a <agent>]"},
 			{Name: "push", Summary: "push the worktree branch (clean only — refuses dirty)"},
 			{Name: "pr", Summary: "generate PR title+body, then open the PR", Usage: "/gtw pr [-a <agent>]"},
+			{Name: "config", Summary: "show or set the gtw output language (repo scope by default, -g for the user scope)", Usage: configCmdSpec.Usage},
 			{Name: "sync", Summary: "checkout the default branch and pull --rebase from origin"},
 		},
 	}
@@ -367,12 +370,15 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, mgr *c
 	//
 	// /gtw plan and /gtw new take no lock: they touch neither the
 	// worktree nor the chat cwd — plan only queues a prompt, new
-	// only the chat's own issue draft.
+	// only the chat's own issue draft. /gtw config likewise only
+	// reads and writes ~/.nightme/gtw.yml.
 	switch input.Args[1] {
 	case "plan":
 		return f.runPlan(ctx, cs, input)
 	case "new":
 		return f.runNew(ctx, rt, cs, input)
+	case "config":
+		return f.runConfig(ctx, cs, input)
 	}
 	if mu := f.mgr.runLockFor(input.ChatID); mu != nil {
 		mu.Lock()
@@ -431,12 +437,12 @@ func (f *Factory) runNew(ctx context.Context, _ command.RuntimeServices, cs *cha
 		return failOut, nil
 	}
 
+	cfg, loadNotes := Load()
+
 	if !args.Yes {
-		_, _ = RunNewDraft(ctx, cs, f.deps, input.ChatID, input.MessageID)
+		_, _ = RunNewDraft(ctx, cs, f.deps, input.ChatID, input.MessageID, cfg)
 		return &command.SlashOutput{Consumed: true}, nil
 	}
-
-	cfg, loadNotes := Load()
 
 	hc := f.deriveHookContext(ctx, cs, "new")
 	hcFn := func() HookContext { return hc }
@@ -942,7 +948,7 @@ func (f *Factory) runCommit(ctx context.Context, _ command.RuntimeServices, cs *
 	err = f.withHooks(ctx, cs, input.ChatID, input.MessageID,
 		loadNotes, hcFn, cfg.Commit.Hooks.Before, cfg.Commit.Hooks.After,
 		func() error {
-			res, e := dispatchCommit(ctx, cs, f.deps, input.ChatID, input.MessageID, args, cfg.Commit.Agent)
+			res, e := dispatchCommit(ctx, cs, f.deps, input.ChatID, input.MessageID, args, cfg)
 			_ = res // dispatchCommit already sent the reply via cs.Emitter()
 			if e == nil {
 				hc = f.deriveHookContext(ctx, cs, "commit")
@@ -1155,7 +1161,7 @@ func (f *Factory) runPR(ctx context.Context, _ command.RuntimeServices, cs *chat
 	err = f.withHooks(ctx, cs, input.ChatID, input.MessageID,
 		loadNotes, hcFn, cfg.PR.Hooks.Before, cfg.PR.Hooks.After,
 		func() error {
-			_, e := dispatchPR(ctx, cs, f.deps, input.ChatID, input.MessageID, args, cfg.PR.Agent)
+			_, e := dispatchPR(ctx, cs, f.deps, input.ChatID, input.MessageID, args, cfg)
 			// dispatchPR loads the dispatch context internally
 			// (worktree/branch from yml). Re-derive so any
 			// future change that mutates cwd during PR
@@ -1171,6 +1177,16 @@ func (f *Factory) runPR(ctx context.Context, _ command.RuntimeServices, cs *chat
 			Consumed: true,
 		}, nil
 	}
+	return &command.SlashOutput{Consumed: true}, nil
+}
+
+// runConfig handles `/gtw config [-g|--global] [--unset] lang
+// [value]` — the git-style reader / writer for the gtw output
+// language. It only touches ~/.nightme/gtw.yml: no worktree, no
+// chat cwd, no agent. The reply goes out via cs.Emitter() like
+// the other gtw dispatchers.
+func (f *Factory) runConfig(ctx context.Context, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
+	_, _ = RunConfig(ctx, cs, f.deps, input.ChatID, input.MessageID, input.Args[2:])
 	return &command.SlashOutput{Consumed: true}, nil
 }
 

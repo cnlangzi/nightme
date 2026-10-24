@@ -11,7 +11,6 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
-	"github.com/cnlangzi/nightme/internal/pathutil"
 	"github.com/cnlangzi/nightme/internal/shell"
 	"github.com/cnlangzi/nightme/internal/timeouts"
 )
@@ -31,8 +30,18 @@ import (
 // honours before/after hooks; Push.Agent, if set in an older
 // yml, is silently ignored (push no longer runs an agent).
 type Config struct {
-	Fix  CmdConfig `yaml:"fix"`
-	Push CmdConfig `yaml:"push"`
+	// Lang is the user-scope output language for the commit /
+	// pr / new prompts. Free text — any language name the model
+	// understands. Empty means "not set"; the effective language
+	// then falls back to the repo scope, then to English.
+	Lang string `yaml:"lang"`
+	// Repos holds the repo-scope settings, keyed by the
+	// "host/owner/repo" key derived from the origin remote URL
+	// (see repoKey). A repo-scope entry overrides Lang for that
+	// repository.
+	Repos map[string]RepoConfig `yaml:"repos"`
+	Fix   CmdConfig             `yaml:"fix"`
+	Push  CmdConfig             `yaml:"push"`
 	// Commit owns the /gtw commit subcommand's defaults (F-XX
 	// split: commit and push are two distinct commands; Commit
 	// carries the agent that runs the one-shot commit, plus
@@ -65,6 +74,13 @@ type Config struct {
 type CmdConfig struct {
 	Agent string `yaml:"agent"`
 	Hooks Hooks  `yaml:"hooks"`
+}
+
+// RepoConfig is the per-repository subsection of Config.
+type RepoConfig struct {
+	// Lang is the repo-scope output language. It overrides the
+	// user-scope Lang for the repository this entry is keyed by.
+	Lang string `yaml:"lang"`
 }
 
 // Hooks holds the optional before/after hook lists. Both default
@@ -142,14 +158,16 @@ func Load() (Config, LoadNotes) {
 	var cfg Config
 	var notes LoadNotes
 
-	home, err := os.UserHomeDir()
+	// F-PATHUTIL-001 §13.3.1: userConfigPath uses pathutil.Join
+	// for separator consistency, and is the same helper the write
+	// path uses — the two can never disagree about which file
+	// they mean.
+	path, err := userConfigPath()
 	if err != nil {
 		// Cannot resolve $HOME: silent skip. There's no path to
 		// surface and no useful warning we can write.
 		return cfg, notes
 	}
-	// F-PATHUTIL-001 §13.3.1: pathutil.Join for separator consistency.
-	path := pathutil.Join(home, ".nightme", "gtw.yml")
 
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {

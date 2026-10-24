@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"gopkg.in/yaml.v3"
 
@@ -134,11 +135,23 @@ func applyLanguage(text, lang string) string {
 // round-trip. A file that does not parse is never rewritten — a
 // broken user config is reported, not overwritten.
 
+// configWriteMu serialises the read-modify-write of
+// ~/.nightme/gtw.yml inside this process. Two chats writing at the
+// same time would otherwise interleave their read → mutate →
+// rename cycles and silently lose one of the two updates.
+//
+// The lock is process-local: a second nightme instance still
+// races, which the atomic rename keeps safe from corruption.
+var configWriteMu sync.Mutex
+
 // writeUserConfig applies mutate to the parsed ~/.nightme/gtw.yml
 // and writes the result back. A missing file starts from an empty
 // mapping; a malformed file is an error and the file is left
 // untouched.
 func writeUserConfig(mutate func(root *yaml.Node) error) error {
+	configWriteMu.Lock()
+	defer configWriteMu.Unlock()
+
 	path, err := userConfigPath()
 	if err != nil {
 		return err
@@ -191,25 +204,55 @@ func writeFileAtomic(path string, data []byte) error {
 }
 
 // parseConfigRoot parses the YAML document into its root mapping
-// node. An empty file yields a fresh empty mapping; a document
-// whose root is not a mapping is rejected — writing into it would
-// destroy whatever the user meant.
+// node. A document with no content — an empty file, a
+// comments-only file, a bare `---` — yields a fresh empty
+// mapping; a document whose root is something else (a list, a
+// string) is rejected, because writing into it would destroy
+// whatever the user meant.
 func parseConfigRoot(data []byte, path string) (*yaml.Node, error) {
-	if len(bytes.TrimSpace(data)) == 0 {
-		return &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}, nil
-	}
 	var doc yaml.Node
 	if err := yaml.Unmarshal(data, &doc); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
-	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 {
-		return nil, fmt.Errorf("%s: not a YAML mapping", path)
+	if doc.Kind == 0 || len(doc.Content) == 0 {
+		return emptyConfigRoot(data), nil
 	}
 	root := doc.Content[0]
+	if root.Kind == yaml.ScalarNode && root.Tag == "!!null" {
+		return emptyConfigRoot(data), nil
+	}
 	if root.Kind != yaml.MappingNode {
 		return nil, fmt.Errorf("%s: not a YAML mapping", path)
 	}
 	return root, nil
+}
+
+// emptyConfigRoot builds the fresh mapping a document with no
+// content becomes. yaml.v3 drops the comments of a comments-only
+// document — they are attached to no node — so the header is
+// recovered from the raw bytes and carried over.
+func emptyConfigRoot(data []byte) *yaml.Node {
+	root := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+	root.HeadComment = commentHeader(data)
+	return root
+}
+
+// commentHeader returns the comment lines of a document that holds
+// nothing else. It returns "" when the text carries anything that
+// is not a comment.
+func commentHeader(data []byte) string {
+	var lines []string
+	for _, raw := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			continue
+		}
+		if !strings.HasPrefix(trimmed, "#") {
+			return ""
+		}
+		lines = append(lines, trimmed)
+	}
+	return strings.Join(lines, "\n")
 }
 
 // encodeConfigRoot serializes a root mapping back to YAML. The
@@ -420,22 +463,13 @@ func RunConfig(
 	}
 
 	if global {
-		if unset {
-			if err := unsetGlobalLang(); err != nil {
-				return reply(ctx, cs.Emitter(), chatID, messageID,
-					fmt.Sprintf("❌ %v", err)), nil
-			}
-			return reply(ctx, cs.Emitter(), chatID, messageID,
-				"✅ gtw.lang unset (global scope)\n"+
-					"→ file: "+userConfigRelPath), nil
-		}
-		if err := setGlobalLang(value); err != nil {
-			return reply(ctx, cs.Emitter(), chatID, messageID,
-				fmt.Sprintf("❌ %v", err)), nil
-		}
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("✅ gtw.lang = %s (global scope)", value)+
-				"\n→ file: "+userConfigRelPath), nil
+		return configWriteReply(ctx, cs, chatID, messageID, unset, scopeGlobal, value, "",
+			func() error {
+				if unset {
+					return unsetGlobalLang()
+				}
+				return setGlobalLang(value)
+			})
 	}
 
 	// Repo scope — needs the repository key, which comes from the
@@ -451,24 +485,40 @@ func RunConfig(
 			fmt.Sprintf("❌ cannot determine the repository key: %v\n"+
 				"  hint: use `/gtw config -g %s <value>` for the user-level scope", err, langKey)), nil
 	}
-	if unset {
-		if err := unsetRepoLang(repo); err != nil {
-			return reply(ctx, cs.Emitter(), chatID, messageID,
-				fmt.Sprintf("❌ %v", err)), nil
-		}
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			"✅ gtw.lang unset (repo scope)\n"+
-				"→ file: "+userConfigRelPath+
-				"\n→ repo: "+repo), nil
-	}
-	if err := setRepoLang(repo, value); err != nil {
+	return configWriteReply(ctx, cs, chatID, messageID, unset, scopeRepo, value, repo,
+		func() error {
+			if unset {
+				return unsetRepoLang(repo)
+			}
+			return setRepoLang(repo, value)
+		})
+}
+
+// configWriteReply runs one config write and renders its reply:
+// the value and the scope it landed in, the file it went to, and —
+// for the repo scope — the repository key.
+func configWriteReply(
+	ctx context.Context,
+	cs *chatsession.ChatSession,
+	chatID, messageID string,
+	unset bool,
+	scope langScope,
+	value, repo string,
+	write func() error,
+) (*Result, error) {
+	if err := write(); err != nil {
 		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ %v", err)), nil
 	}
-	return reply(ctx, cs.Emitter(), chatID, messageID,
-		fmt.Sprintf("✅ gtw.lang = %s (repo scope)", value)+
-			"\n→ file: "+userConfigRelPath+
-			"\n→ repo: "+repo), nil
+	headline := fmt.Sprintf("✅ gtw.lang = %s (%s)", value, scope)
+	if unset {
+		headline = fmt.Sprintf("✅ gtw.lang unset (%s)", scope)
+	}
+	lines := []string{headline, "→ file: " + userConfigRelPath}
+	if repo != "" {
+		lines = append(lines, "→ repo: "+repo)
+	}
+	return reply(ctx, cs.Emitter(), chatID, messageID, strings.Join(lines, "\n")), nil
 }
 
 // configQuery reports the effective output language and the scope
@@ -487,19 +537,14 @@ func configQuery(
 		warnings = strings.Join(notes.Warnings, "\n") + "\n"
 	}
 
+	lang, scope := defaultLanguage, scopeDefault
 	if global {
-		lang := strings.TrimSpace(cfg.Lang)
-		if lang == "" {
-			lang = defaultLanguage
-			return reply(ctx, cs.Emitter(), chatID, messageID,
-				"✨ gtw.lang = "+lang+" ("+string(scopeDefault)+")\n"+warnings), nil
+		if v := strings.TrimSpace(cfg.Lang); v != "" {
+			lang, scope = v, scopeGlobal
 		}
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			"✨ gtw.lang = "+lang+" ("+string(scopeGlobal)+")\n"+warnings), nil
+	} else {
+		lang, scope = resolveLanguageScope(ctx, cfg, cs.SelectedCwd(), deps.Git)
 	}
-
-	cwd := cs.SelectedCwd()
-	lang, scope := resolveLanguageScope(ctx, cfg, cwd, deps.Git)
 	return reply(ctx, cs.Emitter(), chatID, messageID,
 		"✨ gtw.lang = "+lang+" ("+string(scope)+")\n"+warnings), nil
 }

@@ -178,9 +178,13 @@ func dispatchPR(
 	// stamping rationale (F-CLAUDE-PRINT-002 follow-up: agentbar /
 	// usagebar must reach the channel even when GTW bypasses the
 	// runtime event pipeline).
+	// The language is resolved before the agent clock starts: the
+	// lookup shells out to git, and its latency must not eat the
+	// agent's budget.
+	lang := resolveLanguage(ctx, cfg, c.Worktree, deps.Git)
+
 	prCtx, prCancel := context.WithTimeout(ctx, timeouts.Agent)
 	defer prCancel()
-	lang := resolveLanguage(prCtx, cfg, c.Worktree, deps.Git)
 	runRes, agentName, err := runAgentFor(prCtx, cs, c.Worktree,
 		buildPRPrompt(c, baseBranch, lang), chatID, messageID, args.Agent, cfg.PR.Agent,
 		// Drop OutResult; replyAgent below is the only result card.

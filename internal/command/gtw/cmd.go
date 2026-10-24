@@ -371,7 +371,9 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, mgr *c
 	// /gtw plan and /gtw new take no lock: they touch neither the
 	// worktree nor the chat cwd — plan only queues a prompt, new
 	// only the chat's own issue draft. /gtw config likewise only
-	// reads and writes ~/.nightme/gtw.yml.
+	// reads and writes ~/.nightme/gtw.yml — that file is shared by
+	// every chat, so its read-modify-write is serialised by
+	// configWriteMu rather than by the per-chat lock.
 	switch input.Args[1] {
 	case "plan":
 		return f.runPlan(ctx, cs, input)
@@ -440,6 +442,13 @@ func (f *Factory) runNew(ctx context.Context, _ command.RuntimeServices, cs *cha
 	cfg, loadNotes := Load()
 
 	if !args.Yes {
+		// The draft path has no withHooks wrapper, so the load
+		// notes ride out as their own reply — a malformed yml
+		// would otherwise silently fall back to the default
+		// output language.
+		if notes := formatLoadNotes(loadNotes); notes != "" {
+			_ = reply(ctx, cs.Emitter(), input.ChatID, input.MessageID, notes)
+		}
 		_, _ = RunNewDraft(ctx, cs, f.deps, input.ChatID, input.MessageID, cfg)
 		return &command.SlashOutput{Consumed: true}, nil
 	}

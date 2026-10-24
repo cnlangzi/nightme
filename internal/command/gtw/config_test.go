@@ -3,9 +3,11 @@ package gtw
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -285,6 +287,110 @@ func TestWriteUserConfig_RefusesMalformedFile(t *testing.T) {
 	data, _ := os.ReadFile(userYmlPath(home))
 	if string(data) != bad {
 		t.Fatalf("malformed file was modified:\n%s", data)
+	}
+}
+
+// TestSetGlobalLang_CommentOnlyFile covers a gtw.yml that holds
+// nothing but comments — a valid YAML document with no root. The
+// write path must treat it as an empty config, not as a broken
+// one.
+func TestSetGlobalLang_CommentOnlyFile(t *testing.T) {
+	home := sandboxHome(t)
+	writeUserYml(t, home, "# only a comment\n")
+
+	if err := setGlobalLang("zh"); err != nil {
+		t.Fatalf("setGlobalLang on a comments-only file: %v", err)
+	}
+	data, err := os.ReadFile(userYmlPath(home))
+	if err != nil {
+		t.Fatalf("read gtw.yml: %v", err)
+	}
+	got := string(data)
+	if !strings.Contains(got, "lang: zh") {
+		t.Errorf("language not written:\n%s", got)
+	}
+	if !strings.Contains(got, "# only a comment") {
+		t.Errorf("comment dropped:\n%s", got)
+	}
+}
+
+// TestWriteUserConfig_ConcurrentWritesDoNotLoseUpdates covers two
+// chats writing the shared gtw.yml at the same time. Without
+// serialisation the read → mutate → rename cycles interleave and
+// one of the two updates is silently lost.
+func TestWriteUserConfig_ConcurrentWritesDoNotLoseUpdates(t *testing.T) {
+	sandboxHome(t)
+
+	const writers = 8
+	var wg sync.WaitGroup
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if err := setRepoLang(fmt.Sprintf("github.com/o/repo-%d", i), "x"); err != nil {
+				t.Errorf("setRepoLang: %v", err)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	cfg, notes := Load()
+	if notes.HasWarnings() {
+		t.Fatalf("unexpected load warnings: %v", notes.Warnings)
+	}
+	for i := 0; i < writers; i++ {
+		key := fmt.Sprintf("github.com/o/repo-%d", i)
+		if _, ok := cfg.Repos[key]; !ok {
+			t.Errorf("lost update: %s is missing from %v", key, cfg.Repos)
+		}
+	}
+}
+
+// TestSetGlobalLang_EmptyDocument covers a gtw.yml that holds no
+// content at all — a bare `---` — which is an empty config, not a
+// broken one.
+func TestSetGlobalLang_EmptyDocument(t *testing.T) {
+	home := sandboxHome(t)
+	writeUserYml(t, home, "---\n")
+
+	if err := setGlobalLang("zh"); err != nil {
+		t.Fatalf("setGlobalLang on an empty document: %v", err)
+	}
+	data, err := os.ReadFile(userYmlPath(home))
+	if err != nil {
+		t.Fatalf("read gtw.yml: %v", err)
+	}
+	if !strings.Contains(string(data), "lang: zh") {
+		t.Errorf("language not written:\n%s", data)
+	}
+}
+
+// TestRunNew_DraftSurfacesLoadNotes covers the /gtw new draft
+// path: a malformed gtw.yml must not silently fall back to the
+// default output language.
+func TestRunNew_DraftSurfacesLoadNotes(t *testing.T) {
+	rig := newNewIssueRig(t, "chat-new-load-notes")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("UserHomeDir: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".nightme"), 0o700); err != nil {
+		t.Fatalf("mkdir .nightme: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".nightme", "gtw.yml"),
+		[]byte("lang: [unclosed\n"), 0o600); err != nil {
+		t.Fatalf("write gtw.yml: %v", err)
+	}
+
+	rig.handle(t)
+
+	var sent strings.Builder
+	for _, m := range rig.ch.sends {
+		sent.WriteString(m.Text)
+		sent.WriteString("\n")
+	}
+	if !strings.Contains(sent.String(), "parse") {
+		t.Fatalf("expected a parse warning in the reply, got:\n%s", sent.String())
 	}
 }
 

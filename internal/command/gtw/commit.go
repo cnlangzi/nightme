@@ -115,9 +115,14 @@ func dispatchCommit(
 	// stamping rationale (F-CLAUDE-PRINT-002 follow-up: agentbar /
 	// usagebar must reach the channel even when GTW bypasses the
 	// runtime event pipeline).
+	//
+	// The language is resolved before the agent clock starts: the
+	// lookup shells out to git, and its latency must not eat the
+	// agent's budget.
+	lang := resolveLanguage(ctx, cfg, c.Worktree, deps.Git)
+
 	ctx, cancel := context.WithTimeout(ctx, timeouts.Agent)
 	defer cancel()
-	lang := resolveLanguage(ctx, cfg, c.Worktree, deps.Git)
 	runRes, agentName, err := runAgentFor(ctx, cs, c.Worktree,
 		buildAgentPrompt(c, lang), chatID, messageID, args.Agent, cfg.Commit.Agent,
 		// Drop OutResult; replyAgent below is the only result card.

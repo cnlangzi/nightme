@@ -32,8 +32,9 @@ import (
 type Config struct {
 	// Lang is the user-scope output language for the commit /
 	// pr / new prompts. Free text — any language name the model
-	// understands. Empty means "not set"; the effective language
-	// then falls back to the repo scope, then to English.
+	// understands. Empty means "not set". A repo-scope entry
+	// under Repos overrides this value for its repository; when
+	// neither scope is set the language falls back to English.
 	Lang string `yaml:"lang"`
 	// Repos holds the repo-scope settings, keyed by the
 	// "host/owner/repo" key derived from the origin remote URL

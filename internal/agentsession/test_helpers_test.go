@@ -157,41 +157,6 @@ func (d *callRecordingASDriver) Keepalive(_ context.Context, _ func(context.Cont
 	return nil
 }
 
-// --- restartErrAS -----------------------------------------------------
-
-// restartErrAS is a bridge fake whose New always returns
-// agent.ErrRestartRequired. It records whether Close() was called so
-// the wrapper's kill+respawn path can be verified.
-type restartErrAS struct {
-	*fakeAgentSession
-	closed bool
-}
-
-func (r *restartErrAS) New(_ context.Context) error { return agent.ErrRestartRequired }
-func (r *restartErrAS) Close() error {
-	r.closed = true
-	return r.fakeAgentSession.Close()
-}
-
-func (r *restartErrAS) buildLive() *agent.Agent {
-	return agent.NewAgent(
-		agent.NewInfo("fake", agent.ModePTY, "fake", nil, nil),
-		r.pid, r.events,
-		&restartErrASDriver{inner: r})
-}
-
-type restartErrASDriver struct{ inner *restartErrAS }
-
-func (d *restartErrASDriver) SendBlocks(ctx context.Context, b []agent.ContentBlock) error {
-	return d.inner.SendBlocks(ctx, b)
-}
-func (d *restartErrASDriver) SendPermission(resp string) error {
-	return d.inner.SendPermission(resp)
-}
-func (d *restartErrASDriver) Reset(ctx context.Context) error { return d.inner.New(ctx) }
-func (d *restartErrASDriver) Close() error                    { return d.inner.Close() }
-func (d *restartErrASDriver) Stop(_ context.Context) error    { return nil }
-
 // --- Spawner fakes ---------------------------------------------------
 
 // fakeSpawner is a Spawner that returns fakeAgentSession instances

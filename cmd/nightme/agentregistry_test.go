@@ -102,14 +102,20 @@ func TestBuild_BuiltinDrivenIgnoresUnknownNames(t *testing.T) {
 	}
 
 	// Every other built-in is still there with its default
-	// (un-overridden) command.
+	// (un-overridden) command. The expected set is derived from the
+	// registry, so an agent added to cmd/nightme/agents.go is
+	// covered without editing this test.
+	before := map[string]bool{}
+	for _, s := range agent.Builtins.List() {
+		before[s.Info().Name] = true
+	}
 	seen := map[string]bool{}
 	for _, s := range reg.List() {
 		seen[s.Info().Name] = true
 	}
-	for _, want := range []string{"codex", "dsh", "opencode", "cursor", "pi", "copilot", "omp"} {
-		if !seen[want] {
-			t.Errorf("built-in %q missing from registry", want)
+	for name := range before {
+		if !seen[name] {
+			t.Errorf("built-in %q missing from registry", name)
 		}
 	}
 }

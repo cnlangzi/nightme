@@ -1,9 +1,13 @@
-// handle_mux_legacy_test.go — pins the mux top-level legacy
-// fallback path added when dsh 0.1.2-rc.1 folded approval +
-// question onto the host $events waterfall. If a future dsh rc
-// reverts to the mux frame names, the bridge must surface a
-// visible warning (not silently drop, not crash) so ops can
-// catch the regression via DumpWireStats.
+// handle_mux_legacy_test.go — pins what happens when the mux
+// top-level approval / question method names show up.
+//
+// dsh 0.1.2-rc.1 folded approval + question onto the host
+// $events waterfall; the mux top-level names are no longer
+// emitted and the bridge has no path for them. A frame under one
+// of those names must land in the generic unknown-method path —
+// recorded, counted, warn-logged — and must never open a
+// permission. That holds for a dsh that reverts to the old names
+// and for a dsh that never sent them.
 package dsh
 
 import (
@@ -15,9 +19,9 @@ import (
 
 // TestHandleMuxFrame_LegacyApprovalRequested_LogsAndDrops asserts
 // that pushing a mux approval/requested frame through
-// handleMuxFrame after the dsh 0.1.2-rc.1 wire shift is recorded
-// as an unknown method (incremented in the wire-stats unknown
-// counter) and produces no EventAgentPermission.
+// handleMuxFrame is recorded as an unknown method (incremented in
+// the wire-stats unknown counter) and produces no
+// EventAgentPermission.
 func TestHandleMuxFrame_LegacyApprovalRequested_LogsAndDrops(t *testing.T) {
 	mock := newRespondMock(t)
 	cli := mock.installGlobal(t)
@@ -49,9 +53,9 @@ func TestHandleMuxFrame_LegacyApprovalRequested_LogsAndDrops(t *testing.T) {
 }
 
 // TestHandleMuxFrame_LegacyQuestionRequested_LogsAndDrops mirrors
-// the approval fallback test for the question path. Same
-// expectation: recorded + counted + warn-logged, no event
-// emitted, no /api/respond fired.
+// the approval test for the question path. Same expectation:
+// recorded + counted + warn-logged, no event emitted, no answer
+// sent to the host.
 func TestHandleMuxFrame_LegacyQuestionRequested_LogsAndDrops(t *testing.T) {
 	mock := newRespondMock(t)
 	cli := mock.installGlobal(t)

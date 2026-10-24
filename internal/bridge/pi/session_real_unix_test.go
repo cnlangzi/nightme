@@ -50,11 +50,12 @@ import (
 // test fails with an elapsed-time message instead of stalling
 // the runner.
 //
-// handshakeWindow bounds the wait for EventAgentReady; the bridge's
-// own handshakeTimeout is 10s but real-pi cold start (model
-// warm-up, plugin load) routinely takes longer.
+// handshakeWindow bounds the wait for EventAgentReady. It matches
+// the bridge's own handshakeTimeout: a test budget tighter than
+// the system's would fail on a real-pi cold start (model warm-up,
+// plugin load) that the bridge itself would still have waited out.
 const (
-	handshakeWindow  = 30 * time.Second
+	handshakeWindow  = 60 * time.Second
 	promptDeadline   = 60 * time.Second
 	closeGraceWindow = 8 * time.Second
 )

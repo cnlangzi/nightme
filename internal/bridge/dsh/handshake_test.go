@@ -31,7 +31,7 @@ type handshakeMock struct {
 	archiveCount     atomic.Int64 // Close calls workspace.archiveSession (repo-scoped workspace survives)
 	promptCount      atomic.Int64
 	promptFailNext   atomic.Bool
-	respondCount     atomic.Int64 // /api/respond — RunOnce auto-allow posts here
+	waterfallCount   atomic.Int64 // /api/$events/result — RunOnce auto-allow posts here
 	commandsCount    atomic.Int64 // /api/commands/execute — /permission danger-full-access priming
 	commandsFailNext atomic.Bool  // force the next commands/execute to fail
 
@@ -43,7 +43,7 @@ type handshakeMock struct {
 	historyEvents    []map[string]any
 	nextFreshCounter atomic.Int64
 	lastPrompt       atomic.Value // map[string]any
-	lastRespond      atomic.Value // []byte of last /api/respond body
+	lastWaterfall    atomic.Value // []byte of last /api/$events/result body
 	lastCommand      atomic.Value // map[string]any
 	lastArchive      atomic.Value // map[string]any — archive request body
 
@@ -62,7 +62,7 @@ func newHandshakeMock(t *testing.T) *handshakeMock {
 	mux.HandleFunc("/api/workspace/archiveSession", m.handleWorkspaceArchiveSession)
 	mux.HandleFunc("/api/session/prompt", m.handleSessionPrompt)
 	mux.HandleFunc("/api/commands/execute", m.handleCommandsExecute)
-	mux.HandleFunc("/api/respond", m.handleRespond)
+	mux.HandleFunc("/api/$events/result", m.handleWaterfallResult)
 	m.server = httptest.NewServer(mux)
 	t.Cleanup(m.server.Close)
 	return m
@@ -368,14 +368,14 @@ func (m *handshakeMock) handleSessionPrompt(w http.ResponseWriter, r *http.Reque
 	writeOK(w, env.RPCID, map[string]any{"accepted": true})
 }
 
-// handleRespond accepts /api/respond (client-response envelope).
-// Shape differs from the other /api/* handlers — see host.RPCClient.Respond.
-// Needed so drainForRunResult's auto-allow can POST without a 404.
-func (m *handshakeMock) handleRespond(w http.ResponseWriter, r *http.Request) {
-	m.respondCount.Add(1)
+// handleWaterfallResult accepts /api/$events/result (the typed RPC
+// envelope the bridge posts an answer on). Needed so
+// drainForRunResult's auto-allow can POST without a 404.
+func (m *handshakeMock) handleWaterfallResult(w http.ResponseWriter, r *http.Request) {
+	m.waterfallCount.Add(1)
 	body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	_ = r.Body.Close()
-	m.lastRespond.Store(append([]byte(nil), body...))
+	m.lastWaterfall.Store(append([]byte(nil), body...))
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write([]byte(`{"accepted":true}`))
 }
@@ -403,8 +403,6 @@ func newTestDriver(cli *host.Client, workspace string) *driver {
 		agentName:        "dsh",
 		pendingApprovals: map[string]chan string{},
 		pendingQuestions: map[string][]questionPayload{},
-		lastApprovalID:   map[string]string{},
-		pendingSource:    map[string]string{},
 		events:           make(chan agent.AgentEvent, 64),
 		translate:        newTranslator("dsh", workspace),
 		wireState:        newWireState(),

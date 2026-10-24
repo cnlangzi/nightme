@@ -275,6 +275,14 @@ func parsePrintStream(ctx context.Context, stdout io.Reader, workspace string, s
 					result.DurationMs = ev.Result.DurationMs
 					result.Subtype = ev.Result.Subtype
 				}
+				if ev.Err != nil {
+					// The upstream provider failed the call. Report a
+					// failed run instead of handing the provider's
+					// message back as the answer — callers parse
+					// RunResult.Text as the agent's own output
+					// (/gtw commit builds a commit body from it).
+					return agent.RunResult{}, ev.Err
+				}
 				if sink != nil {
 					sink(ev)
 				}

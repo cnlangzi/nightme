@@ -66,29 +66,19 @@ type muxSessionSubscribed struct {
 	LastSeq   int64  `json:"lastSeq"`
 }
 
-// muxApprovalRequested is the payload of
-// serverFrame{method:"approval/requested"}. `ApprovalID` is
-// audit-only. /api/respond is keyed on the envelope rpcId.
+// muxApprovalRequested is the approval request the bridge works
+// with. `ApprovalID` is audit-only; the answer is keyed on the
+// host waterfall's eventId.
 //
-// This type is also the adapter target in host_waterfall.go —
-// handleHostFrame builds a muxApprovalRequested from the host
-// waterfall envelope so the existing handleApprovalRequested path
-// stays the single source of truth for permission-event emission.
+// host_waterfall.go::handleHostFrame builds one from the host
+// $events waterfall envelope (approval/request) — the only
+// approval source on the wire.
 type muxApprovalRequested struct {
 	SessionID  string `json:"sessionId"`
 	ApprovalID string `json:"approvalId"`
 	ToolName   string `json:"toolName"`
 	CallID     string `json:"callId,omitempty"`
 	Reason     string `json:"reason,omitempty"`
-	// Source tags the wire origin of this frame so SendPermission
-	// can route the answer to the right RPC:
-	//   - "host" — dsh 0.1.2-rc.1 host $events waterfall;
-	//              answer posts to /api/$events/result.
-	//   - "mux"  — legacy mux approval/requested (defense-in-depth);
-	//              answer posts to /api/respond.
-	// Populated by the caller (handleMuxFrame vs handleHostFrame);
-	// never appears on the wire.
-	Source string `json:"-"`
 }
 
 // muxApprovalResolved and muxQuestionResolved were removed in the
@@ -100,23 +90,24 @@ type muxApprovalRequested struct {
 // split: handleApprovalAsked is an echo (no event); handleApprovalDecided
 // emits EventAgentPermissionSettled for the runtime.
 
-// muxQuestionRequested is the payload of
-// serverFrame{method:"question/requested"}. `Questions` is an array
-// of AskUserQuestionItem (shape from `packages/user-questions/types.ts`).
-// We only decode the surface fields we surface to nightme.
+// muxQuestionRequested is the user-questions request the bridge
+// works with. `Questions` is an array of AskUserQuestionItem
+// (shape from `packages/user-questions/types.ts`). We only decode
+// the surface fields we surface to nightme.
+//
+// host_waterfall.go::handleHostFrame builds one from the host
+// $events waterfall envelope (user-questions/request) — the only
+// question source on the wire.
 type muxQuestionRequested struct {
 	SessionID string            `json:"sessionId"`
 	Questions []questionPayload `json:"questions"`
-	// Source tags the wire origin (see muxApprovalRequested.Source).
-	// Populated by the caller; never appears on the wire.
-	Source string `json:"-"`
 }
 
 // questionPayload is one entry in muxQuestionRequested.Questions.
 // `ID` is the stable caller-provided question id, echoed in the
-// /api/respond answer (AskUserQuestionAnswerItem.id). Host
-// matchesQuestions rejects a batch whose ids / length don't match
-// the pending request. `Header` is the short label; `Question` is
+// answer (AskUserQuestionAnswerItem.id). Host matchesQuestions
+// rejects a batch whose ids / length don't match the pending
+// request. `Header` is the short label; `Question` is
 // the full text; `Options` are the multiple-choice options.
 //
 // BUG FIX (F-dsh-shared-host §6 #4): pre-fix this used
@@ -168,10 +159,8 @@ type waterfallEnvelope struct {
 //	  reason?: string, signal?: AbortSignal }
 //
 // The dsh-minted ApprovalRequestId used to pair approval/asked with
-// approval/decided audit events is NOT surfaced here — we synthesise
-// a derived id from the host frame's eventId for the bridge's
-// d.lastApprovalID map (audit correlation only; /api/respond is
-// keyed on the frame rpcId).
+// approval/decided audit events is NOT surfaced here — the answer is
+// keyed on the host frame's eventId.
 type waterfallApprovalRequest struct {
 	Agent    json.RawMessage `json:"agent"`
 	ToolName string          `json:"toolName"`

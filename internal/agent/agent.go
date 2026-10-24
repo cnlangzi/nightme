@@ -969,19 +969,38 @@ func (a *Agent) Stop(ctx context.Context) error {
 
 // NewAgent builds a *Agent from its constituent parts.
 // Exported so bridges and test fakes (outside the agent package)
-// can construct one. The driver is passed as interface{} because
-// the driver interface itself is package-private; production
-// callers pass the bridge-specific struct that implements the
-// five Send*/Reset/Close methods. The closed channel is freshly
-// allocated; the caller does not need to manage it.
-func NewAgent(info Info, pid int, events chan AgentEvent, d interface{}) *Agent {
+// can construct one.
+//
+// The driver parameter is generic over the package-private driver
+// interface, so the compiler checks at every call site that the
+// bridge's driver implements all of it. A bridge that misses a
+// method fails to build — the check does not depend on the
+// bridge remembering to assert anything, and it does not depend
+// on a hand-maintained copy of the interface going stale.
+//
+// The closed channel is freshly allocated; the caller does not
+// need to manage it.
+func NewAgent[D driver](info Info, pid int, events chan AgentEvent, d D) *Agent {
 	return &Agent{
 		Info:   info,
 		pid:    pid,
 		events: events,
-		driver: d.(driver),
+		driver: d,
 		closed: make(chan struct{}),
 	}
+}
+
+// ImplementsDriver reports whether d satisfies the package-private
+// driver interface.
+//
+// NewAgent's type parameter already guarantees that at compile
+// time for every value passed to it. This is the runtime
+// counterpart, for asserting on a driver obtained from elsewhere —
+// e.g. Agent.Driver(), which hands back the driver's dynamic
+// type.
+func ImplementsDriver(d interface{}) bool {
+	_, ok := d.(driver)
+	return ok
 }
 
 // driver is the per-bridge protocol interface. Each bridge
@@ -1138,6 +1157,8 @@ type RunResult struct {
 	//       "completed" / "failed"
 	//   - pi:        message_end.stopReason
 	//       "stop" / "toolUse" / "error"
+	//   - omp:       message_end.stopReason
+	//       "stop" / "length" / "error"
 	//   - opencode:  terminal SSE event type
 	//       "session.idle" / "error" / etc.
 	//   - acp:       bridge-defined; consult the bridge's docs

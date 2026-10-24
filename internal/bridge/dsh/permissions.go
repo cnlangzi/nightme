@@ -1,18 +1,20 @@
 // permissions.go — approval / question request handling.
 //
-// The respondable gate is mux approval/requested (and
-// question/requested), keyed on the server-frame rpcId.
-// session/event approval/asked is an audit echo and must not
-// register a second pending entry.
+// The respondable gate is the dsh host $events waterfall
+// (approval/request, user-questions/request), keyed on the
+// waterfall's eventId. session/event approval/asked is an audit
+// echo and must not register a second pending entry.
 //
-// SendPermission pops pendingOrder[0] and POSTs /api/respond.
+// SendPermission pops pendingOrder[0] and POSTs
+// /api/$events/result with the typed outcome envelope.
 // Single approval in flight keeps semantics unchanged; concurrent
-// approvals stay unambiguous because each carries a distinct rpcId.
+// approvals stay unambiguous because each carries a distinct
+// eventId.
 //
 // Question requests reuse the same plumbing. The runtime sees them
 // as EventAgentPermission with Questions populated; Feishu renders
 // a one-shot card (len<=1) or an in-card wizard (len>1). The
-// answer is POSTed as QuestionResponse (dsh-api.md §2.12.2).
+// answer is POSTed as a QuestionAnswer batch (dsh-api.md §2.12.2).
 //
 // Concurrency: the pendingMu lock guards map reads/writes. The
 // response channel is buffered (1); SendPermission is the only
@@ -82,28 +84,22 @@ func (d *driver) removeFromPendingOrderLocked(id string) {
 	}
 }
 
-// handleApprovalRequested is the approval entry shared by the mux
-// approval/requested path (legacy) AND the dsh 0.1.2-rc.1 host
-// waterfall path (approval/request, demuxed in host_waterfall.go).
-// The two call sites build a muxApprovalRequested-shaped value
-// from their respective envelopes and land here, so the rest of
-// the bridge has a single emit point for the permission event.
+// handleApprovalRequested is the approval entry. The host
+// waterfall path (approval/request, demuxed in host_waterfall.go)
+// builds a muxApprovalRequested-shaped value from the waterfall
+// envelope and lands here, so the bridge has a single emit point
+// for the permission event.
 //
-// The respond key is frameRpcID (host pendingApprovals map), NOT
-// payload.approvalId (audit-only). For the waterfall path
-// frameRpcID is the waterfall's eventId; for the legacy mux path
-// it's the server-frame rpcId. /api/respond is keyed the same way
-// in both cases, so SendPermission is unchanged.
+// The respond key is frameRpcID (the host pendingApprovals map),
+// NOT payload.approvalId (audit-only) — frameRpcID is the
+// waterfall's eventId, which is what /api/$events/result is keyed
+// on.
 func (d *driver) handleApprovalRequested(frameRpcID string, ar muxApprovalRequested) {
 	if frameRpcID == "" {
 		dLog("dsh: approval/requested missing frame rpcId, skipping")
 		return
 	}
 	respCh := d.registerApproval(frameRpcID)
-	d.pendingMu.Lock()
-	d.lastApprovalID[frameRpcID] = ar.ApprovalID
-	d.pendingSource[frameRpcID] = ar.Source
-	d.pendingMu.Unlock()
 	d.deliver(agent.AgentEvent{
 		Kind: agent.EventAgentPermission,
 		Permission: &agent.AgentPermissionRequest{
@@ -116,14 +112,11 @@ func (d *driver) handleApprovalRequested(frameRpcID string, ar muxApprovalReques
 	})
 }
 
-// handleQuestionRequested is the user-questions entry shared by the
-// mux question/requested path (legacy) AND the dsh 0.1.2-rc.1 host
+// handleQuestionRequested is the user-questions entry. The host
 // waterfall path (user-questions/request, demuxed in
-// host_waterfall.go). Same shape of dual entry as
-// handleApprovalRequested — the muxQuestionRequested adapter is
-// built by the caller from either the legacy mux payload or the
-// waterfall envelope, then this method emits the
-// EventAgentPermission{PermissionKindQuestion, Questions} batch.
+// host_waterfall.go) builds a muxQuestionRequested-shaped value
+// from the waterfall envelope and lands here, so the bridge has a
+// single emit point for the question batch.
 //
 // dsh web's AskUserQuestion UX is a batch: host matchesQuestions
 // requires answers.length == questions.length, each answer.id
@@ -135,9 +128,8 @@ func (d *driver) handleApprovalRequested(frameRpcID string, ar muxApprovalReques
 // still maps onto the matching question in questionAnswerFor;
 // unmatched text becomes custom on the first question.
 //
-// `frameRpcID` is the waterfall's eventId (host path) or the mux
-// frame rpcId (legacy path) — /api/respond is keyed on this, NOT
-// on qr.SessionID+":q" (the OLD wrong key).
+// `frameRpcID` is the waterfall's eventId — /api/$events/result is
+// keyed on this, NOT on qr.SessionID+":q" (the OLD wrong key).
 func (d *driver) handleQuestionRequested(frameRpcID string, qr muxQuestionRequested) {
 	if len(qr.Questions) == 0 {
 		// dsh sometimes emits a question/requested frame with an
@@ -150,7 +142,6 @@ func (d *driver) handleQuestionRequested(frameRpcID string, qr muxQuestionReques
 	respCh := d.registerApproval(frameRpcID)
 	d.pendingMu.Lock()
 	d.pendingQuestions[frameRpcID] = qr.Questions
-	d.pendingSource[frameRpcID] = qr.Source
 	d.pendingMu.Unlock()
 
 	// Render Action as "<header> — <question> [<opt1> | <opt2> | ...]"
@@ -255,9 +246,9 @@ func questionAnswerFromPicks(qs []questionPayload, picks []messages.QuestionPick
 	return host.QuestionAnswer{Answers: answers}, nil
 }
 
-// Dashboard / Feishu labels for mux approval/requested. Host wire
-// vocabulary is allowed-once | rejected; these are the user-facing
-// buttons (matching dsh ApprovalPanel).
+// Dashboard / Feishu labels for a host waterfall approval. Host
+// wire vocabulary is allowed-once | rejected; these are the
+// user-facing buttons (matching dsh ApprovalPanel).
 const (
 	approvalAllowOnce = "Allow once"
 	approvalReject    = "Reject"
@@ -282,7 +273,7 @@ const (
 // drains "settled" into it (best-effort, non-blocking). Used by
 // the host waterfall cancel path and any future host-driven
 // audit-close that needs to clear a pending entry by the frame
-// rpcId the server uses as the /api/respond correlation key.
+// rpcId the server correlates the answer with.
 func (d *driver) dropPendingByRPCID(rpcID string) bool {
 	d.pendingMu.Lock()
 	defer d.pendingMu.Unlock()
@@ -296,7 +287,6 @@ func (d *driver) dropPendingLocked(rpcID, notify string) bool {
 	}
 	delete(d.pendingApprovals, rpcID)
 	delete(d.pendingQuestions, rpcID)
-	delete(d.lastApprovalID, rpcID)
 	d.removeFromPendingOrderLocked(rpcID)
 	if ch != nil && notify != "" {
 		select {

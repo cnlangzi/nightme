@@ -1356,19 +1356,3 @@ func stripDataURLPrefix(dataURL string) string {
 	}
 	return dataURL
 }
-
-// Compile-time guarantee that *driver satisfies the package-private
-// agent.driver interface (SendBlocks/SendPermission/Reset/Close).
-// External callers reach driver via *agent.Agent, which forwards
-// the public methods.
-var _ agentDriver = (*driver)(nil)
-
-// agentDriver is the local alias for the agent.driver interface so
-// this file can compile-time check driver satisfies it without
-// importing the unexported name from the agent package.
-type agentDriver interface {
-	SendBlocks(ctx context.Context, blocks []agent.ContentBlock) error
-	SendPermission(resp string) error
-	Reset(ctx context.Context) error
-	Close() error
-}

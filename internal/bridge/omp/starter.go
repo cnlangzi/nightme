@@ -75,6 +75,9 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 	if err != nil {
 		return nil, err
 	}
+	// agent.NewAgent's type parameter checks at compile time that
+	// the driver implements the package-private agent.driver
+	// interface, so a mismatch cannot reach this point.
 	return agent.NewAgent(s.Info(), d.pid, d.events, d), nil
 }
 

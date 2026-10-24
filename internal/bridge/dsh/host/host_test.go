@@ -7,7 +7,6 @@
 //
 // Coverage:
 //   - RPC envelope round-trip (clientRequest → serverResponse)
-//   - /api/respond special envelope (client-response, NOT client-request)
 //   - mux WS subscribe + push + dispatch by sessionId
 //   - host WS push + handler dispatch
 //   - pending approval register/answer/drop
@@ -83,9 +82,7 @@ type mockDSH struct {
 	muxConnectCount   atomic.Int64
 	listCallCount     atomic.Int64
 	createCallCount   atomic.Int64
-	respondCount      atomic.Int64
 	waterfallCount    atomic.Int64
-	lastRespondBody   atomic.Value // []byte
 	lastWaterfallBody atomic.Value // []byte
 
 	// failSessionList, when true, causes handleSessionList to
@@ -132,7 +129,6 @@ func newMockDSH(t *testing.T) *mockDSH {
 	mux.HandleFunc("/api/session/create", m.handleSessionCreate)
 	mux.HandleFunc("/api/session/prompt", m.handleSessionPrompt)
 	mux.HandleFunc("/api/session/cancel", m.handleSessionCancel)
-	mux.HandleFunc("/api/respond", m.handleRespond)
 	mux.HandleFunc("/api/$events/result", m.handleWaterfallResult)
 	mux.HandleFunc("/api/remote.mux", m.handleMuxWS)
 
@@ -207,33 +203,6 @@ func (m *mockDSH) handleSessionPrompt(w http.ResponseWriter, r *http.Request) {
 
 func (m *mockDSH) handleSessionCancel(w http.ResponseWriter, r *http.Request) {
 	writeRPC(w, rpcIDFromRequest(r), true, map[string]any{"accepted": true})
-}
-
-// handleRespond validates that the inbound body is a client-response
-// envelope (NOT client-request), records the body for assertions,
-// and writes the {accepted:true} receipt per dsh-api.md §2.12.
-func (m *mockDSH) handleRespond(w http.ResponseWriter, r *http.Request) {
-	m.respondCount.Add(1)
-	body, _ := io.ReadAll(r.Body)
-	m.lastRespondBody.Store(body)
-	var env struct {
-		Type   string `json:"type"`
-		RPCID  string `json:"rpcId"`
-		Result struct {
-			OK    bool            `json:"ok"`
-			Value json.RawMessage `json:"value"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(body, &env); err != nil {
-		http.Error(w, "bad envelope: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	if env.Type != "client-response" {
-		http.Error(w, fmt.Sprintf("expected type:client-response, got %q", env.Type), http.StatusBadRequest)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"accepted": true})
 }
 
 // handleWaterfallResult is the dsh 0.1.5-rc.1 /api/$events/result
@@ -553,58 +522,6 @@ func TestRPCClient_SessionCreate(t *testing.T) {
 	}
 }
 
-// ─── Test: /api/respond uses client-response envelope ──────────────
-
-func TestRPCClient_Respond_UsesClientResponseEnvelope(t *testing.T) {
-	mock := newMockDSH(t)
-	c := host.NewRPCClient(mock.url())
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	value := host.ApprovalResponse{
-		SessionID:  "session-x",
-		ApprovalID: "approval-y",
-		Outcome:    "allowed-once",
-	}
-	if err := c.Respond(ctx, "stable-rpc-id-42", value); err != nil {
-		t.Fatalf("Respond: %v", err)
-	}
-	if mock.respondCount.Load() != 1 {
-		t.Fatalf("expected 1 respond call, got %d", mock.respondCount.Load())
-	}
-
-	body, _ := mock.lastRespondBody.Load().([]byte)
-	if len(body) == 0 {
-		t.Fatal("expected respond body captured")
-	}
-	var env struct {
-		Type   string `json:"type"`
-		RPCID  string `json:"rpcId"`
-		Result struct {
-			OK    bool                  `json:"ok"`
-			Value host.ApprovalResponse `json:"value"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(body, &env); err != nil {
-		t.Fatalf("decode respond body: %v (body=%s)", err, body)
-	}
-	if env.Type != "client-response" {
-		t.Errorf("expected type=client-response, got %q (BRIDGE BUG-shape)", env.Type)
-	}
-	if env.RPCID != "stable-rpc-id-42" {
-		t.Errorf("expected rpcId echo, got %q", env.RPCID)
-	}
-	if !env.Result.OK {
-		t.Error("expected result.ok=true")
-	}
-	if env.Result.Value.Outcome != "allowed-once" {
-		t.Errorf("expected outcome=allowed-once, got %q", env.Result.Value.Outcome)
-	}
-	if env.Result.Value.SessionID != "session-x" {
-		t.Errorf("expected sessionId=session-x, got %q", env.Result.Value.SessionID)
-	}
-}
-
 // ─── Test: /api/$events/result matches dsh 0.1.5-rc.1 wire shape ──
 //
 // §13.4 lock: dsh's gateway `parseRemoteEventResult` requires
@@ -629,10 +546,8 @@ func TestRPCClient_SendWaterfallResult_MatchesCanonicalWire(t *testing.T) {
 
 	// SendWaterfallResult goes through PostEnvelope which uses the
 	// same mock router but with method="$events/result" → URL
-	// /api/$events/result. We can't easily inspect that body via
-	// the mock's existing `lastRespondBody` capture (that's only
-	// set for /api/respond). Instead, decode the request that
-	// hit the server using a custom request capture.
+	// /api/$events/result. The mock captures that body in
+	// `lastWaterfallBody`.
 	body, ok := mock.lastWaterfallBody.Load().([]byte)
 	if !ok || len(body) == 0 {
 		t.Fatal("expected waterfall body captured (set WaterfallCapture on mock)")

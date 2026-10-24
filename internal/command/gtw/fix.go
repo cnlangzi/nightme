@@ -170,20 +170,22 @@ func RunFix(
 //
 //  1. RepoRoot → RemoteOriginURL → Detect → GetIssue.
 //  2. Branch name = DeriveBranchFromTitle(issue.Title, id).
-//  3. PreflightWorktreeCreate → catches path / branch / parent
-//     errors before WorktreeAdd.
-//  4. BranchExists? → hard-fail reply (F-XX §3.1; no card).
-//  5. Issue carries LabelWIP? → hard-fail reply (the issue is
+//  3. BranchExists? → hard-fail reply (F-XX §3.1; no card).
+//  4. Issue carries LabelWIP? → hard-fail reply (the issue is
 //     already claimed by another fix; no card, no side effect).
-//  6. WorktreeAdd (creates the durable worktree first; failure
+//  5. PreflightWorktreeCreate → catches path / branch / parent
+//     errors before WorktreeAdd.
+//  6. RefreshDefaultBranch → syncs the default branch so the
+//     worktree branches off the latest upstream code.
+//  7. WorktreeAdd (creates the durable worktree first; failure
 //     here surfaces the git error and bails without touching
 //     the label).
-//  7. AddIssueLabel(LabelWIP). Failure rolls back the worktree
-//     and branch via rollbackLabelStep.
-//  8. SetSelectedCwd → WriteGTWYml (the yml is the cwd-scoped
+//  8. ensureGtwLabels → AddIssueLabel(LabelWIP). Failure rolls
+//     back the worktree and branch via rollbackLabelStep.
+//  9. SetSelectedCwd → WriteGTWYml (the yml is the cwd-scoped
 //     source of truth for hooks, /gtw close, and recovery).
-//  9. Render success card.
-//  10. Dispatch issue body to ChatSession.QueueUserMessage so
+//  10. Render success card.
+//  11. Dispatch issue body to ChatSession.QueueUserMessage so
 //     the agent picks it up. Failure here does NOT roll back
 //     the worktree — the user can re-trigger manually.
 func runFixRemote(

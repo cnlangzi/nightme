@@ -102,7 +102,7 @@ func dispatchPR(
 	deps HandlerDeps,
 	chatID, messageID string,
 	args prArgs,
-	ymlAgent string,
+	cfg Config,
 ) (*Result, error) {
 	c, res := loadDispatchContext(ctx, cs, deps, chatID, messageID)
 	if res != nil {
@@ -178,10 +178,15 @@ func dispatchPR(
 	// stamping rationale (F-CLAUDE-PRINT-002 follow-up: agentbar /
 	// usagebar must reach the channel even when GTW bypasses the
 	// runtime event pipeline).
+	// The language is resolved before the agent clock starts: the
+	// lookup shells out to git, and its latency must not eat the
+	// agent's budget.
+	lang := resolveLanguage(ctx, cfg, c.Worktree, deps.Git)
+
 	prCtx, prCancel := context.WithTimeout(ctx, timeouts.Agent)
 	defer prCancel()
 	runRes, agentName, err := runAgentFor(prCtx, cs, c.Worktree,
-		buildPRPrompt(c, baseBranch), chatID, messageID, args.Agent, ymlAgent,
+		buildPRPrompt(c, baseBranch, lang), chatID, messageID, args.Agent, cfg.PR.Agent,
 		// Drop OutResult; replyAgent below is the only result card.
 		messages.OutResult)
 	if err != nil {
@@ -344,7 +349,14 @@ func dispatchPR(
 // the agent has its own workspace and Bash tool, and we want the
 // body to be grounded in real diff output the LLM itself
 // inspected.
-func buildPRPrompt(c Context, base string) string {
+//
+// The PR title subject and the body prose are written in the
+// configured output language (lang). The structural markers — the
+// `## Summary by NightMe` heading, the category labels, the
+// `Risk:` line, the Conventional Commits type keyword — stay in
+// English: they are a machine-readable contract (extractRiskLevel
+// parses the Risk line, the body shape is asserted by reviewers).
+func buildPRPrompt(c Context, base string, lang string) string {
 	// v5 prompt. The semantic flow is:
 	//   commit history + final diff → PR body → Summary by NightMe → PR title
 	//
@@ -455,6 +467,11 @@ func buildPRPrompt(c Context, base string) string {
 	sb.WriteString("- a concatenation of commit titles\n")
 	sb.WriteString("- an independent interpretation of one commit\n\n")
 
+	// --- Output language ------------------------------------------
+	sb.WriteString("## Output language\n\n")
+	sb.WriteString("Write the PR title subject and the body prose in " + placeholderLanguage + ".\n\n")
+	sb.WriteString("Keep these exactly in English, whatever the output language: the `## Summary by NightMe` heading, the category labels (`New Features:`, `Bug Fixes:`, `Enhancements:`, `Tests:`, `Documentation:`, `Chore / Build / CI:`), the `Risk: <low|medium|high> — <reason>` line, and the Conventional Commits type keyword.\n\n")
+
 	// --- PR Body Format -------------------------------------------
 	sb.WriteString("## PR Body Format\n\n")
 	sb.WriteString("The PR body MUST use the following existing format.\n\n")
@@ -558,7 +575,7 @@ func buildPRPrompt(c Context, base string) string {
 	sb.WriteString("    glab mr create\n\n")
 	sb.WriteString("The caller is responsible for creating the Pull Request.\n")
 
-	return sb.String()
+	return applyLanguage(sb.String(), lang)
 }
 
 // parsePRReply extracts (title, body) from an agent's reply.

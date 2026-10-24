@@ -353,7 +353,7 @@ func TestBuildPRPrompt_Remote(t *testing.T) {
 		Repo:     "octocat/hello",
 		Issue:    42,
 	}
-	p := buildPRPrompt(c, "main")
+	p := buildPRPrompt(c, "main", defaultLanguage)
 
 	// v4 structural sections — all eight must be present (v5
 	// inherits the same eight-section spine).
@@ -429,7 +429,7 @@ func TestBuildPRPrompt_LocalNoIssue(t *testing.T) {
 		RepoRoot: "/r",
 		Repo:     "octocat/hello",
 	}
-	p := buildPRPrompt(c, "main")
+	p := buildPRPrompt(c, "main", defaultLanguage)
 	if strings.Contains(p, "Reference issue") {
 		t.Fatalf("ModeLocal / no-issue prompt should not include issue ref:\n%s", p)
 	}
@@ -456,7 +456,7 @@ func TestBuildPRPrompt_NonWorktreeRepo(t *testing.T) {
 		RepoRoot: "/r",
 		// Repo deliberately empty (non-worktree mode path)
 	}
-	p := buildPRPrompt(c, "main")
+	p := buildPRPrompt(c, "main", defaultLanguage)
 	if strings.Contains(p, "Repository: \n") || strings.Contains(p, "Repository: octocat") {
 		t.Fatalf("v5 prompt should not contain a Repository: line:\n%s", p)
 	}
@@ -469,7 +469,7 @@ func TestBuildPRPrompt_NonWorktreeRepo(t *testing.T) {
 // violation. See also the dedicated brand-casing memory.
 func TestBuildPRPromptV4_BrandHeading(t *testing.T) {
 	c := Context{Worktree: "/w", Branch: "feat/x", RepoRoot: "/r", Repo: "o/r"}
-	p := buildPRPrompt(c, "main")
+	p := buildPRPrompt(c, "main", defaultLanguage)
 
 	mustContain(t, p, "## Summary by NightMe")
 	mustNotContain(t, p, "## Summary by nightme")
@@ -484,7 +484,7 @@ func TestBuildPRPromptV4_BrandHeading(t *testing.T) {
 // from commit types — so this test only pins the labels.
 func TestBuildPRPromptV4_CategoriesPresent(t *testing.T) {
 	c := Context{Worktree: "/w", Branch: "feat/x", RepoRoot: "/r", Repo: "o/r"}
-	p := buildPRPrompt(c, "main")
+	p := buildPRPrompt(c, "main", defaultLanguage)
 
 	mustContain(t, p, "New Features:")
 	mustContain(t, p, "Bug Fixes:")
@@ -506,7 +506,7 @@ func TestBuildPRPromptV4_CategoriesPresent(t *testing.T) {
 // through `## Diff overview` prose instead of category bullets.
 func TestBuildPRPromptV4_NoDiffOverview(t *testing.T) {
 	c := Context{Worktree: "/w", Branch: "feat/x", RepoRoot: "/r", Repo: "o/r"}
-	p := buildPRPrompt(c, "main")
+	p := buildPRPrompt(c, "main", defaultLanguage)
 
 	mustNotContain(t, p, "## Diff overview")
 	mustNotContain(t, p, "Diff overview")
@@ -525,7 +525,7 @@ func TestBuildPRPromptV4_NoDiffOverview(t *testing.T) {
 // inspection" failure mode.
 func TestBuildPRPromptV4_ToolFloorMandatory(t *testing.T) {
 	c := Context{Worktree: "/w", Branch: "feat/x", RepoRoot: "/r", Repo: "o/r"}
-	p := buildPRPrompt(c, "main")
+	p := buildPRPrompt(c, "main", defaultLanguage)
 
 	mustContain(t, p, "## Understand the Complete Change")
 	mustContain(t, p, "git log --oneline main..feat/x")
@@ -542,7 +542,7 @@ func TestBuildPRPromptV4_ToolFloorMandatory(t *testing.T) {
 // negative descriptions of what the title is NOT.
 func TestBuildPRPromptV4_DoNotCommitAsTitle(t *testing.T) {
 	c := Context{Worktree: "/w", Branch: "feat/x", RepoRoot: "/r", Repo: "o/r"}
-	p := buildPRPrompt(c, "main")
+	p := buildPRPrompt(c, "main", defaultLanguage)
 
 	// Decoupling language.
 	mustContain(t, p, "commit subject ≠ PR title")
@@ -564,7 +564,7 @@ func TestBuildPRPromptV4_DoNotCommitAsTitle(t *testing.T) {
 // silently breaks every existing parsePRReply test in this file.
 func TestBuildPRPromptV4_PreserveParseability(t *testing.T) {
 	c := Context{Worktree: "/w", Branch: "feat/x", RepoRoot: "/r", Repo: "o/r"}
-	p := buildPRPrompt(c, "main")
+	p := buildPRPrompt(c, "main", defaultLanguage)
 
 	mustContain(t, p, "ONE fenced markdown code block")
 	mustContain(t, p, "The FIRST line inside the code block MUST be the PR title")
@@ -585,7 +585,7 @@ func TestBuildPRPromptV4_PreserveParseability(t *testing.T) {
 // understanding of the diff range does not depend on what HEAD
 // resolves to in its worktree.
 func TestBuildPRPromptV4_BranchInCommands(t *testing.T) {
-	p := buildPRPrompt(Context{Worktree: "/w", Branch: "feat/y", RepoRoot: "/r", Repo: "o/r"}, "develop")
+	p := buildPRPrompt(Context{Worktree: "/w", Branch: "feat/y", RepoRoot: "/r", Repo: "o/r"}, "develop", defaultLanguage)
 
 	mustContain(t, p, "git log --oneline develop..feat/y")
 	mustContain(t, p, "git diff develop...feat/y --stat")
@@ -899,7 +899,7 @@ func TestDispatchPR_NoWorkspace(t *testing.T) {
 	cs := rig.cs
 	s := captureCh(t, cs)
 
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -926,7 +926,7 @@ func TestDispatchPR_MalformedYml(t *testing.T) {
 	cs := rig.cs
 	s := captureCh(t, cs)
 
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -945,7 +945,7 @@ func TestDispatchPR_DefaultBranchFails(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -1024,7 +1024,7 @@ func TestDispatchPR_NoOriginBranch(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -1062,7 +1062,7 @@ func TestDispatchPR_LSRemoteAuthError(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -1095,7 +1095,7 @@ func TestDispatchPR_LSRemoteNetworkError(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -1126,7 +1126,7 @@ func TestDispatchPR_LSRemoteUnknownErrorPassThrough(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -1167,7 +1167,7 @@ func TestDispatchPR_LSRemoteNotARepository(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -1231,7 +1231,7 @@ func TestDispatchPR_ExistingPR(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -1267,7 +1267,7 @@ func TestDispatchPR_FindOpenPRErrCLINotInstalled(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -1295,7 +1295,7 @@ func TestDispatchPR_FindOpenPRUnknownErrorPassThrough(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -1332,7 +1332,7 @@ func TestDispatchPR_CreateStaleUpstreamRace(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -1366,7 +1366,7 @@ func TestDispatchPR_AlreadyExistsRace(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -1401,7 +1401,7 @@ func TestDispatchPR_CreateStaleUpstreamRace_GitLab(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -1431,7 +1431,7 @@ func TestDispatchPR_CreatePR_CLINotInstalled(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -1458,7 +1458,7 @@ func TestDispatchPR_CreatePR_UnknownErrorPassThrough(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -1507,7 +1507,7 @@ func TestDispatchPR_DirtyNoLongerGate(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -1552,7 +1552,7 @@ func TestDispatchPR_NoAgentSelected(t *testing.T) {
 	cs := &chatsession.ChatSession{} // no SetSelectedAgent → empty selection
 	_ = cs.SetSelectedCwd(tmp)
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, deps, "chat", "msg", prArgs{}, "")
+	_, err := dispatchPR(context.Background(), cs, deps, "chat", "msg", prArgs{}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -1571,7 +1571,7 @@ func TestDispatchPR_AgentRunOnceFails(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -1596,7 +1596,7 @@ func TestDispatchPR_AgentOutputUnparsable(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -1631,7 +1631,7 @@ func TestDispatchPR_AgentOutputNoFenceNowSucceeds(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -1711,7 +1711,7 @@ func TestDispatchPR_ResolveProvider_DetectFallback(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -1731,7 +1731,7 @@ func TestDispatchPR_CreatePRExists(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -1751,7 +1751,7 @@ func TestDispatchPR_CreatePRFails(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -1778,7 +1778,7 @@ func TestDispatchPR_NoCommitsBetween(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -2465,7 +2465,7 @@ func TestDispatchPR_AgentFlagOverride(t *testing.T) {
 
 	s := captureCh(t, cs)
 	_, err := dispatchPR(context.Background(), cs, deps, "chat", "msg",
-		prArgs{Agent: "opencode"}, "")
+		prArgs{Agent: "opencode"}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -2614,7 +2614,7 @@ func TestDispatchPR_NonWorktree_HappyPath(t *testing.T) {
 	deps := HandlerDeps{Git: git, Detect: fakeDetect(prov)}
 
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, deps, "chat", "msg", prArgs{}, "")
+	_, err := dispatchPR(context.Background(), cs, deps, "chat", "msg", prArgs{}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}

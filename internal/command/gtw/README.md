@@ -50,8 +50,64 @@ pr:
       - run: gh pr list --head $GTW_BRANCH --json url -q '.[0].url' # sanity check
 ```
 
-**顶层 `pr:`** 是这次新增 —— `cfg.PR` 之前是静默丢的字段,
-加在 Config 后用户写 `pr: hooks:` 才生效。
+**顶层 `pr:`** 对应 `cfg.PR` —— 用户写 `pr: hooks:` 即生效。
+
+### 0.1 输出语言配置(`/gtw config`)
+
+`/gtw commit`、`/gtw pr`、`/gtw new` 写出来的文本(commit message、PR 标题与
+正文、issue 正文)用什么语言,由 `~/.nightme/gtw.yml` 决定。配置分两级作用域:
+
+| 作用域 | 配置键 | 生效范围 |
+|---|---|---|
+| 用户级 | 顶层 `lang:` | 所有仓库 |
+| 仓库级 | `repos.<host>/<owner>/<repo>.lang:` | 仅该仓库 |
+
+仓库键由 `origin` remote URL 解析成 `host/owner/repo`(用户不手写),必须与
+`repos:` 下的键完全一致(大小写敏感)。优先级:**仓库级 > 用户级 > `English`**。
+语言值是自由文本,不做枚举、不做校验、不做映射 —— `简体中文` / `zh-CN` /
+`Simplified Chinese` 都原样接受;空值视为未设置,继续往下一级回落。
+
+```yaml
+# ~/.nightme/gtw.yml
+lang: 简体中文
+
+repos:
+  github.com/cnlangzi/nightme:
+    lang: zh-CN
+```
+
+四种命令形式:
+
+| 命令 | 作用 |
+|---|---|
+| `/gtw config lang <value>` | 写仓库级(要求 chat 的 cwd 在一个有 origin remote 的仓库里) |
+| `/gtw config -g\|--global lang <value>` | 写用户级 |
+| `/gtw config lang` | 回显生效值及来源作用域 |
+| `/gtw config --unset lang`(可带 `-g`) | 删除该作用域的条目 |
+
+未知键回一条错误并点名唯一已知键 `lang`。仓库没有 `origin` remote 时,仓库级
+写入报错并提示改用 `-g`;读取则回落用户级,再回落默认。
+
+回复形状(走 §2.1 Format 1):
+
+```
+✅ gtw.lang = 简体中文 (repo scope)
+→ file: ~/.nightme/gtw.yml
+→ repo: github.com/cnlangzi/nightme
+```
+
+```
+✨ gtw.lang = English (default)
+```
+
+写入的首行是 `✅`(单步动作完成),查询的首行是 `✨`(无副作用的"现状");
+作用域取值 `repo scope` / `global scope` / `default`。
+
+语言只跟随**正文**:commit 的 subject 与 body、PR 标题的 subject、PR body 正文、
+issue body 正文。`## Summary by NightMe` 标题、PR 分类标签、`Risk:` 行、
+`Issue: #<id>`、`Closes #N`、Conventional Commits 的 type 关键词、issue 草稿的
+小节标题一律保持英文 —— `Risk:` 被 `extractRiskLevel` 正则解析,issue 标题的
+ASCII 是 `DeriveBranchFromTitle` 产出可读分支名的前提。
 
 ---
 

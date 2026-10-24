@@ -82,11 +82,16 @@ func parseNewIssueArgs(argv []string) (newIssueArgs, error) {
 // Previous drafts of this chat are removed first so that a run
 // ending in questions cannot leave older documents behind for
 // /gtw new -y to submit.
+//
+// cfg carries the user-level gtw config; the effective output
+// language is resolved from the chat's cwd — repo scope beats
+// global scope, English is the fallback.
 func RunNewDraft(
 	ctx context.Context,
 	cs *chatsession.ChatSession,
 	deps HandlerDeps,
 	chatID, messageID string,
+	cfg Config,
 ) (*Result, error) {
 	if deps.Now == nil {
 		deps.Now = timeNow
@@ -119,7 +124,8 @@ func RunNewDraft(
 			fmt.Sprintf("❌ prepare issue drafts: %v", err)), nil
 	}
 
-	blocks := []agent.ContentBlock{{Type: agent.ContentText, Text: renderNewIssuePrompt(draftDir)}}
+	lang := resolveLanguage(ctx, cfg, cwd, deps.Git)
+	blocks := []agent.ContentBlock{{Type: agent.ContentText, Text: renderNewIssuePrompt(draftDir, lang)}}
 	if err := dispatchIssueToChatSession(ctx, cs, deps.Now, chatID, messageID, blocks); err != nil {
 		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ dispatch to agent: %v\nhint: /gtw new archives the discussion held with the current agent", err)), nil
@@ -431,8 +437,14 @@ func resetIssueDrafts(dir string) error {
 	return os.MkdirAll(dir, 0o700)
 }
 
-func renderNewIssuePrompt(draftDir string) string {
-	return strings.ReplaceAll(newIssuePrompt, placeholderDraftDirAbs, draftDir)
+// renderNewIssuePrompt fills the prompt's placeholders: the
+// absolute draft directory and the configured output language.
+// The issue title stays English/ASCII — the branch name is derived
+// from it (DeriveBranchFromTitle → slugify drops non-ASCII), so a
+// translated title would degrade the branch name to `fix-<id>`.
+func renderNewIssuePrompt(draftDir, lang string) string {
+	out := strings.ReplaceAll(newIssuePrompt, placeholderDraftDirAbs, draftDir)
+	return applyLanguage(out, lang)
 }
 
 // newIssuePrompt is the archive task queued into the current agent
@@ -492,7 +504,7 @@ When the work is split:
 - Every requirement is verifiable. Quantify vague words ("fast", "friendly", "reasonable") or drop them.
 - Be concrete: field names, types, defaults, error messages, file paths, commands, config keys — verbatim when they appeared in the discussion or code.
 - Define each term on first use and use it consistently.
-- Write the body in the language the user predominantly used. Keep the section headings below as given.
+- Write the body prose in {{GTW_LANGUAGE}}. Keep the section headings below exactly as given, in English.
 - Write "None" under a section that has no entries.
 
 ## Template

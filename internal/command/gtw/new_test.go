@@ -66,7 +66,7 @@ func TestParseNewIssueArgs(t *testing.T) {
 func TestRenderNewIssuePrompt(t *testing.T) {
 	const dir = "/home/u/.nightme/issue-drafts/issue-1"
 
-	p := renderNewIssuePrompt(dir)
+	p := renderNewIssuePrompt(dir, defaultLanguage)
 	if strings.Contains(p, placeholderDraftDirAbs) {
 		t.Error("unsubstituted draft directory placeholder in prompt")
 	}

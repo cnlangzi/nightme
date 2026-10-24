@@ -63,7 +63,7 @@ func TestRenderPlanPrompt(t *testing.T) {
 }
 
 func TestNewIssuePromptEndsPlanMode(t *testing.T) {
-	p := renderNewIssuePrompt("/tmp/drafts")
+	p := renderNewIssuePrompt("/tmp/drafts", defaultLanguage)
 	for _, want := range []string{
 		"If this conversation is in plan mode, this task ends it",
 		`Lines starting with "Decision:" record settled points`,

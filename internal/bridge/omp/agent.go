@@ -127,6 +127,12 @@ type driver struct {
 	workspace string
 	branch    string
 
+	// keepaliveMu serialises Keepalive: the alive-check and the
+	// recovery it may trigger. The contract forbids parallel
+	// recoveries from a burst of Submits, and the caller does not
+	// coordinate.
+	keepaliveMu sync.Mutex
+
 	turnMu           sync.Mutex
 	turnActive       bool
 	inFlightPromptID string
@@ -469,7 +475,16 @@ func (d *driver) New(ctx context.Context) error {
 // onRecover so the chat layer can spawn a fresh omp with the
 // saved --resume session.
 // See agent.driver.Keepalive for the full contract.
+//
+// The alive-check and the recovery are serialised: the contract
+// says a burst of Submits must not kick off parallel recoveries,
+// and the caller does not coordinate. A second caller waits for
+// the first recovery to land, then sees the fresh bridge and
+// proceeds.
 func (d *driver) Keepalive(ctx context.Context, onRecover func(context.Context) error) error {
+	d.keepaliveMu.Lock()
+	defer d.keepaliveMu.Unlock()
+
 	if d.alive() {
 		return nil
 	}

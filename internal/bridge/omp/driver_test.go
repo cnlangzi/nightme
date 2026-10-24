@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sync"
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -100,6 +101,52 @@ func TestKeepalive_NoRecoveryCallback(t *testing.T) {
 	}
 	if err := d.Keepalive(context.Background(), nil); err == nil {
 		t.Fatal("Keepalive() = nil, want an error for a dead bridge with no callback")
+	}
+}
+
+// TestKeepalive_ConcurrentCallsRecoverOnce verifies the contract
+// that concurrent Keepalive calls are serialised inside the
+// bridge: a burst of Submits must not kick off parallel
+// recoveries, and the caller does not coordinate.
+//
+// The recovery callback marks the bridge alive again, so a second
+// caller that waits for the first recovery sees a healthy bridge
+// and does not recover a second time.
+func TestKeepalive_ConcurrentCallsRecoverOnce(t *testing.T) {
+	d := &driver{
+		pid:    deadPID(t),
+		rpc:    newRPCClient(nopWriteCloser{}),
+		events: make(chan agent.AgentEvent, 1),
+	}
+
+	var mu sync.Mutex
+	calls := 0
+	recover := func(context.Context) error {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		// The recovery replaces the bridge; mark the new one alive
+		// so the next Keepalive sees a healthy session.
+		d.pid = os.Getpid()
+		return nil
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := d.Keepalive(context.Background(), recover); err != nil {
+				t.Errorf("Keepalive() = %v, want nil", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("onRecover called %d times, want 1", calls)
 	}
 }
 

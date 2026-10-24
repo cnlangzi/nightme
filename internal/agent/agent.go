@@ -1157,6 +1157,8 @@ type RunResult struct {
 	//       "completed" / "failed"
 	//   - pi:        message_end.stopReason
 	//       "stop" / "toolUse" / "error"
+	//   - omp:       message_end.stopReason
+	//       "stop" / "length" / "error"
 	//   - opencode:  terminal SSE event type
 	//       "session.idle" / "error" / etc.
 	//   - acp:       bridge-defined; consult the bridge's docs

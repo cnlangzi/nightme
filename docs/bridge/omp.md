@@ -134,6 +134,12 @@ no longer accept a prompt. On a dead bridge it invokes the
 caller's recovery callback, which re-spawns omp with the saved
 `--resume` session id.
 
+The alive-check and the recovery are serialised inside the
+bridge: the `agent.driver` contract says a burst of Submits must
+not kick off parallel recoveries and that the caller does not
+coordinate. A second caller waits for the first recovery, then
+sees the fresh bridge and proceeds.
+
 ## 4. Driver contract
 
 `internal/agent` keeps the per-bridge protocol interface
@@ -211,8 +217,10 @@ Translation rules match issue #443 §Spec §5/6/7/8. Highlights:
 - `message_end{assistant}`: stamp `lastModel` and `lastUsage`
   from `message.usage` — usage is an overwriting snapshot, not a
   sum (each API call's `input` already contains the conversation
-  history). `stopReason` and `errorMessage` are stamped too
-  (see "Provider errors" below).
+  history). `stopReason` and `errorMessage` are stamped too —
+  `stopReason` rides on every turn's `Result.Subtype`, and
+  `errorMessage` only on a failed one (see "Provider errors"
+  below).
 - `message_update` dispatches on the inner
   `assistantMessageEvent.type`:
   - `text_start` clears `textBuf[contentIndex]`.
@@ -233,23 +241,6 @@ Translation rules match issue #443 §Spec §5/6/7/8. Highlights:
   final text + usage) followed by one `EventAgentDone{
   Reason:"settled" }`.
 
-### Provider errors
-
-omp reports an upstream model failure on the assistant
-`message_end`: `stopReason` is `"error"`, `errorMessage`
-carries the provider's own text, `content` is empty, and the
-usage block is zeroed. The translator surfaces that reason on
-the turn's `EventAgentResult`:
-
-- `Result.Subtype` = `stopReason` (categorisation only).
-- `Result.Err` wraps `ErrModelError` and carries the
-  provider's message.
-- `Result.Text` falls back to the provider's message when the
-  turn produced no assistant text — a body is what makes the
-  reason visible in the chat.
-
-A failed turn that already streamed assistant text keeps that
-text as the result body; the error rides on `Err` alone.
 - `agent_start` / `turn_*` / `agent_end{isTerminal:false}` are
   ignored; they are not terminal.
 - `extension_ui_request` is ignored without response (omp does
@@ -259,6 +250,25 @@ text as the result body; the error rides on `Err` alone.
 - Anything else: drop silently; the next text_delta's `textBuf`
   must remain intact (R5 acceptance: "未知事件插入在两个 text_delta
   之间时文本缓冲不被打散").
+
+### Provider errors
+
+omp reports an upstream model failure on the assistant
+`message_end`: `stopReason` is `"error"`, `errorMessage`
+carries the provider's own text, `content` is empty, and the
+usage block is zeroed. The translator surfaces that reason on
+the turn's `EventAgentResult` (`Result.Subtype` carries the
+`stopReason` on every turn, error or not — it is categorisation
+only):
+
+- `Result.Err` wraps `ErrModelError` and carries the
+  provider's message.
+- `Result.Text` falls back to the provider's message when the
+  turn produced no assistant text — a body is what makes the
+  reason visible in the chat.
+
+A failed turn that already streamed assistant text keeps that
+text as the result body; the error rides on `Err` alone.
 
 ## 6. Modes
 

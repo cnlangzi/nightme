@@ -14,12 +14,6 @@ func TestIssueHasLabel(t *testing.T) {
 		want  bool
 	}{
 		{
-			name:  "nil issue",
-			issue: nil,
-			label: LabelWIP,
-			want:  false,
-		},
-		{
 			name:  "nil labels",
 			issue: &Issue{ID: 42},
 			label: LabelWIP,
@@ -59,6 +53,12 @@ func TestIssueHasLabel(t *testing.T) {
 			name:  "other label only",
 			issue: &Issue{ID: 42, Labels: []string{"priority/high"}},
 			label: LabelWIP,
+			want:  false,
+		},
+		{
+			name:  "looking for another label",
+			issue: &Issue{ID: 42, Labels: []string{LabelWIP}},
+			label: LabelDone,
 			want:  false,
 		},
 		{

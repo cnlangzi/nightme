@@ -116,7 +116,7 @@ flowchart TD
     O --> Q["agent 直接改代码"]
 ```
 
-相对 F-59 §2.3 的步骤编号，**dispatch 之前**的步骤顺序不变（WorktreeAdd → ensureGtwLabels → AddIssueLabel → WriteGTWYml → slot.Store → success card）。**变更**在 dispatch 内容、branch-exists 策略（§3.1）与 claim gate（§3.2）。
+dispatch 之前的步骤顺序：WorktreeAdd → ensureGtwLabels → AddIssueLabel → WriteGTWYml → success card。分支冲突（§3.1）与 claim（§3.2）都在这些步骤之前硬失败，不产生任何副作用。
 
 ### 3.1 Branch 已存在：硬失败（废除 §5.3.1）
 
@@ -152,6 +152,8 @@ Local 模式（`/gtw fix --name`）同样：branch 存在即失败，无决策�
 - 放在 branch-exists **之后**：branch-exists 覆盖「本机已认领」这一类，它的补救动作 `/gtw close` 同时会摘掉 label，是更准确的出口；gate 只负责本地 checkout 无法解释的 claim（另一台机器的 fix，或分支被手工删掉）。
 - 放在副作用**之前**：被拒绝的运行不留任何痕迹——不建 worktree、不建分支、不写 label、不 dispatch。
 
+**这是协作信号，不是锁**：`GetIssue` 读标签与 `AddIssueLabel` 写标签之间存在时间窗，两台机器同时认领同一个 issue 时可能都通过 gate。gate 缩小窗口但不消除它——label 是幂等写入，平台没有“只允许一个写入者”的原语。
+
 **label 匹配大小写不敏感**：GitHub / GitLab 的 label 名按大小写不敏感处理，手工建的 `Nightme/WIP` 与 `nightme/wip` 是同一个 label。
 
 ```text
@@ -167,6 +169,8 @@ Local 模式（`/gtw fix --name`）同样：branch 存在即失败，无决策�
 - claim 已失效（对端机器的 fix 已经不在了、或分支被手工删掉）时，本地没有任何 `/gtw` 命令能摘掉远端 label，只能在 issue 页面上手工移除。
 
 **没有 `--force` 逃生舱**：`/gtw fix` 不接受 `--force` / `-f`（见 §2.2）。解除 claim 的路径（`/gtw close` 或 issue 页面摘 label）都明确存在。
+
+**Local 模式不受影响**：`/gtw fix --name <branch>` 不接触 issue，没有 label 可读，也就没有 claim 可查——它不受这个 gate 约束。
 
 ### 3.3 gtw 职责边界（dispatch 之后）
 

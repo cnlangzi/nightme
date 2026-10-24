@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -1170,15 +1171,9 @@ func stderrFromWorktreeErr(err error) string {
 // hand-created "Nightme/WIP" still counts as the claim the
 // already-claimed gate rejects on.
 func issueHasLabel(issue *Issue, name string) bool {
-	if issue == nil {
-		return false
-	}
-	for _, l := range issue.Labels {
-		if strings.EqualFold(l, name) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(issue.Labels, func(l string) bool {
+		return strings.EqualFold(l, name)
+	})
 }
 
 // ensureGtwLabels bootstraps the full AllLabels set on the

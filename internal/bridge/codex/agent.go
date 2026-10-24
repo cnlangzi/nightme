@@ -127,7 +127,6 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	if err != nil {
 		return nil, err
 	}
-	sess.deliver = live.deliver
 	live.session = sess
 
 	// Translator is wired AFTER newSession so we have access to
@@ -639,16 +638,5 @@ func (d *driver) deliver(ev agent.AgentEvent) agent.AgentEvent {
 	if d.session == nil {
 		return ev
 	}
-
-	// DEBUG(F-codex-stopped-stuck): every event that the translator
-	// hands to deliver() must show up here. If the bug is "agent
-	// stops responding after a while", the missing
-	// [codex] deliver pushed kind=EventAgentDone line is the smoking
-	// gun — codex emitted turn/completed, translator built the Done,
-	// but it never made it onto d.session.events.
-	cLog("deliver push", "kind", ev.Kind.String(),
-		"q_len", len(d.session.events),
-		"q_cap", cap(d.session.events))
-
 	return d.session.deliverEvent(ev)
 }

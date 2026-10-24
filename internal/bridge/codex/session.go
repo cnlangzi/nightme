@@ -202,8 +202,9 @@ type sessionConfig struct {
 }
 
 // newSession spawns codex app-server, runs the handshake, and returns
-// the live session. The caller (Agent.Start) is responsible for wiring
-// session.deliver to its own deliver helper BEFORE emitting any events.
+// the live session. The session wires its own delivery hook before the
+// pumps start, so a child that dies during startup still reports the
+// exit; the driver installs its own deliver in newDriver on top of it.
 func newSession(ctx context.Context, cfg sessionConfig) (*session, error) {
 	if cfg.workspace == "" {
 		return nil, fmt.Errorf("codex: workspace required")
@@ -642,6 +643,16 @@ func (s *session) deliverEvent(ev agent.AgentEvent) agent.AgentEvent {
 	ev.AgentName = s.agentName
 	ev.Workspace = s.workspace
 	ev.Branch = s.branch
+
+	// DEBUG(F-codex-stopped-stuck): every event that the translator
+	// hands to deliver() must show up here. If the bug is "agent
+	// stops responding after a while", the missing
+	// [codex] deliver pushed kind=EventAgentDone line is the smoking
+	// gun — codex emitted turn/completed, translator built the Done,
+	// but it never made it onto d.session.events.
+	cLog("deliver push", "kind", ev.Kind.String(),
+		"q_len", len(s.events),
+		"q_cap", cap(s.events))
 
 	select {
 	case s.events <- ev:

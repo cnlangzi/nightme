@@ -301,17 +301,31 @@ codex < 0.125 的 usage 只通过 `turn/completed.params.usage` 报一次;**0.12
 `onTurnEnd` 是 `translator` 构造时传入的闭包:
 
 ```go
-live.session.translator = newTranslator(
+live.session.translator.Store(newTranslator(
     live.deliver, a.name, cfg.Workspace, s.branch, s.stderrTail,
     func() {
         a.pendingMu.Lock()
         a.pendingTurnActive = false
         a.pendingMu.Unlock()
     },
-)
+))
 ```
 
 注意三处调用点都要触发 `onTurnEnd`:正常 `completeTurn`、`completeTurn` 早返(turn 为空)、`handleThreadStatusChanged`(idle 兜底路径)。
+
+### 5.3 ⛓️ 踩坑:handshake 期间 session 字段的并发读写
+
+**问题**:`translator` 与 `threadID` / `model` 都是 handshake 期间写入的,但 pump goroutine(read-pump / stderr-loop)此时已经在跑 —— codex 会在握手过程中推 `thread/started`、`remoteControl/status/changed` 这类 notification。普通字段 + 普通读会构成 data race:
+
+- `newDriver` 写 `live.session.translator`,read-pump goroutine 在 `onNotification` 里读 `s.translator`
+- `ensureThread` 写 `s.threadID` / `s.model`,stderr-loop goroutine 启动时读 `s.threadID`
+
+**修复**:两个字段都改成原子发布。
+
+- `translator` → `atomic.Pointer[translator]`,`onNotification` 用 `Load()`
+- `threadID` / `model` → 合成一个 `sessionIdentity`,用 `atomic.Pointer[sessionIdentity]` 一次发布,读方走 `sessionID()` / `modelName()`
+
+合成一个结构体而不是两个独立的原子值,是为了避免读到"新 thread id + 旧 model"这种半更新状态。
 
 ---
 

@@ -136,7 +136,7 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	// defer-in-SendBlocks pattern cleared it the instant turn/start
 	// returned, opening a window where a concurrent SendBlocks would
 	// race the in-flight turn on codex's side.
-	live.session.translator = newTranslator(
+	live.session.translator.Store(newTranslator(
 		live.deliver, s.name, cfg.Workspace, sess.branch, sess.stderrTail,
 		// Captures live (not the template): SendBlocks is
 		// called on the live clone, so the busy guard lives on
@@ -148,23 +148,23 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 			live.pendingTurnActive = false
 			live.pendingMu.Unlock()
 		},
-	)
+	))
 
 	// Synthesize the initial EventAgentReady. The runtime subscribes
 	// to Events(); it will see this immediately and capture the
 	// thread id via SetSessionID.
 	live.deliver(agent.AgentEvent{
 		Kind:      agent.EventAgentReady,
-		SessionID: sess.threadID,
-		Model:     sess.model,
+		SessionID: sess.sessionID(),
+		Model:     sess.modelName(),
 		AgentName: s.name,
 		Workspace: cfg.Workspace,
 		Branch:    sess.branch,
 	})
 	cLog("Start: EventAgentReady emitted",
 		"pid", sess.pid,
-		"thread_id", sess.threadID,
-		"model", sess.model,
+		"thread_id", sess.sessionID(),
+		"model", sess.modelName(),
 	)
 
 	go func() {
@@ -201,7 +201,7 @@ func (d *driver) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) er
 		if d.session == nil {
 			return "<nil>"
 		}
-		return d.session.threadID
+		return d.session.sessionID()
 	}())
 	if len(blocks) == 0 {
 		return nil
@@ -288,7 +288,7 @@ func (d *driver) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) er
 	// see agent.go Stop for the full contract.
 	var resp turnStartResponse
 	if err := d.session.rpc.request(ctx, "turn/start", turnStartParams{
-		ThreadID: d.session.threadID,
+		ThreadID: d.session.sessionID(),
 		Input:    input,
 	}, &resp); err != nil {
 		// turn/start RPC failed — release the busy guard so the
@@ -419,8 +419,8 @@ func (d *driver) New(ctx context.Context) error {
 	}
 	d.deliver(agent.AgentEvent{
 		Kind:      agent.EventAgentReady,
-		SessionID: d.session.threadID,
-		Model:     d.session.model,
+		SessionID: d.session.sessionID(),
+		Model:     d.session.modelName(),
 		AgentName: d.session.agentName,
 		Workspace: d.session.workspace,
 		Branch:    d.session.branch,
@@ -474,7 +474,7 @@ func (d *driver) Stop(ctx context.Context) error {
 	d.pendingMu.Lock()
 	busy := d.pendingTurnActive
 	turnID := d.currentTurnID
-	threadID := d.session.threadID
+	threadID := d.session.sessionID()
 	d.pendingMu.Unlock()
 
 	if !busy {
@@ -639,11 +639,6 @@ func (d *driver) deliver(ev agent.AgentEvent) agent.AgentEvent {
 	if d.session == nil {
 		return ev
 	}
-	ev.SessionID = d.session.threadID
-	ev.Model = d.session.model
-	ev.AgentName = d.session.agentName
-	ev.Workspace = d.session.workspace
-	ev.Branch = d.session.branch
 
 	// DEBUG(F-codex-stopped-stuck): every event that the translator
 	// hands to deliver() must show up here. If the bug is "agent
@@ -655,16 +650,5 @@ func (d *driver) deliver(ev agent.AgentEvent) agent.AgentEvent {
 		"q_len", len(d.session.events),
 		"q_cap", cap(d.session.events))
 
-	select {
-	case d.session.events <- ev:
-		cLog("deliver pushed", "kind", ev.Kind.String())
-	case <-d.session.closed:
-		cLog("deliver dropped (session closed)", "kind", ev.Kind.String())
-	case <-d.session.exitDone:
-		// lifecycle closed exitDone after cmd.Wait returned;
-		// the bridge is being torn down. Drop silently — nobody
-		// will read this anyway.
-		cLog("deliver dropped (exitDone)", "kind", ev.Kind.String())
-	}
-	return ev
+	return d.session.deliverEvent(ev)
 }

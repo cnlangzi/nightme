@@ -101,13 +101,14 @@ func startWire(t *testing.T, behaviour string) (*driver, *interruptServer) {
 	// rpc.request blocks forever.
 	go client.readPump(context.Background(), func(error) {})
 
+	sess := &session{
+		workspace: t.TempDir(),
+		rpc:       client,
+	}
+	sess.setIdentity("th-test", "")
 	d := &driver{
-		closed: make(chan struct{}),
-		session: &session{
-			workspace: t.TempDir(),
-			threadID:  "th-test",
-			rpc:       client,
-		},
+		closed:  make(chan struct{}),
+		session: sess,
 	}
 
 	t.Cleanup(func() {
@@ -267,13 +268,14 @@ func TestDriver_SendBlocks_ReleasesGuardOnRPCError(t *testing.T) {
 		func(string, json.RawMessage) {},
 	)
 
+	sess := &session{
+		workspace: t.TempDir(),
+		rpc:       client,
+	}
+	sess.setIdentity("th-test", "")
 	d := &driver{
-		closed: make(chan struct{}),
-		session: &session{
-			workspace: t.TempDir(),
-			threadID:  "th-test",
-			rpc:       client,
-		},
+		closed:  make(chan struct{}),
+		session: sess,
 	}
 
 	err := d.SendBlocks(context.Background(), []agent.ContentBlock{

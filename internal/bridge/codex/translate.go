@@ -198,12 +198,13 @@ func (t *translator) notify(method string, params json.RawMessage) {
 // server-pushed notifications. Forwards to translator.notify; tests
 // call translator.notify directly.
 func (s *session) onNotification(method string, params json.RawMessage) {
-	if s.translator == nil {
+	tr := s.translator.Load()
+	if tr == nil {
 		slog.Default().Debug("codex: notification before translator ready",
 			slog.String("method", method))
 		return
 	}
-	s.translator.notify(method, params)
+	tr.notify(method, params)
 }
 
 // onServerRequest is wired into rpcClient as the callback for frames

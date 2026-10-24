@@ -49,10 +49,10 @@ func fakeAgent(t *testing.T) *driver {
 	}
 	s := &session{
 		workspace: t.TempDir(),
-		threadID:  "th-test",
 		// rpc is left nil — SendBlocks reaches it only on the
 		// happy-path return, which the early-return tests skip.
 	}
+	s.setIdentity("th-test", "")
 	a.session = s
 	return a
 }

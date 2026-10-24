@@ -32,6 +32,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -130,19 +131,24 @@ func (p *stdioPipe) Close() error                { return nil }
 //   - stderrTail: only stderrLoop writes; emitError reads under no lock
 //     (the tail is advisory and tolerates one torn read).
 type session struct {
-	cmd              *exec.Cmd
-	stdinW           io.WriteCloser // child stdin
-	stdoutR          io.ReadCloser  // child stdout
-	stderrR          io.ReadCloser  // child stderr
-	rpc              *rpcClient
-	events           chan agent.AgentEvent
-	pid              int
-	agentName        string
-	workspace        string
-	branch           string
-	model            string
-	threadID         string
-	stderrTail       *agent.StderrRingBuffer
+	cmd        *exec.Cmd
+	stdinW     io.WriteCloser // child stdin
+	stdoutR    io.ReadCloser  // child stdout
+	stderrR    io.ReadCloser  // child stderr
+	rpc        *rpcClient
+	events     chan agent.AgentEvent
+	pid        int
+	agentName  string
+	workspace  string
+	branch     string
+	stderrTail *agent.StderrRingBuffer
+
+	// identity is the session's wire identity: the thread id and
+	// the model, learned during the handshake. It is set once,
+	// while the pump goroutines are already running, and read from
+	// them — so it travels behind an atomic pointer rather than a
+	// plain field.
+	identity         atomic.Pointer[sessionIdentity]
 	pendingMu        sync.Mutex
 	pendingApprovals map[string]chan string
 	// lastPendingID is the request id of the most-recently spawned
@@ -172,7 +178,14 @@ type session struct {
 	// translator turns wire envelopes into AgentEvents. Wired by
 	// Agent.Start AFTER newSession returns (so we don't expose
 	// the agent-name / workspace / branch through sessionConfig).
-	translator *translator
+	//
+	// Atomic because the RPC read-pump calls onNotification from
+	// the moment the session exists, and codex pushes
+	// notifications (thread/started and friends) while the
+	// handshake is still running. A plain field would be written
+	// by the spawning goroutine and read by the pump at the same
+	// time.
+	translator atomic.Pointer[translator]
 }
 
 // sessionConfig is what newSession needs from the Agent template half.
@@ -291,6 +304,12 @@ func newSession(ctx context.Context, cfg sessionConfig) (*session, error) {
 		s.onServerRequest,
 		s.onNotification,
 	)
+	// The session owns its delivery hook from the moment the child
+	// process exists. The driver installs its own in newDriver, but
+	// the lifecycle goroutine starts here — a child that dies during
+	// startup has to report the exit, and a nil hook would panic in
+	// the lifecycle goroutine instead, losing the error.
+	s.deliver = s.deliverEvent
 
 	// Pumps: readPump + stderrLoop + lifecycle. All three are
 	// long-lived goroutines wrapped in agent.SafeGo so a single
@@ -339,14 +358,14 @@ func newSession(ctx context.Context, cfg sessionConfig) (*session, error) {
 		defer s.pumpWG.Done()
 		defer agent.PanicEventHandler(
 			"codex:read-pump", panicDeliver,
-			s.threadID, s.agentName, s.workspace, s.branch)
+			s.sessionID(), s.agentName, s.workspace, s.branch)
 		s.rpc.readPump(parentCtx, s.emitWireError)
 	})
 	agent.SafeGo("codex:stderr-loop", func() {
 		defer s.pumpWG.Done()
 		defer agent.PanicEventHandler(
 			"codex:stderr-loop", panicDeliver,
-			s.threadID, s.agentName, s.workspace, s.branch)
+			s.sessionID(), s.agentName, s.workspace, s.branch)
 		s.stderrLoop(parentCtx)
 	})
 	// lifecycle is the supervisor that closes events / exitDone
@@ -386,8 +405,8 @@ func newSession(ctx context.Context, cfg sessionConfig) (*session, error) {
 
 	cLog("session handshake complete",
 		"pid", s.pid,
-		"thread_id", s.threadID,
-		"model", s.model,
+		"thread_id", s.sessionID(),
+		"model", s.modelName(),
 	)
 	return s, nil
 }
@@ -442,8 +461,7 @@ func (s *session) ensureThread(ctx context.Context, resumeID string) error {
 		if resp.Thread.ID == "" {
 			return fmt.Errorf("codex: thread/resume returned empty thread id")
 		}
-		s.threadID = resp.Thread.ID
-		s.model = resp.Model
+		s.setIdentity(resp.Thread.ID, resp.Model)
 		return nil
 	}
 	params := threadStartParams{
@@ -458,8 +476,7 @@ func (s *session) ensureThread(ctx context.Context, resumeID string) error {
 	if resp.Thread.ID == "" {
 		return fmt.Errorf("codex: thread/start returned empty thread id")
 	}
-	s.threadID = resp.Thread.ID
-	s.model = resp.Model
+	s.setIdentity(resp.Thread.ID, resp.Model)
 	return nil
 }
 
@@ -557,7 +574,7 @@ func (s *session) lifecycle() {
 			ExitKind:   exitKind,
 			WaitErr:    s.exitErr,
 			StderrTail: tail,
-			SessionID:  s.threadID,
+			SessionID:  s.sessionID(),
 			AgentName:  s.agentName,
 			KilledAt:   time.Now(),
 		}
@@ -578,6 +595,66 @@ func (s *session) lifecycle() {
 	// Close()'s <-s.exitDone wait against lifecycle's closeOnce.Do.
 	// The close itself is now in the defer above so a panic
 	// anywhere below still tears the bridge down cleanly.
+}
+
+// sessionIdentity is the session's wire identity, published as
+// one value so a reader never sees a thread id from one handshake
+// paired with a model from another.
+type sessionIdentity struct {
+	threadID string
+	model    string
+}
+
+// setIdentity publishes the session's wire identity.
+func (s *session) setIdentity(threadID, model string) {
+	s.identity.Store(&sessionIdentity{threadID: threadID, model: model})
+}
+
+// sessionID returns the thread id, or "" before the handshake has
+// published one.
+func (s *session) sessionID() string {
+	if id := s.identity.Load(); id != nil {
+		return id.threadID
+	}
+	return ""
+}
+
+// modelName returns the model, or "" before the handshake has
+// published one.
+func (s *session) modelName() string {
+	if id := s.identity.Load(); id != nil {
+		return id.model
+	}
+	return ""
+}
+
+// deliverEvent stamps the session context onto the event and
+// pushes it onto the events channel.
+//
+// This is the session's own delivery path. It is wired at
+// construction so the session can report on itself before the
+// driver exists — the lifecycle goroutine starts with the child
+// process, and a child that dies during startup must deliver the
+// exit error rather than panic on a missing hook.
+func (s *session) deliverEvent(ev agent.AgentEvent) agent.AgentEvent {
+	ev.SessionID = s.sessionID()
+	ev.Model = s.modelName()
+	ev.AgentName = s.agentName
+	ev.Workspace = s.workspace
+	ev.Branch = s.branch
+
+	select {
+	case s.events <- ev:
+		cLog("deliver pushed", "kind", ev.Kind.String())
+	case <-s.closed:
+		cLog("deliver dropped (session closed)", "kind", ev.Kind.String())
+	case <-s.exitDone:
+		// lifecycle closed exitDone after cmd.Wait returned; the
+		// bridge is being torn down. Drop silently — nobody will
+		// read this anyway.
+		cLog("deliver dropped (exitDone)", "kind", ev.Kind.String())
+	}
+	return ev
 }
 
 // isGracefulClose reports whether the cause of cmd.Wait returning

@@ -41,6 +41,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/agent/procutil"
 	"github.com/cnlangzi/nightme/internal/proc"
 )
 
@@ -90,6 +91,13 @@ const eventsBufferSize = 40960
 // it via errors.As when the underlying text differs from the
 // canonical "Session \"<id>\" not found." literal.
 var ErrResumeUnhealthySession = errors.New("omp: resume session unhealthy")
+
+// ErrModelError marks a turn that ended because the upstream
+// model provider failed the call. omp reports the reason on the
+// assistant message_end (stopReason "error" plus errorMessage);
+// the bridge surfaces it on EventAgentResult.Err so the user
+// sees the provider's own words instead of an empty reply.
+var ErrModelError = errors.New("omp: model provider error")
 
 // driver is the omp-mode bridge descriptor.
 //
@@ -451,6 +459,39 @@ func (d *driver) New(ctx context.Context) error {
 	}
 	d.translatorMu.Unlock()
 	return nil
+}
+
+// Keepalive is the driver.Keepalive implementation for the omp
+// bridge. omp runs as a long-lived `omp --mode rpc` subprocess
+// per AgentSession — when it dies (or its RPC session tears
+// down while the process lingers), the next SendBlocks silently
+// fails against a closed stdin pipe. Probe liveness and invoke
+// onRecover so the chat layer can spawn a fresh omp with the
+// saved --resume session.
+// See agent.driver.Keepalive for the full contract.
+func (d *driver) Keepalive(ctx context.Context, onRecover func(context.Context) error) error {
+	if d.alive() {
+		return nil
+	}
+	oLog("bridge session dead, invoking recovery",
+		"pid", d.PID(), "agent", d.agentName, "workspace", d.workspace)
+	if onRecover == nil {
+		return fmt.Errorf("omp: bridge session dead (pid=%d) and no recovery callback", d.PID())
+	}
+	return onRecover(ctx)
+}
+
+// alive reports whether the omp subprocess is still running AND
+// its RPC session has not already been torn down. The PID probe
+// covers the process-exit case; the RPC client's closed flag
+// covers the "process lingered but the stdout reader gave up"
+// case, where a PID probe alone would report a healthy bridge
+// that can no longer accept a prompt.
+func (d *driver) alive() bool {
+	if d.rpc != nil && d.rpc.closed.Load() {
+		return false
+	}
+	return procutil.AlivePID(d.PID()) == nil
 }
 
 // Stop sends an abort RPC to omp. omp's wire contract is to
@@ -832,21 +873,3 @@ func detectBranch(workspace string) string {
 	}
 	return s
 }
-
-// Compile-time guarantee that *driver satisfies the
-// package-private agent.driver interface.
-var _ agentDriver = (*driver)(nil)
-
-// agentDriver is the local alias for the agent.driver
-// interface (used only for the compile-time check above).
-type agentDriver interface {
-	SendBlocks(ctx context.Context, blocks []agent.ContentBlock) error
-	SendPermission(resp string) error
-	Reset(ctx context.Context) error
-	Close() error
-	Stop(ctx context.Context) error
-}
-
-// strings is referenced via isResumeFailure above; this no-op
-// alias documents the dependency for grep.
-var _ = strings.Contains

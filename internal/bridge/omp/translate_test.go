@@ -8,6 +8,7 @@ package omp
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -597,5 +598,131 @@ func TestEmitConnected_Idempotent(t *testing.T) {
 func TestDecodeMessageUsage_NilYieldsNil(t *testing.T) {
 	if got := decodeMessageUsage(nil, 0); got != nil {
 		t.Errorf("decodeMessageUsage(nil, 0) = %+v, want nil", got)
+	}
+}
+
+// TestTranslate_ProviderErrorSurfaces asserts that an assistant
+// message_end carrying stopReason "error" surfaces the
+// provider's own failure text on the result event's Err field.
+//
+// omp reports provider rejections on the message_end frame
+// (stopReason "error" plus errorMessage) and leaves content
+// empty. Without this the bridge drops the reason and the user
+// sees an empty reply with no explanation.
+func TestTranslate_ProviderErrorSurfaces(t *testing.T) {
+	tr := newTestTranslator()
+	raws := []string{
+		`{"type":"message_end","message":{"role":"assistant","content":[],"model":"kimi-k3","stopReason":"error","errorMessage":"InvalidHTTPResponse fetching \"https://token.sensenova.cn/v1/chat/completions\"","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}}}}`,
+		`{"type":"agent_end","isTerminal":true}`,
+	}
+	events := drive(t, tr, raws...)
+
+	res := findResult(t, events)
+	if res.Subtype != "error" {
+		t.Errorf("Result.Subtype = %q, want %q", res.Subtype, "error")
+	}
+	var gotErr error
+	for _, ev := range events {
+		if ev.Kind == agent.EventAgentResult {
+			gotErr = ev.Err
+		}
+	}
+	if gotErr == nil {
+		t.Fatal("EventAgentResult carried no Err for a provider error")
+	}
+	if !errors.Is(gotErr, ErrModelError) {
+		t.Errorf("Err = %v, want it to wrap ErrModelError", gotErr)
+	}
+	if !strings.Contains(gotErr.Error(), "InvalidHTTPResponse") {
+		t.Errorf("Err = %v, want the provider's own message", gotErr)
+	}
+}
+
+// TestTranslate_NoProviderErrorOnHappyPath asserts the happy
+// path leaves the result's Err unset — the error branch must not
+// fire on an ordinary turn.
+func TestTranslate_NoProviderErrorOnHappyPath(t *testing.T) {
+	tr := newTestTranslator()
+	raws := append(textDeltas(0, "pong"), `{"type":"agent_end","isTerminal":true}`)
+	events := drive(t, tr, raws...)
+
+	for _, ev := range events {
+		if ev.Kind == agent.EventAgentResult && ev.Err != nil {
+			t.Fatalf("EventAgentResult.Err = %v on the happy path, want nil", ev.Err)
+		}
+	}
+}
+
+// TestTranslate_ResultTextFromMessageEnd asserts the result
+// falls back to the assistant message's content text when the
+// streamed deltas produced nothing.
+func TestTranslate_ResultTextFromMessageEnd(t *testing.T) {
+	tr := newTestTranslator()
+	raws := []string{
+		`{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"pong"}],"model":"kimi-k3","usage":{"input":10,"output":2,"cacheRead":0,"cacheWrite":0,"totalTokens":12}}}`,
+		`{"type":"agent_end","isTerminal":true}`,
+	}
+	events := drive(t, tr, raws...)
+	res := findResult(t, events)
+	if res.Text != "pong" {
+		t.Errorf("Result.Text = %q, want %q", res.Text, "pong")
+	}
+}
+
+// TestTranslate_DeliveredTextNotRepeated asserts the result does
+// not re-deliver text the channel already received as an
+// EventAgentText at a tool boundary.
+func TestTranslate_DeliveredTextNotRepeated(t *testing.T) {
+	tr := newTestTranslator()
+	raws := []string{
+		`{"type":"message_update","assistantMessageEvent":{"type":"text_start","contentIndex":0}}`,
+		`{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"working on it"}}`,
+		`{"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":0}}`,
+		`{"type":"tool_execution_start","toolCallId":"t1","toolName":"read"}`,
+		`{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"working on it"}],"model":"kimi-k3","usage":{"input":10,"output":2,"cacheRead":0,"cacheWrite":0,"totalTokens":12}}}`,
+		`{"type":"agent_end","isTerminal":true}`,
+	}
+	events := drive(t, tr, raws...)
+
+	if got := texts(events); len(got) != 1 || got[0] != "working on it" {
+		t.Fatalf("EventAgentText events = %v, want exactly one", got)
+	}
+	res := findResult(t, events)
+	if res.Text != "" {
+		t.Errorf("Result.Text = %q, want empty (text was already delivered)", res.Text)
+	}
+}
+
+// TestTranslate_ProviderErrorCarriesBody asserts the provider's
+// message reaches the result body when the failed turn produced
+// no assistant text of its own — without a body, the reason is
+// invisible in the chat.
+func TestTranslate_ProviderErrorCarriesBody(t *testing.T) {
+	tr := newTestTranslator()
+	raws := []string{
+		`{"type":"message_end","message":{"role":"assistant","content":[],"model":"kimi-k3","stopReason":"error","errorMessage":"InvalidHTTPResponse fetching upstream","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0}}}`,
+		`{"type":"agent_end","isTerminal":true}`,
+	}
+	events := drive(t, tr, raws...)
+	res := findResult(t, events)
+	if !strings.Contains(res.Text, "InvalidHTTPResponse") {
+		t.Errorf("Result.Text = %q, want the provider's message", res.Text)
+	}
+}
+
+// TestTranslate_ProviderErrorKeepsAssistantText asserts the
+// provider message does NOT overwrite text the assistant did
+// produce before the failure.
+func TestTranslate_ProviderErrorKeepsAssistantText(t *testing.T) {
+	tr := newTestTranslator()
+	raws := append(
+		textDeltas(0, "partial answer"),
+		`{"type":"message_end","message":{"role":"assistant","content":[],"model":"kimi-k3","stopReason":"error","errorMessage":"upstream died"}}`,
+		`{"type":"agent_end","isTerminal":true}`,
+	)
+	events := drive(t, tr, raws...)
+	res := findResult(t, events)
+	if res.Text != "partial answer" {
+		t.Errorf("Result.Text = %q, want %q", res.Text, "partial answer")
 	}
 }

@@ -102,19 +102,21 @@ flowchart TD
     B -->|ok| C["GetIssue + DeriveBranch"]
     C --> D{BranchExists?}
     D -->|yes| E["❌ branch already exists"]
-    D -->|no| F["PreflightWorktreeCreate"]
-    F --> G["RefreshDefaultBranch"]
-    G --> H["WorktreeAdd"]
-    H --> I["ensureGtwLabels + AddIssueLabel"]
-    I --> J["completeFixAndDispatch"]
-    J --> K{"-y?"}
-    K -->|no| L["dispatch Assess Prompt"]
-    K -->|yes| M["dispatch Execute Prompt"]
-    L --> N["用户在 chat 与 agent 沟通"]
-    M --> O["agent 直接改代码"]
+    D -->|no| G{issue 带 nightme/wip?}
+    G -->|yes| H["❌ issue already claimed"]
+    G -->|no| F["PreflightWorktreeCreate"]
+    F --> I["RefreshDefaultBranch"]
+    I --> J["WorktreeAdd"]
+    J --> K["ensureGtwLabels + AddIssueLabel"]
+    K --> L["completeFixAndDispatch"]
+    L --> M{"-y?"}
+    M -->|no| N["dispatch Assess Prompt"]
+    M -->|yes| O["dispatch Execute Prompt"]
+    N --> P["用户在 chat 与 agent 沟通"]
+    O --> Q["agent 直接改代码"]
 ```
 
-相对 F-59 §2.3 的步骤编号，**dispatch 之前**的步骤不变（WorktreeAdd → ensureGtwLabels → AddIssueLabel → WriteGTWYml → slot.Store → success card）。**唯一变更**在 dispatch 内容与 branch-exists 策略。
+相对 F-59 §2.3 的步骤编号，**dispatch 之前**的步骤顺序不变（WorktreeAdd → ensureGtwLabels → AddIssueLabel → WriteGTWYml → slot.Store → success card）。**变更**在 dispatch 内容、branch-exists 策略（§3.1）与 claim gate（§3.2）。
 
 ### 3.1 Branch 已存在：硬失败（废除 §5.3.1）
 
@@ -141,7 +143,32 @@ Local 模式（`/gtw fix --name`）同样：branch 存在即失败，无决策�
 
 **保留**：`WorktreeFailChoice` / `DraftFixWorktreeFail`（`git worktree add` 失败仍可 🔄 重试 / ❌ 取消）。
 
-### 3.2 gtw 职责边界（dispatch 之后）
+### 3.2 Issue 已被认领（`nightme/wip`）：硬失败
+
+`nightme/wip` 是 gtw 的 claim 标记：`/gtw fix` 贴上，`/gtw close` 摘掉。远端模式取到 issue 时若该 label 已存在，说明这次 fix 仍被某处持有（本机或另一台机器），本次 `/gtw fix` 直接拒绝。
+
+**判定位置**：`BranchExists` 检查**之后**、任何副作用（preflight / refresh / worktree add / 贴 label / dispatch）**之前**。
+
+- 放在 branch-exists **之后**：branch-exists 覆盖「本机已认领」这一类，它的补救动作 `/gtw close` 同时会摘掉 label，是更准确的出口；gate 只负责本地 checkout 无法解释的 claim（另一台机器的 fix，或分支被手工删掉）。
+- 放在副作用**之前**：被拒绝的运行不留任何痕迹——不建 worktree、不建分支、不写 label、不 dispatch。
+
+**label 匹配大小写不敏感**：GitHub / GitLab 的 label 名按大小写不敏感处理，手工建的 `Nightme/WIP` 与 `nightme/wip` 是同一个 label。
+
+```text
+❌ Issue #42 is already claimed — label "nightme/wip" is present
+→ another /gtw fix holds this issue (or an earlier one never closed)
+↳ to release it: /cwd into that fix's worktree and run `/gtw close`
+↳ if the claim is stale, remove the nightme/wip label on the issue page
+```
+
+两条退出指引各自对应一种场景：
+
+- `/gtw close` 摘掉 `nightme/wip` 并删掉 worktree + branch，但它从 `cs.SelectedCwd()` 读 `.nightme/gtw.yml` 作为唯一真相来源，因此必须先 `/cwd` 进那个 worktree。
+- claim 已失效（对端机器的 fix 已经不在了、或分支被手工删掉）时，本地没有任何 `/gtw` 命令能摘掉远端 label，只能在 issue 页面上手工移除。
+
+**没有 `--force` 逃生舱**：`/gtw fix` 不接受 `--force` / `-f`（见 §2.2）。解除 claim 的路径（`/gtw close` 或 issue 页面摘 label）都明确存在。
+
+### 3.3 gtw 职责边界（dispatch 之后）
 
 ```
 gtw                          agent + user chat

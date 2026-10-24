@@ -150,11 +150,12 @@ func TestQuestionAnswerFor_BatchSkip(t *testing.T) {
 	}
 }
 
-func TestSendPermission_QuestionUsesQuestionResponsePayload(t *testing.T) {
+func TestSendPermission_QuestionUsesWaterfallAnswerBatch(t *testing.T) {
 	mock := newRespondMock(t)
 	cli := mock.installGlobal(t)
 	d := newTestDriver(cli, "/tmp/ws")
 	d.sessionID = "session-6292d9e4-5039-40ee-9a53-a408bddb1773"
+	setTestHostClientID(t, "test-client-id")
 	t.Cleanup(func() { close(d.closed) })
 
 	d.handleQuestionRequested("rpc-q-1", muxQuestionRequested{
@@ -200,41 +201,34 @@ func TestSendPermission_QuestionUsesQuestionResponsePayload(t *testing.T) {
 		t.Fatalf("SendPermission: %v", err)
 	}
 	if mock.count.Load() != 1 {
-		t.Fatalf("respond calls = %d, want 1", mock.count.Load())
+		t.Fatalf("waterfall result calls = %d, want 1", mock.count.Load())
 	}
 
-	var env struct {
-		Type   string `json:"type"`
-		RPCID  string `json:"rpcId"`
-		Result struct {
-			OK    bool                  `json:"ok"`
-			Value host.QuestionResponse `json:"value"`
-		} `json:"result"`
+	env := decodeWaterfallResult(t, mock.body())
+	if env.Method != "$events/result" {
+		t.Errorf("method = %q, want $events/result", env.Method)
 	}
-	if err := json.Unmarshal(mock.body(), &env); err != nil {
-		t.Fatalf("decode respond: %v body=%s", err, mock.body())
+	if env.Payload.Args.EventID != "rpc-q-1" {
+		t.Errorf("eventId = %q, want rpc-q-1", env.Payload.Args.EventID)
 	}
-	if env.Type != "client-response" {
-		t.Errorf("type = %q, want client-response", env.Type)
+	if env.Payload.Args.Outcome.Kind != "result" {
+		t.Errorf("outcome.kind = %q, want result", env.Payload.Args.Outcome.Kind)
 	}
-	if env.RPCID != "rpc-q-1" {
-		t.Errorf("rpcId = %q, want rpc-q-1", env.RPCID)
+	var answers host.QuestionAnswer
+	if err := json.Unmarshal(env.Payload.Args.Outcome.Value, &answers); err != nil {
+		t.Fatalf("decode answers: %v", err)
 	}
-	if env.Result.Value.SessionID != d.sessionID {
-		t.Errorf("sessionId = %q, want %s", env.Result.Value.SessionID, d.sessionID)
+	if len(answers.Answers) != 2 {
+		t.Fatalf("answers = %d, want 2", len(answers.Answers))
 	}
-	answers := env.Result.Value.Answer.Answers
-	if len(answers) != 2 {
-		t.Fatalf("answers = %d, want 2", len(answers))
+	if answers.Answers[0].ID != "q-trigger" || len(answers.Answers[0].Selected) != 1 || answers.Answers[0].Selected[0] != "仅 REPL 启动(裸 nightme)" {
+		t.Errorf("answers[0] = %+v", answers.Answers[0])
 	}
-	if answers[0].ID != "q-trigger" || len(answers[0].Selected) != 1 || answers[0].Selected[0] != "仅 REPL 启动(裸 nightme)" {
-		t.Errorf("answers[0] = %+v", answers[0])
+	if answers.Answers[1].ID != "q-source" || answers.Answers[1].Selected == nil || len(answers.Answers[1].Selected) != 0 {
+		t.Errorf("answers[1] = %+v, want empty selected slice", answers.Answers[1])
 	}
-	if answers[1].ID != "q-source" || answers[1].Selected == nil || len(answers[1].Selected) != 0 {
-		t.Errorf("answers[1] = %+v, want empty selected slice", answers[1])
-	}
-	if answers[0].Custom != "" {
-		t.Errorf("answers[0].Custom = %q, want omitted/empty", answers[0].Custom)
+	if answers.Answers[0].Custom != "" {
+		t.Errorf("answers[0].Custom = %q, want omitted/empty", answers.Answers[0].Custom)
 	}
 }
 
@@ -243,6 +237,7 @@ func TestSendPermission_ApprovalStillUsesOutcome(t *testing.T) {
 	cli := mock.installGlobal(t)
 	d := newTestDriver(cli, "/tmp/ws")
 	d.sessionID = "session-approval"
+	setTestHostClientID(t, "test-client-id")
 	t.Cleanup(func() { close(d.closed) })
 
 	d.handleApprovalRequested("rpc-appr-1", muxApprovalRequested{
@@ -260,19 +255,19 @@ func TestSendPermission_ApprovalStillUsesOutcome(t *testing.T) {
 	if err := d.SendPermission("approved"); err != nil {
 		t.Fatalf("SendPermission: %v", err)
 	}
-	var env struct {
-		Result struct {
-			Value host.ApprovalResponse `json:"value"`
-		} `json:"result"`
+	env := decodeWaterfallResult(t, mock.body())
+	if env.Method != "$events/result" {
+		t.Errorf("method = %q, want $events/result", env.Method)
 	}
-	if err := json.Unmarshal(mock.body(), &env); err != nil {
-		t.Fatalf("decode: %v", err)
+	if env.Payload.Args.EventID != "rpc-appr-1" {
+		t.Errorf("eventId = %q, want rpc-appr-1 (the waterfall eventId, not the approvalId)", env.Payload.Args.EventID)
 	}
-	if env.Result.Value.Outcome != "allowed-once" {
-		t.Errorf("outcome = %q, want allowed-once", env.Result.Value.Outcome)
+	var outcome string
+	if err := json.Unmarshal(env.Payload.Args.Outcome.Value, &outcome); err != nil {
+		t.Fatalf("decode outcome: %v", err)
 	}
-	if env.Result.Value.ApprovalID != "appr-1" {
-		t.Errorf("approvalId = %q, want appr-1", env.Result.Value.ApprovalID)
+	if outcome != "allowed-once" {
+		t.Errorf("outcome = %q, want allowed-once", outcome)
 	}
 }
 
@@ -281,6 +276,7 @@ func TestSendPermission_AllowOnceLabel(t *testing.T) {
 	cli := mock.installGlobal(t)
 	d := newTestDriver(cli, "/tmp/ws")
 	d.sessionID = "session-allow-once"
+	setTestHostClientID(t, "test-client-id")
 	t.Cleanup(func() { close(d.closed) })
 
 	d.handleApprovalRequested("rpc-appr-2", muxApprovalRequested{
@@ -303,20 +299,16 @@ func TestSendPermission_AllowOnceLabel(t *testing.T) {
 	if err := d.SendPermission(approvalAllowOnce); err != nil {
 		t.Fatalf("SendPermission: %v", err)
 	}
-	var env struct {
-		RPCID  string `json:"rpcId"`
-		Result struct {
-			Value host.ApprovalResponse `json:"value"`
-		} `json:"result"`
+	env := decodeWaterfallResult(t, mock.body())
+	if env.Payload.Args.EventID != "rpc-appr-2" {
+		t.Errorf("eventId = %q, want the waterfall eventId rpc-appr-2 (not the approvalId)", env.Payload.Args.EventID)
 	}
-	if err := json.Unmarshal(mock.body(), &env); err != nil {
-		t.Fatalf("decode: %v", err)
+	var outcome string
+	if err := json.Unmarshal(env.Payload.Args.Outcome.Value, &outcome); err != nil {
+		t.Fatalf("decode outcome: %v", err)
 	}
-	if env.RPCID != "rpc-appr-2" {
-		t.Errorf("rpcId = %q, want frame rpcId rpc-appr-2 (not approvalId)", env.RPCID)
-	}
-	if env.Result.Value.Outcome != "allowed-once" {
-		t.Errorf("outcome = %q, want allowed-once", env.Result.Value.Outcome)
+	if outcome != "allowed-once" {
+		t.Errorf("outcome = %q, want allowed-once", outcome)
 	}
 }
 
@@ -325,7 +317,7 @@ func TestDropPendingByRPCID_DropsWithoutRespond(t *testing.T) {
 	// favour of host waterfall cancel; this test pins the new
 	// contract: dropPendingByRPCID (the path handleHostFrame uses
 	// for host/cancel on a waterfall) drains the pending channel
-	// without calling /api/respond, so a subsequent SendPermission
+	// without answering the host, so a subsequent SendPermission
 	// from the runtime finds nothing to answer.
 	mock := newRespondMock(t)
 	cli := mock.installGlobal(t)
@@ -349,7 +341,7 @@ func TestDropPendingByRPCID_DropsWithoutRespond(t *testing.T) {
 		t.Fatal("dropPendingByRPCID returned false on live entry")
 	}
 	if mock.count.Load() != 0 {
-		t.Fatalf("respond calls = %d, want 0 (cancel must not wire /api/respond)", mock.count.Load())
+		t.Fatalf("waterfall result calls = %d, want 0 (cancel must not answer the host)", mock.count.Load())
 	}
 	if err := d.SendPermission(approvalAllowOnce); err == nil {
 		t.Fatal("SendPermission after host cancel should fail (no pending)")
@@ -374,7 +366,6 @@ func TestSendPermission_FailingRPCKeepsPendingEntry(t *testing.T) {
 		ApprovalID: "appr-retry-1",
 		ToolName:   "Bash",
 		Reason:     "retry-after-fail",
-		Source:     "host",
 	})
 	select {
 	case <-d.events:
@@ -415,6 +406,43 @@ func TestSendPermission_FailingRPCKeepsPendingEntry(t *testing.T) {
 	}
 }
 
+// waterfallResultEnvelope is the shape the bridge posts to
+// /api/$events/result when it answers a host waterfall frame.
+type waterfallResultEnvelope struct {
+	Type    string `json:"type"`
+	Method  string `json:"method"`
+	Payload struct {
+		Args struct {
+			ClientID string `json:"clientId"`
+			EventID  string `json:"eventId"`
+			Outcome  struct {
+				Kind  string          `json:"kind"`
+				Value json.RawMessage `json:"value"`
+			} `json:"outcome"`
+		} `json:"args"`
+	} `json:"payload"`
+}
+
+// setTestHostClientID stands in for the host $events ready frame
+// (host/stream.go::case "ready" → host.SetHostClientID), which in
+// production is what supplies the clientId the answer is keyed on.
+func setTestHostClientID(t *testing.T, id string) {
+	t.Helper()
+	host.SetHostClientID(id)
+	t.Cleanup(func() { host.ResetHostClientIDForTest() })
+}
+
+// decodeWaterfallResult decodes the captured /api/$events/result
+// body.
+func decodeWaterfallResult(t *testing.T, body []byte) waterfallResultEnvelope {
+	t.Helper()
+	var env waterfallResultEnvelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("decode waterfall result: %v (body=%s)", err, body)
+	}
+	return env
+}
+
 type respondMock struct {
 	server *httptest.Server
 	count  atomic.Int64
@@ -425,17 +453,9 @@ func newRespondMock(t *testing.T) *respondMock {
 	t.Helper()
 	m := &respondMock{}
 	mux := http.NewServeMux()
-	// Modern host waterfall path (dsh 0.1.2-rc.1).
+	// Host waterfall path (dsh 0.1.2-rc.1) — the only place the
+	// bridge answers a pending approval / question.
 	mux.HandleFunc("/api/$events/result", func(w http.ResponseWriter, r *http.Request) {
-		m.count.Add(1)
-		body, _ := io.ReadAll(r.Body)
-		_ = r.Body.Close()
-		m.raw.Store(append([]byte(nil), body...))
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"accepted":true}`))
-	})
-	// Legacy mux /api/respond path (defense-in-depth).
-	mux.HandleFunc("/api/respond", func(w http.ResponseWriter, r *http.Request) {
 		m.count.Add(1)
 		body, _ := io.ReadAll(r.Body)
 		_ = r.Body.Close()

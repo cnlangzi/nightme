@@ -136,6 +136,29 @@ type assistantMessage struct {
 	Model    string        `json:"model"`
 	Provider string        `json:"provider"`
 	Usage    *messageUsage `json:"usage,omitempty"`
+
+	// StopReason is the model's termination reason. "error" means
+	// the upstream provider rejected or failed the call: omp
+	// leaves Content empty, reports the reason in ErrorMessage,
+	// and zeroes the usage block.
+	StopReason string `json:"stopReason,omitempty"`
+
+	// ErrorMessage is the upstream failure text. omp populates it
+	// only on the StopReason=="error" path.
+	ErrorMessage string `json:"errorMessage,omitempty"`
+
+	// Content is the finalized message content blocks. Carries the
+	// assistant's text when the streamed deltas were already
+	// flushed at a tool boundary.
+	Content []messageContent `json:"content,omitempty"`
+}
+
+// messageContent is one block of an assistant message's content
+// array. Only the text kind matters to the bridge; other kinds
+// (thinking, tool calls) are carried by their own events.
+type messageContent struct {
+	Type string `json:"type"`
+	Text string `json:"text,omitempty"`
 }
 
 // messageUsage is the per-message usage block. omp nests cost

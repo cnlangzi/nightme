@@ -39,6 +39,10 @@ Control surface (R4/R14/R15): `prompt`, `abort`, `new_session`.
 `set_model` / `set_thinking_level` / `steer` / `follow_up` /
 `compact` / `switch_session` are out of scope (issue #443 §Scope).
 
+The bridge's driver implements the package-private `agent.driver`
+interface — §4 — and reports liveness through `Keepalive` —
+§3.
+
 ## 1. Why a separate package (not shared with `internal/bridge/pi`)
 
 omp forked from pi upstream but the wire has already diverged:
@@ -119,7 +123,91 @@ catches it via the stderr ring buffer
 surfaces `agent.ErrResumeUnhealthy` from `Start` so the chat
 layer can clear the stale id and retry without `--resume`.
 
-## 4. Translator (`translate.go`)
+### Liveness
+
+`driver.Keepalive` answers the chat layer's "is this bridge
+usable right now?" question. It reports the bridge dead when
+the child process is gone (`procutil.AlivePID`) or when the RPC
+session has already been torn down (`rpcClient.closed`) while
+the process lingers — the latter still has a live PID but can
+no longer accept a prompt. On a dead bridge it invokes the
+caller's recovery callback, which re-spawns omp with the saved
+`--resume` session id.
+
+The alive-check and the recovery are serialised inside the
+bridge: the `agent.driver` contract says a burst of Submits must
+not kick off parallel recoveries and that the caller does not
+coordinate. A second caller waits for the first recovery, then
+sees the fresh bridge and proceeds.
+
+## 4. Driver contract
+
+`internal/agent` keeps the per-bridge protocol interface
+package-private. It has six methods:
+
+| Method | Purpose |
+|---|---|
+| `SendBlocks` | deliver one user turn |
+| `SendPermission` | answer a permission request |
+| `Reset` | start a fresh session |
+| `Close` | tear the session down |
+| `Stop` | abort the in-flight turn |
+| `Keepalive` | report liveness; recover when dead |
+
+`agent.NewAgent` is generic over that interface:
+
+```go
+func NewAgent[D driver](info Info, pid int, events chan AgentEvent, d D) *Agent
+```
+
+so the compiler checks the bridge's driver at the call site:
+
+```go
+return agent.NewAgent(s.Info(), d.pid, d.events, d), nil
+```
+
+A driver that misses a method fails to build, with the error
+pointing at the bridge:
+
+```
+internal/bridge/omp/starter.go:81:23: in call to agent.NewAgent,
+D (type *driver) does not satisfy agent.driver (missing method Keepalive)
+```
+
+The check does not depend on the bridge remembering to assert
+anything, and it does not depend on a hand-maintained copy of the
+interface staying in sync — a copy is a second thing that can
+drift, and a drifted copy silently stops checking the method it
+omits. `agent.ImplementsDriver` is the runtime counterpart, for
+asserting on a driver obtained by its dynamic type (e.g.
+`Agent.Driver()`).
+
+The bridge does not repeat any of this per-agent: the
+registry-driven conformance suite in
+`cmd/nightme/agentconformance_test.go` walks
+`agent.Builtins.List()` and checks every registered agent's
+metadata, `Detect()`, path override and spawn path. An agent
+registered in `cmd/nightme/agents.go` is covered the moment it
+is registered.
+
+### Spawn-path coverage
+
+Two different things are worth covering, and only the second
+exercises the runtime contract:
+
+- the wire — `rpc_test.go` and `translate_test.go` drive frames
+  through a fake transport;
+- the bridge entry point — `Starter.Start` spawns the child,
+  runs the handshake, and hands the driver to
+  `agent.NewAgent`.
+
+The hand-off lives in `Starter.Start`, so a test that speaks
+the protocol directly does not reach it. The bridge entry point
+is covered against the real omp binary: the test confirms omp
+is installed, skips when it is not, and then drives the path a
+chat session takes.
+
+## 5. Translator (`translate.go`)
 
 Translation rules match issue #443 §Spec §5/6/7/8. Highlights:
 
@@ -129,7 +217,10 @@ Translation rules match issue #443 §Spec §5/6/7/8. Highlights:
 - `message_end{assistant}`: stamp `lastModel` and `lastUsage`
   from `message.usage` — usage is an overwriting snapshot, not a
   sum (each API call's `input` already contains the conversation
-  history).
+  history). `stopReason` and `errorMessage` are stamped too —
+  `stopReason` rides on every turn's `Result.Subtype`, and
+  `errorMessage` only on a failed one (see "Provider errors"
+  below).
 - `message_update` dispatches on the inner
   `assistantMessageEvent.type`:
   - `text_start` clears `textBuf[contentIndex]`.
@@ -149,6 +240,7 @@ Translation rules match issue #443 §Spec §5/6/7/8. Highlights:
   false`. The translator emits one `EventAgentResult` (with the
   final text + usage) followed by one `EventAgentDone{
   Reason:"settled" }`.
+
 - `agent_start` / `turn_*` / `agent_end{isTerminal:false}` are
   ignored; they are not terminal.
 - `extension_ui_request` is ignored without response (omp does
@@ -159,14 +251,33 @@ Translation rules match issue #443 §Spec §5/6/7/8. Highlights:
   must remain intact (R5 acceptance: "未知事件插入在两个 text_delta
   之间时文本缓冲不被打散").
 
-## 5. Modes
+### Provider errors
+
+omp reports an upstream model failure on the assistant
+`message_end`: `stopReason` is `"error"`, `errorMessage`
+carries the provider's own text, `content` is empty, and the
+usage block is zeroed. The translator surfaces that reason on
+the turn's `EventAgentResult` (`Result.Subtype` carries the
+`stopReason` on every turn, error or not — it is categorisation
+only):
+
+- `Result.Err` wraps `ErrModelError` and carries the
+  provider's message.
+- `Result.Text` falls back to the provider's message when the
+  turn produced no assistant text — a body is what makes the
+  reason visible in the chat.
+
+A failed turn that already streamed assistant text keeps that
+text as the result body; the error rides on `Err` alone.
+
+## 6. Modes
 
 `Info().Mode == agent.ModeJSONIO` — `omp --mode rpc` is LF-delimited
 JSON over real stdio pipes (no JSON-RPC envelope), matching
 `ModeJSONIO`'s "NDJSON / JSON events over stdio" definition. pi
 uses the same mode.
 
-## 6. Print mode (`print.go`)
+## 7. Print mode (`print.go`)
 
 `RunOnce` calls `runPrintMode` which spawns `omp -p <prompt>
 --mode json --approval-mode yolo`, drains the stdout NDJSON stream
@@ -184,7 +295,13 @@ agent name (`omp: exit without agent_end isTerminal=true...`)
 so /gtw commit's recovery logic can attribute the failure
 correctly.
 
-## 7. Out of scope
+A provider failure surfaces the same way: the translator marks
+the result event with `Err` (§5), and `parsePrintStream`
+returns that error instead of handing the provider's message
+back as the run's text — callers parse `RunResult.Text` as the
+agent's own output.
+
+## 8. Out of scope
 
 - `omp acp` (Agent Client Protocol) — separate wire; the
   `internal/bridge/acp` package currently merges stdout/stderr
@@ -198,28 +315,43 @@ correctly.
   shape is not verified to round-trip).
 - v2 / chunked compaction events.
 
-## 8. Tests
+## 9. Tests
 
 - `translate_test.go` — translation table coverage (R5 full
   table; R6 delta dispatch; R7 usage overwrite-not-sum; R8
   single-terminal invariant; unknown events do not break
   buffering; `agent_end{isTerminal:false}` is ignored;
-  `extension_ui_request` does not break the turn).
+  `extension_ui_request` does not break the turn; provider
+  errors surface on the result's `Err` / `Subtype` / body).
 - `rpc_test.go` — JSONL framing + request/response correlation
   (writeLine atomicity; round-trip; timeout; fail-pending;
   write-after-close; cancel-response; race-free registration;
   `MaxFrameSize >= 4 MiB` invariant).
 - `starter_test.go` — Info / Detect / Init surfaces.
+- `driver_test.go` — the driver satisfies the package-private
+  `agent.driver` interface; `Keepalive` liveness / recovery
+  paths (live process, dead process, torn-down RPC session,
+  missing recovery callback).
+- `cmd/nightme/agentconformance_test.go` — the registry-driven
+  suite every registered agent is covered by (§4).
+- `print_test.go` — print-mode stream parsing; a provider
+  failure is reported as an error rather than as the model's
+  answer.
 - `print_args_test.go` — argv layout per R12 (no `--model`,
   `--provider`, `--api-key`, `--mcp-config`); `--resume`
   position per R13.
-- `probe_unix_test.go` (build tag `!windows`) — real-binary
-  probe per R9. Skips when `omp` is not on PATH. On a
-  developer machine with omp installed and the login flow
-  complete, drives `omp --mode rpc` end-to-end (boot →
-  get_state → prompt → agent_end{isTerminal:true}).
+- `probe_unix_test.go` (build tag `!windows`) — the bridge
+  entry point and the raw wire. Every case confirms omp is
+  installed and skips when it is not.
+  `TestProbe_StarterStartDrivesRealOmp` drives
+  `Starter.Start` → handshake → `EventAgentReady`.
+  `TestProbe_BridgeTurnRoundTrip` drives a full turn (boot →
+  get_state → prompt → agent_end{isTerminal:true}) and checks
+  the events the bridge produces.
+  `TestProbe_RealOmpRoundTrip` drives the raw protocol
+  end-to-end.
 
-## 9. Configuration
+## 10. Configuration
 
 `cfg.Agents` whitelist (`internal/config/config.go`) — `omp` is a
 valid `name` for an entry whose `command` is the absolute path to

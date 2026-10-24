@@ -161,11 +161,13 @@ func TestRunOnce_StripsSessionID(t *testing.T) {
 
 	s := NewStarter("dsh")
 
-	// Override RunOnce to use a very short ctx so the drain exits
-	// via deadline (we only care about the side effects, not the
+	// Override RunOnce to use a short ctx so the drain exits via
+	// deadline (we only care about the side effects, not the
 	// drain's terminal event). The archive still happens in
-	// defer Close.
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	// defer Close. The budget has to cover the handshake: a
+	// deadline that expires mid-handshake means RunOnce returns
+	// before it has an agent to close.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
 	_, _ = s.RunOnce(ctx, agent.StartConfig{
@@ -225,28 +227,32 @@ func TestRunOnce_ArchiveOnClose(t *testing.T) {
 	mock.installGlobal(t)
 
 	s := NewStarter("dsh")
-	// 200ms ctx is enough for the handshake + SendBlocks + archive
-	// path; drain blocks on events (no terminal delivered in this
-	// test) so we exit via deadline.
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	// The context has to cover the handshake. A deadline that
+	// expires mid-handshake means RunOnce returns before it has an
+	// agent to close, so the archive never happens — which is what
+	// a tight deadline produces on a loaded machine. After the
+	// handshake the drain blocks on events (no terminal delivered in
+	// this test) until the deadline ends it.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
+	var runErr error
 	doneCh := make(chan struct{})
 	go func() {
 		defer close(doneCh)
-		_, _ = s.RunOnce(ctx, agent.StartConfig{Workspace: "/tmp/ws"},
+		_, runErr = s.RunOnce(ctx, agent.StartConfig{Workspace: "/tmp/ws"},
 			[]agent.ContentBlock{{Type: agent.ContentText, Text: "ping"}})
 	}()
 	<-ctx.Done()
 	<-doneCh
 
-	// Poll for archive completion (cheap, max ~500ms).
-	deadline := time.Now().Add(500 * time.Millisecond)
+	// Poll for archive completion (cheap, max ~2s).
+	deadline := time.Now().Add(2 * time.Second)
 	for mock.archiveCount.Load() == 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if got := mock.archiveCount.Load(); got == 0 {
-		t.Fatalf("workspace.archiveSession never fired; defer Close did not run archive")
+		t.Fatalf("workspace.archiveSession never fired; defer Close did not run archive (RunOnce: %v)", runErr)
 	}
 }
 
@@ -261,25 +267,29 @@ func TestRunOnce_DoesNotDeleteWorkspace(t *testing.T) {
 	mock.installGlobal(t)
 
 	s := NewStarter("dsh")
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	// Same budget as TestRunOnce_ArchiveOnClose: the context has
+	// to cover the handshake, and the drain then blocks on events
+	// until the deadline ends it.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
+	var runErr error
 	doneCh := make(chan struct{})
 	go func() {
 		defer close(doneCh)
-		_, _ = s.RunOnce(ctx, agent.StartConfig{Workspace: "/tmp/ws"},
+		_, runErr = s.RunOnce(ctx, agent.StartConfig{Workspace: "/tmp/ws"},
 			[]agent.ContentBlock{{Type: agent.ContentText, Text: "ping"}})
 	}()
 	<-ctx.Done()
 	<-doneCh
 
 	// Archive fires (session row hidden, workspace kept).
-	deadline := time.Now().Add(500 * time.Millisecond)
+	deadline := time.Now().Add(2 * time.Second)
 	for mock.archiveCount.Load() == 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if got := mock.archiveCount.Load(); got == 0 {
-		t.Fatal("workspace.archiveSession never fired; defer Close did not run archive")
+		t.Fatalf("workspace.archiveSession never fired; defer Close did not run archive (RunOnce: %v)", runErr)
 	}
 	// workspace.delete is NOT in the mock mux — any call would
 	// 404 and surface as an error in the dsh log. Best-effort
@@ -462,6 +472,11 @@ func TestDrainForRunResult_AutoAllowsPermission(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	// The answer is keyed on the clientId the host $events ready
+	// frame supplies (host/stream.go::case "ready"); the test
+	// stands in for it.
+	setTestHostClientID(t, "test-client-id")
+
 	a, err := s.Start(ctx, agent.StartConfig{Workspace: "/tmp/ws"})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
@@ -486,7 +501,7 @@ func TestDrainForRunResult_AutoAllowsPermission(t *testing.T) {
 			ToolName:   "Bash",
 			Reason:     "git status",
 		})
-		// Give auto-allow a beat to POST /api/respond before Result.
+		// Give auto-allow a beat to POST /api/$events/result before Result.
 		time.Sleep(50 * time.Millisecond)
 		d.deliver(agent.AgentEvent{
 			Kind: agent.EventAgentResult,
@@ -514,12 +529,12 @@ func TestDrainForRunResult_AutoAllowsPermission(t *testing.T) {
 	if !sawPermission.Load() {
 		t.Fatal("sink never saw EventAgentPermission (observability regression)")
 	}
-	if mock.respondCount.Load() != 1 {
-		t.Fatalf("respond calls = %d, want 1 (auto-allow)", mock.respondCount.Load())
+	if mock.waterfallCount.Load() != 1 {
+		t.Fatalf("waterfall result calls = %d, want 1 (auto-allow)", mock.waterfallCount.Load())
 	}
-	body, _ := mock.lastRespond.Load().([]byte)
+	body, _ := mock.lastWaterfall.Load().([]byte)
 	if !strings.Contains(string(body), "allowed-once") {
-		t.Errorf("respond body = %s, want outcome allowed-once", body)
+		t.Errorf("waterfall result body = %s, want outcome allowed-once", body)
 	}
 }
 

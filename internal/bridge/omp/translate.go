@@ -111,6 +111,31 @@ type turnState struct {
 	// message_end.
 	lastModel string
 
+	// stopReason is the most recent assistant message_end's
+	// termination reason. Surfaced as AgentResultEvent.Subtype;
+	// "error" also sets lastError.
+	stopReason string
+
+	// lastError is the upstream provider's failure text carried by
+	// the assistant message_end when stopReason == "error" (e.g.
+	// `InvalidHTTPResponse fetching "https://..."`). When
+	// non-empty, finishTurnLocked attaches it to
+	// EventAgentResult.Err so the user sees the actual rejection
+	// reason instead of an opaque empty card.
+	lastError string
+
+	// lastMessageText is the assistant text carried by the
+	// message_end content blocks. Used as the result text when
+	// the streamed deltas produced nothing — the deltas may have
+	// been flushed at a tool boundary before the turn ended.
+	lastMessageText string
+
+	// textDelivered records that the turn's text was already
+	// handed to the channel as an EventAgentText. Guards the
+	// lastMessageText fallback in finishTurnLocked from
+	// re-delivering text the user has already seen.
+	textDelivered bool
+
 	// active records that this turn observed something worth
 	// reporting. A settled turn that saw none produces no
 	// EventAgentResult at all.
@@ -448,6 +473,9 @@ func (t *translator) translateMessageEndLocked(raw []byte, logger *slog.Logger) 
 		if msg.Model != "" {
 			t.turn.lastModel = msg.Model
 		}
+		t.turn.stopReason = msg.StopReason
+		t.turn.lastError = msg.ErrorMessage
+		t.turn.lastMessageText = textFromContent(msg.Content)
 		if u := decodeMessageUsage(msg.Usage, int(t.contextWindow.Load())); u != nil {
 			t.turn.lastUsage = u
 		}
@@ -509,6 +537,7 @@ func (t *translator) flushPendingTextLocked() []agent.AgentEvent {
 	if text == "" {
 		return nil
 	}
+	t.turn.textDelivered = true
 	return []agent.AgentEvent{{Kind: agent.EventAgentText, Text: text}}
 }
 
@@ -521,15 +550,52 @@ func (t *translator) finishTurnLocked() []agent.AgentEvent {
 	}
 
 	text := strings.TrimSpace(t.turn.pendingText)
+	if text == "" && !t.turn.textDelivered {
+		text = strings.TrimSpace(t.turn.lastMessageText)
+	}
+	if text == "" && t.turn.lastError != "" {
+		// The turn produced no assistant text because the provider
+		// failed. Carry the provider's own message as the result
+		// body: channels render a result whose Err is set with an
+		// error marker, and without a body the reason is invisible.
+		text = t.turn.lastError
+	}
 	t.turn.pendingText = ""
 
-	return []agent.AgentEvent{{
+	ev := agent.AgentEvent{
 		Kind: agent.EventAgentResult,
 		Result: &agent.AgentResultEvent{
-			Text:  text,
-			Usage: t.turn.lastUsage,
+			Text:    text,
+			Subtype: t.turn.stopReason,
+			Usage:   t.turn.lastUsage,
 		},
-	}}
+	}
+	// Surface the upstream provider's failure text when the turn
+	// ended on an error. AgentResultEvent's contract says errors
+	// go on ev.Err (Subtype is categorisation only); without this
+	// the channel sees an empty Text + Subtype "error" and renders
+	// an opaque card — omp reports the reason on the message_end
+	// but the bridge dropped it.
+	if t.turn.lastError != "" {
+		ev.Err = fmt.Errorf("%w: %s", ErrModelError, t.turn.lastError)
+	}
+	return []agent.AgentEvent{ev}
+}
+
+// textFromContent concatenates the text blocks of a message's
+// content array. Non-text blocks are skipped.
+func textFromContent(blocks []messageContent) string {
+	var sb strings.Builder
+	for _, b := range blocks {
+		if b.Type != "text" || b.Text == "" {
+			continue
+		}
+		if sb.Len() > 0 {
+			sb.WriteString("\n")
+		}
+		sb.WriteString(b.Text)
+	}
+	return sb.String()
 }
 
 // decodeMessageUsage converts omp's per-message usage block
@@ -633,8 +699,3 @@ func modelDisplay(id, name string) string {
 	}
 	return name + " (" + id + ")"
 }
-
-// ensureFmtError references fmt so the import is kept
-// unconditionally (used by other future branches; today the
-// placeholder keeps the file compile-clean).
-var _ = fmt.Errorf

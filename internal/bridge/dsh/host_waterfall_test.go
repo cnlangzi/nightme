@@ -81,7 +81,7 @@ func TestHandleHostFrame_ApprovalRequest_FiresEventAgentPermission(t *testing.T)
 		t.Fatal("timed out waiting for approval event from host waterfall")
 	}
 
-	// SendPermission pops the FIFO + posts /api/respond. Runtime
+	// SendPermission pops the FIFO + posts /api/$events/result. Runtime
 	// would call this when the user clicks a card button; in the
 	// test we drive it directly so the mock fires.
 	if err := d.SendPermission(approvalAllowOnce); err != nil {
@@ -500,7 +500,7 @@ func resetHostWaterfallStateForTest(t *testing.T) {
 // TestHandleHostFrame_HostCancel_DropsPending pins the server-side
 // waterfall cancel path: when dsh sends {type:"cancel", eventId:…}
 // for an in-flight approval or question, dropPendingByRPCID must
-// drain the pending entry without firing /api/respond. Without
+// drain the pending entry without firing /api/$events/result. Without
 // this the runtime's permission card stays interactive for up to
 // 5 minutes (until the permissionTimeout watchdog fires).
 func TestHandleHostFrame_HostCancel_DropsPending(t *testing.T) {
@@ -536,7 +536,7 @@ func TestHandleHostFrame_HostCancel_DropsPending(t *testing.T) {
 	// Server-side cancel arrives.
 	d.handleHostFrame("host/cancel", "rpc-cancel-q", nil)
 
-	// No /api/respond (or /api/$events/result) must fire — the
+	// No /api/$events/result must fire — the
 	// server cancelled without expecting a reply.
 	if err := waitForNoError(t, 200*time.Millisecond, func() error {
 		if mock.count.Load() != 0 {

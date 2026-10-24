@@ -89,15 +89,34 @@ Iteration is over the registered built-ins, not over cfg.Agents. Names outside t
 
 ## 3. Built-in whitelist & registration order
 
-`cmd/nightme/agents.go::init` registers the seven built-ins in a fixed order. The order is the auto-detection priority chain when more than one resolves; new built-ins append to the end.
+`cmd/nightme/agents.go::init` registers the built-ins in a fixed order. The order is the auto-detection priority chain when more than one resolves; new built-ins append to the end.
 
 ```
-claude / codex / dsh / opencode / cursor / pi / copilot
+claude / codex / dsh / opencode / cursor / pi / copilot / omp
 ```
 
-Append-only: `cmd/nightme/agents.go:7-11` doc explains why inserting a new entry earlier permanently shifts every existing user's auto-detection outcome.
+`cmd/nightme/agents.go` is the single source of truth for that list. The registry-driven conformance suite derives its expectations from `agent.Builtins` rather than from a copy of the list, so an agent added there is covered the moment it is registered.
+
+Append-only: the `cmd/nightme/agents.go` doc explains why inserting a new entry earlier permanently shifts every existing user's auto-detection outcome.
 
 `cursor` uses binary name `cursor-agent`, not `cursor`, because the official installers (bash and PowerShell variants) both create `cursor-agent` as the real entry-point and only optionally alias it.
+
+### Conformance of a registered agent
+
+A registered agent is held to the same contract as every other one, checked without any per-agent test code:
+
+| Invariant | Enforced by |
+|---|---|
+| the bridge's driver implements the package-private `agent.driver` interface | `agent.NewAgent`'s type parameter — a compile error at the bridge's call site |
+| `Info()` reports a unique name, a command and a known transport | `cmd/nightme/agentconformance_test.go` — walks `agent.Builtins.List()` |
+| `Detect()` agrees with the command it was given | same |
+| `cfg.Agents` path override is honoured | same |
+| the spawn path does not panic | same — starts the agent when its CLI is installed, skips when it is not |
+| the agent is still in the registry after `agentregistry.Build` | `cmd/nightme/agentregistry_test.go` — the expected set is derived from the registry |
+
+The suite lives in `cmd/nightme` because that is where the built-ins register themselves via `init()`.
+
+The working-path check runs against the agent's real CLI: it confirms the agent is installed, skips when it is not, and drives the path a chat session takes. A bridge whose CLI needs setup this machine does not have (auth, a first-run wizard) is skipped rather than failed — the bridge is not what is missing there. The per-bridge real-binary tests cover each agent's protocol in more depth.
 
 ---
 
@@ -185,3 +204,5 @@ cfg.Agents to override its path, then retry
 | `cmd/nightme/test.go` | Same pre-flight before `agentregistry.Build` |
 | `cmd/nightme/config.go` | `[2] Agents` interactive menu — built-in list with status, sub-menu for set-primary / change-path / remove-override |
 | `cmd/nightme/agents.go` | Built-in registration (`init`) |
+| `cmd/nightme/agentconformance_test.go` | Registry-driven conformance suite — walks every registered agent |
+

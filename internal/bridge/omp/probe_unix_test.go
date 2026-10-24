@@ -28,24 +28,130 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"fmt"
 	"os/exec"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cnlangzi/nightme/internal/agent"
 )
 
-// fakeReadyScript writes a one-shot shell script that mimics
-// the well-behaved path the mock would take. We don't ship a
-// real mock because R9's intent is the actual omp binary —
-// this helper is unused today and exists so future tests can
-// iterate without re-installing omp each time.
-var _ = writeIfHelper
+// TestProbe_StarterStartDrivesRealOmp exercises the bridge's
+// real entry point — Starter.Start — against the real omp
+// binary.
+//
+// The raw-protocol probe above never reaches the code path the
+// chat layer uses: Start spawns omp, drives the get_state
+// handshake, and hands the driver to agent.NewAgent, which
+// type-asserts it against the package-private agent.driver
+// interface. A bridge missing one of that interface's methods
+// passes every raw-protocol test and then panics at runtime —
+// after the omp child process is already running, which leaks
+// the process and strands the chat turn on a permanent
+// "Working" card. This probe pins the whole path.
+func TestProbe_StarterStartDrivesRealOmp(t *testing.T) {
+	ompPath, err := exec.LookPath("omp")
+	if err != nil {
+		t.Skipf("omp not on PATH; install via `curl -fsSL https://omp.sh/install | sh` to enable: %v", err)
+	}
 
-func writeIfHelper(path, content string) {
-	_ = exec.Command("sh", "-c", fmt.Sprintf("cat > %s", path))
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	s := NewStarter("omp", ompPath, nil)
+	ag, err := s.Start(ctx, agent.StartConfig{Workspace: t.TempDir()})
+	if err != nil {
+		t.Fatalf("Start() = %v, want nil", err)
+	}
+	t.Cleanup(func() { _ = ag.Close() })
+
+	if ag.PID() <= 0 {
+		t.Fatalf("PID() = %d, want a live child pid", ag.PID())
+	}
+
+	// The handshake's EventAgentReady carries the session id the
+	// chat layer needs for --resume.
+	select {
+	case ev := <-ag.Events():
+		if ev.Kind != agent.EventAgentReady {
+			t.Fatalf("first event kind = %v, want ready", ev.Kind)
+		}
+		if ev.SessionID == "" {
+			t.Fatal("EventAgentReady carried no session id")
+		}
+		t.Logf("ready: session=%s model=%s", ev.SessionID, ev.Model)
+	case <-time.After(30 * time.Second):
+		t.Fatal("no EventAgentReady within 30s")
+	}
 }
 
+// TestProbe_BridgeTurnRoundTrip drives a full chat turn through
+// the bridge — Start → SendBlocks → translated events — against
+// the real omp binary.
+//
+// The bridge's event translation is only covered by unit tests
+// with synthetic frames elsewhere; this pins it against the wire
+// omp actually speaks.
+func TestProbe_BridgeTurnRoundTrip(t *testing.T) {
+	ompPath, err := exec.LookPath("omp")
+	if err != nil {
+		t.Skipf("omp not on PATH; install via `curl -fsSL https://omp.sh/install | sh` to enable: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+
+	s := NewStarter("omp", ompPath, nil)
+	ag, err := s.Start(ctx, agent.StartConfig{Workspace: t.TempDir()})
+	if err != nil {
+		t.Fatalf("Start() = %v, want nil", err)
+	}
+	t.Cleanup(func() { _ = ag.Close() })
+
+	if err := ag.SendBlocks(ctx, []agent.ContentBlock{
+		{Type: agent.ContentText, Text: "reply with exactly: pong"},
+	}); err != nil {
+		t.Fatalf("SendBlocks() = %v, want nil", err)
+	}
+
+	var sawResult bool
+	deadline := time.After(150 * time.Second)
+	for !sawResult {
+		select {
+		case ev := <-ag.Events():
+			switch ev.Kind {
+			case agent.EventAgentResult:
+				sawResult = true
+				if ev.Result == nil {
+					t.Fatal("EventAgentResult with nil payload")
+				}
+				if ev.Err != nil {
+					// The upstream provider failed the call. The
+					// bridge surfaced its reason, which is the
+					// behaviour under test — the provider's own
+					// failure is not a bridge failure.
+					t.Skipf("model provider failed the call: %v", ev.Err)
+				}
+				if ev.Result.Text == "" {
+					t.Fatal("EventAgentResult carried no text")
+				}
+				t.Logf("result: %q usage=%+v", ev.Result.Text, ev.Result.Usage)
+			case agent.EventAgentDone:
+				if !sawResult {
+					t.Fatal("turn settled without an EventAgentResult")
+				}
+				return
+			case agent.EventAgentError:
+				t.Fatalf("bridge error: %v", ev.Err)
+			}
+		case <-deadline:
+			t.Fatal("no terminal event within 150s")
+		}
+	}
+}
+
+// TestProbe_RealOmpRoundTrip drives the raw wire protocol
+// end-to-end against the real omp binary.
 func TestProbe_RealOmpRoundTrip(t *testing.T) {
 	ompPath, err := exec.LookPath("omp")
 	if err != nil {

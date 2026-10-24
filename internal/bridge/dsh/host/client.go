@@ -357,20 +357,13 @@ func isTransientTransportError(err error) bool {
 }
 
 // PostEnvelope POSTs a pre-built raw JSON body without wrapping in
-// the standard clientRequest envelope. Used for /api/respond which
-// uses the client-response envelope (dsh-api.md §2.12) — type:"client-response",
-// rpcId echoing the server-frame's rpcId, result:{ok,value}.
+// the standard clientRequest envelope. Used for /api/$events/result,
+// whose body carries a typed payload rather than the plain
+// method-args shape Post builds (dsh-api.md §3.7).
 //
-// IMPORTANT: /api/respond's response body is an RpcReceipt
-// ({accepted: true} or {accepted: false, reason: …}), NOT the
-// standard server-response envelope (dsh-api.md §2.12). So this
-// method returns nil error on HTTP 200 + {accepted:true}; the
-// {accepted: false} case surfaces as an error so callers can decide.
-//
-// The server still expects HTTP 200 + a reasonable response on
-// the response side; the difference from Post is purely on the
-// request body shape. Method dots are converted to slashes to
-// match the gateway's slash-separated routing (F-dsh-preset-1).
+// The difference from Post is purely on the request body shape.
+// Method dots are converted to slashes to match the gateway's
+// slash-separated routing (F-dsh-preset-1).
 func (c *RPCClient) PostEnvelope(ctx context.Context, method string, body []byte) error {
 	url := c.baseURL + "/api/" + methodDotsToSlashes(method)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
@@ -401,9 +394,8 @@ func (c *RPCClient) PostEnvelope(ctx context.Context, method string, body []byte
 	// for /api/$events/result (same shape as every other RPC):
 	// {type:"server-response", rpcId:..., result:{ok:true|false}}
 	// Older pre-0.1.2-rc.1 receipts used a flat
-	// {accepted:true|false, reason:...} shape (see PostEnvelope's
-	// /api/respond caller). Accept either to stay compatible with
-	// both.
+	// {accepted:true|false, reason:...} shape. Accept either to stay
+	// compatible with both.
 	var standard struct {
 		Type   string `json:"type"`
 		Result struct {
@@ -826,26 +818,6 @@ func (c *RPCClient) CommandsExecute(ctx context.Context, sessionID, line string)
 	return nil
 }
 
-// ApprovalResponse is the inner body for POST /api/respond when
-// answering approval/requested. dsh-api.md §2.12.1: outcome is
-// "allowed-once" or "rejected" — the client-giveable subset of
-// ApprovalOutcome. Host-side outcomes ("cancelled", "unavailable")
-// never ride this envelope.
-type ApprovalResponse struct {
-	SessionID  string `json:"sessionId"`
-	ApprovalID string `json:"approvalId,omitempty"` // audit-only correlation
-	Outcome    string `json:"outcome"`              // "allowed-once" | "rejected"
-}
-
-// QuestionResponse is the inner body for POST /api/respond when
-// answering question/requested (dsh-api.md §2.12.2). Host
-// matchesQuestions requires answers.length == questions.length,
-// each answer.id echoing AskUserQuestionItem.id, in order.
-type QuestionResponse struct {
-	SessionID string         `json:"sessionId"`
-	Answer    QuestionAnswer `json:"answer"`
-}
-
 // QuestionAnswer is AskUserQuestionAnswer: one batch covering every
 // question in the originating ask().
 type QuestionAnswer struct {
@@ -859,29 +831,6 @@ type QuestionAnswerItem struct {
 	ID       string   `json:"id"`
 	Selected []string `json:"selected"`
 	Custom   string   `json:"custom,omitempty"`
-}
-
-// Respond sends the answer to a server-pushed approval/requested
-// or question/requested. Per dsh-api.md §2.12, /api/respond uses
-// the client-response envelope; the `rpcId` field is the
-// envelope-level echo of the server-frame's rpcId (NOT a fresh
-// client-minted id — that is what makes it correlate).
-//
-// `value` is ApprovalResponse or QuestionResponse depending on the
-// originating frame method.
-func (c *RPCClient) Respond(ctx context.Context, frameRpcID string, value any) error {
-	// envelope: {type:"client-response", rpcId:<echoed>, result:{ok, value}}
-	// Built inline as json.RawMessage so we ship the literal envelope
-	// shape — PostEnvelope does NOT wrap in clientRequest.
-	body, err := json.Marshal(map[string]any{
-		"type":   "client-response",
-		"rpcId":  frameRpcID,
-		"result": map[string]any{"ok": true, "value": value},
-	})
-	if err != nil {
-		return fmt.Errorf("dsh.host: respond marshal: %w", err)
-	}
-	return c.PostEnvelope(ctx, "respond", body)
 }
 
 // WaterfallResultEnvelope is the args body for /api/$events/result.

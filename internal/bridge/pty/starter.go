@@ -83,18 +83,6 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 	return agent.NewAgent(s.Info(), d.PID(), d.events, d), nil
 }
 
-// agentDriver is the local alias for the agent.driver interface so
-// this file can compile-time check driver satisfies it without
-// importing the unexported name from the agent package.
-// The matching `var _ agentDriver = (*driver)(nil)` check lives in
-// agent.go alongside the type so both files are self-contained.
-type agentDriver interface {
-	SendBlocks(ctx context.Context, blocks []agent.ContentBlock) error
-	SendPermission(resp string) error
-	Reset(ctx context.Context) error
-	Close() error
-}
-
 // ptyIdleTimeout is how long RunOnce waits with no new output
 // before declaring the turn done. PTY has no structured result
 // event, so the heuristic is "agent went quiet for this long".

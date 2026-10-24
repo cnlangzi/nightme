@@ -176,9 +176,8 @@ func init() {
 // handleHostFrame is the driver-side dispatch for host waterfall
 // frames. Switches on the dsh event name and emits an
 // EventAgentPermission directly (no mux-shape adaptation — the
-// approval/question helpers in permissions.go are also reached
-// via the legacy mux path, but host waterfall is the primary
-// entry in 0.1.2-rc.1).
+// approval/question helpers in permissions.go are reached from
+// here, the only approval entry on the wire).
 //
 // frameRpcID is the per-waterfall UUID from the frame; it's the
 // key dsh uses to correlate the user's answer back to the
@@ -211,7 +210,6 @@ func (d *driver) handleHostFrame(method, rpcID string, payload json.RawMessage) 
 			ToolName:   ar.ToolName,
 			CallID:     ar.CallID,
 			Reason:     ar.Reason,
-			Source:     "host",
 		})
 	case "user-questions/request":
 		var env waterfallEnvelope
@@ -227,7 +225,6 @@ func (d *driver) handleHostFrame(method, rpcID string, payload json.RawMessage) 
 		d.handleQuestionRequested(rpcID, muxQuestionRequested{
 			SessionID: d.sessionID,
 			Questions: qr.Questions,
-			Source:    "host",
 		})
 	case "host/cancel":
 		// dsh cancelled this waterfall server-side (timeout,

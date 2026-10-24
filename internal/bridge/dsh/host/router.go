@@ -92,11 +92,11 @@ type Router struct {
 	hostHandler HostFrameHandler
 
 	// pending is keyed by "<sessionId>:<frameRpcId>" — the wire
-	// contract (dsh-api.md §2.12, §3.4.6, §3.4.9) is that /api/respond
-	// echoes the frame's rpcId, so the same key the server uses to
-	// track the pending request is what we use to look up the
-	// response channel. Session-scoped key prevents approval from
-	// session A accidentally answering a question from session B.
+	// contract is that the answer echoes the frame's rpcId (the
+	// waterfall eventId), so the same key the server uses to track
+	// the pending request is what we use to look up the response
+	// channel. Session-scoped key prevents approval from session A
+	// accidentally answering a question from session B.
 	pending map[string]chan string
 }
 
@@ -260,7 +260,7 @@ func (r *Router) DispatchHost(method, rpcID string, payload json.RawMessage) {
 // RegisterPendingApproval stores a response channel under
 // (sessionID, frameRpcID). Returns the channel that AnswerPending
 // will write to. The frame's rpcID is what the server correlates
-// with /api/respond — this is also what we put into the
+// the answer with — this is also what we put into the
 // (sessionID, frameRpcID) key.
 //
 // Callers should spawn their own watchdog goroutine that fires
@@ -287,7 +287,7 @@ func (r *Router) RegisterPendingApproval(sessionID, frameRpcID string) chan stri
 // drained.
 //
 // The wire correlation is the frame's rpcId — callers should also
-// invoke RPCClient.Respond(ctx, frameRpcID, ...) to actually tell
+// post the outcome to the host $events waterfall to actually tell
 // dsh what to do with the answer. This method only delivers the
 // value to the in-process handler waiting on the channel.
 func (r *Router) AnswerPending(sessionID, frameRpcID, outcome string) bool {
@@ -305,8 +305,8 @@ func (r *Router) AnswerPending(sessionID, frameRpcID, outcome string) bool {
 		// Channel already drained (likely the timeout watchdog
 		// fired and wrote "rejected"). Don't lose the user's
 		// answer silently — just report that the in-process
-		// handler didn't get it. The /api/respond wire call
-		// still goes out if the caller does it.
+		// handler didn't get it. The wire answer still goes out if
+		// the caller sends it.
 		return false
 	}
 }

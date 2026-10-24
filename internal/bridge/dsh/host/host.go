@@ -15,7 +15,7 @@
 //   - Phase 1: spawn the actual `dsh --profile web` subprocess
 //   - Phase 2: ChatSession.Spawner hooks (subscribe on create,
 //     unsubscribe on drop, wire pending-approval answers through
-//     RPCClient.Respond)
+//     RPCClient.SendWaterfallResult)
 //   - Phase 3: remove the per-driver code paths in the parent dsh
 //     package
 //   - Phase 4: restart-recovery via SessionList

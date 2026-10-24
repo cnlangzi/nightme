@@ -49,7 +49,7 @@ Four wire surfaces, all on the same port:
 | **HTTP RPC** | client → server | `POST /api/{dotted.method}` JSON envelope | every business call (50+ methods across 11 domains) |
 | **Mux stream** | server → client | `GET /api/events.mux` (SSE **or** WebSocket upgrade) | session/event, session/subscribed, session/projection, session/queue, session/jobs, approval/\*, question/\*, stream/error |
 | **Host stream** | server → client | `GET /api/events.host` (SSE **or** WebSocket upgrade) | session lifecycle, workspace changes, archived-sessions, agent errors, forwarded remote events |
-| **Client-response** | client → server | `POST /api/respond` JSON envelope (NOT a method) | answer server-initiated approval/question requests |
+| **Client-response** | client → server | `POST /api/respond` JSON envelope (NOT a method) | answer server-initiated approval/question requests (pre-0.1.2-rc.1; 0.1.2-rc.1+ answers on the host waterfall, `POST /api/$events/result`) |
 | **Downloads** | client → server | `GET /api/session.export?sessionId=...` (no envelope) | session log ZIP (host-only, absent from `IApiClient`) |
 
 The contract has a **four-quadrant message model** (`rpc.d.ts`): physical carriers (HTTP / WebSocket / in-process SSE) are decoupled from logical messages (`ClientRequest` / `ServerResponse` / `ServerRequest` / `ClientResponse`). The browser `IApiClient` consumes the same domain methods regardless of carrier.
@@ -124,7 +124,7 @@ Two flavours of server-request:
 |---|---|
 | `approval/requested`, `question/requested` | `session/event`, `session/projection`, `session/subscribed`, `session/queue`, `session/jobs`, `approval/resolved`, `question/resolved`, host-stream frames |
 
-**Answerable frames**: rpcId is stable across replay (refresh-recovery replays the same frame with the same rpcId). The client responds via `POST /api/respond` carrying a `ClientResponse` envelope that echoes this rpcId.
+**Answerable frames**: rpcId is stable across replay (refresh-recovery replays the same frame with the same rpcId). The client responds via `POST /api/respond` carrying a `ClientResponse` envelope that echoes this rpcId (pre-0.1.2-rc.1; 0.1.2-rc.1+ answers on the host waterfall instead).
 
 **Pure pushes**: rpcId identifies that one push; replay mints a new one.
 
@@ -139,6 +139,8 @@ interface ClientResponse {
 ```
 
 Sent on `POST /api/respond` (NOT `POST /api/respond.something`). The `method` field is **absent** — `respond` is not a domain method, it's a special envelope path. See §3.7 for the actual payload shapes.
+
+dsh 0.1.2-rc.1+ no longer routes answerable requests this way — approval / user-questions arrive on the host `$events` waterfall and are answered with `$events/result` (§3.7). The envelope above is the pre-0.1.2-rc.1 shape; the bridge does not speak it.
 
 ### 1.5 UUID generation
 
@@ -895,7 +897,7 @@ interface AskUserQuestionAnswerItem {
 - **`approvalId` is audit-only** — it's the core correlation id used by the impl to reconcile `approval/asked`/`decided` events; the wire correlation is governed entirely by the echoed `rpcId`.
 - **`sessionId` IS required in the response value** (despite not being on the wire for the request frame) — the server uses it as the second correlation key.
 
-✅ **FIXED**: `SendPermission` now emits `type:"client-response"` with `result.value` as `ApprovalResponse` or `QuestionResponse` (envelope `rpcId` echoes the server-frame). See §11 items 2–5. Multi-question Feishu cards POST the full `answers[]` batch only after the last in-card step (`nm-q:` payload).
+✅ **FIXED**: `SendPermission` answers through the host waterfall — `POST /api/$events/result` with `payload.args={clientId, eventId, outcome:{kind:"result", value}}` (§3.7). The `client-response` / `/api/respond` path is gone from the bridge. Multi-question Feishu cards POST the full `answers[]` batch only after the last in-card step (`nm-q:` payload).
 
 ---
 
@@ -1083,7 +1085,7 @@ interface JobView {
 
 Sent as subscription baseline only for sessions with tasks. Empty `[]` still sent (absence cannot express the "transitioned to empty" event).
 
-#### 3.4.6 `approval/requested` — server-pushed permission gate
+#### 3.4.6 `approval/requested` — server-pushed permission gate (pre-0.1.2-rc.1)
 
 ```json
 {
@@ -1100,7 +1102,9 @@ Sent as subscription baseline only for sessions with tasks. Empty `[]` still sen
 }
 ```
 
-Bridge emits `EventAgentPermission{Tool: toolName, Action: reason, Options: ["Allow once","Reject"], Kind: approval, ResponseCh: respCh}`. Response channel is registered in `pendingApprovals[frame.RPCID]` (NOT `approvalId`). Reply via `POST /api/respond` with `ApprovalResponse` `{sessionId, approvalId, outcome}` (§2.12.1). Feishu card title is **Waiting for approval** (not AskUserQuestion's Action Needed wizard).
+Bridge emits `EventAgentPermission{Tool: toolName, Action: reason, Options: ["Allow once","Reject"], Kind: approval, ResponseCh: respCh}`. Response channel is registered in `pendingApprovals[frame.RPCID]` (NOT `approvalId`). Feishu card title is **Waiting for approval** (not AskUserQuestion's Action Needed wizard).
+
+dsh 0.1.2-rc.1+ does not emit this frame: approval arrives on the host `$events` waterfall as `approval/request` and is answered with `POST /api/$events/result` (§3.7). A mux frame under this name reaches the bridge's unknown-method path — recorded, counted, never a permission.
 
 If the user answers on the **dashboard**, host broadcasts `approval/resolved` and the turn continues on mux `session/event`. nightme must **keep draining events** — it does not wait on Feishu `SendPermission`. On `approval/resolved` the bridge drops the local pending entry and emits `EventAgentPermissionSettled` so Feishu PATCHes the leftover card. A later Feishu click is a no-op (`no pending approval`).
 
@@ -1125,7 +1129,7 @@ Pure push. Bridge drops the matching local pending (by `approvalId`) and emits `
 
 Synthesised routing key: `"evt-" + toolCallID` (`permissions.go:112-130`). Same plumbing as `approval/requested`. Distinct from `approval/requested`: this one comes through the mux method-level dispatch rather than as a `session/event` envelope.
 
-#### 3.4.9 `question/requested` — AskUserQuestion-style prompt
+#### 3.4.9 `question/requested` — AskUserQuestion-style prompt (pre-0.1.2-rc.1)
 
 ```json
 {
@@ -1164,20 +1168,22 @@ interface AskUserQuestionItem {
 }
 ```
 
-**Routing key** for `respond`: the frame's **rpcId** (NOT any session id concat). The question's logical id IS the rpcId minted when the host accepts `ask()`. `permissions.go:142-187` documents the trap.
+**Routing key** for the answer: the frame's **rpcId** (NOT any session id concat). The question's logical id IS the rpcId minted when the host accepts `ask()`. `permissions.go:142-187` documents the trap.
+
+dsh 0.1.2-rc.1+ does not emit this frame: user-questions arrive on the host `$events` waterfall as `user-questions/request` and are answered with `POST /api/$events/result` (§3.7). A mux frame under this name reaches the bridge's unknown-method path — recorded, counted, never a permission.
 
 Empty `questions` array is a known dsh quirk (placeholder frames); bridge logs and skips.
 
 **Feishu Action Needed card** (channel-side, not host). Full design + pitfalls: [feishu-cards.md](../channel/feishu-cards.md).
 
-| batch | card | click | `/api/respond` |
+| batch | card | click | `/api/$events/result` |
 |-------|------|-------|----------------|
 | `len(questions)==1` | one-shot; options stacked one-per-row; **Type your answer** + **Skip this question** + **Submit** | option → inbound of the clicked **label**; Submit → `nm-q:` `{id,selected:[],custom}`; Skip → `nm-q:` `{id,selected:[]}` | `questionAnswerFor` maps a label onto that question; custom rides `AskUserQuestionAnswerItem.custom` with empty `selected` (host rejects custom+selected on non-multi) |
 | `len(questions)>1` | in-card wizard (`👉 Action Needed · i/n`), matching dashboard 1/N; same custom/skip chrome on every step | intermediate clicks PATCH **and** return the next card in the `card.action.trigger` response (`card.type=raw`); last click inbound `nm-q:` + JSON `[{id,selected,custom?}]` | host `matchesQuestions` requires `answers.length == questions.length` and `answer.id === question.id` in order — **must not** POST until the batch is complete |
 | skip | **Skip this question** (`skip:`) on every question, including one-shot | empty `selected` for that id (no `custom`), then advance or POST | same as dashboard Skip |
 | custom | **Type your answer** input + **Submit** (`custom:`) | typed text as `custom`, empty `selected` | same as dashboard free-text; chat-typed Feishu text still does **not** answer a pending question |
 
-Long option labels render as **one button per row** (`width: fill`), not equal-width `column_set` (that truncates mixed Q1+Q2 labels). Title emoji is **👉** (not 🔐). Approval cards (**Waiting for approval** / Allow once / Reject) have no Type your answer / Skip. Feishu `input` must not set `icon` (API 200621 unknown property; password inputs use `show_icon` only). Question options, Type your answer, Skip, and Submit live in **one** `form` at the card root — buttons outside a form on the same card do not fire `card.action.trigger`. Form submit often omits `value.action` and only sends button `name` (`opt_0`, `skip_question`, `submit_custom`); nightme maps `opt_N` back to the Nth option label. Intermediate wizard clicks must return the next card in the callback (`card.type=raw`); IM PATCH alone does not redraw a submitted form. Dashboard 1/N only advances after the **full** `nm-q:` batch hits `/api/respond` (host `matchesQuestions`); Feishu pages locally until the last step.
+Long option labels render as **one button per row** (`width: fill`), not equal-width `column_set` (that truncates mixed Q1+Q2 labels). Title emoji is **👉** (not 🔐). Approval cards (**Waiting for approval** / Allow once / Reject) have no Type your answer / Skip. Feishu `input` must not set `icon` (API 200621 unknown property; password inputs use `show_icon` only). Question options, Type your answer, Skip, and Submit live in **one** `form` at the card root — buttons outside a form on the same card do not fire `card.action.trigger`. Form submit often omits `value.action` and only sends button `name` (`opt_0`, `skip_question`, `submit_custom`); nightme maps `opt_N` back to the Nth option label. Intermediate wizard clicks must return the next card in the callback (`card.type=raw`); IM PATCH alone does not redraw a submitted form. Dashboard 1/N only advances after the **full** `nm-q:` batch hits `/api/$events/result` (host `matchesQuestions`); Feishu pages locally until the last step.
 
 #### 3.4.10 `question/resolved` — audit frame
 
@@ -1629,9 +1635,9 @@ For future maintainers picking up this protocol or extending it:
 
 6. **Strict refusal on resume** — `session.fork` failing should propagate `ErrResumeUnhealthy`, not silently fall through to `session.create`. The runtime handles `ErrResumeUnhealthy` uniformly across bridges (`chatsession.go §1624`); falling through would silently lose user history.
 
-7. **Frame `rpcId` is the answer key** — the server correlates answers on the frame's `rpcId` (for both approval/requested and question/requested). We key `pendingApprovals[frame.RPCID]` and pass `frame.RPCID` as the **envelope-level** `rpcId` of `POST /api/respond`. Using the payload's `approvalId` (audit-only) as the correlation key would route answers to nothing.
+7. **Frame `rpcId` is the answer key** — the server correlates answers on the frame's `rpcId` (for both approval/requested and question/requested). We key `pendingApprovals[frame.RPCID]` and pass `frame.RPCID` as the `eventId` of `POST /api/$events/result`. Using the payload's `approvalId` (audit-only) as the correlation key would route answers to nothing.
 
-8. **`type` field is load-bearing on every envelope** — outbound MUST carry `"type":"client-request"` (or `"client-response"` for `/api/respond`); inbound frames MUST be `"server-request"`. The server's schema rejects envelopes without it.
+8. **`type` field is load-bearing on every envelope** — outbound MUST carry `"type":"client-request"`; inbound frames MUST be `"server-request"`. The server's schema rejects envelopes without it.
 
 9. **`mode` is required on `session.prompt`** — sending `session.prompt` without `mode` returns `bad-request: invalid input: expected "queue"`.
 

@@ -1074,7 +1074,7 @@ func translateHostEvent(raw json.RawMessage) (method, rpcID string, payload json
 		}
 		// No server-side id for emit frames; pass empty rpcId so
 		// callers can still log the (method, payload) pair but won't
-		// try to correlate with a /api/respond answer.
+		// try to correlate with an answer.
 		return rec.Event, "", mustJSON(map[string]any{"args": rec.Args})
 	case "waterfall":
 		if rec.Event == "" {

@@ -173,11 +173,12 @@ type driver struct {
 	// reuse for every Ready event.
 	branch string
 
-	// pendingApprovals maps the server-frame rpcId (NOT the payload's
-	// approvalId) to the response channel we hand to runtime via
-	// EventPermission. The frame rpcId is the key /api/respond is
-	// keyed on; using payload approvalId would silently route the
-	// answer to a "no such pending request" entry on the server.
+	// pendingApprovals maps the host waterfall eventId (NOT the
+	// payload's approvalId) to the response channel we hand to
+	// runtime via EventPermission. The eventId is what
+	// /api/$events/result is keyed on; using payload approvalId
+	// would silently route the answer to a "no such pending
+	// request" entry on the server.
 	// pendingOrder tracks INSERTION ORDER for SendPermission's
 	// routing decision: we pop pendingOrder[0], not pendingApprovals
 	// iteration (Go map iteration is randomized — Agent C trace
@@ -193,19 +194,10 @@ type driver struct {
 	pendingApprovals map[string]chan string
 	pendingOrder     []string
 	// pendingQuestions maps frame rpcId → the AskUserQuestionItem
-	// batch from the originating frame (host waterfall or legacy
-	// mux question/requested). Present only for question frames;
-	// SendPermission uses it to build the $events/result body
-	// (host path) or QuestionResponse (legacy mux path).
-	// lastApprovalID maps frame rpcId → mux approvalId for
-	// approval/requested (legacy mux path audit-only).
+	// batch from the originating host waterfall frame. Present only
+	// for question frames; SendPermission uses it to build the
+	// $events/result body.
 	pendingQuestions map[string][]questionPayload
-	lastApprovalID   map[string]string
-	// pendingSource records the wire source ("host" for the
-	// $events waterfall, "mux" for legacy top-level mux frames)
-	// for each pending entry. SendPermission uses this to route
-	// the answer to /api/$events/result vs /api/respond.
-	pendingSource map[string]string
 
 	events chan agent.AgentEvent
 	// translate + wireState + dispatcher are the per-session
@@ -298,8 +290,6 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 		permissionMode:   firstNonEmpty(cfg.PermissionMode, "danger-full-access"),
 		pendingApprovals: map[string]chan string{},
 		pendingQuestions: map[string][]questionPayload{},
-		lastApprovalID:   map[string]string{},
-		pendingSource:    map[string]string{},
 		events:           make(chan agent.AgentEvent, eventBufferSize),
 		translate:        newTranslator(s.name, cfg.Workspace),
 		wireState:        newWireState(),
@@ -563,16 +553,12 @@ func (d *driver) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) er
 // approval or question (FIFO). The pending FIFO is per-driver (each
 // session has its own queue); see the doc comment on pendingApprovals.
 //
-// Routing is decided by pendingSource[frameRpcID]:
-//   - "host": the gate came from the dsh 0.1.2-rc.1 host $events
-//     waterfall (approval/request or user-questions/request).
-//     Reply goes to POST /api/$events/result with the typed
-//     outcome envelope (kind:"result", value:{answers:[…]} for
-//     questions, kind:"result", value:"allowed-once"|"rejected"
-//     for approvals).
-//   - "mux": legacy dsh < 0.1.2-rc.1 path; reply goes to
-//     POST /api/respond with the client-response envelope
-//     (ApprovalResponse / QuestionResponse).
+// The gate is the dsh host $events waterfall (approval/request or
+// user-questions/request). The reply goes to POST
+// /api/$events/result with the typed outcome envelope
+// (kind:"result", value:{answers:[…]} for questions,
+// kind:"result", value:"allowed-once"|"rejected" for approvals),
+// keyed on the waterfall's eventId.
 func (d *driver) SendPermission(resp string) error {
 	d.pendingMu.Lock()
 	if len(d.pendingOrder) == 0 {
@@ -581,12 +567,10 @@ func (d *driver) SendPermission(resp string) error {
 	}
 	frameRpcID := d.pendingOrder[0]
 	questions, isQuestion := d.pendingQuestions[frameRpcID]
-	source := d.pendingSource[frameRpcID]
 
 	var (
 		outcome  = resp
 		envelope host.WaterfallOutcomeEnvelope
-		muxValue any
 	)
 	if isQuestion {
 		answer, err := questionAnswerFor(questions, resp)
@@ -596,7 +580,6 @@ func (d *driver) SendPermission(resp string) error {
 		}
 		envelope.Kind = "result"
 		envelope.Value, _ = json.Marshal(host.QuestionAnswer{Answers: answer.Answers})
-		muxValue = host.QuestionResponse{SessionID: d.sessionID, Answer: answer}
 	} else {
 		outcome = canonicalApprovalOutcome(resp)
 		if outcome == "" {
@@ -605,11 +588,6 @@ func (d *driver) SendPermission(resp string) error {
 		}
 		envelope.Kind = "result"
 		envelope.Value, _ = json.Marshal(outcome) // "allowed-once" | "rejected"
-		muxValue = host.ApprovalResponse{
-			SessionID:  d.sessionID,
-			ApprovalID: d.lastApprovalID[frameRpcID],
-			Outcome:    outcome,
-		}
 	}
 	// Snapshot the respCh pointer under the lock; the channel
 	// itself is closed/drained outside the lock so the slow RPC
@@ -639,20 +617,15 @@ func (d *driver) SendPermission(resp string) error {
 
 	ctx := context.Background()
 	var sendErr error
-	switch source {
-	case "host":
-		if clientID == "" {
-			sendErr = errors.New("dsh: no clientId captured from host $events ready frame; cannot send waterfall result")
-			break
-		}
+	if clientID == "" {
+		sendErr = errors.New("dsh: no clientId captured from host $events ready frame; cannot send waterfall result")
+	} else {
 		slogDefault().Info("dsh: SendPermission posting to /api/$events/result",
 			"client_id", clientID, "event_id", frameRpcID)
 		sendErr = d.cli.RPC.SendWaterfallResult(ctx, clientID, frameRpcID, envelope)
 		if sendErr != nil {
 			slogDefault().Info("dsh: SendWaterfallResult FAILED", "err", sendErr)
 		}
-	default:
-		sendErr = d.cli.RPC.Respond(ctx, frameRpcID, muxValue)
 	}
 
 	if sendErr != nil {
@@ -669,8 +642,6 @@ func (d *driver) SendPermission(resp string) error {
 	d.pendingOrder = d.pendingOrder[1:]
 	delete(d.pendingApprovals, frameRpcID)
 	delete(d.pendingQuestions, frameRpcID)
-	delete(d.lastApprovalID, frameRpcID)
-	delete(d.pendingSource, frameRpcID)
 	d.pendingMu.Unlock()
 
 	// Wake any in-process handler waiting on the registered channel
@@ -757,8 +728,6 @@ func (d *driver) Reset(ctx context.Context) error {
 	d.pendingApprovals = map[string]chan string{}
 	d.pendingOrder = nil
 	d.pendingQuestions = map[string][]questionPayload{}
-	d.lastApprovalID = map[string]string{}
-	d.pendingSource = map[string]string{}
 	d.pendingMu.Unlock()
 
 	// Phase 3: bridge.MuxSubscribe (single mux subscription per

@@ -763,16 +763,16 @@ func handleTodoDelete(env sessionEventEnvelope, view json.RawMessage, tr *transl
 }
 
 // handleApprovalAsked is the session/event approval/asked echo.
-// The dashboard ApprovalPanel and /api/respond are keyed on mux
-// approval/requested (frame rpcId). Emitting a second
-// EventAgentPermission here would duplicate the Feishu card.
+// The dashboard ApprovalPanel and the answer are keyed on the host
+// waterfall's eventId. Emitting a second EventAgentPermission here
+// would duplicate the Feishu card.
 func handleApprovalAsked(env sessionEventEnvelope, view json.RawMessage, tr *translator, st *wireState, d *driver) []agent.AgentEvent {
 	// session/event approval/asked is an audit/echo of the tool
-	// call. The dashboard ApprovalPanel and /api/respond are keyed
-	// on mux approval/requested (frame rpcId). Emitting a second
+	// call. The dashboard ApprovalPanel and the answer are keyed on
+	// the host waterfall's eventId. Emitting a second
 	// EventAgentPermission here duplicated the Feishu card and
-	// registered a fake "evt-" key that cannot POST /api/respond.
-	dLog("dsh: session/event approval/asked (echo; mux approval/requested is the gate)")
+	// registered a fake "evt-" key that cannot answer the host.
+	dLog("dsh: session/event approval/asked (echo; the host waterfall is the gate)")
 	return nil
 }
 

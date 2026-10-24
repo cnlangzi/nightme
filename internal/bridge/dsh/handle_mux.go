@@ -13,19 +13,17 @@
 //   - session/event:经 dispatcher 路由
 //   - session/projection:经 wireState.applyProjection
 //   - session/queue / session/jobs:本期不消费,debug log
-//   - approval/asked:debug log only (audit-only echo, NOT the
-//     respondable gate; dsh 0.1.2-rc.1 puts approval on the host
-//     $events waterfall as approval/request — see host_waterfall.go)
 //
-// Note: dsh 0.1.2-rc.1 folded approval + user-questions onto the
-// host $events waterfall stream. The mux top-level
-// approval/requested / approval/resolved / question/requested /
-// question/resolved methods are no longer emitted; if a frame still
-// arrives here it is recorded + counted + warn-logged as a
-// regression marker. The respondable path is
+// dsh 0.1.2-rc.1 folded approval + user-questions onto the host
+// $events waterfall stream: the mux top-level approval/requested /
+// approval/resolved / question/requested / question/resolved
+// methods are no longer emitted. The respondable path is
 // host_waterfall.go::driver.handleHostFrame, which adapts the
-// waterfall envelope to the existing handleApprovalRequested /
-// handleQuestionRequested helpers in permissions.go.
+// waterfall envelope to the handleApprovalRequested /
+// handleQuestionRequested helpers in permissions.go. A frame under
+// one of the old names lands in the default branch — recorded,
+// counted, warn-logged as an unknown method — so an older dsh can
+// never open a permission through the mux path.
 //
 // dsh 0.1.2-rc.1 (new wire) folds the per-event type into the mux
 // method itself: after host/stream.go::translateSessionEvent, the
@@ -33,9 +31,9 @@
 // with a nested envelope), and payload=event.data. handleMuxFrame
 // routes these by constructing a synthetic sessionEventEnvelope
 // and forwarding to dispatchEvent. The OLD wire method names
-// (session/event etc.) are kept for backward-compat reads and the
-// legacy session/subscribed / session/projection envelopes still
-// arrive on the new wire under their old method names.
+// (session/event etc.) are kept for backward-compat reads, and the
+// session/subscribed / session/projection envelopes still arrive
+// on the new wire under the same method names.
 
 package dsh
 
@@ -131,28 +129,6 @@ func (d *driver) handleMuxFrame(method, rpcID string, payload json.RawMessage) {
 			d.deliver(ev)
 		}
 
-	case "approval/requested",
-		"approval/resolved",
-		"question/requested",
-		"question/resolved":
-		// dsh 0.1.2-rc.1 no longer emits these as mux top-level
-		// methods — both approval and user-questions gate on the
-		// host $events waterfall stream
-		// (approval/request, user-questions/request). The
-		// corresponding reply is `/api/respond` keyed on the
-		// waterfall's eventId.
-		//
-		// The handling lives in host_waterfall.go →
-		// driver.handleHostFrame. If a frame still arrives here
-		// (older dsh rc, or a future rc reverting to mux),
-		// record + count + warn so ops can spot the regression
-		// without breaking the bridge.
-		unknownTotal := d.wireState.recordAndCountUnknown(method, len(payload))
-		warnLogger.Warn("dsh: mux legacy method dropped — dsh 0.1.2-rc.1 sends this as host waterfall",
-			"method", method,
-			"rpc_id", rpcID,
-			"unknown_total", unknownTotal)
-
 	case "session/queue":
 		d.wireState.recordWireFrame(method, "", len(payload))
 		// Future: surface queued/steering items in a QueueDock UI
@@ -162,14 +138,6 @@ func (d *driver) handleMuxFrame(method, rpcID string, payload json.RawMessage) {
 	case "session/jobs":
 		d.wireState.recordWireFrame(method, "", len(payload))
 		dLog("dsh: session/jobs: %d bytes", len(payload))
-
-	case "approval/asked":
-		// Mux schema has no top-level approval/asked (only
-		// session/event type approval/asked). If a frame still
-		// arrives here, skip — the respondable gate is
-		// approval/requested keyed on this envelope's rpcId.
-		d.wireState.recordWireFrame(method, "", len(payload))
-		dLog("dsh: mux approval/asked ignored (use approval/requested)")
 
 	case "session/snapshot":
 		// dsh 0.1.2-rc.1 sends one snapshot frame as the FIRST
@@ -238,9 +206,9 @@ func (d *driver) handleMuxFrame(method, rpcID string, payload json.RawMessage) {
 // isSessionEventType reports whether method is one of the
 // dsh 0.1.2-rc.1 per-session event.type discriminators that
 // arrive on session/follow. Kept as a tight allow-list (NOT a
-// slash check) so we never accidentally route a legacy mux-frame
-// method (session/subscribed, session/projection, etc.) through
-// the per-event dispatch path. Must stay in sync with
+// slash check) so we never accidentally route a mux-frame method
+// (session/subscribed, session/projection, etc.) through the
+// per-event dispatch path. Must stay in sync with
 // standardRegistry in dispatch.go — a missing entry silently
 // demotes the frame to "unknown method" with a Warn.
 func isSessionEventType(method string) bool {

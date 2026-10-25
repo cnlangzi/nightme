@@ -439,6 +439,122 @@ func TestFixRemote_BranchExists_HardFails_NoSideEffects(t *testing.T) {
 	// v1.5: no in-memory slot to verify.
 }
 
+// TestFixRemote_AlreadyClaimed_Rejected verifies the
+// already-claimed gate: an issue that already carries
+// `nightme/wip` is held by another fix, so this run must bail
+// out before any side effect — no worktree, no branch, no label
+// write, no dispatch.
+func TestFixRemote_AlreadyClaimed_Rejected(t *testing.T) {
+	rig := newFixRemoteRig(t)
+	issueID := 42
+	title := "Login state expiration"
+	rig.prov.SetIssue(issueID, &Issue{
+		ID:    issueID,
+		Title: title,
+		State: "open",
+		URL:   "https://github.com/cnlangzi/nightme/issues/42",
+		Labels: []string{
+			"priority/high",
+			LabelWIP,
+		},
+	})
+
+	res, err := rig.drive(t, fmt.Sprint(issueID))
+	if err != nil {
+		t.Fatalf("RunFix: %v", err)
+	}
+	if res == nil || !res.Consumed {
+		t.Fatalf("Result = %+v, want Consumed=true", res)
+	}
+
+	last := rig.rec.lastText()
+	if !strings.Contains(last, "already claimed") {
+		t.Errorf("reply missing 'already claimed':\n%s", last)
+	}
+	if !strings.Contains(last, LabelWIP) {
+		t.Errorf("reply missing %q:\n%s", LabelWIP, last)
+	}
+	// The reply must offer both exits: run /gtw close in the
+	// holding worktree, or drop the label by hand.
+	if !strings.Contains(last, "/gtw close") {
+		t.Errorf("reply missing '/gtw close' hint:\n%s", last)
+	}
+	if !strings.Contains(last, "label on the issue page") {
+		t.Errorf("reply missing manual label-removal hint:\n%s", last)
+	}
+
+	// No label write of any kind.
+	if addCalls := rig.prov.CallsByMethod("AddIssueLabel"); len(addCalls) != 0 {
+		t.Errorf("AddIssueLabel unexpectedly called: %+v", addCalls)
+	}
+	if createCalls := rig.prov.CallsByMethod("CreateLabel"); len(createCalls) != 0 {
+		t.Errorf("CreateLabel unexpectedly called: %+v", createCalls)
+	}
+	// The only provider round-trip is the GetIssue that carried
+	// the labels — the gate reads what is already in hand.
+	for _, c := range rig.prov.Calls() {
+		if c.Method != "GetIssue" {
+			t.Errorf("unexpected provider call %q; the gate must not touch the provider", c.Method)
+		}
+	}
+	// No worktree on disk.
+	branch := DeriveBranchFromTitle(title, issueID)
+	wtPath := WorktreePath(rig.repoRoot, branch)
+	if _, err := os.Stat(wtPath); !os.IsNotExist(err) {
+		t.Errorf("worktree path %s exists; want no worktree (stat err = %v)", wtPath, err)
+	}
+	wtOut, _ := mustGitOut(t, rig.repoRoot, "worktree", "list", "--porcelain")
+	if c := strings.Count(wtOut, "worktree "); c != 1 {
+		t.Errorf("worktree count = %d, want 1 (no new worktree):\n%s", c, wtOut)
+	}
+	// No branch created either.
+	if exists, err := BranchExists(context.Background(), rig.repoRoot, branch, rig.deps.Git); err != nil {
+		t.Fatalf("BranchExists: %v", err)
+	} else if exists {
+		t.Errorf("branch %q exists; want no branch", branch)
+	}
+	// No dispatch.
+	if got := rig.cs.QueueLen(); got != 0 {
+		t.Errorf("cs.QueueLen = %d, want 0 (no dispatch on claim rejection)", got)
+	}
+}
+
+// TestFixRemote_BranchExistsBeatsClaimGate pins the precedence
+// between the two hard-fails: when the target branch already
+// exists locally, the branch-exists reply wins — its remedy
+// (`/gtw close`) also drops the claim label, so it is the
+// accurate exit.
+func TestFixRemote_BranchExistsBeatsClaimGate(t *testing.T) {
+	rig := newFixRemoteRig(t)
+	issueID := 42
+	title := "Login state expiration"
+	rig.prov.SetIssue(issueID, &Issue{
+		ID:     issueID,
+		Title:  title,
+		State:  "open",
+		URL:    "https://github.com/cnlangzi/nightme/issues/42",
+		Labels: []string{LabelWIP},
+	})
+
+	branch := DeriveBranchFromTitle(title, issueID)
+	mustGit(t, rig.repoRoot, "branch", branch)
+
+	if _, err := rig.drive(t, fmt.Sprint(issueID)); err != nil {
+		t.Fatalf("RunFix: %v", err)
+	}
+
+	last := rig.rec.lastText()
+	if !strings.Contains(last, "already exists") {
+		t.Errorf("reply missing 'already exists':\n%s", last)
+	}
+	if strings.Contains(last, "already claimed") {
+		t.Errorf("reply must not mention the claim gate when the branch exists:\n%s", last)
+	}
+	if addCalls := rig.prov.CallsByMethod("AddIssueLabel"); len(addCalls) != 0 {
+		t.Errorf("AddIssueLabel unexpectedly called: %+v", addCalls)
+	}
+}
+
 // TestFixRemote_AddIssueLabelFailure_RollsBackWorktreeAndBranch
 // verifies the v1.x atomic semantics: when AddIssueLabel fails, the
 // worktree and branch created earlier in the flow must be

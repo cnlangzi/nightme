@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -170,18 +171,22 @@ func RunFix(
 //
 //  1. RepoRoot → RemoteOriginURL → Detect → GetIssue.
 //  2. Branch name = DeriveBranchFromTitle(issue.Title, id).
-//  3. PreflightWorktreeCreate → catches path / branch / parent
+//  3. BranchExists? → hard-fail reply (F-XX §3.1; no card).
+//  4. Issue carries LabelWIP? → hard-fail reply (the issue is
+//     already claimed by another fix; no card, no side effect).
+//  5. PreflightWorktreeCreate → catches path / branch / parent
 //     errors before WorktreeAdd.
-//  4. BranchExists? → hard-fail reply (F-XX §3.1; no card).
-//  5. WorktreeAdd (creates the durable worktree first; failure
+//  6. RefreshDefaultBranch → syncs the default branch so the
+//     worktree branches off the latest upstream code.
+//  7. WorktreeAdd (creates the durable worktree first; failure
 //     here surfaces the git error and bails without touching
 //     the label).
-//  6. AddIssueLabel(LabelWIP). Failure rolls back the worktree
-//     and branch via rollbackLabelStep.
-//  7. SetSelectedCwd → WriteGTWYml (the yml is the cwd-scoped
+//  8. ensureGtwLabels → AddIssueLabel(LabelWIP). Failure rolls
+//     back the worktree and branch via rollbackLabelStep.
+//  9. SetSelectedCwd → WriteGTWYml (the yml is the cwd-scoped
 //     source of truth for hooks, /gtw close, and recovery).
-//  8. Render success card.
-//  9. Dispatch issue body to ChatSession.QueueUserMessage so
+//  10. Render success card.
+//  11. Dispatch issue body to ChatSession.QueueUserMessage so
 //     the agent picks it up. Failure here does NOT roll back
 //     the worktree — the user can re-trigger manually.
 func runFixRemote(
@@ -300,6 +305,29 @@ func runFixRemote(
 		return reply(ctx, cs.Emitter(), chatID, messageID, body), nil
 	}
 
+	// --- already-claimed gate -------------------------------------
+	// `nightme/wip` is the claim marker: /gtw fix stamps it on
+	// the issue, /gtw close lifts it. Its presence at fetch time
+	// means some fix still holds this issue — on this machine or
+	// another one.
+	//
+	// The gate sits AFTER the branch-exists check because that
+	// check owns the "you already own this locally" case, whose
+	// remedy is `/gtw close` (which also drops the label). What
+	// reaches the gate is a claim the local checkout cannot
+	// explain: another machine's fix, or a branch deleted by hand.
+	//
+	// It sits BEFORE every mutation (preflight / refresh /
+	// worktree add), so a rejected run leaves nothing behind.
+	if issueHasLabel(issue, LabelWIP) {
+		return reply(ctx, cs.Emitter(), chatID, messageID, fmt.Sprintf(
+			"❌ Issue #%d is already claimed — label %q is present\n"+
+				"→ another /gtw fix holds this issue (or an earlier one never closed)\n"+
+				"↳ to release it: /cwd into that fix's worktree and run `/gtw close`\n"+
+				"↳ if the claim is stale, remove the %s label on the issue page",
+			issueID, LabelWIP, LabelWIP)), nil
+	}
+
 	// --- preflight (path / branch / parent) ----------------------
 	// F-XX: --force is removed. The previous force-cleanup path
 	// (forceCleanWorktreePath) is gone — its only use case under
@@ -387,10 +415,14 @@ func runFixRemote(
 	// first run against any repo. /gtw fix 235 failed outright
 	// because `nightme/wip` was missing — `gh issue edit
 	// --add-label` errors with "'nightme/wip' not found" rather
-	// than creating the label. ensureGtwLabels calls `gh label
-	// create --force` / `glab label create` (both idempotent)
-	// for every entry in AllLabels BEFORE the AddIssueLabel step, so
-	// AddIssueLabel always succeeds on a freshly-cloned repo.
+	// than creating the label. ensureGtwLabels calls
+	// `gh label create` / `glab api POST labels` for every entry
+	// in AllLabels BEFORE the AddIssueLabel step, so AddIssueLabel
+	// always succeeds on a freshly-cloned repo.
+	//
+	// Neither provider passes `--force`: an existing label keeps
+	// the colour / description the user tuned by hand, and the
+	// "already exists" error from gh / glab is matched as success.
 	//
 	// Failure semantics: any CreateLabel error rolls back the
 	// worktree + branch via the same atomic path as an AddIssueLabel
@@ -1133,6 +1165,16 @@ func stderrFromWorktreeErr(err error) string {
 // gtw package no longer emits interactive cards of its own;
 // the messages-level Choice / ChoiceOption types are still in
 // use by the channels package (feishu/slack/telegram).
+
+// issueHasLabel reports whether `issue` carries `name`. Label
+// names are case-insensitive on the platforms gtw targets, so a
+// hand-created "Nightme/WIP" still counts as the claim the
+// already-claimed gate rejects on.
+func issueHasLabel(issue *Issue, name string) bool {
+	return slices.ContainsFunc(issue.Labels, func(l string) bool {
+		return strings.EqualFold(l, name)
+	})
+}
 
 // ensureGtwLabels bootstraps the full AllLabels set on the
 // remote repo via provider.CreateLabel. The order matches

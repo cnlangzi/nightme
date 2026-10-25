@@ -152,20 +152,32 @@ func TestKeepalive_ConcurrentCallsRecoverOnce(t *testing.T) {
 
 // deadPID returns a PID that is no longer running: a child
 // process that has already exited and been reaped.
+//
+// The reaped PID is not reserved. On Windows the process handle is
+// closed inside cmd.Wait, which frees the PID for immediate reuse
+// by any other process on the machine; a concurrent spawn can
+// claim it before the probe below runs, and OpenProcess then
+// succeeds on the *new* process. The liveness probe is right — the
+// PID just no longer refers to our child. Retry the whole cycle
+// when that happens.
 func deadPID(t *testing.T) int {
 	t.Helper()
-	cmd := exec.Command(os.Args[0], "-test.run=TestNoSuchTestExists")
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start helper process: %v", err)
+	for range 10 {
+		cmd := exec.Command(os.Args[0], "-test.run=TestNoSuchTestExists")
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start helper process: %v", err)
+		}
+		pid := cmd.Process.Pid
+		if err := cmd.Wait(); err != nil {
+			t.Fatalf("wait helper process: %v", err)
+		}
+		if err := procutil.AlivePID(pid); err == nil {
+			continue
+		}
+		return pid
 	}
-	pid := cmd.Process.Pid
-	if err := cmd.Wait(); err != nil {
-		t.Fatalf("wait helper process: %v", err)
-	}
-	if err := procutil.AlivePID(pid); err == nil {
-		t.Fatalf("pid %d is unexpectedly alive", pid)
-	}
-	return pid
+	t.Fatalf("could not obtain a dead PID after 10 attempts")
+	return 0
 }
 
 // nopWriteCloser is a stdin sink for the RPC client in tests.

@@ -77,22 +77,23 @@ func TestFlushHook_DefaultDeliversToAgent(t *testing.T) {
 // OnTurnEnded hook became endPrompt (driven by the per-AS readpump
 // on EventAgentDone) followed by TryFlush.
 //
-// Note on CI flakiness: the polling budgets below were widened
-// from the original 1s (commit 7aa267c was the first deflake
-// pass) to 3s WaitReady + 5s TryFlush retry, then again to the
-// current 30s WaitReady + 30s TryFlush retry. The root cause is
-// isReady propagation latency between EndPrompt's isReady.Store(true)
-// and the test thread's atomic.Load — on a saturated Ubuntu
-// race+coverage runner the goroutine scheduler can take 3-5s
-// to surface the new value. synctest is not viable here because
-// the AS dispatcher goroutine (started lazily by
-// EnsureDispatcher inside endPrompt) blocks on the eventQueue
-// select AFTER EndPrompt returns, which is not a synctest-bubble
-// pattern (the bubble would panic with "main bubble goroutine
-// has exited but blocked goroutines remain" once the test
-// function returns with the dispatcher still parked). Locally
-// this still finishes in well under 100ms; the headroom is
-// purely for the CI VM.
+// Note on CI flakiness: the queued message must reach the agent
+// no matter who drives the flush. Two actors can do it: the AS's
+// own dispatcher (started lazily by ensureDispatcher inside
+// endPrompt) picks up the KindPromptEnded event and routeEvent
+// calls TryFlush; or the test's own TryFlush call does it.
+// IsReady() is NOT a usable precondition for either — the
+// dispatcher's flush submits the NEXT prompt, and Submit flips
+// IsReady back to false, so a wait on IsReady() can burn the whole
+// budget on a session that already flushed and will never report
+// ready again. The test therefore waits on the observable outcome
+// (the agent's SendBlocks count) instead of on AS state.
+//
+// synctest is not viable here because the AS dispatcher goroutine
+// blocks on the eventQueue select AFTER EndPrompt returns, which
+// is not a synctest-bubble pattern (the bubble would panic with
+// "main bubble goroutine has exited but blocked goroutines remain"
+// once the test function returns with the dispatcher still parked).
 func TestFlushHook_BusyQueues(t *testing.T) {
 	spawner := &spawnerRecording{}
 	csFile, asFile := newTestStores(t)
@@ -133,16 +134,14 @@ func TestFlushHook_BusyQueues(t *testing.T) {
 	// End the turn — in production the per-AS readpump does this on
 	// EventAgentDone, then routeEvent calls TryFlush.
 	agentstest.EndPrompt(as, PromptEndClean)
-	if !agentstest.WaitReady(as, 30*time.Second) {
-		t.Fatalf("AS not ready after EndPrompt (isReady propagation stalled)")
-	}
-	// Retry TryFlush a few times: between WaitReady returning and
-	// the first TryFlush call, a slow CI runner can flip IsReady
-	// back to false (causing TryFlush to SKIP) before flipping it
-	// true again. Retry on the same condition until either the
-	// flush lands or we exhaust the budget. 30s deadline (was
-	// 1s / 5s) — tail latency of a heavily loaded Ubuntu CI
-	// runner exceeds both prior budgets.
+	// Wait for the queued message to reach the agent. The flush may
+	// be driven by the AS's own dispatcher (KindPromptEnded ->
+	// routeEvent -> TryFlush) or by the TryFlush loop below.
+	// IsReady() is NOT a usable precondition: the dispatcher's flush
+	// submits the NEXT prompt, which flips IsReady back to false, so
+	// waiting on IsReady() can burn the whole budget on a session
+	// that already flushed. Retry on the same condition until either
+	// the flush lands or we exhaust the budget.
 	deadline := time.Now().Add(30 * time.Second)
 	for got := spawner.sessions[0].SentCount(); got < base+1; got = spawner.sessions[0].SentCount() {
 		if err := cs.TryFlush(); err != nil {

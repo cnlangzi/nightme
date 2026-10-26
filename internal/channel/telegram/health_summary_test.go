@@ -94,3 +94,47 @@ func TestHealthSummary_SendStampsOutbound(t *testing.T) {
 		t.Error("a delivered message did not stamp the outbound liveness clock")
 	}
 }
+
+// TestHealthSummary_PollFailureDisconnects asserts a broken long
+// poll takes the channel down: the doctor must not report a telegram
+// channel whose getUpdates keeps failing as connected. The
+// credential check is a separate claim and survives the outage.
+func TestHealthSummary_PollFailureDisconnects(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	a.mu.Lock()
+	a.started = true
+	a.linkVerified = true
+	a.mu.Unlock()
+
+	a.recordError("getUpdates failed: 409 Conflict")
+	summary := a.HealthSummary()
+	if summary.Connected {
+		t.Error("Connected = true while the poll is failing")
+	}
+	if !summary.LinkVerified {
+		t.Error("LinkVerified = false — the credential check still holds")
+	}
+	if summary.LastError == "" {
+		t.Error("LastError is empty")
+	}
+}
+
+// TestHealthSummary_PollRecoveryReconnects is the other half: a
+// successful poll clears the outage.
+func TestHealthSummary_PollRecoveryReconnects(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	a.mu.Lock()
+	a.started = true
+	a.linkVerified = true
+	a.mu.Unlock()
+
+	a.recordError("getUpdates failed: 409 Conflict")
+	a.recordError("")
+	summary := a.HealthSummary()
+	if !summary.Connected {
+		t.Error("Connected = false after the poll recovered")
+	}
+	if summary.LastError != "" {
+		t.Errorf("LastError = %q after the poll recovered", summary.LastError)
+	}
+}

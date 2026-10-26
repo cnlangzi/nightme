@@ -38,10 +38,20 @@ type HealthSource struct {
 // per started channel: the sources accumulate, so the "health" RPC
 // reports every running channel instead of only the last one
 // registered.
+//
+// A channel name that is already registered is replaced — one process
+// runs one instance per channel, so a repeat registration means the
+// channel was restarted and the newer source is the live one.
 func (s *Server) AddHealthSource(src HealthSource) {
 	s.healthMu.Lock()
+	defer s.healthMu.Unlock()
+	for i := range s.healthSources {
+		if s.healthSources[i].Channel == src.Channel {
+			s.healthSources[i] = src
+			return
+		}
+	}
 	s.healthSources = append(s.healthSources, src)
-	s.healthMu.Unlock()
 }
 
 // healthPayload collects every registered channel's health. A source

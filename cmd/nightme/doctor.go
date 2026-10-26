@@ -190,11 +190,14 @@ func writeDoctorText(out io.Writer, payload daemoncontrol.HealthPayload) error {
 		if i > 0 {
 			fmt.Fprintln(tw, "")
 		}
+		fmt.Fprintf(tw, "CHANNEL %s\n", entry.Channel)
 		summary, err := decodeHealthSummary(entry)
 		if err != nil {
-			return err
+			// One channel with an unreadable summary must not hide
+			// the others — report it and keep going.
+			fmt.Fprintf(tw, "  health error:\t%s\n", err)
+			continue
 		}
-		fmt.Fprintf(tw, "CHANNEL %s\n", entry.Channel)
 		fmt.Fprintf(tw, "  status:\t%s\n", channelStatus(summary))
 		fmt.Fprintf(tw, "  link verified:\t%s\n", yesNo(summary.LinkVerified))
 		fmt.Fprintf(tw, "  last inbound:\t%s\n", formatTimestamp(summary.LastInboundAt, now))

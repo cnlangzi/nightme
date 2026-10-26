@@ -155,6 +155,9 @@ func (b *Bot) Start(ctx context.Context) error {
 
 // Stop implements channel.Channel. Stops the trigger manager.
 func (b *Bot) Stop(_ context.Context) error {
+	b.healthMu.Lock()
+	b.started = false
+	b.healthMu.Unlock()
 	if b.triggers != nil {
 		return b.triggers.Stop()
 	}

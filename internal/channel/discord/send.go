@@ -37,15 +37,52 @@ import (
 //	OutHeartbeat /          — silent drop (no native surface;
 //	OutPromptEnded            OnPromptEnded owns the lifecycle stamp).
 //
-// The outbound liveness clock only advances for a message that
-// actually reaches Discord — the heartbeat and prompt-ended kinds
-// are silent drops.
+// The outbound liveness clock is stamped at the platform write
+// boundary (createMessage / editMessage / addReaction /
+// removeOwnReaction), so a kind that silent-drops — an empty body,
+// a repeated message state, the heartbeat kinds — never advances it.
 func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error {
-	err := a.sendOutbound(ctx, msg)
-	if err == nil && msg.Kind != messages.OutHeartbeat && msg.Kind != messages.OutPromptEnded {
+	return a.sendOutbound(ctx, msg)
+}
+
+// createMessage posts a message to Discord and stamps the outbound
+// liveness clock when the post lands.
+func (a *Adapter) createMessage(ctx context.Context, channelID string, payload CreateMessagePayload) (Message, error) {
+	sent, err := a.api.CreateMessage(ctx, channelID, payload)
+	if err == nil {
 		a.recordOutbound(time.Now())
 	}
-	return err
+	return sent, err
+}
+
+// editMessage edits a message in place and stamps the outbound
+// liveness clock when the edit lands.
+func (a *Adapter) editMessage(ctx context.Context, channelID, messageID string, payload EditMessagePayload) (Message, error) {
+	edited, err := a.api.EditMessage(ctx, channelID, messageID, payload)
+	if err == nil {
+		a.recordOutbound(time.Now())
+	}
+	return edited, err
+}
+
+// addReaction places a reaction and stamps the outbound liveness
+// clock when it lands.
+func (a *Adapter) addReaction(ctx context.Context, channelID, messageID, emoji string) error {
+	if err := a.api.AddReaction(ctx, channelID, messageID, emoji); err != nil {
+		return err
+	}
+	a.recordOutbound(time.Now())
+	return nil
+}
+
+// removeOwnReaction removes a reaction and stamps the outbound
+// liveness clock when the removal lands.
+func (a *Adapter) removeOwnReaction(ctx context.Context, channelID, messageID, emoji string) error {
+	if err := a.api.RemoveOwnReaction(ctx, channelID, messageID, emoji); err != nil {
+		return err
+	}
+	a.recordOutbound(time.Now())
+	return nil
 }
 
 // sendOutbound dispatches one outbound message to its Discord
@@ -104,7 +141,7 @@ func (a *Adapter) sendPlainReply(ctx context.Context, rawChannelID, body string)
 	if strings.TrimSpace(body) == "" {
 		return nil
 	}
-	_, err := a.api.CreateMessage(ctx, rawChannelID, CreateMessagePayload{
+	_, err := a.createMessage(ctx, rawChannelID, CreateMessagePayload{
 		Content:         body,
 		AllowedMentions: &AllowedMentions{Parse: []string{}},
 	})
@@ -123,7 +160,7 @@ func (a *Adapter) sendResult(ctx context.Context, raw string, msg messages.Outbo
 	if body == "" {
 		return nil
 	}
-	sent, err := a.api.CreateMessage(ctx, raw, CreateMessagePayload{
+	sent, err := a.createMessage(ctx, raw, CreateMessagePayload{
 		Content:         body,
 		AllowedMentions: &AllowedMentions{Parse: []string{}},
 	})
@@ -147,7 +184,7 @@ func (a *Adapter) sendMessageState(ctx context.Context, raw string, msg messages
 	if prev, ok := a.previousMessageState(msg.MessageState.MessageID); ok && prev == emoji {
 		return nil
 	}
-	if err := a.api.AddReaction(ctx, raw, msg.MessageState.MessageID, emoji); err != nil {
+	if err := a.addReaction(ctx, raw, msg.MessageState.MessageID, emoji); err != nil {
 		return err
 	}
 	a.rememberMessageState(msg.MessageState.MessageID, emoji)
@@ -163,7 +200,7 @@ func (a *Adapter) sendMessageStateRemoved(ctx context.Context, raw string, msg m
 	if emoji == "" {
 		return nil
 	}
-	return a.api.RemoveOwnReaction(ctx, raw, msg.MessageState.MessageID, emoji)
+	return a.removeOwnReaction(ctx, raw, msg.MessageState.MessageID, emoji)
 }
 
 // sendError prepends the agent diagnostic when present. Mirrors
@@ -173,7 +210,7 @@ func (a *Adapter) sendError(ctx context.Context, raw string, msg messages.Outbou
 	if msg.Diagnostic != nil && msg.Diagnostic.StderrTail != "" {
 		body += "\n```\n" + msg.Diagnostic.StderrTail + "\n```"
 	}
-	_, err := a.api.CreateMessage(ctx, raw, CreateMessagePayload{
+	_, err := a.createMessage(ctx, raw, CreateMessagePayload{
 		Content:         body,
 		AllowedMentions: &AllowedMentions{Parse: []string{}},
 	})
@@ -213,7 +250,7 @@ func (a *Adapter) sendInit(ctx context.Context, rawChannelID string, msg message
 			body += " (" + msg.Branch + ")"
 		}
 	}
-	_, err := a.api.CreateMessage(ctx, rawChannelID, CreateMessagePayload{
+	_, err := a.createMessage(ctx, rawChannelID, CreateMessagePayload{
 		Content:         body,
 		AllowedMentions: &AllowedMentions{Parse: []string{}},
 	})
@@ -236,7 +273,7 @@ func (a *Adapter) sendChoice(ctx context.Context, rawChannelID string, msg messa
 	}
 	content := renderChoiceContent(state)
 	components := a.buildChoiceComponents(state)
-	sent, err := a.api.CreateMessage(ctx, rawChannelID, CreateMessagePayload{
+	sent, err := a.createMessage(ctx, rawChannelID, CreateMessagePayload{
 		Content:         content,
 		Components:      components,
 		AllowedMentions: &AllowedMentions{Parse: []string{}},
@@ -275,7 +312,7 @@ func (a *Adapter) patchChoice(ctx context.Context, rawChannelID string, msg mess
 	if !msg.Choice.Settled {
 		components = a.buildChoiceComponents(state)
 	}
-	_, err := a.api.EditMessage(ctx, state.ChannelID, state.MessageID, EditMessagePayload{
+	_, err := a.editMessage(ctx, state.ChannelID, state.MessageID, EditMessagePayload{
 		Content:         renderChoiceContent(state),
 		Components:      components,
 		AllowedMentions: &AllowedMentions{Parse: []string{}},
@@ -320,7 +357,7 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string, r
 	if target == "" {
 		target = userMsgID
 	}
-	_ = a.api.AddReaction(ctx, raw, target, emoji)
+	_ = a.addReaction(ctx, raw, target, emoji)
 }
 
 // toolName / toolArgs / toolResultOutput / toolErr read the

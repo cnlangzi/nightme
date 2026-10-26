@@ -1982,16 +1982,17 @@ func (a *Adapter) HealthSnapshot() (string, json.RawMessage, error) {
 
 // HealthSummary implements channel.Channel.HealthSummary.
 //
-// Connected only says the adapter was started and not stopped yet.
-// LinkVerified is the stronger claim: it is set once getMe has
-// proved the bot token works against Telegram's API. Until then the
-// channel must not be reported as a connected link.
+// Connected says the adapter is up AND its long poll is working: a
+// getUpdates failure marks the link down until the next poll
+// succeeds, so a broken poll is never reported as connected.
+// LinkVerified is the stronger credential claim: it is set once
+// getMe has proved the bot token works against Telegram's API.
 func (a *Adapter) HealthSummary() channel.HealthSummary {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return channel.HealthSummary{
 		Channel:        a.name,
-		Connected:      a.started && !a.stopped,
+		Connected:      a.started && !a.stopped && a.lastError == "",
 		LinkVerified:   a.linkVerified,
 		LastError:      a.lastError,
 		LastInboundAt:  a.lastInboundAt,

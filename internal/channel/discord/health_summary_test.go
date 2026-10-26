@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // getMeFailedREST rejects the users/@me round trip the way a bad
@@ -71,5 +73,40 @@ func TestHealthSummary_ConnectedAfterReady(t *testing.T) {
 	}
 	if summary.Channel != "discord" {
 		t.Errorf("Channel = %q, want discord", summary.Channel)
+	}
+}
+
+// TestHealthSummary_SilentDropDoesNotStampOutbound asserts a kind
+// that drops before reaching Discord doesn't advance the outbound
+// liveness clock — the doctor would otherwise claim a message went
+// out when nothing was sent.
+func TestHealthSummary_SilentDropDoesNotStampOutbound(t *testing.T) {
+	a := newTestAdapter(&fakeREST{})
+	// A whitespace-only reply is dropped by the sender.
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "dc_12345",
+		Kind:   messages.OutReply,
+		Text:   "   ",
+	}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if !a.HealthSummary().LastOutboundAt.IsZero() {
+		t.Error("a silent drop stamped the outbound liveness clock")
+	}
+}
+
+// TestHealthSummary_SendStampsOutbound is the other half: a message
+// that reaches Discord advances the clock.
+func TestHealthSummary_SendStampsOutbound(t *testing.T) {
+	a := newTestAdapter(&fakeREST{})
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "dc_12345",
+		Kind:   messages.OutReply,
+		Text:   "hello",
+	}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if a.HealthSummary().LastOutboundAt.IsZero() {
+		t.Error("a delivered message did not stamp the outbound liveness clock")
 	}
 }

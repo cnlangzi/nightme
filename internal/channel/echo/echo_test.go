@@ -155,3 +155,25 @@ func TestEcho_AutoHandlesNewKinds(t *testing.T) {
 func TestEcho_SatisfiesChannelInterface(t *testing.T) {
 	var _ channel.Channel = New("echo", nil)
 }
+
+// TestEcho_HealthSummary_TracksLifecycle asserts the normalized
+// health view follows the channel's real state — a channel that was
+// never started, or was stopped, is not connected.
+func TestEcho_HealthSummary_TracksLifecycle(t *testing.T) {
+	c := New("echo", nil)
+	if c.HealthSummary().Connected {
+		t.Error("Connected = true before Start")
+	}
+	if err := c.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if !c.HealthSummary().Connected {
+		t.Error("Connected = false after Start")
+	}
+	if err := c.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if c.HealthSummary().Connected {
+		t.Error("Connected = true after Stop")
+	}
+}

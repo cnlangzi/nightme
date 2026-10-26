@@ -224,3 +224,42 @@ func TestWriteDoctorJSON_KeepsSummaryAndRawPayload(t *testing.T) {
 		t.Errorf("summary = %v, want link_verified true", summary)
 	}
 }
+
+// TestWriteDoctorText_KeepsOtherChannelsWhenOneSummaryIsBroken
+// asserts one unreadable summary doesn't take the whole report
+// down: the operator still sees every other channel.
+func TestWriteDoctorText_KeepsOtherChannelsWhenOneSummaryIsBroken(t *testing.T) {
+	payload := daemoncontrol.HealthPayload{Channels: []daemoncontrol.ChannelHealth{
+		{
+			Channel: "broken",
+			Summary: json.RawMessage(`{"connected":`),
+		},
+		{
+			Channel: "telegram",
+			Summary: mustSummaryJSON(t, channel.HealthSummary{
+				Channel:      "telegram",
+				Connected:    true,
+				LinkVerified: true,
+			}),
+		},
+	}}
+
+	var sb strings.Builder
+	if err := writeDoctorText(&sb, payload); err != nil {
+		t.Fatalf("writeDoctorText: %v", err)
+	}
+	out := sb.String()
+	if !strings.Contains(out, "CHANNEL broken") {
+		t.Errorf("the broken channel must still be listed:\n%s", out)
+	}
+	if !strings.Contains(out, "health error:") {
+		t.Errorf("the broken channel must report its error:\n%s", out)
+	}
+	telegram := doctorSection(out, "telegram")
+	if telegram == "" {
+		t.Fatalf("the healthy channel was hidden by the broken one:\n%s", out)
+	}
+	if got := doctorField(telegram, "status"); got != "connected" {
+		t.Errorf("telegram status = %q, want connected", got)
+	}
+}

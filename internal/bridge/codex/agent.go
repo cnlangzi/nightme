@@ -182,8 +182,14 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 // process-end.
 func (d *driver) Events() <-chan agent.AgentEvent { return d.session.events }
 
-// PID returns the OS process id of the underlying child.
-func (d *driver) PID() int { return d.session.pid }
+// PID returns the OS process id of the underlying child. A driver
+// without a session has no child yet — 0 means "not running".
+func (d *driver) PID() int {
+	if d.session == nil {
+		return 0
+	}
+	return d.session.pid
+}
 
 // ─── user input ───
 
@@ -596,14 +602,30 @@ func (d *driver) Close() error {
 	return firstErr
 }
 
+// alive reports whether the codex bridge is still usable. The RPC
+// session's closed flag is authoritative: it flips in the session
+// lifecycle goroutine right after cmd.Wait returns, and in the RPC
+// read pump on stdout EOF. The PID probe is the fallback for a
+// child that died before either of those ran — and a recycled PID
+// would make that probe report a healthy bridge, so it is checked
+// last.
+func (d *driver) alive() bool {
+	if d.session != nil && d.session.rpc != nil && d.session.rpc.closed.Load() {
+		return false
+	}
+	return procutil.AlivePID(d.PID()) == nil
+}
+
 // Keepalive is the driver.Keepalive implementation for the
 // codex bridge. codex spawns the `codex app-server` subprocess
 // per AS — when it dies, the next SendBlocks silently fails.
-// Probe the OS PID via procutil.AlivePID and invoke onRecover
-// so the chat layer can spawn a fresh codex with the saved
-// thread_id. See agent.driver.Keepalive for the full contract.
+// Ask the bridge's own death signal first (the RPC session's
+// closed flag) and fall back to the OS PID probe, then invoke
+// onRecover so the chat layer can spawn a fresh codex with the
+// saved thread_id. See agent.driver.Keepalive for the full
+// contract.
 func (d *driver) Keepalive(ctx context.Context, onRecover func(context.Context) error) error {
-	if err := procutil.AlivePID(d.PID()); err == nil {
+	if d.alive() {
 		return nil
 	}
 	if onRecover == nil {

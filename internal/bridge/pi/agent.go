@@ -906,14 +906,28 @@ func (d *driver) Close() error {
 	return firstErr
 }
 
+// alive reports whether the pi bridge is still usable. The RPC
+// client's closed flag is authoritative: it flips in the read pump
+// on stdout EOF and in the lifecycle goroutine right after
+// cmd.Wait returns. The PID probe is the fallback for a child that
+// died before either of those ran — and a recycled PID would make
+// that probe report a healthy bridge, so it is checked last.
+func (d *driver) alive() bool {
+	if d.rpc != nil && d.rpc.closed.Load() {
+		return false
+	}
+	return procutil.AlivePID(d.PID()) == nil
+}
+
 // Keepalive is the driver.Keepalive implementation for the
 // pi bridge. pi spawns the `pi` CLI subprocess per AS — when
-// it dies, the next SendBlocks silently fails. Probe the OS
-// PID via procutil.AlivePID and invoke onRecover so the chat
+// it dies, the next SendBlocks silently fails. Ask the bridge's
+// own death signal first (the RPC client's closed flag) and fall
+// back to the OS PID probe, then invoke onRecover so the chat
 // layer can spawn a fresh pi with the saved --resume session.
 // See agent.driver.Keepalive for the full contract.
 func (d *driver) Keepalive(ctx context.Context, onRecover func(context.Context) error) error {
-	if err := procutil.AlivePID(d.PID()); err == nil {
+	if d.alive() {
 		return nil
 	}
 	piLog("bridge process dead, invoking recovery", "pid", d.PID(), "agent", d.agentName, "workspace", d.workspace)

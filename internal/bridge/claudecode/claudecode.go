@@ -795,9 +795,25 @@ func (d *driver) Stop(ctx context.Context) error {
 	return agent.SignalProcessGroup(d.cmd.Process, os.Interrupt)
 }
 
+// alive reports whether the claudecode bridge is still usable.
+// exitDone is closed by the lifecycle goroutine once the child has
+// been reaped, so it is authoritative: the bridge is gone even if
+// the OS PID has since been recycled. The PID probe is the fallback
+// for the window before the reap lands.
+func (d *driver) alive() bool {
+	select {
+	case <-d.exitDone:
+		return false
+	default:
+	}
+	return procutil.AlivePID(d.pid) == nil
+}
+
 // Keepalive is the driver.Keepalive implementation for the
-// claudecode bridge. Detects a dead OS PID via procutil.AlivePID
-// and invokes onRecover so the chat layer's respawn (which has
+// claudecode bridge. Detects a dead child from the bridge's own
+// signal first (exitDone, closed by the lifecycle goroutine after
+// the child is reaped) and falls back to the OS PID probe, then
+// invokes onRecover so the chat layer's respawn (which has
 // access to the Spawner) can re-spawn the subprocess with the
 // saved --resume session_id. See agent.driver.Keepalive for the
 // full contract.
@@ -805,11 +821,11 @@ func (d *driver) Stop(ctx context.Context) error {
 // The bridge deliberately does NOT hold the Spawner reference —
 // respawn is orchestrating it via the chat layer so we don't have
 // to plumb Spawner into every bridge constructor. The bridge
-// owns the "how do I know I'm dead" question (subprocess PID
-// liveness); the chat layer owns the "how do I rebuild myself"
-// question (Spawner).
+// owns the "how do I know I'm dead" question (the child's exit
+// signal, with subprocess PID liveness as the fallback); the chat
+// layer owns the "how do I rebuild myself" question (Spawner).
 func (d *driver) Keepalive(ctx context.Context, onRecover func(context.Context) error) error {
-	if err := procutil.AlivePID(d.pid); err == nil {
+	if d.alive() {
 		return nil
 	}
 	slog.Warn("claudecode: bridge process dead, invoking recovery",

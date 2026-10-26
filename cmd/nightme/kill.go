@@ -21,10 +21,11 @@
 //     verbatim so the next spawn of the same (chat, agent, cwd) tuple
 //     can still replay `--resume <id>` — same rule `nightme list`
 //     follows when it refuses to GC an exited entry that carries one.
-//   - Identity: a persisted PID is only signalled after `ps` confirms
-//     it still runs the agent's binary. Entries outlive daemon
-//     crashes and the OS recycles PIDs, so an unverified sweep could
-//     kill an unrelated process. Mismatches are skipped and named.
+//   - Identity: a persisted PID is only signalled after the OS
+//     confirms it still runs the agent's binary (`ps` on unix, a
+//     process snapshot on Windows). Entries outlive daemon crashes
+//     and the OS recycles PIDs, so an unverified sweep could kill an
+//     unrelated process. Mismatches are skipped and named.
 //   - Scope: agent child processes only. The nightme daemon itself is
 //     untouched; use `nightme stop` for that. If the daemon is running
 //     it owns these children and will observe their death through its

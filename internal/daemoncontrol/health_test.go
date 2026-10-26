@@ -16,7 +16,7 @@ import (
 // channels reported one — and `nightme doctor` showed nothing about
 // the other.
 func TestHealthRPCReportsEveryChannel(t *testing.T) {
-	dir := t.TempDir()
+	dir := healthTestDir(t)
 	paths, err := ResolvePaths(dir)
 	if err != nil {
 		t.Fatalf("resolve paths: %v", err)
@@ -68,7 +68,7 @@ func TestHealthRPCReportsEveryChannel(t *testing.T) {
 // one channel's payload doesn't hide the others: the broken channel
 // reports its error, the healthy one still answers.
 func TestHealthRPCKeepsOtherChannelsWhenOneFails(t *testing.T) {
-	dir := t.TempDir()
+	dir := healthTestDir(t)
 	paths, err := ResolvePaths(dir)
 	if err != nil {
 		t.Fatalf("resolve paths: %v", err)
@@ -119,7 +119,7 @@ func TestHealthRPCKeepsOtherChannelsWhenOneFails(t *testing.T) {
 // process runs one instance per channel, so a repeat registration
 // means the channel was restarted.
 func TestHealthRPCReplacesDuplicateChannel(t *testing.T) {
-	dir := t.TempDir()
+	dir := healthTestDir(t)
 	paths, err := ResolvePaths(dir)
 	if err != nil {
 		t.Fatalf("resolve paths: %v", err)

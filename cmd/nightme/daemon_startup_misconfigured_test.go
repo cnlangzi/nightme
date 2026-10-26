@@ -63,6 +63,9 @@ func (c *misconfiguredChannel) OnPromptEnded(context.Context, string, string, ag
 func (c *misconfiguredChannel) HealthSnapshot() (string, json.RawMessage, error) {
 	return c.name, json.RawMessage("{}"), nil
 }
+func (c *misconfiguredChannel) HealthSummary() channel.HealthSummary {
+	return channel.HealthSummary{Channel: c.name}
+}
 func (c *misconfiguredChannel) SetLogger(*slog.Logger) {}
 func (c *misconfiguredChannel) BuildBlocks(string, []messages.Attachment) []agent.ContentBlock {
 	return nil

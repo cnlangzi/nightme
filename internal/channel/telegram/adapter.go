@@ -41,6 +41,18 @@ type Adapter struct {
 	limiter   *Limiter
 	retry     RetryConfig
 
+	// linkVerified records that a remote round trip (getMe) proved
+	// the bot token works. An adapter that was merely constructed or
+	// started is not a verified link.
+	linkVerified bool
+	// lastError is the most recent getUpdates failure — the reason
+	// messages stopped arriving.
+	lastError string
+	// lastInboundAt / lastOutboundAt are the liveness stamps the
+	// normalized health view reports.
+	lastInboundAt  time.Time
+	lastOutboundAt time.Time
+
 	// muMessageStates guards messageStates. The map stores the last
 	// rendered MessageState per userMsgID so duplicate emits of the
 	// same state can short-circuit without hitting Telegram's API.
@@ -250,6 +262,7 @@ func (a *Adapter) Start(ctx context.Context) error {
 	a.mu.Lock()
 	a.botID = me.ID
 	a.botName = me.Username
+	a.linkVerified = true
 	a.mu.Unlock()
 	if a.botName == "" {
 		a.Stop(context.Background())
@@ -359,12 +372,14 @@ func (a *Adapter) pollLoop(ctx context.Context) {
 			}
 			if ctx.Err() == nil {
 				a.logger.Warn("telegram: getUpdates failed", "err", err)
+				a.recordError(err.Error())
 			}
 			if !sleepContext(ctx, time.Second) {
 				return
 			}
 			continue
 		}
+		a.recordError("")
 		for _, update := range updates {
 			a.offset = update.UpdateID + 1
 			a.handleUpdate(ctx, update)
@@ -552,6 +567,7 @@ func (a *Adapter) handleMessage(ctx context.Context, message *Message) {
 func (a *Adapter) publish(inbound messages.InboundMessage) {
 	select {
 	case a.incoming <- inbound:
+		a.recordInbound(time.Now())
 	case <-a.ctxDone():
 		// Adapter is shutting down — drop silently. This is the
 		// expected race window when Stop() is called mid-publish.
@@ -1222,6 +1238,12 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 	// Most call send sites (chatsession, runtime dispatcher, shell)
 	// don't log Send errors — they bubble up. Log here so every
 	// outgoing failure leaves a trace, regardless of caller.
+	//
+	// sent tracks whether this call reaches Telegram at all. A
+	// silent drop (empty text, OutInit, a repeated message state)
+	// completes without sending anything, so it must not stamp the
+	// outbound liveness clock.
+	sent := true
 	defer func() {
 		if err != nil {
 			a.logger.Warn("telegram: outgoing failed",
@@ -1229,6 +1251,10 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 				"kind", msg.Kind.String(),
 				"err", err,
 			)
+			return
+		}
+		if sent {
+			a.recordOutbound(time.Now())
 		}
 	}()
 	if msg.ChatID == "" {
@@ -1262,6 +1288,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 				(msg.Err != nil || statusbar.StatusBarLines(&msg) != nil) {
 				break
 			}
+			sent = false
 			return nil
 		}
 	case messages.OutInit:
@@ -1270,6 +1297,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// callers, not to surface a bubble. Without this guard
 		// the placeholder resolution below would still send
 		// "🤖 Working..." to Telegram.
+		sent = false
 		return nil
 	}
 	// Resolve replyAnchor up front. reply_to_message_id for OutXxx
@@ -1342,6 +1370,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// preview is the single source of truth for ticker
 		// visuals. patchChainHeader keeps the log line and is the
 		// historical entry point; it now does nothing functional.
+		sent = false
 		return a.patchChainHeader(msg)
 	case messages.OutMessageState:
 		if msg.MessageState == nil || msg.MessageState.MessageID == "" {
@@ -1354,11 +1383,13 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		state := msg.MessageState.State
 		emoji := mapStateToTelegramEmoji(state)
 		if emoji == "" {
+			sent = false
 			return nil // 未知 state silent drop, 跟 feishu 对位
 		}
 		// 幂等: 同 state 跳过 API 调用, 避免 Telegram API 抖动。
 		// 跟 feishu 的 messageStates LRU 行为对称。
 		if prev, ok := a.lastMessageState(msg.MessageState.MessageID); ok && prev == state {
+			sent = false
 			return nil
 		}
 		messageID, err := strconv.Atoi(msg.MessageState.MessageID)
@@ -1947,6 +1978,48 @@ func (a *Adapter) HealthSnapshot() (string, json.RawMessage, error) {
 		"pending_rich_turns": pendingRichTurns,
 	})
 	return "telegram", payload, nil
+}
+
+// HealthSummary implements channel.Channel.HealthSummary.
+//
+// Connected says the adapter is up AND its long poll is working: a
+// getUpdates failure marks the link down until the next poll
+// succeeds, so a broken poll is never reported as connected.
+// LinkVerified is the stronger credential claim: it is set once
+// getMe has proved the bot token works against Telegram's API.
+func (a *Adapter) HealthSummary() channel.HealthSummary {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return channel.HealthSummary{
+		Channel:        a.name,
+		Connected:      a.started && !a.stopped && a.lastError == "",
+		LinkVerified:   a.linkVerified,
+		LastError:      a.lastError,
+		LastInboundAt:  a.lastInboundAt,
+		LastOutboundAt: a.lastOutboundAt,
+	}
+}
+
+// recordInbound stamps the last successful inbound publish.
+func (a *Adapter) recordInbound(at time.Time) {
+	a.mu.Lock()
+	a.lastInboundAt = at
+	a.mu.Unlock()
+}
+
+// recordOutbound stamps the last successful outbound send.
+func (a *Adapter) recordOutbound(at time.Time) {
+	a.mu.Lock()
+	a.lastOutboundAt = at
+	a.mu.Unlock()
+}
+
+// recordError stores the most recent polling error. An empty msg
+// clears it — a successful poll means the link recovered.
+func (a *Adapter) recordError(msg string) {
+	a.mu.Lock()
+	a.lastError = msg
+	a.mu.Unlock()
 }
 
 func (a *Adapter) BuildBlocks(text string, attachments []messages.Attachment) []agent.ContentBlock {

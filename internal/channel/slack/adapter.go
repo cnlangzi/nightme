@@ -184,6 +184,22 @@ func (a *Adapter) HealthSnapshot() (string, json.RawMessage, error) {
 	return a.name, payload, nil
 }
 
+// HealthSummary implements channel.Channel.HealthSummary.
+//
+// A live Socket Mode connection means the handshake succeeded, so a
+// connected socket is a verified link.
+func (a *Adapter) HealthSummary() channel.HealthSummary {
+	snap := a.health.snapshot()
+	return channel.HealthSummary{
+		Channel:        a.name,
+		Connected:      snap.Connected,
+		LinkVerified:   snap.Connected,
+		LastError:      snap.LastError,
+		LastInboundAt:  snap.LastInboundAt,
+		LastOutboundAt: a.health.lastOutboundTime(),
+	}
+}
+
 // BuildBlocks converts an inbound message into agent content blocks.
 // Slack has no rich inbound envelope to preserve (unlike Feishu's
 // post type), so this is text plus whatever files were downloaded.

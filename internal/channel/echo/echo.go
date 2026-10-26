@@ -45,6 +45,7 @@ type Channel struct {
 
 	mu       sync.Mutex
 	recorded []messages.OutboundMessage
+	started  bool
 }
 
 // New constructs an echo Channel. The name is surfaced via Name()
@@ -65,12 +66,22 @@ func (c *Channel) Name() string { return c.name }
 // Start implements channel.Channel. Echo has nothing to connect
 // to; this is a no-op that returns immediately. Tests that don't
 // drive Inbound don't even need to call Start.
-func (c *Channel) Start(ctx context.Context) error { return nil }
+func (c *Channel) Start(ctx context.Context) error {
+	c.mu.Lock()
+	c.started = true
+	c.mu.Unlock()
+	return nil
+}
 
 // Stop implements channel.Channel. Closes the recorded-events
 // snapshot (idempotent); no goroutines to drain because echo
 // never starts any.
-func (c *Channel) Stop(ctx context.Context) error { return nil }
+func (c *Channel) Stop(ctx context.Context) error {
+	c.mu.Lock()
+	c.started = false
+	c.mu.Unlock()
+	return nil
+}
 
 // Incoming implements channel.Channel. The returned channel yields
 // only what Inject puts there, so a caller that never injects sees
@@ -140,6 +151,20 @@ func (c *Channel) OnPromptEnded(ctx context.Context, chatID, userMsgID string, _
 // RPC still answers.
 func (c *Channel) HealthSnapshot() (string, json.RawMessage, error) {
 	return c.Name(), json.RawMessage("{}"), nil
+}
+
+// HealthSummary implements channel.Channel.HealthSummary. echo is a
+// local test channel: there is no remote link to verify, so the link
+// always counts as verified.
+func (c *Channel) HealthSummary() channel.HealthSummary {
+	c.mu.Lock()
+	started := c.started
+	c.mu.Unlock()
+	return channel.HealthSummary{
+		Channel:      c.Name(),
+		Connected:    started,
+		LinkVerified: true,
+	}
 }
 
 // SetLogger implements channel.Channel.SetLogger as a no-op —

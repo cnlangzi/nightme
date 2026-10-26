@@ -16,6 +16,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/messages"
@@ -66,6 +67,11 @@ import (
 //     every "health" RPC. The returned JSON is served
 //     verbatim. No-op adapters return (Name(), empty
 //     RawMessage, nil).
+//   - HealthSummary: the cross-channel normalized health view
+//     (see HealthSummary below). The daemoncontrol server calls
+//     this next to HealthSnapshot so the CLI can render one
+//     section per channel without decoding any adapter's
+//     payload shape.
 //   - SetLogger: the runtime calls this once after
 //     construction, before Start. Lets adapters route their
 //     internal log lines through the daemon's structured
@@ -87,8 +93,33 @@ type Channel interface {
 
 	OnPromptEnded(ctx context.Context, chatID, userMsgID string, reason agent.PromptEndReason)
 	HealthSnapshot() (name string, payload json.RawMessage, err error)
+	HealthSummary() HealthSummary
 	SetLogger(logger *slog.Logger)
 	BuildBlocks(text string, attachments []messages.Attachment) []agent.ContentBlock
+}
+
+// HealthSummary is the cross-channel normalized health view. Every
+// adapter fills it in and the fields mean the same thing for every
+// channel, so `nightme doctor` can render one section per channel
+// without decoding any adapter's own payload shape.
+//
+// Connected is the adapter's own view of the link. LinkVerified
+// reports whether a real remote round trip has proven that the
+// credentials and the link both work. The two differ for adapters
+// that can only prove they were started — a started adapter whose
+// link was never verified must not be reported as connected.
+//
+// LastInboundAt / LastOutboundAt are zero when the adapter does not
+// track them; readers must treat a zero value as "never", not as the
+// zero timestamp. The zero value is left out of the JSON so a
+// consumer never reads it as a real time.
+type HealthSummary struct {
+	Channel        string    `json:"channel"`
+	Connected      bool      `json:"connected"`
+	LinkVerified   bool      `json:"link_verified"`
+	LastError      string    `json:"last_error,omitempty"`
+	LastInboundAt  time.Time `json:"last_inbound_at,omitzero"`
+	LastOutboundAt time.Time `json:"last_outbound_at,omitzero"`
 }
 
 // Message is an alias for messages.InboundMessage. Kept for

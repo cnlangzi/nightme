@@ -314,6 +314,9 @@ func (c *capturingChannel) OnPromptEnded(_ context.Context, chatID, msgID string
 func (c *capturingChannel) HealthSnapshot() (string, json.RawMessage, error) {
 	return c.name, json.RawMessage("{}"), nil
 }
+func (c *capturingChannel) HealthSummary() channel.HealthSummary {
+	return channel.HealthSummary{Channel: c.name}
+}
 func (c *capturingChannel) SetLogger(_ *slog.Logger) {}
 func (c *capturingChannel) BuildBlocks(text string, _ []messages.Attachment) []agent.ContentBlock {
 	if text == "" {

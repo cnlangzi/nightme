@@ -84,6 +84,9 @@ func (c *startFuncChannel) OnPromptEnded(context.Context, string, string, agent.
 func (c *startFuncChannel) HealthSnapshot() (string, json.RawMessage, error) {
 	return c.name, json.RawMessage("{}"), nil
 }
+func (c *startFuncChannel) HealthSummary() channel.HealthSummary {
+	return channel.HealthSummary{Channel: c.name}
+}
 func (c *startFuncChannel) SetLogger(*slog.Logger) {}
 func (c *startFuncChannel) BuildBlocks(string, []messages.Attachment) []agent.ContentBlock {
 	return nil

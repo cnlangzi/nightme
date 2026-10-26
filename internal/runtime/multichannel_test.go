@@ -15,6 +15,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/chatstore"
 	"io"
 	"log/slog"
@@ -63,6 +64,9 @@ func (s *stubChannel) Patch(_ context.Context, _ messages.OutboundMessage) error
 func (s *stubChannel) OnPromptEnded(_ context.Context, _, _ string, _ agent.PromptEndReason) {}
 func (s *stubChannel) HealthSnapshot() (string, json.RawMessage, error) {
 	return s.name, json.RawMessage("{}"), nil
+}
+func (s *stubChannel) HealthSummary() channel.HealthSummary {
+	return channel.HealthSummary{Channel: s.name}
 }
 func (s *stubChannel) SetLogger(_ *slog.Logger) {}
 func (s *stubChannel) BuildBlocks(_ string, _ []messages.Attachment) []agent.ContentBlock {

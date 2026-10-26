@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	commandServices "github.com/cnlangzi/nightme/internal/command/services"
@@ -39,6 +40,9 @@ func (s *spyChannel) Stop(context.Context) error                                
 func (s *spyChannel) OnPromptEnded(context.Context, string, string, agent.PromptEndReason) {}
 func (s *spyChannel) HealthSnapshot() (string, json.RawMessage, error) {
 	return "spy", nil, nil
+}
+func (s *spyChannel) HealthSummary() channel.HealthSummary {
+	return channel.HealthSummary{Channel: "spy"}
 }
 func (s *spyChannel) SetLogger(_ *slog.Logger) {}
 func (s *spyChannel) BuildBlocks(_ string, _ []messages.Attachment) []agent.ContentBlock {

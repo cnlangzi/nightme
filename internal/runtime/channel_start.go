@@ -93,8 +93,8 @@ type ChannelStartup struct {
 //
 // Only Start is concurrent. Everything the daemon does afterwards
 // (buildStack, AttachPumps, health registration) stays in one pass
-// over chs, which keeps allMgrs ordering, the health provider choice
-// and the operator-facing output deterministic.
+// over chs, which keeps allMgrs ordering, the health provider
+// registration order and the operator-facing output deterministic.
 func startChannels(ctx context.Context, chs []channel.Channel) []ChannelStatus {
 	statuses := make([]ChannelStatus, len(chs))
 	var wg sync.WaitGroup

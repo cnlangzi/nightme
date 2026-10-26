@@ -3,6 +3,7 @@ package bot
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -267,3 +268,32 @@ func (a *testActionImpl) Execute(_ context.Context, _ map[string]any, _ map[stri
 }
 
 var _ Action = (*testActionImpl)(nil)
+
+// TestBot_HealthSummary_TracksLifecycle asserts the normalized
+// health view follows the channel's real state: a bot that was never
+// started is not connected, and stopping it takes it back down. A
+// stopped channel that still reports "connected" sends the operator
+// chasing a link that is no longer there.
+func TestBot_HealthSummary_TracksLifecycle(t *testing.T) {
+	b := New(Config{})
+	b.SetLogger(slog.Default())
+	if b.HealthSummary().Connected {
+		t.Error("Connected = true before Start")
+	}
+	if err := b.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	summary := b.HealthSummary()
+	if !summary.Connected {
+		t.Error("Connected = false after Start")
+	}
+	if !summary.LinkVerified {
+		t.Error("LinkVerified = false — bot has no remote link to verify")
+	}
+	if err := b.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if b.HealthSummary().Connected {
+		t.Error("Connected = true after Stop")
+	}
+}

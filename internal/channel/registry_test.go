@@ -43,6 +43,9 @@ func (s *stubChannel) OnPromptEnded(_ context.Context, _, _ string, _ agent.Prom
 func (s *stubChannel) HealthSnapshot() (string, json.RawMessage, error) {
 	return s.name, json.RawMessage("{}"), nil
 }
+func (s *stubChannel) HealthSummary() HealthSummary {
+	return HealthSummary{Channel: s.name}
+}
 func (s *stubChannel) SetLogger(_ *slog.Logger) {}
 func (s *stubChannel) BuildBlocks(_ string, _ []messages.Attachment) []agent.ContentBlock {
 	return nil

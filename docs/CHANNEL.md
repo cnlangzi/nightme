@@ -809,7 +809,12 @@ echo 不入 `channel.Registry`（`Deps.NewChannels` 仍可被测试覆盖）。�
 
 ### 11.2 Channel 健康检查暴露
 
-`deps.RegisterHealth` 已为每个 channel 注册 `HealthSnapshot`。`nightme health` 命令可以枚举所有 channel 的健康状态。
+`deps.RegisterHealth` 为每个启动成功的 channel 注册一个健康源，`daemoncontrol` 的 "health" RPC 返回所有 channel 的健康，每个 channel 一条：
+
+- `summary`：跨 channel 归一化的健康视图（`channel.HealthSummary`）：连接状态、链路是否已验证、最后错误、最后一次成功入站/出站时间。
+- `health`：该 channel 自己的 `HealthSnapshot()` 原始载荷，未做任何改写，供排障查看 channel 特有细节。
+
+`nightme doctor` 按 channel 分节渲染 `summary`；`--json` 同时输出 `summary` 与原始载荷。CLI 只依赖归一化视图，不解析任何 channel 特有的结构。
 
 ### 11.3 Channel 动态启停
 

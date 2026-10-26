@@ -1,11 +1,11 @@
 // Package main — `nightme doctor` subcommand.
 //
-// Reads the live WebSocket lifecycle state from the running daemon
-// via the daemoncontrol "health" RPC, then prints a human-readable
-// status report. Designed to be the first stop when a user reports
-// "feishu消息nightme没收到" — it shows whether the WS is connected,
-// when the last inbound event arrived, recent reconnect attempts,
-// and the most recent error if any.
+// Reads the health of every running channel from the daemon via the
+// daemoncontrol "health" RPC, then prints a human-readable status
+// report — one section per channel. Designed to be the first stop
+// when a user reports "消息nightme没收到" — it shows whether the
+// channel is connected, whether the link was ever verified, when the
+// last inbound event arrived, and the most recent error if any.
 //
 // Usage:
 //
@@ -30,7 +30,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/cnlangzi/nightme/internal/channel/feishu"
+	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/daemoncontrol"
 )
@@ -39,18 +39,24 @@ func newDoctorCmd() *cobra.Command {
 	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "doctor",
-		Short: "Diagnose the running daemon (WS state, reconnect health, inbound/outbound liveness)",
-		Long: `Print the current Feishu WebSocket connection state plus recent
-lifecycle events. Connects to the running daemon via its IPC socket
-(paths.Socket under cfg.Paths.DataDir) and asks for the "health"
-RPC. If the daemon is not running, prints a one-line error.
+		Short: "Diagnose the running daemon (per-channel link state, inbound/outbound liveness)",
+		Long: `Print the health of every running channel. Connects to the running
+daemon via its IPC socket (paths.Socket under cfg.Paths.DataDir) and
+asks for the "health" RPC. If the daemon is not running, prints a
+one-line error.
 
-Useful first-stop diagnostic for "feishu消息没收到" reports:
-  - WebSocket is connected?
-  - When did the last inbound event arrive?
-  - When did the last outbound send succeed?
-  - How many reconnects in this session?
-  - What's the most recent error?
+Each channel gets its own section:
+  - status: connected, started (link not verified) or disconnected
+  - link verified: whether a real remote round trip proved the
+    credentials and the link. An adapter that was only started
+    reports "no" and is never shown as connected.
+  - when did the last inbound event arrive?
+  - when did the last outbound send succeed?
+  - what's the most recent error?
+
+The channel-specific payload (WS lifecycle events, gateway session,
+poll offset, …) is adapter-specific; --json prints it verbatim next
+to the normalized summary.
 
 Examples:
   nightme doctor
@@ -159,166 +165,95 @@ func crashHeadline(path string) string {
 	return first
 }
 
-// writeDoctorJSON pretty-prints the raw payload. The Health field
-// is a json.RawMessage; we don't round-trip decode so the user sees
-// the field shape the daemon actually emitted.
+// writeDoctorJSON pretty-prints the payload. The Health field of
+// every entry is a json.RawMessage; we don't round-trip decode so the
+// user sees the field shape the daemon actually emitted.
 func writeDoctorJSON(out io.Writer, payload daemoncontrol.HealthPayload) error {
-	envelope := map[string]any{
-		"channel": payload.Channel,
-		"health":  json.RawMessage(payload.Health),
-	}
 	enc := json.NewEncoder(out)
 	enc.SetIndent("", "  ")
-	return enc.Encode(envelope)
+	return enc.Encode(payload)
 }
 
-// writeDoctorText prints a human-readable multi-line status with
-// aligned columns. Lifted from cc-connect's health-display pattern
-// (one section per concern, blank line between sections).
+// writeDoctorText prints one section per running channel. Every
+// section is rendered from the channel's normalized health summary —
+// the raw payload behind it is adapter-specific and is only available
+// through --json.
 func writeDoctorText(out io.Writer, payload daemoncontrol.HealthPayload) error {
-	var snap feishu.WSHealthSnapshot
-	if err := json.Unmarshal(payload.Health, &snap); err != nil {
-		return fmt.Errorf("decode health snapshot: %w", err)
+	if len(payload.Channels) == 0 {
+		fmt.Fprintln(out, "NO CHANNELS RUNNING")
+		return nil
 	}
 
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-
-	// Section 1: connection state
-	fmt.Fprintln(tw, "STATUS")
-	fmt.Fprintf(tw, "  channel:\t%s\n", payload.Channel)
-	if snap.Connected {
-		fmt.Fprintf(tw, "  connected:\t%s (since %s)\n", "yes", formatAge(snap.LastConnectedAt, time.Now()))
-	} else {
-		fmt.Fprintf(tw, "  connected:\t%s (since %s)\n", "NO", formatAge(snap.LastDisconnectedAt, time.Now()))
-	}
-	fmt.Fprintf(tw, "  reconnects (this session):\t%d\n", snap.ReconnectCount)
-
-	// Section 2: liveness
-	fmt.Fprintln(tw, "")
-	fmt.Fprintln(tw, "LIVENESS")
 	now := time.Now()
-	if !snap.LastInboundAt.IsZero() {
-		fmt.Fprintf(tw, "  last inbound:\t%s ago\t(chat=%s)\n", formatAge(snap.LastInboundAt, now), snap.LastInboundChatID)
-	} else {
-		fmt.Fprintln(tw, "  last inbound:\tnever")
-	}
-	if !snap.LastOutboundAt.IsZero() {
-		fmt.Fprintf(tw, "  last outbound:\t%s ago\n", formatAge(snap.LastOutboundAt, now))
-	} else {
-		fmt.Fprintln(tw, "  last outbound:\tnever")
-	}
-
-	// Section 3: last error
-	if snap.LastError != "" {
-		fmt.Fprintln(tw, "")
-		fmt.Fprintln(tw, "LAST ERROR")
-		fmt.Fprintf(tw, "  %s\tat %s\n", snap.LastError, snap.LastErrorAt.Format(time.RFC3339))
-	}
-
-	// Section 3.5: F-41 active-reconnect prober
-	// Always printed (even when inactive) so the user knows the
-	// feature exists. When active, prints the force-restart count
-	// and last attempt timestamp.
-	fmt.Fprintln(tw, "")
-	fmt.Fprintln(tw, "PROBER (F-41 active reconnect)")
-	if snap.Prober.Active {
-		fmt.Fprintf(tw, "  active:\t%s\n", "yes")
-	} else {
-		fmt.Fprintf(tw, "  active:\t%s\n", "no")
-	}
-	fmt.Fprintf(tw, "  interval:\t%s\n", snap.Prober.Interval)
-	fmt.Fprintf(tw, "  force_attempts:\t%d\n", snap.Prober.ForceCount)
-	if !snap.Prober.LastForceAt.IsZero() {
-		fmt.Fprintf(tw, "  last_force_at:\t%s ago\n", formatAge(snap.Prober.LastForceAt, now))
-	} else {
-		fmt.Fprintln(tw, "  last_force_at:\tnever")
-	}
-	if !snap.Prober.StartedAt.IsZero() {
-		fmt.Fprintf(tw, "  started_at:\t%s ago\n", formatAge(snap.Prober.StartedAt, now))
-	}
-	if snap.Prober.LastError != "" {
-		fmt.Fprintf(tw, "  last_error:\t%s\n", snap.Prober.LastError)
-	}
-
-	// F-61: agent process prober (fallback for readpump-missed
-	// bridge deaths). Mirrors F-41's format for consistency.
-	fmt.Fprintln(tw, "")
-	fmt.Fprintln(tw, "PROBER (F-61 agent liveness)")
-	if snap.AgentProber.Active {
-		fmt.Fprintf(tw, "  active:\t%s\n", "yes")
-	} else {
-		fmt.Fprintf(tw, "  active:\t%s\n", "no")
-	}
-	fmt.Fprintf(tw, "  interval:\t%s\n", snap.AgentProber.Interval)
-	fmt.Fprintf(tw, "  scanned_total:\t%d\n", snap.AgentProber.ScannedTotal)
-	fmt.Fprintf(tw, "  probes_run:\t%d\n", snap.AgentProber.ProbesRun)
-	fmt.Fprintf(tw, "  respawns_triggered:\t%d\n", snap.AgentProber.RespawnsHit)
-	if !snap.AgentProber.LastScanAt.IsZero() {
-		fmt.Fprintf(tw, "  last_scan_at:\t%s ago\n", formatAge(snap.AgentProber.LastScanAt, now))
-	} else {
-		fmt.Fprintln(tw, "  last_scan_at:\tnever")
-	}
-	if !snap.AgentProber.StartedAt.IsZero() {
-		fmt.Fprintf(tw, "  started_at:\t%s ago\n", formatAge(snap.AgentProber.StartedAt, now))
-	}
-
-	// Section 3.7: WS *Client rebuild counters. Always printed so
-	// the operator can see whether the terminal-recovery path has
-	// fired, even before any prober activity. A non-zero
-	// SkippedMaxConsecutive means the rebuild path has given up —
-	// the WS will not recover until the daemon restarts.
-	fmt.Fprintln(tw, "")
-	fmt.Fprintln(tw, "REBUILD (WS *Client terminal recovery)")
-	fmt.Fprintf(tw, "  rebuild_count:\t%d\n", snap.Rebuild.RebuildCount)
-	if !snap.Rebuild.LastRebuildAt.IsZero() {
-		fmt.Fprintf(tw, "  last_rebuild_at:\t%s ago\n", formatAge(snap.Rebuild.LastRebuildAt, now))
-	}
-	fmt.Fprintf(tw, "  consecutive_failures:\t%d\n", snap.Rebuild.ConsecutiveFailures)
-	fmt.Fprintf(tw, "  skipped_cooldown:\t%d\n", snap.Rebuild.SkippedCooldown)
-	fmt.Fprintf(tw, "  skipped_max_consecutive:\t%d\n", snap.Rebuild.SkippedMaxConsecutive)
-	fmt.Fprintf(tw, "  cancel_stranded_streak:\t%d\n", snap.Rebuild.CancelStrandedStreak)
-	fmt.Fprintf(tw, "  token_invalidations:\t%d\n", snap.Rebuild.TokenInvalidations)
-	if !snap.Rebuild.LastTerminalErrAt.IsZero() {
-		fmt.Fprintf(tw, "  last_terminal_err:\t%s\n", snap.Rebuild.LastTerminalErr)
-		fmt.Fprintf(tw, "  last_terminal_err_at:\t%s ago\n", formatAge(snap.Rebuild.LastTerminalErrAt, now))
-	}
-
-	// Section 4: event ring (most recent first)
-	if len(snap.EventRing) > 0 {
-		fmt.Fprintln(tw, "")
-		fmt.Fprintln(tw, "RECENT EVENTS (newest first)")
-		// reverse for display
-		for i := len(snap.EventRing) - 1; i >= 0; i-- {
-			ev := snap.EventRing[i]
-			msg := ev.Message
-			if msg == "" {
-				msg = "-"
-			}
-			fmt.Fprintf(tw, "  %s\t%s\t%s\n", ev.At.Format("15:04:05"), ev.Kind, truncate(msg, 80))
+	for i, entry := range payload.Channels {
+		if i > 0 {
+			fmt.Fprintln(tw, "")
+		}
+		fmt.Fprintf(tw, "CHANNEL %s\n", entry.Channel)
+		summary, err := decodeHealthSummary(entry)
+		if err != nil {
+			// One channel with an unreadable summary must not hide
+			// the others — report it and keep going.
+			fmt.Fprintf(tw, "  health error:\t%s\n", err)
+			continue
+		}
+		fmt.Fprintf(tw, "  status:\t%s\n", channelStatus(summary))
+		fmt.Fprintf(tw, "  link verified:\t%s\n", yesNo(summary.LinkVerified))
+		fmt.Fprintf(tw, "  last inbound:\t%s\n", formatTimestamp(summary.LastInboundAt, now))
+		fmt.Fprintf(tw, "  last outbound:\t%s\n", formatTimestamp(summary.LastOutboundAt, now))
+		if summary.LastError != "" {
+			fmt.Fprintf(tw, "  last error:\t%s\n", summary.LastError)
+		}
+		if entry.Error != "" {
+			fmt.Fprintf(tw, "  health error:\t%s\n", entry.Error)
 		}
 	}
-
-	// Section 5: inbound ring
-	if len(snap.InboundRing) > 0 {
-		fmt.Fprintln(tw, "")
-		fmt.Fprintln(tw, "RECENT INBOUND")
-		for i := len(snap.InboundRing) - 1; i >= 0; i-- {
-			s := snap.InboundRing[i]
-			fmt.Fprintf(tw, "  %s\t%s\tchat=%s\n", s.At.Format("15:04:05"), s.Kind, s.ChatID)
-		}
-	}
-
-	// Section 6: outbound ring
-	if len(snap.OutboundRing) > 0 {
-		fmt.Fprintln(tw, "")
-		fmt.Fprintln(tw, "RECENT OUTBOUND")
-		for i := len(snap.OutboundRing) - 1; i >= 0; i-- {
-			s := snap.OutboundRing[i]
-			fmt.Fprintf(tw, "  %s\t%s\tchat=%s\n", s.At.Format("15:04:05"), s.Kind, s.ChatID)
-		}
-	}
-
 	return tw.Flush()
+}
+
+// decodeHealthSummary decodes one channel's normalized summary. A
+// channel whose summary is missing still gets a section — the
+// zero summary reads as "not connected, never verified".
+func decodeHealthSummary(entry daemoncontrol.ChannelHealth) (channel.HealthSummary, error) {
+	var summary channel.HealthSummary
+	if len(entry.Summary) == 0 {
+		return summary, nil
+	}
+	if err := json.Unmarshal(entry.Summary, &summary); err != nil {
+		return summary, fmt.Errorf("decode health summary for %s: %w", entry.Channel, err)
+	}
+	return summary, nil
+}
+
+// channelStatus renders the connection state. An adapter that was
+// started but never verified its link must not read as connected.
+func channelStatus(summary channel.HealthSummary) string {
+	switch {
+	case summary.Connected && summary.LinkVerified:
+		return "connected"
+	case summary.Connected:
+		return "started (link not verified)"
+	default:
+		return "disconnected"
+	}
+}
+
+// yesNo renders a boolean as yes / no.
+func yesNo(v bool) string {
+	if v {
+		return "yes"
+	}
+	return "no"
+}
+
+// formatTimestamp renders a timestamp as an age, or "never" when the
+// adapter never recorded one.
+func formatTimestamp(t, now time.Time) string {
+	if t.IsZero() {
+		return "never"
+	}
+	return formatAge(t, now) + " ago"
 }
 
 // formatAge returns "5m12s" / "2h03m" / "30s ago" — relative to now.

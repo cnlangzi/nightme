@@ -51,15 +51,15 @@ type Server struct {
 	mu      sync.Mutex
 	pending []windows.Handle
 
-	// healthProvider supplies the live WS lifecycle snapshot for the
-	// "health" RPC. Set via SetHealthProvider after Listen. Optional —
-	// when nil, "health" returns ErrNoHealthProvider.
-	healthProvider HealthProvider
+	// healthSources holds one entry per started channel. The "health"
+	// RPC collects them all, so every running channel is reported —
+	// not just the last one registered.
+	healthMu      sync.Mutex
+	healthSources []HealthSource
 }
 
-func (s *Server) SetHealthProvider(p HealthProvider) {
-	s.healthProvider = p
-}
+// AddHealthSource registers one channel's health source. Defined
+// cross-platform in server.go.
 
 // pipeInstance is the per-connection HANDLE we hand to handle().
 // Wrapping in a named struct keeps Read/Write idiomatic and
@@ -299,16 +299,7 @@ func (s *Server) handle(conn *pipeInstance) {
 	case "status":
 		_ = WriteResult(conn, s.Status())
 	case "health":
-		if s.healthProvider == nil {
-			_ = WriteError(conn, fmt.Errorf("daemon does not provide health snapshot"))
-			return
-		}
-		channel, snapshot, err := s.healthProvider()
-		if err != nil {
-			_ = WriteError(conn, err)
-			return
-		}
-		_ = WriteResult(conn, HealthPayload{Channel: channel, Health: snapshot})
+		_ = WriteResult(conn, s.healthPayload())
 	case "stop":
 		// Untrack this connection before writing the ack so
 		// Close()'s CancelIoEx sweep cannot abort the in-flight

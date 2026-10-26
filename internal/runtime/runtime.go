@@ -492,7 +492,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 		startup.Results = append(startup.Results, status)
 
 		if deps.RegisterHealth != nil {
-			deps.RegisterHealth(ch.HealthSnapshot)
+			deps.RegisterHealth(ch)
 		}
 	}
 	if len(startedChannels) == 0 && len(chs) > 0 {

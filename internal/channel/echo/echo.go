@@ -142,6 +142,17 @@ func (c *Channel) HealthSnapshot() (string, json.RawMessage, error) {
 	return c.Name(), json.RawMessage("{}"), nil
 }
 
+// HealthSummary implements channel.Channel.HealthSummary. echo is a
+// local test channel: there is no remote link to verify, so the link
+// always counts as verified.
+func (c *Channel) HealthSummary() channel.HealthSummary {
+	return channel.HealthSummary{
+		Channel:      c.Name(),
+		Connected:    true,
+		LinkVerified: true,
+	}
+}
+
 // SetLogger implements channel.Channel.SetLogger as a no-op —
 // echo doesn't log internally.
 func (c *Channel) SetLogger(logger *slog.Logger) {}

@@ -4,7 +4,6 @@ package daemoncontrol
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -29,23 +28,15 @@ type Server struct {
 	cancel    context.CancelFunc
 	closeOnce sync.Once
 
-	// healthProvider supplies the live WS lifecycle snapshot for the
-	// "health" RPC. Set via SetHealthProvider after Listen. Optional —
-	// when nil, "health" returns ErrNoHealthProvider.
-	healthProvider func() (channel string, snapshot json.RawMessage, err error)
+	// healthSources holds one entry per started channel. The "health"
+	// RPC collects them all, so every running channel is reported —
+	// not just the last one registered.
+	healthMu      sync.Mutex
+	healthSources []HealthSource
 }
 
-// HealthProvider is the function signature for fetching the live WS
-// health state from a Feishu adapter (or any future channel adapter).
-// Returned RawMessage must be a valid JSON object — the daemoncontrol
-// server passes it straight back to the caller.
-// HealthProvider itself is defined cross-platform in server.go.
-
-// SetHealthProvider registers the health source for the "health"
-// RPC. Called once at startup after Listen. nil clears the registration.
-func (s *Server) SetHealthProvider(p HealthProvider) {
-	s.healthProvider = p
-}
+// AddHealthSource registers one channel's health source. Defined
+// cross-platform in server.go.
 
 func Listen(path string, status Status, cancel context.CancelFunc) (*Server, error) {
 	if info, err := os.Lstat(path); err == nil {
@@ -120,16 +111,7 @@ func (s *Server) handle(conn *net.UnixConn) {
 	case "status":
 		_ = WriteResult(conn, s.Status())
 	case "health":
-		if s.healthProvider == nil {
-			_ = WriteError(conn, fmt.Errorf("daemon does not provide health snapshot"))
-			return
-		}
-		channel, snapshot, err := s.healthProvider()
-		if err != nil {
-			_ = WriteError(conn, err)
-			return
-		}
-		_ = WriteResult(conn, HealthPayload{Channel: channel, Health: snapshot})
+		_ = WriteResult(conn, s.healthPayload())
 	case "stop":
 		s.stopOnce.Do(func() {
 			// CAS "starting" → "stopping". If the CAS succeeds we

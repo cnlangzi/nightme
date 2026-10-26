@@ -48,7 +48,11 @@ type socketHealth struct {
 	inboundCount  int64
 	outboundCount int64
 	lastInboundAt time.Time
-	events        []HealthEvent
+	// lastOutboundAt feeds the normalized health view only — the
+	// raw HealthSnapshot payload shape is fixed, so it carries the
+	// outbound count instead of the timestamp.
+	lastOutboundAt time.Time
+	events         []HealthEvent
 }
 
 // HealthSnapshot is the JSON shape served by the health RPC.
@@ -112,7 +116,18 @@ func (h *socketHealth) recordOutbound() {
 	}
 	h.mu.Lock()
 	h.outboundCount++
+	h.lastOutboundAt = time.Now().UTC()
 	h.mu.Unlock()
+}
+
+// lastOutboundTime returns when the last outbound send succeeded.
+func (h *socketHealth) lastOutboundTime() time.Time {
+	if h == nil {
+		return time.Time{}
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.lastOutboundAt
 }
 
 func (h *socketHealth) snapshot() HealthSnapshot {

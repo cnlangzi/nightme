@@ -27,6 +27,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/daemoncontrol"
 	nmerrors "github.com/cnlangzi/nightme/internal/errors"
@@ -307,10 +308,10 @@ func runDaemonChild(cmd *cobra.Command, reg *cmdRegistry) (retErr error) {
 	deps.OnChannelsStarted = report.SetChannels
 	// F-40: the lifecycle layer holds the daemoncontrol server
 	// reference. The runtime.Deps.RegisterHealth callback receives
-	// the channel's HealthSnapshot function (Phase 2.1: every
-	// Channel implements it) and wires it into the "health" RPC.
-	deps.RegisterHealth = func(fn func() (string, json.RawMessage, error)) {
-		server.SetHealthProvider(fn)
+	// every started channel and wires it into the "health" RPC, so
+	// the doctor reports all of them.
+	deps.RegisterHealth = func(ch channel.Channel) {
+		server.AddHealthSource(healthSource(ch))
 	}
 	cmd.SetContext(withLogger(ctx, loggerFromContext(cmd.Context())))
 	// Threading model: the runtime is blocking, systray.Run is

@@ -24,14 +24,13 @@
 package runtime
 
 import (
-	"encoding/json"
-	"github.com/cnlangzi/nightme/internal/chatstore"
 	"os"
 	"path/filepath"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/agentregistry"
 	"github.com/cnlangzi/nightme/internal/channel"
+	"github.com/cnlangzi/nightme/internal/chatstore"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
@@ -53,11 +52,12 @@ type Deps struct {
 	Signals           <-chan os.Signal
 	OnReady           func()
 
-	// RegisterHealth, if non-nil, is called once per channel
-	// (v1.3+ multi-channel: one snapshot per attached Channel,
-	// not a single shared one). The closure receives the
-	// channel's HealthSnapshot function.
-	RegisterHealth func(snapshot func() (string, json.RawMessage, error))
+	// RegisterHealth, if non-nil, is called once per started
+	// channel with that channel, so the daemoncontrol server can
+	// serve its health snapshot and its normalized health summary.
+	// Every started channel is registered — the "health" RPC
+	// reports all of them.
+	RegisterHealth func(ch channel.Channel)
 
 	// OnChannelsStarted, if non-nil, is called once with the
 	// outcome of every constructed channel, after the whole

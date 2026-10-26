@@ -84,6 +84,9 @@ func (c *recordingChannel) OnPromptEnded(_ context.Context, _, _ string, _ agent
 func (c *recordingChannel) HealthSnapshot() (string, json.RawMessage, error) {
 	return "mock", json.RawMessage("{}"), nil
 }
+func (c *recordingChannel) HealthSummary() channel.HealthSummary {
+	return channel.HealthSummary{Channel: "mock"}
+}
 func (c *recordingChannel) SetLogger(_ *slog.Logger) {}
 func (c *recordingChannel) BuildBlocks(text string, _ []messages.Attachment) []agent.ContentBlock {
 	if text == "" {

@@ -3224,6 +3224,23 @@ func (a *Adapter) HealthSnapshot() (string, json.RawMessage, error) {
 	return a.Name(), data, nil
 }
 
+// HealthSummary implements channel.Channel.HealthSummary.
+//
+// The feishu WS reports a successful handshake (OnReady /
+// OnReconnected) before any message flows, so a connected WS is a
+// verified link — there is no "started but unproven" state here.
+func (a *Adapter) HealthSummary() channel.HealthSummary {
+	snap := a.Health()
+	return channel.HealthSummary{
+		Channel:        a.Name(),
+		Connected:      snap.Connected,
+		LinkVerified:   snap.Connected,
+		LastError:      snap.LastError,
+		LastInboundAt:  snap.LastInboundAt,
+		LastOutboundAt: snap.LastOutboundAt,
+	}
+}
+
 // BuildBlocks implements channel.Channel.BuildBlocks by
 // delegating to the package-level BuildBlocks helper. The
 // adapter indirection exists so the runtime dispatcher can

@@ -53,6 +53,11 @@ type Bot struct {
 	// lifetime of one workflow run.
 	muRuns       sync.RWMutex
 	runsByChatID map[string]*botRun
+
+	// healthMu guards started, the flag behind the normalized health
+	// view.
+	healthMu sync.Mutex
+	started  bool
 }
 
 type botRun struct {
@@ -139,7 +144,13 @@ func (b *Bot) Start(ctx context.Context) error {
 
 	// 5. start trigger manager
 	b.triggers = newTriggerManager(b.workflows, wsMap, b.onTrigger, b.logger)
-	return b.triggers.Start(ctx)
+	if err := b.triggers.Start(ctx); err != nil {
+		return err
+	}
+	b.healthMu.Lock()
+	b.started = true
+	b.healthMu.Unlock()
+	return nil
 }
 
 // Stop implements channel.Channel. Stops the trigger manager.
@@ -191,6 +202,22 @@ func (b *Bot) OnPromptEnded(_ context.Context, _ string, _ string, _ agent.Promp
 // HealthSnapshot implements channel.Channel.
 func (b *Bot) HealthSnapshot() (string, json.RawMessage, error) {
 	return b.Name(), json.RawMessage(`{"type":"bot"}`), nil
+}
+
+// HealthSummary implements channel.Channel.HealthSummary.
+//
+// bot drives local workflow triggers — there is no remote link to
+// verify, so the link always counts as verified. LastInboundAt /
+// LastOutboundAt stay zero: bot has no IM message path to time.
+func (b *Bot) HealthSummary() channel.HealthSummary {
+	b.healthMu.Lock()
+	started := b.started
+	b.healthMu.Unlock()
+	return channel.HealthSummary{
+		Channel:      b.Name(),
+		Connected:    started,
+		LinkVerified: true,
+	}
 }
 
 // SetLogger implements channel.Channel.

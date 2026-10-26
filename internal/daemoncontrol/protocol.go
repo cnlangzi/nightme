@@ -44,13 +44,28 @@ type Status struct {
 	LogPath         string    `json:"log_path,omitempty"`
 }
 
-// HealthPayload is the response body for the "health" RPC command.
-// Wraps a JSON-encoded WSHealthSnapshot as RawMessage so the wire
-// format stays loose-coupled: the daemoncontrol package doesn't
-// import channel/feishu (which would create an import cycle).
-type HealthPayload struct {
+// ChannelHealth is one running channel's entry in the "health" RPC
+// result.
+//
+// Summary is the cross-channel normalized health view — the fields
+// mean the same thing for every channel, so the CLI can render one
+// section per channel. Health is the channel's own HealthSnapshot()
+// payload, passed through verbatim for troubleshooting.
+//
+// Both are RawMessage so the daemoncontrol package doesn't import the
+// channel packages (which would create an import cycle). A missing
+// payload is reported as null with the reason in Error.
+type ChannelHealth struct {
 	Channel string          `json:"channel"`
+	Summary json.RawMessage `json:"summary"`
 	Health  json.RawMessage `json:"health"`
+	Error   string          `json:"error,omitempty"`
+}
+
+// HealthPayload is the response body for the "health" RPC command.
+// It carries one entry per running channel.
+type HealthPayload struct {
+	Channels []ChannelHealth `json:"channels"`
 }
 
 type Ready struct {

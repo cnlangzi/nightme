@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/gateway/inbound"
 	"github.com/cnlangzi/nightme/internal/gateway/inbound/teststubs"
@@ -43,6 +44,9 @@ func (c *feedChannel) OnPromptEnded(context.Context, string, string, agent.Promp
 }
 func (c *feedChannel) HealthSnapshot() (string, json.RawMessage, error) {
 	return "feed", json.RawMessage("{}"), nil
+}
+func (c *feedChannel) HealthSummary() channel.HealthSummary {
+	return channel.HealthSummary{Channel: "feed"}
 }
 func (c *feedChannel) SetLogger(*slog.Logger) {}
 func (c *feedChannel) BuildBlocks(string, []messages.Attachment) []agent.ContentBlock {

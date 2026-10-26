@@ -27,6 +27,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/daemoncontrol"
 	nmerrors "github.com/cnlangzi/nightme/internal/errors"
@@ -54,6 +55,23 @@ type daemonOptions struct {
 type bootstrapMessage struct {
 	Ready bool   `json:"ready"`
 	Error string `json:"error,omitempty"`
+}
+
+// healthSource adapts a channel to the daemoncontrol health source.
+// The raw snapshot and the normalized summary are fetched
+// independently, so a channel that can't produce one still reports
+// the other.
+func healthSource(ch channel.Channel) daemoncontrol.HealthSource {
+	return daemoncontrol.HealthSource{
+		Channel: ch.Name(),
+		Snapshot: func() (json.RawMessage, error) {
+			_, payload, err := ch.HealthSnapshot()
+			return payload, err
+		},
+		Summary: func() (json.RawMessage, error) {
+			return json.Marshal(ch.HealthSummary())
+		},
+	}
 }
 
 func newStartCmd() *cobra.Command {

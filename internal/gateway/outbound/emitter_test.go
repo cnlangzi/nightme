@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/messages"
 )
 
@@ -45,6 +46,9 @@ func (f *fakeChannel) Send(_ context.Context, msg messages.OutboundMessage) erro
 func (f *fakeChannel) OnPromptEnded(_ context.Context, _, _ string, _ agent.PromptEndReason) {}
 func (f *fakeChannel) HealthSnapshot() (string, json.RawMessage, error) {
 	return f.name, json.RawMessage("{}"), nil
+}
+func (f *fakeChannel) HealthSummary() channel.HealthSummary {
+	return channel.HealthSummary{Channel: f.name}
 }
 func (f *fakeChannel) SetLogger(_ *slog.Logger) {}
 func (f *fakeChannel) BuildBlocks(text string, _ []messages.Attachment) []agent.ContentBlock {

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/messages"
 )
@@ -77,6 +78,17 @@ type Adapter struct {
 	started     bool
 	stopped     bool
 	gatewayDone chan struct{}
+
+	// healthMu guards the fields behind the normalized health view.
+	// It is separate from startStopMu because Stop holds startStopMu
+	// while it waits for the gateway goroutine to exit — a callback
+	// on that goroutine must never block on startStopMu.
+	healthMu       sync.Mutex
+	gatewayReady   bool
+	linkVerified   bool
+	lastError      string
+	lastInboundAt  time.Time
+	lastOutboundAt time.Time
 
 	// metrics is the adapter's observability surface. The
 	// gateway loop bumps reconnect / event / close-code fields;
@@ -267,6 +279,7 @@ func (a *Adapter) Start(ctx context.Context) error {
 	if me.GlobalName != "" {
 		a.botName = me.GlobalName
 	}
+	a.setLinkVerified(true)
 	a.logger.Info("discord: bot verified",
 		"bot_id", a.botUserID,
 		"username", a.botName,
@@ -277,8 +290,10 @@ func (a *Adapter) Start(ctx context.Context) error {
 	a.started = true
 	go func() {
 		defer close(done)
+		defer a.setGatewayReady(false)
 		if err := a.gw.run(ctx); err != nil {
 			a.logger.Error("discord gateway terminated", "err", err.Error())
+			a.setLastError(err.Error())
 		}
 	}()
 	return nil
@@ -292,6 +307,7 @@ func (a *Adapter) Stop(ctx context.Context) error {
 		return nil
 	}
 	a.stopped = true
+	a.setGatewayReady(false)
 	// The gateway's run loop honours ctx cancellation (its read
 	// deadlines + select on ctx.Done() guarantee prompt exit).
 	// Closing a.incoming wakes any channel.Buffered readers
@@ -354,6 +370,60 @@ func (a *Adapter) HealthSnapshot() (string, json.RawMessage, error) {
 	return a.name, payload, nil
 }
 
+// HealthSummary implements channel.Channel.HealthSummary.
+//
+// Connected means the gateway completed a READY handshake and is still
+// running. LinkVerified is the stronger claim: Start() only proceeds
+// after users/@me proved the bot token works.
+func (a *Adapter) HealthSummary() channel.HealthSummary {
+	a.healthMu.Lock()
+	summary := channel.HealthSummary{
+		Channel:        a.name,
+		Connected:      a.gatewayReady,
+		LinkVerified:   a.linkVerified,
+		LastError:      a.lastError,
+		LastInboundAt:  a.lastInboundAt,
+		LastOutboundAt: a.lastOutboundAt,
+	}
+	a.healthMu.Unlock()
+	return summary
+}
+
+// setGatewayReady records whether the gateway handshake completed.
+func (a *Adapter) setGatewayReady(ready bool) {
+	a.healthMu.Lock()
+	a.gatewayReady = ready
+	a.healthMu.Unlock()
+}
+
+// setLinkVerified records that users/@me proved the bot token.
+func (a *Adapter) setLinkVerified(verified bool) {
+	a.healthMu.Lock()
+	a.linkVerified = verified
+	a.healthMu.Unlock()
+}
+
+// setLastError stores the most recent gateway failure.
+func (a *Adapter) setLastError(msg string) {
+	a.healthMu.Lock()
+	a.lastError = msg
+	a.healthMu.Unlock()
+}
+
+// recordInbound stamps the last successful inbound publish.
+func (a *Adapter) recordInbound(at time.Time) {
+	a.healthMu.Lock()
+	a.lastInboundAt = at
+	a.healthMu.Unlock()
+}
+
+// recordOutbound stamps the last successful outbound send.
+func (a *Adapter) recordOutbound(at time.Time) {
+	a.healthMu.Lock()
+	a.lastOutboundAt = at
+	a.healthMu.Unlock()
+}
+
 // onReady is wired into gatewayClient.onReady. Caches the bot
 // user id and name so handleMessageCreate / HealthSnapshot can
 // read them without an extra REST round trip.
@@ -363,6 +433,7 @@ func (a *Adapter) onReady(u User) {
 	if u.GlobalName != "" {
 		a.botName = u.GlobalName
 	}
+	a.setGatewayReady(true)
 }
 
 // onMessage is wired into gatewayClient.onMessage. Maps a
@@ -445,6 +516,7 @@ func (a *Adapter) downloadAndPublish(msg *Message, chatID string, inbound messag
 func (a *Adapter) publish(inbound messages.InboundMessage) {
 	select {
 	case a.incoming <- inbound:
+		a.recordInbound(time.Now())
 	default:
 		a.logger.Warn("discord: incoming channel full; dropping message",
 			"chat_id", inbound.ChatID,

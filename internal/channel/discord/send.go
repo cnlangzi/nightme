@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/messages"
@@ -35,7 +36,21 @@ import (
 //
 //	OutHeartbeat /          — silent drop (no native surface;
 //	OutPromptEnded            OnPromptEnded owns the lifecycle stamp).
+//
+// The outbound liveness clock only advances for a message that
+// actually reaches Discord — the heartbeat and prompt-ended kinds
+// are silent drops.
 func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error {
+	err := a.sendOutbound(ctx, msg)
+	if err == nil && msg.Kind != messages.OutHeartbeat && msg.Kind != messages.OutPromptEnded {
+		a.recordOutbound(time.Now())
+	}
+	return err
+}
+
+// sendOutbound dispatches one outbound message to its Discord
+// surface. Every kind routes to the helper that owns its rendering.
+func (a *Adapter) sendOutbound(ctx context.Context, msg messages.OutboundMessage) error {
 	raw := rawChannelIDFromSession(msg.ChatID)
 	switch msg.Kind {
 	case messages.OutInit:

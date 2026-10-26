@@ -36,7 +36,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/cnlangzi/nightme/internal/proc"
@@ -48,6 +47,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/daemoncontrol"
 	nmerrors "github.com/cnlangzi/nightme/internal/errors"
@@ -297,8 +297,8 @@ func runDaemonChild(cmd *cobra.Command, reg *cmdRegistry) (retErr error) {
 		server.SetReady()
 	}
 	deps.OnChannelsStarted = report.SetChannels
-	deps.RegisterHealth = func(fn func() (string, json.RawMessage, error)) {
-		server.SetHealthProvider(fn)
+	deps.RegisterHealth = func(ch channel.Channel) {
+		server.AddHealthSource(healthSource(ch))
 	}
 	cmd.SetContext(withLogger(ctx, loggerFromContext(cmd.Context())))
 	// Same threading-model flip as Unix: runtime in goroutine,

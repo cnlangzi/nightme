@@ -246,15 +246,10 @@ func TestFixRemote_HappyPath(t *testing.T) {
 	}
 
 	// --- git side effects --------------------------------------
-	// Branch derived from the issue title. The current
-	// DeriveBranchFromTitle strips the title and slugifies; we
-	// don't assert the exact slug (covered by slug_test.go) —
-	// only that the worktree directory exists.
-	branch := "add-gtw-close-subcommand" // best-effort: from "Add /gtw close subcommand"
-	wt := filepath.Join(filepath.Dir(rig.repoRoot), filepath.Base(rig.repoRoot)+".wt-"+branch)
-	// The actual worktree path may differ from our hard-coded
-	// guess if DeriveBranchFromTitle slugifies differently.
-	// Resolve the truth by parsing it from `git worktree list`.
+	// The branch name is derived from the issue title; we don't
+	// assert the exact slug (covered by slug_test.go) — only that
+	// the worktree directory exists. Resolve the worktree path by
+	// parsing it from `git worktree list`.
 	wtOut, _ := mustGitOut(t, rig.repoRoot, "worktree", "list", "--porcelain")
 	// On Windows + MSYS, the same physical dir shows up as
 	// either RUNNER~1 (8.3 short name) or runneradmin (long
@@ -325,7 +320,6 @@ func TestFixRemote_HappyPath(t *testing.T) {
 	if !strings.Contains(last, "cnlangzi/nightme") {
 		t.Errorf("success reply missing repo:\n%s", last)
 	}
-	_ = wt // referenced to keep the expected-name available for debugging
 }
 
 // TestFixRemote_IssueNotFound verifies a 404 from the provider

@@ -11,6 +11,30 @@ is committed there is the version users build and run.
 
 ## [Unreleased] — current dev (locked 2026-08-02)
 
+### Changed: `/gtw fix <id>` branch names lead with the issue id
+
+`/gtw fix <issue-id>` derives the branch from the issue title.
+The issue id leads the branch name:
+
+    ✅ Fix #42 ready
+    → branch:   `42-login-state-expiration`
+
+The title is slugified with every non-ASCII rune dropped, so two
+titles that differ only in their non-ASCII part collapse onto one
+slug — "用户登录 bug" and "用户登出 bug" both slugify to "bug".
+Those issues produced the same branch name, and the second
+`/gtw fix` hard-failed on the branch-collision check with no way
+to tell the two apart. The id makes the branch unique per issue
+however the title degrades, and lets
+`git branch | grep '^42-'` list every branch of one issue.
+
+A title that slugifies to nothing (pure CJK / emoji) still falls
+back to `fix-<id>`.
+
+Worktrees and branches created earlier keep their names — the
+name is written once at `/gtw fix` time and read back from
+`.nightme/gtw.yml` afterwards.
+
 ### Breaking: `/handoff` and `/resume` move to `$HOME/.nightme/handoff/<name>.md`
 
 Both slash commands now require a positional `<name>` argument

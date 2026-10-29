@@ -3,21 +3,19 @@ package gtw
 import "testing"
 
 // TestDeriveBranchFromTitle_BareTitle covers the most common
-// case: issue title has no conventional-commit prefix; the
-// whole title is slugified and returned verbatim (no `fix-`
-// prefix — that was the old behaviour).
+// case: issue title has no conventional-commit prefix. The whole
+// title is slugified and the issue id leads the branch name.
 //
-// Note: empty / whitespace-only titles fall back to `fix-<id>`
-// per the F-XX rule "if conversion result is empty, use
-// fix-<id>". This test only covers non-empty bare titles.
+// Empty / whitespace-only titles fall back to `fix-<id>`; that case
+// is covered by TestDeriveBranchFromTitle_CJKFallback.
 func TestDeriveBranchFromTitle_BareTitle(t *testing.T) {
 	cases := []struct {
 		title string
 		want  string
 	}{
-		{"Login state expiration", "login-state-expiration"},
-		{"Add a delete button", "add-a-delete-button"},
-		{"Fix: foo bar baz", "fix-foo-bar-baz"},
+		{"Login state expiration", "42-login-state-expiration"},
+		{"Add a delete button", "42-add-a-delete-button"},
+		{"Fix: foo bar baz", "42-fix-foo-bar-baz"},
 	}
 	for _, tc := range cases {
 		got := DeriveBranchFromTitle(tc.title, 42)
@@ -34,10 +32,10 @@ func TestDeriveBranchFromTitle_ConventionalCommit(t *testing.T) {
 		title string
 		want  string
 	}{
-		{"feat(login): state expires", "feat-login-state-expires"},
-		{"feat: state expires", "feat-state-expires"},
-		{"fix(api): handle null", "fix-api-handle-null"},
-		{"chore: bump deps", "chore-bump-deps"},
+		{"feat(login): state expires", "42-feat-login-state-expires"},
+		{"feat: state expires", "42-feat-state-expires"},
+		{"fix(api): handle null", "42-fix-api-handle-null"},
+		{"chore: bump deps", "42-chore-bump-deps"},
 	}
 	for _, tc := range cases {
 		got := DeriveBranchFromTitle(tc.title, 42)
@@ -54,9 +52,9 @@ func TestDeriveBranchFromTitle_BracketedTag(t *testing.T) {
 		title string
 		want  string
 	}{
-		{"[BUG] state expires", "bug-state-expires"},
-		{"[BUG-123] state expires", "bug-123-state-expires"},
-		{"[FIX] handle null", "fix-handle-null"},
+		{"[BUG] state expires", "42-bug-state-expires"},
+		{"[BUG-123] state expires", "42-bug-123-state-expires"},
+		{"[FIX] handle null", "42-fix-handle-null"},
 	}
 	for _, tc := range cases {
 		got := DeriveBranchFromTitle(tc.title, 42)
@@ -81,13 +79,28 @@ func TestDeriveBranchFromTitle_CJKFallback(t *testing.T) {
 		{"登录状态过期", 42, "fix-42"},
 		{"🎉", 7, "fix-7"},
 		{"中文标点：，。！？", 100, "fix-100"},
-		{"登录 only", 42, "only"}, // "登录" dropped, "only" survives
+		{"登录 only", 42, "42-only"}, // "登录" dropped, "only" survives
 	}
 	for _, tc := range cases {
 		got := DeriveBranchFromTitle(tc.title, tc.issue)
 		if got != tc.want {
 			t.Errorf("DeriveBranchFromTitle(%q, %d) = %q, want %q", tc.title, tc.issue, got, tc.want)
 		}
+	}
+}
+
+// TestDeriveBranchFromTitle_NonASCIITitlesStayUnique pins the
+// uniqueness guarantee: slugify() drops every non-ASCII rune, so
+// titles that differ only in their CJK part collapse onto one
+// slug. The issue id keeps the branches apart.
+func TestDeriveBranchFromTitle_NonASCIITitlesStayUnique(t *testing.T) {
+	a := DeriveBranchFromTitle("用户登录 bug", 42)
+	b := DeriveBranchFromTitle("用户登出 bug", 43)
+	if a == b {
+		t.Fatalf("distinct issues share a branch name: %q", a)
+	}
+	if a != "42-bug" || b != "43-bug" {
+		t.Errorf("got %q and %q, want %q and %q", a, b, "42-bug", "43-bug")
 	}
 }
 

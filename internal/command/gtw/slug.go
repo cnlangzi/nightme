@@ -84,8 +84,8 @@ func slugify(title string) string {
 //     (see ccPrefixRE). If matched, extract the prefix
 //     components and convert the `:` / `()` separators to `-`.
 //     Then slugify the remainder and concatenate. The branch
-//     ends up looking like `feat-login-state-expires` (or
-//     `bug-state-expires` for `[BUG] state expires`).
+//     ends up looking like `42-feat-login-state-expires` (or
+//     `42-bug-state-expires` for `[BUG] state expires`).
 //  2. If no prefix matches, run the whole title through
 //     slugify() (drop non-ASCII, lowercase, dash-collapse).
 //  3. If the result is empty (e.g. the title was pure CJK / emoji),
@@ -93,9 +93,12 @@ func slugify(title string) string {
 //     to make progress on issue #N" signal even when the title
 //     yields no usable ref characters.
 //
-// F-XX: this replaces the old DeriveBranch which always emitted
-// `fix/<id>-<slug>`. The new convention puts no `fix/` ref
-// namespace — the slug itself is the branch name.
+// The issue id leads the branch name. slugify() drops every
+// non-ASCII rune, so two distinct titles can collapse onto the
+// same slug — "用户登录 bug" and "用户登出 bug" both yield "bug".
+// The id makes the branch unique per issue regardless of how the
+// title degrades, and lets `git branch | grep '^<id>-'` list
+// every branch belonging to one issue.
 func DeriveBranchFromTitle(title string, issueID int) string {
 	prefix := ""
 	rest := title
@@ -128,9 +131,10 @@ func DeriveBranchFromTitle(title string, issueID int) string {
 	slug := slugify(rest)
 	if slug == "" {
 		// Whole-title fallback when even the prefix is unusable.
+		// The id is already in the name, so the branch stays unique.
 		return fmt.Sprintf("fix-%d", issueID)
 	}
-	return prefix + slug
+	return fmt.Sprintf("%d-%s", issueID, prefix+slug)
 }
 
 // DeriveBranchFromName produces the branch name for the local-mode
@@ -142,6 +146,11 @@ func DeriveBranchFromTitle(title string, issueID int) string {
 // pure-CJK / pure-symbol). Local mode has no issue id to fall
 // back to, so we surface a clear error and let the user retry
 // with a valid name.
+//
+// The slug is the whole branch name here — no issue id leads it,
+// because local mode is not tied to an issue. Two local fixes whose
+// names slugify alike therefore land on one branch; the
+// branch-exists check rejects the second one.
 func DeriveBranchFromName(name string) (string, error) {
 	if name == "" {
 		return "", fmt.Errorf("branch name is empty")
@@ -160,8 +169,8 @@ func DeriveBranchFromName(name string) (string, error) {
 // directory under <sibling-of-repo>/<repo>.nightme/<slug>/. F-45 §6.1.
 //
 //	repoRoot = "/home/dev/code/nightme"
-//	slug     = "login-state-expiration"     (F-XX; was "42-login-state-expiration")
-//	→ "/home/dev/code/nightme.nightme/login-state-expiration"
+//	slug     = "42-login-state-expiration"
+//	→ "/home/dev/code/nightme.nightme/42-login-state-expiration"
 //
 // The sibling layout puts the worktree OUTSIDE the repository root
 // so build tools, linters, and codegraph don't see duplicate

@@ -476,10 +476,10 @@ Four forms of `/gtw config`:
 
 The value is free text — `简体中文`, `zh-CN`, and `Simplified Chinese` all
 work. Structured markers stay in English whatever the language: the
-`## Summary by NightMe` heading, the PR category labels, the `Risk:` line, the
-`Issue: #<id>` and `Closes #N` trailers, and the Conventional Commits type
-keyword. Issue titles stay English/ASCII — the branch name is derived from
-them.
+`## Summary by [NightMe](https://nightme.dev)` heading, the PR category labels,
+the `Risk:` line, the `Issue: #<id>` and `Closes #N` trailers, and the
+Conventional Commits type keyword. Issue titles stay English/ASCII — the
+branch name is derived from them.
 
 ## Workflow automation
 

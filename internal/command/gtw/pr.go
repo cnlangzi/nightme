@@ -205,6 +205,13 @@ func dispatchPR(
 				perr, indentLines(text, "  "))), nil
 	}
 
+	// Stamp the branded summary heading on the body in Go. The
+	// agent is asked to write the linked heading, but a model that
+	// paraphrases it would ship an unbranded body — the brand is a
+	// mechanical property, so it is stamped in code, the same way
+	// `Closes #N` is.
+	body = normalizeSummaryHeading(body)
+
 	// Stamp `Closes #N` on the body in Go. GitHub's auto-close
 	// keyword only fires when the issue id is on its own line in
 	// the PR description; we do this here (not via the agent
@@ -293,7 +300,7 @@ func dispatchPR(
 //
 // Format (v5, NightMe-branded + Sourcery-style summary):
 //
-//	## Summary by NightMe
+//	## Summary by [NightMe](https://nightme.dev)
 //	<1-2 sentences, imperative, WHAT not WHY>
 //
 //	New Features:        ← derived from this PR's commit types
@@ -334,8 +341,9 @@ func dispatchPR(
 //     is noise.
 //
 // Hard constraint: only ONE `## ` markdown heading in the body
-// (`## Summary by NightMe`). Categories are inline labels
-// followed by a colon (`New Features:`), NOT `## New Features`.
+// (`## Summary by [NightMe](https://nightme.dev)`). Categories are
+// inline labels followed by a colon (`New Features:`), NOT
+// `## New Features`.
 // GitHub renders each `## ` heading with a horizontal rule, and a
 // body with several such headings looks fragmented instead of
 // scannable. See the `Do NOT` section for the explicit rules.
@@ -352,10 +360,11 @@ func dispatchPR(
 //
 // The PR title subject and the body prose are written in the
 // configured output language (lang). The structural markers — the
-// `## Summary by NightMe` heading, the category labels, the
-// `Risk:` line, the Conventional Commits type keyword — stay in
-// English: they are a machine-readable contract (extractRiskLevel
-// parses the Risk line, the body shape is asserted by reviewers).
+// `## Summary by [NightMe](https://nightme.dev)` heading, the
+// category labels, the `Risk:` line, the Conventional Commits type
+// keyword — stay in English: they are a machine-readable contract
+// (extractRiskLevel parses the Risk line, the body shape is asserted
+// by reviewers).
 func buildPRPrompt(c Context, base string, lang string) string {
 	// v5 prompt. The semantic flow is:
 	//   commit history + final diff → PR body → Summary by NightMe → PR title
@@ -398,7 +407,7 @@ func buildPRPrompt(c Context, base string, lang string) string {
 	sb.WriteString("The commit history is useful evidence for understanding the work.\n\n")
 	sb.WriteString("The final diff is the authoritative evidence of what the Pull Request actually changes.\n\n")
 	sb.WriteString("The Pull Request body explains the complete change.\n\n")
-	sb.WriteString("The `## Summary by NightMe` section provides the concise semantic summary of that complete change.\n\n")
+	sb.WriteString("The `" + summaryHeading + "` section provides the concise semantic summary of that complete change.\n\n")
 	sb.WriteString("The Pull Request title is the shortest useful expression of that Summary.\n\n")
 	sb.WriteString("Therefore the semantic flow is:\n\n")
 	sb.WriteString("    commit history + final diff\n")
@@ -456,11 +465,11 @@ func buildPRPrompt(c Context, base string, lang string) string {
 	sb.WriteString("The PR body explains the meaningful changes introduced by the complete Pull Request.\n\n")
 	sb.WriteString("It must follow the existing NightMe PR body format defined below.\n\n")
 	sb.WriteString("### Summary by NightMe\n\n")
-	sb.WriteString("`## Summary by NightMe` is the canonical concise summary of the complete Pull Request.\n\n")
+	sb.WriteString("`" + summaryHeading + "` is the canonical concise summary of the complete Pull Request.\n\n")
 	sb.WriteString("It is the semantic bridge between the detailed PR body and the concise PR title.\n\n")
 	sb.WriteString("### PR title\n\n")
 	sb.WriteString("The title is a concise representation of the overall Pull Request.\n\n")
-	sb.WriteString("It should be derived from the meaning of `## Summary by NightMe`.\n\n")
+	sb.WriteString("It should be derived from the meaning of `" + summaryHeading + "`.\n\n")
 	sb.WriteString("It is NOT:\n\n")
 	sb.WriteString("- the latest commit title\n")
 	sb.WriteString("- the most important-looking individual commit title\n")
@@ -470,14 +479,14 @@ func buildPRPrompt(c Context, base string, lang string) string {
 	// --- Output language ------------------------------------------
 	sb.WriteString("## Output language\n\n")
 	sb.WriteString("Write the PR title subject and the body prose in " + placeholderLanguage + ".\n\n")
-	sb.WriteString("Keep these exactly in English, whatever the output language: the `## Summary by NightMe` heading, the category labels (`New Features:`, `Bug Fixes:`, `Enhancements:`, `Tests:`, `Documentation:`, `Chore / Build / CI:`), the `Risk: <low|medium|high> — <reason>` line, and the Conventional Commits type keyword.\n\n")
+	sb.WriteString("Keep these exactly in English, whatever the output language: the `" + summaryHeading + "` heading, the category labels (`New Features:`, `Bug Fixes:`, `Enhancements:`, `Tests:`, `Documentation:`, `Chore / Build / CI:`), the `Risk: <low|medium|high> — <reason>` line, and the Conventional Commits type keyword.\n\n")
 
 	// --- PR Body Format -------------------------------------------
 	sb.WriteString("## PR Body Format\n\n")
 	sb.WriteString("The PR body MUST use the following existing format.\n\n")
 	sb.WriteString("Do not invent a different structure.\n\n")
 	sb.WriteString("The body MUST begin immediately with:\n\n")
-	sb.WriteString("## Summary by NightMe\n\n")
+	sb.WriteString(summaryHeading + "\n\n")
 	sb.WriteString("<summary>\n\n")
 	sb.WriteString("This Summary must be the first section of the PR body, immediately after the PR title.\n\n")
 	sb.WriteString("Do not place any other section before it.\n\n")
@@ -504,7 +513,7 @@ func buildPRPrompt(c Context, base string, lang string) string {
 
 	// --- PR Title -------------------------------------------------
 	sb.WriteString("## PR Title\n\n")
-	sb.WriteString("After the PR body and `## Summary by NightMe` have been established, derive the PR title from that Summary.\n\n")
+	sb.WriteString("After the PR body and `" + summaryHeading + "` have been established, derive the PR title from that Summary.\n\n")
 	sb.WriteString("The title should be a semantic compression of the Summary.\n\n")
 	sb.WriteString("It should NOT simply truncate or copy the Summary.\n\n")
 	sb.WriteString("Rewrite the Summary into a concise, natural Conventional Commit title.\n\n")
@@ -516,7 +525,7 @@ func buildPRPrompt(c Context, base string, lang string) string {
 	sb.WriteString("do not automatically use:\n\n")
 	sb.WriteString("    fix(outbound): finalize drain before dispatcher cancels ctx\n\n")
 	sb.WriteString("merely because it is the latest commit.\n\n")
-	sb.WriteString("Instead, first establish what the complete Pull Request accomplishes, express that in `## Summary by NightMe`, and then derive the title from that Summary.\n\n")
+	sb.WriteString("Instead, first establish what the complete Pull Request accomplishes, express that in `" + summaryHeading + "`, and then derive the title from that Summary.\n\n")
 	sb.WriteString("An individual commit title may happen to be a good PR title, but only when it accurately represents the overall change described by the Summary.\n\n")
 
 	// --- Conventional Commit Requirements -------------------------
@@ -535,7 +544,7 @@ func buildPRPrompt(c Context, base string, lang string) string {
 	sb.WriteString("    perf\n")
 	sb.WriteString("    style\n")
 	sb.WriteString("    revert\n\n")
-	sb.WriteString("Choose the type according to the overall purpose of the Pull Request, as expressed by `## Summary by NightMe`.\n\n")
+	sb.WriteString("Choose the type according to the overall purpose of the Pull Request, as expressed by `" + summaryHeading + "`.\n\n")
 	sb.WriteString("Do not simply inherit the type from the latest commit.\n\n")
 	sb.WriteString("Choose the scope according to the subsystem or area represented by the overall Pull Request.\n\n")
 	sb.WriteString("Do not simply inherit the scope from the latest commit.\n\n")
@@ -547,7 +556,7 @@ func buildPRPrompt(c Context, base string, lang string) string {
 	sb.WriteString("## Semantic Consistency\n\n")
 	sb.WriteString("Before producing the final output, verify internally:\n\n")
 	sb.WriteString("- The body describes the complete `" + base + "` → `" + current + "` change.\n")
-	sb.WriteString("- `## Summary by NightMe` accurately summarizes the complete PR.\n")
+	sb.WriteString("- `" + summaryHeading + "` accurately summarizes the complete PR.\n")
 	sb.WriteString("- The title expresses the same overall meaning as the Summary.\n")
 	sb.WriteString("- The title does not introduce a different interpretation.\n")
 	sb.WriteString("- The title is not merely copied from the latest commit.\n")
@@ -723,6 +732,31 @@ func appendClosesFooter(body string, issue int) string {
 	// the last bullet.
 	body = strings.TrimRight(body, " \t\r\n")
 	return body + "\n\n" + footer + "\n"
+}
+
+// normalizeSummaryHeading rewrites the body's leading plain
+// `## Summary by NightMe` heading into the branded form, whose
+// NightMe name links to nightmeSite.
+//
+// Why this lives in Go instead of the agent prompt: the brand link
+// is a mechanical property of the body. A model that paraphrases
+// the heading — dropping the link, or the URL with it — would
+// otherwise ship an unbranded body, and the regression would only
+// show up on some PRs. Doing it in code is deterministic and
+// zero-cost, the same reasoning as appendClosesFooter.
+//
+// Only the leading heading is rewritten, and only when it matches
+// the plain form exactly: a body whose prose mentions the heading
+// keeps its text.
+func normalizeSummaryHeading(body string) string {
+	if !strings.HasPrefix(body, summaryHeadingPlain) {
+		return body
+	}
+	rest := body[len(summaryHeadingPlain):]
+	if rest != "" && !strings.HasPrefix(rest, "\n") {
+		return body
+	}
+	return summaryHeading + rest
 }
 
 // extractRiskLevel pulls the `Risk: <level> — <reason>` line out

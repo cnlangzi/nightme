@@ -663,7 +663,7 @@ func TestBuildPRPrompt_CarriesOutputLanguage(t *testing.T) {
 	p := buildPRPrompt(Context{Worktree: "/w", Branch: "x"}, "main", "简体中文")
 	mustContain(t, p, "## Output language")
 	mustContain(t, p, "Write the PR title subject and the body prose in 简体中文.")
-	mustContain(t, p, "Keep these exactly in English, whatever the output language: the `## Summary by NightMe` heading, the category labels (`New Features:`, `Bug Fixes:`, `Enhancements:`, `Tests:`, `Documentation:`, `Chore / Build / CI:`), the `Risk: <low|medium|high> — <reason>` line, and the Conventional Commits type keyword.")
+	mustContain(t, p, "Keep these exactly in English, whatever the output language: the `## Summary by [NightMe](https://nightme.dev)` heading, the category labels (`New Features:`, `Bug Fixes:`, `Enhancements:`, `Tests:`, `Documentation:`, `Chore / Build / CI:`), the `Risk: <low|medium|high> — <reason>` line, and the Conventional Commits type keyword.")
 	if strings.Contains(p, placeholderLanguage) {
 		t.Errorf("placeholder survived:\n%s", p)
 	}

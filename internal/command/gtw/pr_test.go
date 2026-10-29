@@ -311,12 +311,12 @@ func TestParsePRReply_NoiseModes(t *testing.T) {
 // NightMe → PR title`, which explicitly forbids the "use the
 // latest commit subject as the PR title" shortcut that produced
 // misleading titles on branches whose last commit was a narrow
-// fix. v5 adds: `## Summary by NightMe` is the first section of
-// the body (immediately after the PR title), and Risk is mandatory
-// on every PR body.
+// fix. v5 adds: `## Summary by [NightMe](https://nightme.dev)` is
+// the first section of the body (immediately after the PR title),
+// and Risk is mandatory on every PR body.
 //
 // Carry-over invariants from v3:
-//   - The body has ONE `## ` heading (`## Summary by NightMe`).
+//   - The body has ONE `## ` heading (`## Summary by [NightMe](https://nightme.dev)`).
 //   - Categories are inline labels (`New Features:`), not headings.
 //   - The GitHub `Closes #N` keyword is NOT in the prompt —
 //     dispatchPR appends it in Go via appendClosesFooter, so the
@@ -339,8 +339,8 @@ func TestParsePRReply_NoiseModes(t *testing.T) {
 //     `..HEAD`, so the agent's diff range is unambiguous.
 //
 // v5 anchors:
-//   - `## Summary by NightMe` is the first section of the body,
-//     immediately after the PR title.
+//   - `## Summary by [NightMe](https://nightme.dev)` is the first
+//     section of the body, immediately after the PR title.
 //   - `Risk: <low|medium|high> — <concise reason>` is mandatory on
 //     every PR body (no longer optional / non-trivial-only).
 // -----------------------------------------------------------------------------
@@ -368,7 +368,7 @@ func TestBuildPRPrompt_Remote(t *testing.T) {
 	mustContain(t, p, "## Output Format")
 
 	// Brand heading + six category labels + Risk availability.
-	mustContain(t, p, "## Summary by NightMe")
+	mustContain(t, p, "## Summary by [NightMe](https://nightme.dev)")
 	mustContain(t, p, "New Features:")
 	mustContain(t, p, "Bug Fixes:")
 	mustContain(t, p, "Enhancements:")
@@ -412,9 +412,10 @@ func TestBuildPRPrompt_Remote(t *testing.T) {
 	mustNotContain(t, p, "git push -u origin")
 	mustNotContain(t, p, "git commit -m")
 
-	// v5 anchors: ## Summary by NightMe must be the first section
-	// of the body (immediately after the PR title); Risk is
-	// mandatory on every PR body, including low-risk changes.
+	// v5 anchors: ## Summary by [NightMe](https://nightme.dev) must
+	// be the first section of the body (immediately after the PR
+	// title); Risk is mandatory on every PR body, including low-risk
+	// changes.
 	mustContain(t, p, "first section of the PR body")
 	mustContain(t, p, "immediately after the PR title")
 	mustContain(t, p, "Do not place any other section before it")
@@ -467,11 +468,14 @@ func TestBuildPRPrompt_NonWorktreeRepo(t *testing.T) {
 // and PascalCase `NightMe` in prose. A regression to `nightme`
 // (lowercase) or `Nightme` (sentence case) here is a brand
 // violation. See also the dedicated brand-casing memory.
+//
+// The heading links NightMe to nightme.dev — the prompt asks for
+// the linked form so the PR body carries the brand link.
 func TestBuildPRPromptV4_BrandHeading(t *testing.T) {
 	c := Context{Worktree: "/w", Branch: "feat/x", RepoRoot: "/r", Repo: "o/r"}
 	p := buildPRPrompt(c, "main", defaultLanguage)
 
-	mustContain(t, p, "## Summary by NightMe")
+	mustContain(t, p, "## Summary by [NightMe](https://nightme.dev)")
 	mustNotContain(t, p, "## Summary by nightme")
 	mustNotContain(t, p, "## Summary by Nightme")
 }
@@ -671,6 +675,69 @@ func TestAppendClosesFooter_DoesNotMatchDifferentIssue(t *testing.T) {
 	want := "## Summary by NightMe\n\nFoo.\n\nCloses #99\n\nCloses #42\n"
 	if got := appendClosesFooter(body, 42); got != want {
 		t.Fatalf("appendClosesFooter must append when existing Closes is for a different issue:\nwant: %q\ngot:  %q", want, got)
+	}
+}
+
+// -----------------------------------------------------------------------------
+// normalizeSummaryHeading
+//
+// Stamps the brand link into the body's leading summary heading.
+// The agent is asked to write the linked heading, but a model that
+// paraphrases it would ship an unbranded body — the rewrite in Go
+// makes the link deterministic.
+// -----------------------------------------------------------------------------
+
+func TestNormalizeSummaryHeading_LinksPlainHeading(t *testing.T) {
+	want := "## Summary by [NightMe](https://nightme.dev)\n\nFoo.\n"
+	for _, body := range []string{
+		"## Summary by NightMe\n\nFoo.\n",
+		"## Summary by NightMe \n\nFoo.\n",
+		"## Summary by NightMe\r\n\nFoo.\n",
+	} {
+		if got := normalizeSummaryHeading(body); got != want {
+			t.Fatalf("normalizeSummaryHeading(%q) mismatch:\nwant: %q\ngot:  %q", body, want, got)
+		}
+	}
+}
+
+// TestNormalizeSummaryHeading_HeadingOnlyBody covers the body that
+// is nothing but the heading — no summary text after it.
+func TestNormalizeSummaryHeading_HeadingOnlyBody(t *testing.T) {
+	body := "## Summary by NightMe"
+	want := "## Summary by [NightMe](https://nightme.dev)"
+	if got := normalizeSummaryHeading(body); got != want {
+		t.Fatalf("normalizeSummaryHeading mismatch:\nwant: %q\ngot:  %q", want, got)
+	}
+}
+
+// TestNormalizeSummaryHeading_ReplacesStaleLink pins the case of a
+// model that links the brand to the old GitHub target instead of
+// dropping the link: the body must still end up on nightme.dev.
+func TestNormalizeSummaryHeading_ReplacesStaleLink(t *testing.T) {
+	body := "## Summary by [NightMe](https://github.com/cnlangzi/nightme)\n\nFoo.\n"
+	want := "## Summary by [NightMe](https://nightme.dev)\n\nFoo.\n"
+	if got := normalizeSummaryHeading(body); got != want {
+		t.Fatalf("normalizeSummaryHeading mismatch:\nwant: %q\ngot:  %q", want, got)
+	}
+}
+
+func TestNormalizeSummaryHeading_KeepsLinkedHeading(t *testing.T) {
+	body := "## Summary by [NightMe](https://nightme.dev)\n\nFoo.\n"
+	if got := normalizeSummaryHeading(body); got != body {
+		t.Fatalf("normalizeSummaryHeading must not touch an already linked heading:\nwant: %q\ngot:  %q", body, got)
+	}
+}
+
+func TestNormalizeSummaryHeading_LeavesOtherBodiesAlone(t *testing.T) {
+	for _, body := range []string{
+		"",
+		"Foo.\n",
+		"## Summary by NightMe Notes\n\nFoo.\n",
+		"Refactor notes.\n\n## Summary by NightMe\n\nFoo.\n",
+	} {
+		if got := normalizeSummaryHeading(body); got != body {
+			t.Fatalf("normalizeSummaryHeading must not touch %q:\ngot: %q", body, got)
+		}
 	}
 }
 

@@ -441,7 +441,7 @@ func resetIssueDrafts(dir string) error {
 // absolute draft directory and the configured output language.
 // The issue title stays English/ASCII — the branch name is derived
 // from it (DeriveBranchFromTitle → slugify drops non-ASCII), so a
-// translated title would degrade the branch name to `fix-<id>`.
+// translated title would leave the branch with a truncated slug.
 func renderNewIssuePrompt(draftDir, lang string) string {
 	out := strings.ReplaceAll(newIssuePrompt, placeholderDraftDirAbs, draftDir)
 	return applyLanguage(out, lang)

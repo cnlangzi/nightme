@@ -392,8 +392,8 @@ abc1234 fix(gtw): hooks output uses standard ✅ title
 
 ```
 ✅ Fix #42 ready
-→ branch:   `login-state-expiration`
-→ worktree: /Users/.../worktrees/login-state-expiration
+→ branch:   `42-login-state-expiration`
+→ worktree: /Users/.../worktrees/42-login-state-expiration
 → issue:    owner/repo#42 [nightme/wip]
 → base:     abc1234
 ↳ agent is analyzing — review the plan in chat, then tell the agent when to proceed
@@ -403,8 +403,8 @@ abc1234 fix(gtw): hooks output uses standard ✅ title
 
 ```
 ✅ Fix #42 ready (direct execute)
-→ branch:   `login-state-expiration`
-→ worktree: /Users/.../worktrees/login-state-expiration
+→ branch:   `42-login-state-expiration`
+→ worktree: /Users/.../worktrees/42-login-state-expiration
 → issue:    owner/repo#42 [nightme/wip]
 ↳ agent is fixing now — follow progress in chat · `/gtw commit` + `/gtw push` when done
 ```

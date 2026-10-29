@@ -688,7 +688,33 @@ func TestAppendClosesFooter_DoesNotMatchDifferentIssue(t *testing.T) {
 // -----------------------------------------------------------------------------
 
 func TestNormalizeSummaryHeading_LinksPlainHeading(t *testing.T) {
-	body := "## Summary by NightMe\n\nFoo.\n"
+	want := "## Summary by [NightMe](https://nightme.dev)\n\nFoo.\n"
+	for _, body := range []string{
+		"## Summary by NightMe\n\nFoo.\n",
+		"## Summary by NightMe \n\nFoo.\n",
+		"## Summary by NightMe\r\n\nFoo.\n",
+	} {
+		if got := normalizeSummaryHeading(body); got != want {
+			t.Fatalf("normalizeSummaryHeading(%q) mismatch:\nwant: %q\ngot:  %q", body, want, got)
+		}
+	}
+}
+
+// TestNormalizeSummaryHeading_HeadingOnlyBody covers the body that
+// is nothing but the heading — no summary text after it.
+func TestNormalizeSummaryHeading_HeadingOnlyBody(t *testing.T) {
+	body := "## Summary by NightMe"
+	want := "## Summary by [NightMe](https://nightme.dev)"
+	if got := normalizeSummaryHeading(body); got != want {
+		t.Fatalf("normalizeSummaryHeading mismatch:\nwant: %q\ngot:  %q", want, got)
+	}
+}
+
+// TestNormalizeSummaryHeading_ReplacesStaleLink pins the case of a
+// model that links the brand to the old GitHub target instead of
+// dropping the link: the body must still end up on nightme.dev.
+func TestNormalizeSummaryHeading_ReplacesStaleLink(t *testing.T) {
+	body := "## Summary by [NightMe](https://github.com/cnlangzi/nightme)\n\nFoo.\n"
 	want := "## Summary by [NightMe](https://nightme.dev)\n\nFoo.\n"
 	if got := normalizeSummaryHeading(body); got != want {
 		t.Fatalf("normalizeSummaryHeading mismatch:\nwant: %q\ngot:  %q", want, got)

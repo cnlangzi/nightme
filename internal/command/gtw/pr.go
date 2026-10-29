@@ -734,29 +734,39 @@ func appendClosesFooter(body string, issue int) string {
 	return body + "\n\n" + footer + "\n"
 }
 
-// normalizeSummaryHeading rewrites the body's leading plain
-// `## Summary by NightMe` heading into the branded form, whose
-// NightMe name links to nightmeSite.
+// normalizeSummaryHeading rewrites the body's leading summary
+// heading into the branded form, whose NightMe name links to
+// nightmeSite.
 //
 // Why this lives in Go instead of the agent prompt: the brand link
 // is a mechanical property of the body. A model that paraphrases
-// the heading — dropping the link, or the URL with it — would
-// otherwise ship an unbranded body, and the regression would only
-// show up on some PRs. Doing it in code is deterministic and
-// zero-cost, the same reasoning as appendClosesFooter.
+// the heading — dropping the link, keeping an older link target, or
+// trailing the line with spaces — would otherwise ship an
+// unbranded body, and the regression would only show up on some
+// PRs. Doing it in code is deterministic and zero-cost, the same
+// reasoning as appendClosesFooter.
 //
-// Only the leading heading is rewritten, and only when it matches
-// the plain form exactly: a body whose prose mentions the heading
-// keeps its text.
+// The leading line is rewritten when it is the plain heading or any
+// linked variant of it; trailing spaces and a CR from CRLF input
+// are dropped with it. A line that merely starts like the heading
+// (e.g. `## Summary by NightMe Notes`), and a heading that is not
+// the body's first line, keep their text.
 func normalizeSummaryHeading(body string) string {
-	if !strings.HasPrefix(body, summaryHeadingPlain) {
+	line, rest, found := strings.Cut(body, "\n")
+	if !found {
+		rest = ""
+	}
+	trimmed := strings.TrimRight(line, " \t\r")
+	switch {
+	case trimmed == summaryHeadingPlain:
+	case strings.HasPrefix(trimmed, summaryHeadingLinkedPrefix):
+	default:
 		return body
 	}
-	rest := body[len(summaryHeadingPlain):]
-	if rest != "" && !strings.HasPrefix(rest, "\n") {
-		return body
+	if !found {
+		return summaryHeading
 	}
-	return summaryHeading + rest
+	return summaryHeading + "\n" + rest
 }
 
 // extractRiskLevel pulls the `Risk: <level> — <reason>` line out

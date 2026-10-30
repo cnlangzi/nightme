@@ -222,9 +222,9 @@ func dispatchPR(
 	body = appendClosesFooter(body, c.Issue)
 
 	// Stamp the brand signature on the body in Go. The brand link
-	// lives in the footer, not in the summary heading; the agent is
-	// told to write neither, so both land here.
-	body = appendBrandFooter(body)
+	// lives in the last line, not in the summary heading; the agent
+	// writes neither, so both land here.
+	body = appendPRFooter(body)
 
 	url, err := provider.CreatePR(ctx, owner, repo, baseBranch, c.Branch, title, body)
 	if err != nil {
@@ -326,7 +326,7 @@ func dispatchPR(
 // is a no-op.
 //
 // The brand signature is NOT part of the agent's output either:
-// dispatchPR appends it in Go via appendBrandFooter, so the body
+// dispatchPR appends it in Go via appendPRFooter, so the body
 // ends with the NightMe link to nightme.dev.
 //
 // Differences from v2:
@@ -520,7 +520,6 @@ func buildPRPrompt(c Context, base string, lang string) string {
 	sb.WriteString("Risk assessment is required for every PR.\n\n")
 	sb.WriteString("Assess the risk based on the actual changes in the PR, including compatibility, breaking behavior, API or wire changes, migration requirements, dependency/version coupling, lifecycle or state changes, operational impact, and regression risk when applicable.\n\n")
 	sb.WriteString("Even when the change is low risk, do not omit the Risk line.\n\n")
-	sb.WriteString("Do not write a footer, a signature, or an attribution line.\n\n")
 
 	// --- PR Title -------------------------------------------------
 	sb.WriteString("## PR Title\n\n")
@@ -743,6 +742,25 @@ func appendClosesFooter(body string, issue int) string {
 	// the last bullet.
 	body = strings.TrimRight(body, " \t\r\n")
 	return body + "\n\n" + footer + "\n"
+}
+
+// appendPRFooter stamps the brand signature as the last line of a
+// PR body. The `Closes #N` line above it already separates the
+// signature from the body content, so no horizontal rule is used.
+//
+// Why this lives in Go instead of the agent prompt: the brand link
+// is a mechanical property of the body. A model that paraphrases
+// the signature — dropping the link, or pointing it at a stale
+// target — would otherwise ship an unbranded body, and the
+// regression would only show up on some PRs. Doing it in code is
+// deterministic and zero-cost, the same reasoning as
+// appendClosesFooter.
+//
+// The signature is appended, never substituted: whatever the agent
+// wrote stays in the body, so a quoted example of the footer line
+// survives.
+func appendPRFooter(body string) string {
+	return strings.TrimRight(body, " \t\r\n") + "\n\n" + brandLine + "\n"
 }
 
 // normalizeSummaryHeading rewrites the body's leading summary

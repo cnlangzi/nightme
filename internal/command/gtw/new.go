@@ -27,6 +27,18 @@ const issueDraftDirName = "issue-drafts"
 
 const placeholderDraftDirAbs = "{{DRAFT_DIR_ABS}}"
 
+// issueFooter is appended to every issue /gtw new -y creates: a
+// horizontal rule and the brand signature. The rule keeps the
+// signature separate from the issue text; directly under a text
+// line Markdown would read it as a setext heading underline.
+const issueFooter = "\n\n---\n" + brandLine + "\n"
+
+// appendIssueFooter stamps the brand signature at the bottom of an
+// issue body.
+func appendIssueFooter(body string) string {
+	return strings.TrimRight(body, " \t\r\n") + issueFooter
+}
+
 // A draft is NN.md; once its issue exists, /gtw new -y replaces it
 // with NN.created holding "#<number> <title>". The number fixes the
 // creation order and is the key other drafts reference it by.
@@ -209,7 +221,7 @@ func createIssuesFromDrafts(ctx context.Context, dir string, resolve func() (Git
 	for _, d := range set.pending {
 		kept := len(set.pending) - len(opened)
 		title, body, _ := parseIssueDraft(resolveIssueRefs(d.raw, numbers))
-		issue, err := provider.CreateIssue(ctx, owner, repo, title, appendBrandFooter(body))
+		issue, err := provider.CreateIssue(ctx, owner, repo, title, appendIssueFooter(body))
 		if err != nil {
 			return renderIssueCreateFailure(owner, repo, opened, "create issue from "+d.name(), err, dir, kept)
 		}

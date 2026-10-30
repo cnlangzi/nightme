@@ -205,11 +205,12 @@ func dispatchPR(
 				perr, indentLines(text, "  "))), nil
 	}
 
-	// Stamp the branded summary heading on the body in Go. The
-	// agent is asked to write the linked heading, but a model that
-	// paraphrases it would ship an unbranded body — the brand is a
-	// mechanical property, so it is stamped in code, the same way
-	// `Closes #N` is.
+	// Normalize the summary heading on the body in Go. The agent
+	// is asked to write the plain heading, but a model that
+	// paraphrases it would ship a body whose first section does
+	// not carry the expected shape — the heading is a mechanical
+	// property, so it is stamped in code, the same way `Closes #N`
+	// is.
 	body = normalizeSummaryHeading(body)
 
 	// Stamp `Closes #N` on the body in Go. GitHub's auto-close
@@ -219,6 +220,11 @@ func dispatchPR(
 	// from c.Issue — deterministic, not worth an LLM round-trip.
 	// For ModeLocal / unset Issue the helper is a no-op.
 	body = appendClosesFooter(body, c.Issue)
+
+	// Stamp the brand signature on the body in Go. The brand link
+	// lives in the last line, not in the summary heading; the agent
+	// writes neither, so both land here.
+	body = appendPRFooter(body)
 
 	url, err := provider.CreatePR(ctx, owner, repo, baseBranch, c.Branch, title, body)
 	if err != nil {
@@ -300,7 +306,7 @@ func dispatchPR(
 //
 // Format (v5, NightMe-branded + Sourcery-style summary):
 //
-//	## Summary by [NightMe](https://nightme.dev)
+//	## Summary by NightMe
 //	<1-2 sentences, imperative, WHAT not WHY>
 //
 //	New Features:        ← derived from this PR's commit types
@@ -318,6 +324,10 @@ func dispatchPR(
 // model regression (lowercase / wrong issue / dropped / mid-
 // paragraph). For ModeLocal worktrees (c.Issue == -1) the helper
 // is a no-op.
+//
+// The brand signature is NOT part of the agent's output either:
+// dispatchPR appends it in Go via appendPRFooter, so the body
+// ends with the NightMe link to nightme.dev.
 //
 // Differences from v2:
 //
@@ -341,7 +351,7 @@ func dispatchPR(
 //     is noise.
 //
 // Hard constraint: only ONE `## ` markdown heading in the body
-// (`## Summary by [NightMe](https://nightme.dev)`). Categories are
+// (`## Summary by NightMe`). Categories are
 // inline labels followed by a colon (`New Features:`), NOT
 // `## New Features`.
 // GitHub renders each `## ` heading with a horizontal rule, and a
@@ -360,7 +370,7 @@ func dispatchPR(
 //
 // The PR title subject and the body prose are written in the
 // configured output language (lang). The structural markers — the
-// `## Summary by [NightMe](https://nightme.dev)` heading, the
+// `## Summary by NightMe` heading, the
 // category labels, the `Risk:` line, the Conventional Commits type
 // keyword — stay in English: they are a machine-readable contract
 // (extractRiskLevel parses the Risk line, the body shape is asserted
@@ -734,17 +744,35 @@ func appendClosesFooter(body string, issue int) string {
 	return body + "\n\n" + footer + "\n"
 }
 
-// normalizeSummaryHeading rewrites the body's leading summary
-// heading into the branded form, whose NightMe name links to
-// nightmeSite.
+// appendPRFooter stamps the brand signature as the last line of a
+// PR body. The `Closes #N` line above it already separates the
+// signature from the body content, so no horizontal rule is used.
 //
 // Why this lives in Go instead of the agent prompt: the brand link
 // is a mechanical property of the body. A model that paraphrases
-// the heading — dropping the link, keeping an older link target, or
-// trailing the line with spaces — would otherwise ship an
-// unbranded body, and the regression would only show up on some
-// PRs. Doing it in code is deterministic and zero-cost, the same
-// reasoning as appendClosesFooter.
+// the signature — dropping the link, or pointing it at a stale
+// target — would otherwise ship an unbranded body, and the
+// regression would only show up on some PRs. Doing it in code is
+// deterministic and zero-cost, the same reasoning as
+// appendClosesFooter.
+//
+// The signature is appended, never substituted: whatever the agent
+// wrote stays in the body, so a quoted example of the footer line
+// survives.
+func appendPRFooter(body string) string {
+	return strings.TrimRight(body, " \t\r\n") + "\n\n" + brandLine + "\n"
+}
+
+// normalizeSummaryHeading rewrites the body's leading summary
+// heading into the canonical plain form.
+//
+// Why this lives in Go instead of the agent prompt: the heading is
+// a mechanical property of the body. A model that paraphrases it —
+// adding a link, keeping an older link target, or trailing the line
+// with spaces — would otherwise ship a body whose first section
+// does not carry the expected shape, and the regression would only
+// show up on some PRs. Doing it in code is deterministic and
+// zero-cost, the same reasoning as appendClosesFooter.
 //
 // The leading line is rewritten when it is the plain heading or any
 // linked variant of it; trailing spaces and a CR from CRLF input
@@ -758,7 +786,7 @@ func normalizeSummaryHeading(body string) string {
 	}
 	trimmed := strings.TrimRight(line, " \t\r")
 	switch {
-	case trimmed == summaryHeadingPlain:
+	case trimmed == summaryHeading:
 	case strings.HasPrefix(trimmed, summaryHeadingLinkedPrefix):
 	default:
 		return body

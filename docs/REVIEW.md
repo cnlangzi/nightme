@@ -1,6 +1,6 @@
 # /review 设计
 
-> **Status**: 设计定稿(单一 dispatcher + 两种 Runner + ocr 路径按 rule group 拆多 job 并发 + simplify 作为并行 group)。所有 bridge 走 `agent.ReviewDispatch` 统一入口——`OcrAvailable() ? ReviewWithOcr : ReviewWithPrompt`。**Agent 自带 review 子命令(`claude -p code-review` / `codex review` / `cursor-agent -p /review-bugbot`)不再走 `Starter.Review` 特殊路径**,用户直接在 chat 发 slash command,nightme 透传给底层 agent。**§2.5 多 job 并发机制已实现**(`internal/agent/aggregate_sink.go` + `review_with_ocr.go::delegateReviewMultiJob`,详见 §2.5.7 实现索引)
+> **Status**: 设计定稿(单一 dispatcher + 两种 Runner + ocr 路径按 rule group 拆多 job 并发 + simplify 作为并行 group + 每 group 走 agent session 路径)。所有 bridge 走 `agent.ReviewDispatch` 统一入口——`OcrAvailable() ? ReviewWithOcr : ReviewWithPrompt`。**Agent 自带 review 子命令(`claude -p code-review` / `codex review` / `cursor-agent -p /review-bugbot`)不再走 `Starter.Review` 特殊路径**,用户直接在 chat 发 slash command,nightme 透传给底层 agent。**§2.5 多 job 并发机制已实现**(`internal/agent/aggregate_sink.go` + `review_with_ocr.go::delegateReviewMultiJob`,详见 §2.5.7 实现索引)
 > **Scope**: `/review` slash 命令的架构、分流、数据流、生命周期与边界
 > **读者**: 参与 command / agent / bridge / chatsession 任一层,或想理解 review 设计意图的工程师
 > **Related docs**:
@@ -13,21 +13,21 @@
 
 ## 1. 设计目标
 
-让用户在任意 IM chat 里发 `/review`,对当前 workspace 的代码变更做一次 code review,findings 回到**同一 chat**,主 agent 能据此 fix。review 在**隔离子进程**里跑,不污染主 chat 上下文;支持**多 reviewer 并行**(`--agent`),findings 汇聚到同一 chat。
+让用户在任意 IM chat 里发 `/review`,对当前 workspace 的代码变更做一次 code review,findings 回到**同一 chat**,主 agent 能据此 fix。review 在**隔离的 agent session**里跑(独立进程 / 独立 session,独立 context 窗口),不污染主 chat 上下文;支持**多 reviewer 并行**(`--agent`),findings 汇聚到同一 chat。
 
 ### 1.1 核心不变量
 
 | # | 不变量 | 违反后果 |
 | --- | --- | --- |
 | 1 | `/review` 全异步:Handle 立即返回,goroutine 跑 review | dispatch worker / readpump 阻塞,chat 卡死 |
-| 2 | review 走 RunOnce 隔离子进程,独立 context 窗口 | 主 chat 上下文被 review 推理污染(可烧数万 token) |
-| 3 | review 子进程 ctx 派生自 chat session ctx,`/close` 自动取消 | orphan review 子进程残留 |
+| 2 | review 走 agent session 路径(独立进程 / 独立 session),独立 context 窗口 | 主 chat 上下文被 review 推理污染(可烧数万 token) |
+| 3 | review session 的 ctx 派生自 chat session ctx,`/close` 自动取消 | orphan review 进程 / session 残留 |
 | 4 | findings **双路分发**:注入 AS(当 user turn)+ 发 channel(直接可见) | 主 agent 看不到 findings,或用户要等下游回复 |
 | 5 | `--agent` **不切 AS**(不同 reviewer,同一 chat) | 切 AS 副作用太大,破坏"多 reviewer 汇聚"工作流 |
 | 6 | fix **对话式**:不自动 apply,用户说"fix critical findings"(沿用 output schema 的 severity 词汇 critical/high/medium/low)主 agent 用原生 Edit | 违反 v1 "纯 review"边界 |
 | 7 | **二选一**:`OcrAvailable() ? ReviewWithOcr : ReviewWithPrompt`,所有 bridge 走 `agent.ReviewDispatch` 同一入口 | review 行为跨 agent 不一致,或不同环境不可复现 |
 | 8 | ocr 始终是被调用的**外部工具**(类 git),不进 agent 注册表 | 把狭义 agent 当 bridge,扭曲 bridge 语义 |
-| 9 | 大 changeset 按 ocr rule group 拆多 job,**每 job 独立 RunOnce / 独立 context**,不累积 | 单 context 塞全量 diff 爆窗口,或同进程多轮累积爆 |
+| 9 | 大 changeset 按 ocr rule group 拆多 job,**每 job 独立 session / 独立 context**,不累积 | 单 context 塞全量 diff 爆窗口,或同进程多轮累积爆 |
 | 10 | 多 job **自动并发**(sem 上限),merge 后一次返回 | 顺序跑 N job 慢;无上限并发爆 token / 撞 API rate |
 | 11 | 多 job 时,**上层只看到一个 review lifecycle**(单 Ready / 单 Result) | chat channel 看到 N 个 ready / N 个 result,StatusBar 翻转混乱 |
 | 12 | per-job 内的 ToolStart 必须**等配对 ToolEnd 才转发**,Start/End 在外层 wire 上**连续** | 半截 tool 调用外发,chat 渲染混乱 |
@@ -60,7 +60,7 @@ Starter.Review(所有 bridge 都是同一行)
           │     │     ocr delegate rule    → ocrGroups (N per-pattern)
           │     │     git                 → base + merge-base + 3 diffs
           │     ├─ groups = pre.ocrGroups + simplifyGroup(pre.reviewable)
-          │     └─ delegateReviewMultiJob(sem cap 4,eventAggregator,mergeRunResults)
+          │     └─ delegateReviewMultiJob(sem cap 4,每 group 一个 session turn,eventAggregator,mergeRunResults)
           │
           └─ OcrAvailable() NO  → ReviewWithPrompt
                 ├─ pre := precomputeReviewWithBuiltin(workspace)
@@ -179,11 +179,37 @@ workspace 为空 / precompute 全失败时,fan-out 退化为 `[simplifyGroup(nil
 
 ## 2.5 多 job 并发机制(大 changeset)
 
-ocr 路径按 ocr rule groups 拆多 job 时,核心是**每 job 独立 RunOnce / 独立 context + 自动并发 + merge**。
+ocr 路径按 ocr rule groups 拆多 job 时,核心是**每 job 独立 agent session / 独立 context + 自动并发 + merge**。
+
+**传输层:prompt 走 session pipe,不走 argv**
+
+每个 rule group 的 prompt 通过 agent 的 **session 路径**投递(`agent.RunSession`:Start → SendBlocks → drain → Close),不走 print mode。差别在 prompt 的载体:
+
+- **print mode** 把整个 prompt 作为**单个 argv 元素**传给 agent CLI。Linux 单个 argv 字符串上限 131072 字节(32 × PAGE_SIZE),Windows 整条命令行上限 32767 字符,超了直接 spawn 失败(`argument list too long`)。
+- **session 路径**把 prompt 写进 agent 的**协议管道**(stdio / JSON-RPC / ACP)。管道没有长度上限,group prompt 多大都能送达。
+
+所以 review 的隔离单位是**一个 group 一个 session**(独立进程 / 独立 session id),一个 group 跑**一轮**:prompt 一次性送达,agent 的回答即该 group 的终态事件。
+
+session 路径的 turn 结束信号有两种,`agent.DrainSession` 两种都接(先到先算):
+
+| 终态事件 | 走这条路的 bridge | 正文来源 |
+| --- | --- | --- |
+| `EventAgentResult` | claudecode / dsh / omp / pi | 累积的 `EventAgentText` + `Result.Text` |
+| `EventAgentDone{Reason: "settled"}` | codex / acp 系(opencode / copilot / cursor) | 累积的 `EventAgentText` |
+
+正文可能分两截到:bridge 在 turn 过程中以 `EventAgentText` 流出已说出的部分,结束时把还压着的尾巴放在终态事件上(claudecode / codex 的终态事件不带正文,正文全在 text 事件里)。drain 把两截按顺序拼成完整回答。
+
+下列情况算**失败**(该 group 标 failed,其余 group 的 findings 照常汇入):
+
+- turn 结束但没有终态事件(事件流先关)。
+- 终态事件不是上述两种(例如 `Done{Reason: "interrupted"}` 的中止 turn、或进程退出)——session 在 turn 之后仍然活着,继续等下去只会等到调用方的 deadline。
+- turn 结束但没有正文(空回答)——print mode 的各 bridge 同样拒绝空回答。
+
+review 路径没有交互用户,drain 遇到 `EventAgentPermission` 时用**第一个选项**自动放行("Allow once" 或问题首个标签),不等用户。
 
 ### 2.5.1 为什么拆 job(防大 changeset 爆)
 
-单 RunOnce 塞全量 diff,大 PR(几十文件、几千行)会撞 host agent 的 context 窗口,review 静默降级(丢 findings / 丢文件)。按 rule group 拆:每 job 只含本组 diff,**独立 context**(fresh 子进程,不累积),从根上防爆。这是 ocr 端到端 smart bundling 的 **code-driven 等价**——用 ocr 的 rule groups 做分组边界,RunOnce 各自独立。
+单个 session turn 塞全量 diff,大 PR(几十文件、几千行)会撞 host agent 的 context 窗口,review 静默降级(丢 findings / 丢文件)。按 rule group 拆:每 job 只含本组 diff,**独立 context**(fresh session,不累积),从根上防爆。这是 ocr 端到端 smart bundling 的 **code-driven 等价**——用 ocr 的 rule groups 做分组边界,各 job 的 session 各自独立。
 
 ### 2.5.2 触发条件(自动)
 
@@ -200,8 +226,8 @@ ocr 路径按 ocr rule groups 拆多 job 时,核心是**每 job 独立 RunOnce /
 
 ### 2.5.3 并发控制
 
-- **sem 上限**(如 4):防 N 个 agent 子进程同时跑爆 token / 撞 API rate。超 sem 的 job 排队等空位。
-- **单 job 失败不阻塞**:某组 RunOnce 失败,其他组仍出结果;merge 时该组标"failed"。
+- **sem 上限**(如 4):防 N 个 agent session 同时跑爆 token / 撞 API rate。超 sem 的 job 排队等空位。
+- **单 job 失败不阻塞**:某组 session turn 失败,其他组仍出结果;merge 时该组标"failed"。
 - **ctx 派生**:所有 job 共用 `ReviewWithOcr` / `ReviewWithPrompt` 的 revCtx(chat session ctx + 30min 超时)。`/close` → 全部取消。
 
 ### 2.5.4 merge(一次返回)
@@ -273,7 +299,8 @@ partial failure 路径:**不**升级为 merge 整体错误,失败组以 inline m
 ### 2.5.6 边界
 
 - **超大单组**:某 group diff 仍超大(如 `**/*.go` 100 文件 5000 行)→ per-file 截断兜底(§2.4 第 7 项);极端时按目录二次拆(留后续)。
-- **顺序 vs 并发**:默认并发(快);若并发有风险(如 agent 不支持并发 session),可降级顺序(loop 无 sem)——但已验证 delegate bridge 的 RunOnce 并发安全(dsh sessionId 多路复用 / 其他独立子进程),默认并发。
+- **单组超模型 context 窗口**:`_nightme_simplify` group 永远带全部 reviewable 文件,大 changeset 下单个 group 的 prompt 仍可能超出模型的 context 窗口。传输层不受限(管道无长度上限),但模型侧会失败,该 group 标记 failed,其余 group 的 findings 照常汇入。
+- **顺序 vs 并发**:默认并发(快);若并发有风险(如 agent 不支持并发 session),可降级顺序(loop 无 sem)——但已验证 delegate bridge 的 session 并发安全(dsh sessionId 多路复用 / 其他独立子进程),默认并发。
 - **跨 job 事件流交错**:Phase 2 期间不同 job 的 process 事件在 outer 上**可能交错**(Source="group-N" 区分);**同一 job 内部** ToolStart→ToolEnd 严格配对连续(per-job 缓冲保证)。
 - **Replay vs live 交错**:Phase 1→2 转换时,replay 处理 per-job 旧事件可能与同 job 新到的 live 事件在 outer 上交错。当前实现的已知 minor race:同 job 内 replay 事件 + live 事件少数情况下顺序非严格 chronological。后果仅为 chat 时间线略不规整,无功能影响。修复方案(若需要)是在转换时加 replay-in-progress barrier。
 - **未配对 ToolStart**:job 在 ToolStart 后异常结束(无对应 ToolEnd),该 Start 进 buffer 后永远不被 forward——这是合理行为,chat 不会看到半截 call;该 job 的 done 仍会按 Result/Error 触发。
@@ -290,17 +317,18 @@ partial failure 路径:**不**升级为 merge 整体错误,失败组以 inline m
 | Go 路径 precompute(detectDefaultBranch + merge-base + 4 git 来源 file enumeration(inlined) + builtin group 合成 + 3 diffs) | `internal/agent/review_with_ocr.go::precomputeReviewWithBuiltin` |
 | `OcrAvailable` 导出函数(`ReviewDispatch` 用) | `internal/agent/review_with_ocr.go::OcrAvailable` |
 | 多 job 并发编排(sem cap 4,N 个 goroutine,各自独立 ctx) | `internal/agent/review_with_ocr.go::delegateReviewMultiJob` |
+| **session 路径的一次性调用**(Start → SendBlocks → drain → Close;两种终态事件都接;permission 自动放行) | `internal/agent/run_session.go::RunSession` / `::DrainSession` |
 | per-group 提示词(context / file list / diff / rule / how-to / schema),按 `g.Pattern` 分 header(ocr / builtin / simplify) | `internal/agent/review_with_ocr.go::assembleGroupPrompt` |
 | 按文件过滤 diff(`git diff -- <files...>`) | `internal/agent/review_with_ocr.go::groupFilteredDiff` |
 | `BuiltinPrompt` / `simplifyPrompt` 静态 prompt 模板 | `internal/agent/review.go` |
 | **三相状态机 + per-job 配对缓冲**(Phase 1 buffering → Phase 2 streaming → Phase 3 closed;pendingToolStarts map per-job;Task 跨 job ID 去重;异序到达容错) | `internal/agent/aggregate_sink.go::eventAggregator` |
 | **多 job 结果合并**(纯自然语言拼接 + 部分失败 inline marker,无解析/排序/去重/coverage 聚合) | `internal/agent/review_with_ocr.go::mergeRunResults` |
-| 单元测试(聚合器 / 合并 / 并发 / 配对) | `internal/agent/aggregate_sink_test.go`、`internal/agent/merge_results_test.go`、`internal/agent/fanout_test.go` |
+| 单元测试(聚合器 / 合并 / 并发 / 配对 / session drain) | `internal/agent/aggregate_sink_test.go`、`internal/agent/merge_results_test.go`、`internal/agent/fanout_test.go`、`internal/agent/run_session_test.go` |
 
 **不变量与实现的对应**:
 
 - **#1 全异步**:`Handle` 立即返回,goroutine 跑 review,revCtx 派生自 chat session ctx。
-- **#2 / #9 RunOnce 隔离**:每个 per-job 是独立 `s.RunOnce`(独立子进程 + 独立 context),多 job 间不共享、不累积。
+- **#2 / #9 session 隔离**:每个 per-job 是独立 `agent.RunSession`(独立进程 / 独立 session + 独立 context),多 job 间不共享、不累积。
 - **#3 ctx 派生 + /close 取消**:所有 job 共用 `revCtx`(chat session ctx + 30min 超时)。
 - **#4 双路分发**:`FormatReviewMessage` 一次产出的合并文本 → 注入 AS(user turn)+ 发 channel 一次。
 - **#10 自动并发 + sem + merge 一次返回**:`sem chan struct{}` cap 为 `maxConcurrentReviewJobs = 4`;`wg.Wait()` 同步;`mergeRunResults` 一次产出最终 RunResult。
@@ -312,7 +340,7 @@ partial failure 路径:**不**升级为 merge 整体错误,失败组以 inline m
 
 ## 2.6 Simplify lens(nightme-owned,并行 group)
 
-`ReviewWithOcr` 和 `ReviewWithPrompt` 都会追加一个 nightme-owned 的 **simplify** review group,作为独立的并行维度(独立 RunOnce)跟主 review(ocr groups 或 builtin rubric)一起跑。simplify 不是 prompt 末尾追加,而是一个完整的 reviewGroup,有自己的 Pattern sentinel (`_nightme_simplify`),所以它走跟 ocr/builtin groups 完全一样的 fan-out 路径。
+`ReviewWithOcr` 和 `ReviewWithPrompt` 都会追加一个 nightme-owned 的 **simplify** review group,作为独立的并行维度(独立 session turn)跟主 review(ocr groups 或 builtin rubric)一起跑。simplify 不是 prompt 末尾追加,而是一个完整的 reviewGroup,有自己的 Pattern sentinel (`_nightme_simplify`),所以它走跟 ocr/builtin groups 完全一样的 fan-out 路径。
 
 ### 来源
 
@@ -374,7 +402,7 @@ func ReviewDispatch(ctx context.Context, s Starter, cfg StartConfig, opts ...Run
 ### 为什么不用 `WithSimplifyPrompt` option
 
 早期 v3-v7 讨论过用 functional option `WithSimplifyPrompt()` 控制 simplify 启用。否决原因:
-- simplify 是 simplify-as-group(独立 RunOnce),不是 prompt 末尾追加的 section —— 没法用 option 控制 prompt 字段
+- simplify 是 simplify-as-group(独立 session turn),不是 prompt 末尾追加的 section —— 没法用 option 控制 prompt 字段
 - 始终启用 simplify 比 opt-in/opt-out 简单,且 simplify 的 findings 是低风险补充(默认 severity = `low` / `style`)
 - 未来若要 disable,只需把 simplifyGroup 从 group 列表里删,改 1 个 helper 函数
 
@@ -401,11 +429,12 @@ func ReviewDispatch(ctx context.Context, s Starter, cfg StartConfig, opts ...Run
 
 ## 4. 隔离与生命周期
 
-- **RunOnce 是隔离机制**:fresh 子进程,独立 context 窗口。review 推理(可烧数万 token)不污染主 chat。
-- **多 job 各自独立 context**:大 changeset 按 rule group 拆的每个 job 都是独立 fresh RunOnce——不共享 context、不累积,防爆。区别于"同进程多轮 + /new reset"的弱隔离(依赖 agent reset 彻底),fresh spawn 是 OS 级强隔离,零信任。
-- **超时**:Review 30min(同 `/gtw commit` 的 Agent 预算)。RunOnce 边界使超时安全:只杀 review 子进程,主 chat 不受影响。多 job 并发共用同一超时。
-- **ctx 派生**:goroutine 用 chat session 的 ctx 当 parent。`/close` → ctx cancel → 所有 review 子进程 kill → goroutine 退出。无 orphan。
-- **多 reviewer 并行**:多个 `/review --agent` 并发,各自独立 RunOnce,findings 全注入同一 AS。用户体验:多条 review 接连出现,然后一次"fix"。
+- **session 是隔离机制**:每 group 一个独立 agent session(独立进程 / 独立 session id),独立 context 窗口。review 推理(可烧数万 token)不污染主 chat。
+- **多 job 各自独立 context**:大 changeset 按 rule group 拆的每个 job 都是独立 fresh session——不共享 context、不累积,防爆。区别于"同进程多轮 + /new reset"的弱隔离(依赖 agent reset 彻底),fresh session 是 OS 级强隔离,零信任。
+- **prompt 走管道**:group prompt 经 session 的协议管道送达 agent,不占 argv(见 §2.5 传输层)。管道无长度上限,大 changeset 的 group prompt 不会撑爆 spawn 参数。
+- **超时**:Review 30min(同 `/gtw commit` 的 Agent 预算)。session 边界使超时安全:只杀 review 进程,主 chat 不受影响。多 job 并发共用同一超时。
+- **ctx 派生**:goroutine 用 chat session 的 ctx 当 parent。`/close` → ctx cancel → 所有 review session 关闭 → goroutine 退出。无 orphan。
+- **多 reviewer 并行**:多个 `/review --agent` 并发,各自独立 session,findings 全注入同一 AS。用户体验:多条 review 接连出现,然后一次"fix"。
 - **sink vs deliverable**:sink 是观察用(流式中间事件),`FormatReviewMessage` 文本是交付物。两路独立,不冲突。
 
 ---
@@ -418,7 +447,7 @@ func ReviewDispatch(ctx context.Context, s Starter, cfg StartConfig, opts ...Run
 4. **优雅降级** —— ocr 缺失 → `ReviewWithPrompt` 走 Go 复刻路径(`precomputeReviewWithBuiltin` 内联 4 个 git 来源 + 合成 builtinGroup 模拟 ocr 的产出形状),不报错不阻塞。review 在任何环境可用,只是 file-list 精度低一档(Go 启发式 vs ocr FileFilter)。
 5. **fix 对话式** —— review 只产出 findings,不自动改代码。主 agent 用原生 Edit 工具 fix。保持 v1 纯 review。
 6. **`--agent` 不切 AS** —— runner 是一次性 spawn,findings 回当前 AS。不同 reviewer,同一 chat。
-7. **独立 context 分 bundle(code-driven)** —— 大 changeset 按 ocr rule group 拆多 job,每 job 独立 fresh RunOnce(强隔离,不累积)。这是 ocr smart bundling 的 code-driven 等价——用 ocr 的 rule groups 做分组边界,RunOnce 各自独立,不是 ocr 端到端的重 multi-agent 机器。
+7. **独立 context 分 bundle(code-driven)** —— 大 changeset 按 ocr rule group 拆多 job,每 job 独立 fresh session(强隔离,不累积)。这是 ocr smart bundling 的 code-driven 等价——用 ocr 的 rule groups 做分组边界,各 job 的 session 各自独立,不是 ocr 端到端的重 multi-agent 机器。
 
 ---
 
@@ -427,8 +456,8 @@ func ReviewDispatch(ctx context.Context, s Starter, cfg StartConfig, opts ...Run
 - ❌ 把 ocr 当 bridge / 进 agent 注册表 —— 它是被调用的外部工具。
 - ❌ 在 `Starter.Review` 里再分 native / non-native 分支 —— 所有 bridge 必须走 `agent.ReviewDispatch` 同一入口,行为一致。Agent 自带 review 子命令由 chat 层透传。
 - ❌ 把 ocr 端到端(`ocr review`)设为默认 —— 需配 ocr LLM、双配置,留 opt-in(`--engine ocr`)。
-- ❌ 引入 ocr 端到端的**重 multi-agent 机器**(ocr 自己的定位 / 反思 / 多 bundle 子 agent)作默认 —— 那是 ocr 端到端跑、依赖 ocr 自己的 multi-agent;我们的 code-driven 拆 job **不是**这个(用 ocr 的 rule groups 只取分组边界,RunOnce 各自独立 context,定位 / 反思仍由 host agent 自己做)。两者本质不同,不冲突。
-- ❌ 同进程多轮 + `/new` reset 池化(跨调用复用)—— 破坏 RunOnce 强隔离不变量(#2),`/new` 是弱隔离(依赖 agent reset 彻底),且 review 非高频收益不抵。省 spawn 只在单次 /review 内(瞬态多轮),不跨调用池化。
+- ❌ 引入 ocr 端到端的**重 multi-agent 机器**(ocr 自己的定位 / 反思 / 多 bundle 子 agent)作默认 —— 那是 ocr 端到端跑、依赖 ocr 自己的 multi-agent;我们的 code-driven 拆 job **不是**这个(用 ocr 的 rule groups 只取分组边界,各 job 的 session 各自独立 context,定位 / 反思仍由 host agent 自己做)。两者本质不同,不冲突。
+- ❌ 同进程多轮 + `/new` reset 池化(跨调用复用)—— 破坏 session 强隔离不变量(#2),`/new` 是弱隔离(依赖 agent reset 彻底),且 review 非高频收益不抵。省 spawn 只在单次 /review 内(瞬态多轮),不跨调用池化。
 - ❌ v1 开 `--fix` / `--post` flag —— 留 v2(`/review-fix` / `/review-comment`)。
 - ❌ 破坏 `--agent` 不切 AS 的语义 —— ocr 委托模式 findings 仍注入回当前 AS,主 agent 仍能用原生 Edit 工具 fix。
 

@@ -88,10 +88,10 @@ func (m *handshakeMock) installGlobal(t *testing.T) *host.Client {
 }
 
 // setRespondText toggles the prompt handler's mux-frame synthesis.
-// Empty string means "just return OK" (drainForRunResult will
+// Empty string means "just return OK" (agent.DrainSession will
 // block on events — caller is responsible for ctx timeout). When
 // non-empty, the prompt handler dispatches an assistant/message +
-// turn/end pair via the host Router so drainForRunResult sees a
+// turn/end pair via the host Router so agent.DrainSession sees a
 // complete turn and returns cleanly.
 func (m *handshakeMock) setRespondText(text string) {
 	m.respondText.Store(text)
@@ -318,7 +318,7 @@ func (m *handshakeMock) handleWorkspaceArchiveSession(w http.ResponseWriter, r *
 
 // dispatchAssistantMessage emits a synthetic assistant/message
 // mux frame so the driver's readPump pushes EventAgentText into
-// d.events. Tests that exercise drainForRunResult's full turn path
+// d.events. Tests that exercise agent.DrainSession's full turn path
 // use this.
 func dispatchAssistantMessage(r *host.Router, sessionID, text string) {
 	payload := []byte(`{"sessionId":"` + sessionID + `","event":{"type":"assistant/message","data":{"message":{"role":"assistant","content":[{"type":"text","text":` + jsonString(text) + `}]}}}}`)
@@ -339,7 +339,7 @@ func jsonString(s string) string {
 
 // handleSessionPrompt returns OK and optionally synthesises a
 // complete turn via the host Router when respondText is set on
-// the mock. Tests that need drainForRunResult to exit cleanly call
+// the mock. Tests that need agent.DrainSession to exit cleanly call
 // m.setRespondText(...) before invoking Starter.RunOnce / SendBlocks.
 func (m *handshakeMock) handleSessionPrompt(w http.ResponseWriter, r *http.Request) {
 	m.promptCount.Add(1)
@@ -354,7 +354,7 @@ func (m *handshakeMock) handleSessionPrompt(w http.ResponseWriter, r *http.Reque
 	}
 
 	// If respondText is set, dispatch synthetic mux frames so
-	// drainForRunResult sees a complete turn and returns.
+	// agent.DrainSession sees a complete turn and returns.
 	if text, ok := m.respondText.Load().(string); ok && text != "" {
 		sid, _ := payload["sessionId"].(string)
 		if sid != "" {
@@ -370,7 +370,7 @@ func (m *handshakeMock) handleSessionPrompt(w http.ResponseWriter, r *http.Reque
 
 // handleWaterfallResult accepts /api/$events/result (the typed RPC
 // envelope the bridge posts an answer on). Needed so
-// drainForRunResult's auto-allow can POST without a 404.
+// agent.DrainSession's auto-allow can POST without a 404.
 func (m *handshakeMock) handleWaterfallResult(w http.ResponseWriter, r *http.Request) {
 	m.waterfallCount.Add(1)
 	body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))

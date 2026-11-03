@@ -4,9 +4,8 @@
 // Why this exists: the omp bridge has ONE spawn recipe for
 // long-lived chat sessions (`omp --mode rpc`, agent.go). For
 // callers that only need a single turn (/gtw commit,
-// buildAgentPrompt, /review), opening a long-lived RPC
-// session just to drive one prompt + drain one terminal
-// event is wasteful. omp exposes the same NDJSON event
+// buildAgentPrompt), opening a long-lived RPC session just to
+// drive one prompt + drain one terminal event is wasteful. omp exposes the same NDJSON event
 // stream over the print-mode `-p` flag, so the print-mode
 // path reuses the same translator (translate.go) and only
 // changes the spawn args / lifecycle.

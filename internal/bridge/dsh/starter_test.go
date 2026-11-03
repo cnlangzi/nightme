@@ -30,10 +30,11 @@ func TestStarter_Info_NoArgs(t *testing.T) {
 	}
 }
 
-// ─── TestDrainForRunResult_EventAgentResult ──────────────────────
-// drainForRunResult must exit cleanly with the captured RunResult
-// when EventAgentResult is delivered.
-func TestDrainForRunResult_EventAgentResult(t *testing.T) {
+// ─── TestDrainSession_EventAgentResult ──────────────────────
+// agent.DrainSession must exit cleanly with the captured RunResult
+// when EventAgentResult is delivered, and report the session id the
+// startup EventAgentReady carried.
+func TestDrainSession_EventAgentResult(t *testing.T) {
 	mock := newHandshakeMock(t)
 	mock.installGlobal(t)
 
@@ -46,11 +47,6 @@ func TestDrainForRunResult_EventAgentResult(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(func() { _ = a.Close() })
-
-	// Drain startup EventAgentReady so it doesn't clog the chan.
-	if !drainOneReady(t, a, 2*time.Second) {
-		t.Fatal("timed out draining startup EventAgentReady")
-	}
 
 	d, ok := a.Driver().(*driver)
 	if !ok {
@@ -65,12 +61,14 @@ func TestDrainForRunResult_EventAgentResult(t *testing.T) {
 		},
 	})
 
-	res, err := drainForRunResult(ctx, a, []agent.ContentBlock{{
+	// The startup EventAgentReady is left in the stream: the drain
+	// reads it and reports the session id it carries.
+	res, err := agent.DrainSession(ctx, a, []agent.ContentBlock{{
 		Type: agent.ContentText,
 		Text: "hi",
 	}}, nil)
 	if err != nil {
-		t.Fatalf("drainForRunResult: %v", err)
+		t.Fatalf("agent.DrainSession: %v", err)
 	}
 	if res.Text != "drain ok" {
 		t.Errorf("RunResult.Text = %q, want %q", res.Text, "drain ok")
@@ -80,10 +78,12 @@ func TestDrainForRunResult_EventAgentResult(t *testing.T) {
 	}
 }
 
-// ─── TestDrainForRunResult_DoneWithoutResult ──────────────────────
-// EventAgentDone without a preceding EventAgentResult must error
-// (the turn ended without producing assistant output).
-func TestDrainForRunResult_DoneWithoutResult(t *testing.T) {
+// ─── TestDrainSession_DoneSettledWithoutResult ──────────────
+// EventAgentDone{Reason: "settled"} is a turn terminator in its own
+// right: the turn ends and the reply is the text streamed as
+// EventAgentText. This is the contract the ACP family relies on —
+// it never emits an EventAgentResult at all.
+func TestDrainSession_DoneSettledWithoutResult(t *testing.T) {
 	mock := newHandshakeMock(t)
 	mock.installGlobal(t)
 	s := NewStarter("dsh")
@@ -102,23 +102,27 @@ func TestDrainForRunResult_DoneWithoutResult(t *testing.T) {
 	}
 	d, _ := a.Driver().(*driver)
 
-	d.deliver(agent.AgentEvent{Kind: agent.EventAgentDone})
+	d.deliver(agent.AgentEvent{Kind: agent.EventAgentText, Text: "streamed reply"})
+	d.deliver(agent.AgentEvent{
+		Kind: agent.EventAgentDone,
+		Done: &agent.AgentDoneEvent{ExitCode: 0, Reason: "settled"},
+	})
 
-	_, err = drainForRunResult(ctx, a, []agent.ContentBlock{{
+	res, err := agent.DrainSession(ctx, a, []agent.ContentBlock{{
 		Type: agent.ContentText,
 		Text: "hi",
 	}}, nil)
-	if err == nil {
-		t.Fatal("want error when EventAgentDone fires without Result")
+	if err != nil {
+		t.Fatalf("agent.DrainSession: %v", err)
 	}
-	if !strings.Contains(err.Error(), "turn ended without result event") {
-		t.Errorf("err = %v; want 'turn ended without result event'", err)
+	if res.Text != "streamed reply" {
+		t.Errorf("RunResult.Text = %q, want %q", res.Text, "streamed reply")
 	}
 }
 
-// ─── TestDrainForRunResult_ErrorEvent ─────────────────────────────
+// ─── TestDrainSession_ErrorEvent ─────────────────────────────
 // EventAgentError must surface as a wrapped RunOnce error.
-func TestDrainForRunResult_ErrorEvent(t *testing.T) {
+func TestDrainSession_ErrorEvent(t *testing.T) {
 	mock := newHandshakeMock(t)
 	mock.installGlobal(t)
 	s := NewStarter("dsh")
@@ -140,7 +144,7 @@ func TestDrainForRunResult_ErrorEvent(t *testing.T) {
 	wantErr := errors.New("upstream blew up")
 	d.deliver(agent.AgentEvent{Kind: agent.EventAgentError, Err: wantErr})
 
-	_, err = drainForRunResult(ctx, a, []agent.ContentBlock{{
+	_, err = agent.DrainSession(ctx, a, []agent.ContentBlock{{
 		Type: agent.ContentText,
 		Text: "hi",
 	}}, nil)
@@ -323,14 +327,14 @@ func drainOneReady(t *testing.T, a *agent.Agent, timeout time.Duration) bool {
 	}
 }
 
-// ─── TestDrainForRunResult_SinkReceivesEvents ───────────────────
-// When a sink is supplied, drainForRunResult must invoke it
+// ─── TestDrainSession_SinkReceivesEvents ───────────────────
+// When a sink is supplied, agent.DrainSession must invoke it
 // synchronously for every event read off a.Events(). The sink
 // receives Ready, Text, ToolStart, ToolEnd, Result, Done — every
 // Kind. The caller is responsible for non-blocking semantics
 // (see outbound.StreamRunOnceToEmitter for the canonical pattern);
 // drain just calls it.
-func TestDrainForRunResult_SinkReceivesEvents(t *testing.T) {
+func TestDrainSession_SinkReceivesEvents(t *testing.T) {
 	mock := newHandshakeMock(t)
 	mock.installGlobal(t)
 	s := NewStarter("dsh")
@@ -384,15 +388,18 @@ func TestDrainForRunResult_SinkReceivesEvents(t *testing.T) {
 		},
 	})
 
-	res, err := drainForRunResult(ctx, a, []agent.ContentBlock{{
+	res, err := agent.DrainSession(ctx, a, []agent.ContentBlock{{
 		Type: agent.ContentText,
 		Text: "hi",
 	}}, sink)
 	if err != nil {
-		t.Fatalf("drainForRunResult: %v", err)
+		t.Fatalf("agent.DrainSession: %v", err)
 	}
-	if res.Text != "all done" {
-		t.Errorf("RunResult.Text = %q, want %q", res.Text, "all done")
+	// The reply is the streamed segment plus the tail the result
+	// event carries — the whole turn, not just the tail.
+	wantText := "thinking about it...\nall done"
+	if res.Text != wantText {
+		t.Errorf("RunResult.Text = %q, want %q", res.Text, wantText)
 	}
 
 	// Snapshot got under lock; the sink was called from drain's
@@ -415,10 +422,10 @@ func TestDrainForRunResult_SinkReceivesEvents(t *testing.T) {
 	}
 }
 
-// ─── TestDrainForRunResult_NilSinkSafe ───────────────────────────
+// ─── TestDrainSession_NilSinkSafe ───────────────────────────
 // A nil sink must not panic. drain is called by RunOnce / Review
 // without WithEventSink — the sink param is just nil.
-func TestDrainForRunResult_NilSinkSafe(t *testing.T) {
+func TestDrainSession_NilSinkSafe(t *testing.T) {
 	mock := newHandshakeMock(t)
 	mock.installGlobal(t)
 	s := NewStarter("dsh")
@@ -446,25 +453,26 @@ func TestDrainForRunResult_NilSinkSafe(t *testing.T) {
 		Result: &agent.AgentResultEvent{Text: "ok"},
 	})
 
-	res, err := drainForRunResult(ctx, a, []agent.ContentBlock{{
+	res, err := agent.DrainSession(ctx, a, []agent.ContentBlock{{
 		Type: agent.ContentText,
 		Text: "hi",
 	}}, nil)
 	if err != nil {
-		t.Fatalf("drainForRunResult with nil sink: %v", err)
+		t.Fatalf("agent.DrainSession with nil sink: %v", err)
 	}
-	if res.Text != "ok" {
-		t.Errorf("RunResult.Text = %q, want %q", res.Text, "ok")
+	wantText := "no sink, that's fine\nok"
+	if res.Text != wantText {
+		t.Errorf("RunResult.Text = %q, want %q", res.Text, wantText)
 	}
 }
 
-// ─── TestDrainForRunResult_AutoAllowsPermission ─────────────────
+// ─── TestDrainSession_AutoAllowsPermission ─────────────────
 // RunOnce / Review have no interactive Feishu card reader. When the
-// host fires approval/requested mid-turn, drainForRunResult must
+// host fires approval/requested mid-turn, agent.DrainSession must
 // SendPermission("Allow once") so the turn is not wedged until the
 // 5min decline watchdog. The sink still observes the permission
 // event (observability); the decision is local to the drain.
-func TestDrainForRunResult_AutoAllowsPermission(t *testing.T) {
+func TestDrainSession_AutoAllowsPermission(t *testing.T) {
 	mock := newHandshakeMock(t)
 	mock.installGlobal(t)
 
@@ -493,7 +501,7 @@ func TestDrainForRunResult_AutoAllowsPermission(t *testing.T) {
 
 	var sawPermission atomic.Bool
 	go func() {
-		// Let drainForRunResult block on Events after SendBlocks.
+		// Let agent.DrainSession block on Events after SendBlocks.
 		time.Sleep(50 * time.Millisecond)
 		d.handleApprovalRequested("rpc-runonce-1", muxApprovalRequested{
 			SessionID:  d.sessionID,
@@ -512,7 +520,7 @@ func TestDrainForRunResult_AutoAllowsPermission(t *testing.T) {
 		})
 	}()
 
-	res, err := drainForRunResult(ctx, a, []agent.ContentBlock{{
+	res, err := agent.DrainSession(ctx, a, []agent.ContentBlock{{
 		Type: agent.ContentText,
 		Text: "review pls",
 	}}, func(ev agent.AgentEvent) {
@@ -521,7 +529,7 @@ func TestDrainForRunResult_AutoAllowsPermission(t *testing.T) {
 		}
 	})
 	if err != nil {
-		t.Fatalf("drainForRunResult: %v", err)
+		t.Fatalf("agent.DrainSession: %v", err)
 	}
 	if res.Text != "review done" {
 		t.Errorf("RunResult.Text = %q, want %q", res.Text, "review done")
@@ -538,9 +546,9 @@ func TestDrainForRunResult_AutoAllowsPermission(t *testing.T) {
 	}
 }
 
-// TestDrainForRunResult_SkipsPrimingTurn removed — ensureFullAccess
+// TestDrainSession_SkipsPrimingTurn removed — ensureFullAccess
 // (and the priming slash it posted) are gone, so there is no
-// priming turn to skip. drainForRunResult now reads the FIRST
+// priming turn to skip. agent.DrainSession now reads the FIRST
 // terminal as the real output. The remaining tests in this file
 // already cover that contract via their single-result synthetic
 // turns; locking the absence of any skip is now an invariant of

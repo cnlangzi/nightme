@@ -11,8 +11,8 @@ import (
 // This file covers the v12 multi-job path that aggregate_sink_test
 // (the event aggregator) and merge_results_test (the findings merge)
 // do NOT cover: the per-group PROMPT assembly + the concurrent
-// ORCHESTRATION in delegateReviewMultiJob (one RunOnce per ocr rule
-// group, sem-capped, merged).
+// ORCHESTRATION in delegateReviewMultiJob (one session turn per ocr
+// rule group, sem-capped, merged).
 //
 // mergeRunResults already has 6 tests in merge_results_test.go — we
 // do not duplicate them here. The eventAggregator has 10 tests in
@@ -20,8 +20,8 @@ import (
 //   - assembleGroupPrompt (per-group prompt: this group's files +
 //     rule, NOT other groups' files — smart-bundling isolation)
 //   - delegateReviewMultiJob (concurrent fan-out + merge wiring,
-//     using a fakeStarter; no event sink → isolates orchestration
-//     from the aggregator's own tested event semantics)
+//     using a session-backed fake Starter; no event sink → isolates
+//     orchestration from the aggregator's own tested event semantics)
 
 func twoGroups() []reviewGroup {
 	return []reviewGroup{
@@ -29,8 +29,6 @@ func twoGroups() []reviewGroup {
 		{Pattern: "**/*.ts", Files: []string{"c.ts"}, Rule: "TS rule text"},
 	}
 }
-
-func okResult(text string) RunResult { return RunResult{Text: text} }
 
 var errBoom = &boomError{}
 
@@ -93,9 +91,9 @@ func TestAssembleGroupPrompt_EmptyWorkspace(t *testing.T) {
 }
 
 // TestDelegateReviewMultiJob_ConcurrentMerge: with 2 ocr rule groups,
-// delegateReviewMultiJob runs one RunOnce per group (concurrent,
-// sem-capped) and merges. Uses fakeStarter whose runOnce extracts the
-// group pattern from the assembled prompt and returns per-group
+// delegateReviewMultiJob runs one session turn per group (concurrent,
+// sem-capped) and merges. The fake Starter's session driver extracts
+// the group pattern from the assembled prompt and returns per-group
 // findings — verifying (a) each group got its own prompt, (b) the
 // merge concatenated per-group results, (c) no group was dropped.
 //
@@ -112,25 +110,24 @@ func TestDelegateReviewMultiJob_ConcurrentMerge(t *testing.T) {
 	}
 
 	var callCount int32
-	var mu sync.Mutex
-	fs := &fakeStarter{
+	fs := &sessionFakeStarter{
 		name: "test-agent",
-		runOnce: func(ctx context.Context, cfg StartConfig, blocks []ContentBlock, opts ...RunOnceOption) (RunResult, error) {
-			atomic.AddInt32(&callCount, 1)
-			mu.Lock()
-			defer mu.Unlock()
-			prompt := ""
-			if len(blocks) > 0 {
-				prompt = blocks[0].Text
-			}
-			// Each group's prompt carries its own pattern; echo it
-			// back so the merge is distinguishable per group.
-			for _, g := range groups {
-				if strings.Contains(prompt, g.Pattern) {
-					return okResult("findings[" + g.Pattern + "]"), nil
+		newDriver: func(StartConfig) *sessionFakeDriver {
+			return newSessionFakeDriver(func(blocks []ContentBlock) []AgentEvent {
+				atomic.AddInt32(&callCount, 1)
+				prompt := ""
+				if len(blocks) > 0 {
+					prompt = blocks[0].Text
 				}
-			}
-			return okResult("findings[unknown]"), nil
+				// Each group's prompt carries its own pattern; echo it
+				// back so the merge is distinguishable per group.
+				for _, g := range groups {
+					if strings.Contains(prompt, g.Pattern) {
+						return groupReply("findings[" + g.Pattern + "]")
+					}
+				}
+				return groupReply("findings[unknown]")
+			})
 		},
 	}
 
@@ -139,7 +136,7 @@ func TestDelegateReviewMultiJob_ConcurrentMerge(t *testing.T) {
 		t.Fatalf("delegateReviewMultiJob: %v", err)
 	}
 	if callCount != int32(len(groups)) {
-		t.Errorf("RunOnce called %d times, want %d (one per group)", callCount, len(groups))
+		t.Errorf("session turn ran %d times, want %d (one per group)", callCount, len(groups))
 	}
 	if !strings.Contains(merged.Text, "Reviewed 2 groups") {
 		t.Errorf("merged missing header; got:\n%s", merged.Text)
@@ -152,28 +149,33 @@ func TestDelegateReviewMultiJob_ConcurrentMerge(t *testing.T) {
 	}
 }
 
-// TestDelegateReviewMultiJob_PartialFailure: one group's RunOnce
-// errors → that group is marked failed in the merge, the survivor's
-// findings still flow. Verifies per-job error isolation (one bad job
-// doesn't poison the whole review).
+// TestDelegateReviewMultiJob_PartialFailure: one group's turn errors
+// → that group is marked failed in the merge, the survivor's findings
+// still flow. Verifies per-job error isolation (one bad job doesn't
+// poison the whole review).
 func TestDelegateReviewMultiJob_PartialFailure(t *testing.T) {
 	groups := twoGroups()
 	pre := reviewContext{
 		workspace: "/nonexistent-repo",
 		ocrGroups: groups,
 	}
-	fs := &fakeStarter{
+	fs := &sessionFakeStarter{
 		name: "test-agent",
-		runOnce: func(ctx context.Context, cfg StartConfig, blocks []ContentBlock, opts ...RunOnceOption) (RunResult, error) {
-			prompt := ""
-			if len(blocks) > 0 {
-				prompt = blocks[0].Text
-			}
-			// The TS group fails; the Go group succeeds.
-			if strings.Contains(prompt, "**/*.ts") {
-				return RunResult{}, errBoom
-			}
-			return okResult("go findings"), nil
+		newDriver: func(StartConfig) *sessionFakeDriver {
+			return newSessionFakeDriver(func(blocks []ContentBlock) []AgentEvent {
+				prompt := ""
+				if len(blocks) > 0 {
+					prompt = blocks[0].Text
+				}
+				// The TS group fails; the Go group succeeds.
+				if strings.Contains(prompt, "**/*.ts") {
+					return []AgentEvent{
+						sessionReadyEvent("sess-ts", "model"),
+						{Kind: EventAgentError, Err: errBoom},
+					}
+				}
+				return groupReply("go findings")
+			})
 		},
 	}
 
@@ -186,5 +188,63 @@ func TestDelegateReviewMultiJob_PartialFailure(t *testing.T) {
 	}
 	if !strings.Contains(merged.Text, "failed") || !strings.Contains(merged.Text, "**/*.ts") {
 		t.Errorf("failed group not marked; got:\n%s", merged.Text)
+	}
+}
+
+// TestDelegateReviewMultiJob_UsesSessionPath: every rule group runs
+// on the agent's session path — one Start, one SendBlocks, one Close
+// per group — and the print-mode RunOnce is never called. The prompt
+// travels over the session's protocol pipe, so a group prompt larger
+// than the platform's argv limit still reaches the agent.
+func TestDelegateReviewMultiJob_UsesSessionPath(t *testing.T) {
+	groups := twoGroups()
+	pre := reviewContext{
+		workspace: "/nonexistent-repo",
+		ocrGroups: groups,
+	}
+
+	var mu sync.Mutex
+	var prompts []string
+	fs := &sessionFakeStarter{
+		name: "test-agent",
+		newDriver: func(StartConfig) *sessionFakeDriver {
+			return newSessionFakeDriver(func(blocks []ContentBlock) []AgentEvent {
+				mu.Lock()
+				if len(blocks) > 0 {
+					prompts = append(prompts, blocks[0].Text)
+				}
+				mu.Unlock()
+				return groupReply("ok")
+			})
+		},
+	}
+
+	if _, err := delegateReviewMultiJob(context.Background(), fs, StartConfig{Workspace: pre.workspace}, pre, pre.ocrGroups); err != nil {
+		t.Fatalf("delegateReviewMultiJob: %v", err)
+	}
+	if got := fs.starts.Load(); got != int32(len(groups)) {
+		t.Errorf("Start called %d times, want %d (one session per group)", got, len(groups))
+	}
+	if got := fs.runOnce.Load(); got != 0 {
+		t.Errorf("RunOnce called %d times, want 0 (review runs on the session path)", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(prompts) != len(groups) {
+		t.Errorf("SendBlocks delivered %d prompts, want %d", len(prompts), len(groups))
+	}
+	for _, p := range prompts {
+		if p == "" {
+			t.Error("a group sent an empty prompt")
+		}
+	}
+}
+
+// groupReply is the scripted reply of a fake session driver: a
+// startup Ready followed by the turn's result.
+func groupReply(text string) []AgentEvent {
+	return []AgentEvent{
+		sessionReadyEvent("sess-group", "model"),
+		{Kind: EventAgentResult, Result: &AgentResultEvent{Text: text}},
 	}
 }

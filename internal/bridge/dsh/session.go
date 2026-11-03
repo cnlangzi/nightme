@@ -459,10 +459,9 @@ func (e resumeUnhealthyError) Is(target error) bool {
 // currentModel returns the latest cached model id under modelMu.
 // The model field is mutated by the projection callback (running
 // on the host's WS readLoop goroutine); every reader on the chat
-// session goroutine — including drainForRunResult, the EventAgentReady
-// emit sites in newDriver / Reset, and onSessionModelChanged
-// itself — must go through this helper or risk a data race
-// detectable by `go test -race`.
+// session goroutine — the EventAgentReady emit sites in newDriver /
+// Reset, and onSessionModelChanged itself — must go through this
+// helper or risk a data race detectable by `go test -race`.
 func (d *driver) currentModel() string {
 	d.modelMu.Lock()
 	defer d.modelMu.Unlock()

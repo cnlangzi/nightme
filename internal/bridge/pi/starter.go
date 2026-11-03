@@ -140,8 +140,8 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 // agent.ReviewDispatch (uniform 2-line dispatch shared by every
 // non-native bridge, docs/REVIEW.md §2).
 // pi has no native review subcommand, so it runs the Go-precompute-
-// enhanced prompt via RunOnce — ocr delegate rules are folded in
-// when ocr is on $PATH.
+// enhanced prompt on the session path — ocr delegate rules are
+// folded in when ocr is on $PATH.
 func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	return agent.ReviewDispatch(ctx, s, cfg, opts...)
 }

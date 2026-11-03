@@ -154,8 +154,8 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 // to the shared agent.ReviewWithOcr (three-tier dispatch,
 // docs/REVIEW.md §2). Copilot CLI has no native review
 // subcommand, so /review runs the Go-precompute-enhanced
-// prompt via print-mode one-shot — ocr delegate rules fold
-// in when ocr is on $PATH.
+// prompt on the agent's session path — ocr delegate rules
+// fold in when ocr is on $PATH.
 func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	return agent.ReviewDispatch(ctx, s, cfg, opts...)
 }

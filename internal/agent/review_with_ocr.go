@@ -9,13 +9,13 @@
 //     isn't installed or workspace precompute fails.
 //
 // simplify runs as a parallel reviewGroup inside both runners
-// (see patternSimplify / simplifyGroup below) — one RunOnce per
+// (see patternSimplify / simplifyGroup below) — one session turn per
 // group, concurrently with the main dimension(s).
 //
 // ocr is an external CLI (like git), not a bridge/agent. Its delegation
 // mode is LLM-free: it emits only deterministic engineering (file list
 // + rules) as JSON; the host agent (this bridge's agent) supplies the
-// LLM via RunOnce. No second LLM config.
+// LLM via the session turn. No second LLM config.
 //
 // Every step degrades gracefully: ocr missing/failed → ReviewWithPrompt
 // fallback; precompute totally failed (no workspace) → BuiltinPrompt
@@ -41,8 +41,8 @@ import (
 // agent's context window; beyond this cap the diff is truncated with a
 // pointer that tells the agent to read the affected file directly for
 // the omitted context. This is the single lever that keeps /review
-// stable on large changesets within a single RunOnce (full per-rule-
-// group batching across multiple RunOnce calls is left to Phase C).
+// stable on large changesets within a single group turn (full per-rule-
+// group batching across multiple turns is left to Phase C).
 const maxDiffLines = 2000
 
 // ReviewWithOcr runs review using the ocr delegation flow (docs/REVIEW.md
@@ -58,12 +58,12 @@ const maxDiffLines = 2000
 // Flow:
 //  1. precomputeReview fills reviewable / ocrGroups / diffs.
 //  2. Fan out via delegateReviewMultiJob with [ocrGroups..., simplifyGroup].
-//     simplify always runs as a parallel dimension (its own RunOnce) alongside
+//     simplify always runs as a parallel dimension (its own session turn) alongside
 //     the ocr-sourced groups.
 //
 // If precomputeReview returns empty (no workspace, no ocr groups), the
 // fan-out degrades gracefully to [simplifyGroup(nil)] — one goroutine,
-// one RunOnce. No internal fallback to ReviewWithPrompt; if ocr isn't
+// one session turn. No internal fallback to ReviewWithPrompt; if ocr isn't
 // actually available, that's a caller bug, not this function's problem.
 func ReviewWithOcr(ctx context.Context, s Starter, cfg StartConfig, opts ...RunOnceOption) (RunResult, error) {
 	pre := precomputeReviewWithOcr(ctx, cfg.Workspace)
@@ -77,11 +77,16 @@ func ReviewWithOcr(ctx context.Context, s Starter, cfg StartConfig, opts ...RunO
 	return delegateReviewMultiJob(ctx, s, cfg, pre, groups, opts...)
 }
 
-// delegateReviewMultiJob runs one RunOnce per ocr rule group, in
+// delegateReviewMultiJob runs one session turn per ocr rule group, in
 // parallel (sem-capped at maxConcurrentReviewJobs), each with a
 // per-group prompt + aggregator-wrapped sink. The aggregator collapses
 // N per-job Ready/terminal streams into one outer lifecycle so the
 // chat channel sees a single review run, not N interleaved ones.
+//
+// Each group runs on the agent's session path (RunSession): its own
+// process, its own session, one turn. The prompt travels over the
+// bridge's protocol pipe, so a group prompt larger than the platform's
+// argv limit still reaches the agent.
 //
 // All jobs share ctx (= the parent /review revCtx): chat-session
 // close or /review timeout cancels every in-flight job at once. Per-
@@ -119,7 +124,7 @@ func delegateReviewMultiJob(
 			defer wg.Done()
 			// Completion-driven counting (refactor from /review):
 			// every per-job goroutine contributes exactly one
-			// markJobDone, regardless of RunOnce outcome or
+			// markJobDone, regardless of the turn's outcome or
 			// sink behavior. The last goroutine to defer runs
 			// markJobDone FIRST (LIFO), so the very last one to
 			// call drives doneCount to expected and fires the
@@ -142,7 +147,7 @@ func delegateReviewMultiJob(
 				runOpts = []RunOnceOption{WithEventSink(agg.wrapJob(fmt.Sprintf("group-%d", i+1)))}
 			}
 
-			res, err := s.RunOnce(ctx, cfg, []ContentBlock{{
+			res, err := RunSession(ctx, s, cfg, []ContentBlock{{
 				Type: ContentText,
 				Text: prompt,
 			}}, runOpts...)
@@ -153,7 +158,7 @@ func delegateReviewMultiJob(
 	wg.Wait()
 
 	// Finding 3 from /review: safety net for the case where
-	// some per-job RunOnce never emitted a terminal event
+	// some per-job turn never emitted a terminal event
 	// (spawn failure before the sink was wired, error path
 	// that bypassed the sink on some bridge, ctx cancellation
 	// that orphaned the subprocess). finalize synthesizes

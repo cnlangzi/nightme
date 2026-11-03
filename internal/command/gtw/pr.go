@@ -27,8 +27,11 @@ package gtw
 //  6. Pick an agent (CLI -a > yml cfg.PR.Agent > SelectedAgent),
 //     one-shot RunOnce to generate the PR text.
 //  7. parsePRReply extracts (title, body) from the fenced block.
-//  8. provider.CreatePR → URL.
-//  9. Reply with ✅ PR opened + branch / base / url / worktree card.
+//  8. Gate 3: the parsed title must not be the summary heading — a
+//     body-only agent reply would otherwise open a PR titled
+//     `## Summary by NightMe`.
+//  9. provider.CreatePR → URL.
+// 10. Reply with ✅ PR opened + branch / base / url / worktree card.
 //
 // Pre-PR state (detached HEAD / uncommitted / untracked / ahead vs
 // upstream / ahead vs base / behind vs upstream / merge conflicts /
@@ -59,6 +62,13 @@ import (
 // user can still paste title + body manually into gh/glab.
 var errParseAgentReply = errors.New("could not parse agent reply as fenced PR block")
 
+// errMissingPRTitle is the sentinel reported when the parsed PR
+// title is the NightMe summary heading — the shape a model leaves
+// behind when it wrote the body and forgot the title line. The
+// dispatcher refuses to open the PR instead of shipping one titled
+// `## Summary by NightMe`, and points the user at a retry.
+var errMissingPRTitle = errors.New("agent output is missing the PR title (the output starts with the summary heading)")
+
 // prArgs bundles the parsed argv tail of `/gtw pr <...>`.
 // Mirrors pushArgs (cmd.go) — Agent override + room for
 // future flags. Kept in this file (rather than cmd.go) so
@@ -78,6 +88,11 @@ type prArgs struct {
 //
 //  1. origin/<branch> ref exists (git layer; RemoteBranchExists)
 //  2. no open PR for this branch (provider layer; FindOpenPRForBranch)
+//
+// A third gate runs on the agent's output rather than on the
+// worktree: the parsed title must not be the summary heading, so a
+// model that wrote the body and forgot the title line fails loudly
+// instead of opening a malformed PR.
 //
 // Everything else (detached HEAD / uncommitted / untracked /
 // ahead vs upstream / ahead vs base / behind vs upstream /
@@ -203,6 +218,20 @@ func dispatchPR(
 			fmt.Sprintf(
 				"❌ %v — agent output was:\n%s",
 				perr, indentLines(text, "  "))), nil
+	}
+
+	// Gate 3: the title is missing. A model that wrote the body
+	// only leaves the summary heading as its first line, and
+	// parsePRReply's permissive fallback then takes that heading
+	// as the title — the PR would ship titled `## Summary by
+	// NightMe`, with the summary section missing from the body.
+	// Refuse instead of opening a malformed PR; the user
+	// re-runs /gtw pr.
+	if isSummaryHeading(title) {
+		return reply(ctx, cs.Emitter(), chatID, messageID,
+			fmt.Sprintf(
+				"❌ %v — agent output was:\n%s\n↳ re-run `/gtw pr` to retry (or try another agent with `-a <name>`)",
+				errMissingPRTitle, indentLines(text, "  "))), nil
 	}
 
 	// Normalize the summary heading on the body in Go. The agent
@@ -577,6 +606,8 @@ func buildPRPrompt(c Context, base string, lang string) string {
 	sb.WriteString("## Output Format\n\n")
 	sb.WriteString("Reply with ONE fenced markdown code block.\n\n")
 	sb.WriteString("The FIRST line inside the code block MUST be the PR title.\n\n")
+	sb.WriteString("The SECOND line MUST be empty.\n\n")
+	sb.WriteString("The THIRD line MUST be `" + summaryHeading + "`.\n\n")
 	sb.WriteString("The remaining lines MUST be the PR body.\n\n")
 	sb.WriteString("The PR body MUST follow the existing format described above.\n\n")
 	sb.WriteString("Do not output:\n\n")
@@ -745,8 +776,8 @@ func appendClosesFooter(body string, issue int) string {
 }
 
 // appendPRFooter stamps the brand signature as the last line of a
-// PR body. The `Closes #N` line above it already separates the
-// signature from the body content, so no horizontal rule is used.
+// PR body, separated from the content above it by a horizontal
+// rule.
 //
 // Why this lives in Go instead of the agent prompt: the brand link
 // is a mechanical property of the body. A model that paraphrases
@@ -760,7 +791,22 @@ func appendClosesFooter(body string, issue int) string {
 // wrote stays in the body, so a quoted example of the footer line
 // survives.
 func appendPRFooter(body string) string {
-	return strings.TrimRight(body, " \t\r\n") + "\n\n" + brandLine + "\n"
+	return strings.TrimRight(body, " \t\r\n") + brandFooter
+}
+
+// isSummaryHeading reports whether line is the NightMe summary
+// heading in any form a model can write it: the plain heading, the
+// linked heading with any URL, and any casing of the words.
+//
+// The brand link is stripped before the comparison, so
+// `## Summary by [NightMe](https://nightme.dev)` reduces to the
+// plain heading.
+//
+// This belongs to the missing-title gate only.
+// normalizeSummaryHeading keeps its own, stricter rules.
+func isSummaryHeading(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	return strings.EqualFold(brandLinkRegex.ReplaceAllString(trimmed, "NightMe"), summaryHeading)
 }
 
 // normalizeSummaryHeading rewrites the body's leading summary

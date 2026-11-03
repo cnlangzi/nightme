@@ -27,16 +27,10 @@ const issueDraftDirName = "issue-drafts"
 
 const placeholderDraftDirAbs = "{{DRAFT_DIR_ABS}}"
 
-// issueFooter is appended to every issue /gtw new -y creates: a
-// horizontal rule and the brand signature. The rule keeps the
-// signature separate from the issue text; directly under a text
-// line Markdown would read it as a setext heading underline.
-const issueFooter = "\n\n---\n" + brandLine + "\n"
-
 // appendIssueFooter stamps the brand signature at the bottom of an
 // issue body.
 func appendIssueFooter(body string) string {
-	return strings.TrimRight(body, " \t\r\n") + issueFooter
+	return strings.TrimRight(body, " \t\r\n") + brandFooter
 }
 
 // A draft is NN.md; once its issue exists, /gtw new -y replaces it

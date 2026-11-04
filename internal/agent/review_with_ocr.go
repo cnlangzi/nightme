@@ -27,6 +27,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -36,14 +37,15 @@ import (
 	"github.com/cnlangzi/nightme/internal/proc"
 )
 
-// maxDiffLines caps any single diff section fed into the prompt. A huge
-// PR's full diff can run tens of thousands of lines and blow the host
-// agent's context window; beyond this cap the diff is truncated with a
-// pointer that tells the agent to read the affected file directly for
-// the omitted context. This is the single lever that keeps /review
-// stable on large changesets within a single group turn (full per-rule-
-// group batching across multiple turns is left to Phase C).
-const maxDiffLines = 2000
+// groupDiffBudgetBytes caps the diff payload one rule group sends to
+// the host agent: the committed / staged / unstaged sections together
+// may occupy at most this many bytes.
+//
+// 1 MiB is roughly 300K tokens of diff — about 30% of a 1M-token
+// context window, leaving room for the system prompt, tool schemas,
+// the file list, the agent's output and the file reads the agent
+// performs when a section was cut.
+const groupDiffBudgetBytes = 1 << 20
 
 // ReviewWithOcr runs review using the ocr delegation flow (docs/REVIEW.md
 // §2.2 / §2.5). ocr provides deterministic engineering (file selection +
@@ -56,7 +58,7 @@ const maxDiffLines = 2000
 //     "given ocr, do the ocr flow".
 //
 // Flow:
-//  1. precomputeReview fills reviewable / ocrGroups / diffs.
+//  1. precomputeReview fills reviewable / ocrGroups.
 //  2. Fan out via delegateReviewMultiJob with [ocrGroups..., simplifyGroup].
 //     simplify always runs as a parallel dimension (its own session turn) alongside
 //     the ocr-sourced groups.
@@ -175,22 +177,18 @@ func delegateReviewMultiJob(
 
 // reviewContext is the Go-side deterministic precompute shared by
 // Tier 2 and Tier 3. Every field is best-effort: empty/zero means
-// "could not compute; assembleReviewPrompt omits that section".
-// assembleReviewPrompt returns "" only when workspace is empty — the
-// signal that DelegateReview should fall back to BuiltinPrompt.
+// "could not compute". The diff itself is NOT precomputed — each rule
+// group slices its own diff at prompt-assembly time, where the shared
+// byte budget is known.
 type reviewContext struct {
 	workspace     string
 	defaultBranch string // resolvable ref "origin/main"; "" = could not detect
 	mergeBase     string // commit hash; "" = could not compute
-	committedDiff string // git diff <mergeBase>..HEAD (or base...HEAD fallback)
-	stagedDiff    string // git diff --staged
-	unstagedDiff  string // git diff
 	reviewable    []string
 	untracked     []string // new files never committed/staged; can't be diffed (no baseline)
 	excluded      []string // "path (reason)" entries; Tier 2 only
 	// Tier 2 only (populated when ocr is available + produced rules):
-	ocrRules  string        // formatted rule groups from `ocr delegate rule` (markdown, single-job path)
-	ocrGroups []reviewGroup // parsed structured groups (multi-job path; parallel to ocrRules)
+	ocrGroups []reviewGroup // parsed structured groups, one per ocr pattern
 }
 
 // reviewGroup is one rule group from `ocr delegate rule`. Pattern is
@@ -272,13 +270,10 @@ func precomputeReviewWithOcr(ctx context.Context, workspace string) reviewContex
 			if preview.mergeBase != "" {
 				rc.mergeBase = preview.mergeBase
 			}
-			rulesMarkdown, groups := runOcrDelegateRulesBatched(ctx, workspace, rc.reviewable)
-			rc.ocrRules = rulesMarkdown
-			rc.ocrGroups = groups
+			rc.ocrGroups = runOcrDelegateRulesBatched(ctx, workspace, rc.reviewable)
 		}
 	}
 
-	fillDiffs(ctx, &rc, workspace, base)
 	return rc
 }
 
@@ -377,24 +372,7 @@ func precomputeReviewWithBuiltin(ctx context.Context, workspace string) reviewCo
 		}}
 	}
 
-	fillDiffs(ctx, &rc, workspace, base)
 	return rc
-}
-
-// fillDiffs computes the three git diffs (committed/staged/unstaged)
-// that union into "the diff a PR would have". Shared helper used by
-// both precomputeReviewWithOcr and precomputeReviewWithBuiltin — the
-// diff content is path-agnostic (pure git), so the same logic works
-// regardless of how reviewable was obtained.
-func fillDiffs(ctx context.Context, rc *reviewContext, workspace, base string) {
-	switch {
-	case rc.mergeBase != "":
-		rc.committedDiff = truncateDiff(runGit(ctx, workspace, "diff", rc.mergeBase+"..HEAD"))
-	case base != "":
-		rc.committedDiff = truncateDiff(runGit(ctx, workspace, "diff", base+"...HEAD"))
-	}
-	rc.stagedDiff = truncateDiff(runGit(ctx, workspace, "diff", "--staged"))
-	rc.unstagedDiff = truncateDiff(runGit(ctx, workspace, "diff"))
 }
 
 // resolvableDefaultBranch returns origin/<defaultBranch> (e.g.
@@ -563,43 +541,33 @@ const ruleBatchSize = 50
 
 // runOcrDelegateRulesBatched runs `ocr delegate rule --format json
 // <paths...>` in ≤ruleBatchSize-path batches (SKILL Step 2) and
-// returns BOTH the concatenated markdown (single-job path) AND the
-// parsed structured groups (multi-job path). A single batch failing
+// returns the parsed structured groups. A single batch failing
 // (ocr error, JSON parse error) is non-fatal — other batches still
 // contribute their rules, so a transient failure on one slice doesn't
-// blank the whole rule section.
-//
-// Two parallel outputs are returned so precomputeReview can populate
-// BOTH rc.ocrRules (markdown, for assembleReviewPrompt) and
-// rc.ocrGroups (structured, for DelegateReview's multi-job path)
-// from a single ocr invocation chain — no double-spawn.
-func runOcrDelegateRulesBatched(ctx context.Context, workspace string, paths []string) (string, []reviewGroup) {
+// blank the whole rule set.
+func runOcrDelegateRulesBatched(ctx context.Context, workspace string, paths []string) []reviewGroup {
 	if len(paths) == 0 {
-		return "", nil
+		return nil
 	}
-	var markdown strings.Builder
 	var groups []reviewGroup
 	for i := 0; i < len(paths); i += ruleBatchSize {
 		end := i + ruleBatchSize
 		if end > len(paths) {
 			end = len(paths)
 		}
-		if md, gs, ok := runOcrDelegateRuleBatch(ctx, workspace, paths[i:end]); ok {
-			markdown.WriteString(md)
+		if gs, ok := runOcrDelegateRuleBatch(ctx, workspace, paths[i:end]); ok {
 			groups = append(groups, gs...)
 		}
 	}
-	return markdown.String(), groups
+	return groups
 }
 
 // runOcrDelegateRuleBatch runs one `ocr delegate rule` batch and
-// returns the rule groups as BOTH markdown (for the single-job
-// assembleReviewPrompt path) and structured []reviewGroup (for the
-// multi-job path). ok=false on any failure for this batch. proc.New
-// routes the Windows .cmd shim through cmd.exe /d /c (plain
-// exec.Command would fail with ERROR_INVALID_PARAMETER (87) on a
-// .cmd target).
-func runOcrDelegateRuleBatch(ctx context.Context, workspace string, paths []string) (string, []reviewGroup, bool) {
+// returns the rule groups as structured []reviewGroup. ok=false on any
+// failure for this batch. proc.New routes the Windows .cmd shim
+// through cmd.exe /d /c (plain exec.Command would fail with
+// ERROR_INVALID_PARAMETER (87) on a .cmd target).
+func runOcrDelegateRuleBatch(ctx context.Context, workspace string, paths []string) ([]reviewGroup, bool) {
 	c, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	args := append([]string{"delegate", "rule", "--format", "json"}, paths...)
@@ -607,7 +575,7 @@ func runOcrDelegateRuleBatch(ctx context.Context, workspace string, paths []stri
 	cmd.Dir = workspace
 	out, err := cmd.Output()
 	if err != nil {
-		return "", nil, false
+		return nil, false
 	}
 	var resp struct {
 		Groups []struct {
@@ -617,176 +585,206 @@ func runOcrDelegateRuleBatch(ctx context.Context, workspace string, paths []stri
 		} `json:"groups"`
 	}
 	if err := json.Unmarshal(out, &resp); err != nil {
-		return "", nil, false
+		return nil, false
 	}
 	if len(resp.Groups) == 0 {
-		return "", nil, false
+		return nil, false
 	}
-	var markdown strings.Builder
-	var groups []reviewGroup
+	groups := make([]reviewGroup, 0, len(resp.Groups))
 	for _, g := range resp.Groups {
-		fmt.Fprintf(&markdown, "### Rule (pattern %s) — applies to: %s\n%s\n\n",
-			g.Pattern, strings.Join(g.Files, ", "), g.Rule)
 		groups = append(groups, reviewGroup{
 			Pattern: g.Pattern,
 			Files:   g.Files,
 			Rule:    g.Rule,
 		})
 	}
-	return markdown.String(), groups, true
+	return groups, true
 }
 
-// truncateDiff caps a diff section at maxDiffLines. Under the cap the
-// diff is returned verbatim; over the cap, the head is kept and a
-// truncation marker is appended pointing the agent at the affected
-// files for full context. Without this, a large PR's full diff can
-// exceed the host agent's context window and the review silently
-// degrades (agent starts dropping findings / files).
-func truncateDiff(s string) string {
+// diffTruncationMarker is appended to a diff section the byte budget
+// cut. It names the number of dropped bytes and points the agent at
+// the affected files for the omitted context — the agent recovers the
+// rest by reading those files itself.
+func diffTruncationMarker(dropped int) string {
+	return "\n…(diff truncated: " + strconv.Itoa(dropped) +
+		" bytes dropped; read the affected files directly for full context)…\n"
+}
+
+// truncateDiffToBytes keeps whole lines of s that fit within budget
+// and returns the kept text plus the number of bytes dropped. A
+// dropped-byte count of 0 means the section was not cut.
+//
+// No line is ever cut in half: the kept text ends on a line boundary,
+// so the agent never sees half a diff hunk.
+func truncateDiffToBytes(s string, budget int) (string, int) {
 	if s == "" {
-		return ""
+		return "", 0
 	}
-	// Count newlines; +1 because a trailing line without \n still counts.
-	lineCount := strings.Count(s, "\n") + 1
-	if lineCount <= maxDiffLines {
-		return s
+	if len(s) <= budget {
+		return s, 0
 	}
-	// Keep the first maxDiffLines lines. IndexByte scans for \n and
-	// advances idx past each line; the loop runs maxDiffLines times.
+	if budget <= 0 {
+		return "", len(s)
+	}
+	// Keep the longest prefix of whole lines that fits. IndexByte scans
+	// for \n and advances past each line; a trailing line without \n
+	// is never kept (it would be a partial line).
 	idx := 0
-	for i := 0; i < maxDiffLines; i++ {
+	for idx < len(s) {
 		next := strings.IndexByte(s[idx:], '\n')
 		if next < 0 {
 			break
 		}
+		if idx+next+1 > budget {
+			break
+		}
 		idx += next + 1
 	}
-	return s[:idx] + "\n…(diff truncated: " + strconv.Itoa(lineCount-maxDiffLines) +
-		" more lines; read the affected files directly for full context)…\n"
+	return s[:idx], len(s) - idx
 }
 
-// assembleReviewPrompt builds the enhanced review prompt from the Go-
-// side precompute. Structure mirrors ocr's delegation SKILL:
-// context → files → diffs → rules → how-to → output schema. Tier 2
-// (ocr present) injects ocr's per-file rule groups and uses ONLY the
-// language-agnostic "how to review" methodology (ocr's rules are the
-// language-specific guidance). Tier 3 (ocr absent) uses the built-in
-// rubric's "what to look for" list INSTEAD of ocr's rules — the two
-// are never mixed, matching docs/REVIEW.md §2.4 (rules: Tier 2 ocr,
-// Tier 3 built-in).
+// allocateDiffQuotas splits the byte budget across the diff sections
+// of one rule group.
 //
-// Returns "" only when workspace is empty — DelegateReview then falls
-// back to BuiltinPrompt verbatim.
-func assembleReviewPrompt(rc reviewContext) string {
-	if rc.workspace == "" {
-		return ""
-	}
-	var b strings.Builder
-
-	fmt.Fprintln(&b, "You are a senior engineer reviewing code changes for an upcoming pull request. Find real problems, not style lectures. Be specific, concrete, actionable.")
-
-	// --- Context (precomputed; the agent must NOT re-run git) ---
-	fmt.Fprintln(&b, "\n# Context (precomputed by /review — do NOT re-run git)")
-	fmt.Fprintf(&b, "- workspace: %s\n", rc.workspace)
-	if rc.defaultBranch != "" {
-		if rc.mergeBase != "" {
-			fmt.Fprintf(&b, "- base branch: %s (merge-base: %s)\n", rc.defaultBranch, rc.mergeBase)
-		} else {
-			fmt.Fprintf(&b, "- base branch: %s\n", rc.defaultBranch)
-		}
-	} else {
-		fmt.Fprintln(&b, "- base branch: unknown (workspace mode — review staged + unstaged + untracked)")
-	}
-
-	// --- Files to review (coverage mandatory, SKILL Step 4 & 6) ---
-	if len(rc.reviewable) > 0 {
-		fmt.Fprintln(&b, "\n# Files to review")
-		fmt.Fprintln(&b, "Coverage is MANDATORY: every file below must end as `reviewed` or `skipped` with a concrete reason. Do not silently omit any.")
-		for _, f := range rc.reviewable {
-			fmt.Fprintf(&b, "- %s\n", f)
+// The split is fair-share: the budget is a level that rises until it is
+// spent, and every section takes min(its own size, level). A section
+// smaller than the level keeps its full content and releases the rest
+// to the sections that are still short, so one oversized section never
+// starves the small ones. A quota never exceeds its own section's size
+// and the quotas never sum to more than the budget.
+func allocateDiffQuotas(sizes []int, budget int) []int {
+	quotas := make([]int, len(sizes))
+	pending := make([]int, 0, len(sizes))
+	for i, s := range sizes {
+		if s > 0 {
+			pending = append(pending, i)
 		}
 	}
-	if len(rc.excluded) > 0 {
-		fmt.Fprintln(&b, "\n# Excluded (do not review)")
-		for _, f := range rc.excluded {
-			fmt.Fprintf(&b, "- %s\n", f)
+	remaining := budget
+	for len(pending) > 0 {
+		total := 0
+		for _, i := range pending {
+			total += sizes[i]
 		}
-	}
-
-	// --- Untracked files (new additions, no baseline) ---
-	if len(rc.untracked) > 0 {
-		fmt.Fprintln(&b, "\n# New file additions (no baseline — added in this changeset)")
-		fmt.Fprintln(&b, "These files are untracked (never committed/staged); no diff exists. Review by reading the file contents directly if available, or skip with reason.")
-		for _, f := range rc.untracked {
-			fmt.Fprintf(&b, "- %s\n", f)
-		}
-	}
-
-	// --- Diffs (precomputed) ---
-	hasDiff := rc.committedDiff != "" || rc.stagedDiff != "" || rc.unstagedDiff != ""
-	if hasDiff {
-		fmt.Fprintln(&b, "\n# Diffs (precomputed — the union below is the full diff to review)")
-		if rc.committedDiff != "" {
-			label := rc.defaultBranch + "...HEAD"
-			if rc.mergeBase != "" {
-				label = rc.mergeBase + "..HEAD"
+		if total <= remaining {
+			for _, i := range pending {
+				quotas[i] = sizes[i]
 			}
-			fmt.Fprintf(&b, "## Committed (%s)\n```\n%s\n```\n", label, rc.committedDiff)
+			return quotas
 		}
-		if rc.stagedDiff != "" {
-			fmt.Fprintf(&b, "## Staged\n```\n%s\n```\n", rc.stagedDiff)
+		share := remaining / len(pending)
+		if share <= 0 {
+			return quotas
 		}
-		if rc.unstagedDiff != "" {
-			fmt.Fprintf(&b, "## Unstaged\n```\n%s\n```\n", rc.unstagedDiff)
+		// Sections that fit in the share take their full content and
+		// release the remainder to the sections still short.
+		var short []int
+		used := 0
+		for _, i := range pending {
+			if sizes[i] <= share {
+				quotas[i] = sizes[i]
+				used += sizes[i]
+				continue
+			}
+			short = append(short, i)
 		}
+		if len(short) == len(pending) {
+			// Nobody fits the share — the level is capped by the budget.
+			for _, i := range short {
+				quotas[i] = share
+			}
+			return quotas
+		}
+		remaining -= used
+		pending = short
 	}
+	return quotas
+}
 
-	// --- Rules + how-to (Tier 2 ocr; Tier 3 built-in — never mixed) ---
-	if rc.ocrRules != "" {
-		// Tier 2: ocr's per-file rules ARE the language-specific
-		// guidance; add only the language-agnostic methodology.
-		fmt.Fprintln(&b, "\n# Review rules (matched per file by `ocr delegate` — LLM-free engineering)")
-		fmt.Fprintln(&b, rc.ocrRules)
-		fmt.Fprintln(&b, "\n# How to review")
-		fmt.Fprint(&b, reviewHowTo())
-	} else {
-		// Tier 3: no ocr rules — the built-in rubric supplies both
-		// the methodology and the "what to look for" priority list.
-		fmt.Fprintln(&b, "\n# How to review")
-		fmt.Fprint(&b, reviewHowTo())
-		fmt.Fprint(&b, reviewWhatToLook())
+// diffSection is one of the three git diffs that union into "the diff
+// a PR would have" for a single rule group.
+type diffSection struct {
+	title   string
+	content string
+}
+
+// overhead returns the byte cost of the section's scaffolding — its
+// "## <title>" header and the code fences around the body. The
+// scaffolding counts against the section's quota, so the rendered
+// blocks together stay inside the group budget.
+func (s diffSection) overhead() int {
+	return len("## ") + len(s.title) + len("\n```\n") + len("\n```\n")
+}
+
+// diffSectionSizes returns the untruncated size of each section — its
+// scaffolding plus its content. This is the basis the group budget is
+// split over; empty sections get no share because they are not
+// rendered at all.
+func diffSectionSizes(sections []diffSection) []int {
+	sizes := make([]int, len(sections))
+	for i, s := range sections {
+		if s.content == "" {
+			continue
+		}
+		sizes[i] = s.overhead() + len(s.content)
 	}
+	return sizes
+}
 
-	// --- Output format (structured + coverage, SKILL Step 5 & 6) ---
-	fmt.Fprintln(&b, "\n# Output format")
-	fmt.Fprintln(&b, "Output a coverage summary, then one block per finding. Do not pad with generic advice.")
-	fmt.Fprintln(&b, "\n```")
-	fmt.Fprintln(&b, "## Coverage")
-	fmt.Fprintf(&b, "- total: %d\n", len(rc.reviewable))
-	fmt.Fprintln(&b, "- reviewed: <N>")
-	fmt.Fprintln(&b, "- skipped: <N> (each with reason)")
-	fmt.Fprintln(&b, "- coverage_rate: <N>/<total>")
-	fmt.Fprintln(&b, "\n## Findings")
-	fmt.Fprintln(&b, "For each finding (omit fields you cannot determine; start_line/end_line both 0 = positioning failed):")
-	fmt.Fprintln(&b, "- path: <file>")
-	fmt.Fprintln(&b, "- start_line: <int>")
-	fmt.Fprintln(&b, "- end_line: <int>")
-	fmt.Fprintln(&b, "- category: bug|security|performance|maintainability|test|style|documentation|other")
-	fmt.Fprintln(&b, "- severity: critical|high|medium|low")
-	fmt.Fprintln(&b, "- content: <one-line issue + how to verify>")
-	fmt.Fprintln(&b, "```")
-	fmt.Fprintln(&b, "\nSeverity rubric: critical = breaks in production / loses data; high = real bug, user-visible pain; medium = quality / maintainability, not user-visible; low = nit / style, take-it-or-leave-it.")
-	fmt.Fprintln(&b, "If there are no findings, write \"No blockers; nothing material to flag.\" and still report coverage.")
+// render fits the section into its quota. The returned block is the
+// rendered section (its "## <title>" header plus the fenced body); the
+// returned count is the number of content bytes that did not fit. A
+// quota too small for a single line omits the section entirely.
+func (s diffSection) render(quota int) (string, int) {
+	if s.content == "" {
+		return "", 0
+	}
+	head := "## " + s.title + "\n```\n"
+	tail := "\n```\n"
+	allowance := quota - len(head) - len(tail)
+	if allowance <= 0 {
+		return "", len(s.content)
+	}
+	body, dropped := fitDiffBody(s.content, allowance)
+	if body == "" {
+		return "", dropped
+	}
+	return head + body + tail, dropped
+}
 
-	return b.String()
+// fitDiffBody fits content into allowance bytes. Under the allowance
+// the content is returned verbatim; over it, the longest prefix of
+// whole lines that fits is kept and a truncation marker naming the
+// dropped byte count is appended. An empty body means not even one
+// line fit.
+func fitDiffBody(content string, allowance int) (string, int) {
+	if len(content) <= allowance {
+		return content, 0
+	}
+	kept, dropped := truncateDiffToBytes(content, allowance)
+	for kept != "" {
+		marker := diffTruncationMarker(dropped)
+		if len(kept)+len(marker) <= allowance {
+			return kept + marker, dropped
+		}
+		// The marker does not fit next to the kept lines — drop the
+		// last line and retry with the smaller dropped count.
+		idx := strings.LastIndexByte(kept[:len(kept)-1], '\n')
+		if idx < 0 {
+			break
+		}
+		kept = kept[:idx+1]
+		dropped = len(content) - len(kept)
+	}
+	return "", len(content)
 }
 
 // reviewHowTo is the language-agnostic review methodology, shared by
-// Tier 2 and Tier 3. It is the "process" part of the rubric (read
+// every rule group. It is the "process" part of the rubric (read
 // first, distinguish blockers, cite locations, skip linter territory,
 // false-positive filter, simplification) — NOT the language-specific
-// "what to look for" list, which lives in reviewWhatToLook (Tier 3
-// only) or in ocr's per-file rules (Tier 2).
+// "what to look for" list, which lives in the group's own rule
+// (ocr's per-file rules, or the builtin rubric).
 func reviewHowTo() string {
 	return `1. Read the full diff end to end before judging. Form a mental model of what the change does, then look for where that model breaks.
 2. Distinguish BLOCKERS from nits. A blocker breaks in production, loses data, leaks permissions, or makes a follow-up change materially harder. Everything else is a nit or a suggestion.
@@ -798,34 +796,9 @@ func reviewHowTo() string {
 `
 }
 
-// reviewWhatToLook is the built-in, language-agnostic "what to look
-// for" priority list — Tier 3 ONLY (ocr absent). Tier 2 substitutes
-// ocr's per-file rules (which are richer AND language-specific, e.g.
-// the Go rule set from `ocr delegate rule` covers errors/panics,
-// nil/interfaces, context/goroutines, channels/locks, etc.) so the
-// two are never mixed. Aligned with ocr's delegation SKILL categories
-// (bug / security / performance / maintainability / test).
-func reviewWhatToLook() string {
-	return `
-## What to look for (priority order)
-
-- **Correctness**: off-by-one, wrong null/nil handling, race conditions, integer overflow, divide-by-zero, error swallowing, panic paths
-- **Resource lifetime**: unclosed files / handles / transactions, goroutine / connection leaks, defer in loops
-- **Concurrency**: shared mutable state without locking, channel send without select, deadlock potential
-- **Error handling**: errors silently dropped (especially via _ =), errors wrapped without %w, error returned with no context, panic-from-error
-- **API surface**: exported functions with unclear contracts, signatures that make correct use impossible, types that prevent the caller from handling failure
-- **Security**: unsanitised input → shell / SQL / file path, auth checks skipped, secrets in logs
-- **Migration risk**: schema changes with no rollback path, config changes that break old clients, deploy ordering hazards
-- **Efficiency**: algorithmic slowness (O(n²) when O(n) is one map away), unnecessary repeated work, N+1 queries, hot-path allocations
-- **Test gaps**: new code path with no test, behavioural change to existing function with no test update
-- **Simplification**: redundant code (DRY violations, dead code, unused params/imports), prefer existing helpers over new code, over-abstraction, naming clarity, unnecessary indirection
-`
-}
-
 // assembleGroupPrompt builds a per-group review prompt for the
-// multi-job path. Mirrors assembleReviewPrompt's structure
-// (context → files → diffs → rules → how-to → output schema)
-// but:
+// multi-job path. Structure: context → files → diffs → rules → how-to
+// → output schema.
 //
 //   - filters the file list to the group's Files (the rule
 //     explicitly enumerates them — ocr's authoritative
@@ -835,13 +808,14 @@ func reviewWhatToLook() string {
 //     contains only the diff slice it can actually review)
 //   - uses ONLY this group's rule (Tier 2 single-group case
 //     in multi-job context)
+//   - bounds the three diff sections with the shared group byte
+//     budget, cutting at line boundaries and marking what was dropped
 //
 // ctx is the per-job goroutine's review ctx so groupFilteredDiff's
 // git subprocesses inherit /close + 30-min timeout (Finding 1).
 //
-// Returns "" only when workspace is empty — same fallback signal
-// as assembleReviewPrompt, so the caller's "fall back to BuiltinPrompt"
-// branch fires uniformly.
+// Returns "" only when workspace is empty — the caller's "fall back to
+// BuiltinPrompt" branch fires on it.
 func assembleGroupPrompt(ctx context.Context, rc reviewContext, g *reviewGroup) string {
 	if g == nil {
 		return ""
@@ -888,7 +862,7 @@ func assembleGroupPrompt(ctx context.Context, rc reviewContext, g *reviewGroup) 
 
 	// --- Diffs (group-filtered via `git diff -- <files...>`) ---
 	//
-	// Range strategy (mirrors assembleReviewPrompt §2.4):
+	// Range strategy:
 	//   - mergeBase known → use it (always resolvable; two-dot
 	//     form so a checkout with only the remote tracking ref
 	//     doesn't fail)
@@ -899,6 +873,11 @@ func assembleGroupPrompt(ctx context.Context, rc reviewContext, g *reviewGroup) 
 	//     with no range (= unstaged only), then mislabeled the
 	//     output as "Committed (origin/main...HEAD)".
 	//   - both empty → no committed section (workspace mode)
+	//
+	// The three sections share one byte budget (groupDiffBudgetBytes):
+	// each gets a quota, a section over its quota is cut at line
+	// boundaries and marked with the number of dropped bytes, and a
+	// cut group is logged.
 	committedArgs := []string{"diff"}
 	switch {
 	case rc.mergeBase != "":
@@ -906,25 +885,41 @@ func assembleGroupPrompt(ctx context.Context, rc reviewContext, g *reviewGroup) 
 	case rc.defaultBranch != "":
 		committedArgs = append(committedArgs, rc.defaultBranch+"...HEAD")
 	}
-	committed := groupFilteredDiff(ctx, rc, g, committedArgs...)
-	staged := groupFilteredDiff(ctx, rc, g, "diff", "--staged")
-	unstaged := groupFilteredDiff(ctx, rc, g, "diff")
-	hasDiff := committed != "" || staged != "" || unstaged != ""
-	if hasDiff {
+	label := rc.defaultBranch + "...HEAD"
+	if rc.mergeBase != "" {
+		label = rc.mergeBase + "..HEAD"
+	}
+	sections := []diffSection{
+		{title: "Committed (" + label + ") — group-filtered", content: groupFilteredDiff(ctx, rc, g, committedArgs...)},
+		{title: "Staged — group-filtered", content: groupFilteredDiff(ctx, rc, g, "diff", "--staged")},
+		{title: "Unstaged — group-filtered", content: groupFilteredDiff(ctx, rc, g, "diff")},
+	}
+	sizes := diffSectionSizes(sections)
+	quotas := allocateDiffQuotas(sizes, groupDiffBudgetBytes)
+
+	var payload, dropped int
+	rendered := make([]string, 0, len(sections))
+	for i, s := range sections {
+		block, cut := s.render(quotas[i])
+		dropped += cut
+		if block == "" {
+			continue
+		}
+		payload += len(block)
+		rendered = append(rendered, block)
+	}
+	if len(rendered) > 0 {
 		fmt.Fprintln(&b, "\n# Diffs (precomputed — the union below is the full diff to review for THIS group)")
-		if committed != "" {
-			label := rc.defaultBranch + "...HEAD"
-			if rc.mergeBase != "" {
-				label = rc.mergeBase + "..HEAD"
-			}
-			fmt.Fprintf(&b, "## Committed (%s) — group-filtered\n```\n%s\n```\n", label, committed)
+		for _, block := range rendered {
+			fmt.Fprint(&b, block)
 		}
-		if staged != "" {
-			fmt.Fprintf(&b, "## Staged — group-filtered\n```\n%s\n```\n", staged)
-		}
-		if unstaged != "" {
-			fmt.Fprintf(&b, "## Unstaged — group-filtered\n```\n%s\n```\n", unstaged)
-		}
+	}
+	if dropped > 0 {
+		slog.Info("agent: review group diff cut by the byte budget",
+			"pattern", g.Pattern,
+			"budget_bytes", groupDiffBudgetBytes,
+			"payload_bytes", payload,
+			"dropped_bytes", dropped)
 	}
 
 	// --- Rules + how-to (header depends on group source) ---
@@ -968,10 +963,13 @@ func assembleGroupPrompt(ctx context.Context, rc reviewContext, g *reviewGroup) 
 }
 
 // groupFilteredDiff runs `git diff <args...> -- <g.Files...>` in the
-// workspace and returns the diff trimmed, truncated per the standard
-// cap. "" on any error (per runGit convention). This is the smart-
-// bundling payoff: each per-group RunOnce sees ONLY the diff for its
-// group's files, keeping the prompt within context.
+// workspace and returns the diff trimmed but UNTRUNCATED. "" on any
+// error (per runGit convention). This is the smart-bundling payoff:
+// each per-group RunOnce sees ONLY the diff for its group's files.
+//
+// The diff is cut later — in assembleGroupPrompt, where the group's
+// shared byte budget is known and can be split across the committed /
+// staged / unstaged sections.
 //
 // ctx must be the per-job goroutine's review ctx (parent of the
 // goroutine, derived from chat session ctx + 30-min timeout) so
@@ -992,7 +990,7 @@ func groupFilteredDiff(ctx context.Context, rc reviewContext, g *reviewGroup, ar
 	full = append(full, g.Files...)
 	c2 := proc.New(c, "git", append([]string{"-C", rc.workspace}, full...)...)
 	out, _ := c2.Output() // error swallowed: "" = "skip section", by design
-	return truncateDiff(strings.TrimSpace(string(out)))
+	return strings.TrimSpace(string(out))
 }
 
 // mergeRunResults combines N per-job RunResults into one final

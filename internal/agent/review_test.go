@@ -277,8 +277,8 @@ func TestReview_EmptyDiff_ReturnsErrNoDiff(t *testing.T) {
 		// precompute path (not a stub) runs end-to-end.
 		dir := t.TempDir()
 
-		// Init a git repo so detectDefaultBranch / fillDiffs have
-		// something to call (their results are "" but no panic).
+		// Init a git repo so detectDefaultBranch has something to
+		// call (its result is "" but no panic).
 		gitInit(t, dir)
 		gitCommitEmpty(t, dir)
 

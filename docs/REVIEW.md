@@ -58,13 +58,13 @@ Starter.Review(所有 bridge 都是同一行)
           │     ├─ pre := precomputeReviewWithOcr(workspace)
           │     │     ocr delegate preview → reviewable + excluded + mergeBase
           │     │     ocr delegate rule    → ocrGroups (N per-pattern)
-          │     │     git                 → base + merge-base + 3 diffs
+          │     │     git                 → base + merge-base
           │     ├─ groups = pre.ocrGroups + simplifyGroup(pre.reviewable)
           │     └─ delegateReviewMultiJob(sem cap 4,每 group 一个 session turn,eventAggregator,mergeRunResults)
           │
           └─ OcrAvailable() NO  → ReviewWithPrompt
                 ├─ pre := precomputeReviewWithBuiltin(workspace)
-                │     git → base + merge-base + 3 diffs
+                │     git → base + merge-base
                 │     Go → 4 个 git 来源(inlined)+ 合成 1 个 builtin group
                 ├─ groups = pre.ocrGroups(builtin) + simplifyGroup(pre.reviewable)
                 └─ delegateReviewMultiJob(同上)
@@ -86,10 +86,7 @@ precomputeReviewWithOcr                precomputeReviewWithBuiltin
     │   → reviewable (ocr FileFilter)     │   → reviewable (Go isReviewablePath)
     │   → excluded (with reasons)         │   → untracked (新文件,无 diff)
     ├─ ocr delegate rule                  ├─ synthesize 1 个 builtin group
-                                         │   → ocrGroups = [{patternBuiltin, BuiltinPrompt}]
-    │   → ocrGroups (N groups, per-pattern)
-    │   → ocrRules (markdown)
-    └─ git: 3 diffs                        └─ git: 3 diffs
+    │   → ocrGroups (N groups, per-pattern) │   → ocrGroups = [{patternBuiltin, BuiltinPrompt}]
     ↓                                       ↓
     reviewContext (same shape)              reviewContext (same shape)
     ↓                                       ↓
@@ -97,6 +94,8 @@ precomputeReviewWithOcr                precomputeReviewWithBuiltin
     ↓
     delegateReviewMultiJob → fan-out
 ```
+
+diff 不在 precompute 阶段算——每个 rule group 在组装 prompt 时自己切自己的 diff(`git diff -- <files...>`),那时才知道该 group 的字节预算怎么分(见 §2.4)。
 
 **字段对照**:
 
@@ -106,8 +105,7 @@ precomputeReviewWithOcr                precomputeReviewWithBuiltin
 | `untracked`  | ocr 提供的未 tracked 文件列表 | Go 端 `git ls-files --others --exclude-standard`(独立于 reviewable,因为没有 diff 可渲染)|
 | `excluded` | ocr 提供的排除原因列表 | nil(Go 端不跟踪 excluded)|
 | `ocrGroups` | N 个(每 pattern 一组,Rule 是 ocr rule doc)| 1 个 builtin group(Pattern=patternBuiltin, Rule=BuiltinPrompt)|
-| `ocrRules` | N 个 group 的 markdown 拼好 | ""(只有一个 group)|
-| merge-base / 3 diffs | 都有(同)| 都有(同)|
+| merge-base | 都有(同)| 都有(同)|
 
 `ReviewWithOcr` 调 `precomputeReviewWithOcr`,`ReviewWithPrompt` 调 `precomputeReviewWithBuiltin`。两个 Runner 函数返回值都是 `RunResult`,行为形状一致。`agent.ReviewDispatch` 按 `OcrAvailable()` 选择调用哪个 Runner —— 路由决策集中在这一个 helper,不在任何 Runner 的内部职责里。
 
@@ -163,15 +161,23 @@ workspace 为空 / precompute 全失败时,fan-out 退化为 `[simplifyGroup(nil
 
 参考 ocr 的"确定性工程"思想,把原本烤进静态 prompt 里的几项挪到 Go 侧**硬约束**(纯工程,不依赖 LLM):
 
-1. **Go 侧预算 diff** —— 治 agent 偷懒 / 漏文件
+1. **Go 侧预计算 diff** —— 治 agent 偷懒 / 漏文件
 2. **文件清单 + 排除** —— `isReviewablePath` 启发式(generated / testdata / vendor 等)
 3. **reviewable vs untracked 分离** —— 改了/未改的文件走 diff 通道;**新文件(untracked)走单独通道**,因为 `git diff <untracked>` 全空,把它们混进 reviewable 会让 LLM 看到文件列表却没有 diff 内容,违反 coverage mandate
 4. **覆盖率硬约束** —— 每文件 reviewed 或 skipped-with-reason
 5. **输出 schema** —— path / content / start_line / end_line / category(`bug|security|performance|maintainability|test|style|documentation|other`)/ severity(`critical|high|medium|low`),结构化便于 fix 定位
 6. **规则匹配** —— ocr 路径用 `ocr delegate rule` 返回的 ocrGroups(每个 pattern 一组);builtin 路径用 `precomputeReviewWithBuiltin` 合成的一个 builtinGroup(全部文件 + BuiltinPrompt)。两者**形状一致**,fan-out 不区分
-7. **per-file 截断** —— `maxDiffLines = 2000` 兜底,超长 diff 截断并提示"read directly"
+7. **per-group 字节预算** —— `groupDiffBudgetBytes = 1048576`(1 MiB)兜底,一个 rule group 的三段 diff 共享这个预算;超预算的段按行边界截断,并提示"read directly"
 
-**关键收敛**:1–5 项是纯 Go 工程,两档都做;第 6 项规则匹配是 ocr / builtin 路径的差异点(ocr 拿多 pattern groups,builtin 拿 Go 合成的一个 builtinGroup);第 7 项防单 job 的 prompt 膨胀。ocr 在与不在的区别收敛到"规则匹配"一项的精度(ocr FileFilter vs Go 启发式)。
+**diff 预算(per group)**:
+
+- 一个 rule group 的 committed / staged / unstaged 三段 diff 共享 `groupDiffBudgetBytes = 1048576`(1 MiB)预算——约 30% 的 1M token context,余下留给系统 prompt、tool schema、文件清单、agent 输出,以及 agent 被截断后自己去读文件的开销。
+- 预算按各段未截断的大小切分(fair-share):预算像水位一样上涨,每段取 `min(自身大小, 水位)`;比水位小的段保留完整内容,余量让给还差额的段——单段过大不会饿死小段。各段配额之和 ≤ 预算。
+- 超配额的段按**行边界**截断(不切半行),段尾追加 `…(diff truncated: N bytes dropped; read the affected files directly for full context)…`。
+- 配额小到一行都放不下的段整段省略(不带 marker)。
+- 被截断的 group 记一条 Info 日志:group pattern / 预算 / 实际 payload 字节数 / 丢弃字节数。
+
+**关键收敛**:1–5 项是纯 Go 工程,两档都做;第 6 项规则匹配是 ocr / builtin 路径的差异点(ocr 拿多 pattern groups,builtin 拿 Go 合成的一个 builtinGroup);第 7 项防单 group 的 prompt 膨胀。ocr 在与不在的区别收敛到"规则匹配"一项的精度(ocr FileFilter vs Go 启发式)。
 
 `BuiltinPrompt` 本身不再携带 simplify 规则(原 `StandardPrompt` 里有这条 bullet,已删)—— simplify 作为独立并行 group 跑(`simplifyPrompt` const,小写未导出),不再在 BuiltinPrompt 里冗余出现。severity 词汇统一为 `critical/high/medium/low`,跟 `assembleGroupPrompt` 的 output schema 一致 —— 不再有 `blocker/major/minor/nit` 与 `critical/high/medium/low` 跨 group 冲突。
 
@@ -298,7 +304,7 @@ partial failure 路径:**不**升级为 merge 整体错误,失败组以 inline m
 
 ### 2.5.6 边界
 
-- **超大单组**:某 group diff 仍超大(如 `**/*.go` 100 文件 5000 行)→ per-file 截断兜底(§2.4 第 7 项);极端时按目录二次拆(留后续)。
+- **超大单组**:某 group diff 仍超大(如 `**/*.go` 100 文件 5000 行)→ per-group 字节预算兜底(§2.4 第 7 项),超预算的段按行截断并标记丢弃字节数;极端时按目录二次拆(留后续)。
 - **单组超模型 context 窗口**:`_nightme_simplify` group 永远带全部 reviewable 文件,大 changeset 下单个 group 的 prompt 仍可能超出模型的 context 窗口。传输层不受限(管道无长度上限),但模型侧会失败,该 group 标记 failed,其余 group 的 findings 照常汇入。
 - **顺序 vs 并发**:默认并发(快);若并发有风险(如 agent 不支持并发 session),可降级顺序(loop 无 sem)——但已验证 delegate bridge 的 session 并发安全(dsh sessionId 多路复用 / 其他独立子进程),默认并发。
 - **跨 job 事件流交错**:Phase 2 期间不同 job 的 process 事件在 outer 上**可能交错**(Source="group-N" 区分);**同一 job 内部** ToolStart→ToolEnd 严格配对连续(per-job 缓冲保证)。
@@ -313,13 +319,14 @@ partial failure 路径:**不**升级为 merge 整体错误,失败组以 inline m
 | 统一 dispatcher(所有 bridge 的 Starter.Review 都走它) | `internal/agent/review.go::ReviewDispatch` |
 | ocr Runner 入口 | `internal/agent/review_with_ocr.go::ReviewWithOcr` |
 | builtin Runner 入口(ocr 不在 / precompute 失败的 fallback) | `internal/agent/review.go::ReviewWithPrompt` |
-| ocr 路径 precompute(ocr delegate preview + rule + diffs) | `internal/agent/review_with_ocr.go::precomputeReviewWithOcr` |
-| Go 路径 precompute(detectDefaultBranch + merge-base + 4 git 来源 file enumeration(inlined) + builtin group 合成 + 3 diffs) | `internal/agent/review_with_ocr.go::precomputeReviewWithBuiltin` |
+| ocr 路径 precompute(ocr delegate preview + rule) | `internal/agent/review_with_ocr.go::precomputeReviewWithOcr` |
+| Go 路径 precompute(detectDefaultBranch + merge-base + 4 git 来源 file enumeration(inlined) + builtin group 合成) | `internal/agent/review_with_ocr.go::precomputeReviewWithBuiltin` |
 | `OcrAvailable` 导出函数(`ReviewDispatch` 用) | `internal/agent/review_with_ocr.go::OcrAvailable` |
 | 多 job 并发编排(sem cap 4,N 个 goroutine,各自独立 ctx) | `internal/agent/review_with_ocr.go::delegateReviewMultiJob` |
 | **session 路径的一次性调用**(Start → SendBlocks → drain → Close;两种终态事件都接;permission 自动放行) | `internal/agent/run_session.go::RunSession` / `::DrainSession` |
 | per-group 提示词(context / file list / diff / rule / how-to / schema),按 `g.Pattern` 分 header(ocr / builtin / simplify) | `internal/agent/review_with_ocr.go::assembleGroupPrompt` |
-| 按文件过滤 diff(`git diff -- <files...>`) | `internal/agent/review_with_ocr.go::groupFilteredDiff` |
+| 按文件过滤 diff(`git diff -- <files...>`,未截断) | `internal/agent/review_with_ocr.go::groupFilteredDiff` |
+| per-group diff 字节预算(1 MiB,三段共享 + 按行截断 + 截断日志) | `internal/agent/review_with_ocr.go::groupDiffBudgetBytes` / `::allocateDiffQuotas` / `::fitDiffBody` |
 | `BuiltinPrompt` / `simplifyPrompt` 静态 prompt 模板 | `internal/agent/review.go` |
 | **三相状态机 + per-job 配对缓冲**(Phase 1 buffering → Phase 2 streaming → Phase 3 closed;pendingToolStarts map per-job;Task 跨 job ID 去重;异序到达容错) | `internal/agent/aggregate_sink.go::eventAggregator` |
 | **多 job 结果合并**(纯自然语言拼接 + 部分失败 inline marker,无解析/排序/去重/coverage 聚合) | `internal/agent/review_with_ocr.go::mergeRunResults` |

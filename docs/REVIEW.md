@@ -174,7 +174,7 @@ workspace 为空 / precompute 全失败时,fan-out 退化为 `[simplifyGroup(nil
 - 一个 rule group 的 committed / staged / unstaged 三段 diff 共享 `groupDiffBudgetBytes = 1048576`(1 MiB)预算——约 30% 的 1M token context,余下留给系统 prompt、tool schema、文件清单、agent 输出,以及 agent 被截断后自己去读文件的开销。
 - 预算按各段未截断的大小切分(fair-share):预算像水位一样上涨,每段取 `min(自身大小, 水位)`;比水位小的段保留完整内容,余量让给还差额的段——单段过大不会饿死小段。各段配额之和 ≤ 预算。
 - 超配额的段按**行边界**截断(不切半行),段尾追加 `…(diff truncated: N bytes dropped; read the affected files directly for full context)…`。
-- 配额小到一行都放不下的段整段省略(不带 marker)。
+- 放得下内容、放不下 marker 时,段内容退化为 marker 本身——agent 仍知道这段被截断、该去读哪些文件;配额小到连 marker 都放不下时,整段省略。
 - 被截断的 group 记一条 Info 日志:group pattern / 预算 / 实际 payload 字节数 / 丢弃字节数。
 
 **关键收敛**:1–5 项是纯 Go 工程,两档都做;第 6 项规则匹配是 ocr / builtin 路径的差异点(ocr 拿多 pattern groups,builtin 拿 Go 合成的一个 builtinGroup);第 7 项防单 group 的 prompt 膨胀。ocr 在与不在的区别收敛到"规则匹配"一项的精度(ocr FileFilter vs Go 启发式)。

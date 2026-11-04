@@ -122,6 +122,81 @@ func TestFitDiffBody(t *testing.T) {
 	}
 }
 
+// TestFitDiffBody_MarkerWins verifies the section keeps its recovery
+// pointer when the content and the truncation marker cannot both fit:
+// the body degrades to the marker alone instead of vanishing.
+func TestFitDiffBody_MarkerWins(t *testing.T) {
+	// A single line that nearly fills the allowance: the marker no
+	// longer fits next to it.
+	content := strings.Repeat("x", 181) + "\n" + strings.Repeat("+more\n", 50)
+	body, dropped := fitDiffBody(content, 200)
+	if body == "" {
+		t.Fatal("fitDiffBody dropped the section although the allowance fits the marker")
+	}
+	if !strings.Contains(body, "diff truncated") {
+		t.Errorf("fitDiffBody body carries no truncation marker:\n%q", body)
+	}
+	if dropped != len(content) {
+		t.Errorf("fitDiffBody dropped = %d, want %d", dropped, len(content))
+	}
+	if len(body) > 200 {
+		t.Errorf("fitDiffBody body = %d bytes, want ≤ 200", len(body))
+	}
+
+	// An allowance too small even for the marker omits the section.
+	body, dropped = fitDiffBody(content, 10)
+	if body != "" || dropped != len(content) {
+		t.Errorf("fitDiffBody(tiny allowance) = (%q, %d), want (\"\", %d)", body, dropped, len(content))
+	}
+}
+
+// TestDiffSectionRender_LongLine verifies a section dominated by one
+// very long line still reaches the agent: either the line (when it
+// fits next to the marker) or the marker alone — never silence.
+func TestDiffSectionRender_LongLine(t *testing.T) {
+	tail := strings.Repeat("+more\n", 100)
+	s := diffSection{
+		title:   "Committed — group-filtered",
+		content: strings.Repeat("x", 6000) + "\n" + tail,
+	}
+	head, fence := s.scaffold()
+	marker := len(diffTruncationMarker(len(s.content)))
+	firstLine := len(s.content) - len(tail)
+
+	// The line fits next to the marker: it is kept.
+	quota := len(head) + len(fence) + firstLine + marker + 10
+	block, dropped := s.render(quota)
+	if block == "" {
+		t.Fatal("render dropped a section that fits")
+	}
+	if dropped == 0 {
+		t.Error("render did not report the dropped bytes")
+	}
+	if !strings.Contains(block, "diff truncated") {
+		t.Error("cut section carries no truncation marker")
+	}
+	if len(block) > quota {
+		t.Errorf("rendered block = %d bytes, want ≤ %d", len(block), quota)
+	}
+
+	// The line does not fit next to the marker: the marker alone is the
+	// body — the agent still learns the diff was cut.
+	quota = len(head) + len(fence) + firstLine - 10
+	block, dropped = s.render(quota)
+	if block == "" {
+		t.Fatal("render dropped the section although the quota fits the marker")
+	}
+	if !strings.Contains(block, "diff truncated") {
+		t.Errorf("cut section carries no truncation marker:\n%s", block)
+	}
+	if dropped != len(s.content) {
+		t.Errorf("render dropped = %d, want %d", dropped, len(s.content))
+	}
+	if len(block) > quota {
+		t.Errorf("rendered block = %d bytes, want ≤ %d", len(block), quota)
+	}
+}
+
 // TestAllocateDiffQuotas verifies the group budget is split fairly:
 // a section that fits keeps its full content, an oversized section
 // absorbs the cut, and the quotas never exceed the budget.

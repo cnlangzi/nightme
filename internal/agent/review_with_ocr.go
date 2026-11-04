@@ -708,12 +708,21 @@ type diffSection struct {
 	content string
 }
 
+// scaffold returns the section's framing strings: the "## <title>"
+// header with its opening fence, and the closing fence. Both the
+// budget sizing and the rendering derive from these, so the shape has
+// one source of truth.
+func (s diffSection) scaffold() (string, string) {
+	return "## " + s.title + "\n```\n", "\n```\n"
+}
+
 // overhead returns the byte cost of the section's scaffolding — its
 // "## <title>" header and the code fences around the body. The
 // scaffolding counts against the section's quota, so the rendered
 // blocks together stay inside the group budget.
 func (s diffSection) overhead() int {
-	return len("## ") + len(s.title) + len("\n```\n") + len("\n```\n")
+	head, tail := s.scaffold()
+	return len(head) + len(tail)
 }
 
 // diffSectionSizes returns the untruncated size of each section — its
@@ -734,13 +743,12 @@ func diffSectionSizes(sections []diffSection) []int {
 // render fits the section into its quota. The returned block is the
 // rendered section (its "## <title>" header plus the fenced body); the
 // returned count is the number of content bytes that did not fit. A
-// quota too small for a single line omits the section entirely.
+// quota too small even for the truncation marker omits the section.
 func (s diffSection) render(quota int) (string, int) {
 	if s.content == "" {
 		return "", 0
 	}
-	head := "## " + s.title + "\n```\n"
-	tail := "\n```\n"
+	head, tail := s.scaffold()
 	allowance := quota - len(head) - len(tail)
 	if allowance <= 0 {
 		return "", len(s.content)
@@ -752,31 +760,30 @@ func (s diffSection) render(quota int) (string, int) {
 	return head + body + tail, dropped
 }
 
-// fitDiffBody fits content into allowance bytes. Under the allowance
-// the content is returned verbatim; over it, the longest prefix of
-// whole lines that fits is kept and a truncation marker naming the
-// dropped byte count is appended. An empty body means not even one
-// line fit.
+// fitDiffBody fits content into allowance bytes. Under the allowance the
+// content is returned verbatim; over it, the longest prefix of whole
+// lines that fits alongside the truncation marker is kept and the
+// marker — naming the dropped byte count — is appended.
+//
+// The marker wins when content and marker cannot both fit: a body that
+// is the marker alone still tells the agent the diff was cut and which
+// files to read, which beats dropping the section silently. An empty
+// body means the allowance is too small even for the marker.
 func fitDiffBody(content string, allowance int) (string, int) {
 	if len(content) <= allowance {
 		return content, 0
 	}
-	kept, dropped := truncateDiffToBytes(content, allowance)
-	for kept != "" {
-		marker := diffTruncationMarker(dropped)
-		if len(kept)+len(marker) <= allowance {
-			return kept + marker, dropped
-		}
-		// The marker does not fit next to the kept lines — drop the
-		// last line and retry with the smaller dropped count.
-		idx := strings.LastIndexByte(kept[:len(kept)-1], '\n')
-		if idx < 0 {
-			break
-		}
-		kept = kept[:idx+1]
-		dropped = len(content) - len(kept)
+	// Reserve the widest marker the section can carry: the dropped byte
+	// count never exceeds len(content), so its digit count is bounded.
+	reserve := len(diffTruncationMarker(len(content)))
+	if reserve > allowance {
+		return "", len(content)
 	}
-	return "", len(content)
+	kept, dropped := truncateDiffToBytes(content, allowance-reserve)
+	if kept == "" {
+		return diffTruncationMarker(len(content)), len(content)
+	}
+	return kept + diffTruncationMarker(dropped), dropped
 }
 
 // reviewHowTo is the language-agnostic review methodology, shared by

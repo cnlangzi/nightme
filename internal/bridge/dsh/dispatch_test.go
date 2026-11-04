@@ -182,7 +182,7 @@ func TestDispatcher_LookupMissesAfterRegistrationRemoval(t *testing.T) {
 // request/header(seq=3),bridge 必须把它们当 session event 接收,
 // 否则 isSessionEventType 会把它们当 unknown method 丢弃并打
 // misleading warn,而且 tr.active 永远起不来 → handleTurnEnd 不
-// emit EventAgentResult → drainForRunResult 收不到 result。
+// emit EventAgentResult → agent.DrainSession 收不到 result。
 //
 // 这两个 type 都路由到 handleDebugOnly(不产 AgentEvent),所以
 // 断言是"dispatcher 不 panic 且不产 event",证明 allow-list

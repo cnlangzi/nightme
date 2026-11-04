@@ -1287,8 +1287,8 @@ type runOnceConfig struct {
 //     the caller's job. A sink that only wants text can match on
 //     ev.Kind == EventAgentText.
 //   - One-shot flows (RunOnce / Review) do not await sink response.
-//     Sink is observational only. Permission decisions on the dsh
-//     RunOnce path are made by drainForRunResult (auto-Allow once),
+//     Sink is observational only. Permission decisions on the one-shot
+//     session path are made by the drain itself (auto-Allow once),
 //     not via Permission.ResponseCh through the sink.
 func WithEventSink(sink func(AgentEvent)) RunOnceOption {
 	return func(c *runOnceConfig) { c.OnEvent = sink }

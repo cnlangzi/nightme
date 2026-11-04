@@ -24,7 +24,7 @@ import (
 // Exercises the full RunOnce path:
 //   - Starter.Start → host.EnsureSharedHost (lazy spawn) → handshake →
 //     session.create → EventAgentReady
-//   - drainForRunResult → SendBlocks → session.prompt →
+//   - agent.DrainSession → SendBlocks → session.prompt →
 //     EventAgentResult (or Done) → RunResult
 //   - defer a.Close() → workspace.archiveSession
 func TestE2E_RunOnce_RealDSH(t *testing.T) {

@@ -21,7 +21,8 @@
 // are involved. simplify is one such dimension.
 //
 // Architecture invariants:
-//   - RunOnce is the isolation mechanism (fresh subprocess, own context).
+//   - The agent session is the isolation mechanism (fresh process /
+//     session, own context).
 //   - FormatReviewMessage wraps findings before injection into AS + channel.
 //   - pty/bash returns ErrReviewNotSupported.
 //   - timeouts.Review (30 min) bounds the whole review.
@@ -70,7 +71,7 @@ func FormatReviewMessage(workspace, agentName, review string) string {
 // BuiltinPrompt is the nightme-owned canonical review prompt. Used by:
 //   - ReviewWithPrompt's primary group (as the group's Rule text)
 //   - ReviewWithOcr's fallback path when ocr produces no rule groups
-//   - ReviewWithPrompt's single-RunOnce fallback when workspace is empty
+//   - ReviewWithPrompt's single-group fallback when workspace is empty
 //
 // ~70 lines of markdown, structured as Summary / Findings / Suggestions
 // with severity tags. Drawn from Claude Code /code-review plugin shape
@@ -168,7 +169,7 @@ Concrete next steps, ordered by impact. One bullet per suggestion. Don't restate
 //
 // Wired into both ReviewWithOcr and ReviewWithPrompt as a parallel
 // reviewGroup (Pattern = patternSimplify), so it runs as a separate
-// RunOnce concurrently with the main dimension(s).
+// session turn concurrently with the main dimension(s).
 const simplifyPrompt = `# Simplify review lens (nightme-owned, complementary)
 
 This lens reviews the diff for **simplification opportunities** that are orthogonal to correctness/performance/security findings: code that works but can be made simpler, smaller, or more idiomatic without changing behavior.
@@ -261,7 +262,7 @@ func ReviewWithPrompt(ctx context.Context, s Starter, cfg StartConfig, opts ...R
 	// Short-circuit on empty diff: zero reviewable + zero untracked
 	// means precompute produced no files for any goroutine to slice.
 	// Without this guard, fan-out collapses to [simplifyGroup(nil)]
-	// — one RunOnce that ships a prompt with empty file context to
+	// — one session turn that ships a prompt with empty file context to
 	// the agent, which can only answer "0 covered, 0 findings".
 	// Returning ErrNoDiff lets the /review dispatcher surface a
 	// clean inline message instead of burning a dsh session spawn.

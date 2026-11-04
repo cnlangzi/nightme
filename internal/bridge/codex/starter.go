@@ -111,8 +111,8 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 // Review implements /review for codex via the shared
 // agent.ReviewDispatch — same uniform path every other bridge
 // uses (codex no longer invokes `codex review --base ...`
-// directly; codex's print-mode one-shot receives the nightme
-// BuiltinPrompt and outputs the structured review).
+// directly; the review prompt reaches codex over the session path
+// and codex outputs the structured review).
 //
 // If the user wants codex's built-in `codex review` subcommand
 // (review-specific rubric + structured output), they send the

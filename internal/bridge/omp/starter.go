@@ -89,9 +89,9 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 // As with the other print-mode bridges (pi / claudecode /
 // codex / opencode / copilot), the rationale is to bypass the
 // long-lived RPC handshake for callers that only need a
-// single turn (/gtw commit, buildAgentPrompt, /review via
-// RunOnce). RunOnce spawns, drains the NDJSON event stream
-// through the same translator the RPC path uses, and exits.
+// single turn (/gtw commit, buildAgentPrompt). RunOnce
+// spawns, drains the NDJSON event stream through the same
+// translator the RPC path uses, and exits.
 func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	result, err := runPrintMode(ctx, s, cfg, blocks, opts...)
 	if err != nil {
@@ -102,8 +102,8 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 
 // Review implements /review for omp: delegate to the shared
 // agent.ReviewDispatch. omp has no native review subcommand,
-// so /review runs the Go-precompute-enhanced prompt via
-// RunOnce.
+// so /review runs the Go-precompute-enhanced prompt on the
+// agent's session path.
 func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	return agent.ReviewDispatch(ctx, s, cfg, opts...)
 }

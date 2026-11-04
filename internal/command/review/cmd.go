@@ -1,7 +1,8 @@
 // Package review implements the `/review` slash command.
 //
-// /review runs a code review in a fresh RunOnce subprocess
-// (independent context window, isolated from the main chat).
+// /review runs a code review on the agent's session path — one
+// session per rule group (independent context window, isolated from
+// the main chat).
 // The captured findings are injected back into the main chat
 // session as a user message.
 //
@@ -13,19 +14,20 @@
 //     blocked. Multiple /review commands can run in parallel.
 //   - The goroutine uses cs.Context() as its parent — when
 //     the chat session closes (e.g. /close), the context is
-//     cancelled, RunOnce's subprocess is killed, the goroutine
+//     cancelled, the review sessions are closed, the goroutine
 //     exits cleanly. No orphan work.
-//   - RunOnce itself is the isolation: review runs in a
-//     fresh subprocess with its own context window. Main
+//   - The session is the isolation: review runs in
+//     fresh sessions with their own context window. Main
 //     chat's token budget is NOT polluted by review
 //     reasoning (which can burn tens of thousands of tokens).
 //   - Zero qualifiers: /review takes no args. Extra args are
 //     rejected inline (matches /cwd / /think / /use).
 //   - The bridge's Starter.Review method calls agent.Review
-//     (uses s.RunOnce internally). Most coding bridges
-//     delegate; pty/bash returns agent.ErrReviewNotSupported —
-//     which the goroutine surfaces via cs.Emitter().Send() as
-//     a friendly inline reply, not silent failure.
+//     (uses the shared session helper internally). Most coding
+//     bridges delegate; pty/bash returns
+//     agent.ErrReviewNotSupported — which the goroutine surfaces
+//     via cs.Emitter().Send() as a friendly inline reply, not
+//     silent failure.
 //   - Fix is conversational: after the review appears in chat,
 //     the user types "fix the blockers" and the main agent
 //     uses its native Edit tools. /review does NOT auto-apply.
@@ -92,7 +94,7 @@ type Spec struct {
 	// Agent overrides the review runner. Empty means "use the
 	// current selected AS's agent" (the default). When set, the
 	// dispatcher looks up agent.Builtins.Get(Agent) and uses that
-	// Starter's RunOnce to run the review; findings are still
+	// Starter's session to run the review; findings are still
 	// injected to the current AS (as.SendBlocks) — only the
 	// runner differs.
 	Agent string
@@ -248,20 +250,19 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 
 	// v7: /review is fully async. Handle returns immediately
 	// after launching a goroutine that does the actual review
-	// work (RunOnce subprocess + distribute findings). The
+	// work (review sessions + distribute findings). The
 	// dispatch worker is freed within microseconds; the chat
 	// session's readpump continues processing events unblocked.
 	//
 	// Lifecycle:
 	//   - The goroutine uses cs.Context() as its parent — when
 	//     the chat session closes (e.g. /close), the context is
-	//     cancelled, RunOnce's subprocess is killed, and the
+	//     cancelled, the review sessions are closed, and the
 	//     goroutine exits cleanly. No orphan work.
 	//   - revCtx wraps cs.Context() with timeouts.Review (30 min),
-	//     same as /gtw commit's Agent timeout. RunOnce's
-	//     subprocess boundary makes this safe: the deadline
-	//     only kills the review subprocess; the main chat is
-	//     untouched.
+	//     same as /gtw commit's Agent timeout. The session
+	//     boundary makes this safe: the deadline only closes the
+	//     review sessions; the main chat is untouched.
 	//
 	// v9 distribution: on success, the bridge returns the raw
 	// review text. The goroutine wraps it in FormatReviewMessage

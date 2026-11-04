@@ -187,8 +187,8 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 // Review implements /review for the claudecode bridge via the
 // shared agent.ReviewDispatch — same uniform path every other
 // bridge uses (claudecode no longer invokes `claude -p code-review`
-// directly; claude's print-mode one-shot receives the nightme
-// BuiltinPrompt and outputs the structured review).
+// directly; the review prompt reaches claude over the session path
+// and claude outputs the structured review).
 //
 // If the user wants Claude Code's built-in `code-review` slash
 // command (a multi-agent review pipeline tuned for the task),

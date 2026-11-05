@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -263,11 +264,18 @@ func TestIntegration_EnsureGitignoreOnRealWorktree(t *testing.T) {
 // Returns the repo root (absolute) path.
 func initTempRepo(t *testing.T) string {
 	t.Helper()
+	return initRepoIn(t, t.TempDir())
+}
+
+// initRepoIn creates a throwaway git repo with one initial commit
+// in dir, so `git worktree add` has a valid base. Returns the repo
+// root (absolute) path.
+func initRepoIn(t *testing.T, dir string) string {
+	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not on PATH; skipping real-git integration test")
 	}
 
-	dir := t.TempDir()
 	mustGit(t, dir, "init", "-q", "-b", "main")
 	mustGit(t, dir, "config", "user.email", "test@example.com")
 	mustGit(t, dir, "config", "user.name", "Test")
@@ -286,6 +294,25 @@ func initTempRepo(t *testing.T) string {
 	}
 	mustGit(t, dir, "add", "README.md")
 	mustGit(t, dir, "commit", "-q", "-m", "init")
+	return dir
+}
+
+// shortTempDir returns a temp directory with a SHORT name.
+//
+// t.TempDir() names the directory after the test, which makes the
+// path long enough to break git's worktree admin-path budget on
+// Windows — see TestIntegration_LongLocalBranchNameIsCapped for
+// the numbers. A real checkout lives at a comparable depth.
+//
+// Cleanup is best-effort: a leftover temp dir must not fail a test
+// that already passed.
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "gtw")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	return dir
 }
 
@@ -453,5 +480,83 @@ func TestIntegration_ShortFlagNForLocalFix(t *testing.T) {
 	}
 	if _, err := os.Stat(wt); !os.IsNotExist(err) {
 		t.Errorf("worktree still on disk after close: %v", err)
+	}
+}
+
+// TestIntegration_LongLocalBranchNameIsCapped drives the full
+// /gtw fix local-mode flow with a name far past the 255 bytes a
+// filesystem path component holds. The branch must be capped, and
+// the worktree must be created under the capped name — the same
+// name the command's quick validation predicts, so the two
+// derivations cannot drift apart.
+//
+// The repo lives in a SHORT directory on purpose. Git keeps a
+// worktree's admin data in <repo>/.git/worktrees/<branch> and
+// refuses to start when that path is longer than PATH_MAX - 40
+// characters (220 on Windows, where PATH_MAX is 260): "fatal:
+// '$GIT_DIR' too big". A 128-byte branch spends 128 of them plus
+// the 15 characters of ".git\worktrees\", leaving 77 for the
+// repository path — plenty for a real checkout, not enough for a
+// temp directory named after a long test.
+func TestIntegration_LongLocalBranchNameIsCapped(t *testing.T) {
+	repoRoot := initRepoIn(t, shortTempDir(t))
+
+	ch := &recordingCh{}
+	cs, _ := chatsession.New("chat-int-longname", "test-agent")
+	cs.WithEmitter(ch)
+	if err := cs.SetSelectedCwd(repoRoot); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
+	}
+	deps := HandlerDeps{
+		Git:                      ExecGitRunner{},
+		Now:                      func() time.Time { return time.Date(2026, 8, 8, 14, 0, 0, 0, time.UTC) },
+		SkipRefreshDefaultBranch: true,
+	}
+
+	raw := strings.Repeat("long-branch-name-", 20)
+
+	// The prediction the worktree path is built from — the same
+	// derivation the command's quick validation runs.
+	wantBranch, err := DeriveBranchFromName(raw)
+	if err != nil {
+		t.Fatalf("DeriveBranchFromName: %v", err)
+	}
+	if len(wantBranch) > maxBranchBytes {
+		t.Fatalf("derived branch is %d bytes, want <= %d", len(wantBranch), maxBranchBytes)
+	}
+	// Git refuses to start when the worktree's admin path
+	// (<repo>/.git/worktrees/<branch>) is longer than PATH_MAX - 40
+	// characters — 220 on Windows, where PATH_MAX is 260. Say so
+	// plainly instead of letting git fail with its own opaque
+	// "fatal: '$GIT_DIR' too big".
+	if runtime.GOOS == "windows" && len(filepath.Join(repoRoot, ".git", "worktrees", wantBranch)) > 220 {
+		t.Skipf("repo path %q is too long for git's 220-char admin-path budget on Windows", repoRoot)
+	}
+
+	res, err := RunFix(
+		context.Background(), ModeLocal, cs, deps,
+		cs.ChatID, "msg-int-longname", []string{raw}, false,
+	)
+	if err != nil {
+		t.Fatalf("RunFix: %v", err)
+	}
+	if !res.Consumed {
+		t.Errorf("Result.Consumed = false")
+	}
+
+	// The worktree exists under the capped branch name.
+	wt := WorktreePath(repoRoot, wantBranch)
+	if _, err := os.Stat(wt); err != nil {
+		t.Fatalf("worktree %s not created: %v\npath len: %d\nreply:\n%s",
+			wt, err, len(wt), ch.lastText())
+	}
+	// Git created that branch, not the raw name.
+	out, _ := mustGitOut(t, repoRoot, "branch", "--list", wantBranch)
+	if !strings.Contains(out, wantBranch) {
+		t.Errorf("branch %q not created; `git branch --list` = %q", wantBranch, out)
+	}
+	// The reply names the same branch.
+	if last := ch.lastText(); !strings.Contains(last, wantBranch) {
+		t.Errorf("reply does not mention branch %q:\n%s", wantBranch, last)
 	}
 }

@@ -154,6 +154,28 @@ func TestPreflightWorktreeCreate_ParentUnwritable(t *testing.T) {
 	}
 }
 
+// TestPreflightWorktreeCreate_RejectsOverLongBranch covers the
+// length guard: a branch name that does not fit a single path
+// component is rejected before any git command runs, so the user
+// gets a readable message instead of git's "file name too long"
+// from the middle of `git worktree add`.
+func TestPreflightWorktreeCreate_RejectsOverLongBranch(t *testing.T) {
+	tmp := t.TempDir()
+	branch := strings.Repeat("b", maxPathComponentBytes+1)
+
+	git := &recordingGit{}
+	err := PreflightWorktreeCreate(context.Background(), tmp, branch, filepath.Join(tmp, "wt"), git)
+	if err == nil {
+		t.Fatalf("expected error for a %d-byte branch, got nil", len(branch))
+	}
+	if !strings.Contains(err.Error(), fmt.Sprintf("%d bytes", len(branch))) {
+		t.Errorf("error should name the branch byte length, got %q", err.Error())
+	}
+	if len(git.calls) != 0 {
+		t.Errorf("preflight issued git commands before rejecting: %v", git.calls)
+	}
+}
+
 // fakeGit is a minimal GitRunner for tests that don't need to
 // exercise the worktree-list path. Returns empty for any
 // show-ref / worktree-list query.

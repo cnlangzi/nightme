@@ -240,6 +240,88 @@ func TestDelegateReviewMultiJob_UsesSessionPath(t *testing.T) {
 	}
 }
 
+// TestDelegateReviewMultiJob_ReportsPerGroupOutcomes: the observer
+// sees one report per group — the group's pattern, the files it
+// covered, the session id its session ran under, and the error that
+// ended it.
+//
+// A failed group reports its session id too: that is what makes an
+// unfinished group resumable (/review --continue reopens it).
+func TestDelegateReviewMultiJob_ReportsPerGroupOutcomes(t *testing.T) {
+	groups := twoGroups()
+	pre := reviewContext{
+		workspace: "/nonexistent-repo",
+		ocrGroups: groups,
+	}
+	fs := &sessionFakeStarter{
+		name: "test-agent",
+		newDriver: func(StartConfig) *sessionFakeDriver {
+			return newSessionFakeDriver(func(blocks []ContentBlock) []AgentEvent {
+				prompt := ""
+				if len(blocks) > 0 {
+					prompt = blocks[0].Text
+				}
+				if strings.Contains(prompt, "**/*.ts") {
+					return []AgentEvent{
+						sessionReadyEvent("sess-ts", "model"),
+						{Kind: EventAgentError, Err: errBoom},
+					}
+				}
+				return groupReply("go findings")
+			})
+		},
+	}
+
+	var mu sync.Mutex
+	var reports []ReviewJob
+	var errs []error
+	observer := func(job ReviewJob, err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		reports = append(reports, job)
+		errs = append(errs, err)
+	}
+
+	if _, err := delegateReviewMultiJob(context.Background(), fs, StartConfig{Workspace: pre.workspace},
+		pre, pre.ocrGroups, WithReviewJobObserver(observer)); err != nil {
+		t.Fatalf("delegateReviewMultiJob: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(reports) != len(groups) {
+		t.Fatalf("observer saw %d reports, want %d (one per group)", len(reports), len(groups))
+	}
+	byPattern := map[string]int{}
+	for i, r := range reports {
+		byPattern[r.Pattern] = i
+	}
+	for _, g := range groups {
+		i, ok := byPattern[g.Pattern]
+		if !ok {
+			t.Errorf("no report for pattern %q; got %+v", g.Pattern, reports)
+			continue
+		}
+		if len(reports[i].Files) != len(g.Files) {
+			t.Errorf("report for %q carries files %v, want %v", g.Pattern, reports[i].Files, g.Files)
+		}
+	}
+	tsIdx, ok := byPattern["**/*.ts"]
+	if !ok {
+		t.Fatal("no report for the failing group")
+	}
+	if errs[tsIdx] == nil {
+		t.Error("the failed group reported no error")
+	}
+	if reports[tsIdx].SessionID != "sess-ts" {
+		t.Errorf("the failed group reported session id %q, want %q", reports[tsIdx].SessionID, "sess-ts")
+	}
+	goIdx := byPattern["**/*.go"]
+	if errs[goIdx] != nil {
+		t.Errorf("the successful group reported error %v", errs[goIdx])
+	}
+}
+
 // groupReply is the scripted reply of a fake session driver: a
 // startup Ready followed by the turn's result.
 func groupReply(text string) []AgentEvent {

@@ -103,11 +103,55 @@ func delegateReviewMultiJob(
 	groups []reviewGroup,
 	opts ...RunOnceOption,
 ) (RunResult, error) {
+	run := func(ctx context.Context, groupIdx int, cfg StartConfig, runOpts []RunOnceOption) (RunResult, error) {
+		prompt := assembleGroupPrompt(ctx, pre, &groups[groupIdx])
+		if prompt == "" {
+			prompt = BuiltinPrompt
+		}
+		return RunSession(ctx, s, cfg, []ContentBlock{{
+			Type: ContentText,
+			Text: prompt,
+		}}, runOpts...)
+	}
+	return runReviewGroups(ctx, s, cfg, groups, opts, run)
+}
+
+// reviewGroupRunner runs one group of a review fan-out.
+//
+// The core owns the goroutines, the concurrency cap, the event
+// aggregation and the merge; the runner owns what the group's turn
+// actually is — a fresh session carrying the group's prompt (a
+// review) or a reopened session carrying a resume text (a
+// continuation).
+type reviewGroupRunner func(ctx context.Context, groupIdx int, cfg StartConfig, opts []RunOnceOption) (RunResult, error)
+
+// runReviewGroups is the fan-out core shared by a fresh-session
+// review and a resume run: one goroutine per group, concurrency
+// capped at maxConcurrentReviewJobs, every group's events folded
+// into one outer lifecycle by the eventAggregator, and the per-group
+// results merged by mergeRunResults.
+//
+// opts carries the caller's outer sink (WithEventSink) and the
+// per-group observer (WithReviewJobObserver). The outer sink is
+// replaced per group by the aggregator's wrapped sink; the observer
+// is invoked once per group with that group's identity and the error
+// that ended it.
+//
+// A failed group reports the session id its session ran under, so the
+// caller can reopen that session later (see ResumeSession).
+func runReviewGroups(
+	ctx context.Context,
+	s Starter,
+	cfg StartConfig,
+	groups []reviewGroup,
+	opts []RunOnceOption,
+	run reviewGroupRunner,
+) (RunResult, error) {
 	// Extract the outer sink (if any) and rebuild per-job opts with
 	// the aggregator's per-job sink replacing it. ParseRunOnceOptions
-	// is the single source of truth for option resolution; today the
-	// only RunOnceOption is WithEventSink, so this round-trip is
-	// lossless. Future options would need to be re-threaded here.
+	// is the single source of truth for option resolution; the
+	// per-group observer is consumed here, not forwarded to the
+	// per-group turn.
 	cfgOpts := ParseRunOnceOptions(opts)
 	var agg *eventAggregator
 	if cfgOpts.OnEvent != nil {
@@ -139,22 +183,21 @@ func delegateReviewMultiJob(
 			}
 			defer func() { <-sem }()
 
-			prompt := assembleGroupPrompt(ctx, pre, &groups[i])
-			if prompt == "" {
-				prompt = BuiltinPrompt
-			}
-
 			var runOpts []RunOnceOption
 			if agg != nil {
 				runOpts = []RunOnceOption{WithEventSink(agg.wrapJob(fmt.Sprintf("group-%d", i+1)))}
 			}
 
-			res, err := RunSession(ctx, s, cfg, []ContentBlock{{
-				Type: ContentText,
-				Text: prompt,
-			}}, runOpts...)
+			res, err := run(ctx, i, cfg, runOpts)
 			results[i] = res
 			errs[i] = err
+			if cfgOpts.OnReviewJob != nil {
+				cfgOpts.OnReviewJob(ReviewJob{
+					Pattern:   groups[i].Pattern,
+					Files:     groups[i].Files,
+					SessionID: res.SessionID,
+				}, err)
+			}
 		}(i)
 	}
 	wg.Wait()

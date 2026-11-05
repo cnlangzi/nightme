@@ -653,10 +653,25 @@ type StartConfig struct {
 
 	// SessionID is the agent's own session id, captured from the
 	// previous run's init event (e.g. Claude Code's
-	// `system/init.session_id`). Bridges that support resume (Claude
-	// Code) translate this into their native flag (e.g. `--resume
-	// <id>`); bridges that don't (ACP / Pi / PTY) silently ignore it.
-	// Empty means "no --resume; start a fresh session".
+	// `system/init.session_id`). A non-empty value asks the bridge to
+	// reopen that session instead of opening a fresh one.
+	//
+	// The bridges that consume it:
+	//   - claudecode: `--resume <id>`
+	//   - codex:      `resume_id`
+	//   - omp:        `--resume <id>`
+	//   - pi:         `--session-id <id>`
+	//   - dsh:        the session handshake resumes the named session
+	//   - opencode / copilot / cursor: forwarded to the generic ACP
+	//     bridge, which reopens via `session/resume` or `session/load`
+	//
+	// PTY does not surface it over the wire — it synthesizes a fresh
+	// session id. A bridge that refuses the requested resume (the id
+	// no longer exists on the agent's side) fails with
+	// ErrResumeUnhealthy rather than silently opening a fresh
+	// session.
+	//
+	// Empty means "no resume; start a fresh session".
 	SessionID string
 }
 
@@ -1246,8 +1261,9 @@ type Starter interface {
 // silently ignore it (the option is kept in the package-private
 // config struct, not on the public Starter API).
 //
-// Today only WithEventSink is defined. The pattern is open for
-// future options (timeout overrides, abort hooks, etc.).
+// Today WithEventSink and WithReviewJobObserver are defined. The
+// pattern is open for future options (timeout overrides, abort hooks,
+// etc.).
 type RunOnceOption func(*runOnceConfig)
 
 // runOnceConfig is the per-call config resolved from RunOnceOption
@@ -1262,12 +1278,34 @@ type RunOnceOption func(*runOnceConfig)
 //     parser / drain loop. Empty (nil) means "no observer; behave
 //     as before this option existed".
 //
+//   - OnReviewJob (observer): called once per group of a review
+//     fan-out with the group's identity and the error that ended it.
+//     Only the review fan-out reads it.
+//
 // The struct is package-private so bridges don't accidentally grow
 // their own public RunOnceOption type. The "Options" pattern is
 // exposed via exported functional helpers (e.g. WithEventSink)
 // that callers compose freely.
 type runOnceConfig struct {
 	OnEvent func(AgentEvent)
+
+	// OnReviewJob (observer): called once per group of a review
+	// fan-out with the group's identity and the error that ended it
+	// (nil on success). Set by WithReviewJobObserver; the fan-out
+	// core invokes it on the group's own goroutine.
+	OnReviewJob func(ReviewJob, error)
+}
+
+// ReviewJob identifies one group of a review fan-out.
+type ReviewJob struct {
+	// Pattern is the group's pattern — the glob of an ocr rule
+	// group, or the builtin / simplify sentinel.
+	Pattern string
+	// Files are the files the group covered.
+	Files []string
+	// SessionID is the agent session id of the group's session.
+	// Empty when the group never reached the agent's Ready event.
+	SessionID string
 }
 
 // WithEventSink returns a RunOnceOption that installs sink as the
@@ -1292,6 +1330,23 @@ type runOnceConfig struct {
 //     not via Permission.ResponseCh through the sink.
 func WithEventSink(sink func(AgentEvent)) RunOnceOption {
 	return func(c *runOnceConfig) { c.OnEvent = sink }
+}
+
+// WithReviewJobObserver registers a callback that receives one
+// ReviewJob and one error per group of a review run.
+//
+// The callback runs on the group's own goroutine and must not block.
+//
+// The observer is how a caller learns the per-group outcome of a
+// review fan-out: the group's pattern, the files it covered, the
+// agent session id its session ran under, and the error that ended
+// it (nil on success). The session id rides along on a failed group
+// too — that is what makes an unfinished group resumable.
+//
+// Only the review fan-out invokes the observer; a plain RunOnce /
+// RunSession call ignores it.
+func WithReviewJobObserver(fn func(ReviewJob, error)) RunOnceOption {
+	return func(c *runOnceConfig) { c.OnReviewJob = fn }
 }
 
 // ParseRunOnceOptions resolves a variadic RunOnceOption slice into

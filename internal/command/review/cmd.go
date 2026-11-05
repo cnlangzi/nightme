@@ -29,6 +29,12 @@
 //     an agent — the "no active agent" error.
 //   - `-g / --global` persists the runner as `review.agent` in
 //     ~/.nightme/config.yaml; `--unset` removes it again.
+//   - `-c / --continue` resumes the groups of the last review in
+//     this chat that did NOT complete: it reopens their agent
+//     sessions (the session id recorded with the run), sends them
+//     the text "continue", and delivers the merged result exactly
+//     like a review's. The resume state lives in the factory's
+//     memory, keyed by chat id — nothing is written to disk.
 //   - The bridge's Starter.Review method calls agent.Review
 //     (uses the shared session helper internally). Most coding
 //     bridges delegate; pty/bash returns
@@ -46,6 +52,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/agentsession"
@@ -62,7 +69,17 @@ import (
 // Holds *chatsession.Manager directly (mirrors /cwd, /think, /use)
 // so the runtime can construct it via the package init() without
 // pulling in extra runtime deps.
-type Factory struct{}
+//
+// The factory also holds the resume state of the last review per
+// chat (see record.go) and the count of the reviews currently
+// running per chat. The factory is built once per daemon process, so
+// the state lives for the lifetime of the process and is lost on
+// restart.
+type Factory struct {
+	mu      sync.Mutex
+	records map[string]reviewRecord
+	running map[string]int
+}
 
 // init self-registers the /review command. Each command package's
 // init() calls RegisterBuilder; the runtime orchestrator calls
@@ -77,7 +94,10 @@ func init() {
 // receive a *chatsession.Manager — cs comes from the dispatcher
 // parameter at Handle time.
 func NewFactory() *Factory {
-	return &Factory{}
+	return &Factory{
+		records: make(map[string]reviewRecord),
+		running: make(map[string]int),
+	}
 }
 
 // Spec implements command.SlashCommandFactory.
@@ -92,7 +112,9 @@ func (f *Factory) Spec() command.Spec {
 /review -a codex            # short form of --agent
 /review -a codex -g         # also persist codex as the global review agent
                                  #   (-g / --global) for later /review runs
-/review -g --unset          # remove the persisted global review agent`,
+/review -g --unset          # remove the persisted global review agent
+/review -c                  # resume the groups of the last review in this chat
+                                 #   that failed (sends "continue" to them)`,
 		Category: "workspace",
 	}
 }
@@ -102,13 +124,15 @@ func (f *Factory) Spec() command.Spec {
 // contract for the whole /<cmd> surface.
 var reviewCmdSpec = command.CmdSpec{
 	Name:  "/review",
-	Usage: "/review [-a|--agent <name>] [-g|--global] [--unset]",
+	Usage: "/review [-a|--agent <name>] [-g|--global] [--unset] [-c|--continue]",
 	Flags: map[string]command.FlagSpec{
-		"-a":       {Name: "agent", TakesValue: true},
-		"--agent":  {Name: "agent", TakesValue: true},
-		"-g":       {Name: "global"},
-		"--global": {Name: "global"},
-		"--unset":  {Name: "unset"},
+		"-a":         {Name: "agent", TakesValue: true},
+		"--agent":    {Name: "agent", TakesValue: true},
+		"-g":         {Name: "global"},
+		"--global":   {Name: "global"},
+		"--unset":    {Name: "unset"},
+		"-c":         {Name: "continue"},
+		"--continue": {Name: "continue"},
 	},
 	MinArgs: 0,
 	MaxArgs: 0,
@@ -118,8 +142,10 @@ var reviewCmdSpec = command.CmdSpec{
 //
 // Agent picks the review runner for this invocation; Global
 // persists that runner as the machine-wide default;
-// Unset removes the persisted default. The findings always land in
-// the chat session's current AS — only the runner differs.
+// Unset removes the persisted default; Continue resumes the groups
+// of the last review in this chat that did not complete. The
+// findings always land in the chat session's current AS — only the
+// runner differs.
 type Spec struct {
 	// Agent overrides the review runner. Empty means "use the
 	// global scope, then the current selected AS's agent". When
@@ -136,6 +162,12 @@ type Spec struct {
 	// Unset removes the persisted global review agent. It starts
 	// no review.
 	Unset bool
+
+	// Continue resumes the review groups of the last review in this
+	// chat that failed. The runner is the agent recorded with that
+	// run — a session belongs to one agent and cannot be moved to
+	// another — so the four-tier runner resolution does not apply.
+	Continue bool
 }
 
 // parseReviewArgs extracts /review's flags from argv. Returns an
@@ -151,9 +183,10 @@ func parseReviewArgs(argv []string) (Spec, error) {
 		return Spec{}, err
 	}
 	spec := Spec{
-		Agent:  strings.TrimSpace(parsed.Value("agent")),
-		Global: parsed.Bool("global"),
-		Unset:  parsed.Bool("unset"),
+		Agent:    strings.TrimSpace(parsed.Value("agent")),
+		Global:   parsed.Bool("global"),
+		Unset:    parsed.Bool("unset"),
+		Continue: parsed.Bool("continue"),
 	}
 	// An empty agent name is a mistake, not a request for the
 	// default — "not given" and "given as empty" must stay
@@ -167,8 +200,18 @@ func parseReviewArgs(argv []string) (Spec, error) {
 // validateReviewFlags rejects the flag combinations /review cannot
 // act on. Each combination gets its own message so the user knows
 // which flag to fix.
+//
+// The --continue checks come first: --continue resumes an existing
+// runner, so the flags that choose or persist a runner have nothing
+// to add to it.
 func validateReviewFlags(spec Spec) error {
 	switch {
+	case spec.Continue && spec.Agent != "":
+		return errors.New("--continue and --agent are mutually exclusive")
+	case spec.Continue && spec.Global:
+		return errors.New("--continue and --global are mutually exclusive")
+	case spec.Continue && spec.Unset:
+		return errors.New("--continue and --unset are mutually exclusive")
 	case spec.Unset && spec.Agent != "":
 		return errors.New("--unset and --agent are mutually exclusive")
 	case spec.Unset && !spec.Global:
@@ -214,15 +257,8 @@ func resolveRunner(cliAgent, cfgAgent, sessionAgent string) (name string, warn s
 //     `--unset` removes it. The write happens before the chat
 //     session is consulted — the persisted setting is machine-wide
 //     and does not depend on whether this chat has a workspace.
-//  3. Resolve the current chat's selected AgentSession.
-//  4. Resolve the runner: -a / --agent → global scope → the chat
-//     session's agent.
-//  5. Look up the corresponding Starter from agent.Builtins (it's
-//     keyed by agent name).
-//  6. Build an agent.StartConfig with the chat session's
-//     selected cwd.
-//  7. Delegate to starter.Review — the bridge's Starter owns the
-//     actual prompt invocation (most call agent.Review).
+//  3. Dispatch: `--continue` resumes the last review in this chat,
+//     everything else starts a new one.
 //
 // Returns Consumed=true. The review itself appears asynchronously
 // through the chat session's normal event pipeline (readpump →
@@ -233,8 +269,9 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	mgr *chatsession.Manager, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 
 	// Parse the flags. /review supports --agent/-a (the runner of
-	// this invocation), -g/--global (persist that runner) and
-	// --unset (remove the persisted runner). Findings always land
+	// this invocation), -g/--global (persist that runner),
+	// --unset (remove the persisted runner) and -c/--continue
+	// (resume the last review in this chat). Findings always land
 	// in the current selected AS (via as.SendBlocks in the
 	// goroutine below). Multiple /review commands in parallel run
 	// on different agents and feed back into the same AS, matching
@@ -262,6 +299,27 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	if done {
 		return command.Reply(ctx, rt, strings.Join(notices, "\n")), nil
 	}
+
+	if spec.Continue {
+		return f.handleContinue(ctx, rt, cs, input, notices)
+	}
+	return f.handleReview(ctx, rt, cs, input, spec, notices)
+}
+
+// handleReview starts a new review.
+//
+// Steps:
+//  1. Resolve the current chat's selected AgentSession.
+//  2. Resolve the runner: -a / --agent → global scope → the chat
+//     session's agent.
+//  3. Look up the corresponding Starter from agent.Builtins (it's
+//     keyed by agent name).
+//  4. Build an agent.StartConfig with the chat session's
+//     selected cwd.
+//  5. Delegate to starter.Review — the bridge's Starter owns the
+//     actual prompt invocation (most call agent.Review).
+func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
+	cs *chatsession.ChatSession, input command.SlashInput, spec Spec, notices []string) (*command.SlashOutput, error) {
 
 	// Resolve the inject target. /review always injects findings
 	// back into the chat session's active AS (the
@@ -381,9 +439,32 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	// On failure (incl. ErrReviewNotSupported), only the channel
 	// gets a reply — no Inject, since there's no findings to act
 	// on.
+	//
+	// The chat is marked as running a review while the review is in
+	// flight: a `--continue` for this chat is refused then — the two
+	// flows would fight over the same group sessions. Overlapping
+	// reviews are allowed, as before, so the marker is a counter.
+	f.startReview(chatID)
 	go func() {
 		revCtx, cancel := context.WithTimeout(cs.Context(), timeouts.Review)
 		defer cancel()
+
+		// The chat stops counting as "running a review" once the
+		// review itself is done — the delivery below is only the
+		// user-facing rendering of the result.
+		finished := false
+		finish := func() {
+			if finished {
+				return
+			}
+			finished = true
+			f.finishReview(chatID)
+		}
+		defer finish()
+
+		// The per-group outcomes of this run — the resume state a
+		// later `--review --continue` picks up.
+		collector := &outcomeCollector{}
 
 		// Wire up the sink so the user sees the review agent's
 		// intermediate events (thinking, tool calls, …) streaming
@@ -401,7 +482,18 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 		sink, finalize := outbound.StreamRunOnceToEmitter(revCtx, emitter, cs, slog.Default(), chatID, replyTo, runnerName)
 		defer finalize()
 
-		result, err := starter.Review(revCtx, rc, agent.WithEventSink(sink))
+		result, err := starter.Review(revCtx, rc,
+			agent.WithEventSink(sink),
+			agent.WithReviewJobObserver(collector.observe),
+		)
+
+		// The record is replaced with this run's outcomes BEFORE the
+		// result is delivered: by the time the user sees the
+		// findings, the state a later `--continue` reads is already
+		// this run's.
+		f.record(chatID, runnerName, workspace, collector.results())
+		finish()
+
 		if err != nil {
 			if emitter == nil {
 				return
@@ -492,6 +584,189 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	// AS-injected and channel-emitted); the notices about the
 	// global scope travel with this reply so the user learns about
 	// the persisted setting right away.
+	return replyWith(ctx, rt, notices, ""), nil
+}
+
+// continueText is the text sent to each resumed session.
+//
+// The literal "continue": the resumed session still holds the
+// original review prompt — including the output format the agent
+// was asked for — so the agent knows what to produce without a
+// second prompt spelling it out.
+const continueText = "continue"
+
+// handleContinue resumes the review groups of the last review in this
+// chat that did not complete.
+//
+// The runner is the agent recorded with the previous run — a session
+// belongs to one agent and cannot be moved to another, so the
+// four-tier runner resolution does not apply. The resumed sessions
+// run in the recorded workspace: the session belongs to that
+// workspace, and resuming it against another working directory would
+// point the agent at the wrong files.
+//
+// The merged result is delivered exactly like a review's: wrapped
+// with agent.FormatReviewMessage, injected into the chat session's
+// current AS as a user turn, and emitted to the channel.
+func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices,
+	cs *chatsession.ChatSession, input command.SlashInput, notices []string) (*command.SlashOutput, error) {
+	chatID := input.ChatID
+
+	rec, ok := f.lookup(chatID)
+	if !ok {
+		return replyWith(ctx, rt, notices,
+			"❌ no review to continue — run /review first",
+		), nil
+	}
+	// The chat is marked busy for the whole continuation: two
+	// concurrent --continue commands must not both resume the same
+	// group sessions. The check and the mark happen under one lock.
+	if !f.startContinuation(chatID) {
+		return replyWith(ctx, rt, notices,
+			"❌ a review is already running in this chat",
+		), nil
+	}
+	// From here on the chat counts as busy. Every early return
+	// releases the mark; the goroutine releases it when the
+	// continuation ends.
+	release := func() { f.finishReview(chatID) }
+
+	jobs, why := rec.resumable()
+	if why != "" {
+		release()
+		return replyWith(ctx, rt, notices, why), nil
+	}
+
+	runnerName := rec.agent
+	starter, err := agent.Builtins.Get(runnerName)
+	if err != nil {
+		release()
+		return replyWith(ctx, rt, notices, fmt.Sprintf(
+			"❌ unknown agent %q", runnerName,
+		)), nil
+	}
+
+	// Resolve the inject target — the chat session's active AS.
+	// Unchanged from the review path: the findings land in the
+	// current AS, whatever agent ran the review.
+	as, err := cs.LookupSelectedAgentSession()
+	if err != nil {
+		release()
+		switch {
+		case errors.Is(err, chatsession.ErrNoSelectedCwd):
+			return replyWith(ctx, rt, notices,
+				"❌ no workspace set. Send /cwd <path> first.",
+			), nil
+		case errors.Is(err, chatsession.ErrNoSelectedAgent):
+			return replyWith(ctx, rt, notices,
+				"❌ no active agent configured. Run /use <agent> first.",
+			), nil
+		default:
+			return replyWith(ctx, rt, notices, fmt.Sprintf(
+				"❌ failed to activate agent: %v", err,
+			)), nil
+		}
+	}
+
+	// The resumed sessions run in the recorded workspace, not in the
+	// chat session's current one.
+	rc := agent.StartConfig{
+		Workspace: rec.workspace,
+	}
+
+	// Capture the inputs the goroutine needs for an async reply. We
+	// grab them by value so the closure doesn't pin SlashInput / agent
+	// references for the full 30-min review budget.
+	replyTo := input.MessageID
+	workspace := rec.workspace
+	sendBlocks := as.SendBlocks // close over SendBlocks for Inject
+	emitter := cs.Emitter()
+
+	// The continuation is a review run like any other: the chat
+	// stays marked as busy until the continuation itself is done.
+	go func() {
+		revCtx, cancel := context.WithTimeout(cs.Context(), timeouts.Review)
+		defer cancel()
+
+		// The chat stops counting as "running a review" once the
+		// continuation itself is done — the delivery below is only
+		// the user-facing rendering of the result.
+		finished := false
+		finish := func() {
+			if finished {
+				return
+			}
+			finished = true
+			release()
+		}
+		defer finish()
+
+		// The per-group outcomes of this run.
+		collector := &outcomeCollector{}
+
+		// The sink is purely observational — the formatted text
+		// still flows through FormatReviewMessage + sendBlocks (AS
+		// inject) and emitter.Send (channel emit) below as two
+		// separate product paths.
+		sink, finalize := outbound.StreamRunOnceToEmitter(revCtx, emitter, cs, slog.Default(), chatID, replyTo, runnerName)
+		defer finalize()
+
+		result, err := agent.ContinueReviewJobs(revCtx, starter, rc, jobs, continueText,
+			agent.WithEventSink(sink),
+			agent.WithReviewJobObserver(collector.observe),
+		)
+
+		// The record is replaced with this run's outcomes BEFORE the
+		// result is delivered, so a second `--continue` finds
+		// nothing left to resume. A group that fails again has
+		// spent its one resume attempt — its session id is dropped,
+		// and the failure stays in the record.
+		f.record(chatID, runnerName, workspace, collector.spentResults())
+		finish()
+
+		if err != nil {
+			slog.Default().Warn("/review --continue failed",
+				"agent", runnerName,
+				"err", err,
+			)
+			if emitter == nil {
+				return
+			}
+			msg := err.Error()
+			if len(msg) > 800 {
+				msg = msg[:800] + "…(truncated)"
+			}
+			_ = emitter.Send(revCtx, messages.OutboundMessage{
+				ChatID:  chatID,
+				Kind:    messages.OutReply,
+				ReplyTo: replyTo,
+				Text: fmt.Sprintf("❌ /review continue failed (agent=%s):\n%s",
+					runnerName, msg),
+			})
+			return
+		}
+
+		// Success: wrap once, route twice (AS + channel) — the same
+		// delivery a normal review gets.
+		formatted := agent.FormatReviewMessage(workspace, runnerName, result.Text)
+		blocks := []agent.ContentBlock{{Type: agent.ContentText, Text: formatted}}
+
+		if err := sendBlocks(revCtx, blocks, agentsession.WithReplyTo(replyTo)); err != nil {
+			slog.Default().Warn("/review --continue: AS inject failed",
+				"agent", runnerName,
+				"err", err,
+			)
+		}
+
+		if emitter == nil {
+			return
+		}
+		if revCtx.Err() != nil {
+			return
+		}
+		_ = emitter.Send(revCtx, buildTerminalReply(chatID, replyTo, formatted, runnerName, result))
+	}()
+
 	return replyWith(ctx, rt, notices, ""), nil
 }
 

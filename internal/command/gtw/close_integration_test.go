@@ -503,7 +503,8 @@ func TestIntegration_LongLocalBranchNameIsCapped(t *testing.T) {
 	// The worktree exists under the capped branch name.
 	wt := WorktreePath(repoRoot, wantBranch)
 	if _, err := os.Stat(wt); err != nil {
-		t.Fatalf("worktree %s not created: %v", wt, err)
+		t.Fatalf("worktree %s not created: %v\npath len: %d\nreply:\n%s",
+			wt, err, len(wt), ch.lastText())
 	}
 	// Git created that branch, not the raw name.
 	out, _ := mustGitOut(t, repoRoot, "branch", "--list", wantBranch)

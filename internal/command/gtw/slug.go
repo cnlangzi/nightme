@@ -82,10 +82,16 @@ func slugify(title string) string {
 // 255 bytes is the hard per-component limit (NAME_MAX on ext4 /
 // APFS); the same limit applies to the loose ref file under
 // .git/refs/heads/ and to .git/worktrees/<branch>/. 128 is half of
-// that, which also leaves the Windows MAX_PATH budget about 132
-// characters for <parent>\<repo>.nightme\ — enough for repository
-// paths up to roughly 115 characters — while still fitting every
-// realistic conventional-commit title.
+// that, and it still fits every realistic conventional-commit
+// title.
+//
+// On Windows the binding limit is git's own: a worktree's admin
+// directory (<repo>\.git\worktrees\<branch>) must fit in
+// PATH_MAX - 40 characters — 220, with PATH_MAX at 260 — or git
+// dies with "fatal: '$GIT_DIR' too big". A 128-byte branch spends
+// 128 of them plus the 15 characters of ".git\worktrees\", so the
+// repository path has to stay under 77 characters, which covers a
+// normal checkout ("C:\Users\me\dev\repo").
 const maxBranchBytes = 128
 
 // isASCIIAlnum reports whether b is an ASCII letter or digit.

@@ -478,6 +478,15 @@ workspace / 每个 group 的 outcome)。factory 每个 daemon 进程建一次,�
 命令层:pattern、files、session id、error。失败 group 的 session id 一并保留 ——
 那正是下一轮 `--continue` 要用的。
 
+记录什么时候被替换:
+
+- **跑出 group 的 review 结束时** —— 记录换成这次 review 每个 group 的 outcome。
+  一个 group 都没跑出来的 review(没有 diff 可 review、bridge 不支持 review)不
+  动记录:没有新的 resume 状态,上一次 review 没收尾的 group 依然没收尾。
+- **续跑结束时** —— 记录换成这次续跑的 outcome。写回是**条件写**:只有当记录
+  仍然是这次续跑读的那份时才写。续跑期间跑完的另一次 review 拥有这个 chat 的
+  resume 状态,不能被更早开始、更晚结束的续跑覆盖。
+
 ### 边界
 
 | 场景 | 行为 |
@@ -486,6 +495,7 @@ workspace / 每个 group 的 outcome)。factory 每个 daemon 进程建一次,�
 | 本 chat 有 review 在跑 | `❌ a review is already running in this chat` |
 | 上一次 review 每个 group 都完成了 | `ℹ️ the last review completed — nothing to continue` |
 | 失败的 group 根本没到 agent(没有 session id) | `ℹ️ the unfinished group never reached the agent — nothing to resume` |
+| 失败的 group 已经续跑过一次(还是失败) | `ℹ️ the unfinished group was already retried — nothing to resume` |
 | 记录的 agent 已经不在注册表里 | `❌ unknown agent "<name>"` |
 | bridge 拒绝 resume(`ErrResumeUnhealthy`) | 该 group 在合并文本里 inline 标 failed(所有 group 都失败时:只发 `❌ /review continue failed (agent=<name>): …`) |
 | 续跑又失败 | 合并文本里 inline 标 failed;该 group 的 resume 机会已用完,再 `--continue` 无事可做 |

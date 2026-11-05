@@ -79,6 +79,7 @@ type Factory struct {
 	mu      sync.Mutex
 	records map[string]reviewRecord
 	running map[string]int
+	nextID  uint64
 }
 
 // init self-registers the /review command. Each command package's
@@ -491,7 +492,15 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 		// result is delivered: by the time the user sees the
 		// findings, the state a later `--continue` reads is already
 		// this run's.
-		f.record(chatID, runnerName, workspace, collector.results())
+		//
+		// A run that produced no group outcomes — the review found
+		// no diff, or the bridge cannot review at all — leaves the
+		// chat's resume state alone: there is nothing new to resume
+		// from, and the previous run's unfinished groups are still
+		// unfinished.
+		if outcomes := collector.results(); len(outcomes) > 0 {
+			f.record(chatID, runnerName, workspace, outcomes)
+		}
 		finish()
 
 		if err != nil {
@@ -719,9 +728,13 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 		// The record is replaced with this run's outcomes BEFORE the
 		// result is delivered, so a second `--continue` finds
 		// nothing left to resume. A group that fails again has
-		// spent its one resume attempt — its session id is dropped,
-		// and the failure stays in the record.
-		f.record(chatID, runnerName, workspace, collector.spentResults())
+		// spent its one resume attempt — the failure stays in the
+		// record, the retry does not.
+		//
+		// The write is conditional on the record still being the one
+		// this continuation resumed from: a review that finished in
+		// the meantime owns the chat's resume state.
+		f.recordIfCurrent(chatID, rec.id, runnerName, workspace, collector.spentResults())
 		finish()
 
 		if err != nil {

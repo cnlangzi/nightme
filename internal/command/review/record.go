@@ -30,23 +30,31 @@ type reviewOutcome struct {
 	files []string
 	// sessionID is the agent session id the group's session ran
 	// under — the id a continuation resumes. Empty when the group
-	// never reached the agent, or when the group's one resume
-	// attempt is already spent.
+	// never reached the agent.
 	sessionID string
 	// err is the error that ended the group, nil on success.
 	err error
+	// spent marks a group whose one resume attempt is used up: a
+	// continuation already retried it and it failed again. The group
+	// is not resumed a second time.
+	spent bool
 }
 
 // reviewRecord is the resume state of the last review run in one
 // chat: the runner, the workspace, and one entry per group.
 type reviewRecord struct {
+	// id identifies this record. A run that resumes a record only
+	// replaces it when it is still the current one — a newer run
+	// that finished in the meantime owns the chat's resume state.
+	id        uint64
 	agent     string
 	workspace string
 	outcomes  []reviewOutcome
 }
 
 // resumable returns the groups a continuation can resume: the ones
-// that failed AND produced a session id.
+// that failed AND produced a session id AND still have their resume
+// attempt.
 //
 // The groups that completed are not re-asked — their findings already
 // reached the chat, and asking again would duplicate them.
@@ -56,27 +64,38 @@ type reviewRecord struct {
 func (r reviewRecord) resumable() ([]agent.ReviewJob, string) {
 	var jobs []agent.ReviewJob
 	failed := false
+	neverReached := false
 	for _, o := range r.outcomes {
 		if o.err == nil {
 			continue
 		}
 		failed = true
-		if o.sessionID == "" {
-			continue
+		switch {
+		case o.spent:
+			// The group's one resume attempt is used up — it is not
+			// retried, and "never reached the agent" does not
+			// describe it either.
+		case o.sessionID == "":
+			neverReached = true
+		default:
+			jobs = append(jobs, agent.ReviewJob{
+				Pattern:   o.pattern,
+				Files:     o.files,
+				SessionID: o.sessionID,
+			})
 		}
-		jobs = append(jobs, agent.ReviewJob{
-			Pattern:   o.pattern,
-			Files:     o.files,
-			SessionID: o.sessionID,
-		})
 	}
 	switch {
 	case len(jobs) > 0:
 		return jobs, ""
 	case !failed:
 		return nil, "ℹ️ the last review completed — nothing to continue"
-	default:
+	case neverReached:
 		return nil, "ℹ️ the unfinished group never reached the agent — nothing to resume"
+	default:
+		// The only remaining case: the group failed after reaching
+		// the agent, and its one resume attempt is spent.
+		return nil, "ℹ️ the unfinished group was already retried — nothing to resume"
 	}
 }
 
@@ -87,7 +106,33 @@ func (f *Factory) record(chatID, agentName, workspace string, outcomes []reviewO
 	if f.records == nil {
 		f.records = make(map[string]reviewRecord)
 	}
+	f.nextID++
 	f.records[chatID] = reviewRecord{
+		id:        f.nextID,
+		agent:     agentName,
+		workspace: workspace,
+		outcomes:  outcomes,
+	}
+}
+
+// recordIfCurrent replaces the resume state of a chat only when the
+// chat's record is still the one the caller resumed from.
+//
+// A run that resumes a record must not overwrite a newer run's
+// record: the newer run owns the chat's resume state, even when the
+// older run finishes later.
+func (f *Factory) recordIfCurrent(chatID string, id uint64, agentName, workspace string, outcomes []reviewOutcome) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if cur, ok := f.records[chatID]; ok && cur.id != id {
+		return
+	}
+	if f.records == nil {
+		f.records = make(map[string]reviewRecord)
+	}
+	f.nextID++
+	f.records[chatID] = reviewRecord{
+		id:        f.nextID,
 		agent:     agentName,
 		workspace: workspace,
 		outcomes:  outcomes,
@@ -184,17 +229,17 @@ func (c *outcomeCollector) results() []reviewOutcome {
 }
 
 // spentResults returns the collected outcomes with the failed groups'
-// resume attempt marked as spent: their session id is dropped, so a
-// later continuation finds nothing to resume for them.
+// resume attempt marked as spent: they are not resumed a second time.
 //
 // A continuation that fails again is terminal for that group — the
 // merged text already carries the inline "failed:" marker, and the
-// group's one resume attempt is used up.
+// group's one resume attempt is used up. The session id stays in the
+// record: the failure is still the group's, only the retry is gone.
 func (c *outcomeCollector) spentResults() []reviewOutcome {
 	out := c.results()
 	for i := range out {
 		if out[i].err != nil {
-			out[i].sessionID = ""
+			out[i].spent = true
 		}
 	}
 	return out

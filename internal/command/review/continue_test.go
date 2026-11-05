@@ -78,6 +78,13 @@ type reviewSessionStarter struct {
 	// asserts on the concurrent command.
 	block chan struct{}
 
+	// fail makes the resumed session's turn fail instead of
+	// answering.
+	fail bool
+
+	// reviewErr is the error the review path fails with.
+	reviewErr error
+
 	mu       sync.Mutex
 	started  []agent.StartConfig
 	received []agent.ContentBlock
@@ -113,6 +120,9 @@ func (s *reviewSessionStarter) Review(ctx context.Context, _ agent.StartConfig, 
 			return agent.RunResult{}, ctx.Err()
 		}
 	}
+	if s.reviewErr != nil {
+		return agent.RunResult{}, s.reviewErr
+	}
 	return agent.RunResult{Text: "reviewed"}, nil
 }
 
@@ -145,21 +155,35 @@ type sessionReplyDriver struct {
 	events  chan agent.AgentEvent
 }
 
-func (d *sessionReplyDriver) SendBlocks(_ context.Context, blocks []agent.ContentBlock) error {
+func (d *sessionReplyDriver) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) error {
 	d.starter.mu.Lock()
 	d.starter.received = append(d.starter.received, blocks...)
 	sessionID := "sess-new"
 	d.starter.mu.Unlock()
 
 	go func() {
+		if blk := d.starter.block; blk != nil {
+			select {
+			case <-blk:
+			case <-ctx.Done():
+				return
+			}
+		}
 		d.events <- agent.AgentEvent{
 			Kind:      agent.EventAgentReady,
 			SessionID: sessionID,
 			Model:     "model-x",
 		}
-		d.events <- agent.AgentEvent{
-			Kind:   agent.EventAgentResult,
-			Result: &agent.AgentResultEvent{Text: d.starter.reply},
+		if d.starter.fail {
+			d.events <- agent.AgentEvent{
+				Kind: agent.EventAgentError,
+				Err:  errors.New("resumed session failed"),
+			}
+		} else {
+			d.events <- agent.AgentEvent{
+				Kind:   agent.EventAgentResult,
+				Result: &agent.AgentResultEvent{Text: d.starter.reply},
+			}
 		}
 		close(d.events)
 	}()
@@ -571,4 +595,126 @@ func TestHandle_ContinueTwiceReportsNothingLeft(t *testing.T) {
 	if !strings.Contains(out.Reply, "nothing to continue") {
 		t.Fatalf("unexpected reply: %q", out.Reply)
 	}
+}
+
+// TestHandle_ContinueAfterAFailedRetryReportsTheSpentAttempt covers
+// the group that failed a second time: its one resume attempt is
+// spent, so the next `--continue` says so — the group did reach the
+// agent, it was already retried.
+func TestHandle_ContinueAfterAFailedRetryReportsTheSpentAttempt(t *testing.T) {
+	agents := newTestAgents(t)
+	starter := &reviewSessionStarter{name: "review-retried-agent", fail: true}
+	agents.registry.Register(starter)
+
+	em := newRecordingEmitter()
+	const chatID = "review-retried-chat"
+	cs, _ := newContinueChatSession(t, chatID, starter.name, t.TempDir(), em)
+
+	f := NewFactory()
+	f.record(chatID, starter.name, "/recorded/ws", []reviewOutcome{
+		{pattern: "**/*.ts", files: []string{"c.ts"}, sessionID: "sess-ts", err: errors.New("boom")},
+	})
+
+	dispatchContinue(t, f, cs, chatID, "review", "-c")
+	em.waitForOutReply(t, "/review continue failed")
+
+	out := dispatchContinue(t, f, cs, chatID, "review", "-c")
+
+	if !strings.Contains(out.Reply, "already retried") {
+		t.Fatalf("unexpected reply: %q", out.Reply)
+	}
+	if strings.Contains(out.Reply, "never reached the agent") {
+		t.Errorf("the reply blames the wrong cause: %q", out.Reply)
+	}
+}
+
+// TestHandle_ReviewWithoutGroupsKeepsTheResumeState: a review that
+// ran no group at all — the diff was empty, or the bridge cannot
+// review — produces no outcomes, so it must not wipe the chat's
+// resume state: the previous run's unfinished groups are still
+// unfinished.
+func TestHandle_ReviewWithoutGroupsKeepsTheResumeState(t *testing.T) {
+	agents := newTestAgents(t)
+	starter := &reviewSessionStarter{name: "review-empty-diff-agent", reviewErr: agent.ErrNoDiff}
+	agents.registry.Register(starter)
+
+	em := newRecordingEmitter()
+	const chatID = "review-empty-diff-chat"
+	cs, _ := newContinueChatSession(t, chatID, starter.name, t.TempDir(), em)
+
+	f := NewFactory()
+	f.record(chatID, starter.name, "/recorded/ws", []reviewOutcome{
+		{pattern: "**/*.ts", files: []string{"c.ts"}, sessionID: "sess-ts", err: errors.New("boom")},
+	})
+
+	dispatchContinue(t, f, cs, chatID, "review")
+	em.waitForOutReply(t, "no diff to review")
+
+	rec, ok := f.lookup(chatID)
+	if !ok {
+		t.Fatal("the resume state was wiped")
+	}
+	if len(rec.outcomes) != 1 {
+		t.Fatalf("the record carries %d outcomes, want the previous run's 1", len(rec.outcomes))
+	}
+	if rec.outcomes[0].sessionID != "sess-ts" {
+		t.Errorf("the resumable session id was dropped: %+v", rec.outcomes[0])
+	}
+}
+
+// TestHandle_ContinuationDoesNotClobberANewerRecord: a continuation
+// that finishes after a newer review ran must not overwrite the
+// newer review's resume state — the newer run owns the chat.
+func TestHandle_ContinuationDoesNotClobberANewerRecord(t *testing.T) {
+	agents := newTestAgents(t)
+	starter := &reviewSessionStarter{
+		name:  "review-clobber-agent",
+		reply: "resumed findings",
+		block: make(chan struct{}),
+	}
+	agents.registry.Register(starter)
+
+	em := newRecordingEmitter()
+	const chatID = "review-clobber-chat"
+	cs, _ := newContinueChatSession(t, chatID, starter.name, t.TempDir(), em)
+
+	f := NewFactory()
+	f.record(chatID, starter.name, "/recorded/ws", []reviewOutcome{
+		{pattern: "**/*.ts", files: []string{"c.ts"}, sessionID: "sess-ts", err: errors.New("boom")},
+	})
+
+	dispatchContinue(t, f, cs, chatID, "review", "-c")
+	waitForStart(t, starter)
+
+	// A newer review finished while the continuation was still
+	// running: it owns the chat's resume state.
+	f.record(chatID, starter.name, "/newer/ws", []reviewOutcome{
+		{pattern: "**/*.go", files: []string{"a.go"}, sessionID: "sess-go", err: errors.New("boom")},
+	})
+	close(starter.block)
+	em.waitForOutReply(t, "resumed findings")
+
+	rec, ok := f.lookup(chatID)
+	if !ok {
+		t.Fatal("the record is gone")
+	}
+	if rec.workspace != "/newer/ws" {
+		t.Errorf("the record workspace = %q, want the newer run's %q", rec.workspace, "/newer/ws")
+	}
+	if len(rec.outcomes) != 1 || rec.outcomes[0].sessionID != "sess-go" {
+		t.Errorf("the newer run's outcomes were lost: %+v", rec.outcomes)
+	}
+}
+
+// waitForStart waits until the starter's session has been opened.
+func waitForStart(t *testing.T, starter *reviewSessionStarter) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(starter.startedConfigs()) > 0 {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("the session was never started")
 }

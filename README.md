@@ -399,6 +399,10 @@ The agent for `commit` and `pr` is chosen by `-a <agent>`, then `commit.agent` /
 
 **`/gtw close`** finishes the task: removes the `nightme/wip` label from the issue, removes the worktree, force-deletes the local branch, moves the chat's CWD back to the repo root, and syncs the default branch. It refuses while the worktree has uncommitted changes — commit, stash, or discard first. If a step fails after the label was removed, the label is restored, so re-running `/gtw close` starts from the same state.
 
+### Stuck: `/gtw abort`
+
+**`/gtw abort`** cancels the `/gtw` command running in that chat — the one holding the chat's serial chain, which is why every later `/gtw` command waits behind it. The cancelled command sends no card of its own: the abort card names the command and how long it had been running, and the `/gtw` commands queued behind it continue afterwards.
+
 ### Hooks — bring the dev environment with you
 
 AI tool indexes (CodeGraph, language servers, caches) usually live inside the repo. Each worktree is a fresh checkout — they all need rebuilding. Hooks automate that.

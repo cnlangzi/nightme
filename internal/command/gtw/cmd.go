@@ -290,7 +290,8 @@ func (f *Factory) Spec() command.Spec {
 			"/gtw pr -a claude                 override which agent runs the one-shot\n" +
 			"/gtw config lang [value]          show or set the output language for this repository\n" +
 			"/gtw config -g lang [value]       show or set the user-level output language\n" +
-			"/gtw sync                         checkout the default branch and pull --rebase from origin",
+			"/gtw sync                         checkout the default branch and pull --rebase from origin\n" +
+			"/gtw abort                        cancel the /gtw command currently running in this chat",
 		Subcommands: []command.SubcommandSpec{
 			{
 				Name:    "plan",
@@ -314,6 +315,7 @@ func (f *Factory) Spec() command.Spec {
 			{Name: "pr", Summary: "generate PR title+body, then open the PR", Usage: "/gtw pr [-a <agent>]"},
 			{Name: "config", Summary: "show or set the gtw output language (repo scope by default, -g for the user scope)", Usage: configCmdSpec.Usage},
 			{Name: "sync", Summary: "checkout the default branch and pull --rebase from origin"},
+			{Name: "abort", Summary: "cancel the gtw command currently running in this chat"},
 		},
 	}
 }
@@ -373,7 +375,9 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, mgr *c
 	// only the chat's own issue draft. /gtw config likewise only
 	// reads and writes ~/.nightme/gtw.yml — that file is shared by
 	// every chat, so its read-modify-write is serialised by
-	// configWriteMu rather than by the per-chat lock.
+	// configWriteMu rather than by the per-chat lock. /gtw abort
+	// takes no lock either — it must not queue behind the very
+	// command it has to cancel.
 	switch input.Args[1] {
 	case "plan":
 		return f.runPlan(ctx, cs, input)
@@ -381,32 +385,57 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, mgr *c
 		return f.runNew(ctx, rt, cs, input)
 	case "config":
 		return f.runConfig(ctx, cs, input)
+	case "abort":
+		return f.runAbort(ctx, cs, input)
 	}
+
+	// The run's own context: cancellable with ErrAborted so
+	// /gtw abort can end the command and tear down its
+	// subprocesses. Every subcommand handler below receives runCtx
+	// (not ctx), so the abort cause is visible to the whole call
+	// tree.
+	runCtx, cancelRun := context.WithCancelCause(ctx)
+	defer cancelRun(nil)
+
 	if mu := f.mgr.runLockFor(input.ChatID); mu != nil {
 		mu.Lock()
 		defer mu.Unlock()
 	}
+	// Registered AFTER the lock is taken, so the registry names
+	// the chain holder (the command blocking every later /gtw in
+	// this chat) and never a queued waiter.
+	release := f.mgr.beginRun(input.ChatID, input.Args[1], cancelRun)
+	defer release()
 
+	var out *command.SlashOutput
+	var err error
 	switch input.Args[1] {
 	case "fix":
-		return f.runFix(ctx, rt, cs, input)
+		out, err = f.runFix(runCtx, rt, cs, input)
 	case "close":
-		return f.runClose(ctx, rt, cs, input)
+		out, err = f.runClose(runCtx, rt, cs, input)
 	case "back":
-		return f.runBack(ctx, rt, cs, input)
+		out, err = f.runBack(runCtx, rt, cs, input)
 	case "commit":
-		return f.runCommit(ctx, rt, cs, input)
+		out, err = f.runCommit(runCtx, rt, cs, input)
 	case "push":
-		return f.runPush(ctx, rt, cs, input)
+		out, err = f.runPush(runCtx, rt, cs, input)
 	case "pr":
-		return f.runPR(ctx, rt, cs, input)
+		out, err = f.runPR(runCtx, rt, cs, input)
 	case "sync":
-		return f.runSync(ctx, rt, cs, input)
+		out, err = f.runSync(runCtx, rt, cs, input)
+	default:
+		return &command.SlashOutput{
+			Reply:    "Unknown subcommand: " + input.Args[1] + "\n" + f.Spec().Usage,
+			Consumed: true,
+		}, nil
 	}
-	return &command.SlashOutput{
-		Reply:    "Unknown subcommand: " + input.Args[1] + "\n" + f.Spec().Usage,
-		Consumed: true,
-	}, nil
+	if aborted(runCtx) {
+		// Cancelled by /gtw abort: the abort card is the only
+		// message this run produces.
+		return &command.SlashOutput{Consumed: true}, nil
+	}
+	return out, err
 }
 
 // runPlan handles `/gtw plan [topic]`. The topic is free-form

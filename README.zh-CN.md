@@ -394,6 +394,10 @@ agent 的上下文太长，或者剩下的工作更适合换一个 agent 时：
 
 **`/gtw close`** 结束任务：移除 issue 上的 `nightme/wip` 标签，删掉 worktree，强制删除本地分支，把 chat 的 CWD 切回仓库根目录，并 sync 默认分支。worktree 有未提交改动时拒绝——先 commit、stash 或丢弃。如果标签移除之后的某一步失败，标签会被加回去，重跑 `/gtw close` 时从同一个状态开始。
 
+### 卡住时：`/gtw abort`
+
+**`/gtw abort`** 取消这个 chat 里正在跑的那条 `/gtw` 命令——它占着这个 chat 的串行链，后面所有 `/gtw` 命令都在等它。被取消的命令不发送自己的卡片：abort 卡片会写明取消的是哪条命令、已经跑了多久；排在它后面的 `/gtw` 命令随后照常继续。
+
 ### Hooks——把开发环境一起带过去
 
 AI 工具的索引（CodeGraph、语言服务器、缓存）一般放在仓库里。每个 worktree 是新 checkout——都要重建。Hooks 把这件事自动化了。

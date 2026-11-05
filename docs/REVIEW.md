@@ -36,7 +36,7 @@
 ### 1.2 边界
 
 - **是**:对"当前分支 vs 默认分支"(PR 模式)的代码变更做 review,产出 findings 文本回 chat,主 agent 可对话式 fix。
-- **不是**:不开 `--fix` / `--post`(留 v2 的 `/review-fix` / `/review-comment`);不限定文件 / base(v1 除 `--agent` 外零限定符);不当 CI gating;不自动改代码。
+- **不是**:不开 `--fix` / `--post`(留 v2 的 `/review-fix` / `/review-comment`);不限定文件 / base(只认 `--agent` / `--global` / `--unset` 三个 flag,短写 `-a` / `-g`,不收位置参数);不当 CI gating;不自动改代码。
 
 ---
 
@@ -47,8 +47,10 @@ review 由所有 bridge 统一走 `agent.ReviewDispatch`(单一入口):`OcrAvail
 agent 包不再区分 "native / mixed / delegate" 桥——每条桥的 `Starter.Review` 都是同一行 `return agent.ReviewDispatch(ctx, s, cfg, opts...)`。Agent 自带的 review 子命令(`claude -p code-review` / `codex review` / `cursor-agent -p /review-bugbot`)用户直接在 chat 发 slash command,nightme 透传给底层 agent——不再通过 `Starter.Review` 特殊路径触发。
 
 ```text
-/review [--agent <name>]
-   │  解析 --agent,选定 runner;runner ≠ 当前 AS 时,findings 仍回当前 AS
+/review [-a|--agent <name>] [-g|--global] [--unset]
+   │  解析 flags(共享 lexer),选定 runner;runner ≠ 当前 AS 时,findings 仍回当前 AS
+   │  -g / --global:把 runner 落成全局 `review.agent`(~/.nightme/config.yaml)
+   │  --unset:删掉全局 `review.agent`,不跑 review
    ▼
 Starter.Review(所有 bridge 都是同一行)
    │
@@ -419,18 +421,19 @@ func ReviewDispatch(ctx context.Context, s Starter, cfg StartConfig, opts ...Run
 
 ## 3. 数据流:从 `/review` 到 findings
 
-1. 用户发 `/review [--agent <name>]`。
-2. dispatcher 解析 args(`--agent` / `-a`),inline 校验未知 flag。
-3. 解析 **inject 目标**:当前 chat 的 selected AS(lookup,daemon 重启后自动 spawn)。
-4. 解析 **review runner**:`--agent` 覆盖则用其,否则用当前 AS 的 agent;查 agent 注册表拿 Starter。
-5. 启动 goroutine(chat session ctx 派生 + 30min 超时):
+1. 用户发 `/review [-a|--agent <name>] [-g|--global] [--unset]`。
+2. dispatcher 用共享 lexer(`command.ParseCmdArgs`)解析 args,inline 校验未知 flag、位置参数与非法 flag 组合(`--unset` 需要 `--global`、`--unset` 与 `--agent` 互斥、`--global` 需要 `--agent`)。
+3. **落全局设置**:`-g` 把 runner 写进 `~/.nightme/config.yaml` 的 `review.agent`,`--unset` 删掉它(`--unset` 不跑 review)。写盘发生在查 chat session 之前——全局设置与本 chat 有没有 workspace 无关;写失败只告警(`⚠️ failed to save review.agent: … — reviewing with <name> anyway`),review 照跑。落盘走 node 级写入,config 文件里的注释 / 未建模的 key / 其它 section 原样保留。
+4. 解析 **inject 目标**:当前 chat 的 selected AS(lookup,daemon 重启后自动 spawn)。
+5. 解析 **review runner**(4 级):① `-a` / `--agent` → ② 全局 `review.agent` → ③ 当前 AS 的 agent → ④ 都没有 → `❌ no active agent configured. Run /use <agent> first.`。② 里的名字没在 agent 注册表里时降级到 ③ 并告警(`⚠️ review.agent "x" is not a registered agent — using <session agent>`),config 文件里的陈旧名字不会让 `/review` 变成死命令。查 agent 注册表拿 Starter。
+6. 启动 goroutine(chat session ctx 派生 + 30min 超时):
    1. 接 sink,把 review 的中间事件(思考 / 工具调用)**流式**进 chat(观察用)。
    2. `Starter.Review` → **统一 dispatcher**:
       - 所有 bridge 调 `agent.ReviewDispatch` → `OcrAvailable() ? ReviewWithOcr : ReviewWithPrompt`。
       - Agent 自带的 review 子命令(`claude -p code-review` / `codex review` / `cursor-agent -p /review-bugbot`)不在 `Starter.Review` 路径里触发——用户直接在 chat 发 slash command,nightme 透传给底层 agent。
    3. `FormatReviewMessage` 包前缀(workspace + runner 标注,让主 agent 知道"这是谁跑的 review")。
    4. **双路分发**:注入 AS 当 user turn(主 agent 能"fix critical findings")+ 发 channel(用户直接可见,不等下游回复)。
-6. Handle 立即返回 `Consumed=true`,**无 inline reply**。readpump 继续,dispatch worker 释放,用户可继续发消息。findings 异步到达。
+7. Handle 立即返回 `Consumed=true`。readpump 继续,dispatch worker 释放,用户可继续发消息。findings 异步到达;全局设置的回执(写入确认 / 写失败告警 / 降级告警)随本条命令的 reply 一起发出,先于 findings 到达。
 
 ---
 
@@ -455,6 +458,7 @@ func ReviewDispatch(ctx context.Context, s Starter, cfg StartConfig, opts ...Run
 5. **fix 对话式** —— review 只产出 findings,不自动改代码。主 agent 用原生 Edit 工具 fix。保持 v1 纯 review。
 6. **`--agent` 不切 AS** —— runner 是一次性 spawn,findings 回当前 AS。不同 reviewer,同一 chat。
 7. **独立 context 分 bundle(code-driven)** —— 大 changeset 按 ocr rule group 拆多 job,每 job 独立 fresh session(强隔离,不累积)。这是 ocr smart bundling 的 code-driven 等价——用 ocr 的 rule groups 做分组边界,各 job 的 session 各自独立,不是 ocr 端到端的重 multi-agent 机器。
+8. **全局 runner 是机器级单键** —— `review.agent` 只有全局一档,没有 repo scope、没有环境变量 override:一个键只要一个 source of truth。落盘走 node 级写入,用户 config 里的注释 / 未建模的 key / 其它 section 原样保留;config 解析失败时不覆写文件。
 
 ---
 
@@ -467,6 +471,7 @@ func ReviewDispatch(ctx context.Context, s Starter, cfg StartConfig, opts ...Run
 - ❌ 同进程多轮 + `/new` reset 池化(跨调用复用)—— 破坏 session 强隔离不变量(#2),`/new` 是弱隔离(依赖 agent reset 彻底),且 review 非高频收益不抵。省 spawn 只在单次 /review 内(瞬态多轮),不跨调用池化。
 - ❌ v1 开 `--fix` / `--post` flag —— 留 v2(`/review-fix` / `/review-comment`)。
 - ❌ 破坏 `--agent` 不切 AS 的语义 —— ocr 委托模式 findings 仍注入回当前 AS,主 agent 仍能用原生 Edit 工具 fix。
+- ❌ 给 review runner 加 repo 级 override / 环境变量 override —— 全局单键已经够用,多一档就多一个 source of truth。
 
 ---
 

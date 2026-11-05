@@ -245,6 +245,41 @@ func TestSetRepoLang_CreatesReposSection(t *testing.T) {
 	}
 }
 
+// TestSetRepoLang_EmptyStub covers a gtw.yml whose `repos:` key — or
+// one of its entries — has no value. Such a key parses as a null
+// scalar; writing into it loses nothing, so the stub becomes a
+// mapping instead of an error.
+func TestSetRepoLang_EmptyStub(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+	}{
+		{"empty repos section", "repos:\n"},
+		{"empty repo entry", "repos:\n  github.com/cnlangzi/nightme:\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			home := sandboxHome(t)
+			writeUserYml(t, home, tc.src)
+
+			if err := setRepoLang("github.com/cnlangzi/nightme", "zh-CN"); err != nil {
+				t.Fatalf("setRepoLang: %v", err)
+			}
+			data, err := os.ReadFile(userYmlPath(home))
+			if err != nil {
+				t.Fatalf("read gtw.yml: %v", err)
+			}
+			got := string(data)
+			if !strings.Contains(got, "repos:") {
+				t.Errorf("missing repos section:\n%s", got)
+			}
+			if !strings.Contains(got, "lang: zh-CN") {
+				t.Errorf("missing repo language:\n%s", got)
+			}
+		})
+	}
+}
+
 func TestUnsetGlobalLang_RemovesEntry(t *testing.T) {
 	home := sandboxHome(t)
 	writeUserYml(t, home, "lang: 简体中文\nfix:\n  hooks:\n    before:\n      - run: x\n")

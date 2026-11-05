@@ -88,8 +88,19 @@ func MapValue(m *yaml.Node, key string) *yaml.Node {
 // empty mapping when the key is absent. It reports an error when the
 // key holds something that is not a mapping — writing into it would
 // destroy the user's value.
+//
+// A key with no value (`review:` on its own line) parses as a null
+// scalar. There is nothing to lose by turning it into a mapping, so
+// it is treated as absent.
 func MapValueOrCreate(m *yaml.Node, key string) (*yaml.Node, error) {
 	if v := MapValue(m, key); v != nil {
+		if v.Kind == yaml.ScalarNode && v.Tag == "!!null" {
+			v.Kind = yaml.MappingNode
+			v.Tag = "!!map"
+			v.Value = ""
+			v.Content = nil
+			return v, nil
+		}
 		if v.Kind != yaml.MappingNode {
 			return nil, fmt.Errorf("`%s` is not a mapping", key)
 		}

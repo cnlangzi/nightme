@@ -99,6 +99,33 @@ func TestMapValueOrCreate_RejectsNonMapping(t *testing.T) {
 	}
 }
 
+// TestMapValueOrCreate_ReplacesNullScalar covers the hand-written
+// `key:` stub — a key with no value parses as a null scalar. There
+// is nothing to lose by turning it into a mapping.
+func TestMapValueOrCreate_ReplacesNullScalar(t *testing.T) {
+	root, err := Parse([]byte("review:\nprimary: cc\n"), "/tmp/x.yml")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	section, err := MapValueOrCreate(root, "review")
+	if err != nil {
+		t.Fatalf("MapValueOrCreate: %v", err)
+	}
+	SetMapValue(section, "agent", "pi")
+
+	out, err := Encode(root)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	got := string(out)
+	if !strings.Contains(got, "review:\n  agent: pi") {
+		t.Fatalf("unexpected output:\n%s", got)
+	}
+	if !strings.Contains(got, "primary: cc") {
+		t.Fatalf("the rest of the document was lost:\n%s", got)
+	}
+}
+
 func TestDeleteMapKey_ReportsRemoval(t *testing.T) {
 	root, err := Parse([]byte("a: 1\nb: 2\n"), "/tmp/x.yml")
 	if err != nil {

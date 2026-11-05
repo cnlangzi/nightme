@@ -25,11 +25,22 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 )
+
+// configWriteMu serialises the config file's read-modify-write
+// cycles inside this process: the node-level writers (review.agent)
+// and the whole-file Save. Two writers at the same time would
+// otherwise interleave their read → mutate → rename cycles and
+// silently lose one of the two updates.
+//
+// The lock is process-local: a second nightme instance still races,
+// which the atomic rename keeps safe from corruption.
+var configWriteMu sync.Mutex
 
 // Config is the root of the on-disk configuration. Field tags drive
 // YAML deserialization; the struct itself is the public API.
@@ -326,19 +337,44 @@ func LoadDefault() (*Config, error) {
 	}
 	if cfg.Primary == "" {
 		if detected := detectPrimaryFromBuiltins(); detected != "" {
-			cfg.Primary = detected
-			if saveErr := SaveDefault(cfg); saveErr != nil {
-				// Non-fatal: the in-memory cfg is correct for this
-				// process, but the next start will re-probe. Log
-				// so operators can spot a misconfigured home dir
-				// or read-only filesystem.
-				slog.Default().Warn("config: failed to persist auto-detected primary",
-					"primary", detected,
-					"err", saveErr)
-			}
+			cfg.Primary = persistDetectedPrimary(detected)
 		}
 	}
 	return cfg, nil
+}
+
+// persistDetectedPrimary stores the auto-detected primary in the
+// config file and returns the primary the file ends up with.
+//
+// The file is re-read under the write lock: a node-level write (the
+// review.agent key) may have landed while the agents were probed,
+// and the whole-file save must not clobber it. A primary another
+// writer set in the meantime wins over the detected one.
+//
+// A failure here is non-fatal — the in-memory cfg stays correct for
+// this process, but the next start will re-probe. Log so operators
+// can spot a misconfigured home dir or read-only filesystem.
+func persistDetectedPrimary(detected string) string {
+	configWriteMu.Lock()
+	defer configWriteMu.Unlock()
+
+	fresh, err := Load(DefaultPath())
+	if err != nil {
+		slog.Default().Warn("config: failed to persist auto-detected primary",
+			"primary", detected,
+			"err", err)
+		return detected
+	}
+	if fresh.Primary != "" {
+		return fresh.Primary
+	}
+	fresh.Primary = detected
+	if err := save(fresh, DefaultPath()); err != nil {
+		slog.Default().Warn("config: failed to persist auto-detected primary",
+			"primary", detected,
+			"err", err)
+	}
+	return detected
 }
 
 // detectPrimaryFromBuiltins iterates agent.Builtins in registration
@@ -374,7 +410,19 @@ func SaveDefault(c *Config) error {
 // Save writes cfg atomically to path. Same temp-file+rename pattern
 // as the registry: a corrupted temp cannot leave a half-written
 // config.yaml on disk.
+//
+// The write is serialised with the node-level writers (see
+// SetReviewAgent) so a whole-file save and a node-level write cannot
+// interleave their read → mutate → rename cycles.
 func Save(c *Config, path string) error {
+	configWriteMu.Lock()
+	defer configWriteMu.Unlock()
+	return save(c, path)
+}
+
+// save is Save without the lock — for callers that already hold
+// configWriteMu.
+func save(c *Config, path string) error {
 	if path == "" {
 		return fmt.Errorf("config: empty path")
 	}

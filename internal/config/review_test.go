@@ -147,6 +147,25 @@ func TestSetReviewAgent_PreservesTheRestOfTheFile(t *testing.T) {
 	}
 }
 
+// TestSetReviewAgent_ReplacesAnEmptyReviewStub covers the
+// hand-written `review:` stub — a key with no value parses as a
+// null scalar. Writing into it loses nothing, so the stub becomes a
+// mapping instead of an error.
+func TestSetReviewAgent_ReplacesAnEmptyReviewStub(t *testing.T) {
+	path := writeConfig(t, t.TempDir(), "primary: cc\nreview:\n")
+
+	if err := SetReviewAgent(path, "pi"); err != nil {
+		t.Fatalf("SetReviewAgent: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Review.Agent != "pi" {
+		t.Errorf("Review.Agent = %q, want pi", cfg.Review.Agent)
+	}
+}
+
 // TestSetReviewAgent_RefusesMalformedFile covers R7: a config file
 // that does not parse is reported and never overwritten.
 func TestSetReviewAgent_RefusesMalformedFile(t *testing.T) {

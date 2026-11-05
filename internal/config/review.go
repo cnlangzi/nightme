@@ -3,7 +3,6 @@ package config
 import (
 	"errors"
 	"os"
-	"sync"
 
 	"gopkg.in/yaml.v3"
 
@@ -16,15 +15,6 @@ const reviewKey = "review"
 // reviewAgentKey is the key inside the review section that names
 // the agent /review runs on.
 const reviewAgentKey = "agent"
-
-// configWriteMu serialises the read-modify-write of the config file
-// inside this process. Two chats writing at the same time would
-// otherwise interleave their read → mutate → rename cycles and
-// silently lose one of the two updates.
-//
-// The lock is process-local: a second nightme instance still races,
-// which the atomic rename keeps safe from corruption.
-var configWriteMu sync.Mutex
 
 // SetReviewAgent writes name into the review.agent key of the
 // config file at path. Every other node of the document — comments,

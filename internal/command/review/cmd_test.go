@@ -161,7 +161,7 @@ func TestValidateReviewFlags(t *testing.T) {
 // TestResolveRunner covers the four tiers of the runner chain:
 // -a / --agent → the global scope → the session's agent → none.
 func TestResolveRunner(t *testing.T) {
-	registered := registerTestAgent(t, "review-resolve-agent")
+	registered := newTestAgents(t).register("review-resolve-agent")
 
 	cases := []struct {
 		name              string
@@ -218,7 +218,7 @@ func TestHandle_GlobalScopePersistsTheRunner(t *testing.T) {
 	path := filepath.Join(dir, "config.yaml")
 	t.Setenv("NIGHTME_CONFIG", path)
 
-	starter := registerTestAgent(t, "review-global-agent")
+	starter := newTestAgents(t).register("review-global-agent")
 	cs := newReviewChatSession(t, starter.name, dir)
 
 	out := dispatchReview(t, cs, "review", "-a", starter.name, "-g")
@@ -248,7 +248,7 @@ func TestHandle_UnsetRemovesTheGlobalScope(t *testing.T) {
 		t.Fatalf("seed config: %v", err)
 	}
 
-	starter := registerTestAgent(t, "review-unset-agent")
+	starter := newTestAgents(t).register("review-unset-agent")
 	cs := newReviewChatSession(t, starter.name, dir)
 
 	out := dispatchReview(t, cs, "review", "-g", "--unset")
@@ -280,7 +280,7 @@ func TestHandle_UnsetOnAnEmptyConfigCreatesNothing(t *testing.T) {
 	path := filepath.Join(dir, "config.yaml")
 	t.Setenv("NIGHTME_CONFIG", path)
 
-	starter := registerTestAgent(t, "review-unset-empty-agent")
+	starter := newTestAgents(t).register("review-unset-empty-agent")
 	cs := newReviewChatSession(t, starter.name, dir)
 
 	out := dispatchReview(t, cs, "review", "-g", "--unset")
@@ -305,7 +305,7 @@ func TestHandle_UnregisteredGlobalScopeFallsBackToTheSessionAgent(t *testing.T) 
 		t.Fatalf("seed config: %v", err)
 	}
 
-	starter := registerTestAgent(t, "review-session-agent")
+	starter := newTestAgents(t).register("review-session-agent")
 	cs := newReviewChatSession(t, starter.name, dir)
 
 	out := dispatchReview(t, cs, "review")
@@ -336,7 +336,7 @@ func TestHandle_MalformedConfigFallsBackToTheSessionAgent(t *testing.T) {
 		t.Fatalf("seed config: %v", err)
 	}
 
-	starter := registerTestAgent(t, "review-malformed-agent")
+	starter := newTestAgents(t).register("review-malformed-agent")
 	cs := newReviewChatSession(t, starter.name, dir)
 
 	out := dispatchReview(t, cs, "review")
@@ -371,7 +371,7 @@ func TestHandle_FailedGlobalWriteDoesNotStopTheReview(t *testing.T) {
 	}
 	t.Setenv("NIGHTME_CONFIG", filepath.Join(blocker, "config.yaml"))
 
-	starter := registerTestAgent(t, "review-write-fail-agent")
+	starter := newTestAgents(t).register("review-write-fail-agent")
 	cs := newReviewChatSession(t, starter.name, dir)
 
 	out := dispatchReview(t, cs, "review", "-a", starter.name, "-g")
@@ -407,7 +407,7 @@ func TestHandle_FlagCombinationsAreRejected(t *testing.T) {
 			path := filepath.Join(dir, "config.yaml")
 			t.Setenv("NIGHTME_CONFIG", path)
 
-			starter := registerTestAgent(t, "review-combo-agent")
+			starter := newTestAgents(t).register("review-combo-agent")
 			cs := newReviewChatSession(t, starter.name, dir)
 
 			out := dispatchReview(t, cs, tc.argv...)
@@ -429,7 +429,7 @@ func TestHandle_GlobalScopeWithAnUnknownAgentWritesNothing(t *testing.T) {
 	path := filepath.Join(dir, "config.yaml")
 	t.Setenv("NIGHTME_CONFIG", path)
 
-	starter := registerTestAgent(t, "review-unknown-agent")
+	starter := newTestAgents(t).register("review-unknown-agent")
 	cs := newReviewChatSession(t, starter.name, dir)
 
 	out := dispatchReview(t, cs, "review", "-a", "review-never-registered", "-g")
@@ -452,7 +452,7 @@ func TestHandle_GlobalScopeWithAnUnknownAgentWritesNothing(t *testing.T) {
 // Spec check stage. The downstream AS lookup is what distinguishes
 // "no active agent" from "all good".
 func TestSpec_AcceptsNoArgs(t *testing.T) {
-	starter := registerTestAgent(t, "review-no-args-agent")
+	starter := newTestAgents(t).register("review-no-args-agent")
 	cs := newReviewChatSession(t, starter.name, "")
 
 	out := dispatchReview(t, cs, "review")
@@ -545,19 +545,30 @@ func (s *reviewTestStarter) Review(context.Context, agent.StartConfig, ...agent.
 	return agent.RunResult{Text: "reviewed"}, nil
 }
 
-// registerTestAgent registers a fake starter under name and returns
-// it. The registry is a package-level global, so the previous entry
-// is restored when the test ends.
-func registerTestAgent(t *testing.T, name string) *reviewTestStarter {
+// testAgents holds the fake starters a test installs.
+type testAgents struct {
+	registry *agent.Registry
+}
+
+// newTestAgents installs a fresh agent registry for the test and
+// restores the previous one when the test ends.
+//
+// The registry has no Unregister, so a fake registered in place would
+// stay visible to every later test in the binary. Swapping the whole
+// registry is the pattern internal/command/gtw/push_test.go uses.
+func newTestAgents(t *testing.T) *testAgents {
 	t.Helper()
+	orig := agent.Builtins
+	set := &testAgents{registry: agent.New()}
+	agent.Builtins = set.registry
+	t.Cleanup(func() { agent.Builtins = orig })
+	return set
+}
+
+// register adds a fake starter under name and returns it.
+func (s *testAgents) register(name string) *reviewTestStarter {
 	starter := &reviewTestStarter{name: name, called: make(chan struct{}, 1)}
-	prev, _ := agent.Builtins.Get(name)
-	t.Cleanup(func() {
-		if prev != nil {
-			_ = agent.Builtins.Register(prev)
-		}
-	})
-	agent.Builtins.Register(starter)
+	s.registry.Register(starter)
 	return starter
 }
 

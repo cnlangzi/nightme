@@ -49,6 +49,7 @@ import (
 //	session: ...
 //	logging: ...
 //	paths: ...
+//	review: ...                      # /review's global runner (optional)
 //
 // User-configured `agents:` entries override built-in agents with the
 // same name (merge happens at runtime, not parse time).
@@ -75,6 +76,15 @@ type Config struct {
 	Session  SessionConfig  `yaml:"session"`
 	Logging  LoggingConfig  `yaml:"logging"`
 	Paths    PathsConfig    `yaml:"paths"`
+	Review   ReviewConfig   `yaml:"review,omitempty"`
+}
+
+// ReviewConfig holds the /review command's global preferences.
+type ReviewConfig struct {
+	// Agent is the agent that runs /review when the invocation
+	// carries no -a / --agent flag. Empty means "fall back to the
+	// chat session's selected agent".
+	Agent string `yaml:"agent,omitempty"`
 }
 
 // EffectiveName returns the configured Name, or the local machine

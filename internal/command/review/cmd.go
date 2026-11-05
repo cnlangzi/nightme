@@ -20,8 +20,15 @@
 //     fresh sessions with their own context window. Main
 //     chat's token budget is NOT polluted by review
 //     reasoning (which can burn tens of thousands of tokens).
-//   - Zero qualifiers: /review takes no args. Extra args are
-//     rejected inline (matches /cwd / /think / /use).
+//   - Zero qualifiers: /review takes no positional args. The flags
+//     are parsed by the shared lexer (command.ParseCmdArgs), which
+//     rejects unknown flags and stray positionals.
+//   - The runner is resolved in four tiers: the -a / --agent flag
+//     of this invocation, the global `review.agent` setting, the
+//     chat session's selected agent, and — when none of them names
+//     an agent — the "no active agent" error.
+//   - `-g / --global` persists the runner as `review.agent` in
+//     ~/.nightme/config.yaml; `--unset` removes it again.
 //   - The bridge's Starter.Review method calls agent.Review
 //     (uses the shared session helper internally). Most coding
 //     bridges delegate; pty/bash returns
@@ -38,11 +45,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/agentsession"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
+	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/timeouts"
@@ -80,102 +89,178 @@ func (f *Factory) Spec() command.Spec {
                                  #   inject findings back to the same chat
 /review --agent codex      # run review with codex (or any registered agent),
                                  #   findings still go to the current selected agent
-/review -a codex            # short form of --agent`,
+/review -a codex            # short form of --agent
+/review -a codex -g         # also persist codex as the global review agent
+                                 #   (-g / --global) for later /review runs
+/review -g --unset          # remove the persisted global review agent`,
 		Category: "workspace",
 	}
 }
 
-// Spec is the parsed result of /review's argv. v8 introduced a
-// single optional flag (--agent) that lets the user run the
-// review on a different agent than the current selected one;
-// findings always land in the current AS. All other args are
-// rejected inline at the dispatch layer.
-type Spec struct {
-	// Agent overrides the review runner. Empty means "use the
-	// current selected AS's agent" (the default). When set, the
-	// dispatcher looks up agent.Builtins.Get(Agent) and uses that
-	// Starter's session to run the review; findings are still
-	// injected to the current AS (as.SendBlocks) — only the
-	// runner differs.
-	Agent string
+// reviewCmdSpec declares /review's argv grammar. The shared lexer
+// (command.ParseCmdArgs) enforces the "unknown flag" / arity
+// contract for the whole /<cmd> surface.
+var reviewCmdSpec = command.CmdSpec{
+	Name:  "/review",
+	Usage: "/review [-a|--agent <name>] [-g|--global] [--unset]",
+	Flags: map[string]command.FlagSpec{
+		"-a":       {Name: "agent", TakesValue: true},
+		"--agent":  {Name: "agent", TakesValue: true},
+		"-g":       {Name: "global"},
+		"--global": {Name: "global"},
+		"--unset":  {Name: "unset"},
+	},
+	MinArgs: 0,
+	MaxArgs: 0,
 }
 
-// parseReviewArgs extracts the optional --agent / -a flag from
-// argv. Returns an error for any unrecognised token, matching
-// the dispatcher-level rejection pattern (don't be lenient
-// with user input — better to error and have the user retry).
+// Spec is the parsed result of /review's argv.
 //
-// Issue #291: /review was the early adopter of the strict
-// pattern that command.ParseCmdArgs now implements for the whole
-// /<cmd> surface, and it already satisfies the contract. It
-// keeps its own two-line lexer rather than delegating, for one
-// reason: its "unknown arg %q" wording is deliberately
-// token-echoing and covers non-ASCII lookalikes too (an em-dash
-// "—agent" is not flag-shaped, so a generic lexer would report
-// it as a positional). Behaviour is equivalent; only the
-// phrasing differs. Any NEW flag on /review should prompt a
-// switch to ParseCmdArgs.
+// Agent picks the review runner for this invocation; Global
+// persists that runner as the machine-wide default;
+// Unset removes the persisted default. The findings always land in
+// the chat session's current AS — only the runner differs.
+type Spec struct {
+	// Agent overrides the review runner. Empty means "use the
+	// global scope, then the current selected AS's agent". When
+	// set, the dispatcher looks up agent.Builtins.Get(Agent) and
+	// uses that Starter's session to run the review; findings are
+	// still injected to the current AS (as.SendBlocks) — only the
+	// runner differs.
+	Agent string
+
+	// Global asks for Agent to be persisted as the global review
+	// agent (the review.agent key of ~/.nightme/config.yaml).
+	Global bool
+
+	// Unset removes the persisted global review agent. It starts
+	// no review.
+	Unset bool
+}
+
+// parseReviewArgs extracts /review's flags from argv. Returns an
+// error for any unrecognised token, matching the dispatcher-level
+// rejection pattern (don't be lenient with user input — better to
+// error and have the user retry).
 //
 // Side-effect-free; takes only argv (slice of strings after
 // the command name itself).
 func parseReviewArgs(argv []string) (Spec, error) {
-	var spec Spec
-	for i := 0; i < len(argv); i++ {
-		a := argv[i]
-		switch a {
-		case "-a", "--agent":
-			if i+1 >= len(argv) {
-				return Spec{}, fmt.Errorf("--agent requires a value")
-			}
-			i++
-			spec.Agent = argv[i]
-		default:
-			return Spec{}, fmt.Errorf("unknown arg %q (only --agent / -a supported)", a)
-		}
+	parsed, err := command.ParseCmdArgs(argv, reviewCmdSpec)
+	if err != nil {
+		return Spec{}, err
+	}
+	spec := Spec{
+		Agent:  strings.TrimSpace(parsed.Value("agent")),
+		Global: parsed.Bool("global"),
+		Unset:  parsed.Bool("unset"),
+	}
+	// An empty agent name is a mistake, not a request for the
+	// default — "not given" and "given as empty" must stay
+	// distinguishable.
+	if parsed.Has("agent") && spec.Agent == "" {
+		return Spec{}, errors.New("--agent requires a non-empty agent name")
 	}
 	return spec, nil
+}
+
+// validateReviewFlags rejects the flag combinations /review cannot
+// act on. Each combination gets its own message so the user knows
+// which flag to fix.
+func validateReviewFlags(spec Spec) error {
+	switch {
+	case spec.Unset && spec.Agent != "":
+		return errors.New("--unset and --agent are mutually exclusive")
+	case spec.Unset && !spec.Global:
+		return errors.New("--unset requires --global")
+	case spec.Global && !spec.Unset && spec.Agent == "":
+		return errors.New("--global requires --agent <name>")
+	}
+	return nil
+}
+
+// resolveRunner picks the agent that runs the review.
+//
+//	Tier 1  -a / --agent          this invocation
+//	Tier 2  review.agent          global scope
+//	Tier 3  the session's agent   the chat session's selected agent
+//	Tier 4  none                  the caller reports "no active agent"
+//
+// A tier-2 name that is not a registered agent falls through to
+// tier 3 — a stale name in the config file must not brick /review.
+// The returned warning describes the substitution.
+func resolveRunner(cliAgent, cfgAgent, sessionAgent string) (name string, warn string) {
+	if cliAgent != "" {
+		return cliAgent, ""
+	}
+	if cfgAgent != "" {
+		if _, err := agent.Builtins.Get(cfgAgent); err == nil {
+			return cfgAgent, ""
+		}
+		if sessionAgent == "" {
+			return "", fmt.Sprintf("⚠️ review.agent %q is not a registered agent", cfgAgent)
+		}
+		return sessionAgent, fmt.Sprintf("⚠️ review.agent %q is not a registered agent — using %s", cfgAgent, sessionAgent)
+	}
+	return sessionAgent, ""
 }
 
 // Handle implements command.SlashCommandFactory.
 //
 // Steps:
-//  1. Inline `len(input.Args)` check — no separate parse function
-//     (matches /cwd / /think / /use style).
-//  2. Resolve the current chat's selected AgentSession.
-//  3. Look up the corresponding Starter from agent.Builtins (it's
+//  1. Parse the flags (shared lexer) and reject the flag
+//     combinations /review cannot act on.
+//  2. Apply the global scope: `-g` persists the runner,
+//     `--unset` removes it. The write happens before the chat
+//     session is consulted — the persisted setting is machine-wide
+//     and does not depend on whether this chat has a workspace.
+//  3. Resolve the current chat's selected AgentSession.
+//  4. Resolve the runner: -a / --agent → global scope → the chat
+//     session's agent.
+//  5. Look up the corresponding Starter from agent.Builtins (it's
 //     keyed by agent name).
-//  4. Build an agent.StartConfig with the chat session's
+//  6. Build an agent.StartConfig with the chat session's
 //     selected cwd.
-//  5. Delegate to starter.Review — the bridge's Starter owns the
+//  7. Delegate to starter.Review — the bridge's Starter owns the
 //     actual prompt invocation (most call agent.Review).
 //
-// Returns Consumed=true and NO reply — the review appears
-// asynchronously through the chat session's normal event pipeline
-// (readpump → translate → emit), automatically tagged with
-// agentbar / usagebar footer.
+// Returns Consumed=true. The review itself appears asynchronously
+// through the chat session's normal event pipeline (readpump →
+// translate → emit), automatically tagged with agentbar / usagebar
+// footer; the notices about the global scope travel with this
+// command's own reply.
 func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	mgr *chatsession.Manager, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 
-	// Parse args. /review supports ONE optional flag: --agent/-a
-	// to specify which coding agent runs the review (overriding
-	// the default of the current selected AS). Findings always
-	// land in the current selected AS (via as.SendBlocks in the
-	// goroutine below). Multiple /review commands in parallel
-	// run on different agents and feed back into the same AS,
-	// matching the user's "different reviewers, single chat"
-	// workflow.
+	// Parse the flags. /review supports --agent/-a (the runner of
+	// this invocation), -g/--global (persist that runner) and
+	// --unset (remove the persisted runner). Findings always land
+	// in the current selected AS (via as.SendBlocks in the
+	// goroutine below). Multiple /review commands in parallel run
+	// on different agents and feed back into the same AS, matching
+	// the user's "different reviewers, single chat" workflow.
 	//
 	// parseReviewArgs is the single source of truth for arg
 	// validation (rejects unknown flags + positional names with
 	// a specific error message). There is intentionally no inline
 	// `len(input.Args) > 1` check — such a check would mistakenly
 	// reject `/review --agent codex` (3 args) before the flag
-	// parser can recognize `--agent`. v6 used an inline check +
-	// zero qualifiers; v8 added `--agent` and the inline check
-	// must NOT fire before parseReviewArgs.
+	// parser can recognize `--agent`.
 	spec, err := parseReviewArgs(input.Args[1:])
 	if err != nil {
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
+	}
+	if err := validateReviewFlags(spec); err != nil {
+		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
+	}
+
+	// Apply the global scope before the chat session is consulted.
+	notices, done, err := applyGlobalScope(spec)
+	if err != nil {
+		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
+	}
+	if done {
+		return command.Reply(ctx, rt, strings.Join(notices, "\n")), nil
 	}
 
 	// Resolve the inject target. /review always injects findings
@@ -194,29 +279,48 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	if err != nil {
 		switch {
 		case errors.Is(err, chatsession.ErrNoSelectedCwd):
-			return command.Reply(ctx, rt,
+			return replyWith(ctx, rt, notices,
 				"❌ no workspace set. Send /cwd <path> first.",
 			), nil
 		case errors.Is(err, chatsession.ErrNoSelectedAgent):
-			return command.Reply(ctx, rt,
+			return replyWith(ctx, rt, notices,
 				"❌ no active agent configured. Run /use <agent> first.",
 			), nil
 		default:
-			return command.Reply(ctx, rt, fmt.Sprintf(
+			return replyWith(ctx, rt, notices, fmt.Sprintf(
 				"❌ failed to activate agent: %v", err,
 			)), nil
 		}
 	}
 
-	// Resolve the review runner. --agent overrides the default
-	// (current AS's agent); empty / missing means "use the
-	// current AS's agent". The runner is a separate one-shot
-	// spawn — its findings get routed to BOTH the AS (via
-	// as.SendBlocks) and the channel (via em.Send) by the
-	// goroutine below.
-	runnerName := as.Agent
-	if spec.Agent != "" {
-		runnerName = spec.Agent
+	// Resolve the review runner. Tier 1 is the -a / --agent flag,
+	// tier 2 the global scope, tier 3 the current AS's agent. The
+	// global scope is only read when tier 1 did not decide — a
+	// per-invocation flag always wins over the persisted default.
+	//
+	// The runner is a separate one-shot spawn — its findings get
+	// routed to BOTH the AS (via as.SendBlocks) and the channel
+	// (via em.Send) by the goroutine below.
+	globalAgent := ""
+	if spec.Agent == "" {
+		path := config.DefaultPath()
+		var readErr error
+		globalAgent, readErr = readGlobalReviewAgent(path)
+		if readErr != nil {
+			notices = append(notices, fmt.Sprintf(
+				"⚠️ cannot read review.agent from %s: %v — using %s",
+				path, readErr, as.Agent,
+			))
+		}
+	}
+	runnerName, warn := resolveRunner(spec.Agent, globalAgent, as.Agent)
+	if warn != "" {
+		notices = append(notices, warn)
+	}
+	if runnerName == "" {
+		return replyWith(ctx, rt, notices,
+			"❌ no active agent configured. Run /use <agent> first.",
+		), nil
 	}
 	starter, err := agent.Builtins.Get(runnerName)
 	if err != nil {
@@ -228,7 +332,7 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 		if spec.Agent != "" {
 			suffix = " (--agent)"
 		}
-		return command.Reply(ctx, rt, fmt.Sprintf(
+		return replyWith(ctx, rt, notices, fmt.Sprintf(
 			"❌ unknown agent %q%s", runnerName, suffix,
 		)), nil
 	}
@@ -381,12 +485,80 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 		_ = emitter.Send(revCtx, buildTerminalReply(chatID, replyTo, formatted, runnerName, result))
 	}()
 
-	// Return Consumed=true with no inline reply. The chat session
-	// is now free: readpump continues processing events, the
-	// dispatch worker is free, the user can send more messages.
-	// The review findings arrive in chat asynchronously when the
-	// goroutine completes (both AS-injected and channel-emitted).
-	return &command.SlashOutput{Consumed: true}, nil
+	// Return Consumed=true. The chat session is now free: readpump
+	// continues processing events, the dispatch worker is free, the
+	// user can send more messages. The review findings arrive in
+	// chat asynchronously when the goroutine completes (both
+	// AS-injected and channel-emitted); the notices about the
+	// global scope travel with this reply so the user learns about
+	// the persisted setting right away.
+	return replyWith(ctx, rt, notices, ""), nil
+}
+
+// applyGlobalScope performs the global-scope write of one /review
+// invocation: `-g` persists the runner, `--unset` removes it.
+//
+// It returns the notices for the reply and whether the command is
+// done — the unset path starts no review. A failed write is a
+// notice, not an error: the review is the primary action and must
+// still run.
+func applyGlobalScope(spec Spec) (notices []string, done bool, err error) {
+	if !spec.Global && !spec.Unset {
+		return nil, false, nil
+	}
+	path := config.DefaultPath()
+	switch {
+	case spec.Unset:
+		if err := config.UnsetReviewAgent(path); err != nil {
+			return nil, false, fmt.Errorf("failed to unset review.agent: %w", err)
+		}
+		return []string{"✅ review.agent unset (global)", "→ file: " + path}, true, nil
+	case spec.Global:
+		// The name must be a registered agent — a persisted name
+		// that no agent answers to would only fail later, on every
+		// /review run.
+		if _, err := agent.Builtins.Get(spec.Agent); err != nil {
+			return nil, false, fmt.Errorf("unknown agent %q", spec.Agent)
+		}
+		if err := config.SetReviewAgent(path, spec.Agent); err != nil {
+			return []string{fmt.Sprintf(
+				"⚠️ failed to save review.agent: %v — reviewing with %s anyway",
+				err, spec.Agent,
+			)}, false, nil
+		}
+		return []string{
+			fmt.Sprintf("✅ review.agent = %s (global)", spec.Agent),
+			"→ file: " + path,
+		}, false, nil
+	}
+	return nil, false, nil
+}
+
+// readGlobalReviewAgent reads the persisted review.agent from the
+// config file at path.
+//
+// config.Load (not config.LoadDefault) is deliberate: LoadDefault
+// probes the built-in agents and may persist a detected primary as
+// a side effect, which a slash command must not cause.
+func readGlobalReviewAgent(path string) (string, error) {
+	cfg, err := config.Load(path)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(cfg.Review.Agent), nil
+}
+
+// replyWith builds the command's single reply: the notices the user
+// needs to see (the persistence confirmation, the warnings) followed
+// by the error line when the command failed. A command that failed
+// after a successful write still reports the write.
+func replyWith(ctx context.Context, rt command.RuntimeServices, notices []string, errLine string) *command.SlashOutput {
+	lines := make([]string, 0, len(notices)+1)
+	lines = append(lines, notices...)
+	if errLine != "" {
+		lines = append(lines, errLine)
+	}
+	return command.Reply(ctx, rt, strings.Join(lines, "\n"))
 }
 
 // buildTerminalReply assembles the /review terminal OutboundMessage.

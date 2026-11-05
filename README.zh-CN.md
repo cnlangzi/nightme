@@ -241,7 +241,7 @@ Chat 级别的斜杠命令。`/gtw` 子命令见 [它们自己的 section](#git-
 | `/tools on\|off` | 是否展示每个工具的独立线程回复（默认关）。 |
 | `/handoff <name>` | 把当前任务序列化到 `~/.nightme/handoff/<name>.md`，下一个 agent（或新 session）从任意目录接手。 |
 | `/resume <name>` | 在当前 session 里继续 `~/.nightme/handoff/<name>.md` 描述的任务。 |
-| `/review [--agent <agent>]` | 当前分支对比默认分支做 review（PR 模式），findings 注回当前 chat。`--agent` 指定用哪个 agent 跑 review。 |
+| `/review [-a\|--agent <agent>] [-g\|--global] [--unset]` | 当前分支对比默认分支做 review（PR 模式），findings 注回当前 chat。`--agent` 指定用哪个 agent 跑 review；`-g` 把它存成 `~/.nightme/config.yaml` 里的全局 `review.agent`；`--unset` 删掉这个全局设置。 |
 | `/wiki init [--modules] [--llmstxt] [--arch]` | 读码、分模块、写每个模块的 wiki 文件——把仓库 wiki 作为项目资产。 |
 | `/queue <message>` | 把一条消息作为独立 Prompt 追加进队列。 |
 | `/help` | 在 Chat 里列出所有斜杠命令。 |

@@ -1,12 +1,10 @@
 package gtw
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 
@@ -15,6 +13,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/pathutil"
+	"github.com/cnlangzi/nightme/internal/yamlfile"
 )
 
 // defaultLanguage is the output language used when neither the
@@ -160,160 +159,24 @@ func writeUserConfig(mutate func(root *yaml.Node) error) error {
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	root, err := parseConfigRoot(data, path)
+	root, err := yamlfile.Parse(data, path)
 	if err != nil {
 		return err
 	}
 	if err := mutate(root); err != nil {
 		return err
 	}
-	out, err := encodeConfigRoot(root)
+	out, err := yamlfile.Encode(root)
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(pathutil.Dir(path), 0o700); err != nil {
-		return err
-	}
-	return writeFileAtomic(path, out)
-}
-
-// writeFileAtomic writes data to path via a temp file in the same
-// directory followed by a rename. A failed write leaves the
-// previous file untouched — the user's hand-written config never
-// ends up truncated.
-func writeFileAtomic(path string, data []byte) error {
-	dir := pathutil.Dir(path)
-	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }()
-
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmpName, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, path)
-}
-
-// parseConfigRoot parses the YAML document into its root mapping
-// node. A document with no content — an empty file, a
-// comments-only file, a bare `---` — yields a fresh empty
-// mapping; a document whose root is something else (a list, a
-// string) is rejected, because writing into it would destroy
-// whatever the user meant.
-func parseConfigRoot(data []byte, path string) (*yaml.Node, error) {
-	var doc yaml.Node
-	if err := yaml.Unmarshal(data, &doc); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
-	}
-	if doc.Kind == 0 || len(doc.Content) == 0 {
-		return emptyConfigRoot(data), nil
-	}
-	root := doc.Content[0]
-	if root.Kind == yaml.ScalarNode && root.Tag == "!!null" {
-		return emptyConfigRoot(data), nil
-	}
-	if root.Kind != yaml.MappingNode {
-		return nil, fmt.Errorf("%s: not a YAML mapping", path)
-	}
-	return root, nil
-}
-
-// emptyConfigRoot builds the fresh mapping a document with no
-// content becomes. yaml.v3 drops the comments of a comments-only
-// document — they are attached to no node — so the header is
-// recovered from the raw bytes and carried over.
-func emptyConfigRoot(data []byte) *yaml.Node {
-	root := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
-	root.HeadComment = commentHeader(data)
-	return root
-}
-
-// commentHeader returns the comment lines of a document that holds
-// nothing else. It returns "" when the text carries anything that
-// is not a comment.
-func commentHeader(data []byte) string {
-	var lines []string
-	for _, raw := range strings.Split(string(data), "\n") {
-		trimmed := strings.TrimSpace(raw)
-		if trimmed == "" {
-			continue
-		}
-		if !strings.HasPrefix(trimmed, "#") {
-			return ""
-		}
-		lines = append(lines, trimmed)
-	}
-	return strings.Join(lines, "\n")
-}
-
-// encodeConfigRoot serializes a root mapping back to YAML. The
-// indent is pinned to 2 spaces to match the shape users hand-write.
-func encodeConfigRoot(root *yaml.Node) ([]byte, error) {
-	doc := &yaml.Node{Kind: yaml.DocumentNode, Content: []*yaml.Node{root}}
-	var buf bytes.Buffer
-	enc := yaml.NewEncoder(&buf)
-	enc.SetIndent(2)
-	if err := enc.Encode(doc); err != nil {
-		return nil, err
-	}
-	if err := enc.Close(); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
-
-// mapValue returns the value node stored under key in a mapping, or
-// nil when the mapping has no such key.
-func mapValue(m *yaml.Node, key string) *yaml.Node {
-	for i := 0; i+1 < len(m.Content); i += 2 {
-		if m.Content[i].Value == key {
-			return m.Content[i+1]
-		}
-	}
-	return nil
-}
-
-// setMapValue stores a string scalar under key, creating the key
-// when the mapping does not have it yet.
-func setMapValue(m *yaml.Node, key, value string) {
-	if v := mapValue(m, key); v != nil {
-		v.Kind = yaml.ScalarNode
-		v.Tag = "!!str"
-		v.Value = value
-		v.Content = nil
-		return
-	}
-	m.Content = append(m.Content,
-		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key},
-		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value},
-	)
-}
-
-// deleteMapKey removes key from a mapping. Reports whether the key
-// was there.
-func deleteMapKey(m *yaml.Node, key string) bool {
-	for i := 0; i+1 < len(m.Content); i += 2 {
-		if m.Content[i].Value == key {
-			m.Content = append(m.Content[:i], m.Content[i+2:]...)
-			return true
-		}
-	}
-	return false
+	return yamlfile.WriteFileAtomic(path, out)
 }
 
 // setGlobalLang writes the user-scope output language.
 func setGlobalLang(lang string) error {
 	return writeUserConfig(func(root *yaml.Node) error {
-		setMapValue(root, langKey, lang)
+		yamlfile.SetMapValue(root, langKey, lang)
 		return nil
 	})
 }
@@ -321,7 +184,7 @@ func setGlobalLang(lang string) error {
 // unsetGlobalLang removes the user-scope output language.
 func unsetGlobalLang() error {
 	return writeUserConfig(func(root *yaml.Node) error {
-		deleteMapKey(root, langKey)
+		yamlfile.DeleteMapKey(root, langKey)
 		return nil
 	})
 }
@@ -329,27 +192,15 @@ func unsetGlobalLang() error {
 // setRepoLang writes the repo-scope output language for repo.
 func setRepoLang(repo, lang string) error {
 	return writeUserConfig(func(root *yaml.Node) error {
-		repos := mapValue(root, reposKey)
-		if repos == nil {
-			repos = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
-			root.Content = append(root.Content,
-				&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: reposKey},
-				repos)
+		repos, err := yamlfile.MapValueOrCreate(root, reposKey)
+		if err != nil {
+			return err
 		}
-		if repos.Kind != yaml.MappingNode {
-			return fmt.Errorf("`%s` is not a mapping", reposKey)
-		}
-		entry := mapValue(repos, repo)
-		if entry == nil {
-			entry = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
-			repos.Content = append(repos.Content,
-				&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: repo},
-				entry)
-		}
-		if entry.Kind != yaml.MappingNode {
+		entry, err := yamlfile.MapValueOrCreate(repos, repo)
+		if err != nil {
 			return fmt.Errorf("`%s.%s` is not a mapping", reposKey, repo)
 		}
-		setMapValue(entry, langKey, lang)
+		yamlfile.SetMapValue(entry, langKey, lang)
 		return nil
 	})
 }
@@ -359,20 +210,20 @@ func setRepoLang(repo, lang string) error {
 // accumulate `repos: {}` shells.
 func unsetRepoLang(repo string) error {
 	return writeUserConfig(func(root *yaml.Node) error {
-		repos := mapValue(root, reposKey)
+		repos := yamlfile.MapValue(root, reposKey)
 		if repos == nil || repos.Kind != yaml.MappingNode {
 			return nil
 		}
-		entry := mapValue(repos, repo)
+		entry := yamlfile.MapValue(repos, repo)
 		if entry == nil || entry.Kind != yaml.MappingNode {
 			return nil
 		}
-		deleteMapKey(entry, langKey)
+		yamlfile.DeleteMapKey(entry, langKey)
 		if len(entry.Content) == 0 {
-			deleteMapKey(repos, repo)
+			yamlfile.DeleteMapKey(repos, repo)
 		}
 		if len(repos.Content) == 0 {
-			deleteMapKey(root, reposKey)
+			yamlfile.DeleteMapKey(root, reposKey)
 		}
 		return nil
 	})

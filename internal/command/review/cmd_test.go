@@ -2,14 +2,12 @@ package review
 
 // Dispatcher tests for /review.
 //
-// v7: Handle is fully async — it returns Consumed=true with no
-// inline reply and launches a goroutine to do the actual review
-// work. The synchronous error paths (arg check, no active AS,
-// unknown agent) still return inline replies; only the
-// starter.Review call is async.
+// v7: Handle is fully async — it returns Consumed=true and launches
+// a goroutine to do the actual review work. The synchronous error
+// paths (arg check, no active AS, unknown agent) still return inline
+// replies; only the starter.Review call is async.
 //
-// We test only the synchronous error paths here. The async
-// behavior is covered by:
+// The async behavior is covered by:
 //   - internal/agent/review_test.go (tests agent.Review itself
 //     using a fakeStarter that records RunOnce calls + injects
 //     into a fake)
@@ -29,28 +27,31 @@ package review
 
 import (
 	"context"
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
+	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/messages"
 )
 
-// TestSpec_RejectsArgs covers the arg-rejection path. /review is
-// zero-qualifier except for the --agent / -a flag, so any
-// unrecognized arg (positional name, unknown flag) gets a
-// "❌ unknown arg" reply with the offending token echoed.
+// TestSpec_RejectsArgs covers the arg-rejection path. /review takes
+// no positional args, so a stray word or an unknown flag gets a
+// "❌" reply with the offending token echoed.
+//
+// The wording comes from the shared lexer (command.ParseCmdArgs):
+// an unknown flag reports "unknown flag", a stray word reports
+// "unexpected positional argument".
 //
 // (command.Reply always sets Consumed=true — the runtime shim
 // consumes the slash output and routes Reply to the channel. We
 // only check Reply text here, not Consumed.)
-//
-// Note: this test was previously written under the v6 design
-// (inline len > 1 check + "不接受参数" message). v8 added the
-// --agent flag and removed the inline check; parseReviewArgs is
-// now the single source of truth for arg validation. The test
-// names are kept for parity.
 func TestSpec_RejectsArgs(t *testing.T) {
 	cases := []struct {
 		name           string
@@ -74,7 +75,8 @@ func TestSpec_RejectsArgs(t *testing.T) {
 			if out.Reply == "" {
 				t.Fatal("Handle returned empty Reply; expected error message")
 			}
-			if !strings.Contains(out.Reply, "unknown arg") {
+			if !strings.Contains(out.Reply, "unknown flag") &&
+				!strings.Contains(out.Reply, "unexpected positional argument") {
 				t.Errorf("Reply %q does not contain expected error", out.Reply)
 			}
 			// The first extra arg should be echoed back so the
@@ -86,11 +88,9 @@ func TestSpec_RejectsArgs(t *testing.T) {
 	}
 }
 
-// TestParseReviewArgs covers the --agent / -a flag parser in
-// isolation. v8 introduced the single-flag command surface; the
-// dispatcher delegates to parseReviewArgs after the inline
-// `len(input.Args) > 1` early-return path is gone (because
-// the spec explicitly allows --agent).
+// TestParseReviewArgs covers the flag parser in isolation. The
+// dispatcher delegates to parseReviewArgs, which delegates to the
+// shared lexer.
 func TestParseReviewArgs(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -102,11 +102,17 @@ func TestParseReviewArgs(t *testing.T) {
 		{"--agent codex", []string{"--agent", "codex"}, Spec{Agent: "codex"}, false},
 		{"-a codex (short form)", []string{"-a", "codex"}, Spec{Agent: "codex"}, false},
 		{"--agent at end", []string{"--agent", "dsh"}, Spec{Agent: "dsh"}, false},
+		{"-g", []string{"-g"}, Spec{Global: true}, false},
+		{"--global", []string{"--global"}, Spec{Global: true}, false},
+		{"--unset", []string{"--unset"}, Spec{Unset: true}, false},
+		{"-a codex -g", []string{"-a", "codex", "-g"}, Spec{Agent: "codex", Global: true}, false},
+		{"-g --unset", []string{"-g", "--unset"}, Spec{Global: true, Unset: true}, false},
 		{"--agent without value", []string{"--agent"}, Spec{}, true},
 		{"-a without value", []string{"-a"}, Spec{}, true},
 		{"positional arg rejected", []string{"foo"}, Spec{}, true},
 		{"unknown flag rejected", []string{"--base", "main"}, Spec{}, true},
-		{"empty agent name", []string{"--agent", ""}, Spec{Agent: ""}, false},
+		{"empty agent name rejected", []string{"--agent", ""}, Spec{}, true},
+		{"blank agent name rejected", []string{"--agent", "   "}, Spec{}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -121,28 +127,339 @@ func TestParseReviewArgs(t *testing.T) {
 	}
 }
 
+// TestValidateReviewFlags pins the error strings of the flag
+// combinations /review cannot act on.
+func TestValidateReviewFlags(t *testing.T) {
+	cases := []struct {
+		name    string
+		spec    Spec
+		wantErr string
+	}{
+		{"unset without global", Spec{Unset: true}, "--unset requires --global"},
+		{"unset with agent", Spec{Unset: true, Global: true, Agent: "pi"}, "--unset and --agent are mutually exclusive"},
+		{"global without agent", Spec{Global: true}, "--global requires --agent <name>"},
+		{"agent alone", Spec{Agent: "pi"}, ""},
+		{"global with agent", Spec{Global: true, Agent: "pi"}, ""},
+		{"global with unset", Spec{Global: true, Unset: true}, ""},
+		{"nothing", Spec{}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateReviewFlags(tc.spec)
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Fatalf("validateReviewFlags(%+v) = %v, want nil", tc.spec, err)
+			case tc.wantErr != "" && err == nil:
+				t.Fatalf("validateReviewFlags(%+v) = nil, want %q", tc.spec, tc.wantErr)
+			case tc.wantErr != "" && err.Error() != tc.wantErr:
+				t.Fatalf("validateReviewFlags(%+v) = %q, want %q", tc.spec, err.Error(), tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestResolveRunner covers the four tiers of the runner chain:
+// -a / --agent → the global scope → the session's agent → none.
+func TestResolveRunner(t *testing.T) {
+	registered := registerTestAgent(t, "review-resolve-agent")
+
+	cases := []struct {
+		name              string
+		cli, cfg, session string
+		wantName          string
+		wantWarn          string
+	}{
+		{
+			name: "tier 1 wins over the global scope and the session",
+			cli:  "cli-agent", cfg: registered.name, session: "session-agent",
+			wantName: "cli-agent",
+		},
+		{
+			name: "tier 2 wins over the session",
+			cfg:  registered.name, session: "session-agent",
+			wantName: registered.name,
+		},
+		{
+			name:     "tier 3 when there is no global scope",
+			session:  "session-agent",
+			wantName: "session-agent",
+		},
+		{
+			name: "an unregistered global scope falls back to tier 3",
+			cfg:  "review-unregistered-agent", session: "session-agent",
+			wantName: "session-agent",
+			wantWarn: "review-unregistered-agent",
+		},
+		{
+			name:     "tier 4 when nothing names an agent",
+			wantName: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, warn := resolveRunner(tc.cli, tc.cfg, tc.session)
+			if got != tc.wantName {
+				t.Errorf("resolveRunner = %q, want %q", got, tc.wantName)
+			}
+			switch {
+			case tc.wantWarn == "" && warn != "":
+				t.Errorf("unexpected warning: %q", warn)
+			case tc.wantWarn != "" && !strings.Contains(warn, tc.wantWarn):
+				t.Errorf("warning %q does not name %q", warn, tc.wantWarn)
+			}
+		})
+	}
+}
+
+// TestHandle_GlobalScopePersistsTheRunner covers R5: `-a <name> -g`
+// stores the runner in the global config and confirms the write.
+func TestHandle_GlobalScopePersistsTheRunner(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	t.Setenv("NIGHTME_CONFIG", path)
+
+	starter := registerTestAgent(t, "review-global-agent")
+	cs := newReviewChatSession(t, starter.name, dir)
+
+	out := dispatchReview(t, cs, "review", "-a", starter.name, "-g")
+
+	if !strings.Contains(out.Reply, "✅ review.agent = "+starter.name+" (global)") {
+		t.Fatalf("reply does not confirm the write: %q", out.Reply)
+	}
+	if !strings.Contains(out.Reply, "→ file: "+path) {
+		t.Fatalf("reply does not name the file: %q", out.Reply)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Review.Agent != starter.name {
+		t.Errorf("review.agent = %q, want %q", cfg.Review.Agent, starter.name)
+	}
+}
+
+// TestHandle_UnsetRemovesTheGlobalScope covers R10: `-g --unset`
+// removes the persisted runner and starts no review.
+func TestHandle_UnsetRemovesTheGlobalScope(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	t.Setenv("NIGHTME_CONFIG", path)
+	if err := os.WriteFile(path, []byte("review:\n  agent: pi\n"), 0o600); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	starter := registerTestAgent(t, "review-unset-agent")
+	cs := newReviewChatSession(t, starter.name, dir)
+
+	out := dispatchReview(t, cs, "review", "-g", "--unset")
+
+	if !strings.Contains(out.Reply, "✅ review.agent unset (global)") {
+		t.Fatalf("reply does not confirm the unset: %q", out.Reply)
+	}
+	if !strings.Contains(out.Reply, "→ file: "+path) {
+		t.Fatalf("reply does not name the file: %q", out.Reply)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if strings.Contains(string(data), "agent: pi") {
+		t.Fatalf("review.agent survived the unset:\n%s", data)
+	}
+	select {
+	case <-starter.called:
+		t.Fatal("the unset path started a review")
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// TestHandle_UnsetOnAnEmptyConfigCreatesNothing covers the edge case
+// where nothing was ever configured.
+func TestHandle_UnsetOnAnEmptyConfigCreatesNothing(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	t.Setenv("NIGHTME_CONFIG", path)
+
+	starter := registerTestAgent(t, "review-unset-empty-agent")
+	cs := newReviewChatSession(t, starter.name, dir)
+
+	out := dispatchReview(t, cs, "review", "-g", "--unset")
+
+	if !strings.Contains(out.Reply, "✅ review.agent unset (global)") {
+		t.Fatalf("unexpected reply: %q", out.Reply)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("the unset created a config file, stat err = %v", err)
+	}
+}
+
+// TestHandle_UnregisteredGlobalScopeFallsBackToTheSessionAgent
+// covers R11: a stale name in the global scope must not brick
+// /review — the session's agent runs the review and the user is
+// told why.
+func TestHandle_UnregisteredGlobalScopeFallsBackToTheSessionAgent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	t.Setenv("NIGHTME_CONFIG", path)
+	if err := os.WriteFile(path, []byte("review:\n  agent: review-stale-agent\n"), 0o600); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	starter := registerTestAgent(t, "review-session-agent")
+	cs := newReviewChatSession(t, starter.name, dir)
+
+	out := dispatchReview(t, cs, "review")
+
+	if !strings.Contains(out.Reply, `review.agent "review-stale-agent" is not a registered agent`) {
+		t.Fatalf("reply does not carry the warning: %q", out.Reply)
+	}
+	if !strings.Contains(out.Reply, "using "+starter.name) {
+		t.Fatalf("reply does not name the fallback agent: %q", out.Reply)
+	}
+	select {
+	case <-starter.called:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the review did not run on the session agent")
+	}
+}
+
+// TestHandle_MalformedConfigFallsBackToTheSessionAgent covers the
+// edge case where the global config file does not parse: the file
+// is left alone, the user is told, and the session's agent runs the
+// review.
+func TestHandle_MalformedConfigFallsBackToTheSessionAgent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	t.Setenv("NIGHTME_CONFIG", path)
+	bad := "primary: [unclosed\n"
+	if err := os.WriteFile(path, []byte(bad), 0o600); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	starter := registerTestAgent(t, "review-malformed-agent")
+	cs := newReviewChatSession(t, starter.name, dir)
+
+	out := dispatchReview(t, cs, "review")
+
+	if !strings.Contains(out.Reply, "⚠️ cannot read review.agent from "+path) {
+		t.Fatalf("reply does not report the unreadable config: %q", out.Reply)
+	}
+	if !strings.Contains(out.Reply, "using "+starter.name) {
+		t.Fatalf("reply does not name the fallback agent: %q", out.Reply)
+	}
+	data, _ := os.ReadFile(path)
+	if string(data) != bad {
+		t.Fatalf("the malformed file was rewritten:\n%s", data)
+	}
+	select {
+	case <-starter.called:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the review did not run on the session agent")
+	}
+}
+
+// TestHandle_FailedGlobalWriteDoesNotStopTheReview covers R12: an
+// unwritable config file is reported, and the review still runs with
+// the requested agent.
+func TestHandle_FailedGlobalWriteDoesNotStopTheReview(t *testing.T) {
+	dir := t.TempDir()
+	// A regular file where a directory is expected makes every
+	// write to the config path fail — no permission games needed.
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+	t.Setenv("NIGHTME_CONFIG", filepath.Join(blocker, "config.yaml"))
+
+	starter := registerTestAgent(t, "review-write-fail-agent")
+	cs := newReviewChatSession(t, starter.name, dir)
+
+	out := dispatchReview(t, cs, "review", "-a", starter.name, "-g")
+
+	if !strings.Contains(out.Reply, "⚠️ failed to save review.agent:") {
+		t.Fatalf("reply does not report the failed write: %q", out.Reply)
+	}
+	if !strings.Contains(out.Reply, "reviewing with "+starter.name+" anyway") {
+		t.Fatalf("reply does not say the review still runs: %q", out.Reply)
+	}
+	select {
+	case <-starter.called:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the review did not start after the failed write")
+	}
+}
+
+// TestHandle_FlagCombinationsAreRejected covers R9: the rejected
+// combinations report their own error and leave no trace on disk.
+func TestHandle_FlagCombinationsAreRejected(t *testing.T) {
+	cases := []struct {
+		name    string
+		argv    []string
+		wantErr string
+	}{
+		{"unset without global", []string{"review", "--unset"}, "--unset requires --global"},
+		{"unset with agent", []string{"review", "-a", "pi", "-g", "--unset"}, "--unset and --agent are mutually exclusive"},
+		{"global without agent", []string{"review", "-g"}, "--global requires --agent <name>"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.yaml")
+			t.Setenv("NIGHTME_CONFIG", path)
+
+			starter := registerTestAgent(t, "review-combo-agent")
+			cs := newReviewChatSession(t, starter.name, dir)
+
+			out := dispatchReview(t, cs, tc.argv...)
+
+			if !strings.Contains(out.Reply, tc.wantErr) {
+				t.Fatalf("reply %q does not contain %q", out.Reply, tc.wantErr)
+			}
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatalf("the rejected command wrote a config file, stat err = %v", err)
+			}
+		})
+	}
+}
+
+// TestHandle_GlobalScopeWithAnUnknownAgentWritesNothing covers the
+// edge case where the name to persist is not a registered agent.
+func TestHandle_GlobalScopeWithAnUnknownAgentWritesNothing(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	t.Setenv("NIGHTME_CONFIG", path)
+
+	starter := registerTestAgent(t, "review-unknown-agent")
+	cs := newReviewChatSession(t, starter.name, dir)
+
+	out := dispatchReview(t, cs, "review", "-a", "review-never-registered", "-g")
+
+	if !strings.Contains(out.Reply, `❌ unknown agent "review-never-registered"`) {
+		t.Fatalf("unexpected reply: %q", out.Reply)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("an unknown agent was persisted, stat err = %v", err)
+	}
+	select {
+	case <-starter.called:
+		t.Fatal("the rejected command started a review")
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
 // TestSpec_AcceptsNoArgs verifies the happy-path early check:
-// `/review` (input.Args == ["review"], len == 1) is accepted at
-// the Spec check stage. The downstream AS lookup is what
-// distinguishes "no active agent" from "all good" — both are
-// exercised by the per-bridge tests; here we just check the
-// early-exit path doesn't fire.
-//
-// Note: in this test we can't easily construct a real
-// ChatSession + AgentSession, so the call may panic on a nil
-// receiver. We guard against that with defer-recover.
+// `/review` (input.Args == ["review"], len == 1) is accepted at the
+// Spec check stage. The downstream AS lookup is what distinguishes
+// "no active agent" from "all good".
 func TestSpec_AcceptsNoArgs(t *testing.T) {
-	defer func() {
-		// If the early arg check let us through, the next
-		// statement will dereference nil cs. That's expected —
-		// we just want to confirm we got past the args check.
-		_ = recover()
-	}()
-	_, _ = dispatchWithNoCS(t, []string{"review"})
-	// We don't assert anything here — the test passes as long
-	// as the inline arg check didn't fire (no Reply with
-	// "不接受参数" was generated). The recover above swallows
-	// the expected nil-pointer dereference.
+	starter := registerTestAgent(t, "review-no-args-agent")
+	cs := newReviewChatSession(t, starter.name, "")
+
+	out := dispatchReview(t, cs, "review")
+
+	if !strings.Contains(out.Reply, "no workspace set") {
+		t.Fatalf("unexpected reply: %q", out.Reply)
+	}
 }
 
 // dispatchWithNoCS invokes the factory's Handle with a nil
@@ -160,6 +477,88 @@ func dispatchWithNoCS(t *testing.T, args []string) (*command.SlashOutput, error)
 		HasMention: false,
 		Args:       args,
 	})
+}
+
+// dispatchReview invokes the factory's Handle against cs and
+// returns the reply.
+func dispatchReview(t *testing.T, cs *chatsession.ChatSession, argv ...string) *command.SlashOutput {
+	t.Helper()
+	f := NewFactory()
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs, command.SlashInput{
+		ChatID:    "review-test-chat",
+		UserID:    "test-user",
+		Text:      "/" + strings.Join(argv, " "),
+		MessageID: "msg-1",
+		Args:      argv,
+	})
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if out == nil {
+		t.Fatal("Handle returned nil SlashOutput")
+	}
+	return out
+}
+
+// newReviewChatSession builds a chat session whose selected agent
+// is agentName. An empty dir leaves the chat without a workspace.
+func newReviewChatSession(t *testing.T, agentName, dir string) *chatsession.ChatSession {
+	t.Helper()
+	mgr := chatsession.NewManager()
+	cs, err := mgr.GetOrCreate("review-test-chat", agentName)
+	if err != nil {
+		t.Fatalf("GetOrCreate: %v", err)
+	}
+	if dir != "" {
+		if err := cs.SetSelectedCwd(dir); err != nil {
+			t.Fatalf("SetSelectedCwd: %v", err)
+		}
+	}
+	return cs
+}
+
+// reviewTestStarter is a minimal agent.Starter that records the
+// Review calls it receives. The bridge packages that register the
+// real starters are not linked into this test binary, so
+// agent.Builtins is empty here.
+type reviewTestStarter struct {
+	name   string
+	called chan struct{}
+}
+
+func (s *reviewTestStarter) Info() agent.Info {
+	return agent.NewInfo(s.name, agent.ModeACP, "", nil, nil)
+}
+func (s *reviewTestStarter) Detect() error { return nil }
+func (s *reviewTestStarter) Init(string)   {}
+func (s *reviewTestStarter) Start(context.Context, agent.StartConfig) (*agent.Agent, error) {
+	return nil, errors.New("reviewTestStarter: Start not implemented")
+}
+func (s *reviewTestStarter) RunOnce(context.Context, agent.StartConfig, []agent.ContentBlock, ...agent.RunOnceOption) (agent.RunResult, error) {
+	return agent.RunResult{}, errors.New("reviewTestStarter: RunOnce not implemented")
+}
+func (s *reviewTestStarter) Review(context.Context, agent.StartConfig, ...agent.RunOnceOption) (agent.RunResult, error) {
+	select {
+	case s.called <- struct{}{}:
+	default:
+	}
+	return agent.RunResult{Text: "reviewed"}, nil
+}
+
+// registerTestAgent registers a fake starter under name and returns
+// it. The registry is a package-level global, so the previous entry
+// is restored when the test ends.
+func registerTestAgent(t *testing.T, name string) *reviewTestStarter {
+	t.Helper()
+	starter := &reviewTestStarter{name: name, called: make(chan struct{}, 1)}
+	prev, _ := agent.Builtins.Get(name)
+	t.Cleanup(func() {
+		if prev != nil {
+			_ = agent.Builtins.Register(prev)
+		}
+	})
+	agent.Builtins.Register(starter)
+	return starter
 }
 
 // TestBuildTerminalReply_PassesThroughEnvelope checks the helper

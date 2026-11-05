@@ -3,6 +3,7 @@ package yamlfile
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -180,8 +181,14 @@ func TestWriteFileAtomic_CreatesParentAndFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat: %v", err)
 	}
-	if perm := info.Mode().Perm(); perm != 0o600 {
-		t.Fatalf("mode = %v, want 0600", perm)
+	// Windows has no Unix-style permission bits: os.Chmod only
+	// toggles the read-only flag there, and os.Stat reports 0666.
+	// The 0o600 in WriteFileAtomic is a no-op on Windows but
+	// harmless — the assertion only makes sense on POSIX.
+	if runtime.GOOS != "windows" {
+		if perm := info.Mode().Perm(); perm != 0o600 {
+			t.Fatalf("mode = %v, want 0600", perm)
+		}
 	}
 }
 

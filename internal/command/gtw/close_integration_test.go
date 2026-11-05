@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -263,11 +264,18 @@ func TestIntegration_EnsureGitignoreOnRealWorktree(t *testing.T) {
 // Returns the repo root (absolute) path.
 func initTempRepo(t *testing.T) string {
 	t.Helper()
+	return initRepoIn(t, t.TempDir())
+}
+
+// initRepoIn creates a throwaway git repo with one initial commit
+// in dir, so `git worktree add` has a valid base. Returns the repo
+// root (absolute) path.
+func initRepoIn(t *testing.T, dir string) string {
+	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not on PATH; skipping real-git integration test")
 	}
 
-	dir := t.TempDir()
 	mustGit(t, dir, "init", "-q", "-b", "main")
 	mustGit(t, dir, "config", "user.email", "test@example.com")
 	mustGit(t, dir, "config", "user.name", "Test")
@@ -286,6 +294,25 @@ func initTempRepo(t *testing.T) string {
 	}
 	mustGit(t, dir, "add", "README.md")
 	mustGit(t, dir, "commit", "-q", "-m", "init")
+	return dir
+}
+
+// shortTempDir returns a temp directory with a SHORT name.
+//
+// t.TempDir() names the directory after the test, which makes the
+// path long enough to break git's worktree admin-path budget on
+// Windows — see TestIntegration_LongLocalBranchNameIsCapped for
+// the numbers. A real checkout lives at a comparable depth.
+//
+// Cleanup is best-effort: a leftover temp dir must not fail a test
+// that already passed.
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "gtw")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	return dir
 }
 
@@ -462,8 +489,17 @@ func TestIntegration_ShortFlagNForLocalFix(t *testing.T) {
 // the worktree must be created under the capped name — the same
 // name the command's quick validation predicts, so the two
 // derivations cannot drift apart.
+//
+// The repo lives in a SHORT directory on purpose. Git keeps a
+// worktree's admin data in <repo>/.git/worktrees/<branch> and
+// refuses to start when that path is longer than PATH_MAX - 40
+// characters (220 on Windows, where PATH_MAX is 260): "fatal:
+// '$GIT_DIR' too big". A 128-byte branch spends 128 of them plus
+// the 15 characters of ".git\worktrees\", leaving 77 for the
+// repository path — plenty for a real checkout, not enough for a
+// temp directory named after a long test.
 func TestIntegration_LongLocalBranchNameIsCapped(t *testing.T) {
-	repoRoot := initTempRepo(t)
+	repoRoot := initRepoIn(t, shortTempDir(t))
 
 	ch := &recordingCh{}
 	cs, _ := chatsession.New("chat-int-longname", "test-agent")
@@ -487,6 +523,14 @@ func TestIntegration_LongLocalBranchNameIsCapped(t *testing.T) {
 	}
 	if len(wantBranch) > maxBranchBytes {
 		t.Fatalf("derived branch is %d bytes, want <= %d", len(wantBranch), maxBranchBytes)
+	}
+	// Git refuses to start when the worktree's admin path
+	// (<repo>/.git/worktrees/<branch>) is longer than PATH_MAX - 40
+	// characters — 220 on Windows, where PATH_MAX is 260. Say so
+	// plainly instead of letting git fail with its own opaque
+	// "fatal: '$GIT_DIR' too big".
+	if runtime.GOOS == "windows" && len(filepath.Join(repoRoot, ".git", "worktrees", wantBranch)) > 220 {
+		t.Skipf("repo path %q is too long for git's 220-char admin-path budget on Windows", repoRoot)
 	}
 
 	res, err := RunFix(

@@ -633,7 +633,13 @@ func (e *WorktreeError) Error() string {
 
 func (e *WorktreeError) Unwrap() error { return e.Err }
 
-// PreflightWorktreeCreate runs four cheap checks before
+// maxPathComponentBytes is the filesystem limit on a single path
+// component (NAME_MAX on ext4 / APFS). The branch name is one
+// component of the worktree path, of .git/worktrees/<branch>/ and
+// of the loose ref file, so it has to fit.
+const maxPathComponentBytes = 255
+
+// PreflightWorktreeCreate runs five cheap checks before
 // `git worktree add`, so the user sees a clean error instead of
 // `git`'s internal "fatal: ..." strings. Returns nil when all
 // checks pass.
@@ -642,17 +648,25 @@ func (e *WorktreeError) Unwrap() error { return e.Err }
 //
 // Checks (in order):
 //
-//  1. If `branch` is already attached to the target worktree
+//  1. The branch name fits a single path component
+//     (maxPathComponentBytes). Two tiers, on purpose: the
+//     derivation caps what it produces at maxBranchBytes (128),
+//     and this check allows up to the 255 bytes a filesystem
+//     component holds. It fires for a branch this package did not
+//     derive — the name becomes a path component right here, and
+//     one that does not fit fails deep inside git with an opaque
+//     "file name too long".
+//  2. If `branch` is already attached to the target worktree
 //     path (a re-entry after daemon recovery, or a same-path
 //     repeat), return nil. The worktree directory exists
 //     intentionally in this case; the caller treats it as
 //     "already set up" rather than "create a new one".
-//  2. Branch not already attached to a DIFFERENT worktree via
+//  3. Branch not already attached to a DIFFERENT worktree via
 //     `git worktree list --porcelain` (catches `fatal: <branch>
 //     is already checked out at <other>`).
-//  3. Target path not already present on the filesystem
+//  4. Target path not already present on the filesystem
 //     (catches `fatal: <path> already exists`).
-//  4. Parent directory of the worktree path exists and is
+//  5. Parent directory of the worktree path exists and is
 //     writable by us (catches `fatal: cannot create directory
 //     at <path>: Permission denied`).
 //
@@ -661,12 +675,18 @@ func (e *WorktreeError) Unwrap() error { return e.Err }
 // to read 10 lines of stderr to figure out which case they'd
 // hit; preflight surfaces a one-line friendly error.
 //
-// The same-path short-circuit (check 1) means the caller MUST
+// The same-path short-circuit (check 2) means the caller MUST
 // already have decided the branch is the right one — i.e. the
 // caller has done BranchExists(...) and seen true. The runFix*
 // callers honour that ordering; new callers should not skip
 // the BranchExists check before invoking preflight.
 func PreflightWorktreeCreate(ctx context.Context, repoRoot, branch, worktreePath string, git GitRunner) error {
+	if n := len(branch); n > maxPathComponentBytes {
+		return fmt.Errorf(
+			"❌ branch name is %d bytes — a path component holds at most %d bytes",
+			n, maxPathComponentBytes,
+		)
+	}
 	attachedPath, err := WorktreeListPath(ctx, repoRoot, branch, git)
 	if err != nil {
 		return fmt.Errorf("git worktree list: %w", err)

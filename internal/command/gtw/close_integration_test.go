@@ -455,3 +455,63 @@ func TestIntegration_ShortFlagNForLocalFix(t *testing.T) {
 		t.Errorf("worktree still on disk after close: %v", err)
 	}
 }
+
+// TestIntegration_LongLocalBranchNameIsCapped drives the full
+// /gtw fix local-mode flow with a name far past the 255 bytes a
+// filesystem path component holds. The branch must be capped, and
+// the worktree must be created under the capped name — the same
+// name the command's quick validation predicts, so the two
+// derivations cannot drift apart.
+func TestIntegration_LongLocalBranchNameIsCapped(t *testing.T) {
+	repoRoot := initTempRepo(t)
+
+	ch := &recordingCh{}
+	cs, _ := chatsession.New("chat-int-longname", "test-agent")
+	cs.WithEmitter(ch)
+	if err := cs.SetSelectedCwd(repoRoot); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
+	}
+	deps := HandlerDeps{
+		Git:                      ExecGitRunner{},
+		Now:                      func() time.Time { return time.Date(2026, 8, 8, 14, 0, 0, 0, time.UTC) },
+		SkipRefreshDefaultBranch: true,
+	}
+
+	raw := strings.Repeat("long-branch-name-", 20)
+
+	// The prediction the worktree path is built from — the same
+	// derivation the command's quick validation runs.
+	wantBranch, err := DeriveBranchFromName(raw)
+	if err != nil {
+		t.Fatalf("DeriveBranchFromName: %v", err)
+	}
+	if len(wantBranch) > maxBranchBytes {
+		t.Fatalf("derived branch is %d bytes, want <= %d", len(wantBranch), maxBranchBytes)
+	}
+
+	res, err := RunFix(
+		context.Background(), ModeLocal, cs, deps,
+		cs.ChatID, "msg-int-longname", []string{raw}, false,
+	)
+	if err != nil {
+		t.Fatalf("RunFix: %v", err)
+	}
+	if !res.Consumed {
+		t.Errorf("Result.Consumed = false")
+	}
+
+	// The worktree exists under the capped branch name.
+	wt := WorktreePath(repoRoot, wantBranch)
+	if _, err := os.Stat(wt); err != nil {
+		t.Fatalf("worktree %s not created: %v", wt, err)
+	}
+	// Git created that branch, not the raw name.
+	out, _ := mustGitOut(t, repoRoot, "branch", "--list", wantBranch)
+	if !strings.Contains(out, wantBranch) {
+		t.Errorf("branch %q not created; `git branch --list` = %q", wantBranch, out)
+	}
+	// The reply names the same branch.
+	if last := ch.lastText(); !strings.Contains(last, wantBranch) {
+		t.Errorf("reply does not mention branch %q:\n%s", wantBranch, last)
+	}
+}

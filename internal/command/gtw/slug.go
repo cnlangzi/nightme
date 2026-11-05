@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/cnlangzi/nightme/internal/pathutil"
 )
@@ -76,6 +77,48 @@ func slugify(title string) string {
 	return out
 }
 
+// maxBranchBytes caps a derived branch name.
+//
+// 255 bytes is the hard per-component limit (NAME_MAX on ext4 /
+// APFS); the same limit applies to the loose ref file under
+// .git/refs/heads/ and to .git/worktrees/<branch>/. 128 is half of
+// that, which also leaves the Windows MAX_PATH budget about 132
+// characters for <parent>\<repo>.nightme\ — enough for repository
+// paths up to roughly 115 characters — while still fitting every
+// realistic conventional-commit title.
+const maxBranchBytes = 128
+
+// isASCIIAlnum reports whether b is an ASCII letter or digit.
+func isASCIIAlnum(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
+}
+
+// capBranchBytes truncates a derived branch name to maxBranchBytes.
+//
+// The cut drops trailing content only — the head of the name (the
+// issue id in ID mode) is what identifies the branch. The cut lands
+// on a UTF-8 rune boundary (the conventional-commit scope is
+// carried unslugified and can hold multi-byte characters), and the
+// ASCII tail git refuses at the end of a ref component is trimmed:
+// a trailing "." or space makes `git worktree add` fail with
+// "invalid branch name", and a trailing dash reads as a cut slug.
+// A multi-byte rune is kept — git accepts one at the end of a ref.
+func capBranchBytes(name string) string {
+	if len(name) <= maxBranchBytes {
+		return name
+	}
+	cut := name[:maxBranchBytes]
+	// A byte-exact cut can split a multi-byte rune; drop the
+	// incomplete trailing rune so the result stays valid UTF-8.
+	for len(cut) > 0 && !utf8.ValidString(cut) {
+		cut = cut[:len(cut)-1]
+	}
+	for len(cut) > 0 && cut[len(cut)-1] < utf8.RuneSelf && !isASCIIAlnum(cut[len(cut)-1]) {
+		cut = cut[:len(cut)-1]
+	}
+	return cut
+}
+
 // DeriveBranchFromTitle produces the branch name for the ID-mode
 // `/gtw fix <issue-id>` flow. The branch is derived from the
 // remote issue's title with these rules:
@@ -99,6 +142,14 @@ func slugify(title string) string {
 // The id makes the branch unique per issue regardless of how the
 // title degrades, and lets `git branch | grep '^<id>-'` list
 // every branch belonging to one issue.
+//
+// The result is capped at maxBranchBytes (128 bytes, measured in
+// bytes — the conventional-commit scope is carried unslugified and
+// can hold multi-byte characters). A branch name is the last path
+// component of the fix's worktree directory, of
+// .git/worktrees/<branch>/ and of the loose ref file, and the
+// filesystem allows 255 bytes per component. An over-long title
+// loses its tail; the issue id survives.
 func DeriveBranchFromTitle(title string, issueID int) string {
 	prefix := ""
 	rest := title
@@ -132,9 +183,9 @@ func DeriveBranchFromTitle(title string, issueID int) string {
 	if slug == "" {
 		// Whole-title fallback when even the prefix is unusable.
 		// The id is already in the name, so the branch stays unique.
-		return fmt.Sprintf("fix-%d", issueID)
+		return capBranchBytes(fmt.Sprintf("fix-%d", issueID))
 	}
-	return fmt.Sprintf("%d-%s", issueID, prefix+slug)
+	return capBranchBytes(fmt.Sprintf("%d-%s", issueID, prefix+slug))
 }
 
 // DeriveBranchFromName produces the branch name for the local-mode
@@ -151,6 +202,9 @@ func DeriveBranchFromTitle(title string, issueID int) string {
 // because local mode is not tied to an issue. Two local fixes whose
 // names slugify alike therefore land on one branch; the
 // branch-exists check rejects the second one.
+//
+// The result is capped at maxBranchBytes (128 bytes, measured in
+// bytes); an over-long name loses its tail.
 func DeriveBranchFromName(name string) (string, error) {
 	if name == "" {
 		return "", fmt.Errorf("branch name is empty")
@@ -162,7 +216,7 @@ func DeriveBranchFromName(name string) (string, error) {
 			name,
 		)
 	}
-	return slug, nil
+	return capBranchBytes(slug), nil
 }
 
 // WorktreePath builds the absolute path of the per-fix worktree

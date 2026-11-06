@@ -197,6 +197,22 @@ type driver struct {
 	thoughtBuf *strings.Builder
 	textMu     sync.Mutex
 
+	// turnText accumulates the raw reply text of the turn in
+	// progress — every agent_message_chunk / message_chunk the
+	// server sent, untrimmed and in order.
+	//
+	// textBuf cannot serve that purpose: it is flushed per sentence
+	// and every flushed chunk is trimmed, so the whitespace that
+	// separated the chunks is gone by the time the shared drain
+	// reassembles the reply from the event stream. The one-shot
+	// drain reads this accumulator instead (agent.TurnText), so a
+	// pull-request body keeps every blank line the agent wrote.
+	//
+	// Reset when a prompt starts (see resetTurnState), so the
+	// accumulator always holds the current turn's text only.
+	// Protected by textMu.
+	turnText strings.Builder
+
 	// flushTimer + flushGen implement the sliding idle window.
 	// flushGen invalidates in-flight AfterFunc callbacks when the
 	// timer is stopped or rescheduled (Stop alone races with fire).
@@ -258,6 +274,10 @@ type driver struct {
 // start are paired within SendBlocks's busy-guard window, and the
 // runtime calls SendBlocks for every turn.
 //
+// The exact-text accumulator is cleared here too: it holds the
+// current turn's reply, so a follow-up turn must not inherit the
+// previous turn's text.
+//
 // Factored out of SendBlocks so the regression test
 // (TestSendBlocks_ResetsTurnSettled) doesn't have to mirror the
 // exact mutex sequence inline — if SendBlocks's preamble
@@ -267,6 +287,10 @@ func (d *driver) resetTurnState() {
 	d.turnSettledMu.Lock()
 	d.turnSettled = false
 	d.turnSettledMu.Unlock()
+
+	d.textMu.Lock()
+	d.turnText.Reset()
+	d.textMu.Unlock()
 }
 
 // SessionView is the read-only handle the bridge-specific
@@ -1723,6 +1747,7 @@ func (d *driver) handleSessionUpdate(raw json.RawMessage) {
 			Text string `json:"text"`
 		}
 		if json.Unmarshal(update.Content, &content) == nil && content.Text != "" {
+			d.appendTurnText(content.Text)
 			d.appendAndMaybeFlush(d.textBuf, content.Text)
 		}
 	case "agent_thought_chunk":
@@ -1746,6 +1771,7 @@ func (d *driver) handleSessionUpdate(raw json.RawMessage) {
 			Text string `json:"text"`
 		}
 		if json.Unmarshal(update.Content, &content) == nil && content.Text != "" {
+			d.appendTurnText(content.Text)
 			d.appendAndMaybeFlush(d.textBuf, content.Text)
 		}
 	case "usage_update":
@@ -2273,6 +2299,32 @@ const minFlushRunes = 160
 // as two disjoint rolling-log cards in Feishu rather than one.
 // Tests may override.
 var flushDebounce = 1500 * time.Millisecond
+
+// appendTurnText accumulates the raw reply text of the turn in
+// progress. Called with the chunk BEFORE it goes through the
+// buffering path, so the accumulator keeps the whitespace the
+// server sent — the reply's blank lines included.
+func (d *driver) appendTurnText(chunk string) {
+	if chunk == "" {
+		return
+	}
+	d.textMu.Lock()
+	d.turnText.WriteString(chunk)
+	d.textMu.Unlock()
+}
+
+// TurnText returns the exact text of the turn in progress.
+//
+// The one-shot drain prefers this over the reply it reassembles
+// from the event stream (agent.TurnText): the streamed chunks are
+// trimmed and re-joined with a newline, so the paragraph break that
+// fell on a flush boundary would be lost. This is the agent's own
+// bytes.
+func (d *driver) TurnText() string {
+	d.textMu.Lock()
+	defer d.textMu.Unlock()
+	return d.turnText.String()
+}
 
 // appendAndMaybeFlush writes chunk onto buf and (re)starts the
 // sliding idle timer from this token. Flush happens later in

@@ -40,13 +40,22 @@ type AgentSpec interface {
 }
 
 // Starter 知道怎么 spawn + 运行一个 agent。
-// RunOnce 用于 /gtw commit /pr 这种一次性调用（一轮 turn）；
+// RunOnce 用于 /gtw commit /pr 这种一次性调用（一轮 turn）——
+// 它走 session transport：Start → SendBlocks → drain → Close，
+// prompt 写进 bridge 的协议管道，因此不受平台 argv 上限约束。
 // Start 返回 runtime handle 用于多轮 chat session。
 type Starter interface {
     Info() Info
     Detect() error
     Start(ctx context.Context, cfg StartConfig) (*Agent, error)
-    RunOnce(ctx context.Context, cfg StartConfig, blocks []ContentBlock) (string, error)
+    RunOnce(ctx context.Context, cfg StartConfig, blocks []ContentBlock, opts ...RunOnceOption) (RunResult, error)
+}
+
+// TurnText 是 bridge driver 可以实现的可选能力：报告当前 turn 的
+// 原样正文。one-shot drain 优先取它，取不到才回退到从事件流拼装
+// 出来的正文（分句流式 + trim 会丢掉段落空行）。
+type TurnText interface {
+    TurnText() string
 }
 
 // Agent 是 runtime handle（per-spawn 实例）。
@@ -96,6 +105,7 @@ var Builtins = NewRegistry()
 
 **文件**：
 - `internal/agent/agent.go` — AgentSpec / Starter interface + Agent struct + Event / EventKind / ContentBlock
+- `internal/agent/run_session.go` — 共享的 one-shot turn 驱动（`RunSession` / `ResumeSession` / `DrainSession`）
 - `internal/agent/registry.go` — Registry 实现
 - `internal/agent/registry_test.go`
 - `internal/agent/mode_string.go` — Mode ↔ string 转换

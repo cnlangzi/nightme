@@ -1074,6 +1074,17 @@ type driver interface {
 	Keepalive(ctx context.Context, onRecover func(context.Context) error) error
 }
 
+// TurnText is implemented by bridge drivers that can report the exact
+// text of the turn in progress. The one-shot drain prefers it over the
+// streamed-text join, so a reply the bridge streams in lossy pieces
+// still lands in RunResult.Text verbatim.
+//
+// Optional: a driver that does not implement it is drained from its
+// event stream alone.
+type TurnText interface {
+	TurnText() string
+}
+
 // ─── Starter: spawn recipe (interface, the only one) ──────────────
 
 // Starter is the spawn recipe for an agent. It is the only
@@ -1133,25 +1144,19 @@ type RunResult struct {
 	// run on a cheaper model via cfg override) — callers
 	// rendering a StatusBar should prefer Result.Model over
 	// the chat session's selectedAgent model. Empty when
-	// the bridge didn't observe model metadata. Pi
-	// print-mode peeks the model name off the assistant
-	// message_start/message_update/message_end wire frames
-	// (see internal/bridge/pi/print.go:peekPrintMeta) so
-	// /gtw commit et al. surface it on the AgentBar footer
-	// (F-PI-PRINT-002).
+	// the bridge didn't observe model metadata. Pi reports
+	// the model from its get_state handshake, so /gtw commit
+	// et al. surface it on the AgentBar footer.
 	Model string
 
 	// SessionID is the bridge-side session identifier for
 	// the call (Claude Code: system/init.session_id; Codex:
-	// thread.started.thread_id; Pi print-mode: peeked from the
-	// `{"type":"session","id":..}` frame — see
-	// internal/bridge/pi/print.go:peekPrintMeta). Bridges
+	// thread.started.thread_id; Pi: get_state.sessionId). Bridges
 	// populate when their wire format carries the value;
-	// empty when it doesn't. Print-mode sessions are
-	// short-lived (one per `-p` invocation), so the value is
-	// mostly useful for audit (logging which session produced
-	// which output) and future resume flows (`--resume <sid>`
-	// on retry) rather than as a persistent identifier.
+	// empty when it doesn't. A one-shot turn always opens a
+	// fresh session, so the value is mostly useful for audit
+	// (logging which session produced which output) rather than
+	// as a persistent identifier.
 	SessionID string
 
 	// DurationMs is the wall-clock duration of the call in
@@ -1198,18 +1203,23 @@ type Starter interface {
 
 	Start(ctx context.Context, cfg StartConfig) (*Agent, error)
 
-	// RunOnce runs a single synchronous turn: the implementation
-	// owns the full spawn → send → wait → close cycle. cfg.Workspace
-	// is the agent's cwd for this call. Returns a RunResult
-	// carrying the agent's final text plus any per-turn metadata
-	// (usage / session id / model / duration / subtype) the
-	// bridge could observe. Errors when the turn didn't produce
-	// a usable response.
+	// RunOnce runs a single synchronous turn over the session
+	// transport: the implementation owns the full spawn → send →
+	// wait → close cycle. cfg.Workspace is the agent's cwd for this
+	// call. Returns a RunResult carrying the agent's final text plus
+	// any per-turn metadata (usage / session id / model / duration /
+	// subtype) the bridge could observe. Errors when the turn didn't
+	// produce a usable response.
 	//
 	// RunOnce is the "one-shot" counterpart to Start. Start returns
 	// a live *Agent for multi-turn / chat sessions; RunOnce is for
 	// callers (e.g. /gtw commit, /gtw pr) that want a single
 	// synchronous turn and don't need the session handle.
+	//
+	// The prompt travels over the bridge's protocol pipe, never as an
+	// argv element — the platform caps argv (131072 bytes per string
+	// on Linux, 32767 characters per command line on Windows), and a
+	// prompt over that ceiling fails to spawn.
 	//
 	// opts configures per-call behaviour (see RunOnceOption).
 	// Bridges that don't support a given option ignore it — variadic

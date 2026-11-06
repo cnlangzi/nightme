@@ -1,12 +1,12 @@
 // run_session.go — the shared session-shaped one-shot helper.
 //
 // RunSession drives ONE turn over a bridge's session path
-// (Starter.Start → Agent.SendBlocks → drain → Agent.Close). It is
-// the transport /review uses instead of Starter.RunOnce.
+// (Starter.Start → Agent.SendBlocks → drain → Agent.Close). Every
+// one-shot turn in the codebase runs over this transport.
 //
-// Why the session path and not print mode:
+// Why the session path and not argv:
 //
-//   - Print mode passes the whole prompt as a single argv element.
+//   - A prompt passed as an argv element is capped by the platform:
 //     Linux caps one argv string at 131072 bytes and Windows caps the
 //     whole command line at 32767 characters, so a prompt larger than
 //     that fails to spawn ("argument list too long").
@@ -23,9 +23,6 @@
 //
 // dsh / omp / pi emit the result event first and the settled Done
 // right after it, so the result event is their terminator in practice.
-//
-// The ACP bridge's collectResult (internal/bridge/acp/starter.go) is
-// the existing precedent for this union.
 package agent
 
 import (
@@ -180,7 +177,7 @@ func drainSessionEvents(ctx context.Context, a *Agent, blocks []ContentBlock, si
 					return failedTurn(sessionID, model), fmt.Errorf("agent %s: %w%s",
 						name, ev.Err, sessionAuditFields(sessionID, model))
 				}
-				return finishedTurn(name, sessionID, model, ev.Result, streamed)
+				return finishedTurn(name, sessionID, model, ev.Result, streamed, driverTurnText(a))
 			case EventAgentDone:
 				if ev.Done == nil || ev.Done.Reason != doneReasonSettled {
 					// The turn ended without a result: an aborted
@@ -198,7 +195,7 @@ func drainSessionEvents(ctx context.Context, a *Agent, blocks []ContentBlock, si
 				}
 				return finishedTurn(name, sessionID, model, &AgentResultEvent{
 					Usage: ev.Done.Usage,
-				}, streamed)
+				}, streamed, driverTurnText(a))
 			case EventAgentError:
 				if ev.Err != nil {
 					return failedTurn(sessionID, model), fmt.Errorf("agent %s: %w%s",
@@ -231,10 +228,19 @@ func failedTurn(sessionID, model string) RunResult {
 // finishedTurn builds the RunResult of a completed turn.
 //
 // A turn that produced no reply is a failure, not an empty success:
-// the caller asked for an answer and got none. The print-mode bridges
-// reject an empty answer the same way.
-func finishedTurn(name, sessionID, model string, terminal *AgentResultEvent, streamed []string) (RunResult, error) {
-	text := sessionText(terminal, streamed)
+// the caller asked for an answer and got none.
+//
+// exact is the driver's own report of the turn's text (see TurnText)
+// and wins over the streamed join when it holds anything but
+// whitespace — the bridge holds the raw reply, so its report is the
+// agent's own bytes.
+func finishedTurn(name, sessionID, model string, terminal *AgentResultEvent, streamed []string, exact string) (RunResult, error) {
+	text := ""
+	if strings.TrimSpace(exact) != "" {
+		text = exact
+	} else {
+		text = sessionText(terminal, streamed)
+	}
 	if text == "" {
 		return failedTurn(sessionID, model), fmt.Errorf("agent %s: turn ended without a reply%s",
 			name, sessionAuditFields(sessionID, model))
@@ -249,7 +255,20 @@ func finishedTurn(name, sessionID, model string, terminal *AgentResultEvent, str
 	}, nil
 }
 
+// driverTurnText returns the exact text of the turn in progress when
+// the bridge's driver can report it (see TurnText). Empty when the
+// driver has no such capability, or when the turn produced no text.
+func driverTurnText(a *Agent) string {
+	if tt, ok := a.Driver().(TurnText); ok {
+		return tt.TurnText()
+	}
+	return ""
+}
+
 // sessionText assembles the reply of a finished turn.
+//
+// It is the fallback for a driver that cannot report the turn's exact
+// text (see TurnText).
 //
 // A bridge may deliver the reply in two pieces: the segments it
 // streamed as EventAgentText while the turn ran, and the tail it

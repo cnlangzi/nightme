@@ -1,12 +1,11 @@
 # F-CLAUDE-PRINT-002 — StatusBar 装配重构
 
-> F-CLAUDE-PRINT-001 的后续。原本"在 runtime 集中装配 StatusBar"的设计
-> 经过多轮 review 后被推翻,本文件记录推翻的理由 + 最终形态。
+> 原本"在 runtime 集中装配 StatusBar"的设计经过多轮 review 后被推翻,
+> 本文件记录推翻的理由 + 最终形态。
 
 ## 背景
 
-F-CLAUDE-PRINT-001 把 `claudecode.Starter.RunOnce` 改成了 print-mode 实现,并把
-`RunOnce` 的返回值从 `(string, error)` 改成了 `(RunResult, error)`,携带 Model /
+`claudecode.Starter.RunOnce` 的返回值是 `(RunResult, error)`,携带 Model /
 Usage / DurationMs / Subtype。
 
 跑完真机测试后,review 阶段发现 StatusBar 装配链路不顺,需要重做。

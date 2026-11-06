@@ -5,16 +5,22 @@ package agent_test
 // Real-CLI check that the session path carries a prompt larger than
 // the platform's argv limit.
 //
-// The review path runs on the agent's session path: the prompt
-// travels over the bridge's protocol pipe, never as an argv element.
-// Linux caps one argv string at 131072 bytes and Windows caps the
-// whole command line at 32767 characters, so a review prompt larger
-// than that used to fail to spawn ("argument list too long").
+// The prompt travels over the bridge's protocol pipe, never as an
+// argv element. Linux caps one argv string at 131072 bytes and
+// Windows caps the whole command line at 32767 characters, so a
+// prompt larger than that used to fail to spawn ("argument list too
+// long").
 //
-// Each subtest drives agent.RunSession — the exact helper /review
-// uses — with a single text block of at least 131072 bytes and
-// asserts a successful turn. The same payload on the print-mode path
-// fails with E2BIG; that regression is what this file closes.
+// Each subtest drives two paths with a single text block of at least
+// 131072 bytes and asserts a successful turn:
+//
+//   - agent.RunSession — the shared helper every bridge's session
+//     path uses.
+//   - Starter.RunOnce — the one-shot turn /gtw commit and /gtw pr
+//     use. It runs over the same session transport.
+//
+// The same payload passed as an argv element fails with E2BIG; that
+// regression is what this file closes.
 //
 // Gated by NIGHTME_REAL_LARGE_PROMPT=1 plus the bridge's CLI on
 // PATH. The prompt is ~32k tokens, so each subtest is a real model
@@ -98,6 +104,59 @@ func TestSession_LargePromptOverPipe(t *testing.T) {
 				[]agent.ContentBlock{{Type: agent.ContentText, Text: payload}})
 			if err != nil {
 				t.Fatalf("RunSession with a %d-byte prompt: %v", len(payload), err)
+			}
+			if res.Text == "" {
+				t.Error("RunResult.Text empty; the oversized prompt did not reach the agent")
+			}
+			t.Logf("%s: session=%q model=%q textLen=%d", b.name, res.SessionID, res.Model, len(res.Text))
+		})
+	}
+}
+
+// TestRunOnce_LargePromptOverPipe drives every bridge's one-shot
+// turn (/gtw commit, /gtw pr) with an oversized prompt. The one-shot
+// turn runs over the session transport, so the prompt never reaches
+// argv — where the platform would refuse it.
+func TestRunOnce_LargePromptOverPipe(t *testing.T) {
+	if os.Getenv("NIGHTME_REAL_LARGE_PROMPT") == "" {
+		t.Skip("NIGHTME_REAL_LARGE_PROMPT not set; skipping real-CLI oversized-prompt test")
+	}
+
+	bridges := []struct {
+		name    string
+		command string
+		starter agent.Starter
+	}{
+		{"claudecode", "claude", claudecode.NewStarter("claudecode", "claude", nil)},
+		{"codex", "codex", codex.NewStarter("codex", "codex", nil)},
+		{"copilot", "copilot", copilot.NewStarter("copilot", "copilot", copilot.DefaultACPArgs)},
+		{"cursor", "cursor-agent", cursor.NewStarter("cursor", "cursor-agent", cursor.DefaultACPArgs)},
+		{"omp", "omp", omp.NewStarter("omp", "omp", nil)},
+		{"opencode", "opencode", opencode.NewStarter("opencode", "opencode", []string{"acp"})},
+		{"pi", "pi", pi.NewStarter("pi", "pi", nil)},
+		{"acp", "opencode", acp.NewStarter("acp", "opencode", []string{"acp"}, nil, 0, 0)},
+		{"dsh", "dsh", dsh.NewStarter("dsh")},
+	}
+
+	for _, b := range bridges {
+		t.Run(b.name, func(t *testing.T) {
+			if _, err := exec.LookPath(b.command); err != nil {
+				t.Skipf("%s binary not on PATH: %v", b.command, err)
+			}
+			workspace := t.TempDir()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer cancel()
+
+			payload := largePrompt()
+			if len(payload) < minPayloadBytes {
+				t.Fatalf("payload is %d bytes, want at least %d", len(payload), minPayloadBytes)
+			}
+
+			res, err := b.starter.RunOnce(ctx, agent.StartConfig{Workspace: workspace},
+				[]agent.ContentBlock{{Type: agent.ContentText, Text: payload}})
+			if err != nil {
+				t.Fatalf("RunOnce with a %d-byte prompt: %v", len(payload), err)
 			}
 			if res.Text == "" {
 				t.Error("RunResult.Text empty; the oversized prompt did not reach the agent")

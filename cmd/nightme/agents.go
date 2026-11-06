@@ -90,8 +90,9 @@ func init() {
 	// https://opencode.ai/docs/acp/ — opencode's vendor-
 	// recommended integration mode ("All features are supported").
 	//
-	// One-shot invocations (/gtw commit, buildAgentPrompt) use
-	// the opencode run --format json print-mode spawn in print.go.
+	// One-shot invocations (/gtw commit, /gtw pr) run over the
+	// same ACP transport — the prompt travels over the protocol
+	// pipe, so it is not bounded by the platform's argv limit.
 	//
 	// Migration history: prior versions of this package shipped
 	// an HTTP `opencode serve` SSE bridge (~3500 lines of
@@ -163,10 +164,9 @@ func init() {
 	// tampering principle, model / provider / MCP servers flow
 	// from the user's own settings.
 	//
-	// One-shot invocations use `copilot --allow-all-tools -p
-	// "..."` print-mode (mirrors cursor/print.go). Copilot's
-	// `-p` mode is plain-text stdout, no NDJSON, process exits
-	// after the turn.
+	// One-shot invocations (/gtw commit, /gtw pr) run over the
+	// same ACP transport — the prompt travels over the protocol
+	// pipe, so it is not bounded by the platform's argv limit.
 	agent.Builtins.Register(
 		copilot.NewStarter("copilot", "copilot", copilot.DefaultACPArgs))
 

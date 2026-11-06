@@ -91,21 +91,17 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 	return agent.NewAgent(s.Info(), d.session.pid, d.session.events, d), nil
 }
 
-// RunOnce is the one-shot counterpart to Start. Delegates to
-// runPrintMode in print.go, which spawns `codex exec` directly
-// (bypassing the long-lived app-server pipeline) — see the file
-// doc on print.go for rationale (F-CODEX-PRINT-001, 2026-08-14).
+// RunOnce is the one-shot counterpart to Start. The turn runs over
+// the session transport — Start → SendBlocks → drain → Close — so
+// the prompt travels over the bridge's protocol pipe instead of
+// argv. A prompt larger than the platform's argv limit (131072
+// bytes per string on Linux, 32767 characters per command line on
+// Windows) therefore still reaches the agent.
 //
-// The previous implementation was `Start + defer Close +
-// drain Events()` — still the pattern acp uses today (acp has
-// no CLI-side print-mode flag), but for codex / opencode the
-// 5s closeDrainTimeout + handshake / SSE subscription overhead
-// made it the wrong shape for one-shot. That pattern
-// paid the full app-server handshake + 5s closeDrainTimeout cost
-// per call, which is wasted work for one-shot uses (/gtw commit,
-// /gtw pr, buildAgentPrompt).
+// The turn always opens a fresh session, so it never splices itself
+// into the caller's conversation.
 func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock, opts ...agent.RunOnceOption) (agent.RunResult, error) {
-	return runPrintMode(ctx, s, cfg, blocks, opts...)
+	return agent.RunSession(ctx, s, cfg, blocks, opts...)
 }
 
 // Review implements /review for codex via the shared

@@ -94,9 +94,8 @@ const baselineWaitTimeout = 250 * time.Millisecond
 
 // dLog is a thin wrapper around slog.Default for the dsh bridge's
 // package-level log lines. Debug level keeps production output
-// quiet; tests don't assert on logs. Lives here (rather than in
-// the deleted print.go) because session/dispatch are the heaviest
-// log producers.
+// quiet; tests don't assert on logs. Lives here because
+// session/dispatch are the heaviest log producers.
 func dLog(msg string, args ...any) {
 	slog.Default().Debug(msg, args...)
 }
@@ -1083,8 +1082,7 @@ func mintRequestID() string {
 }
 
 // errStr renders an error's string form, returning "<nil>" for the
-// nil case so log fields are always meaningful. Mirror of
-// claudecode/print.go's helper.
+// nil case so log fields are always meaningful.
 func errStr(err error) string {
 	if err == nil {
 		return "<nil>"

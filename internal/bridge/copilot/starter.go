@@ -10,15 +10,13 @@
 //     Requires Copilot CLI >= 1.0.x (older preview builds
 //     reject `--acp`).
 //
-//   - One-shot invocations (/gtw commit, buildAgentPrompt)
-//     spawn `copilot --allow-all-tools -p "prompt"` directly.
-//     The print-mode path reuses the cursor / opencode / codex
-//     / claudecode / pi print-mode shape — single stdout
-//     capture, process exits after the turn.
+//   - One-shot invocations (/gtw commit, /gtw pr) run over the
+//     same ACP transport. The prompt travels over the protocol
+//     pipe, so it is not bounded by the platform's argv limit.
 //
-// The two paths share the same Starter; only RunOnce and the
-// print-mode spawn in print.go differ from Start and the
-// ACP-backed driver.
+// The two paths share the same Starter; only RunOnce differs from
+// Start: it opens a fresh session and closes it again when the
+// turn ends.
 //
 // No per-bridge UpdateHandler / MethodHandler is installed:
 // Copilot's ACP server emits standard sessionUpdate events
@@ -133,21 +131,17 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 	return a, nil
 }
 
-// RunOnce is the one-shot counterpart to Start. Spawns
-// `copilot` + FullAccessArgs + `-p "prompt"` and returns the
-// agent's final text. No chat session, no events channel, no
-// busy guard — the process exits after the turn.
+// RunOnce is the one-shot counterpart to Start. The turn runs over
+// the session transport — Start → SendBlocks → drain → Close — so
+// the prompt travels over the ACP pipe instead of argv. A prompt
+// larger than the platform's argv limit (131072 bytes per string on
+// Linux, 32767 characters per command line on Windows) therefore
+// still reaches the agent.
 //
-// Mirrors the F-CODEX-PRINT-001 / F-CLAUDE-PRINT-001 /
-// F-PI-PRINT-001 / F-OPENCODE-PRINT-001 rationale: one-shot
-// callers (/gtw commit, buildAgentPrompt) don't need the long-
-// lived ACP handshake (~1s server boot + initialize +
-// session/new round-trip) when `-p` already gives them a turn
-// and exits cleanly. Copilot's `-p` mode is plain-text stdout
-// (no NDJSON), so the print-mode path is simpler than
-// opencode's NDJSON-parsing print-mode.
+// The turn always opens a fresh session, so it never splices itself
+// into the caller's conversation.
 func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock, opts ...agent.RunOnceOption) (agent.RunResult, error) {
-	return runPrintMode(ctx, s, cfg, blocks, opts...)
+	return agent.RunSession(ctx, s, cfg, blocks, opts...)
 }
 
 // Review implements /review for the copilot bridge: delegate

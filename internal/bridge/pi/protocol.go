@@ -48,14 +48,11 @@ type eventEnvelope struct {
 	// translate table.
 	Type string `json:"type"`
 
-	// F-PI-PRINT-002: ID + Message are peeked by the print-mode
-	// RunResult path (internal/bridge/pi/print.go:peekPrintMeta)
-	// so the AgentBar footer can render SessionID + Model
-	// without going through a second json.Unmarshal round-trip.
-	// RPC mode's emitConnected reads the same fields from a
-	// different source (get_state.data.model + get_state.sessionId)
-	// so the duplication is intentional — print-mode has no
-	// get_state handshake.
+	// ID + Message carry the session id and the assistant model
+	// on the wire events. The session path reads the same pair
+	// from the get_state handshake (get_state.sessionId +
+	// get_state.data.model); these two fields are the wire's
+	// own copy of the same facts.
 	ID      string `json:"id,omitempty"`
 	Message struct {
 		Role  string `json:"role,omitempty"`

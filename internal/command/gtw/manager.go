@@ -1,8 +1,31 @@
 package gtw
 
 import (
+	"context"
+	"errors"
 	"sync"
+	"time"
 )
+
+// ErrAborted is the cancellation cause /gtw abort installs on the
+// context of the command it cancels. It is the marker
+// aborted(ctx) looks for, so a run that ends because
+// timeouts.Command / timeouts.Agent expired (cause
+// context.DeadlineExceeded) is never mistaken for an abort.
+var ErrAborted = errors.New("aborted by /gtw abort")
+
+// activeRun is the record of the /gtw command that currently
+// holds the chat's run lock — the one blocking every later /gtw
+// command in that chat.
+type activeRun struct {
+	// sub is the subcommand name ("pr", "commit", …) the card
+	// names when the run is aborted.
+	sub string
+	// startedAt is when the run took the chat's chain.
+	startedAt time.Time
+	// cancel cancels the run's context with ErrAborted.
+	cancel context.CancelCauseFunc
+}
 
 // Manager owns the per-chat run lock used to serialise /gtw
 // subcommand execution. v1.5 stripped the rest:
@@ -25,8 +48,9 @@ import (
 // boundary — two chats must remain independent.
 //
 // The runtime instantiates one Manager per process and shares
-// it across all chats. There is no per-chat substate left to
-// key by chatID; the run lock map is the only field.
+// it across all chats. The only per-chat state left is the run
+// lock map and the active-run registry that names the command
+// holding each chat's chain.
 type Manager struct {
 	// runs is the per-chat run lock that serialises /gtw
 	// subcommand execution. Acquired at the top of
@@ -47,6 +71,17 @@ type Manager struct {
 	// sees sub-megabyte footprint; cleanup isn't worth the
 	// race risk.
 	runs sync.Map // map[chatID]*sync.Mutex
+
+	// active is the per-chat registry of the command that
+	// currently holds the chat's run lock — the chain holder
+	// /gtw abort cancels. Keyed by chatID like runs, so an
+	// abort only ever touches the chat that issued it.
+	//
+	// Only the chain holder is registered: beginRun runs AFTER
+	// the run lock is acquired, so a queued waiter never lands
+	// here. Entries are removed when the run is aborted or when
+	// it releases the chain.
+	active sync.Map // map[chatID]*activeRun
 }
 
 // NewManager returns an empty Manager. The run lock map is
@@ -88,4 +123,56 @@ func (m *Manager) runLockFor(chatID string) *sync.Mutex {
 	mu := &sync.Mutex{}
 	actual, _ := m.runs.LoadOrStore(chatID, mu)
 	return actual.(*sync.Mutex)
+}
+
+// --- active run registry (per-chat chain holder) ---
+
+// beginRun registers the run that holds chatID's chain and returns
+// the release function that clears the registration. Factory.Handle
+// calls it after acquiring the run lock, so the registry always
+// names the chain holder and never a queued waiter.
+//
+// cancel cancels the run's context; /gtw abort calls it with
+// ErrAborted.
+//
+// The release function clears the record only when it is still the
+// same record (pointer compare), so a late release from an aborted
+// run cannot clobber a newer run's registration.
+//
+// chatID == "" is a no-op, mirroring runLockFor: the returned
+// release function does nothing.
+func (m *Manager) beginRun(chatID, sub string, cancel context.CancelCauseFunc) func() {
+	if chatID == "" {
+		return func() {}
+	}
+	run := &activeRun{sub: sub, startedAt: time.Now(), cancel: cancel}
+	m.active.Store(chatID, run)
+	return func() {
+		m.active.CompareAndDelete(chatID, run)
+	}
+}
+
+// abortRun cancels the run holding chatID's chain and returns its
+// subcommand name plus how long it had been running. ok is false
+// when no run is registered for chatID.
+//
+// The record is removed BEFORE the cancel so a second /gtw abort
+// does not report the same run again.
+func (m *Manager) abortRun(chatID string) (sub string, elapsed time.Duration, ok bool) {
+	if chatID == "" {
+		return "", 0, false
+	}
+	v, found := m.active.LoadAndDelete(chatID)
+	if !found {
+		return "", 0, false
+	}
+	run, isRun := v.(*activeRun)
+	if !isRun || run == nil {
+		return "", 0, false
+	}
+	elapsed = time.Since(run.startedAt)
+	if run.cancel != nil {
+		run.cancel(ErrAborted)
+	}
+	return run.sub, elapsed, true
 }

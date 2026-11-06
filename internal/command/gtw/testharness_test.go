@@ -43,6 +43,14 @@ func (r *recordingCh) lastText() string {
 	return r.sends[len(r.sends)-1].Text
 }
 
+// count returns how many messages the emitter received. Tests that
+// assert a command stayed silent use it to prove nothing was sent.
+func (r *recordingCh) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.sends)
+}
+
 // pathsEqual compares two filesystem paths. On macOS, t.TempDir()
 // returns the realpath (e.g. /var/folders/...) but os.Getwd() and
 // chat session SetActiveCwd record the symlink form

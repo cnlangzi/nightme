@@ -207,6 +207,9 @@ func runAgentFor(
 //
 // Returns &Result{Consumed: true} so dispatchCommit / dispatchPR
 // can keep their `return replyAgent(...), nil` shape.
+//
+// A run cancelled by /gtw abort sends nothing: the abort card is
+// the only message that run produces.
 func replyAgent(
 	ctx context.Context,
 	em messages.Emitter,
@@ -214,6 +217,12 @@ func replyAgent(
 	res agent.RunResult,
 ) *Result {
 	if em == nil {
+		return &Result{Consumed: true}
+	}
+	if aborted(ctx) {
+		// Cancelled by /gtw abort — the abort card already says
+		// which command was cancelled and for how long, so this
+		// run stays silent.
 		return &Result{Consumed: true}
 	}
 	out := messages.OutboundMessage{

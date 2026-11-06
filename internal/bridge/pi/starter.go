@@ -94,46 +94,17 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 	return agent.NewAgent(s.Info(), d.pid, d.events, d), nil
 }
 
-// RunOnce is the one-shot counterpart to Start. Drives the
-// configured agent through a single prompt and returns the
-// final text.
+// RunOnce is the one-shot counterpart to Start. The turn runs over
+// the session transport — Start → SendBlocks → drain → Close — so
+// the prompt travels over the bridge's protocol pipe instead of
+// argv. A prompt larger than the platform's argv limit (131072
+// bytes per string on Linux, 32767 characters per command line on
+// Windows) therefore still reaches the agent.
 //
-// As of F-PI-PRINT-001 (2026-08-13), RunOnce routes through
-// the print-mode spawn (--mode json -p) rather than the long-
-// lived RPC session that Start uses. Rationale:
-//
-//   - One-shot invocations (/gtw commit, buildAgentPrompt)
-//     don't need a multi-turn session; they spawn, do the
-//     work, and exit.
-//   - The RPC path was observed to flake in production — pi's
-//     stdout pipe closed 2-5 s after the prompt RPC ack with
-//     no events ever delivered, even though the same RunOnce
-//     flow worked in `go test` smoke tests. Root cause is still
-//     under investigation but the print-mode path sidesteps
-//     it: there is no long-lived pipe, no response-correlation
-//     map, and process exit is the natural turn-end signal.
-//
-// The print-mode spawn lives in print_unix.go / print_windows.go
-// and reuses the shared JSON-event translator (translate.go)
-// because print-mode emits the same event format as RPC.
-//
-// opts (typically WithEventSink from /review, /gtw commit, etc.)
-// are forwarded to runPrintMode so per-call observers see the
-// Ready → Text → ToolStart/End → Result lifecycle — the same
-// shape the dsh / codex bridges emit. Without this forward,
-// callers would have no visibility into the print-mode run
-// (print-mode would emit events the sink never receives).
-//
-// Start (above) is unchanged: it still opens an RPC session
-// for the chat session's long-lived use case where multiple
-// turns ride one bridge. RunOnce and Start share the same
-// Starter; only the spawn path differs.
+// The turn always opens a fresh session, so it never splices itself
+// into the caller's conversation.
 func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock, opts ...agent.RunOnceOption) (agent.RunResult, error) {
-	result, err := runPrintMode(ctx, s, cfg, blocks, opts...)
-	if err != nil {
-		return agent.RunResult{}, fmt.Errorf("agent %s: %w", s.Info().Name, err)
-	}
-	return result, nil
+	return agent.RunSession(ctx, s, cfg, blocks, opts...)
 }
 
 // Review implements /review for pi: delegate to the shared

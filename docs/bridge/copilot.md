@@ -20,7 +20,7 @@
 nightme ──PTY JSON-RPC 2.0──> copilot --allow-all-tools --acp --stdio
 ```
 
-GitHub Copilot CLI 自 v1.0.x 起原生支持 **ACP (Agent Client Protocol)**,与 opencode / cursor 使用相同的协议。我们**完全复用现有的 `internal/bridge/acp` 包**,只需创建一个薄包装层 —— 跟 opencode 风格一致(无 vendor handler,纯包装 + print-mode)。
+GitHub Copilot CLI 自 v1.0.x 起原生支持 **ACP (Agent Client Protocol)**,与 opencode / cursor 使用相同的协议。我们**完全复用现有的 `internal/bridge/acp` 包**,只需创建一个薄包装层 —— 跟 opencode 风格一致(无 vendor handler,纯包装)。
 
 ### 1.2 与现有 bridge 的关系
 
@@ -35,9 +35,7 @@ internal/bridge/
 └── copilot/          # 新增:copilot 包装 acp(opencode 风格,无 handler)
     ├── starter.go    # 包装 acp.NewStarter
     ├── copilot.go    # 包级常量 + debug 日志
-    ├── print.go      # RunOnce print-mode (copilot -p -s)
     ├── starter_test.go       # 单元测试
-    ├── print_real_unix_test.go    # 真机 print-mode 测试
     ├── start_real_unix_test.go    # 真机 Start 链路测试
     └── acp_probe_unix_test.go     # 真机 ACP handshake 探针
 ```
@@ -124,7 +122,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
 | 命令名 | `copilot`(npm wrapper shim,Unix 上是 shell script,Windows 上是 `.cmd`) | ✅ exec.LookPath 自动解析 |
 | ACP 启动参数 | `copilot --allow-all-tools --acp --stdio` | ✅ flat flags,顺序无关 |
 | 认证 | `copilot-login`(需先 `copilot login`) | ⚠️ 用户登录一次,状态持久化在 `~/.copilot/` |
-| Print-mode | `copilot --allow-all-tools -p "..." -s`(plain stdout) | ✅ plain text |
+| One-shot | 与 chat 同一份 ACP transport(prompt 走管道) | ✅ |
 | vendor 私有扩展 | 无(公开 doc 未暴露 `copilot/*` method) | ✅ 通用 ACP fallback 覆盖 |
 
 ---
@@ -137,9 +135,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
 internal/bridge/copilot/
 ├── copilot.go                    # 包级常量 + debug 日志
 ├── starter.go                    # Starter 实现(包装 acp.NewStarter)
-├── print.go                      # RunOnce print-mode (copilot -p -s)
 ├── starter_test.go               # 单元测试
-├── print_real_unix_test.go       # 真机 print-mode 测试
 ├── start_real_unix_test.go       # 真机 Start 全链路测试
 └── acp_probe_unix_test.go        # 真机 ACP handshake 探针
 ```
@@ -164,12 +160,10 @@ internal/bridge/copilot/
 //     docs.github.com/en/copilot/reference/acp-server); the
 //     generic fallback covers all standard sessionUpdate kinds.
 //
-//   - RunOnce (one-shot: /gtw commit, buildAgentPrompt) →
-//     `copilot --allow-all-tools -p "prompt" -s`. The process
-//     outputs the agent's final response to stdout and exits —
-//     no JSON events, no multi-turn, no events channel. `-s`
-//     (`--silent`) suppresses the post-answer stats decoration
-//     so stdout is just the final text (verified on 1.0.81).
+//   - RunOnce (one-shot: /gtw commit, /gtw pr) → the same
+//     ACP transport. The turn runs over the session protocol
+//     pipe, so the prompt is not bounded by the platform's
+//     argv limit.
 //
 // Permission defaults match the other ChatOps bridges (Claude
 // --permission-mode bypassPermissions, Codex approvalPolicy=
@@ -190,8 +184,8 @@ import (
 )
 
 // FullAccessArgs is the spawn-time permission flag that turns
-// off all per-tool approval prompts. Prepended to both the ACP
-// start path and the print-mode RunOnce path.
+// off all per-tool approval prompts. Prepended to the ACP
+// spawn args.
 var FullAccessArgs = []string{"--allow-all-tools"}
 
 // DefaultACPArgs is the argv nightme registers for the
@@ -241,11 +235,10 @@ func cLog(msg string, args ...any) {
 //     Requires Copilot CLI >= 1.0.x (older preview builds
 //     reject `--acp`).
 //
-//   - One-shot invocations (/gtw commit, buildAgentPrompt)
-//     spawn `copilot --allow-all-tools -p "prompt" -s` directly.
-//     The print-mode path reuses the cursor / opencode / codex
-//     / claudecode / pi print-mode shape — single stdout
-//     capture, process exits after the turn.
+//   - One-shot invocations (/gtw commit, /gtw pr) run over
+//     the same ACP transport. The prompt travels over the
+//     protocol pipe, so it is not bounded by the platform's
+//     argv limit.
 //
 // No per-bridge UpdateHandler / MethodHandler is installed:
 // Copilot's ACP server emits standard sessionUpdate events
@@ -323,11 +316,11 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
     return a, nil
 }
 
-// RunOnce is the one-shot counterpart to Start. Spawns
-// `copilot` + FullAccessArgs + `-p "prompt" -s` and returns the
-// agent's final text.
+// RunOnce is the one-shot counterpart to Start. The turn runs over
+// the session transport, so the prompt travels over the protocol
+// pipe instead of argv.
 func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock, opts ...agent.RunOnceOption) (agent.RunResult, error) {
-    return runPrintMode(ctx, s, cfg, blocks, opts...)
+    return agent.RunSession(ctx, s, cfg, blocks, opts...)
 }
 
 // Review delegates to the shared agent.ReviewDispatch — picks
@@ -337,167 +330,29 @@ func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...age
 }
 ```
 
-### 3.4 print.go — RunOnce 实现
+### 3.4 one-shot turn — 走 session transport
 
-```go
-// print.go — one-shot print mode for copilot using `copilot -p -s`.
-//
-// Mirrors cursor/print.go (plain-text stdout, not NDJSON). The
-// `-s` flag suppresses the post-answer stats decoration so
-// stdout is clean final text only — without it, captured
-// stdout would mix the answer with "Changes / AI Credits /
-// Tokens / Resume" metadata that downstream consumers
-// (RunResult.Text) would render as junk.
-package copilot
+copilot 没有独立的 one-shot 路径。`Starter.RunOnce` 与 chat session 共用同一份
+ACP transport,由共享的 `agent.RunSession` 驱动:
 
-import (
-    "context"
-    "fmt"
-    "os"
-    "strings"
-    "time"
-
-    "github.com/cnlangzi/nightme/internal/agent"
-    "github.com/cnlangzi/nightme/internal/proc"
-)
-
-// runPrintMode spawns `copilot` + FullAccessArgs + `-p "prompt" -s`
-// for one-shot invocations (/gtw commit, buildAgentPrompt).
-func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks []agent.ContentBlock, opts ...agent.RunOnceOption) (agent.RunResult, error) {
-    if cfg.Workspace == "" {
-        return agent.RunResult{}, fmt.Errorf("copilot: workspace is required")
-    }
-
-    sink := agent.ParseRunOnceOptions(opts).OnEvent
-    prompt := extractText(blocks)
-    if prompt == "" {
-        return agent.RunResult{}, fmt.Errorf("copilot: empty prompt")
-    }
-
-    startTime := time.Now()
-    args := printModeArgs(prompt, cfg.Args)
-
-    cmd := proc.New(ctx, s.command, args...)
-    cmd.Dir = cfg.Workspace
-    if len(cfg.Env) > 0 {
-        cmd.Env = append(os.Environ(), cfg.Env...)
-    }
-
-    // Up-front Ready so the per-call sink sees the lifecycle start.
-    if sink != nil {
-        sink(agent.AgentEvent{
-            Kind:      agent.EventAgentReady,
-            AgentName: s.Info().Name,
-            Workspace: cfg.Workspace,
-        })
-    }
-
-    output, err := cmd.CombinedOutput()
-    elapsedMs := time.Since(startTime).Milliseconds()
-
-    cLog("PrintMode Exit",
-        "workspace", cfg.Workspace,
-        "elapsed_ms", elapsedMs,
-        "output_bytes", len(output),
-        "err", errStr(err))
-
-    if err != nil {
-        stderr := strings.TrimSpace(string(output))
-        var wrapped error = err
-        if stderr != "" {
-            wrapped = fmt.Errorf("copilot run: %w (stderr: %s)", err, stderr)
-        } else {
-            wrapped = fmt.Errorf("copilot run: %w", err)
-        }
-        if sink != nil {
-            sink(agent.AgentEvent{
-                Kind:       agent.EventAgentError,
-                Err:        wrapped,
-                Diagnostic: copilotDiagnostic(agent.ClassifyExit(err, false), stderr),
-            })
-        }
-        return agent.RunResult{}, wrapped
-    }
-
-    text := strings.TrimSpace(string(output))
-    if text == "" {
-        wrapped := fmt.Errorf("copilot: empty answer")
-        if sink != nil {
-            sink(agent.AgentEvent{
-                Kind:       agent.EventAgentError,
-                Err:        wrapped,
-                Diagnostic: copilotDiagnostic(agent.BridgeExitCleanExit, ""),
-            })
-        }
-        return agent.RunResult{}, wrapped
-    }
-
-    result := agent.RunResult{
-        Text:       text,
-        DurationMs: elapsedMs,
-        Subtype:    "completed",
-    }
-    if sink != nil {
-        sink(agent.AgentEvent{
-            Kind: agent.EventAgentResult,
-            Result: &agent.AgentResultEvent{
-                Text:       result.Text,
-                DurationMs: result.DurationMs,
-                Subtype:    result.Subtype,
-            },
-        })
-        sink(agent.AgentEvent{
-            Kind: agent.EventAgentDone,
-            Done: &agent.AgentDoneEvent{ExitCode: 0, Reason: "settled"},
-        })
-    }
-    return result, nil
-}
-
-// printModeArgs is the argv for `copilot -p`.
-//
-//	copilot --allow-all-tools -p "<prompt>" -s
-//
-// `-s` / `--silent` ("Output only the agent response (no
-// stats), useful for scripting with -p") suppresses the
-// post-answer decoration. Without `-s`, captured stdout
-// contains "Changes / AI Credits / Tokens / Resume" lines
-// that would bleed into RunResult.Text.
-func printModeArgs(prompt string, extra []string) []string {
-    args := append([]string{}, FullAccessArgs...)
-    args = append(args, "-p", prompt, "-s")
-    return append(args, extra...)
-}
-
-// copilotDiagnostic mirrors cursor/cursorDiagnostic.
-func copilotDiagnostic(exitKind agent.BridgeExitKind, stderr string) *agent.BridgeDiagnostic {
-    return &agent.BridgeDiagnostic{
-        ExitKind:   exitKind,
-        StderrTail: stderr,
-        AgentName:  bridgeName,
-        KilledAt:   time.Now(),
-    }
-}
-
-// extractText concatenates all ContentText blocks into a single prompt.
-func extractText(blocks []agent.ContentBlock) string {
-    var parts []string
-    for _, b := range blocks {
-        if b.Type == agent.ContentText && b.Text != "" {
-            parts = append(parts, b.Text)
-        }
-    }
-    return strings.Join(parts, "\n")
-}
-
-// errStr renders an error's string form, returning "<nil>" for nil.
-func errStr(err error) string {
-    if err == nil {
-        return "<nil>"
-    }
-    return err.Error()
-}
+```text
+RunOnce → agent.RunSession → Start(handshake) → SendBlocks(prompt 写进 pipe)
+        → drain(事件流) → Close
 ```
+
+- **prompt 走管道**,不受平台 argv 上限约束(Linux 单个 argv 字符串 131072 字节,
+  Windows 整条命令行 32767 字符)。`/gtw pr` 的 prompt 内嵌完整 diff,超限即
+  spawn 失败 —— 这正是走管道的原因。
+- **正文按 ACP 的原样返回**。ACP bridge 的 `agent_message_chunk` 逐块到达,每个
+  flush 的块会被 trim;acp bridge 另外维护一份 per-turn 的原文累加器
+  (`agent.TurnText`),one-shot drain 优先取它,所以 PR body 的空行不会丢。
+- **one-shot turn 总是开新 session**(`agent.RunSession` 清掉 `cfg.SessionID`),
+  不会接进 chat session 的对话里。
+- **turn 结束信号**:`EventAgentDone{Reason:"settled"}`。正文为空时 turn 失败
+  (`turn ended without a reply`)。
+
+---
+
 
 ---
 
@@ -529,8 +384,9 @@ func init() {
     // config-tampering principle, model / provider / MCP
     // servers flow from the user's own settings.
     //
-    // One-shot invocations use `copilot --allow-all-tools -p
-    // "..." -s` print-mode (mirrors cursor/print.go).
+    // One-shot invocations (/gtw commit, /gtw pr) run over the
+    // same ACP transport — the prompt travels over the protocol
+    // pipe, so it is not bounded by the platform's argv limit.
     agent.Builtins.Register(
         copilot.NewStarter("copilot", "copilot", copilot.DefaultACPArgs))
 }
@@ -558,8 +414,8 @@ agents:
     bridge: copilot
     command: copilot       # Bridge 自动注入 `--allow-all-tools --acp --stdio`
     # bridge 默认行为:
-    #   长会话: `copilot --allow-all-tools --acp --stdio` (PTY + JSON-RPC)
-    #   一次性: `copilot --allow-all-tools -p "..." -s` (plain stdout)
+    #   长会话 / 一次性: `copilot --allow-all-tools --acp --stdio`
+    #   (PTY + JSON-RPC;一次性 turn 的 prompt 走同一条管道)
     # 用户本地的 ~/.copilot/ 配置 + 认证状态由 Copilot CLI 自己处理,
     # nightme 不重写、不注入 model / provider / API key。
 ```
@@ -689,7 +545,7 @@ session/prompt ──> session/update (agent_message_chunk / agent_thought_chunk
 | Permission flag | 无(ACP 内部) | `--force --trust --sandbox disabled --approve-mcps`(4 个) | `--allow-all-tools`(1 个) |
 | Vendor MethodHandler | 无 | **有**(5 个 `cursor/*` method) | **无**(`copilot/*` 未公开) |
 | sessionUpdate 翻译器 | 无(generic 覆盖) | 无 | **无**(opencode 风格) |
-| Print-mode | `opencode run --format json`(NDJSON) | `cursor-agent -p --output-format text`(plain) | `copilot -p -s`(plain, `-s` 抑制 stats) |
+| One-shot | 与 chat 同一份 ACP transport | 与 chat 同一份 ACP transport | 与 chat 同一份 ACP transport |
 | 本地配置 | `~/.opencode/` | `~/.cursor/` | `~/.copilot/` |
 | 代码量 | ~800 行 | ~600 行(含 handler) | **~360 行**(无 handler) |
 
@@ -708,7 +564,7 @@ session/prompt ──> session/update (agent_message_chunk / agent_thought_chunk
 | workspace 为空 | Start / RunOnce 均返回 error |
 | 进程异常退出 | 通用 acp bridge 的 stderr 诊断 + EventAgentDone{Reason:"settled" 或 error path} |
 | `--acp` flag 顺序写错 | Copilot 是 flat flags,无 subcommand,顺序无关,但**必须** `--allow-all-tools` + `--acp` + `--stdio` 三件齐 |
-| Print-mode 输出混入 stats | `-s` flag 抑制;测试 `TestPrintModeArgs_PrependsFullAccess` 锁住 argv 含 `-s` |
+| one-shot 正文丢失空行 | ACP bridge 的 `agent.TurnText` 累加器被绕过 | 确认 acp bridge 仍在维护 per-turn 原文累加器 |
 | Windows `.cmd` shim | npm wrapper 在 Windows 装 `copilot.cmd`,exec.LookPath 自动解析 PATHEXT |
 
 ---
@@ -717,23 +573,20 @@ session/prompt ──> session/update (agent_message_chunk / agent_thought_chunk
 
 ### 9.1 单元测试(`internal/bridge/copilot/starter_test.go`)
 
-6 个测试,镜像 cursor/starter_test.go:
+5 个测试,镜像 cursor/starter_test.go:
 
 | Test | 断言 |
 |---|---|
 | `TestStarter_Info` | `Info().Name == "copilot"`,`Mode == ModeACP`,`Args == DefaultACPArgs` |
 | `TestDefaultACPArgs_AllowAllBeforeACP` | DefaultACPArgs = `[--allow-all-tools, --acp, --stdio]` |
-| `TestPrintModeArgs_PrependsFullAccess` | `printModeArgs("hello", nil) == [--allow-all-tools, -p, hello, -s]` |
 | `TestStarter_Info_DefensiveCopy` | caller 修改 args slice 不影响 Starter |
 | `TestStarter_Detect_BinaryNotOnPath` | 不存在的 binary → error |
 | `TestStarter_Detect_PassForRealBinary` | 真 `copilot` 在 PATH 时 Detect 通过(skip if not) |
 
-### 9.2 真机测试(3 个,均需 `copilot` on PATH)
+### 9.2 真机测试(2 个,均需 `copilot` on PATH)
 
 | Test | 验证 |
 |---|---|
-| `TestPrintMode_RealBinary_RunsAndReturnsText` | `runPrintMode` 真机跑 `copilot -p "PONG" -s`,断言 result.Text 含 "PONG" 且无 stats decoration |
-| `TestPrintMode_RealBinary_EmptyPromptFails` | 空 blocks 早返 "empty prompt" 错误 |
 | `TestStart_RealBinary_FullPromptFlow` | `Starter.Start` 全链路:ACP 握手 → `EventAgentReady` → `SendBlocks` → 流式 `[思考]` + 答案 `EventAgentText` → `EventAgentDone` |
 | `TestACP_Handshake_RealBinary` | 不走 nightme bridge,直接 `exec.CommandContext("copilot", "--acp", "--stdio")` 跑 NDJSON `initialize` + `session/new`,断言 protocolVersion=1 + 合法 sessionId |
 
@@ -771,9 +624,8 @@ go test ./internal/bridge/copilot/ ./internal/agent/... -count=1 -timeout 240s
 | ACP 握手失败 / 未登录 | 用户本机未 `copilot login` | 让用户跑 `copilot login`,状态持久化在 `~/.copilot/` |
 | 权限请求卡住 / 工具被拒 | 用户自定义 `args` 把 `--allow-all-tools` 删了,或覆盖为 deny-tool | 确认 `nightme agents` 列出的 argv 含 `--allow-all-tools`;`make restart` 后重生 |
 | session 卡死 | events channel 消费者问题 | 检查 AS readpump(events 单消费者,见 `claude.md §3`) |
-| print-mode 超时 | copilot `-p` 执行时间过长 | 检查 Copilot CLI 本地环境(模型、proxy) |
-| print-mode 输出含 "Changes / AI Credits / Tokens / Resume" | `-s` flag 缺失 | 确认 print-mode argv 含 `-s`;查看 `TestPrintModeArgs_PrependsFullAccess` |
-| print-mode 空输出 | prompt 为空或 CLI 异常 | 检查 blocks 内容 + stderr |
+| one-shot 超时 | copilot 的 turn 执行时间过长 | 检查 Copilot CLI 本地环境(模型、proxy) |
+| one-shot 空输出 | prompt 为空或 CLI 异常 | 检查 blocks 内容 + stderr |
 
 ---
 
@@ -801,9 +653,9 @@ go test ./internal/bridge/copilot/ ./internal/agent/... -count=1 -timeout 240s
 
 包装 `acp.NewStarter`,提供 `Info()` / `Detect()` / `Start()` / `RunOnce()` / `Review()` 5 个方法。`Start` 委托给 `acp.NewStarter().Start()`。**不安装** vendor handler(Copilot 无 vendor 私有 method)。
 
-### Step 3: 实现 print.go ✅
+### Step 3: one-shot 走 session transport ✅
 
-`runPrintMode` 调用 `copilot --allow-all-tools -p "..." -s`,捕获 stdout 作为结果文本。`-s` 抑制 stats decoration。提取 `copilotDiagnostic` / `extractText` / `errStr` helper。
+`Starter.RunOnce` 委托给共享的 `agent.RunSession`(`internal/agent/run_session.go`):`Start → SendBlocks → drain → Close`。prompt 写进 ACP 管道,不受平台 argv 上限约束;正文由 acp bridge 的 per-turn 原文累加器(`agent.TurnText`)按原样返回。
 
 ### Step 4: 注册到 agents.go ✅
 
@@ -816,8 +668,7 @@ agent.Builtins.Register(
 
 ### Step 5: 编写测试 ✅
 
-- `starter_test.go`: 6 个单元测试
-- `print_real_unix_test.go`: 2 个真机 print-mode 测试
+- `starter_test.go`: 5 个单元测试
 - `start_real_unix_test.go`: 1 个真机 Start 全链路测试
 - `acp_probe_unix_test.go`: 1 个真机 ACP handshake 探针
 

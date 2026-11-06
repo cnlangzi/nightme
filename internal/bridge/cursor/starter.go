@@ -12,13 +12,13 @@
 //     Cursor's sessionUpdate events are handled by the generic
 //     acp bridge's fallback path.
 //
-//   - RunOnce (one-shot: /gtw commit, buildAgentPrompt) →
-//     `cursor-agent` + FullAccessArgs + `-p "prompt"
-//     --output-format text`. The process exits after the turn.
+//   - RunOnce (one-shot: /gtw commit, /gtw pr) → runs over the
+//     same ACP transport. The prompt travels over the protocol
+//     pipe, so it is not bounded by the platform's argv limit.
 //
-// The two paths share the same Starter; only RunOnce and the
-// print-mode spawn in print.go differ from Start and the
-// ACP-backed driver.
+// The two paths share the same Starter; only RunOnce differs from
+// Start: it opens a fresh session and closes it again when the
+// turn ends.
 package cursor
 
 import (
@@ -156,18 +156,17 @@ func (s *Starter) attachMethodHandler(a *agent.Agent) (*agent.Agent, error) {
 	return a, nil
 }
 
-// RunOnce is the one-shot counterpart to Start. Spawns
-// `cursor-agent` + FullAccessArgs + `-p "prompt" --output-format
-// text` and returns the agent's final text. No chat session, no
-// events channel — the process exits after the turn.
+// RunOnce is the one-shot counterpart to Start. The turn runs over
+// the session transport — Start → SendBlocks → drain → Close — so
+// the prompt travels over the ACP pipe instead of argv. A prompt
+// larger than the platform's argv limit (131072 bytes per string on
+// Linux, 32767 characters per command line on Windows) therefore
+// still reaches the agent.
 //
-// Cursor's print-mode uses `cursor-agent -p` (not ACP), which is
-// simpler and faster for one-shot invocations (/gtw commit,
-// buildAgentPrompt). Mirrors the codex/claudecode/pi/opencode
-// print-mode pattern: bypass the long-lived ACP bridge driver,
-// spawn a fresh process, capture stdout, reap on exit.
+// The turn always opens a fresh session, so it never splices itself
+// into the caller's conversation.
 func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock, opts ...agent.RunOnceOption) (agent.RunResult, error) {
-	return runPrintMode(ctx, s, cfg, blocks, opts...)
+	return agent.RunSession(ctx, s, cfg, blocks, opts...)
 }
 
 // Review implements /review for the cursor bridge via the shared

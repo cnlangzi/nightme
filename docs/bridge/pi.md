@@ -293,7 +293,7 @@ npm install -g @earendil-works/pi-coding-agent
 pnpm add -g @earendil-works/pi-coding-agent
 ```
 
-`nightme agents` 表格显示 `pi / pi / --mode rpc --approve --no-themes --offline`；`nightme config` → Agents 可选为 primary；飞书会话中 `/use pi` 走现有 `agentsession.Spawner`，经 `Detect()` (`exec.LookPath("pi")`) → `Start()`（`exec.Command("pi", "--mode", "rpc", "--approve", "--no-themes", "--offline")` + 真实 pipes）→ `newSession(...)`。一次性任务使用 `pi --mode json --approve --no-themes --offline -p <prompt>`。两者都继承 `PI_TELEMETRY=0`。
+`nightme agents` 表格显示 `pi / pi / --mode rpc --approve --no-themes --offline`；`nightme config` → Agents 可选为 primary；飞书会话中 `/use pi` 走现有 `agentsession.Spawner`，经 `Detect()` (`exec.LookPath("pi")`) → `Start()`（`exec.Command("pi", "--mode", "rpc", "--approve", "--no-themes", "--offline")` + 真实 pipes）→ `newSession(...)`。一次性任务走同一份 `--mode rpc` transport，prompt 写进 JSONL 管道（不受平台 argv 上限约束）。两者都继承 `PI_TELEMETRY=0`。
 
 ## 8. 已知限制（首期明确）
 

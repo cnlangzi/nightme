@@ -81,23 +81,17 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 	return agent.NewAgent(s.Info(), d.pid, d.events, d), nil
 }
 
-// RunOnce is the one-shot counterpart to Start. Drives the
-// configured agent through a single prompt via print mode
-// (`omp -p --mode json --approval-mode yolo`) and returns
-// the final text + per-turn usage.
+// RunOnce is the one-shot counterpart to Start. The turn runs over
+// the session transport — Start → SendBlocks → drain → Close — so
+// the prompt travels over the bridge's protocol pipe instead of
+// argv. A prompt larger than the platform's argv limit (131072
+// bytes per string on Linux, 32767 characters per command line on
+// Windows) therefore still reaches the agent.
 //
-// As with the other print-mode bridges (pi / claudecode /
-// codex / opencode / copilot), the rationale is to bypass the
-// long-lived RPC handshake for callers that only need a
-// single turn (/gtw commit, buildAgentPrompt). RunOnce
-// spawns, drains the NDJSON event stream through the same
-// translator the RPC path uses, and exits.
+// The turn always opens a fresh session, so it never splices itself
+// into the caller's conversation.
 func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock, opts ...agent.RunOnceOption) (agent.RunResult, error) {
-	result, err := runPrintMode(ctx, s, cfg, blocks, opts...)
-	if err != nil {
-		return agent.RunResult{}, fmt.Errorf("agent %s: %w", s.Info().Name, err)
-	}
-	return result, nil
+	return agent.RunSession(ctx, s, cfg, blocks, opts...)
 }
 
 // Review implements /review for omp: delegate to the shared

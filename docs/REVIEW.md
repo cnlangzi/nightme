@@ -194,10 +194,7 @@ ocr 路径按 ocr rule groups 拆多 job 时,核心是**每 job 独立 agent ses
 
 **传输层:prompt 走 session pipe,不走 argv**
 
-每个 rule group 的 prompt 通过 agent 的 **session 路径**投递(`agent.RunSession`:Start → SendBlocks → drain → Close),不走 print mode。差别在 prompt 的载体:
-
-- **print mode** 把整个 prompt 作为**单个 argv 元素**传给 agent CLI。Linux 单个 argv 字符串上限 131072 字节(32 × PAGE_SIZE),Windows 整条命令行上限 32767 字符,超了直接 spawn 失败(`argument list too long`)。
-- **session 路径**把 prompt 写进 agent 的**协议管道**(stdio / JSON-RPC / ACP)。管道没有长度上限,group prompt 多大都能送达。
+每个 rule group 的 prompt 通过 agent 的 **session 路径**投递(`agent.RunSession`:Start → SendBlocks → drain → Close)。prompt 写进 agent 的**协议管道**(stdio / JSON-RPC / ACP),管道没有长度上限,group prompt 多大都能送达 —— 如果 prompt 是 argv 元素,Linux 单个 argv 字符串上限 131072 字节(32 × PAGE_SIZE),Windows 整条命令行上限 32767 字符,超了直接 spawn 失败(`argument list too long`)。
 
 所以 review 的隔离单位是**一个 group 一个 session**(独立进程 / 独立 session id),一个 group 跑**一轮**:prompt 一次性送达,agent 的回答即该 group 的终态事件。
 
@@ -210,11 +207,13 @@ session 路径的 turn 结束信号有两种,`agent.DrainSession` 两种都接(�
 
 正文可能分两截到:bridge 在 turn 过程中以 `EventAgentText` 流出已说出的部分,结束时把还压着的尾巴放在终态事件上(claudecode / codex 的终态事件不带正文,正文全在 text 事件里)。drain 把两截按顺序拼成完整回答。
 
+**可选能力 `agent.TurnText`**:bridge driver 如果实现了 `TurnText() string`,drain 优先取它给出的**原样正文**,只有它为空时才回退到上面那条"事件流拼装"。acp bridge 实现了这个能力 —— 它按句 flush 自己的正文缓冲,每个 flush 的块都被 trim,落在 flush 边界上的段落空行就没了;driver 另外维护一份 per-turn 的原文累加器,one-shot drain 取它,PR body 的空行因此不丢。其余 bridge 不实现:它们的流式拼装本来就无损。
+
 下列情况算**失败**(该 group 标 failed,其余 group 的 findings 照常汇入):
 
 - turn 结束但没有终态事件(事件流先关)。
 - 终态事件不是上述两种(例如 `Done{Reason: "interrupted"}` 的中止 turn、或进程退出)——session 在 turn 之后仍然活着,继续等下去只会等到调用方的 deadline。
-- turn 结束但没有正文(空回答)——print mode 的各 bridge 同样拒绝空回答。
+- turn 结束但没有正文(空回答)——drain 拒绝空回答。
 
 review 路径没有交互用户,drain 遇到 `EventAgentPermission` 时用**第一个选项**自动放行("Allow once" 或问题首个标签),不等用户。
 

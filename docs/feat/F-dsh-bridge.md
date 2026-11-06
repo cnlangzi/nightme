@@ -1,13 +1,12 @@
-# F-dsh — DeepSeek Harness (dsh) print-mode Bridge
+# F-dsh — DeepSeek Harness (dsh) Bridge
 
-> **Status**: 方案定稿,待实施
+> **Status**: 历史方案记录。dsh bridge 落地时改走共享 web daemon(见
+> [F-dsh-shared-host.md](./F-dsh-shared-host.md)),one-shot turn 与 chat session
+> 共用同一条 transport。
 > **Scope**: `internal/bridge/dsh/` — dsh 作为 nightme 的 RunOnce agent(`/gtw commit`、`/gtw pr` 等)
-> **方向(已锁定)**: `dsh --profile headless` CLI 直接调用,plain stdout,**完全不改 dsh 本机默认配置**
 > **核心原则(用户 2026-08-14 锁定)**: 接入底层 AI agent,**不修改 agent 本地默认配置**;nightme 只管 transport + permissions(权限默认全开)
 > **姊妹文档**:
-> - [F-CODEX-PRINT-001](./F-CODEX-PRINT-001.md) — 同形态:codex `exec` print-mode,本方案模板
-> - [F-CLAUDE-PRINT-001](./F-CLAUDE-PRINT-001.md) — claude `-p` print-mode
-> - [F-PI-PRINT-001](./F-PI-PRINT-001.md) — pi `--print` print-mode
+> - [F-dsh-shared-host.md](./F-dsh-shared-host.md) — dsh 落到共享 web daemon 的方案
 > - [bridge/cli-transport.md](../bridge/cli-transport.md) — pipe / lifecycle 通用约束
 
 ---
@@ -42,7 +41,7 @@
 
 ### 1.3 与 codex print-mode 形态对齐
 
-| | codex (`F-CODEX-PRINT-001`) | **dsh(本方案)** |
+| | codex | **dsh(本方案)** |
 |---|---|---|
 | chat 后端 | `codex app-server --listen stdio://` JSON-RPC(长生命周期) | ❌ **本方案不做**(headless 不支持) |
 | print-mode 命令 | `codex exec --json -o <tmpfile>` | `dsh --profile headless -- "<prompt>"` |

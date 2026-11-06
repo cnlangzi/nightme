@@ -29,12 +29,10 @@ internal/bridge/
 ├── opencode/         # opencode 包装 acp（参考实现）
 │   ├── starter.go    # 包装 acp.NewStarter
 │   ├── update.go     # opencode 特定的 sessionUpdate 翻译器
-│   ├── print.go      # RunOnce print-mode
 │   └── opencode.go   # 包级常量 + debug 日志
 └── cursor/           # 新增：cursor 包装 acp
     ├── starter.go    # 包装 acp.NewStarter
-    ├── cursor.go     # 包级常量 + debug 日志
-    └── print.go      # RunOnce print-mode (cursor-agent -p)
+    └── cursor.go     # 包级常量 + debug 日志
 ```
 
 ---
@@ -106,8 +104,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
 ```
 internal/bridge/cursor/
 ├── starter.go      # Starter 实现（包装 acp.NewStarter）
-├── cursor.go       # 包级常量 + debug 日志
-└── print.go        # RunOnce print-mode (cursor-agent -p)
+└── cursor.go       # 包级常量 + debug 日志
 ```
 
 ### 3.2 cursor.go — 包级常量与日志
@@ -176,9 +173,9 @@ func cLog(msg string, args ...any) {
 // command. This package wraps the generic acp bridge, similar
 // to opencode.
 //
-// The two paths share the same Starter; only RunOnce and the
-// print-mode spawn in print.go differ from Start and the
-// ACP-backed driver.
+// The two paths share the same Starter; only RunOnce — the
+// one-shot turn — differs from Start: it opens a fresh session
+// and closes it again when the turn ends.
 package cursor
 
 import (
@@ -251,127 +248,35 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 	return a, nil
 }
 
-// RunOnce is the one-shot counterpart to Start. Spawns
-// `cursor-agent -p "prompt" --output-format json` and returns
-// the parsed RunResult (Text + Usage + Subtype + SessionID
-// from the single-line result envelope).
-//
-// Cursor's print-mode uses `cursor-agent -p` (not ACP), which is simpler
-// and faster for one-shot invocations (/gtw commit, buildAgentPrompt).
-func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
-	return runPrintMode(ctx, s, cfg, blocks)
+// RunOnce is the one-shot counterpart to Start. The turn runs over
+// the session transport, so the prompt travels over the ACP pipe
+// instead of argv.
+func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock, opts ...agent.RunOnceOption) (agent.RunResult, error) {
+	return agent.RunSession(ctx, s, cfg, blocks, opts...)
 }
 ```
 
-### 3.4 print.go — RunOnce 实现
+### 3.4 one-shot turn — 走 session transport
 
-```go
-// print.go — one-shot print mode for cursor using `cursor-agent -p`.
-//
-// Cursor CLI has a built-in print-mode: `cursor-agent -p "prompt"
-// --output-format json`. The process exits after the turn and
-// writes a single-line result envelope to stdout carrying the
-// final text plus the per-turn token usage. runPrintMode parses
-// the envelope into RunResult.{Text, Subtype, SessionID, Usage}
-// so the channel footer renders input / output / cache tokens
-// for one-shot calls. Older cursor versions that ignore
-// --output-format json keep working via the plain-text fallback.
-package cursor
+cursor 没有独立的 one-shot 路径。`Starter.RunOnce` 与 chat session 共用同一份
+ACP transport,由共享的 `agent.RunSession` 驱动:
 
-import (
-	"context"
-	"fmt"
-	"os"
-	"os/exec"
-	"strings"
-	"time"
-
-	"github.com/cnlangzi/nightme/internal/agent"
-)
-
-// runPrintMode spawns `cursor-agent -p "prompt"` for one-shot invocations.
-// The process exits after the turn — no multi-turn, no events channel.
-func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
-	if cfg.Workspace == "" {
-		return agent.RunResult{}, fmt.Errorf("cursor: workspace is required")
-	}
-
-	prompt := extractText(blocks)
-	if prompt == "" {
-		return agent.RunResult{}, fmt.Errorf("cursor: empty prompt")
-	}
-
-	start := time.Now()
-
-	args := []string{"-p", prompt, "--output-format", "json"}
-	args = append(args, cfg.Args...)
-
-	cmd := exec.CommandContext(ctx, s.command, args...)
-	cmd.Dir = cfg.Workspace
-	if len(cfg.Env) > 0 {
-		cmd.Env = append(os.Environ(), cfg.Env...)
-	}
-
-	cLog("PrintMode Start",
-		"command", s.command,
-		"workspace", cfg.Workspace,
-		"prompt_bytes", len(prompt))
-
-	output, err := cmd.CombinedOutput()
-
-	elapsedMs := time.Since(start).Milliseconds()
-
-	cLog("PrintMode Exit",
-		"elapsed_ms", elapsedMs,
-		"output_bytes", len(output),
-		"err", errStr(err))
-
-	if err != nil {
-		return agent.RunResult{}, fmt.Errorf("cursor run: %w (output: %s)", err, strings.TrimSpace(string(output)))
-	}
-
-	return agent.RunResult{
-		Text:       strings.TrimSpace(string(output)),
-		DurationMs: elapsedMs,
-		Subtype:    "completed",
-	}, nil
-}
-
-// extractText concatenates all ContentText blocks into a single prompt.
-func extractText(blocks []agent.ContentBlock) string {
-	var parts []string
-	for _, b := range blocks {
-		if b.Type == agent.ContentText && b.Text != "" {
-			parts = append(parts, b.Text)
-		}
-	}
-	return strings.Join(parts, "\n")
-}
-
-// errStr renders an error's string form, returning "<nil>" for nil.
-func errStr(err error) string {
-	if err == nil {
-		return "<nil>"
-	}
-	return err.Error()
-}
+```text
+RunOnce → agent.RunSession → Start(handshake) → SendBlocks(prompt 写进 pipe)
+        → drain(事件流) → Close
 ```
 
-### 3.5 Resume
+- **prompt 走管道**,不受平台 argv 上限约束(Linux 单个 argv 字符串 131072 字节,
+  Windows 整条命令行 32767 字符)。
+- **正文按 ACP 的原样返回**。ACP bridge 的 `agent_message_chunk` 逐块到达,每个
+  flush 的块会被 trim;acp bridge 另外维护一份 per-turn 的原文累加器
+  (`agent.TurnText`),one-shot drain 优先取它,所以 PR body 的空行不会丢。
+- **one-shot turn 总是开新 session**(`agent.RunSession` 清掉 `cfg.SessionID`)。
+- **turn 结束信号**:`EventAgentDone{Reason:"settled"}`。正文为空时 turn 失败
+  (`turn ended without a reply`)。
 
-cursor-agent 的 `initialize` 声明 `loadSession: true`，`sessionCapabilities` 只有 `list`，没有 `resume`。有 `cfg.SessionID` 时握手发 `session/load`，不发 `session/resume`。
+---
 
-`sessionId` 就是 `session/new` 的返回值。`session/load` 读取 `~/.cursor/acp-sessions/<sessionId>/store.db`。第一次 `session/prompt` 结束之后这个文件才存在，所以 nightme 在该轮 `EventAgentDone`（reason `settled`）时才把 id 写入 `agent_sessions.json`。第一次 `session/prompt` 未结束就退出，下次 spawn 不带 session id。只有 `meta.json` 时 load 返回 `-32602`，`error.data.message` 为 `Session "<id>" not found`，bridge 包成 `agent.ErrResumeUnhealthy` 交给 chat 层。不换另一个 session。
-
-```
-session/load {
-  sessionId: <session/new 的 UUID>,
-  cwd: <绝对路径>,
-  mcpServers: []
-}
-```
-
-响应不回带 `sessionId`。客户端继续用请求里的那个 id。历史以 `session/update` 回放，bridge 不转发到聊天。
 
 ---
 
@@ -540,9 +445,9 @@ session/prompt ──> session/update* ──> session/idle ──> EventAgentRe
 | 二进制名 | `opencode` | `cursor-agent` |
 | ACP 启动参数 | `opencode acp` | `cursor-agent --force --trust --sandbox disabled --approve-mcps acp` |
 | sessionUpdate 翻译器 | 需要（opencode 特定事件：user_message_chunk, agent_message_chunk, agent_thought_chunk, tool_call, tool_call_update） | **不需要**（通用 ACP fallback 即可） |
-| print-mode | `opencode run --format json` | `cursor-agent --force --trust --sandbox disabled --approve-mcps -p` |
+| one-shot | 与 chat 同一份 ACP transport | 与 chat 同一份 ACP transport |
 | 本地配置 | `~/.opencode/` | `~/.cursor/` |
-| 代码量 | ~800 行（starter + update + print + opencode.go） | ~150 行（starter + print + cursor.go） |
+| 代码量 | ~800 行（starter + update + opencode.go） | ~150 行（starter + cursor.go） |
 
 **为什么 cursor 不需要 sessionUpdate 翻译器**：
 
@@ -638,7 +543,7 @@ func TestE2E_FreshSession(t *testing.T) {
     }
 }
 
-func TestE2E_PrintMode(t *testing.T) {
+func TestE2E_RunOnce(t *testing.T) {
     requireRealCursor(t)
 
     s := NewStarter("cursor", "cursor-agent", []string{"acp"})
@@ -656,9 +561,6 @@ func TestE2E_PrintMode(t *testing.T) {
     }
     if result.Text == "" {
         t.Error("expected non-empty result text")
-    }
-    if result.Subtype != "completed" {
-        t.Errorf("expected subtype completed, got %s", result.Subtype)
     }
 }
 ```
@@ -687,8 +589,8 @@ go test ./internal/bridge/cursor/ -count=1 -timeout 120s -run 'TestE2E'
 | ACP 握手失败 | CLI 未登录、配置问题，或 `initialize` 超时 | 用户在本机验证 `cursor-agent acp` 是否正常；`initialize` 预算 10s（低配冷启动不够再查 CLI 本身） |
 | 权限请求卡住 / 工具被拒 | 旧 binary 仍是 `cursor-agent acp`（无 `--force`），或自定义 `args` 把 flags 写在 `acp` 后面 | 确认 `nightme agents` 列出的 argv 以 `--force … acp` 结尾；`make restart` 后重生 |
 | session 卡死 | events channel 消费者问题 | 检查 AS readpump |
-| print-mode 超时 | cursor-agent -p 执行时间过长 | 检查 Cursor CLI 本地环境（模型、proxy） |
-| print-mode 空输出 | prompt 为空或 CLI 异常 | 检查 blocks 内容 + stderr |
+| one-shot 超时 | cursor-agent 的 turn 执行时间过长 | 检查 Cursor CLI 本地环境（模型、proxy） |
+| one-shot 空输出 | prompt 为空或 CLI 异常 | 检查 blocks 内容 + stderr |
 
 ---
 
@@ -712,9 +614,9 @@ go test ./internal/bridge/cursor/ -count=1 -timeout 120s -run 'TestE2E'
 
 包装 `acp.NewStarter`，提供 `Info()` / `Detect()` / `Start()` / `RunOnce()` 四个方法。`Start` 委托给 `acp.NewStarter().Start()`，不需要 sessionUpdate 翻译器。
 
-### Step 3: 实现 print.go
+### Step 3: one-shot 走 session transport
 
-`runPrintMode` 调用 `agent -p "prompt" --output-format json`，解析单行 result envelope 并把 `usage.{inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens}` 装进 `RunResult.Usage`。
+`Starter.RunOnce` 委托给共享的 `agent.RunSession`(`internal/agent/run_session.go`):`Start → SendBlocks → drain → Close`。prompt 写进 ACP 管道,不受平台 argv 上限约束;正文由 acp bridge 的 per-turn 原文累加器(`agent.TurnText`)按原样返回。
 
 ### Step 4: 注册到 agents.go
 

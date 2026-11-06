@@ -23,9 +23,10 @@ internal/bridge/acp/
 ├── acp.go              # 包级常量（protocolVersion、clientName/version）+ Transport 接口
 ├── agent.go            # driver + 全部 generic fallback handler + deliver/emit
 ├── rpc.go              # JSON-RPC 2.0 client（pending request 池 + 写锁）
-├── starter.go          # acp.NewStarter + RunOnce + collectResult
+├── starter.go          # acp.NewStarter + RunOnce
 ├── emit_contract_test.go   # deliver() / emitConnected() 阻塞语义回归测试
 ├── deliver_stamp_test.go   # deliver() 盖章 + 新 handler 测试
+├── turn_text_test.go   # per-turn 原文累加器 + one-shot turn 集成测试
 └── *_test.go           # 其它测试（handshake / parse / RFC decode 等）
 ```
 
@@ -38,8 +39,8 @@ internal/bridge/
 ├── codex/         # 自有 app-server JSON-RPC bridge（不走 ACP；用 acp 是独立 SDK）
 ├── dsh/           # 自有 HTTP+SSE bridge
 ├── pi/            # 自有 pi --mode rpc bridge
-├── opencode/      # 走 acp/ 的 CLI 包装层（spawn recipe + print-mode）
-└── cursor/        # 走 acp/ 的 CLI 包装层（spawn recipe + print-mode）
+├── opencode/      # 走 acp/ 的 CLI 包装层（spawn recipe）
+└── cursor/        # 走 acp/ 的 CLI 包装层（spawn recipe）
 ```
 
 claudecode / codex / dsh / pi 是**独立的 transport 实现**，不走 acp bridge；opencode / cursor / 未来 ACP server 走 acp bridge 并在其包内提供 spawn recipe。
@@ -134,6 +135,7 @@ driver.SetFlushHandler(myFlushHook)
 | `model` | `usage_update.model` / `session_info_update.model` | vendor 报就更新 | per-event 盖章 |
 | `lastUsage` | `usage_update` | 每个 turn 写入、turn-end 清零 | 落到 Done.Usage |
 | `turnSettled` | local | turn-end set；**`SendBlocks` 顶部 reset** | 防止 turn-end 双发 |
+| `turnText` | `agent_message_chunk` / `message_chunk` 的原文 | 每块追加；**`SendBlocks` 顶部 reset** | one-shot turn 的原样正文（见 §3.5） |
 
 ### 3.2 `deliver()` — 唯一 producer-side 发送路径
 
@@ -180,6 +182,28 @@ if ev.Model != "" {
 （之前只 `EventAgentReady && ev.Model != ""`，对 ACP 不够 —— wire 不在 handshake 报 model）
 
 意味着 bridge 通过 `deliver()` 盖在后续 Text / Tool / Result 事件上的 Model 会被 runtime 写进 `s.Model()`，footer 跨整个 session 都能显示。ACP 之前 footer 全空的问题由此修复。
+
+### 3.5 `turnText` — one-shot turn 的原样正文
+
+`textBuf` 是**流式**缓冲：按句 flush，每个 flush 的块被 trim。共享的 one-shot drain
+从事件流里拼回来的正文因此会丢掉块之间的空白 —— 落在 flush 边界上的段落空行就没了。
+`/gtw pr` 的 PR body 正是按行解析的，于是正文被静默地改写。
+
+bridge 手里有原文，所以它自己回答。driver 维护一份 per-turn 的累加器 `turnText`：
+每个 `agent_message_chunk` / `message_chunk` 在写进 `textBuf` **之前**原样追加进去，
+`SendBlocks` 顶部（和 `turnSettled` 一起）清零。
+
+driver 实现 `agent.TurnText`（`TurnText() string`）这个可选能力，one-shot drain
+优先取它；只有它为空时才回退到事件流拼出来的正文。ACP family 之外的其他 bridge
+不实现这个能力 —— 它们的流式拼装本来就是无损的。
+
+**装 `UpdateHandler` 的 bridge 要自己喂累加器**：内置 fallback 才是往
+`turnText` 里追加的那一方；handler 接管整条 sessionUpdate 流之后，累加器就是空的，
+one-shot drain 会回退到事件流拼装，段落空行可能丢。handler 自己发
+`agent_message_chunk` / `message_chunk` 时，必须也往累加器里追加。
+
+chat 通道看到的仍然是 trim 过的分句文本（一直如此），`RunResult.Text` 拿到的是
+agent 的原样正文（首尾空白被 trim，内部空行保留）。
 
 ---
 

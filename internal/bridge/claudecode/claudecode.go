@@ -452,8 +452,14 @@ func isClosed(ch chan struct{}) bool {
 	}
 }
 
-// errStr is defined in print.go and shared between this file and
-// the print-mode driver.
+// errStr renders an error for a log line: nil becomes "<nil>",
+// anything else keeps its own message.
+func errStr(err error) string {
+	if err == nil {
+		return "<nil>"
+	}
+	return err.Error()
+}
 
 // ─── live-half methods ───
 

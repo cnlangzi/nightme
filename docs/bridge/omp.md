@@ -14,8 +14,8 @@
 >   replaces `agent_settled`; thinking arrives as a dedicated
 >   content block rather than inline `<think>` tags). The two
 >   packages are deliberately independent — see §1 below.
-> - [`codex.md`](./codex.md) and [`opencode.md`](./opencode.md) —
->   print-mode spawn shape that omp's `RunOnce` mirrors.
+> - [`codex.md`](./codex.md) — the app-server bridge shape that
+>   omp's one-shot turn mirrors.
 > - [`claude.md`](./claude.md), [`acp.md`](./acp.md) — for the
 >   `agent.AgentEvent` / `ModeJSONIO` shapes the bridge consumes.
 
@@ -24,16 +24,15 @@
 `internal/bridge/omp` adds omp as nightme's eighth built-in agent.
 omp exposes a long-lived `omp --mode rpc` transport (LF-delimited
 JSON commands, responses, and events over real stdio pipes — NOT
-PTY) and a one-shot `omp -p --mode json` print mode. The bridge
-owns the protocol: spawn, handshake, request/response correlation,
-event translation, and turn-end resolution.
+PTY). The bridge owns the protocol: spawn, handshake,
+request/response correlation, event translation, and turn-end
+resolution.
 
-Both spawn paths are wired into one `Starter`:
-`Start` (chat sessions) → `omp --mode rpc --approval-mode yolo`;
-`RunOnce` (one-shot calls) → `omp -p --mode json --approval-mode yolo`.
-Both reuse the same `translator` (translate.go) because print-mode
-emits the same NDJSON event shape as RPC mode — only the absence
-of a `response` envelope and `get_state` handshake differs.
+`Start` (chat sessions) and `RunOnce` (one-shot calls) both spawn
+`omp --mode rpc --approval-mode yolo`. The one-shot turn runs the
+same protocol over the same pipes — only the turn count and the
+session lifetime differ — so the prompt is never bounded by the
+platform's argv limit.
 
 Control surface (R4/R14/R15): `prompt`, `abort`, `new_session`.
 `set_model` / `set_thinking_level` / `steer` / `follow_up` /
@@ -54,7 +53,6 @@ omp forked from pi upstream but the wire has already diverged:
 | Compaction events | `compaction_start` / `compaction_end` | documented as `auto_compaction_*` (untested) |
 | Control vocabulary | `get_state` / `prompt` / `abort` / `new_session` | same vocabulary, different wire semantics |
 | `--resume` flag | `--session-id <id>` (pi-ism) | `-r/--resume=<value>` (omp-native) |
-| Print mode opening frame | `{"type":"session","id":...,"version":3,...}` | same |
 
 A shared JSONL transport layer would be possible, but every
 protocol change in either agent would touch the other bridge. Issue
@@ -81,9 +79,6 @@ omp's wire (verified against the v18.x line at https://omp.sh):
   `extension_ui_request` (server→client UI dialog), then
   `advisor_cost_changed`, then `available_commands_update`. The
   bridge absorbs all of these without responding.
-- Print mode opening frame: `{"type":"session",
-  "version":3, "id":..., "timestamp":..., "cwd":...}` instead of
-  `ready`. The id is the call's `SessionID`.
 
 Frame size cap (`MaxFrameSize` in rpc.go): 4 MiB, matching
 `internal/bridge/pi.MaxFrameSize`. Empirical 99th-percentile frames:
@@ -277,29 +272,27 @@ JSON over real stdio pipes (no JSON-RPC envelope), matching
 `ModeJSONIO`'s "NDJSON / JSON events over stdio" definition. pi
 uses the same mode.
 
-## 7. Print mode (`print.go`)
+## 7. One-shot turn
 
-`RunOnce` calls `runPrintMode` which spawns `omp -p <prompt>
---mode json --approval-mode yolo`, drains the stdout NDJSON stream
-through the same translator, and returns a `RunResult` carrying
-text + `UsageInfo` + `SessionID` (peeked from the opening
-`{"type":"session","id":..}` frame).
+`RunOnce` delegates to the shared `agent.RunSession`
+(`internal/agent/run_session.go`): `Start` → `SendBlocks` → drain
+→ `Close`. The prompt travels over omp's JSONL pipe, so it is not
+bounded by the platform's argv limit (Linux caps one argv string
+at 131072 bytes, Windows caps the whole command line at 32767
+characters).
 
-print-mode has no `ready` and no `get_state` — the translator's
-default case drops `session`, and `peekPrintMeta` peeks the id
-once per line.
+The turn ends on the same terminator the chat path uses:
+`agent_end{isTerminal:true}`.
 
-If the process exits without `agent_end{isTerminal:true}`,
-`parsePrintStream` returns an error whose message contains the
-agent name (`omp: exit without agent_end isTerminal=true...`)
-so /gtw commit's recovery logic can attribute the failure
-correctly.
+If the process exits without `agent_end{isTerminal:true}`, the
+error message contains the agent name
+(`omp: exit without agent_end isTerminal=true...`) so /gtw
+commit's recovery logic can attribute the failure correctly.
 
 A provider failure surfaces the same way: the translator marks
-the result event with `Err` (§5), and `parsePrintStream`
-returns that error instead of handing the provider's message
-back as the run's text — callers parse `RunResult.Text` as the
-agent's own output.
+the result event with `Err` (§5), and the drain reports that error
+instead of handing the provider's message back as the run's text —
+callers parse `RunResult.Text` as the agent's own output.
 
 ## 8. Out of scope
 
@@ -334,12 +327,6 @@ agent's own output.
   missing recovery callback).
 - `cmd/nightme/agentconformance_test.go` — the registry-driven
   suite every registered agent is covered by (§4).
-- `print_test.go` — print-mode stream parsing; a provider
-  failure is reported as an error rather than as the model's
-  answer.
-- `print_args_test.go` — argv layout per R12 (no `--model`,
-  `--provider`, `--api-key`, `--mcp-config`); `--resume`
-  position per R13.
 - `probe_unix_test.go` (build tag `!windows`) — the bridge
   entry point and the raw wire. Every case confirms omp is
   installed and skips when it is not.

@@ -40,12 +40,13 @@
 |------|----------|
 | Claude Code Bridge | [bridge/claude.md](./bridge/claude.md) |
 | Codex App-Server Bridge | [bridge/codex.md](./bridge/codex.md) |
-| OpenCode Bridge (ACP `opencode acp` + print-mode `opencode run`) | [feat/F-OPENCODE-ACP-MIGRATION.md](./feat/F-OPENCODE-ACP-MIGRATION.md) |
+| OpenCode Bridge (ACP `opencode acp`) | [feat/F-OPENCODE-ACP-MIGRATION.md](./feat/F-OPENCODE-ACP-MIGRATION.md) |
 | Pi Coding Agent Bridge（传输 + 流式事件 + contextWindow）| [bridge/pi.md](./bridge/pi.md) |
-| dsh (DeepSeek Harness) Bridge — print-mode RunOnce | [feat/F-dsh-bridge.md](./feat/F-dsh-bridge.md) |
+| dsh (DeepSeek Harness) Bridge | [feat/F-dsh-bridge.md](./feat/F-dsh-bridge.md) |
 | dsh Chat-Session Event Translation 重构（To-dos / Tool 列表修复）| [feat/F-DSH-CHAT-001-event-state.md](./feat/F-DSH-CHAT-001-event-state.md) |
 | Channel interface 抽象 | [feat/F-08-channel-abstraction.md](./feat/F-08-channel-abstraction.md) |
 | Agent 抽象（`AgentSpec` / `Starter` interface + `Agent` runtime handle）| [feat/F-09-agent-abstraction.md](./feat/F-09-agent-abstraction.md) |
+| One-shot turn 走 session transport（`Starter.RunOnce` → `agent.RunSession`）| [feat/F-09-agent-abstraction.md](./feat/F-09-agent-abstraction.md) |
 
 ## 4. Channel 渲染
 

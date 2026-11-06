@@ -11,8 +11,8 @@
 > **姊妹文档**:
 > - [docs/bridge/dsh-shared-host.md](./dsh-shared-host.md) — 全局单实例 dsh,1:N 多路复用
 > - [docs/bridge/claude.md](./claude.md) — stream-json transport,长生命周期
-> - [docs/bridge/codex.md](./codex.md) — JSON-RPC over stdio + print-mode
-> - [docs/bridge/pi.md](./pi.md) — JSONL RPC over stdio + print-mode
+> - [docs/bridge/codex.md](./codex.md) — JSON-RPC over stdio
+> - [docs/bridge/pi.md](./pi.md) — JSONL RPC over stdio
 > - [docs/bridge/cli-transport.md](./cli-transport.md) — pipe / lifecycle 通用约束
 
 ---
@@ -151,7 +151,7 @@ bridge 不做硬卡(故意留软,方便先排查别的问题)。
 
 ```bash
 npx @deepseek-ai/dsh web              # 默认 Web UI,127.0.0.1:3080
-pnpm dsh --profile headless "<task>"  # 单 turn print-mode,plain stdout(本 bridge 不用)
+pnpm dsh --profile headless "<task>"  # dsh CLI 自带的单 turn 入口(本 bridge 不用)
 ```
 
 nightme 唯一接入入口是 `dsh --profile web`(HTTP+WS shared host)。每条 prompt 经 nightme 包装为一次 `session.create` + `session.prompt` + `session/follow` 订阅,dash 和 nightme session 在同一 dsh 进程内并行。

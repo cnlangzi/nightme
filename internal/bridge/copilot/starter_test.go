@@ -69,25 +69,6 @@ func TestDefaultACPArgs_AllowAllBeforeACP(t *testing.T) {
 	}
 }
 
-// TestPrintModeArgs_PrependsFullAccess verifies print-mode
-// uses the same parent flag, still before `-p`. `-s` /
-// `--silent` is appended after `-p` to suppress the post-answer
-// stats decoration ("Changes / AI Credits / Tokens / Resume")
-// so stdout is just the agent's final text (verified on
-// copilot 1.0.81 — without `-s` the captured stdout mixes
-// the answer with metadata).
-func TestPrintModeArgs_PrependsFullAccess(t *testing.T) {
-	got := printModeArgs("hello", nil)
-	want := []string{"--allow-all-tools", "-p", "hello", "-s"}
-	if !equalStrings(got, want) {
-		t.Errorf("printModeArgs = %v, want %v", got, want)
-	}
-	extra := printModeArgs("hello", []string{"--model", "auto"})
-	if extra[len(extra)-2] != "--model" || extra[len(extra)-1] != "auto" {
-		t.Errorf("printModeArgs extra not appended: %v", extra)
-	}
-}
-
 func equalStrings(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

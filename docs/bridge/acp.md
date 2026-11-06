@@ -197,8 +197,13 @@ driver 实现 `agent.TurnText`（`TurnText() string`）这个可选能力，one-
 优先取它；只有它为空时才回退到事件流拼出来的正文。ACP family 之外的其他 bridge
 不实现这个能力 —— 它们的流式拼装本来就是无损的。
 
-chat 通道看到的仍然是 trim 过的分句文本（一直如此），`RunResult.Text` 拿到的
-才是 agent 的原样字节。
+**装 `UpdateHandler` 的 bridge 要自己喂累加器**：内置 fallback 才是往
+`turnText` 里追加的那一方；handler 接管整条 sessionUpdate 流之后，累加器就是空的，
+one-shot drain 会回退到事件流拼装，段落空行可能丢。handler 自己发
+`agent_message_chunk` / `message_chunk` 时，必须也往累加器里追加。
+
+chat 通道看到的仍然是 trim 过的分句文本（一直如此），`RunResult.Text` 拿到的是
+agent 的原样正文（首尾空白被 trim，内部空行保留）。
 
 ---
 

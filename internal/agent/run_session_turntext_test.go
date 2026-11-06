@@ -70,7 +70,9 @@ func newTurnTextStarter(name, streamed, exact string) *oneShotFakeStarter {
 
 // TestRunSession_PrefersDriverTurnText: the driver's own report of
 // the turn's text wins over the streamed join. The bridge holds the
-// raw reply; the stream only carries its trimmed pieces.
+// raw reply; the stream only carries its trimmed pieces. The report's
+// outer whitespace is trimmed like every other reply, but the
+// paragraph break inside it survives.
 func TestRunSession_PrefersDriverTurnText(t *testing.T) {
 	s := newTurnTextStarter("fake", "trimmed piece", "exact\n\nreply\n")
 
@@ -79,8 +81,8 @@ func TestRunSession_PrefersDriverTurnText(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunSession: %v", err)
 	}
-	if res.Text != "exact\n\nreply\n" {
-		t.Errorf("Text = %q, want the driver's exact text %q", res.Text, "exact\n\nreply\n")
+	if res.Text != "exact\n\nreply" {
+		t.Errorf("Text = %q, want the driver's exact text %q", res.Text, "exact\n\nreply")
 	}
 }
 

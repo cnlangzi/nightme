@@ -1077,7 +1077,11 @@ type driver interface {
 // TurnText is implemented by bridge drivers that can report the exact
 // text of the turn in progress. The one-shot drain prefers it over the
 // streamed-text join, so a reply the bridge streams in lossy pieces
-// still lands in RunResult.Text verbatim.
+// still lands in RunResult.Text with its paragraph breaks intact.
+//
+// The drain trims the report's outer whitespace (the same way it
+// trims each streamed piece); the reply's internal structure is what
+// the report preserves.
 //
 // Optional: a driver that does not implement it is drained from its
 // event stream alone.

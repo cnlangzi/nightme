@@ -234,10 +234,15 @@ func failedTurn(sessionID, model string) RunResult {
 // and wins over the streamed join when it holds anything but
 // whitespace — the bridge holds the raw reply, so its report is the
 // agent's own bytes.
+//
+// Both replies are trimmed at the edges, like the streamed join's
+// per-piece trim: the outer whitespace is transport noise, and the
+// reply's INTERNAL structure — the paragraph breaks between its
+// paragraphs — is what the exact text preserves.
 func finishedTurn(name, sessionID, model string, terminal *AgentResultEvent, streamed []string, exact string) (RunResult, error) {
 	text := ""
 	if strings.TrimSpace(exact) != "" {
-		text = exact
+		text = strings.TrimSpace(exact)
 	} else {
 		text = sessionText(terminal, streamed)
 	}

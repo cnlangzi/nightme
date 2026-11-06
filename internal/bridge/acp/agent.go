@@ -1357,6 +1357,17 @@ func (d *driver) Keepalive(ctx context.Context, onRecover func(context.Context) 
 // double-emission on kinds the handler handles. Pass nil to
 // revert to the built-in fallback.
 //
+// Consequence for the exact-text accumulator: the built-in
+// fallback is what appends the reply chunks to it (see TurnText),
+// so a handler that owns the sessionUpdate stream leaves the
+// accumulator empty — the one-shot drain then falls back to the
+// streamed join and the reply's paragraph breaks may be lost. A
+// handler that emits agent_message_chunk / message_chunk itself
+// must append them to the accumulator too (the driver exposes
+// TurnText for reading, not writing — a handler reaches the
+// accumulator through the same appendTurnText call the fallback
+// makes).
+//
 // For unrecognized JSON-RPC METHODS (not sessionUpdate kinds),
 // use SetMethodHandler instead — same lifetime contract, same
 // "vendor-private only" semantic.
@@ -2320,6 +2331,10 @@ func (d *driver) appendTurnText(chunk string) {
 // trimmed and re-joined with a newline, so the paragraph break that
 // fell on a flush boundary would be lost. This is the agent's own
 // bytes.
+//
+// Only the built-in fallback fills the accumulator — a bridge that
+// installs an UpdateHandler owns the sessionUpdate stream and must
+// feed the accumulator itself (see SetUpdateHandler).
 func (d *driver) TurnText() string {
 	d.textMu.Lock()
 	defer d.textMu.Unlock()

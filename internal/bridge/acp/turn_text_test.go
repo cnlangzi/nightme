@@ -221,7 +221,13 @@ func TestRunSession_KeepsReplyBlankLines(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunSession: %v", err)
 	}
-	if res.Text != first+second {
-		t.Errorf("Text = %q, want the agent's raw reply %q", res.Text, first+second)
+	// The reply's outer whitespace is trimmed (like every other
+	// bridge's reply); the paragraph break inside it survives.
+	want := strings.TrimSpace(first + second)
+	if res.Text != want {
+		t.Errorf("Text = %q, want the agent's reply %q", res.Text, want)
+	}
+	if !strings.Contains(res.Text, "\n\n") {
+		t.Errorf("Text = %q, want the paragraph break intact", res.Text)
 	}
 }

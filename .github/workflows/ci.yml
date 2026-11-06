@@ -994,8 +994,28 @@ jobs:
           # The bash branch keys off `uname -s` and bails on
           # Git Bash's MINGW64_NT-... output, so the Windows
           # legs use the separate pwsh step below.
+          #
+          # The installer resolves a build from the vendor's
+          # build.stencil.so service, which intermittently answers
+          # 525 / 500 under load (observed 2026-11-06 on the
+          # ubuntu amd64 / arm64 and macos legs of PR #484 — the
+          # service was reachable minutes later). A transient
+          # upstream 5xx must not fail the whole startup job, so
+          # retry a few times before giving up. The final check
+          # turns "the installer kept failing" into a clear
+          # error instead of a missing-binary mystery downstream.
           if [ "${{ matrix.os }}" != "windows-latest" ] && [ "${{ matrix.os }}" != "windows-11-arm" ]; then
-            curl -fsSL https://omp.sh/install | sh
+            for attempt in 1 2 3 4 5; do
+              if curl -fsSL https://omp.sh/install | sh; then
+                break
+              fi
+              echo "omp install attempt ${attempt} failed; retrying in 15s"
+              sleep 15
+            done
+            if ! command -v omp >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/omp" ]; then
+              echo "omp install failed after 5 attempts (vendor build service unreachable?)"
+              exit 1
+            fi
           fi
           # Cursor CLI on unix: official curl-pipe bash installer.
           # Drops `agent` into ~/.local/bin/agent (primary) plus

@@ -32,11 +32,12 @@
 | 11 | 多 job 时,**上层只看到一个 review lifecycle**(单 Ready / 单 Result) | chat channel 看到 N 个 ready / N 个 result,StatusBar 翻转混乱 |
 | 12 | per-job 内的 ToolStart 必须**等配对 ToolEnd 才转发**,Start/End 在外层 wire 上**连续** | 半截 tool 调用外发,chat 渲染混乱 |
 | 13 | 跨 job 的 EventAgentTaskCreate/Update **按 task ID 去重 merge**,同一 ID 多个 job 的最新版本只发一份 | chat checklist 看到 N 份重复 task 条目,数量 = N × tasks |
+| 14 | `--continue` **只续跑失败的 group**,已完成的 group 不再问一遍 | 重复的 findings 混进输出 |
 
 ### 1.2 边界
 
 - **是**:对"当前分支 vs 默认分支"(PR 模式)的代码变更做 review,产出 findings 文本回 chat,主 agent 可对话式 fix。
-- **不是**:不开 `--fix` / `--post`(留 v2 的 `/review-fix` / `/review-comment`);不限定文件 / base(只认 `--agent` / `--global` / `--unset` 三个 flag,短写 `-a` / `-g`,不收位置参数);不当 CI gating;不自动改代码。
+- **不是**:不开 `--fix` / `--post`(留 v2 的 `/review-fix` / `/review-comment`);不限定文件 / base(只认 `--agent` / `--global` / `--unset` / `--continue` 四个 flag,短写 `-a` / `-g` / `-c`,不收位置参数);不当 CI gating;不自动改代码。
 
 ---
 
@@ -47,10 +48,12 @@ review 由所有 bridge 统一走 `agent.ReviewDispatch`(单一入口):`OcrAvail
 agent 包不再区分 "native / mixed / delegate" 桥——每条桥的 `Starter.Review` 都是同一行 `return agent.ReviewDispatch(ctx, s, cfg, opts...)`。Agent 自带的 review 子命令(`claude -p code-review` / `codex review` / `cursor-agent -p /review-bugbot`)用户直接在 chat 发 slash command,nightme 透传给底层 agent——不再通过 `Starter.Review` 特殊路径触发。
 
 ```text
-/review [-a|--agent <name>] [-g|--global] [--unset]
+/review [-a|--agent <name>] [-g|--global] [--unset] [-c|--continue]
    │  解析 flags(共享 lexer),选定 runner;runner ≠ 当前 AS 时,findings 仍回当前 AS
    │  -g / --global:把 runner 落成全局 `review.agent`(~/.nightme/config.yaml)
    │  --unset:删掉全局 `review.agent`,不跑 review
+   │  -c / --continue:续跑本 chat 上一次 review 未完成的 group(见 §2.7);
+   │                  与 -a / -g / --unset 互斥
    ▼
 Starter.Review(所有 bridge 都是同一行)
    │
@@ -332,6 +335,11 @@ partial failure 路径:**不**升级为 merge 整体错误,失败组以 inline m
 | `BuiltinPrompt` / `simplifyPrompt` 静态 prompt 模板 | `internal/agent/review.go` |
 | **三相状态机 + per-job 配对缓冲**(Phase 1 buffering → Phase 2 streaming → Phase 3 closed;pendingToolStarts map per-job;Task 跨 job ID 去重;异序到达容错) | `internal/agent/aggregate_sink.go::eventAggregator` |
 | **多 job 结果合并**(纯自然语言拼接 + 部分失败 inline marker,无解析/排序/去重/coverage 聚合) | `internal/agent/review_with_ocr.go::mergeRunResults` |
+| **review / 续跑共用的 fan-out 内核**(goroutine 编排 + sem cap + eventAggregator + merge) | `internal/agent/review_with_ocr.go::runReviewGroups` |
+| **续跑入口**(并发 resume N 个 session、发同一段文本、合并成同样的 group 格式) | `internal/agent/review_continue.go::ContinueReviewJobs` |
+| **每个 group 的 outcome 观察者**(pattern / files / session id / error) | `internal/agent/agent.go::ReviewJob` / `::WithReviewJobObserver` |
+| **失败 turn 保留 session id**(进程没了但 agent 侧会话还在,session id 是重新打开它的钥匙) | `internal/agent/run_session.go::drainSessionEvents` / `::ResumeSession` |
+| **`/review` 的续跑状态**(按 chat id,只活在 daemon 进程内存里) | `internal/command/review/record.go` |
 | 单元测试(聚合器 / 合并 / 并发 / 配对 / session drain) | `internal/agent/aggregate_sink_test.go`、`internal/agent/merge_results_test.go`、`internal/agent/fanout_test.go`、`internal/agent/run_session_test.go` |
 
 **不变量与实现的对应**:
@@ -419,10 +427,89 @@ func ReviewDispatch(ctx context.Context, s Starter, cfg StartConfig, opts ...Run
 
 ---
 
+## 2.7 续跑未完成的 group(`/review --continue`)
+
+review 是 fan-out:每个 rule group 一个独立 agent session(§2.5)。某个 group 的
+session 挂了,其它 group 的 findings 照常汇入,合并文本里该 group 标成
+`### Group: pattern <p> — failed: <err>`。`/review --continue` 把这次 review 捡
+起来:**只**续跑那些失败的 group,给它们的 session 发一个字面量 `continue`,让
+agent 接着上次的上下文把活干完;已经完成的 group 不再问一遍(否则 findings 会重复
+出现在输出里)。
+
+### 续跑需要的状态
+
+| 状态 | 来源 | 说明 |
+|---|---|---|
+| runner | 上一次 review 跑的那个 agent | session 属于某个 agent,换不了,所以 `--continue` 不走四级 runner 解析 |
+| workspace | 上一次 review 的 workspace | session 属于那个 workspace;换 cwd 会让 agent 看错文件 |
+| 每个 group 的 session id | group 自己的 agent session | 失败的 group 也必须能捞回 session id,否则没有可续跑的 session |
+
+第三项是唯一需要动底层的地方:`drainSessionEvents` 的失败路径原本返回空
+`RunResult`,session id 只留在 error 的 audit 后缀里。失败路径现在返回带上
+session id(和 model)的 result —— 进程没了,但 agent 侧的会话还在,session id
+就是重新打开它的钥匙(`agent.ResumeSession` 把 `StartConfig.SessionID` 交给
+bridge,bridge 用自己的方式 resume:`--resume <id>` / `resume_id` /
+`--session-id <id>` / ACP 的 `session/resume` 或 `session/load` / dsh 的 session
+握手)。bridge 拒绝 resume 时报 `agent.ErrResumeUnhealthy`,不会静默开一个新
+session。
+
+### fan-out 内核复用
+
+fresh-session 的 review 和续跑共用同一套 fan-out 内核
+(`internal/agent/review_with_ocr.go::runReviewGroups`):goroutine 编排、sem 上限
+4、eventAggregator(单 outer lifecycle)、`mergeRunResults`(同样的
+`### Group: pattern <p> — files: …` 段落 + inline `failed:` 标记)。两者的差别只有
+"每个 group 跑什么":review 跑新 session + group prompt,续跑跑 resume 的 session +
+`continue`。
+
+`agent.ContinueReviewJobs` 是续跑的入口:传入若干 `ReviewJob`(pattern / files /
+session id)和要发的文本,并发 resume,事件走同一个 aggregator,回复按同样的 group
+格式合并。
+
+### 续跑状态放在哪
+
+`/review` 命令的 factory 按 chat id 记着上一次 review 的状态(runner /
+workspace / 每个 group 的 outcome)。factory 每个 daemon 进程建一次,所以这份状态
+只活在进程内,daemon 重启即丢 —— 重启后 `--continue` 报
+`❌ no review to continue — run /review first`。落盘不在这条路径上:resume 状态
+不需要持久化,一个 chat 也绝不续跑另一个 chat 的 review。
+
+每个 group 的 outcome 由 fan-out 内核通过 `agent.WithReviewJobObserver` 回调交给
+命令层:pattern、files、session id、error。失败 group 的 session id 一并保留 ——
+那正是下一轮 `--continue` 要用的。
+
+记录什么时候被替换:
+
+- **跑出 group 的 review 结束时** —— 记录换成这次 review 每个 group 的 outcome。
+  一个 group 都没跑出来的 review(没有 diff 可 review、bridge 不支持 review)不
+  动记录:没有新的 resume 状态,上一次 review 没收尾的 group 依然没收尾。
+- **续跑结束时** —— 记录换成这次续跑的 outcome。写回是**条件写**:只有当记录
+  仍然是这次续跑读的那份时才写。续跑期间跑完的另一次 review 拥有这个 chat 的
+  resume 状态,不能被更早开始、更晚结束的续跑覆盖。
+
+### 边界
+
+| 场景 | 行为 |
+|---|---|
+| 本 chat 没有 review 记录 | `❌ no review to continue — run /review first` |
+| 本 chat 有 review 在跑 | `❌ a review is already running in this chat` |
+| 上一次 review 每个 group 都完成了 | `ℹ️ the last review completed — nothing to continue` |
+| 失败的 group 根本没到 agent(没有 session id) | `ℹ️ the unfinished group never reached the agent — nothing to resume` |
+| 失败的 group 已经续跑过一次(还是失败) | `ℹ️ the unfinished group was already retried — nothing to resume` |
+| 记录的 agent 已经不在注册表里 | `❌ unknown agent "<name>"` |
+| bridge 拒绝 resume(`ErrResumeUnhealthy`) | 该 group 在合并文本里 inline 标 failed(所有 group 都失败时:只发 `❌ /review continue failed (agent=<name>): …`) |
+| 续跑又失败 | 合并文本里 inline 标 failed;该 group 的 resume 机会已用完,再 `--continue` 无事可做 |
+| 所有 group 都失败 | 整个续跑失败,只发失败回复,不注入 findings |
+
+`--continue` 与 `--agent` / `--global` / `--unset` 互斥:那三个 flag 选的是"这次
+用哪个 runner",而 `--continue` 续的是"上一次那个 runner"。
+
+---
+
 ## 3. 数据流:从 `/review` 到 findings
 
-1. 用户发 `/review [-a|--agent <name>] [-g|--global] [--unset]`。
-2. dispatcher 用共享 lexer(`command.ParseCmdArgs`)解析 args,inline 校验未知 flag、位置参数与非法 flag 组合(`--unset` 需要 `--global`、`--unset` 与 `--agent` 互斥、`--global` 需要 `--agent`)。
+1. 用户发 `/review [-a|--agent <name>] [-g|--global] [--unset] [-c|--continue]`。
+2. dispatcher 用共享 lexer(`command.ParseCmdArgs`)解析 args,inline 校验未知 flag、位置参数与非法 flag 组合(`--unset` 需要 `--global`、`--unset` 与 `--agent` 互斥、`--global` 需要 `--agent`、`--continue` 与 `--agent` / `--global` / `--unset` 互斥)。
 3. **落全局设置**:`-g` 把 runner 写进 `~/.nightme/config.yaml` 的 `review.agent`,`--unset` 删掉它(`--unset` 不跑 review)。写盘发生在查 chat session 之前——全局设置与本 chat 有没有 workspace 无关;写失败只告警(`⚠️ failed to save review.agent: … — reviewing with <name> anyway`),review 照跑。落盘走 node 级写入,config 文件里的注释 / 未建模的 key / 其它 section 原样保留。
 4. 解析 **inject 目标**:当前 chat 的 selected AS(lookup,daemon 重启后自动 spawn)。
 5. 解析 **review runner**(4 级):① `-a` / `--agent` → ② 全局 `review.agent` → ③ 当前 AS 的 agent → ④ 都没有 → `❌ no active agent configured. Run /use <agent> first.`。② 里的名字没在 agent 注册表里时降级到 ③ 并告警(`⚠️ review.agent "x" is not a registered agent — using <session agent>`),config 文件里的陈旧名字不会让 `/review` 变成死命令。查 agent 注册表拿 Starter。
@@ -435,6 +522,12 @@ func ReviewDispatch(ctx context.Context, s Starter, cfg StartConfig, opts ...Run
    4. **双路分发**:注入 AS 当 user turn(主 agent 能"fix critical findings")+ 发 channel(用户直接可见,不等下游回复)。
 7. Handle 立即返回 `Consumed=true`。readpump 继续,dispatch worker 释放,用户可继续发消息。findings 异步到达;全局设置的回执(写入确认 / 写失败告警 / 降级告警)随本条命令的 reply 一起发出,先于 findings 到达。
 
+`--continue` 走另一条路:查本 chat 的 review 记录 → 本 chat 有 review 在跑就拒绝 →
+挑出"失败且有 session id"的 group → 用记录里的 agent(不走四级 runner 解析)和记录里
+的 workspace 跑 `agent.ContinueReviewJobs` → 合并文本照常包 `FormatReviewMessage`、
+注入 AS + 发 channel(§2.7)。续跑结束后,记录换成这次续跑的结果,所以第二次
+`--continue` 无事可做。
+
 ---
 
 ## 4. 隔离与生命周期
@@ -445,6 +538,7 @@ func ReviewDispatch(ctx context.Context, s Starter, cfg StartConfig, opts ...Run
 - **超时**:Review 30min(同 `/gtw commit` 的 Agent 预算)。session 边界使超时安全:只杀 review 进程,主 chat 不受影响。多 job 并发共用同一超时。
 - **ctx 派生**:goroutine 用 chat session 的 ctx 当 parent。`/close` → ctx cancel → 所有 review session 关闭 → goroutine 退出。无 orphan。
 - **多 reviewer 并行**:多个 `/review --agent` 并发,各自独立 session,findings 全注入同一 AS。用户体验:多条 review 接连出现,然后一次"fix"。
+- **续跑同样是 session 隔离**:resume 打开的是 agent 侧同一个 session(新进程 + 老 session id),agent 的上下文延续,主 chat 上下文依旧不被污染。
 - **sink vs deliverable**:sink 是观察用(流式中间事件),`FormatReviewMessage` 文本是交付物。两路独立,不冲突。
 
 ---
@@ -470,6 +564,7 @@ func ReviewDispatch(ctx context.Context, s Starter, cfg StartConfig, opts ...Run
 - ❌ 引入 ocr 端到端的**重 multi-agent 机器**(ocr 自己的定位 / 反思 / 多 bundle 子 agent)作默认 —— 那是 ocr 端到端跑、依赖 ocr 自己的 multi-agent;我们的 code-driven 拆 job **不是**这个(用 ocr 的 rule groups 只取分组边界,各 job 的 session 各自独立 context,定位 / 反思仍由 host agent 自己做)。两者本质不同,不冲突。
 - ❌ 同进程多轮 + `/new` reset 池化(跨调用复用)—— 破坏 session 强隔离不变量(#2),`/new` 是弱隔离(依赖 agent reset 彻底),且 review 非高频收益不抵。省 spawn 只在单次 /review 内(瞬态多轮),不跨调用池化。
 - ❌ v1 开 `--fix` / `--post` flag —— 留 v2(`/review-fix` / `/review-comment`)。
+- ❌ 把 review 的续跑状态落盘 —— 状态只活在 daemon 进程内存里,按 chat id 隔离(§2.7)。
 - ❌ 破坏 `--agent` 不切 AS 的语义 —— ocr 委托模式 findings 仍注入回当前 AS,主 agent 仍能用原生 Edit 工具 fix。
 - ❌ 给 review runner 加 repo 级 override / 环境变量 override —— 全局单键已经够用,多一档就多一个 source of truth。
 

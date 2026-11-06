@@ -514,7 +514,7 @@ here.
 | `/tools on\|off` | Show or hide per-tool thread replies (default off to keep the card quiet). |
 | `/handoff <name>` | Serialize the current task into `~/.nightme/handoff/<name>.md` so the next agent (or a fresh session) continues from any directory. |
 | `/resume <name>` | Continue the task described by `~/.nightme/handoff/<name>.md` in the current session. |
-| `/review [-a\|--agent <agent>] [-g\|--global] [--unset]` | Review the current branch against the default branch (PR mode); findings are injected back into this chat. `--agent` runs the review with a specific agent; `-g` also stores it as the global `review.agent` in `~/.nightme/config.yaml`; `--unset` removes that global setting. |
+| `/review [-a\|--agent <agent>] [-g\|--global] [--unset] [-c\|--continue]` | Review the current branch against the default branch (PR mode); findings are injected back into this chat. `--agent` runs the review with a specific agent; `-g` also stores it as the global `review.agent` in `~/.nightme/config.yaml`; `--unset` removes that global setting. `-c` resumes the groups of the last review in this chat that failed, by reopening their agent sessions and sending them "continue". |
 | `/wiki init [--modules] [--llmstxt] [--arch]` | Read the codebase, design modules, and write per-module wiki files — the repo wiki as a project asset. |
 | `/queue <message>` | Append `<message>` to the queue as a standalone Prompt. |
 | `/help` | List every slash command in-chat. |

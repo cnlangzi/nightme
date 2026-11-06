@@ -295,6 +295,64 @@ func TestRunSession_EmptyReplyFails(t *testing.T) {
 	}
 }
 
+// TestRunSession_FailedTurnKeepsSessionID: a turn that fails after
+// the startup Ready still reports the session id. The process is
+// gone, but the agent-side conversation survives — the session id is
+// what lets the caller reopen it (ResumeSession) and let the agent
+// pick the work up where it stopped.
+func TestRunSession_FailedTurnKeepsSessionID(t *testing.T) {
+	d := newSessionFakeDriver(func([]ContentBlock) []AgentEvent {
+		return []AgentEvent{
+			sessionReadyEvent("sess-failed", "model-x"),
+			{Kind: EventAgentError, Err: errBoom},
+		}
+	})
+	s := &sessionFakeStarter{name: "fake", newDriver: func(StartConfig) *sessionFakeDriver { return d }}
+
+	res, err := RunSession(context.Background(), s, StartConfig{Workspace: "/ws"},
+		[]ContentBlock{{Type: ContentText, Text: "question"}})
+	if err == nil {
+		t.Fatal("RunSession should fail when the turn errors")
+	}
+	if res.SessionID != "sess-failed" {
+		t.Errorf("SessionID = %q, want %q", res.SessionID, "sess-failed")
+	}
+	if res.Model != "model-x" {
+		t.Errorf("Model = %q, want %q", res.Model, "model-x")
+	}
+}
+
+// TestResumeSession_KeepsSessionID: the resume counterpart of
+// RunSession — it reopens the session named by cfg.SessionID instead
+// of dropping it for a fresh one.
+func TestResumeSession_KeepsSessionID(t *testing.T) {
+	d := newSessionFakeDriver(func([]ContentBlock) []AgentEvent {
+		return []AgentEvent{
+			sessionReadyEvent("sess-resumed", "model-x"),
+			{Kind: EventAgentResult, Result: &AgentResultEvent{Text: "picked up where it stopped"}},
+		}
+	})
+	s := &sessionFakeStarter{name: "fake", newDriver: func(StartConfig) *sessionFakeDriver { return d }}
+
+	res, err := ResumeSession(context.Background(), s, StartConfig{
+		Workspace: "/ws",
+		SessionID: "sess-resumed",
+	}, []ContentBlock{{Type: ContentText, Text: "continue"}})
+	if err != nil {
+		t.Fatalf("ResumeSession: %v", err)
+	}
+	cfgs := s.startedConfigs()
+	if len(cfgs) != 1 {
+		t.Fatalf("Start called %d times, want 1", len(cfgs))
+	}
+	if cfgs[0].SessionID != "sess-resumed" {
+		t.Errorf("Start received SessionID %q, want %q", cfgs[0].SessionID, "sess-resumed")
+	}
+	if res.Text != "picked up where it stopped" {
+		t.Errorf("Text = %q, want the resumed reply", res.Text)
+	}
+}
+
 // TestRunSession_IdentityFromNonReadyEvent: every event carries the
 // bridge-side session context, so the session id and model survive a
 // startup Ready that was consumed elsewhere.

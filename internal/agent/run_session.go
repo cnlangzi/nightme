@@ -57,7 +57,7 @@ const permissionAllowOnce = "Allow once"
 //
 // cfg.SessionID is dropped before Start: a one-shot turn always opens
 // a fresh session, so it never splices itself into the caller's
-// conversation.
+// conversation. ResumeSession is the counterpart that keeps it.
 //
 // The session is closed before RunSession returns, whether the turn
 // succeeded or failed — no session outlives the call.
@@ -66,9 +66,25 @@ const permissionAllowOnce = "Allow once"
 // WithEventSink is defined; the sink observes every event the turn
 // produced and must not block.
 func RunSession(ctx context.Context, s Starter, cfg StartConfig, blocks []ContentBlock, opts ...RunOnceOption) (RunResult, error) {
-	name := s.Info().Name
-
 	cfg.SessionID = ""
+	return ResumeSession(ctx, s, cfg, blocks, opts...)
+}
+
+// ResumeSession runs one turn over an EXISTING agent session.
+//
+// The bridge reopens the session named by cfg.SessionID instead of
+// opening a fresh one, so the agent keeps the conversation it already
+// had — the turn continues it rather than starting over. That is the
+// whole difference from RunSession, which drops the session id.
+//
+// The shape is the same as RunSession's: Start → SendBlocks → drain
+// → Close, and the session is closed before the call returns.
+//
+// A bridge that refuses the requested resume (the session id no
+// longer exists on the agent's side) fails the Start with
+// ErrResumeUnhealthy rather than silently opening a fresh session.
+func ResumeSession(ctx context.Context, s Starter, cfg StartConfig, blocks []ContentBlock, opts ...RunOnceOption) (RunResult, error) {
+	name := s.Info().Name
 
 	a, err := s.Start(ctx, cfg)
 	if err != nil {
@@ -102,6 +118,11 @@ func DrainSession(ctx context.Context, a *Agent, blocks []ContentBlock, sink fun
 }
 
 // drainSessionEvents is the event loop behind DrainSession.
+//
+// A failed turn still reports the session identity it observed: the
+// process is gone, but the conversation lives on the agent's side, so
+// the session id is what lets the caller reopen that conversation
+// later (see ResumeSession).
 func drainSessionEvents(ctx context.Context, a *Agent, blocks []ContentBlock, sink func(AgentEvent)) (RunResult, error) {
 	name := a.Info.Name
 
@@ -110,14 +131,14 @@ func drainSessionEvents(ctx context.Context, a *Agent, blocks []ContentBlock, si
 	var streamed []string
 
 	if err := a.SendBlocks(ctx, blocks); err != nil {
-		return RunResult{}, fmt.Errorf("agent %s: send: %w", name, err)
+		return failedTurn(sessionID, model), fmt.Errorf("agent %s: send: %w", name, err)
 	}
 
 	for {
 		select {
 		case ev, ok := <-a.Events():
 			if !ok {
-				return RunResult{}, fmt.Errorf(
+				return failedTurn(sessionID, model), fmt.Errorf(
 					"agent %s: event stream closed before the turn ended%s",
 					name, sessionAuditFields(sessionID, model))
 			}
@@ -151,12 +172,12 @@ func drainSessionEvents(ctx context.Context, a *Agent, blocks []ContentBlock, si
 				}
 			case EventAgentResult:
 				if ev.Result == nil {
-					return RunResult{}, fmt.Errorf(
+					return failedTurn(sessionID, model), fmt.Errorf(
 						"agent %s: result event with nil payload%s",
 						name, sessionAuditFields(sessionID, model))
 				}
 				if ev.Err != nil {
-					return RunResult{}, fmt.Errorf("agent %s: %w%s",
+					return failedTurn(sessionID, model), fmt.Errorf("agent %s: %w%s",
 						name, ev.Err, sessionAuditFields(sessionID, model))
 				}
 				return finishedTurn(name, sessionID, model, ev.Result, streamed)
@@ -171,7 +192,7 @@ func drainSessionEvents(ctx context.Context, a *Agent, blocks []ContentBlock, si
 					if ev.Done != nil {
 						reason = ev.Done.Reason
 					}
-					return RunResult{}, fmt.Errorf(
+					return failedTurn(sessionID, model), fmt.Errorf(
 						"agent %s: turn ended without a result event (reason=%q)%s",
 						name, reason, sessionAuditFields(sessionID, model))
 				}
@@ -180,20 +201,31 @@ func drainSessionEvents(ctx context.Context, a *Agent, blocks []ContentBlock, si
 				}, streamed)
 			case EventAgentError:
 				if ev.Err != nil {
-					return RunResult{}, fmt.Errorf("agent %s: %w%s",
+					return failedTurn(sessionID, model), fmt.Errorf("agent %s: %w%s",
 						name, ev.Err, sessionAuditFields(sessionID, model))
 				}
-				return RunResult{}, fmt.Errorf(
+				return failedTurn(sessionID, model), fmt.Errorf(
 					"agent %s: error event with nil payload%s",
 					name, sessionAuditFields(sessionID, model))
 			}
 		case <-ctx.Done():
 			if errors.Is(ctx.Err(), context.Canceled) {
-				return RunResult{}, fmt.Errorf("agent %s: canceled: %w", name, ctx.Err())
+				return failedTurn(sessionID, model), fmt.Errorf("agent %s: canceled: %w", name, ctx.Err())
 			}
-			return RunResult{}, fmt.Errorf("agent %s: %w", name, ctx.Err())
+			return failedTurn(sessionID, model), fmt.Errorf("agent %s: %w", name, ctx.Err())
 		}
 	}
+}
+
+// failedTurn builds the RunResult of a turn that ended in failure.
+//
+// It carries the session identity observed before the failure and
+// nothing else: a failed turn has no reply. The session id is the
+// part that outlives the failure — the agent-side conversation is
+// still there, so the caller can reopen it (ResumeSession) and let
+// the agent pick the work up where it stopped.
+func failedTurn(sessionID, model string) RunResult {
+	return RunResult{SessionID: sessionID, Model: model}
 }
 
 // finishedTurn builds the RunResult of a completed turn.
@@ -204,7 +236,7 @@ func drainSessionEvents(ctx context.Context, a *Agent, blocks []ContentBlock, si
 func finishedTurn(name, sessionID, model string, terminal *AgentResultEvent, streamed []string) (RunResult, error) {
 	text := sessionText(terminal, streamed)
 	if text == "" {
-		return RunResult{}, fmt.Errorf("agent %s: turn ended without a reply%s",
+		return failedTurn(sessionID, model), fmt.Errorf("agent %s: turn ended without a reply%s",
 			name, sessionAuditFields(sessionID, model))
 	}
 	return RunResult{

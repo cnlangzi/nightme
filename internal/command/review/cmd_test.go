@@ -107,6 +107,8 @@ func TestParseReviewArgs(t *testing.T) {
 		{"--unset", []string{"--unset"}, Spec{Unset: true}, false},
 		{"-a codex -g", []string{"-a", "codex", "-g"}, Spec{Agent: "codex", Global: true}, false},
 		{"-g --unset", []string{"-g", "--unset"}, Spec{Global: true, Unset: true}, false},
+		{"-c", []string{"-c"}, Spec{Continue: true}, false},
+		{"--continue", []string{"--continue"}, Spec{Continue: true}, false},
 		{"--agent without value", []string{"--agent"}, Spec{}, true},
 		{"-a without value", []string{"-a"}, Spec{}, true},
 		{"positional arg rejected", []string{"foo"}, Spec{}, true},
@@ -138,9 +140,13 @@ func TestValidateReviewFlags(t *testing.T) {
 		{"unset without global", Spec{Unset: true}, "--unset requires --global"},
 		{"unset with agent", Spec{Unset: true, Global: true, Agent: "pi"}, "--unset and --agent are mutually exclusive"},
 		{"global without agent", Spec{Global: true}, "--global requires --agent <name>"},
+		{"continue with agent", Spec{Continue: true, Agent: "pi"}, "--continue and --agent are mutually exclusive"},
+		{"continue with global", Spec{Continue: true, Global: true}, "--continue and --global are mutually exclusive"},
+		{"continue with unset", Spec{Continue: true, Unset: true}, "--continue and --unset are mutually exclusive"},
 		{"agent alone", Spec{Agent: "pi"}, ""},
 		{"global with agent", Spec{Global: true, Agent: "pi"}, ""},
 		{"global with unset", Spec{Global: true, Unset: true}, ""},
+		{"continue alone", Spec{Continue: true}, ""},
 		{"nothing", Spec{}, ""},
 	}
 	for _, tc := range cases {
@@ -400,6 +406,9 @@ func TestHandle_FlagCombinationsAreRejected(t *testing.T) {
 		{"unset without global", []string{"review", "--unset"}, "--unset requires --global"},
 		{"unset with agent", []string{"review", "-a", "pi", "-g", "--unset"}, "--unset and --agent are mutually exclusive"},
 		{"global without agent", []string{"review", "-g"}, "--global requires --agent <name>"},
+		{"continue with agent", []string{"review", "-c", "-a", "pi"}, "--continue and --agent are mutually exclusive"},
+		{"continue with global", []string{"review", "-c", "-g"}, "--continue and --global are mutually exclusive"},
+		{"continue with unset", []string{"review", "-c", "--unset"}, "--continue and --unset are mutually exclusive"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

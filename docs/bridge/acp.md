@@ -22,6 +22,7 @@ bridge 设计的**单一原则**：
 internal/bridge/acp/
 ├── acp.go              # 包级常量（protocolVersion、clientName/version）+ Transport 接口
 ├── agent.go            # driver + 全部 generic fallback handler + deliver/emit
+├── config_option.go    # session/set_config_option（bridge 主动设置 session 配置）
 ├── rpc.go              # JSON-RPC 2.0 client（pending request 池 + 写锁）
 ├── starter.go          # acp.NewStarter + RunOnce
 ├── emit_contract_test.go   # deliver() / emitConnected() 阻塞语义回归测试
@@ -234,10 +235,19 @@ ACP 的 `session/new`、`session/load`、`session/resume` 响应都可以带 Ses
 
 - `config_option_update`（ACP 标准，整表快照）
 - `usage_update.model` / `session_info_update.model`（vendor 扩展）
+- `session/set_config_option`（bridge 主动设置，见 §5.1.1）
 
 `deliver()` 把 `d.model` 盖到后续每个事件上。handshake 响应里已经有模型时，`EventAgentReady.Model` 直接带上；没有则留空，runtime 的 `SetModel` 对空值 no-op，等后续事件再捕获。
 
 有 `cfg.SessionID` 时 handshake 不发 `session/new`：agent 声明了 `sessionCapabilities.resume` 就走 `session/resume`，否则在声明了 `loadSession` 时走 `session/load`（回放的 `session/update` 不转发到聊天）。两者都没有，或调用失败，返回 `agent.ErrResumeUnhealthy`，不静默新开 session。
+
+#### 5.1.1 `SetConfigOption` — bridge 主动设置 session 配置
+
+`driver.SetConfigOption(id, value)` 发 `session/set_config_option`，参数名是 **`configId`**（`optionId` 会被 server 以 `-32602 Invalid params` 拒绝），返回值是 server 回的整份 config option 列表。回包里的 model 选项写回 `d.model`，因此 bridge 报告的是**实际生效**的模型。
+
+option value 的格式是 `provider/model`，带 variant 时 variant 是最后一段路径（`provider/model/variant`）—— server 按这个格式解析，`#variant` 会被判成 "model not found"。
+
+opencode bridge 用它在 session 打开后、`EventAgentReady` 之前，把**用户自己在 opencode 里配置的模型**放到 session 上（`internal/bridge/opencode/model.go`）：模型取自 `opencode debug config`，优先级由 opencode 决定，nightme 只转发、不挑选。
 
 ### 5.2 opencode 的 `used` 字段语义模糊
 
@@ -273,9 +283,15 @@ type SessionView struct {
     Workspace    string
     FlushPending func()
 }
+
+// SetConfigOption：设置 session 的 config option（如 "model"），
+// 返回 server 回的整份 option 列表
+driver.SetConfigOption(id, value string) (json.RawMessage, error)
 ```
 
 **Lifetime 约束**：`SetXxxHandler` 必须在 readPump 观察到第一个相关事件**之前**调用；调用之后改 handler 仍然 race-safe（atomic.Pointer），但事件已经 race 过了。建议在 `Starter.Start()` 返回后立即 set。
+
+`SetConfigOption` 需要一个已存在的 session —— 最早可用的时机是 `OnSessionID` hook（`session/new` 之后、`EventAgentReady` 之前），也可以在 `Starter.Start()` 返回后调用。
 
 ---
 
@@ -288,12 +304,13 @@ type SessionView struct {
 - ✅ `cfg.SessionID`：声明了 `sessionCapabilities.resume` 走 `session/resume`，否则声明了 `loadSession` 走 `session/load`（历史回放不转发）；两者都没有或调用失败返回 `ErrResumeUnhealthy`
 - ✅ `deliver()` 自动盖 SessionID / Model / AgentName / Workspace
 - ✅ runtime `SetModel` 捕获条件放开
+- ✅ `SetConfigOption`（`session/set_config_option`）：opencode bridge 把用户配置的模型转发到 session
 - ✅ 13 个新单元测试（`deliver_stamp_test.go`）
 
 ### 7.2 v2+ 留待 issue
 
 - ACP image / file block（目前 `@<path>` 兜底）
-- `setSessionModel` JSON-RPC 方法（用于 `/model` slash command）
+- `/model` slash command（走 `session/set_config_option`）
 - `available_commands_update` → runtime slash command 路由（等 slash-command-reactions 落地）
 - `current_mode_update` / `config_option_update` 路由（等 opencode 1.19+ 稳定）
 - `Plan` → `EventAgentTaskCreate/Update` 路由

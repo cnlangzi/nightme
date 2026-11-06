@@ -539,6 +539,18 @@ type contentBlock struct {
 
 **中期方案**(F-OPENCODE-ACP-IMAGE):ACP 标准 image block `{type:"image", mimeType:"image/png", data:"<base64>", uri:"file://..."}`。依赖 opencode 上游 promptContentToParts 接受这个 schema。
 
+#### 4.6.3 session 模型:转发用户在 opencode 里配置的模型
+
+`opencode acp` 的 session 模型是**每个 session 自己解析**的:配置文件里的 `model` 不会到达 session,`session/new` 之后 session 跑在 opencode 自己挑的模型上。nightme 不替用户挑模型,但要把**用户已经在 opencode 里选好的模型**送到 session 上。
+
+**取值**(`internal/bridge/opencode/model.go`):在 session 的 workspace 里跑 `opencode debug config`,它打印 opencode 合并后的配置源列表,`document` 项的 `info.model` 就是生效的模型 —— opencode 把它归一化成 `{providerID, model, variant}`,后出现的源覆盖先出现的源。nightme 只解析这份 JSON:优先级规则归 opencode,nightme 不复制一份,也不写用户的 opencode 配置。
+
+**送达**(`internal/bridge/acp/config_option.go`):`driver.SetConfigOption("model", value)` 发 `session/set_config_option`(参数名是 `configId`,`optionId` 会被 server 以 `-32602` 拒绝),option value 是 `provider/model`,带 variant 时 variant 是最后一段路径(`provider/model/variant`)。server 回整份 config option 列表,bridge 把回包里的 model 写回 `d.model`,因此报出去的是**实际生效**的模型。
+
+**时机**:opencode bridge 通过 `acp.WithSessionIDHook` 在 `session/new` 之后、`EventAgentReady` 之前设置,所以第一轮 prompt 就跑在用户配置的模型上,状态栏显示的也是这个模型。
+
+**失败姿态**:取不到模型、server 拒绝该选项、老版本 opencode 不认这个 method —— 一律 soft fail:session 留在 opencode 自己的模型上,spawn 照常成功,失败写日志。
+
 ### 4.7 测试策略
 
 #### 4.7.1 单元测试(纯函数)

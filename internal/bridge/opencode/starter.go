@@ -111,6 +111,11 @@ func (s *Starter) Command() string { return s.command }
 // cfg.SessionID, when non-empty, is forwarded to the generic ACP
 // bridge, which reopens that session via session/resume or
 // session/load.
+//
+// The session runs on the model opencode's own configuration selects:
+// the bridge reads that model (see model.go) and applies it to the
+// session before the first prompt. The model is the user's — the
+// bridge forwards it, it never picks one.
 func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agent, error) {
 	if cfg.Workspace == "" {
 		return nil, errors.New("opencode: workspace is required")
@@ -123,7 +128,8 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 	// tool_call / tool_call_update / usage_update / session.status
 	// / session_info_update / ...) is recognised by the generic
 	// fallback — no per-bridge translator needed.
-	acpStarter := acp.NewStarter(s.name, s.command, s.args, nil, 0, 0)
+	acpStarter := acp.NewStarter(s.name, s.command, s.args, nil, 0, 0,
+		acp.WithSessionIDHook(s.applyConfiguredModel(ctx, cfg.Workspace)))
 	a, err := acpStarter.Start(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("agent %s: spawn: %w", s.Info().Name, err)

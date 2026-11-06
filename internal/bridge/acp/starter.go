@@ -20,9 +20,12 @@ import (
 // EventAgentReady is emitted. Returning a non-nil error aborts the
 // spawn. The hook is generic — bridges that need pre-Ready prep
 // (e.g. cursor pre-creates store.db to bridge the
-// session/new→store.db timing gap) register one via
-// WithSessionIDHook. Opencode / copilot / others don't register.
-type OnSessionID func(sessionID string) error
+// session/new→store.db timing gap, opencode applies the model the
+// user configured for the agent) register one via WithSessionIDHook.
+// The driver handle is passed so the hook can act on the live
+// session (e.g. set a config option). Copilot / others don't
+// register.
+type OnSessionID func(d *DriverHandle, sessionID string) error
 
 // Starter is the acp spawn recipe. Held in agent.Builtins as a
 // singleton per agent name.

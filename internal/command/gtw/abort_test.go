@@ -3,6 +3,8 @@ package gtw
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -308,6 +310,55 @@ func TestAbort_CancelsStuckSyncCommand(t *testing.T) {
 	}
 }
 
+// TestAbort_CancelledRunRunsNoHooks pins the "no further work"
+// half of the abort: the cancelled command's after-hooks never
+// start. The hook's context is already cancelled when the hook
+// would spawn, and os/exec refuses to start a command whose
+// context is done — so the hook process is never created.
+func TestAbort_CancelledRunRunsNoHooks(t *testing.T) {
+	rig := newAbortRig(t, "chat-abort-hooks")
+	writeHomeYml(t, rig.home, `
+sync:
+  hooks:
+    after:
+      - echo hi > marker.txt
+`)
+
+	syncDone := make(chan *command.SlashOutput, 1)
+	go func() {
+		out, _ := rig.f.Handle(context.Background(), command.RuntimeServices{}, nil, rig.cs,
+			command.SlashInput{
+				Text:      "/gtw sync",
+				Args:      []string{"gtw", "sync"},
+				ChatID:    rig.cs.ChatID,
+				MessageID: "msg-sync",
+			})
+		syncDone <- out
+	}()
+
+	select {
+	case <-rig.git.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the /gtw sync never reached the git runner")
+	}
+
+	rig.abort(t, rig.cs.ChatID)
+
+	select {
+	case <-syncDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the aborted command did not return")
+	}
+
+	marker := filepath.Join(rig.cs.SelectedCwd(), "marker.txt")
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("the after-hook ran after the abort; a cancelled command must do no further work")
+	}
+	if n := rig.ch.count(); n != 0 {
+		t.Errorf("the aborted command sent %d message(s); the abort card is the only one", n)
+	}
+}
+
 // TestAbort_QueuedCommandProceeds covers the point of the abort:
 // the commands queued behind the cancelled one are not dropped.
 func TestAbort_QueuedCommandProceeds(t *testing.T) {
@@ -454,10 +505,11 @@ func (g *blockingGit) Run(ctx context.Context, _ string, _ ...string) (string, s
 // session with a workspace, a recording emitter, and a factory
 // whose git runner blocks until cancelled.
 type abortRig struct {
-	f   *Factory
-	cs  *chatsession.ChatSession
-	ch  *recordingCh
-	git *blockingGit
+	f    *Factory
+	cs   *chatsession.ChatSession
+	ch   *recordingCh
+	git  *blockingGit
+	home string
 }
 
 func newAbortRig(t *testing.T, chatID string) *abortRig {
@@ -473,10 +525,11 @@ func newAbortRig(t *testing.T, chatID string) *abortRig {
 		Now: time.Now,
 	})
 	return &abortRig{
-		f:   f,
-		cs:  newAbortSession(t, chatID, ch),
-		ch:  ch,
-		git: git,
+		f:    f,
+		cs:   newAbortSession(t, chatID, ch),
+		ch:   ch,
+		git:  git,
+		home: home,
 	}
 }
 

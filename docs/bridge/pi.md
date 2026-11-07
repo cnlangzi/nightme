@@ -347,6 +347,15 @@ pnpm add -g @earendil-works/pi-coding-agent
 - Close 幂等；Close 时 Write 立即返回错。
 - `cmd.Wait` 唯一调用方（无 race detector 报警）。
 
+### 9.3.1 Windows 回归（`internal/bridge/pi/prompt_over_pipe_windows_test.go`）
+
+Windows 上 pi 是 npm 装的 `pi.cmd`，spawn 走 `cmd.exe /d /c`，命令行长度上限比
+`CreateProcess` 低得多；子进程 stderr 也带控制台代码页而非 UTF-8。该文件用真实
+`pi.cmd` shim（转发到测试二进制）覆盖两点：
+
+- 超过 cmd.exe 命令行上限的 prompt 仍完整到达 agent —— prompt 走协议管道，不进 argv。
+- 子进程 stderr 尾部按控制台代码页解码，`EventError` 的诊断可读而非乱码。
+
 ### 9.4 ChatSession 回归（`internal/chatsession/readpump_test.go`）
 
 - 多个 `EventDone` 后 pump 仍读下一个 event。

@@ -53,6 +53,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
+
+	"github.com/cnlangzi/nightme/internal/codepage"
 )
 
 // stderrTailBytes is how much of the child's stderr we keep for
@@ -304,18 +307,27 @@ func (r *StderrRingBuffer) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// String returns the current ring contents as a string. Safe to
+// String returns the current ring contents as text. Safe to
 // call concurrently with Write (acquires the same mutex). The
 // returned string is a copy; the caller may retain or mutate it.
+//
+// On Windows the child's stderr carries the console code page, not
+// UTF-8 — cmd.exe's own messages on a zh-CN host are GBK. The bytes
+// are decoded here so the diagnostic that reaches the chat is
+// readable instead of mojibake.
 func (r *StderrRingBuffer) String() string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return string(r.buf)
+	return codepage.Decode(r.buf, codepage.LocalDecoder())
 }
 
 // Truncate shortens s to at most max bytes, returning s unchanged
-// when it fits. Truncation marker " ...[truncated N bytes]" is
+// when it fits. Truncation marker " ...[truncated]" is
 // appended so the user can see that data was cut.
+//
+// The cut lands on a rune boundary: a byte slice would split a
+// multi-byte character in half, and the half character is exactly
+// the mojibake this function's callers work to avoid.
 //
 // Helper for callers that want to embed stderr tails in chat
 // messages or log lines without overflowing.
@@ -325,9 +337,22 @@ func TruncateForLog(s string, max int) string {
 	}
 	const marker = " ...[truncated]"
 	if max <= len(marker) {
-		return s[:max]
+		return truncateRunes(s, max)
 	}
-	return s[:max-len(marker)] + marker
+	return truncateRunes(s, max-len(marker)) + marker
+}
+
+// truncateRunes cuts s to at most max bytes without splitting a
+// rune: the cut lands on the last rune boundary that fits.
+func truncateRunes(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
 
 // formatDiagnosticString is a helper for tests + humanize paths.

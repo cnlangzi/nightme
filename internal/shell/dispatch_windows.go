@@ -7,7 +7,8 @@
 // Encoding gotcha: cmd.exe writes stdout/stderr in CP_ACP. On a
 // zh-CN Windows (CP936 = GBK) we decode via GB18030; otherwise
 // passthrough. On decode error the rest of the stream passes
-// through raw (once-decoded-forever-raw).
+// through raw (once-decoded-forever-raw). The code-page rule
+// itself lives in internal/codepage so the bridge path shares it.
 package shell
 
 import (
@@ -21,14 +22,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cnlangzi/nightme/internal/codepage"
 	"github.com/cnlangzi/nightme/internal/proc"
-	"golang.org/x/sys/windows"
 	"golang.org/x/text/encoding"
-	"golang.org/x/text/encoding/simplifiedchinese"
 	"golang.org/x/text/transform"
 )
-
-const cpACPChinese = 936
 
 // executeShell runs cmdline in cwd via "cmd /c". Failure modes
 // (non-zero exit / ctx cancel / drainer panic) collapse into
@@ -44,8 +42,8 @@ func executeShell(ctx context.Context, cwd, cmdline string, extraEnv []string, o
 	errR, errW := io.Pipe()
 	c.Stdout, c.Stderr = outW, errW
 
-	outDec := decoderFor(windows.GetACP())
-	errDec := decoderFor(windows.GetACP())
+	outDec := codepage.LocalDecoder()
+	errDec := codepage.LocalDecoder()
 	outDecodedOK := outDec != nil
 	errDecodedOK := errDec != nil
 	outRdr := wrapDecoder(outR, outDec)
@@ -119,15 +117,6 @@ func executeShell(ctx context.Context, cwd, cmdline string, extraEnv []string, o
 
 	runErr = c.Run()
 	return
-}
-
-// decoderFor returns a GB18030 decoder for CP936 (Simplified
-// Chinese) or nil (identity — raw bytes) for everything else.
-func decoderFor(acp uint32) *encoding.Decoder {
-	if acp == cpACPChinese {
-		return simplifiedchinese.GB18030.NewDecoder()
-	}
-	return nil
 }
 
 func wrapDecoder(r io.Reader, dec *encoding.Decoder) io.Reader {

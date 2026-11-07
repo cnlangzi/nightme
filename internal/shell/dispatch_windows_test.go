@@ -2,8 +2,12 @@
 
 // Windows-specific tests for the shell dispatcher:
 //   - cmd /c execution path (cmd.exe, not sh)
-//   - GBK / GB18030 decoding of child output
-//   - decoderFor / wrapDecoder unit coverage
+//   - wrapDecoder unit coverage
+//
+// The code-page → decoder mapping lives in internal/codepage so the
+// bridge path shares one rule with the shell path; its coverage
+// lives in that package's tests, which run on every platform instead
+// of Windows only.
 //
 // Unix-side coverage lives in dispatch_test.go (cross-platform
 // parseShell + executeShell + runShell tests, with Unix
@@ -46,20 +50,6 @@ func TestExecuteShell_CmdNotFound(t *testing.T) {
 	r := executeShell(context.Background(), t.TempDir(), "definitely-not-a-real-cmd-xyzzy", nil, nil)
 	if r.ExitCode == 0 {
 		t.Errorf("expected non-zero exit for missing command, got %d", r.ExitCode)
-	}
-}
-
-// TestDecoderFor_ChineseACP returns a non-nil decoder when ACP
-// is 936 (Simplified Chinese). For non-Chinese ACPs (Western,
-// Japanese, etc.) the result is nil — caller passes through raw.
-func TestDecoderFor_ChineseACP(t *testing.T) {
-	if got := decoderFor(936); got == nil {
-		t.Error("decoderFor(936): want non-nil GB18030 decoder, got nil")
-	}
-	for _, acp := range []uint32{1252, 932, 949, 950} {
-		if got := decoderFor(acp); got != nil {
-			t.Errorf("decoderFor(%d): want nil (raw passthrough), got %v", acp, got)
-		}
 	}
 }
 

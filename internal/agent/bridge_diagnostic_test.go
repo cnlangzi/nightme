@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 )
 
 // ─── ClassifyExit ─────────────────────────────────────────────────────
@@ -254,6 +255,19 @@ func TestTruncateForLog(t *testing.T) {
 	t.Run("EmptyMax", func(t *testing.T) {
 		if got := TruncateForLog("anything", 0); got != "anything" {
 			t.Errorf("TruncateForLog(x, 0) = %q, want \"anything\" (no truncation)", got)
+		}
+	})
+
+	t.Run("DoesNotSplitRune", func(t *testing.T) {
+		// A byte slice would cut a CJK character in half; the half
+		// character is invalid UTF-8 and renders as mojibake.
+		in := strings.Repeat("好", 40)
+		got := TruncateForLog(in, 20)
+		if !utf8.ValidString(got) {
+			t.Errorf("TruncateForLog(%q, 20) = %q; the result is not valid UTF-8", in, got)
+		}
+		if !strings.Contains(got, " ...[truncated]") {
+			t.Errorf("missing truncation marker: %q", got)
 		}
 	})
 }

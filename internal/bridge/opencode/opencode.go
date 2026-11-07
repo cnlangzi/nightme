@@ -36,9 +36,11 @@
 // session.status, session_info_update) is recognised by
 // internal/bridge/acp/agent.go::handleSessionUpdate. opencode
 // therefore does NOT install a per-bridge UpdateHandler; this
-// package only supplies the spawn recipe and the package-level
-// debug logger. The one-shot turn runs over the same ACP transport
-// (see the shared agent.RunSession helper).
+// package supplies the spawn recipe, the package-level debug logger
+// and the model forwarding (see model.go): the session runs on the
+// model opencode's own configuration selects. The one-shot turn runs
+// over the same ACP transport (see the shared agent.RunSession
+// helper).
 //
 // If a future opencode version adds a PRIVATE protocol layer
 // (e.g. an opencode-only slash-command notification kind not in

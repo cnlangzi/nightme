@@ -35,6 +35,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/cnlangzi/nightme/internal/bridge/acp"
 )
 
 //go:embed store_db_stub.bin
@@ -49,7 +51,7 @@ var storeDBStub []byte
 // and before EventAgentReady is emitted. Failure is non-fatal:
 // the bridge logs and continues — session/load will simply fail
 // -32602 on the next spawn (same behavior as before this fix).
-func ensureStubStoreDB(sessionID string) error {
+func ensureStubStoreDB(_ *acp.DriverHandle, sessionID string) error {
 	if sessionID == "" {
 		return errors.New("cursor: ensureStubStoreDB called with empty sessionId")
 	}

@@ -41,6 +41,7 @@
 | Claude Code Bridge | [bridge/claude.md](./bridge/claude.md) |
 | Codex App-Server Bridge | [bridge/codex.md](./bridge/codex.md) |
 | OpenCode Bridge (ACP `opencode acp`) | [feat/F-OPENCODE-ACP-MIGRATION.md](./feat/F-OPENCODE-ACP-MIGRATION.md) |
+| OpenCode session 跑在用户配置的模型上（转发 opencode 自己选的模型）| [feat/F-OPENCODE-ACP-MIGRATION.md](./feat/F-OPENCODE-ACP-MIGRATION.md) |
 | Pi Coding Agent Bridge（传输 + 流式事件 + contextWindow）| [bridge/pi.md](./bridge/pi.md) |
 | dsh (DeepSeek Harness) Bridge | [feat/F-dsh-bridge.md](./feat/F-dsh-bridge.md) |
 | dsh Chat-Session Event Translation 重构（To-dos / Tool 列表修复）| [feat/F-DSH-CHAT-001-event-state.md](./feat/F-DSH-CHAT-001-event-state.md) |

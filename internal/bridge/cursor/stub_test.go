@@ -40,7 +40,7 @@ func TestEnsureStubStoreDB_WritesValidFile(t *testing.T) {
 	t.Setenv("USERPROFILE", fakeHome)
 
 	sessionID := "test-stub-session-aaaa-bbbb-cccc"
-	if err := ensureStubStoreDB(sessionID); err != nil {
+	if err := ensureStubStoreDB(nil, sessionID); err != nil {
 		t.Fatalf("ensureStubStoreDB: %v", err)
 	}
 
@@ -81,7 +81,7 @@ func TestEnsureStubStoreDB_WritesValidFile(t *testing.T) {
 // pre-condition guard.
 func TestEnsureStubStoreDB_EmptySessionIDRejected(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	if err := ensureStubStoreDB(""); err == nil {
+	if err := ensureStubStoreDB(nil, ""); err == nil {
 		t.Fatal("ensureStubStoreDB(\"\") returned nil; want error")
 	} else if !strings.Contains(err.Error(), "empty") {
 		t.Fatalf("error = %v; want 'empty sessionId' message", err)
@@ -97,7 +97,7 @@ func TestEnsureStubStoreDB_Idempotent(t *testing.T) {
 
 	sessionID := "test-stub-session-eeee-ffff-dddd"
 	for i := 0; i < 3; i++ {
-		if err := ensureStubStoreDB(sessionID); err != nil {
+		if err := ensureStubStoreDB(nil, sessionID); err != nil {
 			t.Fatalf("attempt %d: %v", i, err)
 		}
 	}

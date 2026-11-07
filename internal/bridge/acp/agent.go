@@ -97,7 +97,8 @@ type driver struct {
 	// onSessionID fires synchronously in bindSession after d.sessionID
 	// is finalized and before EventAgentReady is emitted. Used by
 	// cursor to pre-create store.db so the session/new→store.db
-	// timing gap doesn't bite. See bridge/acp/starter.go::WithSessionIDHook.
+	// timing gap doesn't bite, and by opencode to apply the model
+	// the user configured. See bridge/acp/starter.go::WithSessionIDHook.
 	onSessionID OnSessionID
 	// resumeSessionID is the caller's cfg.SessionID. Non-empty means
 	// handshake must reopen that session (session/resume when the
@@ -1478,7 +1479,8 @@ func (d *driver) setSessionID(result json.RawMessage) error {
 // before EventAgentReady is emitted. A non-nil return aborts the
 // spawn with the hook's error. Bridges use this for per-driver
 // prep at the moment the session becomes known (cursor pre-creates
-// store.db; see bridge/cursor/stub.go).
+// store.db — see bridge/cursor/stub.go; opencode applies the model
+// the user configured — see bridge/opencode/model.go).
 func (d *driver) bindSession(fallbackID string, result json.RawMessage) error {
 	var response struct {
 		SessionID      string          `json:"sessionId"`
@@ -1507,7 +1509,7 @@ func (d *driver) bindSession(fallbackID string, result json.RawMessage) error {
 		d.modelMu.Unlock()
 	}
 	if d.onSessionID != nil {
-		if err := d.onSessionID(d.sessionID); err != nil {
+		if err := d.onSessionID(d, d.sessionID); err != nil {
 			return err
 		}
 	}

@@ -58,5 +58,5 @@ Read every sentence as a first-time reader. If removing the timestamp or context
 
 ### Runtime
 
-- Bridge layer is transport + permissions only. Do **not** inject model / provider / credentials / bundled config into downstream AI agents — keep their defaults intact.
+- Bridge layer is transport + permissions only. Do **not** inject model / provider / credentials / bundled config into downstream AI agents — keep their defaults intact. A bridge may forward the model the user configured **for that agent** (e.g. the model opencode's own configuration selects); it must never choose a model, a provider or a credential itself.
 - Bot failure handling: silent recovery first (retry / respawn / `--resume`). Only notify the chat when recovery is impossible. Do not invent a new notification path.

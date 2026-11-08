@@ -103,6 +103,14 @@ Per the agent-no-config-tampering principle, the bridge only
 injects the transport/permission flags. Model / provider / API
 key / MCP configuration all flow from the user's own `~/.omp/`.
 
+### Telemetry
+
+omp exposes no client-telemetry knob — no environment variable,
+no `--disable-*-telemetry` flag, no settings key. The only
+telemetry-shaped surface is the OpenTelemetry instrumentation
+of the agent's own runs, which is not client analytics. The
+bridge therefore adds nothing and the CLI keeps its defaults.
+
 ### Resume
 
 When `cfg.SessionID` is non-empty, `buildArgs` appends

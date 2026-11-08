@@ -84,10 +84,18 @@ type Config struct {
 	Discord  DiscordConfig  `yaml:"discord"`
 	Primary  string         `yaml:"primary"`
 	Agents   []AgentEntry   `yaml:"agents"`
-	Session  SessionConfig  `yaml:"session"`
-	Logging  LoggingConfig  `yaml:"logging"`
-	Paths    PathsConfig    `yaml:"paths"`
-	Review   ReviewConfig   `yaml:"review,omitempty"`
+	// AgentTelemetry lets the agent CLIs nightme spawns send their own
+	// client telemetry (usage analytics, error reporting). false — the
+	// default — means every bridge disables that telemetry for the
+	// child it spawns; the user's own agent runs are unaffected.
+	//
+	// The NIGHTME_AGENT_TELEMETRY environment variable overrides this
+	// key (see applyEnvOverrides).
+	AgentTelemetry bool          `yaml:"agent_telemetry"`
+	Session        SessionConfig `yaml:"session"`
+	Logging        LoggingConfig `yaml:"logging"`
+	Paths          PathsConfig   `yaml:"paths"`
+	Review         ReviewConfig  `yaml:"review,omitempty"`
 }
 
 // ReviewConfig holds the /review command's global preferences.
@@ -530,6 +538,20 @@ func applyDefaults(c *Config) {
 	}
 }
 
+// parseBool reads the boolean spellings nightme accepts in
+// environment variables: 1 / true / yes / on and 0 / false / no /
+// off, case-insensitive. Anything else is not a boolean — the second
+// return value is false and the caller keeps the value it had.
+func parseBool(v string) (bool, bool) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true, true
+	case "0", "false", "no", "off":
+		return false, true
+	}
+	return false, false
+}
+
 // applyEnvOverrides looks at every NIGHTME_<SECTION>_<KEY> variable
 // and writes the value into the matching struct field. Unknown
 // variables are silently ignored (forward-compatibility).
@@ -578,6 +600,11 @@ func applyEnvOverrides(c *Config) {
 	}
 	if v := os.Getenv("NIGHTME_PRIMARY"); v != "" {
 		c.Primary = v
+	}
+	if v := os.Getenv("NIGHTME_AGENT_TELEMETRY"); v != "" {
+		if b, ok := parseBool(v); ok {
+			c.AgentTelemetry = b
+		}
 	}
 	if v := os.Getenv("NIGHTME_NAME"); v != "" {
 		c.Name = v

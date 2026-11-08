@@ -25,7 +25,15 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/bridge/acp"
+	"github.com/cnlangzi/nightme/internal/bridge/telemetry"
 )
+
+// telemetryEnv disables opencode's client telemetry for the child the
+// bridge spawns. DO_NOT_TRACK is the standard do-not-track switch.
+//
+// Applied unless the user opts out of nightme's telemetry policy —
+// see internal/bridge/telemetry.
+var telemetryEnv = []string{"DO_NOT_TRACK=1"}
 
 // Starter is the opencode spawn recipe. Held in agent.Builtins as
 // a singleton per agent name.
@@ -64,8 +72,12 @@ func NewStarter(name, command string, args []string) *Starter {
 // Info returns the fixed metadata for this starter. Observable at
 // any time; used by `nightme agents` and any other spec-only
 // consumer.
+//
+// Env carries the telemetry knob the bridge adds to the child, unless
+// the user opted out of nightme's telemetry policy — the advertised
+// env therefore matches what the child actually receives.
 func (s *Starter) Info() agent.Info {
-	return agent.NewInfo(s.name, agent.ModeACP, s.command, s.args, nil)
+	return agent.NewInfo(s.name, agent.ModeACP, s.command, s.args, telemetry.Env(telemetryEnv...))
 }
 
 // Detect verifies the configured command resolves to an invokable
@@ -128,13 +140,20 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 	// tool_call / tool_call_update / usage_update / session.status
 	// / session_info_update / ...) is recognised by the generic
 	// fallback — no per-bridge translator needed.
-	acpStarter := acp.NewStarter(s.name, s.command, s.args, nil, 0, 0,
-		acp.WithSessionIDHook(s.applyConfiguredModel(ctx, cfg.Workspace)))
+	acpStarter := s.acpStarter(ctx, cfg)
 	a, err := acpStarter.Start(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("agent %s: spawn: %w", s.Info().Name, err)
 	}
 	return a, nil
+}
+
+// acpStarter builds the generic ACP starter this bridge drives. The
+// starter's env carries the telemetry knob, so the spawned child
+// receives it.
+func (s *Starter) acpStarter(ctx context.Context, cfg agent.StartConfig) *acp.Starter {
+	return acp.NewStarter(s.name, s.command, s.args, telemetry.Env(telemetryEnv...), 0, 0,
+		acp.WithSessionIDHook(s.applyConfiguredModel(ctx, cfg.Workspace)))
 }
 
 // RunOnce is the one-shot counterpart to Start. The turn runs over

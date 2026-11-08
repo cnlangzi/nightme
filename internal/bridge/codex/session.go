@@ -36,6 +36,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/bridge/telemetry"
 	"github.com/cnlangzi/nightme/internal/proc"
 )
 
@@ -201,6 +202,61 @@ type sessionConfig struct {
 	resume    bool     // semantic: cfg.SessionID was non-empty
 }
 
+// appServerArgs builds the argv for the spawned codex app-server.
+//
+// Permission defaults (F-codex-permissions): the codex CLI
+// defaults to sandbox_mode="read-only" and a prompt-driven
+// approval policy. Any shell write — Out-File, Set-Content,
+// go build tmp dirs, codex's own apply-patch path — then
+// fails inside the sandbox with "Access is denied" before any
+// approval RPC can be surfaced to the user. That made the
+// agent unusable for any task that touches the filesystem
+// (the documented "current session is sandbox read-only"
+// error surfaced by the model).
+//
+// We override both at spawn time via `-c <key>="<value>"`,
+// which is the documented app-server config layer (verified
+// against codex-rs/app-server/{README.md, shared_options.rs};
+// actual accepted variants read out of the live binary via
+// `codex app-server -c <key>="<bogus>" …`, see F-codex-permissions
+// smoke). `approval_policy="never"` is one of
+// untrusted|on-failure|on-request|granular|never — we pick
+// `never` to suppress on-turn approval prompts so the bridge's
+// existing permissions.go handler stops being asked. The FS
+// sandbox accepts read-only|workspace-write|danger-full-access;
+// we pick `danger-full-access` (NOT `full-access` — that value
+// is from the Python SDK enum and the Rust CLI rejects it).
+// Together these are the app-server analogue of Claude Code's
+// --permission-mode bypassPermissions
+// (internal/bridge/claudecode/permissions.go:65); the design
+// across both bridges is "ChatOps agent defaults to acting".
+//
+// The permissions.go handler stays reachable as a downgrade
+// path for callers that wish to flip cfg.PermissionMode at a
+// later time — once that field is wired through, this is the
+// only place that needs to change to forward the override.
+func appServerArgs(cfg sessionConfig) []string {
+	argv := []string{
+		"app-server", "--listen", "stdio://",
+		"-c", `approval_policy="never"`,
+		"-c", `sandbox_mode="danger-full-access"`,
+	}
+	// Disable codex's client analytics (the built-in Statsig metrics
+	// exporter) for this child only. `analytics.enabled` is a config
+	// key, not a file edit — the `-c` override applies it to this
+	// spawn and leaves the user's ~/.codex/config.toml untouched.
+	// codex ignores an unrecognized key (it logs a warning and keeps
+	// running), so the knob never fails the spawn.
+	argv = append(argv, telemetry.Args("-c", "analytics.enabled=false")...)
+	if cfg.model != "" {
+		argv = append(argv, "-c", fmt.Sprintf("model=%q", cfg.model))
+	}
+	if cfg.effort != "" {
+		argv = append(argv, "-c", fmt.Sprintf("model_reasoning_effort=%q", cfg.effort))
+	}
+	return argv
+}
+
 // newSession spawns codex app-server, runs the handshake, and returns
 // the live session. The session wires its own delivery hook before the
 // pumps start, so a child that dies during startup still reports the
@@ -210,50 +266,7 @@ func newSession(ctx context.Context, cfg sessionConfig) (*session, error) {
 		return nil, fmt.Errorf("codex: workspace required")
 	}
 
-	// Build argv.
-	//
-	// Permission defaults (F-codex-permissions): the codex CLI
-	// defaults to sandbox_mode="read-only" and a prompt-driven
-	// approval policy. Any shell write — Out-File, Set-Content,
-	// go build tmp dirs, codex's own apply-patch path — then
-	// fails inside the sandbox with "Access is denied" before any
-	// approval RPC can be surfaced to the user. That made the
-	// agent unusable for any task that touches the filesystem
-	// (the documented "current session is sandbox read-only"
-	// error surfaced by the model).
-	//
-	// We override both at spawn time via `-c <key>="<value>"`,
-	// which is the documented app-server config layer (verified
-	// against codex-rs/app-server/{README.md, shared_options.rs};
-	// actual accepted variants read out of the live binary via
-	// `codex app-server -c <key>="<bogus>" …`, see F-codex-permissions
-	// smoke). `approval_policy="never"` is one of
-	// untrusted|on-failure|on-request|granular|never — we pick
-	// `never` to suppress on-turn approval prompts so the bridge's
-	// existing permissions.go handler stops being asked. The FS
-	// sandbox accepts read-only|workspace-write|danger-full-access;
-	// we pick `danger-full-access` (NOT `full-access` — that value
-	// is from the Python SDK enum and the Rust CLI rejects it).
-	// Together these are the app-server analogue of Claude Code's
-	// --permission-mode bypassPermissions
-	// (internal/bridge/claudecode/permissions.go:65); the design
-	// across both bridges is "ChatOps agent defaults to acting".
-	//
-	// The permissions.go handler stays reachable as a downgrade
-	// path for callers that wish to flip cfg.PermissionMode at a
-	// later time — once that field is wired through, this is the
-	// only place that needs to change to forward the override.
-	argv := []string{
-		"app-server", "--listen", "stdio://",
-		"-c", `approval_policy="never"`,
-		"-c", `sandbox_mode="danger-full-access"`,
-	}
-	if cfg.model != "" {
-		argv = append(argv, "-c", fmt.Sprintf("model=%q", cfg.model))
-	}
-	if cfg.effort != "" {
-		argv = append(argv, "-c", fmt.Sprintf("model_reasoning_effort=%q", cfg.effort))
-	}
+	argv := appServerArgs(cfg)
 
 	child := proc.New(ctx, cfg.command, argv...)
 	child.Dir = cfg.workspace

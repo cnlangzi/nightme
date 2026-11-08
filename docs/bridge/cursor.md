@@ -408,6 +408,12 @@ cursor-agent --force --trust --sandbox disabled --approve-mcps -p "hello" --outp
 
 `cursor-agent acp --force` 会被 acp 子命令当成未知参数丢掉，进程照样起来，权限仍是默认收紧。
 
+### 5.4 Telemetry
+
+Cursor CLI 没有 client telemetry 开关——binary 里既没有对应的环境变量，也没有
+`--disable-*-telemetry` 之类的 flag，所以 nightme 不会往 child 里塞任何东西，CLI 保持
+它自己的默认行为。
+
 ---
 
 ## 6. 生命周期与事件

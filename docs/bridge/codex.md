@@ -38,6 +38,11 @@ nightme ──stdio JSON-RPC 2.0──> codex app-server --listen stdio:// [-c m
 | **chat-session 单选 `app_server`** | cc-connect 在 `codex.go::StartSession` L466–504 用了二选一,默认 `exec`。我们走单选 `app_server`,因为 `exec` 与 nightme 的多 turn + 流式事件 + 审批 IPC 三条核心契约全部不兼容。one-shot(`/gtw commit` / `/gtw pr`)也走 `app_server`——见 §1.4。**用户临时降级 `codex` 命令 → 自动落 `ModePTY` 兜底**(`cmd/nightme/buildAgentRegistry`),不会失能。 |
 | **不做模型别名表** | `-c model=…` 直接透传,由用户在 `StartConfig.Args` / chat args 写明。 |
 
+**Telemetry**：spawn 时追加 `-c analytics.enabled=false`,关掉 codex 内建的 Statsig
+metrics exporter(client analytics)。这是 per-spawn 的 config override,不写用户
+`~/.codex/config.toml`;codex 遇到不认识的 key 只 log warning 不中断,所以这个 knob
+不会让 spawn 失败。用户把 `agent_telemetry: true` 写进 `~/.nightme/config.yaml`（或设 `NIGHTME_AGENT_TELEMETRY=1`）就能退出整条策略。
+
 ### 1.3 与 cc-connect 的差异速查
 
 | | cc-connect | nightme |

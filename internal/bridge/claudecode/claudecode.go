@@ -26,6 +26,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/agent/procutil"
+	"github.com/cnlangzi/nightme/internal/bridge/telemetry"
 	"github.com/cnlangzi/nightme/internal/proc"
 )
 
@@ -197,17 +198,35 @@ type driver struct {
 // (probeResume) sees the live driver before starter.Start wraps
 // it in a *agent.Agent. Split out of the old Agent.Start so
 // the probe can interact with the runtime before it's exposed.
+// telemetryEnv disables Claude Code's client telemetry for the child
+// the bridge spawns. Claude Code reads DISABLE_TELEMETRY from the
+// environment; the value below reaches the child only, so a `claude`
+// the user runs by hand keeps its own defaults.
+//
+// Applied unless the user opts out of nightme's telemetry policy —
+// see internal/bridge/telemetry.
+var telemetryEnv = []string{"DISABLE_TELEMETRY=1"}
+
+// childEnviron returns the environment for the child process: the
+// daemon's own environment, then the bridge's own entries, then
+// cfg.Env. The telemetry knob lands after the daemon's environment so
+// it wins over it, and before cfg.Env so a per-session override still
+// wins — the same order the ACP bridges use.
+func childEnviron(cfg agent.StartConfig) []string {
+	env := append([]string(nil), telemetry.Env(telemetryEnv...)...)
+	env = append(env, cfg.Env...)
+	return append(os.Environ(), env...)
+}
+
 func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver, error) {
 	args := buildArgs(s.args, cfg)
-
-	env := append([]string(nil), cfg.Env...)
 
 	// Spawn via the proc.New helper so the platform-specific
 	// SysProcAttr (Setsid on unix, no-op on Windows) is in one
 	// place — see internal/proc/exec_unix.go for the rationale.
 	child := proc.New(ctx, s.command, args...)
 	child.Dir = cfg.Workspace
-	child.Env = append(os.Environ(), env...)
+	child.Env = childEnviron(cfg)
 
 	stdin, err := child.StdinPipe()
 	if err != nil {

@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/cnlangzi/nightme/internal/bridge/telemetry"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/logging"
 )
@@ -44,6 +45,9 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(1)
 	}
+	// The agent CLIs nightme spawns keep their client telemetry off
+	// unless the config says otherwise. See internal/bridge/telemetry.
+	telemetry.Allow(cfg.AgentTelemetry)
 	// The forked daemon child has no console: its stdout is
 	// /dev/null and its stderr is the crash-capture file
 	// (daemon_stderr.go). Teeing the log stream there would bury

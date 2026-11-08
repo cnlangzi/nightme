@@ -124,7 +124,7 @@ exec.CommandContext(ctx, "pi",
   "--offline",
 )
 cmd.Dir = cfg.Workspace
-cmd.Env = append(append(os.Environ(), cfg.Env...), "PI_TELEMETRY=0") // defensive
+cmd.Env = append(append(os.Environ(), cfg.Env...), "PI_TELEMETRY=0") // defensive — telemetry knob
 cmd.Stdin  = pipe
 cmd.Stdout = pipe
 cmd.Stderr = pipe
@@ -143,6 +143,10 @@ NightMe 是 Pi 唯一的交互方：没有人可以操作 Pi 的终端或 TUI，
 | `PI_TELEMETRY=0` | 禁止安装/更新 telemetry 与 provider attribution header |
 
 这些参数**不能**等价替换为 `--no-extensions`、`--no-context-files`、`--no-skills`、`--no-prompt-templates` 或 `--no-session`。后者会改变 NightMe 依赖的项目 context、工具能力和 session resume 语义。
+
+`PI_TELEMETRY=0` 是 nightme 的 client telemetry knob：pi 读它决定要不要发安装/更新
+telemetry 与 provider attribution header。它只进 child 环境——用户自己手跑的 `pi` 不受影响。
+用户把 `agent_telemetry: true` 写进 `~/.nightme/config.yaml`（或设 `NIGHTME_AGENT_TELEMETRY=1`）时 bridge 不再加这个 knob，pi 保持自己的默认行为。
 
 `--offline` 依赖前置配置不变量：用户在 NightMe 调用 Pi 前已经安装好需要使用的 extension/package。离线模式只跳过网络安装，不应把缺失 package 静默当作已加载资源。
 

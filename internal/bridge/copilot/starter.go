@@ -71,8 +71,12 @@ func NewStarter(name, command string, args []string) *Starter {
 // Info returns the fixed metadata for this starter. Observable
 // at any time; used by `nightme agents` and any other spec-only
 // consumer.
+//
+// Args carry the telemetry knob the bridge adds to the child, unless
+// the user opted out of nightme's telemetry policy — the advertised
+// argv therefore matches what the child actually receives.
 func (s *Starter) Info() agent.Info {
-	return agent.NewInfo(s.name, agent.ModeACP, s.command, s.args, nil)
+	return agent.NewInfo(s.name, agent.ModeACP, s.command, childArgs(s.args, s.command), nil)
 }
 
 // Detect verifies the configured command resolves to an invokable
@@ -123,12 +127,19 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 	if cfg.Workspace == "" {
 		return nil, errors.New("copilot: workspace is required")
 	}
-	acpStarter := acp.NewStarter(s.name, s.command, s.args, nil, 0, 0)
+	acpStarter := s.acpStarter()
 	a, err := acpStarter.Start(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("agent %s: spawn: %w", s.Info().Name, err)
 	}
 	return a, nil
+}
+
+// acpStarter builds the generic ACP starter this bridge drives. The
+// starter's argv carries the telemetry knob, so the spawned child
+// receives it.
+func (s *Starter) acpStarter() *acp.Starter {
+	return acp.NewStarter(s.name, s.command, childArgs(s.args, s.command), nil, 0, 0)
 }
 
 // RunOnce is the one-shot counterpart to Start. The turn runs over

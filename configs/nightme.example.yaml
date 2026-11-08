@@ -13,6 +13,14 @@
 # Primary (default) agent name. Used when no /use <name> is given.
 primary: claude
 
+# Let the agent CLIs nightme spawns send their own client telemetry
+# (usage analytics, error reporting). Off by default: every bridge
+# disables its CLI's telemetry for the child it spawns, and the CLI
+# you run by hand keeps its own defaults. Set to true to opt out of
+# that policy. The NIGHTME_AGENT_TELEMETRY environment variable
+# overrides this key.
+agent_telemetry: false
+
 # Custom agents. Each entry can either extend a built-in (same name
 # replaces the built-in) or add a brand-new agent. Bridge is the
 # Bridge backend type (claude / codex / opencode / pi); Command is

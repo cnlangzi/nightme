@@ -35,11 +35,15 @@
 package copilot
 
 import (
+	"context"
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/cnlangzi/nightme/internal/bridge/telemetry"
+	"github.com/cnlangzi/nightme/internal/proc"
 )
 
 // FullAccessArgs is the spawn-time permission flag that turns
@@ -64,6 +68,11 @@ var FullAccessArgs = []string{"--allow-all-tools"}
 // parent-level flag (verified against `copilot --help` on 1.0.105);
 // it disables the telemetry the CLI sends and leaves server-side
 // telemetry alone.
+//
+// The flag is missing from older builds (the 1.0.80 npm package has
+// no such flag) and the CLI rejects an unknown flag outright ("error:
+// unexpected argument"), so the bridge asks the binary whether it
+// accepts the flag before adding it. See supportsTelemetryFlag.
 //
 // Applied unless the user opts out of nightme's telemetry policy —
 // see internal/bridge/telemetry.
@@ -90,11 +99,59 @@ var DefaultACPArgs = append(
 // translator to attribute events to the copilot bridge.
 const bridgeName = "copilot"
 
+// telemetryFlagSupport caches, per copilot binary, whether it accepts
+// --disable-client-telemetry. Keyed by the command path so a
+// cfg.Agents override is probed on its own.
+var telemetryFlagSupport sync.Map
+
+// supportsTelemetryFlag reports whether the copilot binary at command
+// accepts --disable-client-telemetry.
+//
+// The CLI rejects an unknown flag outright ("error: unexpected
+// argument"), so a build that predates the flag would abort the
+// spawn instead of merely leaving telemetry on. The probe asks the
+// binary itself — `copilot --help` prints the options it accepts —
+// and the answer is cached per binary so the cost is paid once per
+// process, not once per spawn.
+//
+// A probe that cannot run (missing binary, a CLI that hangs) counts
+// as "not supported": the knob is best-effort, the spawn must not
+// fail because of it.
+func supportsTelemetryFlag(command string) bool {
+	if v, ok := telemetryFlagSupport.Load(command); ok {
+		return v.(bool)
+	}
+	supported := probeTelemetryFlag(command)
+	telemetryFlagSupport.Store(command, supported)
+	return supported
+}
+
+// probeTelemetryFlag runs `copilot --help` and looks for the flag.
+//
+// The needle carries a single leading dash so it matches both the
+// CLI's own help ("--disable-client-telemetry") and a flag listing
+// that prints one dash.
+func probeTelemetryFlag(command string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), telemetryFlagProbeTimeout)
+	defer cancel()
+	out, err := proc.New(ctx, command, "--help").CombinedOutput()
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(out), "-disable-client-telemetry")
+}
+
+// telemetryFlagProbeTimeout bounds the `copilot --help` probe.
+const telemetryFlagProbeTimeout = 10 * time.Second
+
 // childArgs returns the argv for a spawned copilot child: the
 // telemetry knob leads the parent-level flags. Copilot parses its
 // options in any order, so the knob lands ahead of `--acp --stdio`.
-func childArgs(args []string) []string {
-	if telemetry.Allowed() {
+//
+// The knob is dropped when the binary does not accept it — a build
+// that predates the flag would refuse to start at all.
+func childArgs(args []string, command string) []string {
+	if telemetry.Allowed() || !supportsTelemetryFlag(command) {
 		return args
 	}
 	out := make([]string, 0, len(args)+len(telemetryArgs))

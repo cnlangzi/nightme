@@ -40,3 +40,27 @@ func Allow(v bool) { allowed.Store(v) }
 // no knob at all simply receives nothing. A knob is never allowed to
 // fail the spawn.
 func Allowed() bool { return allowed.Load() }
+
+// Env returns the child-environment entries that disable the client
+// telemetry of the CLI that owns knobs. Nil when the policy lets the
+// CLI send telemetry.
+//
+// The returned slice is a copy — the caller may append to it.
+func Env(knobs ...string) []string {
+	if Allowed() {
+		return nil
+	}
+	return append([]string(nil), knobs...)
+}
+
+// Args returns the child-argv entries that disable the client
+// telemetry of the CLI that owns flags. Nil when the policy lets the
+// CLI send telemetry.
+//
+// The returned slice is a copy — the caller may append to it.
+func Args(flags ...string) []string {
+	if Allowed() {
+		return nil
+	}
+	return append([]string(nil), flags...)
+}

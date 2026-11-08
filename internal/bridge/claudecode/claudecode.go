@@ -207,23 +207,14 @@ type driver struct {
 // see internal/bridge/telemetry.
 var telemetryEnv = []string{"DISABLE_TELEMETRY=1"}
 
-// childEnv returns the environment entries the bridge adds to every
-// child it spawns: the telemetry knob, unless the user allowed agent
-// telemetry.
-func childEnv() []string {
-	if telemetry.Allowed() {
-		return nil
-	}
-	return append([]string(nil), telemetryEnv...)
-}
-
 // childEnviron returns the environment for the child process: the
-// daemon's own environment, then cfg.Env, then the bridge's own
-// entries. The telemetry knob lands last so it wins for the child
-// alone — the daemon's own environment is never modified.
+// daemon's own environment, then the bridge's own entries, then
+// cfg.Env. The telemetry knob lands after the daemon's environment so
+// it wins over it, and before cfg.Env so a per-session override still
+// wins — the same order the ACP bridges use.
 func childEnviron(cfg agent.StartConfig) []string {
-	env := append([]string(nil), cfg.Env...)
-	env = append(env, childEnv()...)
+	env := append([]string(nil), telemetry.Env(telemetryEnv...)...)
+	env = append(env, cfg.Env...)
 	return append(os.Environ(), env...)
 }
 

@@ -82,8 +82,13 @@ copilot --help 2>&1 | grep -E "allow-all|acp|stdio|prompt|silent"
 **Telemetry**:`--disable-client-telemetry` 是 parent-level flag(实测 `copilot --help`,
 1.0.105),关掉 CLI 发出的 client telemetry(server-side telemetry 不受影响)。bridge 把它
 放在 parent-level flag 组里、transport flag(`--acp --stdio`)之前。`COPILOT_OFFLINE`
-也能关 telemetry,但它同时关掉 GitHub 登录,CLI 就跑不起来了,所以不用。用户可以在
-用户把 `agent_telemetry: true` 写进 `~/.nightme/config.yaml`（或设 `NIGHTME_AGENT_TELEMETRY=1`）就能退出整条策略。
+也能关 telemetry,但它同时关掉 GitHub 登录,CLI 就跑不起来了,所以不用。用户把
+`agent_telemetry: true` 写进 `~/.nightme/config.yaml`（或设 `NIGHTME_AGENT_TELEMETRY=1`）就能退出整条策略。
+
+**版本兼容**:这个 flag 只在较新的 build 上存在(1.0.80 的 npm 包里没有),而 copilot 遇到
+未知 flag 是直接报 `error: unexpected argument` 退出——不是忽略。所以 bridge 在加 flag
+之前先跑一次 `copilot --help`,看 binary 自己接不接受这个 flag(每个 binary 每个进程
+只探一次);不接受就不加,让那个 build 保持自己的默认 telemetry,而不是整个 spawn 起不来。
 
 ### 2.2 ACP 协议验证
 

@@ -14,6 +14,7 @@ import (
 	"fmt"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/bridge/telemetry"
 )
 
 // Starter is the pi spawn recipe. Held in agent.Builtins as a
@@ -47,7 +48,7 @@ func (s *Starter) Info() agent.Info {
 	args := make([]string, 0, len(DefaultArgs)+len(s.args))
 	args = append(args, DefaultArgs...)
 	args = append(args, s.args...)
-	return agent.NewInfo(s.name, agent.ModeJSONIO, s.command, args, childEnv())
+	return agent.NewInfo(s.name, agent.ModeJSONIO, s.command, args, telemetry.Env(telemetryEnv...))
 }
 
 // Detect verifies the configured command resolves to an invokable

@@ -35,16 +35,6 @@ import (
 // see internal/bridge/telemetry.
 var telemetryEnv = []string{"DO_NOT_TRACK=1"}
 
-// childEnv returns the environment entries the bridge adds to every
-// child it spawns: the telemetry knob, unless the user allowed agent
-// telemetry.
-func childEnv() []string {
-	if telemetry.Allowed() {
-		return nil
-	}
-	return append([]string(nil), telemetryEnv...)
-}
-
 // Starter is the opencode spawn recipe. Held in agent.Builtins as
 // a singleton per agent name.
 //
@@ -87,7 +77,7 @@ func NewStarter(name, command string, args []string) *Starter {
 // the user opted out of nightme's telemetry policy — the advertised
 // env therefore matches what the child actually receives.
 func (s *Starter) Info() agent.Info {
-	return agent.NewInfo(s.name, agent.ModeACP, s.command, s.args, childEnv())
+	return agent.NewInfo(s.name, agent.ModeACP, s.command, s.args, telemetry.Env(telemetryEnv...))
 }
 
 // Detect verifies the configured command resolves to an invokable
@@ -162,7 +152,7 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 // starter's env carries the telemetry knob, so the spawned child
 // receives it.
 func (s *Starter) acpStarter(ctx context.Context, cfg agent.StartConfig) *acp.Starter {
-	return acp.NewStarter(s.name, s.command, s.args, childEnv(), 0, 0,
+	return acp.NewStarter(s.name, s.command, s.args, telemetry.Env(telemetryEnv...), 0, 0,
 		acp.WithSessionIDHook(s.applyConfiguredModel(ctx, cfg.Workspace)))
 }
 

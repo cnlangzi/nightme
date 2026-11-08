@@ -626,7 +626,7 @@ NightMe spawns agent CLIs as a side effect of a chat session, and those CLIs sen
 |---|---|---|
 | claude | `DISABLE_TELEMETRY=1` | child environment |
 | codex | `-c analytics.enabled=false` | child argv — turns off the built-in Statsig metrics exporter |
-| copilot | `--disable-client-telemetry` | child argv |
+| copilot | `--disable-client-telemetry` | child argv — added only when the binary accepts the flag |
 | opencode | `DO_NOT_TRACK=1` | child environment |
 | pi | `PI_TELEMETRY=0` | child environment |
 | cursor | — | the CLI exposes no telemetry knob |

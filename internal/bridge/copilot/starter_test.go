@@ -21,7 +21,8 @@ import (
 
 // TestStarter_Info verifies the Starter's Info() exposes the
 // correct ModeACP + the canonical DefaultACPArgs (full-access
-// parent flags then --acp --stdio), preceded by the telemetry knob.
+// parent flags then --acp --stdio). The telemetry knob is prepended
+// only when the binary accepts it — see the telemetry tests.
 func TestStarter_Info(t *testing.T) {
 	telemetry.Allow(false)
 
@@ -36,10 +37,12 @@ func TestStarter_Info(t *testing.T) {
 	if info.Command != "copilot" {
 		t.Errorf("Info().Command = %q, want copilot", info.Command)
 	}
-	want := append([]string(nil), telemetryArgs...)
-	want = append(want, DefaultACPArgs...)
-	if !equalStrings(info.Args, want) {
-		t.Errorf("Info().Args = %v, want %v", info.Args, want)
+	if len(info.Args) < len(DefaultACPArgs) {
+		t.Fatalf("Info().Args = %v, want it to carry %v", info.Args, DefaultACPArgs)
+	}
+	tail := info.Args[len(info.Args)-len(DefaultACPArgs):]
+	if !equalStrings(tail, DefaultACPArgs) {
+		t.Errorf("Info().Args = %v, want it to end with %v", info.Args, DefaultACPArgs)
 	}
 }
 
@@ -96,9 +99,24 @@ func TestStarter_Info_DefensiveCopy(t *testing.T) {
 	s := NewStarter("copilot", "copilot", args)
 	args[0] = "MUTATED"
 	info := s.Info()
-	if !equalStrings(info.Args[1:], []string{"--acp", "--stdio"}) {
-		t.Errorf("Info().Args = %v, want the caller's mutation to be absent", info.Args)
+	for _, a := range info.Args {
+		if a == "MUTATED" {
+			t.Errorf("Info().Args = %v, want the caller's mutation to be absent", info.Args)
+		}
 	}
+	if !containsString(info.Args, "--acp") {
+		t.Errorf("Info().Args = %v, want it to keep --acp", info.Args)
+	}
+}
+
+// containsString reports whether list holds want.
+func containsString(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
 }
 
 // TestStarter_Detect_BinaryNotOnPath verifies Detect returns

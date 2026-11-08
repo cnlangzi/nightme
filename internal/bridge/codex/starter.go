@@ -39,6 +39,11 @@ func NewStarter(name, command string, args []string) *Starter {
 // Info returns the fixed metadata for this starter. Observable
 // at any time; used by `nightme agents` and any other spec-only
 // consumer.
+//
+// Args are the registered args. Unlike the other bridges, codex
+// builds its app-server argv at spawn time (see appServerArgs), so
+// the telemetry knob does not show up here — it is applied to the
+// child either way.
 func (s *Starter) Info() agent.Info {
 	return agent.NewInfo(s.name, agent.ModeJSONIO, s.command, s.args, nil)
 }

@@ -247,9 +247,7 @@ func appServerArgs(cfg sessionConfig) []string {
 	// spawn and leaves the user's ~/.codex/config.toml untouched.
 	// codex ignores an unrecognized key (it logs a warning and keeps
 	// running), so the knob never fails the spawn.
-	if !telemetry.Allowed() {
-		argv = append(argv, "-c", "analytics.enabled=false")
-	}
+	argv = append(argv, telemetry.Args("-c", "analytics.enabled=false")...)
 	if cfg.model != "" {
 		argv = append(argv, "-c", fmt.Sprintf("model=%q", cfg.model))
 	}

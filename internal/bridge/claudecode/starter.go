@@ -19,6 +19,7 @@ import (
 	"log/slog"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/bridge/telemetry"
 )
 
 // starter is the claudecode spawn recipe. Held in agent.Builtins
@@ -55,7 +56,7 @@ func NewStarter(name, command string, args []string) *Starter {
 // the user opted out of nightme's telemetry policy — the advertised
 // env therefore matches what the child actually receives.
 func (s *Starter) Info() agent.Info {
-	return agent.NewInfo(s.name, agent.ModeJSONIO, s.command, s.args, childEnv())
+	return agent.NewInfo(s.name, agent.ModeJSONIO, s.command, s.args, telemetry.Env(telemetryEnv...))
 }
 
 // Detect verifies the configured command resolves to an invokable

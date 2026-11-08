@@ -79,6 +79,12 @@ copilot --help 2>&1 | grep -E "allow-all|acp|stdio|prompt|silent"
 # --stdio              (with --acp) — stdio transport
 ```
 
+**Telemetry**:`--disable-client-telemetry` 是 parent-level flag(实测 `copilot --help`,
+1.0.105),关掉 CLI 发出的 client telemetry(server-side telemetry 不受影响)。bridge 把它
+放在 parent-level flag 组里、transport flag(`--acp --stdio`)之前。`COPILOT_OFFLINE`
+也能关 telemetry,但它同时关掉 GitHub 登录,CLI 就跑不起来了,所以不用。用户可以在
+用户把 `agent_telemetry: true` 写进 `~/.nightme/config.yaml`（或设 `NIGHTME_AGENT_TELEMETRY=1`）就能退出整条策略。
+
 ### 2.2 ACP 协议验证
 
 实测用 NDJSON 探针直接驱动 `copilot --acp --stdio`,不走 nightme bridge:

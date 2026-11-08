@@ -174,6 +174,11 @@ dsh --profile web --port 3080
 
 **attach-then-spawn 决策**: dsh 0.1.2-rc.1 用 `~/.dsh/.credentials.yaml` 里 `client-connection/browser-session.secret` 签 dsh-auth cookie(见 §3.1 + §7.1)。nightme 直接读这个 secret,本地 mint 出合法 cookie,跳过 launch token exchange。所以 **attach 优先**:StartSharedHost 第一步用我们 mint 的 cookie 探活 3080,验证通过就直接 attach(ownsProcess=false,不 kill 用户 dsh);不通过再扫 [3081, 3099];都失败才 spawn 自己的 dsh。
 
+**Telemetry**: dsh launcher 读 `DSH_TELEMETRY_DISABLED` 决定要不要发自己的 telemetry,
+但 shared host 是独立进程、有自己的配置(而且可能是用户自己起的、nightme 只是 attach),
+所以 nightme 的 client telemetry 策略不覆盖它——bridge 不往 dsh child 里加任何 telemetry
+开关。
+
 ### 2.2 端口策略
 
 3080 是 bridge 唯一绑定的端口(`defaultDSHPort`)。`StartSharedHost` 的 `tryAttachExistingDSH` 用 mint 的 cookie 探活 3080:

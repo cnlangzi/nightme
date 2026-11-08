@@ -57,6 +57,25 @@ claudecode / codex / dsh / pi 是**独立的 transport 实现**，不走 acp bri
 
 超时错误带阶段名和预算，例如 `bridge/acp: initialize (timeout=10s): context deadline exceeded`。
 
+### 1.5 Telemetry
+
+acp bridge 自己不带 telemetry 策略——它是通用 transport，knob 归各个 CLI wrapper
+（`opencode/` / `copilot/` / `cursor/`）所有，因为只有它们知道自己的 CLI 用什么开关：
+
+| CLI wrapper | Knob | 位置 |
+|---|---|---|
+| opencode | `DO_NOT_TRACK=1` | child 环境 |
+| copilot | `--disable-client-telemetry` | child argv（parent-level flag，在 `--acp --stdio` 之前） |
+| cursor | — | cursor CLI 没有 telemetry 开关，bridge 不加任何东西 |
+
+`DO_NOT_TRACK` 是通用的 do-not-track 开关。opencode v2.0.12 本身没有 analytics endpoint
+（binary 里找不到，源码树里也没有 analytics 模块），所以在 opencode 上这个 knob 目前是
+best-effort：CLI 忽略它也不影响别的行为。
+
+knob 只作用于 nightme spawn 的 child；用户把 `agent_telemetry: true` 写进
+`~/.nightme/config.yaml`（或设 `NIGHTME_AGENT_TELEMETRY=1`）时三个 wrapper 都不再加 knob，
+CLI 保持自己的默认行为。
+
 ---
 
 ## 2. 协议支持矩阵

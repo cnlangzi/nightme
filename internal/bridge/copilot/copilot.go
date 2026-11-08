@@ -38,6 +38,8 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+
+	"github.com/cnlangzi/nightme/internal/bridge/telemetry"
 )
 
 // FullAccessArgs is the spawn-time permission flag that turns
@@ -57,6 +59,20 @@ import (
 // tools` is the canonical long form.
 var FullAccessArgs = []string{"--allow-all-tools"}
 
+// telemetryArgs disables the Copilot CLI's client telemetry for the
+// child the bridge spawns. `--disable-client-telemetry` is a
+// parent-level flag (verified against `copilot --help` on 1.0.105);
+// it disables the telemetry the CLI sends and leaves server-side
+// telemetry alone.
+//
+// Applied unless the user opts out of nightme's telemetry policy —
+// see internal/bridge/telemetry.
+var telemetryArgs = []string{"--disable-client-telemetry"}
+
+// acpTransportArgs are the ACP server transport flags. They follow the
+// parent-level flags in the spawn argv.
+var acpTransportArgs = []string{"--acp", "--stdio"}
+
 // DefaultACPArgs is the argv nightme registers for the
 // copilot builtin: `--allow-all-tools` first (parent-level
 // permission flag), then `--acp --stdio` (ACP server transport).
@@ -66,13 +82,25 @@ var FullAccessArgs = []string{"--allow-all-tools"}
 // transport for symmetry with cursor / opencode.
 var DefaultACPArgs = append(
 	append([]string(nil), FullAccessArgs...),
-	"--acp", "--stdio",
+	acpTransportArgs...,
 )
 
 // bridgeName is the AgentName stamped on every AgentEvent.
 // Stable across the package; consumed by the runtime's
 // translator to attribute events to the copilot bridge.
 const bridgeName = "copilot"
+
+// childArgs returns the argv for a spawned copilot child: the
+// telemetry knob leads the parent-level flags. Copilot parses its
+// options in any order, so the knob lands ahead of `--acp --stdio`.
+func childArgs(args []string) []string {
+	if telemetry.Allowed() {
+		return args
+	}
+	out := make([]string, 0, len(args)+len(telemetryArgs))
+	out = append(out, telemetryArgs...)
+	return append(out, args...)
+}
 
 // copilotDebug toggles the bridge's detailed debug logging.
 // Default ON so a "why is copilot stuck" incident produces a

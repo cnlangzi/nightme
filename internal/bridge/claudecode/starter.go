@@ -50,8 +50,12 @@ func NewStarter(name, command string, args []string) *Starter {
 // Info returns the fixed metadata for this starter. Observable
 // at any time; used by `nightme agents` and any other spec-only
 // consumer.
+//
+// Env carries the telemetry knob the bridge adds to the child, unless
+// the user opted out of nightme's telemetry policy — the advertised
+// env therefore matches what the child actually receives.
 func (s *Starter) Info() agent.Info {
-	return agent.NewInfo(s.name, agent.ModeJSONIO, s.command, s.args, nil)
+	return agent.NewInfo(s.name, agent.ModeJSONIO, s.command, s.args, childEnv())
 }
 
 // Detect verifies the configured command resolves to an invokable

@@ -26,6 +26,9 @@ func TestLoadExample(t *testing.T) {
 	if cfg.Primary != "claude" {
 		t.Errorf("Primary = %q, want claude", cfg.Primary)
 	}
+	if cfg.AgentTelemetry {
+		t.Errorf("AgentTelemetry = true, want false (the example ships telemetry off)")
+	}
 	// v1.2: cfg.Agents is a list. Lookup by name.
 	var claude, codex, opencode *AgentEntry
 	for i := range cfg.Agents {
@@ -285,4 +288,99 @@ func (s *detectPersistTestStarter) RunOnce(_ context.Context, _ agent.StartConfi
 }
 func (s *detectPersistTestStarter) Review(_ context.Context, _ agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	return agent.RunResult{}, errors.New("detectPersistTestStarter: Review not implemented")
+}
+
+// TestAgentTelemetry_DefaultsToOff verifies the shipped default: the
+// agent CLIs nightme spawns keep their client telemetry off unless
+// the user asks for it.
+func TestAgentTelemetry_DefaultsToOff(t *testing.T) {
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load(\"\") error: %v", err)
+	}
+	if cfg.AgentTelemetry {
+		t.Error("AgentTelemetry = true, want false (default)")
+	}
+}
+
+// TestAgentTelemetry_ConfigKey verifies the YAML key round-trips.
+func TestAgentTelemetry_ConfigKey(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("agent_telemetry: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load(%s) error: %v", path, err)
+	}
+	if !cfg.AgentTelemetry {
+		t.Error("AgentTelemetry = false, want true (agent_telemetry: true)")
+	}
+}
+
+// TestAgentTelemetry_EnvOverridesConfig verifies the environment
+// variable wins over the config file, like every other override.
+func TestAgentTelemetry_EnvOverridesConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("agent_telemetry: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("NIGHTME_AGENT_TELEMETRY", "0")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load(%s) error: %v", path, err)
+	}
+	if cfg.AgentTelemetry {
+		t.Error("AgentTelemetry = true, want false (the env var overrides the file)")
+	}
+}
+
+// TestAgentTelemetry_EnvInvalidKeepsConfig verifies a value that is
+// not a boolean leaves the config file's value alone.
+func TestAgentTelemetry_EnvInvalidKeepsConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("agent_telemetry: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("NIGHTME_AGENT_TELEMETRY", "maybe")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load(%s) error: %v", path, err)
+	}
+	if !cfg.AgentTelemetry {
+		t.Error("AgentTelemetry = false, want true (a non-boolean env value is ignored)")
+	}
+}
+
+// TestParseBool covers the accepted boolean spellings.
+func TestParseBool(t *testing.T) {
+	tests := []struct {
+		in    string
+		want  bool
+		valid bool
+	}{
+		{"1", true, true},
+		{"true", true, true},
+		{"TRUE", true, true},
+		{"yes", true, true},
+		{"on", true, true},
+		{" 1 ", true, true},
+		{"0", false, true},
+		{"false", false, true},
+		{"no", false, true},
+		{"off", false, true},
+		{"", false, false},
+		{"maybe", false, false},
+	}
+	for _, tc := range tests {
+		got, valid := parseBool(tc.in)
+		if got != tc.want || valid != tc.valid {
+			t.Errorf("parseBool(%q) = (%v, %v), want (%v, %v)", tc.in, got, valid, tc.want, tc.valid)
+		}
+	}
 }

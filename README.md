@@ -567,6 +567,7 @@ NightMe reads YAML from `~/.nightme/config.yaml` (or `$NIGHTME_CONFIG` if set). 
 
 ```yaml
 primary: claude                          # global default agent
+agent_telemetry: false                   # agent CLIs keep their client telemetry off
 
 agents:                                  # each entry = name / bridge / command
   - name: claude
@@ -616,6 +617,25 @@ The `/gtw` workflow reads a **separate** file: `~/.nightme/gtw.yml` — see the 
 See [`configs/nightme.example.yaml`](./configs/nightme.example.yaml) for the full schema and per-bridge notes.
 
 Logs go to `~/.nightme/nightme.log` (mode `0600`) as JSON. Attribute keys containing `secret`, `token`, or `password` are auto-redacted to `***REDACTED***`.
+
+#### Agent CLI telemetry
+
+NightMe spawns agent CLIs as a side effect of a chat session, and those CLIs send client telemetry by default. NightMe never asked for that traffic and cannot see it, so every bridge disables its CLI's client telemetry for the child it spawns — the child only. A `claude` or `codex` you run by hand keeps its own defaults.
+
+| Bridge | Telemetry knob | Where |
+|---|---|---|
+| claude | `DISABLE_TELEMETRY=1` | child environment |
+| codex | `-c analytics.enabled=false` | child argv — turns off the built-in Statsig metrics exporter |
+| copilot | `--disable-client-telemetry` | child argv |
+| opencode | `DO_NOT_TRACK=1` | child environment |
+| pi | `PI_TELEMETRY=0` | child environment |
+| cursor | — | the CLI exposes no telemetry knob |
+| omp | — | the CLI exposes no telemetry knob |
+| dsh | — | the shared host is a separate process with its own configuration |
+
+Telemetry is off by default. To let the agent CLIs send it, set `agent_telemetry: true` in `~/.nightme/config.yaml`, or set `NIGHTME_AGENT_TELEMETRY=1` in the daemon's environment — the environment variable overrides the config file, like every other NightMe override.
+
+The knob is best-effort: a CLI that ignores it keeps its own behaviour, one that has no knob receives nothing, and the knob never fails a spawn. Server-side telemetry and the CLIs' update checks are out of reach of this policy.
 
 ### Documentation
 
@@ -667,6 +687,7 @@ internal/
   agentsession/                    # AgentSession + Prompt + Spawner (per-CLI-process runtime unit)
   bridge/                          # Bridge abstraction, one sub-package per agent
     acp/  claudecode/  codex/  copilot/  cursor/  dsh/  omp/  opencode/  pi/  pty/
+    telemetry/                     # agent-CLI client-telemetry policy (one opt-out)
   channel/                         # Channel interface
     bot/  echo/  feishu/  slack/  telegram/   # adapters (feishu production; telegram ready; slack in development)
   chatsession/                     # ChatSession + pool manager + persistence

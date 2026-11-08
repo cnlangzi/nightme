@@ -16,12 +16,15 @@ import (
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/bridge/telemetry"
 )
 
 // TestStarter_Info verifies the Starter's Info() exposes the
 // correct ModeACP + the canonical DefaultACPArgs (full-access
-// parent flags then --acp --stdio).
+// parent flags then --acp --stdio), preceded by the telemetry knob.
 func TestStarter_Info(t *testing.T) {
+	telemetry.Allow(false)
+
 	s := NewStarter("copilot", "copilot", DefaultACPArgs)
 	info := s.Info()
 	if info.Name != "copilot" {
@@ -33,8 +36,10 @@ func TestStarter_Info(t *testing.T) {
 	if info.Command != "copilot" {
 		t.Errorf("Info().Command = %q, want copilot", info.Command)
 	}
-	if !equalStrings(info.Args, DefaultACPArgs) {
-		t.Errorf("Info().Args = %v, want %v", info.Args, DefaultACPArgs)
+	want := append([]string(nil), telemetryArgs...)
+	want = append(want, DefaultACPArgs...)
+	if !equalStrings(info.Args, want) {
+		t.Errorf("Info().Args = %v, want %v", info.Args, want)
 	}
 }
 
@@ -85,12 +90,14 @@ func equalStrings(a, b []string) bool {
 // args slice after NewStarter does not affect the Starter
 // (defensive copy invariant shared with all bridges).
 func TestStarter_Info_DefensiveCopy(t *testing.T) {
+	telemetry.Allow(false)
+
 	args := []string{"--acp", "--stdio"}
 	s := NewStarter("copilot", "copilot", args)
 	args[0] = "MUTATED"
 	info := s.Info()
-	if info.Args[0] != "--acp" {
-		t.Errorf("Info().Args[0] = %q, want --acp (defensive copy failed)", info.Args[0])
+	if !equalStrings(info.Args[1:], []string{"--acp", "--stdio"}) {
+		t.Errorf("Info().Args = %v, want the caller's mutation to be absent", info.Args)
 	}
 }
 

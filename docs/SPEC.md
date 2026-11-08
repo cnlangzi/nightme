@@ -1079,6 +1079,11 @@ User-configured `agents:` entries override built-ins of the same name (merge hap
 
 [当前不变，新增 `primary` 字段承载 Primary Agent]
 
+新增 `agent_telemetry` 顶层布尔字段(默认 `false`):为 `false` 时每个 bridge 都会给
+自己 spawn 的 agent CLI 加上 client telemetry 开关(见 `internal/bridge/telemetry`);
+置 `true` 则所有 agent CLI 保持自己的默认行为。环境变量 `NIGHTME_AGENT_TELEMETRY`
+覆盖该字段,与其他 `NIGHTME_<SECTION>_<KEY>` 覆盖同优先级。
+
 ---
 
 ## 7. 非功能需求 (NFR)

@@ -47,6 +47,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/agent/procutil"
+	"github.com/cnlangzi/nightme/internal/bridge/telemetry"
 	"github.com/cnlangzi/nightme/internal/proc"
 )
 
@@ -69,12 +70,34 @@ var DefaultArgs = []string{
 	"--offline",
 }
 
-// headlessEnv contains runtime-only switches that are not argv
-// flags. The child inherits the daemon environment, then receives
-// these values after cfg.Env so the bridge's default remains opt-in
-// for future changes without requiring another process restart.
-var headlessEnv = []string{
+// telemetryEnv disables pi's client telemetry for the child the
+// bridge spawns. pi reads PI_TELEMETRY; the value below reaches the
+// child only, so a `pi` the user runs by hand keeps its own defaults.
+//
+// Applied unless the user opts out of nightme's telemetry policy —
+// see internal/bridge/telemetry.
+var telemetryEnv = []string{
 	"PI_TELEMETRY=0",
+}
+
+// childEnv returns the environment entries the bridge adds to every
+// child it spawns: the telemetry knob, unless the user allowed agent
+// telemetry.
+func childEnv() []string {
+	if telemetry.Allowed() {
+		return nil
+	}
+	return append([]string(nil), telemetryEnv...)
+}
+
+// childEnviron returns the environment for the child process: the
+// daemon's own environment, then cfg.Env, then the bridge's own
+// entries. The telemetry knob lands last so it wins for the child
+// alone — the daemon's own environment is never modified.
+func childEnviron(cfg agent.StartConfig) []string {
+	env := append([]string(nil), cfg.Env...)
+	env = append(env, childEnv()...)
+	return append(os.Environ(), env...)
 }
 
 // handshakeTimeout bounds the initial get_state round-trip. Pi
@@ -316,8 +339,6 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 
 	startTime := time.Now()
 	args := buildArgs(s.args, cfg)
-	env := append([]string(nil), cfg.Env...)
-	env = append(env, headlessEnv...)
 
 	piLog("Start enter", "agent", s.name, "command", s.command, "workspace", cfg.Workspace, "args", args)
 
@@ -328,7 +349,7 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	// for the platform-specific SysProcAttr rationale.
 	child := proc.New(ctx, s.command, args...)
 	child.Dir = cfg.Workspace
-	child.Env = append(os.Environ(), env...)
+	child.Env = childEnviron(cfg)
 
 	stdin, err := child.StdinPipe()
 	if err != nil {

@@ -96,6 +96,10 @@ claude \
 | `--permission-mode bypassPermissions` | 自动接受所有权限请求 |
 | `--verbose` | 启用 stream-json 输出（必须）|
 
+**Telemetry**：`DISABLE_TELEMETRY=1` 进 child 环境，关闭 Claude Code 的 client
+telemetry。只作用于 nightme spawn 的这个子进程——用户自己手跑的 `claude` 不受影响。
+用户把 `agent_telemetry: true` 写进 `~/.nightme/config.yaml`（或设 `NIGHTME_AGENT_TELEMETRY=1`）就能退出整条策略。
+
 ### 3.2 stdin 格式（user message）
 
 **纯文本 turn**（最简形态）：

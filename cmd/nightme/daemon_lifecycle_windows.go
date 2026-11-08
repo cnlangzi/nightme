@@ -114,6 +114,18 @@ func startDaemon(ctx context.Context, out io.Writer, cfg *config.Config, paths d
 		return fmt.Errorf("start daemon process: %w", err)
 	}
 
+	// Reap the child in the background. The readiness poll below
+	// needs to know whether the child exited early (e.g. it lost the
+	// daemon lock), but it must not block on that: the daemon child
+	// is long-lived, so a blocking Wait in the poll loop would hang
+	// `nightme start` until the child dies — long past the
+	// readiness deadline. The channel is the non-blocking way to ask.
+	childExited := make(chan *os.ProcessState, 1)
+	go func() {
+		_ = child.Wait()
+		childExited <- child.ProcessState
+	}()
+
 	// Poll for ready: daemoncontrol.Listen (called by the child)
 	// creates the named pipe as its first action; Ping then
 	// succeeds once the server has called SetReady(). The
@@ -127,7 +139,6 @@ func startDaemon(ctx context.Context, out io.Writer, cfg *config.Config, paths d
 		select {
 		case <-ctx.Done():
 			_ = child.Process.Kill()
-			_ = child.Wait()
 			return ctx.Err()
 		case <-ticker.C:
 			if time.Now().After(deadline) {
@@ -137,7 +148,6 @@ func startDaemon(ctx context.Context, out io.Writer, cfg *config.Config, paths d
 				// still alive precisely because it is stuck.
 				reason := startupFailureReason(paths, pid)
 				_ = child.Process.Kill()
-				_ = child.Wait()
 				// Same rationale as daemon_lifecycle_unix.go: the
 				// child was alive but slow, so the capture file may
 				// be empty — but it's still the right place to look
@@ -193,17 +203,35 @@ func startDaemon(ctx context.Context, out io.Writer, cfg *config.Config, paths d
 			}
 			// Ping can fail with ErrNotRunning in two cases:
 			//   1. Pipe doesn't exist yet (child hasn't called Listen)
-			//   2. Child exited (e.g. lock contention) — Wait will succeed
+			//   2. Child exited (e.g. lock contention)
 			//
 			// Detect case 2 so we surface a clearer error.
 			if errors.Is(err, daemoncontrol.ErrNotRunning) {
-				if state, werr := child.Process.Wait(); werr == nil && state != nil {
-					return childExitedError(exitCodeOf(state),
-						startupFailureReason(paths, pid), stderrPath)
+				if err := childExitError(childExited, paths, pid, stderrPath); err != nil {
+					return err
 				}
 			}
 		}
 	}
+}
+
+// childExitError reports the "child exited early" error when the
+// daemon child is already gone, and nil while it is still alive.
+//
+// The check must never block: the daemon child is long-lived, so
+// waiting for it to exit here would hang `nightme start` until the
+// child dies — long past the readiness deadline the caller
+// enforces. A slow child (one that has not created its named pipe
+// yet) is the common case on a loaded machine, not an error.
+func childExitError(exited <-chan *os.ProcessState, paths daemoncontrol.Paths, pid int, stderrPath string) error {
+	select {
+	case state := <-exited:
+		if state != nil {
+			return childExitedError(exitCodeOf(state), startupFailureReason(paths, pid), stderrPath)
+		}
+	default:
+	}
+	return nil
 }
 
 // exitCodeOf extracts a numeric exit code from os.ProcessState

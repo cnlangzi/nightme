@@ -131,18 +131,35 @@ func supportsTelemetryFlag(command string) bool {
 // The needle carries a single leading dash so it matches both the
 // CLI's own help ("--disable-client-telemetry") and a flag listing
 // that prints one dash.
+//
+// WaitDelay is what keeps the probe bounded. On Windows the CLI runs
+// under cmd.exe, which spawns node, which spawns the binary: killing
+// the direct child leaves the grandchildren holding the output pipe,
+// and CombinedOutput would then wait for an EOF that never comes.
+// WaitDelay closes the pipes after the grace window, so the probe
+// always returns.
+//
+// The exit status is deliberately ignored: what matters is whether
+// the CLI's help lists the flag, and the help is in the output even
+// when the pipes had to be force-closed (or the CLI was killed
+// after printing it). A CLI that never printed anything — a missing
+// binary, a timeout before the first line — has no flag to find.
 func probeTelemetryFlag(command string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), telemetryFlagProbeTimeout)
 	defer cancel()
-	out, err := proc.New(ctx, command, "--help").CombinedOutput()
-	if err != nil {
-		return false
-	}
+	cmd := proc.New(ctx, command, "--help")
+	cmd.WaitDelay = telemetryFlagProbeGrace
+	out, _ := cmd.CombinedOutput()
 	return strings.Contains(string(out), "-disable-client-telemetry")
 }
 
 // telemetryFlagProbeTimeout bounds the `copilot --help` probe.
 const telemetryFlagProbeTimeout = 10 * time.Second
+
+// telemetryFlagProbeGrace is how long the probe waits for the
+// probed process's output pipes to close after the process itself is
+// gone. Past it, os/exec closes the pipes and the probe gives up.
+const telemetryFlagProbeGrace = 2 * time.Second
 
 // childArgs returns the argv for a spawned copilot child: the
 // telemetry knob leads the parent-level flags. Copilot parses its

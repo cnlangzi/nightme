@@ -4,32 +4,50 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
-// LoadDir reads all `*.yaml` files from dir and returns parsed
-// workflows. Fails if two workflows share a name.
-func LoadDir(dir string) ([]*Workflow, error) {
+// LoadDir reads all `*.yaml` files from dir and returns the parsed
+// workflows and the parsed playbooks. A file with top-level `steps`
+// is a playbook; a file with `jobs` is a DAG workflow. Fails if two
+// workflows share a name.
+func LoadDir(dir string) ([]*Workflow, []*Playbook, error) {
 	files, err := filepath.Glob(filepath.Join(dir, "*.yaml"))
 	if err != nil {
-		return nil, fmt.Errorf("wfe: glob %s: %w", dir, err)
+		return nil, nil, fmt.Errorf("wfe: glob %s: %w", dir, err)
 	}
-	var out []*Workflow
-	seen := map[string]string{} // name -> filename
+	var workflows []*Workflow
+	var playbooks []*Playbook
+	seen := map[string]string{}          // workflow name -> filename
+	seenPlaybooks := map[string]string{} // playbook name -> filename
 	for _, f := range files {
-		wf, err := LoadFile(f)
+		raw, err := os.ReadFile(f)
 		if err != nil {
-			return nil, fmt.Errorf("wfe: %s: %w", f, err)
+			return nil, nil, fmt.Errorf("wfe: %s: %w", f, err)
+		}
+		wf, pb, err := parseFile(raw)
+		if err != nil {
+			return nil, nil, fmt.Errorf("wfe: %s: %w", f, err)
+		}
+		if pb != nil {
+			if prev, ok := seenPlaybooks[pb.Name]; ok {
+				return nil, nil, fmt.Errorf("wfe: duplicate playbook name %q in %s and %s", pb.Name, prev, f)
+			}
+			seenPlaybooks[pb.Name] = f
+			playbooks = append(playbooks, pb)
+			continue
 		}
 		if prev, ok := seen[wf.Name]; ok {
-			return nil, fmt.Errorf("wfe: duplicate workflow name %q in %s and %s", wf.Name, prev, f)
+			return nil, nil, fmt.Errorf("wfe: duplicate workflow name %q in %s and %s", wf.Name, prev, f)
 		}
 		seen[wf.Name] = f
-		out = append(out, wf)
+		workflows = append(workflows, wf)
 	}
-	return out, nil
+	return workflows, playbooks, nil
 }
 
 // LoadFile parses and validates a single workflow file.
@@ -41,8 +59,21 @@ func LoadFile(path string) (*Workflow, error) {
 	return Parse(raw)
 }
 
-// Parse parses and validates raw YAML bytes.
+// Parse parses and validates raw YAML bytes as a DAG workflow.
 func Parse(raw []byte) (*Workflow, error) {
+	isPlaybook, err := looksLikePlaybook(raw)
+	if err != nil {
+		return nil, err
+	}
+	if isPlaybook {
+		return nil, fmt.Errorf("wfe: this file has top-level steps: it is a playbook, not a workflow")
+	}
+	return parseWorkflow(raw)
+}
+
+// parseWorkflow parses and validates raw YAML bytes as a DAG
+// workflow.
+func parseWorkflow(raw []byte) (*Workflow, error) {
 	var wf Workflow
 	if err := yaml.Unmarshal(raw, &wf); err != nil {
 		return nil, fmt.Errorf("wfe: yaml: %w", err)
@@ -52,6 +83,51 @@ func Parse(raw []byte) (*Workflow, error) {
 	}
 	wf.jobOrder = topoSort(wf.Jobs)
 	return &wf, nil
+}
+
+// ParsePlaybook parses and validates raw YAML bytes as a playbook.
+func ParsePlaybook(raw []byte) (*Playbook, error) {
+	var pb Playbook
+	if err := yaml.Unmarshal(raw, &pb); err != nil {
+		return nil, fmt.Errorf("wfe: yaml: %w", err)
+	}
+	if err := validatePlaybook(&pb); err != nil {
+		return nil, err
+	}
+	return &pb, nil
+}
+
+// parseFile parses raw YAML as a playbook or as a DAG workflow.
+// Exactly one of the two results is non-nil.
+func parseFile(raw []byte) (*Workflow, *Playbook, error) {
+	isPlaybook, err := looksLikePlaybook(raw)
+	if err != nil {
+		return nil, nil, err
+	}
+	if isPlaybook {
+		pb, err := ParsePlaybook(raw)
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, pb, nil
+	}
+	wf, err := parseWorkflow(raw)
+	if err != nil {
+		return nil, nil, err
+	}
+	return wf, nil, nil
+}
+
+// looksLikePlaybook reports whether raw holds a playbook, i.e. has a
+// top-level `steps` key.
+func looksLikePlaybook(raw []byte) (bool, error) {
+	var probe struct {
+		Steps yaml.Node `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(raw, &probe); err != nil {
+		return false, fmt.Errorf("wfe: yaml: %w", err)
+	}
+	return !probe.Steps.IsZero(), nil
 }
 
 func validate(wf *Workflow) error {
@@ -172,4 +248,176 @@ func topoSort(jobs map[string]Job) []string {
 		placed[pick] = true
 	}
 	return order
+}
+
+// UnmarshalYAML implements yaml.Unmarshaler. It fills in the two
+// defaults a playbook may leave out: max_actions and instruct.
+func (p *Playbook) UnmarshalYAML(value *yaml.Node) error {
+	var raw struct {
+		Name       string         `yaml:"name"`
+		Args       []string       `yaml:"args"`
+		Goal       string         `yaml:"goal"`
+		MaxActions *int           `yaml:"max_actions"`
+		Instruct   *bool          `yaml:"instruct"`
+		Steps      []PlaybookStep `yaml:"steps"`
+	}
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+	p.Name = raw.Name
+	p.Args = raw.Args
+	p.Goal = raw.Goal
+	p.MaxActions = DefaultMaxActions
+	if raw.MaxActions != nil {
+		if *raw.MaxActions < 1 {
+			return fmt.Errorf("max_actions must be >= 1")
+		}
+		p.MaxActions = *raw.MaxActions
+	}
+	p.Instruct = true
+	if raw.Instruct != nil {
+		p.Instruct = *raw.Instruct
+	}
+	p.Steps = raw.Steps
+	return nil
+}
+
+// UnmarshalYAML implements yaml.Unmarshaler. A step is either a plain
+// string — shorthand for `run` — or a mapping.
+func (s *PlaybookStep) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind == yaml.ScalarNode {
+		var run string
+		if err := value.Decode(&run); err != nil {
+			return err
+		}
+		s.Run = run
+		return nil
+	}
+	var raw struct {
+		Run   string   `yaml:"run"`
+		Note  string   `yaml:"note"`
+		Allow []string `yaml:"allow"`
+		Max   *int     `yaml:"max"`
+	}
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+	s.Run = raw.Run
+	s.Note = raw.Note
+	s.Allow = raw.Allow
+	if raw.Max != nil {
+		if *raw.Max < 1 {
+			return fmt.Errorf("max must be >= 1")
+		}
+		s.Max = *raw.Max
+	}
+	return nil
+}
+
+func validatePlaybook(pb *Playbook) error {
+	if pb.Name == "" {
+		return fmt.Errorf("wfe: playbook name is required")
+	}
+	if len(pb.Steps) == 0 {
+		return fmt.Errorf("wfe: %s: steps is required (at least one)", pb.Name)
+	}
+	for i, step := range pb.Steps {
+		if strings.TrimSpace(step.Run) == "" {
+			return fmt.Errorf("wfe: %s: step %d: run is required", pb.Name, i+1)
+		}
+	}
+	return nil
+}
+
+// argRef matches an `${{ args.x }}` reference.
+var argRef = regexp.MustCompile(`\$\{\{\s*args\.([A-Za-z0-9_-]+)\s*\}\}`)
+
+// Bind expands `${{ args.x }}` in the playbook with the given values
+// and returns the bound playbook; the source playbook is left
+// untouched. An unknown argument — one the playbook does not declare,
+// or one no value was given for — is an error.
+func Bind(pb *Playbook, args map[string]string) (*Playbook, error) {
+	if pb == nil {
+		return nil, fmt.Errorf("wfe: playbook is nil")
+	}
+	declared := make(map[string]bool, len(pb.Args))
+	for _, a := range pb.Args {
+		declared[a] = true
+	}
+	given := make([]string, 0, len(args))
+	for name := range args {
+		given = append(given, name)
+	}
+	sort.Strings(given)
+	for _, name := range given {
+		if !declared[name] {
+			return nil, fmt.Errorf("wfe: %s: unknown argument %q (declared: %s)", pb.Name, name, describeArgs(pb.Args))
+		}
+	}
+	for _, a := range pb.Args {
+		if _, ok := args[a]; !ok {
+			return nil, fmt.Errorf("wfe: %s: missing argument %q", pb.Name, a)
+		}
+	}
+
+	out := &Playbook{
+		Name:       pb.Name,
+		Args:       append([]string(nil), pb.Args...),
+		Goal:       pb.Goal,
+		MaxActions: pb.MaxActions,
+		Instruct:   pb.Instruct,
+		Steps:      make([]PlaybookStep, len(pb.Steps)),
+	}
+	for i, step := range pb.Steps {
+		out.Steps[i] = PlaybookStep{
+			Run:  step.Run,
+			Note: step.Note,
+			Max:  step.Max,
+		}
+		if len(step.Allow) > 0 {
+			out.Steps[i].Allow = make([]string, len(step.Allow))
+			for j, a := range step.Allow {
+				out.Steps[i].Allow[j] = a
+			}
+		}
+	}
+	for _, text := range playbookTexts(out) {
+		for _, m := range argRef.FindAllStringSubmatch(text, -1) {
+			if !declared[m[1]] {
+				return nil, fmt.Errorf("wfe: %s: unknown argument %q (declared: %s)", pb.Name, m[1], describeArgs(pb.Args))
+			}
+		}
+	}
+
+	// EvalString resolves plain substitutions only; it never reaches
+	// for the runtime.
+	ec := ExprCtx{Args: args}
+	out.Goal = EvalString(out.Goal, ec, nil)
+	for i := range out.Steps {
+		out.Steps[i].Run = EvalString(out.Steps[i].Run, ec, nil)
+		out.Steps[i].Note = EvalString(out.Steps[i].Note, ec, nil)
+		for j, a := range out.Steps[i].Allow {
+			out.Steps[i].Allow[j] = EvalString(a, ec, nil)
+		}
+	}
+	return out, nil
+}
+
+// playbookTexts returns every string of a playbook that may hold an
+// expression.
+func playbookTexts(pb *Playbook) []string {
+	texts := []string{pb.Goal}
+	for _, step := range pb.Steps {
+		texts = append(texts, step.Run, step.Note)
+		texts = append(texts, step.Allow...)
+	}
+	return texts
+}
+
+// describeArgs renders the declared arguments for an error message.
+func describeArgs(args []string) string {
+	if len(args) == 0 {
+		return "none"
+	}
+	return strings.Join(args, ", ")
 }

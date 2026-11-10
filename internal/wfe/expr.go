@@ -10,6 +10,7 @@ import (
 // EvalString evaluates ${{ }} expressions in s. Pure function.
 // Supports:
 //   - ${{ env.X }}        → ec.Env["X"]
+//   - ${{ args.X }}       → ec.Args["X"]
 //   - ${{ event.X }}      → nested map lookup ec.Event["X"]
 //   - ${{ steps.ID.K }}   → ec.Steps["ID"]["K"]
 //   - ${{ needs.JOB.K }}  → ec.Needs["JOB"]["K"]
@@ -119,6 +120,8 @@ func evalOne(expr string, ec ExprCtx, rt Runtime) string {
 	switch parts[0] {
 	case "env":
 		return ec.Env[parts[1]]
+	case "args":
+		return ec.Args[parts[1]]
 	case "event":
 		return lookupMap(ec.Event, parts[1:])
 	case "steps":

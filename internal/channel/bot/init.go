@@ -37,7 +37,7 @@ func botBuilder(cfg *config.Config) (channel.Channel, error) {
 	if err != nil {
 		return nil, err
 	}
-	workflows, err := wfe.LoadDir(dir)
+	workflows, _, err := wfe.LoadDir(dir)
 	if err != nil || len(workflows) == 0 {
 		return nil, fmt.Errorf("no workflows found in %s", dir)
 	}

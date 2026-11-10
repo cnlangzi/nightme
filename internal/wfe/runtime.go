@@ -90,5 +90,6 @@ type ExprCtx struct {
 	Steps map[string]map[string]string
 	Needs map[string]map[string]string
 	Env   map[string]string
+	Args  map[string]string
 	Now   time.Time
 }

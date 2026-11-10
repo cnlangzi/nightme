@@ -2,6 +2,7 @@ package chatsession
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -26,6 +27,12 @@ type Work struct {
 	released bool
 	outcome  messages.Outcome
 	unsubs   []*unsubOnce
+	// anchor is the userMsgID the prompt-end event carries for
+	// this message. It equals msgID until the message is merged
+	// into a multi-message prompt batch: the prompt anchors on
+	// the batch's LAST message, so the earlier messages' anchors
+	// move there. Empty means "anchor on msgID".
+	anchor string
 }
 
 // Hold takes a hold on the outcome of msgID and returns the shared
@@ -78,6 +85,37 @@ func (w *Work) Outcome() messages.Outcome {
 	return w.outcome
 }
 
+// anchorID returns the userMsgID whose prompt-end event ends this
+// work. It is the message's own id until the message is merged into a
+// multi-message prompt batch, where the prompt anchors on the batch's
+// last message.
+func (w *Work) anchorID() string {
+	if w == nil {
+		return ""
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.anchor != "" {
+		return w.anchor
+	}
+	return w.msgID
+}
+
+// reanchor moves the work's prompt-end trigger to anchorID. A work
+// that already settled keeps its trigger — the settled message went
+// out, nothing is waiting for it anymore.
+func (w *Work) reanchor(anchorID string) {
+	if w == nil || anchorID == "" {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.released {
+		return
+	}
+	w.anchor = anchorID
+}
+
 // Release drops one hold. When the last hold goes away the settled
 // message is emitted once. Releasing more times than held is a
 // no-op.
@@ -115,15 +153,27 @@ func (cs *ChatSession) settle(msgID string, outcome messages.Outcome) {
 	delete(cs.works, msgID)
 	cs.workMu.Unlock()
 
-	em := cs.Emitter()
-	if em == nil {
-		return
-	}
 	if outcome.Status == "" {
 		outcome.Status = messages.OutcomeUnknown
 	}
 	if outcome.Summary == "" {
 		outcome.Summary = string(outcome.Status)
+	}
+	// Every IM channel drops the settled message — it exists for
+	// programs that drive nightme, not for humans. The log line is
+	// the only place a person can see WHEN a message really
+	// finished, which is what makes "the command said done but the
+	// agent was still working" visible in a local run.
+	slog.Info("chatsession: message settled",
+		"chat_id", cs.ChatID,
+		"message_id", msgID,
+		"status", string(outcome.Status),
+		"summary", outcome.Summary,
+	)
+
+	em := cs.Emitter()
+	if em == nil {
+		return
 	}
 	_ = em.Send(context.Background(), messages.OutboundMessage{
 		ChatID:  cs.ChatID,
@@ -141,6 +191,10 @@ func (cs *ChatSession) settle(msgID string, outcome messages.Outcome) {
 // The hold is released when the turn ends. A turn that never ends
 // leaves the hold open — the caller waiting on it supplies its own
 // timeout.
+//
+// The trigger is the work's anchor, not msgID itself: a message
+// merged into a multi-message prompt batch ends with the batch, and
+// the prompt-end event carries the batch's anchor id.
 func (cs *ChatSession) HoldUntilPromptEnd(msgID string) *Work {
 	w := cs.Hold(msgID)
 	if w == nil {
@@ -156,7 +210,7 @@ func (cs *ChatSession) HoldUntilPromptEnd(msgID string) *Work {
 	w.mu.Unlock()
 
 	u.set(bus.Subscribe(func(e PromptEndedEvent) bool {
-		if e.UserMsgID != msgID {
+		if e.UserMsgID != w.anchorID() {
 			return false
 		}
 		u.call()
@@ -165,6 +219,20 @@ func (cs *ChatSession) HoldUntilPromptEnd(msgID string) *Work {
 		return false
 	}))
 	return w
+}
+
+// reanchorWork moves the work for msgID onto a different prompt-end
+// trigger. Used when a message is merged into a multi-message prompt
+// batch: the prompt anchors on the batch's last message, so the
+// earlier messages must end with it.
+func (cs *ChatSession) reanchorWork(msgID, anchorID string) {
+	if cs == nil || msgID == "" || anchorID == "" || msgID == anchorID {
+		return
+	}
+	cs.workMu.Lock()
+	w := cs.works[msgID]
+	cs.workMu.Unlock()
+	w.reanchor(anchorID)
 }
 
 // outcomeForPromptEnd maps a prompt-end reason onto an outcome.

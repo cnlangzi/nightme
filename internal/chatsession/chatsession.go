@@ -1134,8 +1134,19 @@ func (cs *ChatSession) QueueUserMessage(msg Message) error {
 	// The queued message becomes an agent turn, so its outcome is
 	// the turn's verdict: hold the message until the turn carrying
 	// it ends.
-	cs.HoldUntilPromptEnd(msg.ID)
+	w := cs.HoldUntilPromptEnd(msg.ID)
 	if err := cs.queue.Push(msg); err != nil {
+		// The message never reaches an agent turn — no prompt
+		// will end for it. Settle it now instead of leaving the
+		// hold open forever.
+		if w != nil {
+			w.Report(messages.Outcome{
+				Status:  messages.OutcomeFailed,
+				Summary: "input queue full",
+				Data:    map[string]string{"reason": "queue_full"},
+			})
+			w.Release()
+		}
 		return err
 	}
 	_ = cs.TryFlush()
@@ -1327,6 +1338,20 @@ func (cs *ChatSession) TryFlush() error {
 	// is the same set — it's later read by writebackMessageState
 	// (and by the AS-side readpump) but never mutated.
 	p := cs.buildPromptLocked(batch)
+
+	// A multi-message batch is ONE agent turn, and the turn's
+	// prompt-end event carries the batch's anchor — the LAST
+	// message (buildPromptLocked). Move the earlier messages'
+	// prompt-end triggers there so every message of the batch
+	// settles when the turn ends instead of only the last one.
+	//
+	// Done BEFORE Submit: the bridge can answer and the readpump
+	// can end the prompt while Submit is still returning, and the
+	// prompt-end event must find every message of the batch
+	// already anchored.
+	for i := 0; i < len(batch)-1; i++ {
+		cs.reanchorWork(batch[i].ID, p.LastMessageID)
+	}
 
 	// Pre-Submit re-check under cs.mu. Between the snapshot of
 	// `as` above and the Submit call below, the selected AS can

@@ -2,6 +2,7 @@ package chatsession
 
 import (
 	"context"
+	"strconv"
 	"sync"
 	"testing"
 
@@ -177,6 +178,78 @@ func TestQueueUserMessage_HoldsUntilPromptEnd(t *testing.T) {
 	}
 	if got[0].Outcome.Status != messages.OutcomeOK {
 		t.Errorf("settled status = %s, want ok", got[0].Outcome.Status)
+	}
+}
+
+// TestQueueUserMessage_BatchedMessagesAllSettle checks the merged
+// prompt batch: the prompt anchors on the batch's LAST message, so
+// every earlier message of the batch must settle with it. Without
+// the re-anchor the earlier messages hold forever.
+func TestQueueUserMessage_BatchedMessagesAllSettle(t *testing.T) {
+	cs, em := newSettleSession(t)
+
+	if err := cs.QueueUserMessage(Message{ID: "m1", ChatID: cs.ID}); err != nil {
+		t.Fatalf("QueueUserMessage m1: %v", err)
+	}
+	if err := cs.QueueUserMessage(Message{ID: "m2", ChatID: cs.ID}); err != nil {
+		t.Fatalf("QueueUserMessage m2: %v", err)
+	}
+
+	// The batch is one prompt; its anchor is the last message.
+	cs.reanchorWork("m1", "m2")
+
+	cs.PromptEndBus.Publish(PromptEndedEvent{UserMsgID: "m2", Reason: agent.PromptEndClean})
+
+	got := em.settled()
+	if len(got) != 2 {
+		t.Fatalf("settled emitted %d times, want 2 (one per inbound message)", len(got))
+	}
+	seen := map[string]bool{}
+	for _, g := range got {
+		seen[g.ReplyTo] = true
+		if g.Outcome == nil || g.Outcome.Status != messages.OutcomeOK {
+			t.Errorf("settled %q outcome = %+v, want ok", g.ReplyTo, g.Outcome)
+		}
+	}
+	if !seen["m1"] || !seen["m2"] {
+		t.Errorf("settled messages = %v, want both m1 and m2", seen)
+	}
+}
+
+// TestQueueUserMessage_QueueFullSettles checks that a message the
+// queue rejects settles instead of holding forever — no turn will
+// ever end for it.
+func TestQueueUserMessage_QueueFullSettles(t *testing.T) {
+	cs, em := newSettleSession(t)
+
+	for i := 0; i < QueueMaxMsgs; i++ {
+		id := "m" + strconv.Itoa(i)
+		if err := cs.QueueUserMessage(Message{ID: id, ChatID: cs.ID}); err != nil {
+			t.Fatalf("QueueUserMessage #%d: %v", i, err)
+		}
+	}
+
+	err := cs.QueueUserMessage(Message{ID: "overflow", ChatID: cs.ID})
+	if err != ErrQueueFull {
+		t.Fatalf("QueueUserMessage on a full queue = %v; want ErrQueueFull", err)
+	}
+
+	got := em.settled()
+	if len(got) != 1 {
+		t.Fatalf("settled emitted %d times, want 1", len(got))
+	}
+	if got[0].ReplyTo != "overflow" {
+		t.Errorf("settled ReplyTo = %q, want overflow", got[0].ReplyTo)
+	}
+	if got[0].Outcome == nil || got[0].Outcome.Status != messages.OutcomeFailed {
+		t.Errorf("settled outcome = %+v, want failed", got[0].Outcome)
+	}
+
+	cs.workMu.Lock()
+	pending := len(cs.works)
+	cs.workMu.Unlock()
+	if pending != QueueMaxMsgs {
+		t.Errorf("pending works = %d, want %d — the rejected message left a hold behind", pending, QueueMaxMsgs)
 	}
 }
 

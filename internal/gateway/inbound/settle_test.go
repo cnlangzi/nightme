@@ -2,6 +2,7 @@ package inbound
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 
@@ -44,6 +45,17 @@ func (c *settleCommander) Dispatch(ctx context.Context, _ command.RuntimeService
 }
 
 func (c *settleCommander) Match(_ string) (string, bool) { return "", true }
+
+// failingSettleCommander is a command whose Handle fails.
+type failingSettleCommander struct {
+	err error
+}
+
+func (c *failingSettleCommander) Dispatch(_ context.Context, _ command.RuntimeServices, _ *chatsession.Manager, _ *chatsession.ChatSession, _ command.SlashInput) (*command.SlashOutput, bool, error) {
+	return nil, true, c.err
+}
+
+func (c *failingSettleCommander) Match(_ string) (string, bool) { return "", true }
 
 // runSettleRouter drives one inbound through the router and waits
 // for the async command dispatch to finish.
@@ -146,5 +158,29 @@ func TestRunCommand_SettledCarriesReportedOutcome(t *testing.T) {
 	}
 	if settled.Outcome.Data["branch"] != "feat/x" {
 		t.Errorf("settled data = %v, want branch=feat/x", settled.Outcome.Data)
+	}
+}
+
+// TestRunCommand_SettledFailedWhenTheCommandErrors checks that a
+// command whose Handle fails settles as failed — the consumer has to
+// be able to tell a broken command from a completed one.
+func TestRunCommand_SettledFailedWhenTheCommandErrors(t *testing.T) {
+	em := &settleEmitter{}
+	out := runSettleRouter(t, &failingSettleCommander{err: errors.New("boom")}, em)
+
+	var settled *messages.OutboundMessage
+	for i := range out {
+		if out[i].Kind == messages.OutMessageSettled {
+			settled = &out[i]
+		}
+	}
+	if settled == nil {
+		t.Fatal("no settled message")
+	}
+	if settled.Outcome == nil || settled.Outcome.Status != messages.OutcomeFailed {
+		t.Fatalf("settled outcome = %+v, want failed", settled.Outcome)
+	}
+	if settled.Outcome.Summary != "boom" {
+		t.Errorf("settled summary = %q, want %q", settled.Outcome.Summary, "boom")
 	}
 }

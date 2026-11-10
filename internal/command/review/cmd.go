@@ -411,6 +411,21 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 	sendBlocks := as.SendBlocks // close over SendBlocks for Inject
 	emitter := cs.Emitter()
 
+	// The review outlives the command: the command returns as soon
+	// as the goroutine is launched, but the review itself runs for
+	// minutes and then feeds the findings back into the chat's
+	// agent as a turn of its own. Take a hold on the message's
+	// outcome so the settled signal waits for the whole thing
+	// instead of reporting the command as done while the agent
+	// work is still running.
+	//
+	// The hold is taken HERE, not inside the goroutine: the
+	// dispatcher's own hold on the same message is released when
+	// Handle returns, and a hold taken later would arrive after
+	// that release — the message would settle as unknown before
+	// the review even started.
+	work := cs.Hold(replyTo)
+
 	// v7: /review is fully async. Handle returns immediately
 	// after launching a goroutine that does the actual review
 	// work (review sessions + distribute findings). The
@@ -449,6 +464,12 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 	go func() {
 		revCtx, cancel := context.WithTimeout(cs.Context(), timeouts.Review)
 		defer cancel()
+
+		// The review's own hold: released when the goroutine
+		// returns, so the message settles only after the review
+		// work AND the injected turn it hands the findings to are
+		// both done.
+		defer work.Release()
 
 		// The chat stops counting as "running a review" once the
 		// review itself is done — the delivery below is only the
@@ -566,11 +587,24 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 		// before /review), and the chat channel renders the fix
 		// replies as a separate rolling card instead of folding
 		// them into the /review placeholder.
+		//
+		// The injected turn is agent work of its own, and it can
+		// run for a long time after the review is done. Hold the
+		// message until that turn ends — the turn's prompt-end
+		// carries replyTo (the WithReplyTo override becomes the
+		// prompt's anchor), so the hold releases on exactly that
+		// event.
+		//
+		// A failed injection means no turn will run, so the hold
+		// is released right away instead of waiting for a turn
+		// that never comes.
+		injectWork := cs.HoldUntilPromptEnd(replyTo)
 		if err := sendBlocks(revCtx, blocks, agentsession.WithReplyTo(replyTo)); err != nil {
 			slog.Default().Warn("/review: AS inject failed",
 				"agent", runnerName,
 				"err", err,
 			)
+			injectWork.Release()
 		}
 
 		// 2) Send to the channel directly — user sees the
@@ -691,11 +725,17 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 	sendBlocks := as.SendBlocks // close over SendBlocks for Inject
 	emitter := cs.Emitter()
 
+	// The continuation outlives the command exactly like a plain
+	// review does — same hold, same reason. See handleReview.
+	work := cs.Hold(replyTo)
+
 	// The continuation is a review run like any other: the chat
 	// stays marked as busy until the continuation itself is done.
 	go func() {
 		revCtx, cancel := context.WithTimeout(cs.Context(), timeouts.Review)
 		defer cancel()
+
+		defer work.Release()
 
 		// The chat stops counting as "running a review" once the
 		// continuation itself is done — the delivery below is only
@@ -764,11 +804,16 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 		formatted := agent.FormatReviewMessage(workspace, runnerName, result.Text)
 		blocks := []agent.ContentBlock{{Type: agent.ContentText, Text: formatted}}
 
+		// Same contract as a plain review: the injected turn is
+		// agent work of its own, so the message settles when that
+		// turn ends — and immediately when the injection fails.
+		injectWork := cs.HoldUntilPromptEnd(replyTo)
 		if err := sendBlocks(revCtx, blocks, agentsession.WithReplyTo(replyTo)); err != nil {
 			slog.Default().Warn("/review --continue: AS inject failed",
 				"agent", runnerName,
 				"err", err,
 			)
+			injectWork.Release()
 		}
 
 		if emitter == nil {

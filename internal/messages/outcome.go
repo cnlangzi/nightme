@@ -109,9 +109,6 @@ func Merge(a, b Outcome) Outcome {
 	return out
 }
 
-// Merge folds b into o and returns the combined outcome.
-func (o Outcome) Merge(b Outcome) Outcome { return Merge(o, b) }
-
 // IsReported reports whether the outcome carries an actual verdict
 // (anything other than unknown).
 func (o Outcome) IsReported() bool {

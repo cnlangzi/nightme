@@ -105,7 +105,7 @@ func (b *Bot) Name() string { return "bot" }
 // trigger manager.
 func (b *Bot) Start(ctx context.Context) error {
 	// 1. load workflows
-	wfs, err := wfe.LoadDir(b.cfg.WorkflowsDir)
+	wfs, _, err := wfe.LoadDir(b.cfg.WorkflowsDir)
 	if err != nil {
 		return fmt.Errorf("bot: load workflows: %w", err)
 	}

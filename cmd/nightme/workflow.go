@@ -56,7 +56,7 @@ func loadWorkflows() ([]*wfe.Workflow, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	wfs, err := wfe.LoadDir(dir)
+	wfs, _, err := wfe.LoadDir(dir)
 	if err != nil {
 		return nil, dir, err
 	}

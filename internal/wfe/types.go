@@ -146,3 +146,79 @@ const (
 	StatusFailed    Status = "failed"
 	StatusCancelled Status = "cancelled"
 )
+
+// DefaultMaxActions is the action budget of a playbook that does not
+// set max_actions.
+const DefaultMaxActions = 30
+
+// Playbook is a human-written, ordered list of steps that bounds
+// what the agent loop may do. It carries no workspace and no
+// trigger: the working directory comes from the chat that starts
+// the run.
+type Playbook struct {
+	Name       string         `yaml:"name" json:"name"`
+	Args       []string       `yaml:"args" json:"args"`
+	Goal       string         `yaml:"goal" json:"goal"`
+	MaxActions int            `yaml:"max_actions" json:"max_actions"`
+	Instruct   bool           `yaml:"instruct" json:"instruct"`
+	Steps      []PlaybookStep `yaml:"steps" json:"steps"`
+}
+
+// PlaybookStep is one step of a playbook. Run is the command the
+// step performs; Allow lists the extra commands the agent may use
+// inside the step; Note explains when to use them; Max caps the
+// number of actions the step may take (0 means no cap of its own).
+type PlaybookStep struct {
+	Run   string   `yaml:"run" json:"run"`
+	Note  string   `yaml:"note" json:"note"`
+	Allow []string `yaml:"allow" json:"allow"`
+	Max   int      `yaml:"max" json:"max"`
+}
+
+// OutcomeStatus is the machine-readable verdict of one action.
+type OutcomeStatus string
+
+const (
+	OutcomeOK         OutcomeStatus = "ok"
+	OutcomeNoop       OutcomeStatus = "noop"
+	OutcomeIncomplete OutcomeStatus = "incomplete"
+	OutcomeFailed     OutcomeStatus = "failed"
+	OutcomeCancelled  OutcomeStatus = "cancelled"
+	OutcomeTimeout    OutcomeStatus = "timeout"
+	OutcomeUnknown    OutcomeStatus = "unknown"
+)
+
+// Outcome is the structured result of one action. It mirrors
+// messages.Outcome field for field; wfe keeps its own copy so the
+// engine stays independent of the message layer.
+type Outcome struct {
+	Status  OutcomeStatus     `json:"status"`
+	Summary string            `json:"summary"`
+	Data    map[string]string `json:"data,omitempty"`
+}
+
+// succeeded reports whether the outcome means the work was done.
+func (o Outcome) succeeded() bool {
+	return o.Status == OutcomeOK || o.Status == OutcomeNoop
+}
+
+// ActionKind is the kind of action recorded in the history.
+type ActionKind string
+
+const (
+	// ActionKindRun is a command from one of the playbook's steps.
+	ActionKindRun ActionKind = "run"
+	// ActionKindInstruct is a free-form prompt to the work agent.
+	ActionKindInstruct ActionKind = "instruct"
+)
+
+// ActionRecord is one action the run has taken. StepIndex points at
+// the playbook step the action served; only a run counts against a
+// step, so an instruction carries -1.
+type ActionRecord struct {
+	Kind      ActionKind `json:"kind"`
+	Command   string     `json:"command"`
+	StepIndex int        `json:"step_index"`
+	Outcome   Outcome    `json:"outcome"`
+	At        time.Time  `json:"at"`
+}

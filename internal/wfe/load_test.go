@@ -179,7 +179,7 @@ jobs:
     steps: [{run: echo}]
 `), 0644)
 	}
-	_, err := LoadDir(dir)
+	_, _, err := LoadDir(dir)
 	if err == nil || !strings.Contains(err.Error(), "duplicate") {
 		t.Errorf("expected duplicate-name error, got %v", err)
 	}

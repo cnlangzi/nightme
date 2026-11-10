@@ -4,6 +4,8 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // RuntimeServices aggregates the dependencies a slash command
@@ -62,6 +64,12 @@ type Deps struct {
 	// imports command for SlashCommandFactory). The gtw
 	// package's builder closure type-asserts.
 	GTWExt any
+	// ChatSender posts a text into any chat on any channel.
+	// Provided by the runtime; nil when the daemon has no
+	// runtime wiring for it. A service that reports progress
+	// to the chat a run started in uses this instead of
+	// reaching for a chatsession.Manager.
+	ChatSender messages.ChatSender
 }
 
 var (

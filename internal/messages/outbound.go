@@ -457,3 +457,18 @@ func (s HeartbeatSnapshot) Empty() bool {
 type Emitter interface {
 	Send(ctx context.Context, msg OutboundMessage) error
 }
+
+// ChatSender posts a text into a chat on any channel.
+//
+// It is the daemon-wide counterpart to channel.Channel.Send: the
+// sender does not know which channel owns the chat, so the chat is
+// resolved by the runtime. A background service that reports to the
+// chat a run started in uses this; a service that talks to its own
+// chat uses the Emitter.
+//
+// The interface lives here — next to Emitter — so a consumer can
+// depend on it without importing chatsession or the runtime. The
+// implementation lives in internal/runtime.
+type ChatSender interface {
+	Send(ctx context.Context, chatID, text string) error
+}

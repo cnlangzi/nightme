@@ -15,6 +15,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
+	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/nightmedir"
 	"github.com/cnlangzi/nightme/internal/pathutil"
 )
@@ -98,8 +99,9 @@ func RunNewDraft(
 		deps.Now = timeNow
 	}
 	if messageID == "" {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			"❌ internal: missing message id; /gtw new did not enqueue"), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+			"❌ internal: missing message id; /gtw new did not enqueue",
+			command.FailedOutcome("error", "the draft request could not be queued")), nil
 	}
 	cwd := cs.SelectedCwd()
 
@@ -108,29 +110,41 @@ func RunNewDraft(
 	// archive turn.
 	repoRoot, err := RepoRoot(ctx, cwd, deps.Git)
 	if err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			"❌ Not in a git repository. Run /cwd <inside a repo> first."), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+			"❌ Not in a git repository. Run /cwd <inside a repo> first.",
+			command.FailedOutcome("not_a_repo", "the workspace is not inside a git repository")), nil
 	}
 	if _, _, _, err := resolveProvider(ctx, Context{RepoRoot: repoRoot, Worktree: cwd}, deps); err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID, "❌ "+err.Error()), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, "❌ "+err.Error(),
+			command.FailedOutcome("provider_error", "the git host could not be resolved")), nil
 	}
 
 	draftDir, err := issueDraftDir(chatID)
 	if err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ prepare issue drafts: %v", err)), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+			fmt.Sprintf("❌ prepare issue drafts: %v", err),
+			command.FailedOutcome("error", "the draft directory could not be prepared")), nil
 	}
 	if err := resetIssueDrafts(draftDir); err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ prepare issue drafts: %v", err)), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+			fmt.Sprintf("❌ prepare issue drafts: %v", err),
+			command.FailedOutcome("error", "the draft directory could not be prepared")), nil
 	}
 
 	lang := resolveLanguage(ctx, cfg, cwd, deps.Git)
 	blocks := []agent.ContentBlock{{Type: agent.ContentText, Text: renderNewIssuePrompt(draftDir, lang)}}
 	if err := dispatchIssueToChatSession(ctx, cs, deps.Now, chatID, messageID, blocks); err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ dispatch to agent: %v\nhint: /gtw new archives the discussion held with the current agent", err)), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+			fmt.Sprintf("❌ dispatch to agent: %v\nhint: /gtw new archives the discussion held with the current agent", err),
+			command.FailedOutcome("error", "the draft request did not reach the agent")), nil
 	}
+	// The prompt is queued — the agent's own turn verdict merges
+	// into this outcome when the turn ends.
+	reportOutcome(ctx, messages.Outcome{
+		Status:  messages.OutcomeOK,
+		Summary: "the agent was asked to draft the issues",
+		Data:    map[string]string{"repo_root": repoRoot},
+	})
 	return &Result{Consumed: true}, nil
 }
 
@@ -147,20 +161,22 @@ func RunNewCreate(
 ) (*Result, error) {
 	draftDir, err := issueDraftDir(chatID)
 	if err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ locate issue drafts: %v", err)), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+			fmt.Sprintf("❌ locate issue drafts: %v", err),
+			command.FailedOutcome("error", "the draft directory could not be located")), nil
 	}
 	cwd := cs.SelectedCwd()
 	repoRoot, err := RepoRoot(ctx, cwd, deps.Git)
 	if err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			"❌ Not in a git repository. Run /cwd <inside a repo> first."), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+			"❌ Not in a git repository. Run /cwd <inside a repo> first.",
+			command.FailedOutcome("not_a_repo", "the workspace is not inside a git repository")), nil
 	}
 	resolve := func() (GitProvider, string, string, error) {
 		return resolveProvider(ctx, Context{RepoRoot: repoRoot, Worktree: cwd}, deps)
 	}
-	return reply(ctx, cs.Emitter(), chatID, messageID,
-		createIssuesFromDrafts(ctx, draftDir, resolve)), nil
+	card, outcome := createIssuesFromDrafts(ctx, draftDir, resolve)
+	return replyOutcome(ctx, cs.Emitter(), chatID, messageID, card, outcome), nil
 }
 
 // issueDraft is one pending draft file of the chat's draft set.
@@ -186,28 +202,34 @@ type issueDraftSet struct {
 // its NN.created record, so after a failure `/gtw new -y` creates
 // only the rest, and the agent — which never sees this reply — can
 // tell from the directory which drafts already are issues.
-func createIssuesFromDrafts(ctx context.Context, dir string, resolve func() (GitProvider, string, string, error)) string {
+func createIssuesFromDrafts(ctx context.Context, dir string, resolve func() (GitProvider, string, string, error)) (string, messages.Outcome) {
 	set, err := loadIssueDrafts(dir)
 	if err != nil {
-		return fmt.Sprintf("❌ read issue drafts %s: %v", dir, err)
+		return fmt.Sprintf("❌ read issue drafts %s: %v", dir, err),
+			command.FailedOutcome("error", "the issue drafts could not be read")
 	}
 	if len(set.pending) == 0 {
 		if len(set.created) > 0 {
 			return "✨ every issue draft of this chat is already an issue\n" +
-				"→ issues: " + joinIssueNumbers(set.created) + "\n" +
-				"↳ `/gtw new` to draft from a new discussion"
+					"→ issues: " + joinIssueNumbers(set.created) + "\n" +
+					"↳ `/gtw new` to draft from a new discussion",
+				command.NoopOutcome("every issue draft is already an issue",
+					map[string]string{"issues": joinIssueNumbers(set.created)})
 		}
 		return "❌ no issue draft for this chat\n" +
-			"→ drafts: " + dir + "\n" +
-			"↳ if the agent showed drafts in chat, ask it to write them into that directory · otherwise run `/gtw new`"
+				"→ drafts: " + dir + "\n" +
+				"↳ if the agent showed drafts in chat, ask it to write them into that directory · otherwise run `/gtw new`",
+			command.FailedOutcome("no_drafts", "the chat has no issue draft")
 	}
 	if err := validateIssueDrafts(set); err != nil {
-		return fmt.Sprintf("❌ invalid issue draft %v\n→ drafts: %s\n↳ ask the agent to fix the draft, then `/gtw new -y` again", err, dir)
+		return fmt.Sprintf("❌ invalid issue draft %v\n→ drafts: %s\n↳ ask the agent to fix the draft, then `/gtw new -y` again", err, dir),
+			command.FailedOutcome("invalid_draft", "an issue draft is not usable")
 	}
 
 	provider, owner, repo, err := resolve()
 	if err != nil {
-		return "❌ " + err.Error()
+		return "❌ " + err.Error(),
+			command.FailedOutcome("provider_error", "the git host could not be resolved")
 	}
 
 	numbers := maps.Clone(set.created)
@@ -217,18 +239,58 @@ func createIssuesFromDrafts(ctx context.Context, dir string, resolve func() (Git
 		title, body, _ := parseIssueDraft(resolveIssueRefs(d.raw, numbers))
 		issue, err := provider.CreateIssue(ctx, owner, repo, title, appendIssueFooter(body))
 		if err != nil {
-			return renderIssueCreateFailure(owner, repo, opened, "create issue from "+d.name(), err, dir, kept)
+			return renderIssueCreateFailure(owner, repo, opened, "create issue from "+d.name(), err, dir, kept),
+				issueCreateOutcome(opened, owner, repo, kept)
 		}
 		opened = append(opened, issue)
 		numbers[d.key] = issue.ID
 		if err := recordIssueCreated(dir, d, issue); err != nil {
-			return renderIssueCreateFailure(owner, repo, opened, fmt.Sprintf("record #%d for %s", issue.ID, d.name()), err, dir, kept-1)
+			return renderIssueCreateFailure(owner, repo, opened, fmt.Sprintf("record #%d for %s", issue.ID, d.name()), err, dir, kept-1),
+				issueCreateOutcome(opened, owner, repo, kept-1)
 		}
 	}
 	if len(opened) == 1 {
-		return renderIssueOpenedCard(owner, repo, opened[0])
+		return renderIssueOpenedCard(owner, repo, opened[0]),
+			issueCreateOutcome(opened, owner, repo, 0)
 	}
-	return renderIssuesOpenedCard(owner, repo, opened)
+	return renderIssuesOpenedCard(owner, repo, opened),
+		issueCreateOutcome(opened, owner, repo, 0)
+}
+
+// issueCreateOutcome is the outcome of one /gtw new -y run: the
+// issues it opened, and whether the run finished them all.
+//
+// Nothing opened means the run failed; some but not all means it
+// stopped half-way — the remaining drafts are still on disk and
+// `/gtw new -y` creates the rest.
+func issueCreateOutcome(opened []*Issue, owner, repo string, kept int) messages.Outcome {
+	numbers := make([]string, 0, len(opened))
+	for _, issue := range opened {
+		numbers = append(numbers, fmt.Sprintf("%d", issue.ID))
+	}
+	data := map[string]string{"repo": owner + "/" + repo}
+	if len(numbers) > 0 {
+		data["issues"] = strings.Join(numbers, ",")
+	}
+	if kept > 0 {
+		data["kept"] = fmt.Sprintf("%d", kept)
+	}
+	switch {
+	case len(opened) == 0:
+		return command.FailedOutcomeData("error", "no issue could be created", data)
+	case kept > 0:
+		return messages.Outcome{
+			Status:  messages.OutcomeIncomplete,
+			Summary: fmt.Sprintf("%d of the issues were opened", len(opened)),
+			Data:    data,
+		}
+	default:
+		return messages.Outcome{
+			Status:  messages.OutcomeOK,
+			Summary: fmt.Sprintf("opened %d issue(s)", len(opened)),
+			Data:    data,
+		}
+	}
 }
 
 // recordIssueCreated replaces draft d with its NN.created record.

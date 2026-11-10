@@ -37,6 +37,7 @@ import (
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // loadDispatchContext returns the Context for /gtw commit,
@@ -52,22 +53,37 @@ func loadDispatchContext(
 ) (Context, *Result) {
 	cwd := cs.SelectedCwd()
 	if cwd == "" {
-		return Context{}, reply(ctx, cs.Emitter(), chatID, messageID,
-			"❌ no active workspace. Send /cwd <path> first.")
+		return Context{}, replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+			"❌ no active workspace. Send /cwd <path> first.",
+			messages.Outcome{
+				Status:  messages.OutcomeFailed,
+				Summary: "no active workspace",
+				Data:    map[string]string{"reason": "no_cwd"},
+			})
 	}
 
 	c, err := ReadGTWYml(cwd)
 	if err == nil {
 		// yml-present: validate and return.
 		if c.Worktree == "" || c.Branch == "" || c.RepoRoot == "" {
-			return Context{}, reply(ctx, cs.Emitter(), chatID, messageID,
-				"❌ .nightme/gtw.yml is malformed (worktree/branch/repoRoot required)")
+			return Context{}, replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+				"❌ .nightme/gtw.yml is malformed (worktree/branch/repoRoot required)",
+				messages.Outcome{
+					Status:  messages.OutcomeFailed,
+					Summary: "the gtw state file is malformed",
+					Data:    map[string]string{"reason": "bad_state"},
+				})
 		}
 		return c, nil
 	}
 	if !os.IsNotExist(err) {
-		return Context{}, reply(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ failed to read .nightme/gtw.yml: %v", err))
+		return Context{}, replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+			fmt.Sprintf("❌ failed to read .nightme/gtw.yml: %v", err),
+			messages.Outcome{
+				Status:  messages.OutcomeFailed,
+				Summary: "the gtw state file could not be read",
+				Data:    map[string]string{"reason": "bad_state"},
+			})
 	}
 
 	// yml-absent: derive from git. This branch lets /gtw commit,
@@ -77,19 +93,34 @@ func loadDispatchContext(
 	// the two pieces of state we can't otherwise guess.
 	repoRootOut, _, err := deps.Git.Run(ctx, cwd, "rev-parse", "--show-toplevel")
 	if err != nil {
-		return Context{}, reply(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ %s is not inside a git repository", cwd))
+		return Context{}, replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+			fmt.Sprintf("❌ %s is not inside a git repository", cwd),
+			messages.Outcome{
+				Status:  messages.OutcomeFailed,
+				Summary: "the workspace is not inside a git repository",
+				Data:    map[string]string{"reason": "not_a_repo"},
+			})
 	}
 	branchOut, _, err := deps.Git.Run(ctx, cwd, "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil {
-		return Context{}, reply(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ cannot determine current branch in %s: %v", cwd, err))
+		return Context{}, replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+			fmt.Sprintf("❌ cannot determine current branch in %s: %v", cwd, err),
+			messages.Outcome{
+				Status:  messages.OutcomeFailed,
+				Summary: "the current branch could not be determined",
+				Data:    map[string]string{"reason": "error"},
+			})
 	}
 	branch := strings.TrimSpace(branchOut)
 	if branch == "" || branch == "HEAD" {
 		// detached HEAD — refuse rather than guess a PR target.
-		return Context{}, reply(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ %s is on a detached HEAD; checkout a named branch first", cwd))
+		return Context{}, replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+			fmt.Sprintf("❌ %s is on a detached HEAD; checkout a named branch first", cwd),
+			messages.Outcome{
+				Status:  messages.OutcomeFailed,
+				Summary: "the workspace is on a detached HEAD",
+				Data:    map[string]string{"reason": "detached"},
+			})
 	}
 	return Context{
 		Mode:     ModeLocal,

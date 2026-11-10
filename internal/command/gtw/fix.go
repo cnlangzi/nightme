@@ -124,14 +124,16 @@ func RunFix(
 		deps.Now = timeNow
 	}
 	if len(args) < 1 {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			"Usage: /gtw fix <issue-id>  |  /gtw fix --name <branch>"), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+			"Usage: /gtw fix <issue-id>  |  /gtw fix --name <branch>",
+			command.FailedOutcome("usage", "no issue id or branch name was given")), nil
 	}
 
 	// --- preflight: SelectedCwd must be set for both modes --------
 	if cs == nil || cs.SelectedCwd() == "" {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			"❌ "+command.NoActiveCwdReply), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+			"❌ "+command.NoActiveCwdReply,
+			command.FailedOutcome("no_cwd", "the command needs an active workspace")), nil
 	}
 	// --- preflight: this directory must not already be a fix worktree ---
 	// gtw is per-directory: every directory is its own island.
@@ -149,8 +151,9 @@ func RunFix(
 	// users with stale worktree paths run `git worktree
 	// remove --force <path>` or `/gtw close` manually.
 	if _, err := os.Stat(pathutil.Join(cs.SelectedCwd(), nightmedir.DirName, gtwYmlName)); err == nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			"⚠️ Already inside a /gtw fix. Finish or cancel it first."), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+			"⚠️ Already inside a /gtw fix. Finish or cancel it first.",
+			command.FailedOutcome("already_active", "the workspace is already inside a /gtw fix")), nil
 	}
 
 	switch mode {
@@ -199,7 +202,8 @@ func runFixRemote(
 ) (*Result, error) {
 	issueID, err := parseIssueID(rawID)
 	if err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID, fmt.Sprintf("❌ %v", err)), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, fmt.Sprintf("❌ %v", err),
+			command.FailedOutcome("invalid_issue", "the issue id is not valid")), nil
 	}
 
 	// F-XX: translate the boolean yes flag into the dispatch
@@ -223,13 +227,15 @@ func runFixRemote(
 	// --- locate repo + remote (§5.2.② prep) -----------------------
 	repoRoot, err := RepoRoot(ctx, cs.SelectedCwd(), deps.Git)
 	if err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			"❌ Not in a git repository. Run /cwd <inside a repo> first."), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+			"❌ Not in a git repository. Run /cwd <inside a repo> first.",
+			command.FailedOutcome("not_a_repo", "the workspace is not inside a git repository")), nil
 	}
 	remoteURL, err := RemoteOriginURL(ctx, repoRoot, deps.Git)
 	if err != nil || remoteURL == "" {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			"❌ No `origin` remote. Add one with `git remote add origin <url>`."), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+			"❌ No `origin` remote. Add one with `git remote add origin <url>`.",
+			command.FailedOutcome("no_remote", "the repository has no origin remote")), nil
 	}
 	// The worktree doesn't exist yet at this point — runFixRemote
 	// runs BEFORE WorktreeAdd so we can use provider hints to name
@@ -248,39 +254,47 @@ func runFixRemote(
 		switch {
 		case errors.Is(err, ErrInvalidRemoteURL):
 			if redacted == "" {
-				return reply(ctx, cs.Emitter(), chatID, messageID,
-					"❌ 无效的 remote URL（凭证已脱敏）\n  Expected: https://github.com/<owner>/<repo>.git, git@github.com:<owner>/<repo>.git, ssh://git@<host>/path, git://<host>/path, etc."), nil
+				return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+					"❌ 无效的 remote URL（凭证已脱敏）\n  Expected: https://github.com/<owner>/<repo>.git, git@github.com:<owner>/<repo>.git, ssh://git@<host>/path, git://<host>/path, etc.",
+					command.FailedOutcome("provider_error", "the remote URL is not valid")), nil
 			}
-			return reply(ctx, cs.Emitter(), chatID, messageID,
-				fmt.Sprintf("❌ 无效的 remote URL: %s\n  Expected: https://github.com/<owner>/<repo>.git, git@github.com:<owner>/<repo>.git, ssh://git@<host>/path, git://<host>/path, etc.", redacted)), nil
+			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+				fmt.Sprintf("❌ 无效的 remote URL: %s\n  Expected: https://github.com/<owner>/<repo>.git, git@github.com:<owner>/<repo>.git, ssh://git@<host>/path, git://<host>/path, etc.", redacted),
+				command.FailedOutcome("provider_error", "the remote URL is not valid")), nil
 		case errors.Is(err, ErrProviderUnreachable):
-			return reply(ctx, cs.Emitter(), chatID, messageID,
-				fmt.Sprintf("❌ 无法连接 Git 主机 (%s)\n  → %v", redacted, err)), nil
+			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+				fmt.Sprintf("❌ 无法连接 Git 主机 (%s)\n  → %v", redacted, err),
+				command.FailedOutcome("provider_error", "the git host could not be reached")), nil
 		default:
-			return reply(ctx, cs.Emitter(), chatID, messageID,
-				fmt.Sprintf("❌ 暂不支持的 Git 平台 (host: %s — neither github.com/gitlab.com URL hint nor /api/v3/meta or /api/v4/version probe recognised it).", redacted)), nil
+			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+				fmt.Sprintf("❌ 暂不支持的 Git 平台 (host: %s — neither github.com/gitlab.com URL hint nor /api/v3/meta or /api/v4/version probe recognised it).", redacted),
+				command.FailedOutcome("provider_error", "the git platform is not supported")), nil
 		}
 	}
 	if provider == nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			"❌ Provider detection returned no result (deps.Detect override bug)."), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+			"❌ Provider detection returned no result (deps.Detect override bug).",
+			command.FailedOutcome("provider_error", "the git platform could not be detected")), nil
 	}
 	providerKind := provider.Kind()
 	owner, repo, err := ParseRepoOwner(remoteURL)
 	if err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ Cannot parse owner/repo from remote URL %s.", redactForDisplay(remoteURL))), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+			fmt.Sprintf("❌ Cannot parse owner/repo from remote URL %s.", redactForDisplay(remoteURL)),
+			command.FailedOutcome("provider_error", "the remote URL does not name a repository")), nil
 	}
 
 	// --- fetch issue + derive branch (§5.2.②) --------------------
 	issue, err := provider.GetIssue(ctx, owner, repo, issueID)
 	if err != nil {
 		if errors.Is(err, ErrIssueNotFound) {
-			return reply(ctx, cs.Emitter(), chatID, messageID,
-				fmt.Sprintf("❌ Issue #%d not found in %s/%s.", issueID, owner, repo)), nil
+			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+				fmt.Sprintf("❌ Issue #%d not found in %s/%s.", issueID, owner, repo),
+				command.FailedOutcome("issue_not_found", "the issue does not exist")), nil
 		}
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ Failed to fetch issue: %v", err)), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+			fmt.Sprintf("❌ Failed to fetch issue: %v", err),
+			command.FailedOutcome("error", "the issue could not be fetched")), nil
 	}
 	branch := DeriveBranchFromTitle(issue.Title, issueID)
 	worktreePath := WorktreePath(repoRoot, branch)
@@ -292,8 +306,9 @@ func runFixRemote(
 	// for an orphaned branch).
 	exists, err := BranchExists(ctx, repoRoot, branch, deps.Git)
 	if err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ git show-ref failed: %v", err)), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+			fmt.Sprintf("❌ git show-ref failed: %v", err),
+			command.FailedOutcome("error", "the branch could not be checked")), nil
 	}
 	if exists {
 		existingPath, _ := WorktreeListPath(ctx, repoRoot, branch, deps.Git)
@@ -302,7 +317,8 @@ func runFixRemote(
 			body += fmt.Sprintf("\n→ worktree: %s", existingPath)
 		}
 		body += "\n↳ finish or drop the active fix with `/gtw close`, then retry"
-		return reply(ctx, cs.Emitter(), chatID, messageID, body), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, body,
+			command.FailedOutcome("branch_exists", "the branch already exists")), nil
 	}
 
 	// --- already-claimed gate -------------------------------------
@@ -320,12 +336,13 @@ func runFixRemote(
 	// It sits BEFORE every mutation (preflight / refresh /
 	// worktree add), so a rejected run leaves nothing behind.
 	if issueHasLabel(issue, LabelWIP) {
-		return reply(ctx, cs.Emitter(), chatID, messageID, fmt.Sprintf(
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, fmt.Sprintf(
 			"❌ Issue #%d is already claimed — label %q is present\n"+
 				"→ another /gtw fix holds this issue (or an earlier one never closed)\n"+
 				"↳ to release it: /cwd into that fix's worktree and run `/gtw close`\n"+
 				"↳ if the claim is stale, remove the %s label on the issue page",
-			issueID, LabelWIP, LabelWIP)), nil
+			issueID, LabelWIP, LabelWIP),
+			command.FailedOutcome("issue_claimed", "the issue is already claimed by another fix")), nil
 	}
 
 	// --- preflight (path / branch / parent) ----------------------
@@ -336,7 +353,8 @@ func runFixRemote(
 	// `git worktree remove --force <path>` or `/gtw close`
 	// manually.
 	if err := PreflightWorktreeCreate(ctx, repoRoot, branch, worktreePath, deps.Git); err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID, err.Error()), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, err.Error(),
+			command.FailedOutcome("error", "the worktree could not be created")), nil
 	}
 
 	// --- sync default branch BEFORE creating worktree ---------
@@ -360,7 +378,8 @@ func runFixRemote(
 		var err error
 		baseSHA, _, err = RefreshDefaultBranch(ctx, repoRoot, deps)
 		if err != nil {
-			return reply(ctx, cs.Emitter(), chatID, messageID, err.Error()), nil
+			return replyOutcome(ctx, cs.Emitter(), chatID, messageID, err.Error(),
+				command.FailedOutcome("error", "the default branch could not be refreshed")), nil
 		}
 	}
 
@@ -380,10 +399,11 @@ func runFixRemote(
 		// is needed: WorktreeAdd failed before any worktree or
 		// label was created, and the chat's SelectedCwd is
 		// unchanged (we haven't moved into a worktree yet).
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ /gtw fix: git worktree add failed: %v\n"+
 				"[git stderr tail]\n%s",
-				err, tailLines(stderrFromWorktreeErr(err), 10))), nil
+				err, tailLines(stderrFromWorktreeErr(err), 10)),
+			command.FailedOutcome("error", "the worktree could not be created")), nil
 	}
 
 	// --- label the issue (post-WorktreeAdd; atomic with worktree) ---
@@ -440,13 +460,15 @@ func runFixRemote(
 	if err := ensureGtwLabels(ctx, provider, owner, repo); err != nil {
 		body := rollbackLabelStep(ctx, deps, repoRoot, worktreePath, branch, issueID,
 			fmt.Sprintf("❌ Could not ensure gtw labels on %s/%s: %v\n", owner, repo, err))
-		return reply(ctx, cs.Emitter(), chatID, messageID, body), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, body,
+			command.FailedOutcome("label_error", "the gtw labels could not be created")), nil
 	}
 
 	if err := provider.AddIssueLabel(ctx, owner, repo, issueID, LabelWIP); err != nil {
 		body := rollbackLabelStep(ctx, deps, repoRoot, worktreePath, branch, issueID,
 			fmt.Sprintf("❌ Could not add label %q to issue #%d: %v\n", LabelWIP, issueID, err))
-		return reply(ctx, cs.Emitter(), chatID, messageID, body), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, body,
+			command.FailedOutcome("label_error", "the issue could not be labelled")), nil
 	}
 
 	// --- switch cwd + write context + render + dispatch ----------
@@ -488,13 +510,15 @@ func runFixLocal(
 ) (*Result, error) {
 	branch, err := DeriveBranchFromName(rawName)
 	if err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID, "❌ "+err.Error()), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, "❌ "+err.Error(),
+			command.FailedOutcome("invalid_branch", "the branch name could not be derived")), nil
 	}
 
 	repoRoot, err := RepoRoot(ctx, cs.SelectedCwd(), deps.Git)
 	if err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			"❌ Not in a git repository. Run /cwd <inside a repo> first."), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+			"❌ Not in a git repository. Run /cwd <inside a repo> first.",
+			command.FailedOutcome("not_a_repo", "the workspace is not inside a git repository")), nil
 	}
 	worktreePath := WorktreePath(repoRoot, branch)
 
@@ -504,8 +528,9 @@ func runFixLocal(
 	// before retrying.
 	exists, err := BranchExists(ctx, repoRoot, branch, deps.Git)
 	if err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ git show-ref failed: %v", err)), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+			fmt.Sprintf("❌ git show-ref failed: %v", err),
+			command.FailedOutcome("error", "the branch could not be checked")), nil
 	}
 	if exists {
 		existingPath, _ := WorktreeListPath(ctx, repoRoot, branch, deps.Git)
@@ -514,13 +539,15 @@ func runFixLocal(
 			body += fmt.Sprintf("\n→ worktree: %s", existingPath)
 		}
 		body += "\n↳ run `git worktree remove --force <path>` or `git branch -D <branch>` to clean up, then retry"
-		return reply(ctx, cs.Emitter(), chatID, messageID, body), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, body,
+			command.FailedOutcome("branch_exists", "the branch already exists")), nil
 	}
 
 	// F-XX: --force removed for local mode too. See runFixRemote
 	// for the rationale.
 	if err := PreflightWorktreeCreate(ctx, repoRoot, branch, worktreePath, deps.Git); err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID, err.Error()), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, err.Error(),
+			command.FailedOutcome("error", "the worktree could not be created")), nil
 	}
 
 	if err := WorktreeAdd(ctx, repoRoot, branch, worktreePath, "HEAD", deps.Git); err != nil {
@@ -529,10 +556,11 @@ func runFixLocal(
 		// single, immediate reply, no draft to click. No cleanup
 		// is needed: WorktreeAdd failed before any worktree was
 		// created, and the chat's SelectedCwd is unchanged.
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ /gtw fix: git worktree add failed: %v\n"+
 				"[git stderr tail]\n%s",
-				err, tailLines(stderrFromWorktreeErr(err), 10))), nil
+				err, tailLines(stderrFromWorktreeErr(err), 10)),
+			command.FailedOutcome("error", "the worktree could not be created")), nil
 	}
 
 	// F-XX: dispMode is unused for ModeLocal (local never
@@ -571,8 +599,9 @@ func completeFixAndDispatch(
 ) (*Result, error) {
 	// --- switch cwd (§5.2.④) -------------------------------------
 	if err := cs.SetSelectedCwd(worktreePath); err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ SetSelectedCwd failed: %v", err)), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+			fmt.Sprintf("❌ SetSelectedCwd failed: %v", err),
+			command.FailedOutcome("error", "the chat could not move into the worktree")), nil
 	}
 
 	// --- ensure worktree .gitignore (§14.4 step 5) ---------------
@@ -612,17 +641,19 @@ func completeFixAndDispatch(
 			// Even the rollback failed. Surface the original
 			// error + the rollback note so the user knows to
 			// clean up by hand.
-			return reply(ctx, cs.Emitter(), chatID, messageID,
+			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 				fmt.Sprintf("❌ /gtw fix: CommitGitignore failed (%v); rollback also failed (%v).\n"+
 					"the worktree at %s is in a stuck state — please `git worktree remove --force %s` manually.",
-					err, rmErr, worktreePath, worktreePath)), nil
+					err, rmErr, worktreePath, worktreePath),
+				command.FailedOutcome("error", "the worktree could not be committed and the rollback failed")), nil
 		}
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ /gtw fix: CommitGitignore failed (%v).\n"+
 				"rolled back worktree at %s. fix and retry:\n"+
 				"  - ensure `git config user.email` is set, OR\n"+
 				"  - manually commit %s/.gitignore before retrying /gtw fix",
-				err, worktreePath, worktreePath)), nil
+				err, worktreePath, worktreePath),
+			command.FailedOutcome("error", "the worktree could not be committed")), nil
 	}
 
 	// --- write on-disk snapshot (§14.4 step 6) -------------------
@@ -667,7 +698,21 @@ func completeFixAndDispatch(
 		// non-nil; a nil here would be a programming error.
 		card = renderFixSuccessCard(issue, branch, worktreePath, repo, baseSHA, dispMode)
 	}
-	result := reply(ctx, cs.Emitter(), chatID, messageID, card)
+	// The facts the fix produced: the issue it claimed, the branch
+	// it created, the worktree it lives in, and the mode it ran
+	// in. They are what a program needs to know the work is ready.
+	fixData := map[string]string{
+		"issue":    fmt.Sprintf("%d", issueID),
+		"branch":   branch,
+		"worktree": worktreePath,
+		"mode":     string(mode),
+	}
+	result := replyOutcome(ctx, cs.Emitter(), chatID, messageID, card,
+		messages.Outcome{
+			Status:  messages.OutcomeOK,
+			Summary: fmt.Sprintf("the worktree for branch %s is ready", branch),
+			Data:    fixData,
+		})
 
 	// --- dispatch issue to agent (ID mode only) -------------------
 	// We do this AFTER the reply so the user sees the success
@@ -708,6 +753,20 @@ func completeFixAndDispatch(
 				Kind:    messages.OutCommandReply,
 				ReplyTo: messageID,
 				Text:    fmt.Sprintf("⚠️ Could not dispatch issue #%d to agent: %v\nThe worktree is ready; you can /cwd into %s and tell the agent to fix #%d.", issue.ID, err, worktreePath, issue.ID),
+			})
+			// The worktree is ready but the agent never got the
+			// issue — half of what was asked happened. The
+			// severity merge keeps this `incomplete` over the
+			// `ok` the success card reported.
+			dispatchData := map[string]string{}
+			for k, v := range fixData {
+				dispatchData[k] = v
+			}
+			dispatchData["reason"] = "dispatch_failed"
+			reportOutcome(ctx, messages.Outcome{
+				Status:  messages.OutcomeIncomplete,
+				Summary: "the worktree is ready but the issue did not reach the agent",
+				Data:    dispatchData,
 			})
 		}
 	}

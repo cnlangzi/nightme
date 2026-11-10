@@ -6,6 +6,43 @@ import (
 	"strings"
 )
 
+// syncOutcome is the machine-readable result of a sync: the facts a
+// program needs to know what the /gtw sync card did.
+//
+// A branch that was already up to date pulled nothing — that is a
+// "nothing to do", not a success with a commit count.
+type syncOutcome struct {
+	// branch is the branch that was synced. Empty when it could
+	// not be determined.
+	branch string
+	// head is the branch's new HEAD sha. Empty when unknown.
+	head string
+	// commits is how many commits the card listed — the card caps
+	// the list at 10, so this is "the commits the card shows".
+	commits int
+	// pulled is false when the branch was already up to date.
+	pulled bool
+}
+
+// data renders the outcome's facts as the Data map of a reported
+// Outcome. Empty when the sync revealed nothing.
+func (s *syncOutcome) data() map[string]string {
+	if s == nil {
+		return nil
+	}
+	data := map[string]string{}
+	if s.branch != "" {
+		data["branch"] = s.branch
+	}
+	if s.head != "" {
+		data["head"] = s.head
+	}
+	if s.pulled {
+		data["commits"] = fmt.Sprintf("%d", s.commits)
+	}
+	return data
+}
+
 // buildSyncReply runs RefreshDefaultBranch and turns the result
 // into an IM-friendly summary suitable for either /gtw sync
 // (slash dispatcher path) or /gtw close (which calls it inline
@@ -16,6 +53,9 @@ import (
 // the git stderr tail + user-facing hint); the caller is
 // responsible for any ❌ prefix / wrapping.
 //
+// The returned syncOutcome carries the facts behind the card, so
+// the caller reports what happened without reading the card.
+//
 // Honours deps.SkipRefreshDefaultBranch by returning (empty, nil)
 // so the caller can treat it as "sync not requested" without
 // special-casing the flag. /gtw sync ignores this flag (it's a
@@ -23,19 +63,22 @@ import (
 //
 // When DefaultBranch can't be read after a successful pull, falls
 // back to the raw git pull output rather than fabricating a card.
-func buildSyncReply(ctx context.Context, repoRoot string, deps HandlerDeps) (string, error) {
+func buildSyncReply(ctx context.Context, repoRoot string, deps HandlerDeps) (string, *syncOutcome, error) {
 	if deps.SkipRefreshDefaultBranch {
-		return "", nil
+		return "", nil, nil
 	}
 	newHead, pullOut, err := RefreshDefaultBranch(ctx, repoRoot, deps)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	branch, derr := DefaultBranch(ctx, repoRoot, deps.Git)
 	if derr != nil || branch == "" {
-		return pullOut, nil
+		// The pull landed; only the branch name is unreadable. The
+		// user gets the raw output, and the sync still succeeded.
+		return pullOut, &syncOutcome{head: newHead, pulled: true}, nil
 	}
-	return renderSyncReply(branch, newHead, pullOut, repoRoot, ctx, deps.Git), nil
+	text, out := renderSyncReply(branch, newHead, pullOut, repoRoot, ctx, deps.Git)
+	return text, out, nil
 }
 
 // renderFixSuccessCard builds the §5.2.⑥ success card (plain text;
@@ -102,12 +145,18 @@ func shortSHA(sha string) string {
 //   - Anything else (rare config variants) → fall back to the
 //     raw pull output so the user still sees what happened.
 //
+// The returned syncOutcome carries the facts behind the card: a
+// branch that was already up to date pulled nothing.
+//
 // On any parsing/log failure (missing SHA, git log error), we
 // degrade gracefully to the raw pull output rather than surfacing
 // a formatting-internal error to the user.
-func renderSyncReply(branch, newHead, pullOut, repoRoot string, ctx context.Context, git GitRunner) string {
+func renderSyncReply(branch, newHead, pullOut, repoRoot string, ctx context.Context, git GitRunner) (string, *syncOutcome) {
+	out := &syncOutcome{branch: branch, head: newHead, pulled: true}
+
 	if strings.Contains(pullOut, "Already up to date.") {
-		return fmt.Sprintf("✨ origin/%s already up to date", branch)
+		out.pulled = false
+		return fmt.Sprintf("✨ origin/%s already up to date", branch), out
 	}
 
 	// Find the "Updating <old>..<new>" line.
@@ -125,7 +174,7 @@ func renderSyncReply(branch, newHead, pullOut, repoRoot string, ctx context.Cont
 	}
 	if oldSHA == "" {
 		// No "Updating" line we recognise — fall back to raw.
-		return pullOut
+		return pullOut, out
 	}
 
 	// Get commit subjects for the pulled range.
@@ -133,9 +182,10 @@ func renderSyncReply(branch, newHead, pullOut, repoRoot string, ctx context.Cont
 	if err != nil || strings.TrimSpace(subjectsRaw) == "" {
 		// Fall back to a plain header so the user still sees the
 		// sync happened.
-		return fmt.Sprintf("✅ origin/%s @ %s", branch, shortSHA(newHead))
+		return fmt.Sprintf("✅ origin/%s @ %s", branch, shortSHA(newHead)), out
 	}
 	subjects := strings.Split(strings.TrimSpace(subjectsRaw), "\n")
+	out.commits = len(subjects)
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "✅ origin/%s @ %s\n", branch, shortSHA(newHead))
@@ -143,7 +193,7 @@ func renderSyncReply(branch, newHead, pullOut, repoRoot string, ctx context.Cont
 	for _, s := range subjects {
 		fmt.Fprintf(&b, " • %s\n", s)
 	}
-	return strings.TrimRight(b.String(), "\n")
+	return strings.TrimRight(b.String(), "\n"), out
 }
 
 // renderFixLocalSuccessCard builds the simplified success card
@@ -181,14 +231,14 @@ func renderFixLocalSuccessCard(branch, worktree string) string {
 // `revRange` is the git log range that captures the commits the
 // commit just produced (typically `headBefore..HEAD`).
 //
-// Returns the rendered card on success, or an error if the
-// underlying `git log` failed. A successful commit with a broken
-// log query is a bug we want to surface, not a card we want to
-// fudge with `committed 0 change(s)`.
-func replyCommitSuccessCard(ctx context.Context, c Context, agentName, revRange string, deps HandlerDeps) (string, error) {
+// Returns the rendered card and the number of commits it lists, or
+// an error if the underlying `git log` failed. A successful commit
+// with a broken log query is a bug we want to surface, not a card we
+// want to fudge with `committed 0 change(s)`.
+func replyCommitSuccessCard(ctx context.Context, c Context, agentName, revRange string, deps HandlerDeps) (string, int, error) {
 	logOut, err := gitLogRange(ctx, c.Worktree, revRange, deps)
 	if err != nil {
-		return "", fmt.Errorf("read committed commits: %w", err)
+		return "", 0, fmt.Errorf("read committed commits: %w", err)
 	}
 	commitCount := 0
 	if logOut != "" {
@@ -203,7 +253,7 @@ func replyCommitSuccessCard(ctx context.Context, c Context, agentName, revRange 
 		b.WriteByte('\n')
 	}
 	fmt.Fprintf(&b, "> %s\n", c.Branch)
-	return b.String(), nil
+	return b.String(), commitCount, nil
 }
 
 // replyPushSuccessCard builds the post-/gtw push success IM card
@@ -213,14 +263,14 @@ func replyCommitSuccessCard(ctx context.Context, c Context, agentName, revRange 
 // `revRange` is the git log range that captures the commits the
 // push just landed (typically `headBefore..origin/<branch>`).
 //
-// Returns the rendered card on success, or an error if the
-// underlying `git log` failed. A successful push with a broken
-// log query is a bug we want to surface, not a card we want to
-// fudge with `pushed 0 commit(s)`.
-func replyPushSuccessCard(ctx context.Context, c Context, revRange string, deps HandlerDeps) (string, error) {
+// Returns the rendered card and the number of commits it lists, or
+// an error if the underlying `git log` failed. A successful push
+// with a broken log query is a bug we want to surface, not a card we
+// want to fudge with `pushed 0 commit(s)`.
+func replyPushSuccessCard(ctx context.Context, c Context, revRange string, deps HandlerDeps) (string, int, error) {
 	logOut, err := gitLogRange(ctx, c.Worktree, revRange, deps)
 	if err != nil {
-		return "", fmt.Errorf("read pushed commits: %w", err)
+		return "", 0, fmt.Errorf("read pushed commits: %w", err)
 	}
 	commitCount := 0
 	if logOut != "" {
@@ -235,5 +285,5 @@ func replyPushSuccessCard(ctx context.Context, c Context, revRange string, deps 
 		b.WriteByte('\n')
 	}
 	fmt.Fprintf(&b, "> %s\n", c.Branch)
-	return b.String(), nil
+	return b.String(), commitCount, nil
 }

@@ -28,6 +28,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // Factory is the command.SlashCommandFactory for /stop.
@@ -95,10 +96,12 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	mgr *chatsession.Manager, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 
 	if cs == nil {
+		chatsession.ReportOutcome(ctx, command.FailedOutcome("no_session", "the chat has no session"))
 		return command.Reply(ctx, rt, "No active chat session."), nil
 	}
 
 	if _, failOut := command.RequireActiveCwd(cs); failOut != nil {
+		chatsession.ReportOutcome(ctx, command.FailedOutcome("no_cwd", "the command needs an active workspace"))
 		return failOut, nil
 	}
 
@@ -106,6 +109,7 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	// subcommands. Treating a typo'd arg as "still stop" would
 	// mask user error.
 	if _, err := command.ParseCmdArgs(input.Args[1:], stopSpec); err != nil {
+		chatsession.ReportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
 
@@ -113,10 +117,53 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	result, err := StopSelectedAgent(cmd)
 	if err != nil {
 		if errors.Is(err, chatsession.ErrNoSelectedAgent) {
+			chatsession.ReportOutcome(ctx, command.FailedOutcome("no_agent", "no agent is selected"))
 			return command.OutReply(input,
 				"No active agent to stop. Use /use <agent> first."), nil
 		}
+		chatsession.ReportOutcome(ctx, command.FailedOutcome("error", "the agent could not be stopped"))
 		return command.OutReply(input, fmt.Sprintf("Stop failed: %v", err)), nil
 	}
+	chatsession.ReportOutcome(ctx, stopOutcome(result))
 	return command.OutReply(input, FormatStopResult(result)), nil
+}
+
+// stopOutcome maps the stop result onto the structured outcome.
+//
+// The stopped turn belongs to an EARLIER inbound message — that one
+// settles as cancelled. This command's own message reports what the
+// stop itself did.
+func stopOutcome(result Result) messages.Outcome {
+	data := map[string]string{}
+	if result.Agent != "" {
+		data["agent"] = result.Agent
+	}
+	switch result.Action {
+	case "stopped":
+		return messages.Outcome{
+			Status:  messages.OutcomeOK,
+			Summary: "the agent was stopped",
+			Data:    data,
+		}
+	case "noop":
+		return messages.Outcome{
+			Status:  messages.OutcomeNoop,
+			Summary: "no turn was in flight",
+			Data:    data,
+		}
+	case "not-supported":
+		data["reason"] = "not_supported"
+		return messages.Outcome{
+			Status:  messages.OutcomeFailed,
+			Summary: "the agent does not support /stop",
+			Data:    data,
+		}
+	default:
+		data["reason"] = "error"
+		return messages.Outcome{
+			Status:  messages.OutcomeFailed,
+			Summary: "the agent could not be stopped",
+			Data:    data,
+		}
+	}
 }

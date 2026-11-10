@@ -80,6 +80,7 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 
 	args, err := command.ParseCmdArgs(input.Args[1:], useSpec)
 	if err != nil {
+		chatsession.ReportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
 
@@ -87,23 +88,37 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	if agentName == "" {
 		// Whitespace-only token: arity is satisfied but the name
 		// is not. Same usage reply as the no-arg case.
+		chatsession.ReportOutcome(ctx, command.FailedOutcome("usage", "no agent name was given"))
 		return command.Reply(ctx, rt, "Usage: /use <agent>"), nil
 	}
 
 	if _, failOut := command.RequireActiveCwd(cs); failOut != nil {
+		chatsession.ReportOutcome(ctx, command.FailedOutcome("no_cwd", "the command needs an active workspace"))
 		return failOut, nil
 	}
 
 	// Pure state mutation first.
 	if err := cs.SetSelectedAgent(agentName); err != nil {
+		chatsession.ReportOutcome(ctx, command.FailedOutcomeData("error",
+			"the agent could not be selected",
+			map[string]string{"agent": agentName}))
 		return command.Reply(ctx, rt, fmt.Sprintf("SetSelectedAgent failed: %v", err)), nil
 	}
 
 	// Lazy lookup — may spawn via the configured Spawner.
 	as, err := cs.LookupSelectedAgentSession()
 	if err != nil {
+		chatsession.ReportOutcome(ctx, command.FailedOutcomeData("error",
+			"the agent could not be activated",
+			map[string]string{"agent": agentName}))
 		return command.Reply(ctx, rt, fmt.Sprintf("Failed to activate agent: %v", err)), nil
 	}
+
+	chatsession.ReportOutcome(ctx, messages.Outcome{
+		Status:  messages.OutcomeOK,
+		Summary: "now using " + as.Agent,
+		Data:    map[string]string{"agent": as.Agent},
+	})
 
 	// commit 8c: stop the previous pump (if any) and start a new
 	// CS-AS 边界重构 Phase 1: readpump is per-AS (started by Spawn).

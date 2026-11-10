@@ -337,6 +337,27 @@ func (h *settleHarness) waitSettledFor(t *testing.T, msgID string, within time.D
 	}
 }
 
+// assertOneSettled waits for the settled message of msgID and
+// asserts that it is the ONLY one for that message.
+//
+// Every inbound message settles exactly once — a command that
+// reports twice, or a hold that is never released, would show up
+// here as a second (or missing) settled message.
+func (h *settleHarness) assertOneSettled(t *testing.T, msgID string, within time.Duration) messages.OutboundMessage {
+	t.Helper()
+	got := h.waitSettledFor(t, msgID, within)
+	var count int
+	for _, m := range h.settled() {
+		if m.ReplyTo == msgID {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("settled messages for %q = %d, want exactly 1", msgID, count)
+	}
+	return got
+}
+
 // openTurnGate lets the in-flight turn end.
 func (h *settleHarness) openTurnGate() { close(h.bridge.turnGate) }
 
@@ -415,12 +436,9 @@ func TestSettle_Review_SettlesOnlyAfterTheInjectedTurnEnds(t *testing.T) {
 
 	h.openTurnGate()
 
-	got := h.waitSettled(t, 1, 3*time.Second)
-	if got[0].ReplyTo != "om_settle_review" {
-		t.Errorf("settled ReplyTo = %q, want om_settle_review", got[0].ReplyTo)
-	}
-	if got[0].Outcome == nil || got[0].Outcome.Status != messages.OutcomeOK {
-		t.Errorf("settled outcome = %+v, want ok", got[0].Outcome)
+	got := h.assertOneSettled(t, "om_settle_review", 3*time.Second)
+	if got.Outcome == nil || got.Outcome.Status != messages.OutcomeOK {
+		t.Errorf("settled outcome = %+v, want ok", got.Outcome)
 	}
 }
 
@@ -448,10 +466,7 @@ func TestSettle_Review_FailedInjection_SettlesAnyway(t *testing.T) {
 
 	h.drive(t, "/review", "om_settle_review_fail")
 
-	got := h.waitSettled(t, 1, 3*time.Second)
-	if got[0].ReplyTo != "om_settle_review_fail" {
-		t.Errorf("settled ReplyTo = %q, want om_settle_review_fail", got[0].ReplyTo)
-	}
+	h.assertOneSettled(t, "om_settle_review_fail", 3*time.Second)
 }
 
 // TestSettle_StoppedTurn_SettlesAsCancelled covers /stop: the turn
@@ -484,6 +499,9 @@ func TestSettle_StoppedTurn_SettlesAsCancelled(t *testing.T) {
 //
 // This is also the cheapest net against a command that hangs: a
 // command that never settles would blow the wait below.
+//
+// /cwd reports its own outcome (the workspace it set); the mode
+// switches still report nothing, so they settle as unknown.
 func TestSettle_CommandsWithoutAgentWork_SettleImmediately(t *testing.T) {
 	h := newSettleHarness(t,
 		think.NewFactory(),
@@ -493,20 +511,21 @@ func TestSettle_CommandsWithoutAgentWork_SettleImmediately(t *testing.T) {
 	)
 
 	cases := []struct {
-		text  string
-		msgID string
+		text   string
+		msgID  string
+		status messages.OutcomeStatus
 	}{
-		{"/think", "om_settle_think"},
-		{"/tools", "om_settle_tools"},
-		{"/watch", "om_settle_watch"},
-		{"/cwd " + h.cs.SelectedCwd(), "om_settle_cwd"},
+		{"/think", "om_settle_think", messages.OutcomeUnknown},
+		{"/tools", "om_settle_tools", messages.OutcomeUnknown},
+		{"/watch", "om_settle_watch", messages.OutcomeUnknown},
+		{"/cwd " + h.cs.SelectedCwd(), "om_settle_cwd", messages.OutcomeOK},
 	}
 
 	for _, tc := range cases {
 		h.drive(t, tc.text, tc.msgID)
-		got := h.waitSettledFor(t, tc.msgID, 3*time.Second)
-		if got.Outcome == nil || got.Outcome.Status != messages.OutcomeUnknown {
-			t.Errorf("%s: settled outcome = %+v, want unknown", tc.text, got.Outcome)
+		got := h.assertOneSettled(t, tc.msgID, 3*time.Second)
+		if got.Outcome == nil || got.Outcome.Status != tc.status {
+			t.Errorf("%s: settled outcome = %+v, want %s", tc.text, got.Outcome, tc.status)
 		}
 	}
 }

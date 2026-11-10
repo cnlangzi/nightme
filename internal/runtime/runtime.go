@@ -6,12 +6,13 @@
 //
 //  1. shared resources — cfg / csFile / asFile / agents /
 //     prCache / gtwDeps (read-only once per daemon)
-//  2. shared wiring    — gtwMgr (with findChatSession-aware
-//     SetGetChatSession) / reactionRouter / commander /
-//     shellDispatcher / inbound.Router; these all use
-//     runtime.findChatSession to resolve the per-chat mgr
-//     (the per-channel mgr is the "owner" of each chatID
-//     because it's the one that bound the channel's Emitter)
+//  2. shared wiring    — reactionRouter / commander /
+//     shellDispatcher / inbound.Router. Each takes the per-channel
+//     mgr and the ChatSession per dispatch call; none of them
+//     holds a reference to a single mgr. The ChatSender resolves a
+//     chat to the mgr that owns it (the per-channel mgr is the
+//     "owner" of each chatID because it's the one that bound the
+//     channel's Emitter).
 //  3. gateway + ready  — gateway.Start + deps.OnReady, both
 //     before any channel has started, so readiness never waits
 //     on an IM round trip
@@ -31,12 +32,11 @@
 //
 // v1.3+ invariants enforced here:
 //   - runtime.allMgrs lists every per-channel chatsession.Manager.
-//   - runtime.findChatSession(chatID) walks allMgrs (in-memory
-//     first, then GetOrCreate per mgr) and returns the owning
-//     ChatSession. The first mgr to successfully GetOrCreate a
-//     chatID becomes its owner (chatID → mgr is implicit via
-//     the chatID-namespaced-per-channel fact; feishu oc_* vs
-//     telegram numeric IDs don't collide in practice).
+//   - runtime.findChatSession(chatID) walks allMgrs and returns the
+//     owning ChatSession. The chatID → mgr mapping is implicit via
+//     the chatID-namespaced-per-channel fact (feishu oc_* vs
+//     telegram numeric IDs don't collide in practice); the manager
+//     that created the session owns it.
 //   - Each mgr has its own per-channel Emitter bound; outbound
 //     from that mgr's ChatSessions goes to the right channel.
 //   - No shared "default channel" or chatID → channel routing
@@ -196,10 +196,10 @@ func (d Deps) fillDefaults() Deps {
 // wire:
 //
 //  1. shared resources  — cfg / csFile / asFile / agents / prCache / gtwDeps
-//  2. shared wiring     — gtwMgr / reactionRouter / commander /
+//  2. shared wiring     — reactionRouter / commander /
 //     shellDispatcher / inbound.Router
-//     (all use runtime.findChatSession for the
-//     per-chat mgr lookup)
+//     (each takes mgr + cs per dispatch call; the ChatSender
+//     resolves a chat to its owning mgr)
 //  3. gateway + ready   — gateway.Start, then deps.OnReady. No
 //     channel has been touched yet: readiness is a property of
 //     local resources, not of IM connectivity
@@ -365,9 +365,8 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 
 	// Per-channel mgr construction happens in buildStack
 	// (Phase 3). The shared singletons below (reactionRouter,
-	// commander, shellDispatcher, inbound.Router) use
-	// findChatSession to resolve per-chat sessions; they do not
-	// hold a reference to any single mgr.
+	// commander, shellDispatcher, inbound.Router) do not hold a
+	// reference to any single mgr.
 
 	// Phase 2.3: command/* packages self-register via init()
 	// — see internal/command/runtime.go. The orchestrator just
@@ -382,11 +381,12 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	// the v1.5 correct behaviour for gtw.
 	router := commandServices.NewReactionRouter()
 
-	// gtwMgr is constructed (and returned to the runtime via the
-	// `command.Deps.GTWExt` payload) by gtw's init() builder
-	// below. The /gtw slash-command path uses it for per-chat
-	// run-lock serialisation; v1.5 stripped the rest of the
-	// surface (no draft registry, no reaction handler).
+	// gtw's Manager is created inside its own builder (see
+	// internal/command/gtw) and stays there: the runtime hands gtw
+	// its HandlerDeps through the `command.Deps.GTWExt` payload,
+	// not a Manager. The /gtw slash-command path uses the Manager
+	// for per-chat run-lock serialisation; v1.5 stripped the rest
+	// of the surface (no draft registry, no reaction handler).
 
 	// Slash command registry + commander. After SetDeps
 	// every command/* package's init() has produced a factory;
@@ -402,6 +402,10 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 		// entirely (see internal/command/gtw/manager.go doc)
 		// so there's no reaction router wiring for it here.
 		GTWExt: gtwDeps,
+		// ChatSender posts into any chat on any channel. It
+		// resolves the channel at send time, so handing it over
+		// before the channels have started is safe.
+		ChatSender: NewChatSender(),
 	})
 	reg := command.Default()
 	commander := command.NewCommander(reg)
@@ -541,9 +545,8 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 //
 // Concurrency: populated during the 3rd wire phase
 // (buildStack, single-threaded) and read by:
-//   - the gateway pumpOne goroutine (per channel)
-//   - the gtw reaction handler (event-driven)
-//   - findChatSession (event-driven, called by gtw / command)
+//   - findChatSession (event-driven, called by the ChatSender)
+//   - ShutdownRunMulti (daemon teardown)
 //
 // We use a sync.RWMutex so reads (lookup) don't block each other.
 var (
@@ -553,24 +556,19 @@ var (
 
 // findChatSession returns the ChatSession that owns chatID.
 //
-// Lookup order:
-//  1. in-memory hit (mgr.Get) — covers chats hydrated on a
-//     previous GetOrCreate call in this daemon's lifetime
-//  2. lazy hydrate via mgr.GetOrCreate — fires Manager's
-//     hydrateFromEntry path (reads csFile, restores AgentSession
-//     pool, fires onCreate for handler installation)
+// The lookup is in-memory only (mgr.Get): it covers the chats
+// hydrated by an inbound message in this daemon's lifetime. A chat
+// that never sent a message has no session and is reported as
+// unknown.
 //
-// We walk every per-channel mgr. The first one that returns
-// the chat wins. chatID namespacing across channels (feishu
-// oc_* vs telegram numeric IDs) is what makes this unambiguous
-// in practice — a feishu chatID never collides with a telegram
-// chatID, so the iteration always finds exactly one mgr.
+// We walk every per-channel mgr. The first one that returns the
+// chat wins. chatID namespacing across channels (feishu oc_* vs
+// telegram numeric IDs) is what makes this unambiguous in practice
+// — a feishu chatID never collides with a telegram chatID, so the
+// iteration always finds exactly one mgr.
 //
-// Returns nil only if every mgr.GetOrCreate failed (which
-// shouldn't happen — the mgr's own persistence layer is the
-// source of truth; failing means csFile is corrupt).
-func findChatSession(chatID, primaryAgent string) *chatsession.ChatSession {
-	_ = primaryAgent // retained for call-site compatibility; never creates
+// The ChatSender (chat_sender.go) is the only production caller.
+func findChatSession(chatID string) *chatsession.ChatSession {
 	allMgrsMu.RLock()
 	mgrs := append([]*chatsession.Manager(nil), allMgrs...)
 	allMgrsMu.RUnlock()

@@ -54,9 +54,9 @@ func (s *stubChannel) Start(_ context.Context) error            { return nil }
 func (s *stubChannel) Stop(_ context.Context) error             { return nil }
 func (s *stubChannel) Incoming() <-chan messages.InboundMessage { return s.in }
 func (s *stubChannel) Inject(m messages.InboundMessage)         { s.in <- m }
-func (s *stubChannel) Send(_ context.Context, _ messages.OutboundMessage) error {
+func (s *stubChannel) Send(_ context.Context, msg messages.OutboundMessage) error {
 	if s.sends != nil {
-		s.sends.add()
+		s.sends.add(msg)
 	}
 	return nil
 }
@@ -73,15 +73,26 @@ func (s *stubChannel) BuildBlocks(_ string, _ []messages.Attachment) []agent.Con
 	return nil
 }
 
-// capturedSends is a thread-safe counter of channel.Send calls.
+// capturedSends is a thread-safe recorder of channel.Send calls.
 type capturedSends struct {
-	mu sync.Mutex
-	n  int
+	mu   sync.Mutex
+	sent []messages.OutboundMessage
 }
 
-func (c *capturedSends) add()       { c.mu.Lock(); c.n++; c.mu.Unlock() }
-func (c *capturedSends) count() int { c.mu.Lock(); defer c.mu.Unlock(); return c.n }
-func (c *capturedSends) reset()     { c.mu.Lock(); c.n = 0; c.mu.Unlock() }
+func (c *capturedSends) add(msg messages.OutboundMessage) {
+	c.mu.Lock()
+	c.sent = append(c.sent, msg)
+	c.mu.Unlock()
+}
+func (c *capturedSends) count() int { c.mu.Lock(); defer c.mu.Unlock(); return len(c.sent) }
+func (c *capturedSends) reset()     { c.mu.Lock(); c.sent = nil; c.mu.Unlock() }
+
+// messages returns a copy of the recorded outbound messages.
+func (c *capturedSends) messages() []messages.OutboundMessage {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]messages.OutboundMessage(nil), c.sent...)
+}
 
 // setupWire builds the minimal shared deps (spawner / csFile /
 // asFile / buildStackOpts) that every multi-channel test needs.
@@ -205,7 +216,7 @@ func TestFindChatSession_RoutesChatToFirstMgr(t *testing.T) {
 	if _, err := alpha.GetOrCreate("shared_chat", "claude"); err != nil {
 		t.Fatalf("GetOrCreate: %v", err)
 	}
-	cs := findChatSession("shared_chat", "claude")
+	cs := findChatSession("shared_chat")
 	if cs == nil {
 		t.Fatal("findChatSession: expected existing chat")
 	}
@@ -221,7 +232,7 @@ func TestFindChatSession_RoutesChatToFirstMgr(t *testing.T) {
 // "no channels" failure mode.
 func TestFindChatSession_NilIfNoMgrsRegistered(t *testing.T) {
 	clearAllMgrs(t)
-	if cs := findChatSession("any_chat", "primary"); cs != nil {
+	if cs := findChatSession("any_chat"); cs != nil {
 		t.Errorf("findChatSession with no mgrs: got %v, want nil", cs)
 	}
 }

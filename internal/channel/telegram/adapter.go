@@ -1275,6 +1275,11 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 	// Telegram. Matches Feishu's pre-F-44 silent-drop behaviour.
 	// See docs/channel/telegram.md §11.11.
 	switch msg.Kind {
+	case messages.OutMessageSettled:
+		// The structured outcome of an inbound message. It exists
+		// for programs that drive nightme, not for humans.
+		sent = false
+		return nil
 	case messages.OutReply, messages.OutCommandReply, messages.OutResult, messages.OutThinking:
 		if strings.TrimSpace(msg.Text) == "" {
 			// OutResult is permissive: a turn may legitimately end

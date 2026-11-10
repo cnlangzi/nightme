@@ -90,6 +90,10 @@ func (a *Adapter) removeOwnReaction(ctx context.Context, channelID, messageID, e
 func (a *Adapter) sendOutbound(ctx context.Context, msg messages.OutboundMessage) error {
 	raw := rawChannelIDFromSession(msg.ChatID)
 	switch msg.Kind {
+	case messages.OutMessageSettled:
+		// The structured outcome of an inbound message. It exists
+		// for programs that drive nightme, not for humans.
+		return nil
 	case messages.OutInit:
 		return a.sendInit(ctx, raw, msg)
 	case messages.OutReply, messages.OutCommandReply:

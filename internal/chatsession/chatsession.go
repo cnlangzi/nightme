@@ -291,6 +291,13 @@ type ChatSession struct {
 	// Keyed by AS.ID; values are placeholders. Guarded by mu.
 	subs map[string]struct{}
 
+	// workMu guards works — the per-msgID outcome trackers that
+	// back the settled signal. Separate from mu because the settle
+	// path emits an outbound message and must not run under the
+	// session lock.
+	workMu sync.Mutex
+	works  map[string]*Work
+
 	// ctx is the per-ChatSession context. Lives for the chat's
 	// lifetime (until daemon shutdown). It is the PARENT context
 	// every AgentSession active on this chat derives its own
@@ -1124,6 +1131,10 @@ func (cs *ChatSession) QueueUserMessage(msg Message) error {
 	if msg.ID == "" {
 		return nil
 	}
+	// The queued message becomes an agent turn, so its outcome is
+	// the turn's verdict: hold the message until the turn carrying
+	// it ends.
+	cs.HoldUntilPromptEnd(msg.ID)
 	if err := cs.queue.Push(msg); err != nil {
 		return err
 	}

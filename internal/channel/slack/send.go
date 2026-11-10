@@ -41,6 +41,11 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 	a.health.recordOutbound()
 
 	switch msg.Kind {
+	case messages.OutMessageSettled:
+		// The structured outcome of an inbound message. It exists
+		// for programs that drive nightme, not for humans.
+		return nil
+
 	case messages.OutReply, messages.OutThinking:
 		return a.sendStreamText(ctx, msg, false)
 

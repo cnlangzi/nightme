@@ -5,6 +5,8 @@ import (
 	"fmt"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
+	"github.com/cnlangzi/nightme/internal/command"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // dispatchPush is the dispatcher for /gtw push. After the F-XX
@@ -52,23 +54,26 @@ func dispatchPush(
 	// — see F-57 §5).
 	snap, err := CollectReadinessForDispatch(ctx, c.Worktree, deps.Git)
 	if err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ read worktree status: %v", err)), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+			fmt.Sprintf("❌ read worktree status: %v", err),
+			command.FailedOutcome("error", "the worktree status could not be read")), nil
 	}
 	if snap == nil {
 		// (nil, nil) from CollectReadiness = not a git repo, empty
 		// repo, or git error. None of these are states we can push
 		// from. Surface a clear refusal rather than silently
 		// continuing.
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			"❌ cannot read worktree git status — refusing to push\n"+
-				"hint: ensure the worktree is inside a git repo with at least one commit"), nil
+				"hint: ensure the worktree is inside a git repo with at least one commit",
+			command.FailedOutcome("not_a_repo", "the worktree is not a git repository")), nil
 	}
 
 	// 1. Hard-refuse conflicts. Pushing an unresolved state would
 	// land a broken tip on origin — no override.
 	if reason := snap.PushBlockReason(); reason != "" {
-		return reply(ctx, cs.Emitter(), chatID, messageID, reason), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, reason,
+			command.FailedOutcome("error", "the worktree has unresolved conflicts")), nil
 	}
 
 	// 1b. Refuse detached HEAD. Pushing from detached HEAD with
@@ -79,8 +84,9 @@ func dispatchPush(
 	// (the two gates share the same readiness snapshot, so the
 	// policy stays consistent).
 	if snap.Branch == "" {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			"❌ detached HEAD — checkout a named branch first"), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+			"❌ detached HEAD — checkout a named branch first",
+			command.FailedOutcome("detached", "the worktree is on a detached HEAD")), nil
 	}
 
 	// 1c. Refuse dirty worktree. After the F-XX commit/push split,
@@ -89,9 +95,10 @@ func dispatchPush(
 	// intentionally wants to commit later; either way, push is
 	// the wrong next step. Surface a "commit first" guidance.
 	if !snap.WorkingTreeIsClean() {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			"❌ worktree is dirty — /gtw push no longer auto-commits\n"+
-				"hint: run `/gtw commit` first, then `/gtw push`"), nil
+				"hint: run `/gtw commit` first, then `/gtw push`",
+			command.FailedOutcome("dirty", "the worktree has uncommitted changes")), nil
 	}
 
 	// 2. Nothing to do. Note: a branch with no upstream at all
@@ -99,10 +106,12 @@ func dispatchPush(
 	// branch was never published; programmaticPush handles the
 	// first push).
 	if snap.HasNothingToPush() {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			"ℹ️ nothing to push\n"+
 				"  no uncommitted changes\n"+
-				"  no unpushed commits on "+snap.Branch), nil
+				"  no unpushed commits on "+snap.Branch,
+			command.NoopOutcome("the branch has nothing to push",
+				map[string]string{"branch": snap.Branch})), nil
 	}
 
 	// 3. Capture originBefore (the previous origin/<branch> tip)
@@ -117,8 +126,9 @@ func dispatchPush(
 	// useless for the post-push log query).
 	originBefore, err := originBranchSHA(ctx, c.Worktree, c.Branch, deps)
 	if err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ read origin/%s: %v", c.Branch, err)), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+			fmt.Sprintf("❌ read origin/%s: %v", c.Branch, err),
+			command.FailedOutcome("error", "the remote branch could not be read")), nil
 	}
 
 	// 4. Push with retry + post-push verification
@@ -126,7 +136,8 @@ func dispatchPush(
 	if err := programmaticPushWithRetry(ctx, deps, c); err != nil {
 		// err.Error() is already a complete IM-friendly message
 		// (per F-56 §4.3 design). Paste it straight in.
-		return reply(ctx, cs.Emitter(), chatID, messageID, err.Error()), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, err.Error(),
+			command.FailedOutcome("rejected", "the push was rejected")), nil
 	}
 
 	// 5. Build the success card from git log — NOT from agent
@@ -157,10 +168,27 @@ func dispatchPush(
 	} else {
 		revRange = firstPushRevRange(ctx, c, deps)
 	}
-	card, err := replyPushSuccessCard(ctx, c, revRange, deps)
+	card, commitCount, err := replyPushSuccessCard(ctx, c, revRange, deps)
 	if err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ push succeeded but couldn't render card: %v", err)), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+			fmt.Sprintf("❌ push succeeded but couldn't render card: %v", err),
+			command.FailedOutcome("error", "the push landed but its result could not be read")), nil
 	}
-	return reply(ctx, cs.Emitter(), chatID, messageID, card), nil
+	// The remote tip the push left behind. Read it back so a
+	// program knows which commit origin now points at — the local
+	// remote-tracking ref is updated by the push itself.
+	remoteHead, _ := originBranchSHA(ctx, c.Worktree, c.Branch, deps)
+	data := map[string]string{
+		"branch":  c.Branch,
+		"commits": fmt.Sprintf("%d", commitCount),
+	}
+	if remoteHead != "" {
+		data["remote_head"] = remoteHead
+	}
+	return replyOutcome(ctx, cs.Emitter(), chatID, messageID, card,
+		messages.Outcome{
+			Status:  messages.OutcomeOK,
+			Summary: fmt.Sprintf("pushed %d commit(s) to %s", commitCount, c.Branch),
+			Data:    data,
+		}), nil
 }

@@ -22,6 +22,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // abortCmdSpec declares /gtw abort's argv grammar for the shared
@@ -56,8 +57,9 @@ func aborted(ctx context.Context) bool {
 //
 // The card is returned as a SlashOutput reply; the runtime emits it
 // as one OutCommandReply.
-func (f *Factory) runAbort(_ context.Context, _ *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
+func (f *Factory) runAbort(ctx context.Context, _ *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 	if _, err := command.ParseCmdArgs(input.Args[2:], abortCmdSpec); err != nil {
+		reportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ %v", err),
 			Consumed: true,
@@ -66,11 +68,20 @@ func (f *Factory) runAbort(_ context.Context, _ *chatsession.ChatSession, input 
 
 	sub, elapsed, ok := f.mgr.abortRun(input.ChatID)
 	if !ok {
+		reportOutcome(ctx, command.NoopOutcome("no /gtw command was running", nil))
 		return &command.SlashOutput{
 			Reply:    "✨ nothing to abort",
 			Consumed: true,
 		}, nil
 	}
+	reportOutcome(ctx, messages.Outcome{
+		Status:  messages.OutcomeOK,
+		Summary: fmt.Sprintf("aborted /gtw %s", sub),
+		Data: map[string]string{
+			"subcommand": sub,
+			"elapsed":    elapsed.String(),
+		},
+	})
 	return &command.SlashOutput{
 		Reply:    abortCard(sub, elapsed),
 		Consumed: true,

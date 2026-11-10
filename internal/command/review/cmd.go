@@ -286,18 +286,45 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	// parser can recognize `--agent`.
 	spec, err := parseReviewArgs(input.Args[1:])
 	if err != nil {
+		chatsession.ReportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
 	if err := validateReviewFlags(spec); err != nil {
+		chatsession.ReportOutcome(ctx, command.FailedOutcome("usage", "the flag combination is not valid"))
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
 
 	// Apply the global scope before the chat session is consulted.
-	notices, done, err := applyGlobalScope(spec)
+	notices, done, writeFailed, err := applyGlobalScope(spec)
 	if err != nil {
+		// An agent name that is not registered is a different
+		// failure than a failed write — the program branches on it.
+		reason := "config_error"
+		summary := "the review agent could not be persisted"
+		if errors.Is(err, errUnknownReviewAgent) {
+			reason = "unknown_agent"
+			summary = "the review agent is not a registered agent"
+		}
+		chatsession.ReportOutcome(ctx, command.FailedOutcome(reason, summary))
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
+	if writeFailed {
+		// The review still runs, but persisting the runner did
+		// not happen — half of what was asked. The review's own
+		// verdict merges underneath this one.
+		chatsession.ReportOutcome(ctx, messages.Outcome{
+			Status:  messages.OutcomeIncomplete,
+			Summary: "the review agent could not be persisted",
+			Data:    map[string]string{"reason": "config_write_failed"},
+		})
+	}
 	if done {
+		// --unset: the persisted runner is gone and no review runs.
+		chatsession.ReportOutcome(ctx, messages.Outcome{
+			Status:  messages.OutcomeOK,
+			Summary: "the global review agent was removed",
+			Data:    map[string]string{"scope": "global"},
+		})
 		return command.Reply(ctx, rt, strings.Join(notices, "\n")), nil
 	}
 
@@ -338,14 +365,17 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 	if err != nil {
 		switch {
 		case errors.Is(err, chatsession.ErrNoSelectedCwd):
+			chatsession.ReportOutcome(ctx, command.FailedOutcome("no_cwd", "no workspace is set"))
 			return replyWith(ctx, rt, notices,
 				"❌ no workspace set. Send /cwd <path> first.",
 			), nil
 		case errors.Is(err, chatsession.ErrNoSelectedAgent):
+			chatsession.ReportOutcome(ctx, command.FailedOutcome("no_agent", "no agent is selected"))
 			return replyWith(ctx, rt, notices,
 				"❌ no active agent configured. Run /use <agent> first.",
 			), nil
 		default:
+			chatsession.ReportOutcome(ctx, command.FailedOutcome("error", "the agent could not be activated"))
 			return replyWith(ctx, rt, notices, fmt.Sprintf(
 				"❌ failed to activate agent: %v", err,
 			)), nil
@@ -377,6 +407,7 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 		notices = append(notices, warn)
 	}
 	if runnerName == "" {
+		chatsession.ReportOutcome(ctx, command.FailedOutcome("no_agent", "no agent is selected"))
 		return replyWith(ctx, rt, notices,
 			"❌ no active agent configured. Run /use <agent> first.",
 		), nil
@@ -391,6 +422,9 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 		if spec.Agent != "" {
 			suffix = " (--agent)"
 		}
+		chatsession.ReportOutcome(ctx, command.FailedOutcomeData("unknown_agent",
+			"the review runner is not a registered agent",
+			map[string]string{"agent": runnerName}))
 		return replyWith(ctx, rt, notices, fmt.Sprintf(
 			"❌ unknown agent %q%s", runnerName, suffix,
 		)), nil
@@ -519,8 +553,9 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 		// chat's resume state alone: there is nothing new to resume
 		// from, and the previous run's unfinished groups are still
 		// unfinished.
-		if outcomes := collector.results(); len(outcomes) > 0 {
-			f.record(chatID, runnerName, workspace, outcomes)
+		groupOutcomes := collector.results()
+		if len(groupOutcomes) > 0 {
+			f.record(chatID, runnerName, workspace, groupOutcomes)
 		}
 		finish()
 
@@ -599,10 +634,29 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 		// ends up with is the merged one: a failed injection
 		// outranks this, and the injected turn's own end decides
 		// the rest.
+		//
+		// A group that failed does not fail the review — the
+		// surviving groups' findings are still useful — but it is
+		// not a clean success either. The group counts come from
+		// the collector, never from the review text.
+		groups, unfinished := groupCounts(groupOutcomes)
+		status := messages.OutcomeOK
+		summary := "review delivered"
+		if unfinished > 0 {
+			status = messages.OutcomeIncomplete
+			summary = fmt.Sprintf("%d of %d groups unfinished", unfinished, groups)
+		}
+		data := map[string]string{"agent": runnerName}
+		if groups > 0 {
+			data["groups"] = fmt.Sprintf("%d", groups)
+		}
+		if unfinished > 0 {
+			data["unfinished_groups"] = fmt.Sprintf("%d", unfinished)
+		}
 		work.Report(messages.Outcome{
-			Status:  messages.OutcomeOK,
-			Summary: "review delivered",
-			Data:    map[string]string{"agent": runnerName},
+			Status:  status,
+			Summary: summary,
+			Data:    data,
 		})
 
 		// 1) Inject into AS as a user turn — main agent sees
@@ -693,6 +747,7 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 
 	rec, ok := f.lookup(chatID)
 	if !ok {
+		chatsession.ReportOutcome(ctx, command.FailedOutcome("no_review", "this chat has no review to continue"))
 		return replyWith(ctx, rt, notices,
 			"❌ no review to continue — run /review first",
 		), nil
@@ -701,6 +756,8 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 	// concurrent --continue commands must not both resume the same
 	// group sessions. The check and the mark happen under one lock.
 	if !f.startContinuation(chatID) {
+		chatsession.ReportOutcome(ctx, command.FailedOutcome("already_running",
+			"a review is already running in this chat"))
 		return replyWith(ctx, rt, notices,
 			"❌ a review is already running in this chat",
 		), nil
@@ -713,6 +770,9 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 	jobs, why := rec.resumable()
 	if why != "" {
 		release()
+		// The ℹ️ cards here mean "there was nothing to resume" —
+		// the last review finished, or its one retry is spent.
+		chatsession.ReportOutcome(ctx, command.NoopOutcome("there was nothing to resume", nil))
 		return replyWith(ctx, rt, notices, why), nil
 	}
 
@@ -720,6 +780,9 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 	starter, err := agent.Builtins.Get(runnerName)
 	if err != nil {
 		release()
+		chatsession.ReportOutcome(ctx, command.FailedOutcomeData("unknown_agent",
+			"the review runner is not a registered agent",
+			map[string]string{"agent": runnerName}))
 		return replyWith(ctx, rt, notices, fmt.Sprintf(
 			"❌ unknown agent %q", runnerName,
 		)), nil
@@ -733,14 +796,17 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 		release()
 		switch {
 		case errors.Is(err, chatsession.ErrNoSelectedCwd):
+			chatsession.ReportOutcome(ctx, command.FailedOutcome("no_cwd", "no workspace is set"))
 			return replyWith(ctx, rt, notices,
 				"❌ no workspace set. Send /cwd <path> first.",
 			), nil
 		case errors.Is(err, chatsession.ErrNoSelectedAgent):
+			chatsession.ReportOutcome(ctx, command.FailedOutcome("no_agent", "no agent is selected"))
 			return replyWith(ctx, rt, notices,
 				"❌ no active agent configured. Run /use <agent> first.",
 			), nil
 		default:
+			chatsession.ReportOutcome(ctx, command.FailedOutcome("error", "the agent could not be activated"))
 			return replyWith(ctx, rt, notices, fmt.Sprintf(
 				"❌ failed to activate agent: %v", err,
 			)), nil
@@ -810,7 +876,8 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 		// The write is conditional on the record still being the one
 		// this continuation resumed from: a review that finished in
 		// the meantime owns the chat's resume state.
-		f.recordIfCurrent(chatID, rec.id, runnerName, workspace, collector.spentResults())
+		groupOutcomes := collector.spentResults()
+		f.recordIfCurrent(chatID, rec.id, runnerName, workspace, groupOutcomes)
 		finish()
 
 		if err != nil {
@@ -845,10 +912,32 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 		formatted := agent.FormatReviewMessage(workspace, runnerName, result.Text)
 		blocks := []agent.ContentBlock{{Type: agent.ContentText, Text: formatted}}
 
+		// A resumed group that failed again did not finish its
+		// work — the continuation is not a clean success. The
+		// counts come from the collector, never from the text.
+		//
+		// A continuation fans out over the groups it RESUMED, not
+		// over every group of the review it continues — so its
+		// count goes under `resumed_groups`, and `groups` keeps
+		// meaning "the groups of the review".
+		resumed, unfinished := groupCounts(groupOutcomes)
+		status := messages.OutcomeOK
+		summary := "review continued"
+		if unfinished > 0 {
+			status = messages.OutcomeIncomplete
+			summary = fmt.Sprintf("%d of %d resumed groups unfinished", unfinished, resumed)
+		}
+		data := map[string]string{"agent": runnerName}
+		if resumed > 0 {
+			data["resumed_groups"] = fmt.Sprintf("%d", resumed)
+		}
+		if unfinished > 0 {
+			data["unfinished_groups"] = fmt.Sprintf("%d", unfinished)
+		}
 		work.Report(messages.Outcome{
-			Status:  messages.OutcomeOK,
-			Summary: "review continued",
-			Data:    map[string]string{"agent": runnerName},
+			Status:  status,
+			Summary: summary,
+			Data:    data,
 		})
 
 		// Same contract as a plain review: the injected turn is
@@ -880,6 +969,11 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 	return replyWith(ctx, rt, notices, ""), nil
 }
 
+// errUnknownReviewAgent is the failure of a -g flag that names an
+// agent no registered starter answers to. It is distinct from a
+// failed write: nothing was written, and the name itself is wrong.
+var errUnknownReviewAgent = errors.New("unknown agent")
+
 // applyGlobalScope performs the global-scope write of one /review
 // invocation: `-g` persists the runner, `--unset` removes it.
 //
@@ -887,36 +981,36 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 // done — the unset path starts no review. A failed write is a
 // notice, not an error: the review is the primary action and must
 // still run.
-func applyGlobalScope(spec Spec) (notices []string, done bool, err error) {
+func applyGlobalScope(spec Spec) (notices []string, done bool, writeFailed bool, err error) {
 	if !spec.Global && !spec.Unset {
-		return nil, false, nil
+		return nil, false, false, nil
 	}
 	path := config.DefaultPath()
 	switch {
 	case spec.Unset:
 		if err := config.UnsetReviewAgent(path); err != nil {
-			return nil, false, fmt.Errorf("failed to unset review.agent: %w", err)
+			return nil, false, false, fmt.Errorf("failed to unset review.agent: %w", err)
 		}
-		return []string{"✅ review.agent unset (global)", "→ file: " + path}, true, nil
+		return []string{"✅ review.agent unset (global)", "→ file: " + path}, true, false, nil
 	case spec.Global:
 		// The name must be a registered agent — a persisted name
 		// that no agent answers to would only fail later, on every
 		// /review run.
 		if _, err := agent.Builtins.Get(spec.Agent); err != nil {
-			return nil, false, fmt.Errorf("unknown agent %q", spec.Agent)
+			return nil, false, false, fmt.Errorf("%w %q", errUnknownReviewAgent, spec.Agent)
 		}
 		if err := config.SetReviewAgent(path, spec.Agent); err != nil {
 			return []string{fmt.Sprintf(
 				"⚠️ failed to save review.agent: %v — reviewing with %s anyway",
 				err, spec.Agent,
-			)}, false, nil
+			)}, false, true, nil
 		}
 		return []string{
 			fmt.Sprintf("✅ review.agent = %s (global)", spec.Agent),
 			"→ file: " + path,
-		}, false, nil
+		}, false, false, nil
 	}
-	return nil, false, nil
+	return nil, false, false, nil
 }
 
 // readGlobalReviewAgent reads the persisted review.agent from the

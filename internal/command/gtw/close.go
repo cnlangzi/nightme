@@ -11,6 +11,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/command/newcmd"
+	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/pathutil"
 )
 
@@ -148,8 +149,9 @@ func RunClose(
 	// otherwise they accumulate as orphans and drag the daemon
 	// down.
 	if selectedCwd == "" {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			"❌ "+command.NoActiveCwdReply), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+			"❌ "+command.NoActiveCwdReply,
+			command.FailedOutcome("no_cwd", "the command needs an active workspace")), nil
 	}
 	// Stat failure handling: split the permanent case from the
 	// transient case. IsNotExist means another /gtw close (or an
@@ -174,11 +176,12 @@ func RunClose(
 	}
 	if _, statErr := statPath(normalizedCwd); statErr != nil {
 		if !os.IsNotExist(statErr) {
-			return reply(ctx, cs.Emitter(), chatID, messageID,
+			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 				fmt.Sprintf("❌ cannot reach workspace: %s\n(stat: %v)\n"+
 					"hint: this may be transient (e.g. NFS hiccup, briefly-unmounted volume). "+
 					"retry /gtw close once the path is reachable again — the in-flight fix and "+
-					"agent sessions are left intact.", selectedCwd, statErr)), nil
+					"agent sessions are left intact.", selectedCwd, statErr),
+				command.FailedOutcome("error", "the workspace could not be reached")), nil
 		}
 		// Always tear down ASes pinned to the unreachable path —
 		// they are orphaned regardless of why the cwd vanished.
@@ -195,29 +198,38 @@ func RunClose(
 				"%scleared the dangling cwd.\n"+
 				"hint: run /cwd <path> to point this chat at a directory again.",
 			selectedCwd, agentsLine)
-		return reply(ctx, cs.Emitter(), chatID, messageID, body), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, body,
+			messages.Outcome{
+				Status:  messages.OutcomeIncomplete,
+				Summary: "the workspace is gone; the dangling state was cleared",
+				Data:    map[string]string{"reason": "workspace_unreachable"},
+			}), nil
 	}
 
 	// --- step 1+2: locate the snapshot ---------------------------
 	c, err := ReadGTWYml(selectedCwd)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return reply(ctx, cs.Emitter(), chatID, messageID,
+			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 				"❌ no active fix to close in this chat\n"+
 					"hint: /cwd into the /gtw fix worktree first (its "+
-					"`.nightme/gtw.yml` is the close source of truth)."), nil
+					"`.nightme/gtw.yml` is the close source of truth).",
+				command.FailedOutcome("no_active_fix", "there is no active fix to close")), nil
 		}
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ failed to read .nightme/gtw.yml: %v", err)), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+			fmt.Sprintf("❌ failed to read .nightme/gtw.yml: %v", err),
+			command.FailedOutcome("bad_state", "the gtw state file could not be read")), nil
 	}
 
 	if c.Worktree == "" {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			"❌ .nightme/gtw.yml is malformed: worktree is empty"), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+			"❌ .nightme/gtw.yml is malformed: worktree is empty",
+			command.FailedOutcome("bad_state", "the gtw state file is malformed")), nil
 	}
 	if c.RepoRoot == "" {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			"❌ .nightme/gtw.yml is malformed: repoRoot is empty"), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+			"❌ .nightme/gtw.yml is malformed: repoRoot is empty",
+			command.FailedOutcome("bad_state", "the gtw state file is malformed")), nil
 	}
 
 	// --- step 2.5: remove nightme/wip label (issue-backed fixes) ---
@@ -247,6 +259,8 @@ func RunClose(
 		// Helper already sent a user-facing error reply. Bail
 		// before any local cleanup so the yml-driven state
 		// (worktree + branch + ASes) stays fully intact.
+		reportOutcome(ctx, command.FailedOutcome("label_error",
+			"the issue label could not be removed"))
 		return &Result{Consumed: true}, nil
 	}
 
@@ -286,7 +300,8 @@ func RunClose(
 			// same starting state.
 			body += "\n" + compensateWIPLabel(ctx, labelProvider, c, labelOwner, labelRepo)
 		}
-		return reply(ctx, cs.Emitter(), chatID, messageID, body), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, body,
+			command.FailedOutcome("dirty", "the worktree has uncommitted changes")), nil
 	}
 
 	// --- step 4: git worktree remove ------------------------------
@@ -307,7 +322,8 @@ func RunClose(
 			// "in flight" marker so a retry converges.
 			body += "\n" + compensateWIPLabel(ctx, labelProvider, c, labelOwner, labelRepo)
 		}
-		return reply(ctx, cs.Emitter(), chatID, messageID, body), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, body,
+			command.FailedOutcome("error", "the worktree could not be removed")), nil
 	}
 
 	// --- step 5: delete the local branch --------------------------
@@ -332,7 +348,8 @@ func RunClose(
 			// doesn't drift while the user investigates).
 			body += "\n" + compensateWIPLabel(ctx, labelProvider, c, labelOwner, labelRepo)
 		}
-		return reply(ctx, cs.Emitter(), chatID, messageID, body), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, body,
+			command.FailedOutcome("error", "the branch could not be deleted")), nil
 	}
 
 	// --- step 6: switch CWD back to repoRoot ----------------------
@@ -344,9 +361,18 @@ func RunClose(
 		slog.Default().Warn("gtw: SetSelectedCwd back to repoRoot failed",
 			"repo_root", c.RepoRoot,
 			"err", err)
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("⚠️ worktree removed but SetSelectedCwd(%s) failed: %v\n"+
-				"run `/cwd %s` manually.", c.RepoRoot, err, c.RepoRoot)), nil
+				"run `/cwd %s` manually.", c.RepoRoot, err, c.RepoRoot),
+			messages.Outcome{
+				Status:  messages.OutcomeIncomplete,
+				Summary: "the worktree was removed but the chat stayed in it",
+				Data: map[string]string{
+					"reason":    "cwd_not_restored",
+					"worktree":  c.Worktree,
+					"repo_root": c.RepoRoot,
+				},
+			}), nil
 	}
 
 	// --- step 6.5: clear PR cache for the workspace ----------------
@@ -441,7 +467,7 @@ func RunClose(
 	//
 	// Single terminal step: all three sync branches (error /
 	// normal / skip) fall through to the same return.
-	syncBody, syncErr := buildSyncReply(ctx, c.RepoRoot, deps)
+	syncBody, _, syncErr := buildSyncReply(ctx, c.RepoRoot, deps)
 	if syncErr != nil {
 		reply(ctx, cs.Emitter(), chatID, messageID,
 			"❌ sync failed: "+syncErr.Error())
@@ -452,6 +478,32 @@ func RunClose(
 	// card. close's card (and /new card when applicable) still
 	// stand.
 
+	// The teardown itself succeeded; the sync that follows it is a
+	// separate step. A failed sync leaves the work closed but the
+	// default branch unrefreshed — half of the command's work
+	// happened.
+	if syncErr != nil {
+		reportOutcome(ctx, messages.Outcome{
+			Status:  messages.OutcomeIncomplete,
+			Summary: "the worktree was closed but the main branch could not be synced",
+			Data: map[string]string{
+				"reason":    "sync_failed",
+				"branch":    c.Branch,
+				"worktree":  c.Worktree,
+				"repo_root": c.RepoRoot,
+			},
+		})
+		return &Result{Consumed: true}, nil
+	}
+	reportOutcome(ctx, messages.Outcome{
+		Status:  messages.OutcomeOK,
+		Summary: fmt.Sprintf("closed the fix on branch %s", c.Branch),
+		Data: map[string]string{
+			"branch":    c.Branch,
+			"worktree":  c.Worktree,
+			"repo_root": c.RepoRoot,
+		},
+	})
 	return &Result{Consumed: true}, nil
 }
 

@@ -52,8 +52,29 @@ type Outcome struct {
 | 键 | 含义 |
 | --- | --- |
 | `end_reason` | 回合结束原因（`clean` / `user-stopped` / `user-killed` / …） |
-| `reason` | 结束原因分类（`queue_full` / `dropped` / `watch_mode` / `no_agent` / `panic` / `no_diff` / `not_supported` / `inject_failed` / `error`） |
+| `reason` | 结束原因分类（见 §7.1） |
 | `agent` | 跑这件事的 agent 名 |
+| `issue` | `/gtw fix` 处理的 issue 号（本地模式为 `-1`） |
+| `branch` | 分支名 |
+| `worktree` | worktree 路径 |
+| `repo_root` | 主仓库根目录 |
+| `mode` | `/gtw fix` 的模式（`remote` / `local`） |
+| `topic` | `/gtw plan` 的主题 |
+| `sha_range` | commit 区间（`<before>..HEAD`） |
+| `commits` | commit 条数（`/gtw commit` 与 `/gtw push` 给出确切条数；`/gtw sync` 的卡片只列前 10 条，所以它不给这个键） |
+| `remote_head` | push 之后 `origin/<branch>` 指向的 sha（读不到时这个键不出现） |
+| `pr_number` / `pr_url` | PR 的编号 / 链接 |
+| `groups` | review 跑了几组（`/review`） |
+| `resumed_groups` | 续跑恢复了几组（`/review --continue` 只跑没完成的那几组） |
+| `unfinished_groups` | 其中没跑完的组数 |
+| `subcommand` | 被 `/gtw abort` 取消的子命令 |
+| `elapsed` | 被取消的子命令已经跑了多久 |
+| `repo` | 仓库（`owner/repo`） |
+| `issues` | `/gtw new -y` 开出来的 issue 编号（逗号分隔） |
+| `kept` | 还没开成 issue 的草稿数 |
+| `lang` / `scope` | `/gtw config` 的语言与作用域（`global` / `repo` / `default`） |
+| `unset` | `/gtw config --unset` 删掉了这个设置（值是 `true`） |
+| `cwd` | `/cwd` 设好的工作区路径 |
 
 `Data` 刻意是 `map[string]string` 而不是 struct：不同命令产出不同的事实，程序只读自己关心的键。
 
@@ -67,11 +88,13 @@ type Outcome struct {
 | `noop` | 没有可做的事——请求有效，但世界已经满足它 |
 | `incomplete` | 做了一部分，剩下的没做完 |
 | `failed` | 没做完 |
-| `cancelled` | 被用户或操作者中止 |
+| `cancelled` | 被用户或操作者中止（`/stop` 停掉的回合、`/gtw abort` 取消的命令） |
 | `timeout` | 跑超时了（**保留**，当前没有命令产出它） |
 | `unknown` | 没有任何一方上报过结论 |
 
 `unknown` 是零值语义：一条没人上报过的消息以此状态 settle；合并时也只有在**没有任何一方上报**的情况下才产生它。
+
+`/gtw`、`/review`、`/cwd`、`/use`、`/stop` 的每一条退出路径都会上报一个非 `unknown` 的结论。`/close`、`/queue`、`/steer`、`/think`、`/tools`、`/watch`、`/new`、`/resume`、`/handoff`、`/wiki` 仍然 settle 成 `unknown`。
 
 ---
 
@@ -148,7 +171,7 @@ settled 不是"命令返回时"发，是"**这条消息引发的工作全部结�
 | `/gtw close` `/gtw back` `/gtw config` `/gtw sync` `/gtw abort` | 不跑回合 | 命令返回时 |
 | `/cwd` `/use` `/think` `/tools` `/watch` `/format` | 不跑回合 | 命令返回时 |
 | `/new` | 重置会话上下文（不跑回合） | 命令返回时 |
-| `/stop` | 同步结束当前回合 | 被停止的**那条用户消息** settle 成 `cancelled`；`/stop` 自己 settle 成 `unknown` |
+| `/stop` | 同步结束当前回合 | 被停止的**那条用户消息** settle 成 `cancelled`；`/stop` 自己结算它停掉的那次停（`ok` / `noop` / `failed`） |
 | `/close` | 同步关闭会话（内部结束当前回合） | 被关闭的那条用户消息 settle 成 `cancelled`；`/close` 自己 settle 成 `unknown` |
 | `/review` `/review --continue` | review goroutine + 注入回合 | 两者都结束 |
 
@@ -185,6 +208,49 @@ chatsession: message settled chat_id=… message_id=… status=… summary=…
 | `/review` 没有可 review 的 diff | `noop` | `no_diff` |
 | `/review` 的 agent 不支持 review | `failed` | `not_supported` |
 | `/review` 的 findings 没能注入 agent | `incomplete` | `inject_failed` |
+
+### 7.1 `reason` 词表
+
+`reason` 是稳定的分类码，程序按它分支，不解析卡片文本。各命令用到的码：
+
+| 码 | 含义 | 出现在 |
+| --- | --- | --- |
+| `usage` | 命令行不合法（未知 flag / 参数缺失 / 位置参数不对） | 全部 |
+| `no_cwd` | 命令需要工作区，但没有 | 全部 |
+| `wrong_cwd` | `/gtw back <worktree>` 要求当前在主仓库根目录 | `/gtw back` |
+| `no_session` | 没有聊天会话 | `/stop` |
+| `no_agent` | 没有选中的 agent | `/use` / `/review` / `/stop` |
+| `unknown_agent` | agent 名没注册 | `/review` |
+| `not_a_repo` | 工作区不在 git 仓库里 | `/gtw` |
+| `no_remote` | 仓库没有 `origin` remote | `/gtw fix` |
+| `provider_error` | git 平台解析 / 连接失败 | `/gtw fix` / `/gtw new` / `/gtw pr` |
+| `invalid_issue` / `invalid_branch` | issue 号 / 分支名不合法 | `/gtw fix` |
+| `issue_not_found` / `issue_claimed` | issue 不存在 / 已被别的 fix 占用 | `/gtw fix` |
+| `branch_exists` | 分支已经存在 | `/gtw fix` |
+| `already_active` | 当前目录已经在一个 `/gtw fix` 里 | `/gtw fix` |
+| `label_error` | issue 标签没能加上 / 摘掉 | `/gtw fix` / `/gtw close` |
+| `bad_state` | `.nightme/gtw.yml` 缺失 / 损坏 / 读不了 | `/gtw close` / `/gtw back` |
+| `no_active_fix` | 这个聊天没有正在进行的 fix | `/gtw close` / `/gtw back` |
+| `dirty` | 工作区有未提交的改动 | `/gtw push` / `/gtw close` |
+| `detached` | HEAD 是游离的 | `/gtw push` / `/gtw commit` / `/gtw pr` |
+| `conflict` | 有未解决的冲突 | `/gtw commit` |
+| `rejected` | push 被拒绝 | `/gtw push` |
+| `not_committed` | agent 跑完了但没有真的提交 | `/gtw commit` |
+| `agent_error` | agent 没跑成 / 输出不可用 | `/gtw commit` / `/gtw pr` |
+| `no_remote_branch` | 分支还没发布到 origin | `/gtw pr` |
+| `no_commits` | 分支和 base 之间没有 commit | `/gtw pr` |
+| `pr_exists` | 这个分支已经有 PR 了 | `/gtw pr` |
+| `no_drafts` / `invalid_draft` | 没有草稿 / 草稿不可用 | `/gtw new -y` |
+| `config_write_failed` | 全局 review agent 没能持久化 | `/review -g` |
+| `no_review` / `already_running` | 没有可续的 review / 已有 review 在跑 | `/review -c` |
+| `not_supported` | agent 不支持这个动作 | `/stop` |
+| `aborted` | 被 `/gtw abort` 取消 | `/gtw` |
+| `dispatch_failed` | worktree 建好了，但 issue 没送到 agent | `/gtw fix` |
+| `sync_failed` | 主体动作完成，随后的 sync 失败 | `/gtw close` / `/gtw back` |
+| `workspace_unreachable` | 工作区目录没了，只清了悬空状态 | `/gtw close` |
+| `cwd_not_changed` / `cwd_not_restored` | 工作区切了但没切成 | `/gtw close` / `/gtw back` |
+| `unknown_subcommand` | `/gtw` 的子命令不存在 | `/gtw` |
+| `error` | 其它失败 | 全部 |
 
 ---
 

@@ -41,6 +41,23 @@ func withCommandTimeout(parent context.Context) (context.Context, context.Cancel
 	return context.WithTimeout(parent, timeouts.Command)
 }
 
+// requireCwd is command.RequireActiveCwd plus the outcome the
+// refusal produces: a command that needs a workspace and has none
+// failed, and a program driving it must be able to tell that apart
+// from a command that ran and found nothing to do.
+func requireCwd(ctx context.Context, cs *chatsession.ChatSession) (string, *command.SlashOutput) {
+	cwd, failOut := command.RequireActiveCwd(cs)
+	if failOut == nil {
+		return cwd, nil
+	}
+	reason := "no_cwd"
+	if cs == nil {
+		reason = "no_session"
+	}
+	reportOutcome(ctx, command.FailedOutcome(reason, "the command needs an active workspace"))
+	return "", failOut
+}
+
 // Factory implements command.SlashCommandFactory for /gtw.
 //
 // It holds the per-process *Manager (gtw state) and the
@@ -332,6 +349,7 @@ func (f *Factory) Spec() command.Spec {
 // is bypassed; production callers must go through commander.
 func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, mgr *chatsession.Manager, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 	if len(input.Args) < 2 {
+		reportOutcome(ctx, command.FailedOutcome("usage", "no /gtw subcommand was given"))
 		return &command.SlashOutput{
 			Reply:    f.Spec().Usage,
 			Consumed: true,
@@ -425,6 +443,8 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, mgr *c
 	case "sync":
 		out, err = f.runSync(runCtx, rt, cs, input)
 	default:
+		reportOutcome(ctx, command.FailedOutcome("unknown_subcommand",
+			"unknown /gtw subcommand "+input.Args[1]))
 		return &command.SlashOutput{
 			Reply:    "Unknown subcommand: " + input.Args[1] + "\n" + f.Spec().Usage,
 			Consumed: true,
@@ -432,7 +452,13 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, mgr *c
 	}
 	if aborted(runCtx) {
 		// Cancelled by /gtw abort: the abort card is the only
-		// message this run produces.
+		// message this run produces. The outcome is `cancelled` —
+		// the run did not fail, it was stopped.
+		chatsession.ReportOutcome(ctx, messages.Outcome{
+			Status:  messages.OutcomeCancelled,
+			Summary: "the command was cancelled by /gtw abort",
+			Data:    map[string]string{"reason": "aborted"},
+		})
 		return &command.SlashOutput{Consumed: true}, nil
 	}
 	return out, err
@@ -442,7 +468,7 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, mgr *c
 // prose for the agent, so it bypasses command.ParseCmdArgs like
 // /steer does: a leading "-" is data, not a flag.
 func (f *Factory) runPlan(ctx context.Context, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
-	if _, failOut := command.RequireActiveCwd(cs); failOut != nil {
+	if _, failOut := requireCwd(ctx, cs); failOut != nil {
 		return failOut, nil
 	}
 	topic := strings.Join(input.Args[2:], " ")
@@ -459,12 +485,13 @@ func (f *Factory) runPlan(ctx context.Context, cs *chatsession.ChatSession, inpu
 func (f *Factory) runNew(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 	args, err := parseNewIssueArgs(input.Args[2:])
 	if err != nil {
+		reportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ %v", err),
 			Consumed: true,
 		}, nil
 	}
-	if _, failOut := command.RequireActiveCwd(cs); failOut != nil {
+	if _, failOut := requireCwd(ctx, cs); failOut != nil {
 		return failOut, nil
 	}
 
@@ -491,6 +518,7 @@ func (f *Factory) runNew(ctx context.Context, _ command.RuntimeServices, cs *cha
 			return e
 		})
 	if err != nil {
+		reportOutcome(ctx, command.FailedOutcome("error", "the issues could not be created"))
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ /gtw new failed: %v", err),
 			Consumed: true,
@@ -516,6 +544,7 @@ func (f *Factory) runNew(ctx context.Context, _ command.RuntimeServices, cs *cha
 // (empty argv) and parse-error replies stay in lockstep.
 func (f *Factory) runFix(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 	if len(input.Args) < 3 {
+		reportOutcome(ctx, command.FailedOutcome("usage", "no issue id or branch name was given"))
 		return &command.SlashOutput{
 			Reply:    fixCmdSpec.Usage,
 			Consumed: true,
@@ -529,6 +558,7 @@ func (f *Factory) runFix(ctx context.Context, _ command.RuntimeServices, cs *cha
 		// post-parse checks (mutual exclusion, missing arg) do
 		// the same via spec.UsageTail(). A single "❌ " prefix
 		// is all the caller needs to layer on top.
+		reportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ %v", err),
 			Consumed: true,
@@ -544,6 +574,8 @@ func (f *Factory) runFix(ctx context.Context, _ command.RuntimeServices, cs *cha
 	if args.Mode == ModeLocal {
 		derived, derr := DeriveBranchFromName(args.RawArg)
 		if derr != nil {
+			reportOutcome(ctx, command.FailedOutcome("invalid_branch",
+				"the branch name could not be derived"))
 			return &command.SlashOutput{
 				Reply:    fmt.Sprintf("❌ %v", derr),
 				Consumed: true,
@@ -556,6 +588,7 @@ func (f *Factory) runFix(ctx context.Context, _ command.RuntimeServices, cs *cha
 	// the GitHub/GitLab convention users have muscle memory for.
 	if args.Mode == ModeRemote {
 		if _, err := parseIssueID(args.RawArg); err != nil {
+			reportOutcome(ctx, command.FailedOutcome("invalid_issue", "the issue id is not valid"))
 			return &command.SlashOutput{
 				Reply:    fmt.Sprintf("Invalid issue id: %q (%v)", args.RawArg, err),
 				Consumed: true,
@@ -567,7 +600,7 @@ func (f *Factory) runFix(ctx context.Context, _ command.RuntimeServices, cs *cha
 	// that /cwd, /use, /close and other slash commands see in
 	// the same chat. No second lookup, no cache that could go
 	// stale.
-	_, failOut := command.RequireActiveCwd(cs)
+	_, failOut := requireCwd(ctx, cs)
 	if failOut != nil {
 		return failOut, nil
 	}
@@ -606,6 +639,7 @@ func (f *Factory) runFix(ctx context.Context, _ command.RuntimeServices, cs *cha
 			return e
 		})
 	if err != nil {
+		reportOutcome(ctx, command.FailedOutcome("error", "the worktree could not be created"))
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ /gtw fix failed: %v", err),
 			Consumed: true,
@@ -753,6 +787,7 @@ func (f *Factory) runClose(ctx context.Context, _ command.RuntimeServices, cs *c
 		MinArgs: 0,
 		MaxArgs: 0,
 	}); err != nil {
+		reportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ %v", err),
 			Consumed: true,
@@ -789,6 +824,7 @@ func (f *Factory) runClose(ctx context.Context, _ command.RuntimeServices, cs *c
 			return e
 		})
 	if err != nil {
+		reportOutcome(ctx, command.FailedOutcome("error", "the worktree could not be closed"))
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ /gtw close failed: %v", err),
 			Consumed: true,
@@ -830,6 +866,7 @@ func (f *Factory) runBack(ctx context.Context, _ command.RuntimeServices, cs *ch
 		MaxArgs: 1,
 	})
 	if err != nil {
+		reportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ %v", err),
 			Consumed: true,
@@ -843,7 +880,7 @@ func (f *Factory) runBack(ctx context.Context, _ command.RuntimeServices, cs *ch
 	// RunBack is ever called, so RunBack can trust its input.
 	// RunBack also has a defensive guard for direct callers
 	// (tests, future call sites) — belt and suspenders.
-	if _, failOut := command.RequireActiveCwd(cs); failOut != nil {
+	if _, failOut := requireCwd(ctx, cs); failOut != nil {
 		return failOut, nil
 	}
 
@@ -872,6 +909,7 @@ func (f *Factory) runBack(ctx context.Context, _ command.RuntimeServices, cs *ch
 				return e
 			})
 		if err != nil {
+			reportOutcome(ctx, command.FailedOutcome("error", "the worktree could not be entered"))
 			return &command.SlashOutput{
 				Reply:    fmt.Sprintf("❌ /gtw back failed: %v", err),
 				Consumed: true,
@@ -902,6 +940,7 @@ func (f *Factory) runBack(ctx context.Context, _ command.RuntimeServices, cs *ch
 			return e
 		})
 	if err != nil {
+		reportOutcome(ctx, command.FailedOutcome("error", "the worktree could not be entered"))
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ /gtw back failed: %v", err),
 			Consumed: true,
@@ -928,6 +967,7 @@ func (f *Factory) runBack(ctx context.Context, _ command.RuntimeServices, cs *ch
 func (f *Factory) runPush(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 	args, err := parsePushArgs(input.Args[2:])
 	if err != nil {
+		reportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ %v", err),
 			Consumed: true,
@@ -953,6 +993,7 @@ func (f *Factory) runPush(ctx context.Context, _ command.RuntimeServices, cs *ch
 			return e
 		})
 	if err != nil {
+		reportOutcome(ctx, command.FailedOutcome("error", "the branch could not be pushed"))
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ /gtw push failed: %v", err),
 			Consumed: true,
@@ -973,6 +1014,7 @@ func (f *Factory) runPush(ctx context.Context, _ command.RuntimeServices, cs *ch
 func (f *Factory) runCommit(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 	args, err := parseCommitArgs(input.Args[2:])
 	if err != nil {
+		reportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ %v", err),
 			Consumed: true,
@@ -994,6 +1036,7 @@ func (f *Factory) runCommit(ctx context.Context, _ command.RuntimeServices, cs *
 			return e
 		})
 	if err != nil {
+		reportOutcome(ctx, command.FailedOutcome("error", "the work could not be committed"))
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ /gtw commit failed: %v", err),
 			Consumed: true,
@@ -1021,13 +1064,14 @@ func (f *Factory) runSync(ctx context.Context, _ command.RuntimeServices, cs *ch
 		MinArgs: 0,
 		MaxArgs: 0,
 	}); err != nil {
+		reportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ %v", err),
 			Consumed: true,
 		}, nil
 	}
 
-	cwd, failOut := command.RequireActiveCwd(cs)
+	cwd, failOut := requireCwd(ctx, cs)
 	if failOut != nil {
 		return failOut, nil
 	}
@@ -1038,6 +1082,7 @@ func (f *Factory) runSync(ctx context.Context, _ command.RuntimeServices, cs *ch
 	hcFn := func() HookContext { return hc }
 
 	var replyText string
+	var syncFacts *syncOutcome
 	err := f.withHooks(ctx, cs, input.ChatID, input.MessageID,
 		loadNotes, hcFn, cfg.Sync.Hooks.Before, cfg.Sync.Hooks.After,
 		func() error {
@@ -1050,11 +1095,12 @@ func (f *Factory) runSync(ctx context.Context, _ command.RuntimeServices, cs *ch
 			// (buildSyncReply honours it as a short-circuit —
 			// but a real user calling /gtw sync should never
 			// see that flag set).
-			body, e := buildSyncReply(ctx, repoRoot, f.deps)
+			body, facts, e := buildSyncReply(ctx, repoRoot, f.deps)
 			if e != nil {
 				return e
 			}
 			replyText = body
+			syncFacts = facts
 			// Re-derive so post-hook env is always fresh,
 			// matching the runPush/runClose/runCommit
 			// pattern. Today sync doesn't mutate cs.SelectedCwd
@@ -1066,7 +1112,22 @@ func (f *Factory) runSync(ctx context.Context, _ command.RuntimeServices, cs *ch
 			return nil
 		})
 	if err != nil {
+		reportOutcome(ctx, command.FailedOutcome("error", "the branch could not be synced"))
 		return &command.SlashOutput{Reply: fmt.Sprintf("❌ %v", err), Consumed: true}, nil
+	}
+	// A branch that was already up to date had nothing to pull —
+	// that is a noop, not a success with a commit count.
+	switch {
+	case syncFacts == nil:
+		reportOutcome(ctx, command.NoopOutcome("the sync was skipped", nil))
+	case !syncFacts.pulled:
+		reportOutcome(ctx, command.NoopOutcome("the branch was already up to date", syncFacts.data()))
+	default:
+		reportOutcome(ctx, messages.Outcome{
+			Status:  messages.OutcomeOK,
+			Summary: "the branch was synced",
+			Data:    syncFacts.data(),
+		})
 	}
 	return &command.SlashOutput{Reply: replyText, Consumed: true}, nil
 }
@@ -1186,6 +1247,7 @@ func parseCommitArgs(argv []string) (commitArgs, error) {
 func (f *Factory) runPR(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 	args, err := parsePRArgs(input.Args[2:])
 	if err != nil {
+		reportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ %v", err),
 			Consumed: true,
@@ -1210,6 +1272,7 @@ func (f *Factory) runPR(ctx context.Context, _ command.RuntimeServices, cs *chat
 			return e
 		})
 	if err != nil {
+		reportOutcome(ctx, command.FailedOutcome("error", "the pull request could not be opened"))
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ /gtw pr failed: %v", err),
 			Consumed: true,

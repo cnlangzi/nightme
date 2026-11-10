@@ -258,7 +258,7 @@ func TestCreateIssuesFromDrafts_NoDraft(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			prov := newFakeGitProvider(ProviderGitHub, "github.com")
 
-			got := createIssuesFromDrafts(context.Background(), dir, resolveTo(prov))
+			got, _ := createIssuesFromDrafts(context.Background(), dir, resolveTo(prov))
 
 			if !strings.HasPrefix(got, "❌ no issue draft") || !strings.Contains(got, dir) || !strings.Contains(got, "`/gtw new`") {
 				t.Errorf("reply = %q", got)
@@ -276,7 +276,7 @@ func TestCreateIssuesFromDrafts_SingleDraft(t *testing.T) {
 	prov := newFakeGitProvider(ProviderGitHub, "github.com")
 	prov.SetCreateIssueResp(&Issue{ID: 42, Title: "feat(gtw): archive chats", URL: "https://github.com/o/r/issues/42"})
 
-	got := createIssuesFromDrafts(context.Background(), dir, resolveTo(prov))
+	got, _ := createIssuesFromDrafts(context.Background(), dir, resolveTo(prov))
 
 	calls := prov.CallsByMethod("CreateIssue")
 	if len(calls) != 1 {
@@ -308,7 +308,7 @@ func TestCreateIssuesFromDrafts_MultipleDraftsInOrderWithRefs(t *testing.T) {
 	prov := newFakeGitProvider(ProviderGitHub, "github.com")
 	numberIssuesFrom(prov, 42)
 
-	got := createIssuesFromDrafts(context.Background(), dir, resolveTo(prov))
+	got, _ := createIssuesFromDrafts(context.Background(), dir, resolveTo(prov))
 
 	calls := prov.CallsByMethod("CreateIssue")
 	if len(calls) != 3 {
@@ -347,7 +347,7 @@ func TestCreateIssuesFromDrafts_AllCreated(t *testing.T) {
 	writeDrafts(t, dir, "01.created", "#42 feat: a\n", "02.created", "#43 feat: b\n")
 	prov := newFakeGitProvider(ProviderGitHub, "github.com")
 
-	got := createIssuesFromDrafts(context.Background(), dir, resolveTo(prov))
+	got, _ := createIssuesFromDrafts(context.Background(), dir, resolveTo(prov))
 
 	if want := "✨ every issue draft of this chat is already an issue\n→ issues: #42, #43\n↳ `/gtw new` to draft from a new discussion"; got != want {
 		t.Errorf("reply =\n%s\nwant\n%s", got, want)
@@ -367,7 +367,7 @@ func TestCreateIssuesFromDrafts_PartialFailureThenRetry(t *testing.T) {
 	prov := newFakeGitProvider(ProviderGitHub, "github.com")
 	numberIssuesFrom(prov, 42, 2)
 
-	got := createIssuesFromDrafts(context.Background(), dir, resolveTo(prov))
+	got, _ := createIssuesFromDrafts(context.Background(), dir, resolveTo(prov))
 
 	for _, want := range []string{"⚠️ 1 of 3 issues opened", "→ #42:", "02.md", "HTTP 401", dir + " (2 kept)", "`/gtw new -y` to create the rest"} {
 		if !strings.Contains(got, want) {
@@ -380,7 +380,7 @@ func TestCreateIssuesFromDrafts_PartialFailureThenRetry(t *testing.T) {
 
 	retry := newFakeGitProvider(ProviderGitHub, "github.com")
 	numberIssuesFrom(retry, 50)
-	got = createIssuesFromDrafts(context.Background(), dir, resolveTo(retry))
+	got, _ = createIssuesFromDrafts(context.Background(), dir, resolveTo(retry))
 
 	calls := retry.CallsByMethod("CreateIssue")
 	if len(calls) != 2 || calls[0].IssueTitle != "feat(b): second" || calls[1].IssueTitle != "feat(c): third" {
@@ -400,7 +400,7 @@ func TestCreateIssuesFromDrafts_FirstFailureKeepsDrafts(t *testing.T) {
 	prov := newFakeGitProvider(ProviderGitHub, "github.com")
 	prov.SetCreateIssueErr(errors.New("HTTP 401"))
 
-	got := createIssuesFromDrafts(context.Background(), dir, resolveTo(prov))
+	got, _ := createIssuesFromDrafts(context.Background(), dir, resolveTo(prov))
 
 	if want := "❌ create issue from 01.md: HTTP 401\n→ drafts: " + dir + " (1 kept)\n↳ `/gtw new -y` to retry"; got != want {
 		t.Errorf("reply =\n%s\nwant\n%s", got, want)
@@ -459,7 +459,7 @@ func TestCreateIssuesFromDrafts_InvalidSetCreatesNothing(t *testing.T) {
 			prov := newFakeGitProvider(ProviderGitHub, "github.com")
 			prov.SetCreateIssueResp(&Issue{ID: 1})
 
-			got := createIssuesFromDrafts(context.Background(), dir, resolveTo(prov))
+			got, _ := createIssuesFromDrafts(context.Background(), dir, resolveTo(prov))
 
 			if !strings.HasPrefix(got, tc.want) {
 				t.Errorf("reply = %q, want prefix %q", got, tc.want)

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
+	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/timeouts"
 )
@@ -66,37 +67,43 @@ func dispatchCommit(
 	// gates reading the same truth.
 	snap, err := CollectReadinessForDispatch(ctx, c.Worktree, deps.Git)
 	if err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ read worktree status: %v", err)), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+			fmt.Sprintf("❌ read worktree status: %v", err),
+			command.FailedOutcome("error", "the worktree status could not be read")), nil
 	}
 	if snap == nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			"❌ cannot read worktree git status — refusing to commit\n"+
-				"hint: ensure the worktree is inside a git repo with at least one commit"), nil
+				"hint: ensure the worktree is inside a git repo with at least one commit",
+			command.FailedOutcome("not_a_repo", "the worktree is not a git repository")), nil
 	}
 
 	// 1. Hard-refuse conflicts. Even if commit doesn't push, an
 	// unmerged state means the worktree isn't coherent; the user
 	// should resolve (or `git rebase --abort`) first.
 	if reason := snap.PushBlockReason(); reason != "" {
-		return reply(ctx, cs.Emitter(), chatID, messageID, reason), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, reason,
+			command.FailedOutcome("conflict", "the worktree has unresolved conflicts")), nil
 	}
 
 	// 1b. Refuse detached HEAD. Mirrors dispatchPush's
 	// "snap.Branch == \"\"" early-return — keep the two
 	// gates' policy symmetrical.
 	if snap.Branch == "" {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			"❌ detached HEAD — checkout a named branch first"), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+			"❌ detached HEAD — checkout a named branch first",
+			command.FailedOutcome("detached", "the worktree is on a detached HEAD")), nil
 	}
 
 	// 2. Nothing to do. Distinct message from push's
 	// "nothing to push" so the user sees which axis they're
 	// short on.
 	if snap.WorkingTreeIsClean() {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			"ℹ️ nothing to commit\n"+
-				"  no uncommitted changes on "+snap.Branch), nil
+				"  no uncommitted changes on "+snap.Branch,
+			command.NoopOutcome("the worktree has nothing to commit",
+				map[string]string{"branch": snap.Branch})), nil
 	}
 
 	// 3. headBefore is required by verifyAgentCommitted's
@@ -105,8 +112,9 @@ func dispatchCommit(
 	// didn't commit" class. Surface the read error.
 	headBefore, err := headSHA(ctx, c.Worktree, deps)
 	if err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ read HEAD: %v", err)), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+			fmt.Sprintf("❌ read HEAD: %v", err),
+			command.FailedOutcome("error", "HEAD could not be read")), nil
 	}
 
 	// 4. Run agent. runAgentFor returns the full RunResult so the
@@ -128,8 +136,10 @@ func dispatchCommit(
 		// Drop OutResult; replyAgent below is the only result card.
 		messages.OutResult)
 	if err != nil {
-		return replyAgent(ctx, cs.Emitter(), chatID, messageID,
-			err.Error(), agentName, runRes), nil
+		return replyAgentOutcome(ctx, cs.Emitter(), chatID, messageID,
+			err.Error(), agentName, runRes,
+			command.FailedOutcomeData("agent_error", "the agent did not commit the work",
+				map[string]string{"agent": agentName})), nil
 	}
 
 	// 4b. (no cs-level GitStatus refresh needed post-RunOnce:
@@ -140,7 +150,8 @@ func dispatchCommit(
 	// 5. Verify the agent actually committed (HEAD advance +
 	// worktree clean + branch still on c.Branch).
 	if msg := verifyAgentCommitted(ctx, deps, c, headBefore); msg != "" {
-		return reply(ctx, cs.Emitter(), chatID, messageID, msg), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, msg,
+			command.FailedOutcome("not_committed", "the agent did not commit the work")), nil
 	}
 
 	// 6. Re-snapshot. Rare but documented: an agent can produce
@@ -150,16 +161,19 @@ func dispatchCommit(
 	// added a conflict entry. We cannot trust the original snap.
 	snap, err = CollectReadinessForDispatch(ctx, c.Worktree, deps.Git)
 	if err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ re-read worktree status after agent: %v", err)), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+			fmt.Sprintf("❌ re-read worktree status after agent: %v", err),
+			command.FailedOutcome("error", "the worktree status could not be re-read")), nil
 	}
 	if snap == nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			"❌ cannot read worktree git status — refusing to commit\n"+
-				"hint: ensure the worktree is inside a git repo with at least one commit"), nil
+				"hint: ensure the worktree is inside a git repo with at least one commit",
+			command.FailedOutcome("not_a_repo", "the worktree is not a git repository")), nil
 	}
 	if reason := snap.PushBlockReason(); reason != "" {
-		return reply(ctx, cs.Emitter(), chatID, messageID, reason), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, reason,
+			command.FailedOutcome("conflict", "the agent left unresolved conflicts")), nil
 	}
 
 	// 7. Build the success card from git log — NOT from agent
@@ -168,18 +182,29 @@ func dispatchCommit(
 	// on origin. A failure here is a hard error: the commit
 	// landed but we can't render the result. Surface the
 	// failure rather than fudging a "committed 0 change(s)" card.
-	card, err := replyCommitSuccessCard(ctx, c, agentName,
+	card, commitCount, err := replyCommitSuccessCard(ctx, c, agentName,
 		headBefore+"..HEAD", deps)
 	if err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ commit landed but couldn't render card: %v", err)), nil
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+			fmt.Sprintf("❌ commit landed but couldn't render card: %v", err),
+			command.FailedOutcome("error", "the commit landed but its result could not be read")), nil
 	}
 	// Success path: forward runRes so the footer (agentbar +
 	// usagebar) renders. Failure paths above stay on the no-stamp
 	// reply — the user just got an error message, not an agent
 	// result, so footer metadata isn't applicable.
-	return replyAgent(ctx, cs.Emitter(), chatID, messageID,
-		card, agentName, runRes), nil
+	return replyAgentOutcome(ctx, cs.Emitter(), chatID, messageID,
+		card, agentName, runRes,
+		messages.Outcome{
+			Status:  messages.OutcomeOK,
+			Summary: fmt.Sprintf("committed %d change(s) on %s", commitCount, c.Branch),
+			Data: map[string]string{
+				"branch":    c.Branch,
+				"sha_range": headBefore + "..HEAD",
+				"commits":   fmt.Sprintf("%d", commitCount),
+				"agent":     agentName,
+			},
+		}), nil
 }
 
 // runAgentFor (in agent_reply.go) is the shared one-shot agent

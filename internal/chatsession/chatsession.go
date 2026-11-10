@@ -1015,6 +1015,18 @@ func (cs *ChatSession) emitMessageDropped(msg Message) {
 		State:     agent.MessageDropped,
 		At:        time.Now(),
 	})
+	// A dropped message never reaches an agent turn, so the
+	// prompt-end that would end its hold will never come. Settle it
+	// here: the hold is released, the settled message goes out, and
+	// the work does not linger for the chat's lifetime.
+	if w := cs.workFor(msg.ID); w != nil {
+		w.Report(messages.Outcome{
+			Status:  messages.OutcomeCancelled,
+			Summary: "message dropped before it reached the agent",
+			Data:    map[string]string{"reason": "dropped"},
+		})
+		w.Release()
+	}
 }
 
 // PromptEndBus (F-53 follow-up → F-54) is the runtime-installed callback
@@ -1196,10 +1208,31 @@ func (cs *ChatSession) SteerUserMessage(msg Message) error {
 		return nil
 	}
 
+	// The steered text is agent work of its own: it rides the next
+	// turn. Hold the message until that turn ends, the same way
+	// QueueUserMessage does — otherwise the message settles as soon
+	// as the command returns, while the agent has not seen the text
+	// yet.
+	//
+	// The hold ends with the turn that carries the steered message.
+	// When that turn is part of a multi-message batch, the batch's
+	// anchor is the trigger (see the re-anchor in TryFlush).
+	w := cs.HoldUntilPromptEnd(msg.ID)
+
 	// Step 1: capacity check. If we can't enqueue the steered
 	// message, skip Stop entirely — aborting the bridge for a
 	// message we lost is worse than not steering at all.
 	if err := cs.queue.PushFront(msg); err != nil {
+		// The text never reaches an agent turn — no prompt will
+		// end for it. Settle it instead of holding it forever.
+		if w != nil {
+			w.Report(messages.Outcome{
+				Status:  messages.OutcomeFailed,
+				Summary: "input queue full",
+				Data:    map[string]string{"reason": "queue_full"},
+			})
+			w.Release()
+		}
 		return err
 	}
 

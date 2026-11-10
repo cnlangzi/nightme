@@ -294,3 +294,67 @@ func TestManager_HandleInbound_TelegramCaseInsensitiveMIME(t *testing.T) {
 		t.Errorf("block type = %s, want image", blocks[0].Type)
 	}
 }
+
+// TestManager_HandleInbound_NoWorkspaceSettlesFailed checks that a
+// message the chat session cannot act on still settles: no agent
+// turn will run for it, so a program waiting on the message must
+// learn that instead of waiting forever.
+func TestManager_HandleInbound_NoWorkspaceSettlesFailed(t *testing.T) {
+	mgr := NewManager()
+	em := &recordingEmitter{}
+	mgr.WithEmitter(em)
+
+	// No cwd — the agent session cannot be resolved.
+	cs, _ := mgr.GetOrCreate("oc_nocwd", "claude")
+	cs.SetWatchMode(WatchModeAll)
+
+	mgr.HandleInbound(context.Background(), &messages.InboundMessage{
+		ChatID:    "oc_nocwd",
+		MessageID: "om_nocwd_1",
+		UserID:    "u_nocwd",
+		Text:      "hi",
+	})
+
+	got := em.settled()
+	if len(got) != 1 {
+		t.Fatalf("settled emitted %d times, want 1", len(got))
+	}
+	if got[0].ReplyTo != "om_nocwd_1" {
+		t.Errorf("settled ReplyTo = %q, want om_nocwd_1", got[0].ReplyTo)
+	}
+	if got[0].Outcome == nil || got[0].Outcome.Status != messages.OutcomeFailed {
+		t.Errorf("settled outcome = %+v, want failed", got[0].Outcome)
+	}
+}
+
+// TestManager_HandleInbound_WatchDropSettlesNoop checks the other
+// terminal path: a group message the bot is not addressed to is
+// dropped by the watch gate — nothing ran, and the message settles
+// as such.
+func TestManager_HandleInbound_WatchDropSettlesNoop(t *testing.T) {
+	mgr := NewManager()
+	em := &recordingEmitter{}
+	mgr.WithEmitter(em)
+
+	cs, _ := mgr.GetOrCreate("oc_watch", "claude")
+	cs.SetWatchMode(WatchModeMention)
+
+	mgr.HandleInbound(context.Background(), &messages.InboundMessage{
+		ChatID:     "oc_watch",
+		MessageID:  "om_watch_1",
+		UserID:     "u_watch",
+		Text:       "hi",
+		HasMention: false,
+	})
+
+	got := em.settled()
+	if len(got) != 1 {
+		t.Fatalf("settled emitted %d times, want 1", len(got))
+	}
+	if got[0].ReplyTo != "om_watch_1" {
+		t.Errorf("settled ReplyTo = %q, want om_watch_1", got[0].ReplyTo)
+	}
+	if got[0].Outcome == nil || got[0].Outcome.Status != messages.OutcomeNoop {
+		t.Errorf("settled outcome = %+v, want noop", got[0].Outcome)
+	}
+}

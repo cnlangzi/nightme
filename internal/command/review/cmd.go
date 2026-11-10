@@ -525,9 +525,10 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 		finish()
 
 		if err != nil {
-			if emitter == nil {
-				return
-			}
+			// The review failed — say so in the machine-readable
+			// channel too. A driver that only reads the settled
+			// message must not see "unknown" for a review that
+			// visibly failed.
 			var text string
 			switch {
 			case errors.Is(err, agent.ErrNoDiff):
@@ -546,12 +547,22 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 				slog.Default().Info("/review: empty diff, no agent spawn",
 					"agent", runnerName,
 					"workspace", workspace)
+				work.Report(messages.Outcome{
+					Status:  messages.OutcomeNoop,
+					Summary: "no diff to review",
+					Data:    map[string]string{"agent": runnerName, "reason": "no_diff"},
+				})
 			case errors.Is(err, agent.ErrReviewNotSupported):
 				slog.Default().Warn("/review failed",
 					"agent", runnerName,
 					"err", err,
 				)
 				text = fmt.Sprintf("❌ agent %q does not support /review", runnerName)
+				work.Report(messages.Outcome{
+					Status:  messages.OutcomeFailed,
+					Summary: "the agent does not support /review",
+					Data:    map[string]string{"agent": runnerName, "reason": "not_supported"},
+				})
 			default:
 				slog.Default().Warn("/review failed",
 					"agent", runnerName,
@@ -562,6 +573,14 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 					msg = msg[:800] + "…(truncated)"
 				}
 				text = fmt.Sprintf("❌ /review failed (agent=%s):\n%s", runnerName, msg)
+				work.Report(messages.Outcome{
+					Status:  messages.OutcomeFailed,
+					Summary: err.Error(),
+					Data:    map[string]string{"agent": runnerName, "reason": "error"},
+				})
+			}
+			if emitter == nil {
+				return
 			}
 			_ = emitter.Send(revCtx, messages.OutboundMessage{
 				ChatID:  chatID,
@@ -575,6 +594,16 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 		// Success: wrap once, route twice (AS + channel).
 		formatted := agent.FormatReviewMessage(workspace, runnerName, result.Text)
 		blocks := []agent.ContentBlock{{Type: agent.ContentText, Text: formatted}}
+
+		// The review itself succeeded. The verdict the consumer
+		// ends up with is the merged one: a failed injection
+		// outranks this, and the injected turn's own end decides
+		// the rest.
+		work.Report(messages.Outcome{
+			Status:  messages.OutcomeOK,
+			Summary: "review delivered",
+			Data:    map[string]string{"agent": runnerName},
+		})
 
 		// 1) Inject into AS as a user turn — main agent sees
 		//    the review and can act on follow-ups.
@@ -604,6 +633,13 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 				"agent", runnerName,
 				"err", err,
 			)
+			// The findings were produced but never reached the
+			// agent — the review is not complete.
+			work.Report(messages.Outcome{
+				Status:  messages.OutcomeIncomplete,
+				Summary: "review findings could not be delivered to the agent",
+				Data:    map[string]string{"agent": runnerName, "reason": "inject_failed"},
+			})
 			injectWork.Release()
 		}
 
@@ -782,6 +818,11 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 				"agent", runnerName,
 				"err", err,
 			)
+			work.Report(messages.Outcome{
+				Status:  messages.OutcomeFailed,
+				Summary: err.Error(),
+				Data:    map[string]string{"agent": runnerName, "reason": "error"},
+			})
 			if emitter == nil {
 				return
 			}
@@ -804,6 +845,12 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 		formatted := agent.FormatReviewMessage(workspace, runnerName, result.Text)
 		blocks := []agent.ContentBlock{{Type: agent.ContentText, Text: formatted}}
 
+		work.Report(messages.Outcome{
+			Status:  messages.OutcomeOK,
+			Summary: "review continued",
+			Data:    map[string]string{"agent": runnerName},
+		})
+
 		// Same contract as a plain review: the injected turn is
 		// agent work of its own, so the message settles when that
 		// turn ends — and immediately when the injection fails.
@@ -813,6 +860,11 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 				"agent", runnerName,
 				"err", err,
 			)
+			work.Report(messages.Outcome{
+				Status:  messages.OutcomeIncomplete,
+				Summary: "review findings could not be delivered to the agent",
+				Data:    map[string]string{"agent": runnerName, "reason": "inject_failed"},
+			})
 			injectWork.Release()
 		}
 

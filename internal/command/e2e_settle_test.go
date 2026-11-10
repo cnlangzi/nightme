@@ -511,30 +511,43 @@ func TestSettle_CommandsWithoutAgentWork_SettleImmediately(t *testing.T) {
 	}
 }
 
-// TestSettle_Steer_SettlesWhenTheCommandReturns documents what
-// /steer does today: the steered text goes to the head of the queue
-// and the agent picks it up on a LATER turn, so the /steer message
-// settles when the command returns.
+// TestSettle_Steer_SettlesWhenTheSteeredTurnEnds covers /steer: the
+// steered text rides the NEXT turn, so the message must not settle
+// when the command returns — the agent has not seen the text yet.
 //
-// The steered turn's end is not bounded — the queue is only drained
-// by the next prompt-end — so holding the message open until the
-// steered turn ends could leave it unsettled indefinitely. That is
-// why /steer does not take a hold. Revisit when the steered message
-// gets its own id and the queue has a flush trigger of its own.
-func TestSettle_Steer_SettlesWhenTheCommandReturns(t *testing.T) {
-	h := newSettleHarness(t, steer.NewFactory())
+// The steered text is queued at the head; the next command that
+// queues a message flushes the batch, and the turn that carries both
+// ends the steered message's work.
+func TestSettle_Steer_SettlesWhenTheSteeredTurnEnds(t *testing.T) {
+	h := newSettleHarness(t, steer.NewFactory(), queue.NewFactory())
 
 	h.drive(t, "/steer keep going", "om_settle_steer")
 
-	got := h.waitSettledFor(t, "om_settle_steer", 3*time.Second)
-	if got.Outcome == nil || got.Outcome.Status != messages.OutcomeUnknown {
-		t.Errorf("settled outcome = %+v, want unknown", got.Outcome)
+	// The command is done; the steered text has not reached the
+	// agent yet.
+	if got := h.settled(); len(got) != 0 {
+		t.Fatalf("settled emitted %d times before the steered turn ran, want 0", len(got))
 	}
-
-	// The steered text is still queued — no turn has run for it.
 	select {
 	case <-h.bridge.turnStarted:
 		t.Error("a turn started for the steered text; the queue should still hold it")
 	default:
+	}
+
+	// The next queued message flushes the batch the steered text is
+	// part of.
+	h.drive(t, "/queue hello", "om_settle_after_steer")
+	h.waitTurnStarted(t)
+
+	// The turn is in flight — still no settled for the steer.
+	if got := h.settled(); len(got) != 0 {
+		t.Fatalf("settled emitted %d times while the steered turn was running, want 0", len(got))
+	}
+
+	h.openTurnGate()
+
+	got := h.waitSettledFor(t, "om_settle_steer", 3*time.Second)
+	if got.Outcome == nil || got.Outcome.Status != messages.OutcomeOK {
+		t.Errorf("settled outcome = %+v, want ok", got.Outcome)
 	}
 }

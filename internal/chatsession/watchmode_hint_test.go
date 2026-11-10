@@ -49,6 +49,21 @@ func makeHintTestManager(t *testing.T, storePath string) (*Manager, *testEmitter
 	return mgr, em, csFile
 }
 
+// userVisibleSends returns the outbound messages a user could
+// actually see. The settled message (OutMessageSettled) is dropped
+// by every IM channel — it is the machine-readable counterpart of a
+// reply, not a reply — so it is not one of them.
+func userVisibleSends(sent []messages.OutboundMessage) []messages.OutboundMessage {
+	out := make([]messages.OutboundMessage, 0, len(sent))
+	for _, m := range sent {
+		if m.Kind == messages.OutMessageSettled {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
 // newDropInboundMessage constructs a minimal InboundMessage
 // shaped like a group-chat non-mention message — just enough
 // for HandleInbound to take the drop branch without panicking.
@@ -86,10 +101,11 @@ func TestManager_FirstDrop_EmitsHint(t *testing.T) {
 		t.Fatalf("HandleInbound: %v", err)
 	}
 
-	if got := len(em.Sent); got != 1 {
+	visible := userVisibleSends(em.Sent)
+	if got := len(visible); got != 1 {
 		t.Fatalf("emitter Send calls = %d, want 1 (the hint)", got)
 	}
-	hint := em.Sent[0]
+	hint := visible[0]
 	if hint.ChatID != "oc_hint" {
 		t.Errorf("hint ChatID = %q, want %q", hint.ChatID, "oc_hint")
 	}
@@ -131,7 +147,7 @@ func TestManager_SubsequentDrop_NoHint(t *testing.T) {
 		}
 	}
 
-	if got := len(em.Sent); got != 1 {
+	if got := len(userVisibleSends(em.Sent)); got != 1 {
 		t.Errorf("emitter Send calls across 3 drops = %d, want 1 (only the first)", got)
 	}
 }

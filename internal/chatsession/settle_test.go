@@ -298,3 +298,103 @@ func TestReportOutcome_MergesWithCommandOutcome(t *testing.T) {
 		t.Errorf("settled summary = %q, want %q", got[0].Outcome.Summary, "1/3 groups unfinished")
 	}
 }
+
+// TestSetSelectedCwd_DroppedMessagesSettle checks that a message
+// the queue drops settles instead of holding forever: a dropped
+// message never reaches an agent turn, so the prompt-end that would
+// end its hold cannot come.
+func TestSetSelectedCwd_DroppedMessagesSettle(t *testing.T) {
+	cs, em := newSettleSession(t)
+
+	if err := cs.QueueUserMessage(Message{ID: "m1", ChatID: cs.ID}); err != nil {
+		t.Fatalf("QueueUserMessage: %v", err)
+	}
+	if got := em.settled(); len(got) != 0 {
+		t.Fatalf("settled emitted %d times before the drop", len(got))
+	}
+
+	// A different workspace drops the queued message.
+	if err := cs.SetSelectedCwd(t.TempDir()); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
+	}
+
+	got := em.settled()
+	if len(got) != 1 {
+		t.Fatalf("settled emitted %d times, want 1", len(got))
+	}
+	if got[0].ReplyTo != "m1" {
+		t.Errorf("settled ReplyTo = %q, want m1", got[0].ReplyTo)
+	}
+	if got[0].Outcome == nil || got[0].Outcome.Status != messages.OutcomeCancelled {
+		t.Errorf("settled outcome = %+v, want cancelled", got[0].Outcome)
+	}
+
+	cs.workMu.Lock()
+	pending := len(cs.works)
+	cs.workMu.Unlock()
+	if pending != 0 {
+		t.Errorf("pending works = %d, want 0 — the dropped message left a hold behind", pending)
+	}
+}
+
+// TestHoldUntilPromptEnd_NoBusDoesNotHoldForever checks the
+// degenerate case: with no prompt-end bus there is no event that
+// could release the hold, so the message settles right away instead
+// of waiting for a turn that can never end.
+func TestHoldUntilPromptEnd_NoBusDoesNotHoldForever(t *testing.T) {
+	cs, em := newSettleSession(t)
+	cs.PromptEndBus = nil
+
+	w := cs.HoldUntilPromptEnd("m1")
+	if w != nil {
+		t.Fatal("HoldUntilPromptEnd returned a work with no bus to release it")
+	}
+
+	got := em.settled()
+	if len(got) != 1 {
+		t.Fatalf("settled emitted %d times, want 1", len(got))
+	}
+}
+
+// TestReportPromptEnd_CleanEndDoesNotOverwriteAVerdict checks that
+// the prompt-end — the generic "the turn finished" signal — does not
+// promote a command's "nothing to do" to a plain "ok".
+func TestReportPromptEnd_CleanEndDoesNotOverwriteAVerdict(t *testing.T) {
+	cs, em := newSettleSession(t)
+
+	w := cs.Hold("m1")
+	w.Report(messages.Outcome{Status: messages.OutcomeNoop, Summary: "nothing to push"})
+	w.ReportPromptEnd(agent.PromptEndClean)
+	w.Release()
+
+	got := em.settled()
+	if len(got) != 1 {
+		t.Fatalf("settled emitted %d times, want 1", len(got))
+	}
+	if got[0].Outcome.Status != messages.OutcomeNoop {
+		t.Errorf("settled status = %s, want noop", got[0].Outcome.Status)
+	}
+	if got[0].Outcome.Summary != "nothing to push" {
+		t.Errorf("settled summary = %q, want %q", got[0].Outcome.Summary, "nothing to push")
+	}
+}
+
+// TestReportPromptEnd_FailedEndOverwritesAVerdict is the other half:
+// a turn that failed is new information and outranks a successful
+// verdict.
+func TestReportPromptEnd_FailedEndOverwritesAVerdict(t *testing.T) {
+	cs, em := newSettleSession(t)
+
+	w := cs.Hold("m1")
+	w.Report(messages.Outcome{Status: messages.OutcomeNoop, Summary: "nothing to push"})
+	w.ReportPromptEnd(agent.PromptEndError)
+	w.Release()
+
+	got := em.settled()
+	if len(got) != 1 {
+		t.Fatalf("settled emitted %d times, want 1", len(got))
+	}
+	if got[0].Outcome.Status != messages.OutcomeFailed {
+		t.Errorf("settled status = %s, want failed", got[0].Outcome.Status)
+	}
+}

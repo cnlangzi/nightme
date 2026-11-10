@@ -184,3 +184,33 @@ func TestRunCommand_SettledFailedWhenTheCommandErrors(t *testing.T) {
 		t.Errorf("settled summary = %q, want %q", settled.Outcome.Summary, "boom")
 	}
 }
+
+// panickingSettleCommander is a command that blows up.
+type panickingSettleCommander struct{}
+
+func (c *panickingSettleCommander) Dispatch(_ context.Context, _ command.RuntimeServices, _ *chatsession.Manager, _ *chatsession.ChatSession, _ command.SlashInput) (*command.SlashOutput, bool, error) {
+	panic("boom")
+}
+
+func (c *panickingSettleCommander) Match(_ string) (string, bool) { return "", true }
+
+// TestRunCommand_SettledFailedWhenTheCommandPanics checks that a
+// command which crashes settles as failed — a driver must not see
+// "unknown" for a command that visibly blew up.
+func TestRunCommand_SettledFailedWhenTheCommandPanics(t *testing.T) {
+	em := &settleEmitter{}
+	out := runSettleRouter(t, &panickingSettleCommander{}, em)
+
+	var settled *messages.OutboundMessage
+	for i := range out {
+		if out[i].Kind == messages.OutMessageSettled {
+			settled = &out[i]
+		}
+	}
+	if settled == nil {
+		t.Fatal("no settled message")
+	}
+	if settled.Outcome == nil || settled.Outcome.Status != messages.OutcomeFailed {
+		t.Fatalf("settled outcome = %+v, want failed", settled.Outcome)
+	}
+}

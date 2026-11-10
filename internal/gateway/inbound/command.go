@@ -99,6 +99,15 @@ func (r *Router) runCommand(ctx context.Context, mgr *chatsession.Manager, comma
 		if rec := recover(); rec != nil {
 			slog.Default().Error("inbound: runCommand panicked",
 				"chat_id", msg.ChatID, "panic", rec)
+			// The command crashed — say so in the machine-readable
+			// channel too. A driver that only reads the settled
+			// message must not see "unknown" for a command that
+			// visibly blew up.
+			work.Report(messages.Outcome{
+				Status:  messages.OutcomeFailed,
+				Summary: "the command panicked",
+				Data:    map[string]string{"reason": "panic"},
+			})
 			r.emitCommandReply(ctx, nil, msg, "❌ internal error (see daemon log)")
 		}
 		work.Release()

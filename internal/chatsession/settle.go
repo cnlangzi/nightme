@@ -75,14 +75,31 @@ func (w *Work) Report(o messages.Outcome) {
 	w.outcome = messages.Merge(w.outcome, o)
 }
 
-// Outcome returns the merged outcome reported so far.
-func (w *Work) Outcome() messages.Outcome {
+// ReportPromptEnd merges the verdict of an ended agent turn.
+//
+// A clean end is the GENERIC "the turn finished" signal. It does not
+// overwrite a verdict the command already reported — a command that
+// had nothing to do stays "nothing to do" instead of being promoted
+// to a plain "ok". It applies only when the work carries no verdict
+// yet.
+//
+// A non-clean end always applies: it outranks every successful
+// verdict, and the turn failing is new information regardless of
+// what the command said.
+func (w *Work) ReportPromptEnd(reason agent.PromptEndReason) {
 	if w == nil {
-		return messages.Outcome{Status: messages.OutcomeUnknown}
+		return
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.outcome
+	if w.released {
+		return
+	}
+	if reason == agent.PromptEndClean &&
+		w.outcome.Status != "" && w.outcome.Status != messages.OutcomeUnknown {
+		return
+	}
+	w.outcome = messages.Merge(w.outcome, outcomeForPromptEnd(reason))
 }
 
 // anchorID returns the userMsgID whose prompt-end event ends this
@@ -202,7 +219,12 @@ func (cs *ChatSession) HoldUntilPromptEnd(msgID string) *Work {
 	}
 	bus := cs.PromptEndBus
 	if bus == nil {
-		return w
+		// No bus means no prompt-end will ever be published, so
+		// this hold could only be released by a queue failure that
+		// never comes. Give it back and let the message settle
+		// rather than hold it forever.
+		w.Release()
+		return nil
 	}
 	u := &unsubOnce{}
 	w.mu.Lock()
@@ -214,11 +236,21 @@ func (cs *ChatSession) HoldUntilPromptEnd(msgID string) *Work {
 			return false
 		}
 		u.call()
-		w.Report(outcomeForPromptEnd(e.Reason))
+		w.ReportPromptEnd(e.Reason)
 		w.Release()
 		return false
 	}))
 	return w
+}
+
+// workFor returns the work tracking msgID, or nil when there is none.
+func (cs *ChatSession) workFor(msgID string) *Work {
+	if cs == nil || msgID == "" {
+		return nil
+	}
+	cs.workMu.Lock()
+	defer cs.workMu.Unlock()
+	return cs.works[msgID]
 }
 
 // reanchorWork moves the work for msgID onto a different prompt-end
@@ -229,10 +261,7 @@ func (cs *ChatSession) reanchorWork(msgID, anchorID string) {
 	if cs == nil || msgID == "" || anchorID == "" || msgID == anchorID {
 		return
 	}
-	cs.workMu.Lock()
-	w := cs.works[msgID]
-	cs.workMu.Unlock()
-	w.reanchor(anchorID)
+	cs.workFor(msgID).reanchor(anchorID)
 }
 
 // outcomeForPromptEnd maps a prompt-end reason onto an outcome.

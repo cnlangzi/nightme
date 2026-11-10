@@ -213,8 +213,8 @@ const (
 )
 
 // ActionRecord is one action the run has taken. StepIndex points at
-// the playbook step the action served, or -1 when it belongs to no
-// step (an instruction).
+// the playbook step the action served; only a run counts against a
+// step, so an instruction carries -1.
 type ActionRecord struct {
 	Kind      ActionKind `json:"kind"`
 	Command   string     `json:"command"`

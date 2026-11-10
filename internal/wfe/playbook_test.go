@@ -219,6 +219,58 @@ steps: ["/gtw fix ${{ args.id }}"]
 	}
 }
 
+func TestBind_RejectsUnsupportedExpressions(t *testing.T) {
+	tests := []struct {
+		name    string
+		src     string
+		args    map[string]string
+		wantErr string
+	}{
+		{
+			name:    "a function call",
+			src:     "name: x\nsteps: [\"echo ${{ success() }}\"]\n",
+			wantErr: "unsupported expression",
+		},
+		{
+			name:    "another namespace",
+			src:     "name: x\nsteps: [\"echo ${{ env.HOME }}\"]\n",
+			wantErr: "unsupported expression",
+		},
+		{
+			name:    "a nested argument",
+			src:     "name: x\nargs: [id]\nsteps: [\"echo ${{ args.id.extra }}\"]\n",
+			args:    map[string]string{"id": "42"},
+			wantErr: "unsupported expression",
+		},
+		{
+			name:    "an undeclared argument",
+			src:     "name: x\nargs: [id]\nsteps: [\"echo ${{ args.nope }}\"]\n",
+			args:    map[string]string{"id": "42"},
+			wantErr: "unknown argument",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pb := mustParsePlaybook(t, tt.src)
+			_, err := Bind(pb, tt.args)
+			if err == nil {
+				t.Fatalf("expected error %q, got nil", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error = %v, want it to contain %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestBind_EmptyRunAfterBinding(t *testing.T) {
+	pb := mustParsePlaybook(t, "name: x\nargs: [id]\nsteps: [\"${{ args.id }}\"]\n")
+	_, err := Bind(pb, map[string]string{"id": ""})
+	if err == nil || !strings.Contains(err.Error(), "run is required") {
+		t.Errorf("expected run-is-required error, got %v", err)
+	}
+}
+
 func TestPolicy_CheckRun(t *testing.T) {
 	pb := mustParsePlaybook(t, fixIssueYAML)
 	bound := mustBind(t, pb, map[string]string{"id": "42"})
@@ -473,6 +525,50 @@ func TestPolicy_Remaining(t *testing.T) {
 	}
 }
 
+func TestPolicy_CheckRun_AllowedListOmitsExhaustedOwner(t *testing.T) {
+	pb := mustParsePlaybook(t, `
+name: x
+steps:
+  - run: echo
+    max: 1
+  - run: other
+    allow: [echo]
+`)
+	pol := NewPolicy(pb, []ActionRecord{
+		{Kind: ActionKindRun, Command: "echo", StepIndex: 0},
+	})
+
+	if _, err := pol.CheckRun("echo"); err == nil || !strings.Contains(err.Error(), "limit is 1") {
+		t.Errorf("expected step-limit error, got %v", err)
+	}
+	_, err := pol.CheckRun("nope")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if strings.Contains(err.Error(), "echo") {
+		t.Errorf("allowed list mentions the exhausted command: %v", err)
+	}
+}
+
+func TestPolicy_InstructionIsNotAStepAction(t *testing.T) {
+	pb := mustParsePlaybook(t, `
+name: x
+steps:
+  - run: echo hi
+    max: 1
+`)
+	pol := NewPolicy(pb, []ActionRecord{
+		{Kind: ActionKindInstruct, Command: "keep going", Outcome: Outcome{Status: OutcomeOK}},
+	})
+
+	if err := pol.CheckFinish("done"); err == nil || !strings.Contains(err.Error(), "has not run yet") {
+		t.Errorf("expected has-not-run-yet error, got %v", err)
+	}
+	if rem := pol.Remaining(); rem.Steps[0] != 1 {
+		t.Errorf("Steps[0] = %d, want 1 (the instruction took no step budget)", rem.Steps[0])
+	}
+}
+
 func TestPolicy_Render(t *testing.T) {
 	pb := mustParsePlaybook(t, fixIssueYAML)
 	bound := mustBind(t, pb, map[string]string{"id": "42"})
@@ -533,5 +629,17 @@ func TestLoadDir_DuplicatePlaybookName(t *testing.T) {
 	_, _, err := LoadDir(dir)
 	if err == nil || !strings.Contains(err.Error(), "duplicate playbook name") {
 		t.Errorf("expected duplicate-playbook error, got %v", err)
+	}
+}
+
+func TestLoadDir_RejectsFileWithJobsAndSteps(t *testing.T) {
+	dir := t.TempDir()
+	src := dagYAML + "\nsteps: [echo hi]\n"
+	if err := os.WriteFile(filepath.Join(dir, "both.yaml"), []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := LoadDir(dir)
+	if err == nil || !strings.Contains(err.Error(), "both steps and jobs") {
+		t.Errorf("expected both-steps-and-jobs error, got %v", err)
 	}
 }

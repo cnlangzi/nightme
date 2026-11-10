@@ -61,11 +61,11 @@ func LoadFile(path string) (*Workflow, error) {
 
 // Parse parses and validates raw YAML bytes as a DAG workflow.
 func Parse(raw []byte) (*Workflow, error) {
-	isPlaybook, err := looksLikePlaybook(raw)
+	kind, err := fileKind(raw)
 	if err != nil {
 		return nil, err
 	}
-	if isPlaybook {
+	if kind == kindPlaybook {
 		return nil, fmt.Errorf("wfe: this file has top-level steps: it is a playbook, not a workflow")
 	}
 	return parseWorkflow(raw)
@@ -100,11 +100,11 @@ func ParsePlaybook(raw []byte) (*Playbook, error) {
 // parseFile parses raw YAML as a playbook or as a DAG workflow.
 // Exactly one of the two results is non-nil.
 func parseFile(raw []byte) (*Workflow, *Playbook, error) {
-	isPlaybook, err := looksLikePlaybook(raw)
+	kind, err := fileKind(raw)
 	if err != nil {
 		return nil, nil, err
 	}
-	if isPlaybook {
+	if kind == kindPlaybook {
 		pb, err := ParsePlaybook(raw)
 		if err != nil {
 			return nil, nil, err
@@ -118,16 +118,34 @@ func parseFile(raw []byte) (*Workflow, *Playbook, error) {
 	return wf, nil, nil
 }
 
-// looksLikePlaybook reports whether raw holds a playbook, i.e. has a
-// top-level `steps` key.
-func looksLikePlaybook(raw []byte) (bool, error) {
+// The kinds of file the loader understands.
+const (
+	kindWorkflow = "workflow"
+	kindPlaybook = "playbook"
+)
+
+// fileKind tells whether raw holds a playbook or a DAG workflow. A
+// file with top-level `steps` is a playbook, a file with `jobs` is a
+// workflow; a file with both is an error, so a workflow never
+// disappears because of a stray key.
+func fileKind(raw []byte) (string, error) {
 	var probe struct {
+		Jobs  yaml.Node `yaml:"jobs"`
 		Steps yaml.Node `yaml:"steps"`
 	}
 	if err := yaml.Unmarshal(raw, &probe); err != nil {
-		return false, fmt.Errorf("wfe: yaml: %w", err)
+		return "", fmt.Errorf("wfe: yaml: %w", err)
 	}
-	return !probe.Steps.IsZero(), nil
+	hasSteps := !probe.Steps.IsZero()
+	hasJobs := !probe.Jobs.IsZero()
+	switch {
+	case hasSteps && hasJobs:
+		return "", fmt.Errorf("wfe: the file has both steps and jobs: it is a playbook or a workflow, not both")
+	case hasSteps:
+		return kindPlaybook, nil
+	default:
+		return kindWorkflow, nil
+	}
 }
 
 func validate(wf *Workflow) error {
@@ -329,13 +347,21 @@ func validatePlaybook(pb *Playbook) error {
 	return nil
 }
 
-// argRef matches an `${{ args.x }}` reference.
-var argRef = regexp.MustCompile(`\$\{\{\s*args\.([A-Za-z0-9_-]+)\s*\}\}`)
+// exprRef matches a `${{ ... }}` expression.
+var exprRef = regexp.MustCompile(`\$\{\{(.*?)\}\}`)
+
+// argExpr matches an `${{ args.NAME }}` reference.
+var argExpr = regexp.MustCompile(`^\s*args\.([A-Za-z0-9_-]+)\s*$`)
 
 // Bind expands `${{ args.x }}` in the playbook with the given values
 // and returns the bound playbook; the source playbook is left
 // untouched. An unknown argument — one the playbook does not declare,
 // or one no value was given for — is an error.
+//
+// A playbook is a static document: the arguments are its only
+// variable part. Any other expression is rejected instead of being
+// resolved to a constant or to nothing, so a command never silently
+// turns into a different one.
 func Bind(pb *Playbook, args map[string]string) (*Playbook, error) {
 	if pb == nil {
 		return nil, fmt.Errorf("wfe: playbook is nil")
@@ -381,12 +407,8 @@ func Bind(pb *Playbook, args map[string]string) (*Playbook, error) {
 			}
 		}
 	}
-	for _, text := range playbookTexts(out) {
-		for _, m := range argRef.FindAllStringSubmatch(text, -1) {
-			if !declared[m[1]] {
-				return nil, fmt.Errorf("wfe: %s: unknown argument %q (declared: %s)", pb.Name, m[1], describeArgs(pb.Args))
-			}
-		}
+	if err := checkExpressions(pb, declared, playbookTexts(out)); err != nil {
+		return nil, err
 	}
 
 	// EvalString resolves plain substitutions only; it never reaches
@@ -400,7 +422,29 @@ func Bind(pb *Playbook, args map[string]string) (*Playbook, error) {
 			out.Steps[i].Allow[j] = EvalString(a, ec, nil)
 		}
 	}
+	// A bound step may have lost its command to an empty argument.
+	if err := validatePlaybook(out); err != nil {
+		return nil, err
+	}
 	return out, nil
+}
+
+// checkExpressions reports the first expression that is not a
+// reference to a declared argument.
+func checkExpressions(pb *Playbook, declared map[string]bool, texts []string) error {
+	for _, text := range texts {
+		for _, m := range exprRef.FindAllStringSubmatch(text, -1) {
+			expr := strings.TrimSpace(m[1])
+			arg := argExpr.FindStringSubmatch(expr)
+			if arg == nil {
+				return fmt.Errorf("wfe: %s: unsupported expression %q: only ${{ args.NAME }} is supported", pb.Name, "${{ "+expr+" }}")
+			}
+			if !declared[arg[1]] {
+				return fmt.Errorf("wfe: %s: unknown argument %q (declared: %s)", pb.Name, arg[1], describeArgs(pb.Args))
+			}
+		}
+	}
+	return nil
 }
 
 // playbookTexts returns every string of a playbook that may hold an

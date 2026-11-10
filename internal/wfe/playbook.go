@@ -24,8 +24,12 @@ func NewPolicy(pb *Playbook, history []ActionRecord) *Policy {
 	return p
 }
 
-// Record appends an action to the history.
+// Record appends an action to the history. Only a run belongs to a
+// step, so any other action is recorded without one.
 func (p *Policy) Record(rec ActionRecord) {
+	if rec.Kind != ActionKindRun {
+		rec.StepIndex = -1
+	}
 	p.History = append(p.History, rec)
 }
 
@@ -173,20 +177,26 @@ func (p *Policy) stepFor(cmd string) int {
 	return -1
 }
 
-// allowedCommands lists the commands the policy accepts now.
+// allowedCommands lists the commands the policy accepts now. A
+// command belongs to the first step listing it, so it is left out
+// once that step has spent its limit.
 func (p *Policy) allowedCommands() string {
+	if p.usedActions() >= p.maxActions() {
+		return "none"
+	}
 	var cmds []string
 	seen := map[string]bool{}
 	for i, step := range p.steps() {
-		if step.Max > 0 && p.stepUsage(i) >= step.Max {
-			continue
-		}
+		spent := step.Max > 0 && p.stepUsage(i) >= step.Max
 		for _, c := range append([]string{step.Run}, step.Allow...) {
 			n := normalizeCommand(c)
 			if n == "" || seen[n] {
 				continue
 			}
 			seen[n] = true
+			if spent {
+				continue
+			}
 			cmds = append(cmds, n)
 		}
 	}
@@ -196,22 +206,22 @@ func (p *Policy) allowedCommands() string {
 	return strings.Join(cmds, ", ")
 }
 
-// stepUsage counts the actions taken for the step.
+// stepUsage counts the runs taken for the step.
 func (p *Policy) stepUsage(idx int) int {
 	n := 0
 	for _, rec := range p.History {
-		if rec.StepIndex == idx {
+		if rec.Kind == ActionKindRun && rec.StepIndex == idx {
 			n++
 		}
 	}
 	return n
 }
 
-// latestOutcome returns the outcome of the most recent action taken
-// for the step.
+// latestOutcome returns the outcome of the most recent run of the
+// step.
 func (p *Policy) latestOutcome(idx int) (Outcome, bool) {
 	for i := len(p.History) - 1; i >= 0; i-- {
-		if p.History[i].StepIndex == idx {
+		if p.History[i].Kind == ActionKindRun && p.History[i].StepIndex == idx {
 			return p.History[i].Outcome, true
 		}
 	}

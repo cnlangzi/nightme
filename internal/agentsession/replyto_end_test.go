@@ -15,7 +15,9 @@
 package agentsession
 
 import (
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 )
@@ -81,5 +83,43 @@ func TestEndPrompt_ClearsTheOverrideAfterwards(t *testing.T) {
 
 	if got := as.replyToOverride(); got != "" {
 		t.Fatalf("override after the prompt ended = %q, want empty", got)
+	}
+}
+
+// TestClose_DeliversTheKilledPromptEnd checks that closing a
+// session still delivers the prompt-end of the turn it killed.
+//
+// Close() stops the readpump BEFORE ending the prompt, so the
+// prompt-end push races a closed stop channel. When the event was
+// dropped, the message that carried the turn never settled — the
+// chat layer waits on that prompt-end to close the message out.
+func TestClose_DeliversTheKilledPromptEnd(t *testing.T) {
+	as := NewAgentSession("as_kill", "cs_kill", "pi", "/tmp", nil)
+
+	var got atomic.Int32
+	as.EventBus.Subscribe(func(ev EnrichedEvent) bool {
+		if ev.Kind == KindPromptEnded {
+			got.Store(1)
+		}
+		return false
+	})
+
+	// A spawned session has a live readpump stop channel — Close()
+	// closes it before ending the prompt.
+	as.asMu.Lock()
+	as.readpumpStop = make(chan struct{})
+	as.asMu.Unlock()
+
+	as.SetCurrentPrompt(&Prompt{ID: "p_inflight", LastMessageID: "om_inflight"})
+	if err := as.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && got.Load() == 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got.Load() == 0 {
+		t.Fatal("the killed turn's prompt-end never reached the event bus")
 	}
 }

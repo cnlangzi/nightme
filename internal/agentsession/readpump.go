@@ -304,12 +304,21 @@ func (as *AgentSession) endPrompt(reason agent.PromptEndReason) {
 	stop := as.readpumpStop
 	as.asMu.Unlock()
 
-	// Push KindPromptEnded event. Honor readpumpStop so a Shutdown
-	// racing us can interrupt the push (otherwise Shutdown would
-	// deadlock on readpumpDone while we're blocked on eventQueue).
+	// Push KindPromptEnded event.
+	//
+	// The event is what tells the chat layer the turn is over — the
+	// message that carried it settles on it. So it must not be
+	// dropped: a turn killed by /close would otherwise leave that
+	// message unsettled forever.
+	//
+	// Honor readpumpStop so a Shutdown racing us can interrupt the
+	// push (otherwise Shutdown would deadlock on readpumpDone while
+	// we're blocked on eventQueue). The non-blocking send comes
+	// first: the queue is buffered, so the event lands even when the
+	// stop channel is already closed — and when the buffer IS full,
+	// the blocking select below still has the shutdown escape.
 	as.ensureDispatcher()
-	select {
-	case as.eventQueue <- EnrichedEvent{
+	ev := EnrichedEvent{
 		ChatID:         as.ChatSessionID,
 		AgentSessionID: as.ID,
 		UserMsgID:      userMsgID,
@@ -320,7 +329,14 @@ func (as *AgentSession) endPrompt(reason agent.PromptEndReason) {
 			EndedAt:   p.EndedAt,
 			EndReason: reason,
 		},
-	}:
+	}
+	select {
+	case as.eventQueue <- ev:
+		return
+	default:
+	}
+	select {
+	case as.eventQueue <- ev:
 	case <-stop:
 		// shutdown wins; event lost
 	}

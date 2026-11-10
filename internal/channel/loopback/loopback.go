@@ -19,8 +19,11 @@
 // there.
 //
 // The channel registers itself in the channel registry under the
-// "lb_" chat-id prefix. It needs no configuration, so its builder
-// always succeeds.
+// "lb_" chat-id prefix, so a binary that links this package and
+// builds its channels from the registry gets one. The builder needs
+// no configuration, so it always succeeds. The daemon does not link
+// this package: the channel is driven in-process by a program that
+// links it.
 package loopback
 
 import (
@@ -29,6 +32,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -70,6 +74,12 @@ const (
 	// executionTTL is how long a settled execution is kept after it
 	// settled, for a driver that never awaited it.
 	executionTTL = 10 * time.Minute
+
+	// unsettledTTL is how long an execution that never settled is
+	// kept. A command whose settle never arrives (the bridge died,
+	// the daemon dropped the message) would otherwise stay in the
+	// store for the life of the process.
+	unsettledTTL = 24 * time.Hour
 )
 
 func init() {
@@ -193,11 +203,20 @@ func (c *Channel) BuildBlocks(text string, _ []messages.Attachment) []agent.Cont
 // send pushes text into the chat as an inbound message and returns
 // the generated message id.
 //
+// The chat id must carry the channel's own namespace prefix. Chat
+// ids are channel-namespaced: a chat of another channel belongs to
+// that channel's session, and a chat id without a known prefix is
+// dropped by the chat store on the next load. Sending one here
+// would fork the other channel's session in two.
+//
 // The execution is registered before the message is queued, so a
 // reply that comes back before this call returns is still tracked.
 func (c *Channel) send(ctx context.Context, chatID, text string) (string, error) {
 	if chatID == "" {
 		return "", errors.New("loopback: empty chat id")
+	}
+	if !strings.HasPrefix(chatID, chatIDPrefix) {
+		return "", fmt.Errorf("loopback: chat id %q is not a loopback chat id (prefix %q)", chatID, chatIDPrefix)
 	}
 
 	now := time.Now()
@@ -354,8 +373,9 @@ func (c *Channel) applyLocked(ex *execution, msg messages.OutboundMessage, now t
 
 	case messages.OutChoicePatch:
 		if msg.Choice != nil {
-			ex.choices = patchChoice(ex.choices, *msg.Choice)
-			changed = true
+			var patched bool
+			ex.choices, patched = patchChoice(ex.choices, *msg.Choice)
+			changed = patched
 		}
 
 	case messages.OutMessageSettled:
@@ -398,22 +418,35 @@ func addChoice(choices []messages.Choice, choice messages.Choice) []messages.Cho
 }
 
 // patchChoice folds an update of an interactive prompt into the
-// pending list. A settled prompt is answered — it is no longer
-// pending.
-func patchChoice(choices []messages.Choice, patch messages.Choice) []messages.Choice {
-	for i := range choices {
-		if choices[i].RequestID != "" && choices[i].RequestID == patch.RequestID {
-			if patch.Settled {
-				return append(choices[:i], choices[i+1:]...)
-			}
-			choices[i] = patch
-			return choices
+// pending list.
+//
+// A patch that names its prompt updates that prompt. A settled
+// prompt is answered — it is no longer pending.
+//
+// A patch that names none is the daemon settling a gate it resolved
+// outside the channel (the dashboard): the run has one outstanding
+// prompt, and it is answered, so nothing is pending any more.
+func patchChoice(choices []messages.Choice, patch messages.Choice) ([]messages.Choice, bool) {
+	if patch.RequestID == "" {
+		if !patch.Settled || len(choices) == 0 {
+			return choices, false
 		}
+		return nil, true
+	}
+	for i := range choices {
+		if choices[i].RequestID != patch.RequestID {
+			continue
+		}
+		if patch.Settled {
+			return append(choices[:i], choices[i+1:]...), true
+		}
+		choices[i] = patch
+		return choices, true
 	}
 	if patch.Settled {
-		return choices
+		return choices, false
 	}
-	return append(choices, patch)
+	return append(choices, patch), true
 }
 
 // notifyLocked hands a fresh snapshot to every watcher.
@@ -441,16 +474,24 @@ func (c *Channel) closeWatchersLocked(ex *execution) {
 	ex.watchers = nil
 }
 
-// sweepLocked drops settled executions nobody read in time.
+// sweepLocked drops the executions nobody needs any more: the ones
+// that settled long ago, and the ones that never settled at all.
+//
+// The sweep runs on every access to the store, so an execution is
+// reaped as soon as anything touches the channel again.
 func (c *Channel) sweepLocked(now time.Time) {
 	for id, ex := range c.execs {
-		if ex.phase != PhaseSettled {
-			continue
-		}
-		if now.Sub(ex.settledAt) < executionTTL {
+		if ex.phase == PhaseSettled {
+			if now.Sub(ex.settledAt) < executionTTL {
+				continue
+			}
+		} else if now.Sub(ex.sentAt) < unsettledTTL {
 			continue
 		}
 		delete(c.execs, id)
+		if c.inflight[ex.chatID] == ex.msgID {
+			delete(c.inflight, ex.chatID)
+		}
 	}
 }
 
@@ -458,6 +499,7 @@ func (c *Channel) sweepLocked(now time.Time) {
 func (c *Channel) lookup(msgID string) (*execution, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.sweepLocked(time.Now())
 	ex, ok := c.execs[msgID]
 	return ex, ok
 }
@@ -484,6 +526,7 @@ func (c *Channel) take(ex *execution) Execution {
 func (c *Channel) peek(msgID string) (Execution, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.sweepLocked(time.Now())
 	ex, ok := c.execs[msgID]
 	if !ok {
 		return Execution{}, false
@@ -492,6 +535,11 @@ func (c *Channel) peek(msgID string) (Execution, bool) {
 }
 
 // watch registers a watcher on an execution.
+//
+// The watcher starts from the state the execution is in now, so it
+// never has to wait for the next change to learn where the run
+// stands. A settled execution has nothing left to report: the
+// watcher gets the final snapshot and the channel closes.
 func (c *Channel) watch(msgID string) <-chan Execution {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -502,17 +550,13 @@ func (c *Channel) watch(msgID string) <-chan Execution {
 		close(ch)
 		return ch
 	}
-	ex.watchers = append(ex.watchers, ch)
-	// The watcher starts from the state the execution is in now, so
-	// it never has to wait for the next change to learn where the
-	// run stands.
-	select {
-	case ch <- ex.snapshot():
-	default:
-	}
+	snap := ex.snapshot()
 	if ex.phase == PhaseSettled {
+		ch <- snap
 		close(ch)
-		ex.watchers = ex.watchers[:len(ex.watchers)-1]
+		return ch
 	}
+	ex.watchers = append(ex.watchers, ch)
+	ch <- snap
 	return ch
 }

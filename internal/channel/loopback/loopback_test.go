@@ -361,6 +361,24 @@ func TestAwait_ContextTimeoutKeepsPartialTranscript(t *testing.T) {
 	}
 }
 
+func TestSend_RejectsAChatIDOutsideTheLoopbackNamespace(t *testing.T) {
+	_, client := newClient(t)
+	ctx := context.Background()
+
+	// A chat of another channel belongs to that channel's session.
+	if _, err := client.Send(ctx, "oc_existing", "hello"); err == nil {
+		t.Error("Send accepted a foreign chat id")
+	}
+	// A chat id without a known prefix is dropped by the chat store
+	// on the next load, so its session would not survive.
+	if _, err := client.Send(ctx, "main", "hello"); err == nil {
+		t.Error("Send accepted a chat id without the lb_ prefix")
+	}
+	if _, err := client.Send(ctx, "", "hello"); err == nil {
+		t.Error("Send accepted an empty chat id")
+	}
+}
+
 func TestAwait_UnknownMessageID(t *testing.T) {
 	_, client := newClient(t)
 	if _, err := client.Await(context.Background(), "lb-404"); err == nil {
@@ -520,6 +538,73 @@ func TestChoice_AnsweredChoiceLeavesThePendingList(t *testing.T) {
 // TestObserve_ForeignEntriesAreNotMixedIn pins the correlation
 // contract: a message of another chat, or one naming an unknown
 // message id, never lands in an execution.
+// TestChoice_DashboardSettleClearsThePendingPrompt pins the patch
+// the daemon sends when it settles a gate it resolved outside the
+// channel: that patch names no prompt, and the run has nothing left
+// to answer.
+func TestChoice_DashboardSettleClearsThePendingPrompt(t *testing.T) {
+	ch, client := newClient(t)
+	ctx := context.Background()
+
+	msgID, err := client.Send(ctx, chatID, "do it")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	emit(t, ch, messages.OutboundMessage{
+		ChatID:  chatID,
+		Kind:    messages.OutChoice,
+		ReplyTo: msgID,
+		Choice: &messages.Choice{
+			RequestID: "perm:lb_main:1",
+			Kind:      messages.ChoiceKindPermission,
+		},
+	})
+
+	// The daemon settles the gate on the dashboard: no RequestID.
+	emit(t, ch, messages.OutboundMessage{
+		ChatID:  chatID,
+		Kind:    messages.OutChoicePatch,
+		ReplyTo: msgID,
+		Choice: &messages.Choice{
+			Kind:    messages.ChoiceKindPermission,
+			Settled: true,
+		},
+	})
+
+	exec, ok := client.Get(msgID)
+	if !ok {
+		t.Fatal("Get: no execution")
+	}
+	if len(exec.Choices) != 0 {
+		t.Errorf("Choices = %v, want none after the gate was settled", exec.Choices)
+	}
+}
+
+// TestWatch_SettledExecutionReportsTheFinalSnapshot pins the watch of
+// a run that is already over: the watcher gets the final snapshot and
+// the channel closes.
+func TestWatch_SettledExecutionReportsTheFinalSnapshot(t *testing.T) {
+	ch, client := newClient(t)
+	ctx := context.Background()
+
+	msgID, err := client.Send(ctx, chatID, "/cwd /tmp")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	emit(t, ch, settledMsg(msgID, messages.Outcome{Status: messages.OutcomeOK}))
+
+	snaps := drain(client.Watch(msgID))
+	if len(snaps) != 1 {
+		t.Fatalf("got %d snapshots, want 1", len(snaps))
+	}
+	if snaps[0].Phase != PhaseSettled {
+		t.Errorf("Phase = %q, want %q", snaps[0].Phase, PhaseSettled)
+	}
+	if snaps[0].Outcome.Status != messages.OutcomeOK {
+		t.Errorf("Outcome.Status = %q, want %q", snaps[0].Outcome.Status, messages.OutcomeOK)
+	}
+}
+
 func TestObserve_ForeignEntriesAreNotMixedIn(t *testing.T) {
 	ch, client := newClient(t)
 	ctx := context.Background()

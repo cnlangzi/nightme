@@ -110,3 +110,28 @@ func TestChatSender_EmptyChatID_ReturnsError(t *testing.T) {
 		t.Fatal("Send with an empty chat id: got nil error, want an error")
 	}
 }
+
+// TestChatSender_EmptyText_ReturnsError checks the empty text guard.
+// The channel adapters disagree on empty text (Slack posts an empty
+// bullet, Feishu errors, Telegram drops it), so the sender rejects
+// it before the message reaches a channel.
+func TestChatSender_EmptyText_ReturnsError(t *testing.T) {
+	clearAllMgrs(t)
+	opts, sends := setupWire(t)
+
+	pump, err := buildStack(newStubChannel("alpha", sends), opts, registerMgrInAllMgrs)
+	if err != nil {
+		t.Fatalf("alpha: %v", err)
+	}
+	if _, err := pump.Manager.GetOrCreate("oc_chat1", "claude"); err != nil {
+		t.Fatalf("GetOrCreate: %v", err)
+	}
+
+	sender := NewChatSender()
+	if err := sender.Send(context.Background(), "oc_chat1", "  "); err == nil {
+		t.Fatal("Send with empty text: got nil error, want an error")
+	}
+	if n := sends.count(); n != 0 {
+		t.Errorf("alpha received %d messages, want 0", n)
+	}
+}

@@ -29,9 +29,16 @@ func NewChatSender() messages.ChatSender {
 // chat ids are channel-namespaced, so exactly one Manager owns a
 // given id. A chat that never sent a message in this daemon's
 // lifetime has no session and is reported as unknown.
+//
+// Empty text is rejected here rather than left to the channel:
+// adapters disagree on it (Slack would post an empty bullet, Feishu
+// would error, Telegram would drop the message silently).
 func (s *chatSender) Send(ctx context.Context, chatID, text string) error {
 	if strings.TrimSpace(chatID) == "" {
 		return errors.New("runtime: ChatSender: empty chat id")
+	}
+	if strings.TrimSpace(text) == "" {
+		return errors.New("runtime: ChatSender: empty text")
 	}
 	cs := findChatSession(chatID)
 	if cs == nil {

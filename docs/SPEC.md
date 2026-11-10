@@ -1165,7 +1165,8 @@ User-configured `agents:` entries override built-ins of the same name (merge hap
         if cs == nil { return nil }
         return cs.GitStatus(ctx)
     }
-9.  command.SetDeps(command.Deps{Primary: cfg.Primary, GTWExt: gtwDeps})
+9.  command.SetDeps(command.Deps{Primary: cfg.Primary, GTWExt: gtwDeps,
+                                 ChatSender: runtime.NewChatSender()})
     reg := command.Default()  # 已注册的 slash command factory
     commander := command.NewCommander(reg)
 10. shellDispatcher := shell.NewDispatcher()    # 不再持 registry；持 mgr per call

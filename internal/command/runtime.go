@@ -64,10 +64,10 @@ type Deps struct {
 	// imports command for SlashCommandFactory). The gtw
 	// package's builder closure type-asserts.
 	GTWExt any
-	// ChatSender posts a text into any chat on any channel.
-	// Provided by the runtime; nil when the daemon has no
-	// runtime wiring for it. A service that reports progress
-	// to the chat a run started in uses this instead of
+	// ChatSender posts a text into any chat on any channel. The
+	// daemon always provides one; a nil value means the deps were
+	// assembled without a runtime (tests). A service that reports
+	// progress to the chat a run started in uses this instead of
 	// reaching for a chatsession.Manager.
 	ChatSender messages.ChatSender
 }

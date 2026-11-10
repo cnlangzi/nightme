@@ -6,12 +6,13 @@
 //
 //  1. shared resources — cfg / csFile / asFile / agents /
 //     prCache / gtwDeps (read-only once per daemon)
-//  2. shared wiring    — gtwMgr (with findChatSession-aware
-//     SetGetChatSession) / reactionRouter / commander /
-//     shellDispatcher / inbound.Router; the ChatSender resolves
-//     the per-chat mgr (the per-channel mgr is the "owner" of
-//     each chatID because it's the one that bound the channel's
-//     Emitter)
+//  2. shared wiring    — reactionRouter / commander /
+//     shellDispatcher / inbound.Router. Each takes the per-channel
+//     mgr and the ChatSession per dispatch call; none of them
+//     holds a reference to a single mgr. The ChatSender resolves a
+//     chat to the mgr that owns it (the per-channel mgr is the
+//     "owner" of each chatID because it's the one that bound the
+//     channel's Emitter).
 //  3. gateway + ready  — gateway.Start + deps.OnReady, both
 //     before any channel has started, so readiness never waits
 //     on an IM round trip
@@ -195,9 +196,10 @@ func (d Deps) fillDefaults() Deps {
 // wire:
 //
 //  1. shared resources  — cfg / csFile / asFile / agents / prCache / gtwDeps
-//  2. shared wiring     — gtwMgr / reactionRouter / commander /
+//  2. shared wiring     — reactionRouter / commander /
 //     shellDispatcher / inbound.Router
-//     (the ChatSender resolves the per-chat mgr)
+//     (each takes mgr + cs per dispatch call; the ChatSender
+//     resolves a chat to its owning mgr)
 //  3. gateway + ready   — gateway.Start, then deps.OnReady. No
 //     channel has been touched yet: readiness is a property of
 //     local resources, not of IM connectivity
@@ -379,11 +381,12 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	// the v1.5 correct behaviour for gtw.
 	router := commandServices.NewReactionRouter()
 
-	// gtwMgr is constructed (and returned to the runtime via the
-	// `command.Deps.GTWExt` payload) by gtw's init() builder
-	// below. The /gtw slash-command path uses it for per-chat
-	// run-lock serialisation; v1.5 stripped the rest of the
-	// surface (no draft registry, no reaction handler).
+	// gtw's Manager is created inside its own builder (see
+	// internal/command/gtw) and stays there: the runtime hands gtw
+	// its HandlerDeps through the `command.Deps.GTWExt` payload,
+	// not a Manager. The /gtw slash-command path uses the Manager
+	// for per-chat run-lock serialisation; v1.5 stripped the rest
+	// of the surface (no draft registry, no reaction handler).
 
 	// Slash command registry + commander. After SetDeps
 	// every command/* package's init() has produced a factory;
@@ -542,9 +545,8 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 //
 // Concurrency: populated during the 3rd wire phase
 // (buildStack, single-threaded) and read by:
-//   - the gateway pumpOne goroutine (per channel)
-//   - the gtw reaction handler (event-driven)
 //   - findChatSession (event-driven, called by the ChatSender)
+//   - ShutdownRunMulti (daemon teardown)
 //
 // We use a sync.RWMutex so reads (lookup) don't block each other.
 var (

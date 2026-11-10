@@ -123,7 +123,8 @@
        cs := findChatSession(chatID); if cs == nil { return nil }
        return cs.GitStatus(ctx)
    }
-   command.SetDeps(command.Deps{Primary: cfg.Primary, GTWExt: gtwDeps})
+   command.SetDeps(command.Deps{Primary: cfg.Primary, GTWExt: gtwDeps,
+                                ChatSender: runtime.NewChatSender()})
    commander := command.NewCommander(command.Default())
    shellDispatcher := shell.NewDispatcher()
    ir := inbound.New(commander, shellDispatcher, reactionRouter, cfg.Primary)

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"slices"
 	"strings"
@@ -758,10 +759,7 @@ func completeFixAndDispatch(
 			// issue — half of what was asked happened. The
 			// severity merge keeps this `incomplete` over the
 			// `ok` the success card reported.
-			dispatchData := map[string]string{}
-			for k, v := range fixData {
-				dispatchData[k] = v
-			}
+			dispatchData := maps.Clone(fixData)
 			dispatchData["reason"] = "dispatch_failed"
 			reportOutcome(ctx, messages.Outcome{
 				Status:  messages.OutcomeIncomplete,

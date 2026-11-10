@@ -297,7 +297,15 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	// Apply the global scope before the chat session is consulted.
 	notices, done, writeFailed, err := applyGlobalScope(spec)
 	if err != nil {
-		chatsession.ReportOutcome(ctx, command.FailedOutcome("config_error", "the review agent could not be persisted"))
+		// An agent name that is not registered is a different
+		// failure than a failed write — the program branches on it.
+		reason := "config_error"
+		summary := "the review agent could not be persisted"
+		if errors.Is(err, errUnknownReviewAgent) {
+			reason = "unknown_agent"
+			summary = "the review agent is not a registered agent"
+		}
+		chatsession.ReportOutcome(ctx, command.FailedOutcome(reason, summary))
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
 	if writeFailed {
@@ -907,16 +915,21 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 		// A resumed group that failed again did not finish its
 		// work — the continuation is not a clean success. The
 		// counts come from the collector, never from the text.
-		groups, unfinished := groupCounts(groupOutcomes)
+		//
+		// A continuation fans out over the groups it RESUMED, not
+		// over every group of the review it continues — so its
+		// count goes under `resumed_groups`, and `groups` keeps
+		// meaning "the groups of the review".
+		resumed, unfinished := groupCounts(groupOutcomes)
 		status := messages.OutcomeOK
 		summary := "review continued"
 		if unfinished > 0 {
 			status = messages.OutcomeIncomplete
-			summary = fmt.Sprintf("%d of %d groups unfinished", unfinished, groups)
+			summary = fmt.Sprintf("%d of %d resumed groups unfinished", unfinished, resumed)
 		}
 		data := map[string]string{"agent": runnerName}
-		if groups > 0 {
-			data["groups"] = fmt.Sprintf("%d", groups)
+		if resumed > 0 {
+			data["resumed_groups"] = fmt.Sprintf("%d", resumed)
 		}
 		if unfinished > 0 {
 			data["unfinished_groups"] = fmt.Sprintf("%d", unfinished)
@@ -956,6 +969,11 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 	return replyWith(ctx, rt, notices, ""), nil
 }
 
+// errUnknownReviewAgent is the failure of a -g flag that names an
+// agent no registered starter answers to. It is distinct from a
+// failed write: nothing was written, and the name itself is wrong.
+var errUnknownReviewAgent = errors.New("unknown agent")
+
 // applyGlobalScope performs the global-scope write of one /review
 // invocation: `-g` persists the runner, `--unset` removes it.
 //
@@ -979,7 +997,7 @@ func applyGlobalScope(spec Spec) (notices []string, done bool, writeFailed bool,
 		// that no agent answers to would only fail later, on every
 		// /review run.
 		if _, err := agent.Builtins.Get(spec.Agent); err != nil {
-			return nil, false, false, fmt.Errorf("unknown agent %q", spec.Agent)
+			return nil, false, false, fmt.Errorf("%w %q", errUnknownReviewAgent, spec.Agent)
 		}
 		if err := config.SetReviewAgent(path, spec.Agent); err != nil {
 			return []string{fmt.Sprintf(

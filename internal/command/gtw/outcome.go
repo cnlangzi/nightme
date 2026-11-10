@@ -29,13 +29,19 @@ import (
 // reportOutcome merges a structured outcome into the inbound
 // message's work.
 //
-// A run cancelled by /gtw abort reports nothing here: the abort card
-// is the only message that run produces, and the outcome the caller
-// sees is `cancelled` — reported once by the factory when it notices
-// the cancellation. Reporting `failed` first would win the merge on
-// severity (failed > cancelled) and hide the cancellation.
+// A run cancelled by /gtw abort reports `cancelled` — the factory
+// does that once, when it notices the cancellation.
+//
+// A `failed` verdict from a cancelled run is dropped: the failure is
+// a consequence of the cancellation (the subprocess was killed
+// mid-flight), and `failed` outranks `cancelled` in the merge, so
+// keeping it would report the cancellation as a failure. The other
+// verdicts are kept: `ok`, `noop` and `incomplete` all rank below
+// `cancelled`, so the merged status stays `cancelled` while their
+// Data — the worktree that was removed, the branch that was
+// deleted — still reaches the program.
 func reportOutcome(ctx context.Context, o messages.Outcome) {
-	if aborted(ctx) {
+	if aborted(ctx) && o.Status == messages.OutcomeFailed {
 		return
 	}
 	chatsession.ReportOutcome(ctx, o)

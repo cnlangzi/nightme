@@ -155,13 +155,19 @@ gtw 标题只从一个闭集里选 emoji,避免散乱:
 |---|---|
 | `✅` | `ok` |
 | `✨` | `noop` |
-| `⚠️` | `incomplete` |
 | `❌` | `failed` |
+| `⚠️` | 看这条 ⚠️ 说的是什么 |
 
 `🤖` 也是 `ok` —— 它只说明这一步是 agent 干的。
 
-`⚠️` 有两种用法:卡片本身表示"部分成功"时对应 `incomplete`;而
-`⚠️ hooks config` 这种**旁注**不是结论,不参与上报。
+`⚠️` 有三种用法,结论各不相同:
+
+- **部分成功**(比如 `⚠️ 1 of 2 issues opened`)→ `incomplete`;
+- **拒绝执行**(比如 `⚠️ Already inside a /gtw fix` —— 什么都没做)
+  → `failed`;
+- **旁注**(比如 `⚠️ hooks config`)→ 不是结论,不参与上报。
+
+一句话:状态来自**命令的决定**,emoji 只是这个决定在卡片上的样子。
 
 结论的 `Data` 键与 `reason` 词表见 [docs/me.md](../../../docs/me.md) §1
 与 §7.1。

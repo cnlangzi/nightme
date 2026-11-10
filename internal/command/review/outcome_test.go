@@ -305,8 +305,8 @@ func TestReviewContinueOutcome(t *testing.T) {
 		hold.Release()
 		got := waitOutcome(t, em, 5*time.Second)
 		assertOutcome(t, got, messages.OutcomeOK, map[string]string{
-			"groups": "1",
-			"agent":  "reviewer",
+			"resumed_groups": "1",
+			"agent":          "reviewer",
 		})
 	})
 
@@ -340,7 +340,7 @@ func TestReviewContinueOutcome(t *testing.T) {
 		hold.Release()
 		got := waitOutcome(t, em, 5*time.Second)
 		assertOutcome(t, got, messages.OutcomeIncomplete, map[string]string{
-			"groups":            "2",
+			"resumed_groups":    "2",
 			"unfinished_groups": "1",
 			"agent":             "reviewer",
 		})

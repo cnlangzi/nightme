@@ -354,17 +354,24 @@ func dispatchPR(
 	// usagebar) renders. Failure paths above (parsePRReply,
 	// resolveProvider, CreatePR, ErrPRExists) stay on the
 	// no-stamp reply — they're not the agent-result surface.
+	// The PR number comes from the URL. A URL that does not carry
+	// one (a self-hosted host with a non-standard PR path) yields
+	// no number at all — publishing a zero would name a PR that
+	// does not exist.
+	prData := map[string]string{
+		"branch": c.Branch,
+		"pr_url": url,
+		"agent":  agentName,
+	}
+	if number := prNumberFromURL(url); number > 0 {
+		prData["pr_number"] = fmt.Sprintf("%d", number)
+	}
 	return replyAgentOutcome(ctx, cs.Emitter(), chatID, messageID,
 		card, agentName, runRes,
 		messages.Outcome{
 			Status:  messages.OutcomeOK,
 			Summary: "opened the pull request",
-			Data: map[string]string{
-				"branch":    c.Branch,
-				"pr_number": fmt.Sprintf("%d", prNumberFromURL(url)),
-				"pr_url":    url,
-				"agent":     agentName,
-			},
+			Data:    prData,
 		}), nil
 }
 

@@ -12,6 +12,8 @@ package gtw
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -324,5 +326,81 @@ func TestGtwOutcome_ReportHappensOnce(t *testing.T) {
 	}
 	if strings.TrimSpace(got.Summary) == "" {
 		t.Error("outcome summary is empty; every outcome names what happened")
+	}
+}
+
+// TestGtwOutcome_NewCreatePartial covers the /gtw new -y run that
+// opened some issues and then stopped: the card says ⚠️ and the
+// outcome must not say ok.
+//
+// The record of the opened issue is written where a directory sits —
+// the issue is opened, the record cannot be written, the run stops,
+// and the remaining drafts stay on disk.
+func TestGtwOutcome_NewCreatePartial(t *testing.T) {
+	dir := t.TempDir()
+	writeDrafts(t, dir, "01.md", "# feat(gtw): archive chats\n\n## Requirements\n- R1\n")
+
+	prov := newFakeGitProvider(ProviderGitHub, "github.com")
+	prov.SetCreateIssueFunc(func(title, body string) (*Issue, error) {
+		// A directory where the record file belongs — writing it
+		// fails once the issue is open.
+		if err := os.MkdirAll(filepath.Join(dir, "01.created"), 0o755); err != nil {
+			return nil, err
+		}
+		return &Issue{ID: 42, Title: title, URL: "https://github.com/o/r/issues/42"}, nil
+	})
+
+	card, outcome := createIssuesFromDrafts(context.Background(), dir, resolveTo(prov))
+	if !strings.HasPrefix(card, "⚠️") {
+		t.Fatalf("card = %q, want a partial-success card", card)
+	}
+	if outcome.Status != messages.OutcomeIncomplete {
+		t.Fatalf("outcome = %+v, want incomplete — the card says ⚠️", outcome)
+	}
+	if outcome.Data["issues"] != "42" {
+		t.Errorf("outcome issues = %q, want 42", outcome.Data["issues"])
+	}
+}
+
+// TestGtwOutcome_AbortedRunKeepsItsFacts covers the abort guard.
+//
+// A cancelled run reports `cancelled`, and the `failed` verdict the
+// cancellation caused is dropped — `failed` outranks `cancelled` in
+// the merge and would report the cancellation as a failure. The
+// facts of the work the run did BEFORE the cancellation still reach
+// the program: a /gtw close that removed the worktree and was
+// aborted during its sync did remove the worktree.
+func TestGtwOutcome_AbortedRunKeepsItsFacts(t *testing.T) {
+	p := newOutcomeProbe(t)
+	ctx, cancel := context.WithCancelCause(p.ctx)
+	cancel(ErrAborted)
+
+	// The failure the cancellation caused: dropped.
+	reportOutcome(ctx, command.FailedOutcome("rejected", "the push was rejected"))
+	// The work the run did before the cancellation: kept.
+	reportOutcome(ctx, messages.Outcome{
+		Status:  messages.OutcomeIncomplete,
+		Summary: "the worktree was closed but the sync failed",
+		Data:    map[string]string{"branch": "feat/x", "worktree": "/tmp/wt"},
+	})
+	// The cancellation itself.
+	chatsession.ReportOutcome(p.ctx, messages.Outcome{
+		Status:  messages.OutcomeCancelled,
+		Summary: "the command was cancelled by /gtw abort",
+		Data:    map[string]string{"reason": "aborted"},
+	})
+
+	got := p.settle(t)
+	if got == nil {
+		t.Fatal("no settled outcome")
+	}
+	if got.Status != messages.OutcomeCancelled {
+		t.Fatalf("outcome = %+v, want cancelled", got)
+	}
+	if got.Data["branch"] != "feat/x" {
+		t.Errorf("outcome data = %v, want the branch the run worked on", got.Data)
+	}
+	if got.Data["reason"] == "rejected" {
+		t.Errorf("outcome data = %v, want the cancellation's reason, not the failure's", got.Data)
 	}
 }

@@ -61,10 +61,11 @@ type Outcome struct {
 | `mode` | `/gtw fix` 的模式（`remote` / `local`） |
 | `topic` | `/gtw plan` 的主题 |
 | `sha_range` | commit 区间（`<before>..HEAD`） |
-| `commits` | commit 条数 |
-| `remote_head` | push 之后 `origin/<branch>` 指向的 sha |
+| `commits` | commit 条数（`/gtw commit` 与 `/gtw push` 给出确切条数；`/gtw sync` 的卡片只列前 10 条，所以它不给这个键） |
+| `remote_head` | push 之后 `origin/<branch>` 指向的 sha（读不到时这个键不出现） |
 | `pr_number` / `pr_url` | PR 的编号 / 链接 |
-| `groups` | review 跑了几组 |
+| `groups` | review 跑了几组（`/review`） |
+| `resumed_groups` | 续跑恢复了几组（`/review --continue` 只跑没完成的那几组） |
 | `unfinished_groups` | 其中没跑完的组数 |
 | `subcommand` | 被 `/gtw abort` 取消的子命令 |
 | `elapsed` | 被取消的子命令已经跑了多久 |
@@ -72,6 +73,7 @@ type Outcome struct {
 | `issues` | `/gtw new -y` 开出来的 issue 编号（逗号分隔） |
 | `kept` | 还没开成 issue 的草稿数 |
 | `lang` / `scope` | `/gtw config` 的语言与作用域（`global` / `repo` / `default`） |
+| `unset` | `/gtw config --unset` 删掉了这个设置（值是 `true`） |
 | `cwd` | `/cwd` 设好的工作区路径 |
 
 `Data` 刻意是 `map[string]string` 而不是 struct：不同命令产出不同的事实，程序只读自己关心的键。
@@ -215,6 +217,7 @@ chatsession: message settled chat_id=… message_id=… status=… summary=…
 | --- | --- | --- |
 | `usage` | 命令行不合法（未知 flag / 参数缺失 / 位置参数不对） | 全部 |
 | `no_cwd` | 命令需要工作区，但没有 | 全部 |
+| `wrong_cwd` | `/gtw back <worktree>` 要求当前在主仓库根目录 | `/gtw back` |
 | `no_session` | 没有聊天会话 | `/stop` |
 | `no_agent` | 没有选中的 agent | `/use` / `/review` / `/stop` |
 | `unknown_agent` | agent 名没注册 | `/review` |

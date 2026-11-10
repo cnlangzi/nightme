@@ -240,30 +240,32 @@ func createIssuesFromDrafts(ctx context.Context, dir string, resolve func() (Git
 		issue, err := provider.CreateIssue(ctx, owner, repo, title, appendIssueFooter(body))
 		if err != nil {
 			return renderIssueCreateFailure(owner, repo, opened, "create issue from "+d.name(), err, dir, kept),
-				issueCreateOutcome(opened, owner, repo, kept)
+				issueCreateOutcome(opened, owner, repo, kept, err)
 		}
 		opened = append(opened, issue)
 		numbers[d.key] = issue.ID
 		if err := recordIssueCreated(dir, d, issue); err != nil {
 			return renderIssueCreateFailure(owner, repo, opened, fmt.Sprintf("record #%d for %s", issue.ID, d.name()), err, dir, kept-1),
-				issueCreateOutcome(opened, owner, repo, kept-1)
+				issueCreateOutcome(opened, owner, repo, kept-1, err)
 		}
 	}
 	if len(opened) == 1 {
 		return renderIssueOpenedCard(owner, repo, opened[0]),
-			issueCreateOutcome(opened, owner, repo, 0)
+			issueCreateOutcome(opened, owner, repo, 0, nil)
 	}
 	return renderIssuesOpenedCard(owner, repo, opened),
-		issueCreateOutcome(opened, owner, repo, 0)
+		issueCreateOutcome(opened, owner, repo, 0, nil)
 }
 
 // issueCreateOutcome is the outcome of one /gtw new -y run: the
 // issues it opened, and whether the run finished them all.
 //
-// Nothing opened means the run failed; some but not all means it
-// stopped half-way — the remaining drafts are still on disk and
-// `/gtw new -y` creates the rest.
-func issueCreateOutcome(opened []*Issue, owner, repo string, kept int) messages.Outcome {
+// A run that stopped on an error opened some issues and left the
+// rest on disk — `/gtw new -y` creates the rest. That is a partial
+// success (the ⚠️ card), whatever the remaining draft count says:
+// the count alone cannot tell "the run stopped" from "the run
+// finished".
+func issueCreateOutcome(opened []*Issue, owner, repo string, kept int, runErr error) messages.Outcome {
 	numbers := make([]string, 0, len(opened))
 	for _, issue := range opened {
 		numbers = append(numbers, fmt.Sprintf("%d", issue.ID))
@@ -276,12 +278,12 @@ func issueCreateOutcome(opened []*Issue, owner, repo string, kept int) messages.
 		data["kept"] = fmt.Sprintf("%d", kept)
 	}
 	switch {
-	case len(opened) == 0:
+	case runErr != nil && len(opened) == 0:
 		return command.FailedOutcomeData("error", "no issue could be created", data)
-	case kept > 0:
+	case runErr != nil:
 		return messages.Outcome{
 			Status:  messages.OutcomeIncomplete,
-			Summary: fmt.Sprintf("%d of the issues were opened", len(opened)),
+			Summary: fmt.Sprintf("%d issue(s) opened before the run stopped", len(opened)),
 			Data:    data,
 		}
 	default:

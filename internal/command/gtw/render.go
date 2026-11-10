@@ -17,9 +17,6 @@ type syncOutcome struct {
 	branch string
 	// head is the branch's new HEAD sha. Empty when unknown.
 	head string
-	// commits is how many commits the card listed — the card caps
-	// the list at 10, so this is "the commits the card shows".
-	commits int
 	// pulled is false when the branch was already up to date.
 	pulled bool
 }
@@ -36,9 +33,6 @@ func (s *syncOutcome) data() map[string]string {
 	}
 	if s.head != "" {
 		data["head"] = s.head
-	}
-	if s.pulled {
-		data["commits"] = fmt.Sprintf("%d", s.commits)
 	}
 	return data
 }
@@ -152,6 +146,10 @@ func shortSHA(sha string) string {
 // degrade gracefully to the raw pull output rather than surfacing
 // a formatting-internal error to the user.
 func renderSyncReply(branch, newHead, pullOut, repoRoot string, ctx context.Context, git GitRunner) (string, *syncOutcome) {
+	// The card lists at most 10 commits, so the number of listed
+	// commits is not the number of commits the pull landed. The
+	// outcome therefore carries no commit count — a program that
+	// needs one reads it from the branch it now points at.
 	out := &syncOutcome{branch: branch, head: newHead, pulled: true}
 
 	if strings.Contains(pullOut, "Already up to date.") {
@@ -185,7 +183,6 @@ func renderSyncReply(branch, newHead, pullOut, repoRoot string, ctx context.Cont
 		return fmt.Sprintf("✅ origin/%s @ %s", branch, shortSHA(newHead)), out
 	}
 	subjects := strings.Split(strings.TrimSpace(subjectsRaw), "\n")
-	out.commits = len(subjects)
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "✅ origin/%s @ %s\n", branch, shortSHA(newHead))

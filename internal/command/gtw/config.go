@@ -390,8 +390,13 @@ func configWriteReply(
 		lines = append(lines, "→ repo: "+repo)
 	}
 	data := map[string]string{"scope": scopeCode(scope)}
+	summary := "the gtw output language was changed"
 	if unset {
+		// An unset removes the entry — nothing was "changed" into
+		// a new value, and an empty `lang` alone cannot say so.
 		data["lang"] = ""
+		data["unset"] = "true"
+		summary = "the gtw output language was unset"
 	} else {
 		data["lang"] = value
 	}
@@ -401,7 +406,7 @@ func configWriteReply(
 	return replyOutcome(ctx, cs.Emitter(), chatID, messageID, strings.Join(lines, "\n"),
 		messages.Outcome{
 			Status:  messages.OutcomeOK,
-			Summary: "the gtw output language was changed",
+			Summary: summary,
 			Data:    data,
 		}), nil
 }

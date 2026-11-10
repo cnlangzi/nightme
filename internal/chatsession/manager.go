@@ -521,6 +521,19 @@ func (m *Manager) HandleInbound(ctx context.Context, msg *messages.InboundMessag
 		m.maybeEmitWatcherHint(ctx, msg, cs)
 		slog.Default().Info("chatsession: drop non-mention group message (WatchMode != All)",
 			"chat_id", msg.ChatID, "message_id", msg.MessageID)
+		// The message was not addressed to the bot — nothing ran.
+		// Settle it so a program waiting on the message learns that
+		// nothing happened instead of waiting for a turn that will
+		// never come.
+		if cs != nil {
+			w := cs.Hold(msg.MessageID)
+			w.Report(messages.Outcome{
+				Status:  messages.OutcomeNoop,
+				Summary: "message not addressed to the bot",
+				Data:    map[string]string{"reason": "watch_mode"},
+			})
+			w.Release()
+		}
 		return nil
 	}
 	userMsgID := msg.MessageID
@@ -550,6 +563,16 @@ func (m *Manager) HandleInbound(ctx context.Context, msg *messages.InboundMessag
 	// reply and no orphan ⏳ reaction stays on the user message.
 	_, err := cs.LookupSelectedAgentSession()
 	if err != nil {
+		// No agent turn will run for this message. Settle it as
+		// failed so a program waiting on the message learns that
+		// instead of waiting forever.
+		w := cs.Hold(userMsgID)
+		w.Report(messages.Outcome{
+			Status:  messages.OutcomeFailed,
+			Summary: err.Error(),
+			Data:    map[string]string{"reason": "no_agent"},
+		})
+		w.Release()
 		if errors.Is(err, ErrNoSelectedCwd) {
 			return m.sendError(ctx, msg.ChatID, "No workspace set. Send /cwd <path> first.")
 		}

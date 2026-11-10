@@ -1411,6 +1411,10 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 
 func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error {
 	switch msg.Kind {
+	case messages.OutMessageSettled:
+		// The structured outcome of an inbound message. It exists
+		// for programs that drive nightme, not for humans.
+		return nil
 	case messages.OutReply:
 		// F-44 revert: OutReply folds into the rolling-log receipt
 		// card (F-25 → F-40 model) for visual scan benefit (1

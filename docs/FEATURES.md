@@ -33,6 +33,7 @@
 | `/new` slash command | [feat/F-chat-session.md](./feat/F-chat-session.md) |
 | `/close` graceful + per-entry list reply | [feat/F-chat-session.md](./feat/F-chat-session.md) |
 | Message / Prompt 生命周期模型（`Prompt` 一等公民）| [feat/F-53-message-prompt-lifecycle.md](./feat/F-53-message-prompt-lifecycle.md) |
+| 消息结算信号（每条 inbound 消息一条 settled + 结构化 `Outcome`）| [**me.md**](./me.md) |
 
 ## 3. Bridge / Agent 集成层
 

@@ -91,16 +91,26 @@ func (r *Router) tryCommandDispatch(ctx context.Context, mgr *chatsession.Manage
 // originating channel. r.emitter is kept only as the fallback
 // for paths that never resolve a ChatSession (e.g. early errors).
 func (r *Router) runCommand(ctx context.Context, mgr *chatsession.Manager, commander CommandDispatcher, msg *messages.InboundMessage) {
-	// Defer recover MUST be first so a panic in GetOrCreate
-	// (e.g. nil deref in chatsession code) is caught and the
-	// goroutine doesn't crash the daemon. Matches runAction /
-	// runMessage which also recover at function entry.
+	// The work is released in the same deferred block as the panic
+	// recovery so the settled message never precedes the command's
+	// reply — on the panic path the recovery reply is emitted first.
+	var work *chatsession.Work
 	defer func() {
 		if rec := recover(); rec != nil {
 			slog.Default().Error("inbound: runCommand panicked",
 				"chat_id", msg.ChatID, "panic", rec)
+			// The command crashed — say so in the machine-readable
+			// channel too. A driver that only reads the settled
+			// message must not see "unknown" for a command that
+			// visibly blew up.
+			work.Report(messages.Outcome{
+				Status:  messages.OutcomeFailed,
+				Summary: "the command panicked",
+				Data:    map[string]string{"reason": "panic"},
+			})
 			r.emitCommandReply(ctx, nil, msg, "❌ internal error (see daemon log)")
 		}
+		work.Release()
 	}()
 
 	// v1.3+ multi-channel: resolve the ChatSession through the
@@ -113,7 +123,15 @@ func (r *Router) runCommand(ctx context.Context, mgr *chatsession.Manager, comma
 		return
 	}
 
-	out, _, err := commander.Dispatch(ctx, command.RuntimeServices{
+	// The structured outcome of this inbound: the command reports
+	// through the work, and the settled message goes out after the
+	// reply. A command that queues an agent turn adds its own hold
+	// (chatsession.QueueUserMessage), so the settled message waits
+	// for that turn too.
+	work = cs.Hold(msg.MessageID)
+	cmdCtx := chatsession.WithWork(ctx, work)
+
+	out, _, err := commander.Dispatch(cmdCtx, command.RuntimeServices{
 		// RuntimeServices currently carries only Logger + Config
 		// (see command/runtime.go). The runtime wires the
 		// concrete services it needs (primary agent, …) at
@@ -129,6 +147,10 @@ func (r *Router) runCommand(ctx context.Context, mgr *chatsession.Manager, comma
 		HasMention: msg.HasMention,
 	})
 	if err != nil {
+		chatsession.ReportOutcome(cmdCtx, messages.Outcome{
+			Status:  messages.OutcomeFailed,
+			Summary: err.Error(),
+		})
 		r.emitCommandReply(ctx, cs, msg, "❌ "+err.Error())
 		return
 	}

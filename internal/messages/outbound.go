@@ -150,6 +150,15 @@ const (
 	// outbound kind that HeartbeatTracker.Observe watches to
 	// flip the heartbeat Status. Same lifecycle, two layers.
 	OutPromptEnded
+
+	// OutMessageSettled marks the end of an inbound message's
+	// handling and carries the structured Outcome. One settled
+	// message per inbound msgID, emitted after the command's
+	// reply. ReplyTo carries the inbound msgID.
+	//
+	// Channels drop it silently — it exists for programs that
+	// drive nightme (internal/me), not for humans.
+	OutMessageSettled
 )
 
 // String renders OutboundKind for log lines.
@@ -187,6 +196,8 @@ func (k OutboundKind) String() string {
 		return "heartbeat"
 	case OutPromptEnded:
 		return "prompt_ended"
+	case OutMessageSettled:
+		return "message_settled"
 	}
 	return "unknown"
 }
@@ -322,6 +333,11 @@ type OutboundMessage struct {
 	// HeartbeatError (Reason.IsError()). Populated by the CS
 	// pump's PromptEndBus subscriber from AgentSession.endPrompt.
 	PromptEndReason *agent.PromptEndReason
+
+	// Outcome is the structured verdict for OutMessageSettled.
+	// nil for other Kinds. Populated by chatsession when the last
+	// hold on an inbound msgID is released.
+	Outcome *Outcome
 
 	// GitStatus (F-CLAUDE-PRINT-002) is the workspace + git + PR
 	// context attached to every outbound message that flows to a

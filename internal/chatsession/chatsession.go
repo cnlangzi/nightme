@@ -291,6 +291,13 @@ type ChatSession struct {
 	// Keyed by AS.ID; values are placeholders. Guarded by mu.
 	subs map[string]struct{}
 
+	// workMu guards works — the per-msgID outcome trackers that
+	// back the settled signal. Separate from mu because the settle
+	// path emits an outbound message and must not run under the
+	// session lock.
+	workMu sync.Mutex
+	works  map[string]*Work
+
 	// ctx is the per-ChatSession context. Lives for the chat's
 	// lifetime (until daemon shutdown). It is the PARENT context
 	// every AgentSession active on this chat derives its own
@@ -1008,6 +1015,18 @@ func (cs *ChatSession) emitMessageDropped(msg Message) {
 		State:     agent.MessageDropped,
 		At:        time.Now(),
 	})
+	// A dropped message never reaches an agent turn, so the
+	// prompt-end that would end its hold will never come. Settle it
+	// here: the hold is released, the settled message goes out, and
+	// the work does not linger for the chat's lifetime.
+	if w := cs.workFor(msg.ID); w != nil {
+		w.Report(messages.Outcome{
+			Status:  messages.OutcomeCancelled,
+			Summary: "message dropped before it reached the agent",
+			Data:    map[string]string{"reason": "dropped"},
+		})
+		w.Release()
+	}
 }
 
 // PromptEndBus (F-53 follow-up → F-54) is the runtime-installed callback
@@ -1124,7 +1143,22 @@ func (cs *ChatSession) QueueUserMessage(msg Message) error {
 	if msg.ID == "" {
 		return nil
 	}
+	// The queued message becomes an agent turn, so its outcome is
+	// the turn's verdict: hold the message until the turn carrying
+	// it ends.
+	w := cs.HoldUntilPromptEnd(msg.ID)
 	if err := cs.queue.Push(msg); err != nil {
+		// The message never reaches an agent turn — no prompt
+		// will end for it. Settle it now instead of leaving the
+		// hold open forever.
+		if w != nil {
+			w.Report(messages.Outcome{
+				Status:  messages.OutcomeFailed,
+				Summary: "input queue full",
+				Data:    map[string]string{"reason": "queue_full"},
+			})
+			w.Release()
+		}
 		return err
 	}
 	_ = cs.TryFlush()
@@ -1174,10 +1208,31 @@ func (cs *ChatSession) SteerUserMessage(msg Message) error {
 		return nil
 	}
 
+	// The steered text is agent work of its own: it rides the next
+	// turn. Hold the message until that turn ends, the same way
+	// QueueUserMessage does — otherwise the message settles as soon
+	// as the command returns, while the agent has not seen the text
+	// yet.
+	//
+	// The hold ends with the turn that carries the steered message.
+	// When that turn is part of a multi-message batch, the batch's
+	// anchor is the trigger (see the re-anchor in TryFlush).
+	w := cs.HoldUntilPromptEnd(msg.ID)
+
 	// Step 1: capacity check. If we can't enqueue the steered
 	// message, skip Stop entirely — aborting the bridge for a
 	// message we lost is worse than not steering at all.
 	if err := cs.queue.PushFront(msg); err != nil {
+		// The text never reaches an agent turn — no prompt will
+		// end for it. Settle it instead of holding it forever.
+		if w != nil {
+			w.Report(messages.Outcome{
+				Status:  messages.OutcomeFailed,
+				Summary: "input queue full",
+				Data:    map[string]string{"reason": "queue_full"},
+			})
+			w.Release()
+		}
 		return err
 	}
 
@@ -1316,6 +1371,20 @@ func (cs *ChatSession) TryFlush() error {
 	// is the same set — it's later read by writebackMessageState
 	// (and by the AS-side readpump) but never mutated.
 	p := cs.buildPromptLocked(batch)
+
+	// A multi-message batch is ONE agent turn, and the turn's
+	// prompt-end event carries the batch's anchor — the LAST
+	// message (buildPromptLocked). Move the earlier messages'
+	// prompt-end triggers there so every message of the batch
+	// settles when the turn ends instead of only the last one.
+	//
+	// Done BEFORE Submit: the bridge can answer and the readpump
+	// can end the prompt while Submit is still returning, and the
+	// prompt-end event must find every message of the batch
+	// already anchored.
+	for i := 0; i < len(batch)-1; i++ {
+		cs.reanchorWork(batch[i].ID, p.LastMessageID)
+	}
 
 	// Pre-Submit re-check under cs.mu. Between the snapshot of
 	// `as` above and the Submit call below, the selected AS can

@@ -141,6 +141,9 @@ func (e *emitImpl) Send(ctx context.Context, msg messages.OutboundMessage) error
 //     Pure internal state propagation; the user sees a counter
 //     refresh, not a new event boundary. A long turn with N
 //     heartbeats would otherwise trigger N `git status` calls.
+//   - OutMessageSettled — the structured outcome of an inbound
+//     message. Internal lifecycle, never rendered; one per inbound
+//     message, so stamping it would run `git status` per message.
 //
 // Every other kind (OutReply, OutResult, OutMessageState,
 // OutMessageStateRemoved, OutError, OutChoice, OutChoicePatch,
@@ -160,7 +163,8 @@ func (e *emitImpl) stampGitStatus(ctx context.Context, msg *messages.OutboundMes
 	case messages.OutToolStart,
 		messages.OutToolEnd,
 		messages.OutThinking,
-		messages.OutHeartbeat:
+		messages.OutHeartbeat,
+		messages.OutMessageSettled:
 		return
 	}
 	msg.GitStatus = e.gitStatusLookup(ctx, msg.ChatID)

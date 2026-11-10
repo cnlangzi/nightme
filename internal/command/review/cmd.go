@@ -411,6 +411,21 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 	sendBlocks := as.SendBlocks // close over SendBlocks for Inject
 	emitter := cs.Emitter()
 
+	// The review outlives the command: the command returns as soon
+	// as the goroutine is launched, but the review itself runs for
+	// minutes and then feeds the findings back into the chat's
+	// agent as a turn of its own. Take a hold on the message's
+	// outcome so the settled signal waits for the whole thing
+	// instead of reporting the command as done while the agent
+	// work is still running.
+	//
+	// The hold is taken HERE, not inside the goroutine: the
+	// dispatcher's own hold on the same message is released when
+	// Handle returns, and a hold taken later would arrive after
+	// that release — the message would settle as unknown before
+	// the review even started.
+	work := cs.Hold(replyTo)
+
 	// v7: /review is fully async. Handle returns immediately
 	// after launching a goroutine that does the actual review
 	// work (review sessions + distribute findings). The
@@ -449,6 +464,12 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 	go func() {
 		revCtx, cancel := context.WithTimeout(cs.Context(), timeouts.Review)
 		defer cancel()
+
+		// The review's own hold: released when the goroutine
+		// returns, so the message settles only after the review
+		// work AND the injected turn it hands the findings to are
+		// both done.
+		defer work.Release()
 
 		// The chat stops counting as "running a review" once the
 		// review itself is done — the delivery below is only the
@@ -504,9 +525,10 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 		finish()
 
 		if err != nil {
-			if emitter == nil {
-				return
-			}
+			// The review failed — say so in the machine-readable
+			// channel too. A driver that only reads the settled
+			// message must not see "unknown" for a review that
+			// visibly failed.
 			var text string
 			switch {
 			case errors.Is(err, agent.ErrNoDiff):
@@ -525,12 +547,22 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 				slog.Default().Info("/review: empty diff, no agent spawn",
 					"agent", runnerName,
 					"workspace", workspace)
+				work.Report(messages.Outcome{
+					Status:  messages.OutcomeNoop,
+					Summary: "no diff to review",
+					Data:    map[string]string{"agent": runnerName, "reason": "no_diff"},
+				})
 			case errors.Is(err, agent.ErrReviewNotSupported):
 				slog.Default().Warn("/review failed",
 					"agent", runnerName,
 					"err", err,
 				)
 				text = fmt.Sprintf("❌ agent %q does not support /review", runnerName)
+				work.Report(messages.Outcome{
+					Status:  messages.OutcomeFailed,
+					Summary: "the agent does not support /review",
+					Data:    map[string]string{"agent": runnerName, "reason": "not_supported"},
+				})
 			default:
 				slog.Default().Warn("/review failed",
 					"agent", runnerName,
@@ -541,6 +573,14 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 					msg = msg[:800] + "…(truncated)"
 				}
 				text = fmt.Sprintf("❌ /review failed (agent=%s):\n%s", runnerName, msg)
+				work.Report(messages.Outcome{
+					Status:  messages.OutcomeFailed,
+					Summary: err.Error(),
+					Data:    map[string]string{"agent": runnerName, "reason": "error"},
+				})
+			}
+			if emitter == nil {
+				return
 			}
 			_ = emitter.Send(revCtx, messages.OutboundMessage{
 				ChatID:  chatID,
@@ -555,6 +595,16 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 		formatted := agent.FormatReviewMessage(workspace, runnerName, result.Text)
 		blocks := []agent.ContentBlock{{Type: agent.ContentText, Text: formatted}}
 
+		// The review itself succeeded. The verdict the consumer
+		// ends up with is the merged one: a failed injection
+		// outranks this, and the injected turn's own end decides
+		// the rest.
+		work.Report(messages.Outcome{
+			Status:  messages.OutcomeOK,
+			Summary: "review delivered",
+			Data:    map[string]string{"agent": runnerName},
+		})
+
 		// 1) Inject into AS as a user turn — main agent sees
 		//    the review and can act on follow-ups.
 		//
@@ -566,11 +616,31 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 		// before /review), and the chat channel renders the fix
 		// replies as a separate rolling card instead of folding
 		// them into the /review placeholder.
+		//
+		// The injected turn is agent work of its own, and it can
+		// run for a long time after the review is done. Hold the
+		// message until that turn ends — the turn's prompt-end
+		// carries replyTo (the WithReplyTo override becomes the
+		// prompt's anchor), so the hold releases on exactly that
+		// event.
+		//
+		// A failed injection means no turn will run, so the hold
+		// is released right away instead of waiting for a turn
+		// that never comes.
+		injectWork := cs.HoldUntilPromptEnd(replyTo)
 		if err := sendBlocks(revCtx, blocks, agentsession.WithReplyTo(replyTo)); err != nil {
 			slog.Default().Warn("/review: AS inject failed",
 				"agent", runnerName,
 				"err", err,
 			)
+			// The findings were produced but never reached the
+			// agent — the review is not complete.
+			work.Report(messages.Outcome{
+				Status:  messages.OutcomeIncomplete,
+				Summary: "review findings could not be delivered to the agent",
+				Data:    map[string]string{"agent": runnerName, "reason": "inject_failed"},
+			})
+			injectWork.Release()
 		}
 
 		// 2) Send to the channel directly — user sees the
@@ -691,11 +761,17 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 	sendBlocks := as.SendBlocks // close over SendBlocks for Inject
 	emitter := cs.Emitter()
 
+	// The continuation outlives the command exactly like a plain
+	// review does — same hold, same reason. See handleReview.
+	work := cs.Hold(replyTo)
+
 	// The continuation is a review run like any other: the chat
 	// stays marked as busy until the continuation itself is done.
 	go func() {
 		revCtx, cancel := context.WithTimeout(cs.Context(), timeouts.Review)
 		defer cancel()
+
+		defer work.Release()
 
 		// The chat stops counting as "running a review" once the
 		// continuation itself is done — the delivery below is only
@@ -742,6 +818,11 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 				"agent", runnerName,
 				"err", err,
 			)
+			work.Report(messages.Outcome{
+				Status:  messages.OutcomeFailed,
+				Summary: err.Error(),
+				Data:    map[string]string{"agent": runnerName, "reason": "error"},
+			})
 			if emitter == nil {
 				return
 			}
@@ -764,11 +845,27 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 		formatted := agent.FormatReviewMessage(workspace, runnerName, result.Text)
 		blocks := []agent.ContentBlock{{Type: agent.ContentText, Text: formatted}}
 
+		work.Report(messages.Outcome{
+			Status:  messages.OutcomeOK,
+			Summary: "review continued",
+			Data:    map[string]string{"agent": runnerName},
+		})
+
+		// Same contract as a plain review: the injected turn is
+		// agent work of its own, so the message settles when that
+		// turn ends — and immediately when the injection fails.
+		injectWork := cs.HoldUntilPromptEnd(replyTo)
 		if err := sendBlocks(revCtx, blocks, agentsession.WithReplyTo(replyTo)); err != nil {
 			slog.Default().Warn("/review --continue: AS inject failed",
 				"agent", runnerName,
 				"err", err,
 			)
+			work.Report(messages.Outcome{
+				Status:  messages.OutcomeIncomplete,
+				Summary: "review findings could not be delivered to the agent",
+				Data:    map[string]string{"agent": runnerName, "reason": "inject_failed"},
+			})
+			injectWork.Release()
 		}
 
 		if emitter == nil {

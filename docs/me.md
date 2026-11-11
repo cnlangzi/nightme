@@ -59,6 +59,12 @@ type Outcome struct {
 | `worktree` | worktree 路径 |
 | `repo_root` | 主仓库根目录 |
 | `mode` | `/gtw fix` 的模式（`remote` / `local`） |
+| `selected_by` | issue 是怎么选出来的（`auto` = `/gtw fix *` 自己挑的） |
+| `wake_after` | 队列里没有可选项时，个人 agent 多久之后再来（`"5m"`） |
+| `candidates` | `/gtw fix *` 看了多少个候选 issue |
+| `blocked` | 其中多少个因为前置依赖没落地被跳过 |
+| `branch_exists` | 其中多少个因为本地已有同名分支被跳过 |
+| `pr_open` | 其中多少个因为已经开了 PR 被跳过 |
 | `topic` | `/gtw plan` 的主题 |
 | `sha_range` | commit 区间（`<before>..HEAD`） |
 | `commits` | commit 条数（`/gtw commit` 与 `/gtw push` 给出确切条数；`/gtw sync` 的卡片只列前 10 条，所以它不给这个键） |
@@ -226,6 +232,7 @@ chatsession: message settled chat_id=… message_id=… status=… summary=…
 | `provider_error` | git 平台解析 / 连接失败 | `/gtw fix` / `/gtw new` / `/gtw pr` |
 | `invalid_issue` / `invalid_branch` | issue 号 / 分支名不合法 | `/gtw fix` |
 | `issue_not_found` / `issue_claimed` | issue 不存在 / 已被别的 fix 占用 | `/gtw fix` |
+| `no_candidate` | `/gtw fix *` 的队列里没有可选项（`Data` 带 `wake_after`） | `/gtw fix` |
 | `branch_exists` | 分支已经存在 | `/gtw fix` |
 | `already_active` | 当前目录已经在一个 `/gtw fix` 里 | `/gtw fix` |
 | `label_error` | issue 标签没能加上 / 摘掉 | `/gtw fix` / `/gtw close` |

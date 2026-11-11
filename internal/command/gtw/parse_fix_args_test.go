@@ -341,7 +341,7 @@ func TestParseFixArgs_PositionalOrdering(t *testing.T) {
 // intentional: minimal, current-state, no F-XX IDs or
 // process records.
 func TestFixCmdSpec(t *testing.T) {
-	wantUsage := "/gtw fix <issue-id> [-y|--yes] | /gtw fix --name <branch> | -n <branch>"
+	wantUsage := "/gtw fix <issue-id> [-y|--yes] | /gtw fix * [-y|--yes] | /gtw fix --name <branch> | -n <branch>"
 	if got := fixCmdSpec.Usage; got != wantUsage {
 		t.Errorf("fixCmdSpec.Usage =\n%q\nwant\n%q", got, wantUsage)
 	}
@@ -400,5 +400,73 @@ func TestSpec_SubcommandsIncludesFix(t *testing.T) {
 	}
 	if found.Usage != fixCmdSpec.Usage {
 		t.Errorf("Spec().Subcommands[fix].Usage =\n%q\nwant\n%q", found.Usage, fixCmdSpec.Usage)
+	}
+}
+
+// TestParseFixArgs_AutoSelector pins the automatic mode: the
+// positional `*` asks for the next assigned issue instead of
+// naming one. It stays a positional — the flag set is unchanged
+// — and -y / --yes remain orthogonal to it.
+func TestParseFixArgs_AutoSelector(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []string
+		want fixArgs
+	}{
+		{"selector alone", []string{"*"}, fixArgs{Mode: ModeRemote, RawArg: "*", Auto: true}},
+		{"selector with yes", []string{"*", "-y"}, fixArgs{Mode: ModeRemote, RawArg: "*", Auto: true, Yes: true}},
+		{"yes before selector", []string{"-y", "*"}, fixArgs{Mode: ModeRemote, RawArg: "*", Auto: true, Yes: true}},
+		{"selector with long yes", []string{"--yes", "*"}, fixArgs{Mode: ModeRemote, RawArg: "*", Auto: true, Yes: true}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := parseFixArgs(c.in)
+			if err != nil {
+				t.Fatalf("parseFixArgs(%v) error: %v", c.in, err)
+			}
+			if got != c.want {
+				t.Errorf("parseFixArgs(%v) = %+v, want %+v", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+// TestParseFixArgs_AutoAndNameMutuallyExclusive pins that the
+// selector cannot be combined with --name / -n: the automatic
+// mode works on an issue, the local mode works on a branch.
+func TestParseFixArgs_AutoAndNameMutuallyExclusive(t *testing.T) {
+	cases := [][]string{
+		{"*", "--name", "my-branch"},
+		{"--name", "my-branch", "*"},
+		{"*", "-n", "my-branch"},
+		{"-n", "my-branch", "*"},
+	}
+	for _, in := range cases {
+		t.Run(strings.Join(in, " "), func(t *testing.T) {
+			_, err := parseFixArgs(in)
+			if err == nil {
+				t.Fatalf("parseFixArgs(%v) returned no error; want mutual-exclusion error", in)
+			}
+			assertParseErr(t, err, "not both")
+		})
+	}
+}
+
+// TestParseFixArgs_AutoTooManyArgs pins the arity check on the
+// automatic mode: a second positional is refused, exactly like a
+// second argument after an issue id.
+func TestParseFixArgs_AutoTooManyArgs(t *testing.T) {
+	cases := [][]string{
+		{"*", "42"},
+		{"*", "42", "-y"},
+	}
+	for _, in := range cases {
+		t.Run(strings.Join(in, " "), func(t *testing.T) {
+			_, err := parseFixArgs(in)
+			if err == nil {
+				t.Fatalf("parseFixArgs(%v) returned no error; want arity error", in)
+			}
+			assertParseErr(t, err, "too many arguments")
+		})
 	}
 }

@@ -35,6 +35,17 @@ type fakeGitProvider struct {
 	issueByID map[int]*Issue
 	issueErr  map[int]error
 
+	// ListIssues response. listIssues is returned as-is;
+	// listIssuesErr wins when non-nil. A nil listIssues means
+	// "the repository has no open issues".
+	listIssues    []*Issue
+	listIssuesErr error
+
+	// ListBlockedBy response. blockedBy[id] is the blocker list
+	// for that issue; blockedByErr[id] wins when set.
+	blockedBy    map[int][]*Issue
+	blockedByErr map[int]error
+
 	// Generic response for AddIssueLabel / RemoveIssueLabel. Returning
 	// nil = success.
 	addIssueLabelErr    error
@@ -74,6 +85,12 @@ type fakeGitProvider struct {
 	findOpenPRResp *PR
 	findOpenPRErr  error
 
+	// findOpenPRFn, when set, answers FindOpenPRForBranch per
+	// head branch. It wins over findOpenPRResp / findOpenPRErr.
+	// Lets a test give one branch an open PR and leave the
+	// others without one.
+	findOpenPRFn func(head string) (*PR, error)
+
 	// GetPR response. prByHead[head] is returned when GetPR is
 	// called with the matching head branch; prErr[head] wins
 	// when set (overrides prByHead). Missing key returns
@@ -90,7 +107,7 @@ type fakeGitProvider struct {
 // named after the interface method (one variant per interface
 // method) so tests can pattern-match cleanly.
 type fakeProviderCall struct {
-	Method string // "GetIssue" / "AddIssueLabel" / "RemoveIssueLabel" / "CreatePR" / "GetPR" / "CreateLabel"
+	Method string // "GetIssue" / "ListIssues" / "ListBlockedBy" / "AddIssueLabel" / "RemoveIssueLabel" / "CreatePR" / "GetPR" / "CreateLabel"
 	Owner  string
 	Repo   string
 	ID     int
@@ -126,7 +143,43 @@ func newFakeGitProvider(kind ProviderKind, host string) *fakeGitProvider {
 		prByHead:          make(map[string]*PR),
 		prErr:             make(map[string]error),
 		createLabelErrFor: make(map[string]error),
+		blockedBy:         make(map[int][]*Issue),
+		blockedByErr:      make(map[int]error),
 	}
+}
+
+// SetListIssues registers the response for ListIssues.
+func (f *fakeGitProvider) SetListIssues(issues []*Issue) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.listIssues = issues
+	f.listIssuesErr = nil
+}
+
+// SetListIssuesErr configures ListIssues to return err.
+func (f *fakeGitProvider) SetListIssuesErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.listIssuesErr = err
+}
+
+// SetBlockedBy registers the blockers of the issue with the given
+// id. Pass nil to say "nothing blocks it".
+func (f *fakeGitProvider) SetBlockedBy(id int, blockers []*Issue) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.blockedBy[id] = blockers
+	delete(f.blockedByErr, id)
+}
+
+// SetBlockedByErr configures ListBlockedBy(id) to return err.
+// Wrap ErrRelationsUnsupported to simulate a platform without a
+// relation graph.
+func (f *fakeGitProvider) SetBlockedByErr(id int, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.blockedByErr[id] = err
+	delete(f.blockedBy, id)
 }
 
 // SetIssue registers `issue` as the response for GetIssue(id).
@@ -271,6 +324,15 @@ func (f *fakeGitProvider) SetFindOpenPRErr(err error) {
 	f.findOpenPRErr = err
 }
 
+// SetFindOpenPRFunc makes FindOpenPRForBranch answer through fn,
+// so a test can vary the response per head branch. fn wins over
+// Resp / Err.
+func (f *fakeGitProvider) SetFindOpenPRFunc(fn func(head string) (*PR, error)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.findOpenPRFn = fn
+}
+
 // SetPR registers `pr` as the response for GetPR(head). Tests
 // use this to simulate a repository where the current head
 // branch has an associated open PR / MR.
@@ -342,6 +404,36 @@ func (f *fakeGitProvider) GetIssue(_ context.Context, owner, repo string, id int
 	// mutated by downstream code.
 	cp := *iss
 	return &cp, nil
+}
+
+func (f *fakeGitProvider) ListIssues(_ context.Context, owner, repo string) ([]*Issue, error) {
+	f.mu.Lock()
+	f.calls = append(f.calls, fakeProviderCall{
+		Method: "ListIssues", Owner: owner, Repo: repo,
+	})
+	issues, err := f.listIssues, f.listIssuesErr
+	f.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*Issue, len(issues))
+	copy(out, issues)
+	return out, nil
+}
+
+func (f *fakeGitProvider) ListBlockedBy(_ context.Context, owner, repo string, id int) ([]*Issue, error) {
+	f.mu.Lock()
+	f.calls = append(f.calls, fakeProviderCall{
+		Method: "ListBlockedBy", Owner: owner, Repo: repo, ID: id,
+	})
+	blockers, err := f.blockedBy[id], f.blockedByErr[id]
+	f.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*Issue, len(blockers))
+	copy(out, blockers)
+	return out, nil
 }
 
 func (f *fakeGitProvider) CreateIssue(_ context.Context, owner, repo, title, body string) (*Issue, error) {
@@ -444,6 +536,7 @@ func (f *fakeGitProvider) FindOpenPRForBranch(_ context.Context, owner, repo, he
 	f.mu.Lock()
 	pr := f.findOpenPRResp
 	err := f.findOpenPRErr
+	fn := f.findOpenPRFn
 	f.calls = append(f.calls, fakeProviderCall{
 		Method: "FindOpenPRForBranch",
 		Owner:  owner,
@@ -451,6 +544,9 @@ func (f *fakeGitProvider) FindOpenPRForBranch(_ context.Context, owner, repo, he
 		Head:   head,
 	})
 	f.mu.Unlock()
+	if fn != nil {
+		return fn(head)
+	}
 	if err != nil {
 		return nil, err
 	}

@@ -107,7 +107,8 @@ type Result struct {
 // between the issue (remote) flow and the local branch flow.
 //
 //	args is the user-supplied argv tail AFTER the "fix"
-//	subcommand. For ModeRemote: args[0] is the issue id.
+//	subcommand. For ModeRemote: args[0] is the issue id, or the
+//	literal `*` that asks for the next assigned issue.
 //	For ModeLocal: args[0] is the literal branch name.
 //	Pass args[1:] (not args[0]) into ModeLocal/Remote since
 //	the "fix" subcommand token has already been consumed by
@@ -126,7 +127,7 @@ func RunFix(
 	}
 	if len(args) < 1 {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-			"Usage: /gtw fix <issue-id>  |  /gtw fix --name <branch>",
+			"Usage: "+fixCmdSpec.Usage,
 			command.FailedOutcome("usage", "no issue id or branch name was given")), nil
 	}
 
@@ -170,10 +171,17 @@ func RunFix(
 // runFixRemote implements the F-45 / F-XX ID-mode flow:
 //
 //	/gtw fix <issue-id>
+//	/gtw fix *
+//
+// The second form names no issue: the queue of assigned issues is
+// consulted and the issue it yields takes the place of the id the
+// user would have typed. Everything downstream is the ordinary
+// remote flow.
 //
 // Steps:
 //
-//  1. RepoRoot → RemoteOriginURL → Detect → GetIssue.
+//  1. RepoRoot → RemoteOriginURL → Detect → (automatic mode: pick
+//     the assigned issue) → GetIssue.
 //  2. Branch name = DeriveBranchFromTitle(issue.Title, id).
 //  3. BranchExists? → hard-fail reply (F-XX §3.1; no card).
 //  4. Issue carries LabelWIP? → hard-fail reply (the issue is
@@ -201,10 +209,18 @@ func runFixRemote(
 	rawID string,
 	yes bool,
 ) (*Result, error) {
-	issueID, err := parseIssueID(rawID)
-	if err != nil {
-		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, fmt.Sprintf("❌ %v", err),
-			command.FailedOutcome("invalid_issue", "the issue id is not valid")), nil
+	// The automatic mode names no issue: the queue is consulted
+	// once the provider is known, and the issue it yields takes
+	// the place of the id the user would have typed.
+	auto := rawID == autoSelector
+	var issueID int
+	if !auto {
+		var err error
+		issueID, err = parseIssueID(rawID)
+		if err != nil {
+			return replyOutcome(ctx, cs.Emitter(), chatID, messageID, fmt.Sprintf("❌ %v", err),
+				command.FailedOutcome("invalid_issue", "the issue id is not valid")), nil
+		}
 	}
 
 	// F-XX: translate the boolean yes flag into the dispatch
@@ -285,7 +301,27 @@ func runFixRemote(
 			command.FailedOutcome("provider_error", "the remote URL does not name a repository")), nil
 	}
 
-	// --- fetch issue + derive branch (§5.2.②) --------------------
+	// --- resolve the issue (§5.2.②) ------------------------------
+	// The automatic mode names no issue: the queue is consulted
+	// here, once the provider is known, and the issue it yields
+	// takes the place of the id the user would have typed.
+	// Everything below is the ordinary remote flow.
+	var sel issueSelection
+	if auto {
+		picked, err := selectNextAssignedIssue(ctx, provider, owner, repo, repoRoot, deps)
+		if err != nil {
+			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+				fmt.Sprintf("❌ Failed to pick an assigned issue: %v", err),
+				command.FailedOutcome("error", "the assigned issues could not be listed")), nil
+		}
+		if picked.Issue == nil {
+			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+				renderAutoNoCandidate(picked), autoNoCandidateOutcome(picked)), nil
+		}
+		issueID = picked.Issue.ID
+		sel = issueSelection{Auto: true, RelationsUnavailable: picked.RelationsUnavailable}
+	}
+
 	issue, err := provider.GetIssue(ctx, owner, repo, issueID)
 	if err != nil {
 		if errors.Is(err, ErrIssueNotFound) {
@@ -472,9 +508,24 @@ func runFixRemote(
 			command.FailedOutcome("label_error", "the issue could not be labelled")), nil
 	}
 
+	// The issue left the queue. `nightme/assigned` is what
+	// `/gtw fix *` draws from, and the fix now holds the issue —
+	// so the queue marker comes off as `nightme/wip` goes on.
+	//
+	// Add-before-remove: a failure between the two leaves the
+	// issue carrying both labels, and the queue filter keeps it
+	// out of the next pick. The removal is therefore warn-only —
+	// it never rolls the fix back.
+	if err := provider.RemoveIssueLabel(ctx, owner, repo, issueID, LabelAssigned); err != nil {
+		slog.Default().Warn("gtw: could not remove the assigned label",
+			"issue_id", issueID,
+			"label", LabelAssigned,
+			"err", err)
+	}
+
 	// --- switch cwd + write context + render + dispatch ----------
 	return completeFixAndDispatch(ctx, cs, deps, chatID, messageID,
-		branch, worktreePath, owner+"/"+repo, repoRoot, string(providerKind), ModeRemote, issueID, issue, baseSHA, dispMode)
+		branch, worktreePath, owner+"/"+repo, repoRoot, string(providerKind), ModeRemote, issueID, issue, baseSHA, dispMode, sel)
 }
 
 // runFixLocal implements the F-XX local-mode flow:
@@ -568,7 +619,7 @@ func runFixLocal(
 	// dispatches and renders its own success card); pass
 	// DispatchAssess as a zero-equivalent placeholder.
 	return completeFixAndDispatch(ctx, cs, deps, chatID, messageID,
-		branch, worktreePath, "", repoRoot, "", ModeLocal, -1, nil, "" /* baseSHA: local mode doesn't refresh */, DispatchAssess)
+		branch, worktreePath, "", repoRoot, "", ModeLocal, -1, nil, "" /* baseSHA: local mode doesn't refresh */, DispatchAssess, issueSelection{})
 }
 
 // completeFixAndDispatch handles the common tail of both modes:
@@ -587,6 +638,9 @@ func runFixLocal(
 // ("github" / "gitlab"); empty for ModeLocal. repoRoot must be
 // absolute — callers in runFixRemote / runFixLocal get it from
 // RepoRoot(ctx, ...) which always returns an absolute path.
+//
+// sel says how the issue was chosen; the card says so and the
+// outcome records it.
 func completeFixAndDispatch(
 	ctx context.Context,
 	cs *chatsession.ChatSession,
@@ -597,6 +651,7 @@ func completeFixAndDispatch(
 	issue *Issue,
 	baseSHA string,
 	dispMode IssueDispatchMode,
+	sel issueSelection,
 ) (*Result, error) {
 	// --- switch cwd (§5.2.④) -------------------------------------
 	if err := cs.SetSelectedCwd(worktreePath); err != nil {
@@ -697,7 +752,7 @@ func completeFixAndDispatch(
 	} else {
 		// ID mode. Callers (runFixRemote) guarantee issue is
 		// non-nil; a nil here would be a programming error.
-		card = renderFixSuccessCard(issue, branch, worktreePath, repo, baseSHA, dispMode)
+		card = renderFixSuccessCard(issue, branch, worktreePath, repo, baseSHA, dispMode, sel)
 	}
 	// The facts the fix produced: the issue it claimed, the branch
 	// it created, the worktree it lives in, and the mode it ran
@@ -707,6 +762,9 @@ func completeFixAndDispatch(
 		"branch":   branch,
 		"worktree": worktreePath,
 		"mode":     string(mode),
+	}
+	if sel.Auto {
+		fixData["selected_by"] = "auto"
 	}
 	result := replyOutcome(ctx, cs.Emitter(), chatID, messageID, card,
 		messages.Outcome{

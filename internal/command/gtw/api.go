@@ -4,6 +4,7 @@
 // Scope (v1):
 //
 //	/gtw fix <issue-id>     claim an issue, create a worktree, label it
+//	/gtw fix *              pick the next assigned issue and fix it
 //
 // Design constraints:
 //

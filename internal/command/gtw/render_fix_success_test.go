@@ -11,7 +11,7 @@ import (
 // trailing hint, NO Execute-mode phrasing.
 func TestRenderFixSuccessCard_AssessMode_HintWording(t *testing.T) {
 	issue := &Issue{ID: 42, Title: "x"}
-	card := renderFixSuccessCard(issue, "br", "/wt", "o/r", "abc1234abcd", DispatchAssess)
+	card := renderFixSuccessCard(issue, "br", "/wt", "o/r", "abc1234abcd", DispatchAssess, issueSelection{})
 	for _, want := range []string{
 		"✅ Fix #42 ready",
 		"→ branch:   `br`",
@@ -35,7 +35,7 @@ func TestRenderFixSuccessCard_AssessMode_HintWording(t *testing.T) {
 // follow-up commit/push commands.
 func TestRenderFixSuccessCard_ExecuteMode_HintWording(t *testing.T) {
 	issue := &Issue{ID: 42, Title: "x"}
-	card := renderFixSuccessCard(issue, "br", "/wt", "o/r", "abc1234abcd", DispatchExecute)
+	card := renderFixSuccessCard(issue, "br", "/wt", "o/r", "abc1234abcd", DispatchExecute, issueSelection{})
 	for _, want := range []string{
 		"✅ Fix #42 ready (direct execute)",
 		"↳ agent is fixing now",
@@ -56,7 +56,7 @@ func TestRenderFixSuccessCard_ExecuteMode_HintWording(t *testing.T) {
 // must be omitted.
 func TestRenderFixSuccessCard_AssessMode_EmptyBaseSHA(t *testing.T) {
 	issue := &Issue{ID: 1, Title: "t"}
-	card := renderFixSuccessCard(issue, "br", "/wt", "o/r", "" /* no base */, DispatchAssess)
+	card := renderFixSuccessCard(issue, "br", "/wt", "o/r", "" /* no base */, DispatchAssess, issueSelection{})
 	if strings.Contains(card, "→ base:") {
 		t.Errorf("Assess-mode success card with empty baseSHA must omit '→ base:' line; got:\n%s", card)
 	}
@@ -71,7 +71,7 @@ func TestRenderFixSuccessCard_AssessMode_EmptyBaseSHA(t *testing.T) {
 // empty-baseSHA branch for the Execute-mode card variant.
 func TestRenderFixSuccessCard_ExecuteMode_EmptyBaseSHA(t *testing.T) {
 	issue := &Issue{ID: 1, Title: "t"}
-	card := renderFixSuccessCard(issue, "br", "/wt", "o/r", "" /* no base */, DispatchExecute)
+	card := renderFixSuccessCard(issue, "br", "/wt", "o/r", "" /* no base */, DispatchExecute, issueSelection{})
 	if strings.Contains(card, "→ base:") {
 		t.Errorf("Execute-mode success card with empty baseSHA must omit '→ base:' line; got:\n%s", card)
 	}

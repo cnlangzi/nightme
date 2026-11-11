@@ -90,7 +90,11 @@ func buildSyncReply(ctx context.Context, repoRoot string, deps HandlerDeps) (str
 //
 // The header line adds "(direct execute)" suffix in Execute
 // mode. See F-gtw-fix.md §5.
-func renderFixSuccessCard(issue *Issue, branch, worktree, repo, baseSHA string, mode IssueDispatchMode) string {
+//
+// sel says how the issue was chosen: a picked issue names itself
+// as such, and a platform without issue relations says that the
+// dependency order was not applied.
+func renderFixSuccessCard(issue *Issue, branch, worktree, repo, baseSHA string, mode IssueDispatchMode, sel issueSelection) string {
 	var b strings.Builder
 	if mode == DispatchExecute {
 		fmt.Fprintf(&b, "✅ Fix #%d ready (direct execute)\n", issue.ID)
@@ -99,7 +103,14 @@ func renderFixSuccessCard(issue *Issue, branch, worktree, repo, baseSHA string, 
 	}
 	fmt.Fprintf(&b, "→ branch:   `%s`\n", branch)
 	fmt.Fprintf(&b, "→ worktree: %s\n", worktree)
-	fmt.Fprintf(&b, "→ issue:    %s#%d [%s]\n", repo, issue.ID, LabelWIP)
+	if sel.Auto {
+		fmt.Fprintf(&b, "→ issue:    %s#%d [%s] · picked automatically\n", repo, issue.ID, LabelWIP)
+	} else {
+		fmt.Fprintf(&b, "→ issue:    %s#%d [%s]\n", repo, issue.ID, LabelWIP)
+	}
+	if sel.RelationsUnavailable {
+		b.WriteString("→ deps:     not ordered — this platform does not expose issue dependencies\n")
+	}
 	if baseSHA != "" {
 		fmt.Fprintf(&b, "→ base:     %s\n", shortSHA(baseSHA))
 	}

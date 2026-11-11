@@ -63,9 +63,9 @@ func TestVerifyOwner_RefusesRecycledPID(t *testing.T) {
 	cmd, image := startPing(t)
 	t.Cleanup(func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() })
 
-	actual, ok := VerifyOwner(cmd.Process.Pid, "claude")
-	if ok {
-		t.Errorf("VerifyOwner = %q, true — a recycled PID must be refused", actual)
+	owner := VerifyOwner(cmd.Process.Pid, "claude")
+	if owner.Match {
+		t.Errorf("VerifyOwner = %q, match — a recycled PID must be refused", owner.Binary)
 	}
 
 	// The innocent process must still be alive.
@@ -82,18 +82,19 @@ func TestVerifyOwner_FailsOpen(t *testing.T) {
 	cmd, image := startPing(t)
 	t.Cleanup(func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() })
 
-	if _, ok := VerifyOwner(cmd.Process.Pid, ""); !ok {
+	if owner := VerifyOwner(cmd.Process.Pid, ""); !owner.Match {
 		t.Errorf("unknown agent command must not block the kill")
 	}
 	// A dead PID cannot be probed either; Kill reports it as
 	// "already exited", so verification must not swallow it first.
-	if _, ok := VerifyOwner(1<<30, "claude"); !ok {
+	if owner := VerifyOwner(1<<30, "claude"); !owner.Match {
 		t.Errorf("unprobeable pid must not block the kill")
 	}
 	// Positive match still passes — the image name without its
 	// ".exe" suffix is what a configured bare command looks like.
-	if _, ok := VerifyOwner(cmd.Process.Pid, stripExeSuffix(image)); !ok {
-		t.Errorf("matching image name %q must verify", image)
+	owner := VerifyOwner(cmd.Process.Pid, stripExeSuffix(image))
+	if !owner.Match || !owner.Verified {
+		t.Errorf("matching image name %q must verify: %+v", image, owner)
 	}
 }
 
@@ -117,7 +118,7 @@ func TestVerifyOwner_HostInterpreter(t *testing.T) {
 		t.Skipf("fixture image %q is not cmd.exe", image)
 	}
 
-	if _, ok := VerifyOwner(pid, "claude"); !ok {
+	if owner := VerifyOwner(pid, "claude"); !owner.Match {
 		t.Errorf("a host interpreter must not block the sweep — every npm-installed agent runs under one")
 	}
 }
@@ -145,7 +146,7 @@ func TestVerifyOwner_ForeignInterpreter(t *testing.T) {
 
 	// "claude" is a bare command name, so its host is cmd.exe —
 	// powershell.exe cannot be the agent's host.
-	if _, ok := VerifyOwner(pid, "claude"); ok {
+	if owner := VerifyOwner(pid, "claude"); owner.Match {
 		t.Errorf("an interpreter that cannot host this agent must not fail open")
 	}
 }

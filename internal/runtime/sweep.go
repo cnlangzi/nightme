@@ -23,6 +23,11 @@
 //   - The resume id (SessionID) is preserved, so the next user
 //     message respawns the agent with `--resume <id>` and the
 //     conversation continues where it stopped.
+//
+// A positively identified agent CLI is terminated together with its
+// process group: the CLI leads its own group, and the tool
+// subprocesses it spawned live in it. Killing only the CLI would
+// orphan them.
 
 package runtime
 
@@ -90,17 +95,28 @@ func SweepOrphanAgents(
 		}
 
 		want := commands[e.Agent]
-		if actual, ok := procsweep.VerifyOwner(e.PID, want); !ok {
+		owner := procsweep.VerifyOwner(e.PID, want)
+		if !owner.Match {
 			logger.Warn("skipped orphan agent process: pid runs a different binary",
 				"agentSessionId", e.ID,
 				"agent", e.Agent,
 				"pid", e.PID,
-				"actual", actual,
+				"actual", owner.Binary,
 				"expected", want)
 			continue
 		}
 
-		if err := procsweep.Kill(e.PID, false); err != nil && !procsweep.IsProcessGone(err) {
+		// A positively identified agent CLI leads its own process
+		// group, so the group is signalled: the tool subprocesses it
+		// spawned die with it instead of being orphaned. An
+		// unverified PID is signalled on its own — its group may
+		// belong to an unrelated process.
+		kill := procsweep.Kill
+		if owner.Verified {
+			kill = procsweep.KillGroup
+		}
+
+		if err := kill(e.PID, false); err != nil && !procsweep.IsProcessGone(err) {
 			logger.Warn("failed to terminate orphan agent process",
 				"agentSessionId", e.ID,
 				"agent", e.Agent,

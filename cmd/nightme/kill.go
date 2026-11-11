@@ -26,6 +26,11 @@
 //     process snapshot on Windows). Entries outlive daemon crashes
 //     and the OS recycles PIDs, so an unverified sweep could kill an
 //     unrelated process. Mismatches are skipped and named.
+//   - Group: a positively identified agent CLI leads its own process
+//     group, so the group is signalled — the tool subprocesses it
+//     spawned die with it instead of being orphaned. A PID that could
+//     not be verified is signalled on its own, because its group may
+//     belong to an unrelated process.
 //   - Scope: agent child processes only. The nightme daemon itself is
 //     untouched; use `nightme stop` for that. If the daemon is running
 //     it owns these children and will observe their death through its
@@ -189,12 +194,23 @@ func killSession(asFile *registry.AgentSessionFile, r listRow, wantCommand strin
 	// to the expected binary before touching it. This matters most
 	// in exactly the scenario `kill` is for: a crashed daemon that
 	// left stale "running" entries behind.
-	if actual, ok := procsweep.VerifyOwner(r.PID, wantCommand); !ok {
-		return killOutcome{row: r, result: fmt.Sprintf("skipped (pid %d is %q, not %s)", r.PID, actual, wantCommand)}
+	owner := procsweep.VerifyOwner(r.PID, wantCommand)
+	if !owner.Match {
+		return killOutcome{row: r, result: fmt.Sprintf("skipped (pid %d is %q, not %s)", r.PID, owner.Binary, wantCommand)}
+	}
+
+	// A positively identified agent CLI leads its own process group,
+	// so the group is signalled: that also reaps the tool
+	// subprocesses it spawned, which would otherwise survive the
+	// CLI. An unverified PID is signalled on its own — its group may
+	// belong to an unrelated process.
+	kill := procsweep.Kill
+	if owner.Verified {
+		kill = procsweep.KillGroup
 	}
 
 	result := "killed"
-	switch err := procsweep.Kill(r.PID, force); {
+	switch err := kill(r.PID, force); {
 	case err == nil:
 	case procsweep.IsProcessGone(err):
 		// The child died on its own between list and kill — the

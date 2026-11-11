@@ -3,12 +3,17 @@
 package procsweep
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/cnlangzi/nightme/internal/proc"
 )
 
 // TestKill_TerminatesRunningChild spawns a real child and asserts
@@ -141,9 +146,9 @@ func TestVerifyOwner_RefusesRecycledPID(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() })
 
-	actual, ok := VerifyOwner(cmd.Process.Pid, "claude")
-	if ok {
-		t.Errorf("VerifyOwner = %q, true — a recycled PID must be refused", actual)
+	owner := VerifyOwner(cmd.Process.Pid, "claude")
+	if owner.Match {
+		t.Errorf("VerifyOwner = %q, match — a recycled PID must be refused", owner.Binary)
 	}
 	// The innocent process must still be alive.
 	if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
@@ -162,17 +167,19 @@ func TestVerifyOwner_FailsOpen(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() })
 
-	if _, ok := VerifyOwner(cmd.Process.Pid, ""); !ok {
+	if owner := VerifyOwner(cmd.Process.Pid, ""); !owner.Match {
 		t.Errorf("unknown agent command must not block the kill")
 	}
 	// A dead PID cannot be probed either; Kill reports it as
 	// "already exited", so verification must not swallow it first.
-	if _, ok := VerifyOwner(1<<30, "claude"); !ok {
+	if owner := VerifyOwner(1<<30, "claude"); !owner.Match {
 		t.Errorf("unprobeable pid must not block the kill")
 	}
-	// Positive match still passes.
-	if _, ok := VerifyOwner(cmd.Process.Pid, "/usr/bin/sleep"); !ok {
-		t.Errorf("basename match must verify (ps comm may be a bare name)")
+	// Positive match still passes — and is reported as verified, so
+	// the caller may signal the process group.
+	owner := VerifyOwner(cmd.Process.Pid, "/usr/bin/sleep")
+	if !owner.Match || !owner.Verified {
+		t.Errorf("basename match must verify (ps comm may be a bare name): %+v", owner)
 	}
 }
 
@@ -203,18 +210,23 @@ func TestVerifyOwner_LongBinaryName(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() })
 
-	actual, ok := VerifyOwner(cmd.Process.Pid, link)
-	if !ok {
-		t.Errorf("VerifyOwner(%q) = %q, false — a live process must verify as itself", link, actual)
+	owner := VerifyOwner(cmd.Process.Pid, link)
+	if !owner.Match || !owner.Verified {
+		t.Errorf("VerifyOwner(%q) = %+v — a live process must verify as itself", link, owner)
 	}
 }
 
 // TestVerifyOwner_Zombie is the regression test for the case the
 // identity check nearly broke: a zombie agent child, which is exactly
-// what a crashed daemon leaves behind. `ps` reports "<defunct>" and
-// the identity is unrecoverable, so verification must fail open —
-// otherwise the sweep skips it and the registry entry stays "running"
-// forever, defeating the cleanup's purpose.
+// what a crashed daemon leaves behind. The identity is unrecoverable
+// from ps, so verification must fail open — otherwise the sweep skips
+// it and the registry entry stays "running" forever, defeating the
+// cleanup's purpose.
+//
+// The zombie marker is platform-specific: Linux prints
+// "<name> <defunct>", macOS prints "<defunct>". Matching only the
+// macOS spelling made this test skip on Linux, which is how a
+// fail-open that never fired survived.
 func TestVerifyOwner_Zombie(t *testing.T) {
 	// A child that exits while we never Wait() is a zombie.
 	cmd := exec.Command("/bin/sh", "-c", "exit 0")
@@ -226,7 +238,7 @@ func TestVerifyOwner_Zombie(t *testing.T) {
 
 	deadline := time.Now().Add(3 * time.Second)
 	for {
-		if out, err := processCommand(pid); err == nil && out == defunctComm {
+		if out, err := processCommand(pid); err == nil && isDefunct(out) {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -235,7 +247,106 @@ func TestVerifyOwner_Zombie(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 
-	if _, ok := VerifyOwner(pid, "claude"); !ok {
-		t.Errorf("a zombie must not block the sweep — its entry would stay running forever")
+	if owner := VerifyOwner(pid, "claude"); !owner.Match {
+		t.Errorf("a zombie must not block the sweep — its entry would stay running forever: %+v", owner)
+	}
+}
+
+// TestIsDefunct pins the platform spellings of the zombie marker.
+// Linux keeps the command name and appends the marker ("sh
+// <defunct>"); macOS reports the marker alone ("<defunct>").
+func TestIsDefunct(t *testing.T) {
+	cases := []struct {
+		comm string
+		want bool
+	}{
+		{"<defunct>", true},
+		{"sh <defunct>", true},
+		{"python3 <defunct>", true},
+		{"claude", false},
+		{"<defunct>sh", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := isDefunct(c.comm); got != c.want {
+			t.Errorf("isDefunct(%q) = %v, want %v", c.comm, got, c.want)
+		}
+	}
+}
+
+// TestKillGroup_TerminatesTheWholeGroup is the reason the sweep
+// signals the group and not just the recorded PID: an agent CLI
+// leads its own process group, and the tool subprocesses it spawned
+// (a shell running a command, a language server, …) live in that
+// group. Killing only the CLI would orphan them.
+//
+// The fixture mirrors the real spawn recipe: proc.NewWith sets
+// Setsid, so the child is a session — and therefore process-group —
+// leader.
+func TestKillGroup_TerminatesTheWholeGroup(t *testing.T) {
+	dir := t.TempDir()
+	sentinel := filepath.Join(dir, "grandchild.pid")
+
+	cmd := proc.NewWith(context.Background(), proc.Options{HideWindow: true},
+		"/bin/sh", "-c", "sleep 60 & echo $! > "+sentinel+"; wait")
+	if err := cmd.Start(); err != nil {
+		t.Skipf("/bin/sh not available: %v", err)
+	}
+	pid := cmd.Process.Pid
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() })
+
+	// Wait for the grandchild to report its pid.
+	var grandchild int
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		raw, err := os.ReadFile(sentinel)
+		if err == nil {
+			if _, err := fmt.Sscanf(strings.TrimSpace(string(raw)), "%d", &grandchild); err == nil && grandchild > 0 {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the fixture never reported its grandchild pid")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// The group kill must take the grandchild with it.
+	if err := KillGroup(pid, false); err != nil {
+		t.Fatalf("KillGroup: %v", err)
+	}
+
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		if syscall.Kill(grandchild, syscall.Signal(0)) != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("grandchild pid %d survived the group kill", grandchild)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestKillGroup_FallsBackToTheProcess is the safety property: a PID
+// that does not lead its own group is signalled on its own, so an
+// unrelated process group is never taken down.
+func TestKillGroup_FallsBackToTheProcess(t *testing.T) {
+	cmd := exec.Command("/bin/sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Skipf("/bin/sleep not available: %v", err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() })
+
+	pgid, err := syscall.Getpgid(cmd.Process.Pid)
+	if err != nil {
+		t.Skipf("Getpgid: %v", err)
+	}
+	if pgid == cmd.Process.Pid {
+		t.Skip("the fixture happens to lead its own group")
+	}
+
+	if err := KillGroup(cmd.Process.Pid, false); err != nil {
+		t.Fatalf("KillGroup: %v", err)
 	}
 }

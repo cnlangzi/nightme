@@ -11,7 +11,9 @@
 //
 //   - Termination. Kill stops a PID with the SIGTERM → grace →
 //     SIGKILL policy, so an agent CLI gets the chance to flush its
-//     own session state before it dies.
+//     own session state before it dies. KillGroup does the same for
+//     the process group the CLI leads, which is the unit that also
+//     covers the tool subprocesses it spawned.
 //   - Attribution. VerifyOwner answers "does this PID still run the
 //     binary we expect?", so a PID the OS recycled onto an unrelated
 //     process is never signalled.
@@ -43,6 +45,27 @@ const (
 	// in cmd/nightme/daemon_lifecycle.go.
 	PollInterval = 50 * time.Millisecond
 )
+
+// Owner is the outcome of a PID-ownership check.
+//
+// The three fields separate two questions a caller must not
+// conflate: "may I signal this PID?" (Match) and "do I know whose
+// process group this is?" (Verified).
+type Owner struct {
+	// Binary is the executable the PID was found to run. Empty when
+	// the check could not get a definite answer.
+	Binary string
+
+	// Match is false when the PID runs a DIFFERENT binary than the
+	// caller expected. A mismatch must never be signalled.
+	Match bool
+
+	// Verified is true when the PID was positively identified as the
+	// expected binary. It is false when the check failed open —
+	// there was nothing to compare against, or the binary could not
+	// be read.
+	Verified bool
+}
 
 // commTruncLen is the length at which Linux truncates a process's
 // `comm`: the kernel stores it in TASK_COMM_LEN (16) bytes including

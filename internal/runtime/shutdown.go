@@ -55,9 +55,19 @@ const (
 
 	// agentExitBudget bounds how long the daemon waits for the
 	// agent children to exit after the process scope is cancelled.
-	// It covers the 3s SIGTERM grace the agent bridges use plus the
-	// time the exit events need to be processed.
-	agentExitBudget = 4 * time.Second
+	//
+	// It has to cover the LONGEST teardown sequence among the agent
+	// families, not the shortest: the exec family gives its child a
+	// 3s SIGTERM grace (proc.AgentGrace), while the PTY family
+	// waits 5s (pty.childExitGrace) before it escalates to SIGKILL.
+	// A budget shorter than that would let the daemon exit while a
+	// wedged PTY child is still waiting for its SIGKILL — the kill
+	// timer dies with the daemon and the child is orphaned.
+	//
+	// The margin on top of the 5s covers the SIGKILL, the reap and
+	// the exit-event drain. Together with channelStopBudget the
+	// shutdown stays inside the 15s window `nightme stop` waits for.
+	agentExitBudget = 7 * time.Second
 
 	// agentExitPoll is how often the agent children are re-checked
 	// while waiting out agentExitBudget. 50ms mirrors the daemon

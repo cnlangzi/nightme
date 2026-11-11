@@ -48,6 +48,16 @@ func Kill(pid int, _ bool) error {
 	return nil
 }
 
+// KillGroup terminates pid and every other process in its group.
+//
+// Windows has no POSIX process groups and no polite signal, so there
+// is no group to signal: the child is terminated directly, exactly
+// as Kill does. The agent CLI's tool subprocesses are not covered —
+// the same platform gap `nightme kill` has always had.
+func KillGroup(pid int, force bool) error {
+	return Kill(pid, force)
+}
+
 // IsProcessGone reports whether err means "the process no longer
 // exists", which the sweep treats as success.
 func IsProcessGone(err error) bool {
@@ -63,12 +73,11 @@ func ImageName(pid int) string {
 	return processImageName(pid)
 }
 
-// VerifyOwner reports whether pid still belongs to wantCommand,
-// returning the executable name it actually found.
+// VerifyOwner reports whether pid still belongs to wantCommand.
 //
 // It is the Windows counterpart of the Unix PID-identity check and
-// follows the same fail-OPEN policy — ok=true whenever we cannot get
-// a definite contradiction:
+// follows the same fail-OPEN policy — Match is true whenever we
+// cannot get a definite contradiction:
 //
 //   - wantCommand == "" (unknown agent): nothing to compare against.
 //   - the image name could not be read (snapshot failed, PID gone):
@@ -79,18 +88,24 @@ func ImageName(pid int) string {
 //
 // Only a positive mismatch ("this PID is codex.exe, you expected
 // claude") blocks the termination.
-func VerifyOwner(pid int, wantCommand string) (string, bool) {
+func VerifyOwner(pid int, wantCommand string) Owner {
 	if wantCommand == "" {
-		return "", true
+		return Owner{Match: true}
 	}
 	actual := processImageName(pid)
 	if actual == "" {
-		return "", true
+		return Owner{Match: true}
 	}
 	if host := hostInterpreterFor(wantCommand); host != "" && strings.EqualFold(actual, host) {
-		return actual, true
+		// The host interpreter cannot say which agent it runs, so
+		// the check fails open — but the process was not positively
+		// identified either.
+		return Owner{Binary: actual, Match: true}
 	}
-	return actual, sameCommandFold(actual, wantCommand)
+	if sameCommandFold(actual, wantCommand) {
+		return Owner{Binary: actual, Match: true, Verified: true}
+	}
+	return Owner{Binary: actual, Match: false}
 }
 
 // hostInterpreterFor returns the executable that nightme's spawn path

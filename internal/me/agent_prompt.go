@@ -140,6 +140,9 @@ func parseBranchHeader(line string) repoFacts {
 
 // baseBranch returns the remote's default branch, or an empty string
 // when the remote has none.
+//
+// The name carries its remote: the counts are against the branch as
+// the remote has it, not against a local branch of the same name.
 func (s *Service) baseBranch(ctx context.Context, dir string) string {
 	out, _, err := s.cfg.Git.Run(ctx, dir, "symbolic-ref", "refs/remotes/origin/HEAD")
 	if err != nil {
@@ -150,7 +153,7 @@ func (s *Service) baseBranch(ctx context.Context, dir string) string {
 	if !strings.HasPrefix(ref, prefix) {
 		return ""
 	}
-	return strings.TrimPrefix(ref, prefix)
+	return "origin/" + strings.TrimPrefix(ref, prefix)
 }
 
 // countDivergence counts the commits the branch is ahead of and

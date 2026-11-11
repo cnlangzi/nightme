@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cnlangzi/nightme/internal/channel/loopback"
 	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/wfe"
@@ -181,12 +182,24 @@ func TestSystem2_TextOnlyReplyIsNudgedAndThenEndsTheRun(t *testing.T) {
 	}}
 	svc, _, sender := testService(t, dir, Config{Provider: provider})
 
-	if _, err := svc.StartPlaybook(context.Background(), Request{
+	runID, err := svc.StartPlaybook(context.Background(), Request{
 		Name: "one", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
+	svc.mu.Lock()
+	r := svc.runs[runID]
+	svc.mu.Unlock()
 	waitRun(t, svc, "obs-1")
+
+	// The run ended as a failure, not as a finished one.
+	if r == nil {
+		t.Fatal("the run is not registered")
+	}
+	if phase := r.currentPhase(); phase != PhaseFailed {
+		t.Fatalf("the run ended as %q, want %q", phase, PhaseFailed)
+	}
 
 	if provider.Calls() != 2 {
 		t.Fatalf("the chat model was called %d times, want 2 (the nudge and the second answer)", provider.Calls())
@@ -240,6 +253,61 @@ func TestSystem2_IterationLimitStopsTheRun(t *testing.T) {
 
 	if !sender.Has("limit of 1 turns") {
 		t.Fatalf("the observer was not told about the limit: %v", sender.Lines())
+	}
+}
+
+func TestCompact_LeavesTheRunConversationAlone(t *testing.T) {
+	dir := t.TempDir()
+	writePlaybook(t, dir, "two", `name: two
+steps:
+  - /gtw commit
+  - /gtw push
+`)
+
+	provider := &scriptedProvider{responses: []llm.Response{
+		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"command": "/gtw commit"})},
+		{Message: toolCallMsg("c2", toolRunStep, map[string]any{"command": "/gtw push"})},
+		{Message: toolCallMsg("c3", toolFinish, map[string]any{"status": "done", "summary": "done"})},
+	}}
+	lb := newFakeLoopback(
+		fakeStep{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "committed"},
+			transcript: []loopback.Entry{{Kind: messages.OutResult, Text: "the work agent said hello"}}},
+		okStep("pushed"),
+	)
+	sender := &fakeSender{}
+	svc := New(Config{
+		WorkflowsDir: dir,
+		StateDir:     dir + "/runs",
+		Provider:     provider,
+		Loopback:     lb,
+		Sender:       sender,
+	})
+	if err := svc.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	runID, err := svc.StartPlaybook(context.Background(), Request{
+		Name: "two", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	svc.mu.Lock()
+	r := svc.runs[runID]
+	svc.mu.Unlock()
+	waitRun(t, svc, "obs-1")
+
+	// The run keeps the transcript of its first command: the
+	// compaction is for the model, not for the run.
+	found := false
+	for _, m := range r.conversation() {
+		for _, p := range m.Parts {
+			if p.Type == llm.PartToolResult && strings.Contains(p.Text, "the work agent said hello") {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("the compaction rewrote the run's own conversation")
 	}
 }
 

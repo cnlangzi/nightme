@@ -96,11 +96,17 @@ func compact(msgs []llm.Message) []llm.Message {
 		if i >= last || out[i].Role != llm.RoleTool {
 			continue
 		}
-		for j, p := range out[i].Parts {
-			if p.Type != llm.PartToolResult {
+		// The parts are copied before they are rewritten: the
+		// messages share their backing array with the run's
+		// conversation, and the run keeps it.
+		parts := make([]llm.Part, len(out[i].Parts))
+		copy(parts, out[i].Parts)
+		out[i].Parts = parts
+		for j := range parts {
+			if parts[j].Type != llm.PartToolResult {
 				continue
 			}
-			out[i].Parts[j].Text = compactResult(p.Text)
+			parts[j].Text = compactResult(parts[j].Text)
 		}
 	}
 	return out

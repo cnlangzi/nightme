@@ -183,6 +183,26 @@ func TestReply_DeliversTheText(t *testing.T) {
 	}
 }
 
+func TestReply_KeepsTheTextTheUserTyped(t *testing.T) {
+	cases := []struct {
+		text string
+		want string
+	}{
+		{"/me reply hello world", "hello world"},
+		{"/me  reply  hello world", "hello world"},
+		{"/me reply   the feature branch  ", "the feature branch"},
+		{"/me reply", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.text, func(t *testing.T) {
+			got := replyText(tc.text)
+			if got != tc.want {
+				t.Fatalf("replyText(%q) = %q, want %q", tc.text, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestStop_StopsTheRun(t *testing.T) {
 	ctrl := &fakeController{}
 	cs := newSession(t, "me-6", "/tmp/work")

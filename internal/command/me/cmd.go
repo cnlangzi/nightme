@@ -198,19 +198,26 @@ func renderStatus(st command.MeStatus) string {
 
 // replyText returns the text of a /me reply: everything after the
 // "reply" token, with the spacing the user typed.
+//
+// The command name and the subcommand are skipped as tokens, so any
+// spacing between them is tolerated.
 func replyText(text string) string {
-	rest := strings.TrimSpace(text)
-	rest = strings.TrimSpace(strings.TrimPrefix(rest, "/"))
-	idx := strings.Index(rest, " ")
+	rest := skipToken(text)
+	if rest == "" {
+		return ""
+	}
+	rest = skipToken(rest)
+	return strings.TrimSpace(rest)
+}
+
+// skipToken drops the first whitespace-separated token of a text.
+func skipToken(text string) string {
+	rest := strings.TrimLeft(text, " \t")
+	idx := strings.IndexAny(rest, " \t\r\n")
 	if idx < 0 {
 		return ""
 	}
-	rest = rest[idx+1:]
-	idx = strings.Index(rest, " ")
-	if idx < 0 {
-		return ""
-	}
-	return strings.TrimSpace(rest[idx+1:])
+	return rest[idx:]
 }
 
 // controller adapts the personal agent to the command package's

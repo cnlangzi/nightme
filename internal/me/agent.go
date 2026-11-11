@@ -260,9 +260,13 @@ func New(cfg Config) *Service {
 	if cfg.StallTimeout <= 0 {
 		cfg.StallTimeout = DefaultStallTimeout
 	}
+	logger := cfg.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &Service{
 		cfg:       cfg,
-		logger:    slog.Default(),
+		logger:    logger,
 		playbooks: map[string]*wfe.Playbook{},
 		runs:      map[string]*run{},
 		active:    map[string]*run{},
@@ -330,8 +334,17 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	for _, r := range runs {
 		r.suspend()
 	}
-	s.wg.Wait()
-	return nil
+	done := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // loadPlaybooks reads the playbooks of the workflows directory.
@@ -377,24 +390,32 @@ func (s *Service) StartPlaybook(ctx context.Context, req Request) (string, error
 	}
 
 	s.mu.Lock()
+	pb, ok := s.playbooks[req.Name]
+	if !ok {
+		known := strings.Join(s.playbookNames(), ", ")
+		s.mu.Unlock()
+		return "", fmt.Errorf("there is no playbook named %q (known: %s)", req.Name, known)
+	}
+	s.mu.Unlock()
+
+	values, err := mapArgValues(pb, req.Args)
+	if err != nil {
+		return "", err
+	}
+	bound, err := wfe.Bind(pb, values)
+	if err != nil {
+		return "", err
+	}
+	r := newRun(s, req, bound)
+
+	// The check and the insert happen under one lock: two commands
+	// that arrive at the same time must not both start a run in the
+	// same chat.
+	s.mu.Lock()
 	if existing, ok := s.active[req.ObserverChatID]; ok {
 		s.mu.Unlock()
 		return "", fmt.Errorf("this chat already has a run in it (%s)", existing.id)
 	}
-	pb, ok := s.playbooks[req.Name]
-	if !ok {
-		s.mu.Unlock()
-		return "", fmt.Errorf("there is no playbook named %q (known: %s)", req.Name, strings.Join(s.playbookNames(), ", "))
-	}
-	s.mu.Unlock()
-
-	bound, err := wfe.Bind(pb, mapArgValues(pb, req.Args))
-	if err != nil {
-		return "", err
-	}
-
-	r := newRun(s, req, bound)
-	s.mu.Lock()
 	s.runs[r.id] = r
 	s.active[req.ObserverChatID] = r
 	s.mu.Unlock()
@@ -426,16 +447,21 @@ func (s *Service) playbookNames() []string {
 // mapArgValues maps the positional arguments onto the playbook's
 // declared arguments, in order.
 //
-// A playbook that declares no arguments takes none; extra arguments
-// are an error, so a typo never runs a playbook with a wrong value.
-func mapArgValues(pb *wfe.Playbook, args []string) map[string]string {
+// A playbook that declares no arguments takes none, and extra
+// arguments are an error: a typo never runs a playbook with a wrong
+// value.
+func mapArgValues(pb *wfe.Playbook, args []string) (map[string]string, error) {
+	if len(args) > len(pb.Args) {
+		return nil, fmt.Errorf("the playbook takes %d argument(s) (%s), %d were given",
+			len(pb.Args), strings.Join(pb.Args, ", "), len(args))
+	}
 	out := map[string]string{}
 	for i, name := range pb.Args {
 		if i < len(args) {
 			out[name] = args[i]
 		}
 	}
-	return out
+	return out, nil
 }
 
 // setupWorkChat points the work chat at the run's workspace and
@@ -536,6 +562,7 @@ func (s *Service) finish(r *run, phase Phase, reason string) {
 	if s.active[r.observerChatID] == r {
 		delete(s.active, r.observerChatID)
 	}
+	delete(s.runs, r.id)
 	s.mu.Unlock()
 }
 

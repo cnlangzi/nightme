@@ -89,7 +89,7 @@ func (s *SystemOne) Decide(ctx context.Context, req llm.DecisionRequest) (*llm.D
 	}
 
 	out := &llm.DecisionResponse{
-		Model:   firstNonEmpty(answer.Model, s.model),
+		Model:   llm.FirstNonEmpty(answer.Model, s.model),
 		Answers: map[string]llm.Answer{},
 	}
 	for _, q := range req.Questions {

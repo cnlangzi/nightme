@@ -472,6 +472,10 @@ func (s *Service) watchCommand(ctx context.Context, r *run, msgID, command strin
 					return stepResult{Status: string(wfe.OutcomeUnknown), Summary: "the command was interrupted"}, nil
 				}
 				if ex.Phase != loopback.PhaseSettled {
+					// The watcher closed while the command was
+					// still running. The next attempt watches the
+					// execution again.
+					r.clearWatch()
 					return s.waitingResult("the command is no longer running"), nil
 				}
 				r.clearInflight()
@@ -537,6 +541,9 @@ func resultOf(ex loopback.Execution) stepResult {
 
 // transcriptOf renders the transcript of an execution, keeping its
 // head and its tail.
+//
+// A long transcript is cut: the opening lines say what was asked, the
+// closing lines say how it ended.
 func transcriptOf(ex loopback.Execution) string {
 	var b strings.Builder
 	for i, entry := range ex.Transcript {
@@ -545,7 +552,12 @@ func transcriptOf(ex loopback.Execution) string {
 		}
 		b.WriteString(entry.Text)
 	}
-	return b.String()
+	text := b.String()
+	if len(text) <= transcriptBytes {
+		return text
+	}
+	half := transcriptBytes / 2
+	return text[:half] + "\n…\n" + tailText(text, half)
 }
 
 // appendToolResult adds the result of a tool call to the

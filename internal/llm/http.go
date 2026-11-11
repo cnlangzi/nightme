@@ -104,11 +104,6 @@ func PostJSON(ctx context.Context, client *http.Client, url string, headers map[
 	policy := defaultRetryPolicy()
 	var lastErr error
 	for attempt := 0; attempt < policy.attempts; attempt++ {
-		if attempt > 0 {
-			if err := sleepCtx(ctx, policy.backoff(attempt)); err != nil {
-				return err
-			}
-		}
 		retryAfter, err := postOnce(ctx, client, url, headers, body, out)
 		if err == nil {
 			return nil
@@ -117,13 +112,17 @@ func PostJSON(ctx context.Context, client *http.Client, url string, headers map[
 		if !Retryable(err) {
 			return err
 		}
+		if attempt == policy.attempts-1 {
+			break
+		}
+		// The server told us when to come back; that wait wins over
+		// the schedule. There is one wait per failure.
+		wait := policy.backoff(attempt + 1)
 		if retryAfter > 0 {
-			// The server told us when to come back; the next
-			// iteration waits exactly that long instead of the
-			// schedule.
-			if err := sleepCtx(ctx, retryAfter); err != nil {
-				return err
-			}
+			wait = retryAfter
+		}
+		if err := sleepCtx(ctx, wait); err != nil {
+			return err
 		}
 	}
 	return lastErr
@@ -180,13 +179,13 @@ func statusError(status int, payload []byte) error {
 	code, msg := parseErrorBody(payload)
 	switch {
 	case status == http.StatusUnauthorized || status == http.StatusForbidden:
-		return &Error{Status: status, Code: code, Message: firstNonEmpty(msg, "the credentials were rejected")}
+		return &Error{Status: status, Code: code, Message: FirstNonEmpty(msg, "the credentials were rejected")}
 	case status == http.StatusTooManyRequests:
-		return &Error{Status: status, Code: code, Message: firstNonEmpty(msg, "the server is rate limiting the requests"), Retryable: true}
+		return &Error{Status: status, Code: code, Message: FirstNonEmpty(msg, "the server is rate limiting the requests"), Retryable: true}
 	case status >= 500:
-		return &Error{Status: status, Code: code, Message: firstNonEmpty(msg, "the server failed"), Retryable: true}
+		return &Error{Status: status, Code: code, Message: FirstNonEmpty(msg, "the server failed"), Retryable: true}
 	default:
-		return &Error{Status: status, Code: code, Message: firstNonEmpty(msg, "the request was rejected")}
+		return &Error{Status: status, Code: code, Message: FirstNonEmpty(msg, "the request was rejected")}
 	}
 }
 
@@ -214,7 +213,7 @@ func parseErrorBody(payload []byte) (code, msg string) {
 	if body.Error.Type != "" && code == "" {
 		code = body.Error.Type
 	}
-	msg = firstNonEmpty(body.Error.Message, body.Message, body.Detail)
+	msg = FirstNonEmpty(body.Error.Message, body.Message, body.Detail)
 	return code, msg
 }
 
@@ -274,8 +273,8 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// firstNonEmpty returns the first non-empty string.
-func firstNonEmpty(values ...string) string {
+// FirstNonEmpty returns the first non-empty string.
+func FirstNonEmpty(values ...string) string {
 	for _, v := range values {
 		if strings.TrimSpace(v) != "" {
 			return v

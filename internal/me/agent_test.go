@@ -444,6 +444,26 @@ func TestStartPlaybook_ReportsAnUnknownPlaybook(t *testing.T) {
 	}
 }
 
+func TestStartPlaybook_RefusesExtraArguments(t *testing.T) {
+	dir := t.TempDir()
+	writePlaybook(t, dir, "one", `name: one
+args: [id]
+steps:
+  - /gtw commit
+`)
+
+	svc, _, _ := testService(t, dir, Config{Provider: &scriptedProvider{}})
+	_, err := svc.StartPlaybook(context.Background(), Request{
+		Name: "one", Args: []string{"42", "43"}, ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+	})
+	if err == nil {
+		t.Fatal("an extra argument was accepted")
+	}
+	if !strings.Contains(err.Error(), "argument") {
+		t.Fatalf("error = %q, want the argument count", err)
+	}
+}
+
 func TestStartPlaybook_ReportsThatTheAgentIsOff(t *testing.T) {
 	dir := t.TempDir()
 	writePlaybook(t, dir, "one", oneStepPlaybook)
@@ -682,19 +702,20 @@ func TestSystem1_DecisionIsRecordedAsASyntheticToolCall(t *testing.T) {
 	}}
 	svc, _, _ := testService(t, dir, Config{Provider: provider, Decider: decider})
 
-	if _, err := svc.StartPlaybook(context.Background(), Request{
+	runID, err := svc.StartPlaybook(context.Background(), Request{
 		Name: "fix-issue", Args: []string{"42"}, ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("start: %v", err)
+	}
+	svc.mu.Lock()
+	r := svc.runs[runID]
+	svc.mu.Unlock()
+	if r == nil {
+		t.Fatal("the run is not registered")
 	}
 	waitRun(t, svc, "obs-1")
 
-	svc.mu.Lock()
-	r := svc.runs[firstRunID(svc)]
-	svc.mu.Unlock()
-	if r == nil {
-		t.Fatal("the run is gone")
-	}
 	found := false
 	for _, m := range r.conversation() {
 		for _, p := range m.Parts {
@@ -709,14 +730,6 @@ func TestSystem1_DecisionIsRecordedAsASyntheticToolCall(t *testing.T) {
 	if !found {
 		t.Fatal("the decision was not recorded in the conversation")
 	}
-}
-
-// firstRunID returns the id of the first run of a service.
-func firstRunID(svc *Service) string {
-	for id := range svc.runs {
-		return id
-	}
-	return ""
 }
 
 // waitForLine waits until the observer received a line that contains

@@ -29,9 +29,8 @@ const (
 // recorded as.
 const syntheticCallID = "system1"
 
-// transcriptTailBytes is how much of the last action's transcript the
-// decision model sees.
-const transcriptTailBytes = 4 << 10
+// transcriptBytes is how much of a transcript the models see.
+const transcriptBytes = 4 << 10
 
 // decision is what the decision model answered.
 type decision struct {
@@ -191,7 +190,7 @@ func (s *Service) decisionState(r *run) string {
 	}
 	if lastTranscript != "" {
 		b.WriteString("last transcript (tail):\n")
-		b.WriteString(tailText(lastTranscript, transcriptTailBytes))
+		b.WriteString(tailText(lastTranscript, transcriptBytes))
 		b.WriteString("\n")
 	}
 	return b.String()

@@ -364,7 +364,7 @@ func (s *Service) persist(r *run) {
 	}
 	path := s.statePath(r.id)
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
 		s.logger.Warn("me: the run state could not be written", "run_id", r.id, "err", err)
 		return
 	}
@@ -501,6 +501,15 @@ func (r *run) inflightState() *inflightState {
 func (r *run) setInflight(st *inflightState) {
 	r.mu.Lock()
 	r.inflight = st
+	r.mu.Unlock()
+}
+
+// clearWatch forgets the channel the running command was watched on.
+//
+// The next attempt watches the execution again.
+func (r *run) clearWatch() {
+	r.mu.Lock()
+	r.watch = nil
 	r.mu.Unlock()
 }
 

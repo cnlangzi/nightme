@@ -120,7 +120,7 @@ func (d *Decisions) Decide(ctx context.Context, req llm.DecisionRequest) (*llm.D
 	}
 
 	out := &llm.DecisionResponse{
-		Model:   firstNonEmpty(answer.Model, d.model),
+		Model:   llm.FirstNonEmpty(answer.Model, d.model),
 		Answers: map[string]llm.Answer{},
 	}
 	for _, q := range req.Questions {
@@ -156,14 +156,4 @@ func toDecisionsQuestion(q llm.Question) decisionsQuestion {
 		out.Levels = append(out.Levels, decisionsLevel{Label: l.Label, Description: l.Description})
 	}
 	return out
-}
-
-// firstNonEmpty returns the first non-empty string.
-func firstNonEmpty(values ...string) string {
-	for _, v := range values {
-		if strings.TrimSpace(v) != "" {
-			return v
-		}
-	}
-	return ""
 }

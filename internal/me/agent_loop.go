@@ -38,8 +38,9 @@ func (s *Service) drive(ctx context.Context, r *run) {
 	}
 	switch {
 	case r.isFinished():
-		// The model ended the run itself.
-		s.finish(r, PhaseDone, "")
+		// The model ended the run itself; the phase it ended with is
+		// kept — a run that failed is not turned into a finished one.
+		s.finish(r, r.currentPhase(), "")
 		s.removeState(r.id)
 	case err == nil, errors.Is(err, errFinished):
 		s.finish(r, PhaseDone, "")

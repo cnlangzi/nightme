@@ -1,17 +1,47 @@
-// PID-identity comparison rules for `nightme kill`.
+// Package procsweep — PID termination and PID-ownership
+// verification for agent child processes.
 //
-// They live in a build-tag-free file so a single unit-test file can
-// pin them on every platform: the unix rules (case-sensitive, with
-// the `ps comm` truncation allowance) and the Windows rules (`.exe`
-// suffix, case-insensitive) are two flavours of the same question —
-// "does this PID still belong to the agent we expect?".
-
-package main
+// Two callers share these primitives: `nightme kill` (an operator
+// sweep over the live rows of agent_sessions.json) and the runtime's
+// startup sweep (the orphan cleanup a crashed daemon leaves behind).
+// They must apply identical PID rules — a divergence would let the
+// runtime kill a process `nightme kill` would have refused to touch.
+//
+// The package owns two concerns:
+//
+//   - Termination. Kill stops a PID with the SIGTERM → grace →
+//     SIGKILL policy, so an agent CLI gets the chance to flush its
+//     own session state before it dies.
+//   - Attribution. VerifyOwner answers "does this PID still run the
+//     binary we expect?", so a PID the OS recycled onto an unrelated
+//     process is never signalled.
+//
+// Both are deliberately fail-open where they cannot get a definite
+// answer: an unreadable binary name must not disable the cleanup
+// the caller exists to perform. Only a positive mismatch blocks the
+// termination.
+package procsweep
 
 import (
 	"strings"
+	"time"
 
 	"github.com/cnlangzi/nightme/internal/pathutil"
+)
+
+const (
+	// Grace is how long a child gets to exit after SIGTERM before
+	// it is SIGKILLed.
+	//
+	// Two seconds matches the per-bridge grace window the runtime
+	// uses in its own Close() paths, so a manual `nightme kill` is
+	// no harsher than a normal shutdown.
+	Grace = 2 * time.Second
+
+	// PollInterval is how often the liveness is re-checked while
+	// waiting out Grace. 50ms mirrors the daemon lifecycle polling
+	// in cmd/nightme/daemon_lifecycle.go.
+	PollInterval = 50 * time.Millisecond
 )
 
 // commTruncLen is the length at which Linux truncates a process's
@@ -30,7 +60,7 @@ const commTruncLen = 15
 // A Linux-truncated comm is accepted as a match when it is a prefix
 // of the expected name at exactly the truncation length: an agent
 // configured as "my-long-agent-runner" shows up as "my-long-agent-r"
-// there, and rejecting that would make `kill` refuse to clean up a
+// there, and rejecting that would make the sweep refuse to clean up a
 // perfectly valid session.
 //
 // This only ever loosens the check, which is the correct direction:
@@ -66,4 +96,14 @@ func stripExeSuffix(s string) string {
 		return s[:len(s)-len(".exe")]
 	}
 	return s
+}
+
+// commandExt returns the lower-cased extension of a configured agent
+// command ("cmd", "ps1", "js", "exe", …), or "" when it has none.
+func commandExt(want string) string {
+	base := strings.ToLower(pathutil.Base(want))
+	if i := strings.LastIndex(base, "."); i > 0 {
+		return base[i+1:]
+	}
+	return ""
 }

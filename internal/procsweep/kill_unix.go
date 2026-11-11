@@ -1,30 +1,30 @@
 //go:build !windows
 
-// Package main — process termination primitives for `nightme kill`
-// on POSIX platforms.
-package main
+// procsweep — process termination primitives on POSIX platforms.
+package procsweep
 
 import (
 	"context"
 	"errors"
-	"github.com/cnlangzi/nightme/internal/proc"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/cnlangzi/nightme/internal/proc"
 )
 
-// killProcess terminates pid.
+// Kill terminates pid.
 //
 // Default policy is SIGTERM → grace → SIGKILL: agent CLIs (claude,
 // codex, …) flush their own session state on SIGTERM, so giving them
-// killGrace to exit preserves the resume id the CLI itself writes.
+// Grace to exit preserves the resume id the CLI itself writes.
 // force=true skips straight to SIGKILL for a wedged child.
 //
 // ESRCH ("no such process") is returned verbatim so the caller can
-// classify it via isProcessGone and report "already exited" — it is
+// classify it via IsProcessGone and report "already exited" — it is
 // the end state we wanted, not a failure.
-func killProcess(pid int, force bool) error {
+func Kill(pid int, force bool) error {
 	if pid <= 0 {
 		return syscall.ESRCH
 	}
@@ -35,7 +35,7 @@ func killProcess(pid int, force bool) error {
 		return err
 	}
 
-	deadline := time.Now().Add(killGrace)
+	deadline := time.Now().Add(Grace)
 	for {
 		if !processAlive(pid) {
 			return nil
@@ -43,36 +43,34 @@ func killProcess(pid int, force bool) error {
 		if time.Now().After(deadline) {
 			break
 		}
-		time.Sleep(killPollInterval)
+		time.Sleep(PollInterval)
 	}
 
 	// Grace expired. SIGKILL, tolerating a child that died in the
 	// gap between the last liveness poll and this call.
-	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && !isProcessGone(err) {
+	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && !IsProcessGone(err) {
 		return err
 	}
 	return nil
 }
 
-// processAlive reports whether pid can still be signalled. Signal 0
-// performs the permission + existence checks without delivering
-// anything.
-//
-// Caveat: a child whose parent (the nightme daemon) has not yet
-// reaped it stays visible as a zombie and answers signal 0. In that
-// case we simply wait out killGrace and send a harmless SIGKILL —
-// the entry is marked exited either way.
-func processAlive(pid int) bool {
-	return syscall.Kill(pid, syscall.Signal(0)) == nil
-}
-
-// isProcessGone reports whether err means "the process no longer
-// exists", which kill treats as success.
-func isProcessGone(err error) bool {
+// IsProcessGone reports whether err means "the process no longer
+// exists", which the sweep treats as success.
+func IsProcessGone(err error) bool {
 	return errors.Is(err, syscall.ESRCH)
 }
 
-// verifyPIDOwner reports whether pid still belongs to wantCommand,
+// ImageName returns the executable name of pid (e.g. "claude"), or ""
+// when it cannot be determined.
+//
+// The name is platform-native: a bare `ps comm` value on Unix, the
+// image file name on Windows.
+func ImageName(pid int) string {
+	name, _ := processCommand(pid)
+	return name
+}
+
+// VerifyOwner reports whether pid still belongs to wantCommand,
 // returning the command it actually found for the caller's message.
 //
 // Policy is fail-OPEN — ok=true — whenever we cannot get a definite
@@ -80,15 +78,15 @@ func isProcessGone(err error) bool {
 //
 //   - wantCommand == "" (unknown agent, e.g. a registry entry whose
 //     agent was renamed or removed): nothing to compare against.
-//   - `ps` missing, or the PID already gone: killProcess handles the
+//   - `ps` missing, or the PID already gone: Kill handles the
 //     gone case as "already exited", and a missing ps must not
 //     disable the command.
 //
 // Only a positive mismatch ("this PID is /usr/bin/vim, you expected
-// claude") blocks the kill. Fail-closed would be worse: it would
-// silently refuse to clean up real agents on any system where the
-// probe doesn't work, which is the command's entire purpose.
-func verifyPIDOwner(pid int, wantCommand string) (string, bool) {
+// claude") blocks the termination. Fail-closed would be worse: it
+// would silently refuse to clean up real agents on any system where
+// the probe doesn't work, which is the sweep's entire purpose.
+func VerifyOwner(pid int, wantCommand string) (string, bool) {
 	if wantCommand == "" {
 		return "", true
 	}
@@ -99,17 +97,29 @@ func verifyPIDOwner(pid int, wantCommand string) (string, bool) {
 	return actual, sameCommand(actual, wantCommand)
 }
 
+// processAlive reports whether pid can still be signalled. Signal 0
+// performs the permission + existence checks without delivering
+// anything.
+//
+// Caveat: a child whose parent (the nightme daemon) has not yet
+// reaped it stays visible as a zombie and answers signal 0. In that
+// case we simply wait out Grace and send a harmless SIGKILL — the
+// entry is marked exited either way.
+func processAlive(pid int) bool {
+	return syscall.Kill(pid, syscall.Signal(0)) == nil
+}
+
 // defunctComm is what `ps` reports for a zombie: a child that has
 // exited but whose parent never reaped it.
 //
 // This is NOT an exotic case for us — it is the signature of the
-// exact failure `nightme kill` exists to clean up. When the daemon
-// dies without reaping, its agent children become zombies whose
-// registry entries still say "running". Their identity is no longer
+// exact failure the sweep exists to clean up. When the daemon dies
+// without reaping, its agent children become zombies whose registry
+// entries still say "running". Their identity is no longer
 // recoverable from ps, so verification must fail open: the process
 // is already dead (signalling it is a no-op), and refusing here
 // would strand the entry as "running" forever — the one outcome the
-// command must never produce.
+// sweep must never produce.
 const defunctComm = "<defunct>"
 
 // processCommand returns the executable name of pid via `ps`, which

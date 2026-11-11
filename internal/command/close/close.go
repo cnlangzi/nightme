@@ -34,8 +34,10 @@
 // session (kill process AND forget conversation), use daemon
 // restart or `agent_sessions.json` cleanup.
 //
-// Daemon shutdown (cmd/nightme/run.go) does NOT call these —
-// agents survive nightme restart via the Detached registry state.
+// Daemon shutdown (cmd/nightme/run.go) does NOT call these — the
+// daemon's own shutdown sequence terminates the agent child
+// processes through the process scope, and records them as exited
+// with registry.ExitCodeTerminatedByNightme.
 package close
 
 import (

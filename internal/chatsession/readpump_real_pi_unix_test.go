@@ -102,7 +102,7 @@ func TestRealPi_E2E_PromptRoundTrip(t *testing.T) {
 	piAgent := pibridge.NewStarter("pi", "pi", nil)
 	reg := agent.New()
 	reg.Register(piAgent)
-	spawner := NewRegistrySpawner(reg)
+	spawner := NewRegistrySpawner(reg, context.Background())
 
 	cs, _ := New("oc_real_pi_test", "pi")
 	cs = cs.WithPersistence(csFile, asFile)

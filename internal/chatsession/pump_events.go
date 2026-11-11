@@ -12,6 +12,8 @@ import (
 	"context"
 	"log/slog"
 	"time"
+
+	"github.com/cnlangzi/nightme/internal/registry"
 )
 
 // PumpEvents (multi-as Phase 1) is the CS-side main loop. It
@@ -162,7 +164,18 @@ func (cs *ChatSession) routeEvent(as *AgentSession, ev EnrichedEvent) {
 			if as.Status() == StatusExited {
 				return
 			}
-			as.SetExited(0)
+			// A session the daemon terminated records -4 ("terminated
+			// by nightme"); a CLI that died on its own records 0.
+			// The chat's shutting-down flag is what tells the two
+			// apart — the runtime sets it before it cancels the
+			// process scope, so it is already in place when this
+			// event arrives.
+			shuttingDown := cs.IsShuttingDown()
+			exitCode := 0
+			if shuttingDown {
+				exitCode = registry.ExitCodeTerminatedByNightme
+			}
+			as.SetExited(exitCode)
 			// F-61: disarm HungPrompt. The bridge died without
 			// emitting KindPromptEnded, so the 5min timer armed
 			// at Submit is still live. Without this, it would
@@ -180,7 +193,15 @@ func (cs *ChatSession) routeEvent(as *AgentSession, ev EnrichedEvent) {
 			slog.Info("chatsession: AS marked Exited",
 				"agent", as.Agent,
 				"chat_id", ev.ChatID,
-				"as_id", ev.AgentSessionID)
+				"as_id", ev.AgentSessionID,
+				"exit_code", exitCode)
+			// No respawn while the daemon is shutting down: the
+			// process scope is already cancelled, so the spawn
+			// could only fail — and a failed spawn would overwrite
+			// the exit code we just recorded.
+			if shuttingDown {
+				return
+			}
 			// F-61: immediate respawn right after marking Exited.
 			// Synchronous spawn — the new bridge starts with
 			// --resume <sessionID> and picks up the prior

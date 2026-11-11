@@ -17,8 +17,9 @@ const (
 	StatusRunning Status = "running"
 
 	// StatusDetached means the child process is alive but nightme no
-	// longer holds it (e.g. SIGTERM was sent to nightme). The next
-	// cleanup sweep can still see it for re-attachment.
+	// longer holds it (e.g. the daemon that spawned it crashed). The
+	// next daemon's startup sweep terminates such a process — see
+	// internal/runtime/sweep.go.
 	StatusDetached Status = "detached"
 
 	// StatusExited means the child process has terminated. ExitCode

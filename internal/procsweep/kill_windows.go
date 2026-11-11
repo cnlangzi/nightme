@@ -1,8 +1,7 @@
 //go:build windows
 
-// Package main — process termination primitives for `nightme kill`
-// on Windows.
-package main
+// procsweep — process termination primitives on Windows.
+package procsweep
 
 import (
 	"errors"
@@ -11,28 +10,26 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
-
-	"github.com/cnlangzi/nightme/internal/pathutil"
 )
 
 // errProcessGone marks a PID that no longer exists. Windows has no
-// ESRCH, so we synthesize the same signal for the shared kill path.
+// ESRCH, so we synthesize the same signal for the shared sweep path.
 var errProcessGone = errors.New("process not found")
 
-// killProcess terminates pid via the Win32 API.
+// Kill terminates pid via the Win32 API.
 //
 // Windows has no POSIX signals, so the SIGTERM-then-SIGKILL grace
 // window has no equivalent: TerminateProcess is the only portable
-// way to stop an arbitrary child, and the `--force` flag is
-// therefore a no-op here. This mirrors internal/agentsession's
-// reapOrphan, which makes the same trade-off.
+// way to stop an arbitrary child, and the `force` flag is therefore
+// a no-op here. This mirrors internal/agentsession's reapOrphan,
+// which makes the same trade-off.
 //
 // ERROR_INVALID_PARAMETER from OpenProcess means the PID does not
 // exist — reported as errProcessGone so the caller prints "already
 // exited" instead of a failure. Other OpenProcess errors (notably
 // ERROR_ACCESS_DENIED, i.e. a live process we may not touch) are
 // surfaced as real errors.
-func killProcess(pid int, _ bool) error {
+func Kill(pid int, _ bool) error {
 	if pid <= 0 {
 		return errProcessGone
 	}
@@ -51,13 +48,22 @@ func killProcess(pid int, _ bool) error {
 	return nil
 }
 
-// isProcessGone reports whether err means "the process no longer
-// exists", which kill treats as success.
-func isProcessGone(err error) bool {
+// IsProcessGone reports whether err means "the process no longer
+// exists", which the sweep treats as success.
+func IsProcessGone(err error) bool {
 	return errors.Is(err, errProcessGone)
 }
 
-// verifyPIDOwner reports whether pid still belongs to wantCommand,
+// ImageName returns the executable file name of pid (e.g.
+// "codex.exe"), or "" when it cannot be determined.
+//
+// The name is platform-native: a bare `ps comm` value on Unix, the
+// image file name on Windows.
+func ImageName(pid int) string {
+	return processImageName(pid)
+}
+
+// VerifyOwner reports whether pid still belongs to wantCommand,
 // returning the executable name it actually found.
 //
 // It is the Windows counterpart of the Unix PID-identity check and
@@ -66,14 +72,14 @@ func isProcessGone(err error) bool {
 //
 //   - wantCommand == "" (unknown agent): nothing to compare against.
 //   - the image name could not be read (snapshot failed, PID gone):
-//     killProcess handles the gone case as "already exited", and a
-//     failed probe must not disable the command.
+//     Kill handles the gone case as "already exited", and a failed
+//     probe must not disable the sweep.
 //   - the PID belongs to the host interpreter that runs the agent
 //     shim: see hostInterpreterFor.
 //
 // Only a positive mismatch ("this PID is codex.exe, you expected
-// claude") blocks the kill.
-func verifyPIDOwner(pid int, wantCommand string) (string, bool) {
+// claude") blocks the termination.
+func VerifyOwner(pid int, wantCommand string) (string, bool) {
 	if wantCommand == "" {
 		return "", true
 	}
@@ -97,8 +103,7 @@ func verifyPIDOwner(pid int, wantCommand string) (string, bool) {
 // in agent_sessions.json belongs to the host, not to the agent — the
 // image name cannot say WHICH agent the session runs, so ownership is
 // undecidable and the check must fail open. Refusing there would make
-// `nightme kill` skip every npm-installed agent on Windows, i.e.
-// useless.
+// the sweep skip every npm-installed agent on Windows, i.e. useless.
 //
 // The host is derived from the configured command, not from a fixed
 // list: exempting every interpreter unconditionally would fail open a
@@ -127,16 +132,6 @@ func hostInterpreterFor(want string) string {
 		// lists .CMD before .JS and does not list .PS1 at all —
 		// so the only host it can be is cmd.exe.
 		return "cmd.exe"
-	}
-	return ""
-}
-
-// commandExt returns the lower-cased extension of a configured agent
-// command ("cmd", "ps1", "js", "exe", …), or "" when it has none.
-func commandExt(want string) string {
-	base := strings.ToLower(pathutil.Base(want))
-	if i := strings.LastIndex(base, "."); i > 0 {
-		return base[i+1:]
 	}
 	return ""
 }

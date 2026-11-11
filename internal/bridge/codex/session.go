@@ -268,7 +268,9 @@ func newSession(ctx context.Context, cfg sessionConfig) (*session, error) {
 
 	argv := appServerArgs(cfg)
 
-	child := proc.New(ctx, cfg.command, argv...)
+	// The 3s grace lets the CLI flush its own session state on
+	// SIGTERM, so the resume id survives the daemon's shutdown.
+	child := proc.NewWith(ctx, proc.Options{HideWindow: true, Grace: proc.AgentGrace}, cfg.command, argv...)
 	child.Dir = cfg.workspace
 	child.Env = append(os.Environ(), cfg.env...)
 

@@ -694,7 +694,7 @@ internal/
   cli/                              # shared CLI helpers (config / doctor / login)
   command/                         # Slash-command Commander / Registry / Factory
     cwd/ close/ newcmd/ use/ think/ tools/ watch/ stop/ steer/ services/
-    handoff/ resume/ review/ wiki/ queue/   # task-continuity / review / wiki / queue
+    handoff/ resume/ review/ wiki/ queue/ me/   # task-continuity / review / wiki / queue / personal agent
     gtw/                           # /gtw plan / new / fix / commit / push / pr / close / back / sync (Git team workflow)
   config/                          # YAML loader + env overrides
   daemoncontrol/                   # IPC for `nightme doctor` / `status`
@@ -703,8 +703,11 @@ internal/
     inbound/  outbound/            # inbound dispatch chain + outbound sender
   gatewaytest/                     # integration test harness
   logging/                         # slog + secret redaction
+  llm/                             # LLM clients — chat + tool calling (Provider) and decision models (Decider)
+    decision/  openai/            # the decision protocols and the OpenAI-compatible chat provider
   login/                           # IM bot registration — feishu / slack / telegram onboarding
-  me/                              # workflow service — runs the workflows through the loopback channel
+  me/                              # the personal agent — runs the playbooks through the loopback channel
+    workflow/                      # the cron / event-driven workflow service
   messages/                        # IM message types + dispatch
   prcache/                         # PR metadata cache (per-F-50)
   registry/                        # JSON-backed chat_sessions.json + agent_sessions.json (0600, atomic)

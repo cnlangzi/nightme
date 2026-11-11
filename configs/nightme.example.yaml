@@ -100,3 +100,23 @@ paths:
   # Root for the v1.2 persistence stores (chat_sessions.json +
   # agent_sessions.json) and per-session scratch.
   data_dir: "~/.nightme"
+
+# The personal agent — /me start <playbook>. Both halves are
+# optional: with only `llm` it runs its tool loop, with only
+# `decider` it runs its fast path and asks you for everything it is
+# not sure about, and with both the fast path hands the uncertain
+# steps to the tool loop. The API key is read from the environment
+# variable named here — it is never stored in this file.
+me:
+  # llm:
+  #   provider: openai
+  #   base_url: https://api.openai.com/v1
+  #   model: gpt-4.1-mini
+  #   api_key_env: OPENAI_API_KEY
+  #   max_tokens: 4096
+  # decider:
+  #   protocol: decisions
+  #   base_url: https://openrouter.ai/api/v1
+  #   model: typesafe/jev-1.14
+  #   api_key_env: OPENROUTER_API_KEY
+  #   min_confidence: 0.8

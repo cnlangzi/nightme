@@ -60,6 +60,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/command/gtw"
+	mec "github.com/cnlangzi/nightme/internal/command/me"
 	commandServices "github.com/cnlangzi/nightme/internal/command/services"
 	"github.com/cnlangzi/nightme/internal/registry"
 
@@ -395,6 +396,11 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	// command/* factories do not take a *chatsession.Manager.
 	// ChatSession references are supplied passively: slash
 	// commands receive cs from the dispatcher parameter.
+	// The personal agent is built here — before the channels start —
+	// so the /me command can reach it. It only sends commands once a
+	// run starts, which is long after the channels are up.
+	personal := buildPersonalAgent(cfg, chs, logger)
+
 	command.SetDeps(command.Deps{
 		Primary: cfg.Primary,
 		// GTWExt carries gtw's HandlerDeps for the /gtw
@@ -406,6 +412,9 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 		// resolves the channel at send time, so handing it over
 		// before the channels have started is safe.
 		ChatSender: NewChatSender(),
+		// Me is the personal agent the /me command drives. A daemon
+		// without a loopback channel has none.
+		Me: mec.NewController(personal),
 	})
 	reg := command.Default()
 	commander := command.NewCommander(reg)
@@ -513,6 +522,16 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	// is attached, so the commands it sends have a chat to land in.
 	meSvc := startMeService(ctx, cfg, startedChannels, logger)
 
+	// The personal agent starts with the workflow service: both need
+	// the loopback channel, and both drive the daemon through it.
+	if personal != nil {
+		if err := personal.Start(ctx); err != nil {
+			logger.Warn("run: the personal agent did not start", "err", err)
+		} else {
+			logger.Info("run: personal agent started", "dir", personal.WorkflowsDir())
+		}
+	}
+
 	// ── Phase 6: OS wake-from-sleep watcher ────────────────────
 	// F-fix-os-sleep-wakeup: detect OS resume-from-sleep and
 	// immediately kick every WakeKicker channel's reconnect
@@ -540,6 +559,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	// The workflow service stops before the channels do: a run that
 	// is still going needs its chat to settle on.
 	stopMeService(meSvc, logger)
+	stopPersonalAgent(personal, logger)
 
 	return ShutdownRunMulti(out, startedChannels, csFile, asFile, prCacheReg, logger)
 }

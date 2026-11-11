@@ -70,6 +70,10 @@ type Deps struct {
 	// progress to the chat a run started in uses this instead of
 	// reaching for a chatsession.Manager.
 	ChatSender messages.ChatSender
+	// Me is the personal agent the /me command drives. The daemon
+	// always provides one; a nil value means the deps were assembled
+	// without a runtime (tests).
+	Me MeController
 }
 
 var (

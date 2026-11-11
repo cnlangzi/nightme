@@ -1,23 +1,25 @@
-// Package me — the user half of nightme.
+// Package workflow runs the cron-driven workflow automations.
 //
 // A workflow automation needs somebody to drive the daemon: set the
 // chat's workspace, pick the agent, ask the question, read the
 // answer.
 //
-// me is that user, and nothing else. It is a runtime service, not a
-// channel: it never receives inbound messages and it renders
-// nothing. It talks to the daemon through the loopback channel's
-// client, the way a person types into a chat window — every command
-// is a real message with a real id, and every answer comes back as
-// a structured outcome.
+// The workflow service is that user, and nothing else. It is a
+// runtime service, not a channel: it never receives inbound messages
+// and it renders nothing. It talks to the daemon through the
+// loopback channel's client, the way a person types into a chat
+// window — every command is a real message with a real id, and every
+// answer comes back as a structured outcome.
 //
 // The split:
 //
 //   - internal/channel/loopback — transport. How a message gets
 //     into the daemon, and how its outcome comes back.
-//   - internal/me — the workflow half. Triggers, actions, run
-//     state, and the steps that drive the daemon.
-package me
+//   - internal/me/workflow — the workflow half. Triggers, actions,
+//     run state, and the steps that drive the daemon.
+//   - internal/me — the personal agent. It runs a playbook with an
+//     LLM in the loop.
+package workflow
 
 import (
 	"context"

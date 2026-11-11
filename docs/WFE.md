@@ -31,14 +31,17 @@ Conceptually a workflow is "GitHub Actions for your local dev loop" — declarat
 - [6. Expressions (`${{ ... }}`)](#6-expressions--)
 - [7. Complete examples](#7-complete-examples)
 - [8. Runtime architecture](#8-runtime-architecture)
-  - [8.1 The `bot` subsystem — host](#81-the-bot-subsystem--host)
-  - [8.2 The `wfe` library — pure](#82-the-wfe-library--pure)
-  - [8.3 Architecture diagram](#83-architecture-diagram)
-  - [8.4 Runtime interface — the injection point](#84-runtime-interface--the-injection-point)
-  - [8.5 Action injection model](#85-action-injection-model)
-  - [8.6 Trigger detection — bot's own concern (3-stage filter pipeline)](#86-trigger-detection--bots-own-concern-3-stage-filter-pipeline)
-  - [8.7 `prompt` step via the nightme channel](#87-prompt-step-via-the-nightme-channel)
-  - [8.8 Run state &amp; persistence](#88-run-state--persistence)
+  - [8.1 The layering](#81-the-layering)
+  - [8.2 The playbook schema](#82-the-playbook-schema)
+  - [8.3 The policy](#83-the-policy)
+  - [8.4 The tools](#84-the-tools)
+  - [8.5 The two capabilities](#85-the-two-capabilities)
+  - [8.6 The three modes](#86-the-three-modes)
+  - [8.7 The configuration](#87-the-configuration)
+  - [8.8 The `/me` commands](#88-the-me-commands)
+  - [8.9 The outcome model](#89-the-outcome-model)
+  - [8.10 Guardrails and recovery](#810-guardrails-and-recovery)
+  - [8.11 The workflow service](#811-the-workflow-service)
 - [9. Out of scope (v0)](#9-out-of-scope-v0)
 - [10. Cross-references](#10-cross-references)
 
@@ -628,379 +631,249 @@ jobs:
 
 ## 8. Runtime architecture
 
-This section answers "where do workflow runs actually execute, and how do the pieces fit?" Sections §1–§7 defined the YAML schema; this one defines how the engine is wired into the existing nightme runtime.
+This section answers "where do runs actually execute, and how do the pieces fit?". Sections §1–§7 define the YAML schema; this one defines the runtime that executes it.
 
-### 8.1 bot is a Channel
+Two kinds of YAML live in the same directory:
 
-> **🔒 Design invariant (locked)**: bot is a channel, full stop. bot does **not** hold any reference to nightme's internal types (`chatsession.Manager`, `ChatSession`, `AgentSession`, `Gateway` internals, `/gtw fix` Go API). bot's **only** path into nightme is `bot.Incoming() → gateway → inbound.Dispatch → ChatSession → … → outbound.Emitter → bot.Send()`. Anything bot wants nightme to do must be expressed as a message (a plain text prompt, or a slash command like `/cwd`, `/use agent`, `/gtw fix`).
->
-> **Outgoing side-effects** (notify, email, github action) are bot's **own** resource channels — they call external APIs (feishu HTTP, SMTP, GitHub REST) directly, not nightme internals. This is fine; the constraint only covers bot → nightme runtime.
+- a **workflow** — a cron- or event-driven DAG of steps (§1–§7). It is executed by the workflow service.
+- a **playbook** — an ordered list of steps plus the constraints around them. It is executed by the personal agent, `me`.
 
-`bot` lives at **`internal/channel/bot/`** and **implements the `channel.Channel` interface** (the same interface as `feishu` and `echo`). bot is registered in `gateway.AttachChannels(bot, feishu, echo, …)` and goes through the exact same channel pipeline as any other channel.
+A file with top-level `steps:` is a playbook; a file with top-level `jobs:` is a workflow. The two are never mixed in one file.
+
+### 8.1 The layering
 
 ```
-person → types in feishu
-  → feishu channel → gateway → ChatSession → agent
-  → reply flows back via feishu.Send → user sees it
-
-workflow fires
-  → bot synthesizes a message
-  → bot channel → gateway → ChatSession → agent       ← SAME PATH
-  → reply flows back via bot.Send → workflow captures it
+  ┌─ a chat ───────────────┐
+  │  /me start fix-issue 42 │
+  └──────────┬─────────────┘
+             │
+             ▼
+  ┌────────────────────────────────────────────────┐
+  │  internal/me — the personal agent               │
+  │                                                │
+  │  System 1 (decision model) — decides the next   │
+  │  step when it is sure                          │
+  │  System 2 (chat model + tools) — decides when   │
+  │  System 1 is not, and whenever text is needed   │
+  │                                                │
+  │  the policy (internal/wfe.Policy) bounds every   │
+  │  action a run may take                         │
+  └───────┬──────────────────────────┬─────────────┘
+          │ commands                 │ questions, progress
+          ▼                          ▼
+  ┌──────────────────────┐   ┌──────────────────────┐
+  │ internal/channel/    │   │ runtime ChatSender   │
+  │ loopback — transport │   │ → the starting chat  │
+  └──────────┬───────────┘   └──────────────────────┘
+             │
+             ▼
+  ┌────────────────────────────────────────────────┐
+  │  gateway → chatsession → agentsession → bridge  │
+  │  → the coding agent that does the work         │
+  └────────────────────────────────────────────────┘
 ```
 
-**bot replaces a person in front of a chat platform.** That's the entire conceptual model. The gateway doesn't know or care whether a message came from feishu, echo, or bot — it just dispatches.
-
-| Channel | "User" | Message source |
+| Layer | Package | Owns |
 |---|---|---|
-| `feishu` | Real person typing in feishu | feishu webhook |
-| `echo` | Test harness | `echo.Inject` (in-process) |
-| **`bot`** | **The workflow YAML scheduler** | **bot synthesizes and pushes into its own `Incoming()`** |
+| Transport | `internal/channel/loopback` | Sending a command into a chat, tracking it, and reporting its outcome. Knows nothing about playbooks. |
+| The agent | `internal/me` | The run: what to do next, what the policy allows, what the observer is told. |
+| The models | `internal/llm` | Two capabilities: `Provider` (chat and tool calling) and `Decider` (typed decision questions). |
+| The schema | `internal/wfe` | The playbook and workflow schemas, and the `Policy` that bounds a run. |
 
-**Why bot must be a Channel (not a subsystem)**:
+The agent drives the daemon the way a person drives it through Feishu: every command is a real message with a real id, and every answer comes back as a structured outcome. It never reaches into the gateway or the chat sessions.
 
-- The gateway's `dispatchLoop` reads from every channel's `Incoming()` and routes via `inbound.Dispatch`. There's no "system trigger" branch — only channels.
-- Slash commands (`/cwd`, `/use agent`, `/gtw fix`) are dispatched by `tryCommandDispatch`. A workflow that wants to invoke `/gtw fix` must do so by sending a `/gtw fix …` message through the channel pipeline.
-- Agent replies flow back via `outbound.Emitter → channel.Send`. bot's `Send` is the only natural way to capture them.
+### 8.2 The playbook schema
 
-If bot tried to bypass the channel and call `ChatSession` directly, it would:
-
-- Skip `inbound.Dispatch` — `/gtw fix` and other slash commands wouldn't work.
-- Have no `outbound.Emitter → Send` callback for replies — it would have to invent a separate reply path.
-- Diverge from the architectural model that `feishu`/`echo` already follow.
-
-**Bot's responsibilities**:
-
-1. **Load workflows** from `~/.nightme/workflows/*.yaml` and validate.
-2. **Run its own trigger manager** (cron timers, git event subscriptions). Triggers are bot's private concern — nightme doesn't see them.
-3. **When a trigger fires**, derive a fresh chatID, register a per-run reply channel, and synthesize the first message (`/cwd <workspace>`) into `bot.Incoming()`.
-4. **Drive `wfe.Tick`** for each run in a goroutine. For `prompt` steps, push a message via `bot.Incoming()` and wait on the per-run reply channel. For `run` steps, `os/exec`. For `use` steps, `ActionRegistry`.
-5. **Capture agent replies** delivered via `bot.Send` (called by the gateway's `outbound.Emitter`) and deliver them to the waiting `wfe.Tick` goroutine through the per-run reply channel.
-6. **Persist run state** to `~/.nightme/workflows/state/<run-id>.json` and recover after restart.
-7. **Register action channels** (built-in + user-defined scripts).
-
-**Iron rule**: bot never holds a `chatsession.Manager` reference, never calls `ChatSession.*` directly, never talks to the gateway's `dispatchInbound` outside the channel protocol. Everything goes through `bot.Incoming()` and `bot.Send()`.
-
-### 8.2 The `wfe` library — pure
-
-`internal/wfe/` is a **pure Go library**. It has zero knowledge of gw, chatsession, agentsession, the file system beyond the YAML it parses, the network, secrets, or even the current time. Every external dependency is injected through a `Runtime` interface that the bot provides.
-
-What wfe owns:
-
-- YAML parsing, schema validation, type definitions (`Workflow`, `Step`, `RunState`, `Event`).
-- Event → workflow matching (pure function).
-- The state machine: `Tick(state, runtime) → (state', error)`. One step at a time, fully pure.
-- Expression evaluation: `${{ event.x }}`, `${{ steps.y.outputs.z }}`, `${{ env.K }}`.
-- Step dispatch: maps each step kind to a `Runtime` call.
-
-What wfe does **not** own:
-
-- Clocks. `Runtime.Now()` is the only way to read time.
-- Secrets. They're just env vars, resolved by the bot before the run starts.
-- I/O of any kind. No file system, no network, no subprocess.
-- The trigger source. The bot decides when to call `Tick`.
-
-This split is what makes wfe trivially testable: pass a mock `Runtime`, pass a `RunState`, observe the new `RunState`.
-
-### 8.3 Architecture diagram
-
-```
-  ┌─ bot's own trigger sources ────────────────┐
-  │  cron timer (robfig/cron)                  │
-  │  PR / issue / branch / mention (git events)│
-  │  ── all internal to bot ──                 │
-  └─────────────────┬──────────────────────────┘
-                    │ trigger events
-                    ▼
-  ┌──────────────────────────────────────────────────┐
-  │   internal/channel/bot  (a Channel, peer of      │
-  │                          feishu, echo)           │
-  │                                                  │
-  │   implements channel.Channel interface:          │
-  │     Name() / Start() / Stop()                    │
-  │     Incoming()  ← bot pushes synthesized msgs     │
-  │     Send()      ← gateway delivers agent reply   │
-  │                                                  │
-  │   internal state:                                │
-  │     workflows []*wfe.Workflow                    │
-  │     triggers  (cron + git events)                │
-  │     actions   ActionRegistry                     │
-  │     stateStore                                    │
-  │     runsByChatID map[chatID]*botRun             │
-  │       each botRun has its own reply channel       │
-  │                                                  │
-  │   per-run lifecycle:                             │
-  │     trigger fires                                │
-  │       → derive chatID + runID                    │
-  │       → spawn botRun (with reply channel)         │
-  │       → go driveRun(r):                          │
-  │            for !r.state.Done() {                  │
-  │                r.state = wfe.Tick(state, wf, rt)   │
-  │                save(state)                        │
-  │            }                                      │
-  │       → cleanup botRun                           │
-  │                                                  │
-  │   runtime 4 methods:                             │
-  │     RunShell:   os/exec (cwd = run.workspace)    │
-  │     SendPrompt: push msg → bot.Incoming(),       │
-  │                 wait on r.reply chan               │
-  │     RunAction:  ActionRegistry                   │
-  │     Now:        time.Now                          │
-  └────────────────────┬─────────────────────────────┘
-                       │ bot.Incoming() / bot.Send()
-                       │ (跟 feishu 完全一样的 channel 协议)
-                       ▼
-  ┌──────────────────────────────────────────────────┐
-  │   nightme gateway (完全复用)                       │
-  │                                                  │
-  │   AttachChannels(bot, feishu, echo, ...)         │
-  │   pumpInbound: 读每个 channel.Incoming()           │
-  │   dispatchLoop:                                  │
-  │     channelCh → inbound.Dispatch                  │
-  │     → tryActionDispatch                          │
-  │     → tryCommandDispatch  (e.g. /cwd /use /gtw fix)│
-  │     → tryShellDispatch                            │
-  │     → tryMessageDispatch                         │
-  │   → ChatSession(chatID)                          │
-  │   → /cwd 设 cwd (第一步)                          │
-  │   → /use agent 设 agent                          │
-  │   → /gtw fix 创建 worktree (off main)             │
-  │   → AgentSession → agent → reply                │
-  │   reply: outbound.Emitter → channel.Send          │
-  │     → bot.Send(msg) 收                           │
-  │     → bot 查 runsByChatID[msg.ChatID]             │
-  │     → 把 msg.Text 投到 botRun.reply               │
-  │     → workflow 的 SendPrompt 等到 reply, 继续 Tick  │
-  └──────────────────────────────────────────────────┘
-```
-
-Solid lines are the path a single workflow run takes. bot.Incoming → gateway → ChatSession → agent → reply → bot.Send → botRun.reply → wfe.Tick. This path is **identical to the path a feishu-typed message takes**; the only difference is the source (synthesized by bot vs. typed by a human) and the sink (bot's reply chan vs. feishu's API).
-
-### 8.4 Resource channels — the injection points
-
-wfe is a pure library. It has no resources of its own — to run anything, it calls out through a `Runtime` interface that the bot injects. **Each method on `Runtime` is a channel from bot to a specific resource.** nightme is just one of those resources.
-
-| Method | Channel | Resource |
-|---|---|---|
-| `RunShell` | shell channel | `os/exec` (direct subprocess) |
-| `SendPrompt` | **nightme channel** | nightme runtime — bot pushes msg to `bot.Incoming()`; gateway dispatches to ChatSession; reply flows back via `bot.Send` (same shape as feishu user typing) |
-| `RunAction: notify` | notify channel | feishu / slack / webhook IM (via bot's `ActionRegistry`) |
-| `RunAction: email` | email channel | SMTP |
-| `RunAction: github_pr_comment` | github channel | GitHub API (via `gitProvider` abstraction) |
-| `RunAction: <user-script>` | user-script channel | `~/.nightme/workflows/actions/<name>.<ext>` |
-| `Now` | (clock — not a channel) | `time.Now` |
-
-The conceptual symmetry with nightme's own `Channel` interface is intentional:
-
-- nightme has `Channel` implementations (`feishu`, `echo`) for **receiving** messages from user-facing sources.
-- bot has "resource channels" for **sending** task-execution messages to backend resources.
-
-The `Runtime` interface in Go is just a typed union of the channels the workflow step grammar can dispatch to:
-
-```go
-// internal/wfe/runtime.go
-type Runtime interface {
-    // shell channel
-    RunShell(ctx, ShellSpec) (*ShellResult, error)
-    
-    // nightme channel (agent task execution)
-    SendPrompt(ctx, PromptSpec) (*Reply, error)
-    
-    // action channels (one method, many backends resolved by name)
-    RunAction(ctx, ActionSpec) (*ActionResult, error)
-    
-    // clock (injected so wfe has no time dependency)
-    Now() time.Time
-}
-```
-
-The bot provides one implementation. The implementation is what wires each method to its resource:
-
-| Method | Backed by |
-|---|---|
-| `RunShell` | `os/exec` in the bot process |
-| `SendPrompt` | Push msg into `bot.Incoming()`; block on per-run reply channel; reply comes via `bot.Send` (see §8.7) |
-| `RunAction` | `ActionRegistry.Run` (resolves name → action implementation) |
-| `Now` | `time.Now` |
-
-**Why nightme is one channel among many**: workflow steps don't only need agents. They need to `run` arbitrary shell, `notify` users, post to `github`, send `email`, etc. The nightme channel is privileged (it can invoke an agent), but it's not special in the type system — it's one entry in a fixed list of channels that the step grammar knows about. Adding a new "always available" capability means adding a new method to `Runtime` (and a new step kind); adding a new "nameable" capability means registering a new entry in `ActionRegistry`.
-
-The `Runtime` is what the bot hands to wfe when calling `Tick`. wfe holds it for the duration of one step, then returns the new state. The next step can see a different `Runtime` (in practice, never, but the type system permits it).
-
-### 8.5 Action resource channels
-
-`use:` is the **extension point** beyond `run` and `prompt`. While `run` and `prompt` are first-class channels (their step kind is enough to dispatch), `use` is **name-dispatched** — wfe doesn't know what actions exist, it just calls `Runtime.RunAction(spec)` with a name. The bot's `ActionRegistry` is what resolves the name to a concrete action channel.
-
-In channel terms: **`run`, `prompt`, `use` are all resource channels**. The first two have fixed method names in `Runtime`; the third is a multiplexer over a dynamic name set.
-
-```go
-// internal/channel/bot/action.go
-type Action interface {
-    Name() string                                  // channel name (matches `use: <name>`)
-    Execute(ctx, args map[string]any, env map[string]string) (*ActionResult, error)
-}
-
-type ActionRegistry struct {
-    actions map[string]Action
-}
-```
-
-**Built-in action channels** (registered in Go at bot startup):
-
-| Action name (`use:`) | Channel to | Backed by |
-|---|---|---|
-| `notify` | notify channel (feishu / slack / webhook IM) | Bot's channel registry + HTTP |
-| `email` | email channel | SMTP client |
-| `github_pr_comment` | github channel (PR comments) | `gitProvider` abstraction (F-50) |
-| `github_issue` | github channel (issues) | Same |
-| `slack` | slack channel | Slack API |
-| `webhook` | webhook channel | `http.Client` |
-
-**User-defined action channels** (auto-discovered at bot startup):
-
-```
-~/.nightme/workflows/actions/
-├── deploy-staging.sh        # auto-registered as channel "deploy-staging"
-├── rotate-secrets.py        # auto-registered as channel "rotate-secrets"
-└── notify-custom.sh         # auto-registered as channel "notify-custom"
-```
-
-The bot wraps each script as a `ShellAction` (a script-backed channel):
-
-```go
-type ShellAction struct {
-    ScriptPath string
-}
-
-func (a *ShellAction) Name() string {
-    return strings.TrimSuffix(filepath.Base(a.ScriptPath), filepath.Ext(a.ScriptPath))
-}
-
-func (a *ShellAction) Execute(ctx, args, env) (*ActionResult, error) {
-    // args serialised to env (KEY_UPPER=json) for shell-side consumption
-    // + JSON file for complex consumption
-    // stdout is expected to be JSON {"outputs": {...}}; non-JSON → empty outputs
-    return parseActionOutput(stdout)
-}
-```
-
-This means **adding a new action channel doesn't require changing wfe or rebuilding the bot binary** — drop a script in the directory and restart the bot (or hot-reload, see open questions). The Go-level built-ins (`notify`, `email`, `github_*`, etc.) ship with the bot; user-scripts are the open extension surface.
-
-Unknown `use:` names fail the run with a clear error: `unknown action: "foo" — registered: [notify, email, github_pr_comment, …]`.
-
-### 8.6 Trigger detection — bot's own concern (3-stage filter pipeline)
-
-Triggers are **not** a nightme feature. The five trigger kinds in `on:` (`schedule`, `pull_request`, `branch`, `issue`, `mention`) are bot's private input sources — nightme's `Channel` / `Gateway` / `ChatSession` subsystems are not involved in detecting them.
-
-The flow has three explicit stages: **receive → filter → trigger**.
-
-#### 8.6.1 Stage 1 — Receive (passive)
-
-bot subscribes once to `gitProvider` and gets **all events** for repos the token can see. No per-workflow subscription.
-
-| Trigger kind | How bot receives it |
-|---|---|
-| `schedule` | bot runs `robfig/cron` internally, ticks evaluate each workflow's cron list |
-| `pull_request` / `issue` / `branch` / `mention` | bot subscribes to `gitProvider` once; receives **all** PR/issue/branch/mention events the API delivers |
-
-#### 8.6.2 Stage 2 — Filter (active, per workflow's `workspaces`)
-
-For every event, bot filters through each workflow's `workspaces` list before triggering:
-
-```
-for each event:
-    if event.kind == "schedule":
-        workspace = nil   # cron 无 event.repo
-    else:
-        workspace = wsMap.byRepo[event.repo]    # ~/.git/config 反查
-        if workspace == "": return              # 事件 repo 不在 bot 的 workspaces 里，丢弃
-
-    for each workflow:
-        if workspace != nil and !contains(workflow.workspaces, workspace):
-            continue    # 这个 workflow 不覆盖此 workspace
-        if !wfe.Match(workflow, event):
-            continue    # 这个 workflow 的 on: 不匹配此 event 类型
-        fireWorkflow(workflow, event, workspace)
-```
-
-`wsMap` is built at bot startup by reading `git -C <workspace> remote get-url origin` for every workspace mentioned in any workflow's `workspaces` list, and normalizing the URL to `owner/repo`. Cached; refreshed on workflow reload.
-
-#### 8.6.3 Stage 3 — Trigger (execute)
-
-For each (workflow, event, workspace) match, bot starts a fresh run (new `runID` + new `chatID` + new worktree via `/gtw fix`).
-
-This means:
-
-- The `Channel` interface is **not** implemented by bot. There's no `Incoming()` channel on bot that anyone pumps.
-- The `Gateway.dispatchLoop` never sees a trigger event.
-- The `inbound.Dispatch` chain is unchanged. No "system trigger" branch.
-- bot has no `Send()` outbound — `notify` and other side-effect actions reach channels via bot's own `ActionRegistry`, not via the gateway.
-
-This isolation is what lets bot ship independently of nightme's dispatch chain evolution. If nightme later refactors gateway, bot is unaffected. If bot adds a new trigger kind, nothing in nightme changes.
-
-### 8.7 `prompt` step via the nightme channel
-
-A `prompt:` step is, at runtime, **bot submitting a task-execution message through the nightme channel**. The message says "execute this prompt in this chat with this agent, give me the reply". This is the same shape as `/gtw fix` asking nightme to spawn an agent in a chat:
+A playbook is a human-written, ordered list of steps that bounds what the agent loop may do. It carries no workspace and no trigger: the working directory comes from the chat that starts the run.
 
 ```yaml
-- prompt: "Review ${{ event.title }}"
-  agent: codex
+name: fix-issue
+args: [id]
+goal: Fix issue #${{ args.id }} and ship it as a PR.
+steps:
+  - /gtw fix ${{ args.id }} -y
+  - /gtw commit
+  - run: /review
+    note: If it fails or does not finish, continue with /review -c. If it passes and left changes, /gtw commit first.
+    allow: [/review -c, /gtw commit]
+    max: 5
+  - /gtw push
+  - /gtw pr
 ```
 
-…is realized as:
+| Field | Meaning |
+|---|---|
+| `name` | The playbook's name. `/me start <name>` picks it. |
+| `args` | The names of the arguments. `/me start fix-issue 42` maps `42` onto `id`. |
+| `goal` | What the run is for. It is part of the model's instructions. |
+| `max_actions` | The action budget of the whole playbook. Default 30. |
+| `instruct` | Whether the agent may send free-form instructions. Default true. |
+| `steps` | The ordered steps. |
 
-> `botRuntime.SendPrompt` synthesizes an inbound message (chatID, body, meta) and pushes it into `bot.Incoming()`
-> → gateway's `pumpInbound` reads it → `channelCh`
-> → `dispatchLoop` calls `DispatchInbound(msg)`
-> → `inbound.Dispatch` → `tryMessageDispatch` → `ChatSession(chatID)` (which has already had `/cwd` and `/use agent` applied at run start)
-> → `AgentSession(codex)` (already running in the worktree) processes the prompt
-> → agent reply flows back: `AgentSession` → `outbound.Emitter` → `bot.Send(msg)`
-> → `bot.Send` looks up `runsByChatID[msg.ChatID]` and delivers `msg.Text` to the per-run reply channel
-> → `botRuntime.SendPrompt` unblocks with `&wfe.Reply{Text: msg.Text}`, wfe records the output under `steps.<id>.outputs.*`
-> → wfe returns the advanced state to the bot
-> → bot saves the new state to disk
+A step is either a plain string — shorthand for `run` — or a mapping:
 
-The AgentSession pool semantics are unchanged: a `prompt` step in a given chat+agent+CWD triple **reuses** an existing live session if one is running, just like a `/gtw fix` or a human typing in that chat. Cold start only when no live session exists for that triple.
+| Field | Meaning |
+|---|---|
+| `run` | The command the step performs. |
+| `note` | Why the step is there, and when the extra commands apply. It is the description the decision model reads. |
+| `allow` | The extra commands the agent may use inside the step. |
+| `max` | The number of actions the step may take. 0 means no limit of its own. |
 
-**`run` and `use` steps do not use the nightme channel.** They go through their own channels:
+Only `${{ args.NAME }}` is supported, and only for a declared argument. Any other expression is rejected when the playbook is loaded.
 
-- `run` → shell channel (direct `os/exec` inside bot's process)
-- `use` → the named action channel (resolved by `ActionRegistry`)
+### 8.3 The policy
 
-Only `prompt` reaches the nightme channel, because only `prompt` needs an LLM agent to think and reply. Everything else is more direct: shell runs locally, github hits GitHub's API directly, notify hits the IM API directly, etc. The nightme channel is the heaviest of the channels because it spans two processes and an LLM — but architecturally it's a peer of the others.
+The policy is the bound on what a run may do. It is a pure function of the playbook and the actions taken so far.
 
-### 8.8 Run state & persistence
+| Check | Reports |
+|---|---|
+| `CheckRun(command)` | Whether the command may run now, and which step it belongs to. |
+| `CheckInstruct()` | Whether a free-form instruction is allowed. |
+| `CheckFinish(status)` | Whether the run may end. `done` needs the last step's latest outcome to be `ok` or `noop`; `failed` is always allowed. |
+| `Remaining()` | The action budget left, overall and per step. |
+| `Render()` | The playbook as a compact text block: the goal, the steps, the notes, the allowed commands and the limits. |
+| `AllowedCommands()` | The commands the policy accepts right now. |
 
-A workflow run is durable. The bot persists per-run state at:
+A command belongs to the first step that lists it, and a step that spent its limit takes its commands out of the list.
+
+### 8.4 The tools
+
+The chat model acts through six tools. Every handler enforces the policy: a violation comes back as a tool error result, and the model corrects itself.
+
+| Tool | Behaviour |
+|---|---|
+| `run_step(command)` | Runs `Policy.CheckRun`, then sends the command to the work chat. It returns the outcome — status, summary, data — and the transcript of what the work agent said. |
+| `instruct(text)` | Runs `Policy.CheckInstruct`, then sends a free-form prompt to the work chat. It is tracked and returned like `run_step`. |
+| `answer_choice(choice_id, option_id)` | Answers a permission request or a question the work agent is waiting for. |
+| `ask_human(question)` | Posts the question to the observer chat and suspends the run. `/me reply <text>` resumes it with the reply as the tool's result. |
+| `repo_status()` | Reads the work chat's repository: the branch, whether the tree is dirty, and how far the branch is ahead of or behind its upstream and its base branch. |
+| `finish(status, summary)` | Runs `Policy.CheckFinish`, ends the run and posts the summary. `status` is `done` or `failed`. |
+
+`run_step` blocks while the command runs and makes no model calls. It comes back early when the work agent asks something — the model can then answer, instruct or ask — or when the command goes quiet for ten minutes. Both cases report `waiting` and the reason.
+
+### 8.5 The two capabilities
+
+After every step settles, the agent asks the decision model what comes next.
+
+**System 1 — the decision model.** One request carries the rendered playbook, the remaining budgets, the history of the run as outcomes, and — for the last action — its full outcome and the tail of its transcript. The request asks three questions:
+
+| Question | Shape | Asked |
+|---|---|---|
+| `next` | choice — the commands the policy accepts now, plus `done` and `escalate`; each option's description is the step's note | always |
+| `needs_human` | yes/no — does the next step need the user's judgement or credentials | always |
+| `step_succeeded` | yes/no — did the last step work | only when the last outcome is `unknown` |
+
+The decision is acted on without the chat model when all of these hold:
+
+- `next` is not `escalate`;
+- the confidence of `next` is at least `min_confidence`;
+- `needs_human` is below 0.5;
+- the policy allows it — `Policy.CheckRun` for a command, `Policy.CheckFinish` for `done`.
+
+The decision is recorded in the conversation as a synthetic assistant tool call with a note (`decided by jev-1.14.0, p=0.93`), so the chat model reads a consistent history when it takes over. The model that answered is stored with the run.
+
+**System 2 — the chat model.** The standard tool-calling shape: call the model with the tools, run the tool calls, append the results, repeat until `finish`, a pause or a budget limit. The system prompt is the playbook: the role, `Policy.Render()`, and how to read an outcome — the status is the primary evidence, the transcript is context.
+
+Anything that needs text — an instruction, an answer to a prompt — always goes to System 2.
+
+### 8.6 The three modes
+
+`me` is enabled when at least one of `me.llm` and `me.decider` is configured.
+
+| `me.llm` | `me.decider` | Behaviour |
+|---|---|---|
+| set | unset | System 2 only: the tool loop decides every step. |
+| unset | set | System 1 only: confident decisions run, everything else asks the user. |
+| set | set | System 1 first, with System 2 handling the escalations. |
+
+Without a chat model, an escalation becomes a question for the user: the agent lists the options and `/me reply <option>` picks one. An action that needs text goes to `ask_human` in that mode.
+
+### 8.7 The configuration
+
+```yaml
+me:
+  llm:
+    provider: openai              # a registered chat provider
+    base_url: https://api.openai.com/v1
+    model: gpt-4.1-mini
+    api_key_env: OPENAI_API_KEY   # the key is read from the environment, never stored in the config
+    max_tokens: 4096
+  decider:
+    protocol: decisions           # decisions | systemone
+    base_url: https://openrouter.ai/api/v1
+    model: typesafe/jev-1.14
+    api_key_env: OPENROUTER_API_KEY
+    min_confidence: 0.8           # below this the agent escalates
+```
+
+The user picks the models. nightme never chooses one, and it never injects a model into the coding agents — those keep their own configuration.
+
+`me.llm` and `me.decider` are independent. A model that is configured but cannot be built — an unknown provider, a missing key — is reported in the daemon log and left out; the daemon still starts, and `/me` says why it cannot run.
+
+### 8.8 The `/me` commands
+
+| Command | Behaviour |
+|---|---|
+| `/me start <playbook> [args...]` | Starts a playbook in this chat. The positional arguments map onto the playbook's declared arguments, in order. The run inherits the chat's workspace and agent. A chat without a workspace is refused. A second run in the same chat is refused. |
+| `/me reply <text>` | Answers the question the run is waiting for. |
+| `/me stop` | Cancels the run and stops the work chat. |
+| `/me status` | Reports the current step, the phase and progress of the running command, the remaining budget, and what each capability decided and spent. |
+
+One run is active per chat: the chat that starts a run is the chat that receives the progress and answers the questions.
+
+### 8.9 The outcome model
+
+The run judges from facts, not from text. Every command the agent sends reports a structured outcome.
+
+| Status | Meaning |
+|---|---|
+| `ok` | The step did what it was asked to do. |
+| `noop` | There was nothing to do — the request was valid, the world already satisfied it. |
+| `incomplete` | The step partly worked; the rest is still open. |
+| `failed` | The step did not work. |
+| `cancelled` | Somebody stopped it. |
+| `timeout` | It ran out of time. |
+| `unknown` | Nobody reported a verdict. |
+
+A step that is still running reports `waiting`, and a step whose execution is gone reports `interrupted`.
+
+The progress the observer receives is built from the outcome:
 
 ```
-~/.nightme/workflows/state/<run-id>.json
+▶ /gtw fix 42 -y
+✅ /gtw fix 42 -y
+▶ /review
+⚠️ /review incomplete · 1/3 groups unfinished
+✅ issue 42 is on its way · 6 actions · system-1: 0 decisions, 0 tokens · system-2: 8 decisions, 4210 tokens
 ```
 
-Where `<run-id>` is `<workflow-name>:<trigger-key>:<started-at>` (deterministic per trigger, so re-fires coalesce).
+### 8.10 Guardrails and recovery
 
-State shape (sketch):
+| Guardrail | Bound |
+|---|---|
+| Loop iterations | Three times the playbook's action budget, unless the configuration says otherwise. |
+| Token budget | The tokens one run may spend on the chat model. |
+| Step timeout | Thirty minutes per command. |
+| Stall detection | Ten minutes without a heartbeat. |
+| Action budget | `max_actions` for the run, `max` for a step. |
+| Compaction | Every tool result but the last keeps its status and summary; the last one keeps its transcript. |
 
-```json
-{
-  "run_id": "pr-reviewer:pr-42:2026-08-18T09:00:00Z",
-  "workflow": "pr-reviewer",
-  "trigger": { "kind": "pull_request", "event": { "pr": { ... } } },
-  "chat_id": "system:pr-reviewer:42",
-  "current_job": "review",
-  "current_step": "ai",
-  "step_outputs": {
-    "ai": { "verdict": "needs-fix", "has_issue": "true" }
-  },
-  "status": "running"          // running | succeeded | failed | cancelled
-}
-```
+A text-only answer — words without a tool call — is nudged once to call a tool. The second time, the run ends as a failure.
 
-- **Daemon restart**: in-flight runs are reloaded from disk; the bot resumes the `Tick` loop from `current_step` (re-evaluates `if:` conditions; re-runs idempotent steps; `prompt` resumes a live session if still alive).
-- **Failure recovery**: a failed step leaves the run in `failed`; the user (or the next trigger) can decide whether to retry.
-- **Worker pool** (§2 `worker: N`): the bot caps concurrent runs of the same workflow at N. Excess triggers queue (FIFO) and run when a worker frees up.
+The run is persisted after every tool result: the bound playbook, the policy's history, the whole conversation and the paused state. On startup, running runs resume:
 
----
+- a command that was in flight is resolved through the loopback; if its execution is gone, it reports `interrupted`;
+- a suspended run keeps waiting for `/me reply`.
+
+Recovery is silent. The observer is told only when a run cannot go on — an authentication error from the model, for instance.
+
+### 8.11 The workflow service
+
+The cron- and event-driven workflows of §1–§7 run in `internal/me/workflow`. It is a runtime service, not a channel: it never receives inbound messages and it renders nothing. It drives the daemon through the loopback channel's client, the way a person drives it through Feishu.
+
+Its run state lives in `<DataDir>/workflows/state/<run-id>.json`, and the work chat of a run is a loopback chat with the `lb_` prefix.
+
+The workflow service and the personal agent share the workflows directory and the loopback channel. They do not share a run: the workflow service's runs are triggered by cron and git events, the personal agent's runs are started by `/me start` in a chat.
 
 ## 9. Out of scope (v0)
 

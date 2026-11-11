@@ -1,4 +1,4 @@
-package me
+package workflow
 
 import (
 	"os"

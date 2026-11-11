@@ -177,12 +177,14 @@ func (p *Policy) stepFor(cmd string) int {
 	return -1
 }
 
-// allowedCommands lists the commands the policy accepts now. A
-// command belongs to the first step listing it, so it is left out
-// once that step has spent its limit.
-func (p *Policy) allowedCommands() string {
+// AllowedCommands lists the commands the policy accepts now.
+//
+// A command belongs to the first step listing it, so it is left out
+// once that step has spent its limit. The whole list is empty once
+// the playbook's action budget is used up.
+func (p *Policy) AllowedCommands() []string {
 	if p.usedActions() >= p.maxActions() {
-		return "none"
+		return nil
 	}
 	var cmds []string
 	seen := map[string]bool{}
@@ -200,6 +202,12 @@ func (p *Policy) allowedCommands() string {
 			cmds = append(cmds, n)
 		}
 	}
+	return cmds
+}
+
+// allowedCommands renders the commands the policy accepts now.
+func (p *Policy) allowedCommands() string {
+	cmds := p.AllowedCommands()
 	if len(cmds) == 0 {
 		return "none"
 	}

@@ -23,7 +23,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/channel/loopback"
 	"github.com/cnlangzi/nightme/internal/config"
-	"github.com/cnlangzi/nightme/internal/me"
+	"github.com/cnlangzi/nightme/internal/me/workflow"
 )
 
 // startMeService builds and starts the workflow service.
@@ -31,7 +31,7 @@ import (
 // A daemon without a loopback channel — a test build, or a channel
 // that failed to start — runs without the service: there is no chat
 // to drive the daemon through.
-func startMeService(ctx context.Context, cfg *config.Config, chs []channel.Channel, logger *slog.Logger) *me.Service {
+func startMeService(ctx context.Context, cfg *config.Config, chs []channel.Channel, logger *slog.Logger) *workflow.Service {
 	lb := findLoopback(chs)
 	if lb == nil {
 		logger.Info("run: no loopback channel; the workflow service stays off")
@@ -42,7 +42,7 @@ func startMeService(ctx context.Context, cfg *config.Config, chs []channel.Chann
 		logger.Warn("run: workflow service has no workflows dir", "err", err)
 		return nil
 	}
-	svc := me.New(me.Config{WorkflowsDir: dir}, loopback.NewClient(lb))
+	svc := workflow.New(workflow.Config{WorkflowsDir: dir}, loopback.NewClient(lb))
 	svc.SetLogger(logger)
 	if err := svc.Start(ctx); err != nil {
 		logger.Warn("run: workflow service did not start", "err", err)
@@ -57,7 +57,7 @@ func startMeService(ctx context.Context, cfg *config.Config, chs []channel.Chann
 //
 // The stop is bounded: a run that is still going is cancelled and
 // the daemon does not wait for it forever.
-func stopMeService(svc *me.Service, logger *slog.Logger) {
+func stopMeService(svc *workflow.Service, logger *slog.Logger) {
 	if svc == nil {
 		return
 	}

@@ -96,6 +96,54 @@ type Config struct {
 	Logging        LoggingConfig `yaml:"logging"`
 	Paths          PathsConfig   `yaml:"paths"`
 	Review         ReviewConfig  `yaml:"review,omitempty"`
+	Me             MeConfig      `yaml:"me,omitempty"`
+}
+
+// MeConfig holds the personal agent's model configuration.
+//
+// The user picks the models; nightme never chooses one. Both halves
+// are optional: with only me.llm the personal agent runs its tool
+// loop, with only me.decider it runs its fast path and asks the user
+// for everything it is not sure about, and with both the fast path
+// hands the uncertain steps to the tool loop.
+type MeConfig struct {
+	// LLM is the chat model (System 2).
+	LLM MeLLMConfig `yaml:"llm,omitempty"`
+	// Decider is the decision model (System 1).
+	Decider MeDeciderConfig `yaml:"decider,omitempty"`
+}
+
+// MeLLMConfig is the chat model configuration.
+type MeLLMConfig struct {
+	// Provider names the registered chat provider ("openai").
+	Provider string `yaml:"provider,omitempty"`
+	// BaseURL is the root of the API.
+	BaseURL string `yaml:"base_url,omitempty"`
+	// Model is the model to call.
+	Model string `yaml:"model,omitempty"`
+	// APIKeyEnv names the environment variable the API key is read
+	// from. The key itself is never stored in the configuration.
+	APIKeyEnv string `yaml:"api_key_env,omitempty"`
+	// MaxTokens caps the length of an answer.
+	MaxTokens int `yaml:"max_tokens,omitempty"`
+}
+
+// MeDeciderConfig is the decision model configuration.
+type MeDeciderConfig struct {
+	// Protocol names the registered decision protocol ("decisions" or
+	// "systemone").
+	Protocol string `yaml:"protocol,omitempty"`
+	// BaseURL is the root of the API.
+	BaseURL string `yaml:"base_url,omitempty"`
+	// Model is the model to call.
+	Model string `yaml:"model,omitempty"`
+	// APIKeyEnv names the environment variable the API key is read
+	// from.
+	APIKeyEnv string `yaml:"api_key_env,omitempty"`
+	// MinConfidence is the confidence a decision must reach before
+	// the personal agent acts on it without the chat model. Zero
+	// means the built-in default.
+	MinConfidence float64 `yaml:"min_confidence,omitempty"`
 }
 
 // ReviewConfig holds the /review command's global preferences.

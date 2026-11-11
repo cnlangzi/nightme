@@ -136,8 +136,23 @@ func TestRegistry_UnknownProvider(t *testing.T) {
 	if _, err := New(Config{Model: "m"}); err == nil {
 		t.Fatal("a missing provider was accepted")
 	}
-	if _, err := New(Config{Provider: "openai"}); err == nil {
+}
+
+// The provider is looked up before the model is checked, so the model
+// check is only reachable for a registered provider. The registry is
+// empty in this test binary — the concrete protocols live in their own
+// packages and register themselves — so the test installs one.
+func TestRegistry_RequiresAModel(t *testing.T) {
+	Register("zzz-model-test", func(Config) (Provider, error) { return nil, nil })
+	_, err := New(Config{Provider: "zzz-model-test"})
+	if err == nil {
 		t.Fatal("a provider without a model was accepted")
+	}
+	if !strings.Contains(err.Error(), "no model") {
+		t.Fatalf("error = %q, want it to report the missing model", err)
+	}
+	if _, err := New(Config{Provider: "zzz-model-test", Model: "m"}); err != nil {
+		t.Fatalf("a provider with a model was rejected: %v", err)
 	}
 }
 

@@ -290,6 +290,13 @@ func (d *scriptedDecider) Request(n int) llm.DecisionRequest {
 
 // ── helpers ───────────────────────────────────────────────────────
 
+// oneStepPlaybook is a playbook with a single step.
+const oneStepPlaybook = `name: one
+goal: Do the one thing.
+steps:
+  - /gtw commit
+`
+
 // fixIssuePlaybook is the playbook of the integration test.
 const fixIssuePlaybook = `name: fix-issue
 args: [id]
@@ -761,6 +768,85 @@ func TestSystem1_DecisionIsRecordedAsASyntheticToolCall(t *testing.T) {
 	if !found {
 		t.Fatal("the decision was not recorded in the conversation")
 	}
+}
+
+func TestSystem1_ANoopStepIsNotAToolError(t *testing.T) {
+	dir := t.TempDir()
+	writePlaybook(t, dir, "one", oneStepPlaybook)
+
+	provider := &scriptedProvider{responses: []llm.Response{
+		{Message: toolCallMsg("c1", toolFinish, map[string]any{"status": "done", "summary": "nothing to commit"})},
+	}}
+	decider := &scriptedDecider{answers: []llm.DecisionResponse{
+		decisionResp("jev-1.14", "/gtw commit", 0.95, 0),
+	}}
+	svc, lb, _ := testService(t, dir, Config{Provider: provider, Decider: decider})
+	lb.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeNoop, Summary: "nothing to commit"}}}
+
+	if _, err := svc.StartPlaybook(context.Background(), Request{
+		Name: "one", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitRun(t, svc, "obs-1")
+
+	if provider.Calls() == 0 {
+		t.Fatal("the chat model never took a turn")
+	}
+	part := toolResultPart(t, provider.Request(0).Messages, toolRunStep)
+	if part.IsError {
+		t.Fatalf("a noop outcome came back as a tool error: %s", part.Text)
+	}
+	if !strings.Contains(part.Text, "noop") {
+		t.Fatalf("the tool result does not carry the status: %s", part.Text)
+	}
+}
+
+func TestSystem1_AFailedStepIsAToolError(t *testing.T) {
+	dir := t.TempDir()
+	writePlaybook(t, dir, "one", oneStepPlaybook)
+
+	provider := &scriptedProvider{responses: []llm.Response{
+		{Message: toolCallMsg("c1", toolFinish, map[string]any{"status": "failed", "summary": "the commit failed"})},
+	}}
+	decider := &scriptedDecider{answers: []llm.DecisionResponse{
+		decisionResp("jev-1.14", "/gtw commit", 0.95, 0),
+	}}
+	svc, lb, _ := testService(t, dir, Config{Provider: provider, Decider: decider})
+	lb.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeFailed, Summary: "the commit failed"}}}
+
+	if _, err := svc.StartPlaybook(context.Background(), Request{
+		Name: "one", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitRun(t, svc, "obs-1")
+
+	if provider.Calls() == 0 {
+		t.Fatal("the chat model never took a turn")
+	}
+	part := toolResultPart(t, provider.Request(0).Messages, toolRunStep)
+	if !part.IsError {
+		t.Fatalf("a failed outcome came back as a tool result that is not an error: %s", part.Text)
+	}
+}
+
+// toolResultPart returns the tool result the messages carry for a
+// tool.
+func toolResultPart(t *testing.T, msgs []llm.Message, tool string) llm.Part {
+	t.Helper()
+	for _, m := range msgs {
+		if m.Role != llm.RoleTool {
+			continue
+		}
+		for _, p := range m.Parts {
+			if p.Type == llm.PartToolResult && p.ToolName == tool {
+				return p
+			}
+		}
+	}
+	t.Fatalf("the messages carry no tool result for %q", tool)
+	return llm.Part{}
 }
 
 // waitForLine waits until the observer received a line that contains

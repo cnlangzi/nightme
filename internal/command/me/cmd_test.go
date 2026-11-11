@@ -3,6 +3,7 @@ package me
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -126,8 +127,10 @@ func TestStart_MapsTheArguments(t *testing.T) {
 	if req.ObserverChatID != cs.ID {
 		t.Errorf("observer chat = %q, want %q", req.ObserverChatID, cs.ID)
 	}
-	if req.Cwd != "/tmp/work" {
-		t.Errorf("cwd = %q, want /tmp/work", req.Cwd)
+	// The chat session cleans the path it stores, so the comparison
+	// is against the cleaned form.
+	if want := filepath.Clean("/tmp/work"); req.Cwd != want {
+		t.Errorf("cwd = %q, want %q", req.Cwd, want)
 	}
 	if req.Agent != "claude" {
 		t.Errorf("agent = %q, want claude", req.Agent)

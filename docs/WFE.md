@@ -793,7 +793,7 @@ Without a chat model, an escalation becomes a question for the user: the agent l
 ```yaml
 me:
   llm:
-    provider: openai              # a registered chat provider
+    provider: openai              # a registered chat provider: openai | anthropic
     base_url: https://api.openai.com/v1
     model: gpt-4.1-mini
     api_key_env: OPENAI_API_KEY   # the key is read from the environment, never stored in the config

@@ -704,7 +704,7 @@ internal/
   gatewaytest/                     # integration test harness
   logging/                         # slog + secret redaction
   llm/                             # LLM clients — chat + tool calling (Provider) and decision models (Decider)
-    decision/  openai/            # the decision protocols and the OpenAI-compatible chat provider
+    anthropic/  decision/  openai/ # the chat providers and the decision protocols
   login/                           # IM bot registration — feishu / slack / telegram onboarding
   me/                              # the personal agent — runs the playbooks through the loopback channel
     workflow/                      # the cron / event-driven workflow service

@@ -10,6 +10,7 @@
 > - [channel/feishu.md](./channel/feishu.md) 飞书实现细节
 > - [channel/telegram.md](./channel/telegram.md) Telegram 实现细节
 > - [channel/slack.md](./channel/slack.md) Slack 接入方案（设计中）
+> - [WFE.md](./WFE.md) §8.1 loopback 进程内 channel（daemon 自己的 chat）
 
 ---
 
@@ -655,6 +656,7 @@ cs.emitter = mgr.emitter = 该 mgr 对应的 channel 的 Emitter
 |---|---|---|
 | Telegram | `tg_<chat.id>` 或 `tg_<chat.id>:<thread_id>` | telegram adapter 的 `sessionChatID` 加前缀（topic 实际存在时） |
 | Feishu | `oc_<hex>` | Feishu API 自带 |
+| Loopback | `lb_<run-id>` | loopback channel 自己加前缀（`internal/channel/loopback`） |
 | 未来 Slack/Lark | `<vendor>_<id>` | 各 adapter 自己加 |
 
 **稳定性约束**（关键）：

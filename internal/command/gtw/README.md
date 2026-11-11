@@ -436,6 +436,38 @@ abc1234 fix(gtw): hooks output uses standard ✅ title
 ↳ agent is fixing now — follow progress in chat · `/gtw commit` + `/gtw push` when done
 ```
 
+### 4.7b Format 1(`/gtw fix *` — 自动挑 issue)
+
+`/gtw fix *` 的成功卡片与 §4.6 / §4.7 同形,只是 issue 行说明它是自动挑的:
+
+```
+✅ Fix #42 ready
+→ branch:   `42-login-state-expiration`
+→ worktree: /Users/.../worktrees/42-login-state-expiration
+→ issue:    owner/repo#42 [nightme/wip] · picked automatically
+→ base:     abc1234
+↳ agent is analyzing — review the plan in chat, then tell the agent when to proceed
+```
+
+队列里没有可选项时:
+
+```
+✨ No eligible assigned issue
+→ queue: empty — none of the 100 oldest open issues carries the `nightme/assigned` label
+↳ come back in 5m for another pick.
+```
+
+平台不暴露 issue 关系图时,队列只按年龄排序,卡片里明说依赖顺序没有生效:
+
+```
+✅ Fix #42 ready
+→ branch:   `42-login-state-expiration`
+→ worktree: /Users/.../worktrees/42-login-state-expiration
+→ issue:    owner/repo#42 [nightme/wip] · picked automatically
+→ deps:     not ordered — this platform does not expose issue dependencies
+↳ agent is analyzing — review the plan in chat, then tell the agent when to proceed
+```
+
 ### 4.8 Format 1(`/gtw new -y`)
 
 `/gtw plan` 与 `/gtw new` 本身没有 gtw 卡片——plan mode 的讨论和草稿都由 agent 在 chat 里直接展示。`/gtw new -y`

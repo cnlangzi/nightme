@@ -297,6 +297,7 @@ func (f *Factory) Spec() command.Spec {
 			"/gtw new                          have the agent draft issues from this chat's discussion\n" +
 			"/gtw new -y                       create the issues from the reviewed drafts\n" +
 			"/gtw fix <issue-id> [-y|--yes]   claim, label, and create a worktree\n" +
+			"/gtw fix * [-y|--yes]            pick the next assigned issue and fix it\n" +
 			"/gtw fix --name <branch>          create a local worktree (no issue)\n" +
 			"/gtw close                        tear down the worktree, delete the branch, and sync main\n" +
 			"/gtw back                         exit the fix worktree (cwd → repoRoot) and sync main — worktree preserved\n" +
@@ -586,7 +587,9 @@ func (f *Factory) runFix(ctx context.Context, _ command.RuntimeServices, cs *cha
 	// ID-mode quick validation: pre-validate locally with
 	// parseIssueID (not strconv.Atoi) so "#42" is accepted —
 	// the GitHub/GitLab convention users have muscle memory for.
-	if args.Mode == ModeRemote {
+	// The automatic mode names no issue, so it has no id to
+	// validate.
+	if args.Mode == ModeRemote && !args.Auto {
 		if _, err := parseIssueID(args.RawArg); err != nil {
 			reportOutcome(ctx, command.FailedOutcome("invalid_issue", "the issue id is not valid"))
 			return &command.SlashOutput{
@@ -630,7 +633,7 @@ func (f *Factory) runFix(ctx context.Context, _ command.RuntimeServices, cs *cha
 		func() error {
 			_, e := RunFix(ctx, args.Mode, cs, f.deps,
 				input.ChatID, input.MessageID,
-				[]string{args.RawArg}, args.Yes)
+				[]string{args.RawArg}, args.Yes, args.Auto)
 			if e == nil {
 				// Re-derive so post-hook sees the worktree
 				// that RunFix just created + yml-wrote.
@@ -658,6 +661,7 @@ type fixArgs struct {
 	Mode   Mode
 	RawArg string // issue id (ModeRemote) or branch name (ModeLocal)
 	Yes    bool   // --yes / -y: dispatch Execute Prompt instead of Assess
+	Auto   bool   // the positional was `*`: pick the next assigned issue
 }
 
 // fixCmdSpec is the argv grammar for /gtw fix. Lexer is the
@@ -668,6 +672,7 @@ type fixArgs struct {
 // both):
 //
 //	<issue-id>              ModeRemote (issue id from positional)
+//	*                       ModeRemote (the next assigned issue)
 //	--name <branch>         ModeLocal  (branch from --name value)
 //
 // Both shapes accept an optional -y/--yes to dispatch the
@@ -682,7 +687,7 @@ var fixCmdSpec = command.CmdSpec{
 	// when appended to parse-error messages — multi-line
 	// Usage would land the second half mid-sentence in
 	// every error reply.
-	Usage: "/gtw fix <issue-id> [-y|--yes] | /gtw fix --name <branch> | -n <branch>",
+	Usage: "/gtw fix <issue-id> [-y|--yes] | /gtw fix * [-y|--yes] | /gtw fix --name <branch> | -n <branch>",
 	Flags: map[string]command.FlagSpec{
 		"-y":     {Name: "yes"},
 		"--yes":  {Name: "yes"},
@@ -699,7 +704,7 @@ var fixCmdSpec = command.CmdSpec{
 
 // parseFixArgs lexes the argv tail of `/gtw fix <...>` via the
 // shared command.ParseCmdArgs and decides which Mode the user
-// is asking for. Returns *fixArgs{Mode, RawArg, Yes}; any
+// is asking for. Returns *fixArgs{Mode, RawArg, Yes, Auto}; any
 // failure comes straight from command.ParseCmdArgs and already
 // carries the Usage tail (issue #291 contract).
 //
@@ -717,6 +722,11 @@ var fixCmdSpec = command.CmdSpec{
 //     happily consumes the next token verbatim (even an empty
 //     one); we surface this as a user-facing error rather than
 //     handing an empty branch name to DeriveBranchFromName.
+//
+// The positional `*` selects the automatic mode: the issue is
+// picked from the queue instead of named by the user. It is a
+// positional, not a flag, so `--name` and `*` are mutually
+// exclusive like an issue id and a branch name are.
 func parseFixArgs(argv []string) (fixArgs, error) {
 	parsed, err := command.ParseCmdArgs(argv, fixCmdSpec)
 	if err != nil {
@@ -746,6 +756,9 @@ func parseFixArgs(argv []string) (fixArgs, error) {
 		}
 		return fixArgs{Mode: ModeLocal, RawArg: name, Yes: parsed.Bool("yes")}, nil
 	case hasPositional:
+		if positional == autoSelector {
+			return fixArgs{Mode: ModeRemote, RawArg: autoSelector, Auto: true, Yes: parsed.Bool("yes")}, nil
+		}
 		return fixArgs{Mode: ModeRemote, RawArg: positional, Yes: parsed.Bool("yes")}, nil
 	default:
 		return fixArgs{}, fmt.Errorf(

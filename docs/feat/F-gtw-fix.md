@@ -54,6 +54,9 @@ v1.x Remote 模式在 worktree 就绪后立刻 dispatch 一条混合语义的 pr
 /gtw fix <issue-id> --yes        # 同 -y
 /gtw fix -y <issue-id>           # -y 任意位置都行（boolean flag，无值）
 
+/gtw fix *                       # 自动模式：自己挑下一个 assigned issue（§2.3）
+/gtw fix * -y                    # 同上，跳过 plan 直接 execute prompt
+
 /gtw fix --name <branch>         # local 模式（无 issue、无 agent dispatch，行为不变）
 /gtw fix -n <branch>             # 同 --name
 /gtw fix --name <branch> -y      # local mode 下 -y 被忽略
@@ -91,15 +94,84 @@ Local mode 不 dispatch agent prompt，Assess / Execute 无意义；不报错但
 - `-y` 的语义（"yes, go ahead"）清晰，不需要发明新 flag。
 - 历史上还有 `-f` / `--force` flag（path 残留强制清理），已在 F-XX 删除。
 
+### 2.3 自动模式：`/gtw fix *`
+
+`/gtw fix *` 不点名 issue：它从队列里挑一个，跑完全一样的 remote 流程（worktree、label、dispatch），然后在成功卡片里说明挑中了哪个 issue。`*` 是位置参数而不是 flag，所以 `/gtw fix` 的 flag 集合不变；它也不能和 `--name` / `-n` 同时出现（和 issue id 与 branch name 互斥是同一条规则）。
+
+**队列在 tracker 上**：NightMe 可以动的 issue 带着 `nightme/assigned` label —— 由人或者 tracker 上的外部自动化加上。gtw 从不自己加这个 label：它只认。`nightme/assigned` 在 `AllLabels` 里，所以 `ensureGtwLabels` 会把它建进仓库的 label catalog。
+
+**选择算法**（`internal/command/gtw/auto.go`）：
+
+```
+candidates := open issues carrying nightme/assigned, minus those carrying nightme/wip
+sort candidates by (CreatedAt asc, ID asc)
+
+for each candidate c:
+    blockers := provider.ListBlockedBy(c)        # lazy：命中第一个可选项就停
+    if any blocker is not closed:      skip (blocked)
+    branch := DeriveBranchFromTitle(c.Title, c.ID)
+    if branch exists locally:          skip (branch exists)
+    if open PR for branch:             skip (PR open)
+    return c
+
+return nothing
+```
+
+- **blocker 只算「已落地」当它 closed**：前置的 PR 必须先 merge，依赖项才建在它之上。
+- **blocker 检查是懒的**：每个 candidate 查一次关系图，命中第一个可选项就停。队列里第一个就可选项时，恰好一次 `ListBlockedBy` 调用。
+- **关系不可用 ≠ 没有 blocker**：平台不暴露关系图时 provider 返回 `ErrRelationsUnsupported`；第一次遇到它之后，本次选择不再查关系，剩下的 candidate 只按年龄排序，回复里明说依赖顺序没有生效。关系调用因别的原因失败（网络、鉴权）时命令直接失败，不降级。
+- **窗口**：平台一次返回的最老的一页 open issue（两个平台都是 100 条），窗口外的 issue 不参与。
+
+**两个新的 provider 能力**（`provider.go`）：
+
+```go
+// ListIssues returns the repository's open issues, oldest first.
+//
+// The window is the oldest open issues the platform returns in one
+// page (100 on both platforms). Issues outside it are not
+// considered.
+ListIssues(ctx context.Context, owner, repo string) ([]*Issue, error)
+
+// ListBlockedBy returns the issues that block the given issue — its
+// prerequisites, in the platform's own relation graph.
+//
+// A platform that does not expose relations returns
+// ErrRelationsUnsupported, so the caller can say "this platform does
+// not tell us" instead of pretending there are no dependencies.
+ListBlockedBy(ctx context.Context, owner, repo string, id int) ([]*Issue, error)
+```
+
+`Issue` 多一个 `CreatedAt time.Time`。
+
+| Provider | ListIssues | ListBlockedBy |
+|---|---|---|
+| GitHub | `gh api "repos/{owner}/{repo}/issues?state=open&per_page=100&sort=created&direction=asc"`，响应里的 PR 条目丢掉 | `gh api "repos/{owner}/{repo}/issues/{n}/dependencies/blocked_by"`；404 → `ErrRelationsUnsupported` |
+| GitLab | `glab api "projects/{owner%2Frepo}/issues?state=opened&per_page=100&order_by=created_at&sort=asc"` | `glab api "projects/{owner%2Frepo}/issues/{iid}/links"`；403 / 404 → `ErrRelationsUnsupported` |
+
+**GitLab 的关系图只能从 issue links 读**：GitLab 没有 `issues/{iid}/blocked_by` 这个 REST 端点（404），blocking 关系只在 issue links API 里。links 的响应是一个扁平数组：每一条是关联 issue 自己的字段，外加 `link_type` 说明它跟被查 issue 的关系。GitLab 按**被查 issue 的视角**报告这个 type：`blocks` 表示这条关联 issue 挡着被查 issue，`is_blocked_by` 表示被查 issue 挡着它。所以 blocker 是 `link_type` 为 `blocks` 的那些条目。
+
+**GitLab 的 blocking 关系是 Premium 功能**：Free / CE 上根本建不出 blocking link，links 列表里也就没有，平台手里没有可遵守的依赖。links 端点本身不可用（403 / 404）时报 `ErrRelationsUnsupported`。
+
+**label 替换**：fix 认领 issue 时把队列标记换成进行中标记 —— 先加 `nightme/wip`，再摘 `nightme/assigned`。先加后摘：两步之间失败，issue 同时带两个 label，而队列过滤会把它挡在下一轮之外。摘 label 失败只记 warning，不回滚 fix。
+
+**认领之后放弃 = 离开队列**：`/gtw close` 只摘 `nightme/wip`，不把 `nightme/assigned` 加回去（nightme 从不自己加这个 label）。所以「挑起来 → 没做完就 close」的 issue 从此不在队列里了；要让它回到队列，人工或者外部自动化重新贴上 `nightme/assigned`。
+
+**队列没有原子认领**：`ListIssues` 和贴 `nightme/wip` 之间有窗口，两台机器同时跑 `/gtw fix *` 可能挑到同一个 issue。这跟具名 fix 的既有窗口是同一类 —— label 是协作信号，不是锁（见 §3.2）。
+
+**没有可选项时**：outcome 是 `noop`，`Data` 带 `reason: no_candidate`、`wake_after: "5m"` 和 `candidates` / `blocked` / `branch_exists` / `pr_open` 四个计数。`wake_after` 是个人 agent 读的契约：它告诉 agent 过一会儿再来，而不是把这次运行判成失败。
+
 ---
 
 ## 3. Remote 模式主流程（§5.2）
 
 ```mermaid
 flowchart TD
-    A["/gtw fix id"] --> B{preflight}
+    A["/gtw fix id"] --> A0["GetIssue"]
+    A1["/gtw fix *"] --> A2["pick the oldest eligible assigned issue"]
+    A2 --> A0
+    A0 --> B{preflight}
     B -->|fail| Z["❌ reply"]
-    B -->|ok| C["GetIssue + DeriveBranch"]
+    B -->|ok| C["DeriveBranch"]
     C --> D{BranchExists?}
     D -->|yes| E["❌ branch already exists"]
     D -->|no| G{issue 带 nightme/wip?}
@@ -668,6 +740,9 @@ F-59 的 `rollbackLabelStep`、label bootstrap 顺序 **不变**；仅 dispatch 
 9. **未知 flag（`--dry-run` / `--foo` / `-d` 等）** → 显式报错"unknown flag"（CLI 惯例）
 10. **arity 过多** → `--name foo extra` / `42 extra` 报错"exactly one argument"
 11. **空 argv / 只传 flag** → `parseFixArgs` 报错"missing argument"
+12. **自动模式** → 挑中最老的可选项；带 `nightme/wip` 的、blocker 未落地的、分支本地已存在的、PR 已开的一律跳过
+13. **关系不可用** → 选择继续按年龄，回复说明依赖顺序没有生效
+14. **队列为空** → `noop` + `wake_after`，不建 worktree、不贴 label
 
 ---
 
@@ -693,6 +768,14 @@ F-59 的 `rollbackLabelStep`、label bootstrap 顺序 **不变**；仅 dispatch 
 | re-entry 路径 success card 用 mode-neutral 措辞 | skipDispatch=true 时不再发 prompt；reentry=true 渲染"worktree resumed"中性 hint 而不是声称"agent is analyzing/fixing"——我们不知道上次 dispatch 是 Assess 还是 Execute，也不重新发 prompt，渲染任何一种 active 语气都不诚实；header 也不加 "(direct execute)" 后缀 |
 | local mode 忽略 `-y` | `/gtw fix --name` 不 dispatch，Assess/Execute 无意义；Factory.runFix 在 ModeLocal 时强制清零 `args.Yes` |
 | Execute 共用 Assess decision-gated methodology | `-y` 仅移除 Assess 确认 round-trip，不移除调研 / 推理 / 验证 / 真正产品决策的边界；ordinary engineering decisions 由 agent 自决（不打扰用户），只有 materially different product/requirement ambiguity 才升级到用户；`-y` 也**不**意味着 code 必须 change——请求行为已正确实现时 verify 后报告「no code change required」即可；旧规则「every non-trivial decision counts as a deviation」删除；最终 diff 必须经 `git diff --check` + scope-creep 巡查 |
+| **自动模式写作 `*` 而不是 `--auto` flag** | `/gtw fix` 的 flag 集合不变；`*` 在对话里读起来就是「任意一个 issue」；同一个模式不写两种拼法 |
+| **不给 issue id 仍然是 usage error** | 隐式模式会把一次打错变成「认领 issue + 建 worktree」；没有参数就该报错 |
+| **队列用 tracker 上的 label 标记** | 认领关系对团队和其他自动化都可见，nightme 不用猜自己可以动什么；nightme 自己加这个 label 会让它变成瞬时 claim 标记而不是队列 |
+| **依赖关系取自平台的关系图** | 机器可读的关系才让「先做前置」可靠；两个平台都提供；正文里的 `#12` 多数是「见 #12」或「Closes #12」，不是依赖 |
+| **blocker 只在 closed 时算已落地** | 前置的 PR 得先 merge，依赖项才建在它之上 |
+| **关系不可用要上报，不能当没有依赖** | 默默忽略依赖会挑错 issue；「平台不支持」和「没有依赖」是两回事 |
+| **label 替换先加后摘** | 两步之间失败时 issue 仍然显示「进行中」，而不是悄悄从队列里消失 |
+| **选择逻辑单独成文件** | `fix.go` 已经很大，选择是一个自洽的单元 |
 
 ---
 

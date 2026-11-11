@@ -370,6 +370,8 @@ issue 标题遵循 Conventional Commits，`/gtw fix` 据此生成可读的分支
 
 **`/gtw fix --name <branch>`**（或 `-n`）创建一个不关联 issue 的本地 worktree，由你自己指挥 agent。
 
+**`/gtw fix *`** 自己从待办队列里取下一件事：挑一个 issue，跑完全一样的流程，然后告诉你挑中了哪个 issue。队列在 tracker 上——NightMe 可以动的 issue 带着 `nightme/assigned` 标签，由人或者 tracker 上的外部自动化加上；fix 在打上 `nightme/wip` 的同时把它摘掉。队列里最老的可选项胜出：前置依赖还没落地的，分支本地已经存在的，或者已经开了 PR 的，都会被跳过。依赖关系取自平台自己的 issue 关系图——GitHub issue dependencies、GitLab blocking issues（Premium）——所以"先做前置"不靠 issue 正文里的文字；平台不提供关系图时队列只按年龄排序，回复里会说明这一点。当队列里没有可选项时，命令会说明原因，并请人在几分钟后叫醒它，而不是直接失败。注意：fix 认领 issue 时就把它移出了队列——没做完就 close 掉，这个 issue 就不在队列里了，要等人重新贴上标签。
+
 **`/gtw back`** 临时离开 fix worktree 而不拆掉它——chat 的 CWD 回到仓库根目录并 sync 默认分支，worktree、分支和未提交的改动都留在磁盘上。**`/gtw back <worktree>`** 再切回去。
 
 > **`/gtw sync`**（`git checkout <default> && git pull --rebase origin <default>`）是主仓库操作，在 worktree 里会拒绝执行。`/gtw fix`、`/gtw back`、`/gtw close` 都已经自带 sync，整个流程里不需要手动调用。

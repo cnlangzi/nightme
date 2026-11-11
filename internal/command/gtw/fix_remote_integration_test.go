@@ -138,6 +138,18 @@ func (r *fixRemoteRecCh) serialized() []string {
 // does.
 func (r *fixRemoteRig) drive(t *testing.T, rawID string) (*Result, error) {
 	t.Helper()
+	return r.driveMode(t, rawID, false)
+}
+
+// driveAuto is drive for the automatic mode: the issue is not
+// named, the queue is consulted.
+func (r *fixRemoteRig) driveAuto(t *testing.T) (*Result, error) {
+	t.Helper()
+	return r.driveMode(t, autoSelector, true)
+}
+
+func (r *fixRemoteRig) driveMode(t *testing.T, rawID string, auto bool) (*Result, error) {
+	t.Helper()
 	return RunFix(
 		context.Background(),
 		ModeRemote,
@@ -147,6 +159,7 @@ func (r *fixRemoteRig) drive(t *testing.T, rawID string) (*Result, error) {
 		"msg-fix-remote",
 		[]string{rawID},
 		false, /* yes — assess-first default for the rig */
+		auto,
 	)
 }
 
@@ -239,10 +252,15 @@ func TestFixRemote_HappyPath(t *testing.T) {
 	if addCalls[0].ID != issueID {
 		t.Errorf("AddIssueLabel id = %d, want %d", addCalls[0].ID, issueID)
 	}
-	// RemoveIssueLabel must NOT be called in the happy path
-	// (we only roll back on worktree-create failure).
-	if rms := rig.prov.CallsByMethod("RemoveIssueLabel"); len(rms) != 0 {
-		t.Errorf("RemoveIssueLabel unexpectedly called: %+v", rms)
+	// RemoveIssueLabel is called once, for the queue marker: the
+	// fix takes the issue out of the `nightme/assigned` queue as
+	// it stamps `nightme/wip` on it. The `nightme/wip` label
+	// itself is never removed here — that is /gtw close's job.
+	rms := rig.prov.CallsByMethod("RemoveIssueLabel")
+	if len(rms) != 1 {
+		t.Errorf("RemoveIssueLabel calls = %+v, want exactly one (the assigned label)", rms)
+	} else if rms[0].Label != LabelAssigned || rms[0].ID != issueID {
+		t.Errorf("RemoveIssueLabel = %+v, want label %q on issue %d", rms[0], LabelAssigned, issueID)
 	}
 
 	// --- git side effects --------------------------------------

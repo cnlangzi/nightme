@@ -14,6 +14,7 @@
 // Scope (v1):
 //
 //	/gtw fix <issue-id>           claim, label, create worktree, dispatch to agent
+//	/gtw fix *                    pick the next assigned issue and fix it
 //	/gtw fix --name <branch>      create local worktree (no issue / no agent)
 //
 // Design constraints (carried from F-45):
@@ -53,6 +54,7 @@ import (
 // visually distinct from human-managed labels on the same issue.
 const (
 	LabelPrefix    = "nightme"
+	LabelAssigned  = "nightme/assigned"
 	LabelWIP       = "nightme/wip"
 	LabelReady     = "nightme/ready"
 	LabelReviewing = "nightme/reviewing"
@@ -61,9 +63,12 @@ const (
 	LabelStuck     = "nightme/stuck"
 )
 
-// AllLabels is the full set of state labels, in display order.
+// AllLabels is the full set of labels /gtw puts on an issue, in
+// display order: the queue marker first, then the state labels.
+// Every entry is bootstrapped into the repository's label catalog
+// by ensureGtwLabels before /gtw fix labels an issue.
 var AllLabels = []string{
-	LabelWIP, LabelReady, LabelReviewing,
+	LabelAssigned, LabelWIP, LabelReady, LabelReviewing,
 	LabelRevise, LabelDone, LabelStuck,
 }
 
@@ -82,6 +87,7 @@ type LabelMeta struct {
 }
 
 var labelMeta = map[string]LabelMeta{
+	LabelAssigned:  {Color: "#c5def5", Description: "Assigned to NightMe — queued for /gtw fix *"},
 	LabelWIP:       {Color: "#fbca04", Description: "Work in progress (claimed by /gtw fix)"},
 	LabelReady:     {Color: "#0e8a16", Description: "Ready for review"},
 	LabelReviewing: {Color: "#1d76db", Description: "Under review"},

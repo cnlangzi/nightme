@@ -20,6 +20,15 @@ import (
 	"github.com/cnlangzi/nightme/internal/messages"
 )
 
+// listIssuesPerPage is the page size both platforms' issue list
+// endpoints are asked for. The automatic pick sees no further than
+// this many open issues.
+const listIssuesPerPage = 100
+
+// gitlabLinkBlocks is the link type GitLab reports for a linked
+// issue that blocks the issue the links were listed for.
+const gitlabLinkBlocks = "blocks"
+
 // ProviderKind names a supported git hosting platform. v1 supports
 // GitHub + GitLab via the user's local `gh` / `glab` CLI; other hosts
 // (Gitea, Bitbucket, self-hosted non-GitHub-Enterprise) return
@@ -42,6 +51,11 @@ type Issue struct {
 	State  string // "open" / "closed"
 	Labels []string
 	URL    string
+
+	// CreatedAt is when the platform created the issue. The
+	// automatic pick orders the queue by it (oldest first), so
+	// ListIssues fills it in; a single-issue fetch leaves it zero.
+	CreatedAt time.Time
 
 	// Attachments are downloadable artifacts attached to the
 	// issue. Each provider populates this from its private
@@ -74,6 +88,126 @@ type IssueAttachment struct {
 	URL      string
 	Filename string
 	MIMEType string
+}
+
+// githubIssueJSON is the wire shape of a GitHub issue as `gh api`
+// returns it. The same shape comes back from the issue list and
+// from the dependencies endpoints, so one decoder serves both.
+type githubIssueJSON struct {
+	Number int    `json:"number"`
+	Title  string `json:"title"`
+	Body   string `json:"body"`
+	State  string `json:"state"`
+	Labels []struct {
+		Name string `json:"name"`
+	} `json:"labels"`
+	URL       string `json:"url"`
+	CreatedAt string `json:"created_at"`
+
+	// PullRequest is present only on pull-request entries — the
+	// issues endpoint returns both kinds.
+	PullRequest *struct {
+		URL string `json:"url"`
+	} `json:"pull_request"`
+}
+
+// toIssue converts the wire shape into the domain type.
+func (r githubIssueJSON) toIssue() *Issue {
+	labels := make([]string, 0, len(r.Labels))
+	for _, l := range r.Labels {
+		labels = append(labels, l.Name)
+	}
+	return &Issue{
+		ID:        r.Number,
+		Title:     r.Title,
+		Body:      r.Body,
+		State:     strings.ToLower(r.State),
+		Labels:    labels,
+		URL:       r.URL,
+		CreatedAt: parsePlatformTime(r.CreatedAt),
+	}
+}
+
+// gitlabIssueJSON is the wire shape of a GitLab issue as `glab api`
+// returns it. GitLab calls the body "description" and the
+// identifier "iid"; the domain type keeps the GitHub spelling.
+type gitlabIssueJSON struct {
+	IID       int      `json:"iid"`
+	Title     string   `json:"title"`
+	Body      string   `json:"description"`
+	State     string   `json:"state"`
+	Labels    []string `json:"labels"`
+	WebURL    string   `json:"web_url"`
+	CreatedAt string   `json:"created_at"`
+
+	// LinkType is only present in the issue-links response, where
+	// every entry says how it relates to the issue the links were
+	// listed for. It stays empty in the plain issue list.
+	LinkType string `json:"link_type"`
+}
+
+// toIssue converts the wire shape into the domain type.
+func (r gitlabIssueJSON) toIssue() *Issue {
+	return &Issue{
+		ID:        r.IID,
+		Title:     r.Title,
+		Body:      r.Body,
+		State:     strings.ToLower(r.State),
+		Labels:    r.Labels,
+		URL:       r.WebURL,
+		CreatedAt: parsePlatformTime(r.CreatedAt),
+	}
+}
+
+// parsePlatformTime parses an RFC3339 timestamp from a platform
+// response. An unparsable value yields the zero time instead of an
+// error: the timestamp only orders the queue, so a missing one
+// degrades to "unknown age" rather than failing the whole listing.
+func parsePlatformTime(v string) time.Time {
+	if v == "" {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339, v)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
+
+// hasHTTPStatus reports whether a CLI's stderr carries the given
+// HTTP status code as a status — never as a number that merely
+// appears in the text.
+//
+// gh prints "gh: Not Found (HTTP 404)"; glab echoes GitLab's
+// error body ("{\"message\":\"404 Project Not Found\"}") or logs
+// "GET <url>: 404 Not Found". A bare digit search would fire on
+// any number in the message — the issue id in the request URL,
+// for one — and turn a real 500 into "not found".
+func hasHTTPStatus(stderr string, code int) bool {
+	s := strconv.Itoa(code)
+	for _, pat := range []string{
+		"(HTTP " + s + ")", // gh
+		s + " Not Found",   // glab's status text
+		s + " Forbidden",   // glab's status text
+		`"message":"` + s,  // glab: GitLab's error body
+		`"error":"` + s,    // glab: GitLab's error body (older shape)
+	} {
+		if strings.Contains(stderr, pat) {
+			return true
+		}
+	}
+	// glab's request log line: "GET <url>: 404 Not Found". The
+	// digits must end there — ": 4042" is a port, not a status.
+	for i := 0; i+len(s) <= len(stderr); i++ {
+		if !strings.HasPrefix(stderr[i:], ": "+s) {
+			continue
+		}
+		if i+len(s) < len(stderr) && stderr[i+len(s)] >= '0' && stderr[i+len(s)] <= '9' {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 // PR (alias for messages.PR) is the abstract cross-platform
@@ -113,6 +247,23 @@ type GitProvider interface {
 	// GetIssue fetches the issue with the given id. Returns
 	// ErrIssueNotFound when the platform responds 404.
 	GetIssue(ctx context.Context, owner, repo string, id int) (*Issue, error)
+
+	// ListIssues returns the repository's open issues, oldest
+	// first.
+	//
+	// The window is the oldest open issues the platform returns
+	// in one page (100 on both platforms). Issues outside it are
+	// not considered.
+	ListIssues(ctx context.Context, owner, repo string) ([]*Issue, error)
+
+	// ListBlockedBy returns the issues that block the given issue
+	// — its prerequisites, in the platform's own relation graph.
+	//
+	// A platform that does not expose relations returns
+	// ErrRelationsUnsupported, so the caller can say "this
+	// platform does not tell us" instead of pretending there are
+	// no dependencies.
+	ListBlockedBy(ctx context.Context, owner, repo string, id int) ([]*Issue, error)
 
 	// CreateIssue opens a new issue and returns it with ID and URL
 	// populated. The body is handed to the CLI through a temp
@@ -206,6 +357,18 @@ type GitProvider interface {
 // responds with 404 (or the glab/gh equivalent). Surfaces to the
 // user as "issue #N not found in <repo>".
 var ErrIssueNotFound = errors.New("gtw: issue not found")
+
+// ErrRelationsUnsupported is returned by ListBlockedBy when the
+// platform does not expose an issue relation graph — GitHub
+// without the dependencies feature, GitLab Free / CE without
+// blocking relations.
+//
+// It is deliberately not "no blockers": silently treating a
+// platform that cannot answer as one with an empty graph would
+// let the automatic pick start work whose prerequisite has not
+// landed. The caller downgrades it to "order by age alone" and
+// says so.
+var ErrRelationsUnsupported = errors.New("gtw: issue relations are not supported by this platform")
 
 // ErrUnsupportedProvider is returned by Detect when the host
 // answered but is neither GitHub nor GitLab: the URL hint
@@ -1212,6 +1375,70 @@ func (c *GitHubProvider) GetIssue(ctx context.Context, owner, repo string, id in
 	}, nil
 }
 
+// ListIssues runs `gh api "repos/<owner>/<repo>/issues?state=open&per_page=100&sort=created&direction=asc"`
+// and decodes the open issues, oldest first.
+//
+// GitHub's issue endpoint returns pull requests as well as issues;
+// every entry that carries a `pull_request` marker is dropped — a
+// pull request is not something /gtw can work on.
+//
+// The page is the oldest 100 open issues. Anything older than that
+// is outside the window and is not considered.
+func (c *GitHubProvider) ListIssues(ctx context.Context, owner, repo string) ([]*Issue, error) {
+	path := fmt.Sprintf("repos/%s/%s/issues?state=open&per_page=%d&sort=created&direction=asc",
+		owner, repo, listIssuesPerPage)
+	stdout, stderr, err := c.runner().Run(ctx, "gh", "api", path)
+	if err != nil {
+		return nil, fmt.Errorf("gh api issues: %v: %s", err, stderr)
+	}
+	var raw []githubIssueJSON
+	if err := json.Unmarshal([]byte(stdout), &raw); err != nil {
+		return nil, fmt.Errorf("gh api issues: decode json: %w", err)
+	}
+	out := make([]*Issue, 0, len(raw))
+	for _, r := range raw {
+		if r.PullRequest != nil {
+			continue
+		}
+		out = append(out, r.toIssue())
+	}
+	return out, nil
+}
+
+// ListBlockedBy runs `gh api "repos/<owner>/<repo>/issues/<id>/dependencies/blocked_by"`
+// and decodes the issues that block the given one.
+//
+// GitHub's issue dependencies are a preview feature: a repository
+// without it answers 404. That is reported as
+// ErrRelationsUnsupported so the caller can say "this platform
+// does not tell us" instead of pretending the issue has no
+// prerequisites.
+//
+// Every entry is kept, pull requests included: a prerequisite that
+// is an open pull request has not landed, and dropping it would
+// read as "no blocker" — the one direction that lets work start
+// on an unmet dependency. The state decides: an open entry blocks,
+// a closed one has landed.
+func (c *GitHubProvider) ListBlockedBy(ctx context.Context, owner, repo string, id int) ([]*Issue, error) {
+	path := fmt.Sprintf("repos/%s/%s/issues/%d/dependencies/blocked_by", owner, repo, id)
+	stdout, stderr, err := c.runner().Run(ctx, "gh", "api", path)
+	if err != nil {
+		if hasHTTPStatus(stderr, http.StatusNotFound) {
+			return nil, fmt.Errorf("%w: gh api %s: %s", ErrRelationsUnsupported, path, strings.TrimSpace(stderr))
+		}
+		return nil, fmt.Errorf("gh api dependencies: %v: %s", err, stderr)
+	}
+	var raw []githubIssueJSON
+	if err := json.Unmarshal([]byte(stdout), &raw); err != nil {
+		return nil, fmt.Errorf("gh api dependencies: decode json: %w", err)
+	}
+	out := make([]*Issue, 0, len(raw))
+	for _, r := range raw {
+		out = append(out, r.toIssue())
+	}
+	return out, nil
+}
+
 // CreateIssue runs `gh issue create --repo <owner>/<repo> --title
 // <title> --body-file <tmp>`. gh prints the new issue URL on
 // stdout; the issue number is its last path segment.
@@ -1680,6 +1907,83 @@ func (c *GitLabProvider) GetIssue(ctx context.Context, owner, repo string, id in
 		URL:         raw.WebURL,
 		Attachments: c.attachmentsFromBody(raw.Body),
 	}, nil
+}
+
+// ListIssues runs `glab api "projects/<owner%2Frepo>/issues?state=opened&per_page=100&order_by=created_at&sort=asc"`
+// and decodes the open issues, oldest first.
+//
+// GitLab names the ordering field `created_at` — `created` is
+// rejected with "order_by does not have a valid value".
+//
+// The page is the oldest 100 open issues. Anything older than that
+// is outside the window and is not considered.
+func (c *GitLabProvider) ListIssues(ctx context.Context, owner, repo string) ([]*Issue, error) {
+	projectPath := url.PathEscape(owner + "/" + repo)
+	path := fmt.Sprintf("projects/%s/issues?state=opened&per_page=%d&order_by=created_at&sort=asc",
+		projectPath, listIssuesPerPage)
+	stdout, stderr, err := c.runner().Run(ctx, "glab", "api", path)
+	if err != nil {
+		return nil, fmt.Errorf("glab api issues: %v: %s", err, stderr)
+	}
+	var raw []gitlabIssueJSON
+	if err := json.Unmarshal([]byte(stdout), &raw); err != nil {
+		return nil, fmt.Errorf("glab api issues: decode json: %w", err)
+	}
+	out := make([]*Issue, 0, len(raw))
+	for _, r := range raw {
+		out = append(out, r.toIssue())
+	}
+	return out, nil
+}
+
+// ListBlockedBy runs `glab api "projects/<owner%2Frepo>/issues/<iid>/links"`
+// and decodes the issues that block the given one.
+//
+// GitLab's issue-links API is the only REST route to an issue's
+// relations: there is no `issues/:iid/blocked_by` endpoint. The
+// list carries every linked issue in both directions, each with
+// the link type that says how it relates to the requested issue.
+//
+// Blocking relations need Premium: on Free and CE no blocking
+// link can exist, so the list holds none and the platform has no
+// dependency to honour. When the endpoint itself is unavailable
+// the call reports ErrRelationsUnsupported.
+func (c *GitLabProvider) ListBlockedBy(ctx context.Context, owner, repo string, id int) ([]*Issue, error) {
+	projectPath := url.PathEscape(owner + "/" + repo)
+	path := fmt.Sprintf("projects/%s/issues/%d/links", projectPath, id)
+	stdout, stderr, err := c.runner().Run(ctx, "glab", "api", path)
+	if err != nil {
+		if hasHTTPStatus(stderr, http.StatusForbidden) || hasHTTPStatus(stderr, http.StatusNotFound) {
+			return nil, fmt.Errorf("%w: glab api %s: %s", ErrRelationsUnsupported, path, strings.TrimSpace(stderr))
+		}
+		return nil, fmt.Errorf("glab api links: %v: %s", err, stderr)
+	}
+	return decodeGitLabBlockers(stdout)
+}
+
+// decodeGitLabBlockers turns the issue-links response into the
+// blockers of the requested issue.
+//
+// The response is a flat array of the linked issues — each one
+// carries its own fields plus the `link_type` that says how it
+// relates to the requested issue. GitLab reports that type from
+// the requested issue's point of view: "blocks" means the linked
+// issue blocks the requested one, "is_blocked_by" means the
+// requested one blocks it. The blockers are therefore the entries
+// whose type is "blocks".
+func decodeGitLabBlockers(stdout string) ([]*Issue, error) {
+	var links []gitlabIssueJSON
+	if err := json.Unmarshal([]byte(stdout), &links); err != nil {
+		return nil, fmt.Errorf("glab api links: decode json: %w", err)
+	}
+	out := make([]*Issue, 0, len(links))
+	for _, l := range links {
+		if l.LinkType != gitlabLinkBlocks {
+			continue
+		}
+		out = append(out, l.toIssue())
+	}
+	return out, nil
 }
 
 // CreateIssue runs `glab api --method POST projects/<owner/repo>/issues

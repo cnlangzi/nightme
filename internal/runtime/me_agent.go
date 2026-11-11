@@ -26,8 +26,9 @@ import (
 	"github.com/cnlangzi/nightme/internal/command/gtw"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/llm"
-	_ "github.com/cnlangzi/nightme/internal/llm/decision" // registers the decision protocols
-	_ "github.com/cnlangzi/nightme/internal/llm/openai"   // registers the chat provider
+	_ "github.com/cnlangzi/nightme/internal/llm/anthropic" // registers the Anthropic chat provider
+	_ "github.com/cnlangzi/nightme/internal/llm/decision"  // registers the decision protocols
+	_ "github.com/cnlangzi/nightme/internal/llm/openai"    // registers the OpenAI-compatible chat provider
 	"github.com/cnlangzi/nightme/internal/me"
 )
 

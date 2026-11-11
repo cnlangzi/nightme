@@ -1,4 +1,4 @@
-package bot
+package me
 
 import (
 	"bytes"
@@ -8,33 +8,34 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/wfe"
 )
 
-// botRuntime implements wfe.Runtime. Each method is a "channel"
-// from wfe to a specific resource:
+// runRuntime implements wfe.Runtime for one workflow run. Each
+// method is a channel from the workflow engine to a specific
+// resource:
 //
 //   - RunShell:   direct os/exec (shell channel)
-//   - SendPrompt: push msg into bot.Incoming(), block on r.reply
-//     (the nightme channel — agent reply flows back via bot.Send
-//     which delivers to r.reply)
-//   - RunAction:  bot's ActionRegistry (action channels by name)
+//   - SendPrompt: the loopback client — the prompt goes into the
+//     daemon as a message and the answer comes back as the settled
+//     execution
+//   - RunAction:  the service's ActionRegistry (action channels by
+//     name)
 //   - Now:        time.Now
-type botRuntime struct {
-	bot *Bot
-	run *botRun
+type runRuntime struct {
+	svc *Service
+	run *run
 }
 
-func (r *botRuntime) Now() time.Time { return time.Now() }
+func (r *runRuntime) Now() time.Time { return time.Now() }
 
-func (r *botRuntime) RunShell(_ context.Context, spec wfe.ShellSpec) (*wfe.ShellResult, error) {
+func (r *runRuntime) RunShell(_ context.Context, spec wfe.ShellSpec) (*wfe.ShellResult, error) {
 	cwd := spec.Cwd
 	if cwd == "" {
 		cwd = r.run.workspace
 	}
 	if cwd == "" {
-		return nil, errors.New("bot: no CWD for run")
+		return nil, errors.New("me: no CWD for run")
 	}
 
 	shellBin, shellArg := pickShell(spec.Shell)
@@ -60,37 +61,35 @@ func (r *botRuntime) RunShell(_ context.Context, spec wfe.ShellSpec) (*wfe.Shell
 	return res, nil
 }
 
-func (r *botRuntime) SendPrompt(ctx context.Context, spec wfe.PromptSpec) (*wfe.Reply, error) {
-	// 1. push the prompt into bot.Incoming() — gateway dispatches
-	msg := messages.InboundMessage{
-		ChatID: spec.ChatID,
-		Text:   spec.Prompt,
-		Time:   time.Now(),
-	}
-	select {
-	case r.bot.in <- msg:
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-
-	// 2. block on the per-run reply channel (delivered by bot.Send)
+// SendPrompt sends the prompt into the chat and waits for the
+// daemon to settle it.
+//
+// The reply is the final text of the execution — the answer the
+// agent produced, not the first thing the daemon said. A command
+// that never settles ends the wait with a timeout snapshot, which
+// fails the step.
+func (r *runRuntime) SendPrompt(ctx context.Context, spec wfe.PromptSpec) (*wfe.Reply, error) {
 	timeout := spec.Timeout
-	if timeout == 0 {
-		timeout = 30 * time.Minute
+	if timeout <= 0 {
+		timeout = defaultPromptTimeout
 	}
-	select {
-	case text := <-r.run.reply:
-		return &wfe.Reply{Text: text}, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-time.After(timeout):
-		return nil, wfe.ErrStepFailed
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	ex, err := r.svc.client.Do(ctx, spec.ChatID, spec.Prompt)
+	if err != nil {
+		return nil, err
 	}
+	return &wfe.Reply{Text: ex.Final()}, nil
 }
 
-func (r *botRuntime) RunAction(ctx context.Context, spec wfe.ActionSpec) (*wfe.ActionResult, error) {
-	return r.bot.actions.Run(ctx, spec)
+func (r *runRuntime) RunAction(ctx context.Context, spec wfe.ActionSpec) (*wfe.ActionResult, error) {
+	return r.svc.actions.Run(ctx, spec)
 }
+
+// defaultPromptTimeout bounds a prompt step when the workflow does
+// not say otherwise.
+const defaultPromptTimeout = 30 * time.Minute
 
 // pickShell returns the binary + arg to invoke. If shell is empty
 // it defaults to "sh -c"; "bash"/"zsh"/"pwsh" are recognized.

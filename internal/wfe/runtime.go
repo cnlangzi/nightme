@@ -7,16 +7,15 @@ import (
 
 // Runtime is the injection point for all external capabilities.
 // Each method is a "channel" from wfe to a specific resource.
-// wfe itself has zero I/O; the bot implements this interface
-// and wires each method to a real resource (os/exec, the nightme
-// channel via bot.Incoming → gateway → ChatSession, the
-// ActionRegistry, etc.).
+// wfe itself has zero I/O; internal/me implements this interface
+// and wires each method to a real resource (os/exec, the loopback
+// channel's client, the ActionRegistry, etc.).
 //
-// Bot implementation contract:
+// Implementation contract:
 //   - RunShell: direct os/exec; cwd = run.Workspace
-//   - SendPrompt: push msg into bot.Incoming(); block waiting on
-//     the per-run reply channel; reply is delivered via bot.Send
-//     (called by the gateway's messages.Emitter).
+//   - SendPrompt: send the prompt through the loopback client and
+//     wait for the execution to settle; the reply is the final text
+//     of the execution.
 //   - RunAction: ActionRegistry.Run(spec.Name, spec.With, spec.Env)
 //   - Now: time.Now (injected so wfe has no clock dependency)
 type Runtime interface {
@@ -24,9 +23,8 @@ type Runtime interface {
 	// env["WORKSPACE_CWD"] then "".
 	RunShell(ctx context.Context, spec ShellSpec) (*ShellResult, error)
 
-	// SendPrompt pushes a message into bot's channel and blocks
-	// until the agent reply comes back via bot.Send. spec.Timeout
-	// bounds the wait.
+	// SendPrompt sends a message into the chat and blocks until the
+	// daemon settles it. spec.Timeout bounds the wait.
 	SendPrompt(ctx context.Context, spec PromptSpec) (*Reply, error)
 
 	// RunAction resolves spec.Name through the ActionRegistry and

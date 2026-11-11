@@ -7,8 +7,8 @@ import (
 )
 
 // Tick advances the run by exactly one step. The state machine is
-// intentionally synchronous: bot calls Tick in a loop, each call
-// either advances to the next step or terminates the run. Pure
+// intentionally synchronous: the caller calls Tick in a loop, each
+// call either advances to the next step or terminates the run. Pure
 // (no I/O) except via Runtime.
 //
 // Termination conditions (state.Status moves out of running):

@@ -1,30 +1,32 @@
-package bot
+package me
 
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/robfig/cron/v3"
 
+	"github.com/cnlangzi/nightme/internal/proc"
+	"github.com/cnlangzi/nightme/internal/timeouts"
 	"github.com/cnlangzi/nightme/internal/wfe"
 )
 
 // TriggerManager subscribes to cron ticks and runs the workspace
 // filter (3-stage pipeline: receive → filter → trigger), invoking
-// bot.onTrigger for each (workflow, event, workspace) match.
+// the service's onTrigger for each (workflow, event, workspace)
+// match.
 //
 // v0: cron-only. Git event support (PR / issue / branch / mention
-// triggers) is planned but deferred — see commit history for
-// details. When re-enabled, the EventSource abstraction will
-// return to this file; until then, this struct holds no event
-// source field.
+// triggers) is planned but deferred. When re-enabled, the
+// EventSource abstraction will return to this file; until then,
+// this struct holds no event source field.
 //
-// Locked design: bot's trigger manager is fully self-contained.
-// It does NOT route through the gateway's dispatch chain; it
-// produces events that bot.onTrigger processes. (The dispatch
-// chain is for messages from external channels — feishu, etc.)
+// Locked design: the trigger manager is fully self-contained. It
+// does NOT route through the gateway's dispatch chain; it produces
+// events that the service processes.
 type TriggerManager struct {
 	workflows []*wfe.Workflow
 	wsMap     *workspaceRepoMap
@@ -96,6 +98,16 @@ func (t *TriggerManager) Stop() error {
 	return nil
 }
 
+// Entries returns the number of cron jobs the manager registered.
+func (t *TriggerManager) Entries() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.cron == nil {
+		return 0
+	}
+	return len(t.cron.Entries())
+}
+
 // onEvent is the callback fired by the cron scheduler for each tick.
 // Stage 2: filter (cron events always match if any workflow has a
 // matching schedule entry).
@@ -116,15 +128,16 @@ func (t *TriggerManager) onEvent(ctx context.Context, ev wfe.Event, originWorkfl
 		return
 	}
 	// Other event kinds (pr / issue / branch / mention) are not
-	// handled in v0 — bot is cron-only until git event support is
-	// re-introduced. Log and drop so users see something happened.
+	// handled in v0 — the service is cron-only until git event
+	// support is re-introduced. Log and drop so users see something
+	// happened.
 	t.logger.Warn("trigger: dropping unhandled event (git events not yet wired)", "kind", ev.Kind)
 }
 
 // workspaceRepoMap maps a git remote URL (e.g. "cnlangzi/nightme")
-// to the workspace path (e.g. "~/work/nightme"). Built at bot
-// startup by reading `git -C <workspace> remote get-url origin`
-// for every workspace mentioned in any workflow.
+// to the workspace path (e.g. "~/work/nightme"). Built at startup
+// by reading `git -C <workspace> remote get-url origin` for every
+// workspace mentioned in any workflow.
 //
 // In v0 (cron-only) this map is unused but kept constructed
 // because it's cheap and lets us bring back git triggers without
@@ -165,5 +178,46 @@ type workspaceError struct {
 }
 
 func (e *workspaceError) Error() string {
-	return "bot: workspace " + e.Workspace + ": " + e.Reason
+	return "me: workspace " + e.Workspace + ": " + e.Reason
+}
+
+// gitOrigin returns the canonical owner/repo for a workspace's
+// git origin, or empty string if it can't be determined.
+//
+// The command is read-only, so it never touches .git/index.lock.
+// It goes through proc.New so the platform-spanning cmd.Cancel /
+// WaitDelay shape stays consistent across the daemon, and so the
+// call gets a context-bound timeout for free.
+func gitOrigin(ctx context.Context, workspace string) string {
+	runCtx, cancel := context.WithTimeout(ctx, timeouts.CLI)
+	defer cancel()
+	cmd := proc.New(runCtx, "git", "-C", workspace, "remote", "get-url", "origin")
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return canonicalRepoURL(strings.TrimSpace(string(out)))
+}
+
+// canonicalRepoURL normalizes a git remote URL to "owner/repo".
+// Handles both HTTPS (https://github.com/foo/bar.git) and SSH
+// (git@github.com:foo/bar.git) forms, with or without .git suffix.
+func canonicalRepoURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	// Strip protocol
+	if i := strings.Index(raw, "://"); i >= 0 {
+		raw = raw[i+3:]
+	} else if strings.HasPrefix(raw, "git@") {
+		raw = strings.TrimPrefix(raw, "git@")
+		if i := strings.Index(raw, ":"); i >= 0 {
+			raw = raw[:i] + "/" + raw[i+1:]
+		}
+	}
+	// Strip host (the bit before the first /)
+	if i := strings.Index(raw, "/"); i >= 0 {
+		raw = raw[i+1:]
+	}
+	// Strip .git suffix
+	raw = strings.TrimSuffix(raw, ".git")
+	return raw
 }

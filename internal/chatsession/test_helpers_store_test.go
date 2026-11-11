@@ -33,7 +33,6 @@ func TestMain(m *testing.M) {
 	// chatsession tests never call BuildAll.
 	channel.Register("feishu", "oc_", nil)
 	channel.Register("telegram", "tg_", nil)
-	channel.Register("bot", "bt_", nil)
 	os.Exit(m.Run())
 }
 

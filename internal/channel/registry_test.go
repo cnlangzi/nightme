@@ -172,9 +172,9 @@ func TestAvailable_Alphabetical(t *testing.T) {
 }
 
 // TestChatIDPrefixes_SkipsEmpty verifies that channels declaring
-// no prefix (e.g. the bot workflows engine) do NOT contribute an
-// "" to ChatIDPrefixes — an empty prefix would falsely accept
-// every key. Pins the safety contract chatstore.New relies on.
+// no prefix do NOT contribute an "" to ChatIDPrefixes — an empty
+// prefix would falsely accept every key. Pins the safety contract
+// chatstore.New relies on.
 func TestChatIDPrefixes_SkipsEmpty(t *testing.T) {
 	original := snapshot()
 	defer restore(original)
@@ -185,7 +185,7 @@ func TestChatIDPrefixes_SkipsEmpty(t *testing.T) {
 
 	Register("feishu", "oc_", makeStubBuilder("feishu", nil))
 	Register("telegram", "tg_", makeStubBuilder("telegram", nil))
-	Register("bot", "", makeStubBuilder("bot", nil))
+	Register("noprefix", "", makeStubBuilder("noprefix", nil))
 
 	got := ChatIDPrefixes()
 	want := []string{"oc_", "tg_"}
@@ -217,8 +217,8 @@ func TestChatIDPrefix_Lookup(t *testing.T) {
 	if got := ChatIDPrefix("unknown"); got != "" {
 		t.Errorf("ChatIDPrefix(unknown) = %q, want \"\"", got)
 	}
-	if got := ChatIDPrefix("bot"); got != "" {
-		t.Errorf("ChatIDPrefix(bot) = %q, want \"\" (bot has no prefix)", got)
+	if got := ChatIDPrefix("noprefix"); got != "" {
+		t.Errorf("ChatIDPrefix(noprefix) = %q, want \"\" (the channel has no prefix)", got)
 	}
 }
 
@@ -244,8 +244,8 @@ func TestRegister_RejectsReservedCharsInPrefix(t *testing.T) {
 }
 
 // TestRegister_AcceptsColonPrefix pins the policy that ':' is a
-// legal prefix character. Bot relies on it ("bot:") and so does
-// telegram's "<prefix><chat>:<thread>" shape, although the colon
+// legal prefix character, the way telegram's
+// "<prefix><chat>:<thread>" shape needs it, although the colon
 // there is between chatid and thread (not inside the prefix).
 func TestRegister_AcceptsColonPrefix(t *testing.T) {
 	original := snapshot()
@@ -256,8 +256,8 @@ func TestRegister_AcceptsColonPrefix(t *testing.T) {
 			t.Errorf("Register with ':' prefix should not panic, got %v", r)
 		}
 	}()
-	Register("test-colon", "bot:", makeStubBuilder("test-colon", nil))
-	if got := ChatIDPrefix("test-colon"); got != "bot:" {
-		t.Errorf("ChatIDPrefix(test-colon) = %q, want %q", got, "bot:")
+	Register("test-colon", "tc:", makeStubBuilder("test-colon", nil))
+	if got := ChatIDPrefix("test-colon"); got != "tc:" {
+		t.Errorf("ChatIDPrefix(test-colon) = %q, want %q", got, "tc:")
 	}
 }

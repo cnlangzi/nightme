@@ -646,7 +646,7 @@ The knob is best-effort: a CLI that ignores it keeps its own behaviour, one that
 | [`docs/FEATURES.md`](./docs/FEATURES.md) | Feature index — every F-XX in one table. |
 | [`docs/CHANNEL.md`](./docs/CHANNEL.md) | Multi-channel architecture — all credentialed channels auto-start, per-channel session isolation. |
 | [`docs/CHATSTORE.md`](./docs/CHATSTORE.md) | `chat_sessions.json` source of truth, ChatSession hydrate, AgentSessionPool. |
-| [`docs/WFE.md`](./docs/WFE.md) | Workflow YAML + engine runtime architecture — triggers, steps, bot↔wfe boundary. |
+| [`docs/WFE.md`](./docs/WFE.md) | Workflow YAML + engine runtime architecture — triggers, steps, me↔wfe boundary. |
 | [`docs/feat/`](./docs/feat/) | Per-feature design docs. |
 | [`docs/bridge/`](./docs/bridge/) | Per-agent bridge design: claude, codex, dsh, opencode, pi, copilot, omp. |
 | [`docs/channel/feishu.md`](./docs/channel/feishu.md) | Feishu adapter reference (rendering rules, card semantics, thread routing). |
@@ -678,7 +678,7 @@ cmd/nightme/                       # cobra CLI (start / stop / restart / status 
 configs/                           # example YAML config
 docs/
   PRD.md SPEC.md FEATURES.md       # 3-layer doc model
-  WFE.md                           # workflow YAML + engine runtime (schema / triggers / steps / bot↔wfe)
+  WFE.md                           # workflow YAML + engine runtime (schema / triggers / steps / me↔wfe)
   feat/                            # F-XX per-feature design
   bridge/  channel/  flow/         # per-subsystem design
   images/                          # README-served screenshots
@@ -689,7 +689,7 @@ internal/
     acp/  claudecode/  codex/  copilot/  cursor/  dsh/  omp/  opencode/  pi/  pty/
     telemetry/                     # agent-CLI client-telemetry policy (one opt-out)
   channel/                         # Channel interface
-    bot/  echo/  feishu/  slack/  telegram/   # adapters (feishu production; telegram ready; slack in development)
+    echo/  feishu/  loopback/  slack/  telegram/   # adapters (feishu production; telegram ready; slack in development)
   chatsession/                     # ChatSession + pool manager + persistence
   cli/                              # shared CLI helpers (config / doctor / login)
   command/                         # Slash-command Commander / Registry / Factory
@@ -704,6 +704,7 @@ internal/
   gatewaytest/                     # integration test harness
   logging/                         # slog + secret redaction
   login/                           # IM bot registration — feishu / slack / telegram onboarding
+  me/                              # workflow service — runs the workflows through the loopback channel
   messages/                        # IM message types + dispatch
   prcache/                         # PR metadata cache (per-F-50)
   registry/                        # JSON-backed chat_sessions.json + agent_sessions.json (0600, atomic)

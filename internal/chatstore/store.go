@@ -59,7 +59,7 @@ type Store struct {
 // Every entry's map key MUST equal its ChatID field. The ChatID
 // MUST start with a channel-namespaced prefix registered by the
 // channel that produced it (telegram "tg_", feishu "oc_", slack
-// "sl_", bot workflows "bt_", …). See docs/CHANNEL.md §5.5 and
+// "sl_", loopback "lb_", …). See docs/CHANNEL.md §5.5 and
 // docs/channel/telegram.md §5.1 for the channel-namespacing rule.
 //
 // The set of accepted prefixes comes from channel.ChatIDPrefixes()
@@ -114,7 +114,7 @@ func New(path string) (*Store, error) {
 				// meaningful feedback. Fail loudly so the
 				// operator can fix the build, not the data.
 				return nil, fmt.Errorf(
-					"chat_sessions: %s has %d entries but no channels are registered; chatstore cannot accept any prefix. Build with at least one channel adapter (channel/feishu, channel/telegram, channel/bot, …)",
+					"chat_sessions: %s has %d entries but no channels are registered; chatstore cannot accept any prefix. Build with at least one channel adapter (channel/feishu, channel/telegram, channel/loopback, …)",
 					path, len(container.ChatSessions),
 				)
 			}

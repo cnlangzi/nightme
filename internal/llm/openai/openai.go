@@ -196,7 +196,7 @@ func toWireMessages(req llm.Request) []chatMessage {
 						Type: "function",
 						Function: functionCall{
 							Name:      p.ToolName,
-							Arguments: string(p.Args),
+							Arguments: wireArguments(p.Args),
 						},
 					})
 				}
@@ -222,18 +222,25 @@ func fromWireMessage(m chatMessage) llm.Message {
 		out.Parts = append(out.Parts, llm.Part{Type: llm.PartText, Text: *m.Content})
 	}
 	for _, tc := range m.ToolCalls {
-		args := json.RawMessage(tc.Function.Arguments)
-		if len(args) == 0 {
-			args = json.RawMessage("{}")
-		}
 		out.Parts = append(out.Parts, llm.Part{
 			Type:       llm.PartToolCall,
 			ToolCallID: tc.ID,
 			ToolName:   tc.Function.Name,
-			Args:       args,
+			Args:       json.RawMessage(wireArguments(json.RawMessage(tc.Function.Arguments))),
 		})
 	}
 	return out
+}
+
+// wireArguments renders the arguments of a tool call. A gateway that
+// sends an empty string means "no arguments", and one that receives an
+// empty string refuses the call — so both directions carry an empty
+// object.
+func wireArguments(args json.RawMessage) string {
+	if strings.TrimSpace(string(args)) == "" {
+		return "{}"
+	}
+	return string(args)
 }
 
 // stopReason maps the wire finish_reason onto the neutral one. A

@@ -277,7 +277,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 		logger.Warn("run: new channels failed", "err", err)
 		chs = nil
 	}
-	if len(chs) == 0 {
+	if countIMChannels(chs) == 0 {
 		logger.Warn("no channels configured; the daemon is running without any IM channel — run `nightme login <channel>` first")
 	}
 
@@ -499,13 +499,19 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 			deps.RegisterHealth(ch)
 		}
 	}
-	if len(startedChannels) == 0 && len(chs) > 0 {
-		logger.Warn("no channel started; the daemon is running without any IM channel",
+	if countIMChannels(startedChannels) == 0 && len(chs) > 0 {
+		logger.Warn("no IM channel started; the daemon is running without any IM channel",
 			"configured", len(chs))
 	}
 	if deps.OnChannelsStarted != nil {
 		deps.OnChannelsStarted(startup)
 	}
+
+	// ── Phase 5.5: the workflow service ─────────────────────────
+	// me drives the daemon through the loopback channel: it is the
+	// user half of the workflow engine. It starts once that channel
+	// is attached, so the commands it sends have a chat to land in.
+	meSvc := startMeService(ctx, cfg, startedChannels, logger)
 
 	// ── Phase 6: OS wake-from-sleep watcher ────────────────────
 	// F-fix-os-sleep-wakeup: detect OS resume-from-sleep and
@@ -530,6 +536,11 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 			fmt.Fprintf(out, "[nightme] received %s\n", sig)
 		}
 	}
+
+	// The workflow service stops before the channels do: a run that
+	// is still going needs its chat to settle on.
+	stopMeService(meSvc, logger)
+
 	return ShutdownRunMulti(out, startedChannels, csFile, asFile, prCacheReg, logger)
 }
 

@@ -1,4 +1,4 @@
-package bot
+package me
 
 import (
 	"bytes"
@@ -16,11 +16,11 @@ import (
 
 // Action is one resource channel that a workflow can invoke via
 // `use: <name>`. Implementations are registered in the
-// ActionRegistry at bot startup.
+// ActionRegistry when the service starts.
 //
 // Built-in actions: notify (feishu/slack/webhook), email (SMTP),
 // github_* (gitProvider). User-defined actions: shell scripts
-// under ~/.nightme/workflows/actions/.
+// under <workflows dir>/actions/.
 type Action interface {
 	Name() string
 	Execute(ctx context.Context, args map[string]any, env map[string]string) (*wfe.ActionResult, error)
@@ -52,9 +52,10 @@ func (r *ActionRegistry) Register(a Action) {
 func (r *ActionRegistry) Run(ctx context.Context, spec wfe.ActionSpec) (*wfe.ActionResult, error) {
 	r.mu.RLock()
 	a, ok := r.actions[spec.Name]
+	names := append([]string(nil), r.orderedNames...)
 	r.mu.RUnlock()
 	if !ok {
-		return nil, fmt.Errorf("%w: %q (registered: %v)", wfe.ErrUnknownAction, spec.Name, r.orderedNames)
+		return nil, fmt.Errorf("%w: %q (registered: %v)", wfe.ErrUnknownAction, spec.Name, names)
 	}
 	return a.Execute(ctx, spec.With, spec.Env)
 }
@@ -66,7 +67,7 @@ func (r *ActionRegistry) Run(ctx context.Context, spec wfe.ActionSpec) (*wfe.Act
 func (r *ActionRegistry) ScanUserScripts(dir string) error {
 	files, err := filepath.Glob(filepath.Join(dir, "*"))
 	if err != nil {
-		return fmt.Errorf("bot: scan user scripts: %w", err)
+		return fmt.Errorf("me: scan user scripts: %w", err)
 	}
 	for _, f := range files {
 		info, err := os.Stat(f)
@@ -107,7 +108,7 @@ func (a *ShellAction) Name() string { return a.name }
 
 func (a *ShellAction) Execute(ctx context.Context, args map[string]any, env map[string]string) (*wfe.ActionResult, error) {
 	// 1. Args → env: KEY_UPPER=json for each top-level key
-	merged := mergeEnvStr(env, argsToEnv(args))
+	merged := mergeEnv(env, argsToEnv(args))
 	// 2. JSON file for complex consumers
 	argsFile, err := os.CreateTemp("", "action-args-*.json")
 	if err != nil {
@@ -125,7 +126,7 @@ func (a *ShellAction) Execute(ctx context.Context, args map[string]any, env map[
 
 	// 3. Execute
 	cmd := exec.CommandContext(ctx, a.ScriptPath)
-	cmd.Env = envToUnixSlice(merged)
+	cmd.Env = append(os.Environ(), envToUnix(merged)...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -163,25 +164,6 @@ func argsToEnv(args map[string]any) map[string]string {
 	return out
 }
 
-func mergeEnvStr(base map[string]string, override map[string]string) map[string]string {
-	out := make(map[string]string, len(base)+len(override))
-	for k, v := range base {
-		out[k] = v
-	}
-	for k, v := range override {
-		out[k] = v
-	}
-	return out
-}
-
-func envToUnixSlice(m map[string]string) []string {
-	out := make([]string, 0, len(m))
-	for k, v := range m {
-		out = append(out, k+"="+v)
-	}
-	return out
-}
-
 func exitCode(err error) int {
 	if err == nil {
 		return 0
@@ -195,9 +177,9 @@ func exitCode(err error) int {
 // Compile-time check: ShellAction implements Action.
 var _ Action = (*ShellAction)(nil)
 
-// registerBuiltinActions is called by Bot.Start to seed the
-// ActionRegistry with v0 built-ins. Each built-in wraps a
-// resource channel the bot owns (notify, email, github).
+// registerBuiltinActions seeds the ActionRegistry with the built-in
+// actions. Each built-in wraps a resource channel the service owns
+// (notify, email, github).
 func registerBuiltinActions(r *ActionRegistry) {
 	r.Register(&notifyAction{})
 	r.Register(&emailAction{})

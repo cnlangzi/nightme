@@ -1,7 +1,7 @@
 package wfe
 
 // Match reports whether ev should fire wf. Pure function. The
-// caller (bot's trigger pipeline) is responsible for workspace
+// caller (the trigger pipeline) is responsible for workspace
 // filtering; Match only checks the on: spec.
 func Match(wf *Workflow, ev Event) bool {
 	switch ev.Kind {

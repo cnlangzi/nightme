@@ -6,10 +6,10 @@
 //	nightme workflow show <name>       # show one workflow's parsed details
 //	nightme workflow run <name>        # dry-run a workflow (prints run plan)
 //
-// Workflows are read from the bot's workflows dir (default
+// Workflows are read from the workflows dir (default
 // `~/.nightme/workflows/`). The CLI is self-contained — it does
 // not require the daemon to be running, and it does not actually
-// trigger an agent (the daemon does that via the channel pipeline).
+// trigger an agent (the daemon does that through internal/me).
 //
 // `nightme workflow run` for v0 is a dry-run: it parses the
 // workflow, builds a dry-run plan (which trigger would fire, what
@@ -31,7 +31,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/cnlangzi/nightme/internal/channel/bot"
 	"github.com/cnlangzi/nightme/internal/wfe"
 )
 
@@ -69,10 +68,9 @@ func newWorkflowCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "workflow",
 		Short: "Workflow automation commands",
-		Long: "workflow manages YAML-defined automations that bot runs " +
-			"on cron / git events. Subcommands are read-only or planning " +
-			"tools — actual execution is the daemon's job via the " +
-			"channel pipeline.",
+		Long: "workflow manages YAML-defined automations that the daemon " +
+			"runs on cron / git events. Subcommands are read-only or planning " +
+			"tools — actual execution is the daemon's job.",
 	}
 	cmd.AddCommand(newWorkflowListCmd())
 	cmd.AddCommand(newWorkflowShowCmd())
@@ -356,8 +354,3 @@ func printWorkflowRun(w io.Writer, wf *wfe.Workflow, workspace string) error {
 // here to avoid an unused-import warning if someone re-enables
 // the wrapper path.
 var _ = json.NewEncoder
-
-// ensure bot package is referenced (its init() registers the
-// channel). Importing here keeps the link active even if a
-// refactor stops anyone else from importing bot.
-var _ = bot.New

@@ -1,7 +1,7 @@
 // Package channel — channel registry for OCP-friendly multi-channel
 // auto-start.
 //
-// Each channel adapter (feishu, telegram, slack, bot, …) calls
+// Each channel adapter (feishu, telegram, slack, loopback, …) calls
 // `Register(name, prefix, NewAdapter)` from its `init()`. The
 // runtime calls `BuildAll(cfg)` to construct every registered
 // channel that has valid credentials in cfg; channels missing
@@ -10,7 +10,7 @@
 //
 // prefix is the chat-id namespace tag every ChatID the adapter
 // produces carries (e.g. telegram "tg_", feishu "oc_", slack "sl_",
-// bot "bt_"). It is read by chatstore.New at file-load time to
+// loopback "lb_"). It is read by chatstore.New at file-load time to
 // recognise chat_sessions.json keys WITHOUT having to construct
 // the adapter — chatstore loads BEFORE BuildAll, and an adapter's
 // Builder may legitimately fail (missing credentials) at startup
@@ -72,7 +72,7 @@ var (
 
 // Register adds a channel Builder under name, declaring the
 // chat-id namespace prefix the channel attaches to every chat id
-// (e.g. telegram "tg_", feishu "oc_", slack "sl_", bot "bt_").
+// (e.g. telegram "tg_", feishu "oc_", slack "sl_", loopback "lb_").
 // See package doc for the rationale.
 //
 // Panics on duplicate registration (a programming error, not a
@@ -114,9 +114,8 @@ func GetBuilder(name string) Builder {
 
 // ChatIDPrefix returns the prefix declared by the channel
 // registered under name, or "" if the channel is unknown or
-// declared no prefix (e.g. the bot workflows engine). Used by
-// tests; production code reads the full prefix set via
-// ChatIDPrefixes().
+// declared no prefix. Used by tests; production code reads the
+// full prefix set via ChatIDPrefixes().
 func ChatIDPrefix(name string) string {
 	mu.RLock()
 	defer mu.RUnlock()

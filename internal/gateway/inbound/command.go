@@ -205,10 +205,11 @@ func (r *Router) resolveEmitter(cs *chatsession.ChatSession) messages.Emitter {
 // Channel-side routing for OutCommandReply is documented per
 // channel: Feishu folds it into the placeholder receipt card via
 // AppendEntryWithFooter, Telegram appends to the active chain
-// segment, bot folds the payload into its run-reply channel, and
-// Slack uses it for the `chat.postMessage` parent-thread path of
-// `/cwd` / `/use` / `/new` / `/stop`. See docs/channel/slack.md §4
-// and internal/messages/outbound.go OutCommandReply doc.
+// segment, the loopback channel folds it into the execution's
+// transcript, and Slack uses it for the `chat.postMessage`
+// parent-thread path of `/cwd` / `/use` / `/new` / `/stop`. See
+// docs/channel/slack.md §4 and internal/messages/outbound.go
+// OutCommandReply doc.
 func (r *Router) emitCommandReply(ctx context.Context, cs *chatsession.ChatSession, msg *messages.InboundMessage, text string) {
 	em := r.resolveEmitter(cs)
 	if text == "" || em == nil {

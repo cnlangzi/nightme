@@ -15,15 +15,12 @@
 //     (a messages.Outcome) instead of parsing human-readable text.
 //
 // The channel knows nothing about workflows: it is transport plus
-// bookkeeping. The workflow half of internal/channel/bot stays
-// there.
+// bookkeeping. The workflow half lives in internal/me.
 //
 // The channel registers itself in the channel registry under the
 // "lb_" chat-id prefix, so a binary that links this package and
 // builds its channels from the registry gets one. The builder needs
-// no configuration, so it always succeeds. The daemon does not link
-// this package: the channel is driven in-process by a program that
-// links it.
+// no configuration, so it always succeeds.
 package loopback
 
 import (
@@ -46,8 +43,11 @@ const (
 	// channelName is the registry name of this channel.
 	channelName = "loopback"
 
-	// chatIDPrefix namespaces every chat id this channel produces.
-	chatIDPrefix = "lb_"
+	// ChatIDPrefix namespaces every chat id this channel produces.
+	// A driver that mints its own chat ids (internal/me does) needs
+	// the same prefix: the channel rejects a chat id that doesn't
+	// carry it.
+	ChatIDPrefix = "lb_"
 
 	// userID is the user every inbound message is attributed to.
 	userID = "loopback"
@@ -86,7 +86,7 @@ func init() {
 	// The loopback channel needs no credentials, so its builder
 	// always succeeds — a program that drives nightme gets a chat
 	// to drive it in.
-	channel.Register(channelName, chatIDPrefix, func(*config.Config) (channel.Channel, error) {
+	channel.Register(channelName, ChatIDPrefix, func(*config.Config) (channel.Channel, error) {
 		return New(), nil
 	})
 }
@@ -215,8 +215,8 @@ func (c *Channel) send(ctx context.Context, chatID, text string) (string, error)
 	if chatID == "" {
 		return "", errors.New("loopback: empty chat id")
 	}
-	if !strings.HasPrefix(chatID, chatIDPrefix) {
-		return "", fmt.Errorf("loopback: chat id %q is not a loopback chat id (prefix %q)", chatID, chatIDPrefix)
+	if !strings.HasPrefix(chatID, ChatIDPrefix) {
+		return "", fmt.Errorf("loopback: chat id %q is not a loopback chat id (prefix %q)", chatID, ChatIDPrefix)
 	}
 
 	now := time.Now()

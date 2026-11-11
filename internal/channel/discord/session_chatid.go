@@ -5,7 +5,7 @@ import "strings"
 // chatIDPrefix is the discord channel namespace tag attached to
 // every ChatID the adapter produces. Matches the two-letter
 // convention used by the other channels (telegram "tg_",
-// feishu "oc_", slack "sl_", bot "bt_") so chatstore's
+// feishu "oc_", slack "sl_", loopback "lb_") so chatstore's
 // ChatIDPrefixes-based validation picks it up automatically.
 //
 // Discord channel ids are 64-bit snowflakes encoded as decimal

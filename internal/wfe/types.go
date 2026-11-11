@@ -118,9 +118,9 @@ type Event struct {
 	Data map[string]any
 }
 
-// RunState is the per-run mutable state, owned by bot and persisted
-// to StateStore. Tick is the pure transition: in-state, runtime;
-// out-state.
+// RunState is the per-run mutable state, owned by internal/me and
+// persisted to StateStore. Tick is the pure transition: in-state,
+// runtime; out-state.
 type RunState struct {
 	RunID        string                       `json:"run_id"`
 	WorkflowName string                       `json:"workflow"`

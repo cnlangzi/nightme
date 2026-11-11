@@ -49,7 +49,7 @@ import (
 // each Channel's private affair.
 //
 // The chat-id namespace prefix (e.g. telegram "tg_", feishu
-// "oc_", slack "sl_", bot "bt_") lives in the registry, not
+// "oc_", slack "sl_", loopback "lb_") lives in the registry, not
 // on this interface — see channel.Register /
 // channel.ChatIDPrefix(name). It is a static property of the
 // channel family, not per-instance state, so consumers

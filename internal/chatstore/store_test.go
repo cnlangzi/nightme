@@ -699,3 +699,51 @@ func TestNew_DroppedEntriesSurviveSave(t *testing.T) {
 		t.Error("after reload: tg_keep entry missing")
 	}
 }
+
+// TestNew_SkipsLegacyBotPrefix — the workflow engine moved from the
+// bot channel to internal/me, so the "bt_" prefix is no longer
+// registered. The chat sessions the bot left behind must not stop
+// the daemon from starting: they are ignored, and the file keeps
+// them verbatim so nothing is lost.
+func TestNew_SkipsLegacyBotPrefix(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "chat_sessions.json")
+	const legacy = `{"id":"cs_bt_run","chatId":"bt_run","primaryAgent":"claude","selectedCwd":"/old"}`
+	initial := `{"version":1,"chatSessions":{"bt_run":` + legacy + `,"tg_keep":{"id":"cs_tg_keep","chatId":"tg_keep","primaryAgent":"claude"}}}`
+	if err := os.WriteFile(path, []byte(initial), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	s, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, ok := s.Get("bt_run"); ok {
+		t.Error("the legacy bot entry was loaded")
+	}
+	if _, ok := s.Get("tg_keep"); !ok {
+		t.Error("tg_keep should have been loaded alongside the legacy entry")
+	}
+	keys, count := s.Dropped()
+	if count != 1 || len(keys) != 1 || keys[0] != "bt_run" {
+		t.Errorf("Dropped = %v (count %d), want [bt_run]", keys, count)
+	}
+
+	// The store stays usable: a write rewrites the file and keeps
+	// the legacy entry.
+	if err := s.SetSelectedCwd("tg_keep", "/new"); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
+	}
+
+	// A restart loads the same file again — no error, no loop.
+	s2, err := New(path)
+	if err != nil {
+		t.Fatalf("reload New: %v", err)
+	}
+	if _, ok := s2.Get("bt_run"); ok {
+		t.Error("after reload: the legacy bot entry was loaded")
+	}
+	if _, count := s2.Dropped(); count != 1 {
+		t.Errorf("after reload: Dropped count = %d, want 1", count)
+	}
+}

@@ -128,7 +128,7 @@
 | Run 状态持久化（`~/.nightme/workflows/state/`）| [WFE.md](./WFE.md) §8.8 |
 | **实现设计（包结构 / Tick 状态机 / StateStore / ActionRegistry / 灰度上线）**| [feat/F-workflow-engine.md](./feat/F-workflow-engine.md) |
 
-Workflow 文件位置：`~/.nightme/workflows/*.yaml`，按 `name:` 去重，热加载。Engine 入口：`internal/wfe/`，host：`internal/channel/bot/`。
+Workflow 文件位置：`~/.nightme/workflows/*.yaml`，按 `name:` 去重，热加载。Engine 入口：`internal/wfe/`，host：`internal/me/`。
 
 ## 9. 范围外（明确不做）
 

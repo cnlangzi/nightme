@@ -76,7 +76,7 @@ func (s *Service) decide(ctx context.Context, r *run) (decision, error) {
 	r.mu.Unlock()
 
 	dec := decision{Model: resp.Model, Options: s.decisionOptions(r)}
-	if answer, ok := resp.Answers[questionNext]; ok {
+	if answer, ok := resp.Answers[questionNext]; ok && !answer.Refused {
 		dec.Next = answer.Choice
 		dec.NextConfidence = answer.Confidence
 		if dec.NextConfidence == 0 {
@@ -84,9 +84,15 @@ func (s *Service) decide(ctx context.Context, r *run) (decision, error) {
 		}
 	}
 	if answer, ok := resp.Answers[questionNeedsHuman]; ok {
-		dec.NeedsHuman = answer.Probability
+		if answer.Refused {
+			// A refused question has no answer. The step may well need
+			// a human, so the run escalates instead of guessing.
+			dec.NeedsHuman = 1
+		} else {
+			dec.NeedsHuman = answer.Probability
+		}
 	}
-	if answer, ok := resp.Answers[questionStepSucceeded]; ok {
+	if answer, ok := resp.Answers[questionStepSucceeded]; ok && !answer.Refused {
 		succeeded := answer.Probability >= 0.5
 		dec.StepSucceeded = &succeeded
 	}

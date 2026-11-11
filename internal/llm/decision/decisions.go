@@ -82,16 +82,6 @@ type decisionsLevel struct {
 	Description string `json:"description,omitempty"`
 }
 
-// decisionsResponse is the answer of a decisions call.
-type decisionsResponse struct {
-	Model   string                `json:"model"`
-	Answers map[string]wireAnswer `json:"answers"`
-	Usage   *struct {
-		InputTokens  int `json:"input_tokens"`
-		OutputTokens int `json:"output_tokens"`
-	} `json:"usage"`
-}
-
 // Decide implements llm.Decider.
 func (d *Decisions) Decide(ctx context.Context, req llm.DecisionRequest) (*llm.DecisionResponse, error) {
 	if err := req.Validate(); err != nil {
@@ -110,34 +100,15 @@ func (d *Decisions) Decide(ctx context.Context, req llm.DecisionRequest) (*llm.D
 		body.Questions = append(body.Questions, toDecisionsQuestion(q))
 	}
 
-	var answer decisionsResponse
+	var answer decisionResponse
 	headers := map[string]string{}
 	if d.apiKey != "" {
 		headers["Authorization"] = "Bearer " + d.apiKey
 	}
-	if err := llm.PostJSON(ctx, d.client, d.baseURL+"/v1/decisions", headers, body, &answer); err != nil {
+	if err := llm.PostJSON(ctx, d.client, endpoint(d.baseURL, "/decisions"), headers, body, &answer); err != nil {
 		return nil, err
 	}
-
-	out := &llm.DecisionResponse{
-		Model:   llm.FirstNonEmpty(answer.Model, d.model),
-		Answers: map[string]llm.Answer{},
-	}
-	for _, q := range req.Questions {
-		w, ok := answer.Answers[q.Name]
-		if !ok {
-			out.Answers[q.Name] = llm.Answer{Type: q.Type}
-			continue
-		}
-		out.Answers[q.Name] = normalise(q, w)
-	}
-	if answer.Usage != nil {
-		out.Usage = llm.Usage{
-			InputTokens:  answer.Usage.InputTokens,
-			OutputTokens: answer.Usage.OutputTokens,
-		}
-	}
-	return out, nil
+	return buildResponse(req.Questions, answer, d.model), nil
 }
 
 // toDecisionsQuestion maps a neutral question onto the wire.

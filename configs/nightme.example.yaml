@@ -107,6 +107,10 @@ paths:
 # not sure about, and with both the fast path hands the uncertain
 # steps to the tool loop. The API key is read from the environment
 # variable named here — it is never stored in this file.
+#
+# The decider's base is the root of the API; the version segment is
+# added when the base does not carry it. The protocols live at
+# {base}/v1/decisions and {base}/v1/systemone.
 me:
   # llm:
   #   provider: openai
@@ -120,3 +124,5 @@ me:
   #   model: typesafe/jev-1.14
   #   api_key_env: OPENROUTER_API_KEY
   #   min_confidence: 0.8
+  # For protocol: systemone the base is https://api.typesafe.ai and the
+  # model is jev-latest.

@@ -12,7 +12,7 @@
 //
 // Both are registered by name, so a protocol is added by registering a
 // factory and nothing else changes. The concrete protocols live in
-// their own packages (openai, decisions, systemone) and register
+// their own packages (openai, anthropic, decision) and register
 // themselves.
 package llm
 

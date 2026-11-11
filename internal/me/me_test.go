@@ -138,10 +138,11 @@ func TestService_Start_InvalidWorkflowIsAnError(t *testing.T) {
 	}
 }
 
-// TestService_Start_WorkspaceWithoutOriginIsAnError — the workspace
-// of every workflow has to be a git repo: the workspace→repo map is
-// what a git event trigger matches on.
-func TestService_Start_WorkspaceWithoutOriginIsAnError(t *testing.T) {
+// TestService_Start_WorkspaceWithoutOriginDoesNotBlockTheService —
+// the workspace→repo map serves git event triggers, which are not
+// wired yet. A workspace the map cannot resolve must not stop the
+// cron workflows from running.
+func TestService_Start_WorkspaceWithoutOriginDoesNotBlockTheService(t *testing.T) {
 	ws := gitInit(t)
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "nightly.yaml", fmt.Sprintf(`
@@ -158,8 +159,16 @@ jobs:
 `, filepath.ToSlash(ws)))
 
 	svc := New(Config{WorkflowsDir: dir}, &fakeClient{})
-	if err := svc.Start(context.Background()); err == nil {
-		t.Fatal("Start: expected an error for a workspace without a git origin")
+	if err := svc.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = svc.Stop(context.Background()) }()
+
+	if len(svc.workflows) != 1 {
+		t.Fatalf("workflows = %d, want 1", len(svc.workflows))
+	}
+	if got := svc.triggers.Entries(); got != 1 {
+		t.Errorf("cron entries = %d, want 1", got)
 	}
 }
 
@@ -168,5 +177,42 @@ jobs:
 func TestWorkflowParse(t *testing.T) {
 	if _, err := wfe.Parse([]byte(dagWorkflow)); err != nil {
 		t.Fatalf("Parse: %v", err)
+	}
+}
+
+// TestService_Start_ExpandsTheWorkspacePath — a workflow that names
+// its workspace "~/work/repo" gets an absolute path: neither the
+// shell nor git expands "~".
+func TestService_Start_ExpandsTheWorkspacePath(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home dir")
+	}
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "nightly.yaml", `
+name: nightly
+workspaces: ['~/work/nightme']
+on:
+  schedule:
+    - cron: "0 3 * * *"
+jobs:
+  main:
+    steps:
+      - id: only
+        prompt: "hello"
+`)
+
+	svc := New(Config{WorkflowsDir: dir}, &fakeClient{})
+	if err := svc.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = svc.Stop(context.Background()) }()
+
+	if len(svc.workflows) != 1 {
+		t.Fatalf("workflows = %d, want 1", len(svc.workflows))
+	}
+	want := filepath.Join(home, "work", "nightme")
+	if got := svc.workflows[0].Workspaces[0]; got != want {
+		t.Errorf("workspace = %q, want %q", got, want)
 	}
 }

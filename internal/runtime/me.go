@@ -8,7 +8,8 @@
 //
 // The service starts once the loopback channel is attached — its
 // commands need a chat to land in — and stops before the channels
-// do, so a run that is still going has its channel to settle on.
+// do: the runs that are still going are cancelled and given a
+// moment to write their final state while their chat is still up.
 
 package runtime
 
@@ -17,6 +18,7 @@ import (
 	"errors"
 	"log/slog"
 	"path/filepath"
+	"time"
 
 	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/channel/loopback"
@@ -52,11 +54,16 @@ func startMeService(ctx context.Context, cfg *config.Config, chs []channel.Chann
 
 // stopMeService stops the workflow service. It is a no-op for a
 // daemon that never started one.
+//
+// The stop is bounded: a run that is still going is cancelled and
+// the daemon does not wait for it forever.
 func stopMeService(svc *me.Service, logger *slog.Logger) {
 	if svc == nil {
 		return
 	}
-	if err := svc.Stop(context.Background()); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := svc.Stop(ctx); err != nil {
 		logger.Warn("run: workflow service stop failed", "err", err)
 	}
 }

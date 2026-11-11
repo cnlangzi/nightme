@@ -108,7 +108,7 @@ func (a *ShellAction) Name() string { return a.name }
 
 func (a *ShellAction) Execute(ctx context.Context, args map[string]any, env map[string]string) (*wfe.ActionResult, error) {
 	// 1. Args → env: KEY_UPPER=json for each top-level key
-	merged := mergeEnvStr(env, argsToEnv(args))
+	merged := mergeEnv(env, argsToEnv(args))
 	// 2. JSON file for complex consumers
 	argsFile, err := os.CreateTemp("", "action-args-*.json")
 	if err != nil {
@@ -126,7 +126,7 @@ func (a *ShellAction) Execute(ctx context.Context, args map[string]any, env map[
 
 	// 3. Execute
 	cmd := exec.CommandContext(ctx, a.ScriptPath)
-	cmd.Env = envToUnixSlice(merged)
+	cmd.Env = append(os.Environ(), envToUnix(merged)...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -160,25 +160,6 @@ func argsToEnv(args map[string]any) map[string]string {
 			b, _ := json.Marshal(v)
 			out[strings.ToUpper(k)] = string(b)
 		}
-	}
-	return out
-}
-
-func mergeEnvStr(base map[string]string, override map[string]string) map[string]string {
-	out := make(map[string]string, len(base)+len(override))
-	for k, v := range base {
-		out[k] = v
-	}
-	for k, v := range override {
-		out[k] = v
-	}
-	return out
-}
-
-func envToUnixSlice(m map[string]string) []string {
-	out := make([]string, 0, len(m))
-	for k, v := range m {
-		out = append(out, k+"="+v)
 	}
 	return out
 }

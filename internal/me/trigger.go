@@ -3,6 +3,8 @@ package me
 import (
 	"context"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -67,17 +69,21 @@ func (t *TriggerManager) Start(ctx context.Context) error {
 			continue
 		}
 		for _, s := range wf.On.Schedule {
-			cronExpr := s.Cron
-			wf := wf // capture
-			expr := cronExpr
-			t.cron.AddFunc(cronExpr, func() {
+			expr := s.Cron
+			if _, err := t.cron.AddFunc(expr, func() {
 				ev := wfe.Event{
 					Kind: "schedule",
 					Time: time.Now(),
 					Data: map[string]any{"cron": expr},
 				}
-				t.onEvent(ctx, ev, wf)
-			})
+				t.onEvent(ctx, ev)
+			}); err != nil {
+				// A malformed expression would otherwise register
+				// nothing and the workflow would never fire, with
+				// no trace anywhere.
+				t.logger.Warn("trigger: bad cron expression; the workflow will not fire",
+					"workflow", wf.Name, "cron", expr, "err", err)
+			}
 		}
 	}
 
@@ -111,7 +117,7 @@ func (t *TriggerManager) Entries() int {
 // onEvent is the callback fired by the cron scheduler for each tick.
 // Stage 2: filter (cron events always match if any workflow has a
 // matching schedule entry).
-func (t *TriggerManager) onEvent(ctx context.Context, ev wfe.Event, originWorkflow *wfe.Workflow) {
+func (t *TriggerManager) onEvent(ctx context.Context, ev wfe.Event) {
 	// cron events: no event.repo; fire all workflows that match
 	// the schedule entry. Iterating per-workspace fires once per
 	// workspace in each matching workflow.
@@ -124,7 +130,6 @@ func (t *TriggerManager) onEvent(ctx context.Context, ev wfe.Event, originWorkfl
 				t.onTrigger(ctx, wf, ev, ws)
 			}
 		}
-		_ = originWorkflow
 		return
 	}
 	// Other event kinds (pr / issue / branch / mention) are not
@@ -141,13 +146,40 @@ func (t *TriggerManager) onEvent(ctx context.Context, ev wfe.Event, originWorkfl
 //
 // In v0 (cron-only) this map is unused but kept constructed
 // because it's cheap and lets us bring back git triggers without
-// restructuring.
+// restructuring. A workspace the map cannot resolve is skipped, not
+// fatal: the map serves triggers that are not wired yet, and one
+// workspace without a git origin must not stop the cron workflows
+// from running.
 type workspaceRepoMap struct {
 	byRepo map[string]string
 	byPath map[string]string
 }
 
-func buildWorkspaceRepoMap(ctx context.Context, wfs []*wfe.Workflow) (*workspaceRepoMap, error) {
+// expandWorkspace expands a leading "~" to the user's home
+// directory.
+//
+// A workflow that names its workspace "~/work/repo" has to reach
+// the shell and git as an absolute path: neither expands "~". The
+// /cwd command expands it too, so the chat and the shell agree on
+// where the run works.
+func expandWorkspace(p string) string {
+	if p == "" || !strings.HasPrefix(p, "~") {
+		return p
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return p
+	}
+	if p == "~" {
+		return home
+	}
+	if strings.HasPrefix(p, "~/") || strings.HasPrefix(p, `~\`) {
+		return filepath.Join(home, p[2:])
+	}
+	return p
+}
+
+func buildWorkspaceRepoMap(ctx context.Context, wfs []*wfe.Workflow, logger *slog.Logger) *workspaceRepoMap {
 	m := &workspaceRepoMap{
 		byRepo: map[string]string{},
 		byPath: map[string]string{},
@@ -161,24 +193,15 @@ func buildWorkspaceRepoMap(ctx context.Context, wfs []*wfe.Workflow) (*workspace
 			seen[ws] = true
 			repo := gitOrigin(ctx, ws)
 			if repo == "" {
-				return nil, &workspaceError{Workspace: ws, Reason: "no git remote origin"}
+				logger.Warn("me: workspace has no git origin; it cannot match git events",
+					"workflow", wf.Name, "workspace", ws)
+				continue
 			}
 			m.byRepo[repo] = ws
 			m.byPath[ws] = repo
 		}
 	}
-	return m, nil
-}
-
-// workspaceError is returned by buildWorkspaceRepoMap when a
-// workspace's git origin can't be determined.
-type workspaceError struct {
-	Workspace string
-	Reason    string
-}
-
-func (e *workspaceError) Error() string {
-	return "me: workspace " + e.Workspace + ": " + e.Reason
+	return m
 }
 
 // gitOrigin returns the canonical owner/repo for a workspace's

@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
 
+	"github.com/cnlangzi/nightme/internal/proc"
 	"github.com/cnlangzi/nightme/internal/wfe"
 )
 
@@ -29,7 +31,14 @@ type runRuntime struct {
 
 func (r *runRuntime) Now() time.Time { return time.Now() }
 
-func (r *runRuntime) RunShell(_ context.Context, spec wfe.ShellSpec) (*wfe.ShellResult, error) {
+// RunShell runs a step's shell command in the run's workspace.
+//
+// The command is bound to ctx: a cancelled run (or a daemon that is
+// shutting down) stops the child instead of leaving it behind. The
+// step's env is layered on top of the daemon's own environment, so
+// the shell finds PATH, HOME and the git/ssh configuration a real
+// command needs.
+func (r *runRuntime) RunShell(ctx context.Context, spec wfe.ShellSpec) (*wfe.ShellResult, error) {
 	cwd := spec.Cwd
 	if cwd == "" {
 		cwd = r.run.workspace
@@ -39,9 +48,9 @@ func (r *runRuntime) RunShell(_ context.Context, spec wfe.ShellSpec) (*wfe.Shell
 	}
 
 	shellBin, shellArg := pickShell(spec.Shell)
-	cmd := exec.Command(shellBin, shellArg, spec.Command)
+	cmd := proc.New(ctx, shellBin, shellArg, spec.Command)
 	cmd.Dir = cwd
-	cmd.Env = envToUnix(spec.Env)
+	cmd.Env = append(os.Environ(), envToUnix(spec.Env)...)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -53,8 +62,16 @@ func (r *runRuntime) RunShell(_ context.Context, spec wfe.ShellSpec) (*wfe.Shell
 		Stderr:  stderr.String(),
 		Outputs: parseKVOutput(stdout.String()),
 	}
-	if exitErr, ok := err.(*exec.ExitError); ok {
-		res.ExitCode = exitErr.ExitCode()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			res.ExitCode = exitErr.ExitCode()
+			return res, err
+		}
+		// The command never ran — a bad working directory, a
+		// missing shell. That is a failed step, not a successful
+		// one with empty output.
+		res.ExitCode = -1
 		return res, err
 	}
 	res.ExitCode = 0

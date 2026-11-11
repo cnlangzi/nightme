@@ -2,15 +2,14 @@ package me
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/channel/loopback"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/internal/timeouts"
 	"github.com/cnlangzi/nightme/internal/wfe"
 )
 
@@ -35,7 +34,11 @@ func (s *Service) onTrigger(ctx context.Context, wf *wfe.Workflow, ev wfe.Event,
 		"workspace", workspace,
 		"run_id", r.runID,
 		"chat_id", r.chatID)
-	go s.driveRun(ctx, r, ev)
+	s.runs.Add(1)
+	go func() {
+		defer s.runs.Done()
+		s.driveRun(ctx, r, ev)
+	}()
 }
 
 // startRun derives the identity of a run: its id, and the chat it
@@ -48,7 +51,7 @@ func (s *Service) startRun(wf *wfe.Workflow, workspace string) *run {
 		chatID:    loopback.ChatIDPrefix + runID,
 		workspace: workspace,
 		workflow:  wf,
-		env:       defaultEnv(),
+		env:       defaultEnv(workspace),
 	}
 }
 
@@ -60,21 +63,7 @@ func (s *Service) driveRun(ctx context.Context, r *run, ev wfe.Event) {
 		s.logger.Error("me: no state store; the run cannot be persisted", "run_id", r.runID)
 		return
 	}
-	state, err := s.stateStore.Load(r.runID)
-	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			s.logger.Error("me: load state", "run_id", r.runID, "err", err)
-			return
-		}
-		state = newRunState(r.runID, r.workflow, r.workspace, ev, r.chatID, r.env, time.Now())
-	} else {
-		// resume: refresh env / chat / workspace (defensive — they
-		// shouldn't change but be safe)
-		state.Env = mergeEnv(r.env, state.Env)
-		state.ChatID = r.chatID
-		state.Workspace = r.workspace
-		state.UpdatedAt = time.Now()
-	}
+	state := newRunState(r.runID, r.workflow, r.workspace, ev, r.chatID, r.env, time.Now())
 
 	// The chat learns its workspace and its agent before the first
 	// step runs. A setup command that did not do its job fails the
@@ -95,6 +84,12 @@ func (s *Service) driveRun(ctx context.Context, r *run, ev wfe.Event) {
 		newState, err := wfe.Tick(ctx, state, r.workflow, rt)
 		if err != nil {
 			s.logger.Error("me: tick", "run_id", r.runID, "err", err)
+			if newState != nil && newState.Status == wfe.StatusRunning {
+				// The tick made no progress — the step could not
+				// be evaluated. Ticking it again would spin
+				// forever, so the run ends here.
+				newState.Status = wfe.StatusFailed
+			}
 		}
 		if newState != nil {
 			state = newState
@@ -133,7 +128,13 @@ func (s *Service) setupChat(ctx context.Context, r *run) error {
 
 // setupStep sends one setup command and checks the outcome it
 // produced.
+//
+// The wait is bounded: a command the daemon never settles would
+// otherwise hang the run forever.
 func (s *Service) setupStep(ctx context.Context, r *run, text string) error {
+	ctx, cancel := context.WithTimeout(ctx, timeouts.CLI)
+	defer cancel()
+
 	ex, err := s.client.Do(ctx, r.chatID, text)
 	if err != nil {
 		return fmt.Errorf("me: setup %q: %w", text, err)
@@ -145,9 +146,9 @@ func (s *Service) setupStep(ctx context.Context, r *run, text string) error {
 }
 
 // defaultEnv returns the env entries every run starts with.
-func defaultEnv() map[string]string {
+func defaultEnv(workspace string) map[string]string {
 	return map[string]string{
-		"WORKSPACE_CWD": "",
+		"WORKSPACE_CWD": workspace,
 	}
 }
 

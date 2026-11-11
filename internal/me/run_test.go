@@ -2,6 +2,8 @@ package me
 
 import (
 	"context"
+	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -331,5 +333,120 @@ func TestSanitize(t *testing.T) {
 				t.Errorf("got %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestService_DAGRun_FailedShellStepEndsTheRun — a shell step that
+// cannot run fails the step and ends the run. It must not report
+// success with empty output: the steps after it would consume an
+// output that never happened.
+func TestService_DAGRun_FailedShellStepEndsTheRun(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the default shell is sh")
+	}
+	client := &fakeClient{}
+	svc := newRunService(t, client)
+
+	wf, err := wfe.Parse([]byte(`
+name: nightly
+workspaces: ['/nonexistent/nightme-workspace']
+on:
+  schedule:
+    - cron: "0 3 * * *"
+jobs:
+  main:
+    steps:
+      - id: shell-step
+        run: echo hello
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	ev := wfe.Event{Kind: "schedule", Time: time.Now()}
+
+	r := svc.startRun(wf, wf.Workspaces[0])
+	svc.driveRun(context.Background(), r, ev)
+
+	state, err := svc.stateStore.Load(r.runID)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if state.Status != wfe.StatusFailed {
+		t.Errorf("status = %q, want failed", state.Status)
+	}
+}
+
+// TestRunShell_InheritsTheDaemonEnvironment — a shell step runs with
+// the daemon's environment (PATH, HOME) plus the step's own env.
+// Without it the shell finds no git, no ssh keys, no gitconfig.
+func TestRunShell_InheritsTheDaemonEnvironment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the default shell is sh")
+	}
+	svc := newRunService(t, &fakeClient{})
+	rt := &runRuntime{svc: svc, run: &run{workspace: t.TempDir()}}
+
+	res, err := rt.RunShell(context.Background(), wfe.ShellSpec{Command: "echo $PATH"})
+	if err != nil {
+		t.Fatalf("RunShell: %v", err)
+	}
+	if !strings.Contains(res.Stdout, os.Getenv("PATH")) {
+		t.Errorf("stdout = %q, want it to carry PATH (%q)", res.Stdout, os.Getenv("PATH"))
+	}
+}
+
+// TestRunShell_CancelledContextStopsTheCommand — a cancelled run
+// stops the shell instead of leaving it behind.
+func TestRunShell_CancelledContextStopsTheCommand(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the default shell is sh")
+	}
+	svc := newRunService(t, &fakeClient{})
+	rt := &runRuntime{svc: svc, run: &run{workspace: t.TempDir()}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := rt.RunShell(ctx, wfe.ShellSpec{Command: "echo hello"})
+	if err == nil {
+		t.Error("expected an error for a cancelled context")
+	}
+}
+
+// blockingClient answers every command by waiting for the context to
+// end — the way a command the daemon never settles behaves.
+type blockingClient struct{}
+
+func (blockingClient) Do(ctx context.Context, _ string, _ string) (loopback.Execution, error) {
+	<-ctx.Done()
+	return loopback.Execution{}, ctx.Err()
+}
+
+// TestService_Stop_CancelsTheRunsInFlight — stopping the service
+// ends the runs that are still going instead of leaving them behind.
+func TestService_Stop_CancelsTheRunsInFlight(t *testing.T) {
+	svc := New(Config{WorkflowsDir: t.TempDir()}, blockingClient{})
+	store, err := NewStateStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStateStore: %v", err)
+	}
+	svc.stateStore = store
+	svc.actions = NewActionRegistry()
+	if err := svc.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	wf, err := wfe.Parse([]byte(dagWorkflow))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	svc.onTrigger(svc.ctx, wf, wfe.Event{Kind: "schedule"}, wf.Workspaces[0])
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := svc.Stop(ctx); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if ctx.Err() != nil {
+		t.Error("Stop did not return — the run was not cancelled")
 	}
 }

@@ -3,6 +3,8 @@ package me
 import (
 	"context"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -78,7 +80,7 @@ func TestTriggerManager_OnEvent_FiresMatchingWorkflow(t *testing.T) {
 		Kind: "schedule",
 		Time: time.Now(),
 		Data: map[string]any{"cron": "0 3 * * *"},
-	}, wf)
+	})
 
 	if len(rec.fired) != 1 {
 		t.Fatalf("fired = %d, want 1", len(rec.fired))
@@ -105,7 +107,7 @@ func TestTriggerManager_OnEvent_IgnoresOtherCron(t *testing.T) {
 		Kind: "schedule",
 		Time: time.Now(),
 		Data: map[string]any{"cron": "15 5 * * *"},
-	}, wf)
+	})
 
 	if len(rec.fired) != 0 {
 		t.Errorf("fired = %d, want 0", len(rec.fired))
@@ -126,7 +128,7 @@ func TestTriggerManager_OnEvent_DropsGitEvents(t *testing.T) {
 		Kind: "pull_request",
 		Time: time.Now(),
 		Data: map[string]any{"branch": "main", "action": "opened"},
-	}, wf)
+	})
 
 	if len(rec.fired) != 0 {
 		t.Errorf("fired = %d, want 0", len(rec.fired))
@@ -143,14 +145,90 @@ func TestBuildWorkspaceRepoMap(t *testing.T) {
 	}
 	wf.Workspaces = []string{ws}
 
-	m, err := buildWorkspaceRepoMap(context.Background(), []*wfe.Workflow{wf})
-	if err != nil {
-		t.Fatalf("buildWorkspaceRepoMap: %v", err)
-	}
+	m := buildWorkspaceRepoMap(context.Background(), []*wfe.Workflow{wf}, slog.Default())
 	if got := m.byPath[ws]; got != "foo/bar" {
 		t.Errorf("byPath[%q] = %q, want %q", ws, got, "foo/bar")
 	}
 	if got := m.byRepo["foo/bar"]; got != ws {
 		t.Errorf("byRepo[foo/bar] = %q, want %q", got, ws)
+	}
+}
+
+// TestBuildWorkspaceRepoMap_SkipsWorkspaceWithoutOrigin — a
+// workspace the map cannot resolve is skipped: the map serves git
+// event triggers, which are not wired yet, so it must not stop the
+// cron workflows from running.
+func TestBuildWorkspaceRepoMap_SkipsWorkspaceWithoutOrigin(t *testing.T) {
+	ws := gitInit(t)
+	wf, err := wfe.Parse([]byte(scheduledWorkflow))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	wf.Workspaces = []string{ws}
+
+	m := buildWorkspaceRepoMap(context.Background(), []*wfe.Workflow{wf}, slog.Default())
+	if len(m.byPath) != 0 {
+		t.Errorf("byPath = %v, want empty", m.byPath)
+	}
+}
+
+// badCronWorkflow carries a cron expression the parser rejects.
+const badCronWorkflow = `
+name: nightly
+workspaces: ['/tmp/nightly-workspace']
+on:
+  schedule:
+    - cron: "not a cron expression"
+jobs:
+  main:
+    steps:
+      - id: only
+        prompt: "hello"
+`
+
+// TestTriggerManager_BadCronExpressionIsSkipped — a malformed cron
+// expression registers nothing. The manager still starts, and the
+// workflow that carries it never fires — with a log line saying so,
+// instead of silence.
+func TestTriggerManager_BadCronExpressionIsSkipped(t *testing.T) {
+	wf, err := wfe.Parse([]byte(badCronWorkflow))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	rec := &recorder{}
+	tm := newTriggerManager([]*wfe.Workflow{wf}, &workspaceRepoMap{}, rec.onTrigger, slog.Default())
+
+	if err := tm.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = tm.Stop() }()
+
+	if got := tm.Entries(); got != 0 {
+		t.Errorf("cron entries = %d, want 0", got)
+	}
+}
+
+// TestExpandWorkspace — a workspace named "~/work/repo" reaches the
+// shell and git as an absolute path: neither expands "~".
+func TestExpandWorkspace(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home dir")
+	}
+	tests := []struct {
+		in, want string
+	}{
+		{"~", home},
+		{"~/work/nightme", filepath.Join(home, "work", "nightme")},
+		{"/abs/path", "/abs/path"},
+		{"relative/path", "relative/path"},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			if got := expandWorkspace(tt.in); got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

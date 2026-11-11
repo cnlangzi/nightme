@@ -66,6 +66,15 @@ type Service struct {
 	actions    *ActionRegistry
 	stateStore *StateStore
 
+	// ctx is the scope every run lives in. Stop cancels it, so an
+	// in-flight run ends instead of waiting for a daemon that is
+	// going away.
+	ctx    context.Context
+	cancel context.CancelFunc
+	// runs tracks the run goroutines, so Stop can wait for them to
+	// write their final state.
+	runs sync.WaitGroup
+
 	mu      sync.Mutex
 	running bool
 }
@@ -108,13 +117,17 @@ func (s *Service) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("me: load workflows: %w", err)
 	}
+	// The workspace has to reach the shell and git as an absolute
+	// path — neither of them expands "~".
+	for _, wf := range wfs {
+		for i, ws := range wf.Workspaces {
+			wf.Workspaces[i] = expandWorkspace(ws)
+		}
+	}
 	s.workflows = wfs
 	s.logger.Info("me: loaded workflows", "count", len(wfs), "dir", s.cfg.WorkflowsDir)
 
-	wsMap, err := buildWorkspaceRepoMap(ctx, wfs)
-	if err != nil {
-		return fmt.Errorf("me: build workspace map: %w", err)
-	}
+	wsMap := buildWorkspaceRepoMap(ctx, wfs, s.logger)
 
 	actions := NewActionRegistry()
 	registerBuiltinActions(actions)
@@ -131,23 +144,51 @@ func (s *Service) Start(ctx context.Context) error {
 		s.stateStore = store
 	}
 
+	runCtx, cancel := context.WithCancel(ctx)
+	s.mu.Lock()
+	s.ctx, s.cancel = runCtx, cancel
+	s.mu.Unlock()
+
 	s.triggers = newTriggerManager(wfs, wsMap, s.onTrigger, s.logger)
-	if err := s.triggers.Start(ctx); err != nil {
+	if err := s.triggers.Start(runCtx); err != nil {
 		return err
 	}
 	s.markStarted()
 	return nil
 }
 
-// Stop disarms the triggers. Idempotent.
-func (s *Service) Stop(context.Context) error {
+// Stop disarms the triggers, ends the runs that are still going and
+// waits (bounded by ctx) for them to write their final state.
+//
+// Idempotent.
+func (s *Service) Stop(ctx context.Context) error {
 	s.mu.Lock()
 	s.running = false
+	cancel := s.cancel
 	s.mu.Unlock()
+
+	var err error
 	if s.triggers != nil {
-		return s.triggers.Stop()
+		err = s.triggers.Stop()
 	}
-	return nil
+	if cancel != nil {
+		cancel()
+	}
+	s.waitRuns(ctx)
+	return err
+}
+
+// waitRuns waits for the in-flight runs to end, bounded by ctx.
+func (s *Service) waitRuns(ctx context.Context) {
+	done := make(chan struct{})
+	go func() {
+		s.runs.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
 }
 
 // started reports whether the service is running.

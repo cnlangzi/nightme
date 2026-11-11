@@ -10,11 +10,14 @@ import (
 	"github.com/cnlangzi/nightme/internal/wfe"
 )
 
-// StateStore persists per-run state to disk so in-flight runs
-// survive daemon restarts. One JSON file per run under StateDir.
+// StateStore persists the per-run state to disk. One JSON file per
+// run under StateDir.
 //
-// Format is the same as wfe.RunState (JSON-tagged) plus a
-// `version` field for forward-compat migrations.
+// The state is the run's record: it is written after every tick, so
+// it shows how far a run got, what each step produced, and how the
+// run ended.
+//
+// Format is the same as wfe.RunState (JSON-tagged).
 type StateStore struct {
 	dir string
 }

@@ -16,6 +16,7 @@ package decision
 
 import (
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -60,8 +61,6 @@ type wireProbabilities map[string]float64
 // probabilityItem is one entry of the array shape of the
 // probabilities.
 type probabilityItem struct {
-	// Key names the option or the level.
-	Key string `json:"key"`
 	// Value is the option, or the index of the level.
 	Value any `json:"value"`
 	// Label names the level of a score question.
@@ -83,7 +82,11 @@ func (p *wireProbabilities) UnmarshalJSON(raw []byte) error {
 	}
 	out := make(wireProbabilities, len(asList))
 	for _, item := range asList {
-		out[item.name()] = item.Probability
+		name := item.name()
+		if name == "" {
+			return fmt.Errorf("llm/decision: a probability names no option and no level: %s", raw)
+		}
+		out[name] = item.Probability
 	}
 	*p = out
 	return nil
@@ -94,9 +97,6 @@ func (p *wireProbabilities) UnmarshalJSON(raw []byte) error {
 func (i probabilityItem) name() string {
 	if i.Label != "" {
 		return i.Label
-	}
-	if i.Key != "" {
-		return i.Key
 	}
 	return textOf(i.Value)
 }
@@ -171,6 +171,47 @@ func pairAnswers(questions []llm.Question, answers wireAnswers) map[string]wireA
 	return out
 }
 
+// decisionResponse is the answer of a decision call.
+//
+// Both protocols answer in this shape: the model that answered, the
+// answers keyed by question name and the tokens the call used.
+type decisionResponse struct {
+	Model   string      `json:"model"`
+	Answers wireAnswers `json:"answers"`
+	Usage   *struct {
+		InputTokens  int `json:"input_tokens"`
+		OutputTokens int `json:"output_tokens"`
+	} `json:"usage"`
+}
+
+// buildResponse turns the answer of a protocol into the neutral
+// response.
+//
+// The model is always recorded: a decision is only as good as the
+// model behind it.
+func buildResponse(questions []llm.Question, answer decisionResponse, fallbackModel string) *llm.DecisionResponse {
+	out := &llm.DecisionResponse{
+		Model:   llm.FirstNonEmpty(answer.Model, fallbackModel),
+		Answers: map[string]llm.Answer{},
+	}
+	answers := pairAnswers(questions, answer.Answers)
+	for _, q := range questions {
+		w, ok := answers[q.Name]
+		if !ok {
+			out.Answers[q.Name] = emptyAnswer(q.Type)
+			continue
+		}
+		out.Answers[q.Name] = normalise(q, w)
+	}
+	if answer.Usage != nil {
+		out.Usage = llm.Usage{
+			InputTokens:  answer.Usage.InputTokens,
+			OutputTokens: answer.Usage.OutputTokens,
+		}
+	}
+	return out
+}
+
 // normalise turns a wire answer into the neutral answer.
 //
 // The question is the reference: it says which shape the answer has,
@@ -188,8 +229,8 @@ func normalise(q llm.Question, w wireAnswer) llm.Answer {
 		out.Probabilities = w.Probabilities
 		out.Confidence = confidenceOf(w, out.Probabilities[out.Choice])
 	case llm.QuestionScore:
-		out.Score = scoreOf(q, w)
 		out.Probabilities = levelProbabilities(q, w.Probabilities)
+		out.Score = scoreOf(q, w, out.Probabilities)
 		out.Confidence = confidenceOf(w, maxProbability(out.Probabilities))
 	}
 	if out.Probabilities == nil {
@@ -236,11 +277,10 @@ func maxProbability(probabilities map[string]float64) float64 {
 
 // scoreOf returns the level index of a score answer: the reported one,
 // or the probability-weighted index of the levels.
-func scoreOf(q llm.Question, w wireAnswer) float64 {
+func scoreOf(q llm.Question, w wireAnswer, probabilities map[string]float64) float64 {
 	if w.Score != nil {
 		return *w.Score
 	}
-	probabilities := levelProbabilities(q, w.Probabilities)
 	var weighted, total float64
 	for i, level := range q.Levels {
 		p := probabilities[level.Label]
@@ -261,18 +301,32 @@ func scoreOf(q llm.Question, w wireAnswer) float64 {
 func levelProbabilities(q llm.Question, probabilities wireProbabilities) map[string]float64 {
 	out := make(map[string]float64, len(probabilities))
 	for key, p := range probabilities {
-		out[levelLabel(q, key)] = p
+		out[levelLabel(q, key, probabilities)] = p
 	}
 	return out
 }
 
 // levelLabel returns the label of the level a probability key names.
-func levelLabel(q llm.Question, key string) string {
+//
+// A key that names a level is that level's label. A key that names no
+// level counts the levels from zero and names the level at that
+// position — unless another key already names that level, which means
+// the keys are labels after all.
+func levelLabel(q llm.Question, key string, probabilities wireProbabilities) string {
+	for _, level := range q.Levels {
+		if level.Label == key {
+			return key
+		}
+	}
 	idx, err := strconv.Atoi(key)
 	if err != nil || idx < 0 || idx >= len(q.Levels) {
 		return key
 	}
-	return q.Levels[idx].Label
+	label := q.Levels[idx].Label
+	if _, taken := probabilities[label]; taken {
+		return key
+	}
+	return label
 }
 
 // wireType maps a neutral question type onto a protocol's question

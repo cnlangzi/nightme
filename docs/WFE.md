@@ -809,7 +809,7 @@ me:
 The decider's base is the root of the API; the version segment is added
 when the base does not carry it. The two protocols live at
 `{base}/v1/decisions` and `{base}/v1/systemone` — `https://api.openai.com`
-and `https://api.typesafe.ai` are the roots of the two the models come from.
+and `https://api.typesafe.ai` are the roots of the two APIs.
 
 The user picks the models. nightme never chooses one, and it never injects a model into the coding agents — those keep their own configuration.
 

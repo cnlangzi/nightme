@@ -55,16 +55,6 @@ type systemoneQuestion struct {
 	Criteria     any    `json:"criteria,omitempty"`
 }
 
-// systemoneResponse is the answer of a systemone call.
-type systemoneResponse struct {
-	Model   string      `json:"model"`
-	Answers wireAnswers `json:"answers"`
-	Usage   *struct {
-		InputTokens  int `json:"input_tokens"`
-		OutputTokens int `json:"output_tokens"`
-	} `json:"usage"`
-}
-
 // Decide implements llm.Decider.
 func (s *SystemOne) Decide(ctx context.Context, req llm.DecisionRequest) (*llm.DecisionResponse, error) {
 	if err := req.Validate(); err != nil {
@@ -79,7 +69,7 @@ func (s *SystemOne) Decide(ctx context.Context, req llm.DecisionRequest) (*llm.D
 		body.Questions[q.Name] = toSystemOneQuestion(q)
 	}
 
-	var answer systemoneResponse
+	var answer decisionResponse
 	headers := map[string]string{}
 	if s.apiKey != "" {
 		headers["Authorization"] = "Bearer " + s.apiKey
@@ -87,27 +77,7 @@ func (s *SystemOne) Decide(ctx context.Context, req llm.DecisionRequest) (*llm.D
 	if err := llm.PostJSON(ctx, s.client, endpoint(s.baseURL, "/systemone"), headers, body, &answer); err != nil {
 		return nil, err
 	}
-
-	out := &llm.DecisionResponse{
-		Model:   llm.FirstNonEmpty(answer.Model, s.model),
-		Answers: map[string]llm.Answer{},
-	}
-	answers := pairAnswers(req.Questions, answer.Answers)
-	for _, q := range req.Questions {
-		w, ok := answers[q.Name]
-		if !ok {
-			out.Answers[q.Name] = emptyAnswer(q.Type)
-			continue
-		}
-		out.Answers[q.Name] = normalise(q, w)
-	}
-	if answer.Usage != nil {
-		out.Usage = llm.Usage{
-			InputTokens:  answer.Usage.InputTokens,
-			OutputTokens: answer.Usage.OutputTokens,
-		}
-	}
-	return out, nil
+	return buildResponse(req.Questions, answer, s.model), nil
 }
 
 // toSystemOneQuestion maps a neutral question onto the wire. A choice

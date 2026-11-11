@@ -557,6 +557,37 @@ func TestSystem1_LowConfidenceEscalatesToTheChatModel(t *testing.T) {
 	}
 }
 
+func TestSystem1_ARefusedDecisionEscalatesToTheChatModel(t *testing.T) {
+	dir := t.TempDir()
+	writePlaybook(t, dir, "fix-issue", fixIssuePlaybook)
+
+	provider := &scriptedProvider{responses: []llm.Response{
+		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"command": "/gtw fix 42 -y"})},
+		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "failed", "summary": "stopped here"})},
+	}}
+	decider := &scriptedDecider{answers: []llm.DecisionResponse{
+		{
+			Model: "jev-1.14",
+			Answers: map[string]llm.Answer{
+				questionNext:       {Type: llm.QuestionChoice, Refused: true},
+				questionNeedsHuman: {Type: llm.QuestionYesNo, Refused: true},
+			},
+		},
+	}}
+	svc, _, _ := testService(t, dir, Config{Provider: provider, Decider: decider})
+
+	if _, err := svc.StartPlaybook(context.Background(), Request{
+		Name: "fix-issue", Args: []string{"42"}, ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitRun(t, svc, "obs-1")
+
+	if provider.Calls() == 0 {
+		t.Fatal("a refused decision must escalate to the chat model")
+	}
+}
+
 func TestSystem1_NeedsHumanAsksTheUserWhenThereIsNoChatModel(t *testing.T) {
 	dir := t.TempDir()
 	writePlaybook(t, dir, "fix-issue", fixIssuePlaybook)

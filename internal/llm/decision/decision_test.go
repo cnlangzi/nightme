@@ -507,6 +507,52 @@ func TestEndpoint_AddsTheVersionOnce(t *testing.T) {
 	}
 }
 
+func TestDecisions_KeepsLabelKeyedProbabilitiesOverNumericLabels(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"model":"m","answers":{"s":{"type":"score","score":0.5,"probabilities":{"1":0.7,"2":0.2,"3":0.1}}}}`))
+	}))
+	defer srv.Close()
+
+	d, _ := NewDecisions(llm.Config{Protocol: "decisions", BaseURL: srv.URL, Model: "m"})
+	resp, err := d.Decide(context.Background(), llm.DecisionRequest{
+		State: "s",
+		Questions: []llm.Question{{
+			Name:   "s",
+			Type:   llm.QuestionScore,
+			Levels: []llm.Level{{Label: "1"}, {Label: "2"}, {Label: "3"}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	want := map[string]float64{"1": 0.7, "2": 0.2, "3": 0.1}
+	got := resp.Answers["s"].Probabilities
+	if len(got) != len(want) {
+		t.Fatalf("the probabilities are %v, want %v", got, want)
+	}
+	for key, p := range want {
+		if got[key] != p {
+			t.Fatalf("the probabilities are %v, want %v", got, want)
+		}
+	}
+}
+
+func TestDecider_ReportsAnUnknownProbabilityShape(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"model":"m","answers":{"next":{"type":"choice","choice":"/gtw commit","probabilities":[{"option":"/gtw commit","p":0.9}]}}}`))
+	}))
+	defer srv.Close()
+
+	d, _ := NewDecisions(llm.Config{Protocol: "decisions", BaseURL: srv.URL, Model: "m"})
+	_, err := d.Decide(context.Background(), neutralRequest())
+	if err == nil {
+		t.Fatal("a probability that names no option was accepted")
+	}
+	if !strings.Contains(err.Error(), "/gtw commit") {
+		t.Fatalf("error = %q, want the provider's payload", err)
+	}
+}
+
 func TestDecider_CallsTheVersionedPath(t *testing.T) {
 	var path string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

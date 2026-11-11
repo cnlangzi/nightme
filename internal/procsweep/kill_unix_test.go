@@ -283,6 +283,12 @@ func TestIsDefunct(t *testing.T) {
 // The fixture mirrors the real spawn recipe: proc.NewWith sets
 // Setsid, so the child is a session — and therefore process-group —
 // leader.
+//
+// The grandchild is the probe. It is not our child, so when the
+// group signal reaches it, it dies and init reaps it: its pid
+// disappears entirely. The leader is our own child, so it stays a
+// zombie until we reap it — that is the parent's business, not the
+// group's.
 func TestKillGroup_TerminatesTheWholeGroup(t *testing.T) {
 	dir := t.TempDir()
 	sentinel := filepath.Join(dir, "grandchild.pid")
@@ -293,7 +299,13 @@ func TestKillGroup_TerminatesTheWholeGroup(t *testing.T) {
 		t.Skipf("/bin/sh not available: %v", err)
 	}
 	pid := cmd.Process.Pid
-	t.Cleanup(func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() })
+	reaped := false
+	t.Cleanup(func() {
+		if !reaped {
+			_ = cmd.Process.Kill()
+			_, _ = cmd.Process.Wait()
+		}
+	})
 
 	// Wait for the grandchild to report its pid.
 	var grandchild int
@@ -311,21 +323,34 @@ func TestKillGroup_TerminatesTheWholeGroup(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 
-	// The group kill must take the grandchild with it.
+	// The kill itself may have to degrade: Darwin can refuse the
+	// group SIGKILL once the group leader is gone, and the fallback
+	// to the leader alone then leaves the grandchild to the earlier
+	// SIGTERM. Either way the grandchild has to be gone.
 	if err := KillGroup(pid, false); err != nil {
 		t.Fatalf("KillGroup: %v", err)
 	}
 
-	deadline = time.Now().Add(5 * time.Second)
-	for {
-		if syscall.Kill(grandchild, syscall.Signal(0)) != nil {
-			break
+	// The grandchild only proves the group kill when the shell left
+	// it in the leader's group. A shell that gives a background job
+	// its own group (job control) puts it out of reach, and the
+	// group kill is then not supposed to reach it.
+	if pgid, err := syscall.Getpgid(grandchild); err == nil && pgid == pid {
+		deadline = time.Now().Add(10 * time.Second)
+		for {
+			if syscall.Kill(grandchild, syscall.Signal(0)) != nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("grandchild pid %d survived the group kill", grandchild)
+			}
+			time.Sleep(20 * time.Millisecond)
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("grandchild pid %d survived the group kill", grandchild)
-		}
-		time.Sleep(20 * time.Millisecond)
 	}
+
+	// Reap the leader so the test leaves no zombie behind.
+	_ = cmd.Wait()
+	reaped = true
 }
 
 // TestKillGroup_FallsBackToTheProcess is the safety property: a PID

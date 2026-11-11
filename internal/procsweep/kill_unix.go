@@ -24,7 +24,7 @@ func Kill(pid int, force bool) error {
 	if pid <= 0 {
 		return syscall.ESRCH
 	}
-	return terminate(processTarget(pid), force)
+	return terminate(processTarget(pid), force, nil)
 }
 
 // KillGroup terminates pid and every other process in its group.
@@ -48,7 +48,13 @@ func KillGroup(pid int, force bool) error {
 	if pgid, err := syscall.Getpgid(pid); err != nil || pgid != pid {
 		return Kill(pid, force)
 	}
-	return terminate(groupTarget(pid), force)
+	// Every step of the group kill falls back to the process itself.
+	// Darwin can answer EPERM for a group signal once the group
+	// leader is gone, and the leader is the agent we have to stop —
+	// so a refused group signal must never turn into a failed kill.
+	return terminate(groupTarget(pid), force, func(sig syscall.Signal) error {
+		return syscall.Kill(pid, sig)
+	})
 }
 
 // target is a termination target: a single process, or a process
@@ -68,14 +74,28 @@ type target struct {
 // the CLI itself writes. force=true skips straight to SIGKILL for a
 // wedged child.
 //
+// fallback delivers the same signal to the process itself when the
+// platform refuses it to the group. It is nil for a single-process
+// target.
+//
 // ESRCH ("no such process") is returned verbatim so the caller can
 // classify it via IsProcessGone and report "already exited" — it is
 // the end state we wanted, not a failure.
-func terminate(t target, force bool) error {
-	if force {
-		return t.signal(syscall.SIGKILL)
+func terminate(t target, force bool, fallback func(syscall.Signal) error) error {
+	send := func(sig syscall.Signal) error {
+		err := t.signal(sig)
+		if err == nil || IsProcessGone(err) {
+			return err
+		}
+		if fallback == nil {
+			return err
+		}
+		return fallback(sig)
 	}
-	if err := t.signal(syscall.SIGTERM); err != nil {
+	if force {
+		return send(syscall.SIGKILL)
+	}
+	if err := send(syscall.SIGTERM); err != nil {
 		return err
 	}
 
@@ -92,10 +112,7 @@ func terminate(t target, force bool) error {
 
 	// Grace expired. SIGKILL, tolerating a target that died in the
 	// gap between the last liveness poll and this call.
-	if err := t.signal(syscall.SIGKILL); err != nil && !IsProcessGone(err) {
-		return err
-	}
-	return nil
+	return send(syscall.SIGKILL)
 }
 
 // processTarget targets a single process.

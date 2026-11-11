@@ -84,8 +84,8 @@ type decisionsLevel struct {
 
 // decisionsResponse is the answer of a decisions call.
 type decisionsResponse struct {
-	Model   string                `json:"model"`
-	Answers map[string]wireAnswer `json:"answers"`
+	Model   string      `json:"model"`
+	Answers wireAnswers `json:"answers"`
 	Usage   *struct {
 		InputTokens  int `json:"input_tokens"`
 		OutputTokens int `json:"output_tokens"`
@@ -115,7 +115,7 @@ func (d *Decisions) Decide(ctx context.Context, req llm.DecisionRequest) (*llm.D
 	if d.apiKey != "" {
 		headers["Authorization"] = "Bearer " + d.apiKey
 	}
-	if err := llm.PostJSON(ctx, d.client, d.baseURL+"/v1/decisions", headers, body, &answer); err != nil {
+	if err := llm.PostJSON(ctx, d.client, endpoint(d.baseURL, "/decisions"), headers, body, &answer); err != nil {
 		return nil, err
 	}
 
@@ -123,10 +123,11 @@ func (d *Decisions) Decide(ctx context.Context, req llm.DecisionRequest) (*llm.D
 		Model:   llm.FirstNonEmpty(answer.Model, d.model),
 		Answers: map[string]llm.Answer{},
 	}
+	answers := pairAnswers(req.Questions, answer.Answers)
 	for _, q := range req.Questions {
-		w, ok := answer.Answers[q.Name]
+		w, ok := answers[q.Name]
 		if !ok {
-			out.Answers[q.Name] = llm.Answer{Type: q.Type}
+			out.Answers[q.Name] = emptyAnswer(q.Type)
 			continue
 		}
 		out.Answers[q.Name] = normalise(q, w)

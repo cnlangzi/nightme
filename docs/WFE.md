@@ -806,6 +806,11 @@ me:
     min_confidence: 0.8           # below this the agent escalates
 ```
 
+The decider's base is the root of the API; the version segment is added
+when the base does not carry it. The two protocols live at
+`{base}/v1/decisions` and `{base}/v1/systemone` — `https://api.openai.com`
+and `https://api.typesafe.ai` are the roots of the two the models come from.
+
 The user picks the models. nightme never chooses one, and it never injects a model into the coding agents — those keep their own configuration.
 
 `me.llm` and `me.decider` are independent. A model that is configured but cannot be built — an unknown provider, a missing key — is reported in the daemon log and left out; the daemon still starts, and `/me` says why it cannot run.

@@ -57,8 +57,8 @@ type systemoneQuestion struct {
 
 // systemoneResponse is the answer of a systemone call.
 type systemoneResponse struct {
-	Model   string                `json:"model"`
-	Answers map[string]wireAnswer `json:"answers"`
+	Model   string      `json:"model"`
+	Answers wireAnswers `json:"answers"`
 	Usage   *struct {
 		InputTokens  int `json:"input_tokens"`
 		OutputTokens int `json:"output_tokens"`
@@ -84,7 +84,7 @@ func (s *SystemOne) Decide(ctx context.Context, req llm.DecisionRequest) (*llm.D
 	if s.apiKey != "" {
 		headers["Authorization"] = "Bearer " + s.apiKey
 	}
-	if err := llm.PostJSON(ctx, s.client, s.baseURL+"/v1/systemone", headers, body, &answer); err != nil {
+	if err := llm.PostJSON(ctx, s.client, endpoint(s.baseURL, "/systemone"), headers, body, &answer); err != nil {
 		return nil, err
 	}
 
@@ -92,10 +92,11 @@ func (s *SystemOne) Decide(ctx context.Context, req llm.DecisionRequest) (*llm.D
 		Model:   llm.FirstNonEmpty(answer.Model, s.model),
 		Answers: map[string]llm.Answer{},
 	}
+	answers := pairAnswers(req.Questions, answer.Answers)
 	for _, q := range req.Questions {
-		w, ok := answer.Answers[q.Name]
+		w, ok := answers[q.Name]
 		if !ok {
-			out.Answers[q.Name] = llm.Answer{Type: q.Type}
+			out.Answers[q.Name] = emptyAnswer(q.Type)
 			continue
 		}
 		out.Answers[q.Name] = normalise(q, w)

@@ -186,6 +186,7 @@ func TestProvider_RetriesAfterARateLimit(t *testing.T) {
 	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if atomic.AddInt32(&calls, 1) == 1 {
+			w.Header().Set("Retry-After", "1")
 			w.WriteHeader(http.StatusTooManyRequests)
 			w.Write([]byte(`{"error":{"message":"slow down"}}`))
 			return
@@ -194,6 +195,7 @@ func TestProvider_RetriesAfterARateLimit(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	started := time.Now()
 	resp, err := newProvider(t, srv.URL).Complete(context.Background(), llm.Request{})
 	if err != nil {
 		t.Fatalf("complete: %v", err)
@@ -203,6 +205,41 @@ func TestProvider_RetriesAfterARateLimit(t *testing.T) {
 	}
 	if atomic.LoadInt32(&calls) != 2 {
 		t.Fatalf("the server saw %d calls, want 2", calls)
+	}
+	// The server asked for a one second wait. The local backoff is
+	// half a second, so the elapsed time tells the two apart.
+	if elapsed := time.Since(started); elapsed < 900*time.Millisecond {
+		t.Fatalf("the retry waited %v, want it to honour the Retry-After of 1s", elapsed)
+	}
+}
+
+func TestProvider_ReplaysAToolCallWithoutArguments(t *testing.T) {
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &body)
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer srv.Close()
+
+	_, err := newProvider(t, srv.URL).Complete(context.Background(), llm.Request{
+		Messages: []llm.Message{{Role: llm.RoleAssistant, Parts: []llm.Part{{
+			Type: llm.PartToolCall, ToolCallID: "c1", ToolName: "repo_status",
+		}}}},
+	})
+	if err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	msgs, _ := body["messages"].([]any)
+	assistant, _ := msgs[0].(map[string]any)
+	calls, _ := assistant["tool_calls"].([]any)
+	if len(calls) != 1 {
+		t.Fatalf("the request carried %d tool calls, want 1", len(calls))
+	}
+	call, _ := calls[0].(map[string]any)
+	fn, _ := call["function"].(map[string]any)
+	if fn["arguments"] != "{}" {
+		t.Fatalf("the tool call went out with the arguments %v, want an empty object", fn["arguments"])
 	}
 }
 

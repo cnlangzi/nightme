@@ -67,7 +67,7 @@ Workflows are read from:
 |---|---|---|---|---|
 | `name` | string | ✅ | — | Unique workflow identifier; surfaces in logs and notifications. |
 | `workspaces` | string[] | ✅ | — | **List of CWDs this workflow operates on.** Each workspace is a local directory (typically a git checkout). The workflow's triggers fire only for events on these workspaces; every run executes `chdir` into one of them. |
-| `agent` | string | ❌ | (nightme default) | **Default agent for this workflow's `prompt` steps.** Applied via the `/use agent <name>` slash command that bot pushes into `bot.Incoming()` at run start. Step-level `agent:` overrides this; if both are absent, the nightme primary agent (`cfg.Primary`) is used. |
+| `agent` | string | ❌ | (nightme default) | **Default agent for this workflow's `prompt` steps.** Applied via the `/use agent <name>` slash command that the workflow service sends into the work chat at run start. Step-level `agent:` overrides this; if both are absent, the nightme primary agent (`cfg.Primary`) is used. |
 | `worker` | int | ❌ | `1` | Max parallel instances when the trigger fires concurrently. |
 | `on` | object | ✅ | — | Trigger spec (see §3). |
 | `jobs` | map | ✅ | — | Named jobs to run in order (see §4). |
@@ -142,7 +142,7 @@ jobs:
         prompt: "Double-check the AI's review."
         agent: claude                         # override the workflow default for this step
 
-      # 4. use step: invoke a bot-injected action
+      # 4. use step: invoke a registered action
       - id: notify
         if: ${{ always() }}
         use: notify
@@ -177,7 +177,7 @@ This example demonstrates every feature in one workflow:
 2. **Workflow-level** `agent` (this field)
 3. **nightme default** (`cfg.Primary` in `nightme.yaml`)
 
-When bot runs the workflow, only the resolved agent is set on the chat via `/use agent <name>`. The other levels are not pushed as messages (avoids redundant `/use agent` calls).
+When the workflow service runs the workflow, only the resolved agent is set on the chat via `/use agent <name>`. The other levels are not pushed as messages (avoids redundant `/use agent` calls).
 
 ---
 
@@ -244,9 +244,9 @@ on:
 
 ### 3.5 `mention`
 
-Fires when **the owner is @-mentioned anywhere that the underlying git provider's mention API can deliver** (sourced via `gitProvider` — this is **not** related to Feishu chat mentions). The "owner" here is the GitHub/GitLab user that the `gitProvider` credentials authenticate as — bot doesn't need a separate `owner_github_login` config; whoever the token belongs to is the owner, and the API can only see events related to that user (and repos the token has access to).
+Fires when **the owner is @-mentioned anywhere that the underlying git provider's mention API can deliver** (sourced via `gitProvider` — this is **not** related to Feishu chat mentions). The "owner" here is the GitHub/GitLab user that the `gitProvider` credentials authenticate as — nightme doesn't need a separate `owner_github_login` config; whoever the token belongs to is the owner, and the API can only see events related to that user (and repos the token has access to).
 
-**Permissive trigger**: bot does not filter by event subtype. Whatever the gitProvider's mention API can deliver counts — issue/PR body mention, issue/PR comment mention, PR review comment mention, PR review summary mention, etc. The `gitProvider` is responsible for normalizing each platform's mention events (GitHub `mentioned`, GitLab `Note` family) into a single "mention" event for bot to consume.
+**Permissive trigger**: the workflow service does not filter by event subtype. Whatever the gitProvider's mention API can deliver counts — issue/PR body mention, issue/PR comment mention, PR review comment mention, PR review summary mention, etc. The `gitProvider` is responsible for normalizing each platform's mention events (GitHub `mentioned`, GitLab `Note` family) into a single "mention" event for the workflow service to consume.
 
 **v0 supported commands**: only `@<owner> review [id]` is implemented. Other commands (`fix`, `close`, etc.) are reserved for later. The whitelist `commands: [review]` (or just `commands: review`) restricts matching to this verb.
 
@@ -322,9 +322,9 @@ Each step is one of three shapes:
 |---|---|---|---|
 | `run` | `run: <cmd>` | Execute shell (inline or file) | `Runtime.RunShell` |
 | `prompt` | `prompt: <text>` + `agent: <name>` | Send a prompt to a local AI agent | `Runtime.SendPrompt` |
-| `use` | `use: <action>` + `with: <args>` | Invoke a bot-injected action (notify, email, GitHub, …) | `Runtime.RunAction` |
+| `use` | `use: <action>` + `with: <args>` | Invoke a registered action (notify, email, GitHub, …) | `Runtime.RunAction` |
 
-`run` and `prompt` are **default-supported** — they work in every workflow because they're part of the wfe runtime contract. `use` is the **extension point** — the bot subsystem registers which action names are valid; see §8.5 for the action model.
+`run` and `prompt` are **default-supported** — they work in every workflow because they're part of the wfe runtime contract. `use` is the **extension point** — the workflow service registers which action names are valid; see [`feat/F-workflow-engine.md`](./feat/F-workflow-engine.md) for the action model.
 
 ### 5.1 `run` — execute shell
 
@@ -385,16 +385,16 @@ Supports both **inline** and **file** modes (mirrors GitHub Actions `run`):
 2. **Workflow-level** `agent:` (§2 top-level field)
 3. **nightme default** (`cfg.Primary` in `nightme.yaml`)
 
-When bot runs the workflow, it determines the resolved agent and pushes a single `/use agent <name>` slash command into `bot.Incoming()` at run start. The chat's active agent is set before any `prompt` step runs, so every subsequent prompt dispatches to the right agent.
+When the workflow service runs the workflow, it determines the resolved agent and sends a single `/use agent <name>` slash command into the work chat at run start. The chat's active agent is set before any `prompt` step runs, so every subsequent prompt dispatches to the right agent.
 
 **Why a workflow-level `agent:`**: the same workflow often needs the same agent across all its `prompt` steps. Setting it once at the workflow level avoids repeating `agent: codex` on every step. Step-level `agent:` is for the rare case where one step needs a different agent.
 
-### 5.3 `use` — invoke a bot-injected action
+### 5.3 `use` — invoke a registered action
 
-`use` is the **extension point** for any capability beyond shell and agent. The action name is whatever the bot subsystem has registered; the YAML passes arguments via `with:` (same shape as GitHub Actions).
+`use` is the **extension point** for any capability beyond shell and agent. The action name is whatever the workflow service has registered; the YAML passes arguments via `with:` (same shape as GitHub Actions).
 
 ```yaml
-# Built-in actions (bot ships with these)
+# Built-in actions (the workflow service ships with these)
 - id: send-notif
   use: notify
   with:
@@ -410,7 +410,7 @@ When bot runs the workflow, it determines the resolved agent and pushes a single
 
 # User-defined action (script in ~/.nightme/workflows/actions/)
 - id: deploy
-  use: deploy-staging          # bot wraps scripts/<name>.sh as an action
+  use: deploy-staging          # the workflow service wraps scripts/<name>.sh as an action
   with:
     env: production
     tag: ${{ env.RELEASE_TAG }}
@@ -418,17 +418,17 @@ When bot runs the workflow, it determines the resolved agent and pushes a single
 
 | Field | Type | Required | Purpose |
 |---|---|---|---|
-| `use` | string | ✅ | Action name. Resolved by bot against its ActionRegistry. |
+| `use` | string | ✅ | Action name. Resolved by the workflow service against its ActionRegistry. |
 | `with` | map | ❌ | Action-specific arguments. Values may embed `${{ ... }}` expressions. |
 
-**Available actions depend on the bot**:
+**Available actions depend on the workflow service**:
 
-- **Built-in** (registered in Go by the bot subsystem): `notify`, `email`, `github_pr_comment`, `github_issue`, `slack`, `webhook`, …
-- **User-defined** (shell scripts under `~/.nightme/workflows/actions/<name>.<ext>`): auto-registered as actions at bot startup. stdout must be JSON `{"outputs": {...}}` for typed outputs, otherwise outputs are empty.
+- **Built-in** (registered in Go by the workflow service): `notify`, `email`, `github_pr_comment`, `github_issue`, `slack`, `webhook`, …
+- **User-defined** (shell scripts under `~/.nightme/workflows/actions/<name>.<ext>`): auto-registered as actions when the workflow service starts. stdout must be JSON `{"outputs": {...}}` for typed outputs, otherwise outputs are empty.
 
 Unknown `use:` names fail the run with a clear error: `unknown action: "foo" — registered: [notify, email, github_pr_comment, …]`.
 
-**Why three forms, not one**: `run` and `prompt` are the universal "do arbitrary work" tools (most workflows only need these two). `use` exists for **structured, repeatable side effects** that benefit from bot-side wiring (typed outputs, retries, secret isolation, multi-channel abstractions) instead of every workflow reinventing them with shell.
+**Why three forms, not one**: `run` and `prompt` are the universal "do arbitrary work" tools (most workflows only need these two). `use` exists for **structured, repeatable side effects** that benefit from workflow-side wiring (typed outputs, retries, secret isolation, multi-channel abstractions) instead of every workflow reinventing them with shell.
 
 ### 5.4 Common step fields
 
@@ -439,7 +439,7 @@ Every step (all three forms) supports:
 | `name` | string | (derived) | Human-readable name for logs / notifications. |
 | `id` | string | — | Step ID for output reference: `${{ steps.<id>.outputs.<key> }}`. |
 | `if` | string | `success()` | Condition expression. Failure of a previous step skips dependents unless `continue-on-error: true`. |
-| `env` | map | — | Environment variables for the step (merged on top of the workflow + bot env). |
+| `env` | map | — | Environment variables for the step (merged on top of the workflow + the daemon's env). |
 | `continue-on-error` | bool | `false` | Don't fail the job if this step errors. |
 | `shell` | string | (host default) | `run` only: which shell interpreter to use (`bash`, `sh`, `zsh`, `pwsh`, …). |
 
@@ -893,15 +893,15 @@ These are deliberately **not** in v0; they belong in a later iteration.
 | Webhook signature verification (beyond what `git provider` already does) | Provider abstraction (see F-50) handles this. |
 | Cross-workflow triggers (`workflow_run`) | Compose via mention + schedule. |
 | Secret injection from external vaults | Reads from `~/.nightme/config.yaml`; HashiCorp Vault / 1Password are follow-ups. |
-| Hot-reload of user-defined action scripts | Bot restart picks them up; live reload is a follow-up. |
+| Hot-reload of user-defined action scripts | A daemon restart picks them up; live reload is a follow-up. |
 
 ---
 
 ## 10. Cross-references
 
-- **Trigger source**: GitHub / GitLab webhook payloads (provider-agnostic; the GitProvider abstraction normalizes them).
-- **Mention parsing**: `@owner <command> ...` text is parsed by bot itself (no feishu involvement). The first word after `@owner` is the command.
+- **Trigger source**: GitHub / GitLab webhook payloads (provider-agnostic; the GitProvider abstraction normalizes them). The git events are not wired yet — the workflow service is cron-only.
+- **Mention parsing**: the `@owner <command> ...` text becomes the event's `command` field, and `internal/wfe` matches it against the trigger's whitelist. The events that carry it are not wired yet.
 - **Agent names** (`codex`, `claude`, `pi`, `opencode`, `dsh`): come from the `agents:` block of `~/.nightme/config.yaml`.
-- **`bot` channel**: `internal/channel/bot/`, peer of `feishu` and `echo`. Implements the `Channel` interface *and* the `wfe.Runtime` interface; no new control plane.
-- **`wfe` library**: `internal/wfe/`. Pure Go, no I/O, no clock, no secrets. Single entry point: `Tick(state, runtime) → state'`. Bot is its only caller.
+- **Loopback channel**: `internal/channel/loopback/`, the daemon's own chat. It implements the `Channel` interface and carries the commands the workflow service and the personal agent send into the daemon. It renders nothing.
+- **`wfe` library**: `internal/wfe/`. Pure Go, no I/O, no clock, no secrets. Single entry point: `Tick(state, runtime) → state'`. The workflow service is its only caller.
 - **Implementation details** (state machine, run state serialisation, event store, ActionRegistry design, gw client integration, rollout phases): [`feat/F-workflow-engine.md`](./feat/F-workflow-engine.md).

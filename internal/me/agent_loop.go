@@ -267,7 +267,7 @@ func (s *Service) actOnDecision(ctx context.Context, r *run, dec decision) (sys1
 		if err != nil {
 			return sys1None, err
 		}
-		s.appendToolResult(r, pendingCall{ID: syntheticCallID, Name: "run_step"}, outcome, outcome.Status != string(wfe.OutcomeOK))
+		s.appendToolResult(r, pendingCall{ID: syntheticCallID, Name: "run_step"}, outcome, !outcomeSucceeded(outcome.Status))
 		s.persist(r)
 		return sys1Act, nil
 	}
@@ -315,7 +315,7 @@ func (s *Service) actOnChoice(ctx context.Context, r *run, command, by string) (
 	if err != nil {
 		return false, err
 	}
-	s.appendToolResult(r, pendingCall{ID: syntheticCallID, Name: "run_step"}, outcome, outcome.Status != string(wfe.OutcomeOK))
+	s.appendToolResult(r, pendingCall{ID: syntheticCallID, Name: "run_step"}, outcome, !outcomeSucceeded(outcome.Status))
 	s.persist(r)
 	return false, nil
 }

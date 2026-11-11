@@ -83,6 +83,13 @@
 | Telegram Polling / Webhook 双模式 | [channel/telegram.md](./channel/telegram.md) |
 | Telegram Inline Keyboard / CallbackQuery → Choice 归一化 | [channel/telegram.md](./channel/telegram.md) |
 
+### 4.3 Loopback 进程内 channel（不渲染）
+
+| 功能 | 设计文档 |
+|------|----------|
+| 进程内 loopback channel（daemon 自己的 chat；不渲染任何内容）| [WFE.md](./WFE.md) §8.1 |
+| 每条命令的执行跟踪（sent / queued / running / settled）+ 结构化 `Outcome` | [WFE.md](./WFE.md) §8.9 + [me.md](./me.md) |
+
 ## 5. 配置 / 数据模型
 
 | 功能 | 设计文档 |
@@ -108,27 +115,41 @@
 
 三个 toggle 模式一致：ChatSession 上挂 mode 字段 + Gateway dispatcher 入口 gate + Channel 自治渲染。
 
-## 8. Workflow 引擎
+## 8. Workflow 引擎 / 个人 Agent
 
 | 功能 | 设计文档 |
 |------|----------|
-| Workflow YAML + 引擎运行时架构（schema / 触发器 / 步骤 / 表达式 / bot↔wfe 边界）| [WFE.md](./WFE.md) |
+| Workflow YAML + 引擎运行时架构（schema / 触发器 / 步骤 / 表达式 / wfe↔runtime 边界）| [WFE.md](./WFE.md) |
 | 5 类触发器：`schedule` / `pull_request` / `branch` / `issue` / `mention` | [WFE.md](./WFE.md) §3 |
 | 三种 step：`run`（shell）/ `prompt`（agent）/ `use`（action）| [WFE.md](./WFE.md) §5 |
 | 顶层 `worker` 字段（并发 worker pool）| [WFE.md](./WFE.md) §2 |
 | `${{ ... }}` 表达式（`event.*` / `steps.*.outputs.*` / `needs.*.outputs.*` / `env.*`）| [WFE.md](./WFE.md) §6 |
 | 复用本地 agent 环境变量（不管理 agent，只调度）| [WFE.md](./WFE.md) §5.2 |
-| `use` 步骤 = 扩展点（bot 注入 action；内置 + `~/.nightme/workflows/actions/*.sh`）| [WFE.md](./WFE.md) §5.3 |
-| `bot` subsystem 作为 host（跟 `/gtw` 平级；不实现 `Channel` interface；持 `NightmeChannel` / `ActionRegistry` / `os/exec` 等资源 channels）| [WFE.md](./WFE.md) §8.1 |
-| `wfe` 库 = 纯库（无 I/O / 无 clock / 无 secrets；Tick 推进 state）| [WFE.md](./WFE.md) §8.2 |
-| Runtime interface（4 方法：RunShell / SendPrompt / RunAction / Now）| [WFE.md](./WFE.md) §8.4 |
-| Action 注入模型（ActionRegistry + ShellAction 包装用户脚本）| [WFE.md](./WFE.md) §8.5 |
-| 触发器 → 虚拟 chat 映射 | [WFE.md](./WFE.md) §8.6 |
-| `prompt` 步骤作为合成消息经 Gateway 派发 | [WFE.md](./WFE.md) §8.7 |
-| Run 状态持久化（`~/.nightme/workflows/state/`）| [WFE.md](./WFE.md) §8.8 |
+| `use` 步骤 = 扩展点（注册的 action；内置 + `~/.nightme/workflows/actions/*.sh`）| [WFE.md](./WFE.md) §5.3 |
+| Runtime interface（4 方法：RunShell / SendPrompt / RunAction / Now）| [WFE.md](./WFE.md) §5 |
+| `wfe` 库 = 纯库（无 I/O / 无 clock / 无 secrets；Tick 推进 state）| [feat/F-workflow-engine.md](./feat/F-workflow-engine.md) |
+| Action 注入模型（ActionRegistry + ShellAction 包装用户脚本）| [WFE.md](./WFE.md) §5.3 + [feat/F-workflow-engine.md](./feat/F-workflow-engine.md) |
+| Workflow service（cron / 事件驱动的 DAG；不是 channel，通过 loopback client 驱动 daemon）| [WFE.md](./WFE.md) §8.11 |
+| `prompt` 步骤作为合成消息经 Gateway 派发 | [WFE.md](./WFE.md) §5.2 |
+| Run 状态持久化（`~/.nightme/workflows/state/`）| [WFE.md](./WFE.md) §8.11 |
 | **实现设计（包结构 / Tick 状态机 / StateStore / ActionRegistry / 灰度上线）**| [feat/F-workflow-engine.md](./feat/F-workflow-engine.md) |
 
-Workflow 文件位置：`~/.nightme/workflows/*.yaml`，按 `name:` 去重，热加载。Engine 入口：`internal/wfe/`，host：`internal/me/`。
+### 8.1 个人 Agent（`me`）
+
+| 功能 | 设计文档 |
+|------|----------|
+| 个人 agent 分层（loopback 传输 / 决策模型 / 聊天模型 / 策略）| [WFE.md](./WFE.md) §8.1 |
+| Playbook schema（`name` / `args` / `goal` / `steps` / `max_actions` / `instruct`）| [WFE.md](./WFE.md) §8.2 |
+| 约束策略 `wfe.Policy`（CheckRun / CheckInstruct / CheckFinish / Remaining / Render）| [WFE.md](./WFE.md) §8.3 |
+| 六个工具（`run_step` / `instruct` / `answer_choice` / `ask_human` / `repo_status` / `finish`）| [WFE.md](./WFE.md) §8.4 |
+| 两种模型能力：System 1 决策模型 + System 2 聊天模型 | [WFE.md](./WFE.md) §8.5 |
+| 三种模式（仅 `me.llm` / 仅 `me.decider` / 两者都有）| [WFE.md](./WFE.md) §8.6 |
+| `me.llm` / `me.decider` 配置（模型与凭据由用户指定）| [WFE.md](./WFE.md) §8.7 |
+| `/me start` / `/me reply` / `/me stop` / `/me status` | [WFE.md](./WFE.md) §8.8 |
+| Outcome 词汇表与 settled 协议 | [me.md](./me.md) |
+| Guardrails 与恢复（迭代 / token 预算 / 超时 / stall / 持久化）| [WFE.md](./WFE.md) §8.10 |
+
+Workflow 文件位置：`~/.nightme/workflows/*.yaml`，按 `name:` 去重，热加载。Engine 入口：`internal/wfe/`；workflow service host：`internal/me/workflow`；个人 agent：`internal/me`。
 
 ## 9. 范围外（明确不做）
 

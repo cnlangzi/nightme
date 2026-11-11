@@ -14,13 +14,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/wfe"
 )
 
-// oneStepPlaybook is a playbook with a single step.
-const oneStepPlaybook = `name: one
-goal: Do the one thing.
-steps:
-  - /gtw commit
-`
-
 // okStep is a command that succeeded.
 func okStep(summary string) fakeStep {
 	return fakeStep{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: summary}}
@@ -169,6 +162,36 @@ func TestSystem2_PolicyViolationComesBackAsAToolError(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("the violation did not come back as a tool error")
+	}
+}
+
+func TestSystem2_ANoopStepIsNotAToolError(t *testing.T) {
+	dir := t.TempDir()
+	writePlaybook(t, dir, "one", oneStepPlaybook)
+
+	provider := &scriptedProvider{responses: []llm.Response{
+		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"command": "/gtw commit"})},
+		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "done", "summary": "nothing to commit"})},
+	}}
+	svc, lb, _ := testService(t, dir, Config{Provider: provider})
+	lb.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeNoop, Summary: "nothing to commit"}}}
+
+	if _, err := svc.StartPlaybook(context.Background(), Request{
+		Name: "one", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitRun(t, svc, "obs-1")
+
+	if provider.Calls() < 2 {
+		t.Fatal("the chat model never took a second turn")
+	}
+	part := toolResultPart(t, provider.Request(1).Messages, toolRunStep)
+	if part.IsError {
+		t.Fatalf("a noop outcome came back as a tool error: %s", part.Text)
+	}
+	if !strings.Contains(part.Text, "noop") {
+		t.Fatalf("the tool result does not carry the status: %s", part.Text)
 	}
 }
 

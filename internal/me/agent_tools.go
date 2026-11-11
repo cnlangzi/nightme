@@ -355,6 +355,15 @@ func outcomeStatus(status string) wfe.OutcomeStatus {
 	return wfe.OutcomeStatus(status)
 }
 
+// outcomeSucceeded reports whether a step result status means the
+// work was done.
+//
+// "noop" counts: the request was valid and the world already
+// satisfied it, so the step did what it was asked to do.
+func outcomeSucceeded(status string) bool {
+	return status == string(wfe.OutcomeOK) || status == string(wfe.OutcomeNoop)
+}
+
 // runCommand sends a command to the work chat and waits for it.
 //
 // A command that is already running is picked up where it left off,

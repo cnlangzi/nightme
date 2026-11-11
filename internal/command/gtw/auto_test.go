@@ -88,9 +88,6 @@ func TestSelectNextAssignedIssue_PicksOldestEligible(t *testing.T) {
 	if sel.Counters.Candidates != 2 {
 		t.Errorf("candidates = %d, want 2 (the unassigned issue is not in the queue)", sel.Counters.Candidates)
 	}
-	if sel.Branch != DeriveBranchFromTitle("feat: older", 3) {
-		t.Errorf("branch = %q, want the derived branch", sel.Branch)
-	}
 }
 
 // TestSelectNextAssignedIssue_OrdersByAgeThenNumber pins the

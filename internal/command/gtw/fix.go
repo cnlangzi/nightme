@@ -107,12 +107,15 @@ type Result struct {
 // between the issue (remote) flow and the local branch flow.
 //
 //	args is the user-supplied argv tail AFTER the "fix"
-//	subcommand. For ModeRemote: args[0] is the issue id, or the
-//	literal `*` that asks for the next assigned issue.
+//	subcommand. For ModeRemote: args[0] is the issue id.
 //	For ModeLocal: args[0] is the literal branch name.
 //	Pass args[1:] (not args[0]) into ModeLocal/Remote since
 //	the "fix" subcommand token has already been consumed by
 //	Factory.runFix.
+//
+//	auto is true when the user named no issue and asked for the
+//	next assigned one. The parser owns that decision; the flow
+//	only receives it.
 func RunFix(
 	ctx context.Context,
 	mode Mode,
@@ -121,6 +124,7 @@ func RunFix(
 	chatID, messageID string,
 	args []string,
 	yes bool,
+	auto bool,
 ) (*Result, error) {
 	if deps.Now == nil {
 		deps.Now = timeNow
@@ -164,7 +168,7 @@ func RunFix(
 		// drops args.Yes when args.Mode == ModeLocal.
 		return runFixLocal(ctx, cs, deps, chatID, messageID, args[0])
 	default:
-		return runFixRemote(ctx, cs, deps, chatID, messageID, args[0], yes)
+		return runFixRemote(ctx, cs, deps, chatID, messageID, args[0], yes, auto)
 	}
 }
 
@@ -208,11 +212,11 @@ func runFixRemote(
 	chatID, messageID string,
 	rawID string,
 	yes bool,
+	auto bool,
 ) (*Result, error) {
 	// The automatic mode names no issue: the queue is consulted
 	// once the provider is known, and the issue it yields takes
 	// the place of the id the user would have typed.
-	auto := rawID == autoSelector
 	var issueID int
 	if !auto {
 		var err error

@@ -86,8 +86,6 @@ type autoSkip struct {
 type autoSelection struct {
 	// Issue is the picked issue — nil when nothing was eligible.
 	Issue *Issue
-	// Branch is the branch the picked issue would get.
-	Branch string
 	// Counters describe the queue that was considered.
 	Counters autoCounters
 	// Skipped lists the candidates that were passed over.
@@ -176,7 +174,6 @@ func selectNextAssignedIssue(
 		}
 
 		sel.Issue = c
-		sel.Branch = branch
 		return sel, nil
 	}
 	return sel, nil
@@ -242,7 +239,9 @@ func renderAutoNoCandidate(sel *autoSelection) string {
 
 	rows := make([][2]string, 0, len(sel.Skipped)+2)
 	if sel.Counters.Candidates == 0 {
-		rows = append(rows, [2]string{"queue", "empty — no open issue carries the `" + LabelAssigned + "` label"})
+		rows = append(rows, [2]string{"queue", fmt.Sprintf(
+			"empty — none of the %d oldest open issues carries the `%s` label",
+			listIssuesPerPage, LabelAssigned)})
 	} else {
 		rows = append(rows, [2]string{"queue", fmt.Sprintf(
 			"%d candidate(s) — %d blocked, %d with an existing branch, %d with an open pull request",

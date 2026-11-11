@@ -633,7 +633,7 @@ func (f *Factory) runFix(ctx context.Context, _ command.RuntimeServices, cs *cha
 		func() error {
 			_, e := RunFix(ctx, args.Mode, cs, f.deps,
 				input.ChatID, input.MessageID,
-				[]string{args.RawArg}, args.Yes)
+				[]string{args.RawArg}, args.Yes, args.Auto)
 			if e == nil {
 				// Re-derive so post-hook sees the worktree
 				// that RunFix just created + yml-wrote.

@@ -138,6 +138,18 @@ func (r *fixRemoteRecCh) serialized() []string {
 // does.
 func (r *fixRemoteRig) drive(t *testing.T, rawID string) (*Result, error) {
 	t.Helper()
+	return r.driveMode(t, rawID, false)
+}
+
+// driveAuto is drive for the automatic mode: the issue is not
+// named, the queue is consulted.
+func (r *fixRemoteRig) driveAuto(t *testing.T) (*Result, error) {
+	t.Helper()
+	return r.driveMode(t, autoSelector, true)
+}
+
+func (r *fixRemoteRig) driveMode(t *testing.T, rawID string, auto bool) (*Result, error) {
+	t.Helper()
 	return RunFix(
 		context.Background(),
 		ModeRemote,
@@ -147,6 +159,7 @@ func (r *fixRemoteRig) drive(t *testing.T, rawID string) (*Result, error) {
 		"msg-fix-remote",
 		[]string{rawID},
 		false, /* yes — assess-first default for the rig */
+		auto,
 	)
 }
 

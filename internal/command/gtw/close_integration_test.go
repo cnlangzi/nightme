@@ -429,7 +429,7 @@ func TestIntegration_ShortFlagNForLocalFix(t *testing.T) {
 	// uses in production).
 	res, err := RunFix(
 		context.Background(), args.Mode, cs, deps,
-		cs.ChatID, "msg-int-shortN", []string{args.RawArg}, args.Yes,
+		cs.ChatID, "msg-int-shortN", []string{args.RawArg}, args.Yes, args.Auto,
 	)
 	if err != nil {
 		t.Fatalf("RunFix: %v", err)
@@ -535,7 +535,7 @@ func TestIntegration_LongLocalBranchNameIsCapped(t *testing.T) {
 
 	res, err := RunFix(
 		context.Background(), ModeLocal, cs, deps,
-		cs.ChatID, "msg-int-longname", []string{raw}, false,
+		cs.ChatID, "msg-int-longname", []string{raw}, false, false,
 	)
 	if err != nil {
 		t.Fatalf("RunFix: %v", err)

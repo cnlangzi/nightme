@@ -453,7 +453,7 @@ abc1234 fix(gtw): hooks output uses standard ✅ title
 
 ```
 ✨ No eligible assigned issue
-→ queue: empty — no open issue carries the `nightme/assigned` label
+→ queue: empty — none of the 100 oldest open issues carries the `nightme/assigned` label
 ↳ come back in 5m for another pick.
 ```
 

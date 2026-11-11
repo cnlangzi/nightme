@@ -146,11 +146,17 @@ ListBlockedBy(ctx context.Context, owner, repo string, id int) ([]*Issue, error)
 | Provider | ListIssues | ListBlockedBy |
 |---|---|---|
 | GitHub | `gh api "repos/{owner}/{repo}/issues?state=open&per_page=100&sort=created&direction=asc"`，响应里的 PR 条目丢掉 | `gh api "repos/{owner}/{repo}/issues/{n}/dependencies/blocked_by"`；404 → `ErrRelationsUnsupported` |
-| GitLab | `glab api "projects/{owner%2Frepo}/issues?state=opened&per_page=100&order_by=created&sort=asc"` | `glab api "projects/{owner%2Frepo}/issues/{iid}/blocked_by"`；403 / 404 时退回 `glab api "projects/{owner%2Frepo}/issues/{iid}/links?link_type=is_blocked_by"`；两个都不行 → `ErrRelationsUnsupported` |
+| GitLab | `glab api "projects/{owner%2Frepo}/issues?state=opened&per_page=100&order_by=created_at&sort=asc"` | `glab api "projects/{owner%2Frepo}/issues/{iid}/links"`；403 / 404 → `ErrRelationsUnsupported` |
 
-GitLab 的 links 回退里，link 表示「source 被 target 挡住」，所以某个 issue 的 blocker 是 source 为该 issue 的那些 link 的 target。
+**GitLab 的关系图只能从 issue links 读**：GitLab 没有 `issues/{iid}/blocked_by` 这个 REST 端点（404），blocking 关系只在 issue links API 里。links 的响应是一个扁平数组：每一条是关联 issue 自己的字段，外加 `link_type` 说明它跟被查 issue 的关系。GitLab 按**被查 issue 的视角**报告这个 type：`blocks` 表示这条关联 issue 挡着被查 issue，`is_blocked_by` 表示被查 issue 挡着它。所以 blocker 是 `link_type` 为 `blocks` 的那些条目。
+
+**GitLab 的 blocking 关系是 Premium 功能**：Free / CE 上根本建不出 blocking link，links 列表里也就没有，平台手里没有可遵守的依赖。links 端点本身不可用（403 / 404）时报 `ErrRelationsUnsupported`。
 
 **label 替换**：fix 认领 issue 时把队列标记换成进行中标记 —— 先加 `nightme/wip`，再摘 `nightme/assigned`。先加后摘：两步之间失败，issue 同时带两个 label，而队列过滤会把它挡在下一轮之外。摘 label 失败只记 warning，不回滚 fix。
+
+**认领之后放弃 = 离开队列**：`/gtw close` 只摘 `nightme/wip`，不把 `nightme/assigned` 加回去（nightme 从不自己加这个 label）。所以「挑起来 → 没做完就 close」的 issue 从此不在队列里了；要让它回到队列，人工或者外部自动化重新贴上 `nightme/assigned`。
+
+**队列没有原子认领**：`ListIssues` 和贴 `nightme/wip` 之间有窗口，两台机器同时跑 `/gtw fix *` 可能挑到同一个 issue。这跟具名 fix 的既有窗口是同一类 —— label 是协作信号，不是锁（见 §3.2）。
 
 **没有可选项时**：outcome 是 `noop`，`Data` 带 `reason: no_candidate`、`wake_after: "5m"` 和 `candidates` / `blocked` / `branch_exists` / `pr_open` 四个计数。`wake_after` 是个人 agent 读的契约：它告诉 agent 过一会儿再来，而不是把这次运行判成失败。
 

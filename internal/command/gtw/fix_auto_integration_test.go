@@ -46,7 +46,7 @@ func TestFixAuto_PicksAssignedIssue(t *testing.T) {
 	rig.prov.SetListIssues([]*Issue{unassigned, assigned})
 	rig.prov.SetIssue(42, assigned)
 
-	res, err := rig.drive(t, "*")
+	res, err := rig.driveAuto(t)
 	if err != nil {
 		t.Fatalf("RunFix: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestFixAuto_NoCandidate_ReportsNoop(t *testing.T) {
 		{ID: 43, Title: "feat: unassigned", State: "open"},
 	})
 
-	res, err := rig.drive(t, "*")
+	res, err := rig.driveAuto(t)
 	if err != nil {
 		t.Fatalf("RunFix: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestFixAuto_SkipsBlockedCandidate(t *testing.T) {
 	rig.prov.SetIssue(42, free)
 	rig.prov.SetBlockedBy(41, []*Issue{{ID: 30, State: "open"}})
 
-	res, err := rig.drive(t, "*")
+	res, err := rig.driveAuto(t)
 	if err != nil {
 		t.Fatalf("RunFix: %v", err)
 	}
@@ -194,7 +194,7 @@ func TestFixAuto_NoCandidate_OutcomeCarriesWakeUp(t *testing.T) {
 	work := rig.cs.Hold("msg-fix-remote")
 	ctx := chatsession.WithWork(context.Background(), work)
 	if _, err := RunFix(ctx, ModeRemote, rig.cs, rig.deps, rig.cs.ChatID,
-		"msg-fix-remote", []string{"*"}, false); err != nil {
+		"msg-fix-remote", []string{"*"}, false, true); err != nil {
 		t.Fatalf("RunFix: %v", err)
 	}
 	work.Release()

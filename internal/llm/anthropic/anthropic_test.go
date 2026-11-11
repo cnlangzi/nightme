@@ -354,6 +354,125 @@ func TestProvider_ReportsANonRetryableFailure(t *testing.T) {
 	}
 }
 
+func TestProvider_DropsAnEmptyTextBlock(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"content":[{"type":"text","text":""},{"type":"text","text":"hi"}],"stop_reason":"end_turn"}`))
+	}))
+	defer srv.Close()
+
+	resp, err := newProvider(t, srv.URL).Complete(context.Background(), llm.Request{})
+	if err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if len(resp.Message.Parts) != 1 {
+		t.Fatalf("the answer has %d parts, want only the text that carries something", len(resp.Message.Parts))
+	}
+	if resp.Message.Text() != "hi" {
+		t.Fatalf("text = %q, want hi", resp.Message.Text())
+	}
+}
+
+func TestProvider_KeepsTheHistorySendable(t *testing.T) {
+	// A gateway that answers a tool call with arguments that are not
+	// an object leaves the history unsendable: every turn that
+	// replays it fails. The call carries no arguments instead.
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &body)
+		w.Write([]byte(`{"content":[{"type":"tool_use","id":"toolu_1","name":"run_step","input":"oops"}],"stop_reason":"tool_use"}`))
+	}))
+	defer srv.Close()
+
+	resp, err := newProvider(t, srv.URL).Complete(context.Background(), llm.Request{})
+	if err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	calls := resp.Message.ToolCalls()
+	if len(calls) != 1 {
+		t.Fatalf("the answer has %d tool calls, want 1", len(calls))
+	}
+	if string(calls[0].Args) != "{}" {
+		t.Fatalf("the tool call carries the arguments %s, want an empty object", calls[0].Args)
+	}
+
+	// The call replays into the next turn without a failure.
+	_, err = newProvider(t, srv.URL).Complete(context.Background(), llm.Request{
+		Messages: []llm.Message{resp.Message},
+	})
+	if err != nil {
+		t.Fatalf("the call was not replayable: %v", err)
+	}
+	msgs, _ := body["messages"].([]any)
+	assistant, _ := msgs[0].(map[string]any)
+	blocks, _ := assistant["content"].([]any)
+	call, _ := blocks[0].(map[string]any)
+	input, _ := call["input"].(map[string]any)
+	if input == nil || len(input) != 0 {
+		t.Fatalf("the tool call went out with the input %v, want an empty object", call["input"])
+	}
+}
+
+func TestProvider_ReadsAnUntypedPartAsText(t *testing.T) {
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &body)
+		w.Write([]byte(`{"content":[],"stop_reason":"end_turn"}`))
+	}))
+	defer srv.Close()
+
+	_, err := newProvider(t, srv.URL).Complete(context.Background(), llm.Request{
+		Messages: []llm.Message{{Role: llm.RoleUser, Parts: []llm.Part{{Text: "hi"}}}},
+	})
+	if err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	msgs, _ := body["messages"].([]any)
+	if len(msgs) != 1 {
+		t.Fatalf("the request carried %d messages, want the user message", len(msgs))
+	}
+	user, _ := msgs[0].(map[string]any)
+	blocks, _ := user["content"].([]any)
+	if len(blocks) != 1 {
+		t.Fatalf("the user turn carried %d blocks, want the text", len(blocks))
+	}
+	block, _ := blocks[0].(map[string]any)
+	if block["type"] != "text" || block["text"] != "hi" {
+		t.Fatalf("the block went out as %v, want the text of the part", block)
+	}
+}
+
+func TestProvider_DropsAnEmptyTextPart(t *testing.T) {
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &body)
+		w.Write([]byte(`{"content":[],"stop_reason":"end_turn"}`))
+	}))
+	defer srv.Close()
+
+	_, err := newProvider(t, srv.URL).Complete(context.Background(), llm.Request{
+		Messages: []llm.Message{{Role: llm.RoleUser, Parts: []llm.Part{
+			{Type: llm.PartText, Text: ""},
+			{Type: llm.PartText, Text: "hi"},
+		}}},
+	})
+	if err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	msgs, _ := body["messages"].([]any)
+	user, _ := msgs[0].(map[string]any)
+	blocks, _ := user["content"].([]any)
+	if len(blocks) != 1 {
+		t.Fatalf("the user turn carried %d blocks, want only the text that carries something", len(blocks))
+	}
+	block, _ := blocks[0].(map[string]any)
+	if block["text"] != "hi" {
+		t.Fatalf("the block went out as %v, want the text that carries something", block)
+	}
+}
+
 func TestNew_IsRegisteredUnderItsName(t *testing.T) {
 	p, err := llm.New(llm.Config{Provider: "anthropic", BaseURL: "https://example.test", Model: "m"})
 	if err != nil {

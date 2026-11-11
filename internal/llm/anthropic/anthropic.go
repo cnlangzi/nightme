@@ -141,13 +141,15 @@ func (p *Provider) Complete(ctx context.Context, req llm.Request) (*llm.Response
 		return nil, err
 	}
 
-	out := &llm.Response{
-		StopReason: llm.StopEnd,
-		Message:    llm.Message{Role: llm.RoleAssistant},
-	}
+	out := &llm.Response{Message: llm.Message{Role: llm.RoleAssistant}}
 	for _, b := range answer.Content {
 		switch b.Type {
 		case "text":
+			// A text block without text is not one: the API refuses
+			// it, and it would poison every turn that replays it.
+			if b.Text == "" {
+				continue
+			}
 			out.Message.Parts = append(out.Message.Parts, llm.Part{Type: llm.PartText, Text: b.Text})
 		case "tool_use":
 			out.Message.Parts = append(out.Message.Parts, llm.Part{
@@ -217,11 +219,15 @@ func toWireMessage(m llm.Message) (wireMessage, error) {
 	for _, p := range m.Parts {
 		switch p.Type {
 		case llm.PartText:
+			// The API refuses a text block without text.
+			if p.Text == "" {
+				continue
+			}
 			blocks = append(blocks, wireBlock{Type: "text", Text: p.Text})
 		case llm.PartToolCall:
-			input, err := wireInput(p.Args, p.ToolName)
+			input, err := wireInput(p.Args)
 			if err != nil {
-				return wireMessage{}, err
+				return wireMessage{}, fmt.Errorf("llm/anthropic: the arguments of %s are not a JSON object: %w", p.ToolName, err)
 			}
 			blocks = append(blocks, wireBlock{
 				Type:  "tool_use",
@@ -237,6 +243,12 @@ func toWireMessage(m llm.Message) (wireMessage, error) {
 				Content:   &text,
 				IsError:   p.IsError,
 			})
+		default:
+			// A part without a type that carries text is text — the
+			// neutral message reads it that way.
+			if p.Type == "" && p.Text != "" {
+				blocks = append(blocks, wireBlock{Type: "text", Text: p.Text})
+			}
 		}
 	}
 	return wireMessage{Role: role, Content: blocks}, nil
@@ -245,14 +257,14 @@ func toWireMessage(m llm.Message) (wireMessage, error) {
 // wireInput renders the arguments of a tool call as the JSON object
 // the API wants. An empty argument list is an empty object; arguments
 // that are not an object cannot be sent at all.
-func wireInput(args json.RawMessage, tool string) (json.RawMessage, error) {
+func wireInput(args json.RawMessage) (json.RawMessage, error) {
 	trimmed := bytes.TrimSpace(args)
 	if len(trimmed) == 0 {
 		return json.RawMessage(`{}`), nil
 	}
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(trimmed, &obj); err != nil {
-		return nil, fmt.Errorf("llm/anthropic: the arguments of %s are not a JSON object: %w", tool, err)
+		return nil, err
 	}
 	if obj == nil {
 		return json.RawMessage(`{}`), nil
@@ -260,13 +272,17 @@ func wireInput(args json.RawMessage, tool string) (json.RawMessage, error) {
 	return json.RawMessage(trimmed), nil
 }
 
-// toolArgs reads the arguments of a tool call out of an answer. The
-// API sends an object; a call without one carries no arguments.
+// toolArgs reads the arguments of a tool call out of an answer.
+//
+// The API sends an object. A call that carries anything else carries
+// no arguments: the history has to stay sendable, and a tool call
+// without arguments comes back as an error the model can correct.
 func toolArgs(input json.RawMessage) json.RawMessage {
-	if len(bytes.TrimSpace(input)) == 0 {
+	args, err := wireInput(input)
+	if err != nil {
 		return json.RawMessage(`{}`)
 	}
-	return input
+	return args
 }
 
 // toolSchema renders the schema of a tool. The API wants a JSON

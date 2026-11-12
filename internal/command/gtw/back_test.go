@@ -239,7 +239,7 @@ func TestRunBack_RunsSync(t *testing.T) {
 // TestRunBack_SyncFails: a sync error surfaces a ❌ card AFTER
 // the back-success card. The back card must still stand (the
 // cwd swap genuinely succeeded) — close has the same contract;
-// see close.go step 10's "Single terminal step" comment.
+// see close.go step 9's "Single terminal step" comment.
 func TestRunBack_SyncFails(t *testing.T) {
 	wt := t.TempDir()
 	repoRoot := t.TempDir()

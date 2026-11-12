@@ -40,7 +40,7 @@ import (
 //
 // Skipped vs RunClose (each with the why):
 //
-//   - Step 2.5 EvictAgentSessionsInCwd(c.Worktree): the worktree
+//   - Step 2.6 EvictAgentSessionsInCwd(c.Worktree): the worktree
 //     is NOT being removed, so any ASes pinned to it must stay
 //     alive. The user may `/cwd` back into the worktree to
 //     continue.
@@ -54,10 +54,6 @@ import (
 //     non-destructive premise.
 //   - Step 6.5 PR cache clear: the branch is still alive;
 //     caching is still valid.
-//   - Step 7 slot.Store(Context{}): the fix is still in flight
-//     per the yml; reaction handlers for the same worktree
-//     should keep routing. (Clearing would silently break
-//     reactions if the user /cwd's back into the worktree.)
 func RunBack(
 	ctx context.Context,
 	cs *chatsession.ChatSession,

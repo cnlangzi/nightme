@@ -490,16 +490,21 @@ func shutdownExitDiagnostic() *agent.BridgeDiagnostic {
 	}
 }
 
-// TestChatSession_RouteEvent_RewritesShutdownExit — a child the
-// daemon stopped on purpose must reach the chat as a shutdown
-// notice, not as a crash.
-func TestChatSession_RouteEvent_RewritesShutdownExit(t *testing.T) {
+// shutdownChatFixture wires a chat with one live agent session and
+// returns the channel the routed agent events arrive on.
+//
+// The per-AS subscription is installed before the caller can
+// subscribe to the AS event bus, so the chat's own routing runs
+// first — that ordering is what the "the original event is not
+// mutated" test needs.
+func shutdownChatFixture(t *testing.T) (*ChatSession, *AgentSession, *fakeAgentSession, <-chan *agent.AgentEvent) {
+	t.Helper()
 	cs := newChatSessionForTest("cs_test")
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	t.Cleanup(cancel)
 
 	as, fake := makeSpawnedAS(t, cs, "pi", ctx)
-	defer as.Shutdown()
+	t.Cleanup(as.Shutdown)
 
 	cs.attachAllPendingSubscriptions()
 
@@ -511,14 +516,27 @@ func TestChatSession_RouteEvent_RewritesShutdownExit(t *testing.T) {
 		}
 		return false
 	})
+	return cs, as, fake, got
+}
 
-	cs.MarkShuttingDown()
-	fake.PushEvent(agent.AgentEvent{
+// shutdownExitEvent is the event a bridge emits when its child dies.
+func shutdownExitEvent() agent.AgentEvent {
+	return agent.AgentEvent{
 		Kind:       agent.EventAgentError,
 		AgentName:  "pi",
 		Err:        errors.New("pi: lifecycle exit clean-exit: <nil>"),
 		Diagnostic: shutdownExitDiagnostic(),
-	})
+	}
+}
+
+// TestChatSession_RouteEvent_RewritesShutdownExit — a child the
+// daemon stopped on purpose must reach the chat as a shutdown
+// notice, not as a crash.
+func TestChatSession_RouteEvent_RewritesShutdownExit(t *testing.T) {
+	cs, _, fake, got := shutdownChatFixture(t)
+
+	cs.MarkShuttingDown()
+	fake.PushEvent(shutdownExitEvent())
 
 	select {
 	case ev := <-got:
@@ -549,30 +567,9 @@ func TestChatSession_RouteEvent_RewritesShutdownExit(t *testing.T) {
 // TestChatSession_RouteEvent_KeepsExitWhenNotShuttingDown — a CLI
 // that died on its own keeps today's message.
 func TestChatSession_RouteEvent_KeepsExitWhenNotShuttingDown(t *testing.T) {
-	cs := newChatSessionForTest("cs_test")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	_, _, fake, got := shutdownChatFixture(t)
 
-	as, fake := makeSpawnedAS(t, cs, "pi", ctx)
-	defer as.Shutdown()
-
-	cs.attachAllPendingSubscriptions()
-
-	got := make(chan *agent.AgentEvent, 1)
-	cs.AgentEventBus.Subscribe(func(env AgentEventEnvelope) bool {
-		select {
-		case got <- env.Event:
-		default:
-		}
-		return false
-	})
-
-	fake.PushEvent(agent.AgentEvent{
-		Kind:       agent.EventAgentError,
-		AgentName:  "pi",
-		Err:        errors.New("pi: lifecycle exit clean-exit: <nil>"),
-		Diagnostic: shutdownExitDiagnostic(),
-	})
+	fake.PushEvent(shutdownExitEvent())
 
 	select {
 	case ev := <-got:
@@ -597,23 +594,7 @@ func TestChatSession_RouteEvent_KeepsExitWhenNotShuttingDown(t *testing.T) {
 // process exits carry a Diagnostic; a turn or wire error must pass
 // through untouched even while the daemon is shutting down.
 func TestChatSession_RouteEvent_KeepsErrorWithoutDiagnostic(t *testing.T) {
-	cs := newChatSessionForTest("cs_test")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	as, fake := makeSpawnedAS(t, cs, "pi", ctx)
-	defer as.Shutdown()
-
-	cs.attachAllPendingSubscriptions()
-
-	got := make(chan *agent.AgentEvent, 1)
-	cs.AgentEventBus.Subscribe(func(env AgentEventEnvelope) bool {
-		select {
-		case got <- env.Event:
-		default:
-		}
-		return false
-	})
+	cs, _, fake, got := shutdownChatFixture(t)
 
 	cs.MarkShuttingDown()
 	fake.PushEvent(agent.AgentEvent{
@@ -638,14 +619,7 @@ func TestChatSession_RouteEvent_KeepsErrorWithoutDiagnostic(t *testing.T) {
 // the rewrite works on a copy: the bridge's own event keeps the
 // error and the diagnostic it produced.
 func TestChatSession_RouteEvent_ShutdownExit_LeavesOriginalIntact(t *testing.T) {
-	cs := newChatSessionForTest("cs_test")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	as, fake := makeSpawnedAS(t, cs, "pi", ctx)
-	defer as.Shutdown()
-
-	cs.attachAllPendingSubscriptions()
+	cs, as, fake, rewritten := shutdownChatFixture(t)
 
 	// Subscribe AFTER the chat's own subscription so this handler
 	// runs after routeEvent: a rewrite that mutated the event in
@@ -661,22 +635,8 @@ func TestChatSession_RouteEvent_ShutdownExit_LeavesOriginalIntact(t *testing.T) 
 		return false
 	})
 
-	rewritten := make(chan *agent.AgentEvent, 1)
-	cs.AgentEventBus.Subscribe(func(env AgentEventEnvelope) bool {
-		select {
-		case rewritten <- env.Event:
-		default:
-		}
-		return false
-	})
-
 	cs.MarkShuttingDown()
-	fake.PushEvent(agent.AgentEvent{
-		Kind:       agent.EventAgentError,
-		AgentName:  "pi",
-		Err:        errors.New("pi: lifecycle exit clean-exit: <nil>"),
-		Diagnostic: shutdownExitDiagnostic(),
-	})
+	fake.PushEvent(shutdownExitEvent())
 
 	select {
 	case ev := <-rewritten:
@@ -714,31 +674,10 @@ func TestChatSession_RouteEvent_ShutdownExit_LogsOriginal(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&safeLogWriter{w: &buf, mu: &mu}, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
-	cs := newChatSessionForTest("cs_test")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	as, fake := makeSpawnedAS(t, cs, "pi", ctx)
-	defer as.Shutdown()
-
-	cs.attachAllPendingSubscriptions()
-
-	got := make(chan *agent.AgentEvent, 1)
-	cs.AgentEventBus.Subscribe(func(env AgentEventEnvelope) bool {
-		select {
-		case got <- env.Event:
-		default:
-		}
-		return false
-	})
+	cs, _, fake, got := shutdownChatFixture(t)
 
 	cs.MarkShuttingDown()
-	fake.PushEvent(agent.AgentEvent{
-		Kind:       agent.EventAgentError,
-		AgentName:  "pi",
-		Err:        errors.New("pi: lifecycle exit clean-exit: <nil>"),
-		Diagnostic: shutdownExitDiagnostic(),
-	})
+	fake.PushEvent(shutdownExitEvent())
 
 	select {
 	case <-got:

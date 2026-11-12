@@ -172,6 +172,12 @@ type BridgeDiagnostic struct {
 	KilledAt time.Time
 }
 
+// IsShutdown reports whether the exit was caused by the NightMe
+// daemon's shutdown rather than by a crash. Nil-safe.
+func (d *BridgeDiagnostic) IsShutdown() bool {
+	return d != nil && d.ExitKind == BridgeExitShutdown
+}
+
 // ClassifyExit maps (waitErr, graceful) into a BridgeExitKind.
 // Shared across all bridges so the recovery policy sees the same
 // taxonomy regardless of which bridge died.

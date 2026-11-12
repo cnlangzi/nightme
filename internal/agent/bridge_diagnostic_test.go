@@ -309,16 +309,33 @@ func TestBridgeExitKind_ZeroValue(t *testing.T) {
 // applied by the chat layer.
 func TestClassifyExit_NeverReturnsShutdown(t *testing.T) {
 	cases := []struct {
+		name     string
 		waitErr  error
 		graceful bool
 	}{
-		{nil, false},
-		{nil, true},
-		{errors.New("boom"), false},
+		{"clean exit", nil, false},
+		{"graceful close", nil, true},
+		{"unknown error", errors.New("boom"), false},
 	}
 	for _, c := range cases {
 		if got := ClassifyExit(c.waitErr, c.graceful); got == BridgeExitShutdown {
-			t.Errorf("ClassifyExit(%v, %v) = shutdown, want a how-the-child-exited kind", c.waitErr, c.graceful)
+			t.Errorf("ClassifyExit(%s) = shutdown, want a how-the-child-exited kind", c.name)
 		}
+	}
+
+	// A child killed by a signal is the shape a real shutdown
+	// produces — that is the case a reader would doubt, so pin it
+	// against a process we kill ourselves.
+	cmd := exec.Command("sh", "-c", "sleep 30")
+	if err := cmd.Start(); err != nil {
+		t.Skipf("cannot start sleep: %v", err)
+	}
+	_ = cmd.Process.Kill()
+	err := cmd.Wait()
+	if err == nil {
+		t.Skip("the child exited cleanly; there is no signal exit to classify")
+	}
+	if got := ClassifyExit(err, false); got == BridgeExitShutdown {
+		t.Errorf("ClassifyExit(signal, false) = shutdown, want a how-the-child-exited kind")
 	}
 }

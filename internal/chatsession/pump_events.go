@@ -253,6 +253,11 @@ func (cs *ChatSession) routeEvent(as *AgentSession, ev EnrichedEvent) {
 //
 // The event and the diagnostic are copied, never mutated: the
 // bridge's own event stays intact for every other subscriber.
+//
+// A child that crashed on its own moments before the shutdown, but
+// whose exit event is routed after the mark landed, is attributed to
+// the shutdown as well. The daemon log keeps the real exit kind and
+// stderr tail, so the triage data survives the misattribution.
 func (cs *ChatSession) rewriteShutdownExit(as *AgentSession, ev *agent.AgentEvent) *agent.AgentEvent {
 	if !cs.IsShuttingDown() {
 		return ev

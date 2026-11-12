@@ -340,13 +340,16 @@ func TestSend_ErrorCarriesStderrTail(t *testing.T) {
 
 // TestSend_ErrorShutdownExit_NoErrorMarker — a child the daemon
 // stopped on purpose is not a crash, so the notice keeps its own ℹ️
-// marker instead of the ⚠️ error one.
+// marker instead of the ⚠️ error one, and carries no stderr tail.
 func TestSend_ErrorShutdownExit_NoErrorMarker(t *testing.T) {
 	api := newFakeAPI()
 	a := newTestAdapter(t, api, newFakeSocket())
 
 	msg := outbound(messages.OutError, "ℹ️ NightMe is shutting down — the claude agent was stopped.")
-	msg.Diagnostic = &agent.BridgeDiagnostic{ExitKind: agent.BridgeExitShutdown}
+	msg.Diagnostic = &agent.BridgeDiagnostic{
+		ExitKind:   agent.BridgeExitShutdown,
+		StderrTail: "unrecognized_model",
+	}
 	if err := a.Send(context.Background(), msg); err != nil {
 		t.Fatalf("send: %v", err)
 	}
@@ -356,6 +359,9 @@ func TestSend_ErrorShutdownExit_NoErrorMarker(t *testing.T) {
 	}
 	if strings.Contains(text, "⚠️") {
 		t.Errorf("shutdown notice must not carry the error marker: %q", text)
+	}
+	if strings.Contains(text, "unrecognized_model") {
+		t.Errorf("shutdown notice must not carry the stderr tail: %q", text)
 	}
 }
 

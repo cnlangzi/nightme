@@ -1912,7 +1912,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// A shutdown exit is not a crash: the daemon stopped the
 		// child on purpose, so the card gets a calm title, a blue
 		// header, and no stderr tail — the daemon log keeps it.
-		shutdown := isShutdownExit(msg)
+		shutdown := msg.Diagnostic.IsShutdown()
 		body := msg.Text
 		if !shutdown && msg.Diagnostic != nil && msg.Diagnostic.StderrTail != "" && !strings.Contains(body, msg.Diagnostic.StderrTail) {
 			body = body + "\n\n--- stderr tail ---\n" + msg.Diagnostic.StderrTail
@@ -2510,12 +2510,6 @@ func encodeErrorCard(title, body, template string) (string, error) {
 	return string(b), nil
 }
 
-// isShutdownExit reports whether the error is the daemon's own
-// shutdown notice rather than a crash.
-func isShutdownExit(msg messages.OutboundMessage) bool {
-	return msg.Diagnostic != nil && msg.Diagnostic.ExitKind == agent.BridgeExitShutdown
-}
-
 // errorCardChrome picks the title + header template of an OutError
 // card.
 //
@@ -2523,7 +2517,7 @@ func isShutdownExit(msg messages.OutboundMessage) bool {
 // purpose, so the card gets a calm title and a blue header instead
 // of the red "bridge died" one.
 func errorCardChrome(msg messages.OutboundMessage) (string, string) {
-	if isShutdownExit(msg) {
+	if msg.Diagnostic.IsShutdown() {
 		return "NightMe shutdown", "blue"
 	}
 	title := "⚠️ bridge died"

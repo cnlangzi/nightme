@@ -199,6 +199,12 @@ func snapshotManagers() []*chatsession.Manager {
 // marks every known chat as shutting down FIRST: the exit events
 // that follow have to be attributed to the shutdown instead of
 // being reported as crashes.
+//
+// The scope is cancelled exactly once, at teardown. ChatSession's
+// shutting-down flag is one-way, so a cancel that did NOT mean "the
+// daemon is going away" would misreport every later crash as a
+// shutdown notice and record exit code -4 instead of 0. Do not
+// reuse the scope for anything else.
 func newProcScope() (context.Context, context.CancelFunc) {
 	scope, cancel := context.WithCancel(context.Background())
 	return scope, func() {

@@ -593,13 +593,13 @@ func (a *Adapter) formatError(msg messages.OutboundMessage) string {
 	}
 	// A shutdown exit is not a crash: the daemon stopped the agent on
 	// purpose, so the notice keeps its own ℹ️ marker instead of the
-	// error one.
+	// error one, and carries no stderr tail — the daemon log keeps it.
 	out := text
-	if msg.Diagnostic == nil || msg.Diagnostic.ExitKind != agent.BridgeExitShutdown {
+	if !msg.Diagnostic.IsShutdown() {
 		out = "⚠️ " + text
-	}
-	if msg.Diagnostic != nil && msg.Diagnostic.StderrTail != "" {
-		out += "\n```\n" + truncateRunes(msg.Diagnostic.StderrTail, 1500) + "\n```"
+		if msg.Diagnostic != nil && msg.Diagnostic.StderrTail != "" {
+			out += "\n```\n" + truncateRunes(msg.Diagnostic.StderrTail, 1500) + "\n```"
+		}
 	}
 	return out
 }

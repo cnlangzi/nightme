@@ -20,7 +20,7 @@ import (
 // gtw.yml — and then run `gtw sync` on the main repo so the next
 // /gtw fix has a clean baseline.
 //
-// Flow (mirrors RunClose, drops the destructive + reset steps):
+// Flow (mirrors RunClose, drops the destructive steps):
 //
 //  1. Read `<cs.SelectedCwd()>/.nightme/gtw.yml` (same source
 //     of truth RunClose uses — no walk-up by design, see
@@ -58,10 +58,6 @@ import (
 //     per the yml; reaction handlers for the same worktree
 //     should keep routing. (Clearing would silently break
 //     reactions if the user /cwd's back into the worktree.)
-//   - Step 9 /new: back is reversible — the user might resume
-//     the fix in minutes. Forcing a context reset would be
-//     hostile. RunClose does /new because its whole purpose is
-//     "tear down the experiment, start fresh".
 func RunBack(
 	ctx context.Context,
 	cs *chatsession.ChatSession,
@@ -186,7 +182,7 @@ func RunBack(
 	// skip) fall through to the same return.
 	syncBody, _, syncErr := buildSyncReply(ctx, c.RepoRoot, deps)
 	if syncErr != nil {
-		// Same pattern as RunClose's step 10: stamp a ❌ prefix
+		// Same pattern as RunClose's step 9: stamp a ❌ prefix
 		// unconditionally so the user can tell the sync failure
 		// apart from the back-success card above. RefreshDefaultBranch
 		// returns plain fmt.Errorf values whose messages already

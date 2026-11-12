@@ -486,16 +486,18 @@ me:
     min_confidence: 0.8           # 低于这个置信度就升级
 ```
 
+`provider` 决定用哪个 chat provider，`protocol` 决定用哪个决策协议：`me.llm` 不写 `provider`、或者 `me.decider` 不写 `protocol`，就等于这一半根本没有配。
+
 **`base_url` 是 API 的根**——endpoint 的路径由它拼出来：
 
-| `provider` / `protocol` | 调用的 endpoint | 可用的根 |
+| `provider` / `protocol` | 调用的 endpoint | 根 |
 |---|---|---|
 | `openai` | `<base_url>/chat/completions` | `https://api.openai.com/v1` |
 | `anthropic` | `<base_url>/v1/messages` | `https://api.anthropic.com` |
-| `decisions` | `<base_url>/v1/decisions` | `https://api.typesafe.ai` |
+| `decisions` | `<base_url>/v1/decisions` | `https://openrouter.ai/api/v1` |
 | `systemone` | `<base_url>/v1/systemone` | `https://api.typesafe.ai` |
 
-决策协议只在根里没有 `/v1` 时才补上：`https://openrouter.ai/api/v1` 保持原样，`https://api.typesafe.ai` 变成 `https://api.typesafe.ai/v1/decisions`。
+决策协议只在根里没有 `/v1` 时才补上：`https://openrouter.ai/api/v1` 变成 `https://openrouter.ai/api/v1/decisions`，`https://api.typesafe.ai` 变成 `https://api.typesafe.ai/v1/systemone`。
 
 **凭据。** `api_key_env` 写的是环境变量的名字——上面是 `OPENAI_API_KEY`。key 本身永远不写进配置文件：配置文件只写变量名，daemon 从自己的环境里读这个变量。接口不需要鉴权时 `api_key_env` 可以留空——这时请求不带任何鉴权头。
 
@@ -539,7 +541,7 @@ steps:
 | playbook 字段 | 含义 |
 |---|---|
 | `name` | playbook 的名字。`/me start <name>` 按名字取。 |
-| `args` | 参数名。`/me start fix-issue 42` 把 `42` 映射到 `id`。 |
+| `args` | 这个 playbook 接受的参数名。`/me start <playbook> [args...]` 把位置参数按顺序映射到它们。 |
 | `goal` | 这次运行为了什么。它是模型指令的一部分。 |
 | `max_actions` | 整个 playbook 的动作预算。默认 30。 |
 | `instruct` | agent 能不能发自由指令。默认 true。 |
@@ -552,9 +554,9 @@ steps:
 | `run` | 这个 step 执行的命令。 |
 | `note` | 这个 step 为什么在这儿，额外的命令什么时候用。它是决策模型读的那段描述。 |
 | `allow` | 这个 step 里 agent 还能用的额外命令。 |
-| `max` | 这个 step 能走的动作数。0 表示自己不设上限。 |
+| `max` | 这个 step 能走的动作数。不填这一项就不设上限——`max: 0` 会被拒绝。 |
 
-只支持 `${{ args.NAME }}`，而且只能用于声明过的参数。其它表达式在加载 playbook 时就会被拒绝。
+只支持 `${{ args.NAME }}`，而且只能用于声明过的参数。其它表达式在运行开始时就会被拒绝。
 
 playbook 既是 agent 的指令，也是它的边界：步骤说做什么，`max_actions`、`max` 和 `allow` 说最多能走多远。
 
@@ -587,8 +589,9 @@ playbook 既是 agent 的指令，也是它的边界：步骤说做什么，`max
 | `there is no playbook named "<name>" (known: ...)` | 没有名字叫这个的 playbook。 |
 | `neither me.llm nor me.decider is configured` | 两个模型都没配，agent 没有可决策的东西。 |
 | `there are no playbooks in <dir>` | workflows 目录里没有 playbook。 |
+| `me is disabled: the playbooks in <dir> cannot be loaded: ...` | workflows 目录里的 YAML 写坏了。 |
 
-workflows 目录里的 YAML 写坏了，workflow 服务和个人 agent 都起不来。`nightme logs` 会报出来。
+workflows 目录里的 YAML 写坏了，workflow 服务和个人 agent 都起不来——`nightme logs` 会报出来。daemon 照常起来，`/me` 用加载错误拒绝每一次运行。
 
 ### 护栏与参考
 

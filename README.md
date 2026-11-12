@@ -534,18 +534,22 @@ me:
     min_confidence: 0.8           # below this the agent escalates
 ```
 
+`provider` is what selects the chat provider and `protocol` the decision protocol: a
+`me.llm` block without a `provider`, or a `me.decider` block without a
+`protocol`, counts as no model at all.
+
 **`base_url` is the root of the API** — the path of the endpoint is added to it:
 
-| `provider` / `protocol` | The endpoint it calls | A root you can use |
+| `provider` / `protocol` | The endpoint it calls | Base |
 |---|---|---|
 | `openai` | `<base_url>/chat/completions` | `https://api.openai.com/v1` |
 | `anthropic` | `<base_url>/v1/messages` | `https://api.anthropic.com` |
-| `decisions` | `<base_url>/v1/decisions` | `https://api.typesafe.ai` |
+| `decisions` | `<base_url>/v1/decisions` | `https://openrouter.ai/api/v1` |
 | `systemone` | `<base_url>/v1/systemone` | `https://api.typesafe.ai` |
 
 The decision protocols add `/v1` only when the base does not carry it:
-`https://openrouter.ai/api/v1` stays as it is, and `https://api.typesafe.ai`
-becomes `https://api.typesafe.ai/v1/decisions`.
+`https://openrouter.ai/api/v1` becomes `https://openrouter.ai/api/v1/decisions`,
+and `https://api.typesafe.ai` becomes `https://api.typesafe.ai/v1/systemone`.
 
 **The credential.** `api_key_env` names an environment variable — `OPENAI_API_KEY`
 above. The key itself is never written to the config file: the file names the
@@ -598,7 +602,7 @@ steps:
 | Playbook field | Meaning |
 |---|---|
 | `name` | The playbook's name. `/me start <name>` picks it. |
-| `args` | The names of the arguments. `/me start fix-issue 42` maps `42` onto `id`. |
+| `args` | The names of the arguments the playbook takes. `/me start <playbook> [args...]` maps its positional arguments onto them, in order. |
 | `goal` | What the run is for. It is part of the model's instructions. |
 | `max_actions` | The action budget of the whole playbook. Default 30. |
 | `instruct` | Whether the agent may send free-form instructions. Default true. |
@@ -611,10 +615,10 @@ A step is either a plain string — shorthand for `run` — or a mapping:
 | `run` | The command the step performs. |
 | `note` | Why the step is there, and when the extra commands apply. It is the description the decision model reads. |
 | `allow` | The extra commands the agent may use inside the step. |
-| `max` | The number of actions the step may take. 0 means no limit of its own. |
+| `max` | The number of actions the step may take. Leave the key out for no limit of its own — `max: 0` is refused. |
 
 Only `${{ args.NAME }}` is supported, and only for a declared argument. Any other
-expression is refused when the playbook is loaded.
+expression is refused when the run starts.
 
 A playbook is both the agent's instruction and its bound: the steps say what to
 do, and `max_actions`, `max` and `allow` say how far the run may go.
@@ -650,9 +654,11 @@ and answers the questions. The agent works in an internal chat you never see.
 | `there is no playbook named "<name>" (known: ...)` | No loaded playbook carries that name. |
 | `neither me.llm nor me.decider is configured` | Neither model is configured, so the agent has nothing to decide with. |
 | `there are no playbooks in <dir>` | The workflows directory holds no playbook. |
+| `me is disabled: the playbooks in <dir> cannot be loaded: ...` | The YAML in the workflows directory is broken. |
 
 A YAML error in the workflows directory stops both the workflow service and the
-personal agent from starting. `nightme logs` reports it.
+personal agent from starting — `nightme logs` reports it. The daemon still comes
+up, and `/me` refuses every run with the load error.
 
 ### Guardrails and reference
 

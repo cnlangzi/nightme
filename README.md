@@ -501,11 +501,183 @@ branch name is derived from them.
 
 The YAML schema — `on:` triggers, `worker:`, `jobs.<name>.steps`, `${{ }}` expressions — is documented in [`docs/WFE.md`](./docs/WFE.md).
 
+## Personal agent (`/me`)
+
+`me` runs a **playbook** in the chat you start it from. A playbook is an ordered
+list of steps plus the constraints around them. The agent drives NightMe the way
+you do — every command is a real message with a real id, and every command
+reports a structured outcome — so it decides the next step from facts instead of
+from prose.
+
+### Configure the models
+
+Two model capabilities, both optional, both yours to pick:
+
+| Capability | Config key | What it does |
+|---|---|---|
+| **System 2 — the chat model** | `me.llm` | Drives the run when the decision model is not sure. |
+| **System 1 — the decision model** | `me.decider` | Decides the next step after each step settles. |
+
+```yaml
+me:
+  llm:
+    provider: openai              # a registered chat provider: openai | anthropic
+    base_url: https://api.openai.com/v1
+    model: gpt-4.1-mini
+    api_key_env: OPENAI_API_KEY   # the key is read from the environment, never stored in the config
+    max_tokens: 4096
+  decider:
+    protocol: decisions           # decisions | systemone
+    base_url: https://openrouter.ai/api/v1
+    model: typesafe/jev-1.14
+    api_key_env: OPENROUTER_API_KEY
+    min_confidence: 0.8           # below this the agent escalates
+```
+
+`provider` is what selects the chat provider and `protocol` the decision protocol: a
+`me.llm` block without a `provider`, or a `me.decider` block without a
+`protocol`, counts as no model at all.
+
+**`base_url` is the root of the API** — the path of the endpoint is added to it:
+
+| `provider` / `protocol` | The endpoint it calls | Base |
+|---|---|---|
+| `openai` | `<base_url>/chat/completions` | `https://api.openai.com/v1` |
+| `anthropic` | `<base_url>/v1/messages` | `https://api.anthropic.com` |
+| `decisions` | `<base_url>/v1/decisions` | `https://openrouter.ai/api/v1` |
+| `systemone` | `<base_url>/v1/systemone` | `https://api.typesafe.ai` |
+
+The decision protocols add `/v1` only when the base does not carry it:
+`https://openrouter.ai/api/v1` becomes `https://openrouter.ai/api/v1/decisions`,
+and `https://api.typesafe.ai` becomes `https://api.typesafe.ai/v1/systemone`.
+
+**The credential.** `api_key_env` names an environment variable — `OPENAI_API_KEY`
+above. The key itself is never written to the config file: the file names the
+variable, and the daemon reads that variable from its own environment. Leave
+`api_key_env` empty when the endpoint needs no authentication — the request then
+carries no authentication header.
+
+**Three modes.** The agent runs as soon as one of the two halves is configured:
+
+| `me.llm` | `me.decider` | Behaviour |
+|---|---|---|
+| set | unset | Chat model only: the tool loop decides every step. |
+| unset | set | Decision model only: confident decisions run, everything else asks you. |
+| set | set | Decision model first; the chat model takes the escalations. |
+
+A model that is configured but cannot be built — an unknown provider, a missing
+key — is reported in `nightme logs` and left out. The daemon still starts, and
+`/me` says why it cannot run.
+
+### Write a playbook
+
+Playbooks live in `~/.nightme/workflows/*.yaml` — the same directory the
+workflows live in. Only `.yaml` files are loaded, and the top-level key decides
+what a file is:
+
+| Top-level key | The file is | Run by |
+|---|---|---|
+| `steps:` | a **playbook** | the personal agent — `/me start` |
+| `jobs:` | a **workflow** | the cron / event-driven workflow service |
+
+One file is never both: a file carrying `steps:` and `jobs:` is refused.
+
+The playbooks are read when the daemon starts. After you add or change one, run
+`nightme restart`.
+
+```yaml
+name: fix-issue
+goal: Fix issue with `nightme/assigned` and ship it as a PR.
+steps:
+  - /gtw fix * -y
+  - /gtw commit
+  - run: /review
+    note: If it fails or does not finish, continue with /review -c. If it passes and left changes, /gtw commit first.
+    allow: [/review -c, /gtw commit]
+    max: 5
+  - /gtw push
+  - /gtw pr
+```
+
+| Playbook field | Meaning |
+|---|---|
+| `name` | The playbook's name. `/me start <name>` picks it. |
+| `args` | The names of the arguments the playbook takes. `/me start <playbook> [args...]` maps its positional arguments onto them, in order. |
+| `goal` | What the run is for. It is part of the model's instructions. |
+| `max_actions` | The action budget of the whole playbook. Default 30. |
+| `instruct` | Whether the agent may send free-form instructions. Default true. |
+| `steps` | The ordered steps. |
+
+A step is either a plain string — shorthand for `run` — or a mapping:
+
+| Step field | Meaning |
+|---|---|
+| `run` | The command the step performs. |
+| `note` | Why the step is there, and when the extra commands apply. It is the description the decision model reads. |
+| `allow` | The extra commands the agent may use inside the step. |
+| `max` | The number of actions the step may take. Leave the key out for no limit of its own — `max: 0` is refused. |
+
+Only `${{ args.NAME }}` is supported, and only for a declared argument. Any other
+expression is refused when the run starts.
+
+A playbook is both the agent's instruction and its bound: the steps say what to
+do, and `max_actions`, `max` and `allow` say how far the run may go.
+
+### Run a playbook
+
+| Command | What it does |
+|---|---|
+| `/me start <playbook> [args...]` | Starts a playbook in this chat. The positional arguments map onto the playbook's declared arguments, in order. |
+| `/me reply <text>` | Answers the question the run is waiting for. |
+| `/me stop` | Cancels the run and stops the work chat. |
+| `/me status` | Reports the current step, the phase and the progress of the running command, the remaining budget, and what each capability decided and spent. |
+
+A chat without a workspace is refused — `No active workspace. Send /cwd <path> first.`
+The run inherits the chat's workspace and agent. A chat holds at most one run at a time.
+
+The chat that starts the run is the **observer chat**: it receives the progress
+and answers the questions. The agent works in an internal chat you never see.
+
+```
+▶ /gtw fix * -y
+✅ /gtw fix * -y
+▶ /review
+⚠️ /review incomplete · 1/3 groups unfinished
+❓ the review found 3 findings — apply them?
+✅ issue 42 is on its way · 6 actions · system-1: 0 decisions, 0 tokens · system-2: 8 decisions, 4210 tokens
+```
+
+### When it does not run
+
+| Message | What it means |
+|---|---|
+| `there is no playbook named "<name>" (known: ...)` | No loaded playbook carries that name. |
+| `neither me.llm nor me.decider is configured` | Neither model is configured, so the agent has nothing to decide with. |
+| `there are no playbooks in <dir>` | The workflows directory holds no playbook. |
+| `me is disabled: the playbooks in <dir> cannot be loaded: ...` | The YAML in the workflows directory is broken. |
+
+A YAML error in the workflows directory stops both the workflow service and the
+personal agent from starting — `nightme logs` reports it. The daemon still comes
+up, and `/me` refuses every run with the load error.
+
+### Guardrails and reference
+
+| Guardrail | Bound |
+|---|---|
+| Action budget | `max_actions` for the run (default 30), `max` for a step. |
+| Step timeout | Thirty minutes per command. |
+| Stall detection | Ten minutes without a heartbeat. |
+| Token budget | The tokens one run may spend on the chat model. |
+
+The full reference — the policy, the tools, both model capabilities and the
+guardrails — is in [`docs/WFE.md` §8](./docs/WFE.md#8-runtime-architecture).
+
 ## Slash commands
 
 Chat-level slash commands. The `/gtw` subcommands live in
 [their own section](#git-team-workflow-gtw) and are not listed
-here.
+here; the `/me` subcommands — `/me start` · `/me reply` · `/me stop` ·
+`/me status` — live in [their own section](#personal-agent-me).
 
 | Command | What it does |
 |---|---|
@@ -615,6 +787,8 @@ paths:
 ```
 
 The `/gtw` workflow reads a **separate** file: `~/.nightme/gtw.yml` — see the [Git Team Workflow section](#git-team-workflow-gtw) above.
+
+The personal agent's models live under `me:` — see the [Personal agent section](#personal-agent-me).
 
 See [`configs/nightme.example.yaml`](./configs/nightme.example.yaml) for the full schema and per-bridge notes.
 

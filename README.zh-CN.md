@@ -224,34 +224,6 @@ nightme start          # daemon 在后台跑起来
 
 ---
 
-## Slash commands
-
-Chat 级别的斜杠命令。`/gtw` 子命令见 [它们自己的 section](#git-team-workflow-gtw)，这里不列。
-
-| 命令 | 干什么 |
-|---|---|
-| `/cwd <path>` | 绑定这个 Chat 到一个工作区。会校验路径，下次发消息时 lazy-spawn。 |
-| `/use <agent>` | 切换当前 agent（`claude` / `codex` / `dsh` / `opencode` / `copilot` / `omp` / `pi`）。前一个 agent 切到后台继续跑——任务推进、结果照常回，只是新消息不再路由给它。 |
-| `/stop` | 停掉当前 agent 上的 in-flight turn。会话留着，队列里的消息继续流。 |
-| `/steer <msg>` | 停掉 in-flight turn 并把 `<msg>` 插到队首。下个 turn agent 第一眼看到的就是这条。 |
-| `/close [agent]` | 终止当前工作区里 AgentSession 的 bridge 进程。AgentSession 记录保留——下次发消息触发 respawn 时会用 `--resume <sessionID>` 接着聊。 |
-| `/new [agent]` | 重置 agent 对话上下文（Claude Code 的 `/clear` 等价）。进程保留，队列清空。 |
-| `/watch on\|off` | 当前 Chat 的消息监听模式（默认群内只听 `@bot` / `@_all`）。 |
-| `/think on\|off` | 是否在回复卡里展示 agent 思考过程。 |
-| `/tools on\|off` | 是否展示每个工具的独立线程回复（默认关）。 |
-| `/handoff <name>` | 把当前任务序列化到 `~/.nightme/handoff/<name>.md`，下一个 agent（或新 session）从任意目录接手。 |
-| `/resume <name>` | 在当前 session 里继续 `~/.nightme/handoff/<name>.md` 描述的任务。 |
-| `/review [-a\|--agent <agent>] [-g\|--global] [--unset] [-c\|--continue]` | 当前分支对比默认分支做 review（PR 模式），findings 注回当前 chat。`--agent` 指定用哪个 agent 跑 review；`-g` 把它存成 `~/.nightme/config.yaml` 里的全局 `review.agent`；`--unset` 删掉这个全局设置。`-c` 续跑本 chat 上一次 review 中失败的 group：重新打开那些 group 的 agent session，给它们发 "continue"。 |
-| `/wiki init [--modules] [--llmstxt] [--arch]` | 读码、分模块、写每个模块的 wiki 文件——把仓库 wiki 作为项目资产。 |
-| `/queue <message>` | 把一条消息作为独立 Prompt 追加进队列。 |
-| `/help` | 在 Chat 里列出所有斜杠命令。 |
-
-`!cmd` 在当前 Chat 的 CWD 里直接跑 shell 命令——规则见 [Shell mode](#shell-mode)。
-
-任何不匹配斜杠命令（或 `!cmd`）的消息，都会被透传到底层 agent 当作普通 prompt——跟你直接在 Claude Code 自己的 CLI 里发消息一样。NightMe 不拦截也不改写；agent 收到原样消息，会运行它自带的斜杠命令（例如 Claude Code 的 `/clear` / `/compact` / `/init` 等）。
-
----
-
 ## Always-in-the-loop
 
 你随时知道 agent 在哪、干到哪、烧了多少钱——每条回复都带一张固定页脚，写清楚关键信息，不用离开 chat。多数「AI 写代码 + 聊天」工具都跟黑盒一样；NightMe 把可视化当成一等公民。
@@ -485,6 +457,179 @@ Conventional Commits 的 type 关键词。issue 标题保持英文 / ASCII——
 
 YAML schema——`on:` 触发器、`worker:`、`jobs.<name>.steps`、`${{ }}` 表达式——见 [`docs/WFE.md`](./docs/WFE.md)。
 
+## 个人 Agent (`/me`)
+
+`me` 在你发起它的那个 chat 里跑一个 **playbook**。playbook 是一份有序的步骤清单加上围绕它的约束。agent 像你一样驱动 NightMe——每条命令都是一条带真实 id 的真实消息，每条命令都回报一个结构化结果——所以它是从事实而不是从文字里决定下一步。
+
+### 配置模型
+
+两个模型能力，都可选，都由你来选：
+
+| 能力 | 配置键 | 作用 |
+|---|---|---|
+| **System 2——chat 模型** | `me.llm` | 决策模型没把握时驱动这次运行。 |
+| **System 1——决策模型** | `me.decider` | 每一步落定之后决定下一步做什么。 |
+
+```yaml
+me:
+  llm:
+    provider: openai              # 已注册的 chat provider：openai | anthropic
+    base_url: https://api.openai.com/v1
+    model: gpt-4.1-mini
+    api_key_env: OPENAI_API_KEY   # key 从环境变量读，绝不写进配置
+    max_tokens: 4096
+  decider:
+    protocol: decisions           # decisions | systemone
+    base_url: https://openrouter.ai/api/v1
+    model: typesafe/jev-1.14
+    api_key_env: OPENROUTER_API_KEY
+    min_confidence: 0.8           # 低于这个置信度就升级
+```
+
+`provider` 决定用哪个 chat provider，`protocol` 决定用哪个决策协议：`me.llm` 不写 `provider`、或者 `me.decider` 不写 `protocol`，就等于这一半根本没有配。
+
+**`base_url` 是 API 的根**——endpoint 的路径由它拼出来：
+
+| `provider` / `protocol` | 调用的 endpoint | 根 |
+|---|---|---|
+| `openai` | `<base_url>/chat/completions` | `https://api.openai.com/v1` |
+| `anthropic` | `<base_url>/v1/messages` | `https://api.anthropic.com` |
+| `decisions` | `<base_url>/v1/decisions` | `https://openrouter.ai/api/v1` |
+| `systemone` | `<base_url>/v1/systemone` | `https://api.typesafe.ai` |
+
+决策协议只在根里没有 `/v1` 时才补上：`https://openrouter.ai/api/v1` 变成 `https://openrouter.ai/api/v1/decisions`，`https://api.typesafe.ai` 变成 `https://api.typesafe.ai/v1/systemone`。
+
+**凭据。** `api_key_env` 写的是环境变量的名字——上面是 `OPENAI_API_KEY`。key 本身永远不写进配置文件：配置文件只写变量名，daemon 从自己的环境里读这个变量。接口不需要鉴权时 `api_key_env` 可以留空——这时请求不带任何鉴权头。
+
+**三种模式。** 两半里配上一半，agent 就能跑：
+
+| `me.llm` | `me.decider` | 行为 |
+|---|---|---|
+| 已配 | 未配 | 只有 chat 模型：工具循环决定每一步。 |
+| 未配 | 已配 | 只有决策模型：有把握的决定直接执行，其余都问你。 |
+| 已配 | 已配 | 决策模型先行，需要升级的交给 chat 模型。 |
+
+配了但建不起来的模型——provider 认不出、key 缺失——会记在 `nightme logs` 里并被跳过。daemon 照常起来，`/me` 会说明它为什么跑不了。
+
+### 写一个 playbook
+
+playbook 放在 `~/.nightme/workflows/*.yaml`——和 workflow 同一个目录。只加载 `.yaml` 文件，文件顶层的键决定它是哪一种：
+
+| 顶层键 | 这个文件是 | 谁跑它 |
+|---|---|---|
+| `steps:` | 一个 **playbook** | 个人 agent——`/me start` |
+| `jobs:` | 一个 **workflow** | cron / 事件驱动的 workflow 服务 |
+
+一个文件不会同时是两者：同时带 `steps:` 和 `jobs:` 的文件会被拒绝。
+
+playbook 在 daemon 启动时读取。加了一个或者改了之后，跑 `nightme restart`。
+
+```yaml
+name: fix-issue
+goal: Fix issue with `nightme/assigned` and ship it as a PR.
+steps:
+  - /gtw fix * -y
+  - /gtw commit
+  - run: /review
+    note: If it fails or does not finish, continue with /review -c. If it passes and left changes, /gtw commit first.
+    allow: [/review -c, /gtw commit]
+    max: 5
+  - /gtw push
+  - /gtw pr
+```
+
+| playbook 字段 | 含义 |
+|---|---|
+| `name` | playbook 的名字。`/me start <name>` 按名字取。 |
+| `args` | 这个 playbook 接受的参数名。`/me start <playbook> [args...]` 把位置参数按顺序映射到它们。 |
+| `goal` | 这次运行为了什么。它是模型指令的一部分。 |
+| `max_actions` | 整个 playbook 的动作预算。默认 30。 |
+| `instruct` | agent 能不能发自由指令。默认 true。 |
+| `steps` | 有序的步骤。 |
+
+一个 step 可以是一个纯字符串——`run` 的简写——也可以是一个映射：
+
+| step 字段 | 含义 |
+|---|---|
+| `run` | 这个 step 执行的命令。 |
+| `note` | 这个 step 为什么在这儿，额外的命令什么时候用。它是决策模型读的那段描述。 |
+| `allow` | 这个 step 里 agent 还能用的额外命令。 |
+| `max` | 这个 step 能走的动作数。不填这一项就不设上限——`max: 0` 会被拒绝。 |
+
+只支持 `${{ args.NAME }}`，而且只能用于声明过的参数。其它表达式在运行开始时就会被拒绝。
+
+playbook 既是 agent 的指令，也是它的边界：步骤说做什么，`max_actions`、`max` 和 `allow` 说最多能走多远。
+
+### 跑一个 playbook
+
+| 命令 | 作用 |
+|---|---|
+| `/me start <playbook> [args...]` | 在当前 chat 里启动一个 playbook。位置参数按顺序映射到 playbook 声明的参数。 |
+| `/me reply <text>` | 回答运行正在等的问题。 |
+| `/me stop` | 取消这次运行并停掉 work chat。 |
+| `/me status` | 报告当前 step、运行中命令的阶段与进度、剩余预算，以及两个能力各自决定和花费了什么。 |
+
+没有工作区的 chat 会被拒绝——`No active workspace. Send /cwd <path> first.`。这次运行继承 chat 的工作区和 agent，一个 chat 同时最多有一次运行。
+
+发起运行的那个 chat 是 **observer chat**：它收进度、回答问题。agent 自己在另一个你看不到的内部 chat 里干活。
+
+```
+▶ /gtw fix * -y
+✅ /gtw fix * -y
+▶ /review
+⚠️ /review incomplete · 1/3 groups unfinished
+❓ the review found 3 findings — apply them?
+✅ issue 42 is on its way · 6 actions · system-1: 0 decisions, 0 tokens · system-2: 8 decisions, 4210 tokens
+```
+
+### 跑不起来的时候
+
+| 消息 | 意思 |
+|---|---|
+| `there is no playbook named "<name>" (known: ...)` | 没有名字叫这个的 playbook。 |
+| `neither me.llm nor me.decider is configured` | 两个模型都没配，agent 没有可决策的东西。 |
+| `there are no playbooks in <dir>` | workflows 目录里没有 playbook。 |
+| `me is disabled: the playbooks in <dir> cannot be loaded: ...` | workflows 目录里的 YAML 写坏了。 |
+
+workflows 目录里的 YAML 写坏了，workflow 服务和个人 agent 都起不来——`nightme logs` 会报出来。daemon 照常起来，`/me` 用加载错误拒绝每一次运行。
+
+### 护栏与参考
+
+| 护栏 | 边界 |
+|---|---|
+| 动作预算 | 整个运行是 `max_actions`（默认 30），单个 step 是 `max`。 |
+| step 超时 | 每条命令三十分钟。 |
+| 停滞检测 | 十分钟没有心跳。 |
+| token 预算 | 一次运行在 chat 模型上能花的 token。 |
+
+完整参考——policy、工具、两个模型能力和护栏——见 [`docs/WFE.md` §8](./docs/WFE.md#8-runtime-architecture)。
+
+## Slash commands
+
+Chat 级别的斜杠命令。`/gtw` 子命令见 [它们自己的 section](#git-team-workflow-gtw)，这里不列；`/me` 子命令——`/me start` · `/me reply` · `/me stop` · `/me status`——见 [它们自己的 section](#个人-agent-me)。
+
+| 命令 | 干什么 |
+|---|---|
+| `/cwd <path>` | 绑定这个 Chat 到一个工作区。会校验路径，下次发消息时 lazy-spawn。 |
+| `/use <agent>` | 切换当前 agent（`claude` / `codex` / `dsh` / `opencode` / `copilot` / `omp` / `pi`）。前一个 agent 切到后台继续跑——任务推进、结果照常回，只是新消息不再路由给它。 |
+| `/stop` | 停掉当前 agent 上的 in-flight turn。会话留着，队列里的消息继续流。 |
+| `/steer <msg>` | 停掉 in-flight turn 并把 `<msg>` 插到队首。下个 turn agent 第一眼看到的就是这条。 |
+| `/close [agent]` | 终止当前工作区里 AgentSession 的 bridge 进程。AgentSession 记录保留——下次发消息触发 respawn 时会用 `--resume <sessionID>` 接着聊。 |
+| `/new [agent]` | 重置 agent 对话上下文（Claude Code 的 `/clear` 等价）。进程保留，队列清空。 |
+| `/watch on\|off` | 当前 Chat 的消息监听模式（默认群内只听 `@bot` / `@_all`）。 |
+| `/think on\|off` | 是否在回复卡里展示 agent 思考过程。 |
+| `/tools on\|off` | 是否展示每个工具的独立线程回复（默认关）。 |
+| `/handoff <name>` | 把当前任务序列化到 `~/.nightme/handoff/<name>.md`，下一个 agent（或新 session）从任意目录接手。 |
+| `/resume <name>` | 在当前 session 里继续 `~/.nightme/handoff/<name>.md` 描述的任务。 |
+| `/review [-a\|--agent <agent>] [-g\|--global] [--unset] [-c\|--continue]` | 当前分支对比默认分支做 review（PR 模式），findings 注回当前 chat。`--agent` 指定用哪个 agent 跑 review；`-g` 把它存成 `~/.nightme/config.yaml` 里的全局 `review.agent`；`--unset` 删掉这个全局设置。`-c` 续跑本 chat 上一次 review 中失败的 group：重新打开那些 group 的 agent session，给它们发 "continue"。 |
+| `/wiki init [--modules] [--llmstxt] [--arch]` | 读码、分模块、写每个模块的 wiki 文件——把仓库 wiki 作为项目资产。 |
+| `/queue <message>` | 把一条消息作为独立 Prompt 追加进队列。 |
+| `/help` | 在 Chat 里列出所有斜杠命令。 |
+
+`!cmd` 在当前 Chat 的 CWD 里直接跑 shell 命令——规则见 [Shell mode](#shell-mode)。
+
+任何不匹配斜杠命令（或 `!cmd`）的消息，都会被透传到底层 agent 当作普通 prompt——跟你直接在 Claude Code 自己的 CLI 里发消息一样。NightMe 不拦截也不改写；agent 收到原样消息，会运行它自带的斜杠命令（例如 Claude Code 的 `/clear` / `/compact` / `/init` 等）。
+
 ## For developers
 
 ### Architecture (advanced)
@@ -565,6 +710,8 @@ paths:
 ```
 
 `/gtw` 工作流读的是 **另一个文件**：`~/.nightme/gtw.yml`——见上文的 [Hooks 那一节](#hooks把开发环境一起带过去)。
+
+个人 Agent 的模型配置在 `me:` 下——见 [个人 Agent 一节](#个人-agent-me)。
 
 完整 schema 和每个 bridge 的说明见 [`configs/nightme.example.yaml`](./configs/nightme.example.yaml)。
 

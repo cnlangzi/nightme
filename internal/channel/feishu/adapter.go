@@ -1908,19 +1908,18 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// plain text bubble) so the user sees the exit kind +
 		// stderr tail. This is not a Choice — nothing is being
 		// asked — so we do not go through messages.Choice.
+		//
+		// A shutdown exit is not a crash: the daemon stopped the
+		// child on purpose, so the card gets a calm title, a blue
+		// header, and no stderr tail — the daemon log keeps it.
+		shutdown := isShutdownExit(msg)
 		body := msg.Text
-		if msg.Diagnostic != nil && msg.Diagnostic.StderrTail != "" && !strings.Contains(body, msg.Diagnostic.StderrTail) {
+		if !shutdown && msg.Diagnostic != nil && msg.Diagnostic.StderrTail != "" && !strings.Contains(body, msg.Diagnostic.StderrTail) {
 			body = body + "\n\n--- stderr tail ---\n" + msg.Diagnostic.StderrTail
 		}
 		body = agent.TruncateForLog(body, 3*1024)
-		title := "⚠️ bridge died"
-		if msg.AgentName != "" {
-			title = "⚠️ " + msg.AgentName + " bridge died"
-		}
-		if msg.Diagnostic != nil && msg.Diagnostic.ExitKind != 0 {
-			title = title + " (" + msg.Diagnostic.ExitKind.String() + ")"
-		}
-		content, err := encodeErrorCard(title, body)
+		title, template := errorCardChrome(msg)
+		content, err := encodeErrorCard(title, body, template)
 		if err != nil {
 			return err
 		}
@@ -2486,7 +2485,7 @@ func encodeInteractiveCard(c *messages.Choice, wiz *choiceWizard) (cardPatch, er
 	return cardPatch{JSON: string(b), Data: data}, nil
 }
 
-func encodeErrorCard(title, body string) (string, error) {
+func encodeErrorCard(title, body, template string) (string, error) {
 	body = SanitizeCardMarkdown(body)
 	var elements []map[string]any
 	if body != "" {
@@ -2500,7 +2499,7 @@ func encodeErrorCard(title, body string) (string, error) {
 		"config": map[string]any{"width_mode": "fill"},
 		"header": map[string]any{
 			"title":    map[string]any{"tag": "plain_text", "content": title},
-			"template": "red",
+			"template": template,
 		},
 		"body": map[string]any{"elements": elements},
 	}
@@ -2509,6 +2508,32 @@ func encodeErrorCard(title, body string) (string, error) {
 		return "", fmt.Errorf("feishu: encode error card: %w", err)
 	}
 	return string(b), nil
+}
+
+// isShutdownExit reports whether the error is the daemon's own
+// shutdown notice rather than a crash.
+func isShutdownExit(msg messages.OutboundMessage) bool {
+	return msg.Diagnostic != nil && msg.Diagnostic.ExitKind == agent.BridgeExitShutdown
+}
+
+// errorCardChrome picks the title + header template of an OutError
+// card.
+//
+// A shutdown exit is not a crash: the daemon stopped the child on
+// purpose, so the card gets a calm title and a blue header instead
+// of the red "bridge died" one.
+func errorCardChrome(msg messages.OutboundMessage) (string, string) {
+	if isShutdownExit(msg) {
+		return "NightMe shutdown", "blue"
+	}
+	title := "⚠️ bridge died"
+	if msg.AgentName != "" {
+		title = "⚠️ " + msg.AgentName + " bridge died"
+	}
+	if msg.Diagnostic != nil && msg.Diagnostic.ExitKind != 0 {
+		title = title + " (" + msg.Diagnostic.ExitKind.String() + ")"
+	}
+	return title, "red"
 }
 
 func interactiveCardMap(c *messages.Choice, wiz *choiceWizard) (map[string]any, error) {

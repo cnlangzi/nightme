@@ -958,6 +958,49 @@ func TestSend_OutError_RendersAsCard_NoPermissionEmoji(t *testing.T) {
 	}
 }
 
+// TestSend_OutError_ShutdownExit_CalmCard — a child the daemon
+// stopped on purpose is not a crash: the card gets a calm title and
+// a blue header instead of the red "bridge died" one.
+func TestSend_OutError_ShutdownExit_CalmCard(t *testing.T) {
+	a := testAdapter(t)
+	var captured struct {
+		Body string
+	}
+	a.sendFunc = func(_ context.Context, _, _, body, _ string, _ bool) (string, error) {
+		captured.Body = body
+		return "om_shutdown_test", nil
+	}
+	notice := "ℹ️ NightMe is shutting down — the claude agent was stopped."
+	if err := a.Send(t.Context(), messages.OutboundMessage{
+		Kind:      messages.OutError,
+		ChatID:    "oc_test",
+		Text:      notice,
+		AgentName: "claude",
+		Diagnostic: &agent.BridgeDiagnostic{
+			ExitKind:   agent.BridgeExitShutdown,
+			StderrTail: "unrecognized_model",
+			AgentName:  "claude",
+		},
+	}); err != nil {
+		t.Fatalf("Send(OutError): %v", err)
+	}
+	if !strings.Contains(captured.Body, "NightMe shutdown") {
+		t.Errorf("card title missing the shutdown title; got body: %s", captured.Body)
+	}
+	if strings.Contains(captured.Body, "bridge died") {
+		t.Errorf("card title must not say the bridge died; got body: %s", captured.Body)
+	}
+	if !strings.Contains(captured.Body, `"template":"blue"`) {
+		t.Errorf("card header template must be blue for a shutdown exit; got body: %s", captured.Body)
+	}
+	if strings.Contains(captured.Body, "stderr tail") {
+		t.Errorf("card body must not carry a stderr tail; got body: %s", captured.Body)
+	}
+	if strings.Contains(captured.Body, "unrecognized_model") {
+		t.Errorf("card body must not carry the stderr tail content; got body: %s", captured.Body)
+	}
+}
+
 // TestSend_OutError_TruncatesLongBody — body budget guard: the
 // Feishu markdown element caps at 4 KiB, but Diagnostic.StderrTail
 // is itself 4 KiB; concatenated with the first line of Err + the

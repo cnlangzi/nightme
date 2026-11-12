@@ -338,6 +338,27 @@ func TestSend_ErrorCarriesStderrTail(t *testing.T) {
 	}
 }
 
+// TestSend_ErrorShutdownExit_NoErrorMarker — a child the daemon
+// stopped on purpose is not a crash, so the notice keeps its own ℹ️
+// marker instead of the ⚠️ error one.
+func TestSend_ErrorShutdownExit_NoErrorMarker(t *testing.T) {
+	api := newFakeAPI()
+	a := newTestAdapter(t, api, newFakeSocket())
+
+	msg := outbound(messages.OutError, "ℹ️ NightMe is shutting down — the claude agent was stopped.")
+	msg.Diagnostic = &agent.BridgeDiagnostic{ExitKind: agent.BridgeExitShutdown}
+	if err := a.Send(context.Background(), msg); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	text := api.snapshot()[0].Text
+	if !strings.HasPrefix(text, "ℹ️") {
+		t.Errorf("shutdown notice = %q, want it to start with ℹ️", text)
+	}
+	if strings.Contains(text, "⚠️") {
+		t.Errorf("shutdown notice must not carry the error marker: %q", text)
+	}
+}
+
 // Slack lets a bot remove its own reaction, so the state track is a
 // real replacement rather than the stack Feishu ends up with.
 func TestSend_MessageStateReplacesPreviousReaction(t *testing.T) {

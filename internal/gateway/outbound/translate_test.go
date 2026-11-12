@@ -590,6 +590,38 @@ func TestTranslate_EventError_NoDiagnostic_Drops(t *testing.T) {
 	}
 }
 
+// TestTranslate_EventError_ShutdownExit — the shutdown notice
+// reaches the channel as the OutError body, and the stderr tail the
+// chat layer withheld stays out of the outbound message.
+func TestTranslate_EventError_ShutdownExit(t *testing.T) {
+	notice := "ℹ️ NightMe is shutting down — the claude agent was stopped."
+	in := agent.AgentEvent{
+		Kind:      agent.EventAgentError,
+		AgentName: "claude",
+		Err:       errors.New(notice),
+		Diagnostic: &agent.BridgeDiagnostic{
+			ExitKind:  agent.BridgeExitShutdown,
+			AgentName: "claude",
+		},
+	}
+	msg, ok := Translate("chat1", in)
+	if !ok {
+		t.Fatal("the shutdown notice should emit")
+	}
+	if msg.Kind != messages.OutError {
+		t.Errorf("kind = %v, want OutError", msg.Kind)
+	}
+	if msg.Text != notice {
+		t.Errorf("Text = %q, want %q", msg.Text, notice)
+	}
+	if msg.Diagnostic == nil || msg.Diagnostic.ExitKind != agent.BridgeExitShutdown {
+		t.Errorf("Diagnostic = %+v, want the shutdown kind", msg.Diagnostic)
+	}
+	if msg.Diagnostic.StderrTail != "" {
+		t.Errorf("StderrTail = %q, want it empty", msg.Diagnostic.StderrTail)
+	}
+}
+
 func TestTranslate_EventError_FallbackBodyFromDiagnostic(t *testing.T) {
 	// Err is nil but Diagnostic is present — we synthesize a
 	// short body from AgentName + ExitKind so the card is

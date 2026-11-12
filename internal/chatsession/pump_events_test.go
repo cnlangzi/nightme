@@ -21,7 +21,11 @@
 package chatsession
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
+	"log/slog"
 	"os"
 	"strings"
 	"sync"
@@ -471,6 +475,329 @@ func TestAgentSession_EndPrompt_EmitsKindPromptEnded(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("no KindPromptEnded event after endPrompt")
 	}
+}
+
+// --- shutdown attribution ---
+
+// shutdownExitDiagnostic is the diagnostic a bridge attaches when
+// its child dies.
+func shutdownExitDiagnostic() *agent.BridgeDiagnostic {
+	return &agent.BridgeDiagnostic{
+		ExitKind:   agent.BridgeExitCleanExit,
+		StderrTail: "[claude-code:unrecognized_model] {\"model\":\"MiniMax-M3\"}",
+		SessionID:  "sess-1",
+		AgentName:  "pi",
+	}
+}
+
+// TestChatSession_RouteEvent_RewritesShutdownExit — a child the
+// daemon stopped on purpose must reach the chat as a shutdown
+// notice, not as a crash.
+func TestChatSession_RouteEvent_RewritesShutdownExit(t *testing.T) {
+	cs := newChatSessionForTest("cs_test")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	as, fake := makeSpawnedAS(t, cs, "pi", ctx)
+	defer as.Shutdown()
+
+	cs.attachAllPendingSubscriptions()
+
+	got := make(chan *agent.AgentEvent, 1)
+	cs.AgentEventBus.Subscribe(func(env AgentEventEnvelope) bool {
+		select {
+		case got <- env.Event:
+		default:
+		}
+		return false
+	})
+
+	cs.MarkShuttingDown()
+	fake.PushEvent(agent.AgentEvent{
+		Kind:       agent.EventAgentError,
+		AgentName:  "pi",
+		Err:        errors.New("pi: lifecycle exit clean-exit: <nil>"),
+		Diagnostic: shutdownExitDiagnostic(),
+	})
+
+	select {
+	case ev := <-got:
+		if ev == nil || ev.Diagnostic == nil {
+			t.Fatal("the published event carries no Diagnostic")
+		}
+		if ev.Diagnostic.ExitKind != agent.BridgeExitShutdown {
+			t.Errorf("ExitKind = %v, want shutdown", ev.Diagnostic.ExitKind)
+		}
+		if ev.Diagnostic.StderrTail != "" {
+			t.Errorf("StderrTail = %q, want it withheld from the chat", ev.Diagnostic.StderrTail)
+		}
+		if ev.Diagnostic.SessionID != "sess-1" {
+			t.Errorf("SessionID = %q, want sess-1", ev.Diagnostic.SessionID)
+		}
+		want := "ℹ️ NightMe is shutting down — the pi agent was stopped."
+		if ev.Err == nil || ev.Err.Error() != want {
+			t.Errorf("Err = %v, want %q", ev.Err, want)
+		}
+		if strings.Contains(ev.Err.Error(), "\n") {
+			t.Error("the shutdown notice must be a single line")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the shutdown notice was not delivered within 2s")
+	}
+}
+
+// TestChatSession_RouteEvent_KeepsExitWhenNotShuttingDown — a CLI
+// that died on its own keeps today's message.
+func TestChatSession_RouteEvent_KeepsExitWhenNotShuttingDown(t *testing.T) {
+	cs := newChatSessionForTest("cs_test")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	as, fake := makeSpawnedAS(t, cs, "pi", ctx)
+	defer as.Shutdown()
+
+	cs.attachAllPendingSubscriptions()
+
+	got := make(chan *agent.AgentEvent, 1)
+	cs.AgentEventBus.Subscribe(func(env AgentEventEnvelope) bool {
+		select {
+		case got <- env.Event:
+		default:
+		}
+		return false
+	})
+
+	fake.PushEvent(agent.AgentEvent{
+		Kind:       agent.EventAgentError,
+		AgentName:  "pi",
+		Err:        errors.New("pi: lifecycle exit clean-exit: <nil>"),
+		Diagnostic: shutdownExitDiagnostic(),
+	})
+
+	select {
+	case ev := <-got:
+		if ev.Diagnostic == nil {
+			t.Fatal("the published event carries no Diagnostic")
+		}
+		if ev.Diagnostic.ExitKind != agent.BridgeExitCleanExit {
+			t.Errorf("ExitKind = %v, want clean-exit", ev.Diagnostic.ExitKind)
+		}
+		if ev.Diagnostic.StderrTail == "" {
+			t.Error("StderrTail was dropped from a crash the daemon did not cause")
+		}
+		if ev.Err == nil || !strings.Contains(ev.Err.Error(), "lifecycle exit") {
+			t.Errorf("Err = %v, want the bridge's own message", ev.Err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the exit event was not delivered within 2s")
+	}
+}
+
+// TestChatSession_RouteEvent_KeepsErrorWithoutDiagnostic — only
+// process exits carry a Diagnostic; a turn or wire error must pass
+// through untouched even while the daemon is shutting down.
+func TestChatSession_RouteEvent_KeepsErrorWithoutDiagnostic(t *testing.T) {
+	cs := newChatSessionForTest("cs_test")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	as, fake := makeSpawnedAS(t, cs, "pi", ctx)
+	defer as.Shutdown()
+
+	cs.attachAllPendingSubscriptions()
+
+	got := make(chan *agent.AgentEvent, 1)
+	cs.AgentEventBus.Subscribe(func(env AgentEventEnvelope) bool {
+		select {
+		case got <- env.Event:
+		default:
+		}
+		return false
+	})
+
+	cs.MarkShuttingDown()
+	fake.PushEvent(agent.AgentEvent{
+		Kind: agent.EventAgentError,
+		Err:  errors.New("pi: turn failed"),
+	})
+
+	select {
+	case ev := <-got:
+		if ev.Diagnostic != nil {
+			t.Errorf("Diagnostic = %+v, want none", ev.Diagnostic)
+		}
+		if ev.Err == nil || ev.Err.Error() != "pi: turn failed" {
+			t.Errorf("Err = %v, want the original message", ev.Err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the error event was not delivered within 2s")
+	}
+}
+
+// TestChatSession_RouteEvent_ShutdownExit_LeavesOriginalIntact —
+// the rewrite works on a copy: the bridge's own event keeps the
+// error and the diagnostic it produced.
+func TestChatSession_RouteEvent_ShutdownExit_LeavesOriginalIntact(t *testing.T) {
+	cs := newChatSessionForTest("cs_test")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	as, fake := makeSpawnedAS(t, cs, "pi", ctx)
+	defer as.Shutdown()
+
+	cs.attachAllPendingSubscriptions()
+
+	// Subscribe AFTER the chat's own subscription so this handler
+	// runs after routeEvent: a rewrite that mutated the event in
+	// place would be visible here.
+	original := make(chan *agent.AgentEvent, 1)
+	as.EventBus.Subscribe(func(ev EnrichedEvent) bool {
+		if ev.Kind == KindAgentEvent && ev.AgentEvent != nil {
+			select {
+			case original <- ev.AgentEvent:
+			default:
+			}
+		}
+		return false
+	})
+
+	rewritten := make(chan *agent.AgentEvent, 1)
+	cs.AgentEventBus.Subscribe(func(env AgentEventEnvelope) bool {
+		select {
+		case rewritten <- env.Event:
+		default:
+		}
+		return false
+	})
+
+	cs.MarkShuttingDown()
+	fake.PushEvent(agent.AgentEvent{
+		Kind:       agent.EventAgentError,
+		AgentName:  "pi",
+		Err:        errors.New("pi: lifecycle exit clean-exit: <nil>"),
+		Diagnostic: shutdownExitDiagnostic(),
+	})
+
+	select {
+	case ev := <-rewritten:
+		if ev.Diagnostic == nil || ev.Diagnostic.ExitKind != agent.BridgeExitShutdown {
+			t.Fatalf("the chat did not receive the rewritten event: %+v", ev)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the shutdown notice was not delivered within 2s")
+	}
+
+	select {
+	case ev := <-original:
+		if ev.Diagnostic == nil || ev.Diagnostic.ExitKind != agent.BridgeExitCleanExit {
+			t.Errorf("the original diagnostic was mutated: %+v", ev.Diagnostic)
+		}
+		if ev.Diagnostic.StderrTail == "" {
+			t.Error("the original stderr tail was cleared")
+		}
+		if ev.Err == nil || !strings.Contains(ev.Err.Error(), "lifecycle exit") {
+			t.Errorf("the original error was mutated: %v", ev.Err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the original event was not delivered within 2s")
+	}
+}
+
+// TestChatSession_RouteEvent_ShutdownExit_LogsOriginal — the stderr
+// tail is withheld from the chat, so the daemon log has to keep it.
+func TestChatSession_RouteEvent_ShutdownExit_LogsOriginal(t *testing.T) {
+	var (
+		mu  sync.Mutex
+		buf bytes.Buffer
+	)
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&safeLogWriter{w: &buf, mu: &mu}, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	cs := newChatSessionForTest("cs_test")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	as, fake := makeSpawnedAS(t, cs, "pi", ctx)
+	defer as.Shutdown()
+
+	cs.attachAllPendingSubscriptions()
+
+	got := make(chan *agent.AgentEvent, 1)
+	cs.AgentEventBus.Subscribe(func(env AgentEventEnvelope) bool {
+		select {
+		case got <- env.Event:
+		default:
+		}
+		return false
+	})
+
+	cs.MarkShuttingDown()
+	fake.PushEvent(agent.AgentEvent{
+		Kind:       agent.EventAgentError,
+		AgentName:  "pi",
+		Err:        errors.New("pi: lifecycle exit clean-exit: <nil>"),
+		Diagnostic: shutdownExitDiagnostic(),
+	})
+
+	select {
+	case <-got:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the shutdown notice was not delivered within 2s")
+	}
+
+	mu.Lock()
+	raw := buf.String()
+	mu.Unlock()
+
+	found := false
+	for _, line := range strings.Split(raw, "\n") {
+		if line == "" {
+			continue
+		}
+		var r shutdownLogRecord
+		if err := json.Unmarshal([]byte(line), &r); err != nil {
+			continue
+		}
+		if !strings.Contains(r.Msg, "shutdown") {
+			continue
+		}
+		found = true
+		if r.Level != "INFO" {
+			t.Errorf("log level = %q, want INFO", r.Level)
+		}
+		if r.ExitKind != "clean-exit" {
+			t.Errorf("logged exit_kind = %q, want clean-exit", r.ExitKind)
+		}
+		if r.StderrTail == "" {
+			t.Error("the logged record lost the stderr tail")
+		}
+	}
+	if !found {
+		t.Errorf("no log record attributed the exit to the shutdown; got:\n%s", raw)
+	}
+}
+
+// safeLogWriter serializes writes so the test goroutine and the
+// logging goroutine cannot race on the buffer.
+type safeLogWriter struct {
+	w  *bytes.Buffer
+	mu *sync.Mutex
+}
+
+// shutdownLogRecord is the shape of the log line the shutdown
+// attribution writes.
+type shutdownLogRecord struct {
+	Msg        string `json:"msg"`
+	Level      string `json:"level"`
+	ExitKind   string `json:"exit_kind"`
+	StderrTail string `json:"stderr_tail"`
+}
+
+func (s *safeLogWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
 }
 
 // --- test helpers ---

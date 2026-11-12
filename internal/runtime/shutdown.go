@@ -155,18 +155,8 @@ func ShutdownRunMulti(
 	// (2) Mark every chat as shutting down and cancel its operation
 	// contexts, so in-flight bridge calls unblock promptly instead
 	// of hanging until the daemon exits.
-	for _, mgr := range mgrs {
-		if mgr == nil {
-			continue
-		}
-		for _, cs := range mgr.List() {
-			if cs == nil {
-				continue
-			}
-			cs.MarkShuttingDown()
-			cs.ResetContext()
-		}
-	}
+	markChatsShuttingDown(mgrs)
+	resetChatContexts(mgrs)
 
 	// (3) Cancel the process scope: every agent child gets SIGTERM,
 	// then SIGKILL once its grace window expires.
@@ -199,6 +189,58 @@ func snapshotManagers() []*chatsession.Manager {
 	allMgrsMu.RLock()
 	defer allMgrsMu.RUnlock()
 	return append([]*chatsession.Manager(nil), allMgrs...)
+}
+
+// newProcScope creates the daemon's process scope — the parent
+// context of every agent child process — together with the cancel
+// function that tears it down.
+//
+// Cancelling the scope is what stops the children, so the cancel
+// marks every known chat as shutting down FIRST: the exit events
+// that follow have to be attributed to the shutdown instead of
+// being reported as crashes.
+func newProcScope() (context.Context, context.CancelFunc) {
+	scope, cancel := context.WithCancel(context.Background())
+	return scope, func() {
+		markChatsShuttingDown(snapshotManagers())
+		cancel()
+	}
+}
+
+// markChatsShuttingDown flags every chat as shutting down.
+//
+// The flag is what tells the exit path the daemon stopped the agent
+// on purpose: it picks registry.ExitCodeTerminatedByNightme over 0
+// and makes the chat report the shutdown notice instead of a crash.
+func markChatsShuttingDown(mgrs []*chatsession.Manager) {
+	for _, mgr := range mgrs {
+		if mgr == nil {
+			continue
+		}
+		for _, cs := range mgr.List() {
+			if cs == nil {
+				continue
+			}
+			cs.MarkShuttingDown()
+		}
+	}
+}
+
+// resetChatContexts cancels every chat's operation contexts, so
+// in-flight bridge calls unblock promptly instead of hanging until
+// the daemon exits.
+func resetChatContexts(mgrs []*chatsession.Manager) {
+	for _, mgr := range mgrs {
+		if mgr == nil {
+			continue
+		}
+		for _, cs := range mgr.List() {
+			if cs == nil {
+				continue
+			}
+			cs.ResetContext()
+		}
+	}
 }
 
 // waitForAgentExit waits until every agent child has exited, or the

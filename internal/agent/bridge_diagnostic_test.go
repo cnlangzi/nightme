@@ -285,10 +285,40 @@ func TestBridgeExitKindString(t *testing.T) {
 		BridgeExitNonZeroExit:   "non-zero-exit",
 		BridgeExitSignalKilled:  "signal-killed",
 		BridgeExitPanic:         "panic",
+		BridgeExitShutdown:      "shutdown",
 	}
 	for k, want := range stable {
 		if got := k.String(); got != want {
 			t.Errorf("%d.String() = %q, want %q", k, got, want)
+		}
+	}
+}
+
+// TestBridgeExitKind_ZeroValue pins the zero value: a Diagnostic
+// built without an explicit kind must read as "unknown", not as one
+// of the named kinds.
+func TestBridgeExitKind_ZeroValue(t *testing.T) {
+	var k BridgeExitKind
+	if k != BridgeExitUnknown {
+		t.Errorf("zero value = %v, want BridgeExitUnknown", k)
+	}
+}
+
+// TestClassifyExit_NeverReturnsShutdown — the classifier describes
+// HOW a child exited, not WHO asked for it. The shutdown kind is
+// applied by the chat layer.
+func TestClassifyExit_NeverReturnsShutdown(t *testing.T) {
+	cases := []struct {
+		waitErr  error
+		graceful bool
+	}{
+		{nil, false},
+		{nil, true},
+		{errors.New("boom"), false},
+	}
+	for _, c := range cases {
+		if got := ClassifyExit(c.waitErr, c.graceful); got == BridgeExitShutdown {
+			t.Errorf("ClassifyExit(%v, %v) = shutdown, want a how-the-child-exited kind", c.waitErr, c.graceful)
 		}
 	}
 }

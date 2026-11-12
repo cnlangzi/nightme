@@ -10,9 +10,12 @@ package chatsession
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
+	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
@@ -133,7 +136,7 @@ func (cs *ChatSession) routeEvent(as *AgentSession, ev EnrichedEvent) {
 			UserMsgID:    ev.UserMsgID,
 			PromptID:     ev.PromptID,
 			AgentSession: as,
-			Event:        ev.AgentEvent,
+			Event:        cs.rewriteShutdownExit(as, ev.AgentEvent),
 		})
 	case KindPromptEnded:
 		cs.writebackMessageState(as, ev.Prompt)
@@ -237,4 +240,49 @@ func (cs *ChatSession) routeEvent(as *AgentSession, ev EnrichedEvent) {
 			}
 		}
 	}
+}
+
+// rewriteShutdownExit turns a bridge process-exit error into the
+// shutdown notice while the daemon is tearing down.
+//
+// The daemon stops its agent children by cancelling the process
+// scope, so their death is expected — reporting it as a crash would
+// put a red "bridge died" card in every channel on every stop. The
+// stderr tail is withheld from the chat but kept in the daemon log,
+// so the triage data is not lost.
+//
+// The event and the diagnostic are copied, never mutated: the
+// bridge's own event stays intact for every other subscriber.
+func (cs *ChatSession) rewriteShutdownExit(as *AgentSession, ev *agent.AgentEvent) *agent.AgentEvent {
+	if !cs.IsShuttingDown() {
+		return ev
+	}
+	if ev.Kind != agent.EventAgentError || ev.Diagnostic == nil {
+		return ev
+	}
+	diag := *ev.Diagnostic
+	slog.Info("chatsession: agent exit attributed to the NightMe shutdown",
+		"agent", as.Agent,
+		"chat_id", cs.ChatID,
+		"as_id", as.ID,
+		"exit_kind", diag.ExitKind.String(),
+		"stderr_tail", diag.StderrTail)
+	diag.ExitKind = agent.BridgeExitShutdown
+	diag.StderrTail = ""
+	rewritten := *ev
+	rewritten.Diagnostic = &diag
+	rewritten.Err = errors.New(shutdownNotice(as.Agent))
+	return &rewritten
+}
+
+// shutdownNotice is the one-line message the chat shows instead of
+// a crash card when the daemon stopped the agent on purpose.
+//
+// The name is the agent session's registry name ("claude"), not the
+// bridge's internal one ("claudecode").
+func shutdownNotice(agentName string) string {
+	if agentName == "" {
+		agentName = "agent"
+	}
+	return fmt.Sprintf("ℹ️ NightMe is shutting down — the %s agent was stopped.", agentName)
 }

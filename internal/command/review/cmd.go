@@ -51,6 +51,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -60,6 +61,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
+	"github.com/cnlangzi/nightme/internal/gitbase"
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/timeouts"
 )
@@ -587,6 +589,23 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 					Summary: "no diff to review",
 					Data:    map[string]string{"agent": runnerName, "reason": "no_diff"},
 				})
+			case errors.Is(err, agent.ErrBaseUnknown):
+				// The repository has an origin remote, but the base
+				// branch could neither be read nor repaired — so the
+				// committed diff was NOT reviewed. Saying "no diff"
+				// would claim there was nothing to review; the truth
+				// is that nothing was examined.
+				text = baseUnknownMessage(workspace, err)
+				slog.Default().Warn("/review: base branch unknown",
+					"agent", runnerName,
+					"workspace", workspace,
+					"err", err,
+				)
+				work.Report(messages.Outcome{
+					Status:  messages.OutcomeFailed,
+					Summary: "the base branch could not be determined",
+					Data:    map[string]string{"agent": runnerName, "reason": "base_unknown"},
+				})
 			case errors.Is(err, agent.ErrReviewNotSupported):
 				slog.Default().Warn("/review failed",
 					"agent", runnerName,
@@ -627,7 +646,7 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 		}
 
 		// Success: wrap once, route twice (AS + channel).
-		formatted := agent.FormatReviewMessage(workspace, runnerName, result.Text)
+		formatted := agent.FormatReviewMessage(workspace, runnerName, result.Text, result.Notes...)
 		blocks := []agent.ContentBlock{{Type: agent.ContentText, Text: formatted}}
 
 		// The review itself succeeded. The verdict the consumer
@@ -909,7 +928,7 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 
 		// Success: wrap once, route twice (AS + channel) — the same
 		// delivery a normal review gets.
-		formatted := agent.FormatReviewMessage(workspace, runnerName, result.Text)
+		formatted := agent.FormatReviewMessage(workspace, runnerName, result.Text, result.Notes...)
 		blocks := []agent.ContentBlock{{Type: agent.ContentText, Text: formatted}}
 
 		// A resumed group that failed again did not finish its
@@ -1055,4 +1074,57 @@ func buildTerminalReply(chatID, replyTo, formatted, runnerName string, result ag
 	}
 	messages.StampRunResult(&out, runnerName, result)
 	return out
+}
+
+// baseUnknownMessage renders the base-unknown failure: the workspace,
+// the fact that the committed diff was not reviewed, and the command
+// that fixes the cause.
+//
+// The remedy depends on why the base is unknown: an unreachable
+// remote needs the symbolic ref set, a missing remote-tracking ref
+// needs the fetch that creates it.
+func baseUnknownMessage(workspace string, err error) string {
+	reason := gitbase.ReasonRemoteUnreachable
+	var unknown *agent.BaseUnknownError
+	if errors.As(err, &unknown) && unknown.Reason != "" {
+		reason = unknown.Reason
+	}
+	cause := "refs/remotes/origin/HEAD is missing and the remote query failed"
+	fix := fmt.Sprintf("git -C %s remote set-head origin -a", shellPath(workspace))
+	if reason == gitbase.ReasonMissingTrackingRef {
+		cause = "refs/remotes/origin/HEAD is missing and the local remote-tracking ref is absent"
+		fix = fmt.Sprintf("git -C %s fetch origin", shellPath(workspace))
+	}
+	return fmt.Sprintf("❌ could not determine the base branch for %s — %s. "+
+		"The committed diff was not reviewed. Fix: %s", workspace, cause, fix)
+}
+
+// shellPath quotes a filesystem path for a copy-paste shell command.
+//
+// A path made only of safe characters stays bare, so the common case
+// reads `git -C /home/me/repo`; anything else is quoted in the
+// platform's shell style, so pasting the command still works for a
+// workspace whose path holds a space or a shell metacharacter.
+func shellPath(path string) string {
+	if path != "" && strings.IndexFunc(path, func(r rune) bool {
+		return !strings.ContainsRune(shellSafeChars(), r)
+	}) == -1 {
+		return path
+	}
+	if runtime.GOOS == "windows" {
+		// cmd.exe knows double quotes; a path cannot hold a double
+		// quote of its own.
+		return `"` + path + `"`
+	}
+	return "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
+}
+
+// shellSafeChars lists the characters a path may hold without
+// quoting, in either shell.
+//
+// These are the characters a real path is made of: cmd.exe expands
+// %VAR% and POSIX expands $VAR, $HOME and backticks — none of them
+// are in this set, so a path holding only these needs no quoting.
+func shellSafeChars() string {
+	return "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-./\\:@+=~"
 }

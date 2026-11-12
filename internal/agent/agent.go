@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+
+	"github.com/cnlangzi/nightme/internal/gitbase"
 )
 
 // Mode identifies how the Bridge should communicate with the agent.
@@ -1188,6 +1190,12 @@ type RunResult struct {
 	//   - acp:       bridge-defined; consult the bridge's docs
 	//   - pty:       always "" (no structured event)
 	Subtype string
+
+	// Notes are run-level notices about what the run did, rendered
+	// by the caller alongside the result. A /review run that repaired
+	// the repository's missing base-branch ref reports it here, so
+	// the user learns that the run touched the repository.
+	Notes []string
 }
 
 //   - Starter.Start(ctx, cfg) spawns (or attaches to) the agent
@@ -1441,17 +1449,46 @@ var (
 	// precomputed reviewContext. This collapses to: clean working
 	// tree, with no staged/unstaged/untracked changes — and (only when
 	// the workspace is itself empty) nothing to review at all. Note
-	// that `detectDefaultBranch` failing does NOT trigger ErrNoDiff by
-	// itself: the staged/unstaged/untracked git sources run
-	// unconditionally and can populate reviewContext even without a
-	// detected base. The /review dispatcher detects this sentinel via
-	// errors.Is and short-circuits with a user-friendly "nothing to
-	// review" inline message — without spawning the agent subprocess
-	// for a zero-context review. Sentinel lives here (not in
-	// command/review) so the agent package owns the contract for
-	// "the review cannot produce findings".
+	// that the base branch failing to resolve does NOT trigger
+	// ErrNoDiff by itself: the staged/unstaged/untracked git sources
+	// run unconditionally and can populate reviewContext even without
+	// a detected base. A repository that HAS a remote but no resolvable
+	// base is ErrBaseUnknown instead. The /review dispatcher detects
+	// this sentinel via errors.Is and short-circuits with a
+	// user-friendly "nothing to review" inline message — without
+	// spawning the agent subprocess for a zero-context review.
+	// Sentinel lives here (not in command/review) so the agent package
+	// owns the contract for "the review cannot produce findings".
 	ErrNoDiff = errors.New("agent: no diff to review")
+
+	// ErrBaseUnknown is returned by ReviewWithPrompt / ReviewWithOcr
+	// when the repository has an "origin" remote but the base branch
+	// could not be determined and could not be repaired. The
+	// committed diff was NOT reviewed — ErrNoDiff would claim there
+	// was nothing to review, while the truth is that nothing was
+	// examined. The /review dispatcher detects this sentinel via
+	// errors.Is and answers with an actionable message (the command
+	// that fixes the cause) instead of spawning the agent.
+	ErrBaseUnknown = errors.New("agent: base branch could not be determined")
 )
+
+// BaseUnknownError carries why the base branch could not be
+// determined. It unwraps to ErrBaseUnknown, so the dispatcher can
+// match the sentinel and still read the reason.
+type BaseUnknownError struct {
+	// Workspace is the repository the review was about.
+	Workspace string
+	// Reason says why the base is unknown: the remote did not
+	// answer, or the local remote-tracking ref is missing.
+	Reason gitbase.Reason
+}
+
+func (e *BaseUnknownError) Error() string {
+	return fmt.Sprintf("agent: base branch could not be determined in %s (%s)",
+		e.Workspace, e.Reason)
+}
+
+func (e *BaseUnknownError) Unwrap() error { return ErrBaseUnknown }
 
 // sentinelErr is a small helper so tests can match errors with
 // errors.Is without depending on the package-level variable identity.

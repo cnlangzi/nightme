@@ -61,16 +61,17 @@ Starter.Review(所有 bridge 都是同一行)
           │
           ├─ OcrAvailable() YES → ReviewWithOcr
           │     ├─ pre := precomputeReviewWithOcr(workspace)
+          │     │     gitbase → base(+ 必要时 repair origin/HEAD)+ merge-base
           │     │     ocr delegate preview → reviewable + excluded + mergeBase
           │     │     ocr delegate rule    → ocrGroups (N per-pattern)
-          │     │     git                 → base + merge-base
+          │     │     git                 → staged/unstaged/untracked(无条件收集)
           │     ├─ groups = pre.ocrGroups + simplifyGroup(pre.reviewable)
           │     └─ delegateReviewMultiJob(sem cap 4,每 group 一个 session turn,eventAggregator,mergeRunResults)
           │
           └─ OcrAvailable() NO  → ReviewWithPrompt
                 ├─ pre := precomputeReviewWithBuiltin(workspace)
-                │     git → base + merge-base
-                │     Go → 4 个 git 来源(inlined)+ 合成 1 个 builtin group
+                │     gitbase → base(+ 必要时 repair origin/HEAD)+ merge-base
+                │     Go → 4 个 git 来源 + 合成 1 个 builtin group
                 ├─ groups = pre.ocrGroups(builtin) + simplifyGroup(pre.reviewable)
                 └─ delegateReviewMultiJob(同上)
 
@@ -85,9 +86,10 @@ pty / bash → ErrReviewNotSupported → 友好提示("不是 coding agent")
 ReviewWithOcr                          ReviewWithPrompt
     ↓                                       ↓
 precomputeReviewWithOcr                precomputeReviewWithBuiltin
-    ├─ git: detectDefaultBranch           ├─ git: detectDefaultBranch
+    ├─ gitbase.Resolve → base            ├─ gitbase.Resolve → base
+    │   (+ repair origin/HEAD)            │   (+ repair origin/HEAD)
     ├─ git: merge-base                    ├─ git: merge-base
-    ├─ ocr delegate preview               ├─ inlined: 4 个 git 来源 → reviewable + untracked
+    ├─ ocr delegate preview               ├─ Go: 4 个 git 来源 → reviewable + untracked
     │   → reviewable (ocr FileFilter)     │   → reviewable (Go isReviewablePath)
     │   → excluded (with reasons)         │   → untracked (新文件,无 diff)
     ├─ ocr delegate rule                  ├─ synthesize 1 个 builtin group
@@ -102,15 +104,40 @@ precomputeReviewWithOcr                precomputeReviewWithBuiltin
 
 diff 不在 precompute 阶段算——每个 rule group 在组装 prompt 时自己切自己的 diff(`git diff -- <files...>`),那时才知道该 group 的字节预算怎么分(见 §2.4)。
 
+**base 分支怎么来**:`internal/gitbase.Resolve` 是唯一的判定点,两条 precompute 路径都走它。阶梯:
+
+1. `git symbolic-ref refs/remotes/origin/HEAD` —— 离线,不写任何东西。这个 ref 由 `git clone` / `git remote set-head` 建,有的 git 版本 `git fetch` 也会建 —— 所以不能假定它在。
+2. 仓库没有 `origin` remote → 没有 base。工作区(工作树)就是全部 scope,这不算错误。
+3. `git ls-remote --symref origin HEAD` 问远端的默认分支(`git remote show origin` 的 `HEAD branch:` 是 fallback)。查询有 20s 预算(`gitbase.Options.QueryTimeout`)。
+4. 拿到了远端的权威默认分支、且本地 `refs/remotes/origin/<branch>` 存在 → 补写缺失的 `refs/remotes/origin/HEAD`,之后的解析就都走第 1 步(离线)。补写只写这一个 ref,永不覆盖已有的 `origin/HEAD`,写失败不影响已知的 base。
+
+只有第 3 步能问出分支、第 4 步又写不进去时,base 才是"未知的"。未知 ≠ 空 diff:仓库有 `origin` remote 但 base 定不下来时,review 报 `agent.ErrBaseUnknown`,明确告诉用户"committed diff 没有被 review",而不是谎称"没有 diff 可 review"。
+
 **字段对照**:
 
 | 字段 | ocr 路径 | Go 路径 |
 |---|---|---|
-| `reviewable` | ocr FileFilter(精度高) | Go 4 个 git 来源(committed/staged/unstaged)+ `isReviewablePath`(启发式) |
-| `untracked`  | ocr 提供的未 tracked 文件列表 | Go 端 `git ls-files --others --exclude-standard`(独立于 reviewable,因为没有 diff 可渲染)|
+| `reviewable` | ocr FileFilter(精度高);ocr preview 失败时退回 Go 4 个 git 来源 | Go 4 个 git 来源(committed/staged/unstaged)+ `isReviewablePath`(启发式) |
+| `untracked`  | Go 端 `git ls-files --others --exclude-standard`(ocr 的 preview 不给未 tracked 列表;独立于 reviewable,因为没有 diff 可渲染)| Go 端 `git ls-files --others --exclude-standard`(独立于 reviewable,因为没有 diff 可渲染)|
 | `excluded` | ocr 提供的排除原因列表 | nil(Go 端不跟踪 excluded)|
-| `ocrGroups` | N 个(每 pattern 一组,Rule 是 ocr rule doc)| 1 个 builtin group(Pattern=patternBuiltin, Rule=BuiltinPrompt)|
+| `ocrGroups` | N 个(每 pattern 一组,Rule 是 ocr rule doc);ocr 没给出 rule 时退回 1 个 builtin group| 1 个 builtin group(Pattern=patternBuiltin, Rule=BuiltinPrompt)|
 | merge-base | 都有(同)| 都有(同)|
+
+`reviewable` / `untracked` 的 staged / unstaged / untracked 三个来源**无条件**收集 —— 只有 committed 那一腿依赖 base。base 定不下来时,工作区里的未提交改动仍会被收集;但 review 不会拿它们冒充完整 diff:仓库有 origin remote 就报 `ErrBaseUnknown`。
+
+**降级矩阵**:
+
+| 情况 | 行为 |
+|---|---|
+| 仓库有 `refs/remotes/origin/HEAD` | 离线解析 base;不碰远端;不写任何东西 |
+| 仓库缺 `origin/HEAD`,但 `origin` 够得着 | 从远端学到默认分支;补写 `refs/remotes/origin/HEAD`;review 的前言里说明这次修复 |
+| 仓库缺 `origin/HEAD`,`origin` 够不着 | `agent.ErrBaseUnknown`;不起 review turn;committed diff 明确报"没 review";提示 `git -C <ws> remote set-head origin -a` |
+| 仓库有 `origin` remote,但本地缺 `refs/remotes/origin/<branch>` | `agent.ErrBaseUnknown`;不写 ref;提示 `git -C <ws> fetch origin` |
+| 仓库根本没有 remote | 不是错误:scope 就是工作区(staged/unstaged/untracked);工作区干净 → `ErrNoDiff` |
+| 远端查到了,但补写 `origin/HEAD` 失败 | base 仍然已知,review 照跑;不 announce |
+| `ocr delegate preview` 失败(base 已知) | Go 端枚举兜底给文件清单,builtin rubric 接手,不会退化成"没有 diff" |
+| 工作区只有未 tracked 文件 | 照常 review;未 tracked 清单进 prompt 的"new file additions"段 |
+| 工作区不是 git 仓库 | 没有文件可收集 → `ErrNoDiff` |
 
 `ReviewWithOcr` 调 `precomputeReviewWithOcr`,`ReviewWithPrompt` 调 `precomputeReviewWithBuiltin`。两个 Runner 函数返回值都是 `RunResult`,行为形状一致。`agent.ReviewDispatch` 按 `OcrAvailable()` 选择调用哪个 Runner —— 路由决策集中在这一个 helper,不在任何 Runner 的内部职责里。
 
@@ -129,6 +156,8 @@ ocr 两个子命令职责分明(**分组依据来自 rule,不是 preview**):
 按 rule 的 groups 拆 jobs:每组 = 一组共享同一规则的文件 + 该组 per-file diff + 该组 rule。同组文件规则上下文一致,放一个 job review 最优。
 
 **收益**:ocr 的精确文件选择 + 规则降噪 + 覆盖率约束,治"漏文件 / 偷懒 / 规则噪声";LLM 走现有 agent;ocr 不配 LLM、无双配置。
+
+**ocr 挂了怎么办**:`ocr delegate preview` 失败时,文件清单退回 Go 端枚举(4 个 git 来源),规则退回 `BuiltinPrompt` —— ocr 失败不再读成"没有 diff"。未 tracked 的文件清单始终来自 Go 端(`git ls-files --others --exclude-standard`):ocr 的 preview 不给这张表,而未 tracked 文件不属于任何 rule group,所以 prompt 的"new file additions"段对每个 group 都渲染。
 
 **边界**:委托模式下定位 / 反思由 host agent 自己做,**拿不到** ocr 的行级定位 / 反思精度(那是端到端 `ocr review` 的领域,不在 v1 默认路径)。
 
@@ -158,7 +187,9 @@ ocr = alibaba 的 [open-code-review](https://github.com/alibaba/open-code-review
 
 ### 2.3 Go 复刻的 builtin 路径(ocr 未装,`ReviewWithPrompt`)
 
-ocr CLI 未装,`agent.ReviewDispatch` 走 `ReviewWithPrompt`。`precomputeReviewWithBuiltin` 用 4 个 git 来源(inlined)+ `isReviewablePath` 启发式收集 reviewable / untracked,合成 1 个 `patternBuiltin` 的 ocrGroup(Rule = `BuiltinPrompt` const,跟 ocr 路径的 N 个 per-pattern ocrGroup 等价)。**仍然 fan-out 出 builtin + simplify 两个 group** —— 跟 ocr 路径走同一条 `delegateReviewMultiJob` 路径,只是 file-list 精度低一档。
+ocr CLI 未装,`agent.ReviewDispatch` 走 `ReviewWithPrompt`。`precomputeReviewWithBuiltin` 用 4 个 git 来源 + `isReviewablePath` 启发式收集 reviewable / untracked,合成 1 个 `patternBuiltin` 的 ocrGroup(Rule = `BuiltinPrompt` const,跟 ocr 路径的 N 个 per-pattern ocrGroup 等价)。**仍然 fan-out 出 builtin + simplify 两个 group** —— 跟 ocr 路径走同一条 `delegateReviewMultiJob` 路径,只是 file-list 精度低一档。
+
+base 分支由 `internal/gitbase.Resolve` 判定(见 §2 的"base 分支怎么来"):两条 precompute 路径共用同一个解析器,`/review` 缺 `refs/remotes/origin/HEAD` 时自己补写。
 
 workspace 为空 / precompute 全失败时,fan-out 退化为 `[simplifyGroup(nil)]` 单 goroutine,prompt 用 `BuiltinPrompt` 兜底。**零外部依赖,零回归**。
 
@@ -323,8 +354,10 @@ partial failure 路径:**不**升级为 merge 整体错误,失败组以 inline m
 | 统一 dispatcher(所有 bridge 的 Starter.Review 都走它) | `internal/agent/review.go::ReviewDispatch` |
 | ocr Runner 入口 | `internal/agent/review_with_ocr.go::ReviewWithOcr` |
 | builtin Runner 入口(ocr 不在 / precompute 失败的 fallback) | `internal/agent/review.go::ReviewWithPrompt` |
-| ocr 路径 precompute(ocr delegate preview + rule) | `internal/agent/review_with_ocr.go::precomputeReviewWithOcr` |
-| Go 路径 precompute(detectDefaultBranch + merge-base + 4 git 来源 file enumeration(inlined) + builtin group 合成) | `internal/agent/review_with_ocr.go::precomputeReviewWithBuiltin` |
+| ocr 路径 precompute(ocr delegate preview + rule;ocr 失败退回 Go 枚举) | `internal/agent/review_with_ocr.go::precomputeReviewWithOcr` |
+| Go 路径 precompute(gitbase 解析 base + merge-base + 4 git 来源 file enumeration + builtin group 合成) | `internal/agent/review_with_ocr.go::precomputeReviewWithBuiltin` |
+| base 分支解析 + `refs/remotes/origin/HEAD` 补写(两条 precompute 路径 + `/me` 共用) | `internal/gitbase/gitbase.go::Resolve` |
+| base 未知的失败出口(`ErrBaseUnknown` + chat 里的可执行提示) | `internal/agent/agent.go::ErrBaseUnknown` / `internal/command/review/cmd.go::baseUnknownMessage` |
 | `OcrAvailable` 导出函数(`ReviewDispatch` 用) | `internal/agent/review_with_ocr.go::OcrAvailable` |
 | 多 job 并发编排(sem cap 4,N 个 goroutine,各自独立 ctx) | `internal/agent/review_with_ocr.go::delegateReviewMultiJob` |
 | **session 路径的一次性调用**(Start → SendBlocks → drain → Close;两种终态事件都接;permission 自动放行) | `internal/agent/run_session.go::RunSession` / `::DrainSession` |
@@ -517,7 +550,7 @@ workspace / 每个 group 的 outcome)。factory 每个 daemon 进程建一次,�
    2. `Starter.Review` → **统一 dispatcher**:
       - 所有 bridge 调 `agent.ReviewDispatch` → `OcrAvailable() ? ReviewWithOcr : ReviewWithPrompt`。
       - Agent 自带的 review 子命令(`claude -p code-review` / `codex review` / `cursor-agent -p /review-bugbot`)不在 `Starter.Review` 路径里触发——用户直接在 chat 发 slash command,nightme 透传给底层 agent。
-   3. `FormatReviewMessage` 包前缀(workspace + runner 标注,让主 agent 知道"这是谁跑的 review")。
+   3. `FormatReviewMessage` 包前缀(workspace + runner 标注,让主 agent 知道"这是谁跑的 review";run 级备注——比如这次补写了 `refs/remotes/origin/HEAD`——也进前缀)。
    4. **双路分发**:注入 AS 当 user turn(主 agent 能"fix critical findings")+ 发 channel(用户直接可见,不等下游回复)。
 7. Handle 立即返回 `Consumed=true`。readpump 继续,dispatch worker 释放,用户可继续发消息。findings 异步到达;全局设置的回执(写入确认 / 写失败告警 / 降级告警)随本条命令的 reply 一起发出,先于 findings 到达。
 
@@ -547,7 +580,7 @@ workspace / 每个 group 的 outcome)。factory 每个 daemon 进程建一次,�
 1. **agent-delegated** —— nightme 自己不调 LLM,review 推理交给现有 agent。ocr 委托模式符合这点(ocr LLM-free,工程产出喂 agent)。
 2. **ocr 不是 bridge** —— ocr 是狭义 agent(只 review,不能 chat / Edit / `/use`)。塞进 agent 注册表扭曲 bridge 语义(bridge = 通用编码 agent)。ocr 是被调用的外部工具(类 git)。
 3. **统一 dispatcher** —— 所有 bridge 走 `agent.ReviewDispatch`,二选一(`OcrAvailable() ? ReviewWithOcr : ReviewWithPrompt`),行为跨 agent 一致。Agent 自带 review 子命令(如 `claude -p code-review` / `codex review` / `cursor-agent -p /review-bugbot`)用户直接在 chat 发 slash command,nightme 透传给底层 agent——不再走 `Starter.Review` 特殊路径。
-4. **优雅降级** —— ocr 缺失 → `ReviewWithPrompt` 走 Go 复刻路径(`precomputeReviewWithBuiltin` 内联 4 个 git 来源 + 合成 builtinGroup 模拟 ocr 的产出形状),不报错不阻塞。review 在任何环境可用,只是 file-list 精度低一档(Go 启发式 vs ocr FileFilter)。
+4. **优雅降级** —— ocr 缺失 → `ReviewWithPrompt` 走 Go 复刻路径(`precomputeReviewWithBuiltin` 用 4 个 git 来源 + 合成 builtinGroup 模拟 ocr 的产出形状),不报错不阻塞;ocr 在但 preview 失败 → Go 端枚举兜底。review 在任何环境可用,只是 file-list 精度低一档(Go 启发式 vs ocr FileFilter)。base 分支定不下来不降级成"没有 diff":那是"没看",不是"没东西可看",所以报 `ErrBaseUnknown` 并给出修复命令。
 5. **fix 对话式** —— review 只产出 findings,不自动改代码。主 agent 用原生 Edit 工具 fix。保持 v1 纯 review。
 6. **`--agent` 不切 AS** —— runner 是一次性 spawn,findings 回当前 AS。不同 reviewer,同一 chat。
 7. **独立 context 分 bundle(code-driven)** —— 大 changeset 按 ocr rule group 拆多 job,每 job 独立 fresh session(强隔离,不累积)。这是 ocr smart bundling 的 code-driven 等价——用 ocr 的 rule groups 做分组边界,各 job 的 session 各自独立,不是 ocr 端到端的重 multi-agent 机器。

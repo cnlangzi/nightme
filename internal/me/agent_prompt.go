@@ -4,6 +4,8 @@ import (
 	"context"
 	"strconv"
 	"strings"
+
+	"github.com/cnlangzi/nightme/internal/gitbase"
 )
 
 // systemPrompt renders the instructions the chat model works under.
@@ -143,17 +145,15 @@ func parseBranchHeader(line string) repoFacts {
 //
 // The name carries its remote: the counts are against the branch as
 // the remote has it, not against a local branch of the same name.
+//
+// The resolver is read-only here — /me reports facts about a
+// repository, it must not modify one.
 func (s *Service) baseBranch(ctx context.Context, dir string) string {
-	out, _, err := s.cfg.Git.Run(ctx, dir, "symbolic-ref", "refs/remotes/origin/HEAD")
-	if err != nil {
+	res := gitbase.Resolve(ctx, dir, gitbase.Options{Repair: false})
+	if res.Branch == "" {
 		return ""
 	}
-	ref := strings.TrimSpace(out)
-	const prefix = "refs/remotes/origin/"
-	if !strings.HasPrefix(ref, prefix) {
-		return ""
-	}
-	return "origin/" + strings.TrimPrefix(ref, prefix)
+	return "origin/" + res.Branch
 }
 
 // countDivergence counts the commits the branch is ahead of and

@@ -878,6 +878,7 @@ internal/
   gateway/                         # Slash router + binding + receipt FSM
     inbound/  outbound/            # inbound dispatch chain + outbound sender
   gatewaytest/                     # integration test harness
+  gitbase/                         # base-branch resolver (+ repairs a missing origin/HEAD)
   logging/                         # slog + secret redaction
   llm/                             # LLM clients — chat + tool calling (Provider) and decision models (Decider)
     anthropic/  decision/  openai/ # the chat providers and the decision protocols

@@ -34,6 +34,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // ErrReviewNotSupported is returned by Starter.Review when the agent
@@ -62,10 +63,28 @@ var ErrReviewNotSupported = errors.New("agent: /review not supported")
 // Exported so the /review dispatcher can wrap the agent's review
 // output (produced via agent.ReviewDispatch) into the same canonical
 // preamble, regardless of which agent ran it.
-func FormatReviewMessage(workspace, agentName, review string) string {
-	return fmt.Sprintf("## Code review of %s (run by %q)\n\n"+
-		"(current branch vs default branch; run via /review)\n\n%s",
-		workspace, agentName, review)
+//
+// notes are run-level notices the review produced — the base-branch
+// repair the run performed. They belong in the preamble: the user
+// must learn that the run touched the repository.
+func FormatReviewMessage(workspace, agentName, review string, notes ...string) string {
+	head := fmt.Sprintf("## Code review of %s (run by %q)\n\n"+
+		"(current branch vs default branch; run via /review)\n\n",
+		workspace, agentName)
+	for _, n := range notes {
+		n = strings.TrimSpace(n)
+		if n == "" {
+			continue
+		}
+		head += "ℹ " + n + "\n\n"
+	}
+	return head + review
+}
+
+// repairNotice is the note announcing the base-branch repair: the ref
+// that was created and the branch it points at.
+func repairNotice(branch string) string {
+	return fmt.Sprintf("repaired missing refs/remotes/origin/HEAD → origin/%s", branch)
 }
 
 // BuiltinPrompt is the nightme-owned canonical review prompt. Used by:
@@ -259,6 +278,13 @@ Findings must conform to the nightme review output schema (see host agent prompt
 // patternSimplify / simplifyGroup in review_with_ocr.go.
 func ReviewWithPrompt(ctx context.Context, s Starter, cfg StartConfig, opts ...RunOnceOption) (RunResult, error) {
 	pre := precomputeReviewWithBuiltin(ctx, cfg.Workspace)
+	// The base branch could not be determined and could not be
+	// repaired: the committed diff was not reviewed. Saying "no diff
+	// to review" would be a lie, so this fails distinctly — and before
+	// any agent is spawned.
+	if err := pre.baseError(); err != nil {
+		return RunResult{}, err
+	}
 	// Short-circuit on empty diff: zero reviewable + zero untracked
 	// means precompute produced no files for any goroutine to slice.
 	// Without this guard, fan-out collapses to [simplifyGroup(nil)]
@@ -270,7 +296,12 @@ func ReviewWithPrompt(ctx context.Context, s Starter, cfg StartConfig, opts ...R
 		return RunResult{}, ErrNoDiff
 	}
 	groups := append(pre.ocrGroups, simplifyGroup(pre.reviewable))
-	return delegateReviewMultiJob(ctx, s, cfg, pre, groups, opts...)
+	res, err := delegateReviewMultiJob(ctx, s, cfg, pre, groups, opts...)
+	if err != nil {
+		return res, err
+	}
+	res.Notes = append(res.Notes, pre.notes()...)
+	return res, nil
 }
 
 // ReviewDispatch is the single entry point every bridge's

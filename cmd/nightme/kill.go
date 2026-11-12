@@ -11,8 +11,8 @@
 //	oc_x3  pi      -      skipped (no pid)  as_01HFAXXX
 //
 // Policy notes:
-//   - Signals: SIGTERM first, then up to killGrace for the child to
-//     exit on its own (agent CLIs flush their session files on
+//   - Signals: SIGTERM first, then up to procsweep.Grace for the child
+//     to exit on its own (agent CLIs flush their session files on
 //     SIGTERM — killing them outright can lose the resume id the
 //     CLI itself persists), escalating to SIGKILL when the grace
 //     window expires. `--force` skips straight to SIGKILL.
@@ -26,10 +26,19 @@
 //     process snapshot on Windows). Entries outlive daemon crashes
 //     and the OS recycles PIDs, so an unverified sweep could kill an
 //     unrelated process. Mismatches are skipped and named.
+//   - Group: a positively identified agent CLI leads its own process
+//     group, so the group is signalled — the tool subprocesses it
+//     spawned die with it instead of being orphaned. A PID that could
+//     not be verified is signalled on its own, because its group may
+//     belong to an unrelated process.
 //   - Scope: agent child processes only. The nightme daemon itself is
 //     untouched; use `nightme stop` for that. If the daemon is running
 //     it owns these children and will observe their death through its
 //     own reap path.
+//
+// The termination and identity primitives live in internal/procsweep:
+// the runtime's startup sweep applies the same PID rules, and the two
+// must not drift.
 package main
 
 import (
@@ -37,27 +46,16 @@ import (
 	"io"
 	"os"
 	"text/tabwriter"
-	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/cnlangzi/nightme/internal/agentregistry"
 	"github.com/cnlangzi/nightme/internal/config"
+	"github.com/cnlangzi/nightme/internal/procsweep"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
 const (
-	// killGrace is how long a child gets to exit after SIGTERM
-	// before SIGKILL. Two seconds matches the per-bridge grace
-	// window the runtime uses in its own Close() paths, so a
-	// manual `nightme kill` is no harsher than a normal shutdown.
-	killGrace = 2 * time.Second
-
-	// killPollInterval is how often we re-check liveness while
-	// waiting out killGrace. 50ms mirrors the daemon lifecycle
-	// polling in daemon_lifecycle.go.
-	killPollInterval = 50 * time.Millisecond
-
 	// killedExitCode is the ExitCode recorded for a session that
 	// this command terminated.
 	//
@@ -148,7 +146,7 @@ func runKill(cmd *cobra.Command, f killCmdFlags) error {
 	// Resolve each agent name to the binary it spawns, so the sweep
 	// can prove a PID still belongs to that agent before signalling
 	// it. A registry that fails to build is not fatal: we fall back
-	// to "cannot verify" (see verifyPIDOwner).
+	// to "cannot verify" (see procsweep.VerifyOwner).
 	commands := agentCommands(cfg)
 
 	outcomes := make([]killOutcome, 0, len(rows))
@@ -175,7 +173,7 @@ func runKill(cmd *cobra.Command, f killCmdFlags) error {
 //
 // wantCommand is the binary the entry's agent is expected to run
 // (e.g. "claude"); empty means "unknown, cannot verify" — see
-// verifyPIDOwner for why that matters.
+// procsweep.VerifyOwner for why that matters.
 func killSession(asFile *registry.AgentSessionFile, r listRow, wantCommand string, force bool) killOutcome {
 	switch {
 	case r.PID <= 0:
@@ -196,14 +194,25 @@ func killSession(asFile *registry.AgentSessionFile, r listRow, wantCommand strin
 	// to the expected binary before touching it. This matters most
 	// in exactly the scenario `kill` is for: a crashed daemon that
 	// left stale "running" entries behind.
-	if actual, ok := verifyPIDOwner(r.PID, wantCommand); !ok {
-		return killOutcome{row: r, result: fmt.Sprintf("skipped (pid %d is %q, not %s)", r.PID, actual, wantCommand)}
+	owner := procsweep.VerifyOwner(r.PID, wantCommand)
+	if !owner.Match {
+		return killOutcome{row: r, result: fmt.Sprintf("skipped (pid %d is %q, not %s)", r.PID, owner.Binary, wantCommand)}
+	}
+
+	// A positively identified agent CLI leads its own process group,
+	// so the group is signalled: that also reaps the tool
+	// subprocesses it spawned, which would otherwise survive the
+	// CLI. An unverified PID is signalled on its own — its group may
+	// belong to an unrelated process.
+	kill := procsweep.Kill
+	if owner.Verified {
+		kill = procsweep.KillGroup
 	}
 
 	result := "killed"
-	switch err := killProcess(r.PID, force); {
+	switch err := kill(r.PID, force); {
 	case err == nil:
-	case isProcessGone(err):
+	case procsweep.IsProcessGone(err):
 		// The child died on its own between list and kill — the
 		// desired end state, so we still mark the entry exited.
 		result = "already exited"

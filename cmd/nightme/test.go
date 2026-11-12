@@ -107,7 +107,11 @@ func runTest(cmd *cobra.Command, f testCmdFlags) error {
 
 	agentReg := agentregistry.Build(cfg, f.agentName)
 
-	spawner := chatsession.NewRegistrySpawner(agentReg)
+	// The agent child lives under this scope. `nightme test` keeps
+	// the CLI's detach policy — the process scope is the command's
+	// own context, which the CLI never cancels, so the child is not
+	// torn down when the command returns.
+	spawner := chatsession.NewRegistrySpawner(agentReg, cmd.Context())
 	mgr := chatsession.NewManager().WithSpawner(spawner)
 
 	cs, err := mgr.GetOrCreate("test:"+f.agentName, f.agentName)

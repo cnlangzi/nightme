@@ -38,6 +38,14 @@ type Options struct {
 	// command execution is true (hide) — every proc.New()
 	// caller gets this for free.
 	HideWindow bool
+
+	// Grace is how long the child gets to exit after SIGTERM
+	// before it is SIGKILLed. Zero means SIGTERMGrace (1s) —
+	// the window the short-lived helper commands need. Agent
+	// CLI children pass AgentGrace (3s) instead, because they
+	// flush their own session state on SIGTERM and an outright
+	// kill loses the resume id the CLI persists.
+	Grace time.Duration
 }
 
 // New is the backward-compatible spawn recipe: always hides the
@@ -72,16 +80,16 @@ func New(ctx context.Context, name string, args ...string) *exec.Cmd {
 // ctx-fire. Replaces the earlier WithGrace + graced-map design
 // (which leaked one goroutine + map entry per successful
 // proc.New whose ctx never fired — see /review finding #1).
-func NewWith(ctx context.Context, _ Options, name string, args ...string) *exec.Cmd {
+func NewWith(ctx context.Context, opts Options, name string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	armGraceCancel(cmd)
+	armGraceCancel(cmd, opts.Grace)
 	return cmd
 }
 
 // armGraceCancel rewrites cmd.Cancel from exec.CommandContext's
 // default `func() error { return c.Process.Kill() }` (raw
-// SIGKILL) to SIGTERM → SIGTERMGrace → SIGKILL, and returns
+// SIGKILL) to SIGTERM → grace → SIGKILL, and returns
 // os.ErrProcessDone so stdlib's watchCtx doesn't wrap Run()'s
 // result with ctx.Err().
 //
@@ -104,7 +112,7 @@ func NewWith(ctx context.Context, _ Options, name string, args ...string) *exec.
 //     Surfacing the error would replace the child's real exit
 //     status in Run()'s return value, which is worse than the
 //     diagnostic loss.
-//   - After SIGTERMGrace, an AfterFunc fires SIGKILL on the
+//   - After the grace window, an AfterFunc fires SIGKILL on the
 //     same pgid. The closure captures cmd by reference for
 //     the full grace window — this is a bounded retention cost
 //     (timer-heap slot + ~1 KB cmd struct), not a leak.
@@ -118,7 +126,14 @@ func NewWith(ctx context.Context, _ Options, name string, args ...string) *exec.
 // armGraceCancel is idempotent: it just assigns cmd.Cancel. Two
 // proc.NewWith calls on the same *exec.Cmd are not possible
 // (each New returns a fresh cmd).
-func armGraceCancel(cmd *exec.Cmd) {
+//
+// grace is the SIGTERM→SIGKILL window. A non-positive value means
+// SIGTERMGrace — the shared default every short-lived helper
+// command relies on.
+func armGraceCancel(cmd *exec.Cmd, grace time.Duration) {
+	if grace <= 0 {
+		grace = SIGTERMGrace
+	}
 	cmd.Cancel = func() error {
 		proc := cmd.Process
 		if proc == nil {
@@ -138,7 +153,7 @@ func armGraceCancel(cmd *exec.Cmd) {
 		// stdlib's exec.Cmd doesn't expose one, and adding a
 		// parallel finalizer / runtime.SetFinalizer would be
 		// more code than the cost it saves.
-		time.AfterFunc(SIGTERMGrace, func() {
+		time.AfterFunc(grace, func() {
 			// Race fix: do NOT read cmd.ProcessState here.
 			// stdlib's cmd.Wait() writes it concurrently from
 			// the main test goroutine, which Go's race

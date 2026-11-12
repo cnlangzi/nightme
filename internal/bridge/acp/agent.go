@@ -477,7 +477,7 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	env := append([]string(nil), s.env...)
 	env = append(env, cfg.Env...)
 
-	transport, err := pty.NewTransport(cfg.Workspace, s.command, args, env, cols, rows)
+	transport, err := pty.NewTransport(ctx, cfg.Workspace, s.command, args, env, cols, rows)
 	if err != nil {
 		return nil, err
 	}

@@ -1,4 +1,4 @@
-package main
+package procsweep
 
 import "testing"
 
@@ -74,6 +74,28 @@ func TestSameCommand(t *testing.T) {
 	for _, c := range cases {
 		if got := sameCommand(c.actual, c.want); got != c.match {
 			t.Errorf("sameCommand(%q, %q) = %v, want %v", c.actual, c.want, got, c.match)
+		}
+	}
+}
+
+// TestCommandExt pins the extension rule the Windows host-interpreter
+// mapping is built on.
+func TestCommandExt(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"claude", ""},
+		{"claude.cmd", "cmd"},
+		{`C:\Users\x\AppData\Roaming\npm\claude.CMD`, "cmd"},
+		{`C:\agents\run.ps1`, "ps1"},
+		{`C:\agents\run.js`, "js"},
+		{`C:\Program Files\claude\claude.exe`, "exe"},
+		{".cmd", ""},
+	}
+	for _, c := range cases {
+		if got := commandExt(c.in); got != c.want {
+			t.Errorf("commandExt(%q) = %q, want %q", c.in, got, c.want)
 		}
 	}
 }

@@ -221,10 +221,12 @@ func childEnviron(cfg agent.StartConfig) []string {
 func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver, error) {
 	args := buildArgs(s.args, cfg)
 
-	// Spawn via the proc.New helper so the platform-specific
+	// Spawn via the proc.NewWith helper so the platform-specific
 	// SysProcAttr (Setsid on unix, no-op on Windows) is in one
 	// place — see internal/proc/exec_unix.go for the rationale.
-	child := proc.New(ctx, s.command, args...)
+	// The 3s grace lets the CLI flush its own session state on
+	// SIGTERM, so the resume id survives the daemon's shutdown.
+	child := proc.NewWith(ctx, proc.Options{HideWindow: true, Grace: proc.AgentGrace}, s.command, args...)
 	child.Dir = cfg.Workspace
 	child.Env = childEnviron(cfg)
 

@@ -595,9 +595,14 @@ func (r *run) setTranscript(text string) {
 
 // askUser asks the user a question and waits for the answer.
 //
-// The question is posted to the observer chat and the run is
-// persisted before the wait, so a daemon that restarts keeps the
-// question open.
+// The run is persisted before the question is posted to the observer
+// chat, and the wait starts after both. The order matters: the state
+// that says "this run is waiting for a reply" has to be durable before
+// the user is told, so a daemon that restarts in the window between
+// the two picks the run up as paused. Notifying first leaves that
+// window open — the observer sees the question while the state on
+// disk still says the run is working, and the restart resumes it as
+// a running run instead of a waiting one.
 func (s *Service) askUser(ctx context.Context, r *run, question string, options []llm.Option) (string, error) {
 	r.mu.Lock()
 	waiting := r.ask != nil
@@ -609,8 +614,8 @@ func (s *Service) askUser(ctx context.Context, r *run, question string, options 
 	r.mu.Unlock()
 
 	if !waiting {
-		s.notify(r, "❓ "+question)
 		s.persist(r)
+		s.notify(r, "❓ "+question)
 	}
 	reply, err := r.awaitReply(ctx)
 	if err != nil {

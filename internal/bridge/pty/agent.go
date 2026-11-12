@@ -107,12 +107,9 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	env := append([]string(nil), s.env...)
 	env = append(env, cfg.Env...)
 
-	// ctx is currently unused — Start blocks synchronously. Reserved
-	// for a future cancellation hook that propagates to the child
-	// process via gopty.CmdContext.
-	_ = ctx
-
-	transport, err := NewTransport(cfg.Workspace, s.command, args, env, cols, rows)
+	// ctx governs the child's lifetime: cancelling it terminates the
+	// child process group and reaps it (see ptyTransport.watch).
+	transport, err := NewTransport(ctx, cfg.Workspace, s.command, args, env, cols, rows)
 	if err != nil {
 		return nil, err
 	}

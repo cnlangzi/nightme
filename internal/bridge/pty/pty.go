@@ -4,6 +4,7 @@
 package pty
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -38,13 +39,31 @@ type ptyTransport struct {
 	cmd       *gopty.Cmd
 	closeOnce sync.Once
 	closeErr  error
+	// closed is closed when the transport has been torn down, by
+	// whichever of Close() / the context watcher got there first.
+	// The watcher selects on it so a transport closed while its
+	// context is still alive does not strand the watcher goroutine.
+	closed chan struct{}
 }
 
-// New spawns command with args inside a PTY rooted at workspace.
+// NewTransport spawns command with args inside a PTY rooted at
+// workspace.
 // env is appended to os.Environ() for the child process. cols / rows
 // set the initial TTY size. Returns a Transport for byte I/O plus a
 // PID() helper.
-func NewTransport(workspace, command string, args []string, env []string, cols, rows int) (Transport, error) {
+//
+// ctx governs the child's lifetime: cancelling it terminates the
+// child process group and reaps it, exactly as Close() does. A
+// context that is already cancelled refuses to start the child at
+// all — the daemon's shutdown must not produce a new agent process.
+func NewTransport(ctx context.Context, workspace, command string, args []string, env []string, cols, rows int) (Transport, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("pty: not starting %s: %w", command, err)
+	}
+
 	ptmx, err := gopty.New()
 	if err != nil {
 		return nil, err
@@ -77,7 +96,31 @@ func NewTransport(workspace, command string, args []string, env []string, cols, 
 		return nil, err
 	}
 
-	return &ptyTransport{ptmx: ptmx, cmd: cmd}, nil
+	b := &ptyTransport{ptmx: ptmx, cmd: cmd, closed: make(chan struct{})}
+	go b.watch(ctx)
+	return b, nil
+}
+
+// watch tears the child down when ctx is cancelled.
+//
+// It shares Close()'s once-guard, so the two paths can race safely:
+// whichever gets there first terminates the child, the other returns
+// without doing anything. The b.closed arm keeps the goroutine from
+// outliving a transport that was closed while its context was still
+// alive.
+func (b *ptyTransport) watch(ctx context.Context) {
+	select {
+	case <-ctx.Done():
+	case <-b.closed:
+		return
+	}
+	b.closeOnce.Do(func() {
+		defer close(b.closed)
+		b.terminateChild()
+		if b.ptmx != nil {
+			b.closeErr = b.ptmx.Close()
+		}
+	})
 }
 
 // Read forwards a read from the PTY master fd.
@@ -94,6 +137,7 @@ func (b *ptyTransport) Write(p []byte) (int, error) { return b.ptmx.Write(p) }
 // Idempotent.
 func (b *ptyTransport) Close() error {
 	b.closeOnce.Do(func() {
+		defer close(b.closed)
 		b.terminateChild()
 		if b.ptmx != nil {
 			b.closeErr = b.ptmx.Close()

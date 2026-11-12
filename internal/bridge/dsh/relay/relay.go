@@ -180,6 +180,11 @@ func Get(opts host.SharedHostOptions) (*Relay, error) {
 		close(call.done)
 	}()
 
+	// The shared dsh host is deliberately started under a context the
+	// daemon never cancels: it is a reusable service on 127.0.0.1:3080
+	// that outlives the daemon that started it, and the next daemon
+	// re-attaches to it. The agent child processes are the ones the
+	// daemon's process scope terminates — the host is not one of them.
 	cli, err := host.EnsureSharedHost(context.Background(), opts)
 	if err != nil {
 		call.err = err

@@ -32,8 +32,9 @@
 //	dsh       — POST /api/session.cancel (dashboard stop button); turn/end{abort}; SessionID kept
 //	pty       — ErrNotSupported (handler surfaces "use /close")
 //
-// Daemon shutdown (cmd/nightme/run.go) does NOT call this — agents
-// survive nightme restart via the Detached registry state.
+// Daemon shutdown (cmd/nightme/run.go) does NOT call this — the
+// daemon terminates the agent child processes through its own
+// shutdown sequence.
 package stop
 
 import (

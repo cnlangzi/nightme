@@ -233,6 +233,15 @@ type ChatSession struct {
 	// production wires a registrySpawner at runtime).
 	spawner Spawner
 
+	// shuttingDown is set by the runtime's graceful-shutdown path
+	// (MarkShuttingDown). The exit-event path reads it to pick the
+	// exit code: a session the daemon terminated records -4
+	// ("terminated by nightme"), a CLI that died on its own records
+	// 0. It also suppresses the F-61 respawn — a respawn during
+	// shutdown could only fail, because the process scope is
+	// already cancelled.
+	shuttingDown bool
+
 	// queue (CS-AS 边界重构 Phase 1) is the at-least-once
 	// successful submission queue. Head element is currently
 	// being attempted; failed Submit keeps the head in place.
@@ -1119,6 +1128,31 @@ func (cs *ChatSession) ResetContext() {
 		cs.cancel()
 	}
 	cs.ctx, cs.cancel = context.WithCancel(context.Background())
+}
+
+// MarkShuttingDown records that the daemon is tearing this chat
+// down. The exit-event path reads the flag to pick the exit code:
+// a session the daemon terminated records
+// registry.ExitCodeTerminatedByNightme (-4), a CLI that died on its
+// own records 0.
+//
+// The flag must be set BEFORE the agent children are terminated —
+// the exit events arrive after the fact, and a chat that was not
+// marked yet would record the wrong code.
+//
+// Idempotent.
+func (cs *ChatSession) MarkShuttingDown() {
+	cs.mu.Lock()
+	cs.shuttingDown = true
+	cs.mu.Unlock()
+}
+
+// IsShuttingDown reports whether the daemon marked this chat as
+// shutting down.
+func (cs *ChatSession) IsShuttingDown() bool {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.shuttingDown
 }
 
 // QueueUserMessage (CS-AS 边界重构 Phase 1) accepts an already-built

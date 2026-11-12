@@ -252,6 +252,15 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 		return errors.New("run: agent registry is nil")
 	}
 
+	// Startup sweep: the agent child processes a previous, crashed
+	// daemon left behind. They have no context to cancel — the
+	// daemon that spawned them is gone — so this is the only path
+	// that can terminate them. It runs before any channel starts,
+	// so it can never touch a process the current daemon owns.
+	if _, err := SweepOrphanAgents(asFile, agents, PidAlive, logger); err != nil {
+		return fmt.Errorf("run: sweep orphan agent processes: %w", err)
+	}
+
 	// dsh is no longer started at boot. The dsh bridge lazy-starts
 	// it on first use via host.EnsureSharedHost (see
 	// internal/bridge/dsh/host/ensure.go). A user who never picks
@@ -262,10 +271,22 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	// by dsh's own session.fork at first use, not by a boot-time
 	// RecoverAll pass. See dsh.newDriver → handshakeSession.
 
+	// The process scope: the parent context of every agent child
+	// process the daemon spawns. Cancelling it terminates them, so
+	// no agent process outlives the daemon.
+	//
+	// It is deliberately NOT derived from the daemon context: on
+	// SIGTERM the daemon context is cancelled by runDaemonChild's
+	// deferred cancel(), which runs after the shutdown sequence —
+	// far too late to be the kill trigger. The runtime owns the
+	// scope and cancels it explicitly, at the right point.
+	procScope, cancelProcs := context.WithCancel(context.Background())
+	defer cancelProcs()
+
 	// Shared spawner — every per-channel mgr uses this so the
 	// agent registry is the single source of truth for which
 	// agents can be spawned.
-	spawner := chatsession.NewRegistrySpawner(agents)
+	spawner := chatsession.NewRegistrySpawner(agents, procScope)
 
 	// v1.3+ multi-channel: scan the registry for every channel
 	// with valid credentials. A channel whose builder returns
@@ -561,7 +582,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	stopMeService(meSvc, logger)
 	stopPersonalAgent(personal, logger)
 
-	return ShutdownRunMulti(out, startedChannels, csFile, asFile, prCacheReg, logger)
+	return ShutdownRunMulti(out, startedChannels, csFile, asFile, prCacheReg, logger, cancelProcs)
 }
 
 // Ensure unused imports stay declared (some are referenced in

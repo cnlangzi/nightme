@@ -54,12 +54,22 @@ var ErrSpawnerNotSet = errors.New("chatsession: spawner not configured")
 // chatsession -> agent.Registry one-way).
 type registrySpawner struct {
 	agents *agent.Registry
+	// scope is the daemon-scoped process scope: the parent context
+	// of every agent child process. Cancelling it terminates the
+	// children — see spawnContext.
+	scope context.Context
 }
 
 // NewRegistrySpawner returns a Spawner that delegates to an
 // agent.Registry. The registry is consulted for Detect and Start.
-func NewRegistrySpawner(reg *agent.Registry) Spawner {
-	return &registrySpawner{agents: reg}
+//
+// scope is the daemon's process scope: the parent context of every
+// agent child process this spawner starts. Cancelling it terminates
+// those children, so the daemon can guarantee no agent process
+// outlives it. A nil scope means "no scope" — the caller's context
+// is then the only lifetime.
+func NewRegistrySpawner(reg *agent.Registry, scope context.Context) Spawner {
+	return &registrySpawner{agents: reg, scope: scope}
 }
 
 func (s *registrySpawner) Spawn(ctx context.Context, agentName, cwd string, args []string, sessionID string) (*agent.Agent, error) {
@@ -73,5 +83,35 @@ func (s *registrySpawner) Spawn(ctx context.Context, agentName, cwd string, args
 	if err := s2.Detect(); err != nil {
 		return nil, err
 	}
-	return s2.Start(ctx, agent.StartConfig{Workspace: cwd, Args: args, SessionID: sessionID})
+	return s2.Start(spawnContext(s.scope, ctx), agent.StartConfig{Workspace: cwd, Args: args, SessionID: sessionID})
+}
+
+// spawnContext combines the process scope with the caller's context
+// so that either one being cancelled tears the child down.
+//
+// The merged context is a child of the scope, so cancelling the scope
+// propagates. A context cannot have two parents, so the caller's
+// cancellation is wired in with context.AfterFunc — "either one
+// cancels" is the contract.
+//
+// The caller's context must be a long-lived one (the daemon context
+// or the chat context), not a per-operation context: a per-agent
+// operation context is cancelled on an agent switch, and the agent
+// process must survive that. The daemon's process scope is the only
+// thing that ends an agent's life.
+//
+// The merged context is deliberately NOT cancelled when Spawn
+// returns: the child process outlives the spawn call, and
+// exec.CommandContext ties the process lifetime to the context it was
+// handed.
+func spawnContext(scope, caller context.Context) context.Context {
+	if scope == nil {
+		scope = context.Background()
+	}
+	if caller == nil {
+		caller = context.Background()
+	}
+	ctx, cancel := context.WithCancel(scope)
+	context.AfterFunc(caller, cancel)
+	return ctx
 }

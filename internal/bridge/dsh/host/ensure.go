@@ -12,6 +12,13 @@
 // delegated to the OS — when the daemon exits, the spawned dsh
 // stays alive (intended; it's a persistent service on port 3080).
 //
+// The host is deliberately OUTSIDE the daemon's process scope: the
+// scope terminates every agent child process, and the shared host is
+// not one of them — it is reusable across daemon instances, and the
+// next daemon re-attaches to it (see tryAttachExistingDSH in
+// lifecycle.go). The context handed to EnsureSharedHost is
+// therefore never the process scope.
+//
 // Concurrency: the package's `globalClient` and `sharedHostGlobal`
 // are protected by their own mutexes. Concurrent first-touch callers
 // share one in-flight StartSharedHost. A failure is not remembered:

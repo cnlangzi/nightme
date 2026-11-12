@@ -48,7 +48,7 @@ import (
 // -1 (spawn failed / unknown) and the kill command's -2 (operator
 // killed). Three disjoint values let list / kill / doctor pinpoint
 // the cause without a heuristic.
-const exitedReconcileCode = -3
+const exitedReconcileCode = registry.ExitCodeReconciledDead
 
 // ReconciledExitCode exposes the sentinel value so the CLI's
 // `nightme list` writes the same code when it independently

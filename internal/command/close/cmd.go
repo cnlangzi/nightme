@@ -43,8 +43,10 @@
 // surface to two entry points and lets the implementation access
 // CS private state without leaking public accessors.
 //
-// Daemon shutdown (cmd/nightme/run.go) does NOT call these —
-// agents survive nightme restart via the Detached registry state.
+// Daemon shutdown (cmd/nightme/run.go) does NOT call these — the
+// daemon terminates the agent child processes through its own
+// shutdown sequence, and records them as exited with the daemon's
+// termination code.
 //
 // Factory holds *chatsession.Manager directly.
 package close

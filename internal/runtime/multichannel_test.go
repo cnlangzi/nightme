@@ -115,7 +115,7 @@ func setupWire(t *testing.T) (buildStackOpts, *capturedSends) {
 	cfg.Feishu.AppSecret = "test-secret"
 	agents := buildTestAgents(cfg)
 	opts := buildStackOpts{
-		spawner:       chatsession.NewRegistrySpawner(agents),
+		spawner:       chatsession.NewRegistrySpawner(agents, context.Background()),
 		csFile:        csFile,
 		asFile:        asFile,
 		primaryAgent:  "claude",

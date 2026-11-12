@@ -25,6 +25,17 @@ import (
 // instant on a 3 s ctx-timeout path.
 const SIGTERMGrace = 1 * time.Second
 
+// AgentGrace is the SIGTERM→SIGKILL window for agent CLI children
+// (claude, codex, omp, pi, …).
+//
+// Why longer than SIGTERMGrace: agent CLIs flush their own session
+// state on SIGTERM, and killing them outright loses the resume id
+// the CLI persists — the next spawn could then not continue the
+// conversation. 3 s sits inside the range the project already
+// relies on (`nightme kill` allows 2 s, the PTY path allows 5 s)
+// without slowing the shared default down.
+const AgentGrace = 3 * time.Second
+
 // currentExePath returns the absolute path of the running
 // nightme binary. Centralised so the three OpenTerminal
 // implementations (macOS / Linux / Windows) share the same

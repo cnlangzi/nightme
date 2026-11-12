@@ -135,6 +135,28 @@ func (p *AgentSessionPool) FindByID(id string) *AgentSession {
 	return p.byID[id]
 }
 
+// List returns every AgentSession in the pool, across all chats and
+// cwds. Order is unspecified. The returned slice is a snapshot;
+// callers may mutate it.
+//
+// The pool is the daemon-wide view: a chat's own Pool() only holds
+// its active cwd working set, so a session parked by /cwd is visible
+// here and nowhere else.
+func (p *AgentSessionPool) List() []*AgentSession {
+	if p == nil {
+		return nil
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	out := make([]*AgentSession, 0, len(p.byKey))
+	for _, as := range p.byKey {
+		if as != nil {
+			out = append(out, as)
+		}
+	}
+	return out
+}
+
 // ListByChatCwd returns every AS for chatID whose Cwd matches cwd
 // (after Clean). Order is unspecified. The returned slice is a
 // snapshot; callers may mutate it.

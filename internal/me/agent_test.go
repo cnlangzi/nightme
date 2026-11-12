@@ -324,6 +324,14 @@ func writePlaybook(t *testing.T, dir, name, body string) {
 }
 
 // testService builds a personal agent with fakes.
+//
+// The service is shut down when the test ends. A run that is still
+// working keeps writing its state file, and Windows refuses to
+// remove a directory that holds a file being written — so a test
+// that leaves the service running fails in its own cleanup rather
+// than in an assertion. The cleanup runs before the temp dir's own:
+// t.TempDir registers its cleanup first, and cleanups run last-in
+// first-out.
 func testService(t *testing.T, dir string, cfg Config) (*Service, *fakeLoopback, *fakeSender) {
 	t.Helper()
 	lb := newFakeLoopback()
@@ -336,6 +344,7 @@ func testService(t *testing.T, dir string, cfg Config) (*Service, *fakeLoopback,
 	cfg.StepTimeout = 5 * time.Second
 	cfg.StallTimeout = 5 * time.Second
 	svc := New(cfg)
+	t.Cleanup(func() { _ = svc.Shutdown(context.Background()) })
 	if err := svc.Start(context.Background()); err != nil {
 		t.Fatalf("start: %v", err)
 	}

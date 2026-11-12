@@ -2,6 +2,7 @@ package pty
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"runtime"
 	"sync"
@@ -19,7 +20,7 @@ func TestSpawnEcho(t *testing.T) {
 		t.Skip("PTY semantics differ on Windows; skip unix-only smoke test")
 	}
 
-	b, err := NewTransport(t.TempDir(), "/bin/echo", []string{"hello"}, nil, 80, 24)
+	b, err := NewTransport(context.Background(), t.TempDir(), "/bin/echo", []string{"hello"}, nil, 80, 24)
 	if err != nil {
 		t.Fatalf("New returned error: %v", err)
 	}
@@ -39,7 +40,7 @@ func TestSetsize(t *testing.T) {
 		t.Skip("PTY semantics differ on Windows; skip unix-only smoke test")
 	}
 
-	b, err := NewTransport(t.TempDir(), "/bin/sleep", []string{"0.2"}, nil, 80, 24)
+	b, err := NewTransport(context.Background(), t.TempDir(), "/bin/sleep", []string{"0.2"}, nil, 80, 24)
 	if err != nil {
 		t.Fatalf("New returned error: %v", err)
 	}
@@ -60,7 +61,7 @@ func TestLongLineNotTruncated(t *testing.T) {
 		t.Skip("PTY semantics differ on Windows; skip unix-only smoke test")
 	}
 	script := "import sys\nline=sys.stdin.readline()\nsys.stdout.write(str(len(line))+'\\n')\nsys.stdout.flush()\n"
-	b, err := NewTransport(t.TempDir(), "python3", []string{"-c", script}, nil, 80, 24)
+	b, err := NewTransport(context.Background(), t.TempDir(), "python3", []string{"-c", script}, nil, 80, 24)
 	if err != nil {
 		t.Fatalf("New returned error: %v", err)
 	}
@@ -100,7 +101,7 @@ func TestCloseKillsChild(t *testing.T) {
 		t.Skip("PTY semantics differ on Windows; skip unix-only smoke test")
 	}
 
-	b, err := NewTransport(t.TempDir(), "/bin/sleep", []string{"30"}, nil, 80, 24)
+	b, err := NewTransport(context.Background(), t.TempDir(), "/bin/sleep", []string{"30"}, nil, 80, 24)
 	if err != nil {
 		t.Fatalf("New returned error: %v", err)
 	}
@@ -126,7 +127,7 @@ func TestClose(t *testing.T) {
 		t.Skip("PTY semantics differ on Windows; skip unix-only smoke test")
 	}
 
-	b, err := NewTransport(t.TempDir(), "/bin/sleep", []string{"0.2"}, nil, 80, 24)
+	b, err := NewTransport(context.Background(), t.TempDir(), "/bin/sleep", []string{"0.2"}, nil, 80, 24)
 	if err != nil {
 		t.Fatalf("New returned error: %v", err)
 	}
@@ -147,7 +148,7 @@ func TestPID(t *testing.T) {
 		t.Skip("PTY semantics differ on Windows; skip unix-only smoke test")
 	}
 
-	b, err := NewTransport(t.TempDir(), "/bin/sleep", []string{"0.2"}, nil, 80, 24)
+	b, err := NewTransport(context.Background(), t.TempDir(), "/bin/sleep", []string{"0.2"}, nil, 80, 24)
 	if err != nil {
 		t.Fatalf("New returned error: %v", err)
 	}

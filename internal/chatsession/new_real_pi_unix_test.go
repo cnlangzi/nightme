@@ -75,7 +75,7 @@ func TestRealPi_NewAfterSwitch(t *testing.T) {
 	// the user's actual sequence (use pi → switch to claude → /new).
 	claudeAgent := newFakeAgentBuilder("claude")
 	reg.Register(claudeAgent)
-	spawner := NewRegistrySpawner(reg)
+	spawner := NewRegistrySpawner(reg, context.Background())
 
 	cs, _ := New("oc_real_pi_new", "pi")
 	cs = cs.WithPersistence(csFile, asFile)

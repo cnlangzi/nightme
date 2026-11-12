@@ -44,12 +44,13 @@ func newRunCmd() *cobra.Command {
 			"router on top of them. Slash commands (/cwd, /use, /kill, /help) " +
 			"drive session lifecycle; plain text is forwarded to the live " +
 			"agent behind the chat's active AgentSession.\n\n" +
-			"On shutdown the daemon stops the channels and persists final " +
-			"state. Agent processes are LONG-LIVED and intentionally NOT " +
-			"killed by nightme — they survive nightme restart via the " +
-			"Detached registry state, and `nightme run` (or /use) re-attaches " +
-			"to them on next start. Use `/kill` from the relevant chat to " +
-			"terminate agent processes.\n\n" +
+			"On shutdown the daemon stops the channels, terminates the " +
+			"agent child processes it started, and persists final state. " +
+			"A session that was running is recorded as exited with the " +
+			"daemon's termination code; the next message respawns the " +
+			"agent with `--resume <id>`, so the conversation continues. " +
+			"Use `/kill` from the relevant chat to terminate an agent " +
+			"process without stopping the daemon.\n\n" +
 			"Channel selection is driven by config credentials (channel.BuildAll " +
 			"iterates the registry and skips builders that return 'missing creds'). " +
 			"See docs/CHANNEL.md for the OCP registration pattern.",

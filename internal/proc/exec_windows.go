@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // CreateNoWindow is the documented Win32 CREATE_NO_WINDOW
@@ -49,6 +50,14 @@ type Options struct {
 	// execution is true (hide) — every proc.New() caller gets
 	// this for free.
 	HideWindow bool
+
+	// Grace is how long the child gets to exit on its own after
+	// the context is cancelled before it is hard-killed. Zero
+	// means SIGTERMGrace (1s) — the window the short-lived
+	// helper commands need. Agent CLI children pass AgentGrace
+	// (3s) instead, because they flush their own session state
+	// before exiting.
+	Grace time.Duration
 }
 
 // New is the backward-compatible spawn recipe: always hides the
@@ -123,7 +132,7 @@ func NewWith(ctx context.Context, opts Options, name string, args ...string) *ex
 		resolved = lp
 	}
 	cmd := launchOnWindowsWith(ctx, opts, resolved, args...)
-	armGraceCancel(cmd)
+	armGraceCancel(cmd, opts.Grace)
 	return cmd
 }
 
@@ -149,8 +158,8 @@ func NewWith(ctx context.Context, opts Options, name string, args ...string) *ex
 // improvement for git children that are *almost done* when
 // cancel fires:
 //
-//   - Set cmd.WaitDelay = SIGTERMGrace. After ctx-fire, stdlib
-//     waits up to SIGTERMGrace (1 s) for the child to exit
+//   - Set cmd.WaitDelay to the requested grace. After ctx-fire,
+//     stdlib waits up to that window for the child to exit
 //     naturally before hard-killing it. A git child that's
 //     finishing its `git status` at the moment of cancel can
 //     complete + drop .git/index.lock in that window.
@@ -166,8 +175,15 @@ func NewWith(ctx context.Context, opts Options, name string, args ...string) *ex
 // GenerateConsoleCtrlEvent — substantially more code; see
 // docs/feat/F-CLAUDE-PRINT-002 §Windows caveat for the full
 // design and the v4 follow-up plan.
-func armGraceCancel(cmd *exec.Cmd) {
-	cmd.WaitDelay = SIGTERMGrace
+//
+// grace is the natural-exit window; a non-positive value means
+// SIGTERMGrace — the shared default every short-lived helper
+// command relies on.
+func armGraceCancel(cmd *exec.Cmd, grace time.Duration) {
+	if grace <= 0 {
+		grace = SIGTERMGrace
+	}
+	cmd.WaitDelay = grace
 	cmd.Cancel = func() error { return os.ErrProcessDone }
 }
 

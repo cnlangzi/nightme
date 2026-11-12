@@ -56,7 +56,7 @@ func TestAS_ReuseAcrossMessages_RealPi(t *testing.T) {
 	piStarter := pibridge.NewStarter("pi", "pi", nil)
 	reg := agent.New()
 	reg.Register(piStarter)
-	innerSpawner := NewRegistrySpawner(reg)
+	innerSpawner := NewRegistrySpawner(reg, context.Background())
 	spy := &countSpawner{inner: innerSpawner}
 
 	mgr := NewManager()

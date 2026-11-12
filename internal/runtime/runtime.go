@@ -280,7 +280,11 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	// deferred cancel(), which runs after the shutdown sequence —
 	// far too late to be the kill trigger. The runtime owns the
 	// scope and cancels it explicitly, at the right point.
-	procScope, cancelProcs := context.WithCancel(context.Background())
+	//
+	// newProcScope's cancel marks every chat as shutting down
+	// first, so the children's death is attributed to the shutdown
+	// instead of reaching the chat as a crash.
+	procScope, cancelProcs := newProcScope()
 	defer cancelProcs()
 
 	// Shared spawner — every per-channel mgr uses this so the

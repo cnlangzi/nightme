@@ -107,6 +107,15 @@ const (
 	// SafeGo/PanicEventHandler, or the panic-recovery path itself
 	// failed. Almost always means a bug in the bridge.
 	BridgeExitPanic
+
+	// BridgeExitShutdown: the child was terminated by the NightMe
+	// daemon's shutdown — the process scope was cancelled, so the
+	// child got SIGTERM and, past the grace window, SIGKILL.
+	//
+	// ClassifyExit never produces it: it classifies HOW the child
+	// exited, not WHO asked for the exit. The chat layer applies it
+	// when it knows the daemon is tearing down.
+	BridgeExitShutdown
 )
 
 // String renders a BridgeExitKind for logs. Stable across versions;
@@ -123,6 +132,8 @@ func (k BridgeExitKind) String() string {
 		return "signal-killed"
 	case BridgeExitPanic:
 		return "panic"
+	case BridgeExitShutdown:
+		return "shutdown"
 	}
 	return "unknown"
 }
@@ -159,6 +170,12 @@ type BridgeDiagnostic struct {
 	// (i.e. cmd.Wait() returned). Not the time of any underlying
 	// signal — those don't surface in Go's exec API.
 	KilledAt time.Time
+}
+
+// IsShutdown reports whether the exit was caused by the NightMe
+// daemon's shutdown rather than by a crash. Nil-safe.
+func (d *BridgeDiagnostic) IsShutdown() bool {
+	return d != nil && d.ExitKind == BridgeExitShutdown
 }
 
 // ClassifyExit maps (waitErr, graceful) into a BridgeExitKind.

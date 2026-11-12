@@ -5,6 +5,7 @@ package proc
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os/exec"
 	"reflect"
 	"syscall"
@@ -45,6 +46,11 @@ func isShellTrapRace(err error) bool {
 // caller. body must establish a fresh child for each
 // invocation (a fresh ctx, a fresh exec.Cmd) — the second call
 // is otherwise a rerun against torn-down state.
+//
+// body owns the failure message: it must wrap the error Run()
+// returned with %w, so isShellTrapRace can still recognise the
+// race through the wrapper, and so the message the test prints
+// describes what that body wanted.
 func runFlakyGuard(t *testing.T, body func(*testing.T) error) {
 	t.Helper()
 	err := body(t)
@@ -52,7 +58,7 @@ func runFlakyGuard(t *testing.T, body func(*testing.T) error) {
 		return
 	}
 	if !isShellTrapRace(err) {
-		t.Fatalf("Run() = %v, want nil (trap cleaned up before grace expired)", err)
+		t.Fatalf("%v", err)
 	}
 	if err := body(t); err != nil {
 		t.Fatalf("retry after sh-trap race: %v", err)
@@ -362,7 +368,10 @@ func TestNewGrace_CleanExit_OnSIGTERM(t *testing.T) {
 		cancel()
 		select {
 		case err := <-done:
-			return err
+			if err != nil {
+				return fmt.Errorf("Run() = %w; want nil (trap cleaned up before grace expired)", err)
+			}
+			return nil
 		case <-time.After(2 * time.Second):
 			t.Fatal("Run() didn't return within 2s of cancel")
 			return nil
@@ -374,30 +383,40 @@ func TestNewGrace_CleanExit_OnSIGTERM(t *testing.T) {
 // child ignores SIGTERM, AfterFunc SIGKILLs it after grace,
 // Run() returns a non-nil error. Wall-time ≈ grace + small
 // overhead — anything much shorter means grace wasn't honoured.
+//
+// The elapsed time is measured from the cancel, not from the
+// spawn: the warm-up below must not be counted as grace. The
+// test races /bin/sh's trap-installation latency like its
+// siblings, so it goes through runFlakyGuard.
 func TestNewGrace_SIGKILL_AfterGrace(t *testing.T) {
-	grace := 200 * time.Millisecond
-	start := time.Now()
-	ctx, cancel := context.WithCancel(t.Context())
-	cmd := New(ctx, "/bin/sh", "-c", "trap '' TERM; sleep 600")
-	done := make(chan error, 1)
-	go func() { done <- cmd.Run() }()
-	time.Sleep(50 * time.Millisecond) // child is in `sleep 600`
-	cancel()
-	select {
-	case err := <-done:
-		if err == nil {
-			t.Fatal("Run() = nil; want non-nil (child ignored SIGTERM, SIGKILL fired)")
+	runFlakyGuard(t, func(t *testing.T) error {
+		grace := 200 * time.Millisecond
+		ctx, cancel := context.WithCancel(t.Context())
+		cmd := New(ctx, "/bin/sh", "-c", "trap '' TERM; sleep 600")
+		done := make(chan error, 1)
+		go func() { done <- cmd.Run() }()
+		// Warm-up so sh's trap is armed before we signal; this
+		// is the race window runFlakyGuard retries past.
+		time.Sleep(200 * time.Millisecond)
+		start := time.Now()
+		cancel()
+		select {
+		case err := <-done:
+			if err == nil {
+				return errors.New("Run() = nil; want non-nil (child ignored SIGTERM, SIGKILL fired)")
+			}
+			elapsed := time.Since(start)
+			if elapsed < grace {
+				return fmt.Errorf("Run() returned in %v, before grace %v elapsed — grace wasn't honoured: %w", elapsed, grace, err)
+			}
+			if elapsed > 5*time.Second {
+				return fmt.Errorf("Run() returned in %v, way past grace %v — should have fired SIGKILL much sooner: %w", elapsed, grace, err)
+			}
+			return nil
+		case <-time.After(5 * time.Second):
+			return errors.New("Run() didn't return within 5s of cancel")
 		}
-		elapsed := time.Since(start)
-		if elapsed < grace {
-			t.Fatalf("Run() returned in %v, before grace %v elapsed — grace wasn't honoured", elapsed, grace)
-		}
-		if elapsed > 5*time.Second {
-			t.Fatalf("Run() returned in %v, way past grace %v — should have fired SIGKILL much sooner", elapsed, grace)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("Run() didn't return within 5s of cancel")
-	}
+	})
 }
 
 // TestNewGrace_ProcessGroup_BroadcastsToChildren verifies that
@@ -440,7 +459,7 @@ wait`,
 				}
 				return nil
 			}
-			return err
+			return fmt.Errorf("Run() = %w; want nil (the trap fired and the shell exited 0)", err)
 		case <-time.After(2 * time.Second):
 			t.Fatal("Run() didn't return within 2s of cancel")
 			return nil

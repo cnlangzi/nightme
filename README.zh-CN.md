@@ -781,6 +781,7 @@ internal/
   gateway/                         # Slash router + binding + receipt FSM
     inbound/  outbound/            # inbound dispatch chain + outbound sender
   gatewaytest/                     # integration test harness
+  gitbase/                         # base 分支解析器(+ 补写缺失的 origin/HEAD)
   logging/                         # slog + secret redaction
   login/                           # IM bot 注册——feishu / slack / telegram onboarding
   messages/                        # IM message types + dispatch

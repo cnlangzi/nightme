@@ -36,7 +36,7 @@ on:
     commands: [review]
 jobs:
   main:
-    steps: [{id: s, run: x}]
+    steps: [{id: s, message: /review}]
 `
 	if err := os.WriteFile(filepath.Join(dir, "reviewer.yaml"), []byte(yaml), 0644); err != nil {
 		t.Fatalf("write: %v", err)
@@ -61,7 +61,6 @@ func TestWorkflowShow_Found(t *testing.T) {
 	yaml := `
 name: reviewer
 workspaces: [~/work/nightme]
-agent: codex
 on:
   mention:
     commands: [review, fix]
@@ -69,8 +68,7 @@ jobs:
   main:
     steps:
       - id: review
-        prompt: "review this"
-        agent: codex
+        message: "review this"
       - id: notify
         use: notify
         with: { channel: feishu, target: oc_xxx, message: hi }
@@ -85,9 +83,8 @@ jobs:
 	})
 	for _, want := range []string{
 		"name:       reviewer",
-		"agent:      codex",
 		"mention: commands=[review fix]",
-		"prompt:",
+		"message:",
 		"use:",
 	} {
 		if !strings.Contains(out, want) {
@@ -125,10 +122,9 @@ jobs:
   main:
     steps:
       - id: s1
-        run: echo
+        shell: echo
       - id: s2
-        prompt: "do thing"
-        agent: codex
+        message: "do thing"
 `
 	if err := os.WriteFile(filepath.Join(dir, "reviewer.yaml"), []byte(yaml), 0644); err != nil {
 		t.Fatalf("write: %v", err)
@@ -142,13 +138,67 @@ jobs:
 		"workflow:   reviewer",
 		"workspace:  /tmp/test",
 		"execution plan",
-		"echo",    // step 1 run
-		"prompt:", // step 2 prompt
-		"dry-run", // footer
+		"echo",     // step 1 shell
+		"message:", // step 2 message
+		"dry-run",  // footer
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q\n--- output ---\n%s", want, out)
 		}
+	}
+}
+
+// TestWorkflowRun_WithoutWorkspaces — a workflow that declares no
+// workspace takes the one of the chat that starts it, so the plan
+// still prints.
+func TestWorkflowRun_WithoutWorkspaces(t *testing.T) {
+	dir := t.TempDir()
+	yaml := `
+name: reviewer
+jobs:
+  main:
+    steps:
+      - id: s1
+        message: /review
+`
+	if err := os.WriteFile(filepath.Join(dir, "reviewer.yaml"), []byte(yaml), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
+
+	out := captureStdout(t, func() error {
+		return runRoot("workflow", "run", "reviewer")
+	})
+	for _, want := range []string{"workflow:   reviewer", "execution plan", "/review"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q\n--- output ---\n%s", want, out)
+		}
+	}
+}
+
+// TestWorkflowList_RefusesARetiredKey — a file that still uses a
+// retired key is refused, and the error names the replacement.
+func TestWorkflowList_RefusesARetiredKey(t *testing.T) {
+	dir := t.TempDir()
+	yaml := `
+name: reviewer
+jobs:
+  main:
+    steps:
+      - id: s1
+        run: echo
+`
+	if err := os.WriteFile(filepath.Join(dir, "reviewer.yaml"), []byte(yaml), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
+
+	err := runRoot("workflow", "list")
+	if err == nil {
+		t.Fatal("a retired key was accepted")
+	}
+	if !strings.Contains(err.Error(), "shell:") {
+		t.Errorf("err = %v, want it to name the replacement", err)
 	}
 }
 

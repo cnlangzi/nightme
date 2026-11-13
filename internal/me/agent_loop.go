@@ -27,7 +27,7 @@ const (
 	sys1Escalate
 )
 
-// drive runs one playbook to its end and reports how it ended.
+// drive runs one workflow to its end and reports how it ended.
 func (s *Service) drive(ctx context.Context, r *run) {
 	defer close(r.done)
 	err := s.loop(ctx, r)
@@ -57,9 +57,10 @@ func (s *Service) drive(ctx context.Context, r *run) {
 
 // loop is the run's main cycle.
 //
-// Every turn does one of three things: it finishes the tool calls
-// that are still open, it asks the decision model what comes next, or
-// it lets the chat model take a turn.
+// Every turn does one of four things: it finishes the tool calls that
+// are still open, it runs the step the workflow decides on, it asks
+// the decision model what comes next, or it lets the chat model take
+// a turn.
 func (s *Service) loop(ctx context.Context, r *run) error {
 	if s.cfg.Provider == nil {
 		return s.loopDeciderOnly(ctx, r)
@@ -75,14 +76,7 @@ func (s *Service) loop(ctx context.Context, r *run) error {
 			}
 			continue
 		}
-		action, err := s.system1(ctx, r)
-		if err != nil {
-			return err
-		}
-		if action == sys1Act {
-			continue
-		}
-		done, err := s.system2(ctx, r)
+		done, err := s.turn(ctx, r)
 		if err != nil {
 			return err
 		}
@@ -91,6 +85,89 @@ func (s *Service) loop(ctx context.Context, r *run) error {
 		}
 	}
 	return fmt.Errorf("the run reached its limit of %d turns", maxIter)
+}
+
+// turn advances the run by one decision.
+//
+// The workflow decides when it can: the step runs as it is, and no
+// model is asked. Where the workflow cannot decide, the agent does.
+func (s *Service) turn(ctx context.Context, r *run) (bool, error) {
+	decision, err := s.plan(r)
+	if err != nil {
+		return false, err
+	}
+	if decision.Kind == wfe.DecisionRun {
+		if err := r.checkStep(decision.Step); err == nil {
+			if err := s.runPlanStep(ctx, r, decision); err != nil {
+				return false, err
+			}
+			return false, nil
+		} else {
+			// The budget is spent: the workflow cannot go on by
+			// itself, so the agent decides what happens next.
+			decision = wfe.Decision{Kind: wfe.DecisionJudgment, Reason: err.Error()}
+		}
+	}
+	r.setJudgment(decision.Reason)
+	if decision.Exhausted && s.goalMet(r) {
+		// Every step ran and the last one ended ok: the goal is met
+		// and no model is asked to say so.
+		r.markFinished()
+		s.finish(r, PhaseDone, "")
+		s.notify(r, finishLine(r, "done", r.workflow.Name+" is complete"))
+		s.persist(r)
+		return true, nil
+	}
+	action, err := s.system1(ctx, r)
+	if err != nil {
+		return false, err
+	}
+	if action == sys1Act {
+		return false, nil
+	}
+	done, err := s.system2(ctx, r)
+	if err != nil {
+		return false, err
+	}
+	return done, nil
+}
+
+// plan asks the engine what the run does next.
+//
+// The engine owns the state: it records the steps it skips on the way.
+func (s *Service) plan(r *run) (wfe.Decision, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.state.UpdatedAt = s.now()
+	return wfe.Decide(r.state, r.workflow)
+}
+
+// runPlanStep runs the step the workflow decided on.
+//
+// No model is asked: the step's own text is what runs.
+func (s *Service) runPlanStep(ctx context.Context, r *run, decision wfe.Decision) error {
+	verdict, err := s.executeStep(ctx, r, decision.Job, decision.Step)
+	if err != nil {
+		return err
+	}
+	if !verdict.Settled {
+		// The step is still running: it has no verdict yet, so the
+		// run state must not record it. The command is picked up
+		// where it left off on the next turn.
+		return nil
+	}
+	r.recordStep(decision.Job, decision.Step, verdict.Outcome)
+	s.persist(r)
+	return nil
+}
+
+// goalMet reports whether the plan is done and every step ended ok.
+//
+// The goal of a workflow is written for a person; the engine can only
+// say that the plan ran through.
+func (s *Service) goalMet(r *run) bool {
+	out, ok := r.lastOutcome()
+	return ok && out.Succeeded()
 }
 
 // loopDeciderOnly runs the run with the decision model alone.
@@ -120,6 +197,24 @@ func (s *Service) loopDeciderOnly(ctx context.Context, r *run) error {
 				}
 			}
 			continue
+		}
+		decision, err := s.plan(r)
+		if err != nil {
+			return err
+		}
+		r.setJudgment(decision.Reason)
+		if decision.Kind == wfe.DecisionRun && r.checkStep(decision.Step) == nil {
+			if err := s.runPlanStep(ctx, r, decision); err != nil {
+				return err
+			}
+			continue
+		}
+		if decision.Exhausted && s.goalMet(r) {
+			r.markFinished()
+			s.finish(r, PhaseDone, "")
+			s.notify(r, finishLine(r, "done", r.workflow.Name+" is complete"))
+			s.persist(r)
+			return errFinished
 		}
 		dec, err := s.decide(ctx, r)
 		if err != nil {
@@ -165,12 +260,12 @@ func (s *Service) checkAlive(ctx context.Context, r *run) error {
 }
 
 // maxIterations returns the loop cap of a run: three times the
-// playbook's action budget, unless the configuration says otherwise.
+// workflow's action budget, unless the configuration says otherwise.
 func (s *Service) maxIterations(r *run) int {
 	if s.cfg.MaxIterations > 0 {
 		return s.cfg.MaxIterations
 	}
-	actions := r.playbook.MaxActions
+	actions := r.workflow.MaxActions
 	if actions <= 0 {
 		actions = wfe.DefaultMaxActions
 	}
@@ -252,10 +347,10 @@ func (s *Service) actOnDecision(ctx context.Context, r *run, dec decision) (sys1
 		if err := r.checkFinish("done"); err != nil {
 			return s.escalateDecision(r, dec, err)
 		}
-		s.recordSynthetic(r, "finish", map[string]any{"status": "done", "summary": "the playbook is complete"}, dec)
+		s.recordSynthetic(r, "finish", map[string]any{"status": "done", "summary": "the workflow is complete"}, dec)
 		r.markFinished()
 		s.finish(r, PhaseDone, "")
-		s.notify(r, finishLine(r, "done", r.playbook.Name+" is complete"))
+		s.notify(r, finishLine(r, "done", r.workflow.Name+" is complete"))
 		s.persist(r)
 		return sys1Act, nil
 	default:
@@ -263,7 +358,7 @@ func (s *Service) actOnDecision(ctx context.Context, r *run, dec decision) (sys1
 			return s.escalateDecision(r, dec, err)
 		}
 		s.recordSynthetic(r, "run_step", map[string]any{"command": dec.Next}, dec)
-		outcome, err := s.runPlaybookStep(ctx, r, dec.Next)
+		outcome, err := s.runStep(ctx, r, dec.Next)
 		if err != nil {
 			return sys1None, err
 		}
@@ -276,7 +371,7 @@ func (s *Service) actOnDecision(ctx context.Context, r *run, dec decision) (sys1
 // escalateDecision hands a policy-rejected decision over.
 //
 // A decision the policy does not allow is not an error: the model
-// simply picked something the playbook forbids, and somebody else
+// simply picked something the workflow forbids, and somebody else
 // has to decide.
 func (s *Service) escalateDecision(r *run, dec decision, cause error) (sys1Action, error) {
 	s.logger.Info("me: the decision was not allowed", "run_id", r.id, "choice", dec.Next, "err", cause)
@@ -289,7 +384,7 @@ func (s *Service) escalateDecision(r *run, dec decision, cause error) (sys1Actio
 //
 // It reports whether the run is over. A choice the policy refuses is
 // reported to the observer and asked again — the user picked something
-// the playbook does not allow, not a reason to end the run.
+// the workflow does not allow, not a reason to end the run.
 func (s *Service) actOnChoice(ctx context.Context, r *run, command, by string) (bool, error) {
 	if command == optionEscalate {
 		return false, nil
@@ -301,7 +396,7 @@ func (s *Service) actOnChoice(ctx context.Context, r *run, command, by string) (
 		}
 		r.markFinished()
 		s.finish(r, PhaseDone, "")
-		s.notify(r, finishLine(r, "done", r.playbook.Name+" is complete"))
+		s.notify(r, finishLine(r, "done", r.workflow.Name+" is complete"))
 		s.persist(r)
 		return true, nil
 	}
@@ -311,7 +406,7 @@ func (s *Service) actOnChoice(ctx context.Context, r *run, command, by string) (
 	}
 	s.recordSynthetic(r, "run_step", map[string]any{"command": command},
 		decision{Next: command, Model: by, NextConfidence: 1})
-	outcome, err := s.runPlaybookStep(ctx, r, command)
+	outcome, err := s.runStep(ctx, r, command)
 	if err != nil {
 		return false, err
 	}

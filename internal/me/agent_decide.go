@@ -12,7 +12,7 @@ import (
 
 // The options the decision model may pick besides a command.
 const (
-	// optionDone ends the run: the playbook is complete.
+	// optionDone ends the run: the workflow is complete.
 	optionDone = "done"
 	// optionEscalate hands the next step to the chat model.
 	optionEscalate = "escalate"
@@ -51,7 +51,7 @@ type decision struct {
 
 // decide asks the decision model what comes next.
 //
-// The request carries the rendered playbook, the remaining budget, the
+// The request carries the rendered workflow, the remaining budget, the
 // history of the run as outcomes, and — for the last action — its
 // full outcome and the tail of its transcript.
 func (s *Service) decide(ctx context.Context, r *run) (decision, error) {
@@ -110,7 +110,7 @@ func (s *Service) decisionQuestions(r *run) []llm.Question {
 		{
 			Name:         questionNext,
 			Type:         llm.QuestionChoice,
-			Instructions: "Which step of the playbook comes next?",
+			Instructions: "Which step of the workflow comes next?",
 			Options:      s.decisionOptions(r),
 		},
 		{
@@ -142,13 +142,15 @@ func (s *Service) decisionOptions(r *run) []llm.Option {
 	options := make([]llm.Option, 0, 8)
 	for _, cmd := range r.allowedCommands() {
 		desc := ""
-		if idx, err := r.checkRun(cmd); err == nil && r.playbook != nil && idx >= 0 && idx < len(r.playbook.Steps) {
-			desc = r.playbook.Steps[idx].Note
+		if idx, err := r.checkRun(cmd); err == nil {
+			if step, ok := r.stepAt(idx); ok {
+				desc = step.Note
+			}
 		}
 		options = append(options, llm.Option{Value: cmd, Description: desc})
 	}
 	options = append(options,
-		llm.Option{Value: optionDone, Description: "the playbook is complete"},
+		llm.Option{Value: optionDone, Description: "the workflow is complete"},
 		llm.Option{Value: optionEscalate, Description: "let the chat model decide and act"},
 	)
 	return options
@@ -176,6 +178,9 @@ func (s *Service) decisionState(r *run) string {
 			continue
 		}
 		fmt.Fprintf(&b, "remaining actions for step %d: %d\n", i+1, n)
+	}
+	if reason := r.judgmentReason(); reason != "" {
+		fmt.Fprintf(&b, "the workflow cannot decide: %s\n", reason)
 	}
 	b.WriteString("history:\n")
 	if len(history) == 0 {

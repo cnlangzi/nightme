@@ -45,11 +45,11 @@ type inflightState struct {
 	// Command is the text that was sent.
 	Command string `json:"command"`
 	// Instruct is true when the command is a free-form instruction
-	// rather than a playbook step.
+	// rather than a step of the workflow.
 	Instruct bool `json:"instruct"`
 }
 
-// run is one playbook run.
+// run is one workflow run.
 type run struct {
 	svc *Service
 
@@ -59,10 +59,13 @@ type run struct {
 	cwd            string
 	agent          string
 
-	// playbook is the bound playbook the run works through.
-	playbook *wfe.Playbook
+	// workflow is the bound workflow the run works through.
+	workflow *wfe.Workflow
 	// policy bounds what the run may do.
 	policy *wfe.Policy
+	// state is the progress of the run: the steps that ran and what
+	// they produced. The engine owns it.
+	state *wfe.RunState
 
 	// messages is the conversation with the chat model.
 	messages []llm.Message
@@ -92,6 +95,8 @@ type run struct {
 	lastTranscript string
 	// system1Model is the decision model that answered last.
 	system1Model string
+	// judgment is why the workflow cannot decide on its own.
+	judgment string
 	// finished records that the model called the finish tool.
 	finished bool
 	// suspended records that the daemon went away while the run was
@@ -115,10 +120,11 @@ type run struct {
 	watch <-chan loopback.Execution
 }
 
-// newRun builds a run for a bound playbook.
-func newRun(svc *Service, req Request, pb *wfe.Playbook) *run {
+// newRun builds a run for a bound workflow.
+func newRun(svc *Service, req Request, wf *wfe.Workflow) *run {
 	ctx, cancel := context.WithCancel(context.Background())
 	id := fmt.Sprintf("%s-%d", req.Name, svc.now().UnixNano())
+	now := svc.now()
 	return &run{
 		svc:            svc,
 		id:             id,
@@ -126,13 +132,22 @@ func newRun(svc *Service, req Request, pb *wfe.Playbook) *run {
 		workChatID:     loopback.ChatIDPrefix + id,
 		cwd:            req.Cwd,
 		agent:          req.Agent,
-		playbook:       pb,
-		policy:         wfe.NewPolicy(pb, nil),
-		phase:          PhaseRunning,
-		ctx:            ctx,
-		cancel:         cancel,
-		resume:         make(chan struct{}, 1),
-		done:           make(chan struct{}),
+		workflow:       wf,
+		policy:         wfe.NewPolicy(wf, nil),
+		state: &wfe.RunState{
+			RunID:        id,
+			WorkflowName: wf.Name,
+			Workspace:    req.Cwd,
+			Status:       wfe.StatusRunning,
+			Env:          map[string]string{"WORKSPACE_CWD": req.Cwd},
+			StartedAt:    now,
+			UpdatedAt:    now,
+		},
+		phase:  PhaseRunning,
+		ctx:    ctx,
+		cancel: cancel,
+		resume: make(chan struct{}, 1),
+		done:   make(chan struct{}),
 	}
 }
 
@@ -263,6 +278,78 @@ func (r *run) checkFinish(status string) error {
 	return r.policy.CheckFinish(status)
 }
 
+// checkStep asks the policy whether the step may take an action now:
+// its own limit and the workflow's action budget.
+func (r *run) checkStep(step wfe.Step) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	idx := r.stepIndex(step.ID)
+	if idx < 0 {
+		return fmt.Errorf("the step %q is not part of this workflow", step.ID)
+	}
+	return r.policy.CheckStep(idx)
+}
+
+// stepAt returns the workflow's step at the policy's index.
+func (r *run) stepAt(idx int) (wfe.Step, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	steps := r.workflow.Steps()
+	if idx < 0 || idx >= len(steps) {
+		return wfe.Step{}, false
+	}
+	return steps[idx], true
+}
+
+// isStepMessage reports whether the command is the step's own message.
+func (r *run) isStepMessage(idx int, command string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.policy.IsStepMessage(idx, command)
+}
+
+// judgmentReason returns why the workflow cannot decide on its own.
+func (r *run) judgmentReason() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.judgment
+}
+
+// setJudgment records why the workflow cannot decide on its own.
+func (r *run) setJudgment(reason string) {
+	r.mu.Lock()
+	r.judgment = reason
+	r.mu.Unlock()
+}
+
+// recordStep records the outcome of a step in the run's progress.
+//
+// The engine owns the state: the step that ran and its outcome go
+// in together.
+func (r *run) recordStep(job string, step wfe.Step, out wfe.Outcome) {
+	r.mu.Lock()
+	wfe.RecordStep(r.state, job, step, out, false)
+	r.mu.Unlock()
+}
+
+// recordPending records that a step started and has not settled.
+func (r *run) recordPending(job string, step wfe.Step) {
+	r.mu.Lock()
+	wfe.RecordPending(r.state, job, step)
+	r.mu.Unlock()
+}
+
+// stepIndex returns the index of the step in the workflow's step list,
+// or -1.
+func (r *run) stepIndex(stepID string) int {
+	for i, step := range r.workflow.Steps() {
+		if step.ID == stepID {
+			return i
+		}
+	}
+	return -1
+}
+
 // allowedCommands returns the commands the policy accepts now.
 func (r *run) allowedCommands() []string {
 	r.mu.Lock()
@@ -270,7 +357,7 @@ func (r *run) allowedCommands() []string {
 	return r.policy.AllowedCommands()
 }
 
-// renderPolicy returns the playbook as the model reads it.
+// renderPolicy returns the workflow as the model reads it.
 func (r *run) renderPolicy() string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -278,16 +365,31 @@ func (r *run) renderPolicy() string {
 }
 
 // record appends an action to the policy's history.
-func (r *run) record(kind wfe.ActionKind, command string, stepIndex int, outcome wfe.Outcome) {
+func (r *run) record(kind wfe.ActionKind, command, stepID string, outcome wfe.Outcome) {
 	r.mu.Lock()
 	r.policy.Record(wfe.ActionRecord{
-		Kind:      kind,
-		Command:   command,
-		StepIndex: stepIndex,
-		Outcome:   outcome,
-		At:        r.svc.now(),
+		Kind:    kind,
+		Command: command,
+		StepID:  stepID,
+		Outcome: outcome,
+		At:      r.svc.now(),
 	})
 	r.mu.Unlock()
+}
+
+// exprCtx renders the run's progress as the context an expression
+// reads.
+func (r *run) exprCtx() wfe.ExprCtx {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return wfe.ExprContext(r.state)
+}
+
+// lastOutcome returns the outcome of the last step that ran.
+func (r *run) lastOutcome() (wfe.Outcome, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return wfe.LastOutcome(r.state)
 }
 
 // outcomeLine renders an outcome as one human-readable line.
@@ -299,13 +401,17 @@ func outcomeLine(o messages.Outcome) string {
 }
 
 // persistedRun is the on-disk shape of a run.
+//
+// One file holds everything: the DAG progress, the conversation and
+// the judgment history.
 type persistedRun struct {
 	RunID            string             `json:"run_id"`
 	ObserverChatID   string             `json:"observer_chat_id"`
 	WorkChatID       string             `json:"work_chat_id"`
 	Cwd              string             `json:"cwd"`
 	Agent            string             `json:"agent"`
-	Playbook         *wfe.Playbook      `json:"playbook"`
+	Workflow         *wfe.Workflow      `json:"workflow"`
+	State            *wfe.RunState      `json:"state"`
 	History          []wfe.ActionRecord `json:"history"`
 	Messages         []llm.Message      `json:"messages"`
 	PendingCalls     []pendingCall      `json:"pending_calls"`
@@ -336,7 +442,8 @@ func (s *Service) persist(r *run) {
 		WorkChatID:       r.workChatID,
 		Cwd:              r.cwd,
 		Agent:            r.agent,
-		Playbook:         r.playbook,
+		Workflow:         r.workflow,
+		State:            r.state,
 		History:          append([]wfe.ActionRecord(nil), r.policy.History...),
 		Messages:         append([]llm.Message(nil), r.messages...),
 		PendingCalls:     append([]pendingCall(nil), r.pendingCalls...),
@@ -415,7 +522,7 @@ func (s *Service) resumeRuns(ctx context.Context) {
 			s.logger.Warn("me: a run state could not be decoded", "file", e.Name(), "err", err)
 			continue
 		}
-		if state.RunID == "" || state.Playbook == nil {
+		if state.RunID == "" || state.Workflow == nil {
 			continue
 		}
 		r := s.restoreRun(state)
@@ -442,8 +549,9 @@ func (s *Service) restoreRun(state persistedRun) *run {
 		workChatID:       state.WorkChatID,
 		cwd:              state.Cwd,
 		agent:            state.Agent,
-		playbook:         state.Playbook,
-		policy:           wfe.NewPolicy(state.Playbook, state.History),
+		workflow:         state.Workflow,
+		policy:           wfe.NewPolicy(state.Workflow, state.History),
+		state:            state.State,
 		messages:         state.Messages,
 		pendingCalls:     state.PendingCalls,
 		ask:              state.Ask,
@@ -460,6 +568,14 @@ func (s *Service) restoreRun(state persistedRun) *run {
 		cancel:           cancel,
 		resume:           make(chan struct{}, 1),
 		done:             make(chan struct{}),
+	}
+	if r.state == nil {
+		r.state = &wfe.RunState{
+			RunID:        r.id,
+			WorkflowName: state.Workflow.Name,
+			Workspace:    r.cwd,
+			Status:       wfe.StatusRunning,
+		}
 	}
 	if r.phase == "" {
 		r.phase = PhaseRunning
@@ -545,7 +661,7 @@ func (r *run) pendingAsk() *askState {
 	return r.ask
 }
 
-// clearAsk forgets the question the run was waiting for.
+// clearAsk forgets the question the run is waiting for.
 func (r *run) clearAsk() {
 	r.mu.Lock()
 	r.ask = nil

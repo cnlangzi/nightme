@@ -18,7 +18,7 @@ import (
 // neutralRequest is the request both protocols answer.
 func neutralRequest() llm.DecisionRequest {
 	return llm.DecisionRequest{
-		State: "the run is halfway through the playbook",
+		State: "the run is halfway through the workflow",
 		Questions: []llm.Question{
 			{
 				Name:         "next",

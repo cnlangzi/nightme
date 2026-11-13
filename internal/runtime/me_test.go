@@ -11,39 +11,39 @@ import (
 	"github.com/cnlangzi/nightme/internal/config"
 )
 
-// TestStartMeService_NoLoopbackChannel — the service drives the
-// daemon through the loopback channel. Without that channel there is
-// no chat to drive it through, so the service stays off.
-func TestStartMeService_NoLoopbackChannel(t *testing.T) {
+// TestBuildPersonalAgent_NoLoopbackChannel — the personal agent
+// drives the daemon through the loopback channel. Without that
+// channel there is no chat to drive it through, so the agent stays
+// off.
+func TestBuildPersonalAgent_NoLoopbackChannel(t *testing.T) {
 	cfg := &config.Config{Paths: config.PathsConfig{DataDir: t.TempDir()}}
-	svc := startMeService(context.Background(), cfg, nil, slog.Default())
+	svc := buildPersonalAgent(cfg, nil, slog.Default())
 	if svc != nil {
-		t.Fatal("expected no service without a loopback channel")
+		t.Fatal("expected no agent without a loopback channel")
 	}
 }
 
-// TestStartMeService_StartsWithLoopbackChannel — the service starts
-// once the loopback channel is up. A workflows dir that does not
-// exist yet leaves it idle, not broken.
-func TestStartMeService_StartsWithLoopbackChannel(t *testing.T) {
+// TestBuildPersonalAgent_OtherChannelOnly — a daemon whose only
+// channel is not the loopback one runs without the agent.
+func TestBuildPersonalAgent_OtherChannelOnly(t *testing.T) {
+	cfg := &config.Config{Paths: config.PathsConfig{DataDir: t.TempDir()}}
+	svc := buildPersonalAgent(cfg, []channel.Channel{newStubChannel("stub", nil)}, slog.Default())
+	if svc != nil {
+		t.Fatal("expected no agent without a loopback channel")
+	}
+}
+
+// TestBuildPersonalAgent_StartsWithLoopbackChannel — the agent
+// starts once the loopback channel is up.
+func TestBuildPersonalAgent_StartsWithLoopbackChannel(t *testing.T) {
 	cfg := &config.Config{Paths: config.PathsConfig{DataDir: t.TempDir()}}
 	ch := loopback.New()
-	svc := startMeService(context.Background(), cfg, []channel.Channel{ch}, slog.Default())
+	svc := buildPersonalAgent(cfg, []channel.Channel{ch}, slog.Default())
 	if svc == nil {
-		t.Fatal("expected a service")
+		t.Fatal("expected an agent")
 	}
-	if err := svc.Stop(context.Background()); err != nil {
-		t.Fatalf("Stop: %v", err)
-	}
-}
-
-// TestStartMeService_OtherChannelOnly — a daemon whose only channel
-// is not the loopback one runs without the service.
-func TestStartMeService_OtherChannelOnly(t *testing.T) {
-	cfg := &config.Config{Paths: config.PathsConfig{DataDir: t.TempDir()}}
-	svc := startMeService(context.Background(), cfg, []channel.Channel{newStubChannel("stub", nil)}, slog.Default())
-	if svc != nil {
-		t.Fatal("expected no service without a loopback channel")
+	if err := svc.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
 	}
 }
 

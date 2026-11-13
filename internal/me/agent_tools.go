@@ -16,7 +16,7 @@ import (
 
 // The tools the chat model may call.
 const (
-	// toolRunStep runs one of the playbook's steps.
+	// toolRunStep runs one of the workflow's steps.
 	toolRunStep = "run_step"
 	// toolInstruct sends a free-form prompt to the work agent.
 	toolInstruct = "instruct"
@@ -61,12 +61,12 @@ func toolCatalogue() []llm.Tool {
 	return []llm.Tool{
 		{
 			Name:        toolRunStep,
-			Description: "Run one of the playbook's steps in the work chat. The command must be a step of the playbook or one its step allows.",
+			Description: "Run one of the workflow's steps in the work chat. The command must be a step of the workflow or one its step allows.",
 			Schema:      json.RawMessage(`{"type":"object","properties":{"command":{"type":"string","description":"the command to run"}},"required":["command"],"additionalProperties":false}`),
 		},
 		{
 			Name:        toolInstruct,
-			Description: "Send a free-form instruction to the work agent, for the cases the playbook's commands do not cover.",
+			Description: "Send a free-form instruction to the work agent, for the cases the workflow's commands do not cover.",
 			Schema:      json.RawMessage(`{"type":"object","properties":{"text":{"type":"string","description":"the instruction"}},"required":["text"],"additionalProperties":false}`),
 		},
 		{
@@ -87,7 +87,7 @@ func toolCatalogue() []llm.Tool {
 		{
 			Name:        toolFinish,
 			Description: "End the run and report how it went.",
-			Schema:      json.RawMessage(`{"type":"object","properties":{"status":{"type":"string","enum":["done","failed"],"description":"done when the playbook is complete, failed when it cannot go on"},"summary":{"type":"string","description":"what was done"}},"required":["status","summary"],"additionalProperties":false}`),
+			Schema:      json.RawMessage(`{"type":"object","properties":{"status":{"type":"string","enum":["done","failed"],"description":"done when the workflow is complete, failed when it cannot go on"},"summary":{"type":"string","description":"what was done"}},"required":["status","summary"],"additionalProperties":false}`),
 		},
 	}
 }
@@ -144,24 +144,29 @@ func (s *Service) execTool(ctx context.Context, r *run, call pendingCall) (stepR
 	}
 }
 
-// toolRunStep runs a playbook step.
+// toolRunStep runs a step of the workflow.
 func (s *Service) toolRunStep(ctx context.Context, r *run, call pendingCall) (stepResult, error) {
 	command, err := callArgString(call, "command")
 	if err != nil {
 		return stepResult{}, err
 	}
-	res, err := s.runPlaybookStep(ctx, r, command)
+	res, err := s.runStep(ctx, r, command)
 	if err != nil {
 		return stepResult{}, err
 	}
 	return res, nil
 }
 
-// runPlaybookStep runs a command of the playbook and records it.
+// runStep runs a command of the workflow and records it.
+//
+// The command must be a step's message or one of a step's allow
+// entries. A command that is a step's message is that step running:
+// the run state records it. A command from an allow list is a repair
+// inside the step: only the action history records it.
 //
 // The action is recorded only when the command settled: a step that
 // is still running has not been taken yet.
-func (s *Service) runPlaybookStep(ctx context.Context, r *run, command string) (stepResult, error) {
+func (s *Service) runStep(ctx context.Context, r *run, command string) (stepResult, error) {
 	idx, err := r.checkRun(command)
 	if err != nil {
 		return stepResult{}, toolErrorf("%s", err.Error())
@@ -170,12 +175,27 @@ func (s *Service) runPlaybookStep(ctx context.Context, r *run, command string) (
 	if err != nil {
 		return stepResult{}, err
 	}
-	if res.Status != statusWaiting {
-		r.record(wfe.ActionKindRun, command, idx, wfe.Outcome{
-			Status:  outcomeStatus(res.Status),
-			Summary: res.Summary,
-			Data:    res.Data,
-		})
+	if res.Status == statusWaiting {
+		// The command is still running: the step has no verdict yet.
+		if step, ok := r.stepAt(idx); ok {
+			r.recordPending(wfe.JobOf(r.workflow, step.ID), step)
+		}
+		return res, nil
+	}
+	out := wfe.Outcome{
+		Status:  outcomeStatus(res.Status),
+		Summary: res.Summary,
+		Data:    res.Data,
+	}
+	step, ok := r.stepAt(idx)
+	if !ok {
+		return res, nil
+	}
+	r.record(wfe.ActionKindRun, command, step.ID, out)
+	if r.isStepMessage(idx, command) || wfe.HasRun(r.state, step.ID) {
+		// The step ran, or the command was a repair inside a step
+		// that ran: the run state carries the latest outcome.
+		r.recordStep(wfe.JobOf(r.workflow, step.ID), step, out)
 	}
 	return res, nil
 }
@@ -194,7 +214,7 @@ func (s *Service) toolInstruct(ctx context.Context, r *run, call pendingCall) (s
 		return stepResult{}, err
 	}
 	if res.Status != statusWaiting {
-		r.record(wfe.ActionKindInstruct, text, -1, wfe.Outcome{
+		r.record(wfe.ActionKindInstruct, text, "", wfe.Outcome{
 			Status:  outcomeStatus(res.Status),
 			Summary: res.Summary,
 			Data:    res.Data,

@@ -2,33 +2,33 @@
 //
 // A person drives nightme by typing commands into a chat and reading
 // what comes back. `me` does the same thing without the typing: it
-// runs a playbook — an ordered list of steps and the constraints
-// around them — and decides what to run next.
+// runs a workflow — a YAML file with jobs and steps — and decides
+// what to run next.
 //
-// The run has two layers of judgement:
+// A run has two layers:
 //
-//   - System 1 — a decision model. After every step settles, `me`
-//     asks it what comes next. A confident answer is acted on
-//     directly, without a chat model in the loop.
-//   - System 2 — a chat model with tools. When System 1 is not
-//     confident, or when the next step needs text, the tool loop
-//     takes over.
+//   - The fast path. The workflow says what comes next, so the step
+//     runs as it is. No model is asked.
+//   - The judgment point. Where the workflow cannot decide — the
+//     previous step did not end ok, the plan forks, the plan is
+//     exhausted — the agent decides: it picks the next node, repairs
+//     the current one, or ends the run.
 //
 // Both drive the daemon through the loopback channel, the way a
 // person drives it through Feishu: every command is a real message
 // with a real id, and every answer comes back as a structured
-// outcome. The playbook's policy (internal/wfe.Policy) is the
-// boundary — a tool call the playbook does not allow comes back as
+// outcome. The workflow's policy (internal/wfe.Policy) is the
+// boundary — a tool call the workflow does not allow comes back as
 // an error the model can correct.
 //
 // The split:
 //
 //   - internal/channel/loopback — transport. How a message gets into
 //     the daemon, and how its outcome comes back.
-//   - internal/wfe — the playbook schema and the policy that bounds
-//     what a run may do.
-//   - internal/llm — the two model capabilities: decisions and
-//     chat.
+//   - internal/wfe — the workflow schema, the engine that computes
+//     the plan of a run, and the policy that bounds what a run may
+//     do.
+//   - internal/llm — the two model capabilities: decisions and chat.
 //   - internal/me — the run itself.
 package me
 
@@ -67,7 +67,7 @@ const (
 	// heartbeat before the run stops waiting for it.
 	DefaultStallTimeout = 10 * time.Minute
 
-	// DefaultMaxIterationsFactor multiplies the playbook's action
+	// DefaultMaxIterationsFactor multiplies the workflow's action
 	// budget to get the loop iteration cap.
 	DefaultMaxIterationsFactor = 3
 )
@@ -84,7 +84,7 @@ const (
 	PhaseWaiting Phase = "waiting"
 	// PhasePaused means the run is waiting for the user's reply.
 	PhasePaused Phase = "paused"
-	// PhaseDone means the run finished its playbook.
+	// PhaseDone means the run finished its workflow.
 	PhaseDone Phase = "done"
 	// PhaseFailed means the run could not go on.
 	PhaseFailed Phase = "failed"
@@ -92,12 +92,13 @@ const (
 	PhaseStopped Phase = "stopped"
 )
 
-// Request is a request to run a playbook.
+// Request is a request to run a workflow.
 type Request struct {
-	// Name is the playbook's name.
+	// Name is the workflow's name.
 	Name string
-	// Args are the positional arguments of the command line. They
-	// are mapped onto the playbook's declared arguments, in order.
+	// Args are the arguments of the command line. A token of the
+	// form name=value assigns that argument by name; every other
+	// token fills the next declared argument, in order.
 	Args []string
 	// ObserverChatID is the chat the run reports to and takes
 	// answers from.
@@ -176,7 +177,9 @@ type GitRunner interface {
 
 // Config holds the personal agent's configuration.
 type Config struct {
-	// WorkflowsDir is the directory the playbooks live in.
+	// WorkflowsDir is the directory the workflows live in. The action
+	// scripts live in <WorkflowsDir>/actions and the runs in
+	// <WorkflowsDir>/runs.
 	WorkflowsDir string
 	// StateDir is where the runs are persisted. Empty means the
 	// runs are not persisted at all.
@@ -196,7 +199,7 @@ type Config struct {
 	// model. Zero means DefaultTokenBudget.
 	TokenBudget int
 	// MaxIterations caps the tool loop of one run. Zero means three
-	// times the playbook's action budget.
+	// times the workflow's action budget.
 	MaxIterations int
 	// StepTimeout caps one step. Zero means DefaultStepTimeout.
 	StepTimeout time.Duration
@@ -206,6 +209,9 @@ type Config struct {
 
 	// Loopback drives the work chat.
 	Loopback Loopback
+	// Shell runs the shell commands of the workflow's steps. Nil
+	// turns the shell step kind off.
+	Shell ShellRunner
 	// Sender posts the progress to the observer chat.
 	Sender messages.ChatSender
 	// Answerer answers the pending prompts of the work chat.
@@ -222,30 +228,33 @@ type Config struct {
 
 // Service is the personal agent.
 //
-// It owns the playbook catalogue and the runs. One run is active per
-// observer chat: the chat that started a run is the chat that gets
-// the progress, the questions and the summary.
+// It owns the workflow catalogue, the action registry and the runs.
+// One run is active per observer chat: the chat that started a run is
+// the chat that gets the progress, the questions and the summary.
 type Service struct {
 	cfg    Config
 	logger *slog.Logger
 
 	mu sync.Mutex
-	// playbooks holds the loaded playbooks by name.
-	playbooks map[string]*wfe.Playbook
+	// workflows holds the loaded workflows by name.
+	workflows map[string]*wfe.Workflow
 	// runs holds every run by id.
 	runs map[string]*run
 	// active maps an observer chat id to the run it started.
 	active map[string]*run
 	// started reports whether the service is up.
 	started bool
-	// loadErr is why the playbooks could not be loaded.
+	// loadErr is why the workflows could not be loaded.
 	loadErr error
+
+	// actions holds the actions a `use:` step can name.
+	actions *ActionRegistry
 
 	// wg tracks the run goroutines, so a shutdown can wait for them.
 	wg sync.WaitGroup
 }
 
-// New constructs a Service. The playbooks are loaded at Start, not
+// New constructs a Service. The workflows are loaded at Start, not
 // here.
 func New(cfg Config) *Service {
 	if cfg.MinConfidence <= 0 {
@@ -267,9 +276,10 @@ func New(cfg Config) *Service {
 	return &Service{
 		cfg:       cfg,
 		logger:    logger,
-		playbooks: map[string]*wfe.Playbook{},
+		workflows: map[string]*wfe.Workflow{},
 		runs:      map[string]*run{},
 		active:    map[string]*run{},
+		actions:   NewActionRegistry(),
 	}
 }
 
@@ -288,32 +298,37 @@ func (s *Service) DisabledReason() string {
 		return "neither me.llm nor me.decider is configured"
 	}
 	s.mu.Lock()
-	n := len(s.playbooks)
+	n := len(s.workflows)
 	loadErr := s.loadErr
 	s.mu.Unlock()
 	if loadErr != nil {
 		return loadErr.Error()
 	}
 	if n == 0 {
-		return fmt.Sprintf("there are no playbooks in %s", s.cfg.WorkflowsDir)
+		return fmt.Sprintf("there are no workflows in %s", s.cfg.WorkflowsDir)
 	}
 	return ""
 }
 
-// Start loads the playbooks and resumes the runs that were left
-// behind by a previous daemon.
+// Start loads the workflows, registers the actions and resumes the
+// runs that were left behind by a previous daemon.
 //
 // A run that cannot go on is reported to its observer; a run that can
 // is resumed silently.
 func (s *Service) Start(ctx context.Context) error {
-	playbooks, err := loadPlaybooks(s.cfg.WorkflowsDir)
+	workflows, err := loadWorkflows(s.cfg.WorkflowsDir)
 	s.mu.Lock()
 	s.loadErr = err
-	s.playbooks = playbooks
+	s.workflows = workflows
 	s.started = true
 	s.mu.Unlock()
 	if err != nil {
 		return fmt.Errorf("me: %w", err)
+	}
+
+	registerBuiltinActions(s.actions)
+	if err := s.actions.ScanUserScripts(s.actionsDir()); err != nil {
+		return fmt.Errorf("me: scan action scripts: %w", err)
 	}
 
 	s.resumeRuns(ctx)
@@ -347,12 +362,12 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	}
 }
 
-// loadPlaybooks reads the playbooks of the workflows directory.
+// loadWorkflows reads the workflows of the workflows directory.
 //
-// A missing directory is not an error: a daemon without playbooks is
+// A missing directory is not an error: a daemon without workflows is
 // simply idle.
-func loadPlaybooks(dir string) (map[string]*wfe.Playbook, error) {
-	out := map[string]*wfe.Playbook{}
+func loadWorkflows(dir string) (map[string]*wfe.Workflow, error) {
+	out := map[string]*wfe.Workflow{}
 	if strings.TrimSpace(dir) == "" {
 		return out, nil
 	}
@@ -362,26 +377,32 @@ func loadPlaybooks(dir string) (map[string]*wfe.Playbook, error) {
 		}
 		return nil, fmt.Errorf("the workflows directory %s cannot be read: %w", dir, err)
 	}
-	_, playbooks, err := wfe.LoadDir(dir)
+	wfs, err := wfe.LoadDir(dir)
 	if err != nil {
-		return nil, fmt.Errorf("the playbooks in %s cannot be loaded: %w", dir, err)
+		return nil, fmt.Errorf("the workflows in %s cannot be loaded: %w", dir, err)
 	}
-	for _, pb := range playbooks {
-		out[pb.Name] = pb
+	for _, wf := range wfs {
+		out[wf.Name] = wf
 	}
 	return out, nil
 }
 
-// WorkflowsDir returns the directory the playbooks live in.
+// WorkflowsDir returns the directory the workflows live in.
 func (s *Service) WorkflowsDir() string {
 	return s.cfg.WorkflowsDir
 }
 
-// StartPlaybook starts a playbook in a chat.
+// actionsDir is the directory the user-defined action scripts live
+// in.
+func (s *Service) actionsDir() string {
+	return filepath.Join(s.cfg.WorkflowsDir, "actions")
+}
+
+// StartWorkflow starts a workflow in a chat.
 //
 // The chat gets one run at a time: a second start in the same chat
 // is refused.
-func (s *Service) StartPlaybook(ctx context.Context, req Request) (string, error) {
+func (s *Service) StartWorkflow(ctx context.Context, req Request) (string, error) {
 	if reason := s.DisabledReason(); reason != "" {
 		return "", fmt.Errorf("me is disabled: %s", reason)
 	}
@@ -390,19 +411,19 @@ func (s *Service) StartPlaybook(ctx context.Context, req Request) (string, error
 	}
 
 	s.mu.Lock()
-	pb, ok := s.playbooks[req.Name]
+	wf, ok := s.workflows[req.Name]
 	if !ok {
-		known := strings.Join(s.playbookNames(), ", ")
+		known := strings.Join(s.workflowNames(), ", ")
 		s.mu.Unlock()
-		return "", fmt.Errorf("there is no playbook named %q (known: %s)", req.Name, known)
+		return "", fmt.Errorf("there is no workflow named %q (known: %s)", req.Name, known)
 	}
 	s.mu.Unlock()
 
-	values, err := mapArgValues(pb, req.Args)
+	values, err := mapArgValues(wf, req.Args)
 	if err != nil {
 		return "", err
 	}
-	bound, err := wfe.Bind(pb, values)
+	bound, err := wfe.Bind(wf, values)
 	if err != nil {
 		return "", err
 	}
@@ -433,35 +454,75 @@ func (s *Service) StartPlaybook(ctx context.Context, req Request) (string, error
 	return r.id, nil
 }
 
-// playbookNames returns the loaded playbook names, sorted. The caller
+// workflowNames returns the loaded workflow names, sorted. The caller
 // holds the lock.
-func (s *Service) playbookNames() []string {
-	out := make([]string, 0, len(s.playbooks))
-	for name := range s.playbooks {
+func (s *Service) workflowNames() []string {
+	out := make([]string, 0, len(s.workflows))
+	for name := range s.workflows {
 		out = append(out, name)
 	}
 	sort.Strings(out)
 	return out
 }
 
-// mapArgValues maps the positional arguments onto the playbook's
-// declared arguments, in order.
+// mapArgValues maps the command line's tokens onto the workflow's
+// declared arguments.
 //
-// A playbook that declares no arguments takes none, and extra
-// arguments are an error: a typo never runs a playbook with a wrong
-// value.
-func mapArgValues(pb *wfe.Playbook, args []string) (map[string]string, error) {
-	if len(args) > len(pb.Args) {
-		return nil, fmt.Errorf("the playbook takes %d argument(s) (%s), %d were given",
-			len(pb.Args), strings.Join(pb.Args, ", "), len(args))
-	}
+// A token of the form name=value assigns that argument by name; an
+// argument the workflow does not declare is an error. Every other
+// token fills the next argument that is still unassigned, in
+// declaration order. More positional tokens than declared arguments
+// is an error: a typo never runs a workflow with a wrong value.
+func mapArgValues(wf *wfe.Workflow, tokens []string) (map[string]string, error) {
+	declared := wf.ArgNames()
 	out := map[string]string{}
-	for i, name := range pb.Args {
-		if i < len(args) {
-			out[name] = args[i]
+	var positional []string
+	for _, tok := range tokens {
+		name, value, ok := strings.Cut(tok, "=")
+		if !ok {
+			positional = append(positional, tok)
+			continue
 		}
+		if !wf.HasArg(name) {
+			return nil, fmt.Errorf("wfe: %s: unknown argument %q (declared: %s)",
+				wf.Name, name, describeArgs(declared))
+		}
+		out[name] = value
+	}
+	if len(positional) > len(declared) {
+		return nil, tooManyArgs(wf, len(positional))
+	}
+	next := 0
+	for _, value := range positional {
+		for next < len(declared) {
+			if _, ok := out[declared[next]]; !ok {
+				break
+			}
+			next++
+		}
+		if next >= len(declared) {
+			return nil, tooManyArgs(wf, len(positional))
+		}
+		out[declared[next]] = value
+		next++
 	}
 	return out, nil
+}
+
+// tooManyArgs reports that the command line carries more arguments
+// than the workflow takes.
+func tooManyArgs(wf *wfe.Workflow, given int) error {
+	declared := wf.ArgNames()
+	return fmt.Errorf("the workflow takes %d argument(s) (%s), %d were given",
+		len(declared), strings.Join(declared, ", "), given)
+}
+
+// describeArgs renders the declared arguments for an error message.
+func describeArgs(args []string) string {
+	if len(args) == 0 {
+		return "none"
+	}
+	return strings.Join(args, ", ")
 }
 
 // setupWorkChat points the work chat at the run's workspace and

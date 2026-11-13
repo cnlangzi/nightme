@@ -2,15 +2,16 @@ package command
 
 import "context"
 
-// MeRequest is a request to run a playbook.
+// MeRequest is a request to run a workflow.
 //
 // The types here are the command package's own view of a run, so the
 // command layer does not depend on the personal agent's internals.
 type MeRequest struct {
-	// Name is the playbook's name.
+	// Name is the workflow's name.
 	Name string
-	// Args are the positional arguments of the command line. They are
-	// mapped onto the playbook's declared arguments, in order.
+	// Args are the arguments of the command line. A token of the form
+	// name=value assigns that argument by name; every other token
+	// fills the next declared argument, in order.
 	Args []string
 	// ObserverChatID is the chat the run reports to.
 	ObserverChatID string
@@ -57,8 +58,8 @@ type MeStatus struct {
 // One run is active per chat: the chat that starts a run is the chat
 // that gets the progress and answers the questions.
 type MeController interface {
-	// StartPlaybook starts a playbook and returns the run's id.
-	StartPlaybook(ctx context.Context, req MeRequest) (string, error)
+	// StartWorkflow starts a workflow and returns the run's id.
+	StartWorkflow(ctx context.Context, req MeRequest) (string, error)
 	// Reply hands the user's reply to the run that waits for one.
 	Reply(ctx context.Context, observerChatID, text string) error
 	// Stop cancels the run of a chat.

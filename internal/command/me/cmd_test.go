@@ -31,7 +31,7 @@ type fakeController struct {
 	status command.MeStatus
 }
 
-func (c *fakeController) StartPlaybook(_ context.Context, req command.MeRequest) (string, error) {
+func (c *fakeController) StartWorkflow(_ context.Context, req command.MeRequest) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.started = append(c.started, req)
@@ -160,7 +160,7 @@ func TestStart_ReportsWhyTheRunDidNotStart(t *testing.T) {
 	}
 }
 
-func TestStart_WithoutAPlaybookName(t *testing.T) {
+func TestStart_WithoutAWorkflowName(t *testing.T) {
 	ctrl := &fakeController{}
 	cs := newSession(t, "me-4", "/tmp/work")
 
@@ -169,7 +169,7 @@ func TestStart_WithoutAPlaybookName(t *testing.T) {
 		t.Fatalf("reply = %q, want the usage", reply)
 	}
 	if len(ctrl.started) != 0 {
-		t.Fatal("the run was started without a playbook")
+		t.Fatal("the run was started without a workflow")
 	}
 }
 
@@ -262,6 +262,18 @@ func TestUnknownSubcommand(t *testing.T) {
 	reply := runMe(t, ctrl, cs, "/me", "dance")
 	if !strings.Contains(reply, "Unknown /me subcommand") {
 		t.Fatalf("reply = %q, want the unknown subcommand", reply)
+	}
+}
+
+// TestWorkAgent_FallsBackToThePrimaryAgent — a chat that selected no
+// agent runs on its primary one.
+func TestWorkAgent_FallsBackToThePrimaryAgent(t *testing.T) {
+	if got := workAgent(nil); got != "" {
+		t.Errorf("workAgent(nil) = %q, want an empty agent", got)
+	}
+	cs := newSession(t, "me-11", "/tmp/work")
+	if got := workAgent(cs); got != cs.PrimaryAgent() {
+		t.Errorf("workAgent = %q, want the primary agent %q", got, cs.PrimaryAgent())
 	}
 }
 

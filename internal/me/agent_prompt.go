@@ -10,13 +10,13 @@ import (
 
 // systemPrompt renders the instructions the chat model works under.
 //
-// The prompt is the playbook: the goal, the steps, the notes and the
+// The prompt is the workflow: the goal, the steps, the notes and the
 // limits. The model acts through the tools, and every tool handler
-// enforces the policy, so a command the playbook does not allow comes
+// enforces the policy, so a command the workflow does not allow comes
 // back as an error the model can correct.
 func (s *Service) systemPrompt(r *run) string {
 	var b strings.Builder
-	b.WriteString("You are the operator for the user. You run the playbook below on their behalf, one step at a time, and you report what happened.\n\n")
+	b.WriteString("You are the operator for the user. You run the workflow below on their behalf, one step at a time, and you report what happened.\n\n")
 	b.WriteString(r.renderPolicy())
 	b.WriteString("\nHow to read an outcome:\n")
 	b.WriteString("- ok and noop mean the step did what it was asked to do.\n")
@@ -25,15 +25,15 @@ func (s *Service) systemPrompt(r *run) string {
 	b.WriteString("- cancelled means somebody stopped it; timeout means it ran out of time.\n")
 	b.WriteString("- unknown means nobody reported a verdict — ask before you continue.\n")
 	b.WriteString("- waiting means the step is still running and needs an answer, an instruction or a question.\n")
-	b.WriteString("- error means the call itself was refused — the command is not in the playbook, or the playbook does not allow it. Read the message and call a tool the playbook allows.\n")
+	b.WriteString("- error means the call itself was refused — the command is not in the workflow, or the workflow does not allow it. Read the message and call a tool the workflow allows.\n")
 	b.WriteString("The status is the evidence. The transcript explains the status; it does not replace it.\n")
 	b.WriteString("\nHow to work:\n")
-	b.WriteString("- Use run_step for the playbook's commands. A command the playbook does not allow comes back as an error — do not run it again.\n")
-	b.WriteString("- Use instruct for the work the commands do not cover, when the playbook allows it.\n")
+	b.WriteString("- Use run_step for the workflow's commands. A command the workflow does not allow comes back as an error — do not run it again.\n")
+	b.WriteString("- Use instruct for the work the commands do not cover, when the workflow allows it.\n")
 	b.WriteString("- Use answer_choice when an outcome says a prompt is waiting.\n")
 	b.WriteString("- Use ask_human when the next step needs the user's judgement or their credentials.\n")
 	b.WriteString("- Use repo_status to read the branch and the working tree before you act on them.\n")
-	b.WriteString("- Call finish when the playbook is done. A done verdict is only accepted after the last step succeeded.\n")
+	b.WriteString("- Call finish when the workflow is done. A done verdict is only accepted after the last step succeeded.\n")
 	b.WriteString("- Always call a tool. An answer without a tool call does not move the run forward.\n")
 	return b.String()
 }

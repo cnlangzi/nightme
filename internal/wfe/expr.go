@@ -132,7 +132,7 @@ func evalOne(expr string, ec ExprCtx, rt Runtime) string {
 		if !ok {
 			return ""
 		}
-		return stepOut[parts[2]]
+		return stepOut[strings.Join(parts[2:], ".")]
 	case "needs":
 		if len(parts) < 3 {
 			return ""
@@ -141,7 +141,7 @@ func evalOne(expr string, ec ExprCtx, rt Runtime) string {
 		if !ok {
 			return ""
 		}
-		return jobOut[parts[2]]
+		return jobOut[strings.Join(parts[2:], ".")]
 	}
 	return ""
 }

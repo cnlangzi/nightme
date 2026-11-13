@@ -487,27 +487,99 @@ the `Risk:` line, the `Issue: #<id>` and `Closes #N` trailers, and the
 Conventional Commits type keyword. Issue titles stay English/ASCII — the
 branch name is derived from them.
 
-## Workflow automation
+## Workflows and the personal agent (`/me`)
 
-`nightme workflow` plans and inspects YAML-defined automations. Workflows live in `~/.nightme/workflows/*.yaml`, loaded by name.
+A **workflow** is a YAML file that says what to do and how far to go. It is the
+only automation artifact: the same file is the plan the agent follows and the
+bound it may not cross. Workflows live in `~/.nightme/workflows/*.yaml` and are
+loaded by name.
+
+The agent — `/me` — runs a workflow in the chat you start it from. Every command
+is a real message with a real id, and every command reports a structured
+outcome, so the agent decides the next step from facts instead of from prose.
+
+### Inspect the workflows
 
 | Subcommand | What it does |
 |---|---|
 | `nightme workflow list` | Summarize every workflow: name, workspaces, triggers, jobs. `--json` for machine output. |
-| `nightme workflow show <name>` | Print one workflow's parsed details: triggers, jobs, steps, effective agent. |
-| `nightme workflow run <name>` | Print the execution plan — which trigger fires, which steps run, in what order. `--workspace` overrides the workspace. |
+| `nightme workflow show <name>` | Print one workflow's parsed details: triggers, jobs, steps. |
+| `nightme workflow run <name>` | Print the execution plan — which steps run, in what order. `--workspace` overrides the workspace. |
 
 `run` is a planning dry-run: it parses and plans but does not invoke an agent.
 
-The YAML schema — `on:` triggers, `worker:`, `jobs.<name>.steps`, `${{ }}` expressions — is documented in [`docs/WFE.md`](./docs/WFE.md).
+### Write a workflow
 
-## Personal agent (`/me`)
+The workflows are read when the daemon starts. After you add or change one, run
+`nightme restart`.
 
-`me` runs a **playbook** in the chat you start it from. A playbook is an ordered
-list of steps plus the constraints around them. The agent drives NightMe the way
-you do — every command is a real message with a real id, and every command
-reports a structured outcome — so it decides the next step from facts instead of
-from prose.
+```yaml
+name: fix-issue
+args:
+  - name: issue
+    default: "*"
+goal: 把队列里的一个 issue 做完并推上去
+max_actions: 30
+on:                                   # 将来给 timer scheduler 消费；本期不实现
+  schedule:
+    - cron: "0 2 * * *"
+jobs:
+  ship:
+    steps:
+      - id: fix
+        message: "/gtw fix ${{ args.issue }} -y"
+        note: 从 nightme/assigned 队列里挑一个
+        allow: ["/gtw abort"]
+        max: 3
+      - id: commit
+        message: "/gtw commit"
+      - id: review
+        message: "/review"
+        note: 没跑完就 /review -c；有改动就先 /gtw commit
+        allow: ["/review -c", "/gtw commit"]
+        max: 5
+      - id: commit2
+        message: "/gtw commit"
+      - id: push
+        message: "/gtw push"
+```
+
+Deploy it by writing the file to `~/.nightme/workflows/fix-issue.yaml` and
+running `nightme restart`.
+
+| Workflow field | Meaning |
+|---|---|
+| `name` | The workflow's name. `/me start <name>` picks it. |
+| `args` | The arguments the workflow takes. A spec is a mapping with `name` and an optional `default`; a default makes the argument optional, no default makes it required. |
+| `goal` | What the run is for. It is part of the model's instructions. |
+| `max_actions` | The action budget of the whole run. Default 30. |
+| `instruct` | Whether the agent may send free-form instructions. Default true. |
+| `workspaces` | The workspaces the workflow names. Optional — the run takes the workspace of the chat that starts it. |
+| `on` | The trigger block. It is parsed and displayed; nothing fires it. |
+| `jobs` | The jobs, each with an ordered list of `steps`. Required. |
+
+A step carries exactly one kind:
+
+| Step kind | What it does |
+|---|---|
+| `message:` | Sends the text to the work chat. A `/`-prefixed text is a slash command; anything else is a turn for the work agent. |
+| `shell:` | Runs a shell command in the workspace. |
+| `use:` | Runs a registered action — `notify`, `email`, `github_pr_comment`, `github_issue`, or a script under `~/.nightme/workflows/actions/`. |
+
+| Step field | Meaning |
+|---|---|
+| `id` | The step's name. Optional — a step without one gets the id `<job>#<position>`. |
+| `if` | The condition that has to hold for the step to run. A step without one always runs. |
+| `env` | The environment the step's command gets. |
+| `continue-on-error` | Whether the chain continues when the step fails. |
+| `note` | Why the step is there, and when the extra commands apply. It is the description the decision model reads. |
+| `allow` | The extra commands the agent may use inside the step. |
+| `max` | The number of actions the step may take. Leave the key out for no limit of its own — `max: 0` is refused. |
+
+The expressions are `${{ args.NAME }}`, `${{ steps.<id>.outputs.status }}`,
+`${{ steps.<id>.outputs.data.<key> }}`, `${{ needs.<job>.* }}`, `${{ env.NAME }}`
+and `${{ now }}`. An expression that names an argument the workflow does not
+declare is refused when the file is loaded.
 
 ### Configure the models
 
@@ -516,7 +588,7 @@ Two model capabilities, both optional, both yours to pick:
 | Capability | Config key | What it does |
 |---|---|---|
 | **System 2 — the chat model** | `me.llm` | Drives the run when the decision model is not sure. |
-| **System 1 — the decision model** | `me.decider` | Decides the next step after each step settles. |
+| **System 1 — the decision model** | `me.decider` | Decides the next step at a judgment point. |
 
 ```yaml
 me:
@@ -561,7 +633,7 @@ carries no authentication header.
 
 | `me.llm` | `me.decider` | Behaviour |
 |---|---|---|
-| set | unset | Chat model only: the tool loop decides every step. |
+| set | unset | Chat model only: the tool loop decides every judgment point. |
 | unset | set | Decision model only: confident decisions run, everything else asks you. |
 | set | set | Decision model first; the chat model takes the escalations. |
 
@@ -569,68 +641,18 @@ A model that is configured but cannot be built — an unknown provider, a missin
 key — is reported in `nightme logs` and left out. The daemon still starts, and
 `/me` says why it cannot run.
 
-### Write a playbook
-
-Playbooks live in `~/.nightme/workflows/*.yaml` — the same directory the
-workflows live in. Only `.yaml` files are loaded, and the top-level key decides
-what a file is:
-
-| Top-level key | The file is | Run by |
-|---|---|---|
-| `steps:` | a **playbook** | the personal agent — `/me start` |
-| `jobs:` | a **workflow** | the cron / event-driven workflow service |
-
-One file is never both: a file carrying `steps:` and `jobs:` is refused.
-
-The playbooks are read when the daemon starts. After you add or change one, run
-`nightme restart`.
-
-```yaml
-name: fix-issue
-goal: Fix issue with `nightme/assigned` and ship it as a PR.
-steps:
-  - /gtw fix * -y
-  - /gtw commit
-  - run: /review
-    note: If it fails or does not finish, continue with /review -c. If it passes and left changes, /gtw commit first.
-    allow: [/review -c, /gtw commit]
-    max: 5
-  - /gtw push
-  - /gtw pr
-```
-
-| Playbook field | Meaning |
-|---|---|
-| `name` | The playbook's name. `/me start <name>` picks it. |
-| `args` | The names of the arguments the playbook takes. `/me start <playbook> [args...]` maps its positional arguments onto them, in order. |
-| `goal` | What the run is for. It is part of the model's instructions. |
-| `max_actions` | The action budget of the whole playbook. Default 30. |
-| `instruct` | Whether the agent may send free-form instructions. Default true. |
-| `steps` | The ordered steps. |
-
-A step is either a plain string — shorthand for `run` — or a mapping:
-
-| Step field | Meaning |
-|---|---|
-| `run` | The command the step performs. |
-| `note` | Why the step is there, and when the extra commands apply. It is the description the decision model reads. |
-| `allow` | The extra commands the agent may use inside the step. |
-| `max` | The number of actions the step may take. Leave the key out for no limit of its own — `max: 0` is refused. |
-
-Only `${{ args.NAME }}` is supported, and only for a declared argument. Any other
-expression is refused when the run starts.
-
-A playbook is both the agent's instruction and its bound: the steps say what to
-do, and `max_actions`, `max` and `allow` say how far the run may go.
-
-### Run a playbook
+### Run a workflow
 
 | Command | What it does |
 |---|---|
-| `/me start <playbook> [args...]` | Starts a playbook in this chat. The positional arguments map onto the playbook's declared arguments, in order. |
+| `/me start <workflow> [args...]` | Starts a workflow in this chat. |
 | `/me reply <text>` | Answers the question the run is waiting for. |
 | `/me stop` | Cancels the run and stops the work chat. |
 | `/me status` | Reports the current step, the phase and the progress of the running command, the remaining budget, and what each capability decided and spent. |
+
+The arguments of `/me start` fill the workflow's declared arguments: a positional
+token fills the next argument that is still unassigned, in declaration order, and
+a token of the form `name=value` assigns that argument by name.
 
 A chat without a workspace is refused — `No active workspace. Send /cwd <path> first.`
 The run inherits the chat's workspace and agent. A chat holds at most one run at a time.
@@ -647,18 +669,57 @@ and answers the questions. The agent works in an internal chat you never see.
 ✅ issue 42 is on its way · 6 actions · system-1: 0 decisions, 0 tokens · system-2: 8 decisions, 4210 tokens
 ```
 
+### The fast path and the judgment point
+
+The workflow says what comes next, so most steps need no model at all.
+
+- The **ready set** is the unrun steps whose job's `needs` are satisfied and
+  whose `if:` holds. Within a job only the first such step counts.
+- When the ready set holds exactly one step and the previous outcome was `ok`
+  or `noop`, the step runs as it is. No model is asked.
+- Everything else is a **judgment point**: the ready set is empty or forks, the
+  previous step did not end `ok` or `noop`, or a command is still waiting for an
+  answer. The agent decides there — it picks the next node, repairs the current
+  one, or ends the run.
+
+The agent answers a judgment point with a directive: `run_step` (run a command),
+`instruct` (send a free-form instruction to the work chat), `answer_choice`
+(answer a prompt the work agent is waiting for), `ask_human` (ask you),
+`repo_status` (read the branch and the tree), or `finish` (end the run). A
+command the agent names has to be a step's `message:` or one of a step's
+`allow:` entries — anything else comes back as an error it can correct.
+
+### The outcome model
+
+Every command reports a structured outcome: a status, a one-line summary and the
+facts it knows.
+
+| Status | What it means |
+|---|---|
+| `ok` | The work completed as asked. |
+| `noop` | There was nothing to do — the request was valid and the world already satisfied it. |
+| `incomplete` | The work started and part of it finished; the remainder did not. |
+| `failed` | The work did not complete. |
+| `cancelled` | Somebody stopped it. |
+| `timeout` | It ran out of time. |
+| `unknown` | Nobody reported a verdict. |
+
+The outcome of a step reaches the expressions of the steps after it: the status
+as `${{ steps.<id>.outputs.status }}`, the facts under
+`${{ steps.<id>.outputs.data.<key> }}`.
+
 ### When it does not run
 
 | Message | What it means |
 |---|---|
-| `there is no playbook named "<name>" (known: ...)` | No loaded playbook carries that name. |
+| `there is no workflow named "<name>" (known: ...)` | No loaded workflow carries that name. |
 | `neither me.llm nor me.decider is configured` | Neither model is configured, so the agent has nothing to decide with. |
-| `there are no playbooks in <dir>` | The workflows directory holds no playbook. |
-| `me is disabled: the playbooks in <dir> cannot be loaded: ...` | The YAML in the workflows directory is broken. |
+| `there are no workflows in <dir>` | The workflows directory holds no workflow. |
+| `me is disabled: the workflows in <dir> cannot be loaded: ...` | The YAML in the workflows directory is broken. |
 
-A YAML error in the workflows directory stops both the workflow service and the
-personal agent from starting — `nightme logs` reports it. The daemon still comes
-up, and `/me` refuses every run with the load error.
+A YAML error in the workflows directory stops the personal agent from starting —
+`nightme logs` reports it. The daemon still comes up, and `/me` refuses every
+run with the load error.
 
 ### Guardrails and reference
 
@@ -669,15 +730,15 @@ up, and `/me` refuses every run with the load error.
 | Stall detection | Ten minutes without a heartbeat. |
 | Token budget | The tokens one run may spend on the chat model. |
 
-The full reference — the policy, the tools, both model capabilities and the
-guardrails — is in [`docs/WFE.md` §8](./docs/WFE.md#8-runtime-architecture).
+The full reference — the schema, the policy, the tools, both model capabilities
+and the guardrails — is in [`docs/WFE.md` §8](./docs/WFE.md#8-runtime-architecture).
 
 ## Slash commands
 
 Chat-level slash commands. The `/gtw` subcommands live in
 [their own section](#git-team-workflow-gtw) and are not listed
 here; the `/me` subcommands — `/me start` · `/me reply` · `/me stop` ·
-`/me status` — live in [their own section](#personal-agent-me).
+`/me status` — live in [their own section](#workflows-and-the-personal-agent-me).
 
 | Command | What it does |
 |---|---|
@@ -883,8 +944,7 @@ internal/
   llm/                             # LLM clients — chat + tool calling (Provider) and decision models (Decider)
     anthropic/  decision/  openai/ # the chat providers and the decision protocols
   login/                           # IM bot registration — feishu / slack / telegram onboarding
-  me/                              # the personal agent — runs the playbooks through the loopback channel
-    workflow/                      # the cron / event-driven workflow service
+  me/                              # the personal agent — runs the workflows through the loopback channel
   messages/                        # IM message types + dispatch
   prcache/                         # PR metadata cache (per-F-50)
   registry/                        # JSON-backed chat_sessions.json + agent_sessions.json (0600, atomic)

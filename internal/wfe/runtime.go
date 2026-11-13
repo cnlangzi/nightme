@@ -1,42 +1,17 @@
 package wfe
 
 import (
-	"context"
 	"time"
 )
 
-// Runtime is the injection point for all external capabilities.
-// Each method is a "channel" from wfe to a specific resource.
-// wfe itself has zero I/O; internal/me implements this interface
-// and wires each method to a real resource (os/exec, the loopback
-// channel's client, the ActionRegistry, etc.).
+// The engine is a pure library: it parses, validates, computes the
+// plan of a run and evaluates expressions. It performs no I/O and
+// holds no clock — the runner (internal/me) owns the external
+// capabilities and hands the engine their results.
 //
-// Implementation contract:
-//   - RunShell: direct os/exec; cwd = run.Workspace
-//   - SendPrompt: send the prompt through the loopback client and
-//     wait for the execution to settle; the reply is the final text
-//     of the execution.
-//   - RunAction: ActionRegistry.Run(spec.Name, spec.With, spec.Env)
-//   - Now: time.Now (injected so wfe has no clock dependency)
-type Runtime interface {
-	// RunShell executes a shell command. spec.Cwd falls back to
-	// env["WORKSPACE_CWD"] then "".
-	RunShell(ctx context.Context, spec ShellSpec) (*ShellResult, error)
+// The types below are the vocabulary those capabilities speak.
 
-	// SendPrompt sends a message into the chat and blocks until the
-	// daemon settles it. spec.Timeout bounds the wait.
-	SendPrompt(ctx context.Context, spec PromptSpec) (*Reply, error)
-
-	// RunAction resolves spec.Name through the ActionRegistry and
-	// executes the corresponding action.
-	RunAction(ctx context.Context, spec ActionSpec) (*ActionResult, error)
-
-	// Now returns the current time. Injected so wfe has no
-	// time.Now() calls (testable).
-	Now() time.Time
-}
-
-// ShellSpec is the input to RunShell.
+// ShellSpec is the input to a shell command.
 type ShellSpec struct {
 	Cwd     string
 	Command string
@@ -44,7 +19,7 @@ type ShellSpec struct {
 	Shell   string
 }
 
-// ShellResult is the output of RunShell.
+// ShellResult is the output of a shell command.
 type ShellResult struct {
 	ExitCode int
 	Stdout   string
@@ -52,37 +27,21 @@ type ShellResult struct {
 	Outputs  map[string]string
 }
 
-// PromptSpec is the input to SendPrompt.
-type PromptSpec struct {
-	ChatID  string
-	Agent   string
-	Prompt  string
-	Env     map[string]string
-	Timeout time.Duration
-}
-
-// Reply is the output of SendPrompt — the agent's reply text and
-// any structured outputs.
-type Reply struct {
-	Text    string
-	Outputs map[string]string
-}
-
-// ActionSpec is the input to RunAction.
+// ActionSpec is the input to an action.
 type ActionSpec struct {
 	Name string
 	With map[string]any
 	Env  map[string]string
 }
 
-// ActionResult is the output of RunAction.
+// ActionResult is the output of an action.
 type ActionResult struct {
 	Outputs map[string]any
 }
 
 // ExprCtx is the evaluation context for ${{ }} expressions.
-// Populated by Tick from RunState and provided to EvalString /
-// EvalMap / EvalCond.
+//
+// Populated by the engine from the run state.
 type ExprCtx struct {
 	Event map[string]any
 	Steps map[string]map[string]string

@@ -277,11 +277,11 @@ A workflow runs one job graph in one work chat: the branches of the graph expres
 
 Each step carries exactly one of three kinds. A step with two kinds, or with none, is refused when the file is loaded.
 
-| Kind | Field | Use case | Runtime call |
+| Kind | Field | Use case | Where it runs |
 |---|---|---|---|
 | `message` | `message: <text>` | Talk to the work chat | the work chat |
-| `shell` | `shell: <cmd>` | Execute shell | `Runtime.RunShell` |
-| `use` | `use: <action>` + `with: <args>` | Invoke a registered action | `Runtime.RunAction` |
+| `shell` | `shell: <cmd>` | Execute shell | the workspace |
+| `use` | `use: <action>` + `with: <args>` | Invoke a registered action | the action registry |
 
 `message` and `shell` are **default-supported** — they work in every workflow. `use` is the **extension point** — the agent registers which action names are valid.
 
@@ -533,7 +533,7 @@ This section answers "where do runs actually execute, and how do the pieces fit?
 | The models | `internal/llm` | Two capabilities: `Provider` (chat and tool calling) and `Decider` (typed decision questions). |
 | The engine | `internal/wfe` | The workflow schema, the plan of a run, the judgment points, and the `Policy` that bounds a run. |
 
-The engine is a pure library: no I/O, no clock, no secrets. Every external capability goes through the injected `Runtime`.
+The engine is a pure library: no I/O, no clock, no secrets. It parses, validates, computes the plan of a run and evaluates expressions — the runner owns the external capabilities and hands the engine their results.
 
 The agent drives the daemon the way a person drives it through Feishu: every command is a real message with a real id, and every answer comes back as a structured outcome. It never reaches into the gateway or the chat sessions.
 

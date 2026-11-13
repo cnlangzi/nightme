@@ -224,6 +224,34 @@ func (f *fakeShell) RunShell(_ context.Context, spec wfe.ShellSpec) (*wfe.ShellR
 	return &wfe.ShellResult{ExitCode: 0}, nil
 }
 
+// blockingShell blocks until its context ends, the way a long command
+// does.
+type blockingShell struct {
+	started   chan struct{}
+	mu        sync.Mutex
+	cancelled bool
+}
+
+func newBlockingShell() *blockingShell {
+	return &blockingShell{started: make(chan struct{})}
+}
+
+func (b *blockingShell) RunShell(ctx context.Context, _ wfe.ShellSpec) (*wfe.ShellResult, error) {
+	close(b.started)
+	<-ctx.Done()
+	b.mu.Lock()
+	b.cancelled = true
+	b.mu.Unlock()
+	return nil, ctx.Err()
+}
+
+// Cancelled reports whether the command was stopped.
+func (b *blockingShell) Cancelled() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.cancelled
+}
+
 // fakeAnswerer answers the prompts of the fake loopback.
 type fakeAnswerer struct {
 	lb *fakeLoopback
@@ -935,6 +963,43 @@ func (a *recordingAction) Execute(_ context.Context, args map[string]any, _ map[
 	a.args = args
 	a.mu.Unlock()
 	return &wfe.ActionResult{Outputs: map[string]any{"sent": "true"}}, nil
+}
+
+// TestStop_CancelsARunningShellStep — `/me stop` stops the command a
+// shell step is running, and the run ends.
+func TestStop_CancelsARunningShellStep(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "sh", `name: sh
+jobs:
+  main:
+    steps:
+      - id: build
+        shell: make build
+`)
+
+	shell := newBlockingShell()
+	provider := &scriptedProvider{err: errors.New("the chat model must not be called")}
+	decider := &scriptedDecider{err: errors.New("the decision model must not be called")}
+	svc, _, _ := testService(t, dir, Config{Provider: provider, Decider: decider, Shell: shell})
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "sh", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	select {
+	case <-shell.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the shell step never ran")
+	}
+	if err := svc.Stop(context.Background(), "obs-1"); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	waitRun(t, svc, "obs-1")
+
+	if !shell.Cancelled() {
+		t.Fatal("the shell command was not stopped with the run")
+	}
 }
 
 // TestStepKind_UseRunsTheAction — a `use:` step runs the action it

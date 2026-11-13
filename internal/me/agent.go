@@ -483,14 +483,9 @@ func mapArgValues(wf *wfe.Workflow, tokens []string) (map[string]string, error) 
 			positional = append(positional, tok)
 			continue
 		}
-		if !wf.HasArg(name) {
-			return nil, fmt.Errorf("wfe: %s: unknown argument %q (declared: %s)",
-				wf.Name, name, describeArgs(declared))
-		}
+		// An argument the workflow does not declare is refused by
+		// the bind that follows.
 		out[name] = value
-	}
-	if len(positional) > len(declared) {
-		return nil, tooManyArgs(wf, len(positional))
 	}
 	next := 0
 	for _, value := range positional {
@@ -501,7 +496,7 @@ func mapArgValues(wf *wfe.Workflow, tokens []string) (map[string]string, error) 
 			next++
 		}
 		if next >= len(declared) {
-			return nil, tooManyArgs(wf, len(positional))
+			return nil, tooManyArgs(wf, len(tokens))
 		}
 		out[declared[next]] = value
 		next++
@@ -515,14 +510,6 @@ func tooManyArgs(wf *wfe.Workflow, given int) error {
 	declared := wf.ArgNames()
 	return fmt.Errorf("the workflow takes %d argument(s) (%s), %d were given",
 		len(declared), strings.Join(declared, ", "), given)
-}
-
-// describeArgs renders the declared arguments for an error message.
-func describeArgs(args []string) string {
-	if len(args) == 0 {
-		return "none"
-	}
-	return strings.Join(args, ", ")
 }
 
 // setupWorkChat points the work chat at the run's workspace and

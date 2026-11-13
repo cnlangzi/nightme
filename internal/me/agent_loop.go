@@ -112,10 +112,7 @@ func (s *Service) turn(ctx context.Context, r *run) (bool, error) {
 	if decision.Exhausted && s.goalMet(r) {
 		// Every step ran and the last one ended ok: the goal is met
 		// and no model is asked to say so.
-		r.markFinished()
-		s.finish(r, PhaseDone, "")
-		s.notify(r, finishLine(r, "done", r.workflow.Name+" is complete"))
-		s.persist(r)
+		s.finishDone(r, r.workflow.Name+" is complete")
 		return true, nil
 	}
 	action, err := s.system1(ctx, r)
@@ -202,18 +199,21 @@ func (s *Service) loopDeciderOnly(ctx context.Context, r *run) error {
 		if err != nil {
 			return err
 		}
-		r.setJudgment(decision.Reason)
-		if decision.Kind == wfe.DecisionRun && r.checkStep(decision.Step) == nil {
-			if err := s.runPlanStep(ctx, r, decision); err != nil {
-				return err
+		if decision.Kind == wfe.DecisionRun {
+			if err := r.checkStep(decision.Step); err == nil {
+				if err := s.runPlanStep(ctx, r, decision); err != nil {
+					return err
+				}
+				continue
+			} else {
+				// The budget is spent: the workflow cannot go on by
+				// itself, so the agent decides what happens next.
+				decision = wfe.Decision{Kind: wfe.DecisionJudgment, Reason: err.Error()}
 			}
-			continue
 		}
+		r.setJudgment(decision.Reason)
 		if decision.Exhausted && s.goalMet(r) {
-			r.markFinished()
-			s.finish(r, PhaseDone, "")
-			s.notify(r, finishLine(r, "done", r.workflow.Name+" is complete"))
-			s.persist(r)
+			s.finishDone(r, r.workflow.Name+" is complete")
 			return errFinished
 		}
 		dec, err := s.decide(ctx, r)
@@ -270,6 +270,14 @@ func (s *Service) maxIterations(r *run) int {
 		actions = wfe.DefaultMaxActions
 	}
 	return actions * DefaultMaxIterationsFactor
+}
+
+// finishDone ends the run as done and tells the observer.
+func (s *Service) finishDone(r *run, summary string) {
+	r.markFinished()
+	s.finish(r, PhaseDone, "")
+	s.notify(r, finishLine(r, "done", summary))
+	s.persist(r)
 }
 
 // notify posts a line to the observer chat.
@@ -348,10 +356,7 @@ func (s *Service) actOnDecision(ctx context.Context, r *run, dec decision) (sys1
 			return s.escalateDecision(r, dec, err)
 		}
 		s.recordSynthetic(r, "finish", map[string]any{"status": "done", "summary": "the workflow is complete"}, dec)
-		r.markFinished()
-		s.finish(r, PhaseDone, "")
-		s.notify(r, finishLine(r, "done", r.workflow.Name+" is complete"))
-		s.persist(r)
+		s.finishDone(r, r.workflow.Name+" is complete")
 		return sys1Act, nil
 	default:
 		if _, err := r.checkRun(dec.Next); err != nil {
@@ -394,10 +399,7 @@ func (s *Service) actOnChoice(ctx context.Context, r *run, command, by string) (
 			s.notify(r, "⚠️ "+err.Error())
 			return false, nil
 		}
-		r.markFinished()
-		s.finish(r, PhaseDone, "")
-		s.notify(r, finishLine(r, "done", r.workflow.Name+" is complete"))
-		s.persist(r)
+		s.finishDone(r, r.workflow.Name+" is complete")
 		return true, nil
 	}
 	if _, err := r.checkRun(command); err != nil {

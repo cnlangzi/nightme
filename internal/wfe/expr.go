@@ -22,7 +22,7 @@ import (
 // The `$` is part of the syntax delimiter (matches GitHub Actions).
 // Unknown identifiers become empty strings. v0; richer
 // expressions can come later.
-func EvalString(s string, ec ExprCtx, rt Runtime) string {
+func EvalString(s string, ec ExprCtx) string {
 	if !strings.Contains(s, "${{") {
 		return s
 	}
@@ -37,7 +37,7 @@ func EvalString(s string, ec ExprCtx, rt Runtime) string {
 				continue
 			}
 			expr := strings.TrimSpace(s[i+3 : i+3+end])
-			out.WriteString(evalOne(expr, ec, rt))
+			out.WriteString(evalOne(expr, ec))
 			i = i + 3 + end + 2
 			continue
 		}
@@ -49,28 +49,28 @@ func EvalString(s string, ec ExprCtx, rt Runtime) string {
 
 // EvalMap evaluates ${{ }} expressions in every string value of m
 // (recursively). Non-string leaves are untouched.
-func EvalMap(m map[string]any, ec ExprCtx, rt Runtime) map[string]any {
+func EvalMap(m map[string]any, ec ExprCtx) map[string]any {
 	out := make(map[string]any, len(m))
 	for k, v := range m {
-		out[k] = evalValue(v, ec, rt)
+		out[k] = evalValue(v, ec)
 	}
 	return out
 }
 
-func evalValue(v any, ec ExprCtx, rt Runtime) any {
+func evalValue(v any, ec ExprCtx) any {
 	switch x := v.(type) {
 	case string:
-		return EvalString(x, ec, rt)
+		return EvalString(x, ec)
 	case map[string]any:
 		inner := make(map[string]any, len(x))
 		for k, vv := range x {
-			inner[k] = evalValue(vv, ec, rt)
+			inner[k] = evalValue(vv, ec)
 		}
 		return inner
 	case []any:
 		inner := make([]any, len(x))
 		for i, vv := range x {
-			inner[i] = evalValue(vv, ec, rt)
+			inner[i] = evalValue(vv, ec)
 		}
 		return inner
 	}
@@ -79,12 +79,12 @@ func evalValue(v any, ec ExprCtx, rt Runtime) any {
 
 // EvalCond evaluates a boolean condition. Returns true if the
 // condition is empty (vacuously true) or evaluates to a truthy value.
-func EvalCond(cond string, ec ExprCtx, rt Runtime) (bool, error) {
+func EvalCond(cond string, ec ExprCtx) (bool, error) {
 	cond = strings.TrimSpace(cond)
 	if cond == "" {
 		return true, nil
 	}
-	v := EvalString(cond, ec, rt)
+	v := EvalString(cond, ec)
 	if v == "" {
 		return false, nil
 	}
@@ -95,7 +95,7 @@ func EvalCond(cond string, ec ExprCtx, rt Runtime) (bool, error) {
 	return true, nil
 }
 
-func evalOne(expr string, ec ExprCtx, rt Runtime) string {
+func evalOne(expr string, ec ExprCtx) string {
 	// Function call: foo()
 	if idx := strings.Index(expr, "("); idx > 0 && strings.HasSuffix(expr, ")") {
 		name := strings.TrimSpace(expr[:idx])

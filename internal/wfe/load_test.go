@@ -302,6 +302,31 @@ jobs:
 			wantErr: "nonexistent",
 		},
 		{
+			name: "two steps with the same id",
+			src: `
+name: x
+jobs:
+  a:
+    steps: [{id: s, message: one}]
+  b:
+    steps: [{id: s, message: two}]
+`,
+			wantErr: `the step id "s" is used`,
+		},
+		{
+			name: "a declared id that collides with a synthetic one",
+			src: `
+name: x
+jobs:
+  a:
+    steps:
+      - message: one
+      - id: "a#1"
+        message: two
+`,
+			wantErr: `the step id "a#1" is used`,
+		},
+		{
 			name: "jobs in a circle",
 			src: `
 name: x
@@ -442,6 +467,39 @@ jobs:
 	msg := bound.Jobs["main"].Steps[1].Message
 	if msg != "echo ${{ steps.a.outputs.status }}" {
 		t.Errorf("message = %q, want the step expression left alone", msg)
+	}
+}
+
+func TestBind_ExpandsAnArgumentInsideAListItem(t *testing.T) {
+	wf := mustParse(t, `
+name: x
+args:
+  - name: issue
+    default: "42"
+jobs:
+  main:
+    steps:
+      - id: notify
+        use: notify
+        with:
+          items:
+            - name: "${{ args.issue }}"
+`)
+	bound, err := Bind(wf, map[string]string{})
+	if err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	with := bound.Jobs["main"].Steps[0].With
+	items, ok := with["items"].([]any)
+	if !ok || len(items) != 1 {
+		t.Fatalf("the with arguments = %v", with)
+	}
+	item, ok := items[0].(map[string]any)
+	if !ok {
+		t.Fatalf("the list item = %v", items[0])
+	}
+	if item["name"] != "42" {
+		t.Errorf("the list item = %v, want the argument expanded", item)
 	}
 }
 

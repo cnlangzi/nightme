@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/cnlangzi/nightme/internal/channel/loopback"
 	"github.com/cnlangzi/nightme/internal/llm"
@@ -134,20 +135,25 @@ func newRun(svc *Service, req Request, wf *wfe.Workflow) *run {
 		agent:          req.Agent,
 		workflow:       wf,
 		policy:         wfe.NewPolicy(wf, nil),
-		state: &wfe.RunState{
-			RunID:        id,
-			WorkflowName: wf.Name,
-			Workspace:    req.Cwd,
-			Status:       wfe.StatusRunning,
-			Env:          map[string]string{"WORKSPACE_CWD": req.Cwd},
-			StartedAt:    now,
-			UpdatedAt:    now,
-		},
-		phase:  PhaseRunning,
-		ctx:    ctx,
-		cancel: cancel,
-		resume: make(chan struct{}, 1),
-		done:   make(chan struct{}),
+		state:          newRunState(id, wf.Name, req.Cwd, now),
+		phase:          PhaseRunning,
+		ctx:            ctx,
+		cancel:         cancel,
+		resume:         make(chan struct{}, 1),
+		done:           make(chan struct{}),
+	}
+}
+
+// newRunState builds the progress of a run.
+func newRunState(runID, workflow, cwd string, now time.Time) *wfe.RunState {
+	return &wfe.RunState{
+		RunID:        runID,
+		WorkflowName: workflow,
+		Workspace:    cwd,
+		Status:       wfe.StatusRunning,
+		Env:          map[string]string{"WORKSPACE_CWD": cwd},
+		StartedAt:    now,
+		UpdatedAt:    now,
 	}
 }
 
@@ -392,6 +398,34 @@ func (r *run) lastOutcome() (wfe.Outcome, bool) {
 	return wfe.LastOutcome(r.state)
 }
 
+// runContext returns a context that ends when either the caller's
+// context or the run's own context ends.
+//
+// A command the run spawns is bound to it: `/me stop` and the
+// daemon's shutdown both stop the child instead of leaving it behind.
+func (r *run) runContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	merged, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(r.ctx, cancel)
+	return merged, func() {
+		stop()
+		cancel()
+	}
+}
+
+// env returns the run's environment.
+func (r *run) env() map[string]string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.state.Env
+}
+
+// hasRun reports whether the step already ran.
+func (r *run) hasRun(stepID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return wfe.HasRun(r.state, stepID)
+}
+
 // outcomeLine renders an outcome as one human-readable line.
 func outcomeLine(o messages.Outcome) string {
 	if o.Summary != "" {
@@ -570,12 +604,7 @@ func (s *Service) restoreRun(state persistedRun) *run {
 		done:             make(chan struct{}),
 	}
 	if r.state == nil {
-		r.state = &wfe.RunState{
-			RunID:        r.id,
-			WorkflowName: state.Workflow.Name,
-			Workspace:    r.cwd,
-			Status:       wfe.StatusRunning,
-		}
+		r.state = newRunState(r.id, state.Workflow.Name, r.cwd, time.Now())
 	}
 	if r.phase == "" {
 		r.phase = PhaseRunning

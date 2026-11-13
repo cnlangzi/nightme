@@ -140,6 +140,8 @@ type readyStep struct {
 // steps of a job run in order.
 func readySet(state *RunState, wf *Workflow) ([]readyStep, []readyStep, error) {
 	done := completedJobs(state, wf)
+	// The context is the same for every condition of the round.
+	ec := buildExprCtx(state)
 	var ready, skipped []readyStep
 	for _, name := range wf.JobOrder() {
 		job := wf.Jobs[name]
@@ -157,7 +159,7 @@ func readySet(state *RunState, wf *Workflow) ([]readyStep, []readyStep, error) {
 			continue
 		}
 		if job.If != "" {
-			ok, err := EvalCond(job.If, buildExprCtx(state), nil)
+			ok, err := EvalCond(job.If, ec)
 			if err != nil {
 				return nil, nil, fmt.Errorf("wfe: job %q: %w", name, err)
 			}
@@ -176,7 +178,7 @@ func readySet(state *RunState, wf *Workflow) ([]readyStep, []readyStep, error) {
 				continue
 			}
 			if step.If != "" {
-				ok, err := EvalCond(step.If, buildExprCtx(state), nil)
+				ok, err := EvalCond(step.If, ec)
 				if err != nil {
 					return nil, nil, fmt.Errorf("wfe: step %q: %w", step.ID, err)
 				}

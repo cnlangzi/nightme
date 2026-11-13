@@ -125,8 +125,7 @@
 | 顶层字段（`name` / `args` / `goal` / `max_actions` / `instruct` / `workspaces` / `on` / `jobs`）| [WFE.md](./WFE.md) §2 |
 | `${{ ... }}` 表达式（`args.*` / `steps.*.outputs.*` / `needs.*.*` / `env.*` / `now`）| [WFE.md](./WFE.md) §6 |
 | `use` 步骤 = 扩展点（注册的 action；内置 + `~/.nightme/workflows/actions/*.sh`）| [WFE.md](./WFE.md) §5.3 |
-| Runtime interface（RunShell / SendPrompt / RunAction / Now）| [WFE.md](./WFE.md) §5 |
-| `wfe` 库 = 纯库（无 I/O / 无 clock / 无 secrets；引擎算就绪集和判断点）| [feat/F-workflow-engine.md](./feat/F-workflow-engine.md) |
+| `wfe` 库 = 纯库（无 I/O / 无 clock / 无 secrets；引擎算就绪集和判断点）| [WFE.md](./WFE.md) §8.2 |
 | Action 注入模型（ActionRegistry + ShellAction 包装用户脚本）| [WFE.md](./WFE.md) §5.3 + [feat/F-workflow-engine.md](./feat/F-workflow-engine.md) |
 | 就绪集与快路径（唯一就绪步骤 + 上一步 ok/noop → 不问模型）| [WFE.md](./WFE.md) §8.2 |
 | 判断点（就绪集为空 / 分叉 / 上一步不是 ok/noop / 步骤失败 / 命令还在等）| [WFE.md](./WFE.md) §8.3 |

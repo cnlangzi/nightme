@@ -268,11 +268,14 @@ func describeStep(s wfe.Step) string {
 	return fmt.Sprintf("? (id=%s)", s.ID)
 }
 
-// workspacesLabel renders the workflow's workspaces. A workflow that
-// declares none takes the workspace of the chat that starts it.
+// inheritedWorkspace is what a workflow without workspaces says: the
+// run takes the workspace of the chat that starts it.
+const inheritedWorkspace = "(the workspace of the chat that starts it)"
+
+// workspacesLabel renders the workflow's workspaces.
 func workspacesLabel(wf *wfe.Workflow) string {
 	if len(wf.Workspaces) == 0 {
-		return "(the workspace of the chat that starts it)"
+		return inheritedWorkspace
 	}
 	return strings.Join(wf.Workspaces, ", ")
 }
@@ -323,7 +326,7 @@ func printWorkflowRun(w io.Writer, wf *wfe.Workflow, workspace string) error {
 	if workspace != "" {
 		fmt.Fprintf(w, "workspace:  %s\n", workspace)
 	} else {
-		fmt.Fprintf(w, "workspace:  (the workspace of the chat that starts it)\n")
+		fmt.Fprintf(w, "workspace:  %s\n", inheritedWorkspace)
 	}
 	fmt.Fprintln(w, "\ntriggers (parsed and displayed; nothing fires them):")
 	if len(wf.On.Schedule) > 0 {

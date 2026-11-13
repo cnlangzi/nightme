@@ -268,15 +268,15 @@ func TestExprContext_CarriesTheStepOutcomes(t *testing.T) {
 	}, false)
 
 	ec := ExprContext(state)
-	got := EvalString("${{ steps.one.outputs.status }}", ec, nil)
+	got := EvalString("${{ steps.one.outputs.status }}", ec)
 	if got != "ok" {
 		t.Errorf("status = %q, want ok", got)
 	}
-	got = EvalString("${{ steps.one.outputs.data.issue }}", ec, nil)
+	got = EvalString("${{ steps.one.outputs.data.issue }}", ec)
 	if got != "42" {
 		t.Errorf("data.issue = %q, want 42", got)
 	}
-	got = EvalString("${{ needs.main.outputs.summary }}", ec, nil)
+	got = EvalString("${{ needs.main.outputs.summary }}", ec)
 	if got != "done" {
 		t.Errorf("needs.main summary = %q, want done", got)
 	}

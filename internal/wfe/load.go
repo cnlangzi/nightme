@@ -315,6 +315,7 @@ func validate(wf *Workflow, root *yaml.Node) error {
 	if len(wf.JobOrder()) != len(wf.Jobs) {
 		return fmt.Errorf("wfe: %s: the jobs need each other in a circle", wf.Name)
 	}
+	seenSteps := map[string]string{} // step id -> the job it belongs to
 	for _, name := range sortedJobNames(wf.Jobs) {
 		job := wf.Jobs[name]
 		if len(job.Steps) == 0 {
@@ -328,6 +329,12 @@ func validate(wf *Workflow, root *yaml.Node) error {
 			if step.ID == "" {
 				step.ID = syntheticStepID(name, i+1)
 			}
+			// The run state is keyed by step id, so two steps may
+			// not share one.
+			if prev, ok := seenSteps[step.ID]; ok {
+				return fmt.Errorf("wfe: %s: the step id %q is used by job %q and job %q", wf.Name, step.ID, prev, name)
+			}
+			seenSteps[step.ID] = name
 		}
 	}
 	if err := checkArgExpressions(wf); err != nil {
@@ -412,16 +419,6 @@ func (w *Workflow) ArgNames() []string {
 		out = append(out, a.Name)
 	}
 	return out
-}
-
-// HasArg reports whether the workflow declares the argument.
-func (w *Workflow) HasArg(name string) bool {
-	for _, a := range w.Args {
-		if a.Name == name {
-			return true
-		}
-	}
-	return false
 }
 
 // topoSort returns jobs in topological order (no job appears
@@ -569,20 +566,26 @@ func workflowTexts(wf *Workflow) []string {
 func mapValues(m map[string]any) []string {
 	var out []string
 	for _, v := range m {
-		switch x := v.(type) {
-		case string:
-			out = append(out, x)
-		case map[string]any:
-			out = append(out, mapValues(x)...)
-		case []any:
-			for _, item := range x {
-				if s, ok := item.(string); ok {
-					out = append(out, s)
-				}
-			}
-		}
+		out = append(out, valueStrings(v)...)
 	}
 	return out
+}
+
+// valueStrings returns the string leaves of a value.
+func valueStrings(v any) []string {
+	switch x := v.(type) {
+	case string:
+		return []string{x}
+	case map[string]any:
+		return mapValues(x)
+	case []any:
+		var out []string
+		for _, item := range x {
+			out = append(out, valueStrings(item)...)
+		}
+		return out
+	}
+	return nil
 }
 
 // cloneWorkflow copies a workflow so a bound one never touches the
@@ -686,26 +689,29 @@ func expandAnyMap(m map[string]any, args map[string]string) map[string]any {
 	}
 	out := make(map[string]any, len(m))
 	for k, v := range m {
-		switch x := v.(type) {
-		case string:
-			out[k] = expandArgs(x, args)
-		case map[string]any:
-			out[k] = expandAnyMap(x, args)
-		case []any:
-			items := make([]any, len(x))
-			for i, item := range x {
-				if s, ok := item.(string); ok {
-					items[i] = expandArgs(s, args)
-					continue
-				}
-				items[i] = item
-			}
-			out[k] = items
-		default:
-			out[k] = v
-		}
+		out[k] = expandValue(v, args)
 	}
 	return out
+}
+
+// expandValue replaces the `${{ args.NAME }}` references of a value.
+//
+// Every shape the runtime understands is walked, so a reference hides
+// nowhere.
+func expandValue(v any, args map[string]string) any {
+	switch x := v.(type) {
+	case string:
+		return expandArgs(x, args)
+	case map[string]any:
+		return expandAnyMap(x, args)
+	case []any:
+		items := make([]any, len(x))
+		for i, item := range x {
+			items[i] = expandValue(item, args)
+		}
+		return items
+	}
+	return v
 }
 
 // expandArgs replaces the `${{ args.NAME }}` references in s.

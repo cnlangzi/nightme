@@ -189,10 +189,13 @@ func (s *Service) runStep(ctx context.Context, r *run, command string) (stepResu
 	}
 	step, ok := r.stepAt(idx)
 	if !ok {
+		// The action still happened, so it is recorded — the budget
+		// has to know about it.
+		r.record(wfe.ActionKindRun, command, "", out)
 		return res, nil
 	}
 	r.record(wfe.ActionKindRun, command, step.ID, out)
-	if r.isStepMessage(idx, command) || wfe.HasRun(r.state, step.ID) {
+	if r.isStepMessage(idx, command) || r.hasRun(step.ID) {
 		// The step ran, or the command was a repair inside a step
 		// that ran: the run state carries the latest outcome.
 		r.recordStep(wfe.JobOf(r.workflow, step.ID), step, out)

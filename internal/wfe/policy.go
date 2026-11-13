@@ -17,6 +17,10 @@ type Policy struct {
 	Workflow *Workflow
 	// History holds the actions taken so far, oldest first.
 	History []ActionRecord
+
+	// stepList is the workflow's step list, computed once: the
+	// topological order does not change while the run goes on.
+	stepList []Step
 }
 
 // NewPolicy returns a policy over wf with the given action history.
@@ -276,16 +280,14 @@ func (p *Policy) stepUsage(idx int) int {
 
 // lastExecuted returns the step that ran last and its latest
 // outcome.
+//
+// The history is in order, so the last run record carries the latest
+// outcome of the last executed step.
 func (p *Policy) lastExecuted() (string, Outcome, bool) {
 	for i := len(p.History) - 1; i >= 0; i-- {
 		rec := p.History[i]
 		if rec.Kind != ActionKindRun {
 			continue
-		}
-		for j := i; j >= 0; j-- {
-			if p.History[j].Kind == ActionKindRun && p.History[j].StepID == rec.StepID {
-				return rec.StepID, p.History[j].Outcome, true
-			}
 		}
 		return rec.StepID, rec.Outcome, true
 	}
@@ -310,7 +312,10 @@ func (p *Policy) steps() []Step {
 	if p == nil || p.Workflow == nil {
 		return nil
 	}
-	return p.Workflow.Steps()
+	if p.stepList == nil {
+		p.stepList = p.Workflow.Steps()
+	}
+	return p.stepList
 }
 
 // normalizeCommand collapses the whitespace of a command so a command

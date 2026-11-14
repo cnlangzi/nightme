@@ -12,57 +12,157 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// LoadDir reads all `*.yaml` files from dir and returns the parsed
-// workflows. Fails if two workflows share a name.
-func LoadDir(dir string) ([]*Workflow, error) {
-	files, err := filepath.Glob(filepath.Join(dir, "*.yaml"))
+// Failure is one workflow file that did not load.
+//
+// The name is the base name the file would have provided: it is what
+// the operator asks for, so the failure is reported against it.
+type Failure struct {
+	// Name is the base name of the file.
+	Name string
+	// Path is the file that did not load.
+	Path string
+	// Err is why the file did not load.
+	Err error
+}
+
+// Error implements the error interface.
+func (f Failure) Error() string {
+	return f.Err.Error()
+}
+
+// LoadDir loads the workflow files of dir.
+//
+// Both `*.yaml` and `*.yml` are read, and a workflow's identity is the
+// base name of its file. The workflows that loaded come back with one
+// failure per file that did not: a broken file does not take the
+// workflows beside it down with it.
+func LoadDir(dir string) ([]*Workflow, []Failure) {
+	paths, err := WorkflowPaths(dir)
 	if err != nil {
-		return nil, fmt.Errorf("wfe: glob %s: %w", dir, err)
+		return nil, []Failure{{Path: dir, Err: err}}
 	}
+	claims := map[string][]string{} // base name -> the files that claim it
+	loaded := map[string]*Workflow{}
+	var failures []Failure
+	for _, path := range paths {
+		name := BaseName(path)
+		if name == "" {
+			continue
+		}
+		claims[name] = append(claims[name], path)
+		wf, err := LoadFile(path)
+		if err != nil {
+			failures = append(failures, Failure{
+				Name: name,
+				Path: path,
+				Err:  fmt.Errorf("%s could not be loaded: %w", filepath.Base(path), err),
+			})
+			continue
+		}
+		loaded[name] = wf
+	}
+	names := make([]string, 0, len(claims))
+	for name := range claims {
+		names = append(names, name)
+	}
+	sort.Strings(names)
 	var workflows []*Workflow
-	seen := map[string]string{} // workflow name -> filename
-	for _, f := range files {
-		raw, err := os.ReadFile(f)
-		if err != nil {
-			return nil, fmt.Errorf("wfe: %s: %w", f, err)
+	for _, name := range names {
+		files := claims[name]
+		if len(files) > 1 {
+			failures = append(failures, Failure{
+				Name: name,
+				Path: files[1],
+				Err: fmt.Errorf("wfe: duplicate workflow name %q in %s and %s",
+					name, files[0], files[1]),
+			})
+			continue
 		}
-		wf, err := Parse(raw)
-		if err != nil {
-			return nil, fmt.Errorf("wfe: %s: %w", f, err)
+		wf, ok := loaded[name]
+		if !ok {
+			// The file did not load: its failure says why.
+			continue
 		}
-		if prev, ok := seen[wf.Name]; ok {
-			return nil, fmt.Errorf("wfe: duplicate workflow name %q in %s and %s", wf.Name, prev, f)
-		}
-		seen[wf.Name] = f
 		workflows = append(workflows, wf)
 	}
-	return workflows, nil
+	return workflows, failures
+}
+
+// WorkflowPaths returns the workflow files of dir, sorted.
+//
+// A workflow file is a `*.yaml` or a `*.yml` file.
+func WorkflowPaths(dir string) ([]string, error) {
+	var out []string
+	for _, pattern := range []string{"*.yaml", "*.yml"} {
+		files, err := filepath.Glob(filepath.Join(dir, pattern))
+		if err != nil {
+			return nil, fmt.Errorf("wfe: glob %s: %w", dir, err)
+		}
+		out = append(out, files...)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// BaseName returns the identity of a workflow file: its name without
+// the extension.
+func BaseName(path string) string {
+	base := filepath.Base(path)
+	return strings.TrimSuffix(base, filepath.Ext(base))
 }
 
 // LoadFile parses and validates a single workflow file.
+//
+// The file's base name is the workflow's identity and the workflow's
+// title states what it is for. The identity is set on the workflow;
+// the file does not carry it.
 func LoadFile(path string) (*Workflow, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("wfe: read: %w", err)
+		return nil, fmt.Errorf("wfe: %s: %w", filepath.Base(path), err)
 	}
-	return Parse(raw)
+	wf, err := parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("wfe: %s: %w", filepath.Base(path), err)
+	}
+	name := BaseName(path)
+	if name == "" {
+		return nil, fmt.Errorf("wfe: %s: the file has no name", filepath.Base(path))
+	}
+	wf.Name = name
+	return wf, nil
 }
 
 // Parse parses and validates raw YAML bytes as a workflow.
+//
+// The workflow carries no identity: the identity is the name of the
+// file it came from, and the loader sets it (see LoadFile).
 func Parse(raw []byte) (*Workflow, error) {
+	wf, err := parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("wfe: %w", err)
+	}
+	return wf, nil
+}
+
+// parse parses and validates raw YAML bytes as a workflow.
+//
+// Its errors carry no prefix: the caller names the file they come
+// from.
+func parse(raw []byte) (*Workflow, error) {
 	var doc yaml.Node
 	if err := yaml.Unmarshal(raw, &doc); err != nil {
-		return nil, fmt.Errorf("wfe: yaml: %w", err)
+		return nil, err
 	}
 	root := &doc
 	if doc.Kind == yaml.DocumentNode {
 		if len(doc.Content) == 0 {
-			return nil, fmt.Errorf("wfe: the file is empty")
+			return nil, fmt.Errorf("the file is empty")
 		}
 		root = doc.Content[0]
 	}
 	if root.Kind != yaml.MappingNode {
-		return nil, fmt.Errorf("wfe: the file is not a workflow: it has no keys")
+		return nil, fmt.Errorf("the file is not a workflow: it has no keys")
 	}
 	if err := checkDocument(root); err != nil {
 		return nil, err
@@ -70,7 +170,7 @@ func Parse(raw []byte) (*Workflow, error) {
 
 	var wf Workflow
 	if err := root.Decode(&wf); err != nil {
-		return nil, fmt.Errorf("wfe: yaml: %w", err)
+		return nil, err
 	}
 	if err := validate(&wf, root); err != nil {
 		return nil, err
@@ -80,7 +180,7 @@ func Parse(raw []byte) (*Workflow, error) {
 
 // The keys each level of the schema accepts.
 var (
-	workflowKeys = keySet("name", "args", "goal", "instruct", "workspaces", "on", "jobs")
+	workflowKeys = keySet("title", "args", "instruct", "workspaces", "on", "jobs")
 	argKeys      = keySet("name", "default")
 	jobKeys      = keySet("needs", "if", "iterations", "steps")
 	stepKeys     = keySet("id", "if", "env", "continue-on-error", "note", "allow", "attempts", "message", "shell", "use", "with", "wait")
@@ -145,17 +245,22 @@ func nodeKind(node *yaml.Node) string {
 func checkDocument(root *yaml.Node) error {
 	entries, err := mappingEntries(root)
 	if err != nil {
-		return fmt.Errorf("wfe: %w", err)
+		return err
 	}
 	for _, e := range entries {
 		switch e.key {
 		case "steps":
-			return fmt.Errorf("wfe: `steps:` is retired (line %d): a workflow keeps its steps in `jobs:`", e.line)
+			return fmt.Errorf("`steps:` is retired (line %d): a workflow keeps its steps in `jobs:`", e.line)
 		case "agent":
-			return fmt.Errorf("wfe: `agent:` is retired (line %d): a run uses the agent of the chat that started it", e.line)
+			return fmt.Errorf("`agent:` is retired (line %d): a run uses the agent of the chat that started it", e.line)
+		case "name":
+			return fmt.Errorf("unknown key %q: the workflow's name is its file name; use %q for a description (line %d)",
+				e.key, "title", e.line)
+		case "goal":
+			return fmt.Errorf("unknown key %q: use %q for a description (line %d)", e.key, "title", e.line)
 		}
 		if !workflowKeys[e.key] {
-			return fmt.Errorf("wfe: unknown key %q (line %d)", e.key, e.line)
+			return fmt.Errorf("unknown key %q (line %d)", e.key, e.line)
 		}
 		switch e.key {
 		case "args":
@@ -178,16 +283,16 @@ func checkDocument(root *yaml.Node) error {
 // checkArgs validates the argument specs of a workflow.
 func checkArgs(node *yaml.Node) error {
 	if node.Kind != yaml.SequenceNode {
-		return fmt.Errorf("wfe: `args:` must be a list (got %s)", nodeKind(node))
+		return fmt.Errorf("`args:` must be a list (got %s)", nodeKind(node))
 	}
 	for _, item := range node.Content {
 		entries, err := mappingEntries(item)
 		if err != nil {
-			return fmt.Errorf("wfe: `args:`: %w", err)
+			return fmt.Errorf("`args:`: %w", err)
 		}
 		for _, e := range entries {
 			if !argKeys[e.key] {
-				return fmt.Errorf("wfe: unknown key %q in an argument (line %d)", e.key, e.line)
+				return fmt.Errorf("unknown key %q in an argument (line %d)", e.key, e.line)
 			}
 		}
 	}
@@ -199,15 +304,15 @@ func checkArgs(node *yaml.Node) error {
 // The block is parsed and displayed; nothing fires it yet.
 func checkTrigger(node *yaml.Node) error {
 	if node.Kind != yaml.MappingNode {
-		return fmt.Errorf("wfe: `on:` must be a mapping (got %s)", nodeKind(node))
+		return fmt.Errorf("`on:` must be a mapping (got %s)", nodeKind(node))
 	}
 	entries, err := mappingEntries(node)
 	if err != nil {
-		return fmt.Errorf("wfe: `on:`: %w", err)
+		return fmt.Errorf("`on:`: %w", err)
 	}
 	for _, e := range entries {
 		if !triggerKeys[e.key] {
-			return fmt.Errorf("wfe: unknown key %q in `on:` (line %d)", e.key, e.line)
+			return fmt.Errorf("unknown key %q in `on:` (line %d)", e.key, e.line)
 		}
 	}
 	return nil
@@ -216,24 +321,24 @@ func checkTrigger(node *yaml.Node) error {
 // checkJobs validates the jobs of a workflow and their steps.
 func checkJobs(node *yaml.Node) error {
 	if node.Kind != yaml.MappingNode {
-		return fmt.Errorf("wfe: `jobs:` must be a mapping (got %s)", nodeKind(node))
+		return fmt.Errorf("`jobs:` must be a mapping (got %s)", nodeKind(node))
 	}
 	entries, err := mappingEntries(node)
 	if err != nil {
-		return fmt.Errorf("wfe: `jobs:`: %w", err)
+		return fmt.Errorf("`jobs:`: %w", err)
 	}
 	for _, e := range entries {
 		jobEntries, err := mappingEntries(e.val)
 		if err != nil {
-			return fmt.Errorf("wfe: job %q: %w", e.key, err)
+			return fmt.Errorf("job %q: %w", e.key, err)
 		}
 		for _, je := range jobEntries {
 			if !jobKeys[je.key] {
-				return fmt.Errorf("wfe: unknown key %q in job %q (line %d)", je.key, e.key, je.line)
+				return fmt.Errorf("unknown key %q in job %q (line %d)", je.key, e.key, je.line)
 			}
 			if je.key == "iterations" {
 				if err := requireWholeNumber(je.key, je.val); err != nil {
-					return fmt.Errorf("wfe: job %q: %w", e.key, err)
+					return fmt.Errorf("job %q: %w", e.key, err)
 				}
 			}
 			if je.key == "steps" {
@@ -249,28 +354,28 @@ func checkJobs(node *yaml.Node) error {
 // checkSteps validates the steps of a job.
 func checkSteps(job string, node *yaml.Node) error {
 	if node.Kind != yaml.SequenceNode {
-		return fmt.Errorf("wfe: job %q: `steps:` must be a list (got %s)", job, nodeKind(node))
+		return fmt.Errorf("job %q: `steps:` must be a list (got %s)", job, nodeKind(node))
 	}
 	for _, item := range node.Content {
 		entries, err := mappingEntries(item)
 		if err != nil {
-			return fmt.Errorf("wfe: job %q: `steps:`: %w", job, err)
+			return fmt.Errorf("job %q: `steps:`: %w", job, err)
 		}
 		for _, e := range entries {
 			switch e.key {
 			case "run":
-				return fmt.Errorf("wfe: `run:` is retired (line %d): use `shell:`", e.line)
+				return fmt.Errorf("`run:` is retired (line %d): use `shell:`", e.line)
 			case "prompt":
-				return fmt.Errorf("wfe: `prompt:` is retired (line %d): use `message:`", e.line)
+				return fmt.Errorf("`prompt:` is retired (line %d): use `message:`", e.line)
 			case "agent":
-				return fmt.Errorf("wfe: `agent:` is retired (line %d): a run uses the agent of the chat that started it", e.line)
+				return fmt.Errorf("`agent:` is retired (line %d): a run uses the agent of the chat that started it", e.line)
 			}
 			if !stepKeys[e.key] {
-				return fmt.Errorf("wfe: unknown key %q in a step of job %q (line %d)", e.key, job, e.line)
+				return fmt.Errorf("unknown key %q in a step of job %q (line %d)", e.key, job, e.line)
 			}
 			if e.key == "attempts" {
 				if err := requireWholeNumber(e.key, e.val); err != nil {
-					return fmt.Errorf("wfe: job %q: %w", job, err)
+					return fmt.Errorf("job %q: %w", job, err)
 				}
 			}
 		}
@@ -296,8 +401,8 @@ func requireWholeNumber(key string, node *yaml.Node) error {
 // actually wrote, so a missing key can be told apart from a key that
 // was written with a zero value.
 func validate(wf *Workflow, root *yaml.Node) error {
-	if wf.Name == "" {
-		return fmt.Errorf("wfe: name is required")
+	if strings.TrimSpace(wf.Title) == "" {
+		return fmt.Errorf("title is required")
 	}
 	if !hasKey(root, "instruct") {
 		wf.Instruct = true
@@ -306,16 +411,16 @@ func validate(wf *Workflow, root *yaml.Node) error {
 	seenArgs := map[string]bool{}
 	for i, arg := range wf.Args {
 		if strings.TrimSpace(arg.Name) == "" {
-			return fmt.Errorf("wfe: %s: argument %d has no name", wf.Name, i+1)
+			return fmt.Errorf("argument %d has no name", i+1)
 		}
 		if seenArgs[arg.Name] {
-			return fmt.Errorf("wfe: %s: duplicate argument %q", wf.Name, arg.Name)
+			return fmt.Errorf("duplicate argument %q", arg.Name)
 		}
 		seenArgs[arg.Name] = true
 	}
 
 	if len(wf.Jobs) == 0 {
-		return fmt.Errorf("wfe: %s: jobs is required (at least one)", wf.Name)
+		return fmt.Errorf("jobs is required (at least one)")
 	}
 	jobNames := map[string]bool{}
 	for name := range wf.Jobs {
@@ -324,26 +429,26 @@ func validate(wf *Workflow, root *yaml.Node) error {
 	for name, job := range wf.Jobs {
 		for _, need := range job.Needs {
 			if !jobNames[need] {
-				return fmt.Errorf("wfe: %s: job %q needs unknown job %q", wf.Name, name, need)
+				return fmt.Errorf("job %q needs unknown job %q", name, need)
 			}
 		}
 		if job.Iterations != nil && *job.Iterations < 0 {
-			return fmt.Errorf("wfe: %s: job %q: iterations must be >= 0", wf.Name, name)
+			return fmt.Errorf("job %q: iterations must be >= 0", name)
 		}
 	}
 	if len(wf.JobOrder()) != len(wf.Jobs) {
-		return fmt.Errorf("wfe: %s: the jobs need each other in a circle", wf.Name)
+		return fmt.Errorf("the jobs need each other in a circle")
 	}
 	seenSteps := map[string]string{} // step id -> the job it belongs to
 	for _, name := range sortedJobNames(wf.Jobs) {
 		job := wf.Jobs[name]
 		if len(job.Steps) == 0 {
-			return fmt.Errorf("wfe: %s: job %q has no steps", wf.Name, name)
+			return fmt.Errorf("job %q has no steps", name)
 		}
 		for i := range job.Steps {
 			step := &job.Steps[i]
 			if err := validateStep(step); err != nil {
-				return fmt.Errorf("wfe: %s: job %q step %d: %w", wf.Name, name, i+1, err)
+				return fmt.Errorf("job %q step %d: %w", name, i+1, err)
 			}
 			if step.ID == "" {
 				step.ID = syntheticStepID(name, i+1)
@@ -351,7 +456,7 @@ func validate(wf *Workflow, root *yaml.Node) error {
 			// The run state is keyed by step id, so two steps may
 			// not share one.
 			if prev, ok := seenSteps[step.ID]; ok {
-				return fmt.Errorf("wfe: %s: the step id %q is used by job %q and job %q", wf.Name, step.ID, prev, name)
+				return fmt.Errorf("the step id %q is used by job %q and job %q", step.ID, prev, name)
 			}
 			seenSteps[step.ID] = name
 		}
@@ -563,7 +668,7 @@ func checkArgExpressions(wf *Workflow) error {
 				continue
 			}
 			if !declared[arg[1]] {
-				return fmt.Errorf("wfe: %s: unknown argument %q (declared: %s)", wf.Name, arg[1], describeArgs(wf.ArgNames()))
+				return fmt.Errorf("unknown argument %q (declared: %s)", arg[1], describeArgs(wf.ArgNames()))
 			}
 		}
 	}
@@ -573,7 +678,7 @@ func checkArgExpressions(wf *Workflow) error {
 // workflowTexts returns every string of a workflow that may hold an
 // expression.
 func workflowTexts(wf *Workflow) []string {
-	texts := []string{wf.Goal}
+	texts := []string{wf.Title}
 	for _, name := range wf.JobOrder() {
 		job := wf.Jobs[name]
 		texts = append(texts, job.If)
@@ -619,8 +724,8 @@ func valueStrings(v any) []string {
 // source.
 func cloneWorkflow(wf *Workflow) *Workflow {
 	out := &Workflow{
+		Title:      wf.Title,
 		Name:       wf.Name,
-		Goal:       wf.Goal,
 		Instruct:   wf.Instruct,
 		Workspaces: append([]string(nil), wf.Workspaces...),
 		On:         wf.On,
@@ -690,7 +795,7 @@ func cloneAnyMap(m map[string]any) map[string]any {
 // Every other expression is left as it is: it can only be resolved
 // once the run knows what the earlier steps produced.
 func expandWorkflowArgs(wf *Workflow, args map[string]string) {
-	wf.Goal = expandArgs(wf.Goal, args)
+	wf.Title = expandArgs(wf.Title, args)
 	for name := range wf.Jobs {
 		job := wf.Jobs[name]
 		job.If = expandArgs(job.If, args)

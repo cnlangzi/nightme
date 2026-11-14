@@ -9,11 +9,10 @@ import (
 
 // fixIssueYAML is the workflow from the feature request.
 const fixIssueYAML = `
-name: fix-issue
+title: 把队列里的一个 issue 做完并推上去
 args:
   - name: issue
     default: "*"
-goal: 把队列里的一个 issue 做完并推上去
 on:
   schedule:
     - cron: "0 2 * * *"
@@ -47,20 +46,32 @@ func mustParse(t *testing.T, src string) *Workflow {
 	return wf
 }
 
+// mustLoadFile writes a workflow file and loads it.
+//
+// The file's base name is the workflow's identity, so the file has to
+// carry the name the test expects.
+func mustLoadFile(t *testing.T, name, body string) *Workflow {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	writeFile(t, path, body)
+	wf, err := LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	return wf
+}
+
 func TestParse_Valid(t *testing.T) {
 	wf := mustParse(t, fixIssueYAML)
 
-	if wf.Name != "fix-issue" {
-		t.Errorf("Name = %q, want fix-issue", wf.Name)
+	if wf.Title == "" {
+		t.Error("Title is empty")
 	}
 	if len(wf.Args) != 1 || wf.Args[0].Name != "issue" {
 		t.Fatalf("Args = %v, want one argument named issue", wf.Args)
 	}
 	if wf.Args[0].Default == nil || *wf.Args[0].Default != "*" {
 		t.Errorf("Args[0].Default = %v, want *", wf.Args[0].Default)
-	}
-	if wf.Goal == "" {
-		t.Error("Goal is empty")
 	}
 	if !wf.Instruct {
 		t.Error("Instruct = false, want true by default")
@@ -94,11 +105,10 @@ func TestParse_Valid(t *testing.T) {
 // nothing else.
 func TestParse_EveryTopLevelField(t *testing.T) {
 	wf := mustParse(t, `
-name: everything
+title: do the thing
 args:
   - name: issue
     default: "*"
-goal: do the thing
 instruct: true
 workspaces: [~/work/nightme]
 on:
@@ -110,14 +120,11 @@ jobs:
       - id: one
         message: /gtw commit
 `)
-	if wf.Name != "everything" {
-		t.Errorf("Name = %q", wf.Name)
-	}
 	if len(wf.Args) != 1 || wf.Args[0].Name != "issue" {
 		t.Errorf("Args = %v", wf.Args)
 	}
-	if wf.Goal != "do the thing" {
-		t.Errorf("Goal = %q", wf.Goal)
+	if wf.Title != "do the thing" {
+		t.Errorf("Title = %q", wf.Title)
 	}
 	if !wf.Instruct {
 		t.Error("Instruct = false, want true")
@@ -135,7 +142,7 @@ jobs:
 
 func TestParse_Defaults(t *testing.T) {
 	wf := mustParse(t, `
-name: small
+title: small
 jobs:
   main:
     steps: [{message: echo hi}]
@@ -150,7 +157,7 @@ jobs:
 
 func TestParse_ExplicitInstructFalse(t *testing.T) {
 	wf := mustParse(t, `
-name: small
+title: small
 instruct: false
 jobs:
   main:
@@ -163,7 +170,7 @@ jobs:
 
 func TestParse_SyntheticStepID(t *testing.T) {
 	wf := mustParse(t, `
-name: x
+title: x
 jobs:
   ship:
     steps:
@@ -183,7 +190,7 @@ jobs:
 // kinds.
 func TestParse_TheStepKinds(t *testing.T) {
 	wf := mustParse(t, `
-name: kinds
+title: kinds
 jobs:
   main:
     steps:
@@ -220,7 +227,7 @@ jobs:
 // bound what the agent does with it.
 func TestParse_IterationsAndAttempts(t *testing.T) {
 	wf := mustParse(t, `
-name: rounds
+title: rounds
 jobs:
   main:
     iterations: 3
@@ -244,11 +251,11 @@ jobs:
 // TestParse_ZeroIterationsMeansUntilTheRunEnds — a job that does not
 // say how many rounds it runs runs one round.
 func TestParse_ZeroIterationsMeansUntilTheRunEnds(t *testing.T) {
-	one := mustParse(t, "name: x\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	one := mustParse(t, "title: x\njobs:\n  main:\n    steps: [{message: hi}]\n")
 	if one.Jobs["main"].Rounds() != 1 {
 		t.Errorf("Rounds() = %d, want 1", one.Jobs["main"].Rounds())
 	}
-	forever := mustParse(t, "name: x\njobs:\n  main:\n    iterations: 0\n    steps: [{message: hi}]\n")
+	forever := mustParse(t, "title: x\njobs:\n  main:\n    iterations: 0\n    steps: [{message: hi}]\n")
 	if forever.Jobs["main"].Rounds() != 0 {
 		t.Errorf("Rounds() = %d, want 0 (until the run ends)", forever.Jobs["main"].Rounds())
 	}
@@ -258,7 +265,7 @@ func TestParse_ZeroIterationsMeansUntilTheRunEnds(t *testing.T) {
 // argument like every other field of a step.
 func TestParse_AnActionNameMayComeFromAnArgument(t *testing.T) {
 	wf := mustParse(t, `
-name: act
+title: act
 args:
   - name: which
     default: notify
@@ -281,7 +288,7 @@ jobs:
 // every field of a step, `use:` included.
 func TestParse_AnUndeclaredArgumentIsRefusedEverywhere(t *testing.T) {
 	_, err := Parse([]byte(`
-name: act
+title: act
 jobs:
   main:
     steps:
@@ -300,10 +307,10 @@ jobs:
 // a check on the decoded value.
 func TestParse_TheCountsMustBeWholeNumbers(t *testing.T) {
 	for _, src := range []string{
-		"name: x\njobs:\n  main:\n    iterations: 1.5\n    steps: [{message: hi}]\n",
-		"name: x\njobs:\n  main:\n    iterations: -0.5\n    steps: [{message: hi}]\n",
-		"name: x\njobs:\n  main:\n    steps: [{message: hi, attempts: 0.5}]\n",
-		"name: x\njobs:\n  main:\n    steps: [{message: hi, attempts: -0.5}]\n",
+		"title: x\njobs:\n  main:\n    iterations: 1.5\n    steps: [{message: hi}]\n",
+		"title: x\njobs:\n  main:\n    iterations: -0.5\n    steps: [{message: hi}]\n",
+		"title: x\njobs:\n  main:\n    steps: [{message: hi, attempts: 0.5}]\n",
+		"title: x\njobs:\n  main:\n    steps: [{message: hi, attempts: -0.5}]\n",
 	} {
 		if _, err := Parse([]byte(src)); err == nil {
 			t.Errorf("a fraction was accepted:\n%s", src)
@@ -318,19 +325,39 @@ func TestParse_Errors(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name:    "missing name",
+			name:    "missing title",
 			src:     "jobs:\n  main:\n    steps: [{message: hi}]\n",
-			wantErr: "name is required",
+			wantErr: "title is required",
 		},
 		{
 			name:    "missing jobs",
-			src:     "name: x\n",
+			src:     "title: x\n",
 			wantErr: "jobs is required",
+		},
+		{
+			name: "retired name key",
+			src: `
+name: x
+jobs:
+  main:
+    steps: [{message: hi}]
+`,
+			wantErr: `unknown key "name"`,
+		},
+		{
+			name: "retired goal key",
+			src: `
+goal: x
+jobs:
+  main:
+    steps: [{message: hi}]
+`,
+			wantErr: `unknown key "goal"`,
 		},
 		{
 			name: "retired top-level steps",
 			src: `
-name: x
+title: x
 steps:
   - /gtw commit
 `,
@@ -339,7 +366,7 @@ steps:
 		{
 			name: "retired run key",
 			src: `
-name: x
+title: x
 jobs:
   main:
     steps: [{run: echo}]
@@ -349,7 +376,7 @@ jobs:
 		{
 			name: "retired prompt key",
 			src: `
-name: x
+title: x
 jobs:
   main:
     steps: [{prompt: hello}]
@@ -359,7 +386,7 @@ jobs:
 		{
 			name: "retired agent key",
 			src: `
-name: x
+title: x
 jobs:
   main:
     steps: [{message: hi, agent: codex}]
@@ -369,7 +396,7 @@ jobs:
 		{
 			name: "unknown top-level key",
 			src: `
-name: x
+title: x
 worker: 2
 jobs:
   main:
@@ -380,7 +407,7 @@ jobs:
 		{
 			name: "retired action budget",
 			src: `
-name: x
+title: x
 max_actions: 30
 jobs:
   main:
@@ -391,7 +418,7 @@ jobs:
 		{
 			name: "a wait that is not a duration",
 			src: `
-name: x
+title: x
 jobs:
   main:
     steps: [{wait: soon}]
@@ -401,7 +428,7 @@ jobs:
 		{
 			name: "unknown step key",
 			src: `
-name: x
+title: x
 jobs:
   main:
     steps: [{message: hi, retries: 3}]
@@ -411,7 +438,7 @@ jobs:
 		{
 			name: "two kinds",
 			src: `
-name: x
+title: x
 jobs:
   main:
     steps: [{message: hi, shell: echo}]
@@ -421,7 +448,7 @@ jobs:
 		{
 			name: "no kind",
 			src: `
-name: x
+title: x
 jobs:
   main:
     steps: [{note: nothing to do}]
@@ -431,7 +458,7 @@ jobs:
 		{
 			name: "unknown need",
 			src: `
-name: x
+title: x
 jobs:
   main:
     needs: [nonexistent]
@@ -442,7 +469,7 @@ jobs:
 		{
 			name: "two steps with the same id",
 			src: `
-name: x
+title: x
 jobs:
   a:
     steps: [{id: s, message: one}]
@@ -454,7 +481,7 @@ jobs:
 		{
 			name: "a declared id that collides with a synthetic one",
 			src: `
-name: x
+title: x
 jobs:
   a:
     steps:
@@ -467,7 +494,7 @@ jobs:
 		{
 			name: "jobs in a circle",
 			src: `
-name: x
+title: x
 jobs:
   a:
     needs: [b]
@@ -481,7 +508,7 @@ jobs:
 		{
 			name: "undeclared argument",
 			src: `
-name: x
+title: x
 jobs:
   main:
     steps: [{message: "${{ args.nope }}"}]
@@ -502,19 +529,170 @@ jobs:
 	}
 }
 
-func TestLoadDir_DuplicateName(t *testing.T) {
+// TestLoadFile_TheNameIsTheFileName — the identity of a workflow is
+// the base name of the file it was loaded from.
+func TestLoadFile_TheNameIsTheFileName(t *testing.T) {
 	dir := t.TempDir()
-	for _, name := range []string{"a.yaml", "b.yaml"} {
-		os.WriteFile(filepath.Join(dir, name), []byte(`
-name: dup
+	path := filepath.Join(dir, "fix.yml")
+	writeFile(t, path, `
+title: do the thing
 jobs:
   main:
     steps: [{message: hi}]
-`), 0644)
+`)
+	wf, err := LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
 	}
-	_, err := LoadDir(dir)
-	if err == nil || !strings.Contains(err.Error(), "duplicate") {
-		t.Errorf("expected duplicate-name error, got %v", err)
+	if wf.Name != "fix" {
+		t.Errorf("Name = %q, want fix", wf.Name)
+	}
+	if wf.Title != "do the thing" {
+		t.Errorf("Title = %q", wf.Title)
+	}
+}
+
+// TestLoadFile_RefusesTheRetiredKeys — a file that still names itself
+// or states its purpose the old way is refused, and the error says
+// what to write instead.
+func TestLoadFile_RefusesTheRetiredKeys(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		body string
+	}{
+		{
+			name: "a name",
+			body: "name: fix\ntitle: x\njobs:\n  main:\n    steps: [{message: hi}]\n",
+		},
+		{
+			name: "a goal",
+			body: "goal: x\njobs:\n  main:\n    steps: [{message: hi}]\n",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "fix.yml")
+			writeFile(t, path, tt.body)
+			_, err := LoadFile(path)
+			if err == nil {
+				t.Fatal("the retired key was accepted")
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, "fix.yml") {
+				t.Errorf("error = %v, want it to name the file", err)
+			}
+			if !strings.Contains(msg, "title") {
+				t.Errorf("error = %v, want it to name the replacement", err)
+			}
+		})
+	}
+}
+
+// TestLoadFile_RefusesAFileWithoutATitle — the title says what the
+// workflow is for, and the agent is given it.
+func TestLoadFile_RefusesAFileWithoutATitle(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fix.yml")
+	writeFile(t, path, "jobs:\n  main:\n    steps: [{message: hi}]\n")
+	_, err := LoadFile(path)
+	if err == nil || !strings.Contains(err.Error(), "title is required") {
+		t.Errorf("error = %v, want the title to be required", err)
+	}
+}
+
+// TestLoadDir_ReadsBothExtensions — a workflow is a *.yaml or a *.yml
+// file, and its name is the base name of that file.
+func TestLoadDir_ReadsBothExtensions(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "fix.yaml"), "title: fix it\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeFile(t, filepath.Join(dir, "other.yml"), "title: other it\njobs:\n  main:\n    steps: [{message: hi}]\n")
+
+	wfs, failures := LoadDir(dir)
+	if len(failures) != 0 {
+		t.Fatalf("failures = %v, want none", failures)
+	}
+	if len(wfs) != 2 {
+		t.Fatalf("workflows = %d, want 2", len(wfs))
+	}
+	names := []string{wfs[0].Name, wfs[1].Name}
+	if names[0] != "fix" || names[1] != "other" {
+		t.Errorf("names = %v, want fix and other", names)
+	}
+}
+
+// TestLoadDir_AFileThatDoesNotLoadAffectsOnlyItself — a broken file
+// does not take the workflows beside it down with it.
+func TestLoadDir_AFileThatDoesNotLoadAffectsOnlyItself(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "fix.yml"), "title: fix it\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeFile(t, filepath.Join(dir, "broken.yml"), "goal: no title\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeFile(t, filepath.Join(dir, "other.yml"), "title: other it\njobs:\n  main:\n    steps: [{message: hi}]\n")
+
+	wfs, failures := LoadDir(dir)
+	if len(wfs) != 2 {
+		t.Fatalf("workflows = %d, want 2", len(wfs))
+	}
+	if len(failures) != 1 {
+		t.Fatalf("failures = %v, want one", failures)
+	}
+	if failures[0].Name != "broken" {
+		t.Errorf("the failure names %q, want broken", failures[0].Name)
+	}
+	if !strings.Contains(failures[0].Error(), "broken.yml") {
+		t.Errorf("failure = %v, want it to name the file", failures[0])
+	}
+}
+
+// TestLoadDir_TwoFilesWithTheSameNameMakeItUnusable — the name is
+// ambiguous, and neither file is offered under it.
+func TestLoadDir_TwoFilesWithTheSameNameMakeItUnusable(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "fix.yaml"), "title: one\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeFile(t, filepath.Join(dir, "fix.yml"), "title: two\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeFile(t, filepath.Join(dir, "other.yml"), "title: other it\njobs:\n  main:\n    steps: [{message: hi}]\n")
+
+	wfs, failures := LoadDir(dir)
+	if len(wfs) != 1 || wfs[0].Name != "other" {
+		t.Fatalf("workflows = %v, want only other", wfs)
+	}
+	if len(failures) != 1 {
+		t.Fatalf("failures = %v, want one", failures)
+	}
+	msg := failures[0].Error()
+	if !strings.Contains(msg, `duplicate workflow name "fix"`) {
+		t.Errorf("failure = %v, want the duplicate", failures[0])
+	}
+	if !strings.Contains(msg, "fix.yaml") || !strings.Contains(msg, "fix.yml") {
+		t.Errorf("failure = %v, want it to name both files", failures[0])
+	}
+}
+
+// TestBind_ExpandsTheTitle — the title may hold an argument, the way
+// the goal did.
+func TestBind_ExpandsTheTitle(t *testing.T) {
+	wf := mustParse(t, `
+title: fix issue ${{ args.issue }}
+args:
+  - name: issue
+    default: "42"
+jobs:
+  main:
+    steps: [{message: hi}]
+`)
+	bound, err := Bind(wf, map[string]string{})
+	if err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	if bound.Title != "fix issue 42" {
+		t.Errorf("Title = %q, want the argument expanded", bound.Title)
+	}
+}
+
+// writeFile writes a file, failing the test when it cannot.
+func writeFile(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(body), 0644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
 	}
 }
 
@@ -560,7 +738,7 @@ func TestBind_DefaultArgument(t *testing.T) {
 
 func TestBind_MissingRequiredArgument(t *testing.T) {
 	wf := mustParse(t, `
-name: x
+title: x
 args: [{name: issue}]
 jobs:
   main:
@@ -574,7 +752,7 @@ jobs:
 
 func TestBind_UnknownArgument(t *testing.T) {
 	wf := mustParse(t, `
-name: x
+title: x
 args: [{name: issue}]
 jobs:
   main:
@@ -588,7 +766,7 @@ jobs:
 
 func TestBind_LeavesOtherExpressionsAlone(t *testing.T) {
 	wf := mustParse(t, `
-name: x
+title: x
 args: [{name: issue, default: "1"}]
 jobs:
   main:
@@ -610,7 +788,7 @@ jobs:
 
 func TestBind_ExpandsAnArgumentInsideAListItem(t *testing.T) {
 	wf := mustParse(t, `
-name: x
+title: x
 args:
   - name: issue
     default: "42"

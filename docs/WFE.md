@@ -54,10 +54,12 @@ Workflows are read from:
 
 ```
 ~/.nightme/workflows/*.yaml
+~/.nightme/workflows/*.yml
 ```
 
-- One workflow per file; the filename is informational — the `name:` field is the identifier, and duplicates are a load error.
-- The workflows are read when the daemon starts. After you add or change one, run `nightme restart`.
+- One workflow per file; the file name without its extension is the workflow's name — `fix-issue.yaml` is the workflow `fix-issue`. Two files with the same base name make that name unusable.
+- The workflows are read when they are asked for: the daemon reads the directory at startup and again before every `/me start`. An edited file takes effect on the next `/me start`, without a restart. A file whose size and modification time did not change is not parsed again. The fingerprint is best-effort: a change that keeps the size and lands in the same modification-time tick is noticed when the daemon restarts.
+- A file that does not load stops only itself: the workflows beside it load and run as usual, and the failure is reported against the name the file would have provided.
 - The action scripts live in `~/.nightme/workflows/actions/`, and the run state in `~/.nightme/workflows/runs/`.
 
 ---
@@ -66,20 +68,23 @@ Workflows are read from:
 
 | Field | Type | Required | Default | Purpose |
 |---|---|---|---|---|
-| `name` | string | ✅ | — | Unique workflow identifier; surfaces in logs and notifications. |
+| `title` | string | ✅ | — | What the run is for. It is what the operator reads and what the agent is given. |
 | `args` | arg[] | ❌ | — | The arguments the workflow takes. A spec is a mapping with `name` and an optional `default`. |
-| `goal` | string | ❌ | — | What the run is for. It is part of the model's instructions. |
 | `instruct` | bool | ❌ | `true` | Whether the agent may send free-form instructions to the work chat. |
 | `workspaces` | string[] | ❌ | — | The workspaces the workflow names. The run takes the workspace of the chat that starts it. |
 | `on` | object | ❌ | — | Trigger spec (see §3). Parsed and displayed; nothing fires it. |
 | `jobs` | map | ✅ | — | Named jobs, each with ordered `steps` (see §4). |
 
+The workflow's name is **not** a field: it is the name of the file. A file that
+carries `name:` or `goal:` is refused — both are retired, and `title:` says
+what the workflow is for.
+
 A workflow names **no agent**. The run uses the agent of the chat that started it — the chat's `/use` choice, or its primary agent.
 
-Minimal skeleton:
+Minimal skeleton (`~/.nightme/workflows/my-workflow.yaml`):
 
 ```yaml
-name: my-workflow
+title: commit the work in this chat
 jobs:
   main:
     steps:
@@ -89,11 +94,11 @@ jobs:
 **Full example** (every top-level field + every step kind + every trigger kind):
 
 ```yaml
-name: full-demo
+title: Fix an issue and ship it as a PR.
+
 args:
   - name: issue
     default: "*"                          # a default makes the argument optional
-goal: Fix an issue and ship it as a PR.
 
 workspaces: [~/work/nightme]              # optional: the workspaces this names
 
@@ -437,11 +442,10 @@ An expression that names an argument the workflow does not declare is refused wh
 ### 7.1 Fix an issue and ship it
 
 ```yaml
-name: fix-issue
+title: 把队列里的一个 issue 做完并推上去
 args:
   - name: issue
     default: "*"
-goal: 把队列里的一个 issue 做完并推上去
 jobs:
   ship:
     iterations: 0                     # 0 = the job repeats until the run ends
@@ -475,7 +479,7 @@ The guard on the steps after `fix` reads `data.issue`: a fix that picked an issu
 ### 7.2 Build, test and report
 
 ```yaml
-name: ci
+title: build, test and report
 workspaces: [~/work/nightme]
 on:
   schedule:
@@ -502,7 +506,7 @@ jobs:
 ### 7.3 A workflow with two branches
 
 ```yaml
-name: triage
+title: look at the tree and fix what is broken
 jobs:
   inspect:
     steps:
@@ -630,7 +634,7 @@ The policy is the bound on what a run may do. It is a pure function of the workf
 | `CheckInstruct()` | Whether a free-form instruction is allowed. |
 | `CheckFinish(status)` | Whether the run may end. `done` needs the last executed step's latest outcome to be `ok` or `noop`; `failed` is always allowed. |
 | `Remaining()` | The actions left per step. |
-| `Render()` | The workflow as a compact text block: the goal, the steps, the notes, the allowed commands and the limits. |
+| `Render()` | The workflow as a compact text block: the identity, the title, the steps, the notes, the allowed commands and the limits. |
 | `AllowedCommands()` | The commands the policy accepts right now. |
 
 A command belongs to the first step that lists it, and a step that spent its limit takes its commands out of the list. A step's `attempts` limit counts the actions of the current round only: the step's own execution and the `allow:` commands the agent ran against it. The limit starts over at every round.
@@ -728,7 +732,7 @@ The user picks the models. nightme never chooses one, and it never injects a mod
 
 | Command | Behaviour |
 |---|---|
-| `/me start <workflow> [args...]` | Starts a workflow in this chat. The run inherits the chat's workspace and agent. A chat without a workspace is refused. A second run in the same chat is refused. |
+| `/me start <workflow> [args...]` | Starts a workflow in this chat. The name is the base name of the workflow's file. The run inherits the chat's workspace and agent. A chat without a workspace is refused. A second run in the same chat is refused. |
 | `/me reply <text>` | Answers the question the run is waiting for. |
 | `/me stop` | Cancels the run and stops the work chat. |
 | `/me status` | Reports the current step, the phase and progress of the running command, the remaining budget, and what each capability decided and spent. |

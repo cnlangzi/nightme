@@ -20,7 +20,7 @@ func newRunState(wf *Workflow) *RunState {
 
 // threeStepYAML is a workflow whose steps run in order.
 const threeStepYAML = `
-name: three
+title: three
 jobs:
   main:
     steps:
@@ -121,7 +121,7 @@ func TestDecide_ThePlanIsExhausted(t *testing.T) {
 
 func TestDecide_AForkIsAJudgmentPoint(t *testing.T) {
 	wf := mustParse(t, `
-name: fork
+title: fork
 jobs:
   a:
     steps: [{id: a1, message: "/a"}]
@@ -144,7 +144,7 @@ jobs:
 
 func TestDecide_JobNeedsHoldTheNextJobBack(t *testing.T) {
 	wf := mustParse(t, `
-name: two-jobs
+title: two-jobs
 jobs:
   build:
     steps: [{id: build1, message: "/build"}]
@@ -190,7 +190,7 @@ func TestDecide_OnlyTheFirstReadyStepOfAJobCounts(t *testing.T) {
 
 func TestDecide_AFalseConditionSkipsTheStep(t *testing.T) {
 	wf := mustParse(t, `
-name: conditional
+title: conditional
 jobs:
   main:
     steps:
@@ -233,7 +233,7 @@ func TestDecide_AnEmptyConditionHolds(t *testing.T) {
 
 func TestDecide_ContinueOnErrorKeepsTheChainGoing(t *testing.T) {
 	wf := mustParse(t, `
-name: resilient
+title: resilient
 jobs:
   main:
     steps:

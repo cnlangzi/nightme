@@ -13,9 +13,13 @@ import "time"
 // the steps and the arguments they take. It names no agent — the run
 // uses the agent of the chat that started it.
 type Workflow struct {
-	Name       string         `yaml:"name" json:"name"`
+	// Title states what the workflow is for. It is what the operator
+	// reads and what the agent is given.
+	Title string `yaml:"title" json:"title"`
+	// Name is the workflow's identity: the base name of the file it was
+	// loaded from. The loader sets it; the file does not carry it.
+	Name       string         `yaml:"-" json:"name"`
 	Args       []Arg          `yaml:"args" json:"args,omitempty"`
-	Goal       string         `yaml:"goal" json:"goal,omitempty"`
 	Instruct   bool           `yaml:"instruct" json:"instruct"`
 	Workspaces []string       `yaml:"workspaces" json:"workspaces,omitempty"`
 	On         Trigger        `yaml:"on" json:"on"`

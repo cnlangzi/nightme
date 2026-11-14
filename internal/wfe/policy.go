@@ -170,14 +170,14 @@ func (p *Policy) Remaining() Remaining {
 }
 
 // Render returns the workflow as a compact text block for the agent's
-// system prompt: the goal, the steps with their notes, the extra
+// system prompt: the title, the steps with their notes, the extra
 // commands each step allows and the limits.
 func (p *Policy) Render() string {
 	var b strings.Builder
 	if p.Workflow != nil {
 		fmt.Fprintf(&b, "workflow: %s\n", p.Workflow.Name)
-		if p.Workflow.Goal != "" {
-			fmt.Fprintf(&b, "goal: %s\n", p.Workflow.Goal)
+		if p.Workflow.Title != "" {
+			fmt.Fprintf(&b, "title: %s\n", p.Workflow.Title)
 		}
 	}
 	if p.Workflow != nil && !p.Workflow.Instruct {

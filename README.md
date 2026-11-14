@@ -577,7 +577,9 @@ A job carries `needs`, `if`, `iterations` and `steps`. `iterations` is how many
 rounds the job runs: leave it out for one round, `0` for "until the run ends",
 `N` for `N` rounds. A round ends when the job's steps are done; the next round
 starts with the job's first step, the round's step outputs are cleared and the
-per-step budgets start over.
+per-step budgets start over. A repeating job needs a `wait:` step: a job whose
+every step is skipped in every round would otherwise go round after round
+without ever waiting.
 
 A step carries exactly one kind:
 

@@ -281,6 +281,58 @@ jobs:
 	}
 }
 
+// TestStepKind_ShellOutputIsBounded — a command that prints a
+// megabyte does not put a megabyte into the run state.
+func TestStepKind_ShellOutputIsBounded(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "sh", `name: sh
+jobs:
+  main:
+    steps:
+      - id: build
+        shell: make build
+`)
+
+	shell := newGatedShell()
+	shell.ret = &wfe.ShellResult{
+		ExitCode: 0,
+		Stdout:   strings.Repeat("x", 100_000),
+	}
+	provider := &scriptedProvider{err: errors.New("the chat model must not be called")}
+	decider := &scriptedDecider{err: errors.New("the decision model must not be called")}
+	svc, _, _ := testService(t, dir, Config{Provider: provider, Decider: decider, Shell: shell})
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "sh", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	select {
+	case <-shell.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the shell step never ran")
+	}
+	svc.mu.Lock()
+	r := svc.active["obs-1"]
+	svc.mu.Unlock()
+	if r == nil {
+		t.Fatal("the run is gone")
+	}
+	close(shell.gate)
+	waitRun(t, svc, "obs-1")
+
+	r.mu.Lock()
+	state := r.state
+	r.mu.Unlock()
+	stdout := state.Steps[0].Outcome.Data["stdout"]
+	if len(stdout) > maxShellOutput+len("…") {
+		t.Errorf("the step kept %d bytes of output, want at most %d", len(stdout), maxShellOutput)
+	}
+	if stdout == "" {
+		t.Error("the step kept no output at all")
+	}
+}
+
 // TestTool_ARuntimeFailureComesBackAsAToolError — a command the work
 // chat cannot take comes back to the agent as an error it can correct,
 // and the run does not end.

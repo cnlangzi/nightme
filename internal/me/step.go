@@ -123,14 +123,21 @@ func (s *Service) workDir(r *run) string {
 	return r.cwd
 }
 
+// maxShellOutput is how much of a shell command's output a step keeps.
+//
+// A build log runs to megabytes. The step's outputs go into the run
+// state and into the decision model's request, and neither wants the
+// whole log.
+const maxShellOutput = 4 << 10
+
 // shellOutputs renders what a shell command produced as the facts an
 // expression reads: the exit code, the output, the error output and
 // the key=value lines of the output.
 func shellOutputs(res *wfe.ShellResult) map[string]string {
 	out := map[string]string{
 		"exit_code": strconv.Itoa(res.ExitCode),
-		"stdout":    res.Stdout,
-		"stderr":    res.Stderr,
+		"stdout":    truncate(res.Stdout, maxShellOutput),
+		"stderr":    truncate(res.Stderr, maxShellOutput),
 	}
 	for k, v := range res.Outputs {
 		out[k] = v

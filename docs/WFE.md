@@ -344,7 +344,7 @@ The step's outputs carry what the command produced: `data.exit_code`, `data.stdo
 
 The step waits five minutes and then reports `ok`. The duration is a Go duration (`30s`, `5m`, `1h30m`); a value that does not parse is refused when the file is loaded. A wait carries no command.
 
-A wait is how a repeating job backs off when there is nothing to do: it belongs at the start of the round, because the expression language has no negation — a wait that runs only when the queue was empty cannot be written as a condition on the step's outcome.
+A wait is how a repeating job backs off when there is nothing to do: it belongs at the start of the round, because the expression language has no negation — a wait that runs only when the queue was empty cannot be written as a condition on the step's outcome. A repeating job needs one: a job whose every step is skipped in every round would otherwise go round after round without ever waiting.
 
 `/me stop` ends a wait at once: the wait belongs to the run.
 

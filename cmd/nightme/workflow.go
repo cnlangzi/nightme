@@ -46,17 +46,16 @@ func workflowsDir() (string, error) {
 }
 
 // loadWorkflows loads all workflows from the workflows dir.
-// Returns (workflows, dir, err).
-func loadWorkflows() ([]*wfe.Workflow, string, error) {
+//
+// The workflows are read on every command: the CLI needs no running
+// daemon. Returns (workflows, failures, dir).
+func loadWorkflows() ([]*wfe.Workflow, []wfe.Failure, string, error) {
 	dir, err := workflowsDir()
 	if err != nil {
-		return nil, "", err
+		return nil, nil, "", err
 	}
-	wfs, err := wfe.LoadDir(dir)
-	if err != nil {
-		return nil, dir, err
-	}
-	return wfs, dir, nil
+	wfs, failures := wfe.LoadDir(dir)
+	return wfs, failures, dir, nil
 }
 
 // newWorkflowCmd builds the `nightme workflow` parent command and
@@ -81,15 +80,24 @@ func newWorkflowListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List configured workflows",
-		Long: "list reads every *.yaml in the workflows dir and prints " +
-			"a summary table. The --json flag swaps the table for a " +
-			"JSON array (one element per workflow).",
+		Long: "list reads every *.yaml and *.yml in the workflows dir and " +
+			"prints a summary table. A workflow's name is the base name of " +
+			"its file. The files that did not load are reported below the " +
+			"table. The --json flag swaps the table for a JSON array (one " +
+			"element per workflow); the failures go to stderr, so the " +
+			"output stays machine-readable.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			wfs, dir, err := loadWorkflows()
+			wfs, failures, dir, err := loadWorkflows()
 			if err != nil {
 				return err
 			}
-			return printWorkflowList(cmd.OutOrStdout(), wfs, dir, jsonOut)
+			if err := printWorkflowList(cmd.OutOrStdout(), wfs, dir, jsonOut); err != nil {
+				return err
+			}
+			if jsonOut {
+				return printWorkflowFailures(cmd.ErrOrStderr(), failures)
+			}
+			return printWorkflowFailures(cmd.OutOrStdout(), failures)
 		},
 	}
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSON array")
@@ -102,6 +110,7 @@ func printWorkflowList(w io.Writer, wfs []*wfe.Workflow, dir string, asJSON bool
 	if asJSON {
 		type item struct {
 			Name       string   `json:"name"`
+			Title      string   `json:"title"`
 			Workspaces []string `json:"workspaces"`
 			Triggers   []string `json:"triggers"`
 			Jobs       []string `json:"jobs"`
@@ -110,6 +119,7 @@ func printWorkflowList(w io.Writer, wfs []*wfe.Workflow, dir string, asJSON bool
 		for _, wf := range wfs {
 			out = append(out, item{
 				Name:       wf.Name,
+				Title:      wf.Title,
 				Workspaces: wf.Workspaces,
 				Triggers:   triggerSummary(wf),
 				Jobs:       jobNames(wf),
@@ -120,10 +130,11 @@ func printWorkflowList(w io.Writer, wfs []*wfe.Workflow, dir string, asJSON bool
 		return enc.Encode(out)
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tWORKSPACES\tTRIGGERS\tJOBS")
+	fmt.Fprintln(tw, "NAME\tTITLE\tWORKSPACES\tTRIGGERS\tJOBS")
 	for _, wf := range wfs {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
 			wf.Name,
+			truncate(wf.Title, 40),
 			truncate(strings.Join(wf.Workspaces, ", "), 30),
 			truncate(strings.Join(triggerSummary(wf), ", "), 30),
 			strings.Join(jobNames(wf), ", "),
@@ -134,7 +145,22 @@ func printWorkflowList(w io.Writer, wfs []*wfe.Workflow, dir string, asJSON bool
 	}
 	if len(wfs) == 0 {
 		fmt.Fprintf(w, "\nno workflows found in %s\n", dir)
-		fmt.Fprintf(w, "hint: create a *.yaml file there, or set $NIGHTME_WORKFLOWS_DIR\n")
+		fmt.Fprintf(w, "hint: create a *.yaml or *.yml file there, or set $NIGHTME_WORKFLOWS_DIR\n")
+	}
+	return nil
+}
+
+// printWorkflowFailures writes the files that did not load to w.
+//
+// A file that did not load does not take the workflows beside it down
+// with it: the failures are reported next to the ones that loaded.
+func printWorkflowFailures(w io.Writer, failures []wfe.Failure) error {
+	if len(failures) == 0 {
+		return nil
+	}
+	fmt.Fprintln(w, "\nthe files that did not load:")
+	for _, f := range failures {
+		fmt.Fprintf(w, "  %s\n", f.Error())
 	}
 	return nil
 }
@@ -180,23 +206,37 @@ func newWorkflowShowCmd() *cobra.Command {
 		Use:   "show <name>",
 		Short: "Show one workflow's parsed details",
 		Long: "show prints the full workflow details: triggers, jobs, steps, " +
-			"and effective agent resolution. The --json flag emits the " +
-			"raw parsed Workflow struct.",
+			"and effective agent resolution. The name is the base name of " +
+			"the workflow's file. The --json flag emits the raw parsed " +
+			"Workflow struct.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			wfs, _, err := loadWorkflows()
+			wfs, failures, _, err := loadWorkflows()
 			if err != nil {
 				return err
 			}
 			wf := findWorkflow(wfs, args[0])
 			if wf == nil {
-				return fmt.Errorf("workflow %q not found", args[0])
+				return notFound(args[0], failures)
 			}
 			return printWorkflowShow(cmd.OutOrStdout(), wf, jsonOut)
 		},
 	}
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw workflow JSON")
 	return cmd
+}
+
+// notFound reports that a workflow is not there.
+//
+// A file that did not load carries its own reason: the operator asked
+// for that name, and the file is on disk.
+func notFound(name string, failures []wfe.Failure) error {
+	for _, f := range failures {
+		if f.Name == name {
+			return f.Err
+		}
+	}
+	return fmt.Errorf("workflow %q not found", name)
 }
 
 func findWorkflow(wfs []*wfe.Workflow, name string) *wfe.Workflow {
@@ -215,8 +255,8 @@ func printWorkflowShow(w io.Writer, wf *wfe.Workflow, asJSON bool) error {
 		return enc.Encode(wf)
 	}
 	fmt.Fprintf(w, "name:       %s\n", wf.Name)
-	if wf.Goal != "" {
-		fmt.Fprintf(w, "goal:       %s\n", wf.Goal)
+	if wf.Title != "" {
+		fmt.Fprintf(w, "title:      %s\n", wf.Title)
 	}
 	fmt.Fprintf(w, "workspaces: %s\n", workspacesLabel(wf))
 	if len(wf.Args) > 0 {
@@ -304,13 +344,13 @@ func newWorkflowRunCmd() *cobra.Command {
 			"workspace takes the one of the chat that starts it.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			wfs, _, err := loadWorkflows()
+			wfs, failures, _, err := loadWorkflows()
 			if err != nil {
 				return err
 			}
 			wf := findWorkflow(wfs, args[0])
 			if wf == nil {
-				return fmt.Errorf("workflow %q not found", args[0])
+				return notFound(args[0], failures)
 			}
 			ws := workspace
 			if ws == "" && len(wf.Workspaces) > 0 {
@@ -326,8 +366,8 @@ func newWorkflowRunCmd() *cobra.Command {
 
 func printWorkflowRun(w io.Writer, wf *wfe.Workflow, workspace string) error {
 	fmt.Fprintf(w, "workflow:   %s\n", wf.Name)
-	if wf.Goal != "" {
-		fmt.Fprintf(w, "goal:       %s\n", wf.Goal)
+	if wf.Title != "" {
+		fmt.Fprintf(w, "title:      %s\n", wf.Title)
 	}
 	if workspace != "" {
 		fmt.Fprintf(w, "workspace:  %s\n", workspace)

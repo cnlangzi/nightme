@@ -491,8 +491,9 @@ branch name is derived from them.
 
 A **workflow** is a YAML file that says what to do and how far to go. It is the
 only automation artifact: the same file is the plan the agent follows and the
-bound it may not cross. Workflows live in `~/.nightme/workflows/*.yaml` and are
-loaded by name.
+bound it may not cross. Workflows live in `~/.nightme/workflows/*.yaml` or
+`~/.nightme/workflows/*.yml`, and the file name is the workflow's name:
+`fix-issue.yaml` is the workflow `fix-issue`.
 
 The agent — `/me` — runs a workflow in the chat you start it from. Every command
 is a real message with a real id, and every command reports a structured
@@ -502,7 +503,7 @@ outcome, so the agent decides the next step from facts instead of from prose.
 
 | Subcommand | What it does |
 |---|---|
-| `nightme workflow list` | Summarize every workflow: name, workspaces, triggers, jobs. `--json` for machine output. |
+| `nightme workflow list` | Summarize every workflow: name, title, workspaces, triggers, jobs. The files that did not load are reported below the table. `--json` for machine output. |
 | `nightme workflow show <name>` | Print one workflow's parsed details: triggers, jobs, steps. |
 | `nightme workflow run <name>` | Print the execution plan — which steps run, in what order. `--workspace` overrides the workspace. |
 
@@ -510,15 +511,14 @@ outcome, so the agent decides the next step from facts instead of from prose.
 
 ### Write a workflow
 
-The workflows are read when the daemon starts. After you add or change one, run
-`nightme restart`.
+The workflows are read when they are asked for: an edited file takes effect on
+the next `/me start`, without a restart.
 
 ```yaml
-name: fix-issue
+title: 把队列里的 issue 一个个做完、开 PR，然后回 main 继续
 args:
   - name: issue
     default: "*"
-goal: 把队列里的 issue 一个个做完、开 PR，然后回 main 继续
 on:                                   # 将来给 timer scheduler 消费；本期不实现
   schedule:
     - cron: "0 2 * * *"
@@ -556,8 +556,9 @@ jobs:
         if: ${{ steps.fix.outputs.data.issue }}
 ```
 
-Deploy it by writing the file to `~/.nightme/workflows/fix-issue.yaml` and
-running `nightme restart`.
+Deploy it by writing the file to `~/.nightme/workflows/fix-issue.yaml`:
+`/me start fix-issue` runs it. A file that does not load is reported against
+its own name, and the workflows beside it keep working.
 
 The guard on the steps after `fix` reads `data.issue`: a fix that picked an
 issue reports `issue` in its outcome, a fix that found nothing does not — so
@@ -565,9 +566,8 @@ the guard means "an issue was picked" and the rest of the round is skipped.
 
 | Workflow field | Meaning |
 |---|---|
-| `name` | The workflow's name. `/me start <name>` picks it. |
+| `title` | What the run is for. It is part of the model's instructions. Required. |
 | `args` | The arguments the workflow takes. A spec is a mapping with `name` and an optional `default`; a default makes the argument optional, no default makes it required. |
-| `goal` | What the run is for. It is part of the model's instructions. |
 | `instruct` | Whether the agent may send free-form instructions. Default true. |
 | `workspaces` | The workspaces the workflow names. Optional — the run takes the workspace of the chat that starts it. |
 | `on` | The trigger block. It is parsed and displayed; nothing fires it. |
@@ -745,13 +745,12 @@ as `${{ steps.<id>.outputs.status }}`, the facts under
 | Message | What it means |
 |---|---|
 | `there is no workflow named "<name>" (known: ...)` | No loaded workflow carries that name. |
+| `<file> could not be loaded: ...` | The file of that name did not load. The workflows beside it still run. |
 | `neither me.llm nor me.decider is configured` | Neither model is configured, so the agent has nothing to decide with. |
 | `there are no workflows in <dir>` | The workflows directory holds no workflow. |
-| `me is disabled: the workflows in <dir> cannot be loaded: ...` | The YAML in the workflows directory is broken. |
 
-A YAML error in the workflows directory stops the personal agent from starting —
-`nightme logs` reports it. The daemon still comes up, and `/me` refuses every
-run with the load error.
+A file that does not load stops only itself: the daemon comes up, the workflows
+beside it work, and `nightme logs` reports the failure.
 
 ### Guardrails and reference
 

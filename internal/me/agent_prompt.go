@@ -10,7 +10,7 @@ import (
 
 // systemPrompt renders the instructions the chat model works under.
 //
-// The prompt is the workflow: the goal, the steps, the notes and the
+// The prompt is the workflow: the title, the steps, the notes and the
 // limits. The model acts through the tools, and every tool handler
 // enforces the policy, so a command the workflow does not allow comes
 // back as an error the model can correct.

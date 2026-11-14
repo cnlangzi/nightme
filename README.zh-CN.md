@@ -445,7 +445,7 @@ Conventional Commits 的 type 关键词。issue 标题保持英文 / ASCII——
 
 ## Workflow 与个人 Agent (`/me`)
 
-**workflow** 是一份 YAML，写清楚做什么、能走多远。它是唯一的自动化产物：同一份文件既是 agent 照着走的计划，也是它不能越过的边界。workflow 放在 `~/.nightme/workflows/*.yaml`，按 `name:` 去重加载。
+**workflow** 是一份 YAML，写清楚做什么、能走多远。它是唯一的自动化产物：同一份文件既是 agent 照着走的计划，也是它不能越过的边界。workflow 放在 `~/.nightme/workflows/*.yaml` 或 `~/.nightme/workflows/*.yml`，文件名就是 workflow 的名字：`fix-issue.yaml` 就是 workflow `fix-issue`。
 
 agent——`/me`——在你发起它的那个 chat 里跑一个 workflow。每条命令都是一条带真实 id 的真实消息，每条命令都回报一个结构化结果，所以它是从事实而不是从文字里决定下一步。
 
@@ -453,7 +453,7 @@ agent——`/me`——在你发起它的那个 chat 里跑一个 workflow。每�
 
 | 子命令 | 作用 |
 |---|---|
-| `nightme workflow list` | 汇总每个 workflow：名称、workspaces、触发器、jobs。`--json` 输出机器可读。 |
+| `nightme workflow list` | 汇总每个 workflow：名称、title、workspaces、触发器、jobs。没加载成功的文件列在表格下面。`--json` 输出机器可读。 |
 | `nightme workflow show <name>` | 打印一个 workflow 的解析细节：触发器、jobs、steps。 |
 | `nightme workflow run <name>` | 打印执行计划——哪些 step 跑、什么顺序。`--workspace` 覆盖 workspace。 |
 
@@ -461,14 +461,13 @@ agent——`/me`——在你发起它的那个 chat 里跑一个 workflow。每�
 
 ### 写一个 workflow
 
-workflow 在 daemon 启动时读取。加了一个或者改了之后，跑 `nightme restart`。
+workflow 在被用到的时候读取：改过的文件在下一次 `/me start` 就生效，不用重启。
 
 ```yaml
-name: fix-issue
+title: 把队列里的 issue 一个个做完、开 PR，然后回 main 继续
 args:
   - name: issue
     default: "*"
-goal: 把队列里的 issue 一个个做完、开 PR，然后回 main 继续
 on:                                   # 将来给 timer scheduler 消费；本期不实现
   schedule:
     - cron: "0 2 * * *"
@@ -506,15 +505,14 @@ jobs:
         if: ${{ steps.fix.outputs.data.issue }}
 ```
 
-部署方式：把这份文件写到 `~/.nightme/workflows/fix-issue.yaml`，然后跑 `nightme restart`。
+部署方式：把这份文件写到 `~/.nightme/workflows/fix-issue.yaml`，`/me start fix-issue` 就跑它。没加载成功的文件按它自己的名字报错，旁边的 workflow 照常工作。
 
 `fix` 之后的那些 step 都用 `data.issue` 守卫：挑到了 issue 的 fix 会在结果里报 `issue`，没挑到的不会——所以这个守卫读的就是"挑到了 issue"，这一轮的其余部分会被跳过。
 
 | workflow 字段 | 含义 |
 |---|---|
-| `name` | workflow 的名字。`/me start <name>` 按名字取。 |
+| `title` | 这次运行为了什么。它是模型指令的一部分。必填。 |
 | `args` | 这个 workflow 接受的参数。一个参数规格是带 `name` 和可选 `default` 的映射：有 `default` 就是可选参数，没有就是必填参数。 |
-| `goal` | 这次运行为了什么。它是模型指令的一部分。 |
 | `instruct` | agent 能不能发自由指令。默认 true。 |
 | `workspaces` | 这个 workflow 点名的工作区。可选——运行用的是发起它的那个 chat 的工作区。 |
 | `on` | 触发器块。它被解析和展示，目前没有东西会触发它。 |

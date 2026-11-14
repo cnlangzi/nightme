@@ -352,8 +352,7 @@ func (d *scriptedDecider) Request(n int) llm.DecisionRequest {
 // ── helpers ───────────────────────────────────────────────────────
 
 // oneStepWorkflow is a workflow with a single step.
-const oneStepWorkflow = `name: one
-goal: Do the one thing.
+const oneStepWorkflow = `title: Do the one thing.
 jobs:
   main:
     steps:
@@ -362,11 +361,10 @@ jobs:
 `
 
 // fixIssueWorkflow is the workflow of the integration test.
-const fixIssueWorkflow = `name: fix-issue
+const fixIssueWorkflow = `title: Fix issue #${{ args.id }} and ship it as a PR.
 args:
   - name: id
     default: "1"
-goal: Fix issue #${{ args.id }} and ship it as a PR.
 jobs:
   main:
     steps:
@@ -535,7 +533,7 @@ func TestStartWorkflow_ReportsAnUnknownWorkflow(t *testing.T) {
 
 func TestStartWorkflow_RefusesExtraArguments(t *testing.T) {
 	dir := t.TempDir()
-	writeWorkflow(t, dir, "one", `name: one
+	writeWorkflow(t, dir, "one", `title: one
 args:
   - name: id
 jobs:
@@ -558,7 +556,7 @@ jobs:
 
 func TestStartWorkflow_BindsANamedArgument(t *testing.T) {
 	dir := t.TempDir()
-	writeWorkflow(t, dir, "one", `name: one
+	writeWorkflow(t, dir, "one", `title: one
 args:
   - name: issue
     default: "*"
@@ -663,7 +661,7 @@ func TestFastPath_RunsEveryStepWithoutAModel(t *testing.T) {
 // outcome of every step that ran.
 func TestFastPath_RecordsTheStepOutcomes(t *testing.T) {
 	dir := t.TempDir()
-	writeWorkflow(t, dir, "one", `name: one
+	writeWorkflow(t, dir, "one", `title: one
 jobs:
   main:
     steps:
@@ -722,7 +720,7 @@ jobs:
 // the run state.
 func TestFastPath_CarriesTheOutcomeData(t *testing.T) {
 	dir := t.TempDir()
-	writeWorkflow(t, dir, "one", `name: one
+	writeWorkflow(t, dir, "one", `title: one
 jobs:
   main:
     steps:
@@ -779,7 +777,7 @@ jobs:
 // that owns it.
 func TestJudgmentPoint_ARepairIsRecordedAgainstItsStep(t *testing.T) {
 	dir := t.TempDir()
-	writeWorkflow(t, dir, "repair", `name: repair
+	writeWorkflow(t, dir, "repair", `title: repair
 jobs:
   main:
     steps:
@@ -916,7 +914,7 @@ func TestSetup_FailureEndsTheRunBeforeAnyStep(t *testing.T) {
 // command in the workspace of the run.
 func TestStepKind_ShellRunsInTheWorkspace(t *testing.T) {
 	dir := t.TempDir()
-	writeWorkflow(t, dir, "sh", `name: sh
+	writeWorkflow(t, dir, "sh", `title: sh
 jobs:
   main:
     steps:
@@ -984,7 +982,7 @@ func (a *recordingAction) Called() bool {
 // shell step is running, and the run ends.
 func TestStop_CancelsARunningShellStep(t *testing.T) {
 	dir := t.TempDir()
-	writeWorkflow(t, dir, "sh", `name: sh
+	writeWorkflow(t, dir, "sh", `title: sh
 jobs:
   main:
     steps:
@@ -1021,7 +1019,7 @@ jobs:
 // names, with the arguments it declares.
 func TestStepKind_UseRunsTheAction(t *testing.T) {
 	dir := t.TempDir()
-	writeWorkflow(t, dir, "act", `name: act
+	writeWorkflow(t, dir, "act", `title: act
 jobs:
   main:
     steps:
@@ -1059,7 +1057,7 @@ jobs:
 // an action nobody registered fails with the name of the action.
 func TestStepKind_AnUnknownActionFailsTheStep(t *testing.T) {
 	dir := t.TempDir()
-	writeWorkflow(t, dir, "act", `name: act
+	writeWorkflow(t, dir, "act", `title: act
 jobs:
   main:
     steps:

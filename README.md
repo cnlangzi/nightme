@@ -688,8 +688,8 @@ The run inherits the chat's workspace and agent. A chat holds at most one run at
 real message of that chat, marked with a bot sign:
 
 ```
-🤖 /gtw fix * -y
-🤖 /review
+🧑‍💻: /gtw fix * -y
+🧑‍💻: /review
 ```
 
 The receipt, the reaction and the permission card anchor to that message the way

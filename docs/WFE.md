@@ -555,7 +555,7 @@ This section answers "where do runs actually execute, and how do the pieces fit?
   │  the policy (internal/wfe.Policy) bounds every   │
   │  action a run may take                         │
   └───────┬──────────────────────────┬─────────────┘
-          │ "🤖 /gtw fix 42 -y"      │ the run card
+          │ "🧑‍💻: /gtw fix 42 -y"   │ the run card
           ▼                          ▼
   ┌──────────────────────┐   ┌──────────────────────┐
   │ internal/channel —   │   │ internal/gateway/   │

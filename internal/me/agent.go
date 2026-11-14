@@ -72,7 +72,7 @@ const (
 // The agent speaks with the bot's voice: a person reading the chat
 // sees at once that the message came from the run and not from
 // somebody else.
-const BotMark = "🤖 "
+const BotMark = "🧑‍💻: "
 
 // Phase is where a run stands.
 type Phase string

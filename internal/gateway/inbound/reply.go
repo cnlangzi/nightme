@@ -5,9 +5,10 @@
 // program, not to the agent. The claimer takes it, and the agent
 // never sees it.
 //
-// The branch sits after the slash-command and shell branches and
-// before the universal fallback: a command is a command, and a
-// message nobody claims reaches the agent.
+// The branch sits after the action branch and before the
+// slash-command branch: the answer to a program's question may be a
+// slash command, and it belongs to the program. A message nobody
+// claims reaches the agent.
 
 package inbound
 

@@ -27,9 +27,13 @@
 // Dispatch chain (priority order, first match wins):
 //
 //  1. tryActionDispatch   — msg.Reaction / msg.Action events
-//  2. tryCommandDispatch  — /-prefixed text via command.Commander
-//  3. tryShellDispatch    — !-prefixed text via shell.Dispatcher
-//  4. tryMessageDispatch  — universal fallback (WatchMode + agent loop)
+//  2. tryReplyClaim       — a message a program owns (an answer to
+//     its question), claimed before the
+//     command branch: the answer may be a
+//     slash command
+//  3. tryCommandDispatch  — /-prefixed text via command.Commander
+//  4. tryShellDispatch    — !-prefixed text via shell.Dispatcher
+//  5. tryMessageDispatch  — universal fallback (WatchMode + agent loop)
 package inbound
 
 import (
@@ -131,9 +135,10 @@ type (
 
 	// ReplyClaimer takes the messages a program owns.
 	//
-	// A claimer runs after the slash-command and shell branches and
-	// before the default branch: a message the claimer takes does
-	// not reach the agent.
+	// A claimer runs after the action branch and before the
+	// slash-command branch: the answer to a program's question may
+	// be a slash command, and it belongs to the program. A message
+	// the claimer takes does not reach the agent.
 	ReplyClaimer interface {
 		// Claim reports whether the message belongs to the claimer.
 		Claim(ctx context.Context, msg *messages.InboundMessage) bool
@@ -246,9 +251,9 @@ func (r *Router) Dispatch(ctx context.Context, mgr *chatsession.Manager, msg *me
 	}
 	for _, try := range []func(context.Context, *chatsession.Manager, *messages.InboundMessage) (bool, *CommandResult, error){
 		r.tryActionDispatch,
+		r.tryReplyClaim,
 		r.tryCommandDispatch,
 		r.tryShellDispatch,
-		r.tryReplyClaim,
 		r.tryMessageDispatch,
 	} {
 		handled, result, err := try(ctx, mgr, msg)

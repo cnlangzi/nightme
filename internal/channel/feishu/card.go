@@ -105,13 +105,18 @@ func (a *Adapter) handleMeCardAction(ctx context.Context, event *larkcallback.Ca
 	}
 	select {
 	case a.incoming <- synthetic:
+		return &larkcallback.CardActionTriggerResponse{
+			Toast: &larkcallback.Toast{Type: "info", Content: "Recorded"},
+		}, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	default:
 		a.logger.Warn("feishu: run card action inbound full, dropping",
 			"chat_id", chatID, "command", command)
 	}
+	// The click did not reach the daemon: the toast must not claim it
+	// was recorded.
 	return &larkcallback.CardActionTriggerResponse{
-		Toast: &larkcallback.Toast{Type: "info", Content: "Recorded"},
+		Toast: &larkcallback.Toast{Type: "warning", Content: "The chat is busy, try again"},
 	}, nil
 }

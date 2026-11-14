@@ -139,6 +139,13 @@ type Impersonator interface {
 	// message it became. The id is the id the daemon sees when the
 	// message comes back in.
 	Speak(ctx context.Context, chatID, text string, opts SpeakOptions) (string, error)
+	// Ask puts a question in the chat and returns the id of the
+	// message it became.
+	//
+	// The message is visible and the operator can answer it, but the
+	// daemon does not take it as a turn of its own: the question
+	// belongs to the program that asked it, not to the agent.
+	Ask(ctx context.Context, chatID, text string, opts SpeakOptions) (string, error)
 	// Act clicks a button of an interactive prompt, as if a person
 	// had clicked it. The prompt is patched to show the choice.
 	Act(ctx context.Context, chatID string, action messages.ActionPayload) error

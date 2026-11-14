@@ -69,7 +69,39 @@ func (a *Adapter) Speak(ctx context.Context, chatID, text string, opts channel.S
 	if replyTo > 0 {
 		native.ReplyToMessage = &Message{MessageID: replyTo}
 	}
-	a.ingest(ctx, native, messages.OriginMe, opts.RunID)
+	if err := a.ingest(ctx, native, messages.OriginMe, opts.RunID); err != nil {
+		return strconv.Itoa(result.MessageID), fmt.Errorf("telegram: the message did not reach the daemon: %w", err)
+	}
+	return strconv.Itoa(result.MessageID), nil
+}
+
+// Ask puts a question in the chat and returns the id of the message
+// it became.
+//
+// The message is visible and the operator can answer it, but the
+// daemon does not take it as a turn of its own: the question belongs
+// to the run that asked it.
+func (a *Adapter) Ask(ctx context.Context, chatID, text string, opts channel.SpeakOptions) (string, error) {
+	rawChatID, threadID, ok := splitSessionID(chatID)
+	if !ok {
+		return "", fmt.Errorf("telegram: chat id %q is not a telegram chat id", chatID)
+	}
+	display := opts.Display
+	if display == "" {
+		display = text
+	}
+	replyTo := 0
+	if opts.ReplyTo != "" {
+		n, err := strconv.Atoi(opts.ReplyTo)
+		if err != nil {
+			return "", fmt.Errorf("telegram: %q is not a telegram message id", opts.ReplyTo)
+		}
+		replyTo = n
+	}
+	result, err := a.sendTelegramMessage(ctx, rawChatID, threadID, replyTo, escapeInline(display), nil)
+	if err != nil {
+		return "", err
+	}
 	return strconv.Itoa(result.MessageID), nil
 }
 
@@ -100,8 +132,7 @@ func (a *Adapter) Act(ctx context.Context, chatID string, action messages.Action
 	a.mu.Lock()
 	botID := a.botID
 	a.mu.Unlock()
-	select {
-	case a.incoming <- messages.InboundMessage{
+	click := messages.InboundMessage{
 		ChatID:     state.ChatID,
 		UserID:     strconv.FormatInt(botID, 10),
 		MessageID:  strconv.Itoa(state.MessageID),
@@ -112,9 +143,9 @@ func (a *Adapter) Act(ctx context.Context, chatID string, action messages.Action
 			Option:    option.ID,
 			Form:      action.Form,
 		},
-	}:
-	case <-a.ctxDone():
-		return errors.New("telegram: the adapter is stopped")
+	}
+	if !a.publish(click) {
+		return errors.New("telegram: the click did not reach the daemon")
 	}
 	return nil
 }

@@ -140,6 +140,36 @@ func TestSpeak_IgnoresTheBotsOwnEcho(t *testing.T) {
 	}
 }
 
+// TestAsk_PostsTheQuestionWithoutDispatchingIt — a question belongs
+// to the program that asked it: the daemon does not take it as a
+// turn of its own.
+func TestAsk_PostsTheQuestionWithoutDispatchingIt(t *testing.T) {
+	a, api := newImpersonateAdapter(t)
+
+	id, err := a.Ask(context.Background(), "tg_100", "Which branch?", channel.SpeakOptions{
+		Display: "🤖 ❓ Which branch?",
+		ReplyTo: "55",
+	})
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if id == "" {
+		t.Fatal("the question got no id")
+	}
+	send := findCall(api.snapshotCalls(), "sendMessage")
+	if send == nil {
+		t.Fatal("the question was not posted")
+	}
+	if got, _ := send.Params["reply_to_message_id"].(int); got != 55 {
+		t.Errorf("reply_to_message_id = %v, want 55", send.Params["reply_to_message_id"])
+	}
+	select {
+	case msg := <-a.Incoming():
+		t.Fatalf("the question was dispatched to the daemon: %+v", msg)
+	default:
+	}
+}
+
 // TestAct_ClicksThePromptAndShowsTheChoice — the run answers a
 // prompt the way a person does: the prompt shows the choice and the
 // click reaches the daemon.

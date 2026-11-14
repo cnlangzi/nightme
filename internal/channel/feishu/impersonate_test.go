@@ -108,6 +108,38 @@ func TestSpeak_QuotesTheMessageItAnswers(t *testing.T) {
 	}
 }
 
+// TestAsk_PostsTheQuestionWithoutDispatchingIt — a question belongs
+// to the program that asked it: the daemon does not take it as a
+// turn of its own.
+func TestAsk_PostsTheQuestionWithoutDispatchingIt(t *testing.T) {
+	a := testAdapter(t)
+
+	var posted string
+	a.sendFunc = func(_ context.Context, _, _, content, _ string, _ bool) (string, error) {
+		posted = content
+		return "om_question", nil
+	}
+
+	id, err := a.Ask(context.Background(), "oc_test", "Which branch?", channel.SpeakOptions{
+		Display: "🤖 ❓ Which branch?",
+		ReplyTo: "om_card",
+	})
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if id != "om_question" {
+		t.Fatalf("id = %q, want om_question", id)
+	}
+	if posted == "" {
+		t.Fatal("the question was not posted")
+	}
+	select {
+	case msg := <-a.Incoming():
+		t.Fatalf("the question was dispatched to the daemon: %+v", msg)
+	default:
+	}
+}
+
 // TestAct_ClicksTheCardAndShowsTheChoice — the run answers a prompt
 // the way a person does: the card shows the choice and the click
 // reaches the daemon.

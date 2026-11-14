@@ -73,18 +73,30 @@ func renderRunCard(spec channel.CardSpec) string {
 }
 
 // runCardKeyboard renders the card's buttons as an inline keyboard.
+//
+// The buttons are laid out two to a row, the way the choice keyboard
+// lays them out: a run card can carry a button per option, and a row
+// of ten is unreadable.
 func runCardKeyboard(spec channel.CardSpec) map[string]any {
 	if len(spec.Buttons) == 0 {
 		return nil
 	}
-	row := make([]any, 0, len(spec.Buttons))
+	rows := make([]any, 0, (len(spec.Buttons)+1)/2)
+	row := make([]any, 0, 2)
 	for _, b := range spec.Buttons {
+		if len(row) == 2 {
+			rows = append(rows, row)
+			row = make([]any, 0, 2)
+		}
 		row = append(row, map[string]any{
 			"text":          escapeInline(b.Label),
 			"callback_data": meActionPrefix + b.Action,
 		})
 	}
-	return map[string]any{"inline_keyboard": []any{row}}
+	if len(row) > 0 {
+		rows = append(rows, row)
+	}
+	return map[string]any{"inline_keyboard": rows}
 }
 
 // handleRunCardClick turns a run-card button click into the command
@@ -109,9 +121,11 @@ func (a *Adapter) handleRunCardClick(ctx context.Context, callback *CallbackQuer
 		HasMention: true,
 		Time:       time.Now(),
 	}
-	select {
-	case a.incoming <- synthetic:
-		a.answerCallback(ctx, callback.ID, "Recorded", false)
-	case <-a.ctxDone():
+	// The click is published without blocking: a full queue must not
+	// stall the poll loop.
+	if !a.publish(synthetic) {
+		a.answerCallback(ctx, callback.ID, "The chat is busy, try again", true)
+		return
 	}
+	a.answerCallback(ctx, callback.ID, "Recorded", false)
 }

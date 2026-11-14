@@ -401,7 +401,7 @@ func (a *Adapter) handleMessage(ctx context.Context, message *Message) {
 	if a.dropMessage(message) {
 		return
 	}
-	a.ingest(ctx, message, messages.OriginHuman, "")
+	_ = a.ingest(ctx, message, messages.OriginHuman, "")
 }
 
 // dropMessage reports whether a Telegram update must not be
@@ -445,9 +445,9 @@ func (a *Adapter) dropMessage(message *Message) bool {
 // adapter posts it on the platform and then hands the same message
 // to the daemon, so the topic, the placeholder and the reply chain
 // are set up exactly as they are for a person's message.
-func (a *Adapter) ingest(ctx context.Context, message *Message, origin messages.Origin, runID string) {
+func (a *Adapter) ingest(ctx context.Context, message *Message, origin messages.Origin, runID string) error {
 	if message == nil {
-		return
+		return errors.New("telegram: no message")
 	}
 	text := message.Text
 	if text == "" {
@@ -458,7 +458,7 @@ func (a *Adapter) ingest(ctx context.Context, message *Message, origin messages.
 	threadID, err := a.ensureTopic(ctx, message)
 	if err != nil {
 		a.logger.Warn("telegram: ensure topic failed", "chat_id", chatID, "err", err)
-		return
+		return err
 	}
 	// Placeholder ("Working...") anchors every turn's reply chain.
 	// Real Telegram topics (thread_id > 0) and DM / main-window
@@ -493,7 +493,7 @@ func (a *Adapter) ingest(ctx context.Context, message *Message, origin messages.
 		}
 		a.notifyDownloadFailure(chatID, topicID, downloadRes, text == "")
 		if text == "" {
-			return
+			return errors.New("telegram: the attachments could not be downloaded")
 		}
 		attachments = nil
 	} else if downloadRes.FailureCount > 0 {
@@ -563,7 +563,7 @@ func (a *Adapter) ingest(ctx context.Context, message *Message, origin messages.
 	// this redundant block was removed in the 2026-08-22 plan-C
 	// revision since ensurePlaceholder now persists state.)
 	if a.handleForceReply(ctx, message) {
-		return
+		return nil
 	}
 	inbound := messages.InboundMessage{
 		ChatID:      a.sessionChatID(chatID, topicID),
@@ -592,18 +592,28 @@ func (a *Adapter) ingest(ctx context.Context, message *Message, origin messages.
 		"origin", string(origin),
 		"run_id", runID,
 	)
-	a.publish(inbound)
+	if !a.publish(inbound) {
+		return errors.New("telegram: the inbound queue is full")
+	}
+	return nil
 }
 
-func (a *Adapter) publish(inbound messages.InboundMessage) {
+// publish pushes an inbound message onto the queue.
+//
+// It reports whether the message was queued. A full queue drops the
+// message rather than stalling the daemon: the caller decides what
+// to do about a message nobody will see.
+func (a *Adapter) publish(inbound messages.InboundMessage) bool {
 	select {
 	case a.incoming <- inbound:
 		a.recordInbound(time.Now())
+		return true
 	case <-a.ctxDone():
 		// Adapter is shutting down — drop silently. This is the
 		// expected race window when Stop() is called mid-publish.
 		a.logger.Warn("telegram: publish dropped (adapter stopping)",
 			"chat_id", inbound.ChatID, "user_msg_id", inbound.MessageID)
+		return false
 	default:
 		// incoming channel is full (buffer=128). Runtime is not
 		// draining Inbound — likely a chatsession pump stall.
@@ -611,6 +621,7 @@ func (a *Adapter) publish(inbound messages.InboundMessage) {
 		a.logger.Warn("telegram: publish dropped (incoming channel full)",
 			"chat_id", inbound.ChatID, "user_msg_id", inbound.MessageID,
 			"buffer_size", cap(a.incoming))
+		return false
 	}
 }
 

@@ -61,9 +61,23 @@ func (a *Adapter) Speak(ctx context.Context, chatID, text string, opts channel.S
 	}
 	a.logInbound(inbound)
 	if err := a.publishImpersonated(ctx, inbound); err != nil {
-		return msgID, err
+		return msgID, fmt.Errorf("feishu: the message did not reach the daemon: %w", err)
 	}
 	return msgID, nil
+}
+
+// Ask puts a question in the chat and returns the id of the message
+// it became.
+//
+// The message is visible and the operator can answer it, but the
+// daemon does not take it as a turn of its own: the question belongs
+// to the run that asked it.
+func (a *Adapter) Ask(ctx context.Context, chatID, text string, opts channel.SpeakOptions) (string, error) {
+	display := opts.Display
+	if display == "" {
+		display = text
+	}
+	return a.SendMessageText(ctx, chatID, display, opts.ReplyTo, false)
 }
 
 // Act clicks a button of an interactive prompt.

@@ -960,6 +960,7 @@ type recordingAction struct {
 	name string
 	mu   sync.Mutex
 	args map[string]any
+	ran  bool
 }
 
 func (a *recordingAction) Name() string { return a.name }
@@ -967,8 +968,16 @@ func (a *recordingAction) Name() string { return a.name }
 func (a *recordingAction) Execute(_ context.Context, args map[string]any, _ map[string]string) (*wfe.ActionResult, error) {
 	a.mu.Lock()
 	a.args = args
+	a.ran = true
 	a.mu.Unlock()
 	return &wfe.ActionResult{Outputs: map[string]any{"sent": "true"}}, nil
+}
+
+// Called reports whether the action ran.
+func (a *recordingAction) Called() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.ran
 }
 
 // TestStop_CancelsARunningShellStep — `/me stop` stops the command a

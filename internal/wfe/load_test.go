@@ -254,6 +254,63 @@ func TestParse_ZeroIterationsMeansUntilTheRunEnds(t *testing.T) {
 	}
 }
 
+// TestParse_AnActionNameMayComeFromAnArgument — `use:` takes an
+// argument like every other field of a step.
+func TestParse_AnActionNameMayComeFromAnArgument(t *testing.T) {
+	wf := mustParse(t, `
+name: act
+args:
+  - name: which
+    default: notify
+jobs:
+  main:
+    steps:
+      - id: tell
+        use: ${{ args.which }}
+`)
+	bound, err := Bind(wf, nil)
+	if err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	if got := bound.Jobs["main"].Steps[0].Use; got != "notify" {
+		t.Errorf("Use = %q, want notify", got)
+	}
+}
+
+// TestParse_AnUndeclaredArgumentIsRefusedEverywhere — the check covers
+// every field of a step, `use:` included.
+func TestParse_AnUndeclaredArgumentIsRefusedEverywhere(t *testing.T) {
+	_, err := Parse([]byte(`
+name: act
+jobs:
+  main:
+    steps:
+      - id: tell
+        use: ${{ args.nope }}
+`))
+	if err == nil {
+		t.Fatal("an undeclared argument was accepted")
+	}
+	if !strings.Contains(err.Error(), "unknown argument") {
+		t.Errorf("error = %v, want it to name the argument", err)
+	}
+}
+
+// TestParse_TheCountsMustBeWholeNumbers — a fraction would slip past
+// a check on the decoded value.
+func TestParse_TheCountsMustBeWholeNumbers(t *testing.T) {
+	for _, src := range []string{
+		"name: x\njobs:\n  main:\n    iterations: 1.5\n    steps: [{message: hi}]\n",
+		"name: x\njobs:\n  main:\n    iterations: -0.5\n    steps: [{message: hi}]\n",
+		"name: x\njobs:\n  main:\n    steps: [{message: hi, attempts: 0.5}]\n",
+		"name: x\njobs:\n  main:\n    steps: [{message: hi, attempts: -0.5}]\n",
+	} {
+		if _, err := Parse([]byte(src)); err == nil {
+			t.Errorf("a fraction was accepted:\n%s", src)
+		}
+	}
+}
+
 func TestParse_Errors(t *testing.T) {
 	tests := []struct {
 		name    string

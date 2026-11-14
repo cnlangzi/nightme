@@ -187,6 +187,40 @@ jobs:
 	}
 }
 
+func TestDecide_ARoundThatDidNothingDoesNotRepeat(t *testing.T) {
+	wf := mustParse(t, `
+name: repeat
+jobs:
+  ship:
+    iterations: 0
+    steps:
+      - id: fix
+        message: "/fix"
+        if: "false"
+`)
+	state := newRunState(wf)
+	// The step's condition does not hold, so the plan skips it and
+	// the round does nothing.
+	RecordStep(state, "ship", wf.Jobs["ship"].Steps[0], Outcome{
+		Status:  OutcomeNoop,
+		Summary: "the step's condition did not hold",
+	}, true)
+
+	decision, err := Decide(state, wf)
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if decision.Kind != DecisionJudgment {
+		t.Fatalf("Kind = %v, want a judgment point", decision.Kind)
+	}
+	if !decision.Exhausted {
+		t.Errorf("Exhausted = false, want the plan to be exhausted (the reason was %q)", decision.Reason)
+	}
+	if state.Rounds["ship"] != 1 {
+		t.Errorf("Rounds = %v, want the round to stay where it is", state.Rounds)
+	}
+}
+
 func TestPolicy_TheStepBudgetCountsTheCurrentRoundOnly(t *testing.T) {
 	wf := mustParse(t, `
 name: x

@@ -25,6 +25,10 @@ type stepVerdict struct {
 // chat, a shell command runs in the work chat's directory, an action
 // runs through the action registry, and a wait runs out the clock.
 func (s *Service) executeStep(ctx context.Context, r *run, job string, step wfe.Step) (stepVerdict, error) {
+	// A step may run for a long time: the state is written first, so a
+	// daemon that goes away in the middle of it comes back and runs the
+	// step again.
+	s.persist(r)
 	switch step.Kind() {
 	case wfe.StepKindMessage:
 		return s.executeMessage(ctx, r, job, step)
@@ -81,10 +85,16 @@ func (s *Service) executeMessage(ctx context.Context, r *run, job string, step w
 // The command is bound to the run: `/me stop` and the daemon's
 // shutdown stop the child instead of leaving it behind.
 func (s *Service) executeShell(ctx context.Context, r *run, job string, step wfe.Step) (stepVerdict, error) {
-	if s.cfg.Shell == nil {
-		return stepVerdict{}, fmt.Errorf("the step %q needs a shell runner, and the daemon has none", step.ID)
-	}
 	command := s.evalText(r, step.Shell)
+	if s.cfg.Shell == nil {
+		out := wfe.Outcome{
+			Status:  wfe.OutcomeFailed,
+			Summary: fmt.Sprintf("the step %q needs a shell runner, and the daemon has none", step.ID),
+		}
+		r.record(wfe.ActionKindRun, command, step.ID, out)
+		s.notifyStep(r, command, out)
+		return stepVerdict{Outcome: out, Settled: true}, nil
+	}
 	s.notify(r, "▶ "+truncate(command, 80))
 
 	execCtx, cancel := r.runContext(ctx)
@@ -94,6 +104,10 @@ func (s *Service) executeShell(ctx context.Context, r *run, job string, step wfe
 		Command: command,
 		Env:     mergeEnv(r.env(), step.Env),
 	})
+	if err != nil && execCtx.Err() != nil {
+		// The run was cancelled: the step has no verdict of its own.
+		return stepVerdict{}, execCtx.Err()
+	}
 	out := wfe.Outcome{Status: wfe.OutcomeOK, Summary: "the shell command ran"}
 	if res != nil {
 		out.Data = shellOutputs(res)
@@ -133,15 +147,17 @@ const maxShellOutput = 4 << 10
 // shellOutputs renders what a shell command produced as the facts an
 // expression reads: the exit code, the output, the error output and
 // the key=value lines of the output.
+//
+// The reserved facts win: a command that prints `exit_code=0` does not
+// get to report an exit code it never had.
 func shellOutputs(res *wfe.ShellResult) map[string]string {
-	out := map[string]string{
-		"exit_code": strconv.Itoa(res.ExitCode),
-		"stdout":    truncate(res.Stdout, maxShellOutput),
-		"stderr":    truncate(res.Stderr, maxShellOutput),
-	}
+	out := make(map[string]string, len(res.Outputs)+3)
 	for k, v := range res.Outputs {
 		out[k] = v
 	}
+	out["exit_code"] = strconv.Itoa(res.ExitCode)
+	out["stdout"] = truncate(res.Stdout, maxShellOutput)
+	out["stderr"] = truncate(res.Stderr, maxShellOutput)
 	return out
 }
 
@@ -167,6 +183,7 @@ func (s *Service) executeWait(ctx context.Context, r *run, job string, step wfe.
 	}
 	out := wfe.Outcome{Status: wfe.OutcomeOK, Summary: "waited " + d.String()}
 	r.record(wfe.ActionKindRun, "wait "+d.String(), step.ID, out)
+	s.notifyStep(r, "wait "+d.String(), out)
 	return stepVerdict{Outcome: out, Settled: true}, nil
 }
 
@@ -186,6 +203,10 @@ func (s *Service) executeUse(ctx context.Context, r *run, job string, step wfe.S
 		With: with,
 		Env:  mergeEnv(r.env(), step.Env),
 	})
+	if err != nil && execCtx.Err() != nil {
+		// The run was cancelled: the step has no verdict of its own.
+		return stepVerdict{}, execCtx.Err()
+	}
 	out := wfe.Outcome{Status: wfe.OutcomeOK, Summary: "the action " + name + " ran"}
 	if res != nil {
 		out.Data = stringifyAnyMap(res.Outputs)

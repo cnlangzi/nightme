@@ -153,10 +153,17 @@ func recordSkipped(state *RunState, skipped []readyStep) {
 
 // repeatingJobs returns the jobs whose round is over and that have
 // rounds left.
+//
+// A round in which no step ran did nothing: the job does not start
+// another one. Without that a job whose steps are all skipped would
+// go round after round and never come back.
 func repeatingJobs(state *RunState, wf *Workflow) []string {
 	var out []string
 	for _, name := range wf.JobOrder() {
 		if !jobComplete(state, wf, name) {
+			continue
+		}
+		if !jobDidSomething(state, wf, name) {
 			continue
 		}
 		rounds := wf.Jobs[name].Rounds()
@@ -165,6 +172,17 @@ func repeatingJobs(state *RunState, wf *Workflow) []string {
 		}
 	}
 	return out
+}
+
+// jobDidSomething reports whether the job's last round ran at least
+// one step. A step that was skipped did not run.
+func jobDidSomething(state *RunState, wf *Workflow, name string) bool {
+	for _, st := range state.Steps {
+		if st.Job == name && !st.Skipped {
+			return true
+		}
+	}
+	return false
 }
 
 // startRound begins the next round of a job.
@@ -189,7 +207,9 @@ func clearJobSteps(state *RunState, wf *Workflow, name string) {
 	for _, step := range job.Steps {
 		ids[step.ID] = true
 	}
-	kept := state.Steps[:0]
+	// A fresh slice: the run state is marshalled outside the run's
+	// lock, so the old one must not be written to.
+	kept := make([]StepState, 0, len(state.Steps))
 	for _, st := range state.Steps {
 		if ids[st.ID] {
 			continue

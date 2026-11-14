@@ -359,6 +359,11 @@ func (s *Service) actOnDecision(ctx context.Context, r *run, dec decision) (sys1
 		s.recordSynthetic(r, "run_step", map[string]any{"command": dec.Next}, dec)
 		outcome, err := s.runStep(ctx, r, dec.Next)
 		if err != nil {
+			if isToolError(err) {
+				// The command could not run: the chat model takes over
+				// and can correct it.
+				return s.escalateDecision(r, dec, err)
+			}
 			return sys1None, err
 		}
 		s.appendToolResult(r, pendingCall{ID: syntheticCallID, Name: "run_step"}, outcome, !outcomeSucceeded(outcome.Status))
@@ -404,6 +409,12 @@ func (s *Service) actOnChoice(ctx context.Context, r *run, command, by string) (
 		decision{Next: command, Model: by, NextConfidence: 1})
 	outcome, err := s.runStep(ctx, r, command)
 	if err != nil {
+		if isToolError(err) {
+			// The command could not run: the user is told and the run
+			// goes on.
+			s.notify(r, "⚠️ "+err.Error())
+			return false, nil
+		}
 		return false, err
 	}
 	s.appendToolResult(r, pendingCall{ID: syntheticCallID, Name: "run_step"}, outcome, !outcomeSucceeded(outcome.Status))

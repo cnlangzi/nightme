@@ -38,6 +38,15 @@ type toolError struct{ msg string }
 
 func (e *toolError) Error() string { return e.msg }
 
+// isToolError reports whether the error is one the agent can correct.
+//
+// A tool error does not end the run: it comes back to the agent, which
+// tries again.
+func isToolError(err error) bool {
+	var te *toolError
+	return errors.As(err, &te)
+}
+
 // toolErrorf builds a tool error.
 func toolErrorf(format string, args ...any) error {
 	return &toolError{msg: fmt.Sprintf(format, args...)}
@@ -186,7 +195,13 @@ func (s *Service) runStep(ctx context.Context, r *run, command string) (stepResu
 			return stepResult{}, toolErrorf("%s", err.Error())
 		}
 		r.record(wfe.ActionKindRun, command, step.ID, out)
-		r.recordStep(wfe.JobOf(r.workflow, step.ID), step, out)
+		if r.isStepMessage(idx, command) || r.hasRun(step.ID) {
+			// The step ran, or the command was a repair inside a step
+			// that ran: the run state carries the latest outcome. A
+			// repair that was only attempted does not consume the
+			// step: its own message still has to run.
+			r.recordStep(wfe.JobOf(r.workflow, step.ID), step, out)
+		}
 		return stepResult{}, toolErrorf("%s", err.Error())
 	}
 	if res.Status == statusWaiting {

@@ -231,6 +231,11 @@ func checkJobs(node *yaml.Node) error {
 			if !jobKeys[je.key] {
 				return fmt.Errorf("wfe: unknown key %q in job %q (line %d)", je.key, e.key, je.line)
 			}
+			if je.key == "iterations" {
+				if err := requireWholeNumber(je.key, je.val); err != nil {
+					return fmt.Errorf("wfe: job %q: %w", e.key, err)
+				}
+			}
 			if je.key == "steps" {
 				if err := checkSteps(e.key, je.val); err != nil {
 					return err
@@ -263,7 +268,23 @@ func checkSteps(job string, node *yaml.Node) error {
 			if !stepKeys[e.key] {
 				return fmt.Errorf("wfe: unknown key %q in a step of job %q (line %d)", e.key, job, e.line)
 			}
+			if e.key == "attempts" {
+				if err := requireWholeNumber(e.key, e.val); err != nil {
+					return fmt.Errorf("wfe: job %q: %w", job, err)
+				}
+			}
 		}
+	}
+	return nil
+}
+
+// requireWholeNumber checks that a scalar node holds a whole number.
+//
+// yaml.v3 decodes a float into an int field by truncating it, so a
+// negative fraction would slip past a check on the decoded value.
+func requireWholeNumber(key string, node *yaml.Node) error {
+	if node.Kind != yaml.ScalarNode || node.Tag != "!!int" {
+		return fmt.Errorf("%s must be a whole number, got %q", key, node.Value)
 	}
 	return nil
 }
@@ -557,7 +578,7 @@ func workflowTexts(wf *Workflow) []string {
 		job := wf.Jobs[name]
 		texts = append(texts, job.If)
 		for _, step := range job.Steps {
-			texts = append(texts, step.If, step.Message, step.Shell, step.Note)
+			texts = append(texts, step.If, step.Message, step.Shell, step.Note, step.Use)
 			texts = append(texts, step.Allow...)
 			for _, v := range step.Env {
 				texts = append(texts, v)
@@ -679,6 +700,7 @@ func expandWorkflowArgs(wf *Workflow, args map[string]string) {
 			step.Message = expandArgs(step.Message, args)
 			step.Shell = expandArgs(step.Shell, args)
 			step.Note = expandArgs(step.Note, args)
+			step.Use = expandArgs(step.Use, args)
 			for j := range step.Allow {
 				step.Allow[j] = expandArgs(step.Allow[j], args)
 			}

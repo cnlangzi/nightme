@@ -520,7 +520,7 @@ jobs:
 | `on` | 触发器块。它被解析和展示，目前没有东西会触发它。 |
 | `jobs` | 各个 job，每个带一份有序的 `steps`。必填。 |
 
-一个 job 带 `needs`、`if`、`iterations` 和 `steps`。`iterations` 是这个 job 跑多少轮：不填就是一轮，`0` 是"一直跑到运行结束"，`N` 就是 `N` 轮。一轮在这个 job 的 step 跑完时结束；下一轮从这个 job 的第一个 step 开始，上一轮的 step 产出被清空，每个 step 的预算也重新开始。重复的 job 需要一个 `wait:` step——每一轮的每个 step 都被跳过的 job 会一轮接一轮地空转，永远等不到东西。
+一个 job 带 `needs`、`if`、`iterations` 和 `steps`。`iterations` 是这个 job 跑多少轮：不填就是一轮，`0` 是"一直跑到运行结束"，`N` 就是 `N` 轮。一轮在这个 job 的 step 跑完时结束；下一轮从这个 job 的第一个 step 开始，上一轮的 step 产出被清空，每个 step 的预算也重新开始。一轮里一个 step 都没跑的 job 不会再重复——每个 step 都被跳过的这一轮什么也没做。重复的 job 最好带一个 `wait:` step，不然一轮接一轮地跑，追着 work chat 的速度。
 
 一个 step 恰好带一种类型：
 

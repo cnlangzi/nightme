@@ -276,6 +276,10 @@ jobs:
 
 A **round** is one pass through a job's step list. When a round ends, the job starts the next one: the round's step outputs are cleared — so `${{ steps.fix.outputs.data.issue }}` reads the next round's fix — and the per-step `attempts` budgets start over. The job's `if:` conditions are read from the state of the round that is running.
 
+A round in which no step ran does not repeat: a job whose every step is skipped had nothing to do, so it does not start another round. The plan is exhausted and the agent decides whether the run is over.
+
+A job waits for the jobs it `needs` — a repeating needed job releases the waiting job after its first round, because a job that repeats until the run ends never finishes.
+
 A workflow runs one job graph in one work chat: the branches of the graph express ordering and branching, never concurrent work on separate workspaces.
 
 ---
@@ -344,7 +348,7 @@ The step's outputs carry what the command produced: `data.exit_code`, `data.stdo
 
 The step waits five minutes and then reports `ok`. The duration is a Go duration (`30s`, `5m`, `1h30m`); a value that does not parse is refused when the file is loaded. A wait carries no command.
 
-A wait is how a repeating job backs off when there is nothing to do: it belongs at the start of the round, because the expression language has no negation — a wait that runs only when the queue was empty cannot be written as a condition on the step's outcome. A repeating job needs one: a job whose every step is skipped in every round would otherwise go round after round without ever waiting.
+A wait is how a repeating job backs off when there is nothing to do: it belongs at the start of the round, because the expression language has no negation — a wait that runs only when the queue was empty cannot be written as a condition on the step's outcome. A repeating job wants one: without it the rounds follow each other as fast as the work chat answers.
 
 `/me stop` ends a wait at once: the wait belongs to the run.
 

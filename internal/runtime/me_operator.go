@@ -45,13 +45,27 @@ func (o *operator) Speak(ctx context.Context, chatID, text string, opts channel.
 	}
 	msgID, err := imp.Speak(ctx, chatID, text, opts)
 	if err != nil {
-		return "", err
+		// The message may have reached the chat even though the
+		// daemon did not take it: the caller is told which it was.
+		return msgID, err
 	}
 	// The tracker already knows the message from the inbound side;
 	// registering it again is harmless and covers a channel that
 	// publishes the message on its own.
 	o.tracker.Register(msgID, chatID, text)
 	return msgID, nil
+}
+
+// Ask puts a question in the chat.
+//
+// The question is visible and the operator can answer it, but the
+// daemon does not take it as a turn of its own.
+func (o *operator) Ask(ctx context.Context, chatID, text string, opts channel.SpeakOptions) (string, error) {
+	imp, err := o.impersonatorFor(chatID)
+	if err != nil {
+		return "", err
+	}
+	return imp.Ask(ctx, chatID, text, opts)
 }
 
 // Act answers a prompt the chat is waiting for.

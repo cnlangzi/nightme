@@ -164,15 +164,107 @@ func TestTheCardOffersTheQuestionAsButtons(t *testing.T) {
 	buttons := op.Buttons()
 	found := false
 	for _, b := range buttons {
-		if b.Action == "reply /gtw commit" {
+		if b.Label == "/gtw commit" && b.Action == "reply 0" {
 			found = true
 		}
-		if b.Action == "reply escalate" {
-			t.Errorf("the card offers the operator %q, want the options of the run", b.Action)
+		if b.Label == "escalate" {
+			t.Errorf("the card offers the operator %q, want the options of the run", b.Label)
 		}
 	}
 	if !found {
 		t.Fatalf("the card has no answer button: %+v", buttons)
+	}
+}
+
+// TestTheQuestionIsNotDispatched — the question belongs to the run,
+// not to the agent: the agent never sees what the run asked.
+func TestTheQuestionIsNotDispatched(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	provider := &scriptedProvider{responses: []llm.Response{
+		{Message: toolCallMsg("c1", toolAskHuman, map[string]any{"question": "Which branch?"})},
+	}}
+	svc, op := testService(t, dir, Config{Provider: provider})
+	op.steps = []fakeStep{pendingStep("still going")}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitForLine(t, op, "Which branch?")
+
+	asked := op.Asked()
+	if len(asked) != 1 {
+		t.Fatalf("the run asked %d questions, want 1", len(asked))
+	}
+	if !strings.Contains(asked[0].Text, "Which branch?") {
+		t.Errorf("the question is %q, want the model's question", asked[0].Text)
+	}
+	for _, m := range op.Spoken() {
+		if strings.Contains(m.Text, "Which branch?") {
+			t.Fatalf("the question was dispatched to the agent: %+v", m)
+		}
+	}
+}
+
+// TestANumberedAnswerIsTheOption — the card's buttons carry the
+// number of the option, because a chat button has room for a few
+// bytes only.
+func TestANumberedAnswerIsTheOption(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	decider := &scriptedDecider{answers: []llm.DecisionResponse{
+		decisionResp("jev", "/gtw commit", 0.1, 0),
+	}}
+	svc, op := testService(t, dir, Config{Decider: decider})
+	op.steps = []fakeStep{pendingStep("still going"), okStep("committed")}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitForLine(t, op, "Which step should run next?")
+
+	if err := svc.Reply(context.Background(), "obs-1", "0"); err != nil {
+		t.Fatalf("reply: %v", err)
+	}
+	waitSent(t, op, "/gtw commit")
+}
+
+// TestContinue_CancelsAPauseThatHasNotTakenEffect — the operator
+// changed their mind before the step ended: the run does not pause.
+func TestContinue_CancelsAPauseThatHasNotTakenEffect(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
+	op.steps = []fakeStep{{open: true}}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitSent(t, op, "/gtw commit")
+
+	if err := svc.Pause(context.Background(), "obs-1"); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	if err := svc.Continue(context.Background(), "obs-1", ""); err != nil {
+		t.Fatalf("continue: %v", err)
+	}
+
+	// The step ends: the run goes on instead of pausing.
+	if err := op.answer("obs-1", "", ""); err != nil {
+		t.Fatalf("settle the step: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if st := svc.Status("obs-1"); st.Paused {
+		t.Fatal("the run paused although the operator cancelled the pause")
 	}
 }
 

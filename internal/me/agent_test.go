@@ -49,6 +49,7 @@ type fakeOperator struct {
 	steps   []fakeStep
 	sent    []string
 	spoken  []spokenMessage
+	asked   []askedMessage
 	cards   []string
 	buttons [][]channel.CardButton
 	execs   map[string]*fakeExec
@@ -113,6 +114,43 @@ func (f *fakeOperator) Speak(_ context.Context, chatID, text string, opts channe
 		f.execs[id] = ex
 	}
 	return id, nil
+}
+
+// askedMessage is one question the run asked in the chat.
+type askedMessage struct {
+	// Text is what was asked.
+	Text string
+	// Display is what the chat shows.
+	Display string
+	// ReplyTo names the message the question quotes.
+	ReplyTo string
+	// MsgID is the id of the message the question became.
+	MsgID string
+}
+
+// Ask puts a question in the chat.
+//
+// The question is not dispatched: it belongs to the run, not to the
+// agent.
+func (f *fakeOperator) Ask(_ context.Context, _ string, text string, opts channel.SpeakOptions) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.seq++
+	id := fmt.Sprintf("msg-%d", f.seq)
+	f.asked = append(f.asked, askedMessage{
+		Text:    text,
+		Display: opts.Display,
+		ReplyTo: opts.ReplyTo,
+		MsgID:   id,
+	})
+	return id, nil
+}
+
+// Asked returns the questions the run asked.
+func (f *fakeOperator) Asked() []askedMessage {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]askedMessage(nil), f.asked...)
 }
 
 // Act answers a prompt the chat is waiting for.

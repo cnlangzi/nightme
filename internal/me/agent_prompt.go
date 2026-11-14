@@ -31,7 +31,7 @@ func (s *Service) systemPrompt(r *run) string {
 	b.WriteString("- Use run_step for the workflow's commands. A command the workflow does not allow comes back as an error — do not run it again.\n")
 	b.WriteString("- Use instruct for the work the commands do not cover, when the workflow allows it.\n")
 	b.WriteString("- Use answer_choice when an outcome says a prompt is waiting.\n")
-	b.WriteString("- Use ask_human when the next step needs the user's judgement or their credentials.\n")
+	b.WriteString("- Use ask_human when the next step needs the user's judgement or their credentials. The question goes to the chat as a message of its own; the user answers it there.\n")
 	b.WriteString("- Use repo_status to read the branch and the working tree before you act on them.\n")
 	b.WriteString("- Call finish when the workflow is done. A done verdict is only accepted after the last step succeeded.\n")
 	b.WriteString("- Always call a tool. An answer without a tool call does not move the run forward.\n")

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/channel"
@@ -43,8 +44,19 @@ func (s *Service) speak(ctx context.Context, r *run, text, replyTo string) (stri
 //
 // The question is a reply to the run's overview, so the answer comes
 // back the way a person's reply comes back.
+//
+// The question is not dispatched: it belongs to the run, not to the
+// agent. The agent never sees what the run asked.
 func (s *Service) speakQuestion(ctx context.Context, r *run, question string) (string, error) {
-	return s.speak(ctx, r, "❓ "+question, r.cardMessageID())
+	if s.cfg.Operator == nil {
+		return "", errors.New("me: no operator: the chat cannot be spoken in")
+	}
+	return s.cfg.Operator.Ask(ctx, r.chatID, "❓ "+question, channel.SpeakOptions{
+		ReplyTo: r.cardMessageID(),
+		Display: BotMark + "❓ " + question,
+		Owner:   r.owner,
+		RunID:   r.id,
+	})
 }
 
 // postCard publishes the run's overview in the chat.
@@ -176,11 +188,15 @@ func (s *Service) cardView(r *run) channel.CardSpec {
 	if len(options) > 0 {
 		// The run is waiting for an answer: the options become the
 		// card's buttons, so a click is the answer.
+		//
+		// The button carries the number of the option, not its text:
+		// a chat button has room for a few bytes only, and the text
+		// of an option can be long.
 		buttons = nil
-		for _, option := range options {
+		for i, option := range options {
 			buttons = append(buttons, channel.CardButton{
 				Label:  option.Value,
-				Action: cardActionReply + " " + option.Value,
+				Action: cardActionReply + " " + strconv.Itoa(i),
 			})
 		}
 		buttons = append(buttons, channel.CardButton{Label: "停止", Action: cardActionStop})

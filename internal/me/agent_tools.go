@@ -86,7 +86,7 @@ func toolCatalogue() []llm.Tool {
 		},
 		{
 			Name:        toolAskHuman,
-			Description: "Ask the user a question. The run waits for the answer.",
+			Description: "Ask the user a question. The run waits for the answer. The operator answers by quoting the question or by picking a button on the run card.",
 			Schema:      json.RawMessage(`{"type":"object","properties":{"question":{"type":"string","description":"the question"}},"required":["question"],"additionalProperties":false}`),
 		},
 		{

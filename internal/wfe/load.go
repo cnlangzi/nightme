@@ -96,15 +96,26 @@ func LoadDir(dir string) ([]*Workflow, []Failure) {
 // A workflow file is a `*.yaml` or a `*.yml` file. A directory that
 // cannot be read is an error: the caller says so instead of reporting
 // an empty directory.
+//
+// The directory is checked before it is read: a path that is not a
+// directory is refused on every platform, because reading it does not
+// fail the same way everywhere.
 func WorkflowPaths(dir string) ([]string, error) {
 	if strings.TrimSpace(dir) == "" {
 		return nil, nil
 	}
-	entries, err := os.ReadDir(dir)
+	info, err := os.Stat(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
+		return nil, err
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("%s is not a directory", dir)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
 		return nil, err
 	}
 	var out []string

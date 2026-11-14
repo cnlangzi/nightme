@@ -745,7 +745,9 @@ The user picks the models. nightme never chooses one, and it never injects a mod
 
 The run card carries the same commands: its buttons are `[暂停] [继续] [停止]`, and a click is the command it stands for.
 
-A run that waits for an answer offers the choices as the card's buttons: a click is the answer, and the answer never reaches the agent. A person who quotes the question instead types the answer — it is claimed by the run before the agent sees it.
+A run that waits for an answer offers the choices as the card's buttons: a click is the answer, and the answer never reaches the agent. A person who quotes the question instead answers it in their own words — the answer is claimed by the run before the agent sees it.
+
+The question itself never reaches the agent either: it is a message of the chat, not a turn of the conversation. The agent sees the commands the run speaks, not the questions the run asks.
 
 The arguments of `/me start` fill the workflow's declared arguments: a positional token fills the next argument that is still unassigned, in declaration order, and a token of the form `name=value` assigns that argument by name. An argument the workflow does not declare is refused, and an argument with neither a value nor a default is refused.
 
@@ -771,14 +773,22 @@ A step that is still running reports `waiting`, and a step whose execution is go
 
 The outcome of a step reaches the run state and the expressions of the steps after it: the status as `${{ steps.<id>.outputs.status }}`, the facts under `${{ steps.<id>.outputs.data.<key> }}`.
 
-The progress the chat receives is built from the outcome:
+The chat sees the outcome in the run card — one message, updated in
+place:
 
 ```
-▶ /gtw fix 42 -y
-✅ /gtw fix 42 -y
-▶ /review
-⚠️ /review incomplete · 1/3 groups unfinished
-✅ issue 42 is on its way · 6 actions · system-1: 0 decisions, 0 tokens · system-2: 8 decisions, 4210 tokens
+fix-issue · running
+
+args: id=42
+
+1. ✅ /gtw fix 42 -y
+2. ✅ /gtw commit
+3. ⚠️ /review
+4. ⏳ /gtw push
+
+current: /gtw push
+decision: the workflow — the plan says so
+actions: 6 · system-1: 0 decisions, 0 tokens · system-2: 8 decisions, 4210 tokens
 ```
 
 ### 8.11 Guardrails and recovery

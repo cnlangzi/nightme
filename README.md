@@ -696,7 +696,9 @@ The receipt, the reaction and the permission card anchor to that message the way
 they anchor to a message you sent yourself. The run's overview — the steps, the
 current one, the last decision, the token usage — is one card in the chat, with
 `[暂停] [继续] [停止]` on it; a click is the command it stands for. When the run
-asks a question, the choices become the card's buttons: a click is the answer.
+asks a question, the choices become the card's buttons: a click is the answer. The
+question itself never reaches the agent — it is a message of the chat, not a turn
+of the conversation.
 
 Two channels can be driven this way: Feishu and Telegram. On any other channel
 `/me start` says so and refuses.

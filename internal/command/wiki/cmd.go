@@ -154,11 +154,11 @@ func (f *Factory) runInit(ctx context.Context, rt command.RuntimeServices, cs *c
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
 
-	repoRoot, err := f.git.RepoRoot(cwd)
+	repoRoot, err := f.git.RepoRoot(ctx, cwd)
 	if err != nil {
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
-	clean, err := f.git.IsClean(repoRoot)
+	clean, err := f.git.IsClean(ctx, repoRoot)
 	if err != nil {
 		return command.Reply(ctx, rt, "❌ git status failed: "+err.Error()), nil
 	}
@@ -221,7 +221,7 @@ func (f *Factory) runLlmsTxt(ctx context.Context, rt command.RuntimeServices, cs
 	if fail != nil {
 		return fail, nil
 	}
-	repoRoot, err := f.git.RepoRoot(cwd)
+	repoRoot, err := f.git.RepoRoot(ctx, cwd)
 	if err != nil {
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}

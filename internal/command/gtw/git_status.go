@@ -109,7 +109,11 @@ type GitStatusSnapshot = messages.GitStatusSnapshot
 // cached-ref case. The runtime footer path keeps using this
 // function to avoid an extra network round-trip on every stamp.
 func CollectReadiness(ctx context.Context, dir string, git GitRunner) (*GitStatusSnapshot, error) {
-	out, stderr, err := git.Run(ctx, dir, "status", "--porcelain", "--branch",
+	// `--no-optional-locks` skips git's optional index refresh, so
+	// the footer path (one call per outbound message) never takes
+	// the index lock and never leaves one behind for the next git
+	// command to collide with.
+	out, stderr, err := git.Run(ctx, dir, "--no-optional-locks", "status", "--porcelain", "--branch",
 		"--untracked-files=normal")
 	if err != nil {
 		// Non-zero exit: not-a-git-repo, IO error, etc. We swallow

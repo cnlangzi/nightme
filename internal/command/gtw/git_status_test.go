@@ -77,7 +77,7 @@ func TestCollectReadinessForDispatch_UpstreamMissingNoProbe(t *testing.T) {
 	// / commit invocation even for branches that have never
 	// been pushed — wasteful.
 	g := &probeGit{}
-	g.on([]string{"status", "--porcelain", "--branch", "--untracked-files=normal"},
+	g.on(statusCmd,
 		"## feature/no-upstream\n", "", nil)
 
 	snap, err := CollectReadinessForDispatch(context.Background(), "/w", g)
@@ -105,7 +105,7 @@ func TestCollectReadinessForDispatch_DetachedHeadNoProbe(t *testing.T) {
 	// the detached branch is already flagged via the porcelain
 	// header (no upstream possible).
 	g := &probeGit{}
-	g.on([]string{"status", "--porcelain", "--branch", "--untracked-files=normal"},
+	g.on(statusCmd,
 		"## HEAD (no branch)\n", "", nil)
 
 	snap, err := CollectReadinessForDispatch(context.Background(), "/w", g)
@@ -130,7 +130,7 @@ func TestCollectReadinessForDispatch_UpstreamConfirmed(t *testing.T) {
 	// Happy path: porcelain claims upstream, ls-remote confirms.
 	// Snap should be unchanged.
 	g := &probeGit{}
-	g.on([]string{"status", "--porcelain", "--branch", "--untracked-files=normal"},
+	g.on(statusCmd,
 		"## fix-install...origin/fix-install [ahead 2]\n", "", nil)
 	g.on([]string{"ls-remote", "--heads", "origin", "fix-install"},
 		"e43d2665eeae2ff8a9b763cc2c5a3e9f50611997\trefs/heads/fix-install\n", "", nil)
@@ -167,7 +167,7 @@ func TestCollectReadinessForDispatch_StaleCachedUpstreamFlipped(t *testing.T) {
 	// / clean" → ready, which is exactly what the bug
 	// exploits).
 	g := &probeGit{}
-	g.on([]string{"status", "--porcelain", "--branch", "--untracked-files=normal"},
+	g.on(statusCmd,
 		"## fix-install...origin/fix-install\n", "", nil)
 	g.on([]string{"ls-remote", "--heads", "origin", "fix-install"},
 		"", "", nil) // empty stdout = branch NOT on origin
@@ -214,7 +214,7 @@ func TestCollectReadinessForDispatch_LSRemoteErrorFallback(t *testing.T) {
 	// cached ref really was stale and we got past the gate on
 	// a fluke.
 	g := &probeGit{}
-	g.on([]string{"status", "--porcelain", "--branch", "--untracked-files=normal"},
+	g.on(statusCmd,
 		"## feature/x...origin/feature/x [ahead 1]\n", "", nil)
 	g.on([]string{"ls-remote", "--heads", "origin", "feature/x"},
 		"", "fatal: unable to access 'origin'", errors.New("exit 128"))
@@ -241,7 +241,7 @@ func TestCollectReadinessForDispatch_StaleWithAheadCountsZeroed(t *testing.T) {
 	// that doesn't exist on origin, so the "ahead/behind"
 	// counts are computed against a ghost.
 	g := &probeGit{}
-	g.on([]string{"status", "--porcelain", "--branch", "--untracked-files=normal"},
+	g.on(statusCmd,
 		"## stale-branch...origin/stale-branch [ahead 3, behind 2]\n", "", nil)
 	g.on([]string{"ls-remote", "--heads", "origin", "stale-branch"},
 		"", "", nil)
@@ -265,7 +265,7 @@ func TestCollectReadiness_BareDoesNotProbe(t *testing.T) {
 	// budget would pay for a network round-trip per stamp
 	// otherwise, which is exactly what we want to avoid.
 	g := &probeGit{}
-	g.on([]string{"status", "--porcelain", "--branch", "--untracked-files=normal"},
+	g.on(statusCmd,
 		"## fix-install...origin/fix-install\n", "", nil)
 
 	snap, err := CollectReadiness(context.Background(), "/w", g)

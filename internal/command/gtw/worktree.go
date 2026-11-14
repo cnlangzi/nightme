@@ -29,10 +29,28 @@ type ExecGitRunner struct{}
 // path can never drift from the CLI runner's. dir may be empty
 // (run in the caller's cwd); otherwise it is the working
 // directory of the spawned process.
+//
+// A failure that git attributes to an existing index lock is
+// recovered here: the lock is removed when it is demonstrably stale
+// and the command is retried once. See gitlock.go.
 func (ExecGitRunner) Run(ctx context.Context, dir string, args ...string) (string, string, error) {
 	if len(args) == 0 {
 		return "", "", errors.New("gtw: git: empty argv")
 	}
+	stdout, stderr, err := runCmd(ctx, dir, "git", args...)
+	if err == nil {
+		return stdout, stderr, nil
+	}
+	lockPath, ok := parseGitLockConflict(stderr)
+	if !ok {
+		return stdout, stderr, err
+	}
+	return recoverGitLockConflict(ctx, dir, args, stdout, stderr, err, lockPath, runGitCmd)
+}
+
+// runGitCmd re-runs a git invocation. It is the retry hook of the
+// lock-conflict recovery.
+func runGitCmd(ctx context.Context, dir string, args ...string) (string, string, error) {
 	return runCmd(ctx, dir, "git", args...)
 }
 
@@ -346,15 +364,17 @@ func defaultBranchFromRemoteSymref(ctx context.Context, dir string, git GitRunne
 // command. The sequence:
 //
 //  1. Discover the default branch (errors if no origin).
-//  2. Refuse if the primary checkout has uncommitted changes —
-//     silently stashing / discarding would be hostile.
-//  3. Verify repoRoot is the primary checkout (not a linked
+//  2. Verify repoRoot is the primary checkout (not a linked
 //     worktree). `git checkout <default>` from a linked
 //     worktree fails because the default branch is checked
 //     out elsewhere; worse, git can silently switch the
 //     worktree itself off the user's feature branch.
-//  4. `git checkout <default>`.
-//  5. `git pull --rebase origin <default>`.
+//  3. Refuse while a rebase is unfinished — clearing the index
+//     lock alone does not make the repository usable.
+//  4. Refuse if the primary checkout has uncommitted changes —
+//     silently stashing / discarding would be hostile.
+//  5. `git checkout <default>`.
+//  6. `git pull --rebase origin <default>`.
 //
 // Returns (newHead, pullOut, err):
 //   - newHead: the post-pull HEAD SHA, for callers that want
@@ -370,18 +390,7 @@ func RefreshDefaultBranch(ctx context.Context, repoRoot string, deps HandlerDeps
 		return "", "", err
 	}
 
-	// Step 2: refuse on dirty main.
-	statusOut, _, err := deps.Git.Run(ctx, repoRoot, "status", "--porcelain")
-	if err != nil {
-		return "", "", fmt.Errorf("git status %s: %w", repoRoot, err)
-	}
-	if statusOut != "" {
-		return "", "", fmt.Errorf(
-			"❌ main repo %s has uncommitted changes — commit or stash first:\n%s",
-			repoRoot, statusOut)
-	}
-
-	// Step 3: enforce primary-checkout precondition. `git
+	// Step 2: enforce primary-checkout precondition. `git
 	// rev-parse --git-dir` returns the per-worktree .git
 	// location; `--git-common-dir` returns the shared .git
 	// directory. They match only in the primary checkout.
@@ -403,12 +412,36 @@ func RefreshDefaultBranch(ctx context.Context, repoRoot string, deps HandlerDeps
 			repoRoot)
 	}
 
-	// Step 4: checkout.
-	if _, _, err := deps.Git.Run(ctx, repoRoot, "checkout", branch); err != nil {
-		return "", "", fmt.Errorf("git checkout %s in %s: %w", branch, repoRoot, err)
+	// Step 3: refuse while a rebase is unfinished. A killed
+	// `git pull --rebase` leaves the rebase state behind, and the
+	// next rebase refuses to run until the user clears it. The
+	// repository is left untouched — aborting the rebase would
+	// discard the user's in-flight commits, and that decision is
+	// theirs.
+	if rebase := unfinishedRebase(gitDir); rebase != "" {
+		return "", "", fmt.Errorf(
+			"❌ %s is in the middle of a rebase (%s) — run `git rebase --abort` to clear it before refreshing",
+			repoRoot, rebase)
 	}
 
-	// Step 5: pull --rebase. We pass explicit `<remote>
+	// Step 4: refuse on dirty main.
+	statusOut, stderr, err := deps.Git.Run(ctx, repoRoot,
+		"--no-optional-locks", "status", "--porcelain")
+	if err != nil {
+		return "", "", gitErr(fmt.Sprintf("git status %s", repoRoot), err, stderr)
+	}
+	if statusOut != "" {
+		return "", "", fmt.Errorf(
+			"❌ main repo %s has uncommitted changes — commit or stash first:\n%s",
+			repoRoot, statusOut)
+	}
+
+	// Step 5: checkout.
+	if _, stderr, err := deps.Git.Run(ctx, repoRoot, "checkout", branch); err != nil {
+		return "", "", gitErr(fmt.Sprintf("git checkout %s in %s", branch, repoRoot), err, stderr)
+	}
+
+	// Step 6: pull --rebase. We pass explicit `<remote>
 	// <branch>` so the command works on local branches that
 	// have no upstream-tracking config. We use `--rebase` rather
 	// than the default merge-style pull, OR `--ff-only`, for a
@@ -435,14 +468,13 @@ func RefreshDefaultBranch(ctx context.Context, repoRoot string, deps HandlerDeps
 	pullOut, stderr, err := deps.Git.Run(ctx, repoRoot,
 		"pull", "--rebase", "origin", branch)
 	if err != nil {
-		return "", pullOut, fmt.Errorf(
-			"git pull --rebase origin %s in %s: %w "+
-				"[stderr: %s] "+
+		return "", pullOut, gitErr(fmt.Sprintf(
+			"git pull --rebase origin %s in %s "+
 				"(rebase conflict? resolve manually, then `git rebase --abort` to clean up before retrying)",
-			branch, repoRoot, err, stderr)
+			branch, repoRoot), err, stderr)
 	}
 
-	// Step 5: report the new HEAD.
+	// Report the new HEAD.
 	headOut, _, err := deps.Git.Run(ctx, repoRoot, "rev-parse", "HEAD")
 	if err != nil {
 		return "", pullOut, fmt.Errorf("git rev-parse HEAD in %s: %w", repoRoot, err)

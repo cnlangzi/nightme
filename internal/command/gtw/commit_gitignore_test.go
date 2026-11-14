@@ -88,7 +88,7 @@ type recordingGit struct {
 
 func (r *recordingGit) Run(_ context.Context, _ string, args ...string) (string, string, error) {
 	r.calls = append(r.calls, append([]string(nil), args...))
-	if len(args) >= 1 && args[0] == "status" {
+	if gitSubcommand(args) == "status" {
 		return r.statusResp, "", nil
 	}
 	return "", "", nil

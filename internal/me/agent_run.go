@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cnlangzi/nightme/internal/channel/loopback"
+	"github.com/cnlangzi/nightme/internal/gateway/observe"
 	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/wfe"
@@ -32,16 +32,19 @@ type pendingCall struct {
 type askState struct {
 	// ToolCallID is the call the question belongs to.
 	ToolCallID string `json:"tool_call_id"`
-	// Question is the text the observer was asked.
+	// Question is the text the operator was asked.
 	Question string `json:"question"`
-	// Options are the choices the user may pick, when the question
-	// is a choice between them.
+	// Options are the choices the operator may pick, when the
+	// question is a choice between them.
 	Options []llm.Option `json:"options,omitempty"`
+	// MsgID is the id of the message the question was asked in. A
+	// reply to that message is an answer, not a takeover.
+	MsgID string `json:"msg_id,omitempty"`
 }
 
 // inflightState is the command a run is waiting for.
 type inflightState struct {
-	// MsgID is the loopback message the command became.
+	// MsgID is the chat message the command became.
 	MsgID string `json:"msg_id"`
 	// Command is the text that was sent.
 	Command string `json:"command"`
@@ -54,11 +57,12 @@ type inflightState struct {
 type run struct {
 	svc *Service
 
-	id             string
-	observerChatID string
-	workChatID     string
-	cwd            string
-	agent          string
+	id       string
+	chatID   string
+	cwd      string
+	owner    string
+	argNames []string
+	argVals  map[string]string
 
 	// workflow is the bound workflow the run works through.
 	workflow *wfe.Workflow
@@ -81,6 +85,17 @@ type run struct {
 	question string
 	errMsg   string
 
+	// paused reports whether the run waits for the operator.
+	paused bool
+	// pauseRequested reports whether a pause was asked for and the
+	// run has not applied it yet.
+	pauseRequested bool
+	// pauseReason says why the run paused.
+	pauseReason string
+
+	// cardMsgID is the id of the run's overview message.
+	cardMsgID string
+
 	// system1Decisions and system2Decisions count what each
 	// capability decided.
 	system1Decisions int
@@ -98,6 +113,15 @@ type run struct {
 	system1Model string
 	// judgment is why the workflow cannot decide on its own.
 	judgment string
+	// lastDecision names who decided last: the workflow, the
+	// decision model or the chat model.
+	lastDecision string
+	// lastReason says why that decision was made.
+	lastReason string
+	// lastNote is what the chat model said last.
+	lastNote string
+	// summary is how the run ended.
+	summary string
 	// finished records that the model called the finish tool.
 	finished bool
 	// suspended records that the daemon went away while the run was
@@ -111,36 +135,54 @@ type run struct {
 	cancel context.CancelFunc
 	// resume carries the signal that a reply arrived.
 	resume chan struct{}
+	// unpause carries the signal that the control came back.
+	unpause chan struct{}
 	// done is closed when the run's goroutine is over.
 	done chan struct{}
-	// reply is the text the user answered with.
+	// reply is the text the operator answered with.
 	reply string
 	// watch is the channel the running command is watched on. It is
-	// kept across the calls that resume a command, so the loopback
-	// channel never grows a watcher nobody reads.
-	watch <-chan loopback.Execution
+	// kept across the calls that resume a command, so the tracker
+	// never grows a watcher nobody reads.
+	watch <-chan observe.Execution
 }
 
 // newRun builds a run for a bound workflow.
-func newRun(svc *Service, req Request, wf *wfe.Workflow) *run {
+func newRun(svc *Service, req Request, wf *wfe.Workflow, args map[string]string) *run {
 	ctx, cancel := context.WithCancel(context.Background())
 	id := fmt.Sprintf("%s-%d", req.Name, svc.now().UnixNano())
 	now := svc.now()
+	names := make([]string, 0, len(args))
+	for name := range args {
+		names = append(names, name)
+	}
+	sortStrings(names)
 	return &run{
-		svc:            svc,
-		id:             id,
-		observerChatID: req.ObserverChatID,
-		workChatID:     loopback.ChatIDPrefix + id,
-		cwd:            req.Cwd,
-		agent:          req.Agent,
-		workflow:       wf,
-		policy:         wfe.NewPolicy(wf, nil),
-		state:          newRunState(id, wf.Name, req.Cwd, now),
-		phase:          PhaseRunning,
-		ctx:            ctx,
-		cancel:         cancel,
-		resume:         make(chan struct{}, 1),
-		done:           make(chan struct{}),
+		svc:      svc,
+		id:       id,
+		chatID:   req.ChatID,
+		cwd:      req.Cwd,
+		owner:    req.Owner,
+		argNames: names,
+		argVals:  args,
+		workflow: wf,
+		policy:   wfe.NewPolicy(wf, nil),
+		state:    newRunState(id, wf.Name, req.Cwd, now),
+		phase:    PhaseRunning,
+		ctx:      ctx,
+		cancel:   cancel,
+		resume:   make(chan struct{}, 1),
+		unpause:  make(chan struct{}, 1),
+		done:     make(chan struct{}),
+	}
+}
+
+// sortStrings sorts a slice of strings in place.
+func sortStrings(s []string) {
+	for i := 1; i < len(s); i++ {
+		for j := i; j > 0 && s[j] < s[j-1]; j-- {
+			s[j], s[j-1] = s[j-1], s[j]
+		}
 	}
 }
 
@@ -171,6 +213,8 @@ func (r *run) status() Status {
 		System1Usage:     r.system1Usage,
 		System2Usage:     r.system2Usage,
 		Question:         r.question,
+		Paused:           r.paused,
+		PauseReason:      r.pauseReason,
 		Error:            r.errMsg,
 	}
 	if r.inflight != nil {
@@ -210,7 +254,7 @@ func (r *run) finish(phase Phase, reason string) {
 	r.cancel()
 }
 
-// deliver hands the user's reply to the waiting run.
+// deliver hands the operator's reply to the waiting run.
 func (r *run) deliver(text string) error {
 	r.mu.Lock()
 	if r.ask == nil {
@@ -230,7 +274,7 @@ func (r *run) deliver(text string) error {
 	return nil
 }
 
-// awaitReply waits for the user's reply.
+// awaitReply waits for the operator's reply.
 //
 // The wait ends when the run is cancelled, when the reply arrives, or
 // when ctx ends.
@@ -247,6 +291,98 @@ func (r *run) awaitReply(ctx context.Context) (string, error) {
 	r.reply = ""
 	r.mu.Unlock()
 	return reply, nil
+}
+
+// requestPause records that the run should stop after the step it is
+// on.
+func (r *run) requestPause(reason string) {
+	r.mu.Lock()
+	r.pauseRequested = true
+	r.pauseReason = reason
+	r.mu.Unlock()
+}
+
+// applyPause moves the run into the paused state when a pause was
+// asked for. It reports whether the run paused.
+func (r *run) applyPause() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.pauseRequested {
+		return false
+	}
+	r.pauseRequested = false
+	r.paused = true
+	r.phase = PhasePaused
+	return true
+}
+
+// isPaused reports whether the run waits for the operator.
+func (r *run) isPaused() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.paused
+}
+
+// handBack hands the control back to a paused run.
+//
+// A note is the operator's instruction: it joins the conversation the
+// chat model reads.
+func (r *run) handBack(note string) error {
+	r.mu.Lock()
+	if !r.paused {
+		r.mu.Unlock()
+		return errors.New("this run is not paused")
+	}
+	r.paused = false
+	r.pauseReason = ""
+	r.phase = PhaseRunning
+	if strings.TrimSpace(note) != "" {
+		r.messages = append(r.messages, llm.Message{
+			Role:  llm.RoleUser,
+			Parts: []llm.Part{{Type: llm.PartText, Text: note}},
+		})
+	}
+	r.mu.Unlock()
+
+	select {
+	case r.unpause <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
+// awaitUnpause waits until the control comes back.
+func (r *run) awaitUnpause(ctx context.Context) error {
+	select {
+	case <-r.unpause:
+		return nil
+	case <-r.ctx.Done():
+		return r.ctx.Err()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// askMsgID returns the id of the message the run asked its question
+// in.
+func (r *run) askMsgID() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.ask == nil {
+		return ""
+	}
+	return r.ask.MsgID
+}
+
+// isAnswerTo reports whether the message answers the run's question.
+//
+// A reply to the question is an answer; anything else is somebody
+// else taking the chat back.
+func (r *run) isAnswerTo(msg *messages.InboundMessage) bool {
+	if msg == nil || msg.ReplyTo == "" {
+		return false
+	}
+	return msg.ReplyTo == r.askMsgID()
 }
 
 // appendMessage adds a turn to the conversation.
@@ -325,6 +461,14 @@ func (r *run) judgmentReason() string {
 func (r *run) setJudgment(reason string) {
 	r.mu.Lock()
 	r.judgment = reason
+	r.mu.Unlock()
+}
+
+// setDecision records who decided last and why.
+func (r *run) setDecision(who, reason string) {
+	r.mu.Lock()
+	r.lastDecision = who
+	r.lastReason = reason
 	r.mu.Unlock()
 }
 
@@ -457,10 +601,10 @@ func outcomeLine(o messages.Outcome) string {
 // the judgment history.
 type persistedRun struct {
 	RunID            string             `json:"run_id"`
-	ObserverChatID   string             `json:"observer_chat_id"`
-	WorkChatID       string             `json:"work_chat_id"`
+	ChatID           string             `json:"chat_id"`
 	Cwd              string             `json:"cwd"`
-	Agent            string             `json:"agent"`
+	Owner            string             `json:"owner"`
+	Args             map[string]string  `json:"args,omitempty"`
 	Workflow         *wfe.Workflow      `json:"workflow"`
 	State            *wfe.RunState      `json:"state"`
 	History          []wfe.ActionRecord `json:"history"`
@@ -471,6 +615,9 @@ type persistedRun struct {
 	Phase            Phase              `json:"phase"`
 	Question         string             `json:"question"`
 	Error            string             `json:"error"`
+	Paused           bool               `json:"paused"`
+	PauseReason      string             `json:"pause_reason,omitempty"`
+	RunCardMsgID     string             `json:"run_card_msg_id,omitempty"`
 	System1Decisions int                `json:"system1_decisions"`
 	System2Decisions int                `json:"system2_decisions"`
 	System1Usage     llm.Usage          `json:"system1_usage"`
@@ -489,10 +636,10 @@ func (s *Service) persist(r *run) {
 	r.mu.Lock()
 	state := persistedRun{
 		RunID:            r.id,
-		ObserverChatID:   r.observerChatID,
-		WorkChatID:       r.workChatID,
+		ChatID:           r.chatID,
 		Cwd:              r.cwd,
-		Agent:            r.agent,
+		Owner:            r.owner,
+		Args:             r.argVals,
 		Workflow:         r.workflow,
 		State:            r.state,
 		History:          append([]wfe.ActionRecord(nil), r.policy.History...),
@@ -503,6 +650,9 @@ func (s *Service) persist(r *run) {
 		Phase:            r.phase,
 		Question:         r.question,
 		Error:            r.errMsg,
+		Paused:           r.paused,
+		PauseReason:      r.pauseReason,
+		RunCardMsgID:     r.cardMsgID,
 		System1Decisions: r.system1Decisions,
 		System2Decisions: r.system2Decisions,
 		System1Usage:     r.system1Usage,
@@ -546,8 +696,11 @@ func (s *Service) removeState(runID string) {
 //
 // A run that was waiting for a reply keeps waiting. A run that was
 // working is resumed: the command it was waiting for is resolved
-// through the loopback, and a command whose execution is gone comes
+// through the tracker, and a command whose execution is gone comes
 // back as interrupted.
+//
+// A state file left by an older daemon names a chat that no longer
+// exists: the run cannot go on there, so it is dropped.
 func (s *Service) resumeRuns(ctx context.Context) {
 	if s.cfg.StateDir == "" {
 		return
@@ -576,10 +729,18 @@ func (s *Service) resumeRuns(ctx context.Context) {
 		if state.RunID == "" || state.Workflow == nil {
 			continue
 		}
+		if state.ChatID == "" {
+			// The state names a chat the daemon no longer has.
+			// The run cannot go on: it is dropped.
+			s.logger.Warn("me: a run from an older daemon was dropped",
+				"run_id", state.RunID, "file", e.Name())
+			s.removeState(state.RunID)
+			continue
+		}
 		r := s.restoreRun(state)
 		s.mu.Lock()
 		s.runs[r.id] = r
-		s.active[r.observerChatID] = r
+		s.active[r.chatID] = r
 		s.mu.Unlock()
 
 		s.wg.Add(1)
@@ -596,10 +757,10 @@ func (s *Service) restoreRun(state persistedRun) *run {
 	r := &run{
 		svc:              s,
 		id:               state.RunID,
-		observerChatID:   state.ObserverChatID,
-		workChatID:       state.WorkChatID,
+		chatID:           state.ChatID,
 		cwd:              state.Cwd,
-		agent:            state.Agent,
+		owner:            state.Owner,
+		argVals:          state.Args,
 		workflow:         state.Workflow,
 		policy:           wfe.NewPolicy(state.Workflow, state.History),
 		state:            state.State,
@@ -610,6 +771,9 @@ func (s *Service) restoreRun(state persistedRun) *run {
 		phase:            state.Phase,
 		question:         state.Question,
 		errMsg:           state.Error,
+		paused:           state.Paused,
+		pauseReason:      state.PauseReason,
+		cardMsgID:        state.RunCardMsgID,
 		system1Decisions: state.System1Decisions,
 		system2Decisions: state.System2Decisions,
 		system1Usage:     state.System1Usage,
@@ -618,6 +782,7 @@ func (s *Service) restoreRun(state persistedRun) *run {
 		ctx:              ctx,
 		cancel:           cancel,
 		resume:           make(chan struct{}, 1),
+		unpause:          make(chan struct{}, 1),
 		done:             make(chan struct{}),
 	}
 	if r.state == nil {
@@ -627,6 +792,14 @@ func (s *Service) restoreRun(state persistedRun) *run {
 		r.phase = PhaseRunning
 	}
 	r.policy.SetRounds(r.state.Rounds)
+	if len(r.argVals) > 0 {
+		names := make([]string, 0, len(r.argVals))
+		for name := range r.argVals {
+			names = append(names, name)
+		}
+		sortStrings(names)
+		r.argNames = names
+	}
 	return r
 }
 
@@ -688,14 +861,14 @@ func (r *run) clearInflight() {
 }
 
 // watchChannel returns the channel the running command is watched on.
-func (r *run) watchChannel() <-chan loopback.Execution {
+func (r *run) watchChannel() <-chan observe.Execution {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.watch
 }
 
 // setWatchChannel keeps the channel the running command is watched on.
-func (r *run) setWatchChannel(ch <-chan loopback.Execution) {
+func (r *run) setWatchChannel(ch <-chan observe.Execution) {
 	r.mu.Lock()
 	r.watch = ch
 	r.mu.Unlock()
@@ -708,11 +881,25 @@ func (r *run) pendingAsk() *askState {
 	return r.ask
 }
 
-// clearAsk forgets the question the run is waiting for.
+// clearAsk forgets the question the run was waiting for.
 func (r *run) clearAsk() {
 	r.mu.Lock()
 	r.ask = nil
 	r.question = ""
+	r.mu.Unlock()
+}
+
+// cardMessageID returns the id of the run's overview message.
+func (r *run) cardMessageID() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.cardMsgID
+}
+
+// setCardMessageID records the id of the run's overview message.
+func (r *run) setCardMessageID(id string) {
+	r.mu.Lock()
+	r.cardMsgID = id
 	r.mu.Unlock()
 }
 
@@ -756,29 +943,55 @@ func (r *run) setTranscript(text string) {
 	r.mu.Unlock()
 }
 
-// askUser asks the user a question and waits for the answer.
+// setSummary records how the run ended.
+func (r *run) setSummary(text string) {
+	r.mu.Lock()
+	r.summary = text
+	r.mu.Unlock()
+}
+
+// setNote records what the chat model said last.
+func (r *run) setNote(text string) {
+	r.mu.Lock()
+	r.lastNote = text
+	r.mu.Unlock()
+}
+
+// askUser asks the operator a question and waits for the answer.
 //
-// The run is persisted before the question is posted to the observer
-// chat, and the wait starts after both. The order matters: the state
-// that says "this run is waiting for a reply" has to be durable before
-// the user is told, so a daemon that restarts in the window between
-// the two picks the run up as paused. Notifying first leaves that
-// window open — the observer sees the question while the state on
-// disk still says the run is working, and the restart resumes it as
-// a running run instead of a waiting one.
+// The question is asked in the chat the run works in, as a reply to
+// the run's overview: the answer comes back the way a person's reply
+// comes back, and the run does not need a channel of its own.
+//
+// The run is persisted before the question is asked, and the wait
+// starts after both. The order matters: the state that says "this
+// run is waiting for an answer" has to be durable before the
+// operator is told, so a daemon that restarts in the window between
+// the two picks the run up as asking.
 func (s *Service) askUser(ctx context.Context, r *run, question string, options []llm.Option) (string, error) {
 	r.mu.Lock()
 	waiting := r.ask != nil
 	if !waiting {
 		r.ask = &askState{Question: question, Options: options}
 		r.question = question
-		r.phase = PhasePaused
+		r.phase = PhaseAsking
 	}
 	r.mu.Unlock()
 
 	if !waiting {
 		s.persist(r)
-		s.notify(r, "❓ "+question)
+		msgID, err := s.speakQuestion(ctx, r, question)
+		if err != nil {
+			s.logger.Warn("me: the question could not be asked", "run_id", r.id, "err", err)
+		} else {
+			r.mu.Lock()
+			if r.ask != nil {
+				r.ask.MsgID = msgID
+			}
+			r.mu.Unlock()
+		}
+		s.persist(r)
+		s.updateCard(r)
 	}
 	reply, err := r.awaitReply(ctx)
 	if err != nil {

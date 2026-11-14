@@ -25,6 +25,25 @@ import (
 // rendering decisions are exposed to the wider system, never the
 // classification itself. See docs/SPEC.md section 3.1 and docs/feat/F-33.
 
+// Origin says who sent an inbound message.
+//
+// The zero value means a person sent it: a message that carries no
+// origin came from a human.
+type Origin string
+
+const (
+	// OriginHuman means a person sent the message.
+	OriginHuman Origin = ""
+	// OriginMe means the personal agent spoke in the chat.
+	//
+	// The message is a real, visible message of the chat — it is
+	// posted on the platform like any other — but the daemon knows it
+	// did not come from a person. The WatchMode gate lets it through
+	// regardless, and the personal agent does not treat it as a
+	// takeover.
+	OriginMe Origin = "me"
+)
+
 // InboundMessage is the abstract shape of "a message arriving from
 // some Channel". Channels parse their native event into this shape
 // before publishing on Channel.Incoming(); Gateway reads this and
@@ -32,6 +51,12 @@ import (
 type InboundMessage struct {
 	ChatID string
 	UserID string
+	// Origin says who sent the message: OriginHuman for a person,
+	// OriginMe for the personal agent.
+	Origin Origin
+	// RunID names the run the message belongs to. It is set on the
+	// messages the personal agent sends, and empty everywhere else.
+	RunID string
 	// Text is the caption / message body.
 	Text string
 	// Attachments is the unified attachment shape. Channels are

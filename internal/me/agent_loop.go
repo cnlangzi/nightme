@@ -27,6 +27,13 @@ const (
 	sys1Escalate
 )
 
+// Who decided last. The names show up in the run's overview.
+const (
+	decisionWorkflow = "the workflow"
+	decisionDecider  = "the decision model"
+	decisionChat     = "the chat model"
+)
+
 // drive runs one workflow to its end and reports how it ended.
 func (s *Service) drive(ctx context.Context, r *run) {
 	defer close(r.done)
@@ -50,7 +57,8 @@ func (s *Service) drive(ctx context.Context, r *run) {
 		s.removeState(r.id)
 	default:
 		s.finish(r, PhaseFailed, err.Error())
-		s.notify(r, "❌ the run failed: "+err.Error())
+		r.setSummary("the run failed: " + err.Error())
+		s.updateCard(r)
 		s.removeState(r.id)
 	}
 }
@@ -70,7 +78,7 @@ func (s *Service) loop(ctx context.Context, r *run) error {
 		return s.loopDeciderOnly(ctx, r)
 	}
 	for {
-		if err := s.checkAlive(ctx, r); err != nil {
+		if err := s.checkGate(ctx, r); err != nil {
 			return err
 		}
 		if len(r.pendingCallList()) > 0 {
@@ -89,6 +97,28 @@ func (s *Service) loop(ctx context.Context, r *run) error {
 	}
 }
 
+// checkGate reports whether the run may go on.
+//
+// A run that was asked to pause waits here: the step that was
+// running is not interrupted, and the run picks up again when the
+// operator hands the control back.
+func (s *Service) checkGate(ctx context.Context, r *run) error {
+	if err := s.checkAlive(ctx, r); err != nil {
+		return err
+	}
+	if r.applyPause() {
+		s.updateCard(r)
+	}
+	if !r.isPaused() {
+		return nil
+	}
+	if err := r.awaitUnpause(ctx); err != nil {
+		return err
+	}
+	s.updateCard(r)
+	return nil
+}
+
 // turn advances the run by one decision.
 //
 // The workflow decides when it can: the step runs as it is, and no
@@ -100,6 +130,8 @@ func (s *Service) turn(ctx context.Context, r *run) (bool, error) {
 	}
 	if decision.Kind == wfe.DecisionRun {
 		if err := r.checkStep(decision.Step); err == nil {
+			r.setDecision(decisionWorkflow, "the plan says so")
+			r.setJudgment("")
 			if err := s.runPlanStep(ctx, r, decision); err != nil {
 				return false, err
 			}
@@ -164,6 +196,7 @@ func (s *Service) runPlanStep(ctx context.Context, r *run, decision wfe.Decision
 	}
 	r.recordStep(decision.Job, decision.Step, verdict.Outcome)
 	s.persist(r)
+	s.updateCard(r)
 	return nil
 }
 
@@ -182,7 +215,7 @@ func (s *Service) goalMet(r *run) bool {
 // the model is not sure about becomes a question for the user.
 func (s *Service) loopDeciderOnly(ctx context.Context, r *run) error {
 	for {
-		if err := s.checkAlive(ctx, r); err != nil {
+		if err := s.checkGate(ctx, r); err != nil {
 			return err
 		}
 		// A question from an earlier turn is still open.
@@ -209,6 +242,8 @@ func (s *Service) loopDeciderOnly(ctx context.Context, r *run) error {
 		}
 		if decision.Kind == wfe.DecisionRun {
 			if err := r.checkStep(decision.Step); err == nil {
+				r.setDecision(decisionWorkflow, "the plan says so")
+				r.setJudgment("")
 				if err := s.runPlanStep(ctx, r, decision); err != nil {
 					return err
 				}
@@ -228,6 +263,7 @@ func (s *Service) loopDeciderOnly(ctx context.Context, r *run) error {
 		if err != nil {
 			return err
 		}
+		r.setDecision(decisionDecider, decisionReason(dec))
 		if s.canAct(dec) {
 			action, err := s.actOnDecision(ctx, r, dec)
 			if err != nil {
@@ -269,26 +305,10 @@ func (s *Service) checkAlive(ctx context.Context, r *run) error {
 // finishDone ends the run as done and tells the observer.
 func (s *Service) finishDone(r *run, summary string) {
 	r.markFinished()
+	r.setSummary(summary)
 	s.finish(r, PhaseDone, "")
-	s.notify(r, finishLine(r, "done", summary))
+	s.updateCard(r)
 	s.persist(r)
-}
-
-// notify posts a line to the observer chat.
-//
-// A run without a sender — a test, or a daemon that is still wiring
-// up — simply has nobody to tell.
-func (s *Service) notify(r *run, text string) {
-	if s.cfg.Sender == nil || strings.TrimSpace(text) == "" {
-		return
-	}
-	// The run's own context is cancelled when the run ends, and the
-	// last line — the summary — is sent after that. The context
-	// outlives the run here on purpose.
-	ctx := context.WithoutCancel(r.ctx)
-	if err := s.cfg.Sender.Send(ctx, r.observerChatID, text); err != nil {
-		s.logger.Warn("me: the observer could not be told", "run_id", r.id, "err", err)
-	}
 }
 
 // now returns the current time.
@@ -311,6 +331,7 @@ func (s *Service) system1(ctx context.Context, r *run) (sys1Action, error) {
 	if err != nil {
 		return sys1None, err
 	}
+	r.setDecision(decisionDecider, decisionReason(dec))
 	if !s.canAct(dec) {
 		// The decision is not sure enough to act on: the chat model
 		// takes over, with the decision attached as a hint.
@@ -318,6 +339,14 @@ func (s *Service) system1(ctx context.Context, r *run) (sys1Action, error) {
 		return sys1Escalate, nil
 	}
 	return s.actOnDecision(ctx, r, dec)
+}
+
+// decisionReason renders why the decision model picked what it picked.
+func decisionReason(dec decision) string {
+	if dec.Model == "" {
+		return fmt.Sprintf("p=%.2f", dec.NextConfidence)
+	}
+	return fmt.Sprintf("%s, p=%.2f", dec.Model, dec.NextConfidence)
 }
 
 // canAct reports whether a decision may be acted on without the chat
@@ -368,6 +397,7 @@ func (s *Service) actOnDecision(ctx context.Context, r *run, dec decision) (sys1
 		}
 		s.appendToolResult(r, pendingCall{ID: syntheticCallID, Name: "run_step"}, outcome, !outcomeSucceeded(outcome.Status))
 		s.persist(r)
+		s.updateCard(r)
 		return sys1Act, nil
 	}
 }
@@ -395,14 +425,16 @@ func (s *Service) actOnChoice(ctx context.Context, r *run, command, by string) (
 	}
 	if command == optionDone {
 		if err := r.checkFinish("done"); err != nil {
-			s.notify(r, "⚠️ "+err.Error())
+			r.setSummary(err.Error())
+			s.updateCard(r)
 			return false, nil
 		}
 		s.finishDone(r, r.workflow.Name+" is complete")
 		return true, nil
 	}
 	if _, err := r.checkRun(command); err != nil {
-		s.notify(r, "⚠️ "+err.Error())
+		r.setSummary(err.Error())
+		s.updateCard(r)
 		return false, nil
 	}
 	s.recordSynthetic(r, "run_step", map[string]any{"command": command},
@@ -412,13 +444,15 @@ func (s *Service) actOnChoice(ctx context.Context, r *run, command, by string) (
 		if isToolError(err) {
 			// The command could not run: the user is told and the run
 			// goes on.
-			s.notify(r, "⚠️ "+err.Error())
+			r.setSummary(err.Error())
+			s.updateCard(r)
 			return false, nil
 		}
 		return false, err
 	}
 	s.appendToolResult(r, pendingCall{ID: syntheticCallID, Name: "run_step"}, outcome, !outcomeSucceeded(outcome.Status))
 	s.persist(r)
+	s.updateCard(r)
 	return false, nil
 }
 

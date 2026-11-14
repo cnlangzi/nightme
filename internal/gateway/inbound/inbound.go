@@ -128,6 +128,16 @@ type (
 	ReactionRouter interface {
 		Handle(ctx context.Context, chatID string, ev commandServices.ReactionEvent) bool
 	}
+
+	// ReplyClaimer takes the messages a program owns.
+	//
+	// A claimer runs after the slash-command and shell branches and
+	// before the default branch: a message the claimer takes does
+	// not reach the agent.
+	ReplyClaimer interface {
+		// Claim reports whether the message belongs to the claimer.
+		Claim(ctx context.Context, msg *messages.InboundMessage) bool
+	}
 )
 
 // Router owns the priority dispatch chain and the four
@@ -143,6 +153,7 @@ type Router struct {
 	commander CommandDispatcher
 	shell     ShellDispatcher
 	action    ReactionRouter
+	claimer   ReplyClaimer
 	primary   string
 
 	// emitter is the F-59 reply sink. F-59 made the
@@ -237,6 +248,7 @@ func (r *Router) Dispatch(ctx context.Context, mgr *chatsession.Manager, msg *me
 		r.tryActionDispatch,
 		r.tryCommandDispatch,
 		r.tryShellDispatch,
+		r.tryReplyClaim,
 		r.tryMessageDispatch,
 	} {
 		handled, result, err := try(ctx, mgr, msg)
@@ -269,6 +281,23 @@ func (r *Router) requireShell() (ShellDispatcher, bool) {
 // if not wired.
 func (r *Router) requireAction() (ReactionRouter, bool) {
 	return r.action, r.action != nil
+}
+
+// requireClaimer returns the wired ReplyClaimer, or false if not
+// wired.
+func (r *Router) requireClaimer() (ReplyClaimer, bool) {
+	return r.claimer, r.claimer != nil
+}
+
+// WithReplyClaimer installs the claimer that takes the messages a
+// program owns.
+//
+// It returns the router so it can be chained onto New.
+func (r *Router) WithReplyClaimer(c ReplyClaimer) *Router {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.claimer = c
+	return r
 }
 
 // WaitExec blocks until every async-dispatch goroutine

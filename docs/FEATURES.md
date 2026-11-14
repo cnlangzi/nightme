@@ -83,12 +83,12 @@
 | Telegram Polling / Webhook 双模式 | [channel/telegram.md](./channel/telegram.md) |
 | Telegram Inline Keyboard / CallbackQuery → Choice 归一化 | [channel/telegram.md](./channel/telegram.md) |
 
-### 4.3 Loopback 进程内 channel（不渲染）
+### 4.3 Run 追踪（旁听出站消息）
 
 | 功能 | 设计文档 |
 |------|----------|
-| 进程内 loopback channel（daemon 自己的 chat；不渲染任何内容）| [WFE.md](./WFE.md) §8.1 |
-| 每条命令的执行跟踪（sent / queued / running / settled）+ 结构化 `Outcome` | [WFE.md](./WFE.md) §8.9 + [me.md](./me.md) |
+| Tracker：按 `ReplyTo` 关联已登记的入站消息，跟踪 sent / queued / running / settled + 结构化 `Outcome` | [WFE.md](./WFE.md) §8.1 + [me.md](./me.md) |
+| Tap：包住 outbound emitter，先原样转发再观测 | [WFE.md](./WFE.md) §8.1 |
 
 ## 5. 配置 / 数据模型
 
@@ -121,7 +121,7 @@
 |------|----------|
 | Workflow YAML + 引擎运行时架构（schema / 触发器 / 步骤 / 表达式 / wfe↔runtime 边界）| [WFE.md](./WFE.md) |
 | 5 类触发器：`schedule` / `pull_request` / `branch` / `issue` / `mention`（解析并展示，没有东西会触发它们）| [WFE.md](./WFE.md) §3 |
-| 三种 step：`message`（work chat）/ `shell`（shell）/ `use`（action）| [WFE.md](./WFE.md) §5 |
+| 三种 step：`message`（chat）/ `shell`（shell）/ `use`（action）| [WFE.md](./WFE.md) §5 |
 | 顶层字段（`name` / `args` / `goal` / `instruct` / `workspaces` / `on` / `jobs`）| [WFE.md](./WFE.md) §2 |
 | `${{ ... }}` 表达式（`args.*` / `steps.*.outputs.*` / `needs.*.*` / `env.*` / `now`）| [WFE.md](./WFE.md) §6 |
 | `use` 步骤 = 扩展点（注册的 action；内置 + `~/.nightme/workflows/actions/*.sh`）| [WFE.md](./WFE.md) §5.3 |
@@ -135,14 +135,14 @@
 
 | 功能 | 设计文档 |
 |------|----------|
-| 个人 agent 分层（loopback 传输 / 决策模型 / 聊天模型 / 策略）| [WFE.md](./WFE.md) §8.1 |
+| 个人 agent 分层（channel 传输 / observe 旁听 / 决策模型 / 聊天模型 / 策略）| [WFE.md](./WFE.md) §8.1 |
 | Workflow schema（`name` / `args` / `goal` / `instruct` / `workspaces` / `on` / `jobs`）| [WFE.md](./WFE.md) §2 |
 | 约束策略 `wfe.Policy`（CheckRun / CheckStep / CheckInstruct / CheckFinish / Remaining / Render）| [WFE.md](./WFE.md) §8.4 |
 | 六个工具（`run_step` / `instruct` / `answer_choice` / `ask_human` / `repo_status` / `finish`）| [WFE.md](./WFE.md) §8.5 |
 | 两种模型能力：System 1 决策模型 + System 2 聊天模型 | [WFE.md](./WFE.md) §8.6 |
 | 三种模式（仅 `me.llm` / 仅 `me.decider` / 两者都有）| [WFE.md](./WFE.md) §8.7 |
 | `me.llm` / `me.decider` 配置（模型与凭据由用户指定）| [WFE.md](./WFE.md) §8.8 |
-| `/me start` / `/me reply` / `/me stop` / `/me status` | [WFE.md](./WFE.md) §8.9 |
+| `/me start` / `/me reply` / `/me pause` / `/me continue` / `/me stop` / `/me status` | [WFE.md](./WFE.md) §8.9 |
 | Outcome 词汇表与 settled 协议 | [me.md](./me.md) |
 | Guardrails 与恢复（迭代 / token 预算 / 超时 / stall / 持久化）| [WFE.md](./WFE.md) §8.11 |
 

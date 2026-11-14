@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cnlangzi/nightme/internal/channel/loopback"
+	"github.com/cnlangzi/nightme/internal/gateway/observe"
 	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/wfe"
@@ -36,17 +36,17 @@ func TestSystem2_ToolDispatch(t *testing.T) {
 			Usage: llm.Usage{InputTokens: 10, OutputTokens: 5}},
 		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "done", "summary": "committed"})},
 	}}
-	svc, lb, sender := testService(t, dir, Config{Provider: provider})
-	lb.steps = []fakeStep{pendingStep("still going"), okStep("committed")}
+	svc, op := testService(t, dir, Config{Provider: provider})
+	op.steps = []fakeStep{pendingStep("still going"), okStep("committed")}
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	waitRun(t, svc, "obs-1")
 
-	sent := lb.Sent()
+	sent := op.Sent()
 	found := false
 	for _, cmd := range sent {
 		if cmd == "/gtw commit" {
@@ -54,13 +54,13 @@ func TestSystem2_ToolDispatch(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatalf("the work chat got %v, want /gtw commit", sent)
+		t.Fatalf("the chat got %v, want /gtw commit", sent)
 	}
-	if !sender.Has("✅ /gtw commit") {
-		t.Fatalf("the observer did not see the settled step: %v", sender.Lines())
+	if !op.Has("✅ /gtw commit") {
+		t.Fatalf("the run's overview did not show the settled step: %v", op.Lines())
 	}
-	if !sender.Has("system-2: 1 decisions") {
-		t.Fatalf("the summary does not count the turns: %v", sender.Lines())
+	if !op.Has("system-2: 1 decisions") {
+		t.Fatalf("the summary does not count the turns: %v", op.Lines())
 	}
 }
 
@@ -71,16 +71,16 @@ func TestStatus_ReportsTheRunWhileItWorks(t *testing.T) {
 	provider := &scriptedProvider{responses: []llm.Response{
 		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"command": "/gtw commit"})},
 	}}
-	svc, lb, _ := testService(t, dir, Config{Provider: provider})
+	svc, op := testService(t, dir, Config{Provider: provider})
 	// The command never settles: the run waits for it.
-	lb.steps = []fakeStep{{open: true}}
+	op.steps = []fakeStep{{open: true}}
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitSent(t, lb, "/gtw commit")
+	waitSent(t, op, "/gtw commit")
 
 	// The status is read while the run works.
 	deadline := time.Now().Add(200 * time.Millisecond)
@@ -116,17 +116,17 @@ jobs:
 `)
 
 	provider := &scriptedProvider{err: errors.New("the chat model must not be called")}
-	svc, lb, _ := testService(t, dir, Config{Provider: provider})
+	svc, op := testService(t, dir, Config{Provider: provider})
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "two", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "two", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	waitRun(t, svc, "obs-1")
 
-	if len(lb.Watched()) != 2 {
-		t.Fatalf("the run watched %v, want one watch per command", lb.Watched())
+	if len(op.Watched()) != 2 {
+		t.Fatalf("the run watched %v, want one watch per command", op.Watched())
 	}
 }
 
@@ -139,19 +139,19 @@ func TestSystem2_PolicyViolationComesBackAsAToolError(t *testing.T) {
 		{Message: toolCallMsg("c2", toolRunStep, map[string]any{"command": "/gtw commit"})},
 		{Message: toolCallMsg("c3", toolFinish, map[string]any{"status": "done", "summary": "committed"})},
 	}}
-	svc, lb, _ := testService(t, dir, Config{Provider: provider})
-	lb.steps = []fakeStep{pendingStep("still going"), okStep("committed")}
+	svc, op := testService(t, dir, Config{Provider: provider})
+	op.steps = []fakeStep{pendingStep("still going"), okStep("committed")}
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	waitRun(t, svc, "obs-1")
 
-	for _, cmd := range lb.Sent() {
+	for _, cmd := range op.Sent() {
 		if cmd == "/gtw sync" {
-			t.Fatalf("the policy rejected /gtw sync but it ran anyway: %v", lb.Sent())
+			t.Fatalf("the policy rejected /gtw sync but it ran anyway: %v", op.Sent())
 		}
 	}
 	// The model saw the violation as a tool error and corrected
@@ -184,11 +184,11 @@ func TestSystem2_ANoopStepIsNotAToolError(t *testing.T) {
 		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"command": "/gtw commit"})},
 		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "done", "summary": "nothing to commit"})},
 	}}
-	svc, lb, _ := testService(t, dir, Config{Provider: provider})
-	lb.steps = []fakeStep{pendingStep("still going"), {outcome: messages.Outcome{Status: messages.OutcomeNoop, Summary: "nothing to commit"}}}
+	svc, op := testService(t, dir, Config{Provider: provider})
+	op.steps = []fakeStep{pendingStep("still going"), {outcome: messages.Outcome{Status: messages.OutcomeNoop, Summary: "nothing to commit"}}}
 
 	runID, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	})
 	if err != nil {
 		t.Fatalf("start: %v", err)
@@ -218,11 +218,11 @@ func TestSystem2_TextOnlyReplyIsNudgedAndThenEndsTheRun(t *testing.T) {
 		{Message: textMsg("I think I should commit.")},
 		{Message: textMsg("Still thinking about it.")},
 	}}
-	svc, lb, sender := testService(t, dir, Config{Provider: provider})
-	lb.steps = []fakeStep{pendingStep("still going")}
+	svc, op := testService(t, dir, Config{Provider: provider})
+	op.steps = []fakeStep{pendingStep("still going")}
 
 	runID, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	})
 	if err != nil {
 		t.Fatalf("start: %v", err)
@@ -247,8 +247,8 @@ func TestSystem2_TextOnlyReplyIsNudgedAndThenEndsTheRun(t *testing.T) {
 	if !strings.Contains(req.Messages[len(req.Messages)-1].Text(), "Call a tool") {
 		t.Fatalf("the second turn did not carry the nudge: %v", req.Messages)
 	}
-	if !sender.Has("did not call a tool") {
-		t.Fatalf("the observer was not told why the run ended: %v", sender.Lines())
+	if !op.Has("did not call a tool") {
+		t.Fatalf("the run's overview did not say why the run ended: %v", op.Lines())
 	}
 }
 
@@ -260,18 +260,18 @@ func TestSystem2_TokenBudgetStopsTheRun(t *testing.T) {
 		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"command": "/gtw commit"}),
 			Usage: llm.Usage{InputTokens: 500, OutputTokens: 500}},
 	}}
-	svc, lb, sender := testService(t, dir, Config{Provider: provider, TokenBudget: 100})
-	lb.steps = []fakeStep{pendingStep("still going")}
+	svc, op := testService(t, dir, Config{Provider: provider, TokenBudget: 100})
+	op.steps = []fakeStep{pendingStep("still going")}
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	waitRun(t, svc, "obs-1")
 
-	if !sender.Has("token budget") {
-		t.Fatalf("the observer was not told about the budget: %v", sender.Lines())
+	if !op.Has("token budget") {
+		t.Fatalf("the run's overview did not mention the budget: %v", op.Lines())
 	}
 }
 
@@ -291,19 +291,19 @@ func TestRun_HasNoTurnCap(t *testing.T) {
 	writeWorkflow(t, dir, "many", b.String())
 
 	provider := &scriptedProvider{err: errors.New("the chat model must not be called")}
-	svc, lb, _ := testService(t, dir, Config{Provider: provider})
+	svc, op := testService(t, dir, Config{Provider: provider})
 	for i := 0; i < steps; i++ {
-		lb.steps = append(lb.steps, fakeStep{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "ok"}})
+		op.steps = append(op.steps, fakeStep{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "ok"}})
 	}
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "many", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "many", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	waitRun(t, svc, "obs-1")
 
-	sent := lb.Sent()
+	sent := op.Sent()
 	for i := 1; i <= steps; i++ {
 		cmd := fmt.Sprintf("/gtw s%d", i)
 		found := false
@@ -334,25 +334,23 @@ jobs:
 	provider := &scriptedProvider{responses: []llm.Response{
 		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"command": "/gtw commit"})},
 	}}
-	lb := newFakeLoopback(
+	op := newFakeOperator(
 		pendingStep("still going"),
 		fakeStep{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "committed"},
-			transcript: []loopback.Entry{{Kind: messages.OutResult, Text: "the work agent said hello"}}},
+			transcript: []observe.Entry{{Kind: messages.OutResult, Text: "the coding agent said hello"}}},
 		okStep("pushed"),
 	)
-	sender := &fakeSender{}
 	svc := New(Config{
 		WorkflowsDir: dir,
 		StateDir:     dir + "/runs",
 		Provider:     provider,
-		Loopback:     lb,
-		Sender:       sender,
+		Operator:     op,
 	})
 	if err := svc.Start(context.Background()); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	runID, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "two", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "two", ChatID: "obs-1", Cwd: "/tmp/work",
 	})
 	if err != nil {
 		t.Fatalf("start: %v", err)
@@ -367,7 +365,7 @@ jobs:
 	found := false
 	for _, m := range r.conversation() {
 		for _, p := range m.Parts {
-			if p.Type == llm.PartToolResult && strings.Contains(p.Text, "the work agent said hello") {
+			if p.Type == llm.PartToolResult && strings.Contains(p.Text, "the coding agent said hello") {
 				found = true
 			}
 		}
@@ -423,20 +421,20 @@ jobs:
 		{Message: toolCallMsg("c2", toolRunStep, map[string]any{"command": "/gtw commit"})},
 		{Message: toolCallMsg("c3", toolFinish, map[string]any{"status": "done", "summary": "committed"})},
 	}}
-	svc, lb, sender := testService(t, dir, Config{Provider: provider})
-	lb.steps = []fakeStep{pendingStep("still going"), okStep("committed")}
+	svc, op := testService(t, dir, Config{Provider: provider})
+	op.steps = []fakeStep{pendingStep("still going"), okStep("committed")}
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "two", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "two", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForLine(t, sender, "Which branch?")
+	waitForLine(t, op, "Which branch?")
 
 	// The run is waiting: the command did not run yet.
-	for _, cmd := range lb.Sent() {
+	for _, cmd := range op.Sent() {
 		if cmd == "/gtw commit" {
-			t.Fatalf("the run went on before the user answered: %v", lb.Sent())
+			t.Fatalf("the run went on before the user answered: %v", op.Sent())
 		}
 	}
 	if err := svc.Reply(context.Background(), "obs-1", "the feature branch"); err != nil {
@@ -444,7 +442,7 @@ jobs:
 	}
 	waitRun(t, svc, "obs-1")
 
-	waitSent(t, lb, "/gtw commit")
+	waitSent(t, op, "/gtw commit")
 	req := provider.Request(1)
 	if !messagesContain(req, "the feature branch") {
 		t.Fatalf("the reply did not become the tool result: %v", req.Messages)
@@ -460,24 +458,24 @@ func TestRestart_ResumesASuspendedRun(t *testing.T) {
 		{Message: toolCallMsg("c2", toolRunStep, map[string]any{"command": "/gtw commit"})},
 		{Message: toolCallMsg("c3", toolFinish, map[string]any{"status": "done", "summary": "committed"})},
 	}}
-	svc, lb, sender := testService(t, dir, Config{Provider: provider})
-	lb.steps = []fakeStep{pendingStep("still going")}
+	svc, op := testService(t, dir, Config{Provider: provider})
+	op.steps = []fakeStep{pendingStep("still going")}
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForLine(t, sender, "Which branch?")
+	waitForLine(t, op, "Which branch?")
 
 	// The daemon restarts: a new service picks the run up.
-	restarted, lb2, _ := testService(t, dir, Config{Provider: provider})
+	restarted, op2 := testService(t, dir, Config{Provider: provider})
 	waitForReply(t, restarted, "obs-1")
 
 	if err := restarted.Reply(context.Background(), "obs-1", "the feature branch"); err != nil {
 		t.Fatalf("reply: %v", err)
 	}
 	waitRun(t, restarted, "obs-1")
-	waitSent(t, lb2, "/gtw commit")
+	waitSent(t, op2, "/gtw commit")
 }
 
 func TestShutdown_KeepsTheRunForTheNextDaemon(t *testing.T) {
@@ -489,15 +487,14 @@ func TestShutdown_KeepsTheRunForTheNextDaemon(t *testing.T) {
 		{Message: toolCallMsg("c2", toolRunStep, map[string]any{"command": "/gtw commit"})},
 		{Message: toolCallMsg("c3", toolFinish, map[string]any{"status": "done", "summary": "committed"})},
 	}}
-	svc, _, sender := testService(t, dir, Config{Provider: provider})
-	lb := svc.cfg.Loopback.(*fakeLoopback)
-	lb.steps = []fakeStep{pendingStep("still going")}
+	svc, op := testService(t, dir, Config{Provider: provider})
+	op.steps = []fakeStep{pendingStep("still going")}
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForLine(t, sender, "Which branch?")
+	waitForLine(t, op, "Which branch?")
 
 	// The daemon goes away while the run waits for an answer.
 	if err := svc.Shutdown(context.Background()); err != nil {
@@ -506,7 +503,7 @@ func TestShutdown_KeepsTheRunForTheNextDaemon(t *testing.T) {
 	waitStateFile(t, dir)
 
 	// The next daemon picks the run up and it keeps waiting.
-	restarted, _, _ := testService(t, dir, Config{Provider: provider})
+	restarted, _ := testService(t, dir, Config{Provider: provider})
 	waitForReply(t, restarted, "obs-1")
 }
 
@@ -517,23 +514,23 @@ func TestRestart_ResolvesAnInFlightCommandAsInterrupted(t *testing.T) {
 	provider := &scriptedProvider{responses: []llm.Response{
 		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"command": "/gtw commit"})},
 	}}
-	svc, lb, _ := testService(t, dir, Config{Provider: provider})
+	svc, op := testService(t, dir, Config{Provider: provider})
 	svc.cfg.StallTimeout = 50 * time.Millisecond
 	// The command never settles: the run waits for it.
-	lb.steps = []fakeStep{{open: true}}
+	op.steps = []fakeStep{{open: true}}
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitSent(t, lb, "/gtw commit")
+	waitSent(t, op, "/gtw commit")
 	// Wait until the run persisted the in-flight command.
 	waitStateFile(t, dir)
 
-	// The daemon restarts with a fresh loopback: the execution of the
+	// The daemon restarts with a fresh tracker: the execution of the
 	// in-flight command is gone.
-	restarted, _, _ := testService(t, dir, Config{Provider: provider})
+	restarted, _ := testService(t, dir, Config{Provider: provider})
 	restarted.mu.Lock()
 	var restored *run
 	for _, r := range restarted.runs {
@@ -564,7 +561,7 @@ func TestRestart_ResolvesAnInFlightCommandAsInterrupted(t *testing.T) {
 	t.Fatal("the in-flight command was never resolved")
 }
 
-// TestRunStep_WaitsForTheAnswerOfTheWorkAgent — the work agent asks
+// TestRunStep_WaitsForTheAnswerOfTheWorkAgent — the coding agent asks
 // a question: the run waits for the answer instead of running the
 // command again.
 func TestRunStep_WaitsForTheAnswerOfTheWorkAgent(t *testing.T) {
@@ -574,8 +571,8 @@ func TestRunStep_WaitsForTheAnswerOfTheWorkAgent(t *testing.T) {
 	decider := &scriptedDecider{answers: []llm.DecisionResponse{
 		decisionResp("jev-1.14", optionEscalate, 0.1, 0),
 	}}
-	svc, lb, sender := testService(t, dir, Config{Decider: decider})
-	lb.steps = []fakeStep{{
+	svc, op := testService(t, dir, Config{Decider: decider})
+	op.steps = []fakeStep{{
 		open: true,
 		choices: []messages.Choice{{
 			RequestID: "req-1",
@@ -585,11 +582,11 @@ func TestRunStep_WaitsForTheAnswerOfTheWorkAgent(t *testing.T) {
 	}}
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForLine(t, sender, "Which step should run next?")
+	waitForLine(t, op, "Which step should run next?")
 
 	if decider.Calls() == 0 {
 		t.Fatal("the decision model was not asked")
@@ -599,7 +596,7 @@ func TestRunStep_WaitsForTheAnswerOfTheWorkAgent(t *testing.T) {
 	}
 	// The command is not run again while it waits for an answer.
 	count := 0
-	for _, cmd := range lb.Sent() {
+	for _, cmd := range op.Sent() {
 		if cmd == "/gtw commit" {
 			count++
 		}
@@ -613,7 +610,7 @@ func TestRunStep_WaitsForTheAnswerOfTheWorkAgent(t *testing.T) {
 	waitRun(t, svc, "obs-1")
 }
 
-// TestRunStep_ReturnsEarlyOnAStall — the work agent goes quiet: the
+// TestRunStep_ReturnsEarlyOnAStall — the coding agent goes quiet: the
 // run stops waiting for it and hands the decision to the agent.
 func TestRunStep_ReturnsEarlyOnAStall(t *testing.T) {
 	dir := t.TempDir()
@@ -622,16 +619,16 @@ func TestRunStep_ReturnsEarlyOnAStall(t *testing.T) {
 	decider := &scriptedDecider{answers: []llm.DecisionResponse{
 		decisionResp("jev-1.14", optionEscalate, 0.1, 0),
 	}}
-	svc, lb, sender := testService(t, dir, Config{Decider: decider})
+	svc, op := testService(t, dir, Config{Decider: decider})
 	svc.cfg.StallTimeout = 50 * time.Millisecond
-	lb.steps = []fakeStep{{open: true}}
+	op.steps = []fakeStep{{open: true}}
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForLine(t, sender, "Which step should run next?")
+	waitForLine(t, op, "Which step should run next?")
 
 	if decider.Calls() == 0 {
 		t.Fatal("the decision model was not asked")
@@ -652,7 +649,7 @@ func TestIntegration_TheWorkflowRunsEndToEnd(t *testing.T) {
 	provider := &scriptedProvider{responses: []llm.Response{
 		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"command": "/review -c"})},
 	}}
-	lb := newFakeLoopback(
+	op := newFakeOperator(
 		okStep("fixed"),
 		okStep("committed"),
 		fakeStep{outcome: messages.Outcome{
@@ -668,39 +665,46 @@ func TestIntegration_TheWorkflowRunsEndToEnd(t *testing.T) {
 			Data:    map[string]string{"pr_number": "7", "pr_url": "https://example.test/pr/7"},
 		}},
 	)
-	sender := &fakeSender{}
 	svc := New(Config{
 		WorkflowsDir: dir,
 		StateDir:     dir + "/runs",
 		Provider:     provider,
-		Loopback:     lb,
-		Sender:       sender,
-		Answerer:     fakeAnswerer{lb: lb},
+		Operator:     op,
 	})
 	if err := svc.Start(context.Background()); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "fix-issue", Args: []string{"42"}, ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "fix-issue", Args: []string{"42"}, ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start workflow: %v", err)
 	}
 	waitRun(t, svc, "obs-1")
 
+	// Every command of the run was spoken in the chat.
 	want := []string{
-		"▶ /gtw fix 42 -y",
-		"✅ /gtw fix 42 -y",
-		"▶ /review",
-		"⚠️ /review incomplete · 1/3 groups unfinished",
-		"▶ /review -c",
-		"✅ /review -c",
-		"▶ /gtw push",
-		"▶ /gtw pr",
-		"fix-issue is complete",
+		"/gtw fix 42 -y",
+		"/gtw commit",
+		"/review",
+		"/review -c",
+		"/gtw push",
+		"/gtw pr",
 	}
-	for _, line := range want {
-		if !sender.Has(line) {
-			t.Fatalf("the observer never saw %q: %v", line, sender.Lines())
+	spoken := strings.Join(op.Sent(), "\n")
+	for _, cmd := range want {
+		if !strings.Contains(spoken, cmd) {
+			t.Fatalf("the chat never saw %q: %v", cmd, op.Sent())
+		}
+	}
+	// The run's overview shows the steps, how they ended, and the
+	// summary.
+	for _, line := range []string{
+		"✅ /gtw fix 42 -y",
+		"✅ /review",
+		"fix-issue is complete",
+	} {
+		if !op.Has(line) {
+			t.Fatalf("the run's overview never showed %q: %v", line, op.Lines())
 		}
 	}
 }
@@ -741,7 +745,7 @@ func waitForReply(t *testing.T, svc *Service, chatID string) {
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		st := svc.Status(chatID)
-		if st.Phase == PhasePaused {
+		if st.Phase == PhaseAsking {
 			return
 		}
 		time.Sleep(2 * time.Millisecond)

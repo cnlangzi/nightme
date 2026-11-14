@@ -23,10 +23,20 @@ type fakeController struct {
 	replyErr error
 	// stopErr is the error a stop reports.
 	stopErr error
+	// pauseErr is the error a pause reports.
+	pauseErr error
+	// continueErr is the error a continue reports.
+	continueErr error
 	// replies holds the replies the command sent.
 	replies []string
 	// stopped counts the stops.
 	stopped int
+	// paused counts the pauses.
+	paused int
+	// continued counts the continues.
+	continued int
+	// notes holds the notes the continues carried.
+	notes []string
 	// status is the state the controller reports.
 	status command.MeStatus
 }
@@ -46,6 +56,21 @@ func (c *fakeController) Reply(_ context.Context, _ string, text string) error {
 	defer c.mu.Unlock()
 	c.replies = append(c.replies, text)
 	return c.replyErr
+}
+
+func (c *fakeController) Pause(_ context.Context, _ string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.paused++
+	return c.pauseErr
+}
+
+func (c *fakeController) Continue(_ context.Context, _ string, note string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.continued++
+	c.notes = append(c.notes, note)
+	return c.continueErr
 }
 
 func (c *fakeController) Stop(_ context.Context, _ string) error {
@@ -124,16 +149,13 @@ func TestStart_MapsTheArguments(t *testing.T) {
 	if len(req.Args) != 1 || req.Args[0] != "42" {
 		t.Errorf("args = %v, want [42]", req.Args)
 	}
-	if req.ObserverChatID != cs.ID {
-		t.Errorf("observer chat = %q, want %q", req.ObserverChatID, cs.ID)
+	if req.ChatID != cs.ID {
+		t.Errorf("observer chat = %q, want %q", req.ChatID, cs.ID)
 	}
 	// The chat session cleans the path it stores, so the comparison
 	// is against the cleaned form.
 	if want := filepath.Clean("/tmp/work"); req.Cwd != want {
 		t.Errorf("cwd = %q, want %q", req.Cwd, want)
-	}
-	if req.Agent != "claude" {
-		t.Errorf("agent = %q, want claude", req.Agent)
 	}
 }
 
@@ -206,6 +228,45 @@ func TestReply_KeepsTheTextTheUserTyped(t *testing.T) {
 	}
 }
 
+func TestPause_PausesTheRun(t *testing.T) {
+	ctrl := &fakeController{}
+	cs := newSession(t, "me-10", "/tmp/work")
+
+	reply := runMe(t, ctrl, cs, "/me", "pause")
+	if !strings.Contains(reply, "pauses") {
+		t.Fatalf("reply = %q, want the pause", reply)
+	}
+	if ctrl.paused != 1 {
+		t.Fatalf("the controller paused %d runs, want 1", ctrl.paused)
+	}
+}
+
+func TestContinue_HandsTheControlBack(t *testing.T) {
+	ctrl := &fakeController{}
+	cs := newSession(t, "me-12", "/tmp/work")
+
+	reply := runMe(t, ctrl, cs, "/me", "continue")
+	if !strings.Contains(reply, "goes on") {
+		t.Fatalf("reply = %q, want the continuation", reply)
+	}
+	if ctrl.continued != 1 {
+		t.Fatalf("the controller continued %d runs, want 1", ctrl.continued)
+	}
+	if len(ctrl.notes) != 1 || ctrl.notes[0] != "" {
+		t.Fatalf("the controller got the notes %v, want none", ctrl.notes)
+	}
+}
+
+func TestContinue_CarriesTheNote(t *testing.T) {
+	ctrl := &fakeController{}
+	cs := newSession(t, "me-13", "/tmp/work")
+
+	runMe(t, ctrl, cs, "/me", "continue", "use", "the", "other", "branch")
+	if len(ctrl.notes) != 1 || ctrl.notes[0] != "use the other branch" {
+		t.Fatalf("the controller got the notes %v, want the note", ctrl.notes)
+	}
+}
+
 func TestStop_StopsTheRun(t *testing.T) {
 	ctrl := &fakeController{}
 	cs := newSession(t, "me-6", "/tmp/work")
@@ -261,18 +322,6 @@ func TestUnknownSubcommand(t *testing.T) {
 	reply := runMe(t, ctrl, cs, "/me", "dance")
 	if !strings.Contains(reply, "Unknown /me subcommand") {
 		t.Fatalf("reply = %q, want the unknown subcommand", reply)
-	}
-}
-
-// TestWorkAgent_FallsBackToThePrimaryAgent — a chat that selected no
-// agent runs on its primary one.
-func TestWorkAgent_FallsBackToThePrimaryAgent(t *testing.T) {
-	if got := workAgent(nil); got != "" {
-		t.Errorf("workAgent(nil) = %q, want an empty agent", got)
-	}
-	cs := newSession(t, "me-11", "/tmp/work")
-	if got := workAgent(cs); got != cs.PrimaryAgent() {
-		t.Errorf("workAgent = %q, want the primary agent %q", got, cs.PrimaryAgent())
 	}
 }
 

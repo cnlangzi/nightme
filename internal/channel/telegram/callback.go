@@ -50,6 +50,8 @@ func (a *Adapter) handleCallbackQuery(ctx context.Context, callback *CallbackQue
 		a.handleChoiceClick(ctx, callback, parts[1], parts[2])
 	case "i":
 		a.handleInputClick(ctx, callback, parts[1])
+	case meActionKind:
+		a.handleRunCardClick(ctx, callback, parts[1])
 	default:
 		a.answerCallback(ctx, callback.ID, "Unsupported action", true)
 	}

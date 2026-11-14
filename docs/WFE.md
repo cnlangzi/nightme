@@ -24,7 +24,7 @@ The personal agent (`/me`) runs a workflow in a chat. The same file is the plan 
   - [3.5 `mention`](#35-mention)
 - [4. Jobs](#4-jobs)
 - [5. Steps](#5-steps)
-  - [5.1 `message` — talk to the work chat](#51-message--talk-to-the-work-chat)
+  - [5.1 `message` — talk to the chat the run works in](#51-message--talk-to-the-chat-the-run-works-in)
   - [5.2 `shell` — execute shell](#52-shell--execute-shell)
   - [5.3 `wait` — sit out a duration](#53-wait--sit-out-a-duration)
   - [5.4 `use` — invoke a registered action](#54-use--invoke-a-registered-action)
@@ -70,7 +70,7 @@ Workflows are read from:
 |---|---|---|---|---|
 | `title` | string | ✅ | — | What the run is for. It is what the operator reads and what the agent is given. |
 | `args` | arg[] | ❌ | — | The arguments the workflow takes. A spec is a mapping with `name` and an optional `default`. |
-| `instruct` | bool | ❌ | `true` | Whether the agent may send free-form instructions to the work chat. |
+| `instruct` | bool | ❌ | `true` | Whether the agent may send free-form instructions to the chat the run works in. |
 | `workspaces` | string[] | ❌ | — | The workspaces the workflow names. The run takes the workspace of the chat that starts it. |
 | `on` | object | ❌ | — | Trigger spec (see §3). Parsed and displayed; nothing fires it. |
 | `jobs` | map | ✅ | — | Named jobs, each with ordered `steps` (see §4). |
@@ -132,7 +132,7 @@ jobs:
         shell: ./scripts/lint.sh
         continue-on-error: true             # the chain continues when the step fails
 
-      # 2. message step: talk to the work chat
+      # 2. message step: talk to the chat the run works in
       - id: fix
         if: ${{ success() }}
         message: "/gtw fix ${{ args.issue }} -y"
@@ -285,7 +285,7 @@ A round in which no step ran does not repeat: a job whose every step is skipped 
 
 A job waits for the jobs it `needs` — a repeating needed job releases the waiting job after its first round, because a job that repeats until the run ends never finishes.
 
-A workflow runs one job graph in one work chat: the branches of the graph express ordering and branching, never concurrent work on separate workspaces.
+A workflow runs one job graph in one chat: the branches of the graph express ordering and branching, never concurrent work on separate workspaces.
 
 ---
 
@@ -295,16 +295,16 @@ Each step carries exactly one of four kinds. A step with two kinds, or with none
 
 | Kind | Field | Use case | Where it runs |
 |---|---|---|---|
-| `message` | `message: <text>` | Talk to the work chat | the work chat |
-| `shell` | `shell: <cmd>` | Execute shell | the work chat's current directory |
+| `message` | `message: <text>` | Talk to the chat the run works in | that chat |
+| `shell` | `shell: <cmd>` | Execute shell | the chat's current directory |
 | `use` | `use: <action>` + `with: <args>` | Invoke a registered action | the action registry |
 | `wait` | `wait: <duration>` | Sit out a duration | the run |
 
 `message` and `shell` are **default-supported** — they work in every workflow. `use` is the **extension point** — the agent registers which action names are valid.
 
-### 5.1 `message` — talk to the work chat
+### 5.1 `message` — talk to the chat the run works in
 
-The text goes into the work chat. A `/`-prefixed text is a slash command the daemon interprets; anything else is a turn for the work agent. Both settle with an outcome.
+The text goes into the chat the run works in, marked with a bot sign. A `/`-prefixed text is a slash command the daemon interprets; anything else is a turn for the coding agent. Both settle with an outcome.
 
 ```yaml
 # A slash command
@@ -338,7 +338,7 @@ The agent's own commands — the ones it may pick at a judgment point — are th
   shell: ./scripts/checkout.sh
 ```
 
-The command runs in the work chat's current directory. The directory moves when a command moves it — `/gtw fix` moves the chat into the worktree it created — so a step that follows `/gtw fix` runs inside that worktree. The step's `env:` is layered on top of the daemon's own environment, so the shell finds `PATH`, `HOME` and the git/ssh configuration a real command needs.
+The command runs in the chat's current directory. The directory moves when a command moves it — `/gtw fix` moves the chat into the worktree it created — so a step that follows `/gtw fix` runs inside that worktree. The step's `env:` is layered on top of the daemon's own environment, so the shell finds `PATH`, `HOME` and the git/ssh configuration a real command needs.
 
 The step's outputs carry what the command produced: `data.exit_code`, `data.stdout`, `data.stderr` and one `data.<key>` per `key=value` line of the output.
 
@@ -353,7 +353,7 @@ The step's outputs carry what the command produced: `data.exit_code`, `data.stdo
 
 The step waits five minutes and then reports `ok`. The duration is a Go duration (`30s`, `5m`, `1h30m`); a value that does not parse is refused when the file is loaded. A wait carries no command.
 
-A wait is how a repeating job backs off when there is nothing to do: it belongs at the start of the round, because the expression language has no negation — a wait that runs only when the queue was empty cannot be written as a condition on the step's outcome. A repeating job wants one: without it the rounds follow each other as fast as the work chat answers.
+A wait is how a repeating job backs off when there is nothing to do: it belongs at the start of the round, because the expression language has no negation — a wait that runs only when the queue was empty cannot be written as a condition on the step's outcome. A repeating job wants one: without it the rounds follow each other as fast as the chat answers.
 
 `/me stop` ends a wait at once: the wait belongs to the run.
 
@@ -555,11 +555,12 @@ This section answers "where do runs actually execute, and how do the pieces fit?
   │  the policy (internal/wfe.Policy) bounds every   │
   │  action a run may take                         │
   └───────┬──────────────────────────┬─────────────┘
-          │ commands                 │ questions, progress
+          │ "🤖 /gtw fix 42 -y"      │ the run card
           ▼                          ▼
   ┌──────────────────────┐   ┌──────────────────────┐
-  │ internal/channel/    │   │ runtime ChatSender   │
-  │ loopback — transport │   │ → the starting chat  │
+  │ internal/channel —   │   │ internal/gateway/   │
+  │ the chat itself      │   │ observe — what the  │
+  │                      │   │ daemon said         │
   └──────────┬───────────┘   └──────────────────────┘
              │
              ▼
@@ -571,14 +572,17 @@ This section answers "where do runs actually execute, and how do the pieces fit?
 
 | Layer | Package | Owns |
 |---|---|---|
-| Transport | `internal/channel/loopback` | Sending a command into a chat, tracking it, and reporting its outcome. Knows nothing about workflows. |
-| The agent | `internal/me` | The run: what to do next, what the policy allows, what the observer is told. |
+| Transport | `internal/channel` | The chat the run works in. `Impersonator` speaks for the run: what it says is a real message of the chat, and it comes back in through `Incoming()`. |
+| The side channel | `internal/gateway/observe` | What the daemon said about the messages the run sent: the phase, the heartbeat, the prompts, the outcome. |
+| The agent | `internal/me` | The run: what to do next, what the policy allows, what the run card shows. |
 | The models | `internal/llm` | Two capabilities: `Provider` (chat and tool calling) and `Decider` (typed decision questions). |
 | The engine | `internal/wfe` | The workflow schema, the plan of a run, the judgment points, and the `Policy` that bounds a run. |
 
 The engine is a pure library: no I/O, no clock, no secrets. It parses, validates, computes the plan of a run and evaluates expressions — the runner owns the external capabilities and hands the engine their results.
 
-The agent drives the daemon the way a person drives it through Feishu: every command is a real message with a real id, and every answer comes back as a structured outcome. It never reaches into the gateway or the chat sessions.
+The agent works in the chat the run started in. Every command it sends is a real message of that chat, posted on the platform with a bot mark in front of it, and it comes back into the daemon through `Incoming()` like any other message. The receipt, the reaction and the interactive prompt therefore anchor to that message the way they anchor to a person's message. The agent never reaches into the gateway or the chat sessions.
+
+Two channels can be driven this way: Feishu and Telegram. On any other channel `/me start` is refused with the reason.
 
 ### 8.2 The plan: the ready set
 
@@ -612,11 +616,11 @@ The agent answers a judgment point with a **directive**:
 
 | Directive | What it does |
 |---|---|
-| `run_step(command)` | Runs a command of the workflow in the work chat. |
-| `instruct(text)` | Sends a free-form instruction to the work chat. |
+| `run_step(command)` | Runs a command of the workflow in the chat. |
+| `instruct(text)` | Sends a free-form instruction to the chat. |
 | `answer_choice(choice_id, option_id)` | Answers a prompt the work agent is waiting for. |
 | `ask_human(question)` | Asks the user. The run waits for the answer. |
-| `repo_status()` | Reads the branch and the tree facts of the work chat. |
+| `repo_status()` | Reads the branch and the tree facts of the chat. |
 | `finish(status, summary)` | Ends the run. `status` is `done` or `failed`. |
 
 A command the agent names has to be a step's `message:` or one of a step's `allow:` entries, compared with whitespace normalised away. Anything else comes back to the agent as an error it can correct. A command the deterministic path would not have run is allowed, and it is recorded against the step that owns it.
@@ -647,11 +651,11 @@ The chat model acts through six tools. Every handler enforces the policy: a viol
 
 | Tool | Behaviour |
 |---|---|
-| `run_step(command)` | Runs `Policy.CheckRun`, then sends the command to the work chat. It returns the outcome — status, summary, data — and the transcript of what the work agent said. |
-| `instruct(text)` | Runs `Policy.CheckInstruct`, then sends a free-form prompt to the work chat. It is tracked and returned like `run_step`. |
+| `run_step(command)` | Runs `Policy.CheckRun`, then sends the command to the chat. It returns the outcome — status, summary, data — and the transcript of what the coding agent said. |
+| `instruct(text)` | Runs `Policy.CheckInstruct`, then sends a free-form prompt to the chat. It is tracked and returned like `run_step`. |
 | `answer_choice(choice_id, option_id)` | Answers a permission request or a question the work agent is waiting for. |
-| `ask_human(question)` | Posts the question to the observer chat and suspends the run. `/me reply <text>` resumes it with the reply as the tool's result. |
-| `repo_status()` | Reads the work chat's repository: the branch, whether the tree is dirty, and how far the branch is ahead of or behind its upstream and its base branch. |
+| `ask_human(question)` | Asks the question in the chat — as a reply to the run's overview — and waits. The answer resumes the run as the tool's result. |
+| `repo_status()` | Reads the chat's repository: the branch, whether the tree is dirty, and how far the branch is ahead of or behind its upstream and its base branch. |
 | `finish(status, summary)` | Runs `Policy.CheckFinish`, ends the run and posts the summary. `status` is `done` or `failed`. |
 
 `run_step` blocks while the command runs and makes no model calls. It comes back early when the work agent asks something — the model can then answer, instruct or ask — or when the command goes quiet for ten minutes. Both cases report `waiting` and the reason.
@@ -734,12 +738,20 @@ The user picks the models. nightme never chooses one, and it never injects a mod
 |---|---|
 | `/me start <workflow> [args...]` | Starts a workflow in this chat. The name is the base name of the workflow's file. The run inherits the chat's workspace and agent. A chat without a workspace is refused. A second run in the same chat is refused. |
 | `/me reply <text>` | Answers the question the run is waiting for. |
-| `/me stop` | Cancels the run and stops the work chat. |
+| `/me pause` | Stops the run after the step it is on. The step that is running is not interrupted: its outcome is recorded. |
+| `/me continue [note]` | Hands the control back to a paused run. The note is the operator's instruction; it joins the conversation the chat model reads. |
+| `/me stop` | Cancels the run and tells the chat to stop working. |
 | `/me status` | Reports the current step, the phase and progress of the running command, the remaining budget, and what each capability decided and spent. |
+
+The run card carries the same commands: its buttons are `[暂停] [继续] [停止]`, and a click is the command it stands for.
+
+A run that waits for an answer offers the choices as the card's buttons: a click is the answer, and the answer never reaches the agent. A person who quotes the question instead types the answer — it is claimed by the run before the agent sees it.
 
 The arguments of `/me start` fill the workflow's declared arguments: a positional token fills the next argument that is still unassigned, in declaration order, and a token of the form `name=value` assigns that argument by name. An argument the workflow does not declare is refused, and an argument with neither a value nor a default is refused.
 
-One run is active per chat: the chat that starts a run is the chat that receives the progress and answers the questions.
+One run is active per chat: the chat that starts a run is the chat the run works in, the chat that answers its questions, and the chat that holds its overview.
+
+The run's lifecycle belongs to these commands alone. `/close`, `/stop` and `/new` end the chat's session, not the run: a run whose step was interrupted goes on to the next judgment point.
 
 ### 8.10 The outcome model
 
@@ -759,7 +771,7 @@ A step that is still running reports `waiting`, and a step whose execution is go
 
 The outcome of a step reaches the run state and the expressions of the steps after it: the status as `${{ steps.<id>.outputs.status }}`, the facts under `${{ steps.<id>.outputs.data.<key> }}`.
 
-The progress the observer receives is built from the outcome:
+The progress the chat receives is built from the outcome:
 
 ```
 ▶ /gtw fix 42 -y
@@ -784,10 +796,12 @@ A text-only answer — words without a tool call — is nudged once to call a to
 
 The run is persisted after every tool result: one file in `<DataDir>/workflows/runs/<run-id>.json` holds the DAG progress, the conversation, the judgment history and the paused state. On startup, running runs resume:
 
-- a command that was in flight is resolved through the loopback; if its execution is gone, it reports `interrupted`;
-- a suspended run keeps waiting for `/me reply`.
+- a command that was in flight is resolved through the tracker; if its execution is gone, it reports `interrupted`;
+- a suspended run keeps waiting for `/me reply`;
+- a run that was paused keeps waiting for `/me continue`;
+- a state file left by an older daemon names a chat that no longer exists: the run cannot go on there and is dropped.
 
-Recovery is silent. The observer is told only when a run cannot go on — an authentication error from the model, for instance.
+Recovery is silent. The chat is told only when a run cannot go on — an authentication error from the model, for instance.
 
 ## 9. Out of scope
 
@@ -801,7 +815,7 @@ These are deliberately **not** in the workflow engine; they belong in a later it
 | Per-step `timeout-minutes` | Inherits the host process timeout for now. |
 | Webhook signature verification (beyond what `git provider` already does) | Provider abstraction (see F-50) handles this. |
 | Cross-workflow triggers (`workflow_run`) | Compose via mention + schedule. |
-| Parallel execution | One run drives one work chat, so the branches of a graph express ordering, not concurrency. |
+| Parallel execution | One run drives one chat, so the branches of a graph express ordering, not concurrency. |
 | Real `notify` / `email` / `github_*` actions | They report `"stub": true`; making them real is their own change. |
 | A human-gate node kind | Human input stays the agent's `ask_human` tool at a judgment point. |
 
@@ -812,6 +826,7 @@ These are deliberately **not** in the workflow engine; they belong in a later it
 | Trigger sources | [`feat/F-workflow-engine.md`](./feat/F-workflow-engine.md) |
 | Mention parsing (git provider) | [`feat/F-workflow-engine.md`](./feat/F-workflow-engine.md) |
 | Agent names | [`primary-agent-detection.md`](./primary-agent-detection.md) |
-| Loopback channel | [`../internal/channel/loopback`](../../internal/channel/loopback) |
+| The chat a run works in | [`../internal/channel`](../../internal/channel) |
+| What the daemon said | [`../internal/gateway/observe`](../../internal/gateway/observe) |
 | The `wfe` engine | [`../../internal/wfe`](../../internal/wfe) |
 | The outcome contract | [`me.md`](./me.md) |

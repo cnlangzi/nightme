@@ -1,9 +1,9 @@
 // me_agent.go — the personal agent the daemon runs alongside its
 // channels.
 //
-// The personal agent is the user half of nightme: it runs a
-// workflow through the loopback channel, decides what comes next, and
-// reports back to the chat that started the run.
+// The personal agent is the user half of nightme: it runs a workflow
+// in the chat the run started in, decides what comes next, and shows
+// the run's overview there.
 //
 // Its models are the user's choice. me.llm is the chat model (System
 // 2), me.decider the decision model (System 1); either, both or
@@ -15,14 +15,11 @@ package runtime
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"log/slog"
 	"path/filepath"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/channel"
-	"github.com/cnlangzi/nightme/internal/channel/loopback"
 	"github.com/cnlangzi/nightme/internal/command/gtw"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/llm"
@@ -34,13 +31,12 @@ import (
 
 // buildPersonalAgent constructs the personal agent.
 //
-// It returns nil when the daemon has no loopback channel: the agent
-// drives the daemon through that channel, so without it there is no
-// chat to drive.
-func buildPersonalAgent(cfg *config.Config, chs []channel.Channel, logger *slog.Logger) *me.Service {
-	lb := findLoopback(chs)
-	if lb == nil {
-		logger.Info("run: no loopback channel; the personal agent stays off")
+// It returns nil when the daemon has no channel to work in: the agent
+// drives the daemon through a chat, so without one there is nothing
+// to drive.
+func buildPersonalAgent(cfg *config.Config, chs []channel.Channel, op *operator, logger *slog.Logger) *me.Service {
+	if len(chs) == 0 {
+		logger.Info("run: no channel; the personal agent stays off")
 		return nil
 	}
 	dir, err := workflowsDir(cfg)
@@ -58,10 +54,8 @@ func buildPersonalAgent(cfg *config.Config, chs []channel.Channel, logger *slog.
 		Provider:      provider,
 		Decider:       decider,
 		MinConfidence: cfg.Me.Decider.MinConfidence,
-		Loopback:      loopback.NewClient(lb),
+		Operator:      op,
 		Shell:         me.ExecShell{},
-		Sender:        NewChatSender(),
-		Answerer:      chatAnswerer{},
 		Git:           gtw.ExecGitRunner{},
 		Cwd:           chatCwd{},
 	})
@@ -146,13 +140,6 @@ func stopPersonalAgent(svc *me.Service, logger *slog.Logger) {
 	}
 }
 
-// chatAnswerer answers a pending prompt of a work chat.
-//
-// The daemon owns the answer: the prompt is waiting inside the agent
-// session the work chat drives, and the agent's handle is what takes
-// the answer.
-type chatAnswerer struct{}
-
 // chatCwd reports the directory a chat currently works in.
 //
 // The directory moves when a command moves it — `/gtw fix` moves the
@@ -167,21 +154,4 @@ func (chatCwd) Cwd(chatID string) string {
 		return ""
 	}
 	return cs.SelectedCwd()
-}
-
-// Answer implements me.ChoiceAnswerer.
-func (chatAnswerer) Answer(chatID, requestID, optionID string) error {
-	cs := findChatSession(chatID)
-	if cs == nil {
-		return fmt.Errorf("runtime: no chat session for %q", chatID)
-	}
-	as := cs.SelectedAgentSession()
-	if as == nil {
-		return errors.New("runtime: the chat has no selected agent")
-	}
-	h := as.Handle()
-	if h == nil {
-		return errors.New("runtime: the agent is not running")
-	}
-	return h.SendPermission(optionID)
 }

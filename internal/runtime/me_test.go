@@ -11,44 +11,76 @@ import (
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/channel"
-	"github.com/cnlangzi/nightme/internal/channel/loopback"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/llm"
 )
 
-// TestBuildPersonalAgent_NoLoopbackChannel — the personal agent
-// drives the daemon through the loopback channel. Without that
-// channel there is no chat to drive it through, so the agent stays
-// off.
-func TestBuildPersonalAgent_NoLoopbackChannel(t *testing.T) {
+// TestBuildPersonalAgent_NoChannel — the personal agent works in a
+// chat. Without a channel there is no chat to work in, so the agent
+// stays off.
+func TestBuildPersonalAgent_NoChannel(t *testing.T) {
 	cfg := &config.Config{Paths: config.PathsConfig{DataDir: t.TempDir()}}
-	svc := buildPersonalAgent(cfg, nil, slog.Default())
+	svc := buildPersonalAgent(cfg, nil, nil, slog.Default())
 	if svc != nil {
-		t.Fatal("expected no agent without a loopback channel")
+		t.Fatal("expected no agent without a channel")
 	}
 }
 
-// TestBuildPersonalAgent_OtherChannelOnly — a daemon whose only
-// channel is not the loopback one runs without the agent.
-func TestBuildPersonalAgent_OtherChannelOnly(t *testing.T) {
+// TestBuildPersonalAgent_StartsWithAChannel — the agent starts once
+// the daemon has a channel to work in.
+func TestBuildPersonalAgent_StartsWithAChannel(t *testing.T) {
 	cfg := &config.Config{Paths: config.PathsConfig{DataDir: t.TempDir()}}
-	svc := buildPersonalAgent(cfg, []channel.Channel{newStubChannel("stub", nil)}, slog.Default())
-	if svc != nil {
-		t.Fatal("expected no agent without a loopback channel")
-	}
-}
-
-// TestBuildPersonalAgent_StartsWithLoopbackChannel — the agent
-// starts once the loopback channel is up.
-func TestBuildPersonalAgent_StartsWithLoopbackChannel(t *testing.T) {
-	cfg := &config.Config{Paths: config.PathsConfig{DataDir: t.TempDir()}}
-	ch := loopback.New()
-	svc := buildPersonalAgent(cfg, []channel.Channel{ch}, slog.Default())
+	ch := newStubChannel("stub", nil)
+	op := newOperator(nil, []channel.Channel{ch})
+	svc := buildPersonalAgent(cfg, []channel.Channel{ch}, op, slog.Default())
 	if svc == nil {
 		t.Fatal("expected an agent")
 	}
 	if err := svc.Shutdown(context.Background()); err != nil {
 		t.Fatalf("Shutdown: %v", err)
+	}
+}
+
+// init registers a channel the operator tests can resolve. The
+// operator finds the channel of a chat by the namespace its chat id
+// carries.
+func init() {
+	channel.Register("me_stub", "ms_", func(*config.Config) (channel.Channel, error) {
+		return newStubChannel("me_stub", nil), nil
+	})
+}
+
+// TestOperator_ResolvesTheChannelOfTheChat — the chat id names the
+// channel that owns it.
+func TestOperator_ResolvesTheChannelOfTheChat(t *testing.T) {
+	ch := newStubChannel("me_stub", nil)
+	op := newOperator(nil, []channel.Channel{ch})
+
+	got, err := op.channelFor("ms_test")
+	if err != nil {
+		t.Fatalf("channelFor: %v", err)
+	}
+	if got.Name() != "me_stub" {
+		t.Fatalf("channel = %q, want me_stub", got.Name())
+	}
+	if _, err := op.channelFor("tg_test"); err == nil {
+		t.Fatal("a chat of another channel was resolved")
+	}
+}
+
+// TestOperator_RefusesAChannelThatCannotBeDriven — a channel that
+// does not speak for a program cannot host a run, and the refusal
+// says so.
+func TestOperator_RefusesAChannelThatCannotBeDriven(t *testing.T) {
+	ch := newStubChannel("me_stub", nil)
+	op := newOperator(nil, []channel.Channel{ch})
+
+	_, err := op.impersonatorFor("ms_test")
+	if err == nil {
+		t.Fatal("the channel was accepted")
+	}
+	if !strings.Contains(err.Error(), "cannot be driven") {
+		t.Fatalf("error = %v, want it to say the channel cannot be driven", err)
 	}
 }
 
@@ -175,16 +207,16 @@ func TestWorkflowsDir(t *testing.T) {
 	}
 }
 
-// TestCountIMChannels — the loopback channel is the daemon's own
-// chat: it must not hide the fact that no IM channel is configured.
+// TestCountIMChannels — the count says how many channels a person can
+// talk to.
 func TestCountIMChannels(t *testing.T) {
 	if got := countIMChannels(nil); got != 0 {
 		t.Errorf("count = %d, want 0", got)
 	}
-	if got := countIMChannels([]channel.Channel{loopback.New()}); got != 0 {
-		t.Errorf("count = %d, want 0 — the loopback channel is not an IM channel", got)
-	}
-	if got := countIMChannels([]channel.Channel{loopback.New(), newStubChannel("stub", nil)}); got != 1 {
+	if got := countIMChannels([]channel.Channel{newStubChannel("stub", nil)}); got != 1 {
 		t.Errorf("count = %d, want 1", got)
+	}
+	if got := countIMChannels([]channel.Channel{newStubChannel("a", nil), newStubChannel("b", nil)}); got != 2 {
+		t.Errorf("count = %d, want 2", got)
 	}
 }

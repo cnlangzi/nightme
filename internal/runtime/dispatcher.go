@@ -64,7 +64,7 @@ func NewMessageDispatcher(mgr *chatsession.Manager, em messages.Emitter, ch chan
 		// filtered messages don't allocate state or wake pumps.
 		// Slash commands never reach this branch (the commander
 		// shim returns first inside DispatchInbound).
-		if !mgr.AcceptInbound(msg.ChatID, msg.HasMention) {
+		if !mgr.AcceptInbound(msg.ChatID, msg.HasMention, msg.Origin) {
 			slog.Default().Info("dispatcher: drop non-mention group message (WatchMode != All)",
 				"chat_id", msg.ChatID, "message_id", msg.MessageID)
 			return nil

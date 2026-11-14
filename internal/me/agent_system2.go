@@ -36,14 +36,17 @@ func (s *Service) system2(ctx context.Context, r *run) (bool, error) {
 	r.system2Usage.Add(resp.Usage)
 	spent := r.system2Usage.Total()
 	r.mu.Unlock()
+	r.setDecision(decisionChat, "the chat model took the turn")
 
 	if spent > s.cfg.TokenBudget {
 		return false, fmt.Errorf("the run reached its token budget of %d tokens", s.cfg.TokenBudget)
 	}
 
-	// The model's own words are progress the observer wants to see.
+	// The model's own words are what the operator reads in the run's
+	// overview.
 	if text := strings.TrimSpace(resp.Message.Text()); text != "" {
-		s.notify(r, text)
+		r.setNote(text)
+		s.updateCard(r)
 	}
 
 	calls := resp.Message.ToolCalls()
@@ -53,8 +56,9 @@ func (s *Service) system2(ctx context.Context, r *run) (bool, error) {
 			// on, so it ends as a failure.
 			r.markNudged()
 			r.markFinished()
+			r.setSummary("the chat model did not call a tool")
 			s.finish(r, PhaseFailed, "the chat model did not call a tool")
-			s.notify(r, finishLine(r, "failed", "the chat model did not call a tool"))
+			s.updateCard(r)
 			return true, nil
 		}
 		r.markNudged()

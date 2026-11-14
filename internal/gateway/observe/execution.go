@@ -1,4 +1,4 @@
-package loopback
+package observe
 
 import (
 	"time"
@@ -14,7 +14,7 @@ import (
 type Phase string
 
 const (
-	// PhaseSent: the command was handed to the daemon; nothing has
+	// PhaseSent: the message was handed to the daemon; nothing has
 	// come back yet.
 	PhaseSent Phase = "sent"
 
@@ -69,7 +69,7 @@ type Entry struct {
 	At time.Time
 }
 
-// Execution is the tracked state of one command the loopback sent.
+// Execution is the tracked state of one message a program sent.
 //
 // It is a snapshot: reading it never observes a half-written state,
 // and the slices it carries are copies.
@@ -78,9 +78,9 @@ type Execution struct {
 	// tracks. It is the correlation key the daemon's outbound
 	// messages carry in ReplyTo.
 	MsgID string
-	// ChatID is the chat the command was sent to.
+	// ChatID is the chat the message was sent to.
 	ChatID string
-	// Text is the command text that was sent.
+	// Text is the message text that was sent.
 	Text string
 
 	// Phase is where the execution currently stands.
@@ -124,7 +124,7 @@ func (e Execution) Final() string {
 	return ""
 }
 
-// execution is the live state of one tracked command. The public
+// execution is the live state of one tracked message. The public
 // Execution is the snapshot of it.
 type execution struct {
 	msgID  string
@@ -140,11 +140,6 @@ type execution struct {
 	progress   Progress
 	transcript []Entry
 	choices    []messages.Choice
-
-	// settledCh is closed when the execution settles. Await waits
-	// on it, so a settle that lands before anybody waits is never
-	// lost.
-	settledCh chan struct{}
 
 	// watchers receive a snapshot whenever the execution moves.
 	watchers []chan Execution
@@ -213,7 +208,29 @@ func (e *execution) snapshot() Execution {
 		out.Transcript = append([]Entry(nil), e.transcript...)
 	}
 	if len(e.choices) > 0 {
-		out.Choices = append([]messages.Choice(nil), e.choices...)
+		out.Choices = cloneChoices(e.choices)
+	}
+	return out
+}
+
+// cloneChoices copies a pending prompt list, including the slices
+// each prompt carries.
+func cloneChoices(choices []messages.Choice) []messages.Choice {
+	out := make([]messages.Choice, len(choices))
+	for i, c := range choices {
+		out[i] = c
+		if c.Options != nil {
+			out[i].Options = append([]messages.ChoiceOption(nil), c.Options...)
+		}
+		if c.Questions != nil {
+			out[i].Questions = make([]messages.ChoiceQuestion, len(c.Questions))
+			for j, q := range c.Questions {
+				out[i].Questions[j] = q
+				if q.Options != nil {
+					out[i].Questions[j].Options = append([]messages.ChoiceOption(nil), q.Options...)
+				}
+			}
+		}
 	}
 	return out
 }

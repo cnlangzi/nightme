@@ -3328,6 +3328,8 @@ func (a *Adapter) logInbound(msg channel.Message) {
 		slog.String("chat_id", msg.ChatID),
 		slog.String("message_id", msg.MessageID),
 		slog.String("text", msg.Text),
+		slog.String("origin", string(msg.Origin)),
+		slog.String("run_id", msg.RunID),
 		slog.Int("attachments", len(msg.Attachments)),
 	)
 }
@@ -4455,6 +4457,8 @@ func (a *Adapter) handleCardAction(ctx context.Context, event *larkcallback.Card
 	actionStr := resolveCardAction(req, remembered, wiz)
 
 	switch {
+	case strings.HasPrefix(actionStr, meActionPrefix):
+		return a.handleMeCardAction(ctx, event, strings.TrimPrefix(actionStr, meActionPrefix))
 	case strings.HasPrefix(actionStr, "act:"):
 		return a.handleActCardAction(ctx, event, actionStr)
 	case strings.HasPrefix(actionStr, "opt:"),

@@ -116,7 +116,7 @@ func (p *Policy) IsStepMessage(idx int, command string) bool {
 }
 
 // CheckInstruct reports whether the agent may send a free-form prompt
-// to the work agent.
+// to the coding agent.
 func (p *Policy) CheckInstruct() error {
 	if p.Workflow == nil || !p.Workflow.Instruct {
 		return fmt.Errorf("this workflow does not allow free-form instructions")

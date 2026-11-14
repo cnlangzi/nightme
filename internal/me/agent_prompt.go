@@ -38,9 +38,9 @@ func (s *Service) systemPrompt(r *run) string {
 	return b.String()
 }
 
-// repoFacts holds the repository facts of the work chat.
+// repoFacts holds the repository facts of the chat.
 type repoFacts struct {
-	// Branch is the branch the work chat is on.
+	// Branch is the branch the chat is on.
 	Branch string
 	// Dirty is true when the working tree has changes.
 	Dirty bool

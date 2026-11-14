@@ -12,7 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cnlangzi/nightme/internal/channel/loopback"
+	"github.com/cnlangzi/nightme/internal/channel"
+	"github.com/cnlangzi/nightme/internal/gateway/observe"
 	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/wfe"
@@ -20,148 +21,162 @@ import (
 
 // ── fakes ─────────────────────────────────────────────────────────
 
-// fakeSender records the lines the run posts to the observer.
-type fakeSender struct {
-	mu    sync.Mutex
-	lines []string
-}
-
-func (s *fakeSender) Send(_ context.Context, _ string, text string) error {
-	s.mu.Lock()
-	s.lines = append(s.lines, text)
-	s.mu.Unlock()
-	return nil
-}
-
-// Lines returns the lines the observer received.
-func (s *fakeSender) Lines() []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return append([]string(nil), s.lines...)
-}
-
-// Has reports whether the observer received a line that contains the
-// given text.
-func (s *fakeSender) Has(text string) bool {
-	for _, line := range s.Lines() {
-		if strings.Contains(line, text) {
-			return true
-		}
-	}
-	return false
-}
-
-// fakeStep is one scripted answer of the work chat.
+// fakeStep is one scripted answer of the chat.
 type fakeStep struct {
 	// outcome is the verdict the command reports.
 	outcome messages.Outcome
-	// transcript is what the work agent said.
-	transcript []loopback.Entry
+	// transcript is what the coding agent said.
+	transcript []observe.Entry
 	// choices are the prompts the command is waiting for.
 	choices []messages.Choice
 	// open keeps the command running: it never settles on its own.
 	open bool
 }
 
-// fakeExec is one tracked execution of the fake loopback.
+// fakeExec is one tracked execution of the fake operator.
 type fakeExec struct {
-	ex       loopback.Execution
-	watchers []chan loopback.Execution
+	ex       observe.Execution
+	watchers []chan observe.Execution
 }
 
-// fakeLoopback is a scripted loopback channel.
+// fakeOperator is a scripted chat.
 //
-// The commands settle on their own unless a step says otherwise.
-//
-// The setup commands — /cwd and /use — always succeed and never
-// consume a scripted step, so a test only scripts the workflow's own
-// commands.
-type fakeLoopback struct {
+// The commands settle on their own unless a step says otherwise. The
+// questions the run asks and the /stop it speaks do not consume a
+// scripted step: they are not steps of the workflow.
+type fakeOperator struct {
 	mu      sync.Mutex
 	steps   []fakeStep
 	sent    []string
+	spoken  []spokenMessage
+	cards   []string
+	buttons [][]channel.CardButton
 	execs   map[string]*fakeExec
 	seq     int
+	cardSeq int
 	watched []string
-	// setupOutcome is the outcome the setup commands report. Nil
-	// means they succeed.
-	setupOutcome *messages.Outcome
 	// failCommand is the command that cannot be sent at all, the way
-	// a dead work chat cannot take it.
+	// a dead chat cannot take it.
 	failCommand string
+	// failCard makes the chat refuse the run's overview.
+	failCard bool
 }
 
-func newFakeLoopback(steps ...fakeStep) *fakeLoopback {
-	return &fakeLoopback{steps: steps, execs: map[string]*fakeExec{}}
+func newFakeOperator(steps ...fakeStep) *fakeOperator {
+	return &fakeOperator{steps: steps, execs: map[string]*fakeExec{}}
 }
 
-func (f *fakeLoopback) Send(_ context.Context, chatID, text string) (string, error) {
+// spokenMessage is one thing the run said in the chat.
+type spokenMessage struct {
+	// Text is what the daemon was given.
+	Text string
+	// Display is what the chat shows.
+	Display string
+	// ReplyTo names the message the text quotes.
+	ReplyTo string
+}
+
+// Speak says something in the chat.
+func (f *fakeOperator) Speak(_ context.Context, chatID, text string, opts channel.SpeakOptions) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sent = append(f.sent, text)
+	f.spoken = append(f.spoken, spokenMessage{
+		Text:    text,
+		Display: opts.Display,
+		ReplyTo: opts.ReplyTo,
+	})
 	if f.failCommand != "" && text == f.failCommand {
-		return "", errors.New("the work chat is gone")
+		return "", errors.New("the chat is gone")
 	}
 	f.seq++
 	id := fmt.Sprintf("msg-%d", f.seq)
 
-	step := fakeStep{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "ok"}}
-	if !isSetupCommand(text) {
+	if !isControlText(text) {
+		step := fakeStep{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "ok"}}
 		if len(f.steps) > 0 {
 			step = f.steps[0]
 			f.steps = f.steps[1:]
 		}
-	} else if f.setupOutcome != nil {
-		step = fakeStep{outcome: *f.setupOutcome}
+		ex := &fakeExec{ex: observe.Execution{
+			MsgID:      id,
+			ChatID:     chatID,
+			Text:       text,
+			Phase:      observe.PhaseSettled,
+			Outcome:    step.outcome,
+			Transcript: step.transcript,
+			Choices:    step.choices,
+		}}
+		if step.open {
+			ex.ex.Phase = observe.PhaseRunning
+		}
+		f.execs[id] = ex
 	}
-	ex := &fakeExec{ex: loopback.Execution{
-		MsgID:      id,
-		ChatID:     chatID,
-		Text:       text,
-		Phase:      loopback.PhaseSettled,
-		Outcome:    step.outcome,
-		Transcript: step.transcript,
-		Choices:    step.choices,
-	}}
-	if step.open {
-		ex.ex.Phase = loopback.PhaseRunning
-	}
-	f.execs[id] = ex
 	return id, nil
 }
 
-func (f *fakeLoopback) Do(ctx context.Context, chatID, text string) (loopback.Execution, error) {
-	id, err := f.Send(ctx, chatID, text)
-	if err != nil {
-		return loopback.Execution{}, err
-	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.execs[id].ex, nil
+// Act answers a prompt the chat is waiting for.
+func (f *fakeOperator) Act(_ context.Context, chatID string, action messages.ActionPayload) error {
+	return f.answer(chatID, action.RequestID, action.Option)
 }
 
-func (f *fakeLoopback) Get(msgID string) (loopback.Execution, bool) {
+// PostCard publishes the run's overview.
+func (f *fakeOperator) PostCard(_ context.Context, _ string, spec channel.CardSpec) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failCard {
+		return "", errors.New("the chat cannot show a card")
+	}
+	f.cardSeq++
+	id := fmt.Sprintf("card-%d", f.cardSeq)
+	f.cards = append(f.cards, spec.Body)
+	f.buttons = append(f.buttons, spec.Buttons)
+	return id, nil
+}
+
+// UpdateCard replaces the run's overview.
+func (f *fakeOperator) UpdateCard(_ context.Context, _, _ string, spec channel.CardSpec) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cards = append(f.cards, spec.Body)
+	f.buttons = append(f.buttons, spec.Buttons)
+	return nil
+}
+
+// Buttons returns the buttons of the run's overview.
+func (f *fakeOperator) Buttons() []channel.CardButton {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.buttons) == 0 {
+		return nil
+	}
+	return append([]channel.CardButton(nil), f.buttons[len(f.buttons)-1]...)
+}
+
+// Get returns the tracked execution of a message.
+func (f *fakeOperator) Get(msgID string) (observe.Execution, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	ex, ok := f.execs[msgID]
 	if !ok {
-		return loopback.Execution{}, false
+		return observe.Execution{}, false
 	}
 	return ex.ex, true
 }
 
-func (f *fakeLoopback) Watch(msgID string) <-chan loopback.Execution {
+// Watch returns a channel of snapshots of an execution.
+func (f *fakeOperator) Watch(msgID string) <-chan observe.Execution {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.watched = append(f.watched, msgID)
-	ch := make(chan loopback.Execution, 4)
+	ch := make(chan observe.Execution, 4)
 	ex, ok := f.execs[msgID]
 	if !ok {
 		close(ch)
 		return ch
 	}
 	ch <- ex.ex
-	if ex.ex.Phase == loopback.PhaseSettled {
+	if ex.ex.Phase == observe.PhaseSettled {
 		close(ch)
 		return ch
 	}
@@ -169,16 +184,16 @@ func (f *fakeLoopback) Watch(msgID string) <-chan loopback.Execution {
 	return ch
 }
 
-// Answer settles the open execution of a chat, the way answering a
-// prompt lets the work agent go on.
-func (f *fakeLoopback) Answer(chatID, requestID, optionID string) error {
+// answer settles the open execution of a chat, the way answering a
+// prompt lets the coding agent go on.
+func (f *fakeOperator) answer(chatID, requestID, optionID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for _, ex := range f.execs {
-		if ex.ex.ChatID != chatID || ex.ex.Phase == loopback.PhaseSettled {
+		if ex.ex.ChatID != chatID || ex.ex.Phase == observe.PhaseSettled {
 			continue
 		}
-		ex.ex.Phase = loopback.PhaseSettled
+		ex.ex.Phase = observe.PhaseSettled
 		ex.ex.Outcome = messages.Outcome{Status: messages.OutcomeOK, Summary: "answered " + optionID}
 		for _, w := range ex.watchers {
 			w <- ex.ex
@@ -191,22 +206,47 @@ func (f *fakeLoopback) Answer(chatID, requestID, optionID string) error {
 }
 
 // Watched returns the messages the run watched.
-func (f *fakeLoopback) Watched() []string {
+func (f *fakeOperator) Watched() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.watched...)
 }
 
 // Sent returns the commands the run sent.
-func (f *fakeLoopback) Sent() []string {
+func (f *fakeOperator) Sent() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.sent...)
 }
 
-// isSetupCommand reports whether a command sets the work chat up.
-func isSetupCommand(text string) bool {
-	return strings.HasPrefix(text, "/cwd ") || strings.HasPrefix(text, "/use ")
+// Spoken returns what the run said in the chat.
+func (f *fakeOperator) Spoken() []spokenMessage {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]spokenMessage(nil), f.spoken...)
+}
+
+// Lines returns the bodies the run's overview showed.
+func (f *fakeOperator) Lines() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.cards...)
+}
+
+// Has reports whether the run's overview carried the given text.
+func (f *fakeOperator) Has(text string) bool {
+	for _, line := range f.Lines() {
+		if strings.Contains(line, text) {
+			return true
+		}
+	}
+	return false
+}
+
+// isControlText reports whether the text is something the run says
+// outside a workflow step: a question or the /stop.
+func isControlText(text string) bool {
+	return strings.HasPrefix(text, "❓") || strings.HasPrefix(text, "/stop")
 }
 
 // fakeShell records the shell commands a run made.
@@ -256,15 +296,6 @@ func (b *blockingShell) Cancelled() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.cancelled
-}
-
-// fakeAnswerer answers the prompts of the fake loopback.
-type fakeAnswerer struct {
-	lb *fakeLoopback
-}
-
-func (a fakeAnswerer) Answer(chatID, requestID, optionID string) error {
-	return a.lb.Answer(chatID, requestID, optionID)
 }
 
 // scriptedProvider answers with a scripted list of responses.
@@ -403,15 +434,12 @@ func writeWorkflow(t *testing.T, dir, name, body string) {
 // than in an assertion. The cleanup runs before the temp dir's own:
 // t.TempDir registers its cleanup first, and cleanups run last-in
 // first-out.
-func testService(t *testing.T, dir string, cfg Config) (*Service, *fakeLoopback, *fakeSender) {
+func testService(t *testing.T, dir string, cfg Config) (*Service, *fakeOperator) {
 	t.Helper()
-	lb := newFakeLoopback()
-	sender := &fakeSender{}
+	op := newFakeOperator()
 	cfg.WorkflowsDir = dir
 	cfg.StateDir = filepath.Join(dir, "runs")
-	cfg.Loopback = lb
-	cfg.Sender = sender
-	cfg.Answerer = fakeAnswerer{lb: lb}
+	cfg.Operator = op
 	cfg.StepTimeout = 5 * time.Second
 	cfg.StallTimeout = 5 * time.Second
 	svc := New(cfg)
@@ -419,7 +447,7 @@ func testService(t *testing.T, dir string, cfg Config) (*Service, *fakeLoopback,
 	if err := svc.Start(context.Background()); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	return svc, lb, sender
+	return svc, op
 }
 
 // toolCallMsg builds an assistant message that asks for one tool.
@@ -478,19 +506,19 @@ func waitRun(t *testing.T, svc *Service, chatID string) {
 	}
 }
 
-// waitSent waits until the work chat received a command.
-func waitSent(t *testing.T, lb *fakeLoopback, command string) {
+// waitSent waits until the chat received a command.
+func waitSent(t *testing.T, op *fakeOperator, command string) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		for _, cmd := range lb.Sent() {
+		for _, cmd := range op.Sent() {
 			if cmd == command {
 				return
 			}
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
-	t.Fatalf("the work chat never received %q: %v", command, lb.Sent())
+	t.Fatalf("the chat never received %q: %v", command, op.Sent())
 }
 
 // ── starting a run ────────────────────────────────────────────────
@@ -501,15 +529,15 @@ func TestStartWorkflow_RefusesASecondRunInTheSameChat(t *testing.T) {
 
 	provider := &scriptedProvider{err: errors.New("the chat model must not be called")}
 	decider := &scriptedDecider{err: errors.New("the decision model must not be called")}
-	svc, _, _ := testService(t, dir, Config{Provider: provider, Decider: decider})
+	svc, _ := testService(t, dir, Config{Provider: provider, Decider: decider})
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err == nil {
 		t.Fatal("a second run in the same chat was accepted")
 	}
@@ -519,9 +547,9 @@ func TestStartWorkflow_ReportsAnUnknownWorkflow(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
-	svc, _, _ := testService(t, dir, Config{Provider: &scriptedProvider{}})
+	svc, _ := testService(t, dir, Config{Provider: &scriptedProvider{}})
 	_, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "nope", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "nope", ChatID: "obs-1", Cwd: "/tmp/work",
 	})
 	if err == nil {
 		t.Fatal("an unknown workflow was accepted")
@@ -542,9 +570,9 @@ jobs:
       - message: /gtw commit
 `)
 
-	svc, _, _ := testService(t, dir, Config{Provider: &scriptedProvider{}})
+	svc, _ := testService(t, dir, Config{Provider: &scriptedProvider{}})
 	_, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", Args: []string{"42", "43"}, ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "one", Args: []string{"42", "43"}, ChatID: "obs-1", Cwd: "/tmp/work",
 	})
 	if err == nil {
 		t.Fatal("an extra argument was accepted")
@@ -569,25 +597,25 @@ jobs:
 
 	provider := &scriptedProvider{err: errors.New("the chat model must not be called")}
 	decider := &scriptedDecider{err: errors.New("the decision model must not be called")}
-	svc, lb, _ := testService(t, dir, Config{Provider: provider, Decider: decider})
+	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", Args: []string{"issue=42"}, ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "one", Args: []string{"issue=42"}, ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	waitRun(t, svc, "obs-1")
 
-	waitSent(t, lb, "/gtw fix 42 -y")
+	waitSent(t, op, "/gtw fix 42 -y")
 }
 
 func TestStartWorkflow_RefusesAnUnknownNamedArgument(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
-	svc, _, _ := testService(t, dir, Config{Provider: &scriptedProvider{}})
+	svc, _ := testService(t, dir, Config{Provider: &scriptedProvider{}})
 	_, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", Args: []string{"nope=1"}, ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "one", Args: []string{"nope=1"}, ChatID: "obs-1", Cwd: "/tmp/work",
 	})
 	if err == nil {
 		t.Fatal("an unknown argument was accepted")
@@ -601,9 +629,9 @@ func TestStartWorkflow_ReportsThatTheAgentIsOff(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
-	svc, _, _ := testService(t, dir, Config{})
+	svc, _ := testService(t, dir, Config{})
 	_, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	})
 	if err == nil {
 		t.Fatal("the run started without a model")
@@ -623,14 +651,13 @@ func TestFastPath_RunsEveryStepWithoutAModel(t *testing.T) {
 
 	provider := &scriptedProvider{err: errors.New("the chat model must not be called")}
 	decider := &scriptedDecider{err: errors.New("the decision model must not be called")}
-	svc, lb, sender := testService(t, dir, Config{Provider: provider, Decider: decider})
+	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name:           "fix-issue",
-		Args:           []string{"42"},
-		ObserverChatID: "obs-1",
-		Cwd:            "/tmp/work",
-		Agent:          "claude",
+		Name:   "fix-issue",
+		Args:   []string{"42"},
+		ChatID: "obs-1",
+		Cwd:    "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -642,18 +669,18 @@ func TestFastPath_RunsEveryStepWithoutAModel(t *testing.T) {
 	if decider.Calls() != 0 {
 		t.Fatalf("the decision model was called %d times, the fast path should not need it", decider.Calls())
 	}
-	sent := lb.Sent()
+	sent := op.Sent()
 	want := []string{"/gtw fix 42 -y", "/gtw commit", "/review", "/gtw push", "/gtw pr"}
-	if len(sent) != len(want)+2 {
-		t.Fatalf("the work chat got %v, want the setup and %v", sent, want)
+	if len(sent) != len(want) {
+		t.Fatalf("the chat got %v, want %v", sent, want)
 	}
 	for i, cmd := range want {
-		if sent[i+2] != cmd {
-			t.Fatalf("command %d was %q, want %q", i, sent[i+2], cmd)
+		if sent[i] != cmd {
+			t.Fatalf("command %d was %q, want %q", i, sent[i], cmd)
 		}
 	}
-	if !sender.Has("system-1: 0 decisions") {
-		t.Fatalf("the summary does not count the decisions: %v", sender.Lines())
+	if !op.Has("system-1: 0 decisions") {
+		t.Fatalf("the summary does not count the decisions: %v", op.Lines())
 	}
 }
 
@@ -678,19 +705,19 @@ jobs:
 	decider := &scriptedDecider{answers: []llm.DecisionResponse{
 		decisionResp("jev-1.14", optionEscalate, 0.1, 0),
 	}}
-	svc, lb, sender := testService(t, dir, Config{Decider: decider})
-	lb.steps = []fakeStep{
+	svc, op := testService(t, dir, Config{Decider: decider})
+	op.steps = []fakeStep{
 		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "fixed"}},
 		{outcome: messages.Outcome{Status: messages.OutcomeNoop, Summary: "nothing to commit"}},
 		{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}},
 	}
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForLine(t, sender, "Which step should run next?")
+	waitForLine(t, op, "Which step should run next?")
 
 	svc.mu.Lock()
 	r := svc.active["obs-1"]
@@ -731,19 +758,19 @@ jobs:
 	decider := &scriptedDecider{answers: []llm.DecisionResponse{
 		decisionResp("jev-1.14", optionEscalate, 0.1, 0),
 	}}
-	svc, lb, sender := testService(t, dir, Config{Decider: decider})
-	lb.steps = []fakeStep{{outcome: messages.Outcome{
+	svc, op := testService(t, dir, Config{Decider: decider})
+	op.steps = []fakeStep{{outcome: messages.Outcome{
 		Status:  messages.OutcomeIncomplete,
 		Summary: "1 of 3 groups unfinished",
 		Data:    map[string]string{"issue": "42", "groups": "3"},
 	}}}
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForLine(t, sender, "Which step should run next?")
+	waitForLine(t, op, "Which step should run next?")
 
 	svc.mu.Lock()
 	r := svc.active["obs-1"]
@@ -792,19 +819,19 @@ jobs:
 	decider := &scriptedDecider{answers: []llm.DecisionResponse{
 		decisionResp("jev-1.14", "/review -c", 0.95, 0),
 	}}
-	svc, lb, sender := testService(t, dir, Config{Decider: decider})
-	lb.steps = []fakeStep{
+	svc, op := testService(t, dir, Config{Decider: decider})
+	op.steps = []fakeStep{
 		{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}},
 		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "review finished"}},
 		{outcome: messages.Outcome{Status: messages.OutcomeFailed, Summary: "the push failed"}},
 	}
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "repair", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "repair", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForLine(t, sender, "Which step should run next?")
+	waitForLine(t, op, "Which step should run next?")
 
 	svc.mu.Lock()
 	r := svc.active["obs-1"]
@@ -844,15 +871,15 @@ func TestPersist_HoldsTheProgressTheConversationAndTheHistory(t *testing.T) {
 	decider := &scriptedDecider{answers: []llm.DecisionResponse{
 		decisionResp("jev-1.14", optionEscalate, 0.1, 0),
 	}}
-	svc, lb, sender := testService(t, dir, Config{Decider: decider})
-	lb.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}}}
+	svc, op := testService(t, dir, Config{Decider: decider})
+	op.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}}}
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForLine(t, sender, "Which step should run next?")
+	waitForLine(t, op, "Which step should run next?")
 	waitStateFile(t, dir)
 
 	svc.mu.Lock()
@@ -885,27 +912,24 @@ func TestPersist_HoldsTheProgressTheConversationAndTheHistory(t *testing.T) {
 	waitRun(t, svc, "obs-1")
 }
 
-// TestSetup_FailureEndsTheRunBeforeAnyStep — a work chat that does
-// not come up ends the run before a step executes.
+// TestSetup_FailureEndsTheRunBeforeAnyStep — a chat that cannot
+// take the run's overview ends the run before a step executes.
 func TestSetup_FailureEndsTheRunBeforeAnyStep(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
-	svc, lb, _ := testService(t, dir, Config{Provider: &scriptedProvider{}})
-	lb.setupOutcome = &messages.Outcome{Status: messages.OutcomeFailed, Summary: "no such directory"}
+	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
+	op.failCard = true
 
 	_, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	})
 	if err == nil {
-		t.Fatal("the run started with a broken work chat")
+		t.Fatal("the run started with a chat that cannot show its overview")
 	}
-	if !strings.Contains(err.Error(), "/cwd") {
-		t.Errorf("error = %q, want it to name the command", err)
-	}
-	for _, cmd := range lb.Sent() {
+	for _, cmd := range op.Sent() {
 		if cmd == "/gtw commit" {
-			t.Fatalf("a step ran although the setup failed: %v", lb.Sent())
+			t.Fatalf("a step ran although the run could not start: %v", op.Sent())
 		}
 	}
 }
@@ -927,10 +951,10 @@ jobs:
 	shell := &fakeShell{}
 	provider := &scriptedProvider{err: errors.New("the chat model must not be called")}
 	decider := &scriptedDecider{err: errors.New("the decision model must not be called")}
-	svc, _, _ := testService(t, dir, Config{Provider: provider, Decider: decider, Shell: shell})
+	svc, _ := testService(t, dir, Config{Provider: provider, Decider: decider, Shell: shell})
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "sh", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "sh", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -993,10 +1017,10 @@ jobs:
 	shell := newBlockingShell()
 	provider := &scriptedProvider{err: errors.New("the chat model must not be called")}
 	decider := &scriptedDecider{err: errors.New("the decision model must not be called")}
-	svc, _, _ := testService(t, dir, Config{Provider: provider, Decider: decider, Shell: shell})
+	svc, _ := testService(t, dir, Config{Provider: provider, Decider: decider, Shell: shell})
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "sh", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "sh", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -1031,12 +1055,12 @@ jobs:
 
 	provider := &scriptedProvider{err: errors.New("the chat model must not be called")}
 	decider := &scriptedDecider{err: errors.New("the decision model must not be called")}
-	svc, _, _ := testService(t, dir, Config{Provider: provider, Decider: decider})
+	svc, _ := testService(t, dir, Config{Provider: provider, Decider: decider})
 	action := &recordingAction{name: "hello"}
 	svc.actions.Register(action)
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "act", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "act", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -1068,14 +1092,14 @@ jobs:
 	decider := &scriptedDecider{answers: []llm.DecisionResponse{
 		decisionResp("jev-1.14", optionEscalate, 0.1, 0),
 	}}
-	svc, _, sender := testService(t, dir, Config{Decider: decider})
+	svc, op := testService(t, dir, Config{Decider: decider})
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "act", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "act", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForLine(t, sender, "Which step should run next?")
+	waitForLine(t, op, "Which step should run next?")
 
 	svc.mu.Lock()
 	r := svc.active["obs-1"]
@@ -1111,12 +1135,12 @@ func TestJudgmentPoint_ANonOkOutcomeAsksTheAgent(t *testing.T) {
 	decider := &scriptedDecider{answers: []llm.DecisionResponse{
 		decisionResp("jev-1.14", "/gtw fix 42 -y", 0.95, 0),
 	}}
-	svc, lb, _ := testService(t, dir, Config{Provider: provider, Decider: decider})
+	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
 	// The first step does not finish.
-	lb.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}}}
+	op.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}}}
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "fix-issue", Args: []string{"42"}, ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "fix-issue", Args: []string{"42"}, ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -1141,11 +1165,11 @@ func TestJudgmentPoint_LowConfidenceEscalatesToTheChatModel(t *testing.T) {
 	decider := &scriptedDecider{answers: []llm.DecisionResponse{
 		decisionResp("jev-1.14", "/gtw fix 42 -y", 0.2, 0),
 	}}
-	svc, lb, _ := testService(t, dir, Config{Provider: provider, Decider: decider})
-	lb.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}}}
+	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
+	op.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}}}
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "fix-issue", Args: []string{"42"}, ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "fix-issue", Args: []string{"42"}, ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -1154,9 +1178,9 @@ func TestJudgmentPoint_LowConfidenceEscalatesToTheChatModel(t *testing.T) {
 	if provider.Calls() == 0 {
 		t.Fatal("the chat model was not called, a low-confidence decision must escalate")
 	}
-	sent := lb.Sent()
-	if len(sent) < 3 || sent[2] != "/gtw fix 42 -y" {
-		t.Fatalf("the work chat got %v, want the escalated command", sent)
+	sent := op.Sent()
+	if len(sent) < 2 || sent[1] != "/gtw fix 42 -y" {
+		t.Fatalf("the chat got %v, want the escalated command", sent)
 	}
 }
 
@@ -1177,11 +1201,11 @@ func TestJudgmentPoint_ARefusedDecisionEscalatesToTheChatModel(t *testing.T) {
 			},
 		},
 	}}
-	svc, lb, _ := testService(t, dir, Config{Provider: provider, Decider: decider})
-	lb.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}}}
+	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
+	op.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}}}
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "fix-issue", Args: []string{"42"}, ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "fix-issue", Args: []string{"42"}, ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -1199,20 +1223,20 @@ func TestJudgmentPoint_NeedsHumanAsksTheUserWhenThereIsNoChatModel(t *testing.T)
 	decider := &scriptedDecider{answers: []llm.DecisionResponse{
 		decisionResp("jev-1.14", "/gtw fix 42 -y", 0.95, 0.9),
 	}}
-	svc, lb, sender := testService(t, dir, Config{Decider: decider})
-	lb.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}}}
+	svc, op := testService(t, dir, Config{Decider: decider})
+	op.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}}}
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "fix-issue", Args: []string{"42"}, ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "fix-issue", Args: []string{"42"}, ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForLine(t, sender, "Which step should run next?")
+	waitForLine(t, op, "Which step should run next?")
 
 	if err := svc.Reply(context.Background(), "obs-1", "/gtw fix 42 -y"); err != nil {
 		t.Fatalf("reply: %v", err)
 	}
-	waitSent(t, lb, "/gtw fix 42 -y")
+	waitSent(t, op, "/gtw fix 42 -y")
 	if err := svc.Stop(context.Background(), "obs-1"); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
@@ -1230,17 +1254,17 @@ func TestJudgmentPoint_PolicyRejectedChoiceEscalates(t *testing.T) {
 	decider := &scriptedDecider{answers: []llm.DecisionResponse{
 		decisionResp("jev-1.14", "/gtw sync", 0.99, 0),
 	}}
-	svc, lb, _ := testService(t, dir, Config{Provider: provider, Decider: decider})
-	lb.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}}}
+	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
+	op.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}}}
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "fix-issue", Args: []string{"42"}, ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "fix-issue", Args: []string{"42"}, ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	waitRun(t, svc, "obs-1")
 
-	sent := lb.Sent()
+	sent := op.Sent()
 	for _, cmd := range sent {
 		if cmd == "/gtw sync" {
 			t.Fatalf("the policy rejected /gtw sync but it ran anyway: %v", sent)
@@ -1265,12 +1289,12 @@ func TestSystem1_UnknownOutcomeAsksWhetherTheStepSucceeded(t *testing.T) {
 	decider := &scriptedDecider{answers: []llm.DecisionResponse{
 		decisionResp("jev-1.14", optionEscalate, 0.1, 0),
 	}}
-	svc, lb, _ := testService(t, dir, Config{Provider: provider, Decider: decider})
+	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
 	// The first step reports nothing.
-	lb.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeUnknown}}}
+	op.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeUnknown}}}
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "fix-issue", Args: []string{"42"}, ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "fix-issue", Args: []string{"42"}, ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -1304,11 +1328,11 @@ func TestSystem1_KnownOutcomeDoesNotAskWhetherTheStepSucceeded(t *testing.T) {
 	decider := &scriptedDecider{answers: []llm.DecisionResponse{
 		decisionResp("jev-1.14", optionEscalate, 0.1, 0),
 	}}
-	svc, lb, _ := testService(t, dir, Config{Provider: provider, Decider: decider})
-	lb.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}}}
+	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
+	op.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}}}
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "fix-issue", Args: []string{"42"}, ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "fix-issue", Args: []string{"42"}, ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -1334,11 +1358,11 @@ func TestSystem1_DecisionIsRecordedAsASyntheticToolCall(t *testing.T) {
 	decider := &scriptedDecider{answers: []llm.DecisionResponse{
 		decisionResp("jev-1.14", "/gtw fix 42 -y", 0.93, 0),
 	}}
-	svc, lb, _ := testService(t, dir, Config{Provider: provider, Decider: decider})
-	lb.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}}}
+	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
+	op.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}}}
 
 	runID, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "fix-issue", Args: []string{"42"}, ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "fix-issue", Args: []string{"42"}, ChatID: "obs-1", Cwd: "/tmp/work",
 	})
 	if err != nil {
 		t.Fatalf("start: %v", err)
@@ -1377,16 +1401,16 @@ func TestSystem1_ANoopStepIsNotAToolError(t *testing.T) {
 	decider := &scriptedDecider{answers: []llm.DecisionResponse{
 		decisionResp("jev-1.14", "/gtw commit", 0.95, 0),
 	}}
-	svc, lb, _ := testService(t, dir, Config{Provider: provider, Decider: decider})
+	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
 	// The first attempt does not finish, so the run reaches a
 	// judgment point; the command the agent runs then reports a noop.
-	lb.steps = []fakeStep{
+	op.steps = []fakeStep{
 		{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}},
 		{outcome: messages.Outcome{Status: messages.OutcomeNoop, Summary: "nothing to commit"}},
 	}
 
 	runID, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	})
 	if err != nil {
 		t.Fatalf("start: %v", err)
@@ -1418,14 +1442,14 @@ func TestSystem1_AFailedStepIsAToolError(t *testing.T) {
 	decider := &scriptedDecider{answers: []llm.DecisionResponse{
 		decisionResp("jev-1.14", "/gtw commit", 0.95, 0),
 	}}
-	svc, lb, _ := testService(t, dir, Config{Provider: provider, Decider: decider})
-	lb.steps = []fakeStep{
+	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
+	op.steps = []fakeStep{
 		{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}},
 		{outcome: messages.Outcome{Status: messages.OutcomeFailed, Summary: "the commit failed"}},
 	}
 
 	runID, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	})
 	if err != nil {
 		t.Fatalf("start: %v", err)
@@ -1462,16 +1486,15 @@ func toolResultPart(t *testing.T, msgs []llm.Message, tool string) llm.Part {
 	return llm.Part{}
 }
 
-// waitForLine waits until the observer received a line that contains
-// the given text.
-func waitForLine(t *testing.T, sender *fakeSender, text string) {
+// waitForLine waits until the run's overview carried the given text.
+func waitForLine(t *testing.T, op *fakeOperator, text string) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		if sender.Has(text) {
+		if op.Has(text) {
 			return
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
-	t.Fatalf("the observer never received %q: %v", text, sender.Lines())
+	t.Fatalf("the run's overview never carried %q: %v", text, op.Lines())
 }

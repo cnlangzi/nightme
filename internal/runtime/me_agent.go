@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/channel"
@@ -74,18 +73,19 @@ func buildPersonalAgent(cfg *config.Config, chs []channel.Channel, logger *slog.
 // A missing configuration is not an error: the personal agent runs
 // with its fast path alone.
 func buildChatModel(cfg *config.Config, logger *slog.Logger) llm.Provider {
-	warnDualCredential(logger, "me.llm", cfg.Me.LLM.APIKey, cfg.Me.LLM.APIKeyEnv)
 	if cfg.Me.LLM.Provider == "" {
 		return nil
 	}
-	provider, err := llm.New(llm.Config{
+	llmCfg := llm.Config{
 		Provider:  cfg.Me.LLM.Provider,
 		BaseURL:   cfg.Me.LLM.BaseURL,
 		Model:     cfg.Me.LLM.Model,
 		APIKey:    cfg.Me.LLM.APIKey,
 		APIKeyEnv: cfg.Me.LLM.APIKeyEnv,
 		MaxTokens: cfg.Me.LLM.MaxTokens,
-	})
+	}
+	warnDualCredential(logger, "me.llm", llmCfg)
+	provider, err := llm.New(llmCfg)
 	if err != nil {
 		logger.Warn("run: the chat model could not be built", "err", err)
 		return nil
@@ -98,17 +98,18 @@ func buildChatModel(cfg *config.Config, logger *slog.Logger) llm.Provider {
 // A missing configuration is not an error: the personal agent runs
 // with its tool loop alone.
 func buildDecider(cfg *config.Config, logger *slog.Logger) llm.Decider {
-	warnDualCredential(logger, "me.decider", cfg.Me.Decider.APIKey, cfg.Me.Decider.APIKeyEnv)
 	if cfg.Me.Decider.Protocol == "" {
 		return nil
 	}
-	decider, err := llm.NewDecider(llm.Config{
+	llmCfg := llm.Config{
 		Protocol:  cfg.Me.Decider.Protocol,
 		BaseURL:   cfg.Me.Decider.BaseURL,
 		Model:     cfg.Me.Decider.Model,
 		APIKey:    cfg.Me.Decider.APIKey,
 		APIKeyEnv: cfg.Me.Decider.APIKeyEnv,
-	})
+	}
+	warnDualCredential(logger, "me.decider", llmCfg)
+	decider, err := llm.NewDecider(llmCfg)
 	if err != nil {
 		logger.Warn("run: the decision model could not be built", "err", err)
 		return nil
@@ -121,8 +122,8 @@ func buildDecider(cfg *config.Config, logger *slog.Logger) llm.Decider {
 // The inline key wins, so the configuration is unambiguous — but the
 // operator should know that one of the two is dead weight. The warning
 // carries neither of the credentials.
-func warnDualCredential(logger *slog.Logger, capability, apiKey, apiKeyEnv string) {
-	if strings.TrimSpace(apiKey) == "" || strings.TrimSpace(apiKeyEnv) == "" {
+func warnDualCredential(logger *slog.Logger, capability string, cfg llm.Config) {
+	if !llm.DualCredential(cfg) {
 		return
 	}
 	logger.Warn("run: both api_key and api_key_env are set; api_key wins", "capability", capability)

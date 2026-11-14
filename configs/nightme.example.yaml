@@ -107,8 +107,9 @@ paths:
 # not sure about, and with both the fast path hands the uncertain
 # steps to the tool loop. The API key comes from `api_key`, which
 # holds it in this file, or from `api_key_env`, which names the
-# environment variable that holds it — `api_key` wins when both are
-# set, and a model with neither needs no authentication.
+# environment variable that holds it — set one of the two, not both:
+# `api_key` wins when both are set, and a model with neither needs
+# no authentication.
 #
 # The decider's base is the root of the API; the version segment is
 # added when the base does not carry it. The protocols live at
@@ -119,13 +120,11 @@ me:
   #   base_url: https://api.openai.com/v1
   #   model: gpt-4.1-mini
   #   api_key: sk-xxxx
-  #   api_key_env: OPENAI_API_KEY
   #   max_tokens: 4096
   # decider:
   #   protocol: decisions
   #   base_url: https://openrouter.ai/api/v1
   #   model: typesafe/jev-1.14
-  #   api_key: sk-yyyy
   #   api_key_env: OPENROUTER_API_KEY
   #   min_confidence: 0.8
   # For protocol: systemone the base is https://api.typesafe.ai and the

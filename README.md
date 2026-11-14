@@ -596,15 +596,13 @@ me:
     provider: openai              # a registered chat provider: openai | anthropic
     base_url: https://api.openai.com/v1
     model: gpt-4.1-mini
-    api_key: sk-xxxx              # the key itself, in the file (optional)
-    api_key_env: OPENAI_API_KEY   # the name of a variable holding the key (optional)
+    api_key: sk-xxxx              # the key itself, in the file
     max_tokens: 4096
   decider:
     protocol: decisions           # decisions | systemone
     base_url: https://openrouter.ai/api/v1
     model: typesafe/jev-1.14
-    api_key: sk-yyyy
-    api_key_env: OPENROUTER_API_KEY
+    api_key_env: OPENROUTER_API_KEY # the name of a variable that holds the key
     min_confidence: 0.8           # below this the agent escalates
 ```
 
@@ -625,11 +623,11 @@ The decision protocols add `/v1` only when the base does not carry it:
 `https://openrouter.ai/api/v1` becomes `https://openrouter.ai/api/v1/decisions`,
 and `https://api.typesafe.ai` becomes `https://api.typesafe.ai/v1/systemone`.
 
-**The credential.** `api_key` holds the key itself, in the file. `api_key_env`
-names an environment variable that holds it — `OPENAI_API_KEY` above. Either one
-is enough: `api_key` wins when both are set, and a configuration with neither
-sends no authentication header. `config.yaml` is written with mode 0600 — keep it
-out of git.
+**The credential.** `api_key` holds the key itself, in the file. `api_key_env` names
+an environment variable that holds it — `OPENROUTER_API_KEY` above. Either channel
+works for either capability; set one of them, not both: `api_key` wins when both
+are set, and a configuration with neither sends no authentication header.
+`config.yaml` is written with mode 0600 — keep it out of git.
 
 **Three modes.** The agent runs as soon as one of the two halves is configured:
 

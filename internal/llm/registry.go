@@ -76,8 +76,10 @@ func RegisterDecider(name string, f DeciderFactory) {
 // New builds the chat provider the configuration names.
 //
 // The configuration is validated before the provider is built: an
-// unknown provider, a missing model or a missing API key environment
-// variable is an error the caller can report.
+// unknown provider, a missing model or a named environment variable
+// that holds no key is an error the caller can report. A
+// configuration that names no credential at all asks for no
+// authentication and is not an error.
 func New(cfg Config) (Provider, error) {
 	name := strings.ToLower(strings.TrimSpace(cfg.Provider))
 	if name == "" {

@@ -64,6 +64,24 @@ func Retryable(err error) bool {
 	return false
 }
 
+// inlineAPIKey returns the plaintext key a configuration carries,
+// trimmed. It is empty when the configuration carries no inline key.
+func inlineAPIKey(cfg Config) string { return strings.TrimSpace(cfg.APIKey) }
+
+// apiKeyEnvName returns the environment variable a configuration
+// names, trimmed. It is empty when the configuration names none.
+func apiKeyEnvName(cfg Config) string { return strings.TrimSpace(cfg.APIKeyEnv) }
+
+// DualCredential reports whether a configuration names the API key
+// twice — an inline key and an environment variable.
+//
+// The inline key wins, so the other channel is dead weight. A caller
+// that wants to tell the operator about it asks here rather than
+// re-deriving the rule.
+func DualCredential(cfg Config) bool {
+	return inlineAPIKey(cfg) != "" && apiKeyEnvName(cfg) != ""
+}
+
 // APIKey resolves the credential a configuration asks for.
 //
 // Two channels exist: the inline key in the configuration and an
@@ -73,10 +91,10 @@ func Retryable(err error) bool {
 //
 // The error names the variable, never the key.
 func APIKey(cfg Config) (string, error) {
-	if key := strings.TrimSpace(cfg.APIKey); key != "" {
+	if key := inlineAPIKey(cfg); key != "" {
 		return key, nil
 	}
-	name := strings.TrimSpace(cfg.APIKeyEnv)
+	name := apiKeyEnvName(cfg)
 	if name == "" {
 		return "", nil
 	}

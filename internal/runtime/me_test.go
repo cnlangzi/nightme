@@ -144,6 +144,24 @@ func TestBuildChatModel_NoWarningOnOneChannel(t *testing.T) {
 	}
 }
 
+// TestBuildChatModel_NoWarningWithoutAProvider — a capability that is
+// not configured is not built, so its credentials are nobody's
+// business.
+func TestBuildChatModel_NoWarningWithoutAProvider(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+
+	cfg := &config.Config{Me: config.MeConfig{LLM: config.MeLLMConfig{
+		APIKey: "sk-inline", APIKeyEnv: "NIGHTME_TEST_KEY",
+	}}}
+	if p := buildChatModel(cfg, logger); p != nil {
+		t.Fatal("a chat model without a provider was built")
+	}
+	if out := buf.String(); out != "" {
+		t.Fatalf("the log is not empty: %s", out)
+	}
+}
+
 func TestWorkflowsDir(t *testing.T) {
 	dir, err := workflowsDir(&config.Config{Paths: config.PathsConfig{DataDir: t.TempDir()}})
 	if err != nil {

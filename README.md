@@ -518,53 +518,75 @@ name: fix-issue
 args:
   - name: issue
     default: "*"
-goal: 把队列里的一个 issue 做完并推上去
-max_actions: 30
+goal: 把队列里的 issue 一个个做完、开 PR，然后回 main 继续
 on:                                   # 将来给 timer scheduler 消费；本期不实现
   schedule:
     - cron: "0 2 * * *"
 jobs:
   ship:
+    iterations: 0                     # 0 = the job repeats until the run ends
     steps:
+      - id: wait
+        wait: 5m
       - id: fix
         message: "/gtw fix ${{ args.issue }} -y"
-        note: 从 nightme/assigned 队列里挑一个
-        allow: ["/gtw abort"]
-        max: 3
+        note: 从 nightme/assigned 队列里挑一个；挑不到就等下一轮
+        allow: ["/gtw fix ${{ args.issue }} -y", "/gtw back"]
+        attempts: 3
       - id: commit
         message: "/gtw commit"
+        if: ${{ steps.fix.outputs.data.issue }}
       - id: review
         message: "/review"
         note: 没跑完就 /review -c；有改动就先 /gtw commit
         allow: ["/review -c", "/gtw commit"]
-        max: 5
+        attempts: 5
+        if: ${{ steps.fix.outputs.data.issue }}
       - id: commit2
         message: "/gtw commit"
+        if: ${{ steps.fix.outputs.data.issue }}
       - id: push
         message: "/gtw push"
+        if: ${{ steps.fix.outputs.data.issue }}
+      - id: pr
+        message: "/gtw pr"
+        if: ${{ steps.fix.outputs.data.issue }}
+      - id: back
+        message: "/gtw back"
+        if: ${{ steps.fix.outputs.data.issue }}
 ```
 
 Deploy it by writing the file to `~/.nightme/workflows/fix-issue.yaml` and
 running `nightme restart`.
+
+The guard on the steps after `fix` reads `data.issue`: a fix that picked an
+issue reports `issue` in its outcome, a fix that found nothing does not — so
+the guard means "an issue was picked" and the rest of the round is skipped.
 
 | Workflow field | Meaning |
 |---|---|
 | `name` | The workflow's name. `/me start <name>` picks it. |
 | `args` | The arguments the workflow takes. A spec is a mapping with `name` and an optional `default`; a default makes the argument optional, no default makes it required. |
 | `goal` | What the run is for. It is part of the model's instructions. |
-| `max_actions` | The action budget of the whole run. Default 30. |
 | `instruct` | Whether the agent may send free-form instructions. Default true. |
 | `workspaces` | The workspaces the workflow names. Optional — the run takes the workspace of the chat that starts it. |
 | `on` | The trigger block. It is parsed and displayed; nothing fires it. |
 | `jobs` | The jobs, each with an ordered list of `steps`. Required. |
+
+A job carries `needs`, `if`, `iterations` and `steps`. `iterations` is how many
+rounds the job runs: leave it out for one round, `0` for "until the run ends",
+`N` for `N` rounds. A round ends when the job's steps are done; the next round
+starts with the job's first step, the round's step outputs are cleared and the
+per-step budgets start over.
 
 A step carries exactly one kind:
 
 | Step kind | What it does |
 |---|---|
 | `message:` | Sends the text to the work chat. A `/`-prefixed text is a slash command; anything else is a turn for the work agent. |
-| `shell:` | Runs a shell command in the workspace. |
+| `shell:` | Runs a shell command in the work chat's current directory. |
 | `use:` | Runs a registered action — `notify`, `email`, `github_pr_comment`, `github_issue`, or a script under `~/.nightme/workflows/actions/`. |
+| `wait:` | Waits a duration (`5m`) and reports ok. |
 
 | Step field | Meaning |
 |---|---|
@@ -574,12 +596,12 @@ A step carries exactly one kind:
 | `continue-on-error` | Whether the chain continues when the step fails. |
 | `note` | Why the step is there, and when the extra commands apply. It is the description the decision model reads. |
 | `allow` | The extra commands the agent may use inside the step. |
-| `max` | The number of actions the step may take. Leave the key out for no limit of its own — `max: 0` is refused. |
+| `attempts` | The number of actions the agent may take on the step in one round — the step's own execution and the `allow:` commands. Leave the key out for no limit of its own. |
 
 The expressions are `${{ args.NAME }}`, `${{ steps.<id>.outputs.status }}`,
 `${{ steps.<id>.outputs.data.<key> }}`, `${{ needs.<job>.* }}`, `${{ env.NAME }}`
-and `${{ now }}`. An expression that names an argument the workflow does not
-declare is refused when the file is loaded.
+and `${{ now }}`. The `outputs` segment is optional. An expression that names
+an argument the workflow does not declare is refused when the file is loaded.
 
 ### Configure the models
 
@@ -681,6 +703,13 @@ The workflow says what comes next, so most steps need no model at all.
   previous step did not end `ok` or `noop`, or a command is still waiting for an
   answer. The agent decides there — it picks the next node, repairs the current
   one, or ends the run.
+- A job whose round is over starts its next round instead of ending the run:
+  the round's step outputs are cleared and the per-step `attempts` budgets
+  start over.
+
+A run has no global action budget and no cap on the number of model turns: it
+ends when the plan is exhausted and the agent finishes it, when you send
+`/me stop`, or when the daemon shuts down.
 
 The agent answers a judgment point with a directive: `run_step` (run a command),
 `instruct` (send a free-form instruction to the work chat), `answer_choice`
@@ -725,7 +754,8 @@ run with the load error.
 
 | Guardrail | Bound |
 |---|---|
-| Action budget | `max_actions` for the run (default 30), `max` for a step. |
+| Step budget | `attempts` for a step, counted per round. |
+| Rounds | `iterations` for a job — the number of rounds it runs. |
 | Step timeout | Thirty minutes per command. |
 | Stall detection | Ten minutes without a heartbeat. |
 | Token budget | The tokens one run may spend on the chat model. |

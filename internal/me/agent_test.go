@@ -86,6 +86,9 @@ type fakeLoopback struct {
 	// setupOutcome is the outcome the setup commands report. Nil
 	// means they succeed.
 	setupOutcome *messages.Outcome
+	// failCommand is the command that cannot be sent at all, the way
+	// a dead work chat cannot take it.
+	failCommand string
 }
 
 func newFakeLoopback(steps ...fakeStep) *fakeLoopback {
@@ -96,6 +99,9 @@ func (f *fakeLoopback) Send(_ context.Context, chatID, text string) (string, err
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sent = append(f.sent, text)
+	if f.failCommand != "" && text == f.failCommand {
+		return "", errors.New("the work chat is gone")
+	}
 	f.seq++
 	id := fmt.Sprintf("msg-%d", f.seq)
 
@@ -372,7 +378,7 @@ jobs:
         message: /review
         note: If it fails or does not finish, continue with /review -c.
         allow: [/review -c, /gtw commit]
-        max: 5
+        attempts: 5
       - id: push
         message: /gtw push
       - id: pr
@@ -780,7 +786,7 @@ jobs:
       - id: review
         message: /review
         allow: ["/review -c"]
-        max: 5
+        attempts: 5
       - id: push
         message: /gtw push
 `)

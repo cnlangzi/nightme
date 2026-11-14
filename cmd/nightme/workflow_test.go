@@ -93,6 +93,38 @@ jobs:
 	}
 }
 
+// TestWorkflowShow_TheMergedSchema — the detail view carries the
+// rounds and the wait step, and names no agent: the run uses the
+// agent of the chat that starts it.
+func TestWorkflowShow_TheMergedSchema(t *testing.T) {
+	dir := t.TempDir()
+	yaml := `
+name: reviewer
+jobs:
+  main:
+    iterations: 0
+    steps:
+      - id: rest
+        wait: 5m
+`
+	if err := os.WriteFile(filepath.Join(dir, "reviewer.yaml"), []byte(yaml), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
+
+	out := captureStdout(t, func() error {
+		return runRoot("workflow", "show", "reviewer")
+	})
+	for _, want := range []string{"wait: 5m", "iterations: until the run ends"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q\n--- output ---\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "agent") {
+		t.Errorf("the output names an agent\n--- output ---\n%s", out)
+	}
+}
+
 // TestWorkflowShow_NotFound verifies the error path.
 func TestWorkflowShow_NotFound(t *testing.T) {
 	dir := t.TempDir()

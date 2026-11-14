@@ -10,8 +10,8 @@ import (
 // and the history and answers with an error the agent can act on.
 //
 // The steps of the policy are every step of every job, in topological
-// order. A step's `max` caps the actions taken against it — its own
-// message and the commands in its allow list.
+// order. A step's `attempts` caps the actions taken against it in the
+// current round — its own message and the commands in its allow list.
 type Policy struct {
 	// Workflow is the bound workflow the policy enforces.
 	Workflow *Workflow
@@ -21,11 +21,14 @@ type Policy struct {
 	// stepList is the workflow's step list, computed once: the
 	// topological order does not change while the run goes on.
 	stepList []Step
+	// rounds holds the round every job is in. The per-step budgets
+	// count the attempts of the current round only.
+	rounds map[string]int
 }
 
 // NewPolicy returns a policy over wf with the given action history.
 func NewPolicy(wf *Workflow, history []ActionRecord) *Policy {
-	p := &Policy{Workflow: wf}
+	p := &Policy{Workflow: wf, rounds: map[string]int{}}
 	if len(history) > 0 {
 		p.History = append([]ActionRecord(nil), history...)
 	}
@@ -39,6 +42,26 @@ func (p *Policy) Record(rec ActionRecord) {
 		rec.StepID = ""
 	}
 	p.History = append(p.History, rec)
+}
+
+// SetRounds records the round every job is in.
+//
+// The run state owns the rounds; the policy needs them to count the
+// attempts of the current round.
+func (p *Policy) SetRounds(rounds map[string]int) {
+	p.rounds = make(map[string]int, len(rounds))
+	for job, round := range rounds {
+		p.rounds[job] = round
+	}
+}
+
+// Round returns the round the job is in. A job that has not started
+// is in its first round.
+func (p *Policy) Round(job string) int {
+	if r := p.rounds[job]; r > 0 {
+		return r
+	}
+	return 1
 }
 
 // CheckRun reports whether the command may run now and which step it
@@ -55,20 +78,14 @@ func (p *Policy) CheckRun(command string) (int, error) {
 	if idx < 0 {
 		return -1, fmt.Errorf("%q is not allowed: allowed commands are %s", command, p.allowedCommands())
 	}
-	step := p.steps()[idx]
-	if step.Max > 0 {
-		if used := p.stepUsage(idx); used >= step.Max {
-			return -1, fmt.Errorf("step %d (%s) already ran %d times, its limit is %d", idx+1, step.Message, used, step.Max)
-		}
-	}
-	if used, limit := p.usedActions(), p.maxActions(); used >= limit {
-		return -1, fmt.Errorf("the workflow allows %d actions in total, all %d are used", limit, used)
+	if err := p.CheckStep(idx); err != nil {
+		return -1, err
 	}
 	return idx, nil
 }
 
 // CheckStep reports whether the step may take an action now: its own
-// limit and the workflow's action budget.
+// limit for the current round.
 //
 // The workflow's own plan runs through this check too: a step that
 // spent its budget is a judgment point, not a silent overrun.
@@ -78,13 +95,12 @@ func (p *Policy) CheckStep(idx int) error {
 		return fmt.Errorf("there is no step %d in this workflow", idx+1)
 	}
 	step := steps[idx]
-	if step.Max > 0 {
-		if used := p.stepUsage(idx); used >= step.Max {
-			return fmt.Errorf("step %d (%s) already ran %d times, its limit is %d", idx+1, step.Message, used, step.Max)
-		}
+	if step.Attempts <= 0 {
+		return nil
 	}
-	if used, limit := p.usedActions(), p.maxActions(); used >= limit {
-		return fmt.Errorf("the workflow allows %d actions in total, all %d are used", limit, used)
+	if used := p.stepUsage(idx); used >= step.Attempts {
+		return fmt.Errorf("the step %q already ran %d times, its limit is %d",
+			step.ID, used, step.Attempts)
 	}
 	return nil
 }
@@ -100,14 +116,10 @@ func (p *Policy) IsStepMessage(idx int, command string) bool {
 }
 
 // CheckInstruct reports whether the agent may send a free-form prompt
-// to the work agent. An instruction is an action: it counts against
-// the workflow's action budget.
+// to the work agent.
 func (p *Policy) CheckInstruct() error {
 	if p.Workflow == nil || !p.Workflow.Instruct {
 		return fmt.Errorf("this workflow does not allow free-form instructions")
-	}
-	if used, limit := p.usedActions(), p.maxActions(); used >= limit {
-		return fmt.Errorf("the workflow allows %d actions in total, all %d are used", limit, used)
 	}
 	return nil
 }
@@ -135,27 +147,20 @@ func (p *Policy) CheckFinish(status string) error {
 
 // Remaining reports the budget left in the policy.
 type Remaining struct {
-	// Actions is the number of actions left overall.
-	Actions int
 	// Steps holds the actions left per step, index-aligned with the
 	// workflow's steps. -1 means the step has no limit of its own.
 	Steps []int
 }
 
-// Remaining returns the budget left: actions left overall and actions
-// left per step.
+// Remaining returns the actions left per step.
 func (p *Policy) Remaining() Remaining {
-	left := p.maxActions() - p.usedActions()
-	if left < 0 {
-		left = 0
-	}
-	rem := Remaining{Actions: left, Steps: make([]int, len(p.steps()))}
+	rem := Remaining{Steps: make([]int, len(p.steps()))}
 	for i, step := range p.steps() {
-		if step.Max <= 0 {
+		if step.Attempts <= 0 {
 			rem.Steps[i] = -1
 			continue
 		}
-		n := step.Max - p.stepUsage(i)
+		n := step.Attempts - p.stepUsage(i)
 		if n < 0 {
 			n = 0
 		}
@@ -175,11 +180,9 @@ func (p *Policy) Render() string {
 			fmt.Fprintf(&b, "goal: %s\n", p.Workflow.Goal)
 		}
 	}
-	fmt.Fprintf(&b, "limits: %d actions in total", p.maxActions())
 	if p.Workflow != nil && !p.Workflow.Instruct {
-		b.WriteString("; no free-form instructions")
+		b.WriteString("no free-form instructions\n")
 	}
-	b.WriteString("\n")
 	b.WriteString("steps:\n")
 	for i, step := range p.steps() {
 		fmt.Fprintf(&b, "%d. %s\n", i+1, stepLabel(step))
@@ -189,8 +192,8 @@ func (p *Policy) Render() string {
 		if len(step.Allow) > 0 {
 			fmt.Fprintf(&b, "   also allowed: %s\n", strings.Join(step.Allow, ", "))
 		}
-		if step.Max > 0 {
-			fmt.Fprintf(&b, "   limit: %d actions\n", step.Max)
+		if step.Attempts > 0 {
+			fmt.Fprintf(&b, "   limit: %d attempts in this round\n", step.Attempts)
 		}
 	}
 	return b.String()
@@ -205,6 +208,8 @@ func stepLabel(step Step) string {
 		return "(shell) " + step.Shell
 	case StepKindUse:
 		return "(use) " + step.Use
+	case StepKindWait:
+		return "(wait) " + step.Wait
 	}
 	return "(no kind)"
 }
@@ -228,16 +233,12 @@ func (p *Policy) stepFor(cmd string) int {
 // AllowedCommands lists the commands the policy accepts now.
 //
 // A command belongs to the first step listing it, so it is left out
-// once that step has spent its limit. The whole list is empty once
-// the workflow's action budget is used up.
+// once that step has spent its limit.
 func (p *Policy) AllowedCommands() []string {
-	if p.usedActions() >= p.maxActions() {
-		return nil
-	}
 	var cmds []string
 	seen := map[string]bool{}
 	for i, step := range p.steps() {
-		spent := step.Max > 0 && p.stepUsage(i) >= step.Max
+		spent := step.Attempts > 0 && p.stepUsage(i) >= step.Attempts
 		for _, c := range append([]string{step.Message}, step.Allow...) {
 			n := normalizeCommand(c)
 			if n == "" || seen[n] {
@@ -262,20 +263,33 @@ func (p *Policy) allowedCommands() string {
 	return strings.Join(cmds, ", ")
 }
 
-// stepUsage counts the runs taken for the step.
+// stepUsage counts the runs taken for the step in the current round.
 func (p *Policy) stepUsage(idx int) int {
 	steps := p.steps()
 	if idx < 0 || idx >= len(steps) {
 		return 0
 	}
 	id := steps[idx].ID
+	round := p.Round(JobOf(p.Workflow, id))
 	n := 0
 	for _, rec := range p.History {
-		if rec.Kind == ActionKindRun && rec.StepID == id {
-			n++
+		if rec.Kind != ActionKindRun || rec.StepID != id {
+			continue
 		}
+		if recordRound(rec) != round {
+			continue
+		}
+		n++
 	}
 	return n
+}
+
+// recordRound returns the round an action was taken in.
+func recordRound(rec ActionRecord) int {
+	if rec.Round <= 0 {
+		return 1
+	}
+	return rec.Round
 }
 
 // lastExecuted returns the step that ran last and its latest
@@ -292,19 +306,6 @@ func (p *Policy) lastExecuted() (string, Outcome, bool) {
 		return rec.StepID, rec.Outcome, true
 	}
 	return "", Outcome{}, false
-}
-
-// usedActions counts every action taken, instructions included.
-func (p *Policy) usedActions() int {
-	return len(p.History)
-}
-
-// maxActions returns the workflow's action budget.
-func (p *Policy) maxActions() int {
-	if p.Workflow != nil && p.Workflow.MaxActions > 0 {
-		return p.Workflow.MaxActions
-	}
-	return DefaultMaxActions
 }
 
 // steps returns the workflow's steps, tolerating a missing workflow.

@@ -3,6 +3,7 @@ package me
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -274,25 +275,47 @@ func TestSystem2_TokenBudgetStopsTheRun(t *testing.T) {
 	}
 }
 
-func TestSystem2_IterationLimitStopsTheRun(t *testing.T) {
+// TestRun_HasNoTurnCap — a run takes as many turns as the plan needs.
+//
+// There is no turn cap any more: only `/me stop` and the daemon's
+// shutdown end a run. A plan with more steps than the old cap allowed
+// runs to the end.
+func TestRun_HasNoTurnCap(t *testing.T) {
 	dir := t.TempDir()
-	writeWorkflow(t, dir, "one", oneStepWorkflow)
+	const steps = 100
+	var b strings.Builder
+	b.WriteString("name: many\njobs:\n  main:\n    steps:\n")
+	for i := 1; i <= steps; i++ {
+		fmt.Fprintf(&b, "      - id: s%d\n        message: /gtw s%d\n", i, i)
+	}
+	writeWorkflow(t, dir, "many", b.String())
 
-	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolRepoStatus, map[string]any{})},
-	}}
-	svc, lb, sender := testService(t, dir, Config{Provider: provider, MaxIterations: 1})
-	lb.steps = []fakeStep{pendingStep("still going")}
+	provider := &scriptedProvider{err: errors.New("the chat model must not be called")}
+	svc, lb, _ := testService(t, dir, Config{Provider: provider})
+	for i := 0; i < steps; i++ {
+		lb.steps = append(lb.steps, fakeStep{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "ok"}})
+	}
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "many", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	waitRun(t, svc, "obs-1")
 
-	if !sender.Has("limit of 1 turns") {
-		t.Fatalf("the observer was not told about the limit: %v", sender.Lines())
+	sent := lb.Sent()
+	for i := 1; i <= steps; i++ {
+		cmd := fmt.Sprintf("/gtw s%d", i)
+		found := false
+		for _, s := range sent {
+			if s == cmd {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("the step %q never ran: %d commands were sent", cmd, len(sent))
+		}
 	}
 }
 

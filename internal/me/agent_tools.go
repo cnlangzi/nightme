@@ -164,6 +164,9 @@ func (s *Service) toolRunStep(ctx context.Context, r *run, call pendingCall) (st
 // the run state records it. A command from an allow list is a repair
 // inside the step: only the action history records it.
 //
+// A command that could not run at all comes back as a tool error: the
+// agent reads what went wrong and tries again.
+//
 // The action is recorded only when the command settled: a step that
 // is still running has not been taken yet.
 func (s *Service) runStep(ctx context.Context, r *run, command string) (stepResult, error) {
@@ -173,7 +176,18 @@ func (s *Service) runStep(ctx context.Context, r *run, command string) (stepResu
 	}
 	res, err := s.runCommand(ctx, r, command, false)
 	if err != nil {
-		return stepResult{}, err
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return stepResult{}, err
+		}
+		out := wfe.Outcome{Status: wfe.OutcomeFailed, Summary: err.Error()}
+		step, ok := r.stepAt(idx)
+		if !ok {
+			r.record(wfe.ActionKindRun, command, "", out)
+			return stepResult{}, toolErrorf("%s", err.Error())
+		}
+		r.record(wfe.ActionKindRun, command, step.ID, out)
+		r.recordStep(wfe.JobOf(r.workflow, step.ID), step, out)
+		return stepResult{}, toolErrorf("%s", err.Error())
 	}
 	if res.Status == statusWaiting {
 		// The command is still running: the step has no verdict yet.

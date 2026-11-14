@@ -61,12 +61,15 @@ func (s *Service) drive(ctx context.Context, r *run) {
 // are still open, it runs the step the workflow decides on, it asks
 // the decision model what comes next, or it lets the chat model take
 // a turn.
+//
+// A run has no turn cap: it ends when the plan is exhausted and the
+// agent finishes it, when the operator stops it, or when the daemon
+// shuts down.
 func (s *Service) loop(ctx context.Context, r *run) error {
 	if s.cfg.Provider == nil {
 		return s.loopDeciderOnly(ctx, r)
 	}
-	maxIter := s.maxIterations(r)
-	for i := 0; i < maxIter; i++ {
+	for {
 		if err := s.checkAlive(ctx, r); err != nil {
 			return err
 		}
@@ -84,7 +87,6 @@ func (s *Service) loop(ctx context.Context, r *run) error {
 			return errFinished
 		}
 	}
-	return fmt.Errorf("the run reached its limit of %d turns", maxIter)
 }
 
 // turn advances the run by one decision.
@@ -131,12 +133,19 @@ func (s *Service) turn(ctx context.Context, r *run) (bool, error) {
 
 // plan asks the engine what the run does next.
 //
-// The engine owns the state: it records the steps it skips on the way.
+// The engine owns the state: it records the steps it skips on the way
+// and advances the round of a job that repeats. The policy follows the
+// rounds, so the per-step budgets count the current round only.
 func (s *Service) plan(r *run) (wfe.Decision, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.state.UpdatedAt = s.now()
-	return wfe.Decide(r.state, r.workflow)
+	decision, err := wfe.Decide(r.state, r.workflow)
+	if err != nil {
+		return decision, err
+	}
+	r.policy.SetRounds(r.state.Rounds)
+	return decision, nil
 }
 
 // runPlanStep runs the step the workflow decided on.
@@ -172,8 +181,7 @@ func (s *Service) goalMet(r *run) bool {
 // Without a chat model there is nobody to escalate to, so a decision
 // the model is not sure about becomes a question for the user.
 func (s *Service) loopDeciderOnly(ctx context.Context, r *run) error {
-	maxIter := s.maxIterations(r)
-	for i := 0; i < maxIter; i++ {
+	for {
 		if err := s.checkAlive(ctx, r); err != nil {
 			return err
 		}
@@ -248,7 +256,6 @@ func (s *Service) loopDeciderOnly(ctx context.Context, r *run) error {
 			return errFinished
 		}
 	}
-	return fmt.Errorf("the run reached its limit of %d turns", maxIter)
 }
 
 // checkAlive reports whether the run may go on.
@@ -257,19 +264,6 @@ func (s *Service) checkAlive(ctx context.Context, r *run) error {
 		return err
 	}
 	return r.ctx.Err()
-}
-
-// maxIterations returns the loop cap of a run: three times the
-// workflow's action budget, unless the configuration says otherwise.
-func (s *Service) maxIterations(r *run) int {
-	if s.cfg.MaxIterations > 0 {
-		return s.cfg.MaxIterations
-	}
-	actions := r.workflow.MaxActions
-	if actions <= 0 {
-		actions = wfe.DefaultMaxActions
-	}
-	return actions * DefaultMaxIterationsFactor
 }
 
 // finishDone ends the run as done and tells the observer.

@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -79,10 +80,10 @@ func Parse(raw []byte) (*Workflow, error) {
 
 // The keys each level of the schema accepts.
 var (
-	workflowKeys = keySet("name", "args", "goal", "max_actions", "instruct", "workspaces", "on", "jobs")
+	workflowKeys = keySet("name", "args", "goal", "instruct", "workspaces", "on", "jobs")
 	argKeys      = keySet("name", "default")
-	jobKeys      = keySet("needs", "if", "steps")
-	stepKeys     = keySet("id", "if", "env", "continue-on-error", "note", "allow", "max", "message", "shell", "use", "with")
+	jobKeys      = keySet("needs", "if", "iterations", "steps")
+	stepKeys     = keySet("id", "if", "env", "continue-on-error", "note", "allow", "attempts", "message", "shell", "use", "with", "wait")
 	triggerKeys  = keySet("schedule", "pull_request", "branch", "issue", "mention")
 )
 
@@ -277,12 +278,6 @@ func validate(wf *Workflow, root *yaml.Node) error {
 	if wf.Name == "" {
 		return fmt.Errorf("wfe: name is required")
 	}
-	if !hasKey(root, "max_actions") {
-		wf.MaxActions = DefaultMaxActions
-	}
-	if wf.MaxActions < 1 {
-		return fmt.Errorf("wfe: %s: max_actions must be >= 1", wf.Name)
-	}
 	if !hasKey(root, "instruct") {
 		wf.Instruct = true
 	}
@@ -310,6 +305,9 @@ func validate(wf *Workflow, root *yaml.Node) error {
 			if !jobNames[need] {
 				return fmt.Errorf("wfe: %s: job %q needs unknown job %q", wf.Name, name, need)
 			}
+		}
+		if job.Iterations != nil && *job.Iterations < 0 {
+			return fmt.Errorf("wfe: %s: job %q: iterations must be >= 0", wf.Name, name)
 		}
 	}
 	if len(wf.JobOrder()) != len(wf.Jobs) {
@@ -355,11 +353,19 @@ func validateStep(s *Step) error {
 	if s.Use != "" {
 		n++
 	}
-	if n != 1 {
-		return fmt.Errorf("exactly one of message / shell / use must be set (got %d)", n)
+	if s.Wait != "" {
+		n++
 	}
-	if s.Max < 0 {
-		return fmt.Errorf("max must be >= 1")
+	if n != 1 {
+		return fmt.Errorf("exactly one of message / shell / use / wait must be set (got %d)", n)
+	}
+	if s.Attempts < 0 {
+		return fmt.Errorf("attempts must be >= 0")
+	}
+	if s.Wait != "" {
+		if _, err := time.ParseDuration(s.Wait); err != nil {
+			return fmt.Errorf("wait: %q is not a duration", s.Wait)
+		}
 	}
 	return nil
 }
@@ -594,7 +600,6 @@ func cloneWorkflow(wf *Workflow) *Workflow {
 	out := &Workflow{
 		Name:       wf.Name,
 		Goal:       wf.Goal,
-		MaxActions: wf.MaxActions,
 		Instruct:   wf.Instruct,
 		Workspaces: append([]string(nil), wf.Workspaces...),
 		On:         wf.On,
@@ -626,11 +631,16 @@ func cloneWorkflow(wf *Workflow) *Workflow {
 				steps[i].With = cloneAnyMap(step.With)
 			}
 		}
-		out.Jobs[name] = Job{
+		cloned := Job{
 			Needs: append([]string(nil), job.Needs...),
 			If:    job.If,
 			Steps: steps,
 		}
+		if job.Iterations != nil {
+			rounds := *job.Iterations
+			cloned.Iterations = &rounds
+		}
+		out.Jobs[name] = cloned
 	}
 	return out
 }

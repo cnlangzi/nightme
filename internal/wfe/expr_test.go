@@ -39,6 +39,46 @@ func TestEvalString_Steps(t *testing.T) {
 	}
 }
 
+func TestEvalString_StepOutputs(t *testing.T) {
+	ec := ExprCtx{Steps: map[string]map[string]string{
+		"fix": {
+			"status":      "ok",
+			"summary":     "picked an issue",
+			"data.issue":  "42",
+			"data.branch": "nightme/issue-42",
+		},
+	}}
+	tests := []struct {
+		expr string
+		want string
+	}{
+		{"${{ steps.fix.outputs.status }}", "ok"},
+		{"${{ steps.fix.outputs.summary }}", "picked an issue"},
+		{"${{ steps.fix.outputs.data.issue }}", "42"},
+		{"${{ steps.fix.status }}", "ok"},
+		{"${{ steps.fix.data.branch }}", "nightme/issue-42"},
+		{"${{ steps.fix.outputs.issue }}", "42"},
+		{"${{ steps.fix.outputs.data.missing }}", ""},
+	}
+	for _, tt := range tests {
+		if got := EvalString(tt.expr, ec); got != tt.want {
+			t.Errorf("%s = %q, want %q", tt.expr, got, tt.want)
+		}
+	}
+}
+
+func TestEvalString_NeedsOutputs(t *testing.T) {
+	ec := ExprCtx{Needs: map[string]map[string]string{
+		"ship": {"status": "ok", "data.pr": "7"},
+	}}
+	if got := EvalString("${{ needs.ship.outputs.status }}", ec); got != "ok" {
+		t.Errorf("status = %q, want ok", got)
+	}
+	if got := EvalString("${{ needs.ship.outputs.data.pr }}", ec); got != "7" {
+		t.Errorf("data.pr = %q, want 7", got)
+	}
+}
+
 func TestEvalString_FunctionSuccess(t *testing.T) {
 	ec := ExprCtx{}
 	got := EvalString("${{ success() }}", ec)

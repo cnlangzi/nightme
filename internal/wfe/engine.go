@@ -41,6 +41,10 @@ type Decision struct {
 // ready set forks, or the previous outcome was not ok or noop. The
 // agent decides what happens next.
 //
+// A job whose round is over starts its next round instead of ending
+// the run: the round's outputs are cleared and the step budgets start
+// over.
+//
 // The state is the engine's: the steps whose condition did not hold
 // are recorded as skipped before the decision is made.
 func Decide(state *RunState, wf *Workflow) (Decision, error) {
@@ -55,26 +59,60 @@ func Decide(state *RunState, wf *Workflow) (Decision, error) {
 	if err != nil {
 		return Decision{}, err
 	}
-	for _, step := range skipped {
-		RecordStep(state, step.Job, step.Step, Outcome{
-			Status:  OutcomeNoop,
-			Summary: "the step's condition did not hold",
-		}, true)
-	}
+	recordSkipped(state, skipped)
 
 	steps := make([]Step, 0, len(ready))
 	for _, step := range ready {
 		steps = append(steps, step.Step)
 	}
 	prev, hasPrev := lastRun(state)
-	switch {
-	case len(ready) == 0:
-		return Decision{
-			Kind:      DecisionJudgment,
-			Reason:    exhaustedReason(prev, hasPrev),
-			Exhausted: true,
-		}, nil
-	case len(ready) > 1:
+	// A step that did not end ok is a judgment point: the plan cannot
+	// go on by itself.
+	blocked := hasPrev && prevBlocks(state, wf, prev)
+
+	if len(ready) == 0 {
+		repeating := repeatingJobs(state, wf)
+		switch {
+		case len(repeating) == 0:
+			return Decision{
+				Kind:      DecisionJudgment,
+				Reason:    exhaustedReason(prev, hasPrev),
+				Exhausted: true,
+			}, nil
+		case blocked:
+			// The round does not advance on its own: the agent decides
+			// what to do about the step that did not end ok.
+			return Decision{
+				Kind:   DecisionJudgment,
+				Reason: fmt.Sprintf("the previous step %q ended as %q", prev.ID, prev.Outcome.Status),
+			}, nil
+		case len(repeating) > 1:
+			return Decision{
+				Kind:   DecisionJudgment,
+				Reason: fmt.Sprintf("%d jobs are ready to start another round", len(repeating)),
+			}, nil
+		}
+		// The round is over: the job starts the next one.
+		startRound(state, wf, repeating[0])
+		ready, skipped, err = readySet(state, wf)
+		if err != nil {
+			return Decision{}, err
+		}
+		recordSkipped(state, skipped)
+		steps = steps[:0]
+		for _, step := range ready {
+			steps = append(steps, step.Step)
+		}
+		if len(ready) == 0 {
+			return Decision{
+				Kind:      DecisionJudgment,
+				Reason:    exhaustedReason(prev, hasPrev),
+				Exhausted: true,
+			}, nil
+		}
+	}
+
+	if len(ready) > 1 {
 		return Decision{
 			Kind:   DecisionJudgment,
 			Ready:  steps,
@@ -88,7 +126,7 @@ func Decide(state *RunState, wf *Workflow) (Decision, error) {
 			Reason: fmt.Sprintf("the step %q is still running", ready[0].Step.ID),
 		}, nil
 	}
-	if hasPrev && prevBlocks(state, wf, prev) {
+	if blocked {
 		return Decision{
 			Kind:   DecisionJudgment,
 			Ready:  steps,
@@ -101,6 +139,64 @@ func Decide(state *RunState, wf *Workflow) (Decision, error) {
 		Job:   ready[0].Job,
 		Ready: steps,
 	}, nil
+}
+
+// recordSkipped records the steps whose condition did not hold.
+func recordSkipped(state *RunState, skipped []readyStep) {
+	for _, step := range skipped {
+		RecordStep(state, step.Job, step.Step, Outcome{
+			Status:  OutcomeNoop,
+			Summary: "the step's condition did not hold",
+		}, true)
+	}
+}
+
+// repeatingJobs returns the jobs whose round is over and that have
+// rounds left.
+func repeatingJobs(state *RunState, wf *Workflow) []string {
+	var out []string
+	for _, name := range wf.JobOrder() {
+		if !jobComplete(state, wf, name) {
+			continue
+		}
+		rounds := wf.Jobs[name].Rounds()
+		if rounds == 0 || state.Rounds[name] < rounds {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// startRound begins the next round of a job.
+//
+// The round's outputs are cleared, so an expression reads the next
+// round's facts, and the step budgets start over.
+func startRound(state *RunState, wf *Workflow, name string) {
+	if state.Rounds == nil {
+		state.Rounds = map[string]int{}
+	}
+	state.Rounds[name]++
+	clearJobSteps(state, wf, name)
+}
+
+// clearJobSteps drops the steps of a job from the run state.
+func clearJobSteps(state *RunState, wf *Workflow, name string) {
+	job, ok := wf.Jobs[name]
+	if !ok {
+		return
+	}
+	ids := make(map[string]bool, len(job.Steps))
+	for _, step := range job.Steps {
+		ids[step.ID] = true
+	}
+	kept := state.Steps[:0]
+	for _, st := range state.Steps {
+		if ids[st.ID] {
+			continue
+		}
+		kept = append(kept, st)
+	}
+	state.Steps = kept
 }
 
 // exhaustedReason explains why a run with nothing ready has to stop.
@@ -145,6 +241,13 @@ func readySet(state *RunState, wf *Workflow) ([]readyStep, []readyStep, error) {
 	var ready, skipped []readyStep
 	for _, name := range wf.JobOrder() {
 		job := wf.Jobs[name]
+		// The job's first round begins as soon as the plan looks at it.
+		if state.Rounds == nil {
+			state.Rounds = map[string]int{}
+		}
+		if state.Rounds[name] == 0 {
+			state.Rounds[name] = 1
+		}
 		if done[name] {
 			continue
 		}
@@ -198,19 +301,26 @@ func readySet(state *RunState, wf *Workflow) ([]readyStep, []readyStep, error) {
 // completedJobs returns the jobs whose steps have all run.
 func completedJobs(state *RunState, wf *Workflow) map[string]bool {
 	out := map[string]bool{}
-	for name, job := range wf.Jobs {
-		complete := true
-		for _, step := range job.Steps {
-			if !HasRun(state, step.ID) {
-				complete = false
-				break
-			}
-		}
-		if complete {
+	for name := range wf.Jobs {
+		if jobComplete(state, wf, name) {
 			out[name] = true
 		}
 	}
 	return out
+}
+
+// jobComplete reports whether every step of the job has run.
+func jobComplete(state *RunState, wf *Workflow, name string) bool {
+	job, ok := wf.Jobs[name]
+	if !ok {
+		return false
+	}
+	for _, step := range job.Steps {
+		if !HasRun(state, step.ID) {
+			return false
+		}
+	}
+	return true
 }
 
 // HasRun reports whether the step already ran.
@@ -257,6 +367,7 @@ func RecordStep(state *RunState, job string, step Step, out Outcome, skipped boo
 	if state == nil {
 		return
 	}
+	round := state.RoundOf(job)
 	for i := range state.Steps {
 		if state.Steps[i].ID != step.ID {
 			continue
@@ -264,11 +375,13 @@ func RecordStep(state *RunState, job string, step Step, out Outcome, skipped boo
 		state.Steps[i].Outcome = out
 		state.Steps[i].Skipped = skipped
 		state.Steps[i].Pending = false
+		state.Steps[i].Round = round
 		return
 	}
 	state.Steps = append(state.Steps, StepState{
 		ID:      step.ID,
 		Job:     job,
+		Round:   round,
 		Outcome: out,
 		Skipped: skipped,
 	})
@@ -283,16 +396,19 @@ func RecordPending(state *RunState, job string, step Step) {
 	if state == nil {
 		return
 	}
+	round := state.RoundOf(job)
 	for i := range state.Steps {
 		if state.Steps[i].ID != step.ID {
 			continue
 		}
 		state.Steps[i].Pending = true
+		state.Steps[i].Round = round
 		return
 	}
 	state.Steps = append(state.Steps, StepState{
 		ID:      step.ID,
 		Job:     job,
+		Round:   round,
 		Outcome: Outcome{Status: OutcomeUnknown},
 		Pending: true,
 	})
@@ -378,14 +494,14 @@ func buildExprCtx(state *RunState) ExprCtx {
 }
 
 // outcomeOutputs renders an outcome as the outputs an expression
-// reads: outputs.status, outputs.summary and outputs.data.<key>.
+// reads: status, summary and one data.<key> per fact.
 func outcomeOutputs(o Outcome) map[string]string {
 	out := map[string]string{
-		"outputs.status":  string(o.Status),
-		"outputs.summary": o.Summary,
+		"status":  string(o.Status),
+		"summary": o.Summary,
 	}
 	for k, v := range o.Data {
-		out["outputs.data."+k] = v
+		out["data."+k] = v
 	}
 	return out
 }

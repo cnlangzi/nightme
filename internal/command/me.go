@@ -36,8 +36,6 @@ type MeStatus struct {
 	Progress string
 	// Actions is the number of actions the run took.
 	Actions int
-	// RemainingActions is the action budget left.
-	RemainingActions int
 	// System1Decisions is the number of decisions the decision model
 	// made.
 	System1Decisions int

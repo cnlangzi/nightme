@@ -285,7 +285,7 @@ func (r *run) checkFinish(status string) error {
 }
 
 // checkStep asks the policy whether the step may take an action now:
-// its own limit and the workflow's action budget.
+// its own limit for the current round.
 func (r *run) checkStep(step wfe.Step) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -371,16 +371,33 @@ func (r *run) renderPolicy() string {
 }
 
 // record appends an action to the policy's history.
+//
+// The record carries the round the step's job is in: the per-step
+// budgets count the attempts of the current round only.
 func (r *run) record(kind wfe.ActionKind, command, stepID string, outcome wfe.Outcome) {
 	r.mu.Lock()
 	r.policy.Record(wfe.ActionRecord{
 		Kind:    kind,
 		Command: command,
 		StepID:  stepID,
+		Round:   r.roundOf(stepID),
 		Outcome: outcome,
 		At:      r.svc.now(),
 	})
 	r.mu.Unlock()
+}
+
+// roundOf returns the round the step's job is in. The caller holds the
+// lock.
+func (r *run) roundOf(stepID string) int {
+	job := wfe.JobOf(r.workflow, stepID)
+	if job == "" {
+		return 1
+	}
+	if round := r.state.Rounds[job]; round > 0 {
+		return round
+	}
+	return 1
 }
 
 // exprCtx renders the run's progress as the context an expression
@@ -609,6 +626,7 @@ func (s *Service) restoreRun(state persistedRun) *run {
 	if r.phase == "" {
 		r.phase = PhaseRunning
 	}
+	r.policy.SetRounds(r.state.Rounds)
 	return r
 }
 

@@ -468,52 +468,68 @@ name: fix-issue
 args:
   - name: issue
     default: "*"
-goal: 把队列里的一个 issue 做完并推上去
-max_actions: 30
+goal: 把队列里的 issue 一个个做完、开 PR，然后回 main 继续
 on:                                   # 将来给 timer scheduler 消费；本期不实现
   schedule:
     - cron: "0 2 * * *"
 jobs:
   ship:
+    iterations: 0                     # 0 = 这个 job 一直重复到运行结束
     steps:
+      - id: wait
+        wait: 5m
       - id: fix
         message: "/gtw fix ${{ args.issue }} -y"
-        note: 从 nightme/assigned 队列里挑一个
-        allow: ["/gtw abort"]
-        max: 3
+        note: 从 nightme/assigned 队列里挑一个；挑不到就等下一轮
+        allow: ["/gtw fix ${{ args.issue }} -y", "/gtw back"]
+        attempts: 3
       - id: commit
         message: "/gtw commit"
+        if: ${{ steps.fix.outputs.data.issue }}
       - id: review
         message: "/review"
         note: 没跑完就 /review -c；有改动就先 /gtw commit
         allow: ["/review -c", "/gtw commit"]
-        max: 5
+        attempts: 5
+        if: ${{ steps.fix.outputs.data.issue }}
       - id: commit2
         message: "/gtw commit"
+        if: ${{ steps.fix.outputs.data.issue }}
       - id: push
         message: "/gtw push"
+        if: ${{ steps.fix.outputs.data.issue }}
+      - id: pr
+        message: "/gtw pr"
+        if: ${{ steps.fix.outputs.data.issue }}
+      - id: back
+        message: "/gtw back"
+        if: ${{ steps.fix.outputs.data.issue }}
 ```
 
 部署方式：把这份文件写到 `~/.nightme/workflows/fix-issue.yaml`，然后跑 `nightme restart`。
+
+`fix` 之后的那些 step 都用 `data.issue` 守卫：挑到了 issue 的 fix 会在结果里报 `issue`，没挑到的不会——所以这个守卫读的就是"挑到了 issue"，这一轮的其余部分会被跳过。
 
 | workflow 字段 | 含义 |
 |---|---|
 | `name` | workflow 的名字。`/me start <name>` 按名字取。 |
 | `args` | 这个 workflow 接受的参数。一个参数规格是带 `name` 和可选 `default` 的映射：有 `default` 就是可选参数，没有就是必填参数。 |
 | `goal` | 这次运行为了什么。它是模型指令的一部分。 |
-| `max_actions` | 整个运行的动作预算。默认 30。 |
 | `instruct` | agent 能不能发自由指令。默认 true。 |
 | `workspaces` | 这个 workflow 点名的工作区。可选——运行用的是发起它的那个 chat 的工作区。 |
 | `on` | 触发器块。它被解析和展示，目前没有东西会触发它。 |
 | `jobs` | 各个 job，每个带一份有序的 `steps`。必填。 |
+
+一个 job 带 `needs`、`if`、`iterations` 和 `steps`。`iterations` 是这个 job 跑多少轮：不填就是一轮，`0` 是"一直跑到运行结束"，`N` 就是 `N` 轮。一轮在这个 job 的 step 跑完时结束；下一轮从这个 job 的第一个 step 开始，上一轮的 step 产出被清空，每个 step 的预算也重新开始。
 
 一个 step 恰好带一种类型：
 
 | step 类型 | 作用 |
 |---|---|
 | `message:` | 把这段文字发到 work chat。以 `/` 开头的文字是斜杠命令，其它文字是给 work agent 的一轮对话。 |
-| `shell:` | 在工作区里跑一条 shell 命令。 |
+| `shell:` | 在 work chat 当前所在目录里跑一条 shell 命令。 |
 | `use:` | 跑一个已注册的动作——`notify`、`email`、`github_pr_comment`、`github_issue`，或者 `~/.nightme/workflows/actions/` 下的脚本。 |
+| `wait:` | 等待一段时间（`5m`）然后回报 ok。 |
 
 | step 字段 | 含义 |
 |---|---|
@@ -523,11 +539,11 @@ jobs:
 | `continue-on-error` | 这个 step 失败时链条是否继续。 |
 | `note` | 这个 step 为什么在这儿，额外的命令什么时候用。它是决策模型读的那段描述。 |
 | `allow` | 这个 step 里 agent 还能用的额外命令。 |
-| `max` | 这个 step 能走的动作数。不填这一项就不设上限——`max: 0` 会被拒绝。 |
+| `attempts` | agent 在一轮里能对这个 step 走的动作数——step 自己那次执行，加上 `allow:` 里的命令。不填这一项就不设上限。 |
 
 表达式有 `${{ args.NAME }}`、`${{ steps.<id>.outputs.status }}`、
 `${{ steps.<id>.outputs.data.<key> }}`、`${{ needs.<job>.* }}`、`${{ env.NAME }}`
-和 `${{ now }}`。表达式里出现 workflow 没声明的参数，在加载文件时就会被拒绝。
+和 `${{ now }}`；`outputs` 这一段可以省略。表达式里出现 workflow 没声明的参数，在加载文件时就会被拒绝。
 
 ### 配置模型
 
@@ -610,6 +626,9 @@ workflow 说了下一步是什么，所以大部分步骤根本不需要模型�
 - **就绪集**是那些 job 的 `needs` 都满足、`if:` 也成立的未跑步骤。同一个 job 里只算第一个这样的步骤。
 - 就绪集只有一个元素、并且上一步的结果是 `ok` 或 `noop` 时，这一步照原样跑。不问模型。
 - 其它都是**判断点**：就绪集空了或者分叉、上一步没有以 `ok` 或 `noop` 收尾、或者一条命令还在等回答。这时由 agent 决定——它挑下一个节点、修当前这一步，或者结束这次运行。
+- 一个 job 的这一轮跑完时，它开下一轮，而不是结束这次运行：这一轮的 step 产出被清空，每个 step 的 `attempts` 预算也重新开始。
+
+一次运行既没有全局动作预算，也没有模型轮数上限：它结束于计划跑完、agent 收尾，或者你发 `/me stop`，或者 daemon 关掉。
 
 agent 在判断点上给出一个指令：`run_step`（跑一条命令）、`instruct`（给 work chat 发一段自由指令）、`answer_choice`（回答 work agent 在等的一个提示）、`ask_human`（问你）、`repo_status`（读分支和工作树）、`finish`（结束运行）。agent 点名的命令必须是某个 step 的 `message:`，或者某个 step 的 `allow:` 里的一条——别的会作为错误退回来让它自己纠正。
 
@@ -644,7 +663,8 @@ workflows 目录里的 YAML 写坏了，个人 agent 起不来——`nightme log
 
 | 护栏 | 边界 |
 |---|---|
-| 动作预算 | 整个运行是 `max_actions`（默认 30），单个 step 是 `max`。 |
+| step 预算 | 单个 step 是 `attempts`，按轮算。 |
+| 轮数 | 一个 job 是 `iterations`——它跑多少轮。 |
 | step 超时 | 每条命令三十分钟。 |
 | 停滞检测 | 十分钟没有心跳。 |
 | token 预算 | 一次运行在 chat 模型上能花的 token。 |

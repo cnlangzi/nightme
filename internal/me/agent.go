@@ -66,10 +66,6 @@ const (
 	// DefaultStallTimeout is how long a step may go without a
 	// heartbeat before the run stops waiting for it.
 	DefaultStallTimeout = 10 * time.Minute
-
-	// DefaultMaxIterationsFactor multiplies the workflow's action
-	// budget to get the loop iteration cap.
-	DefaultMaxIterationsFactor = 3
 )
 
 // Phase is where a run stands.
@@ -175,6 +171,16 @@ type GitRunner interface {
 	Run(ctx context.Context, dir string, args ...string) (stdout, stderr string, err error)
 }
 
+// CwdProvider reports the directory a chat currently works in.
+//
+// The work chat's directory moves when a command moves it — `/gtw fix`
+// moves it into the worktree — so a shell step runs where the chat
+// stands.
+type CwdProvider interface {
+	// Cwd returns the directory the chat currently works in.
+	Cwd(chatID string) string
+}
+
 // Config holds the personal agent's configuration.
 type Config struct {
 	// WorkflowsDir is the directory the workflows live in. The action
@@ -198,9 +204,6 @@ type Config struct {
 	// TokenBudget caps the tokens one run may spend on the chat
 	// model. Zero means DefaultTokenBudget.
 	TokenBudget int
-	// MaxIterations caps the tool loop of one run. Zero means three
-	// times the workflow's action budget.
-	MaxIterations int
 	// StepTimeout caps one step. Zero means DefaultStepTimeout.
 	StepTimeout time.Duration
 	// StallTimeout is how long a step may go without a heartbeat.
@@ -218,6 +221,9 @@ type Config struct {
 	Answerer ChoiceAnswerer
 	// Git reads the repository facts of the work chat.
 	Git GitRunner
+	// Cwd reports the directory a chat currently works in. Nil means
+	// the shell steps run in the workspace the run started in.
+	Cwd CwdProvider
 
 	// Logger is the logger the agent logs through. Nil means
 	// slog.Default().

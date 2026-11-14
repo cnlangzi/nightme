@@ -13,6 +13,8 @@ import (
 //   - ${{ args.X }}       → ec.Args["X"]
 //   - ${{ event.X }}      → nested map lookup ec.Event["X"]
 //   - ${{ steps.ID.K }}   → ec.Steps["ID"]["K"]
+//   - ${{ steps.ID.outputs.K }} → the same, with the optional
+//     `outputs` segment written out
 //   - ${{ needs.JOB.K }}  → ec.Needs["JOB"]["K"]
 //   - ${{ success() }}    → true
 //   - ${{ failure() }}    → false
@@ -132,7 +134,7 @@ func evalOne(expr string, ec ExprCtx) string {
 		if !ok {
 			return ""
 		}
-		return stepOut[strings.Join(parts[2:], ".")]
+		return lookupOutput(stepOut, parts[2:])
 	case "needs":
 		if len(parts) < 3 {
 			return ""
@@ -141,7 +143,35 @@ func evalOne(expr string, ec ExprCtx) string {
 		if !ok {
 			return ""
 		}
-		return jobOut[strings.Join(parts[2:], ".")]
+		return lookupOutput(jobOut, parts[2:])
+	}
+	return ""
+}
+
+// lookupOutput resolves the path of an output.
+//
+// The `outputs` segment is optional: the rest of the path is joined
+// with "." into one key. A key the outputs do not hold falls back to
+// the data namespace, so `steps.fix.outputs.issue` finds the outcome's
+// `issue` fact.
+func lookupOutput(out map[string]string, path []string) string {
+	if len(path) == 0 {
+		return ""
+	}
+	if path[0] == "outputs" {
+		path = path[1:]
+	}
+	if len(path) == 0 {
+		return ""
+	}
+	key := strings.Join(path, ".")
+	if v, ok := out[key]; ok {
+		return v
+	}
+	if !strings.HasPrefix(key, "data.") {
+		if v, ok := out["data."+key]; ok {
+			return v
+		}
 	}
 	return ""
 }

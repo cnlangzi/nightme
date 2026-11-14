@@ -105,7 +105,7 @@ func TestStatus_ReportsTheRunWhileItWorks(t *testing.T) {
 // does not carry over to the next one.
 func TestFastPath_EveryCommandIsWatchedOnItsOwn(t *testing.T) {
 	dir := t.TempDir()
-	writeWorkflow(t, dir, "two", `name: two
+	writeWorkflow(t, dir, "two", `title: two
 jobs:
   main:
     steps:
@@ -284,7 +284,7 @@ func TestRun_HasNoTurnCap(t *testing.T) {
 	dir := t.TempDir()
 	const steps = 100
 	var b strings.Builder
-	b.WriteString("name: many\njobs:\n  main:\n    steps:\n")
+	b.WriteString("title: many\njobs:\n  main:\n    steps:\n")
 	for i := 1; i <= steps; i++ {
 		fmt.Fprintf(&b, "      - id: s%d\n        message: /gtw s%d\n", i, i)
 	}
@@ -321,7 +321,7 @@ func TestRun_HasNoTurnCap(t *testing.T) {
 
 func TestCompact_LeavesTheRunConversationAlone(t *testing.T) {
 	dir := t.TempDir()
-	writeWorkflow(t, dir, "two", `name: two
+	writeWorkflow(t, dir, "two", `title: two
 jobs:
   main:
     steps:
@@ -408,7 +408,7 @@ func TestCompact_OldToolResultsKeepOnlyTheOutcome(t *testing.T) {
 
 func TestAskHuman_SuspendsAndTheReplyResumes(t *testing.T) {
 	dir := t.TempDir()
-	writeWorkflow(t, dir, "two", `name: two
+	writeWorkflow(t, dir, "two", `title: two
 jobs:
   main:
     steps:

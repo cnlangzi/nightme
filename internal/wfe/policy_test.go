@@ -8,7 +8,7 @@ import (
 // boundFixIssue binds the example workflow to an issue number.
 func boundFixIssue(t *testing.T) *Workflow {
 	t.Helper()
-	wf := mustParse(t, fixIssueYAML)
+	wf := mustLoadFile(t, "fix-issue.yaml", fixIssueYAML)
 	bound, err := Bind(wf, map[string]string{"issue": "42"})
 	if err != nil {
 		t.Fatalf("Bind: %v", err)
@@ -133,8 +133,8 @@ func TestPolicy_CheckRun_ErrorListsAllowedCommands(t *testing.T) {
 }
 
 func TestPolicy_CheckInstruct(t *testing.T) {
-	allowed := mustParse(t, "name: x\njobs:\n  main:\n    steps: [{message: echo hi}]\n")
-	forbidden := mustParse(t, "name: x\ninstruct: false\njobs:\n  main:\n    steps: [{message: echo hi}]\n")
+	allowed := mustParse(t, "title: x\njobs:\n  main:\n    steps: [{message: echo hi}]\n")
+	forbidden := mustParse(t, "title: x\ninstruct: false\njobs:\n  main:\n    steps: [{message: echo hi}]\n")
 
 	tests := []struct {
 		name    string
@@ -271,7 +271,7 @@ func TestPolicy_Remaining(t *testing.T) {
 
 func TestPolicy_CheckRun_AllowedListOmitsExhaustedOwner(t *testing.T) {
 	wf := mustParse(t, `
-name: x
+title: x
 jobs:
   main:
     steps:
@@ -300,7 +300,7 @@ jobs:
 
 func TestPolicy_InstructionIsNotAStepAction(t *testing.T) {
 	wf := mustParse(t, `
-name: x
+title: x
 jobs:
   main:
     steps:
@@ -324,6 +324,7 @@ func TestPolicy_Render(t *testing.T) {
 	out := NewPolicy(boundFixIssue(t), nil).Render()
 	for _, want := range []string{
 		"workflow: fix-issue",
+		"title: 把队列里的一个 issue 做完并推上去",
 		"1. /gtw fix 42 -y",
 		"3. /review",
 		"also allowed: /review -c, /gtw commit",
@@ -338,7 +339,7 @@ func TestPolicy_Render(t *testing.T) {
 
 func TestPolicy_Render_ShowsTheOtherStepKinds(t *testing.T) {
 	wf := mustParse(t, `
-name: mixed
+title: mixed
 jobs:
   main:
     steps:

@@ -146,7 +146,7 @@
 | Outcome 词汇表与 settled 协议 | [me.md](./me.md) |
 | Guardrails 与恢复（迭代 / token 预算 / 超时 / stall / 持久化）| [WFE.md](./WFE.md) §8.11 |
 
-Workflow 文件位置：`~/.nightme/workflows/*.yaml`，按 `name:` 去重，daemon 启动时读取。Engine 入口：`internal/wfe/`；个人 agent：`internal/me`。
+Workflow 文件位置：`~/.nightme/workflows/*.yaml` 或 `*.yml`，文件名就是 workflow 的名字，被问到时才读取。Engine 入口：`internal/wfe/`；个人 agent：`internal/me`。
 
 ## 9. 范围外（明确不做）
 

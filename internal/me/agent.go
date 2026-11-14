@@ -37,9 +37,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -241,17 +239,18 @@ type Service struct {
 	cfg    Config
 	logger *slog.Logger
 
+	// catalog is the daemon's view of the workflows directory. It is
+	// read when a workflow is asked for, so an edited file takes
+	// effect without a restart.
+	catalog *Catalog
+
 	mu sync.Mutex
-	// workflows holds the loaded workflows by name.
-	workflows map[string]*wfe.Workflow
 	// runs holds every run by id.
 	runs map[string]*run
 	// active maps an observer chat id to the run it started.
 	active map[string]*run
 	// started reports whether the service is up.
 	started bool
-	// loadErr is why the workflows could not be loaded.
-	loadErr error
 
 	// actions holds the actions a `use:` step can name.
 	actions *ActionRegistry
@@ -260,8 +259,7 @@ type Service struct {
 	wg sync.WaitGroup
 }
 
-// New constructs a Service. The workflows are loaded at Start, not
-// here.
+// New constructs a Service. The workflows are read at Start, not here.
 func New(cfg Config) *Service {
 	if cfg.MinConfidence <= 0 {
 		cfg.MinConfidence = DefaultMinConfidence
@@ -280,12 +278,12 @@ func New(cfg Config) *Service {
 		logger = slog.Default()
 	}
 	return &Service{
-		cfg:       cfg,
-		logger:    logger,
-		workflows: map[string]*wfe.Workflow{},
-		runs:      map[string]*run{},
-		active:    map[string]*run{},
-		actions:   NewActionRegistry(),
+		cfg:     cfg,
+		logger:  logger,
+		catalog: NewCatalog(cfg.WorkflowsDir),
+		runs:    map[string]*run{},
+		active:  map[string]*run{},
+		actions: NewActionRegistry(),
 	}
 }
 
@@ -300,36 +298,62 @@ func (s *Service) SetLogger(l *slog.Logger) {
 // DisabledReason explains why the personal agent cannot run, or
 // returns an empty string when it can.
 func (s *Service) DisabledReason() string {
+	if reason := s.modelsReason(); reason != "" {
+		return reason
+	}
+	return s.workflowsReason()
+}
+
+// modelsReason reports why the agent has nothing to decide with.
+func (s *Service) modelsReason() string {
 	if s.cfg.Provider == nil && s.cfg.Decider == nil {
 		return "neither me.llm nor me.decider is configured"
-	}
-	s.mu.Lock()
-	n := len(s.workflows)
-	loadErr := s.loadErr
-	s.mu.Unlock()
-	if loadErr != nil {
-		return loadErr.Error()
-	}
-	if n == 0 {
-		return fmt.Sprintf("there are no workflows in %s", s.cfg.WorkflowsDir)
 	}
 	return ""
 }
 
-// Start loads the workflows, registers the actions and resumes the
+// workflowsReason reports why the workflows directory cannot be used.
+//
+// The directory holds no workflow: the failures say why, when there are
+// any.
+func (s *Service) workflowsReason() string {
+	if len(s.catalog.Names()) > 0 {
+		return ""
+	}
+	if failures := s.catalog.Failures(); len(failures) > 0 {
+		return strings.Join(failureLines(failures), "; ")
+	}
+	return fmt.Sprintf("there are no workflows in %s", s.cfg.WorkflowsDir)
+}
+
+// failureLines renders the failures of the directory, one per line.
+func failureLines(failures []error) []string {
+	out := make([]string, 0, len(failures))
+	for _, err := range failures {
+		out = append(out, err.Error())
+	}
+	return out
+}
+
+// Start reads the workflows, registers the actions and resumes the
 // runs that were left behind by a previous daemon.
+//
+// A file that does not load is not fatal: the daemon comes up and the
+// workflows beside it work. The failure is logged and reported by
+// `/me`.
 //
 // A run that cannot go on is reported to its observer; a run that can
 // is resumed silently.
 func (s *Service) Start(ctx context.Context) error {
-	workflows, err := loadWorkflows(s.cfg.WorkflowsDir)
+	err := s.catalog.Refresh()
 	s.mu.Lock()
-	s.loadErr = err
-	s.workflows = workflows
 	s.started = true
 	s.mu.Unlock()
 	if err != nil {
 		return fmt.Errorf("me: %w", err)
+	}
+	for _, failure := range s.catalog.Failures() {
+		s.logger.Warn("me: a workflow did not load", "dir", s.cfg.WorkflowsDir, "err", failure)
 	}
 
 	registerBuiltinActions(s.actions)
@@ -368,31 +392,6 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	}
 }
 
-// loadWorkflows reads the workflows of the workflows directory.
-//
-// A missing directory is not an error: a daemon without workflows is
-// simply idle.
-func loadWorkflows(dir string) (map[string]*wfe.Workflow, error) {
-	out := map[string]*wfe.Workflow{}
-	if strings.TrimSpace(dir) == "" {
-		return out, nil
-	}
-	if _, err := os.Stat(dir); err != nil {
-		if os.IsNotExist(err) {
-			return out, nil
-		}
-		return nil, fmt.Errorf("the workflows directory %s cannot be read: %w", dir, err)
-	}
-	wfs, err := wfe.LoadDir(dir)
-	if err != nil {
-		return nil, fmt.Errorf("the workflows in %s cannot be loaded: %w", dir, err)
-	}
-	for _, wf := range wfs {
-		out[wf.Name] = wf
-	}
-	return out, nil
-}
-
 // WorkflowsDir returns the directory the workflows live in.
 func (s *Service) WorkflowsDir() string {
 	return s.cfg.WorkflowsDir
@@ -406,24 +405,35 @@ func (s *Service) actionsDir() string {
 
 // StartWorkflow starts a workflow in a chat.
 //
+// The workflows directory is read first, so a file that was edited
+// since the last start takes effect now.
+//
 // The chat gets one run at a time: a second start in the same chat
 // is refused.
 func (s *Service) StartWorkflow(ctx context.Context, req Request) (string, error) {
-	if reason := s.DisabledReason(); reason != "" {
+	if err := s.catalog.Refresh(); err != nil {
+		return "", fmt.Errorf("me: %w", err)
+	}
+	if reason := s.modelsReason(); reason != "" {
 		return "", fmt.Errorf("me is disabled: %s", reason)
 	}
 	if strings.TrimSpace(req.ObserverChatID) == "" {
 		return "", errors.New("me: the run has no observer chat")
 	}
 
-	s.mu.Lock()
-	wf, ok := s.workflows[req.Name]
+	wf, ok := s.catalog.Lookup(req.Name)
 	if !ok {
-		known := strings.Join(s.workflowNames(), ", ")
-		s.mu.Unlock()
-		return "", fmt.Errorf("there is no workflow named %q (known: %s)", req.Name, known)
+		// A file that did not load carries its own failure: the
+		// operator asked for that name, and the file is on disk.
+		if failure, broken := s.catalog.Failure(req.Name); broken {
+			return "", failure
+		}
+		if reason := s.workflowsReason(); reason != "" {
+			return "", fmt.Errorf("me is disabled: %s", reason)
+		}
+		return "", fmt.Errorf("there is no workflow named %q (known: %s)",
+			req.Name, strings.Join(s.catalog.Names(), ", "))
 	}
-	s.mu.Unlock()
 
 	values, err := mapArgValues(wf, req.Args)
 	if err != nil {
@@ -458,17 +468,6 @@ func (s *Service) StartWorkflow(ctx context.Context, req Request) (string, error
 		s.drive(ctx, r)
 	}()
 	return r.id, nil
-}
-
-// workflowNames returns the loaded workflow names, sorted. The caller
-// holds the lock.
-func (s *Service) workflowNames() []string {
-	out := make([]string, 0, len(s.workflows))
-	for name := range s.workflows {
-		out = append(out, name)
-	}
-	sort.Strings(out)
-	return out
 }
 
 // mapArgValues maps the command line's tokens onto the workflow's

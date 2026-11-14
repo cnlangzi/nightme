@@ -17,7 +17,7 @@ import (
 // waits comes back and finds the run.
 func TestRun_AWaitSurvivesARestart(t *testing.T) {
 	dir := t.TempDir()
-	writeWorkflow(t, dir, "wait", `name: wait
+	writeWorkflow(t, dir, "wait", `title: wait
 jobs:
   main:
     steps:
@@ -54,7 +54,7 @@ jobs:
 // TestRun_AShellStepSurvivesARestart — the same for a shell step.
 func TestRun_AShellStepSurvivesARestart(t *testing.T) {
 	dir := t.TempDir()
-	writeWorkflow(t, dir, "sh", `name: sh
+	writeWorkflow(t, dir, "sh", `title: sh
 jobs:
   main:
     steps:
@@ -108,7 +108,7 @@ func TestShellOutputs_TheReservedFactsWin(t *testing.T) {
 // still runs it.
 func TestRunStep_AFailedRepairDoesNotConsumeTheStep(t *testing.T) {
 	dir := t.TempDir()
-	writeWorkflow(t, dir, "one", `name: one
+	writeWorkflow(t, dir, "one", `title: one
 jobs:
   main:
     steps:
@@ -185,7 +185,7 @@ func TestActOnDecision_ARuntimeFailureEscalates(t *testing.T) {
 // is not recorded as failed.
 func TestExecuteShell_ACancelledStepHasNoVerdict(t *testing.T) {
 	dir := t.TempDir()
-	writeWorkflow(t, dir, "sh", `name: sh
+	writeWorkflow(t, dir, "sh", `title: sh
 jobs:
   main:
     steps:
@@ -233,7 +233,7 @@ jobs:
 // argument like every other field of a step.
 func TestUseStep_AnActionNameMayComeFromAnArgument(t *testing.T) {
 	dir := t.TempDir()
-	writeWorkflow(t, dir, "act", `name: act
+	writeWorkflow(t, dir, "act", `title: act
 args:
   - name: which
     default: notify

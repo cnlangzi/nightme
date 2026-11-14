@@ -169,7 +169,7 @@ func (s *Service) runPlanStep(ctx context.Context, r *run, decision wfe.Decision
 
 // goalMet reports whether the plan is done and every step ended ok.
 //
-// The goal of a workflow is written for a person; the engine can only
+// The title of a workflow is written for a person; the engine can only
 // say that the plan ran through.
 func (s *Service) goalMet(r *run) bool {
 	out, ok := r.lastOutcome()

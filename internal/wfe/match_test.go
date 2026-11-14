@@ -7,7 +7,7 @@ import "testing"
 
 func TestMatch(t *testing.T) {
 	wf, err := Parse([]byte(`
-name: x
+title: x
 on:
   pull_request:
     branches: [main]
@@ -56,7 +56,7 @@ jobs:
 
 func TestMatchMentionNoCommands(t *testing.T) {
 	wf, err := Parse([]byte(`
-name: x
+title: x
 on:
   mention: {}
 jobs:
@@ -74,7 +74,7 @@ jobs:
 
 func TestMatchSchedule(t *testing.T) {
 	wf, err := Parse([]byte(`
-name: x
+title: x
 on:
   schedule:
     - cron: '0 9 * * *'

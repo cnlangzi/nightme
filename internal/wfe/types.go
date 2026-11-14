@@ -5,7 +5,10 @@
 // runtime.go).
 package wfe
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // Workflow is the parsed+validated workflow definition.
 //
@@ -13,13 +16,40 @@ import "time"
 // the steps and the arguments they take. It names no agent — the run
 // uses the agent of the chat that started it.
 type Workflow struct {
-	Name       string         `yaml:"name" json:"name"`
+	// Title states what the workflow is for. It is what the operator
+	// reads and what the agent is given.
+	Title string `yaml:"title" json:"title"`
+	// Name is the workflow's identity: the base name of the file it was
+	// loaded from. The loader sets it; the file does not carry it.
+	Name       string         `yaml:"-" json:"name"`
 	Args       []Arg          `yaml:"args" json:"args,omitempty"`
-	Goal       string         `yaml:"goal" json:"goal,omitempty"`
 	Instruct   bool           `yaml:"instruct" json:"instruct"`
 	Workspaces []string       `yaml:"workspaces" json:"workspaces,omitempty"`
 	On         Trigger        `yaml:"on" json:"on"`
 	Jobs       map[string]Job `yaml:"jobs" json:"jobs"`
+}
+
+// UnmarshalJSON reads a workflow, migrating the retired `goal` key
+// into the title.
+//
+// A run that was persisted before the title replaced the goal keeps
+// its purpose when the daemon resumes it: the file on disk still
+// carries the old key. New writes only carry the title.
+func (w *Workflow) UnmarshalJSON(data []byte) error {
+	type alias Workflow
+	aux := struct {
+		*alias
+		LegacyGoal string `json:"goal,omitempty"`
+	}{
+		alias: (*alias)(w),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if w.Title == "" && aux.LegacyGoal != "" {
+		w.Title = aux.LegacyGoal
+	}
+	return nil
 }
 
 // Arg is one argument a workflow takes.

@@ -24,7 +24,7 @@ func (c fakeCwd) Cwd(string) string { return c.dir }
 // used up.
 func TestRun_AJobWithIterationsRunsItsStepsAgain(t *testing.T) {
 	dir := t.TempDir()
-	writeWorkflow(t, dir, "repeat", `name: repeat
+	writeWorkflow(t, dir, "repeat", `title: repeat
 jobs:
   main:
     iterations: 2
@@ -63,7 +63,7 @@ jobs:
 // duration and reports ok.
 func TestStepKind_WaitWaitsAndReportsOk(t *testing.T) {
 	dir := t.TempDir()
-	writeWorkflow(t, dir, "wait", `name: wait
+	writeWorkflow(t, dir, "wait", `title: wait
 jobs:
   main:
     steps:
@@ -92,7 +92,7 @@ jobs:
 // once.
 func TestStepKind_WaitEndsWithTheRun(t *testing.T) {
 	dir := t.TempDir()
-	writeWorkflow(t, dir, "wait", `name: wait
+	writeWorkflow(t, dir, "wait", `title: wait
 jobs:
   main:
     steps:
@@ -126,7 +126,7 @@ jobs:
 // where the work chat stands, not where the run started.
 func TestStepKind_ShellRunsInTheWorkChatDirectory(t *testing.T) {
 	dir := t.TempDir()
-	writeWorkflow(t, dir, "sh", `name: sh
+	writeWorkflow(t, dir, "sh", `title: sh
 jobs:
   main:
     steps:
@@ -187,7 +187,7 @@ func (g *gatedShell) RunShell(ctx context.Context, _ wfe.ShellSpec) (*wfe.ShellR
 // the exit code, the output and the key=value lines.
 func TestStepKind_ShellReportsWhatItProduced(t *testing.T) {
 	dir := t.TempDir()
-	writeWorkflow(t, dir, "sh", `name: sh
+	writeWorkflow(t, dir, "sh", `title: sh
 jobs:
   main:
     steps:
@@ -249,7 +249,7 @@ jobs:
 // what to do next.
 func TestStepKind_AFailedCommandReachesTheAgent(t *testing.T) {
 	dir := t.TempDir()
-	writeWorkflow(t, dir, "sh", `name: sh
+	writeWorkflow(t, dir, "sh", `title: sh
 jobs:
   main:
     steps:
@@ -285,7 +285,7 @@ jobs:
 // megabyte does not put a megabyte into the run state.
 func TestStepKind_ShellOutputIsBounded(t *testing.T) {
 	dir := t.TempDir()
-	writeWorkflow(t, dir, "sh", `name: sh
+	writeWorkflow(t, dir, "sh", `title: sh
 jobs:
   main:
     steps:
@@ -338,7 +338,7 @@ jobs:
 // and the run does not end.
 func TestTool_ARuntimeFailureComesBackAsAToolError(t *testing.T) {
 	dir := t.TempDir()
-	writeWorkflow(t, dir, "one", `name: one
+	writeWorkflow(t, dir, "one", `title: one
 jobs:
   main:
     steps:
@@ -384,7 +384,7 @@ jobs:
 // steps are not commands the agent may run.
 func TestStepKind_TheStepKindIsPartOfThePolicy(t *testing.T) {
 	dir := t.TempDir()
-	writeWorkflow(t, dir, "mixed", `name: mixed
+	writeWorkflow(t, dir, "mixed", `title: mixed
 jobs:
   main:
     steps:

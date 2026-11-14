@@ -7,7 +7,7 @@ import (
 
 // repeatingYAML is a workflow whose job runs two rounds.
 const repeatingYAML = `
-name: repeat
+title: repeat
 jobs:
   ship:
     iterations: 2
@@ -80,7 +80,7 @@ func TestDecide_TheNextRoundReadsItsOwnOutputs(t *testing.T) {
 
 func TestDecide_ZeroIterationsRepeatsUntilTheRunEnds(t *testing.T) {
 	wf := mustParse(t, `
-name: forever
+title: forever
 jobs:
   ship:
     iterations: 0
@@ -116,7 +116,7 @@ func TestDecide_AJobWithoutIterationsRunsOneRound(t *testing.T) {
 
 func TestDecide_TwoJobsThatRepeatAreAJudgmentPoint(t *testing.T) {
 	wf := mustParse(t, `
-name: two
+title: two
 jobs:
   a:
     iterations: 0
@@ -162,7 +162,7 @@ func TestDecide_AFailedStepIsNotSwallowedByTheNextRound(t *testing.T) {
 
 func TestDecide_ContinueOnErrorLetsTheRoundAdvance(t *testing.T) {
 	wf := mustParse(t, `
-name: repeat
+title: repeat
 jobs:
   ship:
     iterations: 2
@@ -189,7 +189,7 @@ jobs:
 
 func TestDecide_ARoundThatDidNothingDoesNotRepeat(t *testing.T) {
 	wf := mustParse(t, `
-name: repeat
+title: repeat
 jobs:
   ship:
     iterations: 0
@@ -223,7 +223,7 @@ jobs:
 
 func TestPolicy_TheStepBudgetCountsTheCurrentRoundOnly(t *testing.T) {
 	wf := mustParse(t, `
-name: x
+title: x
 jobs:
   main:
     iterations: 2
@@ -253,7 +253,7 @@ jobs:
 
 func TestPolicy_TheStepBudgetRefusesTheNextAttempt(t *testing.T) {
 	wf := mustParse(t, `
-name: x
+title: x
 jobs:
   main:
     steps:

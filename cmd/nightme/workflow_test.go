@@ -29,7 +29,7 @@ func TestWorkflowList_NoWorkflows(t *testing.T) {
 func TestWorkflowList_OneWorkflow(t *testing.T) {
 	dir := t.TempDir()
 	yaml := `
-name: reviewer
+title: review the changes
 workspaces: [~/work/nightme]
 on:
   mention:
@@ -59,7 +59,7 @@ jobs:
 func TestWorkflowShow_Found(t *testing.T) {
 	dir := t.TempDir()
 	yaml := `
-name: reviewer
+title: review the changes
 workspaces: [~/work/nightme]
 on:
   mention:
@@ -99,7 +99,7 @@ jobs:
 func TestWorkflowShow_TheMergedSchema(t *testing.T) {
 	dir := t.TempDir()
 	yaml := `
-name: reviewer
+title: review the changes
 jobs:
   main:
     iterations: 0
@@ -145,7 +145,7 @@ func TestWorkflowShow_NotFound(t *testing.T) {
 func TestWorkflowRun_DryRun(t *testing.T) {
 	dir := t.TempDir()
 	yaml := `
-name: reviewer
+title: review the changes
 workspaces: [~/work/nightme]
 on:
   mention:
@@ -186,7 +186,7 @@ jobs:
 func TestWorkflowRun_WithoutWorkspaces(t *testing.T) {
 	dir := t.TempDir()
 	yaml := `
-name: reviewer
+title: review the changes
 jobs:
   main:
     steps:
@@ -208,29 +208,96 @@ jobs:
 	}
 }
 
-// TestWorkflowList_RefusesARetiredKey — a file that still uses a
-// retired key is refused, and the error names the replacement.
-func TestWorkflowList_RefusesARetiredKey(t *testing.T) {
+// TestWorkflowList_ReportsAFileThatDidNotLoad — a file that does not
+// load is reported beside the ones that did: it does not take them
+// down with it.
+func TestWorkflowList_ReportsAFileThatDidNotLoad(t *testing.T) {
 	dir := t.TempDir()
-	yaml := `
-name: reviewer
+	broken := `
+title: review the changes
 jobs:
   main:
     steps:
       - id: s1
         run: echo
 `
-	if err := os.WriteFile(filepath.Join(dir, "reviewer.yaml"), []byte(yaml), 0644); err != nil {
+	good := `
+title: ship the fix
+jobs:
+  main:
+    steps:
+      - id: s1
+        message: /gtw commit
+`
+	if err := os.WriteFile(filepath.Join(dir, "reviewer.yaml"), []byte(broken), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "ship.yml"), []byte(good), 0644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
 
-	err := runRoot("workflow", "list")
-	if err == nil {
-		t.Fatal("a retired key was accepted")
+	out := captureStdout(t, func() error {
+		return runRoot("workflow", "list")
+	})
+	if !strings.Contains(out, "ship") {
+		t.Errorf("output = %q, want the workflow that loaded", out)
 	}
-	if !strings.Contains(err.Error(), "shell:") {
-		t.Errorf("err = %v, want it to name the replacement", err)
+	if !strings.Contains(out, "reviewer.yaml") {
+		t.Errorf("output = %q, want the file that did not load", out)
+	}
+	if !strings.Contains(out, "shell:") {
+		t.Errorf("output = %q, want the error to name the replacement", out)
+	}
+}
+
+// TestWorkflowList_ReadsBothExtensionsAndTheTitle — a workflow is a
+// *.yaml or a *.yml file, its name is the base name of that file and
+// the list shows its title.
+func TestWorkflowList_ReadsBothExtensionsAndTheTitle(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"fix.yaml", "other.yml"} {
+		body := "title: do the thing\njobs:\n  main:\n    steps: [{message: hi}]\n"
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
+
+	out := captureStdout(t, func() error {
+		return runRoot("workflow", "list")
+	})
+	for _, want := range []string{"fix", "other", "do the thing"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output = %q, want %q", out, want)
+		}
+	}
+}
+
+// TestWorkflowShow_FindsAWorkflowByItsFileName — the name of a
+// workflow is the base name of its file.
+func TestWorkflowShow_FindsAWorkflowByItsFileName(t *testing.T) {
+	dir := t.TempDir()
+	body := `
+title: review the changes
+jobs:
+  main:
+    steps:
+      - id: s1
+        message: /review
+`
+	if err := os.WriteFile(filepath.Join(dir, "reviewer.yml"), []byte(body), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
+
+	out := captureStdout(t, func() error {
+		return runRoot("workflow", "show", "reviewer")
+	})
+	for _, want := range []string{"name:       reviewer", "title:      review the changes"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output = %q, want %q", out, want)
+		}
 	}
 }
 
@@ -263,4 +330,55 @@ func captureStderr(t *testing.T, fn func() error) string {
 	n, _ := r.Read(buf)
 	_ = err
 	return string(buf[:n])
+}
+
+// TestWorkflowList_OnlyTheFailuresOfABrokenDirectory — a directory
+// whose files all failed says why, not that it holds no workflow.
+func TestWorkflowList_OnlyTheFailuresOfABrokenDirectory(t *testing.T) {
+	dir := t.TempDir()
+	body := `
+title: review the changes
+jobs:
+  main:
+    steps:
+      - id: s1
+        run: echo
+`
+	if err := os.WriteFile(filepath.Join(dir, "reviewer.yaml"), []byte(body), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
+
+	out := captureStdout(t, func() error {
+		return runRoot("workflow", "list")
+	})
+	if strings.Contains(out, "no workflows found") {
+		t.Errorf("output = %q, want the failure of the file", out)
+	}
+	if !strings.Contains(out, "reviewer.yaml") {
+		t.Errorf("output = %q, want the file that did not load", out)
+	}
+}
+
+// TestWorkflowShow_ReportsTheClashOfTwoFiles — the name two files
+// claim is unusable, and the clash is the reason.
+func TestWorkflowShow_ReportsTheClashOfTwoFiles(t *testing.T) {
+	dir := t.TempDir()
+	good := "title: one\njobs:\n  main:\n    steps: [{message: hi}]\n"
+	broken := "goal: no title\njobs:\n  main:\n    steps: [{message: hi}]\n"
+	if err := os.WriteFile(filepath.Join(dir, "fix.yaml"), []byte(good), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "fix.yml"), []byte(broken), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
+
+	err := runRoot("workflow", "show", "fix")
+	if err == nil {
+		t.Fatal("the ambiguous name was accepted")
+	}
+	if !strings.Contains(err.Error(), `duplicate workflow name "fix"`) {
+		t.Errorf("err = %v, want the clash", err)
+	}
 }

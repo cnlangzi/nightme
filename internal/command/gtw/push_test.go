@@ -120,18 +120,18 @@ func (f *pushGit) Run(_ context.Context, dir string, args ...string) (string, st
 	if resp, ok := f.responsesByArgs[key]; ok {
 		return resp.stdout, resp.stderr, resp.err
 	}
-	if seq, ok := f.seqResponses[args[0]]; ok {
-		idx := f.seqCallCount[args[0]]
-		f.seqCallCount[args[0]] = idx + 1
+	if seq, ok := f.seqResponses[gitSubcommand(args)]; ok {
+		idx := f.seqCallCount[gitSubcommand(args)]
+		f.seqCallCount[gitSubcommand(args)] = idx + 1
 		if idx >= len(seq) {
 			idx = len(seq) - 1
 		}
 		resp := seq[idx]
 		return resp.stdout, resp.stderr, resp.err
 	}
-	resp, ok := f.responses[args[0]]
+	resp, ok := f.responses[gitSubcommand(args)]
 	if !ok {
-		return "", "", errors.New("pushGit: no response for " + args[0])
+		return "", "", errors.New("pushGit: no response for " + gitSubcommand(args))
 	}
 	return resp.stdout, resp.stderr, resp.err
 }

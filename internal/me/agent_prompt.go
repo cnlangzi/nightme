@@ -64,7 +64,11 @@ type repoFacts struct {
 // branch, the tracking ref and the ahead/behind counts, and the base
 // branch is the remote's default branch.
 func (s *Service) repoFacts(ctx context.Context, dir string) (repoFacts, error) {
-	out, _, err := s.cfg.Git.Run(ctx, dir, "status", "--porcelain", "--branch")
+	// `--no-optional-locks` skips git's optional index refresh: the
+	// status only reads the working tree, and a refresh would take
+	// the index lock.
+	out, _, err := s.cfg.Git.Run(ctx, dir,
+		"--no-optional-locks", "status", "--porcelain", "--branch")
 	if err != nil {
 		return repoFacts{}, err
 	}

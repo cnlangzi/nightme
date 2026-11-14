@@ -120,7 +120,11 @@ func porcelainFromSnapshot(snap messages.GitStatusSnapshot) string {
 // status call. Exposed so tests that need to register additional
 // responses (e.g. sequencing with a post-push re-snapshot) can
 // reference the same key.
-var statusCmd = []string{"status", "--porcelain", "--branch", "--untracked-files=normal"}
+//
+// `--no-optional-locks` is part of the argv: the readiness status
+// only reads the working tree, and skipping git's optional index
+// refresh keeps it from taking the index lock.
+var statusCmd = []string{"--no-optional-locks", "status", "--porcelain", "--branch", "--untracked-files=normal"}
 
 // setupReadiness configures a rig's pushGit with responses for
 // /gtw pr's two readiness gates + DefaultBranch +

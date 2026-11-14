@@ -763,7 +763,7 @@ func TestDispatchCommit_UsesConfiguredLanguage(t *testing.T) {
 		pushGitResp{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n", "", nil},
 		pushGitResp{"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n", "", nil},
 	)
-	git.onArgs([]string{"status", "--porcelain"}, "", "", nil)
+	git.onArgs([]string{"--no-optional-locks", "status", "--porcelain"}, "", "", nil)
 	git.onArgs([]string{"rev-parse", "--abbrev-ref", "HEAD"}, "wt-lang\n", "", nil)
 	git.on("log", "bbbbbbbb feat: agent did the thing\n", "", nil)
 	git.on("remote", "git@github.com:cnlangzi/nightme.git", "", nil)

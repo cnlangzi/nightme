@@ -136,30 +136,30 @@ const (
 // "worktree is the durable side effect" pattern used elsewhere.
 func CommitGitignoreIfDirty(ctx context.Context, worktreePath string, git GitRunner) error {
 	// Quick exit: is .gitignore dirty?
-	statusOut, _, err := git.Run(ctx, worktreePath,
-		"status", "--porcelain", "--", ".gitignore")
+	statusOut, stderr, err := git.Run(ctx, worktreePath,
+		"--no-optional-locks", "status", "--porcelain", "--", ".gitignore")
 	if err != nil {
-		return fmt.Errorf("git status .gitignore: %w", err)
+		return gitErr("git status .gitignore", err, stderr)
 	}
 	if strings.TrimSpace(statusOut) == "" {
 		return nil // clean — nothing to commit
 	}
 
 	// Stage the file.
-	if _, _, err := git.Run(ctx, worktreePath, "add", "--", ".gitignore"); err != nil {
-		return fmt.Errorf("git add .gitignore: %w", err)
+	if _, stderr, err := git.Run(ctx, worktreePath, "add", "--", ".gitignore"); err != nil {
+		return gitErr("git add .gitignore", err, stderr)
 	}
 
 	// Commit with the tool identity forced inline. We use `-c`
 	// instead of relying on the user's global config so the
 	// commit succeeds even when `git config user.email` is unset.
-	_, _, err = git.Run(ctx, worktreePath,
+	_, stderr, err = git.Run(ctx, worktreePath,
 		"-c", "user.name="+gitToolIdentityName,
 		"-c", "user.email="+gitToolIdentityEmail,
 		"commit", "-m", "gtw: ignore .nightme/",
 		"--", ".gitignore")
 	if err != nil {
-		return fmt.Errorf("git commit .gitignore: %w", err)
+		return gitErr("git commit .gitignore", err, stderr)
 	}
 	return nil
 }

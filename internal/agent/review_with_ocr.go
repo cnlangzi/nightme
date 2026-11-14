@@ -513,9 +513,18 @@ func resolveBase(ctx context.Context, workspace string) (gitbase.Resolution, str
 func runGit(ctx context.Context, workspace string, args ...string) string {
 	c, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	cmd := proc.New(c, "git", append([]string{"-C", workspace}, args...)...)
+	cmd := proc.New(c, "git", gitArgv(workspace, args...)...)
 	out, _ := cmd.Output() // error swallowed: "" = "skip section", by design
 	return strings.TrimSpace(string(out))
+}
+
+// gitArgv builds the argv of a git invocation in workspace.
+//
+// `--no-optional-locks` comes first so git skips the optional index
+// refresh: the review diffs only read the index, and a refresh would
+// take the index lock on every review.
+func gitArgv(workspace string, args ...string) []string {
+	return append([]string{"--no-optional-locks", "-C", workspace}, args...)
 }
 
 // isReviewablePath drops well-known noise directories. Conservative:
@@ -1078,7 +1087,7 @@ func groupFilteredDiff(ctx context.Context, rc reviewContext, g *reviewGroup, ar
 	full := append([]string{}, args...)
 	full = append(full, "--")
 	full = append(full, g.Files...)
-	c2 := proc.New(c, "git", append([]string{"-C", rc.workspace}, full...)...)
+	c2 := proc.New(c, "git", gitArgv(rc.workspace, full...)...)
 	out, _ := c2.Output() // error swallowed: "" = "skip section", by design
 	return strings.TrimSpace(string(out))
 }

@@ -612,14 +612,68 @@ func armGraceCancel(cmd *exec.Cmd) {
 
 **调用方**:不需要改一行。`gtw/runCmd` 不再调 `WithGrace`(已删),`ExecGitRunner.Run` / `ExecCLIRunner.Run` / `/gtw commit` / `/gtw push` / `/gtw pr` / `prcache.Cache.refresh` / `agent.Agent.Review` 等所有 nightme-side git 调用经 `proc.New` 自动获 grace,以及 claudecode/dsh/pi/codex 桥里的 `git symbolic-ref` / `git rev-parse --abbrev-ref HEAD` / `git rev-parse --show-toplevel` 也都自动获益。
 
-**Trade-off(SIGKILL fallback 也会留 lock)**:`git` 收到 SIGTERM 走信号处理路径会清理 `.git/index.lock`;SIGKILL 不给 cleanup 机会。所以:子进程响应 SIGTERM(绝大多数情况)→ 锁清理;子进程忽略 SIGTERM(mask 信号、stuck syscall,极少见)→ SIGKILL 拍死 → **lock 残留**。这种情况没比改前更差(改前就是 SIGKILL-on-cancel,必然残留)。**v3 兜底**:在 `gtw.runCmd` 顶部加 `os.Stat(<dir>/.git/index.lock)`,mtime > 5s 视为 stale,`os.Remove`(本 PR 不做)。
+**Trade-off(SIGKILL fallback 也会留 lock)**:`git` 收到 SIGTERM 走信号处理路径会清理 `.git/index.lock`;SIGKILL 不给 cleanup 机会。所以:子进程响应 SIGTERM(绝大多数情况)→ 锁清理;子进程忽略 SIGTERM(mask 信号、stuck syscall,极少见)→ SIGKILL 拍死 → **lock 残留**。这种情况没比改前更差(改前就是 SIGKILL-on-cancel,必然残留)。残留的 lock 由下面的 stale-lock 自愈兜底。
+
+### stale-lock 自愈(`internal/command/gtw/gitlock.go`)
+
+`gtw.ExecGitRunner.Run` 是 `/gtw` 所有 git 调用的唯一生产入口,lock 冲突的自愈就落在那里 —— 一次改动覆盖全部 `/gtw` git 调用,测试注入的 fake runner 不受影响。
+
+算法(git 报出冲突之后才动手,最多重试一次):
+
+```
+跑 git 命令 → 失败
+从 git 的 stderr 解析 lock 路径:
+    Unable to create '<path>': File exists.
+解析不到 → 原样返回失败(带 stderr)
+
+stat <path>
+  文件已消失      → 持有者在失败与检查之间释放了它 → 直接重试一次,不删任何东西
+  mtime ≤ 30s     → 可能还有活的 git 持有 → 不删;失败信息带上路径、年龄、手动清理方法
+  不是 index.lock → 不是 index lock(ref lock / packed-refs.lock)→ 不删
+  还有进程打开着   → 持有者还活着 → 不删
+  mtime > 30s     → 持有者已被 kill → 删掉它,记一条 warning,重试一次
+
+重试仍失败 → 一次性上报(git 的 stderr + 锁路径 + 年龄),不再重试
+```
+
+lock 路径取自 git 自己的 stderr,而不是从工作目录推算:git 报的是它没能创建的那个确切文件,primary checkout 和 linked worktree 都对,也不需要额外的 git 调用去解析。git 的这句话带 gettext 翻译,所以解析先试英文原文,再退回到"引号里的 .lock 文件"这一 locale 无关的形状;路径里有单引号时(git 不转义)取到的是最后一个 "': " 之前的内容。
+
+**30s 阈值只是初筛,不是判据**:git 是在 checkout / reset / merge / rebase 的**整个工作树更新期间**持有 index lock 的,而 lock 文件的 mtime 停在创建那一刻 —— 一次 4000 文件的 checkout 实测持锁约 6s,更大的仓库更久。所以"lock 够旧"完全不能证明持有者已死,删掉一个活着的 lock 会让两个进程同时写 index:持有者最后 `rename(index.lock, index)` 失败("fatal: unable to write new index file"),工作树已经换了内容而 index 还是旧的,两者就此分叉。
+
+**真正的判据是"还有没有进程打开着这个文件"**:git 从创建 lock 起一直持有它的 fd,直到 commit 或 rollback 才关闭;被 kill 的 git 会随进程一起关掉 fd,文件留在盘上却不再被打开。于是"被打开"= 持有者活着,"没被打开"= 持有者已死。
+
+| 平台 | 怎么查 |
+|---|---|
+| Linux | 扫 `/proc/<pid>/fd`,和 lock 的 inode 比对 |
+| macOS | `lsof -t -- <path>`(没有 /proc;lsof 要扫全部进程,约 1s) |
+| Windows | 用 share mode 0 打开文件:别人打开着就会 sharing violation |
+
+查不到(或平台没实现)时按"还活着"处理 —— 不删。lock 删不得就报出来:路径、年龄、手动清理的方法。
+
+**只删 index lock**:git 还会拿别的 lock 文件(ref lock、`packed-refs.lock`),那些属于 fetch / push 这类网络操作,持锁可以长达数分钟,删掉会直接破坏对应的 ref 更新。所以自愈只处理 `index.lock`。
+
+**未完成的 rebase**:被 kill 的 `git pull --rebase` 除了留下 index lock,还会留下 `.git/rebase-merge` 或 `.git/rebase-apply`。只清 lock 不够 —— 下一次 rebase 会拒绝运行。`RefreshDefaultBranch` 在解析出 git 目录后检查这两个目录,存在就拒绝刷新并报出 `git rebase --abort`,但**不动仓库**:abort 掉 rebase 会丢掉用户正在写的 commit,这个决定属于用户。lock 还在的话错误信息会一并点出它 —— `git rebase --abort` 撞上 index lock 会失败,并把 HEAD 留在 detached 状态,所以要先删 lock 再 abort。
+
+**`--no-optional-locks`**:只读的 `git status` 会顺手刷新 index(把 stat cache 写回 index 文件)—— 这就是它会拿 index lock 的原因,而这个刷新对调用方毫无价值:status 报告的内容不变,只是下次调用要多 hash 一遍。`git --no-optional-locks <cmd>` 跳过这个 optional 操作,于是这些调用从不拿锁、也从不留下锁。`git diff` 也带上同一个 flag(读 diff 不需要刷新 index)。flag 显式写在调用点(而不是由 runner 注入),argv 保持可读可 grep:
+
+| 调用点 | 命令 |
+|---|---|
+| `internal/command/gtw/git_status.go` | `git --no-optional-locks status --porcelain --branch --untracked-files=normal`(chat footer 路径) |
+| `internal/command/gtw/worktree.go` | `git --no-optional-locks status --porcelain`(刷新前的 dirty 检查) |
+| `internal/command/gtw/persist.go` | `git --no-optional-locks status --porcelain -- .gitignore` |
+| `internal/command/gtw/push.go` | `git --no-optional-locks status --porcelain` |
+| `internal/command/gtw/close.go` | `git --no-optional-locks status --porcelain` |
+| `internal/me/agent_prompt.go` | `git --no-optional-locks status --porcelain --branch` |
+| `internal/command/wiki/git.go` | `git --no-optional-locks -C <cwd> status --porcelain` |
+| `internal/agent/review_with_ocr.go` | `git --no-optional-locks -C <ws> diff …` |
+
+其余 git 调用(`rev-parse` / `log` / `rev-list` / `show-ref` / `ls-remote` / `remote` / `symbolic-ref` / `for-each-ref`)从不碰 index,保持原样。
 
 ### 不在本 PR 范围
 
 | 候选 | 为何不做 |
 |---|---|
 | cwd-scoped git 单飞(`internal/command/gtw/gate.go`) | 留 v3。当前放过 `prcache` 后台刷新 + stamp 之间的并发。grace 生效后压力应显著下降 |
-| stale-lock 兜底自愈(`gtw.runCmd` 顶部 `os.Stat + os.Remove`) | 留 v3 作为最后防线。仅在 SIGKILL fallback 路径才需要,本 PR 的 grace 不依赖它 |
 | `--untracked-files=no`(`git_status.go:114`) | 已记在本文档"性能权衡"段,非本次主题 |
 | 加 `EventAgentThink` | 它当前不存在;下游 routing 已通过 `OutboundKind.OutThinking` 解决 |
 
@@ -642,6 +696,9 @@ func armGraceCancel(cmd *exec.Cmd) {
   - `internal/proc/exec_unix.go:59-78` `NewWith` + `:80-141` `armGraceCancel` + `SIGTERMGrace` 常量(改动 2 — grace folded in)
   - `internal/proc/exec_windows.go:120-` `NewWith` + `:armGraceCancel` stub(改动 2 副产物 — Windows 端最小兼容实现)
   - `internal/command/gtw/exec.go:54-81 runCmd`(已删 `proc.WithGrace(cmd, proc.KillGrace)` 接线,grace 现在 default-on)
+  - `internal/command/gtw/gitlock.go`(stale-lock 自愈:冲突解析、stale 判定、删除、单次重试)
+  - `internal/command/gtw/worktree.go` `ExecGitRunner.Run`(自愈接线)+ `RefreshDefaultBranch`(未完成 rebase 的守卫)
+  - `internal/command/wiki/git.go`(`/wiki` 的 git 调用迁到 `internal/proc`,带 context 超时)
   - `internal/channel/bot/bot.go:241 gitOrigin`(改动 3 — `exec.Command` 改 `proc.New`,纳入统一路径)
   - `internal/messages/outbound.go:13-`OutboundKind 枚举(本次涉及 OutToolStart/OutToolEnd/OutThinking/OutHeartbeat)
   - `internal/agent/agent.go:99-164` EventKind 枚举(本次**不**改,确认 EventAgentThink 不存在)
@@ -667,4 +724,4 @@ Windows 上 `armGraceCancel` 实际做了什么:设 `cmd.WaitDelay = SIGTERMGrac
 
 这条路径比 Unix 复杂得多,而且 Git for Windows 在 console-less spawn 下是否可靠响应 CTRL_BREAK_EVENT 还需要实测。**留 v4 单独设计**,本 PR 不实现。
 
-实际意义:Windows 用户跑 daemon 时,`.git/index.lock` stale-lock 的问题**仍然存在**(等同改前行为)。Unix / macOS 用户不受影响。
+实际意义:Windows 上 git 依旧不会自己清理 `.git/index.lock`(grace 机制不提供这个能力),但残留的 lock 不再会卡住下一次 git 操作 —— stale-lock 自愈在所有平台上是同一套逻辑(删除判定看 mtime,与平台无关),`--no-optional-locks` 也让只读调用从一开始就不产生 lock。Windows 与 Unix / macOS 的差别只剩在"谁负责清理":Unix 靠 git 自己的 SIGTERM handler,Windows 靠 nightme 的自愈。

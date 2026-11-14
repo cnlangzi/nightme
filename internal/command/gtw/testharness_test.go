@@ -69,3 +69,20 @@ func pathsEqual(a, b string) bool {
 	}
 	return ca == cb
 }
+
+// gitSubcommand returns the git subcommand of an argv, skipping a
+// leading `--no-optional-locks` flag. Fakes key on the subcommand
+// ("status", "add", "commit") rather than on the raw first token,
+// so they keep matching when a call site adds the flag.
+func gitSubcommand(args []string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	if args[0] == "--no-optional-locks" {
+		if len(args) < 2 {
+			return ""
+		}
+		return args[1]
+	}
+	return args[0]
+}

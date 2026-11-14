@@ -491,7 +491,7 @@ func TestRunCommit_HappyPath(t *testing.T) {
 		pushGitResp{"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n", "", nil},
 	)
 	// verifyAgentCommitted's listUncommittedFiles via `status --porcelain`.
-	git.onArgs([]string{"status", "--porcelain"}, "", "", nil)
+	git.onArgs([]string{"--no-optional-locks", "status", "--porcelain"}, "", "", nil)
 	// Branch check: still on wt-dirty.
 	git.onArgs([]string{"rev-parse", "--abbrev-ref", "HEAD"},
 		"wt-dirty\n", "", nil)
@@ -566,7 +566,7 @@ func TestRunCommit_DirtyWithAgentFlag(t *testing.T) {
 		pushGitResp{"3333333333333333333333333333333333333333\n", "", nil},
 	)
 	// verify (all checks pass).
-	git.onArgs([]string{"status", "--porcelain"}, "", "", nil)
+	git.onArgs([]string{"--no-optional-locks", "status", "--porcelain"}, "", "", nil)
 	git.onArgs([]string{"rev-parse", "--abbrev-ref", "HEAD"},
 		"wt-flag\n", "", nil)
 	git.on("log", "3333 feat\n", "", nil)
@@ -614,7 +614,7 @@ func TestRunCommit_DirtyAgentLeavesFiles(t *testing.T) {
 		"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n", "", nil)
 	// verifyAgentCommitted's listUncommittedFiles: agent left
 	// the file uncommitted.
-	git.onArgs([]string{"status", "--porcelain"},
+	git.onArgs([]string{"--no-optional-locks", "status", "--porcelain"},
 		"?? new-secret.env\n", "", nil)
 	// Branch check (precedes worktree-clean check, in our impl).
 	git.on("rev-parse", "wt-dirty-leftover\n", "", nil)
@@ -661,7 +661,7 @@ func TestRunCommit_DirtyAgentClaimsDoneButNoCommit(t *testing.T) {
 		"cafebabecafebabecafebabecafebabecafebabe\n", "", nil)
 	// verifyAgentCommitted's worktree-clean check passes
 	// (post-agent file list is empty — agent stash/restore'd).
-	git.onArgs([]string{"status", "--porcelain"},
+	git.onArgs([]string{"--no-optional-locks", "status", "--porcelain"},
 		"", "", nil)
 	// Branch check passes (still on wt-noop).
 	git.on("rev-parse", "wt-noop\n", "", nil)
@@ -753,7 +753,7 @@ func TestRunCommit_AgentIntroducedConflicts(t *testing.T) {
 	)
 	// verify's listUncommittedFiles returns empty porcelain —
 	// UU lines look malformed (no path after first 4 chars).
-	git.onArgs([]string{"status", "--porcelain"}, "", "", nil)
+	git.onArgs([]string{"--no-optional-locks", "status", "--porcelain"}, "", "", nil)
 	git.onArgs([]string{"rev-parse", "--abbrev-ref", "HEAD"},
 		"wt-bad-agent\n", "", nil)
 

@@ -6,7 +6,7 @@
 A **workflow** is a YAML file that nightme runs. It answers two questions:
 
 1. **What** does it do? (`jobs.<name>.steps` — ordered steps)
-2. **How far** may it go? (`max_actions`, `max`, `allow`)
+2. **How far** may it go? (`iterations`, `attempts`, `allow`)
 
 The personal agent (`/me`) runs a workflow in a chat. The same file is the plan the agent follows and the bound it may not cross.
 
@@ -26,8 +26,9 @@ The personal agent (`/me`) runs a workflow in a chat. The same file is the plan 
 - [5. Steps](#5-steps)
   - [5.1 `message` — talk to the work chat](#51-message--talk-to-the-work-chat)
   - [5.2 `shell` — execute shell](#52-shell--execute-shell)
-  - [5.3 `use` — invoke a registered action](#53-use--invoke-a-registered-action)
-  - [5.4 Common step fields](#54-common-step-fields)
+  - [5.3 `wait` — sit out a duration](#53-wait--sit-out-a-duration)
+  - [5.4 `use` — invoke a registered action](#54-use--invoke-a-registered-action)
+  - [5.5 Common step fields](#55-common-step-fields)
 - [6. Expressions (`${{ ... }}`)](#6-expressions--)
 - [7. Complete examples](#7-complete-examples)
 - [8. Runtime architecture](#8-runtime-architecture)
@@ -68,7 +69,6 @@ Workflows are read from:
 | `name` | string | ✅ | — | Unique workflow identifier; surfaces in logs and notifications. |
 | `args` | arg[] | ❌ | — | The arguments the workflow takes. A spec is a mapping with `name` and an optional `default`. |
 | `goal` | string | ❌ | — | What the run is for. It is part of the model's instructions. |
-| `max_actions` | int | ❌ | `30` | The action budget of the whole run. |
 | `instruct` | bool | ❌ | `true` | Whether the agent may send free-form instructions to the work chat. |
 | `workspaces` | string[] | ❌ | — | The workspaces the workflow names. The run takes the workspace of the chat that starts it. |
 | `on` | object | ❌ | — | Trigger spec (see §3). Parsed and displayed; nothing fires it. |
@@ -139,9 +139,13 @@ jobs:
         message: "/review"
         note: 没跑完就 /review -c；有改动就先 /gtw commit
         allow: ["/review -c", "/gtw commit"]
-        max: 5
+        attempts: 5
 
-      # 4. use step: invoke a registered action
+      # 4. wait step: sit out a duration
+      - id: rest
+        wait: 5m
+
+      # 5. use step: invoke a registered action
       - id: notify
         if: ${{ always() }}
         use: notify
@@ -150,7 +154,7 @@ jobs:
           target: oc_xxx
           message: "issue ${{ steps.fix.outputs.data.issue }} done"
 
-      # 5. use step: user-defined action script
+      # 6. use step: user-defined action script
       - id: cleanup
         if: ${{ always() }}
         use: cleanup-tmp-files
@@ -267,7 +271,14 @@ jobs:
 |---|---|---|---|
 | `needs` | string \| string[] | ❌ | Other job(s) this one waits for. |
 | `if` | string | ❌ | Condition expression (see §6). A job whose condition does not hold is skipped. |
+| `iterations` | int | ❌ | How many rounds the job runs. Missing means one round, `0` means the job's steps run until the run ends, `N` means `N` rounds in total. |
 | `steps` | step[] | ✅ | Ordered steps to execute. |
+
+A **round** is one pass through a job's step list. When a round ends, the job starts the next one: the round's step outputs are cleared — so `${{ steps.fix.outputs.data.issue }}` reads the next round's fix — and the per-step `attempts` budgets start over. The job's `if:` conditions are read from the state of the round that is running.
+
+A round in which no step ran does not repeat: a job whose every step is skipped had nothing to do, so it does not start another round. The plan is exhausted and the agent decides whether the run is over.
+
+A job waits for the jobs it `needs` — a repeating needed job releases the waiting job after its first round, because a job that repeats until the run ends never finishes.
 
 A workflow runs one job graph in one work chat: the branches of the graph express ordering and branching, never concurrent work on separate workspaces.
 
@@ -275,13 +286,14 @@ A workflow runs one job graph in one work chat: the branches of the graph expres
 
 ## 5. Steps
 
-Each step carries exactly one of three kinds. A step with two kinds, or with none, is refused when the file is loaded.
+Each step carries exactly one of four kinds. A step with two kinds, or with none, is refused when the file is loaded.
 
 | Kind | Field | Use case | Where it runs |
 |---|---|---|---|
 | `message` | `message: <text>` | Talk to the work chat | the work chat |
-| `shell` | `shell: <cmd>` | Execute shell | the workspace |
+| `shell` | `shell: <cmd>` | Execute shell | the work chat's current directory |
 | `use` | `use: <action>` + `with: <args>` | Invoke a registered action | the action registry |
+| `wait` | `wait: <duration>` | Sit out a duration | the run |
 
 `message` and `shell` are **default-supported** — they work in every workflow. `use` is the **extension point** — the agent registers which action names are valid.
 
@@ -321,11 +333,26 @@ The agent's own commands — the ones it may pick at a judgment point — are th
   shell: ./scripts/checkout.sh
 ```
 
-The command runs in the workspace of the run. The step's `env:` is layered on top of the daemon's own environment, so the shell finds `PATH`, `HOME` and the git/ssh configuration a real command needs.
+The command runs in the work chat's current directory. The directory moves when a command moves it — `/gtw fix` moves the chat into the worktree it created — so a step that follows `/gtw fix` runs inside that worktree. The step's `env:` is layered on top of the daemon's own environment, so the shell finds `PATH`, `HOME` and the git/ssh configuration a real command needs.
+
+The step's outputs carry what the command produced: `data.exit_code`, `data.stdout`, `data.stderr` and one `data.<key>` per `key=value` line of the output.
 
 `shell` is the right tool when you need arbitrary side effects. Reuse is by writing shell scripts (e.g. under `~/.nightme/workflows/actions/`), not by importing external action packages.
 
-### 5.3 `use` — invoke a registered action
+### 5.3 `wait` — sit out a duration
+
+```yaml
+- id: rest
+  wait: 5m
+```
+
+The step waits five minutes and then reports `ok`. The duration is a Go duration (`30s`, `5m`, `1h30m`); a value that does not parse is refused when the file is loaded. A wait carries no command.
+
+A wait is how a repeating job backs off when there is nothing to do: it belongs at the start of the round, because the expression language has no negation — a wait that runs only when the queue was empty cannot be written as a condition on the step's outcome. A repeating job wants one: without it the rounds follow each other as fast as the work chat answers.
+
+`/me stop` ends a wait at once: the wait belongs to the run.
+
+### 5.4 `use` — invoke a registered action
 
 `use` is the **extension point** for any capability beyond shell and chat. The YAML passes arguments via `with:`.
 
@@ -363,7 +390,7 @@ The command runs in the workspace of the run. The step's `env:` is layered on to
 
 An unknown `use:` name fails the step with a clear error: `unknown action: "foo" (registered: [notify, email, github_pr_comment, github_issue])`.
 
-### 5.4 Common step fields
+### 5.5 Common step fields
 
 Every step supports:
 
@@ -375,7 +402,7 @@ Every step supports:
 | `continue-on-error` | bool | `false` | Whether the chain continues when this step fails. |
 | `note` | string | — | Why the step is there, and when the extra commands apply. It is the description the decision model reads. |
 | `allow` | string[] | — | The extra commands the agent may use inside the step. |
-| `max` | int | (no limit) | The number of actions the step may take. `max: 0` is refused. |
+| `attempts` | int | (no limit) | The number of actions the agent may take on the step in one round — the step's own execution and the `allow:` commands. `attempts: 0` means no limit. |
 
 ---
 
@@ -397,6 +424,10 @@ Any string value can embed expressions. Expressions are evaluated when the step 
 | `${{ always() }}` | `true`. |
 | `${{ cancelled() }}` | `false`. |
 
+The `outputs` segment is optional: the rest of the path is joined with `.` into one key. `${{ steps.fix.outputs.data.issue }}` and `${{ steps.fix.data.issue }}` read the same fact, and a key that is not an output falls back to the data namespace, so `${{ steps.fix.outputs.issue }}` finds the `issue` fact of the outcome.
+
+A condition is true when the value it resolves to is neither empty, `false` nor `0`.
+
 An expression that names an argument the workflow does not declare is refused when the file is loaded.
 
 ---
@@ -411,27 +442,35 @@ args:
   - name: issue
     default: "*"
 goal: 把队列里的一个 issue 做完并推上去
-max_actions: 30
 jobs:
   ship:
+    iterations: 0                     # 0 = the job repeats until the run ends
     steps:
+      - id: wait
+        wait: 5m
       - id: fix
         message: "/gtw fix ${{ args.issue }} -y"
         note: 从 nightme/assigned 队列里挑一个
         allow: ["/gtw abort"]
-        max: 3
+        attempts: 3
       - id: commit
         message: "/gtw commit"
+        if: ${{ steps.fix.outputs.data.issue }}
       - id: review
         message: "/review"
         note: 没跑完就 /review -c；有改动就先 /gtw commit
         allow: ["/review -c", "/gtw commit"]
-        max: 5
+        attempts: 5
+        if: ${{ steps.fix.outputs.data.issue }}
       - id: commit2
         message: "/gtw commit"
+        if: ${{ steps.fix.outputs.data.issue }}
       - id: push
         message: "/gtw push"
+        if: ${{ steps.fix.outputs.data.issue }}
 ```
+
+The guard on the steps after `fix` reads `data.issue`: a fix that picked an issue reports `issue` in its outcome, a fix that found nothing does not — so the guard means "an issue was picked" and the rest of the round is skipped.
 
 ### 7.2 Build, test and report
 
@@ -548,15 +587,18 @@ The **ready set** is the set of unrun steps whose job's `needs` are all satisfie
 | one step in the ready set, and the previous outcome was `ok` or `noop` | run that step |
 | one step in the ready set, and the previous outcome was anything else | a judgment point |
 | more than one step in the ready set | a judgment point — the plan forks |
-| no step in the ready set | a judgment point — the plan is exhausted |
+| no step in the ready set, and no job repeats | a judgment point — the plan is exhausted |
+| no step in the ready set, and a job repeats | that job starts its next round |
 
 A run that has not executed anything yet counts as `ok`, so the first step runs on the fast path.
+
+A round ends when the job's steps are done. The next round starts with the job's first step, the round's step outputs are cleared and the per-step `attempts` budgets start over. The ready set of the next round is computed from the state of that round.
 
 ### 8.3 The judgment points
 
 A judgment point is where the workflow cannot decide and the agent does. It is reached when:
 
-- the ready set is empty — the plan is exhausted;
+- the ready set is empty and no job repeats — the plan is exhausted;
 - the ready set holds more than one step — the plan forks;
 - the previous outcome was not `ok` or `noop` — the last step did not finish its work;
 - the step itself failed;
@@ -575,7 +617,7 @@ The agent answers a judgment point with a **directive**:
 
 A command the agent names has to be a step's `message:` or one of a step's `allow:` entries, compared with whitespace normalised away. Anything else comes back to the agent as an error it can correct. A command the deterministic path would not have run is allowed, and it is recorded against the step that owns it.
 
-The engine owns the run state: after a directive is executed, the state holds the new outcome, the step that ran and the remaining budgets. A decision the agent makes never writes state by itself.
+The engine owns the run state: after a directive is executed, the state holds the new outcome, the step that ran and the round it ran in. A decision the agent makes never writes state by itself.
 
 ### 8.4 The policy
 
@@ -584,14 +626,16 @@ The policy is the bound on what a run may do. It is a pure function of the workf
 | Check | Reports |
 |---|---|
 | `CheckRun(command)` | Whether the command may run now, and which step it belongs to. |
-| `CheckStep(index)` | Whether the step may take an action now — its own limit and the run's budget. |
+| `CheckStep(index)` | Whether the step may take an action now — its own `attempts` limit for the current round. |
 | `CheckInstruct()` | Whether a free-form instruction is allowed. |
 | `CheckFinish(status)` | Whether the run may end. `done` needs the last executed step's latest outcome to be `ok` or `noop`; `failed` is always allowed. |
-| `Remaining()` | The action budget left, overall and per step. |
+| `Remaining()` | The actions left per step. |
 | `Render()` | The workflow as a compact text block: the goal, the steps, the notes, the allowed commands and the limits. |
 | `AllowedCommands()` | The commands the policy accepts right now. |
 
-A command belongs to the first step that lists it, and a step that spent its limit takes its commands out of the list.
+A command belongs to the first step that lists it, and a step that spent its limit takes its commands out of the list. A step's `attempts` limit counts the actions of the current round only: the step's own execution and the `allow:` commands the agent ran against it. The limit starts over at every round.
+
+There is no global action budget and no cap on the number of model turns: a run ends when the plan is exhausted and the agent finishes it, when the operator sends `/me stop`, or when the daemon shuts down.
 
 ### 8.5 The tools
 
@@ -725,11 +769,11 @@ The progress the observer receives is built from the outcome:
 
 | Guardrail | Bound |
 |---|---|
-| Loop iterations | Three times the workflow's action budget, unless the configuration says otherwise. |
 | Token budget | The tokens one run may spend on the chat model. |
 | Step timeout | Thirty minutes per command. |
 | Stall detection | Ten minutes without a heartbeat. |
-| Action budget | `max_actions` for the run, `max` for a step. |
+| Step budget | `attempts` for a step, counted per round. |
+| Rounds | `iterations` for a job — the number of rounds it runs. |
 | Compaction | Every tool result but the last keeps its status and summary; the last one keeps its transcript. |
 
 A text-only answer — words without a tool call — is nudged once to call a tool. The second time, the run ends as a failure.

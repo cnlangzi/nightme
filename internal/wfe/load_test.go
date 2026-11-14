@@ -14,7 +14,6 @@ args:
   - name: issue
     default: "*"
 goal: 把队列里的一个 issue 做完并推上去
-max_actions: 30
 on:
   schedule:
     - cron: "0 2 * * *"
@@ -25,14 +24,14 @@ jobs:
         message: "/gtw fix ${{ args.issue }} -y"
         note: 从 nightme/assigned 队列里挑一个
         allow: ["/gtw abort"]
-        max: 3
+        attempts: 3
       - id: commit
         message: "/gtw commit"
       - id: review
         message: "/review"
         note: 没跑完就 /review -c；有改动就先 /gtw commit
         allow: ["/review -c", "/gtw commit"]
-        max: 5
+        attempts: 5
       - id: commit2
         message: "/gtw commit"
       - id: push
@@ -63,9 +62,6 @@ func TestParse_Valid(t *testing.T) {
 	if wf.Goal == "" {
 		t.Error("Goal is empty")
 	}
-	if wf.MaxActions != 30 {
-		t.Errorf("MaxActions = %d, want 30", wf.MaxActions)
-	}
 	if !wf.Instruct {
 		t.Error("Instruct = false, want true by default")
 	}
@@ -89,8 +85,8 @@ func TestParse_Valid(t *testing.T) {
 	if len(fix.Allow) != 1 || fix.Allow[0] != "/gtw abort" {
 		t.Errorf("Steps[0].Allow = %v", fix.Allow)
 	}
-	if fix.Max != 3 {
-		t.Errorf("Steps[0].Max = %d, want 3", fix.Max)
+	if fix.Attempts != 3 {
+		t.Errorf("Steps[0].Attempts = %d, want 3", fix.Attempts)
 	}
 }
 
@@ -103,7 +99,6 @@ args:
   - name: issue
     default: "*"
 goal: do the thing
-max_actions: 12
 instruct: true
 workspaces: [~/work/nightme]
 on:
@@ -123,9 +118,6 @@ jobs:
 	}
 	if wf.Goal != "do the thing" {
 		t.Errorf("Goal = %q", wf.Goal)
-	}
-	if wf.MaxActions != 12 {
-		t.Errorf("MaxActions = %d, want 12", wf.MaxActions)
 	}
 	if !wf.Instruct {
 		t.Error("Instruct = false, want true")
@@ -148,9 +140,6 @@ jobs:
   main:
     steps: [{message: echo hi}]
 `)
-	if wf.MaxActions != DefaultMaxActions {
-		t.Errorf("MaxActions = %d, want %d", wf.MaxActions, DefaultMaxActions)
-	}
 	if !wf.Instruct {
 		t.Error("Instruct = false, want true by default")
 	}
@@ -162,15 +151,11 @@ jobs:
 func TestParse_ExplicitInstructFalse(t *testing.T) {
 	wf := mustParse(t, `
 name: small
-max_actions: 4
 instruct: false
 jobs:
   main:
     steps: [{message: echo hi}]
 `)
-	if wf.MaxActions != 4 {
-		t.Errorf("MaxActions = %d, want 4", wf.MaxActions)
-	}
 	if wf.Instruct {
 		t.Error("Instruct = true, want false")
 	}
@@ -191,6 +176,138 @@ jobs:
 	}
 	if steps[1].ID != "ship#2" {
 		t.Errorf("Steps[1].ID = %q, want ship#2", steps[1].ID)
+	}
+}
+
+// TestParse_TheStepKinds — a step carries exactly one of the four
+// kinds.
+func TestParse_TheStepKinds(t *testing.T) {
+	wf := mustParse(t, `
+name: kinds
+jobs:
+  main:
+    steps:
+      - id: talk
+        message: "/gtw commit"
+      - id: build
+        shell: make build
+      - id: tell
+        use: notify
+        with:
+          message: hi
+      - id: rest
+        wait: 5m
+`)
+	steps := wf.Jobs["main"].Steps
+	kinds := []StepKind{
+		steps[0].Kind(),
+		steps[1].Kind(),
+		steps[2].Kind(),
+		steps[3].Kind(),
+	}
+	want := []StepKind{StepKindMessage, StepKindShell, StepKindUse, StepKindWait}
+	for i := range want {
+		if kinds[i] != want[i] {
+			t.Errorf("Steps[%d].Kind() = %v, want %v", i, kinds[i], want[i])
+		}
+	}
+	if steps[3].Wait != "5m" {
+		t.Errorf("Wait = %q, want 5m", steps[3].Wait)
+	}
+}
+
+// TestParse_IterationsAndAttempts — a job may repeat and a step may
+// bound what the agent does with it.
+func TestParse_IterationsAndAttempts(t *testing.T) {
+	wf := mustParse(t, `
+name: rounds
+jobs:
+  main:
+    iterations: 3
+    steps:
+      - id: fix
+        message: "/gtw fix"
+        attempts: 5
+`)
+	job := wf.Jobs["main"]
+	if job.Iterations == nil || *job.Iterations != 3 {
+		t.Fatalf("Iterations = %v, want 3", job.Iterations)
+	}
+	if job.Rounds() != 3 {
+		t.Errorf("Rounds() = %d, want 3", job.Rounds())
+	}
+	if job.Steps[0].Attempts != 5 {
+		t.Errorf("Attempts = %d, want 5", job.Steps[0].Attempts)
+	}
+}
+
+// TestParse_ZeroIterationsMeansUntilTheRunEnds — a job that does not
+// say how many rounds it runs runs one round.
+func TestParse_ZeroIterationsMeansUntilTheRunEnds(t *testing.T) {
+	one := mustParse(t, "name: x\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	if one.Jobs["main"].Rounds() != 1 {
+		t.Errorf("Rounds() = %d, want 1", one.Jobs["main"].Rounds())
+	}
+	forever := mustParse(t, "name: x\njobs:\n  main:\n    iterations: 0\n    steps: [{message: hi}]\n")
+	if forever.Jobs["main"].Rounds() != 0 {
+		t.Errorf("Rounds() = %d, want 0 (until the run ends)", forever.Jobs["main"].Rounds())
+	}
+}
+
+// TestParse_AnActionNameMayComeFromAnArgument — `use:` takes an
+// argument like every other field of a step.
+func TestParse_AnActionNameMayComeFromAnArgument(t *testing.T) {
+	wf := mustParse(t, `
+name: act
+args:
+  - name: which
+    default: notify
+jobs:
+  main:
+    steps:
+      - id: tell
+        use: ${{ args.which }}
+`)
+	bound, err := Bind(wf, nil)
+	if err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	if got := bound.Jobs["main"].Steps[0].Use; got != "notify" {
+		t.Errorf("Use = %q, want notify", got)
+	}
+}
+
+// TestParse_AnUndeclaredArgumentIsRefusedEverywhere — the check covers
+// every field of a step, `use:` included.
+func TestParse_AnUndeclaredArgumentIsRefusedEverywhere(t *testing.T) {
+	_, err := Parse([]byte(`
+name: act
+jobs:
+  main:
+    steps:
+      - id: tell
+        use: ${{ args.nope }}
+`))
+	if err == nil {
+		t.Fatal("an undeclared argument was accepted")
+	}
+	if !strings.Contains(err.Error(), "unknown argument") {
+		t.Errorf("error = %v, want it to name the argument", err)
+	}
+}
+
+// TestParse_TheCountsMustBeWholeNumbers — a fraction would slip past
+// a check on the decoded value.
+func TestParse_TheCountsMustBeWholeNumbers(t *testing.T) {
+	for _, src := range []string{
+		"name: x\njobs:\n  main:\n    iterations: 1.5\n    steps: [{message: hi}]\n",
+		"name: x\njobs:\n  main:\n    iterations: -0.5\n    steps: [{message: hi}]\n",
+		"name: x\njobs:\n  main:\n    steps: [{message: hi, attempts: 0.5}]\n",
+		"name: x\njobs:\n  main:\n    steps: [{message: hi, attempts: -0.5}]\n",
+	} {
+		if _, err := Parse([]byte(src)); err == nil {
+			t.Errorf("a fraction was accepted:\n%s", src)
+		}
 	}
 }
 
@@ -261,6 +378,27 @@ jobs:
 			wantErr: "worker",
 		},
 		{
+			name: "retired action budget",
+			src: `
+name: x
+max_actions: 30
+jobs:
+  main:
+    steps: [{message: hi}]
+`,
+			wantErr: "max_actions",
+		},
+		{
+			name: "a wait that is not a duration",
+			src: `
+name: x
+jobs:
+  main:
+    steps: [{wait: soon}]
+`,
+			wantErr: "soon",
+		},
+		{
 			name: "unknown step key",
 			src: `
 name: x
@@ -278,7 +416,7 @@ jobs:
   main:
     steps: [{message: hi, shell: echo}]
 `,
-			wantErr: "exactly one of message / shell / use must be set",
+			wantErr: "exactly one of message / shell / use / wait must be set",
 		},
 		{
 			name: "no kind",
@@ -288,7 +426,7 @@ jobs:
   main:
     steps: [{note: nothing to do}]
 `,
-			wantErr: "exactly one of message / shell / use must be set",
+			wantErr: "exactly one of message / shell / use / wait must be set",
 		},
 		{
 			name: "unknown need",

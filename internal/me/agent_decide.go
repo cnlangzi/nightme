@@ -171,7 +171,6 @@ func (s *Service) decisionState(r *run) string {
 
 	var b strings.Builder
 	b.WriteString(r.renderPolicy())
-	fmt.Fprintf(&b, "remaining actions: %d\n", remaining.Actions)
 	for i, n := range remaining.Steps {
 		if n < 0 {
 			fmt.Fprintf(&b, "remaining actions for step %d: no limit of its own\n", i+1)

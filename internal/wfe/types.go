@@ -16,7 +16,6 @@ type Workflow struct {
 	Name       string         `yaml:"name" json:"name"`
 	Args       []Arg          `yaml:"args" json:"args,omitempty"`
 	Goal       string         `yaml:"goal" json:"goal,omitempty"`
-	MaxActions int            `yaml:"max_actions" json:"max_actions"`
 	Instruct   bool           `yaml:"instruct" json:"instruct"`
 	Workspaces []string       `yaml:"workspaces" json:"workspaces,omitempty"`
 	On         Trigger        `yaml:"on" json:"on"`
@@ -40,15 +39,32 @@ type Arg struct {
 type Job struct {
 	Needs []string `yaml:"needs" json:"needs,omitempty"`
 	If    string   `yaml:"if" json:"if,omitempty"`
-	Steps []Step   `yaml:"steps" json:"steps"`
+	// Iterations is how many rounds the job runs.
+	//
+	// A missing value means one round: the job's steps run once. Zero
+	// means the job's steps run until the run ends. N means the job's
+	// steps run N rounds in total.
+	Iterations *int   `yaml:"iterations,omitempty" json:"iterations,omitempty"`
+	Steps      []Step `yaml:"steps" json:"steps"`
+}
+
+// Rounds returns how many rounds the job runs.
+//
+// Zero means the job repeats until the run ends.
+func (j Job) Rounds() int {
+	if j.Iterations == nil {
+		return 1
+	}
+	return *j.Iterations
 }
 
 // Step is one unit of work inside a job: exactly one of message,
-// shell or use is set.
+// shell, use or wait is set.
 //
-// Max caps the number of actions the step may take — its own message
-// and the commands in its allow list. Allow lists the extra commands
-// the agent may use inside the step. Note explains when to use them.
+// Attempts caps the number of actions the step may take in one round —
+// its own message and the commands in its allow list. Allow lists the
+// extra commands the agent may use inside the step. Note explains when
+// to use them.
 type Step struct {
 	ID              string            `yaml:"id,omitempty" json:"id,omitempty"`
 	If              string            `yaml:"if,omitempty" json:"if,omitempty"`
@@ -56,15 +72,17 @@ type Step struct {
 	ContinueOnError bool              `yaml:"continue-on-error,omitempty" json:"continue-on-error,omitempty"`
 	Note            string            `yaml:"note,omitempty" json:"note,omitempty"`
 	Allow           []string          `yaml:"allow,omitempty" json:"allow,omitempty"`
-	Max             int               `yaml:"max,omitempty" json:"max,omitempty"`
+	Attempts        int               `yaml:"attempts,omitempty" json:"attempts,omitempty"`
 
 	// Message is the text sent to the work chat.
 	Message string `yaml:"message,omitempty" json:"message,omitempty"`
-	// Shell is the shell command run in the workspace.
+	// Shell is the shell command run in the work chat's directory.
 	Shell string `yaml:"shell,omitempty" json:"shell,omitempty"`
 	// Use is the name of a registered action.
 	Use  string         `yaml:"use,omitempty" json:"use,omitempty"`
 	With map[string]any `yaml:"with,omitempty" json:"with,omitempty"`
+	// Wait is the duration the step waits before it reports ok.
+	Wait string `yaml:"wait,omitempty" json:"wait,omitempty"`
 }
 
 // StepKind is the dispatch category of a Step.
@@ -75,10 +93,12 @@ const (
 	StepKindNone StepKind = iota
 	// StepKindMessage sends text to the work chat.
 	StepKindMessage
-	// StepKindShell runs a shell command in the workspace.
+	// StepKindShell runs a shell command in the work chat's directory.
 	StepKindShell
 	// StepKindUse runs a registered action.
 	StepKindUse
+	// StepKindWait waits for a duration.
+	StepKindWait
 )
 
 // Kind returns the kind of the step.
@@ -90,6 +110,8 @@ func (s Step) Kind() StepKind {
 		return StepKindShell
 	case s.Use != "":
 		return StepKindUse
+	case s.Wait != "":
+		return StepKindWait
 	}
 	return StepKindNone
 }
@@ -159,6 +181,9 @@ type RunState struct {
 	Status Status `json:"status"`
 	// Env holds the run's environment.
 	Env map[string]string `json:"env,omitempty"`
+	// Rounds holds the round every job is in. A job that has not
+	// started yet is not in the map.
+	Rounds map[string]int `json:"rounds,omitempty"`
 	// Steps holds every step that ran, in the order it ran.
 	Steps []StepState `json:"steps"`
 	// StartedAt is when the run started.
@@ -173,6 +198,8 @@ type StepState struct {
 	ID string `json:"id"`
 	// Job is the job the step belongs to.
 	Job string `json:"job"`
+	// Round is the round of the job the step ran in.
+	Round int `json:"round,omitempty"`
 	// Outcome is the step's verdict.
 	Outcome Outcome `json:"outcome"`
 	// Skipped is true when the step's `if:` did not hold.
@@ -181,6 +208,18 @@ type StepState struct {
 	// The step is still the ready one, but the plan cannot go on
 	// without the agent: the command is waiting for an answer.
 	Pending bool `json:"pending,omitempty"`
+}
+
+// RoundOf returns the round a job is in. A job that has not started
+// is in its first round.
+func (s *RunState) RoundOf(job string) int {
+	if s == nil {
+		return 1
+	}
+	if r := s.Rounds[job]; r > 0 {
+		return r
+	}
+	return 1
 }
 
 // Status is the lifecycle state of a run.
@@ -192,10 +231,6 @@ const (
 	StatusFailed    Status = "failed"
 	StatusCancelled Status = "cancelled"
 )
-
-// DefaultMaxActions is the action budget of a workflow that does not
-// set max_actions.
-const DefaultMaxActions = 30
 
 // OutcomeStatus is the machine-readable verdict of one action.
 type OutcomeStatus string
@@ -237,10 +272,14 @@ const (
 // ActionRecord is one action the run has taken. StepID points at the
 // step the action served; only a run belongs to a step, so an
 // instruction carries an empty one.
+//
+// Round is the round of the step's job the action was taken in. The
+// per-step budgets count the attempts of the current round only.
 type ActionRecord struct {
 	Kind    ActionKind `json:"kind"`
 	Command string     `json:"command"`
 	StepID  string     `json:"step_id,omitempty"`
+	Round   int        `json:"round,omitempty"`
 	Outcome Outcome    `json:"outcome"`
 	At      time.Time  `json:"at"`
 }

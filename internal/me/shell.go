@@ -98,6 +98,12 @@ func envToUnix(m map[string]string) []string {
 	return out
 }
 
+// maxShellFacts is how many key=value facts a shell command may
+// report. The facts go into the run state and into the decision
+// model's request, so a command that prints thousands of them is
+// truncated rather than carried whole.
+const maxShellFacts = 64
+
 // parseKVOutput extracts "key=value" lines from stdout. Both key
 // and value must be non-empty. Lines that don't match are ignored.
 // Used to populate ShellResult.Outputs for downstream step
@@ -117,6 +123,9 @@ func parseKVOutput(stdout string) map[string]string {
 		val := strings.TrimSpace(line[idx+1:])
 		if key == "" || val == "" {
 			continue
+		}
+		if len(out) >= maxShellFacts {
+			break
 		}
 		out[key] = val
 	}

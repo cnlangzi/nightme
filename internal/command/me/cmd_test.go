@@ -226,7 +226,6 @@ func TestStatus_ReportsWhereTheRunStands(t *testing.T) {
 		Step:             "/gtw commit",
 		Execution:        "running",
 		Actions:          2,
-		RemainingActions: 28,
 		System1Decisions: 3,
 		System2Decisions: 1,
 		System1Tokens:    120,
@@ -235,7 +234,7 @@ func TestStatus_ReportsWhereTheRunStands(t *testing.T) {
 	cs := newSession(t, "me-7", "/tmp/work")
 
 	reply := runMe(t, ctrl, cs, "/me", "status")
-	for _, want := range []string{"running", "run-1", "/gtw commit", "2 taken, 28 left", "system-1: 3 decisions"} {
+	for _, want := range []string{"running", "run-1", "/gtw commit", "2 taken", "system-1: 3 decisions"} {
 		if !strings.Contains(reply, want) {
 			t.Fatalf("reply = %q, want it to mention %q", reply, want)
 		}

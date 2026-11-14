@@ -219,7 +219,6 @@ func printWorkflowShow(w io.Writer, wf *wfe.Workflow, asJSON bool) error {
 		fmt.Fprintf(w, "goal:       %s\n", wf.Goal)
 	}
 	fmt.Fprintf(w, "workspaces: %s\n", workspacesLabel(wf))
-	fmt.Fprintf(w, "max_actions: %d\n", wf.MaxActions)
 	if len(wf.Args) > 0 {
 		fmt.Fprintf(w, "args:       %s\n", strings.Join(wf.ArgNames(), ", "))
 	}
@@ -248,6 +247,11 @@ func printWorkflowShow(w io.Writer, wf *wfe.Workflow, asJSON bool) error {
 		if len(job.Needs) > 0 {
 			fmt.Fprintf(w, "    needs: %s\n", strings.Join(job.Needs, ", "))
 		}
+		if rounds := job.Rounds(); rounds == 0 {
+			fmt.Fprintf(w, "    iterations: until the run ends\n")
+		} else if rounds > 1 {
+			fmt.Fprintf(w, "    iterations: %d\n", rounds)
+		}
 		for i, step := range job.Steps {
 			fmt.Fprintf(w, "    [%d] %s\n", i, describeStep(step))
 		}
@@ -264,6 +268,8 @@ func describeStep(s wfe.Step) string {
 	case wfe.StepKindUse:
 		return fmt.Sprintf("use: %s (id=%s, with=%d args)",
 			s.Use, s.ID, len(s.With))
+	case wfe.StepKindWait:
+		return fmt.Sprintf("wait: %s (id=%s)", s.Wait, s.ID)
 	}
 	return fmt.Sprintf("? (id=%s)", s.ID)
 }
@@ -354,6 +360,11 @@ func printWorkflowRun(w io.Writer, wf *wfe.Workflow, workspace string) error {
 		fmt.Fprintf(w, "\n  job: %s (steps: %d)\n", name, len(job.Steps))
 		if len(job.Needs) > 0 {
 			fmt.Fprintf(w, "    needs: %s\n", strings.Join(job.Needs, ", "))
+		}
+		if rounds := job.Rounds(); rounds == 0 {
+			fmt.Fprintf(w, "    iterations: until the run ends\n")
+		} else if rounds > 1 {
+			fmt.Fprintf(w, "    iterations: %d\n", rounds)
 		}
 		for i, step := range job.Steps {
 			fmt.Fprintf(w, "    [%d] %s\n", i, describeStep(step))

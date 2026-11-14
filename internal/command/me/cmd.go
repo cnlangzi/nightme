@@ -199,7 +199,7 @@ func renderStatus(st command.MeStatus) string {
 	if st.Progress != "" {
 		fmt.Fprintf(&b, "progress: %s\n", st.Progress)
 	}
-	fmt.Fprintf(&b, "actions: %d taken, %d left\n", st.Actions, st.RemainingActions)
+	fmt.Fprintf(&b, "actions: %d taken\n", st.Actions)
 	fmt.Fprintf(&b, "system-1: %d decisions, %d tokens\n", st.System1Decisions, st.System1Tokens)
 	fmt.Fprintf(&b, "system-2: %d decisions, %d tokens\n", st.System2Decisions, st.System2Tokens)
 	if st.Question != "" {
@@ -280,7 +280,6 @@ func (c *controller) Status(observerChatID string) command.MeStatus {
 		Step:             st.Step,
 		Execution:        string(st.Execution),
 		Actions:          st.Actions,
-		RemainingActions: st.Remaining.Actions,
 		System1Decisions: st.System1Decisions,
 		System2Decisions: st.System2Decisions,
 		System1Tokens:    st.System1Usage.Total(),

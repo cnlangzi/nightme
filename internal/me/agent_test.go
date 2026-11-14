@@ -86,6 +86,9 @@ type fakeLoopback struct {
 	// setupOutcome is the outcome the setup commands report. Nil
 	// means they succeed.
 	setupOutcome *messages.Outcome
+	// failCommand is the command that cannot be sent at all, the way
+	// a dead work chat cannot take it.
+	failCommand string
 }
 
 func newFakeLoopback(steps ...fakeStep) *fakeLoopback {
@@ -96,6 +99,9 @@ func (f *fakeLoopback) Send(_ context.Context, chatID, text string) (string, err
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sent = append(f.sent, text)
+	if f.failCommand != "" && text == f.failCommand {
+		return "", errors.New("the work chat is gone")
+	}
 	f.seq++
 	id := fmt.Sprintf("msg-%d", f.seq)
 
@@ -372,7 +378,7 @@ jobs:
         message: /review
         note: If it fails or does not finish, continue with /review -c.
         allow: [/review -c, /gtw commit]
-        max: 5
+        attempts: 5
       - id: push
         message: /gtw push
       - id: pr
@@ -780,7 +786,7 @@ jobs:
       - id: review
         message: /review
         allow: ["/review -c"]
-        max: 5
+        attempts: 5
       - id: push
         message: /gtw push
 `)
@@ -954,6 +960,7 @@ type recordingAction struct {
 	name string
 	mu   sync.Mutex
 	args map[string]any
+	ran  bool
 }
 
 func (a *recordingAction) Name() string { return a.name }
@@ -961,8 +968,16 @@ func (a *recordingAction) Name() string { return a.name }
 func (a *recordingAction) Execute(_ context.Context, args map[string]any, _ map[string]string) (*wfe.ActionResult, error) {
 	a.mu.Lock()
 	a.args = args
+	a.ran = true
 	a.mu.Unlock()
 	return &wfe.ActionResult{Outputs: map[string]any{"sent": "true"}}, nil
+}
+
+// Called reports whether the action ran.
+func (a *recordingAction) Called() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.ran
 }
 
 // TestStop_CancelsARunningShellStep — `/me stop` stops the command a

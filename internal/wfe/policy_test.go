@@ -16,13 +16,27 @@ func boundFixIssue(t *testing.T) *Workflow {
 	return bound
 }
 
+// manyPushes builds a history of the same command.
+func manyPushes(n int) []ActionRecord {
+	out := make([]ActionRecord, n)
+	for i := range out {
+		out[i] = ActionRecord{Kind: ActionKindRun, Command: "/gtw push", StepID: "push"}
+	}
+	return out
+}
+
+// manyEchoes builds a history of the same command.
+func manyEchoes(n int) []ActionRecord {
+	out := make([]ActionRecord, n)
+	for i := range out {
+		out[i] = ActionRecord{Kind: ActionKindRun, Command: "echo hi", StepID: "main#1"}
+	}
+	return out
+}
+
 func TestPolicy_CheckRun(t *testing.T) {
 	bound := boundFixIssue(t)
 
-	spent := make([]ActionRecord, DefaultMaxActions)
-	for i := range spent {
-		spent[i] = ActionRecord{Kind: ActionKindRun, Command: "/gtw push", StepID: "push"}
-	}
 	reviews := make([]ActionRecord, 5)
 	for i := range reviews {
 		reviews[i] = ActionRecord{Kind: ActionKindRun, Command: "/review", StepID: "review"}
@@ -72,10 +86,10 @@ func TestPolicy_CheckRun(t *testing.T) {
 			wantErr: "limit is 5",
 		},
 		{
-			name:    "action budget spent",
+			name:    "a step without a limit of its own takes any number of attempts",
 			command: "/gtw push",
-			history: spent,
-			wantErr: "actions in total",
+			history: manyPushes(20),
+			wantIdx: 4,
 		},
 	}
 	for _, tt := range tests {
@@ -122,11 +136,6 @@ func TestPolicy_CheckInstruct(t *testing.T) {
 	allowed := mustParse(t, "name: x\njobs:\n  main:\n    steps: [{message: echo hi}]\n")
 	forbidden := mustParse(t, "name: x\ninstruct: false\njobs:\n  main:\n    steps: [{message: echo hi}]\n")
 
-	spent := make([]ActionRecord, DefaultMaxActions)
-	for i := range spent {
-		spent[i] = ActionRecord{Kind: ActionKindRun, Command: "echo hi", StepID: "main#1"}
-	}
-
 	tests := []struct {
 		name    string
 		wf      *Workflow
@@ -143,10 +152,9 @@ func TestPolicy_CheckInstruct(t *testing.T) {
 			wantErr: "does not allow free-form instructions",
 		},
 		{
-			name:    "action budget spent",
+			name:    "an instruction is not bounded by a total budget",
 			wf:      allowed,
-			history: spent,
-			wantErr: "actions in total",
+			history: manyEchoes(20),
 		},
 	}
 	for _, tt := range tests {
@@ -250,9 +258,6 @@ func TestPolicy_Remaining(t *testing.T) {
 		{Kind: ActionKindInstruct, Command: "keep going"},
 	})
 	rem := pol.Remaining()
-	if rem.Actions != DefaultMaxActions-2 {
-		t.Errorf("Actions = %d, want %d", rem.Actions, DefaultMaxActions-2)
-	}
 	if len(rem.Steps) != 5 {
 		t.Fatalf("Steps = %d, want 5", len(rem.Steps))
 	}
@@ -272,7 +277,7 @@ jobs:
     steps:
       - id: one
         message: echo
-        max: 1
+        attempts: 1
       - id: two
         message: other
         allow: [echo]
@@ -301,7 +306,7 @@ jobs:
     steps:
       - id: one
         message: echo hi
-        max: 1
+        attempts: 1
 `)
 	pol := NewPolicy(wf, []ActionRecord{
 		{Kind: ActionKindInstruct, Command: "keep going", Outcome: Outcome{Status: OutcomeOK}},
@@ -319,11 +324,10 @@ func TestPolicy_Render(t *testing.T) {
 	out := NewPolicy(boundFixIssue(t), nil).Render()
 	for _, want := range []string{
 		"workflow: fix-issue",
-		"limits: 30 actions in total",
 		"1. /gtw fix 42 -y",
 		"3. /review",
 		"also allowed: /review -c, /gtw commit",
-		"limit: 5 actions",
+		"limit: 5 attempts in this round",
 		"5. /gtw push",
 	} {
 		if !strings.Contains(out, want) {

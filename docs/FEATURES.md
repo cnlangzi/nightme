@@ -122,7 +122,7 @@
 | Workflow YAML + 引擎运行时架构（schema / 触发器 / 步骤 / 表达式 / wfe↔runtime 边界）| [WFE.md](./WFE.md) |
 | 5 类触发器：`schedule` / `pull_request` / `branch` / `issue` / `mention`（解析并展示，没有东西会触发它们）| [WFE.md](./WFE.md) §3 |
 | 三种 step：`message`（work chat）/ `shell`（shell）/ `use`（action）| [WFE.md](./WFE.md) §5 |
-| 顶层字段（`name` / `args` / `goal` / `max_actions` / `instruct` / `workspaces` / `on` / `jobs`）| [WFE.md](./WFE.md) §2 |
+| 顶层字段（`name` / `args` / `goal` / `instruct` / `workspaces` / `on` / `jobs`）| [WFE.md](./WFE.md) §2 |
 | `${{ ... }}` 表达式（`args.*` / `steps.*.outputs.*` / `needs.*.*` / `env.*` / `now`）| [WFE.md](./WFE.md) §6 |
 | `use` 步骤 = 扩展点（注册的 action；内置 + `~/.nightme/workflows/actions/*.sh`）| [WFE.md](./WFE.md) §5.3 |
 | `wfe` 库 = 纯库（无 I/O / 无 clock / 无 secrets；引擎算就绪集和判断点）| [WFE.md](./WFE.md) §8.2 |
@@ -136,7 +136,7 @@
 | 功能 | 设计文档 |
 |------|----------|
 | 个人 agent 分层（loopback 传输 / 决策模型 / 聊天模型 / 策略）| [WFE.md](./WFE.md) §8.1 |
-| Workflow schema（`name` / `args` / `goal` / `max_actions` / `instruct` / `workspaces` / `on` / `jobs`）| [WFE.md](./WFE.md) §2 |
+| Workflow schema（`name` / `args` / `goal` / `instruct` / `workspaces` / `on` / `jobs`）| [WFE.md](./WFE.md) §2 |
 | 约束策略 `wfe.Policy`（CheckRun / CheckStep / CheckInstruct / CheckFinish / Remaining / Render）| [WFE.md](./WFE.md) §8.4 |
 | 六个工具（`run_step` / `instruct` / `answer_choice` / `ask_human` / `repo_status` / `finish`）| [WFE.md](./WFE.md) §8.5 |
 | 两种模型能力：System 1 决策模型 + System 2 聊天模型 | [WFE.md](./WFE.md) §8.6 |

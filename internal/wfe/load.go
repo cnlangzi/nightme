@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -79,10 +80,10 @@ func Parse(raw []byte) (*Workflow, error) {
 
 // The keys each level of the schema accepts.
 var (
-	workflowKeys = keySet("name", "args", "goal", "max_actions", "instruct", "workspaces", "on", "jobs")
+	workflowKeys = keySet("name", "args", "goal", "instruct", "workspaces", "on", "jobs")
 	argKeys      = keySet("name", "default")
-	jobKeys      = keySet("needs", "if", "steps")
-	stepKeys     = keySet("id", "if", "env", "continue-on-error", "note", "allow", "max", "message", "shell", "use", "with")
+	jobKeys      = keySet("needs", "if", "iterations", "steps")
+	stepKeys     = keySet("id", "if", "env", "continue-on-error", "note", "allow", "attempts", "message", "shell", "use", "with", "wait")
 	triggerKeys  = keySet("schedule", "pull_request", "branch", "issue", "mention")
 )
 
@@ -230,6 +231,11 @@ func checkJobs(node *yaml.Node) error {
 			if !jobKeys[je.key] {
 				return fmt.Errorf("wfe: unknown key %q in job %q (line %d)", je.key, e.key, je.line)
 			}
+			if je.key == "iterations" {
+				if err := requireWholeNumber(je.key, je.val); err != nil {
+					return fmt.Errorf("wfe: job %q: %w", e.key, err)
+				}
+			}
 			if je.key == "steps" {
 				if err := checkSteps(e.key, je.val); err != nil {
 					return err
@@ -262,7 +268,23 @@ func checkSteps(job string, node *yaml.Node) error {
 			if !stepKeys[e.key] {
 				return fmt.Errorf("wfe: unknown key %q in a step of job %q (line %d)", e.key, job, e.line)
 			}
+			if e.key == "attempts" {
+				if err := requireWholeNumber(e.key, e.val); err != nil {
+					return fmt.Errorf("wfe: job %q: %w", job, err)
+				}
+			}
 		}
+	}
+	return nil
+}
+
+// requireWholeNumber checks that a scalar node holds a whole number.
+//
+// yaml.v3 decodes a float into an int field by truncating it, so a
+// negative fraction would slip past a check on the decoded value.
+func requireWholeNumber(key string, node *yaml.Node) error {
+	if node.Kind != yaml.ScalarNode || node.Tag != "!!int" {
+		return fmt.Errorf("%s must be a whole number, got %q", key, node.Value)
 	}
 	return nil
 }
@@ -276,12 +298,6 @@ func checkSteps(job string, node *yaml.Node) error {
 func validate(wf *Workflow, root *yaml.Node) error {
 	if wf.Name == "" {
 		return fmt.Errorf("wfe: name is required")
-	}
-	if !hasKey(root, "max_actions") {
-		wf.MaxActions = DefaultMaxActions
-	}
-	if wf.MaxActions < 1 {
-		return fmt.Errorf("wfe: %s: max_actions must be >= 1", wf.Name)
 	}
 	if !hasKey(root, "instruct") {
 		wf.Instruct = true
@@ -310,6 +326,9 @@ func validate(wf *Workflow, root *yaml.Node) error {
 			if !jobNames[need] {
 				return fmt.Errorf("wfe: %s: job %q needs unknown job %q", wf.Name, name, need)
 			}
+		}
+		if job.Iterations != nil && *job.Iterations < 0 {
+			return fmt.Errorf("wfe: %s: job %q: iterations must be >= 0", wf.Name, name)
 		}
 	}
 	if len(wf.JobOrder()) != len(wf.Jobs) {
@@ -355,11 +374,19 @@ func validateStep(s *Step) error {
 	if s.Use != "" {
 		n++
 	}
-	if n != 1 {
-		return fmt.Errorf("exactly one of message / shell / use must be set (got %d)", n)
+	if s.Wait != "" {
+		n++
 	}
-	if s.Max < 0 {
-		return fmt.Errorf("max must be >= 1")
+	if n != 1 {
+		return fmt.Errorf("exactly one of message / shell / use / wait must be set (got %d)", n)
+	}
+	if s.Attempts < 0 {
+		return fmt.Errorf("attempts must be >= 0")
+	}
+	if s.Wait != "" {
+		if _, err := time.ParseDuration(s.Wait); err != nil {
+			return fmt.Errorf("wait: %q is not a duration", s.Wait)
+		}
 	}
 	return nil
 }
@@ -551,7 +578,7 @@ func workflowTexts(wf *Workflow) []string {
 		job := wf.Jobs[name]
 		texts = append(texts, job.If)
 		for _, step := range job.Steps {
-			texts = append(texts, step.If, step.Message, step.Shell, step.Note)
+			texts = append(texts, step.If, step.Message, step.Shell, step.Note, step.Use)
 			texts = append(texts, step.Allow...)
 			for _, v := range step.Env {
 				texts = append(texts, v)
@@ -594,7 +621,6 @@ func cloneWorkflow(wf *Workflow) *Workflow {
 	out := &Workflow{
 		Name:       wf.Name,
 		Goal:       wf.Goal,
-		MaxActions: wf.MaxActions,
 		Instruct:   wf.Instruct,
 		Workspaces: append([]string(nil), wf.Workspaces...),
 		On:         wf.On,
@@ -626,11 +652,16 @@ func cloneWorkflow(wf *Workflow) *Workflow {
 				steps[i].With = cloneAnyMap(step.With)
 			}
 		}
-		out.Jobs[name] = Job{
+		cloned := Job{
 			Needs: append([]string(nil), job.Needs...),
 			If:    job.If,
 			Steps: steps,
 		}
+		if job.Iterations != nil {
+			rounds := *job.Iterations
+			cloned.Iterations = &rounds
+		}
+		out.Jobs[name] = cloned
 	}
 	return out
 }
@@ -669,6 +700,7 @@ func expandWorkflowArgs(wf *Workflow, args map[string]string) {
 			step.Message = expandArgs(step.Message, args)
 			step.Shell = expandArgs(step.Shell, args)
 			step.Note = expandArgs(step.Note, args)
+			step.Use = expandArgs(step.Use, args)
 			for j := range step.Allow {
 				step.Allow[j] = expandArgs(step.Allow[j], args)
 			}

@@ -63,6 +63,7 @@ func buildPersonalAgent(cfg *config.Config, chs []channel.Channel, logger *slog.
 		Sender:        NewChatSender(),
 		Answerer:      chatAnswerer{},
 		Git:           gtw.ExecGitRunner{},
+		Cwd:           chatCwd{},
 	})
 	svc.SetLogger(logger)
 	return svc
@@ -151,6 +152,22 @@ func stopPersonalAgent(svc *me.Service, logger *slog.Logger) {
 // session the work chat drives, and the agent's handle is what takes
 // the answer.
 type chatAnswerer struct{}
+
+// chatCwd reports the directory a chat currently works in.
+//
+// The directory moves when a command moves it — `/gtw fix` moves the
+// chat into the worktree — so a shell step of a workflow runs where
+// the chat stands.
+type chatCwd struct{}
+
+// Cwd implements me.CwdProvider.
+func (chatCwd) Cwd(chatID string) string {
+	cs := findChatSession(chatID)
+	if cs == nil {
+		return ""
+	}
+	return cs.SelectedCwd()
+}
 
 // Answer implements me.ChoiceAnswerer.
 func (chatAnswerer) Answer(chatID, requestID, optionID string) error {

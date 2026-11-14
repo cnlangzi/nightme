@@ -101,7 +101,7 @@ paths:
   # agent_sessions.json) and per-session scratch.
   data_dir: "~/.nightme"
 
-# The personal agent — /me start <playbook>. Both halves are
+# The personal agent — /me start <workflow>. Both halves are
 # optional: with only `llm` it runs its tool loop, with only
 # `decider` it runs its fast path and asks you for everything it is
 # not sure about, and with both the fast path hands the uncertain

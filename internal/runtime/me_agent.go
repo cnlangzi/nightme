@@ -2,7 +2,7 @@
 // channels.
 //
 // The personal agent is the user half of nightme: it runs a
-// playbook through the loopback channel, decides what comes next, and
+// workflow through the loopback channel, decides what comes next, and
 // reports back to the chat that started the run.
 //
 // Its models are the user's choice. me.llm is the chat model (System
@@ -59,6 +59,7 @@ func buildPersonalAgent(cfg *config.Config, chs []channel.Channel, logger *slog.
 		Decider:       decider,
 		MinConfidence: cfg.Me.Decider.MinConfidence,
 		Loopback:      loopback.NewClient(lb),
+		Shell:         me.ExecShell{},
 		Sender:        NewChatSender(),
 		Answerer:      chatAnswerer{},
 		Git:           gtw.ExecGitRunner{},

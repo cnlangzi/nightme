@@ -1,4 +1,4 @@
-package workflow
+package me
 
 import (
 	"bytes"
@@ -7,44 +7,35 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"time"
 
 	"github.com/cnlangzi/nightme/internal/proc"
 	"github.com/cnlangzi/nightme/internal/wfe"
 )
 
-// runRuntime implements wfe.Runtime for one workflow run. Each
-// method is a channel from the workflow engine to a specific
-// resource:
-//
-//   - RunShell:   direct os/exec (shell channel)
-//   - SendPrompt: the loopback client — the prompt goes into the
-//     daemon as a message and the answer comes back as the settled
-//     execution
-//   - RunAction:  the service's ActionRegistry (action channels by
-//     name)
-//   - Now:        time.Now
-type runRuntime struct {
-	svc *Service
-	run *run
+// ShellRunner runs the shell command of a workflow step.
+type ShellRunner interface {
+	// RunShell runs the command in the workspace and reports what it
+	// produced.
+	RunShell(ctx context.Context, spec wfe.ShellSpec) (*wfe.ShellResult, error)
 }
 
-func (r *runRuntime) Now() time.Time { return time.Now() }
-
-// RunShell runs a step's shell command in the run's workspace.
+// ExecShell runs a step's shell command with os/exec.
 //
 // The command is bound to ctx: a cancelled run (or a daemon that is
 // shutting down) stops the child instead of leaving it behind. The
 // step's env is layered on top of the daemon's own environment, so
 // the shell finds PATH, HOME and the git/ssh configuration a real
 // command needs.
-func (r *runRuntime) RunShell(ctx context.Context, spec wfe.ShellSpec) (*wfe.ShellResult, error) {
+type ExecShell struct{}
+
+// RunShell implements ShellRunner.
+func (ExecShell) RunShell(ctx context.Context, spec wfe.ShellSpec) (*wfe.ShellResult, error) {
 	cwd := spec.Cwd
 	if cwd == "" {
-		cwd = r.run.workspace
+		cwd = spec.Env["WORKSPACE_CWD"]
 	}
 	if cwd == "" {
-		return nil, errors.New("me: no CWD for run")
+		return nil, errors.New("me: no workspace for the shell step")
 	}
 
 	shellBin, shellArg := pickShell(spec.Shell)
@@ -78,36 +69,6 @@ func (r *runRuntime) RunShell(ctx context.Context, spec wfe.ShellSpec) (*wfe.She
 	return res, nil
 }
 
-// SendPrompt sends the prompt into the chat and waits for the
-// daemon to settle it.
-//
-// The reply is the final text of the execution — the answer the
-// agent produced, not the first thing the daemon said. A command
-// that never settles ends the wait with a timeout snapshot, which
-// fails the step.
-func (r *runRuntime) SendPrompt(ctx context.Context, spec wfe.PromptSpec) (*wfe.Reply, error) {
-	timeout := spec.Timeout
-	if timeout <= 0 {
-		timeout = defaultPromptTimeout
-	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	ex, err := r.svc.client.Do(ctx, spec.ChatID, spec.Prompt)
-	if err != nil {
-		return nil, err
-	}
-	return &wfe.Reply{Text: ex.Final()}, nil
-}
-
-func (r *runRuntime) RunAction(ctx context.Context, spec wfe.ActionSpec) (*wfe.ActionResult, error) {
-	return r.svc.actions.Run(ctx, spec)
-}
-
-// defaultPromptTimeout bounds a prompt step when the workflow does
-// not say otherwise.
-const defaultPromptTimeout = 30 * time.Minute
-
 // pickShell returns the binary + arg to invoke. If shell is empty
 // it defaults to "sh -c"; "bash"/"zsh"/"pwsh" are recognized.
 func pickShell(s string) (string, string) {
@@ -140,7 +101,7 @@ func envToUnix(m map[string]string) []string {
 // parseKVOutput extracts "key=value" lines from stdout. Both key
 // and value must be non-empty. Lines that don't match are ignored.
 // Used to populate ShellResult.Outputs for downstream step
-// references like ${{ steps.x.outputs.y }}.
+// references like ${{ steps.x.outputs.data.y }}.
 func parseKVOutput(stdout string) map[string]string {
 	out := map[string]string{}
 	for _, line := range strings.Split(stdout, "\n") {

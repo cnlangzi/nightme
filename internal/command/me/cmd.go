@@ -1,12 +1,12 @@
 // Package me implements the `/me` slash command.
 //
-// /me starts a playbook in the chat it is typed in. The chat then
+// /me starts a workflow in the chat it is typed in. The chat then
 // receives the progress of the run, the questions the run cannot
 // answer on its own, and the summary when it ends.
 //
 // The commands:
 //
-//	/me start <playbook> [args...] — start a playbook
+//	/me start <workflow> [args...] — start a workflow
 //	/me reply <text>              — answer the question the run asked
 //	/me stop                      — stop the run
 //	/me status                    — report where the run stands
@@ -48,11 +48,11 @@ func NewFactory(ctrl command.MeController) *Factory {
 func (f *Factory) Spec() command.Spec {
 	return command.Spec{
 		Name:     "me",
-		Summary:  "Run a playbook: /me start <playbook> [args...]",
-		Usage:    "/me start <playbook> [args...]\n/me reply <text>\n/me stop\n/me status",
+		Summary:  "Run a workflow: /me start <workflow> [args...]",
+		Usage:    "/me start <workflow> [args...]\n/me reply <text>\n/me stop\n/me status",
 		Category: "agent",
 		Subcommands: []command.SubcommandSpec{
-			{Name: "start", Summary: "Start a playbook in this chat."},
+			{Name: "start", Summary: "Start a workflow in this chat."},
 			{Name: "reply", Summary: "Answer the question the run asked."},
 			{Name: "stop", Summary: "Stop the run of this chat."},
 			{Name: "status", Summary: "Report where the run stands."},
@@ -87,13 +87,13 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	}
 }
 
-// start runs a playbook in this chat.
+// start runs a workflow in this chat.
 func (f *Factory) start(ctx context.Context, rt command.RuntimeServices,
 	cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 
 	if len(input.Args) < 3 {
 		chatsession.ReportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
-		return command.Reply(ctx, rt, "Usage: /me start <playbook> [args...]"), nil
+		return command.Reply(ctx, rt, "Usage: /me start <workflow> [args...]"), nil
 	}
 	cwd, failOut := command.RequireActiveCwd(cs)
 	if failOut != nil {
@@ -102,23 +102,38 @@ func (f *Factory) start(ctx context.Context, rt command.RuntimeServices,
 	}
 
 	name := input.Args[2]
-	runID, err := f.ctrl.StartPlaybook(ctx, command.MeRequest{
+	runID, err := f.ctrl.StartWorkflow(ctx, command.MeRequest{
 		Name:           name,
 		Args:           input.Args[3:],
 		ObserverChatID: input.ChatID,
 		Cwd:            cwd,
-		Agent:          cs.SelectedAgent(),
+		Agent:          workAgent(cs),
 	})
 	if err != nil {
-		chatsession.ReportOutcome(ctx, command.FailedOutcome("error", "the playbook could not be started"))
+		chatsession.ReportOutcome(ctx, command.FailedOutcome("error", "the workflow could not be started"))
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
 	chatsession.ReportOutcome(ctx, messages.Outcome{
 		Status:  messages.OutcomeOK,
 		Summary: "started " + name,
-		Data:    map[string]string{"playbook": name, "run_id": runID},
+		Data:    map[string]string{"workflow": name, "run_id": runID},
 	})
 	return command.Reply(ctx, rt, "▶ "+name+" started ("+runID+")"), nil
+}
+
+// workAgent returns the agent the work chat uses.
+//
+// The chat's own choice wins; a chat that selected nothing falls back
+// to its primary agent. The workflow names no agent: the run belongs
+// to the chat that started it.
+func workAgent(cs *chatsession.ChatSession) string {
+	if cs == nil {
+		return ""
+	}
+	if agent := cs.SelectedAgent(); agent != "" {
+		return agent
+	}
+	return cs.PrimaryAgent()
 }
 
 // reply hands the user's answer to the run.
@@ -235,9 +250,9 @@ func NewController(svc *mesvc.Service) command.MeController {
 	return &controller{svc: svc}
 }
 
-// StartPlaybook implements command.MeController.
-func (c *controller) StartPlaybook(ctx context.Context, req command.MeRequest) (string, error) {
-	return c.svc.StartPlaybook(ctx, mesvc.Request{
+// StartWorkflow implements command.MeController.
+func (c *controller) StartWorkflow(ctx context.Context, req command.MeRequest) (string, error) {
+	return c.svc.StartWorkflow(ctx, mesvc.Request{
 		Name:           req.Name,
 		Args:           req.Args,
 		ObserverChatID: req.ObserverChatID,

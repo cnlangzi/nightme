@@ -541,14 +541,10 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 		deps.OnChannelsStarted(startup)
 	}
 
-	// ── Phase 5.5: the workflow service ─────────────────────────
+	// ── Phase 5.5: the personal agent ───────────────────────────
 	// me drives the daemon through the loopback channel: it is the
 	// user half of the workflow engine. It starts once that channel
 	// is attached, so the commands it sends have a chat to land in.
-	meSvc := startMeService(ctx, cfg, startedChannels, logger)
-
-	// The personal agent starts with the workflow service: both need
-	// the loopback channel, and both drive the daemon through it.
 	if personal != nil {
 		if err := personal.Start(ctx); err != nil {
 			logger.Warn("run: the personal agent did not start", "err", err)
@@ -581,9 +577,8 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 		}
 	}
 
-	// The workflow service stops before the channels do: a run that
-	// is still going needs its chat to settle on.
-	stopMeService(meSvc, logger)
+	// The personal agent stops before the channels do: a run that is
+	// still going needs its chat to settle on.
 	stopPersonalAgent(personal, logger)
 
 	return ShutdownRunMulti(out, startedChannels, csFile, asFile, prCacheReg, logger, cancelProcs)

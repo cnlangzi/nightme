@@ -7,163 +7,360 @@ import (
 	"testing"
 )
 
-func TestParse_Valid(t *testing.T) {
-	yaml := `
-name: pr-reviewer
-workspaces: [~/work/nightme]
-agent: codex
+// fixIssueYAML is the workflow from the feature request.
+const fixIssueYAML = `
+name: fix-issue
+args:
+  - name: issue
+    default: "*"
+goal: 把队列里的一个 issue 做完并推上去
+max_actions: 30
 on:
-  mention:
-    commands: [review]
+  schedule:
+    - cron: "0 2 * * *"
 jobs:
-  review:
+  ship:
     steps:
+      - id: fix
+        message: "/gtw fix ${{ args.issue }} -y"
+        note: 从 nightme/assigned 队列里挑一个
+        allow: ["/gtw abort"]
+        max: 3
+      - id: commit
+        message: "/gtw commit"
       - id: review
-        prompt: "Review ${{ event.title }}"
-        if: ${{ success() }}
-        env:
-          GH_TOKEN: secret
+        message: "/review"
+        note: 没跑完就 /review -c；有改动就先 /gtw commit
+        allow: ["/review -c", "/gtw commit"]
+        max: 5
+      - id: commit2
+        message: "/gtw commit"
+      - id: push
+        message: "/gtw push"
 `
-	wf, err := Parse([]byte(yaml))
+
+func mustParse(t *testing.T, src string) *Workflow {
+	t.Helper()
+	wf, err := Parse([]byte(src))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if wf.Name != "pr-reviewer" {
-		t.Errorf("Name = %q, want pr-reviewer", wf.Name)
+	return wf
+}
+
+func TestParse_Valid(t *testing.T) {
+	wf := mustParse(t, fixIssueYAML)
+
+	if wf.Name != "fix-issue" {
+		t.Errorf("Name = %q, want fix-issue", wf.Name)
 	}
-	if len(wf.Workspaces) != 1 {
-		t.Errorf("Workspaces = %v, want 1", wf.Workspaces)
+	if len(wf.Args) != 1 || wf.Args[0].Name != "issue" {
+		t.Fatalf("Args = %v, want one argument named issue", wf.Args)
 	}
-	if wf.Agent != "codex" {
-		t.Errorf("Agent = %q, want codex", wf.Agent)
+	if wf.Args[0].Default == nil || *wf.Args[0].Default != "*" {
+		t.Errorf("Args[0].Default = %v, want *", wf.Args[0].Default)
 	}
-	if len(wf.On.Mention.Commands) != 1 || wf.On.Mention.Commands[0] != "review" {
-		t.Errorf("Mention.Commands = %v, want [review]", wf.On.Mention.Commands)
+	if wf.Goal == "" {
+		t.Error("Goal is empty")
+	}
+	if wf.MaxActions != 30 {
+		t.Errorf("MaxActions = %d, want 30", wf.MaxActions)
+	}
+	if !wf.Instruct {
+		t.Error("Instruct = false, want true by default")
+	}
+	if len(wf.On.Schedule) != 1 || wf.On.Schedule[0].Cron != "0 2 * * *" {
+		t.Errorf("On.Schedule = %v", wf.On.Schedule)
+	}
+	job := wf.Jobs["ship"]
+	if len(job.Steps) != 5 {
+		t.Fatalf("Steps = %d, want 5", len(job.Steps))
+	}
+	fix := job.Steps[0]
+	if fix.ID != "fix" {
+		t.Errorf("Steps[0].ID = %q, want fix", fix.ID)
+	}
+	if fix.Message != "/gtw fix ${{ args.issue }} -y" {
+		t.Errorf("Steps[0].Message = %q", fix.Message)
+	}
+	if fix.Kind() != StepKindMessage {
+		t.Errorf("Steps[0].Kind = %v, want message", fix.Kind())
+	}
+	if len(fix.Allow) != 1 || fix.Allow[0] != "/gtw abort" {
+		t.Errorf("Steps[0].Allow = %v", fix.Allow)
+	}
+	if fix.Max != 3 {
+		t.Errorf("Steps[0].Max = %d, want 3", fix.Max)
+	}
+}
+
+// TestParse_EveryTopLevelField — the schema carries these fields and
+// nothing else.
+func TestParse_EveryTopLevelField(t *testing.T) {
+	wf := mustParse(t, `
+name: everything
+args:
+  - name: issue
+    default: "*"
+goal: do the thing
+max_actions: 12
+instruct: true
+workspaces: [~/work/nightme]
+on:
+  schedule:
+    - cron: "0 2 * * *"
+jobs:
+  main:
+    steps:
+      - id: one
+        message: /gtw commit
+`)
+	if wf.Name != "everything" {
+		t.Errorf("Name = %q", wf.Name)
+	}
+	if len(wf.Args) != 1 || wf.Args[0].Name != "issue" {
+		t.Errorf("Args = %v", wf.Args)
+	}
+	if wf.Goal != "do the thing" {
+		t.Errorf("Goal = %q", wf.Goal)
+	}
+	if wf.MaxActions != 12 {
+		t.Errorf("MaxActions = %d, want 12", wf.MaxActions)
+	}
+	if !wf.Instruct {
+		t.Error("Instruct = false, want true")
+	}
+	if len(wf.Workspaces) != 1 || wf.Workspaces[0] != "~/work/nightme" {
+		t.Errorf("Workspaces = %v", wf.Workspaces)
+	}
+	if len(wf.On.Schedule) != 1 {
+		t.Errorf("On.Schedule = %v", wf.On.Schedule)
 	}
 	if len(wf.Jobs) != 1 {
-		t.Errorf("Jobs = %v, want 1 job", wf.Jobs)
-	}
-	step := wf.Jobs["review"].Steps[0]
-	if step.Prompt == "" {
-		t.Error("step.Prompt empty")
-	}
-	if step.ID != "review" {
-		t.Errorf("step.ID = %q, want review", step.ID)
-	}
-	if step.Env["GH_TOKEN"] != "secret" {
-		t.Errorf("step.Env[GH_TOKEN] = %q, want secret", step.Env["GH_TOKEN"])
+		t.Errorf("Jobs = %v", wf.Jobs)
 	}
 }
 
-func TestParse_MissingName(t *testing.T) {
-	yaml := `
-workspaces: [a]
-on: { mention: {} }
+func TestParse_Defaults(t *testing.T) {
+	wf := mustParse(t, `
+name: small
 jobs:
   main:
-    steps: [{run: echo}]
-`
-	_, err := Parse([]byte(yaml))
-	if err == nil {
-		t.Error("expected error for missing name")
+    steps: [{message: echo hi}]
+`)
+	if wf.MaxActions != DefaultMaxActions {
+		t.Errorf("MaxActions = %d, want %d", wf.MaxActions, DefaultMaxActions)
+	}
+	if !wf.Instruct {
+		t.Error("Instruct = false, want true by default")
+	}
+	if len(wf.Workspaces) != 0 {
+		t.Errorf("Workspaces = %v, want none", wf.Workspaces)
 	}
 }
 
-func TestParse_MissingWorkspaces(t *testing.T) {
-	yaml := `
+func TestParse_ExplicitInstructFalse(t *testing.T) {
+	wf := mustParse(t, `
+name: small
+max_actions: 4
+instruct: false
+jobs:
+  main:
+    steps: [{message: echo hi}]
+`)
+	if wf.MaxActions != 4 {
+		t.Errorf("MaxActions = %d, want 4", wf.MaxActions)
+	}
+	if wf.Instruct {
+		t.Error("Instruct = true, want false")
+	}
+}
+
+func TestParse_SyntheticStepID(t *testing.T) {
+	wf := mustParse(t, `
 name: x
-on: { mention: {} }
 jobs:
-  main:
-    steps: [{run: echo}]
-`
-	_, err := Parse([]byte(yaml))
-	if err == nil || !strings.Contains(err.Error(), "workspaces") {
-		t.Errorf("expected workspaces error, got %v", err)
-	}
-}
-
-func TestParse_NoTriggers(t *testing.T) {
-	yaml := `
-name: x
-workspaces: [a]
-jobs:
-  main:
-    steps: [{run: echo}]
-`
-	_, err := Parse([]byte(yaml))
-	if err == nil || !strings.Contains(err.Error(), "on:") {
-		t.Errorf("expected on: error, got %v", err)
-	}
-}
-
-func TestParse_StepKindExclusive(t *testing.T) {
-	yaml := `
-name: x
-workspaces: [a]
-on: { mention: {} }
-jobs:
-  main:
+  ship:
     steps:
-      - id: s
-        run: echo
-        prompt: hi
-`
-	_, err := Parse([]byte(yaml))
-	if err == nil || !strings.Contains(err.Error(), "exactly one") {
-		t.Errorf("expected exactly-one error, got %v", err)
+      - message: one
+      - message: two
+`)
+	steps := wf.Jobs["ship"].Steps
+	if steps[0].ID != "ship#1" {
+		t.Errorf("Steps[0].ID = %q, want ship#1", steps[0].ID)
+	}
+	if steps[1].ID != "ship#2" {
+		t.Errorf("Steps[1].ID = %q, want ship#2", steps[1].ID)
 	}
 }
 
-func TestParse_AgentOnlyForPrompt(t *testing.T) {
-	yaml := `
+func TestParse_Errors(t *testing.T) {
+	tests := []struct {
+		name    string
+		src     string
+		wantErr string
+	}{
+		{
+			name:    "missing name",
+			src:     "jobs:\n  main:\n    steps: [{message: hi}]\n",
+			wantErr: "name is required",
+		},
+		{
+			name:    "missing jobs",
+			src:     "name: x\n",
+			wantErr: "jobs is required",
+		},
+		{
+			name: "retired top-level steps",
+			src: `
 name: x
-workspaces: [a]
-on: { mention: {} }
+steps:
+  - /gtw commit
+`,
+			wantErr: "jobs:",
+		},
+		{
+			name: "retired run key",
+			src: `
+name: x
 jobs:
   main:
-    steps:
-      - id: s
-        run: echo
-        agent: codex
-`
-	_, err := Parse([]byte(yaml))
-	if err == nil || !strings.Contains(err.Error(), "agent") {
-		t.Errorf("expected agent error, got %v", err)
-	}
-}
-
-func TestParse_UnknownNeed(t *testing.T) {
-	yaml := `
+    steps: [{run: echo}]
+`,
+			wantErr: "shell:",
+		},
+		{
+			name: "retired prompt key",
+			src: `
 name: x
-workspaces: [a]
-on: { mention: {} }
+jobs:
+  main:
+    steps: [{prompt: hello}]
+`,
+			wantErr: "message:",
+		},
+		{
+			name: "retired agent key",
+			src: `
+name: x
+jobs:
+  main:
+    steps: [{message: hi, agent: codex}]
+`,
+			wantErr: "agent:",
+		},
+		{
+			name: "unknown top-level key",
+			src: `
+name: x
+worker: 2
+jobs:
+  main:
+    steps: [{message: hi}]
+`,
+			wantErr: "worker",
+		},
+		{
+			name: "unknown step key",
+			src: `
+name: x
+jobs:
+  main:
+    steps: [{message: hi, retries: 3}]
+`,
+			wantErr: "retries",
+		},
+		{
+			name: "two kinds",
+			src: `
+name: x
+jobs:
+  main:
+    steps: [{message: hi, shell: echo}]
+`,
+			wantErr: "exactly one of message / shell / use must be set",
+		},
+		{
+			name: "no kind",
+			src: `
+name: x
+jobs:
+  main:
+    steps: [{note: nothing to do}]
+`,
+			wantErr: "exactly one of message / shell / use must be set",
+		},
+		{
+			name: "unknown need",
+			src: `
+name: x
 jobs:
   main:
     needs: [nonexistent]
-    steps: [{run: echo}]
-`
-	_, err := Parse([]byte(yaml))
-	if err == nil || !strings.Contains(err.Error(), "nonexistent") {
-		t.Errorf("expected unknown-need error, got %v", err)
-	}
-}
-
-func TestParse_DedupWorkspaces(t *testing.T) {
-	yaml := `
+    steps: [{message: hi}]
+`,
+			wantErr: "nonexistent",
+		},
+		{
+			name: "two steps with the same id",
+			src: `
 name: x
-workspaces: [a, b, a, c, b]
-on: { mention: {} }
+jobs:
+  a:
+    steps: [{id: s, message: one}]
+  b:
+    steps: [{id: s, message: two}]
+`,
+			wantErr: `the step id "s" is used`,
+		},
+		{
+			name: "a declared id that collides with a synthetic one",
+			src: `
+name: x
+jobs:
+  a:
+    steps:
+      - message: one
+      - id: "a#1"
+        message: two
+`,
+			wantErr: `the step id "a#1" is used`,
+		},
+		{
+			name: "jobs in a circle",
+			src: `
+name: x
+jobs:
+  a:
+    needs: [b]
+    steps: [{message: hi}]
+  b:
+    needs: [a]
+    steps: [{message: hi}]
+`,
+			wantErr: "in a circle",
+		},
+		{
+			name: "undeclared argument",
+			src: `
+name: x
 jobs:
   main:
-    steps: [{run: echo}]
-`
-	wf, err := Parse([]byte(yaml))
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
+    steps: [{message: "${{ args.nope }}"}]
+`,
+			wantErr: `unknown argument "nope"`,
+		},
 	}
-	if len(wf.Workspaces) != 3 {
-		t.Errorf("Workspaces = %v, want 3 (deduped)", wf.Workspaces)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Parse([]byte(tt.src))
+			if err == nil {
+				t.Fatalf("expected an error mentioning %q", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error = %v, want it to mention %q", err, tt.wantErr)
+			}
+		})
 	}
 }
 
@@ -172,14 +369,12 @@ func TestLoadDir_DuplicateName(t *testing.T) {
 	for _, name := range []string{"a.yaml", "b.yaml"} {
 		os.WriteFile(filepath.Join(dir, name), []byte(`
 name: dup
-workspaces: [a]
-on: { mention: {} }
 jobs:
   main:
-    steps: [{run: echo}]
+    steps: [{message: hi}]
 `), 0644)
 	}
-	_, _, err := LoadDir(dir)
+	_, err := LoadDir(dir)
 	if err == nil || !strings.Contains(err.Error(), "duplicate") {
 		t.Errorf("expected duplicate-name error, got %v", err)
 	}
@@ -188,9 +383,9 @@ jobs:
 func TestTopoSort(t *testing.T) {
 	wf := &Workflow{
 		Jobs: map[string]Job{
-			"a": {Steps: []Step{{ID: "a1", Run: "x"}}},
-			"b": {Needs: []string{"a"}, Steps: []Step{{ID: "b1", Run: "x"}}},
-			"c": {Needs: []string{"b"}, Steps: []Step{{ID: "c1", Run: "x"}}},
+			"a": {Steps: []Step{{ID: "a1", Message: "x"}}},
+			"b": {Needs: []string{"a"}, Steps: []Step{{ID: "b1", Message: "x"}}},
+			"c": {Needs: []string{"b"}, Steps: []Step{{ID: "c1", Message: "x"}}},
 		},
 	}
 	order := topoSort(wf.Jobs)
@@ -210,5 +405,110 @@ func TestTopoSort(t *testing.T) {
 	}
 	if !(posA < posB && posB < posC) {
 		t.Errorf("order %v does not respect deps a < b < c", order)
+	}
+}
+
+func TestBind_DefaultArgument(t *testing.T) {
+	wf := mustParse(t, fixIssueYAML)
+	bound, err := Bind(wf, map[string]string{})
+	if err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	msg := bound.Jobs["ship"].Steps[0].Message
+	if msg != "/gtw fix * -y" {
+		t.Errorf("message = %q, want the default to be filled in", msg)
+	}
+}
+
+func TestBind_MissingRequiredArgument(t *testing.T) {
+	wf := mustParse(t, `
+name: x
+args: [{name: issue}]
+jobs:
+  main:
+    steps: [{message: "/gtw fix ${{ args.issue }}"}]
+`)
+	_, err := Bind(wf, map[string]string{})
+	if err == nil || !strings.Contains(err.Error(), `missing argument "issue"`) {
+		t.Errorf("expected a missing-argument error, got %v", err)
+	}
+}
+
+func TestBind_UnknownArgument(t *testing.T) {
+	wf := mustParse(t, `
+name: x
+args: [{name: issue}]
+jobs:
+  main:
+    steps: [{message: hi}]
+`)
+	_, err := Bind(wf, map[string]string{"nope": "1"})
+	if err == nil || !strings.Contains(err.Error(), `unknown argument "nope"`) {
+		t.Errorf("expected an unknown-argument error, got %v", err)
+	}
+}
+
+func TestBind_LeavesOtherExpressionsAlone(t *testing.T) {
+	wf := mustParse(t, `
+name: x
+args: [{name: issue, default: "1"}]
+jobs:
+  main:
+    steps:
+      - id: a
+        message: "/gtw fix ${{ args.issue }}"
+      - id: b
+        message: "echo ${{ steps.a.outputs.status }}"
+`)
+	bound, err := Bind(wf, map[string]string{})
+	if err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	msg := bound.Jobs["main"].Steps[1].Message
+	if msg != "echo ${{ steps.a.outputs.status }}" {
+		t.Errorf("message = %q, want the step expression left alone", msg)
+	}
+}
+
+func TestBind_ExpandsAnArgumentInsideAListItem(t *testing.T) {
+	wf := mustParse(t, `
+name: x
+args:
+  - name: issue
+    default: "42"
+jobs:
+  main:
+    steps:
+      - id: notify
+        use: notify
+        with:
+          items:
+            - name: "${{ args.issue }}"
+`)
+	bound, err := Bind(wf, map[string]string{})
+	if err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	with := bound.Jobs["main"].Steps[0].With
+	items, ok := with["items"].([]any)
+	if !ok || len(items) != 1 {
+		t.Fatalf("the with arguments = %v", with)
+	}
+	item, ok := items[0].(map[string]any)
+	if !ok {
+		t.Fatalf("the list item = %v", items[0])
+	}
+	if item["name"] != "42" {
+		t.Errorf("the list item = %v, want the argument expanded", item)
+	}
+}
+
+func TestBind_LeavesTheSourceAlone(t *testing.T) {
+	wf := mustParse(t, fixIssueYAML)
+	if _, err := Bind(wf, map[string]string{"issue": "42"}); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	if got := wf.Jobs["ship"].Steps[0].Message; got != "/gtw fix ${{ args.issue }} -y" {
+		t.Errorf("the source workflow was changed: %q", got)
 	}
 }

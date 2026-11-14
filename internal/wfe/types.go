@@ -1,115 +1,140 @@
 // Package wfe — workflow engine. Pure library: parses YAML,
-// matches events to workflows, drives a state machine one step at
-// a time, evaluates ${{ }} expressions. Zero I/O. Every external
-// dependency is injected through the Runtime interface (see
+// validates the schema, computes the plan of a run and evaluates
+// ${{ }} expressions. Zero I/O, no clock, no secrets. Every
+// external capability is injected through the Runtime interface (see
 // runtime.go).
 package wfe
 
 import "time"
 
 // Workflow is the parsed+validated workflow definition.
+//
+// A workflow is the only automation artifact: it carries the jobs,
+// the steps and the arguments they take. It names no agent — the run
+// uses the agent of the chat that started it.
 type Workflow struct {
-	Name       string         `yaml:"name" validate:"required"`
-	Workspaces []string       `yaml:"workspaces" validate:"required,min=1"`
-	Worker     int            `yaml:"worker"`
-	Agent      string         `yaml:"agent"`
-	On         Trigger        `yaml:"on" validate:"required"`
-	Jobs       map[string]Job `yaml:"jobs" validate:"required,min=1"`
+	Name       string         `yaml:"name" json:"name"`
+	Args       []Arg          `yaml:"args" json:"args,omitempty"`
+	Goal       string         `yaml:"goal" json:"goal,omitempty"`
+	MaxActions int            `yaml:"max_actions" json:"max_actions"`
+	Instruct   bool           `yaml:"instruct" json:"instruct"`
+	Workspaces []string       `yaml:"workspaces" json:"workspaces,omitempty"`
+	On         Trigger        `yaml:"on" json:"on"`
+	Jobs       map[string]Job `yaml:"jobs" json:"jobs"`
+}
 
-	// Computed at parse time, not from YAML.
-	jobOrder []string // topological order of jobs
+// Arg is one argument a workflow takes.
+//
+// A default makes the argument optional: the run starts without a
+// value for it. No default makes it required.
+type Arg struct {
+	Name    string  `yaml:"name" json:"name"`
+	Default *string `yaml:"default,omitempty" json:"default,omitempty"`
 }
 
 // Job is a named sequence of steps.
+//
+// Needs lists the jobs that have to finish before this one starts. If
+// holds only when the condition is true; an empty condition always
+// holds.
 type Job struct {
-	Needs []string `yaml:"needs"`
-	If    string   `yaml:"if"`
-	Steps []Step   `yaml:"steps" validate:"required,min=1"`
+	Needs []string `yaml:"needs" json:"needs,omitempty"`
+	If    string   `yaml:"if" json:"if,omitempty"`
+	Steps []Step   `yaml:"steps" json:"steps"`
 }
 
-// Step is one of three kinds: run / prompt / use. The corresponding
-// field is set; the others are empty.
+// Step is one unit of work inside a job: exactly one of message,
+// shell or use is set.
+//
+// Max caps the number of actions the step may take — its own message
+// and the commands in its allow list. Allow lists the extra commands
+// the agent may use inside the step. Note explains when to use them.
 type Step struct {
-	Name            string            `yaml:"name"`
-	ID              string            `yaml:"id"`
-	If              string            `yaml:"if"`
-	Env             map[string]string `yaml:"env"`
-	ContinueOnError bool              `yaml:"continue-on-error"`
-	Shell           string            `yaml:"shell"` // run only
+	ID              string            `yaml:"id,omitempty" json:"id,omitempty"`
+	If              string            `yaml:"if,omitempty" json:"if,omitempty"`
+	Env             map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
+	ContinueOnError bool              `yaml:"continue-on-error,omitempty" json:"continue-on-error,omitempty"`
+	Note            string            `yaml:"note,omitempty" json:"note,omitempty"`
+	Allow           []string          `yaml:"allow,omitempty" json:"allow,omitempty"`
+	Max             int               `yaml:"max,omitempty" json:"max,omitempty"`
 
-	// run
-	Run string `yaml:"run"`
-
-	// prompt
-	Prompt string `yaml:"prompt"`
-	Agent  string `yaml:"agent"`
-
-	// use
-	Use  string         `yaml:"use"`
-	With map[string]any `yaml:"with"`
+	// Message is the text sent to the work chat.
+	Message string `yaml:"message,omitempty" json:"message,omitempty"`
+	// Shell is the shell command run in the workspace.
+	Shell string `yaml:"shell,omitempty" json:"shell,omitempty"`
+	// Use is the name of a registered action.
+	Use  string         `yaml:"use,omitempty" json:"use,omitempty"`
+	With map[string]any `yaml:"with,omitempty" json:"with,omitempty"`
 }
 
 // StepKind is the dispatch category of a Step.
 type StepKind int
 
 const (
+	// StepKindNone means the step names no kind at all.
 	StepKindNone StepKind = iota
-	StepKindRun
-	StepKindPrompt
+	// StepKindMessage sends text to the work chat.
+	StepKindMessage
+	// StepKindShell runs a shell command in the workspace.
+	StepKindShell
+	// StepKindUse runs a registered action.
 	StepKindUse
 )
 
+// Kind returns the kind of the step.
 func (s Step) Kind() StepKind {
 	switch {
-	case s.Run != "":
-		return StepKindRun
-	case s.Prompt != "":
-		return StepKindPrompt
+	case s.Message != "":
+		return StepKindMessage
+	case s.Shell != "":
+		return StepKindShell
 	case s.Use != "":
 		return StepKindUse
 	}
 	return StepKindNone
 }
 
-// Trigger is the parsed `on:` block. Only one kind is set per workflow.
+// Trigger is the parsed `on:` block.
+//
+// The block is parsed and displayed; nothing fires it yet.
 type Trigger struct {
-	Schedule    []ScheduleEntry `yaml:"schedule"`
-	PullRequest *PRTrigger      `yaml:"pull_request"`
-	Branch      *BranchTrigger  `yaml:"branch"`
-	Issue       *EventFilter    `yaml:"issue"`
-	Mention     *MentionTrigger `yaml:"mention"`
+	Schedule    []ScheduleEntry `yaml:"schedule,omitempty" json:"schedule,omitempty"`
+	PullRequest *PRTrigger      `yaml:"pull_request,omitempty" json:"pull_request,omitempty"`
+	Branch      *BranchTrigger  `yaml:"branch,omitempty" json:"branch,omitempty"`
+	Issue       *EventFilter    `yaml:"issue,omitempty" json:"issue,omitempty"`
+	Mention     *MentionTrigger `yaml:"mention,omitempty" json:"mention,omitempty"`
 }
 
 // ScheduleEntry is one cron entry.
 type ScheduleEntry struct {
-	Cron string `yaml:"cron" validate:"required"`
+	Cron string `yaml:"cron" json:"cron"`
 }
 
 // PRTrigger fires on PR events; optional branch / event filters.
 type PRTrigger struct {
-	Branches []string `yaml:"branches"`
-	Events   []string `yaml:"events"`
+	Branches []string `yaml:"branches,omitempty" json:"branches,omitempty"`
+	Events   []string `yaml:"events,omitempty" json:"events,omitempty"`
 }
 
 // BranchTrigger fires on branch push events; optional pattern / event filters.
 type BranchTrigger struct {
-	Patterns []string `yaml:"patterns"`
-	Events   []string `yaml:"events"`
+	Patterns []string `yaml:"patterns,omitempty" json:"patterns,omitempty"`
+	Events   []string `yaml:"events,omitempty" json:"events,omitempty"`
 }
 
 // EventFilter is a generic event filter (used for issue).
 type EventFilter struct {
-	Events []string `yaml:"events"`
+	Events []string `yaml:"events,omitempty" json:"events,omitempty"`
 }
 
 // MentionTrigger fires when @owner is mentioned in a PR/issue comment
 // (sourced via gitProvider). Optional command whitelist; empty means
 // any mention fires.
 type MentionTrigger struct {
-	Commands []string `yaml:"commands"`
+	Commands []string `yaml:"commands,omitempty" json:"commands,omitempty"`
 }
 
-// Event is what the trigger pipeline produces. Type is one of
+// Event is what a trigger pipeline produces. Type is one of
 // "schedule" / "pull_request" / "branch" / "issue" / "mention".
 // Data carries the trigger-specific payload.
 type Event struct {
@@ -118,23 +143,44 @@ type Event struct {
 	Data map[string]any
 }
 
-// RunState is the per-run mutable state, owned by internal/me and
-// persisted to StateStore. Tick is the pure transition: in-state,
-// runtime; out-state.
+// RunState is the progress of a run: which steps ran, what they
+// produced and where the run stands.
+//
+// The engine owns it. The agent reads it and proposes a directive;
+// only the engine writes to it.
 type RunState struct {
-	RunID        string                       `json:"run_id"`
-	WorkflowName string                       `json:"workflow"`
-	Workspace    string                       `json:"workspace"`
-	Status       Status                       `json:"status"`
-	CurrentJob   string                       `json:"current_job"`
-	CurrentStep  string                       `json:"current_step"`
-	Env          map[string]string            `json:"env"`
-	StepOutputs  map[string]map[string]string `json:"step_outputs"`
-	Event        Event                        `json:"event"`
-	ChatID       string                       `json:"chat_id"`
-	StartedAt    time.Time                    `json:"started_at"`
-	UpdatedAt    time.Time                    `json:"updated_at"`
-	Attempts     map[string]int               `json:"attempts"`
+	// RunID is the run's id.
+	RunID string `json:"run_id"`
+	// WorkflowName is the workflow the run works through.
+	WorkflowName string `json:"workflow"`
+	// Workspace is the directory the run works in.
+	Workspace string `json:"workspace"`
+	// Status is where the run stands.
+	Status Status `json:"status"`
+	// Env holds the run's environment.
+	Env map[string]string `json:"env,omitempty"`
+	// Steps holds every step that ran, in the order it ran.
+	Steps []StepState `json:"steps"`
+	// StartedAt is when the run started.
+	StartedAt time.Time `json:"started_at"`
+	// UpdatedAt is when the run last moved.
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// StepState is the record of one step that ran.
+type StepState struct {
+	// ID is the step's id.
+	ID string `json:"id"`
+	// Job is the job the step belongs to.
+	Job string `json:"job"`
+	// Outcome is the step's verdict.
+	Outcome Outcome `json:"outcome"`
+	// Skipped is true when the step's `if:` did not hold.
+	Skipped bool `json:"skipped,omitempty"`
+	// Pending is true when the step started and has not settled yet.
+	// The step is still the ready one, but the plan cannot go on
+	// without the agent: the command is waiting for an answer.
+	Pending bool `json:"pending,omitempty"`
 }
 
 // Status is the lifecycle state of a run.
@@ -147,33 +193,9 @@ const (
 	StatusCancelled Status = "cancelled"
 )
 
-// DefaultMaxActions is the action budget of a playbook that does not
+// DefaultMaxActions is the action budget of a workflow that does not
 // set max_actions.
 const DefaultMaxActions = 30
-
-// Playbook is a human-written, ordered list of steps that bounds
-// what the agent loop may do. It carries no workspace and no
-// trigger: the working directory comes from the chat that starts
-// the run.
-type Playbook struct {
-	Name       string         `yaml:"name" json:"name"`
-	Args       []string       `yaml:"args" json:"args"`
-	Goal       string         `yaml:"goal" json:"goal"`
-	MaxActions int            `yaml:"max_actions" json:"max_actions"`
-	Instruct   bool           `yaml:"instruct" json:"instruct"`
-	Steps      []PlaybookStep `yaml:"steps" json:"steps"`
-}
-
-// PlaybookStep is one step of a playbook. Run is the command the
-// step performs; Allow lists the extra commands the agent may use
-// inside the step; Note explains when to use them; Max caps the
-// number of actions the step may take (0 means no cap of its own).
-type PlaybookStep struct {
-	Run   string   `yaml:"run" json:"run"`
-	Note  string   `yaml:"note" json:"note"`
-	Allow []string `yaml:"allow" json:"allow"`
-	Max   int      `yaml:"max" json:"max"`
-}
 
 // OutcomeStatus is the machine-readable verdict of one action.
 type OutcomeStatus string
@@ -197,8 +219,8 @@ type Outcome struct {
 	Data    map[string]string `json:"data,omitempty"`
 }
 
-// succeeded reports whether the outcome means the work was done.
-func (o Outcome) succeeded() bool {
+// Succeeded reports whether the outcome means the work was done.
+func (o Outcome) Succeeded() bool {
 	return o.Status == OutcomeOK || o.Status == OutcomeNoop
 }
 
@@ -206,19 +228,19 @@ func (o Outcome) succeeded() bool {
 type ActionKind string
 
 const (
-	// ActionKindRun is a command from one of the playbook's steps.
+	// ActionKindRun is a command from one of the workflow's steps.
 	ActionKindRun ActionKind = "run"
 	// ActionKindInstruct is a free-form prompt to the work agent.
 	ActionKindInstruct ActionKind = "instruct"
 )
 
-// ActionRecord is one action the run has taken. StepIndex points at
-// the playbook step the action served; only a run counts against a
-// step, so an instruction carries -1.
+// ActionRecord is one action the run has taken. StepID points at the
+// step the action served; only a run belongs to a step, so an
+// instruction carries an empty one.
 type ActionRecord struct {
-	Kind      ActionKind `json:"kind"`
-	Command   string     `json:"command"`
-	StepIndex int        `json:"step_index"`
-	Outcome   Outcome    `json:"outcome"`
-	At        time.Time  `json:"at"`
+	Kind    ActionKind `json:"kind"`
+	Command string     `json:"command"`
+	StepID  string     `json:"step_id,omitempty"`
+	Outcome Outcome    `json:"outcome"`
+	At      time.Time  `json:"at"`
 }

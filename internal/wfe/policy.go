@@ -5,19 +5,27 @@ import (
 	"strings"
 )
 
-// Policy is the constraint policy over a bound playbook and the
-// actions taken so far. Every check is pure: it reads the playbook
+// Policy is the constraint policy over a bound workflow and the
+// actions taken so far. Every check is pure: it reads the workflow
 // and the history and answers with an error the agent can act on.
+//
+// The steps of the policy are every step of every job, in topological
+// order. A step's `max` caps the actions taken against it — its own
+// message and the commands in its allow list.
 type Policy struct {
-	// Playbook is the bound playbook the policy enforces.
-	Playbook *Playbook
+	// Workflow is the bound workflow the policy enforces.
+	Workflow *Workflow
 	// History holds the actions taken so far, oldest first.
 	History []ActionRecord
+
+	// stepList is the workflow's step list, computed once: the
+	// topological order does not change while the run goes on.
+	stepList []Step
 }
 
-// NewPolicy returns a policy over pb with the given action history.
-func NewPolicy(pb *Playbook, history []ActionRecord) *Policy {
-	p := &Policy{Playbook: pb}
+// NewPolicy returns a policy over wf with the given action history.
+func NewPolicy(wf *Workflow, history []ActionRecord) *Policy {
+	p := &Policy{Workflow: wf}
 	if len(history) > 0 {
 		p.History = append([]ActionRecord(nil), history...)
 	}
@@ -28,14 +36,14 @@ func NewPolicy(pb *Playbook, history []ActionRecord) *Policy {
 // step, so any other action is recorded without one.
 func (p *Policy) Record(rec ActionRecord) {
 	if rec.Kind != ActionKindRun {
-		rec.StepIndex = -1
+		rec.StepID = ""
 	}
 	p.History = append(p.History, rec)
 }
 
 // CheckRun reports whether the command may run now and which step it
 // belongs to. The command matches a step when it equals that step's
-// `run` or one of its `allow` entries, compared with whitespace
+// message or one of its `allow` entries, compared with whitespace
 // normalised away. The step that owns the command is the first one
 // listing it.
 func (p *Policy) CheckRun(command string) (int, error) {
@@ -50,47 +58,74 @@ func (p *Policy) CheckRun(command string) (int, error) {
 	step := p.steps()[idx]
 	if step.Max > 0 {
 		if used := p.stepUsage(idx); used >= step.Max {
-			return -1, fmt.Errorf("step %d (%s) already ran %d times, its limit is %d", idx+1, step.Run, used, step.Max)
+			return -1, fmt.Errorf("step %d (%s) already ran %d times, its limit is %d", idx+1, step.Message, used, step.Max)
 		}
 	}
 	if used, limit := p.usedActions(), p.maxActions(); used >= limit {
-		return -1, fmt.Errorf("the playbook allows %d actions in total, all %d are used", limit, used)
+		return -1, fmt.Errorf("the workflow allows %d actions in total, all %d are used", limit, used)
 	}
 	return idx, nil
 }
 
-// CheckInstruct reports whether the agent may send a free-form prompt
-// to the work agent. An instruction is an action: it counts against
-// the playbook's action budget.
-func (p *Policy) CheckInstruct() error {
-	if p.Playbook == nil || !p.Playbook.Instruct {
-		return fmt.Errorf("this playbook does not allow free-form instructions")
+// CheckStep reports whether the step may take an action now: its own
+// limit and the workflow's action budget.
+//
+// The workflow's own plan runs through this check too: a step that
+// spent its budget is a judgment point, not a silent overrun.
+func (p *Policy) CheckStep(idx int) error {
+	steps := p.steps()
+	if idx < 0 || idx >= len(steps) {
+		return fmt.Errorf("there is no step %d in this workflow", idx+1)
+	}
+	step := steps[idx]
+	if step.Max > 0 {
+		if used := p.stepUsage(idx); used >= step.Max {
+			return fmt.Errorf("step %d (%s) already ran %d times, its limit is %d", idx+1, step.Message, used, step.Max)
+		}
 	}
 	if used, limit := p.usedActions(), p.maxActions(); used >= limit {
-		return fmt.Errorf("the playbook allows %d actions in total, all %d are used", limit, used)
+		return fmt.Errorf("the workflow allows %d actions in total, all %d are used", limit, used)
+	}
+	return nil
+}
+
+// IsStepMessage reports whether the command is the step's own message.
+func (p *Policy) IsStepMessage(idx int, command string) bool {
+	steps := p.steps()
+	if idx < 0 || idx >= len(steps) {
+		return false
+	}
+	msg := steps[idx].Message
+	return msg != "" && normalizeCommand(msg) == normalizeCommand(command)
+}
+
+// CheckInstruct reports whether the agent may send a free-form prompt
+// to the work agent. An instruction is an action: it counts against
+// the workflow's action budget.
+func (p *Policy) CheckInstruct() error {
+	if p.Workflow == nil || !p.Workflow.Instruct {
+		return fmt.Errorf("this workflow does not allow free-form instructions")
+	}
+	if used, limit := p.usedActions(), p.maxActions(); used >= limit {
+		return fmt.Errorf("the workflow allows %d actions in total, all %d are used", limit, used)
 	}
 	return nil
 }
 
 // CheckFinish reports whether the run may end with the given status.
-// "done" needs the last step's latest outcome to be ok or noop;
-// "failed" is always allowed.
+// "done" needs the last executed step's latest outcome to be ok or
+// noop; "failed" is always allowed.
 func (p *Policy) CheckFinish(status string) error {
 	switch strings.ToLower(strings.TrimSpace(status)) {
 	case "failed":
 		return nil
 	case "done":
-		steps := p.steps()
-		if len(steps) == 0 {
-			return fmt.Errorf("the playbook has no steps")
-		}
-		last := len(steps) - 1
-		out, ok := p.latestOutcome(last)
+		stepID, out, ok := p.lastExecuted()
 		if !ok {
-			return fmt.Errorf("the last step %q has not run yet", steps[last].Run)
+			return fmt.Errorf("the last step has not run yet")
 		}
-		if !out.succeeded() {
-			return fmt.Errorf("the last step %q finished as %q: it must be ok or noop", steps[last].Run, out.Status)
+		if !out.Succeeded() {
+			return fmt.Errorf("the last step %q finished as %q: it must be ok or noop", stepID, out.Status)
 		}
 		return nil
 	default:
@@ -102,8 +137,8 @@ func (p *Policy) CheckFinish(status string) error {
 type Remaining struct {
 	// Actions is the number of actions left overall.
 	Actions int
-	// Steps holds the actions left per step, index-aligned with
-	// Playbook.Steps. -1 means the step has no limit of its own.
+	// Steps holds the actions left per step, index-aligned with the
+	// workflow's steps. -1 means the step has no limit of its own.
 	Steps []int
 }
 
@@ -129,25 +164,25 @@ func (p *Policy) Remaining() Remaining {
 	return rem
 }
 
-// Render returns the playbook as a compact text block for the agent's
+// Render returns the workflow as a compact text block for the agent's
 // system prompt: the goal, the steps with their notes, the extra
 // commands each step allows and the limits.
 func (p *Policy) Render() string {
 	var b strings.Builder
-	if p.Playbook != nil {
-		fmt.Fprintf(&b, "playbook: %s\n", p.Playbook.Name)
-		if p.Playbook.Goal != "" {
-			fmt.Fprintf(&b, "goal: %s\n", p.Playbook.Goal)
+	if p.Workflow != nil {
+		fmt.Fprintf(&b, "workflow: %s\n", p.Workflow.Name)
+		if p.Workflow.Goal != "" {
+			fmt.Fprintf(&b, "goal: %s\n", p.Workflow.Goal)
 		}
 	}
 	fmt.Fprintf(&b, "limits: %d actions in total", p.maxActions())
-	if p.Playbook != nil && !p.Playbook.Instruct {
+	if p.Workflow != nil && !p.Workflow.Instruct {
 		b.WriteString("; no free-form instructions")
 	}
 	b.WriteString("\n")
 	b.WriteString("steps:\n")
 	for i, step := range p.steps() {
-		fmt.Fprintf(&b, "%d. %s\n", i+1, step.Run)
+		fmt.Fprintf(&b, "%d. %s\n", i+1, stepLabel(step))
 		if step.Note != "" {
 			fmt.Fprintf(&b, "   note: %s\n", step.Note)
 		}
@@ -161,11 +196,24 @@ func (p *Policy) Render() string {
 	return b.String()
 }
 
+// stepLabel renders a step as the agent reads it.
+func stepLabel(step Step) string {
+	switch step.Kind() {
+	case StepKindMessage:
+		return step.Message
+	case StepKindShell:
+		return "(shell) " + step.Shell
+	case StepKindUse:
+		return "(use) " + step.Use
+	}
+	return "(no kind)"
+}
+
 // stepFor returns the index of the first step that permits the
 // command, or -1 when no step does.
 func (p *Policy) stepFor(cmd string) int {
 	for i, step := range p.steps() {
-		if normalizeCommand(step.Run) == cmd {
+		if step.Message != "" && normalizeCommand(step.Message) == cmd {
 			return i
 		}
 		for _, a := range step.Allow {
@@ -181,7 +229,7 @@ func (p *Policy) stepFor(cmd string) int {
 //
 // A command belongs to the first step listing it, so it is left out
 // once that step has spent its limit. The whole list is empty once
-// the playbook's action budget is used up.
+// the workflow's action budget is used up.
 func (p *Policy) AllowedCommands() []string {
 	if p.usedActions() >= p.maxActions() {
 		return nil
@@ -190,7 +238,7 @@ func (p *Policy) AllowedCommands() []string {
 	seen := map[string]bool{}
 	for i, step := range p.steps() {
 		spent := step.Max > 0 && p.stepUsage(i) >= step.Max
-		for _, c := range append([]string{step.Run}, step.Allow...) {
+		for _, c := range append([]string{step.Message}, step.Allow...) {
 			n := normalizeCommand(c)
 			if n == "" || seen[n] {
 				continue
@@ -216,24 +264,34 @@ func (p *Policy) allowedCommands() string {
 
 // stepUsage counts the runs taken for the step.
 func (p *Policy) stepUsage(idx int) int {
+	steps := p.steps()
+	if idx < 0 || idx >= len(steps) {
+		return 0
+	}
+	id := steps[idx].ID
 	n := 0
 	for _, rec := range p.History {
-		if rec.Kind == ActionKindRun && rec.StepIndex == idx {
+		if rec.Kind == ActionKindRun && rec.StepID == id {
 			n++
 		}
 	}
 	return n
 }
 
-// latestOutcome returns the outcome of the most recent run of the
-// step.
-func (p *Policy) latestOutcome(idx int) (Outcome, bool) {
+// lastExecuted returns the step that ran last and its latest
+// outcome.
+//
+// The history is in order, so the last run record carries the latest
+// outcome of the last executed step.
+func (p *Policy) lastExecuted() (string, Outcome, bool) {
 	for i := len(p.History) - 1; i >= 0; i-- {
-		if p.History[i].Kind == ActionKindRun && p.History[i].StepIndex == idx {
-			return p.History[i].Outcome, true
+		rec := p.History[i]
+		if rec.Kind != ActionKindRun {
+			continue
 		}
+		return rec.StepID, rec.Outcome, true
 	}
-	return Outcome{}, false
+	return "", Outcome{}, false
 }
 
 // usedActions counts every action taken, instructions included.
@@ -241,24 +299,27 @@ func (p *Policy) usedActions() int {
 	return len(p.History)
 }
 
-// maxActions returns the playbook's action budget.
+// maxActions returns the workflow's action budget.
 func (p *Policy) maxActions() int {
-	if p.Playbook != nil && p.Playbook.MaxActions > 0 {
-		return p.Playbook.MaxActions
+	if p.Workflow != nil && p.Workflow.MaxActions > 0 {
+		return p.Workflow.MaxActions
 	}
 	return DefaultMaxActions
 }
 
-// steps returns the playbook's steps, tolerating a missing playbook.
-func (p *Policy) steps() []PlaybookStep {
-	if p == nil || p.Playbook == nil {
+// steps returns the workflow's steps, tolerating a missing workflow.
+func (p *Policy) steps() []Step {
+	if p == nil || p.Workflow == nil {
 		return nil
 	}
-	return p.Playbook.Steps
+	if p.stepList == nil {
+		p.stepList = p.Workflow.Steps()
+	}
+	return p.stepList
 }
 
 // normalizeCommand collapses the whitespace of a command so a command
-// typed with extra spaces still matches the playbook.
+// typed with extra spaces still matches the workflow.
 func normalizeCommand(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }

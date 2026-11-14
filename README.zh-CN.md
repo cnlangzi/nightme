@@ -443,23 +443,91 @@ Conventional Commits 的 type 关键词。issue 标题保持英文 / ASCII——
 
 ---
 
-## Workflow 自动化
+## Workflow 与个人 Agent (`/me`)
 
-`nightme workflow` 规划和检查 YAML 定义的自动化。Workflow 放在 `~/.nightme/workflows/*.yaml`，按 `name:` 去重加载。
+**workflow** 是一份 YAML，写清楚做什么、能走多远。它是唯一的自动化产物：同一份文件既是 agent 照着走的计划，也是它不能越过的边界。workflow 放在 `~/.nightme/workflows/*.yaml`，按 `name:` 去重加载。
+
+agent——`/me`——在你发起它的那个 chat 里跑一个 workflow。每条命令都是一条带真实 id 的真实消息，每条命令都回报一个结构化结果，所以它是从事实而不是从文字里决定下一步。
+
+### 检查 workflow
 
 | 子命令 | 作用 |
 |---|---|
 | `nightme workflow list` | 汇总每个 workflow：名称、workspaces、触发器、jobs。`--json` 输出机器可读。 |
-| `nightme workflow show <name>` | 打印一个 workflow 的解析细节：触发器、jobs、steps、生效的 agent。 |
-| `nightme workflow run <name>` | 打印执行计划——哪个触发器会命中、哪些 step 跑、什么顺序。`--workspace` 覆盖 workspace。 |
+| `nightme workflow show <name>` | 打印一个 workflow 的解析细节：触发器、jobs、steps。 |
+| `nightme workflow run <name>` | 打印执行计划——哪些 step 跑、什么顺序。`--workspace` 覆盖 workspace。 |
 
 `run` 是规划 dry-run：只解析和排计划，不真正调 agent。
 
-YAML schema——`on:` 触发器、`worker:`、`jobs.<name>.steps`、`${{ }}` 表达式——见 [`docs/WFE.md`](./docs/WFE.md)。
+### 写一个 workflow
 
-## 个人 Agent (`/me`)
+workflow 在 daemon 启动时读取。加了一个或者改了之后，跑 `nightme restart`。
 
-`me` 在你发起它的那个 chat 里跑一个 **playbook**。playbook 是一份有序的步骤清单加上围绕它的约束。agent 像你一样驱动 NightMe——每条命令都是一条带真实 id 的真实消息，每条命令都回报一个结构化结果——所以它是从事实而不是从文字里决定下一步。
+```yaml
+name: fix-issue
+args:
+  - name: issue
+    default: "*"
+goal: 把队列里的一个 issue 做完并推上去
+max_actions: 30
+on:                                   # 将来给 timer scheduler 消费；本期不实现
+  schedule:
+    - cron: "0 2 * * *"
+jobs:
+  ship:
+    steps:
+      - id: fix
+        message: "/gtw fix ${{ args.issue }} -y"
+        note: 从 nightme/assigned 队列里挑一个
+        allow: ["/gtw abort"]
+        max: 3
+      - id: commit
+        message: "/gtw commit"
+      - id: review
+        message: "/review"
+        note: 没跑完就 /review -c；有改动就先 /gtw commit
+        allow: ["/review -c", "/gtw commit"]
+        max: 5
+      - id: commit2
+        message: "/gtw commit"
+      - id: push
+        message: "/gtw push"
+```
+
+部署方式：把这份文件写到 `~/.nightme/workflows/fix-issue.yaml`，然后跑 `nightme restart`。
+
+| workflow 字段 | 含义 |
+|---|---|
+| `name` | workflow 的名字。`/me start <name>` 按名字取。 |
+| `args` | 这个 workflow 接受的参数。一个参数规格是带 `name` 和可选 `default` 的映射：有 `default` 就是可选参数，没有就是必填参数。 |
+| `goal` | 这次运行为了什么。它是模型指令的一部分。 |
+| `max_actions` | 整个运行的动作预算。默认 30。 |
+| `instruct` | agent 能不能发自由指令。默认 true。 |
+| `workspaces` | 这个 workflow 点名的工作区。可选——运行用的是发起它的那个 chat 的工作区。 |
+| `on` | 触发器块。它被解析和展示，目前没有东西会触发它。 |
+| `jobs` | 各个 job，每个带一份有序的 `steps`。必填。 |
+
+一个 step 恰好带一种类型：
+
+| step 类型 | 作用 |
+|---|---|
+| `message:` | 把这段文字发到 work chat。以 `/` 开头的文字是斜杠命令，其它文字是给 work agent 的一轮对话。 |
+| `shell:` | 在工作区里跑一条 shell 命令。 |
+| `use:` | 跑一个已注册的动作——`notify`、`email`、`github_pr_comment`、`github_issue`，或者 `~/.nightme/workflows/actions/` 下的脚本。 |
+
+| step 字段 | 含义 |
+|---|---|
+| `id` | 这个 step 的名字。可选——不写就拿到 `<job>#<位置>` 这样的 id。 |
+| `if` | 这个 step 要跑的条件。不写就总是成立。 |
+| `env` | 这个 step 的命令拿到的环境变量。 |
+| `continue-on-error` | 这个 step 失败时链条是否继续。 |
+| `note` | 这个 step 为什么在这儿，额外的命令什么时候用。它是决策模型读的那段描述。 |
+| `allow` | 这个 step 里 agent 还能用的额外命令。 |
+| `max` | 这个 step 能走的动作数。不填这一项就不设上限——`max: 0` 会被拒绝。 |
+
+表达式有 `${{ args.NAME }}`、`${{ steps.<id>.outputs.status }}`、
+`${{ steps.<id>.outputs.data.<key> }}`、`${{ needs.<job>.* }}`、`${{ env.NAME }}`
+和 `${{ now }}`。表达式里出现 workflow 没声明的参数，在加载文件时就会被拒绝。
 
 ### 配置模型
 
@@ -468,7 +536,7 @@ YAML schema——`on:` 触发器、`worker:`、`jobs.<name>.steps`、`${{ }}` �
 | 能力 | 配置键 | 作用 |
 |---|---|---|
 | **System 2——chat 模型** | `me.llm` | 决策模型没把握时驱动这次运行。 |
-| **System 1——决策模型** | `me.decider` | 每一步落定之后决定下一步做什么。 |
+| **System 1——决策模型** | `me.decider` | 在判断点上决定下一步做什么。 |
 
 ```yaml
 me:
@@ -505,69 +573,22 @@ me:
 
 | `me.llm` | `me.decider` | 行为 |
 |---|---|---|
-| 已配 | 未配 | 只有 chat 模型：工具循环决定每一步。 |
+| 已配 | 未配 | 只有 chat 模型：工具循环决定每一个判断点。 |
 | 未配 | 已配 | 只有决策模型：有把握的决定直接执行，其余都问你。 |
 | 已配 | 已配 | 决策模型先行，需要升级的交给 chat 模型。 |
 
 配了但建不起来的模型——provider 认不出、key 缺失——会记在 `nightme logs` 里并被跳过。daemon 照常起来，`/me` 会说明它为什么跑不了。
 
-### 写一个 playbook
-
-playbook 放在 `~/.nightme/workflows/*.yaml`——和 workflow 同一个目录。只加载 `.yaml` 文件，文件顶层的键决定它是哪一种：
-
-| 顶层键 | 这个文件是 | 谁跑它 |
-|---|---|---|
-| `steps:` | 一个 **playbook** | 个人 agent——`/me start` |
-| `jobs:` | 一个 **workflow** | cron / 事件驱动的 workflow 服务 |
-
-一个文件不会同时是两者：同时带 `steps:` 和 `jobs:` 的文件会被拒绝。
-
-playbook 在 daemon 启动时读取。加了一个或者改了之后，跑 `nightme restart`。
-
-```yaml
-name: fix-issue
-goal: Fix issue with `nightme/assigned` and ship it as a PR.
-steps:
-  - /gtw fix * -y
-  - /gtw commit
-  - run: /review
-    note: If it fails or does not finish, continue with /review -c. If it passes and left changes, /gtw commit first.
-    allow: [/review -c, /gtw commit]
-    max: 5
-  - /gtw push
-  - /gtw pr
-```
-
-| playbook 字段 | 含义 |
-|---|---|
-| `name` | playbook 的名字。`/me start <name>` 按名字取。 |
-| `args` | 这个 playbook 接受的参数名。`/me start <playbook> [args...]` 把位置参数按顺序映射到它们。 |
-| `goal` | 这次运行为了什么。它是模型指令的一部分。 |
-| `max_actions` | 整个 playbook 的动作预算。默认 30。 |
-| `instruct` | agent 能不能发自由指令。默认 true。 |
-| `steps` | 有序的步骤。 |
-
-一个 step 可以是一个纯字符串——`run` 的简写——也可以是一个映射：
-
-| step 字段 | 含义 |
-|---|---|
-| `run` | 这个 step 执行的命令。 |
-| `note` | 这个 step 为什么在这儿，额外的命令什么时候用。它是决策模型读的那段描述。 |
-| `allow` | 这个 step 里 agent 还能用的额外命令。 |
-| `max` | 这个 step 能走的动作数。不填这一项就不设上限——`max: 0` 会被拒绝。 |
-
-只支持 `${{ args.NAME }}`，而且只能用于声明过的参数。其它表达式在运行开始时就会被拒绝。
-
-playbook 既是 agent 的指令，也是它的边界：步骤说做什么，`max_actions`、`max` 和 `allow` 说最多能走多远。
-
-### 跑一个 playbook
+### 跑一个 workflow
 
 | 命令 | 作用 |
 |---|---|
-| `/me start <playbook> [args...]` | 在当前 chat 里启动一个 playbook。位置参数按顺序映射到 playbook 声明的参数。 |
+| `/me start <workflow> [args...]` | 在当前 chat 里启动一个 workflow。 |
 | `/me reply <text>` | 回答运行正在等的问题。 |
 | `/me stop` | 取消这次运行并停掉 work chat。 |
 | `/me status` | 报告当前 step、运行中命令的阶段与进度、剩余预算，以及两个能力各自决定和花费了什么。 |
+
+`/me start` 的参数按 workflow 声明的顺序填：位置参数填下一个还没被占用的参数，`name=value` 形式的参数按名字指定。
 
 没有工作区的 chat 会被拒绝——`No active workspace. Send /cwd <path> first.`。这次运行继承 chat 的工作区和 agent，一个 chat 同时最多有一次运行。
 
@@ -582,16 +603,42 @@ playbook 既是 agent 的指令，也是它的边界：步骤说做什么，`max
 ✅ issue 42 is on its way · 6 actions · system-1: 0 decisions, 0 tokens · system-2: 8 decisions, 4210 tokens
 ```
 
+### 快路径与判断点
+
+workflow 说了下一步是什么，所以大部分步骤根本不需要模型。
+
+- **就绪集**是那些 job 的 `needs` 都满足、`if:` 也成立的未跑步骤。同一个 job 里只算第一个这样的步骤。
+- 就绪集只有一个元素、并且上一步的结果是 `ok` 或 `noop` 时，这一步照原样跑。不问模型。
+- 其它都是**判断点**：就绪集空了或者分叉、上一步没有以 `ok` 或 `noop` 收尾、或者一条命令还在等回答。这时由 agent 决定——它挑下一个节点、修当前这一步，或者结束这次运行。
+
+agent 在判断点上给出一个指令：`run_step`（跑一条命令）、`instruct`（给 work chat 发一段自由指令）、`answer_choice`（回答 work agent 在等的一个提示）、`ask_human`（问你）、`repo_status`（读分支和工作树）、`finish`（结束运行）。agent 点名的命令必须是某个 step 的 `message:`，或者某个 step 的 `allow:` 里的一条——别的会作为错误退回来让它自己纠正。
+
+### 结果模型
+
+每条命令都回报一个结构化结果：一个状态、一行摘要、还有它知道的事实。
+
+| 状态 | 意思 |
+|---|---|
+| `ok` | 工作按要求做完了。 |
+| `noop` | 没有事情可做——请求有效，而现场已经满足它了。 |
+| `incomplete` | 工作开始了，做完了一部分，剩下的没做完。 |
+| `failed` | 工作没有做完。 |
+| `cancelled` | 有人把它停了。 |
+| `timeout` | 它跑超时了。 |
+| `unknown` | 没有人给出结论。 |
+
+一个 step 的结果会流到后面步骤的表达式里：状态是 `${{ steps.<id>.outputs.status }}`，事实放在 `${{ steps.<id>.outputs.data.<key> }}` 下面。
+
 ### 跑不起来的时候
 
 | 消息 | 意思 |
 |---|---|
-| `there is no playbook named "<name>" (known: ...)` | 没有名字叫这个的 playbook。 |
+| `there is no workflow named "<name>" (known: ...)` | 没有名字叫这个的 workflow。 |
 | `neither me.llm nor me.decider is configured` | 两个模型都没配，agent 没有可决策的东西。 |
-| `there are no playbooks in <dir>` | workflows 目录里没有 playbook。 |
-| `me is disabled: the playbooks in <dir> cannot be loaded: ...` | workflows 目录里的 YAML 写坏了。 |
+| `there are no workflows in <dir>` | workflows 目录里没有 workflow。 |
+| `me is disabled: the workflows in <dir> cannot be loaded: ...` | workflows 目录里的 YAML 写坏了。 |
 
-workflows 目录里的 YAML 写坏了，workflow 服务和个人 agent 都起不来——`nightme logs` 会报出来。daemon 照常起来，`/me` 用加载错误拒绝每一次运行。
+workflows 目录里的 YAML 写坏了，个人 agent 起不来——`nightme logs` 会报出来。daemon 照常起来，`/me` 用加载错误拒绝每一次运行。
 
 ### 护栏与参考
 
@@ -602,11 +649,11 @@ workflows 目录里的 YAML 写坏了，workflow 服务和个人 agent 都起不
 | 停滞检测 | 十分钟没有心跳。 |
 | token 预算 | 一次运行在 chat 模型上能花的 token。 |
 
-完整参考——policy、工具、两个模型能力和护栏——见 [`docs/WFE.md` §8](./docs/WFE.md#8-runtime-architecture)。
+完整参考——schema、policy、工具、两个模型能力和护栏——见 [`docs/WFE.md` §8](./docs/WFE.md#8-runtime-architecture)。
 
 ## Slash commands
 
-Chat 级别的斜杠命令。`/gtw` 子命令见 [它们自己的 section](#git-team-workflow-gtw)，这里不列；`/me` 子命令——`/me start` · `/me reply` · `/me stop` · `/me status`——见 [它们自己的 section](#个人-agent-me)。
+Chat 级别的斜杠命令。`/gtw` 子命令见 [它们自己的 section](#git-team-workflow-gtw)，这里不列；`/me` 子命令——`/me start` · `/me reply` · `/me stop` · `/me status`——见 [它们自己的 section](#workflow-与个人-agent-me)。
 
 | 命令 | 干什么 |
 |---|---|

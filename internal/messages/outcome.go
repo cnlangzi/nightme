@@ -1,7 +1,7 @@
 package messages
 
 // OutcomeStatus is the machine-readable verdict of one unit of
-// work — one slash command, one agent turn, one playbook step.
+// work — one slash command, one agent turn, one workflow step.
 //
 // A program that drives nightme (see internal/me) judges from
 // these values instead of parsing the human-readable cards the

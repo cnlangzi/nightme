@@ -1,15 +1,14 @@
 # nightme Workflow — Configuration Reference
 
-> **Status**: Design draft (v0, pre-implementation). Schema may shift as the engine lands.
-> **Scope**: YAML schema, trigger semantics, step grammar, expressions. Engine internals (scheduler, runner, store) live elsewhere.
+> **Status**: The workflow schema and the personal agent that runs it.
+> **Scope**: The YAML schema, the plan the engine computes, the judgment points, and the runtime that executes them.
 
-A **workflow** is a YAML file that nightme watches, schedules, and runs. It answers three questions:
+A **workflow** is a YAML file that nightme runs. It answers two questions:
 
-1. **When** does it run? (`on:` — trigger)
-2. **How many** parallel instances? (`worker:`)
-3. **What** does it do? (`jobs.<name>.steps` — ordered steps)
+1. **What** does it do? (`jobs.<name>.steps` — ordered steps)
+2. **How far** may it go? (`max_actions`, `max`, `allow`)
 
-Conceptually a workflow is "GitHub Actions for your local dev loop" — declarative, idempotent, single-binary.
+The personal agent (`/me`) runs a workflow in a chat. The same file is the plan the agent follows and the bound it may not cross.
 
 ---
 
@@ -25,24 +24,25 @@ Conceptually a workflow is "GitHub Actions for your local dev loop" — declarat
   - [3.5 `mention`](#35-mention)
 - [4. Jobs](#4-jobs)
 - [5. Steps](#5-steps)
-  - [5.1 `run` — execute shell](#51-run--execute-shell)
-  - [5.2 `prompt` — invoke local agent](#52-prompt--invoke-local-agent)
-  - [5.3 Common step fields](#53-common-step-fields)
+  - [5.1 `message` — talk to the work chat](#51-message--talk-to-the-work-chat)
+  - [5.2 `shell` — execute shell](#52-shell--execute-shell)
+  - [5.3 `use` — invoke a registered action](#53-use--invoke-a-registered-action)
+  - [5.4 Common step fields](#54-common-step-fields)
 - [6. Expressions (`${{ ... }}`)](#6-expressions--)
 - [7. Complete examples](#7-complete-examples)
 - [8. Runtime architecture](#8-runtime-architecture)
   - [8.1 The layering](#81-the-layering)
-  - [8.2 The playbook schema](#82-the-playbook-schema)
-  - [8.3 The policy](#83-the-policy)
-  - [8.4 The tools](#84-the-tools)
-  - [8.5 The two capabilities](#85-the-two-capabilities)
-  - [8.6 The three modes](#86-the-three-modes)
-  - [8.7 The configuration](#87-the-configuration)
-  - [8.8 The `/me` commands](#88-the-me-commands)
-  - [8.9 The outcome model](#89-the-outcome-model)
-  - [8.10 Guardrails and recovery](#810-guardrails-and-recovery)
-  - [8.11 The workflow service](#811-the-workflow-service)
-- [9. Out of scope (v0)](#9-out-of-scope-v0)
+  - [8.2 The plan: the ready set](#82-the-plan-the-ready-set)
+  - [8.3 The judgment points](#83-the-judgment-points)
+  - [8.4 The policy](#84-the-policy)
+  - [8.5 The tools](#85-the-tools)
+  - [8.6 The two capabilities](#86-the-two-capabilities)
+  - [8.7 The three modes](#87-the-three-modes)
+  - [8.8 The configuration](#88-the-configuration)
+  - [8.9 The `/me` commands](#89-the-me-commands)
+  - [8.10 The outcome model](#810-the-outcome-model)
+  - [8.11 Guardrails and recovery](#811-guardrails-and-recovery)
+- [9. Out of scope](#9-out-of-scope)
 - [10. Cross-references](#10-cross-references)
 
 ---
@@ -55,9 +55,9 @@ Workflows are read from:
 ~/.nightme/workflows/*.yaml
 ```
 
-- One workflow per file; filename is informational (not used as the identifier).
-- The `name:` field is the canonical identifier; duplicates cause a load error.
-- Hot-reload on file change (no daemon restart needed).
+- One workflow per file; the filename is informational — the `name:` field is the identifier, and duplicates are a load error.
+- The workflows are read when the daemon starts. After you add or change one, run `nightme restart`.
+- The action scripts live in `~/.nightme/workflows/actions/`, and the run state in `~/.nightme/workflows/runs/`.
 
 ---
 
@@ -66,81 +66,80 @@ Workflows are read from:
 | Field | Type | Required | Default | Purpose |
 |---|---|---|---|---|
 | `name` | string | ✅ | — | Unique workflow identifier; surfaces in logs and notifications. |
-| `workspaces` | string[] | ✅ | — | **List of CWDs this workflow operates on.** Each workspace is a local directory (typically a git checkout). The workflow's triggers fire only for events on these workspaces; every run executes `chdir` into one of them. |
-| `agent` | string | ❌ | (nightme default) | **Default agent for this workflow's `prompt` steps.** Applied via the `/use agent <name>` slash command that the workflow service sends into the work chat at run start. Step-level `agent:` overrides this; if both are absent, the nightme primary agent (`cfg.Primary`) is used. |
-| `worker` | int | ❌ | `1` | Max parallel instances when the trigger fires concurrently. |
-| `on` | object | ✅ | — | Trigger spec (see §3). |
-| `jobs` | map | ✅ | — | Named jobs to run in order (see §4). |
+| `args` | arg[] | ❌ | — | The arguments the workflow takes. A spec is a mapping with `name` and an optional `default`. |
+| `goal` | string | ❌ | — | What the run is for. It is part of the model's instructions. |
+| `max_actions` | int | ❌ | `30` | The action budget of the whole run. |
+| `instruct` | bool | ❌ | `true` | Whether the agent may send free-form instructions to the work chat. |
+| `workspaces` | string[] | ❌ | — | The workspaces the workflow names. The run takes the workspace of the chat that starts it. |
+| `on` | object | ❌ | — | Trigger spec (see §3). Parsed and displayed; nothing fires it. |
+| `jobs` | map | ✅ | — | Named jobs, each with ordered `steps` (see §4). |
+
+A workflow names **no agent**. The run uses the agent of the chat that started it — the chat's `/use` choice, or its primary agent.
 
 Minimal skeleton:
 
 ```yaml
 name: my-workflow
-workspaces: [~/work/myproject]                # ← required: which CWDs
-agent: codex                                  # ← optional: workflow default agent
-worker: 1
-on:
-  schedule:
-    - cron: '0 9 * * *'
 jobs:
   main:
     steps:
-      - run: echo "hello"
+      - message: /gtw commit
 ```
 
-**Full example** (uses every top-level field + every step kind + every trigger kind):
+**Full example** (every top-level field + every step kind + every trigger kind):
 
 ```yaml
 name: full-demo
-workspaces: [~/work/nightme]                  # which CWDs this applies to
-agent: codex                                  # default agent for all prompt steps
-worker: 3                                     # up to 3 parallel runs
+args:
+  - name: issue
+    default: "*"                          # a default makes the argument optional
+goal: Fix an issue and ship it as a PR.
 
-on:                                           # multiple triggers OR'd
+workspaces: [~/work/nightme]              # optional: the workspaces this names
+
+on:                                        # parsed and displayed; nothing fires it
   schedule:
-    - cron: '0 9 * * *'                      # nightly at 9 AM
+    - cron: '0 9 * * *'                    # nightly at 9 AM
   pull_request:
-    branches: [main, develop]                 # PRs to main or develop
-    events: [opened, synchronize]              # opened or new commit pushed
+    branches: [main, develop]
+    events: [opened, synchronize]
   branch:
-    patterns: ['release/*']                   # release branches
+    patterns: ['release/*']
     events: [pushed]
   issue:
-    events: [opened, labeled]                 # new or labeled issues
-  mention:                                     # @owner mention
-    commands: [review, fix]                   # only review or fix mentions
+    events: [opened, labeled]
+  mention:
+    commands: [review, fix]
 
 jobs:
-  prepare:                                     # one job
+  prepare:                                  # one job
     steps:
       - id: setup
-        run: echo "starting at $(date)"
+        shell: echo "starting at $(date)"
         env:
           TZ: UTC
 
-  review:                                     # another job; runs in parallel with prepare
-    needs: [prepare]                          # wait for prepare
+  ship:                                     # another job; waits for prepare
+    needs: [prepare]
     steps:
       # 1. shell step: run a script
       - id: lint
-        run: ./scripts/lint.sh
-        continue-on-error: true                # don't fail the whole run on lint
+        shell: ./scripts/lint.sh
+        continue-on-error: true             # the chain continues when the step fails
 
-      # 2. prompt step: ask the agent (inherits workflow-level agent: codex)
-      - id: ai
-        if: ${{ success() }}                  # skip if lint failed (due to continue-on-error)
-        prompt: |
-          Review this PR.
-          Title: ${{ event.title }}
-          Author: ${{ event.author }}
+      # 2. message step: talk to the work chat
+      - id: fix
+        if: ${{ success() }}
+        message: "/gtw fix ${{ args.issue }} -y"
         env:
           REVIEW_DEPTH: deep
 
-      # 3. prompt step with step-level agent override
-      - id: critical-look
-        if: ${{ steps.ai.outputs.verdict == 'needs-fix' }}
-        prompt: "Double-check the AI's review."
-        agent: claude                         # override the workflow default for this step
+      # 3. message step that repairs the step before it
+      - id: review
+        message: "/review"
+        note: 没跑完就 /review -c；有改动就先 /gtw commit
+        allow: ["/review -c", "/gtw commit"]
+        max: 5
 
       # 4. use step: invoke a registered action
       - id: notify
@@ -149,41 +148,23 @@ jobs:
         with:
           channel: feishu
           target: oc_xxx
-          message: "PR ${{ event.title }}: ${{ steps.ai.outputs.verdict }}"
+          message: "issue ${{ steps.fix.outputs.data.issue }} done"
 
       # 5. use step: user-defined action script
       - id: cleanup
         if: ${{ always() }}
         use: cleanup-tmp-files
         with:
-          paths: [/tmp/pr-${{ event.number }}]
+          paths: [/tmp/pr]
 ```
 
-This example demonstrates every feature in one workflow:
-- All 5 trigger kinds (`schedule` / `pull_request` / `branch` / `issue` / `mention`)
-- Both `cron` style and `command` style for `mention`
-- All 3 step kinds (`run` / `prompt` / `use`)
-- Step-level overrides (agent: claude on critical-look)
-- Conditional execution (`if:` expressions)
-- Cross-job dependency (`needs: [prepare]`)
-- Job-level env merging
-- `continue-on-error` for graceful degradation
-
-**Why `workspaces` (plural, array)**: one workflow can apply to many projects. e.g. the same `nightly-cleanup` workflow might run on every checkout under `~/work/*`. The array is the trigger filter: a trigger event for workspace X only fires workflows whose `workspaces` list contains X.
-
-**Agent resolution priority** (highest first):
-
-1. **Step-level** `prompt.agent` (e.g. `- prompt: "..."` + `agent: codex` on the step)
-2. **Workflow-level** `agent` (this field)
-3. **nightme default** (`cfg.Primary` in `nightme.yaml`)
-
-When the workflow service runs the workflow, only the resolved agent is set on the chat via `/use agent <name>`. The other levels are not pushed as messages (avoids redundant `/use agent` calls).
+**Why `workspaces` is optional**: a workflow runs in the workspace of the chat that starts it. The list names the workspaces the workflow is meant for; it is not a filter that decides where the run happens.
 
 ---
 
 ## 3. Triggers (`on:`)
 
-A workflow can listen to **multiple** trigger sources in one file — all conditions are OR'd. The trigger block is one of five shapes:
+The trigger block is one of five shapes. It is parsed and displayed — `nightme workflow show <name>` prints it — and nothing fires it: a workflow is started by a person, with `/me start <name>` in a chat.
 
 ### 3.1 `schedule`
 
@@ -244,33 +225,11 @@ on:
 
 ### 3.5 `mention`
 
-Fires when **the owner is @-mentioned anywhere that the underlying git provider's mention API can deliver** (sourced via `gitProvider` — this is **not** related to Feishu chat mentions). The "owner" here is the GitHub/GitLab user that the `gitProvider` credentials authenticate as — nightme doesn't need a separate `owner_github_login` config; whoever the token belongs to is the owner, and the API can only see events related to that user (and repos the token has access to).
-
-**Permissive trigger**: the workflow service does not filter by event subtype. Whatever the gitProvider's mention API can deliver counts — issue/PR body mention, issue/PR comment mention, PR review comment mention, PR review summary mention, etc. The `gitProvider` is responsible for normalizing each platform's mention events (GitHub `mentioned`, GitLab `Note` family) into a single "mention" event for the workflow service to consume.
-
-**v0 supported commands**: only `@<owner> review [id]` is implemented. Other commands (`fix`, `close`, etc.) are reserved for later. The whitelist `commands: [review]` (or just `commands: review`) restricts matching to this verb.
-
-**v0 `<id>` semantics**: when present in args, it's an explicit PR/issue number to review. When absent, the workflow reviews the PR/issue where the mention happened (from `event.mention.pr_number` or `event.mention.issue_number`).
+Fires when **the owner is @-mentioned anywhere that the underlying git provider's mention API can deliver** (sourced via `gitProvider` — this is **not** related to Feishu chat mentions). The "owner" is the GitHub/GitLab user that the `gitProvider` credentials authenticate as.
 
 | Field | Type | Default | Purpose |
 |---|---|---|---|
 | `commands` | string \| string[] | (all) | Whitelist of mention commands. Omit to fire on any mention. |
-
-**Command format** (v0): `@<owner> review [<id>]` — the only supported command is `review`, and `<id>` is optional.
-
-| Trigger text | `command` | `args` | Reviewed target |
-|---|---|---|---|
-| `@owner review` | `review` | (empty) | `event.mention.pr_number` / `event.mention.issue_number` (default) |
-| `@owner review 123` | `review` | `123` | PR/issue #123 (explicit) |
-| `@owner review #42` | `review` | `#42` | PR/issue #42 (`#` is stripped) |
-| `@owner fix ...` | `fix` | — | ❌ not triggered (v0 unsupported) |
-
-| Mention text | `commands` | Triggers? |
-|---|---|---|
-| `@owner review` | `review` | ✅ |
-| `@owner review` | `[fix, close]` | ❌ |
-| `@owner please review` | `review` | ❌ (first word is "please", not "review") |
-| `@owner review` | (omitted) | ✅ |
 
 ```yaml
 # Single command
@@ -292,7 +251,7 @@ on:
 
 ## 4. Jobs
 
-`jobs` is a map of named job definitions. Each job runs its `steps` in order. Jobs run **in parallel by default**; use `needs` to express dependencies.
+`jobs` is a map of named job definitions. Each job runs its `steps` in order. A job waits for the jobs it `needs`.
 
 ```yaml
 jobs:
@@ -307,324 +266,223 @@ jobs:
 | Field | Type | Required | Purpose |
 |---|---|---|---|
 | `needs` | string \| string[] | ❌ | Other job(s) this one waits for. |
-| `if` | string | ❌ | Condition expression (see §6). |
+| `if` | string | ❌ | Condition expression (see §6). A job whose condition does not hold is skipped. |
 | `steps` | step[] | ✅ | Ordered steps to execute. |
 
-**No per-job concurrency knob.** Concurrency is workflow-level (`worker:`). Each worker instance runs the full job graph.
+A workflow runs one job graph in one work chat: the branches of the graph express ordering and branching, never concurrent work on separate workspaces.
 
 ---
 
 ## 5. Steps
 
-Each step is one of three shapes:
+Each step carries exactly one of three kinds. A step with two kinds, or with none, is refused when the file is loaded.
 
-| Form | Field | Use case | Runtime call |
+| Kind | Field | Use case | Where it runs |
 |---|---|---|---|
-| `run` | `run: <cmd>` | Execute shell (inline or file) | `Runtime.RunShell` |
-| `prompt` | `prompt: <text>` + `agent: <name>` | Send a prompt to a local AI agent | `Runtime.SendPrompt` |
-| `use` | `use: <action>` + `with: <args>` | Invoke a registered action (notify, email, GitHub, …) | `Runtime.RunAction` |
+| `message` | `message: <text>` | Talk to the work chat | the work chat |
+| `shell` | `shell: <cmd>` | Execute shell | the workspace |
+| `use` | `use: <action>` + `with: <args>` | Invoke a registered action | the action registry |
 
-`run` and `prompt` are **default-supported** — they work in every workflow because they're part of the wfe runtime contract. `use` is the **extension point** — the workflow service registers which action names are valid; see [`feat/F-workflow-engine.md`](./feat/F-workflow-engine.md) for the action model.
+`message` and `shell` are **default-supported** — they work in every workflow. `use` is the **extension point** — the agent registers which action names are valid.
 
-### 5.1 `run` — execute shell
+### 5.1 `message` — talk to the work chat
 
-Supports both **inline** and **file** modes (mirrors GitHub Actions `run`):
+The text goes into the work chat. A `/`-prefixed text is a slash command the daemon interprets; anything else is a turn for the work agent. Both settle with an outcome.
 
 ```yaml
-# 1. Inline single-line
-- name: Lint
-  run: npm run lint
+# A slash command
+- id: commit
+  message: "/gtw commit"
 
-# 2. Inline multi-line (literal block)
-- name: Build
-  run: |
+# A free-form turn
+- id: explain
+  message: |
+    Summarise the changes of the last commit in one line.
+```
+
+The agent's own commands — the ones it may pick at a judgment point — are the steps' `message:` values and the `allow:` entries. A command that is neither comes back to the agent as an error it can correct.
+
+### 5.2 `shell` — execute shell
+
+```yaml
+# Inline single-line
+- id: lint
+  shell: npm run lint
+
+# Inline multi-line (literal block)
+- id: build
+  shell: |
     set -euo pipefail
     echo "Building..."
     make build
 
-# 3. Script file (path must exist; resolved relative to workflow dir)
-- name: Checkout
-  run: ./scripts/checkout.sh
+# Script file
+- id: checkout
+  shell: ./scripts/checkout.sh
 ```
 
-**Disambiguation rule** (matches GitHub Actions):
+The command runs in the workspace of the run. The step's `env:` is layered on top of the daemon's own environment, so the shell finds `PATH`, `HOME` and the git/ssh configuration a real command needs.
 
-- Value contains a newline OR starts with `|` → multi-line inline
-- Value is a path that resolves to an existing file → run that file
-- Otherwise → single-line shell command
-
-`run` is the right tool when you need arbitrary side effects. Reuse is by writing shell scripts (e.g. under `~/.nightme/workflows/scripts/`), not by importing external action packages.
-
-### 5.2 `prompt` — invoke local agent
-
-`prompt` is the "run for LLMs" sibling of `run`. It sends a text prompt to a local agent (Claude Code, Codex, Pi, etc.) and waits for the reply.
-
-```yaml
-# Basic
-- name: AI review
-  prompt: |
-    Please review this PR.
-    Title: ${{ event.title }}
-  agent: codex                  # local agent name (see below)
-
-# Without agent → owner's default agent
-- name: Quick summary
-  prompt: "Summarize ${{ event.title }} in one line"
-```
-
-| Field | Type | Required | Purpose |
-|---|---|---|---|
-| `prompt` | string | ✅ | The prompt text (supports `${{ ... }}` expressions). |
-| `agent` | string | ❌ | Local agent name (`codex`, `claude`, `pi`, `opencode`, `dsh`). Defaults to the workflow-level `agent:` (§2) or, if absent, the nightme primary agent (`cfg.Primary`). |
-
-**Scope note**: nightme only **invokes** the agent — it does not install, configure, or store credentials. The agent binary must be on `$PATH` and have its own environment (API keys, config) ready. This is a "reuse the local env" model, not a "manage the agent" model.
-
-**Agent resolution** (highest priority first):
-
-1. **Step-level** `agent:` on the prompt step
-2. **Workflow-level** `agent:` (§2 top-level field)
-3. **nightme default** (`cfg.Primary` in `nightme.yaml`)
-
-When the workflow service runs the workflow, it determines the resolved agent and sends a single `/use agent <name>` slash command into the work chat at run start. The chat's active agent is set before any `prompt` step runs, so every subsequent prompt dispatches to the right agent.
-
-**Why a workflow-level `agent:`**: the same workflow often needs the same agent across all its `prompt` steps. Setting it once at the workflow level avoids repeating `agent: codex` on every step. Step-level `agent:` is for the rare case where one step needs a different agent.
+`shell` is the right tool when you need arbitrary side effects. Reuse is by writing shell scripts (e.g. under `~/.nightme/workflows/actions/`), not by importing external action packages.
 
 ### 5.3 `use` — invoke a registered action
 
-`use` is the **extension point** for any capability beyond shell and agent. The action name is whatever the workflow service has registered; the YAML passes arguments via `with:` (same shape as GitHub Actions).
+`use` is the **extension point** for any capability beyond shell and chat. The YAML passes arguments via `with:`.
 
 ```yaml
-# Built-in actions (the workflow service ships with these)
+# Built-in actions
 - id: send-notif
   use: notify
   with:
     channel: feishu
     target: oc_xxx
-    message: "PR ${{ event.pr.number }} done"
+    message: "PR done"
 
 - id: post-pr
   use: github_pr_comment
   with:
-    pr: ${{ event.pr.number }}
+    pr: 123
     body: "Auto-reviewed by nightme"
 
 # User-defined action (script in ~/.nightme/workflows/actions/)
 - id: deploy
-  use: deploy-staging          # the workflow service wraps scripts/<name>.sh as an action
+  use: deploy-staging
   with:
     env: production
-    tag: ${{ env.RELEASE_TAG }}
 ```
 
 | Field | Type | Required | Purpose |
 |---|---|---|---|
-| `use` | string | ✅ | Action name. Resolved by the workflow service against its ActionRegistry. |
+| `use` | string | ✅ | Action name. Resolved against the action registry. |
 | `with` | map | ❌ | Action-specific arguments. Values may embed `${{ ... }}` expressions. |
 
-**Available actions depend on the workflow service**:
+**Available actions**:
 
-- **Built-in** (registered in Go by the workflow service): `notify`, `email`, `github_pr_comment`, `github_issue`, `slack`, `webhook`, …
-- **User-defined** (shell scripts under `~/.nightme/workflows/actions/<name>.<ext>`): auto-registered as actions when the workflow service starts. stdout must be JSON `{"outputs": {...}}` for typed outputs, otherwise outputs are empty.
+- **Built-in**: `notify`, `email`, `github_pr_comment`, `github_issue`.
+- **User-defined** (executable files under `~/.nightme/workflows/actions/<name>.<ext>`): auto-registered as actions when the agent starts. stdout must be JSON `{"outputs": {...}}` for typed outputs, otherwise outputs are empty.
 
-Unknown `use:` names fail the run with a clear error: `unknown action: "foo" — registered: [notify, email, github_pr_comment, …]`.
-
-**Why three forms, not one**: `run` and `prompt` are the universal "do arbitrary work" tools (most workflows only need these two). `use` exists for **structured, repeatable side effects** that benefit from workflow-side wiring (typed outputs, retries, secret isolation, multi-channel abstractions) instead of every workflow reinventing them with shell.
+An unknown `use:` name fails the step with a clear error: `unknown action: "foo" (registered: [notify, email, github_pr_comment, github_issue])`.
 
 ### 5.4 Common step fields
 
-Every step (all three forms) supports:
+Every step supports:
 
 | Field | Type | Default | Purpose |
 |---|---|---|---|
-| `name` | string | (derived) | Human-readable name for logs / notifications. |
-| `id` | string | — | Step ID for output reference: `${{ steps.<id>.outputs.<key> }}`. |
-| `if` | string | `success()` | Condition expression. Failure of a previous step skips dependents unless `continue-on-error: true`. |
-| `env` | map | — | Environment variables for the step (merged on top of the workflow + the daemon's env). |
-| `continue-on-error` | bool | `false` | Don't fail the job if this step errors. |
-| `shell` | string | (host default) | `run` only: which shell interpreter to use (`bash`, `sh`, `zsh`, `pwsh`, …). |
+| `id` | string | `<job>#<position>` | The step's name. Only a step that declares one can be named in an expression. |
+| `if` | string | (always true) | Condition expression. A step whose condition does not hold is skipped and the chain continues. |
+| `env` | map | — | Environment variables for the step (merged on top of the run's env and the daemon's env). |
+| `continue-on-error` | bool | `false` | Whether the chain continues when this step fails. |
+| `note` | string | — | Why the step is there, and when the extra commands apply. It is the description the decision model reads. |
+| `allow` | string[] | — | The extra commands the agent may use inside the step. |
+| `max` | int | (no limit) | The number of actions the step may take. `max: 0` is refused. |
 
 ---
 
 ## 6. Expressions (`${{ ... }}`)
 
-Any string value can embed expressions. Expressions are evaluated **at step start** (not at workflow load).
+Any string value can embed expressions. Expressions are evaluated when the step runs, except the `${{ args.* }}` ones, which are resolved when the run starts.
 
-### 6.1 Context roots
-
-| Context | When | What's in it |
-|---|---|---|
-| `event.*` | always | The trigger event payload. Schema depends on `on.<trigger>`. |
-| `steps.<id>.outputs.*` | after that step finishes | Output keys the step declared. |
-| `needs.<job>.outputs.*` | after that job finishes | Aggregated outputs of that job's last step. |
-| `secrets.*` | always | Secrets loaded from nightme config. |
-
-### 6.2 Event payload shapes (v0)
-
-| Trigger | `event.*` keys |
+| Expression | Resolves to |
 |---|---|
-| `schedule` | `event.cron`, `event.scheduled_at` |
-| `pull_request` | `event.pr.number`, `event.pr.title`, `event.pr.body`, `event.pr.author`, `event.pr.branch`, `event.pr.base`, `event.pr.changed_files`, `event.action` |
-| `branch` | `event.branch.name`, `event.action` |
-| `issue` | `event.issue.number`, `event.issue.title`, `event.issue.body`, `event.issue.author`, `event.action` |
-| `mention` | `event.mention.text` (full comment body), `event.mention.command` (first word after `@owner`), `event.mention.args` (everything after the command), `event.mention.source` (`pr` / `issue`), `event.mention.pr_number` or `event.mention.issue_number`, `event.mention.comment_id`, `event.mention.author`, `event.mention.url` |
+| `${{ args.NAME }}` | The value of the argument `NAME`. |
+| `${{ steps.<id>.outputs.status }}` | The status of the step `<id>` — `ok`, `noop`, `incomplete`, `failed`, `cancelled`, `timeout`, `unknown`. |
+| `${{ steps.<id>.outputs.summary }}` | The one-line summary of the step `<id>`. |
+| `${{ steps.<id>.outputs.data.<key> }}` | One of the facts the step `<id>` reported. |
+| `${{ needs.<job>.* }}` | The outputs of the last step of the job `<job>`. |
+| `${{ env.NAME }}` | The value of the environment variable `NAME`. |
+| `${{ now }}` | The current time. |
+| `${{ success() }}` | `true`. |
+| `${{ failure() }}` | `false`. |
+| `${{ always() }}` | `true`. |
+| `${{ cancelled() }}` | `false`. |
 
-### 6.3 Functions
-
-| Function | Meaning |
-|---|---|
-| `success()` | True if the previous step (or all `needs` for jobs) succeeded. |
-| `failure()` | True if the previous step failed. |
-| `always()` | Always true (use sparingly). |
-| `cancelled()` | True if the run was cancelled. |
-
-### 6.4 Examples
-
-```yaml
-# Conditional notify
-- name: Notify
-  if: ${{ steps.ai.outputs.has_issue == 'true' }}
-  run: ./scripts/notify-feishu.sh oc_xxx "PR ${{ event.pr.number }} has issues"
-
-# Cross-step output
-- name: AI review
-  id: ai
-  prompt: "Review ${{ event.pr.title }}"
-  agent: codex
-
-- name: Apply fix
-  if: ${{ steps.ai.outputs.verdict == 'needs-fix' }}
-  prompt: "Fix: ${{ steps.ai.outputs.verdict_detail }}"
-
-# Cross-job output
-- name: Final report
-  prompt: "Based on review: ${{ needs.review.outputs.ai.verdict }}"
-```
+An expression that names an argument the workflow does not declare is refused when the file is loaded.
 
 ---
 
 ## 7. Complete examples
 
-### 7.1 PR review workflow
+### 7.1 Fix an issue and ship it
 
 ```yaml
-name: pr-reviewer
-workspaces: [~/work/nightme]               # which project(s) this workflow runs in
-worker: 3                                  # up to 3 PRs reviewed in parallel
-
-on:
-  pull_request:
-    branches: [main, develop]
-    events: [opened, reopened, synchronize]
-  mention:
-    commands: review                      # also: "@owner review this"
-
+name: fix-issue
+args:
+  - name: issue
+    default: "*"
+goal: 把队列里的一个 issue 做完并推上去
+max_actions: 30
 jobs:
-  review:
+  ship:
     steps:
-      - name: Checkout
-        run: ./scripts/checkout.sh
-
-      - name: Lint
-        run: npm run lint
-        continue-on-error: true
-
-      - name: AI review
-        id: ai
-        prompt: |
-          Review PR:
-          Title: ${{ event.pr.title }}
-          Author: ${{ event.pr.author }}
-          Files:  ${{ event.pr.changed_files }}
-        agent: codex
-
-      - name: Notify
-        if: ${{ steps.ai.outputs.has_issue == 'true' }}
-        run: ./scripts/notify-feishu.sh oc_xxx \
-          "PR ${{ event.pr.number }} has issues"
+      - id: fix
+        message: "/gtw fix ${{ args.issue }} -y"
+        note: 从 nightme/assigned 队列里挑一个
+        allow: ["/gtw abort"]
+        max: 3
+      - id: commit
+        message: "/gtw commit"
+      - id: review
+        message: "/review"
+        note: 没跑完就 /review -c；有改动就先 /gtw commit
+        allow: ["/review -c", "/gtw commit"]
+        max: 5
+      - id: commit2
+        message: "/gtw commit"
+      - id: push
+        message: "/gtw push"
 ```
 
-### 7.2 Mention-driven review (v0)
+### 7.2 Build, test and report
 
 ```yaml
-name: pr-reviewer
-workspaces: [~/work/nightme, ~/work/foo]   # applies to both repos
-
-on:
-  mention:
-    commands: review                       # only `@owner review [id]` triggers this workflow
-
-jobs:
-  review:
-    steps:
-      - name: Determine target id
-        id: target
-        run: |
-          # 如果 args 提供 id，用 args；否则用 mention 环境里的 PR/issue
-          if [ -n "$MENTION_ARGS" ]; then
-            echo "id=$MENTION_ARGS" >> "$GITHUB_OUTPUT"
-          else
-            case "$MENTION_SOURCE" in
-              pr)     echo "id=$MENTION_PR_NUMBER" >> "$GITHUB_OUTPUT" ;;
-              issue)  echo "id=$MENTION_ISSUE_NUMBER" >> "$GITHUB_OUTPUT" ;;
-            esac
-          fi
-        env:
-          MENTION_ARGS:        ${{ event.mention.args }}
-          MENTION_SOURCE:      ${{ event.mention.source }}
-          MENTION_PR_NUMBER:   ${{ event.mention.pr_number }}
-          MENTION_ISSUE_NUMBER: ${{ event.mention.issue_number }}
-
-      - name: AI review
-        id: ai
-        prompt: |
-          Review ${{ steps.target.outputs.id }}:
-          URL:    ${{ event.mention.url }}
-          Author: ${{ event.mention.author }}
-        agent: codex
-
-      - name: Post review comment
-        use: github_pr_comment
-        with:
-          pr: ${{ steps.target.outputs.id }}
-          body: "Auto-review by nightme:\n\n${{ steps.ai.outputs.summary }}"
-```
-
-### 7.3 Nightly batch
-
-```yaml
-name: nightly-cleanup
-worker: 1                                  # serial — only one instance at a time
-
+name: ci
+workspaces: [~/work/nightme]
 on:
   schedule:
-    - cron: '0 3 * * *'                    # 3am every day
-
+    - cron: '0 3 * * *'
 jobs:
-  cleanup:
+  build:
     steps:
-      - run: ./scripts/rotate-logs.sh
-      - run: ./scripts/prune-caches.sh
+      - id: compile
+        shell: make build
+      - id: test
+        shell: make test
         continue-on-error: true
-      - run: ./scripts/notify-feishu.sh oc_xxx "Nightly cleanup done"
+  report:
+    needs: [build]
+    steps:
+      - id: notify
+        use: notify
+        with:
+          channel: feishu
+          target: oc_xxx
+          message: "build ${{ steps.build.outputs.status }} on ${{ now }}"
 ```
 
-### 7.4 Branch-protection (release flow)
+### 7.3 A workflow with two branches
 
 ```yaml
-name: release-watch
-
-on:
-  branch:
-    patterns: ['release/*']
-    events: [pushed]
-
+name: triage
 jobs:
-  validate:
+  inspect:
     steps:
-      - run: ./scripts/check-semver.sh ${{ event.branch.name }}
-      - run: ./scripts/run-e2e.sh
-      - name: Notify
-        run: ./scripts/notify-feishu.sh oc_xxx "Release ${{ event.branch.name }} validated"
+      - id: status
+        message: "/gtw status"
+  fix:
+    needs: [inspect]
+    steps:
+      - id: commit
+        message: "/gtw commit"
+  notify:
+    needs: [inspect]
+    steps:
+      - id: say
+        use: notify
+        with:
+          channel: feishu
+          target: oc_xxx
+          message: "the tree was inspected"
 ```
 
 ---
@@ -632,13 +490,6 @@ jobs:
 ## 8. Runtime architecture
 
 This section answers "where do runs actually execute, and how do the pieces fit?". Sections §1–§7 define the YAML schema; this one defines the runtime that executes it.
-
-Two kinds of YAML live in the same directory:
-
-- a **workflow** — a cron- or event-driven DAG of steps (§1–§7). It is executed by the workflow service.
-- a **playbook** — an ordered list of steps plus the constraints around them. It is executed by the personal agent, `me`.
-
-A file with top-level `steps:` is a playbook; a file with top-level `jobs:` is a workflow. The two are never mixed in one file.
 
 ### 8.1 The layering
 
@@ -651,10 +502,12 @@ A file with top-level `steps:` is a playbook; a file with top-level `jobs:` is a
   ┌────────────────────────────────────────────────┐
   │  internal/me — the personal agent               │
   │                                                │
-  │  System 1 (decision model) — decides the next   │
-  │  step when it is sure                          │
-  │  System 2 (chat model + tools) — decides when   │
-  │  System 1 is not, and whenever text is needed   │
+  │  the fast path: the workflow says what comes    │
+  │  next, so the step runs as it is — no model     │
+  │                                                │
+  │  a judgment point: the agent decides — the      │
+  │  decision model (System 1) first, the chat      │
+  │  model (System 2) when it is not sure           │
   │                                                │
   │  the policy (internal/wfe.Policy) bounds every   │
   │  action a run may take                         │
@@ -675,68 +528,72 @@ A file with top-level `steps:` is a playbook; a file with top-level `jobs:` is a
 
 | Layer | Package | Owns |
 |---|---|---|
-| Transport | `internal/channel/loopback` | Sending a command into a chat, tracking it, and reporting its outcome. Knows nothing about playbooks. |
+| Transport | `internal/channel/loopback` | Sending a command into a chat, tracking it, and reporting its outcome. Knows nothing about workflows. |
 | The agent | `internal/me` | The run: what to do next, what the policy allows, what the observer is told. |
 | The models | `internal/llm` | Two capabilities: `Provider` (chat and tool calling) and `Decider` (typed decision questions). |
-| The schema | `internal/wfe` | The playbook and workflow schemas, and the `Policy` that bounds a run. |
+| The engine | `internal/wfe` | The workflow schema, the plan of a run, the judgment points, and the `Policy` that bounds a run. |
+
+The engine is a pure library: no I/O, no clock, no secrets. It parses, validates, computes the plan of a run and evaluates expressions — the runner owns the external capabilities and hands the engine their results.
 
 The agent drives the daemon the way a person drives it through Feishu: every command is a real message with a real id, and every answer comes back as a structured outcome. It never reaches into the gateway or the chat sessions.
 
-### 8.2 The playbook schema
+### 8.2 The plan: the ready set
 
-A playbook is a human-written, ordered list of steps that bounds what the agent loop may do. It carries no workspace and no trigger: the working directory comes from the chat that starts the run.
+The engine computes the plan of a run from the workflow and the progress so far.
 
-```yaml
-name: fix-issue
-args: [id]
-goal: Fix issue #${{ args.id }} and ship it as a PR.
-steps:
-  - /gtw fix ${{ args.id }} -y
-  - /gtw commit
-  - run: /review
-    note: If it fails or does not finish, continue with /review -c. If it passes and left changes, /gtw commit first.
-    allow: [/review -c, /gtw commit]
-    max: 5
-  - /gtw push
-  - /gtw pr
-```
+The **ready set** is the set of unrun steps whose job's `needs` are all satisfied and whose `if:` holds. Within a job only the first such step counts — the steps of a job run in order.
 
-| Field | Meaning |
+| The workflow says | The plan is |
 |---|---|
-| `name` | The playbook's name. `/me start <name>` picks it. |
-| `args` | The names of the arguments. `/me start fix-issue 42` maps `42` onto `id`. |
-| `goal` | What the run is for. It is part of the model's instructions. |
-| `max_actions` | The action budget of the whole playbook. Default 30. |
-| `instruct` | Whether the agent may send free-form instructions. Default true. |
-| `steps` | The ordered steps. |
+| one step in the ready set, and the previous outcome was `ok` or `noop` | run that step |
+| one step in the ready set, and the previous outcome was anything else | a judgment point |
+| more than one step in the ready set | a judgment point — the plan forks |
+| no step in the ready set | a judgment point — the plan is exhausted |
 
-A step is either a plain string — shorthand for `run` — or a mapping:
+A run that has not executed anything yet counts as `ok`, so the first step runs on the fast path.
 
-| Field | Meaning |
+### 8.3 The judgment points
+
+A judgment point is where the workflow cannot decide and the agent does. It is reached when:
+
+- the ready set is empty — the plan is exhausted;
+- the ready set holds more than one step — the plan forks;
+- the previous outcome was not `ok` or `noop` — the last step did not finish its work;
+- the step itself failed;
+- a command is still running and waiting for an answer.
+
+The agent answers a judgment point with a **directive**:
+
+| Directive | What it does |
 |---|---|
-| `run` | The command the step performs. |
-| `note` | Why the step is there, and when the extra commands apply. It is the description the decision model reads. |
-| `allow` | The extra commands the agent may use inside the step. |
-| `max` | The number of actions the step may take. 0 means no limit of its own. |
+| `run_step(command)` | Runs a command of the workflow in the work chat. |
+| `instruct(text)` | Sends a free-form instruction to the work chat. |
+| `answer_choice(choice_id, option_id)` | Answers a prompt the work agent is waiting for. |
+| `ask_human(question)` | Asks the user. The run waits for the answer. |
+| `repo_status()` | Reads the branch and the tree facts of the work chat. |
+| `finish(status, summary)` | Ends the run. `status` is `done` or `failed`. |
 
-Only `${{ args.NAME }}` is supported, and only for a declared argument. Any other expression is rejected when the playbook is loaded.
+A command the agent names has to be a step's `message:` or one of a step's `allow:` entries, compared with whitespace normalised away. Anything else comes back to the agent as an error it can correct. A command the deterministic path would not have run is allowed, and it is recorded against the step that owns it.
 
-### 8.3 The policy
+The engine owns the run state: after a directive is executed, the state holds the new outcome, the step that ran and the remaining budgets. A decision the agent makes never writes state by itself.
 
-The policy is the bound on what a run may do. It is a pure function of the playbook and the actions taken so far.
+### 8.4 The policy
+
+The policy is the bound on what a run may do. It is a pure function of the workflow and the actions taken so far.
 
 | Check | Reports |
 |---|---|
 | `CheckRun(command)` | Whether the command may run now, and which step it belongs to. |
+| `CheckStep(index)` | Whether the step may take an action now — its own limit and the run's budget. |
 | `CheckInstruct()` | Whether a free-form instruction is allowed. |
-| `CheckFinish(status)` | Whether the run may end. `done` needs the last step's latest outcome to be `ok` or `noop`; `failed` is always allowed. |
+| `CheckFinish(status)` | Whether the run may end. `done` needs the last executed step's latest outcome to be `ok` or `noop`; `failed` is always allowed. |
 | `Remaining()` | The action budget left, overall and per step. |
-| `Render()` | The playbook as a compact text block: the goal, the steps, the notes, the allowed commands and the limits. |
+| `Render()` | The workflow as a compact text block: the goal, the steps, the notes, the allowed commands and the limits. |
 | `AllowedCommands()` | The commands the policy accepts right now. |
 
 A command belongs to the first step that lists it, and a step that spent its limit takes its commands out of the list.
 
-### 8.4 The tools
+### 8.5 The tools
 
 The chat model acts through six tools. Every handler enforces the policy: a violation comes back as a tool error result, and the model corrects itself.
 
@@ -751,11 +608,11 @@ The chat model acts through six tools. Every handler enforces the policy: a viol
 
 `run_step` blocks while the command runs and makes no model calls. It comes back early when the work agent asks something — the model can then answer, instruct or ask — or when the command goes quiet for ten minutes. Both cases report `waiting` and the reason.
 
-### 8.5 The two capabilities
+### 8.6 The two capabilities
 
-After every step settles, the agent asks the decision model what comes next.
+At a judgment point, the agent asks the decision model what comes next.
 
-**System 1 — the decision model.** One request carries the rendered playbook, the remaining budgets, the history of the run as outcomes, and — for the last action — its full outcome and the tail of its transcript. The request asks three questions:
+**System 1 — the decision model.** One request carries the rendered workflow, the remaining budgets, the history of the run as outcomes, and — for the last action — its full outcome and the tail of its transcript. The request asks three questions:
 
 | Question | Shape | Asked |
 |---|---|---|
@@ -772,23 +629,25 @@ The decision is acted on without the chat model when all of these hold:
 
 The decision is recorded in the conversation as a synthetic assistant tool call with a note (`decided by jev-1.14.0, p=0.93`), so the chat model reads a consistent history when it takes over. The model that answered is stored with the run.
 
-**System 2 — the chat model.** The standard tool-calling shape: call the model with the tools, run the tool calls, append the results, repeat until `finish`, a pause or a budget limit. The system prompt is the playbook: the role, `Policy.Render()`, and how to read an outcome — the status is the primary evidence, the transcript is context.
+**System 2 — the chat model.** The standard tool-calling shape: call the model with the tools, run the tool calls, append the results, repeat until `finish`, a pause or a budget limit. The system prompt is the workflow: the role, `Policy.Render()`, and how to read an outcome — the status is the primary evidence, the transcript is context.
 
 Anything that needs text — an instruction, an answer to a prompt — always goes to System 2.
 
-### 8.6 The three modes
+### 8.7 The three modes
 
 `me` is enabled when at least one of `me.llm` and `me.decider` is configured.
 
 | `me.llm` | `me.decider` | Behaviour |
 |---|---|---|
-| set | unset | System 2 only: the tool loop decides every step. |
+| set | unset | System 2 only: the tool loop decides every judgment point. |
 | unset | set | System 1 only: confident decisions run, everything else asks the user. |
 | set | set | System 1 first, with System 2 handling the escalations. |
 
 Without a chat model, an escalation becomes a question for the user: the agent lists the options and `/me reply <option>` picks one. An action that needs text goes to `ask_human` in that mode.
 
-### 8.7 The configuration
+The fast path needs no model at all: a workflow whose every step ends `ok` runs with zero calls to either capability.
+
+### 8.8 The configuration
 
 ```yaml
 me:
@@ -815,18 +674,20 @@ The user picks the models. nightme never chooses one, and it never injects a mod
 
 `me.llm` and `me.decider` are independent. A model that is configured but cannot be built — an unknown provider, a missing key — is reported in the daemon log and left out; the daemon still starts, and `/me` says why it cannot run.
 
-### 8.8 The `/me` commands
+### 8.9 The `/me` commands
 
 | Command | Behaviour |
 |---|---|
-| `/me start <playbook> [args...]` | Starts a playbook in this chat. The positional arguments map onto the playbook's declared arguments, in order. The run inherits the chat's workspace and agent. A chat without a workspace is refused. A second run in the same chat is refused. |
+| `/me start <workflow> [args...]` | Starts a workflow in this chat. The run inherits the chat's workspace and agent. A chat without a workspace is refused. A second run in the same chat is refused. |
 | `/me reply <text>` | Answers the question the run is waiting for. |
 | `/me stop` | Cancels the run and stops the work chat. |
 | `/me status` | Reports the current step, the phase and progress of the running command, the remaining budget, and what each capability decided and spent. |
 
+The arguments of `/me start` fill the workflow's declared arguments: a positional token fills the next argument that is still unassigned, in declaration order, and a token of the form `name=value` assigns that argument by name. An argument the workflow does not declare is refused, and an argument with neither a value nor a default is refused.
+
 One run is active per chat: the chat that starts a run is the chat that receives the progress and answers the questions.
 
-### 8.9 The outcome model
+### 8.10 The outcome model
 
 The run judges from facts, not from text. Every command the agent sends reports a structured outcome.
 
@@ -842,6 +703,8 @@ The run judges from facts, not from text. Every command the agent sends reports 
 
 A step that is still running reports `waiting`, and a step whose execution is gone reports `interrupted`.
 
+The outcome of a step reaches the run state and the expressions of the steps after it: the status as `${{ steps.<id>.outputs.status }}`, the facts under `${{ steps.<id>.outputs.data.<key> }}`.
+
 The progress the observer receives is built from the outcome:
 
 ```
@@ -852,11 +715,11 @@ The progress the observer receives is built from the outcome:
 ✅ issue 42 is on its way · 6 actions · system-1: 0 decisions, 0 tokens · system-2: 8 decisions, 4210 tokens
 ```
 
-### 8.10 Guardrails and recovery
+### 8.11 Guardrails and recovery
 
 | Guardrail | Bound |
 |---|---|
-| Loop iterations | Three times the playbook's action budget, unless the configuration says otherwise. |
+| Loop iterations | Three times the workflow's action budget, unless the configuration says otherwise. |
 | Token budget | The tokens one run may spend on the chat model. |
 | Step timeout | Thirty minutes per command. |
 | Stall detection | Ten minutes without a heartbeat. |
@@ -865,43 +728,36 @@ The progress the observer receives is built from the outcome:
 
 A text-only answer — words without a tool call — is nudged once to call a tool. The second time, the run ends as a failure.
 
-The run is persisted after every tool result: the bound playbook, the policy's history, the whole conversation and the paused state. On startup, running runs resume:
+The run is persisted after every tool result: one file in `<DataDir>/workflows/runs/<run-id>.json` holds the DAG progress, the conversation, the judgment history and the paused state. On startup, running runs resume:
 
 - a command that was in flight is resolved through the loopback; if its execution is gone, it reports `interrupted`;
 - a suspended run keeps waiting for `/me reply`.
 
 Recovery is silent. The observer is told only when a run cannot go on — an authentication error from the model, for instance.
 
-### 8.11 The workflow service
+## 9. Out of scope
 
-The cron- and event-driven workflows of §1–§7 run in `internal/me/workflow`. It is a runtime service, not a channel: it never receives inbound messages and it renders nothing. It drives the daemon through the loopback channel's client, the way a person drives it through Feishu.
+These are deliberately **not** in the workflow engine; they belong in a later iteration.
 
-Its run state lives in `<DataDir>/workflows/state/<run-id>.json`, and the work chat of a run is a loopback chat with the `lb_` prefix.
-
-The workflow service and the personal agent share the workflows directory and the loopback channel. They do not share a run: the workflow service's runs are triggered by cron and git events, the personal agent's runs are started by `/me start` in a chat.
-
-## 9. Out of scope (v0)
-
-These are deliberately **not** in v0; they belong in a later iteration.
-
-| Not in v0 | Why |
+| Not in scope | Why |
 |---|---|
+| A timer scheduler | The `on:` block is parsed and displayed; a scheduler that starts a workflow belongs in its own change. |
 | External action marketplace (`uses: owner/repo@v1`) | Reuse is via shell scripts; the project's stack stays single-binary. |
 | Cron expressions with seconds / `@reboot` | Standard 5-field cron is enough; expansion is a follow-up. |
-| Job-level matrix / fan-out | Worker pool at workflow level covers the common case. |
 | Per-step `timeout-minutes` | Inherits the host process timeout for now. |
 | Webhook signature verification (beyond what `git provider` already does) | Provider abstraction (see F-50) handles this. |
 | Cross-workflow triggers (`workflow_run`) | Compose via mention + schedule. |
-| Secret injection from external vaults | Reads from `~/.nightme/config.yaml`; HashiCorp Vault / 1Password are follow-ups. |
-| Hot-reload of user-defined action scripts | A daemon restart picks them up; live reload is a follow-up. |
-
----
+| Parallel execution | One run drives one work chat, so the branches of a graph express ordering, not concurrency. |
+| Real `notify` / `email` / `github_*` actions | They report `"stub": true`; making them real is their own change. |
+| A human-gate node kind | Human input stays the agent's `ask_human` tool at a judgment point. |
 
 ## 10. Cross-references
 
-- **Trigger source**: GitHub / GitLab webhook payloads (provider-agnostic; the GitProvider abstraction normalizes them). The git events are not wired yet — the workflow service is cron-only.
-- **Mention parsing**: the `@owner <command> ...` text becomes the event's `command` field, and `internal/wfe` matches it against the trigger's whitelist. The events that carry it are not wired yet.
-- **Agent names** (`codex`, `claude`, `pi`, `opencode`, `dsh`): come from the `agents:` block of `~/.nightme/config.yaml`.
-- **Loopback channel**: `internal/channel/loopback/`, the daemon's own chat. It implements the `Channel` interface and carries the commands the workflow service and the personal agent send into the daemon. It renders nothing.
-- **`wfe` library**: `internal/wfe/`. Pure Go, no I/O, no clock, no secrets. Single entry point: `Tick(state, runtime) → state'`. The workflow service is its only caller.
-- **Implementation details** (state machine, run state serialisation, event store, ActionRegistry design, gw client integration, rollout phases): [`feat/F-workflow-engine.md`](./feat/F-workflow-engine.md).
+| Topic | Where |
+|---|---|
+| Trigger sources | [`feat/F-workflow-engine.md`](./feat/F-workflow-engine.md) |
+| Mention parsing (git provider) | [`feat/F-workflow-engine.md`](./feat/F-workflow-engine.md) |
+| Agent names | [`primary-agent-detection.md`](./primary-agent-detection.md) |
+| Loopback channel | [`../internal/channel/loopback`](../../internal/channel/loopback) |
+| The `wfe` engine | [`../../internal/wfe`](../../internal/wfe) |
+| The outcome contract | [`me.md`](./me.md) |

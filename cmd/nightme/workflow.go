@@ -1,7 +1,5 @@
 // Package main — `nightme workflow` subcommands.
 //
-// v0 surface (per Phase 3 design):
-//
 //	nightme workflow list              # list configured workflows
 //	nightme workflow show <name>       # show one workflow's parsed details
 //	nightme workflow run <name>        # dry-run a workflow (prints run plan)
@@ -11,11 +9,10 @@
 // not require the daemon to be running, and it does not actually
 // trigger an agent (the daemon does that through internal/me).
 //
-// `nightme workflow run` for v0 is a dry-run: it parses the
-// workflow, builds a dry-run plan (which trigger would fire, what
-// steps would run, in what order), and prints it. Actual agent
-// execution is the daemon's job — the CLI is a planning/inspection
-// tool.
+// `nightme workflow run` is a dry-run: it parses the workflow,
+// builds a plan (what the steps are, in what order) and prints it.
+// A workflow is started by a person, with `/me start <name>` in a
+// chat — the CLI is a planning/inspection tool.
 
 package main
 
@@ -55,7 +52,7 @@ func loadWorkflows() ([]*wfe.Workflow, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	wfs, _, err := wfe.LoadDir(dir)
+	wfs, err := wfe.LoadDir(dir)
 	if err != nil {
 		return nil, dir, err
 	}
@@ -68,9 +65,9 @@ func newWorkflowCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "workflow",
 		Short: "Workflow automation commands",
-		Long: "workflow manages YAML-defined automations that the daemon " +
-			"runs on cron / git events. Subcommands are read-only or planning " +
-			"tools — actual execution is the daemon's job.",
+		Long: "workflow inspects the YAML workflows the personal agent runs. " +
+			"Subcommands are read-only or planning tools — a workflow is " +
+			"started by a person, with /me start <name> in a chat.",
 	}
 	cmd.AddCommand(newWorkflowListCmd())
 	cmd.AddCommand(newWorkflowShowCmd())
@@ -218,13 +215,14 @@ func printWorkflowShow(w io.Writer, wf *wfe.Workflow, asJSON bool) error {
 		return enc.Encode(wf)
 	}
 	fmt.Fprintf(w, "name:       %s\n", wf.Name)
-	fmt.Fprintf(w, "workspaces: %s\n", strings.Join(wf.Workspaces, ", "))
-	if wf.Agent != "" {
-		fmt.Fprintf(w, "agent:      %s (workflow default)\n", wf.Agent)
-	} else {
-		fmt.Fprintf(w, "agent:      (inherits nightme primary)\n")
+	if wf.Goal != "" {
+		fmt.Fprintf(w, "goal:       %s\n", wf.Goal)
 	}
-	fmt.Fprintf(w, "worker:     %d\n", wf.Worker)
+	fmt.Fprintf(w, "workspaces: %s\n", workspacesLabel(wf))
+	fmt.Fprintf(w, "max_actions: %d\n", wf.MaxActions)
+	if len(wf.Args) > 0 {
+		fmt.Fprintf(w, "args:       %s\n", strings.Join(wf.ArgNames(), ", "))
+	}
 	fmt.Fprintln(w, "\ntriggers:")
 	for _, s := range wf.On.Schedule {
 		fmt.Fprintf(w, "  - schedule: cron=%q\n", s.Cron)
@@ -259,11 +257,10 @@ func printWorkflowShow(w io.Writer, wf *wfe.Workflow, asJSON bool) error {
 
 func describeStep(s wfe.Step) string {
 	switch s.Kind() {
-	case wfe.StepKindRun:
-		return fmt.Sprintf("run: %q (id=%s)", truncate(s.Run, 60), s.ID)
-	case wfe.StepKindPrompt:
-		return fmt.Sprintf("prompt: %q (id=%s, agent=%q)",
-			truncate(s.Prompt, 40), s.ID, s.Agent)
+	case wfe.StepKindMessage:
+		return fmt.Sprintf("message: %q (id=%s)", truncate(s.Message, 60), s.ID)
+	case wfe.StepKindShell:
+		return fmt.Sprintf("shell: %q (id=%s)", truncate(s.Shell, 60), s.ID)
 	case wfe.StepKindUse:
 		return fmt.Sprintf("use: %s (id=%s, with=%d args)",
 			s.Use, s.ID, len(s.With))
@@ -271,22 +268,34 @@ func describeStep(s wfe.Step) string {
 	return fmt.Sprintf("? (id=%s)", s.ID)
 }
 
+// inheritedWorkspace is what a workflow without workspaces says: the
+// run takes the workspace of the chat that starts it.
+const inheritedWorkspace = "(the workspace of the chat that starts it)"
+
+// workspacesLabel renders the workflow's workspaces.
+func workspacesLabel(wf *wfe.Workflow) string {
+	if len(wf.Workspaces) == 0 {
+		return inheritedWorkspace
+	}
+	return strings.Join(wf.Workspaces, ", ")
+}
+
 // newWorkflowRunCmd implements `nightme workflow run <name>`.
-// For v0 this is a dry-run: it prints the run plan (what would be
-// triggered, what steps would execute, in what order) without
-// actually executing. Actual execution is the daemon's job.
+// It is a dry-run: it prints the run plan (what the steps are, in
+// what order) without executing anything. A workflow is started by a
+// person, with `/me start <name>` in a chat.
 func newWorkflowRunCmd() *cobra.Command {
 	var workspace string
 	cmd := &cobra.Command{
 		Use:   "run <name>",
 		Short: "Dry-run a workflow (prints what would be executed)",
 		Long: "run parses the workflow and prints a step-by-step execution " +
-			"plan. It does NOT actually execute anything — the daemon is " +
-			"responsible for live execution via the channel pipeline. Use " +
-			"this to verify trigger matching and step ordering before " +
-			"relying on the real run.\n\n" +
+			"plan. It does NOT actually execute anything — a workflow is " +
+			"started by a person, with /me start <name> in a chat. Use " +
+			"this to verify the step ordering before relying on the real run.\n\n" +
 			"--workspace overrides one of the workflow's workspaces " +
-			"(defaults to the first one).",
+			"(defaults to the first one). A workflow that declares no " +
+			"workspace takes the one of the chat that starts it.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			wfs, _, err := loadWorkflows()
@@ -298,7 +307,7 @@ func newWorkflowRunCmd() *cobra.Command {
 				return fmt.Errorf("workflow %q not found", args[0])
 			}
 			ws := workspace
-			if ws == "" {
+			if ws == "" && len(wf.Workspaces) > 0 {
 				ws = wf.Workspaces[0]
 			}
 			return printWorkflowRun(cmd.OutOrStdout(), wf, ws)
@@ -311,11 +320,15 @@ func newWorkflowRunCmd() *cobra.Command {
 
 func printWorkflowRun(w io.Writer, wf *wfe.Workflow, workspace string) error {
 	fmt.Fprintf(w, "workflow:   %s\n", wf.Name)
-	fmt.Fprintf(w, "workspace:  %s\n", workspace)
-	if wf.Agent != "" {
-		fmt.Fprintf(w, "agent:      %s\n", wf.Agent)
+	if wf.Goal != "" {
+		fmt.Fprintf(w, "goal:       %s\n", wf.Goal)
 	}
-	fmt.Fprintln(w, "\ntrigger sources (workflow will fire on any):")
+	if workspace != "" {
+		fmt.Fprintf(w, "workspace:  %s\n", workspace)
+	} else {
+		fmt.Fprintf(w, "workspace:  %s\n", inheritedWorkspace)
+	}
+	fmt.Fprintln(w, "\ntriggers (parsed and displayed; nothing fires them):")
 	if len(wf.On.Schedule) > 0 {
 		for _, s := range wf.On.Schedule {
 			fmt.Fprintf(w, "  - cron: %s\n", s.Cron)

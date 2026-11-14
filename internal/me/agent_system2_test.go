@@ -2,6 +2,7 @@ package me
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,9 +20,15 @@ func okStep(summary string) fakeStep {
 	return fakeStep{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: summary}}
 }
 
+// pendingStep is a command that did not finish: the run reaches a
+// judgment point and the agent takes over.
+func pendingStep(summary string) fakeStep {
+	return fakeStep{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: summary}}
+}
+
 func TestSystem2_ToolDispatch(t *testing.T) {
 	dir := t.TempDir()
-	writePlaybook(t, dir, "one", oneStepPlaybook)
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
 	provider := &scriptedProvider{responses: []llm.Response{
 		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"command": "/gtw commit"}),
@@ -29,8 +36,9 @@ func TestSystem2_ToolDispatch(t *testing.T) {
 		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "done", "summary": "committed"})},
 	}}
 	svc, lb, sender := testService(t, dir, Config{Provider: provider})
+	lb.steps = []fakeStep{pendingStep("still going"), okStep("committed")}
 
-	if _, err := svc.StartPlaybook(context.Background(), Request{
+	if _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -50,14 +58,14 @@ func TestSystem2_ToolDispatch(t *testing.T) {
 	if !sender.Has("✅ /gtw commit") {
 		t.Fatalf("the observer did not see the settled step: %v", sender.Lines())
 	}
-	if !sender.Has("system-2: 2 decisions") {
+	if !sender.Has("system-2: 1 decisions") {
 		t.Fatalf("the summary does not count the turns: %v", sender.Lines())
 	}
 }
 
 func TestStatus_ReportsTheRunWhileItWorks(t *testing.T) {
 	dir := t.TempDir()
-	writePlaybook(t, dir, "one", oneStepPlaybook)
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
 	provider := &scriptedProvider{responses: []llm.Response{
 		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"command": "/gtw commit"})},
@@ -66,7 +74,7 @@ func TestStatus_ReportsTheRunWhileItWorks(t *testing.T) {
 	// The command never settles: the run waits for it.
 	lb.steps = []fakeStep{{open: true}}
 
-	if _, err := svc.StartPlaybook(context.Background(), Request{
+	if _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -91,30 +99,31 @@ func TestStatus_ReportsTheRunWhileItWorks(t *testing.T) {
 	waitRun(t, svc, "obs-1")
 }
 
-func TestSystem2_EveryCommandIsWatchedOnItsOwn(t *testing.T) {
+// TestFastPath_EveryCommandIsWatchedOnItsOwn — each command the plan
+// runs is watched on its own message: the watch of a settled command
+// does not carry over to the next one.
+func TestFastPath_EveryCommandIsWatchedOnItsOwn(t *testing.T) {
 	dir := t.TempDir()
-	writePlaybook(t, dir, "two", `name: two
-steps:
-  - /gtw commit
-  - /gtw push
+	writeWorkflow(t, dir, "two", `name: two
+jobs:
+  main:
+    steps:
+      - id: commit
+        message: /gtw commit
+      - id: push
+        message: /gtw push
 `)
 
-	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"command": "/gtw commit"})},
-		{Message: toolCallMsg("c2", toolRunStep, map[string]any{"command": "/gtw push"})},
-		{Message: toolCallMsg("c3", toolFinish, map[string]any{"status": "done", "summary": "done"})},
-	}}
+	provider := &scriptedProvider{err: errors.New("the chat model must not be called")}
 	svc, lb, _ := testService(t, dir, Config{Provider: provider})
 
-	if _, err := svc.StartPlaybook(context.Background(), Request{
+	if _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "two", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	waitRun(t, svc, "obs-1")
 
-	// Each command is watched on its own message: the watch of a
-	// settled command does not carry over to the next one.
 	if len(lb.Watched()) != 2 {
 		t.Fatalf("the run watched %v, want one watch per command", lb.Watched())
 	}
@@ -122,7 +131,7 @@ steps:
 
 func TestSystem2_PolicyViolationComesBackAsAToolError(t *testing.T) {
 	dir := t.TempDir()
-	writePlaybook(t, dir, "one", oneStepPlaybook)
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
 	provider := &scriptedProvider{responses: []llm.Response{
 		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"command": "/gtw sync"})},
@@ -130,8 +139,9 @@ func TestSystem2_PolicyViolationComesBackAsAToolError(t *testing.T) {
 		{Message: toolCallMsg("c3", toolFinish, map[string]any{"status": "done", "summary": "committed"})},
 	}}
 	svc, lb, _ := testService(t, dir, Config{Provider: provider})
+	lb.steps = []fakeStep{pendingStep("still going"), okStep("committed")}
 
-	if _, err := svc.StartPlaybook(context.Background(), Request{
+	if _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -145,7 +155,7 @@ func TestSystem2_PolicyViolationComesBackAsAToolError(t *testing.T) {
 	}
 	// The model saw the violation as a tool error and corrected
 	// itself.
-	req := provider.Request(2)
+	req := provider.Request(1)
 	if len(req.Messages) == 0 {
 		t.Fatal("the second turn carried no history")
 	}
@@ -167,26 +177,30 @@ func TestSystem2_PolicyViolationComesBackAsAToolError(t *testing.T) {
 
 func TestSystem2_ANoopStepIsNotAToolError(t *testing.T) {
 	dir := t.TempDir()
-	writePlaybook(t, dir, "one", oneStepPlaybook)
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
 	provider := &scriptedProvider{responses: []llm.Response{
 		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"command": "/gtw commit"})},
 		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "done", "summary": "nothing to commit"})},
 	}}
 	svc, lb, _ := testService(t, dir, Config{Provider: provider})
-	lb.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeNoop, Summary: "nothing to commit"}}}
+	lb.steps = []fakeStep{pendingStep("still going"), {outcome: messages.Outcome{Status: messages.OutcomeNoop, Summary: "nothing to commit"}}}
 
-	if _, err := svc.StartPlaybook(context.Background(), Request{
+	runID, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
+	svc.mu.Lock()
+	r := svc.runs[runID]
+	svc.mu.Unlock()
 	waitRun(t, svc, "obs-1")
 
-	if provider.Calls() < 2 {
-		t.Fatal("the chat model never took a second turn")
+	if provider.Calls() == 0 {
+		t.Fatal("the chat model never took a turn")
 	}
-	part := toolResultPart(t, provider.Request(1).Messages, toolRunStep)
+	part := toolResultPart(t, r.conversation(), toolRunStep)
 	if part.IsError {
 		t.Fatalf("a noop outcome came back as a tool error: %s", part.Text)
 	}
@@ -197,15 +211,16 @@ func TestSystem2_ANoopStepIsNotAToolError(t *testing.T) {
 
 func TestSystem2_TextOnlyReplyIsNudgedAndThenEndsTheRun(t *testing.T) {
 	dir := t.TempDir()
-	writePlaybook(t, dir, "one", oneStepPlaybook)
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
 	provider := &scriptedProvider{responses: []llm.Response{
 		{Message: textMsg("I think I should commit.")},
 		{Message: textMsg("Still thinking about it.")},
 	}}
-	svc, _, sender := testService(t, dir, Config{Provider: provider})
+	svc, lb, sender := testService(t, dir, Config{Provider: provider})
+	lb.steps = []fakeStep{pendingStep("still going")}
 
-	runID, err := svc.StartPlaybook(context.Background(), Request{
+	runID, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
 	})
 	if err != nil {
@@ -238,15 +253,16 @@ func TestSystem2_TextOnlyReplyIsNudgedAndThenEndsTheRun(t *testing.T) {
 
 func TestSystem2_TokenBudgetStopsTheRun(t *testing.T) {
 	dir := t.TempDir()
-	writePlaybook(t, dir, "one", oneStepPlaybook)
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
 	provider := &scriptedProvider{responses: []llm.Response{
 		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"command": "/gtw commit"}),
 			Usage: llm.Usage{InputTokens: 500, OutputTokens: 500}},
 	}}
-	svc, _, sender := testService(t, dir, Config{Provider: provider, TokenBudget: 100})
+	svc, lb, sender := testService(t, dir, Config{Provider: provider, TokenBudget: 100})
+	lb.steps = []fakeStep{pendingStep("still going")}
 
-	if _, err := svc.StartPlaybook(context.Background(), Request{
+	if _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -260,14 +276,15 @@ func TestSystem2_TokenBudgetStopsTheRun(t *testing.T) {
 
 func TestSystem2_IterationLimitStopsTheRun(t *testing.T) {
 	dir := t.TempDir()
-	writePlaybook(t, dir, "one", oneStepPlaybook)
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
 	provider := &scriptedProvider{responses: []llm.Response{
 		{Message: toolCallMsg("c1", toolRepoStatus, map[string]any{})},
 	}}
-	svc, _, sender := testService(t, dir, Config{Provider: provider, MaxIterations: 1})
+	svc, lb, sender := testService(t, dir, Config{Provider: provider, MaxIterations: 1})
+	lb.steps = []fakeStep{pendingStep("still going")}
 
-	if _, err := svc.StartPlaybook(context.Background(), Request{
+	if _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -281,18 +298,21 @@ func TestSystem2_IterationLimitStopsTheRun(t *testing.T) {
 
 func TestCompact_LeavesTheRunConversationAlone(t *testing.T) {
 	dir := t.TempDir()
-	writePlaybook(t, dir, "two", `name: two
-steps:
-  - /gtw commit
-  - /gtw push
+	writeWorkflow(t, dir, "two", `name: two
+jobs:
+  main:
+    steps:
+      - id: commit
+        message: /gtw commit
+      - id: push
+        message: /gtw push
 `)
 
 	provider := &scriptedProvider{responses: []llm.Response{
 		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"command": "/gtw commit"})},
-		{Message: toolCallMsg("c2", toolRunStep, map[string]any{"command": "/gtw push"})},
-		{Message: toolCallMsg("c3", toolFinish, map[string]any{"status": "done", "summary": "done"})},
 	}}
 	lb := newFakeLoopback(
+		pendingStep("still going"),
 		fakeStep{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "committed"},
 			transcript: []loopback.Entry{{Kind: messages.OutResult, Text: "the work agent said hello"}}},
 		okStep("pushed"),
@@ -308,7 +328,7 @@ steps:
 	if err := svc.Start(context.Background()); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	runID, err := svc.StartPlaybook(context.Background(), Request{
+	runID, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "two", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
 	})
 	if err != nil {
@@ -319,8 +339,8 @@ steps:
 	svc.mu.Unlock()
 	waitRun(t, svc, "obs-1")
 
-	// The run keeps the transcript of its first command: the
-	// compaction is for the model, not for the run.
+	// The run keeps the transcript of its command: the compaction is
+	// for the model, not for the run.
 	found := false
 	for _, m := range r.conversation() {
 		for _, p := range m.Parts {
@@ -365,7 +385,15 @@ func TestCompact_OldToolResultsKeepOnlyTheOutcome(t *testing.T) {
 
 func TestAskHuman_SuspendsAndTheReplyResumes(t *testing.T) {
 	dir := t.TempDir()
-	writePlaybook(t, dir, "one", oneStepPlaybook)
+	writeWorkflow(t, dir, "two", `name: two
+jobs:
+  main:
+    steps:
+      - id: prepare
+        message: /gtw prepare
+      - id: commit
+        message: /gtw commit
+`)
 
 	provider := &scriptedProvider{responses: []llm.Response{
 		{Message: toolCallMsg("c1", toolAskHuman, map[string]any{"question": "Which branch?"})},
@@ -373,9 +401,10 @@ func TestAskHuman_SuspendsAndTheReplyResumes(t *testing.T) {
 		{Message: toolCallMsg("c3", toolFinish, map[string]any{"status": "done", "summary": "committed"})},
 	}}
 	svc, lb, sender := testService(t, dir, Config{Provider: provider})
+	lb.steps = []fakeStep{pendingStep("still going"), okStep("committed")}
 
-	if _, err := svc.StartPlaybook(context.Background(), Request{
-		Name: "one", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "two", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -401,15 +430,16 @@ func TestAskHuman_SuspendsAndTheReplyResumes(t *testing.T) {
 
 func TestRestart_ResumesASuspendedRun(t *testing.T) {
 	dir := t.TempDir()
-	writePlaybook(t, dir, "one", oneStepPlaybook)
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
 	provider := &scriptedProvider{responses: []llm.Response{
 		{Message: toolCallMsg("c1", toolAskHuman, map[string]any{"question": "Which branch?"})},
 		{Message: toolCallMsg("c2", toolRunStep, map[string]any{"command": "/gtw commit"})},
 		{Message: toolCallMsg("c3", toolFinish, map[string]any{"status": "done", "summary": "committed"})},
 	}}
-	svc, _, sender := testService(t, dir, Config{Provider: provider})
-	if _, err := svc.StartPlaybook(context.Background(), Request{
+	svc, lb, sender := testService(t, dir, Config{Provider: provider})
+	lb.steps = []fakeStep{pendingStep("still going")}
+	if _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -429,7 +459,7 @@ func TestRestart_ResumesASuspendedRun(t *testing.T) {
 
 func TestShutdown_KeepsTheRunForTheNextDaemon(t *testing.T) {
 	dir := t.TempDir()
-	writePlaybook(t, dir, "one", oneStepPlaybook)
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
 	provider := &scriptedProvider{responses: []llm.Response{
 		{Message: toolCallMsg("c1", toolAskHuman, map[string]any{"question": "Which branch?"})},
@@ -437,7 +467,9 @@ func TestShutdown_KeepsTheRunForTheNextDaemon(t *testing.T) {
 		{Message: toolCallMsg("c3", toolFinish, map[string]any{"status": "done", "summary": "committed"})},
 	}}
 	svc, _, sender := testService(t, dir, Config{Provider: provider})
-	if _, err := svc.StartPlaybook(context.Background(), Request{
+	lb := svc.cfg.Loopback.(*fakeLoopback)
+	lb.steps = []fakeStep{pendingStep("still going")}
+	if _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -457,7 +489,7 @@ func TestShutdown_KeepsTheRunForTheNextDaemon(t *testing.T) {
 
 func TestRestart_ResolvesAnInFlightCommandAsInterrupted(t *testing.T) {
 	dir := t.TempDir()
-	writePlaybook(t, dir, "one", oneStepPlaybook)
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
 	provider := &scriptedProvider{responses: []llm.Response{
 		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"command": "/gtw commit"})},
@@ -467,7 +499,7 @@ func TestRestart_ResolvesAnInFlightCommandAsInterrupted(t *testing.T) {
 	// The command never settles: the run waits for it.
 	lb.steps = []fakeStep{{open: true}}
 
-	if _, err := svc.StartPlaybook(context.Background(), Request{
+	if _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -509,14 +541,17 @@ func TestRestart_ResolvesAnInFlightCommandAsInterrupted(t *testing.T) {
 	t.Fatal("the in-flight command was never resolved")
 }
 
-func TestRunStep_ReturnsEarlyOnAPendingChoice(t *testing.T) {
+// TestRunStep_WaitsForTheAnswerOfTheWorkAgent — the work agent asks
+// a question: the run waits for the answer instead of running the
+// command again.
+func TestRunStep_WaitsForTheAnswerOfTheWorkAgent(t *testing.T) {
 	dir := t.TempDir()
-	writePlaybook(t, dir, "one", oneStepPlaybook)
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
-	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"command": "/gtw commit"})},
+	decider := &scriptedDecider{answers: []llm.DecisionResponse{
+		decisionResp("jev-1.14", optionEscalate, 0.1, 0),
 	}}
-	svc, lb, _ := testService(t, dir, Config{Provider: provider})
+	svc, lb, sender := testService(t, dir, Config{Decider: decider})
 	lb.steps = []fakeStep{{
 		open: true,
 		choices: []messages.Choice{{
@@ -526,72 +561,73 @@ func TestRunStep_ReturnsEarlyOnAPendingChoice(t *testing.T) {
 		}},
 	}}
 
-	if _, err := svc.StartPlaybook(context.Background(), Request{
+	if _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitRun(t, svc, "obs-1")
+	waitForLine(t, sender, "Which step should run next?")
 
-	req := provider.Request(1)
-	found := false
-	for _, m := range req.Messages {
-		for _, p := range m.Parts {
-			if p.Type == llm.PartToolResult && strings.Contains(p.Text, "waiting") {
-				found = true
-			}
+	if decider.Calls() == 0 {
+		t.Fatal("the decision model was not asked")
+	}
+	if !strings.Contains(decider.Request(0).State, "still running") {
+		t.Fatalf("the decision model was not told that the step is waiting: %s", decider.Request(0).State)
+	}
+	// The command is not run again while it waits for an answer.
+	count := 0
+	for _, cmd := range lb.Sent() {
+		if cmd == "/gtw commit" {
+			count++
 		}
 	}
-	if !found {
-		t.Fatalf("the tool did not report that it is waiting: %v", req.Messages)
+	if count != 1 {
+		t.Fatalf("the command ran %d times, want once", count)
 	}
+	if err := svc.Stop(context.Background(), "obs-1"); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	waitRun(t, svc, "obs-1")
 }
 
+// TestRunStep_ReturnsEarlyOnAStall — the work agent goes quiet: the
+// run stops waiting for it and hands the decision to the agent.
 func TestRunStep_ReturnsEarlyOnAStall(t *testing.T) {
 	dir := t.TempDir()
-	writePlaybook(t, dir, "one", oneStepPlaybook)
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
-	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"command": "/gtw commit"})},
+	decider := &scriptedDecider{answers: []llm.DecisionResponse{
+		decisionResp("jev-1.14", optionEscalate, 0.1, 0),
 	}}
-	svc, lb, _ := testService(t, dir, Config{Provider: provider})
+	svc, lb, sender := testService(t, dir, Config{Decider: decider})
 	svc.cfg.StallTimeout = 50 * time.Millisecond
 	lb.steps = []fakeStep{{open: true}}
 
-	if _, err := svc.StartPlaybook(context.Background(), Request{
+	if _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitRun(t, svc, "obs-1")
+	waitForLine(t, sender, "Which step should run next?")
 
-	req := provider.Request(1)
-	found := false
-	for _, m := range req.Messages {
-		for _, p := range m.Parts {
-			if p.Type == llm.PartToolResult && strings.Contains(p.Text, "went quiet") {
-				found = true
-			}
-		}
+	if decider.Calls() == 0 {
+		t.Fatal("the decision model was not asked")
 	}
-	if !found {
-		t.Fatalf("the tool did not report the stall: %v", req.Messages)
+	if err := svc.Stop(context.Background(), "obs-1"); err != nil {
+		t.Fatalf("stop: %v", err)
 	}
+	waitRun(t, svc, "obs-1")
 }
 
-func TestIntegration_ThePlaybookRunsEndToEnd(t *testing.T) {
+// TestIntegration_TheWorkflowRunsEndToEnd — the review step does not
+// finish, so the agent repairs it; the plan carries on and the run
+// ends on its own.
+func TestIntegration_TheWorkflowRunsEndToEnd(t *testing.T) {
 	dir := t.TempDir()
-	writePlaybook(t, dir, "fix-issue", fixIssuePlaybook)
+	writeWorkflow(t, dir, "fix-issue", fixIssueWorkflow)
 
 	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"command": "/gtw fix 42 -y"})},
-		{Message: toolCallMsg("c2", toolRunStep, map[string]any{"command": "/gtw commit"})},
-		{Message: toolCallMsg("c3", toolRunStep, map[string]any{"command": "/review"})},
-		{Message: toolCallMsg("c4", toolRunStep, map[string]any{"command": "/review -c"})},
-		{Message: toolCallMsg("c5", toolRunStep, map[string]any{"command": "/gtw commit"})},
-		{Message: toolCallMsg("c6", toolRunStep, map[string]any{"command": "/gtw push"})},
-		{Message: toolCallMsg("c7", toolRunStep, map[string]any{"command": "/gtw pr"})},
-		{Message: toolCallMsg("c8", toolFinish, map[string]any{"status": "done", "summary": "issue 42 is on its way"})},
+		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"command": "/review -c"})},
 	}}
 	lb := newFakeLoopback(
 		okStep("fixed"),
@@ -602,7 +638,6 @@ func TestIntegration_ThePlaybookRunsEndToEnd(t *testing.T) {
 			Data:    map[string]string{"groups": "3", "unfinished_groups": "1"},
 		}},
 		okStep("review finished"),
-		okStep("committed again"),
 		okStep("pushed"),
 		fakeStep{outcome: messages.Outcome{
 			Status:  messages.OutcomeOK,
@@ -622,10 +657,10 @@ func TestIntegration_ThePlaybookRunsEndToEnd(t *testing.T) {
 	if err := svc.Start(context.Background()); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	if _, err := svc.StartPlaybook(context.Background(), Request{
+	if _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "fix-issue", Args: []string{"42"}, ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
 	}); err != nil {
-		t.Fatalf("start playbook: %v", err)
+		t.Fatalf("start workflow: %v", err)
 	}
 	waitRun(t, svc, "obs-1")
 
@@ -635,8 +670,10 @@ func TestIntegration_ThePlaybookRunsEndToEnd(t *testing.T) {
 		"▶ /review",
 		"⚠️ /review incomplete · 1/3 groups unfinished",
 		"▶ /review -c",
+		"✅ /review -c",
+		"▶ /gtw push",
 		"▶ /gtw pr",
-		"issue 42 is on its way",
+		"fix-issue is complete",
 	}
 	for _, line := range want {
 		if !sender.Has(line) {

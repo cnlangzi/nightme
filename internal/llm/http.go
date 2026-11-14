@@ -64,13 +64,19 @@ func Retryable(err error) bool {
 	return false
 }
 
-// APIKey reads the API key from the environment variable the
-// configuration names.
+// APIKey resolves the credential a configuration asks for.
 //
-// The key is never stored in the configuration file: the file names
-// the variable, the environment holds the secret.
-func APIKey(envName string) (string, error) {
-	name := strings.TrimSpace(envName)
+// Two channels exist: the inline key in the configuration and an
+// environment variable it names. The inline key wins — it is the more
+// specific of the two — and a key that is only whitespace counts as
+// unset. An empty result means the endpoint needs no authentication.
+//
+// The error names the variable, never the key.
+func APIKey(cfg Config) (string, error) {
+	if key := strings.TrimSpace(cfg.APIKey); key != "" {
+		return key, nil
+	}
+	name := strings.TrimSpace(cfg.APIKeyEnv)
 	if name == "" {
 		return "", nil
 	}

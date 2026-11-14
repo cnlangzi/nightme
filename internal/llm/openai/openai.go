@@ -37,7 +37,7 @@ func New(cfg llm.Config) (llm.Provider, error) {
 	if base == "" {
 		return nil, fmt.Errorf("llm/openai: base_url is required")
 	}
-	key, err := llm.APIKey(cfg.APIKeyEnv)
+	key, err := llm.APIKey(cfg)
 	if err != nil {
 		return nil, err
 	}

@@ -22,8 +22,14 @@ type Config struct {
 	BaseURL string `json:"base_url,omitempty" yaml:"base_url,omitempty"`
 	// Model is the model to call.
 	Model string `json:"model,omitempty" yaml:"model,omitempty"`
+	// APIKey holds the API key in plaintext. It wins over APIKeyEnv
+	// when both are set.
+	//
+	// The field is tagged out of every serializer: a credential must
+	// not leave the package through a status dump or a log line.
+	APIKey string `json:"-" yaml:"-"`
 	// APIKeyEnv names the environment variable the API key is read
-	// from. The key is never stored in the configuration.
+	// from when APIKey is empty.
 	APIKeyEnv string `json:"api_key_env,omitempty" yaml:"api_key_env,omitempty"`
 	// MaxTokens caps the length of an answer.
 	MaxTokens int `json:"max_tokens,omitempty" yaml:"max_tokens,omitempty"`

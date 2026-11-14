@@ -28,7 +28,7 @@ func NewDecisions(cfg llm.Config) (llm.Decider, error) {
 	if base == "" {
 		return nil, fmt.Errorf("llm/decision: base_url is required")
 	}
-	key, err := llm.APIKey(cfg.APIKeyEnv)
+	key, err := llm.APIKey(cfg)
 	if err != nil {
 		return nil, err
 	}

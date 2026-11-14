@@ -294,3 +294,51 @@ func TestNew_ReportsAMissingKey(t *testing.T) {
 		t.Fatal("a missing api key was accepted")
 	}
 }
+
+// The inline key is the credential, even when the environment channel
+// is configured too and its variable is unset.
+func TestNew_SendsTheInlineKey(t *testing.T) {
+	t.Setenv("NIGHTME_TEST_LLM_KEY", "")
+	var auth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth = r.Header.Get("Authorization")
+		w.Write([]byte(`{"choices":[]}`))
+	}))
+	defer srv.Close()
+
+	p, err := New(llm.Config{
+		Provider: "openai", BaseURL: srv.URL, Model: "m",
+		APIKey: "sk-inline", APIKeyEnv: "NIGHTME_TEST_LLM_KEY",
+	})
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	if _, err := p.Complete(context.Background(), llm.Request{}); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if auth != "Bearer sk-inline" {
+		t.Fatalf("authorization = %q, want the inline key", auth)
+	}
+}
+
+// A configuration that names no credential asks for no
+// authentication: the request carries no header.
+func TestNew_SendsNoAuthHeaderWithoutAKey(t *testing.T) {
+	var auth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth = r.Header.Get("Authorization")
+		w.Write([]byte(`{"choices":[]}`))
+	}))
+	defer srv.Close()
+
+	p, err := New(llm.Config{Provider: "openai", BaseURL: srv.URL, Model: "m"})
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	if _, err := p.Complete(context.Background(), llm.Request{}); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if auth != "" {
+		t.Fatalf("authorization = %q, want no header", auth)
+	}
+}

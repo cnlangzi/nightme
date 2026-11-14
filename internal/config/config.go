@@ -121,8 +121,11 @@ type MeLLMConfig struct {
 	BaseURL string `yaml:"base_url,omitempty"`
 	// Model is the model to call.
 	Model string `yaml:"model,omitempty"`
+	// APIKey holds the API key in plaintext. It wins over APIKeyEnv
+	// when both are set.
+	APIKey string `yaml:"api_key,omitempty"`
 	// APIKeyEnv names the environment variable the API key is read
-	// from. The key itself is never stored in the configuration.
+	// from when APIKey is empty.
 	APIKeyEnv string `yaml:"api_key_env,omitempty"`
 	// MaxTokens caps the length of an answer.
 	MaxTokens int `yaml:"max_tokens,omitempty"`
@@ -137,8 +140,11 @@ type MeDeciderConfig struct {
 	BaseURL string `yaml:"base_url,omitempty"`
 	// Model is the model to call.
 	Model string `yaml:"model,omitempty"`
+	// APIKey holds the API key in plaintext. It wins over APIKeyEnv
+	// when both are set.
+	APIKey string `yaml:"api_key,omitempty"`
 	// APIKeyEnv names the environment variable the API key is read
-	// from.
+	// from when APIKey is empty.
 	APIKeyEnv string `yaml:"api_key_env,omitempty"`
 	// MinConfidence is the confidence a decision must reach before
 	// the personal agent acts on it without the chat model. Zero

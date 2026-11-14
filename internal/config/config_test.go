@@ -179,6 +179,39 @@ func TestMalformedFile(t *testing.T) {
 	}
 }
 
+// The plaintext key of the personal agent's models is read from the
+// file and survives a save/load round trip.
+func TestMeAPIKey_LoadsFromTheFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	body := "me:\n  llm:\n    api_key: sk-test\n  decider:\n    api_key: sk-decider\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Me.LLM.APIKey != "sk-test" {
+		t.Errorf("Me.LLM.APIKey = %q, want sk-test", cfg.Me.LLM.APIKey)
+	}
+	if cfg.Me.Decider.APIKey != "sk-decider" {
+		t.Errorf("Me.Decider.APIKey = %q, want sk-decider", cfg.Me.Decider.APIKey)
+	}
+
+	saved := filepath.Join(dir, "saved.yaml")
+	if err := Save(cfg, saved); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	back, err := Load(saved)
+	if err != nil {
+		t.Fatalf("Load(saved): %v", err)
+	}
+	if back.Me.LLM.APIKey != "sk-test" || back.Me.Decider.APIKey != "sk-decider" {
+		t.Errorf("the round trip lost the keys: %q / %q", back.Me.LLM.APIKey, back.Me.Decider.APIKey)
+	}
+}
+
 func TestEnvOverrideInvalidNumber(t *testing.T) {
 	// Set a non-numeric value for an int override — the loader should
 	// silently fall back to the default rather than crash.

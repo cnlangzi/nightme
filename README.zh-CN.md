@@ -544,13 +544,13 @@ me:
     provider: openai              # 已注册的 chat provider：openai | anthropic
     base_url: https://api.openai.com/v1
     model: gpt-4.1-mini
-    api_key_env: OPENAI_API_KEY   # key 从环境变量读，绝不写进配置
+    api_key: sk-xxxx              # key 本身，就写在配置里
     max_tokens: 4096
   decider:
     protocol: decisions           # decisions | systemone
     base_url: https://openrouter.ai/api/v1
     model: typesafe/jev-1.14
-    api_key_env: OPENROUTER_API_KEY
+    api_key_env: OPENROUTER_API_KEY # 存 key 的环境变量的名字
     min_confidence: 0.8           # 低于这个置信度就升级
 ```
 
@@ -567,7 +567,7 @@ me:
 
 决策协议只在根里没有 `/v1` 时才补上：`https://openrouter.ai/api/v1` 变成 `https://openrouter.ai/api/v1/decisions`，`https://api.typesafe.ai` 变成 `https://api.typesafe.ai/v1/systemone`。
 
-**凭据。** `api_key_env` 写的是环境变量的名字——上面是 `OPENAI_API_KEY`。key 本身永远不写进配置文件：配置文件只写变量名，daemon 从自己的环境里读这个变量。接口不需要鉴权时 `api_key_env` 可以留空——这时请求不带任何鉴权头。
+**凭据。** `api_key` 写的是 key 本身，就放在配置文件里；`api_key_env` 写的是存 key 的环境变量的名字——上面是 `OPENROUTER_API_KEY`。两个通道对两个能力都通用：写一个就够，不要两个都写——两个都写时 `api_key` 生效，两个都不写时请求不带任何鉴权头。`config.yaml` 以 0600 写入——不要把它提交进 git。
 
 **三种模式。** 两半里配上一半，agent 就能跑：
 

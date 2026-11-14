@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestMessage_RoundTripsThroughJSON(t *testing.T) {
@@ -176,6 +178,28 @@ func TestRegistry_RegisteredNames(t *testing.T) {
 	}
 	if !contains(DeciderNames(), "zzz-test") {
 		t.Fatalf("the deciders are %v, want zzz-test", DeciderNames())
+	}
+}
+
+// The credential must not leave the package through a serializer: a
+// status dump or a log line would otherwise carry it.
+func TestConfig_DoesNotSerializeTheKey(t *testing.T) {
+	cfg := Config{Provider: "openai", Model: "m", APIKey: "sk-secret"}
+
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal json: %v", err)
+	}
+	if strings.Contains(string(raw), "sk-secret") {
+		t.Fatalf("the json carries the key: %s", raw)
+	}
+
+	out, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal yaml: %v", err)
+	}
+	if strings.Contains(string(out), "sk-secret") {
+		t.Fatalf("the yaml carries the key: %s", out)
 	}
 }
 

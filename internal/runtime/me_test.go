@@ -1,14 +1,19 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/channel/loopback"
 	"github.com/cnlangzi/nightme/internal/config"
+	"github.com/cnlangzi/nightme/internal/llm"
 )
 
 // TestBuildPersonalAgent_NoLoopbackChannel — the personal agent
@@ -44,6 +49,116 @@ func TestBuildPersonalAgent_StartsWithLoopbackChannel(t *testing.T) {
 	}
 	if err := svc.Shutdown(context.Background()); err != nil {
 		t.Fatalf("Shutdown: %v", err)
+	}
+}
+
+// TestBuildChatModel_UsesTheInlineKey — the plaintext key of the
+// chat model reaches the provider as its credential.
+func TestBuildChatModel_UsesTheInlineKey(t *testing.T) {
+	var auth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth = r.Header.Get("Authorization")
+		w.Write([]byte(`{"choices":[]}`))
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{Me: config.MeConfig{LLM: config.MeLLMConfig{
+		Provider: "openai", BaseURL: srv.URL, Model: "m", APIKey: "sk-inline",
+	}}}
+	p := buildChatModel(cfg, slog.Default())
+	if p == nil {
+		t.Fatal("no chat model was built")
+	}
+	if _, err := p.Complete(context.Background(), llm.Request{}); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if auth != "Bearer sk-inline" {
+		t.Fatalf("authorization = %q, want the inline key", auth)
+	}
+}
+
+// TestBuildDecider_UsesTheInlineKey — the plaintext key of the
+// decision model reaches the decider as its credential.
+func TestBuildDecider_UsesTheInlineKey(t *testing.T) {
+	var auth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth = r.Header.Get("Authorization")
+		w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{Me: config.MeConfig{Decider: config.MeDeciderConfig{
+		Protocol: "decisions", BaseURL: srv.URL, Model: "m", APIKey: "sk-inline",
+	}}}
+	d := buildDecider(cfg, slog.Default())
+	if d == nil {
+		t.Fatal("no decision model was built")
+	}
+	if _, err := d.Decide(context.Background(), llm.DecisionRequest{
+		State:     "halfway",
+		Questions: []llm.Question{{Name: "next", Type: llm.QuestionYesNo}},
+	}); err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	if auth != "Bearer sk-inline" {
+		t.Fatalf("authorization = %q, want the inline key", auth)
+	}
+}
+
+// TestBuildChatModel_WarnsOnBothChannels — a configuration that names
+// the key twice is reported, and the report carries no credential.
+func TestBuildChatModel_WarnsOnBothChannels(t *testing.T) {
+	t.Setenv("NIGHTME_TEST_KEY", "sk-env-value")
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+
+	cfg := &config.Config{Me: config.MeConfig{LLM: config.MeLLMConfig{
+		Provider: "openai", BaseURL: "https://example.test", Model: "m",
+		APIKey: "sk-inline", APIKeyEnv: "NIGHTME_TEST_KEY",
+	}}}
+	buildChatModel(cfg, logger)
+
+	out := buf.String()
+	if !strings.Contains(out, "api_key_env") || !strings.Contains(out, "api_key wins") {
+		t.Fatalf("the warning does not name the two keys and the winner: %s", out)
+	}
+	if strings.Contains(out, "sk-inline") || strings.Contains(out, "sk-env-value") {
+		t.Fatalf("the warning carries a credential: %s", out)
+	}
+}
+
+// TestBuildChatModel_NoWarningOnOneChannel — a single channel is not
+// ambiguous and stays quiet.
+func TestBuildChatModel_NoWarningOnOneChannel(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+
+	cfg := &config.Config{Me: config.MeConfig{LLM: config.MeLLMConfig{
+		Provider: "openai", BaseURL: "https://example.test", Model: "m",
+		APIKey: "sk-inline",
+	}}}
+	buildChatModel(cfg, logger)
+
+	if out := buf.String(); strings.Contains(out, "api_key") {
+		t.Fatalf("the log mentions the credential: %s", out)
+	}
+}
+
+// TestBuildChatModel_NoWarningWithoutAProvider — a capability that is
+// not configured is not built, so its credentials are nobody's
+// business.
+func TestBuildChatModel_NoWarningWithoutAProvider(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+
+	cfg := &config.Config{Me: config.MeConfig{LLM: config.MeLLMConfig{
+		APIKey: "sk-inline", APIKeyEnv: "NIGHTME_TEST_KEY",
+	}}}
+	if p := buildChatModel(cfg, logger); p != nil {
+		t.Fatal("a chat model without a provider was built")
+	}
+	if out := buf.String(); out != "" {
+		t.Fatalf("the log is not empty: %s", out)
 	}
 }
 

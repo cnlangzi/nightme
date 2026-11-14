@@ -64,13 +64,37 @@ func Retryable(err error) bool {
 	return false
 }
 
-// APIKey reads the API key from the environment variable the
-// configuration names.
+// inlineAPIKey returns the plaintext key a configuration carries,
+// trimmed. It is empty when the configuration carries no inline key.
+func inlineAPIKey(cfg Config) string { return strings.TrimSpace(cfg.APIKey) }
+
+// apiKeyEnvName returns the environment variable a configuration
+// names, trimmed. It is empty when the configuration names none.
+func apiKeyEnvName(cfg Config) string { return strings.TrimSpace(cfg.APIKeyEnv) }
+
+// DualCredential reports whether a configuration names the API key
+// twice — an inline key and an environment variable.
 //
-// The key is never stored in the configuration file: the file names
-// the variable, the environment holds the secret.
-func APIKey(envName string) (string, error) {
-	name := strings.TrimSpace(envName)
+// The inline key wins, so the other channel is dead weight. A caller
+// that wants to tell the operator about it asks here rather than
+// re-deriving the rule.
+func DualCredential(cfg Config) bool {
+	return inlineAPIKey(cfg) != "" && apiKeyEnvName(cfg) != ""
+}
+
+// APIKey resolves the credential a configuration asks for.
+//
+// Two channels exist: the inline key in the configuration and an
+// environment variable it names. The inline key wins — it is the more
+// specific of the two — and a key that is only whitespace counts as
+// unset. An empty result means the endpoint needs no authentication.
+//
+// The error names the variable, never the key.
+func APIKey(cfg Config) (string, error) {
+	if key := inlineAPIKey(cfg); key != "" {
+		return key, nil
+	}
+	name := apiKeyEnvName(cfg)
 	if name == "" {
 		return "", nil
 	}

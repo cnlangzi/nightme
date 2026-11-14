@@ -655,13 +655,13 @@ me:
     provider: openai              # a registered chat provider: openai | anthropic
     base_url: https://api.openai.com/v1
     model: gpt-4.1-mini
-    api_key_env: OPENAI_API_KEY   # the key is read from the environment, never stored in the config
+    api_key: sk-xxxx              # the key itself, in the file
     max_tokens: 4096
   decider:
     protocol: decisions           # decisions | systemone
     base_url: https://openrouter.ai/api/v1
     model: typesafe/jev-1.14
-    api_key_env: OPENROUTER_API_KEY
+    api_key_env: OPENROUTER_API_KEY # the name of a variable that holds the key
     min_confidence: 0.8           # below this the agent escalates
 ```
 
@@ -669,6 +669,12 @@ The decider's base is the root of the API; the version segment is added
 when the base does not carry it. The two protocols live at
 `{base}/v1/decisions` and `{base}/v1/systemone` — `https://api.openai.com`
 and `https://api.typesafe.ai` are the roots of the two APIs.
+
+The credential comes from one of two channels: `api_key` holds the key itself in
+the configuration file, `api_key_env` names an environment variable that holds it.
+Either channel works for either capability; set one of them, not both — `api_key`
+wins when both are set, and a configuration with neither sends no authentication
+header. `config.yaml` is written with mode 0600 and should be kept out of git.
 
 The user picks the models. nightme never chooses one, and it never injects a model into the coding agents — those keep their own configuration.
 

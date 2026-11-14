@@ -76,13 +76,16 @@ func buildChatModel(cfg *config.Config, logger *slog.Logger) llm.Provider {
 	if cfg.Me.LLM.Provider == "" {
 		return nil
 	}
-	provider, err := llm.New(llm.Config{
+	llmCfg := llm.Config{
 		Provider:  cfg.Me.LLM.Provider,
 		BaseURL:   cfg.Me.LLM.BaseURL,
 		Model:     cfg.Me.LLM.Model,
+		APIKey:    cfg.Me.LLM.APIKey,
 		APIKeyEnv: cfg.Me.LLM.APIKeyEnv,
 		MaxTokens: cfg.Me.LLM.MaxTokens,
-	})
+	}
+	warnDualCredential(logger, "me.llm", llmCfg)
+	provider, err := llm.New(llmCfg)
 	if err != nil {
 		logger.Warn("run: the chat model could not be built", "err", err)
 		return nil
@@ -98,17 +101,32 @@ func buildDecider(cfg *config.Config, logger *slog.Logger) llm.Decider {
 	if cfg.Me.Decider.Protocol == "" {
 		return nil
 	}
-	decider, err := llm.NewDecider(llm.Config{
+	llmCfg := llm.Config{
 		Protocol:  cfg.Me.Decider.Protocol,
 		BaseURL:   cfg.Me.Decider.BaseURL,
 		Model:     cfg.Me.Decider.Model,
+		APIKey:    cfg.Me.Decider.APIKey,
 		APIKeyEnv: cfg.Me.Decider.APIKeyEnv,
-	})
+	}
+	warnDualCredential(logger, "me.decider", llmCfg)
+	decider, err := llm.NewDecider(llmCfg)
 	if err != nil {
 		logger.Warn("run: the decision model could not be built", "err", err)
 		return nil
 	}
 	return decider
+}
+
+// warnDualCredential reports a capability that names its key twice.
+//
+// The inline key wins, so the configuration is unambiguous — but the
+// operator should know that one of the two is dead weight. The warning
+// carries neither of the credentials.
+func warnDualCredential(logger *slog.Logger, capability string, cfg llm.Config) {
+	if !llm.DualCredential(cfg) {
+		return
+	}
+	logger.Warn("run: both api_key and api_key_env are set; api_key wins", "capability", capability)
 }
 
 // stopPersonalAgent stops the personal agent. It is a no-op for a

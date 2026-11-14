@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 )
@@ -26,32 +25,83 @@ import (
 // corrupted index is a worse outcome than the failure this prevents.
 const staleGitLockAge = 30 * time.Second
 
-// gitLockConflictRe matches the index-lock conflict git reports:
+// gitLockConflictPrefix is the English wording git uses when it
+// cannot create a lock file:
 //
 //	fatal: Unable to create '<path>': File exists.
 //
-// git prefixes the message with `fatal:` or `error:` depending on
-// the command, so the match is on the message body. The path comes
-// from git rather than from the working directory: git names the
-// exact file it could not create, which is correct for the primary
-// checkout and for linked worktrees alike, and needs no extra git
-// invocation to resolve.
-var gitLockConflictRe = regexp.MustCompile(`Unable to create '([^']+)': File exists\.`)
+// git prefixes the message with `fatal:` or `error:` depending on the
+// command, so the match is on the message body. The path comes from
+// git rather than from the working directory: git names the exact
+// file it could not create, which is correct for the primary checkout
+// and for linked worktrees alike, and needs no extra git invocation
+// to resolve.
+const gitLockConflictPrefix = "Unable to create '"
+
+// gitLockConflictSuffix separates the quoted path from git's
+// (localized) description of the error.
+const gitLockConflictSuffix = "': "
 
 // gitRetryFunc re-runs a failed git invocation. The recovery takes
 // it as a parameter so the retry behaviour can be exercised without
 // spawning a real git.
 type gitRetryFunc func(ctx context.Context, dir string, args ...string) (string, string, error)
 
-// parseGitLockConflict extracts the index-lock path from git's
-// stderr. Returns ("", false) when the failure is not a lock
-// conflict.
+// parseGitLockConflict extracts the lock path from git's stderr.
+// Returns ("", false) when the failure is not a lock conflict.
+//
+// The English wording is matched first. The path may contain an
+// apostrophe (git does not escape it), so the path runs to the last
+// "': " rather than to the first quote.
+//
+// When git runs in a non-English locale the wording is translated and
+// the English match fails. The path is still quoted and still names a
+// ".lock" file, so the fallback reads it out of the message as well.
 func parseGitLockConflict(stderr string) (string, bool) {
-	m := gitLockConflictRe.FindStringSubmatch(stderr)
-	if m == nil {
+	if path, ok := parseEnglishLockConflict(stderr); ok {
+		return path, true
+	}
+	return parseLocalizedLockConflict(stderr)
+}
+
+// parseEnglishLockConflict reads the lock path out of git's English
+// "Unable to create '<path>': <error>" message.
+func parseEnglishLockConflict(stderr string) (string, bool) {
+	i := strings.Index(stderr, gitLockConflictPrefix)
+	if i < 0 {
 		return "", false
 	}
-	return m[1], true
+	rest := stderr[i+len(gitLockConflictPrefix):]
+	j := strings.LastIndex(rest, gitLockConflictSuffix)
+	if j < 0 {
+		return "", false
+	}
+	return rest[:j], true
+}
+
+// parseLocalizedLockConflict reads the lock path out of a translated
+// "Unable to create" message. Git quotes the path and always names a
+// ".lock" file, so the path is what sits between the first quote and
+// the last ".lock'".
+func parseLocalizedLockConflict(stderr string) (string, bool) {
+	open := strings.Index(stderr, "'")
+	if open < 0 {
+		return "", false
+	}
+	end := strings.LastIndex(stderr, ".lock'")
+	if end < 0 || end < open {
+		return "", false
+	}
+	return stderr[open+1 : end+len(".lock")], true
+}
+
+// isIndexLock reports whether path is the index lock of a git
+// directory. Only the index lock is ever removed: the other lock
+// files git takes (a ref lock, packed-refs.lock) are held by network
+// operations that can run for minutes, and removing one of those
+// breaks the ref update it belongs to.
+func isIndexLock(path string) bool {
+	return filepath.Base(path) == "index.lock"
 }
 
 // recoverGitLockConflict handles a git failure that names an index
@@ -65,8 +115,15 @@ func parseGitLockConflict(stderr string) (string, bool) {
 //   - the lock is younger than staleGitLockAge — a live git may
 //     still own it; leave it alone and report the conflict with the
 //     manual remedy;
-//   - the lock is older — its owner was killed; remove it, log one
-//     warning, retry once.
+//   - the lock is older and nothing holds it open — its owner was
+//     killed; remove it, log one warning, retry once.
+//
+// Age alone does not prove the owner is dead: git holds the index
+// lock across the whole worktree update of a checkout, a reset or a
+// rebase, and the lock's mtime stays at its creation time, so a live
+// lock can be minutes old. An open lock is the signal that its owner
+// is alive — git keeps the lock file open until it commits or rolls
+// the lock back.
 //
 // A retry that fails is reported as-is. The command never runs a
 // third time: retrying in a loop turns one failure into a hang.
@@ -85,6 +142,17 @@ func recoverGitLockConflict(ctx context.Context, dir string, args []string,
 	age := time.Since(info.ModTime())
 	if age <= staleGitLockAge {
 		// Not stale: a live git may still own this lock.
+		return stdout, stderr, newGitLockError(err, stderr, lockPath, age)
+	}
+	if !isIndexLock(lockPath) {
+		// Only the index lock is ever removed. The other lock files
+		// git takes (a ref lock, packed-refs.lock) belong to network
+		// operations that can run for minutes.
+		return stdout, stderr, newGitLockError(err, stderr, lockPath, age)
+	}
+	if lockHasLiveHolder(lockPath) {
+		// A live git still owns the lock. Unlinking it would let two
+		// processes write the index at once.
 		return stdout, stderr, newGitLockError(err, stderr, lockPath, age)
 	}
 	if rmErr := os.Remove(lockPath); rmErr != nil && !os.IsNotExist(rmErr) {
@@ -175,6 +243,16 @@ func unfinishedRebase(gitDir string) string {
 		if _, err := os.Stat(filepath.Join(gitDir, name)); err == nil {
 			return name
 		}
+	}
+	return ""
+}
+
+// indexLockPath returns the path of the repository's index lock when
+// it is there, or "" when it is not.
+func indexLockPath(gitDir string) string {
+	path := filepath.Join(gitDir, "index.lock")
+	if _, err := os.Stat(path); err == nil {
+		return path
 	}
 	return ""
 }

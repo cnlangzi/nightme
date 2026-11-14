@@ -419,9 +419,18 @@ func RefreshDefaultBranch(ctx context.Context, repoRoot string, deps HandlerDeps
 	// discard the user's in-flight commits, and that decision is
 	// theirs.
 	if rebase := unfinishedRebase(gitDir); rebase != "" {
-		return "", "", fmt.Errorf(
+		msg := fmt.Sprintf(
 			"❌ %s is in the middle of a rebase (%s) — run `git rebase --abort` to clear it before refreshing",
 			repoRoot, rebase)
+		// `git rebase --abort` fails while the index lock is there,
+		// and it leaves HEAD detached when it does — so name the
+		// lock and the order of operations.
+		if lock := indexLockPath(gitDir); lock != "" {
+			msg += fmt.Sprintf(
+				"\nremove the stale git index lock first: rm '%s' (`git rebase --abort` fails while it is there)",
+				lock)
+		}
+		return "", "", errors.New(msg)
 	}
 
 	// Step 4: refuse on dirty main.

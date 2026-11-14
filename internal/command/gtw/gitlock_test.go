@@ -68,6 +68,20 @@ func TestParseGitLockConflict(t *testing.T) {
 			wantOK:   true,
 		},
 		{
+			// git does not escape an apostrophe in the path.
+			name:     "path with an apostrophe",
+			stderr:   "fatal: Unable to create '/tmp/apos's repo/.git/index.lock': File exists.",
+			wantPath: "/tmp/apos's repo/.git/index.lock",
+			wantOK:   true,
+		},
+		{
+			// git ships translations, so the wording is not stable.
+			name:     "localized message",
+			stderr:   "fatal: 无法创建 '/repo/.git/index.lock'：文件已存在。",
+			wantPath: "/repo/.git/index.lock",
+			wantOK:   true,
+		},
+		{
 			name:   "other failure",
 			stderr: "fatal: not a git repository: '/nope'",
 			wantOK: false,
@@ -179,6 +193,72 @@ func TestRecoverGitLockConflict_RetryFailureIsNotRetriedAgain(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "did not match") {
 		t.Errorf("the retry's stderr should be reported: %q", stderr)
+	}
+}
+
+// TestRecoverGitLockConflict_LiveHolderKeepsTheLock pins the guard
+// that keeps the recovery from stealing a lock a live git still owns.
+//
+// Git holds the lock file open from the moment it creates it until it
+// commits or rolls the lock back, and it holds it across the whole
+// worktree update of a checkout — so a lock can be minutes old while
+// its owner is alive. Unlinking it would let two processes write the
+// index at once.
+func TestRecoverGitLockConflict_LiveHolderKeepsTheLock(t *testing.T) {
+	dir := t.TempDir()
+	lock := filepath.Join(dir, "index.lock")
+	writeLock(t, lock, 31*time.Second)
+
+	// Hold the lock open, the way a live git does.
+	handle, err := os.OpenFile(lock, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("open lock: %v", err)
+	}
+	defer handle.Close()
+
+	calls := 0
+	retry := countingRetry(&calls, "", "", nil)
+
+	_, _, err = recoverGitLockConflict(context.Background(), dir,
+		[]string{"add"}, "", gitLockConflictStderr(lock),
+		errors.New("exit status 128"), lock, retry)
+	if err == nil {
+		t.Fatal("expected an error while the lock is held, got nil")
+	}
+	if calls != 0 {
+		t.Errorf("retry calls = %d, want 0 (a held lock is not removed)", calls)
+	}
+	if _, statErr := os.Stat(lock); statErr != nil {
+		t.Errorf("the held lock was removed: %v", statErr)
+	}
+}
+
+// TestRecoverGitLockConflict_RefLockIsNotRemoved pins that only the
+// index lock is ever removed. The other lock files git takes (a ref
+// lock, packed-refs.lock) belong to network operations that can run
+// for minutes, and removing one of those breaks the ref update.
+func TestRecoverGitLockConflict_RefLockIsNotRemoved(t *testing.T) {
+	dir := t.TempDir()
+	lock := filepath.Join(dir, "refs", "heads", "main.lock")
+	if err := os.MkdirAll(filepath.Dir(lock), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	writeLock(t, lock, 31*time.Second)
+
+	calls := 0
+	retry := countingRetry(&calls, "", "", nil)
+
+	_, _, err := recoverGitLockConflict(context.Background(), dir,
+		[]string{"push"}, "", gitLockConflictStderr(lock),
+		errors.New("exit status 128"), lock, retry)
+	if err == nil {
+		t.Fatal("expected an error, got nil")
+	}
+	if calls != 0 {
+		t.Errorf("retry calls = %d, want 0 (a ref lock is not removed)", calls)
+	}
+	if _, statErr := os.Stat(lock); statErr != nil {
+		t.Errorf("the ref lock was removed: %v", statErr)
 	}
 }
 
@@ -382,6 +462,14 @@ func TestRefreshDefaultBranch_RefusesUnfinishedRebase(t *testing.T) {
 				t.Fatalf("mkdir %s: %v", name, err)
 			}
 
+			// A killed `git pull --rebase` leaves the index lock
+			// behind too, and `git rebase --abort` fails while it is
+			// there — so the message has to name it.
+			lock := filepath.Join(repo, ".git", "index.lock")
+			if err := os.WriteFile(lock, nil, 0o600); err != nil {
+				t.Fatalf("write index.lock: %v", err)
+			}
+
 			_, _, err := RefreshDefaultBranch(context.Background(), repo, HandlerDeps{
 				Git: ExecGitRunner{},
 			})
@@ -391,8 +479,14 @@ func TestRefreshDefaultBranch_RefusesUnfinishedRebase(t *testing.T) {
 			if !strings.Contains(err.Error(), "git rebase --abort") {
 				t.Errorf("error should name `git rebase --abort`: %v", err)
 			}
+			if !strings.Contains(err.Error(), lock) {
+				t.Errorf("error should name the index lock %q: %v", lock, err)
+			}
 			if _, statErr := os.Stat(rebaseDir); statErr != nil {
 				t.Errorf("the rebase state was removed: %v", statErr)
+			}
+			if _, statErr := os.Stat(lock); statErr != nil {
+				t.Errorf("the index lock was removed: %v", statErr)
 			}
 		})
 	}

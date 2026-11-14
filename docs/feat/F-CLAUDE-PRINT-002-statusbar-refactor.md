@@ -629,16 +629,30 @@ func armGraceCancel(cmd *exec.Cmd) {
 stat <path>
   文件已消失      → 持有者在失败与检查之间释放了它 → 直接重试一次,不删任何东西
   mtime ≤ 30s     → 可能还有活的 git 持有 → 不删;失败信息带上路径、年龄、手动清理方法
+  不是 index.lock → 不是 index lock(ref lock / packed-refs.lock)→ 不删
+  还有进程打开着   → 持有者还活着 → 不删
   mtime > 30s     → 持有者已被 kill → 删掉它,记一条 warning,重试一次
 
 重试仍失败 → 一次性上报(git 的 stderr + 锁路径 + 年龄),不再重试
 ```
 
-lock 路径取自 git 自己的 stderr,而不是从工作目录推算:git 报的是它没能创建的那个确切文件,primary checkout 和 linked worktree 都对,也不需要额外的 git 调用去解析。
+lock 路径取自 git 自己的 stderr,而不是从工作目录推算:git 报的是它没能创建的那个确切文件,primary checkout 和 linked worktree 都对,也不需要额外的 git 调用去解析。git 的这句话带 gettext 翻译,所以解析先试英文原文,再退回到"引号里的 .lock 文件"这一 locale 无关的形状;路径里有单引号时(git 不转义)取到的是最后一个 "': " 之前的内容。
 
-**30s 阈值**:git 只在写 index 文件的那一小段时间里持有 index lock(`git add` 最耗时的 hashing 工作树发生在拿锁之前),活的锁通常只活几毫秒到几秒。30s 远高于任何现实的持有时长,删掉活锁(两个进程同时写 index → index 损坏)的风险可以忽略,又恢复得足够快。
+**30s 阈值只是初筛,不是判据**:git 是在 checkout / reset / merge / rebase 的**整个工作树更新期间**持有 index lock 的,而 lock 文件的 mtime 停在创建那一刻 —— 一次 4000 文件的 checkout 实测持锁约 6s,更大的仓库更久。所以"lock 够旧"完全不能证明持有者已死,删掉一个活着的 lock 会让两个进程同时写 index:持有者最后 `rename(index.lock, index)` 失败("fatal: unable to write new index file"),工作树已经换了内容而 index 还是旧的,两者就此分叉。
 
-**未完成的 rebase**:被 kill 的 `git pull --rebase` 除了留下 index lock,还会留下 `.git/rebase-merge` 或 `.git/rebase-apply`。只清 lock 不够 —— 下一次 rebase 会拒绝运行。`RefreshDefaultBranch` 在解析出 git 目录后检查这两个目录,存在就拒绝刷新并报出 `git rebase --abort`,但**不动仓库**:abort 掉 rebase 会丢掉用户正在写的 commit,这个决定属于用户。
+**真正的判据是"还有没有进程打开着这个文件"**:git 从创建 lock 起一直持有它的 fd,直到 commit 或 rollback 才关闭;被 kill 的 git 会随进程一起关掉 fd,文件留在盘上却不再被打开。于是"被打开"= 持有者活着,"没被打开"= 持有者已死。
+
+| 平台 | 怎么查 |
+|---|---|
+| Linux | 扫 `/proc/<pid>/fd`,和 lock 的 inode 比对 |
+| macOS | `lsof -t -- <path>`(没有 /proc;lsof 要扫全部进程,约 1s) |
+| Windows | 用 share mode 0 打开文件:别人打开着就会 sharing violation |
+
+查不到(或平台没实现)时按"还活着"处理 —— 不删。lock 删不得就报出来:路径、年龄、手动清理的方法。
+
+**只删 index lock**:git 还会拿别的 lock 文件(ref lock、`packed-refs.lock`),那些属于 fetch / push 这类网络操作,持锁可以长达数分钟,删掉会直接破坏对应的 ref 更新。所以自愈只处理 `index.lock`。
+
+**未完成的 rebase**:被 kill 的 `git pull --rebase` 除了留下 index lock,还会留下 `.git/rebase-merge` 或 `.git/rebase-apply`。只清 lock 不够 —— 下一次 rebase 会拒绝运行。`RefreshDefaultBranch` 在解析出 git 目录后检查这两个目录,存在就拒绝刷新并报出 `git rebase --abort`,但**不动仓库**:abort 掉 rebase 会丢掉用户正在写的 commit,这个决定属于用户。lock 还在的话错误信息会一并点出它 —— `git rebase --abort` 撞上 index lock 会失败,并把 HEAD 留在 detached 状态,所以要先删 lock 再 abort。
 
 **`--no-optional-locks`**:只读的 `git status` 会顺手刷新 index(把 stat cache 写回 index 文件)—— 这就是它会拿 index lock 的原因,而这个刷新对调用方毫无价值:status 报告的内容不变,只是下次调用要多 hash 一遍。`git --no-optional-locks <cmd>` 跳过这个 optional 操作,于是这些调用从不拿锁、也从不留下锁。`git diff` 也带上同一个 flag(读 diff 不需要刷新 index)。flag 显式写在调用点(而不是由 runner 注入),argv 保持可读可 grep:
 
@@ -647,6 +661,9 @@ lock 路径取自 git 自己的 stderr,而不是从工作目录推算:git 报的
 | `internal/command/gtw/git_status.go` | `git --no-optional-locks status --porcelain --branch --untracked-files=normal`(chat footer 路径) |
 | `internal/command/gtw/worktree.go` | `git --no-optional-locks status --porcelain`(刷新前的 dirty 检查) |
 | `internal/command/gtw/persist.go` | `git --no-optional-locks status --porcelain -- .gitignore` |
+| `internal/command/gtw/push.go` | `git --no-optional-locks status --porcelain` |
+| `internal/command/gtw/close.go` | `git --no-optional-locks status --porcelain` |
+| `internal/me/agent_prompt.go` | `git --no-optional-locks status --porcelain --branch` |
 | `internal/command/wiki/git.go` | `git --no-optional-locks -C <cwd> status --porcelain` |
 | `internal/agent/review_with_ocr.go` | `git --no-optional-locks -C <ws> diff …` |
 

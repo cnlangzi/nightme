@@ -580,7 +580,8 @@ func compensateWIPLabel(
 // porcelain format GitStatusSnapshot uses elsewhere in gtw, so
 // the semantics are consistent across the package.
 func assertWorktreeClean(ctx context.Context, dir string, deps HandlerDeps) error {
-	stdout, stderr, err := deps.Git.Run(ctx, dir, "status", "--porcelain")
+	stdout, stderr, err := deps.Git.Run(ctx, dir,
+		"--no-optional-locks", "status", "--porcelain")
 	if err != nil {
 		return gitErr(fmt.Sprintf("❌ git status in %s failed", dir), err, stderr)
 	}

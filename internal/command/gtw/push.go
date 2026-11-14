@@ -375,7 +375,8 @@ func unpushedCommitsForDisplay(ctx context.Context, worktree, branch string, dep
 // tell the user exactly what's still uncommitted after the agent
 // claimed to be done.
 func listUncommittedFiles(ctx context.Context, worktree string, deps HandlerDeps) ([]string, error) {
-	out, stderr, err := deps.Git.Run(ctx, worktree, "status", "--porcelain")
+	out, stderr, err := deps.Git.Run(ctx, worktree,
+		"--no-optional-locks", "status", "--porcelain")
 	if err != nil {
 		return nil, gitErr("git status", err, stderr)
 	}

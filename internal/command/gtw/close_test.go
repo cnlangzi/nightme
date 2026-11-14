@@ -126,7 +126,7 @@ func (p *programmableGit) Run(_ context.Context, dir string, args ...string) (st
 	p.calls = append(p.calls, append([]string(nil), args...))
 
 	switch {
-	case len(args) >= 1 && args[0] == "status":
+	case gitSubcommand(args) == "status":
 		return p.statusResp, "", nil
 	case len(args) >= 2 && args[0] == "worktree" && args[1] == "remove":
 		return "", p.worktreeRemoveStderr, p.worktreeRemoveErr

@@ -1,6 +1,7 @@
 package wfe
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -667,6 +668,25 @@ func TestLoadDir_TwoFilesWithTheSameNameMakeItUnusable(t *testing.T) {
 	}
 }
 
+// TestLoadDir_TheClashIsTheOnlyFailureOfAName — a name two files
+// claim carries one failure: the clash, not the state of one of them.
+func TestLoadDir_TheClashIsTheOnlyFailureOfAName(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "fix.yaml"), "title: one\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeFile(t, filepath.Join(dir, "fix.yml"), "goal: no title\njobs:\n  main:\n    steps: [{message: hi}]\n")
+
+	wfs, failures := LoadDir(dir)
+	if len(wfs) != 0 {
+		t.Fatalf("workflows = %v, want none", wfs)
+	}
+	if len(failures) != 1 {
+		t.Fatalf("failures = %v, want one", failures)
+	}
+	if !strings.Contains(failures[0].Error(), `duplicate workflow name "fix"`) {
+		t.Errorf("failure = %v, want the clash", failures[0])
+	}
+}
+
 // TestBind_ExpandsTheTitle — the title may hold an argument, the way
 // the goal did.
 func TestBind_ExpandsTheTitle(t *testing.T) {
@@ -826,5 +846,52 @@ func TestBind_LeavesTheSourceAlone(t *testing.T) {
 	}
 	if got := wf.Jobs["ship"].Steps[0].Message; got != "/gtw fix ${{ args.issue }} -y" {
 		t.Errorf("the source workflow was changed: %q", got)
+	}
+}
+
+// TestWorkflow_UnmarshalJSON_MigratesTheRetiredGoal — a run that was
+// persisted before the title replaced the goal keeps its purpose when
+// the daemon resumes it.
+func TestWorkflow_UnmarshalJSON_MigratesTheRetiredGoal(t *testing.T) {
+	var wf Workflow
+	raw := `{"name":"fix","goal":"do the thing","jobs":{"main":{"steps":[{"id":"s","message":"hi"}]}}}`
+	if err := json.Unmarshal([]byte(raw), &wf); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if wf.Title != "do the thing" {
+		t.Errorf("Title = %q, want the migrated goal", wf.Title)
+	}
+	if wf.Name != "fix" {
+		t.Errorf("Name = %q, want fix", wf.Name)
+	}
+	job, ok := wf.Jobs["main"]
+	if !ok || len(job.Steps) != 1 || job.Steps[0].Message != "hi" {
+		t.Errorf("Jobs = %v, want the step of the persisted run", wf.Jobs)
+	}
+}
+
+// TestWorkflow_UnmarshalJSON_KeepsTheTitle — a title that is there
+// wins over the retired goal.
+func TestWorkflow_UnmarshalJSON_KeepsTheTitle(t *testing.T) {
+	var wf Workflow
+	raw := `{"name":"fix","title":"the title","goal":"the old goal"}`
+	if err := json.Unmarshal([]byte(raw), &wf); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if wf.Title != "the title" {
+		t.Errorf("Title = %q, want the title", wf.Title)
+	}
+}
+
+// TestWorkflowPaths_AnEmptyDirectoryHoldsNoWorkflows — an unset
+// workflows directory holds nothing, not the workflows of the working
+// directory.
+func TestWorkflowPaths_AnEmptyDirectoryHoldsNoWorkflows(t *testing.T) {
+	paths, err := WorkflowPaths("")
+	if err != nil {
+		t.Fatalf("WorkflowPaths: %v", err)
+	}
+	if len(paths) != 0 {
+		t.Errorf("paths = %v, want none", paths)
 	}
 }

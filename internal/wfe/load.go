@@ -34,16 +34,16 @@ func (f Failure) Error() string {
 //
 // Both `*.yaml` and `*.yml` are read, and a workflow's identity is the
 // base name of its file. The workflows that loaded come back with one
-// failure per file that did not: a broken file does not take the
-// workflows beside it down with it.
+// failure per base name that is unusable: a broken file does not take
+// the workflows beside it down with it.
 func LoadDir(dir string) ([]*Workflow, []Failure) {
 	paths, err := WorkflowPaths(dir)
 	if err != nil {
-		return nil, []Failure{{Path: dir, Err: err}}
+		return nil, []Failure{{Path: dir, Err: fmt.Errorf("the workflows directory %s cannot be read: %w", dir, err)}}
 	}
-	claims := map[string][]string{} // base name -> the files that claim it
-	loaded := map[string]*Workflow{}
-	var failures []Failure
+	claims := map[string][]string{}  // base name -> the files that claim it
+	loaded := map[string]*Workflow{} // base name -> the workflow that loaded
+	broken := map[string]Failure{}   // base name -> why the file did not load
 	for _, path := range paths {
 		name := BaseName(path)
 		if name == "" {
@@ -52,11 +52,11 @@ func LoadDir(dir string) ([]*Workflow, []Failure) {
 		claims[name] = append(claims[name], path)
 		wf, err := LoadFile(path)
 		if err != nil {
-			failures = append(failures, Failure{
+			broken[name] = Failure{
 				Name: name,
 				Path: path,
 				Err:  fmt.Errorf("%s could not be loaded: %w", filepath.Base(path), err),
-			})
+			}
 			continue
 		}
 		loaded[name] = wf
@@ -67,9 +67,13 @@ func LoadDir(dir string) ([]*Workflow, []Failure) {
 	}
 	sort.Strings(names)
 	var workflows []*Workflow
+	var failures []Failure
 	for _, name := range names {
 		files := claims[name]
 		if len(files) > 1 {
+			// Two files claim the name: it is ambiguous, and neither
+			// file is offered under it. The clash is the reason the
+			// name is unusable, not the state of one of the files.
 			failures = append(failures, Failure{
 				Name: name,
 				Path: files[1],
@@ -78,27 +82,40 @@ func LoadDir(dir string) ([]*Workflow, []Failure) {
 			})
 			continue
 		}
-		wf, ok := loaded[name]
-		if !ok {
-			// The file did not load: its failure says why.
+		if failure, bad := broken[name]; bad {
+			failures = append(failures, failure)
 			continue
 		}
-		workflows = append(workflows, wf)
+		workflows = append(workflows, loaded[name])
 	}
 	return workflows, failures
 }
 
 // WorkflowPaths returns the workflow files of dir, sorted.
 //
-// A workflow file is a `*.yaml` or a `*.yml` file.
+// A workflow file is a `*.yaml` or a `*.yml` file. A directory that
+// cannot be read is an error: the caller says so instead of reporting
+// an empty directory.
 func WorkflowPaths(dir string) ([]string, error) {
-	var out []string
-	for _, pattern := range []string{"*.yaml", "*.yml"} {
-		files, err := filepath.Glob(filepath.Join(dir, pattern))
-		if err != nil {
-			return nil, fmt.Errorf("wfe: glob %s: %w", dir, err)
+	if strings.TrimSpace(dir) == "" {
+		return nil, nil
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
 		}
-		out = append(out, files...)
+		return nil, err
+	}
+	var out []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		switch filepath.Ext(e.Name()) {
+		case ".yaml", ".yml":
+			out = append(out, filepath.Join(dir, e.Name()))
+		}
 	}
 	sort.Strings(out)
 	return out, nil

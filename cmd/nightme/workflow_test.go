@@ -331,3 +331,54 @@ func captureStderr(t *testing.T, fn func() error) string {
 	_ = err
 	return string(buf[:n])
 }
+
+// TestWorkflowList_OnlyTheFailuresOfABrokenDirectory — a directory
+// whose files all failed says why, not that it holds no workflow.
+func TestWorkflowList_OnlyTheFailuresOfABrokenDirectory(t *testing.T) {
+	dir := t.TempDir()
+	body := `
+title: review the changes
+jobs:
+  main:
+    steps:
+      - id: s1
+        run: echo
+`
+	if err := os.WriteFile(filepath.Join(dir, "reviewer.yaml"), []byte(body), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
+
+	out := captureStdout(t, func() error {
+		return runRoot("workflow", "list")
+	})
+	if strings.Contains(out, "no workflows found") {
+		t.Errorf("output = %q, want the failure of the file", out)
+	}
+	if !strings.Contains(out, "reviewer.yaml") {
+		t.Errorf("output = %q, want the file that did not load", out)
+	}
+}
+
+// TestWorkflowShow_ReportsTheClashOfTwoFiles — the name two files
+// claim is unusable, and the clash is the reason.
+func TestWorkflowShow_ReportsTheClashOfTwoFiles(t *testing.T) {
+	dir := t.TempDir()
+	good := "title: one\njobs:\n  main:\n    steps: [{message: hi}]\n"
+	broken := "goal: no title\njobs:\n  main:\n    steps: [{message: hi}]\n"
+	if err := os.WriteFile(filepath.Join(dir, "fix.yaml"), []byte(good), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "fix.yml"), []byte(broken), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
+
+	err := runRoot("workflow", "show", "fix")
+	if err == nil {
+		t.Fatal("the ambiguous name was accepted")
+	}
+	if !strings.Contains(err.Error(), `duplicate workflow name "fix"`) {
+		t.Errorf("err = %v, want the clash", err)
+	}
+}

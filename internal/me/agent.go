@@ -412,7 +412,7 @@ func (s *Service) actionsDir() string {
 // is refused.
 func (s *Service) StartWorkflow(ctx context.Context, req Request) (string, error) {
 	if err := s.catalog.Refresh(); err != nil {
-		return "", fmt.Errorf("me: the workflows in %s cannot be read: %w", s.cfg.WorkflowsDir, err)
+		return "", fmt.Errorf("me: %w", err)
 	}
 	if reason := s.modelsReason(); reason != "" {
 		return "", fmt.Errorf("me is disabled: %s", reason)

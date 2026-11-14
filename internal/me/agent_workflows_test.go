@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -238,4 +239,92 @@ jobs:
 		t.Fatalf("stop: %v", err)
 	}
 	waitRun(t, svc, "obs-1")
+}
+
+// TestStartWorkflow_ReportsTheClashOfTwoFiles — the name two files
+// claim is unusable, and the clash is the reason the daemon gives.
+func TestStartWorkflow_ReportsTheClashOfTwoFiles(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "fix", `title: do the thing
+jobs:
+  main:
+    steps:
+      - id: rest
+        wait: 5m
+`)
+	// A second file claims the same name.
+	if err := os.WriteFile(filepath.Join(dir, "fix.yml"), []byte("goal: no title\njobs:\n  main:\n    steps: [{message: hi}]\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	svc, _, _ := testService(t, dir, noModels())
+	_, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "fix", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+	})
+	if err == nil {
+		t.Fatal("the ambiguous name was accepted")
+	}
+	if !strings.Contains(err.Error(), `duplicate workflow name "fix"`) {
+		t.Errorf("error = %v, want the clash", err)
+	}
+}
+
+// TestResume_ARunPersistedBeforeTheTitleKeepsItsPurpose — a run that
+// was persisted before the title replaced the goal keeps its purpose
+// when the daemon resumes it.
+func TestResume_ARunPersistedBeforeTheTitleKeepsItsPurpose(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	// A run state written before the title replaced the goal.
+	state := `{
+  "run_id": "one-1",
+  "observer_chat_id": "obs-1",
+  "work_chat_id": "lb_one-1",
+  "cwd": "/tmp/work",
+  "agent": "claude",
+  "workflow": {
+    "name": "one",
+    "goal": "Do the one thing.",
+    "jobs": {"main": {"steps": [{"id": "rest", "wait": "5m"}]}}
+  },
+  "state": {
+    "run_id": "one-1",
+    "workflow": "one",
+    "workspace": "/tmp/work",
+    "status": "running",
+    "steps": [],
+    "started_at": "2026-01-01T00:00:00Z"
+  },
+  "history": [],
+  "messages": [],
+  "phase": "running"
+}`
+	runs := filepath.Join(dir, "runs")
+	if err := os.MkdirAll(runs, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(runs, "one-1.json"), []byte(state), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	svc, _, _ := testService(t, dir, noModels())
+	svc.mu.Lock()
+	var restored *run
+	for _, r := range svc.runs {
+		restored = r
+	}
+	svc.mu.Unlock()
+	if restored == nil {
+		t.Fatal("the run was not resumed")
+	}
+	restored.mu.Lock()
+	title := restored.workflow.Title
+	restored.mu.Unlock()
+	if title != "Do the one thing." {
+		t.Errorf("the resumed run has the title %q, want the migrated goal", title)
+	}
+	if rendered := restored.renderPolicy(); !strings.Contains(rendered, "title: Do the one thing.") {
+		t.Errorf("the resumed policy does not carry the purpose:\n%s", rendered)
+	}
 }

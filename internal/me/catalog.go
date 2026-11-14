@@ -83,13 +83,16 @@ func NewCatalog(dir string) *Catalog {
 // A file that does not load is remembered under its base name, so the
 // name it would have provided reports the reason instead of "there is
 // no workflow named".
+//
+// A directory that cannot be read is an error, and the catalogue keeps
+// what it has: the workflows it holds are still the ones on disk.
 func (c *Catalog) Refresh() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	paths, err := wfe.WorkflowPaths(c.dir)
 	if err != nil {
-		return err
+		return fmt.Errorf("the workflows directory %s cannot be read: %w", c.dir, err)
 	}
 	files := make(map[string]*catalogEntry, len(paths))
 	for _, path := range paths {

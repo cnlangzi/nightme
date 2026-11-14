@@ -91,7 +91,7 @@ func newWorkflowListCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := printWorkflowList(cmd.OutOrStdout(), wfs, dir, jsonOut); err != nil {
+			if err := printWorkflowList(cmd.OutOrStdout(), wfs, failures, dir, jsonOut); err != nil {
 				return err
 			}
 			if jsonOut {
@@ -106,7 +106,7 @@ func newWorkflowListCmd() *cobra.Command {
 
 // printWorkflowList writes a human-readable (or JSON) table of
 // workflows to w.
-func printWorkflowList(w io.Writer, wfs []*wfe.Workflow, dir string, asJSON bool) error {
+func printWorkflowList(w io.Writer, wfs []*wfe.Workflow, failures []wfe.Failure, dir string, asJSON bool) error {
 	if asJSON {
 		type item struct {
 			Name       string   `json:"name"`
@@ -143,7 +143,7 @@ func printWorkflowList(w io.Writer, wfs []*wfe.Workflow, dir string, asJSON bool
 	if err := tw.Flush(); err != nil {
 		return err
 	}
-	if len(wfs) == 0 {
+	if len(wfs) == 0 && len(failures) == 0 {
 		fmt.Fprintf(w, "\nno workflows found in %s\n", dir)
 		fmt.Fprintf(w, "hint: create a *.yaml or *.yml file there, or set $NIGHTME_WORKFLOWS_DIR\n")
 	}

@@ -5,7 +5,10 @@
 // runtime.go).
 package wfe
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // Workflow is the parsed+validated workflow definition.
 //
@@ -24,6 +27,29 @@ type Workflow struct {
 	Workspaces []string       `yaml:"workspaces" json:"workspaces,omitempty"`
 	On         Trigger        `yaml:"on" json:"on"`
 	Jobs       map[string]Job `yaml:"jobs" json:"jobs"`
+}
+
+// UnmarshalJSON reads a workflow, migrating the retired `goal` key
+// into the title.
+//
+// A run that was persisted before the title replaced the goal keeps
+// its purpose when the daemon resumes it: the file on disk still
+// carries the old key. New writes only carry the title.
+func (w *Workflow) UnmarshalJSON(data []byte) error {
+	type alias Workflow
+	aux := struct {
+		*alias
+		LegacyGoal string `json:"goal,omitempty"`
+	}{
+		alias: (*alias)(w),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if w.Title == "" && aux.LegacyGoal != "" {
+		w.Title = aux.LegacyGoal
+	}
+	return nil
 }
 
 // Arg is one argument a workflow takes.

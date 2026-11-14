@@ -213,3 +213,29 @@ func TestCatalog_AMissingDirectoryIsNotAnError(t *testing.T) {
 		t.Errorf("failures = %v, want none", failures)
 	}
 }
+
+// TestCatalog_ADirectoryThatCannotBeRead — the refresh says why and
+// keeps the workflows the catalogue holds.
+func TestCatalog_ADirectoryThatCannotBeRead(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflowFile(t, dir, "fix.yml", "title: one\njobs:\n  main:\n    steps: [{message: hi}]\n")
+
+	c := NewCatalog(dir)
+	if err := c.Refresh(); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	// The directory is a file now: it cannot be read.
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if err := os.WriteFile(dir, []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := c.Refresh(); err == nil {
+		t.Fatal("a directory that cannot be read was accepted")
+	}
+	if _, ok := c.Lookup("fix"); !ok {
+		t.Error("the catalogue forgot the workflow it held")
+	}
+}

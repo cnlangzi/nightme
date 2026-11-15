@@ -31,7 +31,7 @@ func TestBuildPersonalAgent_NoChannel(t *testing.T) {
 func TestBuildPersonalAgent_StartsWithAChannel(t *testing.T) {
 	cfg := &config.Config{Paths: config.PathsConfig{DataDir: t.TempDir()}}
 	ch := newStubChannel("stub", nil)
-	op := newOperator(nil, []channel.Channel{ch})
+	op := newOperator(nil, []channel.Channel{ch}, slog.Default())
 	svc := buildPersonalAgent(cfg, []channel.Channel{ch}, op, slog.Default())
 	if svc == nil {
 		t.Fatal("expected an agent")
@@ -54,7 +54,7 @@ func init() {
 // channel that owns it.
 func TestOperator_ResolvesTheChannelOfTheChat(t *testing.T) {
 	ch := newStubChannel("me_stub", nil)
-	op := newOperator(nil, []channel.Channel{ch})
+	op := newOperator(nil, []channel.Channel{ch}, slog.Default())
 
 	got, err := op.channelFor("ms_test")
 	if err != nil {
@@ -73,7 +73,7 @@ func TestOperator_ResolvesTheChannelOfTheChat(t *testing.T) {
 // says so.
 func TestOperator_RefusesAChannelThatCannotBeDriven(t *testing.T) {
 	ch := newStubChannel("me_stub", nil)
-	op := newOperator(nil, []channel.Channel{ch})
+	op := newOperator(nil, []channel.Channel{ch}, slog.Default())
 
 	_, err := op.impersonatorFor("ms_test")
 	if err == nil {

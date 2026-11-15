@@ -427,7 +427,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	// the channels start: every channel's outbound path taps into
 	// it, and the personal agent reads from it.
 	tracker := observe.NewTracker()
-	op := newOperator(tracker, chs)
+	op := newOperator(tracker, chs, logger)
 
 	// The personal agent is built here — before the channels start —
 	// so the /me command can reach it. It only speaks once a run

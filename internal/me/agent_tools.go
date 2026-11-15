@@ -211,23 +211,30 @@ func commandSchema(c CommandInfo) json.RawMessage {
 // The calls run one at a time and in order. A call that asks the user
 // suspends the run until the answer arrives; the answer becomes the
 // call's result.
+//
+// Every call is published to the chat: the call before it runs and
+// the result after it settles.
 func (s *Service) runPendingCalls(ctx context.Context, r *run) error {
 	for len(r.pendingCallList()) > 0 {
 		if err := s.checkAlive(ctx, r); err != nil {
 			return err
 		}
 		call := r.pendingCallList()[0]
+		s.publishToolStart(ctx, r, call)
 		res, err := s.execTool(ctx, r, call)
 		if err != nil {
 			var te *toolError
 			if errors.As(err, &te) {
+				s.publishToolEnd(ctx, r, call, te.Error())
 				s.appendToolResult(r, call, stepResult{Status: "error", Summary: te.Error()}, true)
 				r.dropPendingCall()
 				s.persist(r)
 				continue
 			}
+			s.publishToolEnd(ctx, r, call, err.Error())
 			return err
 		}
+		s.publishToolEnd(ctx, r, call, res.Summary)
 		r.dropPendingCall()
 		s.appendToolResult(r, call, res, false)
 		s.persist(r)

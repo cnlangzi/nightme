@@ -54,10 +54,11 @@ func (s *Service) system2(ctx context.Context, r *run) (bool, error) {
 	r.mu.Unlock()
 	r.setDecision(decisionChat, "the chat model took the turn")
 
-	// The model's own words are what the operator reads in the run's
-	// overview.
+	// The model's own words go to the chat: the operator reads the
+	// run's reasoning where the reasoning of the coding agent is
+	// read.
 	if text := strings.TrimSpace(resp.Message.Text()); text != "" {
-		r.setNote(text)
+		s.publishThinking(ctx, r, text)
 		s.updateCard(r)
 	}
 

@@ -193,6 +193,10 @@ type Operator interface {
 	PostCard(ctx context.Context, chatID string, spec channel.CardSpec) (string, error)
 	// UpdateCard replaces the run's overview.
 	UpdateCard(ctx context.Context, chatID, cardID string, spec channel.CardSpec) error
+	// Emit publishes an outbound message in the chat the run works in.
+	// The kind decides how the chat renders it: thinking becomes a
+	// 💭 card, a tool call a ● line, a reply a message.
+	Emit(ctx context.Context, chatID string, msg messages.OutboundMessage) error
 	// Get returns the tracked execution of a message, without
 	// consuming it.
 	Get(msgID string) (observe.Execution, bool)

@@ -704,6 +704,13 @@ asks a question, the choices become the card's buttons: a click is the answer. T
 question itself never reaches the agent — it is a message of the chat, not a turn
 of the conversation.
 
+The run's own thinking and its tool calls leave the card and appear in the chat,
+rendered the way a coding agent's are: a 💭 card for the thinking, a `● call` /
+`⎿ result` pair for a tool call. The card keeps the state — the phase, the steps,
+the last decision, the token usage — and the thread under the card is the run's
+live log. `/think off` and `/tools off` hide the run's events the way they hide a
+coding agent's.
+
 Two channels can be driven this way: Feishu and Telegram. On any other channel
 `/me start` says so and refuses.
 

@@ -23,14 +23,12 @@ jobs:
       - id: fix
         message: "/gtw fix ${{ args.issue }} -y"
         note: 从 nightme/assigned 队列里挑一个
-        allow: ["/gtw abort"]
         attempts: 3
       - id: commit
         message: "/gtw commit"
       - id: review
         message: "/review"
         note: 没跑完就 /review -c；有改动就先 /gtw commit
-        allow: ["/review -c", "/gtw commit"]
         attempts: 5
       - id: commit2
         message: "/gtw commit"
@@ -93,9 +91,6 @@ func TestParse_Valid(t *testing.T) {
 	}
 	if fix.Kind() != StepKindMessage {
 		t.Errorf("Steps[0].Kind = %v, want message", fix.Kind())
-	}
-	if len(fix.Allow) != 1 || fix.Allow[0] != "/gtw abort" {
-		t.Errorf("Steps[0].Allow = %v", fix.Allow)
 	}
 	if fix.Attempts != 3 {
 		t.Errorf("Steps[0].Attempts = %d, want 3", fix.Attempts)
@@ -418,6 +413,16 @@ jobs:
 			wantErr: "agent:",
 		},
 		{
+			name: "retired allow key",
+			src: `
+title: x
+jobs:
+  main:
+    steps: [{message: hi, allow: ["/gtw commit"]}]
+`,
+			wantErr: "allow:",
+		},
+		{
 			name: "unknown top-level key",
 			src: `
 title: x
@@ -550,6 +555,31 @@ jobs:
 				t.Errorf("error = %v, want it to mention %q", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+// TestParse_RefusesTheRetiredAllowKey — a step that still carries an
+// allow list is refused: the error names the key, the line it is
+// written on and what to write instead.
+func TestParse_RefusesTheRetiredAllowKey(t *testing.T) {
+	src := `title: x
+jobs:
+  main:
+    steps:
+      - id: one
+        message: /gtw commit
+        allow: ["/gtw push"]
+`
+	_, err := parse([]byte(src))
+	if err == nil {
+		t.Fatal("the retired key was accepted")
+	}
+	want := "`allow:` is retired (line 7):"
+	if !strings.HasPrefix(err.Error(), want) {
+		t.Errorf("error = %v, want it to begin with %q", err, want)
+	}
+	if !strings.Contains(err.Error(), "its own step") {
+		t.Errorf("error = %v, want it to say what to write instead", err)
 	}
 }
 

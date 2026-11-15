@@ -531,7 +531,6 @@ jobs:
       - id: fix
         message: "/gtw fix ${{ args.issue }} -y"
         note: 从 nightme/assigned 队列里挑一个；挑不到就等下一轮
-        allow: ["/gtw fix ${{ args.issue }} -y", "/gtw back"]
         attempts: 3
       - id: commit
         message: "/gtw commit"
@@ -539,7 +538,6 @@ jobs:
       - id: review
         message: "/review"
         note: 没跑完就 /review -c；有改动就先 /gtw commit
-        allow: ["/review -c", "/gtw commit"]
         attempts: 5
         if: ${{ steps.fix.outputs.data.issue }}
       - id: commit2
@@ -600,9 +598,8 @@ A step carries exactly one kind:
 | `if` | The condition that has to hold for the step to run. A step without one always runs. |
 | `env` | The environment the step's command gets. |
 | `continue-on-error` | Whether the chain continues when the step fails. |
-| `note` | Why the step is there, and when the extra commands apply. It is the description the decision model reads. |
-| `allow` | The extra commands the agent may use inside the step. |
-| `attempts` | The number of actions the agent may take on the step in one round — the step's own execution, the `allow:` commands and the nightme commands issued for it. Leave the key out for no limit of its own. |
+| `note` | Why the step is there, and which fixes the owner uses for it. It is the description the decision model reads. |
+| `attempts` | The number of actions the agent may take on the step in one round — the step's own execution and the nightme commands issued for it. Leave the key out for no limit of its own. |
 | `final` | The step cleans up after the round: it runs when the round ends, however the round ends. A step marked `final: true` runs in the place of the steps a round that ended early cut short. |
 
 The expressions are `${{ args.NAME }}`, `${{ steps.<id>.outputs.status }}`,

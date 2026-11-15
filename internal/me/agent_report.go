@@ -12,10 +12,10 @@ import (
 // renderWorkflow renders the workflow as the model reads it.
 //
 // The rendering holds the facts the model needs to decide: the
-// objective, the steps in the order they run, why a step is there, the
-// commands a step allows and how often a step may try. The machinery
-// of the workflow — its conditions, its environment, its workspaces and
-// its triggers — is none of the model's business.
+// objective, the steps in the order they run, why a step is there and
+// how often a step may try. The machinery of the workflow — its
+// conditions, its environment, its workspaces and its triggers — is
+// none of the model's business.
 func (s *Service) renderWorkflow(r *run) string {
 	r.mu.Lock()
 	wf := r.workflow
@@ -34,9 +34,6 @@ func (s *Service) renderWorkflow(r *run) string {
 			fmt.Fprintf(&b, "  %s (%s): %s\n", step.ID, stepKind(step), s.evalText(r, stepText(step)))
 			if note := strings.TrimSpace(step.Note); note != "" {
 				fmt.Fprintf(&b, "    note: %s\n", note)
-			}
-			if len(step.Allow) > 0 {
-				fmt.Fprintf(&b, "    allowed commands: %s\n", strings.Join(step.Allow, ", "))
 			}
 			if step.Attempts > 0 {
 				fmt.Fprintf(&b, "    limit: %d attempts in this round\n", step.Attempts)
@@ -214,10 +211,9 @@ func writeOutcomeFacts(b *strings.Builder, st wfe.StepState) {
 // carriesOutcome reports whether the rendered steps already carry the
 // action's verdict.
 //
-// A step's own run and a repair inside a step that already ran both
-// leave the verdict on the step: the step list carries it. A command
-// the run issued for a step that has not run yet leaves it nowhere
-// else.
+// A step's own run leaves the verdict on the step: the step list
+// carries it. A repair the run issued for a step does not: its verdict
+// is nowhere else.
 func carriesOutcome(rendered map[string]wfe.StepState, action wfe.ActionRecord) bool {
 	st, ok := rendered[action.StepID]
 	if !ok {

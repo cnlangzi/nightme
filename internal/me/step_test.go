@@ -419,7 +419,7 @@ jobs:
 	close(shell.gate)
 	waitRun(t, svc, "obs-1")
 
-	allowed := r.allowedCommands()
+	allowed := r.stepCommands()
 	for _, cmd := range allowed {
 		if strings.Contains(cmd, "make build") {
 			t.Errorf("the policy allows the shell command %q", cmd)

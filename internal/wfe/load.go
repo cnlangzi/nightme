@@ -211,7 +211,7 @@ var (
 	workflowKeys = keySet("title", "args", "instruct", "workspaces", "on", "jobs")
 	argKeys      = keySet("name", "default")
 	jobKeys      = keySet("needs", "if", "iterations", "steps")
-	stepKeys     = keySet("id", "if", "env", "continue-on-error", "note", "allow", "attempts", "final", "message", "shell", "use", "with", "wait")
+	stepKeys     = keySet("id", "if", "env", "continue-on-error", "note", "attempts", "final", "message", "shell", "use", "with", "wait")
 	triggerKeys  = keySet("schedule", "pull_request", "branch", "issue", "mention")
 )
 
@@ -397,6 +397,8 @@ func checkSteps(job string, node *yaml.Node) error {
 				return fmt.Errorf("`prompt:` is retired (line %d): use `message:`", e.line)
 			case "agent":
 				return fmt.Errorf("`agent:` is retired (line %d): a run uses the agent of the chat that started it", e.line)
+			case "allow":
+				return fmt.Errorf("`allow:` is retired (line %d): the agent may run any nightme command; a fix does not move the plan on — put the command in its own step if it is part of the work", e.line)
 			}
 			if !stepKeys[e.key] {
 				return fmt.Errorf("unknown key %q in a step of job %q (line %d)", e.key, job, e.line)
@@ -712,7 +714,6 @@ func workflowTexts(wf *Workflow) []string {
 		texts = append(texts, job.If)
 		for _, step := range job.Steps {
 			texts = append(texts, step.If, step.Message, step.Shell, step.Note, step.Use)
-			texts = append(texts, step.Allow...)
 			for _, v := range step.Env {
 				texts = append(texts, v)
 			}
@@ -771,9 +772,6 @@ func cloneWorkflow(wf *Workflow) *Workflow {
 		steps := make([]Step, len(job.Steps))
 		for i, step := range job.Steps {
 			steps[i] = step
-			if len(step.Allow) > 0 {
-				steps[i].Allow = append([]string(nil), step.Allow...)
-			}
 			if len(step.Env) > 0 {
 				env := make(map[string]string, len(step.Env))
 				for k, v := range step.Env {
@@ -834,9 +832,6 @@ func expandWorkflowArgs(wf *Workflow, args map[string]string) {
 			step.Shell = expandArgs(step.Shell, args)
 			step.Note = expandArgs(step.Note, args)
 			step.Use = expandArgs(step.Use, args)
-			for j := range step.Allow {
-				step.Allow[j] = expandArgs(step.Allow[j], args)
-			}
 			for k, v := range step.Env {
 				step.Env[k] = expandArgs(v, args)
 			}

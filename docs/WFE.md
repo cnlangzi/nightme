@@ -6,7 +6,7 @@
 A **workflow** is a YAML file that nightme runs. It answers two questions:
 
 1. **What** does it do? (`jobs.<name>.steps` — ordered steps)
-2. **How far** may it go? (`iterations`, `attempts`, `allow`)
+2. **How far** may it go? (`iterations`, `attempts`)
 
 The personal agent (`/me`) runs a workflow in a chat. The same file is the plan the agent follows and the bound it may not cross.
 
@@ -144,7 +144,6 @@ jobs:
       - id: review
         message: "/review"
         note: 没跑完就 /review -c；有改动就先 /gtw commit
-        allow: ["/review -c", "/gtw commit"]
         attempts: 5
 
       # 4. wait step: sit out a duration
@@ -320,7 +319,7 @@ The text goes into the chat the run works in, marked with a bot sign. A `/`-pref
     Summarise the changes of the last commit in one line.
 ```
 
-The agent's own commands — the ones it may pick at a judgment point — are the steps' `message:` values and the `allow:` entries. A command that is neither comes back to the agent as an error it can correct.
+The decision model picks among the steps' `message:` values. A registered nightme command the agent issues is a repair: the run accepts it, records it against the step the run is on, and it never becomes that step's verdict. A command that is neither a step's message nor a registered command comes back to the agent as an error it can correct.
 
 ### 5.2 `shell` — execute shell
 
@@ -408,9 +407,8 @@ Every step supports:
 | `if` | string | (always true) | Condition expression. A step whose condition does not hold is skipped and the chain continues. |
 | `env` | map | — | Environment variables for the step (merged on top of the run's env and the daemon's env). |
 | `continue-on-error` | bool | `false` | Whether the chain continues when this step fails. |
-| `note` | string | — | Why the step is there, and when the extra commands apply. It is the description the decision model reads. |
-| `allow` | string[] | — | The extra commands the agent may use inside the step. |
-| `attempts` | int | (no limit) | The number of actions the agent may take on the step in one round — the step's own execution, the `allow:` commands and the nightme commands issued for it. `attempts: 0` means no limit. |
+| `note` | string | — | Why the step is there, and which fixes the owner uses for it. It is the description the decision model reads. |
+| `attempts` | int | (no limit) | The number of actions the agent may take on the step in one round — the step's own execution and the nightme commands issued for it. `attempts: 0` means no limit. |
 | `final` | bool | `false` | The step cleans up after the round. It runs when the round ends, however the round ends. |
 
 ### 5.6 `final` — the step that cleans up after the round
@@ -481,7 +479,6 @@ jobs:
       - id: fix
         message: "/gtw fix ${{ args.issue }} -y"
         note: 从 nightme/assigned 队列里挑一个
-        allow: ["/gtw abort"]
         attempts: 3
       - id: commit
         message: "/gtw commit"
@@ -489,7 +486,6 @@ jobs:
       - id: review
         message: "/review"
         note: 没跑完就 /review -c；有改动就先 /gtw commit
-        allow: ["/review -c", "/gtw commit"]
         attempts: 5
         if: ${{ steps.fix.outputs.data.issue }}
       - id: commit2
@@ -672,15 +668,15 @@ The policy is the bound on what a run may do. It is a pure function of the workf
 
 | Check | Reports |
 |---|---|
-| `CheckRun(command)` | Whether the command may run now, which step it counts against, and whether that step owns it. |
+| `CheckRun(command)` | Whether the command may run now and which step it counts against. |
 | `CheckStep(index)` | Whether the step may take an action now — its own `attempts` limit for the current round. |
 | `CheckInstruct()` | Whether a free-form instruction is allowed. |
 | `CheckFinish(status)` | Whether the run may end. `done` needs the last executed step's latest outcome to be `ok` or `noop`; `failed` is always allowed. |
 | `Remaining()` | The actions left per step. |
-| `Render()` | The workflow as a compact text block: the identity, the title, the steps, the notes, the allowed commands and the limits. |
-| `AllowedCommands()` | The commands the policy accepts right now. |
+| `Render()` | The workflow as a compact text block: the identity, the title, the steps, the notes and the limits. |
+| `StepCommands()` | The step messages the policy accepts right now. |
 
-A command belongs to the first step that lists it, and a step that spent its limit takes its commands out of the list. A step's `attempts` limit counts the actions of the current round only: the step's own execution, the `allow:` commands the agent ran against it and the nightme commands issued for it. The limit starts over at every round.
+A step's message belongs to that step, and a step that spent its limit leaves the list. A step's `attempts` limit counts the actions of the current round only: the step's own execution and the nightme commands issued for it. The limit starts over at every round.
 
 The registered nightme commands are not the workflow's own: they are accepted without belonging to a step, and they are recorded against the step the run is on. The step's own verdict is the one the plan reads, so a repair that succeeded does not turn a failed step into a finished one.
 
@@ -715,7 +711,7 @@ At a judgment point, the agent asks the decision model what comes next.
 
 | Question | Shape | Asked |
 |---|---|---|
-| `next` | choice — the commands the policy accepts now, plus `done` and `escalate`; each option's description is the step's note | always |
+| `next` | choice — the steps' `message:` values, plus `done` and `escalate`; each option's description is the step's note | always |
 | `needs_human` | yes/no — does the next step need the user's judgement or credentials | always |
 | `step_succeeded` | yes/no — did the last step work | only when the last outcome is `unknown` |
 
@@ -726,11 +722,11 @@ The decision is acted on without the chat model when all of these hold:
 - `needs_human` is below 0.5;
 - the policy allows it — `Policy.CheckRun` for a command, `Policy.CheckFinish` for `done`.
 
-The decision is recorded in the conversation as a synthetic assistant tool call, so the chat model reads a consistent history when it takes over: a step of the workflow is `run_step(step_id)`, a nightme command is its own tool. The model that answered is stored with the run.
+The decision is recorded in the conversation as a synthetic assistant tool call, so the chat model reads a consistent history when it takes over: the decision names a step, so the call is `run_step(step_id)`. The model that answered is stored with the run.
 
 **System 2 — the chat model.** The standard tool-calling shape: call the model with the tools, run the tool calls, append the results, repeat until `finish` or a pause.
 
-The model is the owner's avatar: what it runs executes exactly as if the owner had typed it. The system prompt is the role, the tools and the workflow — the title, the jobs, the steps, their notes, the commands a step allows and its limits. It does not carry the workflow's conditions, its environment or its templates: those are the engine's business, not the model's. It names the two situations a step that produced nothing can mean: nothing is left to do (end the round) or the work is still running in the background (wait, then look again).
+The model is the owner's avatar: what it runs executes exactly as if the owner had typed it. The system prompt is the role, the tools and the workflow — the title, the jobs, the steps, their notes and its limits. It does not carry the workflow's conditions, its environment or its templates: those are the engine's business, not the model's. It names the two situations a step that produced nothing can mean: nothing is left to do (end the round) or the work is still running in the background (wait, then look again).
 
 The model is called with a situation report: why the run needs it, the round it is in, the steps of that round and which one is ready, what every step of the round produced — its status, its summary, its facts and the hint that explains its reason code — and the transcripts of the last two actions, each cut to its last 4 KB. The report is the first turn of the conversation; it is added again whenever the workflow ran on by itself in between, as a user turn.
 

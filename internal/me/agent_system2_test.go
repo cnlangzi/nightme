@@ -620,14 +620,15 @@ func TestRunStep_WaitsForTheAgentToFinish(t *testing.T) {
 }
 
 // TestIntegration_TheWorkflowRunsEndToEnd — the review step does not
-// finish, so the agent repairs it; the plan carries on and the run
-// ends on its own.
+// finish, so the agent repairs it and runs the step again; the plan
+// carries on and the run ends on its own.
 func TestIntegration_TheWorkflowRunsEndToEnd(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "fix-issue", fixIssueWorkflow)
 
 	provider := &scriptedProvider{responses: []llm.Response{
 		{Message: toolCallMsg("c1", "ntm_review", map[string]any{"args": "-c"})},
+		{Message: toolCallMsg("c2", toolRunStep, map[string]any{"step_id": "review"})},
 	}}
 	op := newFakeOperator(
 		okStep("fixed"),
@@ -637,6 +638,7 @@ func TestIntegration_TheWorkflowRunsEndToEnd(t *testing.T) {
 			Summary: "1 of 3 groups unfinished",
 			Data:    map[string]string{"groups": "3", "unfinished_groups": "1"},
 		}},
+		okStep("review finished"),
 		okStep("review finished"),
 		okStep("pushed"),
 		fakeStep{outcome: messages.Outcome{

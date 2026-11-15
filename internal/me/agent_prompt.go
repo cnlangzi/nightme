@@ -22,7 +22,7 @@ func (s *Service) systemPrompt(r *run) string {
 	b.WriteString("The workflow runs its steps by itself as long as each one succeeds. You are called when a step has finished and the work cannot go on in the normal order. The situation report says why. Get the work back on course — once it is, the workflow continues without you.\n\n")
 
 	b.WriteString("## The workflow\n")
-	b.WriteString("The title is the objective. The steps are the owner's procedure for reaching it; each note says why a step is there. Follow their order. A step's allowed commands are the owner's usual fixes for it, not the only ones you may use.\n")
+	b.WriteString("The title is the objective. The steps are the owner's procedure for reaching it; each note says why a step is there and which fixes the owner uses for it. Follow their order. The nightme commands are yours to run as fixes, but only a step's own run moves the work on.\n")
 	b.WriteString("A step that waits sits out a duration. A wait belongs at the start of a round: it is how a repeating job backs off when there is nothing to do. A step marked as the final step cleans up after the round: it runs when the round ends, however the round ends.\n\n")
 
 	b.WriteString("## Your tools\n")

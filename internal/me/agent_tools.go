@@ -408,14 +408,12 @@ func (s *Service) toolAgent(ctx context.Context, r *run, call pendingCall) (step
 
 // runStep runs a command of the workflow and records it.
 //
-// The command must be a step's message or one of a step's allow
-// entries. A command that is a step's message is that step running:
-// the run state records it. A command from an allow list is a repair
-// inside the step: only the action history records it.
+// A command that is a step's message is that step running: the run
+// state records it, and it is the step's verdict.
 //
-// A command of the registry that belongs to no step is a repair too,
-// and it is recorded as such: it counts against the step the run is
-// on, but it never becomes that step's verdict.
+// A command of the registry that belongs to no step is a repair: it
+// counts against the step the run is on, and it never becomes that
+// step's verdict.
 //
 // A command that could not run at all comes back as a tool error: the
 // agent reads what went wrong and tries again.
@@ -423,10 +421,14 @@ func (s *Service) toolAgent(ctx context.Context, r *run, call pendingCall) (step
 // The action is recorded only when the command settled: a step that
 // is still running has not been taken yet.
 func (s *Service) runStep(ctx context.Context, r *run, command string) (stepResult, error) {
-	idx, owned, err := r.checkRun(command)
+	idx, err := r.checkRun(command)
 	if err != nil {
 		return stepResult{}, toolErrorf("%s", err.Error())
 	}
+	// The step's own message is the step running. Anything else is a
+	// repair: it counts against the step the run is on and leaves the
+	// step's verdict alone.
+	owned := r.isStepMessage(idx, command)
 	// The card follows the step the command belongs to: the command
 	// runs in the job and the round of that step, and the card records
 	// where the run is working.
@@ -443,19 +445,16 @@ func (s *Service) runStep(ctx context.Context, r *run, command string) (stepResu
 			return stepResult{}, toolErrorf("%s", err.Error())
 		}
 		r.record(actionKind(owned), command, step.ID, out)
-		if owned && (r.isStepMessage(idx, command) || r.hasRun(step.ID)) {
-			// The step ran, or the command was a repair inside a step
-			// that ran: the run state carries the latest outcome. A
-			// repair that was only attempted does not consume the
-			// step: its own message still has to run.
+		if owned {
+			// The step ran: the run state carries the outcome.
 			r.recordStep(wfe.JobOf(r.workflow, step.ID), step, out)
 		}
 		return stepResult{}, toolErrorf("%s", err.Error())
 	}
 	if res.Status == statusWaiting {
 		// The command is still running: the step has no verdict yet.
-		// A command that belongs to no step changes nothing: the
-		// command it started is picked up where it left off.
+		// A repair changes nothing: the command it started is picked
+		// up where it left off.
 		if owned {
 			if step, ok := r.stepAt(idx); ok {
 				r.recordPending(wfe.JobOf(r.workflow, step.ID), step)
@@ -476,16 +475,15 @@ func (s *Service) runStep(ctx context.Context, r *run, command string) (stepResu
 		return res, nil
 	}
 	r.record(actionKind(owned), command, step.ID, out)
-	if owned && (r.isStepMessage(idx, command) || r.hasRun(step.ID)) {
-		// The step ran, or the command was a repair inside a step
-		// that ran: the run state carries the latest outcome.
+	if owned {
+		// The step ran: the run state carries the outcome.
 		r.recordStep(wfe.JobOf(r.workflow, step.ID), step, out)
 	}
 	return res, nil
 }
 
 // actionKind returns the kind an action is recorded as: a command
-// that belongs to no step is not a step's own run.
+// that is no step's own message is a repair.
 func actionKind(owned bool) wfe.ActionKind {
 	if owned {
 		return wfe.ActionKindRun

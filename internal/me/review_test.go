@@ -103,9 +103,9 @@ func TestShellOutputs_TheReservedFactsWin(t *testing.T) {
 	}
 }
 
-// TestRunStep_AFailedRepairDoesNotConsumeTheStep — a repair of a step
-// the plan has not reached yet does not consume that step: the plan
-// still runs it.
+// TestRunStep_AFailedRepairDoesNotConsumeTheStep — a repair that
+// fails does not consume the step the plan has not reached yet: the
+// plan still runs it.
 func TestRunStep_AFailedRepairDoesNotConsumeTheStep(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", `title: one
@@ -116,7 +116,6 @@ jobs:
         message: "/one"
       - id: two
         message: "/two"
-        allow: ["/two -c"]
 `)
 
 	provider := &scriptedProvider{responses: []llm.Response{

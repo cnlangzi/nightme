@@ -251,8 +251,11 @@ func TestCommandTools_TheNameIsCleaned(t *testing.T) {
 		t.Errorf("toolName = %q, want an empty name", got)
 	}
 	long := strings.Repeat("a", 80)
-	if got := toolName(long); got != "ntm_"+strings.Repeat("a", 64) {
-		t.Errorf("toolName = %q, want the name cut to 64 characters", got)
+	if got := toolName(long); len(got) != 64 {
+		t.Errorf("toolName is %d characters long, want 64", len(got))
+	}
+	if got := toolName(long); got != "ntm_"+strings.Repeat("a", 60) {
+		t.Errorf("toolName = %q, want the whole name cut to 64 characters", got)
 	}
 }
 

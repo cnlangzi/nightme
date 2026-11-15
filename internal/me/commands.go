@@ -23,14 +23,26 @@ var excludedCommands = map[string]bool{
 	"tools":  true,
 	"watch":  true,
 	"format": true,
+	"steer":  true,
+	"wiki":   true,
 }
 
 // The subcommands the run may not issue.
 //
 // They shape the project instead of moving the work on, and the run
-// has no say over the project's shape.
+// has no say over the project's shape. The ones that tear the run's
+// own workspace down or move it elsewhere are off limits for the same
+// reason: the run works where it works.
 var excludedSubcommands = map[string]map[string]bool{
-	"gtw": {"config": true, "plan": true, "new": true},
+	"gtw": {
+		"config": true,
+		"plan":   true,
+		"new":    true,
+		"close":  true,
+		"back":   true,
+		"sync":   true,
+		"abort":  true,
+	},
 }
 
 // usableCommands returns the commands the run may issue: the ones the
@@ -91,6 +103,9 @@ func commandNames(cmds []CommandInfo) []string {
 // invalidToolChars is every character a tool name may not carry.
 var invalidToolChars = regexp.MustCompile(`[^a-zA-Z0-9_-]`)
 
+// toolNameLimit is the longest name a tool may carry.
+const toolNameLimit = 64
+
 // toolName returns the tool name of a command: "ntm_" and the
 // command's name, cleaned to the shape a tool name may take.
 //
@@ -100,8 +115,9 @@ func toolName(command string) string {
 	if clean == "" {
 		return ""
 	}
-	if len(clean) > 64 {
-		clean = clean[:64]
+	name := "ntm_" + clean
+	if len(name) > toolNameLimit {
+		name = name[:toolNameLimit]
 	}
-	return "ntm_" + clean
+	return name
 }

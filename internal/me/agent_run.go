@@ -595,9 +595,16 @@ func (r *run) checkCommandText(text string) error {
 	}
 	name := strings.TrimPrefix(first, "/")
 	for _, c := range r.registry {
-		if c.Name == name {
-			return fmt.Errorf("%q is a nightme command: run it with the %s tool", first, toolName(name))
+		if c.Name != name {
+			continue
 		}
+		tool := toolName(name)
+		for _, usable := range r.commands {
+			if usable.Name == name {
+				return fmt.Errorf("%q is a nightme command: run it with the %s tool", first, tool)
+			}
+		}
+		return fmt.Errorf("%q is a nightme command, and the run may not use it", first)
 	}
 	return nil
 }
@@ -634,11 +641,13 @@ func (r *run) setDecision(who, reason string) {
 // recordStep records the outcome of a step in the run's progress.
 //
 // The engine owns the state: the step that ran and its outcome go
-// in together.
+// in together. The run's situation moved on, so the model reads it
+// again before it decides.
 func (r *run) recordStep(job string, step wfe.Step, out wfe.Outcome) {
 	r.mu.Lock()
 	wfe.RecordStep(r.state, job, step, out, false)
 	r.mu.Unlock()
+	r.markSituation()
 }
 
 // recordPending records that a step started and has not settled.
@@ -992,8 +1001,11 @@ func (s *Service) restoreRun(state persistedRun) *run {
 	if oldConversation(r.messages) {
 		// The conversation was written by an older daemon, in a shape
 		// the tools no longer have. The run starts over from the
-		// situation report instead.
+		// situation report instead. The pending calls go with it: a
+		// call the model never saw answered would come back as a
+		// result without a question.
 		r.messages = nil
+		r.pendingCalls = nil
 	}
 	r.cards = map[iteration]string{}
 	for _, entry := range state.Cards {

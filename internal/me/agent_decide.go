@@ -77,10 +77,14 @@ func (s *Service) decide(ctx context.Context, r *run) (decision, error) {
 
 	dec := decision{Model: resp.Model, Options: s.decisionOptions(r)}
 	if answer, ok := resp.Answers[questionNext]; ok && !answer.Refused {
-		dec.Next = answer.Choice
-		dec.NextConfidence = answer.Confidence
-		if dec.NextConfidence == 0 {
-			dec.NextConfidence = answer.Probabilities[answer.Choice]
+		// The answer must be one of the choices the model was offered:
+		// a command it was not given is not a decision.
+		if offered(dec.Options, answer.Choice) {
+			dec.Next = answer.Choice
+			dec.NextConfidence = answer.Confidence
+			if dec.NextConfidence == 0 {
+				dec.NextConfidence = answer.Probabilities[answer.Choice]
+			}
 		}
 	}
 	if answer, ok := resp.Answers[questionNeedsHuman]; ok {
@@ -97,6 +101,16 @@ func (s *Service) decide(ctx context.Context, r *run) (decision, error) {
 		dec.StepSucceeded = &succeeded
 	}
 	return dec, nil
+}
+
+// offered reports whether the choice is one of the options.
+func offered(options []llm.Option, choice string) bool {
+	for _, o := range options {
+		if o.Value == choice {
+			return true
+		}
+	}
+	return false
 }
 
 // decisionQuestions builds the questions of one decision request.

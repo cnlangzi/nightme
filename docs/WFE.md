@@ -627,7 +627,7 @@ The agent answers a judgment point with a **directive**:
 
 `run_step` takes the id of a step: the step that is ready, or one that already ran in this round. A step further down the line is refused — the steps of a job run in order, and a skipped one would come back out of order.
 
-The nightme commands are the ones the command registry holds, minus the ones that would take the run with them (`/me`, `/close`, `/new`, `/stop`, `/cwd`, `/use`, `/resume`), the ones that only show something (`/help`, `/think`, `/tools`, `/watch`, `/format`) and the subcommands that shape the project instead of moving the work on (`/gtw config`, `/gtw plan`, `/gtw new`). A command that belongs to no step is a repair: it counts against the step the run is on, but it never becomes that step's verdict.
+The nightme commands are the ones the command registry holds, minus the ones that would take the run with them (`/me`, `/close`, `/new`, `/stop`, `/cwd`, `/use`, `/resume`, `/steer`, `/wiki`), the ones that only show something (`/help`, `/think`, `/tools`, `/watch`, `/format`) and the subcommands that shape the project or tear the run's own workspace down instead of moving the work on (`/gtw config`, `/gtw plan`, `/gtw new`, `/gtw close`, `/gtw back`, `/gtw sync`, `/gtw abort`). A command that belongs to no step is a repair: it counts against the step the run is on, but it never becomes that step's verdict.
 
 The engine owns the run state: after a directive is executed, the state holds the new outcome, the step that ran and the round it ran in. A decision the agent makes never writes state by itself.
 

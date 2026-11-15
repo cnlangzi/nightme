@@ -249,6 +249,9 @@ func TestTheConversation_HoldsNoHints(t *testing.T) {
 	provider := &scriptedProvider{responses: []llm.Response{
 		{Message: toolCallMsg("c1", toolFinish, map[string]any{"status": "failed", "summary": "stopped"})},
 	}}
+	// The model waits until the test has the run: the run deletes
+	// itself when it ends.
+	provider.block = make(chan struct{})
 	decider := &scriptedDecider{answers: []llm.DecisionResponse{
 		decisionResp("jev-1.14", "/gtw commit", 0.2, 0.8),
 	}}
@@ -264,10 +267,11 @@ func TestTheConversation_HoldsNoHints(t *testing.T) {
 	svc.mu.Lock()
 	r := svc.runs[runID]
 	svc.mu.Unlock()
-	waitRun(t, svc, "obs-1")
 	if r == nil {
 		t.Fatal("the run is not registered")
 	}
+	close(provider.block)
+	waitRun(t, svc, "obs-1")
 
 	for _, m := range r.conversation() {
 		for _, p := range m.Parts {
@@ -290,6 +294,9 @@ func TestTheConversation_TheSyntheticCallHasTheNewShape(t *testing.T) {
 	provider := &scriptedProvider{responses: []llm.Response{
 		{Message: toolCallMsg("c1", toolFinish, map[string]any{"status": "failed", "summary": "stopped"})},
 	}}
+	// The model waits until the test has the run: the run deletes
+	// itself when it ends.
+	provider.block = make(chan struct{})
 	decider := &scriptedDecider{answers: []llm.DecisionResponse{
 		decisionResp("jev-1.14", "/gtw commit", 0.95, 0),
 	}}
@@ -334,6 +341,40 @@ func TestTheConversation_TheSyntheticCallHasTheNewShape(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("the decision was not recorded in the conversation")
+	}
+}
+
+// TestTheDecisionModelCannotAnswerWithACommandItWasNotGiven — a
+// command the decision model was not offered is not a decision: the
+// run escalates instead of running it.
+func TestTheDecisionModelCannotAnswerWithACommandItWasNotGiven(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	provider := &scriptedProvider{responses: []llm.Response{
+		{Message: toolCallMsg("c1", toolFinish, map[string]any{"status": "failed", "summary": "stopped"})},
+	}}
+	decider := &scriptedDecider{answers: []llm.DecisionResponse{
+		decisionResp("jev-1.14", "/gtw push", 0.99, 0),
+	}}
+	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
+	op.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}}}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+		Commands: []CommandInfo{{Name: "gtw"}},
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitRun(t, svc, "obs-1")
+
+	if provider.Calls() == 0 {
+		t.Fatal("the chat model was not asked: the decision was refused")
+	}
+	for _, cmd := range op.Sent() {
+		if cmd == "/gtw push" {
+			t.Fatalf("the decision model ran a command it was not offered: %v", op.Sent())
+		}
 	}
 }
 
@@ -407,9 +448,15 @@ func TestAResumedRunDropsAnOldConversation(t *testing.T) {
 		Workflow: r.workflow,
 		State:    r.state,
 		Messages: r.messages,
+		PendingCalls: []pendingCall{
+			{ID: "c1", Name: toolRunStep, Args: json.RawMessage(`{"command":"/gtw commit"}`)},
+		},
 	})
 	if len(restored.conversation()) != 0 {
 		t.Errorf("the old conversation was kept: %v", restored.conversation())
+	}
+	if len(restored.pendingCallList()) != 0 {
+		t.Errorf("the old tool call was kept: %v", restored.pendingCallList())
 	}
 }
 

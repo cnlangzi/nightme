@@ -58,6 +58,22 @@ func (r *run) setBrain(b *roundBrain) {
 	r.mu.Unlock()
 }
 
+// brainGreeted reports whether the session got its opening turn.
+func (r *run) brainGreeted() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.brain != nil && r.brain.greeted
+}
+
+// markBrainGreeted records that the session got its opening turn.
+func (r *run) markBrainGreeted() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.brain != nil {
+		r.brain.greeted = true
+	}
+}
+
 // brainIteration returns the job and the round the run is on.
 func (r *run) brainIteration() (string, int) {
 	r.mu.Lock()
@@ -187,18 +203,15 @@ func (s *Service) askBrain(ctx context.Context, r *run, task string) (AgentReply
 
 // askSession asks one session a question.
 func (s *Service) askSession(ctx context.Context, r *run, session AgentSession, task string) (AgentReply, error) {
-	b := r.brainState()
 	prompt := task
-	if b == nil || !b.greeted {
+	if !r.brainGreeted() {
 		prompt = s.brainOpening(r, task)
 	}
 	reply, err := session.Ask(ctx, prompt)
 	if err != nil {
 		return AgentReply{}, err
 	}
-	if b != nil {
-		b.greeted = true
-	}
+	r.markBrainGreeted()
 	return reply, nil
 }
 

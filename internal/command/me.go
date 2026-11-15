@@ -8,8 +8,10 @@ import (
 
 // MeRequest is a request to run a workflow.
 //
-// The types here are the command package's own view of a run, so the
-// command layer does not depend on the personal agent's internals.
+// The types here are the command package's own view of a run: the
+// command layer names what a run needs, and the personal agent reads
+// it. The command description is the personal agent's own, so the run
+// and the model read the same summary.
 type MeRequest struct {
 	// Name is the workflow's name.
 	Name string

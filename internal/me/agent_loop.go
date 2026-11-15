@@ -249,9 +249,6 @@ func (s *Service) runPlanStep(ctx context.Context, r *run, decision wfe.Decision
 		return nil
 	}
 	r.recordStep(decision.Job, decision.Step, verdict.Outcome)
-	// The workflow moved on by itself: the model reads the new
-	// situation before it decides again.
-	r.markSituation()
 	s.persist(r)
 	s.updateCard(r)
 	return nil

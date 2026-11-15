@@ -4,15 +4,12 @@
 // (handled in translate_test.go). This file covers the fallback
 // path: when Pi emits reasoning inline as raw text wrapped in
 // <think>...</think> tags — consistent on the Windows trace that
-// prompted think_tags.go — the bridge must strip the tags and
+// prompted the shared splitter — the bridge must strip the tags and
 // route the content to the [思考] surface instead of letting it
 // leak into the reply text.
 //
-// Coverage:
-//
-//   - splitThinking: pure-function unit tests for the splitter
-//     itself (no translator state). Locks the Held protocol that
-//     keeps split-boundary blocks whole.
+// The splitter itself lives in internal/thinktext and is unit-tested
+// there; this file covers the bridge's use of it:
 //
 //   - text_delta handler: end-to-end through the translator,
 //     confirming inline tags in a single delta, tags that span two
@@ -32,99 +29,6 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/agent"
 )
-
-// ─── splitThinking unit tests ─────────────────────────────────────
-
-func TestSplitThinking_PlainTextUnchanged(t *testing.T) {
-	got := splitThinking("hello world")
-	if got.Kept != "hello world" {
-		t.Errorf("Kept = %q, want %q", got.Kept, "hello world")
-	}
-	if got.Thinking != "" {
-		t.Errorf("Thinking = %q, want empty", got.Thinking)
-	}
-	if got.Held != "" {
-		t.Errorf("Held = %q, want empty", got.Held)
-	}
-}
-
-func TestSplitThinking_SingleBlock(t *testing.T) {
-	got := splitThinking("hello <think>reasoning</think> world")
-	if got.Kept != "hello  world" {
-		t.Errorf("Kept = %q, want %q", got.Kept, "hello  world")
-	}
-	if got.Thinking != "reasoning" {
-		t.Errorf("Thinking = %q, want %q", got.Thinking, "reasoning")
-	}
-	if got.Held != "" {
-		t.Errorf("Held = %q, want empty", got.Held)
-	}
-}
-
-func TestSplitThinking_MultipleBlocks(t *testing.T) {
-	got := splitThinking("a<think>first</think>b<think>second</think>c")
-	if got.Kept != "abc" {
-		t.Errorf("Kept = %q, want %q", got.Kept, "abc")
-	}
-	if got.Thinking != "first\nsecond" {
-		t.Errorf("Thinking = %q, want %q", got.Thinking, "first\nsecond")
-	}
-	if got.Held != "" {
-		t.Errorf("Held = %q, want empty", got.Held)
-	}
-}
-
-func TestSplitThinking_TrailingPartialOpen(t *testing.T) {
-	got := splitThinking("hello <think>half-baked")
-	if got.Kept != "hello " {
-		t.Errorf("Kept = %q, want %q", got.Kept, "hello ")
-	}
-	if got.Thinking != "" {
-		t.Errorf("Thinking = %q, want empty", got.Thinking)
-	}
-	if got.Held != "<think>half-baked" {
-		t.Errorf("Held = %q, want %q", got.Held, "<think>half-baked")
-	}
-}
-
-// TestSplitThinking_HeldCompletesAcrossCalls simulates the streaming
-// protocol that keeps a split-boundary block whole: the next call
-// prepends the Held partial before rescanning.
-func TestSplitThinking_HeldCompletesAcrossCalls(t *testing.T) {
-	first := splitThinking("hello <think>the user wants")
-	if first.Held == "" {
-		t.Fatalf("first call did not hold a partial; Held = %q", first.Held)
-	}
-	if first.Thinking != "" {
-		t.Errorf("first call Thinking = %q, want empty", first.Thinking)
-	}
-
-	second := splitThinking(first.Held + " me to switch</think> world")
-	if second.Thinking != "the user wants me to switch" {
-		t.Errorf("second call Thinking = %q, want %q", second.Thinking, "the user wants me to switch")
-	}
-	if second.Kept != " world" {
-		t.Errorf("second call Kept = %q, want %q", second.Kept, " world")
-	}
-	if second.Held != "" {
-		t.Errorf("second call Held = %q, want empty", second.Held)
-	}
-}
-
-// TestSplitThinking_StrayCloseTagKept guards against an overzealous
-// splitter: a bare </think> with no preceding <think> in the input
-// must be preserved as ordinary text. Pi never emits stray close
-// tags today, but the bridge must not eat user content if some
-// future variant does.
-func TestSplitThinking_StrayCloseTagKept(t *testing.T) {
-	got := splitThinking("user typed </think> here")
-	if got.Kept != "user typed </think> here" {
-		t.Errorf("Kept = %q, want %q", got.Kept, "user typed </think> here")
-	}
-	if got.Thinking != "" {
-		t.Errorf("Thinking = %q, want empty", got.Thinking)
-	}
-}
 
 // ─── text_delta end-to-end tests ──────────────────────────────────
 

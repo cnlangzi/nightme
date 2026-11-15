@@ -40,6 +40,7 @@ import (
 	"sync/atomic"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/thinktext"
 )
 
 // pendingTool records a tool_call that has emitted
@@ -578,17 +579,16 @@ func (t *translator) translateMessageUpdateLocked(raw []byte, logger *slog.Logge
 		// Pi sometimes emits reasoning inline as <think>...</think>
 		// inside text_delta instead of via the structured
 		// thinking_* events (consistent on the Windows trace that
-		// prompted this branch — see think_tags.go). Strip those
-		// tags before the text lands in textBuf so they do not
-		// surface in OutReply.
+		// prompted this branch). Strip those tags before the text
+		// lands in textBuf so they do not surface in OutReply.
 		//
 		// A <think> that opened on a previous delta may close on
-		// this one (or vice versa): splitThinking's Held carries
-		// the partial forward across calls, keyed by contentIndex
+		// this one (or vice versa): the splitter's Held carries the
+		// partial forward across calls, keyed by contentIndex
 		// because each Pi text block has its own delta stream.
 		combined := t.turn.thinkHoldings[delta.ContentIndex] + delta.Delta
 		t.turn.thinkHoldings[delta.ContentIndex] = ""
-		split := splitThinking(combined)
+		split := thinktext.Split(combined)
 
 		if split.Kept != "" {
 			b := t.turn.textBuf[delta.ContentIndex]
@@ -775,11 +775,10 @@ func (t *translator) recordAssistantMessageLocked(msg assistantMessage) []agent.
 			}
 			// Strip inline <think>...</think> from the text so
 			// they do not surface in OutReply. See
-			// translate.go's text_delta handler and think_tags.go
-			// for the rationale; message_end is the non-streamed
-			// counterpart and sees the same wire shapes on a
-			// replayed message.
-			split := splitThinking(b.Text)
+			// translate.go's text_delta handler for the rationale;
+			// message_end is the non-streamed counterpart and sees
+			// the same wire shapes on a replayed message.
+			split := thinktext.Split(b.Text)
 			if kept := strings.TrimSpace(split.Kept); kept != "" {
 				if text != "" {
 					text += "\n"

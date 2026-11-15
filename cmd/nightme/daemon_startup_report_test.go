@@ -175,6 +175,60 @@ func TestStartupReport_ReportIsValidJSONAfterEveryTransition(t *testing.T) {
 	}
 }
 
+// TestStartupReport_ReplacedAfterTheReaderLetsGo pins the Windows
+// rule the report depends on: a file another process holds open
+// cannot be renamed over, so the daemon's replace has to wait for the
+// parent to let go.
+//
+// The parent polls the report while the daemon rewrites it. A replace
+// that gives up leaves the report at the version it had before the
+// channels were tried, and the operator never sees which channel came
+// up — which is exactly what the misconfigured-channel test catches
+// when it fails.
+func TestStartupReport_ReplacedAfterTheReaderLetsGo(t *testing.T) {
+	paths := reportPaths(t)
+	path := startupReportPath(paths)
+	if err := os.WriteFile(path, []byte(`{"pid":1}`), 0o600); err != nil {
+		t.Fatalf("write the report: %v", err)
+	}
+
+	// The reader holds the report open, the way the parent does while
+	// it polls.
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open the report: %v", err)
+	}
+
+	tmp := filepath.Join(paths.Dir, ".daemon-startup-test.json.tmp")
+	if err := os.WriteFile(tmp, []byte(`{"pid":2}`), 0o600); err != nil {
+		t.Fatalf("write the temp file: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- replaceReportFile(tmp, path) }()
+
+	// The reader lets go.
+	time.Sleep(50 * time.Millisecond)
+	_ = f.Close()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("the report was not replaced after the reader closed it: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the replace never finished")
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read the report: %v", err)
+	}
+	if string(data) != `{"pid":2}` {
+		t.Errorf("the report still holds %q, want the replacement", data)
+	}
+}
+
 // TestStartupReport_LeavesNoTempFiles: the rewrite is temp + rename,
 // and a data directory that accumulates .daemon-startup-*.tmp files
 // on every daemon start would slowly fill the user's home.

@@ -530,3 +530,19 @@ func TestExprContext_CarriesTheStepOutcomes(t *testing.T) {
 		t.Errorf("needs.main summary = %q, want done", got)
 	}
 }
+
+// TestEndRound_ARoundThatIsAlreadyOverIsRefused — ending a round
+// twice at the same point would change nothing, and the plan would
+// ask the agent the same question forever.
+func TestEndRound_ARoundThatIsAlreadyOverIsRefused(t *testing.T) {
+	wf := mustParse(t, finalStepYAML)
+	state := newRunState(wf)
+	RecordStep(state, "main", wf.Jobs["main"].Steps[0], Outcome{Status: OutcomeFailed}, false)
+
+	if err := EndRound(state, wf, "main"); err != nil {
+		t.Fatalf("EndRound: %v", err)
+	}
+	if err := EndRound(state, wf, "main"); err == nil {
+		t.Fatal("the round was ended twice")
+	}
+}

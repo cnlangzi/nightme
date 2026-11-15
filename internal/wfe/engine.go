@@ -272,6 +272,13 @@ func EndRound(state *RunState, wf *Workflow, job string) error {
 		}
 	}
 	round := state.RoundOf(job)
+	ended := lastRunStep(state, job)
+	if prev, ok := state.EndedRounds[job]; ok && prev.Round == round && prev.Step == ended {
+		// The round is already over at this very point: ending it
+		// again would change nothing, and the plan would ask the
+		// agent the same question forever.
+		return fmt.Errorf("wfe: the round %d of %q is already over", round, job)
+	}
 	for _, step := range spec.Steps {
 		if HasRun(state, step.ID) {
 			continue
@@ -289,7 +296,7 @@ func EndRound(state *RunState, wf *Workflow, job string) error {
 	if state.EndedRounds == nil {
 		state.EndedRounds = map[string]EndedRound{}
 	}
-	state.EndedRounds[job] = EndedRound{Round: round, Step: lastRunStep(state, job)}
+	state.EndedRounds[job] = EndedRound{Round: round, Step: ended}
 	return nil
 }
 

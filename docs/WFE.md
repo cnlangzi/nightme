@@ -429,6 +429,8 @@ jobs:
 
 A final step is normally the last step of its job. It runs in the ordinary order when the round completes. When the round ends early — the agent ends it because there is genuinely nothing left to do — the final step runs in place of the steps the round cut short, and the job starts its next round.
 
+A wait that belongs at the start of the round (the back-off a repeating job wants, see §5.3) has already run when the round ends early, so the back-off is not lost. A wait at the *end* of the round is one of the steps the early end cuts short — mark it `final: true` if it is the back-off you want.
+
 The author says which step cleans up, so no existing workflow changes meaning: a workflow without a `final: true` step behaves exactly as before.
 
 A final step is a step like any other: when it fails, the agent is asked again.

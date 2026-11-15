@@ -925,3 +925,44 @@ func TestWaitTool_ABadDurationIsRefused(t *testing.T) {
 		t.Fatalf("err = %v, want a tool error the model can correct", err)
 	}
 }
+
+// TestBrainIteration_ASkippedStepDoesNotMoveTheRun — the run is on
+// the job of the last step that ran. A step that was skipped does not
+// count: the chain continues past it, so the job it belongs to is not
+// the one a judgment belongs to.
+func TestBrainIteration_ASkippedStepDoesNotMoveTheRun(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", `title: one
+jobs:
+  main:
+    steps:
+      - id: fix
+        message: /gtw fix
+  other:
+    needs: [main]
+    steps:
+      - id: skipped
+        message: /gtw skipped
+`)
+	svc, _ := testService(t, dir, Config{})
+	r := testRun(t, svc, "one")
+
+	fix, ok := r.stepByID("fix")
+	if !ok {
+		t.Fatal("the workflow has no fix step")
+	}
+	r.recordStep("main", fix, wfe.Outcome{Status: wfe.OutcomeFailed, Summary: "nothing to fix"})
+
+	skipped, ok := r.stepByID("skipped")
+	if !ok {
+		t.Fatal("the workflow has no skipped step")
+	}
+	r.mu.Lock()
+	wfe.RecordStep(r.state, "other", skipped, wfe.Outcome{Status: wfe.OutcomeNoop}, true)
+	r.mu.Unlock()
+
+	job, _ := r.brainIteration()
+	if job != "main" {
+		t.Errorf("the run is on job %q, want main", job)
+	}
+}

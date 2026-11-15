@@ -636,3 +636,39 @@ func TestARunKeepsItsEvidence(t *testing.T) {
 		}
 	}
 }
+
+// TestRenderSituation_KeepsTheVerdictOfARepair — a command the run
+// issued for a step that has not run yet leaves its verdict nowhere
+// else, so the report carries it.
+func TestRenderSituation_KeepsTheVerdictOfARepair(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", `title: one
+jobs:
+  main:
+    steps:
+      - id: commit
+        message: /gtw commit
+`)
+	svc, _ := testService(t, dir, Config{})
+	r := testRun(t, svc, "one")
+	r.setJudgment(`the previous step "commit" ended as "failed"`)
+
+	// A repair the run issued for the step: the step has not run, so
+	// the run state does not carry the verdict.
+	r.record(wfe.ActionKindCommand, "/gtw push", "commit", wfe.Outcome{
+		Status:  wfe.OutcomeFailed,
+		Summary: "the branch has nothing to push",
+		Data:    map[string]string{"reason": "nothing_to_push"},
+	})
+
+	report := svc.renderSituation(r)
+	for _, want := range []string{
+		"the branch has nothing to push",
+		"reason: nothing_to_push",
+		"hint: the branch carries no commit the remote does not have: there was nothing to push.",
+	} {
+		if !strings.Contains(report, want) {
+			t.Errorf("the situation does not carry %q:\n%s", want, report)
+		}
+	}
+}

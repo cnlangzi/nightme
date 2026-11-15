@@ -2,8 +2,8 @@ package me
 
 import (
 	"fmt"
+	"maps"
 	"regexp"
-	"slices"
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/wfe"
@@ -112,17 +112,19 @@ func (s *Service) renderSituation(r *run) string {
 		fmt.Fprintf(&b, "directory: %s\n", cwd)
 	}
 
-	if steps := s.renderRoundSteps(r); steps != "" {
+	steps, rendered := s.renderRoundSteps(r)
+	if steps != "" {
 		b.WriteString(steps)
 	}
 
-	// The last action's outcome: only when it belongs to no step of
-	// the round, because the step list above already carries the
-	// outcome of the steps.
-	if action, ok := r.lastAction(); ok && action.StepID == "" {
+	// The last action's outcome: the step list above carries it when
+	// the action was a step's own run. A command the run issued for a
+	// step that has not run yet leaves its verdict nowhere else, so
+	// it is rendered here.
+	if action, ok := r.lastAction(); ok && !carriesOutcome(rendered, action) {
 		out := action.Outcome
 		fmt.Fprintf(&b, "\nlast outcome:\n  status: %s\n  summary: %s\n", out.Status, out.Summary)
-		for _, k := range sortedKeys(out.Data) {
+		for _, k := range sortedNames(out.Data) {
 			fmt.Fprintf(&b, "  %s: %s\n", k, out.Data[k])
 		}
 		if hint := reasonHint(out.Data["reason"]); hint != "" {
@@ -143,12 +145,15 @@ func (s *Service) renderSituation(r *run) string {
 // renderRoundSteps renders the steps of the round the run is on: where
 // each of them stands, what each of them produced and which one is
 // ready.
-func (s *Service) renderRoundSteps(r *run) string {
+//
+// It also returns the state of every step it rendered, so the caller
+// can tell whether the step list already carries a verdict.
+func (s *Service) renderRoundSteps(r *run) (string, map[string]wfe.StepState) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	wf := r.workflow
 	if wf == nil {
-		return ""
+		return "", nil
 	}
 	states := map[string]wfe.StepState{}
 	for _, st := range r.state.Steps {
@@ -162,6 +167,7 @@ func (s *Service) renderRoundSteps(r *run) string {
 		}
 	}
 	job, _ := r.brainIterationLocked()
+	rendered := map[string]wfe.StepState{}
 	var b strings.Builder
 	for _, name := range wf.JobOrder() {
 		if job != "" && name != job {
@@ -169,6 +175,7 @@ func (s *Service) renderRoundSteps(r *run) string {
 		}
 		for _, step := range wf.Jobs[name].Steps {
 			st := states[step.ID]
+			rendered[step.ID] = st
 			fmt.Fprintf(&b, "  %s: %s", step.ID, stepStateText(st))
 			if idx := r.stepIndex(step.ID); idx >= 0 && idx < len(remaining.Steps) && remaining.Steps[idx] >= 0 {
 				fmt.Fprintf(&b, " (%d attempts left)", remaining.Steps[idx])
@@ -180,7 +187,7 @@ func (s *Service) renderRoundSteps(r *run) string {
 			writeOutcomeFacts(&b, st)
 		}
 	}
-	return b.String()
+	return b.String(), rendered
 }
 
 // writeOutcomeFacts renders what a step produced: its summary, the
@@ -196,7 +203,7 @@ func writeOutcomeFacts(b *strings.Builder, st wfe.StepState) {
 	if out.Summary != "" {
 		fmt.Fprintf(b, "    %s\n", out.Summary)
 	}
-	for _, k := range sortedKeys(out.Data) {
+	for _, k := range sortedNames(out.Data) {
 		fmt.Fprintf(b, "    %s: %s\n", k, out.Data[k])
 	}
 	if hint := reasonHint(out.Data["reason"]); hint != "" {
@@ -204,14 +211,21 @@ func writeOutcomeFacts(b *strings.Builder, st wfe.StepState) {
 	}
 }
 
-// sortedKeys returns the keys of a map, in order.
-func sortedKeys(m map[string]string) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
+// carriesOutcome reports whether the rendered steps already carry the
+// action's verdict.
+//
+// A step's own run and a repair inside a step that already ran both
+// leave the verdict on the step: the step list carries it. A command
+// the run issued for a step that has not run yet leaves it nowhere
+// else.
+func carriesOutcome(rendered map[string]wfe.StepState, action wfe.ActionRecord) bool {
+	st, ok := rendered[action.StepID]
+	if !ok {
+		return false
 	}
-	slices.Sort(out)
-	return out
+	return st.Outcome.Status == action.Outcome.Status &&
+		st.Outcome.Summary == action.Outcome.Summary &&
+		maps.Equal(st.Outcome.Data, action.Outcome.Data)
 }
 
 // stepStateText renders where a step stands.

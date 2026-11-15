@@ -23,7 +23,7 @@ func (s *Service) systemPrompt(r *run) string {
 
 	b.WriteString("## The workflow\n")
 	b.WriteString("The title is the objective. The steps are the owner's procedure for reaching it; each note says why a step is there. Follow their order. A step's allowed commands are the owner's usual fixes for it, not the only ones you may use.\n")
-	b.WriteString("A step that waits sits out a duration — it is how the workflow backs off when there is nothing to do. A step marked as the final step cleans up after the round: it runs when the round ends, however the round ends.\n\n")
+	b.WriteString("A step that waits sits out a duration. A wait belongs at the start of a round: it is how a repeating job backs off when there is nothing to do. A step marked as the final step cleans up after the round: it runs when the round ends, however the round ends.\n\n")
 
 	b.WriteString("## Your tools\n")
 	b.WriteString("- run_step(step_id) runs a step as the workflow wrote it: the step that is ready, or one that already ran this round.\n")
@@ -53,8 +53,9 @@ func (s *Service) systemPrompt(r *run) string {
 
 	b.WriteString("\n## When a step produced nothing\n")
 	b.WriteString("A step that ends as failed because it found nothing to do means one of two things, and the reason in the report tells you which:\n")
-	b.WriteString("- Nothing is left to do. The queue is empty, the tree is clean, the branch has nothing to push. Call end_round: the workflow backs off with its wait step and starts its next round.\n")
+	b.WriteString("- Nothing is left to do. The queue is empty, the tree is clean, the branch has nothing to push. Call end_round: the steps of the round that did not run are skipped, the job's final step runs, and the job starts its next round.\n")
 	b.WriteString("- The work is still running in the background. The agent the step dispatched has not finished. Call wait, then look again — do not end the round before the work is done.\n")
+	b.WriteString("The workflow may offer a step that waits — that is the owner's back-off. Run it with run_step when the round should wait before it goes on.\n")
 	b.WriteString("Never read a step that produced nothing as a step that succeeded.\n")
 
 	b.WriteString("\n## When to ask the owner\n")

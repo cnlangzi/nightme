@@ -27,8 +27,8 @@ jobs:
         message: /gtw commit
 `
 
-// activeRun returns the run of a chat.
-func activeRun(t *testing.T, svc *Service, chatID string) *run {
+// chatRun returns the run of a chat.
+func chatRun(t *testing.T, svc *Service, chatID string) *run {
 	t.Helper()
 	svc.mu.Lock()
 	r := svc.active[chatID]
@@ -91,7 +91,7 @@ func TestStop_PostsTheSummaryOfTheSession(t *testing.T) {
 	waitForLine(t, op, "Which step should run next?")
 
 	before := svc.Status("obs-1")
-	r := activeRun(t, svc, "obs-1")
+	r := chatRun(t, svc, "obs-1")
 	if err := svc.Stop(context.Background(), "obs-1"); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestStop_UpdatesTheLastCardToTheFinalPhase(t *testing.T) {
 	}
 	waitForLine(t, op, "Which step should run next?")
 
-	r := activeRun(t, svc, "obs-1")
+	r := chatRun(t, svc, "obs-1")
 	if err := svc.Stop(context.Background(), "obs-1"); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
@@ -195,7 +195,7 @@ func TestTheSummaryComesAfterTheRunUnwinds(t *testing.T) {
 	}
 	waitSent(t, op, "/gtw commit")
 
-	r := activeRun(t, svc, "obs-1")
+	r := chatRun(t, svc, "obs-1")
 	if err := svc.Stop(context.Background(), "obs-1"); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
@@ -238,7 +238,7 @@ func TestTheSummaryListsOnlyTheActionsThatWentWrong(t *testing.T) {
 	}
 	waitForLine(t, op, "Which step should run next?")
 
-	r := activeRun(t, svc, "obs-1")
+	r := chatRun(t, svc, "obs-1")
 	if err := svc.Stop(context.Background(), "obs-1"); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
@@ -399,7 +399,7 @@ func TestTheFastPathHoldsNoWakeRecords(t *testing.T) {
 	}
 	waitSent(t, op, "/gtw commit")
 
-	r := activeRun(t, svc, "obs-1")
+	r := chatRun(t, svc, "obs-1")
 	if wakes := r.wakeRecords(); len(wakes) != 0 {
 		t.Errorf("the run holds %d wake records, want none: %+v", len(wakes), wakes)
 	}
@@ -430,7 +430,7 @@ func TestTheWakeLogHoldsOneRecordPerModelCall(t *testing.T) {
 	}
 	waitForLine(t, op, "Which branch?")
 
-	r := activeRun(t, svc, "obs-1")
+	r := chatRun(t, svc, "obs-1")
 	wakes := r.wakeRecords()
 	if len(wakes) != 2 {
 		t.Fatalf("the run holds %d wake records, want 2: %+v", len(wakes), wakes)
@@ -477,7 +477,7 @@ func TestTheWakeLogSurvivesTheDaemon(t *testing.T) {
 	waitForLine(t, op, "Which step should run next?")
 	waitStateFile(t, dir)
 
-	r := activeRun(t, svc, "obs-1")
+	r := chatRun(t, svc, "obs-1")
 	raw, err := os.ReadFile(filepath.Join(dir, "runs", r.id+".json"))
 	if err != nil {
 		t.Fatalf("read state: %v", err)
@@ -515,7 +515,7 @@ func TestTheDaemonShutdownPostsNoSummary(t *testing.T) {
 	}
 	waitSent(t, op, "/gtw commit")
 
-	r := activeRun(t, svc, "obs-1")
+	r := chatRun(t, svc, "obs-1")
 	before := op.Posted()
 	if err := svc.Shutdown(context.Background()); err != nil {
 		t.Fatalf("shutdown: %v", err)

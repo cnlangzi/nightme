@@ -134,6 +134,7 @@ func TestRun_PublishesItsToolCalls(t *testing.T) {
 func TestRun_PublishesTheToolResultOfAFailedCall(t *testing.T) {
 	provider := &scriptedProvider{responses: []llm.Response{
 		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"step_id": "nowhere"})},
+		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "failed", "summary": "the step does not exist"})},
 	}}
 	_, op := eventsRun(t, provider)
 

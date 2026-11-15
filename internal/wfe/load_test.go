@@ -23,13 +23,11 @@ jobs:
       - id: fix
         message: "/gtw fix ${{ args.issue }} -y"
         note: 从 nightme/assigned 队列里挑一个
-        attempts: 3
       - id: commit
         message: "/gtw commit"
       - id: review
         message: "/review"
         note: 没跑完就 /review -c；有改动就先 /gtw commit
-        attempts: 5
       - id: commit2
         message: "/gtw commit"
       - id: push
@@ -91,9 +89,6 @@ func TestParse_Valid(t *testing.T) {
 	}
 	if fix.Kind() != StepKindMessage {
 		t.Errorf("Steps[0].Kind = %v, want message", fix.Kind())
-	}
-	if fix.Attempts != 3 {
-		t.Errorf("Steps[0].Attempts = %d, want 3", fix.Attempts)
 	}
 }
 
@@ -219,9 +214,8 @@ jobs:
 	}
 }
 
-// TestParse_IterationsAndAttempts — a job may repeat and a step may
-// bound what the agent does with it.
-func TestParse_IterationsAndAttempts(t *testing.T) {
+// TestParse_Iterations — a job may repeat.
+func TestParse_Iterations(t *testing.T) {
 	wf := mustParse(t, `
 title: rounds
 jobs:
@@ -230,7 +224,6 @@ jobs:
     steps:
       - id: fix
         message: "/gtw fix"
-        attempts: 5
 `)
 	job := wf.Jobs["main"]
 	if job.Iterations == nil || *job.Iterations != 3 {
@@ -239,8 +232,31 @@ jobs:
 	if job.Rounds() != 3 {
 		t.Errorf("Rounds() = %d, want 3", job.Rounds())
 	}
-	if job.Steps[0].Attempts != 5 {
-		t.Errorf("Attempts = %d, want 5", job.Steps[0].Attempts)
+}
+
+// TestParse_AttemptsIsRetired — the budget is one number now, and a
+// workflow that still carries the old key is refused by name.
+func TestParse_AttemptsIsRetired(t *testing.T) {
+	_, err := Parse([]byte(`
+title: rounds
+jobs:
+  main:
+    steps:
+      - id: fix
+        message: "/gtw fix"
+        attempts: 5
+`))
+	if err == nil {
+		t.Fatal("a workflow with `attempts:` was accepted")
+	}
+	msg := err.Error()
+	for _, want := range []string{"attempts", "retired", "budget"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("the error does not name %q: %v", want, err)
+		}
+	}
+	if !strings.Contains(msg, "line 8") {
+		t.Errorf("the error does not name the line: %v", err)
 	}
 }
 
@@ -328,8 +344,6 @@ func TestParse_TheCountsMustBeWholeNumbers(t *testing.T) {
 	for _, src := range []string{
 		"title: x\njobs:\n  main:\n    iterations: 1.5\n    steps: [{message: hi}]\n",
 		"title: x\njobs:\n  main:\n    iterations: -0.5\n    steps: [{message: hi}]\n",
-		"title: x\njobs:\n  main:\n    steps: [{message: hi, attempts: 0.5}]\n",
-		"title: x\njobs:\n  main:\n    steps: [{message: hi, attempts: -0.5}]\n",
 	} {
 		if _, err := Parse([]byte(src)); err == nil {
 			t.Errorf("a fraction was accepted:\n%s", src)

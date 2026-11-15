@@ -480,14 +480,12 @@ jobs:
       - id: fix
         message: "/gtw fix ${{ args.issue }} -y"
         note: 从 nightme/assigned 队列里挑一个；挑不到就等下一轮
-        attempts: 3
       - id: commit
         message: "/gtw commit"
         if: ${{ steps.fix.outputs.data.issue }}
       - id: review
         message: "/review"
         note: 没跑完就 /review -c；有改动就先 /gtw commit
-        attempts: 5
         if: ${{ steps.fix.outputs.data.issue }}
       - id: commit2
         message: "/gtw commit"
@@ -534,7 +532,6 @@ jobs:
 | `env` | 这个 step 的命令拿到的环境变量。 |
 | `continue-on-error` | 这个 step 失败时链条是否继续。 |
 | `note` | 这个 step 为什么在这儿，owner 平时怎么修它。它是决策模型读的那段描述。 |
-| `attempts` | agent 在一轮里能对这个 step 走的动作数——step 自己那次执行，加上为它发出的 nightme 命令。不填这一项就不设上限。 |
 | `final` | 这个 step 负责收尾：这一轮怎么结束它都跑。标了 `final: true` 的 step 在提前结束的一轮里顶上被跳过的那几步。 |
 
 表达式有 `${{ args.NAME }}`、`${{ steps.<id>.outputs.status }}`、
@@ -564,6 +561,7 @@ me:
     model: typesafe/jev-1.14
     api_key_env: OPENROUTER_API_KEY # 存 key 的环境变量的名字
     min_confidence: 0.8           # 低于这个置信度就升级
+  max_judgments: 50              # agent 在一个 step 一轮里的机会数
 ```
 
 `provider` 决定用哪个 chat provider，`protocol` 决定用哪个决策协议：`me.llm` 不写 `provider`、或者 `me.decider` 不写 `protocol`，就等于这一半根本没有配。
@@ -631,9 +629,11 @@ workflow 说了下一步是什么，所以大部分步骤根本不需要模型�
 - **就绪集**是那些 job 的 `needs` 都满足、`if:` 也成立的未跑步骤。同一个 job 里只算第一个这样的步骤。
 - 就绪集只有一个元素、并且上一步的结果是 `ok` 或 `noop` 时，这一步照原样跑。不问模型。
 - 其它都是**判断点**：就绪集空了或者分叉、上一步没有以 `ok` 或 `noop` 收尾、或者一条命令还在等回答。这时由 agent 决定——它挑下一个节点、修当前这一步，或者结束这次运行。
-- 一个 job 的这一轮跑完时，它开下一轮，而不是结束这次运行：这一轮的 step 产出被清空，每个 step 的 `attempts` 预算也重新开始。
+- 一个 job 的这一轮跑完时，它开下一轮，而不是结束这次运行：这一轮的 step 产出被清空，每个 step 的预算也重新开始。
 
-一次运行既没有全局动作预算，也没有模型轮数上限：它结束于计划跑完、agent 收尾，或者你发 `/me stop`，或者 daemon 关掉。
+agent 在每个 step 上有一个预算：一个数字，每个 step、每一轮都一样，由 `me.max_judgments` 定（默认 50）。一次机会是这次 step 自己的执行、为它发出的一条 nightme 命令，或者 chat 模型一轮没有工具调用的回答。运行所在那个 step 的预算用完时，运行暂停下来，在 chat 里说清楚；`/me continue` 把控制权交回来，那个 step 的预算重新开始。
+
+一次运行没有模型轮数上限：它结束于计划跑完、agent 调用 `finish`，或者你发 `/me stop`，或者 daemon 关掉。chat 模型一轮没有工具调用的回答、provider 调用失败，都不结束运行——运行会再问一次，界限由预算给出。
 
 agent 在判断点上给出一个指令：`run_step`（跑 workflow 的一个 step）、`ntm_<command>`（以你的身份跑一条 nightme 命令）、`agent`（问 owner 的思考为什么这一步失败）、`instruct`（给 chat 发一段自由指令）、`answer_choice`（回答 chat 在等的一个提示）、`ask_human`（问你）、`repo_status`（读分支和工作树）、`wait`（等一会儿再看——后台还有活在跑时）、`end_round`（结束当前 job 的这一轮：没跑的 step 记成跳过，job 的 final step 顶上，然后开下一轮）、`finish`（结束运行）。`run_step` 接一个 step 的 id：就绪的那一个，或者这一轮已经跑过的那个。运行不允许做的事会以错误回来，agent 自己纠正。
 
@@ -668,7 +668,7 @@ workflows 目录里的 YAML 写坏了，个人 agent 起不来——`nightme log
 
 | 护栏 | 边界 |
 |---|---|
-| step 预算 | 单个 step 是 `attempts`，按轮算。 |
+| step 预算 | `me.max_judgments` 给一个 step 在一轮里的机会数，按轮算。 |
 | 轮数 | 一个 job 是 `iterations`——它跑多少轮。 |
 | step 超时 | 每条命令三十分钟。 |
 | 停滞检测 | 十分钟没有心跳。 |

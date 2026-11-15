@@ -160,9 +160,6 @@ type run struct {
 	// capability spent.
 	system1Usage llm.Usage
 	system2Usage llm.Usage
-	// nudged records that the chat model answered with text only
-	// and was asked to call a tool.
-	nudged bool
 	// situationStale records that the workflow moved on since the
 	// model last read a situation report.
 	situationStale bool
@@ -177,6 +174,14 @@ type run struct {
 	system1Model string
 	// judgment is why the workflow cannot decide on its own.
 	judgment string
+	// judgmentStep is the step the judgment is about: the step that
+	// failed, the step that is still running. Empty when the judgment
+	// names no step.
+	judgmentStep string
+	// providerWait is how long the run waits before it asks the chat
+	// model again. It grows with every failed turn and starts over
+	// when the model answers.
+	providerWait time.Duration
 	// lastDecision names who decided last: the workflow, the
 	// decision model or the chat model.
 	lastDecision string
@@ -226,6 +231,7 @@ func newRun(svc *Service, req Request, wf *wfe.Workflow, args map[string]string)
 	commands := usableCommands(req.Commands)
 	policy := wfe.NewPolicy(wf, nil)
 	policy.Commands = commandNames(commands)
+	policy.Budget = svc.cfg.MaxJudgments
 	return &run{
 		svc:       svc,
 		id:        id,
@@ -369,6 +375,19 @@ func (r *run) requestPause(reason string) {
 	r.mu.Unlock()
 }
 
+// pauseNow stops the run and waits for the operator.
+//
+// The run keeps its state and its place: the operator hands the
+// control back, and the run goes on where it stopped.
+func (r *run) pauseNow(reason string) {
+	r.mu.Lock()
+	r.pauseRequested = false
+	r.paused = true
+	r.pauseReason = reason
+	r.phase = PhasePaused
+	r.mu.Unlock()
+}
+
 // applyPause moves the run into the paused state when a pause was
 // asked for. It reports whether the run paused.
 func (r *run) applyPause() bool {
@@ -398,6 +417,9 @@ func (r *run) isPaused() bool {
 //
 // A note is the operator's instruction: it joins the conversation the
 // chat model reads.
+//
+// The step the run was on gets a fresh budget: the operator took the
+// chat back, so the chances the agent spent there are spent no more.
 func (r *run) handBack(note string) error {
 	r.mu.Lock()
 	if !r.paused && !r.pauseRequested {
@@ -420,6 +442,11 @@ func (r *run) handBack(note string) error {
 		})
 	}
 	r.mu.Unlock()
+
+	// The operator took over: the step the run was on starts over.
+	if stepID := r.budgetStep(); stepID != "" {
+		r.record(wfe.ActionKindReset, "", stepID, wfe.Outcome{})
+	}
 
 	if pending {
 		// The pause had not taken effect: there is nobody to wake up.
@@ -668,6 +695,65 @@ func (r *run) setJudgment(reason string) {
 	r.mu.Unlock()
 }
 
+// setJudgmentStep records the step the judgment is about.
+func (r *run) setJudgmentStep(stepID string) {
+	r.mu.Lock()
+	r.judgmentStep = stepID
+	r.mu.Unlock()
+}
+
+// budgetStep returns the step whose budget bounds the run now: the
+// step the judgment is about, or the step the run is on.
+//
+// A judgment that names no step — the plan forks, a job starts a new
+// round — belongs to the last step that ran in the round.
+func (r *run) budgetStep() string {
+	r.mu.Lock()
+	stepID := r.judgmentStep
+	r.mu.Unlock()
+	if stepID != "" {
+		return stepID
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.policy.CurrentStepID()
+}
+
+// stepUsage returns the chances the step spent in the current round
+// and the budget it has.
+func (r *run) stepUsage(stepID string) (int, int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	idx := r.stepIndex(stepID)
+	if idx < 0 {
+		return 0, 0
+	}
+	return r.policy.StepUsage(idx), r.policy.Budget
+}
+
+// nextProviderWait returns how long the run waits before it asks the
+// chat model again, and grows the wait for the next time.
+func (r *run) nextProviderWait() time.Duration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.providerWait == 0 {
+		r.providerWait = firstProviderWait
+	} else {
+		r.providerWait *= 2
+		if r.providerWait > maxProviderWait {
+			r.providerWait = maxProviderWait
+		}
+	}
+	return r.providerWait
+}
+
+// resetProviderWait forgets the wait: the chat model answered.
+func (r *run) resetProviderWait() {
+	r.mu.Lock()
+	r.providerWait = 0
+	r.mu.Unlock()
+}
+
 // setDecision records who decided last and why.
 func (r *run) setDecision(who, reason string) {
 	r.mu.Lock()
@@ -713,6 +799,29 @@ func (r *run) stepCommands() []string {
 	return r.policy.StepCommands()
 }
 
+// consecutiveStalls returns the number of turns the agent produced no
+// tool call in.
+func (r *run) consecutiveStalls() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.policy.ConsecutiveStalls()
+}
+
+// readyStepIDs returns the ids of the steps the plan may run now.
+func (r *run) readyStepIDs() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ready, err := wfe.ReadySet(r.state, r.workflow)
+	if err != nil {
+		return nil
+	}
+	ids := make([]string, 0, len(ready))
+	for _, step := range ready {
+		ids = append(ids, step.ID)
+	}
+	return ids
+}
+
 // renderPolicy returns the workflow as the model reads it.
 func (r *run) renderPolicy() string {
 	r.mu.Lock()
@@ -755,15 +864,21 @@ func (r *run) exprCtx() wfe.ExprCtx {
 	return wfe.ExprContext(r.state)
 }
 
-// lastAction returns the last action the run took.
-func (r *run) lastAction() (wfe.ActionRecord, bool) {
+// lastVerdict returns the last action that produced a verdict.
+//
+// A stall and a reset produce none: they are the run's own
+// bookkeeping, not the work's.
+func (r *run) lastVerdict() (wfe.ActionRecord, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	history := r.policy.History
-	if len(history) == 0 {
-		return wfe.ActionRecord{}, false
+	for i := len(r.policy.History) - 1; i >= 0; i-- {
+		rec := r.policy.History[i]
+		if rec.Kind == wfe.ActionKindStall || rec.Kind == wfe.ActionKindReset {
+			continue
+		}
+		return rec, true
 	}
-	return history[len(history)-1], true
+	return wfe.ActionRecord{}, false
 }
 
 // lastOutcome returns the outcome of the last step that ran.
@@ -843,7 +958,6 @@ type persistedRun struct {
 	System2Decisions int                `json:"system2_decisions"`
 	System1Usage     llm.Usage          `json:"system1_usage"`
 	System2Usage     llm.Usage          `json:"system2_usage"`
-	Nudged           bool               `json:"nudged"`
 	Commands         []CommandInfo      `json:"commands,omitempty"`
 	Agent            string             `json:"agent,omitempty"`
 	Wakes            []wakeRecord       `json:"wakes,omitempty"`
@@ -888,7 +1002,6 @@ func (s *Service) persist(r *run) {
 		System2Decisions: r.system2Decisions,
 		System1Usage:     r.system1Usage,
 		System2Usage:     r.system2Usage,
-		Nudged:           r.nudged,
 		Commands:         r.registry,
 		Agent:            r.agentName,
 		Wakes:            append([]wakeRecord(nil), r.wakes...),
@@ -991,6 +1104,7 @@ func (s *Service) restoreRun(state persistedRun) *run {
 	policy := wfe.NewPolicy(state.Workflow, state.History)
 	commands := usableCommands(state.Commands)
 	policy.Commands = commandNames(commands)
+	policy.Budget = s.cfg.MaxJudgments
 	r := &run{
 		svc:              s,
 		id:               state.RunID,
@@ -1018,7 +1132,6 @@ func (s *Service) restoreRun(state persistedRun) *run {
 		system2Decisions: state.System2Decisions,
 		system1Usage:     state.System1Usage,
 		system2Usage:     state.System2Usage,
-		nudged:           state.Nudged,
 		registry:         state.Commands,
 		commands:         commands,
 		agentName:        s.agentName(state.Agent),

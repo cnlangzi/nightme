@@ -131,5 +131,9 @@ me:
   #   model: typesafe/jev-1.14
   #   api_key_env: OPENROUTER_API_KEY
   #   min_confidence: 0.8
+  # The chances the agent has at one step in one round: the step's own
+  # execution, a nightme command issued for it and a turn of the chat
+  # model that produced no tool call each cost one. Unset means 50.
+  # max_judgments: 50
   # For protocol: systemone the base is https://api.typesafe.ai and the
   # model is jev-latest.

@@ -212,6 +212,24 @@ func TestMeAPIKey_LoadsFromTheFile(t *testing.T) {
 	}
 }
 
+// TestMeMaxJudgments_ReadsTheFile — the budget of the agent is one
+// number, set in the file.
+func TestMeMaxJudgments_ReadsTheFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	body := "me:\n  max_judgments: 3\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Me.MaxJudgments != 3 {
+		t.Errorf("Me.MaxJudgments = %d, want 3", cfg.Me.MaxJudgments)
+	}
+}
+
 func TestEnvOverrideInvalidNumber(t *testing.T) {
 	// Set a non-numeric value for an int override — the loader should
 	// silently fall back to the default rather than crash.

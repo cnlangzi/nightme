@@ -29,6 +29,12 @@ type Decision struct {
 	Reason string
 	// Exhausted is true when the plan has nothing left to run.
 	Exhausted bool
+	// Subject is the step the judgment is about.
+	//
+	// It is set when the judgment names one step: the step that
+	// failed, the step that is still running. A judgment about no step
+	// — the plan forks, a job starts a new round — leaves it empty.
+	Subject string
 }
 
 // Decide computes what a run does next.
@@ -79,13 +85,15 @@ func Decide(state *RunState, wf *Workflow) (Decision, error) {
 				Kind:      DecisionJudgment,
 				Reason:    exhaustedReason(prev, hasPrev),
 				Exhausted: true,
+				Subject:   subjectOf(prev, hasPrev),
 			}, nil
 		case blocked:
 			// The round does not advance on its own: the agent decides
 			// what to do about the step that did not end ok.
 			return Decision{
-				Kind:   DecisionJudgment,
-				Reason: fmt.Sprintf("the previous step %q ended as %q", prev.ID, prev.Outcome.Status),
+				Kind:    DecisionJudgment,
+				Reason:  fmt.Sprintf("the previous step %q ended as %q", prev.ID, prev.Outcome.Status),
+				Subject: prev.ID,
 			}, nil
 		case len(repeating) > 1:
 			return Decision{
@@ -109,6 +117,7 @@ func Decide(state *RunState, wf *Workflow) (Decision, error) {
 				Kind:      DecisionJudgment,
 				Reason:    exhaustedReason(prev, hasPrev),
 				Exhausted: true,
+				Subject:   subjectOf(prev, hasPrev),
 			}, nil
 		}
 	}
@@ -122,16 +131,18 @@ func Decide(state *RunState, wf *Workflow) (Decision, error) {
 	}
 	if IsPending(state, ready[0].Step.ID) {
 		return Decision{
-			Kind:   DecisionJudgment,
-			Ready:  steps,
-			Reason: fmt.Sprintf("the step %q is still running", ready[0].Step.ID),
+			Kind:    DecisionJudgment,
+			Ready:   steps,
+			Reason:  fmt.Sprintf("the step %q is still running", ready[0].Step.ID),
+			Subject: ready[0].Step.ID,
 		}, nil
 	}
 	if blocked {
 		return Decision{
-			Kind:   DecisionJudgment,
-			Ready:  steps,
-			Reason: fmt.Sprintf("the previous step %q ended as %q", prev.ID, prev.Outcome.Status),
+			Kind:    DecisionJudgment,
+			Ready:   steps,
+			Reason:  fmt.Sprintf("the previous step %q ended as %q", prev.ID, prev.Outcome.Status),
+			Subject: prev.ID,
 		}, nil
 	}
 	return Decision{
@@ -342,6 +353,15 @@ func exhaustedReason(prev StepState, hasPrev bool) string {
 			prev.ID, prev.Outcome.Status)
 	}
 	return "the plan is exhausted: every step has run"
+}
+
+// subjectOf returns the step a judgment is about: the step that ran
+// last. Empty when nothing ran yet.
+func subjectOf(prev StepState, hasPrev bool) string {
+	if !hasPrev {
+		return ""
+	}
+	return prev.ID
 }
 
 // prevBlocks reports whether the last step that ran keeps the chain

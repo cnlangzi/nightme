@@ -205,7 +205,14 @@ func TestSystem2_ANoopStepIsNotAToolError(t *testing.T) {
 	}
 }
 
-func TestSystem2_TextOnlyReplyIsNudgedAndThenEndsTheRun(t *testing.T) {
+// TestSystem2_TextOnlyReplyKeepsTheRunGoing — a turn of the chat
+// model that produced no tool call does not end the run.
+//
+// The agent's job is to keep the pipeline moving: a turn it did not
+// act in costs a chance and the agent is asked again. Its own words
+// stay in the conversation, so a model that is asked again sees what
+// it just said.
+func TestSystem2_TextOnlyReplyKeepsTheRunGoing(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
@@ -225,26 +232,49 @@ func TestSystem2_TextOnlyReplyIsNudgedAndThenEndsTheRun(t *testing.T) {
 	svc.mu.Lock()
 	r := svc.runs[runID]
 	svc.mu.Unlock()
-	waitRun(t, svc, "obs-1")
+	waitCalls(t, provider, 2)
 
-	// The run ended as a failure, not as a finished one.
+	// The run is still going: it did not end as a failure.
 	if r == nil {
 		t.Fatal("the run is not registered")
 	}
-	if phase := r.currentPhase(); phase != PhaseFailed {
-		t.Fatalf("the run ended as %q, want %q", phase, PhaseFailed)
+	if phase := r.currentPhase(); phase == PhaseFailed {
+		t.Fatalf("the run ended as %q, want it to keep going", phase)
+	}
+	if !op.Has("/gtw commit") {
+		t.Fatalf("the run's overview lost the step list: %v", op.Lines())
 	}
 
-	if provider.Calls() != 2 {
-		t.Fatalf("the chat model was called %d times, want 2 (the nudge and the second answer)", provider.Calls())
-	}
+	// The words of the model stayed in the conversation, and the next
+	// request carries them.
 	req := provider.Request(1)
-	if !strings.Contains(req.Messages[len(req.Messages)-1].Text(), "Call a tool") {
-		t.Fatalf("the second turn did not carry the nudge: %v", req.Messages)
+	var carried bool
+	for _, m := range req.Messages {
+		if m.Role != llm.RoleAssistant {
+			continue
+		}
+		for _, p := range m.Parts {
+			if strings.Contains(p.Text, "I think I should commit.") {
+				carried = true
+			}
+		}
 	}
-	if !op.Has("did not call a tool") {
-		t.Fatalf("the run's overview did not say why the run ended: %v", op.Lines())
+	if !carried {
+		t.Fatalf("the second turn did not carry the words of the first: %v", req.Messages)
 	}
+}
+
+// waitCalls waits until the provider served that many calls.
+func waitCalls(t *testing.T, provider *scriptedProvider, n int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if provider.Calls() >= n {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("the chat model was called %d times, want %d", provider.Calls(), n)
 }
 
 // TestRun_HasNoTurnCap — a run takes as many turns as the plan needs.

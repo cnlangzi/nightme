@@ -111,6 +111,11 @@ type MeConfig struct {
 	LLM MeLLMConfig `yaml:"llm,omitempty"`
 	// Decider is the decision model (System 1).
 	Decider MeDeciderConfig `yaml:"decider,omitempty"`
+	// MaxJudgments is the number of chances the agent has at one step
+	// in one round. A chance is the step's own execution, a nightme
+	// command issued for it, or a turn the agent produced no tool call
+	// in. Zero means the built-in default.
+	MaxJudgments int `yaml:"max_judgments,omitempty"`
 }
 
 // MeLLMConfig is the chat model configuration.

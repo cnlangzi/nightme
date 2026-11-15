@@ -230,11 +230,11 @@ jobs:
     steps:
       - id: one
         message: echo
-        attempts: 1
 `)
 	pol := NewPolicy(wf, []ActionRecord{
 		{Kind: ActionKindRun, Command: "echo", StepID: "one", Round: 1},
 	})
+	pol.Budget = 1
 
 	pol.SetRounds(map[string]int{"main": 2})
 	if _, err := pol.CheckRun("echo"); err != nil {
@@ -259,12 +259,12 @@ jobs:
     steps:
       - id: one
         message: echo
-        attempts: 2
 `)
 	pol := NewPolicy(wf, []ActionRecord{
 		{Kind: ActionKindRun, Command: "echo", StepID: "one"},
 		{Kind: ActionKindRun, Command: "echo", StepID: "one"},
 	})
+	pol.Budget = 2
 
 	_, err := pol.CheckRun("echo")
 	if err == nil {

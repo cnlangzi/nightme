@@ -409,9 +409,11 @@ func (f *fakeOperator) Has(text string) bool {
 }
 
 // isControlText reports whether the text is something the run says
-// outside a workflow step: a question or the /stop.
+// outside a workflow step: a question, the /stop or the pause.
 func isControlText(text string) bool {
-	return strings.HasPrefix(text, "❓") || strings.HasPrefix(text, "/stop")
+	return strings.HasPrefix(text, "❓") ||
+		strings.HasPrefix(text, "/stop") ||
+		strings.HasPrefix(text, pauseMark)
 }
 
 // recordingLogger keeps the messages the service logged.
@@ -611,7 +613,6 @@ jobs:
       - id: review
         message: /review
         note: If it fails or does not finish, continue with /review -c.
-        attempts: 5
       - id: push
         message: /gtw push
       - id: pr
@@ -644,6 +645,11 @@ func testService(t *testing.T, dir string, cfg Config) (*Service, *fakeOperator)
 	cfg.WorkflowsDir = dir
 	cfg.StateDir = filepath.Join(dir, "runs")
 	cfg.Operator = op
+	if cfg.Sleep == nil {
+		// The backoff between two attempts of the chat model is real
+		// time; a test does not wait for it.
+		cfg.Sleep = func(context.Context, time.Duration) error { return nil }
+	}
 	svc := New(cfg)
 	t.Cleanup(func() { _ = svc.Shutdown(context.Background()) })
 	if err := svc.Start(context.Background()); err != nil {
@@ -1043,7 +1049,6 @@ jobs:
     steps:
       - id: review
         message: /review
-        attempts: 5
       - id: push
         message: /gtw push
 `)
@@ -1097,7 +1102,6 @@ jobs:
     steps:
       - id: review
         message: /review
-        attempts: 5
       - id: push
         message: /gtw push
 `)
@@ -1141,7 +1145,6 @@ jobs:
     steps:
       - id: review
         message: /review
-        attempts: 5
       - id: push
         message: /gtw push
 `)

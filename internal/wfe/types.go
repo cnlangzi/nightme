@@ -91,16 +91,14 @@ func (j Job) Rounds() int {
 // Step is one unit of work inside a job: exactly one of message,
 // shell, use or wait is set.
 //
-// Attempts caps the number of actions the step may take in one round —
-// its own execution and the commands issued for it. Note explains why
-// the step is there and which fixes the owner uses for it.
+// Note explains why the step is there and which fixes the owner uses
+// for it.
 type Step struct {
 	ID              string            `yaml:"id,omitempty" json:"id,omitempty"`
 	If              string            `yaml:"if,omitempty" json:"if,omitempty"`
 	Env             map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
 	ContinueOnError bool              `yaml:"continue-on-error,omitempty" json:"continue-on-error,omitempty"`
 	Note            string            `yaml:"note,omitempty" json:"note,omitempty"`
-	Attempts        int               `yaml:"attempts,omitempty" json:"attempts,omitempty"`
 	// Final marks the step that cleans up after the round. It runs
 	// when the round ends, however the round ends.
 	Final bool `yaml:"final,omitempty" json:"final,omitempty"`
@@ -316,15 +314,27 @@ const (
 	// It counts against the step it was issued for, but it is not a
 	// step's own execution, so it never becomes that step's verdict.
 	ActionKindCommand ActionKind = "command"
+	// ActionKindStall is a turn of the chat model that produced no
+	// tool call.
+	//
+	// It counts against the step the judgment was about, and it never
+	// becomes a step's verdict.
+	ActionKindStall ActionKind = "stall"
+	// ActionKindReset starts a step's budget over.
+	//
+	// The operator took the chat back and handed the control to the
+	// run: the step gets a fresh budget.
+	ActionKindReset ActionKind = "reset"
 )
 
 // ActionRecord is one action the run has taken. StepID points at the
 // step the action served: a run belongs to its step, and a repair
-// counts against the step the run is on. An instruction carries an
-// empty one.
+// counts against the step the run is on. A stall counts against the
+// step the judgment was about, and a reset names the step whose
+// budget starts over. An instruction carries an empty one.
 //
 // Round is the round of the step's job the action was taken in. The
-// per-step budgets count the attempts of the current round only.
+// per-step budgets count the actions of the current round only.
 type ActionRecord struct {
 	Kind    ActionKind `json:"kind"`
 	Command string     `json:"command"`

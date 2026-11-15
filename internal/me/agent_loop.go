@@ -12,6 +12,12 @@ import (
 // errFinished ends the loop when the model called the finish tool.
 var errFinished = errors.New("me: the run finished")
 
+// pauseMark marks the run's own notice in the chat.
+//
+// The notice is not a command of the workflow: it is the run telling
+// the operator what it waits for.
+const pauseMark = "⏸ "
+
 // sys1Action is what the decision model led to.
 type sys1Action int
 
@@ -148,6 +154,7 @@ func (s *Service) turn(ctx context.Context, r *run) (bool, error) {
 		if err := r.checkStep(decision.Step); err == nil {
 			r.setDecision(decisionWorkflow, "the plan says so")
 			r.setJudgment("")
+			r.setJudgmentStep("")
 			if err := s.runPlanStep(ctx, r, decision); err != nil {
 				return false, err
 			}
@@ -155,15 +162,28 @@ func (s *Service) turn(ctx context.Context, r *run) (bool, error) {
 		} else {
 			// The budget is spent: the workflow cannot go on by
 			// itself, so the agent decides what happens next.
-			decision = wfe.Decision{Kind: wfe.DecisionJudgment, Reason: err.Error()}
+			decision = wfe.Decision{
+				Kind:    wfe.DecisionJudgment,
+				Reason:  err.Error(),
+				Subject: decision.Step.ID,
+			}
 		}
 	}
 	r.setJudgment(decision.Reason)
+	r.setJudgmentStep(decision.Subject)
 	if decision.Exhausted && s.goalMet(r) {
 		// Every step ran and the last one ended ok: the goal is met
 		// and no model is asked to say so.
 		s.finishDone(r, r.workflow.Name+" is complete")
 		return true, nil
+	}
+	// The budget of the step the run is on bounds what the agent may
+	// do at it. When it is spent, the run waits for a human: the run
+	// keeps its place, and the operator decides what happens to a
+	// node that cannot be repaired.
+	if s.budgetSpent(r) {
+		s.pauseForBudget(ctx, r)
+		return false, nil
 	}
 	action, err := s.system1(ctx, r)
 	if err != nil {
@@ -177,6 +197,45 @@ func (s *Service) turn(ctx context.Context, r *run) (bool, error) {
 		return false, err
 	}
 	return done, nil
+}
+
+// budgetSpent reports whether the step the run is on used up its
+// budget.
+func (s *Service) budgetSpent(r *run) bool {
+	stepID := r.budgetStep()
+	if stepID == "" {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	idx := r.stepIndex(stepID)
+	if idx < 0 {
+		return false
+	}
+	remaining := r.policy.Remaining()
+	if idx >= len(remaining.Steps) {
+		return false
+	}
+	return remaining.Steps[idx] == 0
+}
+
+// pauseForBudget pauses the run because the step it is on used up its
+// budget.
+//
+// The run keeps its state and its place: the operator hands the
+// control back with `/me continue`, and the step's budget starts
+// over.
+func (s *Service) pauseForBudget(ctx context.Context, r *run) {
+	stepID := r.budgetStep()
+	used, limit := r.stepUsage(stepID)
+	reason := fmt.Sprintf("the step %q used up its budget (%d of %d chances) — the run waits for you",
+		stepID, used, limit)
+	r.pauseNow(reason)
+	s.persist(r)
+	s.updateCard(r)
+	if _, err := s.speak(ctx, r, pauseMark+"The run paused: "+reason+". Send /me continue to hand the control back.", ""); err != nil {
+		s.logger.Warn("me: the pause could not be spoken", "run_id", r.id, "err", err)
+	}
 }
 
 // plan asks the engine what the run does next.
@@ -313,6 +372,7 @@ func (s *Service) loopDeciderOnly(ctx context.Context, r *run) error {
 			if err := r.checkStep(decision.Step); err == nil {
 				r.setDecision(decisionWorkflow, "the plan says so")
 				r.setJudgment("")
+				r.setJudgmentStep("")
 				if err := s.runPlanStep(ctx, r, decision); err != nil {
 					return err
 				}
@@ -320,13 +380,24 @@ func (s *Service) loopDeciderOnly(ctx context.Context, r *run) error {
 			} else {
 				// The budget is spent: the workflow cannot go on by
 				// itself, so the agent decides what happens next.
-				decision = wfe.Decision{Kind: wfe.DecisionJudgment, Reason: err.Error()}
+				decision = wfe.Decision{
+					Kind:    wfe.DecisionJudgment,
+					Reason:  err.Error(),
+					Subject: decision.Step.ID,
+				}
 			}
 		}
 		r.setJudgment(decision.Reason)
+		r.setJudgmentStep(decision.Subject)
 		if decision.Exhausted && s.goalMet(r) {
 			s.finishDone(r, r.workflow.Name+" is complete")
 			return errFinished
+		}
+		if s.budgetSpent(r) {
+			// The budget of the step the run is on is spent: the run
+			// waits for a human.
+			s.pauseForBudget(ctx, r)
+			continue
 		}
 		dec, err := s.decide(ctx, r)
 		if err != nil {

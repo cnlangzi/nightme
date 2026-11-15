@@ -4,19 +4,37 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
+	"time"
 
 	"github.com/cnlangzi/nightme/internal/llm"
+	"github.com/cnlangzi/nightme/internal/wfe"
 )
 
-// nudgeText is what the run says when the chat model answered with
-// words instead of a tool call.
-const nudgeText = "Call a tool to make progress. A reply without a tool call does not move the run forward."
+// The turn of the chat model.
+//
+// The turn carries its own deadline: the run does not inherit the
+// client's own timeout, and a provider that never answers does not
+// look like a frozen run.
+const (
+	// maxAgentTurn bounds one turn of the chat model.
+	maxAgentTurn = 5 * time.Minute
+	// firstProviderWait is how long the run waits after the chat
+	// model failed the first time.
+	firstProviderWait = 30 * time.Second
+	// maxProviderWait is the longest the run waits between two
+	// attempts.
+	maxProviderWait = 5 * time.Minute
+)
 
 // system2 runs one turn of the chat model.
 //
 // It reports whether the run is over.
+//
+// The chat model does not end the run by what it says: a turn that
+// produced no tool call costs a chance against the step and the agent
+// is asked again. The run ends when the plan is done, when the agent
+// calls the finish tool, or when the operator stops it.
 func (s *Service) system2(ctx context.Context, r *run) (bool, error) {
 	conversation := r.conversation()
 	if len(conversation) == 0 {
@@ -25,14 +43,14 @@ func (s *Service) system2(ctx context.Context, r *run) (bool, error) {
 		// prompt has no conversation to answer: the API refuses the
 		// request. The opening turn says what the run is up
 		// against.
-		r.appendMessage(situationMessage(s.renderSituation(r)))
+		r.appendMessage(situationMessage(s.renderSituation(ctx, r)))
 		r.takeSituation()
 		conversation = r.conversation()
 	} else if r.takeSituation() {
 		// The workflow ran on by itself while the model was away: the
 		// model reads the new situation before it decides again. The
 		// report is a user turn, so the system prompt stays the same.
-		r.appendMessage(situationMessage(s.renderSituation(r)))
+		r.appendMessage(situationMessage(s.renderSituation(ctx, r)))
 		conversation = r.conversation()
 	}
 	req := llm.Request{
@@ -40,12 +58,14 @@ func (s *Service) system2(ctx context.Context, r *run) (bool, error) {
 		Messages: compact(conversation),
 		Tools:    s.toolCatalogue(r),
 	}
-	resp, err := s.cfg.Provider.Complete(ctx, req)
+	resp, err := s.askModel(ctx, r, req)
 	if err != nil {
-		return false, fmt.Errorf("the chat model failed: %w", err)
+		return false, err
 	}
 	if resp == nil {
-		return false, errors.New("the chat model answered nothing")
+		// The chat model did not answer: the run waits and asks
+		// again.
+		return false, nil
 	}
 
 	r.mu.Lock()
@@ -73,21 +93,15 @@ func (s *Service) system2(ctx context.Context, r *run) (bool, error) {
 
 	calls := resp.Message.ToolCalls()
 	if len(calls) == 0 {
-		if r.wasNudged() {
-			// The model answered with words twice. The run cannot go
-			// on, so it ends as a failure.
-			r.markNudged()
-			r.markFinished()
-			r.setSummary("the chat model did not call a tool")
-			s.finish(r, PhaseFailed, "the chat model did not call a tool")
-			s.updateCard(r)
-			return true, nil
-		}
-		r.markNudged()
-		r.appendMessage(llm.Message{
-			Role:  llm.RoleUser,
-			Parts: []llm.Part{{Type: llm.PartText, Text: nudgeText}},
-		})
+		// The model answered with words. The run does not end: the
+		// agent's job is to keep the pipeline moving, and a turn that
+		// produced no tool call is a turn it can try again.
+		//
+		// The words stay in the conversation: a model that is asked
+		// again has to see what it just said.
+		r.appendMessage(resp.Message)
+		s.chargeStall(r, "the chat model answered without a tool call")
+		s.updateCard(r)
 		return false, nil
 	}
 
@@ -98,6 +112,78 @@ func (s *Service) system2(ctx context.Context, r *run) (bool, error) {
 	}
 	r.setPendingCalls(pending)
 	return false, nil
+}
+
+// askModel asks the chat model for one turn.
+//
+// A provider that fails is not fatal: the turn costs one chance
+// against the step the judgment is about, and the run waits before it
+// asks again. An answer that is not there at all is a provider that
+// failed as well.
+//
+// It reports an error only when the run itself is over.
+func (s *Service) askModel(ctx context.Context, r *run, req llm.Request) (*llm.Response, error) {
+	execCtx, cancel := r.runContext(ctx)
+	defer cancel()
+	turnCtx, cancelTurn := context.WithTimeout(execCtx, maxAgentTurn)
+	defer cancelTurn()
+
+	r.setWaiting("the chat model is thinking")
+	s.updateCard(r)
+	defer func() {
+		r.setWaiting("")
+		s.updateCard(r)
+	}()
+
+	resp, err := s.cfg.Provider.Complete(turnCtx, req)
+	if err == nil && resp == nil {
+		err = errors.New("the chat model answered nothing")
+	}
+	if err == nil {
+		r.resetProviderWait()
+		return resp, nil
+	}
+	if endErr := execCtx.Err(); endErr != nil {
+		// The run is over: the operator stopped it or the daemon went
+		// away.
+		return nil, endErr
+	}
+	s.logger.Warn("me: the chat model did not answer", "run_id", r.id, "err", err)
+	s.chargeStall(r, "the chat model did not answer: "+err.Error())
+	if err := s.waitBeforeRetry(ctx, r); err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+
+// waitBeforeRetry waits before the run asks the chat model again.
+//
+// The wait grows: a provider that keeps failing is given more room.
+// The wait belongs to the run: stopping the run or shutting the
+// daemon ends it at once.
+func (s *Service) waitBeforeRetry(ctx context.Context, r *run) error {
+	wait := r.nextProviderWait()
+	s.logger.Info("me: the chat model is asked again", "run_id", r.id, "wait", wait.String())
+	execCtx, cancel := r.runContext(ctx)
+	defer cancel()
+	return s.cfg.Sleep(execCtx, wait)
+}
+
+// chargeStall records a turn that produced no action.
+//
+// The stall counts against the step the judgment was about: a
+// judgment that names no step is charged to the last step that ran
+// in the round.
+//
+// The situation moved on — the agent has one chance less — so the
+// model reads the report again before it decides.
+func (s *Service) chargeStall(r *run, summary string) {
+	r.record(wfe.ActionKindStall, "", r.budgetStep(), wfe.Outcome{
+		Status:  wfe.OutcomeUnknown,
+		Summary: summary,
+	})
+	r.markSituation()
+	s.persist(r)
 }
 
 // situationMessage builds the user turn that carries a situation
@@ -160,19 +246,4 @@ func compactResult(text string) string {
 		return text
 	}
 	return string(raw)
-}
-
-// wasNudged reports whether the chat model was already nudged for
-// answering without a tool call.
-func (r *run) wasNudged() bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.nudged
-}
-
-// markNudged records that the chat model was nudged.
-func (r *run) markNudged() {
-	r.mu.Lock()
-	r.nudged = true
-	r.mu.Unlock()
 }

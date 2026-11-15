@@ -10,8 +10,9 @@ import (
 // and the history and answers with an error the agent can act on.
 //
 // The steps of the policy are every step of every job, in topological
-// order. A step's `attempts` caps the actions taken against it in the
-// current round — its own execution and the commands issued for it.
+// order. The budget caps the actions taken against one step in the
+// current round — its own execution, the commands issued for it and
+// the turns the agent produced no tool call in.
 type Policy struct {
 	// Workflow is the bound workflow the policy enforces.
 	Workflow *Workflow
@@ -24,12 +25,19 @@ type Policy struct {
 	// A command of the list belongs to no step: it counts against the
 	// step the run is on, but it never becomes that step's verdict.
 	Commands []string
+	// Budget is the number of chances the agent has at one step in
+	// one round.
+	//
+	// One number bounds every step: the step's own execution, the
+	// nightme commands issued for it and the turns the agent produced
+	// no tool call in each cost one chance. Zero means no limit.
+	Budget int
 
 	// stepList is the workflow's step list, computed once: the
 	// topological order does not change while the run goes on.
 	stepList []Step
 	// rounds holds the round every job is in. The per-step budgets
-	// count the attempts of the current round only.
+	// count the actions of the current round only.
 	rounds map[string]int
 }
 
@@ -42,13 +50,24 @@ func NewPolicy(wf *Workflow, history []ActionRecord) *Policy {
 	return p
 }
 
-// Record appends an action to the history. Only a run and a command
-// belong to a step, so any other action is recorded without one.
+// Record appends an action to the history. Only the actions that
+// count against a step carry one, so any other action is recorded
+// without one.
 func (p *Policy) Record(rec ActionRecord) {
-	if rec.Kind != ActionKindRun && rec.Kind != ActionKindCommand {
+	if !belongsToStep(rec.Kind) {
 		rec.StepID = ""
 	}
 	p.History = append(p.History, rec)
+}
+
+// belongsToStep reports whether an action of the kind counts against
+// a step.
+func belongsToStep(kind ActionKind) bool {
+	switch kind {
+	case ActionKindRun, ActionKindCommand, ActionKindStall, ActionKindReset:
+		return true
+	}
+	return false
 }
 
 // SetRounds records the round every job is in.
@@ -151,8 +170,8 @@ func commandName(cmd string) string {
 	return strings.TrimPrefix(first, "/")
 }
 
-// CheckStep reports whether the step may take an action now: its own
-// limit for the current round.
+// CheckStep reports whether the step may take an action now: its
+// budget for the current round.
 //
 // The workflow's own plan runs through this check too: a step that
 // spent its budget is a judgment point, not a silent overrun.
@@ -161,13 +180,12 @@ func (p *Policy) CheckStep(idx int) error {
 	if idx < 0 || idx >= len(steps) {
 		return fmt.Errorf("there is no step %d in this workflow", idx+1)
 	}
-	step := steps[idx]
-	if step.Attempts <= 0 {
+	if p.Budget <= 0 {
 		return nil
 	}
-	if used := p.stepUsage(idx); used >= step.Attempts {
+	if used := p.StepUsage(idx); used >= p.Budget {
 		return fmt.Errorf("the step %q already ran %d times, its limit is %d",
-			step.ID, used, step.Attempts)
+			steps[idx].ID, used, p.Budget)
 	}
 	return nil
 }
@@ -217,20 +235,20 @@ func (p *Policy) CheckFinish(status string) error {
 
 // Remaining reports the budget left in the policy.
 type Remaining struct {
-	// Steps holds the actions left per step, index-aligned with the
-	// workflow's steps. -1 means the step has no limit of its own.
+	// Steps holds the chances left per step, index-aligned with the
+	// workflow's steps. -1 means the policy has no budget at all.
 	Steps []int
 }
 
-// Remaining returns the actions left per step.
+// Remaining returns the chances left per step.
 func (p *Policy) Remaining() Remaining {
 	rem := Remaining{Steps: make([]int, len(p.steps()))}
-	for i, step := range p.steps() {
-		if step.Attempts <= 0 {
+	for i := range p.steps() {
+		if p.Budget <= 0 {
 			rem.Steps[i] = -1
 			continue
 		}
-		n := step.Attempts - p.stepUsage(i)
+		n := p.Budget - p.StepUsage(i)
 		if n < 0 {
 			n = 0
 		}
@@ -240,7 +258,7 @@ func (p *Policy) Remaining() Remaining {
 }
 
 // Render returns the workflow as a compact text block for the agent's
-// system prompt: the title, the steps with their notes and the limits.
+// system prompt: the title, the steps with their notes and the budget.
 func (p *Policy) Render() string {
 	var b strings.Builder
 	if p.Workflow != nil {
@@ -252,14 +270,14 @@ func (p *Policy) Render() string {
 	if p.Workflow != nil && !p.Workflow.Instruct {
 		b.WriteString("no free-form instructions\n")
 	}
+	if p.Budget > 0 {
+		fmt.Fprintf(&b, "budget: %d chances per step in this round\n", p.Budget)
+	}
 	b.WriteString("steps:\n")
 	for i, step := range p.steps() {
 		fmt.Fprintf(&b, "%d. %s\n", i+1, stepLabel(step))
 		if step.Note != "" {
 			fmt.Fprintf(&b, "   note: %s\n", step.Note)
-		}
-		if step.Attempts > 0 {
-			fmt.Fprintf(&b, "   limit: %d attempts in this round\n", step.Attempts)
 		}
 	}
 	return b.String()
@@ -294,12 +312,12 @@ func (p *Policy) stepFor(cmd string) int {
 // StepCommands lists the step messages the policy accepts now.
 //
 // A command belongs to the first step that has it, so it is left out
-// once that step has spent its limit.
+// once that step has spent its budget.
 func (p *Policy) StepCommands() []string {
 	var cmds []string
 	seen := map[string]bool{}
 	for i, step := range p.steps() {
-		spent := step.Attempts > 0 && p.stepUsage(i) >= step.Attempts
+		spent := p.Budget > 0 && p.StepUsage(i) >= p.Budget
 		n := normalizeCommand(step.Message)
 		if n == "" || seen[n] {
 			continue
@@ -322,29 +340,68 @@ func (p *Policy) stepCommandList() string {
 	return strings.Join(cmds, ", ")
 }
 
-// stepUsage counts the actions taken for the step in the current
-// round: the step's own runs and the commands issued for it.
-func (p *Policy) stepUsage(idx int) int {
+// StepUsage counts the chances the step spent in the current round:
+// its own runs, the commands issued for it and the turns the agent
+// produced no tool call in.
+//
+// A reset starts the step's budget over: only the actions after the
+// last one count.
+func (p *Policy) StepUsage(idx int) int {
 	steps := p.steps()
 	if idx < 0 || idx >= len(steps) {
 		return 0
 	}
 	id := steps[idx].ID
 	round := p.Round(JobOf(p.Workflow, id))
+	after := -1
 	n := 0
-	for _, rec := range p.History {
-		if rec.Kind != ActionKindRun && rec.Kind != ActionKindCommand {
-			continue
-		}
+	for i, rec := range p.History {
 		if rec.StepID != id {
 			continue
 		}
 		if recordRound(rec) != round {
 			continue
 		}
+		switch rec.Kind {
+		case ActionKindReset:
+			after = i
+			n = 0
+		case ActionKindRun, ActionKindCommand, ActionKindStall:
+			if i > after {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// ConsecutiveStalls returns the number of turns the agent produced no
+// tool call in, counted from the end of the history.
+//
+// A turn that did something ends the count: the agent acted.
+func (p *Policy) ConsecutiveStalls() int {
+	n := 0
+	for i := len(p.History) - 1; i >= 0; i-- {
+		if p.History[i].Kind != ActionKindStall {
+			break
+		}
 		n++
 	}
 	return n
+}
+
+// CurrentStepID returns the id of the step the run is on: the step of
+// the last run the history holds. Empty when nothing ran yet.
+func (p *Policy) CurrentStepID() string {
+	idx := p.currentStep()
+	if idx < 0 {
+		return ""
+	}
+	steps := p.steps()
+	if idx >= len(steps) {
+		return ""
+	}
+	return steps[idx].ID
 }
 
 // recordRound returns the round an action was taken in.

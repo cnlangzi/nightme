@@ -133,6 +133,23 @@ func summarizeToolResult(name, output string, err error) string {
 	}
 }
 
+// toolResultLine renders the result of a tool call.
+//
+// The summary is the producer's verdict: the producer knows the text
+// is safe to show, so it goes to the chat as it is. A call without a
+// summary falls back to the per-tool heuristics over the raw output —
+// a coding agent's output may hold file contents, so it is only ever
+// summarized, never shown.
+func toolResultLine(name, output, summary string, err error) string {
+	if err != nil {
+		return summarizeToolResult(name, output, err)
+	}
+	if summary != "" {
+		return "⎿  ✅ " + name + " → " + summary
+	}
+	return summarizeToolResult(name, output, nil)
+}
+
 // summarizeToolEnd is the legacy single-line summary. Kept for
 // backward compat with tests that pin the v0.2.x format. New
 // code should use formatToolStartCall + summarizeToolResult.

@@ -16,8 +16,13 @@ import (
 //
 // A button carries the text of the command it runs, so a click
 // travels the same path a typed command takes.
-// maxCardError is how much of an error the run card shows.
-const maxCardError = 300
+// maxCardError is how long the line of the error is.
+// maxCardCommand is how long the line of the command in flight is:
+// the full text is in the chat's tool line, clipped the same way.
+const (
+	maxCardError   = 300
+	maxCardCommand = 300
+)
 
 const (
 	cardActionPause    = "pause"
@@ -187,7 +192,6 @@ func (s *Service) cardView(r *run, it iteration) channel.CardSpec {
 	judgment := r.judgment
 	decision := r.lastDecision
 	reason := r.lastReason
-	note := r.lastNote
 	summary := r.summary
 	errMsg := r.errMsg
 	paused := r.paused
@@ -215,7 +219,7 @@ func (s *Service) cardView(r *run, it iteration) channel.CardSpec {
 
 	fields := make([]string, 0, 6)
 	if inflight != nil {
-		fields = append(fields, "current: "+inflight.Command)
+		fields = append(fields, clipLine("current: "+inflight.Command, maxCardCommand))
 	}
 	if question != "" {
 		fields = append(fields, "question: "+question)
@@ -240,13 +244,10 @@ func (s *Service) cardView(r *run, it iteration) channel.CardSpec {
 	case pausePending:
 		fields = append(fields, "pausing: the run stops after the current step")
 	}
-	if note != "" {
-		fields = append(fields, "note: "+note)
-	}
 	// The error stands on its own line: it is why the run stopped,
 	// and it must not read as another field of the run.
 	if errMsg != "" {
-		fields = append(fields, "error: "+truncate(errMsg, maxCardError))
+		fields = append(fields, clipLine("error: "+errMsg, maxCardError))
 	}
 	if summary != "" {
 		fields = append(fields, "result: "+summary)

@@ -197,16 +197,25 @@ func (s *GitStatusSnapshot) PushBlockReason() string {
 //	          Start.
 //	Err     — the tool's error (if any). Only set on End; nil on
 //	          Start.
+//	Summary — the one-line verdict of the call. Only set on End;
+//	          empty on Start. A channel shows it as it is: the
+//	          producer knows the text is safe to show, while a
+//	          coding agent's Output may hold file contents and is
+//	          only ever summarized. A producer with no raw output
+//	          sets it to the same text as Output; a call without a
+//	          summary falls back to the per-tool heuristics over
+//	          Output.
 //
 // ToolInfo deliberately avoids naming fields after any specific
 // bridge's schema (no `file_path`, `command`, `content`, etc.) —
 // those are tool-specific details that the channel layer
 // (with its own per-tool heuristics) handles.
 type ToolInfo struct {
-	Name   string
-	Args   string
-	Output string
-	Err    error
+	Name    string
+	Args    string
+	Output  string
+	Err     error
+	Summary string
 }
 
 // UsageInfo is the typed payload for OutUsage. See agent.UsageInfo

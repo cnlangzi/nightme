@@ -138,6 +138,23 @@ func summarizeToolResult(name, output string, err error) string {
 	}
 }
 
+// toolResultLine renders the result of a tool call.
+//
+// The summary is the producer's verdict: the producer knows the text
+// is safe to show, so it goes to the chat as it is. A call without a
+// summary falls back to the per-tool heuristics over the raw output —
+// a coding agent's output may hold file contents, so it is only ever
+// summarized, never shown.
+func toolResultLine(name, output, summary string, err error) string {
+	if err != nil {
+		return summarizeToolResult(name, output, err)
+	}
+	if summary != "" {
+		return "⎿  ✅ " + name + " → " + summary
+	}
+	return summarizeToolResult(name, output, nil)
+}
+
 // countLines returns the line count of s. An empty string is zero
 // lines; trailing newlines are not counted as separate lines (a
 // file ending with "\n" has the same line count as one without).

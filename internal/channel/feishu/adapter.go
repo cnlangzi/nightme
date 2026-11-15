@@ -1766,7 +1766,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		if msg.Tool != nil {
 			toolErr = msg.Tool.Err
 		}
-		resultBody := summarizeToolResult(toolName(msg), toolOutput(msg), toolErr)
+		resultBody := toolResultLine(toolName(msg), toolOutput(msg), toolSummary(msg), toolErr)
 		entry, ok := a.popToolStart(msg.ReplyTo)
 		if ok {
 			merged := entry.startBody + "\n" + resultBody
@@ -2383,6 +2383,15 @@ func toolArgs(m messages.OutboundMessage) string {
 func toolOutput(m messages.OutboundMessage) string {
 	if m.Tool != nil {
 		return m.Tool.Output
+	}
+	return ""
+}
+
+// toolSummary returns the verdict the producer declared safe to
+// show.
+func toolSummary(m messages.OutboundMessage) string {
+	if m.Tool != nil {
+		return m.Tool.Summary
 	}
 	return ""
 }

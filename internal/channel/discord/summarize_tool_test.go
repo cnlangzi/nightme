@@ -118,3 +118,33 @@ func TestFormatTaskList_OrderInProgressFirst(t *testing.T) {
 			activeIdx, pendingIdx, doneIdx)
 	}
 }
+
+// TestToolResultLine_ShowsTheSummaryVerbatim — the producer's verdict
+// is safe to show: it goes to the chat as it is, where the per-tool
+// heuristics would reduce the output to a byte count.
+func TestToolResultLine_ShowsTheSummaryVerbatim(t *testing.T) {
+	got := toolResultLine("run_step", "", "committed", nil)
+	if !strings.Contains(got, "committed") {
+		t.Errorf("toolResultLine = %q, want the summary", got)
+	}
+	if !strings.Contains(got, "run_step") {
+		t.Errorf("toolResultLine = %q, want the tool's name", got)
+	}
+}
+
+// TestToolResultLine_FallsBackToThePerToolHeuristics — a call without
+// a summary keeps the rendering of its tool.
+func TestToolResultLine_FallsBackToThePerToolHeuristics(t *testing.T) {
+	got := toolResultLine("Read", "line1\nline2", "", nil)
+	if got != summarizeToolResult("Read", "line1\nline2", nil) {
+		t.Errorf("toolResultLine = %q, want the per-tool rendering", got)
+	}
+}
+
+// TestToolResultLine_FailureWins — a failed call reads as a failure.
+func TestToolResultLine_FailureWins(t *testing.T) {
+	got := toolResultLine("run_step", "", "committed", errors.New("boom"))
+	if !strings.Contains(got, "boom") {
+		t.Errorf("toolResultLine = %q, want the failure", got)
+	}
+}

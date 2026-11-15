@@ -145,8 +145,6 @@ type run struct {
 	lastDecision string
 	// lastReason says why that decision was made.
 	lastReason string
-	// lastNote is what the chat model said last.
-	lastNote string
 	// summary is how the run ended.
 	summary string
 	// finished records that the model called the finish tool.
@@ -1253,13 +1251,6 @@ func (r *run) setTranscript(text string) {
 func (r *run) setSummary(text string) {
 	r.mu.Lock()
 	r.summary = text
-	r.mu.Unlock()
-}
-
-// setNote records what the chat model said last.
-func (r *run) setNote(text string) {
-	r.mu.Lock()
-	r.lastNote = text
 	r.mu.Unlock()
 }
 

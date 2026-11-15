@@ -12,17 +12,22 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 
+	"github.com/cnlangzi/nightme/internal/agentsession"
 	"github.com/cnlangzi/nightme/internal/channel"
+	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/gateway/observe"
+	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // operator drives a chat on behalf of the personal agent.
 type operator struct {
 	tracker *observe.Tracker
+	logger  *slog.Logger
 
 	mu sync.RWMutex
 	// channels are the started channels, in the order they started.
@@ -30,9 +35,13 @@ type operator struct {
 }
 
 // newOperator constructs an operator.
-func newOperator(tracker *observe.Tracker, chs []channel.Channel) *operator {
+func newOperator(tracker *observe.Tracker, chs []channel.Channel, logger *slog.Logger) *operator {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &operator{
 		tracker:  tracker,
+		logger:   logger,
 		channels: append([]channel.Channel(nil), chs...),
 	}
 }
@@ -99,6 +108,41 @@ func (o *operator) UpdateCard(ctx context.Context, chatID, cardID string, spec c
 		return err
 	}
 	return pub.UpdateCard(ctx, chatID, cardID, spec)
+}
+
+// Emit publishes an outbound message in the chat the run works in.
+//
+// The message travels the same wire the coding agent's events travel:
+// the chat's emitter when the chat has a session, and the channel
+// itself when it has none — a run that was resumed after a restart
+// finds no session, and its events still reach the chat.
+//
+// The chat's own settings gate the message the way they gate the
+// agent's: /think off hides the thinking, /tools off hides the tool
+// calls. A chat without a session has no settings, so nothing is
+// gated.
+func (o *operator) Emit(ctx context.Context, chatID string, msg messages.OutboundMessage) error {
+	ch, err := o.channelFor(chatID)
+	if err != nil {
+		return err
+	}
+	msg.ChatID = chatID
+
+	cs := findChatSession(chatID)
+	if cs == nil {
+		return ch.Send(ctx, msg)
+	}
+	env := agentsession.AgentEventEnvelope{ChatID: chatID}
+	for _, p := range outbound.DefaultPolicies(chatsession.GitStatusDeps{}, cs, o.logger) {
+		if p.Apply(&msg, env) {
+			return nil
+		}
+	}
+	em := cs.Emitter()
+	if em == nil {
+		return ch.Send(ctx, msg)
+	}
+	return em.Send(ctx, msg)
 }
 
 // Get returns the tracked execution of a message.

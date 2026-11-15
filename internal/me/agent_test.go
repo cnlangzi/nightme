@@ -53,6 +53,18 @@ type cardRecord struct {
 	Posted bool
 }
 
+// emittedMessage is one outbound message the run published.
+type emittedMessage struct {
+	// Kind is the kind of the message.
+	Kind messages.OutboundKind
+	// Text is the body of the message.
+	Text string
+	// Tool is the tool payload, when the message carries one.
+	Tool *messages.ToolInfo
+	// ReplyTo names the message the event hangs under.
+	ReplyTo string
+}
+
 // fakeOperator is a scripted chat.
 //
 // The commands settle on their own unless a step says otherwise. The
@@ -71,6 +83,8 @@ type fakeOperator struct {
 	seq     int
 	cardSeq int
 	watched []string
+	// emitted are the outbound messages the run published.
+	emitted []emittedMessage
 	// failCommand is the command that cannot be sent at all, the way
 	// a dead chat cannot take it.
 	failCommand string
@@ -226,6 +240,40 @@ func (f *fakeOperator) UpdateCard(_ context.Context, _, cardID string, spec chan
 	f.cards = append(f.cards, cardRecord{ID: cardID, Title: spec.Title, Body: spec.Body})
 	f.buttons = append(f.buttons, spec.Buttons)
 	return nil
+}
+
+// Emit publishes an outbound message in the chat.
+func (f *fakeOperator) Emit(_ context.Context, _ string, msg messages.OutboundMessage) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.emitted = append(f.emitted, emittedMessage{
+		Kind:    msg.Kind,
+		Text:    msg.Text,
+		Tool:    msg.Tool,
+		ReplyTo: msg.ReplyTo,
+	})
+	return nil
+}
+
+// Emitted returns the outbound messages the run published, in the
+// order it published them.
+func (f *fakeOperator) Emitted() []emittedMessage {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]emittedMessage(nil), f.emitted...)
+}
+
+// EmittedOf returns the outbound messages of one kind.
+func (f *fakeOperator) EmittedOf(kind messages.OutboundKind) []emittedMessage {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]emittedMessage, 0, len(f.emitted))
+	for _, m := range f.emitted {
+		if m.Kind == kind {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // Cards returns the cards the run published and updated, in the order

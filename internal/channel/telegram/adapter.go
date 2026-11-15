@@ -1528,7 +1528,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 			endName = "tool"
 		}
 		toolErr := msg.Tool.Err
-		resultBody := summarizeToolResult(endName, msg.Tool.Output, toolErr)
+		resultBody := toolResultLine(endName, msg.Tool.Output, msg.Tool.Summary, toolErr)
 
 		// Synchronous flush so the user sees `● Tool(args)\n⎿ result`
 		// as a single visual block. The rich turn's debounce will
@@ -2122,7 +2122,7 @@ func formatTool(msg messages.OutboundMessage) string {
 	case messages.OutToolStart:
 		return formatToolStartCall(name, msg.Tool.Args)
 	case messages.OutToolEnd:
-		return summarizeToolResult(name, msg.Tool.Output, msg.Err)
+		return toolResultLine(name, msg.Tool.Output, msg.Tool.Summary, msg.Err)
 	}
 	return ""
 }

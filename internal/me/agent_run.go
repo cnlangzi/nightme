@@ -97,9 +97,15 @@ type run struct {
 
 	// cardMsgID is the id of the run's overview message.
 	cardMsgID string
-	// round counts the rounds the run has started. Every round gets
-	// a card of its own.
-	round int
+	// cardJob is the job the card records; cardRound is the round of
+	// that job the card belongs to. An empty cardJob means the card
+	// has no iteration yet: it is the one the run started with.
+	cardJob   string
+	cardRound int
+	// cards holds the message id of the card of every iteration the
+	// run has entered. A run that comes back to an iteration goes on
+	// with the card that iteration has.
+	cards map[iteration]string
 
 	// system1Decisions and system2Decisions count what each
 	// capability decided.
@@ -569,10 +575,7 @@ func (r *run) roundOf(stepID string) int {
 	if job == "" {
 		return 1
 	}
-	if round := r.state.Rounds[job]; round > 0 {
-		return round
-	}
-	return 1
+	return r.state.RoundOf(job)
 }
 
 // exprCtx renders the run's progress as the context an expression
@@ -626,6 +629,16 @@ func outcomeLine(o messages.Outcome) string {
 	return string(o.Status)
 }
 
+// cardEntry is the card of one iteration of a run.
+type cardEntry struct {
+	// Job is the job the card records.
+	Job string `json:"job"`
+	// Round is the round of that job the card belongs to.
+	Round int `json:"round"`
+	// ID is the id of the message the card became.
+	ID string `json:"id"`
+}
+
 // persistedRun is the on-disk shape of a run.
 //
 // One file holds everything: the DAG progress, the conversation and
@@ -649,6 +662,9 @@ type persistedRun struct {
 	Paused           bool               `json:"paused"`
 	PauseReason      string             `json:"pause_reason,omitempty"`
 	RunCardMsgID     string             `json:"run_card_msg_id,omitempty"`
+	CardJob          string             `json:"card_job"`
+	CardRound        int                `json:"card_round"`
+	Cards            []cardEntry        `json:"cards,omitempty"`
 	System1Decisions int                `json:"system1_decisions"`
 	System2Decisions int                `json:"system2_decisions"`
 	System1Usage     llm.Usage          `json:"system1_usage"`
@@ -664,6 +680,9 @@ func (s *Service) persist(r *run) {
 	if s.cfg.StateDir == "" {
 		return
 	}
+	// The cards are read before the lock: the run holds it while it
+	// writes the state.
+	cards := r.cardEntries()
 	r.mu.Lock()
 	state := persistedRun{
 		RunID:            r.id,
@@ -684,6 +703,9 @@ func (s *Service) persist(r *run) {
 		Paused:           r.paused,
 		PauseReason:      r.pauseReason,
 		RunCardMsgID:     r.cardMsgID,
+		CardJob:          r.cardJob,
+		CardRound:        r.cardRound,
+		Cards:            cards,
 		System1Decisions: r.system1Decisions,
 		System2Decisions: r.system2Decisions,
 		System1Usage:     r.system1Usage,
@@ -805,6 +827,8 @@ func (s *Service) restoreRun(state persistedRun) *run {
 		paused:           state.Paused,
 		pauseReason:      state.PauseReason,
 		cardMsgID:        state.RunCardMsgID,
+		cardJob:          state.CardJob,
+		cardRound:        state.CardRound,
 		system1Decisions: state.System1Decisions,
 		system2Decisions: state.System2Decisions,
 		system1Usage:     state.System1Usage,
@@ -821,6 +845,10 @@ func (s *Service) restoreRun(state persistedRun) *run {
 	}
 	if r.phase == "" {
 		r.phase = PhaseRunning
+	}
+	r.cards = map[iteration]string{}
+	for _, entry := range state.Cards {
+		r.cards[iteration{job: entry.Job, round: entry.Round}] = entry.ID
 	}
 	r.policy.SetRounds(r.state.Rounds)
 	if len(r.argVals) > 0 {
@@ -927,11 +955,73 @@ func (r *run) cardMessageID() string {
 	return r.cardMsgID
 }
 
-// setCardMessageID records the id of the run's overview message.
-func (r *run) setCardMessageID(id string) {
+// setCard makes the card of an iteration the one the run updates.
+func (r *run) setCard(id string, it iteration) {
 	r.mu.Lock()
 	r.cardMsgID = id
+	r.cardJob = it.job
+	r.cardRound = it.round
 	r.mu.Unlock()
+}
+
+// cardIteration returns the iteration the run's card records.
+func (r *run) cardIteration() iteration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return iteration{job: r.cardJob, round: r.cardRound}
+}
+
+// cardOf returns the message id of the card of an iteration.
+func (r *run) cardOf(it iteration) (string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	id, ok := r.cards[it]
+	return id, ok
+}
+
+// rememberCard records the card of an iteration.
+func (r *run) rememberCard(it iteration, id string) {
+	r.mu.Lock()
+	if r.cards == nil {
+		r.cards = map[iteration]string{}
+	}
+	r.cards[it] = id
+	r.mu.Unlock()
+}
+
+// cardEntries returns the card of every iteration the run has entered.
+func (r *run) cardEntries() []cardEntry {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]cardEntry, 0, len(r.cards))
+	for it, id := range r.cards {
+		out = append(out, cardEntry{Job: it.job, Round: it.round, ID: id})
+	}
+	// The map has no order of its own: the file is written in the
+	// order of the iterations.
+	slices.SortFunc(out, func(a, b cardEntry) int {
+		if a.Job != b.Job {
+			return strings.Compare(a.Job, b.Job)
+		}
+		return a.Round - b.Round
+	})
+	return out
+}
+
+// iterationOfStep returns the iteration a step of the workflow runs
+// in: the job it belongs to and the round of that job.
+func (r *run) iterationOfStep(idx int) iteration {
+	step, ok := r.stepAt(idx)
+	if !ok {
+		return iteration{}
+	}
+	job := wfe.JobOf(r.workflow, step.ID)
+	if job == "" {
+		return iteration{}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return iteration{job: job, round: r.state.RoundOf(job)}
 }
 
 // suspend stops the run without ending it.
@@ -1030,5 +1120,9 @@ func (s *Service) askUser(ctx context.Context, r *run, question string, options 
 	}
 	r.clearAsk()
 	r.setPhase(PhaseRunning)
+	// The card does not offer the answer any more: the run is not
+	// waiting for one. A card that is left behind when the run moves
+	// on must not keep the choices of a question that is answered.
+	s.updateCard(r)
 	return reply, nil
 }

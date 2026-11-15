@@ -62,17 +62,27 @@ func (s *Service) speakQuestion(ctx context.Context, r *run, question string) (s
 	})
 }
 
-// postCard publishes the run's overview in the chat.
-func (s *Service) postCard(ctx context.Context, r *run) error {
+// iteration is one pass through a job's step list: the job and the
+// round of that job.
+type iteration struct {
+	job   string
+	round int
+}
+
+// postCard publishes a card of the run's overview in the chat and
+// returns the id of the message it became.
+//
+// The card records the given iteration: a card of its own belongs to
+// the iteration the run enters.
+func (s *Service) postCard(ctx context.Context, r *run, it iteration) (string, error) {
 	if s.cfg.Operator == nil {
-		return errors.New("me: no operator: the chat cannot be driven")
+		return "", errors.New("me: no operator: the chat cannot be driven")
 	}
-	id, err := s.cfg.Operator.PostCard(ctx, r.chatID, s.cardView(r))
+	id, err := s.cfg.Operator.PostCard(ctx, r.chatID, s.cardView(r, it))
 	if err != nil {
-		return fmt.Errorf("me: the run card could not be posted: %w", err)
+		return "", fmt.Errorf("me: the run card could not be posted: %w", err)
 	}
-	r.setCardMessageID(id)
-	return nil
+	return id, nil
 }
 
 // updateCard republishes the run's overview.
@@ -91,13 +101,79 @@ func (s *Service) updateCard(r *run) {
 	// last update — the summary — happens after that. The context
 	// outlives the run here on purpose.
 	ctx := context.WithoutCancel(r.ctx)
-	if err := s.cfg.Operator.UpdateCard(ctx, r.chatID, id, s.cardView(r)); err != nil {
+	if err := s.cfg.Operator.UpdateCard(ctx, r.chatID, id, s.cardView(r, r.cardIteration())); err != nil {
 		s.logger.Warn("me: the run card could not be updated", "run_id", r.id, "err", err)
 	}
 }
 
-// cardView renders the run's overview.
-func (s *Service) cardView(r *run) channel.CardSpec {
+// switchCard moves the run to the card of the iteration it is in.
+//
+// Every iteration gets a card of its own. The card of the iteration
+// that ended stays in the chat as the record of that iteration: the
+// engine clears the round's step records when the next round starts,
+// so the finished card cannot be rebuilt afterwards. A run that comes
+// back to an iteration goes on with the card that iteration has.
+//
+// The switch happens before the first command of the iteration is sent
+// to the chat, so the card of an iteration stands in front of the
+// commands of that iteration.
+func (s *Service) switchCard(ctx context.Context, r *run, it iteration) {
+	if it.job == "" {
+		return
+	}
+	id, known := r.cardOf(it)
+	r.mu.Lock()
+	current := r.cardMsgID
+	currentIt := iteration{job: r.cardJob, round: r.cardRound}
+	r.mu.Unlock()
+
+	switch {
+	case known && id != "":
+		// The iteration has a card of its own: the run goes back to it.
+		if current == id && currentIt == it {
+			// The run is already on that card.
+			return
+		}
+		r.setCard(id, it)
+		s.updateCard(r)
+	case current == "":
+		// The run has no card at all: the iteration gets one.
+		s.publishCard(ctx, r, it, current)
+	case currentIt.job == "":
+		// The card the run started with has no iteration of its own:
+		// it adopts the one the run enters.
+		r.setCard(current, it)
+		r.rememberCard(it, current)
+		s.updateCard(r)
+	default:
+		// Another iteration: it gets a card of its own, and the card
+		// of the iteration that ended keeps its content.
+		s.publishCard(ctx, r, it, current)
+	}
+}
+
+// publishCard publishes the card of an iteration.
+//
+// The card of the iteration that ended keeps its content: the run
+// does not write to it any more.
+func (s *Service) publishCard(ctx context.Context, r *run, it iteration, current string) {
+	newID, err := s.postCard(ctx, r, it)
+	if err != nil {
+		// The card is for people: the work goes on on the card the run
+		// has. The chat refused the card, so the iteration that ended
+		// has no card of its own — the run says where it is on the
+		// card it has.
+		s.logger.Warn("me: the run card could not be published", "run_id", r.id, "err", err)
+		r.setCard(current, it)
+		return
+	}
+	r.setCard(newID, it)
+	r.rememberCard(it, newID)
+}
+
+// cardView renders the run's overview for the iteration the card
+// records.
+func (s *Service) cardView(r *run, it iteration) channel.CardSpec {
 	r.mu.Lock()
 	steps := r.workflow.Steps()
 	states := make(map[string]wfe.StepState, len(r.state.Steps))
@@ -124,7 +200,12 @@ func (s *Service) cardView(r *run) channel.CardSpec {
 	options := askOptions(r.ask)
 	r.mu.Unlock()
 
-	lines := make([]string, 0, len(steps)+8)
+	lines := make([]string, 0, len(steps)+9)
+	// The iteration the card records. A card that has none yet — the
+	// one the run started with — does not name one.
+	if it.job != "" {
+		lines = append(lines, fmt.Sprintf("job: %s · round: %d", it.job, it.round))
+	}
 	if args != "" {
 		lines = append(lines, "args: "+args)
 	}

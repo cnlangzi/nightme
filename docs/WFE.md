@@ -746,7 +746,7 @@ The user picks the models. nightme never chooses one, and it never injects a mod
 
 The run card carries the same commands: its buttons are `[暂停] [继续] [停止]`, and a click is the command it stands for.
 
-Every round of the run gets a card of its own. The card of the round that ended stays in the chat as the record of that round; the next round starts a new one. `/me show` posts the current state as a card of its own, for the operator who wants the state back in front of them.
+Every job iteration of the run gets a card of its own: an iteration is one pass through a job's step list. The card of the iteration that ended stays in the chat as the record of that iteration; the next iteration starts a new one. A run that comes back to an iteration it has been in before goes on with the card that iteration has. `/me show` posts the current state as a card of its own, for the operator who wants the state back in front of them.
 
 A run that waits for an answer offers the choices as the card's buttons: a click is the answer, and the answer never reaches the agent. A person who quotes the question instead answers it in their own words — the answer is claimed by the run before the agent sees it.
 
@@ -777,11 +777,12 @@ A step that is still running reports `waiting`, and a step whose execution is go
 The outcome of a step reaches the run state and the expressions of the steps after it: the status as `${{ steps.<id>.outputs.status }}`, the facts under `${{ steps.<id>.outputs.data.<key> }}`.
 
 The chat sees the outcome in the run card — one message, updated in
-place:
+place. The card names the iteration it records:
 
 ```
 fix-issue · running
 
+job: main · round: 1
 args: id=42
 
 1. ✅ /gtw fix 42 -y

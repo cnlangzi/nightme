@@ -696,8 +696,9 @@ real message of that chat, marked with a bot sign:
 The receipt, the reaction and the permission card anchor to that message the way
 they anchor to a message you sent yourself. The run's overview — the steps, the
 current one, the last decision, the token usage — is a card in the chat, with
-`[暂停] [继续] [停止]` on it; a click is the command it stands for. Every round of
-the run gets a card of its own, so the chat keeps the record of how it went.
+`[暂停] [继续] [停止]` on it; a click is the command it stands for. Every job
+iteration of the run gets a card of its own, so the chat keeps the record of how
+it went.
 When the run
 asks a question, the choices become the card's buttons: a click is the answer. The
 question itself never reaches the agent — it is a message of the chat, not a turn

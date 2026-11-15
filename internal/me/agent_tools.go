@@ -187,6 +187,10 @@ func (s *Service) runStep(ctx context.Context, r *run, command string) (stepResu
 	if err != nil {
 		return stepResult{}, toolErrorf("%s", err.Error())
 	}
+	// The card follows the step the command belongs to: the command
+	// runs in the job and the round of that step, and the card records
+	// where the run is working.
+	s.switchCard(ctx, r, r.iterationOfStep(idx))
 	res, err := s.runCommand(ctx, r, command, false)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {

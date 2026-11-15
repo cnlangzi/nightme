@@ -23,6 +23,14 @@
 //
 // The file is rewritten atomically (temp + rename) after every
 // transition because the parent polls it concurrently.
+//
+// The reader has to cooperate with that rewrite: on Windows a file
+// another process holds open cannot be replaced unless the opener
+// allowed FILE_SHARE_DELETE. The parent polls the report while the
+// daemon rewrites it, so the parent's handle allows the delete —
+// otherwise the daemon's rename fails with "Access is denied" and the
+// report goes stale, leaving the operator without the per-channel
+// lines this file exists to produce.
 package main
 
 import (
@@ -176,7 +184,12 @@ func (w *startupReportWriter) warnOnce(err error) {
 // when there is none, it is unreadable, or it belongs to another
 // process (a daemon killed mid-startup leaves its report behind).
 func readStartupReport(path string, pid int) (startupReport, bool) {
-	data, err := os.ReadFile(path)
+	f, err := openReportFile(path)
+	if err != nil {
+		return startupReport{}, false
+	}
+	defer func() { _ = f.Close() }()
+	data, err := io.ReadAll(f)
 	if err != nil {
 		return startupReport{}, false
 	}

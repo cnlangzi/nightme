@@ -137,7 +137,7 @@ gtw 标题只从一个闭集里选 emoji,避免散乱:
 | emoji | 含义 | 例子 |
 |---|---|---|
 | `✅` | 单步动作完成 | `✅ Local worktree ready` / `✅ PR opened` / `✅ closed \`fix-42\`` |
-| `✨` | 无副作用的"现状" | `✨ origin/main already up to date` |
+| `✨` | 无副作用的"现状" | `✨ nothing to abort` |
 | `❌` | 终态失败 | `❌ git push failed: ...` |
 | `⚠️` | 警告 / 部分成功 | `⚠️ hooks config` |
 | `🤖` | agent 主导 | `🤖 claude pushed` |

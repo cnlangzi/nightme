@@ -12,6 +12,7 @@ package gtw
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -136,7 +137,7 @@ func TestGtwOutcome_AbortNothingRunning(t *testing.T) {
 }
 
 // TestGtwOutcome_Push covers the /gtw push exit paths a program
-// branches on: the refusals, the "nothing to push" noop, and the
+// branches on: the refusals, the "nothing to push" failure, and the
 // success that names the branch, the commit count and the remote
 // head the push left behind.
 func TestGtwOutcome_Push(t *testing.T) {
@@ -194,7 +195,10 @@ func TestGtwOutcome_Push(t *testing.T) {
 		if _, err := dispatchPush(p.ctx, p.cs, HandlerDeps{Git: git}, "chat", "msg", pushArgs{}); err != nil {
 			t.Fatalf("dispatchPush: %v", err)
 		}
-		assertOutcome(t, p.settle(t), messages.OutcomeNoop, map[string]string{"branch": "wt-clean"})
+		assertOutcome(t, p.settle(t), messages.OutcomeFailed, map[string]string{
+			"reason": "nothing_to_push",
+			"branch": "wt-clean",
+		})
 	})
 
 	t.Run("pushed", func(t *testing.T) {
@@ -233,6 +237,47 @@ func TestGtwOutcome_Push(t *testing.T) {
 			"remote_head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 		})
 	})
+
+	t.Run("pushed nothing", func(t *testing.T) {
+		// The branch was ahead of the remote, so the push ran — but
+		// the range it landed lists no commit. A push that pushed
+		// nothing did not do what it was asked to do.
+		git := newPushGit()
+		git.onArgs(statusCmd, "## wt-pushed...origin/wt-pushed [ahead 2]\n", "", nil)
+		git.onArgsSeq([]string{"rev-parse", "--verify", "origin/wt-pushed"},
+			pushGitResp{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n", "", nil},
+			pushGitResp{"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n", "", nil},
+		)
+		git.onSeq("rev-list",
+			pushGitResp{"2", "", nil},
+			pushGitResp{"0", "", nil},
+		)
+		git.on("push", "To origin", "", nil)
+		git.onArgs([]string{"log", "--oneline", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa..origin/wt-pushed"},
+			"", "", nil)
+
+		withCwd(t, t.TempDir())
+		writeYml(t, mustPwd(t), Context{
+			Worktree: mustPwd(t),
+			Branch:   "wt-pushed",
+			RepoRoot: mustPwd(t),
+		})
+
+		p := newOutcomeProbe(t)
+		p.cs.SetSelectedCwd(mustPwd(t))
+		if _, err := dispatchPush(p.ctx, p.cs, HandlerDeps{Git: git}, "chat", "msg", pushArgs{}); err != nil {
+			t.Fatalf("dispatchPush: %v", err)
+		}
+		card := p.ch.lastText()
+		got := p.settle(t)
+		assertOutcome(t, got, messages.OutcomeFailed, map[string]string{
+			"reason": "nothing_to_push",
+			"branch": "wt-pushed",
+		})
+		if !strings.Contains(card, "nothing to push") {
+			t.Errorf("the card must read like the status:\n%s", card)
+		}
+	})
 }
 
 // TestGtwOutcome_CommitNothingToDo covers /gtw commit on a clean
@@ -253,7 +298,41 @@ func TestGtwOutcome_CommitNothingToDo(t *testing.T) {
 	if _, err := dispatchCommit(p.ctx, p.cs, HandlerDeps{Git: git}, "chat", "msg", commitArgs{}, Config{}); err != nil {
 		t.Fatalf("dispatchCommit: %v", err)
 	}
-	assertOutcome(t, p.settle(t), messages.OutcomeNoop, map[string]string{"branch": "wt-clean"})
+	assertOutcome(t, p.settle(t), messages.OutcomeFailed, map[string]string{
+		"reason": "nothing_to_commit",
+		"branch": "wt-clean",
+	})
+}
+
+// TestGtwOutcome_SyncUpToDate covers /gtw sync on a branch that was
+// already up to date: a sync is an unconditional refresh, so a pull
+// with nothing to pull means the goal state holds.
+func TestGtwOutcome_SyncUpToDate(t *testing.T) {
+	repoRoot := initTempRepo(t)
+	addLocalRemote(t, repoRoot)
+
+	p := newOutcomeProbe(t)
+	p.cs.SetSelectedCwd(repoRoot)
+	f := NewFactoryWithDeps(NewManager(), HandlerDeps{Git: ExecGitRunner{}})
+	out, err := f.Handle(p.ctx, command.RuntimeServices{}, nil, p.cs, command.SlashInput{
+		ChatID:    "chat",
+		MessageID: "msg-1",
+		Text:      "/gtw sync",
+		Args:      []string{"gtw", "sync"},
+	})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	got := p.settle(t)
+	assertOutcome(t, got, messages.OutcomeOK, map[string]string{"branch": "main"})
+	if got != nil && got.Summary != "the branch was already up to date" {
+		t.Errorf("outcome summary = %q, want %q", got.Summary, "the branch was already up to date")
+	}
+	// The card reads like the status: the sync did what it was asked
+	// to do.
+	if out == nil || !strings.Contains(out.Reply, "✅") {
+		t.Errorf("the card must read like the status:\n%+v", out)
+	}
 }
 
 // TestGtwOutcome_ConfigQuery covers /gtw config without a value: it
@@ -402,5 +481,43 @@ func TestGtwOutcome_AbortedRunKeepsItsFacts(t *testing.T) {
 	}
 	if got.Data["reason"] == "rejected" {
 		t.Errorf("outcome data = %v, want the cancellation's reason, not the failure's", got.Data)
+	}
+}
+
+// TestGtwOutcome_PushUnreadableRangeIsSurfaced — a range that does
+// not resolve is not an empty range: the push landed, and the card
+// must say the result could not be read rather than claim that
+// nothing was pushed.
+func TestGtwOutcome_PushUnreadableRangeIsSurfaced(t *testing.T) {
+	git := newPushGit()
+	git.onArgs(statusCmd, "## wt-pushed...origin/wt-pushed [ahead 2]\n", "", nil)
+	git.onArgsSeq([]string{"rev-parse", "--verify", "origin/wt-pushed"},
+		pushGitResp{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n", "", nil},
+		pushGitResp{"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n", "", nil},
+	)
+	git.onSeq("rev-list",
+		pushGitResp{"2", "", nil},
+		pushGitResp{"0", "", nil},
+	)
+	git.on("push", "To origin", "", nil)
+	git.onArgs([]string{"log", "--oneline", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa..origin/wt-pushed"},
+		"", "fatal: ambiguous argument 'aaaaaaaa..origin/wt-pushed': unknown revision or path not in the working tree.", errors.New("exit status 128"))
+
+	withCwd(t, t.TempDir())
+	writeYml(t, mustPwd(t), Context{
+		Worktree: mustPwd(t),
+		Branch:   "wt-pushed",
+		RepoRoot: mustPwd(t),
+	})
+
+	p := newOutcomeProbe(t)
+	p.cs.SetSelectedCwd(mustPwd(t))
+	if _, err := dispatchPush(p.ctx, p.cs, HandlerDeps{Git: git}, "chat", "msg", pushArgs{}); err != nil {
+		t.Fatalf("dispatchPush: %v", err)
+	}
+	got := p.settle(t)
+	assertOutcome(t, got, messages.OutcomeFailed, map[string]string{"reason": "error"})
+	if got != nil && got.Summary != "the push landed but its result could not be read" {
+		t.Errorf("outcome summary = %q, want the push's result to be reported as unread", got.Summary)
 	}
 }

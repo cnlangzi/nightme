@@ -233,9 +233,12 @@ func blockerNumbers(blockers []*Issue) string {
 // renderAutoNoCandidate builds the reply for a queue with nothing
 // eligible. It says what was considered and why every candidate
 // was passed over, so the user can act on it.
+//
+// The card reads like the outcome: the command was asked to fix an
+// issue and could not, so it failed.
 func renderAutoNoCandidate(sel *autoSelection) string {
 	var b strings.Builder
-	b.WriteString("✨ No eligible assigned issue\n")
+	b.WriteString("❌ No eligible assigned issue\n")
 
 	rows := make([][2]string, 0, len(sel.Skipped)+2)
 	if sel.Counters.Candidates == 0 {
@@ -275,15 +278,15 @@ func renderAutoNoCandidate(sel *autoSelection) string {
 }
 
 // autoNoCandidateOutcome is the outcome of a queue with nothing
-// eligible: a noop (the request was valid, the world had nothing
-// to offer) carrying the counters and the wake-up hint.
+// eligible: a failure (the command was asked to fix an issue and
+// could not) carrying the counters and the wake-up hint.
 func autoNoCandidateOutcome(sel *autoSelection) messages.Outcome {
-	return command.NoopOutcome("no assigned issue was eligible", map[string]string{
-		"reason":        "no_candidate",
-		"wake_after":    autoWakeAfter,
-		"candidates":    strconv.Itoa(sel.Counters.Candidates),
-		"blocked":       strconv.Itoa(sel.Counters.Blocked),
-		"branch_exists": strconv.Itoa(sel.Counters.BranchExists),
-		"pr_open":       strconv.Itoa(sel.Counters.PROpen),
-	})
+	return command.FailedOutcomeData("no_candidate", "no assigned issue was eligible",
+		map[string]string{
+			"wake_after":    autoWakeAfter,
+			"candidates":    strconv.Itoa(sel.Counters.Candidates),
+			"blocked":       strconv.Itoa(sel.Counters.Blocked),
+			"branch_exists": strconv.Itoa(sel.Counters.BranchExists),
+			"pr_open":       strconv.Itoa(sel.Counters.PROpen),
+		})
 }

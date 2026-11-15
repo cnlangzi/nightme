@@ -211,7 +211,7 @@ var (
 	workflowKeys = keySet("title", "args", "instruct", "workspaces", "on", "jobs")
 	argKeys      = keySet("name", "default")
 	jobKeys      = keySet("needs", "if", "iterations", "steps")
-	stepKeys     = keySet("id", "if", "env", "continue-on-error", "note", "allow", "attempts", "message", "shell", "use", "with", "wait")
+	stepKeys     = keySet("id", "if", "env", "continue-on-error", "note", "allow", "attempts", "final", "message", "shell", "use", "with", "wait")
 	triggerKeys  = keySet("schedule", "pull_request", "branch", "issue", "mention")
 )
 

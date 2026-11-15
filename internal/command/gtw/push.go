@@ -402,22 +402,21 @@ func listUncommittedFiles(ctx context.Context, worktree string, deps HandlerDeps
 // "originBefore..origin/<branch>" for push — see dispatchPush
 // for why push switched off `headBefore..origin/<branch>` which
 // collapses to empty after a successful push). Used by
-// replyCommitSuccessCard and replyPushSuccessCard to build the
+// replyCommitSuccessCard and replyPushCard to build the
 // IM card directly from git state — never from agent prose.
 //
 // Output is the raw `git log --oneline` text, trimmed. Caller
 // can split on "\n" if it wants structured access.
 //
-// An empty range (no commits) returns "" + nil. Errors other
-// than "bad revision" propagate.
+// An empty range (no commits) returns "" + nil. A range that does
+// not resolve is an error: the caller must not read it as "there was
+// nothing there".
 func gitLogRange(ctx context.Context, worktree, revRange string, deps HandlerDeps) (string, error) {
 	out, stderr, err := deps.Git.Run(ctx, worktree, "log", "--oneline", revRange)
 	if err != nil {
-		// Empty rev range (no commits) often surfaces as a non-fatal
-		// error from `git log`; treat that as "no output, no error".
-		// Caller can render an empty list.
-		if strings.Contains(stderr, "does not have any commits") ||
-			strings.Contains(stderr, "unknown revision") {
+		// An unborn ref has no commit to log: that is an empty
+		// range, not a broken one.
+		if strings.Contains(stderr, "does not have any commits") {
 			return "", nil
 		}
 		return "", fmt.Errorf("git log %s: %w (stderr: %s)", revRange, err, strings.TrimSpace(stderr))

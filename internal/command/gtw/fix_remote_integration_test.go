@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 )
 
@@ -133,6 +134,19 @@ func (r *fixRemoteRecCh) serialized() []string {
 	return out
 }
 
+// settled returns the outcome of the settled message, or nil when
+// the message has not settled yet.
+func (r *fixRemoteRecCh) settled() *messages.Outcome {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, m := range r.sends {
+		if m.Kind == messages.OutMessageSettled {
+			return m.Outcome
+		}
+	}
+	return nil
+}
+
 // drive is shorthand: invoke RunFix in ID mode with the given
 // raw issue id. Returns the same fields the production code
 // does.
@@ -164,6 +178,44 @@ func (r *fixRemoteRig) driveMode(t *testing.T, rawID string, auto bool) (*Result
 }
 
 // --- tests ---
+
+// TestFixRemote_SettlesAfterTheDispatchedTurn pins the settle
+// timing of /gtw fix: the message the command answers settles when
+// the agent turn it dispatched ends, not when the command returns.
+// The work the command caused is the agent's work.
+func TestFixRemote_SettlesAfterTheDispatchedTurn(t *testing.T) {
+	rig := newFixRemoteRig(t)
+	rig.prov.SetIssue(42, &Issue{
+		ID:    42,
+		Title: "feat: the dispatched one",
+		State: "open",
+	})
+
+	work := rig.cs.Hold("msg-fix")
+	ctx := chatsession.WithWork(context.Background(), work)
+	if _, err := RunFix(ctx, ModeRemote, rig.cs, rig.deps, rig.cs.ChatID,
+		"msg-fix", []string{"42"}, false, false); err != nil {
+		t.Fatalf("RunFix: %v", err)
+	}
+	// The dispatcher releases its hold when the command returns.
+	work.Release()
+	if got := rig.rec.settled(); got != nil {
+		t.Fatalf("the message settled before the dispatched turn ended: %+v", got)
+	}
+	// The dispatched turn ends: the message settles with the
+	// command's own verdict.
+	rig.cs.PromptEndBus.Publish(chatsession.PromptEndedEvent{
+		UserMsgID: "msg-fix",
+		Reason:    agent.PromptEndClean,
+	})
+	got := rig.rec.settled()
+	if got == nil {
+		t.Fatal("the message did not settle when the dispatched turn ended")
+	}
+	if got.Status != messages.OutcomeOK {
+		t.Errorf("settled status = %q, want ok", got.Status)
+	}
+}
 
 // TestFixRemote_HappyPath exercises the canonical flow:
 //

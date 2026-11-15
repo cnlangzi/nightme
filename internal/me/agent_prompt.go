@@ -22,7 +22,8 @@ func (s *Service) systemPrompt(r *run) string {
 	b.WriteString("The workflow runs its steps by itself as long as each one succeeds. You are called when a step has finished and the work cannot go on in the normal order. The situation report says why. Get the work back on course — once it is, the workflow continues without you.\n\n")
 
 	b.WriteString("## The workflow\n")
-	b.WriteString("The title is the objective. The steps are the owner's procedure for reaching it; each note says why a step is there. Follow their order. A step's allowed commands are the owner's usual fixes for it, not the only ones you may use.\n\n")
+	b.WriteString("The title is the objective. The steps are the owner's procedure for reaching it; each note says why a step is there. Follow their order. A step's allowed commands are the owner's usual fixes for it, not the only ones you may use.\n")
+	b.WriteString("A step that waits sits out a duration. A wait belongs at the start of a round: it is how a repeating job backs off when there is nothing to do. A step marked as the final step cleans up after the round: it runs when the round ends, however the round ends.\n\n")
 
 	b.WriteString("## Your tools\n")
 	b.WriteString("- run_step(step_id) runs a step as the workflow wrote it: the step that is ready, or one that already ran this round.\n")
@@ -34,6 +35,8 @@ func (s *Service) systemPrompt(r *run) string {
 		b.WriteString("- instruct(text) asks the agent doing the work to change something, in plain words: fix code, resolve a conflict, commit. Never put a nightme command in it.\n")
 	}
 	b.WriteString("- repo_status reads the branch and the working tree. answer_choice answers a prompt a running command is waiting for.\n")
+	b.WriteString("- wait(duration) waits before you look again — for work that is still running in the background.\n")
+	b.WriteString("- end_round ends the round of the job the run is on: the steps of the round that did not run are skipped, the job's final step runs, and the job starts its next round.\n")
 	if !r.workflow.Instruct {
 		b.WriteString("\nThis workflow does not allow instructions; fix things with nightme commands.\n")
 	}
@@ -47,6 +50,13 @@ func (s *Service) systemPrompt(r *run) string {
 	b.WriteString("3. Run the step again with run_step. The work moves on only when the step itself succeeds; a fix alone does not count.\n")
 	b.WriteString("4. When a step's result is good enough even though it did not succeed, run the ready step after it — the workflow continues from there.\n")
 	b.WriteString("Each retry must change something. When the same failure comes back twice, change the approach, move on, or ask.\n")
+
+	b.WriteString("\n## When a step produced nothing\n")
+	b.WriteString("A step that ends as failed because it found nothing to do means one of two things, and the reason in the report tells you which:\n")
+	b.WriteString("- Nothing is left to do. The queue is empty, the tree is clean, the branch has nothing to push. Call end_round: the steps of the round that did not run are skipped, the job's final step runs, and the job starts its next round.\n")
+	b.WriteString("- The work is still running in the background. The agent the step dispatched has not finished. Call wait, then look again — do not end the round before the work is done.\n")
+	b.WriteString("The workflow may offer a step that waits — that is the owner's back-off. Run it with run_step when the round should wait before it goes on.\n")
+	b.WriteString("Never read a step that produced nothing as a step that succeeded.\n")
 
 	b.WriteString("\n## When to ask the owner\n")
 	b.WriteString("Use ask_human only for credentials or access you do not have, an irreversible or public action the workflow does not call for, or a product decision the evidence does not settle — or when you have run out of reasonable fixes. Give the evidence and your recommendation in the question.\n")

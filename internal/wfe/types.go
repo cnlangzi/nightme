@@ -103,6 +103,9 @@ type Step struct {
 	Note            string            `yaml:"note,omitempty" json:"note,omitempty"`
 	Allow           []string          `yaml:"allow,omitempty" json:"allow,omitempty"`
 	Attempts        int               `yaml:"attempts,omitempty" json:"attempts,omitempty"`
+	// Final marks the step that cleans up after the round. It runs
+	// when the round ends, however the round ends.
+	Final bool `yaml:"final,omitempty" json:"final,omitempty"`
 
 	// Message is the text sent to the chat.
 	Message string `yaml:"message,omitempty" json:"message,omitempty"`
@@ -214,12 +217,24 @@ type RunState struct {
 	// Rounds holds the round every job is in. A job that has not
 	// started yet is not in the map.
 	Rounds map[string]int `json:"rounds,omitempty"`
+	// EndedRounds holds the early end of a round, keyed by the job.
+	// The plan goes on with the final step of such a job or with its
+	// next round — not with a judgment point.
+	EndedRounds map[string]EndedRound `json:"ended_rounds,omitempty"`
 	// Steps holds every step that ran, in the order it ran.
 	Steps []StepState `json:"steps"`
 	// StartedAt is when the run started.
 	StartedAt time.Time `json:"started_at"`
 	// UpdatedAt is when the run last moved.
 	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// EndedRound is the early end of one round of a job.
+type EndedRound struct {
+	// Round is the round that was ended.
+	Round int `json:"round"`
+	// Step is the step whose failure ended it.
+	Step string `json:"step"`
 }
 
 // StepState is the record of one step that ran.

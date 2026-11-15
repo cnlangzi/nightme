@@ -2,6 +2,7 @@ package me
 
 import (
 	"fmt"
+	"maps"
 	"regexp"
 	"strings"
 
@@ -39,6 +40,9 @@ func (s *Service) renderWorkflow(r *run) string {
 			}
 			if step.Attempts > 0 {
 				fmt.Fprintf(&b, "    limit: %d attempts in this round\n", step.Attempts)
+			}
+			if step.Final {
+				b.WriteString("    final: it runs when the round ends, however the round ends\n")
 			}
 		}
 	}
@@ -91,8 +95,8 @@ func stepText(step wfe.Step) string {
 // model.
 //
 // It is the report the model reads when it is called: the reason, the
-// facts of the round, the outcome of the last action and what the
-// transcript said about it.
+// facts of the round, what every step of the round produced and what
+// the agents behind the last two actions said about it.
 func (s *Service) renderSituation(r *run) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "The run needs you: %s.\n", s.situationReason(r))
@@ -108,36 +112,48 @@ func (s *Service) renderSituation(r *run) string {
 		fmt.Fprintf(&b, "directory: %s\n", cwd)
 	}
 
-	if steps := s.renderRoundSteps(r); steps != "" {
+	steps, rendered := s.renderRoundSteps(r)
+	if steps != "" {
 		b.WriteString(steps)
 	}
 
-	if action, ok := r.lastAction(); ok {
+	// The last action's outcome: the step list above carries it when
+	// the action was a step's own run. A command the run issued for a
+	// step that has not run yet leaves its verdict nowhere else, so
+	// it is rendered here.
+	if action, ok := r.lastAction(); ok && !carriesOutcome(rendered, action) {
 		out := action.Outcome
 		fmt.Fprintf(&b, "\nlast outcome:\n  status: %s\n  summary: %s\n", out.Status, out.Summary)
-		for k, v := range out.Data {
-			fmt.Fprintf(&b, "  %s: %s\n", k, v)
+		for _, k := range sortedNames(out.Data) {
+			fmt.Fprintf(&b, "  %s: %s\n", k, out.Data[k])
 		}
 		if hint := reasonHint(out.Data["reason"]); hint != "" {
 			fmt.Fprintf(&b, "  hint: %s\n", hint)
 		}
 	}
-	if transcript := r.transcriptTail(); transcript != "" {
-		b.WriteString("\ntranscript (tail):\n")
-		b.WriteString(tailText(transcript, transcriptBytes))
-		b.WriteString("\n")
+	if transcripts := r.actionTranscripts(); len(transcripts) > 0 {
+		b.WriteString("\ntranscripts (tail):\n")
+		for _, t := range transcripts {
+			fmt.Fprintf(&b, "\n--- %s ---\n", t.Command)
+			b.WriteString(tailText(t.Text, transcriptBytes))
+			b.WriteString("\n")
+		}
 	}
 	return b.String()
 }
 
 // renderRoundSteps renders the steps of the round the run is on: where
-// each of them stands and which one is ready.
-func (s *Service) renderRoundSteps(r *run) string {
+// each of them stands, what each of them produced and which one is
+// ready.
+//
+// It also returns the state of every step it rendered, so the caller
+// can tell whether the step list already carries a verdict.
+func (s *Service) renderRoundSteps(r *run) (string, map[string]wfe.StepState) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	wf := r.workflow
 	if wf == nil {
-		return ""
+		return "", nil
 	}
 	states := map[string]wfe.StepState{}
 	for _, st := range r.state.Steps {
@@ -151,13 +167,16 @@ func (s *Service) renderRoundSteps(r *run) string {
 		}
 	}
 	job, _ := r.brainIterationLocked()
+	rendered := map[string]wfe.StepState{}
 	var b strings.Builder
 	for _, name := range wf.JobOrder() {
 		if job != "" && name != job {
 			continue
 		}
 		for _, step := range wf.Jobs[name].Steps {
-			fmt.Fprintf(&b, "  %s: %s", step.ID, stepStateText(states[step.ID]))
+			st := states[step.ID]
+			rendered[step.ID] = st
+			fmt.Fprintf(&b, "  %s: %s", step.ID, stepStateText(st))
 			if idx := r.stepIndex(step.ID); idx >= 0 && idx < len(remaining.Steps) && remaining.Steps[idx] >= 0 {
 				fmt.Fprintf(&b, " (%d attempts left)", remaining.Steps[idx])
 			}
@@ -165,9 +184,48 @@ func (s *Service) renderRoundSteps(r *run) string {
 				b.WriteString(" — ready")
 			}
 			b.WriteString("\n")
+			writeOutcomeFacts(&b, st)
 		}
 	}
-	return b.String()
+	return b.String(), rendered
+}
+
+// writeOutcomeFacts renders what a step produced: its summary, the
+// facts it reported and the hint its reason carries.
+//
+// The facts are the evidence the deciding agent needs: why a step
+// ended the way it did is rarely in the status alone.
+func writeOutcomeFacts(b *strings.Builder, st wfe.StepState) {
+	if st.ID == "" || st.Pending {
+		return
+	}
+	out := st.Outcome
+	if out.Summary != "" {
+		fmt.Fprintf(b, "    %s\n", out.Summary)
+	}
+	for _, k := range sortedNames(out.Data) {
+		fmt.Fprintf(b, "    %s: %s\n", k, out.Data[k])
+	}
+	if hint := reasonHint(out.Data["reason"]); hint != "" {
+		fmt.Fprintf(b, "    hint: %s\n", hint)
+	}
+}
+
+// carriesOutcome reports whether the rendered steps already carry the
+// action's verdict.
+//
+// A step's own run and a repair inside a step that already ran both
+// leave the verdict on the step: the step list carries it. A command
+// the run issued for a step that has not run yet leaves it nowhere
+// else.
+func carriesOutcome(rendered map[string]wfe.StepState, action wfe.ActionRecord) bool {
+	st, ok := rendered[action.StepID]
+	if !ok {
+		return false
+	}
+	return st.Outcome.Status == action.Outcome.Status &&
+		st.Outcome.Summary == action.Outcome.Summary &&
+		maps.Equal(st.Outcome.Data, action.Outcome.Data)
 }
 
 // stepStateText renders where a step stands.
@@ -233,10 +291,14 @@ var (
 var reasonHints = map[string]string{
 	"agent_error":           "the agent did not run, or it produced no usable output.",
 	"not_committed":         "the agent finished, but nothing was committed.",
+	"nothing_to_commit":     "the working tree carries no changes: there was nothing to commit.",
+	"nothing_to_push":       "the branch carries no commit the remote does not have: there was nothing to push.",
 	"conflict":              "the working tree has unresolved conflicts.",
 	"dirty":                 "the working tree has changes that were not committed.",
 	"detached":              "HEAD is detached: the branch has to be checked out first.",
 	"no_commits":            "the branch has no commit beyond its base.",
+	"no_diff":               "there is no diff in the working tree: there was nothing to review.",
+	"no_candidate":          "the queue of assigned issues was empty. The workflow backs off with its wait step.",
 	"provider_error":        "the git platform could not be reached.",
 	"dispatch_failed":       "the worktree was made, but the work never reached the agent.",
 	"not_supported":         "the agent cannot do this.",
@@ -254,11 +316,4 @@ func reasonHint(code string) string {
 		return ""
 	}
 	return reasonHints[code]
-}
-
-// transcriptTail returns the tail of the last action's transcript.
-func (r *run) transcriptTail() string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.lastTranscript
 }

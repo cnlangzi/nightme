@@ -83,10 +83,14 @@ func (r *run) brainIteration() (string, int) {
 
 // brainIterationLocked returns the job and the round the run is on.
 // The caller holds the lock.
+//
+// A step that was skipped does not count: the chain continues past it,
+// so the run is not in that job. The job of the last step that ran is
+// the one the run is working on — and the one a judgment belongs to.
 func (r *run) brainIterationLocked() (string, int) {
 	job := ""
 	for i := len(r.state.Steps) - 1; i >= 0; i-- {
-		if r.state.Steps[i].Job == "" {
+		if r.state.Steps[i].Job == "" || r.state.Steps[i].Skipped {
 			continue
 		}
 		job = r.state.Steps[i].Job

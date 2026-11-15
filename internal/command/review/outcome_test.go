@@ -228,7 +228,7 @@ func TestReviewOutcome(t *testing.T) {
 		{
 			name: "no diff",
 			err:  agent.ErrNoDiff,
-			want: messages.OutcomeNoop,
+			want: messages.OutcomeFailed,
 			data: map[string]string{"reason": "no_diff", "agent": "reviewer"},
 		},
 		{

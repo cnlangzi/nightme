@@ -409,7 +409,7 @@ func TestRunCommit_NoWorkToDo(t *testing.T) {
 		t.Fatalf("dispatchCommit: %v", err)
 	}
 	r := s.lastText()
-	if !strings.Contains(r, "ℹ️ nothing to commit") {
+	if !strings.Contains(r, "❌ nothing to commit") {
 		t.Fatalf("expected no-work-to-do reply, got:\n%s", r)
 	}
 	for _, c := range git.calls {

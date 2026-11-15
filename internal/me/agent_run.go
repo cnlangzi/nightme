@@ -55,6 +55,23 @@ type inflightState struct {
 	Instruct bool `json:"instruct"`
 }
 
+// actionTranscript is the transcript of one action of a run.
+//
+// The evidence that explains a failure is often in the action before
+// the one that failed, so a run keeps the last two.
+type actionTranscript struct {
+	// Command is the action the transcript belongs to.
+	Command string `json:"command"`
+	// Text is the transcript itself.
+	Text string `json:"text"`
+}
+
+// maxActionTranscripts is how many action transcripts a run keeps.
+//
+// The one before the last one is what explains the last one: the
+// agent that did the work said why it could not.
+const maxActionTranscripts = 2
+
 // run is one workflow run.
 type run struct {
 	svc *Service
@@ -134,8 +151,13 @@ type run struct {
 	// situationStale records that the workflow moved on since the
 	// model last read a situation report.
 	situationStale bool
-	// lastTranscript is the tail of the last action's transcript.
-	lastTranscript string
+	// transcripts holds the transcripts of the last actions, oldest
+	// first. The evidence that explains a failure is often in the
+	// action before the one that failed.
+	transcripts []actionTranscript
+	// waiting is how long the run is waiting, when it waits inside
+	// the agent's turn.
+	waiting string
 	// system1Model is the decision model that answered last.
 	system1Model string
 	// judgment is why the workflow cannot decide on its own.
@@ -792,6 +814,7 @@ type persistedRun struct {
 	Workflow         *wfe.Workflow      `json:"workflow"`
 	State            *wfe.RunState      `json:"state"`
 	History          []wfe.ActionRecord `json:"history"`
+	Transcripts      []actionTranscript `json:"transcripts,omitempty"`
 	Messages         []llm.Message      `json:"messages"`
 	PendingCalls     []pendingCall      `json:"pending_calls"`
 	Ask              *askState          `json:"ask,omitempty"`
@@ -835,6 +858,7 @@ func (s *Service) persist(r *run) {
 		Workflow:         r.workflow,
 		State:            r.state,
 		History:          append([]wfe.ActionRecord(nil), r.policy.History...),
+		Transcripts:      append([]actionTranscript(nil), r.transcripts...),
 		Messages:         append([]llm.Message(nil), r.messages...),
 		PendingCalls:     append([]pendingCall(nil), r.pendingCalls...),
 		Ask:              r.ask,
@@ -964,6 +988,7 @@ func (s *Service) restoreRun(state persistedRun) *run {
 		workflow:         state.Workflow,
 		policy:           policy,
 		state:            state.State,
+		transcripts:      state.Transcripts,
 		messages:         state.Messages,
 		pendingCalls:     state.PendingCalls,
 		ask:              state.Ask,
@@ -1240,10 +1265,44 @@ func (r *run) isFinished() bool {
 	return r.finished
 }
 
-// setTranscript keeps the tail of the last action's transcript.
-func (r *run) setTranscript(text string) {
+// setTranscript keeps the transcript of an action.
+//
+// The run keeps the last two: the evidence that explains a failure is
+// often in the action before the one that failed.
+func (r *run) setTranscript(command, text string) {
+	if strings.TrimSpace(text) == "" {
+		return
+	}
 	r.mu.Lock()
-	r.lastTranscript = text
+	r.transcripts = append(r.transcripts, actionTranscript{Command: command, Text: text})
+	if len(r.transcripts) > maxActionTranscripts {
+		r.transcripts = r.transcripts[len(r.transcripts)-maxActionTranscripts:]
+	}
+	r.mu.Unlock()
+}
+
+// actionTranscripts returns the transcripts of the last actions,
+// oldest first.
+func (r *run) actionTranscripts() []actionTranscript {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]actionTranscript(nil), r.transcripts...)
+}
+
+// lastTranscriptText returns the transcript of the last action.
+func (r *run) lastTranscriptText() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.transcripts) == 0 {
+		return ""
+	}
+	return r.transcripts[len(r.transcripts)-1].Text
+}
+
+// setWaiting records how long the run is waiting.
+func (r *run) setWaiting(text string) {
+	r.mu.Lock()
+	r.waiting = text
 	r.mu.Unlock()
 }
 

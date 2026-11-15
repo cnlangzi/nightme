@@ -197,6 +197,7 @@ func (s *Service) cardView(r *run, it iteration) channel.CardSpec {
 	paused := r.paused
 	pausePending := r.pauseRequested
 	pauseReason := r.pauseReason
+	waiting := r.waiting
 	actions := len(r.policy.History)
 	s1d, s2d := r.system1Decisions, r.system2Decisions
 	s1u, s2u := r.system1Usage.Total(), r.system2Usage.Total()
@@ -243,6 +244,9 @@ func (s *Service) cardView(r *run, it iteration) channel.CardSpec {
 		fields = append(fields, line)
 	case pausePending:
 		fields = append(fields, "pausing: the run stops after the current step")
+	}
+	if waiting != "" {
+		fields = append(fields, "waiting: "+waiting)
 	}
 	// The error stands on its own line: it is why the run stopped,
 	// and it must not read as another field of the run.

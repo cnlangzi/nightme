@@ -107,10 +107,10 @@ func TestFixAuto_PicksAssignedIssue(t *testing.T) {
 	}
 }
 
-// TestFixAuto_NoCandidate_ReportsNoop pins the empty-queue
+// TestFixAuto_NoCandidate_ReportsFailure pins the empty-queue
 // outcome: nothing is claimed, no worktree is created, and the
 // reply asks to be woken later.
-func TestFixAuto_NoCandidate_ReportsNoop(t *testing.T) {
+func TestFixAuto_NoCandidate_ReportsFailure(t *testing.T) {
 	rig := newFixRemoteRig(t)
 	rig.prov.SetListIssues([]*Issue{
 		{ID: 43, Title: "feat: unassigned", State: "open"},
@@ -183,7 +183,7 @@ func TestFixAuto_SkipsBlockedCandidate(t *testing.T) {
 }
 
 // TestFixAuto_NoCandidate_OutcomeCarriesWakeUp pins the outcome
-// the personal agent reads: a noop that says why nothing was
+// the personal agent reads: a failure that says why nothing was
 // eligible and when to come back.
 func TestFixAuto_NoCandidate_OutcomeCarriesWakeUp(t *testing.T) {
 	rig := newFixRemoteRig(t)
@@ -208,8 +208,8 @@ func TestFixAuto_NoCandidate_OutcomeCarriesWakeUp(t *testing.T) {
 	if settled == nil {
 		t.Fatalf("no settled outcome: the command reported nothing")
 	}
-	if settled.Status != messages.OutcomeNoop {
-		t.Errorf("outcome status = %q, want noop", settled.Status)
+	if settled.Status != messages.OutcomeFailed {
+		t.Errorf("outcome status = %q, want failed", settled.Status)
 	}
 	want := map[string]string{
 		"reason":        "no_candidate",

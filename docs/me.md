@@ -52,7 +52,7 @@ type Outcome struct {
 | 键 | 含义 |
 | --- | --- |
 | `end_reason` | 回合结束原因（`clean` / `user-stopped` / `user-killed` / …） |
-| `reason` | 结束原因分类（见 §7.1） |
+| `reason` | 结束原因分类（见 §7.1）——命令**因为有东西要做**才跑、又发现没东西可做时，它报 `failed` 并带上这里的码 |
 | `agent` | 跑这件事的 agent 名 |
 | `issue` | `/gtw fix` 处理的 issue 号（本地模式为 `-1`） |
 | `branch` | 分支名 |
@@ -91,9 +91,9 @@ type Outcome struct {
 | Status | 含义 |
 | --- | --- |
 | `ok` | 按要求完成了 |
-| `noop` | 没有可做的事——请求有效，但世界已经满足它 |
+| `noop` | 没有可做的事——请求有效，但世界已经满足它（查询类命令：`/gtw config` 读设置、`/gtw abort` 没有命令在跑） |
 | `incomplete` | 做了一部分，剩下的没做完 |
-| `failed` | 没做完 |
+| `failed` | 没做完。**命令是因为有东西要做才跑的**：提交没有东西可提交、推送没有东西可推送、review 没有 diff 可看、队列里没有可挑的 issue——这些都报 `failed`，让程序和 workflow 知道前提不成立，而不是让它以为一切正常 |
 | `cancelled` | 被用户或操作者中止（`/stop` 停掉的回合、`/gtw abort` 取消的命令） |
 | `timeout` | 跑超时了（**保留**，当前没有命令产出它） |
 | `unknown` | 没有任何一方上报过结论 |
@@ -161,6 +161,8 @@ settled 不是"命令返回时"发，是"**这条消息引发的工作全部结�
 
 `/review` 的 hold 在 `Handle` 里**同步**取（不能在 goroutine 里取：那会晚于分发器的 release，导致消息在 review 开始前就 settle 成 `unknown`），goroutine 退出时放掉。
 
+`/gtw fix` 派发 issue 时走 `cs.QueueUserMessage`，它自己持一份 hold 到承载那条消息的回合结束——所以命令返回时消息**不** settle，它等 agent 把 issue 做完。派发失败时没有回合会结束，消息在命令返回时就 settle（结论是 `incomplete` / `dispatch_failed`）。
+
 ---
 
 ## 5. 各命令的 settle 时机
@@ -211,7 +213,10 @@ chatsession: message settled chat_id=… message_id=… status=… summary=…
 | 消息被丢弃（换 workspace 的边界清队列 / 队列重置） | `cancelled` | `dropped` |
 | 消息没有 @ 到 bot（watch 模式丢弃） | `noop` | `watch_mode` |
 | 没有 workspace / agent 起不来 | `failed` | `no_agent` |
-| `/review` 没有可 review 的 diff | `noop` | `no_diff` |
+| `/gtw fix *` 的队列里没有可选项 | `failed` | `no_candidate` |
+| `/gtw commit` 的工作区没有改动 | `failed` | `nothing_to_commit` |
+| `/gtw push` 的分支没有远端没有的 commit | `failed` | `nothing_to_push` |
+| `/review` 没有可 review 的 diff | `failed` | `no_diff` |
 | `/review` 的 agent 不支持 review | `failed` | `not_supported` |
 | `/review` 的 findings 没能注入 agent | `incomplete` | `inject_failed` |
 
@@ -241,6 +246,8 @@ chatsession: message settled chat_id=… message_id=… status=… summary=…
 | `dirty` | 工作区有未提交的改动 | `/gtw push` / `/gtw close` |
 | `detached` | HEAD 是游离的 | `/gtw push` / `/gtw commit` / `/gtw pr` |
 | `conflict` | 有未解决的冲突 | `/gtw commit` |
+| `nothing_to_commit` | 工作区没有改动，没有东西可提交 | `/gtw commit` |
+| `nothing_to_push` | 分支没有远端没有的 commit，没有东西可推送 | `/gtw push` |
 | `rejected` | push 被拒绝 | `/gtw push` |
 | `not_committed` | agent 跑完了但没有真的提交 | `/gtw commit` |
 | `agent_error` | agent 没跑成 / 输出不可用 | `/gtw commit` / `/gtw pr` |

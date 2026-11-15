@@ -424,7 +424,7 @@ func TestRunPush_CleanNoUnpushed(t *testing.T) {
 		}
 	}
 	r := s.lastText()
-	if !strings.Contains(r, "ℹ️ nothing to push") {
+	if !strings.Contains(r, "❌ nothing to push") {
 		t.Errorf("expected Branch 1 no-op card, got:\n%s", r)
 	}
 }
@@ -1228,7 +1228,7 @@ func TestDispatchPush_NothingToPush(t *testing.T) {
 		t.Fatalf("dispatchPush err: %v", err)
 	}
 	r := s.lastText()
-	if !strings.Contains(r, "ℹ️ nothing to push") {
+	if !strings.Contains(r, "❌ nothing to push") {
 		t.Fatalf("expected nothing-to-push reply, got:\n%s", r)
 	}
 	for _, c := range rig.git.calls {

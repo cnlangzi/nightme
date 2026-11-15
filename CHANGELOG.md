@@ -23,7 +23,8 @@ step the run is on is spent, the run pauses and says so in the chat:
 `/me continue` hands the control back and the step's budget starts over.
 
 Workflow files that still carry `attempts:` are refused with a message that
-names the key, the line and the replacement.
+names the key and the line. The budget is one number for every step and
+every round, set by `me.max_judgments`.
 
 ### Fixed: a failed step no longer ends the run
 
@@ -34,10 +35,13 @@ made a hung provider look like a frozen run.
 
 Neither ends a run any more. The words of a prose-only turn stay in the
 conversation, the turn costs one chance of the step, and the run asks the
-agent again with a fresh situation report. A provider that failed or that
-never answered costs the same one chance: the run waits — half a minute at
-first, doubling up to five minutes — and asks again. One turn of the chat
-model lasts at most five minutes.
+agent again with a fresh situation report.
+
+A provider that failed or that never answered costs the same one chance. The
+run waits before it asks again: the first failure waits 30 seconds, and every
+further failure waits twice as long, up to five minutes. One turn of the chat
+model lasts at most five minutes, so a provider that never answers does not
+hold the run.
 
 The situation report now carries the state of the repository, the note of
 the failing step, the commands the policy accepts, the chances left, the
@@ -53,9 +57,10 @@ restricted nothing: every registered nightme command is a tool the agent
 may call.
 
 A step's verdict now comes from the step's own execution only. A repair —
-a registered command the agent issues at a judgment point — is recorded
-against the step the run is on and counts against that step's budget,
-but it no longer turns a failed step into a finished one.
+a registered command the agent issues at a judgment point — is accepted
+without belonging to a step: it is recorded against the step the run is on
+and counts against that step's budget, but it no longer turns a failed step
+into a finished one.
 
 The decision model now picks among the steps' `message:` values. The
 repairs belong to the chat model, which holds every nightme command as a

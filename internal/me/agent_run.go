@@ -181,6 +181,9 @@ type run struct {
 	// providerWait is how long the run waits before it asks the chat
 	// model again. It grows with every failed turn and starts over
 	// when the model answers.
+	//
+	// It is not persisted: a daemon that comes back starts the wait
+	// over. The chances the agent spent are what the history keeps.
 	providerWait time.Duration
 	// lastDecision names who decided last: the workflow, the
 	// decision model or the chat model.

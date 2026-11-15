@@ -768,7 +768,10 @@ func TestStartWorkflow_RefusesASecondRunInTheSameChat(t *testing.T) {
 
 	provider := &scriptedProvider{err: errors.New("the chat model must not be called")}
 	decider := &scriptedDecider{err: errors.New("the decision model must not be called")}
-	svc, _ := testService(t, dir, Config{Provider: provider, Decider: decider})
+	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
+	// The run keeps working: a run that is over would free the chat
+	// for a second one, and the test would prove nothing.
+	op.steps = []fakeStep{{open: true}}
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",

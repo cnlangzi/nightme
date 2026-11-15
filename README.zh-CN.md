@@ -534,6 +534,8 @@ jobs:
 | `note` | 这个 step 为什么在这儿，owner 平时怎么修它。它是决策模型读的那段描述。 |
 | `final` | 这个 step 负责收尾：这一轮怎么结束它都跑。标了 `final: true` 的 step 在提前结束的一轮里顶上被跳过的那几步。 |
 
+`attempts:` 已经退休：还带着它的文件加载不了。agent 的预算是一个数字，对每个 step、每一轮都一样，由 `me.max_judgments` 定。
+
 表达式有 `${{ args.NAME }}`、`${{ steps.<id>.outputs.status }}`、
 `${{ steps.<id>.outputs.data.<key> }}`、`${{ needs.<job>.* }}`、`${{ env.NAME }}`
 和 `${{ now }}`；`outputs` 这一段可以省略。表达式里出现 workflow 没声明的参数，在加载文件时就会被拒绝。
@@ -633,7 +635,7 @@ workflow 说了下一步是什么，所以大部分步骤根本不需要模型�
 
 agent 在每个 step 上有一个预算：一个数字，每个 step、每一轮都一样，由 `me.max_judgments` 定（默认 50）。一次机会是这次 step 自己的执行、为它发出的一条 nightme 命令，或者 chat 模型一轮没有工具调用的回答。运行所在那个 step 的预算用完时，运行暂停下来，在 chat 里说清楚；`/me continue` 把控制权交回来，那个 step 的预算重新开始。
 
-一次运行没有模型轮数上限：它结束于计划跑完、agent 调用 `finish`，或者你发 `/me stop`，或者 daemon 关掉。chat 模型一轮没有工具调用的回答、provider 调用失败，都不结束运行——运行会再问一次，界限由预算给出。
+除了每个 step 的预算之外没有别的预算：一次运行结束于计划跑完、agent 调用 `finish`，或者你发 `/me stop`，或者 daemon 关掉。chat 模型一轮没有工具调用的回答、provider 调用失败，都不结束运行——运行会再问一次，界限由预算给出。
 
 agent 在判断点上给出一个指令：`run_step`（跑 workflow 的一个 step）、`ntm_<command>`（以你的身份跑一条 nightme 命令）、`agent`（问 owner 的思考为什么这一步失败）、`instruct`（给 chat 发一段自由指令）、`answer_choice`（回答 chat 在等的一个提示）、`ask_human`（问你）、`repo_status`（读分支和工作树）、`wait`（等一会儿再看——后台还有活在跑时）、`end_round`（结束当前 job 的这一轮：没跑的 step 记成跳过，job 的 final step 顶上，然后开下一轮）、`finish`（结束运行）。`run_step` 接一个 step 的 id：就绪的那一个，或者这一轮已经跑过的那个。运行不允许做的事会以错误回来，agent 自己纠正。
 

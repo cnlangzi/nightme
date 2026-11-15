@@ -325,10 +325,15 @@ func TestProviderFailure_TheAttemptsAreSpacedByTheBackoff(t *testing.T) {
 	}
 }
 
-// deadlineProvider records the deadline of the turn it was given.
+// deadlineProvider records the deadline of the turn it was given and
+// holds it.
+//
+// The turn stays in flight, so the deadline the run set is observable
+// while the run is still asking.
 type deadlineProvider struct {
 	mu       sync.Mutex
 	calls    int
+	calledAt time.Time
 	deadline time.Time
 	has      bool
 }
@@ -337,14 +342,24 @@ func (p *deadlineProvider) Complete(ctx context.Context, _ llm.Request) (*llm.Re
 	p.mu.Lock()
 	p.calls++
 	deadline, ok := ctx.Deadline()
-	p.has = ok
-	p.deadline = deadline
+	if !p.has {
+		p.has = ok
+		p.deadline = deadline
+		p.calledAt = time.Now()
+	}
 	p.mu.Unlock()
-	return &llm.Response{Message: textMsg("thinking")}, nil
+	if !ok {
+		return &llm.Response{Message: textMsg("thinking")}, nil
+	}
+	<-ctx.Done()
+	return nil, ctx.Err()
 }
 
 // TestProviderFailure_TheTurnIsBounded — one turn of the chat model
 // does not last forever: it carries its own deadline.
+//
+// The run does not inherit the client's own timeout, and a provider
+// that never answers does not look like a frozen run.
 func TestProviderFailure_TheTurnIsBounded(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", budgetWorkflow)
@@ -361,17 +376,19 @@ func TestProviderFailure_TheTurnIsBounded(t *testing.T) {
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		provider.mu.Lock()
-		calls := provider.calls
 		has := provider.has
 		until := provider.deadline
+		at := provider.calledAt
 		provider.mu.Unlock()
-		if calls > 0 && has {
-			left := time.Until(until)
-			if left > maxAgentTurn {
-				t.Errorf("the turn has %v left, want at most %v", left, maxAgentTurn)
+		if has {
+			// The span of the turn is measured against the moment the
+			// call was made: a slow host cannot make it look shorter.
+			span := until.Sub(at)
+			if span > maxAgentTurn {
+				t.Errorf("the turn lasts %v, want at most %v", span, maxAgentTurn)
 			}
-			if left < maxAgentTurn-time.Minute {
-				t.Errorf("the turn has %v left, want it to be about %v", left, maxAgentTurn)
+			if span < maxAgentTurn-time.Minute {
+				t.Errorf("the turn lasts %v, want it to be about %v", span, maxAgentTurn)
 			}
 			return
 		}
@@ -512,7 +529,10 @@ func waitProseCalls(t *testing.T, provider *proseProvider, n int) {
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
-	t.Fatalf("the chat model was called %d times, want %d", provider.calls, n)
+	provider.mu.Lock()
+	calls := provider.calls
+	provider.mu.Unlock()
+	t.Fatalf("the chat model was called %d times, want %d", calls, n)
 }
 
 // waitCard waits until the run's overview carries the given text.

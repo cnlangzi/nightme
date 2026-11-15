@@ -886,7 +886,11 @@ The wake log holds the model decisions only: the workflow's own fast path is not
 | Compaction | Every tool result but the last keeps its status and summary; the last one keeps its transcript. |
 | Rate limit | A command the agent answered 429 pauses the run; the operator continues it. |
 
-A text-only answer — words without a tool call — does not end the run. The words stay in the conversation, the turn costs one chance of the step the judgment was about, and the run asks the agent again with a fresh situation report. A provider that failed or that never answered costs the same one chance: the run waits — half a minute at first, doubling up to five minutes — and asks again. One turn of the chat model lasts at most five minutes.
+A text-only answer — words without a tool call — does not end the run. The words stay in the conversation, the turn costs one chance of the step the judgment was about, and the run asks the agent again with a fresh situation report.
+
+A provider that failed or that never answered costs the same one chance. The wait before the next attempt grows: the first failure waits 30 seconds, the next waits 60, then 120, 240, and 300 seconds from then on. The wait belongs to the run — stopping the run or shutting the daemon ends it at once.
+
+One turn of the chat model lasts at most five minutes: the provider call carries that deadline, so the run does not wait for the client's own timeout.
 
 A command the underlying agent answered 429 pauses the run: the agent is throttled, and running the command again makes it worse. The run waits for the operator, who continues it with `/me continue`. The pause is the run's own: the model is not asked to think about a throttle.
 

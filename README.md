@@ -599,6 +599,10 @@ A step carries exactly one kind:
 | `note` | Why the step is there, and which fixes the owner uses for it. It is the description the decision model reads. |
 | `final` | The step cleans up after the round: it runs when the round ends, however the round ends. A step marked `final: true` runs in the place of the steps a round that ended early cut short. |
 
+`attempts:` is retired: a file that still carries it does not load. The budget
+of the agent is one number for every step and every round, set by
+`me.max_judgments`.
+
 The expressions are `${{ args.NAME }}`, `${{ steps.<id>.outputs.status }}`,
 `${{ steps.<id>.outputs.data.<key> }}`, `${{ needs.<job>.* }}`, `${{ env.NAME }}`
 and `${{ now }}`. The `outputs` segment is optional. An expression that names
@@ -747,7 +751,7 @@ that produced no tool call. When the budget of the step the run is on is
 spent, the run pauses and says so in the chat; `/me continue` hands the
 control back and the step's budget starts over.
 
-A run has no cap on the number of model turns: it ends when the plan is
+There is no budget beyond the per-step one: a run ends when the plan is
 exhausted and the agent finishes it, when the agent calls `finish`, when you
 send `/me stop`, or when the daemon shuts down. A turn of the chat model that
 produced no tool call and a provider that failed end nothing: the run asks

@@ -188,7 +188,9 @@ func (a *Adapter) sendToolEnd(ctx context.Context, msg messages.OutboundMessage)
 	status := slackgo.TaskCardStatusComplete
 	details := ""
 	if msg.Tool != nil {
-		details = msg.Tool.Output
+		// The summary is the producer's verdict: it is safe to show.
+		// A call without one falls back to the raw output.
+		details = firstNonEmpty(msg.Tool.Summary, msg.Tool.Output)
 	}
 	if msg.Err != nil || (msg.Tool != nil && msg.Tool.Err != nil) {
 		status = slackgo.TaskCardStatusError

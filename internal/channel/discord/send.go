@@ -109,7 +109,7 @@ func (a *Adapter) sendOutbound(ctx context.Context, msg messages.OutboundMessage
 		}
 		return a.sendPlainReply(ctx, raw, body)
 	case messages.OutToolEnd:
-		body := summarizeToolResult(toolName(msg), toolResultOutput(msg), toolErr(msg))
+		body := toolResultLine(toolName(msg), toolResultOutput(msg), toolResultSummary(msg), toolErr(msg))
 		if body == "" {
 			return nil
 		}
@@ -390,6 +390,15 @@ func toolResultOutput(msg messages.OutboundMessage) string {
 
 func toolErr(msg messages.OutboundMessage) error {
 	return msg.Err
+}
+
+// toolResultSummary returns the verdict the producer declared safe to
+// show.
+func toolResultSummary(msg messages.OutboundMessage) string {
+	if msg.Tool == nil {
+		return ""
+	}
+	return msg.Tool.Summary
 }
 
 // formatTaskListBody renders the OutboundMessage.TaskList payload

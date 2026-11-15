@@ -74,8 +74,8 @@ func Split(s string) Result {
 	)
 
 	for {
-		openIdx := strings.Index(s, openTag)
-		if openIdx < 0 {
+		block, ok := nextBlock(s)
+		if !ok {
 			// No opening tag in the remainder. Whatever is left
 			// (text or stray close tags) is plain content.
 			kept.WriteString(s)
@@ -87,29 +87,25 @@ func Split(s string) Result {
 
 		// Emit the prefix as ordinary text and slice past the open
 		// tag.
-		kept.WriteString(s[:openIdx])
-		rest := s[openIdx+len(openTag):]
-
-		closeIdx := strings.Index(rest, closeTag)
-		if closeIdx < 0 {
+		kept.WriteString(s[:block.open])
+		if !block.closed {
 			// Unclosed open tag — hand the remainder (with the
 			// open tag re-attached) to the caller so it can be
 			// prepended to the next chunk.
 			return Result{
 				Kept:     kept.String(),
 				Thinking: thinking.String(),
-				Held:     openTag + rest,
+				Held:     s[block.open:],
 			}
 		}
 
 		// Complete block: append inner text to Thinking, then
 		// resume scanning after the close tag.
-		block := rest[:closeIdx]
 		if thinking.Len() > 0 {
 			thinking.WriteByte('\n')
 		}
-		thinking.WriteString(block)
-		s = rest[closeIdx+len(closeTag):]
+		thinking.WriteString(block.content)
+		s = s[block.end:]
 	}
 }
 
@@ -123,28 +119,56 @@ func Split(s string) Result {
 // of the text is still the reasoning.
 func Unwrap(s string) string {
 	var b strings.Builder
-	rest := s
 
 	for {
-		openIdx := strings.Index(rest, openTag)
-		if openIdx < 0 {
+		block, ok := nextBlock(s)
+		if !ok {
 			// No opening tag in the remainder: whatever is left
 			// (text or stray close tags) is plain content.
-			b.WriteString(rest)
+			b.WriteString(s)
 			return b.String()
 		}
 
-		b.WriteString(rest[:openIdx])
-		rest = rest[openIdx+len(openTag):]
-
-		closeIdx := strings.Index(rest, closeTag)
-		if closeIdx < 0 {
+		b.WriteString(s[:block.open])
+		b.WriteString(block.content)
+		if !block.closed {
 			// Unclosed open tag: the content stays, the tag goes.
-			b.WriteString(rest)
 			return b.String()
 		}
-
-		b.WriteString(rest[:closeIdx])
-		rest = rest[closeIdx+len(closeTag):]
+		s = s[block.end:]
 	}
+}
+
+// block is one reasoning block of a text.
+type block struct {
+	// open is the index of the opening tag.
+	open int
+	// end is the index just past the closing tag.
+	end int
+	// content is the text between the tags.
+	content string
+	// closed reports whether the block has a closing tag.
+	closed bool
+}
+
+// nextBlock finds the first reasoning block of s.
+//
+// It reports false when s carries no opening tag at all: the rest of
+// the text is plain content.
+func nextBlock(s string) (block, bool) {
+	open := strings.Index(s, openTag)
+	if open < 0 {
+		return block{}, false
+	}
+	rest := s[open+len(openTag):]
+	closeIdx := strings.Index(rest, closeTag)
+	if closeIdx < 0 {
+		return block{open: open, end: len(s), content: rest}, true
+	}
+	return block{
+		open:    open,
+		end:     open + len(openTag) + closeIdx + len(closeTag),
+		content: rest[:closeIdx],
+		closed:  true,
+	}, true
 }

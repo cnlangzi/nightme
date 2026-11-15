@@ -8,6 +8,7 @@ package me
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -105,8 +106,8 @@ func TestRun_PublishesItsToolCalls(t *testing.T) {
 	if starts[0].Tool.Args != "commit" {
 		t.Fatalf("the argument line = %q, want the step id", starts[0].Tool.Args)
 	}
-	if starts[0].Tool.Output != "" {
-		t.Fatalf("the call carries a result before it ran: %q", starts[0].Tool.Output)
+	if starts[0].Tool.Summary != "" {
+		t.Fatalf("the call carries a result before it ran: %q", starts[0].Tool.Summary)
 	}
 
 	ends := op.EmittedOf(messages.OutToolEnd)
@@ -119,13 +120,17 @@ func TestRun_PublishesItsToolCalls(t *testing.T) {
 	if ends[0].Tool.Name != toolRunStep {
 		t.Fatalf("the tool = %q, want %q", ends[0].Tool.Name, toolRunStep)
 	}
-	if ends[0].Tool.Output != "committed" {
-		t.Fatalf("the result = %q, want the summary of the step", ends[0].Tool.Output)
+	if ends[0].Tool.Summary != "committed" {
+		t.Fatalf("the result = %q, want the summary of the step", ends[0].Tool.Summary)
+	}
+	if ends[0].Tool.Err != nil {
+		t.Fatalf("the result carries an error: %v", ends[0].Tool.Err)
 	}
 }
 
 // TestRun_PublishesTheToolResultOfAFailedCall — a call that could not
-// run carries its failure in the result.
+// run carries its failure as the error: a failed call must not read
+// as one that went through.
 func TestRun_PublishesTheToolResultOfAFailedCall(t *testing.T) {
 	provider := &scriptedProvider{responses: []llm.Response{
 		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"step_id": "nowhere"})},
@@ -136,8 +141,106 @@ func TestRun_PublishesTheToolResultOfAFailedCall(t *testing.T) {
 	if len(ends) == 0 {
 		t.Fatalf("the run published no tool result: %v", op.Emitted())
 	}
-	if ends[0].Tool.Output == "" {
-		t.Fatal("the failed call carries no summary")
+	if ends[0].Tool.Err == nil {
+		t.Fatal("the failed call carries no error")
+	}
+	if ends[0].Tool.Err.Error() == "" {
+		t.Fatal("the failed call carries an empty error")
+	}
+	if ends[0].Tool.Summary != "" {
+		t.Fatalf("the failed call also carries a summary: %q", ends[0].Tool.Summary)
+	}
+}
+
+// TestRun_PublishesNoResultForACallThatIsStillRunning — a call whose
+// command has not settled has no verdict yet.
+func TestRun_PublishesNoResultForACallThatIsStillRunning(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	provider := &scriptedProvider{responses: []llm.Response{
+		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"step_id": "commit"})},
+	}}
+	svc, op := testService(t, dir, Config{Provider: provider})
+	// The first command does not settle: the run reaches a judgment
+	// point and the model runs the step again. The second command
+	// never settles: the call has no verdict.
+	op.steps = []fakeStep{pendingStep("still going"), {open: true}}
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitSentCount(t, op, 2)
+
+	if starts := op.EmittedOf(messages.OutToolStart); len(starts) == 0 {
+		t.Fatalf("the run published no tool call: %v", op.Emitted())
+	}
+	if ends := op.EmittedOf(messages.OutToolEnd); len(ends) != 0 {
+		t.Fatalf("the run published %d results for a call that is still running", len(ends))
+	}
+
+	if err := svc.Stop(context.Background(), "obs-1"); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	waitRun(t, svc, "obs-1")
+}
+
+// waitSentCount waits until the chat received that many commands.
+func waitSentCount(t *testing.T, op *fakeOperator, count int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(op.Sent()) >= count {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("the chat got %d commands, want %d", len(op.Sent()), count)
+}
+
+// TestRun_KeepsTheCallAndItsResultUnderOneCard — the run may move to
+// another iteration while a call runs. The call and its result still
+// hang under the card the call started under: the chat pairs them by
+// their anchor.
+func TestRun_KeepsTheCallAndItsResultUnderOneCard(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	svc, op := testService(t, dir, Config{
+		Provider: &scriptedProvider{err: errors.New("the chat model must not be called")},
+	})
+	// The command never settles: the run stays in the chat.
+	op.steps = []fakeStep{{open: true}}
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitSent(t, op, "/gtw commit")
+
+	svc.mu.Lock()
+	r := svc.active["obs-1"]
+	svc.mu.Unlock()
+	if r == nil {
+		t.Fatal("the chat has no run")
+	}
+
+	call := pendingCall{ID: "c1", Name: toolRunStep, Args: json.RawMessage(`{"step_id":"commit"}`)}
+	anchor := r.cardMessageID()
+	svc.publishToolStart(context.Background(), r, anchor, call)
+	// The run moves to another iteration while the call runs.
+	r.setCard("card-2", iteration{job: "main", round: 2})
+	svc.publishToolEnd(context.Background(), r, anchor, call,
+		stepResult{Status: "ok", Summary: "committed"}, nil)
+
+	starts := op.EmittedOf(messages.OutToolStart)
+	ends := op.EmittedOf(messages.OutToolEnd)
+	if len(starts) == 0 || len(ends) == 0 {
+		t.Fatalf("the run published %d calls and %d results", len(starts), len(ends))
+	}
+	if starts[0].ReplyTo != ends[0].ReplyTo {
+		t.Fatalf("the call hangs under %q and its result under %q", starts[0].ReplyTo, ends[0].ReplyTo)
 	}
 }
 

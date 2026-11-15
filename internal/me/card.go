@@ -16,9 +16,9 @@ import (
 //
 // A button carries the text of the command it runs, so a click
 // travels the same path a typed command takes.
-// maxCardError is how much of an error the run card shows.
+// maxCardError is how long the line of the error is.
 // maxCardCommand is how long the line of the command in flight is:
-// the full text is in the chat's tool line.
+// the full text is in the chat's tool line, clipped the same way.
 const (
 	maxCardError   = 300
 	maxCardCommand = 300
@@ -247,7 +247,7 @@ func (s *Service) cardView(r *run, it iteration) channel.CardSpec {
 	// The error stands on its own line: it is why the run stopped,
 	// and it must not read as another field of the run.
 	if errMsg != "" {
-		fields = append(fields, "error: "+truncate(errMsg, maxCardError))
+		fields = append(fields, clipLine("error: "+errMsg, maxCardError))
 	}
 	if summary != "" {
 		fields = append(fields, "result: "+summary)

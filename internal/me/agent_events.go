@@ -17,31 +17,34 @@ package me
 
 import (
 	"context"
+	"errors"
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/thinktext"
+	"github.com/cnlangzi/nightme/internal/wfe"
 )
 
-// maxEventLine is how much of an argument line or a summary the chat
-// sees. The line is for a person: the model's raw JSON is a wall of
-// escaped text, and the full text is on the card.
+// maxEventLine is how much of an argument line the chat sees. The
+// line is for a person: the model's raw JSON is a wall of escaped
+// text.
 const maxEventLine = 300
 
 // emit publishes an outbound message in the chat the run works in.
 //
 // The message hangs under the run's card: the card is the run's state
-// board, and the thread under it is the run's live log. A run that
-// has no card yet publishes without an anchor.
+// board, and the thread under it is the run's live log. The anchor
+// is the card of the iteration the run is in; a run that has no card
+// yet publishes without one.
 //
 // A message that does not reach the chat is reported and the run goes
 // on: the run's state lives on the card, not in the chat.
-func (s *Service) emit(ctx context.Context, r *run, msg messages.OutboundMessage) {
+func (s *Service) emit(ctx context.Context, r *run, anchor string, msg messages.OutboundMessage) {
 	if s.cfg.Operator == nil {
 		return
 	}
 	msg.ChatID = r.chatID
-	msg.ReplyTo = r.cardMessageID()
+	msg.ReplyTo = anchor
 	if err := s.cfg.Operator.Emit(ctx, r.chatID, msg); err != nil {
 		s.logger.Warn("me: the run's event could not be published",
 			"run_id", r.id, "kind", msg.Kind.String(), "err", err)
@@ -57,15 +60,19 @@ func (s *Service) publishThinking(ctx context.Context, r *run, text string) {
 	if text == "" {
 		return
 	}
-	s.emit(ctx, r, messages.OutboundMessage{
+	s.emit(ctx, r, r.cardMessageID(), messages.OutboundMessage{
 		Kind: messages.OutThinking,
 		Text: text,
 	})
 }
 
 // publishToolStart publishes a tool call that is about to run.
-func (s *Service) publishToolStart(ctx context.Context, r *run, call pendingCall) {
-	s.emit(ctx, r, messages.OutboundMessage{
+//
+// The anchor is the card the call hangs under: the call and its
+// result belong under the same card, and the run may move to another
+// iteration while the call runs.
+func (s *Service) publishToolStart(ctx context.Context, r *run, anchor string, call pendingCall) {
+	s.emit(ctx, r, anchor, messages.OutboundMessage{
 		Kind: messages.OutToolStart,
 		Tool: &messages.ToolInfo{
 			Name: call.Name,
@@ -76,17 +83,39 @@ func (s *Service) publishToolStart(ctx context.Context, r *run, call pendingCall
 
 // publishToolEnd publishes a tool call that settled.
 //
-// A call that failed carries its failure in the summary: the chat
-// renders the summary, not the error.
-func (s *Service) publishToolEnd(ctx context.Context, r *run, call pendingCall, summary string) {
-	s.emit(ctx, r, messages.OutboundMessage{
+// The result is the call's verdict: the chat shows it as it is. A
+// call that failed carries its failure as the error — the chat
+// renders the error, and a failed call must not read as one that
+// went through.
+func (s *Service) publishToolEnd(ctx context.Context, r *run, anchor string, call pendingCall, res stepResult, cause error) {
+	tool := &messages.ToolInfo{
+		Name: call.Name,
+		Args: toolArgLine(r, call),
+	}
+	switch {
+	case cause != nil:
+		tool.Err = cause
+	case outcomeFailed(res.Status):
+		tool.Err = errors.New(res.Summary)
+	default:
+		tool.Summary = res.Summary
+	}
+	s.emit(ctx, r, anchor, messages.OutboundMessage{
 		Kind: messages.OutToolEnd,
-		Tool: &messages.ToolInfo{
-			Name:   call.Name,
-			Args:   toolArgLine(r, call),
-			Output: summary,
-		},
+		Tool: tool,
 	})
+}
+
+// outcomeFailed reports whether a tool result is a failure.
+//
+// The verdict of a call that did not go through is an error, not a
+// summary: the chat renders the two differently.
+func outcomeFailed(status string) bool {
+	switch status {
+	case string(wfe.OutcomeFailed), string(wfe.OutcomeCancelled), string(wfe.OutcomeTimeout), "error":
+		return true
+	}
+	return false
 }
 
 // toolArgLine renders the one-line summary of a tool call's
@@ -155,12 +184,12 @@ func argText(call pendingCall, name string) string {
 // The line is read in a chat: it must not run away with the message
 // that carries it.
 func clipLine(text string, n int) string {
+	if n <= 0 {
+		return ""
+	}
 	runes := []rune(text)
 	if len(runes) <= n {
 		return text
-	}
-	if n <= 1 {
-		return "…"
 	}
 	return string(runes[:n-1]) + "…"
 }

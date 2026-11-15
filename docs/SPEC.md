@@ -1265,7 +1265,7 @@ nightme 已经沉淀了几个跨平台类库,**任何新增代码碰到对应场
 |----|------|---------|
 | `internal/proc` | 跨平台子进程 spawn 与 console 行为 | `proc.New(ctx, name, args...)`、`proc.HideWindow`、`proc.ComSpecOrDefault`、`proc.OpenTerminal` |
 | `internal/command/cwd` | `/cwd` 命令的 orchestration + OS 调用(`os.Stat` 校验目录存在性);**路径解析全部委托给 pathutil**(2026-08-21 迁移完成) | `verifyDirectory`(平台分流 OS 调用)、`expandTilde`(HOME 相对解析,这是 cwd 独有的语义) |
-| `internal/pathutil` *(本规范新增,见 [`feat/F-PATHUTIL-001.md`](./feat/F-PATHUTIL-001-unified-path.md))* | 统一的路径规范化、跨平台等价比较、子路径归属判断、IME/CJK 规范化 | `NormalizeForOS`、`NormalizeForGit`、`Equal`、`IsUnder`、`FromSlash`、`ToSlash`、`Clean`、`Join`、`IsAbs`、`Base`、`Dir`、`NormalizeInput`、`NormalizeIMRichText` |
+| `internal/pathutil` *(本规范新增,见 [`feat/F-PATHUTIL-001.md`](./feat/F-PATHUTIL-001-unified-path.md))* | 统一的路径规范化、跨平台等价比较、子路径归属判断、IME/CJK 规范化 | `NormalizeForOS`、`NormalizeForGit`、`Equal`、`IsUnder`、`FromSlash`、`ToSlash`、`Clean`、`Join`、`IsAbs`、`Base`、`Dir`、`ShortWorkspacePath`、`NormalizeInput`、`NormalizeIMRichText` |
 
 ### 13.3 使用规则
 

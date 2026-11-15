@@ -236,11 +236,11 @@ func TestStatusBarLines_GitStatusLine(t *testing.T) {
 	// marker so users see "this is untracked" vs "missing data".
 	//
 	// Workspace strings in GitStatus come from the git CLI which
-	// always emits forward slashes; formatWorkspacePath feeds them
-	// through filepath.Clean + filepath.Separator so the rendered
-	// path uses the OS-native separator. We build the expected
-	// string with the same transformation so the assertion is
-	// stable across Linux/macOS (`/`) and Windows (`\`).
+	// always emits forward slashes; pathutil.ShortWorkspacePath
+	// feeds them through pathutil.Clean + filepath.Separator so the
+	// rendered path uses the OS-native separator. We build the
+	// expected string with the same transformation so the assertion
+	// is stable across Linux/macOS (`/`) and Windows (`\`).
 	gs := &messages.GitStatus{
 		Workspace: "code/nightme",
 		Snapshot:  &messages.GitStatusSnapshot{Branch: "main"},
@@ -320,7 +320,7 @@ func TestStatusBarLines_GitStatusLine_EmptyWorkspace(t *testing.T) {
 }
 
 func TestStatusBarLines_GitStatusLine_DotWorkspace(t *testing.T) {
-	// Workspace == "." — formatWorkspacePath returns "" for "."
+	// Workspace == "." — pathutil.ShortWorkspacePath returns "" for "."
 	// (the literal current dir), so Line 3 must drop even when
 	// Snapshot is nil (no "📁: . · (no git)" line would be useful).
 	gs := &messages.GitStatus{Workspace: ".", Snapshot: nil}

@@ -35,10 +35,10 @@ package statusbar
 
 import (
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/internal/pathutil"
 )
 
 // PanelMaxWidth anchors the top/bottom bars so they never wrap
@@ -339,51 +339,6 @@ func abbrevOneDecimal(v float64, unit string) string {
 	return s
 }
 
-// formatWorkspacePath renders the AgentSession's Cwd into a
-// short, human-readable label for footer line 3.
-//
-// Rules (F-48 §1.7, simplified per Devin feedback 2026-08-06):
-//
-//   - NO prefix is added — neither "~" for HOME paths nor "/"
-//     for absolute paths. The path is just shown as-is.
-//     Rationale: a `~` prefix is misleading when the workspace
-//     isn't under HOME (different operators, containerised
-//     sessions, non-standard HOME layout). Skipping both prefixes
-//     keeps the segment unambiguous: "code/nightme" is the leaf
-//     parent, period.
-//   - ≤ 2 path components → display all components.
-//     ("/home/devin" → "home/devin"; "/tmp/foo" → "tmp/foo").
-//   - > 2 path components → keep only the last 2.
-//     ("/home/devin/code/nightme" → "code/nightme";
-//     "/home/devin/code/nightme/internal" → "nightme/internal";
-//     "/tmp/a/b/c" → "b/c").
-//   - "" or "." → "" (caller omits the segment).
-//   - "/" → "" (no components to show).
-//
-// The "last two when long" rule lets users see the leaf + its
-// parent (enough to disambiguate), without a long absolute path
-// that won't fit in narrow channel renderings.
-func formatWorkspacePath(absPath string) string {
-	if absPath == "" || absPath == "." {
-		return ""
-	}
-	cleaned := filepath.Clean(absPath)
-	parts := strings.Split(cleaned, string(filepath.Separator))
-	// Drop leading empty from the leading separator so the
-	// "first component" is the first directory, not "".
-	if len(parts) > 0 && parts[0] == "" {
-		parts = parts[1:]
-	}
-	switch {
-	case len(parts) == 0:
-		return ""
-	case len(parts) <= 2:
-		return strings.Join(parts, string(filepath.Separator))
-	default:
-		return strings.Join(parts[len(parts)-2:], string(filepath.Separator))
-	}
-}
-
 // formatGitLine renders footer line 3 — the per-stamp git status
 // snapshot, with the PR / MR reference folded in as the LAST
 // segment — and returns "" when there is nothing meaningful to
@@ -455,7 +410,7 @@ func formatGitLine(gs *messages.GitStatus) string {
 	if gs.Workspace == "" {
 		return ""
 	}
-	ws := formatWorkspacePath(gs.Workspace)
+	ws := pathutil.ShortWorkspacePath(gs.Workspace)
 	if ws == "" {
 		return ""
 	}

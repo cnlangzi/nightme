@@ -27,6 +27,7 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -552,7 +553,7 @@ func TestChatSession_RouteEvent_RewritesShutdownExit(t *testing.T) {
 		if ev.Diagnostic.SessionID != "sess-1" {
 			t.Errorf("SessionID = %q, want sess-1", ev.Diagnostic.SessionID)
 		}
-		want := "ℹ️ NightMe is shutting down — the pi agent was stopped."
+		want := "ℹ️ NightMe is shutting down — the pi agent was stopped (cwd: tmp)"
 		if ev.Err == nil || ev.Err.Error() != want {
 			t.Errorf("Err = %v, want %q", ev.Err, want)
 		}
@@ -561,6 +562,114 @@ func TestChatSession_RouteEvent_RewritesShutdownExit(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("the shutdown notice was not delivered within 2s")
+	}
+}
+
+// TestShutdownNotice — the notice names the directory of the agent
+// session that stopped, in the short form the card's workspace line
+// uses, and drops the segment when there is no directory to show.
+func TestShutdownNotice(t *testing.T) {
+	tests := []struct {
+		name  string
+		agent string
+		cwd   string
+		want  string
+	}{
+		{
+			name:  "a deep path keeps the last two components",
+			agent: "claude",
+			cwd:   "/home/devin/code/nightme",
+			want:  "ℹ️ NightMe is shutting down — the claude agent was stopped (cwd: " + filepath.FromSlash("code/nightme") + ")",
+		},
+		{
+			name:  "a shallow path keeps every component",
+			agent: "claude",
+			cwd:   "/tmp/foo",
+			want:  "ℹ️ NightMe is shutting down — the claude agent was stopped (cwd: " + filepath.FromSlash("tmp/foo") + ")",
+		},
+		{
+			name:  "no directory drops the segment",
+			agent: "claude",
+			cwd:   "",
+			want:  "ℹ️ NightMe is shutting down — the claude agent was stopped.",
+		},
+		{
+			name:  "the root drops the segment",
+			agent: "claude",
+			cwd:   "/",
+			want:  "ℹ️ NightMe is shutting down — the claude agent was stopped.",
+		},
+		{
+			name:  "the current directory drops the segment",
+			agent: "claude",
+			cwd:   ".",
+			want:  "ℹ️ NightMe is shutting down — the claude agent was stopped.",
+		},
+		{
+			name:  "an unnamed agent reads as the agent",
+			agent: "",
+			cwd:   "/tmp",
+			want:  "ℹ️ NightMe is shutting down — the agent was stopped (cwd: tmp)",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shutdownNotice(tt.agent, tt.cwd)
+			if got != tt.want {
+				t.Errorf("shutdownNotice(%q, %q) = %q, want %q", tt.agent, tt.cwd, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestChatSession_RouteEvent_ShutdownExit_NamesEachSessionCwd — a
+// chat can hold several agent sessions in different directories.
+// Each notice must name the directory of the session that stopped,
+// or the notices of one shutdown read alike.
+func TestChatSession_RouteEvent_ShutdownExit_NamesEachSessionCwd(t *testing.T) {
+	cs := newChatSessionForTest("cs_test")
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	asA, fakeA := makeSpawnedASAt(t, cs, "pi", "/home/devin/code/nightme", ctx)
+	t.Cleanup(asA.Shutdown)
+	asB, fakeB := makeSpawnedASAt(t, cs, "pi", "/home/devin/code/other", ctx)
+	t.Cleanup(asB.Shutdown)
+
+	cs.attachAllPendingSubscriptions()
+
+	got := make(chan *agent.AgentEvent, 2)
+	cs.AgentEventBus.Subscribe(func(env AgentEventEnvelope) bool {
+		select {
+		case got <- env.Event:
+		default:
+		}
+		return false
+	})
+
+	cs.MarkShuttingDown()
+	fakeA.PushEvent(shutdownExitEvent())
+	fakeB.PushEvent(shutdownExitEvent())
+
+	notices := map[string]bool{}
+	for range 2 {
+		select {
+		case ev := <-got:
+			if ev.Err == nil {
+				t.Fatal("the published event carries no error")
+			}
+			notices[ev.Err.Error()] = true
+		case <-time.After(2 * time.Second):
+			t.Fatal("the shutdown notices were not delivered within 2s")
+		}
+	}
+	if len(notices) != 2 {
+		t.Errorf("the two notices must differ by the directory; got %d distinct: %v", len(notices), notices)
+	}
+	for notice := range notices {
+		if !strings.Contains(notice, "(cwd: ") {
+			t.Errorf("notice = %q, want it to name the directory", notice)
+		}
 	}
 }
 
@@ -753,9 +862,15 @@ func newChatSessionForTest(chatID string) *ChatSession {
 // handle's PushEvent method drives the event channel.
 func makeSpawnedAS(t *testing.T, cs *ChatSession, agentName string, parent context.Context) (*AgentSession, *fakeAgentSession) {
 	t.Helper()
-	as := NewAgentSession(newAgentSessionID(), cs.ID, agentName, "/tmp", nil)
+	return makeSpawnedASAt(t, cs, agentName, "/tmp", parent)
+}
+
+// makeSpawnedASAt is makeSpawnedAS at an explicit working directory.
+func makeSpawnedASAt(t *testing.T, cs *ChatSession, agentName, cwd string, parent context.Context) (*AgentSession, *fakeAgentSession) {
+	t.Helper()
+	as := NewAgentSession(newAgentSessionID(), cs.ID, agentName, cwd, nil)
 	cs.mu.Lock()
-	cs.pool[agentCwdKey{Agent: agentName, Cwd: "/tmp"}] = as
+	cs.pool[agentCwdKey{Agent: agentName, Cwd: cwd}] = as
 	cs.mu.Unlock()
 
 	as.Activate(parent)

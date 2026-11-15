@@ -297,6 +297,13 @@ const (
 	ActionKindRun ActionKind = "run"
 	// ActionKindInstruct is a free-form prompt to the coding agent.
 	ActionKindInstruct ActionKind = "instruct"
+	// ActionKindCommand is a nightme command the run issued outside
+	// any step of the workflow.
+	//
+	// It counts against the step it was issued for, but it is not a
+	// step's own execution: the plan's verdict is still the one the
+	// step produced.
+	ActionKindCommand ActionKind = "command"
 )
 
 // ActionRecord is one action the run has taken. StepID points at the

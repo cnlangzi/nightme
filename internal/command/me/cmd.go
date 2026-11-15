@@ -114,11 +114,13 @@ func (f *Factory) start(ctx context.Context, rt command.RuntimeServices,
 
 	name := input.Args[2]
 	runID, err := f.ctrl.StartWorkflow(ctx, command.MeRequest{
-		Name:   name,
-		Args:   input.Args[3:],
-		ChatID: input.ChatID,
-		Cwd:    cwd,
-		Owner:  input.UserID,
+		Name:     name,
+		Args:     input.Args[3:],
+		ChatID:   input.ChatID,
+		Cwd:      cwd,
+		Owner:    input.UserID,
+		Commands: commandInfos(command.Default().SpecsVisible()),
+		Agent:    cs.SelectedAgent(),
 	})
 	if err != nil {
 		chatsession.ReportOutcome(ctx, command.FailedOutcome("error", "the workflow could not be started"))
@@ -303,12 +305,41 @@ func NewController(svc *mesvc.Service) command.MeController {
 // StartWorkflow implements command.MeController.
 func (c *controller) StartWorkflow(ctx context.Context, req command.MeRequest) (string, error) {
 	return c.svc.StartWorkflow(ctx, mesvc.Request{
-		Name:   req.Name,
-		Args:   req.Args,
-		ChatID: req.ChatID,
-		Cwd:    req.Cwd,
-		Owner:  req.Owner,
+		Name:     req.Name,
+		Args:     req.Args,
+		ChatID:   req.ChatID,
+		Cwd:      req.Cwd,
+		Owner:    req.Owner,
+		Commands: req.Commands,
+		Agent:    req.Agent,
 	})
+}
+
+// commandInfos renders the registered commands as the personal agent
+// reads them.
+//
+// A hidden subcommand stays hidden: the run has no use for it.
+func commandInfos(specs []command.Spec) []mesvc.CommandInfo {
+	out := make([]mesvc.CommandInfo, 0, len(specs))
+	for _, spec := range specs {
+		info := mesvc.CommandInfo{
+			Name:    spec.Name,
+			Summary: spec.Summary,
+			Usage:   spec.Usage,
+		}
+		for _, sub := range spec.Subcommands {
+			if sub.Hidden {
+				continue
+			}
+			info.Subcommands = append(info.Subcommands, mesvc.CommandInfo{
+				Name:    sub.Name,
+				Summary: sub.Summary,
+				Usage:   sub.Usage,
+			})
+		}
+		out = append(out, info)
+	}
+	return out
 }
 
 // Reply implements command.MeController.

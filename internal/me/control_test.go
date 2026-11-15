@@ -514,7 +514,7 @@ func TestTheModelPathFollowsTheStepOfTheCommand(t *testing.T) {
 	writeWorkflow(t, dir, "ship", twoJobWorkflow)
 
 	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"command": "/gtw push"})},
+		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"step_id": "push"})},
 		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "done", "summary": "pushed"})},
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider})
@@ -547,7 +547,7 @@ func TestAnIterationKeepsItsCard(t *testing.T) {
 	writeWorkflow(t, dir, "ship", buildTagWorkflow)
 
 	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"command": "/gtw push"})},
+		{Message: toolCallMsg("c1", "ntm_gtw", map[string]any{"args": "push"})},
 		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "done", "summary": "pushed"})},
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider})
@@ -559,6 +559,7 @@ func TestAnIterationKeepsItsCard(t *testing.T) {
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "ship", ChatID: "obs-1", Cwd: "/tmp/work",
+		Commands: []CommandInfo{{Name: "gtw"}},
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -594,7 +595,7 @@ func TestACardTheChatRefusedIsPublishedLater(t *testing.T) {
 	writeWorkflow(t, dir, "ship", publishTwiceWorkflow)
 
 	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"command": "/gtw push"})},
+		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"step_id": "push"})},
 		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "done", "summary": "pushed"})},
 	}}
 	logger := &recordingLogger{}

@@ -148,9 +148,10 @@ func TestACommandThatWorkedIsNotThrottled(t *testing.T) {
 	}
 }
 
-// TestThePromptExplainsARateLimit — the chat model reads what a rate
-// limit means and what to do about it.
-func TestThePromptExplainsARateLimit(t *testing.T) {
+// TestThePromptDoesNotMentionARateLimit — a throttled agent is the
+// run's business: the run pauses by itself, so the model is not asked
+// to think about it.
+func TestThePromptDoesNotMentionARateLimit(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
@@ -158,11 +159,8 @@ func TestThePromptExplainsARateLimit(t *testing.T) {
 	r := testRun(t, svc, "one")
 
 	prompt := svc.systemPrompt(r)
-	if !strings.Contains(prompt, "429") {
-		t.Errorf("the prompt does not mention the rate limit:\n%s", prompt)
-	}
-	if !strings.Contains(prompt, "pauses") {
-		t.Errorf("the prompt does not say the run pauses:\n%s", prompt)
+	if strings.Contains(prompt, "429") {
+		t.Errorf("the prompt mentions the rate limit:\n%s", prompt)
 	}
 }
 

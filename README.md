@@ -599,7 +599,7 @@ A step carries exactly one kind:
 | `continue-on-error` | Whether the chain continues when the step fails. |
 | `note` | Why the step is there, and when the extra commands apply. It is the description the decision model reads. |
 | `allow` | The extra commands the agent may use inside the step. |
-| `attempts` | The number of actions the agent may take on the step in one round — the step's own execution and the `allow:` commands. Leave the key out for no limit of its own. |
+| `attempts` | The number of actions the agent may take on the step in one round — the step's own execution, the `allow:` commands and the nightme commands issued for it. Leave the key out for no limit of its own. |
 
 The expressions are `${{ args.NAME }}`, `${{ steps.<id>.outputs.status }}`,
 `${{ steps.<id>.outputs.data.<key> }}`, `${{ needs.<job>.* }}`, `${{ env.NAME }}`
@@ -732,12 +732,14 @@ A run has no global action budget and no cap on the number of model turns: it
 ends when the plan is exhausted and the agent finishes it, when you send
 `/me stop`, or when the daemon shuts down.
 
-The agent answers a judgment point with a directive: `run_step` (run a command),
-`instruct` (send a free-form instruction to the chat), `answer_choice`
-(answer a prompt the work agent is waiting for), `ask_human` (ask you),
-`repo_status` (read the branch and the tree), or `finish` (end the run). A
-command the agent names has to be a step's `message:` or one of a step's
-`allow:` entries — anything else comes back as an error it can correct.
+The agent answers a judgment point with a directive: `run_step` (run a step of
+the workflow), `ntm_<command>` (run a nightme command as you), `agent` (ask the
+owner's thinking why a step failed), `instruct` (send a free-form instruction to
+the chat), `answer_choice` (answer a prompt the work agent is waiting for),
+`ask_human` (ask you), `repo_status` (read the branch and the tree), or `finish`
+(end the run). `run_step` takes the id of a step: the one that is ready, or one
+that already ran this round. Anything the run is not allowed to do comes back as
+an error it can correct.
 
 ### The outcome model
 
@@ -778,7 +780,6 @@ beside it work, and `nightme logs` reports the failure.
 | Rounds | `iterations` for a job — the number of rounds it runs. |
 | Step timeout | Thirty minutes per command. |
 | Stall detection | Ten minutes without a heartbeat. |
-| Token budget | The tokens one run may spend on the chat model. |
 
 The full reference — the schema, the policy, the tools, both model capabilities
 and the guardrails — is in [`docs/WFE.md` §8](./docs/WFE.md#8-runtime-architecture).

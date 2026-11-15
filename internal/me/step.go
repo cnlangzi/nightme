@@ -17,6 +17,9 @@ type stepVerdict struct {
 	// Settled is false while the step is still running: it has no
 	// verdict yet, so the run state must not record it.
 	Settled bool
+	// Transcript is what the coding agent said, when the step talked
+	// to it.
+	Transcript string
 }
 
 // executeStep runs one step of the workflow.
@@ -72,7 +75,7 @@ func (s *Service) executeMessage(ctx context.Context, r *run, job string, step w
 		Data:    res.Data,
 	}
 	r.record(wfe.ActionKindRun, text, step.ID, out)
-	return stepVerdict{Outcome: out, Settled: true}, nil
+	return stepVerdict{Outcome: out, Settled: true, Transcript: res.Transcript}, nil
 }
 
 // executeShell runs the step's shell command in the chat's

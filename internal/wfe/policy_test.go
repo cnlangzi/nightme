@@ -95,7 +95,7 @@ func TestPolicy_CheckRun(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			pol := NewPolicy(bound, tt.history)
-			idx, err := pol.CheckRun(tt.command)
+			idx, owned, err := pol.CheckRun(tt.command)
 			if tt.wantErr != "" {
 				if err == nil {
 					t.Fatalf("expected error %q, got nil", tt.wantErr)
@@ -114,6 +114,9 @@ func TestPolicy_CheckRun(t *testing.T) {
 			if idx != tt.wantIdx {
 				t.Errorf("step index = %d, want %d", idx, tt.wantIdx)
 			}
+			if !owned {
+				t.Errorf("the command is not owned by a step, want it owned")
+			}
 		})
 	}
 }
@@ -121,7 +124,7 @@ func TestPolicy_CheckRun(t *testing.T) {
 func TestPolicy_CheckRun_ErrorListsAllowedCommands(t *testing.T) {
 	pol := NewPolicy(boundFixIssue(t), nil)
 
-	_, err := pol.CheckRun("/gtw sync")
+	_, _, err := pol.CheckRun("/gtw sync")
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -129,6 +132,133 @@ func TestPolicy_CheckRun_ErrorListsAllowedCommands(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not list %q", err, want)
 		}
+	}
+}
+
+// TestPolicy_CheckRun_RegisteredCommandIsAcceptedButNotOwned — a
+// command of the registry runs, but it belongs to no step: it counts
+// against the step the run is on, and it never becomes that step's
+// verdict.
+func TestPolicy_CheckRun_RegisteredCommandIsAcceptedButNotOwned(t *testing.T) {
+	bound := boundFixIssue(t)
+	pol := NewPolicy(bound, nil)
+	pol.Commands = []string{"gtw", "review"}
+
+	idx, owned, err := pol.CheckRun("/gtw sync")
+	if err != nil {
+		t.Fatalf("CheckRun: %v", err)
+	}
+	if owned {
+		t.Error("the command is owned by a step, want it unowned")
+	}
+	if idx != -1 {
+		t.Errorf("step index = %d, want -1 (no step ran yet)", idx)
+	}
+
+	// With a step behind the run, the command counts against it.
+	pol = NewPolicy(bound, []ActionRecord{
+		{Kind: ActionKindRun, Command: "/gtw commit", StepID: "commit", Outcome: Outcome{Status: OutcomeOK}},
+	})
+	pol.Commands = []string{"gtw", "review"}
+	idx, owned, err = pol.CheckRun("/gtw sync")
+	if err != nil {
+		t.Fatalf("CheckRun: %v", err)
+	}
+	if owned {
+		t.Error("the command is owned by a step, want it unowned")
+	}
+	if idx != 1 {
+		t.Errorf("step index = %d, want 1 (the step the run is on)", idx)
+	}
+}
+
+// TestPolicy_CheckRun_StepsOwnCommandWins — a step's own command is
+// the step's, even when the registry knows the same name.
+func TestPolicy_CheckRun_StepsOwnCommandWins(t *testing.T) {
+	wf := mustParse(t, `
+title: x
+jobs:
+  main:
+    steps:
+      - id: one
+        message: /gtw commit
+`)
+	pol := NewPolicy(wf, nil)
+	pol.Commands = []string{"gtw"}
+
+	idx, owned, err := pol.CheckRun("/gtw commit")
+	if err != nil {
+		t.Fatalf("CheckRun: %v", err)
+	}
+	if !owned {
+		t.Error("the command is unowned, want the step to own it")
+	}
+	if idx != 0 {
+		t.Errorf("step index = %d, want 0", idx)
+	}
+}
+
+// TestPolicy_CommandCountsAgainstTheStepButNotTheVerdict — a
+// command of the registry takes an attempt of the step, but the
+// step's own verdict is the one the plan reads.
+func TestPolicy_CommandCountsAgainstTheStepButNotTheVerdict(t *testing.T) {
+	wf := mustParse(t, `
+title: x
+jobs:
+  main:
+    steps:
+      - id: one
+        message: /gtw commit
+        attempts: 2
+`)
+	pol := NewPolicy(wf, []ActionRecord{
+		{Kind: ActionKindRun, Command: "/gtw commit", StepID: "one", Outcome: Outcome{Status: OutcomeFailed}},
+	})
+	pol.Commands = []string{"gtw"}
+
+	if rem := pol.Remaining(); rem.Steps[0] != 1 {
+		t.Errorf("Steps[0] = %d, want 1 (the command took an attempt)", rem.Steps[0])
+	}
+
+	// The step failed: a command that succeeded does not turn the run
+	// into a finished one.
+	pol.Record(ActionRecord{
+		Kind:    ActionKindCommand,
+		Command: "/gtw sync",
+		StepID:  "one",
+		Outcome: Outcome{Status: OutcomeOK},
+	})
+	if err := pol.CheckFinish("done"); err == nil || !strings.Contains(err.Error(), "must be ok or noop") {
+		t.Errorf("expected must-be-ok error, got %v", err)
+	}
+
+	// The attempts are spent: the step refuses another action.
+	if _, _, err := pol.CheckRun("/gtw sync"); err == nil || !strings.Contains(err.Error(), "limit is 2") {
+		t.Errorf("expected step-limit error, got %v", err)
+	}
+}
+
+// TestPolicy_AllowedCommandsAndRenderAreUnchanged — the registered
+// commands do not join the list of the workflow's own commands, and
+// they do not show up in the rendering.
+func TestPolicy_AllowedCommandsAndRenderAreUnchanged(t *testing.T) {
+	bound := boundFixIssue(t)
+	before := NewPolicy(bound, nil)
+
+	pol := NewPolicy(bound, nil)
+	pol.Commands = []string{"gtw", "review"}
+
+	after := pol.AllowedCommands()
+	if len(after) != len(before.AllowedCommands()) {
+		t.Fatalf("AllowedCommands = %v, want %v", after, before.AllowedCommands())
+	}
+	for i := range after {
+		if after[i] != before.AllowedCommands()[i] {
+			t.Errorf("AllowedCommands = %v, want %v", after, before.AllowedCommands())
+		}
+	}
+	if out := pol.Render(); out != before.Render() {
+		t.Errorf("Render changed:\n%s\nwant:\n%s", out, before.Render())
 	}
 }
 
@@ -286,10 +416,10 @@ jobs:
 		{Kind: ActionKindRun, Command: "echo", StepID: "one"},
 	})
 
-	if _, err := pol.CheckRun("echo"); err == nil || !strings.Contains(err.Error(), "limit is 1") {
+	if _, _, err := pol.CheckRun("echo"); err == nil || !strings.Contains(err.Error(), "limit is 1") {
 		t.Errorf("expected step-limit error, got %v", err)
 	}
-	_, err := pol.CheckRun("nope")
+	_, _, err := pol.CheckRun("nope")
 	if err == nil {
 		t.Fatal("expected error")
 	}

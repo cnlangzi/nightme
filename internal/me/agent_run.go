@@ -73,6 +73,19 @@ type run struct {
 	// state is the progress of the run: the steps that ran and what
 	// they produced. The engine owns it.
 	state *wfe.RunState
+	// registry holds the nightme commands the chat knows, as they came
+	// from the command registry.
+	registry []CommandInfo
+	// commands are the nightme commands the run may issue outside the
+	// workflow's steps.
+	commands []CommandInfo
+	// agentName is the agent that thinks for the owner. Empty when
+	// there is none: the run then has no agent tool.
+	agentName string
+	// brain is the session that thinks for the owner. It is opened
+	// when the model asks for it and closed when the round it belongs
+	// to is over.
+	brain *roundBrain
 
 	// messages is the conversation with the chat model.
 	messages []llm.Message
@@ -118,6 +131,9 @@ type run struct {
 	// nudged records that the chat model answered with text only
 	// and was asked to call a tool.
 	nudged bool
+	// situationStale records that the workflow moved on since the
+	// model last read a situation report.
+	situationStale bool
 	// lastTranscript is the tail of the last action's transcript.
 	lastTranscript string
 	// system1Model is the decision model that answered last.
@@ -168,23 +184,29 @@ func newRun(svc *Service, req Request, wf *wfe.Workflow, args map[string]string)
 		names = append(names, name)
 	}
 	slices.Sort(names)
+	commands := usableCommands(req.Commands)
+	policy := wfe.NewPolicy(wf, nil)
+	policy.Commands = commandNames(commands)
 	return &run{
-		svc:      svc,
-		id:       id,
-		chatID:   req.ChatID,
-		cwd:      req.Cwd,
-		owner:    req.Owner,
-		argNames: names,
-		argVals:  args,
-		workflow: wf,
-		policy:   wfe.NewPolicy(wf, nil),
-		state:    newRunState(id, wf.Name, req.Cwd, now),
-		phase:    PhaseRunning,
-		ctx:      ctx,
-		cancel:   cancel,
-		resume:   make(chan struct{}, 1),
-		unpause:  make(chan struct{}, 1),
-		done:     make(chan struct{}),
+		svc:       svc,
+		id:        id,
+		chatID:    req.ChatID,
+		cwd:       req.Cwd,
+		owner:     req.Owner,
+		argNames:  names,
+		argVals:   args,
+		workflow:  wf,
+		policy:    policy,
+		state:     newRunState(id, wf.Name, req.Cwd, now),
+		registry:  req.Commands,
+		commands:  commands,
+		agentName: svc.agentName(req.Agent),
+		phase:     PhaseRunning,
+		ctx:       ctx,
+		cancel:    cancel,
+		resume:    make(chan struct{}, 1),
+		unpause:   make(chan struct{}, 1),
+		done:      make(chan struct{}),
 	}
 }
 
@@ -429,6 +451,23 @@ func (r *run) appendMessage(m llm.Message) {
 	r.mu.Unlock()
 }
 
+// markSituation records that the workflow moved on by itself.
+func (r *run) markSituation() {
+	r.mu.Lock()
+	r.situationStale = true
+	r.mu.Unlock()
+}
+
+// takeSituation reports whether a new situation report is due, and
+// clears the mark.
+func (r *run) takeSituation() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	stale := r.situationStale
+	r.situationStale = false
+	return stale
+}
+
 // conversation returns a copy of the conversation.
 func (r *run) conversation() []llm.Message {
 	r.mu.Lock()
@@ -437,7 +476,10 @@ func (r *run) conversation() []llm.Message {
 }
 
 // checkRun asks the policy whether a command may run now.
-func (r *run) checkRun(command string) (int, error) {
+//
+// It reports the step the command counts against and whether that
+// step owns the command.
+func (r *run) checkRun(command string) (int, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.policy.CheckRun(command)
@@ -487,6 +529,93 @@ func (r *run) isStepMessage(idx int, command string) bool {
 	return r.policy.IsStepMessage(idx, command)
 }
 
+// stepByID returns the workflow's step with the given id.
+func (r *run) stepByID(stepID string) (wfe.Step, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	idx := r.stepIndex(stepID)
+	if idx < 0 {
+		return wfe.Step{}, false
+	}
+	steps := r.workflow.Steps()
+	return steps[idx], true
+}
+
+// runnableStep reports whether the step may run now: it is the ready
+// step, or it already ran in this round.
+//
+// A step further down the line is not runnable: the steps of a job
+// run in order, and a skipped one would come back out of order.
+func (r *run) runnableStep(stepID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ready, err := wfe.ReadySet(r.state, r.workflow)
+	if err == nil {
+		for _, step := range ready {
+			if step.ID == stepID {
+				return true
+			}
+		}
+	}
+	for _, st := range r.state.Steps {
+		if st.ID != stepID || st.Skipped {
+			continue
+		}
+		if st.Round == r.state.RoundOf(st.Job) {
+			return true
+		}
+	}
+	return false
+}
+
+// commandFor returns the command a tool name stands for.
+func (r *run) commandFor(tool string) (CommandInfo, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, c := range r.commands {
+		if toolName(c.Name) == tool {
+			return c, true
+		}
+	}
+	return CommandInfo{}, false
+}
+
+// checkCommandText refuses a text that names a nightme command.
+//
+// The commands have tools of their own: a command in a free-form text
+// would run as a turn of the chat, not as a command of the run.
+func (r *run) checkCommandText(text string) error {
+	fields := strings.Fields(text)
+	if len(fields) == 0 {
+		return nil
+	}
+	first := fields[0]
+	if !strings.HasPrefix(first, "/") {
+		return nil
+	}
+	name := strings.TrimPrefix(first, "/")
+	for _, c := range r.registry {
+		if c.Name != name {
+			continue
+		}
+		tool := toolName(name)
+		for _, usable := range r.commands {
+			if usable.Name == name {
+				return fmt.Errorf("%q is a nightme command: run it with the %s tool", first, tool)
+			}
+		}
+		return fmt.Errorf("%q is a nightme command, and the run may not use it", first)
+	}
+	return nil
+}
+
+// workflowTitle returns the workflow's title.
+func (r *run) workflowTitle() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.workflow.Title
+}
+
 // judgmentReason returns why the workflow cannot decide on its own.
 func (r *run) judgmentReason() string {
 	r.mu.Lock()
@@ -512,11 +641,13 @@ func (r *run) setDecision(who, reason string) {
 // recordStep records the outcome of a step in the run's progress.
 //
 // The engine owns the state: the step that ran and its outcome go
-// in together.
+// in together. The run's situation moved on, so the model reads it
+// again before it decides.
 func (r *run) recordStep(job string, step wfe.Step, out wfe.Outcome) {
 	r.mu.Lock()
 	wfe.RecordStep(r.state, job, step, out, false)
 	r.mu.Unlock()
+	r.markSituation()
 }
 
 // recordPending records that a step started and has not settled.
@@ -584,6 +715,17 @@ func (r *run) exprCtx() wfe.ExprCtx {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return wfe.ExprContext(r.state)
+}
+
+// lastAction returns the last action the run took.
+func (r *run) lastAction() (wfe.ActionRecord, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	history := r.policy.History
+	if len(history) == 0 {
+		return wfe.ActionRecord{}, false
+	}
+	return history[len(history)-1], true
 }
 
 // lastOutcome returns the outcome of the last step that ran.
@@ -670,6 +812,8 @@ type persistedRun struct {
 	System1Usage     llm.Usage          `json:"system1_usage"`
 	System2Usage     llm.Usage          `json:"system2_usage"`
 	Nudged           bool               `json:"nudged"`
+	Commands         []CommandInfo      `json:"commands,omitempty"`
+	Agent            string             `json:"agent,omitempty"`
 }
 
 // persist writes the run's state to disk.
@@ -711,6 +855,8 @@ func (s *Service) persist(r *run) {
 		System1Usage:     r.system1Usage,
 		System2Usage:     r.system2Usage,
 		Nudged:           r.nudged,
+		Commands:         r.registry,
+		Agent:            r.agentName,
 	}
 	r.mu.Unlock()
 
@@ -807,6 +953,9 @@ func (s *Service) resumeRuns(ctx context.Context) {
 // restoreRun rebuilds a run from its persisted state.
 func (s *Service) restoreRun(state persistedRun) *run {
 	ctx, cancel := context.WithCancel(context.Background())
+	policy := wfe.NewPolicy(state.Workflow, state.History)
+	commands := usableCommands(state.Commands)
+	policy.Commands = commandNames(commands)
 	r := &run{
 		svc:              s,
 		id:               state.RunID,
@@ -815,7 +964,7 @@ func (s *Service) restoreRun(state persistedRun) *run {
 		owner:            state.Owner,
 		argVals:          state.Args,
 		workflow:         state.Workflow,
-		policy:           wfe.NewPolicy(state.Workflow, state.History),
+		policy:           policy,
 		state:            state.State,
 		messages:         state.Messages,
 		pendingCalls:     state.PendingCalls,
@@ -834,6 +983,9 @@ func (s *Service) restoreRun(state persistedRun) *run {
 		system1Usage:     state.System1Usage,
 		system2Usage:     state.System2Usage,
 		nudged:           state.Nudged,
+		registry:         state.Commands,
+		commands:         commands,
+		agentName:        s.agentName(state.Agent),
 		ctx:              ctx,
 		cancel:           cancel,
 		resume:           make(chan struct{}, 1),
@@ -845,6 +997,15 @@ func (s *Service) restoreRun(state persistedRun) *run {
 	}
 	if r.phase == "" {
 		r.phase = PhaseRunning
+	}
+	if oldConversation(r.messages) {
+		// The conversation was written by an older daemon, in a shape
+		// the tools no longer have. The run starts over from the
+		// situation report instead. The pending calls go with it: a
+		// call the model never saw answered would come back as a
+		// result without a question.
+		r.messages = nil
+		r.pendingCalls = nil
 	}
 	r.cards = map[iteration]string{}
 	for _, entry := range state.Cards {
@@ -860,6 +1021,30 @@ func (s *Service) restoreRun(state persistedRun) *run {
 		r.argNames = names
 	}
 	return r
+}
+
+// oldConversation reports whether the conversation was written in a
+// shape the tools no longer have.
+//
+// The old run_step took a command; the new one takes a step's id. A
+// conversation that carries the old call cannot be read by the model
+// the way it was written, so it is dropped.
+func oldConversation(msgs []llm.Message) bool {
+	for _, m := range msgs {
+		for _, p := range m.Parts {
+			if p.Type != llm.PartToolCall || p.ToolName != toolRunStep {
+				continue
+			}
+			var args map[string]any
+			if err := json.Unmarshal(p.Args, &args); err != nil {
+				continue
+			}
+			if _, ok := args["command"]; ok {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // pendingCallList returns the tool calls that still have to run.

@@ -237,12 +237,12 @@ jobs:
 	})
 
 	pol.SetRounds(map[string]int{"main": 2})
-	if _, err := pol.CheckRun("echo"); err != nil {
+	if _, _, err := pol.CheckRun("echo"); err != nil {
 		t.Fatalf("the attempt of the previous round still counts: %v", err)
 	}
 
 	pol.SetRounds(map[string]int{"main": 1})
-	_, err := pol.CheckRun("echo")
+	_, _, err := pol.CheckRun("echo")
 	if err == nil {
 		t.Fatal("the attempt of the current round does not count")
 	}
@@ -266,7 +266,7 @@ jobs:
 		{Kind: ActionKindRun, Command: "echo", StepID: "one"},
 	})
 
-	_, err := pol.CheckRun("echo")
+	_, _, err := pol.CheckRun("echo")
 	if err == nil {
 		t.Fatal("the third attempt was accepted")
 	}

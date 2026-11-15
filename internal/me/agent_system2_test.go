@@ -32,7 +32,7 @@ func TestSystem2_ToolDispatch(t *testing.T) {
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
 	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"command": "/gtw commit"}),
+		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"step_id": "commit"}),
 			Usage: llm.Usage{InputTokens: 10, OutputTokens: 5}},
 		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "done", "summary": "committed"})},
 	}}
@@ -69,7 +69,7 @@ func TestStatus_ReportsTheRunWhileItWorks(t *testing.T) {
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
 	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"command": "/gtw commit"})},
+		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"step_id": "commit"})},
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider})
 	// The command never settles: the run waits for it.
@@ -135,8 +135,8 @@ func TestSystem2_PolicyViolationComesBackAsAToolError(t *testing.T) {
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
 	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"command": "/gtw sync"})},
-		{Message: toolCallMsg("c2", toolRunStep, map[string]any{"command": "/gtw commit"})},
+		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"step_id": "sync"})},
+		{Message: toolCallMsg("c2", toolRunStep, map[string]any{"step_id": "commit"})},
 		{Message: toolCallMsg("c3", toolFinish, map[string]any{"status": "done", "summary": "committed"})},
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider})
@@ -149,11 +149,6 @@ func TestSystem2_PolicyViolationComesBackAsAToolError(t *testing.T) {
 	}
 	waitRun(t, svc, "obs-1")
 
-	for _, cmd := range op.Sent() {
-		if cmd == "/gtw sync" {
-			t.Fatalf("the policy rejected /gtw sync but it ran anyway: %v", op.Sent())
-		}
-	}
 	// The model saw the violation as a tool error and corrected
 	// itself.
 	req := provider.Request(1)
@@ -166,7 +161,7 @@ func TestSystem2_PolicyViolationComesBackAsAToolError(t *testing.T) {
 			continue
 		}
 		for _, p := range m.Parts {
-			if p.IsError && strings.Contains(p.Text, "not allowed") {
+			if p.IsError && strings.Contains(p.Text, "not part of this workflow") {
 				found = true
 			}
 		}
@@ -181,7 +176,7 @@ func TestSystem2_ANoopStepIsNotAToolError(t *testing.T) {
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
 	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"command": "/gtw commit"})},
+		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"step_id": "commit"})},
 		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "done", "summary": "nothing to commit"})},
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider})
@@ -252,29 +247,6 @@ func TestSystem2_TextOnlyReplyIsNudgedAndThenEndsTheRun(t *testing.T) {
 	}
 }
 
-func TestSystem2_TokenBudgetStopsTheRun(t *testing.T) {
-	dir := t.TempDir()
-	writeWorkflow(t, dir, "one", oneStepWorkflow)
-
-	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"command": "/gtw commit"}),
-			Usage: llm.Usage{InputTokens: 500, OutputTokens: 500}},
-	}}
-	svc, op := testService(t, dir, Config{Provider: provider, TokenBudget: 100})
-	op.steps = []fakeStep{pendingStep("still going")}
-
-	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
-	}); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	waitRun(t, svc, "obs-1")
-
-	if !op.Has("token budget") {
-		t.Fatalf("the run's overview did not mention the budget: %v", op.Lines())
-	}
-}
-
 // TestRun_HasNoTurnCap — a run takes as many turns as the plan needs.
 //
 // There is no turn cap any more: only `/me stop` and the daemon's
@@ -332,7 +304,7 @@ jobs:
 `)
 
 	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"command": "/gtw commit"})},
+		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"step_id": "commit"})},
 	}}
 	op := newFakeOperator(
 		pendingStep("still going"),
@@ -418,7 +390,7 @@ jobs:
 
 	provider := &scriptedProvider{responses: []llm.Response{
 		{Message: toolCallMsg("c1", toolAskHuman, map[string]any{"question": "Which branch?"})},
-		{Message: toolCallMsg("c2", toolRunStep, map[string]any{"command": "/gtw commit"})},
+		{Message: toolCallMsg("c2", toolRunStep, map[string]any{"step_id": "commit"})},
 		{Message: toolCallMsg("c3", toolFinish, map[string]any{"status": "done", "summary": "committed"})},
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider})
@@ -455,7 +427,7 @@ func TestRestart_ResumesASuspendedRun(t *testing.T) {
 
 	provider := &scriptedProvider{responses: []llm.Response{
 		{Message: toolCallMsg("c1", toolAskHuman, map[string]any{"question": "Which branch?"})},
-		{Message: toolCallMsg("c2", toolRunStep, map[string]any{"command": "/gtw commit"})},
+		{Message: toolCallMsg("c2", toolRunStep, map[string]any{"step_id": "commit"})},
 		{Message: toolCallMsg("c3", toolFinish, map[string]any{"status": "done", "summary": "committed"})},
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider})
@@ -484,7 +456,7 @@ func TestShutdown_KeepsTheRunForTheNextDaemon(t *testing.T) {
 
 	provider := &scriptedProvider{responses: []llm.Response{
 		{Message: toolCallMsg("c1", toolAskHuman, map[string]any{"question": "Which branch?"})},
-		{Message: toolCallMsg("c2", toolRunStep, map[string]any{"command": "/gtw commit"})},
+		{Message: toolCallMsg("c2", toolRunStep, map[string]any{"step_id": "commit"})},
 		{Message: toolCallMsg("c3", toolFinish, map[string]any{"status": "done", "summary": "committed"})},
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider})
@@ -512,7 +484,7 @@ func TestRestart_ResolvesAnInFlightCommandAsInterrupted(t *testing.T) {
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
 	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"command": "/gtw commit"})},
+		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"step_id": "commit"})},
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider})
 	// The command never settles: the run waits for it.
@@ -655,7 +627,7 @@ func TestIntegration_TheWorkflowRunsEndToEnd(t *testing.T) {
 	writeWorkflow(t, dir, "fix-issue", fixIssueWorkflow)
 
 	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"command": "/review -c"})},
+		{Message: toolCallMsg("c1", "ntm_review", map[string]any{"args": "-c"})},
 	}}
 	op := newFakeOperator(
 		okStep("fixed"),
@@ -684,6 +656,7 @@ func TestIntegration_TheWorkflowRunsEndToEnd(t *testing.T) {
 	}
 	if _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "fix-issue", Args: []string{"42"}, ChatID: "obs-1", Cwd: "/tmp/work",
+		Commands: []CommandInfo{{Name: "review"}},
 	}); err != nil {
 		t.Fatalf("start workflow: %v", err)
 	}

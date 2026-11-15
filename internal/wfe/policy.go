@@ -17,6 +17,13 @@ type Policy struct {
 	Workflow *Workflow
 	// History holds the actions taken so far, oldest first.
 	History []ActionRecord
+	// Commands holds the names of the nightme commands the run may
+	// issue outside the workflow's steps. The names carry no leading
+	// slash.
+	//
+	// A command of the list belongs to no step: it counts against the
+	// step the run is on, but it never becomes that step's verdict.
+	Commands []string
 
 	// stepList is the workflow's step list, computed once: the
 	// topological order does not change while the run goes on.
@@ -35,10 +42,10 @@ func NewPolicy(wf *Workflow, history []ActionRecord) *Policy {
 	return p
 }
 
-// Record appends an action to the history. Only a run belongs to a
-// step, so any other action is recorded without one.
+// Record appends an action to the history. Only a run and a command
+// belong to a step, so any other action is recorded without one.
 func (p *Policy) Record(rec ActionRecord) {
-	if rec.Kind != ActionKindRun {
+	if rec.Kind != ActionKindRun && rec.Kind != ActionKindCommand {
 		rec.StepID = ""
 	}
 	p.History = append(p.History, rec)
@@ -64,24 +71,85 @@ func (p *Policy) Round(job string) int {
 	return 1
 }
 
-// CheckRun reports whether the command may run now and which step it
-// belongs to. The command matches a step when it equals that step's
-// message or one of its `allow` entries, compared with whitespace
-// normalised away. The step that owns the command is the first one
-// listing it.
-func (p *Policy) CheckRun(command string) (int, error) {
+// CheckRun reports whether the command may run now, which step it
+// belongs to and whether that step owns it.
+//
+// The command matches a step when it equals that step's message or one
+// of its `allow` entries, compared with whitespace normalised away.
+// The step that owns the command is the first one listing it.
+//
+// A command that belongs to no step but is one of the registered
+// nightme commands is accepted too: it is not owned by a step, so it
+// never becomes a step's verdict, but it counts against the step the
+// run is on.
+func (p *Policy) CheckRun(command string) (int, bool, error) {
 	cmd := normalizeCommand(command)
 	if cmd == "" {
-		return -1, fmt.Errorf("no command given")
+		return -1, false, fmt.Errorf("no command given")
 	}
 	idx := p.stepFor(cmd)
-	if idx < 0 {
-		return -1, fmt.Errorf("%q is not allowed: allowed commands are %s", command, p.allowedCommands())
+	if idx >= 0 {
+		if err := p.CheckStep(idx); err != nil {
+			return -1, true, err
+		}
+		return idx, true, nil
 	}
-	if err := p.CheckStep(idx); err != nil {
-		return -1, err
+	if p.isRegistered(cmd) {
+		cur := p.currentStep()
+		if cur >= 0 {
+			if err := p.CheckStep(cur); err != nil {
+				return -1, false, err
+			}
+		}
+		return cur, false, nil
 	}
-	return idx, nil
+	return -1, false, fmt.Errorf("%q is not allowed: allowed commands are %s", command, p.allowedCommands())
+}
+
+// isRegistered reports whether the command is one of the nightme
+// commands the run may issue.
+func (p *Policy) isRegistered(cmd string) bool {
+	name := commandName(cmd)
+	if name == "" {
+		return false
+	}
+	for _, c := range p.Commands {
+		if c == name {
+			return true
+		}
+	}
+	return false
+}
+
+// currentStep returns the index of the step the run is on: the step
+// of the last run the history holds. -1 when nothing ran yet.
+func (p *Policy) currentStep() int {
+	for i := len(p.History) - 1; i >= 0; i-- {
+		rec := p.History[i]
+		if rec.Kind != ActionKindRun || rec.StepID == "" {
+			continue
+		}
+		for j, step := range p.steps() {
+			if step.ID == rec.StepID {
+				return j
+			}
+		}
+	}
+	return -1
+}
+
+// commandName returns the name of a nightme command: the first token
+// of the command line when it starts with a slash. Empty otherwise.
+func commandName(cmd string) string {
+	fields := strings.Fields(cmd)
+	if len(fields) == 0 {
+		return ""
+	}
+	first := fields[0]
+	if !strings.HasPrefix(first, "/") {
+		return ""
+	}
+	return strings.TrimPrefix(first, "/")
 }
 
 // CheckStep reports whether the step may take an action now: its own
@@ -263,7 +331,8 @@ func (p *Policy) allowedCommands() string {
 	return strings.Join(cmds, ", ")
 }
 
-// stepUsage counts the runs taken for the step in the current round.
+// stepUsage counts the actions taken for the step in the current
+// round: the step's own runs and the commands issued for it.
 func (p *Policy) stepUsage(idx int) int {
 	steps := p.steps()
 	if idx < 0 || idx >= len(steps) {
@@ -273,7 +342,10 @@ func (p *Policy) stepUsage(idx int) int {
 	round := p.Round(JobOf(p.Workflow, id))
 	n := 0
 	for _, rec := range p.History {
-		if rec.Kind != ActionKindRun || rec.StepID != id {
+		if rec.Kind != ActionKindRun && rec.Kind != ActionKindCommand {
+			continue
+		}
+		if rec.StepID != id {
 			continue
 		}
 		if recordRound(rec) != round {

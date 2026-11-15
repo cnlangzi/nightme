@@ -1314,7 +1314,7 @@ func TestJudgmentPoint_LowConfidenceEscalatesToTheChatModel(t *testing.T) {
 	writeWorkflow(t, dir, "fix-issue", fixIssueWorkflow)
 
 	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"command": "/gtw fix 42 -y"})},
+		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"step_id": "fix"})},
 		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "failed", "summary": "stopped here"})},
 	}}
 	decider := &scriptedDecider{answers: []llm.DecisionResponse{
@@ -1344,7 +1344,7 @@ func TestJudgmentPoint_ARefusedDecisionEscalatesToTheChatModel(t *testing.T) {
 	writeWorkflow(t, dir, "fix-issue", fixIssueWorkflow)
 
 	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"command": "/gtw fix 42 -y"})},
+		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"step_id": "fix"})},
 		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "failed", "summary": "stopped here"})},
 	}}
 	decider := &scriptedDecider{answers: []llm.DecisionResponse{
@@ -1403,7 +1403,7 @@ func TestJudgmentPoint_PolicyRejectedChoiceEscalates(t *testing.T) {
 	writeWorkflow(t, dir, "fix-issue", fixIssueWorkflow)
 
 	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"command": "/gtw fix 42 -y"})},
+		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"step_id": "fix"})},
 		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "failed", "summary": "stopped"})},
 	}}
 	decider := &scriptedDecider{answers: []llm.DecisionResponse{
@@ -1533,11 +1533,15 @@ func TestSystem1_DecisionIsRecordedAsASyntheticToolCall(t *testing.T) {
 	found := false
 	for _, m := range r.conversation() {
 		for _, p := range m.Parts {
-			if p.Type != llm.PartToolCall {
+			if p.Type != llm.PartToolCall || p.ToolName != toolRunStep {
 				continue
 			}
-			if strings.Contains(p.Text, "decided by jev-1.14, p=0.93") {
-				found = true
+			if !strings.Contains(string(p.Args), `"step_id":"fix"`) {
+				continue
+			}
+			found = true
+			if strings.Contains(p.Text, "decided by") || strings.Contains(p.Text, "p=") {
+				t.Errorf("the synthetic call carries the decision model: %q", p.Text)
 			}
 		}
 	}

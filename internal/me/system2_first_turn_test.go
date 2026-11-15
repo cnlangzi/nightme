@@ -47,7 +47,7 @@ func TestTheFirstTurnOfTheChatModelHasAUserMessage(t *testing.T) {
 	for _, p := range req.Messages[0].Parts {
 		text += p.Text
 	}
-	if !strings.Contains(text, "needs a decision") {
+	if !strings.Contains(text, "The run needs you") {
 		t.Errorf("the opening turn is %q, want it to say what the run is up against", text)
 	}
 }

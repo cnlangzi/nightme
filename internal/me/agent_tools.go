@@ -20,6 +20,8 @@ const (
 	toolRunStep = "run_step"
 	// toolInstruct sends a free-form prompt to the coding agent.
 	toolInstruct = "instruct"
+	// toolAgent asks the thinking of the owner.
+	toolAgent = "agent"
 	// toolAnswerChoice answers a pending prompt of the chat.
 	toolAnswerChoice = "answer_choice"
 	// toolAskHuman asks the user.
@@ -70,39 +72,138 @@ type stepResult struct {
 }
 
 // toolCatalogue returns the tools the chat model may call.
-func toolCatalogue() []llm.Tool {
-	return []llm.Tool{
+//
+// The nightme commands are tools of their own: they are the only way
+// the model runs a command, and each carries the command's own
+// description.
+func (s *Service) toolCatalogue(r *run) []llm.Tool {
+	tools := []llm.Tool{
 		{
 			Name:        toolRunStep,
-			Description: "Run one of the workflow's steps in the chat. The command must be a step of the workflow or one its step allows.",
-			Schema:      json.RawMessage(`{"type":"object","properties":{"command":{"type":"string","description":"the command to run"}},"required":["command"],"additionalProperties":false}`),
+			Description: "Run a step of the workflow as the workflow wrote it: the step that is ready, or one that already ran this round.",
+			Schema:      json.RawMessage(`{"type":"object","properties":{"step_id":{"type":"string","description":"the id of the step"}},"required":["step_id"],"additionalProperties":false}`),
 		},
-		{
+	}
+	tools = append(tools, commandTools(r)...)
+	tools = append(tools,
+		llm.Tool{
 			Name:        toolInstruct,
 			Description: "Send a free-form instruction to the coding agent, for the cases the workflow's commands do not cover.",
 			Schema:      json.RawMessage(`{"type":"object","properties":{"text":{"type":"string","description":"the instruction"}},"required":["text"],"additionalProperties":false}`),
 		},
-		{
+		llm.Tool{
 			Name:        toolAnswerChoice,
 			Description: "Answer a prompt the coding agent is waiting for — a permission request or a question.",
 			Schema:      json.RawMessage(`{"type":"object","properties":{"choice_id":{"type":"string","description":"the id of the prompt"},"option_id":{"type":"string","description":"the id of the option to pick"}},"required":["choice_id","option_id"],"additionalProperties":false}`),
 		},
-		{
+		llm.Tool{
 			Name:        toolAskHuman,
 			Description: "Ask the user a question. The run waits for the answer. The operator answers by quoting the question or by picking a button on the run card.",
 			Schema:      json.RawMessage(`{"type":"object","properties":{"question":{"type":"string","description":"the question"}},"required":["question"],"additionalProperties":false}`),
 		},
-		{
+		llm.Tool{
 			Name:        toolRepoStatus,
 			Description: "Read the repository facts of the chat: the branch, whether the tree is dirty, and how far the branch is ahead of or behind its upstream and its base branch.",
 			Schema:      json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`),
 		},
-		{
+		llm.Tool{
 			Name:        toolFinish,
 			Description: "End the run and report how it went.",
 			Schema:      json.RawMessage(`{"type":"object","properties":{"status":{"type":"string","enum":["done","failed"],"description":"done when the workflow is complete, failed when it cannot go on"},"summary":{"type":"string","description":"what was done"}},"required":["status","summary"],"additionalProperties":false}`),
 		},
+	)
+	if s.hasBrain(r) {
+		tools = append(tools, llm.Tool{
+			Name:        toolAgent,
+			Description: "Ask the owner's thinking about a task. It investigates and comes back with the cause and a recommendation. It changes nothing.",
+			Schema:      json.RawMessage(`{"type":"object","properties":{"task":{"type":"string","description":"the question to investigate"}},"required":["task"],"additionalProperties":false}`),
+		})
 	}
+	return tools
+}
+
+// commandTools returns the tools of the nightme commands the run may
+// issue.
+func commandTools(r *run) []llm.Tool {
+	out := make([]llm.Tool, 0, len(r.commands))
+	for _, c := range r.commands {
+		name := toolName(c.Name)
+		if name == "" {
+			continue
+		}
+		out = append(out, llm.Tool{
+			Name:        name,
+			Description: commandDescription(c),
+			Schema:      commandSchema(c),
+		})
+	}
+	return out
+}
+
+// commandDescription renders what the model reads about a command.
+func commandDescription(c CommandInfo) string {
+	var b strings.Builder
+	if summary := strings.TrimSpace(c.Summary); summary != "" {
+		b.WriteString(summary)
+	}
+	if usage := strings.TrimSpace(c.Usage); usage != "" {
+		if b.Len() > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString("usage: ")
+		b.WriteString(usage)
+	}
+	if len(c.Subcommands) > 0 {
+		if b.Len() > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString("subcommands:")
+		for _, s := range c.Subcommands {
+			b.WriteString("\n- ")
+			b.WriteString(s.Name)
+			if summary := strings.TrimSpace(s.Summary); summary != "" {
+				b.WriteString(": ")
+				b.WriteString(summary)
+			}
+		}
+	}
+	return b.String()
+}
+
+// commandSchema renders the arguments of a command.
+//
+// A command with subcommands takes one of them; a command without
+// them takes its arguments only. The arguments are always optional.
+func commandSchema(c CommandInfo) json.RawMessage {
+	props := map[string]any{}
+	if len(c.Subcommands) > 0 {
+		values := make([]string, 0, len(c.Subcommands))
+		for _, s := range c.Subcommands {
+			values = append(values, s.Name)
+		}
+		props["subcommand"] = map[string]any{
+			"type":        "string",
+			"description": "the subcommand to run",
+			"enum":        values,
+		}
+	}
+	props["args"] = map[string]any{
+		"type":        "string",
+		"description": "the arguments of the command",
+	}
+	schema := map[string]any{
+		"type":                 "object",
+		"properties":           props,
+		"additionalProperties": false,
+	}
+	if len(c.Subcommands) > 0 {
+		schema["required"] = []string{"subcommand"}
+	}
+	raw, err := json.Marshal(schema)
+	if err != nil {
+		return json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`)
+	}
+	return raw
 }
 
 // runPendingCalls executes the tool calls the model asked for.
@@ -144,6 +245,8 @@ func (s *Service) execTool(ctx context.Context, r *run, call pendingCall) (stepR
 		return s.toolRunStep(ctx, r, call)
 	case toolInstruct:
 		return s.toolInstruct(ctx, r, call)
+	case toolAgent:
+		return s.toolAgent(ctx, r, call)
 	case toolAnswerChoice:
 		return s.toolAnswerChoice(ctx, r, call)
 	case toolAskHuman:
@@ -153,21 +256,113 @@ func (s *Service) execTool(ctx context.Context, r *run, call pendingCall) (stepR
 	case toolFinish:
 		return s.toolFinish(ctx, r, call)
 	default:
+		if cmd, ok := r.commandFor(call.Name); ok {
+			return s.toolCommand(ctx, r, call, cmd)
+		}
 		return stepResult{}, toolErrorf("there is no tool called %q", call.Name)
 	}
 }
 
 // toolRunStep runs a step of the workflow.
+//
+// The step must be the ready one, or one that already ran this round:
+// a step further down the line would leave the steps before it out of
+// order.
 func (s *Service) toolRunStep(ctx context.Context, r *run, call pendingCall) (stepResult, error) {
-	command, err := callArgString(call, "command")
+	stepID, err := callArgString(call, "step_id")
 	if err != nil {
 		return stepResult{}, err
 	}
-	res, err := s.runStep(ctx, r, command)
+	step, ok := r.stepByID(stepID)
+	if !ok {
+		return stepResult{}, toolErrorf("the step %q is not part of this workflow", stepID)
+	}
+	if !r.runnableStep(step.ID) {
+		return stepResult{}, toolErrorf("the step %q is not ready: run the step that is ready", step.ID)
+	}
+	if err := r.checkStep(step); err != nil {
+		return stepResult{}, toolErrorf("%s", err.Error())
+	}
+	idx := r.stepIndex(step.ID)
+	// The card follows the step: the step runs in the job and the
+	// round of that step.
+	s.switchCard(ctx, r, r.iterationOfStep(idx))
+	job := wfe.JobOf(r.workflow, step.ID)
+	verdict, err := s.executeStep(ctx, r, job, step)
 	if err != nil {
 		return stepResult{}, err
 	}
-	return res, nil
+	if !verdict.Settled {
+		// The step is still running: it has no verdict yet.
+		return stepResult{Status: statusWaiting, Summary: verdict.Outcome.Summary}, nil
+	}
+	r.recordStep(job, step, verdict.Outcome)
+	s.persist(r)
+	s.updateCard(r)
+	return stepResult{
+		Status:     string(verdict.Outcome.Status),
+		Summary:    verdict.Outcome.Summary,
+		Data:       verdict.Outcome.Data,
+		Transcript: verdict.Transcript,
+	}, nil
+}
+
+// toolCommand runs a nightme command as the owner.
+func (s *Service) toolCommand(ctx context.Context, r *run, call pendingCall, cmd CommandInfo) (stepResult, error) {
+	sub, _ := callArgOptional(call, "subcommand")
+	if len(cmd.Subcommands) > 0 {
+		if sub == "" {
+			return stepResult{}, toolErrorf("%s needs a subcommand", toolName(cmd.Name))
+		}
+		if !hasSubcommand(cmd, sub) {
+			return stepResult{}, toolErrorf("%s has no subcommand %q", toolName(cmd.Name), sub)
+		}
+	}
+	args, _ := callArgOptional(call, "args")
+	command := "/" + cmd.Name
+	if sub != "" {
+		command += " " + sub
+	}
+	if args != "" {
+		command += " " + args
+	}
+	return s.runStep(ctx, r, command)
+}
+
+// hasSubcommand reports whether the command has the subcommand.
+func hasSubcommand(cmd CommandInfo, name string) bool {
+	for _, s := range cmd.Subcommands {
+		if s.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// toolAgent asks the thinking of the owner.
+func (s *Service) toolAgent(ctx context.Context, r *run, call pendingCall) (stepResult, error) {
+	task, err := callArgString(call, "task")
+	if err != nil {
+		return stepResult{}, err
+	}
+	if err := r.checkCommandText(task); err != nil {
+		return stepResult{}, toolErrorf("%s", err.Error())
+	}
+	reply, err := s.askBrain(ctx, r, task)
+	if err != nil {
+		return stepResult{}, toolErrorf("%s", err.Error())
+	}
+	summary, transcript := brainSummary(reply)
+	data := map[string]string{}
+	if reply.Model != "" {
+		data["model"] = reply.Model
+	}
+	return stepResult{
+		Status:     string(wfe.OutcomeOK),
+		Summary:    summary,
+		Data:       data,
+		Transcript: transcript,
+	}, nil
 }
 
 // runStep runs a command of the workflow and records it.
@@ -177,13 +372,17 @@ func (s *Service) toolRunStep(ctx context.Context, r *run, call pendingCall) (st
 // the run state records it. A command from an allow list is a repair
 // inside the step: only the action history records it.
 //
+// A command of the registry that belongs to no step is a repair too,
+// and it is recorded as such: it counts against the step the run is
+// on, but it never becomes that step's verdict.
+//
 // A command that could not run at all comes back as a tool error: the
 // agent reads what went wrong and tries again.
 //
 // The action is recorded only when the command settled: a step that
 // is still running has not been taken yet.
 func (s *Service) runStep(ctx context.Context, r *run, command string) (stepResult, error) {
-	idx, err := r.checkRun(command)
+	idx, owned, err := r.checkRun(command)
 	if err != nil {
 		return stepResult{}, toolErrorf("%s", err.Error())
 	}
@@ -199,11 +398,11 @@ func (s *Service) runStep(ctx context.Context, r *run, command string) (stepResu
 		out := wfe.Outcome{Status: wfe.OutcomeFailed, Summary: err.Error()}
 		step, ok := r.stepAt(idx)
 		if !ok {
-			r.record(wfe.ActionKindRun, command, "", out)
+			r.record(actionKind(owned), command, "", out)
 			return stepResult{}, toolErrorf("%s", err.Error())
 		}
-		r.record(wfe.ActionKindRun, command, step.ID, out)
-		if r.isStepMessage(idx, command) || r.hasRun(step.ID) {
+		r.record(actionKind(owned), command, step.ID, out)
+		if owned && (r.isStepMessage(idx, command) || r.hasRun(step.ID)) {
 			// The step ran, or the command was a repair inside a step
 			// that ran: the run state carries the latest outcome. A
 			// repair that was only attempted does not consume the
@@ -214,8 +413,12 @@ func (s *Service) runStep(ctx context.Context, r *run, command string) (stepResu
 	}
 	if res.Status == statusWaiting {
 		// The command is still running: the step has no verdict yet.
-		if step, ok := r.stepAt(idx); ok {
-			r.recordPending(wfe.JobOf(r.workflow, step.ID), step)
+		// A command that belongs to no step changes nothing: the
+		// command it started is picked up where it left off.
+		if owned {
+			if step, ok := r.stepAt(idx); ok {
+				r.recordPending(wfe.JobOf(r.workflow, step.ID), step)
+			}
 		}
 		return res, nil
 	}
@@ -228,16 +431,25 @@ func (s *Service) runStep(ctx context.Context, r *run, command string) (stepResu
 	if !ok {
 		// The action still happened, so it is recorded — the budget
 		// has to know about it.
-		r.record(wfe.ActionKindRun, command, "", out)
+		r.record(actionKind(owned), command, "", out)
 		return res, nil
 	}
-	r.record(wfe.ActionKindRun, command, step.ID, out)
-	if r.isStepMessage(idx, command) || r.hasRun(step.ID) {
+	r.record(actionKind(owned), command, step.ID, out)
+	if owned && (r.isStepMessage(idx, command) || r.hasRun(step.ID)) {
 		// The step ran, or the command was a repair inside a step
 		// that ran: the run state carries the latest outcome.
 		r.recordStep(wfe.JobOf(r.workflow, step.ID), step, out)
 	}
 	return res, nil
+}
+
+// actionKind returns the kind an action is recorded as: a command
+// that belongs to no step is not a step's own run.
+func actionKind(owned bool) wfe.ActionKind {
+	if owned {
+		return wfe.ActionKindRun
+	}
+	return wfe.ActionKindCommand
 }
 
 // toolInstruct sends a free-form prompt to the coding agent.
@@ -247,6 +459,9 @@ func (s *Service) toolInstruct(ctx context.Context, r *run, call pendingCall) (s
 		return stepResult{}, err
 	}
 	if err := r.checkInstruct(); err != nil {
+		return stepResult{}, toolErrorf("%s", err.Error())
+	}
+	if err := r.checkCommandText(text); err != nil {
 		return stepResult{}, toolErrorf("%s", err.Error())
 	}
 	res, err := s.runCommand(ctx, r, text, true)
@@ -649,4 +864,26 @@ func callArgString(call pendingCall, name string) (string, error) {
 		return "", toolErrorf("the %q argument of %s must be a non-empty string", name, call.Name)
 	}
 	return s, nil
+}
+
+// callArgOptional reads a string argument of a tool call that may be
+// absent.
+//
+// An argument that is there but empty reads as absent.
+func callArgOptional(call pendingCall, name string) (string, bool) {
+	var args map[string]any
+	if len(call.Args) > 0 {
+		if err := json.Unmarshal(call.Args, &args); err != nil {
+			return "", false
+		}
+	}
+	v, ok := args[name]
+	if !ok {
+		return "", false
+	}
+	s, ok := v.(string)
+	if !ok {
+		return "", false
+	}
+	return strings.TrimSpace(s), s != ""
 }

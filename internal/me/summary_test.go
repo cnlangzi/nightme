@@ -134,6 +134,11 @@ func TestStop_PostsTheSummaryOfTheSession(t *testing.T) {
 		t.Errorf("the run decided %d times with the decision model and %d times with the chat model, want 1 and 0",
 			before.System1Decisions, before.System2Decisions)
 	}
+	// The state of a run that ended goes with it: a file that outlived
+	// the run would be resumed by the next daemon.
+	if _, err := os.Stat(filepath.Join(dir, "runs", r.id+".json")); !os.IsNotExist(err) {
+		t.Errorf("the state of the stopped run is still on disk: %v", err)
+	}
 }
 
 // TestStop_UpdatesTheLastCardToTheFinalPhase — the card of the last
@@ -269,6 +274,7 @@ func TestTheSummaryCapsTheErrorsAndTheDecisions(t *testing.T) {
 		workflow: wf,
 		policy:   wfe.NewPolicy(wf, nil),
 		state:    newRunState("one-1", wf.Name, "/tmp/work", time.Now()),
+		phase:    PhaseStopped,
 	}
 	for i := 0; i < 6; i++ {
 		r.policy.History = append(r.policy.History, wfe.ActionRecord{
@@ -325,6 +331,55 @@ func countLines(body, prefix string) int {
 		}
 	}
 	return n
+}
+
+// TestTheSummaryClipsItsRows — a card that carries a whole build log
+// is unreadable, and a card that is too long is refused.
+func TestTheSummaryClipsItsRows(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+	svc, _ := testService(t, dir, Config{})
+
+	wf, ok := svc.catalog.Lookup("one")
+	if !ok {
+		t.Fatal("the workflow did not load")
+	}
+	r := &run{
+		svc:      svc,
+		id:       "one-1",
+		chatID:   "obs-1",
+		workflow: wf,
+		policy:   wfe.NewPolicy(wf, nil),
+		state:    newRunState("one-1", wf.Name, "/tmp/work", time.Now()),
+		phase:    PhaseStopped,
+	}
+	r.policy.History = []wfe.ActionRecord{{
+		Kind:    wfe.ActionKindRun,
+		Command: "/gtw build",
+		StepID:  "commit",
+		Outcome: wfe.Outcome{
+			Status:  wfe.OutcomeFailed,
+			Summary: strings.Repeat("build log ", 100),
+			Data:    map[string]string{"reason": "agent_error"},
+		},
+	}}
+	r.wakes = []wakeRecord{{
+		Who:  decisionChat,
+		What: "run_step(step_id=" + strings.Repeat("x", 400) + ")",
+		Why:  strings.Repeat("because ", 100),
+	}}
+
+	body := svc.summaryView(r).Body
+	for _, line := range strings.Split(body, "\n") {
+		if n := len([]rune(line)); n > maxSummaryLine {
+			t.Errorf("a line of the summary is %d runes long, want at most %d: %q", n, maxSummaryLine, line)
+		}
+	}
+	// The reason code is the machine-readable part of the row: the cut
+	// must not swallow it.
+	if !strings.Contains(body, "reason: agent_error") {
+		t.Errorf("the summary lost the reason code:\n%s", body)
+	}
 }
 
 // TestTheFastPathHoldsNoWakeRecords — the workflow's own plan is not a
@@ -391,6 +446,11 @@ func TestTheWakeLogHoldsOneRecordPerModelCall(t *testing.T) {
 	}
 	if wakes[0].Why == "" {
 		t.Error("the first record does not say why the run woke the model")
+	}
+	for i, rec := range wakes {
+		if rec.Round != 1 {
+			t.Errorf("the record %d is from round %d, want the round of the job the run is on", i, rec.Round)
+		}
 	}
 }
 

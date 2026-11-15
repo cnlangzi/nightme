@@ -1317,16 +1317,15 @@ func (r *run) wasStoppedByOperator() bool {
 
 // currentRound returns the round of the job the run is on.
 //
-// The job is the one of the last step that ran; a run that has not run
-// a step yet is in the first round.
+// The run's iteration is the job it entered and the round of that job;
+// a run that has entered no job yet is in the first round.
 func (r *run) currentRound() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if len(r.state.Steps) == 0 {
+	if r.cardJob == "" || r.cardRound <= 0 {
 		return 1
 	}
-	job := r.state.Steps[len(r.state.Steps)-1].Job
-	return r.state.RoundOf(job)
+	return r.cardRound
 }
 
 // setTranscript keeps the transcript of an action.

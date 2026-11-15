@@ -56,13 +56,18 @@ func (s *Service) drive(ctx context.Context, r *run) {
 	default:
 		if r.wasStoppedByOperator() {
 			// The operator stopped the run: that is what ended it.
-			s.finish(r, PhaseStopped, err.Error())
+			// The reason it stopped is the stop itself.
+			s.finish(r, PhaseStopped, "")
 		} else {
 			s.finish(r, PhaseFailed, err.Error())
 			r.setSummary("the run failed")
 			s.updateCard(r)
 		}
 	}
+	// The run is over: its state goes with it. The summary is built
+	// from the run's own record, so it does not need the file — and a
+	// file that outlives the run would be resumed by the next daemon.
+	s.removeState(r.id)
 	if r.wasStoppedByOperator() {
 		// The session is over: the chat gets the record of it. The
 		// summary is built here and not in the command, because the
@@ -72,7 +77,6 @@ func (s *Service) drive(ctx context.Context, r *run) {
 		// The card of the last iteration shows where the run ended.
 		s.updateCard(r)
 	}
-	s.removeState(r.id)
 }
 
 // loop is the run's main cycle.

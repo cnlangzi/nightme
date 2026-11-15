@@ -23,6 +23,17 @@ const (
 	maxSummaryDecisions = 10
 	// maxSummaryValue is how long the value of a tool argument is.
 	maxSummaryValue = 40
+	// maxSummaryCommand is how long the command of a row is.
+	maxSummaryCommand = 100
+	// maxSummaryText is how long the summary of an action or the reason
+	// of a decision is.
+	maxSummaryText = 120
+	// maxSummaryLine is how long a line of the card is.
+	//
+	// The card is a message of the chat: a row that carries a whole
+	// transcript would make the card unreadable, and a card that is
+	// too long is refused.
+	maxSummaryLine = 300
 )
 
 // postSummary posts the summary of a run the operator stopped.
@@ -64,19 +75,19 @@ func (s *Service) summaryView(r *run) channel.CardSpec {
 		rounds[job] = round
 	}
 	history := append([]wfe.ActionRecord(nil), r.policy.History...)
-	wakes := append([]wakeRecord(nil), r.wakes...)
 	s1d, s2d := r.system1Decisions, r.system2Decisions
 	s1u, s2u := r.system1Usage.Total(), r.system2Usage.Total()
 	inflight := r.inflight
 	stepIDs := workflowStepIDs(r.workflow)
 	jobs := r.workflow.JobOrder()
 	r.mu.Unlock()
+	wakes := r.wakeRecords()
 
 	lines := make([]string, 0, 16)
 	lines = append(lines, "run: "+id)
 	lines = append(lines, "duration: "+compactDuration(s.now().Sub(started)))
 	if line := jobsLine(jobs, rounds); line != "" {
-		lines = append(lines, line)
+		lines = append(lines, clipLine(line, maxSummaryLine))
 	}
 	lines = append(lines, actionsLine(history))
 	lines = append(lines, wakeLine(wakes))
@@ -94,11 +105,11 @@ func (s *Service) summaryView(r *run) channel.CardSpec {
 	}
 	if inflight != nil && inflight.Command != "" {
 		lines = append(lines, "")
-		lines = append(lines, "stopped while: "+inflight.Command)
+		lines = append(lines, clipLine("stopped while: "+inflight.Command, maxSummaryLine))
 	}
 
 	return channel.CardSpec{
-		Title: workflow + " · " + string(PhaseStopped),
+		Title: workflow + " · " + string(r.currentPhase()),
 		Body:  strings.Join(lines, "\n"),
 	}
 }
@@ -244,16 +255,19 @@ func errorLines(history []wfe.ActionRecord) []string {
 }
 
 // errorLine renders one action that went wrong.
+//
+// The command and the summary are cut: a shell step reports a whole
+// build log as its summary, and a card that carries it is unreadable.
 func errorLine(rec wfe.ActionRecord) string {
 	out := rec.Outcome
-	line := fmt.Sprintf("%s — %s", rec.Command, out.Status)
+	line := fmt.Sprintf("%s — %s", clipLine(rec.Command, maxSummaryCommand), out.Status)
 	if out.Summary != "" {
-		line += ": " + out.Summary
+		line += ": " + clipLine(out.Summary, maxSummaryText)
 	}
 	if reason := out.Data["reason"]; reason != "" {
 		line += " (reason: " + reason + ")"
 	}
-	return line
+	return clipLine(line, maxSummaryLine)
 }
 
 // decisionLines renders the decisions the models made at the wake-ups.
@@ -269,11 +283,11 @@ func decisionLines(wakes []wakeRecord) []string {
 	lines := make([]string, 0, len(wakes)+1)
 	lines = append(lines, heading)
 	for _, rec := range wakes {
-		line := "· " + rec.Who + " — " + rec.What
+		line := "· " + rec.Who + " — " + clipLine(rec.What, maxSummaryCommand)
 		if rec.Why != "" {
-			line += " · because: " + rec.Why
+			line += " · because: " + clipLine(rec.Why, maxSummaryText)
 		}
-		lines = append(lines, line)
+		lines = append(lines, clipLine(line, maxSummaryLine))
 	}
 	return lines
 }
@@ -313,7 +327,7 @@ func renderArgs(raw json.RawMessage) string {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	tok, err := dec.Token()
 	if err != nil || tok != json.Delim('{') {
-		return clipValue(strings.TrimSpace(string(raw)))
+		return clipLine(strings.TrimSpace(string(raw)), maxSummaryValue)
 	}
 	parts := make([]string, 0, 4)
 	for dec.More() {
@@ -329,7 +343,7 @@ func renderArgs(raw json.RawMessage) string {
 		if err := dec.Decode(&value); err != nil {
 			break
 		}
-		parts = append(parts, key+"="+clipValue(argValue(value)))
+		parts = append(parts, key+"="+clipLine(argValue(value), maxSummaryValue))
 	}
 	return strings.Join(parts, ", ")
 }
@@ -341,15 +355,6 @@ func argValue(raw json.RawMessage) string {
 		return text
 	}
 	return strings.TrimSpace(string(raw))
-}
-
-// clipValue cuts a value short.
-func clipValue(text string) string {
-	runes := []rune(text)
-	if len(runes) <= maxSummaryValue {
-		return text
-	}
-	return string(runes[:maxSummaryValue-1]) + "…"
 }
 
 // compactDuration renders a duration in the short form: the seconds,

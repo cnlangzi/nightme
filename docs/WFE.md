@@ -873,7 +873,7 @@ decisions (last 10 of 23)
 · the chat model — run_step(step_id=review) · because: the plan is exhausted
 ```
 
-The facts come from the run's own record: no model is asked to write the summary. The `errors` are the actions whose outcome was `failed`, `incomplete`, `cancelled` or `timeout`, one per line and at most the last five of them; the `decisions` are the judgments the models made at the wake-ups, at most the last ten. The totals stay in the facts lines.
+The facts come from the run's own record: no model is asked to write the summary. The `errors` are the actions whose outcome was `failed`, `incomplete`, `cancelled` or `timeout`, one per line and at most the last five of them; the `decisions` are the judgments the models made at the wake-ups, at most the last ten. A row is cut short: a shell step reports a whole build log as its summary, and a card that carries it is unreadable. The totals stay in the facts lines.
 
 The wake log holds the model decisions only: the workflow's own fast path is not a decision a model made, so a run that goes through its workflow without asking a model holds no wake records at all. A decision model answer and a chat model turn are two records. The log is persisted with the rest of the run, so it survives a restart of the daemon.
 

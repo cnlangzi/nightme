@@ -67,8 +67,9 @@ func Decide(state *RunState, wf *Workflow) (Decision, error) {
 	}
 	prev, hasPrev := lastRun(state)
 	// A step that did not end ok is a judgment point: the plan cannot
-	// go on by itself.
-	blocked := hasPrev && prevBlocks(state, wf, prev)
+	// go on by itself. A round the agent ended early is not a
+	// judgment point: the agent has already decided.
+	blocked := hasPrev && prevBlocks(state, wf, prev) && !roundEnded(state, prev)
 
 	if len(ready) == 0 {
 		repeating := repeatingJobs(state, wf)
@@ -223,7 +224,86 @@ func startRound(state *RunState, wf *Workflow, name string) {
 		state.Rounds = map[string]int{}
 	}
 	state.Rounds[name]++
+	delete(state.EndedRounds, name)
 	clearJobSteps(state, wf, name)
+}
+
+// roundEnded reports whether the step is the one whose failure ended
+// the round of its job.
+//
+// The agent ended the round: the plan goes on with the final step of
+// the job or with the next round, not with a judgment point.
+func roundEnded(state *RunState, prev StepState) bool {
+	if prev.Job == "" || prev.ID == "" {
+		return false
+	}
+	ended, ok := state.EndedRounds[prev.Job]
+	if !ok {
+		return false
+	}
+	return ended.Round == state.RoundOf(prev.Job) && ended.Step == prev.ID
+}
+
+// EndRound ends the current round of a job early.
+//
+// It is what the agent does when there is nothing left to do in this
+// round: the steps of the round that did not run are recorded as
+// skipped — the final step of the job excepted, for it runs in their
+// place — and the round is marked as ended. The plan goes on with the
+// final step of the job, or with its next round when it has none.
+//
+// The engine owns the state: this is the only way a round ends early.
+func EndRound(state *RunState, wf *Workflow, job string) error {
+	if state == nil {
+		return errors.New("wfe: nil state")
+	}
+	if wf == nil {
+		return errors.New("wfe: nil workflow")
+	}
+	spec, ok := wf.Jobs[job]
+	if !ok {
+		return fmt.Errorf("wfe: no job %q", job)
+	}
+	for _, step := range spec.Steps {
+		if IsPending(state, step.ID) {
+			// A step of the round is still running: the round cannot
+			// end under a command that has not settled.
+			return fmt.Errorf("wfe: the step %q is still running", step.ID)
+		}
+	}
+	round := state.RoundOf(job)
+	for _, step := range spec.Steps {
+		if HasRun(state, step.ID) {
+			continue
+		}
+		if step.Final {
+			// The final step runs in place of the steps the round
+			// cut short.
+			continue
+		}
+		RecordStep(state, job, step, Outcome{
+			Status:  OutcomeNoop,
+			Summary: "the round was ended before this step ran",
+		}, true)
+	}
+	if state.EndedRounds == nil {
+		state.EndedRounds = map[string]EndedRound{}
+	}
+	state.EndedRounds[job] = EndedRound{Round: round, Step: lastRunStep(state, job)}
+	return nil
+}
+
+// lastRunStep returns the id of the last step that ran in the job,
+// or an empty string when the job ran nothing.
+func lastRunStep(state *RunState, job string) string {
+	for i := len(state.Steps) - 1; i >= 0; i-- {
+		st := state.Steps[i]
+		if st.Job != job || st.Skipped || st.Pending {
+			continue
+		}
+		return st.ID
+	}
+	return ""
 }
 
 // clearJobSteps drops the steps of a job from the run state.

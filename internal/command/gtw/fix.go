@@ -555,9 +555,10 @@ func runFixRemote(
 // Local mode does NOT call provider.GetIssue / AddIssueLabel /
 // QueueUserMessage — there is no issue to claim and no agent to
 // dispatch. It shares the remote mode's preconditions: the
-// refresh needs an `origin` remote, a clean primary checkout and
-// no unfinished rebase, so the local mode refuses to run without
-// them.
+// refresh runs in the primary checkout (not inside a linked
+// worktree), needs an `origin` remote, and refuses while the
+// primary checkout has uncommitted changes or an unfinished
+// rebase.
 //
 // F-XX: local mode has no yes/dispMode parameter — the
 // Assess / Execute split has no meaning without an agent

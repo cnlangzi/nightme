@@ -666,7 +666,7 @@ verify 后报告「no code change required」即可，不编辑代码。旧规�
 | `AddIssueLabel` | ✅ | ❌ |
 | Agent dispatch | ✅ Assess / Execute | ❌（never dispatch） |
 | Branch exists | ❌ 硬失败 | ❌ 硬失败 |
-| 默认分支 sync | ✅ | ✅（同样要求 `origin` remote + 主仓库工作区干净） |
+| 默认分支 sync | ✅ | ✅（同样要求在主仓库执行、`origin` remote、主仓库工作区干净） |
 
 F-59 的 `rollbackLabelStep`、label bootstrap 顺序 **不变**；仅 dispatch 文案与 branch 策略变更。详见 [`F-59-gtw-label-bootstrap.md`](./F-59-gtw-label-bootstrap.md) §2.3（步骤 10 改为「按 mode dispatch Assess 或 Execute」）。
 

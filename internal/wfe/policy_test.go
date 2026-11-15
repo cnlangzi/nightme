@@ -80,21 +80,22 @@ func TestPolicy_CheckRun(t *testing.T) {
 			wantErr: "is not allowed",
 		},
 		{
-			name:    "step limit reached",
+			name:    "the budget of the step is spent",
 			command: "/review",
 			history: reviews,
 			wantErr: "limit is 5",
 		},
 		{
-			name:    "a step without a limit of its own takes any number of attempts",
+			name:    "another step spends its own budget",
 			command: "/gtw push",
-			history: manyPushes(20),
+			history: manyPushes(3),
 			wantIdx: 4,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			pol := NewPolicy(bound, tt.history)
+			pol.Budget = 5
 			idx, err := pol.CheckRun(tt.command)
 			if tt.wantErr != "" {
 				if err == nil {
@@ -199,7 +200,7 @@ jobs:
 }
 
 // TestPolicy_CommandCountsAgainstTheStepButNotTheVerdict — a
-// command of the registry takes an attempt of the step, but the
+// command of the registry takes a chance of the step, but the
 // step's own verdict is the one the plan reads.
 func TestPolicy_CommandCountsAgainstTheStepButNotTheVerdict(t *testing.T) {
 	wf := mustParse(t, `
@@ -209,15 +210,15 @@ jobs:
     steps:
       - id: one
         message: /gtw commit
-        attempts: 2
 `)
 	pol := NewPolicy(wf, []ActionRecord{
 		{Kind: ActionKindRun, Command: "/gtw commit", StepID: "one", Outcome: Outcome{Status: OutcomeFailed}},
 	})
 	pol.Commands = []string{"gtw"}
+	pol.Budget = 2
 
 	if rem := pol.Remaining(); rem.Steps[0] != 1 {
-		t.Errorf("Steps[0] = %d, want 1 (the command took an attempt)", rem.Steps[0])
+		t.Errorf("Steps[0] = %d, want 1 (the command took a chance)", rem.Steps[0])
 	}
 
 	// The step failed: a command that succeeded does not turn the run
@@ -232,7 +233,7 @@ jobs:
 		t.Errorf("expected must-be-ok error, got %v", err)
 	}
 
-	// The attempts are spent: the step refuses another action.
+	// The budget is spent: the step refuses another action.
 	if _, err := pol.CheckRun("/gtw sync"); err == nil || !strings.Contains(err.Error(), "limit is 2") {
 		t.Errorf("expected step-limit error, got %v", err)
 	}
@@ -387,6 +388,7 @@ func TestPolicy_Remaining(t *testing.T) {
 		{Kind: ActionKindRun, Command: "/review", StepID: "review"},
 		{Kind: ActionKindInstruct, Command: "keep going"},
 	})
+	pol.Budget = 5
 	rem := pol.Remaining()
 	if len(rem.Steps) != 5 {
 		t.Fatalf("Steps = %d, want 5", len(rem.Steps))
@@ -394,8 +396,19 @@ func TestPolicy_Remaining(t *testing.T) {
 	if rem.Steps[2] != 4 {
 		t.Errorf("Steps[2] = %d, want 4", rem.Steps[2])
 	}
-	if rem.Steps[0] != 3 {
-		t.Errorf("Steps[0] = %d, want 3 (the step's own limit)", rem.Steps[0])
+	if rem.Steps[0] != 5 {
+		t.Errorf("Steps[0] = %d, want 5 (the step spent nothing)", rem.Steps[0])
+	}
+}
+
+// TestPolicy_RemainingWithoutABudget — a policy without a budget has
+// no limit at all.
+func TestPolicy_RemainingWithoutABudget(t *testing.T) {
+	pol := NewPolicy(boundFixIssue(t), nil)
+	for i, left := range pol.Remaining().Steps {
+		if left != -1 {
+			t.Errorf("Steps[%d] = %d, want -1 (no budget)", i, left)
+		}
 	}
 }
 
@@ -407,13 +420,13 @@ jobs:
     steps:
       - id: one
         message: echo
-        attempts: 1
       - id: two
         message: other
 `)
 	pol := NewPolicy(wf, []ActionRecord{
 		{Kind: ActionKindRun, Command: "echo", StepID: "one"},
 	})
+	pol.Budget = 1
 
 	if _, err := pol.CheckRun("echo"); err == nil || !strings.Contains(err.Error(), "limit is 1") {
 		t.Errorf("expected step-limit error, got %v", err)
@@ -435,28 +448,30 @@ jobs:
     steps:
       - id: one
         message: echo hi
-        attempts: 1
 `)
 	pol := NewPolicy(wf, []ActionRecord{
 		{Kind: ActionKindInstruct, Command: "keep going", Outcome: Outcome{Status: OutcomeOK}},
 	})
+	pol.Budget = 1
 
 	if err := pol.CheckFinish("done"); err == nil || !strings.Contains(err.Error(), "has not run yet") {
 		t.Errorf("expected has-not-run-yet error, got %v", err)
 	}
 	if rem := pol.Remaining(); rem.Steps[0] != 1 {
-		t.Errorf("Steps[0] = %d, want 1 (the instruction took no step budget)", rem.Steps[0])
+		t.Errorf("Steps[0] = %d, want 1 (the instruction took no chance)", rem.Steps[0])
 	}
 }
 
 func TestPolicy_Render(t *testing.T) {
-	out := NewPolicy(boundFixIssue(t), nil).Render()
+	pol := NewPolicy(boundFixIssue(t), nil)
+	pol.Budget = 5
+	out := pol.Render()
 	for _, want := range []string{
 		"workflow: fix-issue",
 		"title: 把队列里的一个 issue 做完并推上去",
+		"budget: 5 chances per step in this round",
 		"1. /gtw fix 42 -y",
 		"3. /review",
-		"limit: 5 attempts in this round",
 		"5. /gtw push",
 	} {
 		if !strings.Contains(out, want) {
@@ -487,6 +502,7 @@ jobs:
 func TestPolicy_CheckStep(t *testing.T) {
 	bound := boundFixIssue(t)
 	pol := NewPolicy(bound, nil)
+	pol.Budget = 5
 	if err := pol.CheckStep(0); err != nil {
 		t.Fatalf("CheckStep: %v", err)
 	}
@@ -495,7 +511,66 @@ func TestPolicy_CheckStep(t *testing.T) {
 		reviews[i] = ActionRecord{Kind: ActionKindRun, Command: "/review", StepID: "review"}
 	}
 	pol = NewPolicy(bound, reviews)
+	pol.Budget = 5
 	if err := pol.CheckStep(2); err == nil || !strings.Contains(err.Error(), "limit is 5") {
 		t.Errorf("expected step-limit error, got %v", err)
+	}
+}
+
+// TestPolicy_AStallCountsAgainstTheStep — a turn of the chat model
+// that produced no tool call costs a chance of the step the judgment
+// was about.
+func TestPolicy_AStallCountsAgainstTheStep(t *testing.T) {
+	wf := mustParse(t, `
+title: x
+jobs:
+  main:
+    steps:
+      - id: one
+        message: echo
+`)
+	pol := NewPolicy(wf, nil)
+	pol.Budget = 3
+	pol.Record(ActionRecord{Kind: ActionKindStall, StepID: "one"})
+	pol.Record(ActionRecord{Kind: ActionKindStall, StepID: "one"})
+
+	if rem := pol.Remaining(); rem.Steps[0] != 1 {
+		t.Errorf("Steps[0] = %d, want 1 (the stalls took two chances)", rem.Steps[0])
+	}
+	if pol.ConsecutiveStalls() != 2 {
+		t.Errorf("ConsecutiveStalls() = %d, want 2", pol.ConsecutiveStalls())
+	}
+	pol.Record(ActionRecord{Kind: ActionKindRun, StepID: "one"})
+	if pol.ConsecutiveStalls() != 0 {
+		t.Errorf("ConsecutiveStalls() = %d, want 0 (the agent acted)", pol.ConsecutiveStalls())
+	}
+}
+
+// TestPolicy_AResetStartsTheBudgetOver — the operator took the chat
+// back: the step gets a fresh budget.
+func TestPolicy_AResetStartsTheBudgetOver(t *testing.T) {
+	wf := mustParse(t, `
+title: x
+jobs:
+  main:
+    steps:
+      - id: one
+        message: echo
+`)
+	pol := NewPolicy(wf, []ActionRecord{
+		{Kind: ActionKindRun, StepID: "one"},
+		{Kind: ActionKindStall, StepID: "one"},
+	})
+	pol.Budget = 2
+	if rem := pol.Remaining(); rem.Steps[0] != 0 {
+		t.Fatalf("Steps[0] = %d, want 0 (the budget is spent)", rem.Steps[0])
+	}
+
+	pol.Record(ActionRecord{Kind: ActionKindReset, StepID: "one"})
+	if rem := pol.Remaining(); rem.Steps[0] != 2 {
+		t.Errorf("Steps[0] = %d, want 2 (the budget starts over)", rem.Steps[0])
+	}
+	if pol.ConsecutiveStalls() != 0 {
+		t.Errorf("ConsecutiveStalls() = %d, want 0", pol.ConsecutiveStalls())
 	}
 }

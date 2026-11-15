@@ -103,6 +103,15 @@ type repoFacts struct {
 // branch, the tracking ref and the ahead/behind counts, and the base
 // branch is the remote's default branch.
 func (s *Service) repoFacts(ctx context.Context, dir string) (repoFacts, error) {
+	return s.repoFactsWithBase(ctx, dir, s.baseBranch(ctx, dir))
+}
+
+// repoFactsWithBase reads the repository facts of a workspace, with
+// the base branch the caller resolved.
+//
+// The base branch is a parameter because resolving it may reach the
+// remote: the caller decides how often that happens.
+func (s *Service) repoFactsWithBase(ctx context.Context, dir, base string) (repoFacts, error) {
 	// `--no-optional-locks` skips git's optional index refresh: the
 	// status only reads the working tree, and a refresh would take
 	// the index lock.
@@ -113,7 +122,6 @@ func (s *Service) repoFacts(ctx context.Context, dir string) (repoFacts, error) 
 	}
 	facts := parsePorcelainStatus(out)
 
-	base := s.baseBranch(ctx, dir)
 	if base != "" {
 		facts.Base = base
 		if ahead, behind, ok := s.countDivergence(ctx, dir, base); ok {

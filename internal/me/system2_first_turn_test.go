@@ -19,6 +19,7 @@ func TestTheFirstTurnOfTheChatModelHasAUserMessage(t *testing.T) {
 
 	provider := &scriptedProvider{responses: []llm.Response{
 		{Message: toolCallMsg("c1", toolFinish, map[string]any{"status": "done", "summary": "done"})},
+		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "failed", "summary": "the step did not work"})},
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider})
 	op.steps = []fakeStep{{outcome: messages.Outcome{

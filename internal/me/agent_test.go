@@ -409,9 +409,11 @@ func (f *fakeOperator) Has(text string) bool {
 }
 
 // isControlText reports whether the text is something the run says
-// outside a workflow step: a question or the /stop.
+// outside a workflow step: a question, the /stop or the pause.
 func isControlText(text string) bool {
-	return strings.HasPrefix(text, "❓") || strings.HasPrefix(text, "/stop")
+	return strings.HasPrefix(text, "❓") ||
+		strings.HasPrefix(text, "/stop") ||
+		strings.HasPrefix(text, pauseMark)
 }
 
 // recordingLogger keeps the messages the service logged.
@@ -611,7 +613,6 @@ jobs:
       - id: review
         message: /review
         note: If it fails or does not finish, continue with /review -c.
-        attempts: 5
       - id: push
         message: /gtw push
       - id: pr
@@ -644,6 +645,11 @@ func testService(t *testing.T, dir string, cfg Config) (*Service, *fakeOperator)
 	cfg.WorkflowsDir = dir
 	cfg.StateDir = filepath.Join(dir, "runs")
 	cfg.Operator = op
+	if cfg.Sleep == nil {
+		// The backoff between two attempts of the chat model is real
+		// time; a test does not wait for it.
+		cfg.Sleep = func(context.Context, time.Duration) error { return nil }
+	}
 	svc := New(cfg)
 	t.Cleanup(func() { _ = svc.Shutdown(context.Background()) })
 	if err := svc.Start(context.Background()); err != nil {
@@ -693,16 +699,31 @@ func decisionResp(model, next string, confidence, needsHuman float64) llm.Decisi
 }
 
 // waitRun waits until the run of a chat is over.
+//
+// A run that is over has left the chat, and its goroutine may still
+// be unwinding — posting the summary of the session, closing the
+// session that thinks for the owner. The wait is for the goroutine,
+// not for the chat.
 func waitRun(t *testing.T, svc *Service, chatID string) {
 	t.Helper()
 	svc.mu.Lock()
 	r := svc.active[chatID]
 	svc.mu.Unlock()
-	if r == nil {
+	if r != nil {
+		select {
+		case <-r.done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the run did not finish")
+		}
 		return
 	}
+	done := make(chan struct{})
+	go func() {
+		svc.wg.Wait()
+		close(done)
+	}()
 	select {
-	case <-r.done:
+	case <-done:
 	case <-time.After(10 * time.Second):
 		t.Fatal("the run did not finish")
 	}
@@ -762,7 +783,10 @@ func TestStartWorkflow_RefusesASecondRunInTheSameChat(t *testing.T) {
 
 	provider := &scriptedProvider{err: errors.New("the chat model must not be called")}
 	decider := &scriptedDecider{err: errors.New("the decision model must not be called")}
-	svc, _ := testService(t, dir, Config{Provider: provider, Decider: decider})
+	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
+	// The run keeps working: a run that is over would free the chat
+	// for a second one, and the test would prove nothing.
+	op.steps = []fakeStep{{open: true}}
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
@@ -1043,7 +1067,6 @@ jobs:
     steps:
       - id: review
         message: /review
-        attempts: 5
       - id: push
         message: /gtw push
 `)
@@ -1097,7 +1120,6 @@ jobs:
     steps:
       - id: review
         message: /review
-        attempts: 5
       - id: push
         message: /gtw push
 `)
@@ -1141,7 +1163,6 @@ jobs:
     steps:
       - id: review
         message: /review
-        attempts: 5
       - id: push
         message: /gtw push
 `)

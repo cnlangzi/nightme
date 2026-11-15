@@ -11,6 +11,44 @@ is committed there is the version users build and run.
 
 ## [Unreleased] — current dev (locked 2026-08-02)
 
+### Breaking: the workflow step's `attempts:` is retired
+
+`attempts:` was the agent's counter for one step in one round. The agent
+now has one budget for every step and every round, set by `me.max_judgments`
+(50 by default).
+
+A chance is the step's own execution, a nightme command or an instruction
+issued for it, or a turn of the chat model that produced no tool call. When the budget of the
+step the run is on is spent, the run pauses and says so in the chat:
+`/me continue` hands the control back and the step's budget starts over.
+
+Workflow files that still carry `attempts:` are refused with a message that
+names the key and the line. The budget is one number for every step and
+every round, set by `me.max_judgments`.
+
+### Fixed: a failed step no longer ends the run
+
+A turn of the chat model that produced no tool call ended the run: the
+second prose answer failed a run that had been working for hours. A failing
+provider call ended it as well, and the LLM client's own ten-minute timeout
+made a hung provider look like a frozen run.
+
+Neither ends a run any more. The words of a prose-only turn stay in the
+conversation, the turn costs one chance of the step, and the run asks the
+agent again with a fresh situation report.
+
+A provider that failed or that never answered costs the same one chance. The
+run waits before it asks again: the first failure waits 30 seconds, and every
+further failure waits twice as long, up to five minutes. One turn of the chat
+model lasts at most five minutes, so a provider that never answers does not
+hold the run.
+
+The situation report now carries the state of the repository, the note of
+the failing step, the commands the policy accepts, the chances left, the
+turns the agent spent without acting and the directives it may take. The
+run card carries the waiting line, the chances left and the reason a paused
+run is paused.
+
 ### Breaking: the workflow step's `allow:` list is retired
 
 `allow:` listed the extra commands the agent could run inside a step.
@@ -19,9 +57,10 @@ restricted nothing: every registered nightme command is a tool the agent
 may call.
 
 A step's verdict now comes from the step's own execution only. A repair —
-a registered command the agent issues at a judgment point — is recorded
-against the step the run is on and counts against that step's `attempts`,
-but it no longer turns a failed step into a finished one.
+a registered command the agent issues at a judgment point — is accepted
+without belonging to a step: it is recorded against the step the run is on
+and counts against that step's budget, but it no longer turns a failed step
+into a finished one.
 
 The decision model now picks among the steps' `message:` values. The
 repairs belong to the chat model, which holds every nightme command as a

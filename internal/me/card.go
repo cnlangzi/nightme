@@ -185,6 +185,7 @@ func (s *Service) cardView(r *run, it iteration) channel.CardSpec {
 	for _, st := range r.state.Steps {
 		states[st.ID] = st
 	}
+	remaining := r.policy.Remaining()
 	workflow := r.workflow.Name
 	phase := r.phase
 	inflight := r.inflight
@@ -215,7 +216,11 @@ func (s *Service) cardView(r *run, it iteration) channel.CardSpec {
 		lines = append(lines, "args: "+args)
 	}
 	for i, step := range steps {
-		lines = append(lines, fmt.Sprintf("%d. %s %s", i+1, stepIcon(states[step.ID]), stepLabel(step)))
+		line := fmt.Sprintf("%d. %s %s", i+1, stepIcon(states[step.ID]), stepLabel(step))
+		if i < len(remaining.Steps) && remaining.Steps[i] >= 0 {
+			line += fmt.Sprintf(" (%d chances left)", remaining.Steps[i])
+		}
+		lines = append(lines, line)
 	}
 
 	fields := make([]string, 0, 6)

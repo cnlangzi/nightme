@@ -31,7 +31,6 @@ jobs:
           key: value
         continue-on-error: true
         note: the commit comes first
-        attempts: 3
 `)
 	svc, _ := testService(t, dir, Config{})
 	r := testRun(t, svc, "one")
@@ -42,7 +41,6 @@ jobs:
 		"job main — runs once",
 		"commit (message): /gtw commit",
 		"note: the commit comes first",
-		"limit: 3 attempts in this round",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("the workflow does not carry %q:\n%s", want, out)
@@ -133,7 +131,7 @@ jobs:
 	r.record(wfe.ActionKindRun, "/gtw commit", "commit", out)
 	r.setTranscript("/gtw commit", "the coding agent said hello")
 
-	report := svc.renderSituation(r)
+	report := svc.renderSituation(context.Background(), r)
 	for _, want := range []string{
 		"The run needs you: step commit ended as incomplete.",
 		"args: id=42",
@@ -202,7 +200,7 @@ jobs:
 	})
 	r.setTranscript("/gtw commit", "nothing to commit")
 
-	report := svc.renderSituation(r)
+	report := svc.renderSituation(context.Background(), r)
 	for _, want := range []string{
 		"fix: ok",
 		"the worktree for branch feat/x is ready",
@@ -622,7 +620,7 @@ func TestARunKeepsItsEvidence(t *testing.T) {
 			{Command: "/gtw commit", Text: "nothing to commit"},
 		},
 	})
-	report := svc.renderSituation(restored)
+	report := svc.renderSituation(context.Background(), restored)
 	for _, want := range []string{
 		"--- /gtw fix ---",
 		"the agent said it could not find the file",
@@ -659,7 +657,7 @@ jobs:
 		Data:    map[string]string{"reason": "nothing_to_push"},
 	})
 
-	report := svc.renderSituation(r)
+	report := svc.renderSituation(context.Background(), r)
 	for _, want := range []string{
 		"the branch has nothing to push",
 		"reason: nothing_to_push",

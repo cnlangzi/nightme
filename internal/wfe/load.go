@@ -211,7 +211,7 @@ var (
 	workflowKeys = keySet("title", "args", "instruct", "workspaces", "on", "jobs")
 	argKeys      = keySet("name", "default")
 	jobKeys      = keySet("needs", "if", "iterations", "steps")
-	stepKeys     = keySet("id", "if", "env", "continue-on-error", "note", "attempts", "final", "message", "shell", "use", "with", "wait")
+	stepKeys     = keySet("id", "if", "env", "continue-on-error", "note", "final", "message", "shell", "use", "with", "wait")
 	triggerKeys  = keySet("schedule", "pull_request", "branch", "issue", "mention")
 )
 
@@ -399,14 +399,11 @@ func checkSteps(job string, node *yaml.Node) error {
 				return fmt.Errorf("`agent:` is retired (line %d): a run uses the agent of the chat that started it", e.line)
 			case "allow":
 				return fmt.Errorf("`allow:` is retired (line %d): the agent may run any nightme command; a fix does not move the plan on — put the command in its own step if it is part of the work", e.line)
+			case "attempts":
+				return fmt.Errorf("`attempts:` is retired (line %d): the agent's budget for a step is one number now — the same for every step and every round", e.line)
 			}
 			if !stepKeys[e.key] {
 				return fmt.Errorf("unknown key %q in a step of job %q (line %d)", e.key, job, e.line)
-			}
-			if e.key == "attempts" {
-				if err := requireWholeNumber(e.key, e.val); err != nil {
-					return fmt.Errorf("job %q: %w", job, err)
-				}
 			}
 		}
 	}
@@ -514,9 +511,6 @@ func validateStep(s *Step) error {
 	}
 	if n != 1 {
 		return fmt.Errorf("exactly one of message / shell / use / wait must be set (got %d)", n)
-	}
-	if s.Attempts < 0 {
-		return fmt.Errorf("attempts must be >= 0")
 	}
 	if s.Wait != "" {
 		if _, err := time.ParseDuration(s.Wait); err != nil {

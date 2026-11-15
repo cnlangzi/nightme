@@ -59,6 +59,14 @@ const (
 	// must reach before it is acted on without the chat model.
 	DefaultMinConfidence = 0.8
 
+	// DefaultMaxJudgments is the number of chances the agent has at
+	// one step in one round.
+	//
+	// A chance is the step's own execution, a nightme command issued
+	// for it, or a turn the agent produced no tool call in. One
+	// number bounds both what the agent spends and what it causes.
+	DefaultMaxJudgments = 50
+
 	// The run has no budget of its own.
 	//
 	// Every command the run issues carries one: the agent behind it
@@ -269,6 +277,14 @@ type Config struct {
 	// MinConfidence is the confidence a System 1 decision must reach
 	// before it is acted on. Zero means DefaultMinConfidence.
 	MinConfidence float64
+	// MaxJudgments is the number of chances the agent has at one step
+	// in one round. Zero means DefaultMaxJudgments.
+	MaxJudgments int
+	// Sleep waits for a duration.
+	//
+	// The backoff between two attempts of the chat model uses it: the
+	// run waits before it asks again. Nil means the real clock.
+	Sleep func(ctx context.Context, d time.Duration) error
 	// Agent is the name of the agent that thinks for the owner. It
 	// wins over the agent of the chat that started the run. Empty
 	// means the chat's agent is used, and a run without one has no
@@ -330,6 +346,12 @@ func New(cfg Config) *Service {
 	if cfg.MinConfidence <= 0 {
 		cfg.MinConfidence = DefaultMinConfidence
 	}
+	if cfg.MaxJudgments <= 0 {
+		cfg.MaxJudgments = DefaultMaxJudgments
+	}
+	if cfg.Sleep == nil {
+		cfg.Sleep = sleepContext
+	}
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.Default()
@@ -341,6 +363,21 @@ func New(cfg Config) *Service {
 		runs:    map[string]*run{},
 		active:  map[string]*run{},
 		actions: NewActionRegistry(),
+	}
+}
+
+// sleepContext waits for a duration, unless the context ends first.
+func sleepContext(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -639,6 +676,9 @@ func (s *Service) Continue(ctx context.Context, chatID, note string) error {
 	if err := r.handBack(note); err != nil {
 		return err
 	}
+	// The reset of the step's budget is part of the run's state: a
+	// daemon that goes away now comes back with it.
+	s.persist(r)
 	s.updateCard(r)
 	return nil
 }

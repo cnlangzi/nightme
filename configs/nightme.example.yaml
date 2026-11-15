@@ -133,3 +133,8 @@ me:
   #   min_confidence: 0.8
   # For protocol: systemone the base is https://api.typesafe.ai and the
   # model is jev-latest.
+  # The chances the agent has at one step in one round: the step's own
+  # execution, a nightme command or an instruction issued for it and a
+  # turn of the chat model that produced no tool call each cost one.
+  # Unset means 50.
+  # max_judgments: 50

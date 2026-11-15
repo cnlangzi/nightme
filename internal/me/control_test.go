@@ -3,7 +3,6 @@ package me
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -1007,7 +1006,10 @@ func TestTheErrorHasItsOwnLine(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
-	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{err: errors.New("the chat model is broken")}})
+	provider := &scriptedProvider{responses: []llm.Response{
+		{Message: toolCallMsg("c1", toolFinish, map[string]any{"status": "failed", "summary": "the step did not work"})},
+	}}
+	svc, op := testService(t, dir, Config{Provider: provider})
 	op.steps = []fakeStep{{outcome: messages.Outcome{
 		Status:  messages.OutcomeFailed,
 		Summary: "the command failed",

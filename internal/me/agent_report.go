@@ -1,6 +1,7 @@
 package me
 
 import (
+	"context"
 	"fmt"
 	"maps"
 	"regexp"
@@ -34,9 +35,6 @@ func (s *Service) renderWorkflow(r *run) string {
 			fmt.Fprintf(&b, "  %s (%s): %s\n", step.ID, stepKind(step), s.evalText(r, stepText(step)))
 			if note := strings.TrimSpace(step.Note); note != "" {
 				fmt.Fprintf(&b, "    note: %s\n", note)
-			}
-			if step.Attempts > 0 {
-				fmt.Fprintf(&b, "    limit: %d attempts in this round\n", step.Attempts)
 			}
 			if step.Final {
 				b.WriteString("    final: it runs when the round ends, however the round ends\n")
@@ -92,9 +90,10 @@ func stepText(step wfe.Step) string {
 // model.
 //
 // It is the report the model reads when it is called: the reason, the
-// facts of the round, what every step of the round produced and what
-// the agents behind the last two actions said about it.
-func (s *Service) renderSituation(r *run) string {
+// facts of the round, what every step of the round produced, what the
+// agents behind the last two actions said about it, the state of the
+// repository and what the model may do now.
+func (s *Service) renderSituation(ctx context.Context, r *run) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "The run needs you: %s.\n", s.situationReason(r))
 
@@ -108,16 +107,25 @@ func (s *Service) renderSituation(r *run) string {
 	if cwd := s.workDir(r); cwd != "" {
 		fmt.Fprintf(&b, "directory: %s\n", cwd)
 	}
+	if facts := s.renderRepository(ctx, r); facts != "" {
+		b.WriteString(facts)
+	}
 
 	steps, rendered := s.renderRoundSteps(r)
 	if steps != "" {
 		b.WriteString(steps)
 	}
+	if repair := s.renderRepair(r); repair != "" {
+		b.WriteString(repair)
+	}
+	if directives := s.renderDirectives(r); directives != "" {
+		b.WriteString(directives)
+	}
 
 	// The last action's outcome: the step list above carries it when
 	// the action was a step's own run. A repair the run issued leaves
 	// its verdict on no step, so it is rendered here.
-	if action, ok := r.lastAction(); ok && !carriesOutcome(rendered, action) {
+	if action, ok := r.lastVerdict(); ok && !carriesOutcome(rendered, action) {
 		out := action.Outcome
 		fmt.Fprintf(&b, "\nlast outcome:\n  status: %s\n  summary: %s\n", out.Status, out.Summary)
 		for _, k := range sortedNames(out.Data) {
@@ -134,6 +142,87 @@ func (s *Service) renderSituation(r *run) string {
 			b.WriteString(tailText(t.Text, transcriptBytes))
 			b.WriteString("\n")
 		}
+	}
+	return b.String()
+}
+
+// renderRepository renders the state of the repository the run works
+// in.
+//
+// The facts are the run's own: the agent should not spend a tool call
+// on what the run already knows.
+func (s *Service) renderRepository(ctx context.Context, r *run) string {
+	if s.cfg.Git == nil {
+		return ""
+	}
+	dir := s.workDir(r)
+	if dir == "" {
+		return ""
+	}
+	facts, err := s.repoFactsWithBase(ctx, dir, r.baseBranchOf(ctx, s, dir))
+	if err != nil {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("repository:\n")
+	if facts.Branch != "" {
+		fmt.Fprintf(&b, "  branch: %s\n", facts.Branch)
+	}
+	fmt.Fprintf(&b, "  dirty: %t\n", facts.Dirty)
+	if facts.Base != "" {
+		fmt.Fprintf(&b, "  base: %s\n", facts.Base)
+		fmt.Fprintf(&b, "  ahead of base: %d\n", facts.AheadOfBase)
+		fmt.Fprintf(&b, "  behind base: %d\n", facts.BehindBase)
+	}
+	return b.String()
+}
+
+// renderRepair renders what the model has to repair and what it has
+// left to do it with.
+//
+// The step the judgment is about, its note, the commands the policy
+// accepts now, the chances left for it and the turns the agent spent
+// without acting.
+func (s *Service) renderRepair(r *run) string {
+	stepID := r.budgetStep()
+	if stepID == "" {
+		return ""
+	}
+	step, ok := r.stepByID(stepID)
+	if !ok {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\nrepair:\n")
+	fmt.Fprintf(&b, "  step: %s\n", step.ID)
+	if note := strings.TrimSpace(step.Note); note != "" {
+		fmt.Fprintf(&b, "  note: %s\n", note)
+	}
+	if left, limit := r.stepUsage(step.ID); limit > 0 {
+		fmt.Fprintf(&b, "  chances left: %d of %d\n", limit-left, limit)
+	}
+	fmt.Fprintf(&b, "  turns without an action: %d\n", r.consecutiveStalls())
+	if cmds := r.stepCommands(); len(cmds) > 0 {
+		fmt.Fprintf(&b, "  step commands now: %s\n", strings.Join(cmds, ", "))
+	}
+	return b.String()
+}
+
+// renderDirectives renders the directives the model may take now.
+//
+// The list is the whole catalogue of the run: a report that named
+// only some of the tools would read as the set of permitted moves.
+func (s *Service) renderDirectives(r *run) string {
+	var b strings.Builder
+	b.WriteString("\ndirectives now:\n")
+	for _, id := range r.readyStepIDs() {
+		fmt.Fprintf(&b, "  run_step(%q)\n", id)
+	}
+	for _, tool := range s.toolCatalogue(r) {
+		if tool.Name == toolRunStep {
+			continue
+		}
+		fmt.Fprintf(&b, "  %s\n", tool.Name)
 	}
 	return b.String()
 }
@@ -174,7 +263,7 @@ func (s *Service) renderRoundSteps(r *run) (string, map[string]wfe.StepState) {
 			rendered[step.ID] = st
 			fmt.Fprintf(&b, "  %s: %s", step.ID, stepStateText(st))
 			if idx := r.stepIndex(step.ID); idx >= 0 && idx < len(remaining.Steps) && remaining.Steps[idx] >= 0 {
-				fmt.Fprintf(&b, " (%d attempts left)", remaining.Steps[idx])
+				fmt.Fprintf(&b, " (%d chances left)", remaining.Steps[idx])
 			}
 			if ready[step.ID] {
 				b.WriteString(" — ready")
@@ -257,9 +346,9 @@ func (s *Service) situationReason(r *run) string {
 	case stillRunningReason.MatchString(reason):
 		m := stillRunningReason.FindStringSubmatch(reason)
 		return fmt.Sprintf("step %s is still running", m[1])
-	case attemptsReason.MatchString(reason):
-		m := attemptsReason.FindStringSubmatch(reason)
-		return fmt.Sprintf("step %s used up its attempts", m[1])
+	case budgetReason.MatchString(reason):
+		m := budgetReason.FindStringSubmatch(reason)
+		return fmt.Sprintf("step %s used up its budget", m[1])
 	case jobsReason.MatchString(reason):
 		m := jobsReason.FindStringSubmatch(reason)
 		return fmt.Sprintf("%s jobs are ready to start another round", m[1])
@@ -275,7 +364,7 @@ var (
 	lastStepReason     = regexp.MustCompile(`^the plan is exhausted and the last step "([^"]+)" ended as "([^"]+)"$`)
 	readyStepsReason   = regexp.MustCompile(`^(\d+) steps are ready`)
 	stillRunningReason = regexp.MustCompile(`^the step "([^"]+)" is still running$`)
-	attemptsReason     = regexp.MustCompile(`^the step "([^"]+)" already ran \d+ times, its limit is \d+$`)
+	budgetReason       = regexp.MustCompile(`^the step "([^"]+)" already ran \d+ times, its limit is \d+$`)
 	jobsReason         = regexp.MustCompile(`^(\d+) jobs are ready to start another round$`)
 )
 

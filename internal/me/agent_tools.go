@@ -508,7 +508,9 @@ func (s *Service) toolInstruct(ctx context.Context, r *run, call pendingCall) (s
 		return stepResult{}, err
 	}
 	if res.Status != statusWaiting {
-		r.record(wfe.ActionKindInstruct, text, "", wfe.Outcome{
+		// The instruction is a repair: it is work the agent causes, so
+		// it costs a chance of the step the run is on.
+		r.record(wfe.ActionKindInstruct, text, r.budgetStep(), wfe.Outcome{
 			Status:  outcomeStatus(res.Status),
 			Summary: res.Summary,
 			Data:    res.Data,

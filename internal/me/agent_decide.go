@@ -187,10 +187,10 @@ func (s *Service) decisionState(r *run) string {
 	b.WriteString(r.renderPolicy())
 	for i, n := range remaining.Steps {
 		if n < 0 {
-			fmt.Fprintf(&b, "remaining actions for step %d: no limit of its own\n", i+1)
+			fmt.Fprintf(&b, "remaining chances for step %d: the policy has no budget\n", i+1)
 			continue
 		}
-		fmt.Fprintf(&b, "remaining actions for step %d: %d\n", i+1, n)
+		fmt.Fprintf(&b, "remaining chances for step %d: %d\n", i+1, n)
 	}
 	if reason := r.judgmentReason(); reason != "" {
 		fmt.Fprintf(&b, "the workflow cannot decide: %s\n", reason)

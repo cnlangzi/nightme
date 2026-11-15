@@ -531,14 +531,12 @@ jobs:
       - id: fix
         message: "/gtw fix ${{ args.issue }} -y"
         note: 从 nightme/assigned 队列里挑一个；挑不到就等下一轮
-        attempts: 3
       - id: commit
         message: "/gtw commit"
         if: ${{ steps.fix.outputs.data.issue }}
       - id: review
         message: "/review"
         note: 没跑完就 /review -c；有改动就先 /gtw commit
-        attempts: 5
         if: ${{ steps.fix.outputs.data.issue }}
       - id: commit2
         message: "/gtw commit"
@@ -599,8 +597,11 @@ A step carries exactly one kind:
 | `env` | The environment the step's command gets. |
 | `continue-on-error` | Whether the chain continues when the step fails. |
 | `note` | Why the step is there, and which fixes the owner uses for it. It is the description the decision model reads. |
-| `attempts` | The number of actions the agent may take on the step in one round — the step's own execution and the nightme commands issued for it. Leave the key out for no limit of its own. |
 | `final` | The step cleans up after the round: it runs when the round ends, however the round ends. A step marked `final: true` runs in the place of the steps a round that ended early cut short. |
+
+`attempts:` is retired: a file that still carries it does not load. The budget
+of the agent is one number for every step and every round, set by
+`me.max_judgments`.
 
 The expressions are `${{ args.NAME }}`, `${{ steps.<id>.outputs.status }}`,
 `${{ steps.<id>.outputs.data.<key> }}`, `${{ needs.<job>.* }}`, `${{ env.NAME }}`
@@ -630,6 +631,7 @@ me:
     model: typesafe/jev-1.14
     api_key_env: OPENROUTER_API_KEY # the name of a variable that holds the key
     min_confidence: 0.8           # below this the agent escalates
+  max_judgments: 50              # the chances the agent has at one step in one round
 ```
 
 `provider` is what selects the chat provider and `protocol` the decision protocol: a
@@ -740,12 +742,20 @@ The workflow says what comes next, so most steps need no model at all.
   answer. The agent decides there — it picks the next node, repairs the current
   one, or ends the run.
 - A job whose round is over starts its next round instead of ending the run:
-  the round's step outputs are cleared and the per-step `attempts` budgets
-  start over.
+  the round's step outputs are cleared and the per-step budgets start over.
 
-A run has no global action budget and no cap on the number of model turns: it
-ends when the plan is exhausted and the agent finishes it, when you send
-`/me stop`, or when the daemon shuts down.
+The agent has a budget at every step: one number, the same for every step and
+every round, set by `me.max_judgments` (50 by default). A chance is the step's
+own execution, a nightme command or an instruction issued for it, or a turn of
+the chat model that produced no tool call. When the budget of the step the run is on is
+spent, the run pauses and says so in the chat; `/me continue` hands the
+control back and the step's budget starts over.
+
+There is no budget beyond the per-step one: a run ends when the plan is
+exhausted and the agent finishes it, when the agent calls `finish`, when you
+send `/me stop`, or when the daemon shuts down. A turn of the chat model that
+produced no tool call and a provider that failed end nothing: the run asks
+again, and the budget is what bounds it.
 
 The agent answers a judgment point with a directive: `run_step` (run a step of
 the workflow), `ntm_<command>` (run a nightme command as you), `agent` (ask the
@@ -794,7 +804,7 @@ beside it work, and `nightme logs` reports the failure.
 
 | Guardrail | Bound |
 |---|---|
-| Step budget | `attempts` for a step, counted per round. |
+| Step budget | `me.max_judgments` chances at one step in one round, counted per round. |
 | Rounds | `iterations` for a job — the number of rounds it runs. |
 | Step timeout | Thirty minutes per command. |
 | Stall detection | Ten minutes without a heartbeat. |

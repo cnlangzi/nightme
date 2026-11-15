@@ -6,7 +6,7 @@
 A **workflow** is a YAML file that nightme runs. It answers two questions:
 
 1. **What** does it do? (`jobs.<name>.steps` — ordered steps)
-2. **How far** may it go? (`iterations`, `attempts`)
+2. **How far** may it go? (`iterations`, and the agent's budget)
 
 The personal agent (`/me`) runs a workflow in a chat. The same file is the plan the agent follows and the bound it may not cross.
 
@@ -144,7 +144,6 @@ jobs:
       - id: review
         message: "/review"
         note: 没跑完就 /review -c；有改动就先 /gtw commit
-        attempts: 5
 
       # 4. wait step: sit out a duration
       - id: rest
@@ -279,7 +278,7 @@ jobs:
 | `iterations` | int | ❌ | How many rounds the job runs. Missing means one round, `0` means the job's steps run until the run ends, `N` means `N` rounds in total. |
 | `steps` | step[] | ✅ | Ordered steps to execute. |
 
-A **round** is one pass through a job's step list. When a round ends, the job starts the next one: the round's step outputs are cleared — so `${{ steps.fix.outputs.data.issue }}` reads the next round's fix — and the per-step `attempts` budgets start over. The job's `if:` conditions are read from the state of the round that is running.
+A **round** is one pass through a job's step list. When a round ends, the job starts the next one: the round's step outputs are cleared — so `${{ steps.fix.outputs.data.issue }}` reads the next round's fix — and the per-step budgets start over. The job's `if:` conditions are read from the state of the round that is running.
 
 A round in which no step ran does not repeat: a job whose every step is skipped had nothing to do, so it does not start another round. The plan is exhausted and the agent decides whether the run is over.
 
@@ -408,8 +407,12 @@ Every step supports:
 | `env` | map | — | Environment variables for the step (merged on top of the run's env and the daemon's env). |
 | `continue-on-error` | bool | `false` | Whether the chain continues when this step fails. |
 | `note` | string | — | Why the step is there, and which fixes the owner uses for it. It is the description the decision model reads. |
-| `attempts` | int | (no limit) | The number of actions the agent may take on the step in one round — the step's own execution and the nightme commands issued for it. `attempts: 0` means no limit. |
 | `final` | bool | `false` | The step cleans up after the round. It runs when the round ends, however the round ends. |
+
+The keys `run:`, `prompt:`, `agent:`, `allow:` and `attempts:` are retired. A
+file that carries one is refused by name, with the line it is written on.
+`attempts:` is replaced by the agent's budget: one number for every step and
+every round, set by `me.max_judgments`.
 
 ### 5.6 `final` — the step that cleans up after the round
 
@@ -479,14 +482,12 @@ jobs:
       - id: fix
         message: "/gtw fix ${{ args.issue }} -y"
         note: 从 nightme/assigned 队列里挑一个
-        attempts: 3
       - id: commit
         message: "/gtw commit"
         if: ${{ steps.fix.outputs.data.issue }}
       - id: review
         message: "/review"
         note: 没跑完就 /review -c；有改动就先 /gtw commit
-        attempts: 5
         if: ${{ steps.fix.outputs.data.issue }}
       - id: commit2
         message: "/gtw commit"
@@ -627,7 +628,7 @@ The **ready set** is the set of unrun steps whose job's `needs` are all satisfie
 
 A run that has not executed anything yet counts as `ok`, so the first step runs on the fast path.
 
-A round ends when the job's steps are done. The next round starts with the job's first step, the round's step outputs are cleared and the per-step `attempts` budgets start over. The ready set of the next round is computed from the state of that round.
+A round ends when the job's steps are done. The next round starts with the job's first step, the round's step outputs are cleared and the per-step budgets start over. The ready set of the next round is computed from the state of that round.
 
 A round can also end early, when the agent ends it: the steps of the round that did not run are recorded as skipped, the job's final step runs in their place, and the round advances as it does after an ordinary round. The step whose failure the agent resolved is not a judgment point any more — the agent has already decided what happens next.
 
@@ -669,18 +670,22 @@ The policy is the bound on what a run may do. It is a pure function of the workf
 | Check | Reports |
 |---|---|
 | `CheckRun(command)` | Whether the command may run now and which step it counts against. |
-| `CheckStep(index)` | Whether the step may take an action now — its own `attempts` limit for the current round. |
+| `CheckStep(index)` | Whether the step may take an action now — its budget for the current round. |
 | `CheckInstruct()` | Whether a free-form instruction is allowed. |
 | `CheckFinish(status)` | Whether the run may end. `done` needs the last executed step's latest outcome to be `ok` or `noop`; `failed` is always allowed. |
-| `Remaining()` | The actions left per step. |
+| `Remaining()` | The chances left per step. |
 | `Render()` | The workflow as a compact text block: the identity, the title, the steps, the notes and the limits. |
 | `StepCommands()` | The step messages the policy accepts right now. |
 
-A step's message belongs to that step, and a step that spent its limit leaves the list. A step's `attempts` limit counts the actions of the current round only: the step's own execution and the nightme commands issued for it. The limit starts over at every round.
+A step's message belongs to that step, and a step that spent its budget leaves the list. The budget counts the actions of the current round only: the step's own execution, the nightme commands and the instructions issued for it, and the turns of the chat model that produced no tool call. It starts over at every round.
+
+A judgment that names no step — the plan forks, a job starts a new round — is charged to the last step that ran in the round. A run that has done no work yet is charged to the step the plan may run now. Every turn the agent spends without acting costs a chance somewhere: a turn that costs nothing bounds nothing.
+
+The budget is one number for every step and every round, set by the personal agent from `me.max_judgments` (50 by default). A workflow file does not carry it. When the budget of the step the run is on is spent, the run pauses and says so in the chat: the operator hands the control back with `/me continue`, and the step's budget starts over.
 
 The registered nightme commands are not the workflow's own: they are accepted without belonging to a step, and they are recorded against the step the run is on. The step's own verdict is the one the plan reads, so a repair that succeeded does not turn a failed step into a finished one.
 
-There is no global action budget and no cap on the number of model turns: a run ends when the plan is exhausted and the agent finishes it, when the operator sends `/me stop`, or when the daemon shuts down.
+There is no cap on the number of model turns: a run ends when the plan is exhausted and the agent finishes it, when the agent calls `finish`, when the operator sends `/me stop`, or when the daemon shuts down. A turn of the chat model that produced no tool call and a provider that failed end nothing: the run asks again, and the budget is what bounds it.
 
 ### 8.5 The tools
 
@@ -728,7 +733,9 @@ The decision is recorded in the conversation as a synthetic assistant tool call,
 
 The model is the owner's avatar: what it runs executes exactly as if the owner had typed it. The system prompt is the role, the tools and the workflow — the title, the jobs, the steps, their notes and its limits. It does not carry the workflow's conditions, its environment or its templates: those are the engine's business, not the model's. It names the two situations a step that produced nothing can mean: nothing is left to do (end the round) or the work is still running in the background (wait, then look again).
 
-The model is called with a situation report: why the run needs it, the round it is in, the steps of that round and which one is ready, what every step of the round produced — its status, its summary, its facts and the hint that explains its reason code — and the transcripts of the last two actions, each cut to its last 4 KB. The report is the first turn of the conversation; it is added again whenever the workflow ran on by itself in between, as a user turn.
+The model is called with a situation report: why the run needs it, the round it is in, the state of the repository, the steps of that round and which one is ready, what every step of the round produced — its status, its summary, its facts and the hint that explains its reason code — the step the judgment is about with its note, the commands the policy accepts now, the chances left for it, the turns the agent spent without acting, the directives it may take, and the transcripts of the last two actions, each cut to its last 4 KB.
+
+The report is a user turn, and only the latest one is kept: the report is rendered again on every turn of the agent, and a conversation that holds one report per turn grows past what the provider accepts.
 
 Anything that needs text — an instruction, an answer to a prompt — always goes to System 2.
 
@@ -763,6 +770,7 @@ me:
     model: typesafe/jev-1.14
     api_key_env: OPENROUTER_API_KEY # the name of a variable that holds the key
     min_confidence: 0.8           # below this the agent escalates
+  max_judgments: 50              # the chances the agent has at one step in one round
 ```
 
 The decider's base is the root of the API; the version segment is added
@@ -877,12 +885,16 @@ The wake log holds the model decisions only: the workflow's own fast path is not
 
 | Guardrail | Bound |
 |---|---|
-| Step budget | `attempts` for a step, counted per round. |
+| Step budget | `me.max_judgments` chances at one step in one round, counted per round. |
 | Rounds | `iterations` for a job — the number of rounds it runs. |
 | Compaction | Every tool result but the last keeps its status and summary; the last one keeps its transcript. |
 | Rate limit | A command the agent answered 429 pauses the run; the operator continues it. |
 
-A text-only answer — words without a tool call — is nudged once to call a tool. The second time, the run ends as a failure.
+A text-only answer — words without a tool call — does not end the run. The words stay in the conversation, the turn costs one chance of the step the judgment was about, and the run asks the agent again with a fresh situation report.
+
+A provider that failed or that never answered costs the same one chance. The wait before the next attempt grows: the first failure waits 30 seconds, the next waits 60, then 120, 240, and 300 seconds from then on. The wait belongs to the run — stopping the run or shutting the daemon ends it at once.
+
+One turn of the chat model lasts at most five minutes: the provider call carries that deadline, so the run does not wait for the client's own timeout.
 
 A command the underlying agent answered 429 pauses the run: the agent is throttled, and running the command again makes it worse. The run waits for the operator, who continues it with `/me continue`. The pause is the run's own: the model is not asked to think about a throttle.
 

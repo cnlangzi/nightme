@@ -333,10 +333,10 @@ jobs:
 	}
 }
 
-// TestTool_ARuntimeFailureComesBackAsAToolError — a command the the
-// chat cannot take comes back to the agent as an error it can correct,
-// and the run does not end.
-func TestTool_ARuntimeFailureComesBackAsAToolError(t *testing.T) {
+// TestTool_ARuntimeFailureComesBackAsAFailedOutcome — a step the chat
+// cannot take comes back to the agent as a failure it can correct, and
+// the run does not end.
+func TestTool_ARuntimeFailureComesBackAsAFailedOutcome(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", `title: one
 jobs:
@@ -347,7 +347,7 @@ jobs:
 `)
 
 	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"command": "/gtw commit"})},
+		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"step_id": "commit"})},
 		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "failed", "summary": "the chat is gone"})},
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider})
@@ -370,13 +370,13 @@ jobs:
 			continue
 		}
 		for _, p := range m.Parts {
-			if p.IsError && strings.Contains(p.Text, "the chat is gone") {
+			if strings.Contains(p.Text, "the chat is gone") {
 				found = true
 			}
 		}
 	}
 	if !found {
-		t.Fatal("the runtime failure did not come back as a tool error")
+		t.Fatal("the runtime failure did not come back to the agent")
 	}
 }
 

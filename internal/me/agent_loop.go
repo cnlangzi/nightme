@@ -4,10 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
-	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/wfe"
 )
 
@@ -38,6 +36,9 @@ const (
 func (s *Service) drive(ctx context.Context, r *run) {
 	defer close(r.done)
 	err := s.loop(ctx, r)
+	// The session that thinks for the owner belongs to the run: it
+	// goes with it, whatever ended the run.
+	s.closeBrain(r)
 	if r.isSuspended() {
 		// The daemon is going away, not the run: the state is kept and
 		// the run resumes when the daemon comes back.
@@ -186,6 +187,10 @@ func (s *Service) plan(ctx context.Context, r *run) (wfe.Decision, error) {
 	it := targetIteration(r, decision, before)
 	r.mu.Unlock()
 
+	// The engine advances a round inside its own decision, so the
+	// rounds are compared around it: the thinking session of the round
+	// that ended goes with it.
+	s.closeBrainOnNewRound(r, before, decision)
 	s.switchCard(ctx, r, it)
 	return decision, nil
 }
@@ -244,6 +249,9 @@ func (s *Service) runPlanStep(ctx context.Context, r *run, decision wfe.Decision
 		return nil
 	}
 	r.recordStep(decision.Job, decision.Step, verdict.Outcome)
+	// The workflow moved on by itself: the model reads the new
+	// situation before it decides again.
+	r.markSituation()
 	s.persist(r)
 	s.updateCard(r)
 	return nil
@@ -275,7 +283,7 @@ func (s *Service) loopDeciderOnly(ctx context.Context, r *run) error {
 			}
 			r.clearAsk()
 			if choice := matchOption(st.Options, reply); choice != "" {
-				done, err := s.actOnChoice(ctx, r, choice, "the user")
+				done, err := s.actOnChoice(ctx, r, choice)
 				if err != nil {
 					return err
 				}
@@ -333,7 +341,7 @@ func (s *Service) loopDeciderOnly(ctx context.Context, r *run) error {
 		if choice == "" {
 			continue
 		}
-		done, err := s.actOnChoice(ctx, r, choice, "the user")
+		done, err := s.actOnChoice(ctx, r, choice)
 		if err != nil {
 			return err
 		}
@@ -383,8 +391,7 @@ func (s *Service) system1(ctx context.Context, r *run) (sys1Action, error) {
 	r.setDecision(decisionDecider, decisionReason(dec))
 	if !s.canAct(dec) {
 		// The decision is not sure enough to act on: the chat model
-		// takes over, with the decision attached as a hint.
-		s.appendHint(r, dec)
+		// takes over.
 		return sys1Escalate, nil
 	}
 	return s.actOnDecision(ctx, r, dec)
@@ -427,14 +434,15 @@ func (s *Service) actOnDecision(ctx context.Context, r *run, dec decision) (sys1
 		if err := r.checkFinish("done"); err != nil {
 			return s.escalateDecision(r, dec, err)
 		}
-		s.recordSynthetic(r, "finish", map[string]any{"status": "done", "summary": "the workflow is complete"}, dec)
+		s.recordSynthetic(r, toolFinish, map[string]any{"status": "done", "summary": "the workflow is complete"})
 		s.finishDone(r, r.workflow.Name+" is complete")
 		return sys1Act, nil
 	default:
-		if _, err := r.checkRun(dec.Next); err != nil {
+		if _, _, err := r.checkRun(dec.Next); err != nil {
 			return s.escalateDecision(r, dec, err)
 		}
-		s.recordSynthetic(r, "run_step", map[string]any{"command": dec.Next}, dec)
+		tool, args := s.syntheticCall(r, dec.Next)
+		s.recordSynthetic(r, tool, args)
 		outcome, err := s.runStep(ctx, r, dec.Next)
 		if err != nil {
 			if isToolError(err) {
@@ -444,7 +452,7 @@ func (s *Service) actOnDecision(ctx context.Context, r *run, dec decision) (sys1
 			}
 			return sys1None, err
 		}
-		s.appendToolResult(r, pendingCall{ID: syntheticCallID, Name: "run_step"}, outcome, !outcomeSucceeded(outcome.Status))
+		s.appendToolResult(r, pendingCall{ID: syntheticCallID, Name: tool}, outcome, !outcomeSucceeded(outcome.Status))
 		s.persist(r)
 		s.updateCard(r)
 		return sys1Act, nil
@@ -458,8 +466,6 @@ func (s *Service) actOnDecision(ctx context.Context, r *run, dec decision) (sys1
 // has to decide.
 func (s *Service) escalateDecision(r *run, dec decision, cause error) (sys1Action, error) {
 	s.logger.Info("me: the decision was not allowed", "run_id", r.id, "choice", dec.Next, "err", cause)
-	s.appendHint(r, decision{Next: optionEscalate, Options: dec.Options, Model: dec.Model,
-		NextConfidence: dec.NextConfidence, NeedsHuman: dec.NeedsHuman})
 	return sys1Escalate, nil
 }
 
@@ -468,7 +474,7 @@ func (s *Service) escalateDecision(r *run, dec decision, cause error) (sys1Actio
 // It reports whether the run is over. A choice the policy refuses is
 // reported to the observer and asked again — the user picked something
 // the workflow does not allow, not a reason to end the run.
-func (s *Service) actOnChoice(ctx context.Context, r *run, command, by string) (bool, error) {
+func (s *Service) actOnChoice(ctx context.Context, r *run, command string) (bool, error) {
 	if command == optionEscalate {
 		return false, nil
 	}
@@ -481,13 +487,13 @@ func (s *Service) actOnChoice(ctx context.Context, r *run, command, by string) (
 		s.finishDone(r, r.workflow.Name+" is complete")
 		return true, nil
 	}
-	if _, err := r.checkRun(command); err != nil {
+	if _, _, err := r.checkRun(command); err != nil {
 		r.setSummary(err.Error())
 		s.updateCard(r)
 		return false, nil
 	}
-	s.recordSynthetic(r, "run_step", map[string]any{"command": command},
-		decision{Next: command, Model: by, NextConfidence: 1})
+	tool, args := s.syntheticCall(r, command)
+	s.recordSynthetic(r, tool, args)
 	outcome, err := s.runStep(ctx, r, command)
 	if err != nil {
 		if isToolError(err) {
@@ -499,31 +505,8 @@ func (s *Service) actOnChoice(ctx context.Context, r *run, command, by string) (
 		}
 		return false, err
 	}
-	s.appendToolResult(r, pendingCall{ID: syntheticCallID, Name: "run_step"}, outcome, !outcomeSucceeded(outcome.Status))
+	s.appendToolResult(r, pendingCall{ID: syntheticCallID, Name: tool}, outcome, !outcomeSucceeded(outcome.Status))
 	s.persist(r)
 	s.updateCard(r)
 	return false, nil
-}
-
-// appendHint attaches a decision to the conversation, so the chat
-// model knows what the decision model thought.
-func (s *Service) appendHint(r *run, dec decision) {
-	if dec.Model == "" && dec.Next == "" {
-		return
-	}
-	var b strings.Builder
-	b.WriteString("system-1 hints: ")
-	if dec.Next != "" {
-		fmt.Fprintf(&b, "next=%s (p=%.2f)", dec.Next, dec.NextConfidence)
-	}
-	if dec.NeedsHuman > 0 {
-		fmt.Fprintf(&b, " needs_human=%.2f", dec.NeedsHuman)
-	}
-	if dec.StepSucceeded != nil {
-		fmt.Fprintf(&b, " step_succeeded=%t", *dec.StepSucceeded)
-	}
-	r.appendMessage(llm.Message{
-		Role:  llm.RoleUser,
-		Parts: []llm.Part{{Type: llm.PartText, Text: b.String()}},
-	})
 }

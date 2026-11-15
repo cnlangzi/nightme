@@ -59,10 +59,6 @@ const (
 	// must reach before it is acted on without the chat model.
 	DefaultMinConfidence = 0.8
 
-	// DefaultTokenBudget caps the tokens one run may spend on the
-	// chat model.
-	DefaultTokenBudget = 200_000
-
 	// The run has no budget of its own.
 	//
 	// Every command the run issues carries one: the agent behind it
@@ -100,6 +96,22 @@ const (
 	PhaseStopped Phase = "stopped"
 )
 
+// CommandInfo describes one nightme command the run may issue.
+//
+// It is the command's own description, carried over from the command
+// registry: the run's owner sees the same summary in /help that the
+// model reads.
+type CommandInfo struct {
+	// Name is the command's name without the leading slash.
+	Name string
+	// Summary is the one-line description of the command.
+	Summary string
+	// Usage is the usage hint of the command.
+	Usage string
+	// Subcommands are the command's subcommands.
+	Subcommands []CommandInfo
+}
+
 // Request is a request to run a workflow.
 type Request struct {
 	// Name is the workflow's name.
@@ -115,6 +127,12 @@ type Request struct {
 	Cwd string
 	// Owner is the user the run speaks for.
 	Owner string
+	// Commands are the nightme commands the run may issue outside the
+	// workflow's steps.
+	Commands []CommandInfo
+	// Agent is the name of the chat's agent. It is the one that
+	// thinks for the owner when the daemon names none itself.
+	Agent string
 }
 
 // Status is the state of a run.
@@ -198,6 +216,35 @@ type CwdProvider interface {
 	Cwd(chatID string) string
 }
 
+// AgentOpener opens the session that thinks for the owner.
+//
+// The package does not know the agent layer: the daemon injects the
+// opener, and the run only ever asks a session a question.
+type AgentOpener interface {
+	// Open starts a session of the named agent in the workspace. The
+	// context is the session's scope: when it ends, the session ends
+	// with it.
+	Open(ctx context.Context, agent, workspace string) (AgentSession, error)
+}
+
+// AgentSession is the thinking of the owner: it investigates a
+// question and answers it, and it changes nothing.
+type AgentSession interface {
+	// Ask asks the session one question and waits for its answer.
+	Ask(ctx context.Context, prompt string) (AgentReply, error)
+	// Close ends the session.
+	Close() error
+}
+
+// AgentReply is what a session answered.
+type AgentReply struct {
+	// Text is the answer.
+	Text string
+	// Model is the model that produced it, when the session reports
+	// one.
+	Model string
+}
+
 // Config holds the personal agent's configuration.
 type Config struct {
 	// WorkflowsDir is the directory the workflows live in. The action
@@ -218,9 +265,14 @@ type Config struct {
 	// MinConfidence is the confidence a System 1 decision must reach
 	// before it is acted on. Zero means DefaultMinConfidence.
 	MinConfidence float64
-	// TokenBudget caps the tokens one run may spend on the chat
-	// model. Zero means DefaultTokenBudget.
-	TokenBudget int
+	// Agent is the name of the agent that thinks for the owner. It
+	// wins over the agent of the chat that started the run. Empty
+	// means the chat's agent is used, and a run without one has no
+	// thinking to ask.
+	Agent string
+	// AgentOpener opens the session that thinks for the owner. Nil
+	// means the run cannot ask anyone: it has no agent tool.
+	AgentOpener AgentOpener
 	// Operator drives the chat the run works in. Nil means the
 	// personal agent cannot run.
 	Operator Operator
@@ -273,9 +325,6 @@ type Service struct {
 func New(cfg Config) *Service {
 	if cfg.MinConfidence <= 0 {
 		cfg.MinConfidence = DefaultMinConfidence
-	}
-	if cfg.TokenBudget <= 0 {
-		cfg.TokenBudget = DefaultTokenBudget
 	}
 	logger := cfg.Logger
 	if logger == nil {

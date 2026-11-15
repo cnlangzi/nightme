@@ -141,6 +141,25 @@ func Decide(state *RunState, wf *Workflow) (Decision, error) {
 	}, nil
 }
 
+// ReadySet returns the steps a run may run next: the unrun steps
+// whose job's needs are all satisfied and whose own `if:` holds.
+//
+// Within a job only the first such step counts: the steps of a job
+// run in order. The set is the plan's, computed from the state as it
+// stands — it does not advance a round and it does not record the
+// steps whose condition did not hold.
+func ReadySet(state *RunState, wf *Workflow) ([]Step, error) {
+	ready, _, err := readySet(state, wf)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Step, 0, len(ready))
+	for _, rs := range ready {
+		out = append(out, rs.Step)
+	}
+	return out, nil
+}
+
 // recordSkipped records the steps whose condition did not hold.
 func recordSkipped(state *RunState, skipped []readyStep) {
 	for _, step := range skipped {

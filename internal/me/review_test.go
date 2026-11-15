@@ -120,8 +120,8 @@ jobs:
 `)
 
 	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"command": "/two -c"})},
-		{Message: toolCallMsg("c2", toolRunStep, map[string]any{"command": "/two"})},
+		{Message: toolCallMsg("c1", "ntm_two", map[string]any{"args": "-c"})},
+		{Message: toolCallMsg("c2", toolRunStep, map[string]any{"step_id": "two"})},
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider})
 	op.failCommand = "/two -c"
@@ -135,6 +135,7 @@ jobs:
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+		Commands: []CommandInfo{{Name: "two"}},
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}

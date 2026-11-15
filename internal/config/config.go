@@ -129,6 +129,10 @@ type MeLLMConfig struct {
 	APIKeyEnv string `yaml:"api_key_env,omitempty"`
 	// MaxTokens caps the length of an answer.
 	MaxTokens int `yaml:"max_tokens,omitempty"`
+	// Agent names the agent that thinks for the owner: the run asks it
+	// when it cannot work out what to do. Empty means the agent of
+	// the chat that started the run is used.
+	Agent string `yaml:"agent,omitempty"`
 }
 
 // MeDeciderConfig is the decision model configuration.

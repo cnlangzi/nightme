@@ -407,7 +407,7 @@ Every step supports:
 | `continue-on-error` | bool | `false` | Whether the chain continues when this step fails. |
 | `note` | string | — | Why the step is there, and when the extra commands apply. It is the description the decision model reads. |
 | `allow` | string[] | — | The extra commands the agent may use inside the step. |
-| `attempts` | int | (no limit) | The number of actions the agent may take on the step in one round — the step's own execution and the `allow:` commands. `attempts: 0` means no limit. |
+| `attempts` | int | (no limit) | The number of actions the agent may take on the step in one round — the step's own execution, the `allow:` commands and the nightme commands issued for it. `attempts: 0` means no limit. |
 
 ---
 
@@ -616,14 +616,18 @@ The agent answers a judgment point with a **directive**:
 
 | Directive | What it does |
 |---|---|
-| `run_step(command)` | Runs a command of the workflow in the chat. |
+| `run_step(step_id)` | Runs a step of the workflow as the workflow wrote it. |
+| `ntm_<command>` | Runs a nightme command, as the owner. One tool per registered command. |
+| `agent(task)` | Asks the owner's thinking. It investigates and recommends; it changes nothing. |
 | `instruct(text)` | Sends a free-form instruction to the chat. |
 | `answer_choice(choice_id, option_id)` | Answers a prompt the work agent is waiting for. |
 | `ask_human(question)` | Asks the user. The run waits for the answer. |
 | `repo_status()` | Reads the branch and the tree facts of the chat. |
 | `finish(status, summary)` | Ends the run. `status` is `done` or `failed`. |
 
-A command the agent names has to be a step's `message:` or one of a step's `allow:` entries, compared with whitespace normalised away. Anything else comes back to the agent as an error it can correct. A command the deterministic path would not have run is allowed, and it is recorded against the step that owns it.
+`run_step` takes the id of a step: the step that is ready, or one that already ran in this round. A step further down the line is refused — the steps of a job run in order, and a skipped one would come back out of order.
+
+The nightme commands are the ones the command registry holds, minus the ones that would take the run with them (`/me`, `/close`, `/new`, `/stop`, `/cwd`, `/use`, `/resume`), the ones that only show something (`/help`, `/think`, `/tools`, `/watch`, `/format`) and the subcommands that shape the project instead of moving the work on (`/gtw config`, `/gtw plan`, `/gtw new`). A command that belongs to no step is a repair: it counts against the step the run is on, but it never becomes that step's verdict.
 
 The engine owns the run state: after a directive is executed, the state holds the new outcome, the step that ran and the round it ran in. A decision the agent makes never writes state by itself.
 
@@ -633,7 +637,7 @@ The policy is the bound on what a run may do. It is a pure function of the workf
 
 | Check | Reports |
 |---|---|
-| `CheckRun(command)` | Whether the command may run now, and which step it belongs to. |
+| `CheckRun(command)` | Whether the command may run now, which step it counts against, and whether that step owns it. |
 | `CheckStep(index)` | Whether the step may take an action now — its own `attempts` limit for the current round. |
 | `CheckInstruct()` | Whether a free-form instruction is allowed. |
 | `CheckFinish(status)` | Whether the run may end. `done` needs the last executed step's latest outcome to be `ok` or `noop`; `failed` is always allowed. |
@@ -641,24 +645,30 @@ The policy is the bound on what a run may do. It is a pure function of the workf
 | `Render()` | The workflow as a compact text block: the identity, the title, the steps, the notes, the allowed commands and the limits. |
 | `AllowedCommands()` | The commands the policy accepts right now. |
 
-A command belongs to the first step that lists it, and a step that spent its limit takes its commands out of the list. A step's `attempts` limit counts the actions of the current round only: the step's own execution and the `allow:` commands the agent ran against it. The limit starts over at every round.
+A command belongs to the first step that lists it, and a step that spent its limit takes its commands out of the list. A step's `attempts` limit counts the actions of the current round only: the step's own execution, the `allow:` commands the agent ran against it and the nightme commands issued for it. The limit starts over at every round.
+
+The registered nightme commands are not the workflow's own: they are accepted without belonging to a step, and they are recorded against the step the run is on. The step's own verdict is the one the plan reads, so a repair that succeeded does not turn a failed step into a finished one.
 
 There is no global action budget and no cap on the number of model turns: a run ends when the plan is exhausted and the agent finishes it, when the operator sends `/me stop`, or when the daemon shuts down.
 
 ### 8.5 The tools
 
-The chat model acts through six tools. Every handler enforces the policy: a violation comes back as a tool error result, and the model corrects itself.
+The chat model acts through the tools below. Every handler enforces the policy: a violation comes back as a tool error result, and the model corrects itself.
 
 | Tool | Behaviour |
 |---|---|
-| `run_step(command)` | Runs `Policy.CheckRun`, then sends the command to the chat. It returns the outcome — status, summary, data — and the transcript of what the coding agent said. |
+| `run_step(step_id)` | Runs the step of the workflow: its own limit for the current round is checked first, then the step runs as the workflow wrote it. It returns the outcome — status, summary, data — and the transcript of what the coding agent said. |
+| `ntm_<command>` | Runs a nightme command as the owner. The tool takes the command's subcommand and its arguments; the command goes to the chat as a message of the run. |
+| `agent(task)` | Asks the owner's thinking a question and returns its answer. Registered only when there is an agent to ask. |
 | `instruct(text)` | Runs `Policy.CheckInstruct`, then sends a free-form prompt to the chat. It is tracked and returned like `run_step`. |
 | `answer_choice(choice_id, option_id)` | Answers a permission request or a question the work agent is waiting for. |
 | `ask_human(question)` | Asks the question in the chat — as a reply to the run's overview — and waits. The answer resumes the run as the tool's result. |
 | `repo_status()` | Reads the chat's repository: the branch, whether the tree is dirty, and how far the branch is ahead of or behind its upstream and its base branch. |
 | `finish(status, summary)` | Runs `Policy.CheckFinish`, ends the run and posts the summary. `status` is `done` or `failed`. |
 
-`run_step` blocks while the command runs and makes no model calls. It comes back early when the work agent asks something — the model can then answer, instruct or ask — or when the command goes quiet for ten minutes. Both cases report `waiting` and the reason.
+A free-form text that names a nightme command is refused: the command has a tool of its own, and a command in a free-form text would run as a turn of the chat instead of as a command of the run.
+
+`run_step` blocks while the step runs and makes no model calls. It comes back early when the work agent asks something — the model can then answer, instruct or ask — or when the command goes quiet for ten minutes. Both cases report `waiting` and the reason.
 
 ### 8.6 The two capabilities
 
@@ -679,9 +689,13 @@ The decision is acted on without the chat model when all of these hold:
 - `needs_human` is below 0.5;
 - the policy allows it — `Policy.CheckRun` for a command, `Policy.CheckFinish` for `done`.
 
-The decision is recorded in the conversation as a synthetic assistant tool call with a note (`decided by jev-1.14.0, p=0.93`), so the chat model reads a consistent history when it takes over. The model that answered is stored with the run.
+The decision is recorded in the conversation as a synthetic assistant tool call, so the chat model reads a consistent history when it takes over: a step of the workflow is `run_step(step_id)`, a nightme command is its own tool. The model that answered is stored with the run.
 
-**System 2 — the chat model.** The standard tool-calling shape: call the model with the tools, run the tool calls, append the results, repeat until `finish`, a pause or a budget limit. The system prompt is the workflow: the role, `Policy.Render()`, and how to read an outcome — the status is the primary evidence, the transcript is context.
+**System 2 — the chat model.** The standard tool-calling shape: call the model with the tools, run the tool calls, append the results, repeat until `finish` or a pause.
+
+The model is the owner's avatar: what it runs executes exactly as if the owner had typed it. The system prompt is the role, the tools and the workflow — the title, the jobs, the steps, their notes, the commands a step allows and its limits. It does not carry the workflow's conditions, its environment or its templates: those are the engine's business, not the model's.
+
+The model is called with a situation report: why the run needs it, the round it is in, the steps of that round and which one is ready, the outcome of the last action, the hint that explains the reason code of that outcome, and the tail of the transcript. The report is the first turn of the conversation; it is added again whenever the workflow ran on by itself in between, as a user turn.
 
 Anything that needs text — an instruction, an answer to a prompt — always goes to System 2.
 
@@ -709,6 +723,7 @@ me:
     model: gpt-4.1-mini
     api_key: sk-xxxx              # the key itself, in the file
     max_tokens: 4096
+    agent: claude                 # the agent that thinks for the owner
   decider:
     protocol: decisions           # decisions | systemone
     base_url: https://openrouter.ai/api/v1
@@ -729,6 +744,8 @@ wins when both are set, and a configuration with neither sends no authentication
 header. `config.yaml` is written with mode 0600 and should be kept out of git.
 
 The user picks the models. nightme never chooses one, and it never injects a model into the coding agents — those keep their own configuration.
+
+`me.llm.agent` names the agent that thinks for the owner: the run asks it why a step failed and what to do about it, and it answers with the cause and a recommendation. It changes nothing — the run's own avatar carries out every change. When it is not set, the agent of the chat that started the run is used; a run without an agent has nobody to ask.
 
 `me.llm` and `me.decider` are independent. A model that is configured but cannot be built — an unknown provider, a missing key — is reported in the daemon log and left out; the daemon still starts, and `/me` says why it cannot run.
 
@@ -799,7 +816,6 @@ actions: 6 · system-1: 0 decisions, 0 tokens · system-2: 8 decisions, 4210 tok
 
 | Guardrail | Bound |
 |---|---|
-| Token budget | The tokens one run may spend on the chat model. |
 | Step budget | `attempts` for a step, counted per round. |
 | Rounds | `iterations` for a job — the number of rounds it runs. |
 | Compaction | Every tool result but the last keeps its status and summary; the last one keeps its transcript. |
@@ -807,7 +823,7 @@ actions: 6 · system-1: 0 decisions, 0 tokens · system-2: 8 decisions, 4210 tok
 
 A text-only answer — words without a tool call — is nudged once to call a tool. The second time, the run ends as a failure.
 
-A command the underlying agent answered 429 pauses the run: the agent is throttled, and running the command again makes it worse. The run waits for the operator, who continues it with `/me continue`.
+A command the underlying agent answered 429 pauses the run: the agent is throttled, and running the command again makes it worse. The run waits for the operator, who continues it with `/me continue`. The pause is the run's own: the model is not asked to think about a throttle.
 
 The run has no clock of its own. Every command it issues carries its own budget — the agent behind the command reports its own outcome when that budget runs out — and the run acts on that outcome. A timeout is the agent's timeout, never the run's. The run watches: it stops when the command reports, when the operator stops it, or when the daemon shuts down.
 

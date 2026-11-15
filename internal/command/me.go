@@ -1,6 +1,10 @@
 package command
 
-import "context"
+import (
+	"context"
+
+	"github.com/cnlangzi/nightme/internal/me"
+)
 
 // MeRequest is a request to run a workflow.
 //
@@ -19,6 +23,11 @@ type MeRequest struct {
 	Cwd string
 	// Owner is the user the run speaks for.
 	Owner string
+	// Commands are the nightme commands the run may issue outside the
+	// workflow's steps.
+	Commands []me.CommandInfo
+	// Agent is the name of the chat's agent.
+	Agent string
 }
 
 // MeStatus is the state of a run.

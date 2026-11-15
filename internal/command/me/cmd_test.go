@@ -170,6 +170,62 @@ func TestStart_MapsTheArguments(t *testing.T) {
 	}
 }
 
+// TestStart_CarriesTheCommandsAndTheAgent — the run gets the commands
+// it may issue and the agent of the chat that started it.
+func TestStart_CarriesTheCommandsAndTheAgent(t *testing.T) {
+	command.SetDeps(command.Deps{})
+
+	ctrl := &fakeController{}
+	cs := newSession(t, "me-commands", "/tmp/work")
+	if err := cs.SetSelectedAgent("claude"); err != nil {
+		t.Fatalf("SetSelectedAgent: %v", err)
+	}
+
+	runMe(t, ctrl, cs, "/me", "start", "fix-issue", "42")
+
+	req := ctrl.request(0)
+	if req.Agent != "claude" {
+		t.Errorf("the agent is %q, want the agent of the chat", req.Agent)
+	}
+	found := false
+	for _, c := range req.Commands {
+		if c.Name == "me" {
+			found = true
+			if c.Summary == "" {
+				t.Errorf("the command carries no summary: %v", c)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("the commands are %v, want the registered ones", req.Commands)
+	}
+}
+
+// TestCommandInfos_TheHiddenSubcommandsStayHidden — a subcommand the
+// chat does not show is a subcommand the run does not get.
+func TestCommandInfos_TheHiddenSubcommandsStayHidden(t *testing.T) {
+	infos := commandInfos([]command.Spec{
+		{
+			Name:    "gtw",
+			Summary: "the git workflow",
+			Usage:   "/gtw <subcommand>",
+			Subcommands: []command.SubcommandSpec{
+				{Name: "fix", Summary: "fix an issue"},
+				{Name: "secret", Hidden: true},
+			},
+		},
+	})
+	if len(infos) != 1 {
+		t.Fatalf("the commands are %v, want one", infos)
+	}
+	if infos[0].Name != "gtw" || infos[0].Summary != "the git workflow" || infos[0].Usage != "/gtw <subcommand>" {
+		t.Errorf("the command is %v, want the registered one", infos[0])
+	}
+	if len(infos[0].Subcommands) != 1 || infos[0].Subcommands[0].Name != "fix" {
+		t.Errorf("the subcommands are %v, want the visible one", infos[0].Subcommands)
+	}
+}
+
 func TestStart_WithoutAWorkspace(t *testing.T) {
 	ctrl := &fakeController{}
 	cs := newSession(t, "me-2", "")

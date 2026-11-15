@@ -25,16 +25,20 @@ func (s *Service) system2(ctx context.Context, r *run) (bool, error) {
 		// prompt has no conversation to answer: the API refuses the
 		// request. The opening turn says what the run is up
 		// against.
-		r.appendMessage(llm.Message{
-			Role:  llm.RoleUser,
-			Parts: []llm.Part{{Type: llm.PartText, Text: s.firstTurnPrompt(r)}},
-		})
+		r.appendMessage(situationMessage(s.renderSituation(r)))
+		r.takeSituation()
+		conversation = r.conversation()
+	} else if r.takeSituation() {
+		// The workflow ran on by itself while the model was away: the
+		// model reads the new situation before it decides again. The
+		// report is a user turn, so the system prompt stays the same.
+		r.appendMessage(situationMessage(s.renderSituation(r)))
 		conversation = r.conversation()
 	}
 	req := llm.Request{
 		System:   s.systemPrompt(r),
 		Messages: compact(conversation),
-		Tools:    toolCatalogue(),
+		Tools:    s.toolCatalogue(r),
 	}
 	resp, err := s.cfg.Provider.Complete(ctx, req)
 	if err != nil {
@@ -47,13 +51,8 @@ func (s *Service) system2(ctx context.Context, r *run) (bool, error) {
 	r.mu.Lock()
 	r.system2Decisions++
 	r.system2Usage.Add(resp.Usage)
-	spent := r.system2Usage.Total()
 	r.mu.Unlock()
 	r.setDecision(decisionChat, "the chat model took the turn")
-
-	if spent > s.cfg.TokenBudget {
-		return false, fmt.Errorf("the run reached its token budget of %d tokens", s.cfg.TokenBudget)
-	}
 
 	// The model's own words are what the operator reads in the run's
 	// overview.
@@ -91,25 +90,13 @@ func (s *Service) system2(ctx context.Context, r *run) (bool, error) {
 	return false, nil
 }
 
-// firstTurnPrompt renders the opening message of the chat model's
-// conversation.
-//
-// The run reaches the chat model at a judgment point: the model has
-// to know what the run is up against before it can choose.
-func (s *Service) firstTurnPrompt(r *run) string {
-	reason := r.judgmentReason()
-	if reason == "" {
-		reason = "the workflow cannot decide what comes next"
+// situationMessage builds the user turn that carries a situation
+// report.
+func situationMessage(text string) llm.Message {
+	return llm.Message{
+		Role:  llm.RoleUser,
+		Parts: []llm.Part{{Type: llm.PartText, Text: text}},
 	}
-	var b strings.Builder
-	b.WriteString("The run needs a decision: ")
-	b.WriteString(reason)
-	b.WriteString("\n")
-	if out, ok := r.lastOutcome(); ok {
-		fmt.Fprintf(&b, "The last step ended as %q: %s\n", out.Status, out.Summary)
-	}
-	b.WriteString("Pick the next step, repair the current one, or finish the run.")
-	return b.String()
 }
 
 // compact shortens the conversation for the model.

@@ -778,7 +778,6 @@ beside it work, and `nightme logs` reports the failure.
 | Rounds | `iterations` for a job — the number of rounds it runs. |
 | Step timeout | Thirty minutes per command. |
 | Stall detection | Ten minutes without a heartbeat. |
-| Token budget | The tokens one run may spend on the chat model. |
 
 The full reference — the schema, the policy, the tools, both model capabilities
 and the guardrails — is in [`docs/WFE.md` §8](./docs/WFE.md#8-runtime-architecture).

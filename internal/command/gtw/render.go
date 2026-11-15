@@ -144,7 +144,7 @@ func shortSHA(sha string) string {
 // IM-friendly summary. Shared by /gtw sync (cmd.go runSync) and
 // /gtw close (close.go RunClose) so both surface the same card.
 //
-//   - "Already up to date." → "✨ origin/<branch> already up to date"
+//   - "Already up to date." → "✅ origin/<branch> already up to date"
 //   - "Updating <old>..<new>" → header line + commit subject list
 //     capped at 10 entries ("📥 pulled N commits: • …")
 //   - Anything else (rare config variants) → fall back to the
@@ -165,7 +165,10 @@ func renderSyncReply(branch, newHead, pullOut, repoRoot string, ctx context.Cont
 
 	if strings.Contains(pullOut, "Already up to date.") {
 		out.pulled = false
-		return fmt.Sprintf("✨ origin/%s already up to date", branch), out
+		// The sync did what it was asked to do: the branch is where
+		// it should be. The card says so with the same mark the
+		// outcome carries.
+		return fmt.Sprintf("✅ origin/%s already up to date", branch), out
 	}
 
 	// Find the "Updating <old>..<new>" line.
@@ -264,18 +267,21 @@ func replyCommitSuccessCard(ctx context.Context, c Context, agentName, revRange 
 	return b.String(), commitCount, nil
 }
 
-// replyPushSuccessCard builds the post-/gtw push success IM card
-// from git state — never from agent prose. Same source-of-truth
-// rule as replyCommitSuccessCard.
+// replyPushCard builds the post-/gtw push IM card from git state —
+// never from agent prose. Same source-of-truth rule as
+// replyCommitSuccessCard.
 //
 // `revRange` is the git log range that captures the commits the
 // push just landed (typically `headBefore..origin/<branch>`).
+//
+// A push that landed no commit is not a success: the card says so,
+// and the count tells the caller which verdict to report.
 //
 // Returns the rendered card and the number of commits it lists, or
 // an error if the underlying `git log` failed. A successful push
 // with a broken log query is a bug we want to surface, not a card we
 // want to fudge with `pushed 0 commit(s)`.
-func replyPushSuccessCard(ctx context.Context, c Context, revRange string, deps HandlerDeps) (string, int, error) {
+func replyPushCard(ctx context.Context, c Context, revRange string, deps HandlerDeps) (string, int, error) {
 	logOut, err := gitLogRange(ctx, c.Worktree, revRange, deps)
 	if err != nil {
 		return "", 0, fmt.Errorf("read pushed commits: %w", err)
@@ -283,6 +289,9 @@ func replyPushSuccessCard(ctx context.Context, c Context, revRange string, deps 
 	commitCount := 0
 	if logOut != "" {
 		commitCount = strings.Count(logOut, "\n") + 1
+	}
+	if commitCount == 0 {
+		return fmt.Sprintf("❌ nothing to push\n  no unpushed commits on %s\n", c.Branch), 0, nil
 	}
 
 	var b strings.Builder

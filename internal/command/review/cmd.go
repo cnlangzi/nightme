@@ -576,16 +576,20 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 				// NOT spawned (short-circuit inside
 				// ReviewWithPrompt / ReviewWithOcr), so we don't
 				// slog.Warn — this is the expected graceful path,
-				// not a failure. Use ℹ️ instead of ❌ so the user
-				// sees "nothing to do", not "something broke".
+				// not a crash.
+				//
+				// A review runs because there is a diff; an empty
+				// diff means the premise does not hold, so the
+				// outcome is a failure: the caller decides what to
+				// do with a review that never looked at anything.
 				text = fmt.Sprintf(
-					"ℹ️ no diff to review in %s (working tree clean, no staged/committed/untracked files in scope)",
+					"❌ no diff to review in %s (working tree clean, no staged/committed/untracked files in scope)",
 					workspace)
 				slog.Default().Info("/review: empty diff, no agent spawn",
 					"agent", runnerName,
 					"workspace", workspace)
 				work.Report(messages.Outcome{
-					Status:  messages.OutcomeNoop,
+					Status:  messages.OutcomeFailed,
 					Summary: "no diff to review",
 					Data:    map[string]string{"agent": runnerName, "reason": "no_diff"},
 				})

@@ -1060,11 +1060,14 @@ func (f *Factory) runCommit(ctx context.Context, _ command.RuntimeServices, cs *
 
 // runSync handles `/gtw sync`: checkout the default branch and
 // pull --rebase from origin. The reply is an IM-friendly
-// compact summary (✅ branch @ sha + commit list, or ✨
+// compact summary (✅ branch @ sha + commit list, or ✅
 // already up to date) — not git's raw pull stdout. Errors are
 // surfaced verbatim (RefreshDefaultBranch already includes the
 // dirty-worktree refusal and rebase-conflict guidance the
 // user needs).
+//
+// A branch that was already up to date is a sync that did what it
+// was asked to do: the outcome is `ok`, and the card says so.
 //
 // Wrapped in withHooks so sync.before / sync.after fire.
 func (f *Factory) runSync(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
@@ -1134,7 +1137,14 @@ func (f *Factory) runSync(ctx context.Context, _ command.RuntimeServices, cs *ch
 	case syncFacts == nil:
 		reportOutcome(ctx, command.NoopOutcome("the sync was skipped", nil))
 	case !syncFacts.pulled:
-		reportOutcome(ctx, command.NoopOutcome("the branch was already up to date", syncFacts.data()))
+		// A sync is an unconditional refresh: a correct checkout and
+		// a pull with nothing to pull means the goal state holds, so
+		// the sync did what it was asked to do.
+		reportOutcome(ctx, messages.Outcome{
+			Status:  messages.OutcomeOK,
+			Summary: "the branch was already up to date",
+			Data:    syncFacts.data(),
+		})
 	default:
 		reportOutcome(ctx, messages.Outcome{
 			Status:  messages.OutcomeOK,

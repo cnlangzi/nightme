@@ -101,16 +101,19 @@ func dispatchPush(
 			command.FailedOutcome("dirty", "the worktree has uncommitted changes")), nil
 	}
 
-	// 2. Nothing to do. Note: a branch with no upstream at all
-	// deliberately returns HasNothingToPush=false here (the
-	// branch was never published; programmaticPush handles the
-	// first push).
+	// 2. Nothing to push. A push runs because the branch carries
+	// commits the remote does not have; a branch that carries none
+	// means the premise does not hold, so the command reports a
+	// failure and the caller decides what to do. Note: a branch
+	// with no upstream at all deliberately returns
+	// HasNothingToPush=false here (the branch was never published;
+	// programmaticPush handles the first push).
 	if snap.HasNothingToPush() {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-			"ℹ️ nothing to push\n"+
+			"❌ nothing to push\n"+
 				"  no uncommitted changes\n"+
 				"  no unpushed commits on "+snap.Branch,
-			command.NoopOutcome("the branch has nothing to push",
+			command.FailedOutcomeData("nothing_to_push", "the branch has nothing to push",
 				map[string]string{"branch": snap.Branch})), nil
 	}
 
@@ -168,11 +171,20 @@ func dispatchPush(
 	} else {
 		revRange = firstPushRevRange(ctx, c, deps)
 	}
-	card, commitCount, err := replyPushSuccessCard(ctx, c, revRange, deps)
+	card, commitCount, err := replyPushCard(ctx, c, revRange, deps)
 	if err != nil {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ push succeeded but couldn't render card: %v", err),
 			command.FailedOutcome("error", "the push landed but its result could not be read")), nil
+	}
+	// The push landed no commit: the branch carried nothing the
+	// remote did not have. The card says so, and the outcome says
+	// so — a push that pushed nothing did not do what it was asked
+	// to do, so the caller decides what to do next.
+	if commitCount == 0 {
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, card,
+			command.FailedOutcomeData("nothing_to_push", "the branch has nothing to push",
+				map[string]string{"branch": c.Branch})), nil
 	}
 	// The remote tip the push left behind. Read it back so a
 	// program knows which commit origin now points at — the local

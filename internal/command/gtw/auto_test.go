@@ -311,7 +311,7 @@ func TestSelectNextAssignedIssue_NoCandidates(t *testing.T) {
 }
 
 // TestAutoNoCandidateOutcome pins the outcome the personal agent
-// reads: a noop carrying the wake-up hint and the counters.
+// reads: a failure carrying the wake-up hint and the counters.
 func TestAutoNoCandidateOutcome(t *testing.T) {
 	sel := &autoSelection{Counters: autoCounters{
 		Candidates:   4,
@@ -320,8 +320,8 @@ func TestAutoNoCandidateOutcome(t *testing.T) {
 		PROpen:       1,
 	}}
 	o := autoNoCandidateOutcome(sel)
-	if o.Status != "noop" {
-		t.Errorf("status = %q, want noop", o.Status)
+	if o.Status != "failed" {
+		t.Errorf("status = %q, want failed", o.Status)
 	}
 	want := map[string]string{
 		"reason":        "no_candidate",

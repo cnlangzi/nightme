@@ -402,7 +402,7 @@ func listUncommittedFiles(ctx context.Context, worktree string, deps HandlerDeps
 // "originBefore..origin/<branch>" for push — see dispatchPush
 // for why push switched off `headBefore..origin/<branch>` which
 // collapses to empty after a successful push). Used by
-// replyCommitSuccessCard and replyPushSuccessCard to build the
+// replyCommitSuccessCard and replyPushCard to build the
 // IM card directly from git state — never from agent prose.
 //
 // Output is the raw `git log --oneline` text, trimmed. Caller

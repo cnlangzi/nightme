@@ -95,14 +95,16 @@ func dispatchCommit(
 			command.FailedOutcome("detached", "the worktree is on a detached HEAD")), nil
 	}
 
-	// 2. Nothing to do. Distinct message from push's
-	// "nothing to push" so the user sees which axis they're
-	// short on.
+	// 2. Nothing to commit. A commit runs because the worktree
+	// carries changes; a clean worktree means the premise does not
+	// hold, so the command reports a failure and the caller decides
+	// what to do. Distinct message from push's "nothing to push" so
+	// the user sees which axis they're short on.
 	if snap.WorkingTreeIsClean() {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-			"ℹ️ nothing to commit\n"+
+			"❌ nothing to commit\n"+
 				"  no uncommitted changes on "+snap.Branch,
-			command.NoopOutcome("the worktree has nothing to commit",
+			command.FailedOutcomeData("nothing_to_commit", "the worktree has nothing to commit",
 				map[string]string{"branch": snap.Branch})), nil
 	}
 

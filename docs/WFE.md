@@ -29,6 +29,7 @@ The personal agent (`/me`) runs a workflow in a chat. The same file is the plan 
   - [5.3 `wait` — sit out a duration](#53-wait--sit-out-a-duration)
   - [5.4 `use` — invoke a registered action](#54-use--invoke-a-registered-action)
   - [5.5 Common step fields](#55-common-step-fields)
+  - [5.6 `final` — the step that cleans up after the round](#56-final--the-step-that-cleans-up-after-the-round)
 - [6. Expressions (`${{ ... }}`)](#6-expressions--)
 - [7. Complete examples](#7-complete-examples)
 - [8. Runtime architecture](#8-runtime-architecture)
@@ -283,6 +284,8 @@ A **round** is one pass through a job's step list. When a round ends, the job st
 
 A round in which no step ran does not repeat: a job whose every step is skipped had nothing to do, so it does not start another round. The plan is exhausted and the agent decides whether the run is over.
 
+A round can also end **early**: the agent ends it when there is genuinely nothing left to do in it. The steps of the round that did not run are recorded as skipped, the job's final step (see §5.6) runs in their place, and the job starts its next round. A job that names no final step just starts its next round.
+
 A job waits for the jobs it `needs` — a repeating needed job releases the waiting job after its first round, because a job that repeats until the run ends never finishes.
 
 A workflow runs one job graph in one chat: the branches of the graph express ordering and branching, never concurrent work on separate workspaces.
@@ -408,6 +411,27 @@ Every step supports:
 | `note` | string | — | Why the step is there, and when the extra commands apply. It is the description the decision model reads. |
 | `allow` | string[] | — | The extra commands the agent may use inside the step. |
 | `attempts` | int | (no limit) | The number of actions the agent may take on the step in one round — the step's own execution, the `allow:` commands and the nightme commands issued for it. `attempts: 0` means no limit. |
+| `final` | bool | `false` | The step cleans up after the round. It runs when the round ends, however the round ends. |
+
+### 5.6 `final` — the step that cleans up after the round
+
+```yaml
+jobs:
+  ship:
+    iterations: 0                     # the job repeats until the run ends
+    steps:
+      - id: fix
+        message: "/gtw fix ${{ args.issue }} -y"
+      - id: cleanup
+        message: "/gtw close"
+        final: true
+```
+
+A final step is normally the last step of its job. It runs in the ordinary order when the round completes. When the round ends early — the agent ends it because there is genuinely nothing left to do — the final step runs in place of the steps the round cut short, and the job starts its next round.
+
+The author says which step cleans up, so no existing workflow changes meaning: a workflow without a `final: true` step behaves exactly as before.
+
+A final step is a step like any other: when it fails, the agent is asked again.
 
 ---
 
@@ -472,9 +496,14 @@ jobs:
       - id: push
         message: "/gtw push"
         if: ${{ steps.fix.outputs.data.issue }}
+      - id: close
+        message: "/gtw close"
+        final: true
 ```
 
 The guard on the steps after `fix` reads `data.issue`: a fix that picked an issue reports `issue` in its outcome, a fix that found nothing does not — so the guard means "an issue was picked" and the rest of the round is skipped.
+
+The `close` step is the final step: it runs however the round ends. When the queue was empty, the agent ends the round instead of walking past the work that was never done, and `close` still tidies up the worktree the previous round left behind.
 
 ### 7.2 Build, test and report
 
@@ -602,6 +631,8 @@ A run that has not executed anything yet counts as `ok`, so the first step runs 
 
 A round ends when the job's steps are done. The next round starts with the job's first step, the round's step outputs are cleared and the per-step `attempts` budgets start over. The ready set of the next round is computed from the state of that round.
 
+A round can also end early, when the agent ends it: the steps of the round that did not run are recorded as skipped, the job's final step runs in their place, and the round advances as it does after an ordinary round. The step whose failure the agent resolved is not a judgment point any more — the agent has already decided what happens next.
+
 ### 8.3 The judgment points
 
 A judgment point is where the workflow cannot decide and the agent does. It is reached when:
@@ -623,6 +654,8 @@ The agent answers a judgment point with a **directive**:
 | `answer_choice(choice_id, option_id)` | Answers a prompt the work agent is waiting for. |
 | `ask_human(question)` | Asks the user. The run waits for the answer. |
 | `repo_status()` | Reads the branch and the tree facts of the chat. |
+| `wait(duration)` | Waits before the model looks again — for work that is still running in the background. The duration is a Go duration (`30s`, `5m`); the wait lasts at most 10 minutes. |
+| `end_round()` | Ends the round of the job the run is on: the steps of the round that did not run are skipped, the job's final step runs, and the job starts its next round. |
 | `finish(status, summary)` | Ends the run. `status` is `done` or `failed`. |
 
 `run_step` takes the id of a step: the step that is ready, or one that already ran in this round. A step further down the line is refused — the steps of a job run in order, and a skipped one would come back out of order.
@@ -664,6 +697,8 @@ The chat model acts through the tools below. Every handler enforces the policy: 
 | `answer_choice(choice_id, option_id)` | Answers a permission request or a question the work agent is waiting for. |
 | `ask_human(question)` | Asks the question in the chat — as a reply to the run's overview — and waits. The answer resumes the run as the tool's result. |
 | `repo_status()` | Reads the chat's repository: the branch, whether the tree is dirty, and how far the branch is ahead of or behind its upstream and its base branch. |
+| `wait(duration)` | Blocks the agent's turn for the duration, at most 10 minutes, and hands the turn back to the model when it is over. The wait belongs to the run: stopping the run or shutting the daemon ends it at once. |
+| `end_round()` | Ends the round of the job the run is on: the steps of the round that did not run are recorded as skipped, the job's final step runs in their place, and the job starts its next round. A round whose step is still running cannot end. |
 | `finish(status, summary)` | Runs `Policy.CheckFinish`, ends the run and posts the summary. `status` is `done` or `failed`. |
 
 A free-form text that names a nightme command is refused: the command has a tool of its own, and a command in a free-form text would run as a turn of the chat instead of as a command of the run.
@@ -693,9 +728,9 @@ The decision is recorded in the conversation as a synthetic assistant tool call,
 
 **System 2 — the chat model.** The standard tool-calling shape: call the model with the tools, run the tool calls, append the results, repeat until `finish` or a pause.
 
-The model is the owner's avatar: what it runs executes exactly as if the owner had typed it. The system prompt is the role, the tools and the workflow — the title, the jobs, the steps, their notes, the commands a step allows and its limits. It does not carry the workflow's conditions, its environment or its templates: those are the engine's business, not the model's.
+The model is the owner's avatar: what it runs executes exactly as if the owner had typed it. The system prompt is the role, the tools and the workflow — the title, the jobs, the steps, their notes, the commands a step allows and its limits. It does not carry the workflow's conditions, its environment or its templates: those are the engine's business, not the model's. It names the two situations a step that produced nothing can mean: nothing is left to do (end the round) or the work is still running in the background (wait, then look again).
 
-The model is called with a situation report: why the run needs it, the round it is in, the steps of that round and which one is ready, the outcome of the last action, the hint that explains the reason code of that outcome, and the tail of the transcript. The report is the first turn of the conversation; it is added again whenever the workflow ran on by itself in between, as a user turn.
+The model is called with a situation report: why the run needs it, the round it is in, the steps of that round and which one is ready, what every step of the round produced — its status, its summary, its facts and the hint that explains its reason code — and the transcripts of the last two actions, each cut to its last 4 KB. The report is the first turn of the conversation; it is added again whenever the workflow ran on by itself in between, as a user turn.
 
 Anything that needs text — an instruction, an answer to a prompt — always goes to System 2.
 
@@ -784,7 +819,7 @@ The run judges from facts, not from text. Every command the agent sends reports 
 | `ok` | The step did what it was asked to do. |
 | `noop` | There was nothing to do — the request was valid, the world already satisfied it. |
 | `incomplete` | The step partly worked; the rest is still open. |
-| `failed` | The step did not work. |
+| `failed` | The step did not work. A command that ran *because* something existed and found nothing to do reports `failed`: nothing to commit, nothing to push, no diff to review, an empty queue. The premise did not hold, so the run stops there and the agent decides. |
 | `cancelled` | Somebody stopped it. |
 | `timeout` | It ran out of time. |
 | `unknown` | Nobody reported a verdict. |

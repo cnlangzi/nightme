@@ -2,6 +2,7 @@ package me
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -526,8 +527,9 @@ func TestRestart_ResolvesAnInFlightCommandAsInterrupted(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	waitSent(t, op, "/gtw commit")
-	// Wait until the run persisted the in-flight command.
-	waitStateFile(t, dir)
+	// Wait until the run persisted the in-flight command: a state file
+	// without it would restart the step from the beginning.
+	waitInFlight(t, dir)
 
 	// The daemon restarts with a fresh tracker: the execution of the
 	// in-flight command is gone.
@@ -723,6 +725,36 @@ func TestIntegration_TheWorkflowRunsEndToEnd(t *testing.T) {
 }
 
 // waitStateFile waits until a run persisted its state.
+// waitInFlight waits until the persisted run carries the command it
+// was waiting for.
+func waitInFlight(t *testing.T, dir string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		entries, err := os.ReadDir(filepath.Join(dir, "runs"))
+		if err == nil {
+			for _, e := range entries {
+				if !strings.HasSuffix(e.Name(), ".json") {
+					continue
+				}
+				raw, err := os.ReadFile(filepath.Join(dir, "runs", e.Name()))
+				if err != nil {
+					continue
+				}
+				var state persistedRun
+				if err := json.Unmarshal(raw, &state); err != nil {
+					continue
+				}
+				if state.Inflight != nil {
+					return
+				}
+			}
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatal("the run did not persist its in-flight command")
+}
+
 func waitStateFile(t *testing.T, dir string) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)

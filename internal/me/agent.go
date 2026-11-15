@@ -676,6 +676,9 @@ func (s *Service) Continue(ctx context.Context, chatID, note string) error {
 	if err := r.handBack(note); err != nil {
 		return err
 	}
+	// The reset of the step's budget is part of the run's state: a
+	// daemon that goes away now comes back with it.
+	s.persist(r)
 	s.updateCard(r)
 	return nil
 }

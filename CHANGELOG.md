@@ -17,8 +17,8 @@ is committed there is the version users build and run.
 now has one budget for every step and every round, set by `me.max_judgments`
 (50 by default).
 
-A chance is the step's own execution, a nightme command issued for it, or a
-turn of the chat model that produced no tool call. When the budget of the
+A chance is the step's own execution, a nightme command or an instruction
+issued for it, or a turn of the chat model that produced no tool call. When the budget of the
 step the run is on is spent, the run pauses and says so in the chat:
 `/me continue` hands the control back and the step's budget starts over.
 

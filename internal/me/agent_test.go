@@ -699,16 +699,31 @@ func decisionResp(model, next string, confidence, needsHuman float64) llm.Decisi
 }
 
 // waitRun waits until the run of a chat is over.
+//
+// A run that is over has left the chat, and its goroutine may still
+// be unwinding — posting the summary of the session, closing the
+// session that thinks for the owner. The wait is for the goroutine,
+// not for the chat.
 func waitRun(t *testing.T, svc *Service, chatID string) {
 	t.Helper()
 	svc.mu.Lock()
 	r := svc.active[chatID]
 	svc.mu.Unlock()
-	if r == nil {
+	if r != nil {
+		select {
+		case <-r.done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the run did not finish")
+		}
 		return
 	}
+	done := make(chan struct{})
+	go func() {
+		svc.wg.Wait()
+		close(done)
+	}()
 	select {
-	case <-r.done:
+	case <-done:
 	case <-time.After(10 * time.Second):
 		t.Fatal("the run did not finish")
 	}

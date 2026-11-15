@@ -64,7 +64,7 @@ func (p *Policy) Record(rec ActionRecord) {
 // a step.
 func belongsToStep(kind ActionKind) bool {
 	switch kind {
-	case ActionKindRun, ActionKindCommand, ActionKindStall, ActionKindReset:
+	case ActionKindRun, ActionKindCommand, ActionKindInstruct, ActionKindStall, ActionKindReset:
 		return true
 	}
 	return false
@@ -73,7 +73,7 @@ func belongsToStep(kind ActionKind) bool {
 // SetRounds records the round every job is in.
 //
 // The run state owns the rounds; the policy needs them to count the
-// attempts of the current round.
+// actions of the current round.
 func (p *Policy) SetRounds(rounds map[string]int) {
 	p.rounds = make(map[string]int, len(rounds))
 	for job, round := range rounds {
@@ -341,8 +341,8 @@ func (p *Policy) stepCommandList() string {
 }
 
 // StepUsage counts the chances the step spent in the current round:
-// its own runs, the commands issued for it and the turns the agent
-// produced no tool call in.
+// its own runs, the commands and the instructions issued for it and the
+// turns the agent produced no tool call in.
 //
 // A reset starts the step's budget over: only the actions after the
 // last one count.
@@ -366,7 +366,7 @@ func (p *Policy) StepUsage(idx int) int {
 		case ActionKindReset:
 			after = i
 			n = 0
-		case ActionKindRun, ActionKindCommand, ActionKindStall:
+		case ActionKindRun, ActionKindCommand, ActionKindInstruct, ActionKindStall:
 			if i > after {
 				n++
 			}

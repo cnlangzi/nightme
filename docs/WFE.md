@@ -677,7 +677,9 @@ The policy is the bound on what a run may do. It is a pure function of the workf
 | `Render()` | The workflow as a compact text block: the identity, the title, the steps, the notes and the limits. |
 | `StepCommands()` | The step messages the policy accepts right now. |
 
-A step's message belongs to that step, and a step that spent its budget leaves the list. The budget counts the actions of the current round only: the step's own execution, the nightme commands issued for it, and the turns of the chat model that produced no tool call. It starts over at every round.
+A step's message belongs to that step, and a step that spent its budget leaves the list. The budget counts the actions of the current round only: the step's own execution, the nightme commands and the instructions issued for it, and the turns of the chat model that produced no tool call. It starts over at every round.
+
+A judgment that names no step — the plan forks, a job starts a new round — is charged to the last step that ran in the round. A run that has done no work yet is charged to the step the plan may run now. Every turn the agent spends without acting costs a chance somewhere: a turn that costs nothing bounds nothing.
 
 The budget is one number for every step and every round, set by the personal agent from `me.max_judgments` (50 by default). A workflow file does not carry it. When the budget of the step the run is on is spent, the run pauses and says so in the chat: the operator hands the control back with `/me continue`, and the step's budget starts over.
 
@@ -731,7 +733,9 @@ The decision is recorded in the conversation as a synthetic assistant tool call,
 
 The model is the owner's avatar: what it runs executes exactly as if the owner had typed it. The system prompt is the role, the tools and the workflow — the title, the jobs, the steps, their notes and its limits. It does not carry the workflow's conditions, its environment or its templates: those are the engine's business, not the model's. It names the two situations a step that produced nothing can mean: nothing is left to do (end the round) or the work is still running in the background (wait, then look again).
 
-The model is called with a situation report: why the run needs it, the round it is in, the steps of that round and which one is ready, what every step of the round produced — its status, its summary, its facts and the hint that explains its reason code — and the transcripts of the last two actions, each cut to its last 4 KB. The report is the first turn of the conversation; it is added again whenever the workflow ran on by itself in between, as a user turn.
+The model is called with a situation report: why the run needs it, the round it is in, the state of the repository, the steps of that round and which one is ready, what every step of the round produced — its status, its summary, its facts and the hint that explains its reason code — the step the judgment is about with its note, the commands the policy accepts now, the chances left for it, the turns the agent spent without acting, the directives it may take, and the transcripts of the last two actions, each cut to its last 4 KB.
+
+The report is a user turn, and only the latest one is kept: the report is rendered again on every turn of the agent, and a conversation that holds one report per turn grows past what the provider accepts.
 
 Anything that needs text — an instruction, an answer to a prompt — always goes to System 2.
 

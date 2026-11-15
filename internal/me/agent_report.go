@@ -159,7 +159,7 @@ func (s *Service) renderRepository(ctx context.Context, r *run) string {
 	if dir == "" {
 		return ""
 	}
-	facts, err := s.repoFacts(ctx, dir)
+	facts, err := s.repoFactsWithBase(ctx, dir, r.baseBranchOf(ctx, s, dir))
 	if err != nil {
 		return ""
 	}
@@ -209,24 +209,21 @@ func (s *Service) renderRepair(r *run) string {
 }
 
 // renderDirectives renders the directives the model may take now.
+//
+// The list is the whole catalogue of the run: a report that named
+// only some of the tools would read as the set of permitted moves.
 func (s *Service) renderDirectives(r *run) string {
 	var b strings.Builder
 	b.WriteString("\ndirectives now:\n")
-	if ids := r.readyStepIDs(); len(ids) > 0 {
-		for _, id := range ids {
-			fmt.Fprintf(&b, "  run_step(%q)\n", id)
-		}
+	for _, id := range r.readyStepIDs() {
+		fmt.Fprintf(&b, "  run_step(%q)\n", id)
 	}
-	for _, c := range r.commands {
-		name := toolName(c.Name)
-		if name == "" {
+	for _, tool := range s.toolCatalogue(r) {
+		if tool.Name == toolRunStep {
 			continue
 		}
-		fmt.Fprintf(&b, "  %s\n", name)
+		fmt.Fprintf(&b, "  %s\n", tool.Name)
 	}
-	b.WriteString("  end_round\n")
-	b.WriteString("  ask_human\n")
-	b.WriteString("  finish\n")
 	return b.String()
 }
 

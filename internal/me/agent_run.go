@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -163,6 +164,11 @@ type run struct {
 	// situationStale records that the workflow moved on since the
 	// model last read a situation report.
 	situationStale bool
+	// situationIdx is where the situation report sits in the
+	// conversation. The report is rendered again on every turn, and
+	// only the latest one is kept: the conversation would grow with
+	// every turn of the agent.
+	situationIdx int
 	// transcripts holds the transcripts of the last actions, oldest
 	// first. The evidence that explains a failure is often in the
 	// action before the one that failed.
@@ -178,6 +184,14 @@ type run struct {
 	// failed, the step that is still running. Empty when the judgment
 	// names no step.
 	judgmentStep string
+	// base is the base branch of the workspace, and baseDir the
+	// directory it was read for.
+	//
+	// Resolving the base branch may reach the remote: the situation
+	// report is rendered on every turn of the agent, so the branch is
+	// read once per workspace.
+	base    string
+	baseDir string
 	// providerWait is how long the run waits before it asks the chat
 	// model again. It grows with every failed turn and starts over
 	// when the model answers.
@@ -232,29 +246,28 @@ func newRun(svc *Service, req Request, wf *wfe.Workflow, args map[string]string)
 	}
 	slices.Sort(names)
 	commands := usableCommands(req.Commands)
-	policy := wfe.NewPolicy(wf, nil)
-	policy.Commands = commandNames(commands)
-	policy.Budget = svc.cfg.MaxJudgments
+	policy := svc.newPolicy(wf, nil, commands)
 	return &run{
-		svc:       svc,
-		id:        id,
-		chatID:    req.ChatID,
-		cwd:       req.Cwd,
-		owner:     req.Owner,
-		argNames:  names,
-		argVals:   args,
-		workflow:  wf,
-		policy:    policy,
-		state:     newRunState(id, wf.Name, req.Cwd, now),
-		registry:  req.Commands,
-		commands:  commands,
-		agentName: svc.agentName(req.Agent),
-		phase:     PhaseRunning,
-		ctx:       ctx,
-		cancel:    cancel,
-		resume:    make(chan struct{}, 1),
-		unpause:   make(chan struct{}, 1),
-		done:      make(chan struct{}),
+		svc:          svc,
+		id:           id,
+		chatID:       req.ChatID,
+		cwd:          req.Cwd,
+		owner:        req.Owner,
+		argNames:     names,
+		argVals:      args,
+		workflow:     wf,
+		policy:       policy,
+		state:        newRunState(id, wf.Name, req.Cwd, now),
+		registry:     req.Commands,
+		commands:     commands,
+		agentName:    svc.agentName(req.Agent),
+		phase:        PhaseRunning,
+		situationIdx: -1,
+		ctx:          ctx,
+		cancel:       cancel,
+		resume:       make(chan struct{}, 1),
+		unpause:      make(chan struct{}, 1),
+		done:         make(chan struct{}),
 	}
 }
 
@@ -520,6 +533,43 @@ func (r *run) appendMessage(m llm.Message) {
 	r.mu.Unlock()
 }
 
+// appendSituation adds the situation report to the conversation.
+//
+// Only the latest report is kept. The report is rendered again on
+// every turn of the agent, and a conversation that holds one report
+// per turn grows past what the provider accepts.
+func (r *run) appendSituation(text string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.situationIdx >= 0 && r.situationIdx < len(r.messages) {
+		// A fresh slice: the conversation is copied elsewhere, and the
+		// copy shares the array the messages live in.
+		msgs := make([]llm.Message, 0, len(r.messages))
+		msgs = append(msgs, r.messages[:r.situationIdx]...)
+		msgs = append(msgs, r.messages[r.situationIdx+1:]...)
+		r.messages = msgs
+	}
+	r.messages = append(r.messages, situationMessage(text))
+	r.situationIdx = len(r.messages) - 1
+}
+
+// situationIndex returns where the last situation report sits in a
+// conversation, or -1 when it holds none.
+//
+// The report is the user turn that opens with the reason the run
+// needs the model.
+func situationIndex(msgs []llm.Message) int {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role != llm.RoleUser {
+			continue
+		}
+		if strings.HasPrefix(msgs[i].Text(), situationMark) {
+			return i
+		}
+	}
+	return -1
+}
+
 // markSituation records that the workflow moved on by itself.
 func (r *run) markSituation() {
 	r.mu.Lock()
@@ -705,21 +755,76 @@ func (r *run) setJudgmentStep(stepID string) {
 	r.mu.Unlock()
 }
 
-// budgetStep returns the step whose budget bounds the run now: the
-// step the judgment is about, or the step the run is on.
+// newPolicy builds the policy of a run.
 //
-// A judgment that names no step — the plan forks, a job starts a new
-// round — belongs to the last step that ran in the round.
+// The budget is the agent's: one number for every step and every
+// round. It is set here, so a run cannot go without one.
+func (s *Service) newPolicy(wf *wfe.Workflow, history []wfe.ActionRecord, commands []CommandInfo) *wfe.Policy {
+	p := wfe.NewPolicy(wf, history)
+	p.Budget = s.cfg.MaxJudgments
+	p.Commands = commandNames(commands)
+	return p
+}
+
+// baseBranchOf returns the base branch of a workspace.
+//
+// The resolution may reach the remote, so it is done once per
+// workspace: the situation report is rendered on every turn of the
+// agent, and the base branch of a workspace does not change.
+func (r *run) baseBranchOf(ctx context.Context, s *Service, dir string) string {
+	r.mu.Lock()
+	cached, cachedDir := r.base, r.baseDir
+	r.mu.Unlock()
+	if cachedDir == dir {
+		return cached
+	}
+	base := s.baseBranch(ctx, dir)
+	r.mu.Lock()
+	r.base, r.baseDir = base, dir
+	r.mu.Unlock()
+	return base
+}
+
+// budgetStep returns the step whose budget bounds the run now.
+//
+// The judgment names the step it is about. A judgment that names no
+// step — the plan forks, a job starts a new round — belongs to the
+// last step that ran in the round. A run that has done no work yet
+// belongs to the step the plan may run now, and a run whose plan is
+// spent to the last step of the round.
+//
+// Every judgment ends up at a step: a turn the agent spent without
+// acting has to cost a chance somewhere, or nothing bounds the run.
 func (r *run) budgetStep() string {
 	r.mu.Lock()
-	stepID := r.judgmentStep
-	r.mu.Unlock()
-	if stepID != "" {
-		return stepID
-	}
-	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.policy.CurrentStepID()
+	return r.budgetStepLocked()
+}
+
+// budgetStepLocked returns the step whose budget bounds the run now.
+// The caller holds the lock.
+func (r *run) budgetStepLocked() string {
+	if r.judgmentStep != "" {
+		return r.judgmentStep
+	}
+	if id := r.policy.CurrentStepID(); id != "" {
+		return id
+	}
+	if ids := r.readyStepIDsLocked(); len(ids) > 0 {
+		return ids[0]
+	}
+	return r.lastStepLocked()
+}
+
+// lastStepLocked returns the id of the last step the run state holds.
+// The caller holds the lock.
+func (r *run) lastStepLocked() string {
+	for i := len(r.state.Steps) - 1; i >= 0; i-- {
+		if r.state.Steps[i].ID != "" {
+			return r.state.Steps[i].ID
+		}
+	}
+	return ""
 }
 
 // stepUsage returns the chances the step spent in the current round
@@ -814,6 +919,12 @@ func (r *run) consecutiveStalls() int {
 func (r *run) readyStepIDs() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.readyStepIDsLocked()
+}
+
+// readyStepIDsLocked returns the ids of the steps the plan may run
+// now. The caller holds the lock.
+func (r *run) readyStepIDsLocked() []string {
 	ready, err := wfe.ReadySet(r.state, r.workflow)
 	if err != nil {
 		return nil
@@ -835,7 +946,7 @@ func (r *run) renderPolicy() string {
 // record appends an action to the policy's history.
 //
 // The record carries the round the step's job is in: the per-step
-// budgets count the attempts of the current round only.
+// budgets count the actions of the current round only.
 func (r *run) record(kind wfe.ActionKind, command, stepID string, outcome wfe.Outcome) {
 	r.mu.Lock()
 	r.policy.Record(wfe.ActionRecord{
@@ -949,6 +1060,7 @@ type persistedRun struct {
 	Ask              *askState          `json:"ask,omitempty"`
 	Inflight         *inflightState     `json:"inflight,omitempty"`
 	Phase            Phase              `json:"phase"`
+	JudgmentStep     string             `json:"judgment_step,omitempty"`
 	Question         string             `json:"question"`
 	Error            string             `json:"error"`
 	Paused           bool               `json:"paused"`
@@ -985,7 +1097,7 @@ func (s *Service) persist(r *run) {
 		Owner:            r.owner,
 		Args:             r.argVals,
 		Workflow:         r.workflow,
-		State:            r.state,
+		State:            snapshotState(r.state),
 		History:          append([]wfe.ActionRecord(nil), r.policy.History...),
 		Transcripts:      append([]actionTranscript(nil), r.transcripts...),
 		Messages:         append([]llm.Message(nil), r.messages...),
@@ -993,6 +1105,7 @@ func (s *Service) persist(r *run) {
 		Ask:              r.ask,
 		Inflight:         r.inflight,
 		Phase:            r.phase,
+		JudgmentStep:     r.judgmentStep,
 		Question:         r.question,
 		Error:            r.errMsg,
 		Paused:           r.paused,
@@ -1029,6 +1142,31 @@ func (s *Service) persist(r *run) {
 	if err := os.Rename(tmp, path); err != nil {
 		s.logger.Warn("me: the run state could not be replaced", "run_id", r.id, "err", err)
 	}
+}
+
+// snapshotState copies the progress of a run.
+//
+// The state is written to disk outside the run's lock, and the run
+// moves on while the file is written: the state is copied first.
+func snapshotState(state *wfe.RunState) *wfe.RunState {
+	if state == nil {
+		return nil
+	}
+	out := *state
+	out.Env = maps.Clone(state.Env)
+	out.Rounds = maps.Clone(state.Rounds)
+	if state.EndedRounds != nil {
+		out.EndedRounds = make(map[string]wfe.EndedRound, len(state.EndedRounds))
+		for job, ended := range state.EndedRounds {
+			out.EndedRounds[job] = ended
+		}
+	}
+	out.Steps = make([]wfe.StepState, len(state.Steps))
+	for i, st := range state.Steps {
+		out.Steps[i] = st
+		out.Steps[i].Outcome.Data = maps.Clone(st.Outcome.Data)
+	}
+	return &out
 }
 
 // removeState deletes the persisted state of a run that ended.
@@ -1104,10 +1242,8 @@ func (s *Service) resumeRuns(ctx context.Context) {
 // restoreRun rebuilds a run from its persisted state.
 func (s *Service) restoreRun(state persistedRun) *run {
 	ctx, cancel := context.WithCancel(context.Background())
-	policy := wfe.NewPolicy(state.Workflow, state.History)
 	commands := usableCommands(state.Commands)
-	policy.Commands = commandNames(commands)
-	policy.Budget = s.cfg.MaxJudgments
+	policy := s.newPolicy(state.Workflow, state.History, commands)
 	r := &run{
 		svc:              s,
 		id:               state.RunID,
@@ -1124,6 +1260,7 @@ func (s *Service) restoreRun(state persistedRun) *run {
 		ask:              state.Ask,
 		inflight:         state.Inflight,
 		phase:            state.Phase,
+		judgmentStep:     state.JudgmentStep,
 		question:         state.Question,
 		errMsg:           state.Error,
 		paused:           state.Paused,
@@ -1139,6 +1276,7 @@ func (s *Service) restoreRun(state persistedRun) *run {
 		commands:         commands,
 		agentName:        s.agentName(state.Agent),
 		wakes:            state.Wakes,
+		situationIdx:     situationIndex(state.Messages),
 		ctx:              ctx,
 		cancel:           cancel,
 		resume:           make(chan struct{}, 1),

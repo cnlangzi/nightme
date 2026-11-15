@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/llm"
+	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/wfe"
 )
 
@@ -238,7 +239,7 @@ func TestBudget_AStallCostsAChance(t *testing.T) {
 	svc.mu.Lock()
 	r := svc.runs[runID]
 	svc.mu.Unlock()
-	waitProseCalls(t, provider, 1)
+	waitStalls(t, svc, "obs-1", 1)
 
 	r.mu.Lock()
 	stalls := r.policy.ConsecutiveStalls()
@@ -515,24 +516,27 @@ func TestTheRunDoesNotFailOnAProseReply(t *testing.T) {
 	}
 }
 
-// waitProseCalls waits until the prose provider served that many
-// calls.
-func waitProseCalls(t *testing.T, provider *proseProvider, n int) {
+// waitStalls waits until the history of the run holds that many
+// stalls.
+func waitStalls(t *testing.T, svc *Service, chatID string, n int) {
 	t.Helper()
+	svc.mu.Lock()
+	r := svc.active[chatID]
+	svc.mu.Unlock()
+	if r == nil {
+		t.Fatal("the chat has no run in it")
+	}
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		provider.mu.Lock()
-		calls := provider.calls
-		provider.mu.Unlock()
-		if calls >= n {
+		r.mu.Lock()
+		stalls := r.policy.ConsecutiveStalls()
+		r.mu.Unlock()
+		if stalls >= n {
 			return
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
-	provider.mu.Lock()
-	calls := provider.calls
-	provider.mu.Unlock()
-	t.Fatalf("the chat model was called %d times, want %d", calls, n)
+	t.Fatalf("the history holds no stall")
 }
 
 // waitCard waits until the run's overview carries the given text.
@@ -594,5 +598,134 @@ jobs:
 	}
 	if !pushed {
 		t.Fatalf("the second step never ran on the fast path: %v", sent)
+	}
+}
+
+// alwaysProse answers with words every time.
+type alwaysProse struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (p *alwaysProse) Complete(_ context.Context, _ llm.Request) (*llm.Response, error) {
+	p.mu.Lock()
+	p.calls++
+	p.mu.Unlock()
+	return &llm.Response{Message: textMsg("I think I should commit.")}, nil
+}
+
+// alwaysInstruct calls the instruction tool every time.
+type alwaysInstruct struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (p *alwaysInstruct) Complete(_ context.Context, _ llm.Request) (*llm.Response, error) {
+	p.mu.Lock()
+	p.calls++
+	p.mu.Unlock()
+	return &llm.Response{Message: toolCallMsg("c1", toolInstruct, map[string]any{"text": "fix it"})}, nil
+}
+
+// TestBudget_AJudgmentWithoutAStepIsBounded — a judgment that names
+// no step — the plan forks — still costs chances.
+//
+// The stall has to land on a step the budget can see, or nothing
+// bounds the run.
+func TestBudget_AJudgmentWithoutAStepIsBounded(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "fork", `title: fork
+jobs:
+  a:
+    steps:
+      - id: a1
+        message: /gtw a
+  b:
+    steps:
+      - id: b1
+        message: /gtw b
+`)
+
+	provider := &alwaysProse{}
+	svc, op := testService(t, dir, Config{Provider: provider, MaxJudgments: 3})
+	op.steps = []fakeStep{okStep("a"), okStep("b")}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "fork", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitPaused(t, svc, "obs-1")
+
+	provider.mu.Lock()
+	calls := provider.calls
+	provider.mu.Unlock()
+	if calls > 4 {
+		t.Errorf("the chat model was called %d times, want the budget to stop the run", calls)
+	}
+}
+
+// TestBudget_AnInstructionCostsAChance — an instruction is a repair:
+// it is work the agent causes, so it costs a chance of the step.
+func TestBudget_AnInstructionCostsAChance(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", budgetWorkflow)
+
+	provider := &alwaysInstruct{}
+	svc, op := testService(t, dir, Config{Provider: provider, MaxJudgments: 3})
+	op.steps = []fakeStep{{outcome: messages.Outcome{
+		Status:  messages.OutcomeFailed,
+		Summary: "the command failed",
+	}}}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitPaused(t, svc, "obs-1")
+
+	provider.mu.Lock()
+	calls := provider.calls
+	provider.mu.Unlock()
+	if calls > 3 {
+		t.Errorf("the chat model was called %d times, want the budget to stop the run", calls)
+	}
+}
+
+// TestBudget_TheConversationKeepsOneSituationReport — the report is
+// rendered again on every turn, and only the latest one is kept: a
+// conversation that holds one report per turn grows past what the
+// provider accepts.
+func TestBudget_TheConversationKeepsOneSituationReport(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", budgetWorkflow)
+
+	provider := &alwaysProse{}
+	svc, op := testService(t, dir, Config{Provider: provider, MaxJudgments: 6})
+	op.steps = []fakeStep{{outcome: messages.Outcome{
+		Status:  messages.OutcomeFailed,
+		Summary: "the command failed",
+	}}}
+
+	runID, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	svc.mu.Lock()
+	r := svc.runs[runID]
+	svc.mu.Unlock()
+	waitPaused(t, svc, "obs-1")
+
+	var reports int
+	for _, m := range r.conversation() {
+		if m.Role == llm.RoleUser && strings.HasPrefix(m.Text(), situationMark) {
+			reports++
+		}
+	}
+	if reports != 1 {
+		t.Errorf("the conversation holds %d situation reports, want 1", reports)
 	}
 }

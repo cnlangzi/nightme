@@ -43,14 +43,14 @@ func (s *Service) system2(ctx context.Context, r *run) (bool, error) {
 		// prompt has no conversation to answer: the API refuses the
 		// request. The opening turn says what the run is up
 		// against.
-		r.appendMessage(situationMessage(s.renderSituation(ctx, r)))
+		r.appendSituation(s.renderSituation(ctx, r))
 		r.takeSituation()
 		conversation = r.conversation()
 	} else if r.takeSituation() {
 		// The workflow ran on by itself while the model was away: the
 		// model reads the new situation before it decides again. The
 		// report is a user turn, so the system prompt stays the same.
-		r.appendMessage(situationMessage(s.renderSituation(ctx, r)))
+		r.appendSituation(s.renderSituation(ctx, r))
 		conversation = r.conversation()
 	}
 	req := llm.Request{
@@ -185,6 +185,12 @@ func (s *Service) chargeStall(r *run, summary string) {
 	r.markSituation()
 	s.persist(r)
 }
+
+// situationMark opens the situation report.
+//
+// The report is the user turn that tells the model why the run needs
+// it; the mark is how the run finds it again in the conversation.
+const situationMark = "The run needs you:"
 
 // situationMessage builds the user turn that carries a situation
 // report.

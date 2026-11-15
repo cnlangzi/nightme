@@ -307,6 +307,9 @@ const (
 	// ActionKindRun is the step's own execution — the step running.
 	ActionKindRun ActionKind = "run"
 	// ActionKindInstruct is a free-form prompt to the coding agent.
+	//
+	// It counts against the step the run is on: it is a repair, and a
+	// repair is work the agent causes.
 	ActionKindInstruct ActionKind = "instruct"
 	// ActionKindCommand is a nightme command the run issued as a
 	// repair.
@@ -328,10 +331,10 @@ const (
 )
 
 // ActionRecord is one action the run has taken. StepID points at the
-// step the action served: a run belongs to its step, and a repair
-// counts against the step the run is on. A stall counts against the
-// step the judgment was about, and a reset names the step whose
-// budget starts over. An instruction carries an empty one.
+// step the action served: a run belongs to its step, and a repair — a
+// command or an instruction — counts against the step the run is on.
+// A stall counts against the step the judgment was about, and a reset
+// names the step whose budget starts over.
 //
 // Round is the round of the step's job the action was taken in. The
 // per-step budgets count the actions of the current round only.

@@ -22,7 +22,9 @@
 // by the process it just spawned.
 //
 // The file is rewritten atomically (temp + rename) after every
-// transition because the parent polls it concurrently.
+// transition because the parent polls it concurrently. On Windows the
+// rename has to be retried while the parent holds the file open —
+// see replaceReportFile.
 package main
 
 import (
@@ -158,7 +160,7 @@ func (w *startupReportWriter) flush() {
 		w.warnOnce(err)
 		return
 	}
-	if err := os.Rename(tmpName, w.path); err != nil {
+	if err := replaceReportFile(tmpName, w.path); err != nil {
 		w.warnOnce(err)
 	}
 }

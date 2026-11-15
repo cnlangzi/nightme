@@ -7,10 +7,10 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 
-	"github.com/cnlangzi/nightme/internal/channel/loopback"
+	"github.com/cnlangzi/nightme/internal/gateway/observe"
 	"github.com/cnlangzi/nightme/internal/llm"
+	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/wfe"
 )
 
@@ -18,9 +18,9 @@ import (
 const (
 	// toolRunStep runs one of the workflow's steps.
 	toolRunStep = "run_step"
-	// toolInstruct sends a free-form prompt to the work agent.
+	// toolInstruct sends a free-form prompt to the coding agent.
 	toolInstruct = "instruct"
-	// toolAnswerChoice answers a pending prompt of the work chat.
+	// toolAnswerChoice answers a pending prompt of the chat.
 	toolAnswerChoice = "answer_choice"
 	// toolAskHuman asks the user.
 	toolAskHuman = "ask_human"
@@ -52,7 +52,7 @@ func toolErrorf(format string, args ...any) error {
 	return &toolError{msg: fmt.Sprintf(format, args...)}
 }
 
-// stepResult is the result of a command the run sent to the work
+// stepResult is the result of a command the run sent to the the
 // chat.
 type stepResult struct {
 	// Status is the machine-readable verdict.
@@ -61,8 +61,12 @@ type stepResult struct {
 	Summary string `json:"summary"`
 	// Data carries the facts the command reported.
 	Data map[string]string `json:"data,omitempty"`
-	// Transcript is the tail of what the work agent said.
+	// Transcript is the tail of what the coding agent said.
 	Transcript string `json:"transcript,omitempty"`
+	// entries is the whole transcript of the execution. It is not
+	// part of the tool result — the model reads the truncated
+	// transcript above — but the run scans every line of it.
+	entries []observe.Entry
 }
 
 // toolCatalogue returns the tools the chat model may call.
@@ -70,27 +74,27 @@ func toolCatalogue() []llm.Tool {
 	return []llm.Tool{
 		{
 			Name:        toolRunStep,
-			Description: "Run one of the workflow's steps in the work chat. The command must be a step of the workflow or one its step allows.",
+			Description: "Run one of the workflow's steps in the chat. The command must be a step of the workflow or one its step allows.",
 			Schema:      json.RawMessage(`{"type":"object","properties":{"command":{"type":"string","description":"the command to run"}},"required":["command"],"additionalProperties":false}`),
 		},
 		{
 			Name:        toolInstruct,
-			Description: "Send a free-form instruction to the work agent, for the cases the workflow's commands do not cover.",
+			Description: "Send a free-form instruction to the coding agent, for the cases the workflow's commands do not cover.",
 			Schema:      json.RawMessage(`{"type":"object","properties":{"text":{"type":"string","description":"the instruction"}},"required":["text"],"additionalProperties":false}`),
 		},
 		{
 			Name:        toolAnswerChoice,
-			Description: "Answer a prompt the work agent is waiting for — a permission request or a question.",
+			Description: "Answer a prompt the coding agent is waiting for — a permission request or a question.",
 			Schema:      json.RawMessage(`{"type":"object","properties":{"choice_id":{"type":"string","description":"the id of the prompt"},"option_id":{"type":"string","description":"the id of the option to pick"}},"required":["choice_id","option_id"],"additionalProperties":false}`),
 		},
 		{
 			Name:        toolAskHuman,
-			Description: "Ask the user a question. The run waits for the answer.",
+			Description: "Ask the user a question. The run waits for the answer. The operator answers by quoting the question or by picking a button on the run card.",
 			Schema:      json.RawMessage(`{"type":"object","properties":{"question":{"type":"string","description":"the question"}},"required":["question"],"additionalProperties":false}`),
 		},
 		{
 			Name:        toolRepoStatus,
-			Description: "Read the repository facts of the work chat: the branch, whether the tree is dirty, and how far the branch is ahead of or behind its upstream and its base branch.",
+			Description: "Read the repository facts of the chat: the branch, whether the tree is dirty, and how far the branch is ahead of or behind its upstream and its base branch.",
 			Schema:      json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`),
 		},
 		{
@@ -232,7 +236,7 @@ func (s *Service) runStep(ctx context.Context, r *run, command string) (stepResu
 	return res, nil
 }
 
-// toolInstruct sends a free-form prompt to the work agent.
+// toolInstruct sends a free-form prompt to the coding agent.
 func (s *Service) toolInstruct(ctx context.Context, r *run, call pendingCall) (stepResult, error) {
 	text, err := callArgString(call, "text")
 	if err != nil {
@@ -255,7 +259,11 @@ func (s *Service) toolInstruct(ctx context.Context, r *run, call pendingCall) (s
 	return res, nil
 }
 
-// toolAnswerChoice answers a prompt the work agent is waiting for.
+// toolAnswerChoice answers a prompt the chat is waiting for.
+//
+// The answer is a click: the prompt is patched to show the choice,
+// and the click reaches the agent the way a person's click reaches
+// it.
 func (s *Service) toolAnswerChoice(ctx context.Context, r *run, call pendingCall) (stepResult, error) {
 	choiceID, err := callArgString(call, "choice_id")
 	if err != nil {
@@ -265,14 +273,14 @@ func (s *Service) toolAnswerChoice(ctx context.Context, r *run, call pendingCall
 	if err != nil {
 		return stepResult{}, err
 	}
-	if s.cfg.Answerer == nil {
+	if s.cfg.Operator == nil {
 		return stepResult{}, toolErrorf("nothing can answer a prompt right now")
 	}
 	inflight := r.inflightState()
 	if inflight == nil {
 		return stepResult{}, toolErrorf("no command is running, so there is no prompt to answer")
 	}
-	ex, ok := s.cfg.Loopback.Get(inflight.MsgID)
+	ex, ok := s.cfg.Operator.Get(inflight.MsgID)
 	if !ok {
 		return stepResult{}, toolErrorf("the command is no longer running")
 	}
@@ -297,7 +305,10 @@ func (s *Service) toolAnswerChoice(ctx context.Context, r *run, call pendingCall
 	if label == "" {
 		return stepResult{}, toolErrorf("the prompt %q has no option %q", choiceID, optionID)
 	}
-	if err := s.cfg.Answerer.Answer(r.workChatID, choiceID, optionID); err != nil {
+	if err := s.cfg.Operator.Act(ctx, r.chatID, messages.ActionPayload{
+		RequestID: choiceID,
+		Option:    optionID,
+	}); err != nil {
 		return stepResult{}, toolErrorf("the prompt could not be answered: %v", err)
 	}
 	return stepResult{Status: "ok", Summary: "answered: " + label}, nil
@@ -316,14 +327,14 @@ func (s *Service) toolAskHuman(ctx context.Context, r *run, call pendingCall) (s
 	return stepResult{Status: "ok", Summary: "the user answered: " + reply, Data: map[string]string{"answer": reply}}, nil
 }
 
-// toolRepoStatus reads the repository facts of the work chat.
+// toolRepoStatus reads the repository facts of the chat.
 func (s *Service) toolRepoStatus(ctx context.Context, r *run, _ pendingCall) (stepResult, error) {
 	if s.cfg.Git == nil {
 		return stepResult{}, toolErrorf("the repository facts are not available")
 	}
 	dir := r.cwd
 	if dir == "" {
-		return stepResult{}, toolErrorf("the work chat has no working directory")
+		return stepResult{}, toolErrorf("the chat has no working directory")
 	}
 	facts, err := s.repoFacts(ctx, dir)
 	if err != nil {
@@ -364,8 +375,16 @@ func (s *Service) toolFinish(ctx context.Context, r *run, call pendingCall) (ste
 		return stepResult{}, toolErrorf("%s", err.Error())
 	}
 	r.markFinished()
-	s.finish(r, PhaseDone, "")
-	s.notify(r, finishLine(r, status, summary))
+	if status == "failed" {
+		// The model says the run did not work: the reason is the
+		// error, and the summary says how it ended.
+		r.setSummary("the run failed")
+		s.finish(r, PhaseFailed, summary)
+	} else {
+		r.setSummary(summary)
+		s.finish(r, PhaseDone, "")
+	}
+	s.updateCard(r)
 	s.persist(r)
 	return stepResult{Status: status, Summary: summary}, nil
 }
@@ -416,39 +435,32 @@ func outcomeSucceeded(status string) bool {
 	return status == string(wfe.OutcomeOK) || status == string(wfe.OutcomeNoop)
 }
 
-// runCommand sends a command to the work chat and waits for it.
+// runCommand sends a command to the chat and waits for it.
 //
 // A command that is already running is picked up where it left off,
 // so a step that came back early — waiting for a prompt, or stalled —
 // can be resumed instead of run twice.
+//
+// A command the agent could not take because it is rate limited pauses
+// the run: the agent is throttled, and running the command again
+// makes it worse.
 func (s *Service) runCommand(ctx context.Context, r *run, command string, instruct bool) (stepResult, error) {
 	res, err := s.runCommandInner(ctx, r, command, instruct)
 	if err != nil {
 		return res, err
 	}
 	s.reportOutcome(r, command, res)
+	if throttled(res) {
+		r.requestPause(rateLimitReason)
+	}
 	return res, nil
 }
 
-// reportOutcome tells the observer how a command ended.
+// reportOutcome records how a command ended and refreshes the run's
+// overview.
 func (s *Service) reportOutcome(r *run, command string, res stepResult) {
 	r.setTranscript(res.Transcript)
-	switch res.Status {
-	case statusWaiting:
-		s.notify(r, "⏳ "+command+" is waiting · "+res.Summary)
-	case string(wfe.OutcomeOK), string(wfe.OutcomeNoop):
-		s.notify(r, "✅ "+command)
-	case string(wfe.OutcomeIncomplete):
-		s.notify(r, "⚠️ "+command+" incomplete"+groupsSuffix(res.Data))
-	case string(wfe.OutcomeFailed):
-		s.notify(r, "❌ "+command+" failed")
-	case string(wfe.OutcomeTimeout):
-		s.notify(r, "⏱ "+command+" timed out")
-	case string(wfe.OutcomeCancelled):
-		s.notify(r, "⏹ "+command+" was cancelled")
-	default:
-		s.notify(r, "❓ "+command+" finished with no verdict")
-	}
+	s.updateCard(r)
 }
 
 // groupsSuffix renders how many review groups are still open.
@@ -466,19 +478,19 @@ func groupsSuffix(data map[string]string) string {
 
 // runCommandInner sends the command and waits for it.
 func (s *Service) runCommandInner(ctx context.Context, r *run, command string, instruct bool) (stepResult, error) {
-	if s.cfg.Loopback == nil {
-		return stepResult{}, errors.New("me: no loopback client")
+	if s.cfg.Operator == nil {
+		return stepResult{}, errors.New("me: no operator: the chat cannot be driven")
 	}
 	msgID := ""
 	if inflight := r.inflightState(); inflight != nil && inflight.Command == command {
-		ex, ok := s.cfg.Loopback.Get(inflight.MsgID)
+		ex, ok := s.cfg.Operator.Get(inflight.MsgID)
 		switch {
 		case !ok:
 			// The execution is gone: the daemon that carried it is
 			// no longer watching it.
 			r.clearInflight()
 			return stepResult{Status: statusInterrupted, Summary: "the command was interrupted"}, nil
-		case ex.Phase == loopback.PhaseSettled:
+		case ex.Phase == observe.PhaseSettled:
 			r.clearInflight()
 			return resultOf(ex), nil
 		default:
@@ -486,37 +498,34 @@ func (s *Service) runCommandInner(ctx context.Context, r *run, command string, i
 		}
 	}
 	if msgID == "" {
-		s.notify(r, "▶ "+truncate(command, 80))
-		id, err := s.cfg.Loopback.Send(ctx, r.workChatID, command)
+		id, err := s.speak(ctx, r, command, "")
 		if err != nil {
-			return stepResult{}, fmt.Errorf("the work chat could not run %q: %w", command, err)
+			return stepResult{}, fmt.Errorf("the chat could not run %q: %w", command, err)
 		}
 		msgID = id
 		r.setInflight(&inflightState{MsgID: msgID, Command: command, Instruct: instruct})
 		// The in-flight command is persisted right away: a daemon
 		// that dies while it runs comes back and resolves it.
 		s.persist(r)
+		s.updateCard(r)
 	}
 	return s.watchCommand(ctx, r, msgID, command)
 }
 
 // watchCommand waits for a command to settle.
 //
-// It comes back early when the work agent asks something — the model
-// can then answer — or when the command goes quiet for too long.
+// The run has no clock of its own here: the agent behind the command
+// decides when it is done, and its verdict is the verdict. The run
+// only watches.
+//
+// It comes back early when the chat asks something — the agent is
+// waiting for an answer, and the model can answer it.
 func (s *Service) watchCommand(ctx context.Context, r *run, msgID, command string) (stepResult, error) {
 	ch := r.watchChannel()
 	if ch == nil {
-		ch = s.cfg.Loopback.Watch(msgID)
+		ch = s.cfg.Operator.Watch(msgID)
 		r.setWatchChannel(ch)
 	}
-
-	deadline := s.now().Add(s.cfg.StepTimeout)
-	lastBeat := s.now()
-	poll := s.pollInterval()
-
-	ticker := time.NewTicker(poll)
-	defer ticker.Stop()
 
 	for {
 		select {
@@ -527,12 +536,12 @@ func (s *Service) watchCommand(ctx context.Context, r *run, msgID, command strin
 		case ex, ok := <-ch:
 			if !ok {
 				// The watcher was closed without a final snapshot.
-				ex, found := s.cfg.Loopback.Get(msgID)
+				ex, found := s.cfg.Operator.Get(msgID)
 				if !found {
 					r.clearInflight()
 					return stepResult{Status: string(wfe.OutcomeUnknown), Summary: "the command was interrupted"}, nil
 				}
-				if ex.Phase != loopback.PhaseSettled {
+				if ex.Phase != observe.PhaseSettled {
 					// The watcher closed while the command was
 					// still running. The next attempt watches the
 					// execution again.
@@ -542,24 +551,12 @@ func (s *Service) watchCommand(ctx context.Context, r *run, msgID, command strin
 				r.clearInflight()
 				return resultOf(ex), nil
 			}
-			if ex.Phase == loopback.PhaseSettled {
+			if ex.Phase == observe.PhaseSettled {
 				r.clearInflight()
 				return resultOf(ex), nil
 			}
 			if len(ex.Choices) > 0 {
-				return s.waitingResult(fmt.Sprintf("the work agent is waiting for an answer: %s", ex.Choices[0].Title)), nil
-			}
-			if beat := ex.Progress.LastBeatAt; !beat.IsZero() && beat.After(lastBeat) {
-				lastBeat = beat
-			}
-		case <-ticker.C:
-			now := s.now()
-			if now.After(deadline) {
-				r.clearInflight()
-				return stepResult{Status: string(wfe.OutcomeTimeout), Summary: "the command timed out"}, nil
-			}
-			if now.Sub(lastBeat) > s.cfg.StallTimeout {
-				return s.waitingResult("the work agent went quiet"), nil
+				return s.waitingResult(fmt.Sprintf("the chat is waiting for an answer: %s", ex.Choices[0].Title)), nil
 			}
 		}
 	}
@@ -579,24 +576,15 @@ func (s *Service) waitingResult(reason string) stepResult {
 	return stepResult{Status: statusWaiting, Summary: reason}
 }
 
-// pollInterval returns how often a running command is checked for a
-// timeout or a stall.
-func (s *Service) pollInterval() time.Duration {
-	interval := time.Second
-	if quarter := s.cfg.StallTimeout / 4; quarter > 0 && quarter < interval {
-		interval = quarter
-	}
-	return interval
-}
-
 // resultOf turns a settled execution into the result of a command.
-func resultOf(ex loopback.Execution) stepResult {
+func resultOf(ex observe.Execution) stepResult {
 	res := stepResult{
 		Status:  string(ex.Outcome.Status),
 		Summary: ex.Outcome.Summary,
 		Data:    ex.Outcome.Data,
 	}
 	res.Transcript = transcriptOf(ex)
+	res.entries = ex.Transcript
 	return res
 }
 
@@ -605,7 +593,7 @@ func resultOf(ex loopback.Execution) stepResult {
 //
 // A long transcript is cut: the opening lines say what was asked, the
 // closing lines say how it ended.
-func transcriptOf(ex loopback.Execution) string {
+func transcriptOf(ex observe.Execution) string {
 	var b strings.Builder
 	for i, entry := range ex.Transcript {
 		if i > 0 {

@@ -104,9 +104,9 @@ type Step struct {
 	Allow           []string          `yaml:"allow,omitempty" json:"allow,omitempty"`
 	Attempts        int               `yaml:"attempts,omitempty" json:"attempts,omitempty"`
 
-	// Message is the text sent to the work chat.
+	// Message is the text sent to the chat.
 	Message string `yaml:"message,omitempty" json:"message,omitempty"`
-	// Shell is the shell command run in the work chat's directory.
+	// Shell is the shell command run in the chat's directory.
 	Shell string `yaml:"shell,omitempty" json:"shell,omitempty"`
 	// Use is the name of a registered action.
 	Use  string         `yaml:"use,omitempty" json:"use,omitempty"`
@@ -121,9 +121,9 @@ type StepKind int
 const (
 	// StepKindNone means the step names no kind at all.
 	StepKindNone StepKind = iota
-	// StepKindMessage sends text to the work chat.
+	// StepKindMessage sends text to the chat.
 	StepKindMessage
-	// StepKindShell runs a shell command in the work chat's directory.
+	// StepKindShell runs a shell command in the chat's directory.
 	StepKindShell
 	// StepKindUse runs a registered action.
 	StepKindUse
@@ -295,7 +295,7 @@ type ActionKind string
 const (
 	// ActionKindRun is a command from one of the workflow's steps.
 	ActionKindRun ActionKind = "run"
-	// ActionKindInstruct is a free-form prompt to the work agent.
+	// ActionKindInstruct is a free-form prompt to the coding agent.
 	ActionKindInstruct ActionKind = "instruct"
 )
 

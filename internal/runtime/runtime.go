@@ -87,6 +87,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/gateway"
 	"github.com/cnlangzi/nightme/internal/gateway/inbound"
+	"github.com/cnlangzi/nightme/internal/gateway/observe"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/prcache"
@@ -421,10 +422,17 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	// command/* factories do not take a *chatsession.Manager.
 	// ChatSession references are supplied passively: slash
 	// commands receive cs from the dispatcher parameter.
+	// The tracker is the side channel that reports what the daemon
+	// said about the messages a program sent. It is created before
+	// the channels start: every channel's outbound path taps into
+	// it, and the personal agent reads from it.
+	tracker := observe.NewTracker()
+	op := newOperator(tracker, chs)
+
 	// The personal agent is built here — before the channels start —
-	// so the /me command can reach it. It only sends commands once a
-	// run starts, which is long after the channels are up.
-	personal := buildPersonalAgent(cfg, chs, logger)
+	// so the /me command can reach it. It only speaks once a run
+	// starts, which is long after the channels are up.
+	personal := buildPersonalAgent(cfg, chs, op, logger)
 
 	command.SetDeps(command.Deps{
 		Primary: cfg.Primary,
@@ -438,7 +446,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 		// before the channels have started is safe.
 		ChatSender: NewChatSender(),
 		// Me is the personal agent the /me command drives. A daemon
-		// without a loopback channel has none.
+		// without a channel has none.
 		Me: mec.NewController(personal),
 	})
 	reg := command.Default()
@@ -466,6 +474,11 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 		&noOpEmitter{},
 		cfg.Primary,
 	)
+	// The personal agent owns the messages that answer the run's
+	// questions: they never reach the agent.
+	if personal != nil {
+		ir = ir.WithReplyClaimer(personal)
+	}
 
 	// ── Phase 3: buildStack per channel ────────────────────────
 	stackOpts := buildStackOpts{
@@ -475,6 +488,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 		asPool:        chatsession.NewAgentSessionPool(),
 		primaryAgent:  cfg.Primary,
 		gitStatusDeps: gitStatusDeps,
+		tracker:       tracker,
 		logger:        logger,
 	}
 
@@ -485,6 +499,14 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	// stores, agent registry — and no IM network round trip can hold
 	// the daemon hostage.
 	gwImpl := gateway.New(ir)
+	// The tracker learns about the messages the personal agent sent
+	// from the inbound side; the personal agent learns about the
+	// messages a person sent while a run is going.
+	observers := []observe.Observer{tracker}
+	if personal != nil {
+		observers = append(observers, personal)
+	}
+	gwImpl = gwImpl.WithObserver(observe.Observers(observers...))
 	if err := gwImpl.Start(ctx); err != nil {
 		return fmt.Errorf("run: start gateway: %w", err)
 	}
@@ -537,14 +559,17 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 		logger.Warn("no IM channel started; the daemon is running without any IM channel",
 			"configured", len(chs))
 	}
+	// The personal agent drives the channels that started: a channel
+	// that failed to start has no chat to work in.
+	op.setChannels(startedChannels)
 	if deps.OnChannelsStarted != nil {
 		deps.OnChannelsStarted(startup)
 	}
 
 	// ── Phase 5.5: the personal agent ───────────────────────────
-	// me drives the daemon through the loopback channel: it is the
-	// user half of the workflow engine. It starts once that channel
-	// is attached, so the commands it sends have a chat to land in.
+	// me works in the chat the run started in: it is the user half
+	// of the workflow engine. It starts once the channels are up,
+	// so the commands it sends have a chat to land in.
 	if personal != nil {
 		if err := personal.Start(ctx); err != nil {
 			logger.Warn("run: the personal agent did not start", "err", err)
@@ -643,6 +668,7 @@ type buildStackOpts struct {
 	asPool        *chatsession.AgentSessionPool // process-wide; shared across Managers
 	primaryAgent  string
 	gitStatusDeps chatsession.GitStatusDeps
+	tracker       *observe.Tracker
 	logger        *slog.Logger
 }
 
@@ -688,6 +714,11 @@ func buildStack(
 			return cs.GitStatus(ctx)
 		},
 	})
+	// The tracker sees what the daemon says about the messages a
+	// program sent. The tap forwards the message unchanged first.
+	if opts.tracker != nil {
+		em = observe.Tap(em, opts.tracker)
+	}
 
 	// Bind the per-channel Emitter to this mgr so new
 	// ChatSessions inherit it. MUST happen BEFORE

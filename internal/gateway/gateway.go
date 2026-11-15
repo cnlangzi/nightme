@@ -82,6 +82,10 @@ type Router struct {
 	// no Pump context is available. Set automatically when
 	// AttachPumps is called.
 	mgrFallback *chatsession.Manager
+
+	// observer is told about every inbound message before it is
+	// dispatched. Nil when nobody watches.
+	observer InboundObserver
 }
 
 // Pump pairs a channel with its per-channel chatsession.Manager.
@@ -91,6 +95,16 @@ type Router struct {
 type Pump struct {
 	Channel channel.Channel
 	Manager *chatsession.Manager
+}
+
+// InboundObserver is told about every inbound message before the
+// dispatch chain sees it.
+//
+// The observer runs on the pump goroutine, so it must be quick and
+// must not block: a program that wants to react to a person's
+// message learns about it here and does its work elsewhere.
+type InboundObserver interface {
+	Seen(msg *messages.InboundMessage)
 }
 
 // New constructs a Router (the multi-pump + binding table).
@@ -115,6 +129,17 @@ func New(ir *inbound.Router) *Router {
 		inbound:  ir,
 		bindings: make(map[string]*BindingEntry),
 	}
+}
+
+// WithObserver installs the observer that is told about every
+// inbound message before it is dispatched.
+//
+// It returns the router so it can be chained onto New.
+func (r *Router) WithObserver(o InboundObserver) *Router {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.observer = o
+	return r
 }
 
 // AttachPumps registers one (Channel, Manager) tuple per
@@ -213,6 +238,13 @@ func (r *Router) pumpOne(ctx context.Context, p Pump) {
 		case msg, ok := <-in:
 			if !ok {
 				return
+			}
+			// The observer learns about the message before the
+			// dispatch chain does, so a program that tracks the
+			// messages it sent knows about them before the daemon
+			// says anything about them.
+			if r.observer != nil {
+				r.observer.Seen(&msg)
 			}
 			// Per-pump mgr: the chat this msg came from is
 			// in this pump's chatID namespace (chatIDs are

@@ -197,6 +197,9 @@ func (s *Service) decisionState(r *run) string {
 				fmt.Fprintf(&b, "    %s: %s\n", k, v)
 			}
 		}
+		if rateLimit(last.Outcome.Summary, lastTranscript, last.Outcome.Data) {
+			b.WriteString("the agent is rate limited (429) — it is throttled. The run pauses and waits for the operator; do not pick another step yet.\n")
+		}
 	}
 	if lastTranscript != "" {
 		b.WriteString("last transcript (tail):\n")
@@ -243,13 +246,19 @@ func (s *Service) recordSynthetic(r *run, tool string, args map[string]any, dec 
 
 // escalateQuestion renders the question a run asks the user when the
 // decision model is not sure enough to act.
+//
+// "escalate" is a word for the decision model: it is left out of the
+// question, the same way it is left out of the run card's buttons.
 func escalateQuestion(dec decision) string {
 	var b strings.Builder
 	b.WriteString("Which step should run next?")
 	for _, o := range dec.Options {
+		if o.Value == optionEscalate {
+			continue
+		}
 		fmt.Fprintf(&b, "\n- %s", o.Value)
 	}
-	b.WriteString("\nReply with the command to run.")
+	b.WriteString("\nPick one of the buttons on the run card, or quote this message with your answer.")
 	return b.String()
 }
 

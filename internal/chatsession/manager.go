@@ -455,6 +455,10 @@ func (m *Manager) SendPermission(chatID, option string) error {
 //
 // Decision matrix:
 //
+//	Origin=me                                 → accept (the personal
+//	                                            agent speaks for the
+//	                                            run; the gate never
+//	                                            drops it)
 //	HasMention=true                           → accept (any mode)
 //	HasMention=false + no ChatSession yet     → accept (let
 //	                                            downstream reply
@@ -471,7 +475,12 @@ func (m *Manager) SendPermission(chatID, option string) error {
 // Relocated from internal/gateway (was gateway.WithWatchModeResolver
 // + applyWatchModeGate) so the gate stops needing a callback
 // indirection across the import-cycle boundary.
-func (m *Manager) AcceptInbound(chatID string, hasMention bool) bool {
+func (m *Manager) AcceptInbound(chatID string, hasMention bool, origin messages.Origin) bool {
+	if origin == messages.OriginMe {
+		// The personal agent speaks for the run: its message is
+		// addressed to the bot by construction.
+		return true
+	}
 	if hasMention {
 		return true
 	}
@@ -504,7 +513,7 @@ func (m *Manager) HandleInbound(ctx context.Context, msg *messages.InboundMessag
 	// F-watch §3.1.1: drop early, before any GetOrCreate / spawn
 	// work, so filtered messages don't allocate state or wake
 	// pumps. Slash commands never reach this branch.
-	if !m.AcceptInbound(msg.ChatID, msg.HasMention) {
+	if !m.AcceptInbound(msg.ChatID, msg.HasMention, msg.Origin) {
 		// F-watch first-drop hint: on the very first non-mention
 		// group message we silently drop in this chat, tell the
 		// user `/watch on` exists. AcceptInbound's drop arm only

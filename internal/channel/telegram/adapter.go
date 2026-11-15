@@ -398,14 +398,23 @@ func (a *Adapter) handleUpdate(ctx context.Context, update Update) {
 }
 
 func (a *Adapter) handleMessage(ctx context.Context, message *Message) {
-	if message == nil || message.Chat.ID == 0 {
+	if a.dropMessage(message) {
 		return
+	}
+	_ = a.ingest(ctx, message, messages.OriginHuman, "")
+}
+
+// dropMessage reports whether a Telegram update must not be
+// ingested: the bot's own message, or a bare /start.
+func (a *Adapter) dropMessage(message *Message) bool {
+	if message == nil || message.Chat.ID == 0 {
+		return true
 	}
 	a.mu.Lock()
 	botID := a.botID
 	a.mu.Unlock()
 	if message.From != nil && botID != 0 && message.From.ID == botID {
-		return
+		return true
 	}
 	text := message.Text
 	if text == "" {
@@ -424,14 +433,32 @@ func (a *Adapter) handleMessage(ctx context.Context, message *Message) {
 				"message_id", message.MessageID,
 			)
 		}
-		return
+		return true
+	}
+	return false
+}
+
+// ingest turns a Telegram message into an inbound message and
+// publishes it.
+//
+// A message the personal agent sent comes through here as well: the
+// adapter posts it on the platform and then hands the same message
+// to the daemon, so the topic, the placeholder and the reply chain
+// are set up exactly as they are for a person's message.
+func (a *Adapter) ingest(ctx context.Context, message *Message, origin messages.Origin, runID string) error {
+	if message == nil {
+		return errors.New("telegram: no message")
+	}
+	text := message.Text
+	if text == "" {
+		text = message.Caption
 	}
 	hasMention := a.hasMention(message, text)
 	chatID := strconv.FormatInt(message.Chat.ID, 10)
 	threadID, err := a.ensureTopic(ctx, message)
 	if err != nil {
 		a.logger.Warn("telegram: ensure topic failed", "chat_id", chatID, "err", err)
-		return
+		return err
 	}
 	// Placeholder ("Working...") anchors every turn's reply chain.
 	// Real Telegram topics (thread_id > 0) and DM / main-window
@@ -466,7 +493,7 @@ func (a *Adapter) handleMessage(ctx context.Context, message *Message) {
 		}
 		a.notifyDownloadFailure(chatID, topicID, downloadRes, text == "")
 		if text == "" {
-			return
+			return errors.New("telegram: the attachments could not be downloaded")
 		}
 		attachments = nil
 	} else if downloadRes.FailureCount > 0 {
@@ -536,7 +563,7 @@ func (a *Adapter) handleMessage(ctx context.Context, message *Message) {
 	// this redundant block was removed in the 2026-08-22 plan-C
 	// revision since ensurePlaceholder now persists state.)
 	if a.handleForceReply(ctx, message) {
-		return
+		return nil
 	}
 	inbound := messages.InboundMessage{
 		ChatID:      a.sessionChatID(chatID, topicID),
@@ -548,6 +575,8 @@ func (a *Adapter) handleMessage(ctx context.Context, message *Message) {
 		Time:        time.Unix(message.Date, 0).UTC(),
 		Raw:         message,
 		HasMention:  hasMention,
+		Origin:      origin,
+		RunID:       runID,
 	}
 	if inbound.Blocks == nil {
 		inbound.Blocks = a.BuildBlocks(text, attachments)
@@ -560,19 +589,31 @@ func (a *Adapter) handleMessage(ctx context.Context, message *Message) {
 		"has_mention", hasMention,
 		"message_id", message.MessageID,
 		"text_len", len(text),
+		"origin", string(origin),
+		"run_id", runID,
 	)
-	a.publish(inbound)
+	if !a.publish(inbound) {
+		return errors.New("telegram: the inbound queue is full")
+	}
+	return nil
 }
 
-func (a *Adapter) publish(inbound messages.InboundMessage) {
+// publish pushes an inbound message onto the queue.
+//
+// It reports whether the message was queued. A full queue drops the
+// message rather than stalling the daemon: the caller decides what
+// to do about a message nobody will see.
+func (a *Adapter) publish(inbound messages.InboundMessage) bool {
 	select {
 	case a.incoming <- inbound:
 		a.recordInbound(time.Now())
+		return true
 	case <-a.ctxDone():
 		// Adapter is shutting down — drop silently. This is the
 		// expected race window when Stop() is called mid-publish.
 		a.logger.Warn("telegram: publish dropped (adapter stopping)",
 			"chat_id", inbound.ChatID, "user_msg_id", inbound.MessageID)
+		return false
 	default:
 		// incoming channel is full (buffer=128). Runtime is not
 		// draining Inbound — likely a chatsession pump stall.
@@ -580,6 +621,7 @@ func (a *Adapter) publish(inbound messages.InboundMessage) {
 		a.logger.Warn("telegram: publish dropped (incoming channel full)",
 			"chat_id", inbound.ChatID, "user_msg_id", inbound.MessageID,
 			"buffer_size", cap(a.incoming))
+		return false
 	}
 }
 

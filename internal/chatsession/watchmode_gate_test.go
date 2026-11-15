@@ -1,6 +1,7 @@
 package chatsession
 
 import (
+	"github.com/cnlangzi/nightme/internal/messages"
 	"testing"
 )
 
@@ -76,12 +77,33 @@ func TestManager_AcceptInbound(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			mgr := NewManager()
 			tc.setup(mgr)
-			got := mgr.AcceptInbound(chatID, tc.hasMention)
+			got := mgr.AcceptInbound(chatID, tc.hasMention, messages.OriginHuman)
 			if got != tc.wantAccept {
 				t.Errorf("AcceptInbound(%q, hasMention=%v) = %v, want %v",
 					chatID, tc.hasMention, got, tc.wantAccept)
 			}
 		})
+	}
+}
+
+// TestManager_AcceptInbound_ThePersonalAgentAlwaysGetsThrough —
+// the message the personal agent sends is addressed to the bot by
+// construction: the gate never drops it.
+func TestManager_AcceptInbound_ThePersonalAgentAlwaysGetsThrough(t *testing.T) {
+	mgr := NewManager()
+	chatID := "oc_me"
+	cs, err := mgr.GetOrCreate(chatID, "claude")
+	if err != nil {
+		t.Fatalf("GetOrCreate: %v", err)
+	}
+	if err := cs.SetWatchMode(WatchModeMention); err != nil {
+		t.Fatalf("SetWatchMode: %v", err)
+	}
+	if !mgr.AcceptInbound(chatID, false, messages.OriginMe) {
+		t.Fatal("the message of the personal agent was dropped")
+	}
+	if mgr.AcceptInbound(chatID, false, messages.OriginHuman) {
+		t.Fatal("a message of a person was let through")
 	}
 }
 
@@ -96,10 +118,10 @@ func TestManager_AcceptInbound_DefaultModeIsMention(t *testing.T) {
 	if got := cs.WatchMode(); got != WatchModeMention {
 		t.Fatalf("WatchMode default = %q, want %q", got, WatchModeMention)
 	}
-	if mgr.AcceptInbound(chatID, false) {
+	if mgr.AcceptInbound(chatID, false, messages.OriginHuman) {
 		t.Errorf("default WatchModeMention should drop non-mention message")
 	}
-	if !mgr.AcceptInbound(chatID, true) {
+	if !mgr.AcceptInbound(chatID, true, messages.OriginHuman) {
 		t.Errorf("mention should pass regardless of mode")
 	}
 }
@@ -113,21 +135,21 @@ func TestManager_AcceptInbound_ReflectsRuntimeMutation(t *testing.T) {
 	mgr := NewManager()
 	cs, _ := mgr.GetOrCreate(chatID, "claude")
 
-	if mgr.AcceptInbound(chatID, false) {
+	if mgr.AcceptInbound(chatID, false, messages.OriginHuman) {
 		t.Fatalf("baseline: non-mention should be dropped under default WatchModeMention")
 	}
 
 	if err := cs.SetWatchMode(WatchModeAll); err != nil {
 		t.Fatalf("SetWatchMode(All): %v", err)
 	}
-	if !mgr.AcceptInbound(chatID, false) {
+	if !mgr.AcceptInbound(chatID, false, messages.OriginHuman) {
 		t.Errorf("after /watch on: non-mention should pass under WatchModeAll")
 	}
 
 	if err := cs.SetWatchMode(WatchModeMention); err != nil {
 		t.Fatalf("SetWatchMode(Mention): %v", err)
 	}
-	if mgr.AcceptInbound(chatID, false) {
+	if mgr.AcceptInbound(chatID, false, messages.OriginHuman) {
 		t.Errorf("after /watch off: non-mention should drop again under WatchModeMention")
 	}
 }

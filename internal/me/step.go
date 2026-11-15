@@ -21,8 +21,8 @@ type stepVerdict struct {
 
 // executeStep runs one step of the workflow.
 //
-// The four kinds answer to four places: a message goes to the work
-// chat, a shell command runs in the work chat's directory, an action
+// The four kinds answer to four places: a message goes to the the
+// chat, a shell command runs in the chat's directory, an action
 // runs through the action registry, and a wait runs out the clock.
 func (s *Service) executeStep(ctx context.Context, r *run, job string, step wfe.Step) (stepVerdict, error) {
 	// A step may run for a long time: the state is written first, so a
@@ -42,7 +42,7 @@ func (s *Service) executeStep(ctx context.Context, r *run, job string, step wfe.
 	return stepVerdict{}, fmt.Errorf("the step %q names no kind", step.ID)
 }
 
-// executeMessage sends the step's text to the work chat and waits for
+// executeMessage sends the step's text to the chat and waits for
 // the outcome.
 //
 // A command that could not run at all ends the step as failed: the
@@ -56,7 +56,7 @@ func (s *Service) executeMessage(ctx context.Context, r *run, job string, step w
 		}
 		out := wfe.Outcome{Status: wfe.OutcomeFailed, Summary: err.Error()}
 		r.record(wfe.ActionKindRun, text, step.ID, out)
-		s.notifyStep(r, text, out)
+		s.updateCard(r)
 		return stepVerdict{Outcome: out, Settled: true}, nil
 	}
 	if res.Status == statusWaiting {
@@ -75,7 +75,7 @@ func (s *Service) executeMessage(ctx context.Context, r *run, job string, step w
 	return stepVerdict{Outcome: out, Settled: true}, nil
 }
 
-// executeShell runs the step's shell command in the work chat's
+// executeShell runs the step's shell command in the chat's
 // current directory.
 //
 // The directory moves when a command moves it — `/gtw fix` moves the
@@ -92,10 +92,9 @@ func (s *Service) executeShell(ctx context.Context, r *run, job string, step wfe
 			Summary: fmt.Sprintf("the step %q needs a shell runner, and the daemon has none", step.ID),
 		}
 		r.record(wfe.ActionKindRun, command, step.ID, out)
-		s.notifyStep(r, command, out)
+		s.updateCard(r)
 		return stepVerdict{Outcome: out, Settled: true}, nil
 	}
-	s.notify(r, "▶ "+truncate(command, 80))
 
 	execCtx, cancel := r.runContext(ctx)
 	defer cancel()
@@ -121,16 +120,16 @@ func (s *Service) executeShell(ctx context.Context, r *run, job string, step wfe
 		}
 	}
 	r.record(wfe.ActionKindRun, command, step.ID, out)
-	s.notifyStep(r, command, out)
+	s.updateCard(r)
 	return stepVerdict{Outcome: out, Settled: true}, nil
 }
 
-// workDir returns the directory the shell steps run in: the work
+// workDir returns the directory the shell steps run in: the the
 // chat's current directory, or the workspace the run started in when
 // the daemon cannot tell.
 func (s *Service) workDir(r *run) string {
 	if s.cfg.Cwd != nil {
-		if dir := s.cfg.Cwd.Cwd(r.workChatID); dir != "" {
+		if dir := s.cfg.Cwd.Cwd(r.chatID); dir != "" {
 			return dir
 		}
 	}
@@ -170,7 +169,6 @@ func (s *Service) executeWait(ctx context.Context, r *run, job string, step wfe.
 	if err != nil {
 		return stepVerdict{}, fmt.Errorf("the step %q waits for %q, which is not a duration", step.ID, step.Wait)
 	}
-	s.notify(r, "⏳ waiting "+d.String())
 
 	execCtx, cancel := r.runContext(ctx)
 	defer cancel()
@@ -183,7 +181,7 @@ func (s *Service) executeWait(ctx context.Context, r *run, job string, step wfe.
 	}
 	out := wfe.Outcome{Status: wfe.OutcomeOK, Summary: "waited " + d.String()}
 	r.record(wfe.ActionKindRun, "wait "+d.String(), step.ID, out)
-	s.notifyStep(r, "wait "+d.String(), out)
+	s.updateCard(r)
 	return stepVerdict{Outcome: out, Settled: true}, nil
 }
 
@@ -194,7 +192,6 @@ func (s *Service) executeWait(ctx context.Context, r *run, job string, step wfe.
 func (s *Service) executeUse(ctx context.Context, r *run, job string, step wfe.Step) (stepVerdict, error) {
 	name := s.evalText(r, step.Use)
 	with := wfe.EvalMap(step.With, r.exprCtx())
-	s.notify(r, "▶ "+name)
 
 	execCtx, cancel := r.runContext(ctx)
 	defer cancel()
@@ -216,20 +213,8 @@ func (s *Service) executeUse(ctx context.Context, r *run, job string, step wfe.S
 		out.Summary = err.Error()
 	}
 	r.record(wfe.ActionKindRun, name, step.ID, out)
-	s.notifyStep(r, name, out)
+	s.updateCard(r)
 	return stepVerdict{Outcome: out, Settled: true}, nil
-}
-
-// notifyStep posts the progress of a step that is not a message.
-func (s *Service) notifyStep(r *run, label string, out wfe.Outcome) {
-	switch out.Status {
-	case wfe.OutcomeOK, wfe.OutcomeNoop:
-		s.notify(r, "✅ "+label)
-	case wfe.OutcomeFailed:
-		s.notify(r, "❌ "+label+" failed")
-	default:
-		s.notify(r, "❓ "+label+" finished with no verdict")
-	}
 }
 
 // evalText resolves the expressions of a step's text.

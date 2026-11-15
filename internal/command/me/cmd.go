@@ -1,13 +1,15 @@
 // Package me implements the `/me` slash command.
 //
-// /me starts a workflow in the chat it is typed in. The chat then
-// receives the progress of the run, the questions the run cannot
-// answer on its own, and the summary when it ends.
+// /me starts a workflow in the chat it is typed in. The run then
+// works in that chat: every step it takes is a message of the chat,
+// and the chat holds the run's overview.
 //
 // The commands:
 //
 //	/me start <workflow> [args...] — start a workflow
 //	/me reply <text>              — answer the question the run asked
+//	/me pause                     — stop the run after the current step
+//	/me continue [note]           — hand the control back to the run
 //	/me stop                      — stop the run
 //	/me status                    — report where the run stands
 package me
@@ -49,11 +51,14 @@ func (f *Factory) Spec() command.Spec {
 	return command.Spec{
 		Name:     "me",
 		Summary:  "Run a workflow: /me start <workflow> [args...]",
-		Usage:    "/me start <workflow> [args...]\n/me reply <text>\n/me stop\n/me status",
+		Usage:    "/me start <workflow> [args...]\n/me reply <text>\n/me pause\n/me continue [note]\n/me show\n/me stop\n/me status",
 		Category: "agent",
 		Subcommands: []command.SubcommandSpec{
 			{Name: "start", Summary: "Start a workflow in this chat."},
 			{Name: "reply", Summary: "Answer the question the run asked."},
+			{Name: "pause", Summary: "Stop the run after the current step."},
+			{Name: "continue", Summary: "Hand the control back to the run."},
+			{Name: "show", Summary: "Show the run's state again."},
 			{Name: "stop", Summary: "Stop the run of this chat."},
 			{Name: "status", Summary: "Report where the run stands."},
 		},
@@ -77,6 +82,12 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 		return f.start(ctx, rt, cs, input)
 	case "reply":
 		return f.reply(ctx, rt, input)
+	case "pause":
+		return f.pause(ctx, rt, input)
+	case "continue":
+		return f.continueRun(ctx, rt, input)
+	case "show":
+		return f.show(ctx, rt, input)
 	case "stop":
 		return f.stop(ctx, rt, input)
 	case "status":
@@ -103,11 +114,11 @@ func (f *Factory) start(ctx context.Context, rt command.RuntimeServices,
 
 	name := input.Args[2]
 	runID, err := f.ctrl.StartWorkflow(ctx, command.MeRequest{
-		Name:           name,
-		Args:           input.Args[3:],
-		ObserverChatID: input.ChatID,
-		Cwd:            cwd,
-		Agent:          workAgent(cs),
+		Name:   name,
+		Args:   input.Args[3:],
+		ChatID: input.ChatID,
+		Cwd:    cwd,
+		Owner:  input.UserID,
 	})
 	if err != nil {
 		chatsession.ReportOutcome(ctx, command.FailedOutcome("error", "the workflow could not be started"))
@@ -119,21 +130,6 @@ func (f *Factory) start(ctx context.Context, rt command.RuntimeServices,
 		Data:    map[string]string{"workflow": name, "run_id": runID},
 	})
 	return command.Reply(ctx, rt, "▶ "+name+" started ("+runID+")"), nil
-}
-
-// workAgent returns the agent the work chat uses.
-//
-// The chat's own choice wins; a chat that selected nothing falls back
-// to its primary agent. The workflow names no agent: the run belongs
-// to the chat that started it.
-func workAgent(cs *chatsession.ChatSession) string {
-	if cs == nil {
-		return ""
-	}
-	if agent := cs.SelectedAgent(); agent != "" {
-		return agent
-	}
-	return cs.PrimaryAgent()
 }
 
 // reply hands the user's answer to the run.
@@ -152,6 +148,46 @@ func (f *Factory) reply(ctx context.Context, rt command.RuntimeServices, input c
 		Summary: "the reply was delivered",
 	})
 	return command.Reply(ctx, rt, "✅ The reply was delivered."), nil
+}
+
+// pause stops the run after the step it is on.
+func (f *Factory) pause(ctx context.Context, rt command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
+	if err := f.ctrl.Pause(ctx, input.ChatID); err != nil {
+		chatsession.ReportOutcome(ctx, command.FailedOutcome("error", "the run could not be paused"))
+		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
+	}
+	chatsession.ReportOutcome(ctx, messages.Outcome{
+		Status:  messages.OutcomeOK,
+		Summary: "the run pauses after the current step",
+	})
+	return command.Reply(ctx, rt, "⏸ The run pauses after the current step."), nil
+}
+
+// continueRun hands the control back to a paused run.
+func (f *Factory) continueRun(ctx context.Context, rt command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
+	note := continueNote(input.Text)
+	if err := f.ctrl.Continue(ctx, input.ChatID, note); err != nil {
+		chatsession.ReportOutcome(ctx, command.FailedOutcome("error", "the run could not be continued"))
+		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
+	}
+	chatsession.ReportOutcome(ctx, messages.Outcome{
+		Status:  messages.OutcomeOK,
+		Summary: "the run goes on",
+	})
+	return command.Reply(ctx, rt, "▶ The run goes on."), nil
+}
+
+// show puts the run's state back in front of the operator.
+func (f *Factory) show(ctx context.Context, rt command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
+	if err := f.ctrl.Show(ctx, input.ChatID); err != nil {
+		chatsession.ReportOutcome(ctx, command.FailedOutcome("error", "the run could not be shown"))
+		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
+	}
+	chatsession.ReportOutcome(ctx, messages.Outcome{
+		Status:  messages.OutcomeOK,
+		Summary: "the run's state is shown again",
+	})
+	return command.Reply(ctx, rt, "📋 The run's state is shown again."), nil
 }
 
 // stop stops the run of this chat.
@@ -199,6 +235,9 @@ func renderStatus(st command.MeStatus) string {
 	if st.Progress != "" {
 		fmt.Fprintf(&b, "progress: %s\n", st.Progress)
 	}
+	if st.Paused {
+		fmt.Fprintf(&b, "paused: %s\n", st.PauseReason)
+	}
 	fmt.Fprintf(&b, "actions: %d taken\n", st.Actions)
 	fmt.Fprintf(&b, "system-1: %d decisions, %d tokens\n", st.System1Decisions, st.System1Tokens)
 	fmt.Fprintf(&b, "system-2: %d decisions, %d tokens\n", st.System2Decisions, st.System2Tokens)
@@ -217,6 +256,17 @@ func renderStatus(st command.MeStatus) string {
 // The command name and the subcommand are skipped as tokens, so any
 // spacing between them is tolerated.
 func replyText(text string) string {
+	rest := skipToken(text)
+	if rest == "" {
+		return ""
+	}
+	rest = skipToken(rest)
+	return strings.TrimSpace(rest)
+}
+
+// continueNote returns the note of a /me continue: everything after
+// the "continue" token.
+func continueNote(text string) string {
 	rest := skipToken(text)
 	if rest == "" {
 		return ""
@@ -253,27 +303,42 @@ func NewController(svc *mesvc.Service) command.MeController {
 // StartWorkflow implements command.MeController.
 func (c *controller) StartWorkflow(ctx context.Context, req command.MeRequest) (string, error) {
 	return c.svc.StartWorkflow(ctx, mesvc.Request{
-		Name:           req.Name,
-		Args:           req.Args,
-		ObserverChatID: req.ObserverChatID,
-		Cwd:            req.Cwd,
-		Agent:          req.Agent,
+		Name:   req.Name,
+		Args:   req.Args,
+		ChatID: req.ChatID,
+		Cwd:    req.Cwd,
+		Owner:  req.Owner,
 	})
 }
 
 // Reply implements command.MeController.
-func (c *controller) Reply(ctx context.Context, observerChatID, text string) error {
-	return c.svc.Reply(ctx, observerChatID, text)
+func (c *controller) Reply(ctx context.Context, chatID, text string) error {
+	return c.svc.Reply(ctx, chatID, text)
+}
+
+// Pause implements command.MeController.
+func (c *controller) Pause(ctx context.Context, chatID string) error {
+	return c.svc.Pause(ctx, chatID)
+}
+
+// Continue implements command.MeController.
+func (c *controller) Continue(ctx context.Context, chatID, note string) error {
+	return c.svc.Continue(ctx, chatID, note)
+}
+
+// Show implements command.MeController.
+func (c *controller) Show(ctx context.Context, chatID string) error {
+	return c.svc.Show(ctx, chatID)
 }
 
 // Stop implements command.MeController.
-func (c *controller) Stop(ctx context.Context, observerChatID string) error {
-	return c.svc.Stop(ctx, observerChatID)
+func (c *controller) Stop(ctx context.Context, chatID string) error {
+	return c.svc.Stop(ctx, chatID)
 }
 
 // Status implements command.MeController.
-func (c *controller) Status(observerChatID string) command.MeStatus {
-	st := c.svc.Status(observerChatID)
+func (c *controller) Status(chatID string) command.MeStatus {
+	st := c.svc.Status(chatID)
 	out := command.MeStatus{
 		Phase:            string(st.Phase),
 		RunID:            st.RunID,
@@ -285,6 +350,8 @@ func (c *controller) Status(observerChatID string) command.MeStatus {
 		System1Tokens:    st.System1Usage.Total(),
 		System2Tokens:    st.System2Usage.Total(),
 		Question:         st.Question,
+		Paused:           st.Paused,
+		PauseReason:      st.PauseReason,
 		Error:            st.Error,
 	}
 	if st.Progress.LastBeatAt.IsZero() {

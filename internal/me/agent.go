@@ -14,17 +14,21 @@
 //     exhausted — the agent decides: it picks the next node, repairs
 //     the current one, or ends the run.
 //
-// Both drive the daemon through the loopback channel, the way a
-// person drives it through Feishu: every command is a real message
-// with a real id, and every answer comes back as a structured
-// outcome. The workflow's policy (internal/wfe.Policy) is the
-// boundary — a tool call the workflow does not allow comes back as
-// an error the model can correct.
+// The agent sits in the chat the run started in. What it says is a
+// real message of that chat, posted on the platform like any other
+// message, so the receipt, the reaction and the interactive prompts
+// anchor to it the way they anchor to a person's message.
+//
+// The run has no clock of its own. Every command it issues carries
+// its own budget, and the run acts on the outcome the agent reports:
+// a timeout is the agent's timeout, never the run's. The run watches.
 //
 // The split:
 //
-//   - internal/channel/loopback — transport. How a message gets into
-//     the daemon, and how its outcome comes back.
+//   - internal/channel — transport. How a message reaches the chat
+//     and how a click comes back.
+//   - internal/gateway/observe — the side channel that reports what
+//     the daemon said about the messages the run sent.
 //   - internal/wfe — the workflow schema, the engine that computes
 //     the plan of a run, and the policy that bounds what a run may
 //     do.
@@ -42,7 +46,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cnlangzi/nightme/internal/channel/loopback"
+	"github.com/cnlangzi/nightme/internal/channel"
+	"github.com/cnlangzi/nightme/internal/gateway/observe"
 	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/wfe"
@@ -58,13 +63,20 @@ const (
 	// chat model.
 	DefaultTokenBudget = 200_000
 
-	// DefaultStepTimeout caps one step of a run.
-	DefaultStepTimeout = 30 * time.Minute
-
-	// DefaultStallTimeout is how long a step may go without a
-	// heartbeat before the run stops waiting for it.
-	DefaultStallTimeout = 10 * time.Minute
+	// The run has no budget of its own.
+	//
+	// Every command the run issues carries one: the agent behind it
+	// reports its own outcome when its own budget runs out. The run
+	// watches that outcome and acts on it — a timeout is the agent's
+	// timeout, never the run's.
 )
+
+// BotMark is what the run's messages look like in the chat.
+//
+// The agent speaks with the bot's voice: a person reading the chat
+// sees at once that the message came from the run and not from
+// somebody else.
+const BotMark = "🧑‍💻: "
 
 // Phase is where a run stands.
 type Phase string
@@ -74,15 +86,17 @@ const (
 	PhaseIdle Phase = "idle"
 	// PhaseRunning means the run is working.
 	PhaseRunning Phase = "running"
-	// PhaseWaiting means the run is waiting for a step to settle.
-	PhaseWaiting Phase = "waiting"
-	// PhasePaused means the run is waiting for the user's reply.
+	// PhasePaused means the run stopped on purpose: the operator
+	// asked for a pause, or a person took the chat back.
 	PhasePaused Phase = "paused"
+	// PhaseAsking means the run is waiting for the operator to
+	// answer a question.
+	PhaseAsking Phase = "asking"
 	// PhaseDone means the run finished its workflow.
 	PhaseDone Phase = "done"
 	// PhaseFailed means the run could not go on.
 	PhaseFailed Phase = "failed"
-	// PhaseStopped means the user stopped the run.
+	// PhaseStopped means the operator stopped the run.
 	PhaseStopped Phase = "stopped"
 )
 
@@ -94,13 +108,13 @@ type Request struct {
 	// form name=value assigns that argument by name; every other
 	// token fills the next declared argument, in order.
 	Args []string
-	// ObserverChatID is the chat the run reports to and takes
-	// answers from.
-	ObserverChatID string
+	// ChatID is the chat the run works in. The run speaks there and
+	// takes its answers from there.
+	ChatID string
 	// Cwd is the working directory the run works in.
 	Cwd string
-	// Agent is the agent the work chat uses.
-	Agent string
+	// Owner is the user the run speaks for.
+	Owner string
 }
 
 // Status is the state of a run.
@@ -112,9 +126,9 @@ type Status struct {
 	// Step is the command the run is on.
 	Step string
 	// Execution is the phase of the running command.
-	Execution loopback.Phase
+	Execution observe.Phase
 	// Progress is the heartbeat view of the running command.
-	Progress loopback.Progress
+	Progress observe.Progress
 	// Actions is the number of actions the run took.
 	Actions int
 	// Remaining is the budget left in the policy.
@@ -130,37 +144,42 @@ type Status struct {
 	System2Usage llm.Usage
 	// Question is the question the run is waiting for.
 	Question string
+	// Paused reports whether the run is waiting for the operator.
+	Paused bool
+	// PauseReason says why the run paused.
+	PauseReason string
 	// Error is why the run cannot go on, when it cannot.
 	Error string
 }
 
-// ChoiceAnswerer answers a pending interactive prompt on a work chat.
+// Operator drives the chat a run works in.
 //
-// The loopback channel reports the prompts a run still has to answer;
-// answering one is the daemon's business, not the agent's.
-type ChoiceAnswerer interface {
-	// Answer delivers the option to the prompt with the given
-	// request id.
-	Answer(chatID, requestID, optionID string) error
-}
-
-// Loopback drives the work chat.
-//
-// It is the slice of the loopback client the personal agent needs:
-// send a command into a chat, watch how it goes, and read the
-// execution back. The agent depends on the interface rather than on
-// the concrete client, so a run can be driven without a daemon behind
-// it.
-type Loopback interface {
-	// Send pushes text into the chat and returns the id of the
-	// message it became.
-	Send(ctx context.Context, chatID, text string) (string, error)
-	// Do sends text and waits for the command to settle.
-	Do(ctx context.Context, chatID, text string) (loopback.Execution, error)
-	// Get returns the execution of a message, without consuming it.
-	Get(msgID string) (loopback.Execution, bool)
+// It is the slice of the channel the personal agent needs: say
+// something in the chat, answer a prompt the chat is waiting for,
+// publish the run's overview, and watch how a message went.
+type Operator interface {
+	// Speak says something in the chat. The text is what the daemon
+	// dispatches; the display is what the chat shows. It returns the
+	// id of the message it became.
+	Speak(ctx context.Context, chatID, text string, opts channel.SpeakOptions) (string, error)
+	// Ask puts a question in the chat and returns the id of the
+	// message it became. The question is visible and the operator
+	// can answer it, but the daemon does not take it as a turn of
+	// its own.
+	Ask(ctx context.Context, chatID, text string, opts channel.SpeakOptions) (string, error)
+	// Act answers a prompt the chat is waiting for, as if a person
+	// had clicked the button.
+	Act(ctx context.Context, chatID string, action messages.ActionPayload) error
+	// PostCard publishes the run's overview and returns the id of
+	// the message it became.
+	PostCard(ctx context.Context, chatID string, spec channel.CardSpec) (string, error)
+	// UpdateCard replaces the run's overview.
+	UpdateCard(ctx context.Context, chatID, cardID string, spec channel.CardSpec) error
+	// Get returns the tracked execution of a message, without
+	// consuming it.
+	Get(msgID string) (observe.Execution, bool)
 	// Watch returns a channel of snapshots of an execution.
-	Watch(msgID string) <-chan loopback.Execution
+	Watch(msgID string) <-chan observe.Execution
 }
 
 // GitRunner runs git in a workspace.
@@ -171,7 +190,7 @@ type GitRunner interface {
 
 // CwdProvider reports the directory a chat currently works in.
 //
-// The work chat's directory moves when a command moves it — `/gtw fix`
+// The chat's directory moves when a command moves it — `/gtw fix`
 // moves it into the worktree — so a shell step runs where the chat
 // stands.
 type CwdProvider interface {
@@ -202,22 +221,13 @@ type Config struct {
 	// TokenBudget caps the tokens one run may spend on the chat
 	// model. Zero means DefaultTokenBudget.
 	TokenBudget int
-	// StepTimeout caps one step. Zero means DefaultStepTimeout.
-	StepTimeout time.Duration
-	// StallTimeout is how long a step may go without a heartbeat.
-	// Zero means DefaultStallTimeout.
-	StallTimeout time.Duration
-
-	// Loopback drives the work chat.
-	Loopback Loopback
+	// Operator drives the chat the run works in. Nil means the
+	// personal agent cannot run.
+	Operator Operator
 	// Shell runs the shell commands of the workflow's steps. Nil
 	// turns the shell step kind off.
 	Shell ShellRunner
-	// Sender posts the progress to the observer chat.
-	Sender messages.ChatSender
-	// Answerer answers the pending prompts of the work chat.
-	Answerer ChoiceAnswerer
-	// Git reads the repository facts of the work chat.
+	// Git reads the repository facts of the chat.
 	Git GitRunner
 	// Cwd reports the directory a chat currently works in. Nil means
 	// the shell steps run in the workspace the run started in.
@@ -233,8 +243,8 @@ type Config struct {
 // Service is the personal agent.
 //
 // It owns the workflow catalogue, the action registry and the runs.
-// One run is active per observer chat: the chat that started a run is
-// the chat that gets the progress, the questions and the summary.
+// One run is active per chat: the chat that started a run is the
+// chat the run works in and the chat that gets its overview.
 type Service struct {
 	cfg    Config
 	logger *slog.Logger
@@ -247,7 +257,7 @@ type Service struct {
 	mu sync.Mutex
 	// runs holds every run by id.
 	runs map[string]*run
-	// active maps an observer chat id to the run it started.
+	// active maps a chat id to the run it started.
 	active map[string]*run
 	// started reports whether the service is up.
 	started bool
@@ -266,12 +276,6 @@ func New(cfg Config) *Service {
 	}
 	if cfg.TokenBudget <= 0 {
 		cfg.TokenBudget = DefaultTokenBudget
-	}
-	if cfg.StepTimeout <= 0 {
-		cfg.StepTimeout = DefaultStepTimeout
-	}
-	if cfg.StallTimeout <= 0 {
-		cfg.StallTimeout = DefaultStallTimeout
 	}
 	logger := cfg.Logger
 	if logger == nil {
@@ -301,6 +305,9 @@ func (s *Service) DisabledReason() string {
 	if reason := s.modelsReason(); reason != "" {
 		return reason
 	}
+	if reason := s.operatorReason(); reason != "" {
+		return reason
+	}
 	return s.workflowsReason()
 }
 
@@ -308,6 +315,14 @@ func (s *Service) DisabledReason() string {
 func (s *Service) modelsReason() string {
 	if s.cfg.Provider == nil && s.cfg.Decider == nil {
 		return "neither me.llm nor me.decider is configured"
+	}
+	return ""
+}
+
+// operatorReason reports why the agent cannot drive a chat.
+func (s *Service) operatorReason() string {
+	if s.cfg.Operator == nil {
+		return "there is no channel the run can work in"
 	}
 	return ""
 }
@@ -342,7 +357,7 @@ func failureLines(failures []error) []string {
 // workflows beside it work. The failure is logged and reported by
 // `/me`.
 //
-// A run that cannot go on is reported to its observer; a run that can
+// A run that cannot go on is reported to its chat; a run that can
 // is resumed silently.
 func (s *Service) Start(ctx context.Context) error {
 	err := s.catalog.Refresh()
@@ -417,8 +432,11 @@ func (s *Service) StartWorkflow(ctx context.Context, req Request) (string, error
 	if reason := s.modelsReason(); reason != "" {
 		return "", fmt.Errorf("me is disabled: %s", reason)
 	}
-	if strings.TrimSpace(req.ObserverChatID) == "" {
-		return "", errors.New("me: the run has no observer chat")
+	if reason := s.operatorReason(); reason != "" {
+		return "", fmt.Errorf("me is disabled: %s", reason)
+	}
+	if strings.TrimSpace(req.ChatID) == "" {
+		return "", errors.New("me: the run has no chat")
 	}
 
 	wf, ok := s.catalog.Lookup(req.Name)
@@ -443,21 +461,23 @@ func (s *Service) StartWorkflow(ctx context.Context, req Request) (string, error
 	if err != nil {
 		return "", err
 	}
-	r := newRun(s, req, bound)
+	r := newRun(s, req, bound, values)
 
 	// The check and the insert happen under one lock: two commands
 	// that arrive at the same time must not both start a run in the
 	// same chat.
 	s.mu.Lock()
-	if existing, ok := s.active[req.ObserverChatID]; ok {
+	if existing, ok := s.active[req.ChatID]; ok {
 		s.mu.Unlock()
 		return "", fmt.Errorf("this chat already has a run in it (%s)", existing.id)
 	}
 	s.runs[r.id] = r
-	s.active[req.ObserverChatID] = r
+	s.active[req.ChatID] = r
 	s.mu.Unlock()
 
-	if err := s.setupWorkChat(ctx, r); err != nil {
+	// The run's overview goes up before the first step: the chat
+	// shows what the run is from the start.
+	if err := s.postCard(ctx, r); err != nil {
 		s.finish(r, PhaseFailed, err.Error())
 		return "", err
 	}
@@ -517,47 +537,12 @@ func tooManyArgs(wf *wfe.Workflow, given int) error {
 		len(declared), strings.Join(declared, ", "), given)
 }
 
-// setupWorkChat points the work chat at the run's workspace and
-// agent.
-//
-// The two commands are sent one at a time and each one is awaited:
-// /use must not run against a chat that has no workspace yet.
-func (s *Service) setupWorkChat(ctx context.Context, r *run) error {
-	if s.cfg.Loopback == nil {
-		return errors.New("me: no loopback client: the work chat cannot be set up")
-	}
-	if r.cwd != "" {
-		if err := s.setupStep(ctx, r, "/cwd "+r.cwd); err != nil {
-			return err
-		}
-	}
-	if r.agent != "" {
-		if err := s.setupStep(ctx, r, "/use "+r.agent); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// setupStep sends one setup command and checks the outcome it
-// produced.
-func (s *Service) setupStep(ctx context.Context, r *run, text string) error {
-	ex, err := s.cfg.Loopback.Do(ctx, r.workChatID, text)
-	if err != nil {
-		return fmt.Errorf("the work chat could not run %q: %w", text, err)
-	}
-	if ex.Outcome.Status != messages.OutcomeOK {
-		return fmt.Errorf("the work chat could not run %q: %s", text, outcomeLine(ex.Outcome))
-	}
-	return nil
-}
-
 // Reply hands a reply to the run that is waiting for one.
 //
 // A reply to a chat without a waiting run is refused.
-func (s *Service) Reply(ctx context.Context, observerChatID, text string) error {
+func (s *Service) Reply(ctx context.Context, chatID, text string) error {
 	s.mu.Lock()
-	r, ok := s.active[observerChatID]
+	r, ok := s.active[chatID]
 	s.mu.Unlock()
 	if !ok {
 		return errors.New("this chat has no run in it")
@@ -568,21 +553,71 @@ func (s *Service) Reply(ctx context.Context, observerChatID, text string) error 
 	return r.deliver(text)
 }
 
-// Stop cancels a run and stops the work chat.
+// Pause asks the run to stop after the step it is on.
+//
+// The step that is running is not interrupted: its outcome is
+// recorded, and the run waits for the operator to hand the control
+// back.
+func (s *Service) Pause(ctx context.Context, chatID string) error {
+	s.mu.Lock()
+	r, ok := s.active[chatID]
+	s.mu.Unlock()
+	if !ok {
+		return errors.New("this chat has no run in it")
+	}
+	r.requestPause("the operator paused the run")
+	s.updateCard(r)
+	return nil
+}
+
+// Continue hands the control back to a paused run.
+//
+// A note is the operator's instruction: it joins the conversation the
+// chat model reads.
+func (s *Service) Continue(ctx context.Context, chatID, note string) error {
+	s.mu.Lock()
+	r, ok := s.active[chatID]
+	s.mu.Unlock()
+	if !ok {
+		return errors.New("this chat has no run in it")
+	}
+	if err := r.handBack(note); err != nil {
+		return err
+	}
+	s.updateCard(r)
+	return nil
+}
+
+// Show puts the run's state back in front of the operator.
+//
+// The card the run is updating is not always the one the operator
+// wants to look at: `/me show` posts the current state as a card of
+// its own, and the run keeps updating that one from here on.
+func (s *Service) Show(ctx context.Context, chatID string) error {
+	s.mu.Lock()
+	r, ok := s.active[chatID]
+	s.mu.Unlock()
+	if !ok {
+		return errors.New("this chat has no run in it")
+	}
+	return s.postCard(ctx, r)
+}
+
+// Stop cancels a run and tells the chat to stop working.
 //
 // The run's context is cancelled first, so the loop stops at its next
 // checkpoint; /stop then reaches the agent that is still working.
-func (s *Service) Stop(ctx context.Context, observerChatID string) error {
+func (s *Service) Stop(ctx context.Context, chatID string) error {
 	s.mu.Lock()
-	r, ok := s.active[observerChatID]
+	r, ok := s.active[chatID]
 	s.mu.Unlock()
 	if !ok {
 		return errors.New("this chat has no run in it")
 	}
 	r.cancel()
-	if s.cfg.Loopback != nil {
-		if _, err := s.cfg.Loopback.Send(ctx, r.workChatID, "/stop"); err != nil {
-			s.logger.Warn("me: the work chat could not be stopped", "run_id", r.id, "err", err)
+	if s.cfg.Operator != nil {
+		if _, err := s.speak(ctx, r, "/stop", ""); err != nil {
+			s.logger.Warn("me: the chat could not be stopped", "run_id", r.id, "err", err)
 		}
 	}
 	return nil
@@ -592,9 +627,9 @@ func (s *Service) Stop(ctx context.Context, observerChatID string) error {
 //
 // A chat without a run gets an idle status; the error says why the
 // personal agent cannot start one.
-func (s *Service) Status(observerChatID string) Status {
+func (s *Service) Status(chatID string) Status {
 	s.mu.Lock()
-	r, ok := s.active[observerChatID]
+	r, ok := s.active[chatID]
 	s.mu.Unlock()
 	if !ok {
 		// The error says why the personal agent cannot start a run;
@@ -608,23 +643,23 @@ func (s *Service) Status(observerChatID string) Status {
 	return r.status()
 }
 
-// finish records how a run ended and tells its observer.
+// finish records how a run ended and frees its chat.
 func (s *Service) finish(r *run, phase Phase, reason string) {
 	r.finish(phase, reason)
 	s.mu.Lock()
-	if s.active[r.observerChatID] == r {
-		delete(s.active, r.observerChatID)
+	if s.active[r.chatID] == r {
+		delete(s.active, r.chatID)
 	}
 	delete(s.runs, r.id)
 	s.mu.Unlock()
 }
 
 // executionOf returns the tracked execution of a message.
-func (s *Service) executionOf(msgID string) (loopback.Execution, bool) {
-	if s.cfg.Loopback == nil {
-		return loopback.Execution{}, false
+func (s *Service) executionOf(msgID string) (observe.Execution, bool) {
+	if s.cfg.Operator == nil {
+		return observe.Execution{}, false
 	}
-	return s.cfg.Loopback.Get(msgID)
+	return s.cfg.Operator.Get(msgID)
 }
 
 // statePath returns the file a run is persisted in.

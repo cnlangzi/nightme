@@ -261,7 +261,28 @@ chatsession: message settled chat_id=… message_id=… status=… summary=…
 
 ---
 
-## 8. 边界
+## 8. 旁听通道（Tracker）
+
+settled 是一条消息的**结论**。程序往往还想知道这条消息**走到哪一步了**：daemon 收下了没有、agent 开始干活没有、是不是在等一个回答、最后怎么样了。
+
+`internal/gateway/observe` 的 Tracker 就是这条通道：
+
+| 能力 | 说明 |
+| --- | --- |
+| `Register(msgID, chatID, text)` | 登记一条程序自己发的消息 |
+| `Get(msgID)` | 读这条消息的执行快照 |
+| `Watch(msgID)` | 订阅这条消息的变化；settle 时通道关闭 |
+| `Observe(outbound)` | 把一条出站消息折进它对应的执行 |
+
+关联键是 `ReplyTo`：daemon 给每条它为某个回合产出的消息盖上那个回合的入站消息 id。Tracker 只认**登记过**的消息 id，所以人发的消息永远不会被算到程序头上。
+
+没有 `ReplyTo` 的出站消息（只有 `OutCommandReply`）兜底落到该 chat 里 me 的 in-flight 锚点上——没有锚点就不归属。
+
+执行的阶段只会往前走：`sent` → `queued` → `running` → `settled`。迟到的回复拉不回已经 settle 的执行。
+
+---
+
+## 9. 边界
 
 - settled 只在**工作真正结束**时发出。一轮很长的 agent 回合会把 settled 往后推——这是设计意图：settled 报的是结束，不是开始。
 - `/steer` 的文本由下一个 prompt-end 或下一条入队消息冲刷队列，settled 跟着承载它的那个回合。

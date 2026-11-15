@@ -22,6 +22,7 @@ func (s *Service) systemPrompt(r *run) string {
 	b.WriteString("- ok and noop mean the step did what it was asked to do.\n")
 	b.WriteString("- incomplete means it partly worked; the rest is still open.\n")
 	b.WriteString("- failed means it did not work.\n")
+	b.WriteString("- a summary that says 429 means the agent is rate limited — it is throttled and cannot work right now.\n")
 	b.WriteString("- cancelled means somebody stopped it; timeout means it ran out of time.\n")
 	b.WriteString("- unknown means nobody reported a verdict — ask before you continue.\n")
 	b.WriteString("- waiting means the step is still running and needs an answer, an instruction or a question.\n")
@@ -31,16 +32,17 @@ func (s *Service) systemPrompt(r *run) string {
 	b.WriteString("- Use run_step for the workflow's commands. A command the workflow does not allow comes back as an error — do not run it again.\n")
 	b.WriteString("- Use instruct for the work the commands do not cover, when the workflow allows it.\n")
 	b.WriteString("- Use answer_choice when an outcome says a prompt is waiting.\n")
-	b.WriteString("- Use ask_human when the next step needs the user's judgement or their credentials.\n")
+	b.WriteString("- Use ask_human when the next step needs the user's judgement or their credentials. The question goes to the chat as a message of its own; the user answers it there.\n")
 	b.WriteString("- Use repo_status to read the branch and the working tree before you act on them.\n")
+	b.WriteString("- When an outcome says the agent is rate limited, stop: the run pauses and waits for the operator. Do not run the command again and do not pick another step.\n")
 	b.WriteString("- Call finish when the workflow is done. A done verdict is only accepted after the last step succeeded.\n")
 	b.WriteString("- Always call a tool. An answer without a tool call does not move the run forward.\n")
 	return b.String()
 }
 
-// repoFacts holds the repository facts of the work chat.
+// repoFacts holds the repository facts of the chat.
 type repoFacts struct {
-	// Branch is the branch the work chat is on.
+	// Branch is the branch the chat is on.
 	Branch string
 	// Dirty is true when the working tree has changes.
 	Dirty bool

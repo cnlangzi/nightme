@@ -1,0 +1,518 @@
+package me
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/cnlangzi/nightme/internal/llm"
+	"github.com/cnlangzi/nightme/internal/messages"
+)
+
+// waitForStatus waits until the run of a chat stands in the given
+// phase.
+func waitForStatus(t *testing.T, svc *Service, chatID string, phase Phase) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if svc.Status(chatID).Phase == phase {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("the run is %q, want %q", svc.Status(chatID).Phase, phase)
+}
+
+// TestPause_DoesNotInterruptTheRunningStep — a pause stops the run
+// after the step it is on: that step's outcome is recorded.
+func TestPause_DoesNotInterruptTheRunningStep(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
+	op.steps = []fakeStep{{open: true}}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitSent(t, op, "/gtw commit")
+
+	if err := svc.Pause(context.Background(), "obs-1"); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	// The step that was running is not interrupted.
+	time.Sleep(50 * time.Millisecond)
+	if st := svc.Status("obs-1"); st.Paused {
+		t.Fatal("the run paused while its step was running")
+	}
+
+	// The step ends, and the run pauses.
+	if err := op.answer("obs-1", "", ""); err != nil {
+		t.Fatalf("settle the step: %v", err)
+	}
+	waitForStatus(t, svc, "obs-1", PhasePaused)
+
+	st := svc.Status("obs-1")
+	if !st.Paused {
+		t.Error("the run does not report that it is paused")
+	}
+	if st.PauseReason == "" {
+		t.Error("the run does not say why it paused")
+	}
+}
+
+// TestContinue_HandsTheControlBack — the run goes on where it
+// stopped.
+func TestContinue_HandsTheControlBack(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
+	op.steps = []fakeStep{{open: true}}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitSent(t, op, "/gtw commit")
+
+	if err := svc.Pause(context.Background(), "obs-1"); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	if err := op.answer("obs-1", "", ""); err != nil {
+		t.Fatalf("settle the step: %v", err)
+	}
+	waitForStatus(t, svc, "obs-1", PhasePaused)
+
+	if err := svc.Continue(context.Background(), "obs-1", ""); err != nil {
+		t.Fatalf("continue: %v", err)
+	}
+	waitForStatus(t, svc, "obs-1", PhaseRunning)
+}
+
+// TestContinue_CarriesTheNote — the note is the operator's
+// instruction: it joins the conversation the chat model reads.
+func TestContinue_CarriesTheNote(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
+	op.steps = []fakeStep{{open: true}}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitSent(t, op, "/gtw commit")
+
+	if err := svc.Pause(context.Background(), "obs-1"); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	if err := op.answer("obs-1", "", ""); err != nil {
+		t.Fatalf("settle the step: %v", err)
+	}
+	waitForStatus(t, svc, "obs-1", PhasePaused)
+
+	if err := svc.Continue(context.Background(), "obs-1", "use the other branch"); err != nil {
+		t.Fatalf("continue: %v", err)
+	}
+	waitForStatus(t, svc, "obs-1", PhaseRunning)
+
+	svc.mu.Lock()
+	r := svc.active["obs-1"]
+	svc.mu.Unlock()
+	if r == nil {
+		t.Fatal("the run is gone")
+	}
+	found := false
+	for _, m := range r.conversation() {
+		for _, p := range m.Parts {
+			if p.Type == "text" && strings.Contains(p.Text, "use the other branch") {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Error("the note did not join the conversation")
+	}
+}
+
+// TestTheCardOffersTheQuestionAsButtons — the options the run is
+// waiting for become the card's buttons, so a click is the answer.
+func TestTheCardOffersTheQuestionAsButtons(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	decider := &scriptedDecider{answers: []llm.DecisionResponse{
+		decisionResp("jev", "/gtw commit", 0.1, 0),
+	}}
+	svc, op := testService(t, dir, Config{Decider: decider})
+	op.steps = []fakeStep{pendingStep("still going")}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitForLine(t, op, "Which step should run next?")
+
+	buttons := op.Buttons()
+	found := false
+	for _, b := range buttons {
+		if b.Label == "/gtw commit" && b.Action == "reply 0" {
+			found = true
+		}
+		if b.Label == "escalate" {
+			t.Errorf("the card offers the operator %q, want the options of the run", b.Label)
+		}
+	}
+	if !found {
+		t.Fatalf("the card has no answer button: %+v", buttons)
+	}
+}
+
+// TestTheQuestionIsNotDispatched — the question belongs to the run,
+// not to the agent: the agent never sees what the run asked.
+func TestTheQuestionIsNotDispatched(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	provider := &scriptedProvider{responses: []llm.Response{
+		{Message: toolCallMsg("c1", toolAskHuman, map[string]any{"question": "Which branch?"})},
+	}}
+	svc, op := testService(t, dir, Config{Provider: provider})
+	op.steps = []fakeStep{pendingStep("still going")}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitForLine(t, op, "Which branch?")
+
+	asked := op.Asked()
+	if len(asked) != 1 {
+		t.Fatalf("the run asked %d questions, want 1", len(asked))
+	}
+	if !strings.Contains(asked[0].Text, "Which branch?") {
+		t.Errorf("the question is %q, want the model's question", asked[0].Text)
+	}
+	for _, m := range op.Spoken() {
+		if strings.Contains(m.Text, "Which branch?") {
+			t.Fatalf("the question was dispatched to the agent: %+v", m)
+		}
+	}
+}
+
+// TestANumberedAnswerIsTheOption — the card's buttons carry the
+// number of the option, because a chat button has room for a few
+// bytes only.
+func TestANumberedAnswerIsTheOption(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	decider := &scriptedDecider{answers: []llm.DecisionResponse{
+		decisionResp("jev", "/gtw commit", 0.1, 0),
+	}}
+	svc, op := testService(t, dir, Config{Decider: decider})
+	op.steps = []fakeStep{pendingStep("still going"), okStep("committed")}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitForLine(t, op, "Which step should run next?")
+
+	if err := svc.Reply(context.Background(), "obs-1", "0"); err != nil {
+		t.Fatalf("reply: %v", err)
+	}
+	waitSent(t, op, "/gtw commit")
+}
+
+// TestContinue_CancelsAPauseThatHasNotTakenEffect — the operator
+// changed their mind before the step ended: the run does not pause.
+func TestContinue_CancelsAPauseThatHasNotTakenEffect(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
+	op.steps = []fakeStep{{open: true}}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitSent(t, op, "/gtw commit")
+
+	if err := svc.Pause(context.Background(), "obs-1"); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	if err := svc.Continue(context.Background(), "obs-1", ""); err != nil {
+		t.Fatalf("continue: %v", err)
+	}
+
+	// The step ends: the run goes on instead of pausing.
+	if err := op.answer("obs-1", "", ""); err != nil {
+		t.Fatalf("settle the step: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if st := svc.Status("obs-1"); st.Paused {
+		t.Fatal("the run paused although the operator cancelled the pause")
+	}
+}
+
+// TestEveryRoundGetsItsOwnCard — the card of the round that ended
+// stays in the chat as the record of that round; the next round gets
+// a card of its own.
+func TestEveryRoundGetsItsOwnCard(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "two", `title: two steps.
+jobs:
+  main:
+    steps:
+      - id: one
+        message: /gtw commit
+      - id: two
+        message: /gtw push
+`)
+
+	svc, op := testService(t, dir, noModels())
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "two", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitRun(t, svc, "obs-1")
+
+	// The run had three rounds: one per step, and the closing one
+	// that finds the plan exhausted. Every round got a card.
+	if posted := op.Posted(); posted != 3 {
+		t.Fatalf("the run published %d cards, want one per round", posted)
+	}
+}
+
+// TestShow_PutsTheStateBackInFrontOfTheOperator — /me show posts the
+// current state as a card of its own.
+func TestShow_PutsTheStateBackInFrontOfTheOperator(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	svc, op := testService(t, dir, noModels())
+	op.steps = []fakeStep{{open: true}}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitSent(t, op, "/gtw commit")
+	before := op.Posted()
+
+	if err := svc.Show(context.Background(), "obs-1"); err != nil {
+		t.Fatalf("show: %v", err)
+	}
+	if op.Posted() != before+1 {
+		t.Fatalf("the run published %d cards, want one more", op.Posted())
+	}
+	if !op.Has("/gtw commit") {
+		t.Errorf("the card does not show the step: %v", op.Lines())
+	}
+}
+
+// TestShow_WithoutARunIsRefused — a chat without a run has no state
+// to show.
+func TestShow_WithoutARunIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	svc, _ := testService(t, dir, noModels())
+	if err := svc.Show(context.Background(), "obs-1"); err == nil {
+		t.Fatal("a chat without a run showed a state")
+	}
+}
+
+// TestTheErrorHasItsOwnLine — the error says why the run stopped, on
+// its own line.
+func TestTheErrorHasItsOwnLine(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{err: errors.New("the chat model is broken")}})
+	op.steps = []fakeStep{{outcome: messages.Outcome{
+		Status:  messages.OutcomeFailed,
+		Summary: "the command failed",
+	}}}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitRun(t, svc, "obs-1")
+
+	var found bool
+	for _, line := range op.Lines() {
+		for _, l := range strings.Split(line, "\n") {
+			if strings.HasPrefix(l, "error: ") {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Errorf("the card has no error line: %v", op.Lines())
+	}
+}
+
+// TestTakeover_APersonsMessagePausesTheRun — somebody who writes in
+// the chat while the run is going takes the chat back: the run stops
+// after the step it is on.
+func TestTakeover_APersonsMessagePausesTheRun(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
+	op.steps = []fakeStep{{open: true}}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitSent(t, op, "/gtw commit")
+
+	// Somebody writes in the chat.
+	svc.Seen(&messages.InboundMessage{
+		ChatID:    "obs-1",
+		MessageID: "om_human",
+		Text:      "wait, stop there",
+		Origin:    messages.OriginHuman,
+	})
+
+	if err := op.answer("obs-1", "", ""); err != nil {
+		t.Fatalf("settle the step: %v", err)
+	}
+	waitForStatus(t, svc, "obs-1", PhasePaused)
+
+	st := svc.Status("obs-1")
+	if !strings.Contains(st.PauseReason, "continue") {
+		t.Errorf("the pause reason is %q, want it to name the way back", st.PauseReason)
+	}
+}
+
+// TestTakeover_AReplyToTheQuestionIsNotATakeover — the answer to the
+// run's own question is an answer, not somebody taking the chat back.
+func TestTakeover_AReplyToTheQuestionIsNotATakeover(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	provider := &scriptedProvider{responses: []llm.Response{
+		{Message: toolCallMsg("c1", toolAskHuman, map[string]any{"question": "Which branch?"})},
+	}}
+	svc, op := testService(t, dir, Config{Provider: provider})
+	op.steps = []fakeStep{pendingStep("still going")}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitForLine(t, op, "Which branch?")
+
+	svc.mu.Lock()
+	r := svc.active["obs-1"]
+	svc.mu.Unlock()
+	if r == nil {
+		t.Fatal("the run is gone")
+	}
+	askID := r.askMsgID()
+	if askID == "" {
+		t.Fatal("the question has no message id")
+	}
+
+	// The person answers the question.
+	svc.Seen(&messages.InboundMessage{
+		ChatID:    "obs-1",
+		MessageID: "om_human",
+		ReplyTo:   askID,
+		Text:      "the feature branch",
+		Origin:    messages.OriginHuman,
+	})
+	if st := svc.Status("obs-1"); st.Paused {
+		t.Fatal("the answer to the question paused the run")
+	}
+}
+
+// TestTakeover_AMessageOfTheRunIsNotATakeover — what the run says is
+// not somebody taking the chat back.
+func TestTakeover_AMessageOfTheRunIsNotATakeover(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
+	op.steps = []fakeStep{{open: true}}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitSent(t, op, "/gtw commit")
+
+	svc.Seen(&messages.InboundMessage{
+		ChatID:    "obs-1",
+		MessageID: "om_me",
+		Text:      "/gtw commit",
+		Origin:    messages.OriginMe,
+	})
+
+	if err := op.answer("obs-1", "", ""); err != nil {
+		t.Fatalf("settle the step: %v", err)
+	}
+	waitForStatus(t, svc, "obs-1", PhaseRunning)
+}
+
+// TestStop_EndsTheRun — only the run's own command ends it.
+func TestStop_EndsTheRun(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
+	op.steps = []fakeStep{{open: true}}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitSent(t, op, "/gtw commit")
+
+	if err := svc.Stop(context.Background(), "obs-1"); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	waitRun(t, svc, "obs-1")
+	if st := svc.Status("obs-1"); st.Phase != PhaseIdle {
+		t.Errorf("the run is %q, want it gone", st.Phase)
+	}
+	// The chat is told to stop working.
+	if !containsText(op.Sent(), "/stop") {
+		t.Errorf("the chat was not told to stop: %v", op.Sent())
+	}
+}
+
+// containsText reports whether the list holds the text.
+func containsText(list []string, text string) bool {
+	for _, item := range list {
+		if item == text {
+			return true
+		}
+	}
+	return false
+}

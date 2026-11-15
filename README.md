@@ -579,15 +579,15 @@ rounds the job runs: leave it out for one round, `0` for "until the run ends",
 starts with the job's first step, the round's step outputs are cleared and the
 per-step budgets start over. A round in which no step ran does not repeat: a
 job whose every step is skipped had nothing to do. A repeating job wants a
-`wait:` step, so its rounds do not follow each other as fast as the work chat
+`wait:` step, so its rounds do not follow each other as fast as the chat
 answers.
 
 A step carries exactly one kind:
 
 | Step kind | What it does |
 |---|---|
-| `message:` | Sends the text to the work chat. A `/`-prefixed text is a slash command; anything else is a turn for the work agent. |
-| `shell:` | Runs a shell command in the work chat's current directory. |
+| `message:` | Sends the text to the chat the run works in. A `/`-prefixed text is a slash command; anything else is a turn for the coding agent. |
+| `shell:` | Runs a shell command in the chat's current directory. |
 | `use:` | Runs a registered action — `notify`, `email`, `github_pr_comment`, `github_issue`, or a script under `~/.nightme/workflows/actions/`. |
 | `wait:` | Waits a duration (`5m`) and reports ok. |
 
@@ -672,7 +672,10 @@ key — is reported in `nightme logs` and left out. The daemon still starts, and
 |---|---|
 | `/me start <workflow> [args...]` | Starts a workflow in this chat. |
 | `/me reply <text>` | Answers the question the run is waiting for. |
-| `/me stop` | Cancels the run and stops the work chat. |
+| `/me pause` | Stops the run after the step it is on. |
+| `/me continue [note]` | Hands the control back to a paused run. The note is your instruction. |
+| `/me show` | Puts the run's state back in front of you as a card of its own. |
+| `/me stop` | Cancels the run and tells the chat to stop working. |
 | `/me status` | Reports the current step, the phase and the progress of the running command, the remaining budget, and what each capability decided and spent. |
 
 The arguments of `/me start` fill the workflow's declared arguments: a positional
@@ -682,17 +685,31 @@ a token of the form `name=value` assigns that argument by name.
 A chat without a workspace is refused — `No active workspace. Send /cwd <path> first.`
 The run inherits the chat's workspace and agent. A chat holds at most one run at a time.
 
-The chat that starts the run is the **observer chat**: it receives the progress
-and answers the questions. The agent works in an internal chat you never see.
+**The run works in the chat that started it.** Every step the agent takes is a
+real message of that chat, marked with a bot sign:
 
 ```
-▶ /gtw fix * -y
-✅ /gtw fix * -y
-▶ /review
-⚠️ /review incomplete · 1/3 groups unfinished
-❓ the review found 3 findings — apply them?
-✅ issue 42 is on its way · 6 actions · system-1: 0 decisions, 0 tokens · system-2: 8 decisions, 4210 tokens
+🧑‍💻: /gtw fix * -y
+🧑‍💻: /review
 ```
+
+The receipt, the reaction and the permission card anchor to that message the way
+they anchor to a message you sent yourself. The run's overview — the steps, the
+current one, the last decision, the token usage — is a card in the chat, with
+`[暂停] [继续] [停止]` on it; a click is the command it stands for. Every round of
+the run gets a card of its own, so the chat keeps the record of how it went.
+When the run
+asks a question, the choices become the card's buttons: a click is the answer. The
+question itself never reaches the agent — it is a message of the chat, not a turn
+of the conversation.
+
+Two channels can be driven this way: Feishu and Telegram. On any other channel
+`/me start` says so and refuses.
+
+The run's lifecycle belongs to the `/me` commands alone: `/close`, `/stop` and
+`/new` end the chat's session, not the run. A person who writes in the chat while
+the run is going takes the chat back — the run stops after the step it is on, and
+`/me continue` hands the control back.
 
 ### The fast path and the judgment point
 
@@ -715,7 +732,7 @@ ends when the plan is exhausted and the agent finishes it, when you send
 `/me stop`, or when the daemon shuts down.
 
 The agent answers a judgment point with a directive: `run_step` (run a command),
-`instruct` (send a free-form instruction to the work chat), `answer_choice`
+`instruct` (send a free-form instruction to the chat), `answer_choice`
 (answer a prompt the work agent is waiting for), `ask_human` (ask you),
 `repo_status` (read the branch and the tree), or `finish` (end the run). A
 command the agent names has to be a step's `message:` or one of a step's
@@ -769,8 +786,9 @@ and the guardrails — is in [`docs/WFE.md` §8](./docs/WFE.md#8-runtime-archite
 
 Chat-level slash commands. The `/gtw` subcommands live in
 [their own section](#git-team-workflow-gtw) and are not listed
-here; the `/me` subcommands — `/me start` · `/me reply` · `/me stop` ·
-`/me status` — live in [their own section](#workflows-and-the-personal-agent-me).
+here; the `/me` subcommands — `/me start` · `/me reply` · `/me pause` ·
+`/me continue` · `/me stop` · `/me status` — live in
+[their own section](#workflows-and-the-personal-agent-me).
 
 | Command | What it does |
 |---|---|
@@ -958,7 +976,7 @@ internal/
     acp/  claudecode/  codex/  copilot/  cursor/  dsh/  omp/  opencode/  pi/  pty/
     telemetry/                     # agent-CLI client-telemetry policy (one opt-out)
   channel/                         # Channel interface
-    echo/  feishu/  loopback/  slack/  telegram/   # adapters (feishu production; telegram ready; slack in development)
+    echo/  feishu/  slack/  telegram/   # adapters (feishu production; telegram ready; slack in development)
   chatsession/                     # ChatSession + pool manager + persistence
   cli/                              # shared CLI helpers (config / doctor / login)
   command/                         # Slash-command Commander / Registry / Factory
@@ -969,14 +987,14 @@ internal/
   daemoncontrol/                   # IPC for `nightme doctor` / `status`
   errors/                          # CodedError + ExitCode
   gateway/                         # Slash router + binding + receipt FSM
-    inbound/  outbound/            # inbound dispatch chain + outbound sender
+    inbound/  observe/  outbound/  # inbound dispatch chain + run tracker + outbound sender
   gatewaytest/                     # integration test harness
   gitbase/                         # base-branch resolver (+ repairs a missing origin/HEAD)
   logging/                         # slog + secret redaction
   llm/                             # LLM clients — chat + tool calling (Provider) and decision models (Decider)
     anthropic/  decision/  openai/ # the chat providers and the decision protocols
   login/                           # IM bot registration — feishu / slack / telegram onboarding
-  me/                              # the personal agent — runs the workflows through the loopback channel
+  me/                              # the personal agent — runs the workflows in the chat they started in
   messages/                        # IM message types + dispatch
   prcache/                         # PR metadata cache (per-F-50)
   registry/                        # JSON-backed chat_sessions.json + agent_sessions.json (0600, atomic)

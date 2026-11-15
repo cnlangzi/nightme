@@ -35,21 +35,21 @@ jobs:
 
 	provider := &scriptedProvider{err: errors.New("the chat model must not be called")}
 	decider := &scriptedDecider{err: errors.New("the decision model must not be called")}
-	svc, lb, _ := testService(t, dir, Config{Provider: provider, Decider: decider})
-	lb.steps = []fakeStep{
+	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
+	op.steps = []fakeStep{
 		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "ok"}},
 		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "ok"}},
 	}
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "repeat", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "repeat", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	waitRun(t, svc, "obs-1")
 
 	runs := 0
-	for _, cmd := range lb.Sent() {
+	for _, cmd := range op.Sent() {
 		if cmd == "/gtw fix" {
 			runs++
 		}
@@ -73,11 +73,11 @@ jobs:
 
 	provider := &scriptedProvider{err: errors.New("the chat model must not be called")}
 	decider := &scriptedDecider{err: errors.New("the decision model must not be called")}
-	svc, _, _ := testService(t, dir, Config{Provider: provider, Decider: decider})
+	svc, _ := testService(t, dir, Config{Provider: provider, Decider: decider})
 
 	start := time.Now()
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "wait", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "wait", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -102,10 +102,10 @@ jobs:
 
 	provider := &scriptedProvider{err: errors.New("the chat model must not be called")}
 	decider := &scriptedDecider{err: errors.New("the decision model must not be called")}
-	svc, _, _ := testService(t, dir, Config{Provider: provider, Decider: decider})
+	svc, _ := testService(t, dir, Config{Provider: provider, Decider: decider})
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "wait", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "wait", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -123,7 +123,7 @@ jobs:
 }
 
 // TestStepKind_ShellRunsInTheWorkChatDirectory — a shell step runs
-// where the work chat stands, not where the run started.
+// where the chat stands, not where the run started.
 func TestStepKind_ShellRunsInTheWorkChatDirectory(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "sh", `title: sh
@@ -137,7 +137,7 @@ jobs:
 	shell := &fakeShell{}
 	provider := &scriptedProvider{err: errors.New("the chat model must not be called")}
 	decider := &scriptedDecider{err: errors.New("the decision model must not be called")}
-	svc, _, _ := testService(t, dir, Config{
+	svc, _ := testService(t, dir, Config{
 		Provider: provider,
 		Decider:  decider,
 		Shell:    shell,
@@ -145,7 +145,7 @@ jobs:
 	})
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "sh", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "sh", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -158,7 +158,7 @@ jobs:
 		t.Fatalf("the shell ran %d commands, want 1", len(calls))
 	}
 	if calls[0].Cwd != "/tmp/worktree" {
-		t.Errorf("the cwd = %q, want the work chat's directory", calls[0].Cwd)
+		t.Errorf("the cwd = %q, want the chat's directory", calls[0].Cwd)
 	}
 }
 
@@ -204,10 +204,10 @@ jobs:
 	}
 	provider := &scriptedProvider{err: errors.New("the chat model must not be called")}
 	decider := &scriptedDecider{err: errors.New("the decision model must not be called")}
-	svc, _, _ := testService(t, dir, Config{Provider: provider, Decider: decider, Shell: shell})
+	svc, _ := testService(t, dir, Config{Provider: provider, Decider: decider, Shell: shell})
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "sh", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "sh", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -262,22 +262,22 @@ jobs:
 	shell := &fakeShell{err: errors.New("the shell is gone")}
 	provider := &scriptedProvider{err: errors.New("the chat model must not be called")}
 	decider := &scriptedDecider{err: errors.New("the decision model must not be called")}
-	svc, lb, sender := testService(t, dir, Config{Provider: provider, Decider: decider, Shell: shell})
+	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider, Shell: shell})
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "sh", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "sh", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	waitRun(t, svc, "obs-1")
 
-	for _, cmd := range lb.Sent() {
+	for _, cmd := range op.Sent() {
 		if cmd == "/after" {
 			t.Fatal("the chain continued after the failed step")
 		}
 	}
-	if !sender.Has("failed") {
-		t.Errorf("the observer was not told about the failure: %v", sender.Lines())
+	if !op.Has("failed") {
+		t.Errorf("the observer was not told about the failure: %v", op.Lines())
 	}
 }
 
@@ -300,10 +300,10 @@ jobs:
 	}
 	provider := &scriptedProvider{err: errors.New("the chat model must not be called")}
 	decider := &scriptedDecider{err: errors.New("the decision model must not be called")}
-	svc, _, _ := testService(t, dir, Config{Provider: provider, Decider: decider, Shell: shell})
+	svc, _ := testService(t, dir, Config{Provider: provider, Decider: decider, Shell: shell})
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "sh", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "sh", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -333,7 +333,7 @@ jobs:
 	}
 }
 
-// TestTool_ARuntimeFailureComesBackAsAToolError — a command the work
+// TestTool_ARuntimeFailureComesBackAsAToolError — a command the the
 // chat cannot take comes back to the agent as an error it can correct,
 // and the run does not end.
 func TestTool_ARuntimeFailureComesBackAsAToolError(t *testing.T) {
@@ -348,13 +348,13 @@ jobs:
 
 	provider := &scriptedProvider{responses: []llm.Response{
 		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"command": "/gtw commit"})},
-		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "failed", "summary": "the work chat is gone"})},
+		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "failed", "summary": "the chat is gone"})},
 	}}
-	svc, lb, _ := testService(t, dir, Config{Provider: provider})
-	lb.failCommand = "/gtw commit"
+	svc, op := testService(t, dir, Config{Provider: provider})
+	op.failCommand = "/gtw commit"
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -370,7 +370,7 @@ jobs:
 			continue
 		}
 		for _, p := range m.Parts {
-			if p.IsError && strings.Contains(p.Text, "the work chat is gone") {
+			if p.IsError && strings.Contains(p.Text, "the chat is gone") {
 				found = true
 			}
 		}
@@ -398,10 +398,10 @@ jobs:
 	shell.ret = &wfe.ShellResult{ExitCode: 0}
 	provider := &scriptedProvider{err: errors.New("the chat model must not be called")}
 	decider := &scriptedDecider{err: errors.New("the decision model must not be called")}
-	svc, _, _ := testService(t, dir, Config{Provider: provider, Decider: decider, Shell: shell})
+	svc, _ := testService(t, dir, Config{Provider: provider, Decider: decider, Shell: shell})
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "mixed", ObserverChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
+		Name: "mixed", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}

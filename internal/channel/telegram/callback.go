@@ -40,16 +40,26 @@ func (a *Adapter) handleCallbackQuery(ctx context.Context, callback *CallbackQue
 		a.answerCallback(ctx, callback.ID, "", false)
 		return
 	}
-	parts := strings.SplitN(data, ":", 3)
-	if len(parts) < 2 {
+	// The kind comes first; the rest is the kind's own payload. The
+	// run card's action may hold a colon of its own, so it is not
+	// split further.
+	kind, rest, ok := strings.Cut(data, ":")
+	if !ok {
 		a.answerCallback(ctx, callback.ID, "Unsupported action", true)
 		return
 	}
-	switch parts[0] {
+	switch kind {
 	case "c":
-		a.handleChoiceClick(ctx, callback, parts[1], parts[2])
+		shortRequestID, optionIndex, found := strings.Cut(rest, ":")
+		if !found {
+			a.answerCallback(ctx, callback.ID, "Unsupported action", true)
+			return
+		}
+		a.handleChoiceClick(ctx, callback, shortRequestID, optionIndex)
 	case "i":
-		a.handleInputClick(ctx, callback, parts[1])
+		a.handleInputClick(ctx, callback, rest)
+	case meActionKind:
+		a.handleRunCardClick(ctx, callback, rest)
 	default:
 		a.answerCallback(ctx, callback.ID, "Unsupported action", true)
 	}

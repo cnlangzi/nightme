@@ -49,7 +49,7 @@ import (
 // each Channel's private affair.
 //
 // The chat-id namespace prefix (e.g. telegram "tg_", feishu
-// "oc_", slack "sl_", loopback "lb_") lives in the registry, not
+// "oc_", slack "sl_") lives in the registry, not
 // on this interface — see channel.Register /
 // channel.ChatIDPrefix(name). It is a static property of the
 // channel family, not per-instance state, so consumers
@@ -120,6 +120,83 @@ type HealthSummary struct {
 	LastError      string    `json:"last_error,omitempty"`
 	LastInboundAt  time.Time `json:"last_inbound_at,omitzero"`
 	LastOutboundAt time.Time `json:"last_outbound_at,omitzero"`
+}
+
+// Impersonator lets a program take part in a chat the way a person
+// does: what it says is a visible message of the chat, and it enters
+// the daemon through Incoming() like any other message.
+//
+// A channel that implements it can be driven by the personal agent
+// (internal/me). What the agent says is posted on the platform like
+// any other message and comes back in as a real inbound message, so
+// the receipts, the reactions and the interactive prompts anchor to
+// it the way they anchor to a person's message.
+//
+// An adapter that does not implement it says so when the agent asks
+// to speak: the run cannot be driven in that chat.
+type Impersonator interface {
+	// Speak posts text into the chat and returns the id of the
+	// message it became. The id is the id the daemon sees when the
+	// message comes back in.
+	Speak(ctx context.Context, chatID, text string, opts SpeakOptions) (string, error)
+	// Ask puts a question in the chat and returns the id of the
+	// message it became.
+	//
+	// The message is visible and the operator can answer it, but the
+	// daemon does not take it as a turn of its own: the question
+	// belongs to the program that asked it, not to the agent.
+	Ask(ctx context.Context, chatID, text string, opts SpeakOptions) (string, error)
+	// Act clicks a button of an interactive prompt, as if a person
+	// had clicked it. The prompt is patched to show the choice.
+	Act(ctx context.Context, chatID string, action messages.ActionPayload) error
+}
+
+// SpeakOptions shapes what a Speak call says and how it is attributed.
+//
+// The zero value says the text itself, as the user of the run.
+type SpeakOptions struct {
+	// ReplyTo names the message the text quotes, like a human reply.
+	ReplyTo string
+	// Display is what the chat shows. Empty means the text itself.
+	// A run prefixes its text with a bot mark, so the display and the
+	// dispatched text usually differ.
+	Display string
+	// Owner is the user the message is attributed to. Empty means the
+	// run's own user.
+	Owner string
+	// RunID names the run the message belongs to.
+	RunID string
+}
+
+// CardSpec is what a card shows: a title, a body and the buttons
+// under it.
+type CardSpec struct {
+	Title   string
+	Body    string
+	Buttons []CardButton
+}
+
+// CardButton is one button under a card.
+//
+// Action is the text a click produces. The channel renders the
+// button; the click comes back as an inbound message carrying that
+// text, so a click travels the same path a typed command takes.
+type CardButton struct {
+	Label  string
+	Action string
+}
+
+// CardPublisher renders a card in a chat.
+//
+// A card is a message of the chat: it is posted like any other
+// message and edited in place afterwards, so the chat keeps one
+// overview rather than a stream of updates.
+type CardPublisher interface {
+	// PostCard publishes the card and returns the id of the message
+	// it became.
+	PostCard(ctx context.Context, chatID string, spec CardSpec) (string, error)
+	// UpdateCard replaces the card's content.
+	UpdateCard(ctx context.Context, chatID, cardID string, spec CardSpec) error
 }
 
 // Message is an alias for messages.InboundMessage. Kept for

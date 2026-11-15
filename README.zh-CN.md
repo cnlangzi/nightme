@@ -518,14 +518,14 @@ jobs:
 | `on` | 触发器块。它被解析和展示，目前没有东西会触发它。 |
 | `jobs` | 各个 job，每个带一份有序的 `steps`。必填。 |
 
-一个 job 带 `needs`、`if`、`iterations` 和 `steps`。`iterations` 是这个 job 跑多少轮：不填就是一轮，`0` 是"一直跑到运行结束"，`N` 就是 `N` 轮。一轮在这个 job 的 step 跑完时结束；下一轮从这个 job 的第一个 step 开始，上一轮的 step 产出被清空，每个 step 的预算也重新开始。一轮里一个 step 都没跑的 job 不会再重复——每个 step 都被跳过的这一轮什么也没做。重复的 job 最好带一个 `wait:` step，不然一轮接一轮地跑，追着 work chat 的速度。
+一个 job 带 `needs`、`if`、`iterations` 和 `steps`。`iterations` 是这个 job 跑多少轮：不填就是一轮，`0` 是"一直跑到运行结束"，`N` 就是 `N` 轮。一轮在这个 job 的 step 跑完时结束；下一轮从这个 job 的第一个 step 开始，上一轮的 step 产出被清空，每个 step 的预算也重新开始。一轮里一个 step 都没跑的 job 不会再重复——每个 step 都被跳过的这一轮什么也没做。重复的 job 最好带一个 `wait:` step，不然一轮接一轮地跑，追着 chat 的速度。
 
 一个 step 恰好带一种类型：
 
 | step 类型 | 作用 |
 |---|---|
-| `message:` | 把这段文字发到 work chat。以 `/` 开头的文字是斜杠命令，其它文字是给 work agent 的一轮对话。 |
-| `shell:` | 在 work chat 当前所在目录里跑一条 shell 命令。 |
+| `message:` | 把这段文字发到运行所在的那个 chat。以 `/` 开头的文字是斜杠命令，其它文字是给 coding agent 的一轮对话。 |
+| `shell:` | 在 chat 当前所在目录里跑一条 shell 命令。 |
 | `use:` | 跑一个已注册的动作——`notify`、`email`、`github_pr_comment`、`github_issue`，或者 `~/.nightme/workflows/actions/` 下的脚本。 |
 | `wait:` | 等待一段时间（`5m`）然后回报 ok。 |
 
@@ -599,23 +599,28 @@ me:
 |---|---|
 | `/me start <workflow> [args...]` | 在当前 chat 里启动一个 workflow。 |
 | `/me reply <text>` | 回答运行正在等的问题。 |
-| `/me stop` | 取消这次运行并停掉 work chat。 |
+| `/me pause` | 当前这一步跑完后停下。 |
+| `/me continue [note]` | 把控制权交回运行；note 是你的指示。 |
+| `/me show` | 把运行的状态重新贴到当前对话里。 |
+| `/me stop` | 取消这次运行，并让 chat 停下手上的活。 |
 | `/me status` | 报告当前 step、运行中命令的阶段与进度、剩余预算，以及两个能力各自决定和花费了什么。 |
 
 `/me start` 的参数按 workflow 声明的顺序填：位置参数填下一个还没被占用的参数，`name=value` 形式的参数按名字指定。
 
 没有工作区的 chat 会被拒绝——`No active workspace. Send /cwd <path> first.`。这次运行继承 chat 的工作区和 agent，一个 chat 同时最多有一次运行。
 
-发起运行的那个 chat 是 **observer chat**：它收进度、回答问题。agent 自己在另一个你看不到的内部 chat 里干活。
+**运行就在发起它的那个 chat 里干活。** agent 走的每一步都是那个 chat 里一条真实消息，前面带一个机器人标记：
 
 ```
-▶ /gtw fix * -y
-✅ /gtw fix * -y
-▶ /review
-⚠️ /review incomplete · 1/3 groups unfinished
-❓ the review found 3 findings — apply them?
-✅ issue 42 is on its way · 6 actions · system-1: 0 decisions, 0 tokens · system-2: 8 decisions, 4210 tokens
+🧑‍💻: /gtw fix * -y
+🧑‍💻: /review
 ```
+
+回执、reaction 和权限卡片都挂在这条消息上，跟你自己发的消息一样。运行的概览是 chat 里的一张卡片：哪一步在跑、上一次是谁做的决定、token 用了多少。卡片上有 `[暂停] [继续] [停止]`，点一下就等于敲了对应的命令。运行的每一轮都会发一张自己的卡片，chat 里因此留着这次运行一路是怎么走过来的。运行提问时，可选项会变成卡片上的按钮：点一下就是答案。问题本身不会进 agent——它只是 chat 里的一条消息，不是对话的一轮。
+
+能这样跑的 channel 有两个：飞书和 Telegram。其他 channel 上 `/me start` 会说明原因并拒绝。
+
+运行的生死只归 `/me` 管：`/close`、`/stop`、`/new` 结束的是 chat 的会话，不是这次运行。运行期间有人在 chat 里说话，就是把 chat 拿回去了——当前这一步跑完运行就停下，`/me continue` 把控制权交回来。
 
 ### 快路径与判断点
 
@@ -628,7 +633,7 @@ workflow 说了下一步是什么，所以大部分步骤根本不需要模型�
 
 一次运行既没有全局动作预算，也没有模型轮数上限：它结束于计划跑完、agent 收尾，或者你发 `/me stop`，或者 daemon 关掉。
 
-agent 在判断点上给出一个指令：`run_step`（跑一条命令）、`instruct`（给 work chat 发一段自由指令）、`answer_choice`（回答 work agent 在等的一个提示）、`ask_human`（问你）、`repo_status`（读分支和工作树）、`finish`（结束运行）。agent 点名的命令必须是某个 step 的 `message:`，或者某个 step 的 `allow:` 里的一条——别的会作为错误退回来让它自己纠正。
+agent 在判断点上给出一个指令：`run_step`（跑一条命令）、`instruct`（给 chat 发一段自由指令）、`answer_choice`（回答 chat 在等的一个提示）、`ask_human`（问你）、`repo_status`（读分支和工作树）、`finish`（结束运行）。agent 点名的命令必须是某个 step 的 `message:`，或者某个 step 的 `allow:` 里的一条——别的会作为错误退回来让它自己纠正。
 
 ### 结果模型
 
@@ -671,7 +676,7 @@ workflows 目录里的 YAML 写坏了，个人 agent 起不来——`nightme log
 
 ## Slash commands
 
-Chat 级别的斜杠命令。`/gtw` 子命令见 [它们自己的 section](#git-team-workflow-gtw)，这里不列；`/me` 子命令——`/me start` · `/me reply` · `/me stop` · `/me status`——见 [它们自己的 section](#workflow-与个人-agent-me)。
+Chat 级别的斜杠命令。`/gtw` 子命令见 [它们自己的 section](#git-team-workflow-gtw)，这里不列；`/me` 子命令——`/me start` · `/me reply` · `/me pause` · `/me continue` · `/me stop` · `/me status`——见 [它们自己的 section](#workflow-与个人-agent-me)。
 
 | 命令 | 干什么 |
 |---|---|

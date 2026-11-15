@@ -50,6 +50,7 @@ type fakeOperator struct {
 	sent    []string
 	spoken  []spokenMessage
 	asked   []askedMessage
+	posted  int
 	cards   []string
 	buttons [][]channel.CardButton
 	execs   map[string]*fakeExec
@@ -169,7 +170,15 @@ func (f *fakeOperator) PostCard(_ context.Context, _ string, spec channel.CardSp
 	id := fmt.Sprintf("card-%d", f.cardSeq)
 	f.cards = append(f.cards, spec.Body)
 	f.buttons = append(f.buttons, spec.Buttons)
+	f.posted++
 	return id, nil
+}
+
+// Posted returns the number of cards the run published.
+func (f *fakeOperator) Posted() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.posted
 }
 
 // UpdateCard replaces the run's overview.
@@ -478,8 +487,6 @@ func testService(t *testing.T, dir string, cfg Config) (*Service, *fakeOperator)
 	cfg.WorkflowsDir = dir
 	cfg.StateDir = filepath.Join(dir, "runs")
 	cfg.Operator = op
-	cfg.StepTimeout = 5 * time.Second
-	cfg.StallTimeout = 5 * time.Second
 	svc := New(cfg)
 	t.Cleanup(func() { _ = svc.Shutdown(context.Background()) })
 	if err := svc.Start(context.Background()); err != nil {

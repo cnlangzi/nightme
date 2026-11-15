@@ -515,7 +515,6 @@ func TestRestart_ResolvesAnInFlightCommandAsInterrupted(t *testing.T) {
 		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"command": "/gtw commit"})},
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider})
-	svc.cfg.StallTimeout = 50 * time.Millisecond
 	// The command never settles: the run waits for it.
 	op.steps = []fakeStep{{open: true}}
 
@@ -610,9 +609,10 @@ func TestRunStep_WaitsForTheAnswerOfTheWorkAgent(t *testing.T) {
 	waitRun(t, svc, "obs-1")
 }
 
-// TestRunStep_ReturnsEarlyOnAStall — the coding agent goes quiet: the
-// run stops waiting for it and hands the decision to the agent.
-func TestRunStep_ReturnsEarlyOnAStall(t *testing.T) {
+// TestRunStep_WaitsForTheAgentToFinish — the run has no clock of its
+// own: a command that has not settled is still running, and the run
+// keeps watching it instead of deciding that it failed.
+func TestRunStep_WaitsForTheAgentToFinish(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
@@ -620,7 +620,6 @@ func TestRunStep_ReturnsEarlyOnAStall(t *testing.T) {
 		decisionResp("jev-1.14", optionEscalate, 0.1, 0),
 	}}
 	svc, op := testService(t, dir, Config{Decider: decider})
-	svc.cfg.StallTimeout = 50 * time.Millisecond
 	op.steps = []fakeStep{{open: true}}
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
@@ -628,11 +627,20 @@ func TestRunStep_ReturnsEarlyOnAStall(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForLine(t, op, "Which step should run next?")
+	waitSent(t, op, "/gtw commit")
 
-	if decider.Calls() == 0 {
-		t.Fatal("the decision model was not asked")
+	// The command has not settled. The run is still watching it: the
+	// decision model is not asked, because the agent has not said
+	// anything yet.
+	time.Sleep(200 * time.Millisecond)
+	if decider.Calls() != 0 {
+		t.Fatalf("the decision model was asked %d times, want 0 — the run waits for the agent",
+			decider.Calls())
 	}
+	if st := svc.Status("obs-1"); st.Phase != PhaseRunning {
+		t.Errorf("the run is %q, want it waiting for the agent", st.Phase)
+	}
+
 	if err := svc.Stop(context.Background(), "obs-1"); err != nil {
 		t.Fatalf("stop: %v", err)
 	}

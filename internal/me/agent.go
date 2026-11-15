@@ -19,6 +19,10 @@
 // message, so the receipt, the reaction and the interactive prompts
 // anchor to it the way they anchor to a person's message.
 //
+// The run has no clock of its own. Every command it issues carries
+// its own budget, and the run acts on the outcome the agent reports:
+// a timeout is the agent's timeout, never the run's. The run watches.
+//
 // The split:
 //
 //   - internal/channel — transport. How a message reaches the chat
@@ -59,12 +63,12 @@ const (
 	// chat model.
 	DefaultTokenBudget = 200_000
 
-	// DefaultStepTimeout caps one step of a run.
-	DefaultStepTimeout = 30 * time.Minute
-
-	// DefaultStallTimeout is how long a step may go without a
-	// heartbeat before the run stops waiting for it.
-	DefaultStallTimeout = 10 * time.Minute
+	// The run has no budget of its own.
+	//
+	// Every command the run issues carries one: the agent behind it
+	// reports its own outcome when its own budget runs out. The run
+	// watches that outcome and acts on it — a timeout is the agent's
+	// timeout, never the run's.
 )
 
 // BotMark is what the run's messages look like in the chat.
@@ -217,12 +221,6 @@ type Config struct {
 	// TokenBudget caps the tokens one run may spend on the chat
 	// model. Zero means DefaultTokenBudget.
 	TokenBudget int
-	// StepTimeout caps one step. Zero means DefaultStepTimeout.
-	StepTimeout time.Duration
-	// StallTimeout is how long a step may go without a heartbeat.
-	// Zero means DefaultStallTimeout.
-	StallTimeout time.Duration
-
 	// Operator drives the chat the run works in. Nil means the
 	// personal agent cannot run.
 	Operator Operator
@@ -278,12 +276,6 @@ func New(cfg Config) *Service {
 	}
 	if cfg.TokenBudget <= 0 {
 		cfg.TokenBudget = DefaultTokenBudget
-	}
-	if cfg.StepTimeout <= 0 {
-		cfg.StepTimeout = DefaultStepTimeout
-	}
-	if cfg.StallTimeout <= 0 {
-		cfg.StallTimeout = DefaultStallTimeout
 	}
 	logger := cfg.Logger
 	if logger == nil {
@@ -594,6 +586,21 @@ func (s *Service) Continue(ctx context.Context, chatID, note string) error {
 	}
 	s.updateCard(r)
 	return nil
+}
+
+// Show puts the run's state back in front of the operator.
+//
+// The card the run is updating is not always the one the operator
+// wants to look at: `/me show` posts the current state as a card of
+// its own, and the run keeps updating that one from here on.
+func (s *Service) Show(ctx context.Context, chatID string) error {
+	s.mu.Lock()
+	r, ok := s.active[chatID]
+	s.mu.Unlock()
+	if !ok {
+		return errors.New("this chat has no run in it")
+	}
+	return s.postCard(ctx, r)
 }
 
 // Stop cancels a run and tells the chat to stop working.

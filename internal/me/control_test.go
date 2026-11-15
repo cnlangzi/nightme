@@ -2,6 +2,7 @@ package me
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -265,6 +266,108 @@ func TestContinue_CancelsAPauseThatHasNotTakenEffect(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if st := svc.Status("obs-1"); st.Paused {
 		t.Fatal("the run paused although the operator cancelled the pause")
+	}
+}
+
+// TestEveryRoundGetsItsOwnCard — the card of the round that ended
+// stays in the chat as the record of that round; the next round gets
+// a card of its own.
+func TestEveryRoundGetsItsOwnCard(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "two", `title: two steps.
+jobs:
+  main:
+    steps:
+      - id: one
+        message: /gtw commit
+      - id: two
+        message: /gtw push
+`)
+
+	svc, op := testService(t, dir, noModels())
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "two", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitRun(t, svc, "obs-1")
+
+	// The run had three rounds: one per step, and the closing one
+	// that finds the plan exhausted. Every round got a card.
+	if posted := op.Posted(); posted != 3 {
+		t.Fatalf("the run published %d cards, want one per round", posted)
+	}
+}
+
+// TestShow_PutsTheStateBackInFrontOfTheOperator — /me show posts the
+// current state as a card of its own.
+func TestShow_PutsTheStateBackInFrontOfTheOperator(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	svc, op := testService(t, dir, noModels())
+	op.steps = []fakeStep{{open: true}}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitSent(t, op, "/gtw commit")
+	before := op.Posted()
+
+	if err := svc.Show(context.Background(), "obs-1"); err != nil {
+		t.Fatalf("show: %v", err)
+	}
+	if op.Posted() != before+1 {
+		t.Fatalf("the run published %d cards, want one more", op.Posted())
+	}
+	if !op.Has("/gtw commit") {
+		t.Errorf("the card does not show the step: %v", op.Lines())
+	}
+}
+
+// TestShow_WithoutARunIsRefused — a chat without a run has no state
+// to show.
+func TestShow_WithoutARunIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	svc, _ := testService(t, dir, noModels())
+	if err := svc.Show(context.Background(), "obs-1"); err == nil {
+		t.Fatal("a chat without a run showed a state")
+	}
+}
+
+// TestTheErrorHasItsOwnLine — the error says why the run stopped, on
+// its own line.
+func TestTheErrorHasItsOwnLine(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{err: errors.New("the chat model is broken")}})
+	op.steps = []fakeStep{{outcome: messages.Outcome{
+		Status:  messages.OutcomeFailed,
+		Summary: "the command failed",
+	}}}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitRun(t, svc, "obs-1")
+
+	var found bool
+	for _, line := range op.Lines() {
+		for _, l := range strings.Split(line, "\n") {
+			if strings.HasPrefix(l, "error: ") {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Errorf("the card has no error line: %v", op.Lines())
 	}
 }
 

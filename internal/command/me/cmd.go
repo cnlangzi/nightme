@@ -51,13 +51,14 @@ func (f *Factory) Spec() command.Spec {
 	return command.Spec{
 		Name:     "me",
 		Summary:  "Run a workflow: /me start <workflow> [args...]",
-		Usage:    "/me start <workflow> [args...]\n/me reply <text>\n/me pause\n/me continue [note]\n/me stop\n/me status",
+		Usage:    "/me start <workflow> [args...]\n/me reply <text>\n/me pause\n/me continue [note]\n/me show\n/me stop\n/me status",
 		Category: "agent",
 		Subcommands: []command.SubcommandSpec{
 			{Name: "start", Summary: "Start a workflow in this chat."},
 			{Name: "reply", Summary: "Answer the question the run asked."},
 			{Name: "pause", Summary: "Stop the run after the current step."},
 			{Name: "continue", Summary: "Hand the control back to the run."},
+			{Name: "show", Summary: "Show the run's state again."},
 			{Name: "stop", Summary: "Stop the run of this chat."},
 			{Name: "status", Summary: "Report where the run stands."},
 		},
@@ -85,6 +86,8 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 		return f.pause(ctx, rt, input)
 	case "continue":
 		return f.continueRun(ctx, rt, input)
+	case "show":
+		return f.show(ctx, rt, input)
 	case "stop":
 		return f.stop(ctx, rt, input)
 	case "status":
@@ -172,6 +175,19 @@ func (f *Factory) continueRun(ctx context.Context, rt command.RuntimeServices, i
 		Summary: "the run goes on",
 	})
 	return command.Reply(ctx, rt, "▶ The run goes on."), nil
+}
+
+// show puts the run's state back in front of the operator.
+func (f *Factory) show(ctx context.Context, rt command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
+	if err := f.ctrl.Show(ctx, input.ChatID); err != nil {
+		chatsession.ReportOutcome(ctx, command.FailedOutcome("error", "the run could not be shown"))
+		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
+	}
+	chatsession.ReportOutcome(ctx, messages.Outcome{
+		Status:  messages.OutcomeOK,
+		Summary: "the run's state is shown again",
+	})
+	return command.Reply(ctx, rt, "📋 The run's state is shown again."), nil
 }
 
 // stop stops the run of this chat.
@@ -308,6 +324,11 @@ func (c *controller) Pause(ctx context.Context, chatID string) error {
 // Continue implements command.MeController.
 func (c *controller) Continue(ctx context.Context, chatID, note string) error {
 	return c.svc.Continue(ctx, chatID, note)
+}
+
+// Show implements command.MeController.
+func (c *controller) Show(ctx context.Context, chatID string) error {
+	return c.svc.Show(ctx, chatID)
 }
 
 // Stop implements command.MeController.

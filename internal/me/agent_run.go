@@ -97,6 +97,9 @@ type run struct {
 
 	// cardMsgID is the id of the run's overview message.
 	cardMsgID string
+	// round counts the rounds the run has started. Every round gets
+	// a card of its own.
+	round int
 
 	// system1Decisions and system2Decisions count what each
 	// capability decided.

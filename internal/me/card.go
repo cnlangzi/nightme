@@ -16,6 +16,9 @@ import (
 //
 // A button carries the text of the command it runs, so a click
 // travels the same path a typed command takes.
+// maxCardError is how much of an error the run card shows.
+const maxCardError = 300
+
 const (
 	cardActionPause    = "pause"
 	cardActionContinue = "continue"
@@ -110,6 +113,7 @@ func (s *Service) cardView(r *run) channel.CardSpec {
 	reason := r.lastReason
 	note := r.lastNote
 	summary := r.summary
+	errMsg := r.errMsg
 	paused := r.paused
 	pausePending := r.pauseRequested
 	pauseReason := r.pauseReason
@@ -120,63 +124,57 @@ func (s *Service) cardView(r *run) channel.CardSpec {
 	options := askOptions(r.ask)
 	r.mu.Unlock()
 
-	var b strings.Builder
+	lines := make([]string, 0, len(steps)+8)
 	if args != "" {
-		b.WriteString("args: ")
-		b.WriteString(args)
-		b.WriteString("\n\n")
+		lines = append(lines, "args: "+args)
 	}
 	for i, step := range steps {
-		b.WriteString(fmt.Sprintf("%d. %s %s", i+1, stepIcon(states[step.ID]), stepLabel(step)))
-		b.WriteString("\n")
+		lines = append(lines, fmt.Sprintf("%d. %s %s", i+1, stepIcon(states[step.ID]), stepLabel(step)))
 	}
+
+	fields := make([]string, 0, 6)
 	if inflight != nil {
-		b.WriteString("\ncurrent: ")
-		b.WriteString(inflight.Command)
-		b.WriteString("\n")
+		fields = append(fields, "current: "+inflight.Command)
 	}
 	if question != "" {
-		b.WriteString("question: ")
-		b.WriteString(question)
-		b.WriteString("\n")
+		fields = append(fields, "question: "+question)
 	}
 	if decision != "" {
-		b.WriteString("decision: ")
-		b.WriteString(decision)
+		line := "decision: " + decision
 		if reason != "" {
-			b.WriteString(" — ")
-			b.WriteString(reason)
+			line += " — " + reason
 		}
-		b.WriteString("\n")
+		fields = append(fields, line)
 	}
 	if judgment != "" {
-		b.WriteString("blocked: ")
-		b.WriteString(judgment)
-		b.WriteString("\n")
+		fields = append(fields, "blocked: "+judgment)
 	}
 	switch {
 	case paused:
-		b.WriteString("paused: ")
+		line := "paused: the run waits for the operator"
 		if pauseReason != "" {
-			b.WriteString(pauseReason)
-		} else {
-			b.WriteString("the run waits for the operator")
+			line = "paused: " + pauseReason
 		}
-		b.WriteString("\n")
+		fields = append(fields, line)
 	case pausePending:
-		b.WriteString("pausing: the run stops after the current step\n")
+		fields = append(fields, "pausing: the run stops after the current step")
 	}
 	if note != "" {
-		b.WriteString("note: ")
-		b.WriteString(note)
-		b.WriteString("\n")
+		fields = append(fields, "note: "+note)
+	}
+	// The error stands on its own line: it is why the run stopped,
+	// and it must not read as another field of the run.
+	if errMsg != "" {
+		fields = append(fields, "error: "+truncate(errMsg, maxCardError))
 	}
 	if summary != "" {
-		b.WriteString("result: ")
-		b.WriteString(summary)
-		b.WriteString("\n")
+		fields = append(fields, "result: "+summary)
 	}
-	b.WriteString(fmt.Sprintf("actions: %d · system-1: %d decisions, %d tokens · system-2: %d decisions, %d tokens",
+	if len(fields) > 0 {
+		lines = append(lines, "")
+		lines = append(lines, fields...)
+	}
+	lines = append(lines, fmt.Sprintf("actions: %d · system-1: %d decisions, %d tokens · system-2: %d decisions, %d tokens",
 		actions, s1d, s1u, s2d, s2u))
 
 	title := workflow + " · " + string(phase)
@@ -204,7 +202,7 @@ func (s *Service) cardView(r *run) channel.CardSpec {
 
 	return channel.CardSpec{
 		Title:   title,
-		Body:    strings.TrimRight(b.String(), "\n"),
+		Body:    strings.Join(lines, "\n"),
 		Buttons: buttons,
 	}
 }

@@ -57,7 +57,7 @@ func (s *Service) drive(ctx context.Context, r *run) {
 		s.removeState(r.id)
 	default:
 		s.finish(r, PhaseFailed, err.Error())
-		r.setSummary("the run failed: " + err.Error())
+		r.setSummary("the run failed")
 		s.updateCard(r)
 		s.removeState(r.id)
 	}
@@ -81,6 +81,9 @@ func (s *Service) loop(ctx context.Context, r *run) error {
 		if err := s.checkGate(ctx, r); err != nil {
 			return err
 		}
+		if err := s.startRound(ctx, r); err != nil {
+			return err
+		}
 		if len(r.pendingCallList()) > 0 {
 			if err := s.runPendingCalls(ctx, r); err != nil {
 				return err
@@ -95,6 +98,23 @@ func (s *Service) loop(ctx context.Context, r *run) error {
 			return errFinished
 		}
 	}
+}
+
+// startRound begins a round of the run.
+//
+// Every round gets a card of its own: the card of the round that
+// ended stays in the chat as the record of that round, and the new
+// one carries the state from here on.
+func (s *Service) startRound(ctx context.Context, r *run) error {
+	r.mu.Lock()
+	first := r.round == 0
+	r.round++
+	r.mu.Unlock()
+	if first {
+		// The run started with a card of its own.
+		return nil
+	}
+	return s.postCard(ctx, r)
 }
 
 // checkGate reports whether the run may go on.
@@ -216,6 +236,9 @@ func (s *Service) goalMet(r *run) bool {
 func (s *Service) loopDeciderOnly(ctx context.Context, r *run) error {
 	for {
 		if err := s.checkGate(ctx, r); err != nil {
+			return err
+		}
+		if err := s.startRound(ctx, r); err != nil {
 			return err
 		}
 		// A question from an earlier turn is still open.

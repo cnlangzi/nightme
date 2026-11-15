@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/cnlangzi/nightme/internal/gateway/observe"
 	"github.com/cnlangzi/nightme/internal/llm"
@@ -376,8 +375,15 @@ func (s *Service) toolFinish(ctx context.Context, r *run, call pendingCall) (ste
 		return stepResult{}, toolErrorf("%s", err.Error())
 	}
 	r.markFinished()
-	r.setSummary(summary)
-	s.finish(r, PhaseDone, "")
+	if status == "failed" {
+		// The model says the run did not work: the reason is the
+		// error, and the summary says how it ended.
+		r.setSummary("the run failed")
+		s.finish(r, PhaseFailed, summary)
+	} else {
+		r.setSummary(summary)
+		s.finish(r, PhaseDone, "")
+	}
 	s.updateCard(r)
 	s.persist(r)
 	return stepResult{Status: status, Summary: summary}, nil
@@ -508,21 +514,18 @@ func (s *Service) runCommandInner(ctx context.Context, r *run, command string, i
 
 // watchCommand waits for a command to settle.
 //
-// It comes back early when the chat asks something — the model can
-// then answer — or when the command goes quiet for too long.
+// The run has no clock of its own here: the agent behind the command
+// decides when it is done, and its verdict is the verdict. The run
+// only watches.
+//
+// It comes back early when the chat asks something — the agent is
+// waiting for an answer, and the model can answer it.
 func (s *Service) watchCommand(ctx context.Context, r *run, msgID, command string) (stepResult, error) {
 	ch := r.watchChannel()
 	if ch == nil {
 		ch = s.cfg.Operator.Watch(msgID)
 		r.setWatchChannel(ch)
 	}
-
-	deadline := s.now().Add(s.cfg.StepTimeout)
-	lastBeat := s.now()
-	poll := s.pollInterval()
-
-	ticker := time.NewTicker(poll)
-	defer ticker.Stop()
 
 	for {
 		select {
@@ -555,18 +558,6 @@ func (s *Service) watchCommand(ctx context.Context, r *run, msgID, command strin
 			if len(ex.Choices) > 0 {
 				return s.waitingResult(fmt.Sprintf("the chat is waiting for an answer: %s", ex.Choices[0].Title)), nil
 			}
-			if beat := ex.Progress.LastBeatAt; !beat.IsZero() && beat.After(lastBeat) {
-				lastBeat = beat
-			}
-		case <-ticker.C:
-			now := s.now()
-			if now.After(deadline) {
-				r.clearInflight()
-				return stepResult{Status: string(wfe.OutcomeTimeout), Summary: "the command timed out"}, nil
-			}
-			if now.Sub(lastBeat) > s.cfg.StallTimeout {
-				return s.waitingResult("the agent went quiet"), nil
-			}
 		}
 	}
 }
@@ -583,16 +574,6 @@ func truncate(text string, n int) string {
 // yet.
 func (s *Service) waitingResult(reason string) stepResult {
 	return stepResult{Status: statusWaiting, Summary: reason}
-}
-
-// pollInterval returns how often a running command is checked for a
-// timeout or a stall.
-func (s *Service) pollInterval() time.Duration {
-	interval := time.Second
-	if quarter := s.cfg.StallTimeout / 4; quarter > 0 && quarter < interval {
-		interval = quarter
-	}
-	return interval
 }
 
 // resultOf turns a settled execution into the result of a command.

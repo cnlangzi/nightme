@@ -140,6 +140,44 @@ func TestAsk_PostsTheQuestionWithoutDispatchingIt(t *testing.T) {
 	}
 }
 
+// TestPostCard_RendersOneLinePerElement — Feishu's markdown element
+// treats a newline as a soft break: a body with newlines in a single
+// element runs together on the card.
+func TestPostCard_RendersOneLinePerElement(t *testing.T) {
+	a := testAdapter(t)
+
+	var sent string
+	a.sendFunc = func(_ context.Context, _, _, content, _ string, _ bool) (string, error) {
+		sent = content
+		return "om_card", nil
+	}
+
+	spec := channel.CardSpec{
+		Title: "fix · running",
+		Body:  "1. ✅ /gtw commit\n2. 🔄 /gtw push\nerror: the agent is rate limited",
+	}
+	if _, err := a.PostCard(context.Background(), "oc_test", spec); err != nil {
+		t.Fatalf("PostCard: %v", err)
+	}
+
+	var card map[string]any
+	if err := json.Unmarshal([]byte(sent), &card); err != nil {
+		t.Fatalf("decode card: %v", err)
+	}
+	body, _ := card["body"].(map[string]any)
+	elements, _ := body["elements"].([]any)
+	lines := 0
+	for _, el := range elements {
+		m, _ := el.(map[string]any)
+		if m["tag"] == "markdown" {
+			lines++
+		}
+	}
+	if lines != 3 {
+		t.Fatalf("the card has %d markdown elements, want one per line", lines)
+	}
+}
+
 // TestAct_ClicksTheCardAndShowsTheChoice — the run answers a prompt
 // the way a person does: the card shows the choice and the click
 // reaches the daemon.

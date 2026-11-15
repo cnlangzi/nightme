@@ -18,9 +18,22 @@ const nudgeText = "Call a tool to make progress. A reply without a tool call doe
 //
 // It reports whether the run is over.
 func (s *Service) system2(ctx context.Context, r *run) (bool, error) {
+	conversation := r.conversation()
+	if len(conversation) == 0 {
+		// The run talks to the chat model for the first time at a
+		// judgment point. A chat model with nothing but a system
+		// prompt has no conversation to answer: the API refuses the
+		// request. The opening turn says what the run is up
+		// against.
+		r.appendMessage(llm.Message{
+			Role:  llm.RoleUser,
+			Parts: []llm.Part{{Type: llm.PartText, Text: s.firstTurnPrompt(r)}},
+		})
+		conversation = r.conversation()
+	}
 	req := llm.Request{
 		System:   s.systemPrompt(r),
-		Messages: compact(r.conversation()),
+		Messages: compact(conversation),
 		Tools:    toolCatalogue(),
 	}
 	resp, err := s.cfg.Provider.Complete(ctx, req)
@@ -76,6 +89,27 @@ func (s *Service) system2(ctx context.Context, r *run) (bool, error) {
 	}
 	r.setPendingCalls(pending)
 	return false, nil
+}
+
+// firstTurnPrompt renders the opening message of the chat model's
+// conversation.
+//
+// The run reaches the chat model at a judgment point: the model has
+// to know what the run is up against before it can choose.
+func (s *Service) firstTurnPrompt(r *run) string {
+	reason := r.judgmentReason()
+	if reason == "" {
+		reason = "the workflow cannot decide what comes next"
+	}
+	var b strings.Builder
+	b.WriteString("The run needs a decision: ")
+	b.WriteString(reason)
+	b.WriteString("\n")
+	if out, ok := r.lastOutcome(); ok {
+		fmt.Fprintf(&b, "The last step ended as %q: %s\n", out.Status, out.Summary)
+	}
+	b.WriteString("Pick the next step, repair the current one, or finish the run.")
+	return b.String()
 }
 
 // compact shortens the conversation for the model.

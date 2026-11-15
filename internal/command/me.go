@@ -70,6 +70,8 @@ type MeController interface {
 	// Continue hands the control back to a paused run. The note is
 	// the operator's instruction.
 	Continue(ctx context.Context, chatID, note string) error
+	// Show puts the run's state back in front of the operator.
+	Show(ctx context.Context, chatID string) error
 	// Stop cancels the run of a chat.
 	Stop(ctx context.Context, chatID string) error
 	// Status returns the state of the run of a chat.

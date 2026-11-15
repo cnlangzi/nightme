@@ -44,12 +44,20 @@ func (a *Adapter) UpdateCard(ctx context.Context, chatID, cardID string, spec ch
 }
 
 // runCardJSON renders the card as a Feishu card 2.0 envelope.
+//
+// The body is rendered one line per element: Feishu's markdown
+// element treats a newline as a soft break, so a body with newlines
+// in a single element runs together on the card.
 func runCardJSON(spec channel.CardSpec) (string, error) {
-	elements := make([]map[string]any, 0, 2)
-	if body := SanitizeCardMarkdown(spec.Body); body != "" {
+	elements := make([]map[string]any, 0, 8)
+	for _, line := range strings.Split(spec.Body, "\n") {
+		if strings.TrimSpace(line) == "" {
+			elements = append(elements, map[string]any{"tag": "hr"})
+			continue
+		}
 		elements = append(elements, map[string]any{
 			"tag":     "markdown",
-			"content": body,
+			"content": SanitizeCardMarkdown(line),
 		})
 	}
 	if len(spec.Buttons) > 0 {

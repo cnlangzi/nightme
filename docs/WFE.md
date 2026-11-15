@@ -740,10 +740,13 @@ The user picks the models. nightme never chooses one, and it never injects a mod
 | `/me reply <text>` | Answers the question the run is waiting for. |
 | `/me pause` | Stops the run after the step it is on. The step that is running is not interrupted: its outcome is recorded. |
 | `/me continue [note]` | Hands the control back to a paused run. The note is the operator's instruction; it joins the conversation the chat model reads. |
+| `/me show` | Puts the run's state back in front of the operator as a card of its own. |
 | `/me stop` | Cancels the run and tells the chat to stop working. |
 | `/me status` | Reports the current step, the phase and progress of the running command, the remaining budget, and what each capability decided and spent. |
 
 The run card carries the same commands: its buttons are `[暂停] [继续] [停止]`, and a click is the command it stands for.
+
+Every round of the run gets a card of its own. The card of the round that ended stays in the chat as the record of that round; the next round starts a new one. `/me show` posts the current state as a card of its own, for the operator who wants the state back in front of them.
 
 A run that waits for an answer offers the choices as the card's buttons: a click is the answer, and the answer never reaches the agent. A person who quotes the question instead answers it in their own words — the answer is claimed by the run before the agent sees it.
 
@@ -796,8 +799,6 @@ actions: 6 · system-1: 0 decisions, 0 tokens · system-2: 8 decisions, 4210 tok
 | Guardrail | Bound |
 |---|---|
 | Token budget | The tokens one run may spend on the chat model. |
-| Step timeout | Thirty minutes per command. |
-| Stall detection | Ten minutes without a heartbeat. |
 | Step budget | `attempts` for a step, counted per round. |
 | Rounds | `iterations` for a job — the number of rounds it runs. |
 | Compaction | Every tool result but the last keeps its status and summary; the last one keeps its transcript. |
@@ -806,6 +807,8 @@ actions: 6 · system-1: 0 decisions, 0 tokens · system-2: 8 decisions, 4210 tok
 A text-only answer — words without a tool call — is nudged once to call a tool. The second time, the run ends as a failure.
 
 A command the underlying agent answered 429 pauses the run: the agent is throttled, and running the command again makes it worse. The run waits for the operator, who continues it with `/me continue`.
+
+The run has no clock of its own. Every command it issues carries its own budget — the agent behind the command reports its own outcome when that budget runs out — and the run acts on that outcome. A timeout is the agent's timeout, never the run's. The run watches: it stops when the command reports, when the operator stops it, or when the daemon shuts down.
 
 The run is persisted after every tool result: one file in `<DataDir>/workflows/runs/<run-id>.json` holds the DAG progress, the conversation, the judgment history and the paused state. On startup, running runs resume:
 

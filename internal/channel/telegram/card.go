@@ -11,6 +11,7 @@ package telegram
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -35,7 +36,7 @@ func (a *Adapter) PostCard(ctx context.Context, chatID string, spec channel.Card
 	if !ok {
 		return "", fmt.Errorf("telegram: chat id %q is not a telegram chat id", chatID)
 	}
-	result, err := a.sendRichFromHTML(ctx, rawChatID, topicID, 0, renderRunCard(spec), runCardKeyboard(spec))
+	result, err := a.sendRichBlocks(ctx, rawChatID, topicID, 0, renderRunCard(spec), runCardKeyboard(spec))
 	if err != nil {
 		return "", err
 	}
@@ -52,24 +53,40 @@ func (a *Adapter) UpdateCard(ctx context.Context, chatID, cardID string, spec ch
 	if err != nil {
 		return fmt.Errorf("telegram: %q is not a telegram message id", cardID)
 	}
-	return a.editRichFromHTML(ctx, rawChatID, id, renderRunCard(spec), runCardKeyboard(spec))
+	return a.editRichBlocks(ctx, rawChatID, id, renderRunCard(spec), runCardKeyboard(spec))
 }
 
-// renderRunCard renders the card as Telegram HTML.
+// renderRunCard renders the card as rich-message blocks: the title as
+// a heading, the body one paragraph per line.
+//
+// One block per line keeps every line of the overview on a line of
+// its own, the way the card reads on the other channels.
 func renderRunCard(spec channel.CardSpec) string {
-	var b strings.Builder
+	blocks := make([]map[string]any, 0, 10)
 	if spec.Title != "" {
-		b.WriteString("<b>")
-		b.WriteString(escapeInline(spec.Title))
-		b.WriteString("</b>")
+		blocks = append(blocks, map[string]any{
+			"type": "heading",
+			"text": escapeInline(spec.Title),
+			"size": 2,
+		})
 	}
-	if spec.Body != "" {
-		if b.Len() > 0 {
-			b.WriteString("\n\n")
+	for _, line := range strings.Split(spec.Body, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
 		}
-		b.WriteString(escapeInline(spec.Body))
+		blocks = append(blocks, map[string]any{
+			"type": "paragraph",
+			"text": escapeInline(line),
+		})
 	}
-	return b.String()
+	if len(blocks) == 0 {
+		blocks = append(blocks, map[string]any{
+			"type": "paragraph",
+			"text": "",
+		})
+	}
+	b, _ := json.Marshal(blocks)
+	return string(b)
 }
 
 // runCardKeyboard renders the card's buttons as an inline keyboard.

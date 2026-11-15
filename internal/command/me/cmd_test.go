@@ -27,6 +27,10 @@ type fakeController struct {
 	pauseErr error
 	// continueErr is the error a continue reports.
 	continueErr error
+	// showErr is the error a show reports.
+	showErr error
+	// shown counts the shows.
+	shown int
 	// replies holds the replies the command sent.
 	replies []string
 	// stopped counts the stops.
@@ -71,6 +75,13 @@ func (c *fakeController) Continue(_ context.Context, _ string, note string) erro
 	c.continued++
 	c.notes = append(c.notes, note)
 	return c.continueErr
+}
+
+func (c *fakeController) Show(_ context.Context, _ string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.shown++
+	return c.showErr
 }
 
 func (c *fakeController) Stop(_ context.Context, _ string) error {
@@ -264,6 +275,19 @@ func TestContinue_CarriesTheNote(t *testing.T) {
 	runMe(t, ctrl, cs, "/me", "continue", "use", "the", "other", "branch")
 	if len(ctrl.notes) != 1 || ctrl.notes[0] != "use the other branch" {
 		t.Fatalf("the controller got the notes %v, want the note", ctrl.notes)
+	}
+}
+
+func TestShow_PutsTheStateBackInFrontOfTheOperator(t *testing.T) {
+	ctrl := &fakeController{}
+	cs := newSession(t, "me-14", "/tmp/work")
+
+	reply := runMe(t, ctrl, cs, "/me", "show")
+	if !strings.Contains(reply, "shown again") {
+		t.Fatalf("reply = %q, want the show", reply)
+	}
+	if ctrl.shown != 1 {
+		t.Fatalf("the controller showed %d times, want 1", ctrl.shown)
 	}
 }
 

@@ -170,6 +170,39 @@ func TestAsk_PostsTheQuestionWithoutDispatchingIt(t *testing.T) {
 	}
 }
 
+// TestPostCard_RendersOneLinePerBlock — the card's body is one rich
+// block per line, so every line of the overview reads as a line.
+func TestPostCard_RendersOneLinePerBlock(t *testing.T) {
+	a, api := newImpersonateAdapter(t)
+
+	spec := channel.CardSpec{
+		Title: "fix · running",
+		Body:  "1. ✅ /gtw commit\n2. 🔄 /gtw push\nerror: the agent is rate limited",
+	}
+	if _, err := a.PostCard(context.Background(), "tg_100", spec); err != nil {
+		t.Fatalf("PostCard: %v", err)
+	}
+	send := findCall(api.snapshotCalls(), "sendRichMessage")
+	if send == nil {
+		t.Fatal("the card was not published")
+	}
+	rich, _ := send.Params["rich_message"].(map[string]any)
+	raw, _ := rich["blocks"].(json.RawMessage)
+	var blocks []map[string]any
+	if err := json.Unmarshal(raw, &blocks); err != nil {
+		t.Fatalf("decode blocks: %v", err)
+	}
+	paragraphs := 0
+	for _, b := range blocks {
+		if b["type"] == "paragraph" {
+			paragraphs++
+		}
+	}
+	if paragraphs != 3 {
+		t.Fatalf("the card has %d paragraphs, want one per line", paragraphs)
+	}
+}
+
 // TestAct_ClicksThePromptAndShowsTheChoice — the run answers a
 // prompt the way a person does: the prompt shows the choice and the
 // click reaches the daemon.

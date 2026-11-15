@@ -674,6 +674,7 @@ key — is reported in `nightme logs` and left out. The daemon still starts, and
 | `/me reply <text>` | Answers the question the run is waiting for. |
 | `/me pause` | Stops the run after the step it is on. |
 | `/me continue [note]` | Hands the control back to a paused run. The note is your instruction. |
+| `/me show` | Puts the run's state back in front of you as a card of its own. |
 | `/me stop` | Cancels the run and tells the chat to stop working. |
 | `/me status` | Reports the current step, the phase and the progress of the running command, the remaining budget, and what each capability decided and spent. |
 
@@ -694,8 +695,10 @@ real message of that chat, marked with a bot sign:
 
 The receipt, the reaction and the permission card anchor to that message the way
 they anchor to a message you sent yourself. The run's overview — the steps, the
-current one, the last decision, the token usage — is one card in the chat, with
-`[暂停] [继续] [停止]` on it; a click is the command it stands for. When the run
+current one, the last decision, the token usage — is a card in the chat, with
+`[暂停] [继续] [停止]` on it; a click is the command it stands for. Every round of
+the run gets a card of its own, so the chat keeps the record of how it went.
+When the run
 asks a question, the choices become the card's buttons: a click is the answer. The
 question itself never reaches the agent — it is a message of the chat, not a turn
 of the conversation.

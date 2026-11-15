@@ -12,6 +12,7 @@ package gtw
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -480,5 +481,43 @@ func TestGtwOutcome_AbortedRunKeepsItsFacts(t *testing.T) {
 	}
 	if got.Data["reason"] == "rejected" {
 		t.Errorf("outcome data = %v, want the cancellation's reason, not the failure's", got.Data)
+	}
+}
+
+// TestGtwOutcome_PushUnreadableRangeIsSurfaced — a range that does
+// not resolve is not an empty range: the push landed, and the card
+// must say the result could not be read rather than claim that
+// nothing was pushed.
+func TestGtwOutcome_PushUnreadableRangeIsSurfaced(t *testing.T) {
+	git := newPushGit()
+	git.onArgs(statusCmd, "## wt-pushed...origin/wt-pushed [ahead 2]\n", "", nil)
+	git.onArgsSeq([]string{"rev-parse", "--verify", "origin/wt-pushed"},
+		pushGitResp{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n", "", nil},
+		pushGitResp{"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n", "", nil},
+	)
+	git.onSeq("rev-list",
+		pushGitResp{"2", "", nil},
+		pushGitResp{"0", "", nil},
+	)
+	git.on("push", "To origin", "", nil)
+	git.onArgs([]string{"log", "--oneline", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa..origin/wt-pushed"},
+		"", "fatal: ambiguous argument 'aaaaaaaa..origin/wt-pushed': unknown revision or path not in the working tree.", errors.New("exit status 128"))
+
+	withCwd(t, t.TempDir())
+	writeYml(t, mustPwd(t), Context{
+		Worktree: mustPwd(t),
+		Branch:   "wt-pushed",
+		RepoRoot: mustPwd(t),
+	})
+
+	p := newOutcomeProbe(t)
+	p.cs.SetSelectedCwd(mustPwd(t))
+	if _, err := dispatchPush(p.ctx, p.cs, HandlerDeps{Git: git}, "chat", "msg", pushArgs{}); err != nil {
+		t.Fatalf("dispatchPush: %v", err)
+	}
+	got := p.settle(t)
+	assertOutcome(t, got, messages.OutcomeFailed, map[string]string{"reason": "error"})
+	if got != nil && got.Summary != "the push landed but its result could not be read" {
+		t.Errorf("outcome summary = %q, want the push's result to be reported as unread", got.Summary)
 	}
 }

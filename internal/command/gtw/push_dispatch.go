@@ -109,12 +109,8 @@ func dispatchPush(
 	// HasNothingToPush=false here (the branch was never published;
 	// programmaticPush handles the first push).
 	if snap.HasNothingToPush() {
-		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-			"❌ nothing to push\n"+
-				"  no uncommitted changes\n"+
-				"  no unpushed commits on "+snap.Branch,
-			command.FailedOutcomeData("nothing_to_push", "the branch has nothing to push",
-				map[string]string{"branch": snap.Branch})), nil
+		card, out := nothingToPush(snap.Branch)
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, card, out), nil
 	}
 
 	// 3. Capture originBefore (the previous origin/<branch> tip)
@@ -182,9 +178,8 @@ func dispatchPush(
 	// so — a push that pushed nothing did not do what it was asked
 	// to do, so the caller decides what to do next.
 	if commitCount == 0 {
-		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, card,
-			command.FailedOutcomeData("nothing_to_push", "the branch has nothing to push",
-				map[string]string{"branch": c.Branch})), nil
+		failure, out := nothingToPush(c.Branch)
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, failure, out), nil
 	}
 	// The remote tip the push left behind. Read it back so a
 	// program knows which commit origin now points at — the local

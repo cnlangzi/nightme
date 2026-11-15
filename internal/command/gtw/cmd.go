@@ -1131,8 +1131,6 @@ func (f *Factory) runSync(ctx context.Context, _ command.RuntimeServices, cs *ch
 		reportOutcome(ctx, command.FailedOutcome("error", "the branch could not be synced"))
 		return &command.SlashOutput{Reply: fmt.Sprintf("❌ %v", err), Consumed: true}, nil
 	}
-	// A branch that was already up to date had nothing to pull —
-	// that is a noop, not a success with a commit count.
 	switch {
 	case syncFacts == nil:
 		reportOutcome(ctx, command.NoopOutcome("the sync was skipped", nil))

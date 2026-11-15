@@ -408,16 +408,15 @@ func listUncommittedFiles(ctx context.Context, worktree string, deps HandlerDeps
 // Output is the raw `git log --oneline` text, trimmed. Caller
 // can split on "\n" if it wants structured access.
 //
-// An empty range (no commits) returns "" + nil. Errors other
-// than "bad revision" propagate.
+// An empty range (no commits) returns "" + nil. A range that does
+// not resolve is an error: the caller must not read it as "there was
+// nothing there".
 func gitLogRange(ctx context.Context, worktree, revRange string, deps HandlerDeps) (string, error) {
 	out, stderr, err := deps.Git.Run(ctx, worktree, "log", "--oneline", revRange)
 	if err != nil {
-		// Empty rev range (no commits) often surfaces as a non-fatal
-		// error from `git log`; treat that as "no output, no error".
-		// Caller can render an empty list.
-		if strings.Contains(stderr, "does not have any commits") ||
-			strings.Contains(stderr, "unknown revision") {
+		// An unborn ref has no commit to log: that is an empty
+		// range, not a broken one.
+		if strings.Contains(stderr, "does not have any commits") {
 			return "", nil
 		}
 		return "", fmt.Errorf("git log %s: %w (stderr: %s)", revRange, err, strings.TrimSpace(stderr))

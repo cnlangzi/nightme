@@ -4,13 +4,17 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"github.com/cnlangzi/nightme/internal/command"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // syncOutcome is the machine-readable result of a sync: the facts a
 // program needs to know what the /gtw sync card did.
 //
-// A branch that was already up to date pulled nothing — that is a
-// "nothing to do", not a success with a commit count.
+// A branch that was already up to date pulled nothing — the sync did
+// what it was asked to do, and the outcome carries no commit count to
+// say so.
 type syncOutcome struct {
 	// branch is the branch that was synced. Empty when it could
 	// not be determined.
@@ -274,8 +278,8 @@ func replyCommitSuccessCard(ctx context.Context, c Context, agentName, revRange 
 // `revRange` is the git log range that captures the commits the
 // push just landed (typically `headBefore..origin/<branch>`).
 //
-// A push that landed no commit is not a success: the card says so,
-// and the count tells the caller which verdict to report.
+// A push that landed no commit has no card: the caller reports it
+// with the shared "nothing to push" card.
 //
 // Returns the rendered card and the number of commits it lists, or
 // an error if the underlying `git log` failed. A successful push
@@ -291,7 +295,7 @@ func replyPushCard(ctx context.Context, c Context, revRange string, deps Handler
 		commitCount = strings.Count(logOut, "\n") + 1
 	}
 	if commitCount == 0 {
-		return fmt.Sprintf("❌ nothing to push\n  no unpushed commits on %s\n", c.Branch), 0, nil
+		return "", 0, nil
 	}
 
 	var b strings.Builder
@@ -303,4 +307,18 @@ func replyPushCard(ctx context.Context, c Context, revRange string, deps Handler
 	}
 	fmt.Fprintf(&b, "> %s\n", c.Branch)
 	return b.String(), commitCount, nil
+}
+
+// nothingToPush is the card and the outcome of a push that had
+// nothing to push.
+//
+// A push runs because the branch carries commits the remote does not
+// have; a branch that carries none means the premise does not hold,
+// so the command reports a failure and the caller decides what to do.
+func nothingToPush(branch string) (string, messages.Outcome) {
+	card := "❌ nothing to push\n" +
+		"  no uncommitted changes\n" +
+		"  no unpushed commits on " + branch
+	return card, command.FailedOutcomeData("nothing_to_push", "the branch has nothing to push",
+		map[string]string{"branch": branch})
 }

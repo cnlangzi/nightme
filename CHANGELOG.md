@@ -23,6 +23,10 @@ a registered command the agent issues at a judgment point — is recorded
 against the step the run is on and counts against that step's `attempts`,
 but it no longer turns a failed step into a finished one.
 
+The decision model now picks among the steps' `message:` values. The
+repairs belong to the chat model, which holds every nightme command as a
+tool: a run with only a decision model asks the user instead.
+
 Workflow files that still carry `allow:` are refused with a message that
 names the key and the line.
 

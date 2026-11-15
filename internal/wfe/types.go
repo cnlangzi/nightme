@@ -306,7 +306,7 @@ func (o Outcome) Succeeded() bool {
 type ActionKind string
 
 const (
-	// ActionKindRun is the step's own message — the step running.
+	// ActionKindRun is the step's own execution — the step running.
 	ActionKindRun ActionKind = "run"
 	// ActionKindInstruct is a free-form prompt to the coding agent.
 	ActionKindInstruct ActionKind = "instruct"
@@ -319,8 +319,9 @@ const (
 )
 
 // ActionRecord is one action the run has taken. StepID points at the
-// step the action served; only a run belongs to a step, so an
-// instruction carries an empty one.
+// step the action served: a run belongs to its step, and a repair
+// counts against the step the run is on. An instruction carries an
+// empty one.
 //
 // Round is the round of the step's job the action was taken in. The
 // per-step budgets count the attempts of the current round only.

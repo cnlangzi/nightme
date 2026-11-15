@@ -115,9 +115,8 @@ func (s *Service) renderSituation(r *run) string {
 	}
 
 	// The last action's outcome: the step list above carries it when
-	// the action was a step's own run. A command the run issued for a
-	// step that has not run yet leaves its verdict nowhere else, so
-	// it is rendered here.
+	// the action was a step's own run. A repair the run issued leaves
+	// its verdict on no step, so it is rendered here.
 	if action, ok := r.lastAction(); ok && !carriesOutcome(rendered, action) {
 		out := action.Outcome
 		fmt.Fprintf(&b, "\nlast outcome:\n  status: %s\n  summary: %s\n", out.Status, out.Summary)

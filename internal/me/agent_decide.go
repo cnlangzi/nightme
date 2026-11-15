@@ -259,14 +259,15 @@ func (s *Service) recordSynthetic(r *run, tool string, args map[string]any) {
 // syntheticCall renders the tool call a decision becomes.
 //
 // A decision names a step message: the call is run_step with the
-// step's id.
+// step's id. A command that names no step has no step to run: the
+// call carries no id, and the tool refuses it.
 func (s *Service) syntheticCall(r *run, command string) (string, map[string]any) {
 	if idx, err := r.checkRun(command); err == nil && r.isStepMessage(idx, command) {
 		if step, ok := r.stepAt(idx); ok {
 			return toolRunStep, map[string]any{"step_id": step.ID}
 		}
 	}
-	return toolRunStep, map[string]any{"step_id": command}
+	return toolRunStep, map[string]any{"step_id": ""}
 }
 
 // escalateQuestion renders the question a run asks the user when the

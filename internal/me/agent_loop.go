@@ -183,10 +183,10 @@ func (s *Service) plan(ctx context.Context, r *run) (wfe.Decision, error) {
 		return decision, err
 	}
 	r.policy.SetRounds(r.state.Rounds)
-	job, round := targetIteration(r, decision, before)
+	it := targetIteration(r, decision, before)
 	r.mu.Unlock()
 
-	s.switchCard(ctx, r, job, round)
+	s.switchCard(ctx, r, it)
 	return decision, nil
 }
 
@@ -204,6 +204,9 @@ func roundsSnapshot(rounds map[string]int) map[string]int {
 
 // targetIteration returns the iteration the plan enters.
 //
+// The engine counts the rounds; the runner reads them and does not
+// change how they are counted.
+//
 // The decision's job wins when it names one: a run decision on job B
 // keeps the card on B even when the engine advanced job A in the same
 // call. The advanced job is the target only when the decision names
@@ -211,17 +214,19 @@ func roundsSnapshot(rounds map[string]int) map[string]int {
 //
 // A job the plan looked at for the first time is not an advance: the
 // engine sets its round to 1 when it reads it.
-func targetIteration(r *run, decision wfe.Decision, before map[string]int) (string, int) {
+//
+// The caller holds the run's lock.
+func targetIteration(r *run, decision wfe.Decision, before map[string]int) iteration {
 	if decision.Job != "" {
-		return decision.Job, r.state.RoundOf(decision.Job)
+		return iteration{job: decision.Job, round: r.state.RoundOf(decision.Job)}
 	}
 	for _, job := range r.workflow.JobOrder() {
 		round := r.state.Rounds[job]
 		if round > before[job] && round > 1 {
-			return job, round
+			return iteration{job: job, round: round}
 		}
 	}
-	return "", 0
+	return iteration{}
 }
 
 // runPlanStep runs the step the workflow decided on.

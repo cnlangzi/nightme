@@ -746,7 +746,7 @@ The user picks the models. nightme never chooses one, and it never injects a mod
 
 The run card carries the same commands: its buttons are `[暂停] [继续] [停止]`, and a click is the command it stands for.
 
-Every job iteration of the run gets a card of its own: an iteration is one pass through a job's step list. The card of the iteration that ended stays in the chat as the record of that iteration; the next iteration starts a new one. `/me show` posts the current state as a card of its own, for the operator who wants the state back in front of them.
+Every job iteration of the run gets a card of its own: an iteration is one pass through a job's step list. The card of the iteration that ended stays in the chat as the record of that iteration; the next iteration starts a new one. A run that comes back to an iteration it has been in before goes on with the card that iteration has. `/me show` posts the current state as a card of its own, for the operator who wants the state back in front of them.
 
 A run that waits for an answer offers the choices as the card's buttons: a click is the answer, and the answer never reaches the agent. A person who quotes the question instead answers it in their own words — the answer is claimed by the run before the agent sees it.
 

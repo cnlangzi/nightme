@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/messages"
 )
@@ -538,6 +539,138 @@ func TestTheModelPathFollowsTheStepOfTheCommand(t *testing.T) {
 	}
 }
 
+// TestAnIterationKeepsItsCard — a run that comes back to an iteration
+// goes on with the card that iteration has: one card per iteration,
+// not one per visit.
+func TestAnIterationKeepsItsCard(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "ship", buildTagWorkflow)
+
+	provider := &scriptedProvider{responses: []llm.Response{
+		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"command": "/gtw push"})},
+		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "done", "summary": "pushed"})},
+	}}
+	svc, op := testService(t, dir, Config{Provider: provider})
+	op.steps = []fakeStep{
+		{outcome: messages.Outcome{Status: messages.OutcomeFailed, Summary: "the commit failed"}},
+		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "pushed"}},
+		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "tagged"}},
+	}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "ship", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitRun(t, svc, "obs-1")
+
+	// The run was in the build job, then in the publish job, and back
+	// in the build job: two iterations, two cards.
+	if posted := op.Posted(); posted != 2 {
+		t.Fatalf("the run published %d cards, want one per iteration", posted)
+	}
+	// The card of the build iteration was written after the card of
+	// the publish iteration: the run went back to it.
+	cards := op.Cards()
+	publish, build := -1, -1
+	for i, c := range cards {
+		if c.ID == "card-2" && c.Posted {
+			publish = i
+		}
+		if c.ID == "card-1" {
+			build = i
+		}
+	}
+	if publish < 0 || build < publish {
+		t.Fatalf("the run did not go back to the card of the build iteration: %v", cards)
+	}
+}
+
+// TestACardTheChatRefusedIsPublishedLater — a card the chat refuses
+// does not stop the run: the iteration gets its card as soon as the
+// chat takes one.
+func TestACardTheChatRefusedIsPublishedLater(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "ship", publishTwiceWorkflow)
+
+	provider := &scriptedProvider{responses: []llm.Response{
+		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"command": "/gtw push"})},
+		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "done", "summary": "pushed"})},
+	}}
+	logger := &recordingLogger{}
+	svc, op := testService(t, dir, Config{Provider: provider, Logger: slog.New(logger)})
+	// The chat refuses the card of the publish iteration — the second
+	// attempt — and takes the one that comes after it.
+	op.refuseAttempt = 2
+	op.steps = []fakeStep{
+		{outcome: messages.Outcome{Status: messages.OutcomeFailed, Summary: "the commit failed"}},
+		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "pushed"}},
+		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "tagged"}},
+	}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "ship", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitRun(t, svc, "obs-1")
+
+	if !logged(logger, "the run card could not be published") {
+		t.Errorf("the failure was not logged: %v", logger.Lines())
+	}
+	if posted := op.Posted(); posted != 2 {
+		t.Fatalf("the run published %d cards, want the start card and the one the chat took later", posted)
+	}
+	body := lastCardBody(op, "card-2")
+	if !strings.HasPrefix(body, "job: publish · round: 1") {
+		t.Errorf("the card does not name the iteration it records: %q", body)
+	}
+}
+
+// TestTheCardOfAnAnsweredQuestionOffersNoChoice — the card the run
+// leaves behind does not offer the answer of a question that is
+// answered.
+func TestTheCardOfAnAnsweredQuestionOffersNoChoice(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "ship", twoJobWorkflow)
+
+	decider := &scriptedDecider{answers: []llm.DecisionResponse{
+		decisionResp("jev", "/gtw push", 0.1, 0),
+	}}
+	svc, op := testService(t, dir, Config{Decider: decider})
+	op.steps = []fakeStep{
+		{outcome: messages.Outcome{Status: messages.OutcomeFailed, Summary: "the commit failed"}},
+		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "pushed"}},
+	}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "ship", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitForLine(t, op, "Which step should run next?")
+	if !hasReplyButton(op.Buttons()) {
+		t.Fatalf("the card does not offer the answer: %+v", op.Buttons())
+	}
+
+	// The operator picks one: the run goes on in another iteration.
+	if err := svc.Reply(context.Background(), "obs-1", "1"); err != nil {
+		t.Fatalf("reply: %v", err)
+	}
+	waitForPosted(t, op, 2)
+
+	// The card the run left behind does not offer the answer any more.
+	buttons := cardButtons(op, "card-1")
+	for _, b := range buttons {
+		if strings.HasPrefix(b.Action, cardActionReply) {
+			t.Fatalf("the card of the iteration that ended still offers the answer: %+v", buttons)
+		}
+	}
+	if body := lastCardBody(op, "card-1"); strings.Contains(body, "question: ") {
+		t.Errorf("the card of the iteration that ended still shows the question: %q", body)
+	}
+}
+
 // TestACardThatCannotBePublishedDoesNotStopTheRun — the card is for
 // people: the work goes on when the chat refuses it.
 func TestACardThatCannotBePublishedDoesNotStopTheRun(t *testing.T) {
@@ -605,6 +738,16 @@ func TestResume_KeepsTheCardItOwns(t *testing.T) {
 	}
 	if state["card_round"] != float64(1) {
 		t.Errorf("the state names the round %v, want 1", state["card_round"])
+	}
+	// The card of the iteration travels with the run: a run that comes
+	// back to it goes on with that card.
+	cards, ok := state["cards"].([]any)
+	if !ok || len(cards) != 1 {
+		t.Fatalf("the state holds no card of an iteration: %v", state["cards"])
+	}
+	entry, ok := cards[0].(map[string]any)
+	if !ok || entry["job"] != "main" || entry["round"] != float64(1) {
+		t.Errorf("the state names the card of %v, want the card of main", cards[0])
 	}
 
 	// The daemon goes away and comes back.
@@ -692,6 +835,40 @@ jobs:
         wait: 1h
 `
 
+// buildTagWorkflow is a workflow whose build job has two steps: the
+// run comes back to it after it has worked somewhere else.
+const buildTagWorkflow = `title: two jobs.
+jobs:
+  build:
+    steps:
+      - id: commit
+        message: /gtw commit
+      - id: tag
+        message: /gtw tag
+  publish:
+    needs: [build]
+    steps:
+      - id: push
+        message: /gtw push
+`
+
+// publishTwiceWorkflow is a workflow whose publish job has two steps:
+// the run stays in that job for another turn.
+const publishTwiceWorkflow = `title: two jobs.
+jobs:
+  build:
+    steps:
+      - id: commit
+        message: /gtw commit
+  publish:
+    needs: [build]
+    steps:
+      - id: push
+        message: /gtw push
+      - id: tag
+        message: /gtw tag
+`
+
 // lastCardBody returns the body that was written to the card with the
 // given id last.
 func lastCardBody(op *fakeOperator, id string) string {
@@ -703,6 +880,42 @@ func lastCardBody(op *fakeOperator, id string) string {
 		}
 	}
 	return body
+}
+
+// cardButtons returns the buttons of the card with the given id, as
+// they were written last.
+func cardButtons(op *fakeOperator, id string) []channel.CardButton {
+	cards := op.Cards()
+	buttons := op.CardButtons()
+	for i := len(cards) - 1; i >= 0; i-- {
+		if cards[i].ID == id {
+			return buttons[i]
+		}
+	}
+	return nil
+}
+
+// hasReplyButton reports whether the buttons answer a question.
+func hasReplyButton(buttons []channel.CardButton) bool {
+	for _, b := range buttons {
+		if strings.HasPrefix(b.Action, cardActionReply) {
+			return true
+		}
+	}
+	return false
+}
+
+// waitForPosted waits until the run published that many cards.
+func waitForPosted(t *testing.T, op *fakeOperator, n int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if op.Posted() >= n {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("the run published %d cards, want %d", op.Posted(), n)
 }
 
 // lastPostedCard returns the card the run published last.

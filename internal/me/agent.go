@@ -477,10 +477,12 @@ func (s *Service) StartWorkflow(ctx context.Context, req Request) (string, error
 
 	// The run's overview goes up before the first step: the chat
 	// shows what the run is from the start.
-	if err := s.postCard(ctx, r); err != nil {
+	id, err := s.postCard(ctx, r, iteration{})
+	if err != nil {
 		s.finish(r, PhaseFailed, err.Error())
 		return "", err
 	}
+	r.setCard(id, iteration{})
 
 	s.wg.Add(1)
 	go func() {
@@ -600,7 +602,18 @@ func (s *Service) Show(ctx context.Context, chatID string) error {
 	if !ok {
 		return errors.New("this chat has no run in it")
 	}
-	return s.postCard(ctx, r)
+	it := r.cardIteration()
+	id, err := s.postCard(ctx, r, it)
+	if err != nil {
+		return err
+	}
+	r.setCard(id, it)
+	if it.job != "" {
+		// The card of the iteration is this one from now on: a run
+		// that comes back to the iteration goes on with it.
+		r.rememberCard(it, id)
+	}
+	return nil
 }
 
 // Stop cancels a run and tells the chat to stop working.

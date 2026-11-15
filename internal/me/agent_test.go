@@ -79,6 +79,11 @@ type fakeOperator struct {
 	// failCardAfter makes the chat refuse the cards after it has
 	// published that many of them.
 	failCardAfter int
+	// refuseAttempt makes the chat refuse that attempt to publish a
+	// card. Zero refuses none.
+	refuseAttempt int
+	// cardAttempts counts the attempts to publish a card.
+	cardAttempts int
 }
 
 func newFakeOperator(steps ...fakeStep) *fakeOperator {
@@ -181,7 +186,10 @@ func (f *fakeOperator) Act(_ context.Context, chatID string, action messages.Act
 func (f *fakeOperator) PostCard(_ context.Context, _ string, spec channel.CardSpec) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.failCard || (f.failCardAfter > 0 && f.postedCount() >= f.failCardAfter) {
+	f.cardAttempts++
+	if f.failCard ||
+		f.refuseAttempt == f.cardAttempts ||
+		(f.failCardAfter > 0 && f.postedCount() >= f.failCardAfter) {
 		return "", errors.New("the chat cannot show a card")
 	}
 	f.cardSeq++
@@ -244,6 +252,18 @@ func (f *fakeOperator) Buttons() []channel.CardButton {
 		return nil
 	}
 	return append([]channel.CardButton(nil), f.buttons[len(f.buttons)-1]...)
+}
+
+// CardButtons returns the buttons of every card the run published and
+// updated, in the order it did it.
+func (f *fakeOperator) CardButtons() [][]channel.CardButton {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([][]channel.CardButton, 0, len(f.buttons))
+	for _, b := range f.buttons {
+		out = append(out, append([]channel.CardButton(nil), b...))
+	}
+	return out
 }
 
 // Get returns the tracked execution of a message.

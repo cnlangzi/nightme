@@ -360,6 +360,21 @@ func TestStop_StopsTheRun(t *testing.T) {
 	}
 }
 
+// TestStop_SaysTheSummaryIsOnItsWay — the reply tells the operator
+// that the summary of the session is coming.
+func TestStop_SaysTheSummaryIsOnItsWay(t *testing.T) {
+	ctrl := &fakeController{}
+	cs := newSession(t, "me-8", "/tmp/work")
+
+	reply := runMe(t, ctrl, cs, "/me", "stop")
+	if !strings.Contains(reply, "stopped") {
+		t.Fatalf("reply = %q, want the stop", reply)
+	}
+	if !strings.Contains(reply, "summary") {
+		t.Fatalf("reply = %q, want the summary", reply)
+	}
+}
+
 func TestStatus_ReportsWhereTheRunStands(t *testing.T) {
 	ctrl := &fakeController{status: command.MeStatus{
 		Phase:            "running",

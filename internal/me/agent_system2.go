@@ -53,6 +53,13 @@ func (s *Service) system2(ctx context.Context, r *run) (bool, error) {
 	r.system2Usage.Add(resp.Usage)
 	r.mu.Unlock()
 	r.setDecision(decisionChat, "the chat model took the turn")
+	r.recordWake(wakeRecord{
+		Who:   decisionChat,
+		What:  toolCallsLine(resp.Message.ToolCalls()),
+		Why:   r.judgmentReason(),
+		Round: r.currentRound(),
+		At:    s.now(),
+	})
 	// The card names who decided last: the decision changed, so the
 	// card changes with it.
 	s.updateCard(r)

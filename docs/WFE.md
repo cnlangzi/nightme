@@ -791,12 +791,14 @@ The user picks the models. nightme never chooses one, and it never injects a mod
 | `/me pause` | Stops the run after the step it is on. The step that is running is not interrupted: its outcome is recorded. |
 | `/me continue [note]` | Hands the control back to a paused run. The note is the operator's instruction; it joins the conversation the chat model reads. |
 | `/me show` | Puts the run's state back in front of the operator as a card of its own. |
-| `/me stop` | Cancels the run and tells the chat to stop working. |
+| `/me stop` | Cancels the run, tells the chat to stop working, and leaves a summary of the session in the chat. |
 | `/me status` | Reports the current step, the phase and progress of the running command, the remaining budget, and what each capability decided and spent. |
 
 The run card carries the same commands: its buttons are `[暂停] [继续] [停止]`, and a click is the command it stands for.
 
 Every job iteration of the run gets a card of its own: an iteration is one pass through a job's step list. The card of the iteration that ended stays in the chat as the record of that iteration; the next iteration starts a new one. A run that comes back to an iteration it has been in before goes on with the card that iteration has. `/me show` posts the current state as a card of its own, for the operator who wants the state back in front of them.
+
+`/me stop` leaves a summary of the session in the chat: a card of its own that says what the run did, what went wrong and what the models decided. The summary is posted once the run has unwound, so the step that was in flight counts as a step that did not run unless it produced an outcome. The card carries no buttons — the run is over, and pause, continue and stop would act on a run that no longer exists.
 
 A run that waits for an answer offers the choices as the card's buttons: a click is the answer, and the answer never reaches the agent. A person who quotes the question instead answers it in their own words — the answer is claimed by the run before the agent sees it.
 
@@ -844,6 +846,32 @@ current: /gtw push
 decision: the workflow — the plan says so
 actions: 6 · system-1: 0 decisions, 0 tokens · system-2: 8 decisions, 4210 tokens
 ```
+
+The summary of a stopped session is a card of its own:
+
+```
+fix-issue · stopped
+
+run: fix-issue-1752661200000000000
+duration: 42m
+jobs: ship × 7
+actions: 63 (41 ok · 3 failed · 2 noop · 1 cancelled)
+wake-ups: 23 (18 by the decision model · 5 by the chat model)
+steps: 9 ran · 2 not run
+system-1: 12 decisions, 1204 tokens
+system-2: 31 decisions, 18422 tokens
+
+errors (last 5 of 6)
+· /gtw fix 43 -y — failed: the issue is claimed by another run (reason: issue_claimed)
+
+decisions (last 10 of 23)
+· the decision model — /gtw fix 43 -y (p=0.91) · because: the previous step "review" ended as "failed"
+· the chat model — run_step(step_id=review) · because: the plan is exhausted
+```
+
+The facts come from the run's own record: no model is asked to write the summary. The `errors` are the actions whose outcome was `failed`, `incomplete`, `cancelled` or `timeout`, one per line and at most the last five of them; the `decisions` are the judgments the models made at the wake-ups, at most the last ten. A row is cut short: a shell step reports a whole build log as its summary, and a card that carries it is unreadable. The totals stay in the facts lines.
+
+The wake log holds the model decisions only: the workflow's own fast path is not a decision a model made, so a run that goes through its workflow without asking a model holds no wake records at all. A decision model answer and a chat model turn are two records. The log is persisted with the rest of the run, so it survives a restart of the daemon.
 
 ### 8.11 Guardrails and recovery
 

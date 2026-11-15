@@ -258,6 +258,255 @@ jobs:
 	}
 }
 
+// finalStepYAML is a workflow whose last step cleans up after the
+// round.
+const finalStepYAML = `
+title: with a final step
+jobs:
+  main:
+    steps:
+      - id: one
+        message: "/one"
+      - id: two
+        message: "/two"
+      - id: cleanup
+        message: "/cleanup"
+        final: true
+`
+
+// TestDecide_AFinalStepRunsInTheOrdinaryOrder pins the final step
+// like any other: it runs when the steps before it ran.
+func TestDecide_AFinalStepRunsInTheOrdinaryOrder(t *testing.T) {
+	wf := mustParse(t, finalStepYAML)
+	state := newRunState(wf)
+	RecordStep(state, "main", wf.Jobs["main"].Steps[0], Outcome{Status: OutcomeOK}, false)
+	RecordStep(state, "main", wf.Jobs["main"].Steps[1], Outcome{Status: OutcomeOK}, false)
+
+	decision, err := Decide(state, wf)
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if decision.Kind != DecisionRun || decision.Step.ID != "cleanup" {
+		t.Fatalf("the final step should run now, got %v (%q)", decision.Kind, decision.Reason)
+	}
+}
+
+// TestEndRound_SkipsTheRemainingStepsAndRunsTheFinalStep pins the
+// early end of a round: the steps that did not run are skipped, the
+// final step runs in their place, and the round is over.
+func TestEndRound_SkipsTheRemainingStepsAndRunsTheFinalStep(t *testing.T) {
+	wf := mustParse(t, finalStepYAML)
+	state := newRunState(wf)
+	RecordStep(state, "main", wf.Jobs["main"].Steps[0], Outcome{
+		Status:  OutcomeFailed,
+		Summary: "the worktree has nothing to commit",
+	}, false)
+
+	if err := EndRound(state, wf, "main"); err != nil {
+		t.Fatalf("EndRound: %v", err)
+	}
+	// The step that did not run is recorded as skipped.
+	step, ok := stepState(state, "two")
+	if !ok {
+		t.Fatal("the step that did not run was not recorded")
+	}
+	if !step.Skipped {
+		t.Error("the step that did not run is not recorded as skipped")
+	}
+	// The final step was left to run.
+	if HasRun(state, "cleanup") {
+		t.Error("the final step must be left to run")
+	}
+
+	decision, err := Decide(state, wf)
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if decision.Kind != DecisionRun || decision.Step.ID != "cleanup" {
+		t.Fatalf("the final step should run now, got %v (%q)", decision.Kind, decision.Reason)
+	}
+}
+
+// TestEndRound_TheNextRoundBeginsAfterTheFinalStep pins the round
+// that follows: the final step ends the round, and the job starts
+// the next one.
+func TestEndRound_TheNextRoundBeginsAfterTheFinalStep(t *testing.T) {
+	wf := mustParse(t, `
+title: repeats
+jobs:
+  main:
+    iterations: 0
+    steps:
+      - id: one
+        message: "/one"
+      - id: cleanup
+        message: "/cleanup"
+        final: true
+`)
+	state := newRunState(wf)
+	RecordStep(state, "main", wf.Jobs["main"].Steps[0], Outcome{Status: OutcomeFailed}, false)
+
+	if err := EndRound(state, wf, "main"); err != nil {
+		t.Fatalf("EndRound: %v", err)
+	}
+	decision, err := Decide(state, wf)
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if decision.Kind != DecisionRun || decision.Step.ID != "cleanup" {
+		t.Fatalf("the final step should run now, got %v (%q)", decision.Kind, decision.Reason)
+	}
+	RecordStep(state, "main", wf.Jobs["main"].Steps[1], Outcome{Status: OutcomeOK}, false)
+
+	decision, err = Decide(state, wf)
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if decision.Kind != DecisionRun || decision.Step.ID != "one" {
+		t.Fatalf("the next round should start, got %v (%q)", decision.Kind, decision.Reason)
+	}
+	if round := state.RoundOf("main"); round != 2 {
+		t.Errorf("round = %d, want 2", round)
+	}
+}
+
+// TestEndRound_AJobWithoutAFinalStepStartsTheNextRound pins the
+// round that ends early in a job that names no final step: the
+// remaining steps are skipped and the job goes on.
+func TestEndRound_AJobWithoutAFinalStepStartsTheNextRound(t *testing.T) {
+	wf := mustParse(t, `
+title: repeats
+jobs:
+  main:
+    iterations: 0
+    steps:
+      - id: one
+        message: "/one"
+      - id: two
+        message: "/two"
+`)
+	state := newRunState(wf)
+	RecordStep(state, "main", wf.Jobs["main"].Steps[0], Outcome{Status: OutcomeFailed}, false)
+
+	if err := EndRound(state, wf, "main"); err != nil {
+		t.Fatalf("EndRound: %v", err)
+	}
+	decision, err := Decide(state, wf)
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if decision.Kind != DecisionRun || decision.Step.ID != "one" {
+		t.Fatalf("the next round should start, got %v (%q)", decision.Kind, decision.Reason)
+	}
+	if round := state.RoundOf("main"); round != 2 {
+		t.Errorf("round = %d, want 2", round)
+	}
+}
+
+// TestEndRound_AFailedFinalStepIsAJudgmentPoint pins the final step
+// as a step of its own: when it fails, the agent decides again.
+func TestEndRound_AFailedFinalStepIsAJudgmentPoint(t *testing.T) {
+	wf := mustParse(t, finalStepYAML)
+	state := newRunState(wf)
+	RecordStep(state, "main", wf.Jobs["main"].Steps[0], Outcome{Status: OutcomeFailed}, false)
+
+	if err := EndRound(state, wf, "main"); err != nil {
+		t.Fatalf("EndRound: %v", err)
+	}
+	decision, err := Decide(state, wf)
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if decision.Kind != DecisionRun || decision.Step.ID != "cleanup" {
+		t.Fatalf("the final step should run now, got %v (%q)", decision.Kind, decision.Reason)
+	}
+	RecordStep(state, "main", wf.Jobs["main"].Steps[2], Outcome{Status: OutcomeFailed}, false)
+
+	decision, err = Decide(state, wf)
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if decision.Kind != DecisionJudgment {
+		t.Fatalf("Kind = %v, want a judgment point (the final step failed)", decision.Kind)
+	}
+}
+
+// TestEndRound_TheLastRoundOfAJobExhaustsThePlan pins the job that
+// has no round left: the plan is over and the agent is asked again.
+func TestEndRound_TheLastRoundOfAJobExhaustsThePlan(t *testing.T) {
+	wf := mustParse(t, threeStepYAML)
+	state := newRunState(wf)
+	RecordStep(state, "main", wf.Jobs["main"].Steps[0], Outcome{Status: OutcomeFailed}, false)
+
+	if err := EndRound(state, wf, "main"); err != nil {
+		t.Fatalf("EndRound: %v", err)
+	}
+	decision, err := Decide(state, wf)
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if decision.Kind != DecisionJudgment || !decision.Exhausted {
+		t.Fatalf("the plan should be exhausted, got %v (%q)", decision.Kind, decision.Reason)
+	}
+}
+
+// TestEndRound_AStepThatIsStillRunningHoldsTheRound — a round cannot
+// end under a command that has not settled.
+func TestEndRound_AStepThatIsStillRunningHoldsTheRound(t *testing.T) {
+	wf := mustParse(t, finalStepYAML)
+	state := newRunState(wf)
+	RecordPending(state, "main", wf.Jobs["main"].Steps[0])
+
+	if err := EndRound(state, wf, "main"); err == nil {
+		t.Fatal("the round ended while a step was still running")
+	}
+	if HasRun(state, "two") {
+		t.Error("a step was skipped even though the round did not end")
+	}
+}
+
+// TestEndRound_AFinalStepThatIsNotLastStillRuns — a final step in the
+// middle of a job runs in the ordinary order, and a round that ends
+// early runs it too.
+func TestEndRound_AFinalStepThatIsNotLastStillRuns(t *testing.T) {
+	wf := mustParse(t, `
+title: final in the middle
+jobs:
+  main:
+    steps:
+      - id: one
+        message: "/one"
+      - id: cleanup
+        message: "/cleanup"
+        final: true
+      - id: last
+        message: "/last"
+`)
+	state := newRunState(wf)
+	RecordStep(state, "main", wf.Jobs["main"].Steps[0], Outcome{Status: OutcomeFailed}, false)
+
+	if err := EndRound(state, wf, "main"); err != nil {
+		t.Fatalf("EndRound: %v", err)
+	}
+	decision, err := Decide(state, wf)
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if decision.Kind != DecisionRun || decision.Step.ID != "cleanup" {
+		t.Fatalf("the final step should run now, got %v (%q)", decision.Kind, decision.Reason)
+	}
+}
+
+// stepState returns the record of the step, and whether it exists.
+func stepState(state *RunState, id string) (StepState, bool) {
+	for _, st := range state.Steps {
+		if st.ID == id {
+			return st, true
+		}
+	}
+	return StepState{}, false
+}
+
 func TestExprContext_CarriesTheStepOutcomes(t *testing.T) {
 	wf := mustParse(t, threeStepYAML)
 	state := newRunState(wf)

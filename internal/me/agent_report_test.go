@@ -94,7 +94,8 @@ jobs:
 }
 
 // TestRenderSituation_SaysWhereTheRunStands — the report names the
-// reason, the round, the steps and the last outcome.
+// reason, the round, the steps, what each of them produced and the
+// transcript of the last actions.
 func TestRenderSituation_SaysWhereTheRunStands(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", `title: one
@@ -132,7 +133,7 @@ jobs:
 	}
 	r.recordStep("main", step, out)
 	r.record(wfe.ActionKindRun, "/gtw commit", "commit", out)
-	r.setTranscript("the coding agent said hello")
+	r.setTranscript("/gtw commit", "the coding agent said hello")
 
 	report := svc.renderSituation(r)
 	for _, want := range []string{
@@ -143,12 +144,78 @@ jobs:
 		"commit: incomplete",
 		"push: not run yet",
 		"— ready",
-		"status: incomplete",
-		"summary: the commit did not finish",
+		"the commit did not finish",
 		"reason: agent_error",
 		"hint: the agent did not run, or it produced no usable output.",
-		"transcript (tail):",
+		"transcripts (tail):",
+		"--- /gtw commit ---",
 		"the coding agent said hello",
+	} {
+		if !strings.Contains(report, want) {
+			t.Errorf("the situation does not carry %q:\n%s", want, report)
+		}
+	}
+}
+
+// TestRenderSituation_CarriesTheEvidenceOfTheLastTwoActions — the
+// evidence that explains a failure is often in the action before the
+// one that failed.
+func TestRenderSituation_CarriesTheEvidenceOfTheLastTwoActions(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", `title: one
+jobs:
+  main:
+    steps:
+      - id: fix
+        message: /gtw fix
+      - id: commit
+        message: /gtw commit
+`)
+	svc, _ := testService(t, dir, Config{})
+	wf, ok := svc.catalog.Lookup("one")
+	if !ok {
+		t.Fatal("the workflow is not in the catalogue")
+	}
+	bound, err := wfe.Bind(wf, map[string]string{})
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	r := newRun(svc, Request{Name: "one", ChatID: "obs-2", Cwd: "/tmp/work"}, bound,
+		map[string]string{})
+	r.setJudgment(`the previous step "commit" ended as "failed"`)
+
+	fix, ok := r.stepByID("fix")
+	if !ok {
+		t.Fatal("the workflow has no fix step")
+	}
+	commit, ok := r.stepByID("commit")
+	if !ok {
+		t.Fatal("the workflow has no commit step")
+	}
+	r.recordStep("main", fix, wfe.Outcome{
+		Status:  wfe.OutcomeOK,
+		Summary: "the worktree for branch feat/x is ready",
+	})
+	r.setTranscript("/gtw fix", "the agent said it could not find the file")
+	r.recordStep("main", commit, wfe.Outcome{
+		Status:  wfe.OutcomeFailed,
+		Summary: "the worktree has nothing to commit",
+		Data:    map[string]string{"reason": "nothing_to_commit"},
+	})
+	r.setTranscript("/gtw commit", "nothing to commit")
+
+	report := svc.renderSituation(r)
+	for _, want := range []string{
+		"fix: ok",
+		"the worktree for branch feat/x is ready",
+		"commit: failed",
+		"the worktree has nothing to commit",
+		"reason: nothing_to_commit",
+		"hint: the working tree carries no changes: there was nothing to commit.",
+		"--- /gtw fix ---",
+		"the agent said it could not find the file",
+		"--- /gtw commit ---",
+		"nothing to commit",
 	} {
 		if !strings.Contains(report, want) {
 			t.Errorf("the situation does not carry %q:\n%s", want, report)
@@ -191,10 +258,48 @@ func TestThePrompt_WordsTheTools(t *testing.T) {
 		"repo_status",
 		"answer_choice",
 		"ask_human",
+		"wait(duration)",
+		"end_round",
 		"finish(done)",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("the prompt does not carry %q:\n%s", want, prompt)
+		}
+	}
+}
+
+// TestThePrompt_TeachesTheNewJudgmentPoints — the prompt names the
+// two situations a step that produced nothing can mean.
+func TestThePrompt_TeachesTheNewJudgmentPoints(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+	svc, _ := testService(t, dir, Config{})
+	r := testRun(t, svc, "one")
+
+	prompt := svc.systemPrompt(r)
+	for _, want := range []string{
+		"When a step produced nothing",
+		"Nothing is left to do",
+		"Call end_round",
+		"still running in the background",
+		"Call wait, then look again",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("the prompt does not carry %q:\n%s", want, prompt)
+		}
+	}
+}
+
+// TestTheReasonHints_ExplainTheEmptyQueue — the hint of the reason
+// code of an empty queue says what to do about it.
+func TestTheReasonHints_ExplainTheEmptyQueue(t *testing.T) {
+	hint := reasonHint("no_candidate")
+	if hint == "" {
+		t.Fatal("the empty queue has no hint")
+	}
+	for _, want := range []string{"queue", "wait"} {
+		if !strings.Contains(hint, want) {
+			t.Errorf("the hint does not carry %q: %q", want, hint)
 		}
 	}
 }
@@ -493,5 +598,41 @@ func TestARunKeepsItsCommandsAndItsAgent(t *testing.T) {
 	}
 	if restored.agentName != "chat" {
 		t.Errorf("the restored agent is %q, want the chat's agent", restored.agentName)
+	}
+}
+
+// TestARunKeepsItsEvidence — a run that comes back after a daemon
+// restart still shows the evidence of the actions that led to the
+// judgment point.
+func TestARunKeepsItsEvidence(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	svc, _ := testService(t, dir, Config{})
+	r := testRun(t, svc, "one")
+	r.setTranscript("/gtw fix", "the agent said it could not find the file")
+	r.setTranscript("/gtw commit", "nothing to commit")
+
+	restored := svc.restoreRun(persistedRun{
+		RunID:    "one-1",
+		ChatID:   "obs-1",
+		Cwd:      "/tmp/work",
+		Workflow: r.workflow,
+		State:    r.state,
+		Transcripts: []actionTranscript{
+			{Command: "/gtw fix", Text: "the agent said it could not find the file"},
+			{Command: "/gtw commit", Text: "nothing to commit"},
+		},
+	})
+	report := svc.renderSituation(restored)
+	for _, want := range []string{
+		"--- /gtw fix ---",
+		"the agent said it could not find the file",
+		"--- /gtw commit ---",
+		"nothing to commit",
+	} {
+		if !strings.Contains(report, want) {
+			t.Errorf("the restored situation does not carry %q:\n%s", want, report)
+		}
 	}
 }

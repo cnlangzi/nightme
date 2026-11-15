@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/wfe"
@@ -786,4 +787,141 @@ func (s *recordingShell) Called() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.calls > 0
+}
+
+// ── the round and the wait ─────────────────────────────────────────
+
+// TestEndRoundTool_TheRoundEndsAndTheFinalStepRuns — the agent ends
+// the round of the job the run is on: the steps that did not run are
+// skipped, the final step runs in their place and the job goes on.
+func TestEndRoundTool_TheRoundEndsAndTheFinalStepRuns(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", `title: one
+jobs:
+  main:
+    steps:
+      - id: fix
+        message: /gtw fix
+      - id: commit
+        message: /gtw commit
+      - id: cleanup
+        message: /gtw close
+        final: true
+`)
+
+	provider := &scriptedProvider{responses: []llm.Response{
+		{Message: toolCallMsg("c1", toolEndRound, map[string]any{})},
+	}}
+	svc, op := testService(t, dir, Config{Provider: provider})
+	// The first step did not end ok: the run reaches a judgment
+	// point and the agent takes over. The final step runs after the
+	// agent ended the round.
+	op.steps = []fakeStep{pendingStep("nothing to fix"), okStep("closed")}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitRun(t, svc, "obs-1")
+
+	sent := op.Sent()
+	var finalRan bool
+	for _, cmd := range sent {
+		switch cmd {
+		case "/gtw close":
+			finalRan = true
+		case "/gtw commit":
+			t.Fatalf("the step the round cut short ran: %v", sent)
+		}
+	}
+	if !finalRan {
+		t.Fatalf("the final step did not run: %v", sent)
+	}
+}
+
+// TestEndRoundTool_ItIsAToolOfTheRun — the agent ends the round with
+// a tool, and the tool is one the model knows.
+func TestEndRoundTool_ItIsAToolOfTheRun(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+	svc, _ := testService(t, dir, Config{})
+	r := testRun(t, svc, "one")
+
+	tool, ok := toolNamed(svc.toolCatalogue(r), toolEndRound)
+	if !ok {
+		t.Fatal("the run has no end_round tool")
+	}
+	if tool.Description == "" {
+		t.Error("the end_round tool has no description")
+	}
+}
+
+// TestWaitTool_TheModelWaitsAndLooksAgain — the wait blocks the
+// agent's turn and ends by itself.
+func TestWaitTool_TheModelWaitsAndLooksAgain(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	provider := &scriptedProvider{responses: []llm.Response{
+		{Message: toolCallMsg("c1", toolWait, map[string]any{"duration": "10ms"})},
+		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "failed", "summary": "gave up"})},
+	}}
+	svc, op := testService(t, dir, Config{Provider: provider})
+	// The step did not end ok: the run reaches a judgment point and
+	// the agent takes over.
+	op.steps = []fakeStep{pendingStep("still going")}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitRun(t, svc, "obs-1")
+
+	if provider.Calls() < 2 {
+		t.Fatalf("the model was called %d times, want the wait to hand the turn back", provider.Calls())
+	}
+	req := provider.Request(1)
+	if !messagesContain(req, "waited 10ms") {
+		t.Errorf("the model did not learn that the wait is over: %v", req.Messages)
+	}
+}
+
+// TestWaitTool_TheRunIsStoppedDuringTheWait — the wait belongs to the
+// run: stopping the run ends it at once.
+func TestWaitTool_TheRunIsStoppedDuringTheWait(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+	svc, _ := testService(t, dir, Config{})
+	r := testRun(t, svc, "one")
+
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		r.finish(PhaseStopped, "")
+	}()
+	_, err := svc.toolWait(context.Background(), r, pendingCall{
+		Name: toolWait,
+		Args: json.RawMessage(`{"duration":"5m"}`),
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want the run's cancellation", err)
+	}
+}
+
+// TestWaitTool_ABadDurationIsRefused — the model gets the error and
+// tries again.
+func TestWaitTool_ABadDurationIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+	svc, _ := testService(t, dir, Config{})
+	r := testRun(t, svc, "one")
+
+	_, err := svc.toolWait(context.Background(), r, pendingCall{
+		Name: toolWait,
+		Args: json.RawMessage(`{"duration":"soon"}`),
+	})
+	if err == nil || !isToolError(err) {
+		t.Fatalf("err = %v, want a tool error the model can correct", err)
+	}
 }

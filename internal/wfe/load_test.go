@@ -249,6 +249,29 @@ jobs:
 	}
 }
 
+// TestParse_AFinalStep — a step may say it cleans up after the
+// round.
+func TestParse_AFinalStep(t *testing.T) {
+	wf := mustParse(t, `
+title: rounds
+jobs:
+  main:
+    steps:
+      - id: fix
+        message: "/gtw fix"
+      - id: cleanup
+        message: "/gtw close"
+        final: true
+`)
+	steps := wf.Jobs["main"].Steps
+	if steps[0].Final {
+		t.Error("the step that does not say it is final is final")
+	}
+	if !steps[1].Final {
+		t.Error("the step marked `final: true` is not final")
+	}
+}
+
 // TestParse_ZeroIterationsMeansUntilTheRunEnds — a job that does not
 // say how many rounds it runs runs one round.
 func TestParse_ZeroIterationsMeansUntilTheRunEnds(t *testing.T) {

@@ -611,7 +611,6 @@ jobs:
       - id: review
         message: /review
         note: If it fails or does not finish, continue with /review -c.
-        allow: [/review -c, /gtw commit]
         attempts: 5
       - id: push
         message: /gtw push
@@ -722,6 +721,37 @@ func waitSent(t *testing.T, op *fakeOperator, command string) {
 		time.Sleep(2 * time.Millisecond)
 	}
 	t.Fatalf("the chat never received %q: %v", command, op.Sent())
+}
+
+// stepOutcome returns the outcome the run state holds for a step.
+func stepOutcome(r *run, stepID string) (wfe.Outcome, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, st := range r.state.Steps {
+		if st.ID == stepID {
+			return st.Outcome, true
+		}
+	}
+	return wfe.Outcome{}, false
+}
+
+// runHistory returns the actions the run took.
+func runHistory(r *run) []wfe.ActionRecord {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]wfe.ActionRecord(nil), r.policy.History...)
+}
+
+// activeRun returns the run of a chat.
+func activeRun(t *testing.T, svc *Service, chatID string) *run {
+	t.Helper()
+	svc.mu.Lock()
+	r := svc.active[chatID]
+	svc.mu.Unlock()
+	if r == nil {
+		t.Fatal("the run is not registered")
+	}
+	return r
 }
 
 // ── starting a run ────────────────────────────────────────────────
@@ -1004,7 +1034,7 @@ jobs:
 
 // TestJudgmentPoint_ARepairIsRecordedAgainstItsStep — a command the
 // deterministic path would not have run is recorded against the step
-// that owns it.
+// the run is on.
 func TestJudgmentPoint_ARepairIsRecordedAgainstItsStep(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "repair", `title: repair
@@ -1013,45 +1043,40 @@ jobs:
     steps:
       - id: review
         message: /review
-        allow: ["/review -c"]
         attempts: 5
       - id: push
         message: /gtw push
 `)
 
-	decider := &scriptedDecider{answers: []llm.DecisionResponse{
-		decisionResp("jev-1.14", "/review -c", 0.95, 0),
+	provider := &scriptedProvider{responses: []llm.Response{
+		{Message: toolCallMsg("c1", "ntm_review", map[string]any{"args": "-c"})},
+		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "failed", "summary": "the review did not pass"})},
 	}}
-	svc, op := testService(t, dir, Config{Decider: decider})
+	svc, op := testService(t, dir, Config{Provider: provider})
 	op.steps = []fakeStep{
 		{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}},
 		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "review finished"}},
-		{outcome: messages.Outcome{Status: messages.OutcomeFailed, Summary: "the push failed"}},
 	}
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "repair", ChatID: "obs-1", Cwd: "/tmp/work",
+		Commands: []CommandInfo{{Name: "review"}},
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForLine(t, op, "Which step should run next?")
+	r := activeRun(t, svc, "obs-1")
+	waitRun(t, svc, "obs-1")
 
-	svc.mu.Lock()
-	r := svc.active["obs-1"]
-	svc.mu.Unlock()
-	if r == nil {
-		t.Fatal("the run is not registered")
-	}
-	r.mu.Lock()
-	history := append([]wfe.ActionRecord(nil), r.policy.History...)
-	r.mu.Unlock()
-
+	history := runHistory(r)
 	found := false
 	for _, rec := range history {
 		if rec.Command != "/review -c" {
 			continue
 		}
 		found = true
+		if rec.Kind != wfe.ActionKindCommand {
+			t.Errorf("the repair was recorded as %q, want it recorded as a command", rec.Kind)
+		}
 		if rec.StepID != "review" {
 			t.Errorf("the repair was recorded against %q, want the review step", rec.StepID)
 		}
@@ -1059,10 +1084,108 @@ jobs:
 	if !found {
 		t.Fatalf("the repair is not in the history: %v", history)
 	}
-	if err := svc.Stop(context.Background(), "obs-1"); err != nil {
-		t.Fatalf("stop: %v", err)
+}
+
+// TestJudgmentPoint_ARepairDoesNotReplaceTheVerdict — a repair is
+// recorded against the step the run is on, but the step's verdict is
+// the one its own execution wrote.
+func TestJudgmentPoint_ARepairDoesNotReplaceTheVerdict(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "repair", `title: repair
+jobs:
+  main:
+    steps:
+      - id: review
+        message: /review
+        attempts: 5
+      - id: push
+        message: /gtw push
+`)
+
+	provider := &scriptedProvider{responses: []llm.Response{
+		{Message: toolCallMsg("c1", "ntm_review", map[string]any{"args": "-c"})},
+		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "failed", "summary": "the review did not pass"})},
+	}}
+	svc, op := testService(t, dir, Config{Provider: provider})
+	op.steps = []fakeStep{
+		{outcome: messages.Outcome{Status: messages.OutcomeFailed, Summary: "the review failed"}},
+		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "the repair worked"}},
 	}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "repair", ChatID: "obs-1", Cwd: "/tmp/work",
+		Commands: []CommandInfo{{Name: "review"}},
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	r := activeRun(t, svc, "obs-1")
 	waitRun(t, svc, "obs-1")
+
+	out, ok := stepOutcome(r, "review")
+	if !ok {
+		t.Fatal("the review step has no outcome")
+	}
+	if out.Status != wfe.OutcomeFailed {
+		t.Errorf("the review step ended as %q, want the failed one the step produced", out.Status)
+	}
+}
+
+// TestJudgmentPoint_AStepRunsAgainReplacesTheVerdict — the step's own
+// execution writes the verdict, and a later run of it replaces the
+// verdict it had.
+func TestJudgmentPoint_AStepRunsAgainReplacesTheVerdict(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "repair", `title: repair
+jobs:
+  main:
+    steps:
+      - id: review
+        message: /review
+        attempts: 5
+      - id: push
+        message: /gtw push
+`)
+
+	provider := &scriptedProvider{responses: []llm.Response{
+		{Message: toolCallMsg("c1", "ntm_review", map[string]any{"args": "-c"})},
+		{Message: toolCallMsg("c2", toolRunStep, map[string]any{"step_id": "review"})},
+	}}
+	svc, op := testService(t, dir, Config{Provider: provider})
+	op.steps = []fakeStep{
+		{outcome: messages.Outcome{Status: messages.OutcomeFailed, Summary: "the review failed"}},
+		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "the repair worked"}},
+		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "the review worked"}},
+	}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "repair", ChatID: "obs-1", Cwd: "/tmp/work",
+		Commands: []CommandInfo{{Name: "review"}},
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	r := activeRun(t, svc, "obs-1")
+	waitRun(t, svc, "obs-1")
+
+	out, ok := stepOutcome(r, "review")
+	if !ok {
+		t.Fatal("the review step has no outcome")
+	}
+	if out.Status != wfe.OutcomeOK {
+		t.Errorf("the review step ended as %q, want the ok one its own run wrote", out.Status)
+	}
+	found := false
+	for _, rec := range runHistory(r) {
+		if rec.Command != "/review" {
+			continue
+		}
+		found = true
+		if rec.Kind != wfe.ActionKindRun {
+			t.Errorf("the step's own run was recorded as %q, want it recorded as a run", rec.Kind)
+		}
+	}
+	if !found {
+		t.Fatal("the step's own run is not in the history")
+	}
 }
 
 // TestPersist_HoldsTheProgressTheConversationAndTheHistory — one file

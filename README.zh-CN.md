@@ -480,7 +480,6 @@ jobs:
       - id: fix
         message: "/gtw fix ${{ args.issue }} -y"
         note: 从 nightme/assigned 队列里挑一个；挑不到就等下一轮
-        allow: ["/gtw fix ${{ args.issue }} -y", "/gtw back"]
         attempts: 3
       - id: commit
         message: "/gtw commit"
@@ -488,7 +487,6 @@ jobs:
       - id: review
         message: "/review"
         note: 没跑完就 /review -c；有改动就先 /gtw commit
-        allow: ["/review -c", "/gtw commit"]
         attempts: 5
         if: ${{ steps.fix.outputs.data.issue }}
       - id: commit2
@@ -535,9 +533,8 @@ jobs:
 | `if` | 这个 step 要跑的条件。不写就总是成立。 |
 | `env` | 这个 step 的命令拿到的环境变量。 |
 | `continue-on-error` | 这个 step 失败时链条是否继续。 |
-| `note` | 这个 step 为什么在这儿，额外的命令什么时候用。它是决策模型读的那段描述。 |
-| `allow` | 这个 step 里 agent 还能用的额外命令。 |
-| `attempts` | agent 在一轮里能对这个 step 走的动作数——step 自己那次执行，加上 `allow:` 里的命令。不填这一项就不设上限。 |
+| `note` | 这个 step 为什么在这儿，owner 平时怎么修它。它是决策模型读的那段描述。 |
+| `attempts` | agent 在一轮里能对这个 step 走的动作数——step 自己那次执行，加上为它发出的 nightme 命令。不填这一项就不设上限。 |
 | `final` | 这个 step 负责收尾：这一轮怎么结束它都跑。标了 `final: true` 的 step 在提前结束的一轮里顶上被跳过的那几步。 |
 
 表达式有 `${{ args.NAME }}`、`${{ steps.<id>.outputs.status }}`、
@@ -636,7 +633,7 @@ workflow 说了下一步是什么，所以大部分步骤根本不需要模型�
 
 一次运行既没有全局动作预算，也没有模型轮数上限：它结束于计划跑完、agent 收尾，或者你发 `/me stop`，或者 daemon 关掉。
 
-agent 在判断点上给出一个指令：`run_step`（跑一条命令）、`instruct`（给 chat 发一段自由指令）、`answer_choice`（回答 chat 在等的一个提示）、`ask_human`（问你）、`repo_status`（读分支和工作树）、`wait`（等一会儿再看——后台还有活在跑时）、`end_round`（结束当前 job 的这一轮：没跑的 step 记成跳过，job 的 final step 顶上，然后开下一轮）、`finish`（结束运行）。agent 点名的命令必须是某个 step 的 `message:`，或者某个 step 的 `allow:` 里的一条——别的会作为错误退回来让它自己纠正。
+agent 在判断点上给出一个指令：`run_step`（跑 workflow 的一个 step）、`ntm_<command>`（以你的身份跑一条 nightme 命令）、`agent`（问 owner 的思考为什么这一步失败）、`instruct`（给 chat 发一段自由指令）、`answer_choice`（回答 chat 在等的一个提示）、`ask_human`（问你）、`repo_status`（读分支和工作树）、`wait`（等一会儿再看——后台还有活在跑时）、`end_round`（结束当前 job 的这一轮：没跑的 step 记成跳过，job 的 final step 顶上，然后开下一轮）、`finish`（结束运行）。`run_step` 接一个 step 的 id：就绪的那一个，或者这一轮已经跑过的那个。运行不允许做的事会以错误回来，agent 自己纠正。
 
 ### 结果模型
 

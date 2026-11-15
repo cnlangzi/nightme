@@ -148,15 +148,15 @@ func (s *Service) decisionQuestions(r *run) []llm.Question {
 }
 
 // decisionOptions returns the choices the decision model is offered:
-// the commands the policy accepts now, plus done and escalate.
+// the step messages the policy accepts now, plus done and escalate.
 //
 // The description of a command is the note of the step that owns it,
 // so the model reads why a step is there.
 func (s *Service) decisionOptions(r *run) []llm.Option {
 	options := make([]llm.Option, 0, 8)
-	for _, cmd := range r.allowedCommands() {
+	for _, cmd := range r.stepCommands() {
 		desc := ""
-		if idx, _, err := r.checkRun(cmd); err == nil {
+		if idx, err := r.checkRun(cmd); err == nil {
 			if step, ok := r.stepAt(idx); ok {
 				desc = step.Note
 			}
@@ -258,52 +258,16 @@ func (s *Service) recordSynthetic(r *run, tool string, args map[string]any) {
 
 // syntheticCall renders the tool call a decision becomes.
 //
-// A command of the workflow is a step: the call is run_step with the
-// step's id. A command of the registry is a nightme command: the call
-// is the command's own tool.
+// A decision names a step message: the call is run_step with the
+// step's id. A command that names no step has no step to run: the
+// call carries no id, and the tool refuses it.
 func (s *Service) syntheticCall(r *run, command string) (string, map[string]any) {
-	if idx, owned, err := r.checkRun(command); err == nil && owned {
+	if idx, err := r.checkRun(command); err == nil && r.isStepMessage(idx, command) {
 		if step, ok := r.stepAt(idx); ok {
 			return toolRunStep, map[string]any{"step_id": step.ID}
 		}
 	}
-	fields := strings.Fields(command)
-	if len(fields) == 0 {
-		return toolRunStep, map[string]any{"step_id": command}
-	}
-	name := strings.TrimPrefix(fields[0], "/")
-	tool := toolName(name)
-	cmd, ok := r.commandFor(tool)
-	if !ok {
-		return toolRunStep, map[string]any{"step_id": command}
-	}
-	sub, args := splitCommand(cmd, command)
-	out := map[string]any{}
-	if sub != "" {
-		out["subcommand"] = sub
-	}
-	if args != "" {
-		out["args"] = args
-	}
-	return tool, out
-}
-
-// splitCommand splits a command line into the subcommand and the
-// arguments.
-//
-// A command with subcommands takes one of them as its second token;
-// a command without them takes everything after the name as
-// arguments.
-func splitCommand(cmd CommandInfo, line string) (sub string, args string) {
-	fields := strings.Fields(line)
-	if len(fields) < 2 {
-		return "", ""
-	}
-	rest := fields[1:]
-	if hasSubcommand(cmd, rest[0]) {
-		return rest[0], strings.Join(rest[1:], " ")
-	}
-	return "", strings.Join(rest, " ")
+	return toolRunStep, map[string]any{"step_id": ""}
 }
 
 // escalateQuestion renders the question a run asks the user when the

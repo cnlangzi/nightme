@@ -497,9 +497,8 @@ func (r *run) conversation() []llm.Message {
 
 // checkRun asks the policy whether a command may run now.
 //
-// It reports the step the command counts against and whether that
-// step owns the command.
-func (r *run) checkRun(command string) (int, bool, error) {
+// It reports the step the command counts against.
+func (r *run) checkRun(command string) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.policy.CheckRun(command)
@@ -688,11 +687,11 @@ func (r *run) stepIndex(stepID string) int {
 	return -1
 }
 
-// allowedCommands returns the commands the policy accepts now.
-func (r *run) allowedCommands() []string {
+// stepCommands returns the step messages the policy accepts now.
+func (r *run) stepCommands() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.policy.AllowedCommands()
+	return r.policy.StepCommands()
 }
 
 // renderPolicy returns the workflow as the model reads it.
@@ -774,13 +773,6 @@ func (r *run) env() map[string]string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.state.Env
-}
-
-// hasRun reports whether the step already ran.
-func (r *run) hasRun(stepID string) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return wfe.HasRun(r.state, stepID)
 }
 
 // outcomeLine renders an outcome as one human-readable line.

@@ -497,8 +497,9 @@ func lastRun(state *RunState) (StepState, bool) {
 // what came of it.
 //
 // A step that ran already keeps its place in the run: the new outcome
-// is its latest one. A step that runs again — a repair the agent made
-// inside the step — therefore replaces the verdict the step had.
+// is its latest one. A step that runs again therefore replaces the
+// verdict the step had. A repair — a command the agent issued for the
+// step — does not: it never reaches this function.
 func RecordStep(state *RunState, job string, step Step, out Outcome, skipped bool) {
 	if state == nil {
 		return

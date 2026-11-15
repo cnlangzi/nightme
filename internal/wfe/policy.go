@@ -11,7 +11,7 @@ import (
 //
 // The steps of the policy are every step of every job, in topological
 // order. A step's `attempts` caps the actions taken against it in the
-// current round — its own message and the commands in its allow list.
+// current round — its own execution and the commands issued for it.
 type Policy struct {
 	// Workflow is the bound workflow the policy enforces.
 	Workflow *Workflow
@@ -71,39 +71,38 @@ func (p *Policy) Round(job string) int {
 	return 1
 }
 
-// CheckRun reports whether the command may run now, which step it
-// belongs to and whether that step owns it.
+// CheckRun reports whether the command may run now and which step the
+// action counts against.
 //
-// The command matches a step when it equals that step's message or one
-// of its `allow` entries, compared with whitespace normalised away.
-// The step that owns the command is the first one listing it.
+// The command matches a step when it equals that step's message,
+// compared with whitespace normalised away. The step that owns the
+// command is the first one with that message.
 //
-// A command that belongs to no step but is one of the registered
-// nightme commands is accepted too: it is not owned by a step, so it
-// never becomes a step's verdict, but it counts against the step the
-// run is on.
-func (p *Policy) CheckRun(command string) (int, bool, error) {
+// A command of the registry that belongs to no step is accepted too:
+// it counts against the step the run is on, but it never becomes that
+// step's verdict.
+func (p *Policy) CheckRun(command string) (int, error) {
 	cmd := normalizeCommand(command)
 	if cmd == "" {
-		return -1, false, fmt.Errorf("no command given")
+		return -1, fmt.Errorf("no command given")
 	}
 	idx := p.stepFor(cmd)
 	if idx >= 0 {
 		if err := p.CheckStep(idx); err != nil {
-			return -1, true, err
+			return -1, err
 		}
-		return idx, true, nil
+		return idx, nil
 	}
 	if p.isRegistered(cmd) {
 		cur := p.currentStep()
 		if cur >= 0 {
 			if err := p.CheckStep(cur); err != nil {
-				return -1, false, err
+				return -1, err
 			}
 		}
-		return cur, false, nil
+		return cur, nil
 	}
-	return -1, false, fmt.Errorf("%q is not allowed: allowed commands are %s", command, p.allowedCommands())
+	return -1, fmt.Errorf("%q is not allowed: the run may run the steps %s", command, p.stepCommandList())
 }
 
 // isRegistered reports whether the command is one of the nightme
@@ -174,6 +173,9 @@ func (p *Policy) CheckStep(idx int) error {
 }
 
 // IsStepMessage reports whether the command is the step's own message.
+//
+// It is the single ownership test: a step's message belongs to that
+// step, and a command that is no step's message belongs to no step.
 func (p *Policy) IsStepMessage(idx int, command string) bool {
 	steps := p.steps()
 	if idx < 0 || idx >= len(steps) {
@@ -238,8 +240,7 @@ func (p *Policy) Remaining() Remaining {
 }
 
 // Render returns the workflow as a compact text block for the agent's
-// system prompt: the title, the steps with their notes, the extra
-// commands each step allows and the limits.
+// system prompt: the title, the steps with their notes and the limits.
 func (p *Policy) Render() string {
 	var b strings.Builder
 	if p.Workflow != nil {
@@ -256,9 +257,6 @@ func (p *Policy) Render() string {
 		fmt.Fprintf(&b, "%d. %s\n", i+1, stepLabel(step))
 		if step.Note != "" {
 			fmt.Fprintf(&b, "   note: %s\n", step.Note)
-		}
-		if len(step.Allow) > 0 {
-			fmt.Fprintf(&b, "   also allowed: %s\n", strings.Join(step.Allow, ", "))
 		}
 		if step.Attempts > 0 {
 			fmt.Fprintf(&b, "   limit: %d attempts in this round\n", step.Attempts)
@@ -282,49 +280,42 @@ func stepLabel(step Step) string {
 	return "(no kind)"
 }
 
-// stepFor returns the index of the first step that permits the
-// command, or -1 when no step does.
+// stepFor returns the index of the step whose message is the command,
+// or -1 when no step has it.
 func (p *Policy) stepFor(cmd string) int {
 	for i, step := range p.steps() {
 		if step.Message != "" && normalizeCommand(step.Message) == cmd {
 			return i
 		}
-		for _, a := range step.Allow {
-			if normalizeCommand(a) == cmd {
-				return i
-			}
-		}
 	}
 	return -1
 }
 
-// AllowedCommands lists the commands the policy accepts now.
+// StepCommands lists the step messages the policy accepts now.
 //
-// A command belongs to the first step listing it, so it is left out
+// A command belongs to the first step that has it, so it is left out
 // once that step has spent its limit.
-func (p *Policy) AllowedCommands() []string {
+func (p *Policy) StepCommands() []string {
 	var cmds []string
 	seen := map[string]bool{}
 	for i, step := range p.steps() {
 		spent := step.Attempts > 0 && p.stepUsage(i) >= step.Attempts
-		for _, c := range append([]string{step.Message}, step.Allow...) {
-			n := normalizeCommand(c)
-			if n == "" || seen[n] {
-				continue
-			}
-			seen[n] = true
-			if spent {
-				continue
-			}
-			cmds = append(cmds, n)
+		n := normalizeCommand(step.Message)
+		if n == "" || seen[n] {
+			continue
 		}
+		seen[n] = true
+		if spent {
+			continue
+		}
+		cmds = append(cmds, n)
 	}
 	return cmds
 }
 
-// allowedCommands renders the commands the policy accepts now.
-func (p *Policy) allowedCommands() string {
-	cmds := p.AllowedCommands()
+// stepCommandList renders the step messages the policy accepts now.
+func (p *Policy) stepCommandList() string {
+	cmds := p.StepCommands()
 	if len(cmds) == 0 {
 		return "none"
 	}

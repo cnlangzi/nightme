@@ -60,9 +60,9 @@ func TestPolicy_CheckRun(t *testing.T) {
 			wantIdx: 1,
 		},
 		{
-			name:    "allowed command",
+			name:    "a command that is no step's message",
 			command: "/review -c",
-			wantIdx: 2,
+			wantErr: "is not allowed",
 		},
 		{
 			name:    "whitespace is normalised",
@@ -95,7 +95,7 @@ func TestPolicy_CheckRun(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			pol := NewPolicy(bound, tt.history)
-			idx, owned, err := pol.CheckRun(tt.command)
+			idx, err := pol.CheckRun(tt.command)
 			if tt.wantErr != "" {
 				if err == nil {
 					t.Fatalf("expected error %q, got nil", tt.wantErr)
@@ -114,17 +114,17 @@ func TestPolicy_CheckRun(t *testing.T) {
 			if idx != tt.wantIdx {
 				t.Errorf("step index = %d, want %d", idx, tt.wantIdx)
 			}
-			if !owned {
-				t.Errorf("the command is not owned by a step, want it owned")
+			if !pol.IsStepMessage(idx, tt.command) {
+				t.Errorf("the command is not the step's own message, want it to be")
 			}
 		})
 	}
 }
 
-func TestPolicy_CheckRun_ErrorListsAllowedCommands(t *testing.T) {
+func TestPolicy_CheckRun_ErrorListsTheStepCommands(t *testing.T) {
 	pol := NewPolicy(boundFixIssue(t), nil)
 
-	_, _, err := pol.CheckRun("/gtw sync")
+	_, err := pol.CheckRun("/gtw sync")
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -144,11 +144,11 @@ func TestPolicy_CheckRun_RegisteredCommandIsAcceptedButNotOwned(t *testing.T) {
 	pol := NewPolicy(bound, nil)
 	pol.Commands = []string{"gtw", "review"}
 
-	idx, owned, err := pol.CheckRun("/gtw sync")
+	idx, err := pol.CheckRun("/gtw sync")
 	if err != nil {
 		t.Fatalf("CheckRun: %v", err)
 	}
-	if owned {
+	if pol.IsStepMessage(idx, "/gtw sync") {
 		t.Error("the command is owned by a step, want it unowned")
 	}
 	if idx != -1 {
@@ -160,11 +160,11 @@ func TestPolicy_CheckRun_RegisteredCommandIsAcceptedButNotOwned(t *testing.T) {
 		{Kind: ActionKindRun, Command: "/gtw commit", StepID: "commit", Outcome: Outcome{Status: OutcomeOK}},
 	})
 	pol.Commands = []string{"gtw", "review"}
-	idx, owned, err = pol.CheckRun("/gtw sync")
+	idx, err = pol.CheckRun("/gtw sync")
 	if err != nil {
 		t.Fatalf("CheckRun: %v", err)
 	}
-	if owned {
+	if pol.IsStepMessage(idx, "/gtw sync") {
 		t.Error("the command is owned by a step, want it unowned")
 	}
 	if idx != 1 {
@@ -186,11 +186,11 @@ jobs:
 	pol := NewPolicy(wf, nil)
 	pol.Commands = []string{"gtw"}
 
-	idx, owned, err := pol.CheckRun("/gtw commit")
+	idx, err := pol.CheckRun("/gtw commit")
 	if err != nil {
 		t.Fatalf("CheckRun: %v", err)
 	}
-	if !owned {
+	if !pol.IsStepMessage(idx, "/gtw commit") {
 		t.Error("the command is unowned, want the step to own it")
 	}
 	if idx != 0 {
@@ -233,28 +233,28 @@ jobs:
 	}
 
 	// The attempts are spent: the step refuses another action.
-	if _, _, err := pol.CheckRun("/gtw sync"); err == nil || !strings.Contains(err.Error(), "limit is 2") {
+	if _, err := pol.CheckRun("/gtw sync"); err == nil || !strings.Contains(err.Error(), "limit is 2") {
 		t.Errorf("expected step-limit error, got %v", err)
 	}
 }
 
-// TestPolicy_AllowedCommandsAndRenderAreUnchanged — the registered
+// TestPolicy_StepCommandsAndRenderAreUnchanged — the registered
 // commands do not join the list of the workflow's own commands, and
 // they do not show up in the rendering.
-func TestPolicy_AllowedCommandsAndRenderAreUnchanged(t *testing.T) {
+func TestPolicy_StepCommandsAndRenderAreUnchanged(t *testing.T) {
 	bound := boundFixIssue(t)
 	before := NewPolicy(bound, nil)
 
 	pol := NewPolicy(bound, nil)
 	pol.Commands = []string{"gtw", "review"}
 
-	after := pol.AllowedCommands()
-	if len(after) != len(before.AllowedCommands()) {
-		t.Fatalf("AllowedCommands = %v, want %v", after, before.AllowedCommands())
+	after := pol.StepCommands()
+	if len(after) != len(before.StepCommands()) {
+		t.Fatalf("StepCommands = %v, want %v", after, before.StepCommands())
 	}
 	for i := range after {
-		if after[i] != before.AllowedCommands()[i] {
-			t.Errorf("AllowedCommands = %v, want %v", after, before.AllowedCommands())
+		if after[i] != before.StepCommands()[i] {
+			t.Errorf("StepCommands = %v, want %v", after, before.StepCommands())
 		}
 	}
 	if out := pol.Render(); out != before.Render() {
@@ -399,7 +399,7 @@ func TestPolicy_Remaining(t *testing.T) {
 	}
 }
 
-func TestPolicy_CheckRun_AllowedListOmitsExhaustedOwner(t *testing.T) {
+func TestPolicy_CheckRun_StepCommandsOmitTheExhaustedStep(t *testing.T) {
 	wf := mustParse(t, `
 title: x
 jobs:
@@ -410,21 +410,20 @@ jobs:
         attempts: 1
       - id: two
         message: other
-        allow: [echo]
 `)
 	pol := NewPolicy(wf, []ActionRecord{
 		{Kind: ActionKindRun, Command: "echo", StepID: "one"},
 	})
 
-	if _, _, err := pol.CheckRun("echo"); err == nil || !strings.Contains(err.Error(), "limit is 1") {
+	if _, err := pol.CheckRun("echo"); err == nil || !strings.Contains(err.Error(), "limit is 1") {
 		t.Errorf("expected step-limit error, got %v", err)
 	}
-	_, _, err := pol.CheckRun("nope")
+	_, err := pol.CheckRun("nope")
 	if err == nil {
 		t.Fatal("expected error")
 	}
 	if strings.Contains(err.Error(), "echo") {
-		t.Errorf("allowed list mentions the exhausted command: %v", err)
+		t.Errorf("the step list mentions the exhausted command: %v", err)
 	}
 }
 
@@ -457,7 +456,6 @@ func TestPolicy_Render(t *testing.T) {
 		"title: 把队列里的一个 issue 做完并推上去",
 		"1. /gtw fix 42 -y",
 		"3. /review",
-		"also allowed: /review -c, /gtw commit",
 		"limit: 5 attempts in this round",
 		"5. /gtw push",
 	} {

@@ -92,16 +92,14 @@ func (j Job) Rounds() int {
 // shell, use or wait is set.
 //
 // Attempts caps the number of actions the step may take in one round —
-// its own message and the commands in its allow list. Allow lists the
-// extra commands the agent may use inside the step. Note explains when
-// to use them.
+// its own execution and the commands issued for it. Note explains why
+// the step is there and which fixes the owner uses for it.
 type Step struct {
 	ID              string            `yaml:"id,omitempty" json:"id,omitempty"`
 	If              string            `yaml:"if,omitempty" json:"if,omitempty"`
 	Env             map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
 	ContinueOnError bool              `yaml:"continue-on-error,omitempty" json:"continue-on-error,omitempty"`
 	Note            string            `yaml:"note,omitempty" json:"note,omitempty"`
-	Allow           []string          `yaml:"allow,omitempty" json:"allow,omitempty"`
 	Attempts        int               `yaml:"attempts,omitempty" json:"attempts,omitempty"`
 	// Final marks the step that cleans up after the round. It runs
 	// when the round ends, however the round ends.
@@ -308,22 +306,22 @@ func (o Outcome) Succeeded() bool {
 type ActionKind string
 
 const (
-	// ActionKindRun is a command from one of the workflow's steps.
+	// ActionKindRun is the step's own execution — the step running.
 	ActionKindRun ActionKind = "run"
 	// ActionKindInstruct is a free-form prompt to the coding agent.
 	ActionKindInstruct ActionKind = "instruct"
-	// ActionKindCommand is a nightme command the run issued outside
-	// any step of the workflow.
+	// ActionKindCommand is a nightme command the run issued as a
+	// repair.
 	//
 	// It counts against the step it was issued for, but it is not a
-	// step's own execution: the plan's verdict is still the one the
-	// step produced.
+	// step's own execution, so it never becomes that step's verdict.
 	ActionKindCommand ActionKind = "command"
 )
 
 // ActionRecord is one action the run has taken. StepID points at the
-// step the action served; only a run belongs to a step, so an
-// instruction carries an empty one.
+// step the action served: a run belongs to its step, and a repair
+// counts against the step the run is on. An instruction carries an
+// empty one.
 //
 // Round is the round of the step's job the action was taken in. The
 // per-step budgets count the attempts of the current round only.

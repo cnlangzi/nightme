@@ -435,7 +435,7 @@ func (s *Service) actOnDecision(ctx context.Context, r *run, dec decision) (sys1
 		s.finishDone(r, r.workflow.Name+" is complete")
 		return sys1Act, nil
 	default:
-		if _, _, err := r.checkRun(dec.Next); err != nil {
+		if _, err := r.checkRun(dec.Next); err != nil {
 			return s.escalateDecision(r, dec, err)
 		}
 		tool, args := s.syntheticCall(r, dec.Next)
@@ -484,7 +484,7 @@ func (s *Service) actOnChoice(ctx context.Context, r *run, command string) (bool
 		s.finishDone(r, r.workflow.Name+" is complete")
 		return true, nil
 	}
-	if _, _, err := r.checkRun(command); err != nil {
+	if _, err := r.checkRun(command); err != nil {
 		r.setSummary(err.Error())
 		s.updateCard(r)
 		return false, nil

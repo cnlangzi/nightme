@@ -31,7 +31,6 @@ jobs:
           key: value
         continue-on-error: true
         note: the commit comes first
-        allow: [/gtw push]
         attempts: 3
 `)
 	svc, _ := testService(t, dir, Config{})
@@ -43,7 +42,6 @@ jobs:
 		"job main — runs once",
 		"commit (message): /gtw commit",
 		"note: the commit comes first",
-		"allowed commands: /gtw push",
 		"limit: 3 attempts in this round",
 	} {
 		if !strings.Contains(out, want) {

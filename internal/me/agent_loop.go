@@ -49,19 +49,30 @@ func (s *Service) drive(ctx context.Context, r *run) {
 		// The model ended the run itself; the phase it ended with is
 		// kept — a run that failed is not turned into a finished one.
 		s.finish(r, r.currentPhase(), "")
-		s.removeState(r.id)
 	case err == nil, errors.Is(err, errFinished):
 		s.finish(r, PhaseDone, "")
-		s.removeState(r.id)
 	case errors.Is(err, context.Canceled):
 		s.finish(r, PhaseStopped, "")
-		s.removeState(r.id)
 	default:
-		s.finish(r, PhaseFailed, err.Error())
-		r.setSummary("the run failed")
-		s.updateCard(r)
-		s.removeState(r.id)
+		if r.wasStoppedByOperator() {
+			// The operator stopped the run: that is what ended it.
+			s.finish(r, PhaseStopped, err.Error())
+		} else {
+			s.finish(r, PhaseFailed, err.Error())
+			r.setSummary("the run failed")
+			s.updateCard(r)
+		}
 	}
+	if r.wasStoppedByOperator() {
+		// The session is over: the chat gets the record of it. The
+		// summary is built here and not in the command, because the
+		// outcome of the step that was in flight is only known now
+		// that the run has unwound.
+		s.postSummary(r)
+		// The card of the last iteration shows where the run ended.
+		s.updateCard(r)
+	}
+	s.removeState(r.id)
 }
 
 // loop is the run's main cycle.
@@ -318,6 +329,13 @@ func (s *Service) loopDeciderOnly(ctx context.Context, r *run) error {
 			return err
 		}
 		r.setDecision(decisionDecider, decisionReason(dec))
+		r.recordWake(wakeRecord{
+			Who:   decisionDecider,
+			What:  decisionWhat(dec),
+			Why:   r.judgmentReason(),
+			Round: r.currentRound(),
+			At:    s.now(),
+		})
 		if s.canAct(dec) {
 			action, err := s.actOnDecision(ctx, r, dec)
 			if err != nil {
@@ -386,6 +404,13 @@ func (s *Service) system1(ctx context.Context, r *run) (sys1Action, error) {
 		return sys1None, err
 	}
 	r.setDecision(decisionDecider, decisionReason(dec))
+	r.recordWake(wakeRecord{
+		Who:   decisionDecider,
+		What:  decisionWhat(dec),
+		Why:   r.judgmentReason(),
+		Round: r.currentRound(),
+		At:    s.now(),
+	})
 	if !s.canAct(dec) {
 		// The decision is not sure enough to act on: the chat model
 		// takes over.
@@ -400,6 +425,17 @@ func decisionReason(dec decision) string {
 		return fmt.Sprintf("p=%.2f", dec.NextConfidence)
 	}
 	return fmt.Sprintf("%s, p=%.2f", dec.Model, dec.NextConfidence)
+}
+
+// decisionWhat renders what the decision model decided.
+//
+// A model that picked nothing decided nothing: the wake log says so.
+func decisionWhat(dec decision) string {
+	what := dec.Next
+	if what == "" {
+		what = "nothing"
+	}
+	return fmt.Sprintf("%s (p=%.2f)", what, dec.NextConfidence)
 }
 
 // canAct reports whether a decision may be acted on without the chat

@@ -679,7 +679,7 @@ key — is reported in `nightme logs` and left out. The daemon still starts, and
 | `/me pause` | Stops the run after the step it is on. |
 | `/me continue [note]` | Hands the control back to a paused run. The note is your instruction. |
 | `/me show` | Puts the run's state back in front of you as a card of its own. |
-| `/me stop` | Cancels the run and tells the chat to stop working. |
+| `/me stop` | Cancels the run, tells the chat to stop working, and leaves a summary of the session in the chat. |
 | `/me status` | Reports the current step, the phase and the progress of the running command, the remaining budget, and what each capability decided and spent. |
 
 The arguments of `/me start` fill the workflow's declared arguments: a positional
@@ -707,6 +707,12 @@ When the run
 asks a question, the choices become the card's buttons: a click is the answer. The
 question itself never reaches the agent — it is a message of the chat, not a turn
 of the conversation.
+
+`/me stop` leaves a summary of the session in the chat: a card of its own that
+says what the run did, what went wrong and what the models decided — the facts
+of the whole session, the actions that went wrong one by one, and the judgment
+the models made at the wake-ups. It is posted once the run has unwound, and it
+carries no buttons: the run is over.
 
 The run's own thinking and its tool calls leave the card and appear in the chat,
 rendered the way a coding agent's are: a 💭 card for the thinking, a `● call` /

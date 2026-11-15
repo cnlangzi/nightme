@@ -673,6 +673,10 @@ func (s *Service) Show(ctx context.Context, chatID string) error {
 //
 // The run's context is cancelled first, so the loop stops at its next
 // checkpoint; /stop then reaches the agent that is still working.
+//
+// The run is marked as stopped by the operator before it is cancelled:
+// the mark is what tells an operator's stop from every other way a
+// run ends, and the summary of the session is built from it.
 func (s *Service) Stop(ctx context.Context, chatID string) error {
 	s.mu.Lock()
 	r, ok := s.active[chatID]
@@ -680,6 +684,7 @@ func (s *Service) Stop(ctx context.Context, chatID string) error {
 	if !ok {
 		return errors.New("this chat has no run in it")
 	}
+	r.markStoppedByOperator()
 	r.cancel()
 	if s.cfg.Operator != nil {
 		if _, err := s.speak(ctx, r, "/stop", ""); err != nil {

@@ -72,6 +72,21 @@ type actionTranscript struct {
 // agent that did the work said why it could not.
 const maxActionTranscripts = 2
 
+// wakeRecord is one decision a model made after the run woke it up.
+type wakeRecord struct {
+	// Who decided: the decision model or the chat model.
+	Who string `json:"who"`
+	// What the model decided.
+	What string `json:"what"`
+	// Why the run woke the model: the judgment the workflow could not
+	// decide.
+	Why string `json:"why,omitempty"`
+	// Round is the round of the job the run was on.
+	Round int `json:"round,omitempty"`
+	// At is when the decision was made.
+	At time.Time `json:"at"`
+}
+
 // run is one workflow run.
 type run struct {
 	svc *Service
@@ -174,6 +189,10 @@ type run struct {
 	// suspended records that the daemon went away while the run was
 	// going: the run keeps its state and resumes when it comes back.
 	suspended bool
+	// wakes holds the decisions the models made at the judgment points.
+	wakes []wakeRecord
+	// stoppedByOperator reports that the operator stopped the run.
+	stoppedByOperator bool
 
 	mu sync.Mutex
 	// ctx is the run's scope. Cancelling it stops the run.
@@ -835,6 +854,7 @@ type persistedRun struct {
 	Nudged           bool               `json:"nudged"`
 	Commands         []CommandInfo      `json:"commands,omitempty"`
 	Agent            string             `json:"agent,omitempty"`
+	Wakes            []wakeRecord       `json:"wakes,omitempty"`
 }
 
 // persist writes the run's state to disk.
@@ -879,6 +899,7 @@ func (s *Service) persist(r *run) {
 		Nudged:           r.nudged,
 		Commands:         r.registry,
 		Agent:            r.agentName,
+		Wakes:            append([]wakeRecord(nil), r.wakes...),
 	}
 	r.mu.Unlock()
 
@@ -1009,6 +1030,7 @@ func (s *Service) restoreRun(state persistedRun) *run {
 		registry:         state.Commands,
 		commands:         commands,
 		agentName:        s.agentName(state.Agent),
+		wakes:            state.Wakes,
 		ctx:              ctx,
 		cancel:           cancel,
 		resume:           make(chan struct{}, 1),
@@ -1263,6 +1285,48 @@ func (r *run) isFinished() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.finished
+}
+
+// recordWake appends a decision to the wake log.
+func (r *run) recordWake(rec wakeRecord) {
+	r.mu.Lock()
+	r.wakes = append(r.wakes, rec)
+	r.mu.Unlock()
+}
+
+// wakeRecords returns the decisions the models made, oldest first.
+func (r *run) wakeRecords() []wakeRecord {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]wakeRecord(nil), r.wakes...)
+}
+
+// markStoppedByOperator records that the operator stopped the run.
+func (r *run) markStoppedByOperator() {
+	r.mu.Lock()
+	r.stoppedByOperator = true
+	r.mu.Unlock()
+}
+
+// wasStoppedByOperator reports that the operator stopped the run.
+func (r *run) wasStoppedByOperator() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.stoppedByOperator
+}
+
+// currentRound returns the round of the job the run is on.
+//
+// The job is the one of the last step that ran; a run that has not run
+// a step yet is in the first round.
+func (r *run) currentRound() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.state.Steps) == 0 {
+		return 1
+	}
+	job := r.state.Steps[len(r.state.Steps)-1].Job
+	return r.state.RoundOf(job)
 }
 
 // setTranscript keeps the transcript of an action.

@@ -16,8 +16,8 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/pathutil"
 	"github.com/cnlangzi/nightme/internal/registry"
-	"github.com/cnlangzi/nightme/internal/statusbar"
 )
 
 // PumpEvents (multi-as Phase 1) is the CS-side main loop. It
@@ -294,8 +294,9 @@ func shutdownNotice(agentName, cwd string) string {
 	if agentName != "" {
 		subject = "the " + agentName + " agent"
 	}
-	if ws := statusbar.FormatWorkspacePath(cwd); ws != "" {
-		return fmt.Sprintf("ℹ️ NightMe is shutting down — %s was stopped (cwd: %s)", subject, ws)
+	notice := fmt.Sprintf("ℹ️ NightMe is shutting down — %s was stopped", subject)
+	if ws := pathutil.ShortWorkspacePath(cwd); ws != "" {
+		return notice + " (cwd: " + ws + ")"
 	}
-	return fmt.Sprintf("ℹ️ NightMe is shutting down — %s was stopped.", subject)
+	return notice + "."
 }

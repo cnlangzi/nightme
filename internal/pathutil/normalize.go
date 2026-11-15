@@ -11,6 +11,8 @@
 //     FromSlash / ToSlash do — so grep `pathutil.Clean` finds every
 //     caller and the "must use pathutil" rule (SPEC.md §13.3.1)
 //     has zero exceptions.
+//   - ShortWorkspacePath: the display form of a path (its last two
+//     components) — the workspace label every channel shows.
 //
 // See F-PATHUTIL-001 §13.3.1 for the full mandatory-use table.
 package pathutil
@@ -143,3 +145,48 @@ func Base(p string) string { return filepath.Base(p) }
 
 // Dir is a thin wrapper over filepath.Dir.
 func Dir(p string) string { return filepath.Dir(p) }
+
+// ShortWorkspacePath renders a path in the short form a workspace
+// label uses — the path's last two components.
+//
+//   - "" or "." → "" (the caller drops the segment).
+//   - "/" → "" (no components to show).
+//   - ≤ 2 components → all of them.
+//     ("/home/devin" → "home/devin"; "/tmp/foo" → "tmp/foo").
+//   - > 2 components → the last two.
+//     ("/home/devin/code/nightme" → "code/nightme";
+//     "/home/devin/code/nightme/internal" → "nightme/internal";
+//     "/tmp/a/b/c" → "b/c").
+//
+// No prefix is added — neither "~" for HOME paths nor "/" for
+// absolute paths. A "~" would mislead when the workspace is not
+// under HOME, and skipping both keeps the segment unambiguous:
+// "code/nightme" is the leaf parent, period.
+//
+// The "last two when long" rule lets the reader see the leaf and its
+// parent (enough to disambiguate) without a full path that does not
+// fit in a narrow channel.
+//
+// One rule for every workspace label: the card's footer line 3
+// (internal/statusbar) and the shutdown notice (internal/chatsession)
+// both render through here, so the two cannot drift apart.
+func ShortWorkspacePath(absPath string) string {
+	if absPath == "" || absPath == "." {
+		return ""
+	}
+	cleaned := Clean(absPath)
+	parts := strings.Split(cleaned, string(filepath.Separator))
+	// Drop leading empty from the leading separator so the
+	// "first component" is the first directory, not "".
+	if len(parts) > 0 && parts[0] == "" {
+		parts = parts[1:]
+	}
+	switch {
+	case len(parts) == 0:
+		return ""
+	case len(parts) <= 2:
+		return strings.Join(parts, string(filepath.Separator))
+	default:
+		return strings.Join(parts[len(parts)-2:], string(filepath.Separator))
+	}
+}

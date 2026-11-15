@@ -236,11 +236,11 @@ func TestStatusBarLines_GitStatusLine(t *testing.T) {
 	// marker so users see "this is untracked" vs "missing data".
 	//
 	// Workspace strings in GitStatus come from the git CLI which
-	// always emits forward slashes; FormatWorkspacePath feeds them
-	// through filepath.Clean + filepath.Separator so the rendered
-	// path uses the OS-native separator. We build the expected
-	// string with the same transformation so the assertion is
-	// stable across Linux/macOS (`/`) and Windows (`\`).
+	// always emits forward slashes; pathutil.ShortWorkspacePath
+	// feeds them through pathutil.Clean + filepath.Separator so the
+	// rendered path uses the OS-native separator. We build the
+	// expected string with the same transformation so the assertion
+	// is stable across Linux/macOS (`/`) and Windows (`\`).
 	gs := &messages.GitStatus{
 		Workspace: "code/nightme",
 		Snapshot:  &messages.GitStatusSnapshot{Branch: "main"},
@@ -320,7 +320,7 @@ func TestStatusBarLines_GitStatusLine_EmptyWorkspace(t *testing.T) {
 }
 
 func TestStatusBarLines_GitStatusLine_DotWorkspace(t *testing.T) {
-	// Workspace == "." — FormatWorkspacePath returns "" for "."
+	// Workspace == "." — pathutil.ShortWorkspacePath returns "" for "."
 	// (the literal current dir), so Line 3 must drop even when
 	// Snapshot is nil (no "📁: . · (no git)" line would be useful).
 	gs := &messages.GitStatus{Workspace: ".", Snapshot: nil}
@@ -505,29 +505,5 @@ func TestStatusBarLines_EmptyUsage_NotPanic(t *testing.T) {
 	got := StatusBarLines(outWith("claude", "opus-4-5", "", nil, nil))
 	if len(got) != 1 {
 		t.Errorf("expected 1 line (identity only), got %d: %v", len(got), got)
-	}
-}
-
-// TestFormatWorkspacePath — the short form of a working directory.
-// The card's workspace line and the shutdown notice share this
-// rule, so it is pinned here rather than through one of them.
-func TestFormatWorkspacePath(t *testing.T) {
-	tests := []struct {
-		path string
-		want string
-	}{
-		{path: "", want: ""},
-		{path: ".", want: ""},
-		{path: "/", want: ""},
-		{path: "/home/devin", want: filepath.FromSlash("home/devin")},
-		{path: "/tmp/foo", want: filepath.FromSlash("tmp/foo")},
-		{path: "/home/devin/code/nightme", want: filepath.FromSlash("code/nightme")},
-		{path: "/home/devin/code/nightme/internal", want: filepath.FromSlash("nightme/internal")},
-		{path: "/tmp/a/b/c", want: filepath.FromSlash("b/c")},
-	}
-	for _, tt := range tests {
-		if got := FormatWorkspacePath(tt.path); got != tt.want {
-			t.Errorf("FormatWorkspacePath(%q) = %q, want %q", tt.path, got, tt.want)
-		}
 	}
 }

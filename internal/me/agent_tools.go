@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/cnlangzi/nightme/internal/gateway/observe"
 	"github.com/cnlangzi/nightme/internal/llm"
@@ -28,9 +29,20 @@ const (
 	toolAskHuman = "ask_human"
 	// toolRepoStatus reads the repository facts.
 	toolRepoStatus = "repo_status"
+	// toolWait waits for a duration before the model looks again.
+	toolWait = "wait"
+	// toolEndRound ends the round of the job the run is on.
+	toolEndRound = "end_round"
 	// toolFinish ends the run.
 	toolFinish = "finish"
 )
+
+// maxWait is how long one wait may last.
+//
+// The wait happens inside the agent's turn: the model waits, looks
+// again and decides. A wait longer than this would hold the turn for
+// too long, so it is cut short.
+const maxWait = 10 * time.Minute
 
 // toolError is a failure the model can correct.
 //
@@ -104,6 +116,16 @@ func (s *Service) toolCatalogue(r *run) []llm.Tool {
 		llm.Tool{
 			Name:        toolRepoStatus,
 			Description: "Read the repository facts of the chat: the branch, whether the tree is dirty, and how far the branch is ahead of or behind its upstream and its base branch.",
+			Schema:      json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`),
+		},
+		llm.Tool{
+			Name:        toolWait,
+			Description: "Wait before you look again — for work that is still running in the background. The duration is a Go duration (\"30s\", \"5m\") and the wait lasts at most 10 minutes.",
+			Schema:      json.RawMessage(`{"type":"object","properties":{"duration":{"type":"string","description":"how long to wait, e.g. 30s or 5m"}},"required":["duration"],"additionalProperties":false}`),
+		},
+		llm.Tool{
+			Name:        toolEndRound,
+			Description: "End the round of the job the run is on, because there is genuinely nothing left to do in it. The steps of the round that did not run are skipped, the job's final step runs, and the job starts its next round.",
 			Schema:      json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`),
 		},
 		llm.Tool{
@@ -268,6 +290,10 @@ func (s *Service) execTool(ctx context.Context, r *run, call pendingCall) (stepR
 		return s.toolAskHuman(ctx, r, call)
 	case toolRepoStatus:
 		return s.toolRepoStatus(ctx, r, call)
+	case toolWait:
+		return s.toolWait(ctx, r, call)
+	case toolEndRound:
+		return s.toolEndRound(ctx, r, call)
 	case toolFinish:
 		return s.toolFinish(ctx, r, call)
 	default:
@@ -595,6 +621,82 @@ func (s *Service) toolRepoStatus(ctx context.Context, r *run, _ pendingCall) (st
 	return stepResult{Status: "ok", Summary: summary, Data: data}, nil
 }
 
+// toolWait waits for a duration before the model looks again.
+//
+// The wait happens inside the agent's turn, so the model can wait and
+// then look again without the run going on in the meantime. It
+// belongs to the run: `/me stop` and the daemon's shutdown end it at
+// once.
+func (s *Service) toolWait(ctx context.Context, r *run, call pendingCall) (stepResult, error) {
+	text, err := callArgString(call, "duration")
+	if err != nil {
+		return stepResult{}, err
+	}
+	d, err := time.ParseDuration(strings.TrimSpace(text))
+	if err != nil {
+		return stepResult{}, toolErrorf("%q is not a duration: use \"30s\" or \"5m\"", text)
+	}
+	if d <= 0 {
+		return stepResult{}, toolErrorf("the duration must be positive")
+	}
+	capped := d > maxWait
+	if capped {
+		d = maxWait
+	}
+
+	r.setWaiting(d.String())
+	s.updateCard(r)
+	defer func() {
+		r.setWaiting("")
+		s.updateCard(r)
+	}()
+
+	execCtx, cancel := r.runContext(ctx)
+	defer cancel()
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-execCtx.Done():
+		return stepResult{}, execCtx.Err()
+	}
+	summary := "waited " + d.String()
+	if capped {
+		summary += " (a wait lasts at most 10 minutes)"
+	}
+	return stepResult{
+		Status:  string(wfe.OutcomeOK),
+		Summary: summary,
+	}, nil
+}
+
+// toolEndRound ends the round of the job the run is on.
+//
+// It is the generic signal for "there is nothing left to do here":
+// the steps of the round that did not run are skipped, the final step
+// of the job runs, and the job starts its next round.
+func (s *Service) toolEndRound(ctx context.Context, r *run, _ pendingCall) (stepResult, error) {
+	job, round := r.brainIteration()
+	if job == "" {
+		return stepResult{}, toolErrorf("the run is not on a job yet")
+	}
+	r.mu.Lock()
+	err := wfe.EndRound(r.state, r.workflow, job)
+	r.mu.Unlock()
+	if err != nil {
+		return stepResult{}, toolErrorf("%s", err.Error())
+	}
+	// The round moved on: the model reads the new situation before it
+	// decides again.
+	r.markSituation()
+	s.persist(r)
+	s.updateCard(r)
+	return stepResult{
+		Status:  string(wfe.OutcomeOK),
+		Summary: fmt.Sprintf("the round %d of %s is over", round, job),
+	}, nil
+}
+
 // toolFinish ends the run.
 func (s *Service) toolFinish(ctx context.Context, r *run, call pendingCall) (stepResult, error) {
 	status, err := callArgString(call, "status")
@@ -693,7 +795,7 @@ func (s *Service) runCommand(ctx context.Context, r *run, command string, instru
 // reportOutcome records how a command ended and refreshes the run's
 // overview.
 func (s *Service) reportOutcome(r *run, command string, res stepResult) {
-	r.setTranscript(res.Transcript)
+	r.setTranscript(command, res.Transcript)
 	s.updateCard(r)
 }
 

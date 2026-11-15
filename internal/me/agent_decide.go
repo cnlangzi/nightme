@@ -180,8 +180,8 @@ func (s *Service) decisionState(r *run) string {
 	r.mu.Lock()
 	history := append([]wfe.ActionRecord(nil), r.policy.History...)
 	remaining := r.policy.Remaining()
-	lastTranscript := r.lastTranscript
 	r.mu.Unlock()
+	lastTranscript := r.lastTranscriptText()
 
 	var b strings.Builder
 	b.WriteString(r.renderPolicy())

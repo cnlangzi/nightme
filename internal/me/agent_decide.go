@@ -197,6 +197,9 @@ func (s *Service) decisionState(r *run) string {
 				fmt.Fprintf(&b, "    %s: %s\n", k, v)
 			}
 		}
+		if rateLimit(last.Outcome.Summary, lastTranscript, last.Outcome.Data) {
+			b.WriteString("the agent is rate limited (429) — it is throttled. The run pauses and waits for the operator; do not pick another step yet.\n")
+		}
 	}
 	if lastTranscript != "" {
 		b.WriteString("last transcript (tail):\n")

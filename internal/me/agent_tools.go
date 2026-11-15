@@ -64,6 +64,10 @@ type stepResult struct {
 	Data map[string]string `json:"data,omitempty"`
 	// Transcript is the tail of what the coding agent said.
 	Transcript string `json:"transcript,omitempty"`
+	// entries is the whole transcript of the execution. It is not
+	// part of the tool result — the model reads the truncated
+	// transcript above — but the run scans every line of it.
+	entries []observe.Entry
 }
 
 // toolCatalogue returns the tools the chat model may call.
@@ -430,12 +434,19 @@ func outcomeSucceeded(status string) bool {
 // A command that is already running is picked up where it left off,
 // so a step that came back early — waiting for a prompt, or stalled —
 // can be resumed instead of run twice.
+//
+// A command the agent could not take because it is rate limited pauses
+// the run: the agent is throttled, and running the command again
+// makes it worse.
 func (s *Service) runCommand(ctx context.Context, r *run, command string, instruct bool) (stepResult, error) {
 	res, err := s.runCommandInner(ctx, r, command, instruct)
 	if err != nil {
 		return res, err
 	}
 	s.reportOutcome(r, command, res)
+	if throttled(res) {
+		r.requestPause(rateLimitReason)
+	}
 	return res, nil
 }
 
@@ -592,6 +603,7 @@ func resultOf(ex observe.Execution) stepResult {
 		Data:    ex.Outcome.Data,
 	}
 	res.Transcript = transcriptOf(ex)
+	res.entries = ex.Transcript
 	return res
 }
 

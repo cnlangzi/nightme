@@ -801,8 +801,11 @@ actions: 6 · system-1: 0 decisions, 0 tokens · system-2: 8 decisions, 4210 tok
 | Step budget | `attempts` for a step, counted per round. |
 | Rounds | `iterations` for a job — the number of rounds it runs. |
 | Compaction | Every tool result but the last keeps its status and summary; the last one keeps its transcript. |
+| Rate limit | A command the agent answered 429 pauses the run; the operator continues it. |
 
 A text-only answer — words without a tool call — is nudged once to call a tool. The second time, the run ends as a failure.
+
+A command the underlying agent answered 429 pauses the run: the agent is throttled, and running the command again makes it worse. The run waits for the operator, who continues it with `/me continue`.
 
 The run is persisted after every tool result: one file in `<DataDir>/workflows/runs/<run-id>.json` holds the DAG progress, the conversation, the judgment history and the paused state. On startup, running runs resume:
 

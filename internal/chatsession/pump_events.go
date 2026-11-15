@@ -17,6 +17,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/registry"
+	"github.com/cnlangzi/nightme/internal/statusbar"
 )
 
 // PumpEvents (multi-as Phase 1) is the CS-side main loop. It
@@ -276,7 +277,7 @@ func (cs *ChatSession) rewriteShutdownExit(as *AgentSession, ev *agent.AgentEven
 	diag.StderrTail = ""
 	rewritten := *ev
 	rewritten.Diagnostic = &diag
-	rewritten.Err = errors.New(shutdownNotice(as.Agent))
+	rewritten.Err = errors.New(shutdownNotice(as.Agent, as.Cwd))
 	return &rewritten
 }
 
@@ -284,10 +285,17 @@ func (cs *ChatSession) rewriteShutdownExit(as *AgentSession, ev *agent.AgentEven
 // a crash card when the daemon stopped the agent on purpose.
 //
 // The name is the agent session's registry name ("claude"), not the
-// bridge's internal one ("claudecode").
-func shutdownNotice(agentName string) string {
-	if agentName == "" {
-		agentName = "agent"
+// bridge's internal one ("claudecode"). The directory is the one the
+// agent session worked in, rendered in the short form the card's
+// workspace line uses — a chat can hold several agent sessions in
+// different directories, and without it the notices read alike.
+func shutdownNotice(agentName, cwd string) string {
+	subject := "the agent"
+	if agentName != "" {
+		subject = "the " + agentName + " agent"
 	}
-	return fmt.Sprintf("ℹ️ NightMe is shutting down — the %s agent was stopped.", agentName)
+	if ws := statusbar.FormatWorkspacePath(cwd); ws != "" {
+		return fmt.Sprintf("ℹ️ NightMe is shutting down — %s was stopped (cwd: %s)", subject, ws)
+	}
+	return fmt.Sprintf("ℹ️ NightMe is shutting down — %s was stopped.", subject)
 }

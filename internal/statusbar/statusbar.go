@@ -339,8 +339,12 @@ func abbrevOneDecimal(v float64, unit string) string {
 	return s
 }
 
-// formatWorkspacePath renders the AgentSession's Cwd into a
-// short, human-readable label for footer line 3.
+// FormatWorkspacePath renders a working directory into a short,
+// human-readable label — the workspace form footer line 3 uses.
+//
+// Exported so the shutdown notice (internal/chatsession) renders the
+// directory the same way the card does; a second copy of the rule
+// would drift from the one the cards show.
 //
 // Rules (F-48 §1.7, simplified per Devin feedback 2026-08-06):
 //
@@ -363,7 +367,7 @@ func abbrevOneDecimal(v float64, unit string) string {
 // The "last two when long" rule lets users see the leaf + its
 // parent (enough to disambiguate), without a long absolute path
 // that won't fit in narrow channel renderings.
-func formatWorkspacePath(absPath string) string {
+func FormatWorkspacePath(absPath string) string {
 	if absPath == "" || absPath == "." {
 		return ""
 	}
@@ -455,7 +459,7 @@ func formatGitLine(gs *messages.GitStatus) string {
 	if gs.Workspace == "" {
 		return ""
 	}
-	ws := formatWorkspacePath(gs.Workspace)
+	ws := FormatWorkspacePath(gs.Workspace)
 	if ws == "" {
 		return ""
 	}

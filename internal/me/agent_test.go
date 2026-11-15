@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,6 +40,19 @@ type fakeExec struct {
 	watchers []chan observe.Execution
 }
 
+// cardRecord is one card the run published or updated.
+type cardRecord struct {
+	// ID is the id of the message the card became.
+	ID string
+	// Title is the card's title.
+	Title string
+	// Body is the card's body.
+	Body string
+	// Posted reports whether the card was published as a card of its
+	// own or updated in place.
+	Posted bool
+}
+
 // fakeOperator is a scripted chat.
 //
 // The commands settle on their own unless a step says otherwise. The
@@ -50,8 +64,8 @@ type fakeOperator struct {
 	sent    []string
 	spoken  []spokenMessage
 	asked   []askedMessage
-	posted  int
-	cards   []string
+	cards   []cardRecord
+	log     []string
 	buttons [][]channel.CardButton
 	execs   map[string]*fakeExec
 	seq     int
@@ -62,6 +76,9 @@ type fakeOperator struct {
 	failCommand string
 	// failCard makes the chat refuse the run's overview.
 	failCard bool
+	// failCardAfter makes the chat refuse the cards after it has
+	// published that many of them.
+	failCardAfter int
 }
 
 func newFakeOperator(steps ...fakeStep) *fakeOperator {
@@ -88,6 +105,7 @@ func (f *fakeOperator) Speak(_ context.Context, chatID, text string, opts channe
 		Display: opts.Display,
 		ReplyTo: opts.ReplyTo,
 	})
+	f.log = append(f.log, "speak:"+text)
 	if f.failCommand != "" && text == f.failCommand {
 		return "", errors.New("the chat is gone")
 	}
@@ -163,31 +181,59 @@ func (f *fakeOperator) Act(_ context.Context, chatID string, action messages.Act
 func (f *fakeOperator) PostCard(_ context.Context, _ string, spec channel.CardSpec) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.failCard {
+	if f.failCard || (f.failCardAfter > 0 && f.postedCount() >= f.failCardAfter) {
 		return "", errors.New("the chat cannot show a card")
 	}
 	f.cardSeq++
 	id := fmt.Sprintf("card-%d", f.cardSeq)
-	f.cards = append(f.cards, spec.Body)
+	f.cards = append(f.cards, cardRecord{ID: id, Title: spec.Title, Body: spec.Body, Posted: true})
 	f.buttons = append(f.buttons, spec.Buttons)
-	f.posted++
+	f.log = append(f.log, "card:"+id)
 	return id, nil
+}
+
+// postedCount returns the number of cards the run published. The
+// caller holds the lock.
+func (f *fakeOperator) postedCount() int {
+	n := 0
+	for _, c := range f.cards {
+		if c.Posted {
+			n++
+		}
+	}
+	return n
 }
 
 // Posted returns the number of cards the run published.
 func (f *fakeOperator) Posted() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.posted
+	return f.postedCount()
 }
 
 // UpdateCard replaces the run's overview.
-func (f *fakeOperator) UpdateCard(_ context.Context, _, _ string, spec channel.CardSpec) error {
+func (f *fakeOperator) UpdateCard(_ context.Context, _, cardID string, spec channel.CardSpec) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.cards = append(f.cards, spec.Body)
+	f.cards = append(f.cards, cardRecord{ID: cardID, Title: spec.Title, Body: spec.Body})
 	f.buttons = append(f.buttons, spec.Buttons)
 	return nil
+}
+
+// Cards returns the cards the run published and updated, in the order
+// it did it.
+func (f *fakeOperator) Cards() []cardRecord {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]cardRecord(nil), f.cards...)
+}
+
+// Log returns what the run did in the chat, in the order it did it:
+// "card:<id>" for a card it published, "speak:<text>" for a command.
+func (f *fakeOperator) Log() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.log...)
 }
 
 // Buttons returns the buttons of the run's overview.
@@ -277,7 +323,11 @@ func (f *fakeOperator) Spoken() []spokenMessage {
 func (f *fakeOperator) Lines() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return append([]string(nil), f.cards...)
+	out := make([]string, 0, len(f.cards))
+	for _, c := range f.cards {
+		out = append(out, c.Body)
+	}
+	return out
 }
 
 // Has reports whether the run's overview carried the given text.
@@ -294,6 +344,46 @@ func (f *fakeOperator) Has(text string) bool {
 // outside a workflow step: a question or the /stop.
 func isControlText(text string) bool {
 	return strings.HasPrefix(text, "❓") || strings.HasPrefix(text, "/stop")
+}
+
+// recordingLogger keeps the messages the service logged.
+type recordingLogger struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+// Enabled reports that every level is logged.
+func (l *recordingLogger) Enabled(context.Context, slog.Level) bool { return true }
+
+// Handle keeps the message of the record.
+func (l *recordingLogger) Handle(_ context.Context, rec slog.Record) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lines = append(l.lines, rec.Message)
+	return nil
+}
+
+// WithAttrs returns the logger itself: the test reads the messages.
+func (l *recordingLogger) WithAttrs([]slog.Attr) slog.Handler { return l }
+
+// WithGroup returns the logger itself: the test reads the messages.
+func (l *recordingLogger) WithGroup(string) slog.Handler { return l }
+
+// Lines returns the messages that were logged.
+func (l *recordingLogger) Lines() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.lines...)
+}
+
+// logged reports whether the service logged the given text.
+func logged(l *recordingLogger, text string) bool {
+	for _, line := range l.Lines() {
+		if strings.Contains(line, text) {
+			return true
+		}
+	}
+	return false
 }
 
 // fakeShell records the shell commands a run made.

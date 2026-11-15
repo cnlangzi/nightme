@@ -81,9 +81,6 @@ func (s *Service) loop(ctx context.Context, r *run) error {
 		if err := s.checkGate(ctx, r); err != nil {
 			return err
 		}
-		if err := s.startRound(ctx, r); err != nil {
-			return err
-		}
 		if len(r.pendingCallList()) > 0 {
 			if err := s.runPendingCalls(ctx, r); err != nil {
 				return err
@@ -98,23 +95,6 @@ func (s *Service) loop(ctx context.Context, r *run) error {
 			return errFinished
 		}
 	}
-}
-
-// startRound begins a round of the run.
-//
-// Every round gets a card of its own: the card of the round that
-// ended stays in the chat as the record of that round, and the new
-// one carries the state from here on.
-func (s *Service) startRound(ctx context.Context, r *run) error {
-	r.mu.Lock()
-	first := r.round == 0
-	r.round++
-	r.mu.Unlock()
-	if first {
-		// The run started with a card of its own.
-		return nil
-	}
-	return s.postCard(ctx, r)
 }
 
 // checkGate reports whether the run may go on.
@@ -144,7 +124,7 @@ func (s *Service) checkGate(ctx context.Context, r *run) error {
 // The workflow decides when it can: the step runs as it is, and no
 // model is asked. Where the workflow cannot decide, the agent does.
 func (s *Service) turn(ctx context.Context, r *run) (bool, error) {
-	decision, err := s.plan(r)
+	decision, err := s.plan(ctx, r)
 	if err != nil {
 		return false, err
 	}
@@ -188,16 +168,60 @@ func (s *Service) turn(ctx context.Context, r *run) (bool, error) {
 // The engine owns the state: it records the steps it skips on the way
 // and advances the round of a job that repeats. The policy follows the
 // rounds, so the per-step budgets count the current round only.
-func (s *Service) plan(r *run) (wfe.Decision, error) {
+//
+// The card follows the iteration the plan enters: a run that moves to
+// another job or to the next round of its job gets a card of its own,
+// and the switch happens before the command of that iteration is sent
+// to the chat.
+func (s *Service) plan(ctx context.Context, r *run) (wfe.Decision, error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.state.UpdatedAt = s.now()
+	before := roundsSnapshot(r.state.Rounds)
 	decision, err := wfe.Decide(r.state, r.workflow)
 	if err != nil {
+		r.mu.Unlock()
 		return decision, err
 	}
 	r.policy.SetRounds(r.state.Rounds)
+	job, round := targetIteration(r, decision, before)
+	r.mu.Unlock()
+
+	s.switchCard(ctx, r, job, round)
 	return decision, nil
+}
+
+// roundsSnapshot copies the round every job is in.
+//
+// The engine writes the rounds into the map it holds, so the rounds of
+// a plan have to be copied before it runs.
+func roundsSnapshot(rounds map[string]int) map[string]int {
+	out := make(map[string]int, len(rounds))
+	for name, round := range rounds {
+		out[name] = round
+	}
+	return out
+}
+
+// targetIteration returns the iteration the plan enters.
+//
+// The decision's job wins when it names one: a run decision on job B
+// keeps the card on B even when the engine advanced job A in the same
+// call. The advanced job is the target only when the decision names
+// no job.
+//
+// A job the plan looked at for the first time is not an advance: the
+// engine sets its round to 1 when it reads it.
+func targetIteration(r *run, decision wfe.Decision, before map[string]int) (string, int) {
+	if decision.Job != "" {
+		return decision.Job, r.state.RoundOf(decision.Job)
+	}
+	for _, job := range r.workflow.JobOrder() {
+		round := r.state.Rounds[job]
+		if round > before[job] && round > 1 {
+			return job, round
+		}
+	}
+	return "", 0
 }
 
 // runPlanStep runs the step the workflow decided on.
@@ -238,9 +262,6 @@ func (s *Service) loopDeciderOnly(ctx context.Context, r *run) error {
 		if err := s.checkGate(ctx, r); err != nil {
 			return err
 		}
-		if err := s.startRound(ctx, r); err != nil {
-			return err
-		}
 		// A question from an earlier turn is still open.
 		if st := r.pendingAsk(); st != nil {
 			reply, err := r.awaitReply(ctx)
@@ -259,7 +280,7 @@ func (s *Service) loopDeciderOnly(ctx context.Context, r *run) error {
 			}
 			continue
 		}
-		decision, err := s.plan(r)
+		decision, err := s.plan(ctx, r)
 		if err != nil {
 			return err
 		}

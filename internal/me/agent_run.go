@@ -97,9 +97,11 @@ type run struct {
 
 	// cardMsgID is the id of the run's overview message.
 	cardMsgID string
-	// round counts the rounds the run has started. Every round gets
-	// a card of its own.
-	round int
+	// cardJob is the job the card records; cardRound is the round of
+	// that job the card belongs to. An empty cardJob means the card
+	// has no iteration yet: it is the one the run started with.
+	cardJob   string
+	cardRound int
 
 	// system1Decisions and system2Decisions count what each
 	// capability decided.
@@ -649,6 +651,8 @@ type persistedRun struct {
 	Paused           bool               `json:"paused"`
 	PauseReason      string             `json:"pause_reason,omitempty"`
 	RunCardMsgID     string             `json:"run_card_msg_id,omitempty"`
+	CardJob          string             `json:"card_job"`
+	CardRound        int                `json:"card_round"`
 	System1Decisions int                `json:"system1_decisions"`
 	System2Decisions int                `json:"system2_decisions"`
 	System1Usage     llm.Usage          `json:"system1_usage"`
@@ -684,6 +688,8 @@ func (s *Service) persist(r *run) {
 		Paused:           r.paused,
 		PauseReason:      r.pauseReason,
 		RunCardMsgID:     r.cardMsgID,
+		CardJob:          r.cardJob,
+		CardRound:        r.cardRound,
 		System1Decisions: r.system1Decisions,
 		System2Decisions: r.system2Decisions,
 		System1Usage:     r.system1Usage,
@@ -805,6 +811,8 @@ func (s *Service) restoreRun(state persistedRun) *run {
 		paused:           state.Paused,
 		pauseReason:      state.PauseReason,
 		cardMsgID:        state.RunCardMsgID,
+		cardJob:          state.CardJob,
+		cardRound:        state.CardRound,
 		system1Decisions: state.System1Decisions,
 		system2Decisions: state.System2Decisions,
 		system1Usage:     state.System1Usage,
@@ -932,6 +940,31 @@ func (r *run) setCardMessageID(id string) {
 	r.mu.Lock()
 	r.cardMsgID = id
 	r.mu.Unlock()
+}
+
+// setCardIteration records the iteration the run's card records: the
+// job it belongs to and the round of that job.
+func (r *run) setCardIteration(job string, round int) {
+	r.mu.Lock()
+	r.cardJob = job
+	r.cardRound = round
+	r.mu.Unlock()
+}
+
+// iterationOf returns the iteration a step of the workflow runs in:
+// the job it belongs to and the round that job is in.
+func (r *run) iterationOf(idx int) (string, int) {
+	step, ok := r.stepAt(idx)
+	if !ok {
+		return "", 0
+	}
+	job := wfe.JobOf(r.workflow, step.ID)
+	if job == "" {
+		return "", 0
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return job, r.roundOf(step.ID)
 }
 
 // suspend stops the run without ending it.

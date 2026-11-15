@@ -96,6 +96,42 @@ func (s *Service) updateCard(r *run) {
 	}
 }
 
+// switchCard moves the run's card to the iteration the run is in.
+//
+// The card of the iteration that ended stays in the chat as the record
+// of that iteration: the engine clears the round's step records when
+// the next round starts, so the finished card cannot be rebuilt
+// afterwards.
+//
+// The switch happens before the first command of the iteration is sent
+// to the chat, so the card of an iteration stands in front of the
+// commands of that iteration.
+func (s *Service) switchCard(ctx context.Context, r *run, job string, round int) {
+	if job == "" {
+		return
+	}
+	r.mu.Lock()
+	same := r.cardJob == job && r.cardRound == round
+	adopted := r.cardJob == ""
+	r.mu.Unlock()
+	if same {
+		// The card already records this iteration: it is updated in
+		// place.
+		return
+	}
+	r.setCardIteration(job, round)
+	if adopted {
+		// The card the run started with has no iteration of its own:
+		// it adopts the one the run entered.
+		s.updateCard(r)
+		return
+	}
+	if err := s.postCard(ctx, r); err != nil {
+		// The card is for people: the work goes on without it.
+		s.logger.Warn("me: the run card could not be published", "run_id", r.id, "err", err)
+	}
+}
+
 // cardView renders the run's overview.
 func (s *Service) cardView(r *run) channel.CardSpec {
 	r.mu.Lock()
@@ -122,9 +158,15 @@ func (s *Service) cardView(r *run) channel.CardSpec {
 	s1u, s2u := r.system1Usage.Total(), r.system2Usage.Total()
 	args := argLine(r.argNames, r.argVals)
 	options := askOptions(r.ask)
+	cardJob, cardRound := r.cardJob, r.cardRound
 	r.mu.Unlock()
 
-	lines := make([]string, 0, len(steps)+8)
+	lines := make([]string, 0, len(steps)+9)
+	// The iteration the card records. A card that has none yet — the
+	// one the run started with — does not name one.
+	if cardJob != "" {
+		lines = append(lines, fmt.Sprintf("job: %s · round: %d", cardJob, cardRound))
+	}
 	if args != "" {
 		lines = append(lines, "args: "+args)
 	}

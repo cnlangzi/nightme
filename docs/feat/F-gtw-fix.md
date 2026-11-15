@@ -57,7 +57,7 @@ v1.x Remote 模式在 worktree 就绪后立刻 dispatch 一条混合语义的 pr
 /gtw fix *                       # 自动模式：自己挑下一个 assigned issue（§2.3）
 /gtw fix * -y                    # 同上，跳过 plan 直接 execute prompt
 
-/gtw fix --name <branch>         # local 模式（无 issue、无 agent dispatch，行为不变）
+/gtw fix --name <branch>         # local 模式（无 issue、无 agent dispatch；同样先 sync 默认分支）
 /gtw fix -n <branch>             # 同 --name
 /gtw fix --name <branch> -y      # local mode 下 -y 被忽略
 ```
@@ -666,6 +666,7 @@ verify 后报告「no code change required」即可，不编辑代码。旧规�
 | `AddIssueLabel` | ✅ | ❌ |
 | Agent dispatch | ✅ Assess / Execute | ❌（never dispatch） |
 | Branch exists | ❌ 硬失败 | ❌ 硬失败 |
+| 默认分支 sync | ✅ | ✅（同样要求 `origin` remote + 主仓库工作区干净） |
 
 F-59 的 `rollbackLabelStep`、label bootstrap 顺序 **不变**；仅 dispatch 文案与 branch 策略变更。详见 [`F-59-gtw-label-bootstrap.md`](./F-59-gtw-label-bootstrap.md) §2.3（步骤 10 改为「按 mode dispatch Assess 或 Execute」）。
 

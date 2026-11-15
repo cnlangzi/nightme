@@ -81,3 +81,36 @@ func TestRenderFixSuccessCard_ExecuteMode_EmptyBaseSHA(t *testing.T) {
 		}
 	}
 }
+
+// TestRenderFixLocalSuccessCard_BaseLine pins the local-mode card:
+// it names the base the worktree branched off, with the same
+// 12-char abbreviation the remote card uses.
+func TestRenderFixLocalSuccessCard_BaseLine(t *testing.T) {
+	card := renderFixLocalSuccessCard("br", "/wt", "abc1234abcdef0123456789abcdef0123456789")
+	for _, want := range []string{
+		"✅ Local worktree ready",
+		"→ branch:   `br`",
+		"→ worktree: /wt",
+		"→ base:     abc1234abcde",
+		"↳ work freely here",
+	} {
+		if !strings.Contains(card, want) {
+			t.Errorf("local success card missing %q; got:\n%s", want, card)
+		}
+	}
+}
+
+// TestRenderFixLocalSuccessCard_EmptyBaseSHA pins the empty-baseSHA
+// branch: with no refresh (the test seam), the local card carries no
+// base line.
+func TestRenderFixLocalSuccessCard_EmptyBaseSHA(t *testing.T) {
+	card := renderFixLocalSuccessCard("br", "/wt", "" /* no base */)
+	if strings.Contains(card, "→ base:") {
+		t.Errorf("local success card with empty baseSHA must omit '→ base:' line; got:\n%s", card)
+	}
+	for _, want := range []string{"✅ Local worktree ready", "→ branch:   `br`", "↳ work freely here"} {
+		if !strings.Contains(card, want) {
+			t.Errorf("local card missing %q; got:\n%s", want, card)
+		}
+	}
+}

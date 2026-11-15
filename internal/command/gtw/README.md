@@ -197,6 +197,7 @@ gtw 标题只从一个闭集里选 emoji,避免散乱:
 ✅ Local worktree ready
 → branch:   `fix-gtw-hooks`
 → worktree: /Users/.../fix-gtw-hooks
+→ base:     abc1234
 ↳ work freely here · or `/gtw close` to drop the worktree
 ```
 

@@ -216,14 +216,21 @@ func renderSyncReply(branch, newHead, pullOut, repoRoot string, ctx context.Cont
 // platform label, and no agent dispatch — just a confirmation
 // that the worktree + branch are ready.
 //
+// baseSHA is the HEAD sha of the upstream default branch
+// RefreshDefaultBranch pulled before WorktreeAdd. When empty
+// the "→ base:" line is omitted.
+//
 // F-XX: replaces (in the local-mode path) the cluttered
 // success card that mentions issue id / platform / wip label —
 // those fields don't apply to local branches.
-func renderFixLocalSuccessCard(branch, worktree string) string {
+func renderFixLocalSuccessCard(branch, worktree, baseSHA string) string {
 	var b strings.Builder
 	b.WriteString("✅ Local worktree ready\n")
 	fmt.Fprintf(&b, "→ branch:   `%s`\n", branch)
 	fmt.Fprintf(&b, "→ worktree: %s\n", worktree)
+	if baseSHA != "" {
+		fmt.Fprintf(&b, "→ base:     %s\n", shortSHA(baseSHA))
+	}
 	b.WriteString("↳ work freely here · or `/gtw close` to drop the worktree\n")
 	return b.String()
 }

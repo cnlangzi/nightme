@@ -76,17 +76,17 @@ type HandlerDeps struct {
 
 	// SkipRefreshDefaultBranch, when true, causes RunFix to
 	// skip the RefreshDefaultBranch step (no `git checkout
-	// <default>` / `git pull --ff-only`). Production leaves
-	// this false so the upstream default branch is always
-	// synced before the worktree branches off it; tests set
-	// it to true when their setup can't satisfy the pull (no
+	// <default>` / `git pull --rebase origin <default>`).
+	// Production leaves this false so the upstream default branch
+	// is always synced before the worktree branches off it — in
+	// the remote mode and in the local mode alike. Tests set it
+	// to true when their setup can't satisfy the pull (no
 	// upstream, fake URL, sandbox without network).
 	//
-	// The unit tests in worktree_test.go and
-	// refresh_default_branch_test.go exercise the real flow;
-	// this flag exists only for end-to-end integration tests
-	// that want to focus on the /gtw fix business logic without
-	// needing a usable origin remote.
+	// The unit tests in worktree_test.go and refresh_test.go
+	// exercise the real flow; this flag exists only for end-to-end
+	// integration tests that want to focus on the /gtw fix business
+	// logic without needing a usable origin remote.
 	SkipRefreshDefaultBranch bool
 }
 
@@ -541,17 +541,23 @@ func runFixRemote(
 //  1. DeriveBranchFromName(rawName) — slugifies user input; errors
 //     out if the result is empty (no remote-issue id to fall
 //     back to).
-//  2. RepoRoot → no origin required.
+//  2. RepoRoot.
 //  3. PreflightWorktreeCreate.
 //  4. BranchExists? → hard-fail reply (F-XX §3.1; no card).
-//  5. WorktreeAdd; on failure → plain-text reply (v1.5 retired
+//  5. RefreshDefaultBranch → syncs the default branch so the
+//     worktree branches off the latest upstream code. A failed
+//     refresh ends the command, exactly as in runFixRemote.
+//  6. WorktreeAdd; on failure → plain-text reply (v1.5 retired
 //     the §5.3.3 retry card; failure stops the flow).
-//  6. SetSelectedCwd → WriteGTWYml (cwd-scoped source of truth).
-//  7. Render the simplified local success card.
+//  7. SetSelectedCwd → WriteGTWYml (cwd-scoped source of truth).
+//  8. Render the simplified local success card.
 //
 // Local mode does NOT call provider.GetIssue / AddIssueLabel /
-// QueueUserMessage — the user is opting into a no-remote flow
-// that should work even in repos without an `origin`.
+// QueueUserMessage — there is no issue to claim and no agent to
+// dispatch. It shares the remote mode's preconditions: the
+// refresh needs an `origin` remote, a clean primary checkout and
+// no unfinished rebase, so the local mode refuses to run without
+// them.
 //
 // F-XX: local mode has no yes/dispMode parameter — the
 // Assess / Execute split has no meaning without an agent
@@ -606,6 +612,22 @@ func runFixLocal(
 			command.FailedOutcome("error", "the worktree could not be created")), nil
 	}
 
+	// --- sync default branch BEFORE creating worktree ---------
+	// Same contract as runFixRemote: the worktree branches off the
+	// latest upstream code, not off whatever the primary
+	// checkout's HEAD happens to be. A failed refresh ends the
+	// command — the refresh's own message carries the remedy, so
+	// it is surfaced verbatim and nothing is created.
+	var baseSHA string
+	if !deps.SkipRefreshDefaultBranch {
+		var err error
+		baseSHA, _, err = RefreshDefaultBranch(ctx, repoRoot, deps)
+		if err != nil {
+			return replyOutcome(ctx, cs.Emitter(), chatID, messageID, err.Error(),
+				command.FailedOutcome("error", "the default branch could not be refreshed")), nil
+		}
+	}
+
 	if err := WorktreeAdd(ctx, repoRoot, branch, worktreePath, "HEAD", deps.Git); err != nil {
 		// /gtw fix failure paths reply with the error text and
 		// stop. v1.5 retired the §5.3.3 retry card — users get a
@@ -623,7 +645,7 @@ func runFixLocal(
 	// dispatches and renders its own success card); pass
 	// DispatchAssess as a zero-equivalent placeholder.
 	return completeFixAndDispatch(ctx, cs, deps, chatID, messageID,
-		branch, worktreePath, "", repoRoot, "", ModeLocal, -1, nil, "" /* baseSHA: local mode doesn't refresh */, DispatchAssess, issueSelection{})
+		branch, worktreePath, "", repoRoot, "", ModeLocal, -1, nil, baseSHA, DispatchAssess, issueSelection{})
 }
 
 // completeFixAndDispatch handles the common tail of both modes:
@@ -752,7 +774,7 @@ func completeFixAndDispatch(
 	// --- render the success card (§5.2.⑥) ------------------------
 	var card string
 	if mode == ModeLocal {
-		card = renderFixLocalSuccessCard(branch, worktreePath)
+		card = renderFixLocalSuccessCard(branch, worktreePath, baseSHA)
 	} else {
 		// ID mode. Callers (runFixRemote) guarantee issue is
 		// non-nil; a nil here would be a programming error.

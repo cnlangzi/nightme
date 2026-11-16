@@ -403,6 +403,26 @@ func TestStart_ReportsTheRoundCount(t *testing.T) {
 	}
 }
 
+// TestStart_ZeroRoundsMeansUntilTheRunEnds — a count of zero is not
+// "no rounds": it is "until the run ends", and the reply says so.
+func TestStart_ZeroRoundsMeansUntilTheRunEnds(t *testing.T) {
+	ctrl := &fakeController{}
+	cs, ch := newSessionWithOutcome(t, "me-zero-rounds", "/tmp/work")
+
+	reply := runMe(t, ctrl, cs, "/me", "start", "fix-issue", "-i", "0")
+
+	if want := "▶ fix-issue started (run-1) · rounds: until the run ends"; reply != want {
+		t.Errorf("reply = %q, want %q", reply, want)
+	}
+	outcome := ch.settled()
+	if outcome == nil {
+		t.Fatal("the command reported no outcome")
+	}
+	if outcome.Data["iterations"] != "0" {
+		t.Errorf("the outcome carries %q, want 0", outcome.Data["iterations"])
+	}
+}
+
 // TestStart_WithoutTheFlagTheCountIsAbsent — the reply and the
 // outcome of a run that names no count stay as they were.
 func TestStart_WithoutTheFlagTheCountIsAbsent(t *testing.T) {

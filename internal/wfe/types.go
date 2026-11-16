@@ -93,7 +93,9 @@ func (j Job) Rounds() int {
 //
 // It changes the workflow in place: the caller must own the copy it
 // passes. A count of zero means the job repeats until the run ends —
-// the same meaning `iterations: 0` has in the file.
+// the same meaning `iterations: 0` has in the file. A count is a
+// round count, so it must not be negative: the loader refuses a
+// workflow that carries one.
 func OverrideIterations(wf *Workflow, rounds int) {
 	if wf == nil {
 		return

@@ -120,16 +120,7 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 func (f *Factory) start(ctx context.Context, rt command.RuntimeServices,
 	cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 
-	var argv []string
-	if len(input.Args) > 2 {
-		argv = input.Args[2:]
-	}
-	parsed, err := command.ParseCmdArgs(argv, startCmdSpec)
-	if err != nil {
-		chatsession.ReportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
-		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
-	}
-	iterations, err := parseIterations(parsed)
+	parsed, iterations, err := parseStartArgs(input.Args[2:])
 	if err != nil {
 		chatsession.ReportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
@@ -159,7 +150,7 @@ func (f *Factory) start(ctx context.Context, rt command.RuntimeServices,
 	reply := "▶ " + name + " started (" + runID + ")"
 	if iterations != nil {
 		data["iterations"] = strconv.Itoa(*iterations)
-		reply += " · rounds: " + strconv.Itoa(*iterations)
+		reply += " · rounds: " + roundsText(*iterations)
 	}
 	chatsession.ReportOutcome(ctx, messages.Outcome{
 		Status:  messages.OutcomeOK,
@@ -169,23 +160,39 @@ func (f *Factory) start(ctx context.Context, rt command.RuntimeServices,
 	return command.Reply(ctx, rt, reply), nil
 }
 
-// parseIterations reads the round count the command line asks for.
+// parseStartArgs reads the command line of /me start: the positional
+// args, and the round count the line asks for.
 //
 // A count that is not a whole number >= 0 is refused: the workflow
 // file's own counts are the fallback, not a mistyped number. A count
 // of zero means the job repeats until the run ends — the same meaning
 // `iterations: 0` has in the file.
-func parseIterations(parsed command.ParsedArgs) (*int, error) {
+func parseStartArgs(argv []string) (command.ParsedArgs, *int, error) {
+	parsed, err := command.ParseCmdArgs(argv, startCmdSpec)
+	if err != nil {
+		return command.ParsedArgs{}, nil, err
+	}
 	if !parsed.Has("iterations") {
-		return nil, nil
+		return parsed, nil, nil
 	}
 	raw := strings.TrimSpace(parsed.Value("iterations"))
 	rounds, err := strconv.Atoi(raw)
 	if err != nil || rounds < 0 {
-		return nil, fmt.Errorf("the round count must be a whole number >= 0, got %q%s",
+		return command.ParsedArgs{}, nil, fmt.Errorf("the round count must be a whole number >= 0, got %q%s",
 			raw, startCmdSpec.UsageTail())
 	}
-	return &rounds, nil
+	return parsed, &rounds, nil
+}
+
+// roundsText renders the round count a run was given.
+//
+// Zero is not "no rounds": it is "until the run ends", the same
+// meaning `iterations: 0` has in the file.
+func roundsText(rounds int) string {
+	if rounds == 0 {
+		return "until the run ends"
+	}
+	return strconv.Itoa(rounds)
 }
 
 // reply hands the user's answer to the run.

@@ -234,29 +234,112 @@ jobs:
 	}
 }
 
-// TestParse_AttemptsIsRetired — the budget is one number now, and a
-// workflow that still carries the old key is refused by name.
-func TestParse_AttemptsIsRetired(t *testing.T) {
-	_, err := Parse([]byte(`
-title: rounds
+// TestParse_IgnoresTheKeysAStepCarries — a key the schema does not
+// have is ignored: the step keeps the kind it names.
+func TestParse_IgnoresTheKeysAStepCarries(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		key  string
+	}{
+		{"attempts", "attempts: 5"},
+		{"allow", `allow: ["/gtw push"]`},
+		{"agent", "agent: codex"},
+		{"run", "run: echo"},
+		{"prompt", "prompt: hello"},
+		{"a misspelled key", "messege: hi"},
+		{"a value of the wrong type", `attempts: "many"`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			wf := mustParse(t, "title: x\njobs:\n  main:\n    steps: [{message: hi, "+tt.key+"}]\n")
+			step := wf.Jobs["main"].Steps[0]
+			if step.Message != "hi" {
+				t.Errorf("Message = %q, want the message the step kept", step.Message)
+			}
+			if step.Kind() != StepKindMessage {
+				t.Errorf("Kind = %v, want message", step.Kind())
+			}
+		})
+	}
+}
+
+// TestParse_IgnoresAnUnknownKeyAtEveryLevel — a key the schema never
+// had is treated exactly like a retired one.
+func TestParse_IgnoresAnUnknownKeyAtEveryLevel(t *testing.T) {
+	wf := mustParse(t, `
+title: x
+messege: hello
+args:
+  - name: issue
+    default: "*"
+    description: the issue to fix
+on:
+  schedulee:
+    - cron: "0 2 * * *"
 jobs:
   main:
+    worker: 2
     steps:
-      - id: fix
-        message: "/gtw fix"
-        attempts: 5
-`))
-	if err == nil {
-		t.Fatal("a workflow with `attempts:` was accepted")
+      - id: one
+        message: hi
+        iff: always
+`)
+	if wf.Title != "x" {
+		t.Errorf("Title = %q, want x", wf.Title)
 	}
-	msg := err.Error()
-	for _, want := range []string{"attempts", "retired", "budget"} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("the error does not name %q: %v", want, err)
+	if len(wf.Args) != 1 || wf.Args[0].Name != "issue" {
+		t.Errorf("Args = %v, want one argument named issue", wf.Args)
+	}
+	if len(wf.On.Schedule) != 0 {
+		t.Errorf("On.Schedule = %v, want none", wf.On.Schedule)
+	}
+	step := wf.Jobs["main"].Steps[0]
+	if step.Message != "hi" {
+		t.Errorf("Message = %q, want hi", step.Message)
+	}
+	if step.If != "" {
+		t.Errorf("If = %q, want the condition to be empty", step.If)
+	}
+}
+
+// TestParse_AStepWithOnlyAnUnusedKindFails — a step still has to name
+// one kind: the keys the schema does not have name none.
+func TestParse_AStepWithOnlyAnUnusedKindFails(t *testing.T) {
+	for _, src := range []string{
+		"title: x\njobs:\n  main:\n    steps: [{run: echo}]\n",
+		"title: x\njobs:\n  main:\n    steps: [{prompt: hello}]\n",
+	} {
+		_, err := Parse([]byte(src))
+		if err == nil {
+			t.Errorf("a step with no kind was accepted:\n%s", src)
+			continue
+		}
+		want := "exactly one of message / shell / use / wait must be set (got 0)"
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %v, want it to mention %q", err, want)
 		}
 	}
-	if !strings.Contains(msg, "line 8") {
-		t.Errorf("the error does not name the line: %v", err)
+}
+
+// TestParse_ARootKeyThatNamesNoJobIsIgnored — the steps live in
+// `jobs:`: a file that carries the old key has no jobs.
+func TestParse_ARootKeyThatNamesNoJobIsIgnored(t *testing.T) {
+	_, err := Parse([]byte("title: x\nsteps:\n  - /gtw commit\n"))
+	if err == nil || !strings.Contains(err.Error(), "jobs is required") {
+		t.Errorf("error = %v, want the jobs to be required", err)
+	}
+}
+
+// TestParse_ARootKeyThatNamesNoTitleIsIgnored — the workflow's name is
+// the name of the file: a file that carries the old key has no title.
+func TestParse_ARootKeyThatNamesNoTitleIsIgnored(t *testing.T) {
+	for _, src := range []string{
+		"name: fix\njobs:\n  main:\n    steps: [{message: hi}]\n",
+		"goal: fix\njobs:\n  main:\n    steps: [{message: hi}]\n",
+	} {
+		_, err := Parse([]byte(src))
+		if err == nil || !strings.Contains(err.Error(), "title is required") {
+			t.Errorf("error = %v, want the title to be required", err)
+		}
 	}
 }
 
@@ -368,95 +451,53 @@ func TestParse_Errors(t *testing.T) {
 			wantErr: "jobs is required",
 		},
 		{
-			name: "retired name key",
+			name: "a name that names no title",
 			src: `
 name: x
 jobs:
   main:
     steps: [{message: hi}]
 `,
-			wantErr: `unknown key "name"`,
+			wantErr: "title is required",
 		},
 		{
-			name: "retired goal key",
+			name: "a goal that names no title",
 			src: `
 goal: x
 jobs:
   main:
     steps: [{message: hi}]
 `,
-			wantErr: `unknown key "goal"`,
+			wantErr: "title is required",
 		},
 		{
-			name: "retired top-level steps",
+			name: "steps that name no job",
 			src: `
 title: x
 steps:
   - /gtw commit
 `,
-			wantErr: "jobs:",
+			wantErr: "jobs is required",
 		},
 		{
-			name: "retired run key",
+			name: "a run key that names no kind",
 			src: `
 title: x
 jobs:
   main:
     steps: [{run: echo}]
 `,
-			wantErr: "shell:",
+			wantErr: "exactly one of message / shell / use / wait must be set",
 		},
 		{
-			name: "retired prompt key",
+			name: "a prompt key that names no kind",
 			src: `
 title: x
 jobs:
   main:
     steps: [{prompt: hello}]
 `,
-			wantErr: "message:",
-		},
-		{
-			name: "retired agent key",
-			src: `
-title: x
-jobs:
-  main:
-    steps: [{message: hi, agent: codex}]
-`,
-			wantErr: "agent:",
-		},
-		{
-			name: "retired allow key",
-			src: `
-title: x
-jobs:
-  main:
-    steps: [{message: hi, allow: ["/gtw commit"]}]
-`,
-			wantErr: "allow:",
-		},
-		{
-			name: "unknown top-level key",
-			src: `
-title: x
-worker: 2
-jobs:
-  main:
-    steps: [{message: hi}]
-`,
-			wantErr: "worker",
-		},
-		{
-			name: "retired action budget",
-			src: `
-title: x
-max_actions: 30
-jobs:
-  main:
-    steps: [{message: hi}]
-`,
-			wantErr: "max_actions",
+			wantErr: "exactly one of message / shell / use / wait must be set",
 		},
 		{
 			name: "a wait that is not a duration",
@@ -467,16 +508,6 @@ jobs:
     steps: [{wait: soon}]
 `,
 			wantErr: "soon",
-		},
-		{
-			name: "unknown step key",
-			src: `
-title: x
-jobs:
-  main:
-    steps: [{message: hi, retries: 3}]
-`,
-			wantErr: "retries",
 		},
 		{
 			name: "two kinds",
@@ -572,10 +603,9 @@ jobs:
 	}
 }
 
-// TestParse_RefusesTheRetiredAllowKey — a step that still carries an
-// allow list is refused: the error names the key, the line it is
-// written on and what to write instead.
-func TestParse_RefusesTheRetiredAllowKey(t *testing.T) {
+// TestParse_IgnoresTheRetiredAllowKey — a step that still carries an
+// allow list loads: the key is ignored.
+func TestParse_IgnoresTheRetiredAllowKey(t *testing.T) {
 	src := `title: x
 jobs:
   main:
@@ -584,16 +614,12 @@ jobs:
         message: /gtw commit
         allow: ["/gtw push"]
 `
-	_, err := parse([]byte(src))
-	if err == nil {
-		t.Fatal("the retired key was accepted")
+	wf, err := parse([]byte(src))
+	if err != nil {
+		t.Fatalf("the unused key was refused: %v", err)
 	}
-	want := "`allow:` is retired (line 7):"
-	if !strings.HasPrefix(err.Error(), want) {
-		t.Errorf("error = %v, want it to begin with %q", err, want)
-	}
-	if !strings.Contains(err.Error(), "its own step") {
-		t.Errorf("error = %v, want it to say what to write instead", err)
+	if got := wf.Jobs["main"].Steps[0].Message; got != "/gtw commit" {
+		t.Errorf("Message = %q, want the message the step kept", got)
 	}
 }
 
@@ -620,10 +646,9 @@ jobs:
 	}
 }
 
-// TestLoadFile_RefusesTheRetiredKeys — a file that still names itself
-// or states its purpose the old way is refused, and the error says
-// what to write instead.
-func TestLoadFile_RefusesTheRetiredKeys(t *testing.T) {
+// TestLoadFile_IgnoresTheRetiredKeys — a file that still names itself
+// or states its purpose the old way loads: the keys are ignored.
+func TestLoadFile_IgnoresTheRetiredKeys(t *testing.T) {
 	for _, tt := range []struct {
 		name string
 		body string
@@ -634,23 +659,26 @@ func TestLoadFile_RefusesTheRetiredKeys(t *testing.T) {
 		},
 		{
 			name: "a goal",
-			body: "goal: x\njobs:\n  main:\n    steps: [{message: hi}]\n",
+			body: "goal: x\ntitle: x\njobs:\n  main:\n    steps: [{message: hi}]\n",
+		},
+		{
+			name: "steps at the root",
+			body: "title: x\nsteps:\n  - /gtw commit\njobs:\n  main:\n    steps: [{message: hi}]\n",
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
 			path := filepath.Join(dir, "fix.yml")
 			writeFile(t, path, tt.body)
-			_, err := LoadFile(path)
-			if err == nil {
-				t.Fatal("the retired key was accepted")
+			wf, err := LoadFile(path)
+			if err != nil {
+				t.Fatalf("the unused key was refused: %v", err)
 			}
-			msg := err.Error()
-			if !strings.Contains(msg, "fix.yml") {
-				t.Errorf("error = %v, want it to name the file", err)
+			if wf.Title != "x" {
+				t.Errorf("Title = %q, want x", wf.Title)
 			}
-			if !strings.Contains(msg, "title") {
-				t.Errorf("error = %v, want it to name the replacement", err)
+			if got := wf.Jobs["main"].Steps[0].Message; got != "hi" {
+				t.Errorf("Message = %q, want hi", got)
 			}
 		})
 	}

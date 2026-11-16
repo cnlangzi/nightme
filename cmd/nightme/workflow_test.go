@@ -246,8 +246,8 @@ jobs:
 	if !strings.Contains(out, "reviewer.yaml") {
 		t.Errorf("output = %q, want the file that did not load", out)
 	}
-	if !strings.Contains(out, "shell:") {
-		t.Errorf("output = %q, want the error to name the replacement", out)
+	if !strings.Contains(out, "exactly one of message / shell / use / wait must be set") {
+		t.Errorf("output = %q, want the error to name the missing kind", out)
 	}
 }
 

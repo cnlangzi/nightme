@@ -76,8 +76,7 @@ Workflows are read from:
 | `on` | object | ❌ | — | Trigger spec (see §3). Parsed and displayed; nothing fires it. |
 | `jobs` | map | ✅ | — | Named jobs, each with ordered `steps` (see §4). |
 
-The workflow's name is **not** a field: it is the name of the file. A file that
-carries `name:` or `goal:` is refused — both are retired, and `title:` says
+The workflow's name is **not** a field: it is the name of the file. `title:` says
 what the workflow is for.
 
 A workflow names **no agent**. The run uses the agent of the chat that started it — the chat's `/use` choice, or its primary agent.
@@ -408,11 +407,6 @@ Every step supports:
 | `continue-on-error` | bool | `false` | Whether the chain continues when this step fails. |
 | `note` | string | — | Why the step is there, and which fixes the owner uses for it. It is the description the decision model reads. |
 | `final` | bool | `false` | The step cleans up after the round. It runs when the round ends, however the round ends. |
-
-The keys `run:`, `prompt:`, `agent:`, `allow:` and `attempts:` are retired. A
-file that carries one is refused by name, with the line it is written on.
-`attempts:` is replaced by the agent's budget: one number for every step and
-every round, set by `me.max_judgments`.
 
 ### 5.6 `final` — the step that cleans up after the round
 

@@ -10,6 +10,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // fakeController is a scripted personal agent.
@@ -107,17 +108,53 @@ func (c *fakeController) request(n int) command.MeRequest {
 // newSession builds a chat session with a workspace.
 func newSession(t *testing.T, chatID, cwd string) *chatsession.ChatSession {
 	t.Helper()
+	cs, _ := newSessionWithOutcome(t, chatID, cwd)
+	return cs
+}
+
+// recordingCh captures the messages the chat session sends.
+type recordingCh struct {
+	mu    sync.Mutex
+	sends []messages.OutboundMessage
+}
+
+func (r *recordingCh) Send(_ context.Context, m messages.OutboundMessage) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sends = append(r.sends, m)
+	return nil
+}
+
+// settled returns the outcome the command reported, or nil when it
+// reported none.
+func (r *recordingCh) settled() *messages.Outcome {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, m := range r.sends {
+		if m.Kind == messages.OutMessageSettled {
+			return m.Outcome
+		}
+	}
+	return nil
+}
+
+// newSessionWithOutcome builds a chat session with a workspace and a
+// channel that records what the session sends.
+func newSessionWithOutcome(t *testing.T, chatID, cwd string) (*chatsession.ChatSession, *recordingCh) {
+	t.Helper()
 	mgr := chatsession.NewManager()
 	cs, err := mgr.GetOrCreate(chatID, "claude")
 	if err != nil {
 		t.Fatalf("GetOrCreate: %v", err)
 	}
+	ch := &recordingCh{}
+	cs.WithEmitter(ch)
 	if cwd != "" {
 		if err := cs.SetSelectedCwd(cwd); err != nil {
 			t.Fatalf("SetSelectedCwd: %v", err)
 		}
 	}
-	return cs
+	return cs, ch
 }
 
 // runMe runs /me with the given argv and returns the reply.
@@ -223,6 +260,186 @@ func TestCommandInfos_TheHiddenSubcommandsStayHidden(t *testing.T) {
 	}
 	if len(infos[0].Subcommands) != 1 || infos[0].Subcommands[0].Name != "fix" {
 		t.Errorf("the subcommands are %v, want the visible one", infos[0].Subcommands)
+	}
+}
+
+// TestStart_CarriesTheRoundCount — the flag sets the round count of
+// the run and is not one of the workflow's own arguments.
+func TestStart_CarriesTheRoundCount(t *testing.T) {
+	cases := []struct {
+		argv []string
+		want int
+	}{
+		{[]string{"/me", "start", "fix-issue", "-i", "1"}, 1},
+		{[]string{"/me", "start", "fix-issue", "--iterations", "2"}, 2},
+		{[]string{"/me", "start", "-i", "3", "fix-issue"}, 3},
+	}
+	for _, tc := range cases {
+		t.Run(strings.Join(tc.argv, " "), func(t *testing.T) {
+			ctrl := &fakeController{}
+			cs := newSession(t, "me-iterations", "/tmp/work")
+
+			runMe(t, ctrl, cs, tc.argv...)
+
+			if len(ctrl.started) != 1 {
+				t.Fatalf("the controller got %d requests, want 1", len(ctrl.started))
+			}
+			req := ctrl.request(0)
+			if req.Iterations == nil {
+				t.Fatalf("the request carries no round count, want %d", tc.want)
+			}
+			if *req.Iterations != tc.want {
+				t.Errorf("the round count = %d, want %d", *req.Iterations, tc.want)
+			}
+			if len(req.Args) != 0 {
+				t.Errorf("the workflow's arguments are %v, want none", req.Args)
+			}
+			if req.Name != "fix-issue" {
+				t.Errorf("name = %q, want fix-issue", req.Name)
+			}
+		})
+	}
+}
+
+// TestStart_KeepsTheWorkflowsOwnArguments — the tokens that are not
+// flags reach the workflow unchanged.
+func TestStart_KeepsTheWorkflowsOwnArguments(t *testing.T) {
+	ctrl := &fakeController{}
+	cs := newSession(t, "me-args", "/tmp/work")
+
+	runMe(t, ctrl, cs, "/me", "start", "fix-issue", "42", "id=7")
+
+	req := ctrl.request(0)
+	if len(req.Args) != 2 || req.Args[0] != "42" || req.Args[1] != "id=7" {
+		t.Errorf("the workflow's arguments are %v, want [42 id=7]", req.Args)
+	}
+	if req.Iterations != nil {
+		t.Errorf("the request carries a round count of %d, want none", *req.Iterations)
+	}
+}
+
+// TestStart_AfterTheTerminatorEveryTokenIsTheWorkflows — a token that
+// looks like a flag is the workflow's own when it follows "--".
+func TestStart_AfterTheTerminatorEveryTokenIsTheWorkflows(t *testing.T) {
+	ctrl := &fakeController{}
+	cs := newSession(t, "me-terminator", "/tmp/work")
+
+	runMe(t, ctrl, cs, "/me", "start", "fix-issue", "--", "-i")
+
+	req := ctrl.request(0)
+	if len(req.Args) != 1 || req.Args[0] != "-i" {
+		t.Errorf("the workflow's arguments are %v, want [-i]", req.Args)
+	}
+	if req.Iterations != nil {
+		t.Errorf("the request carries a round count of %d, want none", *req.Iterations)
+	}
+}
+
+// TestStart_RefusesABadCommandLine — a flag the lexer does not know, a
+// flag without a value, a value that is not a whole number and a
+// negative count are all refused, and no run starts.
+func TestStart_RefusesABadCommandLine(t *testing.T) {
+	cases := []struct {
+		name string
+		argv []string
+		want string
+	}{
+		{"an unknown flag", []string{"/me", "start", "fix-issue", "--iteraton", "1"}, "unknown flag"},
+		{"an unknown short flag", []string{"/me", "start", "fix-issue", "-x"}, "unknown flag"},
+		{"a missing value", []string{"/me", "start", "fix-issue", "-i"}, "missing value"},
+		{"a value that is not a number", []string{"/me", "start", "fix-issue", "-i", "abc"}, "whole number"},
+		{"a negative count", []string{"/me", "start", "fix-issue", "-i", "-1"}, "whole number"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := &fakeController{}
+			cs := newSession(t, "me-bad", "/tmp/work")
+
+			reply := runMe(t, ctrl, cs, tc.argv...)
+
+			if !strings.Contains(reply, tc.want) {
+				t.Errorf("reply = %q, want it to mention %q", reply, tc.want)
+			}
+			if len(ctrl.started) != 0 {
+				t.Fatal("the run was started with a bad command line")
+			}
+		})
+	}
+}
+
+// TestStart_NamesTheRecognisedFlags — the refusal of an unknown flag
+// says which flags the command knows.
+func TestStart_NamesTheRecognisedFlags(t *testing.T) {
+	ctrl := &fakeController{}
+	cs := newSession(t, "me-unknown-flag", "/tmp/work")
+
+	reply := runMe(t, ctrl, cs, "/me", "start", "fix-issue", "--iteraton", "1")
+
+	if !strings.Contains(reply, "--iteraton") {
+		t.Errorf("reply = %q, want it to name the unknown flag", reply)
+	}
+	if !strings.Contains(reply, "-i/--iterations") {
+		t.Errorf("reply = %q, want it to name the recognised flags", reply)
+	}
+}
+
+// TestStart_ReportsTheRoundCount — the reply names the count and the
+// outcome carries it.
+func TestStart_ReportsTheRoundCount(t *testing.T) {
+	ctrl := &fakeController{}
+	cs, ch := newSessionWithOutcome(t, "me-rounds", "/tmp/work")
+
+	reply := runMe(t, ctrl, cs, "/me", "start", "fix-issue", "-i", "1")
+
+	if want := "▶ fix-issue started (run-1) · rounds: 1"; reply != want {
+		t.Errorf("reply = %q, want %q", reply, want)
+	}
+	outcome := ch.settled()
+	if outcome == nil {
+		t.Fatal("the command reported no outcome")
+	}
+	if outcome.Data["iterations"] != "1" {
+		t.Errorf("the outcome carries %q, want 1", outcome.Data["iterations"])
+	}
+}
+
+// TestStart_ZeroRoundsMeansUntilTheRunEnds — a count of zero is not
+// "no rounds": it is "until the run ends", and the reply says so.
+func TestStart_ZeroRoundsMeansUntilTheRunEnds(t *testing.T) {
+	ctrl := &fakeController{}
+	cs, ch := newSessionWithOutcome(t, "me-zero-rounds", "/tmp/work")
+
+	reply := runMe(t, ctrl, cs, "/me", "start", "fix-issue", "-i", "0")
+
+	if want := "▶ fix-issue started (run-1) · rounds: until the run ends"; reply != want {
+		t.Errorf("reply = %q, want %q", reply, want)
+	}
+	outcome := ch.settled()
+	if outcome == nil {
+		t.Fatal("the command reported no outcome")
+	}
+	if outcome.Data["iterations"] != "0" {
+		t.Errorf("the outcome carries %q, want 0", outcome.Data["iterations"])
+	}
+}
+
+// TestStart_WithoutTheFlagTheCountIsAbsent — the reply and the
+// outcome of a run that names no count stay as they were.
+func TestStart_WithoutTheFlagTheCountIsAbsent(t *testing.T) {
+	ctrl := &fakeController{}
+	cs, ch := newSessionWithOutcome(t, "me-no-rounds", "/tmp/work")
+
+	reply := runMe(t, ctrl, cs, "/me", "start", "fix-issue")
+
+	if strings.Contains(reply, "rounds") {
+		t.Errorf("reply = %q, want no round count", reply)
+	}
+	outcome := ch.settled()
+	if outcome == nil {
+		t.Fatal("the command reported no outcome")
+	}
+	if _, ok := outcome.Data["iterations"]; ok {
+		t.Errorf("the outcome carries a round count of %q, want none", outcome.Data["iterations"])
 	}
 }
 

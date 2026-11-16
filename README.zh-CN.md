@@ -515,7 +515,7 @@ jobs:
 | `on` | 触发器块。它被解析和展示，目前没有东西会触发它。 |
 | `jobs` | 各个 job，每个带一份有序的 `steps`。必填。 |
 
-一个 job 带 `needs`、`if`、`iterations` 和 `steps`。`iterations` 是这个 job 跑多少轮：不填就是一轮，`0` 是"一直跑到运行结束"，`N` 就是 `N` 轮。一轮在这个 job 的 step 跑完时结束；下一轮从这个 job 的第一个 step 开始，上一轮的 step 产出被清空，每个 step 的预算也重新开始。一轮里一个 step 都没跑的 job 不会再重复——每个 step 都被跳过的这一轮什么也没做。重复的 job 最好带一个 `wait:` step，不然一轮接一轮地跑，追着 chat 的速度。一轮也可以提前结束——这一轮真的没东西可做时由 agent 结束它：这一轮没跑的 step 记成跳过，job 的 `final: true` step 顶上，然后 job 开下一轮。
+一个 job 带 `needs`、`if`、`iterations` 和 `steps`。`iterations` 是这个 job 跑多少轮：不填就是一轮，`0` 是"一直跑到运行结束"，`N` 就是 `N` 轮。`/me start -i <rounds>` 在这一次运行里覆盖它：workflow 的每个 job 都跑命令行指定的那个轮数。一轮在这个 job 的 step 跑完时结束；下一轮从这个 job 的第一个 step 开始，上一轮的 step 产出被清空，每个 step 的预算也重新开始。一轮里一个 step 都没跑的 job 不会再重复——每个 step 都被跳过的这一轮什么也没做。重复的 job 最好带一个 `wait:` step，不然一轮接一轮地跑，追着 chat 的速度。一轮也可以提前结束——这一轮真的没东西可做时由 agent 结束它：这一轮没跑的 step 记成跳过，job 的 `final: true` step 顶上，然后 job 开下一轮。
 
 一个 step 恰好带一种类型：
 
@@ -596,7 +596,7 @@ me:
 
 | 命令 | 作用 |
 |---|---|
-| `/me start <workflow> [args...]` | 在当前 chat 里启动一个 workflow。 |
+| `/me start <workflow> [args...] [-i <rounds>]` | 在当前 chat 里启动一个 workflow。`-i` 指定这个 workflow 的每个 job 跑多少轮。 |
 | `/me reply <text>` | 回答运行正在等的问题。 |
 | `/me pause` | 当前这一步跑完后停下。 |
 | `/me continue [note]` | 把控制权交回运行；note 是你的指示。 |
@@ -605,6 +605,8 @@ me:
 | `/me status` | 报告当前 step、运行中命令的阶段与进度、剩余预算，以及两个能力各自决定和花费了什么。 |
 
 `/me start` 的参数按 workflow 声明的顺序填：位置参数填下一个还没被占用的参数，`name=value` 形式的参数按名字指定。
+
+以 `-` 开头的 token 是 flag。`-i <rounds>`（或 `--iterations <rounds>`）指定这次运行里 workflow 的每个 job 跑多少轮——`0` 是"一直跑到运行结束"，跟文件里的 `iterations: 0` 一个意思。这个轮数只属于这一次运行：文件里的轮数不变，下一次 `/me start` 照旧用它。`--` 之后的 token 都归 workflow：以 `-` 开头的参数值要这样才能传给 workflow。
 
 没有工作区的 chat 会被拒绝——`No active workspace. Send /cwd <path> first.`。这次运行继承 chat 的工作区和 agent，一个 chat 同时最多有一次运行。
 

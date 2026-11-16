@@ -276,7 +276,7 @@ jobs:
 |---|---|---|---|
 | `needs` | string \| string[] | ❌ | Other job(s) this one waits for. |
 | `if` | string | ❌ | Condition expression (see §6). A job whose condition does not hold is skipped. |
-| `iterations` | int | ❌ | How many rounds the job runs. Missing means one round, `0` means the job's steps run until the run ends, `N` means `N` rounds in total. |
+| `iterations` | int | ❌ | How many rounds the job runs. Missing means one round, `0` means the job's steps run until the run ends, `N` means `N` rounds in total. `/me start -i <rounds>` overrides it for that run (see §8.9). |
 | `steps` | step[] | ✅ | Ordered steps to execute. |
 
 A **round** is one pass through a job's step list. When a round ends, the job starts the next one: the round's step outputs are cleared — so `${{ steps.fix.outputs.data.issue }}` reads the next round's fix — and the per-step budgets start over. The job's `if:` conditions are read from the state of the round that is running.
@@ -794,7 +794,7 @@ The cap on an answer defaults to 40960 tokens; a configuration that does not nam
 
 | Command | Behaviour |
 |---|---|
-| `/me start <workflow> [args...]` | Starts a workflow in this chat. The name is the base name of the workflow's file. The run inherits the chat's workspace and agent. A chat without a workspace is refused. A second run in the same chat is refused. |
+| `/me start <workflow> [args...] [-i <rounds>]` | Starts a workflow in this chat. The name is the base name of the workflow's file. The run inherits the chat's workspace and agent. A chat without a workspace is refused. A second run in the same chat is refused. `-i` sets how many rounds every job of the workflow runs in this run. |
 | `/me reply <text>` | Answers the question the run is waiting for. |
 | `/me pause` | Stops the run after the step it is on. The step that is running is not interrupted: its outcome is recorded. |
 | `/me continue [note]` | Hands the control back to a paused run. The note is the operator's instruction; it joins the conversation the chat model reads. |
@@ -813,6 +813,8 @@ A run that waits for an answer offers the choices as the card's buttons: a click
 The question itself never reaches the agent either: it is a message of the chat, not a turn of the conversation. The agent sees the commands the run speaks, not the questions the run asks.
 
 The arguments of `/me start` fill the workflow's declared arguments: a positional token fills the next argument that is still unassigned, in declaration order, and a token of the form `name=value` assigns that argument by name. An argument the workflow does not declare is refused, and an argument with neither a value nor a default is refused.
+
+The command line is read by the shared lexer: a token that starts with `-` is a flag, and a flag the command does not know is refused. `-i <rounds>` (or `--iterations <rounds>`) sets the round count of every job of the workflow for that run — `0` means "until the run ends", the same as `iterations: 0` in the file. The count belongs to the run: the file keeps its own counts, and the next `/me start` uses them. Everything after `--` belongs to the workflow, so a value that starts with `-` reaches it.
 
 One run is active per chat: the chat that starts a run is the chat the run works in, the chat that answers its questions, and the chat that holds its overview.
 
@@ -893,7 +895,7 @@ The wake log holds the model decisions only: the workflow's own fast path is not
 | Guardrail | Bound |
 |---|---|
 | Step budget | `me.max_judgments` chances at one step in one round, counted per round. |
-| Rounds | `iterations` for a job — the number of rounds it runs. |
+| Rounds | `iterations` for a job — the number of rounds it runs. `/me start -i <rounds>` sets it for that run. |
 | Compaction | Every tool result but the last keeps its status and summary; the last one keeps its transcript. |
 | Rate limit | A command the agent answered 429 pauses the run; the operator continues it. |
 

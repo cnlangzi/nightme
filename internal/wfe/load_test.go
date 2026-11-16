@@ -603,6 +603,62 @@ jobs:
 	}
 }
 
+// TestParse_TheShapeErrorsKeepTheirWording — the shape of a workflow
+// is checked, and the error says what is wrong.
+func TestParse_TheShapeErrorsKeepTheirWording(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		src     string
+		wantErr string
+	}{
+		{
+			name:    "args that are not a list",
+			src:     "title: x\nargs: hi\njobs:\n  main:\n    steps: [{message: hi}]\n",
+			wantErr: "`args:` must be a list (got a value)",
+		},
+		{
+			name:    "an argument that is not a mapping",
+			src:     "title: x\nargs: [hi]\njobs:\n  main:\n    steps: [{message: hi}]\n",
+			wantErr: "`args:`: expected a mapping, got a value",
+		},
+		{
+			name:    "a trigger that is not a mapping",
+			src:     "title: x\non: hi\njobs:\n  main:\n    steps: [{message: hi}]\n",
+			wantErr: "`on:` must be a mapping (got a value)",
+		},
+		{
+			name:    "jobs that are not a mapping",
+			src:     "title: x\njobs: hi\n",
+			wantErr: "`jobs:` must be a mapping (got a value)",
+		},
+		{
+			name:    "a job that is not a mapping",
+			src:     "title: x\njobs: {main: hi}\n",
+			wantErr: `job "main": expected a mapping, got a value`,
+		},
+		{
+			name:    "steps that are not a list",
+			src:     "title: x\njobs:\n  main:\n    steps: hi\n",
+			wantErr: "job \"main\": `steps:` must be a list (got a value)",
+		},
+		{
+			name:    "a step that is not a mapping",
+			src:     "title: x\njobs:\n  main:\n    steps: [hi]\n",
+			wantErr: "job \"main\": `steps:`: expected a mapping, got a value",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Parse([]byte(tt.src))
+			if err == nil {
+				t.Fatalf("expected an error mentioning %q", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error = %v, want it to mention %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 // TestParse_IgnoresTheRetiredAllowKey — a step that still carries an
 // allow list loads: the key is ignored.
 func TestParse_IgnoresTheRetiredAllowKey(t *testing.T) {

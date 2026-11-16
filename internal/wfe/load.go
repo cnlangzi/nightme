@@ -225,10 +225,9 @@ func requireMapping(node *yaml.Node) error {
 }
 
 // mappingEntries returns the key/value pairs of a YAML mapping.
+//
+// The node must be a mapping: requireMapping says so.
 func mappingEntries(node *yaml.Node) ([]entry, error) {
-	if node == nil {
-		return nil, nil
-	}
 	if err := requireMapping(node); err != nil {
 		return nil, err
 	}
@@ -267,7 +266,7 @@ func checkDocument(root *yaml.Node) error {
 	for _, e := range entries {
 		switch e.key {
 		case "args":
-			if err := checkArgs(e.val); err != nil {
+			if err := checkMappingList("`args:`", e.val); err != nil {
 				return err
 			}
 		case "on":
@@ -283,14 +282,16 @@ func checkDocument(root *yaml.Node) error {
 	return nil
 }
 
-// checkArgs validates the argument specs of a workflow.
-func checkArgs(node *yaml.Node) error {
+// checkMappingList checks that a node holds a list of mappings.
+//
+// The label names the list in an error message.
+func checkMappingList(label string, node *yaml.Node) error {
 	if node.Kind != yaml.SequenceNode {
-		return fmt.Errorf("`args:` must be a list (got %s)", nodeKind(node))
+		return fmt.Errorf("%s must be a list (got %s)", label, nodeKind(node))
 	}
 	for _, item := range node.Content {
 		if err := requireMapping(item); err != nil {
-			return fmt.Errorf("`args:`: %w", err)
+			return fmt.Errorf("%s: %w", label, err)
 		}
 	}
 	return nil
@@ -327,23 +328,10 @@ func checkJobs(node *yaml.Node) error {
 				}
 			}
 			if je.key == "steps" {
-				if err := checkSteps(e.key, je.val); err != nil {
+				if err := checkMappingList(fmt.Sprintf("job %q: `steps:`", e.key), je.val); err != nil {
 					return err
 				}
 			}
-		}
-	}
-	return nil
-}
-
-// checkSteps validates the steps of a job.
-func checkSteps(job string, node *yaml.Node) error {
-	if node.Kind != yaml.SequenceNode {
-		return fmt.Errorf("job %q: `steps:` must be a list (got %s)", job, nodeKind(node))
-	}
-	for _, item := range node.Content {
-		if err := requireMapping(item); err != nil {
-			return fmt.Errorf("job %q: `steps:`: %w", job, err)
 		}
 	}
 	return nil

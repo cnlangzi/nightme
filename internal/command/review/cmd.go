@@ -480,13 +480,15 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 	//
 	// v9 distribution: on success, the bridge returns the raw
 	// review text. The goroutine wraps it in FormatReviewMessage
-	// and emits to TWO destinations:
+	// and injects it into the AS as a user turn — the main agent
+	// sees the findings and can act on "fix the blockers"
+	// follow-ups.
 	//
-	//   1. as.SendBlocks → AS as a user turn → main agent sees
-	//      findings, can act on "fix the blockers" follow-ups.
-	//   2. em.Send → channel directly → user sees findings in
-	//      chat immediately, without waiting for the AS's
-	//      downstream reply (which may not echo them verbatim).
+	// The channel does NOT get the merged text: the findings reach
+	// it through the coalesced stream the sink carries (each batch
+	// labeled with its group), framed by the plan line before it
+	// and the verdict line after it. The user reads the findings
+	// once.
 	//
 	// On failure (incl. ErrReviewNotSupported), only the channel
 	// gets a reply — no Inject, since there's no findings to act
@@ -550,10 +552,7 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 			// The plan fires once, before the first group starts —
 			// the user learns the group list before any group
 			// produces output.
-			agent.WithReviewPlanObserver(func(groups []agent.ReviewPlanGroup) {
-				collector.setPlan(groups)
-				sendReviewLine(revCtx, emitter, chatID, replyTo, runnerName, renderPlanLine(runnerName, groups))
-			}),
+			agent.WithReviewPlanObserver(planObserver(revCtx, emitter, collector, chatID, replyTo, runnerName)),
 		)
 
 		// The record is replaced with this run's outcomes BEFORE the
@@ -718,16 +717,7 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 		//    answering as soon as the turn is injected, and the
 		//    verdict must not land after the answer it summarizes.
 		if revCtx.Err() == nil {
-			out := messages.OutboundMessage{
-				ChatID:  chatID,
-				Kind:    messages.OutReply,
-				ReplyTo: replyTo,
-				Text:    reviewVerdict(groupOutcomes, collector.plan()),
-			}
-			messages.StampRunResult(&out, runnerName, result)
-			if emitter != nil && out.Text != "" {
-				_ = emitter.Send(revCtx, out)
-			}
+			sendVerdict(revCtx, emitter, chatID, replyTo, runnerName, result, groupOutcomes, collector.plan())
 		}
 
 		// 2) Inject into AS as a user turn — main agent sees
@@ -798,8 +788,9 @@ const continueText = "continue"
 // point the agent at the wrong files.
 //
 // The merged result is delivered exactly like a review's: wrapped
-// with agent.FormatReviewMessage, injected into the chat session's
-// current AS as a user turn, and emitted to the channel.
+// with agent.FormatReviewMessage and injected into the chat session's
+// current AS as a user turn. The channel gets the resumed groups'
+// coalesced stream, framed by the plan line and the verdict line.
 func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices,
 	cs *chatsession.ChatSession, input command.SlashInput, notices []string) (*command.SlashOutput, error) {
 	chatID := input.ChatID
@@ -931,10 +922,7 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 			agent.WithReviewJobObserver(collector.observe),
 			// The plan names the resumed groups, before the first
 			// one produces output.
-			agent.WithReviewPlanObserver(func(groups []agent.ReviewPlanGroup) {
-				collector.setPlan(groups)
-				sendReviewLine(revCtx, emitter, chatID, replyTo, runnerName, renderPlanLine(runnerName, groups))
-			}),
+			agent.WithReviewPlanObserver(planObserver(revCtx, emitter, collector, chatID, replyTo, runnerName)),
 		)
 
 		// The record is replaced with this run's outcomes BEFORE the
@@ -1024,16 +1012,7 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 		// before the injected turn so it never lands after the main
 		// agent's answer.
 		if revCtx.Err() == nil {
-			out := messages.OutboundMessage{
-				ChatID:  chatID,
-				Kind:    messages.OutReply,
-				ReplyTo: replyTo,
-				Text:    reviewVerdict(groupOutcomes, collector.plan()),
-			}
-			messages.StampRunResult(&out, runnerName, result)
-			if emitter != nil && out.Text != "" {
-				_ = emitter.Send(revCtx, out)
-			}
+			sendVerdict(revCtx, emitter, chatID, replyTo, runnerName, result, groupOutcomes, collector.plan())
 		}
 
 		// Same contract as a plain review: the injected turn is

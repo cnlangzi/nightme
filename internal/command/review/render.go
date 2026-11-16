@@ -35,7 +35,8 @@ const reviewPromptFrame = "\n\n---\n\n" +
 	"findings — they are in this message and in the chat already."
 
 // renderPlanLine renders the plan of a review run: the runner, the
-// group count, and one entry per group with the files it covers.
+// group count, and one entry per group with the number of files it
+// covers.
 //
 // The plan is the first thing the review says — the user learns what
 // the run is about to do before any group produces output.
@@ -55,6 +56,10 @@ func renderPlanLine(runner string, groups []agent.ReviewPlanGroup) string {
 // reports holds one entry per group that completed; failed holds the
 // label of every group that did not. A group that failed is counted as
 // failed — never as unparsed.
+//
+// The verdict is a claim about what the run found, so it is marked
+// with ⚠️ whenever it is incomplete: a group failed, or a group's
+// output could not be parsed (the count is then a lower bound).
 func renderCountLine(groups int, reports []agent.ReviewReport, failed []string) string {
 	counts := make(map[string]int)
 	findings := 0
@@ -81,7 +86,7 @@ func renderCountLine(groups int, reports []agent.ReviewReport, failed []string) 
 	}
 
 	icon := "✅"
-	if len(failed) > 0 {
+	if len(failed) > 0 || unparsed > 0 {
 		icon = "⚠️"
 	}
 	line := icon + " review · " + strings.Join(parts, " · ")
@@ -135,6 +140,43 @@ func sendReviewLine(ctx context.Context, em messages.Emitter, chatID, replyTo, r
 		AgentName: runner,
 		Text:      text,
 	})
+}
+
+// planObserver returns the agent.WithReviewPlanObserver callback of a
+// review run: it records the plan the verdict names the groups with,
+// and sends the plan line — the first thing the user sees.
+//
+// The callback runs on the goroutine that drives the fan-out, before
+// the first group starts, so the plan line reaches the channel before
+// any group's output.
+func planObserver(ctx context.Context, em messages.Emitter, collector *outcomeCollector,
+	chatID, replyTo, runner string,
+) func([]agent.ReviewPlanGroup) {
+	return func(groups []agent.ReviewPlanGroup) {
+		collector.setPlan(groups)
+		sendReviewLine(ctx, em, chatID, replyTo, runner, renderPlanLine(runner, groups))
+	}
+}
+
+// sendVerdict sends the run's verdict line — the last thing the review
+// itself sends. The main agent's answer follows it.
+func sendVerdict(ctx context.Context, em messages.Emitter, chatID, replyTo, runner string,
+	result agent.RunResult, outcomes []reviewOutcome, plan []agent.ReviewPlanGroup,
+) {
+	text := reviewVerdict(outcomes, plan)
+	if text == "" {
+		return
+	}
+	out := messages.OutboundMessage{
+		ChatID:  chatID,
+		Kind:    messages.OutReply,
+		ReplyTo: replyTo,
+		Text:    text,
+	}
+	messages.StampRunResult(&out, runner, result)
+	if em != nil {
+		_ = em.Send(ctx, out)
+	}
 }
 
 // plural renders a count with its noun: "1 group", "4 groups".

@@ -311,3 +311,16 @@ func TestHandle_ReviewNamesTheFailedGroup(t *testing.T) {
 		t.Errorf("the verdict does not report the group count: %q", verdict.Text)
 	}
 }
+
+// TestRenderCountLine_UnparsedGroupsAreNotGreen: a verdict whose
+// count is incomplete (a group's output could not be parsed) must not
+// read as a clean "nothing found".
+func TestRenderCountLine_UnparsedGroupsAreNotGreen(t *testing.T) {
+	got := renderCountLine(2, []agent.ReviewReport{{Parsed: false}}, nil)
+	if !strings.Contains(got, "⚠️") {
+		t.Errorf("the verdict of an unparsed run is not marked: %s", got)
+	}
+	if !strings.Contains(got, "1 unparsed group") {
+		t.Errorf("the verdict does not report the unparsed group: %s", got)
+	}
+}

@@ -1406,8 +1406,9 @@ func WithReviewJobObserver(fn func(ReviewJob, error)) RunOnceOption {
 // the caller learns what the run is about to do — the group list, the
 // human-facing name of each group and the files it covers.
 //
-// The callback runs on the goroutine that drives the fan-out and must
-// not block.
+// The callback runs on the goroutine that drives the fan-out, before
+// the first group starts. It should return promptly: it runs before
+// the groups start, so a slow callback delays the whole run.
 //
 // Only the review fan-out invokes the observer; a plain RunOnce /
 // RunSession call ignores it.

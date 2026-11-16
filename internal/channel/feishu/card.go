@@ -104,24 +104,16 @@ func runCardJSON(spec channel.CardSpec) (string, error) {
 // of five markdown tables.
 //
 // The lines are the body of the card in render order. A table is a
-// run of consecutive lines that are pipe-delimited rows. The tables
-// past the fifth lose their table shape: their rows are rendered as
-// plain text, so the card is still created and still PATCHed —
-// Feishu refuses a card that carries more than five tables.
+// run of consecutive lines that are pipe-delimited rows — the count
+// the result card uses to decide whether it can be a card at all. The
+// tables past the fifth lose their table shape: their rows are
+// rendered as plain text, so the card is still created and still
+// PATCHed — Feishu refuses a card that carries more than five tables.
 func limitCardTables(lines []string) []string {
 	out := make([]string, len(lines))
-	tables := 0
-	inTable := false
+	groups := tableGroups(lines)
 	for i, line := range lines {
-		if tableRow(line) {
-			if !inTable {
-				tables++
-				inTable = true
-			}
-		} else {
-			inTable = false
-		}
-		if inTable && tables > resultCardTableLimit {
+		if groups[i] > resultCardTableLimit {
 			out[i] = plainTableRow(line)
 			continue
 		}
@@ -132,10 +124,13 @@ func limitCardTables(lines []string) []string {
 
 // plainTableRow renders a row of a markdown table as plain text.
 //
-// The pipes are escaped: the row keeps its shape and stops being a
-// table.
+// The border of the row is the table's syntax and not its text: what
+// is left is the cells of the row, and the row stops being a table.
 func plainTableRow(line string) string {
-	return strings.ReplaceAll(line, "|", `\|`)
+	trimmed := strings.TrimSpace(line)
+	trimmed = strings.TrimPrefix(trimmed, "|")
+	trimmed = strings.TrimSuffix(trimmed, "|")
+	return strings.TrimSpace(trimmed)
 }
 
 // handleMeCardAction turns a run-card button click into the command

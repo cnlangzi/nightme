@@ -86,19 +86,37 @@ func countMarkdownTables(s string) int {
 	if !strings.Contains(s, "|") {
 		return 0
 	}
+	groups := tableGroups(strings.Split(s, "\n"))
 	count := 0
-	inTable := false
-	for _, line := range strings.Split(s, "\n") {
-		if tableRow(line) {
-			if !inTable {
-				count++
-				inTable = true
-			}
-		} else {
-			inTable = false
+	for _, g := range groups {
+		if g > count {
+			count = g
 		}
 	}
 	return count
+}
+
+// tableGroups numbers the tables the lines hold.
+//
+// A table is a run of consecutive lines that are pipe-delimited rows.
+// Every line of the n-th table carries the number n, and a line that is
+// no table row carries 0.
+func tableGroups(lines []string) []int {
+	groups := make([]int, len(lines))
+	count := 0
+	inTable := false
+	for i, line := range lines {
+		if !tableRow(line) {
+			inTable = false
+			continue
+		}
+		if !inTable {
+			count++
+			inTable = true
+		}
+		groups[i] = count
+	}
+	return groups
 }
 
 // tableRow reports whether a line is a row of a markdown table.

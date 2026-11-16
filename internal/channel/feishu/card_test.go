@@ -58,12 +58,12 @@ func TestRunCardJSON_KeepsInsideTheTableCap(t *testing.T) {
 	if n := tableElements(elements); n != resultCardTableLimit {
 		t.Fatalf("the card carries %d tables, want the first %d kept", n, resultCardTableLimit)
 	}
-	// The table past the fifth is plain text: it kept its rows and
-	// lost its shape.
+	// The table past the fifth is plain text: the border of the row is
+	// the table's syntax and not its text.
 	plain := 0
 	for _, el := range elements {
 		content, _ := el["content"].(string)
-		if strings.Contains(content, `\|`) {
+		if content == "a | b" {
 			plain++
 		}
 	}

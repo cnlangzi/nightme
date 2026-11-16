@@ -86,7 +86,11 @@ func countMarkdownTables(s string) int {
 	if !strings.Contains(s, "|") {
 		return 0
 	}
-	groups := tableGroups(strings.Split(s, "\n"))
+	return countTableGroups(tableGroups(strings.Split(s, "\n")))
+}
+
+// countTableGroups counts the tables the numbered lines hold.
+func countTableGroups(groups []int) int {
 	count := 0
 	for _, g := range groups {
 		if g > count {
@@ -101,12 +105,22 @@ func countMarkdownTables(s string) int {
 // A table is a run of consecutive lines that are pipe-delimited rows.
 // Every line of the n-th table carries the number n, and a line that is
 // no table row carries 0.
+//
+// A fenced code block holds no table: the pipe rows of a code sample
+// are code, and Feishu renders them as code — they are neither a table
+// the card holds nor text a table guard may rewrite.
 func tableGroups(lines []string) []int {
 	groups := make([]int, len(lines))
 	count := 0
 	inTable := false
+	inFence := false
 	for i, line := range lines {
-		if !tableRow(line) {
+		if strings.HasPrefix(strings.TrimSpace(line), "```") {
+			inFence = !inFence
+			inTable = false
+			continue
+		}
+		if inFence || !tableRow(line) {
 			inTable = false
 			continue
 		}
@@ -123,6 +137,30 @@ func tableGroups(lines []string) []int {
 func tableRow(line string) bool {
 	trimmed := strings.TrimSpace(line)
 	return len(trimmed) > 1 && trimmed[0] == '|' && trimmed[len(trimmed)-1] == '|'
+}
+
+// tableDelimiterRow reports whether a line is the delimiter row of a
+// markdown table: every cell of the row is hyphens, with an optional
+// colon on either side.
+//
+// The delimiter row is the table's syntax and not its text. It is also
+// what makes the rows around it a table: a row of cells followed by a
+// delimiter row is a table to a markdown parser, so a table that is
+// flattened into plain text has to lose this row as well.
+func tableDelimiterRow(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if !tableRow(trimmed) {
+		return false
+	}
+	cells := strings.Split(strings.Trim(trimmed, "|"), "|")
+	for _, cell := range cells {
+		cell = strings.TrimSpace(cell)
+		cell = strings.Trim(cell, ":")
+		if cell == "" || strings.Trim(cell, "-") != "" {
+			return false
+		}
+	}
+	return true
 }
 
 // buildPostMdJSON renders a Feishu Post (rich-text) message using the `md`

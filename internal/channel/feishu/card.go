@@ -103,29 +103,51 @@ func runCardJSON(spec channel.CardSpec) (string, error) {
 // limitCardTables keeps a card body inside Feishu Card 2.0's hard cap
 // of five markdown tables.
 //
-// The lines are the body of the card in render order. A table is a
-// run of consecutive lines that are pipe-delimited rows — the count
-// the result card uses to decide whether it can be a card at all. The
-// tables past the fifth lose their table shape: their rows are
-// rendered as plain text, so the card is still created and still
-// PATCHed — Feishu refuses a card that carries more than five tables.
+// The lines are the body of the card in render order, and the body is
+// one part of the card: the tables of the body are counted from the
+// first one. See limitCardTableLines for what the cap does to the
+// tables past it.
 func limitCardTables(lines []string) []string {
-	out := make([]string, len(lines))
+	out, _ := limitCardTableLines(lines, 0)
+	return out
+}
+
+// limitCardTableLines keeps the tables of one part of a card inside
+// Feishu Card 2.0's hard cap of five markdown tables.
+//
+// The lines are the markdown of the part in render order. used is the
+// number of tables the parts before this one hold: the cap is a
+// property of the card and not of one part, so a card that holds six
+// tables flattens the sixth whatever part it lives in. The returned
+// count is the number of tables this part holds.
+//
+// The tables past the fifth lose their table shape: their rows are
+// rendered as plain text and their delimiter row is dropped, so what is
+// left is not a table any more and the card is still created and still
+// PATCHed — Feishu refuses a card that carries more than five tables.
+func limitCardTableLines(lines []string, used int) ([]string, int) {
 	groups := tableGroups(lines)
+	out := make([]string, 0, len(lines))
 	for i, line := range lines {
-		if groups[i] > resultCardTableLimit {
-			out[i] = plainTableRow(line)
+		if groups[i] == 0 || used+groups[i] <= resultCardTableLimit {
+			out = append(out, line)
 			continue
 		}
-		out[i] = line
+		// The delimiter row is the table's syntax and not its text:
+		// dropping it is what keeps the rows around it from reading
+		// as a table again.
+		if tableDelimiterRow(line) {
+			continue
+		}
+		out = append(out, plainTableRow(line))
 	}
-	return out
+	return out, used + countTableGroups(groups)
 }
 
 // plainTableRow renders a row of a markdown table as plain text.
 //
 // The border of the row is the table's syntax and not its text: what
-// is left is the cells of the row, and the row stops being a table.
+// is left is the cells of the row.
 func plainTableRow(line string) string {
 	trimmed := strings.TrimSpace(line)
 	trimmed = strings.TrimPrefix(trimmed, "|")

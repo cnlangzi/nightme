@@ -2941,6 +2941,12 @@ func encodeCardJSON(v any) ([]byte, error) {
 // 30 KB envelope, so buildReceiptCard is never asked to render
 // an over-budget body.
 //
+// The card holds five markdown tables at most — Feishu refuses a card
+// that carries more — and the entries carry the agent's reply, so they
+// carry its tables. The tables past the fifth lose their table shape:
+// their rows are rendered as plain text, so the card is still created
+// and still PATCHed and the turn's content still reaches the operator.
+//
 // Signature: takes (entries, tasks) directly, not a *MessageReceipt.
 // This avoids copying a struct that contains a sync.Mutex (vet
 // warning) — AppendEntry needs to build a hypothetical card body
@@ -3048,11 +3054,26 @@ func buildReceiptCard(entries []LogEntry, tasks []agent.AgentTaskItem, footerLin
 	// the card), split into 1+ div elements by splitMarkdownForDivs
 	// (per-entry multi-div, the F-37 split helper), and prefixed
 	// with the entry icon on the first chunk only.
+	//
+	// The entries carry the agent's reply, so they carry its tables
+	// too. Feishu holds five tables per card and refuses a card that
+	// carries more: the tables past the fifth lose their table shape
+	// and their rows are rendered as plain text, so the card is still
+	// created and still PATCHed. The count spans the card — the cap
+	// is a property of the card and not of one entry — and the tables
+	// of a chunk are the tables of that chunk: Feishu renders the
+	// markdown of an element on its own.
+	tables := 0
 	for _, entry := range entries {
 		sanitized := SanitizeCardMarkdown(entry.Text)
 		chunks := splitMarkdownForDivs(sanitized, divTextCharLimit)
 		if len(chunks) == 0 {
 			chunks = []string{""}
+		}
+		for i := range chunks {
+			lines, used := limitCardTableLines(strings.Split(chunks[i], "\n"), tables)
+			tables = used
+			chunks[i] = strings.Join(lines, "\n")
 		}
 		// Icon prefix on the first chunk only — multi-div entries
 		// otherwise repeat the icon on every div, which is noisy.
@@ -3070,9 +3091,11 @@ func buildReceiptCard(entries []LogEntry, tasks []agent.AgentTaskItem, footerLin
 
 	// Section 2: task checklist (F-38, unchanged).
 	for _, chunk := range buildTaskChecklistChunks(tasks) {
+		lines, used := limitCardTableLines(strings.Split(chunk, "\n"), tables)
+		tables = used
 		elements = append(elements, map[string]any{
 			"tag":     "markdown",
-			"content": chunk,
+			"content": strings.Join(lines, "\n"),
 		})
 		elementCount++
 	}

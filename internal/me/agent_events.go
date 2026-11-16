@@ -1,14 +1,18 @@
-// agent_events.go — the run's own activity in the chat.
+// agent_events.go — the run's own activity.
 //
-// The run's thinking and the run's tool calls leave the card and
-// travel the outbound path: the same path a coding agent's activity
-// travels. The chat renders them the way it renders the agent's —
-// a 💭 card for the thinking, a ● call / ⎿ result pair for a tool
-// call — so the run reads like the agent it drives.
+// The run's tool calls leave the card and travel the outbound path:
+// the same path a coding agent's activity travels. The chat renders
+// them the way it renders the agent's — a ● call / ⎿ result pair for
+// a tool call — so the run reads like the agent it drives.
 //
-// The card keeps the state. What the model said is not state: it is
-// the run's reasoning, and it belongs next to the work, not on the
-// board that carries the state.
+// What the chat model said is not such an event: it is the run's own
+// words to the operator, and they go on the run's card. A reply is
+// never gated: the run says what it has to say, whatever the chat
+// shows of a coding agent's thinking.
+//
+// The counts of what the run did are taken here, before the events
+// leave the run: a chat that hides them does not change what the run
+// did.
 //
 // The package speaks the abstract outbound vocabulary
 // (internal/messages) and not the agent protocol: it does not depend
@@ -19,6 +23,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/thinktext"
@@ -29,6 +34,14 @@ import (
 // line is for a person: the model's raw JSON is a wall of escaped
 // text.
 const maxEventLine = 300
+
+// cardRefreshInterval is how long the run waits between two card
+// updates of its own.
+//
+// The snapshots of the command the run waits for come at the pace of
+// that command: without a throttle the card would be written on
+// every line the command produces.
+const cardRefreshInterval = 5 * time.Second
 
 // emit publishes an outbound message in the chat the run works in.
 //
@@ -51,19 +64,57 @@ func (s *Service) emit(ctx context.Context, r *run, anchor string, msg messages.
 	}
 }
 
-// publishThinking publishes what the chat model said.
+// recordReply keeps what the chat model said.
+//
+// The words are the run's own: they go on the run's card, where the
+// operator reads them, and not into the chat as a thinking card of
+// their own.
 //
 // A model that writes its scratchpad into its own text wraps it in
-// <think>…</think> tags; the tags come off and the reasoning stays.
-func (s *Service) publishThinking(ctx context.Context, r *run, text string) {
+// <think>…</think> tags; the tags come off and the words stay.
+func (s *Service) recordReply(r *run, text string) {
 	text = strings.TrimSpace(thinktext.Unwrap(text))
 	if text == "" {
 		return
 	}
-	s.emit(ctx, r, r.cardMessageID(), messages.OutboundMessage{
-		Kind: messages.OutThinking,
-		Text: text,
-	})
+	r.addReply(replyBlock{Text: clipReply(text), At: s.now()})
+}
+
+// countToolCall records a tool call the run made.
+//
+// The count is taken before the call leaves the run: a chat that
+// hides the run's tool calls does not change what the run did.
+func (s *Service) countToolCall(r *run) {
+	r.countTool(s.now())
+}
+
+// refreshCard updates the card, at most once every
+// cardRefreshInterval.
+//
+// The card follows the run when it moves — a decision, a tool call, a
+// step boundary — and it follows the command the run waits for
+// through the snapshots of the tracker. The snapshots are throttled:
+// a run that is doing something writes to the chat now and then, not
+// on every line the command produces.
+func (s *Service) refreshCard(r *run) {
+	now := s.now()
+	if !r.takeCardRefresh(now) {
+		return
+	}
+	s.updateCard(r)
+}
+
+// clipReply cuts a reply to what a card can show.
+//
+// The card carries the first lines of the reply and the rest is cut
+// short: a card is read at a glance, and the words the run said are
+// in the conversation the model wrote them in.
+func clipReply(text string) string {
+	lines := strings.Split(text, "\n")
+	if len(lines) > maxReplyLines {
+		lines = lines[:maxReplyLines]
+	}
+	return clipLine(strings.Join(lines, "\n"), maxReplyChars)
 }
 
 // publishToolStart publishes a tool call that is about to run.

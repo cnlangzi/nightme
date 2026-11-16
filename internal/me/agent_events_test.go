@@ -1,8 +1,8 @@
-// Tests for the run's own activity in the chat.
+// Tests for the run's own activity.
 //
-// The run's thinking and the run's tool calls travel the outbound
-// path: the chat renders them the way it renders a coding agent's.
-// The card keeps the state.
+// The run's tool calls travel the outbound path: the chat renders them
+// the way it renders a coding agent's. The card keeps the state and
+// the run's own words.
 
 package me
 
@@ -11,12 +11,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/cnlangzi/nightme/internal/gateway/observe"
 	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/internal/wfe"
 )
 
 // textAndToolCall builds an assistant message that says something and
@@ -45,44 +50,50 @@ func eventsRun(t *testing.T, provider *scriptedProvider) (*Service, *fakeOperato
 	return svc, op
 }
 
-// TestRun_PublishesTheChatModelsThinking — the reasoning the chat
-// model writes leaves the card and reaches the chat.
-func TestRun_PublishesTheChatModelsThinking(t *testing.T) {
+// TestRun_PublishesNoThinkingForTheChatModelsMessage — the words of
+// the chat model are the run's own: they go on the run's card and not
+// into the chat as a thinking card of their own.
+func TestRun_PublishesNoThinkingForTheChatModelsMessage(t *testing.T) {
 	provider := &scriptedProvider{responses: []llm.Response{
 		{Message: textAndToolCall("the commit comes first", "c1", toolRunStep,
 			map[string]any{"step_id": "commit"})},
 	}}
 	_, op := eventsRun(t, provider)
 
-	thinking := op.EmittedOf(messages.OutThinking)
-	if len(thinking) == 0 {
-		t.Fatalf("the run published no thinking: %v", op.Emitted())
+	if thinking := op.EmittedOf(messages.OutThinking); len(thinking) != 0 {
+		t.Fatalf("the run published %d thinking cards, want none: %v", len(thinking), op.Emitted())
 	}
-	if thinking[0].Text != "the commit comes first" {
-		t.Fatalf("the thinking = %q, want the words of the model", thinking[0].Text)
+	if !op.Has("the commit comes first") {
+		t.Fatalf("the card does not carry the words of the model: %v", op.Lines())
 	}
 }
 
-// TestRun_PublishesTheThinkingWithoutTheInlineTags — a model that
-// writes its scratchpad into its own text does not make the chat show
+// TestRun_PublishesTheReplyWithoutTheInlineTags — a model that
+// writes its scratchpad into its own text does not make the card show
 // the tags.
-func TestRun_PublishesTheThinkingWithoutTheInlineTags(t *testing.T) {
+func TestRun_PublishesTheReplyWithoutTheInlineTags(t *testing.T) {
 	provider := &scriptedProvider{responses: []llm.Response{
 		{Message: textAndToolCall("<think>the commit comes first</think>", "c1", toolRunStep,
 			map[string]any{"step_id": "commit"})},
 	}}
 	_, op := eventsRun(t, provider)
 
-	thinking := op.EmittedOf(messages.OutThinking)
-	if len(thinking) == 0 {
-		t.Fatalf("the run published no thinking: %v", op.Emitted())
+	body := lastBody(op)
+	if !strings.Contains(body, "the commit comes first") {
+		t.Fatalf("the card does not carry the words of the model: %q", body)
 	}
-	if thinking[0].Text != "the commit comes first" {
-		t.Fatalf("the thinking = %q, want the reasoning without the tags", thinking[0].Text)
+	if strings.Contains(body, "<think>") {
+		t.Fatalf("the card carries the tags: %q", body)
 	}
-	if strings.Contains(thinking[0].Text, "<think>") {
-		t.Fatal("the published thinking carries the tags")
+}
+
+// lastBody returns the body of the last card the run wrote.
+func lastBody(op *fakeOperator) string {
+	bodies := op.Lines()
+	if len(bodies) == 0 {
+		return ""
 	}
+	return bodies[len(bodies)-1]
 }
 
 // TestRun_PublishesItsToolCalls — the call goes out before it runs and
@@ -357,4 +368,228 @@ func waitCurrentLine(t *testing.T, op *fakeOperator) string {
 	}
 	t.Fatal("no card showed the command in flight")
 	return ""
+}
+
+// TestRun_CountsItsActivityEvenWhenTheChatHidesIt — the counts are
+// the run's own: a chat that hides the run's events does not change
+// what the run did.
+func TestRun_CountsItsActivityEvenWhenTheChatHidesIt(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	provider := &scriptedProvider{responses: []llm.Response{
+		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"step_id": "commit"})},
+	}}
+	svc, op := testService(t, dir, Config{Provider: provider})
+	// The chat hides everything the run publishes.
+	op.dropOutbound = true
+	op.steps = []fakeStep{pendingStep("still going"), okStep("committed")}
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitRun(t, svc, "obs-1")
+
+	if !op.Has("💭 1 · 🔧 1") {
+		t.Fatalf("the card does not carry the counters of the run: %v", op.Lines())
+	}
+}
+
+// TestRun_KeepsTheChatModelsMessageAsItsReply — the words of the chat
+// model are the run's reply: the run holds them and the card ends
+// with them.
+func TestRun_KeepsTheChatModelsMessageAsItsReply(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	provider := &scriptedProvider{responses: []llm.Response{
+		{Message: textAndToolCall("the commit comes first", "c1", toolAskHuman,
+			map[string]any{"question": "Which branch?"})},
+	}}
+	svc, op := testService(t, dir, Config{Provider: provider})
+	op.steps = []fakeStep{pendingStep("still going")}
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitForLine(t, op, "question: Which branch?")
+
+	r := chatRun(t, svc, "obs-1")
+	replies := r.replyList()
+	if len(replies) != 1 {
+		t.Fatalf("the run holds %d replies, want 1", len(replies))
+	}
+	if replies[0].Text != "the commit comes first" {
+		t.Fatalf("the reply is %q, want the words of the model", replies[0].Text)
+	}
+	if thinking := op.EmittedOf(messages.OutThinking); len(thinking) != 0 {
+		t.Fatalf("the run published %d thinking cards, want none", len(thinking))
+	}
+	if body := lastBody(op); !strings.HasSuffix(body, "the commit comes first") {
+		t.Fatalf("the card does not end with the reply: %q", body)
+	}
+}
+
+// TestTheActivityOfTheRunSurvivesTheDaemon — the counters, the time
+// of the last activity and the replies are persisted with the rest of
+// the run.
+func TestTheActivityOfTheRunSurvivesTheDaemon(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	provider := &scriptedProvider{responses: []llm.Response{
+		{Message: textAndToolCall("which branch?", "c1", toolAskHuman,
+			map[string]any{"question": "Which branch?"})},
+	}}
+	svc, op := testService(t, dir, Config{Provider: provider})
+	op.steps = []fakeStep{pendingStep("still going")}
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitForLine(t, op, "question: Which branch?")
+	waitStateFile(t, dir)
+
+	r := chatRun(t, svc, "obs-1")
+	raw, err := os.ReadFile(filepath.Join(dir, "runs", r.id+".json"))
+	if err != nil {
+		t.Fatalf("read state: %v", err)
+	}
+	var state persistedRun
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatalf("decode state: %v", err)
+	}
+	if state.ThinkCount != 1 {
+		t.Errorf("the state file holds %d model turns, want 1", state.ThinkCount)
+	}
+	if state.ToolCount != 1 {
+		t.Errorf("the state file holds %d tool calls, want 1", state.ToolCount)
+	}
+	if state.LastBeatAt.IsZero() {
+		t.Error("the state file holds no time of the last activity")
+	}
+	if len(state.Replies) != 1 {
+		t.Fatalf("the state file holds %d replies, want 1", len(state.Replies))
+	}
+	if state.Replies[0].Text != "which branch?" {
+		t.Errorf("the persisted reply is %q, want the words of the model", state.Replies[0].Text)
+	}
+
+	restored := svc.restoreRun(state)
+	if restored.thinkCount != 1 || restored.toolCount != 1 {
+		t.Errorf("the restored run holds %d model turns and %d tool calls, want 1 and 1",
+			restored.thinkCount, restored.toolCount)
+	}
+	if !restored.lastBeatAt.Equal(state.LastBeatAt) {
+		t.Errorf("the restored run stands at %v, want %v", restored.lastBeatAt, state.LastBeatAt)
+	}
+	if replies := restored.replyList(); len(replies) != 1 || replies[0].Text != "which branch?" {
+		t.Errorf("the restored run holds %v, want the reply of the model", replies)
+	}
+}
+
+// TestTheCardFollowsTheSnapshotsOfTheCommand — the card follows the
+// command the run waits for, and it does not write to the chat on
+// every snapshot of it.
+func TestTheCardFollowsTheSnapshotsOfTheCommand(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	clock := &testClock{now: time.Date(2026, 11, 16, 14, 35, 22, 0, time.UTC)}
+	svc, op := testService(t, dir, Config{Now: clock.Now})
+	wf, ok := svc.catalog.Lookup("one")
+	if !ok {
+		t.Fatal("the workflow is not in the catalogue")
+	}
+	bound, err := wfe.Bind(wf, map[string]string{})
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	r := newRun(svc, Request{Name: "one", ChatID: "obs-1", Cwd: "/tmp/work"}, bound, nil)
+	r.setCard("card-1", iteration{job: "main", round: 1})
+	t.Cleanup(r.cancel)
+
+	// The run watches the command it waits for.
+	snapshots := make(chan observe.Execution, 8)
+	r.setWatchChannel(snapshots)
+	go svc.watchCommand(context.Background(), r, "msg-1", "/gtw commit")
+
+	// A snapshot of the command refreshes the card.
+	snapshots <- observe.Execution{Phase: observe.PhaseRunning}
+	waitCards(t, op, 1)
+
+	// A second snapshot within the window does not.
+	snapshots <- observe.Execution{Phase: observe.PhaseRunning}
+	time.Sleep(100 * time.Millisecond)
+	if n := len(op.Cards()); n != 1 {
+		t.Fatalf("the card was written %d times, want once", n)
+	}
+
+	// A snapshot after the window refreshes it again.
+	clock.Advance(cardRefreshInterval)
+	snapshots <- observe.Execution{Phase: observe.PhaseRunning}
+	waitCards(t, op, 2)
+}
+
+// testClock is a clock a test moves by hand.
+type testClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+// Now returns the time the clock stands at.
+func (c *testClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+// Advance moves the clock.
+func (c *testClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
+
+// waitCards waits until the run wrote that many cards.
+func waitCards(t *testing.T, op *fakeOperator, n int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(op.Cards()) >= n {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("the run wrote %d cards, want %d", len(op.Cards()), n)
+}
+
+// TestRun_HangsItsToolCallsUnderTheCard — the call and its result
+// hang under the card of the run: the card is the run's state board,
+// and the thread under it is the run's log.
+func TestRun_HangsItsToolCallsUnderTheCard(t *testing.T) {
+	provider := &scriptedProvider{responses: []llm.Response{
+		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"step_id": "commit"})},
+	}}
+	_, op := eventsRun(t, provider)
+
+	cards := op.Cards()
+	if len(cards) == 0 {
+		t.Fatal("the run published no card")
+	}
+	cardID := cards[0].ID
+	starts := op.EmittedOf(messages.OutToolStart)
+	ends := op.EmittedOf(messages.OutToolEnd)
+	if len(starts) == 0 || len(ends) == 0 {
+		t.Fatalf("the run published %d calls and %d results", len(starts), len(ends))
+	}
+	if starts[0].ReplyTo != cardID {
+		t.Errorf("the call hangs under %q, want the card %q", starts[0].ReplyTo, cardID)
+	}
+	if ends[0].ReplyTo != cardID {
+		t.Errorf("the result hangs under %q, want the card %q", ends[0].ReplyTo, cardID)
+	}
 }

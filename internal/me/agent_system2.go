@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"strings"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/llm"
@@ -72,6 +71,9 @@ func (s *Service) system2(ctx context.Context, r *run) (bool, error) {
 	r.system2Decisions++
 	r.system2Usage.Add(resp.Usage)
 	r.mu.Unlock()
+	// The turn is counted before the run's events leave it: a chat
+	// that hides them does not change what the run did.
+	r.countThink(s.now())
 	r.setDecision(decisionChat, "the chat model took the turn")
 	r.recordWake(wakeRecord{
 		Who:   decisionChat,
@@ -80,16 +82,12 @@ func (s *Service) system2(ctx context.Context, r *run) (bool, error) {
 		Round: r.currentRound(),
 		At:    s.now(),
 	})
-	// The card names who decided last: the decision changed, so the
-	// card changes with it.
+	// The model's own words are the run's reply: they go on the card,
+	// where the operator reads them.
+	s.recordReply(r, resp.Message.Text())
+	// The card names who decided last and carries the reply: it
+	// changed, so the card changes with it.
 	s.updateCard(r)
-
-	// The model's own words go to the chat: the operator reads the
-	// run's reasoning where the reasoning of the coding agent is
-	// read.
-	if text := strings.TrimSpace(resp.Message.Text()); text != "" {
-		s.publishThinking(ctx, r, text)
-	}
 
 	calls := resp.Message.ToolCalls()
 	if len(calls) == 0 {

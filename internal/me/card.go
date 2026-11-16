@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/llm"
@@ -23,6 +24,13 @@ const (
 	maxCardError   = 300
 	maxCardCommand = 300
 )
+
+// maxCardElements is how many elements the body of a card may hold.
+//
+// Feishu's Card 2.0 caps a card body at 50 elements. The state of
+// the run comes first: the replies that do not fit go, the oldest
+// first.
+const maxCardElements = 50
 
 const (
 	cardActionPause    = "pause"
@@ -193,6 +201,10 @@ func (s *Service) cardView(r *run, it iteration) channel.CardSpec {
 	judgment := r.judgment
 	decision := r.lastDecision
 	reason := r.lastReason
+	think := r.thinkCount
+	tools := r.toolCount
+	beat := r.lastBeatAt
+	replies := append([]replyBlock(nil), r.replies...)
 	summary := r.summary
 	errMsg := r.errMsg
 	paused := r.paused
@@ -204,9 +216,19 @@ func (s *Service) cardView(r *run, it iteration) channel.CardSpec {
 	s1u, s2u := r.system1Usage.Total(), r.system2Usage.Total()
 	args := argLine(r.argNames, r.argVals)
 	options := askOptions(r.ask)
+	// The last decision a model made: the card names what it decided.
+	var wake *wakeRecord
+	if len(r.wakes) > 0 {
+		rec := r.wakes[len(r.wakes)-1]
+		wake = &rec
+	}
 	r.mu.Unlock()
 
 	lines := make([]string, 0, len(steps)+9)
+	// The live header: what the run did and when it last did it.
+	if header := liveHeader(think, tools, beat); header != "" {
+		lines = append(lines, header)
+	}
 	// The iteration the card records. A card that has none yet — the
 	// one the run started with — does not name one.
 	if it.job != "" {
@@ -231,11 +253,7 @@ func (s *Service) cardView(r *run, it iteration) channel.CardSpec {
 		fields = append(fields, "question: "+question)
 	}
 	if decision != "" {
-		line := "decision: " + decision
-		if reason != "" {
-			line += " — " + reason
-		}
-		fields = append(fields, line)
+		fields = append(fields, decisionLine(decision, reason, wake))
 	}
 	if judgment != "" {
 		fields = append(fields, "blocked: "+judgment)
@@ -268,6 +286,16 @@ func (s *Service) cardView(r *run, it iteration) channel.CardSpec {
 	lines = append(lines, fmt.Sprintf("actions: %d · system-1: %d decisions, %d tokens · system-2: %d decisions, %d tokens",
 		actions, s1d, s1u, s2d, s2u))
 
+	// The run's own words go last: the state of the run comes first.
+	head := len(lines)
+	lines = append(lines, replyArea(replies)...)
+	// The card holds a limited number of elements: the replies that
+	// do not fit go, the oldest first.
+	for len(lines)+1 > maxCardElements && len(replies) > 0 {
+		replies = replies[1:]
+		lines = append(lines[:head], replyArea(replies)...)
+	}
+
 	title := workflow + " · " + string(phase)
 	buttons := []channel.CardButton{
 		{Label: "暂停", Action: cardActionPause},
@@ -296,6 +324,59 @@ func (s *Service) cardView(r *run, it iteration) channel.CardSpec {
 		Body:    strings.Join(lines, "\n"),
 		Buttons: buttons,
 	}
+}
+
+// liveHeader renders what the run did and when it last did it.
+//
+// The shape is the receipt card's header: a chip whose count is zero
+// is left out, and a run that has not done anything yet has no
+// header at all.
+func liveHeader(think, tools int, last time.Time) string {
+	parts := make([]string, 0, 3)
+	if think > 0 {
+		parts = append(parts, fmt.Sprintf("💭 %d", think))
+	}
+	if tools > 0 {
+		parts = append(parts, fmt.Sprintf("🔧 %d", tools))
+	}
+	if !last.IsZero() {
+		parts = append(parts, "⏱ "+last.Format("15:04:05"))
+	}
+	return strings.Join(parts, " · ")
+}
+
+// decisionLine renders the run's last decision.
+//
+// A model that decided says what it decided: the wake record holds
+// it, and the reason the card carried before said the same thing in
+// other words. The workflow's own decision keeps its reason — there
+// is no model behind it.
+func decisionLine(decision, reason string, wake *wakeRecord) string {
+	if wake != nil && wake.Who == decision && wake.What != "" {
+		return "decision: " + wake.Who + " — " + wake.What
+	}
+	if reason != "" {
+		return "decision: " + decision + " — " + reason
+	}
+	return "decision: " + decision
+}
+
+// replyArea renders the run's own words.
+//
+// The replies go under a heading of their own, and the blocks are
+// separated by a blank line: the card renders it as a divider.
+func replyArea(replies []replyBlock) []string {
+	if len(replies) == 0 {
+		return nil
+	}
+	lines := []string{"", "reply:"}
+	for i, block := range replies {
+		if i > 0 {
+			lines = append(lines, "")
+		}
+		lines = append(lines, strings.Split(block.Text, "\n")...)
+	}
+	return lines
 }
 
 // askOptions returns the choices the run is waiting for.

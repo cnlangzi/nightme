@@ -428,7 +428,7 @@ func TestTheWakeLogHoldsOneRecordPerModelCall(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForLine(t, op, "Which branch?")
+	waitForLine(t, op, "question: Which branch?")
 
 	r := chatRun(t, svc, "obs-1")
 	wakes := r.wakeRecords()

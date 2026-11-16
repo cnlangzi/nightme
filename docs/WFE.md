@@ -837,11 +837,15 @@ A step that is still running reports `waiting`, and a step whose execution is go
 The outcome of a step reaches the run state and the expressions of the steps after it: the status as `${{ steps.<id>.outputs.status }}`, the facts under `${{ steps.<id>.outputs.data.<key> }}`.
 
 The chat sees the outcome in the run card — one message, updated in
-place. The card names the iteration it records:
+place. The card names the iteration it records, and its first line is the
+live header: how many turns the chat model took, how many tool calls the run
+made and when it last did something. The card carries the decision the run
+made last and the run's own words:
 
 ```
 fix-issue · running
 
+💭 8 · 🔧 6 · ⏱ 14:35:22
 job: main · round: 1
 args: id=42
 
@@ -853,6 +857,9 @@ args: id=42
 current: /gtw push
 decision: the workflow — the plan says so
 actions: 6 · system-1: 0 decisions, 0 tokens · system-2: 8 decisions, 4210 tokens
+
+reply:
+the review needs a second look, the diff is bigger than I expected
 ```
 
 The summary of a stopped session is a card of its own:

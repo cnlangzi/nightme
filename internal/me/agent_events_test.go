@@ -520,6 +520,10 @@ func TestTheCardFollowsTheSnapshotsOfTheCommand(t *testing.T) {
 	// A snapshot of the command refreshes the card.
 	snapshots <- observe.Execution{Phase: observe.PhaseRunning}
 	waitCards(t, op, 1)
+	first := lastBody(op)
+	if !strings.Contains(first, "⏱ 14:35:22") {
+		t.Fatalf("the card does not say when the run did something last: %q", first)
+	}
 
 	// A second snapshot within the window does not.
 	snapshots <- observe.Execution{Phase: observe.PhaseRunning}
@@ -532,6 +536,9 @@ func TestTheCardFollowsTheSnapshotsOfTheCommand(t *testing.T) {
 	clock.Advance(cardRefreshInterval)
 	snapshots <- observe.Execution{Phase: observe.PhaseRunning}
 	waitCards(t, op, 2)
+	if lastBody(op) == first {
+		t.Fatal("the card did not follow the command")
+	}
 }
 
 // testClock is a clock a test moves by hand.

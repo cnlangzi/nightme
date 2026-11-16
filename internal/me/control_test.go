@@ -321,7 +321,7 @@ func TestTheCardOfTheStartIsAdopted(t *testing.T) {
 		t.Fatalf("the run published %d cards, want the one it started with", posted)
 	}
 	body := lastCardBody(op, "card-1")
-	if !strings.HasPrefix(body, "job: main · round: 1") {
+	if !strings.Contains(body, "job: main · round: 1") {
 		t.Errorf("the card does not name the iteration it records: %q", body)
 	}
 }
@@ -799,7 +799,7 @@ func TestShow_PutsTheStateBackInFrontOfTheOperator(t *testing.T) {
 
 	// The run keeps updating the card /me show published.
 	shown := lastPostedCard(op)
-	if !strings.HasPrefix(shown.Body, "job: main · round: 1") {
+	if !strings.Contains(shown.Body, "job: main · round: 1") {
 		t.Errorf("the card does not name the iteration it records: %q", shown.Body)
 	}
 	if err := op.answer("obs-1", "", ""); err != nil {

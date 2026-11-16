@@ -249,7 +249,7 @@ func (s *Service) runPendingCalls(ctx context.Context, r *run) error {
 		// hides the run's tool calls does not change what the run did.
 		s.countToolCall(r)
 		s.publishToolStart(ctx, r, anchor, call)
-		// The run moved: the card shows the call it is making.
+		// The run moved: the card counts the call it is making.
 		s.updateCard(r)
 		res, err := s.execTool(ctx, r, call)
 		if err != nil {

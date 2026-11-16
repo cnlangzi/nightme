@@ -927,6 +927,16 @@ func (r *run) countTool(now time.Time) {
 	r.mu.Unlock()
 }
 
+// beat records that the run did something.
+//
+// The command the run waits for moved: the run is doing something,
+// and the card says when it did it for the last time.
+func (r *run) beat(now time.Time) {
+	r.mu.Lock()
+	r.lastBeatAt = now
+	r.mu.Unlock()
+}
+
 // addReply keeps what the chat model said.
 //
 // The run's own words are on its card: the run keeps the last few of
@@ -944,6 +954,12 @@ func (r *run) addReply(block replyBlock) {
 func (r *run) replyList() []replyBlock {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.replyListLocked()
+}
+
+// replyListLocked returns the run's own words. The caller holds the
+// lock.
+func (r *run) replyListLocked() []replyBlock {
 	return append([]replyBlock(nil), r.replies...)
 }
 
@@ -1170,7 +1186,7 @@ type persistedRun struct {
 	Wakes            []wakeRecord       `json:"wakes,omitempty"`
 	ThinkCount       int                `json:"think_count"`
 	ToolCount        int                `json:"tool_count"`
-	LastBeatAt       time.Time          `json:"last_beat_at,omitempty"`
+	LastBeatAt       time.Time          `json:"last_beat_at"`
 	Replies          []replyBlock       `json:"replies,omitempty"`
 }
 

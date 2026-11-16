@@ -91,24 +91,27 @@ func (s *Service) countToolCall(r *run) {
 // refreshCard updates the card, at most once every
 // cardRefreshInterval.
 //
-// The card follows the run when it moves — a decision, a tool call, a
-// step boundary — and it follows the command the run waits for
-// through the snapshots of the tracker. The snapshots are throttled:
-// a run that is doing something writes to the chat now and then, not
-// on every line the command produces.
+// The card follows the command the run waits for through the
+// snapshots of the tracker. The snapshots are throttled: a run that
+// is doing something writes to the chat now and then, not on every
+// line the command produces.
+//
+// A snapshot means the command moved: the run is doing something, and
+// the card says when it did it for the last time.
 func (s *Service) refreshCard(r *run) {
 	now := s.now()
 	if !r.takeCardRefresh(now) {
 		return
 	}
+	r.beat(now)
 	s.updateCard(r)
 }
 
 // clipReply cuts a reply to what a card can show.
 //
 // The card carries the first lines of the reply and the rest is cut
-// short: a card is read at a glance, and the words the run said are
-// in the conversation the model wrote them in.
+// short: a card is read at a glance, and the reply is one turn of a
+// conversation the operator does not read.
 func clipReply(text string) string {
 	lines := strings.Split(text, "\n")
 	if len(lines) > maxReplyLines {

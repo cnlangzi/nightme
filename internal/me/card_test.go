@@ -6,6 +6,7 @@
 package me
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -37,6 +38,16 @@ func cardService(t *testing.T) *Service {
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 	svc, _ := testService(t, dir, Config{})
 	return svc
+}
+
+// manyStepWorkflow is a workflow with the given number of steps.
+func manyStepWorkflow(n int) string {
+	var b strings.Builder
+	b.WriteString("title: many\njobs:\n  main:\n    steps:\n")
+	for i := 0; i < n; i++ {
+		fmt.Fprintf(&b, "      - id: step%d\n        message: /gtw step%d\n", i, i)
+	}
+	return b.String()
 }
 
 // firstLine returns the first line of a card body.
@@ -125,6 +136,46 @@ func TestCard_CarriesTheLastThreeReplies(t *testing.T) {
 	}
 	if strings.Contains(view.Body, "the first") {
 		t.Fatalf("the card carries a reply that is too old: %q", view.Body)
+	}
+}
+
+// TestCard_LeavesOutTheStepsThatDoNotFit — a card that is too long is
+// refused by the chat, and a run whose card is refused shows nothing.
+// The steps that do not fit are left out.
+func TestCard_LeavesOutTheStepsThatDoNotFit(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "many", manyStepWorkflow(24))
+	svc, _ := testService(t, dir, Config{})
+	wf, ok := svc.catalog.Lookup("many")
+	if !ok {
+		t.Fatal("the workflow is not in the catalogue")
+	}
+	bound, err := wfe.Bind(wf, map[string]string{})
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	r := newRun(svc, Request{Name: "many", ChatID: "obs-1", Cwd: "/tmp/work"}, bound, nil)
+
+	view := svc.cardView(r, iteration{job: "main", round: 1})
+	if !strings.Contains(view.Body, "… and 8 more steps") {
+		t.Fatalf("the card does not say how many steps it left out: %q", view.Body)
+	}
+	if got := len(strings.Split(view.Body, "\n")); got > maxCardElements {
+		t.Fatalf("the card holds %d lines, want at most %d", got, maxCardElements)
+	}
+}
+
+// TestCard_ShowsTheSummaryOnOneLine — the summary is the model's own
+// text: it does not take a line of the card for every line of it.
+func TestCard_ShowsTheSummaryOnOneLine(t *testing.T) {
+	svc := cardService(t)
+	r := cardRun(t, svc)
+
+	r.setSummary("the first line\nthe second line")
+
+	view := svc.cardView(r, iteration{job: "main", round: 1})
+	if !strings.Contains(view.Body, "result: the first line the second line") {
+		t.Fatalf("the card does not show the summary on one line: %q", view.Body)
 	}
 }
 

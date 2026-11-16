@@ -23,14 +23,25 @@ import (
 const (
 	maxCardError   = 300
 	maxCardCommand = 300
+	// maxCardSummary is how long the line of the result is.
+	maxCardSummary = 300
 )
 
 // maxCardElements is how many elements the body of a card may hold.
 //
-// Feishu's Card 2.0 caps a card body at 50 elements. The state of
-// the run comes first: the replies that do not fit go, the oldest
-// first.
+// A card that is too long is refused by the chat, and a run whose
+// card is refused shows nothing. Every line of the body is an
+// element, and the buttons under the card take one of them.
+//
+// The state of the run comes first: the run's words give way, the
+// oldest first, and the steps of a long workflow are left out.
 const maxCardElements = 50
+
+// maxCardSteps is how many steps of the workflow the card shows.
+//
+// A workflow with more steps than that would take the card over the
+// limit. The card says how many steps it left out.
+const maxCardSteps = 16
 
 const (
 	cardActionPause    = "pause"
@@ -204,7 +215,7 @@ func (s *Service) cardView(r *run, it iteration) channel.CardSpec {
 	think := r.thinkCount
 	tools := r.toolCount
 	beat := r.lastBeatAt
-	replies := append([]replyBlock(nil), r.replies...)
+	replies := r.replyListLocked()
 	summary := r.summary
 	errMsg := r.errMsg
 	paused := r.paused
@@ -238,6 +249,12 @@ func (s *Service) cardView(r *run, it iteration) channel.CardSpec {
 		lines = append(lines, "args: "+args)
 	}
 	for i, step := range steps {
+		if i == maxCardSteps {
+			// The steps that do not fit the card are left out: the
+			// card says how many.
+			lines = append(lines, fmt.Sprintf("… and %d more steps", len(steps)-maxCardSteps))
+			break
+		}
 		line := fmt.Sprintf("%d. %s %s", i+1, stepIcon(states[step.ID]), stepLabel(step))
 		if i < len(remaining.Steps) && remaining.Steps[i] >= 0 {
 			line += fmt.Sprintf(" (%d chances left)", remaining.Steps[i])
@@ -247,7 +264,7 @@ func (s *Service) cardView(r *run, it iteration) channel.CardSpec {
 
 	fields := make([]string, 0, 6)
 	if inflight != nil {
-		fields = append(fields, clipLine("current: "+inflight.Command, maxCardCommand))
+		fields = append(fields, oneLine("current: "+inflight.Command, maxCardCommand))
 	}
 	if question != "" {
 		fields = append(fields, "question: "+question)
@@ -274,10 +291,10 @@ func (s *Service) cardView(r *run, it iteration) channel.CardSpec {
 	// The error stands on its own line: it is why the run stopped,
 	// and it must not read as another field of the run.
 	if errMsg != "" {
-		fields = append(fields, clipLine("error: "+errMsg, maxCardError))
+		fields = append(fields, oneLine("error: "+errMsg, maxCardError))
 	}
 	if summary != "" {
-		fields = append(fields, "result: "+summary)
+		fields = append(fields, oneLine("result: "+summary, maxCardSummary))
 	}
 	if len(fields) > 0 {
 		lines = append(lines, "")
@@ -324,6 +341,15 @@ func (s *Service) cardView(r *run, it iteration) channel.CardSpec {
 		Body:    strings.Join(lines, "\n"),
 		Buttons: buttons,
 	}
+}
+
+// oneLine cuts a text to a single line.
+//
+// A field of the card is one line: a summary with lines in it would
+// take a line of the card for every line of the summary, and the
+// card has a limited number of lines.
+func oneLine(text string, n int) string {
+	return clipLine(strings.Join(strings.Fields(text), " "), n)
 }
 
 // liveHeader renders what the run did and when it last did it.

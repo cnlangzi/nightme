@@ -713,13 +713,14 @@ of the whole session, the actions that went wrong one by one, and the judgment
 the models made at the wake-ups. It is posted once the run has unwound, and it
 carries no buttons: the run is over.
 
-The run's own thinking and its tool calls leave the card and appear in the chat,
-rendered the way a coding agent's are: a 💭 card for the thinking, a `● call` /
-`⎿ result` pair for a tool call. The card keeps the state — the phase, the steps,
-the last decision, the token usage — and the thread under the card is the run's
-live log. The chat's `/think` and `/tools` settings gate the run's events exactly
-as they gate a coding agent's: the events stay hidden until the chat turns them
-on with `/think on` and `/tools on`.
+The card is the run's receipt. Its first line is a live header — how many turns the
+chat model took, how many tool calls the run made, when it last did something —
+and the card carries the decision the run made last and the run's own words. The
+run's tool calls leave the card and appear in the chat as a `● call` /
+`⎿ result` pair, the way a coding agent's are. The chat's `/tools` setting gates
+them exactly as it gates a coding agent's: the pairs stay hidden until the chat
+turns them on with `/tools on`. `/think` does not apply to the run: its words are
+on the card, not in a thinking card of their own.
 
 Two channels can be driven this way: Feishu and Telegram. On any other channel
 `/me start` says so and refuses.

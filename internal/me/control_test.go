@@ -198,7 +198,7 @@ func TestTheQuestionIsNotDispatched(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForLine(t, op, "Which branch?")
+	waitForLine(t, op, "question: Which branch?")
 
 	asked := op.Asked()
 	if len(asked) != 1 {
@@ -321,7 +321,7 @@ func TestTheCardOfTheStartIsAdopted(t *testing.T) {
 		t.Fatalf("the run published %d cards, want the one it started with", posted)
 	}
 	body := lastCardBody(op, "card-1")
-	if !strings.HasPrefix(body, "job: main · round: 1") {
+	if !strings.Contains(body, "job: main · round: 1") {
 		t.Errorf("the card does not name the iteration it records: %q", body)
 	}
 }
@@ -533,7 +533,7 @@ func TestTheModelPathFollowsTheStepOfTheCommand(t *testing.T) {
 		t.Fatalf("the run published %d cards, want one per job", posted)
 	}
 	body := lastCardBody(op, "card-2")
-	if !strings.HasPrefix(body, "job: publish · round: 1") {
+	if !strings.Contains(body, "job: publish · round: 1") {
 		t.Errorf("the card does not follow the step of the command: %q", body)
 	}
 }
@@ -622,7 +622,7 @@ func TestACardTheChatRefusedIsPublishedLater(t *testing.T) {
 		t.Fatalf("the run published %d cards, want the start card and the one the chat took later", posted)
 	}
 	body := lastCardBody(op, "card-2")
-	if !strings.HasPrefix(body, "job: publish · round: 1") {
+	if !strings.Contains(body, "job: publish · round: 1") {
 		t.Errorf("the card does not name the iteration it records: %q", body)
 	}
 }
@@ -799,7 +799,7 @@ func TestShow_PutsTheStateBackInFrontOfTheOperator(t *testing.T) {
 
 	// The run keeps updating the card /me show published.
 	shown := lastPostedCard(op)
-	if !strings.HasPrefix(shown.Body, "job: main · round: 1") {
+	if !strings.Contains(shown.Body, "job: main · round: 1") {
 		t.Errorf("the card does not name the iteration it records: %q", shown.Body)
 	}
 	if err := op.answer("obs-1", "", ""); err != nil {
@@ -1088,7 +1088,7 @@ func TestTakeover_AReplyToTheQuestionIsNotATakeover(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForLine(t, op, "Which branch?")
+	waitForLine(t, op, "question: Which branch?")
 
 	svc.mu.Lock()
 	r := svc.active["obs-1"]

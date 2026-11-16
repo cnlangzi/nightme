@@ -98,6 +98,9 @@ type fakeOperator struct {
 	refuseAttempt int
 	// cardAttempts counts the attempts to publish a card.
 	cardAttempts int
+	// dropOutbound makes the chat hide every outbound message: the
+	// run's events do not reach it.
+	dropOutbound bool
 }
 
 func newFakeOperator(steps ...fakeStep) *fakeOperator {
@@ -246,6 +249,10 @@ func (f *fakeOperator) UpdateCard(_ context.Context, _, cardID string, spec chan
 func (f *fakeOperator) Emit(_ context.Context, _ string, msg messages.OutboundMessage) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.dropOutbound {
+		// The chat hides the run's events.
+		return nil
+	}
 	f.emitted = append(f.emitted, emittedMessage{
 		Kind:    msg.Kind,
 		Text:    msg.Text,

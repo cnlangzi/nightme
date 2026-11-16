@@ -245,12 +245,18 @@ func (s *Service) runPendingCalls(ctx context.Context, r *run) error {
 		}
 		call := r.pendingCallList()[0]
 		anchor := r.cardMessageID()
+		// The call is counted before it leaves the run: a chat that
+		// hides the run's tool calls does not change what the run did.
+		s.countToolCall(r)
 		s.publishToolStart(ctx, r, anchor, call)
+		// The run moved: the card counts the call it is making.
+		s.updateCard(r)
 		res, err := s.execTool(ctx, r, call)
 		if err != nil {
 			var te *toolError
 			if errors.As(err, &te) {
 				s.publishToolEnd(ctx, r, anchor, call, stepResult{Status: "error", Summary: te.Error()}, nil)
+				s.updateCard(r)
 				s.appendToolResult(r, call, stepResult{Status: "error", Summary: te.Error()}, true)
 				r.dropPendingCall()
 				s.persist(r)
@@ -264,6 +270,7 @@ func (s *Service) runPendingCalls(ctx context.Context, r *run) error {
 			// has no verdict yet: the result comes when the run picks
 			// the command up again.
 			s.publishToolEnd(ctx, r, anchor, call, res, nil)
+			s.updateCard(r)
 		}
 		r.dropPendingCall()
 		s.appendToolResult(r, call, res, false)
@@ -894,6 +901,11 @@ func (s *Service) watchCommand(ctx context.Context, r *run, msgID, command strin
 			if len(ex.Choices) > 0 {
 				return s.waitingResult(fmt.Sprintf("the chat is waiting for an answer: %s", ex.Choices[0].Title)), nil
 			}
+			// The command is still running: the card follows it
+			// through the snapshots of the tracker. The refresh is
+			// throttled, so a chatty command does not write to the
+			// chat on every line it produces.
+			s.refreshCard(r)
 		}
 	}
 }

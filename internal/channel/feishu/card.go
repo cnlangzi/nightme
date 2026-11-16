@@ -48,9 +48,14 @@ func (a *Adapter) UpdateCard(ctx context.Context, chatID, cardID string, spec ch
 // The body is rendered one line per element: Feishu's markdown
 // element treats a newline as a soft break, so a body with newlines
 // in a single element runs together on the card.
+//
+// The body keeps inside Card 2.0's cap of five markdown tables: the
+// tables past the fifth lose their table shape, so the card is still
+// created and still PATCHed.
 func runCardJSON(spec channel.CardSpec) (string, error) {
+	lines := strings.Split(spec.Body, "\n")
 	elements := make([]map[string]any, 0, 8)
-	for _, line := range strings.Split(spec.Body, "\n") {
+	for _, line := range limitCardTables(lines) {
 		if strings.TrimSpace(line) == "" {
 			elements = append(elements, map[string]any{"tag": "hr"})
 			continue
@@ -93,6 +98,39 @@ func runCardJSON(spec channel.CardSpec) (string, error) {
 		return "", err
 	}
 	return string(raw), nil
+}
+
+// limitCardTables keeps a card body inside Feishu Card 2.0's hard cap
+// of five markdown tables.
+//
+// The lines are the body of the card in render order. A table is a
+// run of consecutive lines that are pipe-delimited rows — the count
+// the result card uses to decide whether it can be a card at all. The
+// tables past the fifth lose their table shape: their rows are
+// rendered as plain text, so the card is still created and still
+// PATCHed — Feishu refuses a card that carries more than five tables.
+func limitCardTables(lines []string) []string {
+	out := make([]string, len(lines))
+	groups := tableGroups(lines)
+	for i, line := range lines {
+		if groups[i] > resultCardTableLimit {
+			out[i] = plainTableRow(line)
+			continue
+		}
+		out[i] = line
+	}
+	return out
+}
+
+// plainTableRow renders a row of a markdown table as plain text.
+//
+// The border of the row is the table's syntax and not its text: what
+// is left is the cells of the row, and the row stops being a table.
+func plainTableRow(line string) string {
+	trimmed := strings.TrimSpace(line)
+	trimmed = strings.TrimPrefix(trimmed, "|")
+	trimmed = strings.TrimSuffix(trimmed, "|")
+	return strings.TrimSpace(trimmed)
 }
 
 // handleMeCardAction turns a run-card button click into the command

@@ -73,6 +73,30 @@ type actionTranscript struct {
 // agent that did the work said why it could not.
 const maxActionTranscripts = 2
 
+// The caps of the run's own words.
+//
+// The card is read at a glance: it carries the last few replies, and
+// every one of them is short.
+const (
+	// maxCardReplies is how many replies the run keeps.
+	maxCardReplies = 3
+	// maxReplyChars is how many characters a reply has.
+	maxReplyChars = 400
+	// maxReplyLines is how many lines a reply has.
+	maxReplyLines = 6
+)
+
+// replyBlock is one turn of the chat model's message.
+//
+// The block holds the text already cut: the card renders it as it
+// is, and nothing has to be cut again.
+type replyBlock struct {
+	// Text is what the model said.
+	Text string `json:"text"`
+	// At is when the model said it.
+	At time.Time `json:"at"`
+}
+
 // wakeRecord is one decision a model made after the run woke it up.
 type wakeRecord struct {
 	// Who decided: the decision model or the chat model.
@@ -204,6 +228,23 @@ type run struct {
 	lastDecision string
 	// lastReason says why that decision was made.
 	lastReason string
+	// thinkCount counts the turns the chat model took, and toolCount
+	// the tool calls the run made.
+	//
+	// The counts are taken before the run's events leave it: a chat
+	// that hides them does not change what the run did.
+	thinkCount int
+	toolCount  int
+	// lastBeatAt is when the run last did something. The card shows
+	// it as the time of day.
+	lastBeatAt time.Time
+	// replies holds the run's own words, oldest first. The card
+	// shows the last few of them.
+	replies []replyBlock
+	// cardRefreshedAt is when the card was refreshed last. The
+	// snapshots of the command the run waits for refresh the card,
+	// and they are throttled.
+	cardRefreshedAt time.Time
 	// summary is how the run ended.
 	summary string
 	// finished records that the model called the finish tool.
@@ -870,6 +911,73 @@ func (r *run) setDecision(who, reason string) {
 	r.mu.Unlock()
 }
 
+// countThink records a turn of the chat model.
+func (r *run) countThink(now time.Time) {
+	r.mu.Lock()
+	r.thinkCount++
+	r.lastBeatAt = now
+	r.mu.Unlock()
+}
+
+// countTool records a tool call the run made.
+func (r *run) countTool(now time.Time) {
+	r.mu.Lock()
+	r.toolCount++
+	r.lastBeatAt = now
+	r.mu.Unlock()
+}
+
+// beat records that the run did something.
+//
+// The command the run waits for moved: the run is doing something,
+// and the card says when it did it for the last time.
+func (r *run) beat(now time.Time) {
+	r.mu.Lock()
+	r.lastBeatAt = now
+	r.mu.Unlock()
+}
+
+// addReply keeps what the chat model said.
+//
+// The run's own words are on its card: the run keeps the last few of
+// them and forgets the rest.
+func (r *run) addReply(block replyBlock) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.replies = append(r.replies, block)
+	if len(r.replies) > maxCardReplies {
+		r.replies = r.replies[len(r.replies)-maxCardReplies:]
+	}
+}
+
+// replyList returns the run's own words, oldest first.
+func (r *run) replyList() []replyBlock {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.replyListLocked()
+}
+
+// replyListLocked returns the run's own words. The caller holds the
+// lock.
+func (r *run) replyListLocked() []replyBlock {
+	return append([]replyBlock(nil), r.replies...)
+}
+
+// takeCardRefresh reports whether the card may be refreshed now, and
+// remembers when it was.
+//
+// The throttle keeps a run from writing to the chat on every snapshot
+// of the command it waits for.
+func (r *run) takeCardRefresh(now time.Time) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.cardRefreshedAt.IsZero() && now.Sub(r.cardRefreshedAt) < cardRefreshInterval {
+		return false
+	}
+	r.cardRefreshedAt = now
+	return true
+}
+
 // recordStep records the outcome of a step in the run's progress.
 //
 // The engine owns the state: the step that ran and its outcome go
@@ -1076,6 +1184,10 @@ type persistedRun struct {
 	Commands         []CommandInfo      `json:"commands,omitempty"`
 	Agent            string             `json:"agent,omitempty"`
 	Wakes            []wakeRecord       `json:"wakes,omitempty"`
+	ThinkCount       int                `json:"think_count"`
+	ToolCount        int                `json:"tool_count"`
+	LastBeatAt       time.Time          `json:"last_beat_at"`
+	Replies          []replyBlock       `json:"replies,omitempty"`
 }
 
 // persist writes the run's state to disk.
@@ -1121,6 +1233,10 @@ func (s *Service) persist(r *run) {
 		Commands:         r.registry,
 		Agent:            r.agentName,
 		Wakes:            append([]wakeRecord(nil), r.wakes...),
+		ThinkCount:       r.thinkCount,
+		ToolCount:        r.toolCount,
+		LastBeatAt:       r.lastBeatAt,
+		Replies:          append([]replyBlock(nil), r.replies...),
 	}
 	r.mu.Unlock()
 
@@ -1276,6 +1392,10 @@ func (s *Service) restoreRun(state persistedRun) *run {
 		commands:         commands,
 		agentName:        s.agentName(state.Agent),
 		wakes:            state.Wakes,
+		thinkCount:       state.ThinkCount,
+		toolCount:        state.ToolCount,
+		lastBeatAt:       state.LastBeatAt,
+		replies:          state.Replies,
 		situationIdx:     situationIndex(state.Messages),
 		ctx:              ctx,
 		cancel:           cancel,

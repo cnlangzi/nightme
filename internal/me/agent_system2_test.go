@@ -432,7 +432,7 @@ jobs:
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForLine(t, op, "Which branch?")
+	waitForLine(t, op, "question: Which branch?")
 
 	// The run is waiting: the command did not run yet.
 	for _, cmd := range op.Sent() {
@@ -468,7 +468,7 @@ func TestRestart_ResumesASuspendedRun(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForLine(t, op, "Which branch?")
+	waitForLine(t, op, "question: Which branch?")
 
 	// The daemon restarts: a new service picks the run up.
 	restarted, op2 := testService(t, dir, Config{Provider: provider})
@@ -497,7 +497,7 @@ func TestShutdown_KeepsTheRunForTheNextDaemon(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForLine(t, op, "Which branch?")
+	waitForLine(t, op, "question: Which branch?")
 
 	// The daemon goes away while the run waits for an answer.
 	if err := svc.Shutdown(context.Background()); err != nil {

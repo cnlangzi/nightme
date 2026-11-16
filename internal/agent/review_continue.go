@@ -56,7 +56,7 @@ func ContinueReviewJobs(
 ) (RunResult, error) {
 	groups := make([]reviewGroup, len(jobs))
 	for i, j := range jobs {
-		groups[i] = reviewGroup{Pattern: j.Pattern, Files: j.Files}
+		groups[i] = reviewGroup{Pattern: j.Pattern, Source: j.Source, Files: j.Files}
 	}
 
 	run := func(ctx context.Context, groupIdx int, cfg StartConfig, runOpts []RunOnceOption) (RunResult, error) {

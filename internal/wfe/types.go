@@ -88,6 +88,23 @@ func (j Job) Rounds() int {
 	return *j.Iterations
 }
 
+// OverrideIterations sets the round count of every job of the
+// workflow.
+//
+// It changes the workflow in place: the caller must own the copy it
+// passes. A count of zero means the job repeats until the run ends —
+// the same meaning `iterations: 0` has in the file.
+func OverrideIterations(wf *Workflow, rounds int) {
+	if wf == nil {
+		return
+	}
+	for name, job := range wf.Jobs {
+		count := rounds
+		job.Iterations = &count
+		wf.Jobs[name] = job
+	}
+}
+
 // Step is one unit of work inside a job: exactly one of message,
 // shell, use or wait is set.
 //

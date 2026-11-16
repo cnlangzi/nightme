@@ -221,6 +221,72 @@ jobs:
 	}
 }
 
+// TestOverrideIterations_SetsEveryJob — the override reaches every
+// job of the workflow: the ones that declare a count and the ones
+// that declare none.
+func TestOverrideIterations_SetsEveryJob(t *testing.T) {
+	wf := mustParse(t, `
+title: x
+jobs:
+  main:
+    iterations: 0
+    steps: [{id: one, message: hi}]
+  check:
+    steps: [{id: two, message: hi}]
+`)
+
+	OverrideIterations(wf, 2)
+
+	if got := wf.Jobs["main"].Rounds(); got != 2 {
+		t.Errorf("the rounds of main = %d, want 2", got)
+	}
+	if got := wf.Jobs["check"].Rounds(); got != 2 {
+		t.Errorf("the rounds of check = %d, want 2", got)
+	}
+}
+
+// TestOverrideIterations_ZeroRepeatsUntilTheRunEnds — a count of zero
+// means the same thing it means in the file.
+func TestOverrideIterations_ZeroRepeatsUntilTheRunEnds(t *testing.T) {
+	wf := mustParse(t, `
+title: x
+jobs:
+  main:
+    steps: [{id: one, message: hi}]
+`)
+
+	OverrideIterations(wf, 0)
+
+	if got := wf.Jobs["main"].Rounds(); got != 0 {
+		t.Errorf("the rounds of main = %d, want 0", got)
+	}
+}
+
+// TestOverrideIterations_LeavesTheSourceAlone — the caller owns the
+// copy it passes: the workflow it overrides keeps its own counts.
+func TestOverrideIterations_LeavesTheSourceAlone(t *testing.T) {
+	wf := mustParse(t, `
+title: x
+jobs:
+  main:
+    iterations: 3
+    steps: [{id: one, message: hi}]
+`)
+	bound, err := Bind(wf, nil)
+	if err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+
+	OverrideIterations(bound, 1)
+
+	if got := wf.Jobs["main"].Rounds(); got != 3 {
+		t.Errorf("the rounds of the source = %d, want 3", got)
+	}
+	if got := bound.Jobs["main"].Rounds(); got != 1 {
+		t.Errorf("the rounds of the bound workflow = %d, want 1", got)
+	}
+}
+
 func TestPolicy_TheStepBudgetCountsTheCurrentRoundOnly(t *testing.T) {
 	wf := mustParse(t, `
 title: x

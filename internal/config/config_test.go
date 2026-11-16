@@ -435,3 +435,69 @@ func TestParseBool(t *testing.T) {
 		}
 	}
 }
+
+// TestMeMaxTokens_Default covers the chat model's answer cap: a
+// configuration that does not name one gets the shipped default, and
+// a configuration that names one keeps it.
+func TestMeMaxTokens_Default(t *testing.T) {
+	unset := writeMeConfig(t, "primary: claude\n")
+	cfg, err := Load(unset)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Me.LLM.MaxTokens != 40960 {
+		t.Errorf("default Me.LLM.MaxTokens = %d, want 40960", cfg.Me.LLM.MaxTokens)
+	}
+
+	configured := writeMeConfig(t, "me:\n  llm:\n    max_tokens: 8192\n")
+	cfg, err = Load(configured)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Me.LLM.MaxTokens != 8192 {
+		t.Errorf("Me.LLM.MaxTokens = %d, want 8192", cfg.Me.LLM.MaxTokens)
+	}
+}
+
+// TestUpdate_KeepsAChangeMadeOnDisk covers the read-modify-write: the
+// file is read when the update runs, so a value another writer
+// changed in the meantime survives.
+func TestUpdate_KeepsAChangeMadeOnDisk(t *testing.T) {
+	path := writeMeConfig(t, "name: laptop\nprimary: claude\n")
+
+	// The menu loads the configuration...
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if loaded.Name != "laptop" {
+		t.Fatalf("Name = %q, want laptop", loaded.Name)
+	}
+
+	// ...and the me.llm block changes on disk while the menu is open.
+	if err := SetMeLLM(path, MeLLMValues{
+		Provider: "openai",
+		Model:    "gpt-4.1-mini",
+	}); err != nil {
+		t.Fatalf("SetMeLLM: %v", err)
+	}
+
+	// The menu saves its own field.
+	if err := Update(path, func(c *Config) error {
+		c.Name = "desktop"
+		return nil
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	after, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load after update: %v", err)
+	}
+	if after.Name != "desktop" {
+		t.Errorf("Name = %q, want desktop", after.Name)
+	}
+	if after.Me.LLM.Model != "gpt-4.1-mini" {
+		t.Errorf("Me.LLM.Model = %q, want gpt-4.1-mini (the on-disk change survives)", after.Me.LLM.Model)
+	}
+}

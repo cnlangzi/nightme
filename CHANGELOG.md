@@ -11,6 +11,32 @@ is committed there is the version users build and run.
 
 ## [Unreleased] — current dev (locked 2026-08-02)
 
+### Added: `nightme me` configures the chat model of the personal agent
+
+The personal agent's chat model lives in `config.yaml` under `me.llm`, and
+the only way to set it was a text editor. `nightme me` is the terminal's
+way into that block: it shows the current values, asks for the endpoint,
+the model, the cap on an answer, the agent that thinks for the owner and
+the credential, and writes them into the configuration file without
+touching the rest of it — comments, key order and keys nightme does not
+model all survive. The key is read without echo, and the wizard never
+prints it in full.
+
+The wizard is the whole interface: there is no `nightme me get` and no
+`nightme me set`. It reports whether the resulting configuration builds
+and names the command that makes it effective — the daemon builds its
+models at start-up, so a new chat model needs a `nightme restart`.
+
+The `nightme config` menu saves through a read-modify-write now: a
+`me.llm` value that changed on disk while the menu was open survives the
+menu's save.
+
+### Changed: the chat model caps its answers at 40960 tokens
+
+`me.llm.max_tokens` had no default: a configuration that did not name one
+sent no cap at all. The cap is 40960 tokens now, for every chat model —
+the daemon sends it, and `nightme me` shows it as the value to keep.
+
 ### Changed: the workflow loader ignores the keys a workflow file does not use
 
 A workflow file that carries a key of an older schema was refused by name,

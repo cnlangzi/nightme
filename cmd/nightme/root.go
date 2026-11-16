@@ -83,6 +83,7 @@ func newRootCmd() (*cobra.Command, *cmdRegistry) {
 	reg.addNoTray(newLogsCmd(), "logs [--lines N] tail daemon log (Ctrl-C to exit)")
 	reg.add(newCleanCmd(), "clean           truncate logs + remove attachments")
 	reg.add(newConfigCmd(), "config          interactive configuration (name, agents)")
+	reg.addNoTray(newMeCmd(), "me              configure the personal agent's chat model")
 	reg.add(newVersionCmd(), "version         version info")
 	reg.add(newUpdateCmd(), "update          check for a newer release")
 	reg.addNoTray(newWorkflowCmd(), "workflow ...   list/show/run workflow YAMLs")

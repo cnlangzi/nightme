@@ -212,6 +212,7 @@ nightme start          # daemon 在后台跑起来
 | `nightme kill` | 一次性停掉所有 agent。在 chat 里发条消息就回来了，对话不丢。 |
 | `nightme logs` | 实时看 NightMe 在干什么。 |
 | `nightme config` | 交互菜单：实例名、主 agent、每个 agent 的二进制路径。 |
+| `nightme me` | 交互向导：配置个人 agent 的 chat model——接口地址、模型、回答上限、思考用的 agent、凭据。 |
 | `nightme update` | 就地升级：检查、下载、SHA256 校验、安装、重启 daemon。 |
 | `nightme clean` | 清空日志、清掉附件 inbox；`--all` 全量本地重置（先停 daemon）。 |
 | `nightme workflow` | list / show / dry-run `~/.nightme/workflows/` 下的 workflow YAML。 |

@@ -66,6 +66,22 @@ func buildPersonalAgent(cfg *config.Config, chs []channel.Channel, op *operator,
 	return svc
 }
 
+// ChatModelConfig maps the chat-model configuration onto the
+// configuration of the LLM client.
+//
+// The daemon and the `nightme me` wizard build the chat model from
+// the same block; they must build the same one.
+func ChatModelConfig(c config.MeLLMConfig) llm.Config {
+	return llm.Config{
+		Provider:  c.Provider,
+		BaseURL:   c.BaseURL,
+		Model:     c.Model,
+		APIKey:    c.APIKey,
+		APIKeyEnv: c.APIKeyEnv,
+		MaxTokens: c.MaxTokens,
+	}
+}
+
 // buildChatModel builds the chat model (System 2).
 //
 // A missing configuration is not an error: the personal agent runs
@@ -74,14 +90,7 @@ func buildChatModel(cfg *config.Config, logger *slog.Logger) llm.Provider {
 	if cfg.Me.LLM.Provider == "" {
 		return nil
 	}
-	llmCfg := llm.Config{
-		Provider:  cfg.Me.LLM.Provider,
-		BaseURL:   cfg.Me.LLM.BaseURL,
-		Model:     cfg.Me.LLM.Model,
-		APIKey:    cfg.Me.LLM.APIKey,
-		APIKeyEnv: cfg.Me.LLM.APIKeyEnv,
-		MaxTokens: cfg.Me.LLM.MaxTokens,
-	}
+	llmCfg := ChatModelConfig(cfg.Me.LLM)
 	warnDualCredential(logger, "me.llm", llmCfg)
 	provider, err := llm.New(llmCfg)
 	if err != nil {

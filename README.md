@@ -247,6 +247,7 @@ Most of the time you live in chat. These are the few things you do from a termin
 | `nightme kill` | Stop every agent at once. Send a message in the chat and it comes back, conversation intact. |
 | `nightme logs` | Watch what NightMe is doing, live. |
 | `nightme config` | Interactive menu: instance name, primary agent, per-agent binary path. |
+| `nightme me` | Interactive wizard for the personal agent's chat model: endpoint, model, answer cap, thinking agent, credential. |
 | `nightme update` | In-place upgrade: check, download, SHA256-verify, install, restart the daemon. |
 | `nightme clean` | Truncate logs and clear the attachment inbox; `--all` for a full local reset (stop the daemon first). |
 | `nightme workflow` | List / show / dry-run the workflow YAMLs under `~/.nightme/workflows/`. |

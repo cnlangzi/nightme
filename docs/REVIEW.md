@@ -363,7 +363,7 @@ card 上只有 plan 行和 verdict 行 —— findings 不再进 card。
 
 sink 的 drain 在 verdict 之前排空:各组的 findings 还排在 drain goroutine 的队列里,verdict 必须落在它们之后(否则 verdict 会盖过它总结的 findings)。收尾提示在 drain 之前入队(sink 是 FIFO),所以它落在各组 findings 之后。
 
-**组的命名**:组名说的是这组在 review 什么。nightme 自己的两组是固定名(builtin 组 = `nightme code reviewer`,simplify 组 = `Simplify review lens`,取自它 prompt 的标题);ocr 的组用规则的 `source` 与 `pattern`(`system / **/*.rs`)—— 不用规则正文的首行:那描述的是规则的**第一个** category,而组检查的是这条规则的每个 category。组名后面统一跟一段文件摘要:这组覆盖的文件按扩展名统计,多的在前,最多列三个,其余用 `等`;没有扩展名的文件用自己的文件名参与统计。规则集的名字和组名是两件事:组名说"这组在看什么",规则集说"按哪套规则看的"。
+**组的身份**:组的身份是 `source` + pattern —— 两条规则落在同一个 glob 上就是两个组,所以 verdict 点名失败组时按这两个字段配对,不能只看 pattern。组名说的是这组在 review 什么。nightme 自己的两组是固定名(builtin 组 = `nightme code reviewer`,simplify 组 = `Simplify review lens`,取自它 prompt 的标题);ocr 的组用规则的 `source` 与 `pattern`(`system / **/*.rs`)—— 不用规则正文的首行:那描述的是规则的**第一个** category,而组检查的是这条规则的每个 category。组名后面统一跟一段文件摘要:这组覆盖的文件按扩展名统计,多的在前,最多列三个,其余用 `等`;没有扩展名的文件用自己的文件名参与统计。规则集的名字和组名是两件事:组名说"这组在看什么",规则集说"按哪套规则看的"。
 
 **合并文本不进 channel**:合并文本只注入主 agent 的 session —— 它要读全文、要看到失败组的 inline marker、"fix the blockers" 要读它;作为 channel 的一份拷贝,它和 thread 里说的是同一件事。注入的那一轮带一句 frame:要 verdict 和下一步,不要复述 findings。
 
@@ -387,6 +387,7 @@ sink 的 drain 在 verdict 之前排空:各组的 findings 还排在 drain gorou
 - **单组超模型 context 窗口**:`_nightme_simplify` group 永远带全部 reviewable 文件,大 changeset 下单个 group 的 prompt 仍可能超出模型的 context 窗口。传输层不受限(管道无长度上限),但模型侧会失败,该 group 标记 failed,其余 group 的 findings 照常汇入。
 - **顺序 vs 并发**:默认并发(快);若并发有风险(如 agent 不支持并发 session),可降级顺序(loop 无 sem)——但已验证 delegate bridge 的 session 并发安全(dsh sessionId 多路复用 / 其他独立子进程),默认并发。
 - **跨 job 事件流交错**:Phase 2 期间不同 job 的 process 事件在 outer 上**可能交错**(Source="group-N" 区分);**同一 job 内部** ToolStart→ToolEnd 严格配对连续(per-job 缓冲保证)。
+- **各组 findings 的到达顺序 = 完成顺序**:一组结束就把自己的 findings 交出去,所以先跑完的组先到(thread 里是 `[2] …` 在 `[1] …` 前面)。编号 `[N]` 是组在 plan 里的位置,读的人靠它认出组;fan-out 结束时(finalize)兜底交付没结束的那几组,那部分是 plan 顺序。
 - **Replay vs live 交错**:Phase 1→2 转换时,replay 处理 per-job 旧事件可能与同 job 新到的 live 事件在 outer 上交错。当前实现的已知 minor race:同 job 内 replay 事件 + live 事件少数情况下顺序非严格 chronological。后果仅为 chat 时间线略不规整,无功能影响。修复方案(若需要)是在转换时加 replay-in-progress barrier。
 - **未配对 ToolStart**:job 在 ToolStart 后异常结束(无对应 ToolEnd),该 Start 进 buffer 后永远不被 forward——这是合理行为,chat 不会看到半截 call;该 job 的 done 仍会按 Result/Error 触发。
 - **orphan ToolEnd**:配对 ToolStart 已先被 replay 转发过的罕见情况——orphan End 也 forward,chat 看到一条无 Start 的 End,可忽略。
@@ -558,6 +559,8 @@ files / session id)和要发的文本,并发 resume,事件走同一个 aggregato
 group 格式合并。续跑的组在 thread 里的交付方式与 review 完全一致:每组一条
 findings + 开始提示,末尾一条收尾提示;card 上同样是 plan 行 + verdict 行。组名沿用
 review 时那一个 —— `source` 与 pattern 一起构成组的身份,所以 record 里存着 source。
+编号是**重排**的:续跑的 plan 只含续跑的那几组,所以它们从 1 重新编号(编号是组在
+**这次 run** 的 plan 里的位置,不是跨 run 的稳定 id)。
 
 ### 续跑状态放在哪
 

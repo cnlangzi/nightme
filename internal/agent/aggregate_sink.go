@@ -25,8 +25,8 @@
 // works, coalesced into batches of roughly 2 seconds or 2 KiB. Every
 // delivered batch carries its group's number ("[1] ") inline, and the
 // findings ride the thinking kind, so they are rendered in the
-// thread. A batch is lossless — the delivered bodies of a group
-// concatenate back into the group's raw text.
+// thread. A batch is lossless — the bodies of a group's delivered
+// replies concatenate back into the group's raw text.
 //
 // State machine (three phases):
 //
@@ -191,15 +191,20 @@ func (b *pendingBatch) reset() {
 	b.kind = 0
 }
 
-// The coalescing triggers. A batch is flushed when it reaches
-// coalesceBytes of body, or when it has been open for
-// coalesceInterval — whichever comes first.
+// The coalescing triggers. The findings are cut when a batch reaches
+// coalesceBytes of body; the reasoning is cut when it reaches
+// coalesceBytes of body or when it has been open for coalesceInterval
+// — whichever comes first.
 //
 // The size keeps a batch from growing without end; the interval
 // keeps the user watching the review being written instead of
 // staring at a card that has not moved for a minute. Neither is a
 // hard bound: a single event larger than the size trigger is
 // delivered as it is.
+//
+// The clock does not cut the findings: they are handed over when the
+// group ends, and a clock-cut batch would split one group's findings
+// over several replies.
 const (
 	// coalesceBytes is the body size that flushes a pending batch.
 	coalesceBytes = 2048
@@ -1162,10 +1167,13 @@ func (a *eventAggregator) tailAlreadyDelivered(state *perJobState, tail string) 
 	return strings.HasSuffix(delivered, tail)
 }
 
-// flushAll hands over every group's output — the fan-out is over, no
-// group keeps its text back. The groups are handed over in fan-out
-// order, so the findings reach the chat in the order the plan named
-// the groups.
+// flushAll hands over the output of the groups that are still holding
+// it — the fan-out is over, no group keeps its text back.
+//
+// A group normally hands its findings over when it ends, so this is
+// the mop-up for the groups that never reached their terminal. The
+// groups are walked in fan-out order, so what it hands over arrives
+// in the order the plan named the groups.
 func (a *eventAggregator) flushAll() {
 	for i := range a.plan {
 		a.mu.Lock()

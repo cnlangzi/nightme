@@ -14,24 +14,32 @@ import (
 	"strings"
 )
 
-// reviewGroupName is the name of a review group: what it reviews.
+// ReviewGroupName is the name of a review group: what it reviews.
 //
 // The nightme-owned groups get a fixed name — their sentinel pattern is
 // an internal marker and must not reach the chat. An ocr group is
 // named by its rule's source and pattern: the rule's own text is not
 // used, because its first line describes only the rule's first
 // category while the group checks every category of that rule.
-func reviewGroupName(g reviewGroup) string {
-	switch g.Pattern {
+//
+// The source and the pattern together are the group's identity: two
+// rules over the same glob are two groups.
+func ReviewGroupName(source, pattern string) string {
+	switch pattern {
 	case PatternBuiltin:
 		return "nightme code reviewer"
 	case PatternSimplify:
 		return simplifyGroupName()
 	}
-	if g.Source != "" {
-		return g.Source + " / " + g.Pattern
+	if source != "" {
+		return source + " / " + pattern
 	}
-	return g.Pattern
+	return pattern
+}
+
+// reviewGroupName is the name of the group the plan describes.
+func reviewGroupName(g reviewGroup) string {
+	return ReviewGroupName(g.Source, g.Pattern)
 }
 
 // simplifyGroupName is the simplify group's name: the heading of its

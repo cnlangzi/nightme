@@ -348,6 +348,7 @@ func reviewPlan(groups []reviewGroup) []ReviewPlanGroup {
 	for i, g := range groups {
 		plan[i] = ReviewPlanGroup{
 			Pattern: g.Pattern,
+			Source:  g.Source,
 			Label:   reviewGroupLabel(g),
 			Files:   g.Files,
 		}

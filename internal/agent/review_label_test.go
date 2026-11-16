@@ -100,7 +100,8 @@ func TestReviewFileSummary(t *testing.T) {
 }
 
 // TestReviewPlan_NamesEveryGroup: the plan the fan-out reports names
-// every group by what it reviews.
+// every group by what it reviews, and carries the source that names
+// an ocr group.
 func TestReviewPlan_NamesEveryGroup(t *testing.T) {
 	plan := reviewPlan([]reviewGroup{
 		{Pattern: PatternBuiltin, Files: []string{"a.go"}},
@@ -118,5 +119,18 @@ func TestReviewPlan_NamesEveryGroup(t *testing.T) {
 		if plan[i].Label != want {
 			t.Errorf("plan[%d].Label = %q, want %q", i, plan[i].Label, want)
 		}
+	}
+	if plan[2].Source != "system" {
+		t.Errorf("plan[2].Source = %q, want %q", plan[2].Source, "system")
+	}
+}
+
+// TestReviewGroupName_TwoRulesOverTheSameGlob: two rules over the
+// same glob are two groups — the source tells them apart.
+func TestReviewGroupName_TwoRulesOverTheSameGlob(t *testing.T) {
+	security := ReviewGroupName("security", "**/*.go")
+	performance := ReviewGroupName("performance", "**/*.go")
+	if security == performance {
+		t.Errorf("the two groups over the same glob share a name: %q", security)
 	}
 }

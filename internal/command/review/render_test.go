@@ -75,10 +75,10 @@ func TestRenderPlanLine_OneSubagent(t *testing.T) {
 	}
 }
 
-// TestRenderCountLine: the verdict counts the subagents, the findings
+// TestVerdictLine: the verdict counts the subagents, the findings
 // and their severities, names the groups that failed and points at
 // the command that resumes them.
-func TestRenderCountLine(t *testing.T) {
+func TestVerdictLine(t *testing.T) {
 	reports := []agent.ReviewReport{
 		{Parsed: true, Findings: []agent.ReviewFinding{
 			{Severity: agent.SeverityCritical},
@@ -90,7 +90,7 @@ func TestRenderCountLine(t *testing.T) {
 		}},
 	}
 
-	got := renderCountLine(3, reports, nil)
+	got := newVerdict(3, reports, nil).line()
 	for _, want := range []string{
 		"3 subagents",
 		"4 findings",
@@ -110,7 +110,7 @@ func TestRenderCountLine(t *testing.T) {
 		t.Errorf("the verdict line shows an empty severity bucket: %s", got)
 	}
 
-	failed := renderCountLine(3, reports, []string{"**/*.ts"})
+	failed := newVerdict(3, reports, []string{"**/*.ts"}).line()
 	for _, want := range []string{"**/*.ts", "/review --continue"} {
 		if !strings.Contains(failed, want) {
 			t.Errorf("the verdict line does not carry %q: %s", want, failed)
@@ -118,13 +118,13 @@ func TestRenderCountLine(t *testing.T) {
 	}
 }
 
-// TestRenderCountLine_UnparsedGroups: a group whose output matched no
+// TestVerdictLine_UnparsedGroups: a group whose output matched no
 // known shape is reported as unparsed.
-func TestRenderCountLine_UnparsedGroups(t *testing.T) {
-	got := renderCountLine(2, []agent.ReviewReport{
+func TestVerdictLine_UnparsedGroups(t *testing.T) {
+	got := newVerdict(2, []agent.ReviewReport{
 		{Parsed: true},
 		{Parsed: false},
-	}, nil)
+	}, nil).line()
 	if !strings.Contains(got, "1 unparsed subagent") {
 		t.Errorf("the verdict line does not report the unparsed subagent: %s", got)
 	}
@@ -151,6 +151,42 @@ func TestReviewVerdict_FailedGroupsAreNotUnparsed(t *testing.T) {
 	}
 	if strings.Contains(got, "unparsed") {
 		t.Errorf("the failed group was counted as unparsed: %s", got)
+	}
+}
+
+// TestReviewVerdict_NamesTheFailedGroupByItsIdentity: two ocr rules
+// over the same glob are two groups — the verdict names the one that
+// failed, not the other.
+func TestReviewVerdict_NamesTheFailedGroupByItsIdentity(t *testing.T) {
+	outcomes := []reviewOutcome{
+		{pattern: "**/*.go", source: "security", err: errors.New("boom")},
+		{pattern: "**/*.go", source: "performance", report: agent.ReviewReport{Parsed: true}},
+	}
+	plan := []agent.ReviewPlanGroup{
+		{Pattern: "**/*.go", Source: "security", Label: "security / **/*.go · Go"},
+		{Pattern: "**/*.go", Source: "performance", Label: "performance / **/*.go · Go"},
+	}
+
+	got := reviewVerdict(outcomes, plan)
+	if !strings.Contains(got, "security / **/*.go") {
+		t.Errorf("the verdict does not name the failed group: %s", got)
+	}
+	if strings.Contains(got, "performance") {
+		t.Errorf("the verdict names the group that did not fail: %s", got)
+	}
+}
+
+// TestReviewVerdict_FallsBackToTheGroupsName: a group the plan did
+// not name is still named by its identity — the source travels with
+// the pattern.
+func TestReviewVerdict_FallsBackToTheGroupsName(t *testing.T) {
+	outcomes := []reviewOutcome{
+		{pattern: "**/*.go", source: "system", err: errors.New("boom")},
+	}
+
+	got := reviewVerdict(outcomes, nil)
+	if !strings.Contains(got, "system / **/*.go") {
+		t.Errorf("the verdict does not name the failed group: %s", got)
 	}
 }
 
@@ -511,11 +547,11 @@ func TestHandle_ReviewNamesTheFailedGroup(t *testing.T) {
 	}
 }
 
-// TestRenderCountLine_UnparsedGroupsAreNotGreen: a verdict whose
+// TestVerdictLine_UnparsedGroupsAreNotGreen: a verdict whose
 // count is incomplete (a group's output could not be parsed) must not
 // read as a clean "nothing found".
-func TestRenderCountLine_UnparsedGroupsAreNotGreen(t *testing.T) {
-	got := renderCountLine(2, []agent.ReviewReport{{Parsed: false}}, nil)
+func TestVerdictLine_UnparsedGroupsAreNotGreen(t *testing.T) {
+	got := newVerdict(2, []agent.ReviewReport{{Parsed: false}}, nil).line()
 	if !strings.Contains(got, "⚠️") {
 		t.Errorf("the verdict of an unparsed run is not marked: %s", got)
 	}

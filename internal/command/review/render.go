@@ -157,27 +157,25 @@ func (v verdict) hint() string {
 	return v.icon() + " **review done** · " + v.body()
 }
 
-// renderCountLine renders the verdict of a review run: the subagent
-// count, the finding count, the severity distribution, the number of
-// groups whose output could not be parsed, and the groups that failed.
-//
-// A group that failed is counted as failed — never as unparsed.
-func renderCountLine(groups int, reports []agent.ReviewReport, failed []string) string {
-	return newVerdict(groups, reports, failed).line()
-}
-
 // reviewVerdict builds the verdict of a review run from its group
 // outcomes and the plan that named the groups.
 //
 // A failed group is counted as failed, never as unparsed. Its label
-// comes from the plan; a group the plan did not name falls back to its
-// pattern.
+// comes from the plan; a group the plan did not name falls back to the
+// name its identity gives.
 func reviewVerdict(outcomes []reviewOutcome, plan []agent.ReviewPlanGroup) string {
 	if len(outcomes) == 0 {
 		return ""
 	}
 	reports, failed := verdictInputs(outcomes, plan)
 	return newVerdict(len(outcomes), reports, failed).line()
+}
+
+// groupKey is a group's identity: the rule's source and the pattern
+// together. Two rules over the same glob are two groups, so the
+// pattern alone does not identify one.
+func groupKey(source, pattern string) string {
+	return source + "\x00" + pattern
 }
 
 // reviewVerdictHint builds the thread's end hint of a review run: the
@@ -195,17 +193,17 @@ func reviewVerdictHint(outcomes []reviewOutcome, plan []agent.ReviewPlanGroup) s
 // not.
 //
 // A failed group's label comes from the plan; a group the plan did not
-// name falls back to its pattern.
+// name falls back to the name its identity gives.
 func verdictInputs(outcomes []reviewOutcome, plan []agent.ReviewPlanGroup) (reports []agent.ReviewReport, failed []string) {
 	labels := make(map[string]string, len(plan))
 	for _, g := range plan {
-		labels[g.Pattern] = g.Label
+		labels[groupKey(g.Source, g.Pattern)] = g.Label
 	}
 	for _, o := range outcomes {
 		if o.err != nil {
-			label := labels[o.pattern]
+			label := labels[groupKey(o.source, o.pattern)]
 			if label == "" {
-				label = o.pattern
+				label = agent.ReviewGroupName(o.source, o.pattern)
 			}
 			failed = append(failed, label)
 			continue

@@ -1333,6 +1333,10 @@ type ReviewPlanGroup struct {
 	// Pattern is the group's pattern — the glob of an ocr rule group,
 	// or the builtin / simplify sentinel.
 	Pattern string
+	// Source is the rule's source — the area the group came from.
+	// Together with the pattern it is the group's identity: two rules
+	// over the same glob are two groups.
+	Source string
 	// Label is the human-facing name of the group: what it reviews,
 	// followed by the summary of the files it covers. The nightme-owned
 	// sentinels get a name the user can read ("nightme code reviewer",

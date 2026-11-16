@@ -158,7 +158,7 @@ ListBlockedBy(ctx context.Context, owner, repo string, id int) ([]*Issue, error)
 
 **队列没有原子认领**：`ListIssues` 和贴 `nightme/wip` 之间有窗口，两台机器同时跑 `/gtw fix *` 可能挑到同一个 issue。这跟具名 fix 的既有窗口是同一类 —— label 是协作信号，不是锁（见 §3.2）。
 
-**没有可选项时**：回复卡片保留 `❌ No eligible assigned issue` 抬头和队列那一行，并补一行说明队列为什么是空的：label catalog 检查刚建出 `nightme/assigned`（或者它本来就在），所以队列要等人工把这个 label 贴到某个 issue 上才有内容。outcome 是 `noop`，`Data` 带 `reason: no_candidate`、`wake_after: "5m"` 和 `candidates` / `blocked` / `branch_exists` / `pr_open` 四个计数。`wake_after` 是个人 agent 读的契约：它告诉 agent 过一会儿再来，而不是把这次运行判成失败。
+**没有可选项时**：回复卡片保留 `❌ No eligible assigned issue` 抬头和队列那一行。队列**一个候选都没有**的时候，卡片补一行说明队列为什么是空的：label catalog 检查刚建出 `nightme/assigned`（或者它本来就在），所以队列要等人工把这个 label 贴到某个 issue 上才有内容。队列里有候选但全被跳过时（阻塞 / 已有分支 / 已有 PR）不出现这一行 —— 卡片上写的是它们各自被跳过的原因，贴 label 解决不了那些原因。outcome 是 `failed`（`reason: no_candidate`）：命令被要求修一个 issue 却没能修，判成失败；`Data` 另外带 `wake_after: "5m"` 和 `candidates` / `blocked` / `branch_exists` / `pr_open` 四个计数。`wake_after` 是个人 agent 读的契约：它告诉 agent 过一会儿再来挑一次，而不是把这一轮当作结束。
 
 ---
 
@@ -166,9 +166,9 @@ ListBlockedBy(ctx context.Context, owner, repo string, id int) ([]*Issue, error)
 
 ```mermaid
 flowchart TD
-    A["/gtw fix id"] --> A0["GetIssue"]
-    A1["/gtw fix *"] --> A3["ensureRepoLabels"]
-    A3 --> A2["pick the oldest eligible assigned issue"]
+    S["/gtw fix"] --> A3["ensureRepoLabels"]
+    A3 -->|"/gtw fix id"| A0["GetIssue"]
+    A3 -->|"/gtw fix *"| A2["pick the oldest eligible assigned issue"]
     A2 --> A0
     A0 --> B{preflight}
     B -->|fail| Z["❌ reply"]
@@ -197,7 +197,7 @@ label catalog 检查在 owner/repo 解析之后、队列挑选之前跑。它读
 
 **为什么在队列挑选之前**：队列是「带着 `nightme/assigned` 的开放 issue」，而一个 catalog 里没有这个 label 的仓库**挂不上**这个 label（平台报 "not found"，不会自动建）。所以检查必须在挑选之前：它把仓库修好，挑选才看得到一个可能的队列。检查失败时 `/gtw fix` 直接失败并回显平台自己的错误 —— 此时 worktree 还不存在，没有东西需要回滚。
 
-**检查的结果缓存**：`LabelCache` 按仓库（`owner/repo`）记住「这个仓库的 catalog 齐全了」。label catalog 是仓库的属性，不是 worktree 的属性，所以同一仓库的每个 worktree 共用一条记录。缓存只进内存，daemon 重启后重新检查；失败的检查不写缓存，下一条命令会重试。
+**检查的结果缓存**：`LabelCache` 按仓库（平台 + `owner/repo`）记住「这个仓库的 catalog 齐全了」。label catalog 是仓库的属性，不是 worktree 的属性，所以同一仓库的每个 worktree 共用一条记录；平台也在 key 里，因为 GitHub 仓库和 GitLab 项目可以同名同 owner，而两个平台的 catalog 是两套。缓存只进内存，daemon 重启后重新检查；失败的检查不写缓存，下一条命令会重试。
 
 **别处也检查**：`/gtw close`、`/gtw pr`、`/gtw new -y` 同样会检查仓库的 catalog —— 这三个命令不贴 label，所以检查失败只给一行 `⚠️` 警告，命令照常跑完。provider 探测（`detectProvider` / `resolveProvider`）**不**检查：workspace footer 每次刷新消息都会解析一个 provider，在那里检查会把读变成对用户仓库的写。
 
@@ -756,7 +756,7 @@ label catalog 检查在 worktree 创建之前跑，所以 `rollbackLabelStep` �
 11. **空 argv / 只传 flag** → `parseFixArgs` 报错"missing argument"
 12. **自动模式** → 挑中最老的可选项；带 `nightme/wip` 的、blocker 未落地的、分支本地已存在的、PR 已开的一律跳过
 13. **关系不可用** → 选择继续按年龄，回复说明依赖顺序没有生效
-14. **队列为空** → `noop` + `wake_after`，不建 worktree、不贴 label
+14. **队列为空** → `failed`（`reason: no_candidate`）+ `wake_after`，不建 worktree、不贴 label
 
 ---
 

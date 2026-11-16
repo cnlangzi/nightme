@@ -33,8 +33,8 @@ label catalog 里没有某个标签，那个标签就**挂不到任何 issue 上
    `GitLabProvider` 走 `glab api projects/<owner%2Frepo>/labels`；
    `CreateLabel` 两个平台都不传 `--force`。
 2. **检查**：`ensureRepoLabels(ctx, deps, provider, owner, repo)
-   (created []string, err error)` —— 读 catalog，只把 `AllLabels`
-   里缺的那些建出来，返回建出来的标签名。
+   (labelCheck, error)` —— 读 catalog，只把 `AllLabels` 里缺的那些
+   建出来，返回建出来的标签名（以及这次是不是真的读了 catalog）。
 3. **缓存**：`LabelCache` 按仓库记住「这个仓库的 catalog 齐全
    了」。只进内存，daemon 重启后重新检查；失败的检查不写缓存。
 4. **跑在哪**：`/gtw fix` 在**队列挑选之前**跑，失败即致命（此时
@@ -214,24 +214,47 @@ func LabelMetaFor(name string) LabelMeta { /* fallback "#ededed" + "" */ }
 ### 2.3 检查：`ensureRepoLabels`
 
 ```go
-// ensureRepoLabels verifies that every label in AllLabels exists in the
-// repository's label catalog and creates the ones that are missing.
+// ensureRepoLabels verifies that every label in AllLabels exists in
+// the repository's label catalog and creates the ones that are
+// missing.
 //
-// It returns the labels it created, so the caller can tell the user that
-// the repository was repaired. An error means the catalog could not be
+// It returns what it found, so the caller can tell the user that the
+// repository was repaired. An error means the catalog could not be
 // verified — the caller decides whether that is fatal.
+//
+// A verified repository is answered from the cache without any
+// remote call. A failed check records nothing, so the next command
+// checks again.
+//
+// The comparison against the catalog is exact: a label name is
+// matched as the platform reports it, without trimming or case
+// folding.
 func ensureRepoLabels(
     ctx context.Context,
     deps HandlerDeps,
     provider GitProvider,
     owner, repo string,
-) (created []string, err error)
+) (labelCheck, error)
+```
+
+返回值是 `labelCheck`（`internal/command/gtw/labels.go`）：
+
+```go
+type labelCheck struct {
+    // Created lists the labels the check created.
+    Created []string
+    // Verified is true when the check read the catalog during this
+    // call. It is false when the answer came from the cache — the
+    // catalog was verified earlier in the session, and it may have
+    // changed since.
+    Verified bool
+}
 ```
 
 流程：
 
-1. `deps.LabelCache` 里有 `owner/repo` 这一条 → 直接返回，**一次
-   远程调用都不发**。
+1. `deps.LabelCache` 里有这个仓库（平台 + `owner/repo`）这一条 →
+   直接返回，**一次远程调用都不发**。
 2. 否则 `provider.ListLabels` 读 catalog。
 3. 算出 `AllLabels` 里 catalog 没有的条目（精确比对，标签名按平台
    报的样子比，不 trim、不折叠大小写）。
@@ -253,9 +276,13 @@ type LabelCache struct {
 }
 ```
 
-- **key 是 `owner + "/" + repo`**。label catalog 是仓库的属性，
-  不是 worktree 或 branch 的属性，所以同一仓库的每个 worktree
-  共用一条记录。
+- **key 是 `kind + "/" + owner + "/" + repo`**。label catalog 是仓库
+  的属性，不是 worktree 或 branch 的属性，所以同一仓库的每个
+  worktree 共用一条记录。平台也在 key 里：GitHub 仓库和 GitLab
+  项目可以同名同 owner，而两个平台的 catalog 是两套 —— 共用一条
+  记录会让后一个平台的标签永远建不出来。host 不在 key 里：
+  yml 缓存的 provider 路径不解析 host，同一个仓库会因为解析方式
+  不同拿到两条记录。
 - **条目永不失效**：仓库一旦验证过，这个结论就成立到 daemon
   重启为止。代价是可见的 —— 人在会话中间删掉一个标签，下一次
   `/gtw fix` 贴 label 时会失败，而那条回复会解释这一点（见 §5）。
@@ -273,6 +300,10 @@ type LabelCache struct {
 | `/gtw new -y` | 建 issue 的路径（provider 解析之后） | 回复里给一行 `⚠️` 警告，命令继续 |
 
 `/gtw new` 不带 `-y` 只把讨论变成草稿，不写 tracker，所以不检查。
+
+**警告行出现在每一条回复的最前面** —— 无论命令是成功还是失败。
+`/gtw close` 的警告跟着 close 自己的卡片走（成功卡和失败卡都带），
+跟在其后的 sync 卡片是另一个步骤，不重复这行。
 
 **检查不在 provider 探测里跑**：`detectProvider` /
 `resolveProvider` 每次消息刷新都会被 workspace footer 的 PR 查询
@@ -302,10 +333,14 @@ label catalog 检查在 worktree 之前，所以它的失败不需要回滚 —�
   <owner>/<repo>: <err>`，`<err>` 是平台自己的错误文本，一字不改。
 - **队列为空**：卡片保留 `❌ No eligible assigned issue` 抬头和队列
   那一行，并补一行说明队列为什么是空的 —— 标签刚被建出来（或者
-  本来就在），队列要等人工把它贴到某个 issue 上才有内容。
+  本来就在 catalog 里、或者这次是命中缓存、catalog 早先验证过），
+  队列要等人工把它贴到某个 issue 上才有内容。这一行**只在队列
+  一个候选都没有时出现**：队列里有候选但全被跳过时，卡片上写的是
+  它们各自被跳过的原因，"贴标签"解决不了那些原因。
 - **贴 label 失败**：`❌ Could not add label <name> to issue #<id>:
   <err>` 后面补一行，说明 catalog 可能是验证之后被人改过，办法是
-  重启 daemon 重新验证，或者手工建这个标签。
+  重启 daemon 重新验证，或者手工建这个标签。这一行是一个**可能**
+  而不是诊断 —— 平台自己的错误文本说的是实际失败的原因。
 - **检查失败（`/gtw close` / `/gtw pr` / `/gtw new -y`）**：
   `⚠️ could not ensure gtw labels on <owner>/<repo>: <err>`，
   放在回复正文的最前面。
@@ -360,8 +395,9 @@ label catalog 检查在 worktree 之前，所以它的失败不需要回滚 —�
       "6 个里缺 1 个 → 只发 1 次创建"。
 - [x] 验证过的仓库不再检查：第二条命令不发任何远程调用。测试
       `TestEnsureRepoLabels_CacheHitMakesNoRemoteCall`。
-- [x] 缓存的 key 是仓库，不是 worktree。测试
-      `TestEnsureRepoLabels_CacheIsKeyedByRepository`。
+- [x] 缓存的 key 是仓库（在哪个平台上），不是 worktree。测试
+      `TestEnsureRepoLabels_CacheIsKeyedByRepository`、
+      `TestEnsureRepoLabels_SameOwnerRepoOnTwoPlatforms`。
 - [x] 失败的检查不写缓存，下条命令重试。测试
       `TestEnsureRepoLabels_FailedCheckIsNotRecorded`。
 - [x] nil 缓存是惰性的：每次都远程读，行为跟没有缓存一样。测试
@@ -369,11 +405,16 @@ label catalog 检查在 worktree 之前，所以它的失败不需要回滚 —�
 - [x] 检查跑在队列挑选之前 —— 一个 catalog 里没有
       `nightme/assigned` 的仓库因此能被修好。测试
       `TestFixAuto_CreatesMissingAssignedLabelBeforePick`。
+- [x] 队列那一行只在队列一个候选都没有时出现；候选全被跳过时
+      不出现（"贴标签"解决不了那些原因）。测试
+      `TestFixAuto_SkippedCandidate_DropsTheQueueNote`。
 - [x] 检查失败时 `/gtw fix` 致命且不留痕迹。测试
       `TestFixRemote_LabelCheckFailure_IsFatal`。
-- [x] 检查失败时 `/gtw close` / `/gtw pr` / `/gtw new -y` 只警告。
-      测试 `TestRunClose_LabelCheckFailure_WarnsAndContinues`、
+- [x] 检查失败时 `/gtw close` / `/gtw pr` / `/gtw new -y` 只警告，
+      而且警告出现在每一条回复上（成功和失败都有）。测试
+      `TestRunClose_LabelCheckFailure_WarnsAndContinues`、
       `TestDispatchPR_LabelCheckFailure_WarnsAndContinues`、
+      `TestDispatchPR_LabelCheckFailure_WarnsOnFailureToo`、
       `TestRunNewCreate_LabelCheckFailure_WarnsAndContinues`。
 - [x] provider 探测不做检查。测试
       `TestCollectPR_DoesNotTouchTheLabelCatalog`。
@@ -407,22 +448,29 @@ label catalog 检查在 worktree 之前，所以它的失败不需要回滚 —�
 - ✅ `TestEnsureRepoLabels_CompleteCatalogCreatesNothing` — 齐了就不建。
 - ✅ `TestEnsureRepoLabels_CacheHitMakesNoRemoteCall` — 命中不发远程调用。
 - ✅ `TestEnsureRepoLabels_CacheIsKeyedByRepository` — key 是仓库。
+- ✅ `TestEnsureRepoLabels_SameOwnerRepoOnTwoPlatforms` — 平台也在
+  key 里。
 - ✅ `TestEnsureRepoLabels_FailedCheckIsNotRecorded` — 失败不写缓存。
 - ✅ `TestEnsureRepoLabels_FailedCreationIsNotRecorded` — 建失败同样不写缓存。
 - ✅ `TestEnsureRepoLabels_NilCacheAlwaysReadsRemotely` — nil 缓存惰性。
-- ✅ `TestLabelCache_NilIsInert` / `TestLabelCache_StoreThenLookup`。
+- ✅ `TestLabelCache_NilIsInert` / `TestLabelCache_StoreThenLookup` /
+  `TestLabelCache_PlatformIsPartOfTheKey`。
+- ✅ `TestLabelCatalogNote_SaysWhatTheQueueNeeds` / `TestPrependWarning`。
 - ✅ `TestGitHubListLabels_ReturnsCatalogNames` / `_CLIArgs` /
   `_ErrorSurfaces`，`TestGitLabListLabels_ReturnsCatalogNames` /
   `_CLIArgs` — 钉死两个 provider 的 argv 和解析。
 - ✅ `TestFixAuto_CreatesMissingAssignedLabelBeforePick` — 建标签 +
   挑选顺序 + 空队列回复。
+- ✅ `TestFixAuto_SkippedCandidate_DropsTheQueueNote` — 候选全被跳过
+  时不出现"贴标签"那一行。
 - ✅ `TestFixRemote_LabelCheckFailure_IsFatal` — 致命 + 无残留。
 - ✅ `TestFixRemote_AddIssueLabelFailure_NamesStaleCatalog` — stale
   catalog 那一行。
 - ✅ `TestRunClose_LabelCheckFailure_WarnsAndContinues` /
   `TestDispatchPR_LabelCheckFailure_WarnsAndContinues` /
+  `TestDispatchPR_LabelCheckFailure_WarnsOnFailureToo` /
   `TestRunNewCreate_LabelCheckFailure_WarnsAndContinues` — 三个命令
-  的警告路径。
+  的警告路径（成功和失败都有）。
 - ✅ `TestCollectPR_DoesNotTouchTheLabelCatalog` — 探测路径不检查。
 - ✅ `TestFixRemote_CheckRunsOncePerRepository` — 每个仓库只查一次。
 - ✅ `TestGitHubCreateLabel_CLIArgs` — 钉死 argv 里没有 `--force`。
@@ -509,7 +557,7 @@ label 就失败）。
 | `LabelMetaFor` 跟实际 label 颜色漂移 | 极低 | label 颜色只在创建时被消费；已存在 label 一律 no-op，用户调过的颜色不会被覆盖 |
 | catalog 超过一页（> 100 个标签） | 极低 | 多余的创建调用是幂等的（"already exists" 当成功），catalog 结果不变 |
 | 运维手工删除 `nightme/*` 后再跑 `/gtw fix` | 中 | 会话中间删除 → 贴 label 失败，回复说明并给出两条出路；daemon 重启后检查会重建 |
-| 缓存跨主机同名仓库 | 低 | key 是 `owner/repo`，两个 host 上的同名仓库共用一条记录；第二个 host 的标签可能因此没建，症状是 stale-catalog 那条路径 |
+| 缓存跨主机同名仓库 | 低 | key 里有平台：GitHub 仓库和 GitLab 项目同名同 owner 时各查各的。两个同平台的自建实例（同一 kind、同一 owner/repo）仍共用一条记录 —— host 在 yml 缓存的 provider 路径上拿不到，放进 key 会让同一个仓库因解析方式不同拿到两条记录 |
 
 ### 9.2 回滚
 

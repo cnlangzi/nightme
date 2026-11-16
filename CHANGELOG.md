@@ -785,15 +785,16 @@ proof.
 
 ### `gtw`: `/gtw fix` auto-bootstraps `nightme/*` labels (F-59)
 
-The `/gtw fix` ID-mode flow now bootstraps the six `nightme/*`
-state labels on the target repository before applying
-`nightme/wip`. Before F-59 the flow hard-coded the label set in
-`internal/command/gtw/types.go` (`LabelWIP` / `LabelReady` /
-`LabelReviewing` / `LabelRevise` / `LabelDone` / `LabelStuck`)
-and assumed they already existed on the repo. `gh issue edit
---add-label` does not auto-create labels — it errors out with
-`'nightme/wip' not found` and `gh issue edit` exits 1. The
-fix flow then triggered the v1.x atomic rollback
+The `/gtw fix` flow now ensures the target repository's label
+catalog holds every label in `AllLabels` before applying
+`nightme/wip` — it reads the catalog and creates only the labels
+that are missing. Before F-59 the flow hard-coded the label set in
+`internal/command/gtw/types.go` (then six labels: `LabelWIP` /
+`LabelReady` / `LabelReviewing` / `LabelRevise` / `LabelDone` /
+`LabelStuck`) and assumed they already existed on the repo. `gh
+issue edit --add-label` does not auto-create labels — it errors
+out with `'nightme/wip' not found` and `gh issue edit` exits 1.
+The fix flow then triggered the v1.x atomic rollback
 (worktree + branch removed), surfacing the underlying bootstrap
 gap as a confusing user-visible failure.
 
@@ -812,6 +813,12 @@ impossible on a clean repo.
   it already exists. Color / description are **not** propagated
   to existing labels (humans who hand-tuned a label don't get
   silently overwritten on every `/gtw fix`).
+- `internal/command/gtw.GitProvider`: added
+  `ListLabels(ctx, owner, repo) ([]string, error)` — the label
+  names the repository's catalog holds. The check reads it to
+  learn what is missing; `GitHubProvider` runs
+  `gh api repos/<owner>/<repo>/labels`, `GitLabProvider` runs
+  `glab api projects/<owner%2Frepo>/labels`.
 - `internal/command/gtw.GitHubProvider.CreateLabel`: runs
   `gh label create <name> --color <color> --description
   <description> --repo <owner>/<repo>` and treats exit 1 +
@@ -825,71 +832,76 @@ impossible on a clean repo.
   feedback). Both platforms now implement the contract
   identically.
 - `internal/command/gtw.GitLabProvider.CreateLabel`: runs
-  `glab label create --name <name> --color <color>
-  --description <description> --repo <owner>/<repo>`, treats
-  exit ≠ 0 + stderr containing `already exists` / `Already
-  exists` as success (glab 1.82 has no `--force` flag).
+  `glab api --method POST projects/<owner%2Frepo>/labels -f
+  name=<name> -f color=<color> -f description=<description>`,
+  treats exit ≠ 0 + stderr containing `already exists` / `Already
+  exists` as success (glab 1.82 has no `--force` flag). The
+  generic `glab api` route is used because `glab label create`
+  strips the leading `#` from `--color` and GitLab's REST API
+  rejects the bare hex.
 
 **Flow change (`runFixRemote` §5.2)**
 
-The ID-mode flow gains a new step between WorktreeAdd and
-AddIssueLabel:
+The flow gains a new step before the queue is consulted:
 
 ```
+ensureRepoLabels(deps, provider, owner, repo)   (NEW)
+pick the next assigned issue        (automatic mode only)
+GetIssue
+BranchExists / already-claimed gates
 WorktreeAdd                         (existing, unchanged)
-EnsureGitignore + CommitGitignore   (existing, unchanged)
-ensureGtwLabels(provider, owner, repo)   (NEW)
 AddIssueLabel(LabelWIP)                  (existing, unchanged)
+SetSelectedCwd + EnsureGitignore + CommitGitignore   (existing, unchanged)
 WriteGTWYml                         (existing, unchanged)
-slot.Store(StateFixing)             (existing, unchanged)
 reply(success card)                 (existing, unchanged)
 dispatch issue to agent             (existing, unchanged)
 ```
 
-`ensureGtwLabels` iterates `AllLabels` in order and calls
-`provider.CreateLabel` six times. The first error short-circuits
-the loop and triggers `rollbackLabelStep` (the new shared
-atomic-rollback helper). All 6 calls are serial (parallel is
-possible but ~300-500 ms total is acceptable; serial keeps
-error attribution simple).
+`ensureRepoLabels` reads the catalog with `provider.ListLabels` and
+calls `provider.CreateLabel` only for the labels `AllLabels` is
+missing. The first error short-circuits the loop. The check runs
+before any worktree exists, so its failure is fatal with nothing to
+roll back. A verified repository is remembered in `LabelCache`, so
+the check costs one catalog read per repository per daemon session.
 
 **Refactor: shared rollback helper**
 
 The pre-F-59 AddIssueLabel-failure block in `runFixRemote` had a
-~30-line three-state rollback (clean / partial / fully stuck)
-that was copy-pasted into the CreateLabel-failure path.
+~30-line three-state rollback (clean / partial / fully stuck).
 F-59 extracts it to `rollbackLabelStep(ctx, deps, repoRoot,
 worktreePath, branch, issueID, head)` so the three-state
 branch lives in exactly one place. Future gtw flows that
 modify remote labels (`/gtw push` adding `nightme/reviewing`,
 `/gtw close` adding `nightme/done`, etc.) can reuse the same
-helper.
+helper. The label-catalog check runs before the worktree exists,
+so its failure needs no rollback — `rollbackLabelStep` covers the
+AddIssueLabel path.
 
 **Atomic semantics preserved**
 
 The v1.x "fix is atomic with the label" contract
 (`WorktreeAdd` + `branch` + `LabelWIP` form a single
 transaction; any label-side failure rolls back the worktree
-+ branch) is preserved end-to-end. Two existing
-integration tests cover the contract:
++ branch) is preserved end-to-end. Two integration tests cover
+the contract:
 
 - `TestFixRemote_AddIssueLabelFailure_RollsBackWorktreeAndBranch`
   (pre-F-59): AddIssueLabel failure path through `rollbackLabelStep`.
-- `TestFixRemote_CreateLabelFailure_RollsBack` (new): bootstrap
-  failure mid-loop (fail on `AllLabels[1]` = `LabelReady`) —
-  pins that the loop short-circuits, AddIssueLabel is never called,
-  worktree + branch are removed, the reply echoes the
+- `TestFixRemote_CreateLabelFailure_LeavesNoWorktree` (new): the
+  label-catalog check failing mid-loop (fail on `AllLabels[1]` =
+  `LabelWIP`) — pins that the loop short-circuits, that no
+  worktree or branch is created, and that the reply echoes the
   provider error verbatim.
 
 **Tests**
 
 - `TestFixRemote_HappyPath` (extended): asserts CreateLabel
-  is called exactly 6 times, in `AllLabels` order, with
-  `LabelMetaFor(name)` color/description, all BEFORE AddIssueLabel
-  in the chronological call slice.
-- `TestFixRemote_CreateLabelFailure_RollsBack` (new): per-name
+  is called exactly 7 times (the rig's catalog is empty), in
+  `AllLabels` order, with `LabelMetaFor(name)` color/description,
+  all BEFORE AddIssueLabel in the chronological call slice.
+- `TestFixRemote_CreateLabelFailure_LeavesNoWorktree` (new): per-name
   error injection on `AllLabels[1]`; asserts loop short-circuit,
-  atomic rollback, and reply content.
+  that nothing was created, and reply content.
 - `fakeGitProvider` (extended): `CreateLabel` implementation +
   `SetCreateLabelErr` + `SetCreateLabelErrFor(name, err)` per-name
   injection; `fakeProviderCall` struct gains `Color` /
@@ -905,14 +917,14 @@ integration tests cover the contract:
 **Docs**
 
 - [`docs/feat/F-59-gtw-label-bootstrap.md`](docs/feat/F-59-gtw-label-bootstrap.md):
-  full design + bootstrap algorithm + atomic-rollback contract +
-  error-handling matrix + decision records (why no
-  pre-`WorktreeAdd` bootstrap; why no `gh label list` pre-check).
+  full design + catalog-check algorithm + atomic-rollback contract +
+  error-handling matrix + decision records (why the check reads the
+  catalog instead of creating every label; why the check runs before
+  the queue pick).
 - [`docs/feat/F-gtw.md` §A3](./docs/feat/F-gtw.md): short
   summary pointing to F-59.
-- `internal/command/gtw/README.md`: no change (IM card format
-  unchanged — the failure card text differs by one phrase
-  only).
+- `internal/command/gtw/README.md`: the queue-empty card gains one
+  line saying why the queue is empty (the label-catalog note).
 
 **Bug-fix scope**
 

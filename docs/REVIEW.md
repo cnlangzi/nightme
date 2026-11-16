@@ -22,7 +22,7 @@
 | 1 | `/review` 全异步:Handle 立即返回,goroutine 跑 review | dispatch worker / readpump 阻塞,chat 卡死 |
 | 2 | review 走 agent session 路径(独立进程 / 独立 session),独立 context 窗口 | 主 chat 上下文被 review 推理污染(可烧数万 token) |
 | 3 | review session 的 ctx 派生自 chat session ctx,`/close` 自动取消 | orphan review 进程 / session 残留 |
-| 4 | findings **双路分发**:注入 AS(当 user turn)+ 发 channel(直接可见) | 主 agent 看不到 findings,或用户要等下游回复 |
+| 4 | findings **单路分发**:合并全文注入 AS(当 user turn),channel 上只出现一次(合并流 + verdict 行) | 主 agent 看不到 findings,或用户在 chat 里读三遍同样的 findings |
 | 5 | `--agent` **不切 AS**(不同 reviewer,同一 chat) | 切 AS 副作用太大,破坏"多 reviewer 汇聚"工作流 |
 | 6 | fix **对话式**:不自动 apply,用户说"fix critical findings"(沿用 output schema 的 severity 词汇 critical/high/medium/low)主 agent 用原生 Edit | 违反 v1 "纯 review"边界 |
 | 7 | **二选一**:`OcrAvailable() ? ReviewWithOcr : ReviewWithPrompt`,所有 bridge 走 `agent.ReviewDispatch` 同一入口 | review 行为跨 agent 不一致,或不同环境不可复现 |
@@ -33,6 +33,7 @@
 | 12 | per-job 内的 ToolStart 必须**等配对 ToolEnd 才转发**,Start/End 在外层 wire 上**连续** | 半截 tool 调用外发,chat 渲染混乱 |
 | 13 | 跨 job 的 EventAgentTaskCreate/Update **按 task ID 去重 merge**,同一 ID 多个 job 的最新版本只发一份 | chat checklist 看到 N 份重复 task 条目,数量 = N × tasks |
 | 14 | `--continue` **只续跑失败的 group**,已完成的 group 不再问一遍 | 重复的 findings 混进输出 |
+| 15 | 每个 group 的 text/thinking **按组攒批**外发(2 KiB / 2 秒),每条批带 `[group-N]` 标签;组终态与 fan-out 结束各兜底 flush 一次 | chat 里几百条碎片,sink 缓冲与 channel 的 PATCH 频率扛不住,findings 被丢 |
 
 ### 1.2 边界
 
@@ -271,7 +272,7 @@ review 路径没有交互用户,drain 遇到 `EventAgentPermission` 时用**第�
 - **单 job 失败不阻塞**:某组 session turn 失败,其他组仍出结果;merge 时该组标"failed"。
 - **ctx 派生**:所有 job 共用 `ReviewWithOcr` / `ReviewWithPrompt` 的 revCtx(chat session ctx + 30min 超时)。`/close` → 全部取消。
 
-### 2.5.4 merge(一次返回)
+### 2.5.4 merge(一次返回)+ 每组 findings 解析
 
 各 job 输出**结构化 markdown**(`## Coverage` + `## Findings` schema)。LLM 自己解析——merge 阶段**不做**结构化解析、不按 severity 排序、不做 path 去重、不做 coverage 聚合。原因:
 
@@ -282,11 +283,21 @@ review 路径没有交互用户,drain 遇到 `EventAgentPermission` 时用**第�
 merge 步骤只有两步:
 
 1. **按组标头拼接**:每组 `### Group: pattern X — files: A, B, C` 头 + 该组原文 markdown。失败组标 `### Group: pattern X — failed: <err>`。
-2. **一次返回**:合成的 RunResult 经 `FormatReviewMessage` 注入 AS + 发 channel 一次。
+2. **一次返回**:合成的 RunResult 经 `FormatReviewMessage` 注入 AS 一次 —— **合并文本只进主 agent 的 session,不发 channel**。channel 上看到的是 plan 行 + 分组合并流 + verdict 行(§2.5.5),findings 只出现一次。
 
 partial failure 路径:**不**升级为 merge 整体错误,失败组以 inline marker 出现在合并文本里;all-failed 才返回 first error wrapped with agent name。
 
-### 2.5.5 sink 契约:三相状态机 + per-job 配对
+**每组 findings 解析(与 merge 分离)**:verdict 行要报"多少 findings、按 severity 怎么分布",这个计数来自**每组自己的输出**(`agent.ParseReviewFindings`),不来自合并文本 —— 合并文本是写给 LLM 看的自由文本,解析它没有稳定边界。解析器认三种形态:
+
+| 形态 | 例子 | 来源 |
+| --- | --- | --- |
+| 每 finding 一块 | `- path:` / `- start_line:` / `- end_line:` / `- category:` / `- severity:` / `- content:` | ocr delegate rules 的输出 schema |
+| 一行一条 | `- **critical**: <file>:<line> — <issue>` | builtin rubric 的输出格式 |
+| simplify 词表 | `blocking` / `warning` / `style` / `suggestion` | simplify lens 的 severity guidance |
+
+severity 归一到 `critical` / `high` / `medium` / `low` / `unspecified`(`blocking`→critical,`warning`→high,`style`/`suggestion`→low,认不出的→unspecified)。**认不出形态的组报 unparsed**:它的原文照样走合并流到达 channel,findings 一个都不丢。
+
+### 2.5.5 sink 契约:三相状态机 + per-job 配对 + 分组合并流
 
 多 job 时,cmd.go 喂给 `ReviewWithOcr` / `ReviewWithPrompt` 的 outer sink(`outbound.StreamRunOnceToEmitter`)必须**只看到一个 review lifecycle**,不能感知到内部 N 个并发 job。eventAggregator 用三相状态机实现这一契约:
 
@@ -315,8 +326,9 @@ partial failure 路径:**不**升级为 merge 整体错误,失败组以 inline m
 │     - ToolEnd   → 查 pendingToolStarts[ID],有则按 Start→End 连续    │
 │                   转发两条事件;无则 forward 孤儿 End                  │
 │     - TaskCreate/Update → 按 ID dedup 后 forward ONE merged snapshot │
-│     - Text / Permission → forward as-is,Source="group-N"             │
-│     - Result/Error → doneCount++(terminalSeen 守卫);不外发           │
+│     - Text / Thinking → **按组攒批**,攒够或攒久才 flush 一条         │
+│     - Permission → forward as-is                                    │
+│     - Result/Error → 该组剩余的批 flush 掉;终态本身不外发           │
 │   当 doneCount == expected:                                           │
 │     outer(synthetic outer Result,Source="") → Phase 3               │
 ├─────────────────────────────────────────────────────────────────────┤
@@ -337,6 +349,28 @@ partial failure 路径:**不**升级为 merge 整体错误,失败组以 inline m
 
 **为什么 outer sink 能安全接收**:outbound.StreamRunOnceToEmitter 底层是 chan-based,channel send 跨 goroutine 线程安全。aggregator 持锁区只做状态变更,`outer(ev)` 调用在锁外完成,避免持锁回调。
 
+**投递面(channel 上用户看到什么)**:
+
+review 在 channel 上只有三样东西,顺序固定:
+
+1. **plan 行**(任何 group 产出之前):`🔍 review · codex · 4 groups` + 每组一行(组名 + 文件数)。plan 由 agent 层产出(`agent.ReviewPlanGroup` + `agent.WithReviewPlanObserver`,fan-out 开始前触发一次),由 command 层渲染。
+2. **分组合并流**:每组的 text / thinking 按组攒批,一批一条消息,批首是 `[group-N]` 标签行 + 空行 + 批正文。
+3. **verdict 行**(fan-out 结束):组数、findings 数、按 severity 的分布、失败组(点名并指向 `/review --continue`)、unparsed 组数。
+
+sink 的 drain 在 verdict 之前排空:各组的批还排在 drain goroutine 的队列里,verdict 必须落在它们之后(否则 verdict 会盖过它总结的 findings)。
+
+**合并文本不进 channel**:合并文本只注入主 agent 的 session —— 它要读全文、要看到失败组的 inline marker、"fix the blockers" 要读它;作为 channel 的一份拷贝,它和合并流说的是同一件事。注入的那一轮带一句 frame:要 verdict 和下一步,不要复述 findings。
+
+**分组合并(攒批)的触发条件**:
+
+- 一组的一个 text chunk **不**单独成一条 outbound 消息;按组攒批。
+- 批的 flush 触发:**正文到 2 KiB** 或 **批开了 2 秒**,先到先触发。
+- 字节触发的 flush 在批的**最后一个空行**处切开(markdown 块不被劈开);没有空行就从末尾切。
+- 组的终态事件(Result / Error)flush 该组剩下的批;fan-out 结束时(finalize)flush 所有组剩下的批 —— 没有终态的组也不丢字。
+- bridge 可能把回复的**尾巴**留在终态事件上(pi / omp / dsh 把最后一段放在 result 事件;claudecode / codex 全走 text 事件、result 为空)。尾巴属于该组,先并进该组的批再 flush —— 否则 channel 永远看不到它。
+- flush 出来的一条批 = 一个 AgentEvent(同 kind),正文前加 `[group-N]\n\n` 标签行。标签走**文本内部**:outbound 层没有 group 字段,标签必须跟着它命名的正文走。
+- **没有 timer goroutine**:flush 由事件到达和组终态驱动。组停了产字,批就等到它结束时才发。
+
 ### 2.5.6 边界
 
 - **超大单组**:某 group diff 仍超大(如 `**/*.go` 100 文件 5000 行)→ per-group 字节预算兜底(§2.4 第 7 项),超预算的段按行截断并标记丢弃字节数;极端时按目录二次拆(留后续)。
@@ -346,6 +380,8 @@ partial failure 路径:**不**升级为 merge 整体错误,失败组以 inline m
 - **Replay vs live 交错**:Phase 1→2 转换时,replay 处理 per-job 旧事件可能与同 job 新到的 live 事件在 outer 上交错。当前实现的已知 minor race:同 job 内 replay 事件 + live 事件少数情况下顺序非严格 chronological。后果仅为 chat 时间线略不规整,无功能影响。修复方案(若需要)是在转换时加 replay-in-progress barrier。
 - **未配对 ToolStart**:job 在 ToolStart 后异常结束(无对应 ToolEnd),该 Start 进 buffer 后永远不被 forward——这是合理行为,chat 不会看到半截 call;该 job 的 done 仍会按 Result/Error 触发。
 - **orphan ToolEnd**:配对 ToolStart 已先被 replay 转发过的罕见情况——orphan End 也 forward,chat 看到一条无 Start 的 End,可忽略。
+- **单组正文超过 2 KiB 且没有空行**:字节触发的 flush 只能从末尾切,这一条消息比 2 KiB 大(markdown 块不被劈开的代价);标签照旧在正文之前。
+- **组没产出任何正文**:该组没有可 flush 的批,verdict 行把它算成 unparsed 组(不是 failed)。
 
 ### 2.5.7 实现索引
 
@@ -366,24 +402,31 @@ partial failure 路径:**不**升级为 merge 整体错误,失败组以 inline m
 | per-group diff 字节预算(1 MiB,三段共享 + 按行截断 + 截断日志) | `internal/agent/review_with_ocr.go::groupDiffBudgetBytes` / `::allocateDiffQuotas` / `::fitDiffBody` |
 | `BuiltinPrompt` / `simplifyPrompt` 静态 prompt 模板 | `internal/agent/review.go` |
 | **三相状态机 + per-job 配对缓冲**(Phase 1 buffering → Phase 2 streaming → Phase 3 closed;pendingToolStarts map per-job;Task 跨 job ID 去重;异序到达容错) | `internal/agent/aggregate_sink.go::eventAggregator` |
+| **每组 text/thinking 攒批**(2 KiB / 2 秒触发、空行处切、`[group-N]` 标签、终态与 finalize 兜底 flush) | `internal/agent/aggregate_sink.go::coalesce` / `::coalescedEvent` |
+| **每组 findings 解析**(block / 一行 / simplify 三形态 + severity 归一 + unparsed) | `internal/agent/review_findings.go::ParseReviewFindings` |
+| **fan-out 的 plan 回调**(组清单,fan-out 前触发一次) | `internal/agent/agent.go::ReviewPlanGroup` / `::WithReviewPlanObserver` / `internal/agent/review_with_ocr.go::reviewPlan` |
 | **多 job 结果合并**(纯自然语言拼接 + 部分失败 inline marker,无解析/排序/去重/coverage 聚合) | `internal/agent/review_with_ocr.go::mergeRunResults` |
 | **review / 续跑共用的 fan-out 内核**(goroutine 编排 + sem cap + eventAggregator + merge) | `internal/agent/review_with_ocr.go::runReviewGroups` |
 | **续跑入口**(并发 resume N 个 session、发同一段文本、合并成同样的 group 格式) | `internal/agent/review_continue.go::ContinueReviewJobs` |
-| **每个 group 的 outcome 观察者**(pattern / files / session id / error) | `internal/agent/agent.go::ReviewJob` / `::WithReviewJobObserver` |
+| **每个 group 的 outcome 观察者**(pattern / files / session id / error / 解析后的 report) | `internal/agent/agent.go::ReviewJob` / `::WithReviewJobObserver` |
 | **失败 turn 保留 session id**(进程没了但 agent 侧会话还在,session id 是重新打开它的钥匙) | `internal/agent/run_session.go::drainSessionEvents` / `::ResumeSession` |
+| **plan 行 / verdict 行渲染**(channel 上只有这三样东西) | `internal/command/review/render.go::renderPlanLine` / `::renderCountLine` / `::reviewVerdict` |
+| **注入主 agent 的那一轮**(合并全文 + 要 verdict 不要复述的 frame) | `internal/command/review/render.go::reviewPromptFrame` |
 | **`/review` 的续跑状态**(按 chat id,只活在 daemon 进程内存里) | `internal/command/review/record.go` |
-| 单元测试(聚合器 / 合并 / 并发 / 配对 / session drain) | `internal/agent/aggregate_sink_test.go`、`internal/agent/merge_results_test.go`、`internal/agent/fanout_test.go`、`internal/agent/run_session_test.go` |
+| 单元测试(聚合器 / 攒批 / 解析 / 合并 / 并发 / 配对 / session drain) | `internal/agent/aggregate_sink_test.go`、`internal/agent/review_coalesce_test.go`、`internal/agent/review_findings_test.go`、`internal/agent/merge_results_test.go`、`internal/agent/fanout_test.go`、`internal/agent/run_session_test.go` |
 
 **不变量与实现的对应**:
 
 - **#1 全异步**:`Handle` 立即返回,goroutine 跑 review,revCtx 派生自 chat session ctx。
 - **#2 / #9 session 隔离**:每个 per-job 是独立 `agent.RunSession`(独立进程 / 独立 session + 独立 context),多 job 间不共享、不累积。
 - **#3 ctx 派生 + /close 取消**:所有 job 共用 `revCtx`(chat session ctx + 30min 超时)。
-- **#4 双路分发**:`FormatReviewMessage` 一次产出的合并文本 → 注入 AS(user turn)+ 发 channel 一次。
+- **#4 单路分发**:`FormatReviewMessage` 一次产出的合并文本 → 注入 AS(user turn)一次;**不发 channel**。channel 上是 plan 行 + 分组合并流 + verdict 行。
 - **#10 自动并发 + sem + merge 一次返回**:`sem chan struct{}` cap 为 `maxConcurrentReviewJobs = 4`;`wg.Wait()` 同步;`mergeRunResults` 一次产出最终 RunResult。
 - **#11 单 outer lifecycle**:eventAggregator 的三相状态机在 readyCount/doneCount all-wait 时各合成一次 outer Ready / outer Result,per-job lifecycle 不外泄。
 - **#12 per-job ToolStart/End 配对**:eventAggregator 的 `perJob.pendingToolStarts` 按 ID 缓冲 ToolStart,等配对 ToolEnd 时按 Start→End 顺序连续转发。
 - **#13 Task 跨 job 去重**:eventAggregator 的 `tasks map[string]AgentTaskItem`,latest-wins 写入,forward 合并 snapshot。
+- **#14 分组投递**(新):一组一个 chunk 不单独成消息;批按 2 KiB / 2 秒 flush;每条批带 `[group-N]` 标签;组的终态与 fan-out 结束各兜底 flush 一次,不留字。
+- **#15 verdict 确定性**(新):verdict 行的 findings 计数来自每组自己的输出解析,合并文本不解析;失败组算 failed 不算 unparsed。
 
 ---
 
@@ -551,13 +594,13 @@ workspace / 每个 group 的 outcome)。factory 每个 daemon 进程建一次,�
       - 所有 bridge 调 `agent.ReviewDispatch` → `OcrAvailable() ? ReviewWithOcr : ReviewWithPrompt`。
       - Agent 自带的 review 子命令(`claude -p code-review` / `codex review` / `cursor-agent -p /review-bugbot`)不在 `Starter.Review` 路径里触发——用户直接在 chat 发 slash command,nightme 透传给底层 agent。
    3. `FormatReviewMessage` 包前缀(workspace + runner 标注,让主 agent 知道"这是谁跑的 review";run 级备注——比如这次补写了 `refs/remotes/origin/HEAD`——也进前缀)。
-   4. **双路分发**:注入 AS 当 user turn(主 agent 能"fix critical findings")+ 发 channel(用户直接可见,不等下游回复)。
+   4. **单路分发**:合并文本注入 AS 当 user turn(主 agent 能"fix critical findings"),**不发 channel**。channel 上看到的是 plan 行 + 分组合并流 + verdict 行(§2.5.5)。
 7. Handle 立即返回 `Consumed=true`。readpump 继续,dispatch worker 释放,用户可继续发消息。findings 异步到达;全局设置的回执(写入确认 / 写失败告警 / 降级告警)随本条命令的 reply 一起发出,先于 findings 到达。
 
 `--continue` 走另一条路:查本 chat 的 review 记录 → 本 chat 有 review 在跑就拒绝 →
 挑出"失败且有 session id"的 group → 用记录里的 agent(不走四级 runner 解析)和记录里
 的 workspace 跑 `agent.ContinueReviewJobs` → 合并文本照常包 `FormatReviewMessage`、
-注入 AS + 发 channel(§2.7)。续跑结束后,记录换成这次续跑的结果,所以第二次
+注入 AS;channel 上是这次续跑的 plan 行 + 分组合并流 + verdict 行(§2.7)。续跑结束后,记录换成这次续跑的结果,所以第二次
 `--continue` 无事可做。
 
 ---
@@ -571,7 +614,7 @@ workspace / 每个 group 的 outcome)。factory 每个 daemon 进程建一次,�
 - **ctx 派生**:goroutine 用 chat session 的 ctx 当 parent。`/close` → ctx cancel → 所有 review session 关闭 → goroutine 退出。无 orphan。
 - **多 reviewer 并行**:多个 `/review --agent` 并发,各自独立 session,findings 全注入同一 AS。用户体验:多条 review 接连出现,然后一次"fix"。
 - **续跑同样是 session 隔离**:resume 打开的是 agent 侧同一个 session(新进程 + 老 session id),agent 的上下文延续,主 chat 上下文依旧不被污染。
-- **sink vs deliverable**:sink 是观察用(流式中间事件),`FormatReviewMessage` 文本是交付物。两路独立,不冲突。
+- **sink vs deliverable**:sink 是观察用(流式中间事件),`FormatReviewMessage` 文本是给主 agent 的输入。两者不冲突:findings 在 channel 上只出现一次(合并流),合并全文只在主 agent 的上下文里。
 
 ---
 

@@ -15,6 +15,15 @@
 //	    merged by AgentTaskItem.ID (latest-wins) and forwarded as
 //	    ONE snapshot. Avoids N duplicate checklist entries.
 //
+// The fourth rule is the delivery surface: a per-job text or thinking
+// chunk is not an outbound message of its own. Chunks are coalesced
+// per job into batches of roughly 2 seconds or 2 KiB, and every
+// flushed batch carries its group's label ("[group-N]") on its own
+// line. One chunk per message floods the channel's receipt (and the
+// sink's buffer) with fragments; one message per group loses the
+// "watch it being written" feel. A batch is lossless — the flushed
+// bodies of a group concatenate back into the group's raw text.
+//
 // State machine (three phases):
 //
 //	phaseBuffering — every per-job event lands in perJob.initBuffer;
@@ -29,7 +38,8 @@
 //	    handleStreaming (so pairing/merging apply uniformly to
 //	    replayed and live events), then continues processing live
 //	    events: ToolStart/End paired contiguously, TaskCreate/Update
-//	    merged by ID, Result/Error counted but not forwarded.
+//	    merged by ID, text/thinking coalesced per job, Result/Error
+//	    counted but not forwarded.
 //	    When doneCount == expected, transition.
 //
 //	phaseClosed — synthetic outer Result fires (Source=""), late
@@ -41,8 +51,10 @@
 package agent
 
 import (
+	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // maxConcurrentReviewJobs caps how many parallel RunOnce jobs a single
@@ -102,7 +114,39 @@ type perJobState struct {
 	// merging apply uniformly (the same rules govern replay and live
 	// events). Cleared after replay to release memory.
 	initBuffer []AgentEvent
+
+	// pendingText is the group's review text that has not been
+	// flushed yet, and pendingThinking is its thinking. Both are
+	// coalescing batches — see pendingBatch.
+	pendingText     pendingBatch
+	pendingThinking pendingBatch
 }
+
+// pendingBatch is one coalescing batch: the text collected so far,
+// the event that opened it (its metadata rides the flushed event),
+// and the time the batch was opened — the age the time trigger
+// measures.
+type pendingBatch struct {
+	body    string
+	started time.Time
+	ev      AgentEvent
+	kind    EventKind
+}
+
+// The coalescing triggers. A batch is flushed when it reaches
+// coalesceBytes of body, or when it has been open for
+// coalesceInterval — whichever comes first.
+//
+// The size keeps the channel's per-message cost bounded; the interval
+// keeps the user watching the review being written instead of
+// staring at a card that has not moved for a minute.
+const (
+	// coalesceBytes is the body size that flushes a pending batch.
+	coalesceBytes = 2048
+	// coalesceInterval is how long a pending batch may stay open
+	// before the next event flushes it.
+	coalesceInterval = 2 * time.Second
+)
 
 // eventAggregator merges N per-job AgentEvent streams into one outer
 // stream. Constructed via newEventAggregator; per-job sinks are
@@ -272,6 +316,11 @@ func (a *eventAggregator) markJobDone() {
 	a.mu.Unlock()
 
 	if allDone {
+		// Every group is done: whatever a group left pending goes
+		// out before the synthetic outer Result closes the
+		// lifecycle.
+		a.flushAll()
+
 		// Synthetic outer Result — Source="" marks it as the
 		// aggregator's emission. Result.Text intentionally
 		// empty: the merged review text is delivered via
@@ -313,6 +362,10 @@ func (a *eventAggregator) markJobDone() {
 // at the bottom, no "did we miss any?" arithmetic at the
 // call site.
 func (a *eventAggregator) finalize() {
+	// A group that never produced a terminal event still has text
+	// pending — flush it before the lifecycle closes.
+	a.flushAll()
+
 	a.mu.Lock()
 	if a.finalEmitted {
 		a.mu.Unlock()
@@ -566,7 +619,10 @@ func (a *eventAggregator) buildSyntheticReady() AgentEvent {
 //     when available). NOT counted here — doneCount is driven by
 //     the orchestrator's per-job goroutine via markJobDone (see
 //     "Completion-driven counting" rationale below).
-//   - All other events (EventAgentText, EventAgentPermission,
+//   - EventAgentText / EventAgentThinking → coalesced per job into
+//     batches (see coalesce); the flushed batch carries the job's
+//     label.
+//   - All other events (EventAgentPermission,
 //     EventAgentPermissionSettled, etc.) → forwarded as-is with the
 //     Source label already stamped by wrapJob.
 //
@@ -662,6 +718,17 @@ func (a *eventAggregator) handleStreaming(ev AgentEvent, state *perJobState) {
 			}
 		}
 
+	case EventAgentText:
+		// The group's review text is coalesced: a chunk does not
+		// become an outbound message of its own. The batch is
+		// flushed when it grows past the size trigger, when it has
+		// been open past the time trigger, or when the group ends.
+		a.coalesce(&state.pendingText, EventAgentText, ev.Text, ev)
+
+	case EventAgentThinking:
+		// The group's thinking follows the same rules as its text.
+		a.coalesce(&state.pendingThinking, EventAgentThinking, ev.Text, ev)
+
 	case EventAgentTaskCreate, EventAgentTaskUpdate:
 		// Cross-job task list dedup (#13). Merge incoming items
 		// into the cross-job tasks map (latest-wins by ID) under
@@ -712,10 +779,23 @@ func (a *eventAggregator) handleStreaming(ev AgentEvent, state *perJobState) {
 		// NOT here. The sink's per-job terminal is purely a
 		// "this job returned" signal that the orchestrator
 		// already has via the goroutine's defer.
-		_ = ev // dropped
+		//
+		// The terminal does carry one piece of content: the tail
+		// of the group's reply, which a bridge holds back until
+		// the turn ends (pi / omp / dsh put the last segment on
+		// the result event; claudecode / codex leave it empty
+		// and stream everything). That tail belongs to the
+		// group, so it joins the coalesced stream before the
+		// group is flushed — otherwise the channel would never
+		// see it.
+		if ev.Kind == EventAgentResult && ev.Err == nil && ev.Result != nil && ev.Result.Text != "" {
+			a.coalesce(&state.pendingText, EventAgentText, ev.Result.Text, ev)
+		}
+		// The group is over: whatever it left open goes out now.
+		a.flushJob(state)
 
 	default:
-		// Text / Permission / PermissionSettled / unknown kinds:
+		// Permission / PermissionSettled / unknown kinds:
 		// forward as-is. Source already stamped by wrapJob.
 		//
 		// emitMu serializes ALL outer() calls so a Text from one
@@ -732,4 +812,122 @@ func (a *eventAggregator) handleStreaming(ev AgentEvent, state *perJobState) {
 		a.outer(ev)
 		a.emitMu.Unlock()
 	}
+}
+
+// ─── per-group coalescing ─────────────────────────────────────────
+
+// coalesce appends text to the group's pending batch of the given
+// kind and forwards the batch when a trigger fires.
+//
+// A batch is flushed when it reaches coalesceBytes of body, or when
+// it has been open for coalesceInterval — whichever comes first. A
+// size-triggered flush cuts at the batch's last blank line so a
+// markdown block is not split in half; a batch without a blank line
+// is cut at its end.
+//
+// The flush is driven by the arrival of events and by the group's
+// terminal event — there is no timer goroutine. A group that stops
+// producing text keeps its batch until it ends.
+//
+// ev carries the metadata of the flushed event (session, model,
+// agent, workspace) and the group's label.
+func (a *eventAggregator) coalesce(batch *pendingBatch, kind EventKind, text string, ev AgentEvent) {
+	if text == "" {
+		return
+	}
+	now := time.Now()
+	var out []AgentEvent
+
+	a.mu.Lock()
+	if batch.body != "" && now.Sub(batch.started) >= coalesceInterval {
+		out = append(out, coalescedEvent(batch.ev, batch.kind, batch.body))
+		*batch = pendingBatch{}
+	}
+	if batch.body == "" {
+		batch.body = text
+		batch.started = now
+		batch.ev = ev
+		batch.kind = kind
+	} else {
+		batch.body += text
+	}
+	if len(batch.body) >= coalesceBytes {
+		cut := len(batch.body)
+		if i := strings.LastIndex(batch.body, "\n\n"); i >= 0 {
+			cut = i + 2
+		}
+		out = append(out, coalescedEvent(batch.ev, batch.kind, batch.body[:cut]))
+		rest := batch.body[cut:]
+		batch.body = rest
+		if rest == "" {
+			*batch = pendingBatch{}
+		} else {
+			batch.started = now
+		}
+	}
+	a.mu.Unlock()
+
+	a.emit(out)
+}
+
+// flushJob forwards the group's pending batches — the group is over,
+// whatever it left open goes out now.
+func (a *eventAggregator) flushJob(state *perJobState) {
+	a.mu.Lock()
+	out := takePending(&state.pendingText, &state.pendingThinking)
+	a.mu.Unlock()
+	a.emit(out)
+}
+
+// flushAll forwards every group's pending batches — the fan-out is
+// over, no group keeps its text back.
+func (a *eventAggregator) flushAll() {
+	a.mu.Lock()
+	var out []AgentEvent
+	for _, state := range a.perJob {
+		out = append(out, takePending(&state.pendingText, &state.pendingThinking)...)
+	}
+	a.mu.Unlock()
+	a.emit(out)
+}
+
+// emit forwards the given events to the outer sink, one at a time.
+func (a *eventAggregator) emit(events []AgentEvent) {
+	for _, ev := range events {
+		a.emitMu.Lock()
+		a.outer(ev)
+		a.emitMu.Unlock()
+	}
+}
+
+// takePending takes the bodies of the given batches and resets them.
+// The caller holds the aggregator's lock.
+func takePending(batches ...*pendingBatch) []AgentEvent {
+	var out []AgentEvent
+	for _, b := range batches {
+		if b.body == "" {
+			continue
+		}
+		out = append(out, coalescedEvent(b.ev, b.kind, b.body))
+		*b = pendingBatch{}
+	}
+	return out
+}
+
+// coalescedEvent builds the event that carries a flushed batch: the
+// group's label on its own line, then the batch body.
+//
+// The label travels inside the text on purpose — the outbound layer
+// carries no group field, and the label has to travel with the text
+// it names. The label is the job's source label ("group-N"), which is
+// the group's position in the fan-out order.
+func coalescedEvent(ev AgentEvent, kind EventKind, body string) AgentEvent {
+	out := ev
+	out.Kind = kind
+	out.Text = "[" + ev.Source + "]\n\n" + body
+	// A flushed batch is a plain text (or thinking) event — the
+	// terminal that opened it carried a payload of its own.
+	out.Result = nil
+	out.Err = nil
+	return out
 }

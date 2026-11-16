@@ -38,6 +38,10 @@ type reviewOutcome struct {
 	// continuation already retried it and it failed again. The group
 	// is not resumed a second time.
 	spent bool
+	// report is the parsed form of the group's own review output.
+	// The verdict line counts its findings; a group whose output
+	// matched no known shape is reported as unparsed.
+	report agent.ReviewReport
 }
 
 // reviewRecord is the resume state of the last review run in one
@@ -198,13 +202,15 @@ func (f *Factory) startContinuation(chatID string) bool {
 }
 
 // outcomeCollector collects the per-group outcomes a review fan-out
-// reports through agent.WithReviewJobObserver.
+// reports through agent.WithReviewJobObserver, plus the plan the
+// fan-out reported through agent.WithReviewPlanObserver.
 //
 // The observer runs on each group's own goroutine, so the collector
 // guards its slice with a mutex.
 type outcomeCollector struct {
-	mu       sync.Mutex
-	outcomes []reviewOutcome
+	mu         sync.Mutex
+	outcomes   []reviewOutcome
+	planGroups []agent.ReviewPlanGroup
 }
 
 // observe records one group's outcome. It is the
@@ -217,7 +223,24 @@ func (c *outcomeCollector) observe(job agent.ReviewJob, err error) {
 		files:     job.Files,
 		sessionID: job.SessionID,
 		err:       err,
+		report:    job.Report,
 	})
+}
+
+// setPlan records the plan of the fan-out. It is the
+// agent.WithReviewPlanObserver callback.
+func (c *outcomeCollector) setPlan(groups []agent.ReviewPlanGroup) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.planGroups = append([]agent.ReviewPlanGroup(nil), groups...)
+}
+
+// plan returns the recorded plan — the group list the fan-out
+// reported before it started.
+func (c *outcomeCollector) plan() []agent.ReviewPlanGroup {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]agent.ReviewPlanGroup(nil), c.planGroups...)
 }
 
 // results returns the collected outcomes in the order they were

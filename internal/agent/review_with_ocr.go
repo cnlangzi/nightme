@@ -144,11 +144,11 @@ type reviewGroupRunner func(ctx context.Context, groupIdx int, cfg StartConfig, 
 // into one outer lifecycle by the eventAggregator, and the per-group
 // results merged by mergeRunResults.
 //
-// opts carries the caller's outer sink (WithEventSink) and the
-// per-group observer (WithReviewJobObserver). The outer sink is
-// replaced per group by the aggregator's wrapped sink; the observer
-// is invoked once per group with that group's identity and the error
-// that ended it.
+// opts carries the caller's outer sink (WithEventSink), the
+// per-group observer (WithReviewJobObserver) and the plan observer
+// (WithReviewPlanObserver). The outer sink is replaced per group by
+// the aggregator's wrapped sink; the observers are invoked here, not
+// forwarded to the per-group turn.
 //
 // A failed group reports the session id its session ran under, so the
 // caller can reopen that session later (see ResumeSession).
@@ -169,6 +169,12 @@ func runReviewGroups(
 	var agg *eventAggregator
 	if cfgOpts.OnEvent != nil {
 		agg = newEventAggregator(cfgOpts.OnEvent, len(groups))
+	}
+
+	// The plan fires once, before the first group starts: the caller
+	// learns the group list before a single group produces output.
+	if cfgOpts.OnReviewPlan != nil {
+		cfgOpts.OnReviewPlan(reviewPlan(groups))
 	}
 
 	results := make([]RunResult, len(groups))
@@ -209,6 +215,10 @@ func runReviewGroups(
 					Pattern:   groups[i].Pattern,
 					Files:     groups[i].Files,
 					SessionID: res.SessionID,
+					// The group's own output is parsed on its own —
+					// the merged document is free-form text written
+					// for an LLM consumer and is never parsed.
+					Report: ParseReviewFindings(res.Text),
 				}, err)
 			}
 		}(i)
@@ -320,6 +330,36 @@ const (
 // RunOnce concurrent with the main dimension(s).
 func simplifyGroup(files []string) reviewGroup {
 	return reviewGroup{Pattern: patternSimplify, Files: files, Rule: simplifyPrompt}
+}
+
+// reviewPlan turns the fan-out's groups into the plan the caller
+// receives before the first group starts. One entry per group, in
+// fan-out order.
+func reviewPlan(groups []reviewGroup) []ReviewPlanGroup {
+	plan := make([]ReviewPlanGroup, len(groups))
+	for i, g := range groups {
+		plan[i] = ReviewPlanGroup{
+			Pattern: g.Pattern,
+			Label:   reviewGroupLabel(g.Pattern),
+			Files:   g.Files,
+		}
+	}
+	return plan
+}
+
+// reviewGroupLabel is the human-facing name of a review group. An ocr
+// group is named by its pattern; the nightme-owned sentinels get a
+// name the user can read — the sentinel itself is an internal marker
+// and must not reach the chat verbatim.
+func reviewGroupLabel(pattern string) string {
+	switch pattern {
+	case patternBuiltin:
+		return "builtin rubric"
+	case patternSimplify:
+		return "simplify lens"
+	default:
+		return pattern
+	}
 }
 
 // precomputeReviewWithOcr populates the reviewContext using the ocr CLI

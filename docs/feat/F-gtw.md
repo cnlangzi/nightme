@@ -1184,7 +1184,7 @@ func TestDispatchPush_NoCountUnpushedAtEntry(t *testing.T) {
 
 ---
 
-## A3. F-59: `/gtw fix` 自动 bootstrap `nightme/*` 标签
+## A3. F-59: `/gtw` 检查并补齐仓库的 `nightme/*` label catalog
 
 > **Source**: [`F-59-gtw-label-bootstrap.md`](./F-59-gtw-label-bootstrap.md)
 >
@@ -1192,10 +1192,12 @@ func TestDispatchPush_NoCountUnpushedAtEntry(t *testing.T) {
 > case：第一次在 `cnlangzi/nightme` 跑 `/gtw fix 235` 撞到了
 > `'nightme/wip' not found`）
 >
-> **改动摘要**：`GitProvider` 接口加 `CreateLabel` 方法；
-> `runFixRemote` §5.2 在 `WorktreeAdd` 之后、`AddIssueLabel` 之前
-> 串行 bootstrap 6 个 `nightme/*` 标签；AddIssueLabel / CreateLabel
-> 失败的回滚逻辑抽成 `rollbackLabelStep` helper 集中维护。
+> **改动摘要**：`GitProvider` 接口加 `CreateLabel` 与 `ListLabels`
+> 方法；`ensureRepoLabels` 读仓库的 label catalog、只把 `AllLabels`
+> 里缺的那些建出来，并按仓库把结果缓存进 `LabelCache`；检查在
+> `/gtw fix` 的队列挑选**之前**跑（失败即致命，此时还没有
+> worktree），在 `/gtw close` / `/gtw pr` / `/gtw new -y` 里只给
+> 一行 `⚠️` 警告；provider 探测不做检查。
 
 详细设计、错误处理矩阵、决策记录、不在范围内的 followups
 见 [`F-59-gtw-label-bootstrap.md`](./F-59-gtw-label-bootstrap.md)。

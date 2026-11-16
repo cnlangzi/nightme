@@ -172,11 +172,26 @@ func RunNewCreate(
 			"❌ Not in a git repository. Run /cwd <inside a repo> first.",
 			command.FailedOutcome("not_a_repo", "the workspace is not inside a git repository")), nil
 	}
+	// The label catalog is verified before the issues are created,
+	// so the repository keeps the gtw labels /gtw fix needs. A
+	// failed check only warns: opening an issue does not depend on
+	// the catalog holding the gtw labels. The check rides on the
+	// resolve closure, so it only runs when there is an issue to
+	// create.
+	labelWarning := ""
 	resolve := func() (GitProvider, string, string, error) {
-		return resolveProvider(ctx, Context{RepoRoot: repoRoot, Worktree: cwd}, deps)
+		prov, owner, repo, err := resolveProvider(ctx, Context{RepoRoot: repoRoot, Worktree: cwd}, deps)
+		if err != nil {
+			return nil, "", "", err
+		}
+		if _, cerr := ensureRepoLabels(ctx, deps, prov, owner, repo); cerr != nil {
+			labelWarning = labelCheckWarning(owner, repo, cerr)
+		}
+		return prov, owner, repo, nil
 	}
 	card, outcome := createIssuesFromDrafts(ctx, draftDir, resolve)
-	return replyOutcome(ctx, cs.Emitter(), chatID, messageID, card, outcome), nil
+	return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+		prependWarning(labelWarning, card), outcome), nil
 }
 
 // issueDraft is one pending draft file of the chat's draft set.

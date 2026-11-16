@@ -247,7 +247,8 @@ func RunClose(
 	// alone is the right gate. c.RepoRoot != "" is the defensive
 	// guard for the RepoRoot-missing malformed-yml case (caught
 	// by the explicit check above, but cheap to repeat).
-	labelRemoved, labelProvider, labelOwner, labelRepo, labelAborted := removeWIPLabel(ctx, c, deps, cs, chatID, messageID)
+	labelRemoved, labelProvider, labelOwner, labelRepo, labelAborted, labelWarning :=
+		removeWIPLabel(ctx, c, deps, cs, chatID, messageID)
 	if labelAborted {
 		// Helper already sent a user-facing error reply. Bail
 		// before any local cleanup so the yml-driven state
@@ -255,6 +256,15 @@ func RunClose(
 		reportOutcome(ctx, command.FailedOutcome("label_error",
 			"the issue label could not be removed"))
 		return &Result{Consumed: true}, nil
+	}
+	// A failed label-catalog check is a warning, not a failure:
+	// the close still runs to its normal result. The warning rides
+	// along on every reply the close itself produces — its success
+	// card and its failure cards — so the user learns about it
+	// wherever the close ends. The sync card that follows is a
+	// separate step and does not repeat it.
+	withWarning := func(body string) string {
+		return prependWarning(labelWarning, body)
 	}
 
 	// --- step 2.6: close ASes pinned to the about-to-be-gone worktree ---
@@ -293,7 +303,7 @@ func RunClose(
 			// same starting state.
 			body += "\n" + compensateWIPLabel(ctx, labelProvider, c, labelOwner, labelRepo)
 		}
-		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, body,
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, withWarning(body),
 			command.FailedOutcome("dirty", "the worktree has uncommitted changes")), nil
 	}
 
@@ -315,7 +325,7 @@ func RunClose(
 			// "in flight" marker so a retry converges.
 			body += "\n" + compensateWIPLabel(ctx, labelProvider, c, labelOwner, labelRepo)
 		}
-		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, body,
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, withWarning(body),
 			command.FailedOutcome("error", "the worktree could not be removed")), nil
 	}
 
@@ -341,7 +351,7 @@ func RunClose(
 			// doesn't drift while the user investigates).
 			body += "\n" + compensateWIPLabel(ctx, labelProvider, c, labelOwner, labelRepo)
 		}
-		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, body,
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, withWarning(body),
 			command.FailedOutcome("error", "the branch could not be deleted")), nil
 	}
 
@@ -355,8 +365,8 @@ func RunClose(
 			"repo_root", c.RepoRoot,
 			"err", err)
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("⚠️ worktree removed but SetSelectedCwd(%s) failed: %v\n"+
-				"run `/cwd %s` manually.", c.RepoRoot, err, c.RepoRoot),
+			withWarning(fmt.Sprintf("⚠️ worktree removed but SetSelectedCwd(%s) failed: %v\n"+
+				"run `/cwd %s` manually.", c.RepoRoot, err, c.RepoRoot)),
 			messages.Outcome{
 				Status:  messages.OutcomeIncomplete,
 				Summary: "the worktree was removed but the chat stayed in it",
@@ -417,7 +427,7 @@ func RunClose(
 	// separate sync card. Every other reply path in this file
 	// uses `return reply(...), nil` because they're terminal;
 	// step 8 is mid-flow by design.
-	reply(ctx, cs.Emitter(), chatID, messageID, body)
+	reply(ctx, cs.Emitter(), chatID, messageID, withWarning(body))
 
 	// --- step 9: sync main (separate card) ----------------------
 	// buildSyncReply shares the /gtw sync card formatter and
@@ -475,18 +485,25 @@ func RunClose(
 // then asks the provider to drop the nightme/wip label from
 // issue c.Issue.
 //
+// The label catalog is verified on the way, so the repository keeps
+// the gtw labels the next /gtw fix needs. A failed check only warns
+// — closing a fix must not fail because the token cannot manage
+// labels.
+//
 // Returns:
 //
-//   - (true, provider, owner, repo, false): LabelWIP was removed.
-//     provider / owner / repo are threaded back to RunClose so a
-//     later step can compensate (re-add the label) if a local
-//     cleanup step fails — without paying for a second Detect
-//     round-trip. owner/repo come from resolveProvider (yml-
-//     cached c.Repo split on '/', or live remote URL).
-//   - (false, nil, "", "", false): No work was needed (ModeLocal
-//     always writes Issue == -1; c.RepoRoot == "" catches
-//     malformed snapshots). RunClose continues to local cleanup.
-//   - (false, nil, "", "", true): A user-facing error reply was
+//   - (true, provider, owner, repo, false, warning): LabelWIP was
+//     removed. provider / owner / repo are threaded back to
+//     RunClose so a later step can compensate (re-add the label)
+//     if a local cleanup step fails — without paying for a second
+//     Detect round-trip. owner/repo come from resolveProvider
+//     (yml-cached c.Repo split on '/', or live remote URL). The
+//     warning is empty unless the catalog check failed.
+//   - (false, nil, "", "", false, ""): No work was needed
+//     (ModeLocal always writes Issue == -1; c.RepoRoot == ""
+//     catches malformed snapshots). RunClose continues to local
+//     cleanup.
+//   - (false, nil, "", "", true, ""): A user-facing error reply was
 //     sent; RunClose must abort BEFORE any local cleanup so the
 //     yml remains the recovery source of truth.
 //
@@ -500,7 +517,7 @@ func removeWIPLabel(
 	deps HandlerDeps,
 	cs *chatsession.ChatSession,
 	chatID, messageID string,
-) (removed bool, provider GitProvider, owner, repo string, aborted bool) {
+) (removed bool, provider GitProvider, owner, repo string, aborted bool, warning string) {
 	// ModeLocal always writes Issue == -1 (types.go:164), and
 	// legacy yml snapshots that predate the Mode field still
 	// have a positive Issue number per the empty-Mode-treats-
@@ -509,7 +526,7 @@ func removeWIPLabel(
 	// catches malformed snapshots (already filtered above but
 	// repeated here as a defence-in-depth).
 	if c.Issue <= 0 || c.RepoRoot == "" {
-		return false, nil, "", "", false
+		return false, nil, "", "", false, ""
 	}
 
 	// Reuse the same detection pipeline as /gtw pr. resolveProvider
@@ -522,19 +539,29 @@ func removeWIPLabel(
 		reply(ctx, cs.Emitter(), chatID, messageID,
 			"❌ cannot reach GitHub/GitLab to remove the nightme/wip label: "+
 				resolveErr.Error())
-		return false, nil, "", "", true
+		return false, nil, "", "", true, ""
+	}
+
+	// The label catalog is verified before the teardown, so the
+	// repository keeps the gtw labels it needs for the next fix. A
+	// failed check only warns: removing the claim marker does not
+	// depend on the catalog holding the gtw labels. Which labels
+	// the check created is of no interest here — the close does not
+	// report what the catalog needed.
+	if _, err := ensureRepoLabels(ctx, deps, prov, owner, repo); err != nil {
+		warning = labelCheckWarning(owner, repo, err)
 	}
 
 	if rmErr := prov.RemoveIssueLabel(ctx, owner, repo, c.Issue, LabelWIP); rmErr != nil {
 		reply(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ could not remove label %q from issue #%d: %v\n"+
+			prependWarning(warning, fmt.Sprintf("❌ could not remove label %q from issue #%d: %v\n"+
 				"worktree and branch are left intact — retry /gtw close once "+
 				"the platform call succeeds (auth / network / repo moved).",
-				LabelWIP, c.Issue, rmErr))
-		return false, nil, "", "", true
+				LabelWIP, c.Issue, rmErr)))
+		return false, nil, "", "", true, ""
 	}
 
-	return true, prov, owner, repo, false
+	return true, prov, owner, repo, false, warning
 }
 
 // compensateWIPLabel is the symmetric rollback to removeWIPLabel.

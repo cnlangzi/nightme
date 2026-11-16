@@ -25,6 +25,11 @@ import (
 // this many open issues.
 const listIssuesPerPage = 100
 
+// listLabelsPerPage is the page size both platforms' label list
+// endpoints are asked for. A repository with more labels than that
+// is reported partially — see ListLabels.
+const listLabelsPerPage = 100
+
 // gitlabLinkBlocks is the link type GitLab reports for a linked
 // issue that blocks the issue the links were listed for.
 const gitlabLinkBlocks = "blocks"
@@ -273,7 +278,8 @@ type GitProvider interface {
 
 	// AddIssueLabel attaches `label` to the issue. Requires the label
 	// to already exist in the repository's label catalog — callers
-	// uncertain about catalog state must call CreateLabel first.
+	// uncertain about catalog state must run the catalog check
+	// (ensureRepoLabels) first.
 	// Idempotent: re-adding an already-attached label is a no-op.
 	AddIssueLabel(ctx context.Context, owner, repo string, id int, label string) error
 
@@ -297,6 +303,21 @@ type GitProvider interface {
 	// on a freshly-cloned repo errors out with "'nightme/wip'
 	// not found" and the /gtw fix flow has no way to recover.
 	CreateLabel(ctx context.Context, owner, repo, name, color, description string) error
+
+	// ListLabels returns the names of the labels the repository's
+	// label catalog holds.
+	//
+	// A label that is not in the catalog cannot be attached to an
+	// issue, so a caller that attaches labels reads the catalog
+	// first and creates what is missing (see ensureRepoLabels).
+	// Names are reported as the platform reports them; the
+	// comparison against a wanted label is exact.
+	//
+	// The catalog of a repository with more labels than one page
+	// holds is reported partially. That is harmless for the
+	// caller: CreateLabel is idempotent, so a label reported as
+	// missing but actually present is created as a no-op.
+	ListLabels(ctx context.Context, owner, repo string) ([]string, error)
 
 	// RemoveIssueLabel removes `label` from the issue. Idempotent:
 	// removing an already-absent label is a no-op.
@@ -1562,6 +1583,33 @@ func (c *GitHubProvider) CreateLabel(ctx context.Context, owner, repo, name, col
 	return fmt.Errorf("gh label create: %v: %s", err, strings.TrimSpace(stderr))
 }
 
+// ListLabels runs `gh api "repos/<owner>/<repo>/labels?per_page=100"`
+// and returns the label names the repository's catalog holds.
+//
+// The page carries the first 100 labels of the catalog. A
+// repository with more labels than that reports a label as missing
+// even when it is present — the caller creates it, and
+// CreateLabel treats "already exists" as success, so the catalog
+// still ends up right.
+func (c *GitHubProvider) ListLabels(ctx context.Context, owner, repo string) ([]string, error) {
+	path := fmt.Sprintf("repos/%s/%s/labels?per_page=%d", owner, repo, listLabelsPerPage)
+	stdout, stderr, err := c.runner().Run(ctx, "gh", "api", path)
+	if err != nil {
+		return nil, fmt.Errorf("gh api labels: %v: %s", err, stderr)
+	}
+	var raw []struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &raw); err != nil {
+		return nil, fmt.Errorf("gh api labels: decode json: %w", err)
+	}
+	out := make([]string, 0, len(raw))
+	for _, r := range raw {
+		out = append(out, r.Name)
+	}
+	return out, nil
+}
+
 // CreatePR runs `gh pr create --base <base> --head <head> --title
 // <title> --body <body> --repo <owner>/<repo>`. The head branch must
 // already be pushed to origin (dispatchPR's first readiness gate
@@ -2108,6 +2156,33 @@ func (c *GitLabProvider) CreateLabel(ctx context.Context, owner, repo, name, col
 		return nil
 	}
 	return fmt.Errorf("glab api create label: %v: %s", err, strings.TrimSpace(stderr))
+}
+
+// ListLabels runs `glab api "projects/<owner%2Frepo>/labels?per_page=100"`
+// and returns the label names the project's label catalog holds.
+//
+// The page carries the first 100 labels of the catalog. A project
+// with more labels than that reports a label as missing even when
+// it is present — the caller creates it, and CreateLabel treats
+// "already exists" as success, so the catalog still ends up right.
+func (c *GitLabProvider) ListLabels(ctx context.Context, owner, repo string) ([]string, error) {
+	projectPath := url.PathEscape(owner + "/" + repo)
+	path := fmt.Sprintf("projects/%s/labels?per_page=%d", projectPath, listLabelsPerPage)
+	stdout, stderr, err := c.runner().Run(ctx, "glab", "api", path)
+	if err != nil {
+		return nil, fmt.Errorf("glab api labels: %v: %s", err, stderr)
+	}
+	var raw []struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &raw); err != nil {
+		return nil, fmt.Errorf("glab api labels: decode json: %w", err)
+	}
+	out := make([]string, 0, len(raw))
+	for _, r := range raw {
+		out = append(out, r.Name)
+	}
+	return out, nil
 }
 
 // CreatePR runs `glab mr create --target-branch <base> --source-branch

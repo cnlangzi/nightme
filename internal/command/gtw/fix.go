@@ -62,6 +62,11 @@ type HandlerDeps struct {
 	// dispatch. nil → every call probes, the pre-cache behaviour.
 	// The runtime owns the instance, exactly like PRCache.
 	ProviderCache *ProviderCache
+	// LabelCache memoises, per repository, that the repository's
+	// label catalog holds every label in AllLabels. nil → every
+	// check reads the catalog remotely, the pre-cache behaviour.
+	// The runtime owns the instance, exactly like ProviderCache.
+	LabelCache *LabelCache
 	// Now is the clock. Tests override for deterministic drafts.
 	Now func() time.Time
 	// PRCache is the runtime-owned *prcache.Registry that
@@ -184,8 +189,8 @@ func RunFix(
 //
 // Steps:
 //
-//  1. RepoRoot → RemoteOriginURL → Detect → (automatic mode: pick
-//     the assigned issue) → GetIssue.
+//  1. RepoRoot → RemoteOriginURL → Detect → ensureRepoLabels →
+//     (automatic mode: pick the assigned issue) → GetIssue.
 //  2. Branch name = DeriveBranchFromTitle(issue.Title, id).
 //  3. BranchExists? → hard-fail reply (F-XX §3.1; no card).
 //  4. Issue carries LabelWIP? → hard-fail reply (the issue is
@@ -197,14 +202,21 @@ func RunFix(
 //  7. WorktreeAdd (creates the durable worktree first; failure
 //     here surfaces the git error and bails without touching
 //     the label).
-//  8. ensureGtwLabels → AddIssueLabel(LabelWIP). Failure rolls
-//     back the worktree and branch via rollbackLabelStep.
+//  8. AddIssueLabel(LabelWIP). Failure rolls back the worktree
+//     and branch via rollbackLabelStep.
 //  9. SetSelectedCwd → WriteGTWYml (the yml is the cwd-scoped
 //     source of truth for hooks, /gtw close, and recovery).
 //  10. Render success card.
 //  11. Dispatch issue body to ChatSession.QueueUserMessage so
 //     the agent picks it up. Failure here does NOT roll back
 //     the worktree — the user can re-trigger manually.
+//
+// The label catalog is verified at step 1, before the queue is
+// consulted: a repository whose catalog predates `nightme/assigned`
+// can never carry the queue marker, so a pick would report an empty
+// queue forever. The check repairs the catalog first, and its
+// failure is fatal here — /gtw fix attaches a label right away and
+// cannot succeed without one.
 func runFixRemote(
 	ctx context.Context,
 	cs *chatsession.ChatSession,
@@ -305,6 +317,25 @@ func runFixRemote(
 			command.FailedOutcome("provider_error", "the remote URL does not name a repository")), nil
 	}
 
+	// --- ensure the gtw label catalog (§5.2.①) -------------------
+	// The repository's catalog must hold every label in AllLabels
+	// before /gtw fix can attach one of them. A repository whose
+	// catalog predates `nightme/assigned` cannot carry the queue
+	// marker at all, so the pick below would report an empty queue
+	// forever — the check has to run before it.
+	//
+	// The failure is fatal here: nothing has been created yet, so
+	// there is nothing to roll back. The provider's own error text
+	// is echoed verbatim — it names the root cause (token scope,
+	// network, missing permission) better than any paraphrase.
+	created, err := ensureRepoLabels(ctx, deps, provider, owner, repo)
+	if err != nil {
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+			fmt.Sprintf("❌ Could not ensure gtw labels on %s/%s: %v\n"+
+				"fix the cause and re-run /gtw fix", owner, repo, err),
+			command.FailedOutcome("label_error", "the gtw labels could not be created")), nil
+	}
+
 	// --- resolve the issue (§5.2.②) ------------------------------
 	// The automatic mode names no issue: the queue is consulted
 	// here, once the provider is known, and the issue it yields
@@ -320,7 +351,8 @@ func runFixRemote(
 		}
 		if picked.Issue == nil {
 			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-				renderAutoNoCandidate(picked), autoNoCandidateOutcome(picked)), nil
+				renderAutoNoCandidate(picked, labelCatalogNote(created)),
+				autoNoCandidateOutcome(picked)), nil
 		}
 		issueID = picked.Issue.ID
 		sel = issueSelection{Auto: true, RelationsUnavailable: picked.RelationsUnavailable}
@@ -471,43 +503,15 @@ func runFixRemote(
 	// cause. No manual `gh`/`glab` retry command is suggested:
 	// the whole point of atomic semantics is that the user just
 	// re-runs /gtw fix once the cause is fixed.
-	// --- ensure gtw labels exist on the repo (§5.2.④) ---------------
-	// v1.x: /gtw fix bootstraps the `nightme/*` label set on the
-	// first run against any repo. /gtw fix 235 failed outright
-	// because `nightme/wip` was missing — `gh issue edit
-	// --add-label` errors with "'nightme/wip' not found" rather
-	// than creating the label. ensureGtwLabels calls
-	// `gh label create` / `glab api POST labels` for every entry
-	// in AllLabels BEFORE the AddIssueLabel step, so AddIssueLabel
-	// always succeeds on a freshly-cloned repo.
 	//
-	// Neither provider passes `--force`: an existing label keeps
-	// the colour / description the user tuned by hand, and the
-	// "already exists" error from gh / glab is matched as success.
-	//
-	// Failure semantics: any CreateLabel error rolls back the
-	// worktree + branch via the same atomic path as an AddIssueLabel
-	// failure. The error is echoed verbatim so the user sees
-	// whether the root cause is a token-scope issue, a network
-	// blip, or a missing repo permission (gh/glab's own message
-	// is the most actionable hint available).
-	//
-	// Implementation note: AllLabels is short (6 entries); the
-	// calls are serial, not parallel, because (a) /gtw fix is
-	// one-shot per invocation and a few hundred ms of latency
-	// is acceptable, (b) serial calls keep error attribution
-	// simple when one of the 6 fails, and (c) gh/glab's own
-	// rate-limit handling gets a clean per-call retry surface.
-	if err := ensureGtwLabels(ctx, provider, owner, repo); err != nil {
-		body := rollbackLabelStep(ctx, deps, repoRoot, worktreePath, branch, issueID,
-			fmt.Sprintf("❌ Could not ensure gtw labels on %s/%s: %v\n", owner, repo, err))
-		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, body,
-			command.FailedOutcome("label_error", "the gtw labels could not be created")), nil
-	}
-
+	// The catalog was verified before the queue pick, so the label
+	// is expected to exist. When the attachment fails anyway, the
+	// catalog may have changed since the verification — the reply
+	// says so and names the remedy.
 	if err := provider.AddIssueLabel(ctx, owner, repo, issueID, LabelWIP); err != nil {
 		body := rollbackLabelStep(ctx, deps, repoRoot, worktreePath, branch, issueID,
-			fmt.Sprintf("❌ Could not add label %q to issue #%d: %v\n", LabelWIP, issueID, err))
+			fmt.Sprintf("❌ Could not add label %q to issue #%d: %v\n", LabelWIP, issueID, err)+
+				staleCatalogNote(owner, repo, LabelWIP)+"\n")
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, body,
 			command.FailedOutcome("label_error", "the issue could not be labelled")), nil
 	}
@@ -1318,55 +1322,24 @@ func issueHasLabel(issue *Issue, name string) bool {
 	})
 }
 
-// ensureGtwLabels bootstraps the full AllLabels set on the
-// remote repo via provider.CreateLabel. The order matches
-// AllLabels (display order) so that any error message naming
-// the failing label matches what the user sees in /gtw push
-// or /gtw pr's UI. The first failure short-circuits the loop
-// and is returned verbatim — subsequent labels stay
-// un-bootstrapped until the user fixes the cause and re-runs
-// /gtw fix, at which point the loop picks up where it left
-// off because CreateLabel is idempotent.
-//
-// Why serial, not parallel: AllLabels has 6 entries; gh/glab's
-// own retry / rate-limit handling gets a cleaner surface when
-// each call is its own round-trip. The /gtw fix user is happy
-// to wait a few hundred ms in exchange for a clear error
-// attribution when one label fails.
-//
-// Returns nil when every label is bootstrapped (created or
-// already present). The caller (runFixRemote's AddIssueLabel path)
-// treats nil as success and proceeds to the AddIssueLabel step.
-func ensureGtwLabels(ctx context.Context, provider GitProvider, owner, repo string) error {
-	for _, name := range AllLabels {
-		meta := LabelMetaFor(name)
-		if err := provider.CreateLabel(ctx, owner, repo, name, meta.Color, meta.Description); err != nil {
-			return fmt.Errorf("ensure %q: %w", name, err)
-		}
-	}
-	return nil
-}
-
 // rollbackLabelStep rolls back the worktree + branch created by
 // the /gtw fix flow when the post-WorktreeAdd label step
-// (CreateLabel or AddIssueLabel) fails. Returns the user-facing
-// reply body, which the caller hands to reply(). The shape of
-// the three error branches (clean / partial / fully stuck) is
-// preserved verbatim from the v1.x atomic semantics — only the
-// error-message prefix changes.
+// (AddIssueLabel) fails. Returns the user-facing reply body,
+// which the caller hands to reply(). The shape of the three error
+// branches (clean / partial / fully stuck) is preserved verbatim
+// from the v1.x atomic semantics — only the error-message prefix
+// changes.
 //
-// head is the leading "❌ Could not ... : <err>" line that
-// distinguishes CreateLabel failures from AddIssueLabel failures.
-// The trailing "fix the cause and re-run /gtw fix <id>" hint
-// is identical in both cases because both share the same
-// root-cause class: label-state coordination with the remote
-// issue tracker.
+// head is the leading "❌ Could not ... : <err>" line that names
+// the failing label step. The trailing "fix the cause and re-run
+// /gtw fix <id>" hint is the same across the label failure paths
+// because they share one root-cause class: label-state
+// coordination with the remote issue tracker.
 //
-// The helper centralises the rollback so CreateLabel and
-// AddIssueLabel failure paths stay in lockstep; adding a new
-// post-worktree label step in the future only requires one
-// rollbackLabelStep call instead of duplicating the
-// three-branch switch.
+// The helper centralises the rollback so the label failure paths
+// stay in lockstep; adding a new post-worktree label step in the
+// future only requires one rollbackLabelStep call instead of
+// duplicating the three-branch switch.
 func rollbackLabelStep(
 	ctx context.Context,
 	deps HandlerDeps,

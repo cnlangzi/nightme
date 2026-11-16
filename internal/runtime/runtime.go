@@ -341,6 +341,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 		Prober:        &gtw.ExecHTTPProber{},
 		PRCache:       prCacheReg,
 		ProviderCache: &gtw.ProviderCache{},
+		LabelCache:    &gtw.LabelCache{},
 	}
 
 	// prResolver is the prcache ↔ gtw bridge: the cache

@@ -98,7 +98,7 @@ Local mode 不 dispatch agent prompt，Assess / Execute 无意义；不报错但
 
 `/gtw fix *` 不点名 issue：它从队列里挑一个，跑完全一样的 remote 流程（worktree、label、dispatch），然后在成功卡片里说明挑中了哪个 issue。`*` 是位置参数而不是 flag，所以 `/gtw fix` 的 flag 集合不变；它也不能和 `--name` / `-n` 同时出现（和 issue id 与 branch name 互斥是同一条规则）。
 
-**队列在 tracker 上**：NightMe 可以动的 issue 带着 `nightme/assigned` label —— 由人或者 tracker 上的外部自动化加上。gtw 从不自己加这个 label：它只认。`nightme/assigned` 在 `AllLabels` 里，所以 `ensureGtwLabels` 会把它建进仓库的 label catalog。
+**队列在 tracker 上**：NightMe 可以动的 issue 带着 `nightme/assigned` label —— 由人或者 tracker 上的外部自动化加上。gtw 从不自己加这个 label：它只认。`nightme/assigned` 在 `AllLabels` 里，所以 label catalog 检查会把它建进仓库的 label catalog —— 检查在队列挑选**之前**跑，否则一个 catalog 里还没有这个 label 的仓库永远挑不出 issue（见 §3.0）。
 
 **选择算法**（`internal/command/gtw/auto.go`）：
 
@@ -158,7 +158,7 @@ ListBlockedBy(ctx context.Context, owner, repo string, id int) ([]*Issue, error)
 
 **队列没有原子认领**：`ListIssues` 和贴 `nightme/wip` 之间有窗口，两台机器同时跑 `/gtw fix *` 可能挑到同一个 issue。这跟具名 fix 的既有窗口是同一类 —— label 是协作信号，不是锁（见 §3.2）。
 
-**没有可选项时**：outcome 是 `noop`，`Data` 带 `reason: no_candidate`、`wake_after: "5m"` 和 `candidates` / `blocked` / `branch_exists` / `pr_open` 四个计数。`wake_after` 是个人 agent 读的契约：它告诉 agent 过一会儿再来，而不是把这次运行判成失败。
+**没有可选项时**：回复卡片保留 `❌ No eligible assigned issue` 抬头和队列那一行，并补一行说明队列为什么是空的：label catalog 检查刚建出 `nightme/assigned`（或者它本来就在），所以队列要等人工把这个 label 贴到某个 issue 上才有内容。outcome 是 `noop`，`Data` 带 `reason: no_candidate`、`wake_after: "5m"` 和 `candidates` / `blocked` / `branch_exists` / `pr_open` 四个计数。`wake_after` 是个人 agent 读的契约：它告诉 agent 过一会儿再来，而不是把这次运行判成失败。
 
 ---
 
@@ -167,7 +167,8 @@ ListBlockedBy(ctx context.Context, owner, repo string, id int) ([]*Issue, error)
 ```mermaid
 flowchart TD
     A["/gtw fix id"] --> A0["GetIssue"]
-    A1["/gtw fix *"] --> A2["pick the oldest eligible assigned issue"]
+    A1["/gtw fix *"] --> A3["ensureRepoLabels"]
+    A3 --> A2["pick the oldest eligible assigned issue"]
     A2 --> A0
     A0 --> B{preflight}
     B -->|fail| Z["❌ reply"]
@@ -179,7 +180,7 @@ flowchart TD
     G -->|no| F["PreflightWorktreeCreate"]
     F --> I["RefreshDefaultBranch"]
     I --> J["WorktreeAdd"]
-    J --> K["ensureGtwLabels + AddIssueLabel"]
+    J --> K["AddIssueLabel"]
     K --> L["completeFixAndDispatch"]
     L --> M{"-y?"}
     M -->|no| N["dispatch Assess Prompt"]
@@ -188,7 +189,19 @@ flowchart TD
     O --> Q["agent 直接改代码"]
 ```
 
-dispatch 之前的步骤顺序：WorktreeAdd → ensureGtwLabels → AddIssueLabel → WriteGTWYml → success card。分支冲突（§3.1）与 claim（§3.2）都在这些步骤之前硬失败，不产生任何副作用。
+dispatch 之前的步骤顺序：label catalog 检查 → 队列挑选（自动模式）→ GetIssue → preflight → RefreshDefaultBranch → WorktreeAdd → AddIssueLabel → WriteGTWYml → success card。分支冲突（§3.1）与 claim（§3.2）都在 worktree 之前硬失败，不产生任何副作用。
+
+### 3.0 label catalog 检查（§5.2.①）
+
+label catalog 检查在 owner/repo 解析之后、队列挑选之前跑。它读仓库的 label catalog，把 `AllLabels` 里缺的那些建出来，然后把这个仓库记成「已验证」。
+
+**为什么在队列挑选之前**：队列是「带着 `nightme/assigned` 的开放 issue」，而一个 catalog 里没有这个 label 的仓库**挂不上**这个 label（平台报 "not found"，不会自动建）。所以检查必须在挑选之前：它把仓库修好，挑选才看得到一个可能的队列。检查失败时 `/gtw fix` 直接失败并回显平台自己的错误 —— 此时 worktree 还不存在，没有东西需要回滚。
+
+**检查的结果缓存**：`LabelCache` 按仓库（`owner/repo`）记住「这个仓库的 catalog 齐全了」。label catalog 是仓库的属性，不是 worktree 的属性，所以同一仓库的每个 worktree 共用一条记录。缓存只进内存，daemon 重启后重新检查；失败的检查不写缓存，下一条命令会重试。
+
+**别处也检查**：`/gtw close`、`/gtw pr`、`/gtw new -y` 同样会检查仓库的 catalog —— 这三个命令不贴 label，所以检查失败只给一行 `⚠️` 警告，命令照常跑完。provider 探测（`detectProvider` / `resolveProvider`）**不**检查：workspace footer 每次刷新消息都会解析一个 provider，在那里检查会把读变成对用户仓库的写。
+
+详见 [`F-59-gtw-label-bootstrap.md`](./F-59-gtw-label-bootstrap.md)。
 
 ### 3.1 Branch 已存在：硬失败（废除 §5.3.1）
 
@@ -662,13 +675,13 @@ verify 后报告「no code change required」即可，不编辑代码。旧规�
 
 | 能力 | Remote + F-59 | Local (`--name`) |
 |---|---|---|
-| `ensureGtwLabels` | ✅ | ❌ |
+| label catalog 检查（`ensureRepoLabels`） | ✅ | ❌ |
 | `AddIssueLabel` | ✅ | ❌ |
 | Agent dispatch | ✅ Assess / Execute | ❌（never dispatch） |
 | Branch exists | ❌ 硬失败 | ❌ 硬失败 |
 | 默认分支 sync | ✅ | ✅（同样要求在主仓库执行、`origin` remote、主仓库工作区干净） |
 
-F-59 的 `rollbackLabelStep`、label bootstrap 顺序 **不变**；仅 dispatch 文案与 branch 策略变更。详见 [`F-59-gtw-label-bootstrap.md`](./F-59-gtw-label-bootstrap.md) §2.3（步骤 10 改为「按 mode dispatch Assess 或 Execute」）。
+label catalog 检查在 worktree 创建之前跑，所以 `rollbackLabelStep` 只覆盖 `AddIssueLabel` 失败这一条路径。详见 [`F-59-gtw-label-bootstrap.md`](./F-59-gtw-label-bootstrap.md)。
 
 ---
 

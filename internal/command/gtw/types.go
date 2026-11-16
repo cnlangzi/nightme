@@ -65,8 +65,8 @@ const (
 
 // AllLabels is the full set of labels /gtw puts on an issue, in
 // display order: the queue marker first, then the state labels.
-// Every entry is bootstrapped into the repository's label catalog
-// by ensureGtwLabels before /gtw fix labels an issue.
+// Every entry is verified against the repository's label catalog by
+// ensureRepoLabels before /gtw fix labels an issue.
 var AllLabels = []string{
 	LabelAssigned, LabelWIP, LabelReady, LabelReviewing,
 	LabelRevise, LabelDone, LabelStuck,

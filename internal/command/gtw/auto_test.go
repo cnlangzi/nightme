@@ -274,7 +274,7 @@ func TestSelectNextAssignedIssue_RelationsUnsupportedContinuesByAge(t *testing.T
 	if calls := prov.CallsByMethod("ListBlockedBy"); len(calls) != 1 {
 		t.Errorf("ListBlockedBy calls = %d, want 1 (the checks stop after the first failure)", len(calls))
 	}
-	if !strings.Contains(renderAutoNoCandidate(sel), "not ordered") {
+	if !strings.Contains(renderAutoNoCandidate(sel, ""), "not ordered") {
 		t.Errorf("the report must say the dependency order was not applied")
 	}
 }

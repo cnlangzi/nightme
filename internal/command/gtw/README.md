@@ -453,10 +453,14 @@ abc1234 fix(gtw): hooks output uses standard ✅ title
 队列里没有可选项时:
 
 ```
-✨ No eligible assigned issue
+❌ No eligible assigned issue
 → queue: empty — none of the 100 oldest open issues carries the `nightme/assigned` label
+→ `nightme/assigned` exists in this repository — attach it to an issue to fill the queue
 ↳ come back in 5m for another pick.
 ```
+
+最后一行说明队列为什么是空的:label catalog 检查确认(或建出了)队列标记
+`nightme/assigned`,队列要等人工把这个标签贴到某个 issue 上才有内容。
 
 平台不暴露 issue 关系图时,队列只按年龄排序,卡片里明说依赖顺序没有生效:
 

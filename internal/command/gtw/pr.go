@@ -167,6 +167,17 @@ func dispatchPR(
 			command.FailedOutcome("error", "the git host could not be resolved")), nil
 	}
 
+	// The label catalog is verified before the pull request is
+	// opened, so the repository keeps the gtw labels the next /gtw
+	// fix needs. A failed check only warns: opening a pull request
+	// does not depend on the catalog holding the gtw labels. The
+	// warning rides on the success card — the reply that reports
+	// what the command actually did.
+	labelWarning := ""
+	if _, err := ensureRepoLabels(ctx, deps, provider, owner, repo); err != nil {
+		labelWarning = labelCheckWarning(owner, repo, err)
+	}
+
 	// --- gate 2: no open PR for this branch -------------------------
 	// FindOpenPRForBranch translates ErrCLINotInstalled when the
 	// gh/glab binary is missing; unknown stderr propagates
@@ -328,6 +339,9 @@ func dispatchPR(
 
 	riskLevel, riskReason := extractRiskLevel(body)
 	card := renderPROpenedCard(c, baseBranch, url, riskLevel, riskReason)
+	if labelWarning != "" {
+		card = labelWarning + "\n" + card
+	}
 
 	// Stamp the new PR into the workspace's cache before we
 	// reply. Registry.WritePR allocates the cache on first

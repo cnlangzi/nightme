@@ -56,6 +56,13 @@ type fakeGitProvider struct {
 	// (network / 403 / etc.) on the bootstrap path.
 	createLabelErr error
 
+	// ListLabels response. listLabels is the catalog the fake
+	// reports; listLabelsErr wins when non-nil. A nil listLabels
+	// means "the repository has no labels at all" — the state of a
+	// repository whose catalog was never bootstrapped.
+	listLabels    []string
+	listLabelsErr error
+
 	// Per-name response for CreateLabel. When a label name is
 	// present in this map, createLabelErrFor[name] is returned
 	// INSTEAD of the generic createLabelErr. Lets tests pin a
@@ -161,6 +168,23 @@ func (f *fakeGitProvider) SetListIssuesErr(err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.listIssuesErr = err
+}
+
+// SetListLabels registers the label catalog ListLabels reports.
+func (f *fakeGitProvider) SetListLabels(labels []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.listLabels = labels
+	f.listLabelsErr = nil
+}
+
+// SetListLabelsErr configures ListLabels to return err. Wrap it to
+// simulate a catalog read that cannot be completed (network, token
+// scope, missing repo).
+func (f *fakeGitProvider) SetListLabelsErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.listLabelsErr = err
 }
 
 // SetBlockedBy registers the blockers of the issue with the given
@@ -502,6 +526,21 @@ func (f *fakeGitProvider) CreateLabel(_ context.Context, owner, repo, name, colo
 	}
 	f.mu.Unlock()
 	return err
+}
+
+func (f *fakeGitProvider) ListLabels(_ context.Context, owner, repo string) ([]string, error) {
+	f.mu.Lock()
+	f.calls = append(f.calls, fakeProviderCall{
+		Method: "ListLabels", Owner: owner, Repo: repo,
+	})
+	labels, err := f.listLabels, f.listLabelsErr
+	f.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, len(labels))
+	copy(out, labels)
+	return out, nil
 }
 
 func (f *fakeGitProvider) CreatePR(_ context.Context, owner, repo, base, head, title, body string) (string, error) {

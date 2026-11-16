@@ -254,10 +254,10 @@ func TestFixRemote_HappyPath(t *testing.T) {
 	if len(getCalls) != 1 || getCalls[0].ID != issueID {
 		t.Errorf("GetIssue calls = %+v, want exactly one for id=%d", getCalls, issueID)
 	}
-	// --- bootstrap: CreateLabel must be called once for every
-	// label in AllLabels (in order) BEFORE AddIssueLabel. The
-	// bootstrap is what makes /gtw fix idempotent against a
-	// freshly-cloned repo that has no nightme/* labels yet.
+	// --- label catalog check: the repository's catalog is empty in
+	// this rig, so the check creates every label in AllLabels (in
+	// order) BEFORE AddIssueLabel. That is what makes /gtw fix work
+	// against a freshly-cloned repo that has no nightme/* labels yet.
 	ensureCalls := rig.prov.CallsByMethod("CreateLabel")
 	if len(ensureCalls) != len(AllLabels) {
 		t.Fatalf("CreateLabel calls = %d, want %d (AllLabels). last reply:\n%s",
@@ -485,11 +485,12 @@ func TestFixRemote_BranchExists_HardFails_NoSideEffects(t *testing.T) {
 	if addCalls := rig.prov.CallsByMethod("AddIssueLabel"); len(addCalls) != 0 {
 		t.Errorf("AddIssueLabel unexpectedly called: %+v", addCalls)
 	}
-	// ensureGtwLabels bootstrap must NOT be called (CreateLabel
-	// calls). Both bootstrap and label add sit AFTER BranchExists
-	// in the new flow.
-	if createCalls := rig.prov.CallsByMethod("CreateLabel"); len(createCalls) != 0 {
-		t.Errorf("CreateLabel unexpectedly called: %+v", createCalls)
+	// The label catalog check runs before the queue pick, so it
+	// does create the gtw labels the repository is missing — a
+	// repository-level repair, not a claim on the issue. Pin the
+	// ordering: the catalog is read once, before the pick.
+	if listCalls := rig.prov.CallsByMethod("ListLabels"); len(listCalls) != 1 {
+		t.Errorf("ListLabels calls = %d, want 1 (the catalog check runs before the queue pick)", len(listCalls))
 	}
 	// No new worktree created.
 	wtOut, _ := mustGitOut(t, rig.repoRoot, "worktree", "list", "--porcelain")
@@ -547,17 +548,21 @@ func TestFixRemote_AlreadyClaimed_Rejected(t *testing.T) {
 		t.Errorf("reply missing manual label-removal hint:\n%s", last)
 	}
 
-	// No label write of any kind.
+	// No label write of any kind on the issue.
 	if addCalls := rig.prov.CallsByMethod("AddIssueLabel"); len(addCalls) != 0 {
 		t.Errorf("AddIssueLabel unexpectedly called: %+v", addCalls)
 	}
-	if createCalls := rig.prov.CallsByMethod("CreateLabel"); len(createCalls) != 0 {
-		t.Errorf("CreateLabel unexpectedly called: %+v", createCalls)
+	if rms := rig.prov.CallsByMethod("RemoveIssueLabel"); len(rms) != 0 {
+		t.Errorf("RemoveIssueLabel unexpectedly called: %+v", rms)
 	}
-	// The only provider round-trip is the GetIssue that carried
-	// the labels — the gate reads what is already in hand.
+	// The label catalog check runs before the queue pick, so it
+	// reads the catalog and creates the labels the repository is
+	// missing. Beyond that, the gate touches nothing: the only
+	// other round-trip is the GetIssue that carried the labels.
 	for _, c := range rig.prov.Calls() {
-		if c.Method != "GetIssue" {
+		switch c.Method {
+		case "GetIssue", "ListLabels", "CreateLabel":
+		default:
 			t.Errorf("unexpected provider call %q; the gate must not touch the provider", c.Method)
 		}
 	}
@@ -679,27 +684,27 @@ func TestFixRemote_AddIssueLabelFailure_RollsBackWorktreeAndBranch(t *testing.T)
 	}
 }
 
-// TestFixRemote_CreateLabelFailure_RollsBack pins the v1.x
-// atomic semantics for the new CreateLabel bootstrap path. When
-// `gh label create` fails (network / 403 / etc.), the worktree
-// and branch created earlier in the flow must be rolled back
-// just like an AddIssueLabel failure. AddIssueLabel must NOT be called
-// after CreateLabel fails (chronology broken otherwise). The
-// reply must echo the CreateLabel error verbatim AND name the
-// failing label so the user can see exactly which of the 6
-// bootstrap calls tripped.
+// TestFixRemote_CreateLabelFailure_LeavesNoWorktree pins the
+// failure semantics of the label-catalog check. When
+// `gh label create` fails (network / 403 / etc.), the check runs
+// before the queue pick and before any worktree exists — so the
+// command stops with the provider's error and leaves nothing
+// behind. AddIssueLabel must NOT be called after CreateLabel fails
+// (chronology broken otherwise). The reply must echo the
+// CreateLabel error verbatim AND name the failing label so the
+// user can see exactly which of the check's calls tripped.
 //
 // Trigger: SetCreateLabelErrFor is configured so the SECOND
 // CreateLabel call returns an error (simulating a network blip
-// mid-bootstrap). The test asserts that calls 0 succeeded but
-// the bootstrap halted at index 1 — the worktree + branch are
-// then rolled back, and AddIssueLabel is never reached.
-func TestFixRemote_CreateLabelFailure_RollsBack(t *testing.T) {
+// mid-check). The test asserts that calls 0 succeeded but
+// the check halted at index 1 — no worktree, no branch, and
+// AddIssueLabel is never reached.
+func TestFixRemote_CreateLabelFailure_LeavesNoWorktree(t *testing.T) {
 	rig := newFixRemoteRig(t)
 	issueID := 235
 	rig.prov.SetIssue(issueID, &Issue{
 		ID:    issueID,
-		Title: "CreateLabel bootstrap should roll back on mid-loop failure",
+		Title: "CreateLabel bootstrap should stop on mid-loop failure",
 		State: "open",
 		URL:   "https://github.com/cnlangzi/nightme/issues/235",
 	})
@@ -707,7 +712,7 @@ func TestFixRemote_CreateLabelFailure_RollsBack(t *testing.T) {
 	// using per-name injection so the FIRST call (LabelWIP)
 	// still succeeds. This pins the mid-loop short-circuit
 	// behaviour: index 0 logs success, index 1 errors, the
-	// bootstrap halts before reaching AllLabels[2..5]. Without
+	// check halts before reaching AllLabels[2..]. Without
 	// per-name injection the test would only prove "first
 	// label error → short-circuit", which doesn't exercise
 	// the iteration state at all.
@@ -718,9 +723,9 @@ func TestFixRemote_CreateLabelFailure_RollsBack(t *testing.T) {
 	}
 
 	// Exactly two CreateLabel calls happened: index 0 (WIP,
-	// succeeded) + index 1 (Ready, errored). Indices 2..5
-	// were never reached because the loop short-circuits on
-	// the first error.
+	// succeeded) + index 1 (Ready, errored). Indices 2.. were
+	// never reached because the check short-circuits on the
+	// first error.
 	ensureCalls := rig.prov.CallsByMethod("CreateLabel")
 	if len(ensureCalls) != 2 {
 		t.Errorf("CreateLabel calls = %d, want 2 (index 0 success + index 1 short-circuit): %+v",
@@ -733,27 +738,28 @@ func TestFixRemote_CreateLabelFailure_RollsBack(t *testing.T) {
 		t.Errorf("failing CreateLabel = %q, want %q (AllLabels[1])",
 			ensureCalls[1].Label, AllLabels[1])
 	}
-	// AddIssueLabel must NOT be called — bootstrap halted before
-	// reaching it. The rollback is structural (no RemoveIssueLabel
-	// either, since the label was never applied to the issue).
+	// AddIssueLabel must NOT be called — the check halted before
+	// reaching it (no RemoveIssueLabel either, since the label
+	// was never applied to the issue).
 	if addCalls := rig.prov.CallsByMethod("AddIssueLabel"); len(addCalls) != 0 {
 		t.Errorf("AddIssueLabel called despite CreateLabel failure: %+v", addCalls)
 	}
 	if rms := rig.prov.CallsByMethod("RemoveIssueLabel"); len(rms) != 0 {
 		t.Errorf("RemoveIssueLabel unexpectedly called: %+v", rms)
 	}
-	// Worktree must be gone (rollback removed it).
+	// The check runs before the worktree is created, so there is
+	// nothing to roll back: the repository is left as it was.
 	wtOut, _ := mustGitOut(t, rig.repoRoot, "worktree", "list", "--porcelain")
 	if c := strings.Count(wtOut, "worktree "); c != 1 {
-		t.Errorf("worktree count = %d, want 1 (rollback must remove the new worktree):\n%s", c, wtOut)
+		t.Errorf("worktree count = %d, want 1 (the check runs before the worktree exists):\n%s", c, wtOut)
 	}
-	// Branch must also be gone.
+	// Branch must not exist either.
 	branchOut, _ := mustGitOut(t, rig.repoRoot, "branch", "--list", "fix/*")
 	if strings.TrimSpace(branchOut) != "" {
-		t.Errorf("expected no fix/* branches after rollback, got: %q", branchOut)
+		t.Errorf("expected no fix/* branches after the failed check, got: %q", branchOut)
 	}
-	// Reply: must name CreateLabel (not AddIssueLabel), echo the
-	// provider error verbatim, and report the rollback.
+	// Reply: must name the label check (not AddIssueLabel), echo
+	// the provider error verbatim, and point at the retry.
 	last := rig.rec.lastText()
 	if !strings.Contains(last, "Could not ensure gtw labels") {
 		t.Errorf("reply missing 'Could not ensure gtw labels' phrase:\n%s", last)
@@ -761,16 +767,13 @@ func TestFixRemote_CreateLabelFailure_RollsBack(t *testing.T) {
 	if !strings.Contains(last, "403 Forbidden: missing Labels write scope") {
 		t.Errorf("reply missing verbatim provider error:\n%s", last)
 	}
-	if !strings.Contains(last, "rolled back") {
-		t.Errorf("reply missing 'rolled back' phrase:\n%s", last)
-	}
-	if !strings.Contains(last, fmt.Sprintf("re-run /gtw fix %d", issueID)) {
+	if !strings.Contains(last, "re-run /gtw fix") {
 		t.Errorf("reply missing retry hint:\n%s", last)
 	}
 	// Success card must NOT appear.
 	all := strings.Join(rig.rec.serialized(), "\n---\n")
 	if strings.Contains(all, fmt.Sprintf("Fix #%d", issueID)) {
-		t.Errorf("success card present despite CreateLabel rollback:\n%s", all)
+		t.Errorf("success card present despite the failed label check:\n%s", all)
 	}
 }
 

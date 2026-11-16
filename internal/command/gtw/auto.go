@@ -234,9 +234,13 @@ func blockerNumbers(blockers []*Issue) string {
 // eligible. It says what was considered and why every candidate
 // was passed over, so the user can act on it.
 //
+// labelNote explains the empty queue in terms of the label catalog:
+// the queue marker exists in the repository, so the queue is empty
+// because nobody has attached it to an issue yet.
+//
 // The card reads like the outcome: the command was asked to fix an
 // issue and could not, so it failed.
-func renderAutoNoCandidate(sel *autoSelection) string {
+func renderAutoNoCandidate(sel *autoSelection, labelNote string) string {
 	var b strings.Builder
 	b.WriteString("❌ No eligible assigned issue\n")
 
@@ -272,6 +276,9 @@ func renderAutoNoCandidate(sel *autoSelection) string {
 	}
 	for _, r := range rows {
 		fmt.Fprintf(&b, "→ %-*s %s\n", width, r[0]+":", r[1])
+	}
+	if labelNote != "" {
+		fmt.Fprintf(&b, "→ %s\n", labelNote)
 	}
 	fmt.Fprintf(&b, "↳ come back in %s for another pick.\n", autoWakeAfter)
 	return b.String()

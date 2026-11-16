@@ -81,6 +81,9 @@ type Outcome struct {
 | `lang` / `scope` | `/gtw config` 的语言与作用域（`global` / `repo` / `default`） |
 | `unset` | `/gtw config --unset` 删掉了这个设置（值是 `true`） |
 | `cwd` | `/cwd` 设好的工作区路径 |
+| `workflow` | `/me start` 启动的 workflow 的名字 |
+| `run_id` | `/me start` 这次运行的 id |
+| `iterations` | `/me start -i` 指定的轮数——没有这个 flag 时不出现 |
 
 `Data` 刻意是 `map[string]string` 而不是 struct：不同命令产出不同的事实，程序只读自己关心的键。
 

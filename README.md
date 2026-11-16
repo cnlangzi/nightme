@@ -572,10 +572,12 @@ the guard means "an issue was picked" and the rest of the round is skipped.
 
 A job carries `needs`, `if`, `iterations` and `steps`. `iterations` is how many
 rounds the job runs: leave it out for one round, `0` for "until the run ends",
-`N` for `N` rounds. A round ends when the job's steps are done; the next round
-starts with the job's first step, the round's step outputs are cleared and the
-per-step budgets start over. A round in which no step ran does not repeat: a
-job whose every step is skipped had nothing to do. A repeating job wants a
+`N` for `N` rounds. `/me start -i <rounds>` overrides it for that run: every job
+of the workflow runs the number of rounds the command line names. A round ends
+when the job's steps are done; the next round starts with the job's first step,
+the round's step outputs are cleared and the per-step budgets start over. A
+round in which no step ran does not repeat: a job whose every step is skipped
+had nothing to do. A repeating job wants a
 `wait:` step, so its rounds do not follow each other as fast as the chat
 answers. A round can also end early — the agent ends it when there is
 genuinely nothing left to do in it. The steps of the round that did not run are
@@ -673,7 +675,7 @@ key — is reported in `nightme logs` and left out. The daemon still starts, and
 
 | Command | What it does |
 |---|---|
-| `/me start <workflow> [args...]` | Starts a workflow in this chat. |
+| `/me start <workflow> [args...] [-i <rounds>]` | Starts a workflow in this chat. `-i` sets how many rounds every job of the workflow runs. |
 | `/me reply <text>` | Answers the question the run is waiting for. |
 | `/me pause` | Stops the run after the step it is on. |
 | `/me continue [note]` | Hands the control back to a paused run. The note is your instruction. |
@@ -684,6 +686,13 @@ key — is reported in `nightme logs` and left out. The daemon still starts, and
 The arguments of `/me start` fill the workflow's declared arguments: a positional
 token fills the next argument that is still unassigned, in declaration order, and
 a token of the form `name=value` assigns that argument by name.
+
+A token that starts with `-` is a flag. `-i <rounds>` (or `--iterations <rounds>`)
+sets how many rounds every job of the workflow runs in that run — `0` means "until
+the run ends", the same as `iterations: 0` in the file. The count belongs to that
+run alone: the file keeps its own counts, and the next `/me start` uses them.
+Everything after `--` belongs to the workflow, so a value that starts with `-`
+reaches it.
 
 A chat without a workspace is refused — `No active workspace. Send /cwd <path> first.`
 The run inherits the chat's workspace and agent. A chat holds at most one run at a time.

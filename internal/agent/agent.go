@@ -1304,6 +1304,10 @@ type RunOnceOption func(*runOnceConfig)
 //     fan-out with the group's identity and the error that ended it.
 //     Only the review fan-out reads it.
 //
+//   - OnReviewPlan (observer): called once per review fan-out with
+//     the group list, before the first group starts. Only the review
+//     fan-out reads it.
+//
 // The struct is package-private so bridges don't accidentally grow
 // their own public RunOnceOption type. The "Options" pattern is
 // exposed via exported functional helpers (e.g. WithEventSink)
@@ -1316,6 +1320,25 @@ type runOnceConfig struct {
 	// (nil on success). Set by WithReviewJobObserver; the fan-out
 	// core invokes it on the group's own goroutine.
 	OnReviewJob func(ReviewJob, error)
+
+	// OnReviewPlan (observer): called once per review fan-out with
+	// the group list, in fan-out order, before the first group
+	// starts. Set by WithReviewPlanObserver; the fan-out core
+	// invokes it on the goroutine that drives the fan-out.
+	OnReviewPlan func([]ReviewPlanGroup)
+}
+
+// ReviewPlanGroup describes one group of a review fan-out.
+type ReviewPlanGroup struct {
+	// Pattern is the group's pattern — the glob of an ocr rule group,
+	// or the builtin / simplify sentinel.
+	Pattern string
+	// Label is the human-facing name of the group. An ocr group is
+	// named by its pattern; the nightme-owned sentinels get a name
+	// the user can read ("builtin rubric", "simplify lens").
+	Label string
+	// Files are the files the group covers.
+	Files []string
 }
 
 // ReviewJob identifies one group of a review fan-out.
@@ -1328,6 +1351,10 @@ type ReviewJob struct {
 	// SessionID is the agent session id of the group's session.
 	// Empty when the group never reached the agent's Ready event.
 	SessionID string
+	// Report is the parsed form of the group's own review output.
+	// A group whose output matched no known shape yields a report
+	// with Parsed=false and no findings.
+	Report ReviewReport
 }
 
 // WithEventSink returns a RunOnceOption that installs sink as the
@@ -1369,6 +1396,24 @@ func WithEventSink(sink func(AgentEvent)) RunOnceOption {
 // RunSession call ignores it.
 func WithReviewJobObserver(fn func(ReviewJob, error)) RunOnceOption {
 	return func(c *runOnceConfig) { c.OnReviewJob = fn }
+}
+
+// WithReviewPlanObserver registers a callback that receives the plan
+// of a review fan-out: one entry per group, in fan-out order.
+//
+// The callback fires once per run, before the first group starts and
+// before any group's first event reaches the outer sink. It is how
+// the caller learns what the run is about to do — the group list, the
+// human-facing name of each group and the files it covers.
+//
+// The callback runs on the goroutine that drives the fan-out, before
+// the first group starts. It should return promptly: it runs before
+// the groups start, so a slow callback delays the whole run.
+//
+// Only the review fan-out invokes the observer; a plain RunOnce /
+// RunSession call ignores it.
+func WithReviewPlanObserver(fn func([]ReviewPlanGroup)) RunOnceOption {
+	return func(c *runOnceConfig) { c.OnReviewPlan = fn }
 }
 
 // ParseRunOnceOptions resolves a variadic RunOnceOption slice into

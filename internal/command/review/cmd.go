@@ -480,13 +480,15 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 	//
 	// v9 distribution: on success, the bridge returns the raw
 	// review text. The goroutine wraps it in FormatReviewMessage
-	// and emits to TWO destinations:
+	// and injects it into the AS as a user turn — the main agent
+	// sees the findings and can act on "fix the blockers"
+	// follow-ups.
 	//
-	//   1. as.SendBlocks → AS as a user turn → main agent sees
-	//      findings, can act on "fix the blockers" follow-ups.
-	//   2. em.Send → channel directly → user sees findings in
-	//      chat immediately, without waiting for the AS's
-	//      downstream reply (which may not echo them verbatim).
+	// The channel does NOT get the merged text: the findings reach
+	// it through the coalesced stream the sink carries (each batch
+	// labeled with its group), framed by the plan line before it
+	// and the verdict line after it. The user reads the findings
+	// once.
 	//
 	// On failure (incl. ErrReviewNotSupported), only the channel
 	// gets a reply — no Inject, since there's no findings to act
@@ -526,23 +528,31 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 
 		// Wire up the sink so the user sees the review agent's
 		// intermediate events (thinking, tool calls, …) streaming
-		// into the chat while /review runs. Sink is purely
-		// observational — the formatted review text still flows
-		// through FormatReviewMessage + sendBlocks (AS inject)
-		// and emitter.Send (channel emit) below as two separate
-		// product paths. No conflict: sink shows the process,
-		// the formatted text is the deliverable.
+		// into the chat while /review runs. The sink shows the
+		// process; the merged review text is the main agent's
+		// input and never reaches the channel.
 		//
-		// defer finalize() (F-63 follow-up fix-gtw-command-done):
+		// defer drain() (F-63 follow-up fix-gtw-command-done):
 		// the sink's drain goroutine runs on its own ctx so the
 		// terminal OutHeartbeat's renderLocked is not canceled
 		// when revCtx's WithTimeout fires at goroutine return.
+		//
+		// The drain is called once more below, right after the
+		// fan-out ends: the groups' flushed batches are still queued
+		// behind the drain goroutine, and the review's own closing
+		// lines must land after them.
 		sink, finalize := outbound.StreamRunOnceToEmitter(revCtx, emitter, cs, slog.Default(), chatID, replyTo, runnerName)
-		defer finalize()
+		var drainOnce sync.Once
+		drain := func() { drainOnce.Do(finalize) }
+		defer drain()
 
 		result, err := starter.Review(revCtx, rc,
 			agent.WithEventSink(sink),
 			agent.WithReviewJobObserver(collector.observe),
+			// The plan fires once, before the first group starts —
+			// the user learns the group list before any group
+			// produces output.
+			agent.WithReviewPlanObserver(planObserver(revCtx, emitter, collector, chatID, replyTo, runnerName)),
 		)
 
 		// The record is replaced with this run's outcomes BEFORE the
@@ -555,6 +565,11 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 		// chat's resume state alone: there is nothing new to resume
 		// from, and the previous run's unfinished groups are still
 		// unfinished.
+		//
+		// The sink is drained first: the groups' flushed batches are
+		// still queued behind its drain goroutine, and the review's
+		// own lines must land after them.
+		drain()
 		groupOutcomes := collector.results()
 		if len(groupOutcomes) > 0 {
 			f.record(chatID, runnerName, workspace, groupOutcomes)
@@ -649,12 +664,22 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 			return
 		}
 
-		// Success: wrap once, route twice (AS + channel).
+		// Success: the merged text goes to the main agent, the
+		// channel gets the verdict.
+		//
+		// The merged text is the agent's input — it is complete, it
+		// carries the failed-group markers, and "fix the blockers"
+		// reads it. The channel does NOT get it: the findings
+		// already reached the chat through the coalesced stream, and
+		// a second copy would say the same thing twice.
 		formatted := agent.FormatReviewMessage(workspace, runnerName, result.Text, result.Notes...)
-		blocks := []agent.ContentBlock{{Type: agent.ContentText, Text: formatted}}
+		blocks := []agent.ContentBlock{{
+			Type: agent.ContentText,
+			Text: formatted + reviewPromptFrame,
+		}}
 
-		// The review itself succeeded. The verdict the consumer
-		// ends up with is the merged one: a failed injection
+		// The review itself succeeded. The outcome the consumer
+		// ends up with is the delivered one: a failed injection
 		// outranks this, and the injected turn's own end decides
 		// the rest.
 		//
@@ -682,7 +707,20 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 			Data:    data,
 		})
 
-		// 1) Inject into AS as a user turn — main agent sees
+		// 1) The verdict line — what the run found, in one line:
+		//    the group count, the finding count, the severity
+		//    distribution, the groups that failed and the groups
+		//    whose output could not be parsed.
+		//
+		//    It is the last thing the review itself sends. It goes
+		//    out BEFORE the injected turn: the main agent starts
+		//    answering as soon as the turn is injected, and the
+		//    verdict must not land after the answer it summarizes.
+		if revCtx.Err() == nil {
+			sendVerdict(revCtx, emitter, chatID, replyTo, runnerName, result, groupOutcomes, collector.plan())
+		}
+
+		// 2) Inject into AS as a user turn — main agent sees
 		//    the review and can act on follow-ups.
 		//
 		// WithReplyTo(replyTo) tells the readpump to stamp the
@@ -719,18 +757,6 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 			})
 			injectWork.Release()
 		}
-
-		// 2) Send to the channel directly — user sees the
-		//    findings without waiting for the AS's downstream
-		//    reply. Skip silently if the chat session is
-		//    closing (revCtx cancelled) or the emitter is gone.
-		if emitter == nil {
-			return
-		}
-		if revCtx.Err() != nil {
-			return
-		}
-		_ = emitter.Send(revCtx, buildTerminalReply(chatID, replyTo, formatted, runnerName, result))
 	}()
 
 	// Return Consumed=true. The chat session is now free: readpump
@@ -762,8 +788,9 @@ const continueText = "continue"
 // point the agent at the wrong files.
 //
 // The merged result is delivered exactly like a review's: wrapped
-// with agent.FormatReviewMessage, injected into the chat session's
-// current AS as a user turn, and emitted to the channel.
+// with agent.FormatReviewMessage and injected into the chat session's
+// current AS as a user turn. The channel gets the resumed groups'
+// coalesced stream, framed by the plan line and the verdict line.
 func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices,
 	cs *chatsession.ChatSession, input command.SlashInput, notices []string) (*command.SlashOutput, error) {
 	chatID := input.ChatID
@@ -878,16 +905,24 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 		// The per-group outcomes of this run.
 		collector := &outcomeCollector{}
 
-		// The sink is purely observational — the formatted text
-		// still flows through FormatReviewMessage + sendBlocks (AS
-		// inject) and emitter.Send (channel emit) below as two
-		// separate product paths.
+		// The sink shows the process — the merged text is the main
+		// agent's input and never reaches the channel.
+		//
+		// The drain is called once more below, right after the
+		// fan-out ends: the groups' flushed batches are still queued
+		// behind the drain goroutine, and the continuation's own
+		// lines must land after them.
 		sink, finalize := outbound.StreamRunOnceToEmitter(revCtx, emitter, cs, slog.Default(), chatID, replyTo, runnerName)
-		defer finalize()
+		var drainOnce sync.Once
+		drain := func() { drainOnce.Do(finalize) }
+		defer drain()
 
 		result, err := agent.ContinueReviewJobs(revCtx, starter, rc, jobs, continueText,
 			agent.WithEventSink(sink),
 			agent.WithReviewJobObserver(collector.observe),
+			// The plan names the resumed groups, before the first
+			// one produces output.
+			agent.WithReviewPlanObserver(planObserver(revCtx, emitter, collector, chatID, replyTo, runnerName)),
 		)
 
 		// The record is replaced with this run's outcomes BEFORE the
@@ -899,6 +934,11 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 		// The write is conditional on the record still being the one
 		// this continuation resumed from: a review that finished in
 		// the meantime owns the chat's resume state.
+		//
+		// The sink is drained first: the groups' flushed batches are
+		// still queued behind its drain goroutine, and the
+		// continuation's own lines must land after them.
+		drain()
 		groupOutcomes := collector.spentResults()
 		f.recordIfCurrent(chatID, rec.id, runnerName, workspace, groupOutcomes)
 		finish()
@@ -930,10 +970,14 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 			return
 		}
 
-		// Success: wrap once, route twice (AS + channel) — the same
-		// delivery a normal review gets.
+		// Success: the merged text goes to the main agent, the
+		// channel gets the verdict — the same delivery a normal
+		// review gets.
 		formatted := agent.FormatReviewMessage(workspace, runnerName, result.Text, result.Notes...)
-		blocks := []agent.ContentBlock{{Type: agent.ContentText, Text: formatted}}
+		blocks := []agent.ContentBlock{{
+			Type: agent.ContentText,
+			Text: formatted + reviewPromptFrame,
+		}}
 
 		// A resumed group that failed again did not finish its
 		// work — the continuation is not a clean success. The
@@ -963,6 +1007,14 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 			Data:    data,
 		})
 
+		// The verdict line — the same contract as a plain review: it
+		// is the last thing the review itself sends, and it goes out
+		// before the injected turn so it never lands after the main
+		// agent's answer.
+		if revCtx.Err() == nil {
+			sendVerdict(revCtx, emitter, chatID, replyTo, runnerName, result, groupOutcomes, collector.plan())
+		}
+
 		// Same contract as a plain review: the injected turn is
 		// agent work of its own, so the message settles when that
 		// turn ends — and immediately when the injection fails.
@@ -979,14 +1031,6 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 			})
 			injectWork.Release()
 		}
-
-		if emitter == nil {
-			return
-		}
-		if revCtx.Err() != nil {
-			return
-		}
-		_ = emitter.Send(revCtx, buildTerminalReply(chatID, replyTo, formatted, runnerName, result))
 	}()
 
 	return replyWith(ctx, rt, notices, ""), nil
@@ -1061,23 +1105,6 @@ func replyWith(ctx context.Context, rt command.RuntimeServices, notices []string
 		lines = append(lines, errLine)
 	}
 	return command.Reply(ctx, rt, strings.Join(lines, "\n"))
-}
-
-// buildTerminalReply assembles the /review terminal OutboundMessage.
-// The caller passes the already-formatted text (see
-// FormatReviewMessage) so the wrap is computed once for both the
-// AS-inject path and the channel-emit path. Stamp policy lives in
-// messages.StampRunResult; this helper is just the message
-// construction + stamp plumbing.
-func buildTerminalReply(chatID, replyTo, formatted, runnerName string, result agent.RunResult) messages.OutboundMessage {
-	out := messages.OutboundMessage{
-		ChatID:  chatID,
-		Kind:    messages.OutReply,
-		ReplyTo: replyTo,
-		Text:    formatted,
-	}
-	messages.StampRunResult(&out, runnerName, result)
-	return out
 }
 
 // baseUnknownMessage renders the base-unknown failure: the workspace,

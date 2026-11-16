@@ -11,6 +11,26 @@ is committed there is the version users build and run.
 
 ## [Unreleased] — current dev (locked 2026-08-02)
 
+### Changed: `/review` delivers a plan, a coalesced stream and a verdict
+
+The review's findings used to reach the chat three times: once as the
+streamed chunks of every group, once as the merged document, and once
+more as the main agent's answer. The merged document is also the only
+thing the chat's agent could read in full, and it is what "fix the
+blockers" reads — so it stays, but it goes to the agent alone.
+
+The chat now sees the findings once. The run announces its shape before
+it starts (`🔍 review · codex · 4 groups` plus one line per group), the
+groups' output arrives in batches of about two seconds or two kilobytes
+with a `[group-N]` label, and the run ends with a verdict line: the
+group count, the finding count, the severity distribution, the groups
+that failed and the groups whose output could not be parsed. A failed
+group is named and points at `/review --continue`.
+
+The batches are lossless: the bodies of one group's batches concatenate
+back into that group's text. The main agent is asked for a verdict and
+the next step instead of a third copy of the findings.
+
 ### Breaking: the workflow step's `attempts:` is retired
 
 `attempts:` was the agent's counter for one step in one round. The agent

@@ -430,8 +430,9 @@ func TestHandle_ContinueResumesTheFailedGroup(t *testing.T) {
 	}
 
 	// The findings landed in the chat session's AS, wrapped like a
-	// review's.
-	injected := asDriver.blocks()
+	// review's. The inject happens after the run's own lines, so the
+	// test waits for it rather than assuming it already happened.
+	injected := waitForBlocks(t, asDriver, 1)
 	if len(injected) != 1 {
 		t.Fatalf("the AS received %d blocks, want 1", len(injected))
 	}
@@ -588,12 +589,61 @@ func TestHandle_ContinueTwiceReportsNothingLeft(t *testing.T) {
 	})
 
 	dispatchContinue(t, f, cs, chatID, "review", "-c")
-	em.waitForOutReply(t, "resumed findings")
+	// The group's findings reach the chat while the run is still in
+	// flight, so the sync point is the run's end — not the findings.
+	waitUntilIdle(t, f, chatID)
 
 	out := dispatchContinue(t, f, cs, chatID, "review", "-c")
 
 	if !strings.Contains(out.Reply, "nothing to continue") {
 		t.Fatalf("unexpected reply: %q", out.Reply)
+	}
+}
+
+// waitUntilIdle waits until the chat has no review running.
+func waitUntilIdle(t *testing.T, f *Factory, chatID string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for f.reviewRunning(chatID) {
+		if time.Now().After(deadline) {
+			t.Fatal("the review is still running")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestHandle_ContinuationOrdersTheLines: the chat sees the plan
+// first, the group's findings next and the verdict last. The verdict
+// summarizes the findings, so it must not overtake them — the sink
+// drains its queue before the verdict goes out.
+func TestHandle_ContinuationOrdersTheLines(t *testing.T) {
+	agents := newTestAgents(t)
+	starter := &reviewSessionStarter{name: "review-order-agent", reply: "resumed findings"}
+	agents.registry.Register(starter)
+
+	em := newRecordingEmitter()
+	const chatID = "review-order-chat"
+	cs, _ := newContinueChatSession(t, chatID, starter.name, t.TempDir(), em)
+
+	f := NewFactory()
+	f.record(chatID, starter.name, "/recorded/ws", []reviewOutcome{
+		{pattern: "**/*.ts", files: []string{"c.ts"}, sessionID: "sess-ts", err: errors.New("boom")},
+	})
+
+	dispatchContinue(t, f, cs, chatID, "review", "-c")
+	replies := waitForOutReplies(t, em, 3)
+
+	if !strings.Contains(replies[0].Text, "🔍 review") {
+		t.Errorf("the first line is not the plan: %q", replies[0].Text)
+	}
+	if !strings.Contains(replies[1].Text, "[group-1]") {
+		t.Errorf("the second line does not carry the group's label: %q", replies[1].Text)
+	}
+	if !strings.Contains(replies[1].Text, "resumed findings") {
+		t.Errorf("the second line does not carry the group's findings: %q", replies[1].Text)
+	}
+	if !strings.Contains(replies[2].Text, "finding") {
+		t.Errorf("the third line is not the verdict: %q", replies[2].Text)
 	}
 }
 

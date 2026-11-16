@@ -196,6 +196,9 @@ func TestEventAggregator_ReadyAllWait(t *testing.T) {
 // events arriving BEFORE all-Ready are NOT forwarded immediately;
 // they surface only after the synthetic outer Ready fires (via the
 // Phase 1→2 replay path).
+//
+// The replayed Text is coalesced, not forwarded as it is: it reaches
+// the outer sink when the group ends, labeled with the group.
 func TestEventAggregator_StreamAfterReady(t *testing.T) {
 	rec := &sinkRecorder{}
 	agg := newEventAggregator(rec.sink(), 2)
@@ -211,10 +214,11 @@ func TestEventAggregator_StreamAfterReady(t *testing.T) {
 	}
 	j2(readyEvent("a", "/r", "main"))
 
-	// After all-Ready: synthetic Ready first, then the buffered Text.
+	// After all-Ready: the synthetic Ready is the only outer event —
+	// the replayed Text joins the group's pending batch.
 	got := rec.snapshot()
-	if len(got) != 2 {
-		t.Fatalf("expected 2 outer events (1 synthetic Ready + 1 replayed Text); got %d: %+v", len(got), got)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 outer event (the synthetic Ready); got %d: %+v", len(got), got)
 	}
 	if got[0].Kind != EventAgentReady {
 		t.Errorf("event[0].Kind = %v, want EventAgentReady", got[0].Kind)
@@ -222,23 +226,31 @@ func TestEventAggregator_StreamAfterReady(t *testing.T) {
 	if got[0].Source != "" {
 		t.Errorf("event[0].Source = %q, want \"\"", got[0].Source)
 	}
-	if got[1].Kind != EventAgentText {
-		t.Errorf("event[1].Kind = %v, want EventAgentText", got[1].Kind)
+
+	// The group ends: its pending text is flushed, labeled.
+	j1(resultEvent(""))
+
+	got = rec.snapshot()
+	last := got[len(got)-1]
+	if last.Kind != EventAgentText {
+		t.Fatalf("the flushed batch is %v, want EventAgentText: %+v", last.Kind, got)
 	}
-	if got[1].Source != "group-1" {
-		t.Errorf("event[1].Source = %q, want \"group-1\"", got[1].Source)
+	if last.Source != "group-1" {
+		t.Errorf("flushed batch Source = %q, want \"group-1\"", last.Source)
 	}
-	if got[1].Text != "thinking in group-1" {
-		t.Errorf("event[1].Text = %q, want %q", got[1].Text, "thinking in group-1")
+	if last.Text != "[group-1]\n\nthinking in group-1" {
+		t.Errorf("flushed batch = %q, want the labeled group text", last.Text)
 	}
 }
 
 // TestEventAggregator_ToolPairForwardedTogether pins invariant #12:
 // in Phase 2 (live streaming), per-job ToolStart is held until the
 // matching ToolEnd arrives; both events then forward contiguously in
-// (Start, End) order on the wire. Intermediate Text events arriving
-// BETWEEN Start and End are forwarded in arrival order — the pair is
-// the only thing that gets reordered (Start held until End).
+// (Start, End) order on the wire.
+//
+// A Text event arriving BETWEEN Start and End is coalesced, not
+// forwarded as it is — so the pair is the only thing on the wire
+// between them, and the text leaves with the group.
 func TestEventAggregator_ToolPairForwardedTogether(t *testing.T) {
 	rec := &sinkRecorder{}
 	agg := newEventAggregator(rec.sink(), 1)
@@ -247,9 +259,9 @@ func TestEventAggregator_ToolPairForwardedTogether(t *testing.T) {
 	j1 := agg.wrapJob("group-1")
 	j1(readyEvent("a", "/r", "main"))
 
-	// Now Phase 2. Emit: ToolStart (buffered), Text (forwarded
-	// immediately), ToolEnd (pairs with buffered Start → forward
-	// Start, End together).
+	// Now Phase 2. Emit: ToolStart (buffered), Text (coalesced),
+	// ToolEnd (pairs with buffered Start → forward Start, End
+	// together).
 	j1(AgentEvent{
 		Kind: EventAgentToolStart,
 		ToolStart: &AgentToolStartEvent{
@@ -267,26 +279,23 @@ func TestEventAggregator_ToolPairForwardedTogether(t *testing.T) {
 	})
 
 	got := rec.snapshot()
-	// Expected order: synthetic Ready, Text (forwarded when it
-	// arrived), then ToolStart+ToolEnd (paired when End arrived).
-	if len(got) != 4 {
-		t.Fatalf("expected 4 outer events (Ready, Text, ToolStart, ToolEnd); got %d: %+v", len(got), got)
+	// Expected order: synthetic Ready, then ToolStart+ToolEnd (paired
+	// when End arrived). The text waits for the group to end.
+	if len(got) != 3 {
+		t.Fatalf("expected 3 outer events (Ready, ToolStart, ToolEnd); got %d: %+v", len(got), got)
 	}
 	if got[0].Kind != EventAgentReady || got[0].Source != "" {
 		t.Errorf("event[0] = %+v, want synthetic outer Ready", got[0])
 	}
-	if got[1].Kind != EventAgentText || got[1].Text != "in-between thought" {
-		t.Errorf("event[1] = %+v, want EventAgentText 'in-between thought' (forwarded between Start and End)", got[1])
+	if got[1].Kind != EventAgentToolStart || got[1].ToolStart.ID != "t1" {
+		t.Errorf("event[1] = %+v, want EventAgentToolStart ID=t1", got[1])
 	}
-	if got[2].Kind != EventAgentToolStart || got[2].ToolStart.ID != "t1" {
-		t.Errorf("event[2] = %+v, want EventAgentToolStart ID=t1", got[2])
+	if got[2].Kind != EventAgentToolEnd || got[2].ToolEnd.ID != "t1" {
+		t.Errorf("event[2] = %+v, want EventAgentToolEnd ID=t1", got[2])
 	}
-	if got[3].Kind != EventAgentToolEnd || got[3].ToolEnd.ID != "t1" {
-		t.Errorf("event[3] = %+v, want EventAgentToolEnd ID=t1", got[3])
-	}
-	// Critical: Start and End must be contiguous (events 2 and 3).
-	if got[2].Kind != EventAgentToolStart || got[3].Kind != EventAgentToolEnd {
-		t.Errorf("ToolStart/ToolEnd pair not contiguous: events[2]=%v, events[3]=%v", got[2].Kind, got[3].Kind)
+	// Critical: Start and End must be contiguous (events 1 and 2).
+	if got[1].Kind != EventAgentToolStart || got[2].Kind != EventAgentToolEnd {
+		t.Errorf("ToolStart/ToolEnd pair not contiguous: events[1]=%v, events[2]=%v", got[1].Kind, got[2].Kind)
 	}
 }
 
@@ -527,12 +536,14 @@ func TestEventAggregator_LateEventsDropped(t *testing.T) {
 	// After Ready + Result + markJobDone, we're in phaseClosed.
 	// Finding 2 fix: per-job Result/Error are SUPPRESSED at the
 	// aggregator layer (per REVIEW.md §2.5.5 "Result/Error → 不
-	// 外发"). Expected: 1 synthetic outer Ready (Source="") + 1
-	// synthetic outer Result (Source="") = 2 events. Per-job
-	// terminal events (even if they arrive) are not forwarded.
+	// 外发"). Expected: 1 synthetic outer Ready (Source="") + the
+	// group's flushed text (the result carried the tail of the
+	// group's reply) + 1 synthetic outer Result (Source="") = 3
+	// events. Per-job terminal events (even if they arrive) are not
+	// forwarded.
 	got := rec.snapshot()
-	if len(got) != 2 {
-		t.Fatalf("expected 2 events (Ready + synthetic outer Result); got %d: %+v", len(got), got)
+	if len(got) != 3 {
+		t.Fatalf("expected 3 events (Ready + flushed text + synthetic outer Result); got %d: %+v", len(got), got)
 	}
 
 	// Late event arrives via a fresh wrapJob (defensive — late
@@ -541,7 +552,7 @@ func TestEventAggregator_LateEventsDropped(t *testing.T) {
 	lateSink(AgentEvent{Kind: EventAgentText, Text: "this should be dropped"})
 
 	got = rec.snapshot()
-	if len(got) != 2 {
+	if len(got) != 3 {
 		t.Errorf("late event should be dropped; outer event count = %d", len(got))
 	}
 }

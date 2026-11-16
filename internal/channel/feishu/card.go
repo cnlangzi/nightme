@@ -48,9 +48,14 @@ func (a *Adapter) UpdateCard(ctx context.Context, chatID, cardID string, spec ch
 // The body is rendered one line per element: Feishu's markdown
 // element treats a newline as a soft break, so a body with newlines
 // in a single element runs together on the card.
+//
+// The body keeps inside Card 2.0's cap of five markdown tables: the
+// tables past the fifth lose their table shape, so the card is still
+// created and still PATCHed.
 func runCardJSON(spec channel.CardSpec) (string, error) {
+	lines := strings.Split(spec.Body, "\n")
 	elements := make([]map[string]any, 0, 8)
-	for _, line := range strings.Split(spec.Body, "\n") {
+	for _, line := range limitCardTables(lines) {
 		if strings.TrimSpace(line) == "" {
 			elements = append(elements, map[string]any{"tag": "hr"})
 			continue
@@ -93,6 +98,44 @@ func runCardJSON(spec channel.CardSpec) (string, error) {
 		return "", err
 	}
 	return string(raw), nil
+}
+
+// limitCardTables keeps a card body inside Feishu Card 2.0's hard cap
+// of five markdown tables.
+//
+// The lines are the body of the card in render order. A table is a
+// run of consecutive lines that are pipe-delimited rows. The tables
+// past the fifth lose their table shape: their rows are rendered as
+// plain text, so the card is still created and still PATCHed —
+// Feishu refuses a card that carries more than five tables.
+func limitCardTables(lines []string) []string {
+	out := make([]string, len(lines))
+	tables := 0
+	inTable := false
+	for i, line := range lines {
+		if tableRow(line) {
+			if !inTable {
+				tables++
+				inTable = true
+			}
+		} else {
+			inTable = false
+		}
+		if inTable && tables > resultCardTableLimit {
+			out[i] = plainTableRow(line)
+			continue
+		}
+		out[i] = line
+	}
+	return out
+}
+
+// plainTableRow renders a row of a markdown table as plain text.
+//
+// The pipes are escaped: the row keeps its shape and stops being a
+// table.
+func plainTableRow(line string) string {
+	return strings.ReplaceAll(line, "|", `\|`)
 }
 
 // handleMeCardAction turns a run-card button click into the command

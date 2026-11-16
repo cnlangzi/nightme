@@ -89,16 +89,22 @@ func countMarkdownTables(s string) int {
 	count := 0
 	inTable := false
 	for _, line := range strings.Split(s, "\n") {
-		trimmed := strings.TrimSpace(line)
-		isTableLine := len(trimmed) > 1 && trimmed[0] == '|' && trimmed[len(trimmed)-1] == '|'
-		if isTableLine && !inTable {
-			count++
-			inTable = true
-		} else if !isTableLine {
+		if tableRow(line) {
+			if !inTable {
+				count++
+				inTable = true
+			}
+		} else {
 			inTable = false
 		}
 	}
 	return count
+}
+
+// tableRow reports whether a line is a row of a markdown table.
+func tableRow(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	return len(trimmed) > 1 && trimmed[0] == '|' && trimmed[len(trimmed)-1] == '|'
 }
 
 // buildPostMdJSON renders a Feishu Post (rich-text) message using the `md`

@@ -695,10 +695,11 @@ func TestFixRemote_AddIssueLabelFailure_RollsBackWorktreeAndBranch(t *testing.T)
 // user can see exactly which of the check's calls tripped.
 //
 // Trigger: SetCreateLabelErrFor is configured so the SECOND
-// CreateLabel call returns an error (simulating a network blip
-// mid-check). The test asserts that calls 0 succeeded but
-// the check halted at index 1 — no worktree, no branch, and
-// AddIssueLabel is never reached.
+// CreateLabel call (AllLabels[1] = LabelWIP) returns an error
+// (simulating a network blip mid-check). The test asserts that the
+// first call (AllLabels[0] = LabelAssigned) succeeded but the check
+// halted at index 1 — no worktree, no branch, and AddIssueLabel is
+// never reached.
 func TestFixRemote_CreateLabelFailure_LeavesNoWorktree(t *testing.T) {
 	rig := newFixRemoteRig(t)
 	issueID := 235
@@ -708,8 +709,8 @@ func TestFixRemote_CreateLabelFailure_LeavesNoWorktree(t *testing.T) {
 		State: "open",
 		URL:   "https://github.com/cnlangzi/nightme/issues/235",
 	})
-	// Fail on the SECOND CreateLabel call (index 1 = LabelReady)
-	// using per-name injection so the FIRST call (LabelWIP)
+	// Fail on the SECOND CreateLabel call (index 1 = LabelWIP)
+	// using per-name injection so the FIRST call (LabelAssigned)
 	// still succeeds. This pins the mid-loop short-circuit
 	// behaviour: index 0 logs success, index 1 errors, the
 	// check halts before reaching AllLabels[2..]. Without
@@ -722,16 +723,16 @@ func TestFixRemote_CreateLabelFailure_LeavesNoWorktree(t *testing.T) {
 		t.Fatalf("RunFix: %v", err)
 	}
 
-	// Exactly two CreateLabel calls happened: index 0 (WIP,
-	// succeeded) + index 1 (Ready, errored). Indices 2.. were
-	// never reached because the check short-circuits on the
-	// first error.
+	// Exactly two CreateLabel calls happened: index 0
+	// (LabelAssigned, succeeded) + index 1 (LabelWIP, errored).
+	// Indices 2.. were never reached because the check
+	// short-circuits on the first error.
 	ensureCalls := rig.prov.CallsByMethod("CreateLabel")
 	if len(ensureCalls) != 2 {
 		t.Errorf("CreateLabel calls = %d, want 2 (index 0 success + index 1 short-circuit): %+v",
 			len(ensureCalls), ensureCalls)
 	}
-	// The failing call must be AllLabels[1] (LabelReady) per
+	// The failing call must be AllLabels[1] (LabelWIP) per
 	// the per-name injection above. Verifies the per-name
 	// override actually drives which label trips the failure.
 	if len(ensureCalls) >= 2 && ensureCalls[1].Label != AllLabels[1] {

@@ -235,8 +235,12 @@ func blockerNumbers(blockers []*Issue) string {
 // was passed over, so the user can act on it.
 //
 // labelNote explains the empty queue in terms of the label catalog:
-// the queue marker exists in the repository, so the queue is empty
-// because nobody has attached it to an issue yet.
+// the queue marker is in the repository's catalog, so the queue is
+// empty because nobody has attached it to an issue yet. It is
+// rendered only when the queue held no candidate at all — a queue
+// whose candidates were all passed over has its own reasons, spelled
+// out in the rows above, and "attach the label to an issue" would
+// not change that.
 //
 // The card reads like the outcome: the command was asked to fix an
 // issue and could not, so it failed.
@@ -277,7 +281,7 @@ func renderAutoNoCandidate(sel *autoSelection, labelNote string) string {
 	for _, r := range rows {
 		fmt.Fprintf(&b, "→ %-*s %s\n", width, r[0]+":", r[1])
 	}
-	if labelNote != "" {
+	if labelNote != "" && sel.Counters.Candidates == 0 {
 		fmt.Fprintf(&b, "→ %s\n", labelNote)
 	}
 	fmt.Fprintf(&b, "↳ come back in %s for another pick.\n", autoWakeAfter)

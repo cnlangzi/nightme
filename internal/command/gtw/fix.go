@@ -328,7 +328,7 @@ func runFixRemote(
 	// there is nothing to roll back. The provider's own error text
 	// is echoed verbatim — it names the root cause (token scope,
 	// network, missing permission) better than any paraphrase.
-	created, err := ensureRepoLabels(ctx, deps, provider, owner, repo)
+	chk, err := ensureRepoLabels(ctx, deps, provider, owner, repo)
 	if err != nil {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ Could not ensure gtw labels on %s/%s: %v\n"+
@@ -351,7 +351,7 @@ func runFixRemote(
 		}
 		if picked.Issue == nil {
 			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-				renderAutoNoCandidate(picked, labelCatalogNote(created)),
+				renderAutoNoCandidate(picked, labelCatalogNote(chk)),
 				autoNoCandidateOutcome(picked)), nil
 		}
 		issueID = picked.Issue.ID

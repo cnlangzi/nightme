@@ -190,10 +190,8 @@ func RunNewCreate(
 		return prov, owner, repo, nil
 	}
 	card, outcome := createIssuesFromDrafts(ctx, draftDir, resolve)
-	if labelWarning != "" {
-		card = labelWarning + "\n" + card
-	}
-	return replyOutcome(ctx, cs.Emitter(), chatID, messageID, card, outcome), nil
+	return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+		prependWarning(labelWarning, card), outcome), nil
 }
 
 // issueDraft is one pending draft file of the chat's draft set.

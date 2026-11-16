@@ -1597,11 +1597,22 @@ func (c *GitHubProvider) ListLabels(ctx context.Context, owner, repo string) ([]
 	if err != nil {
 		return nil, fmt.Errorf("gh api labels: %v: %s", err, stderr)
 	}
+	return decodeLabelNames("gh", stdout)
+}
+
+// decodeLabelNames turns a platform's label-list response into the
+// label names it carries. Both platforms answer with a flat array
+// of label objects, so the decoding is shared — only the CLI they
+// were read through differs.
+//
+// platform names the CLI in the decode error ("gh" / "glab"), so a
+// failure still says which platform's response could not be parsed.
+func decodeLabelNames(platform, stdout string) ([]string, error) {
 	var raw []struct {
 		Name string `json:"name"`
 	}
 	if err := json.Unmarshal([]byte(stdout), &raw); err != nil {
-		return nil, fmt.Errorf("gh api labels: decode json: %w", err)
+		return nil, fmt.Errorf("%s api labels: decode json: %w", platform, err)
 	}
 	out := make([]string, 0, len(raw))
 	for _, r := range raw {
@@ -2172,17 +2183,7 @@ func (c *GitLabProvider) ListLabels(ctx context.Context, owner, repo string) ([]
 	if err != nil {
 		return nil, fmt.Errorf("glab api labels: %v: %s", err, stderr)
 	}
-	var raw []struct {
-		Name string `json:"name"`
-	}
-	if err := json.Unmarshal([]byte(stdout), &raw); err != nil {
-		return nil, fmt.Errorf("glab api labels: decode json: %w", err)
-	}
-	out := make([]string, 0, len(raw))
-	for _, r := range raw {
-		out = append(out, r.Name)
-	}
-	return out, nil
+	return decodeLabelNames("glab", stdout)
 }
 
 // CreatePR runs `glab mr create --target-branch <base> --source-branch

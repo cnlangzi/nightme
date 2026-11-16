@@ -171,11 +171,14 @@ func dispatchPR(
 	// opened, so the repository keeps the gtw labels the next /gtw
 	// fix needs. A failed check only warns: opening a pull request
 	// does not depend on the catalog holding the gtw labels. The
-	// warning rides on the success card — the reply that reports
-	// what the command actually did.
+	// warning rides on every reply the command produces from here
+	// on, so the user learns about it wherever /gtw pr ends.
 	labelWarning := ""
 	if _, err := ensureRepoLabels(ctx, deps, provider, owner, repo); err != nil {
 		labelWarning = labelCheckWarning(owner, repo, err)
+	}
+	withWarning := func(body string) string {
+		return prependWarning(labelWarning, body)
 	}
 
 	// --- gate 2: no open PR for this branch -------------------------
@@ -191,18 +194,18 @@ func dispatchPR(
 		// surface the install hint without a gate-2 prefix.
 		if errors.Is(err, ErrCLINotInstalled) {
 			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-				fmt.Sprintf("❌ %v", err),
+				withWarning(fmt.Sprintf("❌ %v", err)),
 				command.FailedOutcome("error", "the git host CLI is not installed")), nil
 		}
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ check existing PR: %v", err),
+			withWarning(fmt.Sprintf("❌ check existing PR: %v", err)),
 			command.FailedOutcome("error", "the existing pull requests could not be listed")), nil
 	}
 	if existing != nil {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf(
+			withWarning(fmt.Sprintf(
 				"❌ branch %s already has an open PR (#%d): %s",
-				c.Branch, existing.Number, existing.URL),
+				c.Branch, existing.Number, existing.URL)),
 			command.FailedOutcomeData("pr_exists", "the branch already has an open pull request",
 				map[string]string{
 					"branch":    c.Branch,
@@ -231,7 +234,7 @@ func dispatchPR(
 		messages.OutResult)
 	if err != nil {
 		return replyAgentOutcome(ctx, cs.Emitter(), chatID, messageID,
-			err.Error(), agentName, runRes,
+			withWarning(err.Error()), agentName, runRes,
 			command.FailedOutcomeData("agent_error", "the agent did not produce a pull request",
 				map[string]string{"agent": agentName})), nil
 	}
@@ -242,9 +245,9 @@ func dispatchPR(
 		// Agent output wasn't usable. Echo the raw text so
 		// the user can copy/paste into gh/glab themselves.
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf(
+			withWarning(fmt.Sprintf(
 				"❌ %v — agent output was:\n%s",
-				perr, indentLines(text, "  ")),
+				perr, indentLines(text, "  "))),
 			command.FailedOutcomeData("agent_error", "the agent reply could not be parsed",
 				map[string]string{"agent": agentName})), nil
 	}
@@ -258,9 +261,9 @@ func dispatchPR(
 	// re-runs /gtw pr.
 	if isSummaryHeading(title) {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf(
+			withWarning(fmt.Sprintf(
 				"❌ %v — agent output was:\n%s\n↳ re-run `/gtw pr` to retry (or try another agent with `-a <name>`)",
-				errMissingPRTitle, indentLines(text, "  ")),
+				errMissingPRTitle, indentLines(text, "  "))),
 			command.FailedOutcomeData("agent_error", "the agent reply has no pull request title",
 				map[string]string{"agent": agentName})), nil
 	}
@@ -308,40 +311,37 @@ func dispatchPR(
 		switch {
 		case errors.Is(err, ErrStaleUpstream):
 			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-				fmt.Sprintf(
+				withWarning(fmt.Sprintf(
 					"❌ origin/%s no longer exists — /gtw push first to republish",
-					c.Branch),
+					c.Branch)),
 				command.FailedOutcome("no_remote_branch",
 					"the branch is no longer published to origin")), nil
 		case errors.Is(err, ErrNoCommitsBetween):
 			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-				fmt.Sprintf(
+				withWarning(fmt.Sprintf(
 					"❌ no commits between %s and %s — push new commits first, or rebase onto a newer base.",
-					baseBranch, c.Branch),
+					baseBranch, c.Branch)),
 				command.FailedOutcome("no_commits", "the branch has no commits to review")), nil
 		case errors.Is(err, ErrPRExists):
 			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-				fmt.Sprintf(
+				withWarning(fmt.Sprintf(
 					"❌ a PR for %s already exists — check your repo's PR list.",
-					c.Branch),
+					c.Branch)),
 				command.FailedOutcomeData("pr_exists", "the branch already has an open pull request",
 					map[string]string{"branch": c.Branch})), nil
 		case errors.Is(err, ErrCLINotInstalled):
 			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-				fmt.Sprintf("❌ %v", err),
+				withWarning(fmt.Sprintf("❌ %v", err)),
 				command.FailedOutcome("error", "the git host CLI is not installed")), nil
 		default:
 			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-				fmt.Sprintf("❌ create PR failed: %v", err),
+				withWarning(fmt.Sprintf("❌ create PR failed: %v", err)),
 				command.FailedOutcome("error", "the pull request could not be created")), nil
 		}
 	}
 
 	riskLevel, riskReason := extractRiskLevel(body)
-	card := renderPROpenedCard(c, baseBranch, url, riskLevel, riskReason)
-	if labelWarning != "" {
-		card = labelWarning + "\n" + card
-	}
+	card := withWarning(renderPROpenedCard(c, baseBranch, url, riskLevel, riskReason))
 
 	// Stamp the new PR into the workspace's cache before we
 	// reply. Registry.WritePR allocates the cache on first

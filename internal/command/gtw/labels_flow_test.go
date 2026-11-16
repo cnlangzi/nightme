@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 )
@@ -71,6 +72,35 @@ func TestFixAuto_CreatesMissingAssignedLabelBeforePick(t *testing.T) {
 	}
 	if !strings.Contains(last, "attach it to an issue") {
 		t.Errorf("reply must say how the queue is filled:\n%s", last)
+	}
+}
+
+// TestFixAuto_SkippedCandidate_DropsTheQueueNote pins that the
+// queue-marker note belongs to a queue that holds no candidate at
+// all. A candidate that was passed over has its own reason on the
+// card, and "attach the label to an issue" would not change that.
+func TestFixAuto_SkippedCandidate_DropsTheQueueNote(t *testing.T) {
+	rig := newFixRemoteRig(t)
+	rig.prov.SetListLabels(catalogMissingAssigned())
+	blocked := &Issue{
+		ID:        41,
+		Title:     "feat: blocked one",
+		State:     "open",
+		Labels:    []string{LabelAssigned},
+		CreatedAt: time.Date(2025, 12, 1, 0, 0, 0, 0, time.UTC),
+	}
+	rig.prov.SetListIssues([]*Issue{blocked})
+	rig.prov.SetBlockedBy(41, []*Issue{{ID: 30, State: "open"}})
+
+	if _, err := rig.driveAuto(t); err != nil {
+		t.Fatalf("RunFix: %v", err)
+	}
+	last := rig.rec.lastText()
+	if !strings.Contains(last, "blocked") {
+		t.Errorf("reply must name the reason the candidate was passed over:\n%s", last)
+	}
+	if strings.Contains(last, "attach it to an issue") {
+		t.Errorf("reply must not tell the user to attach the label — the queue holds a candidate:\n%s", last)
 	}
 }
 
@@ -134,7 +164,7 @@ func TestFixRemote_AddIssueLabelFailure_NamesStaleCatalog(t *testing.T) {
 		LabelWIP,
 		"#42",
 		"'nightme/wip' not found",
-		"may have changed since",
+		"was verified earlier in this session",
 		"restart the nightme daemon",
 		"by hand",
 	} {
@@ -198,6 +228,32 @@ func TestDispatchPR_LabelCheckFailure_WarnsAndContinues(t *testing.T) {
 	r := s.lastText()
 	if !strings.Contains(r, "https://github.com/x/y/pull/1") {
 		t.Fatalf("expected the pull request to be opened, got:\n%s", r)
+	}
+	if !strings.Contains(r, "⚠️ could not ensure gtw labels on") {
+		t.Errorf("reply must carry the warning line:\n%s", r)
+	}
+}
+
+// TestDispatchPR_LabelCheckFailure_WarnsOnFailureToo pins that the
+// warning survives the command's failure paths: the user learns
+// about the broken catalog whichever way /gtw pr ends.
+func TestDispatchPR_LabelCheckFailure_WarnsOnFailureToo(t *testing.T) {
+	rig := newPRTestRig(t)
+	setupPRWorktree(t, rig, Context{Branch: "wt"})
+	setupPRGit(rig, "wt", 0)
+	rig.git.on("remote", "git@github.com:octocat/hello.git", "", nil)
+	rig.prov.SetListLabelsErr(errors.New("403 Forbidden: missing Labels read scope"))
+	rig.prov.SetFindOpenPRResp(&PR{Number: 42, URL: "https://github.com/octocat/hello/pull/42", State: "open"})
+	rig.installDeps()
+
+	cs := rig.cs
+	s := captureCh(t, cs)
+	if _, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, Config{}); err != nil {
+		t.Fatalf("dispatchPR err: %v", err)
+	}
+	r := s.lastText()
+	if !strings.Contains(r, "already has an open PR") {
+		t.Fatalf("expected the existing-PR reply, got:\n%s", r)
 	}
 	if !strings.Contains(r, "⚠️ could not ensure gtw labels on") {
 		t.Errorf("reply must carry the warning line:\n%s", r)

@@ -259,13 +259,12 @@ func RunClose(
 	}
 	// A failed label-catalog check is a warning, not a failure:
 	// the close still runs to its normal result. The warning rides
-	// along on every reply the close produces, so the user learns
-	// about it wherever the command happens to end.
+	// along on every reply the close itself produces — its success
+	// card and its failure cards — so the user learns about it
+	// wherever the close ends. The sync card that follows is a
+	// separate step and does not repeat it.
 	withWarning := func(body string) string {
-		if labelWarning == "" {
-			return body
-		}
-		return labelWarning + "\n" + body
+		return prependWarning(labelWarning, body)
 	}
 
 	// --- step 2.6: close ASes pinned to the about-to-be-gone worktree ---
@@ -546,17 +545,19 @@ func removeWIPLabel(
 	// The label catalog is verified before the teardown, so the
 	// repository keeps the gtw labels it needs for the next fix. A
 	// failed check only warns: removing the claim marker does not
-	// depend on the catalog holding the gtw labels.
+	// depend on the catalog holding the gtw labels. Which labels
+	// the check created is of no interest here — the close does not
+	// report what the catalog needed.
 	if _, err := ensureRepoLabels(ctx, deps, prov, owner, repo); err != nil {
 		warning = labelCheckWarning(owner, repo, err)
 	}
 
 	if rmErr := prov.RemoveIssueLabel(ctx, owner, repo, c.Issue, LabelWIP); rmErr != nil {
 		reply(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ could not remove label %q from issue #%d: %v\n"+
+			prependWarning(warning, fmt.Sprintf("❌ could not remove label %q from issue #%d: %v\n"+
 				"worktree and branch are left intact — retry /gtw close once "+
 				"the platform call succeeds (auth / network / repo moved).",
-				LabelWIP, c.Issue, rmErr))
+				LabelWIP, c.Issue, rmErr)))
 		return false, nil, "", "", true, ""
 	}
 

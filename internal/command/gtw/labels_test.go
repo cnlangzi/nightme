@@ -15,31 +15,47 @@ import (
 // every lookup misses, every store is dropped, and nothing panics.
 func TestLabelCache_NilIsInert(t *testing.T) {
 	var c *LabelCache
-	if c.lookup("cnlangzi", "nightme") {
+	if c.lookup(ProviderGitHub, "cnlangzi", "nightme") {
 		t.Errorf("a nil cache must never report a hit")
 	}
-	c.store("cnlangzi", "nightme")
-	if c.lookup("cnlangzi", "nightme") {
+	c.store(ProviderGitHub, "cnlangzi", "nightme")
+	if c.lookup(ProviderGitHub, "cnlangzi", "nightme") {
 		t.Errorf("a nil cache must not remember anything")
 	}
 }
 
 // TestLabelCache_StoreThenLookup pins the key: the entry is the
-// repository, so the same repository hits and every other one misses.
+// repository on a platform, so the same repository hits and every
+// other one misses.
 func TestLabelCache_StoreThenLookup(t *testing.T) {
 	c := &LabelCache{}
-	if c.lookup("cnlangzi", "nightme") {
+	if c.lookup(ProviderGitHub, "cnlangzi", "nightme") {
 		t.Errorf("an empty cache must miss")
 	}
-	c.store("cnlangzi", "nightme")
-	if !c.lookup("cnlangzi", "nightme") {
+	c.store(ProviderGitHub, "cnlangzi", "nightme")
+	if !c.lookup(ProviderGitHub, "cnlangzi", "nightme") {
 		t.Errorf("a stored repository must hit")
 	}
-	if c.lookup("cnlangzi", "other") {
+	if c.lookup(ProviderGitHub, "cnlangzi", "other") {
 		t.Errorf("another repository must miss")
 	}
-	if c.lookup("other", "nightme") {
+	if c.lookup(ProviderGitHub, "other", "nightme") {
 		t.Errorf("another owner must miss")
+	}
+}
+
+// TestLabelCache_PlatformIsPartOfTheKey pins that two platforms
+// hosting repositories with the same owner and name keep separate
+// entries: each platform has its own label catalog, and a shared
+// entry would leave the second platform's labels uncreated.
+func TestLabelCache_PlatformIsPartOfTheKey(t *testing.T) {
+	c := &LabelCache{}
+	c.store(ProviderGitHub, "acme", "api")
+	if c.lookup(ProviderGitLab, "acme", "api") {
+		t.Errorf("a GitLab project must not hit the GitHub repository's entry")
+	}
+	if !c.lookup(ProviderGitHub, "acme", "api") {
+		t.Errorf("the GitHub repository must still hit its own entry")
 	}
 }
 
@@ -60,8 +76,11 @@ func TestEnsureRepoLabels_CreatesOnlyTheMissingLabels(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensureRepoLabels: %v", err)
 	}
-	if len(created) != 1 || created[0] != LabelAssigned {
-		t.Errorf("created = %v, want [%s]", created, LabelAssigned)
+	if len(created.Created) != 1 || created.Created[0] != LabelAssigned {
+		t.Errorf("created = %v, want [%s]", created.Created, LabelAssigned)
+	}
+	if !created.Verified {
+		t.Errorf("the check read the catalog; Verified = false")
 	}
 	calls := prov.CallsByMethod("CreateLabel")
 	if len(calls) != 1 {
@@ -84,12 +103,12 @@ func TestEnsureRepoLabels_CompleteCatalogCreatesNothing(t *testing.T) {
 	prov.SetListLabels(AllLabels)
 	deps := HandlerDeps{LabelCache: &LabelCache{}}
 
-	created, err := ensureRepoLabels(context.Background(), deps, prov, "cnlangzi", "nightme")
+	chk, err := ensureRepoLabels(context.Background(), deps, prov, "cnlangzi", "nightme")
 	if err != nil {
 		t.Fatalf("ensureRepoLabels: %v", err)
 	}
-	if len(created) != 0 {
-		t.Errorf("created = %v, want none", created)
+	if len(chk.Created) != 0 {
+		t.Errorf("created = %v, want none", chk.Created)
 	}
 	if n := len(prov.CallsByMethod("CreateLabel")); n != 0 {
 		t.Errorf("CreateLabel calls = %d, want 0 (the catalog is complete)", n)
@@ -108,12 +127,15 @@ func TestEnsureRepoLabels_CacheHitMakesNoRemoteCall(t *testing.T) {
 	if _, err := ensureRepoLabels(ctx, deps, prov, "cnlangzi", "nightme"); err != nil {
 		t.Fatalf("first ensureRepoLabels: %v", err)
 	}
-	created, err := ensureRepoLabels(ctx, deps, prov, "cnlangzi", "nightme")
+	chk, err := ensureRepoLabels(ctx, deps, prov, "cnlangzi", "nightme")
 	if err != nil {
 		t.Fatalf("second ensureRepoLabels: %v", err)
 	}
-	if len(created) != 0 {
-		t.Errorf("created = %v, want none on a cache hit", created)
+	if len(chk.Created) != 0 {
+		t.Errorf("created = %v, want none on a cache hit", chk.Created)
+	}
+	if chk.Verified {
+		t.Errorf("a cache hit did not read the catalog; Verified = true")
 	}
 	if n := len(prov.CallsByMethod("ListLabels")); n != 1 {
 		t.Errorf("ListLabels calls = %d, want 1 (the second check is a cache hit)", n)
@@ -184,6 +206,29 @@ func TestEnsureRepoLabels_FailedCreationIsNotRecorded(t *testing.T) {
 	}
 }
 
+// TestEnsureRepoLabels_SameOwnerRepoOnTwoPlatforms pins that the
+// platform is part of the cache key: a GitLab project and a GitHub
+// repository can share an owner/repo string, and each platform has
+// its own label catalog.
+func TestEnsureRepoLabels_SameOwnerRepoOnTwoPlatforms(t *testing.T) {
+	github := newFakeGitProvider(ProviderGitHub, "github.com")
+	github.SetListLabels(AllLabels)
+	gitlab := newFakeGitProvider(ProviderGitLab, "gitlab.com")
+	gitlab.SetListLabels(AllLabels)
+	deps := HandlerDeps{LabelCache: &LabelCache{}}
+	ctx := context.Background()
+
+	if _, err := ensureRepoLabels(ctx, deps, github, "acme", "api"); err != nil {
+		t.Fatalf("ensureRepoLabels (github): %v", err)
+	}
+	if _, err := ensureRepoLabels(ctx, deps, gitlab, "acme", "api"); err != nil {
+		t.Fatalf("ensureRepoLabels (gitlab): %v", err)
+	}
+	if n := len(gitlab.CallsByMethod("ListLabels")); n != 1 {
+		t.Errorf("ListLabels calls = %d, want 1 (the GitLab project has its own catalog)", n)
+	}
+}
+
 // TestEnsureRepoLabels_NilCacheAlwaysReadsRemotely pins that a
 // HandlerDeps without a cache keeps working: the check runs every
 // time, against the platform.
@@ -204,22 +249,43 @@ func TestEnsureRepoLabels_NilCacheAlwaysReadsRemotely(t *testing.T) {
 }
 
 // TestLabelCatalogNote_SaysWhatTheQueueNeeds pins the empty-queue
-// note: it names the queue marker, and says the label was just
-// created when the check repaired the repository.
+// note: it names the queue marker, says the label was just created
+// when the check repaired the repository, and says the catalog was
+// verified earlier when the answer came from the cache.
 func TestLabelCatalogNote_SaysWhatTheQueueNeeds(t *testing.T) {
-	created := labelCatalogNote([]string{LabelAssigned})
+	created := labelCatalogNote(labelCheck{Created: []string{LabelAssigned}, Verified: true})
 	if !strings.Contains(created, LabelAssigned) {
 		t.Errorf("note = %q, want it to name %q", created, LabelAssigned)
 	}
 	if !strings.Contains(created, "just created") {
 		t.Errorf("note = %q, want it to say the label was just created", created)
 	}
-	complete := labelCatalogNote(nil)
+	complete := labelCatalogNote(labelCheck{Verified: true})
 	if !strings.Contains(complete, LabelAssigned) {
 		t.Errorf("note = %q, want it to name %q", complete, LabelAssigned)
 	}
 	if strings.Contains(complete, "just created") {
 		t.Errorf("note = %q, want it not to claim the label was created", complete)
+	}
+	// A cached answer was verified earlier in the session, not
+	// now — the note must not claim the label is in the catalog.
+	cached := labelCatalogNote(labelCheck{})
+	if !strings.Contains(cached, "earlier in this session") {
+		t.Errorf("note = %q, want it to say the catalog was verified earlier", cached)
+	}
+	if strings.Contains(cached, "just created") {
+		t.Errorf("note = %q, want it not to claim the label was created", cached)
+	}
+}
+
+// TestPrependWarning pins the shared warning helper: an empty
+// warning leaves the body alone, a non-empty one leads the body.
+func TestPrependWarning(t *testing.T) {
+	if got := prependWarning("", "body"); got != "body" {
+		t.Errorf("prependWarning with no warning = %q, want %q", got, "body")
+	}
+	if got := prependWarning("⚠️ boom", "body"); got != "⚠️ boom\nbody" {
+		t.Errorf("prependWarning = %q, want %q", got, "⚠️ boom\nbody")
 	}
 }
 

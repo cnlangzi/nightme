@@ -81,6 +81,8 @@ what the workflow is for.
 
 A workflow names **no agent**. The run uses the agent of the chat that started it — the chat's `/use` choice, or its primary agent.
 
+A key the schema does not have is ignored: the file loads, and the key has no effect.
+
 Minimal skeleton (`~/.nightme/workflows/my-workflow.yaml`):
 
 ```yaml

@@ -19,6 +19,9 @@ type MeRequest struct {
 	// name=value assigns that argument by name; every other token
 	// fills the next declared argument, in order.
 	Args []string
+	// Iterations overrides the round count of every job of the
+	// workflow. Nil means the workflow file's own counts stand.
+	Iterations *int
 	// ChatID is the chat the run works in.
 	ChatID string
 	// Cwd is the working directory the run works in.

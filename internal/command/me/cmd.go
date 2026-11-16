@@ -6,17 +6,21 @@
 //
 // The commands:
 //
-//	/me start <workflow> [args...] — start a workflow
-//	/me reply <text>              — answer the question the run asked
-//	/me pause                     — stop the run after the current step
-//	/me continue [note]           — hand the control back to the run
-//	/me stop                      — stop the run
-//	/me status                    — report where the run stands
+//	/me start <workflow> [args...] [-i <rounds>] — start a workflow
+//	/me reply <text>                          — answer the question the run asked
+//	/me pause                                 — stop the run after the current step
+//	/me continue [note]                       — hand the control back to the run
+//	/me stop                                  — stop the run
+//	/me status                                — report where the run stands
+//
+// The `-i` flag of `/me start` sets how many rounds every job of the
+// workflow runs in that run. The workflow file keeps its own counts.
 package me
 
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -50,11 +54,11 @@ func NewFactory(ctrl command.MeController) *Factory {
 func (f *Factory) Spec() command.Spec {
 	return command.Spec{
 		Name:     "me",
-		Summary:  "Run a workflow: /me start <workflow> [args...]",
-		Usage:    "/me start <workflow> [args...]\n/me reply <text>\n/me pause\n/me continue [note]\n/me show\n/me stop\n/me status",
+		Summary:  "Run a workflow: /me start <workflow> [args...] [-i <rounds>]",
+		Usage:    "/me start <workflow> [args...] [-i <rounds>]\n/me reply <text>\n/me pause\n/me continue [note]\n/me show\n/me stop\n/me status",
 		Category: "agent",
 		Subcommands: []command.SubcommandSpec{
-			{Name: "start", Summary: "Start a workflow in this chat."},
+			{Name: "start", Summary: "Start a workflow in this chat. -i sets the rounds."},
 			{Name: "reply", Summary: "Answer the question the run asked."},
 			{Name: "pause", Summary: "Stop the run after the current step."},
 			{Name: "continue", Summary: "Hand the control back to the run."},
@@ -63,6 +67,20 @@ func (f *Factory) Spec() command.Spec {
 			{Name: "status", Summary: "Report where the run stands."},
 		},
 	}
+}
+
+// startCmdSpec declares /me start's argv grammar. The shared lexer
+// (command.ParseCmdArgs) enforces the "unknown flag" / arity contract,
+// and "--" hands the rest of the command line to the workflow.
+var startCmdSpec = command.CmdSpec{
+	Name:  "/me start",
+	Usage: "/me start <workflow> [args...] [-i <rounds>]",
+	Flags: map[string]command.FlagSpec{
+		"-i":           {Name: "iterations", TakesValue: true},
+		"--iterations": {Name: "iterations", TakesValue: true},
+	},
+	MinArgs: 1,
+	MaxArgs: command.UnboundedArgs,
 }
 
 // Handle implements command.SlashCommandFactory.
@@ -102,9 +120,19 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 func (f *Factory) start(ctx context.Context, rt command.RuntimeServices,
 	cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 
-	if len(input.Args) < 3 {
+	var argv []string
+	if len(input.Args) > 2 {
+		argv = input.Args[2:]
+	}
+	parsed, err := command.ParseCmdArgs(argv, startCmdSpec)
+	if err != nil {
 		chatsession.ReportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
-		return command.Reply(ctx, rt, "Usage: /me start <workflow> [args...]"), nil
+		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
+	}
+	iterations, err := parseIterations(parsed)
+	if err != nil {
+		chatsession.ReportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
+		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
 	cwd, failOut := command.RequireActiveCwd(cs)
 	if failOut != nil {
@@ -112,26 +140,52 @@ func (f *Factory) start(ctx context.Context, rt command.RuntimeServices,
 		return failOut, nil
 	}
 
-	name := input.Args[2]
+	name := parsed.Arg(0)
 	runID, err := f.ctrl.StartWorkflow(ctx, command.MeRequest{
-		Name:     name,
-		Args:     input.Args[3:],
-		ChatID:   input.ChatID,
-		Cwd:      cwd,
-		Owner:    input.UserID,
-		Commands: commandInfos(command.Default().SpecsVisible()),
-		Agent:    cs.SelectedAgent(),
+		Name:       name,
+		Args:       parsed.Args[1:],
+		Iterations: iterations,
+		ChatID:     input.ChatID,
+		Cwd:        cwd,
+		Owner:      input.UserID,
+		Commands:   commandInfos(command.Default().SpecsVisible()),
+		Agent:      cs.SelectedAgent(),
 	})
 	if err != nil {
 		chatsession.ReportOutcome(ctx, command.FailedOutcome("error", "the workflow could not be started"))
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
+	data := map[string]string{"workflow": name, "run_id": runID}
+	reply := "▶ " + name + " started (" + runID + ")"
+	if iterations != nil {
+		data["iterations"] = strconv.Itoa(*iterations)
+		reply += " · rounds: " + strconv.Itoa(*iterations)
+	}
 	chatsession.ReportOutcome(ctx, messages.Outcome{
 		Status:  messages.OutcomeOK,
 		Summary: "started " + name,
-		Data:    map[string]string{"workflow": name, "run_id": runID},
+		Data:    data,
 	})
-	return command.Reply(ctx, rt, "▶ "+name+" started ("+runID+")"), nil
+	return command.Reply(ctx, rt, reply), nil
+}
+
+// parseIterations reads the round count the command line asks for.
+//
+// A count that is not a whole number >= 0 is refused: the workflow
+// file's own counts are the fallback, not a mistyped number. A count
+// of zero means the job repeats until the run ends — the same meaning
+// `iterations: 0` has in the file.
+func parseIterations(parsed command.ParsedArgs) (*int, error) {
+	if !parsed.Has("iterations") {
+		return nil, nil
+	}
+	raw := strings.TrimSpace(parsed.Value("iterations"))
+	rounds, err := strconv.Atoi(raw)
+	if err != nil || rounds < 0 {
+		return nil, fmt.Errorf("the round count must be a whole number >= 0, got %q%s",
+			raw, startCmdSpec.UsageTail())
+	}
+	return &rounds, nil
 }
 
 // reply hands the user's answer to the run.
@@ -308,13 +362,14 @@ func NewController(svc *mesvc.Service) command.MeController {
 // StartWorkflow implements command.MeController.
 func (c *controller) StartWorkflow(ctx context.Context, req command.MeRequest) (string, error) {
 	return c.svc.StartWorkflow(ctx, mesvc.Request{
-		Name:     req.Name,
-		Args:     req.Args,
-		ChatID:   req.ChatID,
-		Cwd:      req.Cwd,
-		Owner:    req.Owner,
-		Commands: req.Commands,
-		Agent:    req.Agent,
+		Name:       req.Name,
+		Args:       req.Args,
+		Iterations: req.Iterations,
+		ChatID:     req.ChatID,
+		Cwd:        req.Cwd,
+		Owner:      req.Owner,
+		Commands:   req.Commands,
+		Agent:      req.Agent,
 	})
 }
 

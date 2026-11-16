@@ -2,6 +2,7 @@ package me
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -188,6 +189,168 @@ jobs:
 	}
 	if !strings.Contains(err.Error(), `there is no workflow named "nope" (known: fix)`) {
 		t.Errorf("error = %v, want the known names", err)
+	}
+}
+
+// TestStartWorkflow_TheRoundCountOverridesEveryJob — the count the
+// command line names reaches every job of the workflow, the ones that
+// declare a count and the ones that declare none.
+func TestStartWorkflow_TheRoundCountOverridesEveryJob(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "fix", `title: do the thing
+jobs:
+  main:
+    iterations: 0
+    steps:
+      - id: rest
+        wait: 5m
+  check:
+    steps:
+      - id: look
+        wait: 5m
+`)
+
+	svc, _ := testService(t, dir, noModels())
+	rounds := 2
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "fix", ChatID: "obs-1", Cwd: "/tmp/work", Iterations: &rounds,
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() {
+		if err := svc.Stop(context.Background(), "obs-1"); err != nil {
+			t.Fatalf("stop: %v", err)
+		}
+		waitRun(t, svc, "obs-1")
+	}()
+
+	svc.mu.Lock()
+	r := svc.active["obs-1"]
+	svc.mu.Unlock()
+	if r == nil {
+		t.Fatal("the run is not registered")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, job := range []string{"main", "check"} {
+		if got := r.workflow.Jobs[job].Rounds(); got != rounds {
+			t.Errorf("the rounds of %s = %d, want %d", job, got, rounds)
+		}
+	}
+}
+
+// TestStartWorkflow_TheOverrideLeavesTheCatalogueAlone — the count of
+// a run is the run's own: the file and the catalogue's copy of it keep
+// their counts.
+func TestStartWorkflow_TheOverrideLeavesTheCatalogueAlone(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "fix", `title: do the thing
+jobs:
+  main:
+    iterations: 0
+    steps:
+      - id: rest
+        wait: 5m
+`)
+
+	svc, _ := testService(t, dir, noModels())
+	rounds := 1
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "fix", ChatID: "obs-1", Cwd: "/tmp/work", Iterations: &rounds,
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if err := svc.Stop(context.Background(), "obs-1"); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	waitRun(t, svc, "obs-1")
+
+	wf, ok := svc.catalog.Lookup("fix")
+	if !ok {
+		t.Fatal("the catalogue does not hold the workflow")
+	}
+	if got := wf.Jobs["main"].Rounds(); got != 0 {
+		t.Errorf("the rounds of the catalogue's workflow = %d, want 0", got)
+	}
+}
+
+// TestStartWorkflow_WithoutTheCountTheFileCountsStand — a run that
+// names no count uses the counts of the file.
+func TestStartWorkflow_WithoutTheCountTheFileCountsStand(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "fix", `title: do the thing
+jobs:
+  main:
+    iterations: 3
+    steps:
+      - id: rest
+        wait: 5m
+`)
+
+	svc, _ := testService(t, dir, noModels())
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "fix", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() {
+		if err := svc.Stop(context.Background(), "obs-1"); err != nil {
+			t.Fatalf("stop: %v", err)
+		}
+		waitRun(t, svc, "obs-1")
+	}()
+
+	svc.mu.Lock()
+	r := svc.active["obs-1"]
+	svc.mu.Unlock()
+	if r == nil {
+		t.Fatal("the run is not registered")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if got := r.workflow.Jobs["main"].Rounds(); got != 3 {
+		t.Errorf("the rounds of main = %d, want 3", got)
+	}
+}
+
+// TestResume_ARunKeepsItsOverriddenCount — the bound workflow is
+// persisted whole, so a resumed run keeps the count it was started
+// with.
+func TestResume_ARunKeepsItsOverriddenCount(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "fix", `title: do the thing
+jobs:
+  main:
+    iterations: 0
+    steps:
+      - id: rest
+        wait: 5m
+`)
+
+	svc, _ := testService(t, dir, noModels())
+	rounds := 1
+	runID, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "fix", ChatID: "obs-1", Cwd: "/tmp/work", Iterations: &rounds,
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitForState(t, svc.statePath(runID))
+
+	raw, err := os.ReadFile(svc.statePath(runID))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var state persistedRun
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	restored := svc.restoreRun(state)
+	restored.mu.Lock()
+	defer restored.mu.Unlock()
+	if got := restored.workflow.Jobs["main"].Rounds(); got != 1 {
+		t.Errorf("the rounds of the resumed run = %d, want 1", got)
 	}
 }
 

@@ -128,6 +128,9 @@ type Request struct {
 	// form name=value assigns that argument by name; every other
 	// token fills the next declared argument, in order.
 	Args []string
+	// Iterations overrides the round count of every job of the
+	// workflow. Nil means the workflow file's own counts stand.
+	Iterations *int
 	// ChatID is the chat the run works in. The run speaks there and
 	// takes its answers from there.
 	ChatID string
@@ -550,6 +553,12 @@ func (s *Service) StartWorkflow(ctx context.Context, req Request) (string, error
 	bound, err := wfe.Bind(wf, values)
 	if err != nil {
 		return "", err
+	}
+	// The override lands on the bound workflow — the copy the run
+	// owns. The file and the catalogue's copy of it keep their own
+	// counts, so the override is this run's and not the workflow's.
+	if req.Iterations != nil {
+		wfe.OverrideIterations(bound, *req.Iterations)
 	}
 	r := newRun(s, req, bound, values)
 

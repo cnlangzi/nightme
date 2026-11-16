@@ -534,7 +534,7 @@ jobs:
 | `note` | 这个 step 为什么在这儿，owner 平时怎么修它。它是决策模型读的那段描述。 |
 | `final` | 这个 step 负责收尾：这一轮怎么结束它都跑。标了 `final: true` 的 step 在提前结束的一轮里顶上被跳过的那几步。 |
 
-`attempts:` 已经退休：还带着它的文件加载不了。agent 的预算是一个数字，对每个 step、每一轮都一样，由 `me.max_judgments` 定。
+agent 的预算是一个数字，对每个 step、每一轮都一样，由 `me.max_judgments` 定。
 
 表达式有 `${{ args.NAME }}`、`${{ steps.<id>.outputs.status }}`、
 `${{ steps.<id>.outputs.data.<key> }}`、`${{ needs.<job>.* }}`、`${{ env.NAME }}`

@@ -206,47 +206,36 @@ func parse(raw []byte) (*Workflow, error) {
 	return &wf, nil
 }
 
-// The keys each level of the schema accepts.
-var (
-	workflowKeys = keySet("title", "args", "instruct", "workspaces", "on", "jobs")
-	argKeys      = keySet("name", "default")
-	jobKeys      = keySet("needs", "if", "iterations", "steps")
-	stepKeys     = keySet("id", "if", "env", "continue-on-error", "note", "final", "message", "shell", "use", "with", "wait")
-	triggerKeys  = keySet("schedule", "pull_request", "branch", "issue", "mention")
-)
-
-// keySet builds a set of accepted keys.
-func keySet(keys ...string) map[string]bool {
-	out := make(map[string]bool, len(keys))
-	for _, k := range keys {
-		out[k] = true
-	}
-	return out
-}
-
 // entry is one key/value pair of a YAML mapping.
 type entry struct {
 	key string
-	// line is where the key is written.
-	line int
 	// val is the value of the key.
 	val *yaml.Node
 }
 
-// mappingEntries returns the key/value pairs of a YAML mapping.
-func mappingEntries(node *yaml.Node) ([]entry, error) {
+// requireMapping checks that a node holds a mapping.
+func requireMapping(node *yaml.Node) error {
 	if node == nil {
-		return nil, nil
+		return fmt.Errorf("expected a mapping, got nothing")
 	}
 	if node.Kind != yaml.MappingNode {
-		return nil, fmt.Errorf("expected a mapping, got %s", nodeKind(node))
+		return fmt.Errorf("expected a mapping, got %s", nodeKind(node))
+	}
+	return nil
+}
+
+// mappingEntries returns the key/value pairs of a YAML mapping.
+//
+// The node must be a mapping: requireMapping says so.
+func mappingEntries(node *yaml.Node) ([]entry, error) {
+	if err := requireMapping(node); err != nil {
+		return nil, err
 	}
 	out := make([]entry, 0, len(node.Content)/2)
 	for i := 0; i+1 < len(node.Content); i += 2 {
 		out = append(out, entry{
-			key:  node.Content[i].Value,
-			line: node.Content[i].Line,
-			val:  node.Content[i+1],
+			key: node.Content[i].Value,
+			val: node.Content[i+1],
 		})
 	}
 	return out, nil
@@ -265,11 +254,10 @@ func nodeKind(node *yaml.Node) string {
 	return "something else"
 }
 
-// checkDocument validates the keys of a workflow file.
+// checkDocument validates the shape of a workflow file.
 //
-// A key the schema does not know is refused by name. The retired keys
-// get their own message: a file that still uses one of them has to be
-// rewritten, and the error says what to write instead.
+// A key the schema does not have is ignored: the file loads, and the
+// key has no effect.
 func checkDocument(root *yaml.Node) error {
 	entries, err := mappingEntries(root)
 	if err != nil {
@@ -277,22 +265,8 @@ func checkDocument(root *yaml.Node) error {
 	}
 	for _, e := range entries {
 		switch e.key {
-		case "steps":
-			return fmt.Errorf("`steps:` is retired (line %d): a workflow keeps its steps in `jobs:`", e.line)
-		case "agent":
-			return fmt.Errorf("`agent:` is retired (line %d): a run uses the agent of the chat that started it", e.line)
-		case "name":
-			return fmt.Errorf("unknown key %q: the workflow's name is its file name; use %q for a description (line %d)",
-				e.key, "title", e.line)
-		case "goal":
-			return fmt.Errorf("unknown key %q: use %q for a description (line %d)", e.key, "title", e.line)
-		}
-		if !workflowKeys[e.key] {
-			return fmt.Errorf("unknown key %q (line %d)", e.key, e.line)
-		}
-		switch e.key {
 		case "args":
-			if err := checkArgs(e.val); err != nil {
+			if err := checkMappingList("`args:`", e.val); err != nil {
 				return err
 			}
 		case "on":
@@ -308,20 +282,16 @@ func checkDocument(root *yaml.Node) error {
 	return nil
 }
 
-// checkArgs validates the argument specs of a workflow.
-func checkArgs(node *yaml.Node) error {
+// checkMappingList checks that a node holds a list of mappings.
+//
+// The label names the list in an error message.
+func checkMappingList(label string, node *yaml.Node) error {
 	if node.Kind != yaml.SequenceNode {
-		return fmt.Errorf("`args:` must be a list (got %s)", nodeKind(node))
+		return fmt.Errorf("%s must be a list (got %s)", label, nodeKind(node))
 	}
 	for _, item := range node.Content {
-		entries, err := mappingEntries(item)
-		if err != nil {
-			return fmt.Errorf("`args:`: %w", err)
-		}
-		for _, e := range entries {
-			if !argKeys[e.key] {
-				return fmt.Errorf("unknown key %q in an argument (line %d)", e.key, e.line)
-			}
+		if err := requireMapping(item); err != nil {
+			return fmt.Errorf("%s: %w", label, err)
 		}
 	}
 	return nil
@@ -333,15 +303,6 @@ func checkArgs(node *yaml.Node) error {
 func checkTrigger(node *yaml.Node) error {
 	if node.Kind != yaml.MappingNode {
 		return fmt.Errorf("`on:` must be a mapping (got %s)", nodeKind(node))
-	}
-	entries, err := mappingEntries(node)
-	if err != nil {
-		return fmt.Errorf("`on:`: %w", err)
-	}
-	for _, e := range entries {
-		if !triggerKeys[e.key] {
-			return fmt.Errorf("unknown key %q in `on:` (line %d)", e.key, e.line)
-		}
 	}
 	return nil
 }
@@ -361,49 +322,15 @@ func checkJobs(node *yaml.Node) error {
 			return fmt.Errorf("job %q: %w", e.key, err)
 		}
 		for _, je := range jobEntries {
-			if !jobKeys[je.key] {
-				return fmt.Errorf("unknown key %q in job %q (line %d)", je.key, e.key, je.line)
-			}
 			if je.key == "iterations" {
 				if err := requireWholeNumber(je.key, je.val); err != nil {
 					return fmt.Errorf("job %q: %w", e.key, err)
 				}
 			}
 			if je.key == "steps" {
-				if err := checkSteps(e.key, je.val); err != nil {
+				if err := checkMappingList(fmt.Sprintf("job %q: `steps:`", e.key), je.val); err != nil {
 					return err
 				}
-			}
-		}
-	}
-	return nil
-}
-
-// checkSteps validates the steps of a job.
-func checkSteps(job string, node *yaml.Node) error {
-	if node.Kind != yaml.SequenceNode {
-		return fmt.Errorf("job %q: `steps:` must be a list (got %s)", job, nodeKind(node))
-	}
-	for _, item := range node.Content {
-		entries, err := mappingEntries(item)
-		if err != nil {
-			return fmt.Errorf("job %q: `steps:`: %w", job, err)
-		}
-		for _, e := range entries {
-			switch e.key {
-			case "run":
-				return fmt.Errorf("`run:` is retired (line %d): use `shell:`", e.line)
-			case "prompt":
-				return fmt.Errorf("`prompt:` is retired (line %d): use `message:`", e.line)
-			case "agent":
-				return fmt.Errorf("`agent:` is retired (line %d): a run uses the agent of the chat that started it", e.line)
-			case "allow":
-				return fmt.Errorf("`allow:` is retired (line %d): the agent may run any nightme command; a fix does not move the plan on — put the command in its own step if it is part of the work", e.line)
-			case "attempts":
-				return fmt.Errorf("`attempts:` is retired (line %d): the agent's budget for a step is one number now — the same for every step and every round", e.line)
-			}
-			if !stepKeys[e.key] {
-				return fmt.Errorf("unknown key %q in a step of job %q (line %d)", e.key, job, e.line)
 			}
 		}
 	}

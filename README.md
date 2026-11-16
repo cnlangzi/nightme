@@ -599,8 +599,7 @@ A step carries exactly one kind:
 | `note` | Why the step is there, and which fixes the owner uses for it. It is the description the decision model reads. |
 | `final` | The step cleans up after the round: it runs when the round ends, however the round ends. A step marked `final: true` runs in the place of the steps a round that ended early cut short. |
 
-`attempts:` is retired: a file that still carries it does not load. The budget
-of the agent is one number for every step and every round, set by
+The budget of the agent is one number for every step and every round, set by
 `me.max_judgments`.
 
 The expressions are `${{ args.NAME }}`, `${{ steps.<id>.outputs.status }}`,

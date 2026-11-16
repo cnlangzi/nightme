@@ -11,6 +11,19 @@ is committed there is the version users build and run.
 
 ## [Unreleased] — current dev (locked 2026-08-02)
 
+### Changed: the workflow loader ignores the keys a workflow file does not use
+
+A workflow file that carries a key of an older schema was refused by name,
+with the line it was written on. The schema churns, and every retirement
+added a branch to the loader and a message to keep in step with it, so a
+file written against an older schema could not run at all.
+
+The loader ignores every key the schema does not have, a misspelling
+included: the file loads, and the key has no effect. The checks that are
+about a value and a shape stay — a file without a title, a file without
+jobs, a step that names no kind and a duration that is not a duration are
+still refused.
+
 ### Changed: `/review` delivers a plan, a coalesced stream and a verdict
 
 The review's findings used to reach the chat three times: once as the
@@ -42,8 +55,8 @@ issued for it, or a turn of the chat model that produced no tool call. When the 
 step the run is on is spent, the run pauses and says so in the chat:
 `/me continue` hands the control back and the step's budget starts over.
 
-Workflow files that still carry `attempts:` are refused with a message that
-names the key and the line. The budget is one number for every step and
+A workflow file that still carries `attempts:` loads: the key is ignored,
+and the step keeps its kind. The budget is one number for every step and
 every round, set by `me.max_judgments`.
 
 ### Fixed: a failed step no longer ends the run
@@ -86,8 +99,8 @@ The decision model now picks among the steps' `message:` values. The
 repairs belong to the chat model, which holds every nightme command as a
 tool: a run with only a decision model asks the user instead.
 
-Workflow files that still carry `allow:` are refused with a message that
-names the key and the line.
+A workflow file that still carries `allow:` loads: the key is ignored, and
+the step keeps its kind.
 
 ### Changed: `/gtw fix <id>` branch names lead with the issue id
 

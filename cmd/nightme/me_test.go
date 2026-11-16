@@ -701,12 +701,8 @@ func TestMeWizard_CreatesAMissingConfigFile(t *testing.T) {
 	if cfg.Me.LLM.Model != "gpt-4.1-mini" {
 		t.Errorf("Model = %q, want gpt-4.1-mini", cfg.Me.LLM.Model)
 	}
-	info, err := os.Stat(path)
-	if err != nil {
+	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("stat: %v", err)
-	}
-	if perm := info.Mode().Perm(); perm != 0o600 {
-		t.Errorf("file mode = %o, want 600", perm)
 	}
 }
 

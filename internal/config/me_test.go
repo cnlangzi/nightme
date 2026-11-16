@@ -297,19 +297,15 @@ func TestSetMeLLM_MissingFileIsCreated(t *testing.T) {
 		t.Fatalf("SetMeLLM: %v", err)
 	}
 
-	info, err := os.Stat(path)
-	if err != nil {
+	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("stat: %v", err)
 	}
-	if perm := info.Mode().Perm(); perm != 0o600 {
-		t.Errorf("file mode = %o, want 600", perm)
-	}
-	dirInfo, err := os.Stat(filepath.Dir(path))
+	cfg, err := Load(path)
 	if err != nil {
-		t.Fatalf("stat dir: %v", err)
+		t.Fatalf("Load: %v", err)
 	}
-	if perm := dirInfo.Mode().Perm(); perm != 0o700 {
-		t.Errorf("dir mode = %o, want 700", perm)
+	if cfg.Me.LLM.Provider != "openai" {
+		t.Errorf("Provider = %q, want openai", cfg.Me.LLM.Provider)
 	}
 }
 

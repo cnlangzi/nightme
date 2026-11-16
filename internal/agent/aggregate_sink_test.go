@@ -63,6 +63,20 @@ func (m *markJobDoneRecorder) snapshot() int {
 	return m.count
 }
 
+// testPlan builds the plan of a review fan-out with n groups — the
+// aggregator needs it to name the groups.
+func testPlan(n int) []ReviewPlanGroup {
+	plan := make([]ReviewPlanGroup, n)
+	for i := range plan {
+		plan[i] = ReviewPlanGroup{
+			Pattern: fmt.Sprintf("**/*.go"),
+			Label:   fmt.Sprintf("group %d", i+1),
+			Files:   []string{"a.go"},
+		}
+	}
+	return plan
+}
+
 // runJobGoroutine simulates the orchestrator's per-job goroutine
 // pattern: emits a stream of events to a per-job sink, then
 // fires markJobDone in defer. Tests that want to exercise the
@@ -75,14 +89,13 @@ func (m *markJobDoneRecorder) snapshot() int {
 // has finished both the event stream AND the markJobDone defer,
 // so tests can deterministically wait for completion before
 // asserting on the outer sink.
-func runJobGoroutine(agg *eventAggregator, src string, events []AgentEvent) <-chan struct{} {
+func runJobGoroutine(agg *eventAggregator, groupIdx int, events []AgentEvent) <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		defer agg.markJobDone()
-		sink := agg.wrapJob(src)
+		sink := agg.wrapJob(groupIdx)
 		for _, ev := range events {
-			ev.Source = src // match what wrapJob does in production
 			sink(ev)
 		}
 	}()
@@ -94,18 +107,17 @@ func runJobGoroutine(agg *eventAggregator, src string, events []AgentEvent) <-ch
 // Mirrors the orchestrator's wg.Wait() — tests that want to
 // drive the aggregator to its terminal state use this to ensure
 // every per-job's markJobDone has fired before assertions run.
-func runJobGoroutines(agg *eventAggregator, jobs map[string][]AgentEvent) {
+func runJobGoroutines(agg *eventAggregator, jobs map[int][]AgentEvent) {
 	var wg sync.WaitGroup
-	for src, events := range jobs {
+	for groupIdx, events := range jobs {
 		wg.Add(1)
-		src := src
+		groupIdx := groupIdx
 		events := events
 		go func() {
 			defer wg.Done()
 			defer agg.markJobDone()
-			sink := agg.wrapJob(src)
+			sink := agg.wrapJob(groupIdx)
 			for _, ev := range events {
-				ev.Source = src
 				sink(ev)
 			}
 		}()
@@ -118,14 +130,13 @@ func runJobGoroutines(agg *eventAggregator, jobs map[string][]AgentEvent) {
 // goroutine to finish before returning. Use when the test wants
 // per-job ordering to be deterministic (no concurrency noise) but
 // still needs the completion-driven counting path to engage.
-func runSingleJob(agg *eventAggregator, src string, events []AgentEvent) {
+func runSingleJob(agg *eventAggregator, groupIdx int, events []AgentEvent) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		defer agg.markJobDone()
-		sink := agg.wrapJob(src)
+		sink := agg.wrapJob(groupIdx)
 		for _, ev := range events {
-			ev.Source = src
 			sink(ev)
 		}
 	}()
@@ -164,12 +175,12 @@ func errorEvent(err error) AgentEvent {
 // then, the outer sink sees ZERO events.
 func TestEventAggregator_ReadyAllWait(t *testing.T) {
 	rec := &sinkRecorder{}
-	agg := newEventAggregator(rec.sink(), 3)
+	agg := newEventAggregator(rec.sink(), testPlan(3))
 
 	jobs := []func(AgentEvent){
-		agg.wrapJob("group-1"),
-		agg.wrapJob("group-2"),
-		agg.wrapJob("group-3"),
+		agg.wrapJob(1 - 1),
+		agg.wrapJob(2 - 1),
+		agg.wrapJob(3 - 1),
 	}
 	// Emit Readys in non-monotonic order to make sure the gate
 	// doesn't rely on arrival order.
@@ -197,14 +208,14 @@ func TestEventAggregator_ReadyAllWait(t *testing.T) {
 // they surface only after the synthetic outer Ready fires (via the
 // Phase 1→2 replay path).
 //
-// The replayed Text is coalesced, not forwarded as it is: it reaches
-// the outer sink when the group ends, labeled with the group.
+// The replayed Text is collected, not forwarded as it is: it reaches
+// the outer sink when the group ends, carrying the group's number.
 func TestEventAggregator_StreamAfterReady(t *testing.T) {
 	rec := &sinkRecorder{}
-	agg := newEventAggregator(rec.sink(), 2)
+	agg := newEventAggregator(rec.sink(), testPlan(2))
 
-	j1 := agg.wrapJob("group-1")
-	j2 := agg.wrapJob("group-2")
+	j1 := agg.wrapJob(0)
+	j2 := agg.wrapJob(1)
 
 	// Phase 1: emit Ready + Text from job-1, then Ready from job-2.
 	j1(readyEvent("a", "/r", "main"))
@@ -214,11 +225,12 @@ func TestEventAggregator_StreamAfterReady(t *testing.T) {
 	}
 	j2(readyEvent("a", "/r", "main"))
 
-	// After all-Ready: the synthetic Ready is the only outer event —
-	// the replayed Text joins the group's pending batch.
+	// After all-Ready: the synthetic Ready and the group's start hint
+	// are the outer events — the replayed Text joins the group's
+	// pending batch.
 	got := rec.snapshot()
-	if len(got) != 1 {
-		t.Fatalf("expected 1 outer event (the synthetic Ready); got %d: %+v", len(got), got)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 outer events (the synthetic Ready and the start hint); got %d: %+v", len(got), got)
 	}
 	if got[0].Kind != EventAgentReady {
 		t.Errorf("event[0].Kind = %v, want EventAgentReady", got[0].Kind)
@@ -226,20 +238,23 @@ func TestEventAggregator_StreamAfterReady(t *testing.T) {
 	if got[0].Source != "" {
 		t.Errorf("event[0].Source = %q, want \"\"", got[0].Source)
 	}
+	if got[1].Kind != EventAgentThinking {
+		t.Errorf("event[1].Kind = %v, want the group's start hint", got[1].Kind)
+	}
 
-	// The group ends: its pending text is flushed, labeled.
+	// The group ends: its findings are handed over.
 	j1(resultEvent(""))
 
 	got = rec.snapshot()
 	last := got[len(got)-1]
-	if last.Kind != EventAgentText {
-		t.Fatalf("the flushed batch is %v, want EventAgentText: %+v", last.Kind, got)
+	if last.Kind != EventAgentThinking {
+		t.Fatalf("the handed-over findings are %v, want EventAgentThinking: %+v", last.Kind, got)
 	}
 	if last.Source != "group-1" {
-		t.Errorf("flushed batch Source = %q, want \"group-1\"", last.Source)
+		t.Errorf("the findings' Source = %q, want \"group-1\"", last.Source)
 	}
-	if last.Text != "[group-1]\n\nthinking in group-1" {
-		t.Errorf("flushed batch = %q, want the labeled group text", last.Text)
+	if last.Text != "[1] thinking in group-1" {
+		t.Errorf("the findings = %q, want the numbered group text", last.Text)
 	}
 }
 
@@ -248,18 +263,18 @@ func TestEventAggregator_StreamAfterReady(t *testing.T) {
 // matching ToolEnd arrives; both events then forward contiguously in
 // (Start, End) order on the wire.
 //
-// A Text event arriving BETWEEN Start and End is coalesced, not
+// A Text event arriving BETWEEN Start and End is collected, not
 // forwarded as it is — so the pair is the only thing on the wire
-// between them, and the text leaves with the group.
+// between them, and the findings leave with the group.
 func TestEventAggregator_ToolPairForwardedTogether(t *testing.T) {
 	rec := &sinkRecorder{}
-	agg := newEventAggregator(rec.sink(), 1)
+	agg := newEventAggregator(rec.sink(), testPlan(1))
 
 	// Drive the gate first (1 expected).
-	j1 := agg.wrapJob("group-1")
+	j1 := agg.wrapJob(0)
 	j1(readyEvent("a", "/r", "main"))
 
-	// Now Phase 2. Emit: ToolStart (buffered), Text (coalesced),
+	// Now Phase 2. Emit: ToolStart (buffered), Text (collected),
 	// ToolEnd (pairs with buffered Start → forward Start, End
 	// together).
 	j1(AgentEvent{
@@ -279,23 +294,27 @@ func TestEventAggregator_ToolPairForwardedTogether(t *testing.T) {
 	})
 
 	got := rec.snapshot()
-	// Expected order: synthetic Ready, then ToolStart+ToolEnd (paired
-	// when End arrived). The text waits for the group to end.
-	if len(got) != 3 {
-		t.Fatalf("expected 3 outer events (Ready, ToolStart, ToolEnd); got %d: %+v", len(got), got)
+	// Expected order: synthetic Ready, the group's start hint, then
+	// ToolStart+ToolEnd (paired when End arrived). The findings wait
+	// for the group to end.
+	if len(got) != 4 {
+		t.Fatalf("expected 4 outer events (Ready, start hint, ToolStart, ToolEnd); got %d: %+v", len(got), got)
 	}
 	if got[0].Kind != EventAgentReady || got[0].Source != "" {
 		t.Errorf("event[0] = %+v, want synthetic outer Ready", got[0])
 	}
-	if got[1].Kind != EventAgentToolStart || got[1].ToolStart.ID != "t1" {
-		t.Errorf("event[1] = %+v, want EventAgentToolStart ID=t1", got[1])
+	if got[1].Kind != EventAgentThinking {
+		t.Errorf("event[1] = %+v, want the group's start hint", got[1])
 	}
-	if got[2].Kind != EventAgentToolEnd || got[2].ToolEnd.ID != "t1" {
-		t.Errorf("event[2] = %+v, want EventAgentToolEnd ID=t1", got[2])
+	if got[2].Kind != EventAgentToolStart || got[2].ToolStart.ID != "t1" {
+		t.Errorf("event[2] = %+v, want EventAgentToolStart ID=t1", got[2])
 	}
-	// Critical: Start and End must be contiguous (events 1 and 2).
-	if got[1].Kind != EventAgentToolStart || got[2].Kind != EventAgentToolEnd {
-		t.Errorf("ToolStart/ToolEnd pair not contiguous: events[1]=%v, events[2]=%v", got[1].Kind, got[2].Kind)
+	if got[3].Kind != EventAgentToolEnd || got[3].ToolEnd.ID != "t1" {
+		t.Errorf("event[3] = %+v, want EventAgentToolEnd ID=t1", got[3])
+	}
+	// Critical: Start and End must be contiguous (events 2 and 3).
+	if got[2].Kind != EventAgentToolStart || got[3].Kind != EventAgentToolEnd {
+		t.Errorf("ToolStart/ToolEnd pair not contiguous: events[2]=%v, events[3]=%v", got[2].Kind, got[3].Kind)
 	}
 }
 
@@ -306,10 +325,10 @@ func TestEventAggregator_ToolPairForwardedTogether(t *testing.T) {
 // transition.
 func TestEventAggregator_ToolPairFromReplay(t *testing.T) {
 	rec := &sinkRecorder{}
-	agg := newEventAggregator(rec.sink(), 2)
+	agg := newEventAggregator(rec.sink(), testPlan(2))
 
-	j1 := agg.wrapJob("group-1")
-	j2 := agg.wrapJob("group-2")
+	j1 := agg.wrapJob(1 - 1)
+	j2 := agg.wrapJob(2 - 1)
 	// job-1 emits Ready + tool pair during Phase 1 (only 1 of 2
 	// Readys — still buffering).
 	j1(readyEvent("a", "/r", "main"))
@@ -366,9 +385,9 @@ func TestEventAggregator_ToolPairFromReplay(t *testing.T) {
 // this, but the chat renderer should not crash on it.
 func TestEventAggregator_OrphanEndForwarded(t *testing.T) {
 	rec := &sinkRecorder{}
-	agg := newEventAggregator(rec.sink(), 1)
+	agg := newEventAggregator(rec.sink(), testPlan(1))
 
-	j1 := agg.wrapJob("group-1")
+	j1 := agg.wrapJob(1 - 1)
 	j1(readyEvent("a", "/r", "main"))
 	j1(AgentEvent{
 		Kind:    EventAgentToolEnd,
@@ -395,12 +414,12 @@ func TestEventAggregator_OrphanEndForwarded(t *testing.T) {
 // to the outer sink as OBSERVATION but do not drive doneCount.
 func TestEventAggregator_DoneAllWait(t *testing.T) {
 	rec := &sinkRecorder{}
-	agg := newEventAggregator(rec.sink(), 3)
+	agg := newEventAggregator(rec.sink(), testPlan(3))
 
 	// Drive all-Ready first to clear Phase 1 buffering.
-	runSingleJob(agg, "group-1", []AgentEvent{readyEvent("a", "/r", "main")})
-	runSingleJob(agg, "group-2", []AgentEvent{readyEvent("a", "/r", "main")})
-	runSingleJob(agg, "group-3", []AgentEvent{readyEvent("a", "/r", "main")})
+	runSingleJob(agg, 1-1, []AgentEvent{readyEvent("a", "/r", "main")})
+	runSingleJob(agg, 2-1, []AgentEvent{readyEvent("a", "/r", "main")})
+	runSingleJob(agg, 3-1, []AgentEvent{readyEvent("a", "/r", "main")})
 
 	// Only 3 markJobDones have fired → doneCount == expected → 1
 	// synthetic outer Result already emitted. Verify.
@@ -420,10 +439,10 @@ func TestEventAggregator_DoneAllWait(t *testing.T) {
 // snapshot (latest-wins) regardless of which job emitted them.
 func TestEventAggregator_TaskListMerge(t *testing.T) {
 	rec := &sinkRecorder{}
-	agg := newEventAggregator(rec.sink(), 2)
+	agg := newEventAggregator(rec.sink(), testPlan(2))
 
-	j1 := agg.wrapJob("group-1")
-	j2 := agg.wrapJob("group-2")
+	j1 := agg.wrapJob(1 - 1)
+	j2 := agg.wrapJob(2 - 1)
 	// Drive gate.
 	j1(readyEvent("a", "/r", "main"))
 	j2(readyEvent("a", "/r", "main"))
@@ -481,12 +500,12 @@ func TestEventAggregator_TaskListMerge(t *testing.T) {
 // markJobDone from every goroutine.
 func TestEventAggregator_OutOfOrderReadyAndDone(t *testing.T) {
 	rec := &sinkRecorder{}
-	agg := newEventAggregator(rec.sink(), 3)
+	agg := newEventAggregator(rec.sink(), testPlan(3))
 
 	// Job 1 reports Ready + Result early (before j2/j3 Ready).
 	// The buffered events fire markJobDone; j2 and j3 haven't
 	// even been wired up yet — doneCount stays at 1 of 3.
-	runSingleJob(agg, "group-1", []AgentEvent{
+	runSingleJob(agg, 1-1, []AgentEvent{
 		readyEvent("a", "/r", "main"),
 		resultEvent("early group-1 findings"),
 	})
@@ -499,9 +518,9 @@ func TestEventAggregator_OutOfOrderReadyAndDone(t *testing.T) {
 
 	// Now j2 + j3 run. Each markJobDone increments doneCount;
 	// the LAST one drives it to expected → synthetic outer Result.
-	runJobGoroutines(agg, map[string][]AgentEvent{
-		"group-2": {readyEvent("a", "/r", "main"), resultEvent("group-2 findings")},
-		"group-3": {readyEvent("a", "/r", "main"), resultEvent("group-3 findings")},
+	runJobGoroutines(agg, map[int][]AgentEvent{
+		1: {readyEvent("a", "/r", "main"), resultEvent("group-2 findings")},
+		2: {readyEvent("a", "/r", "main"), resultEvent("group-3 findings")},
 	})
 
 	got = rec.snapshot()
@@ -526,9 +545,9 @@ func TestEventAggregator_OutOfOrderReadyAndDone(t *testing.T) {
 // the synthetic outer Result; further events are out-of-band.
 func TestEventAggregator_LateEventsDropped(t *testing.T) {
 	rec := &sinkRecorder{}
-	agg := newEventAggregator(rec.sink(), 1)
+	agg := newEventAggregator(rec.sink(), testPlan(1))
 
-	runSingleJob(agg, "group-1", []AgentEvent{
+	runSingleJob(agg, 1-1, []AgentEvent{
 		readyEvent("a", "/r", "main"),
 		resultEvent("done"),
 	})
@@ -537,22 +556,22 @@ func TestEventAggregator_LateEventsDropped(t *testing.T) {
 	// Finding 2 fix: per-job Result/Error are SUPPRESSED at the
 	// aggregator layer (per REVIEW.md §2.5.5 "Result/Error → 不
 	// 外发"). Expected: 1 synthetic outer Ready (Source="") + the
-	// group's flushed text (the result carried the tail of the
-	// group's reply) + 1 synthetic outer Result (Source="") = 3
-	// events. Per-job terminal events (even if they arrive) are not
-	// forwarded.
+	// group's start hint + the group's findings (the result carried
+	// the tail of the group's reply) + 1 synthetic outer Result
+	// (Source="") = 4 events. Per-job terminal events (even if they
+	// arrive) are not forwarded.
 	got := rec.snapshot()
-	if len(got) != 3 {
-		t.Fatalf("expected 3 events (Ready + flushed text + synthetic outer Result); got %d: %+v", len(got), got)
+	if len(got) != 4 {
+		t.Fatalf("expected 4 events (Ready + start hint + findings + synthetic outer Result); got %d: %+v", len(got), got)
 	}
 
 	// Late event arrives via a fresh wrapJob (defensive — late
 	// events shouldn't normally reach the sink post-close).
-	lateSink := agg.wrapJob("group-1")
+	lateSink := agg.wrapJob(1 - 1)
 	lateSink(AgentEvent{Kind: EventAgentText, Text: "this should be dropped"})
 
 	got = rec.snapshot()
-	if len(got) != 3 {
+	if len(got) != 4 {
 		t.Errorf("late event should be dropped; outer event count = %d", len(got))
 	}
 }
@@ -573,11 +592,11 @@ func TestEventAggregator_LateEventsDropped(t *testing.T) {
 // didn't fire (test mock, future bug, goroutine panic).
 func TestEventAggregator_FinalizeClosesLifecycle(t *testing.T) {
 	rec := &sinkRecorder{}
-	agg := newEventAggregator(rec.sink(), 3)
+	agg := newEventAggregator(rec.sink(), testPlan(3))
 
 	// Only 1 of 3 per-jobs wired up + markJobDone. finalize()
 	// catches up the remaining 2 of expected.
-	runSingleJob(agg, "group-1", []AgentEvent{readyEvent("a", "/r", "main")})
+	runSingleJob(agg, 1-1, []AgentEvent{readyEvent("a", "/r", "main")})
 
 	agg.finalize()
 
@@ -598,9 +617,9 @@ func TestEventAggregator_FinalizeClosesLifecycle(t *testing.T) {
 // emitted total.
 func TestEventAggregator_FinalizeIdempotent(t *testing.T) {
 	rec := &sinkRecorder{}
-	agg := newEventAggregator(rec.sink(), 2)
+	agg := newEventAggregator(rec.sink(), testPlan(2))
 
-	runSingleJob(agg, "group-1", []AgentEvent{readyEvent("a", "/r", "main")})
+	runSingleJob(agg, 1-1, []AgentEvent{readyEvent("a", "/r", "main")})
 
 	agg.finalize()
 	agg.finalize()
@@ -625,10 +644,10 @@ func TestEventAggregator_FinalizeIdempotent(t *testing.T) {
 // — single-shot via finalEmitted.
 func TestEventAggregator_MarkJobDoneFiresOuterResult(t *testing.T) {
 	rec := &sinkRecorder{}
-	agg := newEventAggregator(rec.sink(), 2)
+	agg := newEventAggregator(rec.sink(), testPlan(2))
 
 	// Job 1 done — doneCount=1, no synthetic Result yet (need 2).
-	runSingleJob(agg, "group-1", []AgentEvent{readyEvent("a", "/r", "main")})
+	runSingleJob(agg, 1-1, []AgentEvent{readyEvent("a", "/r", "main")})
 
 	got := rec.snapshot()
 	resultCount := 0
@@ -642,7 +661,7 @@ func TestEventAggregator_MarkJobDoneFiresOuterResult(t *testing.T) {
 	}
 
 	// Job 2 done — doneCount=2, synthetic Result fires.
-	runSingleJob(agg, "group-2", []AgentEvent{readyEvent("a", "/r", "main")})
+	runSingleJob(agg, 2-1, []AgentEvent{readyEvent("a", "/r", "main")})
 
 	got = rec.snapshot()
 	resultCount = 0
@@ -666,13 +685,13 @@ func TestEventAggregator_MarkJobDoneFiresOuterResult(t *testing.T) {
 // lifecycle.
 func TestEventAggregator_MarkJobDoneEvenWhenSinkSilent(t *testing.T) {
 	rec := &sinkRecorder{}
-	agg := newEventAggregator(rec.sink(), 2)
+	agg := newEventAggregator(rec.sink(), testPlan(2))
 
 	// Job 1: emits Ready only (no terminal). The sink sees no
 	// EventAgentResult / EventAgentError for this job.
-	runSingleJob(agg, "group-1", []AgentEvent{readyEvent("a", "/r", "main")})
+	runSingleJob(agg, 1-1, []AgentEvent{readyEvent("a", "/r", "main")})
 	// Job 2: ditto.
-	runSingleJob(agg, "group-2", []AgentEvent{readyEvent("a", "/r", "main")})
+	runSingleJob(agg, 2-1, []AgentEvent{readyEvent("a", "/r", "main")})
 
 	got := rec.snapshot()
 	resultCount := 0
@@ -694,10 +713,10 @@ func TestEventAggregator_MarkJobDoneEvenWhenSinkSilent(t *testing.T) {
 // already fired (and vice versa).
 func TestEventAggregator_HandleStalePhaseRedirects(t *testing.T) {
 	rec := &sinkRecorder{}
-	agg := newEventAggregator(rec.sink(), 2)
+	agg := newEventAggregator(rec.sink(), testPlan(2))
 
-	j1 := agg.wrapJob("group-1")
-	j2 := agg.wrapJob("group-2")
+	j1 := agg.wrapJob(1 - 1)
+	j2 := agg.wrapJob(2 - 1)
 
 	// Drive all-Ready via j1 to force phaseBuffering → phaseStreaming
 	// transition. The transition takes a snapshot + clears
@@ -746,7 +765,7 @@ func TestEventAggregator_HandleStalePhaseRedirects(t *testing.T) {
 func TestEventAggregator_ConcurrentEmissions(t *testing.T) {
 	rec := &sinkRecorder{}
 	const N = 6
-	agg := newEventAggregator(rec.sink(), N)
+	agg := newEventAggregator(rec.sink(), testPlan(N))
 
 	var wg sync.WaitGroup
 	for i := 0; i < N; i++ {
@@ -755,7 +774,7 @@ func TestEventAggregator_ConcurrentEmissions(t *testing.T) {
 			defer wg.Done()
 			// markJobDone mirrors the orchestrator's defer.
 			defer agg.markJobDone()
-			sink := agg.wrapJob(fmt.Sprintf("group-%d", i))
+			sink := agg.wrapJob(i)
 			sink(readyEvent("a", "/r", "main"))
 			// Some interleaved intermediate events.
 			sink(AgentEvent{Kind: EventAgentText, Text: "thinking"})

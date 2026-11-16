@@ -1333,9 +1333,15 @@ type ReviewPlanGroup struct {
 	// Pattern is the group's pattern — the glob of an ocr rule group,
 	// or the builtin / simplify sentinel.
 	Pattern string
-	// Label is the human-facing name of the group. An ocr group is
-	// named by its pattern; the nightme-owned sentinels get a name
-	// the user can read ("builtin rubric", "simplify lens").
+	// Source is the rule's source — the area the group came from.
+	// Together with the pattern it is the group's identity: two rules
+	// over the same glob are two groups.
+	Source string
+	// Label is the human-facing name of the group: what it reviews,
+	// followed by the summary of the files it covers. The nightme-owned
+	// sentinels get a name the user can read ("nightme code reviewer",
+	// "Simplify review lens"); an ocr group is named by its rule's
+	// source and pattern.
 	Label string
 	// Files are the files the group covers.
 	Files []string
@@ -1346,6 +1352,11 @@ type ReviewJob struct {
 	// Pattern is the group's pattern — the glob of an ocr rule
 	// group, or the builtin / simplify sentinel.
 	Pattern string
+	// Source is the rule's source — the area the group came from.
+	// Together with the pattern it is the group's identity, so a
+	// continuation can name the resumed group the way the review
+	// named it.
+	Source string
 	// Files are the files the group covered.
 	Files []string
 	// SessionID is the agent session id of the group's session.

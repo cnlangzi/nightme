@@ -26,6 +26,10 @@ type reviewOutcome struct {
 	// pattern is the group's pattern — the glob of an ocr rule group,
 	// or the builtin / simplify sentinel.
 	pattern string
+	// source is the rule's source — the area the group came from.
+	// Together with the pattern it is the group's identity, so a
+	// continuation names the resumed group the way the review did.
+	source string
 	// files are the files the group covered.
 	files []string
 	// sessionID is the agent session id the group's session ran
@@ -84,6 +88,7 @@ func (r reviewRecord) resumable() ([]agent.ReviewJob, string) {
 		default:
 			jobs = append(jobs, agent.ReviewJob{
 				Pattern:   o.pattern,
+				Source:    o.source,
 				Files:     o.files,
 				SessionID: o.sessionID,
 			})
@@ -220,6 +225,7 @@ func (c *outcomeCollector) observe(job agent.ReviewJob, err error) {
 	defer c.mu.Unlock()
 	c.outcomes = append(c.outcomes, reviewOutcome{
 		pattern:   job.Pattern,
+		source:    job.Source,
 		files:     job.Files,
 		sessionID: job.SessionID,
 		err:       err,

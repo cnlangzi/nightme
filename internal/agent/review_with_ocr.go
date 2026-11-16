@@ -9,7 +9,7 @@
 //     isn't installed or workspace precompute fails.
 //
 // simplify runs as a parallel reviewGroup inside both runners
-// (see patternSimplify / simplifyGroup below) — one session turn per
+// (see PatternSimplify / simplifyGroup below) — one session turn per
 // group, concurrently with the main dimension(s).
 //
 // ocr is an external CLI (like git), not a bridge/agent. Its delegation
@@ -166,15 +166,16 @@ func runReviewGroups(
 	// per-group observer is consumed here, not forwarded to the
 	// per-group turn.
 	cfgOpts := ParseRunOnceOptions(opts)
+	plan := reviewPlan(groups)
 	var agg *eventAggregator
 	if cfgOpts.OnEvent != nil {
-		agg = newEventAggregator(cfgOpts.OnEvent, len(groups))
+		agg = newEventAggregator(cfgOpts.OnEvent, plan)
 	}
 
 	// The plan fires once, before the first group starts: the caller
 	// learns the group list before a single group produces output.
 	if cfgOpts.OnReviewPlan != nil {
-		cfgOpts.OnReviewPlan(reviewPlan(groups))
+		cfgOpts.OnReviewPlan(plan)
 	}
 
 	results := make([]RunResult, len(groups))
@@ -204,7 +205,7 @@ func runReviewGroups(
 
 			var runOpts []RunOnceOption
 			if agg != nil {
-				runOpts = []RunOnceOption{WithEventSink(agg.wrapJob(fmt.Sprintf("group-%d", i+1)))}
+				runOpts = []RunOnceOption{WithEventSink(agg.wrapJob(i))}
 			}
 
 			res, err := run(ctx, i, cfg, runOpts)
@@ -213,6 +214,7 @@ func runReviewGroups(
 			if cfgOpts.OnReviewJob != nil {
 				cfgOpts.OnReviewJob(ReviewJob{
 					Pattern:   groups[i].Pattern,
+					Source:    groups[i].Source,
 					Files:     groups[i].Files,
 					SessionID: res.SessionID,
 					// The group's own output is parsed on its own —
@@ -266,12 +268,18 @@ type reviewContext struct {
 // file list (the rule explicitly enumerates them); Rule is the rule
 // text (the language-specific guidance for the group).
 //
+// Source is the rule's source — the area the rule came from (e.g.
+// "system"). Together with the pattern it is the group's identity: it
+// is what the group is named by, and what a continuation needs to name
+// the resumed group the same way.
+//
 // Used by the multi-job path (docs/REVIEW.md §2.5): when ocr returns
 // ≥2 groups, DelegateReview runs one RunOnce per group with this
 // group's files + diff + rule — each in its own fresh subprocess /
 // independent context.
 type reviewGroup struct {
 	Pattern string
+	Source  string
 	Files   []string
 	Rule    string
 }
@@ -320,8 +328,8 @@ func (rc *reviewContext) notes() []string {
 // Real ocr groups come with their own glob (e.g. "**/*.go"); sentinels
 // use the underscore prefix to avoid any future glob collision.
 const (
-	patternBuiltin  = "_nightme_builtin"
-	patternSimplify = "_nightme_simplify"
+	PatternBuiltin  = "_nightme_builtin"
+	PatternSimplify = "_nightme_simplify"
 )
 
 // simplifyGroup builds a reviewGroup carrying the nightme-owned simplify
@@ -329,7 +337,7 @@ const (
 // list of ReviewWithOcr and ReviewWithPrompt; runs as a parallel
 // RunOnce concurrent with the main dimension(s).
 func simplifyGroup(files []string) reviewGroup {
-	return reviewGroup{Pattern: patternSimplify, Files: files, Rule: simplifyPrompt}
+	return reviewGroup{Pattern: PatternSimplify, Files: files, Rule: simplifyPrompt}
 }
 
 // reviewPlan turns the fan-out's groups into the plan the caller
@@ -340,26 +348,12 @@ func reviewPlan(groups []reviewGroup) []ReviewPlanGroup {
 	for i, g := range groups {
 		plan[i] = ReviewPlanGroup{
 			Pattern: g.Pattern,
-			Label:   reviewGroupLabel(g.Pattern),
+			Source:  g.Source,
+			Label:   reviewGroupLabel(g),
 			Files:   g.Files,
 		}
 	}
 	return plan
-}
-
-// reviewGroupLabel is the human-facing name of a review group. An ocr
-// group is named by its pattern; the nightme-owned sentinels get a
-// name the user can read — the sentinel itself is an internal marker
-// and must not reach the chat verbatim.
-func reviewGroupLabel(pattern string) string {
-	switch pattern {
-	case patternBuiltin:
-		return "builtin rubric"
-	case patternSimplify:
-		return "simplify lens"
-	default:
-		return pattern
-	}
 }
 
 // precomputeReviewWithOcr populates the reviewContext using the ocr CLI
@@ -407,7 +401,7 @@ func precomputeReviewWithOcr(ctx context.Context, workspace string) reviewContex
 		// ocr produced no rules for these files — the Go enumeration
 		// supplies the file list and the builtin rubric the review.
 		rc.ocrGroups = []reviewGroup{{
-			Pattern: patternBuiltin,
+			Pattern: PatternBuiltin,
 			Files:   rc.reviewable,
 			Rule:    BuiltinPrompt,
 		}}
@@ -423,7 +417,7 @@ func precomputeReviewWithOcr(ctx context.Context, workspace string) reviewContex
 //
 // The output has the same shape as precomputeReviewWithOcr — but
 // `ocrGroups` is synthesized as a single builtin group (Pattern =
-// patternBuiltin, Rule = BuiltinPrompt) instead of N per-pattern ocr
+// PatternBuiltin, Rule = BuiltinPrompt) instead of N per-pattern ocr
 // groups. `excluded` is nil (Go heuristic doesn't track exclusion
 // reasons). File-list precision is lower than ocr's FileFilter.
 func precomputeReviewWithBuiltin(ctx context.Context, workspace string) reviewContext {
@@ -446,7 +440,7 @@ func precomputeReviewWithBuiltin(ctx context.Context, workspace string) reviewCo
 		// untracked is rendered separately by assembleGroupPrompt as a
 		// "new file additions" section.
 		rc.ocrGroups = []reviewGroup{{
-			Pattern: patternBuiltin,
+			Pattern: PatternBuiltin,
 			Files:   rc.reviewable,
 			Rule:    BuiltinPrompt,
 		}}
@@ -709,6 +703,7 @@ func runOcrDelegateRuleBatch(ctx context.Context, workspace string, paths []stri
 	}
 	var resp struct {
 		Groups []struct {
+			Source  string   `json:"source"`
 			Pattern string   `json:"pattern"`
 			Files   []string `json:"files"`
 			Rule    string   `json:"rule"`
@@ -724,6 +719,7 @@ func runOcrDelegateRuleBatch(ctx context.Context, workspace string, paths []stri
 	for _, g := range resp.Groups {
 		groups = append(groups, reviewGroup{
 			Pattern: g.Pattern,
+			Source:  g.Source,
 			Files:   g.Files,
 			Rule:    g.Rule,
 		})
@@ -1063,10 +1059,10 @@ func assembleGroupPrompt(ctx context.Context, rc reviewContext, g *reviewGroup) 
 
 	// --- Rules + how-to (header depends on group source) ---
 	switch g.Pattern {
-	case patternSimplify:
+	case PatternSimplify:
 		fmt.Fprintln(&b, "\n# Simplify review lens (nightme-owned, complementary)")
 		fmt.Fprintln(&b, g.Rule)
-	case patternBuiltin:
+	case PatternBuiltin:
 		fmt.Fprintln(&b, "\n# Built-in review rubric (nightme-owned)")
 		fmt.Fprintln(&b, g.Rule)
 	default:

@@ -565,16 +565,25 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 		// chat's resume state alone: there is nothing new to resume
 		// from, and the previous run's unfinished groups are still
 		// unfinished.
-		//
-		// The sink is drained first: the groups' flushed batches are
-		// still queued behind its drain goroutine, and the review's
-		// own lines must land after them.
-		drain()
 		groupOutcomes := collector.results()
 		if len(groupOutcomes) > 0 {
 			f.record(chatID, runnerName, workspace, groupOutcomes)
 		}
 		finish()
+
+		// The end hint goes into the sink BEFORE the drain: the sink
+		// is a queue, so the hint lands after the groups' findings,
+		// which the fan-out already queued. Sending it through the
+		// sink is what puts it under the chat's /think setting — the
+		// same visibility the findings have.
+		if err == nil {
+			sendVerdictHint(sink, reviewVerdictHint(groupOutcomes, collector.plan()))
+		}
+
+		// The sink is drained now: the groups' findings are still
+		// queued behind its drain goroutine, and the review's own
+		// lines must land after them.
+		drain()
 
 		if err != nil {
 			// The review failed — say so in the machine-readable
@@ -934,14 +943,21 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 		// The write is conditional on the record still being the one
 		// this continuation resumed from: a review that finished in
 		// the meantime owns the chat's resume state.
-		//
-		// The sink is drained first: the groups' flushed batches are
-		// still queued behind its drain goroutine, and the
-		// continuation's own lines must land after them.
-		drain()
 		groupOutcomes := collector.spentResults()
 		f.recordIfCurrent(chatID, rec.id, runnerName, workspace, groupOutcomes)
 		finish()
+
+		// The end hint goes into the sink BEFORE the drain, so it
+		// lands after the resumed groups' findings — same contract as
+		// a plain review.
+		if err == nil {
+			sendVerdictHint(sink, reviewVerdictHint(groupOutcomes, collector.plan()))
+		}
+
+		// The sink is drained now: the groups' findings are still
+		// queued behind its drain goroutine, and the continuation's
+		// own lines must land after them.
+		drain()
 
 		if err != nil {
 			slog.Default().Warn("/review --continue failed",

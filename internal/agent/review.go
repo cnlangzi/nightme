@@ -187,7 +187,7 @@ Concrete next steps, ordered by impact. One bullet per suggestion. Don't restate
 // (not refactor) — produces findings, does not auto-apply.
 //
 // Wired into both ReviewWithOcr and ReviewWithPrompt as a parallel
-// reviewGroup (Pattern = patternSimplify), so it runs as a separate
+// reviewGroup (Pattern = PatternSimplify), so it runs as a separate
 // session turn concurrently with the main dimension(s).
 const simplifyPrompt = `# Simplify review lens (nightme-owned, complementary)
 
@@ -274,8 +274,8 @@ Findings must conform to the nightme review output schema (see host agent prompt
 // directly in chat and NightMe forwards it transparently.
 //
 // simplify always runs alongside as a parallel dimension (Pattern =
-// patternSimplify), appended after pre.ocrGroups — see
-// patternSimplify / simplifyGroup in review_with_ocr.go.
+// PatternSimplify), appended after pre.ocrGroups — see
+// PatternSimplify / simplifyGroup in review_with_ocr.go.
 func ReviewWithPrompt(ctx context.Context, s Starter, cfg StartConfig, opts ...RunOnceOption) (RunResult, error) {
 	pre := precomputeReviewWithBuiltin(ctx, cfg.Workspace)
 	// The base branch could not be determined and could not be

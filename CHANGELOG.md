@@ -11,6 +11,17 @@ is committed there is the version users build and run.
 
 ## [Unreleased] — current dev (locked 2026-08-02)
 
+### Fixed: a bridge that dies during startup says why it died
+
+`Failed to spawn agent: omp: get_state: omp: session closed` was the whole
+story when an agent CLI died during its handshake: the child had written the
+real reason to stderr and the bridge dropped it. The omp, pi and codex
+bridges attach the child's last stderr to every start, handshake and reset
+failure, so the chat message carries the reason next to the error. A child
+that wrote nothing to stderr adds no tail section, and the sentinels the
+chat layer switches on — a closed session, an unhealthy resume — still
+match.
+
 ### Added: `nightme me` configures the chat model of the personal agent
 
 The personal agent's chat model lives in `config.yaml` under `me.llm`, and

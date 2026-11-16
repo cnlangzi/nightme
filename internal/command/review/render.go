@@ -2,15 +2,15 @@
 //
 // The review delivers its content in three moves:
 //
-//  1. the plan line — the runner and the group list, before any group
-//     produces output;
-//  2. the coalesced stream — the groups' findings, batch by batch,
-//     each batch labeled with its group;
+//  1. the plan line — the runner, the rule set and the group list,
+//     before any group produces output;
+//  2. the findings — each group's findings, one reply per group, in
+//     the thread;
 //  3. the verdict line — what the run found, in one line.
 //
 // The merged body is NOT one of them: it is the main agent's input,
 // not the channel's. The channel sees the findings once, in the
-// stream.
+// thread.
 
 package review
 
@@ -26,77 +26,147 @@ import (
 // reviewPromptFrame is the instruction appended to the review text
 // injected into the chat session's agent session.
 //
-// The findings already reached the chat through the coalesced stream.
-// Without this instruction the agent's answer becomes a third copy of
-// them; with it, the agent answers with a verdict and the next step.
+// The findings already reached the chat through the thread. Without
+// this instruction the agent's answer becomes a third copy of them;
+// with it, the agent answers with a verdict and the next step.
 const reviewPromptFrame = "\n\n---\n\n" +
 	"Answer with a verdict and the next step: which findings block the merge, " +
 	"how severe they are, and what you would do next. Do not restate the " +
 	"findings — they are in this message and in the chat already."
 
 // renderPlanLine renders the plan of a review run: the runner, the
-// group count, and one entry per group with the number of files it
-// covers.
+// rule set the review ran against, the subagent count, and one entry
+// per group with the number of files it covers.
 //
 // The plan is the first thing the review says — the user learns what
 // the run is about to do before any group produces output.
 func renderPlanLine(runner string, groups []agent.ReviewPlanGroup) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "🔍 review · %s · %s", runner, plural(len(groups), "group"))
+	fmt.Fprintf(&b, "🔍 review · %s · %s · %s",
+		runner, reviewRuleSet(groups), plural(len(groups), "subagent"))
 	for i, g := range groups {
 		fmt.Fprintf(&b, "\n%d. %s — %s", i+1, g.Label, plural(len(g.Files), "file"))
 	}
 	return b.String()
 }
 
-// renderCountLine renders the verdict of a review run: the group
-// count, the finding count, the severity distribution, the number of
-// groups whose output could not be parsed, and the groups that failed.
+// reviewRuleSet names the rule set the review ran against: nightme's
+// own rubric when the plan holds the built-in group, the ocr rule set
+// when the groups came from ocr.
+//
+// The two rule sets produce different findings, and the group names
+// alone do not tell the reader which one produced them.
+func reviewRuleSet(groups []agent.ReviewPlanGroup) string {
+	for _, g := range groups {
+		if g.Pattern == agent.PatternBuiltin {
+			return "nightme code reviewer"
+		}
+	}
+	return "open-code-review"
+}
+
+// verdict is what a review run found: the counts and the groups that
+// did not finish.
+//
+// The card's verdict line and the thread's end hint are two renderings
+// of the same numbers.
+type verdict struct {
+	// groups is the number of subagents the run fanned out to.
+	groups int
+	// findings is the number of findings the groups reported.
+	findings int
+	// counts holds the findings per severity.
+	counts map[string]int
+	// unparsed is the number of groups whose output could not be
+	// parsed.
+	unparsed int
+	// failed holds the label of every group that did not finish.
+	failed []string
+}
+
+// newVerdict builds the verdict of a review run.
 //
 // reports holds one entry per group that completed; failed holds the
 // label of every group that did not. A group that failed is counted as
 // failed — never as unparsed.
+func newVerdict(groups int, reports []agent.ReviewReport, failed []string) verdict {
+	v := verdict{
+		groups: groups,
+		counts: make(map[string]int),
+		failed: failed,
+	}
+	for _, r := range reports {
+		if !r.Parsed {
+			v.unparsed++
+		}
+		for _, f := range r.Findings {
+			v.findings++
+			v.counts[f.Severity]++
+		}
+	}
+	return v
+}
+
+// parts renders the verdict's counts: the subagent count, the finding
+// count, the severity distribution and the groups that could not be
+// parsed.
+func (v verdict) parts() []string {
+	parts := []string{plural(v.groups, "subagent"), plural(v.findings, "finding")}
+	for _, sev := range agent.SeverityOrder() {
+		if v.counts[sev] == 0 {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%d %s", v.counts[sev], sev))
+	}
+	if v.unparsed > 0 {
+		parts = append(parts, plural(v.unparsed, "unparsed subagent"))
+	}
+	return parts
+}
+
+// icon is the verdict's marker: a clean run reads as a success, an
+// incomplete one is marked.
+func (v verdict) icon() string {
+	if len(v.failed) > 0 || v.unparsed > 0 {
+		return "⚠️"
+	}
+	return "✅"
+}
+
+// body renders the verdict's counts and the groups that failed.
+func (v verdict) body() string {
+	parts := v.parts()
+	if len(v.failed) > 0 {
+		parts = append(parts, "failed: "+strings.Join(v.failed, ", ")+" → /review --continue")
+	}
+	return strings.Join(parts, " · ")
+}
+
+// line renders the verdict as the card's line.
 //
 // The verdict is a claim about what the run found, so it is marked
 // with ⚠️ whenever it is incomplete: a group failed, or a group's
 // output could not be parsed (the count is then a lower bound).
-func renderCountLine(groups int, reports []agent.ReviewReport, failed []string) string {
-	counts := make(map[string]int)
-	findings := 0
-	unparsed := 0
-	for _, r := range reports {
-		if !r.Parsed {
-			unparsed++
-		}
-		for _, f := range r.Findings {
-			findings++
-			counts[f.Severity]++
-		}
-	}
-
-	parts := []string{plural(groups, "group"), plural(findings, "finding")}
-	for _, sev := range agent.SeverityOrder() {
-		if counts[sev] == 0 {
-			continue
-		}
-		parts = append(parts, fmt.Sprintf("%d %s", counts[sev], sev))
-	}
-	if unparsed > 0 {
-		parts = append(parts, plural(unparsed, "unparsed group"))
-	}
-
-	icon := "✅"
-	if len(failed) > 0 || unparsed > 0 {
-		icon = "⚠️"
-	}
-	line := icon + " review · " + strings.Join(parts, " · ")
-	if len(failed) > 0 {
-		line += " · failed: " + strings.Join(failed, ", ") + " → /review --continue"
-	}
-	return line
+func (v verdict) line() string {
+	return v.icon() + " review · " + v.body()
 }
 
-// reviewVerdict builds the verdict line of a review run from its group
+// hint renders the verdict as the thread's end hint — the same
+// numbers, in Markdown, so the thread closes on the outcome.
+func (v verdict) hint() string {
+	return v.icon() + " **review done** · " + v.body()
+}
+
+// renderCountLine renders the verdict of a review run: the subagent
+// count, the finding count, the severity distribution, the number of
+// groups whose output could not be parsed, and the groups that failed.
+//
+// A group that failed is counted as failed — never as unparsed.
+func renderCountLine(groups int, reports []agent.ReviewReport, failed []string) string {
+	return newVerdict(groups, reports, failed).line()
+}
+
+// reviewVerdict builds the verdict of a review run from its group
 // outcomes and the plan that named the groups.
 //
 // A failed group is counted as failed, never as unparsed. Its label
@@ -106,12 +176,31 @@ func reviewVerdict(outcomes []reviewOutcome, plan []agent.ReviewPlanGroup) strin
 	if len(outcomes) == 0 {
 		return ""
 	}
+	reports, failed := verdictInputs(outcomes, plan)
+	return newVerdict(len(outcomes), reports, failed).line()
+}
+
+// reviewVerdictHint builds the thread's end hint of a review run: the
+// verdict in Markdown.
+func reviewVerdictHint(outcomes []reviewOutcome, plan []agent.ReviewPlanGroup) string {
+	if len(outcomes) == 0 {
+		return ""
+	}
+	reports, failed := verdictInputs(outcomes, plan)
+	return newVerdict(len(outcomes), reports, failed).hint()
+}
+
+// verdictInputs splits a review run's group outcomes into the reports
+// of the groups that completed and the labels of the groups that did
+// not.
+//
+// A failed group's label comes from the plan; a group the plan did not
+// name falls back to its pattern.
+func verdictInputs(outcomes []reviewOutcome, plan []agent.ReviewPlanGroup) (reports []agent.ReviewReport, failed []string) {
 	labels := make(map[string]string, len(plan))
 	for _, g := range plan {
 		labels[g.Pattern] = g.Label
 	}
-	var reports []agent.ReviewReport
-	var failed []string
 	for _, o := range outcomes {
 		if o.err != nil {
 			label := labels[o.pattern]
@@ -123,12 +212,12 @@ func reviewVerdict(outcomes []reviewOutcome, plan []agent.ReviewPlanGroup) strin
 		}
 		reports = append(reports, o.report)
 	}
-	return renderCountLine(len(outcomes), reports, failed)
+	return reports, failed
 }
 
 // sendReviewLine sends one of the review's own lines to the channel,
 // anchored to the /review message so it folds into the same receipt as
-// the streamed groups.
+// the plan and the verdict.
 func sendReviewLine(ctx context.Context, em messages.Emitter, chatID, replyTo, runner, text string) {
 	if em == nil || text == "" {
 		return
@@ -159,7 +248,7 @@ func planObserver(ctx context.Context, em messages.Emitter, collector *outcomeCo
 }
 
 // sendVerdict sends the run's verdict line — the last thing the review
-// itself sends. The main agent's answer follows it.
+// itself sends to the card. The main agent's answer follows it.
 func sendVerdict(ctx context.Context, em messages.Emitter, chatID, replyTo, runner string,
 	result agent.RunResult, outcomes []reviewOutcome, plan []agent.ReviewPlanGroup,
 ) {
@@ -179,7 +268,21 @@ func sendVerdict(ctx context.Context, em messages.Emitter, chatID, replyTo, runn
 	}
 }
 
-// plural renders a count with its noun: "1 group", "4 groups".
+// sendVerdictHint sends the review's end hint to the thread: the
+// verdict in Markdown, so the thread closes on the outcome.
+//
+// The hint goes through the review's event sink, so it takes the same
+// path as the findings: translated to the thinking kind, gated by the
+// chat's /think setting, and anchored to the /review message. The
+// visibility of the hints is therefore the visibility of the findings.
+func sendVerdictHint(sink func(agent.AgentEvent), text string) {
+	if text == "" {
+		return
+	}
+	sink(agent.AgentEvent{Kind: agent.EventAgentThinking, Text: text})
+}
+
+// plural renders a count with its noun: "1 subagent", "4 subagents".
 func plural(n int, noun string) string {
 	if n == 1 {
 		return fmt.Sprintf("%d %s", n, noun)

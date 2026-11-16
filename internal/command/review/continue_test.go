@@ -244,6 +244,24 @@ func (e *recordingEmitter) waitForOutReply(t *testing.T, want string) messages.O
 	}
 }
 
+// waitForOutThinking waits for an OutThinking carrying want — the
+// kind the findings and the thread's hints ride.
+func (e *recordingEmitter) waitForOutThinking(t *testing.T, want string) messages.OutboundMessage {
+	t.Helper()
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case msg := <-e.sent:
+			if msg.Kind == messages.OutThinking && strings.Contains(msg.Text, want) {
+				return msg
+			}
+		case <-deadline:
+			t.Fatalf("no OutThinking carrying %q; got %+v", want, e.messages())
+			return messages.OutboundMessage{}
+		}
+	}
+}
+
 // newContinueChatSession builds a chat session whose selected agent
 // session is live (so findings can be injected into it) and whose
 // emitter records the outbound messages. It returns the AS's
@@ -267,6 +285,16 @@ func newContinueChatSession(t *testing.T, chatID, agentName, dir string, em mess
 	cs.AttachAgentSessionForTest(as)
 	cs.SelectedAgentSessionForTest(as)
 	return cs, asDriver
+}
+
+// enableThink turns the chat's /think setting on. The findings and
+// the thread's hints ride the thinking kind, so the think gate drops
+// them while it is off.
+func enableThink(t *testing.T, cs *chatsession.ChatSession) {
+	t.Helper()
+	if err := cs.SetThinkMode(chatsession.ThinkModeShow); err != nil {
+		t.Fatalf("SetThinkMode: %v", err)
+	}
 }
 
 // dispatchContinue invokes the factory's Handle for the given chat and
@@ -377,6 +405,7 @@ func TestHandle_ContinueResumesTheFailedGroup(t *testing.T) {
 	em := newRecordingEmitter()
 	const chatID = "review-continue-chat"
 	cs, asDriver := newContinueChatSession(t, chatID, chatRunner.name, t.TempDir(), em)
+	enableThink(t, cs)
 
 	f := NewFactory()
 	f.record(chatID, recorded.name, "/recorded/ws", []reviewOutcome{
@@ -389,7 +418,7 @@ func TestHandle_ContinueResumesTheFailedGroup(t *testing.T) {
 		t.Fatalf("unexpected reply: %q", out.Reply)
 	}
 
-	em.waitForOutReply(t, "resumed findings")
+	em.waitForOutThinking(t, "resumed findings")
 
 	// Exactly one session was resumed — the failed one.
 	cfgs := recorded.startedConfigs()
@@ -616,6 +645,9 @@ func waitUntilIdle(t *testing.T, f *Factory, chatID string) {
 // first, the group's findings next and the verdict last. The verdict
 // summarizes the findings, so it must not overtake them — the sink
 // drains its queue before the verdict goes out.
+//
+// The findings ride the thinking kind: they are rendered in the
+// thread, not on the card.
 func TestHandle_ContinuationOrdersTheLines(t *testing.T) {
 	agents := newTestAgents(t)
 	starter := &reviewSessionStarter{name: "review-order-agent", reply: "resumed findings"}
@@ -624,6 +656,7 @@ func TestHandle_ContinuationOrdersTheLines(t *testing.T) {
 	em := newRecordingEmitter()
 	const chatID = "review-order-chat"
 	cs, _ := newContinueChatSession(t, chatID, starter.name, t.TempDir(), em)
+	enableThink(t, cs)
 
 	f := NewFactory()
 	f.record(chatID, starter.name, "/recorded/ws", []reviewOutcome{
@@ -631,19 +664,42 @@ func TestHandle_ContinuationOrdersTheLines(t *testing.T) {
 	})
 
 	dispatchContinue(t, f, cs, chatID, "review", "-c")
-	replies := waitForOutReplies(t, em, 3)
+	em.waitForOutReply(t, "review")
+	msgs := waitForReviewMessages(t, em, 5)
 
-	if !strings.Contains(replies[0].Text, "🔍 review") {
-		t.Errorf("the first line is not the plan: %q", replies[0].Text)
+	if !strings.Contains(msgs[0].Text, "🔍 review") {
+		t.Errorf("the first line is not the plan: %q", msgs[0].Text)
 	}
-	if !strings.Contains(replies[1].Text, "[group-1]") {
-		t.Errorf("the second line does not carry the group's label: %q", replies[1].Text)
+	if msgs[1].Kind != messages.OutThinking {
+		t.Errorf("the second line is %v, want the group's start hint in the thread", msgs[1].Kind)
 	}
-	if !strings.Contains(replies[1].Text, "resumed findings") {
-		t.Errorf("the second line does not carry the group's findings: %q", replies[1].Text)
+	if !strings.Contains(msgs[1].Text, "[1]") {
+		t.Errorf("the start hint does not carry the group's number: %q", msgs[1].Text)
 	}
-	if !strings.Contains(replies[2].Text, "finding") {
-		t.Errorf("the third line is not the verdict: %q", replies[2].Text)
+	if msgs[2].Kind != messages.OutThinking {
+		t.Errorf("the third line is %v, want the findings in the thread", msgs[2].Kind)
+	}
+	if !strings.Contains(msgs[2].Text, "[1]") {
+		t.Errorf("the findings do not carry the group's number: %q", msgs[2].Text)
+	}
+	if !strings.Contains(msgs[2].Text, "resumed findings") {
+		t.Errorf("the findings do not carry the group's findings: %q", msgs[2].Text)
+	}
+	if msgs[3].Kind != messages.OutThinking || !strings.Contains(msgs[3].Text, "review done") {
+		t.Errorf("the fourth line is not the end hint: %+v", msgs[3])
+	}
+	if !strings.Contains(msgs[4].Text, "finding") {
+		t.Errorf("the fifth line is not the verdict: %q", msgs[4].Text)
+	}
+
+	// The card carries the plan and the verdict — and no group text.
+	for _, msg := range msgs {
+		if msg.Kind != messages.OutReply {
+			continue
+		}
+		if strings.Contains(msg.Text, "resumed findings") {
+			t.Errorf("a group's findings reached the card: %q", msg.Text)
+		}
 	}
 }
 
@@ -727,6 +783,7 @@ func TestHandle_ContinuationDoesNotClobberANewerRecord(t *testing.T) {
 	em := newRecordingEmitter()
 	const chatID = "review-clobber-chat"
 	cs, _ := newContinueChatSession(t, chatID, starter.name, t.TempDir(), em)
+	enableThink(t, cs)
 
 	f := NewFactory()
 	f.record(chatID, starter.name, "/recorded/ws", []reviewOutcome{
@@ -742,7 +799,7 @@ func TestHandle_ContinuationDoesNotClobberANewerRecord(t *testing.T) {
 		{pattern: "**/*.go", files: []string{"a.go"}, sessionID: "sess-go", err: errors.New("boom")},
 	})
 	close(starter.block)
-	em.waitForOutReply(t, "resumed findings")
+	em.waitForOutThinking(t, "resumed findings")
 
 	rec, ok := f.lookup(chatID)
 	if !ok {

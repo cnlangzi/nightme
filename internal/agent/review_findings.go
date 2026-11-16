@@ -58,8 +58,8 @@ func SeverityOrder() []string {
 type ReviewFinding struct {
 	// Path is the file the finding is about.
 	Path string
-	// Line is the finding's line, as the agent wrote it ("42" for a
-	// single line, "42" for a "42-50" range).
+	// Line is the finding's line: the start of the range the agent
+	// cited ("42" for a "42-50" range).
 	Line string
 	// Severity is the normalized severity bucket — one of the
 	// Severity* constants.
@@ -80,31 +80,29 @@ type ReviewReport struct {
 	Parsed bool
 }
 
+// reviewSeverities maps the severity words the review prompts use onto
+// the normalized buckets. The simplify lens' vocabulary folds onto the
+// same buckets as the ocr rules' and the builtin rubric's.
+var reviewSeverities = map[string]string{
+	SeverityCritical: SeverityCritical,
+	SeverityHigh:     SeverityHigh,
+	SeverityMedium:   SeverityMedium,
+	SeverityLow:      SeverityLow,
+	"blocking":       SeverityCritical,
+	"warning":        SeverityHigh,
+	"style":          SeverityLow,
+	"suggestion":     SeverityLow,
+}
+
 // NormalizeReviewSeverity maps a severity word onto one of the five
 // buckets. The simplify lens' vocabulary folds onto the same buckets
 // (blocking → critical, warning → high, style / suggestion → low);
 // a word this parser does not know becomes SeverityUnspecified.
 func NormalizeReviewSeverity(s string) string {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case SeverityCritical:
-		return SeverityCritical
-	case SeverityHigh:
-		return SeverityHigh
-	case SeverityMedium:
-		return SeverityMedium
-	case SeverityLow:
-		return SeverityLow
-	case "blocking":
-		return SeverityCritical
-	case "warning":
-		return SeverityHigh
-	case "style":
-		return SeverityLow
-	case "suggestion":
-		return SeverityLow
-	default:
-		return SeverityUnspecified
+	if bucket, ok := reviewSeverities[strings.ToLower(strings.TrimSpace(s))]; ok {
+		return bucket
 	}
+	return SeverityUnspecified
 }
 
 // The shapes the review prompts ask for. The block form is the ocr
@@ -196,9 +194,13 @@ func parseBlockFinding(lines []string, i int) (ReviewFinding, int, bool) {
 // naming a severity. The plain form is only taken when its first word
 // is a severity this parser knows, so a stray "- Note: …" bullet does
 // not become a finding.
+//
+// Both forms must carry a location: the prompts ask for
+// "<file>:<line> — <issue>", and a bullet without one is prose — the
+// severity rubric the builtin prompt spells out is such a bullet.
 func parseOneLineFinding(line string) (ReviewFinding, bool) {
 	if m := oneLineRe.FindStringSubmatch(line); m != nil {
-		return oneLineFinding(m[1], m[2]), true
+		return oneLineFinding(m[1], m[2])
 	}
 	m := oneLinePlainRe.FindStringSubmatch(line)
 	if m == nil {
@@ -207,20 +209,24 @@ func parseOneLineFinding(line string) (ReviewFinding, bool) {
 	if isReviewFieldName(m[1]) || !isKnownReviewSeverity(m[1]) {
 		return ReviewFinding{}, false
 	}
-	return oneLineFinding(m[1], m[2]), true
+	return oneLineFinding(m[1], m[2])
 }
 
 // oneLineFinding builds a finding from a severity word and the rest of
-// the line: "<file>:<line> — <issue>".
-func oneLineFinding(severity, rest string) ReviewFinding {
+// the line: "<file>:<line> — <issue>". A line without a location is
+// not a finding.
+func oneLineFinding(severity, rest string) (ReviewFinding, bool) {
 	loc, content := splitLocation(rest)
 	path, line := splitPathLine(loc)
+	if line == "" {
+		return ReviewFinding{}, false
+	}
 	return ReviewFinding{
 		Path:     path,
 		Line:     line,
 		Severity: NormalizeReviewSeverity(severity),
 		Content:  content,
-	}
+	}, true
 }
 
 // splitLocation splits a one-line finding's remainder into its
@@ -262,12 +268,8 @@ func isReviewFieldName(word string) bool {
 // isKnownReviewSeverity reports whether word is a severity this parser
 // recognizes.
 func isKnownReviewSeverity(word string) bool {
-	switch strings.ToLower(strings.TrimSpace(word)) {
-	case SeverityCritical, SeverityHigh, SeverityMedium, SeverityLow,
-		"blocking", "warning", "style", "suggestion":
-		return true
-	}
-	return false
+	_, ok := reviewSeverities[strings.ToLower(strings.TrimSpace(word))]
+	return ok
 }
 
 // statesNoFindings reports whether the output says the group found

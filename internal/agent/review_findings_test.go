@@ -304,3 +304,21 @@ func TestParseReviewFindings_KeepsEveryFinding(t *testing.T) {
 		}
 	}
 }
+
+// TestParseReviewFindings_ProseIsNotAFinding: a bullet that only
+// looks like a finding is prose. The builtin prompt spells out its
+// severity rubric in exactly this shape, and an agent that echoes it
+// must not add findings to the verdict's count.
+func TestParseReviewFindings_ProseIsNotAFinding(t *testing.T) {
+	cases := []string{
+		"- **critical**: would break in production or lose data. Must fix before merge.",
+		"- warning: this may deadlock under load",
+		"- **Note**: watch the nil map",
+	}
+	for _, text := range cases {
+		report := ParseReviewFindings(text)
+		if len(report.Findings) != 0 {
+			t.Errorf("%q produced %d findings, want none: %+v", text, len(report.Findings), report.Findings)
+		}
+	}
+}

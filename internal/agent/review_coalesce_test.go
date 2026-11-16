@@ -51,7 +51,10 @@ func TestEventAggregator_CoalescesTextIntoLabeledBatches(t *testing.T) {
 	// batch stays open until the group ends.
 	var raw strings.Builder
 	for i := 0; i < 40; i++ {
-		chunk := fmt.Sprintf("chunk %d of the review\n", i)
+		chunk := fmt.Sprintf("chunk %d of the review", i)
+		if i > 0 {
+			raw.WriteString("\n")
+		}
 		raw.WriteString(chunk)
 		j1(AgentEvent{Kind: EventAgentText, Text: chunk})
 	}
@@ -100,8 +103,8 @@ func TestEventAggregator_CoalescesThinking(t *testing.T) {
 	if !strings.HasPrefix(think[0].Text, "[group-1]\n\n") {
 		t.Errorf("the thinking batch does not carry its group label: %q", think[0].Text)
 	}
-	if got := stripLabel(think[0].Text); got != "thinking about the diff" {
-		t.Errorf("the flushed thinking = %q, want the group's raw thinking", got)
+	if got := stripLabel(think[0].Text); got != "thinking about \nthe diff" {
+		t.Errorf("the flushed thinking = %q, want the group's thinking", got)
 	}
 }
 
@@ -115,17 +118,12 @@ func TestEventAggregator_FlushesOnSize(t *testing.T) {
 	j1 := agg.wrapJob("group-1")
 	j1(readyEvent("a", "/r", "main"))
 
-	// A long review, streamed in chunks that do not align with the
-	// paragraph breaks — the batch crosses the 2 KiB trigger in the
-	// middle of a paragraph.
-	raw := strings.Repeat("a paragraph of review text that goes on for a while\n\n", 40)
-	for i := 0; i < len(raw); i += 64 {
-		end := i + 64
-		if end > len(raw) {
-			end = len(raw)
-		}
-		j1(AgentEvent{Kind: EventAgentText, Text: raw[i:end]})
-	}
+	// One long review — the batch crosses the 2 KiB trigger in the
+	// middle of the text, and the cut lands on the last paragraph
+	// break before it.
+	raw := strings.Repeat("a paragraph of review text that goes on for a while\n\n", 39) +
+		"a paragraph of review text that goes on for a while"
+	j1(AgentEvent{Kind: EventAgentText, Text: raw})
 	j1(resultEvent(""))
 
 	bodies := textBodies(rec.snapshot())
@@ -152,7 +150,8 @@ func TestEventAggregator_FlushesOnSize(t *testing.T) {
 		joined.WriteString(stripLabel(body))
 	}
 	if joined.String() != raw {
-		t.Errorf("the flushed batches do not reproduce the group's raw text")
+		t.Errorf("the flushed batches do not reproduce the group's raw text:\ngot:  %q\nwant: %q",
+			joined.String(), raw)
 	}
 }
 
@@ -195,7 +194,7 @@ func TestEventAggregator_FlushesTheTailOfTheReply(t *testing.T) {
 	if len(bodies) != 1 {
 		t.Fatalf("expected one coalesced batch, got %d: %+v", len(bodies), bodies)
 	}
-	if got := stripLabel(bodies[0]); got != "the streamed part and the tail" {
+	if got := stripLabel(bodies[0]); got != "the streamed part\n and the tail" {
 		t.Errorf("the flushed body = %q, want the group's whole reply", got)
 	}
 }
@@ -382,5 +381,75 @@ func TestRunReviewGroups_ReportCarriesTheGroupsFindings(t *testing.T) {
 			t.Errorf("the finding of %q has severity %q, want %q",
 				r.Pattern, r.Report.Findings[0].Severity, SeverityHigh)
 		}
+	}
+}
+
+// TestEventAggregator_SkipsTheTailTheGroupAlreadyDelivered: a
+// bridge that streams the reply AND repeats it on the terminal event
+// (dsh carries its last message on both) must not deliver that
+// message twice.
+func TestEventAggregator_SkipsTheTailTheGroupAlreadyDelivered(t *testing.T) {
+	rec := &sinkRecorder{}
+	agg := newEventAggregator(rec.sink(), 1)
+
+	j1 := agg.wrapJob("group-1")
+	j1(readyEvent("a", "/r", "main"))
+	j1(AgentEvent{Kind: EventAgentText, Text: "the findings"})
+	j1(resultEvent("the findings"))
+
+	bodies := textBodies(rec.snapshot())
+	if len(bodies) != 1 {
+		t.Fatalf("expected one batch, got %d: %+v", len(bodies), bodies)
+	}
+	if got := stripLabel(bodies[0]); got != "the findings" {
+		t.Errorf("the flushed body = %q, want the group's text once", got)
+	}
+}
+
+// TestEventAggregator_ReplaysTheBuffersWhenAGroupNeverReportsReady:
+// a group that fails before its Ready event never reaches the Ready
+// gate — the aggregator would stay in phaseBuffering and every
+// group's output would sit in its buffer. The fan-out's end replays
+// them, so the surviving groups' findings still reach the chat.
+func TestEventAggregator_ReplaysTheBuffersWhenAGroupNeverReportsReady(t *testing.T) {
+	rec := &sinkRecorder{}
+	agg := newEventAggregator(rec.sink(), 2)
+
+	j1 := agg.wrapJob("group-1")
+	_ = agg.wrapJob("group-2")
+	j1(readyEvent("a", "/r", "main"))
+	j1(AgentEvent{Kind: EventAgentText, Text: "group-1 findings"})
+
+	// group-2 never reports Ready; the fan-out ends.
+	agg.finalize()
+
+	bodies := textBodies(rec.snapshot())
+	if len(bodies) != 1 {
+		t.Fatalf("expected the stranded batch to be replayed, got %d: %+v", len(bodies), bodies)
+	}
+	if got := stripLabel(bodies[0]); got != "group-1 findings" {
+		t.Errorf("the replayed body = %q, want the group's findings", got)
+	}
+}
+
+// TestEventAggregator_JoinsThePiecesWithANewline: the pieces of a
+// reply are complete blocks — two sentences must not run together in
+// the batch that carries them.
+func TestEventAggregator_JoinsThePiecesWithANewline(t *testing.T) {
+	rec := &sinkRecorder{}
+	agg := newEventAggregator(rec.sink(), 1)
+
+	j1 := agg.wrapJob("group-1")
+	j1(readyEvent("a", "/r", "main"))
+	j1(AgentEvent{Kind: EventAgentText, Text: "first sentence."})
+	j1(AgentEvent{Kind: EventAgentText, Text: "second sentence."})
+	j1(resultEvent(""))
+
+	bodies := textBodies(rec.snapshot())
+	if len(bodies) != 1 {
+		t.Fatalf("expected one batch, got %d: %+v", len(bodies), bodies)
+	}
+	if got := stripLabel(bodies[0]); got != "first sentence.\nsecond sentence." {
+		t.Errorf("the flushed body = %q, want the pieces joined by a newline", got)
 	}
 }

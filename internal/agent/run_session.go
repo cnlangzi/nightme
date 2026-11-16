@@ -277,10 +277,15 @@ func driverTurnText(a *Agent) string {
 //
 // A bridge may deliver the reply in two pieces: the segments it
 // streamed as EventAgentText while the turn ran, and the tail it
-// still held when the turn ended (pi / omp / dsh carry the tail on
-// the result event; claudecode / codex carry the whole reply on the
-// text events and leave the result payload empty). The full reply is
-// both, in order.
+// still held when the turn ended (pi / omp carry the tail on the
+// result event; claudecode / codex carry the whole reply on the text
+// events and leave the result payload empty). The full reply is both,
+// in order.
+//
+// A bridge that repeats what it already streamed (dsh carries its
+// last message on the result event as well) must not have it counted
+// twice: the terminal's text is dropped when the streamed pieces
+// already end with it.
 //
 // Each text event is a self-contained piece of the reply — a message
 // for codex / pi / omp / dsh / claudecode, a sentence for the ACP
@@ -295,7 +300,9 @@ func sessionText(terminal *AgentResultEvent, streamed []string) string {
 		}
 	}
 	if s := strings.TrimSpace(terminal.Text); s != "" {
-		parts = append(parts, s)
+		if !strings.HasSuffix(strings.Join(parts, "\n"), s) {
+			parts = append(parts, s)
+		}
 	}
 	return strings.Join(parts, "\n")
 }

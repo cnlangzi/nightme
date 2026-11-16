@@ -120,26 +120,65 @@ type perJobState struct {
 	// coalescing batches — see pendingBatch.
 	pendingText     pendingBatch
 	pendingThinking pendingBatch
+
+	// deliveredText holds every text piece the group delivered, in
+	// order. It is the text the user has already seen — the tail a
+	// terminal event carries is checked against it, so a bridge
+	// that repeats the reply on the terminal does not deliver it
+	// twice.
+	deliveredText []string
 }
 
-// pendingBatch is one coalescing batch: the text collected so far,
+// pendingBatch is one coalescing batch: the pieces collected so far,
 // the event that opened it (its metadata rides the flushed event),
 // and the time the batch was opened — the age the time trigger
 // measures.
+//
+// The pieces are kept apart because the reply of a turn is assembled
+// from its pieces joined by a newline (see sessionText) — a batch
+// that concatenated them without the separator would run two
+// sentences of the reply together.
 type pendingBatch struct {
-	body    string
+	pieces  []string
+	size    int
 	started time.Time
 	ev      AgentEvent
 	kind    EventKind
+}
+
+// body returns the batch's text: its pieces joined by a newline.
+func (b *pendingBatch) body() string {
+	return strings.Join(b.pieces, "\n")
+}
+
+// append adds a piece to the batch and returns the updated size.
+func (b *pendingBatch) append(piece string) int {
+	if len(b.pieces) > 0 {
+		b.size++ // the newline between the pieces
+	}
+	b.pieces = append(b.pieces, piece)
+	b.size += len(piece)
+	return b.size
+}
+
+// reset empties the batch.
+func (b *pendingBatch) reset() {
+	b.pieces = nil
+	b.size = 0
+	b.started = time.Time{}
+	b.ev = AgentEvent{}
+	b.kind = 0
 }
 
 // The coalescing triggers. A batch is flushed when it reaches
 // coalesceBytes of body, or when it has been open for
 // coalesceInterval — whichever comes first.
 //
-// The size keeps the channel's per-message cost bounded; the interval
+// The size keeps a batch from growing without end; the interval
 // keeps the user watching the review being written instead of
-// staring at a card that has not moved for a minute.
+// staring at a card that has not moved for a minute. Neither is a
+// hard bound: a single event larger than the size trigger is
+// delivered as it is.
 const (
 	// coalesceBytes is the body size that flushes a pending batch.
 	coalesceBytes = 2048
@@ -164,6 +203,12 @@ type eventAggregator struct {
 	emitMu sync.Mutex   // guards pairs of a.outer() calls (invariant #12)
 	phase  atomic.Int32 // Finding 3 from /review: atomic load/store (data race per Go mem model)
 	perJob map[string]*perJobState
+
+	// jobOrder lists the per-job sources in the order wrapJob was
+	// called for them — the fan-out order. The replay and the final
+	// flush walk it so the groups reach the chat in the order the
+	// plan named them. Guarded by mu.
+	jobOrder []string
 
 	// Counters incremented under mu. readyCount tracks per-job
 	// Ready emissions; doneCount tracks per-job Result/Error
@@ -226,6 +271,9 @@ func (a *eventAggregator) wrapJob(src string) func(AgentEvent) {
 	a.mu.Lock()
 	state := &perJobState{
 		pendingToolStarts: make(map[string]AgentEvent),
+	}
+	if _, seen := a.perJob[src]; !seen {
+		a.jobOrder = append(a.jobOrder, src)
 	}
 	a.perJob[src] = state
 	a.mu.Unlock()
@@ -301,6 +349,13 @@ func (a *eventAggregator) handle(ev AgentEvent, state *perJobState) {
 // the callback can't re-enter the aggregator under a held mutex
 // (mirrors handleBuffering's transition path — see the comment
 // at the top of handle()).
+//
+// A group that failed before its Ready event never reaches the
+// Ready gate: the aggregator would stay in phaseBuffering and every
+// group's output would sit in its buffer. When the fan-out ends, the
+// last markJobDone transitions and replays those buffers — the
+// surviving groups' findings reach the chat even when a sibling
+// failed.
 func (a *eventAggregator) markJobDone() {
 	a.mu.Lock()
 	if a.finalEmitted {
@@ -309,6 +364,21 @@ func (a *eventAggregator) markJobDone() {
 	}
 	a.doneCount++
 	allDone := a.doneCount >= a.expected
+	// The transition must happen while the phase is still
+	// phaseBuffering — the replay runs through handleStreaming,
+	// which drops everything once the phase is closed.
+	synthetic, replay, transition := a.beginTransition(allDone)
+	a.mu.Unlock()
+
+	if transition {
+		a.replay(synthetic, replay)
+	}
+
+	a.mu.Lock()
+	if a.finalEmitted {
+		a.mu.Unlock()
+		return
+	}
 	if allDone {
 		a.finalEmitted = true
 		a.phase.Store(int32(phaseClosed))
@@ -344,6 +414,46 @@ func (a *eventAggregator) markJobDone() {
 	}
 }
 
+// beginTransition moves the aggregator out of phaseBuffering when the
+// fan-out ends before every group reported Ready. It returns the
+// synthetic outer Ready and the per-job buffers to replay.
+//
+// The caller holds a.mu.
+func (a *eventAggregator) beginTransition(allDone bool) (AgentEvent, []perJobReplay, bool) {
+	if !allDone || a.readyEmitted {
+		return AgentEvent{}, nil, false
+	}
+	if aggregatorPhase(a.phase.Load()) != phaseBuffering {
+		return AgentEvent{}, nil, false
+	}
+	a.readyEmitted = true
+	a.phase.Store(int32(phaseStreaming))
+	synthetic := a.buildSyntheticReady()
+	replay := make([]perJobReplay, 0, len(a.jobOrder))
+	for _, src := range a.jobOrder {
+		state := a.perJob[src]
+		if state == nil {
+			continue
+		}
+		replay = append(replay, perJobReplay{state: state, events: state.initBuffer})
+		state.initBuffer = nil
+	}
+	return synthetic, replay, true
+}
+
+// replay forwards the synthetic outer Ready and replays the per-job
+// buffers through handleStreaming. The caller holds no lock.
+func (a *eventAggregator) replay(synthetic AgentEvent, replay []perJobReplay) {
+	a.emitMu.Lock()
+	a.outer(synthetic)
+	a.emitMu.Unlock()
+	for _, r := range replay {
+		for _, be := range r.events {
+			a.handleStreaming(be, r.state)
+		}
+	}
+}
+
 // finalize is the post-wg.Wait() safety net called by
 // delegateReviewMultiJob. With completion-driven counting
 // (markJobDone in each per-job goroutine's defer), every
@@ -363,7 +473,15 @@ func (a *eventAggregator) markJobDone() {
 // call site.
 func (a *eventAggregator) finalize() {
 	// A group that never produced a terminal event still has text
-	// pending — flush it before the lifecycle closes.
+	// pending — flush it before the lifecycle closes. A group that
+	// never produced a Ready event has its whole output in its
+	// buffer: the transition replays it first.
+	a.mu.Lock()
+	synthetic, replay, transition := a.beginTransition(true)
+	a.mu.Unlock()
+	if transition {
+		a.replay(synthetic, replay)
+	}
 	a.flushAll()
 
 	a.mu.Lock()
@@ -527,6 +645,11 @@ func (a *eventAggregator) handleBuffering(ev AgentEvent, state *perJobState) {
 	// doneCount may already exceed readyCount when a fast job
 	// finishes before others report Ready; we still wait for
 	// readyCount — Ready is the gate, not Done.
+	//
+	// A group that never reports Ready at all (it failed before its
+	// session came up) would strand every group's output in its
+	// buffer — the fan-out's end transitions and replays them
+	// instead (see markJobDone).
 	if a.readyCount >= a.expected && !a.readyEmitted {
 		a.readyEmitted = true
 		a.phase.Store(int32(phaseStreaming))
@@ -538,8 +661,12 @@ func (a *eventAggregator) handleBuffering(ev AgentEvent, state *perJobState) {
 		// Snapshot all per-job buffers for replay. Per-job state
 		// stays alive (we don't drop it — pendingToolStarts may
 		// still receive live events after transition).
-		replay := make([]perJobReplay, 0, len(a.perJob))
-		for _, v := range a.perJob {
+		replay := make([]perJobReplay, 0, len(a.jobOrder))
+		for _, src := range a.jobOrder {
+			v := a.perJob[src]
+			if v == nil {
+				continue
+			}
 			replay = append(replay, perJobReplay{state: v, events: v.initBuffer})
 			v.initBuffer = nil
 		}
@@ -550,14 +677,7 @@ func (a *eventAggregator) handleBuffering(ev AgentEvent, state *perJobState) {
 		// merging rules are uniform between replay and live events.
 		// emitMu covers the synthetic Ready so it doesn't
 		// interleave with a concurrent per-job pair emit.
-		a.emitMu.Lock()
-		a.outer(syntheticReady)
-		a.emitMu.Unlock()
-		for _, r := range replay {
-			for _, be := range r.events {
-				a.handleStreaming(be, r.state)
-			}
-		}
+		a.replay(syntheticReady, replay)
 		return
 	}
 	a.mu.Unlock()
@@ -614,11 +734,13 @@ func (a *eventAggregator) buildSyntheticReady() AgentEvent {
 //     ev.TaskList.Items into the cross-job tasks map (latest-wins
 //     by AgentTaskItem.ID), then forward ONE snapshot event with
 //     the merged items.
-//   - EventAgentResult / EventAgentError → forwarded to outer as
-//     observation (chat wants to see per-job completion status
-//     when available). NOT counted here — doneCount is driven by
-//     the orchestrator's per-job goroutine via markJobDone (see
-//     "Completion-driven counting" rationale below).
+//   - EventAgentResult / EventAgentError → SUPPRESSED (the chat sees
+//     one outer Result, not one per group). The group is over, so
+//     its pending batches are flushed; a terminal that carries the
+//     tail of the reply joins them first. NOT counted here —
+//     doneCount is driven by the orchestrator's per-job goroutine via
+//     markJobDone (see "Completion-driven counting" rationale
+//     below).
 //   - EventAgentText / EventAgentThinking → coalesced per job into
 //     batches (see coalesce); the flushed batch carries the job's
 //     label.
@@ -723,11 +845,11 @@ func (a *eventAggregator) handleStreaming(ev AgentEvent, state *perJobState) {
 		// become an outbound message of its own. The batch is
 		// flushed when it grows past the size trigger, when it has
 		// been open past the time trigger, or when the group ends.
-		a.coalesce(&state.pendingText, EventAgentText, ev.Text, ev)
+		a.coalesce(state, &state.pendingText, EventAgentText, ev.Text, ev)
 
 	case EventAgentThinking:
 		// The group's thinking follows the same rules as its text.
-		a.coalesce(&state.pendingThinking, EventAgentThinking, ev.Text, ev)
+		a.coalesce(state, &state.pendingThinking, EventAgentThinking, ev.Text, ev)
 
 	case EventAgentTaskCreate, EventAgentTaskUpdate:
 		// Cross-job task list dedup (#13). Merge incoming items
@@ -782,14 +904,20 @@ func (a *eventAggregator) handleStreaming(ev AgentEvent, state *perJobState) {
 		//
 		// The terminal does carry one piece of content: the tail
 		// of the group's reply, which a bridge holds back until
-		// the turn ends (pi / omp / dsh put the last segment on
-		// the result event; claudecode / codex leave it empty
-		// and stream everything). That tail belongs to the
-		// group, so it joins the coalesced stream before the
-		// group is flushed — otherwise the channel would never
-		// see it.
+		// the turn ends (pi / omp put the last segment on the
+		// result event; claudecode / codex leave it empty and
+		// stream everything). That tail belongs to the group, so
+		// it joins the coalesced stream before the group is
+		// flushed — otherwise the channel would never see it.
+		//
+		// A bridge that repeats the reply it already streamed
+		// (dsh carries the last message on the result event as
+		// well) must not deliver it twice: the tail is skipped
+		// when the group already delivered it.
 		if ev.Kind == EventAgentResult && ev.Err == nil && ev.Result != nil && ev.Result.Text != "" {
-			a.coalesce(&state.pendingText, EventAgentText, ev.Result.Text, ev)
+			if !a.tailAlreadyDelivered(state, ev.Result.Text) {
+				a.coalesce(state, &state.pendingText, EventAgentText, ev.Result.Text, ev)
+			}
 		}
 		// The group is over: whatever it left open goes out now.
 		a.flushJob(state)
@@ -820,18 +948,18 @@ func (a *eventAggregator) handleStreaming(ev AgentEvent, state *perJobState) {
 // kind and forwards the batch when a trigger fires.
 //
 // A batch is flushed when it reaches coalesceBytes of body, or when
-// it has been open for coalesceInterval — whichever comes first. A
-// size-triggered flush cuts at the batch's last blank line so a
-// markdown block is not split in half; a batch without a blank line
-// is cut at its end.
+// it has been open for coalesceInterval — whichever comes first. The
+// interval is checked when the next event arrives, not by a timer: a
+// group that stops producing text has nothing to flush until it ends.
 //
-// The flush is driven by the arrival of events and by the group's
-// terminal event — there is no timer goroutine. A group that stops
-// producing text keeps its batch until it ends.
+// A size-triggered flush cuts at the batch's last blank line so a
+// markdown block is not split in half; a batch without a blank line
+// is cut at its end — a single event larger than the trigger is
+// never split.
 //
 // ev carries the metadata of the flushed event (session, model,
 // agent, workspace) and the group's label.
-func (a *eventAggregator) coalesce(batch *pendingBatch, kind EventKind, text string, ev AgentEvent) {
+func (a *eventAggregator) coalesce(state *perJobState, batch *pendingBatch, kind EventKind, text string, ev AgentEvent) {
 	if text == "" {
 		return
 	}
@@ -839,30 +967,37 @@ func (a *eventAggregator) coalesce(batch *pendingBatch, kind EventKind, text str
 	var out []AgentEvent
 
 	a.mu.Lock()
-	if batch.body != "" && now.Sub(batch.started) >= coalesceInterval {
-		out = append(out, coalescedEvent(batch.ev, batch.kind, batch.body))
-		*batch = pendingBatch{}
+	if kind == EventAgentText {
+		// The group's delivered text — what the user has already
+		// seen. The tail its terminal event carries is checked
+		// against it.
+		state.deliveredText = append(state.deliveredText, text)
 	}
-	if batch.body == "" {
-		batch.body = text
+	if len(batch.pieces) > 0 && now.Sub(batch.started) >= coalesceInterval {
+		out = append(out, coalescedEvent(batch.ev, batch.kind, batch.body()))
+		batch.reset()
+	}
+	if len(batch.pieces) == 0 {
 		batch.started = now
 		batch.ev = ev
 		batch.kind = kind
-	} else {
-		batch.body += text
 	}
-	if len(batch.body) >= coalesceBytes {
-		cut := len(batch.body)
-		if i := strings.LastIndex(batch.body, "\n\n"); i >= 0 {
+	if batch.append(text) >= coalesceBytes {
+		body := batch.body()
+		cut := len(body)
+		// A blank line at the very start would flush an empty
+		// batch — cut at the end instead.
+		if i := strings.LastIndex(body, "\n\n"); i > 0 {
 			cut = i + 2
 		}
-		out = append(out, coalescedEvent(batch.ev, batch.kind, batch.body[:cut]))
-		rest := batch.body[cut:]
-		batch.body = rest
-		if rest == "" {
-			*batch = pendingBatch{}
-		} else {
+		out = append(out, coalescedEvent(batch.ev, batch.kind, body[:cut]))
+		rest := body[cut:]
+		batch.reset()
+		if rest != "" {
+			batch.append(rest)
 			batch.started = now
+			batch.ev = ev
+			batch.kind = kind
 		}
 	}
 	a.mu.Unlock()
@@ -879,12 +1014,42 @@ func (a *eventAggregator) flushJob(state *perJobState) {
 	a.emit(out)
 }
 
+// tailAlreadyDelivered reports whether the group already delivered
+// the text its terminal event carries.
+//
+// The reply of a turn reaches the user in two pieces: the pieces the
+// bridge streamed as text events, and the tail it held back until the
+// turn ended. A bridge that streams the whole reply AND repeats it on
+// the terminal event (dsh carries its last message on both) would
+// deliver that message twice — the check keeps the tail out of the
+// stream when the group already said it.
+//
+// The comparison is a suffix check: the tail is the end of the
+// group's text. A tail that merely repeats the end of the text is
+// skipped too — the user has already read it.
+func (a *eventAggregator) tailAlreadyDelivered(state *perJobState, tail string) bool {
+	tail = strings.TrimSpace(tail)
+	if tail == "" {
+		return true
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delivered := strings.Join(state.deliveredText, "\n")
+	return strings.HasSuffix(delivered, tail)
+}
+
 // flushAll forwards every group's pending batches — the fan-out is
-// over, no group keeps its text back.
+// over, no group keeps its text back. The groups are flushed in
+// fan-out order, so the tails reach the chat in the order the plan
+// named the groups.
 func (a *eventAggregator) flushAll() {
 	a.mu.Lock()
 	var out []AgentEvent
-	for _, state := range a.perJob {
+	for _, src := range a.jobOrder {
+		state := a.perJob[src]
+		if state == nil {
+			continue
+		}
 		out = append(out, takePending(&state.pendingText, &state.pendingThinking)...)
 	}
 	a.mu.Unlock()
@@ -905,11 +1070,11 @@ func (a *eventAggregator) emit(events []AgentEvent) {
 func takePending(batches ...*pendingBatch) []AgentEvent {
 	var out []AgentEvent
 	for _, b := range batches {
-		if b.body == "" {
+		if len(b.pieces) == 0 {
 			continue
 		}
-		out = append(out, coalescedEvent(b.ev, b.kind, b.body))
-		*b = pendingBatch{}
+		out = append(out, coalescedEvent(b.ev, b.kind, b.body()))
+		b.reset()
 	}
 	return out
 }

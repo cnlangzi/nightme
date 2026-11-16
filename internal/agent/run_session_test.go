@@ -590,3 +590,26 @@ func TestRunSession_LargePayload(t *testing.T) {
 		t.Fatalf("driver received %d blocks, want 1 of %d bytes", len(sent), wantSize)
 	}
 }
+
+// TestRunSession_ResultTextAlreadyStreamed: a bridge that streams
+// the reply AND repeats it on the result event (dsh carries its last
+// message on both) must not have the reply counted twice.
+func TestRunSession_ResultTextAlreadyStreamed(t *testing.T) {
+	d := newSessionFakeDriver(func([]ContentBlock) []AgentEvent {
+		return []AgentEvent{
+			sessionReadyEvent("sess-1", "model-x"),
+			{Kind: EventAgentText, Text: "the findings"},
+			{Kind: EventAgentResult, Result: &AgentResultEvent{Text: "the findings"}},
+		}
+	})
+	s := &sessionFakeStarter{name: "fake", newDriver: func(StartConfig) *sessionFakeDriver { return d }}
+
+	res, err := RunSession(context.Background(), s, StartConfig{Workspace: "/ws"},
+		[]ContentBlock{{Type: ContentText, Text: "question"}})
+	if err != nil {
+		t.Fatalf("RunSession: %v", err)
+	}
+	if res.Text != "the findings" {
+		t.Errorf("Text = %q, want %q (the reply must not be counted twice)", res.Text, "the findings")
+	}
+}

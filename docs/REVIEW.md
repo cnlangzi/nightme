@@ -345,6 +345,7 @@ severity 归一到 `critical` / `high` / `medium` / `low` / `unspecified`(`block
 - **#13 Task 跨 job 去重**:aggregator 维护 `tasks map[string]AgentTaskItem`,每个 TaskCreate/Update 进来按 ID 写入(latest wins),forward 一份合并 snapshot。避免 chat checklist 看到 N 份重复条目。
 - **进程事件实时流**:Phase 2 期间 process 事件立即外发(Source="group-N" 让 chat 渲染层区分),review 期间用户能实时看到 "[group-1] tool: Read /home/repo/foo.go" 这种进度。
 - **异序到达容错**:job-1 先报 Result、其他还没报 Ready 的情况:`doneCount > readyCount` 短暂成立,但**不**触发 outer Result(Phase 还在 buffering);等所有 Ready 后才触发 Phase 2,然后等所有 Done 才触发 outer Result。**Ready 优先于 Done 的合成外发**。
+- **没报 Ready 的组**:某个组在 session 起来之前就挂了(启动失败、resume 被拒),它永远不会报 Ready —— 聚合器会一直停在 Phase 1,**所有组的正文都卡在 initBuffer 里**。所以 fan-out 结束(最后一个 markJobDone)时,聚合器补一次 Phase 1 → 2 转换并 replay 缓冲:活下来的组的 findings 照样到 channel。
 - **Replay 一致性**:Phase 1→2 转换时,旧 initBuffer 经同一个 `handleStreaming` 路径走完配对/合并逻辑,与 live 事件应用**同一套规则**,行为完全一致。
 
 **为什么 outer sink 能安全接收**:outbound.StreamRunOnceToEmitter 底层是 chan-based,channel send 跨 goroutine 线程安全。aggregator 持锁区只做状态变更,`outer(ev)` 调用在锁外完成,避免持锁回调。
@@ -364,12 +365,13 @@ sink 的 drain 在 verdict 之前排空:各组的批还排在 drain goroutine �
 **分组合并(攒批)的触发条件**:
 
 - 一组的一个 text chunk **不**单独成一条 outbound 消息;按组攒批。
-- 批的 flush 触发:**正文到 2 KiB** 或 **批开了 2 秒**,先到先触发。
+- 批的 flush 触发:**正文到 2 KiB** 或 **批开了 2 秒**,先到先触发。2 秒这一条在**下一个事件到达时**判定 —— 没有 timer goroutine:组停了产字,批就等到它结束时才发。
+- 一个 chunk **不会被劈开**:超过阈值的单条事件按原样发出。
+- 批里的多个 chunk 用**换行**连接(和 `sessionText` 拼整段回复的方式一致):一条回复的每个 chunk 都是自成一块的(一句话 / 一条消息),直接拼接会把两句话粘在一起。
 - 字节触发的 flush 在批的**最后一个空行**处切开(markdown 块不被劈开);没有空行就从末尾切。
 - 组的终态事件(Result / Error)flush 该组剩下的批;fan-out 结束时(finalize)flush 所有组剩下的批 —— 没有终态的组也不丢字。
-- bridge 可能把回复的**尾巴**留在终态事件上(pi / omp / dsh 把最后一段放在 result 事件;claudecode / codex 全走 text 事件、result 为空)。尾巴属于该组,先并进该组的批再 flush —— 否则 channel 永远看不到它。
+- bridge 可能把回复的**尾巴**留在终态事件上(pi / omp 把最后一段放在 result 事件;claudecode / codex 全走 text 事件、result 为空)。尾巴属于该组,先并进该组的批再 flush —— 否则 channel 永远看不到它。**已经流过的尾巴不重复发**:dsh 把最后一条消息同时放在 text 事件和 result 事件上,组已经说过的话不再说一遍(判定:尾巴是该组已发文本的后缀)。
 - flush 出来的一条批 = 一个 AgentEvent(同 kind),正文前加 `[group-N]\n\n` 标签行。标签走**文本内部**:outbound 层没有 group 字段,标签必须跟着它命名的正文走。
-- **没有 timer goroutine**:flush 由事件到达和组终态驱动。组停了产字,批就等到它结束时才发。
 
 ### 2.5.6 边界
 
@@ -381,6 +383,7 @@ sink 的 drain 在 verdict 之前排空:各组的批还排在 drain goroutine �
 - **未配对 ToolStart**:job 在 ToolStart 后异常结束(无对应 ToolEnd),该 Start 进 buffer 后永远不被 forward——这是合理行为,chat 不会看到半截 call;该 job 的 done 仍会按 Result/Error 触发。
 - **orphan ToolEnd**:配对 ToolStart 已先被 replay 转发过的罕见情况——orphan End 也 forward,chat 看到一条无 Start 的 End,可忽略。
 - **单组正文超过 2 KiB 且没有空行**:字节触发的 flush 只能从末尾切,这一条消息比 2 KiB 大(markdown 块不被劈开的代价);标签照旧在正文之前。
+- **一条 chunk 超过 2 KiB**:不劈开,按原样发一条(比阈值大的一条消息是单个事件的下限,不是可以切的东西)。
 - **组没产出任何正文**:该组没有可 flush 的批,verdict 行把它算成 unparsed 组(不是 failed)。
 
 ### 2.5.7 实现索引
@@ -425,7 +428,7 @@ sink 的 drain 在 verdict 之前排空:各组的批还排在 drain goroutine �
 - **#11 单 outer lifecycle**:eventAggregator 的三相状态机在 readyCount/doneCount all-wait 时各合成一次 outer Ready / outer Result,per-job lifecycle 不外泄。
 - **#12 per-job ToolStart/End 配对**:eventAggregator 的 `perJob.pendingToolStarts` 按 ID 缓冲 ToolStart,等配对 ToolEnd 时按 Start→End 顺序连续转发。
 - **#13 Task 跨 job 去重**:eventAggregator 的 `tasks map[string]AgentTaskItem`,latest-wins 写入,forward 合并 snapshot。
-- **#14 分组投递**(新):一组一个 chunk 不单独成消息;批按 2 KiB / 2 秒 flush;每条批带 `[group-N]` 标签;组的终态与 fan-out 结束各兜底 flush 一次,不留字。
+- **#14 分组投递**(新):一组一个 chunk 不单独成消息;批按 2 KiB / 2 秒 flush(2 秒在下一个事件到达时判定);每条批带 `[group-N]` 标签;组的终态与 fan-out 结束各兜底 flush 一次,不留字;没报 Ready 的组由 fan-out 结束时的 replay 兜底,不留字。
 - **#15 verdict 确定性**(新):verdict 行的 findings 计数来自每组自己的输出解析,合并文本不解析;失败组算 failed 不算 unparsed。
 
 ---

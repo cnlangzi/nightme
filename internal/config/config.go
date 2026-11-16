@@ -491,6 +491,32 @@ func Save(c *Config, path string) error {
 	return save(c, path)
 }
 
+// Update loads the config file at path, applies fn to it and saves
+// it, all under one write lock.
+//
+// The file is read when the update runs, not when the caller first
+// looked at it: a value another writer changed in the meantime — the
+// me.llm block the wizard wrote, say — survives the update. A caller
+// that holds a configuration it loaded earlier keeps using it for
+// rendering and applies its own change to that copy as well.
+func Update(path string, fn func(*Config) error) error {
+	if path == "" {
+		return fmt.Errorf("config: empty path")
+	}
+
+	configWriteMu.Lock()
+	defer configWriteMu.Unlock()
+
+	c, err := Load(path)
+	if err != nil {
+		return err
+	}
+	if err := fn(c); err != nil {
+		return err
+	}
+	return save(c, path)
+}
+
 // save is Save without the lock — for callers that already hold
 // configWriteMu.
 func save(c *Config, path string) error {
@@ -598,6 +624,12 @@ func applyDefaults(c *Config) {
 	}
 	if c.Discord.Intents == 0 {
 		c.Discord.Intents = defaultDiscordIntents
+	}
+	// The chat model caps its own answers. An operator who never
+	// touched me.llm.max_tokens gets the cap too — the daemon sends
+	// it, and `nightme me` shows it as the value to keep.
+	if c.Me.LLM.MaxTokens == 0 {
+		c.Me.LLM.MaxTokens = defaultMeMaxTokens
 	}
 }
 

@@ -70,6 +70,24 @@ func TestSetMapValue_CreatesAndUpdates(t *testing.T) {
 	}
 }
 
+func TestSetMapValueInt_WritesANumber(t *testing.T) {
+	root, err := Parse([]byte("lang: zh\n"), "/tmp/x.yml")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	SetMapValueInt(root, "max_tokens", 40960)
+	out, err := Encode(root)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	if !strings.Contains(string(out), "max_tokens: 40960") {
+		t.Fatalf("encoded = %q, want an unquoted number", string(out))
+	}
+	if v := MapValue(root, "max_tokens"); v == nil || v.Tag != "!!int" {
+		t.Fatalf("max_tokens = %+v, want an int node", v)
+	}
+}
+
 func TestMapValueOrCreate_CreatesNestedMapping(t *testing.T) {
 	root, err := Parse([]byte("lang: zh\n"), "/tmp/x.yml")
 	if err != nil {

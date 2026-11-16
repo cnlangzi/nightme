@@ -47,7 +47,7 @@ func runConfig(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	return configInteractive(cfg, path, bufio.NewReader(os.Stdin), os.Stdout)
+	return configInteractive(cfg, path, bufio.NewReader(cmd.InOrStdin()), cmd.OutOrStdout())
 }
 
 // configInteractive drives the top-level menu loop. Extracted for
@@ -75,7 +75,7 @@ func configInteractive(cfg *config.Config, path string, in *bufio.Reader, out io
 				fmt.Fprintf(out, "Error: %v\n", err)
 			}
 		case "2":
-			if err := configAgentsMenu(cfg, in, out); err != nil {
+			if err := configAgentsMenu(cfg, path, in, out); err != nil {
 				fmt.Fprintf(out, "Error: %v\n", err)
 			}
 		case "q", "":
@@ -95,7 +95,10 @@ func configInteractive(cfg *config.Config, path string, in *bufio.Reader, out io
 //
 // Detection is re-run on each menu render so the table stays in
 // sync with disk as the user edits paths in the sub-menu.
-func configAgentsMenu(cfg *config.Config, in *bufio.Reader, out io.Writer) error {
+//
+// path is the config file the menu was loaded from and saves back
+// to — see configInteractive.
+func configAgentsMenu(cfg *config.Config, path string, in *bufio.Reader, out io.Writer) error {
 	builtins := agent.Builtins.List()
 
 	for {
@@ -115,7 +118,7 @@ func configAgentsMenu(cfg *config.Config, in *bufio.Reader, out io.Writer) error
 			continue
 		}
 		picked := builtins[n-1]
-		if err := manageAgent(cfg, picked.Info().Name, in, out); err != nil {
+		if err := manageAgent(cfg, path, picked.Info().Name, in, out); err != nil {
 			fmt.Fprintf(out, "Error: %v\n", err)
 		}
 	}
@@ -164,7 +167,9 @@ func manageStatus(name string, cfgPath map[string]string, reg *agent.Registry) s
 // manageAgent is the per-agent sub-menu. Validates that "set as
 // primary" only runs when Detect passes; lets the user re-enter
 // the path until Detect resolves; writes cfg on success.
-func manageAgent(cfg *config.Config, name string, in *bufio.Reader, out io.Writer) error {
+//
+// path is the config file the change is written to.
+func manageAgent(cfg *config.Config, path, name string, in *bufio.Reader, out io.Writer) error {
 	for {
 		cfgPath := cfgPathMap(cfg)
 		reg := agentregistry.Build(cfg, "")
@@ -196,25 +201,28 @@ func manageAgent(cfg *config.Config, name string, in *bufio.Reader, out io.Write
 				fmt.Fprintln(out, "agent is not detected; configure its path first")
 				continue
 			}
-			cfg.Primary = name
-			return saveOrError(cfg, out)
+			return saveOrError(cfg, path, out, func(c *config.Config) {
+				c.Primary = name
+			})
 		case "2":
-			path, err := promptAgentPath(name, in, out)
+			agentPath, err := promptAgentPath(name, in, out)
 			if err != nil {
 				if errors.Is(err, errPromptAborted) {
 					return nil
 				}
 				return err
 			}
-			applyAgentOverride(cfg, name, path)
-			return saveOrError(cfg, out)
+			return saveOrError(cfg, path, out, func(c *config.Config) {
+				applyAgentOverride(c, name, agentPath)
+			})
 		case "3":
 			if _, ok := cfgPath[name]; !ok {
 				fmt.Fprintln(out, "no path override to remove")
 				continue
 			}
-			removeAgentOverride(cfg, name)
-			return saveOrError(cfg, out)
+			return saveOrError(cfg, path, out, func(c *config.Config) {
+				removeAgentOverride(c, name)
+			})
 		case "b", "q", "":
 			return nil
 		default:
@@ -223,11 +231,22 @@ func manageAgent(cfg *config.Config, name string, in *bufio.Reader, out io.Write
 	}
 }
 
-func saveOrError(cfg *config.Config, out io.Writer) error {
-	if err := config.SaveDefault(cfg); err != nil {
+// saveOrError applies change to the config file and reports the
+// result.
+//
+// The change is applied to the file as it is at save time, so a block
+// another writer changed while the menu was open — the me.llm block
+// `nightme me` writes, say — survives the save. The in-memory config
+// the menu renders is changed as well, so the display stays in sync.
+func saveOrError(cfg *config.Config, path string, out io.Writer, change func(*config.Config)) error {
+	if err := config.Update(path, func(c *config.Config) error {
+		change(c)
+		return nil
+	}); err != nil {
 		return fmt.Errorf("save: %w", err)
 	}
-	fmt.Fprintf(out, "✓ saved to %s\n", config.DefaultPath())
+	change(cfg)
+	fmt.Fprintf(out, "✓ saved to %s\n", path)
 	// If a daemon is running, its in-memory cfg.Primary and
 	// Builtins singletons (cfg.Agents overrides) are now stale.
 	// The user must restart it for these changes to apply.
@@ -271,18 +290,21 @@ func configNameMenu(cfg *config.Config, path string, in *bufio.Reader, out io.Wr
 		return fmt.Errorf("config name: stat %s: %w", path, err)
 	}
 
-	cfg.Name = value
-	if err := config.Save(cfg, path); err != nil {
+	if err := config.Update(path, func(c *config.Config) error {
+		c.Name = value
+		return nil
+	}); err != nil {
 		return fmt.Errorf("config name: save config: %w", err)
 	}
+	cfg.Name = value
 
 	fmt.Fprintf(out, "✓ Name set to %q.\n", value)
 	fmt.Fprintf(out, "  Saved to: %s\n", path)
 	return nil
 }
 
-// readLine reads a single line from br. Trims trailing newline.
-// Returns "" on EOF or read error.
+// readLine reads a single line from br. Trims the surrounding
+// whitespace. Returns "" on EOF or read error.
 //
 // The *bufio.Reader is required (rather than io.Reader) because
 // bufio.Scanner and ad-hoc bufio.NewReader wrappers both read
@@ -292,9 +314,6 @@ func configNameMenu(cfg *config.Config, path string, in *bufio.Reader, out io.Wr
 // bufio.NewReader; production wraps os.Stdin in
 // cmd/nightme/run.go.
 func readLine(br *bufio.Reader) string {
-	line, err := br.ReadString('\n')
-	if err != nil && line == "" {
-		return ""
-	}
-	return strings.TrimRight(line, "\r\n")
+	line, _ := readAnswer(br)
+	return line
 }

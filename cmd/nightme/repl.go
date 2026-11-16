@@ -160,6 +160,10 @@ func runREPLInteractive(root *cobra.Command, reg *cmdRegistry, logger *slog.Logg
 	// (readline works) or runREPL routed it to the scanner path.
 	runStartupUpdateCheck(os.Stdout, logger, newStdinLineReader())
 
+	// A dispatched command reads its input from the terminal:
+	// readline has returned the line, so stdin is free.
+	root.SetIn(os.Stdin)
+
 	rl := readline.NewShell()
 	rl.Prompt.Primary(func() string { return "nightme> " })
 
@@ -234,7 +238,7 @@ func dispatchREPLLine(root *cobra.Command, logger *slog.Logger, line string, out
 	return false, nil
 }
 
-// runREPLWith is the test / non-tty core: bufio.Scanner on the
+// runREPLWith is the test / non-tty core: a bufio.Reader on the
 // supplied io.Reader so unit tests can drive the REPL without a TTY
 // and so piped-stdin invocations (echo "exit" | nightme) work. It
 // deliberately skips the startup version check — test transcripts
@@ -252,10 +256,13 @@ func runREPLWith(root *cobra.Command, reg *cmdRegistry, logger *slog.Logger, in 
 		logger.Info("repl started")
 	}
 
+	br := bufio.NewReader(in)
+	root.SetIn(br)
+
 	fmt.Fprint(out, buildBanner(bannerWithVersion(), reg))
 	fmt.Fprint(out, "nightme> ")
 
-	return scanREPLLoop(root, logger, in, out)
+	return scanREPLLoop(root, logger, br, out)
 }
 
 // runStartupUpdateCheck runs the blocking version probe (5s
@@ -289,32 +296,42 @@ func runStartupUpdateCheck(out io.Writer, logger *slog.Logger, reader func() (st
 	})
 }
 
-// scanREPLLoop is the shared scanner core: read lines from in,
+// scanREPLLoop is the shared line-reading core: read lines from in,
 // dispatch each via dispatchREPLLine (which reprints "nightme> "
 // after every command), and return on clean EOF, exit/quit, or a
 // read/dispatch error. Used by both the test / non-tty path
 // (runREPLWith) and the production no-VT tty path (runREPLScanner).
-func scanREPLLoop(root *cobra.Command, logger *slog.Logger, in io.Reader, out io.Writer) error {
-	scanner := bufio.NewScanner(in)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-
+//
+// in is the reader the REPL and the commands it dispatches share: an
+// interactive command — the `me` wizard — reads its answers from
+// the same stream the next REPL line comes from, so the two never
+// compete for stdin and the line after the command is still there.
+func scanREPLLoop(root *cobra.Command, logger *slog.Logger, in *bufio.Reader, out io.Writer) error {
 	for {
-		if !scanner.Scan() {
-			if err := scanner.Err(); err != nil && !errors.Is(err, io.EOF) {
+		line, err := in.ReadString('\n')
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
 				fmt.Fprintln(out, "Error:", err)
 				return err
 			}
-			// Clean EOF — newline so the host prompt starts on
-			// its own line.
-			fmt.Fprintln(out)
-			return nil
+			if line == "" {
+				// Clean EOF — newline so the host prompt starts on
+				// its own line.
+				fmt.Fprintln(out)
+				return nil
+			}
+			// A last line without a newline is still a line.
 		}
 
-		done, err := dispatchREPLLine(root, logger, scanner.Text(), out, true)
-		if err != nil {
-			return err
+		done, derr := dispatchREPLLine(root, logger, strings.TrimRight(line, "\r\n"), out, true)
+		if derr != nil {
+			return derr
 		}
 		if done {
+			return nil
+		}
+		if errors.Is(err, io.EOF) {
+			fmt.Fprintln(out)
 			return nil
 		}
 	}
@@ -343,5 +360,9 @@ func runREPLScanner(root *cobra.Command, reg *cmdRegistry, logger *slog.Logger) 
 	runStartupUpdateCheck(out, logger, newStdinLineReader())
 	fmt.Fprint(out, "nightme> ")
 
-	return scanREPLLoop(root, logger, os.Stdin, out)
+	// A dispatched command reads the terminal itself: the terminal
+	// hands out one line per read, so the two never compete for it.
+	root.SetIn(os.Stdin)
+
+	return scanREPLLoop(root, logger, bufio.NewReader(os.Stdin), out)
 }

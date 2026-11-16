@@ -54,7 +54,7 @@ func TestConfigAgentsMenu_CancelWithQ(t *testing.T) {
 
 	var buf bytes.Buffer
 	in := bufio.NewReader(strings.NewReader("q\n"))
-	if err := configAgentsMenu(cfg, in, &buf); err != nil {
+	if err := configAgentsMenu(cfg, cfgPath, in, &buf); err != nil {
 		t.Fatalf("configAgentsMenu: %v", err)
 	}
 
@@ -93,7 +93,7 @@ func TestConfigAgentsMenu_ConfiguresPathAndSetsPrimary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if err := configAgentsMenu(cfg, in, &buf); err != nil {
+	if err := configAgentsMenu(cfg, cfgPath, in, &buf); err != nil {
 		t.Fatalf("configAgentsMenu: %v", err)
 	}
 
@@ -144,7 +144,7 @@ func TestConfigAgentsMenu_RemovesPathOverride(t *testing.T) {
 		strconv.Itoa(idx+1) + "\n3\n",
 	))
 	var buf bytes.Buffer
-	if err := configAgentsMenu(cfg, in, &buf); err != nil {
+	if err := configAgentsMenu(cfg, cfgPath, in, &buf); err != nil {
 		t.Fatalf("configAgentsMenu: %v", err)
 	}
 
@@ -265,5 +265,96 @@ func TestConfigNameMenu_RequiresExistingConfig(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no config file") {
 		t.Errorf("error %q should mention missing config file", err.Error())
+	}
+}
+
+// TestConfigInteractive_KeepsTheMeBlockChangedOnDisk covers the
+// read-modify-write: a me.llm value that changed on disk while the
+// menu was open survives the menu's save.
+func TestConfigInteractive_KeepsTheMeBlockChangedOnDisk(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	cfgPath := filepath.Join(tmp, ".nightme", "config.yaml")
+	t.Setenv("NIGHTME_CONFIG", cfgPath)
+
+	if err := config.Save(&config.Config{Name: "laptop"}, cfgPath); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	// The me.llm block changes on disk while the menu is open.
+	if err := config.SetMeLLM(cfgPath, config.MeLLMValues{
+		Provider: "openai",
+		Model:    "gpt-4.1-mini",
+	}); err != nil {
+		t.Fatalf("SetMeLLM: %v", err)
+	}
+
+	var buf bytes.Buffer
+	in := bufio.NewReader(strings.NewReader("1\nmy-laptop\nq\n"))
+	if err := configInteractive(cfg, cfgPath, in, &buf); err != nil {
+		t.Fatalf("configInteractive: %v", err)
+	}
+
+	after, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load after save: %v", err)
+	}
+	if after.Name != "my-laptop" {
+		t.Errorf("Name = %q, want my-laptop", after.Name)
+	}
+	if after.Me.LLM.Model != "gpt-4.1-mini" {
+		t.Errorf("Me.LLM.Model = %q, want gpt-4.1-mini (the on-disk change survives)", after.Me.LLM.Model)
+	}
+}
+
+// TestConfigCmd_InsideTheREPL covers the menu inside the REPL: it
+// reads its answers from the stream the REPL shares with it, and the
+// REPL keeps working afterwards.
+func TestConfigCmd_InsideTheREPL(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	cfgPath := filepath.Join(tmp, ".nightme", "config.yaml")
+	t.Setenv("NIGHTME_CONFIG", cfgPath)
+
+	if err := config.Save(&config.Config{Primary: "claude"}, cfgPath); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	root, reg := newRootCmd()
+	var buf bytes.Buffer
+	captureREPLIO(root, &buf)
+
+	in := strings.NewReader(strings.Join([]string{
+		"config",
+		"1",         // the Name menu
+		"my-laptop", // the new name
+		"q",         // back to the main menu
+		"version",
+		"exit",
+	}, "\n") + "\n")
+	if err := runREPLWith(root, reg, nil, in, &buf); err != nil {
+		t.Fatalf("runREPLWith: %v", err)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "Name set to") {
+		t.Errorf("the menu did not run inside the REPL:\n%s", out)
+	}
+	// The banner carries a version line of its own, so the command
+	// ran only if the line appears twice.
+	if got := strings.Count(out, "nightme version"); got != 2 {
+		t.Errorf("the line after the menu was not executed (version line x%d):\n%s", got, out)
+	}
+
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Name != "my-laptop" {
+		t.Errorf("Name = %q, want my-laptop", cfg.Name)
 	}
 }

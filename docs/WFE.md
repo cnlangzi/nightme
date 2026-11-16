@@ -758,7 +758,7 @@ me:
     base_url: https://api.openai.com/v1
     model: gpt-4.1-mini
     api_key: sk-xxxx              # the key itself, in the file
-    max_tokens: 4096
+    max_tokens: 40960             # the cap on one answer (the default)
     agent: claude                 # the agent that thinks for the owner
   decider:
     protocol: decisions           # decisions | systemone
@@ -785,6 +785,10 @@ The user picks the models. nightme never chooses one, and it never injects a mod
 `me.llm.agent` names the agent that thinks for the owner: the run asks it why a step failed and what to do about it, and it answers with the cause and a recommendation. It changes nothing — the run's own avatar carries out every change. When it is not set, the agent of the chat that started the run is used; a run without an agent has nobody to ask.
 
 `me.llm` and `me.decider` are independent. A model that is configured but cannot be built — an unknown provider, a missing key — is reported in the daemon log and left out; the daemon still starts, and `/me` says why it cannot run.
+
+`nightme me` configures `me.llm` from the terminal: it shows the current values, asks for the endpoint, the model, the cap on an answer, the agent that thinks for the owner and the credential, and writes them into the configuration file without touching the rest of it. The wizard is the whole interface — there is no `nightme me get` and no `nightme me set`. The daemon builds its models at start-up, so a new chat model takes effect on the next `nightme restart`.
+
+The cap on an answer defaults to 40960 tokens; a configuration that does not name one gets it.
 
 ### 8.9 The `/me` commands
 

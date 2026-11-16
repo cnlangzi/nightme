@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -116,16 +117,39 @@ func MapValueOrCreate(m *yaml.Node, key string) (*yaml.Node, error) {
 // SetMapValue stores a string scalar under key, creating the key
 // when the mapping does not have it yet.
 func SetMapValue(m *yaml.Node, key, value string) {
+	setMapNode(m, key, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value})
+}
+
+// SetMapValueInt stores an integer under key, creating the key when
+// the mapping does not have it yet.
+//
+// The value is written as a YAML integer, not as a quoted string: a
+// config field typed as an int (max_tokens) has to read back as an
+// int, and `"40960"` does not.
+func SetMapValueInt(m *yaml.Node, key string, value int) {
+	setMapNode(m, key, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!int", Value: strconv.Itoa(value)})
+}
+
+// setMapNode stores value under key, replacing whatever the key
+// held.
+//
+// A value that changes kind drops the style of the old one: a
+// quoted number stays quoted otherwise, and "40960" does not read
+// back into an int.
+func setMapNode(m *yaml.Node, key string, value *yaml.Node) {
 	if v := MapValue(m, key); v != nil {
-		v.Kind = yaml.ScalarNode
-		v.Tag = "!!str"
-		v.Value = value
+		if v.Tag != value.Tag {
+			v.Style = 0
+		}
+		v.Kind = value.Kind
+		v.Tag = value.Tag
+		v.Value = value.Value
 		v.Content = nil
 		return
 	}
 	m.Content = append(m.Content,
 		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key},
-		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value},
+		value,
 	)
 }
 

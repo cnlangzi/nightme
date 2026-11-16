@@ -110,16 +110,39 @@ func runCardJSON(spec channel.CardSpec) (string, error) {
 // rendered as plain text, so the card is still created and still
 // PATCHed — Feishu refuses a card that carries more than five tables.
 func limitCardTables(lines []string) []string {
-	out := make([]string, len(lines))
+	out, _ := limitCardTableLines(lines, 0)
+	return out
+}
+
+// limitCardTableLines keeps the tables of one part of a card inside
+// Feishu Card 2.0's hard cap of five markdown tables.
+//
+// The lines are the markdown of the part in render order. used is the
+// number of tables the parts before this one hold: the cap is a
+// property of the card and not of one part, so a card that holds six
+// tables flattens the sixth whatever part it lives in. The returned
+// count is the number of tables this part holds.
+//
+// The tables past the fifth lose their table shape: their rows are
+// rendered as plain text, so the card is still created and still
+// PATCHed — Feishu refuses a card that carries more than five tables.
+func limitCardTableLines(lines []string, used int) ([]string, int) {
 	groups := tableGroups(lines)
+	count := 0
+	for _, g := range groups {
+		if g > count {
+			count = g
+		}
+	}
+	out := make([]string, len(lines))
 	for i, line := range lines {
-		if groups[i] > resultCardTableLimit {
+		if groups[i] > 0 && used+groups[i] > resultCardTableLimit {
 			out[i] = plainTableRow(line)
 			continue
 		}
 		out[i] = line
 	}
-	return out
+	return out, used + count
 }
 
 // plainTableRow renders a row of a markdown table as plain text.

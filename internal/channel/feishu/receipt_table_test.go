@@ -126,3 +126,38 @@ func TestBuildReceiptCard_KeepsInsideTheTableCap_SingleEntry(t *testing.T) {
 		t.Errorf("the seventh table lost its text:\n%s", body)
 	}
 }
+
+// TestBuildReceiptCard_DropsTheDelimiterOfTheTablesPastTheCap — a
+// markdown parser reads a row of cells followed by a delimiter row as a
+// table, so the flattened tables have to lose their delimiter row: what
+// is left are plain lines.
+func TestBuildReceiptCard_DropsTheDelimiterOfTheTablesPastTheCap(t *testing.T) {
+	body, _, err := buildReceiptCard(receiptTableEntries(7), nil, nil, nil)
+	if err != nil {
+		t.Fatalf("buildReceiptCard: %v", err)
+	}
+	if n := strings.Count(body, "| --- | --- |"); n != resultCardTableLimit {
+		t.Fatalf("the card holds %d delimiter rows, want the %d of the tables it keeps", n, resultCardTableLimit)
+	}
+}
+
+// TestBuildReceiptCard_KeepsTheCodeSamples — a fenced code block is
+// code, not a table: its pipe rows are neither counted against the cap
+// nor rewritten, so the sample the agent showed keeps its pipes.
+func TestBuildReceiptCard_KeepsTheCodeSamples(t *testing.T) {
+	entries := receiptTableEntries(5)
+	entries = append(entries, LogEntry{Text: "```markdown\n| keep | me |\n| --- | --- |\n```"})
+	body, _, err := buildReceiptCard(entries, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("buildReceiptCard: %v", err)
+	}
+	if !strings.Contains(body, "| keep | me |") {
+		t.Errorf("the code sample lost its pipes:\n%s", body)
+	}
+	if !strings.Contains(body, "| --- | --- |") {
+		t.Errorf("the code sample lost its delimiter row:\n%s", body)
+	}
+	if n := receiptTables(t, body); n != resultCardTableLimit {
+		t.Fatalf("the card holds %d tables, want %d", n, resultCardTableLimit)
+	}
+}

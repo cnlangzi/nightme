@@ -2941,6 +2941,12 @@ func encodeCardJSON(v any) ([]byte, error) {
 // 30 KB envelope, so buildReceiptCard is never asked to render
 // an over-budget body.
 //
+// The card holds five markdown tables at most — Feishu refuses a card
+// that carries more — and the entries carry the agent's reply, so they
+// carry its tables. The tables past the fifth lose their table shape:
+// their rows are rendered as plain text, so the card is still created
+// and still PATCHed and the turn's content still reaches the operator.
+//
 // Signature: takes (entries, tasks) directly, not a *MessageReceipt.
 // This avoids copying a struct that contains a sync.Mutex (vet
 // warning) — AppendEntry needs to build a hypothetical card body

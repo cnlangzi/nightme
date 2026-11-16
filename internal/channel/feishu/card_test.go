@@ -89,3 +89,24 @@ func TestRunCardJSON_KeepsTheTablesOfTheFirstFive(t *testing.T) {
 		t.Fatalf("the card carries %d tables, want 5", n)
 	}
 }
+
+// TestRunCardJSON_DropsTheDelimiterOfTheTablesPastTheCap — a markdown
+// parser reads a row of cells followed by a delimiter row as a table,
+// so the table past the cap has to lose its delimiter row: what is
+// left are plain lines.
+func TestRunCardJSON_DropsTheDelimiterOfTheTablesPastTheCap(t *testing.T) {
+	var body strings.Builder
+	for i := 0; i < 6; i++ {
+		body.WriteString("| a | b |\n")
+		body.WriteString("| --- | --- |\n")
+		body.WriteString("text\n")
+	}
+
+	raw, err := runCardJSON(channel.CardSpec{Title: "run", Body: body.String()})
+	if err != nil {
+		t.Fatalf("the card could not be rendered: %v", err)
+	}
+	if n := strings.Count(raw, "| --- | --- |"); n != resultCardTableLimit {
+		t.Fatalf("the card carries %d delimiter rows, want the %d of the tables it keeps", n, resultCardTableLimit)
+	}
+}

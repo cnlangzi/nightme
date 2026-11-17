@@ -124,9 +124,8 @@ func NormalizeReviewSeverity(s string) string {
 
 // The field names a review agent may use for each finding field.
 //
-// The prompt's own names come first; the aliases follow. The first
-// name of a row wins: an output that carries two names for one field
-// takes the first.
+// The names are ordered by preference: the first name of a row wins —
+// an output that carries two names for one field takes the first.
 var (
 	reviewPathKeys     = []string{"path", "file", "filename", "file_path", "location"}
 	reviewLineKeys     = []string{"line", "start_line", "line_number", "start"}
@@ -285,7 +284,10 @@ func classifyBlockLine(line string) blockLine {
 // blockOpener reads the opener of a per-finding block: a path line.
 //
 // A quoted value belongs to a JSON payload — the JSON salvage reads
-// those, and the block scanner must not claim them.
+// those, and the block scanner must not claim them. A quoted value on
+// a bulleted line is a path the agent quoted: the quotes come off and
+// the block is read. A JSON payload's keys are never bulleted, so the
+// two never overlap.
 func blockOpener(line string) (string, bool) {
 	m := blockKeyRe.FindStringSubmatch(line)
 	if m == nil {
@@ -296,9 +298,28 @@ func blockOpener(line string) (string, bool) {
 	}
 	value := strings.TrimSpace(m[2])
 	if strings.HasPrefix(value, `"`) || strings.HasPrefix(value, "'") {
-		return "", false
+		if !blockBulletRe.MatchString(line) {
+			return "", false
+		}
+		unquoted, ok := unquoteValue(value)
+		if !ok {
+			return "", false
+		}
+		return unquoted, true
 	}
 	return value, true
+}
+
+// unquoteValue strips one matching pair of surrounding quotes.
+func unquoteValue(s string) (string, bool) {
+	if len(s) < 2 {
+		return "", false
+	}
+	quote := s[0]
+	if (quote != '"' && quote != '\'') || s[len(s)-1] != quote {
+		return "", false
+	}
+	return strings.TrimSpace(s[1 : len(s)-1]), true
 }
 
 // parseBlockFinding parses a per-finding block starting at lines[i].
@@ -511,25 +532,29 @@ func isKnownReviewSeverity(word string) bool {
 	return ok
 }
 
-// reviewNoFindingPhrases are the phrasings a group uses to say it
-// found nothing.
-var reviewNoFindingPhrases = []string{
-	"no findings",
-	"no blockers",
-	"no problems found",
-	"found no problems",
-	"no issues found",
-	"found no issues",
-	"nothing material to flag",
-	"nothing to flag",
-}
+// reviewNoFindingsRe matches a line that says the group found
+// nothing.
+//
+// The statement has to BE the line. A group that mentions "no
+// findings" in passing and reports real findings elsewhere must not
+// be read as a group that found nothing — that would drop its
+// findings from the counts and hide the group from the re-emit.
+var reviewNoFindingsRe = regexp.MustCompile(`(?i)^\s*(?:i\s+(?:found|see)\s+|there\s+(?:are|were|is)\s+)?` +
+	`(?:no\s+findings` +
+	`|no\s+blockers(?:\s*;\s*nothing\s+material\s+to\s+flag)?` +
+	`|nothing\s+material\s+to\s+flag` +
+	`|nothing\s+to\s+(?:flag|report)` +
+	`|no\s+problems(?:\s+found)?` +
+	`|found\s+no\s+problems` +
+	`|no\s+issues(?:\s+found)?` +
+	`|found\s+no\s+issues` +
+	`)\s*[.!]?\s*$`)
 
 // statesNoFindings reports whether the output says the group found
 // nothing — the shape the prompts ask for when there is no finding.
 func statesNoFindings(text string) bool {
-	lower := strings.ToLower(text)
-	for _, phrase := range reviewNoFindingPhrases {
-		if strings.Contains(lower, phrase) {
+	for _, line := range strings.Split(text, "\n") {
+		if reviewNoFindingsRe.MatchString(line) {
 			return true
 		}
 	}

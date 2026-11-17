@@ -297,9 +297,9 @@ partial failure 路径:**不**升级为 merge 整体错误,失败组以 inline m
 | 1c | JSON | fenced ` ```json ` 块 / 裸数组 / 带 `findings` 数组的对象;容错尾逗号、单引号、未加引号的 key | agent 用结构化输出时的写法 |
 | 2 | schema 重发 | 上面几层都读不出来时,拿该组自己的 session 再问一次,要求按 schema 重发 findings | 只有该组 turn 成功且拿到 session id 才有 |
 
-1b 的宽松块形态有一条护栏:没有 bullet 的 `path:` 行,只有当下一非空行是字段行时才算块的开头,否则那行是散文 —— 一句话里的 "path: …" 不是 finding。字段别名一行一个义,行内第一个名字赢(`line` 优先于 `start_line`)。
+1b 的宽松块形态有两条护栏:没有 bullet 的 `path:` 行,只有当下一非空行是字段行时才算块的开头,否则那行是散文 —— 一句话里的 "path: …" 不是 finding;带 bullet 的 `path: "…"` 去掉引号照读(而 JSON 的 key 从不带 bullet,所以两者不会打架)。字段别名一行一个义,行内第一个名字赢(`line` 优先于 `start_line`)。
 
-severity 归一到 `critical` / `high` / `medium` / `low` / `unspecified`(`blocking` / `blocker` / `fatal`→critical,`warning` / `major` / `severe`→high,`moderate`→medium,`style` / `suggestion` / `minor` / `nit` / `info`→low,认不出的→unspecified)。"没找到问题"的说法(`No findings.` / `No blockers; …`)算**已解析、零 findings**,不算 unparsed。
+severity 归一到 `critical` / `high` / `medium` / `low` / `unspecified`(`blocking` / `blocker` / `fatal`→critical,`warning` / `major` / `severe`→high,`moderate`→medium,`style` / `suggestion` / `minor` / `nit` / `info`→low,认不出的→unspecified)。"没找到问题"的说法(`No findings.` / `No blockers; …`)算**已解析、零 findings**,不算 unparsed —— 但这句话得**独占一行**:在句子里顺口提一句 "no findings"、别处却真的报了问题,不能被读成"这组什么都没找到"(那会把它的 findings 从计数里抹掉,也会让它错过第 2 层的 schema 重发)。1c 的 JSON 载荷同样得**站在载荷的位置上**:自己一行,或跟在冒号后面,行尾没有别的字 —— 句子里顺口引用的一个配置文件不是 finding。
 
 **认不出形态的组报 unparsed**:它的原文照样走合并流到达 channel,findings 一个都不丢 —— 只是它的计数不进 verdict,verdict 行会标 `⚠️`。schema 重发(第 2 层)只喂计数:合并文档保留该组原文(它是主 agent 的输入,必须承载 agent 真正说过的话),重发那一轮不带 event sink(聚合器按 job 数终态,同一 job 的第二个终态会重复计数),一次 run 里每组最多重发一次。
 

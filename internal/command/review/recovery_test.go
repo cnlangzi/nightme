@@ -331,3 +331,21 @@ func TestReviewContinueOutcome_SpeaksOfContinuedGroups(t *testing.T) {
 		t.Errorf("the summary = %q, want %q", got.Summary, "1 of 2 continued groups unfinished")
 	}
 }
+
+// TestReviewVerdict_NamesTheUnrecoverableGroup: a group the
+// continuation cannot finish says so — the offer must not read as if
+// it would pick that group up.
+func TestReviewVerdict_NamesTheUnrecoverableGroup(t *testing.T) {
+	outcomes := []reviewOutcome{
+		{pattern: "**/*.go", source: "system", err: errors.New("boom")},
+		{pattern: "**/*.ts", source: "system", sessionID: "sess-ts", err: errors.New("boom")},
+	}
+
+	got := reviewVerdict(outcomes, nil)
+	if !strings.Contains(got, "system / **/*.go (not recoverable)") {
+		t.Errorf("the verdict does not name the unrecoverable group: %s", got)
+	}
+	if !strings.Contains(got, "system / **/*.ts → /review --continue") {
+		t.Errorf("the verdict does not offer the continuation for the resumable group: %s", got)
+	}
+}

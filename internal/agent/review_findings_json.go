@@ -15,6 +15,7 @@ package agent
 import (
 	"encoding/json"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -76,16 +77,42 @@ func jsonCandidates(text string) []string {
 		}
 	}
 	for _, region := range jsonRegions(text) {
+		if !jsonPayloadPosition(text, region[0], region[1]) {
+			continue
+		}
 		out = append(out, text[region[0]:region[1]])
 	}
 	return out
 }
 
-// jsonRegions returns the balanced {...} and [...] regions of the
-// text, in the order they appear.
+// jsonPayloadPosition reports whether the region at [start, end) sits
+// where a payload sits: it opens a line, or it follows a colon that
+// introduces it, and nothing follows it on its line.
 //
-// The scan is string-aware: a brace inside a string neither opens nor
-// closes a region.
+// A region quoted inside a sentence is prose — a config file the
+// agent talks about is not a finding.
+func jsonPayloadPosition(text string, start, end int) bool {
+	lineStart := strings.LastIndexByte(text[:start], '\n') + 1
+	prefix := strings.TrimSpace(text[lineStart:start])
+	if prefix != "" && !strings.HasSuffix(prefix, ":") && !strings.HasSuffix(prefix, "=") {
+		return false
+	}
+	lineEnd := strings.IndexByte(text[end:], '\n')
+	if lineEnd < 0 {
+		lineEnd = len(text)
+	} else {
+		lineEnd += end
+	}
+	return strings.TrimSpace(text[end:lineEnd]) == ""
+}
+
+// jsonRegions returns the balanced {...} and [...] regions of the
+// text, largest first.
+//
+// Every matched pair is a region: a stray brace in the prose before
+// the payload must not swallow the payload that follows it. The
+// regions come largest first — the payload that holds the findings is
+// the biggest one.
 func jsonRegions(text string) [][2]int {
 	var regions [][2]int
 	var stack []int
@@ -112,11 +139,12 @@ func jsonRegions(text string) [][2]int {
 			}
 			open := stack[len(stack)-1]
 			stack = stack[:len(stack)-1]
-			if len(stack) == 0 {
-				regions = append(regions, [2]int{open, i + 1})
-			}
+			regions = append(regions, [2]int{open, i + 1})
 		}
 	}
+	slices.SortFunc(regions, func(a, b [2]int) int {
+		return (b[1] - b[0]) - (a[1] - a[0])
+	})
 	return regions
 }
 

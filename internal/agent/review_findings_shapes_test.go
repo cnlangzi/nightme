@@ -318,3 +318,81 @@ content: the problem
 		t.Errorf("severity = %q, want %q", finding.Severity, SeverityHigh)
 	}
 }
+
+// TestParseReviewFindings_NothingFoundMustBeTheWholeLine: a group
+// that mentions "no findings" in passing and reports real findings
+// elsewhere must not be read as a group that found nothing — that
+// would drop its findings from the counts and hide the group from
+// the re-emit.
+func TestParseReviewFindings_NothingFoundMustBeTheWholeLine(t *testing.T) {
+	cases := []string{
+		"No findings in the diff.\n\nHowever, the retry loop drops the error.",
+		"There were no findings in the retry loop.",
+		"No findings — the retry loop drops the error.",
+	}
+	for _, text := range cases {
+		report := ParseReviewFindings(text)
+		if report.Parsed {
+			t.Errorf("%q was read as a group that found nothing: %+v", text, report)
+		}
+	}
+}
+
+// TestParseReviewFindings_QuotedPathIsAPath: the path an agent quoted
+// is still a path — the quotes come off and the block is read.
+func TestParseReviewFindings_QuotedPathIsAPath(t *testing.T) {
+	text := "- path: \"internal/foo.go\"\n- start_line: 12\n- severity: high\n- content: bad\n"
+
+	report := ParseReviewFindings(text)
+	if len(report.Findings) != 1 {
+		t.Fatalf("parsed %d findings, want 1: %+v", len(report.Findings), report.Findings)
+	}
+	if report.Findings[0].Path != "internal/foo.go" {
+		t.Errorf("path = %q, want %q", report.Findings[0].Path, "internal/foo.go")
+	}
+	if report.Findings[0].Line != "12" {
+		t.Errorf("line = %q, want %q", report.Findings[0].Line, "12")
+	}
+}
+
+// TestParseReviewFindings_QuotedJSONIsNotABlock: the keys of a JSON
+// payload are never bulleted, so a bulleted path is a block and an
+// unbulleted one belongs to the JSON salvage.
+func TestParseReviewFindings_QuotedJSONIsNotABlock(t *testing.T) {
+	text := "{\n  path: \"a.go\",\n  line: 12,\n  severity: \"high\"\n}\n"
+
+	report := ParseReviewFindings(text)
+	if len(report.Findings) != 1 {
+		t.Fatalf("parsed %d findings, want 1: %+v", len(report.Findings), report.Findings)
+	}
+	if report.Findings[0].Path != "a.go" || report.Findings[0].Severity != SeverityHigh {
+		t.Errorf("the json payload was not read: %+v", report.Findings[0])
+	}
+}
+
+// TestParseReviewFindings_JSONQuotedInProseIsNotAFinding: a JSON
+// object the agent quotes in a sentence is prose — a config file the
+// agent talks about is not a finding.
+func TestParseReviewFindings_JSONQuotedInProseIsNotAFinding(t *testing.T) {
+	text := "The config file {\"path\": \"a.go\", \"content\": \"x\"} is unrelated."
+
+	report := ParseReviewFindings(text)
+	if len(report.Findings) != 0 {
+		t.Errorf("a quoted config produced findings: %+v", report.Findings)
+	}
+}
+
+// TestParseReviewFindings_AStrayBraceDoesNotSwallowThePayload: a
+// brace in the prose before the payload must not hide the payload
+// that follows it.
+func TestParseReviewFindings_AStrayBraceDoesNotSwallowThePayload(t *testing.T) {
+	text := "the { placeholder\n{\"path\":\"a.go\",\"line\":1,\"severity\":\"high\",\"content\":\"boom\"}"
+
+	report := ParseReviewFindings(text)
+	if len(report.Findings) != 1 {
+		t.Fatalf("parsed %d findings, want 1: %+v", len(report.Findings), report.Findings)
+	}
+	if report.Findings[0].Path != "a.go" || report.Findings[0].Severity != SeverityHigh {
+		t.Errorf("the payload was not read: %+v", report.Findings[0])
+	}
+}

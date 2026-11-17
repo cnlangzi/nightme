@@ -135,8 +135,10 @@ type failedGroup struct {
 // text renders the group's name with its state.
 func (g failedGroup) text() string {
 	switch g.state {
-	case failedNeverStarted, failedUnrecoverable:
+	case failedNeverStarted:
 		return g.label + " (never started)"
+	case failedUnrecoverable:
+		return g.label + " (not recoverable)"
 	case failedSpent:
 		return g.label + " (already retried)"
 	default:

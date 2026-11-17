@@ -190,6 +190,16 @@ type Context struct {
 	// it to skip re-detection on each dispatch.
 	Provider string
 
+	// InitialHead is the commit the fix branch was cut from —
+	// the worktree's HEAD at the moment the branch was created.
+	// /gtw fix records it so /gtw commit can tell "the work was
+	// already committed" from "there is nothing to commit":
+	// the commits between InitialHead and the current HEAD are
+	// the ones the work produced. Empty when the head could not
+	// be read (or when the state file predates the field) — the
+	// caller then falls back to the local default branch.
+	InitialHead string
+
 	State     State
 	UpdatedAt time.Time
 }

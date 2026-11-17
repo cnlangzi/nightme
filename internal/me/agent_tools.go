@@ -384,7 +384,7 @@ func (s *Service) toolResume(ctx context.Context, r *run, _ pendingCall) (stepRe
 		return stepResult{Status: statusWaiting, Summary: verdict.Outcome.Summary}, nil
 	}
 	r.recordStep(job, step, verdict.Outcome)
-	s.recordStepOutcome(ctx, r, job, step, verdict.Outcome)
+	s.recordStepOutcome(ctx, r)
 	s.persist(r)
 	s.refreshSessions(r)
 	return stepResult{
@@ -421,7 +421,7 @@ func (s *Service) toolNext(ctx context.Context, r *run, _ pendingCall) (stepResu
 	job := wfe.JobOf(r.workflow, step.ID)
 	done := doneOutcome(st.Outcome)
 	r.recordStep(job, step, done)
-	s.recordStepOutcome(ctx, r, job, step, done)
+	s.recordStepOutcome(ctx, r)
 	// The history has to agree with the run state: the step is done,
 	// and the run says so.
 	r.record(wfe.ActionKindRun, s.stepCommand(r, step), step.ID, done)
@@ -546,7 +546,7 @@ func (s *Service) runStep(ctx context.Context, r *run, command string) (stepResu
 		if owned {
 			// The step ran: the run state carries the outcome.
 			r.recordStep(wfe.JobOf(r.workflow, step.ID), step, out)
-			s.recordStepOutcome(ctx, r, wfe.JobOf(r.workflow, step.ID), step, out)
+			s.recordStepOutcome(ctx, r)
 		}
 		return stepResult{}, toolErrorf("%s", err.Error())
 	}
@@ -577,7 +577,7 @@ func (s *Service) runStep(ctx context.Context, r *run, command string) (stepResu
 	if owned {
 		// The step ran: the run state carries the outcome.
 		r.recordStep(wfe.JobOf(r.workflow, step.ID), step, out)
-		s.recordStepOutcome(ctx, r, wfe.JobOf(r.workflow, step.ID), step, out)
+		s.recordStepOutcome(ctx, r)
 	}
 	return res, nil
 }

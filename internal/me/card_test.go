@@ -12,9 +12,12 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/internal/wfe"
 )
 
 // sessionService builds a service with the one-step workflow in it.
@@ -46,9 +49,11 @@ func TestTheRunCardHangsUnderTheMessageThatStartedTheRun(t *testing.T) {
 	}
 }
 
-// TestTheRunCardCarriesTheJobsOfTheWorkflow — the checklist of the run
-// is the workflow's jobs, one row per job.
-func TestTheRunCardCarriesTheJobsOfTheWorkflow(t *testing.T) {
+// TestTheRunCardCarriesTheOverviewOfTheRun — the card of the run is
+// the overview of the run: the workflow it works through, the jobs it
+// has and the steps of those jobs. It is published once and never
+// changed.
+func TestTheRunCardCarriesTheOverviewOfTheRun(t *testing.T) {
 	svc, op := sessionService(t)
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
@@ -58,16 +63,90 @@ func TestTheRunCardCarriesTheJobsOfTheWorkflow(t *testing.T) {
 	}
 	waitRun(t, svc, "obs-1")
 
-	tasks := op.EmittedOf(messages.OutTaskUpdate)
-	if len(tasks) == 0 {
-		t.Fatalf("the run published no checklist: %v", op.Emitted())
+	cards := op.Cards()
+	if len(cards) == 0 {
+		t.Fatal("the run published no card")
 	}
-	items := tasks[0].TaskList.Items
-	if len(items) != 1 {
-		t.Fatalf("the checklist holds %d rows, want one per job", len(items))
+	entries := op.Entries(cards[0].ID)
+	if len(entries) != 1 {
+		t.Fatalf("the card of the run carries %d entries, want the overview alone: %v", len(entries), entries)
 	}
-	if items[0].ID != "main" {
-		t.Errorf("the row is %q, want the job", items[0].ID)
+	overview := entries[0]
+	for _, want := range []string{
+		"**one** — Do the one thing.",
+		"1 round · 1 job · 1 step · started ",
+		"jobs:",
+		"  - main",
+		"     - commit",
+	} {
+		if !strings.Contains(overview, want) {
+			t.Errorf("the overview does not carry %q: %q", want, overview)
+		}
+	}
+	// The first line names the run.
+	var runID string
+	for _, m := range op.EmittedOf(messages.OutReply) {
+		if m.ReplyTo == cards[0].ID {
+			runID = m.SessionID
+		}
+	}
+	if !strings.HasPrefix(overview, BotMark+runID) {
+		t.Errorf("the overview does not start with the run id %q: %q", runID, overview)
+	}
+	// The run publishes no checklist of its own.
+	if tasks := op.Checklist(cards[0].ID); len(tasks) != 0 {
+		t.Errorf("the run published a checklist of its own: %+v", tasks)
+	}
+	// The counters of the run are on the card of the round: the card
+	// of the run is static.
+	for _, m := range op.EmittedOf(messages.OutHeartbeat) {
+		if m.ReplyTo == cards[0].ID {
+			t.Errorf("the run card carries a heartbeat: %+v", m.Heartbeat)
+		}
+	}
+}
+
+// TestTheRoundCardNamesTheRunItBelongsTo — the card of a round names
+// the run it belongs to, and the round it is.
+func TestTheRoundCardNamesTheRunItBelongsTo(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+	svc, op := testService(t, dir, noModels())
+	op.steps = []fakeStep{okStep("committed")}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitRun(t, svc, "obs-1")
+
+	cards := op.Cards()
+	if len(cards) < 2 {
+		t.Fatalf("the run published %d cards, want the run card and the round card", len(cards))
+	}
+	entries := op.Entries(cards[1].ID)
+	if len(entries) == 0 {
+		t.Fatal("the card of the round carries no entry")
+	}
+	if !strings.HasPrefix(entries[0], "Run: one-") {
+		t.Errorf("the block does not name the run: %q", entries[0])
+	}
+	var named bool
+	for _, entry := range entries {
+		if strings.Contains(entry, "main · round 1") {
+			named = true
+		}
+	}
+	if !named {
+		t.Errorf("the card of the round does not name its round: %v", entries)
+	}
+	// The round's outcome rides on the card of the round: the card of
+	// the run stays the overview it was.
+	for _, entry := range op.Entries(cards[0].ID) {
+		if strings.Contains(entry, "round 1 —") {
+			t.Errorf("the card of the run names the outcome of a round: %q", entry)
+		}
 	}
 }
 
@@ -226,3 +305,173 @@ func TestTheRoundCardCarriesTheStepsOfTheRound(t *testing.T) {
 		t.Errorf("the checklist of the round is %q, want the step of the round", round)
 	}
 }
+
+// TestTheRunBlockListsTheRoundsThatHaveFinished — the block that
+// names the run lists the rounds that have finished, with the time
+// each of them ended. The round the run is in is not among them.
+func TestTheRunBlockListsTheRoundsThatHaveFinished(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+	svc, _ := testService(t, dir, noModels())
+	wf, ok := svc.catalog.Lookup("one")
+	if !ok {
+		t.Fatal("the workflow is not in the catalogue")
+	}
+	bound, err := wfe.Bind(wf, map[string]string{})
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	r := newRun(svc, Request{Name: "one", ChatID: "obs-1", Cwd: "/tmp/work"}, bound, nil)
+	t.Cleanup(r.cancel)
+
+	ended := time.Date(2026, 11, 18, 14, 7, 41, 0, time.UTC)
+	r.state.Rounds = map[string]int{"main": 3}
+	r.policy.History = []wfe.ActionRecord{
+		{Kind: wfe.ActionKindRun, StepID: "commit", Round: 1, At: ended},
+		{Kind: wfe.ActionKindRun, StepID: "commit", Round: 2, At: ended.Add(time.Minute)},
+	}
+
+	block := r.runBlock()
+	if !strings.HasPrefix(block, "Run: one-") {
+		t.Errorf("the block does not name the run: %q", block)
+	}
+	for _, want := range []string{
+		"|- round 1: main · 14:07:41",
+		"|- round 2: main · 14:08:41",
+	} {
+		if !strings.Contains(block, want) {
+			t.Errorf("the block does not list %q: %q", want, block)
+		}
+	}
+	if strings.Contains(block, "round 3") {
+		t.Errorf("the block lists the round the run is in: %q", block)
+	}
+}
+
+// TestTheRunBlockListsTheLastRoundOfAJobThatIsDone — a job whose
+// steps all ran has finished its round: the block lists it.
+func TestTheRunBlockListsTheLastRoundOfAJobThatIsDone(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+	svc, _ := testService(t, dir, noModels())
+	wf, ok := svc.catalog.Lookup("one")
+	if !ok {
+		t.Fatal("the workflow is not in the catalogue")
+	}
+	bound, err := wfe.Bind(wf, map[string]string{})
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	r := newRun(svc, Request{Name: "one", ChatID: "obs-1", Cwd: "/tmp/work"}, bound, nil)
+	t.Cleanup(r.cancel)
+
+	ended := time.Date(2026, 11, 18, 14, 7, 41, 0, time.UTC)
+	r.state.Rounds = map[string]int{"main": 1}
+	r.state.Steps = []wfe.StepState{{ID: "commit", Job: "main"}}
+	r.policy.History = []wfe.ActionRecord{
+		{Kind: wfe.ActionKindRun, StepID: "commit", Round: 1, At: ended},
+	}
+
+	block := r.runBlock()
+	if !strings.Contains(block, "|- round 1: main · 14:07:41") {
+		t.Errorf("the block does not list the finished round: %q", block)
+	}
+}
+
+// TestTheRoundCardGivesEveryStepItsOwnState — a step that failed is
+// not a step that has not started: every step of the round carries
+// the state it is in, and the detail of that state.
+func TestTheRoundCardGivesEveryStepItsOwnState(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "three", threeStepWorkflow)
+	svc, _ := testService(t, dir, noModels())
+	wf, ok := svc.catalog.Lookup("three")
+	if !ok {
+		t.Fatal("the workflow is not in the catalogue")
+	}
+	bound, err := wfe.Bind(wf, map[string]string{})
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	r := newRun(svc, Request{Name: "three", ChatID: "obs-1", Cwd: "/tmp/work"}, bound, nil)
+	t.Cleanup(r.cancel)
+	r.state.Steps = []wfe.StepState{
+		{ID: "commit", Job: "main", Outcome: wfe.Outcome{Status: wfe.OutcomeOK, Summary: "the commit landed"}},
+		{ID: "push", Job: "main", Outcome: wfe.Outcome{
+			Status:  wfe.OutcomeFailed,
+			Summary: "the remote refused",
+			Data:    map[string]string{wfe.OutcomeKeyError: "no_remote"},
+		}},
+	}
+
+	items := r.roundTasks("main", 1)
+	if len(items) != 3 {
+		t.Fatalf("the checklist holds %d rows, want one per step of the round", len(items))
+	}
+	if items[0].Status != agent.TaskCompleted {
+		t.Errorf("the step that landed is %q, want it completed", items[0].Status)
+	}
+	if items[0].ActiveForm != "ok: the commit landed" {
+		t.Errorf("the detail of the step that landed is %q", items[0].ActiveForm)
+	}
+	if items[1].Status != agent.TaskFailed {
+		t.Errorf("the step that failed is %q, want it failed", items[1].Status)
+	}
+	for _, want := range []string{"failed", "the remote refused", "no_remote"} {
+		if !strings.Contains(items[1].ActiveForm, want) {
+			t.Errorf("the detail of the step that failed is %q, want it to name %q", items[1].ActiveForm, want)
+		}
+	}
+	if items[2].Status != agent.TaskPending {
+		t.Errorf("the step that did not run is %q, want it pending", items[2].Status)
+	}
+	if items[2].ActiveForm != "" {
+		t.Errorf("the step that did not run carries the detail %q, want none", items[2].ActiveForm)
+	}
+}
+
+// TestTheDetailOfAStepIsCutShort — a step that reports a whole build
+// log as its summary must not make the row unreadable.
+func TestTheDetailOfAStepIsCutShort(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+	svc, _ := testService(t, dir, noModels())
+	wf, ok := svc.catalog.Lookup("one")
+	if !ok {
+		t.Fatal("the workflow is not in the catalogue")
+	}
+	bound, err := wfe.Bind(wf, map[string]string{})
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	r := newRun(svc, Request{Name: "one", ChatID: "obs-1", Cwd: "/tmp/work"}, bound, nil)
+	t.Cleanup(r.cancel)
+	r.state.Steps = []wfe.StepState{
+		{ID: "commit", Job: "main", Outcome: wfe.Outcome{Status: wfe.OutcomeFailed, Summary: strings.Repeat("x", 4000)}},
+	}
+
+	items := r.roundTasks("main", 1)
+	if len(items) != 1 {
+		t.Fatalf("the checklist holds %d rows, want one per step of the round", len(items))
+	}
+	detail := items[0].ActiveForm
+	if n := len([]rune(detail)); n > maxStepDetail {
+		t.Errorf("the detail is %d runes, want at most %d", n, maxStepDetail)
+	}
+	if !strings.HasSuffix(detail, "…") {
+		t.Errorf("the detail is %q, want it cut short", detail)
+	}
+}
+
+// threeStepWorkflow is a workflow with three steps in one job.
+const threeStepWorkflow = `title: Three things.
+jobs:
+  main:
+    steps:
+      - id: commit
+        message: /gtw commit
+      - id: push
+        message: /gtw push
+      - id: pr
+        message: /gtw pr
+`

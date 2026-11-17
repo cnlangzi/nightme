@@ -807,17 +807,17 @@ The cap on an answer defaults to 40960 tokens; a configuration that does not nam
 | `/me stop` | Cancels the run, tells the chat to stop working, and leaves a summary of the session in the chat. |
 | `/me status` | Reports the current step, the phase and progress of the running command, the remaining budget, and what each capability decided and spent. |
 
-The run speaks in agent sessions, and the chat renders every session the way it renders a coding agent's turn: an identity line, a checklist, the entries of the session, the tool calls as thread events and a status bar in the footer. A run opens three kinds of session, and every session owns exactly one card:
+The run speaks in agent sessions, and the chat renders every session the way it renders a coding agent's turn: an identity line, the entries of the session, the tool calls as thread events and a status bar in the footer. A round also carries the steps of the round as a checklist. A run opens three kinds of session, and every session owns exactly one card:
 
 | Session | Its card hangs under | It carries |
 |---|---|---|
-| The run | The `/me start` message | The jobs of the workflow as its checklist, one entry per finished job round, the counters of the run in its header, and the run's identity, token usage and repository facts in its footer. |
-| A job round | The card of the run | The steps of the round as its checklist, one entry per step outcome, and the round's identity and token usage in its footer. |
+| The run | The `/me start` message | The overview of the run: its id, the workflow it works through, the arguments it was given and its jobs with the steps of each. The card is published once and never changes; the verdict of the run rides in its footer. |
+| A job round | The card of the run | The block that names the run and the rounds that have finished, the identity of the round, the steps of the round with the state of each, the counters of the run in its header, and the round's identity, token usage and repository facts in its footer. |
 | A decision | The command message of the step the decision is about | The reason the decision was taken as its first entry, the thinking of the chat model, the tool calls of the decision as thread events under the card, one entry per reply, and the verdict of the decision in its footer. |
 
 A decision about a step that never sent a command to the chat — a shell step, a `use:` step, a judgment that names no step — hangs under the card of the round instead.
 
-The card of a session is posted by the run itself and is patched in place from then on: a session owns one card, and the chat never posts a second one for it. The card of a round that ended stays in the chat as the record of that round; the next round starts a new one. A run that comes back to a round it has been in before goes on with the card that round has. `/me show` posts the current state as a card of its own, for the operator who wants the state back in front of them, and the run keeps updating that card from here on.
+The card of a session is posted by the run itself and is patched in place from then on: a session owns one card, and the chat never posts a second one for it. The card of a round that ended stays in the chat as the record of that round; the next round starts a new one. A run that comes back to a round it has been in before goes on with the card that round has. `/me show` posts the overview of the run as a card of its own, for the operator who wants it back in front of them.
 
 `/me stop` leaves a summary of the session in the chat: a card of its own that says what the run did, what went wrong and what the models decided. The summary is posted once the run has unwound, so the step that was in flight counts as a step that did not run unless it produced an outcome.
 
@@ -854,38 +854,60 @@ A step that is still running reports `waiting`, and a step whose execution is go
 The outcome of a step reaches the run state and the expressions of the steps after it: the status as `${{ steps.<id>.outputs.status }}`, the facts under `${{ steps.<id>.outputs.data.<key> }}`.
 
 The chat sees the outcome on the card of the session it belongs to — one
-message, patched in place. The card of the run shows the jobs of the workflow
-as its checklist, one entry per finished job round, and the live header: how
-many turns the chat model took, how many tool calls the run made and when it
-last did something. The footer of the card names the run, the model and the
-verdict the run reached:
+message, patched in place. The card of the run is the overview of the run: it
+names the run, the workflow it works through and what the workflow is for, how
+big the run is, the arguments it was given and the jobs it has with the steps
+of each. It is published once and never changes. The footer of the card names
+the run, the model and the verdict the run reached:
 
 ```
-📋 Tasks
-- [x] main
-- [ ] ship
+🧑‍💻: fix-issue-1752661200000000000
+**fix-issue** — Fix issue #42 and ship it as a PR.
+1 round · 1 job · 5 steps · started 14:03:22
+args:
+ - id: 42
+jobs:
+  - main
+     - fix
+     - commit
+     - review
+     - push
+     - pr
 
-main · round 1 — ok: the fix landed
-main · round 2 — failed: the commit failed
-
-💭 8 · 🔧 6 · ⏱ 14:35:22
 ---
 🤖: me · jev-1.14 · fix-issue-1752661200000000000 · fix-issue is complete
 💰:「 4.2k / 1.1k / 4210 · 12.5% (200k) · $0.087 」
 📁: code/nightme · ⎇ main · + 2 · ± 3 · − 1
 ```
 
-The card of a round shows the steps of that round and how they ended:
+The card of a round is the live state of the round: it names the run the
+round belongs to, lists the rounds that have finished, and shows every step of
+the round with the state it is in. The header carries the counters of the run:
+how many turns the chat model took, how many tool calls the run made and when
+it last did something.
+
+Every row of the checklist carries a marker of one character — `[ ]` not
+started, `[>]` running, `[√]` done, `[!]` failed, `[-]` cancelled, `[/]`
+skipped — and the detail of the row: what the step is doing, what it came to
+and how many chances it has left. A step that failed never reads like a step
+that has not started.
 
 ```
-📋 Tasks
-- [x] /gtw fix 42 -y
-- [ ] /gtw commit
+💭 8 · 🔧 6 · ⏱ 14:35:22
 
-/gtw fix 42 -y — ok: the fix landed
+Run: fix-issue-1752661200000000000 · 14:03:22
+|- round 1: main · 14:07:41
+🧑‍💻: main · round 2
+
+**📋 Tasks**
+- [√] /gtw fix 42 -y (ok: the fix landed)
+- [>] /gtw commit (running · 3 chances left)
+- [!] /gtw push (failed: the remote refused · 1 chance left)
+- [ ] /gtw pr
+- [/] /gtw back (skipped)
 
 ---
-🤖: me · jev-1.14 · main · round 1
+🤖: me · jev-1.14 · main · round 2
 ```
 
 The card of a decision shows why the decision was taken, what the chat model

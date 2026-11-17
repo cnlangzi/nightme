@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/gateway/observe"
 	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/messages"
@@ -58,13 +59,13 @@ func TestSystem2_ToolDispatch(t *testing.T) {
 		t.Fatalf("the chat got %v, want /gtw commit", sent)
 	}
 	var settled bool
-	for _, entry := range op.Entries(op.Cards()[1].ID) {
-		if strings.Contains(entry, "/gtw commit") {
+	for _, item := range op.Checklist(op.Cards()[1].ID) {
+		if strings.Contains(item.Subject, "/gtw commit") && item.Status == agent.TaskCompleted {
 			settled = true
 		}
 	}
 	if !settled {
-		t.Fatalf("the card of the round did not show the settled step: %v", op.Entries(op.Cards()[1].ID))
+		t.Fatalf("the card of the round did not show the settled step: %+v", op.Checklist(op.Cards()[1].ID))
 	}
 }
 
@@ -723,13 +724,13 @@ func TestIntegration_TheWorkflowRunsEndToEnd(t *testing.T) {
 	// The card of the round shows the steps and how they ended, and
 	// the run's card says how the run ended.
 	var steps bool
-	for _, entry := range op.Entries(op.Cards()[1].ID) {
-		if strings.Contains(entry, "/gtw fix 42 -y") {
+	for _, item := range op.Checklist(op.Cards()[1].ID) {
+		if strings.Contains(item.Subject, "/gtw fix 42 -y") {
 			steps = true
 		}
 	}
 	if !steps {
-		t.Fatalf("the card of the round never showed the step: %v", op.Entries(op.Cards()[1].ID))
+		t.Fatalf("the card of the round never showed the step: %+v", op.Checklist(op.Cards()[1].ID))
 	}
 	var done bool
 	for _, m := range op.EmittedOf(messages.OutResult) {

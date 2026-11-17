@@ -498,6 +498,9 @@ func TestTheCardFollowsTheSnapshotsOfTheCommand(t *testing.T) {
 	}
 	r := newRun(svc, Request{Name: "one", ChatID: "obs-1", Cwd: "/tmp/work"}, bound, nil)
 	r.setRunSession(&session{kind: sessionRun, id: r.id, cardID: "card-1"})
+	// The heartbeat rides on the card of the round: the card of the
+	// run is the static overview of the run.
+	r.setRoundSession(&session{kind: sessionRound, id: "main · round 1", job: "main", round: 1, cardID: "card-2"})
 	t.Cleanup(r.cancel)
 
 	// The run watches the command it waits for.

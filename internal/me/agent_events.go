@@ -121,10 +121,10 @@ func (s *Service) countToolCall(ctx context.Context, r *run) {
 	s.publishHeartbeat(ctx, r)
 }
 
-// refreshSessions republishes the checklists of the open sessions.
+// refreshSessions republishes the state of the round the run is in.
 //
-// The checklists follow the run's progress: a job that finished and a
-// step that ran show up on the card of the session they belong to.
+// The checklist of the round follows the run's progress: a step that
+// ran shows up on the card of the round it belongs to.
 func (s *Service) refreshSessions(r *run) {
 	now := s.now()
 	if !r.takeCardRefresh(now) {
@@ -133,7 +133,6 @@ func (s *Service) refreshSessions(r *run) {
 	r.beat(now)
 	ctx := context.WithoutCancel(r.ctx)
 	r.setGitStatus(s.gitStatus(r))
-	s.publishTasks(ctx, r, r.runSessionRef(), r.runTasks())
 	s.publishHeartbeat(ctx, r)
 	sess := r.roundSessionRef()
 	if sess != nil {

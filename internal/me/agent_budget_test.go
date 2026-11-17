@@ -74,14 +74,16 @@ func TestBudget_TheRunPausesWhenTheStepSpentItsBudget(t *testing.T) {
 		t.Fatalf("the run stands at %q, want %q", phase, PhasePaused)
 	}
 	waitEntry(t, op, "paused:")
+	// The pause notice rides on the card of the round: the card of
+	// the run is the static overview of the run.
 	var named bool
-	for _, entry := range op.Entries(op.Cards()[0].ID) {
+	for _, entry := range op.Entries(op.Cards()[1].ID) {
 		if strings.Contains(entry, `the step "commit" used up its budget (2 of 2 chances)`) {
 			named = true
 		}
 	}
 	if !named {
-		t.Errorf("the card does not name the step and its chances: %v", op.Entries(op.Cards()[0].ID))
+		t.Errorf("the card does not name the step and its chances: %v", op.Entries(op.Cards()[1].ID))
 	}
 
 	// The chat is told once that the run waits for a human.

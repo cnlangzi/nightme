@@ -333,7 +333,7 @@ func (s *Service) runPlanStep(ctx context.Context, r *run, decision wfe.Decision
 		return nil
 	}
 	r.recordStep(decision.Job, decision.Step, verdict.Outcome)
-	s.recordStepOutcome(ctx, r, decision.Job, decision.Step, verdict.Outcome)
+	s.recordStepOutcome(ctx, r)
 	s.persist(r)
 	s.refreshSessions(r)
 	return nil

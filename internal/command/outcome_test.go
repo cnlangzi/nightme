@@ -50,6 +50,16 @@ func TestFailedOutcome_CallerDescriptionWins(t *testing.T) {
 	}
 }
 
+// TestFailedOutcome_EmptyReasonStillDescribes — a failure with no
+// summary and no reason code still says that something broke: the
+// description is never empty.
+func TestFailedOutcome_EmptyReasonStillDescribes(t *testing.T) {
+	got := FailedOutcome("", "")
+	if got.Data["error"] == "" {
+		t.Errorf("the error description is empty; an exception must say what broke")
+	}
+}
+
 // TestFailedOutcomeData_KeepsTheExtraFacts — the facts a command
 // reports beside the failure reach the program together with the
 // description.
@@ -96,6 +106,19 @@ func TestBranchOutcome_DropsAnErrorFromTheFacts(t *testing.T) {
 		map[string]string{"error": "the pull request is already open"})
 	if _, ok := got.Data["error"]; ok {
 		t.Errorf("a normal result carries no error description; the data is %v", got.Data)
+	}
+}
+
+// TestNoopOutcome_CarriesNoErrorDescription — the error key belongs
+// to the exception constructors: a noop outcome never carries one.
+func TestNoopOutcome_CarriesNoErrorDescription(t *testing.T) {
+	got := NoopOutcome("the branch was already up to date",
+		map[string]string{"error": "the branch is behind origin"})
+	if _, ok := got.Data["error"]; ok {
+		t.Errorf("a noop outcome carries no error description; the data is %v", got.Data)
+	}
+	if got.Data["error"] != "" {
+		t.Errorf("the error description = %q, want none", got.Data["error"])
 	}
 }
 

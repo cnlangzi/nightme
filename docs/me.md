@@ -110,12 +110,12 @@ type Outcome struct {
 | --- | --- | --- |
 | `ok` | 没有 | 活干完了 |
 | `noop` | 没有 | 没有可做的事——请求有效，但世界已经满足它 |
-| `failed` | 没有 | 正常分支——请求有效，只是没东西可做（提交没有东西可提交、PR 已经开了） |
+| `failed` | 没有 | 正常分支——请求有效，只是没东西可做 |
 | `failed` | 有 | 异常——东西坏了 |
 | `cancelled` / `timeout` / `incomplete` | 有或没有 | 这一步没走完 |
 | `unknown` | 没有 | 没有任何一方上报过结论 |
 
-出错说明由命令的共享构造器（`internal/command`）填——报异常时填 `error`，写的是"坏了什么"；报正常分支时不填，答案只是"没东西可做"。程序读 `Data["error"]` 在不在，就能分清这两者：正常结果不带出错说明。异常同时带 `reason` 和 `error`——前者是给程序分支的码，后者是给人读的解释。别处直接写的结论不带出错说明，按 `status` 和 `reason` 读。
+出错说明由命令的共享构造器（`internal/command`）填：报异常时填 `error`，写的是"坏了什么"；报正常分支时不填——答案只是"没东西可做"。哪一条命令报哪一类，是那条命令自己的判断：同一件事在不同命令里可能是不同的类。程序读 `Data["error"]` 在不在，就知道这条命令报的是哪一类。异常同时带 `reason` 和 `error`——前者是给程序分支的码，后者是给人读的解释。别处直接写的结论不带出错说明，按 `status` 和 `reason` 读。
 
 `/gtw`、`/review`、`/cwd`、`/use`、`/stop` 的每一条退出路径都会上报一个非 `unknown` 的结论。`/close`、`/queue`、`/steer`、`/think`、`/tools`、`/watch`、`/new`、`/resume`、`/handoff`、`/wiki` 仍然 settle 成 `unknown`。
 

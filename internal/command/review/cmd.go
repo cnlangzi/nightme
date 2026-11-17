@@ -29,12 +29,14 @@
 //     an agent — the "no active agent" error.
 //   - `-g / --global` persists the runner as `review.agent` in
 //     ~/.nightme/config.yaml; `--unset` removes it again.
-//   - `-c / --continue` resumes the groups of the last review in
-//     this chat that did NOT complete: it reopens their agent
-//     sessions (the session id recorded with the run), sends them
-//     the text "continue", and delivers the merged result exactly
-//     like a review's. The resume state lives in the factory's
-//     memory, keyed by chat id — nothing is written to disk.
+//   - `-c / --continue` finishes the groups of the last review in
+//     this chat that did NOT complete: a group that reached the agent
+//     is resumed (its agent session is reopened and sent the text
+//     "continue"), a group that never reached the agent is re-run (a
+//     fresh session carries the prompt the group was asked to run).
+//     The merged result is delivered exactly like a review's. The
+//     resume state lives in the factory's memory, keyed by chat id —
+//     nothing is written to disk.
 //   - The bridge's Starter.Review method calls agent.Review
 //     (uses the shared session helper internally). Most coding
 //     bridges delegate; pty/bash returns
@@ -116,8 +118,9 @@ func (f *Factory) Spec() command.Spec {
 /review -a codex -g         # also persist codex as the global review agent
                                  #   (-g / --global) for later /review runs
 /review -g --unset          # remove the persisted global review agent
-/review -c                  # resume the groups of the last review in this chat
-                                 #   that failed (sends "continue" to them)`,
+/review -c                  # continue the groups of the last review in this chat
+                                 #   that failed: a group that reached the agent is
+                                 #   resumed, a group that never started is re-run`,
 		Category: "workspace",
 	}
 }
@@ -548,7 +551,7 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 
 		result, err := starter.Review(revCtx, rc,
 			agent.WithEventSink(sink),
-			agent.WithReviewJobObserver(collector.observe),
+			agent.WithReviewJobObserver(logFailedGroups("/review", runnerName, collector.observe)),
 			// The plan fires once, before the first group starts —
 			// the user learns the group list before any group
 			// produces output.
@@ -794,22 +797,26 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 // The literal "continue": the resumed session still holds the
 // original review prompt — including the output format the agent
 // was asked for — so the agent knows what to produce without a
-// second prompt spelling it out.
+// second prompt spelling it out. A group that never reached the
+// agent is re-run instead: it gets its stored prompt, not this text.
 const continueText = "continue"
 
-// handleContinue resumes the review groups of the last review in this
+// handleContinue finishes the review groups of the last review in this
 // chat that did not complete.
+//
+// A group that reached the agent is resumed; a group that never
+// reached the agent is re-run with the prompt it was asked to run.
 //
 // The runner is the agent recorded with the previous run — a session
 // belongs to one agent and cannot be moved to another, so the
-// four-tier runner resolution does not apply. The resumed sessions
-// run in the recorded workspace: the session belongs to that
-// workspace, and resuming it against another working directory would
-// point the agent at the wrong files.
+// four-tier runner resolution does not apply. The sessions run in the
+// recorded workspace: the session belongs to that workspace, and
+// resuming it against another working directory would point the
+// agent at the wrong files.
 //
 // The merged result is delivered exactly like a review's: wrapped
 // with agent.FormatReviewMessage and injected into the chat session's
-// current AS as a user turn. The channel gets the resumed groups'
+// current AS as a user turn. The channel gets the continued groups'
 // coalesced stream, framed by the plan line and the verdict line.
 func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices,
 	cs *chatsession.ChatSession, input command.SlashInput, notices []string) (*command.SlashOutput, error) {
@@ -883,8 +890,8 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 		}
 	}
 
-	// The resumed sessions run in the recorded workspace, not in the
-	// chat session's current one.
+	// The sessions run in the recorded workspace, not in the chat
+	// session's current one.
 	rc := agent.StartConfig{
 		Workspace: rec.workspace,
 	}
@@ -939,8 +946,8 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 
 		result, err := agent.ContinueReviewJobs(revCtx, starter, rc, jobs, continueText,
 			agent.WithEventSink(sink),
-			agent.WithReviewJobObserver(collector.observe),
-			// The plan names the resumed groups, before the first
+			agent.WithReviewJobObserver(logFailedGroups("/review --continue", runnerName, collector.observe)),
+			// The plan names the continued groups, before the first
 			// one produces output.
 			agent.WithReviewPlanObserver(planObserver(revCtx, emitter, collector, chatID, replyTo, runnerName)),
 		)
@@ -948,7 +955,7 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 		// The record is replaced with this run's outcomes BEFORE the
 		// result is delivered, so a second `--continue` finds
 		// nothing left to resume. A group that fails again has
-		// spent its one resume attempt — the failure stays in the
+		// spent its one recovery attempt — the failure stays in the
 		// record, the retry does not.
 		//
 		// The write is conditional on the record still being the one
@@ -959,8 +966,8 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 		finish()
 
 		// The end hint goes into the sink BEFORE the drain, so it
-		// lands after the resumed groups' findings — same contract as
-		// a plain review.
+		// lands after the continued groups' findings — same contract
+		// as a plain review.
 		if err == nil {
 			sendVerdictHint(sink, reviewVerdictHint(groupOutcomes, collector.plan()))
 		}
@@ -1004,24 +1011,24 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 			Text: formatted + reviewPromptFrame,
 		}}
 
-		// A resumed group that failed again did not finish its
+		// A continued group that failed again did not finish its
 		// work — the continuation is not a clean success. The
 		// counts come from the collector, never from the text.
 		//
-		// A continuation fans out over the groups it RESUMED, not
+		// A continuation fans out over the groups it CONTINUED, not
 		// over every group of the review it continues — so its
-		// count goes under `resumed_groups`, and `groups` keeps
+		// count goes under `continued_groups`, and `groups` keeps
 		// meaning "the groups of the review".
-		resumed, unfinished := groupCounts(groupOutcomes)
+		continued, unfinished := groupCounts(groupOutcomes)
 		status := messages.OutcomeOK
 		summary := "review continued"
 		if unfinished > 0 {
 			status = messages.OutcomeIncomplete
-			summary = fmt.Sprintf("%d of %d resumed groups unfinished", unfinished, resumed)
+			summary = fmt.Sprintf("%d of %d continued groups unfinished", unfinished, continued)
 		}
 		data := map[string]string{"agent": runnerName}
-		if resumed > 0 {
-			data["resumed_groups"] = fmt.Sprintf("%d", resumed)
+		if continued > 0 {
+			data["continued_groups"] = fmt.Sprintf("%d", continued)
 		}
 		if unfinished > 0 {
 			data["unfinished_groups"] = fmt.Sprintf("%d", unfinished)

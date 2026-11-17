@@ -111,7 +111,7 @@ func TestVerdictLine(t *testing.T) {
 		t.Errorf("the verdict line shows an empty severity bucket: %s", got)
 	}
 
-	failed := newVerdict(3, reports, []string{"**/*.ts"}).line()
+	failed := newVerdict(3, reports, []failedGroup{{label: "**/*.ts", state: failedResumable}}).line()
 	for _, want := range []string{"**/*.ts", "/review --continue"} {
 		if !strings.Contains(failed, want) {
 			t.Errorf("the verdict line does not carry %q: %s", want, failed)
@@ -136,7 +136,7 @@ func TestVerdictLine_UnparsedGroups(t *testing.T) {
 func TestReviewVerdict_FailedGroupsAreNotUnparsed(t *testing.T) {
 	outcomes := []reviewOutcome{
 		{pattern: "**/*.go", report: agent.ReviewReport{Parsed: true}},
-		{pattern: "**/*.ts", err: errors.New("boom")},
+		{pattern: "**/*.ts", err: errors.New("boom"), prompt: "the group's prompt"},
 	}
 	plan := []agent.ReviewPlanGroup{
 		{Pattern: "**/*.go", Label: "**/*.go"},
@@ -494,6 +494,9 @@ type planReviewStarter struct {
 	failed int
 	merged string
 	reply  string
+	// prompt is the prompt every group ran — the record keeps it, so
+	// a group that never reached the agent can be re-run with it.
+	prompt string
 }
 
 func (s *planReviewStarter) Info() agent.Info {
@@ -552,6 +555,7 @@ func (s *planReviewStarter) Review(_ context.Context, _ agent.StartConfig, opts 
 				Pattern:   g.Pattern,
 				Files:     g.Files,
 				SessionID: fmt.Sprintf("sess-%d", i+1),
+				Prompt:    s.prompt,
 				Report:    report,
 			}, err)
 		}

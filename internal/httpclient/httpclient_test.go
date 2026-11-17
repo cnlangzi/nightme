@@ -84,7 +84,7 @@ func TestDefaultTimeout_Reasonable(t *testing.T) {
 	// slow upstream API call but short enough not to hang the
 	// daemon. 45s sits comfortably in that band — if this test
 	// starts failing, someone has decided to change the value
-	// and probably should write a CHANGELOG entry.
+	// and probably should record the change.
 	if DefaultTimeout < 5*time.Second {
 		t.Fatalf("DefaultTimeout = %v is too aggressive for upstream APIs", DefaultTimeout)
 	}

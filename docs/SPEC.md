@@ -1235,7 +1235,7 @@ Daemon 重启后（用户发送 SIGINT 然后再启 `nightme run`，v1.3 起）�
 | `cfg.Primary` | 重新读取配置。**不影响已存在的 ChatSession.primaryAgent**（Q-A snapshot）。 |
 | `chat_sessions.json` | **懒加载**（v1.3+）：启动时**不**做全量恢复；`csFile` 整文件加载到 in-memory `entries map`；首次 `GetOrCreate(chatID)` 命中即 hydrate（`selectedCwd` / `selectedAgent` / `primaryAgent` / `watchMode` / `thinkMode` / `toolsMode` 复原），miss 才新建。`chatID` 跨 channel 不撞（feishu `oc_*` vs telegram 数字 namespace 天然分离）|
 | `agent_sessions.json` | 跟 `chat_sessions.json` 一起懒 hydrate：hydrate ChatSession 时同步按 `chatSessionId` 过滤加载 AgentSession 池，**全部 `Status=Detached`，PID=0** |
-| v1.x `registry.json` | 备份为 `.v1.bak`，不恢复数据（见 MIGRATION.md）。 |
+| v1.x `registry.json` | 备份为 `.v1.bak`，不恢复数据。 |
 | 各 channel Adapter | 启动时按 `channel.BuildAll(cfg)` 自动构造并 `Start`；channel 失败不影响其他 |
 
 **用户感知**：

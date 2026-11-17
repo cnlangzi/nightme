@@ -1157,9 +1157,6 @@ calls `MigrateV1ToV2(v1RegistryPath)` which:
 The `MigrateV1ToV2` backup file is kept on disk for forensic
 recovery only — delete it once you're confident you don't need it.
 
-See [`MIGRATION.md`](../../MIGRATION.md) for the full upgrade
-guide.
-
 ---
 
 ## 8. Test strategy

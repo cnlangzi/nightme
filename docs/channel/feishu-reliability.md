@@ -748,7 +748,6 @@ PROBER
 commit A: docs(feishu): F-41 active reconnect design
          docs/SPEC.md (§1.4 changelog)
          docs/channel/feishu.md (§13.18 decision record)
-         CHANGELOG.md (F-41 entry)
          docs/channel/feishu-reliability.md (NEW)
 
 commit B: feat(feishu): F-41 30s forced reconnect prober

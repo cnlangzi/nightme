@@ -501,8 +501,8 @@ func requireRealDsh(t *testing.T) {
 ### 5.4 Communication
 
 - Phase 1 合并前发 RFC(因为不可逆)
-- Phase 2 完成发 changelog
-- Phase 3 完成发 changelog
+- Phase 2 完成发 PR
+- Phase 3 完成发 PR
 
 ---
 
@@ -519,7 +519,7 @@ func requireRealDsh(t *testing.T) {
 - [ ] `grep -r 'exec.Command("dsh"' internal/bridge/dsh/` 只在 `host/lifecycle.go` 1 处
 - [ ] `go test ./...` 全绿,新代码覆盖率 ≥ 80%
 - [ ] [dsh-shared-host.md](../bridge/dsh-shared-host.md) 与本 F 文档同步
-- [ ] CHANGELOG 更新,用户文档更新
+- [ ] 用户文档更新
 
 ---
 

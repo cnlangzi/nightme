@@ -138,7 +138,7 @@
 | 个人 agent 分层（channel 传输 / observe 旁听 / 决策模型 / 聊天模型 / 策略）| [WFE.md](./WFE.md) §8.1 |
 | Workflow schema（`name` / `args` / `goal` / `instruct` / `workspaces` / `on` / `jobs`）| [WFE.md](./WFE.md) §2 |
 | 约束策略 `wfe.Policy`（CheckRun / CheckStep / CheckInstruct / CheckFinish / Remaining / Render）| [WFE.md](./WFE.md) §8.4 |
-| 六个工具（`run_step` / `instruct` / `answer_choice` / `ask_human` / `repo_status` / `finish`）| [WFE.md](./WFE.md) §8.5 |
+| 工具（`resume` / `next` / `ntm_<command>` / `agent` / `instruct` / `answer_choice` / `ask_human` / `repo_status` / `wait` / `end_round` / `finish`）| [WFE.md](./WFE.md) §8.5 |
 | 两种模型能力：System 1 决策模型 + System 2 聊天模型 | [WFE.md](./WFE.md) §8.6 |
 | 三种模式（仅 `me.llm` / 仅 `me.decider` / 两者都有）| [WFE.md](./WFE.md) §8.7 |
 | `me.llm` / `me.decider` 配置（模型与凭据由用户指定）| [WFE.md](./WFE.md) §8.8 |

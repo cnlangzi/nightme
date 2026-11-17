@@ -437,7 +437,8 @@ func TestTheSituationReport_CarriesTheRepair(t *testing.T) {
 		"turns without an action: 1",
 		"step commands now: /gtw commit",
 		"directives now:",
-		`run_step("commit")`,
+		"resume",
+		"next",
 		"ntm_gtw",
 		"end_round",
 		"ask_human",
@@ -572,7 +573,7 @@ jobs:
 
 	provider := &scriptedProvider{responses: []llm.Response{
 		{Message: textMsg("I think I should commit.")},
-		{Message: toolCallMsg("c2", toolRunStep, map[string]any{"step_id": "commit"})},
+		{Message: toolCallMsg("c2", toolResume, map[string]any{})},
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider})
 	op.steps = []fakeStep{pendingStep("still going"), okStep("committed"), okStep("pushed")}

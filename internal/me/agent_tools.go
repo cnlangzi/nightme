@@ -17,7 +17,15 @@ import (
 
 // The tools the chat model may call.
 const (
-	// toolRunStep runs one of the workflow's steps.
+	// toolResume runs the step that broke again.
+	toolResume = "resume"
+	// toolNext says the step is already done.
+	toolNext = "next"
+	// toolRunStep names the step the decision model ran.
+	//
+	// The chat model has no such tool: it repairs a gap and says which
+	// way to go. The decision model's action is recorded under this
+	// name, so the conversation the chat model reads stays consistent.
 	toolRunStep = "run_step"
 	// toolInstruct sends a free-form prompt to the coding agent.
 	toolInstruct = "instruct"
@@ -91,9 +99,14 @@ type stepResult struct {
 func (s *Service) toolCatalogue(r *run) []llm.Tool {
 	tools := []llm.Tool{
 		{
-			Name:        toolRunStep,
-			Description: "Run a step of the workflow as the workflow wrote it: the step that is ready, or one that already ran this round.",
-			Schema:      json.RawMessage(`{"type":"object","properties":{"step_id":{"type":"string","description":"the id of the step"}},"required":["step_id"],"additionalProperties":false}`),
+			Name:        toolResume,
+			Description: "Run the step that broke again, after you repaired the gap.",
+			Schema:      json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`),
+		},
+		{
+			Name:        toolNext,
+			Description: "Say the step is already done and let the engine continue with the workflow.",
+			Schema:      json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`),
 		},
 	}
 	tools = append(tools, commandTools(r)...)
@@ -285,8 +298,10 @@ func (s *Service) runPendingCalls(ctx context.Context, r *run) error {
 // execTool runs one tool call.
 func (s *Service) execTool(ctx context.Context, r *run, call pendingCall) (stepResult, error) {
 	switch call.Name {
-	case toolRunStep:
-		return s.toolRunStep(ctx, r, call)
+	case toolResume:
+		return s.toolResume(ctx, r, call)
+	case toolNext:
+		return s.toolNext(ctx, r, call)
 	case toolInstruct:
 		return s.toolInstruct(ctx, r, call)
 	case toolAgent:
@@ -311,22 +326,44 @@ func (s *Service) execTool(ctx context.Context, r *run, call pendingCall) (stepR
 	}
 }
 
-// toolRunStep runs a step of the workflow.
+// judgmentStep returns the step the run is on: the one the judgment
+// is about.
 //
-// The step must be the ready one, or one that already ran this round:
-// a step further down the line would leave the steps before it out of
-// order.
-func (s *Service) toolRunStep(ctx context.Context, r *run, call pendingCall) (stepResult, error) {
-	stepID, err := callArgString(call, "step_id")
-	if err != nil {
-		return stepResult{}, err
+// The agent names no step: the run knows it, and the engine decides
+// what runs next.
+func judgmentStep(r *run) (wfe.Step, error) {
+	stepID := r.budgetStep()
+	if stepID == "" {
+		return wfe.Step{}, toolErrorf("the run is not on a step")
 	}
 	step, ok := r.stepByID(stepID)
 	if !ok {
-		return stepResult{}, toolErrorf("the step %q is not part of this workflow", stepID)
+		return wfe.Step{}, toolErrorf("the step %q is not part of this workflow", stepID)
+	}
+	return step, nil
+}
+
+// toolResume runs the step that broke again.
+//
+// The step is the one the judgment is about: the run knows it, so the
+// agent names nothing. Its budget is checked like the budget of any
+// other action, and the step's verdict comes back.
+func (s *Service) toolResume(ctx context.Context, r *run, _ pendingCall) (stepResult, error) {
+	step, err := judgmentStep(r)
+	if err != nil {
+		return stepResult{}, err
+	}
+	st, ok := r.stepState(step.ID)
+	if !ok {
+		// The step never ran: there is nothing to run again.
+		return stepResult{}, toolErrorf("the step %q has not run: there is nothing to resume", step.ID)
+	}
+	if st.Outcome.Succeeded() {
+		// The step did its job: there is nothing to repair.
+		return stepResult{}, toolErrorf("the step %q did not break: there is nothing to repair", step.ID)
 	}
 	if !r.runnableStep(step.ID) {
-		return stepResult{}, toolErrorf("the step %q is not ready: run the step that is ready", step.ID)
+		return stepResult{}, toolErrorf("the step %q cannot run now: it did not run this round and it is not ready", step.ID)
 	}
 	if err := r.checkStep(step); err != nil {
 		return stepResult{}, toolErrorf("%s", err.Error())
@@ -353,6 +390,56 @@ func (s *Service) toolRunStep(ctx context.Context, r *run, call pendingCall) (st
 		Data:       verdict.Outcome.Data,
 		Transcript: verdict.Transcript,
 	}, nil
+}
+
+// toolNext records the step as done and hands the control back.
+//
+// The step is the one the run is on: the judgment names it, and the
+// run knows it. The facts the step produced are kept, the summary says
+// the agent decided the step was done, and the engine plans the next
+// step.
+func (s *Service) toolNext(ctx context.Context, r *run, _ pendingCall) (stepResult, error) {
+	step, err := judgmentStep(r)
+	if err != nil {
+		return stepResult{}, err
+	}
+	st, ok := r.stepState(step.ID)
+	if !ok {
+		return stepResult{}, toolErrorf("the step %q has not run: there is nothing to declare done", step.ID)
+	}
+	if st.Pending {
+		// The step is still running: the work is in flight.
+		return stepResult{}, toolErrorf("the step %q is still running: wait for it", step.ID)
+	}
+	if st.Outcome.Succeeded() {
+		// The step did its job: there is nothing to repair.
+		return stepResult{}, toolErrorf("the step %q is already done: there is nothing to repair", step.ID)
+	}
+	job := wfe.JobOf(r.workflow, step.ID)
+	done := doneOutcome(st.Outcome)
+	r.recordStep(job, step, done)
+	// The history has to agree with the run state: the step is done,
+	// and the run says so.
+	r.record(wfe.ActionKindRun, s.stepCommand(r, step), step.ID, done)
+	s.persist(r)
+	s.updateCard(r)
+	return stepResult{
+		Status:  string(done.Status),
+		Summary: done.Summary,
+		Data:    done.Data,
+	}, nil
+}
+
+// stepCommand renders the command a step runs, the way the run records
+// it.
+func (s *Service) stepCommand(r *run, step wfe.Step) string {
+	if step.Kind() == wfe.StepKindWait {
+		return "wait " + step.Wait
+	}
+	if command := s.evalText(r, stepText(step)); command != "" {
+		return command
+	}
+	return step.ID
 }
 
 // toolCommand runs a nightme command as the owner.

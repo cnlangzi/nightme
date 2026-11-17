@@ -753,14 +753,11 @@ func waitSent(t *testing.T, op *fakeOperator, command string) {
 
 // stepOutcome returns the outcome the run state holds for a step.
 func stepOutcome(r *run, stepID string) (wfe.Outcome, bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for _, st := range r.state.Steps {
-		if st.ID == stepID {
-			return st.Outcome, true
-		}
+	st, ok := r.stepState(stepID)
+	if !ok {
+		return wfe.Outcome{}, false
 	}
-	return wfe.Outcome{}, false
+	return st.Outcome, true
 }
 
 // runHistory returns the actions the run took.
@@ -1230,7 +1227,7 @@ jobs:
 
 	provider := &scriptedProvider{responses: []llm.Response{
 		{Message: toolCallMsg("c1", "ntm_review", map[string]any{"args": "-c"})},
-		{Message: toolCallMsg("c2", toolRunStep, map[string]any{"step_id": "review"})},
+		{Message: toolCallMsg("c2", toolResume, map[string]any{})},
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider})
 	op.steps = []fakeStep{
@@ -1567,7 +1564,7 @@ func TestJudgmentPoint_LowConfidenceEscalatesToTheChatModel(t *testing.T) {
 	writeWorkflow(t, dir, "fix-issue", fixIssueWorkflow)
 
 	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"step_id": "fix"})},
+		{Message: toolCallMsg("c1", toolResume, map[string]any{})},
 		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "failed", "summary": "stopped here"})},
 	}}
 	decider := &scriptedDecider{answers: []llm.DecisionResponse{
@@ -1597,7 +1594,7 @@ func TestJudgmentPoint_ARefusedDecisionEscalatesToTheChatModel(t *testing.T) {
 	writeWorkflow(t, dir, "fix-issue", fixIssueWorkflow)
 
 	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"step_id": "fix"})},
+		{Message: toolCallMsg("c1", toolResume, map[string]any{})},
 		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "failed", "summary": "stopped here"})},
 	}}
 	decider := &scriptedDecider{answers: []llm.DecisionResponse{
@@ -1656,7 +1653,7 @@ func TestJudgmentPoint_PolicyRejectedChoiceEscalates(t *testing.T) {
 	writeWorkflow(t, dir, "fix-issue", fixIssueWorkflow)
 
 	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"step_id": "fix"})},
+		{Message: toolCallMsg("c1", toolResume, map[string]any{})},
 		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "failed", "summary": "stopped"})},
 	}}
 	decider := &scriptedDecider{answers: []llm.DecisionResponse{

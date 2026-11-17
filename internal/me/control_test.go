@@ -513,7 +513,7 @@ func TestTheModelPathFollowsTheStepOfTheCommand(t *testing.T) {
 	writeWorkflow(t, dir, "ship", twoJobWorkflow)
 
 	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"step_id": "push"})},
+		{Message: toolCallMsg("c1", toolResume, map[string]any{})},
 		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "done", "summary": "pushed"})},
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider})
@@ -594,7 +594,7 @@ func TestACardTheChatRefusedIsPublishedLater(t *testing.T) {
 	writeWorkflow(t, dir, "ship", publishTwiceWorkflow)
 
 	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"step_id": "push"})},
+		{Message: toolCallMsg("c1", toolResume, map[string]any{})},
 		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "done", "summary": "pushed"})},
 	}}
 	logger := &recordingLogger{}

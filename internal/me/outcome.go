@@ -30,3 +30,25 @@ func failedOutcome(summary string, data map[string]string) wfe.Outcome {
 	out.Data[wfe.OutcomeKeyError] = summary
 	return out
 }
+
+// doneSummary is what a step the agent declared done carries.
+const doneSummary = "the agent decided the step was done"
+
+// doneOutcome builds the outcome of a step the agent declared done.
+//
+// The facts the step produced are kept: they say what it did before it
+// broke. The error description goes: the step is done, so the flow can
+// go on by itself.
+func doneOutcome(out wfe.Outcome) wfe.Outcome {
+	done := wfe.Outcome{
+		Status:  wfe.OutcomeOK,
+		Summary: doneSummary,
+	}
+	if len(out.Data) == 0 {
+		return done
+	}
+	done.Data = make(map[string]string, len(out.Data))
+	maps.Copy(done.Data, out.Data)
+	delete(done.Data, wfe.OutcomeKeyError)
+	return done
+}

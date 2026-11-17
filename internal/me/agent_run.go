@@ -1015,6 +1015,22 @@ func (r *run) stepCommands() []string {
 	return r.policy.StepCommands()
 }
 
+// stepState returns the state of a step: what it produced and whether
+// it is still running.
+//
+// The state is empty when the step never ran.
+func (r *run) stepState(stepID string) (wfe.StepState, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, st := range r.state.Steps {
+		if st.ID != stepID {
+			continue
+		}
+		return st, true
+	}
+	return wfe.StepState{}, false
+}
+
 // consecutiveStalls returns the number of turns the agent produced no
 // tool call in.
 func (r *run) consecutiveStalls() int {

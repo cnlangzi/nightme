@@ -6,12 +6,15 @@ package review
 // reaches the channel.
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/messages"
@@ -419,6 +422,97 @@ func TestSendVerdict_CarriesTheWholeDigest(t *testing.T) {
 	}
 	if strings.Contains(text, "more findings") {
 		t.Errorf("the verdict message names findings it left out:\n%s", text)
+	}
+}
+
+// TestSendVerdict_CarriesEveryFindingInFull: the verdict message
+// holds every finding's content in full, and the message grows past
+// the length the review layer used to hold it to — nothing is cut to
+// make the body fit a channel.
+func TestSendVerdict_CarriesEveryFindingInFull(t *testing.T) {
+	var findings []agent.ReviewFinding
+	for i := 0; i < 40; i++ {
+		findings = append(findings, agent.ReviewFinding{
+			Path:     fmt.Sprintf("internal/agent/review.go:%d", 100+i),
+			Severity: agent.SeverityHigh,
+			Content:  fmt.Sprintf("finding %d: %s", i, strings.Repeat("细节", 30)),
+		})
+	}
+	outcomes := []reviewOutcome{
+		{pattern: "**/*.go", report: agent.ReviewReport{Parsed: true, Findings: findings}},
+	}
+
+	em := newRecordingEmitter()
+	sendVerdict(context.Background(), em, "chat", "msg", "codex", agent.RunResult{}, outcomes, nil)
+
+	msgs := em.messages()
+	if len(msgs) != 1 {
+		t.Fatalf("the review sent %d messages, want the one verdict message: %+v", len(msgs), msgs)
+	}
+	text := msgs[0].Text
+	for i := range findings {
+		if want := fmt.Sprintf("finding %d: ", i); !strings.Contains(text, want) {
+			t.Errorf("the verdict message does not carry %q:\n%s", want, text)
+		}
+	}
+	if n := utf8.RuneCountInString(text); n <= 1900 {
+		t.Errorf("the verdict message is %d runes, under the length the review layer used to hold it to:\n%s", n, text)
+	}
+}
+
+// failingEmitter rejects every message — the channel refused the
+// body.
+type failingEmitter struct {
+	err error
+}
+
+func (e *failingEmitter) Send(_ context.Context, _ messages.OutboundMessage) error {
+	return e.err
+}
+
+// TestSendVerdict_LogsAFailedSend: a channel that refuses the
+// verdict is logged — the verdict is the user's only record of what
+// the review found, so a lost one must not vanish silently.
+func TestSendVerdict_LogsAFailedSend(t *testing.T) {
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	defer slog.SetDefault(prev)
+
+	outcomes := []reviewOutcome{
+		{pattern: "**/*.go", report: agent.ReviewReport{Parsed: true, Findings: []agent.ReviewFinding{
+			{Path: "a.go", Line: "42", Severity: agent.SeverityHigh, Content: "the finding"},
+		}}},
+	}
+
+	sendVerdict(context.Background(), &failingEmitter{err: errors.New("channel said no")},
+		"chat", "msg", "codex", agent.RunResult{}, outcomes, nil)
+
+	if !strings.Contains(logs.String(), "channel said no") {
+		t.Errorf("the failed verdict send was not logged:\n%s", logs.String())
+	}
+	if !strings.Contains(logs.String(), `"level":"WARN"`) {
+		t.Errorf("the failed verdict send was not logged at warn:\n%s", logs.String())
+	}
+}
+
+// TestSendReviewLine_LogsAFailedSend: the review's other lines are
+// logged the same way — a lost plan line is as invisible as a lost
+// verdict otherwise.
+func TestSendReviewLine_LogsAFailedSend(t *testing.T) {
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	defer slog.SetDefault(prev)
+
+	sendReviewLine(context.Background(), &failingEmitter{err: errors.New("channel said no")},
+		"chat", "msg", "codex", "🔍 review · codex")
+
+	if !strings.Contains(logs.String(), "channel said no") {
+		t.Errorf("the failed line send was not logged:\n%s", logs.String())
+	}
+	if !strings.Contains(logs.String(), `"level":"WARN"`) {
+		t.Errorf("the failed line send was not logged at warn:\n%s", logs.String())
 	}
 }
 

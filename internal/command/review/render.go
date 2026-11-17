@@ -19,6 +19,7 @@ package review
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 
@@ -525,17 +526,27 @@ func sanitizeCell(s string) string {
 // sendReviewLine sends one of the review's own lines to the channel,
 // anchored to the /review message so it folds into the same receipt as
 // the plan and the verdict.
+//
+// A channel that rejects the line (a body over the channel's own
+// limit, an outage) is logged: the line is the user's only record of
+// what the review did, so a lost one must not vanish silently.
 func sendReviewLine(ctx context.Context, em messages.Emitter, chatID, replyTo, runner, text string) {
 	if em == nil || text == "" {
 		return
 	}
-	_ = em.Send(ctx, messages.OutboundMessage{
+	out := messages.OutboundMessage{
 		ChatID:    chatID,
 		Kind:      messages.OutReply,
 		ReplyTo:   replyTo,
 		AgentName: runner,
 		Text:      text,
-	})
+	}
+	if err := em.Send(ctx, out); err != nil {
+		slog.Default().Warn("/review: line send failed",
+			"chat_id", chatID,
+			"kind", out.Kind.String(),
+			"err", err.Error())
+	}
 }
 
 // planObserver returns the agent.WithReviewPlanObserver callback of a
@@ -582,8 +593,14 @@ func sendVerdict(ctx context.Context, em messages.Emitter, chatID, replyTo, runn
 		Text:    text,
 	}
 	messages.StampRunResult(&out, runner, result)
-	if em != nil {
-		_ = em.Send(ctx, out)
+	if em == nil {
+		return
+	}
+	if err := em.Send(ctx, out); err != nil {
+		slog.Default().Warn("/review: verdict send failed",
+			"chat_id", chatID,
+			"kind", out.Kind.String(),
+			"err", err.Error())
 	}
 }
 

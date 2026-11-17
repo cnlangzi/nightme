@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -176,6 +177,86 @@ func TestTheWake_ReinitializesTheDeclaredContext(t *testing.T) {
 	}
 	if got := r.env()["WORKSPACE_CWD"]; got != worktree {
 		t.Errorf("WORKSPACE_CWD is %q, want %q", got, worktree)
+	}
+}
+
+// situationText returns the situation report the conversation holds.
+func situationText(t *testing.T, r *run) string {
+	t.Helper()
+	for _, msg := range r.conversation() {
+		if msg.Role != llm.RoleUser {
+			continue
+		}
+		for _, part := range msg.Parts {
+			if part.Type == llm.PartText && strings.HasPrefix(part.Text, situationMark) {
+				return part.Text
+			}
+		}
+	}
+	t.Fatal("the conversation holds no situation report")
+	return ""
+}
+
+// TestTheReport_FollowsTheChatThatMoved — the report the model reads
+// names the directory the chat works in, even when the chat moved
+// after the report was written.
+func TestTheReport_FollowsTheChatThatMoved(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	started := repoOnBranch(t, "main")
+	moved := repoOnBranch(t, "feature")
+
+	provider := &scriptedProvider{responses: []llm.Response{
+		{Message: toolCallMsg("c1", toolFinish, map[string]any{"status": "done", "summary": "done"})},
+		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "done", "summary": "done"})},
+	}}
+	cwd := &movableCwd{dir: started}
+	svc, _ := testService(t, dir, Config{Provider: provider, Git: realGitRunner{}, Cwd: cwd})
+	r := testRunIn(t, svc, "one", started)
+
+	if _, err := svc.system2(context.Background(), r); err != nil {
+		t.Fatalf("system2: %v", err)
+	}
+	if report := situationText(t, r); !strings.Contains(report, "directory: "+started) {
+		t.Fatalf("the report does not name the chat's directory:\n%s", report)
+	}
+
+	// The chat moved into the worktree.
+	cwd.Move(moved)
+
+	if _, err := svc.system2(context.Background(), r); err != nil {
+		t.Fatalf("system2: %v", err)
+	}
+	report := situationText(t, r)
+	if !strings.Contains(report, "directory: "+moved) {
+		t.Errorf("the report does not name the new directory:\n%s", report)
+	}
+	if !strings.Contains(report, "branch: feature") {
+		t.Errorf("the report does not carry the facts of the new directory:\n%s", report)
+	}
+}
+
+// TestThePlan_DecidesAgainstTheChatDirectory — the engine reads the
+// run's environment to decide, so the declared context has to be the
+// chat's directory before the conditions are evaluated.
+func TestThePlan_DecidesAgainstTheChatDirectory(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	started := repoOnBranch(t, "main")
+	moved := repoOnBranch(t, "feature")
+
+	cwd := &movableCwd{dir: started}
+	svc, _ := testService(t, dir, Config{Cwd: cwd})
+	r := testRunIn(t, svc, "one", started)
+
+	cwd.Move(moved)
+	if _, err := svc.plan(context.Background(), r); err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if got := r.env()["WORKSPACE_CWD"]; got != moved {
+		t.Errorf("WORKSPACE_CWD is %q, want %q", got, moved)
 	}
 }
 

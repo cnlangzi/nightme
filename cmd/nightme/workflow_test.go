@@ -181,8 +181,7 @@ jobs:
 }
 
 // TestWorkflowRun_WithoutWorkspaces — a workflow that declares no
-// workspace takes the one of the chat that starts it, so the plan
-// still prints.
+// workspace works where the chat works, so the plan still prints.
 func TestWorkflowRun_WithoutWorkspaces(t *testing.T) {
 	dir := t.TempDir()
 	yaml := `

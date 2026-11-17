@@ -134,7 +134,8 @@ type Request struct {
 	// ChatID is the chat the run works in. The run speaks there and
 	// takes its answers from there.
 	ChatID string
-	// Cwd is the working directory the run works in.
+	// Cwd is the working directory the run starts in. The run follows
+	// the chat's directory from there.
 	Cwd string
 	// Owner is the user the run speaks for.
 	Owner string

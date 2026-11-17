@@ -1145,17 +1145,20 @@ func (r *run) workCwd() string {
 // field, the workspace of its state and the environment its steps
 // run with.
 //
+// It reports whether the directory changed.
+//
 // The environment is replaced rather than written into: a map that
 // was handed out to a step is read outside the lock.
-func (r *run) setWorkCwd(dir string) {
+func (r *run) setWorkCwd(dir string) bool {
 	if dir == "" {
-		return
+		return false
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	changed := r.cwd != dir
 	r.cwd = dir
 	if r.state == nil {
-		return
+		return changed
 	}
 	r.state.Workspace = dir
 	env := maps.Clone(r.state.Env)
@@ -1164,6 +1167,7 @@ func (r *run) setWorkCwd(dir string) {
 	}
 	env["WORKSPACE_CWD"] = dir
 	r.state.Env = env
+	return changed
 }
 
 // outcomeLine renders an outcome as one human-readable line.

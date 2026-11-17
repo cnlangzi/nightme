@@ -115,7 +115,7 @@ func (s *Service) toolCatalogue(r *run) []llm.Tool {
 		},
 		llm.Tool{
 			Name:        toolRepoStatus,
-			Description: "Read the repository facts of the chat: the branch, whether the tree is dirty, and how far the branch is ahead of or behind its upstream and its base branch.",
+			Description: "Read the repository facts of the chat: the branch, whether the tree is dirty, how far the branch is ahead of or behind its upstream and its base branch, and the directory they were read in.",
 			Schema:      json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`),
 		},
 		llm.Tool{

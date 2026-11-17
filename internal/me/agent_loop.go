@@ -249,6 +249,10 @@ func (s *Service) pauseForBudget(ctx context.Context, r *run) {
 // and the switch happens before the command of that iteration is sent
 // to the chat.
 func (s *Service) plan(ctx context.Context, r *run) (wfe.Decision, error) {
+	// The engine reads the run's environment to decide: a step whose
+	// condition names the workspace has to be decided against the
+	// directory the chat stands in now.
+	s.syncWorkDir(r)
 	r.mu.Lock()
 	r.state.UpdatedAt = s.now()
 	before := roundsSnapshot(r.state.Rounds)

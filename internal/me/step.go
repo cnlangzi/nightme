@@ -160,11 +160,13 @@ func (s *Service) liveDir(r *run) string {
 //
 // A directory the daemon cannot tell leaves the run as it is.
 func (s *Service) syncWorkDir(r *run) {
-	dir := s.liveDir(r)
-	if dir == "" {
+	if !r.setWorkCwd(s.liveDir(r)) {
 		return
 	}
-	r.setWorkCwd(dir)
+	// The report the model reads names the directory and the
+	// repository facts of where the run was: a chat that moved makes
+	// the report stale.
+	r.markSituation()
 }
 
 // maxShellOutput is how much of a shell command's output a step keeps.

@@ -315,8 +315,8 @@ func describeStep(s wfe.Step) string {
 }
 
 // inheritedWorkspace is what a workflow without workspaces says: the
-// run takes the workspace of the chat that starts it.
-const inheritedWorkspace = "(the workspace of the chat that starts it)"
+// run works where the chat works.
+const inheritedWorkspace = "(the workspace of the chat)"
 
 // workspacesLabel renders the workflow's workspaces.
 func workspacesLabel(wf *wfe.Workflow) string {
@@ -341,7 +341,7 @@ func newWorkflowRunCmd() *cobra.Command {
 			"this to verify the step ordering before relying on the real run.\n\n" +
 			"--workspace overrides one of the workflow's workspaces " +
 			"(defaults to the first one). A workflow that declares no " +
-			"workspace takes the one of the chat that starts it.",
+			"workspace works where the chat works.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			wfs, failures, _, err := loadWorkflows()

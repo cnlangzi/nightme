@@ -72,7 +72,7 @@ Workflows are read from:
 | `title` | string | ✅ | — | What the run is for. It is what the operator reads and what the agent is given. |
 | `args` | arg[] | ❌ | — | The arguments the workflow takes. A spec is a mapping with `name` and an optional `default`. |
 | `instruct` | bool | ❌ | `true` | Whether the agent may send free-form instructions to the chat the run works in. |
-| `workspaces` | string[] | ❌ | — | The workspaces the workflow names. The run takes the workspace of the chat that starts it. |
+| `workspaces` | string[] | ❌ | — | The workspaces the workflow names. The run works where the chat works. |
 | `on` | object | ❌ | — | Trigger spec (see §3). Parsed and displayed; nothing fires it. |
 | `jobs` | map | ✅ | — | Named jobs, each with ordered `steps` (see §4). |
 
@@ -167,7 +167,7 @@ jobs:
           paths: [/tmp/pr]
 ```
 
-**Why `workspaces` is optional**: a workflow runs in the workspace of the chat that starts it. The list names the workspaces the workflow is meant for; it is not a filter that decides where the run happens.
+**Why `workspaces` is optional**: a workflow runs where the chat works, and follows the chat when it moves. The list names the workspaces the workflow is meant for; it is not a filter that decides where the run happens.
 
 ---
 

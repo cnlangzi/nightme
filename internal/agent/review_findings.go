@@ -6,12 +6,15 @@
 // one-line form, the simplify lens' vocabulary), so the parser lives
 // here and not in the command layer.
 //
-// The parser is deliberately tolerant. A group whose output matches no
-// known shape yields a report with Parsed=false and no findings — the
-// caller reports the group as unparsed, and the group's raw text still
-// reaches the channel through the coalesced stream. Nothing is ever
-// silently discarded: what the parser does not understand, the user
-// still reads.
+// The parser is deliberately tolerant. It reads the shape the prompt
+// asked for and the shapes an agent answers in when it drifts: the
+// block form with or without its bullet markers, the field names the
+// agent used instead of the prompt's, and a JSON payload. A group
+// whose output matches no known shape yields a report with Parsed=false
+// and no findings — the caller reports the group as unparsed, and the
+// group's raw text still reaches the channel through the coalesced
+// stream. Nothing is ever silently discarded: what the parser does not
+// understand, the user still reads.
 
 package agent
 
@@ -80,7 +83,8 @@ type ReviewReport struct {
 	Parsed bool
 }
 
-// reviewSeverities maps the severity words the review prompts use onto
+// reviewSeverities maps the severity words the review prompts use —
+// and the words an agent reaches for when it drifts from them — onto
 // the normalized buckets. The simplify lens' vocabulary folds onto the
 // same buckets as the ocr rules' and the builtin rubric's.
 var reviewSeverities = map[string]string{
@@ -89,15 +93,28 @@ var reviewSeverities = map[string]string{
 	SeverityMedium:   SeverityMedium,
 	SeverityLow:      SeverityLow,
 	"blocking":       SeverityCritical,
+	"blocker":        SeverityCritical,
+	"fatal":          SeverityCritical,
 	"warning":        SeverityHigh,
+	"major":          SeverityHigh,
+	"severe":         SeverityHigh,
+	"moderate":       SeverityMedium,
 	"style":          SeverityLow,
 	"suggestion":     SeverityLow,
+	"minor":          SeverityLow,
+	"nit":            SeverityLow,
+	"nitpick":        SeverityLow,
+	"trivial":        SeverityLow,
+	"info":           SeverityLow,
+	"informational":  SeverityLow,
 }
 
 // NormalizeReviewSeverity maps a severity word onto one of the five
 // buckets. The simplify lens' vocabulary folds onto the same buckets
-// (blocking → critical, warning → high, style / suggestion → low);
-// a word this parser does not know becomes SeverityUnspecified.
+// (blocking → critical, warning → high, style / suggestion → low), and
+// so do the words an agent reaches for when it drifts from the
+// prompt's (blocker → critical, major → high, minor → low, …); a word
+// this parser does not know becomes SeverityUnspecified.
 func NormalizeReviewSeverity(s string) string {
 	if bucket, ok := reviewSeverities[strings.ToLower(strings.TrimSpace(s))]; ok {
 		return bucket
@@ -105,14 +122,81 @@ func NormalizeReviewSeverity(s string) string {
 	return SeverityUnspecified
 }
 
-// The shapes the review prompts ask for. The block form is the ocr
-// delegate rules' schema; the one-line form is the builtin rubric's.
+// The field names a review agent may use for each finding field.
+//
+// The prompt's own names come first; the aliases follow. The first
+// name of a row wins: an output that carries two names for one field
+// takes the first.
 var (
-	// blockStartRe matches the first line of a per-finding block.
-	blockStartRe = regexp.MustCompile(`^\s*[-*]\s+path\s*:\s*(.*)$`)
+	reviewPathKeys     = []string{"path", "file", "filename", "file_path", "location"}
+	reviewLineKeys     = []string{"line", "start_line", "line_number", "start"}
+	reviewEndLineKeys  = []string{"end_line", "to"}
+	reviewSeverityKeys = []string{"severity", "level", "priority"}
+	reviewCategoryKeys = []string{"category", "type", "kind", "tag", "rule"}
+	reviewContentKeys  = []string{
+		"content", "message", "description", "detail", "details",
+		"body", "text", "issue", "summary", "title", "comment", "problem",
+	}
+)
 
-	// blockFieldRe matches the fields that follow a block's path line.
-	blockFieldRe = regexp.MustCompile(`^\s*[-*]\s+(start_line|end_line|category|severity|content)\s*:\s*(.*)$`)
+// reviewFieldKind names the finding field a key carries.
+type reviewFieldKind int
+
+const (
+	reviewFieldLine reviewFieldKind = iota
+	reviewFieldEndLine
+	reviewFieldSeverity
+	reviewFieldCategory
+	reviewFieldContent
+)
+
+// reviewAlias is a key that names a finding field: the field it
+// carries and its rank inside that field's alias list.
+type reviewAlias struct {
+	kind reviewFieldKind
+	rank int
+}
+
+// reviewFieldAliases maps every accepted field name onto the field it
+// carries.
+var reviewFieldAliases = buildReviewFieldAliases()
+
+// reviewPathKeySet is the set of names that open a finding block.
+var reviewPathKeySet = buildReviewPathKeySet()
+
+func buildReviewFieldAliases() map[string]reviewAlias {
+	m := map[string]reviewAlias{}
+	add := func(kind reviewFieldKind, keys []string) {
+		for i, k := range keys {
+			m[k] = reviewAlias{kind: kind, rank: i}
+		}
+	}
+	add(reviewFieldLine, reviewLineKeys)
+	add(reviewFieldEndLine, reviewEndLineKeys)
+	add(reviewFieldSeverity, reviewSeverityKeys)
+	add(reviewFieldCategory, reviewCategoryKeys)
+	add(reviewFieldContent, reviewContentKeys)
+	return m
+}
+
+func buildReviewPathKeySet() map[string]bool {
+	m := make(map[string]bool, len(reviewPathKeys))
+	for _, k := range reviewPathKeys {
+		m[k] = true
+	}
+	return m
+}
+
+// The shapes a review group answers in.
+var (
+	// blockKeyRe matches a "key: value" line — the opener of a
+	// per-finding block, or one of its fields. The bullet marker is
+	// optional: an agent that drops it still answered in the block
+	// form.
+	blockKeyRe = regexp.MustCompile(`^\s*(?:[-*]\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$`)
+
+	// blockBulletRe matches the bullet marker at the start of a line.
+	blockBulletRe = regexp.MustCompile(`^\s*[-*]\s+`)
 
 	// oneLineRe matches the one-line finding form with a bold
 	// severity: "- **critical**: <file>:<line> — <issue>".
@@ -129,26 +213,92 @@ var (
 // ParseReviewFindings parses one group's raw review output into
 // findings.
 //
-// It recognizes the per-finding block form, the one-line form, and the
-// simplify lens' severity vocabulary. Output that matches none of them
-// yields a report with Parsed=false and no findings; output that says
-// it found nothing ("No blockers; nothing material to flag.") yields
+// It recognizes the per-finding block form, the one-line form, the
+// simplify lens' severity vocabulary and a JSON payload. Output that
+// matches none of them yields a report with Parsed=false and no
+// findings; output that says it found nothing ("No findings.") yields
 // Parsed=true with zero findings.
 func ParseReviewFindings(text string) ReviewReport {
-	var report ReviewReport
+	findings := parseReviewFindings(text)
+	if len(findings) == 0 {
+		findings = parseReviewFindingsJSON(text)
+	}
+	report := ReviewReport{Findings: findings}
+	report.Parsed = len(findings) > 0 || statesNoFindings(text)
+	return report
+}
+
+// parseReviewFindings reads the findings the review prompts ask for:
+// the per-finding block form and the one-line form.
+func parseReviewFindings(text string) []ReviewFinding {
 	lines := strings.Split(text, "\n")
+	var findings []ReviewFinding
 	for i := 0; i < len(lines); i++ {
 		if f, next, ok := parseBlockFinding(lines, i); ok {
-			report.Findings = append(report.Findings, f)
+			findings = append(findings, f)
 			i = next
 			continue
 		}
 		if f, ok := parseOneLineFinding(lines[i]); ok {
-			report.Findings = append(report.Findings, f)
+			findings = append(findings, f)
 		}
 	}
-	report.Parsed = len(report.Findings) > 0 || statesNoFindings(text)
-	return report
+	return findings
+}
+
+// blockLineKind classifies a line of a per-finding block.
+type blockLineKind int
+
+const (
+	// blockLineOther is a line that names no key at all.
+	blockLineOther blockLineKind = iota
+	// blockLineField is a line that carries a finding field.
+	blockLineField
+	// blockLinePath is a path line — it opens the next block.
+	blockLinePath
+)
+
+// blockLine is one line of a block, classified.
+type blockLine struct {
+	kind  blockLineKind
+	alias reviewAlias
+	value string
+}
+
+// classifyBlockLine classifies one line: a field line, the path line
+// that opens the next block, or a line that names no key.
+func classifyBlockLine(line string) blockLine {
+	m := blockKeyRe.FindStringSubmatch(line)
+	if m == nil {
+		return blockLine{kind: blockLineOther}
+	}
+	key := strings.ToLower(m[1])
+	if alias, ok := reviewFieldAliases[key]; ok {
+		return blockLine{kind: blockLineField, alias: alias, value: strings.TrimSpace(m[2])}
+	}
+	if reviewPathKeySet[key] {
+		return blockLine{kind: blockLinePath}
+	}
+	return blockLine{kind: blockLineOther}
+}
+
+// blockOpener reads the opener of a per-finding block: a path line.
+//
+// A quoted value belongs to a JSON payload — the JSON salvage reads
+// those, and the block scanner must not claim them.
+func blockOpener(line string) (string, bool) {
+	m := blockKeyRe.FindStringSubmatch(line)
+	if m == nil {
+		return "", false
+	}
+	if !reviewPathKeySet[strings.ToLower(m[1])] {
+		return "", false
+	}
+	value := strings.TrimSpace(m[2])
+	if strings.HasPrefix(value, `"`) || strings.HasPrefix(value, "'") {
+		return "", false
+	}
+	return value, true
 }
 
 // parseBlockFinding parses a per-finding block starting at lines[i].
@@ -158,34 +308,123 @@ func ParseReviewFindings(text string) ReviewReport {
 // fields. A block may omit any field it cannot determine — the
 // severity of such a finding is unspecified.
 func parseBlockFinding(lines []string, i int) (ReviewFinding, int, bool) {
-	m := blockStartRe.FindStringSubmatch(lines[i])
-	if m == nil {
+	path, ok := blockOpener(lines[i])
+	if !ok {
 		return ReviewFinding{}, i, false
 	}
-	f := ReviewFinding{Path: strings.TrimSpace(m[1]), Severity: SeverityUnspecified}
+	// A bullet-less opener is prose unless a field line follows it:
+	// "path: …" on its own is a sentence, not a block.
+	if !blockBulletRe.MatchString(lines[i]) && !nextBlockField(lines, i+1) {
+		return ReviewFinding{}, i, false
+	}
+	fields := reviewFields{path: path}
 	j := i + 1
-	for j < len(lines) {
-		km := blockFieldRe.FindStringSubmatch(lines[j])
-		if km == nil {
-			break
-		}
-		switch km[1] {
-		case "start_line":
-			f.Line = strings.TrimSpace(km[2])
-		case "end_line":
-			if f.Line == "" {
-				f.Line = strings.TrimSpace(km[2])
-			}
-		case "category":
-			f.Category = strings.TrimSpace(km[2])
-		case "severity":
-			f.Severity = NormalizeReviewSeverity(km[2])
-		case "content":
-			f.Content = strings.TrimSpace(km[2])
-		}
+	// The opener and its fields are one unit: a blank line between
+	// them does not end the block. The guard above looks for the next
+	// non-empty line, so the block has to reach it too.
+	for j < len(lines) && strings.TrimSpace(lines[j]) == "" {
 		j++
 	}
-	return f, j - 1, true
+	for j < len(lines) {
+		line := classifyBlockLine(lines[j])
+		if line.kind != blockLineField {
+			break
+		}
+		j++
+		value := line.value
+		// A field's value continues onto the following lines while
+		// they are indented and name no field.
+		for j < len(lines) {
+			next := classifyBlockLine(lines[j])
+			if next.kind != blockLineOther || !isIndentedLine(lines[j]) {
+				break
+			}
+			value = strings.TrimSpace(value + " " + strings.TrimSpace(lines[j]))
+			j++
+		}
+		fields.set(line.alias, value)
+	}
+	return fields.finding(), j - 1, true
+}
+
+// nextBlockField reports whether the next non-empty line is a field
+// line.
+func nextBlockField(lines []string, i int) bool {
+	for ; i < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) == "" {
+			continue
+		}
+		return classifyBlockLine(lines[i]).kind == blockLineField
+	}
+	return false
+}
+
+// isIndentedLine reports whether the line starts with whitespace — the
+// mark of a value that continues onto the next line.
+func isIndentedLine(line string) bool {
+	return strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t")
+}
+
+// reviewValue is one field's value and the rank of the alias that
+// carried it.
+type reviewValue struct {
+	value string
+	rank  int
+	set   bool
+}
+
+// take keeps the value of the better-ranked alias: the first name of
+// the field's alias row wins.
+func (v *reviewValue) take(rank int, value string) {
+	if !v.set || rank < v.rank {
+		v.value = value
+		v.rank = rank
+		v.set = true
+	}
+}
+
+// reviewFields accumulates the fields of one block.
+type reviewFields struct {
+	path     string
+	line     reviewValue
+	endLine  reviewValue
+	severity reviewValue
+	category reviewValue
+	content  reviewValue
+}
+
+// set records one field's value.
+func (f *reviewFields) set(alias reviewAlias, value string) {
+	switch alias.kind {
+	case reviewFieldLine:
+		f.line.take(alias.rank, value)
+	case reviewFieldEndLine:
+		f.endLine.take(alias.rank, value)
+	case reviewFieldSeverity:
+		f.severity.take(alias.rank, value)
+	case reviewFieldCategory:
+		f.category.take(alias.rank, value)
+	case reviewFieldContent:
+		f.content.take(alias.rank, value)
+	}
+}
+
+// finding assembles the finding the block describes.
+func (f *reviewFields) finding() ReviewFinding {
+	out := ReviewFinding{
+		Path:     f.path,
+		Severity: SeverityUnspecified,
+		Category: f.category.value,
+		Content:  f.content.value,
+	}
+	out.Line = f.line.value
+	if out.Line == "" {
+		out.Line = f.endLine.value
+	}
+	if f.severity.set {
+		out.Severity = NormalizeReviewSeverity(f.severity.value)
+	}
+	return out
 }
 
 // parseOneLineFinding parses the one-line finding form.
@@ -258,11 +497,11 @@ func splitPathLine(loc string) (path, line string) {
 // isReviewFieldName reports whether word names a field of the
 // per-finding block schema — such a word is never a severity.
 func isReviewFieldName(word string) bool {
-	switch strings.ToLower(word) {
-	case "path", "start_line", "end_line", "category", "severity", "content":
+	word = strings.ToLower(strings.TrimSpace(word))
+	if _, ok := reviewFieldAliases[word]; ok {
 		return true
 	}
-	return false
+	return reviewPathKeySet[word]
 }
 
 // isKnownReviewSeverity reports whether word is a severity this parser
@@ -272,10 +511,27 @@ func isKnownReviewSeverity(word string) bool {
 	return ok
 }
 
+// reviewNoFindingPhrases are the phrasings a group uses to say it
+// found nothing.
+var reviewNoFindingPhrases = []string{
+	"no findings",
+	"no blockers",
+	"no problems found",
+	"found no problems",
+	"no issues found",
+	"found no issues",
+	"nothing material to flag",
+	"nothing to flag",
+}
+
 // statesNoFindings reports whether the output says the group found
 // nothing — the shape the prompts ask for when there is no finding.
 func statesNoFindings(text string) bool {
 	lower := strings.ToLower(text)
-	return strings.Contains(lower, "no blockers") ||
-		strings.Contains(lower, "nothing material to flag")
+	for _, phrase := range reviewNoFindingPhrases {
+		if strings.Contains(lower, phrase) {
+			return true
+		}
+	}
+	return false
 }

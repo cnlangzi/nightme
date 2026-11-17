@@ -1670,6 +1670,45 @@ func TestAdapter_HandleCallback_Permission(t *testing.T) {
 	}
 }
 
+// TestAdapter_HandleCallback_FlatQuestionClickIsTheAnswer — a
+// question that carries a flat list of options has no wizard to walk:
+// the click is the answer.
+func TestAdapter_HandleCallback_FlatQuestionClickIsTheAnswer(t *testing.T) {
+	a, _ := newTestAdapter(t)
+
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "100",
+		Kind:   messages.OutChoice,
+		Choice: &messages.Choice{
+			RequestID: "req-flat",
+			Kind:      messages.ChoiceKindQuestion,
+			Title:     "The run needs you",
+			Body:      "Which step should run next?",
+			Options:   []messages.ChoiceOption{{ID: "0", Label: "/gtw commit"}},
+		},
+	}); err != nil {
+		t.Fatalf("send choice: %v", err)
+	}
+	state, _ := a.state.choiceByRequestID("req-flat")
+	a.handleCallbackQuery(context.Background(), &CallbackQuery{
+		ID:      "cb-flat",
+		From:    User{ID: 7},
+		Message: &Message{MessageID: state.MessageID, Chat: Chat{ID: 100}},
+		Data:    "c:" + shortID("req-flat") + ":0",
+	})
+	select {
+	case msg := <-a.Incoming():
+		if msg.Action == nil {
+			t.Fatal("the click published no action")
+		}
+		if msg.Action.Option != "0" {
+			t.Fatalf("the option is %q, want the id of the option", msg.Action.Option)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("the click did not reach the chat")
+	}
+}
+
 func TestAdapter_HandleCallback_QuestionWizard(t *testing.T) {
 	a, _ := newTestAdapter(t)
 	a.config.PollingTimeout = 1

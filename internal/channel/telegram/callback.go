@@ -103,6 +103,12 @@ func (a *Adapter) handleChoiceClick(ctx context.Context, callback *CallbackQuery
 	case messages.ChoiceKindPermission:
 		a.handlePermissionClick(ctx, callback, state, option)
 	case messages.ChoiceKindQuestion:
+		if questionStep < 0 {
+			// A question with a flat list of options has no wizard to
+			// walk: the click is the answer.
+			a.handlePermissionClick(ctx, callback, state, option)
+			return
+		}
 		a.handleQuestionClick(ctx, callback, state, option, questionStep)
 	case messages.ChoiceKindDecision:
 		a.handleDecisionClick(ctx, callback, state, option)

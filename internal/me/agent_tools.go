@@ -445,7 +445,7 @@ func (s *Service) runStep(ctx context.Context, r *run, command string) (stepResu
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return stepResult{}, err
 		}
-		out := wfe.Outcome{Status: wfe.OutcomeFailed, Summary: err.Error()}
+		out := failedOutcome(err.Error(), nil)
 		step, ok := r.stepAt(idx)
 		if !ok {
 			r.record(actionKind(owned), command, "", out)

@@ -40,11 +40,12 @@ type Decision struct {
 // Decide computes what a run does next.
 //
 // The plan decides when the ready set holds exactly one step and the
-// previous outcome was ok or noop. A run that has not executed
-// anything yet counts as ok, so the first step runs on the fast path.
+// previous outcome was a normal result. A run that has not executed
+// anything yet counts as a normal result, so the first step runs on
+// the fast path.
 //
 // Everything else is a judgment point: the ready set is empty, the
-// ready set forks, or the previous outcome was not ok or noop. The
+// ready set forks, or the previous outcome raised an exception. The
 // agent decides what happens next.
 //
 // A job whose round is over starts its next round instead of ending
@@ -72,8 +73,8 @@ func Decide(state *RunState, wf *Workflow) (Decision, error) {
 		steps = append(steps, step.Step)
 	}
 	prev, hasPrev := lastRun(state)
-	// A step that did not end ok is a judgment point: the plan cannot
-	// go on by itself. A round the agent ended early is not a
+	// A step that raised an exception is a judgment point: the plan
+	// cannot go on by itself. A round the agent ended early is not a
 	// judgment point: the agent has already decided.
 	blocked := hasPrev && prevBlocks(state, wf, prev) && !roundEnded(state, prev)
 
@@ -367,11 +368,12 @@ func subjectOf(prev StepState, hasPrev bool) string {
 // prevBlocks reports whether the last step that ran keeps the chain
 // from going on by itself.
 //
-// A step that did not end ok is a judgment point: the agent decides.
-// A step that did not end ok but was marked continue-on-error is not:
-// the chain continues, and the error is in the record.
+// An exception is a judgment point: the agent decides. A normal result
+// is not: the plan goes on with the next step on its own. An exception
+// that was marked continue-on-error is not either: the chain continues,
+// and the error is in the record.
 func prevBlocks(state *RunState, wf *Workflow, prev StepState) bool {
-	if prev.Outcome.Succeeded() {
+	if !prev.Outcome.Exception() {
 		return false
 	}
 	step := StepByID(wf, prev.ID)

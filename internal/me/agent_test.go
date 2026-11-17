@@ -948,6 +948,60 @@ func TestFastPath_RunsEveryStepWithoutAModel(t *testing.T) {
 	}
 }
 
+// TestFastPath_ANormalBranchKeepsTheFastPath — a step that had nothing
+// to do is a normal result: the plan runs the next step of its own and
+// asks no model.
+func TestFastPath_ANormalBranchKeepsTheFastPath(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", `title: one
+jobs:
+  main:
+    steps:
+      - id: fix
+        message: /gtw fix 1 -y
+      - id: commit
+        message: /gtw commit
+`)
+
+	provider := &scriptedProvider{err: errors.New("the chat model must not be called")}
+	decider := &scriptedDecider{err: errors.New("the decision model must not be called")}
+	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
+	// The first step had nothing to do: the status is failed, but
+	// nothing broke.
+	op.steps = []fakeStep{
+		{outcome: messages.Outcome{
+			Status:  messages.OutcomeFailed,
+			Summary: "nothing to fix",
+			Data:    map[string]string{"reason": "nothing_to_fix"},
+		}},
+		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "committed"}},
+	}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitRun(t, svc, "obs-1")
+
+	if provider.Calls() != 0 {
+		t.Fatalf("the chat model was called %d times, the fast path should not need it", provider.Calls())
+	}
+	if decider.Calls() != 0 {
+		t.Fatalf("the decision model was called %d times, the fast path should not need it", decider.Calls())
+	}
+	sent := op.Sent()
+	want := []string{"/gtw fix 1 -y", "/gtw commit"}
+	if len(sent) != len(want) {
+		t.Fatalf("the chat got %v, want %v", sent, want)
+	}
+	for i, cmd := range want {
+		if sent[i] != cmd {
+			t.Fatalf("command %d was %q, want %q", i, sent[i], cmd)
+		}
+	}
+}
+
 // TestFastPath_RecordsTheStepOutcomes — the run state holds the
 // outcome of every step that ran.
 func TestFastPath_RecordsTheStepOutcomes(t *testing.T) {
@@ -1180,7 +1234,7 @@ jobs:
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider})
 	op.steps = []fakeStep{
-		{outcome: messages.Outcome{Status: messages.OutcomeFailed, Summary: "the review failed"}},
+		{outcome: messages.Outcome{Status: messages.OutcomeFailed, Summary: "the review failed", Data: map[string]string{"error": "the review failed"}}},
 		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "the repair worked"}},
 		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "the review worked"}},
 	}

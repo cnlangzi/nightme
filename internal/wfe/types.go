@@ -319,6 +319,26 @@ func (o Outcome) Succeeded() bool {
 	return o.Status == OutcomeOK || o.Status == OutcomeNoop
 }
 
+// Exception reports whether the outcome is an exception: the flow
+// cannot go on by itself and the agent has to decide what happens
+// next.
+//
+// The error description says what broke; the status says whether the
+// work got done. A failed outcome without an error description is a
+// normal branch of the work: the step did its job and its answer was
+// "there was nothing to do".
+func (o Outcome) Exception() bool {
+	if o.Data["error"] != "" {
+		return true
+	}
+	switch o.Status {
+	case OutcomeOK, OutcomeNoop, OutcomeFailed:
+		return false
+	default:
+		return true // cancelled, timeout, incomplete, unknown
+	}
+}
+
 // ActionKind is the kind of action recorded in the history.
 type ActionKind string
 

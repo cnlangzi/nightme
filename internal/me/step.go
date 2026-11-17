@@ -57,7 +57,7 @@ func (s *Service) executeMessage(ctx context.Context, r *run, job string, step w
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return stepVerdict{}, err
 		}
-		out := wfe.Outcome{Status: wfe.OutcomeFailed, Summary: err.Error()}
+		out := failedOutcome(err.Error(), nil)
 		r.record(wfe.ActionKindRun, text, step.ID, out)
 		s.updateCard(r)
 		return stepVerdict{Outcome: out, Settled: true}, nil
@@ -90,10 +90,7 @@ func (s *Service) executeMessage(ctx context.Context, r *run, job string, step w
 func (s *Service) executeShell(ctx context.Context, r *run, job string, step wfe.Step) (stepVerdict, error) {
 	command := s.evalText(r, step.Shell)
 	if s.cfg.Shell == nil {
-		out := wfe.Outcome{
-			Status:  wfe.OutcomeFailed,
-			Summary: fmt.Sprintf("the step %q needs a shell runner, and the daemon has none", step.ID),
-		}
+		out := failedOutcome(fmt.Sprintf("the step %q needs a shell runner, and the daemon has none", step.ID), nil)
 		r.record(wfe.ActionKindRun, command, step.ID, out)
 		s.updateCard(r)
 		return stepVerdict{Outcome: out, Settled: true}, nil
@@ -116,11 +113,11 @@ func (s *Service) executeShell(ctx context.Context, r *run, job string, step wfe
 		out.Summary = fmt.Sprintf("the shell command exited with %d", res.ExitCode)
 	}
 	if err != nil {
-		out.Status = wfe.OutcomeFailed
-		out.Summary = err.Error()
+		summary := err.Error()
 		if res != nil && res.Stderr != "" {
-			out.Summary = truncate(res.Stderr, 400)
+			summary = truncate(res.Stderr, 400)
 		}
+		out = failedOutcome(summary, out.Data)
 	}
 	r.record(wfe.ActionKindRun, command, step.ID, out)
 	s.updateCard(r)
@@ -208,12 +205,13 @@ func (s *Service) executeUse(ctx context.Context, r *run, job string, step wfe.S
 		return stepVerdict{}, execCtx.Err()
 	}
 	out := wfe.Outcome{Status: wfe.OutcomeOK, Summary: "the action " + name + " ran"}
+	var data map[string]string
 	if res != nil {
-		out.Data = stringifyAnyMap(res.Outputs)
+		data = stringifyAnyMap(res.Outputs)
+		out.Data = data
 	}
 	if err != nil {
-		out.Status = wfe.OutcomeFailed
-		out.Summary = err.Error()
+		out = failedOutcome(err.Error(), data)
 	}
 	r.record(wfe.ActionKindRun, name, step.ID, out)
 	s.updateCard(r)

@@ -117,6 +117,9 @@ func TestDecide_ThePlanIsExhausted(t *testing.T) {
 	if !decision.Exhausted {
 		t.Error("Exhausted = false, want true")
 	}
+	if decision.Reason == "" {
+		t.Error("the judgment point has no reason")
+	}
 }
 
 func TestDecide_AForkIsAJudgmentPoint(t *testing.T) {
@@ -139,6 +142,9 @@ jobs:
 	}
 	if len(decision.Ready) != 2 {
 		t.Errorf("Ready = %v, want both steps", decision.Ready)
+	}
+	if decision.Reason == "" {
+		t.Error("the judgment point has no reason")
 	}
 }
 
@@ -244,7 +250,10 @@ jobs:
         message: "/next"
 `)
 	state := newRunState(wf)
-	RecordStep(state, "main", wf.Jobs["main"].Steps[0], Outcome{Status: OutcomeFailed}, false)
+	RecordStep(state, "main", wf.Jobs["main"].Steps[0], Outcome{
+		Status: OutcomeFailed,
+		Data:   map[string]string{"error": "the worktree could not be created"},
+	}, false)
 
 	decision, err := Decide(state, wf)
 	if err != nil {

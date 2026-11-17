@@ -616,27 +616,28 @@ The **ready set** is the set of unrun steps whose job's `needs` are all satisfie
 
 | The workflow says | The plan is |
 |---|---|
-| one step in the ready set, and the previous outcome was `ok` or `noop` | run that step |
-| one step in the ready set, and the previous outcome was anything else | a judgment point |
+| one step in the ready set, and the previous outcome was a normal result | run that step |
+| one step in the ready set, and the previous outcome raised an exception | a judgment point |
 | more than one step in the ready set | a judgment point — the plan forks |
 | no step in the ready set, and no job repeats | a judgment point — the plan is exhausted |
 | no step in the ready set, and a job repeats | that job starts its next round |
 
-A run that has not executed anything yet counts as `ok`, so the first step runs on the fast path.
+The plan reads the **error description** of the previous outcome to tell a normal result from a breakage. An outcome that carries one is an **exception**: something broke, so the flow cannot go on by itself and the agent decides. An outcome without one is a **normal result**: the request was valid and there was nothing to do, so the flow continues on its own. The status alone does not say it — a command that ran *because* something existed and found nothing to do reports `failed` — so the description is what the plan reads. The statuses `cancelled`, `timeout`, `incomplete` and `unknown` are exceptions whatever they carry: none of them is a completed piece of work.
+
+A run that has not executed anything yet counts as a normal result, so the first step runs on the fast path.
 
 A round ends when the job's steps are done. The next round starts with the job's first step, the round's step outputs are cleared and the per-step budgets start over. The ready set of the next round is computed from the state of that round.
 
-A round can also end early, when the agent ends it: the steps of the round that did not run are recorded as skipped, the job's final step runs in their place, and the round advances as it does after an ordinary round. The step whose failure the agent resolved is not a judgment point any more — the agent has already decided what happens next.
+A round can also end early, when the agent ends it: the steps of the round that did not run are recorded as skipped, the job's final step runs in their place, and the round advances as it does after an ordinary round. The step whose exception the agent resolved is not a judgment point any more — the agent has already decided what happens next.
 
 ### 8.3 The judgment points
 
 A judgment point is where the workflow cannot decide and the agent does. It is reached when:
 
-- the ready set is empty and no job repeats — the plan is exhausted;
-- the ready set holds more than one step — the plan forks;
-- the previous outcome was not `ok` or `noop` — the last step did not finish its work;
-- the step itself failed;
-- a command is still running and waiting for an answer.
+- the previous outcome raised an exception — something broke, so the flow cannot go on by itself;
+- the plan forks — the ready set holds more than one step, or more than one job is ready to start a round;
+- the ready step is still running — a command waits for an answer;
+- the plan is exhausted — the ready set is empty and no job repeats.
 
 The agent answers a judgment point with a **directive**:
 
@@ -829,10 +830,12 @@ The run judges from facts, not from text. Every command the agent sends reports 
 | `ok` | The step did what it was asked to do. |
 | `noop` | There was nothing to do — the request was valid, the world already satisfied it. |
 | `incomplete` | The step partly worked; the rest is still open. |
-| `failed` | The step did not work. A command that ran *because* something existed and found nothing to do reports `failed`: nothing to commit, nothing to push, no diff to review, an empty queue. The premise did not hold, so the run stops there and the agent decides. |
+| `failed` | The step did not work. A command that ran *because* something existed and found nothing to do reports `failed`: nothing to commit, nothing to push, no diff to review, an empty queue. Whether that is a breakage or a normal branch is the error description's business. |
 | `cancelled` | Somebody stopped it. |
 | `timeout` | It ran out of time. |
 | `unknown` | Nobody reported a verdict. |
+
+An outcome may carry an **error description** — `Data["error"]`, one line that says what broke. Its presence is the axis the two kinds of failure sit on: an outcome that carries one is an **exception**, an outcome without one is a **normal result** — the request was valid and there was nothing to do. The status alone cannot say it, so the plan reads the description: a `failed` outcome without a description is a normal branch, and the flow goes on with the next step of the plan (see §8.2). The contract itself is in [`me.md`](./me.md).
 
 A step that is still running reports `waiting`, and a step whose execution is gone reports `interrupted`.
 

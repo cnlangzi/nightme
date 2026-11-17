@@ -130,7 +130,7 @@ JSON-RPC 2.0 握手是三步,**任何一步错位都会让 codex app-server 拒�
 
 | 阶段 | 超时 | 说明 |
 |---|---|---|
-| initialize 握手 | 10s(`handshakeTimeout`) | 冷启动含模型预热 |
+| initialize 握手 | 180s(`handshakeTimeout`) | 冷启动实测最长 88s(含模型预热) |
 | `Close()` 等 reap | 5s(`closeDrainTimeout`) | 超时也返回,绝不 wedge runtime |
 | 审批等待 | 5min(`permissionTimeout`,包级 var) | 超时 → decline |
 | turn RPC 请求 | 跟随 `ctx` 生命周期 | 跟随 `SendBlocks` 调用的 ctx |

@@ -42,11 +42,15 @@ import (
 
 // ─── constants & exported vars ───
 
-// handshakeTimeout bounds the initialize round-trip. Codex is expected
-// to answer within a couple of seconds even on cold start; 60s matches
-// the acp and pi bridges and gives plenty of room for cold model load
-// on slow / first-run machines (real runs have taken >20s).
-const handshakeTimeout = 60 * time.Second
+// handshakeTimeout bounds the initialize handshake — the initialize
+// request plus the thread/start (or thread/resume) that follows it.
+// The codex app-server's cold start on this host reaches 88s (range
+// 1-88s), and a handshake that gives up first takes the session with
+// it: a fresh session never gets its thread id, so nothing downstream
+// can recover it (a respawn keeps the id it already had). 180s leaves
+// headroom over the slowest observed cold start; a warm app-server
+// answers in well under a second, so the extra budget costs nothing.
+const handshakeTimeout = 180 * time.Second
 
 // closeDrainTimeout bounds the time Close() will wait for the lifecycle
 // goroutine to reap the child and close the events channel. Beyond this

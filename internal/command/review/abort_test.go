@@ -76,14 +76,25 @@ func (s *abortStarter) Review(ctx context.Context, cfg agent.StartConfig, opts .
 }
 
 func (s *abortStarter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agent, error) {
+	// A bridge refuses to spawn on a cancelled context — the shape of
+	// the group the abort caught before it started.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	_, hasDeadline := ctx.Deadline()
 	s.mu.Lock()
 	s.started = append(s.started, cfg)
 	index := len(s.started)
+	// A resume reopens the session it was given — the bridge keeps
+	// the conversation under that id. A fresh session gets a new one.
+	sessionID := cfg.SessionID
+	if sessionID == "" {
+		sessionID = fmt.Sprintf("sess-%d", index)
+	}
 	d := &abortDriver{
 		starter:     s,
 		events:      make(chan agent.AgentEvent, 8),
-		sessionID:   fmt.Sprintf("sess-%d", index),
+		sessionID:   sessionID,
 		hasDeadline: hasDeadline,
 	}
 	s.drivers = append(s.drivers, d)
@@ -286,6 +297,94 @@ func abortNotices(em *recordingEmitter) []messages.OutboundMessage {
 		}
 	}
 	return out
+}
+
+// ─── the registry ──────────────────────────────────────────────────
+
+// TestFactory_AFinishedFanoutIsNotAbortable covers the late abort: a
+// run whose fan-out is over has nothing left to stop, and the
+// delivery that follows must not be cancelled by an abort.
+func TestFactory_AFinishedFanoutIsNotAbortable(t *testing.T) {
+	f := NewFactory()
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+
+	h := &runHandle{cancel: cancel, done: make(chan struct{}), agent: "agent-x", kind: "review"}
+	f.beginRun("chat-a", h)
+
+	// The fan-out ends: the findings are in hand.
+	f.finishFanout("chat-a", h)
+
+	if _, _, ok := f.abortRun("chat-a"); ok {
+		t.Error("a run whose fan-out is over was abortable")
+	}
+	if ctx.Err() != nil {
+		t.Error("the late abort cancelled the run's context")
+	}
+}
+
+// TestFactory_ASecondAbortDoesNotReportTheSameRun covers the abort
+// issued while the first one is still winding down: the same run is
+// not reported twice.
+func TestFactory_ASecondAbortDoesNotReportTheSameRun(t *testing.T) {
+	f := NewFactory()
+	_, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+
+	h := &runHandle{cancel: cancel, done: make(chan struct{}), agent: "agent-x", kind: "review"}
+	f.beginRun("chat-a", h)
+
+	first, _, ok := f.abortRun("chat-a")
+	if !ok {
+		t.Fatal("the first abort found no run")
+	}
+	if first != h {
+		t.Fatalf("the abort targeted %+v, want the registered run", first)
+	}
+	if _, _, ok := f.abortRun("chat-a"); ok {
+		t.Error("the second abort reported the same run again")
+	}
+}
+
+// TestCarrySessionIDs covers the group the abort caught before it
+// spawned: its outcome carries no session id, but the session it was
+// reopening is still the one the record holds.
+func TestCarrySessionIDs(t *testing.T) {
+	outcomes := []reviewOutcome{
+		{pattern: "**/*.go", source: "system", sessionID: "sess-go"},
+		{pattern: "**/*.ts", source: "system"},
+	}
+	jobs := []agent.ReviewJob{
+		{Pattern: "**/*.go", Source: "system", SessionID: "sess-go"},
+		{Pattern: "**/*.ts", Source: "system", SessionID: "sess-ts"},
+	}
+
+	carrySessionIDs(outcomes, jobs)
+
+	if outcomes[1].sessionID != "sess-ts" {
+		t.Errorf("the stopped group's session id = %q, want %q", outcomes[1].sessionID, "sess-ts")
+	}
+	if outcomes[0].sessionID != "sess-go" {
+		t.Errorf("the group's own session id was overwritten: %q", outcomes[0].sessionID)
+	}
+}
+
+// waitForFanout waits until the chat's run's fan-out is over — the
+// run is registered but its findings are in hand.
+func waitForFanout(t *testing.T, f *Factory, chatID string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		f.mu.Lock()
+		runs := f.runs[chatID]
+		over := len(runs) == 0 || !runs[0].abortable
+		f.mu.Unlock()
+		if over {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("the fan-out did not end")
 }
 
 // ─── the abort ─────────────────────────────────────────────────────
@@ -606,6 +705,114 @@ func TestHandle_ChatCloseIsNotReportedAsAnAbort(t *testing.T) {
 	if notices := abortNotices(em); len(notices) != 0 {
 		t.Errorf("the chat close sent %d abort notices, want none", len(notices))
 	}
+}
+
+// TestHandle_AbortAfterTheFanoutIsANoOp covers the late abort: the
+// review's fan-out is over and its findings are on their way to the
+// agent — an abort must not cancel that delivery and report the
+// completed review as aborted.
+func TestHandle_AbortAfterTheFanoutIsANoOp(t *testing.T) {
+	agents := newTestAgents(t)
+	starter := &abortStarter{name: "review-late-abort-agent"}
+	agents.registry.Register(starter)
+
+	em := newRecordingEmitter()
+	const chatID = "review-late-abort-chat"
+	cs, asDriver := newContinueChatSession(t, chatID, starter.name, t.TempDir(), em)
+	// The prompt-end bus is off — the test does not drive a real
+	// readpump, so the injected turn never ends on its own.
+	cs.PromptEndBus = nil
+
+	// The delivery of the findings waits — the review is past its
+	// fan-out but its turn is still in flight.
+	gate := make(chan struct{})
+	asDriver.gate = gate
+
+	f := NewFactory()
+	hold := cs.Hold("msg-1")
+	dispatchWithMessage(t, f, cs, chatID, "msg-1", "review")
+	waitForFanout(t, f, chatID)
+
+	out := dispatchWithMessage(t, f, cs, chatID, "msg-2", "review", "--abort")
+	if !strings.Contains(out.Reply, "no review is running in this chat") {
+		t.Fatalf("the late abort reported a run: %q", out.Reply)
+	}
+
+	// The review's delivery completes: the findings reach the agent
+	// and the run reports a plain success.
+	close(gate)
+	blocks := waitForBlocks(t, asDriver, 1)
+	if len(blocks) != 1 {
+		t.Fatalf("the agent session received %d blocks, want 1", len(blocks))
+	}
+	hold.Release()
+	got := waitOutcome(t, em, 5*time.Second)
+	assertOutcome(t, got, messages.OutcomeOK, map[string]string{"agent": starter.name})
+}
+
+// TestHandle_AbortedContinuationKeepsTheSessionIds covers the groups
+// the abort caught before they spawned: the fan-out's semaphore
+// queues them, so they report no session id — but the sessions they
+// were reopening are still resumable.
+func TestHandle_AbortedContinuationKeepsTheSessionIds(t *testing.T) {
+	agents := newTestAgents(t)
+	starter := &abortStarter{name: "review-abort-ids-agent", hold: make(chan struct{})}
+	agents.registry.Register(starter)
+
+	em := newRecordingEmitter()
+	const chatID = "review-abort-ids-chat"
+	cs, _ := newContinueChatSession(t, chatID, starter.name, t.TempDir(), em)
+
+	// More groups than the fan-out's semaphore has slots, so the last
+	// one waits for a slot that only frees when the abort unwinds the
+	// running ones.
+	var outcomes []reviewOutcome
+	for i := 1; i <= 5; i++ {
+		outcomes = append(outcomes, reviewOutcome{
+			pattern:   fmt.Sprintf("group-%d", i),
+			source:    "abort-test",
+			files:     []string{"a.go"},
+			sessionID: fmt.Sprintf("sess-%d", i),
+			err:       errors.New("boom"),
+		})
+	}
+
+	f := NewFactory()
+	f.record(chatID, starter.name, "/recorded/ws", outcomes)
+
+	hold := cs.Hold("msg-1")
+	dispatchWithMessage(t, f, cs, chatID, "msg-1", "review", "-c")
+	waitForSessions(t, starter, 4)
+
+	dispatchWithMessage(t, f, cs, chatID, "msg-2", "review", "--abort")
+	waitForClose(t, starter, 4)
+
+	rec, ok := f.lookup(chatID)
+	if !ok {
+		t.Fatal("the aborted continuation left no record")
+	}
+	if len(rec.outcomes) != 5 {
+		t.Fatalf("the record holds %d outcomes, want 5", len(rec.outcomes))
+	}
+	// The outcomes are reported in completion order, so the session
+	// ids are compared as a set: every group kept the session it was
+	// reopening — including the one the abort caught before it
+	// spawned.
+	ids := map[string]bool{}
+	for _, o := range rec.outcomes {
+		if o.sessionID == "" {
+			t.Errorf("a stopped group lost its session id: %+v", o)
+			continue
+		}
+		ids[o.sessionID] = true
+	}
+	for i := 1; i <= 5; i++ {
+		want := fmt.Sprintf("sess-%d", i)
+		if !ids[want] {
+			t.Errorf("the record does not hold the session id %q: %v", want, ids)
+		}
+	}
+	hold.Release()
 }
 
 // TestReviewRunHasNoDeadline covers R8: the review's context carries

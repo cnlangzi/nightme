@@ -26,7 +26,8 @@
 //   - FormatReviewMessage wraps findings before injection into AS + channel.
 //   - pty/bash returns ErrReviewNotSupported.
 //   - The review has no wall-clock deadline: it runs until the chat
-//     closes or the user aborts it (/review --abort).
+//     session's context is cancelled (the daemon shutting down) or
+//     the user aborts it (/review --abort).
 //   - /review takes no args besides --agent.
 
 package agent

@@ -83,6 +83,7 @@ type Outcome struct {
 | `unfinished_groups` | 其中没跑完的组数 |
 | `subcommand` | 被 `/gtw abort` 取消的子命令 |
 | `elapsed` | 被取消的子命令（`/gtw abort`）或 review（`/review --abort`）已经跑了多久 |
+| `kind` | 被 `/review --abort` 取消的是哪一次 run：`review`（review 本体）或 `continue`（续跑） |
 | `repo` | 仓库（`owner/repo`） |
 | `issues` | `/gtw new -y` 开出来的 issue 编号（逗号分隔） |
 | `kept` | 还没开成 issue 的草稿数 |

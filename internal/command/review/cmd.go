@@ -39,8 +39,8 @@
 //     closes the agent sessions of its groups. The stopped groups
 //     stay resumable — `--continue` reopens them and sends them the
 //     text "continue". A review has no wall-clock deadline: it runs
-//     until the chat session's context is cancelled or the user
-//     aborts it.
+//     until the chat session's context is cancelled (the daemon
+//     shutting down) or the user aborts it.
 //   - The bridge's Starter.Review method calls agent.Review
 //     (uses the shared session helper internally). Most coding
 //     bridges delegate; pty/bash returns
@@ -60,7 +60,6 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/agentsession"
@@ -536,22 +535,11 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 	// reviews are allowed, as before, so the marker is a counter.
 	f.startReview(chatID)
 
-	// The run's context: no deadline, cancellable with the abort
-	// sentinel so `/review --abort` can stop the run.
-	revCtx, cancel := context.WithCancelCause(cs.Context())
-
-	// The run is registered BEFORE the goroutine starts, so an abort
-	// that arrives right after the command returned cannot race the
-	// registration.
-	done := make(chan struct{})
-	handle := &runHandle{
-		cancel:  cancel,
-		done:    done,
-		agent:   runnerName,
-		kind:    "review",
-		started: time.Now(),
-	}
-	f.beginRun(chatID, handle)
+	// The run: no deadline, cancellable with the abort sentinel so
+	// `/review --abort` can stop the run. It is registered BEFORE the
+	// goroutine starts, so an abort that arrives right after the
+	// command returned cannot race the registration.
+	revCtx, handle := f.newRun(chatID, cs.Context(), runnerName, "review")
 
 	go func() {
 		// The defer order is the run's shutdown contract: the
@@ -559,9 +547,9 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 		// back first, and `done` closes LAST — an abort that waits on
 		// it is guaranteed to find the run finished and its record
 		// written.
-		defer close(done)
+		defer close(handle.done)
 		defer f.endRun(chatID, handle)
-		defer cancel(nil)
+		defer handle.cancel(nil)
 
 		// The review's own hold: released when the goroutine
 		// returns, so the message settles only after the review
@@ -615,6 +603,11 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 			agent.WithReviewPlanObserver(planObserver(revCtx, emitter, collector, chatID, replyTo, runnerName)),
 		)
 
+		// The fan-out is over: the groups' sessions are closed and the
+		// findings are in hand. There is nothing left for an abort to
+		// stop, so the delivery below runs undisturbed.
+		f.finishFanout(chatID, handle)
+
 		// The record is replaced with this run's outcomes BEFORE the
 		// result is delivered: by the time the user sees the
 		// findings, the state a later `--continue` reads is already
@@ -643,25 +636,7 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 			// The sink is drained first: the findings that had
 			// already been queued land before the notice.
 			drain()
-			groups, unfinished := groupCounts(groupOutcomes)
-			work.Report(messages.Outcome{
-				Status:  messages.OutcomeCancelled,
-				Summary: fmt.Sprintf("the review was aborted (%d of %d groups unfinished)", unfinished, groups),
-				Data:    map[string]string{"agent": runnerName, "reason": "aborted"},
-			})
-			if emitter != nil {
-				// The notice rides the review's own message: the
-				// thread of the review closes on the abort instead
-				// of on a failure. The run's context is cancelled,
-				// so the send runs on a context that carries its
-				// values but not its cancellation.
-				_ = emitter.Send(context.WithoutCancel(revCtx), messages.OutboundMessage{
-					ChatID:  chatID,
-					Kind:    messages.OutReply,
-					ReplyTo: replyTo,
-					Text:    abortNotice(unfinished, groups),
-				})
-			}
+			reportAborted(revCtx, work, emitter, chatID, replyTo, runnerName, "review", groupOutcomes)
 			return
 		}
 
@@ -998,22 +973,11 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 	// The continuation is a review run like any other: the chat
 	// stays marked as busy until the continuation itself is done.
 	//
-	// The run's context has no deadline and is cancellable with the
-	// abort sentinel, so `/review --abort` can stop it too.
-	revCtx, cancel := context.WithCancelCause(cs.Context())
-
-	// The run is registered BEFORE the goroutine starts, so an abort
-	// that arrives right after the command returned cannot race the
-	// registration.
-	done := make(chan struct{})
-	handle := &runHandle{
-		cancel:  cancel,
-		done:    done,
-		agent:   runnerName,
-		kind:    "continue",
-		started: time.Now(),
-	}
-	f.beginRun(chatID, handle)
+	// The run: no deadline, cancellable with the abort sentinel so
+	// `/review --abort` can stop it too. It is registered BEFORE the
+	// goroutine starts, so an abort that arrives right after the
+	// command returned cannot race the registration.
+	revCtx, handle := f.newRun(chatID, cs.Context(), runnerName, "continue")
 
 	go func() {
 		// The defer order is the run's shutdown contract: the
@@ -1021,9 +985,9 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 		// back first, and `done` closes LAST — an abort that waits on
 		// it is guaranteed to find the run finished and its record
 		// written.
-		defer close(done)
+		defer close(handle.done)
 		defer f.endRun(chatID, handle)
-		defer cancel(nil)
+		defer handle.cancel(nil)
 
 		defer work.Release()
 
@@ -1063,6 +1027,11 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 			agent.WithReviewPlanObserver(planObserver(revCtx, emitter, collector, chatID, replyTo, runnerName)),
 		)
 
+		// The fan-out is over: the resumed sessions are closed and
+		// their findings are in hand. There is nothing left for an
+		// abort to stop, so the delivery below runs undisturbed.
+		f.finishFanout(chatID, handle)
+
 		// The record is replaced with this run's outcomes BEFORE the
 		// result is delivered, so a second `--continue` finds
 		// nothing left to resume. A group that fails again has
@@ -1078,7 +1047,15 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 		// the meantime owns the chat's resume state.
 		abortedRun := aborted(revCtx)
 		groupOutcomes := collector.results()
-		if !abortedRun {
+		if abortedRun {
+			// A group the abort caught before it spawned reports no
+			// session id — the resume never got that far — but the
+			// session it was reopening is still the one the record
+			// holds. Without this the stopped group would look like
+			// it never reached the agent, and would not be
+			// resumable.
+			carrySessionIDs(groupOutcomes, jobs)
+		} else {
 			groupOutcomes = collector.spentResults()
 		}
 		f.recordIfCurrent(chatID, rec.id, runnerName, workspace, groupOutcomes)
@@ -1096,25 +1073,7 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 			// The sink is drained first: the findings that had
 			// already been queued land before the notice.
 			drain()
-			groups, unfinished := groupCounts(groupOutcomes)
-			work.Report(messages.Outcome{
-				Status:  messages.OutcomeCancelled,
-				Summary: fmt.Sprintf("the continuation was aborted (%d of %d groups unfinished)", unfinished, groups),
-				Data:    map[string]string{"agent": runnerName, "reason": "aborted"},
-			})
-			if emitter != nil {
-				// The notice rides the continuation's own message:
-				// the thread closes on the abort instead of on a
-				// failure. The run's context is cancelled, so the
-				// send runs on a context that carries its values but
-				// not its cancellation.
-				_ = emitter.Send(context.WithoutCancel(revCtx), messages.OutboundMessage{
-					ChatID:  chatID,
-					Kind:    messages.OutReply,
-					ReplyTo: replyTo,
-					Text:    abortNotice(unfinished, groups),
-				})
-			}
+			reportAborted(revCtx, work, emitter, chatID, replyTo, runnerName, "continuation", groupOutcomes)
 			return
 		}
 

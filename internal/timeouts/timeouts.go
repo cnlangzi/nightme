@@ -19,6 +19,10 @@
 //
 // Reply is a different category (outbound IM delivery, not
 // subprocess execution) and is intentionally short.
+//
+// /review is deliberately absent: a review has no wall-clock budget.
+// It runs until the chat session's context is cancelled or the user
+// aborts it (`/review --abort`) — see docs/REVIEW.md §2.8.
 package timeouts
 
 import "time"

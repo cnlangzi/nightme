@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/messages"
@@ -98,6 +99,61 @@ func (f *Factory) handleAbort(ctx context.Context, rt command.RuntimeServices, i
 		},
 	})
 	return command.Reply(ctx, rt, strings.Join(lines, "\n")), nil
+}
+
+// reportAborted reports an aborted run: the `cancelled` outcome and
+// the abort notice on the run's own message.
+//
+// The notice tells the user what was stopped and how to pick the
+// stopped groups up again. The merged review text is NOT injected
+// into the chat session's agent session — the user chose to stop the
+// run, and the continuation delivers the findings.
+func reportAborted(ctx context.Context, work *chatsession.Work, emitter messages.Emitter,
+	chatID, replyTo, runner, kind string, outcomes []reviewOutcome,
+) {
+	groups, unfinished := groupCounts(outcomes)
+	work.Report(messages.Outcome{
+		Status:  messages.OutcomeCancelled,
+		Summary: fmt.Sprintf("the %s was aborted (%d of %d groups unfinished)", kind, unfinished, groups),
+		Data:    map[string]string{"agent": runner, "reason": "aborted"},
+	})
+	if emitter == nil {
+		return
+	}
+	// The notice rides the run's own message: the thread of the
+	// review closes on the abort instead of on a failure. The run's
+	// context is cancelled, so the send runs on a context that
+	// carries its values but not its cancellation.
+	_ = emitter.Send(context.WithoutCancel(ctx), messages.OutboundMessage{
+		ChatID:  chatID,
+		Kind:    messages.OutReply,
+		ReplyTo: replyTo,
+		Text:    abortNotice(unfinished, groups),
+	})
+}
+
+// carrySessionIDs fills the session id of an outcome that has none
+// from the job it resumed.
+//
+// A group the abort caught before it spawned reports no session id —
+// the resume never got that far — but the session it was reopening is
+// still the one the record holds. Without this the stopped group
+// would look like it never reached the agent, and `--continue` would
+// have nothing to resume.
+func carrySessionIDs(outcomes []reviewOutcome, jobs []agent.ReviewJob) {
+	for i := range outcomes {
+		if outcomes[i].sessionID != "" {
+			continue
+		}
+		for _, j := range jobs {
+			// The pattern and the source together are the group's
+			// identity — the same pair the record keys them by.
+			if j.Pattern == outcomes[i].pattern && j.Source == outcomes[i].source {
+				outcomes[i].sessionID = j.SessionID
+				break
+			}
+		}
+	}
 }
 
 // abortNotice renders the notice the aborted run sends on its own

@@ -21,6 +21,7 @@ package review
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"time"
 
@@ -45,6 +46,34 @@ type runHandle struct {
 	kind string
 	// started is when the run began.
 	started time.Time
+	// abortable marks a run whose fan-out can still be stopped. It
+	// goes false when the fan-out ends (the findings are in hand —
+	// there is nothing left to stop) and when the run is aborted (a
+	// second abort must not report the same run again).
+	//
+	// Guarded by the factory's mutex.
+	abortable bool
+}
+
+// newRun creates a review run's context and registers the run.
+//
+// The run is registered BEFORE its goroutine starts, so an abort that
+// arrives right after the command returned cannot race the
+// registration.
+//
+// The context carries no deadline: the run ends when the chat
+// session's context is cancelled or when the user aborts it.
+func (f *Factory) newRun(chatID string, parent context.Context, runner, kind string) (context.Context, *runHandle) {
+	ctx, cancel := context.WithCancelCause(parent)
+	h := &runHandle{
+		cancel:  cancel,
+		done:    make(chan struct{}),
+		agent:   runner,
+		kind:    kind,
+		started: time.Now(),
+	}
+	f.beginRun(chatID, h)
+	return ctx, h
 }
 
 // beginRun registers a running review run of the chat.
@@ -58,7 +87,35 @@ func (f *Factory) beginRun(chatID string, h *runHandle) {
 	if f.runs == nil {
 		f.runs = make(map[string][]*runHandle)
 	}
+	h.abortable = true
 	f.runs[chatID] = append(f.runs[chatID], h)
+}
+
+// finishFanout marks a run's fan-out as over.
+//
+// The groups' sessions are closed and the findings are in hand: there
+// is nothing left for an abort to stop, and the delivery that follows
+// must not be cancelled by one. The run stays registered until its
+// goroutine ends — the reply's "still running" count is about the
+// runs in flight, not about the ones that can be stopped.
+func (f *Factory) finishFanout(chatID string, h *runHandle) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if cur, ok := f.findRun(chatID, h); ok {
+		cur.abortable = false
+	}
+}
+
+// findRun returns the chat's registered run h, if it is still there.
+//
+// The caller holds the factory's mutex.
+func (f *Factory) findRun(chatID string, h *runHandle) (*runHandle, bool) {
+	for _, r := range f.runs[chatID] {
+		if r == h {
+			return r, true
+		}
+	}
+	return nil, false
 }
 
 // endRun removes a finished run from the chat's registry.
@@ -70,33 +127,43 @@ func (f *Factory) endRun(chatID string, h *runHandle) {
 		if r != h {
 			continue
 		}
-		rest := make([]*runHandle, 0, len(runs)-1)
-		rest = append(rest, runs[:i]...)
-		rest = append(rest, runs[i+1:]...)
-		if len(rest) == 0 {
+		runs = slices.Delete(runs, i, i+1)
+		if len(runs) == 0 {
 			delete(f.runs, chatID)
 			return
 		}
-		f.runs[chatID] = rest
+		f.runs[chatID] = runs
 		return
 	}
 }
 
-// abortRun cancels the newest run of the chat with the abort
-// sentinel and reports it, together with the number of the chat's
-// other runs that are still in flight.
+// abortRun cancels the newest abortable run of the chat with the
+// abort sentinel and reports it, together with the number of the
+// chat's other runs that are still in flight.
 //
-// The newest run is the one the next `--continue` picks up, so it is
-// the one the abort targets. ok is false when the chat has no run in
-// flight.
+// The newest run is the one the user means — the chat's resume state
+// is per chat, and the newest run is the one whose groups a
+// `--continue` would pick up. ok is false when the chat has no run
+// whose fan-out can still be stopped.
+//
+// The run is marked before it is cancelled, so a second abort does not
+// report the same run again.
 func (f *Factory) abortRun(chatID string) (h *runHandle, others int, ok bool) {
 	f.mu.Lock()
 	runs := f.runs[chatID]
-	if len(runs) == 0 {
+	idx := -1
+	for i := len(runs) - 1; i >= 0; i-- {
+		if runs[i].abortable {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
 		f.mu.Unlock()
 		return nil, 0, false
 	}
-	h = runs[len(runs)-1]
+	h = runs[idx]
+	h.abortable = false
 	others = len(runs) - 1
 	f.mu.Unlock()
 	h.cancel(errReviewAborted)

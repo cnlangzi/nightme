@@ -34,9 +34,15 @@ import (
 type recordingDriver struct {
 	mu   sync.Mutex
 	sent []agent.ContentBlock
+	// gate, when non-nil, holds SendBlocks until the test closes it
+	// — the shape of a delivery that is still in flight.
+	gate chan struct{}
 }
 
 func (d *recordingDriver) SendBlocks(_ context.Context, blocks []agent.ContentBlock) error {
+	if d.gate != nil {
+		<-d.gate
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.sent = append(d.sent, blocks...)

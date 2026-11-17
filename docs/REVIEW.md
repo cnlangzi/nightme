@@ -642,8 +642,18 @@ agent 侧的会话还在:bridge 在 Ready 事件上交付的 session id 就是 `
 
 命令 factory 按 chat id 记着这个 chat 正在跑的 run(最老的在前),每个 run 一个
 handle:取消函数、goroutine 结束信号、runner、种类(`review` / `continue`)、开始
-时间。run 的 ctx 在 goroutine 启动**之前**就建好并登记 —— 否则命令刚返回就到的
-abort 会和登记抢跑。run 的 goroutine 结束时把自己从注册表里摘掉。
+时间,以及一个"还能不能中止"的标记。run 的 ctx 在 goroutine 启动**之前**就建好并
+登记 —— 否则命令刚返回就到的 abort 会和登记抢跑。run 的 goroutine 结束时把自己
+从注册表里摘掉。
+
+那个标记管的是 abort 够得着的范围:
+
+- **fan-out 结束**时标记被清掉 —— group 的 session 已经关了,findings 已经在手,
+  没有东西可停;后面的交付(finding 注入 AS)也不该被一个迟到的 abort 取消。
+- **abort 落地**时标记也被清掉 —— 第二次 abort 不该把同一个 run 再报一遍。
+
+abort 停的是**最新的、还能停的那个** run;没有可停的 run 时它答"没有 review 在
+跑"。
 
 ### 怎么认出"被中止"
 
@@ -662,8 +672,11 @@ run 照常报失败,不发中止通知。
 - 被中止的 run 仍然写它的 record:每个 group 一条 outcome,带 session id。停掉的
   group 因此还能续跑 —— 这正是"中止"而不是"关 chat"的意义。
 - 被中止的 run 报 `cancelled`,在自己的那条消息上发一条中止通知;不发 verdict 行,
-  也不把合并后的 findings 注入 chat session 的 agent session(续跑会交付它)。
-- 已经跑完的 group 的 findings 已经流进 chat 的 thread,留在那里。
+  也不把合并后的 findings 注入 chat session 的 agent session。
+- 已经跑完的 group 的 findings 已经流进 chat 的 thread(`/think` 开着才看得见),
+  但**不进**主 agent 的上下文:`--continue` 只续跑没跑完的 group,不会把已经跑完
+  的 group 再问一遍,也就不会替它们把 findings 交给 agent。要让 agent 看到它们,
+  只能让这次 review 正常跑完(它的交付会把 findings 注入 AS)。
 - abort 命令自己答一条:点名被中止的 runner、它已经跑了多久、这个 chat 还有几个
   run 在跑、run 是否还在收尾。它最多等 5 秒等 run 收完 —— 答完就意味着 agent
   session 已经关了,紧接着发的 `--continue` 不会被"a review is already running in
@@ -680,9 +693,12 @@ run 照常报失败,不发中止通知。
 | `--abort` 与 `--continue` / `--agent` / `--global` / `--unset` 同用 | 报错,点名两个 flag;不碰任何 run |
 | fan-out 停在两组之间 | 剩下的组同样被取消;这个 run 的每个 group 都落进 record |
 | 某个 group 中止前没到 agent(没有 session id) | 没有 session 可以重开 —— 下一次 `--continue` 报"没到 agent,没有东西可续" |
+| 续跑里排在并发闸后面的 group 被中止 | 它没来得及 spawn,所以没有自己的 session id;record 里沿用它本来要重开的那个 session id,下次 `--continue` 还能续 |
 | agent CLI 在 flush 会话状态之前就被杀掉 | bridge 拒绝 resume(`agent.ErrResumeUnhealthy`);该 group 照旧 inline 标 failed |
 | review 跑着的时候 chat 关了 | 父 ctx 被取消,原因是 `context.Canceled` 而不是中止哨兵 —— run 报失败,不发中止通知 |
 | abort 落在 run 已经结束之后 | run 已经不在注册表里 —— `ℹ️ no review is running in this chat` |
+| abort 落在 fan-out 结束之后、交付还没走完 | fan-out 已经没什么可停的了 —— run 不再可中止,`ℹ️ no review is running in this chat`;交付照常走,findings 照常进 AS |
+| 同一个 run 上再 abort 一次 | 第一次已经把 run 标记成"停过了" —— 第二次不回执同一个 run(有别的可停 run 就停那个) |
 | abort 的 5 秒等超时(bridge 卡在 close 上) | 回执说 review 还在收尾;run 在后台继续收 |
 | 一个 chat 里有多个 run 在跑 | 只停最新的那个;回执说还有几个在跑 |
 | 正在跑的 `--continue` 被 abort | 同 handling;续跑的 group 带 session id 落进 record |
@@ -712,8 +728,8 @@ run 照常报失败,不发中止通知。
 digest(§2.7)。续跑结束后,记录换成这次续跑的结果,所以第二次
 `--continue` 无事可做。
 
-`--abort` 走第三条路:查本 chat 正在跑的 run → 取消最新那个 run 的 ctx(带中止
-哨兵)→ 那个 run 的 fan-out 解开,它的 agent session 被关掉 → 被中止的 run 报
+`--abort` 走第三条路:查本 chat 正在跑的、还能停的 run → 取消最新那个 run 的 ctx
+(带中止哨兵)→ 那个 run 的 fan-out 解开,它的 agent session 被关掉 → 被中止的 run 报
 `cancelled`、在自己的消息上发一条中止通知、不发 verdict 也不注入 findings;它写下的
 record 让停掉的 group 还能 `--continue`(§2.8)。
 
@@ -724,7 +740,7 @@ record 让停掉的 group 还能 `--continue`(§2.8)。
 - **session 是隔离机制**:每 group 一个独立 agent session(独立进程 / 独立 session id),独立 context 窗口。review 推理(可烧数万 token)不污染主 chat。
 - **多 job 各自独立 context**:大 changeset 按 rule group 拆的每个 job 都是独立 fresh session——不共享 context、不累积,防爆。区别于"同进程多轮 + /new reset"的弱隔离(依赖 agent reset 彻底),fresh session 是 OS 级强隔离,零信任。
 - **prompt 走管道**:group prompt 经 session 的协议管道送达 agent,不占 argv(见 §2.5 传输层)。管道无长度上限,大 changeset 的 group prompt 不会撑爆 spawn 参数。
-- **没有超时**:review 没有 wall-clock 上限——它跑到 chat 关闭或用户中止为止。大 changeset 的 review 本来就可能跑很久,与其被一个固定的帽子截断,不如让用户自己决定什么时候停(`/review --abort`,见 §2.8)。
+- **没有超时**:review 没有 wall-clock 上限——它跑到用户中止或 chat session 的 ctx 被取消(daemon 关闭)为止。大 changeset 的 review 本来就可能跑很久,与其被一个固定的帽子截断,不如让用户自己决定什么时候停(`/review --abort`,见 §2.8)。
 - **ctx 派生**:goroutine 用 chat session 的 ctx 当 parent。chat 的 ctx 被取消(daemon 关闭走 `ResetContext`)→ 所有 review session 关闭 → goroutine 退出。无 orphan。run 的 ctx 是 `context.WithCancelCause(cs.Context())`:用户中止装的是哨兵原因(§2.8),ctx 被取消装的是父 ctx 的原因,两者在 `context.Cause` 上分得开。
 - **多 reviewer 并行**:多个 `/review --agent` 并发,各自独立 session,findings 全注入同一 AS。用户体验:多条 review 接连出现,然后一次"fix"。
 - **续跑同样是 session 隔离**:resume 打开的是 agent 侧同一个 session(新进程 + 老 session id),agent 的上下文延续,主 chat 上下文依旧不被污染。

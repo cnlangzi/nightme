@@ -142,8 +142,8 @@ func TestParseReviewFindings_SimplifyVocabulary(t *testing.T) {
 }
 
 // TestNormalizeReviewSeverity pins the severity mapping: the two
-// vocabularies fold onto the same buckets, and a word the parser
-// does not know becomes unspecified.
+// vocabularies fold onto the same buckets, the alias words fold onto
+// them too, and a word the parser does not know becomes unspecified.
 func TestNormalizeReviewSeverity(t *testing.T) {
 	cases := []struct {
 		in   string
@@ -157,10 +157,20 @@ func TestNormalizeReviewSeverity(t *testing.T) {
 		{"warning", SeverityHigh},
 		{"style", SeverityLow},
 		{"suggestion", SeverityLow},
+		{"blocker", SeverityCritical},
+		{"fatal", SeverityCritical},
+		{"major", SeverityHigh},
+		{"severe", SeverityHigh},
+		{"moderate", SeverityMedium},
+		{"minor", SeverityLow},
+		{"nit", SeverityLow},
+		{"nitpick", SeverityLow},
+		{"trivial", SeverityLow},
+		{"info", SeverityLow},
+		{"informational", SeverityLow},
 		{"Critical", SeverityCritical},
 		{"  warning  ", SeverityHigh},
-		{"blocker", SeverityUnspecified},
-		{"nit", SeverityUnspecified},
+		{"weird", SeverityUnspecified},
 		{"", SeverityUnspecified},
 	}
 	for _, tc := range cases {

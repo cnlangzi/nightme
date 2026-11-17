@@ -322,11 +322,96 @@ func TestDelegateReviewMultiJob_ReportsPerGroupOutcomes(t *testing.T) {
 	}
 }
 
+// TestDelegateReviewMultiJob_ReportsTheGroupPrompt: the observer
+// sees the prompt the group was asked to run — a group that never
+// reached the agent is re-run with it.
+func TestDelegateReviewMultiJob_ReportsTheGroupPrompt(t *testing.T) {
+	groups := twoGroups()
+	pre := reviewContext{
+		workspace:     "/nonexistent-repo",
+		defaultBranch: "origin/main",
+		mergeBase:     "abc123",
+		ocrGroups:     groups,
+	}
+
+	var mu sync.Mutex
+	var prompts []string
+	fs := &sessionFakeStarter{
+		name: "test-agent",
+		newDriver: func(StartConfig) *sessionFakeDriver {
+			return newSessionFakeDriver(func(blocks []ContentBlock) []AgentEvent {
+				mu.Lock()
+				if len(blocks) > 0 {
+					prompts = append(prompts, blocks[0].Text)
+				}
+				mu.Unlock()
+				return groupReply("ok")
+			})
+		},
+	}
+
+	var mu2 sync.Mutex
+	var reports []ReviewJob
+	observer := func(job ReviewJob, _ error) {
+		mu2.Lock()
+		defer mu2.Unlock()
+		reports = append(reports, job)
+	}
+
+	if _, err := delegateReviewMultiJob(context.Background(), fs, StartConfig{Workspace: pre.workspace},
+		pre, pre.ocrGroups, WithReviewJobObserver(observer)); err != nil {
+		t.Fatalf("delegateReviewMultiJob: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	mu2.Lock()
+	defer mu2.Unlock()
+	if len(reports) != len(groups) {
+		t.Fatalf("the observer saw %d reports, want %d", len(reports), len(groups))
+	}
+	if len(prompts) != len(groups) {
+		t.Fatalf("the sessions received %d prompts, want %d", len(prompts), len(groups))
+	}
+	// The groups run concurrently, so the reports and the prompts
+	// arrive in no particular order — they are matched by the group's
+	// pattern.
+	received := map[string]string{}
+	for _, prompt := range prompts {
+		for _, g := range groups {
+			if strings.Contains(prompt, g.Pattern) {
+				received[g.Pattern] = prompt
+			}
+		}
+	}
+	for _, report := range reports {
+		want, ok := received[report.Pattern]
+		if !ok {
+			t.Errorf("no session received a prompt for %q", report.Pattern)
+			continue
+		}
+		if report.Prompt != want {
+			t.Errorf("the report of %q carries a prompt the session never received:\n%s",
+				report.Pattern, report.Prompt)
+		}
+	}
+}
+
 // groupReply is the scripted reply of a fake session driver: a
 // startup Ready followed by the turn's result.
 func groupReply(text string) []AgentEvent {
 	return []AgentEvent{
 		sessionReadyEvent("sess-group", "model"),
-		{Kind: EventAgentResult, Result: &AgentResultEvent{Text: text}},
+		{Kind: EventAgentResult, Result: &AgentResultEvent{Text: reviewReply(text)}},
 	}
+}
+
+// reviewReply is a review output the parser can read: a reply that
+// already is one is kept as it is, an unreadable one is wrapped — so
+// a fan-out test does not spend a re-emit turn on it.
+func reviewReply(text string) string {
+	if text == "" || ParseReviewFindings(text).Parsed {
+		return text
+	}
+	return "- path: a.go\n- start_line: 1\n- severity: low\n- content: " + text
 }

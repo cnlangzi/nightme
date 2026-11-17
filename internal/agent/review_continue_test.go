@@ -47,7 +47,7 @@ func TestContinueReviewJobs_ResumesAndMerges(t *testing.T) {
 				mu.Unlock()
 				return []AgentEvent{
 					sessionReadyEvent(cfg.SessionID, "model"),
-					{Kind: EventAgentResult, Result: &AgentResultEvent{Text: "continued findings"}},
+					{Kind: EventAgentResult, Result: &AgentResultEvent{Text: reviewReply("continued findings")}},
 				}
 			})
 		},
@@ -232,6 +232,104 @@ func TestContinueReviewJobs_CapsConcurrency(t *testing.T) {
 	}
 	if peak < 2 {
 		t.Errorf("the resume fan-out did not run concurrently (peak %d)", peak)
+	}
+}
+
+// TestContinueReviewJobs_RerunsTheGroupThatNeverStarted: a group
+// without a session id never reached the agent, so there is no
+// conversation to continue — it is re-run: a fresh session carries
+// the group's stored prompt.
+//
+// The prompt is replayed verbatim: one continuation covers one
+// snapshot, and the resumed groups talk about the snapshot the review
+// took.
+func TestContinueReviewJobs_RerunsTheGroupThatNeverStarted(t *testing.T) {
+	jobs := []ReviewJob{
+		{Pattern: "**/*.go", Files: []string{"a.go"}, Prompt: "the stored prompt"},
+	}
+
+	var mu sync.Mutex
+	var starts []StartConfig
+	var texts []string
+
+	fs := &sessionFakeStarter{
+		name: "test-agent",
+		newDriver: func(cfg StartConfig) *sessionFakeDriver {
+			mu.Lock()
+			starts = append(starts, cfg)
+			mu.Unlock()
+			return newSessionFakeDriver(func(blocks []ContentBlock) []AgentEvent {
+				mu.Lock()
+				if len(blocks) > 0 {
+					texts = append(texts, blocks[0].Text)
+				}
+				mu.Unlock()
+				return []AgentEvent{
+					sessionReadyEvent("sess-rerun", "model"),
+					{Kind: EventAgentResult, Result: &AgentResultEvent{
+						Text: "- path: a.go\n- severity: high\n- content: the re-run finding",
+					}},
+				}
+			})
+		},
+	}
+
+	var plan []ReviewPlanGroup
+	merged, err := ContinueReviewJobs(context.Background(), fs,
+		StartConfig{Workspace: "/ws"}, jobs, "continue",
+		WithReviewPlanObserver(func(groups []ReviewPlanGroup) { plan = groups }))
+	if err != nil {
+		t.Fatalf("ContinueReviewJobs: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(starts) != 1 {
+		t.Fatalf("Start called %d times, want 1 (one session per group)", len(starts))
+	}
+	if starts[0].SessionID != "" {
+		t.Errorf("the re-run session carried session id %q, want none (it is a fresh session)",
+			starts[0].SessionID)
+	}
+	if len(texts) != 1 {
+		t.Fatalf("the session received %d prompts, want 1", len(texts))
+	}
+	if texts[0] != "the stored prompt" {
+		t.Errorf("the re-run session received %q, want the stored prompt", texts[0])
+	}
+	if !strings.Contains(merged.Text, "the re-run finding") {
+		t.Errorf("the re-run's findings did not reach the merged text:\n%s", merged.Text)
+	}
+	if len(plan) != 1 || plan[0].Mode != ReviewModeRerun {
+		t.Errorf("the plan does not mark the group as re-run: %+v", plan)
+	}
+}
+
+// TestContinueReviewJobs_MarksTheResumedGroup: a group with a
+// session id is resumed — its session is reopened and sent the
+// resume text — and the plan says so.
+func TestContinueReviewJobs_MarksTheResumedGroup(t *testing.T) {
+	jobs := []ReviewJob{
+		{Pattern: "**/*.go", Files: []string{"a.go"}, SessionID: "sess-go"},
+	}
+
+	var plan []ReviewPlanGroup
+	fs := &sessionFakeStarter{
+		name: "test-agent",
+		newDriver: func(cfg StartConfig) *sessionFakeDriver {
+			return newSessionFakeDriver(func([]ContentBlock) []AgentEvent {
+				return groupReply("the resumed finding")
+			})
+		},
+	}
+
+	if _, err := ContinueReviewJobs(context.Background(), fs,
+		StartConfig{Workspace: "/ws"}, jobs, "continue",
+		WithReviewPlanObserver(func(groups []ReviewPlanGroup) { plan = groups })); err != nil {
+		t.Fatalf("ContinueReviewJobs: %v", err)
+	}
+	if len(plan) != 1 || plan[0].Mode != ReviewModeResume {
+		t.Errorf("the plan does not mark the group as resumed: %+v", plan)
 	}
 }
 

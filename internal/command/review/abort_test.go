@@ -41,6 +41,9 @@ type abortStarter struct {
 	mu      sync.Mutex
 	started []agent.StartConfig
 	drivers []*abortDriver
+	// received are the blocks every session of this starter was
+	// sent, in order.
+	received []agent.ContentBlock
 }
 
 func (s *abortStarter) Info() agent.Info {
@@ -122,6 +125,14 @@ func (s *abortStarter) closedSessions() int {
 	return n
 }
 
+// receivedBlocks returns the blocks every session of this starter was
+// sent.
+func (s *abortStarter) receivedBlocks() []agent.ContentBlock {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]agent.ContentBlock(nil), s.received...)
+}
+
 // releaseHold lets the held turn answer.
 func (s *abortStarter) releaseHold() {
 	s.mu.Lock()
@@ -176,6 +187,9 @@ func (d *abortDriver) SendBlocks(ctx context.Context, blocks []agent.ContentBloc
 	d.mu.Lock()
 	d.received = append(d.received, blocks...)
 	d.mu.Unlock()
+	d.starter.mu.Lock()
+	d.starter.received = append(d.starter.received, blocks...)
+	d.starter.mu.Unlock()
 	d.events <- agent.AgentEvent{
 		Kind:      agent.EventAgentReady,
 		SessionID: d.sessionID,
@@ -563,15 +577,22 @@ func TestHandle_AbortKeepsTheStoppedGroupsResumable(t *testing.T) {
 	}
 
 	// The resumed session received the single text block "continue".
-	blocks := starter.drivers[len(starter.drivers)-1].receivedBlocks()
-	if len(blocks) != 1 {
-		t.Fatalf("the resumed session received %d blocks, want 1", len(blocks))
+	// A group whose answer the parser cannot read may get a second
+	// turn (the schema re-emit), so the assertion is on the "continue"
+	// block itself, not on the number of turns.
+	blocks := starter.receivedBlocks()
+	continues := 0
+	for _, b := range blocks {
+		if b.Type != agent.ContentText {
+			t.Errorf("the resumed session received a %v block, want a text block", b.Type)
+			continue
+		}
+		if b.Text == "continue" {
+			continues++
+		}
 	}
-	if blocks[0].Type != agent.ContentText {
-		t.Errorf("the resumed session received a %v block, want a text block", blocks[0].Type)
-	}
-	if blocks[0].Text != "continue" {
-		t.Errorf("the resumed session received %q, want %q", blocks[0].Text, "continue")
+	if continues != 1 {
+		t.Errorf("the resumed session received %d %q blocks, want 1: %+v", continues, "continue", blocks)
 	}
 	hold.Release()
 }

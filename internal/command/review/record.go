@@ -4,15 +4,17 @@
 // /review fans out one agent session per review group. A group can
 // fail on its own, and the user is left with a merged text that
 // marks the dead group inline. `/review --continue` picks that run
-// back up: it reopens the sessions of the groups that did not
-// complete, sends them the text "continue", and lets the agent
-// finish the work it had started.
+// back up: it reopens the sessions of the groups that reached the
+// agent, sends them the text "continue", and lets the agent finish
+// the work it had started. A group that never reached the agent has
+// no conversation to continue, so it is re-run — a fresh session
+// carries the prompt the group was asked to run.
 //
 // The state a continuation needs lives here: which agent ran the
 // review, which workspace it ran in, and one entry per group
-// (pattern, files, session id, error). It is held in the command
-// factory's memory, keyed by chat id — a chat never resumes another
-// chat's review, and nothing is written to disk.
+// (pattern, files, session id, prompt, error). It is held in the
+// command factory's memory, keyed by chat id — a chat never resumes
+// another chat's review, and nothing is written to disk.
 //
 // The registry below holds the runs that are in flight, so
 // `/review --abort` can stop one of them (see abort.go).
@@ -21,6 +23,7 @@ package review
 
 import (
 	"context"
+	"log/slog"
 	"slices"
 	"sync"
 	"time"
@@ -191,6 +194,8 @@ type reviewOutcome struct {
 	// continuation already retried it and it failed again. The group
 	// is not resumed a second time.
 	spent bool
+	// prompt is the group's assembled prompt — what a re-run sends.
+	prompt string
 	// report is the parsed form of the group's own review output.
 	// The verdict line counts its findings; a group whose output
 	// matched no known shape is reported as unparsed.
@@ -209,9 +214,15 @@ type reviewRecord struct {
 	outcomes  []reviewOutcome
 }
 
-// resumable returns the groups a continuation can resume: the ones
-// that failed AND produced a session id AND still have their resume
-// attempt.
+// resumable returns the groups a continuation can finish: the ones
+// that failed AND still have their recovery attempt.
+//
+// There are two ways to finish a group. A group that reached the
+// agent is resumed — its session id rides along on the job. A group
+// that never reached the agent has no conversation to continue, so it
+// is re-run: its stored prompt rides along on the job instead. A
+// group with neither is not actionable — there is nothing the
+// continuation could do with it.
 //
 // The groups that completed are not re-asked — their findings already
 // reached the chat, and asking again would duplicate them.
@@ -221,7 +232,7 @@ type reviewRecord struct {
 func (r reviewRecord) resumable() ([]agent.ReviewJob, string) {
 	var jobs []agent.ReviewJob
 	failed := false
-	neverReached := false
+	spent := false
 	for _, o := range r.outcomes {
 		if o.err == nil {
 			continue
@@ -229,17 +240,23 @@ func (r reviewRecord) resumable() ([]agent.ReviewJob, string) {
 		failed = true
 		switch {
 		case o.spent:
-			// The group's one resume attempt is used up — it is not
-			// retried, and "never reached the agent" does not
-			// describe it either.
-		case o.sessionID == "":
-			neverReached = true
-		default:
+			// The group's one recovery attempt is used up — it is
+			// not retried, and neither "never reached the agent" nor
+			// "already retried" describes it alone.
+			spent = true
+		case o.sessionID != "":
 			jobs = append(jobs, agent.ReviewJob{
 				Pattern:   o.pattern,
 				Source:    o.source,
 				Files:     o.files,
 				SessionID: o.sessionID,
+			})
+		case o.prompt != "":
+			jobs = append(jobs, agent.ReviewJob{
+				Pattern: o.pattern,
+				Source:  o.source,
+				Files:   o.files,
+				Prompt:  o.prompt,
 			})
 		}
 	}
@@ -248,12 +265,12 @@ func (r reviewRecord) resumable() ([]agent.ReviewJob, string) {
 		return jobs, ""
 	case !failed:
 		return nil, "ℹ️ the last review completed — nothing to continue"
-	case neverReached:
-		return nil, "ℹ️ the unfinished group never reached the agent — nothing to resume"
-	default:
-		// The only remaining case: the group failed after reaching
-		// the agent, and its one resume attempt is spent.
+	case spent:
 		return nil, "ℹ️ the unfinished group was already retried — nothing to resume"
+	default:
+		// The only remaining case: the group failed before it
+		// reached the agent, and no prompt was kept for it.
+		return nil, "ℹ️ the unfinished group has no session and no prompt to re-run — nothing to resume"
 	}
 }
 
@@ -378,8 +395,29 @@ func (c *outcomeCollector) observe(job agent.ReviewJob, err error) {
 		files:     job.Files,
 		sessionID: job.SessionID,
 		err:       err,
+		prompt:    job.Prompt,
 		report:    job.Report,
 	})
+}
+
+// logFailedGroups wraps the outcome observer so every failed group is
+// logged as it happens: the group's name, the agent that ran it, the
+// error that ended it and whether the group reached the agent.
+//
+// The failure reason goes to the log, not to the chat: it is a long
+// string that would break the one-line verdict.
+func logFailedGroups(scope, runner string, next func(agent.ReviewJob, error)) func(agent.ReviewJob, error) {
+	return func(job agent.ReviewJob, err error) {
+		if err != nil {
+			slog.Default().Warn(scope+": group failed",
+				"agent", runner,
+				"group", agent.ReviewGroupName(job.Source, job.Pattern),
+				"reached_agent", job.SessionID != "",
+				"err", err,
+			)
+		}
+		next(job, err)
+	}
 }
 
 // setPlan records the plan of the fan-out. It is the
@@ -407,11 +445,12 @@ func (c *outcomeCollector) results() []reviewOutcome {
 }
 
 // spentResults returns the collected outcomes with the failed groups'
-// resume attempt marked as spent: they are not resumed a second time.
+// recovery attempt marked as spent: they are not resumed or re-run a
+// second time.
 //
 // A continuation that fails again is terminal for that group — the
 // merged text already carries the inline "failed:" marker, and the
-// group's one resume attempt is used up. The session id stays in the
+// group's one recovery attempt is used up. The session id stays in the
 // record: the failure is still the group's, only the retry is gone.
 func (c *outcomeCollector) spentResults() []reviewOutcome {
 	out := c.results()

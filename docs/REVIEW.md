@@ -367,7 +367,7 @@ review 在 channel 上只有这几样东西,顺序固定:
 2. **每组的 findings**(thread):每组一条回复,正文前带 `[N] ` 编号(N = 该组在 plan 里的位置)。findings 走 **think kind**,所以落在 thread 而不是 card。一条回复放不下一组 findings 时按攒批边界切成连续几条,每条都带同一个编号。组开始产出时会先发一条开始提示(`▶ **[N] 组名** — N files`,同样是 think kind),thread 因此读起来是"一组一段"。
 3. **verdict 行**(fan-out 结束,card):subagent 数、findings 数、按 severity 的分布、失败组(点名,并按失败组的状态标注)、unparsed 组数。失败组的名字后面带状态:跑到了 agent 的组没有后缀,没跑到 agent 的组带 `(never started)`,恢复机会已用完的组带 `(already retried)`。` → /review --continue` 的后缀**只在还有失败组可恢复时才出现** —— 承诺必须是续跑做得到的。thread 末尾另有一条同样数字的收尾提示(`✅ **review done** · ...`,think kind),thread 以结果收尾。
 4. **digest**(紧跟 verdict 行,同一条 card 消息):按 severity 分组的 markdown 表,每个 bucket 一张表,每条 finding 一行。表头是 bucket 名与它的条数(`**high** · 2`),列是 `path`(`path:line`)、`category`、`content` —— severity 是表头,不是列。`category` 列只在**本次 review 有 finding 报了 category** 时出现,没报的那一格写 `—`;content 原文进表,行内的换行/制表符变成空格、`|` 变成 `/`,所以一行 finding 不会撑破列。
-   digest 带全本次 review 的每一条 finding,content 不截断 —— review 层不预扣任何 channel 的长度上限:长消息怎么送达是 channel 的事(Feishu 满了另起一条顶层消息,Slack 按 12000 runes 切块,Telegram 走 rich message)。
+   digest 带全本次 review 的每一条 finding,content 不截断 —— review 层不预扣任何 channel 的长度上限:长消息怎么送达是 channel 的事(Feishu 满了另起一条顶层消息,Slack 按 12000 runes 切块,Telegram 走 rich message,Discord 按 2000 字符切块)。
 
 card 上只有 plan 行、verdict 行和 digest —— findings 原文不进 card。digest 走的是 verdict 那条消息(reply kind),所以它不受 `/think` 控制:`/think` 关着时 thread 上没有 findings,card 上的 digest 照样在。
 

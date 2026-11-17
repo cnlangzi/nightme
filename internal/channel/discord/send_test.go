@@ -3,12 +3,14 @@ package discord
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/messages"
@@ -38,6 +40,7 @@ type createCall struct {
 	ChannelID  string
 	Content    string
 	Components []Component
+	ID         string
 }
 
 type editCall struct {
@@ -82,12 +85,16 @@ func (f *fakeREST) CreateMessage(_ context.Context, channelID string, payload Cr
 	if f.createErr != nil {
 		return Message{}, f.createErr
 	}
+	// Each create gets its own id, so a test can tell which message
+	// a multi-message body ended on.
+	id := fmt.Sprintf("msg-%d", len(f.creates)+1)
 	f.creates = append(f.creates, createCall{
 		ChannelID:  channelID,
 		Content:    payload.Content,
 		Components: payload.Components,
+		ID:         id,
 	})
-	return Message{ID: "msg-1", ChannelID: Snowflake(channelID)}, nil
+	return Message{ID: Snowflake(id), ChannelID: Snowflake(channelID)}, nil
 }
 
 func (f *fakeREST) EditMessage(_ context.Context, channelID, messageID string, payload EditMessagePayload) (Message, error) {
@@ -649,5 +656,141 @@ func TestSend_RestErrorPropagates(t *testing.T) {
 		ChatID: "dc_chan1", Kind: messages.OutReply, Text: "hi",
 	}); err == nil {
 		t.Error("expected error from REST")
+	}
+}
+
+// TestSplitMessageBody_CutsAtABoundary: the split prefers a
+// paragraph boundary, then a line, then a space — a cut does not
+// land inside a line.
+func TestSplitMessageBody_CutsAtABoundary(t *testing.T) {
+	body := "first paragraph\n\nsecond paragraph runs on"
+
+	chunks := splitMessageBody(body, 20)
+	if len(chunks) < 2 {
+		t.Fatalf("chunks = %q, want the body split", chunks)
+	}
+	if chunks[0] != "first paragraph\n\n" {
+		t.Errorf("the first chunk = %q, want the paragraph boundary", chunks[0])
+	}
+	if joined := strings.Join(chunks, ""); joined != body {
+		t.Errorf("the chunks carry %q, want the body in full", joined)
+	}
+}
+
+// TestSplitMessageBody_ShortBodyIsOneChunk: a body that fits is not
+// split.
+func TestSplitMessageBody_ShortBodyIsOneChunk(t *testing.T) {
+	body := "short body"
+	chunks := splitMessageBody(body, maxMessageRunes)
+	if len(chunks) != 1 || chunks[0] != body {
+		t.Errorf("chunks = %q, want the body in one chunk", chunks)
+	}
+}
+
+// TestSend_OutReply_SplitsLongBody: a body over Discord's 2000-
+// character limit is sent as several messages — each within the
+// limit, and nothing dropped.
+func TestSend_OutReply_SplitsLongBody(t *testing.T) {
+	rest := &fakeREST{}
+	a := newTestAdapter(rest)
+	body := strings.Repeat("review digest row\n", 300)
+
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "dc_chan1", Kind: messages.OutReply, Text: body,
+	}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if len(rest.creates) < 2 {
+		t.Fatalf("creates = %d, want the body split into several messages", len(rest.creates))
+	}
+	var joined string
+	for i, c := range rest.creates {
+		if n := utf8.RuneCountInString(c.Content); n > maxMessageRunes {
+			t.Errorf("create %d holds %d runes, over the %d-rune limit", i, n, maxMessageRunes)
+		}
+		joined += c.Content
+	}
+	if joined != body {
+		t.Errorf("the messages carry %d runes, want the body's %d in full", len(joined), len(body))
+	}
+}
+
+// TestSend_OutReply_SplitsLongCJKBody: a CJK body is split on rune
+// boundaries — no message ends in half a character, and the text
+// survives the split.
+func TestSend_OutReply_SplitsLongCJKBody(t *testing.T) {
+	rest := &fakeREST{}
+	a := newTestAdapter(rest)
+	body := strings.Repeat("审查发现的问题描述", 300)
+
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "dc_chan1", Kind: messages.OutReply, Text: body,
+	}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if len(rest.creates) < 2 {
+		t.Fatalf("creates = %d, want the body split into several messages", len(rest.creates))
+	}
+	var joined string
+	for i, c := range rest.creates {
+		if n := utf8.RuneCountInString(c.Content); n > maxMessageRunes {
+			t.Errorf("create %d holds %d runes, over the %d-rune limit", i, n, maxMessageRunes)
+		}
+		if !utf8.ValidString(c.Content) {
+			t.Errorf("create %d is not valid UTF-8", i)
+		}
+		joined += c.Content
+	}
+	if joined != body {
+		t.Error("the messages do not carry the CJK body in full")
+	}
+}
+
+// TestSend_OutResult_SplitsAndRecordsTheLastMessage: a result that
+// does not fit is sent as several messages, and the recorded result
+// message id is the last one — the 🎉 lands at the end of the result.
+func TestSend_OutResult_SplitsAndRecordsTheLastMessage(t *testing.T) {
+	rest := &fakeREST{}
+	a := newTestAdapter(rest)
+	body := strings.Repeat("result line\n", 300)
+
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "dc_chan1", Kind: messages.OutResult, ReplyTo: "user-msg-1", Text: body,
+	}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if len(rest.creates) < 2 {
+		t.Fatalf("creates = %d, want the result split into several messages", len(rest.creates))
+	}
+	last := rest.creates[len(rest.creates)-1]
+	if got := a.lastResultMessageID("dc_chan1", "user-msg-1"); got != last.ID {
+		t.Errorf("recorded result message id = %q, want %q (the last message)", got, last.ID)
+	}
+}
+
+// TestSend_OutError_SplitsLongBody: the error path splits too — a
+// long stderr tail is not lost.
+func TestSend_OutError_SplitsLongBody(t *testing.T) {
+	rest := &fakeREST{}
+	a := newTestAdapter(rest)
+	body := strings.Repeat("boom: trace line\n", 300)
+
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "dc_chan1", Kind: messages.OutError, Text: body,
+	}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if len(rest.creates) < 2 {
+		t.Fatalf("creates = %d, want the body split into several messages", len(rest.creates))
+	}
+	var joined string
+	for i, c := range rest.creates {
+		if n := utf8.RuneCountInString(c.Content); n > maxMessageRunes {
+			t.Errorf("create %d holds %d runes, over the %d-rune limit", i, n, maxMessageRunes)
+		}
+		joined += c.Content
+	}
+	if !strings.Contains(joined, "boom: trace line") {
+		t.Error("the error body did not survive the split")
 	}
 }

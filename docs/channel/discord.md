@@ -165,6 +165,8 @@ REST 客户端 (`httpREST`) 在每次请求前 `limiter.Wait(ctx)`，所以调�
 
 `Send` 中未匹配的 `Kind` 同样走 default 静默丢弃分支（与 `OutHeartbeat` 同路径）。
 
+**消息体长度上限**：Discord 单条 message 的 `content` 上限 2000 字符，超限整条被拒（HTTP 400，`code 50035`），不是截断。适配器在 `sendBody`（`send.go`）按 `maxMessageRunes = 2000` 切分后分多条发：切点优先落在段落边界，其次行边界、空格边界；按 rune 计，不会把一个多字节字符劈开。切分是无损的 —— 各块拼起来就是原文。走 `sendBody` 的是 `OutReply` / `OutCommandReply` / `OutThinking` / `OutToolStart` / `OutToolEnd` / `OutTaskCreate` / `OutTaskUpdate` / `OutResult` / `OutError`。`OutResult` 被切成多条时，记入 `lastResultMessageIDDB` 的是最后一条，🎉 落在正文结尾。`OutChoice` / `OutChoicePatch` 的卡片正文不切分 —— 组件与正文同属一条 message，拆开会让卡片失去按钮。
+
 ## 9. Attachments（CDN + F-61 retry）
 
 ### 9.1 CDN download
@@ -236,6 +238,7 @@ Phase 1 / Phase 2 / Phase 3 联合验收：
 - **Forum thread auto-create**：Discord forum channel 的 sentinel thread 不由 bot 自动创建。Bot 只在用户已创建的 thread 里收消息。
 - **Custom reaction emoji**：仅支持 Unicode 标准 emoji（`AddReaction` 的 emoji 字段必须是不带 `:` 的 unicode 字面）；自定义 guild emoji 走 `:name:id` 形态但 nightme 当前未使用。
 - **Modal input 长度**：Discord 硬限制 4000 字符；超出会被客户端截断。
+- **消息体长度**：Discord 单条 message 的 `content` 上限 2000 字符，超限整条被拒。适配器按 2000 rune 切分后分多条发（见 §8），内容不丢；`OutChoice` 的卡片正文不切分，超限时该条卡片会被 Discord 拒。
 - **V1 components only**：`IS_COMPONENTS_V2` flag 未启用。`content` + `embeds` + V1 components 共存于单条 message。
 - **Thread 消息继承父频道权限**：Discord 的 thread 权限从父频道继承；nightme 不强制覆盖。
 

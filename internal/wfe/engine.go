@@ -203,7 +203,7 @@ func recordSkipped(state *RunState, skipped []readyStep) {
 func repeatingJobs(state *RunState, wf *Workflow) []string {
 	var out []string
 	for _, name := range wf.JobOrder() {
-		if !jobComplete(state, wf, name) {
+		if !JobComplete(state, wf, name) {
 			continue
 		}
 		if !jobDidSomething(state, wf, name) {
@@ -490,15 +490,18 @@ func readySet(state *RunState, wf *Workflow) ([]readyStep, []readyStep, error) {
 func completedJobs(state *RunState, wf *Workflow) map[string]bool {
 	out := map[string]bool{}
 	for name := range wf.Jobs {
-		if jobComplete(state, wf, name) {
+		if JobComplete(state, wf, name) {
 			out[name] = true
 		}
 	}
 	return out
 }
 
-// jobComplete reports whether every step of the job has run.
-func jobComplete(state *RunState, wf *Workflow, name string) bool {
+// JobComplete reports whether every step of the job has run.
+//
+// The plan uses it to decide what is ready; a reader of the run's
+// progress uses it to say what is done.
+func JobComplete(state *RunState, wf *Workflow, name string) bool {
 	job, ok := wf.Jobs[name]
 	if !ok {
 		return false
@@ -509,14 +512,6 @@ func jobComplete(state *RunState, wf *Workflow, name string) bool {
 		}
 	}
 	return true
-}
-
-// JobComplete reports whether every step of the job has run.
-//
-// The plan uses it to decide what is ready; a reader of the run's
-// progress uses it to say what is done.
-func JobComplete(state *RunState, wf *Workflow, name string) bool {
-	return jobComplete(state, wf, name)
 }
 
 // HasRun reports whether the step already ran.

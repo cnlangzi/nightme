@@ -202,11 +202,14 @@ func dispatchPR(
 			command.FailedOutcome("error", "the existing pull requests could not be listed")), nil
 	}
 	if existing != nil {
+		// The branch already has a pull request: a normal branch —
+		// the pull request the command was asked for is there, and
+		// nothing broke.
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			withWarning(fmt.Sprintf(
-				"❌ branch %s already has an open PR (#%d): %s",
+				"✅ branch %s already has an open PR (#%d): %s",
 				c.Branch, existing.Number, existing.URL)),
-			command.FailedOutcomeData("pr_exists", "the branch already has an open pull request",
+			command.BranchOutcome("pr_exists", "the branch already has an open pull request",
 				map[string]string{
 					"branch":    c.Branch,
 					"pr_number": fmt.Sprintf("%d", existing.Number),
@@ -323,11 +326,14 @@ func dispatchPR(
 					baseBranch, c.Branch)),
 				command.FailedOutcome("no_commits", "the branch has no commits to review")), nil
 		case errors.Is(err, ErrPRExists):
+			// The race window of gate 2: no pull request when the
+			// gate ran, one when the pull request was opened. The
+			// pull request is there — a normal branch.
 			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 				withWarning(fmt.Sprintf(
-					"❌ a PR for %s already exists — check your repo's PR list.",
+					"✅ a PR for %s already exists — check your repo's PR list.",
 					c.Branch)),
-				command.FailedOutcomeData("pr_exists", "the branch already has an open pull request",
+				command.BranchOutcome("pr_exists", "the branch already has an open pull request",
 					map[string]string{"branch": c.Branch})), nil
 		case errors.Is(err, ErrCLINotInstalled):
 			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,

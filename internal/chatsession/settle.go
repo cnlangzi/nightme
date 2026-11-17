@@ -164,6 +164,39 @@ func (w *Work) Release() {
 	w.cs.settle(w.msgID, outcome)
 }
 
+// ReleaseAll drops every hold at once and settles the message.
+//
+// The message is dead — it will never reach an agent turn, so no
+// prompt-end will come to release the shares the other participants
+// hold. Every share goes back now, and the settled message goes out
+// with the verdict that was reported.
+//
+// A participant that releases later finds the work already released
+// and its release is a no-op — so a verdict that arrives after the
+// drop is dropped with the message, which is right: the message
+// settled as dropped.
+func (w *Work) ReleaseAll() {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	if w.released {
+		w.mu.Unlock()
+		return
+	}
+	w.holds = 0
+	w.released = true
+	outcome := w.outcome
+	unsubs := w.unsubs
+	w.unsubs = nil
+	w.mu.Unlock()
+
+	for _, u := range unsubs {
+		u.call()
+	}
+	w.cs.settle(w.msgID, outcome)
+}
+
 // settle emits the settled message for msgID and drops the work.
 func (cs *ChatSession) settle(msgID string, outcome messages.Outcome) {
 	cs.workMu.Lock()

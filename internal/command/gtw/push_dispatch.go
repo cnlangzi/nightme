@@ -103,13 +103,14 @@ func dispatchPush(
 
 	// 2. Nothing to push. A push runs because the branch carries
 	// commits the remote does not have; a branch that carries none
-	// means the premise does not hold, so the command reports a
-	// failure and the caller decides what to do. Note: a branch
-	// with no upstream at all deliberately returns
+	// means the premise does not hold. The work may still have been
+	// done — the coding agent pushed the branch itself, before this
+	// command ran — so the remote's tip is the second check. Note: a
+	// branch with no upstream at all deliberately returns
 	// HasNothingToPush=false here (the branch was never published;
 	// programmaticPush handles the first push).
 	if snap.HasNothingToPush() {
-		card, out := nothingToPush(snap.Branch)
+		card, out := pushFallback(ctx, c, snap.Branch, deps)
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, card, out), nil
 	}
 
@@ -174,12 +175,11 @@ func dispatchPush(
 			command.FailedOutcome("error", "the push landed but its result could not be read")), nil
 	}
 	// The push landed no commit: the branch carried nothing the
-	// remote did not have. The card says so, and the outcome says
-	// so — a push that pushed nothing did not do what it was asked
-	// to do, so the caller decides what to do next.
+	// remote did not have. The remote's tip is the second check —
+	// the remote may already hold every local commit.
 	if commitCount == 0 {
-		failure, out := nothingToPush(c.Branch)
-		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, failure, out), nil
+		card, out := pushFallback(ctx, c, c.Branch, deps)
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, card, out), nil
 	}
 	// The remote tip the push left behind. Read it back so a
 	// program knows which commit origin now points at — the local

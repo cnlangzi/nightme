@@ -479,6 +479,18 @@ func runFixRemote(
 			command.FailedOutcome("error", "the worktree could not be created")), nil
 	}
 
+	// The commit the branch was cut from — the worktree's HEAD
+	// right after the branch was created. /gtw fix records it in
+	// the state file so /gtw commit can tell "the work was already
+	// committed" from "there was nothing to commit", and so the
+	// post-work verdict can count the commits the agent made.
+	initialHead, err := headSHA(ctx, worktreePath, deps)
+	if err != nil {
+		slog.Default().Warn("gtw: could not read the branch's initial head",
+			"worktree", worktreePath,
+			"err", err)
+	}
+
 	// --- label the issue (post-WorktreeAdd; atomic with worktree) ---
 	// The label is the external coordination signal on the issue
 	// tracker: it tells other viewers (and concurrent /gtw fix
@@ -533,7 +545,7 @@ func runFixRemote(
 
 	// --- switch cwd + write context + render + dispatch ----------
 	return completeFixAndDispatch(ctx, cs, deps, chatID, messageID,
-		branch, worktreePath, owner+"/"+repo, repoRoot, string(providerKind), ModeRemote, issueID, issue, baseSHA, dispMode, sel)
+		branch, worktreePath, owner+"/"+repo, repoRoot, string(providerKind), ModeRemote, issueID, issue, baseSHA, dispMode, sel, initialHead)
 }
 
 // runFixLocal implements the F-XX local-mode flow:
@@ -646,11 +658,19 @@ func runFixLocal(
 			command.FailedOutcome("error", "the worktree could not be created")), nil
 	}
 
+	// The commit the branch was cut from — see runFixRemote.
+	initialHead, err := headSHA(ctx, worktreePath, deps)
+	if err != nil {
+		slog.Default().Warn("gtw: could not read the branch's initial head",
+			"worktree", worktreePath,
+			"err", err)
+	}
+
 	// F-XX: dispMode is unused for ModeLocal (local never
 	// dispatches and renders its own success card); pass
 	// DispatchAssess as a zero-equivalent placeholder.
 	return completeFixAndDispatch(ctx, cs, deps, chatID, messageID,
-		branch, worktreePath, "", repoRoot, "", ModeLocal, -1, nil, baseSHA, DispatchAssess, issueSelection{})
+		branch, worktreePath, "", repoRoot, "", ModeLocal, -1, nil, baseSHA, DispatchAssess, issueSelection{}, initialHead)
 }
 
 // completeFixAndDispatch handles the common tail of both modes:
@@ -672,6 +692,10 @@ func runFixLocal(
 //
 // sel says how the issue was chosen; the card says so and the
 // outcome records it.
+//
+// initialHead is the commit the branch was cut from — it goes into
+// the on-disk snapshot so /gtw commit can compare the local log
+// against it.
 func completeFixAndDispatch(
 	ctx context.Context,
 	cs *chatsession.ChatSession,
@@ -683,6 +707,7 @@ func completeFixAndDispatch(
 	baseSHA string,
 	dispMode IssueDispatchMode,
 	sel issueSelection,
+	initialHead string,
 ) (*Result, error) {
 	// --- switch cwd (§5.2.④) -------------------------------------
 	if err := cs.SetSelectedCwd(worktreePath); err != nil {
@@ -755,13 +780,14 @@ func completeFixAndDispatch(
 	// is the durable side effect and the user can manually finish
 	// or recover via /gtw close.
 	if err := WriteGTWYml(worktreePath, Context{
-		Mode:     mode,
-		Issue:    issueID,
-		Branch:   branch,
-		Worktree: worktreePath,
-		RepoRoot: repoRoot,
-		Repo:     repo,
-		Provider: provider,
+		Mode:        mode,
+		Issue:       issueID,
+		Branch:      branch,
+		Worktree:    worktreePath,
+		RepoRoot:    repoRoot,
+		Repo:        repo,
+		Provider:    provider,
+		InitialHead: initialHead,
 	}, deps.Now); err != nil && !errors.Is(err, ErrGtwYmlExists) {
 		slog.Default().Warn("gtw: WriteGTWYml failed",
 			"worktree", worktreePath,
@@ -797,12 +823,23 @@ func completeFixAndDispatch(
 	if sel.Auto {
 		fixData["selected_by"] = "auto"
 	}
-	result := replyOutcome(ctx, cs.Emitter(), chatID, messageID, card,
-		messages.Outcome{
-			Status:  messages.OutcomeOK,
-			Summary: fmt.Sprintf("the worktree for branch %s is ready", branch),
-			Data:    fixData,
-		})
+
+	// Local mode runs no agent turn, so there is no post-work
+	// verdict to report: the dispatch-time outcome stands.
+	if mode == ModeLocal {
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, card,
+			messages.Outcome{
+				Status:  messages.OutcomeOK,
+				Summary: fmt.Sprintf("the worktree for branch %s is ready", branch),
+				Data:    fixData,
+			}), nil
+	}
+
+	// Remote mode: the work is not done when the command returns —
+	// the coding agent still has to produce it. The card goes out
+	// now; the verdict comes when the agent's turn ends, so the
+	// settled outcome is the one the work produced.
+	result := reply(ctx, cs.Emitter(), chatID, messageID, card)
 
 	// --- dispatch issue to agent (ID mode only) -------------------
 	// We do this AFTER the reply so the user sees the success
@@ -812,6 +849,12 @@ func completeFixAndDispatch(
 	// re-running /gtw fix or by manually sending the issue
 	// reference to the agent.
 	if mode == ModeRemote && issue != nil {
+		// Take the share of the message's work BEFORE the dispatch:
+		// the dispatch queues the issue under this message's id
+		// and the queue takes its own share inside that call — a
+		// share taken later could arrive after the message
+		// already settled.
+		verdict := watchFixVerdict(ctx, cs, deps, messageID, worktreePath, branch, repoRoot, initialHead, fixData)
 		// Download attachments (best-effort) and assemble the
 		// dispatch blocks. Download failures log a warning
 		// and continue with text-only — the agent still gets
@@ -845,9 +888,7 @@ func completeFixAndDispatch(
 				Text:    fmt.Sprintf("⚠️ Could not dispatch issue #%d to agent: %v\nThe worktree is ready; you can /cwd into %s and tell the agent to fix #%d.", issue.ID, err, worktreePath, issue.ID),
 			})
 			// The worktree is ready but the agent never got the
-			// issue — half of what was asked happened. The
-			// severity merge keeps this `incomplete` over the
-			// `ok` the success card reported.
+			// issue — half of what was asked happened.
 			dispatchData := maps.Clone(fixData)
 			dispatchData["reason"] = "dispatch_failed"
 			reportOutcome(ctx, messages.Outcome{
@@ -855,6 +896,9 @@ func completeFixAndDispatch(
 				Summary: "the worktree is ready but the issue did not reach the agent",
 				Data:    dispatchData,
 			})
+			// No turn will run, so there is no work to judge:
+			// give the share of the message's work back.
+			verdict.release()
 		}
 	}
 	return result, nil

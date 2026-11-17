@@ -230,7 +230,8 @@ func writeYml(t *testing.T, dir string, c Context) {
 //
 // Repo + Provider are emitted when populated so /gtw pr tests
 // can exercise the yml-pinned resolveProvider path without
-// standing up a Detect fallback.
+// standing up a Detect fallback. InitialHead is emitted when
+// populated so /gtw commit can compare the local log against it.
 func buildTestYml(c Context) string {
 	var sb strings.Builder
 	sb.WriteString("worktree: " + c.Worktree + "\n")
@@ -244,6 +245,9 @@ func buildTestYml(c Context) string {
 	}
 	if c.Provider != "" {
 		sb.WriteString("provider: " + c.Provider + "\n")
+	}
+	if c.InitialHead != "" {
+		sb.WriteString("initialHead: " + c.InitialHead + "\n")
 	}
 	return sb.String()
 }

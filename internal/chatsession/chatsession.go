@@ -1026,7 +1026,7 @@ func (cs *ChatSession) emitMessageDropped(msg Message) {
 	})
 	// A dropped message never reaches an agent turn, so the
 	// prompt-end that would end its hold will never come. Settle it
-	// here: the hold is released, the settled message goes out, and
+	// here: every hold is released, the settled message goes out, and
 	// the work does not linger for the chat's lifetime.
 	if w := cs.workFor(msg.ID); w != nil {
 		w.Report(messages.Outcome{
@@ -1034,7 +1034,7 @@ func (cs *ChatSession) emitMessageDropped(msg Message) {
 			Summary: "message dropped before it reached the agent",
 			Data:    map[string]string{"reason": "dropped"},
 		})
-		w.Release()
+		w.ReleaseAll()
 	}
 }
 

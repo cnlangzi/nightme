@@ -612,11 +612,9 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 				slog.Default().Info("/review: empty diff, no agent spawn",
 					"agent", runnerName,
 					"workspace", workspace)
-				work.Report(messages.Outcome{
-					Status:  messages.OutcomeFailed,
-					Summary: "no diff to review",
-					Data:    map[string]string{"agent": runnerName, "reason": "no_diff"},
-				})
+				work.Report(command.FailedOutcomeData("no_diff", "no diff to review",
+					map[string]string{"agent": runnerName},
+					"there is no diff to review: the working tree is clean and the branch carries no change against the base"))
 			case errors.Is(err, agent.ErrBaseUnknown):
 				// The repository has an origin remote, but the base
 				// branch could neither be read nor repaired — so the
@@ -629,22 +627,20 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 					"workspace", workspace,
 					"err", err,
 				)
-				work.Report(messages.Outcome{
-					Status:  messages.OutcomeFailed,
-					Summary: "the base branch could not be determined",
-					Data:    map[string]string{"agent": runnerName, "reason": "base_unknown"},
-				})
+				work.Report(command.FailedOutcomeData("base_unknown",
+					"the base branch could not be determined",
+					map[string]string{"agent": runnerName},
+					"the base branch could neither be read nor repaired: the committed diff was not reviewed"))
 			case errors.Is(err, agent.ErrReviewNotSupported):
 				slog.Default().Warn("/review failed",
 					"agent", runnerName,
 					"err", err,
 				)
 				text = fmt.Sprintf("❌ agent %q does not support /review", runnerName)
-				work.Report(messages.Outcome{
-					Status:  messages.OutcomeFailed,
-					Summary: "the agent does not support /review",
-					Data:    map[string]string{"agent": runnerName, "reason": "not_supported"},
-				})
+				work.Report(command.FailedOutcomeData("not_supported",
+					"the agent does not support /review",
+					map[string]string{"agent": runnerName},
+					"the agent cannot review: "+err.Error()))
 			default:
 				slog.Default().Warn("/review failed",
 					"agent", runnerName,
@@ -655,11 +651,9 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 					msg = msg[:800] + "…(truncated)"
 				}
 				text = fmt.Sprintf("❌ /review failed (agent=%s):\n%s", runnerName, msg)
-				work.Report(messages.Outcome{
-					Status:  messages.OutcomeFailed,
-					Summary: err.Error(),
-					Data:    map[string]string{"agent": runnerName, "reason": "error"},
-				})
+				work.Report(command.FailedOutcomeData("error", err.Error(),
+					map[string]string{"agent": runnerName},
+					"the review failed: "+err.Error()))
 			}
 			if emitter == nil {
 				return
@@ -751,6 +745,20 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 		// A failed injection means no turn will run, so the hold
 		// is released right away instead of waiting for a turn
 		// that never comes.
+		//
+		// The verdict waits for that same turn: it is where the
+		// fixes the findings asked for land. Its watcher is set up
+		// BEFORE the injection so its subscriber runs before the
+		// queue's own — the bus calls its subscribers in
+		// registration order.
+		//
+		// The baseline is read HERE — right before the findings go
+		// out — so only the injected turn's effect is measured. A
+		// change the user made while the review ran is not credited
+		// to the review.
+		before := readBaseline(revCtx, workspace)
+		verdict := watchSelfVerdict(revCtx, cs, replyTo, workspace, runnerName,
+			before, countFindings(groupOutcomes))
 		injectWork := cs.HoldUntilPromptEnd(replyTo)
 		if err := sendBlocks(revCtx, blocks, agentsession.WithReplyTo(replyTo)); err != nil {
 			slog.Default().Warn("/review: AS inject failed",
@@ -765,6 +773,9 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 				Data:    map[string]string{"agent": runnerName, "reason": "inject_failed"},
 			})
 			injectWork.Release()
+			// No turn will run, so nothing was fixed: give the
+			// share of the message's work back.
+			verdict.release()
 		}
 	}()
 
@@ -964,11 +975,9 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 				"agent", runnerName,
 				"err", err,
 			)
-			work.Report(messages.Outcome{
-				Status:  messages.OutcomeFailed,
-				Summary: err.Error(),
-				Data:    map[string]string{"agent": runnerName, "reason": "error"},
-			})
+			work.Report(command.FailedOutcomeData("error", err.Error(),
+				map[string]string{"agent": runnerName},
+				"the continuation failed: "+err.Error()))
 			if emitter == nil {
 				return
 			}
@@ -1034,6 +1043,18 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 		// Same contract as a plain review: the injected turn is
 		// agent work of its own, so the message settles when that
 		// turn ends — and immediately when the injection fails.
+		//
+		// The verdict waits for that same turn, exactly as a plain
+		// review's does: the fixes the findings asked for land
+		// there.
+		//
+		// The baseline is read HERE — right before the findings go
+		// out — so only the injected turn's effect is measured. A
+		// change the user made while the review ran is not credited
+		// to the review.
+		before := readBaseline(revCtx, workspace)
+		verdict := watchSelfVerdict(revCtx, cs, replyTo, workspace, runnerName,
+			before, countFindings(groupOutcomes))
 		injectWork := cs.HoldUntilPromptEnd(replyTo)
 		if err := sendBlocks(revCtx, blocks, agentsession.WithReplyTo(replyTo)); err != nil {
 			slog.Default().Warn("/review --continue: AS inject failed",
@@ -1046,6 +1067,9 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 				Data:    map[string]string{"agent": runnerName, "reason": "inject_failed"},
 			})
 			injectWork.Release()
+			// No turn will run, so nothing was fixed: give the
+			// share of the message's work back.
+			verdict.release()
 		}
 	}()
 

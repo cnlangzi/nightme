@@ -183,6 +183,9 @@ func (r *fixRemoteRig) driveMode(t *testing.T, rawID string, auto bool) (*Result
 // timing of /gtw fix: the message the command answers settles when
 // the agent turn it dispatched ends, not when the command returns.
 // The work the command caused is the agent's work.
+//
+// The verdict the run sees is the one the work produced: the agent
+// left the worktree unchanged, so the outcome is an exception.
 func TestFixRemote_SettlesAfterTheDispatchedTurn(t *testing.T) {
 	rig := newFixRemoteRig(t)
 	rig.prov.SetIssue(42, &Issue{
@@ -203,17 +206,134 @@ func TestFixRemote_SettlesAfterTheDispatchedTurn(t *testing.T) {
 		t.Fatalf("the message settled before the dispatched turn ended: %+v", got)
 	}
 	// The dispatched turn ends: the message settles with the
-	// command's own verdict.
+	// verdict the work produced.
 	rig.cs.PromptEndBus.Publish(chatsession.PromptEndedEvent{
 		UserMsgID: "msg-fix",
 		Reason:    agent.PromptEndClean,
 	})
-	got := rig.rec.settled()
+	got := waitSettled(rig.rec)
+	if got == nil {
+		t.Fatal("the message did not settle when the dispatched turn ended")
+	}
+	if got.Status != messages.OutcomeFailed {
+		t.Errorf("settled status = %q, want failed — the agent produced nothing", got.Status)
+	}
+	if got.Data["reason"] != "no_changes" {
+		t.Errorf("settled reason = %q, want no_changes", got.Data["reason"])
+	}
+	if got.Data["error"] == "" {
+		t.Error("the exception must say what broke")
+	}
+}
+
+// TestFixRemote_SettlesWithTheWorkTheAgentProduced covers the other
+// side of the verdict: the agent left a file in the worktree, so the
+// outcome the run sees is the normal result.
+func TestFixRemote_SettlesWithTheWorkTheAgentProduced(t *testing.T) {
+	rig := newFixRemoteRig(t)
+	rig.prov.SetIssue(42, &Issue{
+		ID:    42,
+		Title: "feat: the dispatched one",
+		State: "open",
+	})
+
+	work := rig.cs.Hold("msg-fix")
+	ctx := chatsession.WithWork(context.Background(), work)
+	if _, err := RunFix(ctx, ModeRemote, rig.cs, rig.deps, rig.cs.ChatID,
+		"msg-fix", []string{"42"}, false, false); err != nil {
+		t.Fatalf("RunFix: %v", err)
+	}
+	work.Release()
+
+	// The agent's work: a file in the worktree.
+	worktree := rig.cs.SelectedCwd()
+	if err := os.WriteFile(filepath.Join(worktree, "fix.go"), []byte("package x\n"), 0o644); err != nil {
+		t.Fatalf("write the agent's file: %v", err)
+	}
+
+	rig.cs.PromptEndBus.Publish(chatsession.PromptEndedEvent{
+		UserMsgID: "msg-fix",
+		Reason:    agent.PromptEndClean,
+	})
+	got := waitSettled(rig.rec)
 	if got == nil {
 		t.Fatal("the message did not settle when the dispatched turn ended")
 	}
 	if got.Status != messages.OutcomeOK {
-		t.Errorf("settled status = %q, want ok", got.Status)
+		t.Errorf("settled status = %q, want ok — the agent produced a file (outcome %+v)", got.Status, got)
+	}
+	if got.Data["changes"] != "1" {
+		t.Errorf("settled changes = %q, want 1", got.Data["changes"])
+	}
+	if _, ok := got.Data["error"]; ok {
+		t.Errorf("a normal result carries no error description: %v", got.Data)
+	}
+}
+
+// TestFixRemote_StoppedTurnKeepsTheFacts covers the turn that did
+// not end cleanly: the prompt-end's own verdict stands (the turn was
+// cancelled), but the facts the fix produced still have to reach the
+// program.
+func TestFixRemote_StoppedTurnKeepsTheFacts(t *testing.T) {
+	rig := newFixRemoteRig(t)
+	rig.prov.SetIssue(42, &Issue{
+		ID:    42,
+		Title: "feat: the dispatched one",
+		State: "open",
+	})
+
+	work := rig.cs.Hold("msg-fix")
+	ctx := chatsession.WithWork(context.Background(), work)
+	if _, err := RunFix(ctx, ModeRemote, rig.cs, rig.deps, rig.cs.ChatID,
+		"msg-fix", []string{"42"}, false, false); err != nil {
+		t.Fatalf("RunFix: %v", err)
+	}
+	work.Release()
+
+	// The turn is stopped by the user.
+	rig.cs.PromptEndBus.Publish(chatsession.PromptEndedEvent{
+		UserMsgID: "msg-fix",
+		Reason:    agent.PromptEndUserStopped,
+	})
+	got := waitSettled(rig.rec)
+	if got == nil {
+		t.Fatal("the message did not settle when the dispatched turn ended")
+	}
+	if got.Status != messages.OutcomeCancelled {
+		t.Errorf("settled status = %q, want cancelled", got.Status)
+	}
+	if got.Data["branch"] == "" || got.Data["worktree"] == "" {
+		t.Errorf("settled data = %v, want the facts the fix produced", got.Data)
+	}
+}
+
+// TestFixRemote_RecordsTheInitialHead covers the state file: it
+// carries the commit the branch was cut from, so /gtw commit can
+// compare the local log against it.
+func TestFixRemote_RecordsTheInitialHead(t *testing.T) {
+	rig := newFixRemoteRig(t)
+	base, _ := mustGitOut(t, rig.repoRoot, "rev-parse", "HEAD")
+	base = strings.TrimSpace(base)
+	rig.prov.SetIssue(42, &Issue{
+		ID:    42,
+		Title: "feat: the dispatched one",
+		State: "open",
+	})
+
+	work := rig.cs.Hold("msg-fix")
+	ctx := chatsession.WithWork(context.Background(), work)
+	if _, err := RunFix(ctx, ModeRemote, rig.cs, rig.deps, rig.cs.ChatID,
+		"msg-fix", []string{"42"}, false, false); err != nil {
+		t.Fatalf("RunFix: %v", err)
+	}
+	work.Release()
+
+	c, err := ReadGTWYml(rig.cs.SelectedCwd())
+	if err != nil {
+		t.Fatalf("ReadGTWYml: %v", err)
+	}
+	if c.InitialHead != base {
+		t.Errorf("initial head = %q, want the base commit %q", c.InitialHead, base)
 	}
 }
 
@@ -990,4 +1110,16 @@ func TestFixRemote_WithAttachments_EndToEnd(t *testing.T) {
 	if !strings.Contains(last, "Fix #100") {
 		t.Errorf("success reply missing issue header:\n%s", last)
 	}
+}
+
+// waitSettled waits for the settled message the recorder captured.
+func waitSettled(r *fixRemoteRecCh) *messages.Outcome {
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := r.settled(); got != nil {
+			return got
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return nil
 }

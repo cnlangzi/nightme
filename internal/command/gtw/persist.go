@@ -30,28 +30,32 @@ import (
 // provider on demand or be promoted to Context fields at that
 // time.
 type gtwYmlDoc struct {
-	Mode      string    `yaml:"mode"`
-	Issue     int       `yaml:"issue"`
-	Branch    string    `yaml:"branch"`
-	Worktree  string    `yaml:"worktree"`
-	RepoRoot  string    `yaml:"repoRoot"`
-	Repo      string    `yaml:"repo"`
-	Provider  string    `yaml:"provider"`
-	CreatedAt time.Time `yaml:"createdAt"`
+	Mode     string `yaml:"mode"`
+	Issue    int    `yaml:"issue"`
+	Branch   string `yaml:"branch"`
+	Worktree string `yaml:"worktree"`
+	RepoRoot string `yaml:"repoRoot"`
+	Repo     string `yaml:"repo"`
+	Provider string `yaml:"provider"`
+	// InitialHead is the commit the fix branch was cut from —
+	// see Context.InitialHead.
+	InitialHead string    `yaml:"initialHead"`
+	CreatedAt   time.Time `yaml:"createdAt"`
 }
 
 // toYmlDoc projects a Context into the on-disk shape. We don't
 // store State / UpdatedAt on disk — see gtwYmlDoc's doc comment.
 func (c Context) toYmlDoc(createdAt time.Time) gtwYmlDoc {
 	return gtwYmlDoc{
-		Mode:      string(c.Mode),
-		Issue:     c.Issue,
-		Branch:    c.Branch,
-		Worktree:  c.Worktree,
-		RepoRoot:  c.RepoRoot,
-		Repo:      c.Repo,
-		Provider:  c.Provider,
-		CreatedAt: createdAt,
+		Mode:        string(c.Mode),
+		Issue:       c.Issue,
+		Branch:      c.Branch,
+		Worktree:    c.Worktree,
+		RepoRoot:    c.RepoRoot,
+		Repo:        c.Repo,
+		Provider:    c.Provider,
+		InitialHead: c.InitialHead,
+		CreatedAt:   createdAt,
 	}
 }
 
@@ -62,15 +66,16 @@ func (c Context) toYmlDoc(createdAt time.Time) gtwYmlDoc {
 // fires a fresh timestamp.
 func (d gtwYmlDoc) toContext() Context {
 	return Context{
-		Mode:      Mode(d.Mode),
-		Issue:     d.Issue,
-		Branch:    d.Branch,
-		Worktree:  d.Worktree,
-		RepoRoot:  d.RepoRoot,
-		Repo:      d.Repo,
-		Provider:  d.Provider,
-		State:     StateFixing,
-		UpdatedAt: d.CreatedAt,
+		Mode:        Mode(d.Mode),
+		Issue:       d.Issue,
+		Branch:      d.Branch,
+		Worktree:    d.Worktree,
+		RepoRoot:    d.RepoRoot,
+		Repo:        d.Repo,
+		Provider:    d.Provider,
+		InitialHead: d.InitialHead,
+		State:       StateFixing,
+		UpdatedAt:   d.CreatedAt,
 	}
 }
 

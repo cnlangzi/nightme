@@ -398,3 +398,37 @@ func TestReportPromptEnd_FailedEndOverwritesAVerdict(t *testing.T) {
 		t.Errorf("settled status = %s, want failed", got[0].Outcome.Status)
 	}
 }
+
+// TestDropQueue_ReleasesEveryHold checks that a dropped message
+// settles even when more than one participant holds its work.
+//
+// The message is dead — it never reached an agent turn — so no
+// prompt-end will come to release the other shares. Every share goes
+// back now, or the message would never settle at all.
+func TestDropQueue_ReleasesEveryHold(t *testing.T) {
+	cs, em := newSettleSession(t)
+
+	if err := cs.QueueUserMessage(Message{ID: "m1", ChatID: cs.ID}); err != nil {
+		t.Fatalf("QueueUserMessage: %v", err)
+	}
+	// A second participant holds the same message — a command that
+	// judges its outcome when the turn ends.
+	cs.Hold("m1")
+
+	cs.DropQueue()
+
+	got := em.settled()
+	if len(got) != 1 {
+		t.Fatalf("settled emitted %d times, want 1", len(got))
+	}
+	if got[0].Outcome == nil || got[0].Outcome.Status != messages.OutcomeCancelled {
+		t.Errorf("settled outcome = %+v, want cancelled", got[0].Outcome)
+	}
+
+	cs.workMu.Lock()
+	pending := len(cs.works)
+	cs.workMu.Unlock()
+	if pending != 0 {
+		t.Errorf("pending works = %d, want 0 — the dropped message left a hold behind", pending)
+	}
+}

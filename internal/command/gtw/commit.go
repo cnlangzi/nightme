@@ -2,6 +2,7 @@ package gtw
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -97,15 +98,13 @@ func dispatchCommit(
 
 	// 2. Nothing to commit. A commit runs because the worktree
 	// carries changes; a clean worktree means the premise does not
-	// hold, so the command reports a failure and the caller decides
-	// what to do. Distinct message from push's "nothing to push" so
-	// the user sees which axis they're short on.
+	// hold. The work may still have been done — by the coding
+	// agent, before this command ran — so the local log is the
+	// second check. Distinct message from push's "nothing to push"
+	// so the user sees which axis they're short on.
 	if snap.WorkingTreeIsClean() {
-		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-			"❌ nothing to commit\n"+
-				"  no uncommitted changes on "+snap.Branch,
-			command.FailedOutcomeData("nothing_to_commit", "the worktree has nothing to commit",
-				map[string]string{"branch": snap.Branch})), nil
+		card, out := commitFallback(ctx, c, snap.Branch, deps)
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, card, out), nil
 	}
 
 	// 3. headBefore is required by verifyAgentCommitted's
@@ -214,6 +213,100 @@ func dispatchCommit(
 // buildAgentPrompt(c) as the prompt and c.Worktree as the workspace.
 // The returned RunResult is forwarded to replyAgent on the
 // success path so the footer (agentbar / usagebar) renders.
+
+// commitFallback judges a worktree that has nothing to commit.
+//
+// The primary signal says "nothing happened", but the work may in
+// fact have been done — by the coding agent, before this command
+// ran. The local log is the second check: the commits between the
+// branch's baseline and the current head are the ones the work
+// produced.
+//
+// A branch ahead of its baseline is a normal branch: the work was
+// committed before, so there was nothing to commit. A branch that is
+// not ahead is an exception: there is genuinely nothing to commit.
+func commitFallback(ctx context.Context, c Context, branch string, deps HandlerDeps) (string, messages.Outcome) {
+	base, err := commitBaseline(ctx, c, deps)
+	if err != nil {
+		return commitNothingToCommitCard(branch),
+			command.FailedOutcomeData("nothing_to_commit", "the worktree has nothing to commit",
+				map[string]string{"branch": branch},
+				"the worktree has no changes and its baseline could not be determined: "+err.Error())
+	}
+	commits, err := agentCommits(ctx, c.Worktree, base, deps)
+	if err != nil {
+		return commitNothingToCommitCard(branch),
+			command.FailedOutcomeData("nothing_to_commit", "the worktree has nothing to commit",
+				map[string]string{"branch": branch},
+				"the worktree has no changes and the local log could not be read: "+err.Error())
+	}
+	if len(commits) == 0 {
+		return commitNothingToCommitCard(branch),
+			command.FailedOutcomeData("nothing_to_commit", "the worktree has nothing to commit",
+				map[string]string{"branch": branch},
+				"the worktree has no changes and the branch carries no commit since "+base)
+	}
+	// The work was committed before this command ran: a normal
+	// branch — there was nothing to do, and nothing broke.
+	card := "✅ nothing to commit — the work was already committed\n" +
+		"  " + strings.Join(commits, "\n  ")
+	return card, command.BranchOutcome("nothing_to_commit",
+		fmt.Sprintf("the work was already committed (%d commit(s))", len(commits)),
+		map[string]string{
+			"branch":     branch,
+			"commits":    fmt.Sprintf("%d", len(commits)),
+			"commit_log": strings.Join(commits, "\n"),
+			"sha_range":  base + "..HEAD",
+		})
+}
+
+// commitNothingToCommitCard is the card of a worktree that carries
+// nothing to commit and no commit the branch did not have before.
+func commitNothingToCommitCard(branch string) string {
+	return "❌ nothing to commit\n" +
+		"  no uncommitted changes on " + branch
+}
+
+// commitBaseline is the commit the local log is compared against:
+// the branch's initial head — the commit the fix branch was cut
+// from — or, when the state file does not carry it, the local
+// default branch.
+//
+// The default branch is only an approximation: it moves. The
+// initial head is exact, so it wins whenever it is known.
+func commitBaseline(ctx context.Context, c Context, deps HandlerDeps) (string, error) {
+	if c.InitialHead != "" {
+		return c.InitialHead, nil
+	}
+	name, err := DefaultBranch(ctx, c.RepoRoot, deps.Git)
+	if err != nil {
+		return "", err
+	}
+	if name == "" {
+		return "", errors.New("the default branch could not be determined")
+	}
+	// The name is resolved to a commit: the local repository does
+	// not necessarily have a branch by that name, and a rev range
+	// over a name that resolves to nothing is an error, not an
+	// empty range.
+	return resolveCommit(ctx, c.RepoRoot, name, deps)
+}
+
+// resolveCommit resolves a revision to a commit sha, falling back to
+// the remote-tracking ref when the local repository has no branch by
+// that name.
+func resolveCommit(ctx context.Context, dir, name string, deps HandlerDeps) (string, error) {
+	for _, rev := range []string{name, "origin/" + name} {
+		out, _, err := deps.Git.Run(ctx, dir, "rev-parse", "--verify", rev+"^{commit}")
+		if err != nil {
+			continue
+		}
+		if sha := strings.TrimSpace(out); sha != "" {
+			return sha, nil
+		}
+	}
+	return "", fmt.Errorf("the default branch %q could not be resolved to a commit", name)
+}
 
 // verifyAgentCommitted is the post-agent sanity check that runs
 // in dispatchCommit. Per F-56 §4.1, it ONLY validates the

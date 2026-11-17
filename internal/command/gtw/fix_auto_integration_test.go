@@ -224,4 +224,9 @@ func TestFixAuto_NoCandidate_OutcomeCarriesWakeUp(t *testing.T) {
 			t.Errorf("outcome Data[%q] = %q, want %q", k, settled.Data[k], v)
 		}
 	}
+	// The queue was empty — nothing broke, so the outcome carries no
+	// error description.
+	if desc, ok := settled.Data["error"]; ok {
+		t.Errorf("an empty queue is a normal branch: it carries no error description, got %q", desc)
+	}
 }

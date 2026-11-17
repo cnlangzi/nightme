@@ -180,8 +180,12 @@ func TestGtwOutcome_Push(t *testing.T) {
 	})
 
 	t.Run("nothing to push", func(t *testing.T) {
+		// The branch carries no commit the remote does not have and
+		// the remote's tip is the local head: there is nothing to
+		// push — a normal branch.
 		git := newPushGit()
 		git.onArgs(statusCmd, "## wt-clean...origin/wt-clean\n", "", nil)
+		git.onArgs([]string{"rev-list", "--count", "origin/wt-clean..HEAD"}, "0\n", "", nil)
 
 		withCwd(t, t.TempDir())
 		writeYml(t, mustPwd(t), Context{
@@ -195,10 +199,12 @@ func TestGtwOutcome_Push(t *testing.T) {
 		if _, err := dispatchPush(p.ctx, p.cs, HandlerDeps{Git: git}, "chat", "msg", pushArgs{}); err != nil {
 			t.Fatalf("dispatchPush: %v", err)
 		}
-		assertOutcome(t, p.settle(t), messages.OutcomeFailed, map[string]string{
+		got := p.settle(t)
+		assertOutcome(t, got, messages.OutcomeFailed, map[string]string{
 			"reason": "nothing_to_push",
 			"branch": "wt-clean",
 		})
+		assertNoError(t, got)
 	})
 
 	t.Run("pushed", func(t *testing.T) {
@@ -231,17 +237,20 @@ func TestGtwOutcome_Push(t *testing.T) {
 		if _, err := dispatchPush(p.ctx, p.cs, HandlerDeps{Git: git}, "chat", "msg", pushArgs{}); err != nil {
 			t.Fatalf("dispatchPush: %v", err)
 		}
-		assertOutcome(t, p.settle(t), messages.OutcomeOK, map[string]string{
+		got := p.settle(t)
+		assertOutcome(t, got, messages.OutcomeOK, map[string]string{
 			"branch":      "wt-pushed",
 			"commits":     "2",
 			"remote_head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 		})
+		assertNoError(t, got)
 	})
 
 	t.Run("pushed nothing", func(t *testing.T) {
 		// The branch was ahead of the remote, so the push ran — but
-		// the range it landed lists no commit. A push that pushed
-		// nothing did not do what it was asked to do.
+		// the range it landed lists no commit, and the remote's tip
+		// is not the local head: the local still carries commits the
+		// remote does not have. An exception.
 		git := newPushGit()
 		git.onArgs(statusCmd, "## wt-pushed...origin/wt-pushed [ahead 2]\n", "", nil)
 		git.onArgsSeq([]string{"rev-parse", "--verify", "origin/wt-pushed"},
@@ -255,6 +264,8 @@ func TestGtwOutcome_Push(t *testing.T) {
 		git.on("push", "To origin", "", nil)
 		git.onArgs([]string{"log", "--oneline", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa..origin/wt-pushed"},
 			"", "", nil)
+		git.onArgs([]string{"rev-list", "--count", "origin/wt-pushed..HEAD"},
+			"2\n", "", nil)
 
 		withCwd(t, t.TempDir())
 		writeYml(t, mustPwd(t), Context{
@@ -274,6 +285,7 @@ func TestGtwOutcome_Push(t *testing.T) {
 			"reason": "nothing_to_push",
 			"branch": "wt-pushed",
 		})
+		assertError(t, got)
 		if !strings.Contains(card, "nothing to push") {
 			t.Errorf("the card must read like the status:\n%s", card)
 		}
@@ -298,10 +310,12 @@ func TestGtwOutcome_CommitNothingToDo(t *testing.T) {
 	if _, err := dispatchCommit(p.ctx, p.cs, HandlerDeps{Git: git}, "chat", "msg", commitArgs{}, Config{}); err != nil {
 		t.Fatalf("dispatchCommit: %v", err)
 	}
-	assertOutcome(t, p.settle(t), messages.OutcomeFailed, map[string]string{
+	got := p.settle(t)
+	assertOutcome(t, got, messages.OutcomeFailed, map[string]string{
 		"reason": "nothing_to_commit",
 		"branch": "wt-clean",
 	})
+	assertError(t, got)
 }
 
 // TestGtwOutcome_SyncUpToDate covers /gtw sync on a branch that was

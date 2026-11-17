@@ -289,10 +289,14 @@ func renderAutoNoCandidate(sel *autoSelection, labelNote string) string {
 }
 
 // autoNoCandidateOutcome is the outcome of a queue with nothing
-// eligible: a failure (the command was asked to fix an issue and
-// could not) carrying the counters and the wake-up hint.
+// eligible: a normal branch — the command was asked to fix an issue
+// and there was none to fix — carrying the counters and the wake-up
+// hint.
+//
+// No error description rides along: nothing broke, the queue was
+// simply empty.
 func autoNoCandidateOutcome(sel *autoSelection) messages.Outcome {
-	return command.FailedOutcomeData("no_candidate", "no assigned issue was eligible",
+	return command.BranchOutcome("no_candidate", "no assigned issue was eligible",
 		map[string]string{
 			"wake_after":    autoWakeAfter,
 			"candidates":    strconv.Itoa(sel.Counters.Candidates),

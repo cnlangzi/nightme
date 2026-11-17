@@ -377,6 +377,8 @@ var reasonHints = map[string]string{
 	"not_committed":         "the agent finished, but nothing was committed.",
 	"nothing_to_commit":     "the working tree carries no changes: there was nothing to commit.",
 	"nothing_to_push":       "the branch carries no commit the remote does not have: there was nothing to push.",
+	"no_changes":            "the agent's turn ended without leaving a single change in the worktree.",
+	"not_fixed":             "the review found problems, and none of them were fixed.",
 	"conflict":              "the working tree has unresolved conflicts.",
 	"dirty":                 "the working tree has changes that were not committed.",
 	"detached":              "HEAD is detached: the branch has to be checked out first.",

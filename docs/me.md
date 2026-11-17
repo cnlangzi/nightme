@@ -69,9 +69,15 @@ type Outcome struct {
 | `topic` | `/gtw plan` 的主题 |
 | `sha_range` | commit 区间（`<before>..HEAD`） |
 | `commits` | commit 条数（`/gtw commit` 与 `/gtw push` 给出确切条数；`/gtw sync` 的卡片只列前 10 条，所以它不给这个键） |
+| `commit_log` | commit 列表（每行一条 `<sha> <subject>`）——`/gtw commit` 报告"工作早就提交过了"时给出 |
+| `changes` | `/gtw fix` 判完后，agent 留下的改动总数 |
+| `staged` | 其中已经进了 index 的 |
+| `unstaged` | 其中改了但没进 index 的 |
+| `untracked` | 其中 git 没跟踪的 |
 | `remote_head` | push 之后 `origin/<branch>` 指向的 sha（读不到时这个键不出现） |
 | `pr_number` / `pr_url` | PR 的编号 / 链接 |
 | `groups` | review 跑了几组（`/review`） |
+| `findings` | review 收集到的 findings 条数（`/review`） |
 | `resumed_groups` | 续跑恢复了几组（`/review --continue` 只跑没完成的那几组） |
 | `unfinished_groups` | 其中没跑完的组数 |
 | `subcommand` | 被 `/gtw abort` 取消的子命令 |
@@ -243,49 +249,57 @@ chatsession: message settled chat_id=… message_id=… status=… summary=…
 
 `reason` 是稳定的分类码，程序按它分支，不解析卡片文本。各命令用到的码：
 
-| 码 | 含义 | 出现在 |
-| --- | --- | --- |
-| `usage` | 命令行不合法（未知 flag / 参数缺失 / 位置参数不对） | 全部 |
-| `no_cwd` | 命令需要工作区，但没有 | 全部 |
-| `wrong_cwd` | `/gtw back <branch>` 要求当前在主仓库根目录 | `/gtw back` |
-| `not_found` | 没有 worktree 分支匹配这个前缀（或 worktree 目录没了） | `/gtw back` |
-| `ambiguous` | 前缀匹配到多个 worktree 分支，无法确定 | `/gtw back` |
-| `no_session` | 没有聊天会话 | `/stop` |
-| `no_agent` | 没有选中的 agent | `/use` / `/review` / `/stop` |
-| `unknown_agent` | agent 名没注册 | `/review` |
-| `not_a_repo` | 工作区不在 git 仓库里 | `/gtw` |
-| `no_remote` | 仓库没有 `origin` remote | `/gtw fix` |
-| `provider_error` | git 平台解析 / 连接失败 | `/gtw fix` / `/gtw new` / `/gtw pr` |
-| `invalid_issue` / `invalid_branch` | issue 号 / 分支名不合法 | `/gtw fix` |
-| `issue_not_found` / `issue_claimed` | issue 不存在 / 已被别的 fix 占用 | `/gtw fix` |
-| `no_candidate` | `/gtw fix *` 的队列里没有可选项（`Data` 带 `wake_after`） | `/gtw fix` |
-| `branch_exists` | 分支已经存在 | `/gtw fix` |
-| `already_active` | 当前目录已经在一个 `/gtw fix` 里 | `/gtw fix` |
-| `label_error` | issue 标签没能加上 / 摘掉 | `/gtw fix` / `/gtw close` |
-| `bad_state` | `.nightme/gtw.yml` 缺失 / 损坏 / 读不了 | `/gtw close` / `/gtw back` |
-| `no_active_fix` | 这个聊天没有正在进行的 fix | `/gtw close` / `/gtw back` |
-| `dirty` | 工作区有未提交的改动 | `/gtw push` / `/gtw close` |
-| `detached` | HEAD 是游离的 | `/gtw push` / `/gtw commit` / `/gtw pr` |
-| `conflict` | 有未解决的冲突 | `/gtw commit` |
-| `nothing_to_commit` | 工作区没有改动，没有东西可提交 | `/gtw commit` |
-| `nothing_to_push` | 分支没有远端没有的 commit，没有东西可推送 | `/gtw push` |
-| `rejected` | push 被拒绝 | `/gtw push` |
-| `not_committed` | agent 跑完了但没有真的提交 | `/gtw commit` |
-| `agent_error` | agent 没跑成 / 输出不可用 | `/gtw commit` / `/gtw pr` |
-| `no_remote_branch` | 分支还没发布到 origin | `/gtw pr` |
-| `no_commits` | 分支和 base 之间没有 commit | `/gtw pr` |
-| `pr_exists` | 这个分支已经有 PR 了 | `/gtw pr` |
-| `no_drafts` / `invalid_draft` | 没有草稿 / 草稿不可用 | `/gtw new -y` |
-| `config_write_failed` | 全局 review agent 没能持久化 | `/review -g` |
-| `no_review` / `already_running` | 没有可续的 review / 已有 review 在跑 | `/review -c` |
-| `not_supported` | agent 不支持这个动作 | `/stop` |
-| `aborted` | 被 `/gtw abort` 取消 | `/gtw` |
-| `dispatch_failed` | worktree 建好了，但 issue 没送到 agent | `/gtw fix` |
-| `sync_failed` | 主体动作完成，随后的 sync 失败 | `/gtw close` / `/gtw back` |
-| `workspace_unreachable` | 工作区目录没了，只清了悬空状态 | `/gtw close` |
-| `cwd_not_changed` / `cwd_not_restored` | 工作区切了但没切成 | `/gtw close` / `/gtw back` |
-| `unknown_subcommand` | `/gtw` 的子命令不存在 | `/gtw` |
-| `error` | 其它失败 | 全部 |
+最后一列是这条 outcome 属于哪一类：**正常分支**表示"请求有效，只是没东西可做"（`Data` 里没有 `error`），**异常**表示"东西坏了"（`Data` 里带 `error`）。同一件事在不同命令里可能是不同的类——只有命令自己知道"没发生"是"没东西可做"还是"活已经干完了"。
+
+| 码 | 含义 | 出现在 | 分类 |
+| --- | --- | --- | --- |
+| `usage` | 命令行不合法（未知 flag / 参数缺失 / 位置参数不对） | 全部 | 异常 |
+| `no_cwd` | 命令需要工作区，但没有 | 全部 | 异常 |
+| `wrong_cwd` | `/gtw back <branch>` 要求当前在主仓库根目录 | `/gtw back` | 异常 |
+| `not_found` | 没有 worktree 分支匹配这个前缀（或 worktree 目录没了） | `/gtw back` | 异常 |
+| `ambiguous` | 前缀匹配到多个 worktree 分支，无法确定 | `/gtw back` | 异常 |
+| `no_session` | 没有聊天会话 | `/stop` | 异常 |
+| `no_agent` | 没有选中的 agent | `/use` / `/review` / `/stop` | 异常 |
+| `unknown_agent` | agent 名没注册 | `/review` | 异常 |
+| `not_a_repo` | 工作区不在 git 仓库里 | `/gtw` | 异常 |
+| `no_remote` | 仓库没有 `origin` remote | `/gtw fix` | 异常 |
+| `provider_error` | git 平台解析 / 连接失败 | `/gtw fix` / `/gtw new` / `/gtw pr` | 异常 |
+| `invalid_issue` / `invalid_branch` | issue 号 / 分支名不合法 | `/gtw fix` | 异常 |
+| `issue_not_found` / `issue_claimed` | issue 不存在 / 已被别的 fix 占用 | `/gtw fix` | 异常 |
+| `no_candidate` | `/gtw fix *` 的队列里没有可选项（`Data` 带 `wake_after`） | `/gtw fix` | 正常分支 |
+| `branch_exists` | 分支已经存在 | `/gtw fix` | 异常 |
+| `already_active` | 当前目录已经在一个 `/gtw fix` 里 | `/gtw fix` | 异常 |
+| `no_changes` | agent 的回合结束了，但工作区一个改动都没留下 | `/gtw fix` | 异常 |
+| `label_error` | issue 标签没能加上 / 摘掉 | `/gtw fix` / `/gtw close` | 异常 |
+| `bad_state` | `.nightme/gtw.yml` 缺失 / 损坏 / 读不了 | `/gtw close` / `/gtw back` | 异常 |
+| `no_active_fix` | 这个聊天没有正在进行的 fix | `/gtw close` / `/gtw back` | 异常 |
+| `dirty` | 工作区有未提交的改动 | `/gtw push` / `/gtw close` | 异常 |
+| `detached` | HEAD 是游离的 | `/gtw push` / `/gtw commit` / `/gtw pr` | 异常 |
+| `conflict` | 有未解决的冲突 | `/gtw commit` | 异常 |
+| `nothing_to_commit` | 工作区没有改动，没有东西可提交 | `/gtw commit` | 两者 † |
+| `nothing_to_push` | 分支没有远端没有的 commit，没有东西可推送 | `/gtw push` | 两者 † |
+| `rejected` | push 被拒绝 | `/gtw push` | 异常 |
+| `not_committed` | agent 跑完了但没有真的提交 | `/gtw commit` | 异常 |
+| `agent_error` | agent 没跑成 / 输出不可用 | `/gtw commit` / `/gtw pr` | 异常 |
+| `no_remote_branch` | 分支还没发布到 origin | `/gtw pr` | 异常 |
+| `no_commits` | 分支和 base 之间没有 commit | `/gtw pr` | 异常 |
+| `pr_exists` | 这个分支已经有 PR 了 | `/gtw pr` | 正常分支 |
+| `no_drafts` / `invalid_draft` | 没有草稿 / 草稿不可用 | `/gtw new -y` | 异常 |
+| `config_write_failed` | 全局 review agent 没能持久化 | `/review -g` | 异常 |
+| `no_review` / `already_running` | 没有可续的 review / 已有 review 在跑 | `/review -c` | 异常 |
+| `not_supported` | agent 不支持这个动作 | `/stop` / `/review` | 异常 |
+| `no_diff` | 没有可 review 的 diff | `/review` | 异常 |
+| `base_unknown` | base 分支既读不出来也修不好，committed diff 没有被 review | `/review` | 异常 |
+| `not_fixed` | review 找到了 findings，但它们一个都没被改 | `/review` | 异常 |
+| `aborted` | 被 `/gtw abort` 取消 | `/gtw` | 异常 |
+| `dispatch_failed` | worktree 建好了，但 issue 没送到 agent | `/gtw fix` | 异常 |
+| `sync_failed` | 主体动作完成，随后的 sync 失败 | `/gtw close` / `/gtw back` | 异常 |
+| `workspace_unreachable` | 工作区目录没了，只清了悬空状态 | `/gtw close` | 异常 |
+| `cwd_not_changed` / `cwd_not_restored` | 工作区切了但没切成 | `/gtw close` / `/gtw back` | 异常 |
+| `unknown_subcommand` | `/gtw` 的子命令不存在 | `/gtw` | 异常 |
+| `error` | 其它失败 | 全部 | 异常 |
+
+† `nothing_to_commit` 与 `nothing_to_push` 两个码都可能落在任一类：命令先看主信号（工作区没改动 / 没有 commit 被推上去），主信号说"什么都没发生"时再查一次（本地日志相对初始 head 的差异 / 本地 head 与远端 tip 的对比）。查到"活其实早就干完了"就是正常分支（没有 `error`），查到"确实还有东西没做"就是异常（带 `error`）。程序读 `Data["error"]` 在不在就知道是哪一类。
 
 ---
 

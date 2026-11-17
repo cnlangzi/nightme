@@ -82,7 +82,7 @@ type Outcome struct {
 | `resumed_groups` | 续跑恢复了几组（`/review --continue` 只跑没完成的那几组） |
 | `unfinished_groups` | 其中没跑完的组数 |
 | `subcommand` | 被 `/gtw abort` 取消的子命令 |
-| `elapsed` | 被取消的子命令已经跑了多久 |
+| `elapsed` | 被取消的子命令（`/gtw abort`）或 review（`/review --abort`）已经跑了多久 |
 | `repo` | 仓库（`owner/repo`） |
 | `issues` | `/gtw new -y` 开出来的 issue 编号（逗号分隔） |
 | `kept` | 还没开成 issue 的草稿数 |
@@ -107,7 +107,7 @@ type Outcome struct {
 | `noop` | 没有可做的事——请求有效，但世界已经满足它（查询类命令：`/gtw config` 读设置、`/gtw abort` 没有命令在跑） |
 | `incomplete` | 做了一部分，剩下的没做完 |
 | `failed` | 没做完。**命令是因为有东西要做才跑的**：提交没有东西可提交、推送没有东西可推送、review 没有 diff 可看、队列里没有可挑的 issue——这些都报 `failed`，让程序和 workflow 知道前提不成立，而不是让它以为一切正常 |
-| `cancelled` | 被用户或操作者中止（`/stop` 停掉的回合、`/gtw abort` 取消的命令） |
+| `cancelled` | 被用户或操作者中止（`/stop` 停掉的回合、`/gtw abort` 取消的命令、`/review --abort` 取消的 review） |
 | `timeout` | 跑超时了（**保留**，当前没有命令产出它） |
 | `unknown` | 没有任何一方上报过结论 |
 
@@ -292,7 +292,7 @@ chatsession: message settled chat_id=… message_id=… status=… summary=…
 | `no_diff` | 没有可 review 的 diff | `/review` | 异常 |
 | `base_unknown` | base 分支既读不出来也修不好，committed diff 没有被 review | `/review` | 异常 |
 | `not_fixed` | review 找到了 findings，但它们一个都没被改 | `/review` | 异常 |
-| `aborted` | 被 `/gtw abort` 取消 | `/gtw` | 异常 |
+| `aborted` | 被 `/gtw abort` / `/review --abort` 取消 | `/gtw` / `/review` | 异常 |
 | `dispatch_failed` | worktree 建好了，但 issue 没送到 agent | `/gtw fix` | 异常 |
 | `sync_failed` | 主体动作完成，随后的 sync 失败 | `/gtw close` / `/gtw back` | 异常 |
 | `workspace_unreachable` | 工作区目录没了，只清了悬空状态 | `/gtw close` | 异常 |

@@ -40,20 +40,6 @@ const (
 	// that LLM agents run.
 	Hook = 30 * time.Minute
 
-	// Review caps a single /review RunOnce invocation. Identical
-	// to Agent (30 min) — review is an LLM-driven audit task with
-	// multi-step git inspection, so the LLM-era budget applies.
-	//
-	// Why we can be generous: /review runs the review in a
-	// RunOnce subprocess (see internal/agent/review.go's
-	// Review). The 30-min deadline only kills that subprocess;
-	// the main chat session is untouched and gets a clean
-	// "review timed out" reply. Pre-RunOnce architectures (where
-	// /review blocked the main turn) had to be conservative
-	// because a stuck review also killed the user's main
-	// conversation — that's no longer the case.
-	Review = 30 * time.Minute
-
 	// Command caps a single /gtw <subcommand> invocation as a
 	// whole — the entire pipeline (pre-hooks + the main RunFix /
 	// RunClose / RunCommit / RunPR / RunBack / RunSync /
@@ -64,7 +50,7 @@ const (
 	// call, an agent session that never returns — still gets a
 	// wall-clock cap and releases the per-chat run lock.
 	//
-	// Aligned with Shell / Agent / Hook / Review (30 min) on
+	// Aligned with Shell / Agent / Hook (30 min) on
 	// purpose: a single /gtw fix often runs one or more
 	// 30-min agent dispatches internally, so capping the command
 	// at less than 30 min would silently truncate real work.

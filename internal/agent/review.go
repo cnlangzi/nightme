@@ -25,7 +25,8 @@
 //     session, own context).
 //   - FormatReviewMessage wraps findings before injection into AS + channel.
 //   - pty/bash returns ErrReviewNotSupported.
-//   - timeouts.Review (30 min) bounds the whole review.
+//   - The review has no wall-clock deadline: it runs until the chat
+//     closes or the user aborts it (/review --abort).
 //   - /review takes no args besides --agent.
 
 package agent

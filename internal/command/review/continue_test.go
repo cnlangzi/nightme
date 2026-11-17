@@ -703,6 +703,45 @@ func TestHandle_ContinuationOrdersTheLines(t *testing.T) {
 	}
 }
 
+// TestHandle_ContinuationVerdictCarriesTheDigest: a continuation
+// delivers the same rendering as a plain review — the digest covers
+// the findings of the resumed groups.
+//
+// The resumed group's own output is parsed into findings, so the
+// rows come from the same reports the verdict line counts.
+func TestHandle_ContinuationVerdictCarriesTheDigest(t *testing.T) {
+	agents := newTestAgents(t)
+	starter := &reviewSessionStarter{
+		name: "review-cont-digest-agent",
+		reply: "- **high**: a.go:42 — the first finding\n" +
+			"- **high**: b.go:7 — the second finding",
+	}
+	agents.registry.Register(starter)
+
+	em := newRecordingEmitter()
+	const chatID = "review-cont-digest-chat"
+	cs, _ := newContinueChatSession(t, chatID, starter.name, t.TempDir(), em)
+
+	f := NewFactory()
+	f.record(chatID, starter.name, "/recorded/ws", []reviewOutcome{
+		{pattern: "**/*.ts", files: []string{"c.ts"}, sessionID: "sess-ts", err: errors.New("boom")},
+	})
+
+	dispatchContinue(t, f, cs, chatID, "review", "-c")
+
+	verdict := em.waitForOutReply(t, "**high** · 2")
+	for _, want := range []string{
+		"| path | content |",
+		"| --- | --- |",
+		"| a.go:42 | the first finding |",
+		"| b.go:7 | the second finding |",
+	} {
+		if !strings.Contains(verdict.Text, want) {
+			t.Errorf("the verdict does not carry %q:\n%s", want, verdict.Text)
+		}
+	}
+}
+
 // TestHandle_ContinueAfterAFailedRetryReportsTheSpentAttempt covers
 // the group that failed a second time: its one resume attempt is
 // spent, so the next `--continue` says so — the group did reach the

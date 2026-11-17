@@ -6,18 +6,22 @@
 //     before any group produces output;
 //  2. the findings — each group's findings, one reply per group, in
 //     the thread;
-//  3. the verdict line — what the run found, in one line.
+//  3. the verdict line — what the run found, in one line, followed by
+//     the digest: the findings as one table per severity, so the card
+//     answers "what was found" on its own.
 //
 // The merged body is NOT one of them: it is the main agent's input,
-// not the channel's. The channel sees the findings once, in the
-// thread.
+// not the channel's. The thread carries the findings; the card
+// carries their digest.
 
 package review
 
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/messages"
@@ -213,6 +217,162 @@ func verdictInputs(outcomes []reviewOutcome, plan []agent.ReviewPlanGroup) (repo
 	return reports, failed
 }
 
+// digestContentRunes is the number of runes a digest's content cell
+// holds before it is cut.
+const digestContentRunes = 80
+
+// reviewDigest renders a review run's findings as severity-grouped
+// markdown tables: one table per severity bucket, one row per
+// finding.
+//
+// The digest is the card's account of what the run found — the
+// verdict line carries the counts, the tables carry the rows. It is
+// built from the same parsed reports the verdict line counts, so the
+// two can never disagree.
+//
+// A run with no findings produces no digest: the verdict message is
+// then the verdict line alone.
+func reviewDigest(outcomes []reviewOutcome, plan []agent.ReviewPlanGroup) string {
+	findings := digestFindings(outcomes, plan)
+	if len(findings) == 0 {
+		return ""
+	}
+	buckets := make(map[string][]agent.ReviewFinding, len(agent.SeverityOrder()))
+	hasCategory := false
+	for _, f := range findings {
+		buckets[f.Severity] = append(buckets[f.Severity], f)
+		if f.Category != "" {
+			hasCategory = true
+		}
+	}
+	var b strings.Builder
+	for _, sev := range agent.SeverityOrder() {
+		rows := buckets[sev]
+		if len(rows) == 0 {
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteString("\n")
+		}
+		fmt.Fprintf(&b, "**%s** · %d\n", sev, len(rows))
+		if hasCategory {
+			b.WriteString("| path | category | content |\n")
+			b.WriteString("| --- | --- | --- |\n")
+		} else {
+			b.WriteString("| path | content |\n")
+			b.WriteString("| --- | --- |\n")
+		}
+		for _, f := range rows {
+			b.WriteString("| " + digestPath(f) + " | ")
+			if hasCategory {
+				b.WriteString(digestCategory(f) + " | ")
+			}
+			b.WriteString(digestContent(f.Content) + " |\n")
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// digestFindings returns the run's findings in the order the digest
+// lists them: by the producing group's position in the plan, and
+// within a group by the finding's order inside that group's report.
+//
+// A group the plan did not name sorts after the planned groups,
+// keeping its outcome order. A group that failed contributes nothing
+// — it produced no report.
+func digestFindings(outcomes []reviewOutcome, plan []agent.ReviewPlanGroup) []agent.ReviewFinding {
+	positions := make(map[string]int, len(plan))
+	for i, g := range plan {
+		positions[groupKey(g.Source, g.Pattern)] = i
+	}
+	type group struct {
+		order   int
+		outcome reviewOutcome
+	}
+	groups := make([]group, 0, len(outcomes))
+	for i, o := range outcomes {
+		order, planned := positions[groupKey(o.source, o.pattern)]
+		if !planned {
+			order = len(plan) + i
+		}
+		groups = append(groups, group{order: order, outcome: o})
+	}
+	slices.SortStableFunc(groups, func(a, b group) int {
+		return a.order - b.order
+	})
+	var findings []agent.ReviewFinding
+	for _, g := range groups {
+		if g.outcome.err != nil {
+			continue
+		}
+		findings = append(findings, g.outcome.report.Findings...)
+	}
+	return findings
+}
+
+// digestPath renders a finding's location: the path with its line
+// when the finding has one, the path alone when it does not.
+func digestPath(f agent.ReviewFinding) string {
+	path := sanitizeCell(f.Path)
+	line := sanitizeCell(f.Line)
+	switch {
+	case path == "":
+		return line
+	case line == "":
+		return path
+	default:
+		return path + ":" + line
+	}
+}
+
+// digestCategory renders a finding's category, or the em dash that
+// stands for a finding that named none.
+func digestCategory(f agent.ReviewFinding) string {
+	category := sanitizeCell(f.Category)
+	if category == "" {
+		return "—"
+	}
+	return category
+}
+
+// digestContent renders a finding's text: sanitized, then cut to
+// the cell's budget.
+func digestContent(content string) string {
+	return truncateRunes(sanitizeCell(content), digestContentRunes)
+}
+
+// sanitizeCell makes a cell safe to render inside a markdown table
+// row: a line break or a tab becomes a space, a pipe becomes a
+// slash, and the cell is trimmed.
+//
+// The pipe matters — a pipe inside a cell ends the cell, so the rest
+// of the finding would land in a column of its own.
+func sanitizeCell(s string) string {
+	s = strings.Map(func(r rune) rune {
+		switch r {
+		case '\n', '\r', '\t':
+			return ' '
+		case '|':
+			return '/'
+		}
+		return r
+	}, s)
+	return strings.TrimSpace(s)
+}
+
+// truncateRunes cuts s to at most n runes and marks the cut with an
+// ellipsis.
+//
+// The cut is rune-safe: findings and paths carry CJK text, and
+// splitting a multi-byte rune would leave a broken character in the
+// cell.
+func truncateRunes(s string, n int) string {
+	if utf8.RuneCountInString(s) <= n {
+		return s
+	}
+	return string([]rune(s)[:n]) + "…"
+}
+
 // sendReviewLine sends one of the review's own lines to the channel,
 // anchored to the /review message so it folds into the same receipt as
 // the plan and the verdict.
@@ -247,12 +407,20 @@ func planObserver(ctx context.Context, em messages.Emitter, collector *outcomeCo
 
 // sendVerdict sends the run's verdict line — the last thing the review
 // itself sends to the card. The main agent's answer follows it.
+//
+// The digest rides inside the same message: one message, one card
+// entry, and the counts and the rows read as one report. It is sent
+// as a reply, so it reaches the card whatever the chat's /think
+// setting says.
 func sendVerdict(ctx context.Context, em messages.Emitter, chatID, replyTo, runner string,
 	result agent.RunResult, outcomes []reviewOutcome, plan []agent.ReviewPlanGroup,
 ) {
 	text := reviewVerdict(outcomes, plan)
 	if text == "" {
 		return
+	}
+	if digest := reviewDigest(outcomes, plan); digest != "" {
+		text += "\n\n" + digest
 	}
 	out := messages.OutboundMessage{
 		ChatID:  chatID,

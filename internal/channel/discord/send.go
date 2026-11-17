@@ -141,6 +141,13 @@ func (a *Adapter) sendOutbound(ctx context.Context, msg messages.OutboundMessage
 // standalone-message OutboundKind. Empty / whitespace-only text
 // silent-drops so the runtime's "no content this turn" signal
 // doesn't produce an empty Discord message.
+//
+// TODO: Discord caps a message at 2000 characters and rejects a
+// longer one whole. The body goes on the wire unchanged, so a body
+// over that limit is lost — a review whose findings digest exceeds it
+// is lost with it. The review layer no longer pre-emptively budgets
+// against the limit; the other channels deliver long bodies their own
+// way. Split here when the Discord channel is ready.
 func (a *Adapter) sendPlainReply(ctx context.Context, rawChannelID, body string) error {
 	if strings.TrimSpace(body) == "" {
 		return nil

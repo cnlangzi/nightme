@@ -35,6 +35,8 @@ type groupReviewStarter struct {
 	groups int
 	// failed is how many of them report an error.
 	failed int
+	// findings is how many findings each group reports.
+	findings int
 	// err is what the whole run fails with (ErrNoDiff,
 	// ErrReviewNotSupported, …). Nil means the run succeeded.
 	err error
@@ -58,6 +60,15 @@ func (s *groupReviewStarter) Review(_ context.Context, _ agent.StartConfig, opts
 	}
 	cfg := agent.ParseRunOnceOptions(opts)
 	if cfg.OnReviewJob != nil {
+		report := agent.ReviewReport{Parsed: true}
+		for i := 0; i < s.findings; i++ {
+			report.Findings = append(report.Findings, agent.ReviewFinding{
+				Path:     "a.go",
+				Line:     "1",
+				Severity: agent.SeverityHigh,
+				Content:  "the problem",
+			})
+		}
 		for i := 0; i < s.groups; i++ {
 			var err error
 			if i < s.failed {
@@ -67,6 +78,7 @@ func (s *groupReviewStarter) Review(_ context.Context, _ agent.StartConfig, opts
 				Pattern:   fmt.Sprintf("group-%d", i+1),
 				Files:     []string{"a.go"},
 				SessionID: fmt.Sprintf("sess-%d", i+1),
+				Report:    report,
 			}, err)
 		}
 	}
@@ -207,6 +219,9 @@ func TestReviewOutcome(t *testing.T) {
 		err    error
 		want   messages.OutcomeStatus
 		data   map[string]string
+		// wantErr says the outcome must carry an error description —
+		// the review's failures are exceptions, not normal branches.
+		wantErr bool
 	}{
 		{
 			name:   "all groups finished",
@@ -226,16 +241,18 @@ func TestReviewOutcome(t *testing.T) {
 			},
 		},
 		{
-			name: "no diff",
-			err:  agent.ErrNoDiff,
-			want: messages.OutcomeFailed,
-			data: map[string]string{"reason": "no_diff", "agent": "reviewer"},
+			name:    "no diff",
+			err:     agent.ErrNoDiff,
+			want:    messages.OutcomeFailed,
+			data:    map[string]string{"reason": "no_diff", "agent": "reviewer"},
+			wantErr: true,
 		},
 		{
-			name: "not supported",
-			err:  agent.ErrReviewNotSupported,
-			want: messages.OutcomeFailed,
-			data: map[string]string{"reason": "not_supported", "agent": "reviewer"},
+			name:    "not supported",
+			err:     agent.ErrReviewNotSupported,
+			want:    messages.OutcomeFailed,
+			data:    map[string]string{"reason": "not_supported", "agent": "reviewer"},
+			wantErr: true,
 		},
 	}
 
@@ -270,6 +287,13 @@ func TestReviewOutcome(t *testing.T) {
 			hold.Release()
 			got := waitOutcome(t, em, 5*time.Second)
 			assertOutcome(t, got, tc.want, tc.data)
+			if tc.wantErr {
+				if got.Data["error"] == "" {
+					t.Errorf("an exception carries an error description, got none: %v", got.Data)
+				}
+			} else if desc, ok := got.Data["error"]; ok {
+				t.Errorf("a normal result carries no error description, got %q", desc)
+			}
 		})
 	}
 }

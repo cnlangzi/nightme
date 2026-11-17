@@ -1675,6 +1675,11 @@ func TestAdapter_HandleCallback_Permission(t *testing.T) {
 // the click is the answer.
 func TestAdapter_HandleCallback_FlatQuestionClickIsTheAnswer(t *testing.T) {
 	a, _ := newTestAdapter(t)
+	a.config.PollingTimeout = 1
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	defer func() { _ = a.Stop(context.Background()) }()
+	_ = a.Start(ctx)
 
 	if err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",

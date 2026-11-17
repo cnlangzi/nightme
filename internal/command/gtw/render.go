@@ -4,9 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-
-	"github.com/cnlangzi/nightme/internal/command"
-	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // syncOutcome is the machine-readable result of a sync: the facts a
@@ -316,16 +313,15 @@ func replyPushCard(ctx context.Context, c Context, revRange string, deps Handler
 	return b.String(), commitCount, nil
 }
 
-// nothingToPush is the card and the outcome of a push that had
-// nothing to push.
-//
-// A push runs because the branch carries commits the remote does not
-// have; a branch that carries none means the premise does not hold,
-// so the command reports a failure and the caller decides what to do.
-func nothingToPush(branch string) (string, messages.Outcome) {
-	card := "❌ nothing to push\n" +
-		"  no uncommitted changes\n" +
-		"  no unpushed commits on " + branch
-	return card, command.FailedOutcomeData("nothing_to_push", "the branch has nothing to push",
-		map[string]string{"branch": branch})
+// nothingToPushCard is the card of a push that moved no commit and
+// left the local branch carrying commits the remote does not have.
+func nothingToPushCard(branch string) string {
+	return "❌ nothing to push\n" +
+		"  " + branch + " still carries commits the remote does not have"
+}
+
+// alreadyPushedCard is the card of a push that moved no commit
+// because the remote already holds every local commit.
+func alreadyPushedCard(branch string) string {
+	return "✅ nothing to push — " + branch + " is already on the remote"
 }

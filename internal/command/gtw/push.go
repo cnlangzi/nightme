@@ -4,7 +4,40 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"github.com/cnlangzi/nightme/internal/command"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
+
+// pushFallback judges a push that moved no commit.
+//
+// The primary signal says "nothing happened", but the work may in
+// fact have been done — the coding agent pushed the branch itself,
+// before this command ran. The second check compares the local head
+// with the remote's tip for the branch: equal means the remote
+// already holds every local commit.
+//
+// A branch the remote holds is a normal branch: there was nothing
+// to push. A branch the remote does not hold is an exception: the
+// local still carries commits the remote does not have.
+func pushFallback(ctx context.Context, c Context, branch string, deps HandlerDeps) (string, messages.Outcome) {
+	held, err := remoteHoldsLocalHead(ctx, c.Worktree, branch, deps)
+	if err != nil {
+		return nothingToPushCard(branch),
+			command.FailedOutcomeData("nothing_to_push", "the branch has nothing to push",
+				map[string]string{"branch": branch},
+				"the push moved no commit and the remote's tip could not be read: "+err.Error())
+	}
+	if held {
+		return alreadyPushedCard(branch),
+			command.BranchOutcome("nothing_to_push", "the branch is already on the remote",
+				map[string]string{"branch": branch})
+	}
+	return nothingToPushCard(branch),
+		command.FailedOutcomeData("nothing_to_push", "the branch has nothing to push",
+			map[string]string{"branch": branch},
+			"the push moved no commit and "+branch+" still carries commits the remote does not have")
+}
 
 // headSHA returns the current HEAD's full SHA in worktree.
 // Used by /gtw commit (the agent-commit flow):

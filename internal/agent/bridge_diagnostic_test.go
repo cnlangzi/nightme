@@ -272,6 +272,50 @@ func TestTruncateForLog(t *testing.T) {
 	})
 }
 
+// ─── KeepTailForLog ───────────────────────────────────────────────────
+
+func TestKeepTailForLog(t *testing.T) {
+	t.Run("ShortUnchanged", func(t *testing.T) {
+		in := "short"
+		if got := KeepTailForLog(in, 100); got != in {
+			t.Errorf("KeepTailForLog(short, 100) = %q, want %q", got, in)
+		}
+	})
+
+	t.Run("KeepsTheEnd", func(t *testing.T) {
+		in := strings.Repeat("a", 200) + "FATAL"
+		got := KeepTailForLog(in, 50)
+		if len(got) > 50 {
+			t.Errorf("len(got) = %d, want <= 50", len(got))
+		}
+		if !strings.Contains(got, " ...[truncated]") {
+			t.Errorf("missing truncation marker: %q", got)
+		}
+		if !strings.HasSuffix(got, "FATAL") {
+			t.Errorf("KeepTailForLog(%q, 50) = %q, want the last bytes kept", in, got)
+		}
+	})
+
+	t.Run("EmptyMax", func(t *testing.T) {
+		if got := KeepTailForLog("anything", 0); got != "anything" {
+			t.Errorf("KeepTailForLog(x, 0) = %q, want \"anything\" (no truncation)", got)
+		}
+	})
+
+	t.Run("DoesNotSplitRune", func(t *testing.T) {
+		// The ring buffer's own cut can land inside a multi-byte
+		// character; the tail must not start with its second half.
+		in := strings.Repeat("好", 40)
+		got := KeepTailForLog(in, 20)
+		if !utf8.ValidString(got) {
+			t.Errorf("KeepTailForLog(%q, 20) = %q; the result is not valid UTF-8", in, got)
+		}
+		if !strings.Contains(got, " ...[truncated]") {
+			t.Errorf("missing truncation marker: %q", got)
+		}
+	})
+}
+
 // ─── BridgeExitKind.String ────────────────────────────────────────────
 
 func TestBridgeExitKindString(t *testing.T) {

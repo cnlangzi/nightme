@@ -408,15 +408,15 @@ func newSession(ctx context.Context, cfg sessionConfig) (*session, error) {
 
 	if err := s.initialize(hsCtx); err != nil {
 		_ = s.Close()
-		return nil, fmt.Errorf("codex: initialize: %w", err)
+		return nil, agent.WithStderrTail(fmt.Errorf("codex: initialize: %w", err), s.stderrTailText())
 	}
 	if err := s.rpc.notify("initialized", nil); err != nil {
 		_ = s.Close()
-		return nil, fmt.Errorf("codex: initialized notify: %w", err)
+		return nil, agent.WithStderrTail(fmt.Errorf("codex: initialized notify: %w", err), s.stderrTailText())
 	}
 	if err := s.ensureThread(hsCtx, cfg.sessionID); err != nil {
 		_ = s.Close()
-		return nil, err
+		return nil, agent.WithStderrTail(err, s.stderrTailText())
 	}
 
 	cLog("session handshake complete",
@@ -494,6 +494,16 @@ func (s *session) ensureThread(ctx context.Context, resumeID string) error {
 	}
 	s.setIdentity(resp.Thread.ID, resp.Model)
 	return nil
+}
+
+// stderrTailText returns the child's captured stderr, or "" when
+// no ring buffer is attached. Read after Close() so it carries the
+// child's final output.
+func (s *session) stderrTailText() string {
+	if s.stderrTail == nil {
+		return ""
+	}
+	return s.stderrTail.String()
 }
 
 // stderrLoop drains the child's stderr into stderrTail. We don't log

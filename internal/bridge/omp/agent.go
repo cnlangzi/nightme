@@ -282,13 +282,14 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 			"elapsed_ms", handshakeElapsed.Milliseconds(),
 			"err", err.Error())
 		_ = live.Close()
+		tail := live.stderrTailText()
 		if isResumeFailure(live.stderrTail) {
-			return nil, fmt.Errorf("omp: %w: %s", agent.ErrResumeUnhealthy, err.Error())
+			return nil, agent.WithStderrTail(fmt.Errorf("omp: %w: %s", agent.ErrResumeUnhealthy, err.Error()), tail)
 		}
 		if errors.Is(err, context.DeadlineExceeded) {
-			return nil, fmt.Errorf("omp: handshake timeout after %s (binary present? --mode rpc supported?): %w", handshakeTimeout, context.DeadlineExceeded)
+			return nil, agent.WithStderrTail(fmt.Errorf("omp: handshake timeout after %s (binary present? --mode rpc supported?): %w", handshakeTimeout, context.DeadlineExceeded), tail)
 		}
-		return nil, fmt.Errorf("omp: get_state: %w", err)
+		return nil, agent.WithStderrTail(fmt.Errorf("omp: get_state: %w", err), tail)
 	}
 	if !resp.Success {
 		oLog("handshake rejected",
@@ -296,7 +297,7 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 			"elapsed_ms", handshakeElapsed.Milliseconds(),
 			"err", resp.Error)
 		_ = live.Close()
-		return nil, fmt.Errorf("omp: get_state rejected: %s", resp.Error)
+		return nil, agent.WithStderrTail(fmt.Errorf("omp: get_state rejected: %s", resp.Error), live.stderrTailText())
 	}
 	oLog("handshake ok",
 		"pid", live.pid,
@@ -307,7 +308,7 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	if len(resp.Data) > 0 {
 		if err := json.Unmarshal(resp.Data, &state); err != nil {
 			_ = live.Close()
-			return nil, fmt.Errorf("omp: decode get_state: %w", err)
+			return nil, agent.WithStderrTail(fmt.Errorf("omp: decode get_state: %w", err), live.stderrTailText())
 		}
 	}
 	live.translatorMu.Lock()
@@ -439,25 +440,25 @@ func (d *driver) New(ctx context.Context) error {
 	defer cancel()
 	resp, err := d.rpc.request(newCtx, "new_session", map[string]any{}, "reset-1")
 	if err != nil {
-		return fmt.Errorf("omp: new_session: %w", err)
+		return agent.WithStderrTail(fmt.Errorf("omp: new_session: %w", err), d.stderrTailText())
 	}
 	if !resp.Success {
-		return fmt.Errorf("omp: new_session rejected: %s", resp.Error)
+		return agent.WithStderrTail(fmt.Errorf("omp: new_session rejected: %s", resp.Error), d.stderrTailText())
 	}
 
 	stateCtx, stateCancel := context.WithTimeout(ctx, handshakeTimeout)
 	defer stateCancel()
 	stateResp, err := d.rpc.request(stateCtx, "get_state", map[string]any{}, "reset-state")
 	if err != nil {
-		return fmt.Errorf("omp: get_state after reset: %w", err)
+		return agent.WithStderrTail(fmt.Errorf("omp: get_state after reset: %w", err), d.stderrTailText())
 	}
 	if !stateResp.Success {
-		return fmt.Errorf("omp: get_state after reset rejected: %s", stateResp.Error)
+		return agent.WithStderrTail(fmt.Errorf("omp: get_state after reset rejected: %s", stateResp.Error), d.stderrTailText())
 	}
 	var state getStateResult
 	if len(stateResp.Data) > 0 {
 		if err := json.Unmarshal(stateResp.Data, &state); err != nil {
-			return fmt.Errorf("omp: decode get_state: %w", err)
+			return agent.WithStderrTail(fmt.Errorf("omp: decode get_state: %w", err), d.stderrTailText())
 		}
 	}
 	d.translatorMu.Lock()
@@ -622,6 +623,16 @@ func (d *driver) recordResumeFailure() {
 	defer d.resumeMu.Unlock()
 	d.resumeFail = true
 	d.resumeFailE = ErrResumeUnhealthySession
+}
+
+// stderrTailText returns the child's captured stderr, or "" when
+// no ring buffer is attached. Read after Close() so it carries the
+// child's final output.
+func (d *driver) stderrTailText() string {
+	if d.stderrTail == nil {
+		return ""
+	}
+	return d.stderrTail.String()
 }
 
 // isResumeFailure inspects stderr tail text for the canonical

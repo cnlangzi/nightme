@@ -420,7 +420,7 @@ func (d *driver) Reset(ctx context.Context) error { return d.New(ctx) }
 
 func (d *driver) New(ctx context.Context) error {
 	if err := d.session.ensureThread(ctx, ""); err != nil {
-		return err
+		return agent.WithStderrTail(err, d.session.stderrTailText())
 	}
 	d.deliver(agent.AgentEvent{
 		Kind:      agent.EventAgentReady,

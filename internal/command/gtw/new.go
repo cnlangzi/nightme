@@ -217,6 +217,10 @@ type issueDraftSet struct {
 // its NN.created record, so after a failure `/gtw new -y` creates
 // only the rest, and the agent — which never sees this reply — can
 // tell from the directory which drafts already are issues.
+//
+// Every draft that references another draft states a dependency, so
+// the run also writes the platform's own relations: the referenced
+// issue blocks the referencing one.
 func createIssuesFromDrafts(ctx context.Context, dir string, resolve func() (GitProvider, string, string, error)) (string, messages.Outcome) {
 	set, err := loadIssueDrafts(dir)
 	if err != nil {
@@ -249,27 +253,34 @@ func createIssuesFromDrafts(ctx context.Context, dir string, resolve func() (Git
 
 	numbers := maps.Clone(set.created)
 	opened := make([]*Issue, 0, len(set.pending))
+	var deps issueDeps
 	for _, d := range set.pending {
 		kept := len(set.pending) - len(opened)
 		title, body, _ := parseIssueDraft(resolveIssueRefs(d.raw, numbers))
 		issue, err := provider.CreateIssue(ctx, owner, repo, title, appendIssueFooter(body))
 		if err != nil {
-			return renderIssueCreateFailure(owner, repo, opened, "create issue from "+d.name(), err, dir, kept),
-				issueCreateOutcome(opened, owner, repo, kept, err)
+			return deps.card(renderIssueCreateFailure(owner, repo, opened, "create issue from "+d.name(), err, dir, kept, deps)),
+				issueCreateOutcome(opened, owner, repo, kept, err, deps)
 		}
 		opened = append(opened, issue)
 		numbers[d.key] = issue.ID
-		if err := recordIssueCreated(dir, d, issue); err != nil {
-			return renderIssueCreateFailure(owner, repo, opened, fmt.Sprintf("record #%d for %s", issue.ID, d.name()), err, dir, kept-1),
-				issueCreateOutcome(opened, owner, repo, kept-1, err)
+		recordErr := recordIssueCreated(dir, d, issue)
+		// The relations are written even when the record failed:
+		// the issue is on the platform, so its dependency belongs
+		// there too — and the draft is gone, so no later run can
+		// add it.
+		deps.addRelations(ctx, provider, owner, repo, issue.ID, d.raw, numbers)
+		if recordErr != nil {
+			return deps.card(renderIssueCreateFailure(owner, repo, opened, fmt.Sprintf("record #%d for %s", issue.ID, d.name()), recordErr, dir, kept-1, deps)),
+				issueCreateOutcome(opened, owner, repo, kept-1, recordErr, deps)
 		}
 	}
 	if len(opened) == 1 {
-		return renderIssueOpenedCard(owner, repo, opened[0]),
-			issueCreateOutcome(opened, owner, repo, 0, nil)
+		return deps.card(renderIssueOpenedCard(owner, repo, opened[0], deps)),
+			issueCreateOutcome(opened, owner, repo, 0, nil, deps)
 	}
-	return renderIssuesOpenedCard(owner, repo, opened),
-		issueCreateOutcome(opened, owner, repo, 0, nil)
+	return deps.card(renderIssuesOpenedCard(owner, repo, opened, deps)),
+		issueCreateOutcome(opened, owner, repo, 0, nil, deps)
 }
 
 // issueCreateOutcome is the outcome of one /gtw new -y run: the
@@ -280,7 +291,7 @@ func createIssuesFromDrafts(ctx context.Context, dir string, resolve func() (Git
 // success (the ⚠️ card), whatever the remaining draft count says:
 // the count alone cannot tell "the run stopped" from "the run
 // finished".
-func issueCreateOutcome(opened []*Issue, owner, repo string, kept int, runErr error) messages.Outcome {
+func issueCreateOutcome(opened []*Issue, owner, repo string, kept int, runErr error, deps issueDeps) messages.Outcome {
 	numbers := make([]string, 0, len(opened))
 	for _, issue := range opened {
 		numbers = append(numbers, fmt.Sprintf("%d", issue.ID))
@@ -292,6 +303,8 @@ func issueCreateOutcome(opened []*Issue, owner, repo string, kept int, runErr er
 	if kept > 0 {
 		data["kept"] = fmt.Sprintf("%d", kept)
 	}
+	data["deps"] = fmt.Sprintf("%d", len(deps.created))
+	data["deps_failed"] = fmt.Sprintf("%d", len(deps.failures))
 	switch {
 	case runErr != nil && len(opened) == 0:
 		return command.FailedOutcomeData("error", "no issue could be created", data)
@@ -308,6 +321,103 @@ func issueCreateOutcome(opened []*Issue, owner, repo string, kept int, runErr er
 			Data:    data,
 		}
 	}
+}
+
+// issueRelation is one dependency of a /gtw new -y run: the
+// dependent issue and the issue it waits for.
+type issueRelation struct {
+	dependent int
+	blocker   int
+}
+
+// issueRelationFailure is a relation the platform refused, with the
+// reason it gave.
+type issueRelationFailure struct {
+	relation issueRelation
+	reason   string
+}
+
+// issueDeps holds the relations of one /gtw new -y run: the ones
+// the platform accepted and the ones it refused.
+type issueDeps struct {
+	created  []issueRelation
+	failures []issueRelationFailure
+}
+
+// addRelations creates the platform relations of a draft: every
+// draft it references is a blocker of the issue just created.
+//
+// A relation the platform refuses is recorded and the rest are still
+// attempted: the issues exist by then, and a missing relation must
+// not fail the run — the card names it instead.
+func (d *issueDeps) addRelations(ctx context.Context, provider GitProvider, owner, repo string, dependent int, raw string, numbers map[string]int) {
+	for _, key := range referencedDrafts(raw) {
+		blocker, ok := numbers[key]
+		if !ok {
+			continue
+		}
+		rel := issueRelation{dependent: dependent, blocker: blocker}
+		if err := provider.AddBlockedBy(ctx, owner, repo, dependent, blocker); err != nil {
+			d.failures = append(d.failures, issueRelationFailure{relation: rel, reason: err.Error()})
+			continue
+		}
+		d.created = append(d.created, rel)
+	}
+}
+
+// referencedDrafts returns the keys of the drafts a draft
+// references, in order and without duplicates. Every reference is a
+// dependency: the referenced issue must land first.
+func referencedDrafts(raw string) []string {
+	var keys []string
+	seen := make(map[string]bool)
+	for _, m := range issueRefRe.FindAllStringSubmatch(raw, -1) {
+		if seen[m[1]] {
+			continue
+		}
+		seen[m[1]] = true
+		keys = append(keys, m[1])
+	}
+	return keys
+}
+
+// relationsLine renders the relations the run created:
+// "#43 blocked by #42 · #44 blocked by #42, #43".
+func (d issueDeps) relationsLine() string {
+	order := make([]int, 0, len(d.created))
+	blockers := make(map[int][]int, len(d.created))
+	for _, rel := range d.created {
+		if _, ok := blockers[rel.dependent]; !ok {
+			order = append(order, rel.dependent)
+		}
+		blockers[rel.dependent] = append(blockers[rel.dependent], rel.blocker)
+	}
+	parts := make([]string, 0, len(order))
+	for _, dependent := range order {
+		names := make([]string, 0, len(blockers[dependent]))
+		for _, blocker := range blockers[dependent] {
+			names = append(names, fmt.Sprintf("#%d", blocker))
+		}
+		parts = append(parts, fmt.Sprintf("#%d blocked by %s", dependent, strings.Join(names, ", ")))
+	}
+	return strings.Join(parts, " · ")
+}
+
+// warnings renders the relations the platform refused, one line
+// each.
+func (d issueDeps) warningLines() string {
+	lines := make([]string, 0, len(d.failures))
+	for _, f := range d.failures {
+		lines = append(lines, fmt.Sprintf("⚠️ could not create the dependency #%d blocked by #%d: %s",
+			f.relation.dependent, f.relation.blocker, f.reason))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// card puts the warnings of the refused relations at the front of
+// the reply: the issues exist, but a dependency is missing.
+func (d issueDeps) card(body string) string {
+	return prependWarning(d.warningLines(), body)
 }
 
 // recordIssueCreated replaces draft d with its NN.created record.
@@ -375,9 +485,9 @@ func validateIssueDrafts(set issueDraftSet) error {
 		if _, _, err := parseIssueDraft(d.raw); err != nil {
 			return fmt.Errorf("%s: %w", d.name(), err)
 		}
-		for _, m := range issueRefRe.FindAllStringSubmatch(d.raw, -1) {
-			if !known[m[1]] {
-				return fmt.Errorf("%s: %s must point to a lower-numbered draft of this set", d.name(), m[0])
+		for _, key := range referencedDrafts(d.raw) {
+			if !known[key] {
+				return fmt.Errorf("%s: {{ISSUE:%s}} must point to a lower-numbered draft of this set", d.name(), key)
 			}
 		}
 		known[d.key] = true
@@ -425,7 +535,7 @@ func parseIssueDraft(raw string) (title, body string, err error) {
 	return title, body + "\n", nil
 }
 
-func renderIssueOpenedCard(owner, repo string, issue *Issue) string {
+func renderIssueOpenedCard(owner, repo string, issue *Issue, deps issueDeps) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "✅ Issue #%d opened\n", issue.ID)
 	fmt.Fprintf(&sb, "→ title: %s\n", issue.Title)
@@ -433,21 +543,28 @@ func renderIssueOpenedCard(owner, repo string, issue *Issue) string {
 	if issue.URL != "" {
 		fmt.Fprintf(&sb, "→ url:   %s\n", issue.URL)
 	}
+	if v := deps.relationsLine(); v != "" {
+		fmt.Fprintf(&sb, "→ deps: %s\n", v)
+	}
 	fmt.Fprintf(&sb, "↳ `/gtw fix %d` to assess it · or `/gtw fix %d -y` to implement directly", issue.ID, issue.ID)
 	return sb.String()
 }
 
-func renderIssuesOpenedCard(owner, repo string, issues []*Issue) string {
+func renderIssuesOpenedCard(owner, repo string, issues []*Issue, deps issueDeps) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "✅ %d issues opened\n", len(issues))
-	sb.WriteString(renderFieldRows(issueRows(owner, repo, issues)))
+	rows := issueRows(owner, repo, issues)
+	if v := deps.relationsLine(); v != "" {
+		rows = append(rows, [2]string{"deps", v})
+	}
+	sb.WriteString(renderFieldRows(rows))
 	sb.WriteString("↳ `/gtw fix <id>` to assess one · or `/gtw fix <id> -y` to implement it directly")
 	return sb.String()
 }
 
 // renderIssueCreateFailure reports the step that stopped
 // /gtw new -y, along with the issues opened before it.
-func renderIssueCreateFailure(owner, repo string, opened []*Issue, step string, err error, dir string, kept int) string {
+func renderIssueCreateFailure(owner, repo string, opened []*Issue, step string, err error, dir string, kept int, deps issueDeps) string {
 	var sb strings.Builder
 	if len(opened) == 0 {
 		fmt.Fprintf(&sb, "❌ %s: %v\n", step, err)
@@ -461,6 +578,9 @@ func renderIssueCreateFailure(owner, repo string, opened []*Issue, step string, 
 		[2]string{"failed", fmt.Sprintf("%s — %v", step, err)},
 		[2]string{"drafts", fmt.Sprintf("%s (%d kept)", dir, kept)},
 	)
+	if v := deps.relationsLine(); v != "" {
+		rows = append(rows, [2]string{"deps", v})
+	}
 	sb.WriteString(renderFieldRows(rows))
 	sb.WriteString("↳ `/gtw new -y` to create the rest")
 	return sb.String()
@@ -578,6 +698,7 @@ When the work is split:
 - Each issue is self-contained: it repeats the background, terms, constraints, and decisions it needs. Never point to another issue for content.
 - Each requirement, edge case, and implementation task belongs to exactly one issue. Under "Out of scope", name what another issue covers. Attach {{ISSUE:NN}} only when the rule below allows it; otherwise describe that work in words, with no reference.
 - Reference another issue of this set only as {{ISSUE:NN}}, where NN is its file number. The issues are created in file order and the reference is replaced with the real issue number, so the referenced issue must already exist by then: NN must be lower than the number of the file that contains the reference, or that draft must already be an NN.created record. A reference that points forward is invalid and no issue is created — {{ISSUE:02}} inside 01.md fails with "must point to a lower-numbered draft of this set". Number the files so this holds. If the second issue depends on the first, the dependency is 01.md and the dependent issue is 02.md, which writes "depends on {{ISSUE:01}}". Never write that reference the other way, and never guess an issue number.
+- A reference is a dependency: the referenced issue must land before this one does. Name another issue in prose when it is not a prerequisite.
 
 ## Writing rules
 - Describe what the system must be, not how the discussion went. Never write phrases like "we discussed", "initially", "later changed to", "as requested".

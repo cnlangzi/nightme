@@ -12,6 +12,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // funcCLIRunner delegates Run to fn so a test can inspect the
@@ -86,6 +87,7 @@ func TestRenderNewIssuePrompt(t *testing.T) {
 		"Never split by kind of work",
 		"{{ISSUE:02}} inside 01.md fails",
 		"must point to a lower-numbered draft of this set",
+		"A reference is a dependency: the referenced issue must land before this one does. Name another issue in prose when it is not a prerequisite.",
 		"every {{ISSUE:NN}} points at a lower file number",
 		"print the complete content of every draft file in chat",
 		"run /gtw new -y to create the issues",
@@ -333,12 +335,252 @@ func TestCreateIssuesFromDrafts_MultipleDraftsInOrderWithRefs(t *testing.T) {
 		"→ #42:  feat(a): first · https://github.com/o/r/issues/42\n" +
 		"→ #43:  feat(b): second · https://github.com/o/r/issues/43\n" +
 		"→ #44:  feat(c): third · https://github.com/o/r/issues/44\n" +
+		"→ deps: #43 blocked by #42 · #44 blocked by #42, #43\n" +
 		"↳ `/gtw fix <id>` to assess one · or `/gtw fix <id> -y` to implement it directly"
 	if got != want {
 		t.Errorf("reply =\n%s\nwant\n%s", got, want)
 	}
 	if names := draftNames(t, dir); strings.Join(names, ",") != "01.created,02.created,03.created" {
 		t.Errorf("drafts should be replaced by their records, dir holds %v", names)
+	}
+}
+
+// TestCreateIssuesFromDrafts_CreatesBlockedByRelations pins that a
+// draft's references become the platform's own relations: every
+// referenced draft blocks the referencing issue, one relation each.
+func TestCreateIssuesFromDrafts_CreatesBlockedByRelations(t *testing.T) {
+	dir := t.TempDir()
+	writeDrafts(t, dir,
+		"01.md", "# feat(a): first\n\nbody a\n",
+		"02.md", "# feat(b): second\n\n- depends on {{ISSUE:01}}\n",
+		"03.md", "# feat(c): third\n\n- depends on {{ISSUE:01}} and {{ISSUE:02}}\n",
+	)
+	prov := newFakeGitProvider(ProviderGitHub, "github.com")
+	numberIssuesFrom(prov, 42)
+
+	got, outcome := createIssuesFromDrafts(context.Background(), dir, resolveTo(prov))
+
+	relations := prov.CallsByMethod("AddBlockedBy")
+	want := [][2]int{{43, 42}, {44, 42}, {44, 43}}
+	if len(relations) != len(want) {
+		t.Fatalf("AddBlockedBy calls = %+v, want %v", relations, want)
+	}
+	for i, w := range want {
+		c := relations[i]
+		if c.ID != w[0] || c.Blocker != w[1] {
+			t.Errorf("relation %d = #%d blocked by #%d, want #%d blocked by #%d", i, c.ID, c.Blocker, w[0], w[1])
+		}
+		if c.Owner != "o" || c.Repo != "r" {
+			t.Errorf("relation %d owner/repo = %s/%s, want o/r", i, c.Owner, c.Repo)
+		}
+	}
+	if want := "→ deps: #43 blocked by #42 · #44 blocked by #42, #43"; !strings.Contains(got, want) {
+		t.Errorf("reply missing %q:\n%s", want, got)
+	}
+	if outcome.Data["deps"] != "3" || outcome.Data["deps_failed"] != "0" {
+		t.Errorf("outcome data = %v, want deps=3 deps_failed=0", outcome.Data)
+	}
+}
+
+// TestCreateIssuesFromDrafts_RepeatedReferenceMakesOneRelation
+// pins that a draft naming the same blocker twice states one
+// dependency, not two.
+func TestCreateIssuesFromDrafts_RepeatedReferenceMakesOneRelation(t *testing.T) {
+	dir := t.TempDir()
+	writeDrafts(t, dir,
+		"01.md", "# feat(a): first\n\nbody a\n",
+		"02.md", "# feat(b): second\n\n- depends on {{ISSUE:01}}, again {{ISSUE:01}}\n",
+	)
+	prov := newFakeGitProvider(ProviderGitHub, "github.com")
+	numberIssuesFrom(prov, 42)
+
+	got, outcome := createIssuesFromDrafts(context.Background(), dir, resolveTo(prov))
+
+	relations := prov.CallsByMethod("AddBlockedBy")
+	if len(relations) != 1 || relations[0].ID != 43 || relations[0].Blocker != 42 {
+		t.Fatalf("AddBlockedBy calls = %+v, want one relation #43 blocked by #42", relations)
+	}
+	if want := "→ deps: #43 blocked by #42"; !strings.Contains(got, want) {
+		t.Errorf("reply missing %q:\n%s", want, got)
+	}
+	if outcome.Data["deps"] != "1" {
+		t.Errorf("outcome data = %v, want deps=1", outcome.Data)
+	}
+}
+
+// TestCreateIssuesFromDrafts_RelationToEarlierRun pins that a
+// reference to a draft created by an earlier run uses that draft's
+// recorded issue number.
+func TestCreateIssuesFromDrafts_RelationToEarlierRun(t *testing.T) {
+	dir := t.TempDir()
+	writeDrafts(t, dir,
+		"01.created", "#42 feat(a): first\n",
+		"02.md", "# feat(b): second\n\n- depends on {{ISSUE:01}}\n",
+	)
+	prov := newFakeGitProvider(ProviderGitHub, "github.com")
+	numberIssuesFrom(prov, 43)
+
+	got, _ := createIssuesFromDrafts(context.Background(), dir, resolveTo(prov))
+
+	relations := prov.CallsByMethod("AddBlockedBy")
+	if len(relations) != 1 || relations[0].ID != 43 || relations[0].Blocker != 42 {
+		t.Fatalf("AddBlockedBy calls = %+v, want one relation #43 blocked by #42", relations)
+	}
+	if want := "→ deps: #43 blocked by #42"; !strings.Contains(got, want) {
+		t.Errorf("reply missing %q:\n%s", want, got)
+	}
+}
+
+// TestCreateIssuesFromDrafts_RelationFailureWarns pins that a
+// relation the platform refuses only warns: the issues exist, the
+// run stays ok, and the card names the relation.
+func TestCreateIssuesFromDrafts_RelationFailureWarns(t *testing.T) {
+	dir := t.TempDir()
+	writeDrafts(t, dir,
+		"01.md", "# feat(a): first\n\nbody a\n",
+		"02.md", "# feat(b): second\n\n- depends on {{ISSUE:01}}\n",
+	)
+	prov := newFakeGitProvider(ProviderGitHub, "github.com")
+	numberIssuesFrom(prov, 42)
+	prov.SetAddBlockedByErr(fmt.Errorf("%w: gh api: 404 Not Found", ErrRelationsUnsupported))
+
+	got, outcome := createIssuesFromDrafts(context.Background(), dir, resolveTo(prov))
+
+	want := "⚠️ could not create the dependency #43 blocked by #42: "
+	if !strings.HasPrefix(got, want) {
+		t.Errorf("reply =\n%s\nwant it to begin with %q", got, want)
+	}
+	if outcome.Status != messages.OutcomeOK {
+		t.Errorf("outcome status = %q, want %q", outcome.Status, messages.OutcomeOK)
+	}
+	if outcome.Data["deps"] != "0" || outcome.Data["deps_failed"] != "1" {
+		t.Errorf("outcome data = %v, want deps=0 deps_failed=1", outcome.Data)
+	}
+	if strings.Contains(got, "→ deps:") {
+		t.Errorf("reply carries a deps row although no relation was created:\n%s", got)
+	}
+}
+
+// TestCreateIssuesFromDrafts_RelationFailureContinues pins that the
+// relations after a refused one are still attempted.
+func TestCreateIssuesFromDrafts_RelationFailureContinues(t *testing.T) {
+	dir := t.TempDir()
+	writeDrafts(t, dir,
+		"01.md", "# feat(a): first\n\nbody a\n",
+		"02.md", "# feat(b): second\n\nbody b\n",
+		"03.md", "# feat(c): third\n\n- depends on {{ISSUE:01}} and {{ISSUE:02}}\n",
+	)
+	prov := newFakeGitProvider(ProviderGitHub, "github.com")
+	numberIssuesFrom(prov, 42)
+	prov.SetAddBlockedByFunc(func(_, blocker int) error {
+		if blocker == 42 {
+			return errors.New("HTTP 500")
+		}
+		return nil
+	})
+
+	got, outcome := createIssuesFromDrafts(context.Background(), dir, resolveTo(prov))
+
+	relations := prov.CallsByMethod("AddBlockedBy")
+	if len(relations) != 2 {
+		t.Fatalf("AddBlockedBy calls = %+v, want both relations attempted", relations)
+	}
+	if !strings.Contains(got, "⚠️ could not create the dependency #44 blocked by #42: HTTP 500") {
+		t.Errorf("reply missing the warning:\n%s", got)
+	}
+	if want := "→ deps: #44 blocked by #43"; !strings.Contains(got, want) {
+		t.Errorf("reply missing %q:\n%s", want, got)
+	}
+	if outcome.Status != messages.OutcomeOK {
+		t.Errorf("outcome status = %q, want %q", outcome.Status, messages.OutcomeOK)
+	}
+	if outcome.Data["deps"] != "1" || outcome.Data["deps_failed"] != "1" {
+		t.Errorf("outcome data = %v, want deps=1 deps_failed=1", outcome.Data)
+	}
+}
+
+// TestCreateIssuesFromDrafts_FailureCardCarriesDeps pins that the
+// relations created before a failed issue are still on the card.
+func TestCreateIssuesFromDrafts_FailureCardCarriesDeps(t *testing.T) {
+	dir := t.TempDir()
+	writeDrafts(t, dir,
+		"01.md", "# feat(a): first\n\nbody a\n",
+		"02.md", "# feat(b): second\n\n- depends on {{ISSUE:01}}\n",
+		"03.md", "# feat(c): third\n\n- depends on {{ISSUE:02}}\n",
+	)
+	prov := newFakeGitProvider(ProviderGitHub, "github.com")
+	numberIssuesFrom(prov, 42, 3)
+
+	got, _ := createIssuesFromDrafts(context.Background(), dir, resolveTo(prov))
+
+	if !strings.Contains(got, "⚠️ 2 of 3 issues opened") {
+		t.Errorf("reply missing the partial-success header:\n%s", got)
+	}
+	if !strings.Contains(got, "→ deps:") || !strings.Contains(got, "#43 blocked by #42") {
+		t.Errorf("reply missing the relations created before the failure:\n%s", got)
+	}
+	relations := prov.CallsByMethod("AddBlockedBy")
+	if len(relations) != 1 || relations[0].ID != 43 || relations[0].Blocker != 42 {
+		t.Errorf("AddBlockedBy calls = %+v, want one relation #43 blocked by #42", relations)
+	}
+}
+
+// TestCreateIssuesFromDrafts_NoDepsRowWithoutRelations pins that a
+// draft set without references carries no deps row.
+func TestCreateIssuesFromDrafts_NoDepsRowWithoutRelations(t *testing.T) {
+	dir := t.TempDir()
+	writeDrafts(t, dir, "01.md", "# feat(a): first\n\nbody a\n")
+	prov := newFakeGitProvider(ProviderGitHub, "github.com")
+	numberIssuesFrom(prov, 42)
+
+	got, outcome := createIssuesFromDrafts(context.Background(), dir, resolveTo(prov))
+
+	if strings.Contains(got, "deps") {
+		t.Errorf("reply carries a deps row although no relation was created:\n%s", got)
+	}
+	if outcome.Data["deps"] != "0" || outcome.Data["deps_failed"] != "0" {
+		t.Errorf("outcome data = %v, want deps=0 deps_failed=0", outcome.Data)
+	}
+}
+
+// TestCreateIssuesFromDrafts_RecordFailureKeepsRelations pins that
+// a draft whose record cannot be written still gets its relations:
+// the issue is on the platform, and the draft is gone, so no later
+// run can add the dependency.
+func TestCreateIssuesFromDrafts_RecordFailureKeepsRelations(t *testing.T) {
+	dir := t.TempDir()
+	writeDrafts(t, dir,
+		"01.md", "# feat(a): first\n\nbody a\n",
+		"02.md", "# feat(b): second\n\n- depends on {{ISSUE:01}}\n",
+	)
+	prov := newFakeGitProvider(ProviderGitHub, "github.com")
+	call := 0
+	prov.SetCreateIssueFunc(func(title, _ string) (*Issue, error) {
+		call++
+		if call == 2 {
+			// A directory where the record belongs: the write fails.
+			if err := os.Mkdir(filepath.Join(dir, "02.created"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		id := 41 + call
+		return &Issue{ID: id, Title: title, URL: fmt.Sprintf("https://github.com/o/r/issues/%d", id)}, nil
+	})
+
+	got, outcome := createIssuesFromDrafts(context.Background(), dir, resolveTo(prov))
+
+	relations := prov.CallsByMethod("AddBlockedBy")
+	if len(relations) != 1 || relations[0].ID != 43 || relations[0].Blocker != 42 {
+		t.Fatalf("AddBlockedBy calls = %+v, want one relation #43 blocked by #42", relations)
+	}
+	if !strings.Contains(got, "record #43 for 02.md") {
+		t.Errorf("reply missing the record failure:\n%s", got)
+	}
+	if want := "#43 blocked by #42"; !strings.Contains(got, want) {
+		t.Errorf("reply missing %q:\n%s", want, got)
+	}
+	if outcome.Data["deps"] != "1" {
+		t.Errorf("outcome data = %v, want deps=1", outcome.Data)
 	}
 }
 

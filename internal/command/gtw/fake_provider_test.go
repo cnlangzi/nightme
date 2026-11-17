@@ -46,6 +46,13 @@ type fakeGitProvider struct {
 	blockedBy    map[int][]*Issue
 	blockedByErr map[int]error
 
+	// AddBlockedBy response. addBlockedByErr is returned by every
+	// call; addBlockedByFn, when set, answers per relation and
+	// wins over it — lets a test fail one relation and let the
+	// others through.
+	addBlockedByErr error
+	addBlockedByFn  func(id, blocker int) error
+
 	// Generic response for AddIssueLabel / RemoveIssueLabel. Returning
 	// nil = success.
 	addIssueLabelErr    error
@@ -114,12 +121,16 @@ type fakeGitProvider struct {
 // named after the interface method (one variant per interface
 // method) so tests can pattern-match cleanly.
 type fakeProviderCall struct {
-	Method string // "GetIssue" / "ListIssues" / "ListBlockedBy" / "AddIssueLabel" / "RemoveIssueLabel" / "CreatePR" / "GetPR" / "CreateLabel"
+	Method string // "GetIssue" / "ListIssues" / "ListBlockedBy" / "AddBlockedBy" / "AddIssueLabel" / "RemoveIssueLabel" / "CreatePR" / "GetPR" / "CreateLabel"
 	Owner  string
 	Repo   string
 	ID     int
 	Label  string // only set for AddIssueLabel / RemoveIssueLabel / CreateLabel
 	Head   string // only set for CreatePR / GetPR
+
+	// Blocker is only set for AddBlockedBy: the issue that
+	// blocks the one named by ID.
+	Blocker int
 
 	// CreateLabel-only fields. Empty for the other methods.
 	// Stored so tests can assert colour / description were
@@ -458,6 +469,37 @@ func (f *fakeGitProvider) ListBlockedBy(_ context.Context, owner, repo string, i
 	out := make([]*Issue, len(blockers))
 	copy(out, blockers)
 	return out, nil
+}
+
+// SetAddBlockedByErr configures the error returned by every
+// AddBlockedBy call. Wrap ErrRelationsUnsupported to simulate a
+// platform without a relation graph.
+func (f *fakeGitProvider) SetAddBlockedByErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.addBlockedByErr = err
+}
+
+// SetAddBlockedByFunc makes AddBlockedBy answer through fn, so a
+// test can fail one relation and let the others through. fn wins
+// over SetAddBlockedByErr.
+func (f *fakeGitProvider) SetAddBlockedByFunc(fn func(id, blocker int) error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.addBlockedByFn = fn
+}
+
+func (f *fakeGitProvider) AddBlockedBy(_ context.Context, owner, repo string, id, blocker int) error {
+	f.mu.Lock()
+	f.calls = append(f.calls, fakeProviderCall{
+		Method: "AddBlockedBy", Owner: owner, Repo: repo, ID: id, Blocker: blocker,
+	})
+	err, fn := f.addBlockedByErr, f.addBlockedByFn
+	f.mu.Unlock()
+	if fn != nil {
+		return fn(id, blocker)
+	}
+	return err
 }
 
 func (f *fakeGitProvider) CreateIssue(_ context.Context, owner, repo, title, body string) (*Issue, error) {

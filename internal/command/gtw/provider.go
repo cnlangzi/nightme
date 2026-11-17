@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -30,9 +31,16 @@ const listIssuesPerPage = 100
 // is reported partially — see ListLabels.
 const listLabelsPerPage = 100
 
-// gitlabLinkBlocks is the link type GitLab reports for a linked
-// issue that blocks the issue the links were listed for.
+// gitlabLinkBlocks is GitLab's type for "the source blocks the
+// target". It is the type a relation is written with: the issue the
+// request names blocks the target. A linked issue listed with it is
+// one the listed-for issue blocks.
 const gitlabLinkBlocks = "blocks"
+
+// gitlabLinkIsBlockedBy is GitLab's type for "the source is blocked
+// by the target". A linked issue listed with it blocks the issue the
+// links were listed for — those are that issue's blockers.
+const gitlabLinkIsBlockedBy = "is_blocked_by"
 
 // ProviderKind names a supported git hosting platform. v1 supports
 // GitHub + GitLab via the user's local `gh` / `glab` CLI; other hosts
@@ -192,12 +200,21 @@ func hasHTTPStatus(stderr string, code int) bool {
 	s := strconv.Itoa(code)
 	for _, pat := range []string{
 		"(HTTP " + s + ")", // gh
-		s + " Not Found",   // glab's status text
-		s + " Forbidden",   // glab's status text
 		`"message":"` + s,  // glab: GitLab's error body
 		`"error":"` + s,    // glab: GitLab's error body (older shape)
 	} {
 		if strings.Contains(stderr, pat) {
+			return true
+		}
+	}
+	// glab's status line: "400 Bad Request", "404 Not Found". The
+	// reason phrase starts with a capital, which keeps a number in
+	// the message ("42 issues") from reading as a status.
+	for i := 0; i+len(s)+1 < len(stderr); i++ {
+		if !strings.HasPrefix(stderr[i:], s+" ") {
+			continue
+		}
+		if c := stderr[i+len(s)+1]; c >= 'A' && c <= 'Z' {
 			return true
 		}
 	}
@@ -269,6 +286,16 @@ type GitProvider interface {
 	// platform does not tell us" instead of pretending there are
 	// no dependencies.
 	ListBlockedBy(ctx context.Context, owner, repo string, id int) ([]*Issue, error)
+
+	// AddBlockedBy makes the issue `id` blocked by `blocker` —
+	// the platform's own dependency graph: the dependent's work
+	// cannot land before the blocker has.
+	//
+	// A platform that does not expose relations returns
+	// ErrRelationsUnsupported, so the caller can say "this
+	// platform does not tell us" instead of pretending there are
+	// no dependencies.
+	AddBlockedBy(ctx context.Context, owner, repo string, id, blocker int) error
 
 	// CreateIssue opens a new issue and returns it with ID and URL
 	// populated. The body is handed to the CLI through a temp
@@ -379,16 +406,17 @@ type GitProvider interface {
 // user as "issue #N not found in <repo>".
 var ErrIssueNotFound = errors.New("gtw: issue not found")
 
-// ErrRelationsUnsupported is returned by ListBlockedBy when the
-// platform does not expose an issue relation graph — GitHub
-// without the dependencies feature, GitLab Free / CE without
-// blocking relations.
+// ErrRelationsUnsupported is returned by ListBlockedBy and
+// AddBlockedBy when the platform does not expose an issue relation
+// graph — GitHub without the dependencies feature, GitLab Free /
+// CE without blocking relations.
 //
-// It is deliberately not "no blockers": silently treating a
-// platform that cannot answer as one with an empty graph would
-// let the automatic pick start work whose prerequisite has not
-// landed. The caller downgrades it to "order by age alone" and
-// says so.
+// It is deliberately not "no blockers" and not "the write failed":
+// silently treating a platform that cannot answer as one with an
+// empty graph would let the automatic pick start work whose
+// prerequisite has not landed. The pick downgrades it to "order by
+// age alone" and says so; a relation write turns it into a warning
+// that names the relation it could not create.
 var ErrRelationsUnsupported = errors.New("gtw: issue relations are not supported by this platform")
 
 // ErrUnsupportedProvider is returned by Detect when the host
@@ -1333,6 +1361,13 @@ type GitHubProvider struct {
 	Worktree string
 
 	host string
+
+	// globalIDs memoises the global id of an issue number for the
+	// lifetime of this provider. Writing a relation needs the
+	// blocker's id, and one draft set names the same blocker from
+	// several dependents.
+	globalIDsMu sync.RWMutex
+	globalIDs   map[int]int
 }
 
 // Kind implements GitProvider.
@@ -1458,6 +1493,72 @@ func (c *GitHubProvider) ListBlockedBy(ctx context.Context, owner, repo string, 
 		out = append(out, r.toIssue())
 	}
 	return out, nil
+}
+
+// AddBlockedBy makes the issue `id` blocked by `blocker`.
+//
+// GitHub names the blocker by its global id, not by its issue
+// number, so the id is read first:
+//
+//	gh api repos/<owner>/<repo>/issues/<blocker>
+//	gh api --method POST repos/<owner>/<repo>/issues/<id>/dependencies/blocked_by -F issue_id=<global id>
+//
+// `-F` sends the id as a JSON integer; `-f` would send a string,
+// which the platform rejects.
+//
+// A repository without the dependencies feature answers 404 —
+// ErrRelationsUnsupported, the same answer ListBlockedBy gives for
+// it.
+func (c *GitHubProvider) AddBlockedBy(ctx context.Context, owner, repo string, id, blocker int) error {
+	blockerID, err := c.issueGlobalID(ctx, owner, repo, blocker)
+	if err != nil {
+		return err
+	}
+	path := fmt.Sprintf("repos/%s/%s/issues/%d/dependencies/blocked_by", owner, repo, id)
+	_, stderr, err := c.runner().Run(ctx, "gh", "api", "--method", "POST", path,
+		"-F", fmt.Sprintf("issue_id=%d", blockerID))
+	if err != nil {
+		if hasHTTPStatus(stderr, http.StatusNotFound) {
+			return fmt.Errorf("%w: gh api %s: %s", ErrRelationsUnsupported, path, strings.TrimSpace(stderr))
+		}
+		return fmt.Errorf("gh api dependencies: %v: %s", err, stderr)
+	}
+	return nil
+}
+
+// issueGlobalID reads the global id of an issue — the `id` field
+// of GitHub's issue JSON, which is not the issue number.
+//
+// The answer is memoised: one draft set names the same blocker
+// from several dependents, and a global id never changes.
+func (c *GitHubProvider) issueGlobalID(ctx context.Context, owner, repo string, number int) (int, error) {
+	c.globalIDsMu.RLock()
+	id, ok := c.globalIDs[number]
+	c.globalIDsMu.RUnlock()
+	if ok {
+		return id, nil
+	}
+	path := fmt.Sprintf("repos/%s/%s/issues/%d", owner, repo, number)
+	stdout, stderr, err := c.runner().Run(ctx, "gh", "api", path)
+	if err != nil {
+		return 0, fmt.Errorf("gh api %s: %v: %s", path, err, stderr)
+	}
+	var raw struct {
+		ID int `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &raw); err != nil {
+		return 0, fmt.Errorf("gh api %s: decode json: %w", path, err)
+	}
+	if raw.ID <= 0 {
+		return 0, fmt.Errorf("gh api %s: response has no id: %s", path, strings.TrimSpace(stdout))
+	}
+	c.globalIDsMu.Lock()
+	if c.globalIDs == nil {
+		c.globalIDs = make(map[int]int)
+	}
+	c.globalIDs[number] = raw.ID
+	c.globalIDsMu.Unlock()
+	return raw.ID, nil
 }
 
 // CreateIssue runs `gh issue create --repo <owner>/<repo> --title
@@ -2020,16 +2121,69 @@ func (c *GitLabProvider) ListBlockedBy(ctx context.Context, owner, repo string, 
 	return decodeGitLabBlockers(stdout)
 }
 
+// AddBlockedBy makes the issue `id` blocked by `blocker`.
+//
+// GitLab records a link from the source issue's side: the issue
+// the request path names is the source, and `link_type=blocks` says
+// the source blocks the target. So the request goes to the
+// blocker's links endpoint and names the dependent as the target.
+//
+//	glab api --method POST projects/<owner%2Frepo>/issues/<blocker>/links
+//	    -f target_project_id=<owner>/<repo> -f target_issue_iid=<dependent> -f link_type=blocks
+//
+// Blocking links are a Premium feature: Free / CE answer 403, and
+// an older platform that does not know the relation type answers
+// 400 — both mean "this platform has no issue relations", not
+// "the write failed".
+func (c *GitLabProvider) AddBlockedBy(ctx context.Context, owner, repo string, id, blocker int) error {
+	path := fmt.Sprintf("projects/%s/issues/%d/links", url.PathEscape(owner+"/"+repo), blocker)
+	_, stderr, err := c.runner().Run(ctx, "glab", "api", "--method", "POST", path,
+		"-f", "target_project_id="+owner+"/"+repo,
+		"-f", fmt.Sprintf("target_issue_iid=%d", id),
+		"-f", "link_type="+gitlabLinkBlocks,
+	)
+	if err != nil {
+		if gitlabRelationsUnsupported(stderr) {
+			return fmt.Errorf("%w: glab api %s: %s", ErrRelationsUnsupported, path, strings.TrimSpace(stderr))
+		}
+		return fmt.Errorf("glab api links: %v: %s", err, stderr)
+	}
+	return nil
+}
+
+// gitlabRelationsUnsupported reports whether GitLab's answer to a
+// link write means "this platform has no issue relations" rather
+// than "the write failed".
+//
+// A 403 is the license gate on blocking links — unless it says the
+// user may not link the two issues, which is a permission problem:
+// the platform has relations, this account may not use them. A 400
+// that names `link_type` is the platform refusing the relation type
+// — the same thing said differently.
+//
+// The message is what tells the two 403s apart; if GitLab words it
+// differently, the 403 falls back to "unsupported", which is what
+// it was before.
+func gitlabRelationsUnsupported(stderr string) bool {
+	if strings.Contains(stderr, "must be a member of the project") {
+		return false
+	}
+	if hasHTTPStatus(stderr, http.StatusForbidden) {
+		return true
+	}
+	return hasHTTPStatus(stderr, http.StatusBadRequest) && strings.Contains(stderr, "link_type")
+}
+
 // decodeGitLabBlockers turns the issue-links response into the
 // blockers of the requested issue.
 //
 // The response is a flat array of the linked issues — each one
 // carries its own fields plus the `link_type` that says how it
 // relates to the requested issue. GitLab reports that type from
-// the requested issue's point of view: "blocks" means the linked
-// issue blocks the requested one, "is_blocked_by" means the
+// the requested issue's point of view: "is_blocked_by" means the
+// linked issue blocks the requested one, "blocks" means the
 // requested one blocks it. The blockers are therefore the entries
-// whose type is "blocks".
+// whose type is "is_blocked_by".
 func decodeGitLabBlockers(stdout string) ([]*Issue, error) {
 	var links []gitlabIssueJSON
 	if err := json.Unmarshal([]byte(stdout), &links); err != nil {
@@ -2037,7 +2191,7 @@ func decodeGitLabBlockers(stdout string) ([]*Issue, error) {
 	}
 	out := make([]*Issue, 0, len(links))
 	for _, l := range links {
-		if l.LinkType != gitlabLinkBlocks {
+		if l.LinkType != gitlabLinkIsBlockedBy {
 			continue
 		}
 		out = append(out, l.toIssue())

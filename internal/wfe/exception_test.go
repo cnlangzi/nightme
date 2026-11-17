@@ -142,6 +142,32 @@ func TestDecide_AStepThatIsStillRunningIsAJudgmentPoint(t *testing.T) {
 	}
 }
 
+// TestDecide_TheJudgmentReasonNamesWhatBroke — the reason the agent
+// reads says what broke, and it says it on one line.
+func TestDecide_TheJudgmentReasonNamesWhatBroke(t *testing.T) {
+	wf := mustParse(t, threeStepYAML)
+	state := newRunState(wf)
+	RecordStep(state, "main", wf.Jobs["main"].Steps[0], Outcome{
+		Status:  OutcomeFailed,
+		Summary: "the worktree could not be created",
+		Data:    map[string]string{OutcomeKeyError: "the worktree could not be created\nand the branch is gone"},
+	}, false)
+
+	decision, err := Decide(state, wf)
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if decision.Kind != DecisionJudgment {
+		t.Fatalf("Kind = %v, want a judgment point", decision.Kind)
+	}
+	if !strings.Contains(decision.Reason, "the worktree could not be created and the branch is gone") {
+		t.Errorf("Reason = %q, want it to name what broke", decision.Reason)
+	}
+	if strings.Contains(decision.Reason, "\n") {
+		t.Errorf("Reason = %q, want it on one line", decision.Reason)
+	}
+}
+
 // TestDecide_AnExceptionTheAgentResolvedIsNotAJudgmentPoint — a round
 // the agent ended early is not a judgment point: the agent has already
 // decided what happens next.

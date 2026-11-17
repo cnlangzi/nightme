@@ -454,6 +454,8 @@ Any string value can embed expressions. Expressions are evaluated when the step 
 
 The `outputs` segment is optional: the rest of the path is joined with `.` into one key. `${{ steps.fix.outputs.data.issue }}` and `${{ steps.fix.data.issue }}` read the same fact, and a key that is not an output falls back to the data namespace, so `${{ steps.fix.outputs.issue }}` finds the `issue` fact of the outcome.
 
+The `error` fact is reserved: it is the error description the plan reads to tell a normal result from a breakage (see §8.2), and only the step that broke fills it. A shell step or an action that reports an `error` output of its own does not get to claim it — the fact is dropped from the outputs.
+
 A condition is true when the value it resolves to is neither empty, `false` nor `0`.
 
 An expression that names an argument the workflow does not declare is refused when the file is loaded.

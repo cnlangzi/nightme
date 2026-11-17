@@ -657,7 +657,7 @@ The agent answers a judgment point with a **directive**:
 | `end_round()` | Ends the round of the job the run is on: the steps of the round that did not run are skipped, the job's final step runs, and the job starts its next round. |
 | `finish(status, summary)` | Ends the run. `status` is `done` or `failed`. |
 
-`resume` and `next` name no step: the run knows the one the judgment is about, and the engine decides what runs next. `resume` runs that step again — its budget for the round is checked first — and `next` records it as complete: the facts the step produced are kept, and the engine plans the next step.
+`resume` and `next` name no step: the run knows the one the judgment is about, and the engine decides what runs next. `resume` runs that step again — its budget for the round is checked first — and `next` records it as complete: the facts the step produced are kept, and the engine plans the next step. Both refuse a step that did its job already: there is nothing to repair, and nothing to declare done. `next` refuses a step that is still running: the work is in flight.
 
 The nightme commands are the ones the command registry holds, minus the ones that would take the run with them (`/me`, `/close`, `/new`, `/stop`, `/cwd`, `/use`, `/resume`, `/steer`, `/wiki`), the ones that only show something (`/help`, `/think`, `/tools`, `/watch`, `/format`) and the subcommands that shape the project or tear the run's own workspace down instead of moving the work on (`/gtw config`, `/gtw plan`, `/gtw new`, `/gtw close`, `/gtw back`, `/gtw sync`, `/gtw abort`). A command that belongs to no step is a repair: it counts against the step the run is on, but it never becomes that step's verdict.
 
@@ -677,7 +677,7 @@ The policy is the bound on what a run may do. It is a pure function of the workf
 | `Render()` | The workflow as a compact text block: the identity, the title, the steps, the notes and the limits. |
 | `StepCommands()` | The step messages the policy accepts right now. |
 
-A step's message belongs to that step, and a step that spent its budget leaves the list. The budget counts the actions of the current round only: the step's own execution, the nightme commands and the instructions issued for it, and the turns of the chat model that produced no tool call. It starts over at every round.
+A step's message belongs to that step, and a step that spent its budget leaves the list. The budget counts the actions of the current round only: the step's own execution, the agent's decision that the step is done, the nightme commands and the instructions issued for it, and the turns of the chat model that produced no tool call. It starts over at every round.
 
 A judgment that names no step — the plan forks, a job starts a new round — is charged to the last step that ran in the round. A run that has done no work yet is charged to the step the plan may run now. Every turn the agent spends without acting costs a chance somewhere: a turn that costs nothing bounds nothing.
 
@@ -693,8 +693,8 @@ The chat model acts through the tools below. Every handler enforces the policy: 
 
 | Tool | Behaviour |
 |---|---|
-| `resume()` | Runs the step the judgment is about — the step that broke — again: its own limit for the current round is checked first, then the step runs as the workflow wrote it. It returns the outcome — status, summary, data — and the transcript of what the coding agent said. |
-| `next()` | Records the step the judgment is about as complete: the facts it produced are kept, the summary says the agent decided the step was done, and the engine plans the next step. It refuses when the run is not on a step. |
+| `resume()` | Runs the step the judgment is about — the step that broke — again: its own limit for the current round is checked first, then the step runs as the workflow wrote it. It returns the outcome — status, summary, data — and the transcript of what the coding agent said. It refuses a step that did not break. |
+| `next()` | Records the step the judgment is about as complete: the facts it produced are kept, the summary says the agent decided the step was done, and the engine plans the next step. It counts against the step's budget like any other action. It refuses a step that is still running and a step that did its job already. |
 | `ntm_<command>` | Runs a nightme command as the owner. The tool takes the command's subcommand and its arguments; the command goes to the chat as a message of the run. |
 | `agent(task)` | Asks the owner's thinking a question and returns its answer. Registered only when there is an agent to ask. |
 | `instruct(text)` | Runs `Policy.CheckInstruct`, then sends a free-form prompt to the chat. It is tracked and returned like `resume`. |

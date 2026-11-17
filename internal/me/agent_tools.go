@@ -326,22 +326,44 @@ func (s *Service) execTool(ctx context.Context, r *run, call pendingCall) (stepR
 	}
 }
 
+// judgmentStep returns the step the run is on: the one the judgment
+// is about.
+//
+// The agent names no step: the run knows it, and the engine decides
+// what runs next.
+func judgmentStep(r *run) (wfe.Step, error) {
+	stepID := r.budgetStep()
+	if stepID == "" {
+		return wfe.Step{}, toolErrorf("the run is not on a step")
+	}
+	step, ok := r.stepByID(stepID)
+	if !ok {
+		return wfe.Step{}, toolErrorf("the step %q is not part of this workflow", stepID)
+	}
+	return step, nil
+}
+
 // toolResume runs the step that broke again.
 //
 // The step is the one the judgment is about: the run knows it, so the
 // agent names nothing. Its budget is checked like the budget of any
 // other action, and the step's verdict comes back.
 func (s *Service) toolResume(ctx context.Context, r *run, _ pendingCall) (stepResult, error) {
-	stepID := r.budgetStep()
-	if stepID == "" {
-		return stepResult{}, toolErrorf("the run is not on a step")
+	step, err := judgmentStep(r)
+	if err != nil {
+		return stepResult{}, err
 	}
-	step, ok := r.stepByID(stepID)
+	st, ok := r.stepState(step.ID)
 	if !ok {
-		return stepResult{}, toolErrorf("the step %q is not part of this workflow", stepID)
+		// The step never ran: there is nothing to run again.
+		return stepResult{}, toolErrorf("the step %q has not run: there is nothing to resume", step.ID)
+	}
+	if st.Outcome.Succeeded() {
+		// The step did its job: there is nothing to repair.
+		return stepResult{}, toolErrorf("the step %q did not break: there is nothing to repair", step.ID)
 	}
 	if !r.runnableStep(step.ID) {
-		return stepResult{}, toolErrorf("the step %q is not ready: the engine decides what runs next", step.ID)
+		return stepResult{}, toolErrorf("the step %q cannot run now: it did not run this round and it is not ready", step.ID)
 	}
 	if err := r.checkStep(step); err != nil {
 		return stepResult{}, toolErrorf("%s", err.Error())
@@ -377,21 +399,28 @@ func (s *Service) toolResume(ctx context.Context, r *run, _ pendingCall) (stepRe
 // the agent decided the step was done, and the engine plans the next
 // step.
 func (s *Service) toolNext(ctx context.Context, r *run, _ pendingCall) (stepResult, error) {
-	stepID := r.budgetStep()
-	if stepID == "" {
-		return stepResult{}, toolErrorf("the run is not on a step")
+	step, err := judgmentStep(r)
+	if err != nil {
+		return stepResult{}, err
 	}
-	step, ok := r.stepByID(stepID)
+	st, ok := r.stepState(step.ID)
 	if !ok {
-		return stepResult{}, toolErrorf("the run is not on a step")
+		return stepResult{}, toolErrorf("the step %q has not run: there is nothing to declare done", step.ID)
 	}
-	out, ok := r.stepOutcome(stepID)
-	if !ok {
-		return stepResult{}, toolErrorf("the run is not on a step")
+	if st.Pending {
+		// The step is still running: the work is in flight.
+		return stepResult{}, toolErrorf("the step %q is still running: wait for it", step.ID)
+	}
+	if st.Outcome.Succeeded() {
+		// The step did its job: there is nothing to repair.
+		return stepResult{}, toolErrorf("the step %q is already done: there is nothing to repair", step.ID)
 	}
 	job := wfe.JobOf(r.workflow, step.ID)
-	done := doneOutcome(out)
+	done := doneOutcome(st.Outcome)
 	r.recordStep(job, step, done)
+	// The history has to agree with the run state: the step is done,
+	// and the run says so.
+	r.record(wfe.ActionKindRun, s.stepCommand(r, step), step.ID, done)
 	s.persist(r)
 	s.updateCard(r)
 	return stepResult{
@@ -399,6 +428,18 @@ func (s *Service) toolNext(ctx context.Context, r *run, _ pendingCall) (stepResu
 		Summary: done.Summary,
 		Data:    done.Data,
 	}, nil
+}
+
+// stepCommand renders the command a step runs, the way the run records
+// it.
+func (s *Service) stepCommand(r *run, step wfe.Step) string {
+	if step.Kind() == wfe.StepKindWait {
+		return "wait " + step.Wait
+	}
+	if command := s.evalText(r, stepText(step)); command != "" {
+		return command
+	}
+	return step.ID
 }
 
 // toolCommand runs a nightme command as the owner.

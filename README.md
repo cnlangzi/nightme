@@ -756,7 +756,8 @@ The workflow says what comes next, so most steps need no model at all.
 
 The agent has a budget at every step: one number, the same for every step and
 every round, set by `me.max_judgments` (50 by default). A chance is the step's
-own execution, a nightme command or an instruction issued for it, or a turn of
+own execution, the agent's decision that the step is done, a nightme command or
+an instruction issued for it, or a turn of
 the chat model that produced no tool call. When the budget of the step the run is on is
 spent, the run pauses and says so in the chat; `/me continue` hands the
 control back and the step's budget starts over.

@@ -753,14 +753,11 @@ func waitSent(t *testing.T, op *fakeOperator, command string) {
 
 // stepOutcome returns the outcome the run state holds for a step.
 func stepOutcome(r *run, stepID string) (wfe.Outcome, bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for _, st := range r.state.Steps {
-		if st.ID == stepID {
-			return st.Outcome, true
-		}
+	st, ok := r.stepState(stepID)
+	if !ok {
+		return wfe.Outcome{}, false
 	}
-	return wfe.Outcome{}, false
+	return st.Outcome, true
 }
 
 // runHistory returns the actions the run took.

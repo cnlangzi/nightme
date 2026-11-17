@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/llm"
+	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/wfe"
 )
 
@@ -578,10 +579,11 @@ jobs:
 		t.Errorf("the verdict is %q, want the one of the completed step", res.Status)
 	}
 
-	out, ok := stepOutcome(r, "commit")
+	st, ok := r.stepState("commit")
 	if !ok {
-		t.Fatal("the commit step has no outcome")
+		t.Fatal("the commit step has no state")
 	}
+	out := st.Outcome
 	if out.Status != wfe.OutcomeOK {
 		t.Errorf("the step ended as %q, want the completed one", out.Status)
 	}
@@ -620,8 +622,183 @@ func TestNextTool_ARunThatIsNotOnAStepIsRefused(t *testing.T) {
 	if err == nil || !isToolError(err) {
 		t.Fatalf("err = %v, want a tool error the model can correct", err)
 	}
-	if !strings.Contains(err.Error(), "not on a step") {
+	if !strings.Contains(err.Error(), "has not run") {
 		t.Errorf("the refusal does not say why: %v", err)
+	}
+}
+
+// TestNextTool_AStepThatIsStillRunningIsRefused — the work is in
+// flight: the step is not done yet.
+func TestNextTool_AStepThatIsStillRunningIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+	svc, _ := testService(t, dir, Config{})
+	r := testRun(t, svc, "one")
+
+	commit, ok := r.stepByID("commit")
+	if !ok {
+		t.Fatal("the workflow has no commit step")
+	}
+	r.setJudgmentStep("commit")
+	r.recordPending("main", commit)
+
+	_, err := svc.toolNext(context.Background(), r, pendingCall{})
+	if err == nil || !isToolError(err) {
+		t.Fatalf("err = %v, want a tool error the model can correct", err)
+	}
+	if !strings.Contains(err.Error(), "still running") {
+		t.Errorf("the refusal does not say why: %v", err)
+	}
+	st, ok := r.stepState("commit")
+	if !ok {
+		t.Fatal("the commit step has no state")
+	}
+	if !st.Pending {
+		t.Error("the step is no longer running although the work is in flight")
+	}
+}
+
+// TestNextTool_AStepThatSucceededIsRefused — a step that did its job
+// has nothing to repair.
+func TestNextTool_AStepThatSucceededIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+	svc, _ := testService(t, dir, Config{})
+	r := testRun(t, svc, "one")
+
+	commit, ok := r.stepByID("commit")
+	if !ok {
+		t.Fatal("the workflow has no commit step")
+	}
+	r.setJudgmentStep("commit")
+	r.recordStep("main", commit, wfe.Outcome{Status: wfe.OutcomeOK, Summary: "committed"})
+
+	_, err := svc.toolNext(context.Background(), r, pendingCall{})
+	if err == nil || !isToolError(err) {
+		t.Fatalf("err = %v, want a tool error the model can correct", err)
+	}
+	if !strings.Contains(err.Error(), "already done") {
+		t.Errorf("the refusal does not say why: %v", err)
+	}
+}
+
+// TestResumeTool_AStepThatSucceededIsRefused — a step that did its job
+// did not break: there is nothing to repair.
+func TestResumeTool_AStepThatSucceededIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+	svc, op := testService(t, dir, Config{})
+	r := testRun(t, svc, "one")
+
+	commit, ok := r.stepByID("commit")
+	if !ok {
+		t.Fatal("the workflow has no commit step")
+	}
+	r.setJudgmentStep("commit")
+	r.recordStep("main", commit, wfe.Outcome{Status: wfe.OutcomeOK, Summary: "committed"})
+
+	_, err := svc.toolResume(context.Background(), r, pendingCall{})
+	if err == nil || !isToolError(err) {
+		t.Fatalf("err = %v, want a tool error the model can correct", err)
+	}
+	if !strings.Contains(err.Error(), "did not break") {
+		t.Errorf("the refusal does not say why: %v", err)
+	}
+	if len(op.Sent()) != 0 {
+		t.Errorf("the step ran again: %v", op.Sent())
+	}
+}
+
+// TestNextTool_TheRunGoesOnWithTheWorkflow — the agent declares the
+// step done: the engine runs the step after it.
+func TestNextTool_TheRunGoesOnWithTheWorkflow(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "two", `title: two
+jobs:
+  main:
+    steps:
+      - id: commit
+        message: /gtw commit
+      - id: push
+        message: /gtw push
+`)
+
+	provider := &scriptedProvider{responses: []llm.Response{
+		{Message: toolCallMsg("c1", toolNext, map[string]any{})},
+		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "done", "summary": "pushed"})},
+	}}
+	svc, op := testService(t, dir, Config{Provider: provider})
+	op.steps = []fakeStep{
+		{outcome: messages.Outcome{
+			Status:  messages.OutcomeFailed,
+			Summary: "the commit failed",
+			Data:    map[string]string{"error": "the commit failed"},
+		}},
+		okStep("pushed"),
+	}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "two", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitRun(t, svc, "obs-1")
+
+	// The engine went on with the workflow: the step after the one the
+	// agent declared done ran.
+	var pushed bool
+	for _, cmd := range op.Sent() {
+		if cmd == "/gtw push" {
+			pushed = true
+		}
+	}
+	if !pushed {
+		t.Errorf("the chat got %v, want the step after the one the agent declared done", op.Sent())
+	}
+}
+
+// TestNextTool_TheHistoryAgreesWithTheRunState — the step is done in
+// the run state and in the history: the run can end as done, and the
+// report does not contradict itself.
+func TestNextTool_TheHistoryAgreesWithTheRunState(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+	svc, _ := testService(t, dir, Config{})
+	r := testRun(t, svc, "one")
+
+	commit, ok := r.stepByID("commit")
+	if !ok {
+		t.Fatal("the workflow has no commit step")
+	}
+	r.setJudgment(`the previous step "commit" ended as "failed"`)
+	r.setJudgmentStep("commit")
+	r.recordStep("main", commit, wfe.Outcome{
+		Status:  wfe.OutcomeFailed,
+		Summary: "the commit failed",
+		Data:    map[string]string{"error": "the commit failed"},
+	})
+	r.record(wfe.ActionKindRun, "/gtw commit", "commit", wfe.Outcome{
+		Status:  wfe.OutcomeFailed,
+		Summary: "the commit failed",
+		Data:    map[string]string{"error": "the commit failed"},
+	})
+
+	if _, err := svc.toolNext(context.Background(), r, pendingCall{}); err != nil {
+		t.Fatalf("next: %v", err)
+	}
+
+	// The policy reads the last run of the step: it ended ok, so the
+	// run may end as done.
+	if err := r.checkFinish("done"); err != nil {
+		t.Errorf("the run may not end as done: %v", err)
+	}
+	// The report shows the done step, not the failed run.
+	report := svc.renderSituation(context.Background(), r)
+	if strings.Contains(report, "last outcome") {
+		t.Errorf("the report carries a verdict the step list already has:\n%s", report)
+	}
+	if !strings.Contains(report, doneSummary) {
+		t.Errorf("the report does not carry the step the agent declared done:\n%s", report)
 	}
 }
 

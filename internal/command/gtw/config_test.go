@@ -708,7 +708,7 @@ func TestBuildPRPrompt_CarriesOutputLanguage(t *testing.T) {
 }
 
 func TestRenderNewIssuePrompt_CarriesOutputLanguage(t *testing.T) {
-	p := renderNewIssuePrompt("/tmp/drafts", "简体中文")
+	p := renderNewIssuePrompt("/tmp/drafts", "简体中文", "")
 	mustContain(t, p, "- Write the body prose in 简体中文. Keep the section headings below exactly as given, in English.")
 	if strings.Contains(p, placeholderLanguage) {
 		t.Errorf("placeholder survived:\n%s", p)

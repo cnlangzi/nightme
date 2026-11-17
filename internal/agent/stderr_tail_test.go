@@ -22,7 +22,7 @@ func TestWithStderrTail(t *testing.T) {
 		if got.Error() != base.Error() {
 			t.Errorf("Error() = %q, want %q", got.Error(), base.Error())
 		}
-		if strings.Contains(got.Error(), "--- stderr tail ---") {
+		if strings.Contains(got.Error(), StderrTailHeader) {
 			t.Errorf("Error() = %q, want no tail section for an empty tail", got.Error())
 		}
 	})
@@ -30,7 +30,7 @@ func TestWithStderrTail(t *testing.T) {
 	t.Run("AppendsTailAndKeepsWrapChain", func(t *testing.T) {
 		base := errors.New("omp: get_state: session closed")
 		got := WithStderrTail(base, "boom")
-		want := base.Error() + "\n--- stderr tail ---\nboom"
+		want := base.Error() + "\n" + StderrTailHeader + "\nboom"
 		if got.Error() != want {
 			t.Errorf("Error() = %q, want %q", got.Error(), want)
 		}
@@ -45,8 +45,22 @@ func TestWithStderrTail(t *testing.T) {
 		if !strings.Contains(got.Error(), " ...[truncated]") {
 			t.Errorf("Error() = %q, want the truncation marker", got.Error())
 		}
-		if len(got.Error()) > len(base.Error())+1024+len("\n--- stderr tail ---\n") {
+		if len(got.Error()) > len(base.Error())+1024+len("\n"+StderrTailHeader+"\n") {
 			t.Errorf("Error() length = %d, want the tail capped at 1024 bytes", len(got.Error()))
+		}
+	})
+
+	// The child's last words are the ones that explain the exit,
+	// so the cap must drop the head of the tail — not its end.
+	t.Run("KeepsNewestBytesOfLongTail", func(t *testing.T) {
+		base := errors.New("boom")
+		fatal := "FATAL: cannot load provider config"
+		got := WithStderrTail(base, strings.Repeat("x", 3000)+"\n"+fatal+"\n")
+		if !strings.Contains(got.Error(), fatal) {
+			t.Errorf("Error() = %q, want the child's last line %q", got.Error(), fatal)
+		}
+		if kept := strings.Count(got.Error(), "x"); kept > 1024 {
+			t.Errorf("Error() keeps %d noise bytes, want the head of the tail dropped", kept)
 		}
 	})
 }

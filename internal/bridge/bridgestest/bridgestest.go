@@ -10,11 +10,15 @@
 package bridgestest
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"time"
+
+	"github.com/cnlangzi/nightme/internal/agent"
 )
 
 // GoToolchainAvailable reports whether the go toolchain is on PATH.
@@ -23,6 +27,60 @@ import (
 func GoToolchainAvailable() bool {
 	_, err := exec.LookPath("go")
 	return err == nil
+}
+
+// TestingT is the slice of *testing.T the helpers below use. The
+// interface keeps this package free of a testing import — the
+// caller decides how a test fails.
+type TestingT interface {
+	Helper()
+	Fatalf(format string, args ...any)
+	Skip(args ...any)
+	TempDir() string
+	Cleanup(func())
+}
+
+// Starter is the slice of a bridge starter the fake-CLI helpers
+// drive: the omp / pi / codex *Starter types satisfy it.
+type Starter interface {
+	Init(command string)
+	Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agent, error)
+}
+
+// BuildFakeCLIT compiles the fake agent CLI named name and returns
+// its path. It skips the test when the go toolchain is missing.
+func BuildFakeCLIT(t TestingT, name string) string {
+	t.Helper()
+	if !GoToolchainAvailable() {
+		t.Skip("go toolchain not on PATH; cannot build the fake CLI")
+	}
+	bin, err := BuildFakeCLI(t.TempDir(), name, FakeCLISource)
+	if err != nil {
+		t.Fatalf("build fake CLI: %v", err)
+	}
+	return bin
+}
+
+// StartFakeAgent points the starter at the fake CLI and spawns it
+// in the given mode. The spawn context lives until the test ends,
+// so the child outlives the call.
+func StartFakeAgent(t TestingT, s Starter, bin, mode string) (*agent.Agent, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	t.Cleanup(cancel)
+	s.Init(bin)
+	return s.Start(ctx, agent.StartConfig{
+		Workspace: t.TempDir(),
+		Env:       []string{"FAKE_BRIDGE_MODE=" + mode},
+	})
+}
+
+// StartFake spawns the fake CLI in the given mode and returns the
+// Start error.
+func StartFake(t TestingT, s Starter, bin, mode string) error {
+	t.Helper()
+	_, err := StartFakeAgent(t, s, bin, mode)
+	return err
 }
 
 // BuildFakeCLI writes source to a .go file in dir, compiles it with

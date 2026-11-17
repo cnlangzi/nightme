@@ -17,10 +17,11 @@ is committed there is the version users build and run.
 story when an agent CLI died during its handshake: the child had written the
 real reason to stderr and the bridge dropped it. The omp, pi and codex
 bridges attach the child's last stderr to every start, handshake and reset
-failure, so the chat message carries the reason next to the error. A child
-that wrote nothing to stderr adds no tail section, and the sentinels the
-chat layer switches on — a closed session, an unhealthy resume — still
-match.
+failure, so the chat message carries the reason next to the error. The tail
+keeps the child's most recent output, so a chatty child does not bury its
+last words under a screenful of diagnostics. A child that wrote nothing to
+stderr adds no tail section, and the sentinels the chat layer switches on —
+a closed session, an unhealthy resume — still match.
 
 ### Added: `nightme me` configures the chat model of the personal agent
 

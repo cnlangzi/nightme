@@ -1522,18 +1522,19 @@ var (
 	ErrResumeUnhealthy = errors.New("agent: resume session unhealthy")
 
 	// ErrNoDiff is returned by ReviewWithPrompt / ReviewWithOcr when
-	// the workspace has zero reviewable + zero untracked files in the
-	// precomputed reviewContext. This collapses to: clean working
-	// tree, with no staged/unstaged/untracked changes — and (only when
-	// the workspace is itself empty) nothing to review at all. Note
-	// that the base branch failing to resolve does NOT trigger
-	// ErrNoDiff by itself: the staged/unstaged/untracked git sources
-	// run unconditionally and can populate reviewContext even without
-	// a detected base. A repository that HAS a remote but no resolvable
-	// base is ErrBaseUnknown instead. The /review dispatcher detects
-	// this sentinel via errors.Is and short-circuits with a
-	// user-friendly "nothing to review" inline message — without
-	// spawning the agent subprocess for a zero-context review.
+	// the workspace has zero reviewable files in the precomputed
+	// reviewContext — nothing committed, staged or modified against the
+	// base. Files git does not track are outside the scope: they have
+	// no baseline to diff against, so a workspace whose only changes are
+	// untracked has no diff to review either. Note that the base branch
+	// failing to resolve does NOT trigger ErrNoDiff by itself: the
+	// staged/unstaged git sources run unconditionally and can populate
+	// reviewContext even without a detected base. A repository that HAS
+	// a remote but no resolvable base is ErrBaseUnknown instead. The
+	// /review dispatcher detects this sentinel via errors.Is and
+	// short-circuits with a user-friendly "nothing to review" inline
+	// message — without spawning the agent subprocess for a
+	// zero-context review.
 	// Sentinel lives here (not in command/review) so the agent package
 	// owns the contract for "the review cannot produce findings".
 	ErrNoDiff = errors.New("agent: no diff to review")

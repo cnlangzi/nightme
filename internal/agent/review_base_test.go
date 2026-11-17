@@ -120,14 +120,116 @@ func TestReview_BaseUnknown_ReturnsErrBaseUnknown(t *testing.T) {
 	}
 }
 
-// TestReview_UntrackedOnlyWorkspace_IsReviewed covers a workspace whose
-// only changes are new files: they have no diff, but they are still
-// part of the changeset and must be reviewed — and named in the prompt.
-func TestReview_UntrackedOnlyWorkspace_IsReviewed(t *testing.T) {
+// TestReview_UntrackedOnlyWorkspace_ReturnsErrNoDiff covers a workspace
+// whose only changes are new files: they have no baseline, so no diff
+// exists for them — the review can only name them, never judge them.
+// They are out of scope, and a workspace holding nothing else has no
+// diff to review at all.
+func TestReview_UntrackedOnlyWorkspace_ReturnsErrNoDiff(t *testing.T) {
 	dir := t.TempDir()
 	gitInit(t, dir)
 	gitCommitEmpty(t, dir)
 	gitWriteFile(t, dir, "new.go", "package new\n")
+
+	var mu sync.Mutex
+	var turns int
+	fs := &sessionFakeStarter{
+		name: "test-agent",
+		newDriver: func(StartConfig) *sessionFakeDriver {
+			return newSessionFakeDriver(func([]ContentBlock) []AgentEvent {
+				mu.Lock()
+				turns++
+				mu.Unlock()
+				return groupReply("ok")
+			})
+		},
+	}
+
+	_, err := ReviewWithOcr(context.Background(), fs, StartConfig{Workspace: dir})
+	if !errors.Is(err, ErrNoDiff) {
+		t.Fatalf("review of an untracked-only workspace err = %v, want ErrNoDiff", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if turns != 0 {
+		t.Errorf("%d agent turns were spawned, want 0", turns)
+	}
+}
+
+// TestReview_DocsOnlyChanges_SkipsSimplifyGroup covers a changeset with
+// no code file: the builtin group still reviews it, but the simplify
+// lens has nothing to act on — no simplify group is created, so no
+// session is spawned for it and the plan does not name it.
+func TestReview_DocsOnlyChanges_SkipsSimplifyGroup(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(context.Context, Starter, StartConfig, ...RunOnceOption) (RunResult, error)
+		// builtin says whether the single group is the builtin one.
+		// The ocr path answers with ocr's own groups when the ocr CLI
+		// is installed, so only the prompt path has a builtin group.
+		builtin bool
+	}{
+		{name: "prompt path", run: ReviewWithPrompt, builtin: true},
+		{name: "ocr path", run: ReviewWithOcr},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			gitInit(t, dir)
+			gitCommitEmpty(t, dir)
+			gitStageFile(t, dir, "README.md", "# docs\n")
+
+			var mu sync.Mutex
+			var plan []ReviewPlanGroup
+			fs := &sessionFakeStarter{
+				name: "test-agent",
+				newDriver: func(StartConfig) *sessionFakeDriver {
+					return newSessionFakeDriver(func([]ContentBlock) []AgentEvent {
+						return groupReply("ok")
+					})
+				},
+			}
+
+			_, err := tc.run(context.Background(), fs, StartConfig{Workspace: dir},
+				WithReviewPlanObserver(func(p []ReviewPlanGroup) {
+					mu.Lock()
+					plan = p
+					mu.Unlock()
+				}))
+			if err != nil {
+				t.Fatalf("review failed: %v", err)
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			if len(plan) != 1 {
+				t.Fatalf("plan carries %d groups, want 1: %+v", len(plan), plan)
+			}
+			if plan[0].Pattern == PatternSimplify {
+				t.Error("the plan names a simplify group although the changeset has no code file")
+			}
+			if !tc.builtin {
+				return
+			}
+			if plan[0].Pattern != PatternBuiltin {
+				t.Errorf("plan group pattern = %q, want %q", plan[0].Pattern, PatternBuiltin)
+			}
+			if len(plan[0].Files) != 1 || plan[0].Files[0] != "README.md" {
+				t.Errorf("builtin group files = %v, want [README.md] (its scope is unchanged)", plan[0].Files)
+			}
+		})
+	}
+}
+
+// TestReview_PromptOmitsUntrackedFiles covers a changeset that holds a
+// tracked change next to an untracked file: no prompt names the
+// untracked file, and no prompt carries a "new file additions" section
+// — an untracked file has no diff, so a review could only name it.
+func TestReview_PromptOmitsUntrackedFiles(t *testing.T) {
+	dir := t.TempDir()
+	gitInit(t, dir)
+	gitCommitEmpty(t, dir)
+	gitStageFile(t, dir, "a.go", "package a\n")
+	gitWriteFile(t, dir, "orphan.go", "package orphan\n")
 
 	var mu sync.Mutex
 	var prompts []string
@@ -145,24 +247,24 @@ func TestReview_UntrackedOnlyWorkspace_IsReviewed(t *testing.T) {
 		},
 	}
 
-	res, err := ReviewWithOcr(context.Background(), fs, StartConfig{Workspace: dir})
-	if err != nil {
-		t.Fatalf("review of an untracked-only workspace failed: %v", err)
+	if _, err := ReviewWithPrompt(context.Background(), fs, StartConfig{Workspace: dir}); err != nil {
+		t.Fatalf("review failed: %v", err)
 	}
-	if !strings.Contains(res.Text, "Reviewed") {
-		t.Errorf("review result carries no findings:\n%s", res.Text)
-	}
+
 	mu.Lock()
 	defer mu.Unlock()
 	if len(prompts) == 0 {
-		t.Fatal("no agent turn ran — the untracked files were never reviewed")
+		t.Fatal("no agent turn ran")
 	}
 	for _, p := range prompts {
-		if !strings.Contains(p, "New file additions") {
-			t.Errorf("prompt has no new-file-additions section:\n%s", p)
+		if strings.Contains(p, "New file additions") {
+			t.Errorf("prompt carries a new-file-additions section:\n%s", p)
 		}
-		if !strings.Contains(p, "new.go") {
-			t.Errorf("prompt does not name the untracked file:\n%s", p)
+		if strings.Contains(p, "orphan.go") {
+			t.Errorf("prompt names the untracked file:\n%s", p)
+		}
+		if !strings.Contains(p, "a.go") {
+			t.Errorf("prompt does not name the tracked file:\n%s", p)
 		}
 	}
 }

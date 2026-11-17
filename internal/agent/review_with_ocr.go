@@ -10,7 +10,8 @@
 //
 // simplify runs as a parallel reviewGroup inside both runners
 // (see PatternSimplify / simplifyGroup below) — one session turn per
-// group, concurrently with the main dimension(s).
+// group, concurrently with the main dimension(s). It covers the code
+// files of the changeset only.
 //
 // ocr is an external CLI (like git), not a bridge/agent. Its delegation
 // mode is LLM-free: it emits only deterministic engineering (file list
@@ -62,13 +63,14 @@ const groupDiffBudgetBytes = 1 << 20
 // Flow:
 //  1. precomputeReview fills reviewable / ocrGroups.
 //  2. Fan out via delegateReviewMultiJob with [ocrGroups..., simplifyGroup].
-//     simplify always runs as a parallel dimension (its own session turn) alongside
-//     the ocr-sourced groups.
+//     simplify runs as a parallel dimension (its own session turn)
+//     alongside the ocr-sourced groups when the changeset has code
+//     files.
 //
-// If precomputeReview returns empty (no workspace, no ocr groups), the
-// fan-out degrades gracefully to [simplifyGroup(nil)] — one goroutine,
-// one session turn. No internal fallback to ReviewWithPrompt; if ocr isn't
-// actually available, that's a caller bug, not this function's problem.
+// A workspace with no reviewable file has nothing to review: the run
+// returns ErrNoDiff before any agent is spawned. No internal fallback to
+// ReviewWithPrompt; if ocr isn't actually available, that's a caller
+// bug, not this function's problem.
 func ReviewWithOcr(ctx context.Context, s Starter, cfg StartConfig, opts ...RunOnceOption) (RunResult, error) {
 	pre := precomputeReviewWithOcr(ctx, cfg.Workspace)
 	// The base branch could not be determined and could not be
@@ -79,12 +81,12 @@ func ReviewWithOcr(ctx context.Context, s Starter, cfg StartConfig, opts ...RunO
 		return RunResult{}, err
 	}
 	// Short-circuit on empty diff — see ReviewWithPrompt for the
-	// rationale. Both runners must agree on the contract: zero
-	// reviewable + zero untracked → ErrNoDiff, no agent spawn.
-	if pre.isEmptyDiff() {
+	// rationale. Both runners must agree on the contract: no
+	// reviewable file → ErrNoDiff, no agent spawn.
+	groups := reviewGroups(pre)
+	if len(groups) == 0 {
 		return RunResult{}, ErrNoDiff
 	}
-	groups := append(pre.ocrGroups, simplifyGroup(pre.reviewable))
 	res, err := delegateReviewMultiJob(ctx, s, cfg, pre, groups, opts...)
 	if err != nil {
 		return res, err
@@ -278,7 +280,6 @@ type reviewContext struct {
 	defaultBranch string // resolvable ref "origin/main"; "" = could not detect
 	mergeBase     string // commit hash; "" = could not compute
 	reviewable    []string
-	untracked     []string // new files never committed/staged; can't be diffed (no baseline)
 	excluded      []string // "path (reason)" entries; Tier 2 only
 	// base is the resolution of the workspace's base branch: how it
 	// was determined, and whether the missing origin/HEAD was
@@ -315,17 +316,17 @@ type reviewGroup struct {
 	Mode string
 }
 
-// isEmptyDiff reports whether the precomputed context has no files
-// for any goroutine to slice. Single source of truth for the
-// "ErrNoDiff short-circuit" — ReviewWithPrompt and ReviewWithOcr both
-// call this so the contract lives next to the field definitions. A
-// nil receiver counts as empty (defensive: tests occasionally pass
-// zero-value reviewContext{}).
+// isEmptyDiff reports whether the precomputed context has no file for
+// any goroutine to slice. Single source of truth for the "nothing to
+// review" predicate — the precompute functions use it to decide whether
+// a builtin group is worth synthesizing. A nil receiver counts as
+// empty (defensive: tests occasionally pass zero-value
+// reviewContext{}).
 func (rc *reviewContext) isEmptyDiff() bool {
 	if rc == nil {
 		return true
 	}
-	return len(rc.reviewable) == 0 && len(rc.untracked) == 0
+	return len(rc.reviewable) == 0
 }
 
 // baseError reports the base-unknown failure: the repository has an
@@ -364,11 +365,31 @@ const (
 )
 
 // simplifyGroup builds a reviewGroup carrying the nightme-owned simplify
-// lens (review.go::simplifyPrompt). Always appended to the fan-out group
-// list of ReviewWithOcr and ReviewWithPrompt; runs as a parallel
-// RunOnce concurrent with the main dimension(s).
+// lens (review.go::simplifyPrompt), scoped to the code files among the
+// given paths: the lens looks for reuse / simplification / efficiency /
+// altitude in code, and prose gives it nothing to act on.
 func simplifyGroup(files []string) reviewGroup {
-	return reviewGroup{Pattern: PatternSimplify, Files: files, Rule: simplifyPrompt}
+	return reviewGroup{Pattern: PatternSimplify, Files: codeFiles(files), Rule: simplifyPrompt}
+}
+
+// reviewGroups returns the fan-out's groups: the precomputed ocr /
+// builtin groups, plus the simplify group when the reviewable files
+// include a code file. A changeset without a code file gets no simplify
+// group — the lens would answer "0 covered, 0 findings" and cost a
+// session turn.
+//
+// The ocr and builtin groups are not filtered: ocr is authoritative for
+// the files it selected, and the builtin group keeps the file list its
+// precompute produced — the Go enumeration in the Go path, ocr's
+// selection in the ocr path. Only the simplify group is narrowed to the
+// code files.
+func reviewGroups(pre reviewContext) []reviewGroup {
+	groups := slices.Clone(pre.ocrGroups)
+	simplify := simplifyGroup(pre.reviewable)
+	if len(simplify.Files) > 0 {
+		groups = append(groups, simplify)
+	}
+	return groups
 }
 
 // reviewPlan turns the fan-out's groups into the plan the caller
@@ -394,11 +415,10 @@ func reviewPlan(groups []reviewGroup) []ReviewPlanGroup {
 // verifying OcrAvailable() before reaching this — this function
 // assumes ocr is on $PATH.
 //
-// The committed leg needs the base branch; the staged / unstaged /
-// untracked legs do not, so they are collected even when the base is
-// unknown. ocr's file list wins when the preview answered; the Go-side
-// enumeration is the fallback, so an ocr failure no longer reads as
-// an empty diff.
+// The committed leg needs the base branch; the staged / unstaged legs
+// do not, so they are collected even when the base is unknown. ocr's
+// file list wins when the preview answered; the Go-side enumeration is
+// the fallback, so an ocr failure no longer reads as an empty diff.
 func precomputeReviewWithOcr(ctx context.Context, workspace string) reviewContext {
 	rc := reviewContext{workspace: workspace}
 	if workspace == "" {
@@ -412,8 +432,7 @@ func precomputeReviewWithOcr(ctx context.Context, workspace string) reviewContex
 		rc.mergeBase = runGit(ctx, workspace, "merge-base", base, "HEAD")
 	}
 
-	goReviewable, goUntracked := collectWorkspaceChanges(ctx, workspace, base)
-	rc.untracked = goUntracked
+	goReviewable := collectWorkspaceChanges(ctx, workspace, base)
 
 	if base != "" {
 		if preview, ok := runOcrDelegatePreview(ctx, workspace, base, "HEAD"); ok {
@@ -465,12 +484,9 @@ func precomputeReviewWithBuiltin(ctx context.Context, workspace string) reviewCo
 		rc.mergeBase = runGit(ctx, workspace, "merge-base", base, "HEAD")
 	}
 
-	rc.reviewable, rc.untracked = collectWorkspaceChanges(ctx, workspace, base)
+	rc.reviewable = collectWorkspaceChanges(ctx, workspace, base)
 
 	if !rc.isEmptyDiff() {
-		// Files = reviewable only — untracked have no diff to slice on.
-		// untracked is rendered separately by assembleGroupPrompt as a
-		// "new file additions" section.
 		rc.ocrGroups = []reviewGroup{{
 			Pattern: PatternBuiltin,
 			Files:   rc.reviewable,
@@ -482,35 +498,26 @@ func precomputeReviewWithBuiltin(ctx context.Context, workspace string) reviewCo
 }
 
 // collectWorkspaceChanges enumerates the workspace's changed files.
-// Returns two disjoint slices:
+// Returns the reviewable paths: the tracked files with at least one
+// diff (committed / staged / unstaged). Safe to render with `git diff
+// -- <file>` and put in reviewGroup.Files.
 //
-//   - reviewable: files with at least one diff (committed/staged/
-//     unstaged). Safe to render with `git diff -- <file>` and put in
-//     reviewGroup.Files.
-//   - untracked:   new files never committed/staged — they have no
-//     baseline to diff against, so they CANNOT appear in any diff.
-//     Listed separately so the LLM prompt can call them out as
-//     "new file additions" instead of pretending a diff exists.
-//
-// `git diff <base>...HEAD -- <untracked>` returns empty (file not in
-// any commit yet). `git diff -- <untracked>` also returns empty. So
-// merging untracked into reviewable would silently violate the
-// coverage mandate (file listed but no content for the LLM to
-// review). Keeping them separate is the only honest shape.
+// Files git does not track are out of scope: they have no baseline, so
+// no diff exists for them (`git diff -- <untracked>` is empty). A
+// review could only name them, never judge them.
 //
 // Only the committed leg needs the base branch; the staged / unstaged
-// / untracked legs run unconditionally, so the uncommitted changes of a
-// workspace with an unknown base are still collected. They are not
-// silently reviewed, though: a repository that HAS a remote fails the
-// run with ErrBaseUnknown rather than passing off a partial diff as
-// the whole change set.
+// legs run unconditionally, so the uncommitted changes of a workspace
+// with an unknown base are still collected. They are not silently
+// reviewed, though: a repository that HAS a remote fails the run with
+// ErrBaseUnknown rather than passing off a partial diff as the whole
+// change set.
 //
-// 4 git sources, dedup'd:
+// 3 git sources, dedup'd:
 //  1. git diff --name-only <base>...HEAD    (committed on branch)
 //  2. git diff --staged --name-only        (staged, not committed)
 //  3. git diff --name-only                 (unstaged working tree)
-//  4. git ls-files --others --exclude-standard  (untracked, .gitignore)
-func collectWorkspaceChanges(ctx context.Context, workspace, baseRef string) (reviewable, untracked []string) {
+func collectWorkspaceChanges(ctx context.Context, workspace, baseRef string) []string {
 	seen := map[string]bool{}
 	var changed []string
 	addChanged := func(s string) {
@@ -534,23 +541,13 @@ func collectWorkspaceChanges(ctx context.Context, workspace, baseRef string) (re
 		"diff", "--name-only"), "\n") {
 		addChanged(f)
 	}
-	for _, f := range strings.Split(runGit(ctx, workspace,
-		"ls-files", "--others", "--exclude-standard"), "\n") {
-		s := strings.TrimSpace(f)
-		if s == "" || seen[s] {
-			continue
-		}
-		seen[s] = true
-		if isReviewablePath(s) {
-			untracked = append(untracked, s)
-		}
-	}
+	var reviewable []string
 	for _, f := range changed {
 		if isReviewablePath(f) {
 			reviewable = append(reviewable, f)
 		}
 	}
-	return reviewable, untracked
+	return reviewable
 }
 
 // resolveBase determines the workspace's base branch and returns it
@@ -1009,22 +1006,6 @@ func assembleGroupPrompt(ctx context.Context, rc reviewContext, g *reviewGroup) 
 	fmt.Fprintln(&b, "Coverage is MANDATORY: every file below must end as `reviewed` or `skipped` with a concrete reason.")
 	for _, f := range g.Files {
 		fmt.Fprintf(&b, "- %s\n", f)
-	}
-
-	// --- Untracked files (new additions, no baseline to diff against) ---
-	// These files appear in the changeset but `git diff -- <file>`
-	// returns empty for them — the LLM must treat them as "new file
-	// additions" rather than expecting existing diff content.
-	//
-	// Rendered for every group: in the ocr path the untracked files
-	// belong to no rule group, so no group's file list would name
-	// them otherwise.
-	if len(rc.untracked) > 0 {
-		fmt.Fprintln(&b, "\n# New file additions (no baseline — added in this changeset)")
-		fmt.Fprintln(&b, "These files are untracked (never committed/staged), so no diff exists. Review by reading the file contents directly if available, or skip with reason.")
-		for _, f := range rc.untracked {
-			fmt.Fprintf(&b, "- %s\n", f)
-		}
 	}
 
 	// --- Diffs (group-filtered via `git diff -- <files...>`) ---

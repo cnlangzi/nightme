@@ -275,9 +275,10 @@ Findings must conform to the nightme review output schema (see host agent prompt
 // `cursor-agent -p /review-bugbot`), they send the slash command
 // directly in chat and NightMe forwards it transparently.
 //
-// simplify always runs alongside as a parallel dimension (Pattern =
-// PatternSimplify), appended after pre.ocrGroups — see
-// PatternSimplify / simplifyGroup in review_with_ocr.go.
+// simplify runs alongside as a parallel dimension (Pattern =
+// PatternSimplify), appended after pre.ocrGroups when the changeset has
+// code files — see PatternSimplify / simplifyGroup in
+// review_with_ocr.go.
 func ReviewWithPrompt(ctx context.Context, s Starter, cfg StartConfig, opts ...RunOnceOption) (RunResult, error) {
 	pre := precomputeReviewWithBuiltin(ctx, cfg.Workspace)
 	// The base branch could not be determined and could not be
@@ -287,17 +288,16 @@ func ReviewWithPrompt(ctx context.Context, s Starter, cfg StartConfig, opts ...R
 	if err := pre.baseError(); err != nil {
 		return RunResult{}, err
 	}
-	// Short-circuit on empty diff: zero reviewable + zero untracked
-	// means precompute produced no files for any goroutine to slice.
-	// Without this guard, fan-out collapses to [simplifyGroup(nil)]
-	// — one session turn that ships a prompt with empty file context to
-	// the agent, which can only answer "0 covered, 0 findings".
-	// Returning ErrNoDiff lets the /review dispatcher surface a
-	// clean inline message instead of burning a dsh session spawn.
-	if pre.isEmptyDiff() {
+	// Short-circuit on empty diff: precompute produced no reviewable
+	// file, so the fan-out has no group to run. Without this guard, a
+	// session turn ships a prompt with empty file context to the agent,
+	// which can only answer "0 covered, 0 findings". Returning
+	// ErrNoDiff lets the /review dispatcher surface a clean inline
+	// message instead of burning a dsh session spawn.
+	groups := reviewGroups(pre)
+	if len(groups) == 0 {
 		return RunResult{}, ErrNoDiff
 	}
-	groups := append(pre.ocrGroups, simplifyGroup(pre.reviewable))
 	res, err := delegateReviewMultiJob(ctx, s, cfg, pre, groups, opts...)
 	if err != nil {
 		return res, err

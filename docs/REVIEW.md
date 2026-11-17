@@ -44,7 +44,7 @@
 
 ## 2. 整体架构:统一 dispatcher + 两种 Runner
 
-review 由所有 bridge 统一走 `agent.ReviewDispatch`(单一入口):`OcrAvailable() ? ReviewWithOcr : ReviewWithPrompt`。两个 Runner 都 fan-out 出 ≥2 个 reviewGroup(ocr/builtin 主 group + simplify),走同一个 `delegateReviewMultiJob`。详见 §2.6。
+review 由所有 bridge 统一走 `agent.ReviewDispatch`(单一入口):`OcrAvailable() ? ReviewWithOcr : ReviewWithPrompt`。两个 Runner 都 fan-out 出 ocr/builtin 主 group,外加 changeset 有代码文件时的 simplify group,走同一个 `delegateReviewMultiJob`。详见 §2.6。
 
 agent 包不再区分 "native / mixed / delegate" 桥——每条桥的 `Starter.Review` 都是同一行 `return agent.ReviewDispatch(ctx, s, cfg, opts...)`。Agent 自带的 review 子命令(`claude -p code-review` / `codex review` / `cursor-agent -p /review-bugbot`)用户直接在 chat 发 slash command,nightme 透传给底层 agent——不再通过 `Starter.Review` 特殊路径触发。
 
@@ -67,15 +67,15 @@ Starter.Review(所有 bridge 都是同一行)
           │     │     gitbase → base(+ 必要时 repair origin/HEAD)+ merge-base
           │     │     ocr delegate preview → reviewable + excluded + mergeBase
           │     │     ocr delegate rule    → ocrGroups (N per-pattern)
-          │     │     git                 → staged/unstaged/untracked(无条件收集)
-          │     ├─ groups = pre.ocrGroups + simplifyGroup(pre.reviewable)
+          │     │     git                 → staged/unstaged(无条件收集)
+          │     ├─ groups = reviewGroups(pre)(ocr/builtin groups + 有代码文件才有 simplify group)
           │     └─ delegateReviewMultiJob(sem cap 4,每 group 一个 session turn,eventAggregator,mergeRunResults)
           │
           └─ OcrAvailable() NO  → ReviewWithPrompt
                 ├─ pre := precomputeReviewWithBuiltin(workspace)
                 │     gitbase → base(+ 必要时 repair origin/HEAD)+ merge-base
-                │     Go → 4 个 git 来源 + 合成 1 个 builtin group
-                ├─ groups = pre.ocrGroups(builtin) + simplifyGroup(pre.reviewable)
+                │     Go → 3 个 git 来源 + 合成 1 个 builtin group
+                ├─ groups = reviewGroups(pre)(同上)
                 └─ delegateReviewMultiJob(同上)
 
 pty / bash → ErrReviewNotSupported → 友好提示("不是 coding agent")
@@ -92,15 +92,15 @@ precomputeReviewWithOcr                precomputeReviewWithBuiltin
     ├─ gitbase.Resolve → base            ├─ gitbase.Resolve → base
     │   (+ repair origin/HEAD)            │   (+ repair origin/HEAD)
     ├─ git: merge-base                    ├─ git: merge-base
-    ├─ ocr delegate preview               ├─ Go: 4 个 git 来源 → reviewable + untracked
+    ├─ ocr delegate preview               ├─ Go: 3 个 git 来源 → reviewable
     │   → reviewable (ocr FileFilter)     │   → reviewable (Go isReviewablePath)
-    │   → excluded (with reasons)         │   → untracked (新文件,无 diff)
+    │   → excluded (with reasons)         │
     ├─ ocr delegate rule                  ├─ synthesize 1 个 builtin group
     │   → ocrGroups (N groups, per-pattern) │   → ocrGroups = [{patternBuiltin, BuiltinPrompt}]
     ↓                                       ↓
     reviewContext (same shape)              reviewContext (same shape)
     ↓                                       ↓
-    groups = pre.ocrGroups + simplifyGroup(pre.reviewable)
+    groups = reviewGroups(pre)(ocr/builtin groups + 有代码文件才有 simplify group)
     ↓
     delegateReviewMultiJob → fan-out
 ```
@@ -120,13 +120,14 @@ diff 不在 precompute 阶段算——每个 rule group 在组装 prompt 时自�
 
 | 字段 | ocr 路径 | Go 路径 |
 |---|---|---|
-| `reviewable` | ocr FileFilter(精度高);ocr preview 失败时退回 Go 4 个 git 来源 | Go 4 个 git 来源(committed/staged/unstaged)+ `isReviewablePath`(启发式) |
-| `untracked`  | Go 端 `git ls-files --others --exclude-standard`(ocr 的 preview 不给未 tracked 列表;独立于 reviewable,因为没有 diff 可渲染)| Go 端 `git ls-files --others --exclude-standard`(独立于 reviewable,因为没有 diff 可渲染)|
+| `reviewable` | ocr FileFilter(精度高);ocr preview 失败时退回 Go 3 个 git 来源 | Go 3 个 git 来源(committed/staged/unstaged)+ `isReviewablePath`(启发式) |
 | `excluded` | ocr 提供的排除原因列表 | nil(Go 端不跟踪 excluded)|
 | `ocrGroups` | N 个(每 pattern 一组,Rule 是 ocr rule doc);ocr 没给出 rule 时退回 1 个 builtin group| 1 个 builtin group(Pattern=patternBuiltin, Rule=BuiltinPrompt)|
 | merge-base | 都有(同)| 都有(同)|
 
-`reviewable` / `untracked` 的 staged / unstaged / untracked 三个来源**无条件**收集 —— 只有 committed 那一腿依赖 base。base 定不下来时,工作区里的未提交改动仍会被收集;但 review 不会拿它们冒充完整 diff:仓库有 origin remote 就报 `ErrBaseUnknown`。
+`reviewable` 的 staged / unstaged 两个来源**无条件**收集 —— 只有 committed 那一腿依赖 base。base 定不下来时,工作区里的未提交改动仍会被收集;但 review 不会拿它们冒充完整 diff:仓库有 origin remote 就报 `ErrBaseUnknown`。
+
+git 不跟踪的文件(未 tracked)**不在 review 的 scope 里**:它们没有基线,`git diff -- <file>` 全空,review 只能点名、无法判断。两条路径都不收集它们,prompt 里也不出现它们的名字。
 
 **降级矩阵**:
 
@@ -136,10 +137,11 @@ diff 不在 precompute 阶段算——每个 rule group 在组装 prompt 时自�
 | 仓库缺 `origin/HEAD`,但 `origin` 够得着 | 从远端学到默认分支;补写 `refs/remotes/origin/HEAD`;review 的前言里说明这次修复 |
 | 仓库缺 `origin/HEAD`,`origin` 够不着 | `agent.ErrBaseUnknown`;不起 review turn;committed diff 明确报"没 review";提示 `git -C <ws> remote set-head origin -a` |
 | 仓库有 `origin` remote,但本地缺 `refs/remotes/origin/<branch>` | `agent.ErrBaseUnknown`;不写 ref;提示 `git -C <ws> fetch origin` |
-| 仓库根本没有 remote | 不是错误:scope 就是工作区(staged/unstaged/untracked);工作区干净 → `ErrNoDiff` |
+| 仓库根本没有 remote | 不是错误:scope 就是工作区(staged/unstaged);工作区干净 → `ErrNoDiff` |
 | 远端查到了,但补写 `origin/HEAD` 失败 | base 仍然已知,review 照跑;不 announce |
 | `ocr delegate preview` 失败(base 已知) | Go 端枚举兜底给文件清单,builtin rubric 接手,不会退化成"没有 diff" |
-| 工作区只有未 tracked 文件 | 照常 review;未 tracked 清单进 prompt 的"new file additions"段 |
+| 工作区只有未 tracked 文件 | 不在 scope 里 → 没有 reviewable 文件 → `ErrNoDiff` |
+| changeset 里没有代码文件(只有文档等) | builtin / ocr group 照跑(scope 不变);simplify group 不创建 |
 | 工作区不是 git 仓库 | 没有文件可收集 → `ErrNoDiff` |
 
 `ReviewWithOcr` 调 `precomputeReviewWithOcr`,`ReviewWithPrompt` 调 `precomputeReviewWithBuiltin`。两个 Runner 函数返回值都是 `RunResult`,行为形状一致。`agent.ReviewDispatch` 按 `OcrAvailable()` 选择调用哪个 Runner —— 路由决策集中在这一个 helper,不在任何 Runner 的内部职责里。
@@ -160,7 +162,7 @@ ocr 两个子命令职责分明(**分组依据来自 rule,不是 preview**):
 
 **收益**:ocr 的精确文件选择 + 规则降噪 + 覆盖率约束,治"漏文件 / 偷懒 / 规则噪声";LLM 走现有 agent;ocr 不配 LLM、无双配置。
 
-**ocr 挂了怎么办**:`ocr delegate preview` 失败时,文件清单退回 Go 端枚举(4 个 git 来源),规则退回 `BuiltinPrompt` —— ocr 失败不再读成"没有 diff"。未 tracked 的文件清单始终来自 Go 端(`git ls-files --others --exclude-standard`):ocr 的 preview 不给这张表,而未 tracked 文件不属于任何 rule group,所以 prompt 的"new file additions"段对每个 group 都渲染。
+**ocr 挂了怎么办**:`ocr delegate preview` 失败时,文件清单退回 Go 端枚举(3 个 git 来源),规则退回 `BuiltinPrompt` —— ocr 失败不再读成"没有 diff"。未 tracked 的文件不在 scope 里(没有基线就没有 diff,review 只能点名):两条路径都不收集它们,prompt 里也不出现它们的名字。
 
 **边界**:委托模式下定位 / 反思由 host agent 自己做,**拿不到** ocr 的行级定位 / 反思精度(那是端到端 `ocr review` 的领域,不在 v1 默认路径)。
 
@@ -190,11 +192,11 @@ ocr = alibaba 的 [open-code-review](https://github.com/alibaba/open-code-review
 
 ### 2.3 Go 复刻的 builtin 路径(ocr 未装,`ReviewWithPrompt`)
 
-ocr CLI 未装,`agent.ReviewDispatch` 走 `ReviewWithPrompt`。`precomputeReviewWithBuiltin` 用 4 个 git 来源 + `isReviewablePath` 启发式收集 reviewable / untracked,合成 1 个 `patternBuiltin` 的 ocrGroup(Rule = `BuiltinPrompt` const,跟 ocr 路径的 N 个 per-pattern ocrGroup 等价)。**仍然 fan-out 出 builtin + simplify 两个 group** —— 跟 ocr 路径走同一条 `delegateReviewMultiJob` 路径,只是 file-list 精度低一档。
+ocr CLI 未装,`agent.ReviewDispatch` 走 `ReviewWithPrompt`。`precomputeReviewWithBuiltin` 用 3 个 git 来源 + `isReviewablePath` 启发式收集 reviewable,合成 1 个 `patternBuiltin` 的 ocrGroup(Rule = `BuiltinPrompt` const,跟 ocr 路径的 N 个 per-pattern ocrGroup 等价)。**仍然 fan-out 出 builtin group,外加 changeset 有代码文件时的 simplify group** —— 跟 ocr 路径走同一条 `delegateReviewMultiJob` 路径,只是 file-list 精度低一档。
 
 base 分支由 `internal/gitbase.Resolve` 判定(见 §2 的"base 分支怎么来"):两条 precompute 路径共用同一个解析器,`/review` 缺 `refs/remotes/origin/HEAD` 时自己补写。
 
-workspace 为空 / precompute 全失败时,fan-out 退化为 `[simplifyGroup(nil)]` 单 goroutine,prompt 用 `BuiltinPrompt` 兜底。**零外部依赖,零回归**。
+workspace 为空 / precompute 全失败时,没有 reviewable 文件 → `ErrNoDiff`,不起 session。**零外部依赖,零回归**。
 
 ### 2.4 prompt 工程(对 ocr / builtin 路径通用)
 
@@ -202,11 +204,12 @@ workspace 为空 / precompute 全失败时,fan-out 退化为 `[simplifyGroup(nil
 
 1. **Go 侧预计算 diff** —— 治 agent 偷懒 / 漏文件
 2. **文件清单 + 排除** —— `isReviewablePath` 启发式(generated / testdata / vendor 等)
-3. **reviewable vs untracked 分离** —— 改了/未改的文件走 diff 通道;**新文件(untracked)走单独通道**,因为 `git diff <untracked>` 全空,把它们混进 reviewable 会让 LLM 看到文件列表却没有 diff 内容,违反 coverage mandate
+3. **只 review 有 diff 的文件** —— 未 tracked 的文件没有基线,`git diff <file>` 全空;把它们列进文件清单会让 LLM 看到文件名却没有内容,违反 coverage mandate,所以它们整个不在 scope 里(不收集、不点名)
 4. **覆盖率硬约束** —— 每文件 reviewed 或 skipped-with-reason
 5. **输出 schema** —— path / content / start_line / end_line / category(`bug|security|performance|maintainability|test|style|documentation|other`)/ severity(`critical|high|medium|low`),结构化便于 fix 定位
 6. **规则匹配** —— ocr 路径用 `ocr delegate rule` 返回的 ocrGroups(每个 pattern 一组);builtin 路径用 `precomputeReviewWithBuiltin` 合成的一个 builtinGroup(全部文件 + BuiltinPrompt)。两者**形状一致**,fan-out 不区分
 7. **per-group 字节预算** —— `groupDiffBudgetBytes = 1048576`(1 MiB)兜底,一个 rule group 的三段 diff 共享这个预算;超预算的段按行边界截断,并提示"read directly"
+8. **simplify group 只看代码文件** —— 代码文件按白名单判定(扩展名表 + 文件名表);没有代码文件的 changeset 不起 simplify group(见 §2.6)
 
 **diff 预算(per group)**:
 
@@ -216,7 +219,7 @@ workspace 为空 / precompute 全失败时,fan-out 退化为 `[simplifyGroup(nil
 - 放得下内容、放不下 marker 时,段内容退化为 marker 本身——agent 仍知道这段被截断、该去读哪些文件;配额小到连 marker 都放不下时,整段省略。
 - 被截断的 group 记一条 Info 日志:group pattern / 预算 / 实际 payload 字节数 / 丢弃字节数。
 
-**关键收敛**:1–5 项是纯 Go 工程,两档都做;第 6 项规则匹配是 ocr / builtin 路径的差异点(ocr 拿多 pattern groups,builtin 拿 Go 合成的一个 builtinGroup);第 7 项防单 group 的 prompt 膨胀。ocr 在与不在的区别收敛到"规则匹配"一项的精度(ocr FileFilter vs Go 启发式)。
+**关键收敛**:1–5 项是纯 Go 工程,两档都做;第 6 项规则匹配是 ocr / builtin 路径的差异点(ocr 拿多 pattern groups,builtin 拿 Go 合成的一个 builtinGroup);第 7 项防单 group 的 prompt 膨胀;第 8 项收窄 simplify group 的 scope。ocr 在与不在的区别收敛到"规则匹配"一项的精度(ocr FileFilter vs Go 启发式)。
 
 `BuiltinPrompt` 本身不再携带 simplify 规则(原 `StandardPrompt` 里有这条 bullet,已删)—— simplify 作为独立并行 group 跑(`simplifyPrompt` const,小写未导出),不再在 BuiltinPrompt 里冗余出现。severity 词汇统一为 `critical/high/medium/low`,跟 `assembleGroupPrompt` 的 output schema 一致 —— 不再有 `blocker/major/minor/nit` 与 `critical/high/medium/low` 跨 group 冲突。
 
@@ -257,14 +260,16 @@ review 路径没有交互用户,drain 遇到 `EventAgentPermission` 时用**第�
 
 ### 2.5.2 触发条件(自动)
 
-两条 Runner 路径都**永远 fan-out**(v14 起,因为 simplify group 总是追加,groups 永远 ≥ 2)。具体 fan-out 数:
+两条 Runner 路径在有 reviewable 文件时**总是 fan-out**(v14 起,builtin / ocr group 一定在)。simplify group 只在 changeset 有代码文件时追加(见 §2.6)。具体 fan-out 数:
 
 | 情况 | fan-out groups | goroutine 数 |
 | --- | --- | --- |
-| ocr 在 + N 个 ocr group | N + 1(N 个 ocrGroup + 1 个 simplifyGroup) | N + 1 |
-| ocr 在 + ocrGroup 为空(ocr 失败) | 0 + 1(只剩 simplifyGroup) | 1 |
-| ocr 不在 + 1 builtinGroup | 1 + 1(builtinGroup + simplifyGroup) | 2 |
-| ocr 不在 + workspace 空 | 0(只有空 goroutine fallback 到 `BuiltinPrompt`)| 1 |
+| ocr 在 + N 个 ocr group + 有代码文件 | N + 1(N 个 ocrGroup + 1 个 simplifyGroup) | N + 1 |
+| ocr 在 + N 个 ocr group + 无代码文件 | N | N |
+| ocr 在 + ocrGroup 为空(ocr 失败)+ 有代码文件 | 1 + 1(builtinGroup + simplifyGroup) | 2 |
+| ocr 不在 + 1 builtinGroup + 有代码文件 | 1 + 1(builtinGroup + simplifyGroup) | 2 |
+| ocr 不在 + 1 builtinGroup + 无代码文件 | 1(只有 builtinGroup) | 1 |
+| 没有 reviewable 文件(工作区干净) | 0 → `ErrNoDiff`,不起 session | 0 |
 
 无需用户开关——`delegateReviewMultiJob` 自动按 groups 数 spawn goroutine,sem cap 4 限并发。
 
@@ -394,7 +399,7 @@ sink 的 drain 在 verdict 之前排空:各组的 findings 还排在 drain gorou
 ### 2.5.6 边界
 
 - **超大单组**:某 group diff 仍超大(如 `**/*.go` 100 文件 5000 行)→ per-group 字节预算兜底(§2.4 第 7 项),超预算的段按行截断并标记丢弃字节数;极端时按目录二次拆(留后续)。
-- **单组超模型 context 窗口**:`_nightme_simplify` group 永远带全部 reviewable 文件,大 changeset 下单个 group 的 prompt 仍可能超出模型的 context 窗口。传输层不受限(管道无长度上限),但模型侧会失败,该 group 标记 failed,其余 group 的 findings 照常汇入。
+- **单组超模型 context 窗口**:`_nightme_simplify` group 带全部代码文件,大 changeset 下单个 group 的 prompt 仍可能超出模型的 context 窗口。传输层不受限(管道无长度上限),但模型侧会失败,该 group 标记 failed,其余 group 的 findings 照常汇入。
 - **顺序 vs 并发**:默认并发(快);若并发有风险(如 agent 不支持并发 session),可降级顺序(loop 无 sem)——但已验证 delegate bridge 的 session 并发安全(dsh sessionId 多路复用 / 其他独立子进程),默认并发。
 - **跨 job 事件流交错**:Phase 2 期间不同 job 的 process 事件在 outer 上**可能交错**(Source="group-N" 区分);**同一 job 内部** ToolStart→ToolEnd 严格配对连续(per-job 缓冲保证)。
 - **各组 findings 的到达顺序 = 完成顺序**:一组结束就把自己的 findings 交出去,所以先跑完的组先到(thread 里是 `[2] …` 在 `[1] …` 前面)。编号 `[N]` 是组在 plan 里的位置,读的人靠它认出组;fan-out 结束时(finalize)兜底交付没结束的那几组,那部分是 plan 顺序。
@@ -418,7 +423,7 @@ sink 的 drain 在 verdict 之前排空:各组的 findings 还排在 drain gorou
 | ocr Runner 入口 | `internal/agent/review_with_ocr.go::ReviewWithOcr` |
 | builtin Runner 入口(ocr 不在 / precompute 失败的 fallback) | `internal/agent/review.go::ReviewWithPrompt` |
 | ocr 路径 precompute(ocr delegate preview + rule;ocr 失败退回 Go 枚举) | `internal/agent/review_with_ocr.go::precomputeReviewWithOcr` |
-| Go 路径 precompute(gitbase 解析 base + merge-base + 4 git 来源 file enumeration + builtin group 合成) | `internal/agent/review_with_ocr.go::precomputeReviewWithBuiltin` |
+| Go 路径 precompute(gitbase 解析 base + merge-base + 3 git 来源 file enumeration + builtin group 合成) | `internal/agent/review_with_ocr.go::precomputeReviewWithBuiltin` |
 | base 分支解析 + `refs/remotes/origin/HEAD` 补写(两条 precompute 路径 + `/me` 共用) | `internal/gitbase/gitbase.go::Resolve` |
 | base 未知的失败出口(`ErrBaseUnknown` + chat 里的可执行提示) | `internal/agent/agent.go::ErrBaseUnknown` / `internal/command/review/cmd.go::baseUnknownMessage` |
 | `OcrAvailable` 导出函数(`ReviewDispatch` 用) | `internal/agent/review_with_ocr.go::OcrAvailable` |
@@ -435,6 +440,8 @@ sink 的 drain 在 verdict 之前排空:各组的 findings 还排在 drain gorou
 | **每组 findings 解析**(block / 一行 / 宽松块形态 / JSON + severity 归一 + unparsed) | `internal/agent/review_findings.go::ParseReviewFindings` / `internal/agent/review_findings_json.go` |
 | **schema 重发**(读不出来的组再问一次,只喂计数) | `internal/agent/review_repair.go::reemitReviewFindings` |
 | **fan-out 的 plan 回调**(组清单,fan-out 前触发一次) | `internal/agent/agent.go::ReviewPlanGroup` / `::WithReviewPlanObserver` / `internal/agent/review_with_ocr.go::reviewPlan` |
+| **group 列表构造**(ocr/builtin groups + 有代码文件才有 simplify group) | `internal/agent/review_with_ocr.go::reviewGroups` / `::simplifyGroup` |
+| **代码文件判定**(扩展名表 + 文件名表,白名单) | `internal/agent/codefile.go::isCodePath` / `::codeFiles` |
 | **多 job 结果合并**(纯自然语言拼接 + 部分失败 inline marker,无解析/排序/去重/coverage 聚合) | `internal/agent/review_with_ocr.go::mergeRunResults` |
 | **review / 续跑共用的 fan-out 内核**(goroutine 编排 + sem cap + eventAggregator + merge) | `internal/agent/review_with_ocr.go::runReviewGroups` |
 | **续跑入口**(并发 resume 或 re-run N 个 group、合并成同样的 group 格式) | `internal/agent/review_continue.go::ContinueReviewJobs` |
@@ -467,6 +474,8 @@ sink 的 drain 在 verdict 之前排空:各组的 findings 还排在 drain gorou
 
 `ReviewWithOcr` 和 `ReviewWithPrompt` 都会追加一个 nightme-owned 的 **simplify** review group,作为独立的并行维度(独立 session turn)跟主 review(ocr groups 或 builtin rubric)一起跑。simplify 不是 prompt 末尾追加,而是一个完整的 reviewGroup,有自己的 Pattern sentinel (`_nightme_simplify`),所以它走跟 ocr/builtin groups 完全一样的 fan-out 路径。
 
+simplify group **只看代码文件**:这 4 个 axis(reuse / simplification / efficiency / altitude)在散文、配置和数据文件上无事可做,而 group 的 diff 预算会被它们花光。所以它的文件清单是 changeset 的代码文件子集 —— 没有代码文件的 changeset 干脆不起这个 group(省一次 session turn)。builtin / ocr group 的 scope 不变:它们仍然 review 全部 tracked 变更文件。
+
 ### 来源
 
 简化规则的 4 axes 借鉴自 Claude Code 的 `/simplify` skill(reuse / simplification / efficiency / altitude),但形态调整为 **review findings** 而非 **refactor apply** —— 它产出发现,不自动改代码。
@@ -474,34 +483,56 @@ sink 的 drain 在 verdict 之前排空:各组的 findings 还排在 drain gorou
 ### 实现
 
 ```go
+// codefile.go
+// 代码文件 = 文件名表命中,或扩展名表命中(大小写不敏感)。
+// 文件名表先查:CMakeLists.txt 是代码文件,.txt 不是。
+func isCodePath(p string) bool
+
+// codeFiles 返回 paths 里的代码文件,保持原顺序。
+func codeFiles(paths []string) []string
+
 // review_with_ocr.go
 const (
-    patternBuiltin  = "_nightme_builtin"   // ReviewWithPrompt 的 builtinGroup
-    patternSimplify = "_nightme_simplify"  // 永远追加
+    PatternBuiltin  = "_nightme_builtin"   // builtin group
+    PatternSimplify = "_nightme_simplify"  // 有代码文件才追加
 )
 
 func simplifyGroup(files []string) reviewGroup {
-    return reviewGroup{Pattern: patternSimplify, Files: files, Rule: simplifyPrompt}
+    return reviewGroup{Pattern: PatternSimplify, Files: codeFiles(files), Rule: simplifyPrompt}
 }
 
-// ReviewWithOcr:precomputeReviewWithOcr → pre.ocrGroups + simplifyGroup → 风扇
-groups := append(pre.ocrGroups, simplifyGroup(pre.reviewable))
-
-// ReviewWithPrompt:precomputeReviewWithBuiltin → 1 builtinGroup(已含在 pre.ocrGroups) + simplifyGroup → 风扇
-// (precomputeReviewWithBuiltin 合成 ocrGroups = [{patternBuiltin, BuiltinPrompt}],所以同样 append simplifyGroup)
-groups := append(pre.ocrGroups, simplifyGroup(pre.reviewable))
+// 两条 Runner 路径共用这一个 group 列表构造器
+func reviewGroups(pre reviewContext) []reviewGroup {
+    groups := slices.Clone(pre.ocrGroups)
+    simplify := simplifyGroup(pre.reviewable)
+    if len(simplify.Files) > 0 {
+        groups = append(groups, simplify)
+    }
+    return groups
+}
 ```
 
-两个 Runner 函数**主体相同**:都 `pre := precomputeReview*(ctx, workspace); groups := append(pre.ocrGroups, simplifyGroup(pre.reviewable)); return delegateReviewMultiJob(...)`。区别只在调哪个 `precomputeReview*`。
+两个 Runner 函数**主体相同**:都 `pre := precomputeReview*(ctx, workspace); groups := reviewGroups(pre); return delegateReviewMultiJob(...)`。区别只在调哪个 `precomputeReview*`。group 列表为空(没有 reviewable 文件)时,run 报 `ErrNoDiff`,不起 session —— 不跑空 fan-out。
 
-simplify group 的 prompt 通过 `assembleGroupPrompt` 渲染:`switch g.Pattern` 命中 `patternSimplify` 分支,header 是 `# Simplify review lens (nightme-owned, complementary)`,rule 文本是 `simplifyPrompt` const。
+simplify group 的 prompt 通过 `assembleGroupPrompt` 渲染:`switch g.Pattern` 命中 `PatternSimplify` 分支,header 是 `# Simplify review lens (nightme-owned, complementary)`,rule 文本是 `simplifyPrompt` const。
+
+### 代码文件怎么判
+
+白名单:扩展名表(`go` / `py` / `ts` / `rs` / `c` / `sh` / `sql` / `tf` / `html` / …)+ 文件名表(`Makefile` / `Dockerfile` / `CMakeLists.txt` / `BUILD.bazel` / `justfile` / …)。
+
+- 文件名表先查 —— 已知文件名压过扩展名:`CMakeLists.txt` 是代码文件,`.txt` 不是。
+- 扩展名匹配大小写不敏感:`main.GO` 是代码文件。
+- 以 `.` 开头且没有第二个点的名字只按文件名判:`.gitignore` 不是代码文件。
+- 表外的扩展名一律不是代码文件:`.md` / `.txt` / `.json` / `.yaml` / `.lock` / `.ipynb` / 图片音视频 / 二进制都出局。
+
+用白名单而不是黑名单:黑名单漏掉的格式会溜进 review,二进制还得另做识别。
 
 ### Scope
 
 | Runner | simplify group 出现? |
 |---|---|
-| `ReviewWithOcr`(ocr 已装) | ✅ 始终追加 |
-| `ReviewWithPrompt`(ocr 未装 / fallback) | ✅ 始终追加 |
+| `ReviewWithOcr`(ocr 已装) | ✅ changeset 有代码文件时追加 |
+| `ReviewWithPrompt`(ocr 未装 / fallback) | ✅ changeset 有代码文件时追加 |
 
 ### ocr 检测的位置(SRP)
 
@@ -528,7 +559,7 @@ func ReviewDispatch(ctx context.Context, s Starter, cfg StartConfig, opts ...Run
 
 早期 v3-v7 讨论过用 functional option `WithSimplifyPrompt()` 控制 simplify 启用。否决原因:
 - simplify 是 simplify-as-group(独立 session turn),不是 prompt 末尾追加的 section —— 没法用 option 控制 prompt 字段
-- 始终启用 simplify 比 opt-in/opt-out 简单,且 simplify 的 findings 是低风险补充(默认 severity = `low` / `style`)
+- 默认启用 simplify 比 opt-in/opt-out 简单,且 simplify 的 findings 是低风险补充(默认 severity = `low` / `style`);要不要跑由 changeset 本身决定(有代码文件才有意义),不需要用户开关
 - 未来若要 disable,只需把 simplifyGroup 从 group 列表里删,改 1 个 helper 函数
 
 
@@ -780,7 +811,7 @@ record 让停掉的 group 还能 `--continue`(§2.8)。
 1. **agent-delegated** —— nightme 自己不调 LLM,review 推理交给现有 agent。ocr 委托模式符合这点(ocr LLM-free,工程产出喂 agent)。
 2. **ocr 不是 bridge** —— ocr 是狭义 agent(只 review,不能 chat / Edit / `/use`)。塞进 agent 注册表扭曲 bridge 语义(bridge = 通用编码 agent)。ocr 是被调用的外部工具(类 git)。
 3. **统一 dispatcher** —— 所有 bridge 走 `agent.ReviewDispatch`,二选一(`OcrAvailable() ? ReviewWithOcr : ReviewWithPrompt`),行为跨 agent 一致。Agent 自带 review 子命令(如 `claude -p code-review` / `codex review` / `cursor-agent -p /review-bugbot`)用户直接在 chat 发 slash command,nightme 透传给底层 agent——不再走 `Starter.Review` 特殊路径。
-4. **优雅降级** —— ocr 缺失 → `ReviewWithPrompt` 走 Go 复刻路径(`precomputeReviewWithBuiltin` 用 4 个 git 来源 + 合成 builtinGroup 模拟 ocr 的产出形状),不报错不阻塞;ocr 在但 preview 失败 → Go 端枚举兜底。review 在任何环境可用,只是 file-list 精度低一档(Go 启发式 vs ocr FileFilter)。base 分支定不下来不降级成"没有 diff":那是"没看",不是"没东西可看",所以报 `ErrBaseUnknown` 并给出修复命令。
+4. **优雅降级** —— ocr 缺失 → `ReviewWithPrompt` 走 Go 复刻路径(`precomputeReviewWithBuiltin` 用 3 个 git 来源 + 合成 builtinGroup 模拟 ocr 的产出形状),不报错不阻塞;ocr 在但 preview 失败 → Go 端枚举兜底。review 在任何环境可用,只是 file-list 精度低一档(Go 启发式 vs ocr FileFilter)。base 分支定不下来不降级成"没有 diff":那是"没看",不是"没东西可看",所以报 `ErrBaseUnknown` 并给出修复命令。
 5. **fix 对话式** —— review 只产出 findings,不自动改代码。主 agent 用原生 Edit 工具 fix。保持 v1 纯 review。
 6. **`--agent` 不切 AS** —— runner 是一次性 spawn,findings 回当前 AS。不同 reviewer,同一 chat。
 7. **独立 context 分 bundle(code-driven)** —— 大 changeset 按 ocr rule group 拆多 job,每 job 独立 fresh session(强隔离,不累积)。这是 ocr smart bundling 的 code-driven 等价——用 ocr 的 rule groups 做分组边界,各 job 的 session 各自独立,不是 ocr 端到端的重 multi-agent 机器。

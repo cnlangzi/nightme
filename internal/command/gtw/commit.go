@@ -443,7 +443,7 @@ func verifyAgentCommitted(ctx context.Context, deps HandlerDeps, c Context, head
 //
 //   - No file modifications: "MUST NOT edit, create, or delete
 //     any file" closes the door on the LLM deciding to "fix a
-//     typo first" or "update CHANGELOG.md before committing".
+//     typo first" or "update the docs before committing".
 //     The user wants the LLM to commit the work AS-IS.
 //
 //   - History immutability: amend / rebase / reset / checkout

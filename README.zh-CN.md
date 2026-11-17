@@ -813,8 +813,6 @@ paths:
 | [`docs/TESTS.md`](./docs/TESTS.md) | CI runner 上的跨平台 agent 启动 smoke test。 |
 | [`docs/Wiki.md`](./docs/Wiki.md) | `/wiki init` 设计——仓库 wiki 作为持久文档资产。 |
 | [`docs/primary-agent-detection.md`](./docs/primary-agent-detection.md) | Primary agent 解析链、内置白名单、首次运行 prompt。 |
-| [`CHANGELOG.md`](./CHANGELOG.md) | 当前 snapshot（单 `[Unreleased]` 段）。 |
-| [`MIGRATION.md`](./MIGRATION.md) | 历史 snapshot 之间的 breaking change 列表。 |
 
 ### Development
 

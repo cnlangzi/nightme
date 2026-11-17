@@ -24,7 +24,7 @@ nightme 的 opencode 集成(`internal/bridge/opencode/`)走 **HTTP serve** 路�
 | `translate.go` | ~1300 | 14 种 SSE event → AgentEvent 翻译表 + 流式 text buffer |
 | `agent.go` + `driver.go` | ~1500 | 生命周期、SSE 重连、watchdog、liveness probe |
 
-**踩坑密度**(从 `docs/bridge/opencode.md` 和 CHANGELOG 整理):
+**踩坑密度**(从 `docs/bridge/opencode.md` 和 git 历史整理):
 - opencode 1.18 `{data: Session}` 信封(translate decode 双形态)
 - 1.18.x SSE 500 ServeError on `GET /api/session/{id}/event`(e2e 自动 skip)
 - readSSE + lifecycle 死锁(`pumpWG` + `stopDeliver` + `close(events)` 顺序)
@@ -777,8 +777,6 @@ NIGHTME_OPENCODE_E2E=1 go test -tags 'unix opencode_real_e2e' \
 | `docs/SPEC.md` §1(组件表) | 不动(opencode bridge 还在,只是实现路径换了) |
 | `docs/FEATURES.md` | 在 ACP 集成表添加 opencode 行 |
 | `README.md` 章节 "Bridge" | 不动 |
-| `CHANGELOG.md` `[Unreleased]` | 加条目:"opencode: 迁移到 ACP 模式;删除 HTTP serve 路径"`bridge/opencode/server.go` `client.go` `translate.go` 移除;新增 `bridge/opencode/update.go` 走 ACP sessionUpdate 路由" |
-| `MIGRATION.md` | 加章节:"v0.x → v0.y: opencode 默认走 acp;旧 serve 路径需 `--bridge serve` 才能用" |
 
 ---
 
@@ -805,8 +803,6 @@ NIGHTME_OPENCODE_E2E=1 go test -tags 'unix opencode_real_e2e' \
   - [x] 验证 `Args: []string{"acp"}` 期望 PASS
 - [x] ~~`docs/bridge/opencode.md`:重写~~ → 不重写;直接删除(本期随 Phase 2 一并落地)。`docs/FEATURES.md` OpenCode Bridge 行改指本文档;`docs/bridge/dsh.md` 中"HTTP+SSE 同构"姊妹链接删除(opencode 已不是 HTTP+SSE)
 - [x] `docs/feat/F-OPENCODE-ACP-MIGRATION.md`:写完(本文档,顶部 Status 已翻 ✅)
-- [x] `CHANGELOG.md`:加条目(`[Unreleased]` 块)
-- [x] `MIGRATION.md`:加章节("opencode bridge migration: HTTP serve → ACP (Phase 2)")
 
 ---
 
@@ -828,7 +824,7 @@ NIGHTME_OPENCODE_E2E=1 go test -tags 'unix opencode_real_e2e' \
 | 阶段 | 内容 | 估时 |
 |---|---|---|
 | Phase 0 — 准备 | acp.go hook + update.go + 单元/集成测试 + 本设计 doc | ✅ 1-2 天(实际) |
-| Phase 1 — 切换默认 | agents.go 切换 + agents_test 验证 + CHANGELOG/MIGRATION 更新 | ✅ 0.5 天(实际) |
+| Phase 1 — 切换默认 | agents.go 切换 + agents_test 验证 | ✅ 0.5 天(实际) |
 | Phase 2 — 删除 serve | 删除 ~12000 行旧 code(26 文件) | ✅ 0.5 天(实际,合并到此分支 + 修 1 处 merge conflict + 1 处 build error) |
 | 收尾 — update.go 收敛 | 删除 6 个不发出的 sessionUpdate 分支 + StashUsage | ✅ 0.5 天(实际) |
 | **总计** | — | **~1 周**(实际 ~3 天,合并冲突意外耗时) |

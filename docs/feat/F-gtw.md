@@ -536,12 +536,11 @@ func TestBuildAgentPrompt_NoNightmeDetails(t *testing.T) {
 | **Phase 7** | `commit_push_test.go` 重写为 8 个 branch 覆盖测试 | `internal/command/gtw/commit_push_test.go` |
 | **Phase 8** | gtw README §1.1 emoji 字典加 `ℹ️` | `internal/command/gtw/README.md` |
 | **Phase 9** | `docs/FEATURES.md` 加 F-56 索引行 | `docs/FEATURES.md` |
-| **Phase 10** | `CHANGELOG.md` Unreleased 段加 F-56 entry | `CHANGELOG.md` |
 
 **总 PR 建议:拆 2 个 PR**
 
 - **PR 1 (本期)**:Phase 1-7(代码 + 测试)
-- **PR 2 (后续)**:Phase 8-10(文档同步 + emoji 字典 + CHANGELOG)
+- **PR 2 (后续)**:Phase 8-9(文档同步 + emoji 字典)
 
 PR 1 不依赖 PR 2,可以独立 merge。
 
@@ -555,8 +554,8 @@ PR 1 不依赖 PR 2,可以独立 merge。
 |---|---|
 | prompt 130 tokens;某些 edge case 缺少指令 | `commit_push_test.go` 8 个 branch case 覆盖;manual smoke 后再 merge |
 | `programmaticPushWithRetry` 抽出来 pushClean 删了,测试可能 break | Phase 7 重写测试,pushClean 引用全清 |
-| Branch 1 新增 no-op IM 卡片,旧用户期待"推 0 条"也回 `✅` | UX 是 bug 修复,不改;CHANGELOG 明示"no-op case 改为 `ℹ️`" |
-| agent 在新 prompt 下不再 push,某些用户依赖"agent 自己推"的工作流 | prompt 改动是 additive breaking;CHANGELOG 明示"agent 不再 push,nightme 接管" |
+| Branch 1 新增 no-op IM 卡片,旧用户期待"推 0 条"也回 `✅` | UX 是 bug 修复,不改;PR 描述明示"no-op case 改为 `ℹ️`" |
+| agent 在新 prompt 下不再 push,某些用户依赖"agent 自己推"的工作流 | prompt 改动是 additive breaking;PR 描述明示"agent 不再 push,nightme 接管" |
 
 ### 12.2 回滚
 
@@ -1142,7 +1141,7 @@ func TestDispatchPush_NoCountUnpushedAtEntry(t *testing.T) {
 4. **`internal/command/gtw/commit_push.go::dispatchPush`**:把 `isClean` / `unpushedBefore` 两个变量换成 `snap` + 三个谓词;`countUnpushed` 入口直调移除(`programmaticPushWithRetry` 内部保留)。agent 跑完强制 re-snapshot。
 5. **`internal/command/gtw/testharness_test.go`(或新文件)**:加 `setupReadiness(rig, snap)` 共享 fixture,统一 mock 入口。
 6. **`internal/command/gtw/pr_test.go` + `commit_push_test.go`**:按 §8.2 / §8.3 / §8.4 列表补全测试。**不机械移植测试,重写时按 readiness 维度重新组织用例。
-7. **`CHANGELOG.md`** [Unreleased] 加一条:"F-57: `/gtw push` + `/gtw pr` 统一使用 `Readiness` snapshot 做前置检测。本地分支未设 upstream / 未推送 / 与 origin 不一致 / 工作区不干净都会被显式拦截,IM 文案直接指向 `/gtw push`。"
+7. **PR 描述**写明:"F-57: `/gtw push` + `/gtw pr` 统一使用 `Readiness` snapshot 做前置检测。本地分支未设 upstream / 未推送 / 与 origin 不一致 / 工作区不干净都会被显式拦截,IM 文案直接指向 `/gtw push`。"
 8. **删除 `pr_test.go::TestDispatchPR_UnpushedCommits` 等基于 `countUnpushed` 数字 mock 的旧测试** —— 它们测的是未实现的代码路径。
 
 ---

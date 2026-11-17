@@ -299,7 +299,7 @@ PROBER (F-61 agent liveness)
 - **磁盘 schema**:`AgentSession` 新增 `SuspectReason` / `SuspectSince` 字段(可选)。`agent_sessions.json` 缺失时按零值处理(`FromAgentSessionEntry` 已有兼容路径)
 - **daemon 重启**:无新依赖;首次启动会自动建好 watchdog + prober
 - **回滚**:本次改动涉及 3 个生产路径(readpump / adapter / persist),但每个改动都有测试覆盖;回滚 commit 即可
-- **不发版公告**(项目目前无 release notes 流程)— 走 CHANGELOG.md `Unreleased` 段
+- **不发版公告**(项目目前无 release notes 流程)— 变更记录在 commit log 与 GitHub PR
 
 ## 9. 后续(Out of Scope)
 

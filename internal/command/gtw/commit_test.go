@@ -25,7 +25,7 @@ import (
 //   - LLM running tests / builds to "verify" its own work
 //     (the user's "做得太多了" complaint)
 //   - LLM editing / creating files before committing ("fix a
-//     typo first", "update CHANGELOG")
+//     typo first", "update the docs")
 //   - LLM amending / rebasing / resetting to clean up
 //   - LLM checking out a different branch and committing there
 //   - LLM omitting the Issue trailer (PR #135 regression class)
@@ -127,7 +127,7 @@ func TestBuildAgentPrompt_AllowlistOperations(t *testing.T) {
 
 // TestBuildAgentPrompt_AntiFileModification: the LLM MUST NOT edit,
 // create, or delete any file in the worktree. Without this guard
-// the LLM decides to "fix a typo" or "update CHANGELOG" before
+// the LLM decides to "fix a typo" or "update the docs" before
 // committing — exactly the overstep behavior the user reported.
 func TestBuildAgentPrompt_AntiFileModification(t *testing.T) {
 	c := Context{Worktree: "/w", Branch: "feat/x", Issue: 1}

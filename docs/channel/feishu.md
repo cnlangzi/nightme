@@ -621,7 +621,7 @@ Feishu IM API 官方支持的顶层 `msg_type`(参考 [create_json 文档](https
 - 飞书没有 `PATCH post` 接口;`Update` / `Patch` 只对 `text` 和 `interactive` 生效
 - receipt 的核心 UX 是**一张可原地更新的卡片承载整轮事件**;`post` 实现不了 PATCH-in-place
 
-→ 结论:**文本类(OutText/OutTool/OutResult/...)继续走 `interactive` card**,**不切 `post` `md` 标签**。`post` 留作未来"一次性富文本消息"的载体(比如 help / changelog 推送,见 §12.2)。
+→ 结论:**文本类(OutText/OutTool/OutResult/...)继续走 `interactive` card**,**不切 `post` `md` 标签**。`post` 留作未来"一次性富文本消息"的载体(比如 help 推送,见 §12.2)。
 
 ### 11.2 与 OpenClaw 官方插件(openclaw-lark)的对比
 
@@ -670,7 +670,7 @@ Feishu IM API 官方支持的顶层 `msg_type`(参考 [create_json 文档](https
 |----------|---------------|-------------------|------|
 | agent 生成图片 | `image`(先 upload 拿 image_key) | 新加 `OutAttachment{Type: "image", FileKey, FileName}` | 不并入 receipt card(打散 PATCH),走独立 Create |
 | agent 生成文件 | `file` | `OutAttachment{Type: "file", ...}` | 同上 |
-| help / changelog 推送 | `post` + `tag:"md"` | 复用 `OutCommandReply` 或新增 `OutPost` | 一次性富文本 |
+| help 推送 | `post` + `tag:"md"` | 复用 `OutCommandReply` 或新增 `OutPost` | 一次性富文本 |
 | bot 自定义表情包 | `sticker` | 复用 `OutMessageState` 或新增 | 仅 DM 可用 |
 
 ## 13. 2026-08-03 审计结果

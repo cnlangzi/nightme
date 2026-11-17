@@ -983,8 +983,6 @@ The knob is best-effort: a CLI that ignores it keeps its own behaviour, one that
 | [`docs/TESTS.md`](./docs/TESTS.md) | Cross-platform agent startup smoke test on CI runners. |
 | [`docs/Wiki.md`](./docs/Wiki.md) | `/wiki init` design — repo wiki as a durable doc asset. |
 | [`docs/primary-agent-detection.md`](./docs/primary-agent-detection.md) | Primary-agent resolution chain, built-in whitelist, first-run prompt. |
-| [`CHANGELOG.md`](./CHANGELOG.md) | Current snapshot (single `[Unreleased]` section). |
-| [`MIGRATION.md`](./MIGRATION.md) | Breaking changes between earlier snapshots. |
 
 ### Development
 

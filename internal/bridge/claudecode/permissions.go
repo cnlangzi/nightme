@@ -84,5 +84,5 @@ const (
 // PermissionMode returns the permission mode string passed to Claude Code
 // when no override is provided via agent.StartConfig.PermissionMode.
 // Kept for backwards compatibility with callers that read the constant
-// directly (see CHANGELOG v0.2).
+// directly.
 const PermissionMode = PermissionBypass

@@ -221,7 +221,7 @@ MAY subscribe to a future `/close` event (not currently exposed; ).
 | Version | What changed |
 |---------|--------------|
 | / | Receipt FSM owned by Gateway (`internal/gateway.CreateReceipt / UpdateReceipt / DisposeReceipt`). Channel painted state transitions. Worked for Feishu; mismatched Slack / Web abstractions. |
-| | Receipt FSM temporarily disabled; daemon sent plain `OutText` (no card UX). Documented as "known gap" in CHANGELOG. |
+| | Receipt FSM temporarily disabled; daemon sent plain `OutText` (no card UX). |
 |  | **Receipt FSM removed from Gateway entirely.** Receipt is now a Channel-internal object keyed by `userMsgID`. Gateway stamps `OutboundMessage.ReplyTo = currentTurnUserMsgID`; each Channel routes + PATCHes its own receipt. "Abstract stays abstract, concrete stays concrete" principle applied throughout. |
 | **(F-thread-route)** | **Receipt scope 收窄**: receipt card body 不再承载全部 event,只承载 OutText / OutResult / OutInit / OutUsage 派生的 entry。OutThinking / OutToolStart / OutToolEnd 路由到 Channel 自治的 thread reply(Feishu 选 thread + 类型感知摘要)。~~OutCompaction 同理走 thread reply;F-49 删除该 path——runtime 不再产生 OutCompaction,count 由 `SessionContext.CompactionCount` 携带,footer Line 1 渲染 `🗜 N`。~~ Card body 元素数从 ~30 降到 ≤5。详见 [`../channel/feishu-rendering.md`](./../channel/feishu-rendering.md) + [`channel/feishu.md` §13.12](../channel/feishu-rendering.md) + [`channel/feishu.md` §13.25](../channel/feishu-rendering.md) (F-49)。 |
 
@@ -896,7 +896,6 @@ Feishu adapter 包内 `summarize_tool.go` 提供 `summarizeToolEnd(name, args, o
 | `docs/channel/feishu-rendering.md` | §3 contract 表更新 + §X.Y Thread reply path | §4.2 |
 | `docs/feat/F-08-channel-abstraction.md` | §4 加 "Channel autonomous routing examples" + §6 边界情况表更新 | §4.3 |
 | `docs/SPEC.md` | §0.3 摘要 + §1.3 新增 + §11 backlog | ✅ 已落地 |
-| `CHANGELOG.md` | [Unreleased] 条目 | — |
 
 ### 3.2 `agent.ToolEndEvent.Args`
 
@@ -1212,44 +1211,11 @@ F-thread-route 方案下同一 turn：
 - §6 边界情况表新增：OutThinking / OutToolStart / OutToolEnd 走 thread（Feishu 行为）；其他 Channel 自决
 - §7 Test plan 加 case：mock Channel 验证收到 OutThinking 时不调 receipt（如果它实现了 thread 分流）
 
-### 4.4 `CHANGELOG.md`
-
-[Unreleased] 段加 "F-thread-route" 条目（参见 §5 模板）。
-
 ---
 
-## 5. CHANGELOG Entry Template
+## 5. Test Plan
 
-```markdown
-### F-thread-route: OutThinking / OutToolStart / OutToolEnd → Feishu thread reply
-
-反转折叠方案（实机验证失败：30 panel 撞破 50 element
-上限、视觉噪声大于折叠收益、最终回答被挤掉）。新方案：Channel 按
-OutboundKind 自决 routing——thinking/tool 直接 POST 到
-Feishu thread（rootID = userMsgID），receipt card 收窄到只承载
-最终答复（OutText / OutResult）+ 元数据（OutInit / OutUsage）。~~`compaction` 同理走 thread reply (`✶ Compacting conversation…`)；F-49 删除该 path——runtime 不再产生 OutCompaction，count 由 `SessionContext.CompactionCount` 携带，footer Line 1 渲染 `🗜 N`。~~
-
-OutToolEnd 类型感知摘要（"决断处理"）：bridge 层把
-`ToolEndEvent.Args` 填好；Channel 层 `summarizeToolEnd(name, args,
-output, err)` 按 tool name 生成单行摘要（"📄 Read /foo.go → 1234
-lines"），不 dump 原始 output 到 thread。Receipt card body 元素数
-从 ~30 降到 ≤5，50 element 上限永远不破。
-
-Bridge 层 contract 扩展：`agent.ToolEndEvent.Args string` 字段；
-claudecode bridge 从同 message `tool_use` block 拿 args 填入。
-
-不变式：OutboundMessage 不动（无新 Kind）；Gateway 不动；ChatSession
-不动；`currentTurnUserMsgID` 单数锚点保留；F-33 thread 概念不进
-nightme 数据模型不变式保留。
-
-详见 [`docs/SPEC.md` §0.3](./SPEC.md) + [`docs/channel/feishu-rendering.md` §13.12](./channel/feishu-rendering.md)。
-```
-
----
-
-## 6. Test Plan
-
-### 6.1 Unit
+### 5.1 Unit
 
 **Bridge 层**：
 
@@ -1278,12 +1244,12 @@ nightme 数据模型不变式保留。
 - `internal/gateway/translate_test.go`：
   - 加 case：`Translate(EventToolEnd{Name: "Read", Args: "/foo.go", Output: "..."})` 返回 `OutboundMessage{Kind: OutToolEnd, Meta["args"]: "/foo.go"}`
 
-### 6.2 集成
+### 5.2 集成
 
 - 端到端 mock Channel + Gateway：发一条消息 → agent turn 产出 1 个 OutThinking + 1 个 OutToolStart + 1 个 OutToolEnd → mock Channel 收到 3 条 OutboundMessage → 验证 mock 的 Send 函数被调 3 次，且每次 Kind 不同。
 - Receipt 端到端：mock Channel 收到 OutText + OutResult → 验证 receipt card body 只有这俩 entry，无 collapsible_panel。
 
-### 6.3 E2E（实机飞书 DM）
+### 5.3 E2E（实机飞书 DM）
 
 - DM 发消息 → agent turn 调 3 个工具（Read / Bash / Edit）→ 验证：
   - Main chat：receipt card 显示最终回答 + 1 个 thread indicator "4 replies"（💭 thinking + 3 工具 messages）
@@ -1294,7 +1260,7 @@ nightme 数据模型不变式保留。
 
 ---
 
-## 7. Backlog
+## 6. Backlog
 
 - **OutThinking 多 chunk 聚合**：agent turn 里 OutThinking 经常多次 emit（每段推理一个）。当前每段一条 thread reply → thread 里 N 条 💭。可聚合成 "💭 N 段" 单条消息（streaming 模式，最后一段更新），减少 thread 噪声。**不在本 PR scope**。
 - **未知 tool type 摘要策略**：默认走字节截断（200 chars）。如果 claudecode 后续新增 tool name，channel 自动 fallback 到默认路径。**无需额外工作**。
@@ -1303,7 +1269,7 @@ nightme 数据模型不变式保留。
 
 ---
 
-## 7.5 实机飞书群验证（2026-08-04，Frtpilot-Xiage）
+## 6.5 实机飞书群验证（2026-08-04，Frtpilot-Xiage）
 
 | 发送 | 形态 | 飞书响应 | main chat UI 实际显示 |
 |---|---|---|---|
@@ -1323,10 +1289,10 @@ Probe 工具代码：`cmd/_probe/feishu_thread_probe.go`（mock 版）+ `cmd/_pr
 
 ---
 
-## 8. Change log
+## 7. Change log
 
-- **2026-08-04 (a)** — F-37 草案（Devin 拍板反转 §13.6 折叠方案）。Docs 落地（SPEC + 本 doc + channel/feishu §13.12 + F-25 §3 收窄 + F-08 §4 自治路由例子 + CHANGELOG）。代码改动 backlog §3.1。
-- **2026-08-04 (b)** — 实机飞书群（Frtpilot-Xiage）验证 "Reply / ReplyInThread+Also send it to chat / ReplyInThread" 三种形态；用 `cmd/_probe/send_one` 直接发 8 条组合消息，把命名固化进 §2.1 表格和 §7.5 实验记录；记录 `thread_id` 分配规则（顶级 / default-reply 不分配；reply-true 分配并复用）。
+- **2026-08-04 (a)** — F-37 草案（Devin 拍板反转 §13.6 折叠方案）。Docs 落地（SPEC + 本 doc + channel/feishu §13.12 + F-25 §3 收窄 + F-08 §4 自治路由例子）。代码改动 backlog §3.1。
+- **2026-08-04 (b)** — 实机飞书群（Frtpilot-Xiage）验证 "Reply / ReplyInThread+Also send it to chat / ReplyInThread" 三种形态；用 `cmd/_probe/send_one` 直接发 8 条组合消息，把命名固化进 §2.1 表格和 §6.5 实验记录；记录 `thread_id` 分配规则（顶级 / default-reply 不分配；reply-true 分配并复用）。
 - **2026-08-04 (c)** — `reply_in_thread` 字段"省略 vs 显式 false"字节差异（28B）发现：`TestSend_ChatVisibleEvents_PassReplyInThreadFalse` 单测 + 代码注释固化"if replyInThread { .ReplyInThread(true) }" 必须保持的纪律。
 
 ---
@@ -2081,7 +2047,7 @@ Both defaults are "safe" by hiding the noisiest parts of the
 agent stream; users opt in to whichever they want surfaced.
 The default was historically `ThinkModeShow` for `ThinkMode`
 (preserve F-thread-route UX), but that flipped to
-`ThinkModeHide` — see CHANGELOG. Rationale (post-flip):
+`ThinkModeHide`. Rationale (post-flip):
 - Thinking + tool-call events are both high-volume, low-signal
   during the bulk of an agent turn; surfacing them by default
   overwhelms the user-message thread with mid-turn noise.
@@ -2403,7 +2369,7 @@ becomes two thread replies again (pre-F-38 UX).
   the thread. Post-F-38, only users who explicitly ran
   `/tools on` see them. This is the **intent** of F-38 ("tool
   spam is the loudest part of the agent stream — quiet by
-  default") but is worth calling out in CHANGELOG.
+  default").
 
 ---
 
@@ -7209,7 +7175,7 @@ Feishu IM API 官方支持的顶层 `msg_type`(参考 [create_json 文档](https
 - 飞书没有 `PATCH post` 接口;`Update` / `Patch` 只对 `text` 和 `interactive` 生效
 - receipt 的核心 UX 是**一张可原地更新的卡片承载整轮事件**;`post` 实现不了 PATCH-in-place
 
-→ 结论:**文本类(OutText/OutTool/OutResult/...)继续走 `interactive` card**,**不切 `post` `md` 标签**。`post` 留作未来"一次性富文本消息"的载体(比如 help / changelog 推送,见 §12.2)。
+→ 结论:**文本类(OutText/OutTool/OutResult/...)继续走 `interactive` card**,**不切 `post` `md` 标签**。`post` 留作未来"一次性富文本消息"的载体(比如 help 推送,见 §12.2)。
 
 ### 11.2 与 OpenClaw 官方插件(openclaw-lark)的对比
 
@@ -7258,7 +7224,7 @@ Feishu IM API 官方支持的顶层 `msg_type`(参考 [create_json 文档](https
 |----------|---------------|-------------------|------|
 | agent 生成图片 | `image`(先 upload 拿 image_key) | 新加 `OutAttachment{Type: "image", FileKey, FileName}` | 不并入 receipt card(打散 PATCH),走独立 Create |
 | agent 生成文件 | `file` | `OutAttachment{Type: "file", ...}` | 同上 |
-| help / changelog 推送 | `post` + `tag:"md"` | 复用 `OutCommandReply` 或新增 `OutPost` | 一次性富文本 |
+| help 推送 | `post` + `tag:"md"` | 复用 `OutCommandReply` 或新增 `OutPost` | 一次性富文本 |
 | bot 自定义表情包 | `sticker` | 复用 `OutMessageState` 或新增 | 仅 DM 可用 |
 
 ---

@@ -608,7 +608,7 @@ buildReceiptCard 的 switch 仍允许它落到后半部分分支(条件已扩为
   - `HeartbeatTracker.mu` 持锁时间需短(只做 map + slice 操作,不调外部函数)——已确认
   - `renderLocked` 的 2s 心跳节流不能影响 entries / tasks 的 300ms 节流——已通过单独字段隔离
   - OutHeartbeat 不能被现有任何 policy 吞——已确认(handler 显式 em.Send 绕过 policies)
-- **不发版公告**: 走 CHANGELOG.md `Unreleased` 段。
+- **不发版公告**: 变更记录在 commit log 与 GitHub PR。
 
 ---
 

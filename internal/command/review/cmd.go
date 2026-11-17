@@ -665,11 +665,10 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 			var text string
 			switch {
 			case errors.Is(err, agent.ErrNoDiff):
-				// Pre-compute found zero reviewable + zero
-				// untracked files in the workspace — clean
-				// working tree, no committed/staged/untracked
-				// changes vs the default branch. The agent was
-				// NOT spawned (short-circuit inside
+				// Pre-compute found zero reviewable files in the
+				// workspace — clean working tree, no
+				// committed/staged changes vs the default branch.
+				// The agent was NOT spawned (short-circuit inside
 				// ReviewWithPrompt / ReviewWithOcr), so we don't
 				// slog.Warn — this is the expected graceful path,
 				// not a crash.
@@ -679,7 +678,7 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 				// outcome is a failure: the caller decides what to
 				// do with a review that never looked at anything.
 				text = fmt.Sprintf(
-					"❌ no diff to review in %s (working tree clean, no staged/committed/untracked files in scope)",
+					"❌ no diff to review in %s (working tree clean, no staged/committed files in scope)",
 					workspace)
 				slog.Default().Info("/review: empty diff, no agent spawn",
 					"agent", runnerName,

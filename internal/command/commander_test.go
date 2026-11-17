@@ -269,6 +269,48 @@ func TestParseCommand_Matrix(t *testing.T) {
 	}
 }
 
+// TestCommandTail locks in the raw-text contract the free-form
+// commands read their argument from: the tail keeps the line
+// structure the commander flattened out of the argv, and the
+// command's own line is reported apart from the body.
+func TestCommandTail(t *testing.T) {
+	cases := []struct {
+		name     string
+		text     string
+		skip     int
+		wantTail string
+		wantLine string
+	}{
+		{"no tail", "/foo", 1, "", ""},
+		{"single token", "/foo bar", 1, "bar", "bar"},
+		{"subcommand", "/foo sub bar", 2, "bar", "bar"},
+		{"full width slash", "／foo sub bar", 2, "bar", "bar"},
+		{"leading whitespace", "   /foo sub bar", 2, "bar", "bar"},
+		{"runs between tokens", "/foo   sub    bar", 2, "bar", "bar"},
+		{"newline after the path", "/foo sub\nline one\nline two", 2, "line one\nline two", ""},
+		{"the command path in the tail", "/gtw new\n/gtw new is in the doc", 2, "/gtw new is in the doc", ""},
+		{"indentation kept", "/foo sub\n    line one\n    line two", 2, "    line one\n    line two", ""},
+		{"blank line after the path", "/foo sub\n\nline one", 2, "line one", ""},
+		{"too few tokens", "/foo bar", 2, "", ""},
+		{"not a slash command", "foo bar", 1, "", ""},
+		{"empty text", "", 1, "", ""},
+		{"lone slash", "/", 1, "", ""},
+		{"zero skip", "/foo bar", 0, "foo bar", "foo bar"},
+		{"the command line and the body", "/foo sub -y\nthe body", 2, "-y\nthe body", "-y"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tail, line := CommandTail(tc.text, tc.skip)
+			if tail != tc.wantTail {
+				t.Errorf("CommandTail(%q, %d) tail = %q, want %q", tc.text, tc.skip, tail, tc.wantTail)
+			}
+			if line != tc.wantLine {
+				t.Errorf("CommandTail(%q, %d) line = %q, want %q", tc.text, tc.skip, line, tc.wantLine)
+			}
+		})
+	}
+}
+
 func TestNewCommander_HandlerError_BecomesReply(t *testing.T) {
 	// A command whose Handle returns an error should surface as
 	// a Consumed=true reply (handled=true). The user gets a

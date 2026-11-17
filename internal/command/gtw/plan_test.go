@@ -63,7 +63,7 @@ func TestRenderPlanPrompt(t *testing.T) {
 }
 
 func TestNewIssuePromptEndsPlanMode(t *testing.T) {
-	p := renderNewIssuePrompt("/tmp/drafts", defaultLanguage)
+	p := renderNewIssuePrompt("/tmp/drafts", defaultLanguage, "")
 	for _, want := range []string{
 		"If this conversation is in plan mode, this task ends it",
 		`Lines starting with "Decision:" record settled points`,
@@ -94,6 +94,24 @@ func TestFactory_Plan_TopicIsNotParsedAsFlags(t *testing.T) {
 
 	if got := rig.ch.lastText(); strings.HasPrefix(got, "❌") {
 		t.Errorf("topic tokens starting with '-' must reach the agent, got reply %q", got)
+	}
+}
+
+// TestFactory_Plan_MultiLineTopicKeepsItsLines pins that the topic
+// comes from the raw text: the commander flattens the argv, so only
+// the text keeps the line structure of a pasted topic.
+func TestFactory_Plan_MultiLineTopicKeepsItsLines(t *testing.T) {
+	rig := newMaterialRig(t, "chat-plan-material")
+
+	rig.send(t, "/gtw plan\nfirst line\nsecond line")
+
+	turns := rig.cap.sent()
+	if len(turns) != 1 {
+		t.Fatalf("the agent received %d turns, want 1", len(turns))
+	}
+	text := blocksText(turns[0])
+	if !strings.Contains(text, "Topic to plan:\nfirst line\nsecond line") {
+		t.Errorf("the topic lost its line structure:\n%s", text)
 	}
 }
 

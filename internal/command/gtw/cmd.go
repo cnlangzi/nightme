@@ -294,7 +294,7 @@ func (f *Factory) Spec() command.Spec {
 		Aliases: []string{"team"},
 		Summary: "GTW: Git-driven team workflow (claim, label, worktree).",
 		Usage: "/gtw plan [topic]                 put the agent in plan mode: settle the design before any change\n" +
-			"/gtw new                          have the agent draft issues from this chat's discussion\n" +
+			"/gtw new [<material>]              have the agent draft issues from this chat's discussion, with the material in the same message\n" +
 			"/gtw new -y                       create the issues from the reviewed drafts\n" +
 			"/gtw fix <issue-id> [-y|--yes]   claim, label, and create a worktree\n" +
 			"/gtw fix * [-y|--yes]            pick the next assigned issue and fix it\n" +
@@ -318,7 +318,7 @@ func (f *Factory) Spec() command.Spec {
 			},
 			{
 				Name:    "new",
-				Summary: "draft issues from this chat's discussion via the current agent; `-y` creates them",
+				Summary: "draft issues from this chat's discussion via the current agent; the material after the command rides along; `-y` creates them",
 				Usage:   newCmdSpec.Usage,
 			},
 			{
@@ -465,26 +465,45 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, mgr *c
 	return out, err
 }
 
+// gtwTail returns the free-form text the user typed after the
+// "/gtw <subcommand>" prefix, with its line structure intact, and
+// the part of it that sits on the command's own line.
+//
+// The raw text wins: it is the message as the user typed it. Only
+// when the caller filled Args alone — programmatic callers and tests
+// — does the whitespace-joined argv stand in for it.
+func gtwTail(input command.SlashInput) (tail, line string) {
+	if input.Text == "" {
+		argv := strings.Join(input.Args[2:], " ")
+		return argv, argv
+	}
+	return command.CommandTail(input.Text, 2)
+}
+
 // runPlan handles `/gtw plan [topic]`. The topic is free-form
 // prose for the agent, so it bypasses command.ParseCmdArgs like
-// /steer does: a leading "-" is data, not a flag.
+// /steer does: a leading "-" is data, not a flag. It comes from the
+// raw text, so a multi-line topic keeps its line structure.
 func (f *Factory) runPlan(ctx context.Context, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 	if _, failOut := requireCwd(ctx, cs); failOut != nil {
 		return failOut, nil
 	}
-	topic := strings.Join(input.Args[2:], " ")
+	topic, _ := gtwTail(input)
 	_, _ = RunPlan(ctx, cs, f.deps, input.ChatID, input.MessageID, topic)
 	return &command.SlashOutput{Consumed: true}, nil
 }
 
-// runNew handles the two steps of /gtw new: `/gtw new` asks the
-// current agent to draft the issues (RunNewDraft), `/gtw new -y`
-// creates them from the reviewed drafts (RunNewCreate). Only the
-// creation step is wrapped in withHooks — new.before / new.after
-// describe "issues are being created", which drafting does not do.
-// They run once per `/gtw new -y`, however many drafts it creates.
+// runNew handles the two steps of /gtw new: `/gtw new [<material>]`
+// asks the current agent to draft the issues (RunNewDraft), `/gtw
+// new -y` creates them from the reviewed drafts (RunNewCreate). The
+// material is the text the user typed after the command; it reaches
+// the agent in the same message as the task. Only the creation step
+// is wrapped in withHooks — new.before / new.after describe "issues
+// are being created", which drafting does not do. They run once per
+// `/gtw new -y`, however many drafts it creates.
 func (f *Factory) runNew(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
-	args, err := parseNewIssueArgs(input.Args[2:])
+	tail, line := gtwTail(input)
+	args, err := parseNewIssueArgs(tail, line)
 	if err != nil {
 		reportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
 		return &command.SlashOutput{
@@ -506,7 +525,7 @@ func (f *Factory) runNew(ctx context.Context, _ command.RuntimeServices, cs *cha
 		if notes := formatLoadNotes(loadNotes); notes != "" {
 			_ = reply(ctx, cs.Emitter(), input.ChatID, input.MessageID, notes)
 		}
-		_, _ = RunNewDraft(ctx, cs, f.deps, input.ChatID, input.MessageID, cfg)
+		_, _ = RunNewDraft(ctx, cs, f.deps, input.ChatID, input.MessageID, cfg, args.Answers)
 		return &command.SlashOutput{Consumed: true}, nil
 	}
 

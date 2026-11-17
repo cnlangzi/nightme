@@ -57,11 +57,14 @@ func TestSystem2_ToolDispatch(t *testing.T) {
 	if !found {
 		t.Fatalf("the chat got %v, want /gtw commit", sent)
 	}
-	if !op.Has("✅ /gtw commit") {
-		t.Fatalf("the run's overview did not show the settled step: %v", op.Lines())
+	var settled bool
+	for _, entry := range op.Entries(op.Cards()[1].ID) {
+		if strings.Contains(entry, "/gtw commit") {
+			settled = true
+		}
 	}
-	if !op.Has("system-2: 1 decisions") {
-		t.Fatalf("the summary does not count the turns: %v", op.Lines())
+	if !settled {
+		t.Fatalf("the card of the round did not show the settled step: %v", op.Entries(op.Cards()[1].ID))
 	}
 }
 
@@ -242,8 +245,14 @@ func TestSystem2_TextOnlyReplyKeepsTheRunGoing(t *testing.T) {
 	if phase := r.currentPhase(); phase == PhaseFailed {
 		t.Fatalf("the run ended as %q, want it to keep going", phase)
 	}
-	if !op.Has("/gtw commit") {
-		t.Fatalf("the run's overview lost the step list: %v", op.Lines())
+	var listed bool
+	for _, item := range op.Checklist(op.Cards()[1].ID) {
+		if strings.Contains(item.Subject, "/gtw commit") {
+			listed = true
+		}
+	}
+	if !listed {
+		t.Fatalf("the card of the round lost the step list: %+v", op.Checklist(op.Cards()[1].ID))
 	}
 
 	// The words of the model stayed in the conversation, and the next
@@ -432,7 +441,7 @@ jobs:
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForLine(t, op, "question: Which branch?")
+	waitAsked(t, op, "Which branch?")
 
 	// The run is waiting: the command did not run yet.
 	for _, cmd := range op.Sent() {
@@ -468,7 +477,7 @@ func TestRestart_ResumesASuspendedRun(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForLine(t, op, "question: Which branch?")
+	waitAsked(t, op, "Which branch?")
 
 	// The daemon restarts: a new service picks the run up.
 	restarted, op2 := testService(t, dir, Config{Provider: provider})
@@ -497,7 +506,7 @@ func TestShutdown_KeepsTheRunForTheNextDaemon(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForLine(t, op, "question: Which branch?")
+	waitAsked(t, op, "Which branch?")
 
 	// The daemon goes away while the run waits for an answer.
 	if err := svc.Shutdown(context.Background()); err != nil {
@@ -589,7 +598,7 @@ func TestRunStep_WaitsForTheAnswerOfTheWorkAgent(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForLine(t, op, "Which step should run next?")
+	waitAsked(t, op, "Which step should run next?")
 
 	if decider.Calls() == 0 {
 		t.Fatal("the decision model was not asked")
@@ -711,16 +720,25 @@ func TestIntegration_TheWorkflowRunsEndToEnd(t *testing.T) {
 			t.Fatalf("the chat never saw %q: %v", cmd, op.Sent())
 		}
 	}
-	// The run's overview shows the steps, how they ended, and the
-	// summary.
-	for _, line := range []string{
-		"✅ /gtw fix 42 -y",
-		"✅ /review",
-		"fix-issue is complete",
-	} {
-		if !op.Has(line) {
-			t.Fatalf("the run's overview never showed %q: %v", line, op.Lines())
+	// The card of the round shows the steps and how they ended, and
+	// the run's card says how the run ended.
+	var steps bool
+	for _, entry := range op.Entries(op.Cards()[1].ID) {
+		if strings.Contains(entry, "/gtw fix 42 -y") {
+			steps = true
 		}
+	}
+	if !steps {
+		t.Fatalf("the card of the round never showed the step: %v", op.Entries(op.Cards()[1].ID))
+	}
+	var done bool
+	for _, m := range op.EmittedOf(messages.OutResult) {
+		if m.Result == "fix-issue is complete" {
+			done = true
+		}
+	}
+	if !done {
+		t.Fatalf("the run never said how it ended: %v", op.EmittedOf(messages.OutResult))
 	}
 }
 

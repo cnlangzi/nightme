@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/wfe"
@@ -52,19 +51,39 @@ func waitDone(t *testing.T, r *run) {
 	}
 }
 
-// summaryCard returns the card the summary was posted as, and its
-// buttons.
-func summaryCard(t *testing.T, op *fakeOperator) (cardRecord, []channel.CardButton) {
+// summaryCard returns the card the summary was posted as.
+func summaryCard(t *testing.T, op *fakeOperator) cardRecord {
 	t.Helper()
 	cards := op.Cards()
-	buttons := op.CardButtons()
-	for i, c := range cards {
-		if c.Posted && strings.HasSuffix(c.Title, " · stopped") {
-			return c, buttons[i]
+	for i := len(cards) - 1; i >= 0; i-- {
+		if cards[i].Posted {
+			return cards[i]
 		}
 	}
 	t.Fatalf("the run posted no summary card: %+v", cards)
-	return cardRecord{}, nil
+	return cardRecord{}
+}
+
+// summaryEntries returns the entries the summary card carries.
+//
+// The summary is a card of its own: its content rides on the entries
+// of the session that posted it.
+func summaryEntries(t *testing.T, op *fakeOperator) []string {
+	t.Helper()
+	card := summaryCard(t, op)
+	out := make([]string, 0, 16)
+	for _, m := range op.EmittedOf(messages.OutReply) {
+		if m.ReplyTo == card.ID {
+			out = append(out, m.Text)
+		}
+	}
+	return out
+}
+
+// summaryBody renders the entries of the summary card as one body.
+func summaryBody(t *testing.T, op *fakeOperator) string {
+	t.Helper()
+	return strings.Join(summaryEntries(t, op), "\n")
 }
 
 // TestStop_PostsTheSummaryOfTheSession — the operator stops the run:
@@ -88,7 +107,7 @@ func TestStop_PostsTheSummaryOfTheSession(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForLine(t, op, "Which step should run next?")
+	waitAsked(t, op, "Which step should run next?")
 
 	before := svc.Status("obs-1")
 	r := chatRun(t, svc, "obs-1")
@@ -100,10 +119,7 @@ func TestStop_PostsTheSummaryOfTheSession(t *testing.T) {
 	}
 	waitDone(t, r)
 
-	card, buttons := summaryCard(t, op)
-	if card.Title != "one · stopped" {
-		t.Errorf("the title = %q, want %q", card.Title, "one · stopped")
-	}
+	body := summaryBody(t, op)
 	for _, want := range []string{
 		"run: ",
 		"duration: ",
@@ -112,23 +128,20 @@ func TestStop_PostsTheSummaryOfTheSession(t *testing.T) {
 		"steps: 1 ran · 0 not run",
 		"system-1: 1 decisions, 0 tokens",
 		"system-2: 0 decisions, 0 tokens",
-		"errors\n",
+		"errors",
 		"· /gtw commit — failed: the issue is claimed by another run (reason: issue_claimed)",
-		"decisions\n",
+		"decisions",
 		"· the decision model — escalate (p=0.10)",
 	} {
-		if !strings.Contains(card.Body, want) {
-			t.Errorf("the summary does not carry %q:\n%s", want, card.Body)
+		if !strings.Contains(body, want) {
+			t.Errorf("the summary does not carry %q:\n%s", want, body)
 		}
-	}
-	if len(buttons) != 0 {
-		t.Errorf("the summary carries %d buttons, want none", len(buttons))
 	}
 	// The summary is rendered from the run's own record: stopping a run
 	// asks no model, so the counters do not move.
-	if !strings.Contains(card.Body, "system-1: 1 decisions, 0 tokens") ||
-		!strings.Contains(card.Body, "system-2: 0 decisions, 0 tokens") {
-		t.Errorf("the summary does not carry the counters of the run:\n%s", card.Body)
+	if !strings.Contains(body, "system-1: 1 decisions, 0 tokens") ||
+		!strings.Contains(body, "system-2: 0 decisions, 0 tokens") {
+		t.Errorf("the summary does not carry the counters of the run:\n%s", body)
 	}
 	if before.System1Decisions != 1 || before.System2Decisions != 0 {
 		t.Errorf("the run decided %d times with the decision model and %d times with the chat model, want 1 and 0",
@@ -141,9 +154,9 @@ func TestStop_PostsTheSummaryOfTheSession(t *testing.T) {
 	}
 }
 
-// TestStop_UpdatesTheLastCardToTheFinalPhase — the card of the last
-// iteration shows where the run ended.
-func TestStop_UpdatesTheLastCardToTheFinalPhase(t *testing.T) {
+// TestStop_EndsTheRunSessionWithItsPhase — the run's card says how
+// the run ended.
+func TestStop_EndsTheRunSessionWithItsPhase(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
@@ -161,7 +174,7 @@ func TestStop_UpdatesTheLastCardToTheFinalPhase(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForLine(t, op, "Which step should run next?")
+	waitAsked(t, op, "Which step should run next?")
 
 	r := chatRun(t, svc, "obs-1")
 	if err := svc.Stop(context.Background(), "obs-1"); err != nil {
@@ -169,10 +182,14 @@ func TestStop_UpdatesTheLastCardToTheFinalPhase(t *testing.T) {
 	}
 	waitDone(t, r)
 
-	cards := op.Cards()
-	last := cards[len(cards)-1]
-	if !strings.HasSuffix(last.Title, " · stopped") {
-		t.Errorf("the last card is %q, want the stopped phase", last.Title)
+	var found bool
+	for _, m := range op.EmittedOf(messages.OutResult) {
+		if m.Result == string(PhaseStopped) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the run published no verdict of its phase: %v", op.EmittedOf(messages.OutResult))
 	}
 }
 
@@ -201,14 +218,14 @@ func TestTheSummaryComesAfterTheRunUnwinds(t *testing.T) {
 	}
 	waitDone(t, r)
 
-	card, _ := summaryCard(t, op)
+	body := summaryBody(t, op)
 	for _, want := range []string{
 		"actions: 1 (1 ok)",
 		"steps: 1 ran · 1 not run",
 		"stopped while: /gtw commit",
 	} {
-		if !strings.Contains(card.Body, want) {
-			t.Errorf("the summary does not carry %q:\n%s", want, card.Body)
+		if !strings.Contains(body, want) {
+			t.Errorf("the summary does not carry %q:\n%s", want, body)
 		}
 	}
 }
@@ -236,7 +253,7 @@ func TestTheSummaryListsOnlyTheActionsThatWentWrong(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForLine(t, op, "Which step should run next?")
+	waitAsked(t, op, "Which step should run next?")
 
 	r := chatRun(t, svc, "obs-1")
 	if err := svc.Stop(context.Background(), "obs-1"); err != nil {
@@ -244,15 +261,15 @@ func TestTheSummaryListsOnlyTheActionsThatWentWrong(t *testing.T) {
 	}
 	waitDone(t, r)
 
-	card, _ := summaryCard(t, op)
-	if !strings.Contains(card.Body, "actions: 2 (1 ok · 1 failed)") {
-		t.Errorf("the summary does not count the actions:\n%s", card.Body)
+	body := summaryBody(t, op)
+	if !strings.Contains(body, "actions: 2 (1 ok · 1 failed)") {
+		t.Errorf("the summary does not count the actions:\n%s", body)
 	}
-	if strings.Contains(card.Body, "/gtw fix 1 -y —") {
-		t.Errorf("the summary lists an action that went well:\n%s", card.Body)
+	if strings.Contains(body, "/gtw fix 1 -y —") {
+		t.Errorf("the summary lists an action that went well:\n%s", body)
 	}
-	if !strings.Contains(card.Body, "· /gtw commit — failed: the commit failed") {
-		t.Errorf("the summary does not list the action that failed:\n%s", card.Body)
+	if !strings.Contains(body, "· /gtw commit — failed: the commit failed") {
+		t.Errorf("the summary does not list the action that failed:\n%s", body)
 	}
 }
 
@@ -292,7 +309,7 @@ func TestTheSummaryCapsTheErrorsAndTheDecisions(t *testing.T) {
 		})
 	}
 
-	body := svc.summaryView(r).Body
+	body := strings.Join(r.summaryLines(), "\n")
 	for _, want := range []string{
 		"errors (last 5 of 6)",
 		"decisions (last 10 of 23)",
@@ -310,7 +327,7 @@ func TestTheSummaryCapsTheErrorsAndTheDecisions(t *testing.T) {
 	// A short session carries the plain headings.
 	r.policy.History = r.policy.History[:2]
 	r.wakes = r.wakes[:3]
-	body = svc.summaryView(r).Body
+	body = strings.Join(r.summaryLines(), "\n")
 	for _, want := range []string{"\nerrors\n", "\ndecisions\n"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("the summary does not carry %q:\n%s", want, body)
@@ -369,7 +386,7 @@ func TestTheSummaryClipsItsRows(t *testing.T) {
 		Why:  strings.Repeat("because ", 100),
 	}}
 
-	body := svc.summaryView(r).Body
+	body := strings.Join(r.summaryLines(), "\n")
 	for _, line := range strings.Split(body, "\n") {
 		if n := len([]rune(line)); n > maxSummaryLine {
 			t.Errorf("a line of the summary is %d runes long, want at most %d: %q", n, maxSummaryLine, line)
@@ -428,7 +445,7 @@ func TestTheWakeLogHoldsOneRecordPerModelCall(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForLine(t, op, "question: Which branch?")
+	waitAsked(t, op, "Which branch?")
 
 	r := chatRun(t, svc, "obs-1")
 	wakes := r.wakeRecords()
@@ -474,7 +491,7 @@ func TestTheWakeLogSurvivesTheDaemon(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForLine(t, op, "Which step should run next?")
+	waitAsked(t, op, "Which step should run next?")
 	waitStateFile(t, dir)
 
 	r := chatRun(t, svc, "obs-1")

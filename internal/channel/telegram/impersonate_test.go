@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"strconv"
-	"strings"
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/channel"
@@ -264,23 +263,21 @@ func TestAct_WithoutAPromptIsRefused(t *testing.T) {
 	}
 }
 
-// TestPostCard_PublishesTheCardAndUpdatesIt — the run's overview is
-// one message of the chat, edited in place.
-func TestPostCard_PublishesTheCardAndUpdatesIt(t *testing.T) {
+// TestPostCard_PublishesTheCardUnderItsAnchor — the card of a
+// session hangs under the message the session is about.
+func TestPostCard_PublishesTheCardUnderItsAnchor(t *testing.T) {
 	a, api := newImpersonateAdapter(t)
 
 	spec := channel.CardSpec{
-		Title: "fix · running",
-		Body:  "1. ✅ /gtw commit",
-		Buttons: []channel.CardButton{
-			{Label: "暂停", Action: "pause"},
-		},
+		Body:    "the run is starting…",
+		ReplyTo: "4242",
 	}
 	id, err := a.PostCard(context.Background(), "tg_100", spec)
 	if err != nil {
 		t.Fatalf("PostCard: %v", err)
 	}
-	if _, err := strconv.Atoi(id); err != nil {
+	cardID, err := strconv.Atoi(id)
+	if err != nil {
 		t.Fatalf("id = %q, want a message id", id)
 	}
 
@@ -288,34 +285,10 @@ func TestPostCard_PublishesTheCardAndUpdatesIt(t *testing.T) {
 	if send == nil {
 		t.Fatal("the card was not published")
 	}
-	markup, _ := send.Params["reply_markup"].(map[string]any)
-	if markup == nil {
-		t.Fatal("the card has no buttons")
+	if got, _ := send.Params["reply_to_message_id"].(int); got != 4242 {
+		t.Errorf("reply_to_message_id = %v, want 4242", send.Params["reply_to_message_id"])
 	}
-	rows, _ := markup["inline_keyboard"].([]any)
-	if len(rows) != 1 {
-		t.Fatalf("the card has %d button rows, want 1", len(rows))
-	}
-	row, _ := rows[0].([]any)
-	if len(row) != 1 {
-		t.Fatalf("the row has %d buttons, want 1", len(row))
-	}
-	button, _ := row[0].(map[string]any)
-	if got, _ := button["callback_data"].(string); got != "m:pause" {
-		t.Errorf("callback_data = %q, want m:pause", got)
-	}
-
-	spec.Body = "1. ✅ /gtw commit\n2. 🔄 /gtw push"
-	if err := a.UpdateCard(context.Background(), "tg_100", id, spec); err != nil {
-		t.Fatalf("UpdateCard: %v", err)
-	}
-	edit := findCall(api.snapshotCalls(), "editMessageText")
-	if edit == nil {
-		t.Fatal("the card was not updated")
-	}
-	rich, _ := edit.Params["rich_message"].(map[string]any)
-	blocks, _ := rich["blocks"].(json.RawMessage)
-	if !strings.Contains(string(blocks), "gtw push") {
-		t.Errorf("the updated card does not carry the new body: %s", string(blocks))
+	if !a.adoptableCard(cardID) {
+		t.Error("the posted card is not adoptable: a session would post a second card")
 	}
 }

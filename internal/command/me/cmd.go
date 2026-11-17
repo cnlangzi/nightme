@@ -377,6 +377,7 @@ func (c *controller) StartWorkflow(ctx context.Context, req command.MeRequest) (
 		Owner:      req.Owner,
 		Commands:   req.Commands,
 		Agent:      req.Agent,
+		MessageID:  req.MessageID,
 	})
 }
 

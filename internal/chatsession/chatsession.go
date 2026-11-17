@@ -215,6 +215,15 @@ type ChatSession struct {
 	// Pool of AgentSessions keyed by (agent, cwd).
 	pool map[agentCwdKey]*AgentSession
 
+	// choiceHandler answers an interactive choice asked in this chat.
+	//
+	// The personal agent asks the operator a question through the
+	// chat's own choice card, and the click comes back through the
+	// same path a coding agent's answer comes back through. The
+	// handler is the run's own: it claims the answer and hands it to
+	// the run.
+	choiceHandler func(requestID, option string) bool
+
 	// Currently active AgentSession (pointer into pool). nil means
 	// no active session (ChatSession exists but no /cwd + /use yet).
 	selectedAS *AgentSession
@@ -946,6 +955,41 @@ func (cs *ChatSession) ToolsMode() ToolsMode {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 	return cs.toolsMode
+}
+
+// SetChoiceHandler installs the handler that answers an interactive
+// choice asked in this chat.
+//
+// The handler is called with the id of the request the choice was
+// asked under and the option that was picked. It reports whether it
+// took the answer: a handler that does not know the request leaves
+// the answer to the coding agent's own pending prompt.
+func (cs *ChatSession) SetChoiceHandler(handler func(requestID, option string) bool) {
+	cs.mu.Lock()
+	cs.choiceHandler = handler
+	cs.mu.Unlock()
+}
+
+// ClearChoiceHandler removes the handler that answers an interactive
+// choice in this chat.
+func (cs *ChatSession) ClearChoiceHandler() {
+	cs.mu.Lock()
+	cs.choiceHandler = nil
+	cs.mu.Unlock()
+}
+
+// AnswerChoice hands the answer of an interactive choice to the
+// handler the chat installed.
+//
+// It reports whether a handler took the answer.
+func (cs *ChatSession) AnswerChoice(requestID, option string) bool {
+	cs.mu.RLock()
+	handler := cs.choiceHandler
+	cs.mu.RUnlock()
+	if handler == nil {
+		return false
+	}
+	return handler(requestID, option)
 }
 
 // PrimaryAgent returns the per-chat primary agent (snapshot of

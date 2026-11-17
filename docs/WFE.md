@@ -581,7 +581,7 @@ This section answers "where do runs actually execute, and how do the pieces fit?
   │  the policy (internal/wfe.Policy) bounds every   │
   │  action a run may take                         │
   └───────┬──────────────────────────┬─────────────┘
-          │ "🧑‍💻: /gtw fix 42 -y"   │ the run card
+          │ "🧑‍💻: /gtw fix 42 -y"   │ the run's cards
           ▼                          ▼
   ┌──────────────────────┐   ┌──────────────────────┐
   │ internal/channel —   │   │ internal/gateway/   │
@@ -600,7 +600,7 @@ This section answers "where do runs actually execute, and how do the pieces fit?
 |---|---|---|
 | Transport | `internal/channel` | The chat the run works in. `Impersonator` speaks for the run: what it says is a real message of the chat, and it comes back in through `Incoming()`. |
 | The side channel | `internal/gateway/observe` | What the daemon said about the messages the run sent: the phase, the heartbeat, the prompts, the outcome. |
-| The agent | `internal/me` | The run: what to do next, what the policy allows, what the run card shows. |
+| The agent | `internal/me` | The run: what to do next, what the policy allows, and the sessions the run speaks in. |
 | The models | `internal/llm` | Two capabilities: `Provider` (chat and tool calling) and `Decider` (typed decision questions). |
 | The engine | `internal/wfe` | The workflow schema, the plan of a run, the judgment points, and the `Policy` that bounds a run. |
 
@@ -807,13 +807,21 @@ The cap on an answer defaults to 40960 tokens; a configuration that does not nam
 | `/me stop` | Cancels the run, tells the chat to stop working, and leaves a summary of the session in the chat. |
 | `/me status` | Reports the current step, the phase and progress of the running command, the remaining budget, and what each capability decided and spent. |
 
-The run card carries the same commands: its buttons are `[暂停] [继续] [停止]`, and a click is the command it stands for.
+The run speaks in agent sessions, and the chat renders every session the way it renders a coding agent's turn: an identity line, a checklist, the entries of the session, the tool calls as thread events and a status bar in the footer. A run opens three kinds of session, and every session owns exactly one card:
 
-Every job iteration of the run gets a card of its own: an iteration is one pass through a job's step list. The card of the iteration that ended stays in the chat as the record of that iteration; the next iteration starts a new one. A run that comes back to an iteration it has been in before goes on with the card that iteration has. `/me show` posts the current state as a card of its own, for the operator who wants the state back in front of them.
+| Session | Its card hangs under | It carries |
+|---|---|---|
+| The run | The `/me start` message | The jobs of the workflow as its checklist, one entry per finished job round, the counters of the run in its header, and the run's identity, token usage and repository facts in its footer. |
+| A job round | The card of the run | The steps of the round as its checklist, one entry per step outcome, and the round's identity and token usage in its footer. |
+| A decision | The command message of the step the decision is about | The reason the decision was taken as its first entry, the thinking of the chat model, the tool calls of the decision as thread events under the card, one entry per reply, and the verdict of the decision in its footer. |
 
-`/me stop` leaves a summary of the session in the chat: a card of its own that says what the run did, what went wrong and what the models decided. The summary is posted once the run has unwound, so the step that was in flight counts as a step that did not run unless it produced an outcome. The card carries no buttons — the run is over, and pause, continue and stop would act on a run that no longer exists.
+A decision about a step that never sent a command to the chat — a shell step, a `use:` step, a judgment that names no step — hangs under the card of the round instead.
 
-A run that waits for an answer offers the choices as the card's buttons: a click is the answer, and the answer never reaches the agent. A person who quotes the question instead answers it in their own words — the answer is claimed by the run before the agent sees it.
+The card of a session is posted by the run itself and is patched in place from then on: a session owns one card, and the chat never posts a second one for it. The card of a round that ended stays in the chat as the record of that round; the next round starts a new one. A run that comes back to a round it has been in before goes on with the card that round has. `/me show` posts the current state as a card of its own, for the operator who wants the state back in front of them, and the run keeps updating that card from here on.
+
+`/me stop` leaves a summary of the session in the chat: a card of its own that says what the run did, what went wrong and what the models decided. The summary is posted once the run has unwound, so the step that was in flight counts as a step that did not run unless it produced an outcome.
+
+No card of the run carries a button: the operator drives the run with `/me pause`, `/me continue` and `/me stop`. A question the run asks is the chat's own interactive choice card, and a click on an option is the answer — the answer never reaches the agent. A person who quotes the question instead answers it in their own words — the answer is claimed by the run before the agent sees it.
 
 The question itself never reaches the agent either: it is a message of the chat, not a turn of the conversation. The agent sees the commands the run speaks, not the questions the run asks.
 
@@ -821,7 +829,7 @@ The arguments of `/me start` fill the workflow's declared arguments: a positiona
 
 The command line is read by the shared lexer: a token that starts with `-` is a flag, and a flag the command does not know is refused. `-i <rounds>` (or `--iterations <rounds>`) sets the round count of every job of the workflow for that run — `0` means "until the run ends", the same as `iterations: 0` in the file. The count belongs to the run: the file keeps its own counts, and the next `/me start` uses them. Everything after `--` belongs to the workflow, so a value that starts with `-` reaches it.
 
-One run is active per chat: the chat that starts a run is the chat the run works in, the chat that answers its questions, and the chat that holds its overview.
+One run is active per chat: the chat that starts a run is the chat the run works in, the chat that answers its questions, and the chat that holds its cards.
 
 The run's lifecycle belongs to these commands alone. `/close`, `/stop` and `/new` end the chat's session, not the run: a run whose step was interrupted goes on to the next judgment point.
 
@@ -845,37 +853,56 @@ A step that is still running reports `waiting`, and a step whose execution is go
 
 The outcome of a step reaches the run state and the expressions of the steps after it: the status as `${{ steps.<id>.outputs.status }}`, the facts under `${{ steps.<id>.outputs.data.<key> }}`.
 
-The chat sees the outcome in the run card — one message, updated in
-place. The card names the iteration it records, and its first line is the
-live header: how many turns the chat model took, how many tool calls the run
-made and when it last did something. The card carries the decision the run
-made last and the run's own words:
+The chat sees the outcome on the card of the session it belongs to — one
+message, patched in place. The card of the run shows the jobs of the workflow
+as its checklist, one entry per finished job round, and the live header: how
+many turns the chat model took, how many tool calls the run made and when it
+last did something. The footer of the card names the run, the model and the
+verdict the run reached:
 
 ```
-fix-issue · running
+📋 Tasks
+- [x] main
+- [ ] ship
+
+main · round 1 — ok: the fix landed
+main · round 2 — failed: the commit failed
 
 💭 8 · 🔧 6 · ⏱ 14:35:22
-job: main · round: 1
-args: id=42
+---
+🤖: me · jev-1.14 · fix-issue-1752661200000000000 · fix-issue is complete
+💰:「 4.2k / 1.1k / 4210 · 12.5% (200k) · $0.087 」
+📁: code/nightme · ⎇ main · + 2 · ± 3 · − 1
+```
 
-1. ✅ /gtw fix 42 -y
-2. ✅ /gtw commit
-3. ⚠️ /review
-4. ⏳ /gtw push
+The card of a round shows the steps of that round and how they ended:
 
-current: /gtw push
-decision: the workflow — the plan says so
-actions: 6 · system-1: 0 decisions, 0 tokens · system-2: 8 decisions, 4210 tokens
+```
+📋 Tasks
+- [x] /gtw fix 42 -y
+- [ ] /gtw commit
 
-reply:
+/gtw fix 42 -y — ok: the fix landed
+
+---
+🤖: me · jev-1.14 · main · round 1
+```
+
+The card of a decision shows why the decision was taken, what the chat model
+said and what the decision came to:
+
+```
+reason: the previous step "review" ended as "failed" — the review is incomplete
+
 the review needs a second look, the diff is bigger than I expected
+
+---
+🤖: me · jev-1.14 · decision-3 · /gtw fix 43 -y (p=0.91)
 ```
 
 The summary of a stopped session is a card of its own:
 
 ```
-fix-issue · stopped
-
 run: fix-issue-1752661200000000000
 duration: 42m
 jobs: ship × 7
@@ -884,10 +911,8 @@ wake-ups: 23 (18 by the decision model · 5 by the chat model)
 steps: 9 ran · 2 not run
 system-1: 12 decisions, 1204 tokens
 system-2: 31 decisions, 18422 tokens
-
 errors (last 5 of 6)
 · /gtw fix 43 -y — failed: the issue is claimed by another run (reason: issue_claimed)
-
 decisions (last 10 of 23)
 · the decision model — /gtw fix 43 -y (p=0.91) · because: the previous step "review" ended as "failed"
 · the chat model — run_step(step_id=review) · because: the plan is exhausted

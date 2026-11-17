@@ -1,14 +1,14 @@
 // agent_events.go — the run's own activity.
 //
-// The run's tool calls leave the card and travel the outbound path:
-// the same path a coding agent's activity travels. The chat renders
-// them the way it renders the agent's — a ● call / ⎿ result pair for
-// a tool call — so the run reads like the agent it drives.
+// The run speaks the standard outbound vocabulary: the same events a
+// coding agent's turn speaks. The chat renders them the way it
+// renders the agent's — a ● call / ⎿ result pair for a tool call, a
+// 💭 line for the thinking, entries for the words — so a run reads
+// like the agent it drives.
 //
-// What the chat model said is not such an event: it is the run's own
-// words to the operator, and they go on the run's card. A reply is
-// never gated: the run says what it has to say, whatever the chat
-// shows of a coding agent's thinking.
+// Every event carries the anchor of the session it belongs to: the
+// card the run posted for that session. The chat patches that card in
+// place, so a session owns exactly one card.
 //
 // The counts of what the run did are taken here, before the events
 // leave the run: a chat that hides them does not change what the run
@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/thinktext"
 	"github.com/cnlangzi/nightme/internal/wfe"
@@ -43,90 +44,110 @@ const maxEventLine = 300
 // every line the command produces.
 const cardRefreshInterval = 5 * time.Second
 
-// emit publishes an outbound message in the chat the run works in.
+// emit publishes an outbound message for a session.
 //
-// The message hangs under the run's card: the card is the run's state
-// board, and the thread under it is the run's live log. The anchor
-// is the card of the iteration the run is in; a run that has no card
-// yet publishes without one.
+// The message hangs under the session's card: the card is the
+// session's state board, and the thread under it is the session's
+// live log. A session without a card publishes without an anchor, and
+// the chat falls back to its orphan handling.
 //
 // A message that does not reach the chat is reported and the run goes
-// on: the run's state lives on the card, not in the chat.
-func (s *Service) emit(ctx context.Context, r *run, anchor string, msg messages.OutboundMessage) {
+// on: the run's state lives in the chat, not in the run.
+func (s *Service) emit(ctx context.Context, r *run, sess *session, msg messages.OutboundMessage) {
 	if s.cfg.Operator == nil {
 		return
 	}
 	msg.ChatID = r.chatID
-	msg.ReplyTo = anchor
+	if sess != nil {
+		msg.ReplyTo = sess.cardID
+		msg.SessionID = sess.id
+		msg.AgentName = meAgentName
+		msg.Model = r.modelName()
+		msg.Usage = usageInfo(r.sessionUsage(sess))
+		msg.GitStatus = r.gitStatusValue()
+	}
 	if err := s.cfg.Operator.Emit(ctx, r.chatID, msg); err != nil {
 		s.logger.Warn("me: the run's event could not be published",
 			"run_id", r.id, "kind", msg.Kind.String(), "err", err)
 	}
 }
 
-// recordReply keeps what the chat model said.
+// usageInfo renders what a session spent as the footer's usage line.
 //
-// The words are the run's own: they go on the run's card, where the
-// operator reads them, and not into the chat as a thinking card of
-// their own.
+// A session that spent nothing has no usage line.
+func usageInfo(usage llm.Usage) *messages.UsageInfo {
+	if usage.Total() == 0 {
+		return nil
+	}
+	return &messages.UsageInfo{
+		InputTokens:  usage.InputTokens,
+		OutputTokens: usage.OutputTokens,
+	}
+}
+
+// recordReply publishes what the chat model said.
+//
+// The words are the decision's own: they go on the decision's card,
+// where the operator reads them. Every reply is shown: the card is
+// the record of the decision.
 //
 // A model that writes its scratchpad into its own text wraps it in
-// <think>…</think> tags; the tags come off and the words stay.
-func (s *Service) recordReply(r *run, text string) {
-	text = strings.TrimSpace(thinktext.Unwrap(text))
-	if text == "" {
+// <think>…</think> tags: the thinking comes off and becomes a
+// thinking event of its own, and the reply carries the words alone.
+func (s *Service) recordReply(ctx context.Context, r *run, text string) {
+	sess := r.decisionSessionRef()
+	if sess == nil {
 		return
 	}
-	r.addReply(replyBlock{Text: clipReply(text), At: s.now()})
+	thinking, reply := thinktext.SplitText(text)
+	if t := strings.TrimSpace(thinking); t != "" {
+		s.emit(ctx, r, sess, messages.OutboundMessage{
+			Kind: messages.OutThinking,
+			Text: t,
+		})
+	}
+	if strings.TrimSpace(reply) == "" {
+		return
+	}
+	s.publishReply(ctx, r, sess, strings.TrimSpace(reply))
 }
 
 // countToolCall records a tool call the run made.
 //
 // The count is taken before the call leaves the run: a chat that
 // hides the run's tool calls does not change what the run did.
-func (s *Service) countToolCall(r *run) {
+func (s *Service) countToolCall(ctx context.Context, r *run) {
 	r.countTool(s.now())
+	s.publishHeartbeat(ctx, r)
 }
 
-// refreshCard updates the card, at most once every
-// cardRefreshInterval.
+// refreshSessions republishes the checklists of the open sessions.
 //
-// The card follows the command the run waits for through the
-// snapshots of the tracker. The snapshots are throttled: a run that
-// is doing something writes to the chat now and then, not on every
-// line the command produces.
-//
-// A snapshot means the command moved: the run is doing something, and
-// the card says when it did it for the last time.
-func (s *Service) refreshCard(r *run) {
+// The checklists follow the run's progress: a job that finished and a
+// step that ran show up on the card of the session they belong to.
+func (s *Service) refreshSessions(r *run) {
 	now := s.now()
 	if !r.takeCardRefresh(now) {
 		return
 	}
 	r.beat(now)
-	s.updateCard(r)
-}
-
-// clipReply cuts a reply to what a card can show.
-//
-// The card carries the first lines of the reply and the rest is cut
-// short: a card is read at a glance, and the reply is one turn of a
-// conversation the operator does not read.
-func clipReply(text string) string {
-	lines := strings.Split(text, "\n")
-	if len(lines) > maxReplyLines {
-		lines = lines[:maxReplyLines]
+	ctx := context.WithoutCancel(r.ctx)
+	r.setGitStatus(s.gitStatus(r))
+	s.publishTasks(ctx, r, r.runSessionRef(), r.runTasks())
+	s.publishHeartbeat(ctx, r)
+	sess := r.roundSessionRef()
+	if sess != nil {
+		s.publishTasks(ctx, r, sess, r.roundTasks(sess.job, sess.round))
 	}
-	return clipLine(strings.Join(lines, "\n"), maxReplyChars)
 }
 
 // publishToolStart publishes a tool call that is about to run.
 //
 // The anchor is the card the call hangs under: the call and its
-// result belong under the same card, and the run may move to another
-// iteration while the call runs.
-func (s *Service) publishToolStart(ctx context.Context, r *run, anchor string, call pendingCall) {
-	s.emit(ctx, r, anchor, messages.OutboundMessage{
+// result belong under the same card, and the run may move on while
+// the call runs.
+func (s *Service) publishToolStart(ctx context.Context, r *run, sess *session, call pendingCall) {
+	s.emit(ctx, r, sess, messages.OutboundMessage{
 		Kind: messages.OutToolStart,
 		Tool: &messages.ToolInfo{
 			Name: call.Name,
@@ -141,7 +162,7 @@ func (s *Service) publishToolStart(ctx context.Context, r *run, anchor string, c
 // call that failed carries its failure as the error — the chat
 // renders the error, and a failed call must not read as one that
 // went through.
-func (s *Service) publishToolEnd(ctx context.Context, r *run, anchor string, call pendingCall, res stepResult, cause error) {
+func (s *Service) publishToolEnd(ctx context.Context, r *run, sess *session, call pendingCall, res stepResult, cause error) {
 	tool := &messages.ToolInfo{
 		Name: call.Name,
 		Args: toolArgLine(r, call),
@@ -154,7 +175,7 @@ func (s *Service) publishToolEnd(ctx context.Context, r *run, anchor string, cal
 	default:
 		tool.Summary = res.Summary
 	}
-	s.emit(ctx, r, anchor, messages.OutboundMessage{
+	s.emit(ctx, r, sess, messages.OutboundMessage{
 		Kind: messages.OutToolEnd,
 		Tool: tool,
 	})

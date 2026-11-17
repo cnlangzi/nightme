@@ -145,6 +145,9 @@ type Request struct {
 	// Agent is the name of the chat's agent. It is the one that
 	// thinks for the owner when the daemon names none itself.
 	Agent string
+	// MessageID is the id of the message that started the run. The
+	// run's card hangs under it.
+	MessageID string
 }
 
 // Status is the state of a run.
@@ -200,15 +203,20 @@ type Operator interface {
 	// Act answers a prompt the chat is waiting for, as if a person
 	// had clicked the button.
 	Act(ctx context.Context, chatID string, action messages.ActionPayload) error
-	// PostCard publishes the run's overview and returns the id of
-	// the message it became.
+	// PostCard publishes the card of a session and returns the id of
+	// the message it became. The card is the session's own: the chat
+	// patches it in place when the session's events land.
 	PostCard(ctx context.Context, chatID string, spec channel.CardSpec) (string, error)
-	// UpdateCard replaces the run's overview.
-	UpdateCard(ctx context.Context, chatID, cardID string, spec channel.CardSpec) error
 	// Emit publishes an outbound message in the chat the run works in.
 	// The kind decides how the chat renders it: thinking becomes a
 	// 💭 card, a tool call a ● line, a reply a message.
 	Emit(ctx context.Context, chatID string, msg messages.OutboundMessage) error
+	// OnChoice installs the handler that takes the answer of an
+	// interactive choice back into the run. The handler is called with
+	// the id of the request the choice was asked under and the option
+	// that was picked; it reports whether it took the answer. The
+	// returned function removes the handler again.
+	OnChoice(chatID string, handler func(requestID, option string) bool) (remove func())
 	// Get returns the tracked execution of a message, without
 	// consuming it.
 	Get(msgID string) (observe.Execution, bool)
@@ -575,14 +583,16 @@ func (s *Service) StartWorkflow(ctx context.Context, req Request) (string, error
 	s.active[req.ChatID] = r
 	s.mu.Unlock()
 
-	// The run's overview goes up before the first step: the chat
-	// shows what the run is from the start.
-	id, err := s.postCard(ctx, r, iteration{})
-	if err != nil {
-		s.finish(r, PhaseFailed, err.Error())
-		return "", err
+	// The run's session goes up before the first step: the chat shows
+	// what the run is from the start. Its card hangs under the message
+	// that started the run.
+	//
+	// A chat that cannot show the card cannot show the run: the run
+	// is refused before it does any work.
+	if !s.openRunSession(ctx, r, req.MessageID) {
+		s.finish(r, PhaseFailed, "the chat cannot show the run's card")
+		return "", errors.New("me: the chat cannot show the run's card")
 	}
-	r.setCard(id, iteration{})
 
 	s.wg.Add(1)
 	go func() {
@@ -668,7 +678,7 @@ func (s *Service) Pause(ctx context.Context, chatID string) error {
 		return errors.New("this chat has no run in it")
 	}
 	r.requestPause("the operator paused the run")
-	s.updateCard(r)
+	s.refreshSessions(r)
 	return nil
 }
 
@@ -689,7 +699,7 @@ func (s *Service) Continue(ctx context.Context, chatID, note string) error {
 	// The reset of the step's budget is part of the run's state: a
 	// daemon that goes away now comes back with it.
 	s.persist(r)
-	s.updateCard(r)
+	s.refreshSessions(r)
 	return nil
 }
 
@@ -705,17 +715,7 @@ func (s *Service) Show(ctx context.Context, chatID string) error {
 	if !ok {
 		return errors.New("this chat has no run in it")
 	}
-	it := r.cardIteration()
-	id, err := s.postCard(ctx, r, it)
-	if err != nil {
-		return err
-	}
-	r.setCard(id, it)
-	if it.job != "" {
-		// The card of the iteration is this one from now on: a run
-		// that comes back to the iteration goes on with it.
-		r.rememberCard(it, id)
-	}
+	s.openRunSession(ctx, r, "")
 	return nil
 }
 

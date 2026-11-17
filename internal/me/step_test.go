@@ -326,8 +326,14 @@ jobs:
 			t.Fatal("the chain continued after the failed step")
 		}
 	}
-	if !op.Has("failed") {
-		t.Errorf("the observer was not told about the failure: %v", op.Lines())
+	var told bool
+	for _, entry := range op.Entries(op.Cards()[1].ID) {
+		if strings.Contains(entry, "failed") {
+			told = true
+		}
+	}
+	if !told {
+		t.Errorf("the observer was not told about the failure: %v", op.Entries(op.Cards()[1].ID))
 	}
 }
 

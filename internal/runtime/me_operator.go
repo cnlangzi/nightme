@@ -101,13 +101,19 @@ func (o *operator) PostCard(ctx context.Context, chatID string, spec channel.Car
 	return pub.PostCard(ctx, chatID, spec)
 }
 
-// UpdateCard replaces the run's overview.
-func (o *operator) UpdateCard(ctx context.Context, chatID, cardID string, spec channel.CardSpec) error {
-	pub, err := o.cardPublisherFor(chatID)
-	if err != nil {
-		return err
+// OnChoice installs the handler that takes the answer of an
+// interactive choice back into the run.
+//
+// The chat that owns the run's chat holds the handler: a click on an
+// option comes back as a card action, and the handler the run
+// installed takes it.
+func (o *operator) OnChoice(chatID string, handler func(requestID, option string) bool) func() {
+	cs := findChatSession(chatID)
+	if cs == nil {
+		return func() {}
 	}
-	return pub.UpdateCard(ctx, chatID, cardID, spec)
+	cs.SetChoiceHandler(handler)
+	return func() { cs.ClearChoiceHandler() }
 }
 
 // Emit publishes an outbound message in the chat the run works in.

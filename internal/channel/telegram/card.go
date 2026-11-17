@@ -15,45 +15,61 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/cnlangzi/nightme/internal/channel"
-	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // Compile-time check: the adapter can publish a card.
 var _ channel.CardPublisher = (*Adapter)(nil)
 
-// meActionKind marks a card button that runs a /me subcommand.
-const meActionKind = "m"
-
-// meActionPrefix is the callback-data prefix of a run-card button.
-const meActionPrefix = meActionKind + ":"
-
 // PostCard publishes the run card in the chat.
+//
+// The card is posted as a reply to the message the spec names, so it
+// hangs where the operator expects it. A card this adapter posted is
+// a card it can adopt: the events that carry its id as their anchor
+// are rendered onto it instead of onto a second message.
 func (a *Adapter) PostCard(ctx context.Context, chatID string, spec channel.CardSpec) (string, error) {
 	rawChatID, topicID, ok := splitSessionID(chatID)
 	if !ok {
 		return "", fmt.Errorf("telegram: chat id %q is not a telegram chat id", chatID)
 	}
-	result, err := a.sendRichBlocks(ctx, rawChatID, topicID, 0, renderRunCard(spec), runCardKeyboard(spec))
+	replyTo := 0
+	if id, err := strconv.Atoi(spec.ReplyTo); err == nil && id > 0 {
+		replyTo = id
+	}
+	result, err := a.sendRichBlocks(ctx, rawChatID, topicID, replyTo, renderRunCard(spec), nil)
 	if err != nil {
 		return "", err
 	}
+	a.rememberPostedCard(result.MessageID)
 	return strconv.Itoa(result.MessageID), nil
 }
 
-// UpdateCard replaces the card's content.
-func (a *Adapter) UpdateCard(ctx context.Context, chatID, cardID string, spec channel.CardSpec) error {
-	rawChatID, _, ok := splitSessionID(chatID)
-	if !ok {
-		return fmt.Errorf("telegram: chat id %q is not a telegram chat id", chatID)
+// rememberPostedCard records a card this adapter posted.
+//
+// The card is the anchor of the session it belongs to: the rich turn
+// for that anchor adopts the card rather than sending a new message.
+func (a *Adapter) rememberPostedCard(messageID int) {
+	if messageID == 0 {
+		return
 	}
-	id, err := strconv.Atoi(cardID)
-	if err != nil {
-		return fmt.Errorf("telegram: %q is not a telegram message id", cardID)
+	a.mu.Lock()
+	a.postedCards[messageID] = true
+	a.mu.Unlock()
+}
+
+// adoptableCard reports whether the anchor names a card this adapter
+// posted.
+//
+// Such an anchor is a session's own card: the rich turn starts on it
+// instead of cold-creating a message of its own.
+func (a *Adapter) adoptableCard(anchor int) bool {
+	if anchor == 0 {
+		return false
 	}
-	return a.editRichBlocks(ctx, rawChatID, id, renderRunCard(spec), runCardKeyboard(spec))
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.postedCards[anchor]
 }
 
 // renderRunCard renders the card as rich-message blocks: the title as
@@ -87,62 +103,4 @@ func renderRunCard(spec channel.CardSpec) string {
 	}
 	b, _ := json.Marshal(blocks)
 	return string(b)
-}
-
-// runCardKeyboard renders the card's buttons as an inline keyboard.
-//
-// The buttons are laid out two to a row, the way the choice keyboard
-// lays them out: a run card can carry a button per option, and a row
-// of ten is unreadable.
-func runCardKeyboard(spec channel.CardSpec) map[string]any {
-	if len(spec.Buttons) == 0 {
-		return nil
-	}
-	rows := make([]any, 0, (len(spec.Buttons)+1)/2)
-	row := make([]any, 0, 2)
-	for _, b := range spec.Buttons {
-		if len(row) == 2 {
-			rows = append(rows, row)
-			row = make([]any, 0, 2)
-		}
-		row = append(row, map[string]any{
-			"text":          escapeInline(b.Label),
-			"callback_data": meActionPrefix + b.Action,
-		})
-	}
-	if len(row) > 0 {
-		rows = append(rows, row)
-	}
-	return map[string]any{"inline_keyboard": rows}
-}
-
-// handleRunCardClick turns a run-card button click into the command
-// it stands for.
-//
-// The command enters the daemon as an ordinary inbound message, so it
-// is dispatched by the same code that dispatches a typed command.
-func (a *Adapter) handleRunCardClick(ctx context.Context, callback *CallbackQuery, action string) {
-	if callback == nil || callback.Message == nil {
-		if callback != nil {
-			a.answerCallback(ctx, callback.ID, "Unsupported action", true)
-		}
-		return
-	}
-	chatID := a.sessionChatID(
-		strconv.FormatInt(callback.Message.Chat.ID, 10),
-		callback.Message.MessageThreadID,
-	)
-	synthetic := messages.InboundMessage{
-		ChatID:     chatID,
-		Text:       "/me " + strings.TrimSpace(action),
-		HasMention: true,
-		Time:       time.Now(),
-	}
-	// The click is published without blocking: a full queue must not
-	// stall the poll loop.
-	if !a.publish(synthetic) {
-		a.answerCallback(ctx, callback.ID, "The chat is busy, try again", true)
-		return
-	}
-	a.answerCallback(ctx, callback.ID, "Recorded", false)
 }

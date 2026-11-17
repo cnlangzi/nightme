@@ -511,6 +511,14 @@ func jobComplete(state *RunState, wf *Workflow, name string) bool {
 	return true
 }
 
+// JobComplete reports whether every step of the job has run.
+//
+// The plan uses it to decide what is ready; a reader of the run's
+// progress uses it to say what is done.
+func JobComplete(state *RunState, wf *Workflow, name string) bool {
+	return jobComplete(state, wf, name)
+}
+
 // HasRun reports whether the step already ran.
 //
 // A step that started and has not settled yet has not run: it is

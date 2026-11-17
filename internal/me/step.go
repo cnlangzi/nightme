@@ -56,13 +56,16 @@ func (s *Service) executeStep(ctx context.Context, r *run, job string, step wfe.
 func (s *Service) executeMessage(ctx context.Context, r *run, job string, step wfe.Step) (stepVerdict, error) {
 	text := s.evalText(r, step.Message)
 	res, err := s.runCommand(ctx, r, text, false)
+	// The decision about this step hangs under the message its command
+	// became: the decision reads directly after the error it answers.
+	r.rememberCommandMsg(step.ID, r.lastCommandMsgIDValue())
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return stepVerdict{}, err
 		}
 		out := failedOutcome(err.Error(), nil)
 		r.record(wfe.ActionKindRun, text, step.ID, out)
-		s.updateCard(r)
+		s.refreshSessions(r)
 		return stepVerdict{Outcome: out, Settled: true}, nil
 	}
 	if res.Status == statusWaiting {
@@ -95,7 +98,7 @@ func (s *Service) executeShell(ctx context.Context, r *run, job string, step wfe
 	if s.cfg.Shell == nil {
 		out := failedOutcome(fmt.Sprintf("the step %q needs a shell runner, and the daemon has none", step.ID), nil)
 		r.record(wfe.ActionKindRun, command, step.ID, out)
-		s.updateCard(r)
+		s.refreshSessions(r)
 		return stepVerdict{Outcome: out, Settled: true}, nil
 	}
 
@@ -123,7 +126,7 @@ func (s *Service) executeShell(ctx context.Context, r *run, job string, step wfe
 		out = failedOutcome(summary, out.Data)
 	}
 	r.record(wfe.ActionKindRun, command, step.ID, out)
-	s.updateCard(r)
+	s.refreshSessions(r)
 	return stepVerdict{Outcome: out, Settled: true}, nil
 }
 
@@ -218,7 +221,7 @@ func (s *Service) executeWait(ctx context.Context, r *run, job string, step wfe.
 	}
 	out := wfe.Outcome{Status: wfe.OutcomeOK, Summary: "waited " + d.String()}
 	r.record(wfe.ActionKindRun, "wait "+d.String(), step.ID, out)
-	s.updateCard(r)
+	s.refreshSessions(r)
 	return stepVerdict{Outcome: out, Settled: true}, nil
 }
 
@@ -250,7 +253,7 @@ func (s *Service) executeUse(ctx context.Context, r *run, job string, step wfe.S
 		out = failedOutcome(err.Error(), data)
 	}
 	r.record(wfe.ActionKindRun, name, step.ID, out)
-	s.updateCard(r)
+	s.refreshSessions(r)
 	return stepVerdict{Outcome: out, Settled: true}, nil
 }
 

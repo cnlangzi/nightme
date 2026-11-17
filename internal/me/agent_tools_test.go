@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/wfe"
@@ -288,8 +289,14 @@ jobs:
 	}
 	waitRun(t, svc, "obs-1")
 
-	if !op.Has("/gtw commit -m") {
-		t.Fatalf("the chat got %v, want the command of the tool", op.Sent())
+	var found bool
+	for _, m := range op.EmittedOf(messages.OutToolStart) {
+		if m.Tool != nil && strings.Contains(m.Tool.Args, "gtw commit -m") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the run published no call of the command: %v", op.EmittedOf(messages.OutToolStart))
 	}
 }
 
@@ -321,13 +328,14 @@ jobs:
 	}
 	waitRun(t, svc, "obs-1")
 
-	// The step keeps the verdict it had: the card still shows it as
-	// the one that did not finish.
-	if !op.Has("\u26a0\ufe0f /gtw commit") {
-		t.Errorf("the step changed its verdict: %v", op.Lines())
+	// The step keeps the verdict it had: the checklist still shows it
+	// as the one that did not finish.
+	items := op.Checklist(op.Cards()[1].ID)
+	if len(items) == 0 {
+		t.Fatalf("the card of the round has no checklist")
 	}
-	if op.Has("✅ /gtw commit") {
-		t.Errorf("the command took over the step's verdict: %v", op.Lines())
+	if items[0].Status == agent.TaskCompleted {
+		t.Errorf("the command took over the step's verdict: %+v", items)
 	}
 }
 

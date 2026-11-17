@@ -448,6 +448,24 @@ func (m *Manager) SendPermission(chatID, option string) error {
 	return h.SendPermission(option)
 }
 
+// AnswerChoice hands the answer of an interactive choice to the
+// handler the chat installed.
+//
+// The personal agent asks the operator a question through the chat's
+// own choice card: the click comes back as a card action, and the
+// handler the run installed takes it. It reports whether a handler
+// took the answer.
+func (m *Manager) AnswerChoice(chatID, requestID, option string) bool {
+	if m == nil {
+		return false
+	}
+	cs := m.Get(chatID)
+	if cs == nil {
+		return false
+	}
+	return cs.AnswerChoice(requestID, option)
+}
+
 // AcceptInbound is the F-watch §3.1.1 per-chat gate, owned by
 // chatsession (not gateway) so the policy sits next to its state.
 // Returns true when the message should proceed to the dispatcher;

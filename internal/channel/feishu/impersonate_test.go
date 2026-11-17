@@ -3,7 +3,6 @@ package feishu
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"testing"
 
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
@@ -232,27 +231,21 @@ func TestAct_WithoutACardIsRefused(t *testing.T) {
 	}
 }
 
-// TestPostCard_PublishesTheCardAndUpdatesIt — the run's overview is
-// one message of the chat, edited in place.
-func TestPostCard_PublishesTheCardAndUpdatesIt(t *testing.T) {
+// TestPostCard_PublishesTheCardUnderItsAnchor — the card of a
+// session hangs under the message the session is about.
+func TestPostCard_PublishesTheCardUnderItsAnchor(t *testing.T) {
 	a := testAdapter(t)
 
-	var sent, patched string
-	a.sendFunc = func(_ context.Context, _, _, content, _ string, _ bool) (string, error) {
+	var sent, rootID string
+	a.sendFunc = func(_ context.Context, _, _, content, root string, _ bool) (string, error) {
 		sent = content
+		rootID = root
 		return "om_card", nil
-	}
-	a.updateFunc = func(_ context.Context, _, content string) error {
-		patched = content
-		return nil
 	}
 
 	spec := channel.CardSpec{
-		Title: "fix · running",
-		Body:  "1. ✅ /gtw commit",
-		Buttons: []channel.CardButton{
-			{Label: "暂停", Action: "pause"},
-		},
+		Body:    "the run is starting…",
+		ReplyTo: "om_start",
 	}
 	id, err := a.PostCard(context.Background(), "oc_test", spec)
 	if err != nil {
@@ -260,6 +253,9 @@ func TestPostCard_PublishesTheCardAndUpdatesIt(t *testing.T) {
 	}
 	if id != "om_card" {
 		t.Fatalf("id = %q, want om_card", id)
+	}
+	if rootID != "om_start" {
+		t.Errorf("root id = %q, want om_start", rootID)
 	}
 	if sent == "" {
 		t.Fatal("the card was not published")
@@ -271,15 +267,10 @@ func TestPostCard_PublishesTheCardAndUpdatesIt(t *testing.T) {
 	if card["schema"] != "2.0" {
 		t.Errorf("schema = %v, want 2.0", card["schema"])
 	}
-
-	spec.Body = "1. ✅ /gtw commit\n2. 🔄 /gtw push"
-	if err := a.UpdateCard(context.Background(), "oc_test", id, spec); err != nil {
-		t.Fatalf("UpdateCard: %v", err)
+	if _, ok := card["header"]; ok {
+		t.Error("the card has a header: a session card has none")
 	}
-	if patched == "" {
-		t.Fatal("the card was not updated")
-	}
-	if !strings.Contains(patched, "gtw push") {
-		t.Errorf("the updated card does not carry the new body: %s", patched)
+	if a.adoptableCard("om_card") != "om_card" {
+		t.Error("the posted card is not adoptable: a session would post a second card")
 	}
 }

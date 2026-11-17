@@ -185,6 +185,11 @@ func StatusBarLines(msg *messages.OutboundMessage) []string {
 		if msg.SessionID != "" {
 			idParts = append(idParts, "·", msg.SessionID)
 		}
+		// The session's verdict is the last segment of the line: the
+		// session says what it concluded next to who it is.
+		if msg.SessionResult != "" {
+			idParts = append(idParts, "·", msg.SessionResult)
+		}
 		if len(idParts) > 1 {
 			lines = append(lines, strings.Join(idParts, " "))
 		}

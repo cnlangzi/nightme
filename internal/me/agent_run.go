@@ -43,6 +43,9 @@ type askState struct {
 	// MsgID is the id of the message the question was asked in. A
 	// reply to that message is an answer, not a takeover.
 	MsgID string `json:"msg_id,omitempty"`
+	// RequestID is the id the choice card was asked under. The click
+	// on an option carries it back.
+	RequestID string `json:"request_id,omitempty"`
 }
 
 // inflightState is the command a run is waiting for.
@@ -72,30 +75,6 @@ type actionTranscript struct {
 // The one before the last one is what explains the last one: the
 // agent that did the work said why it could not.
 const maxActionTranscripts = 2
-
-// The caps of the run's own words.
-//
-// The card is read at a glance: it carries the last few replies, and
-// every one of them is short.
-const (
-	// maxCardReplies is how many replies the run keeps.
-	maxCardReplies = 3
-	// maxReplyChars is how many characters a reply has.
-	maxReplyChars = 400
-	// maxReplyLines is how many lines a reply has.
-	maxReplyLines = 6
-)
-
-// replyBlock is one turn of the chat model's message.
-//
-// The block holds the text already cut: the card renders it as it
-// is, and nothing has to be cut again.
-type replyBlock struct {
-	// Text is what the model said.
-	Text string `json:"text"`
-	// At is when the model said it.
-	At time.Time `json:"at"`
-}
 
 // wakeRecord is one decision a model made after the run woke it up.
 type wakeRecord struct {
@@ -165,17 +144,17 @@ type run struct {
 	// pauseReason says why the run paused.
 	pauseReason string
 
-	// cardMsgID is the id of the run's overview message.
-	cardMsgID string
-	// cardJob is the job the card records; cardRound is the round of
-	// that job the card belongs to. An empty cardJob means the card
-	// has no iteration yet: it is the one the run started with.
-	cardJob   string
-	cardRound int
-	// cards holds the message id of the card of every iteration the
-	// run has entered. A run that comes back to an iteration goes on
-	// with the card that iteration has.
-	cards map[iteration]string
+	// runSession is the session of the run: its card hangs under the
+	// message that started the run.
+	runSession *session
+	// roundSession is the session of the job round the run is in.
+	roundSession *session
+	// decisionSession is the session of the decision that is open.
+	decisionSession *session
+	// roundSessions holds the session of every round the run has
+	// been in. A run that comes back to a round goes on with the card
+	// that round has.
+	roundSessions map[iteration]*session
 
 	// system1Decisions and system2Decisions count what each
 	// capability decided.
@@ -238,9 +217,28 @@ type run struct {
 	// lastBeatAt is when the run last did something. The card shows
 	// it as the time of day.
 	lastBeatAt time.Time
-	// replies holds the run's own words, oldest first. The card
-	// shows the last few of them.
-	replies []replyBlock
+	// commandMsgIDs holds the id of the chat message every step that
+	// sent a command became. The decision about a step hangs under
+	// that message.
+	commandMsgIDs map[string]string
+	// lastCommandMsgID is the id of the message the last command
+	// became.
+	lastCommandMsgID string
+	// gitStatus is the repository facts of the run's workspace. They
+	// ride in the footer's workspace line, and they are read now and
+	// then: a git call per event would cost more than the line is
+	// worth.
+	gitStatus *messages.GitStatus
+	// roundUsage counts what the round the run is in spent.
+	roundUsage llm.Usage
+	// decisionUsage counts what the open decision spent.
+	decisionUsage llm.Usage
+	// decisionCount is how many decisions the run has taken. It
+	// names the decision that is open.
+	decisionCount int
+	// questionCount is how many questions the run has asked. It names
+	// the question that is open.
+	questionCount int
 	// cardRefreshedAt is when the card was refreshed last. The
 	// snapshots of the command the run waits for refresh the card,
 	// and they are throttled.
@@ -289,26 +287,28 @@ func newRun(svc *Service, req Request, wf *wfe.Workflow, args map[string]string)
 	commands := usableCommands(req.Commands)
 	policy := svc.newPolicy(wf, nil, commands)
 	return &run{
-		svc:          svc,
-		id:           id,
-		chatID:       req.ChatID,
-		cwd:          req.Cwd,
-		owner:        req.Owner,
-		argNames:     names,
-		argVals:      args,
-		workflow:     wf,
-		policy:       policy,
-		state:        newRunState(id, wf.Name, req.Cwd, now),
-		registry:     req.Commands,
-		commands:     commands,
-		agentName:    svc.agentName(req.Agent),
-		phase:        PhaseRunning,
-		situationIdx: -1,
-		ctx:          ctx,
-		cancel:       cancel,
-		resume:       make(chan struct{}, 1),
-		unpause:      make(chan struct{}, 1),
-		done:         make(chan struct{}),
+		svc:           svc,
+		id:            id,
+		chatID:        req.ChatID,
+		cwd:           req.Cwd,
+		owner:         req.Owner,
+		argNames:      names,
+		argVals:       args,
+		workflow:      wf,
+		policy:        policy,
+		state:         newRunState(id, wf.Name, req.Cwd, now),
+		registry:      req.Commands,
+		commands:      commands,
+		agentName:     svc.agentName(req.Agent),
+		phase:         PhaseRunning,
+		situationIdx:  -1,
+		roundSessions: map[iteration]*session{},
+		commandMsgIDs: map[string]string{},
+		ctx:           ctx,
+		cancel:        cancel,
+		resume:        make(chan struct{}, 1),
+		unpause:       make(chan struct{}, 1),
+		done:          make(chan struct{}),
 	}
 }
 
@@ -542,6 +542,36 @@ func (r *run) awaitUnpause(ctx context.Context) error {
 		return r.ctx.Err()
 	case <-ctx.Done():
 		return ctx.Err()
+	}
+}
+
+// nextQuestionRequestID returns the id the next question is asked
+// under.
+//
+// The id ties the click on an option to the question the run asked:
+// the answer comes back under the id the card was asked with.
+func (r *run) nextQuestionRequestID() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.questionCount++
+	return fmt.Sprintf("me:%s:%d", r.id, r.questionCount)
+}
+
+// choiceHandler returns the handler that takes the answer of the
+// open question back into the run.
+//
+// The handler claims the answer only when the click belongs to the
+// question the run is asking: a click on somebody else's prompt is
+// none of the run's business.
+func (r *run) choiceHandler() func(requestID, option string) bool {
+	return func(requestID, option string) bool {
+		r.mu.Lock()
+		ask := r.ask
+		r.mu.Unlock()
+		if ask == nil || ask.RequestID == "" || ask.RequestID != requestID {
+			return false
+		}
+		return r.deliver(option) == nil
 	}
 }
 
@@ -937,32 +967,6 @@ func (r *run) beat(now time.Time) {
 	r.mu.Unlock()
 }
 
-// addReply keeps what the chat model said.
-//
-// The run's own words are on its card: the run keeps the last few of
-// them and forgets the rest.
-func (r *run) addReply(block replyBlock) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.replies = append(r.replies, block)
-	if len(r.replies) > maxCardReplies {
-		r.replies = r.replies[len(r.replies)-maxCardReplies:]
-	}
-}
-
-// replyList returns the run's own words, oldest first.
-func (r *run) replyList() []replyBlock {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.replyListLocked()
-}
-
-// replyListLocked returns the run's own words. The caller holds the
-// lock.
-func (r *run) replyListLocked() []replyBlock {
-	return append([]replyBlock(nil), r.replies...)
-}
-
 // takeCardRefresh reports whether the card may be refreshed now, and
 // remembers when it was.
 //
@@ -1194,14 +1198,48 @@ func outcomeLine(o messages.Outcome) string {
 	return string(o.Status)
 }
 
-// cardEntry is the card of one iteration of a run.
-type cardEntry struct {
-	// Job is the job the card records.
-	Job string `json:"job"`
-	// Round is the round of that job the card belongs to.
-	Round int `json:"round"`
-	// ID is the id of the message the card became.
-	ID string `json:"id"`
+// sessionState is the on-disk shape of an open session.
+//
+// The anchors of the open sessions are part of the run's state: a run
+// that comes back after a restart goes on with the cards it opened.
+type sessionState struct {
+	// Kind is what the session is.
+	Kind string `json:"kind"`
+	// CardID is the id of the message the session's card became.
+	CardID string `json:"card_id"`
+	// ID names the session.
+	ID string `json:"id,omitempty"`
+	// Job and Round name the round the session is about.
+	Job   string `json:"job,omitempty"`
+	Round int    `json:"round,omitempty"`
+}
+
+// sessionStateOf renders a session for the disk.
+func sessionStateOf(sess *session) *sessionState {
+	if sess == nil {
+		return nil
+	}
+	return &sessionState{
+		Kind:   string(sess.kind),
+		CardID: sess.cardID,
+		ID:     sess.id,
+		Job:    sess.job,
+		Round:  sess.round,
+	}
+}
+
+// sessionFromState rebuilds a session from the disk.
+func sessionFromState(st *sessionState) *session {
+	if st == nil {
+		return nil
+	}
+	return &session{
+		kind:   sessionKind(st.Kind),
+		cardID: st.CardID,
+		id:     st.ID,
+		job:    st.Job,
+		round:  st.Round,
+	}
 }
 
 // persistedRun is the on-disk shape of a run.
@@ -1228,10 +1266,10 @@ type persistedRun struct {
 	Error            string             `json:"error"`
 	Paused           bool               `json:"paused"`
 	PauseReason      string             `json:"pause_reason,omitempty"`
-	RunCardMsgID     string             `json:"run_card_msg_id,omitempty"`
-	CardJob          string             `json:"card_job"`
-	CardRound        int                `json:"card_round"`
-	Cards            []cardEntry        `json:"cards,omitempty"`
+	RunSession       *sessionState      `json:"run_session,omitempty"`
+	RoundSession     *sessionState      `json:"round_session,omitempty"`
+	DecisionSession  *sessionState      `json:"decision_session,omitempty"`
+	RoundSessions    []sessionState     `json:"round_sessions,omitempty"`
 	System1Decisions int                `json:"system1_decisions"`
 	System2Decisions int                `json:"system2_decisions"`
 	System1Usage     llm.Usage          `json:"system1_usage"`
@@ -1242,7 +1280,8 @@ type persistedRun struct {
 	ThinkCount       int                `json:"think_count"`
 	ToolCount        int                `json:"tool_count"`
 	LastBeatAt       time.Time          `json:"last_beat_at"`
-	Replies          []replyBlock       `json:"replies,omitempty"`
+	DecisionCount    int                `json:"decision_count"`
+	QuestionCount    int                `json:"question_count"`
 }
 
 // persist writes the run's state to disk.
@@ -1253,9 +1292,9 @@ func (s *Service) persist(r *run) {
 	if s.cfg.StateDir == "" {
 		return
 	}
-	// The cards are read before the lock: the run holds it while it
+	// The sessions are read before the lock: the run holds it while it
 	// writes the state.
-	cards := r.cardEntries()
+	rounds := r.roundSessionStates()
 	r.mu.Lock()
 	state := persistedRun{
 		RunID:            r.id,
@@ -1277,10 +1316,10 @@ func (s *Service) persist(r *run) {
 		Error:            r.errMsg,
 		Paused:           r.paused,
 		PauseReason:      r.pauseReason,
-		RunCardMsgID:     r.cardMsgID,
-		CardJob:          r.cardJob,
-		CardRound:        r.cardRound,
-		Cards:            cards,
+		RunSession:       sessionStateOf(r.runSession),
+		RoundSession:     sessionStateOf(r.roundSession),
+		DecisionSession:  sessionStateOf(r.decisionSession),
+		RoundSessions:    rounds,
 		System1Decisions: r.system1Decisions,
 		System2Decisions: r.system2Decisions,
 		System1Usage:     r.system1Usage,
@@ -1291,7 +1330,8 @@ func (s *Service) persist(r *run) {
 		ThinkCount:       r.thinkCount,
 		ToolCount:        r.toolCount,
 		LastBeatAt:       r.lastBeatAt,
-		Replies:          append([]replyBlock(nil), r.replies...),
+		DecisionCount:    r.decisionCount,
+		QuestionCount:    r.questionCount,
 	}
 	r.mu.Unlock()
 
@@ -1436,9 +1476,9 @@ func (s *Service) restoreRun(state persistedRun) *run {
 		errMsg:           state.Error,
 		paused:           state.Paused,
 		pauseReason:      state.PauseReason,
-		cardMsgID:        state.RunCardMsgID,
-		cardJob:          state.CardJob,
-		cardRound:        state.CardRound,
+		runSession:       sessionFromState(state.RunSession),
+		roundSession:     sessionFromState(state.RoundSession),
+		decisionSession:  sessionFromState(state.DecisionSession),
 		system1Decisions: state.System1Decisions,
 		system2Decisions: state.System2Decisions,
 		system1Usage:     state.System1Usage,
@@ -1450,7 +1490,8 @@ func (s *Service) restoreRun(state persistedRun) *run {
 		thinkCount:       state.ThinkCount,
 		toolCount:        state.ToolCount,
 		lastBeatAt:       state.LastBeatAt,
-		replies:          state.Replies,
+		decisionCount:    state.DecisionCount,
+		questionCount:    state.QuestionCount,
 		situationIdx:     situationIndex(state.Messages),
 		ctx:              ctx,
 		cancel:           cancel,
@@ -1473,9 +1514,10 @@ func (s *Service) restoreRun(state persistedRun) *run {
 		r.messages = nil
 		r.pendingCalls = nil
 	}
-	r.cards = map[iteration]string{}
-	for _, entry := range state.Cards {
-		r.cards[iteration{job: entry.Job, round: entry.Round}] = entry.ID
+	r.roundSessions = map[iteration]*session{}
+	for _, entry := range state.RoundSessions {
+		sess := sessionFromState(&entry)
+		r.roundSessions[iteration{job: entry.Job, round: entry.Round}] = sess
 	}
 	r.policy.SetRounds(r.state.Rounds)
 	if len(r.argVals) > 0 {
@@ -1599,58 +1641,135 @@ func (r *run) clearAsk() {
 	r.mu.Unlock()
 }
 
-// cardMessageID returns the id of the run's overview message.
-func (r *run) cardMessageID() string {
+// runSessionRef returns the session of the run.
+func (r *run) runSessionRef() *session {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.cardMsgID
+	return r.runSession
 }
 
-// setCard makes the card of an iteration the one the run updates.
-func (r *run) setCard(id string, it iteration) {
+// setRunSession makes the session the run speaks through.
+func (r *run) setRunSession(sess *session) {
 	r.mu.Lock()
-	r.cardMsgID = id
-	r.cardJob = it.job
-	r.cardRound = it.round
+	r.runSession = sess
 	r.mu.Unlock()
 }
 
-// cardIteration returns the iteration the run's card records.
-func (r *run) cardIteration() iteration {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return iteration{job: r.cardJob, round: r.cardRound}
-}
-
-// cardOf returns the message id of the card of an iteration.
-func (r *run) cardOf(it iteration) (string, bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	id, ok := r.cards[it]
-	return id, ok
-}
-
-// rememberCard records the card of an iteration.
-func (r *run) rememberCard(it iteration, id string) {
-	r.mu.Lock()
-	if r.cards == nil {
-		r.cards = map[iteration]string{}
+// setLastCommandMsgID records the message the last command became.
+func (r *run) setLastCommandMsgID(msgID string) {
+	if msgID == "" {
+		return
 	}
-	r.cards[it] = id
+	r.mu.Lock()
+	r.lastCommandMsgID = msgID
 	r.mu.Unlock()
 }
 
-// cardEntries returns the card of every iteration the run has entered.
-func (r *run) cardEntries() []cardEntry {
+// lastCommandMsgIDValue returns the message the last command became.
+func (r *run) lastCommandMsgIDValue() string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := make([]cardEntry, 0, len(r.cards))
-	for it, id := range r.cards {
-		out = append(out, cardEntry{Job: it.job, Round: it.round, ID: id})
+	return r.lastCommandMsgID
+}
+
+// setGitStatus records the repository facts of the run's workspace.
+func (r *run) setGitStatus(status *messages.GitStatus) {
+	r.mu.Lock()
+	r.gitStatus = status
+	r.mu.Unlock()
+}
+
+// gitStatusValue returns the repository facts of the run's workspace.
+func (r *run) gitStatusValue() *messages.GitStatus {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.gitStatus
+}
+
+// rememberCommandMsg records the chat message a step's command
+// became.
+//
+// The decision about that step hangs under that message: the decision
+// reads directly after the error it answers.
+func (r *run) rememberCommandMsg(stepID, msgID string) {
+	if stepID == "" || msgID == "" {
+		return
+	}
+	r.mu.Lock()
+	if r.commandMsgIDs == nil {
+		r.commandMsgIDs = map[string]string{}
+	}
+	r.commandMsgIDs[stepID] = msgID
+	r.mu.Unlock()
+}
+
+// roundSessionRef returns the session of the round the run is in.
+func (r *run) roundSessionRef() *session {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.roundSession
+}
+
+// setRoundSession makes the session of the round the run is in.
+func (r *run) setRoundSession(sess *session) {
+	r.mu.Lock()
+	r.roundSession = sess
+	r.mu.Unlock()
+}
+
+// decisionSessionRef returns the session of the decision that is open.
+func (r *run) decisionSessionRef() *session {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.decisionSession
+}
+
+// setDecisionSession records the session of the decision that is open.
+func (r *run) setDecisionSession(sess *session) {
+	r.mu.Lock()
+	r.decisionSession = sess
+	r.mu.Unlock()
+}
+
+// roundSessionOf returns the session of a round the run has been in.
+func (r *run) roundSessionOf(it iteration) (*session, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	sess, ok := r.roundSessions[it]
+	return sess, ok
+}
+
+// rememberRoundSession records the session of a round.
+func (r *run) rememberRoundSession(it iteration, sess *session) {
+	r.mu.Lock()
+	if r.roundSessions == nil {
+		r.roundSessions = map[iteration]*session{}
+	}
+	r.roundSessions[it] = sess
+	r.mu.Unlock()
+}
+
+// roundSessionStates returns the session of every round the run has
+// entered.
+func (r *run) roundSessionStates() []sessionState {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]sessionState, 0, len(r.roundSessions))
+	for it, sess := range r.roundSessions {
+		if sess == nil {
+			continue
+		}
+		out = append(out, sessionState{
+			Kind:   string(sess.kind),
+			CardID: sess.cardID,
+			ID:     sess.id,
+			Job:    it.job,
+			Round:  it.round,
+		})
 	}
 	// The map has no order of its own: the file is written in the
-	// order of the iterations.
-	slices.SortFunc(out, func(a, b cardEntry) int {
+	// order of the rounds.
+	slices.SortFunc(out, func(a, b sessionState) int {
 		if a.Job != b.Job {
 			return strings.Compare(a.Job, b.Job)
 		}
@@ -1743,10 +1862,10 @@ func (r *run) wasStoppedByOperator() bool {
 func (r *run) currentRound() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.cardJob == "" || r.cardRound <= 0 {
+	if r.roundSession == nil || r.roundSession.round <= 0 {
 		return 1
 	}
-	return r.cardRound
+	return r.roundSession.round
 }
 
 // setTranscript keeps the transcript of an action.
@@ -1818,9 +1937,19 @@ func (s *Service) askUser(ctx context.Context, r *run, question string, options 
 	}
 	r.mu.Unlock()
 
+	// The choice card is the operator's other way to answer: a click
+	// on an option comes back as the answer of the question the run
+	// asked under. The handler is installed before the question is
+	// asked: a click that comes back right away finds the run waiting
+	// for it.
+	if s.cfg.Operator != nil {
+		remove := s.cfg.Operator.OnChoice(r.chatID, r.choiceHandler())
+		defer remove()
+	}
+
 	if !waiting {
 		s.persist(r)
-		msgID, err := s.speakQuestion(ctx, r, question)
+		msgID, err := s.askQuestion(ctx, r, question, options)
 		if err != nil {
 			s.logger.Warn("me: the question could not be asked", "run_id", r.id, "err", err)
 		} else {
@@ -1831,7 +1960,7 @@ func (s *Service) askUser(ctx context.Context, r *run, question string, options 
 			r.mu.Unlock()
 		}
 		s.persist(r)
-		s.updateCard(r)
+		s.refreshSessions(r)
 	}
 	reply, err := r.awaitReply(ctx)
 	if err != nil {
@@ -1839,9 +1968,6 @@ func (s *Service) askUser(ctx context.Context, r *run, question string, options 
 	}
 	r.clearAsk()
 	r.setPhase(PhaseRunning)
-	// The card does not offer the answer any more: the run is not
-	// waiting for one. A card that is left behind when the run moves
-	// on must not keep the choices of a question that is answered.
-	s.updateCard(r)
+	s.refreshSessions(r)
 	return reply, nil
 }

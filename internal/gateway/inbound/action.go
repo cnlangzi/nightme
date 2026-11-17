@@ -139,6 +139,11 @@ func (r *Router) dispatchPermissionClick(mgr *chatsession.Manager, msg *messages
 			"chat_id", msg.ChatID)
 		return
 	}
+	// The personal agent asks the operator a question through the
+	// chat's own choice card: the run claims the answer first.
+	if mgr.AnswerChoice(msg.ChatID, msg.Action.RequestID, option) {
+		return
+	}
 	if err := mgr.SendPermission(msg.ChatID, option); err != nil {
 		slog.Default().Warn("inbound: SendPermission failed",
 			"chat_id", msg.ChatID, "err", err)

@@ -31,7 +31,7 @@ const (
 	sys1Escalate
 )
 
-// Who decided last. The names show up in the run's overview.
+// Who decided last. The names show up in the run's wake log.
 const (
 	decisionWorkflow = "the workflow"
 	decisionDecider  = "the decision model"
@@ -67,9 +67,13 @@ func (s *Service) drive(ctx context.Context, r *run) {
 		} else {
 			s.finish(r, PhaseFailed, err.Error())
 			r.setSummary("the run failed")
-			s.updateCard(r)
+			s.refreshSessions(r)
 		}
 	}
+	// The run is over: its sessions end with it.
+	s.closeRoundSession(ctx, r)
+	s.closeDecisionSession(ctx, r)
+	s.publishResult(context.WithoutCancel(r.ctx), r, r.runSessionRef(), r.runVerdict())
 	// The run is over: its state goes with it. The summary is built
 	// from the run's own record, so it does not need the file — and a
 	// file that outlives the run would be resumed by the next daemon.
@@ -81,7 +85,7 @@ func (s *Service) drive(ctx context.Context, r *run) {
 		// that the run has unwound.
 		s.postSummary(r)
 		// The card of the last iteration shows where the run ended.
-		s.updateCard(r)
+		s.refreshSessions(r)
 	}
 }
 
@@ -129,7 +133,7 @@ func (s *Service) checkGate(ctx context.Context, r *run) error {
 		return err
 	}
 	if r.applyPause() {
-		s.updateCard(r)
+		s.refreshSessions(r)
 	}
 	if !r.isPaused() {
 		return nil
@@ -137,7 +141,7 @@ func (s *Service) checkGate(ctx context.Context, r *run) error {
 	if err := r.awaitUnpause(ctx); err != nil {
 		return err
 	}
-	s.updateCard(r)
+	s.refreshSessions(r)
 	return nil
 }
 
@@ -185,6 +189,9 @@ func (s *Service) turn(ctx context.Context, r *run) (bool, error) {
 		s.pauseForBudget(ctx, r)
 		return false, nil
 	}
+	// The run asks a model: the decision session opens and owns the
+	// wake-up. Its card is where the decision reads.
+	s.openDecisionSession(ctx, r)
 	action, err := s.system1(ctx, r)
 	if err != nil {
 		return false, err
@@ -232,7 +239,8 @@ func (s *Service) pauseForBudget(ctx context.Context, r *run) {
 		stepID, used, limit)
 	r.pauseNow(reason)
 	s.persist(r)
-	s.updateCard(r)
+	s.publishState(ctx, r, "paused: "+reason)
+	s.refreshSessions(r)
 	if _, err := s.speak(ctx, r, pauseMark+"The run paused: "+reason+". Send /me continue to hand the control back.", ""); err != nil {
 		s.logger.Warn("me: the pause could not be spoken", "run_id", r.id, "err", err)
 	}
@@ -269,7 +277,7 @@ func (s *Service) plan(ctx context.Context, r *run) (wfe.Decision, error) {
 	// rounds are compared around it: the thinking session of the round
 	// that ended goes with it.
 	s.closeBrainOnNewRound(r, before, decision)
-	s.switchCard(ctx, r, it)
+	s.switchRoundSession(ctx, r, it)
 	return decision, nil
 }
 
@@ -327,8 +335,9 @@ func (s *Service) runPlanStep(ctx context.Context, r *run, decision wfe.Decision
 		return nil
 	}
 	r.recordStep(decision.Job, decision.Step, verdict.Outcome)
+	s.recordStepOutcome(ctx, r, decision.Job, decision.Step, verdict.Outcome)
 	s.persist(r)
-	s.updateCard(r)
+	s.refreshSessions(r)
 	return nil
 }
 
@@ -403,6 +412,9 @@ func (s *Service) loopDeciderOnly(ctx context.Context, r *run) error {
 			s.pauseForBudget(ctx, r)
 			continue
 		}
+		// The run asks the decision model: the decision session opens
+		// and owns the wake-up.
+		s.openDecisionSession(ctx, r)
 		dec, err := s.decide(ctx, r)
 		if err != nil {
 			return err
@@ -458,7 +470,7 @@ func (s *Service) finishDone(r *run, summary string) {
 	r.markFinished()
 	r.setSummary(summary)
 	s.finish(r, PhaseDone, "")
-	s.updateCard(r)
+	s.refreshSessions(r)
 	s.persist(r)
 }
 
@@ -566,7 +578,7 @@ func (s *Service) actOnDecision(ctx context.Context, r *run, dec decision) (sys1
 		}
 		s.appendToolResult(r, pendingCall{ID: syntheticCallID, Name: tool}, outcome, !outcomeSucceeded(outcome.Status))
 		s.persist(r)
-		s.updateCard(r)
+		s.refreshSessions(r)
 		return sys1Act, nil
 	}
 }
@@ -593,7 +605,7 @@ func (s *Service) actOnChoice(ctx context.Context, r *run, command string) (bool
 	if command == optionDone {
 		if err := r.checkFinish("done"); err != nil {
 			r.setSummary(err.Error())
-			s.updateCard(r)
+			s.refreshSessions(r)
 			return false, nil
 		}
 		s.finishDone(r, r.workflow.Name+" is complete")
@@ -601,7 +613,7 @@ func (s *Service) actOnChoice(ctx context.Context, r *run, command string) (bool
 	}
 	if _, err := r.checkRun(command); err != nil {
 		r.setSummary(err.Error())
-		s.updateCard(r)
+		s.refreshSessions(r)
 		return false, nil
 	}
 	tool, args := s.syntheticCall(r, command)
@@ -612,13 +624,13 @@ func (s *Service) actOnChoice(ctx context.Context, r *run, command string) (bool
 			// The command could not run: the user is told and the run
 			// goes on.
 			r.setSummary(err.Error())
-			s.updateCard(r)
+			s.refreshSessions(r)
 			return false, nil
 		}
 		return false, err
 	}
 	s.appendToolResult(r, pendingCall{ID: syntheticCallID, Name: tool}, outcome, !outcomeSucceeded(outcome.Status))
 	s.persist(r)
-	s.updateCard(r)
+	s.refreshSessions(r)
 	return false, nil
 }

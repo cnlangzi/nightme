@@ -1,4 +1,5 @@
-// record.go — the resume state of the last review in a chat.
+// record.go — the resume state of the last review in a chat, and
+// the registry of the runs the user can abort.
 //
 // /review fans out one agent session per review group. A group can
 // fail on its own, and the user is left with a merged text that
@@ -14,15 +15,163 @@
 // (pattern, files, session id, prompt, error). It is held in the
 // command factory's memory, keyed by chat id — a chat never resumes
 // another chat's review, and nothing is written to disk.
+//
+// The registry below holds the runs that are in flight, so
+// `/review --abort` can stop one of them (see abort.go).
 
 package review
 
 import (
+	"context"
 	"log/slog"
+	"slices"
 	"sync"
+	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 )
+
+// runHandle is one running review run the user can abort.
+//
+// The command layer holds no handle on the fan-out's agent sessions —
+// they belong to agent.RunSession / agent.ResumeSession — so the run's
+// context is the only thing an abort can reach. Cancelling it closes
+// the underlying agent sessions and unwinds the fan-out.
+type runHandle struct {
+	// cancel cancels the run's context with the abort sentinel.
+	cancel context.CancelCauseFunc
+	// done is closed when the run's goroutine has finished — after
+	// the record was written and the chat's running marker released.
+	done chan struct{}
+	// agent is the runner of this run.
+	agent string
+	// kind is what the run is: "review" or "continue".
+	kind string
+	// started is when the run began.
+	started time.Time
+	// abortable marks a run whose fan-out can still be stopped. It
+	// goes false when the fan-out ends (the findings are in hand —
+	// there is nothing left to stop) and when the run is aborted (a
+	// second abort must not report the same run again).
+	//
+	// Guarded by the factory's mutex.
+	abortable bool
+}
+
+// newRun creates a review run's context and registers the run.
+//
+// The run is registered BEFORE its goroutine starts, so an abort that
+// arrives right after the command returned cannot race the
+// registration.
+//
+// The context carries no deadline: the run ends when the chat
+// session's context is cancelled or when the user aborts it.
+func (f *Factory) newRun(chatID string, parent context.Context, runner, kind string) (context.Context, *runHandle) {
+	ctx, cancel := context.WithCancelCause(parent)
+	h := &runHandle{
+		cancel:  cancel,
+		done:    make(chan struct{}),
+		agent:   runner,
+		kind:    kind,
+		started: time.Now(),
+	}
+	f.beginRun(chatID, h)
+	return ctx, h
+}
+
+// beginRun registers a running review run of the chat.
+//
+// The run is registered BEFORE its goroutine starts, so an abort that
+// arrives right after the command returned cannot race the
+// registration.
+func (f *Factory) beginRun(chatID string, h *runHandle) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.runs == nil {
+		f.runs = make(map[string][]*runHandle)
+	}
+	h.abortable = true
+	f.runs[chatID] = append(f.runs[chatID], h)
+}
+
+// finishFanout marks a run's fan-out as over.
+//
+// The groups' sessions are closed and the findings are in hand: there
+// is nothing left for an abort to stop, and the delivery that follows
+// must not be cancelled by one. The run stays registered until its
+// goroutine ends — the reply's "still running" count is about the
+// runs in flight, not about the ones that can be stopped.
+func (f *Factory) finishFanout(chatID string, h *runHandle) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if cur, ok := f.findRun(chatID, h); ok {
+		cur.abortable = false
+	}
+}
+
+// findRun returns the chat's registered run h, if it is still there.
+//
+// The caller holds the factory's mutex.
+func (f *Factory) findRun(chatID string, h *runHandle) (*runHandle, bool) {
+	for _, r := range f.runs[chatID] {
+		if r == h {
+			return r, true
+		}
+	}
+	return nil, false
+}
+
+// endRun removes a finished run from the chat's registry.
+func (f *Factory) endRun(chatID string, h *runHandle) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	runs := f.runs[chatID]
+	for i, r := range runs {
+		if r != h {
+			continue
+		}
+		runs = slices.Delete(runs, i, i+1)
+		if len(runs) == 0 {
+			delete(f.runs, chatID)
+			return
+		}
+		f.runs[chatID] = runs
+		return
+	}
+}
+
+// abortRun cancels the newest abortable run of the chat with the
+// abort sentinel and reports it, together with the number of the
+// chat's other runs that are still in flight.
+//
+// The newest run is the one the user means — the chat's resume state
+// is per chat, and the newest run is the one whose groups a
+// `--continue` would pick up. ok is false when the chat has no run
+// whose fan-out can still be stopped.
+//
+// The run is marked before it is cancelled, so a second abort does not
+// report the same run again.
+func (f *Factory) abortRun(chatID string) (h *runHandle, others int, ok bool) {
+	f.mu.Lock()
+	runs := f.runs[chatID]
+	idx := -1
+	for i := len(runs) - 1; i >= 0; i-- {
+		if runs[i].abortable {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		f.mu.Unlock()
+		return nil, 0, false
+	}
+	h = runs[idx]
+	h.abortable = false
+	others = len(runs) - 1
+	f.mu.Unlock()
+	h.cancel(errReviewAborted)
+	return h, others, true
+}
 
 // reviewOutcome is one review group's entry in a record.
 type reviewOutcome struct {

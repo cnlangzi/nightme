@@ -38,7 +38,7 @@
 ### 1.2 边界
 
 - **是**:对"当前分支 vs 默认分支"(PR 模式)的代码变更做 review,产出 findings 文本回 chat,主 agent 可对话式 fix。
-- **不是**:不开 `--fix` / `--post`(留 v2 的 `/review-fix` / `/review-comment`);不限定文件 / base(只认 `--agent` / `--global` / `--unset` / `--continue` 四个 flag,短写 `-a` / `-g` / `-c`,不收位置参数);不当 CI gating;不自动改代码。
+- **不是**:不开 `--fix` / `--post`(留 v2 的 `/review-fix` / `/review-comment`);不限定文件 / base(只认 `--agent` / `--global` / `--unset` / `--continue` / `--abort` 五个 flag,短写 `-a` / `-g` / `-c`,不收位置参数);不当 CI gating;不自动改代码。
 
 ---
 
@@ -49,12 +49,14 @@ review 由所有 bridge 统一走 `agent.ReviewDispatch`(单一入口):`OcrAvail
 agent 包不再区分 "native / mixed / delegate" 桥——每条桥的 `Starter.Review` 都是同一行 `return agent.ReviewDispatch(ctx, s, cfg, opts...)`。Agent 自带的 review 子命令(`claude -p code-review` / `codex review` / `cursor-agent -p /review-bugbot`)用户直接在 chat 发 slash command,nightme 透传给底层 agent——不再通过 `Starter.Review` 特殊路径触发。
 
 ```text
-/review [-a|--agent <name>] [-g|--global] [--unset] [-c|--continue]
+/review [-a|--agent <name>] [-g|--global] [--unset] [-c|--continue] [--abort]
    │  解析 flags(共享 lexer),选定 runner;runner ≠ 当前 AS 时,findings 仍回当前 AS
    │  -g / --global:把 runner 落成全局 `review.agent`(~/.nightme/config.yaml)
    │  --unset:删掉全局 `review.agent`,不跑 review
    │  -c / --continue:续跑本 chat 上一次 review 未完成的 group(见 §2.7);
    │                  与 -a / -g / --unset 互斥
+   │  --abort:停掉本 chat 正在跑的 review(或续跑)(见 §2.8);
+   │          与 -a / -g / --unset / -c 互斥
    ▼
 Starter.Review(所有 bridge 都是同一行)
    │
@@ -635,14 +637,108 @@ workspace / 每个 group 的 outcome)。factory 每个 daemon 进程建一次,�
 
 ---
 
+## 2.8 中止正在跑的 review(`/review --abort`)
+
+review 是异步的:命令立刻返回,goroutine 跑 fan-out,可能跑好几分钟。`/stop` 只停
+chat session 选中的那个 agent session,够不到 review 自己的 one-shot session;
+`/close` 把整个 chat session 拆了,对"这次 review 太慢了"来说代价太大。
+`/review --abort` 就是那个"只停这次 review"的开关。
+
+### 中止怎么传到 agent session
+
+命令层拿不到 fan-out 的 agent session:它们是 `agent.RunSession` /
+`agent.ResumeSession` 建的,归 fan-out 自己所有。命令层唯一能碰到的把手是
+**这次 run 的 ctx**。取消它,底层顺着这条路收摊:
+
+```text
+revCtx 被取消
+  → drainSessionEvents 看到 ctx.Done() 返回    (internal/agent/run_session.go)
+  → ResumeSession 的 `defer a.Close()` 跑掉    (internal/agent/run_session.go)
+  → Agent.Close() → driver.Close()              (internal/agent/agent.go)
+  → agent CLI 子进程收到 EOF / SIGINT,proc.AgentGrace(3s SIGTERM→SIGKILL) 兜底
+```
+
+agent 侧的会话还在:bridge 在 Ready 事件上交付的 session id 就是 `--continue`
+交还给 bridge 的 `StartConfig.SessionID`,bridge 用自己的 resume 机制重新打开它
+(`--resume <id>` / `resume_id` / `--session-id <id>` / ACP `session/resume` /
+`session/load` / dsh 的 session 握手)。
+
+### run 的注册表
+
+命令 factory 按 chat id 记着这个 chat 正在跑的 run(最老的在前),每个 run 一个
+handle:取消函数、goroutine 结束信号、runner、种类(`review` / `continue`)、开始
+时间,以及一个"还能不能中止"的标记。run 的 ctx 在 goroutine 启动**之前**就建好并
+登记 —— 否则命令刚返回就到的 abort 会和登记抢跑。run 的 goroutine 结束时把自己
+从注册表里摘掉。
+
+那个标记管的是 abort 够得着的范围:
+
+- **fan-out 结束**时标记被清掉 —— group 的 session 已经关了,findings 已经在手,
+  没有东西可停;后面的交付(finding 注入 AS)也不该被一个迟到的 abort 取消。
+- **abort 落地**时标记也被清掉 —— 第二次 abort 不该把同一个 run 再报一遍。
+
+abort 停的是**最新的、还能停的那个** run;没有可停的 run 时它答"没有 review 在
+跑"。
+
+### 怎么认出"被中止"
+
+run 的 ctx 用 `context.WithCancelCause` 建,abort 用一个哨兵原因取消它:
+
+```go
+var errReviewAborted = errors.New("review aborted")
+```
+
+`context.Cause(revCtx)` 只有在用户中止时才等于这个哨兵。chat 的 ctx 被取消
+(daemon 关闭走 `ResetContext`)时,原因是 `context.Canceled` —— 那不是中止,是关闭:
+run 照常报失败,不发中止通知。
+
+### 中止之后
+
+- 被中止的 run 仍然写它的 record:每个 group 一条 outcome,带 session id。停掉的
+  group 因此还能被 `--continue` 收尾(到过 agent 的那几组续跑,没到的那几组重跑)——
+  这正是"中止"而不是"关 chat"的意义。
+- 被中止的 run 报 `cancelled`,在自己的那条消息上发一条中止通知;不发 verdict 行,
+  也不把合并后的 findings 注入 chat session 的 agent session。
+- 已经跑完的 group 的 findings 已经流进 chat 的 thread(`/think` 开着才看得见),
+  但**不进**主 agent 的上下文:`--continue` 只续跑没跑完的 group,不会把已经跑完
+  的 group 再问一遍,也就不会替它们把 findings 交给 agent。要让 agent 看到它们,
+  只能让这次 review 正常跑完(它的交付会把 findings 注入 AS)。
+- abort 命令自己答一条:点名被中止的 runner、它已经跑了多久、这个 chat 还有几个
+  run 在跑、run 是否还在收尾。它最多等 5 秒等 run 收完 —— 答完就意味着 agent
+  session 已经关了,紧接着发的 `--continue` 不会被"a review is already running in
+  this chat"挡掉。
+- 一个 chat 有多个 run 在跑时,abort 只停最新起的那一个(下一次 `--continue` 接手
+  的就是它),并在回执里说清楚还有几个在跑。
+
+### 边界
+
+| 场景 | 行为 |
+|---|---|
+| 本 chat 没有 review 在跑 | `ℹ️ no review is running in this chat`;结论 `noop` |
+| `--abort` 在没有 workspace / 没有选中 agent 的 chat 里 | 同上 —— 中止两者都不需要 |
+| `--abort` 与 `--continue` / `--agent` / `--global` / `--unset` 同用 | 报错,点名两个 flag;不碰任何 run |
+| fan-out 停在两组之间 | 剩下的组同样被取消;这个 run 的每个 group 都落进 record |
+| 某个 group 中止前没到 agent(没有 session id) | 没有 session 可以重开 —— 下一次 `--continue` 报"没到 agent,没有东西可续" |
+| 续跑里排在并发闸后面的 group 被中止 | 它没来得及 spawn,所以没有自己的 session id;record 里沿用它本来要重开的那个 session id,下次 `--continue` 还能续 |
+| agent CLI 在 flush 会话状态之前就被杀掉 | bridge 拒绝 resume(`agent.ErrResumeUnhealthy`);该 group 照旧 inline 标 failed |
+| review 跑着的时候 chat 关了 | 父 ctx 被取消,原因是 `context.Canceled` 而不是中止哨兵 —— run 报失败,不发中止通知 |
+| abort 落在 run 已经结束之后 | run 已经不在注册表里 —— `ℹ️ no review is running in this chat` |
+| abort 落在 fan-out 结束之后、交付还没走完 | fan-out 已经没什么可停的了 —— run 不再可中止,`ℹ️ no review is running in this chat`;交付照常走,findings 照常进 AS |
+| 同一个 run 上再 abort 一次 | 第一次已经把 run 标记成"停过了" —— 第二次不回执同一个 run(有别的可停 run 就停那个) |
+| abort 的 5 秒等超时(bridge 卡在 close 上) | 回执说 review 还在收尾;run 在后台继续收 |
+| 一个 chat 里有多个 run 在跑 | 只停最新的那个;回执说还有几个在跑 |
+| 正在跑的 `--continue` 被 abort | 同 handling;续跑的 group 带 session id 落进 record |
+
+---
+
 ## 3. 数据流:从 `/review` 到 findings
 
-1. 用户发 `/review [-a|--agent <name>] [-g|--global] [--unset] [-c|--continue]`。
-2. dispatcher 用共享 lexer(`command.ParseCmdArgs`)解析 args,inline 校验未知 flag、位置参数与非法 flag 组合(`--unset` 需要 `--global`、`--unset` 与 `--agent` 互斥、`--global` 需要 `--agent`、`--continue` 与 `--agent` / `--global` / `--unset` 互斥)。
+1. 用户发 `/review [-a|--agent <name>] [-g|--global] [--unset] [-c|--continue] [--abort]`。
+2. dispatcher 用共享 lexer(`command.ParseCmdArgs`)解析 args,inline 校验未知 flag、位置参数与非法 flag 组合(`--unset` 需要 `--global`、`--unset` 与 `--agent` 互斥、`--global` 需要 `--agent`、`--continue` 与 `--agent` / `--global` / `--unset` 互斥、`--abort` 与 `--continue` / `--agent` / `--global` / `--unset` 互斥)。
 3. **落全局设置**:`-g` 把 runner 写进 `~/.nightme/config.yaml` 的 `review.agent`,`--unset` 删掉它(`--unset` 不跑 review)。写盘发生在查 chat session 之前——全局设置与本 chat 有没有 workspace 无关;写失败只告警(`⚠️ failed to save review.agent: … — reviewing with <name> anyway`),review 照跑。落盘走 node 级写入,config 文件里的注释 / 未建模的 key / 其它 section 原样保留。
 4. 解析 **inject 目标**:当前 chat 的 selected AS(lookup,daemon 重启后自动 spawn)。
 5. 解析 **review runner**(4 级):① `-a` / `--agent` → ② 全局 `review.agent` → ③ 当前 AS 的 agent → ④ 都没有 → `❌ no active agent configured. Run /use <agent> first.`。② 里的名字没在 agent 注册表里时降级到 ③ 并告警(`⚠️ review.agent "x" is not a registered agent — using <session agent>`),config 文件里的陈旧名字不会让 `/review` 变成死命令。查 agent 注册表拿 Starter。
-6. 启动 goroutine(chat session ctx 派生 + 30min 超时):
+6. 启动 goroutine(chat session ctx 派生,无超时;run 在 goroutine 之前登记,可被 `--abort` 取消):
    1. 接 sink,把 review 的中间事件(思考 / 工具调用)**流式**进 chat(观察用)。
    2. `Starter.Review` → **统一 dispatcher**:
       - 所有 bridge 调 `agent.ReviewDispatch` → `OcrAvailable() ? ReviewWithOcr : ReviewWithPrompt`。
@@ -659,6 +755,11 @@ workspace / 每个 group 的 outcome)。factory 每个 daemon 进程建一次,�
 digest(§2.7)。续跑结束后,记录换成这次续跑的结果,所以第二次
 `--continue` 无事可做。
 
+`--abort` 走第三条路:查本 chat 正在跑的、还能停的 run → 取消最新那个 run 的 ctx
+(带中止哨兵)→ 那个 run 的 fan-out 解开,它的 agent session 被关掉 → 被中止的 run 报
+`cancelled`、在自己的消息上发一条中止通知、不发 verdict 也不注入 findings;它写下的
+record 让停掉的 group 还能 `--continue`(§2.8)。
+
 ---
 
 ## 4. 隔离与生命周期
@@ -666,8 +767,8 @@ digest(§2.7)。续跑结束后,记录换成这次续跑的结果,所以第二�
 - **session 是隔离机制**:每 group 一个独立 agent session(独立进程 / 独立 session id),独立 context 窗口。review 推理(可烧数万 token)不污染主 chat。
 - **多 job 各自独立 context**:大 changeset 按 rule group 拆的每个 job 都是独立 fresh session——不共享 context、不累积,防爆。区别于"同进程多轮 + /new reset"的弱隔离(依赖 agent reset 彻底),fresh session 是 OS 级强隔离,零信任。
 - **prompt 走管道**:group prompt 经 session 的协议管道送达 agent,不占 argv(见 §2.5 传输层)。管道无长度上限,大 changeset 的 group prompt 不会撑爆 spawn 参数。
-- **超时**:Review 30min(同 `/gtw commit` 的 Agent 预算)。session 边界使超时安全:只杀 review 进程,主 chat 不受影响。多 job 并发共用同一超时。
-- **ctx 派生**:goroutine 用 chat session 的 ctx 当 parent。`/close` → ctx cancel → 所有 review session 关闭 → goroutine 退出。无 orphan。
+- **没有超时**:review 没有 wall-clock 上限——它跑到用户中止或 chat session 的 ctx 被取消(daemon 关闭)为止。大 changeset 的 review 本来就可能跑很久,与其被一个固定的帽子截断,不如让用户自己决定什么时候停(`/review --abort`,见 §2.8)。
+- **ctx 派生**:goroutine 用 chat session 的 ctx 当 parent。chat 的 ctx 被取消(daemon 关闭走 `ResetContext`)→ 所有 review session 关闭 → goroutine 退出。无 orphan。run 的 ctx 是 `context.WithCancelCause(cs.Context())`:用户中止装的是哨兵原因(§2.8),ctx 被取消装的是父 ctx 的原因,两者在 `context.Cause` 上分得开。
 - **多 reviewer 并行**:多个 `/review --agent` 并发,各自独立 session,findings 全注入同一 AS。用户体验:多条 review 接连出现,然后一次"fix"。
 - **续跑同样是 session 隔离**:resume 打开的是 agent 侧同一个 session(新进程 + 老 session id),agent 的上下文延续,主 chat 上下文依旧不被污染。
 - **sink vs deliverable**:sink 是观察用(流式中间事件),`FormatReviewMessage` 文本是给主 agent 的输入。两者不冲突:findings 在 channel 上只出现一次(thread 里每组一条),合并全文只在主 agent 的上下文里。

@@ -12,10 +12,9 @@
 //     immediately. The dispatch worker is freed within
 //     microseconds; the chat session's readpump is never
 //     blocked. Multiple /review commands can run in parallel.
-//   - The goroutine uses cs.Context() as its parent — when
-//     the chat session closes (e.g. /close), the context is
-//     cancelled, the review sessions are closed, the goroutine
-//     exits cleanly. No orphan work.
+//   - The goroutine uses cs.Context() as its parent — when the
+//     chat session's context is cancelled, the review sessions are
+//     closed and the goroutine exits cleanly. No orphan work.
 //   - The session is the isolation: review runs in
 //     fresh sessions with their own context window. Main
 //     chat's token budget is NOT polluted by review
@@ -37,6 +36,13 @@
 //     The merged result is delivered exactly like a review's. The
 //     resume state lives in the factory's memory, keyed by chat id —
 //     nothing is written to disk.
+//   - `--abort` stops the review (or the continuation) that is
+//     running in this chat: the run's context is cancelled, which
+//     closes the agent sessions of its groups. The stopped groups
+//     stay resumable — `--continue` reopens them and sends them the
+//     text "continue". A review has no wall-clock deadline: it runs
+//     until the chat session's context is cancelled (the daemon
+//     shutting down) or the user aborts it.
 //   - The bridge's Starter.Review method calls agent.Review
 //     (uses the shared session helper internally). Most coding
 //     bridges delegate; pty/bash returns
@@ -65,7 +71,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/gitbase"
 	"github.com/cnlangzi/nightme/internal/messages"
-	"github.com/cnlangzi/nightme/internal/timeouts"
 )
 
 // Factory is the command.SlashCommandFactory for /review.
@@ -75,14 +80,16 @@ import (
 // pulling in extra runtime deps.
 //
 // The factory also holds the resume state of the last review per
-// chat (see record.go) and the count of the reviews currently
-// running per chat. The factory is built once per daemon process, so
-// the state lives for the lifetime of the process and is lost on
+// chat (see record.go), the count of the reviews currently running
+// per chat and the registry of the runs the user can abort (see
+// abort.go). The factory is built once per daemon process, so the
+// state lives for the lifetime of the process and is lost on
 // restart.
 type Factory struct {
 	mu      sync.Mutex
 	records map[string]reviewRecord
 	running map[string]int
+	runs    map[string][]*runHandle
 	nextID  uint64
 }
 
@@ -102,6 +109,7 @@ func NewFactory() *Factory {
 	return &Factory{
 		records: make(map[string]reviewRecord),
 		running: make(map[string]int),
+		runs:    make(map[string][]*runHandle),
 	}
 }
 
@@ -120,7 +128,8 @@ func (f *Factory) Spec() command.Spec {
 /review -g --unset          # remove the persisted global review agent
 /review -c                  # continue the groups of the last review in this chat
                                  #   that failed: a group that reached the agent is
-                                 #   resumed, a group that never started is re-run`,
+                                 #   resumed, a group that never started is re-run
+/review --abort            # stop the review running in this chat`,
 		Category: "workspace",
 	}
 }
@@ -130,7 +139,7 @@ func (f *Factory) Spec() command.Spec {
 // contract for the whole /<cmd> surface.
 var reviewCmdSpec = command.CmdSpec{
 	Name:  "/review",
-	Usage: "/review [-a|--agent <name>] [-g|--global] [--unset] [-c|--continue]",
+	Usage: "/review [-a|--agent <name>] [-g|--global] [--unset] [-c|--continue] [--abort]",
 	Flags: map[string]command.FlagSpec{
 		"-a":         {Name: "agent", TakesValue: true},
 		"--agent":    {Name: "agent", TakesValue: true},
@@ -139,6 +148,7 @@ var reviewCmdSpec = command.CmdSpec{
 		"--unset":    {Name: "unset"},
 		"-c":         {Name: "continue"},
 		"--continue": {Name: "continue"},
+		"--abort":    {Name: "abort"},
 	},
 	MinArgs: 0,
 	MaxArgs: 0,
@@ -174,6 +184,11 @@ type Spec struct {
 	// run — a session belongs to one agent and cannot be moved to
 	// another — so the four-tier runner resolution does not apply.
 	Continue bool
+
+	// Abort stops the review (or the continuation) that is running
+	// in this chat. It starts no review and needs neither a
+	// workspace nor a selected agent.
+	Abort bool
 }
 
 // parseReviewArgs extracts /review's flags from argv. Returns an
@@ -193,6 +208,7 @@ func parseReviewArgs(argv []string) (Spec, error) {
 		Global:   parsed.Bool("global"),
 		Unset:    parsed.Bool("unset"),
 		Continue: parsed.Bool("continue"),
+		Abort:    parsed.Bool("abort"),
 	}
 	// An empty agent name is a mistake, not a request for the
 	// default — "not given" and "given as empty" must stay
@@ -207,11 +223,23 @@ func parseReviewArgs(argv []string) (Spec, error) {
 // act on. Each combination gets its own message so the user knows
 // which flag to fix.
 //
-// The --continue checks come first: --continue resumes an existing
+// The --abort checks come first: the abort targets the run that is
+// already in flight, so the flags that choose or persist a runner
+// have nothing to add to it.
+//
+// The --continue checks come next: --continue resumes an existing
 // runner, so the flags that choose or persist a runner have nothing
 // to add to it.
 func validateReviewFlags(spec Spec) error {
 	switch {
+	case spec.Abort && spec.Continue:
+		return errors.New("--abort and --continue are mutually exclusive")
+	case spec.Abort && spec.Agent != "":
+		return errors.New("--abort and --agent are mutually exclusive")
+	case spec.Abort && spec.Global:
+		return errors.New("--abort and --global are mutually exclusive")
+	case spec.Abort && spec.Unset:
+		return errors.New("--abort and --unset are mutually exclusive")
 	case spec.Continue && spec.Agent != "":
 		return errors.New("--continue and --agent are mutually exclusive")
 	case spec.Continue && spec.Global:
@@ -297,6 +325,13 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	if err := validateReviewFlags(spec); err != nil {
 		chatsession.ReportOutcome(ctx, command.FailedOutcome("usage", "the flag combination is not valid"))
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
+	}
+
+	// The abort targets the run that is already in flight, so it
+	// needs neither a workspace nor a selected agent — it is
+	// dispatched before the chat session is consulted.
+	if spec.Abort {
+		return f.handleAbort(ctx, rt, input)
 	}
 
 	// Apply the global scope before the chat session is consulted.
@@ -443,7 +478,7 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 	// (ErrReviewNotSupported is the one case we surface back to
 	// the user; everything else stays in logs). We grab them by
 	// value so the closure doesn't pin SlashInput / agent
-	// references for the full 30-min review budget.
+	// references for the whole review run.
 	chatID := input.ChatID
 	replyTo := input.MessageID
 	workspace := cs.SelectedCwd()
@@ -472,14 +507,14 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 	// session's readpump continues processing events unblocked.
 	//
 	// Lifecycle:
-	//   - The goroutine uses cs.Context() as its parent — when
-	//     the chat session closes (e.g. /close), the context is
-	//     cancelled, the review sessions are closed, and the
-	//     goroutine exits cleanly. No orphan work.
-	//   - revCtx wraps cs.Context() with timeouts.Review (30 min),
-	//     same as /gtw commit's Agent timeout. The session
-	//     boundary makes this safe: the deadline only closes the
-	//     review sessions; the main chat is untouched.
+	//   - The goroutine uses cs.Context() as its parent — when the
+	//     chat session's context is cancelled, the review sessions
+	//     are closed and the goroutine exits cleanly. No orphan
+	//     work.
+	//   - The run has NO wall-clock deadline: it ends when the chat
+	//     closes or when the user aborts it. The context is
+	//     cancellable with a cause, so the run can tell an abort
+	//     from a chat close.
 	//
 	// v9 distribution: on success, the bridge returns the raw
 	// review text. The goroutine wraps it in FormatReviewMessage
@@ -502,9 +537,22 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 	// flows would fight over the same group sessions. Overlapping
 	// reviews are allowed, as before, so the marker is a counter.
 	f.startReview(chatID)
+
+	// The run: no deadline, cancellable with the abort sentinel so
+	// `/review --abort` can stop the run. It is registered BEFORE the
+	// goroutine starts, so an abort that arrives right after the
+	// command returned cannot race the registration.
+	revCtx, handle := f.newRun(chatID, cs.Context(), runnerName, "review")
+
 	go func() {
-		revCtx, cancel := context.WithTimeout(cs.Context(), timeouts.Review)
-		defer cancel()
+		// The defer order is the run's shutdown contract: the
+		// running marker is released and the message's hold is given
+		// back first, and `done` closes LAST — an abort that waits on
+		// it is guaranteed to find the run finished and its record
+		// written.
+		defer close(handle.done)
+		defer f.endRun(chatID, handle)
+		defer handle.cancel(nil)
 
 		// The review's own hold: released when the goroutine
 		// returns, so the message settles only after the review
@@ -538,7 +586,7 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 		// defer drain() (F-63 follow-up fix-gtw-command-done):
 		// the sink's drain goroutine runs on its own ctx so the
 		// terminal OutHeartbeat's renderLocked is not canceled
-		// when revCtx's WithTimeout fires at goroutine return.
+		// when revCtx is cancelled at goroutine return.
 		//
 		// The drain is called once more below, right after the
 		// fan-out ends: the groups' flushed batches are still queued
@@ -558,6 +606,11 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 			agent.WithReviewPlanObserver(planObserver(revCtx, emitter, collector, chatID, replyTo, runnerName)),
 		)
 
+		// The fan-out is over: the groups' sessions are closed and the
+		// findings are in hand. There is nothing left for an abort to
+		// stop, so the delivery below runs undisturbed.
+		f.finishFanout(chatID, handle)
+
 		// The record is replaced with this run's outcomes BEFORE the
 		// result is delivered: by the time the user sees the
 		// findings, the state a later `--continue` reads is already
@@ -573,6 +626,22 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 			f.record(chatID, runnerName, workspace, groupOutcomes)
 		}
 		finish()
+
+		// The user aborted this run: the agent sessions are closed,
+		// the findings that had already arrived stay in the thread,
+		// and the stopped groups stay resumable — the record above
+		// holds them with their session ids.
+		//
+		// The abort branch comes BEFORE the failure branch: after an
+		// abort the fan-out returns a context-cancellation error, and
+		// the user must see "aborted", not "❌ /review failed".
+		if aborted(revCtx) {
+			// The sink is drained first: the findings that had
+			// already been queued land before the notice.
+			drain()
+			reportAborted(revCtx, work, emitter, chatID, replyTo, runnerName, "review", groupOutcomes)
+			return
+		}
 
 		// The end hint goes into the sink BEFORE the drain: the sink
 		// is a queue, so the hint lands after the groups' findings,
@@ -898,7 +967,7 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 
 	// Capture the inputs the goroutine needs for an async reply. We
 	// grab them by value so the closure doesn't pin SlashInput / agent
-	// references for the full 30-min review budget.
+	// references for the whole continuation run.
 	replyTo := input.MessageID
 	workspace := rec.workspace
 	sendBlocks := as.SendBlocks // close over SendBlocks for Inject
@@ -910,9 +979,22 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 
 	// The continuation is a review run like any other: the chat
 	// stays marked as busy until the continuation itself is done.
+	//
+	// The run: no deadline, cancellable with the abort sentinel so
+	// `/review --abort` can stop it too. It is registered BEFORE the
+	// goroutine starts, so an abort that arrives right after the
+	// command returned cannot race the registration.
+	revCtx, handle := f.newRun(chatID, cs.Context(), runnerName, "continue")
+
 	go func() {
-		revCtx, cancel := context.WithTimeout(cs.Context(), timeouts.Review)
-		defer cancel()
+		// The defer order is the run's shutdown contract: the
+		// running marker is released and the message's hold is given
+		// back first, and `done` closes LAST — an abort that waits on
+		// it is guaranteed to find the run finished and its record
+		// written.
+		defer close(handle.done)
+		defer f.endRun(chatID, handle)
+		defer handle.cancel(nil)
 
 		defer work.Release()
 
@@ -952,18 +1034,55 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 			agent.WithReviewPlanObserver(planObserver(revCtx, emitter, collector, chatID, replyTo, runnerName)),
 		)
 
+		// The fan-out is over: the resumed sessions are closed and
+		// their findings are in hand. There is nothing left for an
+		// abort to stop, so the delivery below runs undisturbed.
+		f.finishFanout(chatID, handle)
+
 		// The record is replaced with this run's outcomes BEFORE the
 		// result is delivered, so a second `--continue` finds
 		// nothing left to resume. A group that fails again has
 		// spent its one recovery attempt — the failure stays in the
 		// record, the retry does not.
 		//
+		// An ABORTED continuation is the exception: the groups were
+		// stopped, not exhausted, so they keep their resume attempt
+		// and stay resumable.
+		//
 		// The write is conditional on the record still being the one
 		// this continuation resumed from: a review that finished in
 		// the meantime owns the chat's resume state.
-		groupOutcomes := collector.spentResults()
+		abortedRun := aborted(revCtx)
+		groupOutcomes := collector.results()
+		if abortedRun {
+			// A group the abort caught before it spawned reports no
+			// session id — the resume never got that far — but the
+			// session it was reopening is still the one the record
+			// holds. Without this the stopped group would look like
+			// it never reached the agent, and would not be
+			// resumable.
+			carrySessionIDs(groupOutcomes, jobs)
+		} else {
+			groupOutcomes = collector.spentResults()
+		}
 		f.recordIfCurrent(chatID, rec.id, runnerName, workspace, groupOutcomes)
 		finish()
+
+		// The user aborted this run: the resumed sessions are closed
+		// and the stopped groups stay resumable — the record above
+		// holds them with their session ids.
+		//
+		// The abort branch comes BEFORE the failure branch: after an
+		// abort the fan-out returns a context-cancellation error, and
+		// the user must see "aborted", not "❌ /review continue
+		// failed".
+		if abortedRun {
+			// The sink is drained first: the findings that had
+			// already been queued land before the notice.
+			drain()
+			reportAborted(revCtx, work, emitter, chatID, replyTo, runnerName, "continuation", groupOutcomes)
+			return
+		}
 
 		// The end hint goes into the sink BEFORE the drain, so it
 		// lands after the continued groups' findings — same contract

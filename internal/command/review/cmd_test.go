@@ -108,10 +108,13 @@ func TestParseReviewArgs(t *testing.T) {
 		{"-g --unset", []string{"-g", "--unset"}, Spec{Global: true, Unset: true}, false},
 		{"-c", []string{"-c"}, Spec{Continue: true}, false},
 		{"--continue", []string{"--continue"}, Spec{Continue: true}, false},
+		{"--abort", []string{"--abort"}, Spec{Abort: true}, false},
 		{"--agent without value", []string{"--agent"}, Spec{}, true},
 		{"-a without value", []string{"-a"}, Spec{}, true},
 		{"positional arg rejected", []string{"foo"}, Spec{}, true},
 		{"unknown flag rejected", []string{"--base", "main"}, Spec{}, true},
+		{"unknown short flag rejected", []string{"-x"}, Spec{}, true},
+		{"abort with a positional arg rejected", []string{"--abort", "extra"}, Spec{}, true},
 		{"empty agent name rejected", []string{"--agent", ""}, Spec{}, true},
 		{"blank agent name rejected", []string{"--agent", "   "}, Spec{}, true},
 	}
@@ -142,10 +145,15 @@ func TestValidateReviewFlags(t *testing.T) {
 		{"continue with agent", Spec{Continue: true, Agent: "pi"}, "--continue and --agent are mutually exclusive"},
 		{"continue with global", Spec{Continue: true, Global: true}, "--continue and --global are mutually exclusive"},
 		{"continue with unset", Spec{Continue: true, Unset: true}, "--continue and --unset are mutually exclusive"},
+		{"abort with continue", Spec{Abort: true, Continue: true}, "--abort and --continue are mutually exclusive"},
+		{"abort with agent", Spec{Abort: true, Agent: "pi"}, "--abort and --agent are mutually exclusive"},
+		{"abort with global", Spec{Abort: true, Global: true}, "--abort and --global are mutually exclusive"},
+		{"abort with unset", Spec{Abort: true, Unset: true}, "--abort and --unset are mutually exclusive"},
 		{"agent alone", Spec{Agent: "pi"}, ""},
 		{"global with agent", Spec{Global: true, Agent: "pi"}, ""},
 		{"global with unset", Spec{Global: true, Unset: true}, ""},
 		{"continue alone", Spec{Continue: true}, ""},
+		{"abort alone", Spec{Abort: true}, ""},
 		{"nothing", Spec{}, ""},
 	}
 	for _, tc := range cases {
@@ -408,6 +416,10 @@ func TestHandle_FlagCombinationsAreRejected(t *testing.T) {
 		{"continue with agent", []string{"review", "-c", "-a", "pi"}, "--continue and --agent are mutually exclusive"},
 		{"continue with global", []string{"review", "-c", "-g"}, "--continue and --global are mutually exclusive"},
 		{"continue with unset", []string{"review", "-c", "--unset"}, "--continue and --unset are mutually exclusive"},
+		{"abort with continue", []string{"review", "--abort", "-c"}, "--abort and --continue are mutually exclusive"},
+		{"abort with agent", []string{"review", "--abort", "-a", "pi"}, "--abort and --agent are mutually exclusive"},
+		{"abort with global", []string{"review", "--abort", "-g"}, "--abort and --global are mutually exclusive"},
+		{"abort with unset", []string{"review", "--abort", "--unset"}, "--abort and --unset are mutually exclusive"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -24,7 +24,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/messages"
-	"github.com/cnlangzi/nightme/internal/timeouts"
 )
 
 // ─── test doubles ──────────────────────────────────────────────────
@@ -35,9 +34,15 @@ import (
 type recordingDriver struct {
 	mu   sync.Mutex
 	sent []agent.ContentBlock
+	// gate, when non-nil, holds SendBlocks until the test closes it
+	// — the shape of a delivery that is still in flight.
+	gate chan struct{}
 }
 
 func (d *recordingDriver) SendBlocks(_ context.Context, blocks []agent.ContentBlock) error {
+	if d.gate != nil {
+		<-d.gate
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.sent = append(d.sent, blocks...)
@@ -451,13 +456,10 @@ func TestHandle_ContinueResumesTheFailedGroup(t *testing.T) {
 		t.Errorf("resumed workspace = %q, want the recorded workspace", cfgs[0].Workspace)
 	}
 
-	// The continuation runs under the same 30-minute review budget
-	// as a review.
-	deadline := recorded.startDeadline()
-	if deadline.IsZero() {
-		t.Error("the continuation ran without a deadline")
-	} else if remaining := time.Until(deadline); remaining > timeouts.Review || remaining < timeouts.Review-time.Minute {
-		t.Errorf("the continuation deadline is %v away, want ~%v", remaining, timeouts.Review)
+	// The continuation has no wall-clock deadline: it runs until the
+	// chat closes or the user aborts it.
+	if deadline := recorded.startDeadline(); !deadline.IsZero() {
+		t.Errorf("the continuation ran with a deadline (%v), want none", deadline)
 	}
 
 	// The runner is the recorded agent — not the chat session's.

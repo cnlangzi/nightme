@@ -1328,6 +1328,18 @@ type runOnceConfig struct {
 	OnReviewPlan func([]ReviewPlanGroup)
 }
 
+// The modes a review fan-out can run a group in.
+const (
+	// ReviewModeResume reopens the group's own agent session and
+	// sends it a short text — the agent picks the work up where it
+	// stopped.
+	ReviewModeResume = "resume"
+	// ReviewModeRerun starts a fresh agent session and sends it the
+	// group's stored prompt — the group never reached the agent, so
+	// there is no conversation to continue.
+	ReviewModeRerun = "rerun"
+)
+
 // ReviewPlanGroup describes one group of a review fan-out.
 type ReviewPlanGroup struct {
 	// Pattern is the group's pattern — the glob of an ocr rule group,
@@ -1345,6 +1357,11 @@ type ReviewPlanGroup struct {
 	Label string
 	// Files are the files the group covers.
 	Files []string
+	// Mode is what the run does with the group: "" (a fresh session
+	// carries the group's prompt), ReviewModeResume (the group's own
+	// session is reopened) or ReviewModeRerun (a fresh session carries
+	// the group's stored prompt).
+	Mode string
 }
 
 // ReviewJob identifies one group of a review fan-out.
@@ -1362,6 +1379,10 @@ type ReviewJob struct {
 	// SessionID is the agent session id of the group's session.
 	// Empty when the group never reached the agent's Ready event.
 	SessionID string
+	// Prompt is the text the group's session received: the group's
+	// own prompt for a fresh run. Empty when the group was resumed.
+	// A continuation re-runs a group that never started with it.
+	Prompt string
 	// Report is the parsed form of the group's own review output.
 	// A group whose output matched no known shape yields a report
 	// with Parsed=false and no findings.

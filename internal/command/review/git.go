@@ -8,6 +8,7 @@ package review
 
 import (
 	"context"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -49,6 +50,25 @@ func readWorkspaceState(ctx context.Context, dir string) (workspaceState, error)
 	return workspaceState{head: head, status: status, known: true}, nil
 }
 
+// readBaseline reads the workspace's state for the review's verdict.
+//
+// The read is bounded: it happens right before the findings go out,
+// and a slow git must not hold the findings back. A workspace that
+// cannot be read yields an unknown state — the verdict then leaves
+// the review's own verdict standing.
+func readBaseline(ctx context.Context, dir string) workspaceState {
+	ctx, cancel := context.WithTimeout(ctx, baselineTimeout)
+	defer cancel()
+	state, err := readWorkspaceState(ctx, dir)
+	if err != nil {
+		slog.Default().Debug("/review: the workspace could not be read",
+			"workspace", dir,
+			"err", err)
+		return workspaceState{}
+	}
+	return state
+}
+
 // runGit runs a git command in dir and returns its trimmed stdout.
 //
 // The command goes through the shared process helper (internal/proc)
@@ -76,14 +96,22 @@ func runGit(ctx context.Context, dir string, args ...string) (string, error) {
 			// the only diagnostic there is.
 			msg = err.Error()
 		}
-		return "", &gitError{stderr: msg}
+		return "", &gitError{stderr: msg, err: err}
 	}
 	return strings.TrimSpace(stdout.String()), nil
 }
 
 // gitError is a failed git call carrying git's own diagnostic.
+//
+// The underlying error is kept so the caller can still tell what
+// went wrong (git missing, permission denied) when git printed
+// nothing useful of its own.
 type gitError struct {
 	stderr string
+	err    error
 }
 
 func (e *gitError) Error() string { return e.stderr }
+
+// Unwrap exposes the underlying exec error.
+func (e *gitError) Unwrap() error { return e.err }

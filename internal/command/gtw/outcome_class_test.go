@@ -180,7 +180,11 @@ func TestGtwOutcome_CommitAheadOfTheDefaultBranch(t *testing.T) {
 	git.onArgs(statusCmd, "## wt-clean...origin/wt-clean\n", "", nil)
 	git.onArgs([]string{"symbolic-ref", "--short", "refs/remotes/origin/HEAD"},
 		"origin/main\n", "", nil)
-	git.onArgs([]string{"log", "--format=%ae\t%h %s", "main..HEAD"},
+	// The default branch's name is resolved to a commit before it is
+	// used as a rev range.
+	git.onArgs([]string{"rev-parse", "--verify", "main^{commit}"},
+		"base000\n", "", nil)
+	git.onArgs([]string{"log", "--format=%ae\t%h %s", "base000..HEAD"},
 		"test@example.com\tabc1234 feat: the work\n", "", nil)
 
 	withCwd(t, t.TempDir())
@@ -212,8 +216,39 @@ func TestGtwOutcome_CommitAheadOfTheDefaultBranch(t *testing.T) {
 func TestGtwOutcome_PushAlreadyOnRemote(t *testing.T) {
 	git := newPushGit()
 	git.onArgs(statusCmd, "## wt-clean...origin/wt-clean\n", "", nil)
-	git.onArgs([]string{"rev-parse", "HEAD"}, "aaaa\n", "", nil)
-	git.onArgs([]string{"rev-parse", "--verify", "origin/wt-clean"}, "aaaa\n", "", nil)
+	git.onArgs([]string{"rev-list", "--count", "origin/wt-clean..HEAD"}, "0\n", "", nil)
+
+	withCwd(t, t.TempDir())
+	writeYml(t, mustPwd(t), Context{
+		Worktree: mustPwd(t),
+		Branch:   "wt-clean",
+		RepoRoot: mustPwd(t),
+	})
+
+	p := newOutcomeProbe(t)
+	p.cs.SetSelectedCwd(mustPwd(t))
+	if _, err := dispatchPush(p.ctx, p.cs, HandlerDeps{Git: git}, "chat", "msg", pushArgs{}); err != nil {
+		t.Fatalf("dispatchPush: %v", err)
+	}
+	got := p.settle(t)
+	assertOutcome(t, got, messages.OutcomeFailed, map[string]string{
+		"reason": "nothing_to_push",
+		"branch": "wt-clean",
+	})
+	assertNoError(t, got)
+}
+
+// TestGtwOutcome_PushBehindTheRemote covers a branch the remote has
+// moved past: the local carries no commit the remote does not have,
+// so there is nothing to push — a normal branch.
+//
+// The count is what tells the two apart: a branch that is behind its
+// remote has the same HEAD as "up to date" would, and a plain SHA
+// comparison would call it a branch with commits to push.
+func TestGtwOutcome_PushBehindTheRemote(t *testing.T) {
+	git := newPushGit()
+	git.onArgs(statusCmd, "## wt-clean...origin/wt-clean [behind 1]\n", "", nil)
+	git.onArgs([]string{"rev-list", "--count", "origin/wt-clean..HEAD"}, "0\n", "", nil)
 
 	withCwd(t, t.TempDir())
 	writeYml(t, mustPwd(t), Context{
@@ -242,8 +277,7 @@ func TestGtwOutcome_PushAlreadyOnRemote(t *testing.T) {
 func TestGtwOutcome_PushLocalAheadOfRemote(t *testing.T) {
 	git := newPushGit()
 	git.onArgs(statusCmd, "## wt-clean...origin/wt-clean\n", "", nil)
-	git.onArgs([]string{"rev-parse", "HEAD"}, "aaaa\n", "", nil)
-	git.onArgs([]string{"rev-parse", "--verify", "origin/wt-clean"}, "bbbb\n", "", nil)
+	git.onArgs([]string{"rev-list", "--count", "origin/wt-clean..HEAD"}, "2\n", "", nil)
 
 	withCwd(t, t.TempDir())
 	writeYml(t, mustPwd(t), Context{
@@ -308,7 +342,7 @@ func TestJudgeFixWork_CountsWhatTheAgentLeftBehind(t *testing.T) {
 	}
 
 	// Nothing yet: the agent left the worktree unchanged.
-	got := judgeFixWork(context.Background(), deps, repo, "main", base, nil)
+	got := judgeFixWork(context.Background(), deps, repo, "main", repo, base, nil)
 	if got.Status != messages.OutcomeFailed {
 		t.Fatalf("outcome = %+v, want failed — the agent produced nothing", got)
 	}
@@ -321,7 +355,7 @@ func TestJudgeFixWork_CountsWhatTheAgentLeftBehind(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(repo, "new.go"), []byte("package x\n"), 0o644); err != nil {
 		t.Fatalf("write new.go: %v", err)
 	}
-	got = judgeFixWork(context.Background(), deps, repo, "main", base, nil)
+	got = judgeFixWork(context.Background(), deps, repo, "main", repo, base, nil)
 	if got.Status != messages.OutcomeOK {
 		t.Fatalf("outcome = %+v, want ok — the agent produced a file", got)
 	}
@@ -347,14 +381,14 @@ func TestJudgeFixWork_CountsTheAgentsCommits(t *testing.T) {
 	// gtw's own tool commit: not the agent's work.
 	mustGit(t, repo, "-c", "user.name=nightme-gtw", "-c", "user.email=gtw@localhost",
 		"commit", "--allow-empty", "-m", "gtw: ignore .nightme/")
-	got := judgeFixWork(context.Background(), deps, repo, "main", base, nil)
+	got := judgeFixWork(context.Background(), deps, repo, "main", repo, base, nil)
 	if got.Status != messages.OutcomeFailed {
 		t.Fatalf("outcome = %+v, want failed — only gtw's own commit is on the branch", got)
 	}
 
 	// The agent's commit: the work landed.
 	mustGit(t, repo, "commit", "--allow-empty", "-m", "feat: the work")
-	got = judgeFixWork(context.Background(), deps, repo, "main", base, nil)
+	got = judgeFixWork(context.Background(), deps, repo, "main", repo, base, nil)
 	if got.Status != messages.OutcomeOK {
 		t.Fatalf("outcome = %+v, want ok — the agent committed", got)
 	}

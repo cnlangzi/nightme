@@ -6,8 +6,9 @@ package review
 // fixes land in the turn the findings were injected into. The review
 // therefore knows two facts: how many findings it collected, and
 // what the workspace holds once those findings were acted on. The
-// head is recorded when the command starts and compared when the
-// review ends.
+// baseline is the workspace as it is right before the findings go
+// out — only the injected turn's effect is measured, so a change
+// the user made while the review ran is not credited to it.
 //
 // Nothing to fix is a normal result — the review did its job, there
 // was nothing to change. A review whose findings were addressed is a
@@ -19,16 +20,28 @@ import (
 	"context"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/messages"
 )
 
-// selfVerdict judges the review once the turn its findings went
-// into has ended.
+// verdictGitTimeout bounds the git calls a verdict makes. The
+// judgment runs on its own goroutine, but a hung git must not keep
+// the message from settling forever.
+const verdictGitTimeout = 30 * time.Second
+
+// baselineTimeout bounds the read of the workspace's baseline. The
+// read happens right before the findings go out, so a slow git must
+// not hold the findings back.
+const baselineTimeout = 10 * time.Second
+
+// selfVerdict judges the review once the turn its findings went into
+// has ended.
 type selfVerdict struct {
 	work      *chatsession.Work
+	unsub     func()
 	ctx       context.Context
 	workspace string
 	before    workspaceState
@@ -37,16 +50,16 @@ type selfVerdict struct {
 	once      sync.Once
 }
 
-// watchSelfVerdict takes a share of the message's work and waits
-// for the turn the findings were injected into to end.
+// watchSelfVerdict takes a share of the message's work and waits for
+// the turn the findings were injected into to end.
 //
 // The share keeps the message alive until the verdict is on it: the
 // settled signal goes out when the last participant releases its
 // share.
 //
 // The subscription happens before the injection: the bus calls its
-// subscribers in registration order, so this one judges before the
-// queue's own subscriber releases its share.
+// subscribers in registration order, so this one is in place before
+// the queue's own subscriber releases the queue's share.
 func watchSelfVerdict(
 	ctx context.Context,
 	cs *chatsession.ChatSession,
@@ -73,7 +86,7 @@ func watchSelfVerdict(
 		return v
 	}
 	v.work = cs.Hold(replyTo)
-	bus.Subscribe(func(e chatsession.PromptEndedEvent) bool {
+	v.unsub = bus.Subscribe(func(e chatsession.PromptEndedEvent) bool {
 		if e.UserMsgID != replyTo {
 			return false
 		}
@@ -87,26 +100,47 @@ func watchSelfVerdict(
 // reporting a verdict — the path where no turn will run, so there is
 // nothing to judge.
 func (v *selfVerdict) release() {
-	v.once.Do(func() { v.work.Release() })
+	v.once.Do(func() {
+		v.unsubscribe()
+		v.work.Release()
+	})
+}
+
+// unsubscribe drops the bus subscription. The handler holds the
+// verdict — and through it the workspace and the message's work — so
+// it must not outlive the verdict.
+func (v *selfVerdict) unsubscribe() {
+	if v.unsub != nil {
+		v.unsub()
+	}
 }
 
 // report judges the review and puts the verdict on the message's
 // work.
 //
+// The judgment runs on its own goroutine: the bus publishes the
+// prompt end on the chat's event pump, and the git calls the
+// judgment makes must not hold that pump up.
+//
 // A workspace that cannot be read leaves the review's own verdict
 // standing: nothing is known about what the fixes left behind.
 func (v *selfVerdict) report() {
-	defer v.work.Release()
-	if !v.before.known {
-		// The workspace could not be read when the review started:
-		// there is no baseline to judge against.
-		return
-	}
-	after, err := readWorkspaceState(v.ctx, v.workspace)
-	if err != nil || !after.known {
-		return
-	}
-	v.work.Report(judgeReview(v.before, after, v.findings, v.runner))
+	go func() {
+		defer v.unsubscribe()
+		defer v.work.Release()
+		if !v.before.known {
+			// The workspace could not be read before the findings
+			// went out: there is no baseline to judge against.
+			return
+		}
+		ctx, cancel := context.WithTimeout(v.ctx, verdictGitTimeout)
+		defer cancel()
+		after, err := readWorkspaceState(ctx, v.workspace)
+		if err != nil || !after.known {
+			return
+		}
+		v.work.Report(judgeReview(v.before, after, v.findings, v.runner))
+	}()
 }
 
 // judgeReview decides what the review produced.

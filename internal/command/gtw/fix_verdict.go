@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"sync"
+	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
@@ -23,6 +24,11 @@ import (
 // share — the settled signal goes out after that, so the settled
 // outcome is the post-work one.
 
+// verdictGitTimeout bounds the git calls a verdict makes. The
+// judgment runs on its own goroutine, but a hung git must not keep
+// the message from settling forever.
+const verdictGitTimeout = 30 * time.Second
+
 // fixVerdict judges what the coding agent produced in the worktree
 // and reports it when the agent's turn ends.
 //
@@ -34,8 +40,10 @@ type fixVerdict struct {
 	ctx      context.Context
 	deps     HandlerDeps
 	work     *chatsession.Work
+	unsub    func()
 	worktree string
 	branch   string
+	repoRoot string
 	base     string
 	data     map[string]string
 	once     sync.Once
@@ -50,9 +58,8 @@ type fixVerdict struct {
 // after the message already settled.
 //
 // The subscription happens before the dispatch too: the bus calls
-// its subscribers in registration order, so this one reads the
-// worktree and reports before the queue's subscriber releases the
-// queue's share.
+// its subscribers in registration order, so this one is in place
+// before the queue's subscriber releases the queue's share.
 //
 // The context keeps the command's values (the message's work lives
 // on them) but drops its cancellation: the verdict is judged long
@@ -62,7 +69,7 @@ func watchFixVerdict(
 	ctx context.Context,
 	cs *chatsession.ChatSession,
 	deps HandlerDeps,
-	messageID, worktree, branch, base string,
+	messageID, worktree, branch, repoRoot, base string,
 	data map[string]string,
 ) *fixVerdict {
 	v := &fixVerdict{
@@ -70,6 +77,7 @@ func watchFixVerdict(
 		deps:     deps,
 		worktree: worktree,
 		branch:   branch,
+		repoRoot: repoRoot,
 		base:     base,
 		data:     data,
 	}
@@ -82,7 +90,7 @@ func watchFixVerdict(
 		v.work.Release()
 		return v
 	}
-	bus.Subscribe(func(e chatsession.PromptEndedEvent) bool {
+	v.unsub = bus.Subscribe(func(e chatsession.PromptEndedEvent) bool {
 		if e.UserMsgID != messageID {
 			return false
 		}
@@ -96,20 +104,45 @@ func watchFixVerdict(
 // reporting a verdict — the path where no turn will run, so there
 // is nothing to judge.
 func (v *fixVerdict) release() {
-	v.once.Do(func() { v.work.Release() })
+	v.once.Do(func() {
+		v.unsubscribe()
+		v.work.Release()
+	})
+}
+
+// unsubscribe drops the bus subscription. The handler holds the
+// verdict — and through it the worktree and the message's work — so
+// it must not outlive the verdict.
+func (v *fixVerdict) unsubscribe() {
+	if v.unsub != nil {
+		v.unsub()
+	}
 }
 
 // report judges the work and puts the verdict on the message's
 // work.
 //
+// The judgment runs on its own goroutine: the bus publishes the
+// prompt end on the chat's event pump, and the git calls the
+// judgment makes must not hold that pump up.
+//
 // A turn that did not end cleanly keeps the prompt-end's own verdict:
 // a cancelled turn is a cancellation, not a verdict about the work.
+// The facts the fix produced still have to reach the program, so
+// they ride along without a verdict of their own.
 func (v *fixVerdict) report(reason agent.PromptEndReason) {
-	defer v.work.Release()
-	if reason != agent.PromptEndClean {
-		return
-	}
-	reportOutcome(v.ctx, judgeFixWork(v.ctx, v.deps, v.worktree, v.branch, v.base, v.data))
+	go func() {
+		defer v.unsubscribe()
+		defer v.work.Release()
+		if reason != agent.PromptEndClean {
+			v.work.Report(messages.Outcome{
+				Status: messages.OutcomeUnknown,
+				Data:   maps.Clone(v.data),
+			})
+			return
+		}
+		reportOutcome(v.ctx, judgeFixWork(v.ctx, v.deps, v.worktree, v.branch, v.repoRoot, v.base, v.data))
+	}()
 }
 
 // judgeFixWork reads the worktree and decides what the coding agent
@@ -125,45 +158,77 @@ func (v *fixVerdict) report(reason agent.PromptEndReason) {
 func judgeFixWork(
 	ctx context.Context,
 	deps HandlerDeps,
-	worktree, branch, base string,
+	worktree, branch, repoRoot, base string,
 	data map[string]string,
 ) messages.Outcome {
-	staged, unstaged, untracked, err := countWorktreeChanges(ctx, worktree, deps)
+	ctx, cancel := context.WithTimeout(ctx, verdictGitTimeout)
+	defer cancel()
+
+	counts, err := countWorktreeChanges(ctx, worktree, deps)
 	if err != nil {
 		return fixWorkException(data, "error",
 			"the worktree could not be read after the agent's turn",
 			err.Error())
 	}
-	commits, err := agentCommits(ctx, worktree, base, deps)
+	commits, known, err := countAgentCommits(ctx, deps, worktree, repoRoot, base)
 	if err != nil {
 		return fixWorkException(data, "error",
 			"the worktree could not be read after the agent's turn",
 			err.Error())
 	}
-	w := workCounts{
-		staged:    staged,
-		unstaged:  unstaged,
-		untracked: untracked,
-		commits:   len(commits),
-	}
+	counts.commits = len(commits)
+
 	facts := maps.Clone(data)
 	if facts == nil {
 		facts = map[string]string{}
 	}
-	facts["changes"] = fmt.Sprintf("%d", w.total())
-	facts["staged"] = fmt.Sprintf("%d", w.staged)
-	facts["unstaged"] = fmt.Sprintf("%d", w.unstaged)
-	facts["untracked"] = fmt.Sprintf("%d", w.untracked)
-	facts["commits"] = fmt.Sprintf("%d", w.commits)
-	if w.total() == 0 {
+	facts["changes"] = fmt.Sprintf("%d", counts.total())
+	facts["paths"] = fmt.Sprintf("%d", counts.paths)
+	facts["staged"] = fmt.Sprintf("%d", counts.staged)
+	facts["unstaged"] = fmt.Sprintf("%d", counts.unstaged)
+	facts["untracked"] = fmt.Sprintf("%d", counts.untracked)
+	facts["commits"] = fmt.Sprintf("%d", counts.commits)
+
+	if counts.total() == 0 {
+		if !known {
+			// The worktree is clean and the branch's commits could
+			// not be counted: the agent may well have committed
+			// everything.
+			return fixWorkException(data, "error",
+				"the worktree could not be read after the agent's turn",
+				"the worktree is clean and the branch's history could not be counted")
+		}
 		return command.FailedOutcomeData("no_changes",
 			"the agent left the worktree unchanged", facts)
 	}
 	return messages.Outcome{
 		Status:  messages.OutcomeOK,
-		Summary: fmt.Sprintf("the agent produced %d change(s) on %s", w.total(), branch),
+		Summary: fmt.Sprintf("the agent produced %d change(s) on %s", counts.total(), branch),
 		Data:    facts,
 	}
+}
+
+// countAgentCommits counts the commits the coding agent made since
+// the branch was cut from its baseline.
+//
+// The baseline is the branch's initial head; when it is unknown, the
+// local default branch stands in — the same fallback /gtw commit
+// uses. The second return value says whether the count is known at
+// all: a clean worktree whose commits cannot be counted is not the
+// same as a clean worktree with no commits.
+func countAgentCommits(ctx context.Context, deps HandlerDeps, worktree, repoRoot, base string) ([]string, bool, error) {
+	if base == "" {
+		fallback, err := commitBaseline(ctx, Context{RepoRoot: repoRoot}, deps)
+		if err != nil {
+			return nil, false, nil
+		}
+		base = fallback
+	}
+	commits, err := agentCommits(ctx, worktree, base, deps)
+	if err != nil {
+		return nil, false, err
+	}
+	return commits, true, nil
 }
 
 // fixWorkException builds the outcome of a fix whose work could not

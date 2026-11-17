@@ -185,8 +185,7 @@ func TestGtwOutcome_Push(t *testing.T) {
 		// push — a normal branch.
 		git := newPushGit()
 		git.onArgs(statusCmd, "## wt-clean...origin/wt-clean\n", "", nil)
-		git.onArgs([]string{"rev-parse", "HEAD"}, "aaaa\n", "", nil)
-		git.onArgs([]string{"rev-parse", "--verify", "origin/wt-clean"}, "aaaa\n", "", nil)
+		git.onArgs([]string{"rev-list", "--count", "origin/wt-clean..HEAD"}, "0\n", "", nil)
 
 		withCwd(t, t.TempDir())
 		writeYml(t, mustPwd(t), Context{
@@ -265,8 +264,8 @@ func TestGtwOutcome_Push(t *testing.T) {
 		git.on("push", "To origin", "", nil)
 		git.onArgs([]string{"log", "--oneline", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa..origin/wt-pushed"},
 			"", "", nil)
-		git.onArgs([]string{"rev-parse", "HEAD"},
-			"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n", "", nil)
+		git.onArgs([]string{"rev-list", "--count", "origin/wt-pushed..HEAD"},
+			"2\n", "", nil)
 
 		withCwd(t, t.TempDir())
 		writeYml(t, mustPwd(t), Context{

@@ -278,14 +278,34 @@ func commitBaseline(ctx context.Context, c Context, deps HandlerDeps) (string, e
 	if c.InitialHead != "" {
 		return c.InitialHead, nil
 	}
-	base, err := DefaultBranch(ctx, c.RepoRoot, deps.Git)
+	name, err := DefaultBranch(ctx, c.RepoRoot, deps.Git)
 	if err != nil {
 		return "", err
 	}
-	if base == "" {
+	if name == "" {
 		return "", errors.New("the default branch could not be determined")
 	}
-	return base, nil
+	// The name is resolved to a commit: the local repository does
+	// not necessarily have a branch by that name, and a rev range
+	// over a name that resolves to nothing is an error, not an
+	// empty range.
+	return resolveCommit(ctx, c.RepoRoot, name, deps)
+}
+
+// resolveCommit resolves a revision to a commit sha, falling back to
+// the remote-tracking ref when the local repository has no branch by
+// that name.
+func resolveCommit(ctx context.Context, dir, name string, deps HandlerDeps) (string, error) {
+	for _, rev := range []string{name, "origin/" + name} {
+		out, _, err := deps.Git.Run(ctx, dir, "rev-parse", "--verify", rev+"^{commit}")
+		if err != nil {
+			continue
+		}
+		if sha := strings.TrimSpace(out); sha != "" {
+			return sha, nil
+		}
+	}
+	return "", fmt.Errorf("the default branch %q could not be resolved to a commit", name)
 }
 
 // verifyAgentCommitted is the post-agent sanity check that runs

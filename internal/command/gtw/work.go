@@ -22,46 +22,57 @@ type workCounts struct {
 	unstaged int
 	// untracked is the number of paths git does not track.
 	untracked int
+	// paths is the number of distinct paths the worktree carries a
+	// change on. A path staged and then modified again counts once.
+	paths int
 	// commits is the number of commits the coding agent made.
 	commits int
 }
 
-// total is the number of kinds of change the worktree carries.
-// Zero means nothing happened: the agent left the worktree as it
-// found it.
+// total is the number of things the agent left behind: the paths it
+// touched plus the commits it made. Zero means nothing happened.
 func (w workCounts) total() int {
-	return w.staged + w.unstaged + w.untracked + w.commits
+	return w.paths + w.commits
 }
 
 // countWorktreeChanges counts the changes the worktree holds: the
-// paths staged in the index, the paths changed but not staged, and
-// the untracked paths.
+// paths staged in the index, the paths changed but not staged, the
+// untracked paths, and the distinct paths the worktree carries a
+// change on.
 //
 // The porcelain status is the same source the readiness gate reads,
 // but the XY columns are split here — the readiness gate only asks
 // "is the tree clean", this asks "what did the agent leave behind".
-func countWorktreeChanges(ctx context.Context, worktree string, deps HandlerDeps) (staged, unstaged, untracked int, err error) {
+func countWorktreeChanges(ctx context.Context, worktree string, deps HandlerDeps) (workCounts, error) {
 	out, stderr, err := deps.Git.Run(ctx, worktree, "--no-optional-locks", "status", "--porcelain")
 	if err != nil {
-		return 0, 0, 0, gitErr("git status", err, stderr)
+		return workCounts{}, gitErr("git status", err, stderr)
 	}
+	var w workCounts
 	for _, line := range splitNonEmptyLines(out) {
 		if len(line) < 3 {
 			continue
 		}
 		x, y := line[0], line[1]
 		if x == '?' && y == '?' {
-			untracked++
+			w.untracked++
+			w.paths++
 			continue
 		}
+		if x == '!' && y == '!' {
+			continue
+		}
+		// One path, one entry: it counts once even when it is both
+		// staged and modified again.
+		w.paths++
 		if x != ' ' {
-			staged++
+			w.staged++
 		}
 		if y != ' ' {
-			unstaged++
+			w.unstaged++
 		}
 	}
-	return staged, unstaged, untracked, nil
+	return w, nil
 }
 
 // agentCommits returns the commits between base and HEAD that the
@@ -104,21 +115,22 @@ func agentCommits(ctx context.Context, worktree, base string, deps HandlerDeps) 
 	return commits, nil
 }
 
-// remoteHoldsLocalHead reports whether the remote's tip for the
-// branch is the local head — i.e. every local commit is on the
-// remote.
+// commitsMissingFromRemote counts the commits the remote's tip for
+// the branch does not have.
 //
-// The remote's tip is read from the remote-tracking ref the push
-// updates, so a push that just landed is seen as "the remote holds
-// the local head" without a network round-trip.
-func remoteHoldsLocalHead(ctx context.Context, worktree, branch string, deps HandlerDeps) (bool, error) {
-	local, err := headSHA(ctx, worktree, deps)
+// The range origin/<branch>..HEAD answers the question the push
+// command asks: does the remote hold every local commit? A count of
+// zero means yes — whether the local is level with the remote or
+// behind it. A plain SHA comparison cannot tell those two apart, and
+// calls a branch that is behind the remote one that "carries commits
+// the remote does not have".
+//
+// The remote the push targets is origin — the same one
+// programmaticPush pushes to.
+func commitsMissingFromRemote(ctx context.Context, worktree, branch string, deps HandlerDeps) (int, error) {
+	out, stderr, err := deps.Git.Run(ctx, worktree, "rev-list", "--count", "origin/"+branch+"..HEAD")
 	if err != nil {
-		return false, err
+		return 0, gitErr("git rev-list --count origin/"+branch+"..HEAD", err, stderr)
 	}
-	remote, err := originBranchSHA(ctx, worktree, branch, deps)
-	if err != nil {
-		return false, err
-	}
-	return remote != "" && local == remote, nil
+	return atoi(strings.TrimSpace(out))
 }

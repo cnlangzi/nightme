@@ -13,22 +13,23 @@ import (
 //
 // The primary signal says "nothing happened", but the work may in
 // fact have been done — the coding agent pushed the branch itself,
-// before this command ran. The second check compares the local head
-// with the remote's tip for the branch: equal means the remote
-// already holds every local commit.
+// before this command ran. The second check counts the commits the
+// remote does not have: zero means the remote holds every local
+// commit (the branch is up to date — whether the local is level with
+// the remote or behind it).
 //
 // A branch the remote holds is a normal branch: there was nothing
 // to push. A branch the remote does not hold is an exception: the
 // local still carries commits the remote does not have.
 func pushFallback(ctx context.Context, c Context, branch string, deps HandlerDeps) (string, messages.Outcome) {
-	held, err := remoteHoldsLocalHead(ctx, c.Worktree, branch, deps)
+	missing, err := commitsMissingFromRemote(ctx, c.Worktree, branch, deps)
 	if err != nil {
 		return nothingToPushCard(branch),
 			command.FailedOutcomeData("nothing_to_push", "the branch has nothing to push",
 				map[string]string{"branch": branch},
 				"the push moved no commit and the remote's tip could not be read: "+err.Error())
 	}
-	if held {
+	if missing == 0 {
 		return alreadyPushedCard(branch),
 			command.BranchOutcome("nothing_to_push", "the branch is already on the remote",
 				map[string]string{"branch": branch})
@@ -36,7 +37,8 @@ func pushFallback(ctx context.Context, c Context, branch string, deps HandlerDep
 	return nothingToPushCard(branch),
 		command.FailedOutcomeData("nothing_to_push", "the branch has nothing to push",
 			map[string]string{"branch": branch},
-			"the push moved no commit and "+branch+" still carries commits the remote does not have")
+			fmt.Sprintf("the push moved no commit and %s still carries %d commit(s) origin/%s does not have",
+				branch, missing, branch))
 }
 
 // headSHA returns the current HEAD's full SHA in worktree.

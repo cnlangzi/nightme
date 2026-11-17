@@ -447,20 +447,6 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 	sendBlocks := as.SendBlocks // close over SendBlocks for Inject
 	emitter := cs.Emitter()
 
-	// The state the review is judged against: the head and the
-	// working tree as they are when the command starts. The fixes
-	// land in the turn the findings are injected into, and the
-	// review's verdict compares that turn's result with this.
-	//
-	// A workspace that cannot be read leaves the review without a
-	// baseline: the review's own verdict then stands.
-	before, beforeErr := readWorkspaceState(ctx, workspace)
-	if beforeErr != nil {
-		slog.Default().Debug("/review: the workspace could not be read",
-			"workspace", workspace,
-			"err", beforeErr)
-	}
-
 	// The review outlives the command: the command returns as soon
 	// as the goroutine is launched, but the review itself runs for
 	// minutes and then feeds the findings back into the chat's
@@ -765,6 +751,12 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 		// BEFORE the injection so its subscriber runs before the
 		// queue's own — the bus calls its subscribers in
 		// registration order.
+		//
+		// The baseline is read HERE — right before the findings go
+		// out — so only the injected turn's effect is measured. A
+		// change the user made while the review ran is not credited
+		// to the review.
+		before := readBaseline(revCtx, workspace)
 		verdict := watchSelfVerdict(revCtx, cs, replyTo, workspace, runnerName,
 			before, countFindings(groupOutcomes))
 		injectWork := cs.HoldUntilPromptEnd(replyTo)
@@ -904,17 +896,6 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 	workspace := rec.workspace
 	sendBlocks := as.SendBlocks // close over SendBlocks for Inject
 	emitter := cs.Emitter()
-
-	// The state the continuation is judged against — the same
-	// baseline a plain review takes: the head and the working tree as
-	// they are when the command starts. The fixes land in the turn
-	// the findings are injected into.
-	before, beforeErr := readWorkspaceState(ctx, workspace)
-	if beforeErr != nil {
-		slog.Default().Debug("/review --continue: the workspace could not be read",
-			"workspace", workspace,
-			"err", beforeErr)
-	}
 
 	// The continuation outlives the command exactly like a plain
 	// review does — same hold, same reason. See handleReview.
@@ -1066,6 +1047,12 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 		// The verdict waits for that same turn, exactly as a plain
 		// review's does: the fixes the findings asked for land
 		// there.
+		//
+		// The baseline is read HERE — right before the findings go
+		// out — so only the injected turn's effect is measured. A
+		// change the user made while the review ran is not credited
+		// to the review.
+		before := readBaseline(revCtx, workspace)
 		verdict := watchSelfVerdict(revCtx, cs, replyTo, workspace, runnerName,
 			before, countFindings(groupOutcomes))
 		injectWork := cs.HoldUntilPromptEnd(replyTo)

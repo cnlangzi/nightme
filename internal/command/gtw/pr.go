@@ -207,7 +207,7 @@ func dispatchPR(
 		// nothing broke.
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			withWarning(fmt.Sprintf(
-				"❌ branch %s already has an open PR (#%d): %s",
+				"✅ branch %s already has an open PR (#%d): %s",
 				c.Branch, existing.Number, existing.URL)),
 			command.BranchOutcome("pr_exists", "the branch already has an open pull request",
 				map[string]string{
@@ -331,7 +331,7 @@ func dispatchPR(
 			// pull request is there — a normal branch.
 			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 				withWarning(fmt.Sprintf(
-					"❌ a PR for %s already exists — check your repo's PR list.",
+					"✅ a PR for %s already exists — check your repo's PR list.",
 					c.Branch)),
 				command.BranchOutcome("pr_exists", "the branch already has an open pull request",
 					map[string]string{"branch": c.Branch})), nil

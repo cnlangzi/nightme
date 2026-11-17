@@ -854,7 +854,7 @@ func completeFixAndDispatch(
 		// and the queue takes its own share inside that call — a
 		// share taken later could arrive after the message
 		// already settled.
-		verdict := watchFixVerdict(ctx, cs, deps, messageID, worktreePath, branch, initialHead, fixData)
+		verdict := watchFixVerdict(ctx, cs, deps, messageID, worktreePath, branch, repoRoot, initialHead, fixData)
 		// Download attachments (best-effort) and assemble the
 		// dispatch blocks. Download failures log a warning
 		// and continue with text-only — the agent still gets

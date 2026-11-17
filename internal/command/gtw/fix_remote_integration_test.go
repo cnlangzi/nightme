@@ -211,7 +211,7 @@ func TestFixRemote_SettlesAfterTheDispatchedTurn(t *testing.T) {
 		UserMsgID: "msg-fix",
 		Reason:    agent.PromptEndClean,
 	})
-	got := rig.rec.settled()
+	got := waitSettled(rig.rec)
 	if got == nil {
 		t.Fatal("the message did not settle when the dispatched turn ended")
 	}
@@ -255,7 +255,7 @@ func TestFixRemote_SettlesWithTheWorkTheAgentProduced(t *testing.T) {
 		UserMsgID: "msg-fix",
 		Reason:    agent.PromptEndClean,
 	})
-	got := rig.rec.settled()
+	got := waitSettled(rig.rec)
 	if got == nil {
 		t.Fatal("the message did not settle when the dispatched turn ended")
 	}
@@ -267,6 +267,43 @@ func TestFixRemote_SettlesWithTheWorkTheAgentProduced(t *testing.T) {
 	}
 	if _, ok := got.Data["error"]; ok {
 		t.Errorf("a normal result carries no error description: %v", got.Data)
+	}
+}
+
+// TestFixRemote_StoppedTurnKeepsTheFacts covers the turn that did
+// not end cleanly: the prompt-end's own verdict stands (the turn was
+// cancelled), but the facts the fix produced still have to reach the
+// program.
+func TestFixRemote_StoppedTurnKeepsTheFacts(t *testing.T) {
+	rig := newFixRemoteRig(t)
+	rig.prov.SetIssue(42, &Issue{
+		ID:    42,
+		Title: "feat: the dispatched one",
+		State: "open",
+	})
+
+	work := rig.cs.Hold("msg-fix")
+	ctx := chatsession.WithWork(context.Background(), work)
+	if _, err := RunFix(ctx, ModeRemote, rig.cs, rig.deps, rig.cs.ChatID,
+		"msg-fix", []string{"42"}, false, false); err != nil {
+		t.Fatalf("RunFix: %v", err)
+	}
+	work.Release()
+
+	// The turn is stopped by the user.
+	rig.cs.PromptEndBus.Publish(chatsession.PromptEndedEvent{
+		UserMsgID: "msg-fix",
+		Reason:    agent.PromptEndUserStopped,
+	})
+	got := waitSettled(rig.rec)
+	if got == nil {
+		t.Fatal("the message did not settle when the dispatched turn ended")
+	}
+	if got.Status != messages.OutcomeCancelled {
+		t.Errorf("settled status = %q, want cancelled", got.Status)
+	}
+	if got.Data["branch"] == "" || got.Data["worktree"] == "" {
+		t.Errorf("settled data = %v, want the facts the fix produced", got.Data)
 	}
 }
 
@@ -1073,4 +1110,16 @@ func TestFixRemote_WithAttachments_EndToEnd(t *testing.T) {
 	if !strings.Contains(last, "Fix #100") {
 		t.Errorf("success reply missing issue header:\n%s", last)
 	}
+}
+
+// waitSettled waits for the settled message the recorder captured.
+func waitSettled(r *fixRemoteRecCh) *messages.Outcome {
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := r.settled(); got != nil {
+			return got
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return nil
 }

@@ -176,9 +176,6 @@ type run struct {
 	// first. The evidence that explains a failure is often in the
 	// action before the one that failed.
 	transcripts []actionTranscript
-	// waiting is how long the run is waiting, when it waits inside
-	// the agent's turn.
-	waiting string
 	// system1Model is the decision model that answered last.
 	system1Model string
 	// judgment is why the workflow cannot decide on its own.
@@ -202,11 +199,6 @@ type run struct {
 	// It is not persisted: a daemon that comes back starts the wait
 	// over. The chances the agent spent are what the history keeps.
 	providerWait time.Duration
-	// lastDecision names who decided last: the workflow, the
-	// decision model or the chat model.
-	lastDecision string
-	// lastReason says why that decision was made.
-	lastReason string
 	// thinkCount counts the turns the chat model took, and toolCount
 	// the tool calls the run made.
 	//
@@ -933,14 +925,6 @@ func (r *run) resetProviderWait() {
 	r.mu.Unlock()
 }
 
-// setDecision records who decided last and why.
-func (r *run) setDecision(who, reason string) {
-	r.mu.Lock()
-	r.lastDecision = who
-	r.lastReason = reason
-	r.mu.Unlock()
-}
-
 // countThink records a turn of the chat model.
 func (r *run) countThink(now time.Time) {
 	r.mu.Lock()
@@ -1247,41 +1231,44 @@ func sessionFromState(st *sessionState) *session {
 // One file holds everything: the DAG progress, the conversation and
 // the judgment history.
 type persistedRun struct {
-	RunID            string             `json:"run_id"`
-	ChatID           string             `json:"chat_id"`
-	Cwd              string             `json:"cwd"`
-	Owner            string             `json:"owner"`
-	Args             map[string]string  `json:"args,omitempty"`
-	Workflow         *wfe.Workflow      `json:"workflow"`
-	State            *wfe.RunState      `json:"state"`
-	History          []wfe.ActionRecord `json:"history"`
-	Transcripts      []actionTranscript `json:"transcripts,omitempty"`
-	Messages         []llm.Message      `json:"messages"`
-	PendingCalls     []pendingCall      `json:"pending_calls"`
-	Ask              *askState          `json:"ask,omitempty"`
-	Inflight         *inflightState     `json:"inflight,omitempty"`
-	Phase            Phase              `json:"phase"`
-	JudgmentStep     string             `json:"judgment_step,omitempty"`
-	Question         string             `json:"question"`
-	Error            string             `json:"error"`
-	Paused           bool               `json:"paused"`
-	PauseReason      string             `json:"pause_reason,omitempty"`
-	RunSession       *sessionState      `json:"run_session,omitempty"`
-	RoundSession     *sessionState      `json:"round_session,omitempty"`
-	DecisionSession  *sessionState      `json:"decision_session,omitempty"`
-	RoundSessions    []sessionState     `json:"round_sessions,omitempty"`
-	System1Decisions int                `json:"system1_decisions"`
-	System2Decisions int                `json:"system2_decisions"`
-	System1Usage     llm.Usage          `json:"system1_usage"`
-	System2Usage     llm.Usage          `json:"system2_usage"`
-	Commands         []CommandInfo      `json:"commands,omitempty"`
-	Agent            string             `json:"agent,omitempty"`
-	Wakes            []wakeRecord       `json:"wakes,omitempty"`
-	ThinkCount       int                `json:"think_count"`
-	ToolCount        int                `json:"tool_count"`
-	LastBeatAt       time.Time          `json:"last_beat_at"`
-	DecisionCount    int                `json:"decision_count"`
-	QuestionCount    int                `json:"question_count"`
+	RunID           string             `json:"run_id"`
+	ChatID          string             `json:"chat_id"`
+	Cwd             string             `json:"cwd"`
+	Owner           string             `json:"owner"`
+	Args            map[string]string  `json:"args,omitempty"`
+	Workflow        *wfe.Workflow      `json:"workflow"`
+	State           *wfe.RunState      `json:"state"`
+	History         []wfe.ActionRecord `json:"history"`
+	Transcripts     []actionTranscript `json:"transcripts,omitempty"`
+	Messages        []llm.Message      `json:"messages"`
+	PendingCalls    []pendingCall      `json:"pending_calls"`
+	Ask             *askState          `json:"ask,omitempty"`
+	Inflight        *inflightState     `json:"inflight,omitempty"`
+	Phase           Phase              `json:"phase"`
+	JudgmentStep    string             `json:"judgment_step,omitempty"`
+	Question        string             `json:"question"`
+	Error           string             `json:"error"`
+	Paused          bool               `json:"paused"`
+	PauseReason     string             `json:"pause_reason,omitempty"`
+	RunSession      *sessionState      `json:"run_session,omitempty"`
+	RoundSession    *sessionState      `json:"round_session,omitempty"`
+	DecisionSession *sessionState      `json:"decision_session,omitempty"`
+	RoundSessions   []sessionState     `json:"round_sessions,omitempty"`
+	// CommandMsgIDs holds the chat message every step that sent a
+	// command became. The decision about a step hangs under it.
+	CommandMsgIDs    map[string]string `json:"command_msg_ids,omitempty"`
+	System1Decisions int               `json:"system1_decisions"`
+	System2Decisions int               `json:"system2_decisions"`
+	System1Usage     llm.Usage         `json:"system1_usage"`
+	System2Usage     llm.Usage         `json:"system2_usage"`
+	Commands         []CommandInfo     `json:"commands,omitempty"`
+	Agent            string            `json:"agent,omitempty"`
+	Wakes            []wakeRecord      `json:"wakes,omitempty"`
+	ThinkCount       int               `json:"think_count"`
+	ToolCount        int               `json:"tool_count"`
+	LastBeatAt       time.Time         `json:"last_beat_at"`
+	DecisionCount    int               `json:"decision_count"`
+	QuestionCount    int               `json:"question_count"`
 }
 
 // persist writes the run's state to disk.
@@ -1320,6 +1307,7 @@ func (s *Service) persist(r *run) {
 		RoundSession:     sessionStateOf(r.roundSession),
 		DecisionSession:  sessionStateOf(r.decisionSession),
 		RoundSessions:    rounds,
+		CommandMsgIDs:    r.commandMsgIDsLocked(),
 		System1Decisions: r.system1Decisions,
 		System2Decisions: r.system2Decisions,
 		System1Usage:     r.system1Usage,
@@ -1437,6 +1425,10 @@ func (s *Service) resumeRuns(ctx context.Context) {
 			continue
 		}
 		r := s.restoreRun(state)
+		// The chat has forgotten the cards the run opened: it is told
+		// which of its messages are cards again, so the run goes on
+		// with them.
+		s.adoptSessionCards(r)
 		s.mu.Lock()
 		s.runs[r.id] = r
 		s.active[r.chatID] = r
@@ -1479,6 +1471,7 @@ func (s *Service) restoreRun(state persistedRun) *run {
 		runSession:       sessionFromState(state.RunSession),
 		roundSession:     sessionFromState(state.RoundSession),
 		decisionSession:  sessionFromState(state.DecisionSession),
+		commandMsgIDs:    maps.Clone(state.CommandMsgIDs),
 		system1Decisions: state.System1Decisions,
 		system2Decisions: state.System2Decisions,
 		system1Usage:     state.System1Usage,
@@ -1672,6 +1665,37 @@ func (r *run) lastCommandMsgIDValue() string {
 	return r.lastCommandMsgID
 }
 
+// resetRoundUsage forgets what the round the run was in spent.
+//
+// The round session shows what the round spent since the run entered
+// it: a run that comes back to a round starts its count over.
+func (r *run) resetRoundUsage() {
+	r.mu.Lock()
+	r.roundUsage = llm.Usage{}
+	r.mu.Unlock()
+}
+
+// resetDecisionUsage forgets what the decision that was open spent.
+func (r *run) resetDecisionUsage() {
+	r.mu.Lock()
+	r.decisionUsage = llm.Usage{}
+	r.mu.Unlock()
+}
+
+// addUsage records what a model call spent.
+//
+// The tokens belong to the round the run is in and to the decision
+// that is open: both sessions show what they spent in their footer.
+func (r *run) addUsage(usage llm.Usage) {
+	if usage.Total() == 0 {
+		return
+	}
+	r.mu.Lock()
+	r.roundUsage.Add(usage)
+	r.decisionUsage.Add(usage)
+	r.mu.Unlock()
+}
+
 // setGitStatus records the repository facts of the run's workspace.
 func (r *run) setGitStatus(status *messages.GitStatus) {
 	r.mu.Lock()
@@ -1684,6 +1708,19 @@ func (r *run) gitStatusValue() *messages.GitStatus {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.gitStatus
+}
+
+// commandMsgIDsLocked returns the messages the steps' commands
+// became. The caller holds the lock.
+func (r *run) commandMsgIDsLocked() map[string]string {
+	if len(r.commandMsgIDs) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(r.commandMsgIDs))
+	for stepID, msgID := range r.commandMsgIDs {
+		out[stepID] = msgID
+	}
+	return out
 }
 
 // rememberCommandMsg records the chat message a step's command
@@ -1900,13 +1937,6 @@ func (r *run) lastTranscriptText() string {
 		return ""
 	}
 	return r.transcripts[len(r.transcripts)-1].Text
-}
-
-// setWaiting records how long the run is waiting.
-func (r *run) setWaiting(text string) {
-	r.mu.Lock()
-	r.waiting = text
-	r.mu.Unlock()
 }
 
 // setSummary records how the run ended.

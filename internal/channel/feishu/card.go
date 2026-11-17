@@ -1,11 +1,9 @@
-// card.go — the Feishu run card.
+// card.go — the Feishu card.
 //
-// A run card is the overview of a workflow run: what the run is
-// doing, what it decided last, and the buttons that steer it. It is
-// one message of the chat, PATCHed in place as the run moves.
-//
-// The buttons carry the text a click produces, so a click travels the
-// same path a typed command takes.
+// A card is one message of the chat, PATCHed in place as the run
+// moves. The card of a session is the session's own: the run posts it
+// and the chat patches it, so a session owns one card and the chat
+// never posts a second one for it.
 
 package feishu
 
@@ -19,7 +17,16 @@ import (
 // Compile-time check: the adapter can publish a card.
 var _ channel.CardPublisher = (*Adapter)(nil)
 
-// PostCard publishes the run card in the chat.
+// postedCardKey names a card this adapter posted.
+//
+// A message id is unique inside its chat, not across the chats, so
+// the chat is part of the key.
+type postedCardKey struct {
+	chatID string
+	msgID  string
+}
+
+// PostCard publishes the card in the chat.
 //
 // The card is posted as a reply to the message the spec names, so it
 // hangs where the operator expects it. A card this adapter posted is
@@ -34,21 +41,29 @@ func (a *Adapter) PostCard(ctx context.Context, chatID string, spec channel.Card
 	if err != nil {
 		return "", err
 	}
-	a.rememberPostedCard(msgID)
+	a.rememberPostedCard(chatID, msgID)
 	return msgID, nil
+}
+
+// AdoptCard tells the adapter that the message with the given id is a
+// card of its own.
+//
+// The events that carry such an anchor are rendered onto that card
+// instead of onto a new one. A daemon that comes back has forgotten
+// the cards it posted, and the owner of the card tells it again.
+func (a *Adapter) AdoptCard(chatID, cardID string) {
+	a.rememberPostedCard(chatID, cardID)
 }
 
 // rememberPostedCard records a card this adapter posted.
 //
 // The card is the anchor of the session it belongs to: the receipt
 // for that anchor adopts the card rather than sending a new one.
-func (a *Adapter) rememberPostedCard(msgID string) {
+func (a *Adapter) rememberPostedCard(chatID, msgID string) {
 	if msgID == "" {
 		return
 	}
-	a.mu.Lock()
-	a.postedCards[msgID] = true
-	a.mu.Unlock()
+	a.postedCards.Add(postedCardKey{chatID: chatID, msgID: msgID}, true)
 }
 
 // adoptableCard returns the id of the card the anchor names, when the
@@ -56,13 +71,11 @@ func (a *Adapter) rememberPostedCard(msgID string) {
 //
 // An empty result means the anchor is an ordinary message: the
 // receipt for it is created and sent as it is.
-func (a *Adapter) adoptableCard(anchor string) string {
+func (a *Adapter) adoptableCard(chatID, anchor string) string {
 	if anchor == "" {
 		return ""
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.postedCards[anchor] {
+	if a.postedCards.Contains(postedCardKey{chatID: chatID, msgID: anchor}) {
 		return anchor
 	}
 	return ""

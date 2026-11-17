@@ -270,7 +270,7 @@ func TestPostCard_PublishesTheCardUnderItsAnchor(t *testing.T) {
 	if _, ok := card["header"]; ok {
 		t.Error("the card has a header: a session card has none")
 	}
-	if a.adoptableCard("om_card") != "om_card" {
+	if a.adoptableCard("oc_test", "om_card") != "om_card" {
 		t.Error("the posted card is not adoptable: a session would post a second card")
 	}
 }

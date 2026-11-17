@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/channel"
@@ -103,6 +104,47 @@ func placeholderLine(kind sessionKind, id, job string, round int) string {
 	}
 }
 
+// sessionCards returns every session of the run that owns a card.
+//
+// The cards are the anchors of the sessions: the chat patches them in
+// place, so a run that comes back has to tell the chat which of its
+// messages are cards.
+func (r *run) sessionCards() []*session {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]*session, 0, 4)
+	for _, sess := range []*session{r.runSession, r.roundSession, r.decisionSession} {
+		if sess != nil && sess.cardID != "" {
+			out = append(out, sess)
+		}
+	}
+	for _, sess := range r.roundSessions {
+		if sess == nil || sess.cardID == "" {
+			continue
+		}
+		if sess == r.roundSession {
+			continue
+		}
+		out = append(out, sess)
+	}
+	return out
+}
+
+// adoptSessionCards tells the chat which of the run's messages are its
+// cards.
+//
+// A daemon that comes back has forgotten the cards it posted, and the
+// receipt of a session would send a second card instead of patching
+// the one the run opened before the restart.
+func (s *Service) adoptSessionCards(r *run) {
+	if s.cfg.Operator == nil {
+		return
+	}
+	for _, sess := range r.sessionCards() {
+		s.cfg.Operator.AdoptCard(r.chatID, sess.cardID)
+	}
+}
+
 // openRunSession opens the session of the run.
 //
 // The card hangs under the message that started the run, so the
@@ -135,6 +177,7 @@ func (s *Service) openRoundSession(ctx context.Context, r *run, it iteration) {
 	}
 	sess := s.openSession(ctx, r, sessionRound, roundIdentity(it), it.job, it.round, replyTo)
 	r.setRoundSession(sess)
+	r.resetRoundUsage()
 	r.rememberRoundSession(it, sess)
 	s.publishInit(ctx, r, sess)
 	s.publishTasks(ctx, r, sess, r.roundTasks(it.job, it.round))
@@ -162,6 +205,7 @@ func (s *Service) openDecisionSession(ctx context.Context, r *run) {
 	r.decisionCount++
 	id := fmt.Sprintf("decision-%d", r.decisionCount)
 	r.mu.Unlock()
+	r.resetDecisionUsage()
 
 	sess := s.openSession(ctx, r, sessionDecision, id, "", 0, replyTo)
 	r.setDecisionSession(sess)
@@ -195,6 +239,7 @@ func (s *Service) switchRoundSession(ctx context.Context, r *run, it iteration) 
 	if sess, known := r.roundSessionOf(it); known && sess != nil {
 		// The round has a session of its own: the run goes back to it.
 		r.setRoundSession(sess)
+		r.resetRoundUsage()
 		s.publishTasks(ctx, r, sess, r.roundTasks(it.job, it.round))
 		return
 	}
@@ -569,6 +614,9 @@ func (r *run) sessionUsage(sess *session) llm.Usage {
 	}
 }
 
+// gitStatusTimeout is how long the repository facts may take to read.
+const gitStatusTimeout = 5 * time.Second
+
 // gitStatus returns the repository facts of the run's workspace.
 //
 // The facts ride in the footer's workspace line: where the run works
@@ -582,7 +630,11 @@ func (s *Service) gitStatus(r *run) *messages.GitStatus {
 	if s.cfg.Git == nil {
 		return status
 	}
-	out, _, err := s.cfg.Git.Run(context.WithoutCancel(r.ctx), dir, "status", "--porcelain", "--branch")
+	// The git call must not hold the run: a repository that hangs
+	// would hang the run with it.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.ctx), gitStatusTimeout)
+	defer cancel()
+	out, _, err := s.cfg.Git.Run(ctx, dir, "status", "--porcelain", "--branch")
 	if err != nil {
 		return status
 	}

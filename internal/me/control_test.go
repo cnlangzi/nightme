@@ -210,11 +210,8 @@ func TestAClickOnTheChoiceIsTheAnswerOfTheRun(t *testing.T) {
 	}
 	waitAsked(t, op, "Which step should run next?")
 
-	choices := op.EmittedOf(messages.OutChoice)
-	if len(choices) == 0 || choices[0].Choice == nil {
-		t.Fatalf("the run published no choice: %v", op.Emitted())
-	}
-	if !op.Pick(choices[0].Choice.RequestID, "0") {
+	choice := waitChoice(t, op)
+	if !op.Pick(choice.RequestID, "0") {
 		t.Fatal("the click did not reach the run")
 	}
 	waitRun(t, svc, "obs-1")
@@ -776,6 +773,23 @@ func TestResume_KeepsTheCardItOwns(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	if op.Posted() != posted {
 		t.Errorf("the resumed run published %d cards, want none", op.Posted()-posted)
+	}
+
+	// The chat has forgotten the cards the run opened: the run tells
+	// it again, so the chat patches them instead of sending a second
+	// card for the same session.
+	adopted := op.Adopted()
+	if len(adopted) == 0 {
+		t.Fatalf("the resumed run told the chat about no card: %v", adopted)
+	}
+	want := map[string]bool{}
+	for _, card := range op.Cards() {
+		want[card.ID] = true
+	}
+	for _, cardID := range adopted {
+		if !want[cardID] {
+			t.Errorf("the run told the chat about %q, want a card it owns", cardID)
+		}
 	}
 }
 

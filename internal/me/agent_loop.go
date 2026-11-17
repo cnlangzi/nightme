@@ -31,11 +31,10 @@ const (
 	sys1Escalate
 )
 
-// Who decided last. The names show up in the run's wake log.
+// Who decided. The names show up in the run's wake log.
 const (
-	decisionWorkflow = "the workflow"
-	decisionDecider  = "the decision model"
-	decisionChat     = "the chat model"
+	decisionDecider = "the decision model"
+	decisionChat    = "the chat model"
 )
 
 // drive runs one workflow to its end and reports how it ended.
@@ -156,7 +155,6 @@ func (s *Service) turn(ctx context.Context, r *run) (bool, error) {
 	}
 	if decision.Kind == wfe.DecisionRun {
 		if err := r.checkStep(decision.Step); err == nil {
-			r.setDecision(decisionWorkflow, "the plan says so")
 			r.setJudgment("")
 			r.setJudgmentStep("")
 			if err := s.runPlanStep(ctx, r, decision); err != nil {
@@ -383,7 +381,6 @@ func (s *Service) loopDeciderOnly(ctx context.Context, r *run) error {
 		}
 		if decision.Kind == wfe.DecisionRun {
 			if err := r.checkStep(decision.Step); err == nil {
-				r.setDecision(decisionWorkflow, "the plan says so")
 				r.setJudgment("")
 				r.setJudgmentStep("")
 				if err := s.runPlanStep(ctx, r, decision); err != nil {
@@ -419,7 +416,6 @@ func (s *Service) loopDeciderOnly(ctx context.Context, r *run) error {
 		if err != nil {
 			return err
 		}
-		r.setDecision(decisionDecider, decisionReason(dec))
 		r.recordWake(wakeRecord{
 			Who:   decisionDecider,
 			What:  decisionWhat(dec),
@@ -494,7 +490,6 @@ func (s *Service) system1(ctx context.Context, r *run) (sys1Action, error) {
 	if err != nil {
 		return sys1None, err
 	}
-	r.setDecision(decisionDecider, decisionReason(dec))
 	r.recordWake(wakeRecord{
 		Who:   decisionDecider,
 		What:  decisionWhat(dec),

@@ -745,10 +745,8 @@ func (s *Service) toolWait(ctx context.Context, r *run, call pendingCall) (stepR
 		d = maxWait
 	}
 
-	r.setWaiting(d.String())
 	s.refreshSessions(r)
 	defer func() {
-		r.setWaiting("")
 		s.refreshSessions(r)
 	}()
 

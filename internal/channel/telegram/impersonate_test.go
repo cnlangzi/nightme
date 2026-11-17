@@ -288,7 +288,7 @@ func TestPostCard_PublishesTheCardUnderItsAnchor(t *testing.T) {
 	if got, _ := send.Params["reply_to_message_id"].(int); got != 4242 {
 		t.Errorf("reply_to_message_id = %v, want 4242", send.Params["reply_to_message_id"])
 	}
-	if !a.adoptableCard(cardID) {
+	if !a.adoptableCard("100", cardID) {
 		t.Error("the posted card is not adoptable: a session would post a second card")
 	}
 }

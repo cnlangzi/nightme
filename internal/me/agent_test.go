@@ -76,6 +76,8 @@ type emittedMessage struct {
 	Heartbeat *messages.HeartbeatSnapshot
 	// Choice is the interactive choice the message carries.
 	Choice *messages.Choice
+	// Usage is the token usage the message carries.
+	Usage *messages.UsageInfo
 }
 
 // fakeOperator is a scripted chat.
@@ -119,6 +121,11 @@ type fakeOperator struct {
 	// roundSessions are the names of the round sessions the run
 	// opened.
 	roundSessions []string
+	// adopted are the cards the run told the chat about.
+	adopted []string
+	// choiceGen counts the handlers that were installed, so that the
+	// removal of a handler does not take a newer one with it.
+	choiceGen int
 }
 
 func newFakeOperator(steps ...fakeStep) *fakeOperator {
@@ -253,15 +260,34 @@ func (f *fakeOperator) Posted() int {
 	return f.postedCount()
 }
 
+// AdoptCard tells the chat that the message with the given id is the
+// card of a session.
+func (f *fakeOperator) AdoptCard(_ string, cardID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.adopted = append(f.adopted, cardID)
+}
+
+// Adopted returns the cards the run told the chat about.
+func (f *fakeOperator) Adopted() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.adopted...)
+}
+
 // OnChoice installs the handler that takes the answer of an
 // interactive choice back into the run.
 func (f *fakeOperator) OnChoice(_ string, handler func(requestID, option string) bool) func() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.choice = handler
+	f.choiceGen++
+	gen := f.choiceGen
 	return func() {
 		f.mu.Lock()
-		f.choice = nil
+		if f.choiceGen == gen {
+			f.choice = nil
+		}
 		f.mu.Unlock()
 	}
 }
@@ -294,6 +320,7 @@ func (f *fakeOperator) Emit(_ context.Context, _ string, msg messages.OutboundMe
 		TaskList:  msg.TaskList,
 		Heartbeat: msg.Heartbeat,
 		Choice:    msg.Choice,
+		Usage:     msg.Usage,
 	}
 	if msg.SessionResult != "" {
 		emitted.Result = msg.SessionResult
@@ -1980,6 +2007,25 @@ func waitSpoken(t *testing.T, op *fakeOperator, text string) {
 		time.Sleep(2 * time.Millisecond)
 	}
 	t.Fatalf("the run never said %q: %v", text, op.Spoken())
+}
+
+// waitChoice waits until the run published a choice card and returns
+// it.
+//
+// The question reaches the chat before the choice card does: the card
+// is the second half of the question.
+func waitChoice(t *testing.T, op *fakeOperator) *messages.Choice {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		choices := op.EmittedOf(messages.OutChoice)
+		if len(choices) > 0 && choices[len(choices)-1].Choice != nil {
+			return choices[len(choices)-1].Choice
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("the run published no choice: %v", op.Emitted())
+	return nil
 }
 
 // waitAsked waits until the run asked the given question.

@@ -101,6 +101,20 @@ func (o *operator) PostCard(ctx context.Context, chatID string, spec channel.Car
 	return pub.PostCard(ctx, chatID, spec)
 }
 
+// AdoptCard tells the chat that the message with the given id is the
+// card of a session.
+//
+// A daemon that comes back has forgotten the cards it posted: the run
+// that owns them tells it again, so the run goes on with the card it
+// opened before the restart.
+func (o *operator) AdoptCard(chatID, cardID string) {
+	pub, err := o.cardPublisherFor(chatID)
+	if err != nil {
+		return
+	}
+	pub.AdoptCard(chatID, cardID)
+}
+
 // OnChoice installs the handler that takes the answer of an
 // interactive choice back into the run.
 //
@@ -112,8 +126,7 @@ func (o *operator) OnChoice(chatID string, handler func(requestID, option string
 	if cs == nil {
 		return func() {}
 	}
-	cs.SetChoiceHandler(handler)
-	return func() { cs.ClearChoiceHandler() }
+	return cs.SetChoiceHandler(handler)
 }
 
 // Emit publishes an outbound message in the chat the run works in.

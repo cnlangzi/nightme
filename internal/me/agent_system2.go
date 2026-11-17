@@ -74,11 +74,11 @@ func (s *Service) system2(ctx context.Context, r *run) (bool, error) {
 	r.system2Decisions++
 	r.system2Usage.Add(resp.Usage)
 	r.mu.Unlock()
+	r.addUsage(resp.Usage)
 	// The turn is counted before the run's events leave it: a chat
 	// that hides them does not change what the run did.
 	r.countThink(s.now())
 	s.publishHeartbeat(ctx, r)
-	r.setDecision(decisionChat, "the chat model took the turn")
 	r.recordWake(wakeRecord{
 		Who:   decisionChat,
 		What:  toolCallsLine(resp.Message.ToolCalls()),
@@ -130,10 +130,8 @@ func (s *Service) askModel(ctx context.Context, r *run, req llm.Request) (*llm.R
 	turnCtx, cancelTurn := context.WithTimeout(execCtx, maxAgentTurn)
 	defer cancelTurn()
 
-	r.setWaiting("the chat model is thinking")
 	s.refreshSessions(r)
 	defer func() {
-		r.setWaiting("")
 		s.refreshSessions(r)
 	}()
 

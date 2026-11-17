@@ -142,6 +142,41 @@ func TestTheRoundCardHangsUnderTheRunCard(t *testing.T) {
 	}
 }
 
+// TestTheRunCardCarriesTheTokensOfTheRun — the run's card shows what
+// the run spent in its footer.
+func TestTheRunCardCarriesTheTokensOfTheRun(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	provider := &scriptedProvider{responses: []llm.Response{
+		{Message: toolCallMsg("c1", toolResume, map[string]any{}),
+			Usage: llm.Usage{InputTokens: 120, OutputTokens: 30}},
+	}}
+	svc, op := testService(t, dir, Config{Provider: provider})
+	op.steps = []fakeStep{pendingStep("still going"), okStep("committed")}
+
+	runID, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitRun(t, svc, "obs-1")
+
+	var found bool
+	for _, m := range op.Emitted() {
+		if m.SessionID != runID || m.Usage == nil {
+			continue
+		}
+		if m.Usage.InputTokens == 120 && m.Usage.OutputTokens == 30 {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the run's card carries no usage: %v", op.Emitted())
+	}
+}
+
 // TestTheChoiceIdsLineUpWithTheAnswers — a click on an option is the
 // answer of that option: the ids of the choice and the numbers of a
 // typed reply name the same list.

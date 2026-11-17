@@ -152,7 +152,7 @@ func (a *Adapter) appendRichTurn(
 	// The anchor may name a card this adapter posted: the turn then
 	// starts on that card, and the session owns one message.
 	if turn.messageID == 0 {
-		if a.adoptableCard(userMessageID) {
+		if a.adoptableCard(turn.chatID, userMessageID) {
 			turn.messageID = int64(userMessageID)
 		} else if err := a.sendRichTurnColdCreate(turn); err != nil {
 			a.logger.Warn("telegram: rich turn cold-create failed",
@@ -398,7 +398,7 @@ func (a *Adapter) setRichTurnTaskList(
 	turn.mu.Lock()
 	// The anchor may name a card this adapter posted: the turn then
 	// starts on that card, and the checklist lands on it.
-	if turn.messageID == 0 && a.adoptableCard(userMessageID) {
+	if turn.messageID == 0 && a.adoptableCard(turn.chatID, userMessageID) {
 		turn.messageID = int64(userMessageID)
 	}
 	if len(items) == 0 {

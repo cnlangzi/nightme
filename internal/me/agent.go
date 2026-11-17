@@ -207,6 +207,10 @@ type Operator interface {
 	// the message it became. The card is the session's own: the chat
 	// patches it in place when the session's events land.
 	PostCard(ctx context.Context, chatID string, spec channel.CardSpec) (string, error)
+	// AdoptCard tells the chat that the message with the given id is
+	// the card of a session: the events that carry it as their anchor
+	// are rendered onto that card instead of onto a new one.
+	AdoptCard(chatID, cardID string)
 	// Emit publishes an outbound message in the chat the run works in.
 	// The kind decides how the chat renders it: thinking becomes a
 	// 💭 card, a tool call a ● line, a reply a message.
@@ -715,7 +719,9 @@ func (s *Service) Show(ctx context.Context, chatID string) error {
 	if !ok {
 		return errors.New("this chat has no run in it")
 	}
-	s.openRunSession(ctx, r, "")
+	if !s.openRunSession(ctx, r, "") {
+		return errors.New("me: the chat cannot show the run's state")
+	}
 	return nil
 }
 

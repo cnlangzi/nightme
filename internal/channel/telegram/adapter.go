@@ -69,13 +69,14 @@ type Adapter struct {
 	// fallback when RichMode is off.
 	richTurns *richTurnsIndex
 
-	// postedCards holds the ids of the cards this adapter posted.
+	// postedCards holds the cards this adapter posted, keyed by the
+	// chat they live in and their message id.
 	//
 	// The personal agent posts the card of its session itself and
 	// addresses the session by that card's id: the rich turn for
 	// such an anchor starts on that card instead of cold-creating a
 	// message of its own. Guarded by a.mu.
-	postedCards map[int]bool
+	postedCards map[postedCardKey]bool
 
 	// draftStreamer (sendMessageDraft path) was retired after
 	// observing the animated draft locks the user's send button
@@ -143,7 +144,7 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 		limiter:     NewLimiter(nil, slog.Default()),
 		retry:       DefaultRetryConfig,
 		richTurns:   newRichTurnsIndex(defaultRichTurnCap),
-		postedCards: make(map[int]bool),
+		postedCards: make(map[postedCardKey]bool),
 	}
 	out.liveDraft = newLiveDraftManager(out.api, out.logger)
 	out.wireVoiceHandler()
@@ -218,7 +219,7 @@ func NewAdapterWithClient(cfg *config.Config, api apiClient, dataDir string) *Ad
 		limiter:     NewLimiter(nil, slog.Default()),
 		retry:       DefaultRetryConfig,
 		richTurns:   newRichTurnsIndex(defaultRichTurnCap),
-		postedCards: make(map[int]bool),
+		postedCards: make(map[postedCardKey]bool),
 		liveDraft:   newLiveDraftManager(api, slog.Default()),
 	}
 }

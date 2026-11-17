@@ -194,6 +194,14 @@ type CardPublisher interface {
 	// that carry the card's id as their anchor are rendered onto
 	// that card instead of onto a new one.
 	PostCard(ctx context.Context, chatID string, spec CardSpec) (string, error)
+	// AdoptCard tells the publisher that the message with the given id
+	// is a card of its own.
+	//
+	// The events that carry such an anchor are rendered onto that
+	// card instead of onto a new one. A daemon that comes back has
+	// forgotten the cards it posted, and the owner of a card tells it
+	// again.
+	AdoptCard(chatID, cardID string)
 }
 
 // Message is an alias for messages.InboundMessage. Kept for

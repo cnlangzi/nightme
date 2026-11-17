@@ -223,6 +223,9 @@ type ChatSession struct {
 	// handler is the run's own: it claims the answer and hands it to
 	// the run.
 	choiceHandler func(requestID, option string) bool
+	// choiceGen counts the handlers that were installed, so that the
+	// removal of a handler does not take a newer one with it.
+	choiceGen int
 
 	// Currently active AgentSession (pointer into pool). nil means
 	// no active session (ChatSession exists but no /cwd + /use yet).
@@ -964,18 +967,22 @@ func (cs *ChatSession) ToolsMode() ToolsMode {
 // asked under and the option that was picked. It reports whether it
 // took the answer: a handler that does not know the request leaves
 // the answer to the coding agent's own pending prompt.
-func (cs *ChatSession) SetChoiceHandler(handler func(requestID, option string) bool) {
+//
+// The returned function removes the handler again — unless a newer
+// handler took its place in the meantime.
+func (cs *ChatSession) SetChoiceHandler(handler func(requestID, option string) bool) func() {
 	cs.mu.Lock()
 	cs.choiceHandler = handler
+	cs.choiceGen++
+	gen := cs.choiceGen
 	cs.mu.Unlock()
-}
-
-// ClearChoiceHandler removes the handler that answers an interactive
-// choice in this chat.
-func (cs *ChatSession) ClearChoiceHandler() {
-	cs.mu.Lock()
-	cs.choiceHandler = nil
-	cs.mu.Unlock()
+	return func() {
+		cs.mu.Lock()
+		if cs.choiceGen == gen {
+			cs.choiceHandler = nil
+		}
+		cs.mu.Unlock()
+	}
 }
 
 // AnswerChoice hands the answer of an interactive choice to the

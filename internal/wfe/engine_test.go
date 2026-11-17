@@ -237,6 +237,138 @@ func TestDecide_AnEmptyConditionHolds(t *testing.T) {
 	}
 }
 
+// fixWorkflowYAML is the fix workflow the READMEs document: the wait
+// step backs off at the start of the round, and the steps that follow
+// the fix run only when the fix picked an issue.
+const fixWorkflowYAML = `
+title: ship
+jobs:
+  ship:
+    iterations: 0
+    steps:
+      - id: wait
+        wait: 5m
+      - id: fix
+        message: "/gtw fix * -y"
+      - id: commit
+        message: "/gtw commit"
+        if: ${{ steps.fix.outputs.data.issue }}
+      - id: pr
+        message: "/gtw pr"
+        if: ${{ steps.fix.outputs.data.issue }}
+`
+
+// fixWorkflowFinalWaitYAML is the same workflow with the wait step at
+// the end of the round, marked final: a round that ends early still
+// backs off.
+const fixWorkflowFinalWaitYAML = `
+title: ship
+jobs:
+  ship:
+    iterations: 0
+    steps:
+      - id: fix
+        message: "/gtw fix * -y"
+      - id: commit
+        message: "/gtw commit"
+        if: ${{ steps.fix.outputs.data.issue }}
+      - id: pr
+        message: "/gtw pr"
+        if: ${{ steps.fix.outputs.data.issue }}
+      - id: wait
+        wait: 5m
+        final: true
+`
+
+// TestDecide_TheEmptyQueueSkipsTheGuardedStepsAndStartsTheNextRound
+// pins the empty queue in the documented workflow: the guarded steps
+// do not run, the round is over, and the job starts its next round at
+// the wait step.
+func TestDecide_TheEmptyQueueSkipsTheGuardedStepsAndStartsTheNextRound(t *testing.T) {
+	wf := mustParse(t, fixWorkflowYAML)
+	state := newRunState(wf)
+	RecordStep(state, "ship", *StepByID(wf, "wait"), Outcome{Status: OutcomeOK}, false)
+	// The empty queue: a normal branch — no issue fact, no error.
+	RecordStep(state, "ship", *StepByID(wf, "fix"), Outcome{
+		Status:  OutcomeFailed,
+		Summary: "no assigned issue was eligible",
+		Data:    map[string]string{"reason": "no_candidate"},
+	}, false)
+
+	decision, err := Decide(state, wf)
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if decision.Kind != DecisionRun {
+		t.Fatalf("Kind = %v, want a run (the reason was %q)", decision.Kind, decision.Reason)
+	}
+	if decision.Step.ID != "wait" {
+		t.Errorf("Step.ID = %q, want wait — the next round starts at the back-off", decision.Step.ID)
+	}
+	if state.Rounds["ship"] != 2 {
+		t.Errorf("Rounds[ship] = %d, want 2 — the round is over and the next one began", state.Rounds["ship"])
+	}
+}
+
+// TestDecide_TheEmptyQueueLeavesTheWaitStepAsTheRestOfTheRound pins
+// the same empty queue in the workflow whose wait step ends the
+// round: the guarded steps are skipped, and the wait step is the only
+// one left in the round.
+func TestDecide_TheEmptyQueueLeavesTheWaitStepAsTheRestOfTheRound(t *testing.T) {
+	wf := mustParse(t, fixWorkflowFinalWaitYAML)
+	state := newRunState(wf)
+	RecordStep(state, "ship", *StepByID(wf, "fix"), Outcome{
+		Status:  OutcomeFailed,
+		Summary: "no assigned issue was eligible",
+		Data:    map[string]string{"reason": "no_candidate"},
+	}, false)
+
+	decision, err := Decide(state, wf)
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if decision.Kind != DecisionRun {
+		t.Fatalf("Kind = %v, want a run (the reason was %q)", decision.Kind, decision.Reason)
+	}
+	if decision.Step.ID != "wait" {
+		t.Errorf("Step.ID = %q, want wait — the guarded steps do not run", decision.Step.ID)
+	}
+	for _, id := range []string{"commit", "pr"} {
+		step, ok := stepState(state, id)
+		if !ok {
+			t.Fatalf("the step %q was not recorded", id)
+		}
+		if !step.Skipped {
+			t.Errorf("the step %q is not recorded as skipped", id)
+		}
+	}
+}
+
+// TestDecide_TheGuardedStepsRunWhenAnIssueWasPicked pins the other
+// side of the guard: a fix that picked an issue lets the steps that
+// follow it run.
+func TestDecide_TheGuardedStepsRunWhenAnIssueWasPicked(t *testing.T) {
+	wf := mustParse(t, fixWorkflowYAML)
+	state := newRunState(wf)
+	RecordStep(state, "ship", *StepByID(wf, "wait"), Outcome{Status: OutcomeOK}, false)
+	RecordStep(state, "ship", *StepByID(wf, "fix"), Outcome{
+		Status:  OutcomeOK,
+		Summary: "the work is ready",
+		Data:    map[string]string{"issue": "42"},
+	}, false)
+
+	decision, err := Decide(state, wf)
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if decision.Kind != DecisionRun {
+		t.Fatalf("Kind = %v, want a run (the reason was %q)", decision.Kind, decision.Reason)
+	}
+	if decision.Step.ID != "commit" {
+		t.Errorf("Step.ID = %q, want commit — the guard holds", decision.Step.ID)
+	}
+}
+
 func TestDecide_ContinueOnErrorKeepsTheChainGoing(t *testing.T) {
 	wf := mustParse(t, `
 title: resilient

@@ -287,15 +287,21 @@ merge 步骤只有两步:
 
 partial failure 路径:**不**升级为 merge 整体错误,失败组以 inline marker 出现在合并文本里;all-failed 才返回 first error wrapped with agent name。
 
-**每组 findings 解析(与 merge 分离)**:verdict 行要报"多少 findings、按 severity 怎么分布",digest 要列每一条 finding,两者都来自**每组自己的输出**(`agent.ParseReviewFindings`),不来自合并文本 —— 合并文本是写给 LLM 看的自由文本,解析它没有稳定边界。解析器认三种形态:
+**每组 findings 解析(与 merge 分离)**:verdict 行要报"多少 findings、按 severity 怎么分布",digest 要列每一条 finding,两者都来自**每组自己的输出**(`agent.ParseReviewFindings`),不来自合并文本 —— 合并文本是写给 LLM 看的自由文本,解析它没有稳定边界。解析器分层读,读到有 findings 的那一层就停:
 
-| 形态 | 例子 | 来源 |
-| --- | --- | --- |
-| 每 finding 一块 | `- path:` / `- start_line:` / `- end_line:` / `- category:` / `- severity:` / `- content:` | ocr delegate rules 的输出 schema |
-| 一行一条 | `- **critical**: <file>:<line> — <issue>` | builtin rubric 的输出格式 |
-| simplify 词表 | `blocking` / `warning` / `style` / `suggestion` | simplify lens 的 severity guidance |
+| 层 | 形态 | 例子 | 来源 |
+| --- | --- | --- | --- |
+| 1a | 每 finding 一块 | `- path:` / `- start_line:` / `- end_line:` / `- category:` / `- severity:` / `- content:` | ocr delegate rules 的输出 schema |
+| 1a | 一行一条 | `- **critical**: <file>:<line> — <issue>` | builtin rubric 的输出格式 |
+| 1b | 宽松块形态 | bullet 可有可无、字段名可用别名(`file` / `line` / `level` / `message` …)、`content` 可跨多行 | agent 偏离 prompt 时的写法 |
+| 1c | JSON | fenced ` ```json ` 块 / 裸数组 / 带 `findings` 数组的对象;容错尾逗号、单引号、未加引号的 key | agent 用结构化输出时的写法 |
+| 2 | schema 重发 | 上面几层都读不出来时,拿该组自己的 session 再问一次,要求按 schema 重发 findings | 只有该组 turn 成功且拿到 session id 才有 |
 
-severity 归一到 `critical` / `high` / `medium` / `low` / `unspecified`(`blocking`→critical,`warning`→high,`style`/`suggestion`→low,认不出的→unspecified)。**认不出形态的组报 unparsed**:它的原文照样走合并流到达 channel,findings 一个都不丢。
+1b 的宽松块形态有一条护栏:没有 bullet 的 `path:` 行,只有当下一非空行是字段行时才算块的开头,否则那行是散文 —— 一句话里的 "path: …" 不是 finding。字段别名一行一个义,行内第一个名字赢(`line` 优先于 `start_line`)。
+
+severity 归一到 `critical` / `high` / `medium` / `low` / `unspecified`(`blocking` / `blocker` / `fatal`→critical,`warning` / `major` / `severe`→high,`moderate`→medium,`style` / `suggestion` / `minor` / `nit` / `info`→low,认不出的→unspecified)。"没找到问题"的说法(`No findings.` / `No blockers; …`)算**已解析、零 findings**,不算 unparsed。
+
+**认不出形态的组报 unparsed**:它的原文照样走合并流到达 channel,findings 一个都不丢 —— 只是它的计数不进 verdict,verdict 行会标 `⚠️`。schema 重发(第 2 层)只喂计数:合并文档保留该组原文(它是主 agent 的输入,必须承载 agent 真正说过的话),重发那一轮不带 event sink(聚合器按 job 数终态,同一 job 的第二个终态会重复计数),一次 run 里每组最多重发一次。
 
 ### 2.5.5 sink 契约:三相状态机 + per-job 配对 + 分组合并流
 
@@ -355,9 +361,9 @@ severity 归一到 `critical` / `high` / `medium` / `low` / `unspecified`(`block
 
 review 在 channel 上只有这几样东西,顺序固定:
 
-1. **plan 行**(任何 group 产出之前):`🔍 review · codex · open-code-review · 4 subagents` + 每组一行(`N. 组名 · 文件摘要 — N files`)。plan 由 agent 层产出(`agent.ReviewPlanGroup` + `agent.WithReviewPlanObserver`,fan-out 开始前触发一次),由 command 层渲染。第一行的规则集由 plan 里有没有 builtin 组决定:有就是 nightme 自己的 rubric(`nightme code reviewer`),没有就是 ocr 的规则集(`open-code-review`)。组数说的是 **subagent** 数 —— 每组就是一个独立的 agent session。
+1. **plan 行**(任何 group 产出之前):`🔍 review · codex · open-code-review · 4 subagents` + 每组一行(`N. 组名 · 文件摘要 — N files`)。plan 由 agent 层产出(`agent.ReviewPlanGroup` + `agent.WithReviewPlanObserver`,fan-out 开始前触发一次),由 command 层渲染。第一行的规则集由 plan 里有没有 builtin 组决定:有就是 nightme 自己的 rubric(`nightme code reviewer`),没有就是 ocr 的规则集(`open-code-review`)。组数说的是 **subagent** 数 —— 每组就是一个独立的 agent session。续跑的 plan 行在每组后面标这次要做什么:`(resumed)`(重新打开该组自己的 session)或 `(re-run)`(开新 session 重发该组的 prompt);普通 review 不带标记。
 2. **每组的 findings**(thread):每组一条回复,正文前带 `[N] ` 编号(N = 该组在 plan 里的位置)。findings 走 **think kind**,所以落在 thread 而不是 card。一条回复放不下一组 findings 时按攒批边界切成连续几条,每条都带同一个编号。组开始产出时会先发一条开始提示(`▶ **[N] 组名** — N files`,同样是 think kind),thread 因此读起来是"一组一段"。
-3. **verdict 行**(fan-out 结束,card):subagent 数、findings 数、按 severity 的分布、失败组(点名并指向 `/review --continue`)、unparsed 组数。thread 末尾另有一条同样数字的收尾提示(`✅ **review done** · ...`,think kind),thread 以结果收尾。
+3. **verdict 行**(fan-out 结束,card):subagent 数、findings 数、按 severity 的分布、失败组(点名,并按失败组的状态标注)、unparsed 组数。失败组的名字后面带状态:跑到了 agent 的组没有后缀,没跑到 agent 的组带 `(never started)`,恢复机会已用完的组带 `(already retried)`。` → /review --continue` 的后缀**只在还有失败组可恢复时才出现** —— 承诺必须是续跑做得到的。thread 末尾另有一条同样数字的收尾提示(`✅ **review done** · ...`,think kind),thread 以结果收尾。
 4. **digest**(紧跟 verdict 行,同一条 card 消息):按 severity 分组的 markdown 表,每个 bucket 一张表,每条 finding 一行。表头是 bucket 名与它的条数(`**high** · 2`),列是 `path`(`path:line`)、`category`、`content` —— severity 是表头,不是列。`category` 列只在**本次 review 有 finding 报了 category** 时出现,没报的那一格写 `—`;content 超过 80 字符截断并加 `…`,行内的换行/制表符变成空格、`|` 变成 `/`,所以一行 finding 不会撑破列。
    digest 有 rune 预算:整条 verdict 消息(verdict 行 + digest)不超过 1900 字符 —— Discord 单条消息上限 2000 字符,**超限的消息会被整个丢掉**,连 verdict 行的计数一起丢,所以 digest 只能拿剩下的预算。放不下的 finding 不静默丢弃:表尾一行点名还剩几条(`… +2 more findings — see the thread (/think on).`),剩下的在 thread 里(`/think` 开着才看得到)。
 
@@ -395,7 +401,7 @@ sink 的 drain 在 verdict 之前排空:各组的 findings 还排在 drain gorou
 - **orphan ToolEnd**:配对 ToolStart 已先被 replay 转发过的罕见情况——orphan End 也 forward,chat 看到一条无 Start 的 End,可忽略。
 - **单组正文超过 2 KiB 且没有空行**:字节触发的切分只能从末尾切,这一条比 2 KiB 大(markdown 块不被劈开的代价);编号照旧在正文之前。
 - **一条 chunk 超过 2 KiB**:不劈开,按原样算一批(比阈值大的一条消息是单个事件的下限,不是可以切的东西)。
-- **组没产出任何正文**:该组没有可交付的 findings,verdict 行把它算成 unparsed 组(不是 failed);thread 里也不会有它的开始提示。
+- **组没产出任何正文**:该组没有可交付的 findings,verdict 行把它算成 unparsed 组(不是 failed);thread 里也不会有它的开始提示。正文有、但解析器读不出来时,该组先拿自己的 session 做一次 schema 重发(§2.5.4),仍读不出来才算 unparsed。
 - **一组 findings 装不下一条回复**:按攒批边界切成连续几条,每条都带同一个编号,读者知道它们属于同一组。
 - **`/think` 关着(默认)**:findings 与提示都被 think gate 丢掉,card 上仍有 plan 行、组清单、verdict 行和 digest;主 agent 那边照常拿到合并文本。
 - **digest 拿不到预算**:verdict 行本身就顶满了整条消息的预算(failed 组特别多时),digest 不出现,verdict 消息只剩 verdict 行 —— 与没有 digest 时一样。
@@ -424,12 +430,13 @@ sink 的 drain 在 verdict 之前排空:各组的 findings 还排在 drain gorou
 | **每组 findings 攒批 + 整组交付**(text 只按 2 KiB 切、thinking 按 2 KiB / 2 秒切、空行处切、`[N]` 行内编号、终态与 finalize 兜底交付) | `internal/agent/aggregate_sink.go::coalesce` / `::flushJob` / `::groupEvent` |
 | **每组的开始提示**(组名 + 文件数,think kind) | `internal/agent/aggregate_sink.go::announceGroup` |
 | **组的命名与文件摘要**(builtin / simplify / ocr 规则的 source + pattern,扩展名摘要) | `internal/agent/review_label.go::reviewGroupLabel` / `::reviewFileSummary` |
-| **每组 findings 解析**(block / 一行 / simplify 三形态 + severity 归一 + unparsed) | `internal/agent/review_findings.go::ParseReviewFindings` |
+| **每组 findings 解析**(block / 一行 / 宽松块形态 / JSON + severity 归一 + unparsed) | `internal/agent/review_findings.go::ParseReviewFindings` / `internal/agent/review_findings_json.go` |
+| **schema 重发**(读不出来的组再问一次,只喂计数) | `internal/agent/review_repair.go::reemitReviewFindings` |
 | **fan-out 的 plan 回调**(组清单,fan-out 前触发一次) | `internal/agent/agent.go::ReviewPlanGroup` / `::WithReviewPlanObserver` / `internal/agent/review_with_ocr.go::reviewPlan` |
 | **多 job 结果合并**(纯自然语言拼接 + 部分失败 inline marker,无解析/排序/去重/coverage 聚合) | `internal/agent/review_with_ocr.go::mergeRunResults` |
 | **review / 续跑共用的 fan-out 内核**(goroutine 编排 + sem cap + eventAggregator + merge) | `internal/agent/review_with_ocr.go::runReviewGroups` |
-| **续跑入口**(并发 resume N 个 session、发同一段文本、合并成同样的 group 格式) | `internal/agent/review_continue.go::ContinueReviewJobs` |
-| **每个 group 的 outcome 观察者**(pattern / source / files / session id / error / 解析后的 report) | `internal/agent/agent.go::ReviewJob` / `::WithReviewJobObserver` |
+| **续跑入口**(并发 resume 或 re-run N 个 group、合并成同样的 group 格式) | `internal/agent/review_continue.go::ContinueReviewJobs` |
+| **每个 group 的 outcome 观察者**(pattern / source / files / session id / prompt / error / 解析后的 report) | `internal/agent/agent.go::ReviewJob` / `::WithReviewJobObserver` |
 | **失败 turn 保留 session id**(进程没了但 agent 侧会话还在,session id 是重新打开它的钥匙) | `internal/agent/run_session.go::drainSessionEvents` / `::ResumeSession` |
 | **plan 行 / verdict 行渲染**(card 上的两行) | `internal/command/review/render.go::renderPlanLine` / `::reviewVerdict` |
 | **digest 渲染**(按 severity 分组的 markdown 表,接在 verdict 行后面,走同一条消息;带 rune 预算,超出的部分在表尾点名) | `internal/command/review/render.go::reviewDigest` / `::digestTables` / `::digestFindings` / `::sanitizeCell` / `::truncateRunes` |
@@ -531,9 +538,20 @@ func ReviewDispatch(ctx context.Context, s Starter, cfg StartConfig, opts ...Run
 review 是 fan-out:每个 rule group 一个独立 agent session(§2.5)。某个 group 的
 session 挂了,其它 group 的 findings 照常汇入,合并文本里该 group 标成
 `### Group: pattern <p> — failed: <err>`。`/review --continue` 把这次 review 捡
-起来:**只**续跑那些失败的 group,给它们的 session 发一个字面量 `continue`,让
-agent 接着上次的上下文把活干完;已经完成的 group 不再问一遍(否则 findings 会重复
+起来:**只**续跑那些失败的 group;已经完成的 group 不再问一遍(否则 findings 会重复
 出现在输出里)。
+
+失败分两种,续跑也分两种:
+
+- **跑到了 agent 的 group**(有 session id)—— **续跑**:重新打开它自己的 session,
+  发一个字面量 `continue`,让 agent 接着上次的上下文把活干完。
+- **没跑到 agent 的 group**(turn 在 Ready 之前就死了,没有 session id)—— **重跑**:
+  开一个新 session,把它当初那份 group prompt 原样发过去。没有可续的会话,就重跑
+  一遍 —— 没有这一条,verdict 行承诺的 `--review --continue` 就是一句兑现不了的
+  空话。
+
+重跑的 prompt 是**原样重放**,不是按当前工作区重新拼的:一次续跑覆盖的是一次快照,
+续跑的组 talk about 的正是 review 当初看到的那棵树。
 
 ### 续跑需要的状态
 
@@ -542,6 +560,7 @@ agent 接着上次的上下文把活干完;已经完成的 group 不再问一遍
 | runner | 上一次 review 跑的那个 agent | session 属于某个 agent,换不了,所以 `--continue` 不走四级 runner 解析 |
 | workspace | 上一次 review 的 workspace | session 属于那个 workspace;换 cwd 会让 agent 看错文件 |
 | 每个 group 的 session id | group 自己的 agent session | 失败的 group 也必须能捞回 session id,否则没有可续跑的 session |
+| 每个 group 的 prompt | group 自己那份组装好的 prompt | 没跑到 agent 的 group 重跑时要发的东西;没有它就无从重跑 |
 
 第三项是唯一需要动底层的地方:`drainSessionEvents` 的失败路径原本返回空
 `RunResult`,session id 只留在 error 的 audit 后缀里。失败路径现在返回带上
@@ -558,17 +577,18 @@ fresh-session 的 review 和续跑共用同一套 fan-out 内核
 (`internal/agent/review_with_ocr.go::runReviewGroups`):goroutine 编排、sem 上限
 4、eventAggregator(单 outer lifecycle)、`mergeRunResults`(同样的
 `### Group: pattern <p> — files: …` 段落 + inline `failed:` 标记)。两者的差别只有
-"每个 group 跑什么":review 跑新 session + group prompt,续跑跑 resume 的 session +
-`continue`。
+"每个 group 跑什么":review 跑新 session + group prompt,续跑按组的状态跑 resume 的
+session + `continue`,或跑新 session + 该组存下来的 prompt。
 
 `agent.ContinueReviewJobs` 是续跑的入口:传入若干 `ReviewJob`(pattern / source /
-files / session id)和要发的文本,并发 resume,事件走同一个 aggregator,回复按同样的
-group 格式合并。续跑的组在 thread 里的交付方式与 review 完全一致:每组一条
+files / session id / prompt)和要发的文本,并发跑,事件走同一个 aggregator,回复按同样
+的 group 格式合并。续跑的组在 thread 里的交付方式与 review 完全一致:每组一条
 findings + 开始提示,末尾一条收尾提示;card 上同样是 plan 行 + verdict 行与其下的
 digest。组名沿用
 review 时那一个 —— `source` 与 pattern 一起构成组的身份,所以 record 里存着 source。
 编号是**重排**的:续跑的 plan 只含续跑的那几组,所以它们从 1 重新编号(编号是组在
-**这次 run** 的 plan 里的位置,不是跨 run 的稳定 id)。
+**这次 run** 的 plan 里的位置,不是跨 run 的稳定 id)。续跑的 plan 行另外标出这次对
+每组做什么:`(resumed)` 或 `(re-run)`。
 
 ### 续跑状态放在哪
 
@@ -579,8 +599,11 @@ workspace / 每个 group 的 outcome)。factory 每个 daemon 进程建一次,�
 不需要持久化,一个 chat 也绝不续跑另一个 chat 的 review。
 
 每个 group 的 outcome 由 fan-out 内核通过 `agent.WithReviewJobObserver` 回调交给
-命令层:pattern、source、files、session id、error。失败 group 的 session id 一并保留
-—— 那正是下一轮 `--continue` 要用的。
+命令层:pattern、source、files、session id、prompt、error。失败 group 的 session id
+一并保留 —— 那正是下一轮 `--continue` 要用的;prompt 也一并保留 —— 那是重跑时要发的
+东西。每个失败的 group 都会在 daemon log 里留一条 WARN(`/review: group failed` /
+`/review --continue: group failed`),带组名、runner、错误和该组有没有跑到 agent;
+失败原因太长,只进 log,不进 verdict 行。
 
 记录什么时候被替换:
 
@@ -598,11 +621,13 @@ workspace / 每个 group 的 outcome)。factory 每个 daemon 进程建一次,�
 | 本 chat 没有 review 记录 | `❌ no review to continue — run /review first` |
 | 本 chat 有 review 在跑 | `❌ a review is already running in this chat` |
 | 上一次 review 每个 group 都完成了 | `ℹ️ the last review completed — nothing to continue` |
-| 失败的 group 根本没到 agent(没有 session id) | `ℹ️ the unfinished group never reached the agent — nothing to resume` |
-| 失败的 group 已经续跑过一次(还是失败) | `ℹ️ the unfinished group was already retried — nothing to resume` |
+| 失败的 group 跑到了 agent(有 session id) | 续跑:重开该组自己的 session,发 `continue` |
+| 失败的 group 没跑到 agent,但存下了 prompt | 重跑:开新 session,原样重发该组的 prompt |
+| 失败的 group 既没有 session id 也没有 prompt | `ℹ️ the unfinished group has no session and no prompt to re-run — nothing to resume` |
+| 失败的 group 已经恢复过一次(还是失败) | `ℹ️ the unfinished group was already retried — nothing to resume` |
 | 记录的 agent 已经不在注册表里 | `❌ unknown agent "<name>"` |
 | bridge 拒绝 resume(`ErrResumeUnhealthy`) | 该 group 在合并文本里 inline 标 failed(所有 group 都失败时:只发 `❌ /review continue failed (agent=<name>): …`) |
-| 续跑又失败 | 合并文本里 inline 标 failed;该 group 的 resume 机会已用完,再 `--continue` 无事可做 |
+| 续跑又失败 | 合并文本里 inline 标 failed;该 group 的恢复机会已用完,再 `--continue` 无事可做 |
 | 所有 group 都失败 | 整个续跑失败,只发失败回复,不注入 findings |
 
 `--continue` 与 `--agent` / `--global` / `--unset` 互斥:那三个 flag 选的是"这次
@@ -627,7 +652,8 @@ workspace / 每个 group 的 outcome)。factory 每个 daemon 进程建一次,�
 7. Handle 立即返回 `Consumed=true`。readpump 继续,dispatch worker 释放,用户可继续发消息。findings 异步到达;全局设置的回执(写入确认 / 写失败告警 / 降级告警)随本条命令的 reply 一起发出,先于 findings 到达。
 
 `--continue` 走另一条路:查本 chat 的 review 记录 → 本 chat 有 review 在跑就拒绝 →
-挑出"失败且有 session id"的 group → 用记录里的 agent(不走四级 runner 解析)和记录里
+挑出"失败且还有恢复机会"的 group(有 session id 的续跑,只有 prompt 的重跑)→ 用记录里
+的 agent(不走四级 runner 解析)和记录里
 的 workspace 跑 `agent.ContinueReviewJobs` → 合并文本照常包 `FormatReviewMessage`、
 注入 AS;channel 上是这次续跑的 plan 行 + thread 里每组一条 findings + verdict 行与其下的
 digest(§2.7)。续跑结束后,记录换成这次续跑的结果,所以第二次

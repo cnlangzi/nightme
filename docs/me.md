@@ -70,7 +70,8 @@ type Outcome struct {
 | `sha_range` | commit 区间（`<before>..HEAD`） |
 | `commits` | commit 条数（`/gtw commit` 与 `/gtw push` 给出确切条数；`/gtw sync` 的卡片只列前 10 条，所以它不给这个键） |
 | `commit_log` | commit 列表（每行一条 `<sha> <subject>`）——`/gtw commit` 报告"工作早就提交过了"时给出 |
-| `changes` | `/gtw fix` 判完后，agent 留下的改动总数 |
+| `changes` | `/gtw fix` 判完后，agent 留下的改动总数（改动的路径数 + commit 数） |
+| `paths` | 其中改动了的路径数（同一个路径只算一次） |
 | `staged` | 其中已经进了 index 的 |
 | `unstaged` | 其中改了但没进 index 的 |
 | `untracked` | 其中 git 没跟踪的 |
@@ -299,7 +300,7 @@ chatsession: message settled chat_id=… message_id=… status=… summary=…
 | `unknown_subcommand` | `/gtw` 的子命令不存在 | `/gtw` | 异常 |
 | `error` | 其它失败 | 全部 | 异常 |
 
-† `nothing_to_commit` 与 `nothing_to_push` 两个码都可能落在任一类：命令先看主信号（工作区没改动 / 没有 commit 被推上去），主信号说"什么都没发生"时再查一次（本地日志相对初始 head 的差异 / 本地 head 与远端 tip 的对比）。查到"活其实早就干完了"就是正常分支（没有 `error`），查到"确实还有东西没做"就是异常（带 `error`）。程序读 `Data["error"]` 在不在就知道是哪一类。
+† `nothing_to_commit` 与 `nothing_to_push` 两个码都可能落在任一类：命令先看主信号（工作区没改动 / 没有 commit 被推上去），主信号说"什么都没发生"时再查一次（本地日志相对初始 head 的差异 / 远端还没有的 commit 条数）。查到"活其实早就干完了"就是正常分支（没有 `error`），查到"确实还有东西没做"就是异常（带 `error`）。程序读 `Data["error"]` 在不在就知道是哪一类。
 
 ---
 

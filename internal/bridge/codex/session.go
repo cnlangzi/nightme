@@ -42,13 +42,14 @@ import (
 
 // ─── constants & exported vars ───
 
-// handshakeTimeout bounds the initialize round-trip. The codex
-// app-server's cold start on this host has been observed to reach 88s
-// (range 1-88s). A handshake that gives up first takes the session
-// with it: the session id never arrives, so nothing downstream can
-// recover the session. 180s leaves headroom over the slowest observed
-// cold start; a warm app-server answers in well under a second, so the
-// extra budget costs nothing.
+// handshakeTimeout bounds the initialize handshake — the initialize
+// request plus the thread/start (or thread/resume) that follows it.
+// The codex app-server's cold start on this host reaches 88s (range
+// 1-88s), and a handshake that gives up first takes the session with
+// it: a fresh session never gets its thread id, so nothing downstream
+// can recover it (a respawn keeps the id it already had). 180s leaves
+// headroom over the slowest observed cold start; a warm app-server
+// answers in well under a second, so the extra budget costs nothing.
 const handshakeTimeout = 180 * time.Second
 
 // closeDrainTimeout bounds the time Close() will wait for the lifecycle

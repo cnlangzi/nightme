@@ -397,7 +397,7 @@ jobs:
 `)
 
 	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"step_id": "commit"})},
+		{Message: toolCallMsg("c1", toolResume, map[string]any{})},
 		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "failed", "summary": "the chat is gone"})},
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider})

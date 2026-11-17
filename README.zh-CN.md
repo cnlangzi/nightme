@@ -640,7 +640,7 @@ agent 在每个 step 上有一个预算：一个数字，每个 step、每一轮
 
 除了每个 step 的预算之外没有别的预算：一次运行结束于计划跑完、agent 调用 `finish`，或者你发 `/me stop`，或者 daemon 关掉。chat 模型一轮没有工具调用的回答、provider 调用失败，都不结束运行——运行会再问一次，界限由预算给出。
 
-agent 在判断点上给出一个指令：`run_step`（跑 workflow 的一个 step）、`ntm_<command>`（以你的身份跑一条 nightme 命令）、`agent`（问 owner 的思考为什么这一步失败）、`instruct`（给 chat 发一段自由指令）、`answer_choice`（回答 chat 在等的一个提示）、`ask_human`（问你）、`repo_status`（读分支和工作树）、`wait`（等一会儿再看——后台还有活在跑时）、`end_round`（结束当前 job 的这一轮：没跑的 step 记成跳过，job 的 final step 顶上，然后开下一轮）、`finish`（结束运行）。`run_step` 接一个 step 的 id：就绪的那一个，或者这一轮已经跑过的那个。运行不允许做的事会以错误回来，agent 自己纠正。
+agent 在判断点上给出一个指令：`resume`（修好之后把坏掉的那一步再跑一遍）、`next`（这一步已经做完了，让引擎继续往下走）、`ntm_<command>`（以你的身份跑一条 nightme 命令）、`agent`（问 owner 的思考为什么这一步失败）、`instruct`（给 chat 发一段自由指令）、`answer_choice`（回答 chat 在等的一个提示）、`ask_human`（问你）、`repo_status`（读分支和工作树）、`wait`（等一会儿再看——后台还有活在跑时）、`end_round`（结束当前 job 的这一轮：没跑的 step 记成跳过，job 的 final step 顶上，然后开下一轮）、`finish`（结束运行）。`resume` 和 `next` 不接 step：运行知道判断点说的是哪一步，下一步跑什么由引擎决定。运行不允许做的事会以错误回来，agent 自己纠正。
 
 ### 结果模型
 

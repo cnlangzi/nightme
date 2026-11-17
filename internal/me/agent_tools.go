@@ -17,7 +17,15 @@ import (
 
 // The tools the chat model may call.
 const (
-	// toolRunStep runs one of the workflow's steps.
+	// toolResume runs the step that broke again.
+	toolResume = "resume"
+	// toolNext says the step is already done.
+	toolNext = "next"
+	// toolRunStep names the step the decision model ran.
+	//
+	// The chat model has no such tool: it repairs a gap and says which
+	// way to go. The decision model's action is recorded under this
+	// name, so the conversation the chat model reads stays consistent.
 	toolRunStep = "run_step"
 	// toolInstruct sends a free-form prompt to the coding agent.
 	toolInstruct = "instruct"
@@ -91,9 +99,14 @@ type stepResult struct {
 func (s *Service) toolCatalogue(r *run) []llm.Tool {
 	tools := []llm.Tool{
 		{
-			Name:        toolRunStep,
-			Description: "Run a step of the workflow as the workflow wrote it: the step that is ready, or one that already ran this round.",
-			Schema:      json.RawMessage(`{"type":"object","properties":{"step_id":{"type":"string","description":"the id of the step"}},"required":["step_id"],"additionalProperties":false}`),
+			Name:        toolResume,
+			Description: "Run the step that broke again, after you repaired the gap.",
+			Schema:      json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`),
+		},
+		{
+			Name:        toolNext,
+			Description: "Say the step is already done and let the engine continue with the workflow.",
+			Schema:      json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`),
 		},
 	}
 	tools = append(tools, commandTools(r)...)
@@ -285,8 +298,10 @@ func (s *Service) runPendingCalls(ctx context.Context, r *run) error {
 // execTool runs one tool call.
 func (s *Service) execTool(ctx context.Context, r *run, call pendingCall) (stepResult, error) {
 	switch call.Name {
-	case toolRunStep:
-		return s.toolRunStep(ctx, r, call)
+	case toolResume:
+		return s.toolResume(ctx, r, call)
+	case toolNext:
+		return s.toolNext(ctx, r, call)
 	case toolInstruct:
 		return s.toolInstruct(ctx, r, call)
 	case toolAgent:
@@ -311,22 +326,22 @@ func (s *Service) execTool(ctx context.Context, r *run, call pendingCall) (stepR
 	}
 }
 
-// toolRunStep runs a step of the workflow.
+// toolResume runs the step that broke again.
 //
-// The step must be the ready one, or one that already ran this round:
-// a step further down the line would leave the steps before it out of
-// order.
-func (s *Service) toolRunStep(ctx context.Context, r *run, call pendingCall) (stepResult, error) {
-	stepID, err := callArgString(call, "step_id")
-	if err != nil {
-		return stepResult{}, err
+// The step is the one the judgment is about: the run knows it, so the
+// agent names nothing. Its budget is checked like the budget of any
+// other action, and the step's verdict comes back.
+func (s *Service) toolResume(ctx context.Context, r *run, _ pendingCall) (stepResult, error) {
+	stepID := r.budgetStep()
+	if stepID == "" {
+		return stepResult{}, toolErrorf("the run is not on a step")
 	}
 	step, ok := r.stepByID(stepID)
 	if !ok {
 		return stepResult{}, toolErrorf("the step %q is not part of this workflow", stepID)
 	}
 	if !r.runnableStep(step.ID) {
-		return stepResult{}, toolErrorf("the step %q is not ready: run the step that is ready", step.ID)
+		return stepResult{}, toolErrorf("the step %q is not ready: the engine decides what runs next", step.ID)
 	}
 	if err := r.checkStep(step); err != nil {
 		return stepResult{}, toolErrorf("%s", err.Error())
@@ -352,6 +367,37 @@ func (s *Service) toolRunStep(ctx context.Context, r *run, call pendingCall) (st
 		Summary:    verdict.Outcome.Summary,
 		Data:       verdict.Outcome.Data,
 		Transcript: verdict.Transcript,
+	}, nil
+}
+
+// toolNext records the step as done and hands the control back.
+//
+// The step is the one the run is on: the judgment names it, and the
+// run knows it. The facts the step produced are kept, the summary says
+// the agent decided the step was done, and the engine plans the next
+// step.
+func (s *Service) toolNext(ctx context.Context, r *run, _ pendingCall) (stepResult, error) {
+	stepID := r.budgetStep()
+	if stepID == "" {
+		return stepResult{}, toolErrorf("the run is not on a step")
+	}
+	step, ok := r.stepByID(stepID)
+	if !ok {
+		return stepResult{}, toolErrorf("the run is not on a step")
+	}
+	out, ok := r.stepOutcome(stepID)
+	if !ok {
+		return stepResult{}, toolErrorf("the run is not on a step")
+	}
+	job := wfe.JobOf(r.workflow, step.ID)
+	done := doneOutcome(out)
+	r.recordStep(job, step, done)
+	s.persist(r)
+	s.updateCard(r)
+	return stepResult{
+		Status:  string(done.Status),
+		Summary: done.Summary,
+		Data:    done.Data,
 	}, nil
 }
 

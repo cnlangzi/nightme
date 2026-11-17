@@ -373,66 +373,85 @@ jobs:
 	}
 }
 
-// ── the step tool ─────────────────────────────────────────────────
+// ── the resume and next tools ─────────────────────────────────────
 
-// TestRunStepTool_OnlyTheReadyStepRuns — a step further down the line
-// is refused: the steps of a job run in order.
-func TestRunStepTool_OnlyTheReadyStepRuns(t *testing.T) {
+// TestTheTools_TheCatalogueHasNoRunStep — the agent names no step: it
+// repairs a gap and says which way to go.
+func TestTheTools_TheCatalogueHasNoRunStep(t *testing.T) {
 	dir := t.TempDir()
-	writeWorkflow(t, dir, "two", `title: two
-jobs:
-  build:
-    steps:
-      - id: commit
-        message: /gtw commit
-      - id: tag
-        message: /gtw tag
-  publish:
-    needs: [build]
-    steps:
-      - id: push
-        message: /gtw push
-`)
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+	svc, _ := testService(t, dir, Config{})
+	r := testRun(t, svc, "one")
 
-	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"step_id": "push"})},
-		{Message: toolCallMsg("c2", toolRunStep, map[string]any{"step_id": "nope"})},
-		{Message: toolCallMsg("c3", toolFinish, map[string]any{"status": "failed", "summary": "stopped"})},
-	}}
-	svc, op := testService(t, dir, Config{Provider: provider})
-	op.steps = []fakeStep{pendingStep("still going"), okStep("committed")}
-
-	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "two", ChatID: "obs-1", Cwd: "/tmp/work",
-	}); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	waitRun(t, svc, "obs-1")
-
-	// The step further down the line never ran.
-	for _, cmd := range op.Sent() {
-		if cmd == "/gtw push" {
-			t.Fatalf("the run skipped a step: %v", op.Sent())
+	tools := svc.toolCatalogue(r)
+	for _, name := range []string{toolResume, toolNext} {
+		if _, ok := toolNamed(tools, name); !ok {
+			t.Errorf("the tools do not carry %q", name)
 		}
 	}
-	req := provider.Request(1)
-	if !messagesContain(req, "not ready") {
-		t.Errorf("the refusal did not come back to the model: %v", req.Messages)
-	}
-	req = provider.Request(2)
-	if !messagesContain(req, "not part of this workflow") {
-		t.Errorf("the unknown step did not come back to the model: %v", req.Messages)
+	if _, ok := toolNamed(tools, toolRunStep); ok {
+		t.Error("the tools still carry the tool that names a step")
 	}
 }
 
-// TestRunStepTool_AStepThatRanMayRunAgain — a step that already ran
+// TestResumeTool_TheStepTheJudgmentIsAboutRunsAgain — the agent names
+// no step: the run knows the one the judgment is about.
+func TestResumeTool_TheStepTheJudgmentIsAboutRunsAgain(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "two", `title: two
+jobs:
+  main:
+    steps:
+      - id: commit
+        message: /gtw commit
+      - id: push
+        message: /gtw push
+`)
+	svc, op := testService(t, dir, Config{})
+	r := testRun(t, svc, "two")
+
+	commit, ok := r.stepByID("commit")
+	if !ok {
+		t.Fatal("the workflow has no commit step")
+	}
+	r.setJudgment(`the previous step "commit" ended as "failed"`)
+	r.setJudgmentStep("commit")
+	r.recordStep("main", commit, wfe.Outcome{
+		Status:  wfe.OutcomeFailed,
+		Summary: "the commit failed",
+		Data:    map[string]string{"error": "the commit failed"},
+	})
+
+	res, err := svc.toolResume(context.Background(), r, pendingCall{})
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if res.Status != string(wfe.OutcomeOK) {
+		t.Errorf("the verdict is %q, want the one of the step", res.Status)
+	}
+	// The step the judgment was about ran again.
+	ran := false
+	for _, cmd := range op.Sent() {
+		switch cmd {
+		case "/gtw commit":
+			ran = true
+		case "/gtw push":
+			t.Fatalf("the run went on to the next step: %v", op.Sent())
+		}
+	}
+	if !ran {
+		t.Fatalf("the chat got %v, want the step that broke", op.Sent())
+	}
+}
+
+// TestResumeTool_AStepThatRanMayRunAgain — a step that already ran
 // this round may run again: a transient failure is worth a retry.
-func TestRunStepTool_AStepThatRanMayRunAgain(t *testing.T) {
+func TestResumeTool_AStepThatRanMayRunAgain(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
 	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"step_id": "commit"})},
+		{Message: toolCallMsg("c1", toolResume, map[string]any{})},
 		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "done", "summary": "committed"})},
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider})
@@ -456,9 +475,9 @@ func TestRunStepTool_AStepThatRanMayRunAgain(t *testing.T) {
 	}
 }
 
-// TestRunStepTool_AShellAndAWaitStepRun — a step is a step, whatever
-// its kind is.
-func TestRunStepTool_AShellAndAWaitStepRun(t *testing.T) {
+// TestResumeTool_AShellStepRunsAgain — a step is a step, whatever its
+// kind is: the shell step runs again when the agent resumes it.
+func TestResumeTool_AShellStepRunsAgain(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "mixed", `title: mixed
 jobs:
@@ -466,27 +485,143 @@ jobs:
     steps:
       - id: build
         shell: make build
-      - id: rest
-        wait: 1ms
 `)
 
-	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"step_id": "build"})},
-		{Message: toolCallMsg("c2", toolRunStep, map[string]any{"step_id": "rest"})},
-		{Message: toolCallMsg("c3", toolFinish, map[string]any{"status": "done", "summary": "built"})},
-	}}
-	shell := &recordingShell{}
-	svc, _ := testService(t, dir, Config{Provider: provider, Shell: shell})
+	shell := &fakeShell{}
+	svc, _ := testService(t, dir, Config{Shell: shell})
+	r := testRun(t, svc, "mixed")
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "mixed", ChatID: "obs-1", Cwd: "/tmp/work",
-	}); err != nil {
-		t.Fatalf("start: %v", err)
+	build, ok := r.stepByID("build")
+	if !ok {
+		t.Fatal("the workflow has no build step")
 	}
-	waitRun(t, svc, "obs-1")
+	r.setJudgmentStep("build")
+	r.recordStep("main", build, wfe.Outcome{
+		Status:  wfe.OutcomeFailed,
+		Summary: "the build failed",
+		Data:    map[string]string{"error": "the build failed"},
+	})
 
-	if !shell.Called() {
-		t.Error("the shell step never ran")
+	if _, err := svc.toolResume(context.Background(), r, pendingCall{}); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if len(shell.calls) != 1 {
+		t.Fatalf("the shell ran %d times, want once", len(shell.calls))
+	}
+}
+
+// TestResumeTool_TheBudgetOfTheStepIsChecked — a step that spent its
+// budget does not run again: the agent repairs differently or asks.
+func TestResumeTool_TheBudgetOfTheStepIsChecked(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+	svc, _ := testService(t, dir, Config{MaxJudgments: 1})
+	r := testRun(t, svc, "one")
+
+	commit, ok := r.stepByID("commit")
+	if !ok {
+		t.Fatal("the workflow has no commit step")
+	}
+	r.setJudgmentStep("commit")
+	r.recordStep("main", commit, wfe.Outcome{
+		Status:  wfe.OutcomeFailed,
+		Summary: "the commit failed",
+		Data:    map[string]string{"error": "the commit failed"},
+	})
+	r.record(wfe.ActionKindRun, "/gtw commit", "commit", wfe.Outcome{
+		Status:  wfe.OutcomeFailed,
+		Summary: "the commit failed",
+	})
+
+	_, err := svc.toolResume(context.Background(), r, pendingCall{})
+	if err == nil || !isToolError(err) {
+		t.Fatalf("err = %v, want a tool error the model can correct", err)
+	}
+	if !strings.Contains(err.Error(), "limit is 1") {
+		t.Errorf("the refusal does not say why: %v", err)
+	}
+}
+
+// TestNextTool_TheStepIsRecordedAsDone — the agent says the step is
+// done: the engine continues with the workflow.
+func TestNextTool_TheStepIsRecordedAsDone(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "two", `title: two
+jobs:
+  main:
+    steps:
+      - id: commit
+        message: /gtw commit
+      - id: push
+        message: /gtw push
+`)
+	svc, _ := testService(t, dir, Config{})
+	r := testRun(t, svc, "two")
+
+	commit, ok := r.stepByID("commit")
+	if !ok {
+		t.Fatal("the workflow has no commit step")
+	}
+	r.setJudgment(`the previous step "commit" ended as "failed"`)
+	r.setJudgmentStep("commit")
+	r.recordStep("main", commit, wfe.Outcome{
+		Status:  wfe.OutcomeFailed,
+		Summary: "the commit failed",
+		Data:    map[string]string{"error": "the commit failed", "reason": "conflict"},
+	})
+
+	res, err := svc.toolNext(context.Background(), r, pendingCall{})
+	if err != nil {
+		t.Fatalf("next: %v", err)
+	}
+	if res.Status != string(wfe.OutcomeOK) {
+		t.Errorf("the verdict is %q, want the one of the completed step", res.Status)
+	}
+
+	out, ok := stepOutcome(r, "commit")
+	if !ok {
+		t.Fatal("the commit step has no outcome")
+	}
+	if out.Status != wfe.OutcomeOK {
+		t.Errorf("the step ended as %q, want the completed one", out.Status)
+	}
+	if out.Summary != doneSummary {
+		t.Errorf("the summary is %q, want %q", out.Summary, doneSummary)
+	}
+	if out.Data["reason"] != "conflict" {
+		t.Errorf("the facts are %v, want the ones the step produced", out.Data)
+	}
+	if _, ok := out.Data[wfe.OutcomeKeyError]; ok {
+		t.Errorf("the error is still on the step: %v", out.Data)
+	}
+
+	// The engine goes on with the workflow.
+	decision, err := wfe.Decide(r.state, r.workflow)
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	if decision.Kind != wfe.DecisionRun {
+		t.Fatalf("the engine decided %v, want the next step to run", decision.Kind)
+	}
+	if decision.Step.ID != "push" {
+		t.Errorf("the engine runs %q, want push", decision.Step.ID)
+	}
+}
+
+// TestNextTool_ARunThatIsNotOnAStepIsRefused — there is no step to
+// declare done: the tool says so.
+func TestNextTool_ARunThatIsNotOnAStepIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+	svc, _ := testService(t, dir, Config{})
+	r := testRun(t, svc, "one")
+
+	_, err := svc.toolNext(context.Background(), r, pendingCall{})
+	if err == nil || !isToolError(err) {
+		t.Fatalf("err = %v, want a tool error the model can correct", err)
+	}
+	if !strings.Contains(err.Error(), "not on a step") {
+		t.Errorf("the refusal does not say why: %v", err)
 	}
 }
 
@@ -651,6 +786,35 @@ func TestTheBrainTool_TheSessionIsOpenedOnceAndReused(t *testing.T) {
 	}
 }
 
+// TestTheBrainTool_TheOpeningTurnAnswersTheStepThatFailed — the
+// session is asked about the step that broke: it does not go looking
+// for work.
+func TestTheBrainTool_TheOpeningTurnAnswersTheStepThatFailed(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	opener := &fakeOpener{reply: "the cause"}
+	svc, _ := testService(t, dir, Config{AgentOpener: opener})
+	r := testRunWith(t, svc, "one", nil, "claude")
+
+	if _, err := svc.askBrain(context.Background(), r, "why did the commit fail?"); err != nil {
+		t.Fatalf("ask: %v", err)
+	}
+
+	asked := opener.sessions[0].Asked()
+	if len(asked) == 0 {
+		t.Fatal("the session was not asked")
+	}
+	if strings.Contains(asked[0], "issue tracker") {
+		t.Errorf("the opening turn sends the session to the issue tracker: %q", asked[0])
+	}
+	for _, want := range []string{"the step that failed", "do not look for new work"} {
+		if !strings.Contains(asked[0], want) {
+			t.Errorf("the opening turn does not carry %q: %q", want, asked[0])
+		}
+	}
+}
+
 // TestTheBrainTool_TheSessionFollowsTheDirectory — a run that moves
 // to another directory opens another session.
 func TestTheBrainTool_TheSessionFollowsTheDirectory(t *testing.T) {
@@ -741,7 +905,7 @@ jobs:
 	opener := &fakeOpener{reply: "the cause"}
 	provider := &scriptedProvider{responses: []llm.Response{
 		{Message: toolCallMsg("c1", toolAgent, map[string]any{"task": "why?"})},
-		{Message: toolCallMsg("c2", toolRunStep, map[string]any{"step_id": "commit"})},
+		{Message: toolCallMsg("c2", toolResume, map[string]any{})},
 		{Message: toolCallMsg("c3", toolAgent, map[string]any{"task": "why again?"})},
 		{Message: toolCallMsg("c4", toolFinish, map[string]any{"status": "failed", "summary": "stopped"})},
 	}}
@@ -767,27 +931,6 @@ type fixedCwd struct {
 
 // Cwd implements CwdProvider.
 func (c *fixedCwd) Cwd(string) string { return c.dir }
-
-// recordingShell remembers the shell commands it ran.
-type recordingShell struct {
-	mu    sync.Mutex
-	calls int
-}
-
-// RunShell implements ShellRunner.
-func (s *recordingShell) RunShell(context.Context, wfe.ShellSpec) (*wfe.ShellResult, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.calls++
-	return &wfe.ShellResult{ExitCode: 0}, nil
-}
-
-// Called reports whether the shell ran.
-func (s *recordingShell) Called() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.calls > 0
-}
 
 // ── the round and the wait ─────────────────────────────────────────
 

@@ -234,7 +234,7 @@ func (s *Service) brainOpening(r *run, task string) string {
 	b.WriteString(". You are in ")
 	b.WriteString(cwd)
 	b.WriteString(".\n")
-	b.WriteString("For each question, investigate — read code, run tests and read-only commands, check git and the issue tracker — find the cause, and recommend what to do next, with your reasons. Do not modify files, commit or push: the owner's avatar carries out every change.\n")
+	b.WriteString("For each question, investigate — read code, run tests and read-only commands, check git — find the cause, and recommend what to do next, with your reasons. Answer the question about the step that failed: do not look for new work. Do not modify files, commit or push: the owner's hands carry out every change.\n")
 	b.WriteString(task)
 	return b.String()
 }

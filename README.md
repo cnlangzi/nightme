@@ -767,17 +767,19 @@ send `/me stop`, or when the daemon shuts down. A turn of the chat model that
 produced no tool call and a provider that failed end nothing: the run asks
 again, and the budget is what bounds it.
 
-The agent answers a judgment point with a directive: `run_step` (run a step of
-the workflow), `ntm_<command>` (run a nightme command as you), `agent` (ask the
-owner's thinking why a step failed), `instruct` (send a free-form instruction to
-the chat), `answer_choice` (answer a prompt the work agent is waiting for),
-`ask_human` (ask you), `repo_status` (read the branch and the tree), `wait`
-(wait before it looks again, for work that is still running in the background),
-`end_round` (end the round of the job the run is on — the steps of the round
-that did not run are skipped, the job's final step runs and the job starts its
-next round), or `finish` (end the run). `run_step` takes the id of a step: the
-one that is ready, or one that already ran this round. Anything the run is not
-allowed to do comes back as an error it can correct.
+The agent answers a judgment point with a directive: `resume` (run the step that
+broke again, after the gap was repaired), `next` (say the step is already done
+and let the engine continue), `ntm_<command>` (run a nightme command as you),
+`agent` (ask the owner's thinking why a step failed), `instruct` (send a
+free-form instruction to the chat), `answer_choice` (answer a prompt the work
+agent is waiting for), `ask_human` (ask you), `repo_status` (read the branch and
+the tree), `wait` (wait before it looks again, for work that is still running in
+the background), `end_round` (end the round of the job the run is on — the steps
+of the round that did not run are skipped, the job's final step runs and the job
+starts its next round), or `finish` (end the run). `resume` and `next` name no
+step: the run knows the one the judgment is about, and the engine decides what
+runs next. Anything the run is not allowed to do comes back as an error it can
+correct.
 
 ### The outcome model
 

@@ -215,13 +215,7 @@ func (s *Service) renderRepair(r *run) string {
 func (s *Service) renderDirectives(r *run) string {
 	var b strings.Builder
 	b.WriteString("\ndirectives now:\n")
-	for _, id := range r.readyStepIDs() {
-		fmt.Fprintf(&b, "  run_step(%q)\n", id)
-	}
 	for _, tool := range s.toolCatalogue(r) {
-		if tool.Name == toolRunStep {
-			continue
-		}
 		fmt.Fprintf(&b, "  %s\n", tool.Name)
 	}
 	return b.String()
@@ -275,11 +269,13 @@ func (s *Service) renderRoundSteps(r *run) (string, map[string]wfe.StepState) {
 	return b.String(), rendered
 }
 
-// writeOutcomeFacts renders what a step produced: its summary, the
-// facts it reported and the hint its reason carries.
+// writeOutcomeFacts renders what a step produced: its summary, its
+// error, the facts it reported and the hint its reason carries.
 //
 // The facts are the evidence the deciding agent needs: why a step
-// ended the way it did is rarely in the status alone.
+// ended the way it did is rarely in the status alone. The error comes
+// first among them: its presence is what tells the agent that the
+// step broke, and a normal result carries none.
 func writeOutcomeFacts(b *strings.Builder, st wfe.StepState) {
 	if st.ID == "" || st.Pending {
 		return
@@ -288,7 +284,13 @@ func writeOutcomeFacts(b *strings.Builder, st wfe.StepState) {
 	if out.Summary != "" {
 		fmt.Fprintf(b, "    %s\n", out.Summary)
 	}
+	if desc := out.Data[wfe.OutcomeKeyError]; desc != "" {
+		fmt.Fprintf(b, "    error: %s\n", desc)
+	}
 	for _, k := range sortedNames(out.Data) {
+		if k == wfe.OutcomeKeyError {
+			continue
+		}
 		fmt.Fprintf(b, "    %s: %s\n", k, out.Data[k])
 	}
 	if hint := reasonHint(out.Data["reason"]); hint != "" {

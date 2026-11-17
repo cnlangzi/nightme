@@ -55,8 +55,8 @@ func eventsRun(t *testing.T, provider *scriptedProvider) (*Service, *fakeOperato
 // into the chat as a thinking card of their own.
 func TestRun_PublishesNoThinkingForTheChatModelsMessage(t *testing.T) {
 	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: textAndToolCall("the commit comes first", "c1", toolRunStep,
-			map[string]any{"step_id": "commit"})},
+		{Message: textAndToolCall("the commit comes first", "c1", toolResume,
+			map[string]any{})},
 	}}
 	_, op := eventsRun(t, provider)
 
@@ -73,8 +73,8 @@ func TestRun_PublishesNoThinkingForTheChatModelsMessage(t *testing.T) {
 // the tags.
 func TestRun_PublishesTheReplyWithoutTheInlineTags(t *testing.T) {
 	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: textAndToolCall("<think>the commit comes first</think>", "c1", toolRunStep,
-			map[string]any{"step_id": "commit"})},
+		{Message: textAndToolCall("<think>the commit comes first</think>", "c1", toolResume,
+			map[string]any{})},
 	}}
 	_, op := eventsRun(t, provider)
 
@@ -100,7 +100,7 @@ func lastBody(op *fakeOperator) string {
 // the result comes back when it settles.
 func TestRun_PublishesItsToolCalls(t *testing.T) {
 	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"step_id": "commit"})},
+		{Message: toolCallMsg("c1", toolResume, map[string]any{})},
 	}}
 	_, op := eventsRun(t, provider)
 
@@ -111,11 +111,11 @@ func TestRun_PublishesItsToolCalls(t *testing.T) {
 	if starts[0].Tool == nil {
 		t.Fatal("the tool call carries no payload")
 	}
-	if starts[0].Tool.Name != toolRunStep {
-		t.Fatalf("the tool = %q, want %q", starts[0].Tool.Name, toolRunStep)
+	if starts[0].Tool.Name != toolResume {
+		t.Fatalf("the tool = %q, want %q", starts[0].Tool.Name, toolResume)
 	}
-	if starts[0].Tool.Args != "commit" {
-		t.Fatalf("the argument line = %q, want the step id", starts[0].Tool.Args)
+	if starts[0].Tool.Args != "" {
+		t.Fatalf("the argument line = %q, want none", starts[0].Tool.Args)
 	}
 	if starts[0].Tool.Summary != "" {
 		t.Fatalf("the call carries a result before it ran: %q", starts[0].Tool.Summary)
@@ -128,8 +128,8 @@ func TestRun_PublishesItsToolCalls(t *testing.T) {
 	if ends[0].Tool == nil {
 		t.Fatal("the tool result carries no payload")
 	}
-	if ends[0].Tool.Name != toolRunStep {
-		t.Fatalf("the tool = %q, want %q", ends[0].Tool.Name, toolRunStep)
+	if ends[0].Tool.Name != toolResume {
+		t.Fatalf("the tool = %q, want %q", ends[0].Tool.Name, toolResume)
 	}
 	if ends[0].Tool.Summary != "committed" {
 		t.Fatalf("the result = %q, want the summary of the step", ends[0].Tool.Summary)
@@ -144,8 +144,8 @@ func TestRun_PublishesItsToolCalls(t *testing.T) {
 // as one that went through.
 func TestRun_PublishesTheToolResultOfAFailedCall(t *testing.T) {
 	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"step_id": "nowhere"})},
-		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "failed", "summary": "the step does not exist"})},
+		{Message: toolCallMsg("c1", toolWait, map[string]any{"duration": "soon"})},
+		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "failed", "summary": "the duration is not a duration"})},
 	}}
 	_, op := eventsRun(t, provider)
 
@@ -171,7 +171,7 @@ func TestRun_PublishesNoResultForACallThatIsStillRunning(t *testing.T) {
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
 	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"step_id": "commit"})},
+		{Message: toolCallMsg("c1", toolResume, map[string]any{})},
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider})
 	// The first command does not settle: the run reaches a judgment
@@ -238,7 +238,7 @@ func TestRun_KeepsTheCallAndItsResultUnderOneCard(t *testing.T) {
 		t.Fatal("the chat has no run")
 	}
 
-	call := pendingCall{ID: "c1", Name: toolRunStep, Args: json.RawMessage(`{"step_id":"commit"}`)}
+	call := pendingCall{ID: "c1", Name: toolResume, Args: json.RawMessage(`{}`)}
 	anchor := r.cardMessageID()
 	svc.publishToolStart(context.Background(), r, anchor, call)
 	// The run moves to another iteration while the call runs.
@@ -261,7 +261,7 @@ func TestRun_KeepsTheCallAndItsResultUnderOneCard(t *testing.T) {
 // the run's log.
 func TestRun_AnchorsItsEventsToTheCard(t *testing.T) {
 	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: textAndToolCall("thinking", "c1", toolRunStep, map[string]any{"step_id": "commit"})},
+		{Message: textAndToolCall("thinking", "c1", toolResume, map[string]any{})},
 	}}
 	_, op := eventsRun(t, provider)
 
@@ -284,7 +284,7 @@ func TestRun_AnchorsItsEventsToTheCard(t *testing.T) {
 // TestRun_PublishesNoReply — the run's voice is its card.
 func TestRun_PublishesNoReply(t *testing.T) {
 	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: textAndToolCall("thinking", "c1", toolRunStep, map[string]any{"step_id": "commit"})},
+		{Message: textAndToolCall("thinking", "c1", toolResume, map[string]any{})},
 	}}
 	_, op := eventsRun(t, provider)
 
@@ -297,8 +297,8 @@ func TestRun_PublishesNoReply(t *testing.T) {
 // words.
 func TestCard_CarriesNoNote(t *testing.T) {
 	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: textAndToolCall("the commit comes first", "c1", toolRunStep,
-			map[string]any{"step_id": "commit"})},
+		{Message: textAndToolCall("the commit comes first", "c1", toolResume,
+			map[string]any{})},
 	}}
 	_, op := eventsRun(t, provider)
 
@@ -378,7 +378,7 @@ func TestRun_CountsItsActivityEvenWhenTheChatHidesIt(t *testing.T) {
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
 	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"step_id": "commit"})},
+		{Message: toolCallMsg("c1", toolResume, map[string]any{})},
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider})
 	// The chat hides everything the run publishes.
@@ -579,7 +579,7 @@ func waitCards(t *testing.T, op *fakeOperator, n int) {
 // and the thread under it is the run's log.
 func TestRun_HangsItsToolCallsUnderTheCard(t *testing.T) {
 	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"step_id": "commit"})},
+		{Message: toolCallMsg("c1", toolResume, map[string]any{})},
 	}}
 	_, op := eventsRun(t, provider)
 

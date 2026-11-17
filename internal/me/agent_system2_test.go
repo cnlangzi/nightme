@@ -33,7 +33,7 @@ func TestSystem2_ToolDispatch(t *testing.T) {
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
 	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"step_id": "commit"}),
+		{Message: toolCallMsg("c1", toolResume, map[string]any{}),
 			Usage: llm.Usage{InputTokens: 10, OutputTokens: 5}},
 		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "done", "summary": "committed"})},
 	}}
@@ -70,7 +70,7 @@ func TestStatus_ReportsTheRunWhileItWorks(t *testing.T) {
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
 	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"step_id": "commit"})},
+		{Message: toolCallMsg("c1", toolResume, map[string]any{})},
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider})
 	// The command never settles: the run waits for it.
@@ -136,8 +136,8 @@ func TestSystem2_PolicyViolationComesBackAsAToolError(t *testing.T) {
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
 	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"step_id": "sync"})},
-		{Message: toolCallMsg("c2", toolRunStep, map[string]any{"step_id": "commit"})},
+		{Message: toolCallMsg("c1", toolFinish, map[string]any{"status": "maybe", "summary": "committed"})},
+		{Message: toolCallMsg("c2", toolResume, map[string]any{})},
 		{Message: toolCallMsg("c3", toolFinish, map[string]any{"status": "done", "summary": "committed"})},
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider})
@@ -162,7 +162,7 @@ func TestSystem2_PolicyViolationComesBackAsAToolError(t *testing.T) {
 			continue
 		}
 		for _, p := range m.Parts {
-			if p.IsError && strings.Contains(p.Text, "not part of this workflow") {
+			if p.IsError && strings.Contains(p.Text, "status must be") {
 				found = true
 			}
 		}
@@ -177,7 +177,7 @@ func TestSystem2_ANoopStepIsNotAToolError(t *testing.T) {
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
 	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"step_id": "commit"})},
+		{Message: toolCallMsg("c1", toolResume, map[string]any{})},
 		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "done", "summary": "nothing to commit"})},
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider})
@@ -197,7 +197,7 @@ func TestSystem2_ANoopStepIsNotAToolError(t *testing.T) {
 	if provider.Calls() == 0 {
 		t.Fatal("the chat model never took a turn")
 	}
-	part := toolResultPart(t, r.conversation(), toolRunStep)
+	part := toolResultPart(t, r.conversation(), toolResume)
 	if part.IsError {
 		t.Fatalf("a noop outcome came back as a tool error: %s", part.Text)
 	}
@@ -335,7 +335,7 @@ jobs:
 `)
 
 	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"step_id": "commit"})},
+		{Message: toolCallMsg("c1", toolResume, map[string]any{})},
 	}}
 	op := newFakeOperator(
 		pendingStep("still going"),
@@ -381,14 +381,14 @@ jobs:
 func TestCompact_OldToolResultsKeepOnlyTheOutcome(t *testing.T) {
 	msgs := []llm.Message{
 		{Role: llm.RoleUser, Parts: []llm.Part{{Type: llm.PartText, Text: "go"}}},
-		{Role: llm.RoleAssistant, Parts: []llm.Part{{Type: llm.PartToolCall, ToolCallID: "c1", ToolName: toolRunStep}}},
+		{Role: llm.RoleAssistant, Parts: []llm.Part{{Type: llm.PartToolCall, ToolCallID: "c1", ToolName: toolResume}}},
 		{Role: llm.RoleTool, Parts: []llm.Part{{
-			Type: llm.PartToolResult, ToolCallID: "c1", ToolName: toolRunStep,
+			Type: llm.PartToolResult, ToolCallID: "c1", ToolName: toolResume,
 			Text: `{"status":"ok","summary":"committed","transcript":"a long transcript"}`,
 		}}},
-		{Role: llm.RoleAssistant, Parts: []llm.Part{{Type: llm.PartToolCall, ToolCallID: "c2", ToolName: toolRunStep}}},
+		{Role: llm.RoleAssistant, Parts: []llm.Part{{Type: llm.PartToolCall, ToolCallID: "c2", ToolName: toolResume}}},
 		{Role: llm.RoleTool, Parts: []llm.Part{{
-			Type: llm.PartToolResult, ToolCallID: "c2", ToolName: toolRunStep,
+			Type: llm.PartToolResult, ToolCallID: "c2", ToolName: toolResume,
 			Text: `{"status":"ok","summary":"pushed","transcript":"another transcript"}`,
 		}}},
 	}
@@ -421,7 +421,7 @@ jobs:
 
 	provider := &scriptedProvider{responses: []llm.Response{
 		{Message: toolCallMsg("c1", toolAskHuman, map[string]any{"question": "Which branch?"})},
-		{Message: toolCallMsg("c2", toolRunStep, map[string]any{"step_id": "commit"})},
+		{Message: toolCallMsg("c2", toolResume, map[string]any{})},
 		{Message: toolCallMsg("c3", toolFinish, map[string]any{"status": "done", "summary": "committed"})},
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider})
@@ -458,7 +458,7 @@ func TestRestart_ResumesASuspendedRun(t *testing.T) {
 
 	provider := &scriptedProvider{responses: []llm.Response{
 		{Message: toolCallMsg("c1", toolAskHuman, map[string]any{"question": "Which branch?"})},
-		{Message: toolCallMsg("c2", toolRunStep, map[string]any{"step_id": "commit"})},
+		{Message: toolCallMsg("c2", toolResume, map[string]any{})},
 		{Message: toolCallMsg("c3", toolFinish, map[string]any{"status": "done", "summary": "committed"})},
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider})
@@ -487,7 +487,7 @@ func TestShutdown_KeepsTheRunForTheNextDaemon(t *testing.T) {
 
 	provider := &scriptedProvider{responses: []llm.Response{
 		{Message: toolCallMsg("c1", toolAskHuman, map[string]any{"question": "Which branch?"})},
-		{Message: toolCallMsg("c2", toolRunStep, map[string]any{"step_id": "commit"})},
+		{Message: toolCallMsg("c2", toolResume, map[string]any{})},
 		{Message: toolCallMsg("c3", toolFinish, map[string]any{"status": "done", "summary": "committed"})},
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider})
@@ -515,7 +515,7 @@ func TestRestart_ResolvesAnInFlightCommandAsInterrupted(t *testing.T) {
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
 	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolRunStep, map[string]any{"step_id": "commit"})},
+		{Message: toolCallMsg("c1", toolResume, map[string]any{})},
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider})
 	// The command never settles: the run waits for it.
@@ -660,7 +660,7 @@ func TestIntegration_TheWorkflowRunsEndToEnd(t *testing.T) {
 
 	provider := &scriptedProvider{responses: []llm.Response{
 		{Message: toolCallMsg("c1", "ntm_review", map[string]any{"args": "-c"})},
-		{Message: toolCallMsg("c2", toolRunStep, map[string]any{"step_id": "review"})},
+		{Message: toolCallMsg("c2", toolResume, map[string]any{})},
 	}}
 	op := newFakeOperator(
 		okStep("fixed"),

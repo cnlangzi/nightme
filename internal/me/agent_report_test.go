@@ -219,8 +219,137 @@ jobs:
 	}
 }
 
+// TestThePrompt_TheEngineIsTheMaster — the agent repairs a gap and
+// gives the control back: it is the engine's helper, not the owner's
+// avatar.
+func TestThePrompt_TheEngineIsTheMaster(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+	svc, _ := testService(t, dir, Config{})
+	r := testRun(t, svc, "one")
+
+	prompt := svc.systemPrompt(r)
+	for _, want := range []string{
+		"You are the owner's hands inside a workflow",
+		"The engine is the master",
+		"it comes to you only when a step raised an exception",
+		"get the flow going again and then give the control back",
+		"the engine decides what runs next, not you",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("the prompt does not carry %q:\n%s", want, prompt)
+		}
+	}
+	if strings.Contains(prompt, "owner's avatar") {
+		t.Errorf("the prompt still makes the agent the owner's avatar:\n%s", prompt)
+	}
+}
+
+// TestThePrompt_ANormalResultIsNothingToRepair — an outcome without
+// an error is a normal result: the workflow goes on by itself.
+func TestThePrompt_ANormalResultIsNothingToRepair(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+	svc, _ := testService(t, dir, Config{})
+	r := testRun(t, svc, "one")
+
+	prompt := svc.systemPrompt(r)
+	for _, want := range []string{
+		"An outcome that carries no error is a normal result",
+		"the workflow moves on by itself",
+		"there is nothing there for you to repair",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("the prompt does not carry %q:\n%s", want, prompt)
+		}
+	}
+}
+
+// TestThePrompt_TheNoteOfAStepWins — the note is the owner's
+// instruction for the step.
+func TestThePrompt_TheNoteOfAStepWins(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+	svc, _ := testService(t, dir, Config{})
+	r := testRun(t, svc, "one")
+
+	prompt := svc.systemPrompt(r)
+	for _, want := range []string{
+		"A step's note is the owner's instruction for that step",
+		"The note wins over the ready set and over your own judgment",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("the prompt does not carry %q:\n%s", want, prompt)
+		}
+	}
+}
+
+// TestThePrompt_TheWayOfWorking — the prompt says what to do, in the
+// order to do it.
+func TestThePrompt_TheWayOfWorking(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+	svc, _ := testService(t, dir, Config{})
+	r := testRun(t, svc, "one")
+
+	prompt := svc.systemPrompt(r)
+	steps := []string{
+		"1. Read the report",
+		"2. Find the cause of the error",
+		"3. Repair the gap with the smallest action",
+		"4. Then tell the engine which way to go",
+		"5. Give the control back",
+	}
+	at := -1
+	for _, step := range steps {
+		i := strings.Index(prompt, step)
+		if i < 0 {
+			t.Fatalf("the prompt does not carry %q:\n%s", step, prompt)
+		}
+		if i < at {
+			t.Errorf("the prompt carries %q out of order", step)
+		}
+		at = i
+	}
+	for _, want := range []string{"resume — the gap is repaired", "next — the step is already done"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("the prompt does not carry %q:\n%s", want, prompt)
+		}
+	}
+}
+
+// TestThePrompt_TheThingsThatAreNotTheAgents — the prompt names what
+// the agent may not do.
+func TestThePrompt_TheThingsThatAreNotTheAgents(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+	svc, _ := testService(t, dir, Config{})
+	r := testRun(t, svc, "one")
+
+	prompt := svc.systemPrompt(r)
+	for _, want := range []string{
+		"What is not yours to do",
+		"You do not decide what the work is",
+		"You do not make the workflow's input arrive",
+		"do not look for work",
+		"do not file or label issues",
+		"do not hunt for defects to fix",
+		"do not open pull requests the workflow did not ask for",
+		"You do not widen the workflow",
+		"you do not ask the owner to widen it",
+		"You do not repair a step that did not break",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("the prompt does not carry %q:\n%s", want, prompt)
+		}
+	}
+}
+
 // TestThePrompt_HidesTheEngine — the model reads the work, not the
 // machinery that runs it.
+//
+// The ready set is the one name of the engine the prompt carries: the
+// step's note wins over it, and the model has to know that.
 func TestThePrompt_HidesTheEngine(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
@@ -229,7 +358,7 @@ func TestThePrompt_HidesTheEngine(t *testing.T) {
 
 	prompt := svc.systemPrompt(r)
 	for _, unwanted := range []string{
-		"judgment point", "fast path", "ready set", "System 1", "System 2",
+		"judgment point", "fast path", "System 1", "System 2",
 		"decider", "policy", "token", "429",
 	} {
 		if strings.Contains(prompt, unwanted) {
@@ -248,7 +377,8 @@ func TestThePrompt_WordsTheTools(t *testing.T) {
 
 	prompt := svc.systemPrompt(r)
 	for _, want := range []string{
-		"run_step(step_id)",
+		"resume()",
+		"next()",
 		"ntm_* run nightme commands, as the owner",
 		"instruct(text)",
 		"repo_status",
@@ -262,10 +392,14 @@ func TestThePrompt_WordsTheTools(t *testing.T) {
 			t.Errorf("the prompt does not carry %q:\n%s", want, prompt)
 		}
 	}
+	if strings.Contains(prompt, "run_step") {
+		t.Errorf("the prompt still offers the tool that names a step:\n%s", prompt)
+	}
 }
 
 // TestThePrompt_TeachesTheNewJudgmentPoints — the prompt names the
-// two situations a step that produced nothing can mean.
+// two situations that are still the agent's when a step produced
+// nothing.
 func TestThePrompt_TeachesTheNewJudgmentPoints(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
@@ -275,10 +409,11 @@ func TestThePrompt_TeachesTheNewJudgmentPoints(t *testing.T) {
 	prompt := svc.systemPrompt(r)
 	for _, want := range []string{
 		"When a step produced nothing",
-		"Nothing is left to do",
-		"Call end_round",
+		"An outcome without an error is a normal result",
+		"there is nothing to repair",
+		"verdict nobody reported",
 		"still running in the background",
-		"Call wait, then look again",
+		"call wait, then look again",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("the prompt does not carry %q:\n%s", want, prompt)
@@ -629,6 +764,45 @@ func TestARunKeepsItsEvidence(t *testing.T) {
 	} {
 		if !strings.Contains(report, want) {
 			t.Errorf("the restored situation does not carry %q:\n%s", want, report)
+		}
+	}
+}
+
+// TestRenderSituation_ShowsTheErrorOfAnOutcome — the report says what
+// broke: the error tells the agent that the step needs a repair.
+func TestRenderSituation_ShowsTheErrorOfAnOutcome(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", `title: one
+jobs:
+  main:
+    steps:
+      - id: commit
+        message: /gtw commit
+`)
+	svc, _ := testService(t, dir, Config{})
+	r := testRun(t, svc, "one")
+	r.setJudgment(`the previous step "commit" ended as "failed"`)
+
+	commit, ok := r.stepByID("commit")
+	if !ok {
+		t.Fatal("the workflow has no commit step")
+	}
+	r.recordStep("main", commit, wfe.Outcome{
+		Status:  wfe.OutcomeFailed,
+		Summary: "the commit failed",
+		Data: map[string]string{
+			"error":  "the working tree has unresolved conflicts",
+			"reason": "conflict",
+		},
+	})
+
+	report := svc.renderSituation(context.Background(), r)
+	for _, want := range []string{
+		"error: the working tree has unresolved conflicts",
+		"the working tree has unresolved conflicts",
+	} {
+		if !strings.Contains(report, want) {
+			t.Errorf("the situation does not carry %q:\n%s", want, report)
 		}
 	}
 }

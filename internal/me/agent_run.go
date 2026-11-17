@@ -1015,6 +1015,20 @@ func (r *run) stepCommands() []string {
 	return r.policy.StepCommands()
 }
 
+// stepOutcome returns the outcome a step produced, and whether the
+// step ran at all.
+func (r *run) stepOutcome(stepID string) (wfe.Outcome, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, st := range r.state.Steps {
+		if st.ID != stepID {
+			continue
+		}
+		return st.Outcome, true
+	}
+	return wfe.Outcome{}, false
+}
+
 // consecutiveStalls returns the number of turns the agent produced no
 // tool call in.
 func (r *run) consecutiveStalls() int {

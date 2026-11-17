@@ -120,7 +120,7 @@ jobs:
 
 	provider := &scriptedProvider{responses: []llm.Response{
 		{Message: toolCallMsg("c1", "ntm_two", map[string]any{"args": "-c"})},
-		{Message: toolCallMsg("c2", toolRunStep, map[string]any{"step_id": "two"})},
+		{Message: toolCallMsg("c2", toolResume, map[string]any{})},
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider})
 	op.failCommand = "/two -c"

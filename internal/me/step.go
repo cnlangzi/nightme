@@ -28,6 +28,9 @@ type stepVerdict struct {
 // chat, a shell command runs in the chat's directory, an action
 // runs through the action registry, and a wait runs out the clock.
 func (s *Service) executeStep(ctx context.Context, r *run, job string, step wfe.Step) (stepVerdict, error) {
+	// The step runs where the chat stands: the run's declared context
+	// follows the chat before the step begins.
+	s.syncWorkDir(r)
 	// A step may run for a long time: the state is written first, so a
 	// daemon that goes away in the middle of it comes back and runs the
 	// step again.
@@ -124,16 +127,44 @@ func (s *Service) executeShell(ctx context.Context, r *run, job string, step wfe
 	return stepVerdict{Outcome: out, Settled: true}, nil
 }
 
-// workDir returns the directory the shell steps run in: the the
-// chat's current directory, or the workspace the run started in when
-// the daemon cannot tell.
+// workDir returns the directory the run acts in: the chat's current
+// directory, or the directory the run last knew when the daemon
+// cannot tell.
+//
+// The chat moves when a command moves it — `/gtw fix` moves the chat
+// into the worktree — so the directory is read when it is used, not
+// when the run started.
 func (s *Service) workDir(r *run) string {
-	if s.cfg.Cwd != nil {
-		if dir := s.cfg.Cwd.Cwd(r.chatID); dir != "" {
-			return dir
-		}
+	if dir := s.liveDir(r); dir != "" {
+		return dir
 	}
-	return r.cwd
+	return r.workCwd()
+}
+
+// liveDir returns the directory the chat currently works in, or an
+// empty string when the daemon cannot tell.
+func (s *Service) liveDir(r *run) string {
+	if s.cfg.Cwd == nil {
+		return ""
+	}
+	return s.cfg.Cwd.Cwd(r.chatID)
+}
+
+// syncWorkDir re-initializes the run's declared context to the
+// directory the chat works in.
+//
+// The run's own record of where it works — its directory, the
+// workspace of its state and the environment its steps run with —
+// has to follow the chat: a run that works inside a worktree and
+// describes the repository it started in decides on false facts.
+//
+// A directory the daemon cannot tell leaves the run as it is.
+func (s *Service) syncWorkDir(r *run) {
+	dir := s.liveDir(r)
+	if dir == "" {
+		return
+	}
+	r.setWorkCwd(dir)
 }
 
 // maxShellOutput is how much of a shell command's output a step keeps.

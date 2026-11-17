@@ -599,7 +599,7 @@ func (s *Service) toolRepoStatus(ctx context.Context, r *run, _ pendingCall) (st
 	if s.cfg.Git == nil {
 		return stepResult{}, toolErrorf("the repository facts are not available")
 	}
-	dir := r.cwd
+	dir := s.workDir(r)
 	if dir == "" {
 		return stepResult{}, toolErrorf("the chat has no working directory")
 	}
@@ -610,6 +610,7 @@ func (s *Service) toolRepoStatus(ctx context.Context, r *run, _ pendingCall) (st
 	data := map[string]string{
 		"branch": facts.Branch,
 		"dirty":  strconv.FormatBool(facts.Dirty),
+		"cwd":    dir,
 	}
 	if facts.Upstream != "" {
 		data["upstream"] = facts.Upstream

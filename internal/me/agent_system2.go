@@ -35,6 +35,9 @@ const (
 // is asked again. The run ends when the plan is done, when the agent
 // calls the finish tool, or when the operator stops it.
 func (s *Service) system2(ctx context.Context, r *run) (bool, error) {
+	// The chat moves when a command moves it: the run's declared
+	// context follows the chat before the model reads the report.
+	s.syncWorkDir(r)
 	conversation := r.conversation()
 	if len(conversation) == 0 {
 		// The run talks to the chat model for the first time at a

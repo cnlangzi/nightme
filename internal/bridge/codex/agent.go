@@ -531,8 +531,8 @@ func (d *driver) Stop(ctx context.Context) error {
 
 // stopRPCTimeout bounds how long Stop() waits for the app-server
 // to acknowledge turn/interrupt. The wire reply is `{}` and
-// typically lands in <50ms; 3s is generous and matches
-// handshakeTimeout used elsewhere in this package.
+// typically lands in <50ms; 3s is generous. Unrelated to
+// handshakeTimeout, which bounds the app-server's cold start.
 const stopRPCTimeout = 3 * time.Second
 
 // waitForTurnID polls d.pendingMu briefly for the turnId that

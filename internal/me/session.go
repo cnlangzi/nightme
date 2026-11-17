@@ -6,8 +6,11 @@
 // so the chat renders the session onto that card and patches it in
 // place — the way it renders a coding agent's turn.
 //
-// The package does not assemble card bodies. It speaks the standard
-// outbound vocabulary (internal/messages), and the chat renders it.
+// The package speaks the standard outbound vocabulary
+// (internal/messages), and the chat renders it. The two blocks the
+// run publishes itself — the overview of the run and the block that
+// names the run a round belongs to — are entries of a card, and the
+// chat renders them as such.
 package me
 
 import (
@@ -148,9 +151,10 @@ func (s *Service) adoptSessionCards(r *run) {
 // openRunSession opens the session of the run.
 //
 // The card hangs under the message that started the run, so the
-// operator finds it where the run began. The session's checklist is
-// the workflow's jobs, and the run goes on updating this card from
-// here on.
+// operator finds it where the run began. The card carries the
+// overview of the run and nothing else: what the run is stays the
+// same from the start to the end, and the live state of the work is
+// on the card of the round.
 func (s *Service) openRunSession(ctx context.Context, r *run, replyTo string) bool {
 	sess := s.openSession(ctx, r, sessionRun, r.id, "", 0, replyTo)
 	if sess.cardID == "" {
@@ -162,14 +166,15 @@ func (s *Service) openRunSession(ctx context.Context, r *run, replyTo string) bo
 	r.setRunSession(sess)
 	r.setGitStatus(s.gitStatus(r))
 	s.publishInit(ctx, r, sess)
-	s.publishTasks(ctx, r, sess, r.runTasks())
+	s.publishReply(ctx, r, sess, r.runOverview())
 	return true
 }
 
 // openRoundSession opens the session of a job round.
 //
 // The card hangs under the run's card: the round is the run's work,
-// one level below it. The session's checklist is the round's steps.
+// one level below it. The card names the run the round belongs to and
+// carries the steps of the round as its checklist.
 func (s *Service) openRoundSession(ctx context.Context, r *run, it iteration) {
 	replyTo := ""
 	if runSess := r.runSessionRef(); runSess != nil {
@@ -180,6 +185,8 @@ func (s *Service) openRoundSession(ctx context.Context, r *run, it iteration) {
 	r.resetRoundUsage()
 	r.rememberRoundSession(it, sess)
 	s.publishInit(ctx, r, sess)
+	s.publishReply(ctx, r, sess, r.runBlock())
+	s.publishReply(ctx, r, sess, BotMark+roundIdentity(it))
 	s.publishTasks(ctx, r, sess, r.roundTasks(it.job, it.round))
 }
 
@@ -248,8 +255,8 @@ func (s *Service) switchRoundSession(ctx context.Context, r *run, it iteration) 
 
 // closeRoundSession ends the session of the round the run is in.
 //
-// The run's card says what the round came to: one entry per finished
-// round.
+// The round's card says what the round came to, and the verdict of
+// the round rides in its footer.
 func (s *Service) closeRoundSession(ctx context.Context, r *run) {
 	sess := r.roundSessionRef()
 	if sess == nil {
@@ -257,7 +264,7 @@ func (s *Service) closeRoundSession(ctx context.Context, r *run) {
 	}
 	out := r.roundOutcome(sess.job, sess.round)
 	ctx = context.WithoutCancel(r.ctx)
-	s.publishReply(ctx, r, r.runSessionRef(), roundOutcomeLine(sess.job, sess.round, out))
+	s.publishReply(ctx, r, sess, roundOutcomeLine(sess.job, sess.round, out))
 	s.publishResult(ctx, r, sess, string(out.Status))
 	r.setRoundSession(nil)
 }
@@ -382,14 +389,14 @@ func (r *run) roundOutcome(job string, round int) wfe.Outcome {
 
 // recordStepOutcome publishes the outcome of a step.
 //
-// The round's card says what the step came to, and its checklist
-// follows the run's progress.
-func (s *Service) recordStepOutcome(ctx context.Context, r *run, job string, step wfe.Step, out wfe.Outcome) {
+// The row of the step carries the outcome: the checklist of the round
+// is the state of the round, and an entry per step would say the same
+// thing a second time.
+func (s *Service) recordStepOutcome(ctx context.Context, r *run) {
 	sess := r.roundSessionRef()
 	if sess == nil {
 		return
 	}
-	s.publishReply(ctx, r, sess, stepOutcomeLine(step, out))
 	s.publishTasks(ctx, r, sess, r.roundTasks(sess.job, sess.round))
 }
 
@@ -462,19 +469,20 @@ func (s *Service) publishResult(ctx context.Context, r *run, sess *session, verd
 
 // publishState publishes where the run stands.
 //
-// The state is an entry of the run's card: the card is the run's state
-// board, and the operator reads it there.
+// The state is an entry of the round's card: the card of the round is
+// the state board of the work, and the operator reads it there.
 func (s *Service) publishState(ctx context.Context, r *run, state string) {
-	s.publishReply(ctx, r, r.runSessionRef(), state)
+	s.publishReply(ctx, r, r.roundSessionRef(), state)
 }
 
 // publishHeartbeat publishes what the run did so far.
 //
-// The counters ride in the header of the run's card: how many turns
+// The counters ride in the header of the round's card: how many turns
 // the chat model took, how many tool calls the run made and when it
-// last did something.
+// last did something. The card of the run is static, so it carries
+// none.
 func (s *Service) publishHeartbeat(ctx context.Context, r *run) {
-	sess := r.runSessionRef()
+	sess := r.roundSessionRef()
 	if sess == nil {
 		return
 	}
@@ -492,88 +500,8 @@ func (s *Service) publishHeartbeat(ctx context.Context, r *run) {
 	})
 }
 
-// runTasks renders the workflow's jobs as the checklist of the run's
-// card.
-//
-// One row per job. The job's current round is what the row shows
-// while the job runs.
-func (r *run) runTasks() []agent.AgentTaskItem {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	jobs := r.workflow.JobOrder()
-	items := make([]agent.AgentTaskItem, 0, len(jobs))
-	for _, name := range jobs {
-		item := agent.AgentTaskItem{ID: name, Subject: name, Status: agent.TaskPending}
-		switch {
-		case wfe.JobComplete(r.state, r.workflow, name):
-			item.Status = agent.TaskCompleted
-		case r.state.RoundOf(name) > 0 && r.currentRoundOf(name) > 0:
-			item.Status = agent.TaskInProgress
-			item.ActiveForm = fmt.Sprintf("round %d", r.currentRoundOf(name))
-		}
-		items = append(items, item)
-	}
-	return items
-}
-
-// currentRoundOf returns the round a job is in, or zero when the job
-// has not started. The caller holds the lock.
-func (r *run) currentRoundOf(job string) int {
-	return r.state.Rounds[job]
-}
-
-// roundTasks renders the steps of a round as the checklist of the
-// round's card.
-//
-// One row per step of the job: the round is one pass through the
-// job's step list.
-func (r *run) roundTasks(job string, round int) []agent.AgentTaskItem {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	states := make(map[string]wfe.StepState, len(r.state.Steps))
-	for _, st := range r.state.Steps {
-		states[st.ID] = st
-	}
-	remaining := r.policy.Remaining()
-	var steps []wfe.Step
-	for _, step := range r.workflow.Steps() {
-		if wfe.JobOf(r.workflow, step.ID) == job {
-			steps = append(steps, step)
-		}
-	}
-	items := make([]agent.AgentTaskItem, 0, len(steps))
-	for _, step := range steps {
-		item := agent.AgentTaskItem{ID: step.ID, Subject: stepLabel(step), Status: agent.TaskPending}
-		if st, ok := states[step.ID]; ok {
-			switch {
-			case st.Pending:
-				item.Status = agent.TaskInProgress
-			case st.Skipped, st.Outcome.Succeeded():
-				item.Status = agent.TaskCompleted
-			}
-		}
-		// The chances the step has left are what the run may still do
-		// with it.
-		if idx := r.stepIndex(step.ID); idx >= 0 && idx < len(remaining.Steps) && remaining.Steps[idx] >= 0 {
-			item.ActiveForm = fmt.Sprintf("%d chances left", remaining.Steps[idx])
-		}
-		items = append(items, item)
-	}
-	return items
-}
-
-// stepOutcomeLine renders the outcome of a step as one entry of the
-// round's card.
-func stepOutcomeLine(step wfe.Step, out wfe.Outcome) string {
-	label := stepLabel(step)
-	if out.Summary == "" {
-		return fmt.Sprintf("%s — %s", label, out.Status)
-	}
-	return fmt.Sprintf("%s — %s: %s", label, out.Status, out.Summary)
-}
-
 // roundOutcomeLine renders a finished job round as one entry of the
-// run's card.
+// round's card.
 func roundOutcomeLine(job string, round int, out wfe.Outcome) string {
 	if out.Summary == "" {
 		return fmt.Sprintf("%s · round %d — %s", job, round, out.Status)

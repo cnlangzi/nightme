@@ -89,7 +89,7 @@ func TestFormatTaskList_HeaderAndRows(t *testing.T) {
 	if !strings.Contains(got, "- [ ] first") {
 		t.Errorf("missing pending row in %q", got)
 	}
-	if !strings.Contains(got, "- [x] second") {
+	if !strings.Contains(got, "- [√] second") {
 		t.Errorf("missing completed row in %q", got)
 	}
 }
@@ -103,19 +103,19 @@ func TestFormatTaskList_EmptyReturnsEmpty(t *testing.T) {
 	}
 }
 
-func TestFormatTaskList_OrderInProgressFirst(t *testing.T) {
+func TestFormatTaskList_KeepsTheOrderOfTheSender(t *testing.T) {
 	items := []agent.AgentTaskItem{
 		{ID: "1", Subject: "pending", Status: agent.TaskPending},
 		{ID: "2", Subject: "done", Status: agent.TaskCompleted},
 		{ID: "3", Subject: "active", Status: agent.TaskInProgress, ActiveForm: "writing"},
 	}
 	got := formatTaskList(items)
-	activeIdx := strings.Index(got, "active")
 	pendingIdx := strings.Index(got, "pending")
 	doneIdx := strings.Index(got, "done")
-	if !(activeIdx < pendingIdx && pendingIdx < doneIdx) {
-		t.Errorf("order = active(%d) pending(%d) done(%d), want active<pending<done",
-			activeIdx, pendingIdx, doneIdx)
+	activeIdx := strings.Index(got, "active")
+	if !(pendingIdx < doneIdx && doneIdx < activeIdx) {
+		t.Errorf("order = pending(%d) done(%d) active(%d), want pending<done<active",
+			pendingIdx, doneIdx, activeIdx)
 	}
 }
 

@@ -8,7 +8,7 @@
 //	chunk 3   (OutReply entries carry no icon prefix — stream continuation, not a new entry)
 //	📋 Tasks     ⬅ F-38: agent task checklist (F-44 simplified
 //	  - [ ] Subject       surface — no header / footer / evicted
-//	  - [x] Subject       marker, just the two sections above)
+//	  - [√] Subject       marker, just the two sections above)
 //
 // F-25 → F-42 had OutReply / OutResult / OutInit / OutUsage fold
 // into the same card. F-44 first-pass reversed that: OutReply /

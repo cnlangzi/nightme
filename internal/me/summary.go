@@ -59,7 +59,6 @@ func (s *Service) postSummary(r *run) {
 		return
 	}
 	s.publishInit(ctx, r, sess)
-	s.publishTasks(ctx, r, sess, r.runTasks())
 	for _, line := range r.summaryLines() {
 		s.publishReply(ctx, r, sess, line)
 	}

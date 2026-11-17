@@ -109,10 +109,12 @@ type richTurn struct {
 }
 
 // taskListItem is the minimal task snapshot the rich turn renders.
-// Mirrors the chain's agent.AgentTaskItem shape — kept local to
-// avoid pulling the agent package into the rich file's API.
+// It mirrors the chain's agent.AgentTaskItem shape — kept local so
+// the rich file does not carry the whole agent event. The state of
+// the row is the agent's own, so the marker of the state is the one
+// every channel draws.
 type taskListItem struct {
-	Status     string
+	Status     agent.AgentTaskStatus
 	ID         string
 	Subject    string
 	ActiveForm string
@@ -678,27 +680,6 @@ func (r *richTurnsIndex) size() int {
 // the future without re-adding the import).
 var _ = statusbar.RenderPanel
 
-// taskStatusToString maps agent.AgentTaskStatus to a stable string
-// the rich block renderer's list section consumes. Mirrors the
-// v9 chain's renderTaskLine switch (chain_body.go). Strings are
-// stable on the wire (no enum-name leakage) so future agent
-// status additions don't ripple into the rich-block schema.
-func taskStatusToString(s agent.AgentTaskStatus) string {
-	switch s {
-	case agent.TaskPending:
-		return "pending"
-	case agent.TaskInProgress:
-		return "in_progress"
-	case agent.TaskCompleted:
-		return "completed"
-	case agent.TaskDeleted:
-		return "deleted"
-	case agent.TaskCancelled:
-		return "cancelled"
-	}
-	return "pending"
-}
-
 // Task section emitted by renderRichTurnTaskListBlocks. 📋 Tasks
 // heading matches feishu's `**📋 Tasks**` for cross-channel parity;
 // the rest of the consts are the feishu checklistBudgetRunes /
@@ -718,10 +699,10 @@ const (
 // once at the source rather than re-mutating a block map).
 //
 // The budget accounts for the headline + every row + the trailing
-// " " + … suffix on the last row (when truncated). cancelled /
-// deleted statuses are filtered before the budget runs so they
-// don't consume visible rows; the all-filtered case emits no
-// blocks (matches the no-orphan-headline rule).
+// " " + … suffix on the last row (when truncated). Every state a task
+// can be in is rendered: a task that failed or was cancelled is a row
+// the operator has to see. A deleted task is not: the bridges drop
+// it before they emit the snapshot.
 func renderRichTurnTaskListBlocks(items []taskListItem) ([]map[string]any, bool) {
 	if len(items) == 0 {
 		return nil, false
@@ -729,8 +710,10 @@ func renderRichTurnTaskListBlocks(items []taskListItem) ([]map[string]any, bool)
 
 	visible := make([]taskListItem, 0, len(items))
 	for _, it := range items {
-		switch it.Status {
-		case "cancelled", "deleted":
+		// Filter TaskDeleted defensively: the bridge is supposed to
+		// remove deleted tasks before emitting, but a corrupt snapshot
+		// must not produce a visible "deleted" row.
+		if it.Status == agent.TaskDeleted {
 			continue
 		}
 		visible = append(visible, it)
@@ -780,23 +763,19 @@ func renderRichTurnTaskListBlocks(items []taskListItem) ([]map[string]any, bool)
 }
 
 // renderTaskRowText formats one task row for the rich block list.
-// Subject is trimmed; whitespace-only Subject falls back to the
-// (also-trimmed) ID so a malformed snapshot yields `• ID` rather
-// than `• `. In_progress rows only show the ActiveForm suffix when
-// it's non-empty.
+// The row carries the marker of its state and the detail of the row,
+// so a task that failed never reads like a task that has not
+// started. Subject is trimmed; whitespace-only Subject falls back to
+// the (also-trimmed) ID so a malformed snapshot yields the ID rather
+// than an empty row.
 func renderTaskRowText(it taskListItem) string {
 	subject := strings.TrimSpace(it.Subject)
 	if subject == "" {
 		subject = strings.TrimSpace(it.ID)
 	}
-	switch it.Status {
-	case "completed":
-		return "✓ " + subject
-	case "in_progress":
-		if it.ActiveForm != "" {
-			return "• " + subject + " (" + it.ActiveForm + ")"
-		}
-		return "• " + subject
+	row := agent.TaskStatusMarker(it.Status) + " " + subject
+	if detail := strings.TrimSpace(it.ActiveForm); detail != "" {
+		row += " (" + detail + ")"
 	}
-	return "• " + subject
+	return row
 }

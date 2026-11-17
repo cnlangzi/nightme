@@ -504,6 +504,13 @@ const (
 	// TaskCancelled marks a task that was cancelled before completion.
 	// Cursor uses this status; mapped from Cursor's "cancelled" state.
 	TaskCancelled
+	// TaskFailed marks a task whose work did not get done. A failed
+	// task is not a task that has not started: the two say different
+	// things about the work.
+	TaskFailed
+	// TaskSkipped marks a task whose condition did not hold, so it was
+	// not supposed to run in the first place.
+	TaskSkipped
 )
 
 // String renders a AgentTaskStatus for log lines.
@@ -519,16 +526,51 @@ func (s AgentTaskStatus) String() string {
 		return "deleted"
 	case TaskCancelled:
 		return "cancelled"
+	case TaskFailed:
+		return "failed"
+	case TaskSkipped:
+		return "skipped"
 	}
 	return "task(unknown)"
+}
+
+// TaskStatusMarker returns the bracketed marker of a task status.
+//
+// The marker is the state of a row in a checklist, and every marker
+// is one character between the brackets: the status column then has
+// the same width on every row and the labels start at the same
+// column. An emoji is two cells wide and would shift every row after
+// it, so the markers are plain characters.
+//
+// The table lives next to the status enum, so the channels that
+// render a checklist cannot drift apart.
+func TaskStatusMarker(status AgentTaskStatus) string {
+	switch status {
+	case TaskPending:
+		return "[ ]"
+	case TaskInProgress:
+		return "[>]"
+	case TaskCompleted:
+		return "[√]"
+	case TaskFailed:
+		return "[!]"
+	case TaskCancelled:
+		return "[-]"
+	case TaskSkipped:
+		return "[/]"
+	case TaskDeleted:
+		return "[×]"
+	}
+	return "[ ]"
 }
 
 // AgentTaskItem is one row in the per-turn checklist. ID is the
 // provider-assigned stable identifier (e.g. Claude's `Task #1`);
 // bridges MUST populate it so follow-up updates can correlate by
-// ID. Subject is the user-visible label. ActiveForm is the
-// optional present-continuous phrase the agent emits while the
-// task is in progress.
+// ID. Subject is the user-visible label. ActiveForm is the detail of
+// the row: the phrase the agent emits while the task is in progress,
+// or what the task came to. Every renderer shows it for every status
+// that has one.
 type AgentTaskItem struct {
 	ID         string
 	Subject    string

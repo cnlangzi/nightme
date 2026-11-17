@@ -707,11 +707,12 @@ func (s *Service) Continue(ctx context.Context, chatID, note string) error {
 	return nil
 }
 
-// Show puts the run's state back in front of the operator.
+// Show puts the run back in front of the operator.
 //
-// The card the run is updating is not always the one the operator
-// wants to look at: `/me show` posts the current state as a card of
-// its own, and the run keeps updating that one from here on.
+// The card the run opened is not always the one the operator wants to
+// look at: `/me show` posts the overview of the run as a card of its
+// own. The card is static — the live state of the work is on the
+// card of the round.
 func (s *Service) Show(ctx context.Context, chatID string) error {
 	s.mu.Lock()
 	r, ok := s.active[chatID]

@@ -228,30 +228,32 @@ func truncate(s string, max int) string {
 //	📋 Tasks
 //
 //	- [ ] task one
-//	- [ ] task two (writing unit tests)
-//	- [x] task three
+//	- [>] task two (writing unit tests)
+//	- [√] task three
 //
-// Discord's native renderer does not treat `- [ ]` / `- [x]` as
-// checkboxes (no checkbox widget), but the markdown list shape is
-// stable across clients (mobile / desktop / web) and matches the
-// user-visible convention Claude Code uses in its terminal output.
+// Discord's native renderer does not treat the markers as checkboxes
+// (no checkbox widget), but the markdown list shape is stable across
+// clients (mobile / desktop / web) and matches the user-visible
+// convention Claude Code uses in its terminal output.
 //
-// Stable partition by status: in-progress first, then pending,
-// then completed (mirrors feishu/receipt_task.go). An empty Items
-// slice returns "" so the caller can skip the bubble entirely.
+// The rows keep the order the sender listed them in, and every row
+// carries the marker of its state (mirrors feishu/receipt_task.go).
+// An empty Items slice returns "" so the caller can skip the bubble
+// entirely.
 func formatTaskList(items []agent.AgentTaskItem) string {
 	if len(items) == 0 {
 		return ""
 	}
-	buckets := make(map[agent.AgentTaskStatus][]int, 3)
+	order := make([]int, 0, len(items))
 	for i, it := range items {
-		switch it.Status {
-		case agent.TaskInProgress, agent.TaskPending, agent.TaskCompleted:
-			buckets[it.Status] = append(buckets[it.Status], i)
+		// Filter TaskDeleted defensively: the bridge is supposed to
+		// remove deleted tasks before emitting, but a corrupt snapshot
+		// must not produce a visible "deleted" row.
+		if it.Status == agent.TaskDeleted {
+			continue
 		}
+		order = append(order, i)
 	}
-	order := append(append([]int{}, buckets[agent.TaskInProgress]...), buckets[agent.TaskPending]...)
-	order = append(order, buckets[agent.TaskCompleted]...)
 
 	lines := make([]string, 0, len(order))
 	total := 0
@@ -277,25 +279,21 @@ func formatTaskList(items []agent.AgentTaskItem) string {
 }
 
 // renderTaskLine builds one row of the markdown task list. The
-// status enum decides only the checkbox state and the (optional)
-// activeForm suffix; the row shape is identical for every status
-// so the output reads as a single coherent list.
+// status enum decides the marker of the row and the (optional)
+// detail suffix; the row shape is identical for every status so the
+// output reads as a single coherent list.
 //
 //	pending      → - [ ] Subject
-//	in_progress  → - [ ] Subject (ActiveForm)
-//	completed    → - [x] Subject
+//	in_progress  → - [>] Subject (detail)
+//	completed    → - [√] Subject (detail)
 func renderTaskLine(it agent.AgentTaskItem) string {
-	checkbox := "- [ ]"
-	if it.Status == agent.TaskCompleted {
-		checkbox = "- [x]"
-	}
 	subject := strings.TrimSpace(it.Subject)
 	if subject == "" {
 		subject = it.ID
 	}
-	line := checkbox + " " + subject
-	if it.Status == agent.TaskInProgress && it.ActiveForm != "" {
-		line += " (" + it.ActiveForm + ")"
+	line := "- " + agent.TaskStatusMarker(it.Status) + " " + subject
+	if detail := strings.TrimSpace(it.ActiveForm); detail != "" {
+		line += " (" + detail + ")"
 	}
 	return line
 }

@@ -136,6 +136,169 @@ func TestGitHubListBlockedBy_OtherError(t *testing.T) {
 	}
 }
 
+// TestGitHubAddBlockedBy_CLIArgs pins the two command lines of the
+// dependency write: the blocker's global id is read first, then the
+// relation is posted with it.
+func TestGitHubAddBlockedBy_CLIArgs(t *testing.T) {
+	cli := &seqCLIRunner{responses: []seqResponse{
+		{stdout: `{"number": 42, "id": 4200, "title": "feat: prerequisite"}`},
+		{stdout: `{}`},
+	}}
+	p := &GitHubProvider{Runner: cli, host: "github.com"}
+
+	if err := p.AddBlockedBy(context.Background(), "cnlangzi", "nightme", 43, 42); err != nil {
+		t.Fatalf("AddBlockedBy: %v", err)
+	}
+	if len(cli.calls) != 2 {
+		t.Fatalf("calls = %d, want 2", len(cli.calls))
+	}
+	wantLookup := "gh api repos/cnlangzi/nightme/issues/42"
+	if got := strings.Join(cli.calls[0], " "); got != wantLookup {
+		t.Errorf("lookup argv =\n%q\nwant\n%q", got, wantLookup)
+	}
+	wantPost := "gh api --method POST repos/cnlangzi/nightme/issues/43/dependencies/blocked_by -F issue_id=4200"
+	if got := strings.Join(cli.calls[1], " "); got != wantPost {
+		t.Errorf("post argv =\n%q\nwant\n%q", got, wantPost)
+	}
+}
+
+// TestGitHubAddBlockedBy_Unsupported pins that a repository
+// without the dependencies feature is reported, not silently
+// dropped.
+func TestGitHubAddBlockedBy_Unsupported(t *testing.T) {
+	cli := &seqCLIRunner{responses: []seqResponse{
+		{stdout: `{"number": 42, "id": 4200}`},
+		{stderr: "gh: Not Found (HTTP 404)", err: errors.New("exit status 1")},
+	}}
+	p := &GitHubProvider{Runner: cli, host: "github.com"}
+
+	err := p.AddBlockedBy(context.Background(), "cnlangzi", "nightme", 43, 42)
+	if !errors.Is(err, ErrRelationsUnsupported) {
+		t.Fatalf("err = %v, want ErrRelationsUnsupported", err)
+	}
+}
+
+// TestGitHubAddBlockedBy_OtherError pins that a failure for
+// another reason keeps the platform's own message and is not
+// downgraded to "relations are not supported".
+func TestGitHubAddBlockedBy_OtherError(t *testing.T) {
+	cli := &seqCLIRunner{responses: []seqResponse{
+		{stdout: `{"number": 42, "id": 4200}`},
+		{stderr: "gh: Bad credentials (HTTP 401)", err: errors.New("exit status 1")},
+	}}
+	p := &GitHubProvider{Runner: cli, host: "github.com"}
+
+	err := p.AddBlockedBy(context.Background(), "cnlangzi", "nightme", 43, 42)
+	if err == nil {
+		t.Fatal("err = nil, want the failure to surface")
+	}
+	if errors.Is(err, ErrRelationsUnsupported) {
+		t.Errorf("err = %v, want it NOT to be ErrRelationsUnsupported", err)
+	}
+	if !strings.Contains(err.Error(), "Bad credentials") {
+		t.Errorf("err = %v, want the platform's message", err)
+	}
+}
+
+// TestGitHubAddBlockedBy_BlockerLookupFails pins that a blocker
+// that cannot be read fails the relation without posting one —
+// and that it is not read as "this platform has no relations".
+func TestGitHubAddBlockedBy_BlockerLookupFails(t *testing.T) {
+	cli := &seqCLIRunner{responses: []seqResponse{
+		{stderr: "gh: Not Found (HTTP 404)", err: errors.New("exit status 1")},
+	}}
+	p := &GitHubProvider{Runner: cli, host: "github.com"}
+
+	err := p.AddBlockedBy(context.Background(), "cnlangzi", "nightme", 43, 42)
+	if err == nil {
+		t.Fatal("err = nil, want the lookup failure to surface")
+	}
+	if errors.Is(err, ErrRelationsUnsupported) {
+		t.Errorf("err = %v, want it NOT to be ErrRelationsUnsupported", err)
+	}
+	if len(cli.calls) != 1 {
+		t.Errorf("calls = %d, want 1 — no relation is posted", len(cli.calls))
+	}
+}
+
+// TestGitLabAddBlockedBy_CLIArgs pins the command line of the
+// dependency write: the link is recorded from the blocker's side,
+// with the dependent as the target.
+func TestGitLabAddBlockedBy_CLIArgs(t *testing.T) {
+	cli := &seqCLIRunner{responses: []seqResponse{{stdout: `{}`}}}
+	p := &GitLabProvider{Runner: cli, host: "gitlab.com"}
+
+	if err := p.AddBlockedBy(context.Background(), "cnlangzi", "nightme", 43, 42); err != nil {
+		t.Fatalf("AddBlockedBy: %v", err)
+	}
+	want := "glab api --method POST projects/cnlangzi%2Fnightme/issues/42/links" +
+		" -f target_project_id=cnlangzi/nightme -f target_issue_iid=43 -f link_type=blocks"
+	if got := cli.lastArgv(); got != want {
+		t.Errorf("argv =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// TestGitLabAddBlockedBy_Unsupported pins that a platform without
+// blocking links — the Premium gate — is reported as unsupported.
+func TestGitLabAddBlockedBy_Unsupported(t *testing.T) {
+	cli := &seqCLIRunner{responses: []seqResponse{
+		{stderr: "403 Forbidden", err: errors.New("exit status 1")},
+	}}
+	p := &GitLabProvider{Runner: cli, host: "gitlab.com"}
+
+	err := p.AddBlockedBy(context.Background(), "cnlangzi", "nightme", 43, 42)
+	if !errors.Is(err, ErrRelationsUnsupported) {
+		t.Fatalf("err = %v, want ErrRelationsUnsupported", err)
+	}
+}
+
+// TestGitLabAddBlockedBy_UnsupportedBadRequest pins that a 400
+// naming the relation type is the same answer as the license
+// gate: this platform has no issue relations.
+func TestGitLabAddBlockedBy_UnsupportedBadRequest(t *testing.T) {
+	cli := &seqCLIRunner{responses: []seqResponse{
+		{stderr: `400 Bad Request
+{"message":{"link_type":["is not included in the list"]}}`, err: errors.New("exit status 1")},
+	}}
+	p := &GitLabProvider{Runner: cli, host: "gitlab.com"}
+
+	err := p.AddBlockedBy(context.Background(), "cnlangzi", "nightme", 43, 42)
+	if !errors.Is(err, ErrRelationsUnsupported) {
+		t.Fatalf("err = %v, want ErrRelationsUnsupported", err)
+	}
+}
+
+// TestGitLabAddBlockedBy_OtherError pins that a failure for
+// another reason — including a 400 that says nothing about the
+// relation type — keeps the platform's own message.
+func TestGitLabAddBlockedBy_OtherError(t *testing.T) {
+	cases := map[string]string{
+		"server error": "500 Internal Server Error",
+		"bad request": `400 Bad Request
+{"message":{"title":["is too short"]}}`,
+		"unauthorized": "401 Unauthorized",
+	}
+	for name, stderr := range cases {
+		t.Run(name, func(t *testing.T) {
+			cli := &seqCLIRunner{responses: []seqResponse{
+				{stderr: stderr, err: errors.New("exit status 1")},
+			}}
+			p := &GitLabProvider{Runner: cli, host: "gitlab.com"}
+
+			err := p.AddBlockedBy(context.Background(), "cnlangzi", "nightme", 43, 42)
+			if err == nil {
+				t.Fatal("err = nil, want the failure to surface")
+			}
+			if errors.Is(err, ErrRelationsUnsupported) {
+				t.Errorf("err = %v, want it NOT to be ErrRelationsUnsupported", err)
+			}
+			if !strings.Contains(err.Error(), strings.TrimSpace(stderr)) {
+				t.Errorf("err = %v, want the platform's message", err)
+			}
+		})
+	}
+}
+
 // TestGitLabListIssues_CLIArgsAndDecoding pins the command line
 // and the decoding of the GitLab issue list.
 func TestGitLabListIssues_CLIArgsAndDecoding(t *testing.T) {
@@ -172,15 +335,15 @@ func TestGitLabListIssues_CLIArgsAndDecoding(t *testing.T) {
 //
 // The response is a flat array of the linked issues, each carrying
 // the link type that says how it relates to the issue the links
-// were listed for: "blocks" means the linked issue blocks it,
-// "is_blocked_by" means it blocks the linked one. The blockers are
-// the "blocks" entries.
+// were listed for: "is_blocked_by" means the linked issue blocks
+// it, "blocks" means it blocks the linked one. The blockers are
+// the "is_blocked_by" entries.
 func TestGitLabListBlockedBy_LinksEndpoint(t *testing.T) {
 	cli := &seqCLIRunner{responses: []seqResponse{{stdout: `[
-	  {"iid": 30, "id": 300, "title": "feat: prerequisite", "state": "opened",
+	  {"iid": 30, "id": 300, "title": "feat: dependent", "state": "opened",
 	   "labels": [], "web_url": "https://x/30", "created_at": "2026-01-01T00:00:00Z",
 	   "issue_link_id": 7, "link_type": "blocks"},
-	  {"iid": 31, "id": 310, "title": "feat: dependent", "state": "opened",
+	  {"iid": 31, "id": 310, "title": "feat: prerequisite", "state": "opened",
 	   "labels": [], "web_url": "https://x/31", "created_at": "2026-01-02T00:00:00Z",
 	   "issue_link_id": 8, "link_type": "is_blocked_by"},
 	  {"iid": 32, "id": 320, "title": "feat: related", "state": "opened",
@@ -197,8 +360,8 @@ func TestGitLabListBlockedBy_LinksEndpoint(t *testing.T) {
 	if got := cli.lastArgv(); got != want {
 		t.Errorf("argv =\n%q\nwant\n%q", got, want)
 	}
-	if len(blockers) != 1 || blockers[0].ID != 30 {
-		t.Fatalf("blockers = %+v, want one blocker #30", blockers)
+	if len(blockers) != 1 || blockers[0].ID != 31 {
+		t.Fatalf("blockers = %+v, want one blocker #31", blockers)
 	}
 }
 
@@ -252,6 +415,29 @@ func TestGitHubListBlockedBy_KeepsPullRequests(t *testing.T) {
 	}
 	if len(blockers) != 1 || blockers[0].ID != 30 {
 		t.Fatalf("blockers = %+v, want the pull request kept as a blocker", blockers)
+	}
+}
+
+// TestHasHTTPStatus_StatusLine pins that the status line glab
+// prints — "400 Bad Request" — reads as a status, while a number
+// that merely appears in the message does not.
+func TestHasHTTPStatus_StatusLine(t *testing.T) {
+	cases := []struct {
+		name   string
+		stderr string
+		want   bool
+	}{
+		{"status line", "400 Bad Request", true},
+		{"status line with body", "400 Bad Request\n{\"message\":{\"title\":[\"is too short\"]}}", true},
+		{"number before a lowercase word", "42 issues left", false},
+		{"number inside a word", "issues/4002", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := hasHTTPStatus(c.stderr, 400); got != c.want {
+				t.Errorf("hasHTTPStatus(%q, 400) = %v, want %v", c.stderr, got, c.want)
+			}
+		})
 	}
 }
 

@@ -78,6 +78,8 @@ type Outcome struct {
 | `repo` | 仓库（`owner/repo`） |
 | `issues` | `/gtw new -y` 开出来的 issue 编号（逗号分隔） |
 | `kept` | 还没开成 issue 的草稿数 |
+| `deps` | `/gtw new -y` 建成的依赖关系数 |
+| `deps_failed` | `/gtw new -y` 建不成的依赖关系数 |
 | `lang` / `scope` | `/gtw config` 的语言与作用域（`global` / `repo` / `default`） |
 | `unset` | `/gtw config --unset` 删掉了这个设置（值是 `true`） |
 | `cwd` | `/cwd` 设好的工作区路径 |

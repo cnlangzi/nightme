@@ -548,6 +548,21 @@ abc1234 fix(gtw): hooks output uses standard ✅ title
 → #42:  feat(gtw): store issue drafts per chat · https://github.com/owner/repo/issues/42
 → #43:  feat(gtw): create issues from every draft · https://github.com/owner/repo/issues/43
 → #44:  docs(gtw): describe multi-issue drafts · https://github.com/owner/repo/issues/44
+→ deps: #43 blocked by #42 · #44 blocked by #42, #43
+↳ `/gtw fix <id>` to assess one · or `/gtw fix <id> -y` to implement it directly
+```
+
+`deps` 行是这次建出来的依赖关系:草稿里的 `{{ISSUE:NN}}` 引用就是依赖,被引用的 issue 挡着引用它的 issue。关系建在平台自己的关系图上,所以 `/gtw fix *` 会等前置 issue 关闭之后才动依赖它的那个。没有依赖时没有这一行;只建好一个 issue 时这一行跟在 `url` 后面。
+
+关系建不出来时只警告,不失败——issue 已经建好了,失败的命令留不下可重试的东西:
+
+```
+⚠️ could not create the dependency #44 blocked by #42: gtw: issue relations are not supported by this platform: gh api repos/owner/repo/issues/44/dependencies/blocked_by: 404 Not Found
+✅ 3 issues opened
+→ repo: owner/repo
+→ #42:  feat(gtw): store issue drafts per chat · https://github.com/owner/repo/issues/42
+→ #43:  feat(gtw): create issues from every draft · https://github.com/owner/repo/issues/43
+→ #44:  docs(gtw): describe multi-issue drafts · https://github.com/owner/repo/issues/44
 ↳ `/gtw fix <id>` to assess one · or `/gtw fix <id> -y` to implement it directly
 ```
 
@@ -561,6 +576,8 @@ abc1234 fix(gtw): hooks output uses standard ✅ title
 → drafts: /Users/.../.nightme/issue-drafts/issue-1a2b3c4d5e6f7a8b (2 kept)
 ↳ `/gtw new -y` to create the rest
 ```
+
+失败之前已经建好的依赖关系照样列出来(`deps` 行)。
 
 ---
 

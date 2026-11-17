@@ -648,9 +648,9 @@ func TestRenderRichTurnBlocksLocked_TaskListSection(t *testing.T) {
 		headerLine:    "💭 1",
 		hasContent:    true,
 		taskList: []taskListItem{
-			{ID: "t1", Subject: "Plan the API", Status: "completed"},
-			{ID: "t2", Subject: "Write code", Status: "in_progress", ActiveForm: "coding"},
-			{ID: "t3", Subject: "Write tests", Status: "pending"},
+			{ID: "t1", Subject: "Plan the API", Marker: "[√]"},
+			{ID: "t2", Subject: "Write code", Marker: "[>]", ActiveForm: "coding"},
+			{ID: "t3", Subject: "Write tests", Marker: "[ ]"},
 		},
 	}
 	body, err := a.renderRichTurnBlocksLocked(turn)
@@ -713,7 +713,7 @@ func TestRenderRichTurnBlocksLocked_TaskListSection(t *testing.T) {
 		text, _ := p["text"].(string)
 		gotRows = append(gotRows, row{text})
 	}
-	wantPrefixes := []string{"✓ ", "• ", "• "}
+	wantPrefixes := []string{"[√] ", "[>] ", "[ ] "}
 	wantSubjects := []string{"Plan the API", "Write code (coding)", "Write tests"}
 	for i, r := range gotRows {
 		if !strings.HasPrefix(r.text, wantPrefixes[i]) {
@@ -760,32 +760,31 @@ func TestRenderRichTurnBlocksLocked_EmptyTaskListOmitsSection(t *testing.T) {
 	}
 }
 
-// TestRenderRichTurnBlocksLocked_TaskCancelledAndDeletedFiltered
-// locks the status filter: cancelled / deleted rows are dropped
-// before the rune budget is consumed. Mirrors feishu's
-// buildTaskChecklistChunks which only buckets InProgress / Pending
-// / Completed.
-func TestRenderRichTurnBlocksLocked_TaskCancelledAndDeletedFiltered(t *testing.T) {
+// TestRenderRichTurnBlocksLocked_TaskCancelledAndDeletedRendered
+// locks that every row is rendered: a task that was cancelled or
+// deleted is a row the operator has to see, and it never reads like
+// a task that has not started.
+func TestRenderRichTurnBlocksLocked_TaskCancelledAndDeletedRendered(t *testing.T) {
 	a, _ := newTestAdapter(t)
 	turn := &richTurn{
 		chatID: "123", topicID: 0, userMessageID: 0, messageID: 100,
 		headerLine: "💭 0", hasContent: true,
 		taskList: []taskListItem{
-			{ID: "t1", Subject: "alive-pending", Status: "pending"},
-			{ID: "t2", Subject: "DEAD-cancelled", Status: "cancelled"},
-			{ID: "t3", Subject: "alive-completed", Status: "completed"},
-			{ID: "t4", Subject: "DEAD-deleted", Status: "deleted"},
+			{ID: "t1", Subject: "alive-pending", Marker: "[ ]"},
+			{ID: "t2", Subject: "gone-cancelled", Marker: "[-]"},
+			{ID: "t3", Subject: "alive-completed", Marker: "[√]"},
+			{ID: "t4", Subject: "gone-deleted", Marker: "[×]"},
 		},
 	}
 	body, err := a.renderRichTurnBlocksLocked(turn)
 	if err != nil {
 		t.Fatalf("render: %v", err)
 	}
-	if strings.Contains(body, "DEAD-cancelled") {
-		t.Fatalf("TaskCancelled row must be filtered; body=%s", body)
+	if !strings.Contains(body, "gone-cancelled") {
+		t.Fatalf("cancelled row missing; body=%s", body)
 	}
-	if strings.Contains(body, "DEAD-deleted") {
-		t.Fatalf("TaskDeleted row must be filtered; body=%s", body)
+	if !strings.Contains(body, "gone-deleted") {
+		t.Fatalf("deleted row missing; body=%s", body)
 	}
 	if !strings.Contains(body, "alive-pending") {
 		t.Fatalf("live pending row missing; body=%s", body)
@@ -793,34 +792,34 @@ func TestRenderRichTurnBlocksLocked_TaskCancelledAndDeletedFiltered(t *testing.T
 	if !strings.Contains(body, "alive-completed") {
 		t.Fatalf("live completed row missing; body=%s", body)
 	}
-	// Headline must still render (live rows present).
+	// The headline renders with the rows.
 	if !strings.Contains(body, richTurnTaskListHeadline) {
 		t.Fatalf("headline missing despite live rows; body=%s", body)
 	}
 }
 
-// TestRenderRichTurnBlocksLocked_TaskAllFilteredOmitsSection locks
-// the dual-guard: when every row is filtered out, the section
-// disappears entirely (no orphan headline, no empty list block).
-func TestRenderRichTurnBlocksLocked_TaskAllFilteredOmitsSection(t *testing.T) {
+// TestRenderRichTurnBlocksLocked_TaskEveryRowCancelledRenders locks
+// that a snapshot whose rows all carry a state that is over still
+// paints the section: the rows are the record of what happened.
+func TestRenderRichTurnBlocksLocked_TaskEveryRowCancelledRenders(t *testing.T) {
 	a, _ := newTestAdapter(t)
 	turn := &richTurn{
 		chatID: "123", topicID: 0, userMessageID: 0, messageID: 100,
 		headerLine: "💭 0", hasContent: true,
 		taskList: []taskListItem{
-			{ID: "t1", Subject: "DEAD-cancelled", Status: "cancelled"},
-			{ID: "t2", Subject: "DEAD-deleted", Status: "deleted"},
+			{ID: "t1", Subject: "gone-cancelled", Marker: "[-]"},
+			{ID: "t2", Subject: "gone-failed", Marker: "[!]"},
 		},
 	}
 	body, err := a.renderRichTurnBlocksLocked(turn)
 	if err != nil {
 		t.Fatalf("render: %v", err)
 	}
-	if strings.Contains(body, richTurnTaskListHeadline) {
-		t.Fatalf("all-filtered taskList must NOT paint headline; body=%s", body)
+	if !strings.Contains(body, richTurnTaskListHeadline) {
+		t.Fatalf("headline missing despite rows; body=%s", body)
 	}
-	if strings.Contains(body, `"type":"list"`) {
-		t.Fatalf("all-filtered taskList must NOT emit list block; body=%s", body)
+	if !strings.Contains(body, `"type":"list"`) {
+		t.Fatalf("list block missing despite rows; body=%s", body)
 	}
 }
 
@@ -838,7 +837,7 @@ func TestRenderRichTurnBlocksLocked_TaskListTruncatesAtBudget(t *testing.T) {
 		tasks[i] = taskListItem{
 			ID:      "t" + strconv.Itoa(i),
 			Subject: strings.Repeat("x", 80), // 80-char subject
-			Status:  "pending",
+			Marker:  "[ ]",
 		}
 	}
 	turn := &richTurn{
@@ -902,8 +901,8 @@ func TestRenderRichTurnBlocksLocked_TaskSubjectEscapesHTML(t *testing.T) {
 		chatID: "123", topicID: 0, userMessageID: 0, messageID: 100,
 		headerLine: "💭 0", hasContent: true,
 		taskList: []taskListItem{
-			{ID: "t1", Subject: "<script>alert('xss')</script>", Status: "pending"},
-			{ID: "t2", Subject: "with & ampersand", Status: "pending"},
+			{ID: "t1", Subject: "<script>alert('xss')</script>", Marker: "[ ]"},
+			{ID: "t2", Subject: "with & ampersand", Marker: "[ ]"},
 		},
 	}
 	body, err := a.renderRichTurnBlocksLocked(turn)
@@ -930,10 +929,10 @@ func TestRenderTaskRowText_FallbackSubjectTrimmed(t *testing.T) {
 		in   taskListItem
 		want string
 	}{
-		{"empty subject falls back to id", taskListItem{ID: "t1", Status: "pending"}, "• t1"},
-		{"whitespace subject falls back to id", taskListItem{ID: "t2", Subject: "   ", Status: "pending"}, "• t2"},
-		{"whitespace id still produces a useful row", taskListItem{ID: "   ", Subject: "real", Status: "pending"}, "• real"},
-		{"completed prefix intact with trimmed subject", taskListItem{ID: "x", Subject: "  done  ", Status: "completed"}, "✓ done"},
+		{"empty subject falls back to id", taskListItem{ID: "t1", Marker: "[ ]"}, "[ ] t1"},
+		{"whitespace subject falls back to id", taskListItem{ID: "t2", Subject: "   ", Marker: "[ ]"}, "[ ] t2"},
+		{"whitespace id still produces a useful row", taskListItem{ID: "   ", Subject: "real", Marker: "[ ]"}, "[ ] real"},
+		{"completed marker intact with trimmed subject", taskListItem{ID: "x", Subject: "  done  ", Marker: "[√]"}, "[√] done"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -961,7 +960,7 @@ func TestRenderRichTurnTaskListBlocks_BudgetAccountsForSuffix(t *testing.T) {
 	subject := strings.Repeat("a", 590)
 	items := make([]taskListItem, totalRows)
 	for i := range items {
-		items[i] = taskListItem{ID: "t", Subject: subject, Status: "pending"}
+		items[i] = taskListItem{ID: "t", Subject: subject, Marker: "[ ]"}
 	}
 	blocks, ok := renderRichTurnTaskListBlocks(items)
 	if !ok {
@@ -998,7 +997,7 @@ func TestRenderRichTurnBlocksLocked_TaskListOrderAfterEntries(t *testing.T) {
 			{kind: "reply", body: "thinking out loud"},
 		},
 		taskList: []taskListItem{
-			{ID: "t1", Subject: "Plan", Status: "pending"},
+			{ID: "t1", Subject: "Plan", Marker: "[ ]"},
 		},
 		footer: []string{"🤖: claude", "💰: tokens"},
 	}

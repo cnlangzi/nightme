@@ -1561,7 +1561,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		items := make([]taskListItem, 0, len(msg.TaskList.Items))
 		for _, it := range msg.TaskList.Items {
 			items = append(items, taskListItem{
-				Status:     taskStatusToString(it.Status),
+				Marker:     agent.TaskStatusMarker(it.Status),
 				ID:         it.ID,
 				Subject:    it.Subject,
 				ActiveForm: it.ActiveForm,

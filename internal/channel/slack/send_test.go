@@ -153,18 +153,23 @@ func TestSend_TaskListMapsStatuses(t *testing.T) {
 		{ID: "a", Subject: "write tests", Status: agent.TaskInProgress, ActiveForm: "writing tests"},
 		{ID: "b", Subject: "ship it", Status: agent.TaskPending},
 		{ID: "c", Subject: "done thing", Status: agent.TaskCompleted},
+		{ID: "d", Subject: "broken thing", Status: agent.TaskFailed, ActiveForm: "failed: the remote refused"},
+		{ID: "e", Subject: "called off", Status: agent.TaskCancelled, ActiveForm: "cancelled"},
+		{ID: "f", Subject: "not needed", Status: agent.TaskSkipped, ActiveForm: "skipped"},
 	}}
 	if err := a.Send(context.Background(), msg); err != nil {
 		t.Fatalf("send: %v", err)
 	}
 
 	var got []string
+	var details []string
 	for _, c := range api.snapshot() {
 		for _, tc := range taskChunks(c.Chunks) {
 			got = append(got, string(tc.Status))
+			details = append(details, tc.Details)
 		}
 	}
-	want := []string{"in_progress", "pending", "complete"}
+	want := []string{"in_progress", "pending", "complete", "error", "error", "pending"}
 	if len(got) != len(want) {
 		t.Fatalf("statuses = %v, want %v", got, want)
 	}
@@ -172,6 +177,13 @@ func TestSend_TaskListMapsStatuses(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("status %d = %q, want %q", i, got[i], want[i])
 		}
+	}
+	// The detail of the row is the details of the card.
+	if details[3] != "failed: the remote refused" {
+		t.Fatalf("details = %v, want the detail of the failed row", details)
+	}
+	if details[5] != "skipped" {
+		t.Fatalf("details = %v, want the detail of the skipped row", details)
 	}
 }
 

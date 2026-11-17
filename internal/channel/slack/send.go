@@ -219,8 +219,9 @@ func (a *Adapter) sendTaskList(ctx context.Context, msg messages.OutboundMessage
 			id = "task-" + item.ID
 		}
 		title := firstNonEmpty(item.Subject, item.ActiveForm, "task")
-		// ActiveForm is the live "…writing unit tests" hint; it only
-		// adds information when it differs from the subject.
+		// ActiveForm is the detail of the row: it says what the task
+		// is doing or what it came to. It only adds information when
+		// it differs from the subject.
 		details := ""
 		if item.ActiveForm != "" && item.ActiveForm != item.Subject {
 			details = item.ActiveForm
@@ -234,13 +235,17 @@ func (a *Adapter) sendTaskList(ctx context.Context, msg messages.OutboundMessage
 }
 
 // taskStatus maps nightme's task status onto Slack's card states.
+//
+// A task that did not get done is an error, whatever made it stop:
+// the work did not happen. A task that was skipped is still pending:
+// it never ran, and its detail says why.
 func taskStatus(status agent.AgentTaskStatus) slackgo.TaskCardStatus {
 	switch status {
 	case agent.TaskInProgress:
 		return slackgo.TaskCardStatusInProgress
 	case agent.TaskCompleted:
 		return slackgo.TaskCardStatusComplete
-	case agent.TaskCancelled:
+	case agent.TaskFailed, agent.TaskCancelled:
 		return slackgo.TaskCardStatusError
 	default:
 		return slackgo.TaskCardStatusPending

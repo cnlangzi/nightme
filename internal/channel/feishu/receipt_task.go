@@ -7,17 +7,14 @@
 // share the 50-element budget — Feishu's hard limit — so a long
 // list is still rendered correctly without truncation.
 //
-// The renderer emits a standard markdown todo list so Feishu's
-// lark_md parser renders each row as a checkbox:
-//   - [ ]  → pending / in-progress task (open checkbox)
-//   - [x]  → completed task (checked checkbox)
-//
-// In-progress rows also append the optional `ActiveForm` phrase
-// in a soft-grey suffix (Feishu `lark_md` ignores backticks in
-// the middle of a line, so plain parens are used). The
-// in-progress / pending / completed display order is a Feishu-
-// local decision; other Channels are free to pick their own
-// ordering and presentation. The generic status enum
+// The renderer emits one row per task, in the order the sender
+// listed the items in: the order is what makes a plan readable.
+// Every row carries the marker of its state — one character between
+// the brackets, so the status column has the same width on every
+// row — and the detail of the row in a soft-grey suffix (Feishu
+// `lark_md` ignores backticks in the middle of a line, so plain
+// parens are used). A task that failed therefore never reads like a
+// task that has not started. The generic status enum
 // (agent.AgentTaskStatus) is the only input the renderer reads.
 package feishu
 
@@ -47,8 +44,8 @@ const checklistOverflowPlaceholder = "- [ ] …"
 // Picked to comfortably fit inside the Feishu 24 KB body budget
 // for the worst-case 1 task × 200 chars subject × CJK triple-byte
 // envelope, with plenty of slack for the icon and a few tasks.
-// Long task lists are truncated (in-progress first, then pending,
-// then completed).
+// Long task lists are truncated at the end: the sender's order is
+// the order of the plan.
 const checklistBudgetRunes = 4000
 
 // buildTaskChecklistChunks renders the receipt's tasks slice
@@ -64,22 +61,18 @@ func buildTaskChecklistChunks(items []agent.AgentTaskItem) []string {
 	if len(items) == 0 {
 		return nil
 	}
-	// Stable partition by status so the user's eye lands on
-	// the currently-active task first. Within each bucket we
-	// keep the bridge-supplied order (the bridge has its own
-	// insertion-order tracking) for a deterministic render.
-	buckets := make(map[agent.AgentTaskStatus][]int, 3)
+	// The rows keep the order the sender listed them in: the order is
+	// what makes a plan readable.
+	order := make([]int, 0, len(items))
 	for i, it := range items {
 		// Filter TaskDeleted defensively: the bridge is supposed
 		// to remove deleted tasks before emitting, but a corrupt
 		// snapshot must not produce a visible "deleted" row.
-		switch it.Status {
-		case agent.TaskInProgress, agent.TaskPending, agent.TaskCompleted:
-			buckets[it.Status] = append(buckets[it.Status], i)
+		if it.Status == agent.TaskDeleted {
+			continue
 		}
+		order = append(order, i)
 	}
-	order := append(append([]int{}, buckets[agent.TaskInProgress]...), buckets[agent.TaskPending]...)
-	order = append(order, buckets[agent.TaskCompleted]...)
 
 	// Render the visible lines in order. The line collector
 	// tracks how many bytes the budget has consumed; once the
@@ -107,7 +100,7 @@ func buildTaskChecklistChunks(items []agent.AgentTaskItem) []string {
 	// Join the rendered lines with newlines and split into
 	// per-element chunks that each respect divTextCharLimit.
 	// splitMarkdownForDivs already preserves code blocks / list
-	// atomicity; our checklist is a list of `- [ ]` / `- [x]`
+	// atomicity; our checklist is a list of `- [ ]` / `- [√]`
 	// task lines, all of which share the same list item shape
 	// and are trivially paragraph-safe to split.
 	//
@@ -162,26 +155,23 @@ func joinLines(lines []string) string {
 	return string(buf)
 }
 
-// renderTaskLine builds one row of the markdown todo list. The
-// status enum decides only the checkbox state and the (optional)
-// activeForm suffix; the row shape is identical for every status
-// so the output reads as a single coherent list.
+// renderTaskLine builds one row of the checklist. The status enum
+// decides the marker of the row and the (optional) detail suffix;
+// the row shape is identical for every status so the output reads as
+// a single coherent list.
 //
 //   - pending      → - [ ] Subject
-//   - in_progress  → - [ ] Subject (ActiveForm)         (open checkbox + grey note)
-//   - completed    → - [x] Subject
+//   - in_progress  → - [>] Subject (detail)
+//   - completed    → - [√] Subject (detail)
+//   - failed       → - [!] Subject (detail)
 func renderTaskLine(it agent.AgentTaskItem) string {
-	checkbox := "- [ ]"
-	if it.Status == agent.TaskCompleted {
-		checkbox = "- [x]"
-	}
 	subject := strings.TrimSpace(it.Subject)
 	if subject == "" {
 		subject = it.ID
 	}
-	line := checkbox + " " + subject
-	if it.Status == agent.TaskInProgress && it.ActiveForm != "" {
-		line += " (" + it.ActiveForm + ")"
+	line := "- " + agent.TaskStatusMarker(it.Status) + " " + subject
+	if detail := strings.TrimSpace(it.ActiveForm); detail != "" {
+		line += " (" + detail + ")"
 	}
 	return line
 }

@@ -1483,16 +1483,17 @@ No Channel interface, ChatSession, binding, registry, or receipt map API changes
 
 ### 5.1 Status mapping
 
-The Feishu receipt renders the task snapshot as a standard markdown todo list. Feishu's `lark_md` parses the leading `[ ]` / `[x]` as a checkbox, so the user sees a real interactive checklist. Display order is in-progress, pending, completed; order within each group follows bridge task order.
+The Feishu receipt renders the task snapshot as a markdown list. Every row carries the marker of its state — one character between the brackets, so the status column has the same width on every row — and the detail of the row in a grey suffix. The rows keep the order the sender listed them in.
 
-- [ ] `pending` — render as `- [ ] Subject` (open checkbox)
-  - [ ] Insert before `completed` rows; after `in_progress` rows
-- [ ] `in_progress` — render as `- [ ] Subject (ActiveForm)` (open checkbox + grey note)
-  - [ ] Suffix `(ActiveForm)` is appended only when the field is non-empty
-  - [ ] Insert FIRST in the checklist (highest visual priority)
-- [ ] `completed` — render as `- [x] Subject` (closed checkbox)
-  - [ ] Insert LAST in the checklist (lowest visual priority)
-- [ ] `deleted` — bridge-only; the receipt MUST NOT render any row with this status (defensive filter in `buildTaskChecklistChunks`)
+- `pending` — render as `- [ ] Subject`
+- `in_progress` — render as `- [>] Subject (ActiveForm)`
+- `completed` — render as `- [√] Subject (ActiveForm)`
+- `failed` — render as `- [!] Subject (ActiveForm)`
+- `cancelled` — render as `- [-] Subject (ActiveForm)`
+- `skipped` — render as `- [/] Subject (ActiveForm)`
+- `deleted` — bridge-only; the receipt MUST NOT render any row with this status (defensive filter in `buildTaskChecklistChunks`)
+
+The suffix `(ActiveForm)` is appended only when the field is non-empty. Feishu's `lark_md` parses the leading `[ ]` of a todo row as a checkbox, so the not-started row renders as a checkbox and the other rows as plain text.
 
 ### 5.2 Capacity
 
@@ -1500,10 +1501,9 @@ The entire checklist is one markdown card element. It must fit within `divTextCh
 
 When content exceeds the checklist budget:
 
-1. keep in-progress tasks;
-2. keep pending tasks;
-3. include completed tasks only while space remains;
-4. append `…另有 N 项任务`.
+1. keep the rows in the order the sender listed them in;
+2. drop the rows that do not fit;
+3. append `…` to the last visible row.
 
 The card element calculation must reserve one element when a checklist is present and keep `body.elements <= 50`.
 

@@ -439,7 +439,7 @@ func TestSend_OutTaskCreate_EmitsChecklist(t *testing.T) {
 	if !strings.Contains(got, "- [ ] first") {
 		t.Errorf("missing pending row in %q", got)
 	}
-	if !strings.Contains(got, "- [x] second") {
+	if !strings.Contains(got, "- [√] second") {
 		t.Errorf("missing completed row in %q", got)
 	}
 }

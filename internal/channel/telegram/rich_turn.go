@@ -9,7 +9,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/statusbar"
 )
 
@@ -110,9 +109,11 @@ type richTurn struct {
 
 // taskListItem is the minimal task snapshot the rich turn renders.
 // Mirrors the chain's agent.AgentTaskItem shape — kept local to
-// avoid pulling the agent package into the rich file's API.
+// avoid pulling the agent package into the rich file's API. Marker is
+// the state of the row: the bracketed character the agent package
+// hands out, so every channel draws the same state the same way.
 type taskListItem struct {
-	Status     string
+	Marker     string
 	ID         string
 	Subject    string
 	ActiveForm string
@@ -678,27 +679,6 @@ func (r *richTurnsIndex) size() int {
 // the future without re-adding the import).
 var _ = statusbar.RenderPanel
 
-// taskStatusToString maps agent.AgentTaskStatus to a stable string
-// the rich block renderer's list section consumes. Mirrors the
-// v9 chain's renderTaskLine switch (chain_body.go). Strings are
-// stable on the wire (no enum-name leakage) so future agent
-// status additions don't ripple into the rich-block schema.
-func taskStatusToString(s agent.AgentTaskStatus) string {
-	switch s {
-	case agent.TaskPending:
-		return "pending"
-	case agent.TaskInProgress:
-		return "in_progress"
-	case agent.TaskCompleted:
-		return "completed"
-	case agent.TaskDeleted:
-		return "deleted"
-	case agent.TaskCancelled:
-		return "cancelled"
-	}
-	return "pending"
-}
-
 // Task section emitted by renderRichTurnTaskListBlocks. 📋 Tasks
 // heading matches feishu's `**📋 Tasks**` for cross-channel parity;
 // the rest of the consts are the feishu checklistBudgetRunes /
@@ -718,33 +698,20 @@ const (
 // once at the source rather than re-mutating a block map).
 //
 // The budget accounts for the headline + every row + the trailing
-// " " + … suffix on the last row (when truncated). cancelled /
-// deleted statuses are filtered before the budget runs so they
-// don't consume visible rows; the all-filtered case emits no
-// blocks (matches the no-orphan-headline rule).
+// " " + … suffix on the last row (when truncated). Every row is
+// rendered: a task that failed or was cancelled is a row the
+// operator has to see.
 func renderRichTurnTaskListBlocks(items []taskListItem) ([]map[string]any, bool) {
 	if len(items) == 0 {
-		return nil, false
-	}
-
-	visible := make([]taskListItem, 0, len(items))
-	for _, it := range items {
-		switch it.Status {
-		case "cancelled", "deleted":
-			continue
-		}
-		visible = append(visible, it)
-	}
-	if len(visible) == 0 {
 		return nil, false
 	}
 
 	headlineRunes := utf8.RuneCountInString(richTurnTaskListHeadline)
 	// +2 for the trailing " " + … suffix when the list is truncated.
 	const truncationSuffixRunes = 2
-	rowTexts := make([]string, 0, len(visible))
+	rowTexts := make([]string, 0, len(items))
 	total := headlineRunes
-	for _, it := range visible {
+	for _, it := range items {
 		rowText := renderTaskRowText(it)
 		cost := utf8.RuneCountInString(rowText) + 1 // +1 for inter-row separator
 		if total+cost+truncationSuffixRunes > richTurnTaskListBudgetRunes {
@@ -758,7 +725,7 @@ func renderRichTurnTaskListBlocks(items []taskListItem) ([]map[string]any, bool)
 	// and the user still sees the section header.
 	if len(rowTexts) == 0 {
 		rowTexts = []string{richTurnTaskListOverflowPlaceholder}
-	} else if len(rowTexts) < len(visible) {
+	} else if len(rowTexts) < len(items) {
 		// Truncation marker: appended to the last visible row's
 		// text before block construction so we never have to
 		// re-mutate the block map after building it.
@@ -780,23 +747,22 @@ func renderRichTurnTaskListBlocks(items []taskListItem) ([]map[string]any, bool)
 }
 
 // renderTaskRowText formats one task row for the rich block list.
-// Subject is trimmed; whitespace-only Subject falls back to the
-// (also-trimmed) ID so a malformed snapshot yields `• ID` rather
-// than `• `. In_progress rows only show the ActiveForm suffix when
-// it's non-empty.
+// The row carries the marker of its state and the detail of the row,
+// so a task that failed never reads like a task that has not
+// started. Subject is trimmed; whitespace-only Subject falls back to
+// the (also-trimmed) ID so a malformed snapshot yields the ID rather
+// than an empty row.
 func renderTaskRowText(it taskListItem) string {
 	subject := strings.TrimSpace(it.Subject)
 	if subject == "" {
 		subject = strings.TrimSpace(it.ID)
 	}
-	switch it.Status {
-	case "completed":
-		return "✓ " + subject
-	case "in_progress":
-		if it.ActiveForm != "" {
-			return "• " + subject + " (" + it.ActiveForm + ")"
-		}
-		return "• " + subject
+	row := subject
+	if marker := strings.TrimSpace(it.Marker); marker != "" {
+		row = marker + " " + subject
 	}
-	return "• " + subject
+	if detail := strings.TrimSpace(it.ActiveForm); detail != "" {
+		row += " (" + detail + ")"
+	}
+	return row
 }

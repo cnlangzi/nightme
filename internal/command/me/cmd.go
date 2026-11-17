@@ -141,6 +141,7 @@ func (f *Factory) start(ctx context.Context, rt command.RuntimeServices,
 		Owner:      input.UserID,
 		Commands:   commandInfos(command.Default().SpecsVisible()),
 		Agent:      cs.SelectedAgent(),
+		MessageID:  input.MessageID,
 	})
 	if err != nil {
 		chatsession.ReportOutcome(ctx, command.FailedOutcome("error", "the workflow could not be started"))
@@ -377,6 +378,7 @@ func (c *controller) StartWorkflow(ctx context.Context, req command.MeRequest) (
 		Owner:      req.Owner,
 		Commands:   req.Commands,
 		Agent:      req.Agent,
+		MessageID:  req.MessageID,
 	})
 }
 

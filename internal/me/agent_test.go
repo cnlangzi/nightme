@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/gateway/observe"
 	"github.com/cnlangzi/nightme/internal/llm"
@@ -40,7 +41,7 @@ type fakeExec struct {
 	watchers []chan observe.Execution
 }
 
-// cardRecord is one card the run published or updated.
+// cardRecord is one card the run published.
 type cardRecord struct {
 	// ID is the id of the message the card became.
 	ID string
@@ -48,8 +49,10 @@ type cardRecord struct {
 	Title string
 	// Body is the card's body.
 	Body string
+	// ReplyTo names the message the card hangs under.
+	ReplyTo string
 	// Posted reports whether the card was published as a card of its
-	// own or updated in place.
+	// own.
 	Posted bool
 }
 
@@ -63,6 +66,18 @@ type emittedMessage struct {
 	Tool *messages.ToolInfo
 	// ReplyTo names the message the event hangs under.
 	ReplyTo string
+	// SessionID names the session the event belongs to.
+	SessionID string
+	// TaskList is the checklist the message carries.
+	TaskList *agent.AgentTaskListEvent
+	// Result is the verdict the message carries.
+	Result string
+	// Heartbeat is the progress snapshot the message carries.
+	Heartbeat *messages.HeartbeatSnapshot
+	// Choice is the interactive choice the message carries.
+	Choice *messages.Choice
+	// Usage is the token usage the message carries.
+	Usage *messages.UsageInfo
 }
 
 // fakeOperator is a scripted chat.
@@ -78,7 +93,6 @@ type fakeOperator struct {
 	asked   []askedMessage
 	cards   []cardRecord
 	log     []string
-	buttons [][]channel.CardButton
 	execs   map[string]*fakeExec
 	seq     int
 	cardSeq int
@@ -101,6 +115,17 @@ type fakeOperator struct {
 	// dropOutbound makes the chat hide every outbound message: the
 	// run's events do not reach it.
 	dropOutbound bool
+	// choice is the handler that takes the answer of an interactive
+	// choice back into the run.
+	choice func(requestID, option string) bool
+	// roundSessions are the names of the round sessions the run
+	// opened.
+	roundSessions []string
+	// adopted are the cards the run told the chat about.
+	adopted []string
+	// choiceGen counts the handlers that were installed, so that the
+	// removal of a handler does not take a newer one with it.
+	choiceGen int
 }
 
 func newFakeOperator(steps ...fakeStep) *fakeOperator {
@@ -211,8 +236,7 @@ func (f *fakeOperator) PostCard(_ context.Context, _ string, spec channel.CardSp
 	}
 	f.cardSeq++
 	id := fmt.Sprintf("card-%d", f.cardSeq)
-	f.cards = append(f.cards, cardRecord{ID: id, Title: spec.Title, Body: spec.Body, Posted: true})
-	f.buttons = append(f.buttons, spec.Buttons)
+	f.cards = append(f.cards, cardRecord{ID: id, Title: spec.Title, Body: spec.Body, ReplyTo: spec.ReplyTo, Posted: true})
 	f.log = append(f.log, "card:"+id)
 	return id, nil
 }
@@ -236,13 +260,47 @@ func (f *fakeOperator) Posted() int {
 	return f.postedCount()
 }
 
-// UpdateCard replaces the run's overview.
-func (f *fakeOperator) UpdateCard(_ context.Context, _, cardID string, spec channel.CardSpec) error {
+// AdoptCard tells the chat that the message with the given id is the
+// card of a session.
+func (f *fakeOperator) AdoptCard(_ string, cardID string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.cards = append(f.cards, cardRecord{ID: cardID, Title: spec.Title, Body: spec.Body})
-	f.buttons = append(f.buttons, spec.Buttons)
-	return nil
+	f.adopted = append(f.adopted, cardID)
+}
+
+// Adopted returns the cards the run told the chat about.
+func (f *fakeOperator) Adopted() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.adopted...)
+}
+
+// OnChoice installs the handler that takes the answer of an
+// interactive choice back into the run.
+func (f *fakeOperator) OnChoice(_ string, handler func(requestID, option string) bool) func() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.choice = handler
+	f.choiceGen++
+	gen := f.choiceGen
+	return func() {
+		f.mu.Lock()
+		if f.choiceGen == gen {
+			f.choice = nil
+		}
+		f.mu.Unlock()
+	}
+}
+
+// Pick answers the open question the way a click on an option does.
+func (f *fakeOperator) Pick(requestID, option string) bool {
+	f.mu.Lock()
+	handler := f.choice
+	f.mu.Unlock()
+	if handler == nil {
+		return false
+	}
+	return handler(requestID, option)
 }
 
 // Emit publishes an outbound message in the chat.
@@ -253,12 +311,24 @@ func (f *fakeOperator) Emit(_ context.Context, _ string, msg messages.OutboundMe
 		// The chat hides the run's events.
 		return nil
 	}
-	f.emitted = append(f.emitted, emittedMessage{
-		Kind:    msg.Kind,
-		Text:    msg.Text,
-		Tool:    msg.Tool,
-		ReplyTo: msg.ReplyTo,
-	})
+	emitted := emittedMessage{
+		Kind:      msg.Kind,
+		Text:      msg.Text,
+		Tool:      msg.Tool,
+		ReplyTo:   msg.ReplyTo,
+		SessionID: msg.SessionID,
+		TaskList:  msg.TaskList,
+		Heartbeat: msg.Heartbeat,
+		Choice:    msg.Choice,
+		Usage:     msg.Usage,
+	}
+	if msg.SessionResult != "" {
+		emitted.Result = msg.SessionResult
+	}
+	f.emitted = append(f.emitted, emitted)
+	if msg.Kind == messages.OutInit && strings.Contains(msg.SessionID, " · round ") {
+		f.roundSessions = append(f.roundSessions, msg.SessionID)
+	}
 	return nil
 }
 
@@ -283,6 +353,47 @@ func (f *fakeOperator) EmittedOf(kind messages.OutboundKind) []emittedMessage {
 	return out
 }
 
+// RoundSessions returns the names of the round sessions the run
+// opened, in the order it opened them.
+func (f *fakeOperator) RoundSessions() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.roundSessions...)
+}
+
+// Entries returns the entries of the card with the given id.
+//
+// The entries are what the chat folds into the card: the reason of a
+// decision, the words of a model, the outcome of a step.
+func (f *fakeOperator) Entries(id string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, 0, 8)
+	for _, m := range f.emitted {
+		if m.Kind == messages.OutReply && m.ReplyTo == id {
+			out = append(out, m.Text)
+		}
+	}
+	return out
+}
+
+// Checklist returns the checklist of the card with the given id.
+func (f *fakeOperator) Checklist(id string) []agent.AgentTaskItem {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []agent.AgentTaskItem
+	for _, m := range f.emitted {
+		if m.Kind != messages.OutTaskUpdate || m.TaskList == nil {
+			continue
+		}
+		if m.ReplyTo != id {
+			continue
+		}
+		out = append([]agent.AgentTaskItem(nil), m.TaskList.Items...)
+	}
+	return out
+}
+
 // Cards returns the cards the run published and updated, in the order
 // it did it.
 func (f *fakeOperator) Cards() []cardRecord {
@@ -297,28 +408,6 @@ func (f *fakeOperator) Log() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.log...)
-}
-
-// Buttons returns the buttons of the run's overview.
-func (f *fakeOperator) Buttons() []channel.CardButton {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if len(f.buttons) == 0 {
-		return nil
-	}
-	return append([]channel.CardButton(nil), f.buttons[len(f.buttons)-1]...)
-}
-
-// CardButtons returns the buttons of every card the run published and
-// updated, in the order it did it.
-func (f *fakeOperator) CardButtons() [][]channel.CardButton {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	out := make([][]channel.CardButton, 0, len(f.buttons))
-	for _, b := range f.buttons {
-		out = append(out, append([]channel.CardButton(nil), b...))
-	}
-	return out
 }
 
 // Get returns the tracked execution of a message.
@@ -940,9 +1029,6 @@ func TestFastPath_RunsEveryStepWithoutAModel(t *testing.T) {
 			t.Fatalf("command %d was %q, want %q", i, sent[i], cmd)
 		}
 	}
-	if !op.Has("system-1: 0 decisions") {
-		t.Fatalf("the summary does not count the decisions: %v", op.Lines())
-	}
 }
 
 // TestFastPath_ANormalBranchKeepsTheFastPath — a step that had nothing
@@ -1032,7 +1118,7 @@ jobs:
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForLine(t, op, "Which step should run next?")
+	waitAsked(t, op, "Which step should run next?")
 
 	svc.mu.Lock()
 	r := svc.active["obs-1"]
@@ -1085,7 +1171,7 @@ jobs:
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForLine(t, op, "Which step should run next?")
+	waitAsked(t, op, "Which step should run next?")
 
 	svc.mu.Lock()
 	r := svc.active["obs-1"]
@@ -1284,7 +1370,7 @@ func TestPersist_HoldsTheProgressTheConversationAndTheHistory(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForLine(t, op, "Which step should run next?")
+	waitAsked(t, op, "Which step should run next?")
 	waitStateFile(t, dir)
 
 	svc.mu.Lock()
@@ -1504,7 +1590,7 @@ jobs:
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForLine(t, op, "Which step should run next?")
+	waitAsked(t, op, "Which step should run next?")
 
 	svc.mu.Lock()
 	r := svc.active["obs-1"]
@@ -1636,7 +1722,7 @@ func TestJudgmentPoint_NeedsHumanAsksTheUserWhenThereIsNoChatModel(t *testing.T)
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForLine(t, op, "Which step should run next?")
+	waitAsked(t, op, "Which step should run next?")
 
 	if err := svc.Reply(context.Background(), "obs-1", "/gtw fix 42 -y"); err != nil {
 		t.Fatalf("reply: %v", err)
@@ -1906,4 +1992,53 @@ func waitForLine(t *testing.T, op *fakeOperator, text string) {
 		time.Sleep(2 * time.Millisecond)
 	}
 	t.Fatalf("the run's overview never carried %q: %v", text, op.Lines())
+}
+
+// waitSpoken waits until the run said the given text in the chat.
+func waitSpoken(t *testing.T, op *fakeOperator, text string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, msg := range op.Spoken() {
+			if strings.Contains(msg.Text, text) {
+				return
+			}
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("the run never said %q: %v", text, op.Spoken())
+}
+
+// waitChoice waits until the run published a choice card and returns
+// it.
+//
+// The question reaches the chat before the choice card does: the card
+// is the second half of the question.
+func waitChoice(t *testing.T, op *fakeOperator) *messages.Choice {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		choices := op.EmittedOf(messages.OutChoice)
+		if len(choices) > 0 && choices[len(choices)-1].Choice != nil {
+			return choices[len(choices)-1].Choice
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("the run published no choice: %v", op.Emitted())
+	return nil
+}
+
+// waitAsked waits until the run asked the given question.
+func waitAsked(t *testing.T, op *fakeOperator, text string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, q := range op.Asked() {
+			if strings.Contains(q.Text, text) {
+				return
+			}
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("the run never asked %q: %v", text, op.Asked())
 }

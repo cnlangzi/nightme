@@ -280,6 +280,16 @@ type OutboundMessage struct {
 	Workspace string
 	Branch    string
 
+	// SessionResult is the verdict the session reached: the one line
+	// that says what it concluded. It rides in the footer's identity
+	// line, after the session's id.
+	//
+	// The personal agent's sessions carry it: a decision session says
+	// what the decision was, a run session says how the run ended.
+	// Empty means the session has no verdict to show, and the footer
+	// says nothing about one.
+	SessionResult string
+
 	// ReplyTo carries the channel-native root message id when the
 	// agent wants to reply in a thread.
 	ReplyTo string

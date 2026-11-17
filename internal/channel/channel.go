@@ -168,22 +168,17 @@ type SpeakOptions struct {
 	RunID string
 }
 
-// CardSpec is what a card shows: a title, a body and the buttons
-// under it.
+// CardSpec is what a card shows: a title and a body.
 type CardSpec struct {
-	Title   string
-	Body    string
-	Buttons []CardButton
-}
-
-// CardButton is one button under a card.
-//
-// Action is the text a click produces. The channel renders the
-// button; the click comes back as an inbound message carrying that
-// text, so a click travels the same path a typed command takes.
-type CardButton struct {
-	Label  string
-	Action string
+	Title string
+	Body  string
+	// ReplyTo names the message the card is posted as a reply to.
+	// Empty means the card stands on its own in the chat.
+	//
+	// The personal agent posts the card of its session itself and
+	// then addresses the session by that card's id: the card is
+	// where the session's events hang.
+	ReplyTo string
 }
 
 // CardPublisher renders a card in a chat.
@@ -194,9 +189,19 @@ type CardButton struct {
 type CardPublisher interface {
 	// PostCard publishes the card and returns the id of the message
 	// it became.
+	//
+	// A card the publisher posted is a card it can adopt: the events
+	// that carry the card's id as their anchor are rendered onto
+	// that card instead of onto a new one.
 	PostCard(ctx context.Context, chatID string, spec CardSpec) (string, error)
-	// UpdateCard replaces the card's content.
-	UpdateCard(ctx context.Context, chatID, cardID string, spec CardSpec) error
+	// AdoptCard tells the publisher that the message with the given id
+	// is a card of its own.
+	//
+	// The events that carry such an anchor are rendered onto that
+	// card instead of onto a new one. A daemon that comes back has
+	// forgotten the cards it posted, and the owner of a card tells it
+	// again.
+	AdoptCard(chatID, cardID string)
 }
 
 // Message is an alias for messages.InboundMessage. Kept for

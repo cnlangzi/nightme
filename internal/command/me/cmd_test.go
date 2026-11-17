@@ -207,6 +207,21 @@ func TestStart_MapsTheArguments(t *testing.T) {
 	}
 }
 
+// TestStart_CarriesTheMessageID — the run's card hangs under the
+// message that started the run.
+func TestStart_CarriesTheMessageID(t *testing.T) {
+	ctrl := &fakeController{}
+	cs := newSession(t, "me-1", "/tmp/work")
+
+	runMe(t, ctrl, cs, "/me", "start", "fix-issue")
+	if len(ctrl.started) != 1 {
+		t.Fatalf("the controller got %d requests, want 1", len(ctrl.started))
+	}
+	if req := ctrl.request(0); req.MessageID != "msg-1" {
+		t.Errorf("message id = %q, want msg-1", req.MessageID)
+	}
+}
+
 // TestStart_CarriesTheCommandsAndTheAgent — the run gets the commands
 // it may issue and the agent of the chat that started it.
 func TestStart_CarriesTheCommandsAndTheAgent(t *testing.T) {

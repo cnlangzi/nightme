@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/messages"
 )
@@ -147,9 +146,10 @@ func TestContinue_CarriesTheNote(t *testing.T) {
 	}
 }
 
-// TestTheCardOffersTheQuestionAsButtons — the options the run is
-// waiting for become the card's buttons, so a click is the answer.
-func TestTheCardOffersTheQuestionAsButtons(t *testing.T) {
+// TestTheQuestionIsOfferedAsAChoiceCard — the options the run is
+// waiting for become the chat's own choice card, so a click is the
+// answer.
+func TestTheQuestionIsOfferedAsAChoiceCard(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
@@ -164,21 +164,57 @@ func TestTheCardOffersTheQuestionAsButtons(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForLine(t, op, "Which step should run next?")
+	waitAsked(t, op, "Which step should run next?")
 
-	buttons := op.Buttons()
+	choices := op.EmittedOf(messages.OutChoice)
+	if len(choices) == 0 {
+		t.Fatalf("the run published no choice: %v", op.Emitted())
+	}
+	choice := choices[0].Choice
+	if choice == nil {
+		t.Fatal("the choice carries no payload")
+	}
+	if choice.RequestID == "" {
+		t.Error("the choice has no request id: the answer could not be correlated")
+	}
 	found := false
-	for _, b := range buttons {
-		if b.Label == "/gtw commit" && b.Action == "reply 0" {
+	for _, option := range choice.Options {
+		if option.Label == "/gtw commit" {
 			found = true
 		}
-		if b.Label == "escalate" {
-			t.Errorf("the card offers the operator %q, want the options of the run", b.Label)
+		if option.Label == "escalate" {
+			t.Errorf("the card offers the operator %q, want the options of the run", option.Label)
 		}
 	}
 	if !found {
-		t.Fatalf("the card has no answer button: %+v", buttons)
+		t.Fatalf("the choice has no option of the run: %+v", choice.Options)
 	}
+}
+
+// TestAClickOnTheChoiceIsTheAnswerOfTheRun — a click on an option of
+// the choice card reaches the run.
+func TestAClickOnTheChoiceIsTheAnswerOfTheRun(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	decider := &scriptedDecider{answers: []llm.DecisionResponse{
+		decisionResp("jev", "/gtw commit", 0.1, 0),
+	}}
+	svc, op := testService(t, dir, Config{Decider: decider})
+	op.steps = []fakeStep{pendingStep("still going"), okStep("committed")}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitAsked(t, op, "Which step should run next?")
+
+	choice := waitChoice(t, op)
+	if !op.Pick(choice.RequestID, "0") {
+		t.Fatal("the click did not reach the run")
+	}
+	waitRun(t, svc, "obs-1")
 }
 
 // TestTheQuestionIsNotDispatched — the question belongs to the run,
@@ -198,7 +234,7 @@ func TestTheQuestionIsNotDispatched(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForLine(t, op, "question: Which branch?")
+	waitAsked(t, op, "Which branch?")
 
 	asked := op.Asked()
 	if len(asked) != 1 {
@@ -232,7 +268,7 @@ func TestANumberedAnswerIsTheOption(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForLine(t, op, "Which step should run next?")
+	waitAsked(t, op, "Which step should run next?")
 
 	if err := svc.Reply(context.Background(), "obs-1", "0"); err != nil {
 		t.Fatalf("reply: %v", err)
@@ -295,15 +331,16 @@ jobs:
 	}
 	waitRun(t, svc, "obs-1")
 
-	if posted := op.Posted(); posted != 1 {
-		t.Fatalf("the run published %d cards, want one for the iteration", posted)
+	// The card of the run and the card of the round: every session
+	// owns one card.
+	if posted := op.Posted(); posted != 2 {
+		t.Fatalf("the run published %d cards, want one for the run and one for the round", posted)
 	}
 }
 
-// TestTheCardOfTheStartIsAdopted — the card the run starts with
-// belongs to the first iteration: the run adopts it instead of
-// publishing a second one.
-func TestTheCardOfTheStartIsAdopted(t *testing.T) {
+// TestTheRoundCardHangsUnderTheCardOfTheRun — the round is the run's
+// work, one level below it.
+func TestTheRoundCardHangsUnderTheCardOfTheRun(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
@@ -317,12 +354,12 @@ func TestTheCardOfTheStartIsAdopted(t *testing.T) {
 	}
 	waitSent(t, op, "/gtw commit")
 
-	if posted := op.Posted(); posted != 1 {
-		t.Fatalf("the run published %d cards, want the one it started with", posted)
+	cards := op.Cards()
+	if len(cards) != 2 {
+		t.Fatalf("the run published %d cards, want the card of the run and the card of the round", len(cards))
 	}
-	body := lastCardBody(op, "card-1")
-	if !strings.Contains(body, "job: main · round: 1") {
-		t.Errorf("the card does not name the iteration it records: %q", body)
+	if cards[1].ReplyTo != cards[0].ID {
+		t.Errorf("the round card hangs under %q, want the run card %q", cards[1].ReplyTo, cards[0].ID)
 	}
 }
 
@@ -348,8 +385,8 @@ jobs:
 	}
 	waitRun(t, svc, "obs-1")
 
-	if posted := op.Posted(); posted != 2 {
-		t.Fatalf("the run published %d cards, want one per round", posted)
+	if posted := op.Posted(); posted != 3 {
+		t.Fatalf("the run published %d cards, want the card of the run and one per round", posted)
 	}
 
 	// The card of the second round stands in front of the command of
@@ -370,13 +407,14 @@ jobs:
 		t.Fatalf("the card of the second round came after its first command: %v", log)
 	}
 
-	// The card of the round that ended keeps its content.
-	body := lastCardBody(op, "card-1")
-	if !strings.Contains(body, "1. ✅ /gtw fix") {
-		t.Errorf("the card of the first round does not show its step: %q", body)
+	// The card of the round that ended keeps its content: the round
+	// session is closed with its verdict.
+	rounds := op.RoundSessions()
+	if len(rounds) != 2 {
+		t.Fatalf("the run opened %d round sessions, want one per round", len(rounds))
 	}
-	if !strings.HasPrefix(body, "job: main · round: 1") {
-		t.Errorf("the card of the first round does not name its round: %q", body)
+	if rounds[0] != "main · round 1" || rounds[1] != "main · round 2" {
+		t.Errorf("the round sessions are %v, want one per round", rounds)
 	}
 }
 
@@ -395,21 +433,21 @@ func TestAnotherJobGetsACardOfItsOwn(t *testing.T) {
 	}
 	waitRun(t, svc, "obs-1")
 
-	if posted := op.Posted(); posted != 2 {
-		t.Fatalf("the run published %d cards, want one per job", posted)
+	if posted := op.Posted(); posted != 3 {
+		t.Fatalf("the run published %d cards, want the card of the run and one per job", posted)
 	}
-	body := lastCardBody(op, "card-1")
-	if !strings.Contains(body, "1. ✅ /gtw commit") {
-		t.Errorf("the card of the first job does not show its step: %q", body)
+	rounds := op.RoundSessions()
+	if len(rounds) != 2 {
+		t.Fatalf("the run opened %d round sessions, want one per job", len(rounds))
 	}
-	if !strings.HasPrefix(body, "job: build · round: 1") {
-		t.Errorf("the card of the first job does not name its iteration: %q", body)
+	if rounds[0] != "build · round 1" || rounds[1] != "publish · round 1" {
+		t.Errorf("the round sessions are %v, want one per job", rounds)
 	}
 }
 
-// TestTheCardKeepsItsTitle — the title of the card is the workflow
-// and the phase it is in.
-func TestTheCardKeepsItsTitle(t *testing.T) {
+// TestTheRunCardCarriesThePhaseInItsFooter — the run's card says how
+// the run ended: the verdict rides in the footer of the session.
+func TestTheRunCardCarriesThePhaseInItsFooter(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "ship", twoJobWorkflow)
 
@@ -421,28 +459,24 @@ func TestTheCardKeepsItsTitle(t *testing.T) {
 	}
 	waitRun(t, svc, "obs-1")
 
-	cards := op.Cards()
-	if len(cards) == 0 {
-		t.Fatal("the run published no card")
+	results := op.EmittedOf(messages.OutResult)
+	if len(results) == 0 {
+		t.Fatalf("the run published no result: %v", op.Emitted())
 	}
-	for _, c := range cards {
-		if !strings.HasPrefix(c.Title, "ship · ") {
-			t.Errorf("the card is titled %q, want the workflow and the phase", c.Title)
+	found := false
+	for _, m := range results {
+		if m.Result == "ship is complete" {
+			found = true
 		}
 	}
-	last := cards[len(cards)-1]
-	if last.Title != "ship · done" {
-		t.Errorf("the last card is titled %q, want the final phase", last.Title)
-	}
-	if !strings.Contains(last.Body, "result: ") {
-		t.Errorf("the last card does not carry the summary: %q", last.Body)
+	if !found {
+		t.Errorf("the run published no verdict of its outcome: %v", results)
 	}
 }
 
-// TestAQuestionUpdatesTheCardInPlace — a run that asks a question
-// keeps the card it has: the question is an update, not a card of its
-// own.
-func TestAQuestionUpdatesTheCardInPlace(t *testing.T) {
+// TestAQuestionOpensNoCardOfItsOwn — a run that asks a question keeps
+// the cards it has: the question is a choice, not a session.
+func TestAQuestionOpensNoCardOfItsOwn(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
@@ -457,18 +491,16 @@ func TestAQuestionUpdatesTheCardInPlace(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForLine(t, op, "Which step should run next?")
+	waitAsked(t, op, "Which step should run next?")
 
-	if posted := op.Posted(); posted != 1 {
-		t.Fatalf("the run published %d cards, want the one it started with", posted)
-	}
+	before := op.Posted()
 
 	if err := svc.Reply(context.Background(), "obs-1", "0"); err != nil {
 		t.Fatalf("reply: %v", err)
 	}
 	waitRun(t, svc, "obs-1")
-	if posted := op.Posted(); posted != 1 {
-		t.Fatalf("the run published %d cards, want the one it started with", posted)
+	if posted := op.Posted(); posted != before {
+		t.Fatalf("the run published %d cards, want the ones it had", posted-before)
 	}
 }
 
@@ -501,8 +533,9 @@ func TestAPauseUpdatesTheCardInPlace(t *testing.T) {
 	}
 	waitRun(t, svc, "obs-1")
 
-	if posted := op.Posted(); posted != 1 {
-		t.Fatalf("the run published %d cards, want the one it started with", posted)
+	// The run keeps the cards it has: a pause is not a session.
+	if posted := op.Posted(); posted > 2 {
+		t.Fatalf("the run published %d cards, want the card of the run and the card of the round", posted)
 	}
 }
 
@@ -529,12 +562,9 @@ func TestTheModelPathFollowsTheStepOfTheCommand(t *testing.T) {
 	}
 	waitRun(t, svc, "obs-1")
 
-	if posted := op.Posted(); posted != 2 {
-		t.Fatalf("the run published %d cards, want one per job", posted)
-	}
-	body := lastCardBody(op, "card-2")
-	if !strings.Contains(body, "job: publish · round: 1") {
-		t.Errorf("the card does not follow the step of the command: %q", body)
+	rounds := op.RoundSessions()
+	if len(rounds) < 2 || rounds[len(rounds)-1] != "publish · round 1" {
+		t.Errorf("the card does not follow the step of the command: %v", rounds)
 	}
 }
 
@@ -565,24 +595,14 @@ func TestAnIterationKeepsItsCard(t *testing.T) {
 	waitRun(t, svc, "obs-1")
 
 	// The run was in the build job, then in the publish job, and back
-	// in the build job: two iterations, two cards.
-	if posted := op.Posted(); posted != 2 {
-		t.Fatalf("the run published %d cards, want one per iteration", posted)
+	// in the build job: two rounds, two cards. The round the run came
+	// back to keeps the card it had.
+	rounds := op.RoundSessions()
+	if len(rounds) != 2 {
+		t.Fatalf("the run opened %d round sessions, want one per round", len(rounds))
 	}
-	// The card of the build iteration was written after the card of
-	// the publish iteration: the run went back to it.
-	cards := op.Cards()
-	publish, build := -1, -1
-	for i, c := range cards {
-		if c.ID == "card-2" && c.Posted {
-			publish = i
-		}
-		if c.ID == "card-1" {
-			build = i
-		}
-	}
-	if publish < 0 || build < publish {
-		t.Fatalf("the run did not go back to the card of the build iteration: %v", cards)
+	if rounds[0] != "build · round 1" || rounds[1] != "publish · round 1" {
+		t.Errorf("the round sessions are %v, want one per round", rounds)
 	}
 }
 
@@ -615,15 +635,11 @@ func TestACardTheChatRefusedIsPublishedLater(t *testing.T) {
 	}
 	waitRun(t, svc, "obs-1")
 
-	if !logged(logger, "the run card could not be published") {
+	if !logged(logger, "the session card could not be posted") {
 		t.Errorf("the failure was not logged: %v", logger.Lines())
 	}
-	if posted := op.Posted(); posted != 2 {
-		t.Fatalf("the run published %d cards, want the start card and the one the chat took later", posted)
-	}
-	body := lastCardBody(op, "card-2")
-	if !strings.Contains(body, "job: publish · round: 1") {
-		t.Errorf("the card does not name the iteration it records: %q", body)
+	if posted := op.Posted(); posted < 2 {
+		t.Fatalf("the run published %d cards, want the card of the run and the one the chat took later", posted)
 	}
 }
 
@@ -648,26 +664,21 @@ func TestTheCardOfAnAnsweredQuestionOffersNoChoice(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForLine(t, op, "Which step should run next?")
-	if !hasReplyButton(op.Buttons()) {
-		t.Fatalf("the card does not offer the answer: %+v", op.Buttons())
+	waitAsked(t, op, "Which step should run next?")
+	choices := op.EmittedOf(messages.OutChoice)
+	if len(choices) != 1 {
+		t.Fatalf("the run published %d choices, want one", len(choices))
 	}
 
-	// The operator picks one: the run goes on in another iteration.
+	// The operator picks one: the run goes on in another round.
 	if err := svc.Reply(context.Background(), "obs-1", "1"); err != nil {
 		t.Fatalf("reply: %v", err)
 	}
-	waitForPosted(t, op, 2)
+	waitRun(t, svc, "obs-1")
 
-	// The card the run left behind does not offer the answer any more.
-	buttons := cardButtons(op, "card-1")
-	for _, b := range buttons {
-		if strings.HasPrefix(b.Action, cardActionReply) {
-			t.Fatalf("the card of the iteration that ended still offers the answer: %+v", buttons)
-		}
-	}
-	if body := lastCardBody(op, "card-1"); strings.Contains(body, "question: ") {
-		t.Errorf("the card of the iteration that ended still shows the question: %q", body)
+	// The question is asked once: the run does not ask it again.
+	if again := op.EmittedOf(messages.OutChoice); len(again) != 1 {
+		t.Fatalf("the run published %d choices, want one", len(again))
 	}
 }
 
@@ -699,7 +710,7 @@ func TestACardThatCannotBePublishedDoesNotStopTheRun(t *testing.T) {
 	if posted := op.Posted(); posted != 1 {
 		t.Errorf("the run published %d cards, want the one the chat took", posted)
 	}
-	if !logged(logger, "the run card could not be published") {
+	if !logged(logger, "the session card could not be posted") {
 		t.Errorf("the failure was not logged: %v", logger.Lines())
 	}
 }
@@ -731,23 +742,19 @@ func TestResume_KeepsTheCardItOwns(t *testing.T) {
 	}
 	waitSent(t, op, "/gtw commit")
 
-	// The state carries the iteration of the card the run owns.
-	state := waitForCardIteration(t, filepath.Join(dir, "runs", runID+".json"))
-	if state["card_job"] != "main" {
-		t.Errorf("the state names the job %v, want main", state["card_job"])
+	// The state carries the cards of the open sessions: a run that
+	// comes back goes on with the cards it opened.
+	state := waitForSession(t, filepath.Join(dir, "runs", runID+".json"))
+	runSession, ok := state["run_session"].(map[string]any)
+	if !ok || runSession["card_id"] == "" {
+		t.Fatalf("the state holds no card of the run: %v", state["run_session"])
 	}
-	if state["card_round"] != float64(1) {
-		t.Errorf("the state names the round %v, want 1", state["card_round"])
+	roundSession, ok := state["round_session"].(map[string]any)
+	if !ok || roundSession["card_id"] == "" {
+		t.Fatalf("the state holds no card of the round: %v", state["round_session"])
 	}
-	// The card of the iteration travels with the run: a run that comes
-	// back to it goes on with that card.
-	cards, ok := state["cards"].([]any)
-	if !ok || len(cards) != 1 {
-		t.Fatalf("the state holds no card of an iteration: %v", state["cards"])
-	}
-	entry, ok := cards[0].(map[string]any)
-	if !ok || entry["job"] != "main" || entry["round"] != float64(1) {
-		t.Errorf("the state names the card of %v, want the card of main", cards[0])
+	if roundSession["job"] != "main" || roundSession["round"] != float64(1) {
+		t.Errorf("the state names the round %v, want main round 1", roundSession)
 	}
 
 	// The daemon goes away and comes back.
@@ -766,6 +773,23 @@ func TestResume_KeepsTheCardItOwns(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	if op.Posted() != posted {
 		t.Errorf("the resumed run published %d cards, want none", op.Posted()-posted)
+	}
+
+	// The chat has forgotten the cards the run opened: the run tells
+	// it again, so the chat patches them instead of sending a second
+	// card for the same session.
+	adopted := op.Adopted()
+	if len(adopted) == 0 {
+		t.Fatalf("the resumed run told the chat about no card: %v", adopted)
+	}
+	want := map[string]bool{}
+	for _, card := range op.Cards() {
+		want[card.ID] = true
+	}
+	for _, cardID := range adopted {
+		if !want[cardID] {
+			t.Errorf("the run told the chat about %q, want a card it owns", cardID)
+		}
 	}
 }
 
@@ -793,19 +817,13 @@ func TestShow_PutsTheStateBackInFrontOfTheOperator(t *testing.T) {
 	if op.Posted() != before+1 {
 		t.Fatalf("the run published %d cards, want one more", op.Posted())
 	}
-	if !op.Has("/gtw commit") {
-		t.Errorf("the card does not show the step: %v", op.Lines())
-	}
 
 	// The run keeps updating the card /me show published.
 	shown := lastPostedCard(op)
-	if !strings.Contains(shown.Body, "job: main · round: 1") {
-		t.Errorf("the card does not name the iteration it records: %q", shown.Body)
-	}
 	if err := op.answer("obs-1", "", ""); err != nil {
 		t.Fatalf("settle the step: %v", err)
 	}
-	waitForCardUpdate(t, op, shown.ID)
+	waitForSessionUpdate(t, op, shown.ID)
 }
 
 // twoJobWorkflow is a workflow of two jobs: the second one waits for
@@ -882,29 +900,6 @@ func lastCardBody(op *fakeOperator, id string) string {
 	return body
 }
 
-// cardButtons returns the buttons of the card with the given id, as
-// they were written last.
-func cardButtons(op *fakeOperator, id string) []channel.CardButton {
-	cards := op.Cards()
-	buttons := op.CardButtons()
-	for i := len(cards) - 1; i >= 0; i-- {
-		if cards[i].ID == id {
-			return buttons[i]
-		}
-	}
-	return nil
-}
-
-// hasReplyButton reports whether the buttons answer a question.
-func hasReplyButton(buttons []channel.CardButton) bool {
-	for _, b := range buttons {
-		if strings.HasPrefix(b.Action, cardActionReply) {
-			return true
-		}
-	}
-	return false
-}
-
 // waitForPosted waits until the run published that many cards.
 func waitForPosted(t *testing.T, op *fakeOperator, n int) {
 	t.Helper()
@@ -945,9 +940,9 @@ func waitForCardUpdate(t *testing.T, op *fakeOperator, id string) {
 	t.Fatalf("the run never updated the card %q: %v", id, op.Cards())
 }
 
-// waitForCardIteration waits until the run's state file carries the
-// iteration of the card the run owns.
-func waitForCardIteration(t *testing.T, path string) map[string]any {
+// waitForSession waits until the run's state file carries the card of
+// the round the run is in.
+func waitForSession(t *testing.T, path string) map[string]any {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
@@ -955,15 +950,31 @@ func waitForCardIteration(t *testing.T, path string) map[string]any {
 		if err == nil {
 			var state map[string]any
 			if err := json.Unmarshal(raw, &state); err == nil {
-				if job, ok := state["card_job"].(string); ok && job != "" {
+				if sess, ok := state["round_session"].(map[string]any); ok && sess["card_id"] != "" {
 					return state
 				}
 			}
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
-	t.Fatalf("the run state never carried the card's iteration: %s", path)
+	t.Fatalf("the run state never carried the card of the round: %s", path)
 	return nil
+}
+
+// waitForSessionUpdate waits until the run publishes an event under
+// the card with the given id.
+func waitForSessionUpdate(t *testing.T, op *fakeOperator, id string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, m := range op.Emitted() {
+			if m.ReplyTo == id {
+				return
+			}
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("the run never published an event under the card %q", id)
 }
 
 // indexOf returns the position of the first entry that equals the
@@ -1000,19 +1011,20 @@ func TestShow_WithoutARunIsRefused(t *testing.T) {
 	}
 }
 
-// TestTheErrorHasItsOwnLine — the error says why the run stopped, on
-// its own line.
-func TestTheErrorHasItsOwnLine(t *testing.T) {
+// TestTheDecisionCarriesTheReasonFirst — the reason the decision was
+// taken is the first entry of the decision's card.
+func TestTheDecisionCarriesTheReasonFirst(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
-	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolFinish, map[string]any{"status": "failed", "summary": "the step did not work"})},
+	decider := &scriptedDecider{answers: []llm.DecisionResponse{
+		decisionResp("jev", optionEscalate, 0.1, 0),
 	}}
-	svc, op := testService(t, dir, Config{Provider: provider})
+	svc, op := testService(t, dir, Config{Decider: decider})
 	op.steps = []fakeStep{{outcome: messages.Outcome{
 		Status:  messages.OutcomeFailed,
 		Summary: "the command failed",
+		Data:    map[string]string{"error": "the command failed"},
 	}}}
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
@@ -1020,18 +1032,19 @@ func TestTheErrorHasItsOwnLine(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitRun(t, svc, "obs-1")
+	waitAsked(t, op, "Which step should run next?")
 
-	var found bool
-	for _, line := range op.Lines() {
-		for _, l := range strings.Split(line, "\n") {
-			if strings.HasPrefix(l, "error: ") {
-				found = true
-			}
+	var reason string
+	for _, m := range op.EmittedOf(messages.OutReply) {
+		if strings.HasPrefix(m.Text, "reason: ") {
+			reason = m.Text
 		}
 	}
-	if !found {
-		t.Errorf("the card has no error line: %v", op.Lines())
+	if reason == "" {
+		t.Fatalf("the run published no reason for its decision: %v", op.EmittedOf(messages.OutReply))
+	}
+	if !strings.Contains(reason, "the command failed") {
+		t.Errorf("the reason does not carry the error of the step: %q", reason)
 	}
 }
 
@@ -1088,7 +1101,7 @@ func TestTakeover_AReplyToTheQuestionIsNotATakeover(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForLine(t, op, "question: Which branch?")
+	waitAsked(t, op, "Which branch?")
 
 	svc.mu.Lock()
 	r := svc.active["obs-1"]

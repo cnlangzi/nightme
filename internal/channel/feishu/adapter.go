@@ -65,6 +65,14 @@ const actionNeededTitleEmoji = "👉"
 // eviction only happens for genuinely stale ids.
 const messageStatesLRUSize = 5000
 
+// postedCardsLRUSize bounds the cache of the cards this adapter
+// posted.
+//
+// A card is remembered for as long as the session that owns it may
+// send events. A daemon that comes back is told the cards again by
+// the run that owns them.
+const postedCardsLRUSize = 2000
+
 // sendMessageFunc is kept behind the adapter so unit tests can exercise the
 // channel without making an HTTP request to Feishu.
 //
@@ -222,6 +230,18 @@ type Adapter struct {
 	// a.mu (same lock as receiptsByUserMsgID).
 	pendingHeartbeats map[string]messages.HeartbeatSnapshot
 
+	// postedCards holds the cards this adapter posted, keyed by the
+	// chat they live in and their message id.
+	//
+	// The personal agent posts the card of its session itself and
+	// addresses the session by that card's id: the receipt for such
+	// an anchor adopts the card and patches it in place instead of
+	// sending a second one.
+	//
+	// Bounded by postedCardsLRUSize (LRU eviction). The cache is
+	// internally synchronized.
+	postedCards *lru.Cache[postedCardKey, bool]
+
 	// optCards remembers the last OutChoice payload per bot message
 	// id so a later opt: click can PATCH the card: drop all
 	// buttons and keep only the chosen option. Entries are
@@ -328,10 +348,15 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 	if err != nil {
 		return nil, fmt.Errorf("feishu: init messageStates LRU: %w", err)
 	}
+	postedCards, err := lru.New[postedCardKey, bool](postedCardsLRUSize)
+	if err != nil {
+		return nil, fmt.Errorf("feishu: init postedCards LRU: %w", err)
+	}
 	a := &Adapter{
 		incoming:            make(chan channel.Message, 128),
 		receiptsByUserMsgID: make(map[string]*MessageReceipt),
 		pendingHeartbeats:   make(map[string]messages.HeartbeatSnapshot),
+		postedCards:         postedCards,
 		optCards:            make(map[string]*messages.Choice),
 		optWizards:          make(map[string]*choiceWizard),
 		optByRequestID:      make(map[string]string),
@@ -863,7 +888,7 @@ func (a *Adapter) ensureReceiptForTyping(ctx context.Context, chatID, userMsgID 
 		return nil, false, errors.New("feishu: ensureReceiptForTyping requires userMsgID")
 	}
 
-	transient := NewMessageReceiptForReply(chatID, userMsgID, "", a)
+	transient := NewMessageReceiptForReply(chatID, userMsgID, a.adoptableCard(chatID, userMsgID), a)
 	// No entries / no tasks — buildReceiptCard will render the
 	// "⌨️ Working..." placeholder header line. F-48: footer is
 	// rendered up-front so the placeholder card shows the
@@ -882,6 +907,14 @@ func (a *Adapter) ensureReceiptForTyping(ctx context.Context, chatID, userMsgID 
 	}
 	a.receiptsByUserMsgID[userMsgID] = transient
 	a.mu.Unlock()
+
+	if transient.cardMsgID != "" {
+		// The anchor names a card this adapter posted: the receipt
+		// adopts it and patches it in place. A session owns one card,
+		// and the card is already in the chat where the operator
+		// expects it.
+		return transient, true, a.renderAdopted(ctx, transient)
+	}
 
 	// Snapshot transient state under r.mu: the receipt is now
 	// visible in a.receiptsByUserMsgID, so a concurrent
@@ -929,11 +962,13 @@ func (a *Adapter) ensureReceiptForTyping(ctx context.Context, chatID, userMsgID 
 		return nil, false, err
 	}
 
-	a.mu.Lock()
+	// The receipt's own lock guards its fields: renderLocked reads
+	// them under it.
+	transient.mu.Lock()
 	transient.replyMsgID = msgID
 	transient.cardMsgID = msgID
 	transient.initializing = false
-	a.mu.Unlock()
+	transient.mu.Unlock()
 	// F-63.1: drain any heartbeat snapshot that was stashed
 	// BEFORE this receipt existed (first countable event
 	// landing before MessageQueued). ApplyHeartbeat folds the
@@ -997,7 +1032,7 @@ func (a *Adapter) ensureReceiptForReplyWithFooter(ctx context.Context, chatID, u
 		return nil, false, errors.New("feishu: ensureReceiptForReply requires non-empty firstEntryText")
 	}
 
-	transient := NewMessageReceiptForReply(chatID, userMsgID, "", a)
+	transient := NewMessageReceiptForReply(chatID, userMsgID, a.adoptableCard(chatID, userMsgID), a)
 	transient.entries = []LogEntry{newOutReplyEntry(firstEntryText)}
 	transient.footerLines = footerLines
 	transient.promptState = agentsession.PromptRunning
@@ -1012,6 +1047,12 @@ func (a *Adapter) ensureReceiptForReplyWithFooter(ctx context.Context, chatID, u
 	}
 	a.receiptsByUserMsgID[userMsgID] = transient
 	a.mu.Unlock()
+
+	if transient.cardMsgID != "" {
+		// The anchor names a card this adapter posted: the receipt
+		// adopts it and patches it in place.
+		return transient, true, a.renderAdopted(ctx, transient)
+	}
 
 	// Snapshot transient state under r.mu: the receipt is now
 	// visible in a.receiptsByUserMsgID, so a concurrent
@@ -1072,11 +1113,13 @@ func (a *Adapter) ensureReceiptForReplyWithFooter(ctx context.Context, chatID, u
 		return nil, false, err
 	}
 
-	a.mu.Lock()
+	// The receipt's own lock guards its fields: renderLocked reads
+	// them under it.
+	transient.mu.Lock()
 	transient.replyMsgID = msgID
 	transient.cardMsgID = msgID
 	transient.initializing = false
-	a.mu.Unlock()
+	transient.mu.Unlock()
 	a.applyPendingHeartbeat(ctx, transient)
 	return transient, true, nil
 }
@@ -1328,7 +1371,7 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 		return nil, false, errors.New("feishu: ensureReceiptForTask requires non-nil AgentTaskListEvent")
 	}
 
-	transient := NewMessageReceiptForReply(chatID, userMsgID, "", a)
+	transient := NewMessageReceiptForReply(chatID, userMsgID, a.adoptableCard(chatID, userMsgID), a)
 	// Copy the items exactly like SetTaskList does, so the
 	// snapshot we hand to buildReceiptCard is independent of any
 	// later mutations on the caller's AgentTaskListEvent.
@@ -1349,6 +1392,12 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 	}
 	a.receiptsByUserMsgID[userMsgID] = transient
 	a.mu.Unlock()
+
+	if transient.cardMsgID != "" {
+		// The anchor names a card this adapter posted: the receipt
+		// adopts it and patches it in place.
+		return transient, true, a.renderAdopted(ctx, transient)
+	}
 
 	// Snapshot transient state under r.mu: the receipt is now
 	// visible in a.receiptsByUserMsgID, so a concurrent
@@ -1395,11 +1444,13 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 		return nil, false, err
 	}
 
-	a.mu.Lock()
+	// The receipt's own lock guards its fields: renderLocked reads
+	// them under it.
+	transient.mu.Lock()
 	transient.replyMsgID = msgID
 	transient.cardMsgID = msgID
 	transient.initializing = false
-	a.mu.Unlock()
+	transient.mu.Unlock()
 	// F-63.1: drain any heartbeat snapshot that was stashed
 	// BEFORE this receipt existed (first countable event
 	// landing before MessageQueued). ApplyHeartbeat folds the
@@ -3958,6 +4009,21 @@ func (a *Adapter) applyPendingHeartbeat(ctx context.Context, r *MessageReceipt) 
 	r.ApplyHeartbeat(ctx, snap)
 }
 
+// renderAdopted paints a receipt that adopted a card this adapter
+// posted.
+//
+// The card is already in the chat: the receipt patches it in place
+// instead of sending a second card for the same session.
+func (a *Adapter) renderAdopted(ctx context.Context, r *MessageReceipt) error {
+	r.mu.Lock()
+	r.initializing = false
+	r.mu.Unlock()
+	a.applyPendingHeartbeat(ctx, r)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.renderLocked(ctx)
+}
+
 // Per PR #47, the receipt cold-start card routes through ReplyInBoth
 // (reply endpoint with reply_in_thread omitted) when rootID is non-empty
 // — the card body shows inline in main chat with a reply quote header
@@ -4489,8 +4555,6 @@ func (a *Adapter) handleCardAction(ctx context.Context, event *larkcallback.Card
 	actionStr := resolveCardAction(req, remembered, wiz)
 
 	switch {
-	case strings.HasPrefix(actionStr, meActionPrefix):
-		return a.handleMeCardAction(ctx, event, strings.TrimPrefix(actionStr, meActionPrefix))
 	case strings.HasPrefix(actionStr, "act:"):
 		return a.handleActCardAction(ctx, event, actionStr)
 	case strings.HasPrefix(actionStr, "opt:"),

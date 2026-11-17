@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/wfe"
 )
@@ -39,7 +38,9 @@ const (
 // postSummary posts the summary of a run the operator stopped.
 //
 // The summary is the record of the session: it says what the run did,
-// what went wrong and what the models decided.
+// what went wrong and what the models decided. It is a card of its
+// own — the run is over, and its live card is no longer the record
+// of it.
 //
 // A chat that refuses the card changes nothing else: the run still
 // ends, and no error reaches the operator.
@@ -51,24 +52,29 @@ func (s *Service) postSummary(r *run) {
 	// summary is posted after that. The context outlives the run here
 	// on purpose.
 	ctx := context.WithoutCancel(r.ctx)
-	if _, err := s.cfg.Operator.PostCard(ctx, r.chatID, s.summaryView(r)); err != nil {
-		s.logger.Warn("me: the run summary could not be posted", "run_id", r.id, "err", err)
+	sess := s.openSession(ctx, r, sessionRun, r.id, "", 0, "")
+	if sess.cardID == "" {
+		// The chat refused the card: the run still ends, and no error
+		// reaches the operator.
+		return
 	}
+	s.publishInit(ctx, r, sess)
+	s.publishTasks(ctx, r, sess, r.runTasks())
+	for _, line := range r.summaryLines() {
+		s.publishReply(ctx, r, sess, line)
+	}
+	s.publishResult(ctx, r, sess, string(r.currentPhase()))
 }
 
-// summaryView renders the summary of a stopped run.
+// summaryLines renders the summary of a stopped run.
 //
-// The body is facts first: the run, how long it went, the jobs it
+// The facts come first: the run, how long it went, the jobs it
 // entered, what it did, how often it woke a model and what each
 // capability decided and spent. The errors and the decisions follow,
 // one per line, and the totals stay in the facts.
-//
-// The card carries no buttons: the run is over, and pause, continue
-// and stop would act on a run that no longer exists.
-func (s *Service) summaryView(r *run) channel.CardSpec {
+func (r *run) summaryLines() []string {
 	r.mu.Lock()
 	id := r.id
-	workflow := r.workflow.Name
 	started := r.state.StartedAt
 	rounds := make(map[string]int, len(r.state.Rounds))
 	for job, round := range r.state.Rounds {
@@ -85,7 +91,7 @@ func (s *Service) summaryView(r *run) channel.CardSpec {
 
 	lines := make([]string, 0, 16)
 	lines = append(lines, "run: "+id)
-	lines = append(lines, "duration: "+compactDuration(s.now().Sub(started)))
+	lines = append(lines, "duration: "+compactDuration(r.svc.now().Sub(started)))
 	if line := jobsLine(jobs, rounds); line != "" {
 		lines = append(lines, clipLine(line, maxSummaryLine))
 	}
@@ -96,22 +102,15 @@ func (s *Service) summaryView(r *run) channel.CardSpec {
 	lines = append(lines, fmt.Sprintf("system-2: %d decisions, %d tokens", s2d, s2u))
 
 	if errs := errorLines(history); len(errs) > 0 {
-		lines = append(lines, "")
 		lines = append(lines, errs...)
 	}
 	if decs := decisionLines(wakes); len(decs) > 0 {
-		lines = append(lines, "")
 		lines = append(lines, decs...)
 	}
 	if inflight != nil && inflight.Command != "" {
-		lines = append(lines, "")
 		lines = append(lines, clipLine("stopped while: "+inflight.Command, maxSummaryLine))
 	}
-
-	return channel.CardSpec{
-		Title: workflow + " · " + string(r.currentPhase()),
-		Body:  strings.Join(lines, "\n"),
-	}
+	return lines
 }
 
 // workflowStepIDs returns the ids of the steps of the workflow.

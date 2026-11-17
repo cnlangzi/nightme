@@ -1,213 +1,228 @@
-// Tests for the run's card.
+// Tests for the sessions the run speaks in.
 //
-// The card is the run's receipt: it carries the live header, the
-// decision the run made last and the run's own words.
+// Every session owns one card: the placeholder the run posted when the
+// session opened. The card's message id is the anchor of every event
+// the session sends, so the chat renders the session onto that card
+// and patches it in place.
 
 package me
 
 import (
-	"fmt"
+	"context"
+	"strconv"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/cnlangzi/nightme/internal/wfe"
+	"github.com/cnlangzi/nightme/internal/llm"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
-// cardRun builds a run of the one-step workflow, with the card of
-// its first iteration.
-func cardRun(t *testing.T, svc *Service) *run {
-	t.Helper()
-	wf, ok := svc.catalog.Lookup("one")
-	if !ok {
-		t.Fatal("the workflow is not in the catalogue")
-	}
-	bound, err := wfe.Bind(wf, map[string]string{})
-	if err != nil {
-		t.Fatalf("bind: %v", err)
-	}
-	r := newRun(svc, Request{Name: "one", ChatID: "obs-1", Cwd: "/tmp/work"}, bound, nil)
-	r.setCard("card-1", iteration{job: "main", round: 1})
-	return r
-}
-
-// cardService builds a service with the one-step workflow in it.
-func cardService(t *testing.T) *Service {
+// sessionService builds a service with the one-step workflow in it.
+func sessionService(t *testing.T) (*Service, *fakeOperator) {
 	t.Helper()
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
-	svc, _ := testService(t, dir, Config{})
-	return svc
+	return testService(t, dir, noModels())
 }
 
-// manyStepWorkflow is a workflow with the given number of steps.
-func manyStepWorkflow(n int) string {
-	var b strings.Builder
-	b.WriteString("title: many\njobs:\n  main:\n    steps:\n")
-	for i := 0; i < n; i++ {
-		fmt.Fprintf(&b, "      - id: step%d\n        message: /gtw step%d\n", i, i)
+// TestTheRunCardHangsUnderTheMessageThatStartedTheRun — the run's card
+// answers the message the run was started with.
+func TestTheRunCardHangsUnderTheMessageThatStartedTheRun(t *testing.T) {
+	svc, op := sessionService(t)
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
 	}
-	return b.String()
-}
+	waitRun(t, svc, "obs-1")
 
-// firstLine returns the first line of a card body.
-func firstLine(body string) string {
-	line, _, _ := strings.Cut(body, "\n")
-	return line
-}
-
-// TestCard_CarriesTheLiveHeader — the first line of the card says
-// what the run did and when it last did it.
-func TestCard_CarriesTheLiveHeader(t *testing.T) {
-	svc := cardService(t)
-	r := cardRun(t, svc)
-
-	at := time.Date(2026, 11, 16, 14, 35, 22, 0, time.UTC)
-	r.countThink(at)
-	r.countThink(at)
-	r.countTool(at)
-	r.countTool(at)
-	r.countTool(at)
-
-	view := svc.cardView(r, iteration{job: "main", round: 1})
-	if got := firstLine(view.Body); got != "💭 2 · 🔧 3 · ⏱ 14:35:22" {
-		t.Fatalf("the first line of the card is %q, want the live header", got)
+	cards := op.Cards()
+	if len(cards) == 0 {
+		t.Fatal("the run published no card")
+	}
+	if cards[0].ReplyTo != "om_start" {
+		t.Errorf("the run card hangs under %q, want om_start", cards[0].ReplyTo)
 	}
 }
 
-// TestCard_HasNoLiveHeaderWithoutActivity — a run that has not done
-// anything yet starts with the line of its iteration.
-func TestCard_HasNoLiveHeaderWithoutActivity(t *testing.T) {
-	svc := cardService(t)
-	r := cardRun(t, svc)
+// TestTheRunCardCarriesTheJobsOfTheWorkflow — the checklist of the run
+// is the workflow's jobs, one row per job.
+func TestTheRunCardCarriesTheJobsOfTheWorkflow(t *testing.T) {
+	svc, op := sessionService(t)
 
-	view := svc.cardView(r, iteration{job: "main", round: 1})
-	if got := firstLine(view.Body); got != "job: main · round: 1" {
-		t.Fatalf("the first line of the card is %q, want the iteration of the run", got)
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitRun(t, svc, "obs-1")
+
+	tasks := op.EmittedOf(messages.OutTaskUpdate)
+	if len(tasks) == 0 {
+		t.Fatalf("the run published no checklist: %v", op.Emitted())
+	}
+	items := tasks[0].TaskList.Items
+	if len(items) != 1 {
+		t.Fatalf("the checklist holds %d rows, want one per job", len(items))
+	}
+	if items[0].ID != "main" {
+		t.Errorf("the row is %q, want the job", items[0].ID)
 	}
 }
 
-// TestCard_NamesTheDecisionOfTheModel — the decision a model made
-// names what it decided.
-func TestCard_NamesTheDecisionOfTheModel(t *testing.T) {
-	svc := cardService(t)
-	r := cardRun(t, svc)
+// TestTheRunCardHasNoButtons — the operator drives the run with the
+// /me commands, not with buttons on a card.
+func TestTheRunCardHasNoButtons(t *testing.T) {
+	svc, op := sessionService(t)
 
-	r.setDecision(decisionChat, "the chat model took the turn")
-	r.recordWake(wakeRecord{
-		Who:  decisionChat,
-		What: "run_step(review)",
-		At:   time.Now(),
-	})
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitRun(t, svc, "obs-1")
 
-	view := svc.cardView(r, iteration{job: "main", round: 1})
-	if !strings.Contains(view.Body, "decision: the chat model — run_step(review)") {
-		t.Fatalf("the card does not name the decision: %q", view.Body)
+	for _, card := range op.Cards() {
+		if card.Title != "" {
+			t.Errorf("the card %q carries a title, want the session's own header", card.Title)
+		}
 	}
 }
 
-// TestCard_KeepsTheReasonOfTheWorkflowsDecision — the workflow
-// decides on its own: there is no model behind it.
-func TestCard_KeepsTheReasonOfTheWorkflowsDecision(t *testing.T) {
-	svc := cardService(t)
-	r := cardRun(t, svc)
+// TestEveryEventOfASessionCarriesItsCard — the card of a session is
+// the anchor of its events: the chat renders the session onto that
+// card.
+func TestEveryEventOfASessionCarriesItsCard(t *testing.T) {
+	svc, op := sessionService(t)
 
-	r.setDecision(decisionWorkflow, "the plan says so")
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitRun(t, svc, "obs-1")
 
-	view := svc.cardView(r, iteration{job: "main", round: 1})
-	if !strings.Contains(view.Body, "decision: the workflow — the plan says so") {
-		t.Fatalf("the card does not name the decision: %q", view.Body)
+	cards := map[string]bool{}
+	for _, c := range op.Cards() {
+		cards[c.ID] = true
+	}
+	emitted := op.Emitted()
+	if len(emitted) == 0 {
+		t.Fatal("the run published no event")
+	}
+	for _, m := range emitted {
+		if !cards[m.ReplyTo] {
+			t.Fatalf("the event hangs under %q, want the card of its session", m.ReplyTo)
+		}
 	}
 }
 
-// TestCard_CarriesTheLastThreeReplies — the run keeps the last three
-// of its replies and the card shows them.
-func TestCard_CarriesTheLastThreeReplies(t *testing.T) {
-	svc := cardService(t)
-	r := cardRun(t, svc)
-
-	for _, text := range []string{"the first", "the second", "the third", "the fourth"} {
-		r.addReply(replyBlock{Text: text, At: time.Now()})
-	}
-
-	view := svc.cardView(r, iteration{job: "main", round: 1})
-	if !strings.Contains(view.Body, "reply:\nthe second\n\nthe third\n\nthe fourth") {
-		t.Fatalf("the card does not carry the last three replies: %q", view.Body)
-	}
-	if strings.Contains(view.Body, "the first") {
-		t.Fatalf("the card carries a reply that is too old: %q", view.Body)
-	}
-}
-
-// TestCard_LeavesOutTheStepsThatDoNotFit — a card that is too long is
-// refused by the chat, and a run whose card is refused shows nothing.
-// The steps that do not fit are left out.
-func TestCard_LeavesOutTheStepsThatDoNotFit(t *testing.T) {
+// TestTheRoundCardHangsUnderTheRunCard — the round is the run's work,
+// one level below it.
+func TestTheRoundCardHangsUnderTheRunCard(t *testing.T) {
 	dir := t.TempDir()
-	writeWorkflow(t, dir, "many", manyStepWorkflow(24))
-	svc, _ := testService(t, dir, Config{})
-	wf, ok := svc.catalog.Lookup("many")
-	if !ok {
-		t.Fatal("the workflow is not in the catalogue")
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+	svc, op := testService(t, dir, noModels())
+	op.steps = []fakeStep{okStep("committed")}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
 	}
-	bound, err := wfe.Bind(wf, map[string]string{})
+	waitRun(t, svc, "obs-1")
+
+	cards := op.Cards()
+	if len(cards) < 2 {
+		t.Fatalf("the run published %d cards, want the run card and the round card", len(cards))
+	}
+	if cards[1].ReplyTo != cards[0].ID {
+		t.Errorf("the round card hangs under %q, want the run card %q", cards[1].ReplyTo, cards[0].ID)
+	}
+}
+
+// TestTheRunCardCarriesTheTokensOfTheRun — the run's card shows what
+// the run spent in its footer.
+func TestTheRunCardCarriesTheTokensOfTheRun(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	provider := &scriptedProvider{responses: []llm.Response{
+		{Message: toolCallMsg("c1", toolResume, map[string]any{}),
+			Usage: llm.Usage{InputTokens: 120, OutputTokens: 30}},
+	}}
+	svc, op := testService(t, dir, Config{Provider: provider})
+	op.steps = []fakeStep{pendingStep("still going"), okStep("committed")}
+
+	runID, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	})
 	if err != nil {
-		t.Fatalf("bind: %v", err)
+		t.Fatalf("start: %v", err)
 	}
-	r := newRun(svc, Request{Name: "many", ChatID: "obs-1", Cwd: "/tmp/work"}, bound, nil)
+	waitRun(t, svc, "obs-1")
 
-	view := svc.cardView(r, iteration{job: "main", round: 1})
-	if !strings.Contains(view.Body, "… and 8 more steps") {
-		t.Fatalf("the card does not say how many steps it left out: %q", view.Body)
+	var found bool
+	for _, m := range op.Emitted() {
+		if m.SessionID != runID || m.Usage == nil {
+			continue
+		}
+		if m.Usage.InputTokens == 120 && m.Usage.OutputTokens == 30 {
+			found = true
+		}
 	}
-	if got := len(strings.Split(view.Body, "\n")); got > maxCardElements {
-		t.Fatalf("the card holds %d lines, want at most %d", got, maxCardElements)
+	if !found {
+		t.Errorf("the run's card carries no usage: %v", op.Emitted())
 	}
 }
 
-// TestCard_ShowsTheSummaryOnOneLine — the summary is the model's own
-// text: it does not take a line of the card for every line of it.
-func TestCard_ShowsTheSummaryOnOneLine(t *testing.T) {
-	svc := cardService(t)
-	r := cardRun(t, svc)
-
-	r.setSummary("the first line\nthe second line")
-
-	view := svc.cardView(r, iteration{job: "main", round: 1})
-	if !strings.Contains(view.Body, "result: the first line the second line") {
-		t.Fatalf("the card does not show the summary on one line: %q", view.Body)
+// TestTheChoiceIdsLineUpWithTheAnswers — a click on an option is the
+// answer of that option: the ids of the choice and the numbers of a
+// typed reply name the same list.
+func TestTheChoiceIdsLineUpWithTheAnswers(t *testing.T) {
+	ask := &askState{Options: []llm.Option{
+		{Value: optionEscalate},
+		{Value: "/gtw commit"},
+		{Value: "/gtw push"},
+	}}
+	options := choiceOptions(ask.Options)
+	if len(options) != 2 {
+		t.Fatalf("the choice holds %d options, want 2", len(options))
+	}
+	for i, option := range options {
+		want := strconv.Itoa(i)
+		if option.ID != want {
+			t.Errorf("the option %q has the id %q, want %q", option.Label, option.ID, want)
+		}
+		if got := resolveChoice(ask, want); got != option.Label {
+			t.Errorf("the reply %q resolves to %q, want %q", want, got, option.Label)
+		}
 	}
 }
 
-// TestCard_ClipsTheReply — the reply on the card is short: a card is
-// read at a glance.
-func TestCard_ClipsTheReply(t *testing.T) {
-	svc := cardService(t)
-	r := cardRun(t, svc)
+// TestTheRoundCardCarriesTheStepsOfTheRound — the checklist of a round
+// is the round's steps.
+func TestTheRoundCardCarriesTheStepsOfTheRound(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+	svc, op := testService(t, dir, noModels())
+	op.steps = []fakeStep{okStep("committed")}
 
-	lines := make([]string, 0, 20)
-	for i := 0; i < 6; i++ {
-		lines = append(lines, strings.Repeat("x", 70))
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
 	}
-	for i := 0; i < 13; i++ {
-		lines = append(lines, strings.Repeat("y", 111))
-	}
-	lines = append(lines, strings.Repeat("z", 118))
-	text := strings.Join(lines, "\n")
-	if len(text) != 2000 {
-		t.Fatalf("the reply is %d characters, want 2000", len(text))
-	}
-	r.addReply(replyBlock{Text: clipReply(text), At: time.Now()})
+	waitRun(t, svc, "obs-1")
 
-	view := svc.cardView(r, iteration{job: "main", round: 1})
-	_, block, _ := strings.Cut(view.Body, "reply:\n")
-	if got := len([]rune(block)); got != maxReplyChars {
-		t.Errorf("the reply is %d characters, want %d", got, maxReplyChars)
+	round := ""
+	for _, m := range op.Emitted() {
+		if m.Kind == messages.OutTaskUpdate && m.TaskList != nil && len(m.TaskList.Items) > 0 {
+			round = m.TaskList.Items[0].Subject
+		}
 	}
-	if got := len(strings.Split(block, "\n")); got != maxReplyLines {
-		t.Errorf("the reply has %d lines, want %d", got, maxReplyLines)
-	}
-	if !strings.HasSuffix(block, "…") {
-		t.Errorf("the reply does not end with the ellipsis: %q", block)
+	if !strings.Contains(round, "/gtw commit") {
+		t.Errorf("the checklist of the round is %q, want the step of the round", round)
 	}
 }

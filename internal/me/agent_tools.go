@@ -257,33 +257,35 @@ func (s *Service) runPendingCalls(ctx context.Context, r *run) error {
 			return err
 		}
 		call := r.pendingCallList()[0]
-		anchor := r.cardMessageID()
+		// The call hangs under the decision that made it: the call and
+		// its result belong under the same card.
+		sess := r.decisionSessionRef()
 		// The call is counted before it leaves the run: a chat that
 		// hides the run's tool calls does not change what the run did.
-		s.countToolCall(r)
-		s.publishToolStart(ctx, r, anchor, call)
+		s.countToolCall(ctx, r)
+		s.publishToolStart(ctx, r, sess, call)
 		// The run moved: the card counts the call it is making.
-		s.updateCard(r)
+		s.refreshSessions(r)
 		res, err := s.execTool(ctx, r, call)
 		if err != nil {
 			var te *toolError
 			if errors.As(err, &te) {
-				s.publishToolEnd(ctx, r, anchor, call, stepResult{Status: "error", Summary: te.Error()}, nil)
-				s.updateCard(r)
+				s.publishToolEnd(ctx, r, sess, call, stepResult{Status: "error", Summary: te.Error()}, nil)
+				s.refreshSessions(r)
 				s.appendToolResult(r, call, stepResult{Status: "error", Summary: te.Error()}, true)
 				r.dropPendingCall()
 				s.persist(r)
 				continue
 			}
-			s.publishToolEnd(ctx, r, anchor, call, stepResult{}, err)
+			s.publishToolEnd(ctx, r, sess, call, stepResult{}, err)
 			return err
 		}
 		if res.Status != statusWaiting {
 			// The call settled. A call whose command is still running
 			// has no verdict yet: the result comes when the run picks
 			// the command up again.
-			s.publishToolEnd(ctx, r, anchor, call, res, nil)
-			s.updateCard(r)
+			s.publishToolEnd(ctx, r, sess, call, res, nil)
+			s.refreshSessions(r)
 		}
 		r.dropPendingCall()
 		s.appendToolResult(r, call, res, false)
@@ -371,7 +373,7 @@ func (s *Service) toolResume(ctx context.Context, r *run, _ pendingCall) (stepRe
 	idx := r.stepIndex(step.ID)
 	// The card follows the step: the step runs in the job and the
 	// round of that step.
-	s.switchCard(ctx, r, r.iterationOfStep(idx))
+	s.switchRoundSession(ctx, r, r.iterationOfStep(idx))
 	job := wfe.JobOf(r.workflow, step.ID)
 	verdict, err := s.executeStep(ctx, r, job, step)
 	if err != nil {
@@ -382,8 +384,9 @@ func (s *Service) toolResume(ctx context.Context, r *run, _ pendingCall) (stepRe
 		return stepResult{Status: statusWaiting, Summary: verdict.Outcome.Summary}, nil
 	}
 	r.recordStep(job, step, verdict.Outcome)
+	s.recordStepOutcome(ctx, r, job, step, verdict.Outcome)
 	s.persist(r)
-	s.updateCard(r)
+	s.refreshSessions(r)
 	return stepResult{
 		Status:     string(verdict.Outcome.Status),
 		Summary:    verdict.Outcome.Summary,
@@ -418,11 +421,12 @@ func (s *Service) toolNext(ctx context.Context, r *run, _ pendingCall) (stepResu
 	job := wfe.JobOf(r.workflow, step.ID)
 	done := doneOutcome(st.Outcome)
 	r.recordStep(job, step, done)
+	s.recordStepOutcome(ctx, r, job, step, done)
 	// The history has to agree with the run state: the step is done,
 	// and the run says so.
 	r.record(wfe.ActionKindRun, s.stepCommand(r, step), step.ID, done)
 	s.persist(r)
-	s.updateCard(r)
+	s.refreshSessions(r)
 	return stepResult{
 		Status:  string(done.Status),
 		Summary: done.Summary,
@@ -526,7 +530,7 @@ func (s *Service) runStep(ctx context.Context, r *run, command string) (stepResu
 	// The card follows the step the command belongs to: the command
 	// runs in the job and the round of that step, and the card records
 	// where the run is working.
-	s.switchCard(ctx, r, r.iterationOfStep(idx))
+	s.switchRoundSession(ctx, r, r.iterationOfStep(idx))
 	res, err := s.runCommand(ctx, r, command, false)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -542,6 +546,7 @@ func (s *Service) runStep(ctx context.Context, r *run, command string) (stepResu
 		if owned {
 			// The step ran: the run state carries the outcome.
 			r.recordStep(wfe.JobOf(r.workflow, step.ID), step, out)
+			s.recordStepOutcome(ctx, r, wfe.JobOf(r.workflow, step.ID), step, out)
 		}
 		return stepResult{}, toolErrorf("%s", err.Error())
 	}
@@ -572,6 +577,7 @@ func (s *Service) runStep(ctx context.Context, r *run, command string) (stepResu
 	if owned {
 		// The step ran: the run state carries the outcome.
 		r.recordStep(wfe.JobOf(r.workflow, step.ID), step, out)
+		s.recordStepOutcome(ctx, r, wfe.JobOf(r.workflow, step.ID), step, out)
 	}
 	return res, nil
 }
@@ -739,11 +745,9 @@ func (s *Service) toolWait(ctx context.Context, r *run, call pendingCall) (stepR
 		d = maxWait
 	}
 
-	r.setWaiting(d.String())
-	s.updateCard(r)
+	s.refreshSessions(r)
 	defer func() {
-		r.setWaiting("")
-		s.updateCard(r)
+		s.refreshSessions(r)
 	}()
 
 	execCtx, cancel := r.runContext(ctx)
@@ -785,7 +789,7 @@ func (s *Service) toolEndRound(ctx context.Context, r *run, _ pendingCall) (step
 	// decides again.
 	r.markSituation()
 	s.persist(r)
-	s.updateCard(r)
+	s.refreshSessions(r)
 	return stepResult{
 		Status:  string(wfe.OutcomeOK),
 		Summary: fmt.Sprintf("the round %d of %s is over", round, job),
@@ -815,7 +819,7 @@ func (s *Service) toolFinish(ctx context.Context, r *run, call pendingCall) (ste
 		r.setSummary(summary)
 		s.finish(r, PhaseDone, "")
 	}
-	s.updateCard(r)
+	s.refreshSessions(r)
 	s.persist(r)
 	return stepResult{Status: status, Summary: summary}, nil
 }
@@ -891,7 +895,7 @@ func (s *Service) runCommand(ctx context.Context, r *run, command string, instru
 // overview.
 func (s *Service) reportOutcome(r *run, command string, res stepResult) {
 	r.setTranscript(command, res.Transcript)
-	s.updateCard(r)
+	s.refreshSessions(r)
 }
 
 // groupsSuffix renders how many review groups are still open.
@@ -934,11 +938,12 @@ func (s *Service) runCommandInner(ctx context.Context, r *run, command string, i
 			return stepResult{}, fmt.Errorf("the chat could not run %q: %w", command, err)
 		}
 		msgID = id
+		r.setLastCommandMsgID(msgID)
 		r.setInflight(&inflightState{MsgID: msgID, Command: command, Instruct: instruct})
 		// The in-flight command is persisted right away: a daemon
 		// that dies while it runs comes back and resolves it.
 		s.persist(r)
-		s.updateCard(r)
+		s.refreshSessions(r)
 	}
 	return s.watchCommand(ctx, r, msgID, command)
 }
@@ -993,7 +998,7 @@ func (s *Service) watchCommand(ctx context.Context, r *run, msgID, command strin
 			// through the snapshots of the tracker. The refresh is
 			// throttled, so a chatty command does not write to the
 			// chat on every line it produces.
-			s.refreshCard(r)
+			s.refreshSessions(r)
 		}
 	}
 }

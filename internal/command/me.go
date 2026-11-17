@@ -33,6 +33,9 @@ type MeRequest struct {
 	Commands []me.CommandInfo
 	// Agent is the name of the chat's agent.
 	Agent string
+	// MessageID is the id of the message that started the run. The
+	// run's card hangs under it.
+	MessageID string
 }
 
 // MeStatus is the state of a run.

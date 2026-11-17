@@ -74,6 +74,7 @@ func (s *Service) decide(ctx context.Context, r *run) (decision, error) {
 		r.system1Model = resp.Model
 	}
 	r.mu.Unlock()
+	r.addUsage(resp.Usage)
 
 	dec := decision{Model: resp.Model, Options: s.decisionOptions(r)}
 	if answer, ok := resp.Answers[questionNext]; ok && !answer.Refused {

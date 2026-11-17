@@ -257,28 +257,6 @@ func (a *Adapter) sendRichBlocks(
 	return result, nil
 }
 
-// editRichBlocks edits a Telegram message whose rich_message blocks
-// are already built.
-func (a *Adapter) editRichBlocks(
-	ctx context.Context,
-	chatID string,
-	messageID int,
-	blocks string,
-	keyboard map[string]any,
-) error {
-	params := map[string]any{
-		"chat_id":    chatID,
-		"message_id": messageID,
-		"rich_message": map[string]any{
-			"blocks": json.RawMessage(blocks),
-		},
-	}
-	if keyboard != nil {
-		params["reply_markup"] = keyboard
-	}
-	return a.apiCall(ctx, "editMessageText", params, nil)
-}
-
 // editRichFromHTML edits a Telegram message in rich_message[blocks]
 // format. Mirrors editTelegramMessage's signature, replacing
 // text + parse_mode with rich_message[blocks].

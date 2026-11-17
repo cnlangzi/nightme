@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // TestEndToEnd_TheRunWorksInTheChatItStartedIn — the whole run
@@ -55,17 +57,33 @@ func TestEndToEnd_TheRunWorksInTheChatItStartedIn(t *testing.T) {
 		}
 	}
 
-	// The run's overview shows the steps and ends with the summary.
-	if !op.Has("fix-issue is complete") {
-		t.Fatalf("the run's overview has no summary: %v", op.Lines())
+	// The run's card shows the jobs of the workflow, and the card of
+	// the round shows what the step came to.
+	runCard := op.Cards()[0].ID
+	jobs := op.Checklist(runCard)
+	if len(jobs) != 1 || jobs[0].ID != "main" {
+		t.Fatalf("the checklist of the run is %+v, want the job of the workflow", jobs)
 	}
-	if !op.Has("✅ /gtw fix 42 -y") {
-		t.Fatalf("the run's overview does not show the steps: %v", op.Lines())
+	roundCard := op.Cards()[1].ID
+	var shown bool
+	for _, entry := range op.Entries(roundCard) {
+		if strings.Contains(entry, "/gtw fix 42 -y") {
+			shown = true
+		}
+	}
+	if !shown {
+		t.Fatalf("the card of the round does not show the step: %v", op.Entries(roundCard))
 	}
 
-	// The run's overview was one message, updated in place.
-	if len(op.Lines()) < 2 {
-		t.Fatalf("the run's overview was updated %d times, want the run to show its progress", len(op.Lines()))
+	// The run's card says how the run ended.
+	var verdict bool
+	for _, m := range op.EmittedOf(messages.OutResult) {
+		if m.Result == "fix-issue is complete" {
+			verdict = true
+		}
+	}
+	if !verdict {
+		t.Fatalf("the run published no verdict of its outcome: %v", op.EmittedOf(messages.OutResult))
 	}
 
 	// The chat holds no run any more.

@@ -73,12 +73,19 @@ func TestBudget_TheRunPausesWhenTheStepSpentItsBudget(t *testing.T) {
 	if phase := r.currentPhase(); phase != PhasePaused {
 		t.Fatalf("the run stands at %q, want %q", phase, PhasePaused)
 	}
-	waitCard(t, op, "paused:")
-	if !op.Has(`the step "commit" used up its budget (2 of 2 chances)`) {
-		t.Errorf("the card does not name the step and its chances: %v", op.Lines())
+	waitEntry(t, op, "paused:")
+	var named bool
+	for _, entry := range op.Entries(op.Cards()[0].ID) {
+		if strings.Contains(entry, `the step "commit" used up its budget (2 of 2 chances)`) {
+			named = true
+		}
+	}
+	if !named {
+		t.Errorf("the card does not name the step and its chances: %v", op.Entries(op.Cards()[0].ID))
 	}
 
 	// The chat is told once that the run waits for a human.
+	waitSpoken(t, op, "The run paused")
 	var notices int
 	for _, msg := range op.Spoken() {
 		if strings.Contains(msg.Text, "The run paused") {
@@ -469,20 +476,14 @@ func TestTheCard_ShowsTheWaitingLineAndTheChancesLeft(t *testing.T) {
 	}
 	waitRun(t, svc, "obs-1")
 
-	var waiting, chances bool
-	for _, line := range op.Lines() {
-		if strings.Contains(line, "waiting: the chat model is thinking") {
-			waiting = true
-		}
-		if strings.Contains(line, "chances left") {
+	var chances bool
+	for _, item := range op.Checklist(op.Cards()[1].ID) {
+		if strings.Contains(item.ActiveForm, "chances left") {
 			chances = true
 		}
 	}
-	if !waiting {
-		t.Errorf("the card never said the run waits for the chat model: %v", op.Lines())
-	}
 	if !chances {
-		t.Errorf("the card does not carry the chances left: %v", op.Lines())
+		t.Errorf("the card does not carry the chances left: %+v", op.Checklist(op.Cards()[1].ID))
 	}
 }
 
@@ -551,6 +552,22 @@ func waitCard(t *testing.T, op *fakeOperator, text string) {
 		time.Sleep(2 * time.Millisecond)
 	}
 	t.Fatalf("the card never carried %q: %v", text, op.Lines())
+}
+
+// waitEntry waits until the run published an entry with the given
+// text.
+func waitEntry(t *testing.T, op *fakeOperator, text string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, m := range op.EmittedOf(messages.OutReply) {
+			if strings.Contains(m.Text, text) {
+				return
+			}
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("the run published no entry with %q: %v", text, op.EmittedOf(messages.OutReply))
 }
 
 // TestTheRunReplansAfterEveryTurn — the plan decides whether the

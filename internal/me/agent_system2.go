@@ -74,10 +74,11 @@ func (s *Service) system2(ctx context.Context, r *run) (bool, error) {
 	r.system2Decisions++
 	r.system2Usage.Add(resp.Usage)
 	r.mu.Unlock()
+	r.addUsage(resp.Usage)
 	// The turn is counted before the run's events leave it: a chat
 	// that hides them does not change what the run did.
 	r.countThink(s.now())
-	r.setDecision(decisionChat, "the chat model took the turn")
+	s.publishHeartbeat(ctx, r)
 	r.recordWake(wakeRecord{
 		Who:   decisionChat,
 		What:  toolCallsLine(resp.Message.ToolCalls()),
@@ -85,12 +86,12 @@ func (s *Service) system2(ctx context.Context, r *run) (bool, error) {
 		Round: r.currentRound(),
 		At:    s.now(),
 	})
-	// The model's own words are the run's reply: they go on the card,
-	// where the operator reads them.
-	s.recordReply(r, resp.Message.Text())
-	// The card names who decided last and carries the reply: it
-	// changed, so the card changes with it.
-	s.updateCard(r)
+	// The model's own words are the decision's own: they go on the
+	// decision's card, where the operator reads them.
+	s.recordReply(ctx, r, resp.Message.Text())
+	// The decision's card changed: the checklist follows the run's
+	// progress.
+	s.refreshSessions(r)
 
 	calls := resp.Message.ToolCalls()
 	if len(calls) == 0 {
@@ -102,7 +103,7 @@ func (s *Service) system2(ctx context.Context, r *run) (bool, error) {
 		// again has to see what it just said.
 		r.appendMessage(resp.Message)
 		s.chargeStall(r, "the chat model answered without a tool call")
-		s.updateCard(r)
+		s.refreshSessions(r)
 		return false, nil
 	}
 
@@ -129,11 +130,9 @@ func (s *Service) askModel(ctx context.Context, r *run, req llm.Request) (*llm.R
 	turnCtx, cancelTurn := context.WithTimeout(execCtx, maxAgentTurn)
 	defer cancelTurn()
 
-	r.setWaiting("the chat model is thinking")
-	s.updateCard(r)
+	s.refreshSessions(r)
 	defer func() {
-		r.setWaiting("")
-		s.updateCard(r)
+		s.refreshSessions(r)
 	}()
 
 	resp, err := s.cfg.Provider.Complete(turnCtx, req)

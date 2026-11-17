@@ -1,8 +1,9 @@
 // Tests for the run's own activity.
 //
-// The run's tool calls travel the outbound path: the chat renders them
-// the way it renders a coding agent's. The card keeps the state and
-// the run's own words.
+// The run speaks the standard outbound vocabulary: the same events a
+// coding agent's turn speaks. Every event carries the anchor of the
+// session it belongs to, so the chat renders the session onto that
+// session's card.
 
 package me
 
@@ -50,27 +51,41 @@ func eventsRun(t *testing.T, provider *scriptedProvider) (*Service, *fakeOperato
 	return svc, op
 }
 
-// TestRun_PublishesNoThinkingForTheChatModelsMessage — the words of
-// the chat model are the run's own: they go on the run's card and not
-// into the chat as a thinking card of their own.
-func TestRun_PublishesNoThinkingForTheChatModelsMessage(t *testing.T) {
+// replies returns the entries the run published.
+func replies(op *fakeOperator) []string {
+	out := make([]string, 0, 4)
+	for _, m := range op.EmittedOf(messages.OutReply) {
+		out = append(out, m.Text)
+	}
+	return out
+}
+
+// TestRun_PublishesTheThinkingOfTheChatModel — the thinking is an event
+// of its own: it is not merged into the words the model spoke.
+func TestRun_PublishesTheThinkingOfTheChatModel(t *testing.T) {
 	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: textAndToolCall("the commit comes first", "c1", toolResume,
+		{Message: textAndToolCall("<think>the commit comes first</think>", "c1", toolResume,
 			map[string]any{})},
 	}}
 	_, op := eventsRun(t, provider)
 
-	if thinking := op.EmittedOf(messages.OutThinking); len(thinking) != 0 {
-		t.Fatalf("the run published %d thinking cards, want none: %v", len(thinking), op.Emitted())
+	thinking := op.EmittedOf(messages.OutThinking)
+	if len(thinking) != 1 {
+		t.Fatalf("the run published %d thinking events, want one: %v", len(thinking), op.Emitted())
 	}
-	if !op.Has("the commit comes first") {
-		t.Fatalf("the card does not carry the words of the model: %v", op.Lines())
+	if thinking[0].Text != "the commit comes first" {
+		t.Fatalf("the thinking is %q, want the scratchpad of the model", thinking[0].Text)
+	}
+	for _, text := range replies(op) {
+		if strings.Contains(text, "the commit comes first") {
+			t.Fatalf("the reply carries the thinking: %q", text)
+		}
 	}
 }
 
-// TestRun_PublishesTheReplyWithoutTheInlineTags — a model that
-// writes its scratchpad into its own text does not make the card show
-// the tags.
+// TestRun_PublishesTheReplyWithoutTheInlineTags — a model that writes
+// its scratchpad into its own text does not make the reply show the
+// tags.
 func TestRun_PublishesTheReplyWithoutTheInlineTags(t *testing.T) {
 	provider := &scriptedProvider{responses: []llm.Response{
 		{Message: textAndToolCall("<think>the commit comes first</think>", "c1", toolResume,
@@ -78,22 +93,19 @@ func TestRun_PublishesTheReplyWithoutTheInlineTags(t *testing.T) {
 	}}
 	_, op := eventsRun(t, provider)
 
-	body := lastBody(op)
-	if !strings.Contains(body, "the commit comes first") {
-		t.Fatalf("the card does not carry the words of the model: %q", body)
+	found := false
+	for _, text := range replies(op) {
+		if strings.Contains(text, "<think>") {
+			t.Fatalf("the reply carries the tags: %q", text)
+		}
+		if text == "" {
+			t.Fatalf("the run published an empty reply: %v", replies(op))
+		}
+		found = true
 	}
-	if strings.Contains(body, "<think>") {
-		t.Fatalf("the card carries the tags: %q", body)
+	if !found {
+		t.Fatalf("the run published no reply: %v", replies(op))
 	}
-}
-
-// lastBody returns the body of the last card the run wrote.
-func lastBody(op *fakeOperator) string {
-	bodies := op.Lines()
-	if len(bodies) == 0 {
-		return ""
-	}
-	return bodies[len(bodies)-1]
 }
 
 // TestRun_PublishesItsToolCalls — the call goes out before it runs and
@@ -211,10 +223,34 @@ func waitSentCount(t *testing.T, op *fakeOperator, count int) {
 	t.Fatalf("the chat got %d commands, want %d", len(op.Sent()), count)
 }
 
-// TestRun_KeepsTheCallAndItsResultUnderOneCard — the run may move to
-// another iteration while a call runs. The call and its result still
-// hang under the card the call started under: the chat pairs them by
-// their anchor.
+// TestRun_HangsItsToolCallsUnderTheDecisionCard — the call and its
+// result hang under the card of the decision that made them.
+func TestRun_HangsItsToolCallsUnderTheDecisionCard(t *testing.T) {
+	provider := &scriptedProvider{responses: []llm.Response{
+		{Message: toolCallMsg("c1", toolResume, map[string]any{})},
+	}}
+	_, op := eventsRun(t, provider)
+
+	starts := op.EmittedOf(messages.OutToolStart)
+	ends := op.EmittedOf(messages.OutToolEnd)
+	if len(starts) == 0 || len(ends) == 0 {
+		t.Fatalf("the run published %d calls and %d results", len(starts), len(ends))
+	}
+	if starts[0].ReplyTo != ends[0].ReplyTo {
+		t.Fatalf("the call hangs under %q and its result under %q", starts[0].ReplyTo, ends[0].ReplyTo)
+	}
+	cards := map[string]bool{}
+	for _, c := range op.Cards() {
+		cards[c.ID] = true
+	}
+	if !cards[starts[0].ReplyTo] {
+		t.Fatalf("the call hangs under %q, want the card of its session", starts[0].ReplyTo)
+	}
+}
+
+// TestRun_KeepsTheCallAndItsResultUnderOneCard — the run may move on
+// while a call runs. The call and its result still hang under the card
+// the call started under: the chat pairs them by their anchor.
 func TestRun_KeepsTheCallAndItsResultUnderOneCard(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
@@ -231,19 +267,18 @@ func TestRun_KeepsTheCallAndItsResultUnderOneCard(t *testing.T) {
 	}
 	waitSent(t, op, "/gtw commit")
 
-	svc.mu.Lock()
-	r := svc.active["obs-1"]
-	svc.mu.Unlock()
-	if r == nil {
-		t.Fatal("the chat has no run")
+	r := chatRun(t, svc, "obs-1")
+	svc.openDecisionSession(context.Background(), r)
+	sess := r.decisionSessionRef()
+	if sess == nil {
+		t.Fatal("the run has no decision session")
 	}
 
 	call := pendingCall{ID: "c1", Name: toolResume, Args: json.RawMessage(`{}`)}
-	anchor := r.cardMessageID()
-	svc.publishToolStart(context.Background(), r, anchor, call)
-	// The run moves to another iteration while the call runs.
-	r.setCard("card-2", iteration{job: "main", round: 2})
-	svc.publishToolEnd(context.Background(), r, anchor, call,
+	svc.publishToolStart(context.Background(), r, sess, call)
+	// The run opens another session while the call runs.
+	svc.openDecisionSession(context.Background(), r)
+	svc.publishToolEnd(context.Background(), r, sess, call,
 		stepResult{Status: "ok", Summary: "committed"}, nil)
 
 	starts := op.EmittedOf(messages.OutToolStart)
@@ -256,118 +291,55 @@ func TestRun_KeepsTheCallAndItsResultUnderOneCard(t *testing.T) {
 	}
 }
 
-// TestRun_AnchorsItsEventsToTheCard — the events hang under the run's
-// card: the card is the run's state board, and the thread under it is
-// the run's log.
-func TestRun_AnchorsItsEventsToTheCard(t *testing.T) {
-	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: textAndToolCall("thinking", "c1", toolResume, map[string]any{})},
-	}}
-	_, op := eventsRun(t, provider)
-
-	cards := op.Cards()
-	if len(cards) == 0 {
-		t.Fatal("the run published no card")
-	}
-	cardID := cards[0].ID
-	emitted := op.Emitted()
-	if len(emitted) == 0 {
-		t.Fatal("the run published no event")
-	}
-	for _, m := range emitted {
-		if m.ReplyTo != cardID {
-			t.Fatalf("the event hangs under %q, want the card %q", m.ReplyTo, cardID)
-		}
-	}
-}
-
-// TestRun_PublishesNoReply — the run's voice is its card.
-func TestRun_PublishesNoReply(t *testing.T) {
-	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: textAndToolCall("thinking", "c1", toolResume, map[string]any{})},
-	}}
-	_, op := eventsRun(t, provider)
-
-	if replies := op.EmittedOf(messages.OutReply); len(replies) != 0 {
-		t.Fatalf("the run published %d replies, want none", len(replies))
-	}
-}
-
-// TestCard_CarriesNoNote — the card holds the state, not the model's
-// words.
-func TestCard_CarriesNoNote(t *testing.T) {
-	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: textAndToolCall("the commit comes first", "c1", toolResume,
-			map[string]any{})},
-	}}
-	_, op := eventsRun(t, provider)
-
-	for _, body := range op.Lines() {
-		for _, line := range strings.Split(body, "\n") {
-			if strings.HasPrefix(line, "note:") {
-				t.Fatalf("the card carries a note: %q", line)
-			}
-		}
-	}
-}
-
-// TestCard_TruncatesTheCommandInFlight — the full command is in the
-// chat's tool line; the card keeps a line that fits.
-func TestCard_TruncatesTheCommandInFlight(t *testing.T) {
+// TestRun_PublishesEveryReplyOfTheDecision — every reply of a decision
+// is shown: the number of replies is not capped.
+func TestRun_PublishesEveryReplyOfTheDecision(t *testing.T) {
 	dir := t.TempDir()
-	command := "/gtw commit --message " + strings.Repeat("x", 500)
-	writeWorkflow(t, dir, "one", fmt.Sprintf(`title: one
-jobs:
-  main:
-    steps:
-      - id: commit
-        message: %q
-`, command))
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
-	svc, op := testService(t, dir, Config{
-		Provider: &scriptedProvider{err: errors.New("the chat model must not be called")},
-	})
-	// The command never settles: the run waits for it, and the card
-	// keeps showing what is in flight.
-	op.steps = []fakeStep{{open: true}}
-	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
-	}); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	waitSent(t, op, command)
+	svc, op := testService(t, dir, Config{})
 
-	line := waitCurrentLine(t, op)
-	if got := len([]rune(line)); got > maxCardCommand {
-		t.Fatalf("the line of the command in flight is %d characters, want at most %d", got, maxCardCommand)
+	// The decision keeps every reply it got: the number of them is
+	// not capped.
+	r := &run{svc: svc, id: "one-1"}
+	r.setDecisionSession(&session{kind: sessionDecision, id: "decision-1", cardID: "card-9"})
+	for i := 0; i < 5; i++ {
+		svc.recordReply(context.Background(), r, fmt.Sprintf("reply %d", i))
 	}
-	if got := len([]rune(line)); got != maxCardCommand {
-		t.Fatalf("the line of the command in flight is %d characters, want %d", got, maxCardCommand)
+	published := 0
+	for _, m := range op.EmittedOf(messages.OutReply) {
+		if m.ReplyTo == "card-9" {
+			published++
+		}
 	}
-
-	if err := svc.Stop(context.Background(), "obs-1"); err != nil {
-		t.Fatalf("stop: %v", err)
+	if published != 5 {
+		t.Fatalf("the decision published %d replies, want 5", published)
 	}
-	waitRun(t, svc, "obs-1")
 }
 
-// waitCurrentLine waits until a card of the run shows the command in
-// flight and returns that line.
-func waitCurrentLine(t *testing.T, op *fakeOperator) string {
+// decisionReplies returns the entries of the decision sessions.
+func decisionReplies(op *fakeOperator) []string {
+	out := make([]string, 0, 8)
+	for _, m := range op.EmittedOf(messages.OutReply) {
+		if strings.HasPrefix(m.SessionID, "decision-") {
+			out = append(out, m.Text)
+		}
+	}
+	return out
+}
+
+// waitDecisionReplies waits until the run published that many replies
+// on its decision sessions.
+func waitDecisionReplies(t *testing.T, op *fakeOperator, n int) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		for _, body := range op.Lines() {
-			for _, line := range strings.Split(body, "\n") {
-				if strings.HasPrefix(line, "current: ") {
-					return line
-				}
-			}
+		if len(decisionReplies(op)) >= n {
+			return
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
-	t.Fatal("no card showed the command in flight")
-	return ""
+	t.Fatalf("the run published %d replies, want %d", len(decisionReplies(op)), n)
 }
 
 // TestRun_CountsItsActivityEvenWhenTheChatHidesIt — the counts are
@@ -383,6 +355,44 @@ func TestRun_CountsItsActivityEvenWhenTheChatHidesIt(t *testing.T) {
 	svc, op := testService(t, dir, Config{Provider: provider})
 	// The chat hides everything the run publishes.
 	op.dropOutbound = true
+	// The first command waits: the run reaches the judgment point.
+	// The second never settles: the run stays in the chat and the
+	// counters can be read.
+	op.steps = []fakeStep{pendingStep("still going"), {open: true}}
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitSent(t, op, "/gtw commit")
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		r := chatRun(t, svc, "obs-1")
+		r.mu.Lock()
+		think, tools := r.thinkCount, r.toolCount
+		r.mu.Unlock()
+		if think == 1 && tools == 1 {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatal("the run counted nothing")
+}
+
+// TestTheHeartbeatCarriesTheCountersOfTheRun — the counters ride in
+// the header of the run's card.
+func TestTheHeartbeatCarriesTheCountersOfTheRun(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	clock := &testClock{now: time.Date(2026, 11, 16, 14, 35, 22, 0, time.UTC)}
+	svc, op := testService(t, dir, Config{
+		Now: clock.Now,
+		Provider: &scriptedProvider{responses: []llm.Response{
+			{Message: toolCallMsg("c1", toolResume, map[string]any{})},
+		}},
+	})
 	op.steps = []fakeStep{pendingStep("still going"), okStep("committed")}
 	if _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
@@ -391,50 +401,22 @@ func TestRun_CountsItsActivityEvenWhenTheChatHidesIt(t *testing.T) {
 	}
 	waitRun(t, svc, "obs-1")
 
-	if !op.Has("💭 1 · 🔧 1") {
-		t.Fatalf("the card does not carry the counters of the run: %v", op.Lines())
+	beats := op.EmittedOf(messages.OutHeartbeat)
+	if len(beats) == 0 {
+		t.Fatalf("the run published no heartbeat: %v", op.Emitted())
+	}
+	last := beats[len(beats)-1].Heartbeat
+	if last == nil {
+		t.Fatal("the heartbeat carries no snapshot")
+	}
+	if last.ThinkCount == 0 && last.ToolCount == 0 {
+		t.Fatalf("the heartbeat carries no counters: %+v", last)
 	}
 }
 
-// TestRun_KeepsTheChatModelsMessageAsItsReply — the words of the chat
-// model are the run's reply: the run holds them and the card ends
-// with them.
-func TestRun_KeepsTheChatModelsMessageAsItsReply(t *testing.T) {
-	dir := t.TempDir()
-	writeWorkflow(t, dir, "one", oneStepWorkflow)
-
-	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: textAndToolCall("the commit comes first", "c1", toolAskHuman,
-			map[string]any{"question": "Which branch?"})},
-	}}
-	svc, op := testService(t, dir, Config{Provider: provider})
-	op.steps = []fakeStep{pendingStep("still going")}
-	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
-	}); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	waitForLine(t, op, "question: Which branch?")
-
-	r := chatRun(t, svc, "obs-1")
-	replies := r.replyList()
-	if len(replies) != 1 {
-		t.Fatalf("the run holds %d replies, want 1", len(replies))
-	}
-	if replies[0].Text != "the commit comes first" {
-		t.Fatalf("the reply is %q, want the words of the model", replies[0].Text)
-	}
-	if thinking := op.EmittedOf(messages.OutThinking); len(thinking) != 0 {
-		t.Fatalf("the run published %d thinking cards, want none", len(thinking))
-	}
-	if body := lastBody(op); !strings.HasSuffix(body, "the commit comes first") {
-		t.Fatalf("the card does not end with the reply: %q", body)
-	}
-}
-
-// TestTheActivityOfTheRunSurvivesTheDaemon — the counters, the time
-// of the last activity and the replies are persisted with the rest of
-// the run.
+// TestTheActivityOfTheRunSurvivesTheDaemon — the counters, the time of
+// the last activity and the open sessions are persisted with the rest
+// of the run.
 func TestTheActivityOfTheRunSurvivesTheDaemon(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
@@ -450,7 +432,7 @@ func TestTheActivityOfTheRunSurvivesTheDaemon(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForLine(t, op, "question: Which branch?")
+	waitAsked(t, op, "Which branch?")
 	waitStateFile(t, dir)
 
 	r := chatRun(t, svc, "obs-1")
@@ -471,11 +453,14 @@ func TestTheActivityOfTheRunSurvivesTheDaemon(t *testing.T) {
 	if state.LastBeatAt.IsZero() {
 		t.Error("the state file holds no time of the last activity")
 	}
-	if len(state.Replies) != 1 {
-		t.Fatalf("the state file holds %d replies, want 1", len(state.Replies))
+	if state.RunSession == nil || state.RunSession.CardID == "" {
+		t.Error("the state file holds no card of the run")
 	}
-	if state.Replies[0].Text != "which branch?" {
-		t.Errorf("the persisted reply is %q, want the words of the model", state.Replies[0].Text)
+	if state.RoundSession == nil || state.RoundSession.CardID == "" {
+		t.Error("the state file holds no card of the round")
+	}
+	if state.DecisionSession == nil || state.DecisionSession.CardID == "" {
+		t.Error("the state file holds no card of the decision")
 	}
 
 	restored := svc.restoreRun(state)
@@ -486,8 +471,11 @@ func TestTheActivityOfTheRunSurvivesTheDaemon(t *testing.T) {
 	if !restored.lastBeatAt.Equal(state.LastBeatAt) {
 		t.Errorf("the restored run stands at %v, want %v", restored.lastBeatAt, state.LastBeatAt)
 	}
-	if replies := restored.replyList(); len(replies) != 1 || replies[0].Text != "which branch?" {
-		t.Errorf("the restored run holds %v, want the reply of the model", replies)
+	if restored.runSessionRef() == nil || restored.runSessionRef().cardID != state.RunSession.CardID {
+		t.Error("the restored run lost the card of the run")
+	}
+	if restored.decisionSessionRef() == nil || restored.decisionSessionRef().cardID != state.DecisionSession.CardID {
+		t.Error("the restored run lost the card of the decision")
 	}
 }
 
@@ -509,7 +497,7 @@ func TestTheCardFollowsTheSnapshotsOfTheCommand(t *testing.T) {
 		t.Fatalf("bind: %v", err)
 	}
 	r := newRun(svc, Request{Name: "one", ChatID: "obs-1", Cwd: "/tmp/work"}, bound, nil)
-	r.setCard("card-1", iteration{job: "main", round: 1})
+	r.setRunSession(&session{kind: sessionRun, id: r.id, cardID: "card-1"})
 	t.Cleanup(r.cancel)
 
 	// The run watches the command it waits for.
@@ -519,26 +507,23 @@ func TestTheCardFollowsTheSnapshotsOfTheCommand(t *testing.T) {
 
 	// A snapshot of the command refreshes the card.
 	snapshots <- observe.Execution{Phase: observe.PhaseRunning}
-	waitCards(t, op, 1)
-	first := lastBody(op)
-	if !strings.Contains(first, "⏱ 14:35:22") {
-		t.Fatalf("the card does not say when the run did something last: %q", first)
+	waitBeats(t, op, 1)
+	first := op.EmittedOf(messages.OutHeartbeat)[0].Heartbeat
+	if first == nil || first.LastBeatAt.Format("15:04:05") != "14:35:22" {
+		t.Fatalf("the card does not say when the run did something last: %+v", first)
 	}
 
 	// A second snapshot within the window does not.
 	snapshots <- observe.Execution{Phase: observe.PhaseRunning}
 	time.Sleep(100 * time.Millisecond)
-	if n := len(op.Cards()); n != 1 {
+	if n := len(op.EmittedOf(messages.OutHeartbeat)); n != 1 {
 		t.Fatalf("the card was written %d times, want once", n)
 	}
 
 	// A snapshot after the window refreshes it again.
 	clock.Advance(cardRefreshInterval)
 	snapshots <- observe.Execution{Phase: observe.PhaseRunning}
-	waitCards(t, op, 2)
-	if lastBody(op) == first {
-		t.Fatal("the card did not follow the command")
-	}
+	waitBeats(t, op, 2)
 }
 
 // testClock is a clock a test moves by hand.
@@ -561,42 +546,15 @@ func (c *testClock) Advance(d time.Duration) {
 	c.now = c.now.Add(d)
 }
 
-// waitCards waits until the run wrote that many cards.
-func waitCards(t *testing.T, op *fakeOperator, n int) {
+// waitBeats waits until the run published that many heartbeats.
+func waitBeats(t *testing.T, op *fakeOperator, n int) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		if len(op.Cards()) >= n {
+		if len(op.EmittedOf(messages.OutHeartbeat)) >= n {
 			return
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
-	t.Fatalf("the run wrote %d cards, want %d", len(op.Cards()), n)
-}
-
-// TestRun_HangsItsToolCallsUnderTheCard — the call and its result
-// hang under the card of the run: the card is the run's state board,
-// and the thread under it is the run's log.
-func TestRun_HangsItsToolCallsUnderTheCard(t *testing.T) {
-	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolResume, map[string]any{})},
-	}}
-	_, op := eventsRun(t, provider)
-
-	cards := op.Cards()
-	if len(cards) == 0 {
-		t.Fatal("the run published no card")
-	}
-	cardID := cards[0].ID
-	starts := op.EmittedOf(messages.OutToolStart)
-	ends := op.EmittedOf(messages.OutToolEnd)
-	if len(starts) == 0 || len(ends) == 0 {
-		t.Fatalf("the run published %d calls and %d results", len(starts), len(ends))
-	}
-	if starts[0].ReplyTo != cardID {
-		t.Errorf("the call hangs under %q, want the card %q", starts[0].ReplyTo, cardID)
-	}
-	if ends[0].ReplyTo != cardID {
-		t.Errorf("the result hangs under %q, want the card %q", ends[0].ReplyTo, cardID)
-	}
+	t.Fatalf("the run published %d heartbeats, want %d", len(op.EmittedOf(messages.OutHeartbeat)), n)
 }

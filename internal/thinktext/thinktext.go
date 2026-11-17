@@ -139,6 +139,27 @@ func Unwrap(s string) string {
 	}
 }
 
+// SplitText splits a complete text into its reasoning and the words
+// that are left.
+//
+// The reasoning of a block that was never closed is the rest of the
+// text: the words that came before it stay where they were.
+func SplitText(s string) (thinking, kept string) {
+	res := Split(s)
+	thinking = res.Thinking
+	kept = res.Kept
+	if res.Held != "" {
+		// The block was opened and never closed: the rest of the text
+		// is the reasoning, and the opening tag goes with it.
+		rest := strings.TrimPrefix(res.Held, openTag)
+		if thinking != "" {
+			thinking += "\n"
+		}
+		thinking += rest
+	}
+	return thinking, kept
+}
+
 // block is one reasoning block of a text.
 type block struct {
 	// open is the index of the opening tag.

@@ -82,6 +82,11 @@ type reviewSessionStarter struct {
 	// answering.
 	fail bool
 
+	// raw makes the session answer with the scripted reply verbatim —
+	// an answer the parser cannot read, so the run spends a re-emit
+	// turn on it.
+	raw bool
+
 	// reviewErr is the error the review path fails with.
 	reviewErr error
 
@@ -180,9 +185,13 @@ func (d *sessionReplyDriver) SendBlocks(ctx context.Context, blocks []agent.Cont
 				Err:  errors.New("resumed session failed"),
 			}
 		} else {
+			text := d.starter.reply
+			if !d.starter.raw {
+				text = reviewReply(text)
+			}
 			d.events <- agent.AgentEvent{
 				Kind:   agent.EventAgentResult,
-				Result: &agent.AgentResultEvent{Text: d.starter.reply},
+				Result: &agent.AgentResultEvent{Text: text},
 			}
 		}
 		close(d.events)
@@ -196,6 +205,16 @@ func (d *sessionReplyDriver) Close() error                { return nil }
 func (d *sessionReplyDriver) Stop(context.Context) error  { return agent.ErrNotSupported }
 func (d *sessionReplyDriver) Keepalive(context.Context, func(context.Context) error) error {
 	return nil
+}
+
+// reviewReply is a review output the parser can read: a reply that
+// already is one is kept as it is, an unreadable one is wrapped — so
+// a continuation test does not spend a re-emit turn on it.
+func reviewReply(text string) string {
+	if text == "" || agent.ParseReviewFindings(text).Parsed {
+		return text
+	}
+	return "- path: a.go\n- start_line: 1\n- severity: low\n- content: " + text
 }
 
 // recordingEmitter records the outbound messages the command sends.
@@ -522,9 +541,10 @@ func TestHandle_ContinueWithAnUnknownAgent(t *testing.T) {
 	}
 }
 
-// TestHandle_ContinueWithNothingToResume covers the two "nothing left
-// to resume" replies: the last review completed, or the unfinished
-// group never reached the agent.
+// TestHandle_ContinueWithNothingToResume covers the "nothing left to
+// resume" replies: the last review completed, the unfinished group
+// was already retried, or it reached neither the agent nor a stored
+// prompt.
 func TestHandle_ContinueWithNothingToResume(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -539,12 +559,12 @@ func TestHandle_ContinueWithNothingToResume(t *testing.T) {
 			want: "the last review completed",
 		},
 		{
-			name: "the unfinished group never reached the agent",
+			name: "the unfinished group has no session and no prompt",
 			outcomes: []reviewOutcome{
 				{pattern: "**/*.go", files: []string{"a.go"}},
 				{pattern: "**/*.ts", files: []string{"c.ts"}, err: errors.New("spawn failed")},
 			},
-			want: "the unfinished group never reached the agent",
+			want: "no session and no prompt to re-run",
 		},
 	}
 	for _, tc := range cases {
@@ -650,7 +670,10 @@ func waitUntilIdle(t *testing.T, f *Factory, chatID string) {
 // thread, not on the card.
 func TestHandle_ContinuationOrdersTheLines(t *testing.T) {
 	agents := newTestAgents(t)
-	starter := &reviewSessionStarter{name: "review-order-agent", reply: "resumed findings"}
+	// The answer is not a review output the parser can read: the
+	// group contributes no findings, so the card carries no digest
+	// and the group's text reaches the thread alone.
+	starter := &reviewSessionStarter{name: "review-order-agent", reply: "resumed findings", raw: true}
 	agents.registry.Register(starter)
 
 	em := newRecordingEmitter()

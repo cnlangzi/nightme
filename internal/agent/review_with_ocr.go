@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -116,17 +117,24 @@ func delegateReviewMultiJob(
 	groups []reviewGroup,
 	opts ...RunOnceOption,
 ) (RunResult, error) {
+	// The fan-out owns the groups it runs: the runner fills in each
+	// group's prompt, so the caller's slice is left alone.
+	owned := slices.Clone(groups)
 	run := func(ctx context.Context, groupIdx int, cfg StartConfig, runOpts []RunOnceOption) (RunResult, error) {
-		prompt := assembleGroupPrompt(ctx, pre, &groups[groupIdx])
+		prompt := assembleGroupPrompt(ctx, pre, &owned[groupIdx])
 		if prompt == "" {
 			prompt = BuiltinPrompt
 		}
+		// The group's prompt is kept: a group that never reached the
+		// agent is re-run with it. Each goroutine writes its own
+		// index, so there is no data race.
+		owned[groupIdx].Prompt = prompt
 		return RunSession(ctx, s, cfg, []ContentBlock{{
 			Type: ContentText,
 			Text: prompt,
 		}}, runOpts...)
 	}
-	return runReviewGroups(ctx, s, cfg, groups, opts, run)
+	return runReviewGroups(ctx, s, cfg, owned, opts, run)
 }
 
 // reviewGroupRunner runs one group of a review fan-out.
@@ -151,7 +159,14 @@ type reviewGroupRunner func(ctx context.Context, groupIdx int, cfg StartConfig, 
 // forwarded to the per-group turn.
 //
 // A failed group reports the session id its session ran under, so the
-// caller can reopen that session later (see ResumeSession).
+// caller can reopen that session later (see ResumeSession), and the
+// prompt the group was asked to run, so a group that never reached
+// the agent can be re-run with it.
+//
+// A group whose output the parser cannot read gets one re-emit turn:
+// its own session is reopened and asked to state the findings again
+// in the schema the parser reads. The re-emit feeds the counts only —
+// the merged document keeps the group's raw output.
 func runReviewGroups(
 	ctx context.Context,
 	s Starter,
@@ -211,16 +226,26 @@ func runReviewGroups(
 			res, err := run(ctx, i, cfg, runOpts)
 			results[i] = res
 			errs[i] = err
+			// The group's own output is parsed on its own — the
+			// merged document is free-form text written for an LLM
+			// consumer and is never parsed.
+			report := ParseReviewFindings(res.Text)
+			if err == nil && !report.Parsed && res.SessionID != "" {
+				// The group's answer is in a shape the parser cannot
+				// read. One re-emit turn gives it a second chance to
+				// state its findings in the schema the parser reads.
+				if repaired, ok := reemitReviewFindings(ctx, s, cfg, res.SessionID); ok {
+					report = repaired
+				}
+			}
 			if cfgOpts.OnReviewJob != nil {
 				cfgOpts.OnReviewJob(ReviewJob{
 					Pattern:   groups[i].Pattern,
 					Source:    groups[i].Source,
 					Files:     groups[i].Files,
 					SessionID: res.SessionID,
-					// The group's own output is parsed on its own —
-					// the merged document is free-form text written
-					// for an LLM consumer and is never parsed.
-					Report: ParseReviewFindings(res.Text),
+					Prompt:    groups[i].Prompt,
+					Report:    report,
 				}, err)
 			}
 		}(i)
@@ -282,6 +307,12 @@ type reviewGroup struct {
 	Source  string
 	Files   []string
 	Rule    string
+	// Prompt is the group's assembled prompt; the fan-out fills it
+	// in. A group that never reached the agent is re-run with it.
+	Prompt string
+	// Mode is what the run does with the group: "", ReviewModeResume
+	// or ReviewModeRerun. A plain review leaves it empty.
+	Mode string
 }
 
 // isEmptyDiff reports whether the precomputed context has no files
@@ -351,6 +382,7 @@ func reviewPlan(groups []reviewGroup) []ReviewPlanGroup {
 			Source:  g.Source,
 			Label:   reviewGroupLabel(g),
 			Files:   g.Files,
+			Mode:    g.Mode,
 		}
 	}
 	return plan

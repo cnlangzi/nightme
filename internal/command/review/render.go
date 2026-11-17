@@ -44,14 +44,31 @@ const reviewPromptFrame = "\n\n---\n\n" +
 //
 // The plan is the first thing the review says — the user learns what
 // the run is about to do before any group produces output.
+//
+// A continuation marks what it does with each group: a group that is
+// resumed is marked "(resumed)", a group that is re-run is marked
+// "(re-run)". A plain review carries no marker.
 func renderPlanLine(runner string, groups []agent.ReviewPlanGroup) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "🔍 review · %s · %s · %s",
 		runner, reviewRuleSet(groups), plural(len(groups), "subagent"))
 	for i, g := range groups {
 		fmt.Fprintf(&b, "\n%d. %s — %s", i+1, g.Label, plural(len(g.Files), "file"))
+		b.WriteString(reviewModeMarker(g.Mode))
 	}
 	return b.String()
+}
+
+// reviewModeMarker names what a continuation does with a group.
+func reviewModeMarker(mode string) string {
+	switch mode {
+	case agent.ReviewModeResume:
+		return " (resumed)"
+	case agent.ReviewModeRerun:
+		return " (re-run)"
+	default:
+		return ""
+	}
 }
 
 // reviewRuleSet names the rule set the review ran against: nightme's
@@ -84,16 +101,64 @@ type verdict struct {
 	// unparsed is the number of groups whose output could not be
 	// parsed.
 	unparsed int
-	// failed holds the label of every group that did not finish.
-	failed []string
+	// failed holds every group that did not finish, with the state
+	// the continuation could still act on.
+	failed []failedGroup
+}
+
+// failedState is what a failed group can still be recovered by.
+type failedState int
+
+const (
+	// failedResumable is a group that reached the agent: the
+	// continuation reopens its session.
+	failedResumable failedState = iota
+	// failedNeverStarted is a group that never reached the agent: the
+	// continuation re-runs it with its stored prompt.
+	failedNeverStarted
+	// failedUnrecoverable is a group that reached neither the agent
+	// nor a stored prompt — the continuation cannot finish it.
+	failedUnrecoverable
+	// failedSpent is a group whose one recovery attempt is used up.
+	failedSpent
+)
+
+// failedGroup is one group that did not finish, with the state the
+// verdict tells the user about.
+type failedGroup struct {
+	// label is the group's human-facing name.
+	label string
+	// state is what the continuation can still do with the group.
+	state failedState
+}
+
+// text renders the group's name with its state.
+func (g failedGroup) text() string {
+	switch g.state {
+	case failedNeverStarted:
+		return g.label + " (never started)"
+	case failedUnrecoverable:
+		return g.label + " (not recoverable)"
+	case failedSpent:
+		return g.label + " (already retried)"
+	default:
+		return g.label
+	}
+}
+
+// actionable reports whether the continuation can still finish the
+// group. A spent group cannot, and neither can a group that reached
+// neither the agent nor a stored prompt.
+func (g failedGroup) actionable() bool {
+	return g.state == failedResumable || g.state == failedNeverStarted
 }
 
 // newVerdict builds the verdict of a review run.
 //
-// reports holds one entry per group that completed; failed holds the
-// label of every group that did not. A group that failed is counted as
-// failed — never as unparsed.
-func newVerdict(groups int, reports []agent.ReviewReport, failed []string) verdict {
+// reports holds one entry per group that completed; failed holds
+// every group that did not. A group that failed is counted as failed
+// — never as unparsed.
+func newVerdict(groups int, reports []agent.ReviewReport, failed []failedGroup) verdict {
 	v := verdict{
 		groups: groups,
 		counts: make(map[string]int),
@@ -138,10 +203,25 @@ func (v verdict) icon() string {
 }
 
 // body renders the verdict's counts and the groups that failed.
+//
+// The continuation is offered only when a failed group is still
+// actionable: the offer must match what the continuation can do.
 func (v verdict) body() string {
 	parts := v.parts()
 	if len(v.failed) > 0 {
-		parts = append(parts, "failed: "+strings.Join(v.failed, ", ")+" → /review --continue")
+		labels := make([]string, 0, len(v.failed))
+		actionable := false
+		for _, g := range v.failed {
+			labels = append(labels, g.text())
+			if g.actionable() {
+				actionable = true
+			}
+		}
+		segment := "failed: " + strings.Join(labels, ", ")
+		if actionable {
+			segment += " → /review --continue"
+		}
+		parts = append(parts, segment)
 	}
 	return strings.Join(parts, " · ")
 }
@@ -193,12 +273,11 @@ func reviewVerdictHint(outcomes []reviewOutcome, plan []agent.ReviewPlanGroup) s
 }
 
 // verdictInputs splits a review run's group outcomes into the reports
-// of the groups that completed and the labels of the groups that did
-// not.
+// of the groups that completed and the groups that did not.
 //
 // A failed group's label comes from the plan; a group the plan did not
 // name falls back to the name its identity gives.
-func verdictInputs(outcomes []reviewOutcome, plan []agent.ReviewPlanGroup) (reports []agent.ReviewReport, failed []string) {
+func verdictInputs(outcomes []reviewOutcome, plan []agent.ReviewPlanGroup) (reports []agent.ReviewReport, failed []failedGroup) {
 	labels := make(map[string]string, len(plan))
 	for _, g := range plan {
 		labels[groupKey(g.Source, g.Pattern)] = g.Label
@@ -211,9 +290,25 @@ func verdictInputs(outcomes []reviewOutcome, plan []agent.ReviewPlanGroup) (repo
 		if label == "" {
 			label = agent.ReviewGroupName(o.source, o.pattern)
 		}
-		failed = append(failed, label)
+		failed = append(failed, failedGroup{label: label, state: failedStateOf(o)})
 	}
 	return reports, failed
+}
+
+// failedStateOf names the state a failed group is in: whether it
+// reached the agent, whether it can be re-run, and whether its one
+// recovery attempt is used up.
+func failedStateOf(o reviewOutcome) failedState {
+	switch {
+	case o.spent:
+		return failedSpent
+	case o.sessionID != "":
+		return failedResumable
+	case o.prompt != "":
+		return failedNeverStarted
+	default:
+		return failedUnrecoverable
+	}
 }
 
 // finishedOutcomes returns the outcomes of the groups that completed,

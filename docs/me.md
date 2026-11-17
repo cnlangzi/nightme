@@ -79,7 +79,7 @@ type Outcome struct {
 | `pr_number` / `pr_url` | PR 的编号 / 链接 |
 | `groups` | review 跑了几组（`/review`） |
 | `findings` | review 收集到的 findings 条数（`/review`） |
-| `resumed_groups` | 续跑恢复了几组（`/review --continue` 只跑没完成的那几组） |
+| `continued_groups` | 续跑完成了几组（`/review --continue` 只跑没完成的那几组：跑到 agent 的那几组续跑，没跑到的那几组重跑） |
 | `unfinished_groups` | 其中没跑完的组数 |
 | `subcommand` | 被 `/gtw abort` 取消的子命令 |
 | `elapsed` | 被取消的子命令已经跑了多久 |

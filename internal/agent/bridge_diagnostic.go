@@ -372,6 +372,30 @@ func truncateRunes(s string, max int) string {
 	return s[:cut]
 }
 
+// KeepTailForLog keeps the LAST max bytes of s and marks the cut
+// at the front. TruncateForLog keeps the head; a stderr tail is the
+// child's most recent output, so the line that explains the exit
+// sits at its end and the head is the part worth dropping.
+//
+// The cut lands on a rune boundary for the same reason
+// TruncateForLog's does: the ring buffer's own cut can land inside
+// a multi-byte character.
+func KeepTailForLog(s string, max int) string {
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	const marker = " ...[truncated]"
+	if max <= len(marker)+1 {
+		return marker[:max]
+	}
+	keep := max - len(marker) - 1
+	tail := s[len(s)-keep:]
+	for len(tail) > 0 && !utf8.RuneStart(tail[0]) {
+		tail = tail[1:]
+	}
+	return marker + "\n" + tail
+}
+
 // formatDiagnosticString is a helper for tests + humanize paths.
 // Pulled out so bridge_diagnostic_test.go can verify behavior
 // without duplicating the format string.

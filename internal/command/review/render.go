@@ -19,9 +19,9 @@ package review
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/messages"
@@ -339,23 +339,6 @@ func failedOutcomes(outcomes []reviewOutcome) []reviewOutcome {
 	return out
 }
 
-// digestContentRunes is the number of runes a digest's content cell
-// holds before it is cut.
-const digestContentRunes = 80
-
-// verdictMessageBudgetRunes is the rune budget of the verdict
-// message — the verdict line and the digest together.
-//
-// Discord caps a message at 2000 characters and drops a longer one
-// whole, so an unbounded digest would take the verdict's counts down
-// with it. The budget is the tightest limit nightme ships against,
-// with room for the channel's own framing.
-const verdictMessageBudgetRunes = 1900
-
-// digestTailReserve is the room a digest leaves for its tail line —
-// the line that names the findings that did not fit.
-const digestTailReserve = 64
-
 // reviewDigest renders a review run's findings as severity-grouped
 // markdown tables: one table per severity bucket, one row per
 // finding.
@@ -365,82 +348,29 @@ const digestTailReserve = 64
 // built from the same parsed reports the verdict line counts, so the
 // two can never disagree.
 //
-// The digest fits into the given rune budget. A digest that does not
-// fit keeps the rows that do and names the findings it left out —
-// the reader learns that the digest is partial instead of reading it
-// as the whole run.
+// Every finding of the run is in the digest, with its content in
+// full. The review layer carries no channel-length policy: how a
+// long body reaches the chat is the channel's business.
 //
 // A run with no findings produces no digest: the verdict message is
 // then the verdict line alone.
-func reviewDigest(outcomes []reviewOutcome, plan []agent.ReviewPlanGroup, budget int) string {
+func reviewDigest(outcomes []reviewOutcome, plan []agent.ReviewPlanGroup) string {
 	findings := digestFindings(outcomes, plan)
-	if len(findings) == 0 || budget <= 0 {
+	if len(findings) == 0 {
 		return ""
 	}
-	tables := digestTables(findings)
-
-	var full strings.Builder
-	for i, t := range tables {
-		if i > 0 {
-			full.WriteString("\n")
-		}
-		full.WriteString(t.heading(len(t.rows)))
-		full.WriteString(t.header)
-		for _, row := range t.rows {
-			full.WriteString(row)
-		}
-	}
-	if utf8.RuneCountInString(full.String()) <= budget {
-		return strings.TrimRight(full.String(), "\n")
-	}
-
 	var b strings.Builder
-	used := 0
-	dropped := 0
-	emitted := 0
-	for _, t := range tables {
-		// The heading is sized by the rows that fit, so the room it
-		// takes is reserved with the bucket's full count.
-		avail := budget - digestTailReserve - used -
-			utf8.RuneCountInString(t.heading(len(t.rows))) -
-			utf8.RuneCountInString(t.header)
-		shown := 0
-		rowsUsed := 0
-		for _, row := range t.rows {
-			n := utf8.RuneCountInString(row)
-			if n > avail {
-				break
-			}
-			avail -= n
-			rowsUsed += n
-			shown++
-		}
-		if shown == 0 {
-			dropped += len(t.rows)
-			continue
-		}
-		if emitted > 0 {
+	for i, t := range digestTables(findings) {
+		if i > 0 {
 			b.WriteString("\n")
 		}
-		head := t.heading(shown)
-		b.WriteString(head)
+		b.WriteString(t.heading())
 		b.WriteString(t.header)
-		for i := 0; i < shown; i++ {
-			b.WriteString(t.rows[i])
+		for _, row := range t.rows {
+			b.WriteString(row)
 		}
-		used += utf8.RuneCountInString(head) + utf8.RuneCountInString(t.header) + rowsUsed
-		dropped += len(t.rows) - shown
-		emitted++
 	}
-	b.WriteString("\n")
-	b.WriteString(digestTail(dropped))
 	return strings.TrimRight(b.String(), "\n")
-}
-
-// digestTail names the findings a digest left out. The thread holds
-// them — /think off hides them, so the tail says how to see them.
-func digestTail(dropped int) string {
-	return fmt.Sprintf("… +%d more findings — see the thread (/think on).", dropped)
 }
 
 // digestTable is one severity bucket's table: its heading, its
@@ -456,8 +386,8 @@ type digestTable struct {
 
 // heading renders the table's heading: the bucket and the number of
 // rows the table shows.
-func (t digestTable) heading(shown int) string {
-	return fmt.Sprintf("**%s** · %d\n", t.severity, shown)
+func (t digestTable) heading() string {
+	return fmt.Sprintf("**%s** · %d\n", t.severity, len(t.rows))
 }
 
 // digestTables splits the run's findings into one table per severity
@@ -569,10 +499,9 @@ func digestCategory(f agent.ReviewFinding) string {
 	return category
 }
 
-// digestContent renders a finding's text: sanitized, then cut to
-// the cell's budget.
+// digestContent renders a finding's text: sanitized, in full.
 func digestContent(content string) string {
-	return truncateRunes(sanitizeCell(content), digestContentRunes)
+	return sanitizeCell(content)
 }
 
 // sanitizeCell makes a cell safe to render inside a markdown table
@@ -594,33 +523,30 @@ func sanitizeCell(s string) string {
 	return strings.TrimSpace(s)
 }
 
-// truncateRunes cuts s to at most n runes and marks the cut with an
-// ellipsis.
-//
-// The cut is rune-safe: findings and paths carry CJK text, and
-// splitting a multi-byte rune would leave a broken character in the
-// cell.
-func truncateRunes(s string, n int) string {
-	if utf8.RuneCountInString(s) <= n {
-		return s
-	}
-	return string([]rune(s)[:n]) + "…"
-}
-
 // sendReviewLine sends one of the review's own lines to the channel,
 // anchored to the /review message so it folds into the same receipt as
 // the plan and the verdict.
+//
+// A channel that rejects the line (a body over the channel's own
+// limit, an outage) is logged: the line is the user's only record of
+// what the review did, so a lost one must not vanish silently.
 func sendReviewLine(ctx context.Context, em messages.Emitter, chatID, replyTo, runner, text string) {
 	if em == nil || text == "" {
 		return
 	}
-	_ = em.Send(ctx, messages.OutboundMessage{
+	out := messages.OutboundMessage{
 		ChatID:    chatID,
 		Kind:      messages.OutReply,
 		ReplyTo:   replyTo,
 		AgentName: runner,
 		Text:      text,
-	})
+	}
+	if err := em.Send(ctx, out); err != nil {
+		slog.Default().Warn("/review: line send failed",
+			"chat_id", chatID,
+			"kind", out.Kind.String(),
+			"err", err.Error())
+	}
 }
 
 // planObserver returns the agent.WithReviewPlanObserver callback of a
@@ -647,9 +573,9 @@ func planObserver(ctx context.Context, em messages.Emitter, collector *outcomeCo
 // as a reply, so it reaches the card whatever the chat's /think
 // setting says.
 //
-// The message is budgeted: a channel that caps a message (Discord
-// drops one over 2000 characters) would lose the counts along with
-// the rows, so the digest gets what is left of the budget.
+// The message carries every finding of the run. How a long body
+// reaches the chat is the channel's business — the review layer
+// holds no length budget of its own.
 func sendVerdict(ctx context.Context, em messages.Emitter, chatID, replyTo, runner string,
 	result agent.RunResult, outcomes []reviewOutcome, plan []agent.ReviewPlanGroup,
 ) {
@@ -657,10 +583,7 @@ func sendVerdict(ctx context.Context, em messages.Emitter, chatID, replyTo, runn
 	if text == "" {
 		return
 	}
-	// The blank line between the verdict line and the digest is part
-	// of the message's budget.
-	budget := verdictMessageBudgetRunes - utf8.RuneCountInString(text) - 2
-	if digest := reviewDigest(outcomes, plan, budget); digest != "" {
+	if digest := reviewDigest(outcomes, plan); digest != "" {
 		text += "\n\n" + digest
 	}
 	out := messages.OutboundMessage{
@@ -670,8 +593,14 @@ func sendVerdict(ctx context.Context, em messages.Emitter, chatID, replyTo, runn
 		Text:    text,
 	}
 	messages.StampRunResult(&out, runner, result)
-	if em != nil {
-		_ = em.Send(ctx, out)
+	if em == nil {
+		return
+	}
+	if err := em.Send(ctx, out); err != nil {
+		slog.Default().Warn("/review: verdict send failed",
+			"chat_id", chatID,
+			"kind", out.Kind.String(),
+			"err", err.Error())
 	}
 }
 

@@ -137,6 +137,91 @@ func (a *Adapter) sendOutbound(ctx context.Context, msg messages.OutboundMessage
 	}
 }
 
+// maxMessageRunes is Discord's ceiling for a message body. The API
+// rejects a content field longer than 2000 characters outright — a
+// 400 with no delivery — so a longer body has to be split before it
+// goes on the wire.
+const maxMessageRunes = 2000
+
+// splitMessageBody cuts body into pieces of at most maxRunes runes,
+// preferring a paragraph, then line, then space boundary so a split
+// does not land inside a word.
+//
+// The cut is rune-safe: Discord counts characters and a body carries
+// CJK text, so splitting a multi-byte rune would leave a broken
+// character in the message.
+func splitMessageBody(body string, maxRunes int) []string {
+	if maxRunes <= 0 {
+		return []string{body}
+	}
+	runes := []rune(body)
+	if len(runes) <= maxRunes {
+		return []string{body}
+	}
+	var out []string
+	for len(runes) > maxRunes {
+		cut := softCut(runes, maxRunes)
+		out = append(out, string(runes[:cut]))
+		runes = runes[cut:]
+	}
+	if len(runes) > 0 {
+		out = append(out, string(runes))
+	}
+	return out
+}
+
+// softCut finds the best split point at or below maxRunes.
+func softCut(runes []rune, maxRunes int) int {
+	window := runes[:maxRunes]
+	// Paragraph boundary is the least disruptive.
+	if idx := lastIndexOfPair(window, '\n', '\n'); idx > 0 {
+		return idx + 1
+	}
+	for i := len(window) - 1; i > 0; i-- {
+		if window[i] == '\n' {
+			return i + 1
+		}
+	}
+	for i := len(window) - 1; i > 0; i-- {
+		if window[i] == ' ' {
+			return i + 1
+		}
+	}
+	return maxRunes
+}
+
+// lastIndexOfPair returns the index of the second rune of the last
+// a/b pair in runes, or -1 when there is none.
+func lastIndexOfPair(runes []rune, a, b rune) int {
+	for i := len(runes) - 2; i >= 0; i-- {
+		if runes[i] == a && runes[i+1] == b {
+			return i + 1
+		}
+	}
+	return -1
+}
+
+// sendBody puts body on the wire as one or more messages.
+//
+// Discord rejects a body over its 2000-character limit whole, so a
+// body that does not fit is split and sent as consecutive messages.
+// Nothing is dropped: the chunks carry the body in full.
+func (a *Adapter) sendBody(ctx context.Context, rawChannelID, body string) ([]Message, error) {
+	chunks := splitMessageBody(body, maxMessageRunes)
+	sent := make([]Message, 0, len(chunks))
+	for _, chunk := range chunks {
+		msg, err := a.createMessage(ctx, rawChannelID, CreateMessagePayload{
+			Content:         chunk,
+			AllowedMentions: &AllowedMentions{Parse: []string{}},
+		})
+		if err != nil {
+			return sent, err
+		}
+		sent = append(sent, msg)
+	}
+	return sent, nil
+}
+
 // sendPlainReply is the shared text-bubble emit used by every
 // standalone-message OutboundKind. Empty / whitespace-only text
 // silent-drops so the runtime's "no content this turn" signal
@@ -145,10 +230,7 @@ func (a *Adapter) sendPlainReply(ctx context.Context, rawChannelID, body string)
 	if strings.TrimSpace(body) == "" {
 		return nil
 	}
-	_, err := a.createMessage(ctx, rawChannelID, CreateMessagePayload{
-		Content:         body,
-		AllowedMentions: &AllowedMentions{Parse: []string{}},
-	})
+	_, err := a.sendBody(ctx, rawChannelID, body)
 	return err
 }
 
@@ -164,14 +246,16 @@ func (a *Adapter) sendResult(ctx context.Context, raw string, msg messages.Outbo
 	if body == "" {
 		return nil
 	}
-	sent, err := a.createMessage(ctx, raw, CreateMessagePayload{
-		Content:         body,
-		AllowedMentions: &AllowedMentions{Parse: []string{}},
-	})
+	sent, err := a.sendBody(ctx, raw, body)
 	if err != nil {
 		return err
 	}
-	a.rememberResultMessageID(sessionChatID(raw), msg.ReplyTo, string(sent.ID))
+	// A body that did not fit was sent as several messages — the
+	// last one is the visual end of the result, so that is where
+	// the 🎉 lands.
+	if len(sent) > 0 {
+		a.rememberResultMessageID(sessionChatID(raw), msg.ReplyTo, string(sent[len(sent)-1].ID))
+	}
 	return nil
 }
 
@@ -214,10 +298,7 @@ func (a *Adapter) sendError(ctx context.Context, raw string, msg messages.Outbou
 	if msg.Diagnostic != nil && msg.Diagnostic.StderrTail != "" {
 		body += "\n```\n" + msg.Diagnostic.StderrTail + "\n```"
 	}
-	_, err := a.createMessage(ctx, raw, CreateMessagePayload{
-		Content:         body,
-		AllowedMentions: &AllowedMentions{Parse: []string{}},
-	})
+	_, err := a.sendBody(ctx, raw, body)
 	return err
 }
 

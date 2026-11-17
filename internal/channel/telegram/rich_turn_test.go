@@ -5,6 +5,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/cnlangzi/nightme/internal/agent"
 )
 
 func TestRichTurnsIndex_GetOrCreate(t *testing.T) {
@@ -648,9 +650,9 @@ func TestRenderRichTurnBlocksLocked_TaskListSection(t *testing.T) {
 		headerLine:    "💭 1",
 		hasContent:    true,
 		taskList: []taskListItem{
-			{ID: "t1", Subject: "Plan the API", Marker: "[√]"},
-			{ID: "t2", Subject: "Write code", Marker: "[>]", ActiveForm: "coding"},
-			{ID: "t3", Subject: "Write tests", Marker: "[ ]"},
+			{ID: "t1", Subject: "Plan the API", Status: agent.TaskCompleted},
+			{ID: "t2", Subject: "Write code", Status: agent.TaskInProgress, ActiveForm: "coding"},
+			{ID: "t3", Subject: "Write tests", Status: agent.TaskPending},
 		},
 	}
 	body, err := a.renderRichTurnBlocksLocked(turn)
@@ -760,20 +762,21 @@ func TestRenderRichTurnBlocksLocked_EmptyTaskListOmitsSection(t *testing.T) {
 	}
 }
 
-// TestRenderRichTurnBlocksLocked_TaskCancelledAndDeletedRendered
-// locks that every row is rendered: a task that was cancelled or
-// deleted is a row the operator has to see, and it never reads like
-// a task that has not started.
-func TestRenderRichTurnBlocksLocked_TaskCancelledAndDeletedRendered(t *testing.T) {
+// TestRenderRichTurnBlocksLocked_TaskCancelledRenderedDeletedDropped
+// locks the status filter: a cancelled row is rendered — the operator
+// has to see that the task is over — while a deleted row is dropped,
+// because the bridges remove deleted tasks before they emit the
+// snapshot. Mirrors feishu's buildTaskChecklistChunks.
+func TestRenderRichTurnBlocksLocked_TaskCancelledRenderedDeletedDropped(t *testing.T) {
 	a, _ := newTestAdapter(t)
 	turn := &richTurn{
 		chatID: "123", topicID: 0, userMessageID: 0, messageID: 100,
 		headerLine: "💭 0", hasContent: true,
 		taskList: []taskListItem{
-			{ID: "t1", Subject: "alive-pending", Marker: "[ ]"},
-			{ID: "t2", Subject: "gone-cancelled", Marker: "[-]"},
-			{ID: "t3", Subject: "alive-completed", Marker: "[√]"},
-			{ID: "t4", Subject: "gone-deleted", Marker: "[×]"},
+			{ID: "t1", Subject: "alive-pending", Status: agent.TaskPending},
+			{ID: "t2", Subject: "gone-cancelled", Status: agent.TaskCancelled},
+			{ID: "t3", Subject: "alive-completed", Status: agent.TaskCompleted},
+			{ID: "t4", Subject: "gone-deleted", Status: agent.TaskDeleted},
 		},
 	}
 	body, err := a.renderRichTurnBlocksLocked(turn)
@@ -783,8 +786,8 @@ func TestRenderRichTurnBlocksLocked_TaskCancelledAndDeletedRendered(t *testing.T
 	if !strings.Contains(body, "gone-cancelled") {
 		t.Fatalf("cancelled row missing; body=%s", body)
 	}
-	if !strings.Contains(body, "gone-deleted") {
-		t.Fatalf("deleted row missing; body=%s", body)
+	if strings.Contains(body, "gone-deleted") {
+		t.Fatalf("deleted row must be dropped; body=%s", body)
 	}
 	if !strings.Contains(body, "alive-pending") {
 		t.Fatalf("live pending row missing; body=%s", body)
@@ -798,6 +801,31 @@ func TestRenderRichTurnBlocksLocked_TaskCancelledAndDeletedRendered(t *testing.T
 	}
 }
 
+// TestRenderRichTurnBlocksLocked_TaskEveryRowDeletedOmitsSection
+// locks the dual-guard: when every row is dropped, the section
+// disappears entirely (no orphan headline, no empty list block).
+func TestRenderRichTurnBlocksLocked_TaskEveryRowDeletedOmitsSection(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	turn := &richTurn{
+		chatID: "123", topicID: 0, userMessageID: 0, messageID: 100,
+		headerLine: "💭 0", hasContent: true,
+		taskList: []taskListItem{
+			{ID: "t1", Subject: "gone-deleted", Status: agent.TaskDeleted},
+			{ID: "t2", Subject: "gone-deleted-too", Status: agent.TaskDeleted},
+		},
+	}
+	body, err := a.renderRichTurnBlocksLocked(turn)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if strings.Contains(body, richTurnTaskListHeadline) {
+		t.Fatalf("all-dropped taskList must NOT paint headline; body=%s", body)
+	}
+	if strings.Contains(body, `"type":"list"`) {
+		t.Fatalf("all-dropped taskList must NOT emit list block; body=%s", body)
+	}
+}
+
 // TestRenderRichTurnBlocksLocked_TaskEveryRowCancelledRenders locks
 // that a snapshot whose rows all carry a state that is over still
 // paints the section: the rows are the record of what happened.
@@ -807,8 +835,8 @@ func TestRenderRichTurnBlocksLocked_TaskEveryRowCancelledRenders(t *testing.T) {
 		chatID: "123", topicID: 0, userMessageID: 0, messageID: 100,
 		headerLine: "💭 0", hasContent: true,
 		taskList: []taskListItem{
-			{ID: "t1", Subject: "gone-cancelled", Marker: "[-]"},
-			{ID: "t2", Subject: "gone-failed", Marker: "[!]"},
+			{ID: "t1", Subject: "gone-cancelled", Status: agent.TaskCancelled},
+			{ID: "t2", Subject: "gone-failed", Status: agent.TaskFailed},
 		},
 	}
 	body, err := a.renderRichTurnBlocksLocked(turn)
@@ -837,7 +865,7 @@ func TestRenderRichTurnBlocksLocked_TaskListTruncatesAtBudget(t *testing.T) {
 		tasks[i] = taskListItem{
 			ID:      "t" + strconv.Itoa(i),
 			Subject: strings.Repeat("x", 80), // 80-char subject
-			Marker:  "[ ]",
+			Status:  agent.TaskPending,
 		}
 	}
 	turn := &richTurn{
@@ -901,8 +929,8 @@ func TestRenderRichTurnBlocksLocked_TaskSubjectEscapesHTML(t *testing.T) {
 		chatID: "123", topicID: 0, userMessageID: 0, messageID: 100,
 		headerLine: "💭 0", hasContent: true,
 		taskList: []taskListItem{
-			{ID: "t1", Subject: "<script>alert('xss')</script>", Marker: "[ ]"},
-			{ID: "t2", Subject: "with & ampersand", Marker: "[ ]"},
+			{ID: "t1", Subject: "<script>alert('xss')</script>", Status: agent.TaskPending},
+			{ID: "t2", Subject: "with & ampersand", Status: agent.TaskPending},
 		},
 	}
 	body, err := a.renderRichTurnBlocksLocked(turn)
@@ -929,10 +957,10 @@ func TestRenderTaskRowText_FallbackSubjectTrimmed(t *testing.T) {
 		in   taskListItem
 		want string
 	}{
-		{"empty subject falls back to id", taskListItem{ID: "t1", Marker: "[ ]"}, "[ ] t1"},
-		{"whitespace subject falls back to id", taskListItem{ID: "t2", Subject: "   ", Marker: "[ ]"}, "[ ] t2"},
-		{"whitespace id still produces a useful row", taskListItem{ID: "   ", Subject: "real", Marker: "[ ]"}, "[ ] real"},
-		{"completed marker intact with trimmed subject", taskListItem{ID: "x", Subject: "  done  ", Marker: "[√]"}, "[√] done"},
+		{"empty subject falls back to id", taskListItem{ID: "t1", Status: agent.TaskPending}, "[ ] t1"},
+		{"whitespace subject falls back to id", taskListItem{ID: "t2", Subject: "   ", Status: agent.TaskPending}, "[ ] t2"},
+		{"whitespace id still produces a useful row", taskListItem{ID: "   ", Subject: "real", Status: agent.TaskPending}, "[ ] real"},
+		{"completed marker intact with trimmed subject", taskListItem{ID: "x", Subject: "  done  ", Status: agent.TaskCompleted}, "[√] done"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -960,7 +988,7 @@ func TestRenderRichTurnTaskListBlocks_BudgetAccountsForSuffix(t *testing.T) {
 	subject := strings.Repeat("a", 590)
 	items := make([]taskListItem, totalRows)
 	for i := range items {
-		items[i] = taskListItem{ID: "t", Subject: subject, Marker: "[ ]"}
+		items[i] = taskListItem{ID: "t", Subject: subject, Status: agent.TaskPending}
 	}
 	blocks, ok := renderRichTurnTaskListBlocks(items)
 	if !ok {
@@ -997,7 +1025,7 @@ func TestRenderRichTurnBlocksLocked_TaskListOrderAfterEntries(t *testing.T) {
 			{kind: "reply", body: "thinking out loud"},
 		},
 		taskList: []taskListItem{
-			{ID: "t1", Subject: "Plan", Marker: "[ ]"},
+			{ID: "t1", Subject: "Plan", Status: agent.TaskPending},
 		},
 		footer: []string{"🤖: claude", "💰: tokens"},
 	}

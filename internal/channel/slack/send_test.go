@@ -156,6 +156,7 @@ func TestSend_TaskListMapsStatuses(t *testing.T) {
 		{ID: "d", Subject: "broken thing", Status: agent.TaskFailed, ActiveForm: "failed: the remote refused"},
 		{ID: "e", Subject: "called off", Status: agent.TaskCancelled, ActiveForm: "cancelled"},
 		{ID: "f", Subject: "not needed", Status: agent.TaskSkipped, ActiveForm: "skipped"},
+		{ID: "g", Subject: "deleted thing", Status: agent.TaskDeleted},
 	}}
 	if err := a.Send(context.Background(), msg); err != nil {
 		t.Fatalf("send: %v", err)

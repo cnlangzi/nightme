@@ -214,6 +214,12 @@ func (a *Adapter) sendTaskList(ctx context.Context, msg messages.OutboundMessage
 		stream.stampFooter(lines)
 	}
 	for i, item := range msg.TaskList.Items {
+		// Filter TaskDeleted defensively: the bridge is supposed to
+		// remove deleted tasks before emitting, but a corrupt snapshot
+		// must not produce a visible "deleted" card.
+		if item.Status == agent.TaskDeleted {
+			continue
+		}
 		id := fmt.Sprintf("task-%d", i)
 		if item.ID != "" {
 			id = "task-" + item.ID

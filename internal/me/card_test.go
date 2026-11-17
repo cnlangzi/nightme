@@ -396,12 +396,14 @@ func TestTheRoundCardGivesEveryStepItsOwnState(t *testing.T) {
 	r := newRun(svc, Request{Name: "three", ChatID: "obs-1", Cwd: "/tmp/work"}, bound, nil)
 	t.Cleanup(r.cancel)
 	r.state.Steps = []wfe.StepState{
-		{ID: "commit", Job: "main", Outcome: wfe.Outcome{Status: wfe.OutcomeOK, Summary: "the commit landed"}},
-		{ID: "push", Job: "main", Outcome: wfe.Outcome{
+		{ID: "commit", Job: "main", Round: 1, Outcome: wfe.Outcome{Status: wfe.OutcomeOK, Summary: "the commit landed"}},
+		{ID: "push", Job: "main", Round: 1, Outcome: wfe.Outcome{
 			Status:  wfe.OutcomeFailed,
 			Summary: "the remote refused",
 			Data:    map[string]string{wfe.OutcomeKeyError: "no_remote"},
 		}},
+		// The record of another round is not the state of this round.
+		{ID: "pr", Job: "main", Round: 2, Outcome: wfe.Outcome{Status: wfe.OutcomeOK, Summary: "the PR is up"}},
 	}
 
 	items := r.roundTasks("main", 1)

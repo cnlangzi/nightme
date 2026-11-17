@@ -803,7 +803,7 @@ The cap on an answer defaults to 40960 tokens; a configuration that does not nam
 | `/me reply <text>` | Answers the question the run is waiting for. |
 | `/me pause` | Stops the run after the step it is on. The step that is running is not interrupted: its outcome is recorded. |
 | `/me continue [note]` | Hands the control back to a paused run. The note is the operator's instruction; it joins the conversation the chat model reads. |
-| `/me show` | Puts the run's state back in front of the operator as a card of its own. |
+| `/me show` | Puts the overview of the run back in front of the operator as a card of its own. The live state of the work stays on the card of the round. |
 | `/me stop` | Cancels the run, tells the chat to stop working, and leaves a summary of the session in the chat. |
 | `/me status` | Reports the current step, the phase and progress of the running command, the remaining budget, and what each capability decided and spent. |
 

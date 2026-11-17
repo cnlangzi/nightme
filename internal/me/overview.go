@@ -60,9 +60,6 @@ func (r *run) runOverview() string {
 // workflowLine renders the workflow of the run: its name in bold and
 // what it is for.
 func workflowLine(wf *wfe.Workflow) string {
-	if wf == nil {
-		return ""
-	}
 	line := "**" + wf.Name + "**"
 	if wf.Title != "" {
 		line += " — " + wf.Title
@@ -172,11 +169,12 @@ func (r *run) runBlock() string {
 	r.mu.Unlock()
 
 	wf := r.workflow
+	ends := roundEndTimes(history, wf)
 	lines := []string{"Run: " + id + " · " + clockTime(started)}
 	for _, job := range wf.JobOrder() {
 		for _, round := range finishedRounds(state, wf, job) {
 			line := fmt.Sprintf("|- round %d: %s", round, job)
-			if at, ok := roundEndTime(history, wf, job, round); ok {
+			if at, ok := ends[roundKey{job: job, round: round}]; ok {
 				line += " · " + clockTime(at)
 			}
 			lines = append(lines, line)
@@ -204,30 +202,42 @@ func finishedRounds(state *wfe.RunState, wf *wfe.Workflow, job string) []int {
 	return out
 }
 
-// roundEndTime returns when a round of a job ended: the time of the
-// last action the round took.
+// roundKey names one round of one job.
+type roundKey struct {
+	job   string
+	round int
+}
+
+// roundEndTimes returns when each round of a job ended: the time of
+// the last action the round took.
+//
+// The history is walked once: a run that repeats its rounds has a
+// history that grows with every round, and the block is built again
+// for every round the run enters.
 //
 // The history is persisted with the run, so the time of a round
 // survives a restart of the daemon.
-func roundEndTime(history []wfe.ActionRecord, wf *wfe.Workflow, job string, round int) (time.Time, bool) {
-	var at time.Time
-	found := false
+func roundEndTimes(history []wfe.ActionRecord, wf *wfe.Workflow) map[roundKey]time.Time {
+	out := make(map[roundKey]time.Time, len(history))
+	jobs := make(map[string]string, len(history))
 	for _, rec := range history {
 		if rec.StepID == "" {
 			continue
 		}
-		if wfe.JobOf(wf, rec.StepID) != job {
+		job, known := jobs[rec.StepID]
+		if !known {
+			job = wfe.JobOf(wf, rec.StepID)
+			jobs[rec.StepID] = job
+		}
+		if job == "" {
 			continue
 		}
-		if recordRound(rec) != round {
-			continue
-		}
-		if !found || rec.At.After(at) {
-			at = rec.At
-			found = true
+		key := roundKey{job: job, round: recordRound(rec)}
+		if at, seen := out[key]; !seen || rec.At.After(at) {
+			out[key] = rec.At
 		}
 	}
-	return at, found
+	return out
 }
 
 // recordRound returns the round an action was taken in. An action
@@ -246,11 +256,19 @@ func recordRound(rec wfe.ActionRecord) int {
 // job's step list. Every row carries the state of its step and the
 // detail of that state, so a step that failed never reads like a step
 // that has not started.
+//
+// The states are the records of the round: the engine clears the
+// records of a job when the job enters its next round, so the records
+// that are left are the ones of the round. A record that names no
+// round belongs to the round the run is in.
 func (r *run) roundTasks(job string, round int) []agent.AgentTaskItem {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	states := make(map[string]wfe.StepState, len(r.state.Steps))
 	for _, st := range r.state.Steps {
+		if st.Round != 0 && st.Round != round {
+			continue
+		}
 		states[st.ID] = st
 	}
 	remaining := r.policy.Remaining()

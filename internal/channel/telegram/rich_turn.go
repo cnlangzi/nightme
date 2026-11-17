@@ -9,6 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/statusbar"
 )
 
@@ -108,12 +109,12 @@ type richTurn struct {
 }
 
 // taskListItem is the minimal task snapshot the rich turn renders.
-// Mirrors the chain's agent.AgentTaskItem shape — kept local to
-// avoid pulling the agent package into the rich file's API. Marker is
-// the state of the row: the bracketed character the agent package
-// hands out, so every channel draws the same state the same way.
+// It mirrors the chain's agent.AgentTaskItem shape — kept local so
+// the rich file does not carry the whole agent event. The state of
+// the row is the agent's own, so the marker of the state is the one
+// every channel draws.
 type taskListItem struct {
-	Marker     string
+	Status     agent.AgentTaskStatus
 	ID         string
 	Subject    string
 	ActiveForm string
@@ -698,20 +699,35 @@ const (
 // once at the source rather than re-mutating a block map).
 //
 // The budget accounts for the headline + every row + the trailing
-// " " + … suffix on the last row (when truncated). Every row is
-// rendered: a task that failed or was cancelled is a row the
-// operator has to see.
+// " " + … suffix on the last row (when truncated). Every state a task
+// can be in is rendered: a task that failed or was cancelled is a row
+// the operator has to see. A deleted task is not: the bridges drop
+// it before they emit the snapshot.
 func renderRichTurnTaskListBlocks(items []taskListItem) ([]map[string]any, bool) {
 	if len(items) == 0 {
+		return nil, false
+	}
+
+	visible := make([]taskListItem, 0, len(items))
+	for _, it := range items {
+		// Filter TaskDeleted defensively: the bridge is supposed to
+		// remove deleted tasks before emitting, but a corrupt snapshot
+		// must not produce a visible "deleted" row.
+		if it.Status == agent.TaskDeleted {
+			continue
+		}
+		visible = append(visible, it)
+	}
+	if len(visible) == 0 {
 		return nil, false
 	}
 
 	headlineRunes := utf8.RuneCountInString(richTurnTaskListHeadline)
 	// +2 for the trailing " " + … suffix when the list is truncated.
 	const truncationSuffixRunes = 2
-	rowTexts := make([]string, 0, len(items))
+	rowTexts := make([]string, 0, len(visible))
 	total := headlineRunes
-	for _, it := range items {
+	for _, it := range visible {
 		rowText := renderTaskRowText(it)
 		cost := utf8.RuneCountInString(rowText) + 1 // +1 for inter-row separator
 		if total+cost+truncationSuffixRunes > richTurnTaskListBudgetRunes {
@@ -725,7 +741,7 @@ func renderRichTurnTaskListBlocks(items []taskListItem) ([]map[string]any, bool)
 	// and the user still sees the section header.
 	if len(rowTexts) == 0 {
 		rowTexts = []string{richTurnTaskListOverflowPlaceholder}
-	} else if len(rowTexts) < len(items) {
+	} else if len(rowTexts) < len(visible) {
 		// Truncation marker: appended to the last visible row's
 		// text before block construction so we never have to
 		// re-mutate the block map after building it.
@@ -757,10 +773,7 @@ func renderTaskRowText(it taskListItem) string {
 	if subject == "" {
 		subject = strings.TrimSpace(it.ID)
 	}
-	row := subject
-	if marker := strings.TrimSpace(it.Marker); marker != "" {
-		row = marker + " " + subject
-	}
+	row := agent.TaskStatusMarker(it.Status) + " " + subject
 	if detail := strings.TrimSpace(it.ActiveForm); detail != "" {
 		row += " (" + detail + ")"
 	}

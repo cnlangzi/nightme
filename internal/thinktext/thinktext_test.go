@@ -130,3 +130,33 @@ func TestUnwrap_StrayCloseTagKept(t *testing.T) {
 		t.Errorf("Unwrap = %q, want %q", got, "user typed </think> here")
 	}
 }
+
+func TestSplitText_SplitsTheReasoningFromTheWords(t *testing.T) {
+	thinking, kept := SplitText("<think>reasoning</think> the answer")
+	if thinking != "reasoning" {
+		t.Errorf("thinking = %q, want %q", thinking, "reasoning")
+	}
+	if kept != " the answer" {
+		t.Errorf("kept = %q, want %q", kept, " the answer")
+	}
+}
+
+func TestSplitText_KeepsTheWordsBeforeAnUnterminatedBlock(t *testing.T) {
+	thinking, kept := SplitText("the answer is 42.<think>let me think")
+	if thinking != "let me think" {
+		t.Errorf("thinking = %q, want %q", thinking, "let me think")
+	}
+	if kept != "the answer is 42." {
+		t.Errorf("kept = %q, want %q", kept, "the answer is 42.")
+	}
+}
+
+func TestSplitText_PlainTextIsAllWords(t *testing.T) {
+	thinking, kept := SplitText("hello world")
+	if thinking != "" {
+		t.Errorf("thinking = %q, want none", thinking)
+	}
+	if kept != "hello world" {
+		t.Errorf("kept = %q, want %q", kept, "hello world")
+	}
+}

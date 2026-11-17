@@ -143,8 +143,7 @@ func Unwrap(s string) string {
 // that are left.
 //
 // The reasoning of a block that was never closed is the rest of the
-// text: the words are then empty, because the model wrote nothing
-// but its scratchpad.
+// text: the words that came before it stay where they were.
 func SplitText(s string) (thinking, kept string) {
 	res := Split(s)
 	thinking = res.Thinking
@@ -157,7 +156,6 @@ func SplitText(s string) (thinking, kept string) {
 			thinking += "\n"
 		}
 		thinking += rest
-		kept = ""
 	}
 	return thinking, kept
 }

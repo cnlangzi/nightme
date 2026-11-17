@@ -365,21 +365,24 @@ const (
 )
 
 // simplifyGroup builds a reviewGroup carrying the nightme-owned simplify
-// lens (review.go::simplifyPrompt), scoped to the code files of files:
-// the lens looks for reuse / simplification / efficiency / altitude in
-// code, and prose gives it nothing to act on.
+// lens (review.go::simplifyPrompt), scoped to the code files among the
+// given paths: the lens looks for reuse / simplification / efficiency /
+// altitude in code, and prose gives it nothing to act on.
 func simplifyGroup(files []string) reviewGroup {
 	return reviewGroup{Pattern: PatternSimplify, Files: codeFiles(files), Rule: simplifyPrompt}
 }
 
 // reviewGroups returns the fan-out's groups: the precomputed ocr /
-// builtin groups, plus the simplify group when the changeset has code
-// files. A changeset without a code file gets no simplify group — the
-// lens would answer "0 covered, 0 findings" and cost a session turn.
+// builtin groups, plus the simplify group when the reviewable files
+// include a code file. A changeset without a code file gets no simplify
+// group — the lens would answer "0 covered, 0 findings" and cost a
+// session turn.
 //
 // The ocr and builtin groups are not filtered: ocr is authoritative for
-// the files it selected, and the builtin group keeps the full tracked
-// list. Only the simplify group is narrowed to the code files.
+// the files it selected, and the builtin group keeps the file list its
+// precompute produced — the Go enumeration in the Go path, ocr's
+// selection in the ocr path. Only the simplify group is narrowed to the
+// code files.
 func reviewGroups(pre reviewContext) []reviewGroup {
 	groups := slices.Clone(pre.ocrGroups)
 	simplify := simplifyGroup(pre.reviewable)

@@ -249,13 +249,13 @@ func TestReview_PropagatesRunOnceError(t *testing.T) {
 }
 
 // TestReview_EmptyDiff_ReturnsErrNoDiff pins the short-circuit
-// contract: when the workspace's precomputed reviewable + untracked
-// file lists are both empty (clean tree, no default branch detected,
-// or no workspace), ReviewWithPrompt / ReviewWithOcr must return
-// ErrNoDiff WITHOUT spawning the agent. This is the
-// fix-review-a-dsh follow-up — without it, fan-out collapses to
-// [simplifyGroup(nil)] and burns a dsh session for a zero-context
-// review.
+// contract: when the workspace's precomputed reviewable list is empty
+// (clean tree, no default branch detected, or no workspace),
+// ReviewWithPrompt / ReviewWithOcr must return ErrNoDiff WITHOUT
+// spawning the agent. This is the fix-review-a-dsh follow-up — without
+// it, the fan-out runs a group whose file list is empty (a session turn
+// that can only answer "0 covered, 0 findings") and burns a dsh
+// session for a zero-context review.
 //
 // fakeStarter would record the call if Review tried to spawn —
 // the test asserts zero invocations by leaving runOnce uncalled
@@ -271,10 +271,10 @@ func TestReview_EmptyDiff_ReturnsErrNoDiff(t *testing.T) {
 	})
 
 	t.Run("clean tree via prompt path", func(t *testing.T) {
-		// Workspace points at a temp dir with NO staged/unstaged/
-		// untracked changes — precompute produces zero reviewable +
-		// zero untracked. We use a sub-test temp dir so the real
-		// precompute path (not a stub) runs end-to-end.
+		// Workspace points at a temp dir with NO staged/unstaged
+		// changes — precompute produces zero reviewable files. We use a
+		// sub-test temp dir so the real precompute path (not a stub)
+		// runs end-to-end.
 		dir := t.TempDir()
 
 		// Init a git repo so the base-branch resolver has something
@@ -295,7 +295,7 @@ func TestReview_EmptyDiff_ReturnsErrNoDiff(t *testing.T) {
 		// Same setup but via ReviewWithOcr. Without ocr on PATH
 		// (CI default), precomputeReviewWithOcr degenerates to the
 		// builtin fallback shape — and the short-circuit still
-		// fires when reviewable+untracked are empty.
+		// fires when there is no reviewable file.
 		dir := t.TempDir()
 		gitInit(t, dir)
 		gitCommitEmpty(t, dir)

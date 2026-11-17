@@ -1523,9 +1523,10 @@ var (
 
 	// ErrNoDiff is returned by ReviewWithPrompt / ReviewWithOcr when
 	// the workspace has zero reviewable files in the precomputed
-	// reviewContext. This collapses to: clean working tree, with no
-	// staged/unstaged changes — and (only when the workspace is itself
-	// empty) nothing to review at all. Note that the base branch
+	// reviewContext — nothing committed, staged or modified against the
+	// base. Files git does not track are outside the scope: they have
+	// no baseline to diff against, so a workspace whose only changes are
+	// untracked has no diff to review either. Note that the base branch
 	// failing to resolve does NOT trigger ErrNoDiff by itself: the
 	// staged/unstaged git sources run unconditionally and can populate
 	// reviewContext even without a detected base. A repository that HAS

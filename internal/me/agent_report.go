@@ -391,6 +391,8 @@ var reasonHints = map[string]string{
 	"no_remote":             "the repository has no origin remote.",
 	"already_active":        "another fix is already running in this chat.",
 	"workspace_unreachable": "the workspace directory is gone.",
+	"not_found":             "no worktree branch matched the name that was given.",
+	"ambiguous":             "the name matched several worktree branches: the full branch name is needed.",
 }
 
 // reasonHint explains a reason code, or returns an empty string when

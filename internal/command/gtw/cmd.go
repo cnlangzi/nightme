@@ -301,7 +301,7 @@ func (f *Factory) Spec() command.Spec {
 			"/gtw fix --name <branch>          create a local worktree (no issue)\n" +
 			"/gtw close                        tear down the worktree, delete the branch, and sync main\n" +
 			"/gtw back                         exit the fix worktree (cwd → repoRoot) and sync main — worktree preserved\n" +
-			"/gtw back <worktree>                enter the named fix worktree (cwd → worktree); repairs a missing .nightme/gtw.yml\n" +
+			"/gtw back <branch>                 enter the worktree whose branch starts with <branch> (cwd → worktree); repairs a missing .nightme/gtw.yml\n" +
 			"/gtw commit [-a <agent>]          commit uncommitted work via the configured agent (no push)\n" +
 			"/gtw push                         push the worktree branch (clean only — refuses dirty)\n" +
 			"/gtw pr                           generate PR title+body, then open the PR\n" +
@@ -327,7 +327,7 @@ func (f *Factory) Spec() command.Spec {
 				Usage:   fixCmdSpec.Usage,
 			},
 			{Name: "close", Summary: "tear down the worktree, delete the branch, and sync main"},
-			{Name: "back", Summary: "exit the fix worktree (cwd → repoRoot) and sync main; `/gtw back <name>` jumps into a named worktree", Usage: "/gtw back [<worktree>]"},
+			{Name: "back", Summary: "exit the fix worktree (cwd → repoRoot) and sync main; `/gtw back <branch>` jumps into the worktree of that branch", Usage: "/gtw back [<branch>]"},
 			{Name: "commit", Summary: "commit uncommitted work via the configured agent", Usage: "/gtw commit [-a <agent>]"},
 			{Name: "push", Summary: "push the worktree branch (clean only — refuses dirty)"},
 			{Name: "pr", Summary: "generate PR title+body, then open the PR", Usage: "/gtw pr [-a <agent>]"},
@@ -874,7 +874,7 @@ func (f *Factory) runClose(ctx context.Context, _ command.RuntimeServices, cs *c
 func (f *Factory) runBack(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 	parsed, err := command.ParseCmdArgs(input.Args[2:], command.CmdSpec{
 		Name:    "/gtw back",
-		Usage:   "/gtw back [<worktree>]",
+		Usage:   "/gtw back [<branch>]",
 		MinArgs: 0,
 		MaxArgs: 1,
 	})
@@ -931,7 +931,7 @@ func (f *Factory) runBack(ctx context.Context, _ command.RuntimeServices, cs *ch
 		return &command.SlashOutput{Consumed: true}, nil
 	}
 
-	// --- /gtw back <slug>: enter the named worktree ------------
+	// --- /gtw back <branch>: enter the worktree of that branch --
 	// Inverse direction: cwd must BE the repo root
 	// (RunBackToWorktree's own gate refuses otherwise). Hooks
 	// reuse cfg.Back.Hooks — the user's "before / after back"

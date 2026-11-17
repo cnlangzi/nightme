@@ -61,7 +61,7 @@ type Outcome struct {
 | `mode` | `/gtw fix` 的模式（`remote` / `local`） |
 | `selected_by` | issue 是怎么选出来的（`auto` = `/gtw fix *` 自己挑的） |
 | `wake_after` | 队列里没有可选项时，个人 agent 多久之后再来（`"5m"`） |
-| `candidates` | `/gtw fix *` 看了多少个候选 issue |
+| `candidates` | `/gtw fix *` 看了多少个候选 issue（数字）；`/gtw back` 前缀没命中时列出候选的 worktree 分支（逗号分隔的分支名） |
 | `blocked` | 其中多少个因为前置依赖没落地被跳过 |
 | `branch_exists` | 其中多少个因为本地已有同名分支被跳过 |
 | `pr_open` | 其中多少个因为已经开了 PR 被跳过 |
@@ -231,7 +231,9 @@ chatsession: message settled chat_id=… message_id=… status=… summary=…
 | --- | --- | --- |
 | `usage` | 命令行不合法（未知 flag / 参数缺失 / 位置参数不对） | 全部 |
 | `no_cwd` | 命令需要工作区，但没有 | 全部 |
-| `wrong_cwd` | `/gtw back <worktree>` 要求当前在主仓库根目录 | `/gtw back` |
+| `wrong_cwd` | `/gtw back <branch>` 要求当前在主仓库根目录 | `/gtw back` |
+| `not_found` | 没有 worktree 分支匹配这个前缀（或 worktree 目录没了） | `/gtw back` |
+| `ambiguous` | 前缀匹配到多个 worktree 分支，无法确定 | `/gtw back` |
 | `no_session` | 没有聊天会话 | `/stop` |
 | `no_agent` | 没有选中的 agent | `/use` / `/review` / `/stop` |
 | `unknown_agent` | agent 名没注册 | `/review` |

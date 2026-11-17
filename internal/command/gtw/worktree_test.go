@@ -176,6 +176,100 @@ func TestPreflightWorktreeCreate_RejectsOverLongBranch(t *testing.T) {
 	}
 }
 
+// TestParseWorktreePorcelain covers the one porcelain parser of the
+// package: every "worktree <path>" line opens a record, a
+// "branch refs/heads/<name>" line carries the branch, and a
+// detached HEAD (or a bare repo) carries none.
+func TestParseWorktreePorcelain(t *testing.T) {
+	out := strings.Join([]string{
+		"worktree /repo",
+		"HEAD abc123",
+		"branch refs/heads/main",
+		"",
+		"worktree /repo.nightme/fix-42",
+		"HEAD def456",
+		"branch refs/heads/fix/42",
+		"",
+		"worktree /repo.nightme/scratch",
+		"HEAD 789abc",
+		"detached",
+		"",
+		"worktree /repo.nightme/stale",
+		"HEAD 000abc",
+		"branch refs/heads/stale",
+		"prunable gitdir file points to non-existent location",
+		"",
+	}, "\n")
+
+	entries := parseWorktreePorcelain(out)
+	if len(entries) != 4 {
+		t.Fatalf("parsed %d entries, want 4: %+v", len(entries), entries)
+	}
+	want := []WorktreeEntry{
+		{Path: "/repo", Branch: "main"},
+		{Path: "/repo.nightme/fix-42", Branch: "fix/42"},
+		{Path: "/repo.nightme/scratch"},
+		{Path: "/repo.nightme/stale", Branch: "stale"},
+	}
+	for i, w := range want {
+		if entries[i] != w {
+			t.Errorf("entry[%d] = %+v, want %+v", i, entries[i], w)
+		}
+	}
+}
+
+// TestListWorktrees_RunsGitWorktreeList covers the git call
+// ListWorktrees makes and the shape it returns.
+func TestListWorktrees_RunsGitWorktreeList(t *testing.T) {
+	git := &programmableGit{
+		worktreeListPorcelain: porcelainFor("/repo", "main") + "\n" +
+			porcelainFor("/repo.nightme/fix-42", "fix-42"),
+	}
+	entries, err := ListWorktrees(context.Background(), "/repo", git)
+	if err != nil {
+		t.Fatalf("ListWorktrees: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("got %d entries, want 2: %+v", len(entries), entries)
+	}
+	if entries[0].Branch != "main" || entries[1].Branch != "fix-42" {
+		t.Errorf("branches = %q / %q, want main / fix-42",
+			entries[0].Branch, entries[1].Branch)
+	}
+	if len(git.calls) != 1 {
+		t.Fatalf("ListWorktrees made %d git calls, want 1: %v", len(git.calls), git.calls)
+	}
+	if args := git.calls[0]; len(args) != 3 ||
+		args[0] != "worktree" || args[1] != "list" || args[2] != "--porcelain" {
+		t.Errorf("git argv = %v, want [worktree list --porcelain]", args)
+	}
+}
+
+// TestWorktreeListPath_FindsTheBranchHolder covers the path lookup
+// the §5.3.1 "join existing worktree" decision depends on: the
+// worktree holding exactly `branch`, "" when there is none.
+func TestWorktreeListPath_FindsTheBranchHolder(t *testing.T) {
+	git := &programmableGit{
+		worktreeListPorcelain: porcelainFor("/repo", "main") + "\n" +
+			porcelainFor("/repo.nightme/fix-42", "fix-42") + "\n" +
+			porcelainFor("/repo.nightme/scratch", ""),
+	}
+	got, err := WorktreeListPath(context.Background(), "/repo", "fix-42", git)
+	if err != nil {
+		t.Fatalf("WorktreeListPath: %v", err)
+	}
+	if got != "/repo.nightme/fix-42" {
+		t.Errorf("WorktreeListPath = %q, want %q", got, "/repo.nightme/fix-42")
+	}
+	got, err = WorktreeListPath(context.Background(), "/repo", "nope", git)
+	if err != nil {
+		t.Fatalf("WorktreeListPath: %v", err)
+	}
+	if got != "" {
+		t.Errorf("WorktreeListPath for an unheld branch = %q, want \"\"", got)
+	}
+}
+
 // fakeGit is a minimal GitRunner for tests that don't need to
 // exercise the worktree-list path. Returns empty for any
 // show-ref / worktree-list query.

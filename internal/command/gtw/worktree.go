@@ -491,61 +491,97 @@ func RefreshDefaultBranch(ctx context.Context, repoRoot string, deps HandlerDeps
 	return strings.TrimSpace(headOut), pullOut, nil
 }
 
+// WorktreeEntry is one record of `git worktree list --porcelain`.
+type WorktreeEntry struct {
+	Path   string // absolute path of the worktree
+	Branch string // branch name; empty for a detached HEAD or a bare repo
+}
+
+// ListWorktrees runs `git worktree list --porcelain` in dir and
+// returns one entry per worktree, in git's order. The primary
+// checkout is included — callers that must not select it filter it
+// out themselves.
+func ListWorktrees(ctx context.Context, dir string, git GitRunner) ([]WorktreeEntry, error) {
+	out, _, err := git.Run(ctx, dir, "worktree", "list", "--porcelain")
+	if err != nil {
+		return nil, err
+	}
+	return parseWorktreePorcelain(out), nil
+}
+
+// parseWorktreePorcelain turns a porcelain listing into one entry
+// per worktree. Porcelain is line-oriented: a "worktree <path>"
+// line opens a record and the field lines that follow belong to
+// it. "branch refs/heads/<name>" carries the branch; "detached" and
+// "bare" records have none. "HEAD <sha>", "locked" and "prunable"
+// are ignored.
+func parseWorktreePorcelain(out string) []WorktreeEntry {
+	var entries []WorktreeEntry
+	var cur *WorktreeEntry
+	for raw := range strings.SplitSeq(out, "\n") {
+		line := strings.TrimSpace(raw)
+		switch {
+		case strings.HasPrefix(line, "worktree "):
+			if cur != nil {
+				entries = append(entries, *cur)
+			}
+			cur = &WorktreeEntry{Path: strings.TrimPrefix(line, "worktree ")}
+		case cur == nil:
+			// A field line before the first record — nothing to
+			// attach it to.
+		case strings.HasPrefix(line, "branch refs/heads/"):
+			cur.Branch = strings.TrimPrefix(line, "branch refs/heads/")
+		}
+	}
+	if cur != nil {
+		entries = append(entries, *cur)
+	}
+	return entries
+}
+
 // WorktreeListPath returns the absolute path of the worktree that
 // currently holds `branch`, or "" if `branch` is not checked out
 // in any worktree. Used by the §5.3.1 "join existing worktree"
 // branch of the decision card.
 func WorktreeListPath(ctx context.Context, dir, branch string, git GitRunner) (string, error) {
-	out, _, err := git.Run(ctx, dir, "worktree", "list", "--porcelain")
+	entries, err := ListWorktrees(ctx, dir, git)
 	if err != nil {
 		return "", err
 	}
-	// Walk the porcelain output once, tracking the most recent
-	// "worktree <path>" line so we can return the path whose
-	// "branch refs/heads/<branch>" line follows. Porcelain is
-	// line-oriented (one record per worktree, fields separated
-	// by newlines) so strings.Split is the right tool.
-	lines := strings.Split(out, "\n")
-	var path string
-	for _, line := range lines {
-		if rest, ok := strings.CutPrefix(line, "worktree "); ok {
-			path = rest
-			continue
-		}
-		if strings.TrimSpace(line) == "branch refs/heads/"+branch {
-			return path, nil
+	if branch == "" {
+		return "", nil
+	}
+	for _, e := range entries {
+		if e.Branch == branch {
+			return e.Path, nil
 		}
 	}
 	return "", nil
 }
 
-// IsKnownWorktree reports whether `path` is listed in
-// `git worktree list --porcelain` executed from `repoRoot`.
-// Used by `/gtw back <slug>` to reject arbitrary directories
-// that happen to share the worktree layout basename but are
-// not actual git worktrees of this repository.
-//
-// One porcelain pass; O(n) over the number of worktrees.
-// Returns an error only when the git invocation fails.
-func IsKnownWorktree(ctx context.Context, repoRoot, path string, git GitRunner) (bool, error) {
-	out, _, err := git.Run(ctx, repoRoot, "worktree", "list", "--porcelain")
+// sameWorktreePath reports whether two worktree paths name the same
+// directory. The comparison is symlink-aware: on macOS
+// `git rev-parse --show-toplevel` and `git worktree list
+// --porcelain` can print the same directory as /var/... and
+// /private/var/..., and on Windows the separator and the drive
+// letter's case differ. pathutil.Equal absorbs the "./" / "//" /
+// trailing-separator quirks; EvalSymlinks resolves the rest.
+func sameWorktreePath(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	if pathutil.Equal(a, b) {
+		return true
+	}
+	ra, err := filepath.EvalSymlinks(a)
 	if err != nil {
-		return false, err
+		return false
 	}
-	// pathutil.Equal handles "./" / "//" / trailing-separator
-	// quirks that bite a naive string compare; the porcelain
-	// walker below uses CutPrefix (same as WorktreeListPath)
-	// so we don't accidentally match "/foo" against
-	// "/foo-bar".
-	if n, nerr := pathutil.NormalizeForOS(path); nerr == nil {
-		path = n
+	rb, err := filepath.EvalSymlinks(b)
+	if err != nil {
+		return false
 	}
-	for _, line := range strings.Split(out, "\n") {
-		if rest, ok := strings.CutPrefix(line, "worktree "); ok && rest == path {
-			return true, nil
-		}
-	}
-	return false, nil
+	return pathutil.Equal(ra, rb)
 }
 
 // WorktreeAdd creates a fresh worktree at `path` based on `base`

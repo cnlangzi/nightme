@@ -379,6 +379,58 @@ legacy case"兜底。
 目录、branch、`.nightme/gtw.yml` 都保留——切回 worktree 用 `/cwd <path>`,真
 不要了再 `/gtw close`。
 
+### 4.1c Format 1(`/gtw back <branch>` — 跳进 worktree)
+
+```
+✅ back into `/Users/.../fix-gtw-hooks`
+→ worktree: /Users/.../fix-gtw-hooks
+→ branch: fix-gtw-hooks
+→ .nightme/gtw.yml (preserved)
+```
+
+`<branch>` 是 worktree 分支名的**前缀**,不是目录名。命中多个分支时不猜:
+
+```
+❌ "42-f" matches 2 worktree branches:
+→ 42-feat-login-state-expires
+→ 42-fix-other
+hint: type the full branch name
+```
+
+一个都没命中时列出这个仓库的所有 worktree 分支:
+
+```
+❌ no worktree branch matches "42-f"
+worktree branches:
+→ 42-feat-login-state-expires
+→ 42-fix-other
+```
+
+仓库还没有任何 worktree 时指向 `/gtw fix`:
+
+```
+❌ no worktree branch matches "42-f"
+this repository has no worktrees — run `/gtw fix <issue-id>` or `/gtw fix --name <branch>` to create one
+```
+
+Worktree 目录已经被手工删掉时,提示 `git worktree prune`:
+
+```
+❌ worktree for "42-f" is gone: /Users/.../42-f
+hint: run `git worktree prune` to drop the stale entry
+```
+
+用户自己建的 worktree(不在 `<repo>.nightme/` 布局里)不进 nightme 的
+`.nightme/gtw.yml`——那个文件是 `/gtw close` 拆 worktree 和分支的凭据,
+nightme 不给自己没建的 worktree 发这个凭据:
+
+```
+✅ back into `/Users/.../scratch`
+→ worktree: /Users/.../scratch
+→ branch: scratch
+→ .nightme/gtw.yml (not created — this worktree is not a /gtw fix worktree)
+```
+
 ### 4.2 Format 2(sync)
 
 ```

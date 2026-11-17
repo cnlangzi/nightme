@@ -203,23 +203,63 @@ func verdictInputs(outcomes []reviewOutcome, plan []agent.ReviewPlanGroup) (repo
 	for _, g := range plan {
 		labels[groupKey(g.Source, g.Pattern)] = g.Label
 	}
-	for _, o := range outcomes {
-		if o.err != nil {
-			label := labels[groupKey(o.source, o.pattern)]
-			if label == "" {
-				label = agent.ReviewGroupName(o.source, o.pattern)
-			}
-			failed = append(failed, label)
-			continue
-		}
+	for _, o := range finishedOutcomes(outcomes) {
 		reports = append(reports, o.report)
 	}
+	for _, o := range failedOutcomes(outcomes) {
+		label := labels[groupKey(o.source, o.pattern)]
+		if label == "" {
+			label = agent.ReviewGroupName(o.source, o.pattern)
+		}
+		failed = append(failed, label)
+	}
 	return reports, failed
+}
+
+// finishedOutcomes returns the outcomes of the groups that completed,
+// in the order they were reported.
+//
+// A group that failed produced no report: it has no findings, and it
+// is not a group the verdict counts. The verdict line and the digest
+// both take their findings from here, so the two cannot disagree.
+func finishedOutcomes(outcomes []reviewOutcome) []reviewOutcome {
+	var out []reviewOutcome
+	for _, o := range outcomes {
+		if o.err == nil {
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
+// failedOutcomes returns the outcomes of the groups that did not
+// finish, in the order they were reported.
+func failedOutcomes(outcomes []reviewOutcome) []reviewOutcome {
+	var out []reviewOutcome
+	for _, o := range outcomes {
+		if o.err != nil {
+			out = append(out, o)
+		}
+	}
+	return out
 }
 
 // digestContentRunes is the number of runes a digest's content cell
 // holds before it is cut.
 const digestContentRunes = 80
+
+// verdictMessageBudgetRunes is the rune budget of the verdict
+// message — the verdict line and the digest together.
+//
+// Discord caps a message at 2000 characters and drops a longer one
+// whole, so an unbounded digest would take the verdict's counts down
+// with it. The budget is the tightest limit nightme ships against,
+// with room for the channel's own framing.
+const verdictMessageBudgetRunes = 1900
+
+// digestTailReserve is the room a digest leaves for its tail line —
+// the line that names the findings that did not fit.
+const digestTailReserve = 64
 
 // reviewDigest renders a review run's findings as severity-grouped
 // markdown tables: one table per severity bucket, one row per
@@ -230,47 +270,146 @@ const digestContentRunes = 80
 // built from the same parsed reports the verdict line counts, so the
 // two can never disagree.
 //
+// The digest fits into the given rune budget. A digest that does not
+// fit keeps the rows that do and names the findings it left out —
+// the reader learns that the digest is partial instead of reading it
+// as the whole run.
+//
 // A run with no findings produces no digest: the verdict message is
 // then the verdict line alone.
-func reviewDigest(outcomes []reviewOutcome, plan []agent.ReviewPlanGroup) string {
+func reviewDigest(outcomes []reviewOutcome, plan []agent.ReviewPlanGroup, budget int) string {
 	findings := digestFindings(outcomes, plan)
-	if len(findings) == 0 {
+	if len(findings) == 0 || budget <= 0 {
 		return ""
 	}
-	buckets := make(map[string][]agent.ReviewFinding, len(agent.SeverityOrder()))
-	hasCategory := false
-	for _, f := range findings {
-		buckets[f.Severity] = append(buckets[f.Severity], f)
-		if f.Category != "" {
-			hasCategory = true
+	tables := digestTables(findings)
+
+	var full strings.Builder
+	for i, t := range tables {
+		if i > 0 {
+			full.WriteString("\n")
+		}
+		full.WriteString(t.heading(len(t.rows)))
+		full.WriteString(t.header)
+		for _, row := range t.rows {
+			full.WriteString(row)
 		}
 	}
+	if utf8.RuneCountInString(full.String()) <= budget {
+		return strings.TrimRight(full.String(), "\n")
+	}
+
 	var b strings.Builder
+	used := 0
+	dropped := 0
+	emitted := 0
+	for _, t := range tables {
+		// The heading is sized by the rows that fit, so the room it
+		// takes is reserved with the bucket's full count.
+		avail := budget - digestTailReserve - used -
+			utf8.RuneCountInString(t.heading(len(t.rows))) -
+			utf8.RuneCountInString(t.header)
+		shown := 0
+		rowsUsed := 0
+		for _, row := range t.rows {
+			n := utf8.RuneCountInString(row)
+			if n > avail {
+				break
+			}
+			avail -= n
+			rowsUsed += n
+			shown++
+		}
+		if shown == 0 {
+			dropped += len(t.rows)
+			continue
+		}
+		if emitted > 0 {
+			b.WriteString("\n")
+		}
+		head := t.heading(shown)
+		b.WriteString(head)
+		b.WriteString(t.header)
+		for i := 0; i < shown; i++ {
+			b.WriteString(t.rows[i])
+		}
+		used += utf8.RuneCountInString(head) + utf8.RuneCountInString(t.header) + rowsUsed
+		dropped += len(t.rows) - shown
+		emitted++
+	}
+	b.WriteString("\n")
+	b.WriteString(digestTail(dropped))
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// digestTail names the findings a digest left out. The thread holds
+// them — /think off hides them, so the tail says how to see them.
+func digestTail(dropped int) string {
+	return fmt.Sprintf("… +%d more findings — see the thread (/think on).", dropped)
+}
+
+// digestTable is one severity bucket's table: its heading, its
+// header row and its rows.
+type digestTable struct {
+	// severity is the bucket's name — the heading's subject.
+	severity string
+	// header is the table's header row and its separator row.
+	header string
+	// rows are the table's rows, one per finding.
+	rows []string
+}
+
+// heading renders the table's heading: the bucket and the number of
+// rows the table shows.
+func (t digestTable) heading(shown int) string {
+	return fmt.Sprintf("**%s** · %d\n", t.severity, shown)
+}
+
+// digestTables splits the run's findings into one table per severity
+// bucket, in the order the buckets come.
+//
+// The category column is a property of the run: it exists when some
+// finding of the run named a category, and every table carries it.
+func digestTables(findings []agent.ReviewFinding) []digestTable {
+	hasCategory := false
+	for _, f := range findings {
+		if f.Category != "" {
+			hasCategory = true
+			break
+		}
+	}
+	header := "| path | content |\n| --- | --- |\n"
+	if hasCategory {
+		header = "| path | category | content |\n| --- | --- | --- |\n"
+	}
+	buckets := make(map[string][]agent.ReviewFinding, len(agent.SeverityOrder()))
+	for _, f := range findings {
+		buckets[f.Severity] = append(buckets[f.Severity], f)
+	}
+	var tables []digestTable
 	for _, sev := range agent.SeverityOrder() {
 		rows := buckets[sev]
 		if len(rows) == 0 {
 			continue
 		}
-		if b.Len() > 0 {
-			b.WriteString("\n")
-		}
-		fmt.Fprintf(&b, "**%s** · %d\n", sev, len(rows))
-		if hasCategory {
-			b.WriteString("| path | category | content |\n")
-			b.WriteString("| --- | --- | --- |\n")
-		} else {
-			b.WriteString("| path | content |\n")
-			b.WriteString("| --- | --- |\n")
-		}
+		t := digestTable{severity: sev, header: header}
 		for _, f := range rows {
-			b.WriteString("| " + digestPath(f) + " | ")
-			if hasCategory {
-				b.WriteString(digestCategory(f) + " | ")
-			}
-			b.WriteString(digestContent(f.Content) + " |\n")
+			t.rows = append(t.rows, digestRow(f, hasCategory))
 		}
+		tables = append(tables, t)
 	}
-	return strings.TrimRight(b.String(), "\n")
+	return tables
+}
+
+// digestRow renders one finding as a table row.
+func digestRow(f agent.ReviewFinding, hasCategory bool) string {
+	var b strings.Builder
+	b.WriteString("| " + digestPath(f) + " | ")
+	if hasCategory {
+		b.WriteString(digestCategory(f) + " | ")
+	}
+	b.WriteString(digestContent(f.Content) + " |\n")
+	return b.String()
 }
 
 // digestFindings returns the run's findings in the order the digest
@@ -290,10 +429,13 @@ func digestFindings(outcomes []reviewOutcome, plan []agent.ReviewPlanGroup) []ag
 		outcome reviewOutcome
 	}
 	groups := make([]group, 0, len(outcomes))
-	for i, o := range outcomes {
+	for _, o := range finishedOutcomes(outcomes) {
 		order, planned := positions[groupKey(o.source, o.pattern)]
 		if !planned {
-			order = len(plan) + i
+			// A group the plan did not name sorts after the planned
+			// ones. The sort is stable, so the groups that share
+			// this key keep their outcome order.
+			order = len(plan)
 		}
 		groups = append(groups, group{order: order, outcome: o})
 	}
@@ -302,9 +444,6 @@ func digestFindings(outcomes []reviewOutcome, plan []agent.ReviewPlanGroup) []ag
 	})
 	var findings []agent.ReviewFinding
 	for _, g := range groups {
-		if g.outcome.err != nil {
-			continue
-		}
 		findings = append(findings, g.outcome.report.Findings...)
 	}
 	return findings
@@ -412,6 +551,10 @@ func planObserver(ctx context.Context, em messages.Emitter, collector *outcomeCo
 // entry, and the counts and the rows read as one report. It is sent
 // as a reply, so it reaches the card whatever the chat's /think
 // setting says.
+//
+// The message is budgeted: a channel that caps a message (Discord
+// drops one over 2000 characters) would lose the counts along with
+// the rows, so the digest gets what is left of the budget.
 func sendVerdict(ctx context.Context, em messages.Emitter, chatID, replyTo, runner string,
 	result agent.RunResult, outcomes []reviewOutcome, plan []agent.ReviewPlanGroup,
 ) {
@@ -419,7 +562,10 @@ func sendVerdict(ctx context.Context, em messages.Emitter, chatID, replyTo, runn
 	if text == "" {
 		return
 	}
-	if digest := reviewDigest(outcomes, plan); digest != "" {
+	// The blank line between the verdict line and the digest is part
+	// of the message's budget.
+	budget := verdictMessageBudgetRunes - utf8.RuneCountInString(text) - 2
+	if digest := reviewDigest(outcomes, plan, budget); digest != "" {
 		text += "\n\n" + digest
 	}
 	out := messages.OutboundMessage{

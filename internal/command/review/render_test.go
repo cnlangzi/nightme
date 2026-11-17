@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/messages"
@@ -210,6 +211,276 @@ func TestReviewVerdictHint(t *testing.T) {
 	}
 }
 
+// digestTestBudget is the budget the digest's unit tests give it —
+// more than a run's findings need, so the digest renders complete.
+const digestTestBudget = 4000
+
+// TestReviewDigest_GroupsBySeverity: the digest lists one table per
+// severity bucket, from the most severe to the least, and a bucket
+// with no findings produces no table at all.
+func TestReviewDigest_GroupsBySeverity(t *testing.T) {
+	outcomes := []reviewOutcome{
+		{pattern: "**/*.go", report: agent.ReviewReport{Parsed: true, Findings: []agent.ReviewFinding{
+			{Path: "a.go", Line: "42", Severity: agent.SeverityHigh, Content: "first"},
+			{Path: "b.go", Line: "7", Severity: agent.SeverityHigh, Content: "second"},
+		}}},
+		{pattern: "**/*.ts", report: agent.ReviewReport{Parsed: true, Findings: []agent.ReviewFinding{
+			{Path: "c.ts", Line: "3", Severity: agent.SeverityLow, Content: "third"},
+		}}},
+	}
+	plan := []agent.ReviewPlanGroup{
+		{Pattern: "**/*.go", Label: "**/*.go"},
+		{Pattern: "**/*.ts", Label: "**/*.ts"},
+	}
+
+	got := reviewDigest(outcomes, plan, digestTestBudget)
+	want := "**high** · 2\n" +
+		"| path | content |\n" +
+		"| --- | --- |\n" +
+		"| a.go:42 | first |\n" +
+		"| b.go:7 | second |\n" +
+		"\n" +
+		"**low** · 1\n" +
+		"| path | content |\n" +
+		"| --- | --- |\n" +
+		"| c.ts:3 | third |"
+	if got != want {
+		t.Errorf("the digest is:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// TestReviewDigest_OrdersRowsByThePlan: the rows of one bucket follow
+// the plan — the group that comes first in the plan comes first in the
+// digest, whatever order the groups finished in.
+func TestReviewDigest_OrdersRowsByThePlan(t *testing.T) {
+	outcomes := []reviewOutcome{
+		{pattern: "**/*.ts", report: agent.ReviewReport{Parsed: true, Findings: []agent.ReviewFinding{
+			{Path: "c.ts", Line: "3", Severity: agent.SeverityHigh, Content: "the ts finding"},
+		}}},
+		{pattern: "**/*.go", report: agent.ReviewReport{Parsed: true, Findings: []agent.ReviewFinding{
+			{Path: "a.go", Line: "42", Severity: agent.SeverityHigh, Content: "the go finding"},
+		}}},
+	}
+	plan := []agent.ReviewPlanGroup{
+		{Pattern: "**/*.go", Label: "**/*.go"},
+		{Pattern: "**/*.ts", Label: "**/*.ts"},
+	}
+
+	got := reviewDigest(outcomes, plan, digestTestBudget)
+	goRow := strings.Index(got, "a.go:42")
+	tsRow := strings.Index(got, "c.ts:3")
+	if goRow < 0 || tsRow < 0 {
+		t.Fatalf("the digest does not carry both rows:\n%s", got)
+	}
+	if goRow > tsRow {
+		t.Errorf("the rows do not follow the plan:\n%s", got)
+	}
+}
+
+// TestReviewDigest_CategoryColumn: the category column exists only
+// when some finding of the run named a category — and a finding
+// without one shows the em dash.
+func TestReviewDigest_CategoryColumn(t *testing.T) {
+	plain := []reviewOutcome{
+		{pattern: "**/*.go", report: agent.ReviewReport{Parsed: true, Findings: []agent.ReviewFinding{
+			{Path: "a.go", Line: "42", Severity: agent.SeverityHigh, Content: "first"},
+		}}},
+	}
+
+	got := reviewDigest(plain, nil, digestTestBudget)
+	if !strings.Contains(got, "| path | content |") {
+		t.Errorf("the table has no content column:\n%s", got)
+	}
+	if strings.Contains(got, "category") {
+		t.Errorf("the table has a category column although no finding named one:\n%s", got)
+	}
+
+	mixed := []reviewOutcome{
+		{pattern: "**/*.go", report: agent.ReviewReport{Parsed: true, Findings: []agent.ReviewFinding{
+			{Path: "a.go", Line: "42", Severity: agent.SeverityHigh, Category: "error-handling", Content: "first"},
+			{Path: "b.go", Line: "7", Severity: agent.SeverityHigh, Content: "second"},
+		}}},
+	}
+
+	got = reviewDigest(mixed, nil, digestTestBudget)
+	if !strings.Contains(got, "| path | category | content |") {
+		t.Errorf("the table has no category column:\n%s", got)
+	}
+	if !strings.Contains(got, "| --- | --- | --- |") {
+		t.Errorf("the separator row does not have one dash per column:\n%s", got)
+	}
+	if !strings.Contains(got, "| b.go:7 | — | second |") {
+		t.Errorf("the finding without a category does not show the em dash:\n%s", got)
+	}
+}
+
+// TestReviewDigest_SanitizesAndTruncates: a cell stays one line — a
+// pipe becomes a slash, a line break a space — and the content is
+// cut to the cell's budget.
+func TestReviewDigest_SanitizesAndTruncates(t *testing.T) {
+	outcomes := []reviewOutcome{
+		{pattern: "**/*.go", report: agent.ReviewReport{Parsed: true, Findings: []agent.ReviewFinding{
+			{Path: "a.go", Line: "42", Severity: agent.SeverityHigh, Content: "a | b\nc"},
+			{Path: "b.go", Severity: agent.SeverityHigh, Content: strings.Repeat("错", 100)},
+		}}},
+	}
+
+	got := reviewDigest(outcomes, nil, digestTestBudget)
+	if !strings.Contains(got, "| a.go:42 | a / b c |") {
+		t.Errorf("the cell was not sanitized:\n%s", got)
+	}
+	cut := strings.Repeat("错", 80) + "…"
+	if !strings.Contains(got, "| b.go | "+cut+" |") {
+		t.Errorf("the cell was not truncated to 80 runes:\n%s", got)
+	}
+}
+
+// TestReviewDigest_NoFindings: a run without findings produces no
+// digest — the verdict message is the verdict line alone.
+func TestReviewDigest_NoFindings(t *testing.T) {
+	outcomes := []reviewOutcome{
+		{pattern: "**/*.go", report: agent.ReviewReport{Parsed: true}},
+	}
+
+	if got := reviewDigest(outcomes, nil, digestTestBudget); got != "" {
+		t.Errorf("a run without findings produced a digest:\n%s", got)
+	}
+}
+
+// TestReviewDigest_SkipsFailedGroups: a group that failed produced
+// no report, so it contributes no rows.
+func TestReviewDigest_SkipsFailedGroups(t *testing.T) {
+	outcomes := []reviewOutcome{
+		{pattern: "**/*.go", err: errors.New("boom")},
+		{pattern: "**/*.ts", report: agent.ReviewReport{Parsed: true, Findings: []agent.ReviewFinding{
+			{Path: "c.ts", Line: "3", Severity: agent.SeverityHigh, Content: "the ts finding"},
+		}}},
+	}
+
+	got := reviewDigest(outcomes, nil, digestTestBudget)
+	if strings.Contains(got, "**/*.go") {
+		t.Errorf("the failed group reached the digest:\n%s", got)
+	}
+	if !strings.Contains(got, "| c.ts:3 | the ts finding |") {
+		t.Errorf("the digest does not carry the finished group's finding:\n%s", got)
+	}
+}
+
+// TestReviewDigest_FitsTheBudget: a digest that does not fit keeps
+// the rows that do and names the findings it left out — the reader
+// learns the digest is partial instead of reading it as the whole
+// run.
+func TestReviewDigest_FitsTheBudget(t *testing.T) {
+	var findings []agent.ReviewFinding
+	for i := 0; i < 12; i++ {
+		findings = append(findings, agent.ReviewFinding{
+			Path:     fmt.Sprintf("internal/agent/review.go:%d", 100+i),
+			Severity: agent.SeverityHigh,
+			Content:  strings.Repeat("错", 80),
+		})
+	}
+	outcomes := []reviewOutcome{
+		{pattern: "**/*.go", report: agent.ReviewReport{Parsed: true, Findings: findings}},
+	}
+
+	got := reviewDigest(outcomes, nil, 500)
+	if n := utf8.RuneCountInString(got); n > 500 {
+		t.Errorf("the digest is %d runes, over the 500-rune budget:\n%s", n, got)
+	}
+	if !strings.Contains(got, "… +") || !strings.Contains(got, "more findings") {
+		t.Errorf("the digest does not name the findings it left out:\n%s", got)
+	}
+	// The rows that fit are kept, and the tail counts the rest.
+	rows := strings.Count(got, "| internal/agent/review.go:")
+	if rows == 0 || rows == len(findings) {
+		t.Errorf("the digest kept %d of %d rows:\n%s", rows, len(findings), got)
+	}
+	dropped := len(findings) - rows
+	if !strings.Contains(got, fmt.Sprintf("+%d more findings", dropped)) {
+		t.Errorf("the tail does not name the %d dropped findings:\n%s", dropped, got)
+	}
+}
+
+// TestSendVerdict_StaysInsideTheMessageBudget: the verdict message
+// stays inside the budget, however many findings the run reported —
+// a channel that drops a long message would lose the counts with the
+// rows.
+func TestSendVerdict_StaysInsideTheMessageBudget(t *testing.T) {
+	var findings []agent.ReviewFinding
+	for i := 0; i < 60; i++ {
+		findings = append(findings, agent.ReviewFinding{
+			Path:     fmt.Sprintf("internal/gateway/outbound/policy.go:%d", 40+i),
+			Severity: agent.SeverityHigh,
+			Category: "error-handling",
+			Content:  strings.Repeat("错", 80),
+		})
+	}
+	outcomes := []reviewOutcome{
+		{pattern: "**/*.go", report: agent.ReviewReport{Parsed: true, Findings: findings}},
+	}
+
+	em := newRecordingEmitter()
+	sendVerdict(context.Background(), em, "chat", "msg", "codex", agent.RunResult{}, outcomes, nil)
+
+	msgs := em.messages()
+	if len(msgs) != 1 {
+		t.Fatalf("the review sent %d messages, want the one verdict message: %+v", len(msgs), msgs)
+	}
+	text := msgs[0].Text
+	if n := utf8.RuneCountInString(text); n > verdictMessageBudgetRunes {
+		t.Errorf("the verdict message is %d runes, over the %d-rune budget:\n%s",
+			n, verdictMessageBudgetRunes, text)
+	}
+	if !strings.Contains(text, "60 findings") {
+		t.Errorf("the verdict line does not report every finding:\n%s", text)
+	}
+	if !strings.Contains(text, "more findings") {
+		t.Errorf("the digest does not name the findings it left out:\n%s", text)
+	}
+}
+
+// TestSendVerdict_CarriesTheDigest: the digest rides inside the
+// verdict message — one message, one card entry — and a run without
+// findings leaves the message as the verdict line alone.
+func TestSendVerdict_CarriesTheDigest(t *testing.T) {
+	outcomes := []reviewOutcome{
+		{pattern: "**/*.go", report: agent.ReviewReport{Parsed: true, Findings: []agent.ReviewFinding{
+			{Path: "a.go", Line: "42", Severity: agent.SeverityHigh, Category: "error-handling", Content: "the finding"},
+		}}},
+	}
+
+	em := newRecordingEmitter()
+	sendVerdict(context.Background(), em, "chat", "msg", "codex", agent.RunResult{}, outcomes, nil)
+
+	msgs := em.messages()
+	if len(msgs) != 1 {
+		t.Fatalf("the review sent %d messages, want the one verdict message: %+v", len(msgs), msgs)
+	}
+	text := msgs[0].Text
+	for _, want := range []string{
+		"1 subagent",
+		"**high** · 1",
+		"| path | category | content |",
+		"| a.go:42 | error-handling | the finding |",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("the verdict message does not carry %q:\n%s", want, text)
+		}
+	}
+
+	empty := newRecordingEmitter()
+	sendVerdict(context.Background(), empty, "chat", "msg", "codex", agent.RunResult{},
+		[]reviewOutcome{{pattern: "**/*.go", report: agent.ReviewReport{Parsed: true}}}, nil)
+
+	msgs = empty.messages()
+	if len(msgs) != 1 {
+		t.Fatalf("the review sent %d messages, want the one verdict message: %+v", len(msgs), msgs)
+	}
+	if text := msgs[0].Text; strings.Contains(text, "|") || strings.HasSuffix(text, "\n") {
+		t.Errorf("the verdict message of a run without findings changed:\n%q", text)
+	}
+}
+
 // planReviewStarter is a fake starter that reports a plan and one
 // outcome per group — the way the real fan-out does — and returns a
 // merged text.
@@ -269,7 +540,13 @@ func (s *planReviewStarter) Review(_ context.Context, _ agent.StartConfig, opts 
 			}
 			report := agent.ReviewReport{Parsed: true}
 			if i >= s.failed {
-				report.Findings = []agent.ReviewFinding{{Severity: agent.SeverityHigh}}
+				report.Findings = []agent.ReviewFinding{{
+					Path:     fmt.Sprintf("file%d.go", i+1),
+					Line:     fmt.Sprintf("%d", i+1),
+					Severity: agent.SeverityHigh,
+					Category: "correctness",
+					Content:  fmt.Sprintf("issue %d in group %d", i+1, i+1),
+				}}
 			}
 			cfg.OnReviewJob(agent.ReviewJob{
 				Pattern:   g.Pattern,
@@ -441,6 +718,9 @@ func TestHandle_ReviewDeliversThePlanAndTheVerdict(t *testing.T) {
 // chat in the thread, one reply per group, each starting with the
 // group's number, and the review closes with its verdict.
 //
+// The verdict's digest carries the parsed findings as rows; the
+// group's own prose stays in the thread.
+//
 // The fake starter emits the events the aggregator produces; the
 // aggregator's own contract is covered by the agent package's tests.
 func TestHandle_ReviewDeliversTheFindingsToTheThread(t *testing.T) {
@@ -509,6 +789,59 @@ func TestHandle_ReviewDeliversTheFindingsToTheThread(t *testing.T) {
 	}
 	if !strings.Contains(thinking[2], "review done") {
 		t.Errorf("the thread does not close on the verdict: %q", thinking[2])
+	}
+}
+
+// TestHandle_ReviewVerdictCarriesTheDigest: the verdict message
+// carries the digest — one table per severity, one row per finding —
+// and it reaches the card whatever the chat's /think setting says.
+//
+// The thread carries the groups' findings; the card carries their
+// digest. A user with /think off still reads what the review found.
+func TestHandle_ReviewVerdictCarriesTheDigest(t *testing.T) {
+	agents := newTestAgents(t)
+	starter := &planReviewStarter{
+		name: "review-digest-agent",
+		groups: []agent.ReviewPlanGroup{
+			{Pattern: "**/*.go", Label: "**/*.go", Files: []string{"a.go"}},
+			{Pattern: agent.PatternSimplify, Label: "simplify lens", Files: []string{"a.go"}},
+		},
+		merged: "### Group: pattern **/*.go — files: a.go\n\nthe go findings\n\n",
+	}
+	agents.registry.Register(starter)
+
+	em := newRecordingEmitter()
+	const chatID = "review-digest-chat"
+	cs, _ := newContinueChatSession(t, chatID, starter.name, t.TempDir(), em)
+
+	f := NewFactory()
+	dispatchContinue(t, f, cs, chatID, "review")
+
+	// /think is off: the card carries the plan and the verdict, and
+	// the thread carries nothing.
+	msgs := waitForReviewMessages(t, em, 2)
+	if len(msgs) != 2 {
+		t.Fatalf("the review sent %d messages, want the plan and the verdict: %+v", len(msgs), msgs)
+	}
+	for _, msg := range msgs {
+		if msg.Kind != messages.OutReply {
+			t.Errorf("the thread carries a message while /think is off: %+v", msg)
+		}
+	}
+
+	verdict := msgs[1]
+	for _, want := range []string{
+		"2 subagents",
+		"2 high",
+		"**high** · 2",
+		"| path | category | content |",
+		"| --- | --- | --- |",
+		"| file1.go:1 | correctness | issue 1 in group 1 |",
+		"| file2.go:2 | correctness | issue 2 in group 2 |",
+	} {
+		if !strings.Contains(verdict.Text, want) {
+			t.Errorf("the verdict does not carry %q:\n%s", want, verdict.Text)
+		}
 	}
 }
 

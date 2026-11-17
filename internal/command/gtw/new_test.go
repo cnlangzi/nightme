@@ -543,6 +543,47 @@ func TestCreateIssuesFromDrafts_NoDepsRowWithoutRelations(t *testing.T) {
 	}
 }
 
+// TestCreateIssuesFromDrafts_RecordFailureKeepsRelations pins that
+// a draft whose record cannot be written still gets its relations:
+// the issue is on the platform, and the draft is gone, so no later
+// run can add the dependency.
+func TestCreateIssuesFromDrafts_RecordFailureKeepsRelations(t *testing.T) {
+	dir := t.TempDir()
+	writeDrafts(t, dir,
+		"01.md", "# feat(a): first\n\nbody a\n",
+		"02.md", "# feat(b): second\n\n- depends on {{ISSUE:01}}\n",
+	)
+	prov := newFakeGitProvider(ProviderGitHub, "github.com")
+	call := 0
+	prov.SetCreateIssueFunc(func(title, _ string) (*Issue, error) {
+		call++
+		if call == 2 {
+			// A directory where the record belongs: the write fails.
+			if err := os.Mkdir(filepath.Join(dir, "02.created"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		id := 41 + call
+		return &Issue{ID: id, Title: title, URL: fmt.Sprintf("https://github.com/o/r/issues/%d", id)}, nil
+	})
+
+	got, outcome := createIssuesFromDrafts(context.Background(), dir, resolveTo(prov))
+
+	relations := prov.CallsByMethod("AddBlockedBy")
+	if len(relations) != 1 || relations[0].ID != 43 || relations[0].Blocker != 42 {
+		t.Fatalf("AddBlockedBy calls = %+v, want one relation #43 blocked by #42", relations)
+	}
+	if !strings.Contains(got, "record #43 for 02.md") {
+		t.Errorf("reply missing the record failure:\n%s", got)
+	}
+	if want := "#43 blocked by #42"; !strings.Contains(got, want) {
+		t.Errorf("reply missing %q:\n%s", want, got)
+	}
+	if outcome.Data["deps"] != "1" {
+		t.Errorf("outcome data = %v, want deps=1", outcome.Data)
+	}
+}
+
 func TestCreateIssuesFromDrafts_AllCreated(t *testing.T) {
 	dir := t.TempDir()
 	writeDrafts(t, dir, "01.created", "#42 feat: a\n", "02.created", "#43 feat: b\n")

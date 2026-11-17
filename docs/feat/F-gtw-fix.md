@@ -157,13 +157,13 @@ AddBlockedBy(ctx context.Context, owner, repo string, id, blocker int) error
 | GitHub | `gh api "repos/{owner}/{repo}/issues?state=open&per_page=100&sort=created&direction=asc"`，响应里的 PR 条目丢掉 | `gh api "repos/{owner}/{repo}/issues/{n}/dependencies/blocked_by"`；404 → `ErrRelationsUnsupported` | 先 `gh api "repos/{owner}/{repo}/issues/{blocker}"` 取 blocker 的 global id，再 `gh api --method POST "repos/{owner}/{repo}/issues/{id}/dependencies/blocked_by" -F issue_id=<global id>`；404 → `ErrRelationsUnsupported` |
 | GitLab | `glab api "projects/{owner%2Frepo}/issues?state=opened&per_page=100&order_by=created_at&sort=asc"` | `glab api "projects/{owner%2Frepo}/issues/{iid}/links"`；403 / 404 → `ErrRelationsUnsupported` | `glab api --method POST "projects/{owner%2Frepo}/issues/{blocker}/links" -f target_project_id={owner}/{repo} -f target_issue_iid={id} -f link_type=blocks`；403 → `ErrRelationsUnsupported`，400 且提到 `link_type` 也是 |
 
-**GitHub 的依赖端点认 global id，不认 issue number**：`dependencies/blocked_by` 的 body 参数 `issue_id` 是 issue JSON 的 `id` 字段（仓库外的全局 id），不是 `number`。所以写关系之前先读一次 blocker。`-F` 发整数，`-f` 发字符串，平台不收后者。
+**GitHub 的依赖端点认 global id，不认 issue number**：`dependencies/blocked_by` 的 body 参数 `issue_id` 是 issue JSON 的 `id` 字段（仓库外的全局 id），不是 `number`。所以写关系之前先读一次 blocker。`-F` 发整数，`-f` 发字符串，平台不收后者。同一个 blocker 的 global id 只读一次：provider 记着它，一组草稿里好几个 issue 依赖同一个前置时不会重复读。
 
 **GitLab 的关系图只能从 issue links 读**：GitLab 没有 `issues/{iid}/blocked_by` 这个 REST 端点（404），blocking 关系只在 issue links API 里。links 的响应是一个扁平数组：每一条是关联 issue 自己的字段，外加 `link_type` 说明它跟被查 issue 的关系。GitLab 按**被查 issue 的视角**报告这个 type：`is_blocked_by` 表示这条关联 issue 挡着被查 issue，`blocks` 表示被查 issue 挡着它。所以 blocker 是 `link_type` 为 `is_blocked_by` 的那些条目；`blocks` 的条目是依赖方，不是前置。
 
 **GitLab 的 link 从源 issue 那一侧记**：POST 的路径里的 issue 是源，`link_type=blocks` 表示源挡着 target（`is_blocked_by` 则是反过来）。所以「让 D 被 B 挡着」是往 **B** 的 links 端点发请求，把 D 写成 target。
 
-**GitLab 的 blocking 关系是 Premium 功能**：Free / CE 上根本建不出 blocking link，links 列表里也就没有，平台手里没有可遵守的依赖。links 端点本身不可用（403 / 404）时报 `ErrRelationsUnsupported`；建关系时 403（license 门槛）或者一个提到 `link_type` 的 400，也是同一个意思。
+**GitLab 的 blocking 关系是 Premium 功能**：Free / CE 上根本建不出 blocking link，links 列表里也就没有，平台手里没有可遵守的依赖。links 端点本身不可用（403 / 404）时报 `ErrRelationsUnsupported`；建关系时 403（license 门槛）或者一个提到 `link_type` 的 400，也是同一个意思。403 里说明「你不是两个 issue 所属 project / group 的成员」的那条不是 license 门槛，是权限不够 —— 平台有关系，只是这个账号用不了，它按普通失败报，平台原话留在错误里。
 
 **`/gtw new -y` 写关系**：草稿里的 `{{ISSUE:NN}}` 引用就是依赖，被引用的 issue 挡着引用它的 issue。建 issue 的循环里，每建好一个 issue 就把它引用到的每个 issue 的关系写进平台 —— 写不进去只警告，命令照旧成功，卡片上多一行 `deps` 列出建成的依赖。关系不落盘：草稿建好 issue 后就被 `.created` 记录换掉，同一对 issue 不会重复建关系。
 

@@ -162,6 +162,31 @@ func TestGitHubAddBlockedBy_CLIArgs(t *testing.T) {
 	}
 }
 
+// TestGitHubAddBlockedBy_ReusesTheBlockerID pins that the blocker's
+// global id is read once: a draft set names the same blocker from
+// several dependents.
+func TestGitHubAddBlockedBy_ReusesTheBlockerID(t *testing.T) {
+	cli := &seqCLIRunner{responses: []seqResponse{
+		{stdout: `{"number": 42, "id": 4200}`},
+		{stdout: `{}`},
+		{stdout: `{}`},
+	}}
+	p := &GitHubProvider{Runner: cli, host: "github.com"}
+
+	for _, dependent := range []int{43, 44} {
+		if err := p.AddBlockedBy(context.Background(), "cnlangzi", "nightme", dependent, 42); err != nil {
+			t.Fatalf("AddBlockedBy: %v", err)
+		}
+	}
+	if len(cli.calls) != 3 {
+		t.Fatalf("calls = %d, want 3 (one lookup, two relations)", len(cli.calls))
+	}
+	wantPost := "gh api --method POST repos/cnlangzi/nightme/issues/44/dependencies/blocked_by -F issue_id=4200"
+	if got := cli.lastArgv(); got != wantPost {
+		t.Errorf("argv =\n%q\nwant\n%q", got, wantPost)
+	}
+}
+
 // TestGitHubAddBlockedBy_Unsupported pins that a repository
 // without the dependencies feature is reported, not silently
 // dropped.
@@ -240,15 +265,24 @@ func TestGitLabAddBlockedBy_CLIArgs(t *testing.T) {
 
 // TestGitLabAddBlockedBy_Unsupported pins that a platform without
 // blocking links — the Premium gate — is reported as unsupported.
+// glab prints the status line ("403 Forbidden") and echoes
+// GitLab's error body; both shapes have to be read.
 func TestGitLabAddBlockedBy_Unsupported(t *testing.T) {
-	cli := &seqCLIRunner{responses: []seqResponse{
-		{stderr: "403 Forbidden", err: errors.New("exit status 1")},
-	}}
-	p := &GitLabProvider{Runner: cli, host: "gitlab.com"}
+	for name, stderr := range map[string]string{
+		"status line": "403 Forbidden",
+		"error body":  `{"message":"403 Forbidden"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			cli := &seqCLIRunner{responses: []seqResponse{
+				{stderr: stderr, err: errors.New("exit status 1")},
+			}}
+			p := &GitLabProvider{Runner: cli, host: "gitlab.com"}
 
-	err := p.AddBlockedBy(context.Background(), "cnlangzi", "nightme", 43, 42)
-	if !errors.Is(err, ErrRelationsUnsupported) {
-		t.Fatalf("err = %v, want ErrRelationsUnsupported", err)
+			err := p.AddBlockedBy(context.Background(), "cnlangzi", "nightme", 43, 42)
+			if !errors.Is(err, ErrRelationsUnsupported) {
+				t.Fatalf("err = %v, want ErrRelationsUnsupported", err)
+			}
+		})
 	}
 }
 
@@ -270,13 +304,15 @@ func TestGitLabAddBlockedBy_UnsupportedBadRequest(t *testing.T) {
 
 // TestGitLabAddBlockedBy_OtherError pins that a failure for
 // another reason — including a 400 that says nothing about the
-// relation type — keeps the platform's own message.
+// relation type, and a 403 that says the user may not link the two
+// issues — keeps the platform's own message.
 func TestGitLabAddBlockedBy_OtherError(t *testing.T) {
 	cases := map[string]string{
 		"server error": "500 Internal Server Error",
 		"bad request": `400 Bad Request
 {"message":{"title":["is too short"]}}`,
 		"unauthorized": "401 Unauthorized",
+		"not a member": `{"message":"Could not link issues. You must be a member of the project or group of both issues."}`,
 	}
 	for name, stderr := range cases {
 		t.Run(name, func(t *testing.T) {

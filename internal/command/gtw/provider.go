@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -30,17 +31,15 @@ const listIssuesPerPage = 100
 // is reported partially — see ListLabels.
 const listLabelsPerPage = 100
 
-// gitlabLinkBlocks is the link type that says "the issue this
-// relation is written from blocks the other one". GitLab reports
-// every link from the point of view of the issue the links were
-// listed for, so this is also the type of a linked issue that the
-// listed-for issue blocks.
+// gitlabLinkBlocks is GitLab's type for "the source blocks the
+// target". It is the type a relation is written with: the issue the
+// request names blocks the target. A linked issue listed with it is
+// one the listed-for issue blocks.
 const gitlabLinkBlocks = "blocks"
 
-// gitlabLinkIsBlockedBy is the link type that says "the issue this
-// relation is written from is blocked by the other one" — the type
-// GitLab reports for a linked issue that blocks the issue the links
-// were listed for.
+// gitlabLinkIsBlockedBy is GitLab's type for "the source is blocked
+// by the target". A linked issue listed with it blocks the issue the
+// links were listed for — those are that issue's blockers.
 const gitlabLinkIsBlockedBy = "is_blocked_by"
 
 // ProviderKind names a supported git hosting platform. v1 supports
@@ -201,8 +200,6 @@ func hasHTTPStatus(stderr string, code int) bool {
 	s := strconv.Itoa(code)
 	for _, pat := range []string{
 		"(HTTP " + s + ")", // gh
-		s + " Not Found",   // glab's status text
-		s + " Forbidden",   // glab's status text
 		`"message":"` + s,  // glab: GitLab's error body
 		`"error":"` + s,    // glab: GitLab's error body (older shape)
 	} {
@@ -210,9 +207,9 @@ func hasHTTPStatus(stderr string, code int) bool {
 			return true
 		}
 	}
-	// glab's status line: "400 Bad Request". The reason phrase
-	// starts with a capital, which keeps a number in the message
-	// ("42 issues") from reading as a status.
+	// glab's status line: "400 Bad Request", "404 Not Found". The
+	// reason phrase starts with a capital, which keeps a number in
+	// the message ("42 issues") from reading as a status.
 	for i := 0; i+len(s)+1 < len(stderr); i++ {
 		if !strings.HasPrefix(stderr[i:], s+" ") {
 			continue
@@ -409,16 +406,17 @@ type GitProvider interface {
 // user as "issue #N not found in <repo>".
 var ErrIssueNotFound = errors.New("gtw: issue not found")
 
-// ErrRelationsUnsupported is returned by ListBlockedBy when the
-// platform does not expose an issue relation graph — GitHub
-// without the dependencies feature, GitLab Free / CE without
-// blocking relations.
+// ErrRelationsUnsupported is returned by ListBlockedBy and
+// AddBlockedBy when the platform does not expose an issue relation
+// graph — GitHub without the dependencies feature, GitLab Free /
+// CE without blocking relations.
 //
-// It is deliberately not "no blockers": silently treating a
-// platform that cannot answer as one with an empty graph would
-// let the automatic pick start work whose prerequisite has not
-// landed. The caller downgrades it to "order by age alone" and
-// says so.
+// It is deliberately not "no blockers" and not "the write failed":
+// silently treating a platform that cannot answer as one with an
+// empty graph would let the automatic pick start work whose
+// prerequisite has not landed. The pick downgrades it to "order by
+// age alone" and says so; a relation write turns it into a warning
+// that names the relation it could not create.
 var ErrRelationsUnsupported = errors.New("gtw: issue relations are not supported by this platform")
 
 // ErrUnsupportedProvider is returned by Detect when the host
@@ -1363,6 +1361,13 @@ type GitHubProvider struct {
 	Worktree string
 
 	host string
+
+	// globalIDs memoises the global id of an issue number for the
+	// lifetime of this provider. Writing a relation needs the
+	// blocker's id, and one draft set names the same blocker from
+	// several dependents.
+	globalIDsMu sync.RWMutex
+	globalIDs   map[int]int
 }
 
 // Kind implements GitProvider.
@@ -1523,7 +1528,16 @@ func (c *GitHubProvider) AddBlockedBy(ctx context.Context, owner, repo string, i
 
 // issueGlobalID reads the global id of an issue — the `id` field
 // of GitHub's issue JSON, which is not the issue number.
+//
+// The answer is memoised: one draft set names the same blocker
+// from several dependents, and a global id never changes.
 func (c *GitHubProvider) issueGlobalID(ctx context.Context, owner, repo string, number int) (int, error) {
+	c.globalIDsMu.RLock()
+	id, ok := c.globalIDs[number]
+	c.globalIDsMu.RUnlock()
+	if ok {
+		return id, nil
+	}
 	path := fmt.Sprintf("repos/%s/%s/issues/%d", owner, repo, number)
 	stdout, stderr, err := c.runner().Run(ctx, "gh", "api", path)
 	if err != nil {
@@ -1538,6 +1552,12 @@ func (c *GitHubProvider) issueGlobalID(ctx context.Context, owner, repo string, 
 	if raw.ID <= 0 {
 		return 0, fmt.Errorf("gh api %s: response has no id: %s", path, strings.TrimSpace(stdout))
 	}
+	c.globalIDsMu.Lock()
+	if c.globalIDs == nil {
+		c.globalIDs = make(map[int]int)
+	}
+	c.globalIDs[number] = raw.ID
+	c.globalIDsMu.Unlock()
 	return raw.ID, nil
 }
 
@@ -2135,10 +2155,19 @@ func (c *GitLabProvider) AddBlockedBy(ctx context.Context, owner, repo string, i
 // link write means "this platform has no issue relations" rather
 // than "the write failed".
 //
-// A 403 is the license gate on blocking links. A 400 that names
-// `link_type` is the platform refusing the relation type — the
-// same thing said differently.
+// A 403 is the license gate on blocking links — unless it says the
+// user may not link the two issues, which is a permission problem:
+// the platform has relations, this account may not use them. A 400
+// that names `link_type` is the platform refusing the relation type
+// — the same thing said differently.
+//
+// The message is what tells the two 403s apart; if GitLab words it
+// differently, the 403 falls back to "unsupported", which is what
+// it was before.
 func gitlabRelationsUnsupported(stderr string) bool {
+	if strings.Contains(stderr, "must be a member of the project") {
+		return false
+	}
 	if hasHTTPStatus(stderr, http.StatusForbidden) {
 		return true
 	}

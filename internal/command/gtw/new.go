@@ -264,11 +264,16 @@ func createIssuesFromDrafts(ctx context.Context, dir string, resolve func() (Git
 		}
 		opened = append(opened, issue)
 		numbers[d.key] = issue.ID
-		if err := recordIssueCreated(dir, d, issue); err != nil {
-			return deps.card(renderIssueCreateFailure(owner, repo, opened, fmt.Sprintf("record #%d for %s", issue.ID, d.name()), err, dir, kept-1, deps)),
-				issueCreateOutcome(opened, owner, repo, kept-1, err, deps)
-		}
+		recordErr := recordIssueCreated(dir, d, issue)
+		// The relations are written even when the record failed:
+		// the issue is on the platform, so its dependency belongs
+		// there too — and the draft is gone, so no later run can
+		// add it.
 		deps.addRelations(ctx, provider, owner, repo, issue.ID, d.raw, numbers)
+		if recordErr != nil {
+			return deps.card(renderIssueCreateFailure(owner, repo, opened, fmt.Sprintf("record #%d for %s", issue.ID, d.name()), recordErr, dir, kept-1, deps)),
+				issueCreateOutcome(opened, owner, repo, kept-1, recordErr, deps)
+		}
 	}
 	if len(opened) == 1 {
 		return deps.card(renderIssueOpenedCard(owner, repo, opened[0], deps)),
@@ -376,7 +381,7 @@ func referencedDrafts(raw string) []string {
 	return keys
 }
 
-// value renders the relations the run created:
+// relationsLine renders the relations the run created:
 // "#43 blocked by #42 · #44 blocked by #42, #43".
 func (d issueDeps) relationsLine() string {
 	order := make([]int, 0, len(d.created))
@@ -480,9 +485,9 @@ func validateIssueDrafts(set issueDraftSet) error {
 		if _, _, err := parseIssueDraft(d.raw); err != nil {
 			return fmt.Errorf("%s: %w", d.name(), err)
 		}
-		for _, m := range issueRefRe.FindAllStringSubmatch(d.raw, -1) {
-			if !known[m[1]] {
-				return fmt.Errorf("%s: %s must point to a lower-numbered draft of this set", d.name(), m[0])
+		for _, key := range referencedDrafts(d.raw) {
+			if !known[key] {
+				return fmt.Errorf("%s: {{ISSUE:%s}} must point to a lower-numbered draft of this set", d.name(), key)
 			}
 		}
 		known[d.key] = true

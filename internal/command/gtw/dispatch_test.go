@@ -732,11 +732,20 @@ func TestBuildIssueDispatchText_WorkspaceBoundary(t *testing.T) {
 		// What this mode does when the request needs a change
 		// outside the worktree.
 		action []string
+		// Text the prompt must not carry.
+		mustNot []string
 	}{
 		{
 			mode:   DispatchAssess,
 			after:  "If you can safely infer an implementation detail from an established project convention",
 			action: []string{"Report it in the plan under User Decisions Required", "Leave everything outside the worktree untouched"},
+			// The Assess pass writes nothing at all, so the
+			// boundary must scope where changes go, not
+			// grant a write scope. A "may create, modify, or
+			// delete" clause would read as permission and
+			// contradict the read-only contract stated around
+			// it.
+			mustNot: []string{"may create, modify, or delete"},
 		},
 		{
 			mode:   DispatchExecute,
@@ -752,6 +761,11 @@ func TestBuildIssueDispatchText_WorkspaceBoundary(t *testing.T) {
 			for _, want := range append(append([]string{}, shared...), m.action...) {
 				if !strings.Contains(out, want) {
 					t.Errorf("prompt missing %q; got:\n%s", want, out)
+				}
+			}
+			for _, forbid := range m.mustNot {
+				if strings.Contains(out, forbid) {
+					t.Errorf("prompt contains forbidden %q; got:\n%s", forbid, out)
 				}
 			}
 
@@ -780,6 +794,14 @@ func TestBuildIssueDispatchText_WorkspaceBoundary(t *testing.T) {
 	bullet := "Every change stays inside the worktree; a change outside it needs the user's authorisation first."
 	if !strings.Contains(exec, bullet) {
 		t.Errorf("Execute prompt missing operating-principle bullet %q; got:\n%s", bullet, exec)
+	}
+	// The bullet sits next to "Ask the user only when a genuine
+	// product/requirement decision remains unresolved" — the
+	// authorisation request is not such a decision, so the bullet
+	// has to say so, or the "only" wins and the agent makes the
+	// out-of-worktree change instead of asking.
+	if !strings.Contains(exec, "Ask the user for that authorisation even when no product or requirement decision is involved") {
+		t.Errorf("Execute bullet must exempt the authorisation request from the ask-only rule; got:\n%s", exec)
 	}
 }
 

@@ -384,8 +384,8 @@ decisions into User Decisions Required.
 ### Workspace boundary
 
 Every change stays inside the worktree named in ## Metadata — that
-directory is your working directory, and it is the only place this pass
-may create, modify, or delete anything. Another repository, this
+directory is your working directory, and it is the only place where this
+pass creates, modifies, or deletes anything. Another repository, this
 repository's main checkout, a sibling directory, any other path: none
 of them is yours to change in this pass. Creating a branch, a worktree,
 or a commit outside the worktree is a change outside it. You may read
@@ -584,8 +584,8 @@ Structured issues: when the issue body is organized as a specification — secti
 ### Workspace boundary
 
 Every change stays inside the worktree named in ## Metadata — that
-directory is your working directory, and it is the only place this pass
-may create, modify, or delete anything. Another repository, this
+directory is your working directory, and it is the only place where this
+pass creates, modifies, or deletes anything. Another repository, this
 repository's main checkout, a sibling directory, any other path: none
 of them is yours to change in this pass. Creating a branch, a worktree,
 or a commit outside the worktree is a change outside it. You may read
@@ -621,7 +621,7 @@ This authorisation does NOT imply that code must change. If the requested behavi
 - Do not invent functionality the request did not ask for.
 - Do not refactor unrelated code.
 - Prefer the smallest correct change that fixes the root cause or implements the requested capability.
-- Every change stays inside the worktree; a change outside it needs the user's authorisation first.
+- Every change stays inside the worktree; a change outside it needs the user's authorisation first. Ask the user for that authorisation even when no product or requirement decision is involved.
 
 ### Workflow
 

@@ -485,7 +485,7 @@ jobs:
       - id: commit
         message: "/gtw commit"
         if: ${{ steps.fix.outputs.data.issue }}
-        note: 把 agent 的改动提交成 commit。命令会告诉你修改有没有进到 git 里：进了就是正常，没进（nothing_to_commit）才是异常，那时再决定要不要让 agent 去改。
+        note: 把 agent 的改动提交成 commit。命令会告诉你修改有没有进到 git 里：提交上了是正常；没提交上但活已经干完了（agent 自己提交的）也是正常；outcome 带 error 才是异常（nothing_to_commit），那时再决定要不要让 agent 去改。
       - id: review
         message: "/review"
         if: ${{ steps.fix.outputs.data.issue }}
@@ -493,7 +493,7 @@ jobs:
       - id: commit2
         message: "/gtw commit"
         if: ${{ steps.fix.outputs.data.issue }}
-        note: 把 review 之后的修改提交成 commit。findings 先评估：只有成立且必要的才修，其余驳回 —— 要修的用 instruct 把这几条 findings 交给 agent 改，改完跑 commit2 提交。nothing_to_commit 说明工作区干净：findings 已修好并提交，或没有必须修的 findings —— 结果够用，跑 push 继续。
+        note: 把 review 之后的修改提交成 commit。findings 先评估：只有成立且必要的才修，其余驳回 —— 要修的用 instruct 把这几条 findings 交给 agent 改，改完跑 commit2 提交。outcome 不带 error 就是正常：findings 已修好并提交，或没有必须修的 findings —— 结果够用，跑 push 继续；带 error 才是异常（nothing_to_commit：工作区没有改动，findings 还没修好），先让 agent 去改。
       - id: push
         message: "/gtw push"
         if: ${{ steps.fix.outputs.data.issue }}

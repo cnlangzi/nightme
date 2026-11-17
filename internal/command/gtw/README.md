@@ -420,6 +420,17 @@ Worktree 目录已经被手工删掉时,提示 `git worktree prune`:
 hint: run `git worktree prune` to drop the stale entry
 ```
 
+用户自己建的 worktree(不在 `<repo>.nightme/` 布局里)不进 nightme 的
+`.nightme/gtw.yml`——那个文件是 `/gtw close` 拆 worktree 和分支的凭据,
+nightme 不给自己没建的 worktree 发这个凭据:
+
+```
+✅ back into `/Users/.../scratch`
+→ worktree: /Users/.../scratch
+→ branch: scratch
+→ .nightme/gtw.yml (not created — this worktree is not a /gtw fix worktree)
+```
+
 ### 4.2 Format 2(sync)
 
 ```

@@ -236,6 +236,20 @@ func DeriveBranchFromName(name string) (string, error) {
 // so build tools, linters, and codegraph don't see duplicate
 // sources (F-45 §6.2).
 func WorktreePath(repoRoot, slug string) string {
+	return pathutil.Join(WorktreeLayoutDir(repoRoot), slug)
+}
+
+// WorktreeLayoutDir returns the directory that holds this
+// repository's nightme worktrees: the sibling directory
+// <repoName>.nightme next to the repository.
+//
+//	repoRoot = "/home/dev/code/nightme"
+//	→ "/home/dev/code/nightme.nightme"
+//
+// A worktree that does not live under this directory is one the
+// user made by hand — nightme did not create it, and must not
+// claim it.
+func WorktreeLayoutDir(repoRoot string) string {
 	// F-PATHUTIL-001 §5.2: route through pathutil so the
 	// platform-specific normalization (forward-slash → backslash on
 	// Windows) is consistent with every other path operation in the
@@ -247,5 +261,5 @@ func WorktreePath(repoRoot, slug string) string {
 	repoRoot, _ = pathutil.NormalizeForOS(repoRoot)
 	parent := pathutil.Dir(repoRoot)
 	repoName := pathutil.Base(repoRoot)
-	return pathutil.Join(parent, repoName+"."+LabelPrefix, slug)
+	return pathutil.Join(parent, repoName+"."+LabelPrefix)
 }

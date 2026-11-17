@@ -104,6 +104,13 @@ type programmableGit struct {
 	// when set; used to simulate a transient git failure.
 	revParseShowToplevelErr error
 
+	// revParseShowToplevelByDir overrides revParseShowToplevel
+	// per directory. Real git reports the toplevel of the
+	// directory the command runs in: a cwd inside a linked
+	// worktree gets THAT worktree's own root, not the
+	// repository's primary checkout.
+	revParseShowToplevelByDir map[string]string
+
 	// worktreeListPorcelain is returned for any
 	// `worktree list --porcelain` call. Used by ListWorktrees
 	// (the branch-prefix resolver behind `/gtw back <branch>`)
@@ -140,6 +147,9 @@ func (p *programmableGit) Run(_ context.Context, dir string, args ...string) (st
 	case len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--show-toplevel":
 		if p.revParseShowToplevelErr != nil {
 			return "", "", p.revParseShowToplevelErr
+		}
+		if v, ok := p.revParseShowToplevelByDir[dir]; ok {
+			return v + "\n", "", nil
 		}
 		// Trailing newline matches real git; RepoRoot() trims it.
 		return p.revParseShowToplevel + "\n", "", nil

@@ -11,6 +11,26 @@ is committed there is the version users build and run.
 
 ## [Unreleased] — current dev (locked 2026-08-02)
 
+### Changed: `/gtw back <branch>` takes a prefix of a worktree branch name
+
+`/gtw back <arg>` used to take the name of a worktree directory under
+`<repo>.nightme/`, so the whole branch name had to be typed and a worktree
+the user made by hand could not be entered at all. The argument is now a
+prefix of a worktree branch name: `42-feat` enters the worktree on
+`42-feat-login-state-expires`.
+
+A branch name that matches exactly wins over the longer branches that
+share its prefix. When several branches match and none of them is exact,
+the command fails and names them instead of picking one — a chat that
+lands in the wrong worktree is worse than a chat that asks. The primary
+checkout is never a candidate, so `/gtw back main` does not "enter" the
+directory the chat already sits in.
+
+A worktree nightme did not create gets no `.nightme/gtw.yml`: that file
+is the token `/gtw close` tears a worktree and its branch down with, so
+nightme does not claim worktrees it did not make. `/gtw close` in such a
+worktree refuses — remove it with `git worktree remove` instead.
+
 ### Added: `nightme me` configures the chat model of the personal agent
 
 The personal agent's chat model lives in `config.yaml` under `me.llm`, and

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -622,6 +623,89 @@ func TestRunBackToWorktree_NonWorktreeDirectoryIsNeverEntered(t *testing.T) {
 	// the branch resolved).
 	if _, err := os.Stat(gtwYmlPath(wt)); err == nil {
 		t.Errorf("yml must not be written for non-worktree dirs")
+	}
+}
+
+// TestRunBackToWorktree_RejectsWhenCwdIsALinkedWorktreeRoot: the
+// chat sits exactly at a linked worktree's root. Real git's
+// `rev-parse --show-toplevel` reports THAT worktree's own root, so
+// a gate that compared the cwd against it would let the command
+// through — and the main checkout would become a candidate. The
+// command must refuse and leave the cwd alone.
+func TestRunBackToWorktree_RejectsWhenCwdIsALinkedWorktreeRoot(t *testing.T) {
+	repoRoot := t.TempDir()
+	wt := WorktreePath(repoRoot, "other")
+	if err := os.MkdirAll(wt, 0o755); err != nil {
+		t.Fatalf("mkdir wt: %v", err)
+	}
+
+	rig := newCloseRig(t)
+	// Real git: inside a linked worktree, --show-toplevel reports
+	// the worktree's own root — NOT the primary checkout.
+	rig.git.revParseShowToplevelByDir = map[string]string{wt: wt}
+	rig.git.revParseShowToplevel = repoRoot
+	rig.git.worktreeListPorcelain =
+		porcelainFor(repoRoot, "main") + "\n" + porcelainFor(wt, "other")
+
+	if err := rig.cs.SetSelectedCwd(wt); err != nil {
+		t.Fatalf("SetSelectedCwd(%s): %v", wt, err)
+	}
+
+	card, outcome := runBack(t, rig, "main")
+	if outcome == nil {
+		t.Fatalf("no settled outcome: the command reported nothing")
+	}
+	if outcome.Status != messages.OutcomeFailed {
+		t.Errorf("outcome status = %s, want %s", outcome.Status, messages.OutcomeFailed)
+	}
+	if outcome.Data["reason"] != "wrong_cwd" {
+		t.Errorf("outcome data[reason] = %q, want %q", outcome.Data["reason"], "wrong_cwd")
+	}
+	if got := rig.cs.SelectedCwd(); got != wt {
+		t.Errorf("SelectedCwd must not move on rejection; got %q, want %q", got, wt)
+	}
+	if !strings.Contains(card, "main repo root") {
+		t.Errorf("reply should explain the cwd-is-not-root constraint:\n%s", card)
+	}
+}
+
+// TestRunBackToWorktree_ForeignWorktreeGetsNoOwnershipToken: a
+// worktree the user made by hand is reachable, but nightme does
+// not stamp its state file into it. The yml is the token `/gtw
+// close` tears a worktree — and its branch — down with, and
+// nightme must not be able to delete a branch it never created.
+func TestRunBackToWorktree_ForeignWorktreeGetsNoOwnershipToken(t *testing.T) {
+	repoRoot := t.TempDir()
+	// Outside <repo>.nightme/ — the user made this one.
+	foreign := filepath.Join(t.TempDir(), "scratch")
+	if err := os.MkdirAll(foreign, 0o755); err != nil {
+		t.Fatalf("mkdir wt: %v", err)
+	}
+
+	rig := newCloseRig(t)
+	rig.git.revParseShowToplevel = repoRoot
+	rig.git.worktreeListPorcelain =
+		porcelainFor(repoRoot, "main") + "\n" + porcelainFor(foreign, "scratch")
+
+	moveToRepoRoot(t, rig, repoRoot)
+
+	card, outcome := runBack(t, rig, "scratch")
+	if outcome == nil {
+		t.Fatalf("no settled outcome: the command reported nothing")
+	}
+	if outcome.Status != messages.OutcomeOK {
+		t.Errorf("outcome status = %s, want %s", outcome.Status, messages.OutcomeOK)
+	}
+	// The chat still enters the worktree the user asked for.
+	if got := rig.cs.SelectedCwd(); got != foreign {
+		t.Errorf("SelectedCwd = %q, want %q", got, foreign)
+	}
+	// But nightme leaves no ownership token behind.
+	if _, err := os.Stat(gtwYmlPath(foreign)); err == nil {
+		t.Errorf("no yml must be written into a worktree nightme did not create")
+	}
+	if !strings.Contains(card, "not created") {
+		t.Errorf("card should say the yml was not created:\n%s", card)
 	}
 }
 

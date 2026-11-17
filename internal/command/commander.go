@@ -276,11 +276,12 @@ func parseCommand(text string) (body string, matched bool) {
 
 // CommandTail returns the raw text that follows the leading
 // whitespace-delimited tokens of a slash-command message, with its
-// line structure intact.
+// line structure intact, and the text that sits on the command's own
+// line.
 //
 // skip is the number of leading tokens to drop: 1 for a command
 // without a subcommand ("/foo bar" → "bar"), 2 for one with
-// ("/foo sub bar" → "bar"). Returns "" when text is not a slash
+// ("/foo sub bar" → "bar"). Both are "" when text is not a slash
 // command or carries fewer than skip tokens.
 //
 // The commander flattens a message into whitespace-delimited tokens,
@@ -288,16 +289,20 @@ func parseCommand(text string) (body string, matched bool) {
 // document loses its newlines and its indentation there. This helper
 // reads the text as it arrived, for the commands whose argument is
 // free-form prose.
-func CommandTail(text string, skip int) string {
+//
+// The command's own line is where a flag lives: a "-y" the user
+// typed on a later line belongs to the message body, not to the
+// command.
+func CommandTail(text string, skip int) (tail, line string) {
 	body, matched := parseCommand(text)
 	if !matched || skip < 0 {
-		return ""
+		return "", ""
 	}
 	pos := 0
 	for i := 0; i < skip; i++ {
 		pos = skipSpace(body, pos)
 		if pos >= len(body) {
-			return ""
+			return "", ""
 		}
 		for pos < len(body) {
 			r, size := utf8.DecodeRuneInString(body[pos:])
@@ -307,7 +312,9 @@ func CommandTail(text string, skip int) string {
 			pos += size
 		}
 	}
-	return trimTailSeparator(body[pos:])
+	rest := body[pos:]
+	first, _, _ := strings.Cut(rest, "\n")
+	return trimTailSeparator(rest), strings.TrimSpace(first)
 }
 
 // skipSpace returns the index of the first non-space rune at or

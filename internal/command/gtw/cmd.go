@@ -466,15 +466,18 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, mgr *c
 }
 
 // gtwTail returns the free-form text the user typed after the
-// "/gtw <subcommand>" prefix, with its line structure intact.
+// "/gtw <subcommand>" prefix, with its line structure intact, and
+// the part of it that sits on the command's own line.
 //
-// Falls back to the whitespace-joined argv when the raw text is
-// unavailable — programmatic callers and tests may fill Args only.
-func gtwTail(input command.SlashInput) string {
-	if tail := command.CommandTail(input.Text, 2); tail != "" {
-		return tail
+// The raw text wins: it is the message as the user typed it. Only
+// when the caller filled Args alone — programmatic callers and tests
+// — does the whitespace-joined argv stand in for it.
+func gtwTail(input command.SlashInput) (tail, line string) {
+	if input.Text == "" {
+		argv := strings.Join(input.Args[2:], " ")
+		return argv, argv
 	}
-	return strings.Join(input.Args[2:], " ")
+	return command.CommandTail(input.Text, 2)
 }
 
 // runPlan handles `/gtw plan [topic]`. The topic is free-form
@@ -485,7 +488,7 @@ func (f *Factory) runPlan(ctx context.Context, cs *chatsession.ChatSession, inpu
 	if _, failOut := requireCwd(ctx, cs); failOut != nil {
 		return failOut, nil
 	}
-	topic := gtwTail(input)
+	topic, _ := gtwTail(input)
 	_, _ = RunPlan(ctx, cs, f.deps, input.ChatID, input.MessageID, topic)
 	return &command.SlashOutput{Consumed: true}, nil
 }
@@ -499,7 +502,8 @@ func (f *Factory) runPlan(ctx context.Context, cs *chatsession.ChatSession, inpu
 // are being created", which drafting does not do. They run once per
 // `/gtw new -y`, however many drafts it creates.
 func (f *Factory) runNew(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
-	args, err := parseNewIssueArgs(gtwTail(input))
+	tail, line := gtwTail(input)
+	args, err := parseNewIssueArgs(tail, line)
 	if err != nil {
 		reportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
 		return &command.SlashOutput{

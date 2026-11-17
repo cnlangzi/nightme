@@ -116,3 +116,26 @@ func TestFactory_New_YesWithExtraIsAUsageError(t *testing.T) {
 	}
 	assertOutcome(t, p.settle(t), messages.OutcomeFailed, map[string]string{"reason": "usage"})
 }
+
+// TestFactory_New_PastedYesIsRefused pins that a pasted document
+// whose first line is "-y" is refused loudly instead of flipping the
+// command into create mode: the flag belongs to the command's own
+// line, and a material that starts with it cannot be expressed.
+func TestFactory_New_PastedYesIsRefused(t *testing.T) {
+	rig := newMaterialRig(t, "chat-material-5")
+	dir := rig.draftDir(t)
+	writeDrafts(t, dir, "01.md", "# feat(gtw): archive chats\n\n## Requirements\n- R1\n")
+	numberIssuesFrom(rig.prov, 42)
+
+	out := rig.send(t, "/gtw new\n-y\nthe material")
+
+	if out == nil || !strings.Contains(out.Reply, "the material cannot start with -y") {
+		t.Errorf("reply = %+v, want the refusal naming both modes", out)
+	}
+	if calls := rig.prov.CallsByMethod("CreateIssue"); len(calls) != 0 {
+		t.Errorf("the pasted -y created %d issues; the command must refuse it", len(calls))
+	}
+	if turns := rig.cap.sent(); len(turns) != 0 {
+		t.Errorf("the refused command queued %d agent turns", len(turns))
+	}
+}

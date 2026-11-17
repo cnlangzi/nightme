@@ -572,7 +572,7 @@ the guard means "an issue was picked" and the rest of the round is skipped.
 | `title` | What the run is for. It is part of the model's instructions. Required. |
 | `args` | The arguments the workflow takes. A spec is a mapping with `name` and an optional `default`; a default makes the argument optional, no default makes it required. |
 | `instruct` | Whether the agent may send free-form instructions. Default true. |
-| `workspaces` | The workspaces the workflow names. Optional — the run takes the workspace of the chat that starts it. |
+| `workspaces` | The workspaces the workflow names. Optional — the run works where the chat works. |
 | `on` | The trigger block. It is parsed and displayed; nothing fires it. |
 | `jobs` | The jobs, each with an ordered list of `steps`. Required. |
 

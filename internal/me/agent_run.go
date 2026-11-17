@@ -1131,6 +1131,45 @@ func (r *run) env() map[string]string {
 	return r.state.Env
 }
 
+// workCwd returns the directory the run last knew.
+//
+// The chat moves when a command moves it, so this is the fallback for
+// the moments the daemon cannot tell where the chat stands.
+func (r *run) workCwd() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.cwd
+}
+
+// setWorkCwd records the directory the run works in: the run's own
+// field, the workspace of its state and the environment its steps
+// run with.
+//
+// It reports whether the directory changed.
+//
+// The environment is replaced rather than written into: a map that
+// was handed out to a step is read outside the lock.
+func (r *run) setWorkCwd(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	changed := r.cwd != dir
+	r.cwd = dir
+	if r.state == nil {
+		return changed
+	}
+	r.state.Workspace = dir
+	env := maps.Clone(r.state.Env)
+	if env == nil {
+		env = map[string]string{}
+	}
+	env["WORKSPACE_CWD"] = dir
+	r.state.Env = env
+	return changed
+}
+
 // outcomeLine renders an outcome as one human-readable line.
 func outcomeLine(o messages.Outcome) string {
 	if o.Summary != "" {
@@ -1404,7 +1443,7 @@ func (s *Service) restoreRun(state persistedRun) *run {
 		done:             make(chan struct{}),
 	}
 	if r.state == nil {
-		r.state = newRunState(r.id, state.Workflow.Name, r.cwd, time.Now())
+		r.state = newRunState(r.id, state.Workflow.Name, state.Cwd, time.Now())
 	}
 	if r.phase == "" {
 		r.phase = PhaseRunning

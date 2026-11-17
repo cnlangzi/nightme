@@ -115,7 +115,7 @@ func (s *Service) toolCatalogue(r *run) []llm.Tool {
 		},
 		llm.Tool{
 			Name:        toolRepoStatus,
-			Description: "Read the repository facts of the chat: the branch, whether the tree is dirty, and how far the branch is ahead of or behind its upstream and its base branch.",
+			Description: "Read the repository facts of the chat: the branch, whether the tree is dirty, how far the branch is ahead of or behind its upstream and its base branch, and the directory they were read in.",
 			Schema:      json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`),
 		},
 		llm.Tool{
@@ -599,7 +599,7 @@ func (s *Service) toolRepoStatus(ctx context.Context, r *run, _ pendingCall) (st
 	if s.cfg.Git == nil {
 		return stepResult{}, toolErrorf("the repository facts are not available")
 	}
-	dir := r.cwd
+	dir := s.workDir(r)
 	if dir == "" {
 		return stepResult{}, toolErrorf("the chat has no working directory")
 	}
@@ -610,6 +610,7 @@ func (s *Service) toolRepoStatus(ctx context.Context, r *run, _ pendingCall) (st
 	data := map[string]string{
 		"branch": facts.Branch,
 		"dirty":  strconv.FormatBool(facts.Dirty),
+		"cwd":    dir,
 	}
 	if facts.Upstream != "" {
 		data["upstream"] = facts.Upstream

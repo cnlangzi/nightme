@@ -53,6 +53,7 @@ type Outcome struct {
 | --- | --- |
 | `end_reason` | 回合结束原因（`clean` / `user-stopped` / `user-killed` / …） |
 | `reason` | 结束原因分类（见 §7.1）——命令**因为有东西要做**才跑、又发现没东西可做时，它报 `failed` 并带上这里的码 |
+| `error` | 出错说明——坏了的时候，这里是一句人话；没有这个键说明不是坏了，只是没东西可做（见 §2） |
 | `agent` | 跑这件事的 agent 名 |
 | `issue` | `/gtw fix` 处理的 issue 号（本地模式为 `-1`） |
 | `branch` | 分支名 |
@@ -103,6 +104,19 @@ type Outcome struct {
 
 `unknown` 是零值语义：一条没人上报过的消息以此状态 settle；合并时也只有在**没有任何一方上报**的情况下才产生它。
 
+`Status` 说**活干完了没有**，`Data["error"]` 说**有没有东西坏了**——两个轴分开看：
+
+| Status | `Data["error"]` | 含义 |
+| --- | --- | --- |
+| `ok` | 没有 | 活干完了 |
+| `noop` | 没有 | 没有可做的事——请求有效，但世界已经满足它 |
+| `failed` | 没有 | 正常分支——请求有效，只是没东西可做 |
+| `failed` | 有 | 异常——东西坏了 |
+| `cancelled` / `timeout` / `incomplete` | 有或没有 | 这一步没走完 |
+| `unknown` | 没有 | 没有任何一方上报过结论 |
+
+出错说明由命令的共享构造器（`internal/command`）填：报异常时填 `error`，写的是"坏了什么"；报正常分支时不填——答案只是"没东西可做"。哪一条命令报哪一类，是那条命令自己的判断：同一件事在不同命令里可能是不同的类。程序读 `Data["error"]` 在不在，就知道这条命令报的是哪一类。异常同时带 `reason` 和 `error`——前者是给程序分支的码，后者是给人读的解释。别处直接写的结论不带出错说明，按 `status` 和 `reason` 读。
+
 `/gtw`、`/review`、`/cwd`、`/use`、`/stop` 的每一条退出路径都会上报一个非 `unknown` 的结论。`/close`、`/queue`、`/steer`、`/think`、`/tools`、`/watch`、`/new`、`/resume`、`/handoff`、`/wiki` 仍然 settle 成 `unknown`。
 
 ---
@@ -117,9 +131,9 @@ type Outcome struct {
 failed > cancelled > timeout > incomplete > ok > noop > unknown
 ```
 
-**Status**：取更严重的一方；`unknown` 只在都没人上报时出现。
+**Status**：取更严重的一方；`unknown` 只在都没人上报时出现。`error` 不参与严重度排序——它只说明坏了没有。
 
-**Data**：逐键合并，后上报的覆盖先上报的；只有一方拥有的键保留。
+**Data**：逐键合并，后上报的覆盖先上报的；只有一方拥有的键保留。`error` 走同一条规则：没报错的一方不会抹掉另一方的出错说明——命令报的异常在回合干净结束后依然在合并结果里，后上报的异常也会出现在合并结果里。
 
 **Summary**：取胜出方的；严重度相同时先上报的胜出（命令的专属结论不被后到的通用结论顶掉）；胜出方没有 Summary 时用另一方的。
 

@@ -218,17 +218,135 @@ func RunBack(
 	return &Result{Consumed: true}, nil
 }
 
-// RunBackToWorktree is the entry point for `/gtw back <slug>`.
-// The mirror of RunBack: jump from the chat's main repo root
-// into the named fix worktree, repairing a missing
-// .nightme/gtw.yml when needed.
+// worktreeMatchError is the failure of resolveWorktreeBranch: the
+// argument matched no worktree branch, or matched more than one.
+type worktreeMatchError struct {
+	Reason    string // "not_found" | "ambiguous"
+	Arg       string // the argument the user typed
+	Matches   []WorktreeEntry
+	Available []WorktreeEntry
+}
+
+// Error implements error. The text doubles as the outcome summary.
+func (e *worktreeMatchError) Error() string {
+	if e.Reason == "ambiguous" {
+		return fmt.Sprintf("%s matches several worktree branches", e.Arg)
+	}
+	return fmt.Sprintf("no worktree branch matches %s", e.Arg)
+}
+
+// candidates returns the entries the failure card lists: the prefix
+// matches for an ambiguous prefix, every worktree branch for a
+// miss.
+func (e *worktreeMatchError) candidates() []WorktreeEntry {
+	if e.Reason == "ambiguous" {
+		return e.Matches
+	}
+	return e.Available
+}
+
+// branchNames returns the branch names of the entries.
+func branchNames(entries []WorktreeEntry) []string {
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Branch)
+	}
+	return names
+}
+
+// resolveWorktreeBranch resolves arg — a branch-name prefix — to the
+// worktree of this repository that holds the matching branch.
 //
-// `slug` is the basename of the worktree directory under
-// `<parent>/<repoName>.nightme/<slug>` (the layout WorktreePath
-// builds). It is NOT a branch name and NOT an absolute path —
-// resolving anything else would let a typo silently land in the
-// wrong directory, while the layout's basename is what every
-// existing /gtw fix call writes.
+// The candidate set is every worktree of the repository except the
+// primary checkout, minus the detached ones: the branch is the
+// handle, and a hand-made worktree (`git worktree add ../scratch -b
+// scratch`) is otherwise unreachable. The primary checkout is never a
+// candidate — `/gtw back main` must not "enter" the directory the
+// chat already sits in.
+//
+// An exact match wins over longer branches that share the prefix.
+// An ambiguous prefix is an error, not a guess: landing the chat in
+// the wrong worktree is worse than asking.
+func resolveWorktreeBranch(ctx context.Context, repoRoot, arg string, git GitRunner) (WorktreeEntry, error) {
+	entries, err := ListWorktrees(ctx, repoRoot, git)
+	if err != nil {
+		return WorktreeEntry{}, err
+	}
+	var candidates, available []WorktreeEntry
+	for _, e := range entries {
+		if sameWorktreePath(e.Path, repoRoot) {
+			continue
+		}
+		if e.Branch == "" {
+			// Detached HEAD (or a bare repo): no branch to match.
+			continue
+		}
+		available = append(available, e)
+		if strings.HasPrefix(e.Branch, arg) {
+			candidates = append(candidates, e)
+		}
+	}
+	for _, c := range candidates {
+		if c.Branch == arg {
+			return c, nil
+		}
+	}
+	switch len(candidates) {
+	case 0:
+		return WorktreeEntry{}, &worktreeMatchError{
+			Reason: "not_found", Arg: arg, Available: available,
+		}
+	case 1:
+		return candidates[0], nil
+	default:
+		return WorktreeEntry{}, &worktreeMatchError{
+			Reason: "ambiguous", Arg: arg, Matches: candidates,
+		}
+	}
+}
+
+// renderWorktreeMatchError renders the failure card of a
+// resolveWorktreeBranch miss — no branch matched the argument, or
+// several did. One helper so every caller of the resolver words the
+// two failures the same way.
+func renderWorktreeMatchError(e *worktreeMatchError) string {
+	var b strings.Builder
+	if e.Reason == "ambiguous" {
+		fmt.Fprintf(&b, "❌ %q matches %d worktree branches:\n", e.Arg, len(e.Matches))
+		for _, m := range e.Matches {
+			fmt.Fprintf(&b, "→ %s\n", m.Branch)
+		}
+		b.WriteString("hint: type the full branch name")
+		return b.String()
+	}
+	fmt.Fprintf(&b, "❌ no worktree branch matches %q\n", e.Arg)
+	if len(e.Available) == 0 {
+		b.WriteString("this repository has no worktrees — run `/gtw fix <issue-id>` " +
+			"or `/gtw fix --name <branch>` to create one")
+		return b.String()
+	}
+	b.WriteString("worktree branches:\n")
+	for _, a := range e.Available {
+		fmt.Fprintf(&b, "→ %s\n", a.Branch)
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// RunBackToWorktree is the entry point for `/gtw back <branch>`.
+// The mirror of RunBack: jump from the chat's main repo root
+// into the fix worktree that holds the matching branch, repairing a
+// missing .nightme/gtw.yml when needed.
+//
+// `branch` is a PREFIX of a worktree branch name — the whole branch
+// is not required. When exactly one branch matches, that worktree is
+// entered; when several match and one of them equals the argument
+// exactly, that one wins; when the choice is still ambiguous the
+// command fails and lists the branches, so the next attempt is
+// unambiguous.
+//
+// The candidate set is every worktree of the repository, not only
+// the ones under `<repo>.nightme/`: a worktree the user made by hand
+// is reachable the same way.
 //
 // The new path is the strict inverse of the existing RunBack
 // path:
@@ -241,11 +359,12 @@ func RunBack(
 //
 // These two gates make the two directions non-overlapping: a
 // user inside a worktree types `/gtw back` to leave it; only
-// from the main repo does `/gtw back <name>` make sense.
+// from the main repo does `/gtw back <branch>` make sense.
 //
 // yml repair (when <wt>/.nightme/gtw.yml is missing):
 //
-//  1. `branch   ← git -C <wt> branch --show-current`
+//  1. `branch   ← the branch the worktree holds, per the worktree
+//     listing` (no second git call — the listing already says it)
 //  2. `worktree ← the resolved path itself`
 //  3. `mode     = ModeLocal` (we cannot recover Issue/Repo/
 //     Provider from git alone; ModeLocal is the only safe
@@ -267,7 +386,7 @@ func RunBackToWorktree(
 	ctx context.Context,
 	cs *chatsession.ChatSession,
 	deps HandlerDeps,
-	chatID, messageID, slug string,
+	chatID, messageID, branch string,
 ) (*Result, error) {
 	selectedCwd := cs.SelectedCwd()
 	if selectedCwd == "" {
@@ -292,26 +411,42 @@ func RunBackToWorktree(
 	// trailing-separator quirks that bite a naive string compare.
 	if !pathutil.Equal(selectedCwd, repoRoot) {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-			"❌ /gtw back <worktree> requires cwd at the main repo root.\n"+
+			"❌ /gtw back <branch> requires cwd at the main repo root.\n"+
 				"current cwd is inside a worktree; run `/gtw back` (no arg) first.",
 			command.FailedOutcome("wrong_cwd", "the chat is not at the main repo root")), nil
 	}
 
-	// --- resolve slug → worktree path --------------------------
-	slug = strings.TrimSpace(slug)
-	if slug == "" {
+	// --- resolve the branch prefix → worktree ------------------
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-			"❌ /gtw back: worktree name is empty",
-			command.FailedOutcome("usage", "no worktree name was given")), nil
+			"❌ /gtw back: branch name is empty",
+			command.FailedOutcome("usage", "no branch name was given")), nil
 	}
-	worktreePath := WorktreePath(repoRoot, slug)
+	entry, rerr := resolveWorktreeBranch(ctx, repoRoot, branch, deps.Git)
+	if rerr != nil {
+		if matchErr, ok := errors.AsType[*worktreeMatchError](rerr); ok {
+			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+				renderWorktreeMatchError(matchErr),
+				command.FailedOutcomeData(matchErr.Reason, matchErr.Error(),
+					map[string]string{
+						"candidates": strings.Join(branchNames(matchErr.candidates()), ", "),
+					})), nil
+		}
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+			fmt.Sprintf("❌ git worktree list: %v", rerr),
+			command.FailedOutcome("error", "the worktrees could not be listed")), nil
+	}
+	worktreePath := entry.Path
 
-	// path must exist and be a known worktree of this repo
+	// --- the worktree must still be on disk --------------------
 	if info, serr := os.Stat(worktreePath); serr != nil {
 		if os.IsNotExist(serr) {
 			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-				fmt.Sprintf("❌ worktree %q not found at %s", slug, worktreePath),
-				command.FailedOutcome("not_found", "the worktree does not exist")), nil
+				fmt.Sprintf("❌ worktree for %q is gone: %s\n"+
+					"hint: run `git worktree prune` to drop the stale entry",
+					branch, worktreePath),
+				command.FailedOutcome("not_found", "the worktree directory is gone")), nil
 		}
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ stat worktree path: %v", serr),
@@ -320,17 +455,6 @@ func RunBackToWorktree(
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ %s exists but is not a directory", worktreePath),
 			command.FailedOutcome("error", "the worktree path is not a directory")), nil
-	}
-	known, kerr := IsKnownWorktree(ctx, repoRoot, worktreePath, deps.Git)
-	if kerr != nil {
-		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ git worktree list: %v", kerr),
-			command.FailedOutcome("error", "the worktrees could not be listed")), nil
-	}
-	if !known {
-		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ %s is not a git worktree of this repository", worktreePath),
-			command.FailedOutcome("not_found", "the path is not a worktree of this repository")), nil
 	}
 
 	// --- yml: skip if present, repair from git if missing -----
@@ -349,14 +473,13 @@ func RunBackToWorktree(
 		// `git -C <worktree> rev-parse --show-toplevel` returns
 		// the worktree's OWN toplevel (== worktreePath), not the
 		// parent repo root, which would poison later /gtw close.
-		branch := ""
-		if b, _, berr := deps.Git.Run(ctx, worktreePath,
-			"branch", "--show-current"); berr == nil {
-			branch = strings.TrimSpace(b)
-		}
+		//
+		// The branch comes from the worktree listing the
+		// resolver already read — one git call fewer, and no
+		// chance for the two sources to disagree.
 		werr := WriteGTWYml(worktreePath, Context{
 			Mode:     ModeLocal,
-			Branch:   branch,
+			Branch:   entry.Branch,
 			Worktree: worktreePath,
 			RepoRoot: repoRoot,
 			State:    StateFixing,
@@ -406,14 +529,18 @@ func RunBackToWorktree(
 	if repaired {
 		ymlLine = "→ .nightme/gtw.yml (repaired — ModeLocal stub; re-dispatch any issue manually)"
 	}
-	body := fmt.Sprintf("✅ back into `%s`\n→ worktree: %s\n%s",
-		worktreePath, worktreePath, ymlLine)
+	body := fmt.Sprintf("✅ back into `%s`\n→ worktree: %s\n→ branch: %s\n%s",
+		worktreePath, worktreePath, entry.Branch, ymlLine)
 	reply(ctx, cs.Emitter(), chatID, messageID, body)
 
 	reportOutcome(ctx, messages.Outcome{
 		Status:  messages.OutcomeOK,
 		Summary: fmt.Sprintf("the chat entered the worktree %s", worktreePath),
-		Data:    map[string]string{"worktree": worktreePath, "repo_root": repoRoot},
+		Data: map[string]string{
+			"worktree":  worktreePath,
+			"repo_root": repoRoot,
+			"branch":    entry.Branch,
+		},
 	})
 	return &Result{Consumed: true}, nil
 }

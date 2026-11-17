@@ -104,17 +104,10 @@ type programmableGit struct {
 	// when set; used to simulate a transient git failure.
 	revParseShowToplevelErr error
 
-	// branchShowCurrent is returned for any
-	// `branch --show-current` call. Empty matches detached-HEAD
-	// git behaviour. Used by RunBackToWorktree's yml repair
-	// stub to fill the Branch field.
-	branchShowCurrent string
-
 	// worktreeListPorcelain is returned for any
-	// `worktree list --porcelain` call. Used by IsKnownWorktree
-	// (RunBackToWorktree's "is this actually a worktree" gate)
-	// and WorktreeListPath. Empty means "no worktrees" and any
-	// IsKnownWorktree call returns false.
+	// `worktree list --porcelain` call. Used by ListWorktrees
+	// (the branch-prefix resolver behind `/gtw back <branch>`)
+	// and WorktreeListPath. Empty means "no worktrees".
 	worktreeListPorcelain string
 
 	// calls records every (args) the fake saw, for assertions
@@ -150,10 +143,8 @@ func (p *programmableGit) Run(_ context.Context, dir string, args ...string) (st
 		}
 		// Trailing newline matches real git; RepoRoot() trims it.
 		return p.revParseShowToplevel + "\n", "", nil
-	case len(args) >= 2 && args[0] == "branch" && args[1] == "--show-current":
-		return p.branchShowCurrent + "\n", "", nil
 	case len(args) >= 2 && args[0] == "worktree" && args[1] == "list":
-		// `--porcelain` is the only consumer (IsKnownWorktree /
+		// `--porcelain` is the only consumer (ListWorktrees /
 		// WorktreeListPath); both parse line-oriented output the
 		// same way, so the fake just hands back the configured
 		// block verbatim.

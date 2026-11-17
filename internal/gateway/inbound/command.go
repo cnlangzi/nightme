@@ -106,7 +106,10 @@ func (r *Router) runCommand(ctx context.Context, mgr *chatsession.Manager, comma
 			work.Report(messages.Outcome{
 				Status:  messages.OutcomeFailed,
 				Summary: "the command panicked",
-				Data:    map[string]string{"reason": "panic"},
+				Data: map[string]string{
+					"reason":                 "panic",
+					messages.OutcomeKeyError: "the command panicked",
+				},
 			})
 			r.emitCommandReply(ctx, nil, msg, "❌ internal error (see daemon log)")
 		}
@@ -150,6 +153,9 @@ func (r *Router) runCommand(ctx context.Context, mgr *chatsession.Manager, comma
 		chatsession.ReportOutcome(cmdCtx, messages.Outcome{
 			Status:  messages.OutcomeFailed,
 			Summary: err.Error(),
+			Data: map[string]string{
+				messages.OutcomeKeyError: err.Error(),
+			},
 		})
 		r.emitCommandReply(ctx, cs, msg, "❌ "+err.Error())
 		return

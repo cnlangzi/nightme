@@ -1189,7 +1189,10 @@ func (cs *ChatSession) QueueUserMessage(msg Message) error {
 			w.Report(messages.Outcome{
 				Status:  messages.OutcomeFailed,
 				Summary: "input queue full",
-				Data:    map[string]string{"reason": "queue_full"},
+				Data: map[string]string{
+					"reason":                 "queue_full",
+					messages.OutcomeKeyError: "input queue full",
+				},
 			})
 			w.Release()
 		}
@@ -1263,7 +1266,10 @@ func (cs *ChatSession) SteerUserMessage(msg Message) error {
 			w.Report(messages.Outcome{
 				Status:  messages.OutcomeFailed,
 				Summary: "input queue full",
-				Data:    map[string]string{"reason": "queue_full"},
+				Data: map[string]string{
+					"reason":                 "queue_full",
+					messages.OutcomeKeyError: "input queue full",
+				},
 			})
 			w.Release()
 		}

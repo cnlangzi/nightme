@@ -319,6 +319,34 @@ func (o Outcome) Succeeded() bool {
 	return o.Status == OutcomeOK || o.Status == OutcomeNoop
 }
 
+// OutcomeKeyError is the Data key the error description rides in.
+//
+// It is the key the outcome contract names (see
+// messages.OutcomeKeyError): the engine reads it to tell a normal
+// result from a breakage. The engine keeps its own copy of the
+// outcome type, so it keeps its own copy of the key too.
+const OutcomeKeyError = "error"
+
+// Exception reports whether the outcome is an exception: the flow
+// cannot go on by itself and the agent has to decide what happens
+// next.
+//
+// The error description says what broke; the status says whether the
+// work got done. A failed outcome without an error description is a
+// normal branch of the work: the step did its job and its answer was
+// "there was nothing to do".
+func (o Outcome) Exception() bool {
+	if o.Data[OutcomeKeyError] != "" {
+		return true
+	}
+	switch o.Status {
+	case OutcomeOK, OutcomeNoop, OutcomeFailed:
+		return false
+	default:
+		return true // cancelled, timeout, incomplete, unknown
+	}
+}
+
 // ActionKind is the kind of action recorded in the history.
 type ActionKind string
 

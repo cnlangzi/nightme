@@ -152,18 +152,8 @@ func stopOutcome(result Result) messages.Outcome {
 			Data:    data,
 		}
 	case "not-supported":
-		data["reason"] = "not_supported"
-		return messages.Outcome{
-			Status:  messages.OutcomeFailed,
-			Summary: "the agent does not support /stop",
-			Data:    data,
-		}
+		return command.FailedOutcomeData("not_supported", "the agent does not support /stop", data)
 	default:
-		data["reason"] = "error"
-		return messages.Outcome{
-			Status:  messages.OutcomeFailed,
-			Summary: "the agent could not be stopped",
-			Data:    data,
-		}
+		return command.FailedOutcomeData("error", "the agent could not be stopped", data)
 	}
 }

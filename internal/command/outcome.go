@@ -18,12 +18,6 @@ import (
 // failure sit on: an outcome that carries one is an exception,
 // an outcome without one is a normal branch.
 
-// outcomeKeyError is the Data key the error description rides in.
-//
-// The key belongs to the constructors: the exception ones fill it, the
-// others never leave one behind.
-const outcomeKeyError = "error"
-
 // fallbackErrorDescription is the last link of the description chain:
 // an exception with no summary and no reason code still says that
 // something broke.
@@ -55,7 +49,7 @@ func FailedOutcomeData(reason, summary string, data map[string]string, desc ...s
 // broke".
 func BranchOutcome(reason, summary string, data map[string]string) messages.Outcome {
 	o := baseFailedOutcome(reason, summary, data)
-	delete(o.Data, outcomeKeyError)
+	delete(o.Data, messages.OutcomeKeyError)
 	return o
 }
 
@@ -67,9 +61,9 @@ func NoopOutcome(summary string, data map[string]string) messages.Outcome {
 		Summary: summary,
 		Data:    data,
 	}
-	if _, ok := data[outcomeKeyError]; ok {
+	if _, ok := data[messages.OutcomeKeyError]; ok {
 		o.Data = maps.Clone(data)
-		delete(o.Data, outcomeKeyError)
+		delete(o.Data, messages.OutcomeKeyError)
 	}
 	return o
 }
@@ -81,7 +75,7 @@ func NoopOutcome(summary string, data map[string]string) messages.Outcome {
 // the description is always the one the caller asked for.
 func failedOutcome(reason, summary string, data map[string]string, desc []string) messages.Outcome {
 	o := baseFailedOutcome(reason, summary, data)
-	o.Data[outcomeKeyError] = errorDescription(reason, summary, desc)
+	o.Data[messages.OutcomeKeyError] = errorDescription(reason, summary, desc)
 	return o
 }
 

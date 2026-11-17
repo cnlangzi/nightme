@@ -302,6 +302,11 @@ func (cs *ChatSession) reanchorWork(msgID, anchorID string) {
 // The summary is empty on purpose: it lets the merge keep the
 // summary a command reported (the prompt end is the generic
 // fallback, the command's is the specific one).
+//
+// A turn that broke carries the error description: its presence is
+// what tells a consumer that the outcome is an exception rather than
+// a normal result. A turn that was stopped carries none — the
+// operator stopped it, so nothing broke.
 func outcomeForPromptEnd(reason agent.PromptEndReason) messages.Outcome {
 	out := messages.Outcome{Status: messages.OutcomeFailed}
 	switch reason {
@@ -311,6 +316,9 @@ func outcomeForPromptEnd(reason agent.PromptEndReason) messages.Outcome {
 		out.Status = messages.OutcomeCancelled
 	}
 	out.Data = map[string]string{"end_reason": reason.String()}
+	if out.Status == messages.OutcomeFailed {
+		out.Data[messages.OutcomeKeyError] = "the agent turn ended as " + reason.String()
+	}
 	return out
 }
 

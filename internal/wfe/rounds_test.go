@@ -145,8 +145,11 @@ func TestDecide_AFailedStepIsNotSwallowedByTheNextRound(t *testing.T) {
 	wf := mustParse(t, repeatingYAML)
 	state := newRunState(wf)
 	runWholeJob(state, wf, "ship")
-	// The last step of the round did not end ok.
-	state.Steps[len(state.Steps)-1].Outcome = Outcome{Status: OutcomeFailed}
+	// The last step of the round broke.
+	state.Steps[len(state.Steps)-1].Outcome = Outcome{
+		Status: OutcomeFailed,
+		Data:   map[string]string{"error": "the worktree could not be created"},
+	}
 
 	decision, err := Decide(state, wf)
 	if err != nil {
@@ -157,6 +160,31 @@ func TestDecide_AFailedStepIsNotSwallowedByTheNextRound(t *testing.T) {
 	}
 	if state.Rounds["ship"] != 1 {
 		t.Errorf("Rounds = %v, want the round to stay where it is", state.Rounds)
+	}
+}
+
+// TestDecide_ANormalBranchLetsTheRoundAdvance — a step that ended
+// failed without an error description is a normal branch: the round
+// goes on by itself.
+func TestDecide_ANormalBranchLetsTheRoundAdvance(t *testing.T) {
+	wf := mustParse(t, repeatingYAML)
+	state := newRunState(wf)
+	runWholeJob(state, wf, "ship")
+	// The last step of the round had nothing to do.
+	state.Steps[len(state.Steps)-1].Outcome = Outcome{
+		Status: OutcomeFailed,
+		Data:   map[string]string{"reason": "nothing_to_commit"},
+	}
+
+	decision, err := Decide(state, wf)
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if decision.Kind != DecisionRun {
+		t.Fatalf("Kind = %v, want a run (the reason was %q)", decision.Kind, decision.Reason)
+	}
+	if decision.Step.ID != "fix" {
+		t.Errorf("Step.ID = %q, want fix — the round starts over", decision.Step.ID)
 	}
 }
 
@@ -173,7 +201,10 @@ jobs:
 `)
 	state := newRunState(wf)
 	runWholeJob(state, wf, "ship")
-	state.Steps[len(state.Steps)-1].Outcome = Outcome{Status: OutcomeFailed}
+	state.Steps[len(state.Steps)-1].Outcome = Outcome{
+		Status: OutcomeFailed,
+		Data:   map[string]string{"error": "the worktree could not be created"},
+	}
 
 	decision, err := Decide(state, wf)
 	if err != nil {

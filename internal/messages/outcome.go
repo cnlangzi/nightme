@@ -53,6 +53,15 @@ func outcomeSeverity(s OutcomeStatus) int {
 	}
 }
 
+// OutcomeKeyError is the key the error description rides in.
+//
+// The description says what broke, and its presence is what tells a
+// consumer that the outcome is an exception rather than a normal
+// branch: an outcome without one is a result the work asked for. The
+// status alone cannot say it — a command that had nothing to do
+// reports `failed` too.
+const OutcomeKeyError = "error"
+
 // Outcome is the structured result of one unit of work.
 //
 // Status is the primary evidence — a consumer branches on it.

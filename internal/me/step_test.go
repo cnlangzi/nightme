@@ -244,6 +244,56 @@ jobs:
 	}
 }
 
+// TestStepKind_TheErrorKeyIsReserved — a shell step that prints an
+// `error=` line does not get to claim the key the plan reads: the
+// error description belongs to the step that broke, so a healthy step
+// stays a normal result.
+func TestStepKind_TheErrorKeyIsReserved(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "sh", `title: sh
+jobs:
+  main:
+    steps:
+      - id: build
+        shell: make build
+`)
+
+	shell := &fakeShell{ret: &wfe.ShellResult{
+		ExitCode: 0,
+		Outputs:  map[string]string{"error": "0 issues found"},
+	}}
+	provider := &scriptedProvider{err: errors.New("the chat model must not be called")}
+	decider := &scriptedDecider{err: errors.New("the decision model must not be called")}
+	svc, _ := testService(t, dir, Config{
+		Provider: provider,
+		Decider:  decider,
+		Shell:    shell,
+		Cwd:      fakeCwd{dir: "/tmp/worktree"},
+	})
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "sh", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	r := activeRun(t, svc, "obs-1")
+	waitRun(t, svc, "obs-1")
+
+	out, ok := stepOutcome(r, "build")
+	if !ok {
+		t.Fatal("the build step has no outcome")
+	}
+	if out.Status != wfe.OutcomeOK {
+		t.Errorf("the build step ended as %q, want ok", out.Status)
+	}
+	if desc := out.Data[wfe.OutcomeKeyError]; desc != "" {
+		t.Errorf("the step carries the error description %q, want none", desc)
+	}
+	if out.Exception() {
+		t.Error("a healthy step reads as an exception")
+	}
+}
+
 // TestStepKind_AFailedCommandReachesTheAgent — a command that could
 // not run at all ends the step as failed, and the plan asks the agent
 // what to do next.

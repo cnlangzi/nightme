@@ -518,7 +518,7 @@ func TestTheModelPathFollowsTheStepOfTheCommand(t *testing.T) {
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider})
 	op.steps = []fakeStep{
-		{outcome: messages.Outcome{Status: messages.OutcomeFailed, Summary: "the commit failed"}},
+		{outcome: messages.Outcome{Status: messages.OutcomeFailed, Summary: "the commit failed", Data: map[string]string{"error": "the commit failed"}}},
 		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "pushed"}},
 	}
 
@@ -551,7 +551,7 @@ func TestAnIterationKeepsItsCard(t *testing.T) {
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider})
 	op.steps = []fakeStep{
-		{outcome: messages.Outcome{Status: messages.OutcomeFailed, Summary: "the commit failed"}},
+		{outcome: messages.Outcome{Status: messages.OutcomeFailed, Summary: "the commit failed", Data: map[string]string{"error": "the commit failed"}}},
 		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "pushed"}},
 		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "tagged"}},
 	}
@@ -603,7 +603,7 @@ func TestACardTheChatRefusedIsPublishedLater(t *testing.T) {
 	// attempt — and takes the one that comes after it.
 	op.refuseAttempt = 2
 	op.steps = []fakeStep{
-		{outcome: messages.Outcome{Status: messages.OutcomeFailed, Summary: "the commit failed"}},
+		{outcome: messages.Outcome{Status: messages.OutcomeFailed, Summary: "the commit failed", Data: map[string]string{"error": "the commit failed"}}},
 		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "pushed"}},
 		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "tagged"}},
 	}
@@ -639,7 +639,7 @@ func TestTheCardOfAnAnsweredQuestionOffersNoChoice(t *testing.T) {
 	}}
 	svc, op := testService(t, dir, Config{Decider: decider})
 	op.steps = []fakeStep{
-		{outcome: messages.Outcome{Status: messages.OutcomeFailed, Summary: "the commit failed"}},
+		{outcome: messages.Outcome{Status: messages.OutcomeFailed, Summary: "the commit failed", Data: map[string]string{"error": "the commit failed"}}},
 		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "pushed"}},
 	}
 

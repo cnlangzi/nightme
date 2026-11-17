@@ -6,11 +6,9 @@ import (
 	"github.com/cnlangzi/nightme/internal/wfe"
 )
 
-// outcomeKeyError is the key the error description rides in.
-//
-// It is the key the outcome contract names (see docs/me.md §1): the
-// plan reads it to tell a normal branch from a breakage.
-const outcomeKeyError = "error"
+// fallbackErrorDescription is the last link of the description chain:
+// an exception with no summary still says that something broke.
+const fallbackErrorDescription = "the step failed"
 
 // failedOutcome builds the outcome of a step that broke.
 //
@@ -20,12 +18,15 @@ const outcomeKeyError = "error"
 // facts the step produced are kept: they say what it did before it
 // broke.
 func failedOutcome(summary string, data map[string]string) wfe.Outcome {
+	if summary == "" {
+		summary = fallbackErrorDescription
+	}
 	out := wfe.Outcome{
 		Status:  wfe.OutcomeFailed,
 		Summary: summary,
 		Data:    make(map[string]string, len(data)+1),
 	}
 	maps.Copy(out.Data, data)
-	out.Data[outcomeKeyError] = summary
+	out.Data[wfe.OutcomeKeyError] = summary
 	return out
 }

@@ -336,10 +336,10 @@ func (s *Service) situationReason(r *run) string {
 	switch {
 	case prevStepReason.MatchString(reason):
 		m := prevStepReason.FindStringSubmatch(reason)
-		return fmt.Sprintf("step %s ended as %s", m[1], m[2])
+		return withDetail(fmt.Sprintf("step %s ended as %s", m[1], m[2]), m[3])
 	case lastStepReason.MatchString(reason):
 		m := lastStepReason.FindStringSubmatch(reason)
-		return fmt.Sprintf("the plan is over and step %s ended as %s", m[1], m[2])
+		return withDetail(fmt.Sprintf("the plan is over and step %s ended as %s", m[1], m[2]), m[3])
 	case readyStepsReason.MatchString(reason):
 		m := readyStepsReason.FindStringSubmatch(reason)
 		return fmt.Sprintf("%s steps are ready and the plan cannot pick one", m[1])
@@ -359,14 +359,26 @@ func (s *Service) situationReason(r *run) string {
 }
 
 // The reasons the engine reports, and the words they are said in.
+//
+// The third group of the step reasons is the error description the
+// engine rides along: it says what broke, and it is empty when the
+// reason carries none.
 var (
-	prevStepReason     = regexp.MustCompile(`^the previous step "([^"]+)" ended as "([^"]+)"$`)
-	lastStepReason     = regexp.MustCompile(`^the plan is exhausted and the last step "([^"]+)" ended as "([^"]+)"$`)
+	prevStepReason     = regexp.MustCompile(`^the previous step "([^"]+)" ended as "([^"]+)"(?:: (.*))?$`)
+	lastStepReason     = regexp.MustCompile(`^the plan is exhausted and the last step "([^"]+)" ended as "([^"]+)"(?:: (.*))?$`)
 	readyStepsReason   = regexp.MustCompile(`^(\d+) steps are ready`)
 	stillRunningReason = regexp.MustCompile(`^the step "([^"]+)" is still running$`)
 	budgetReason       = regexp.MustCompile(`^the step "([^"]+)" already ran \d+ times, its limit is \d+$`)
 	jobsReason         = regexp.MustCompile(`^(\d+) jobs are ready to start another round$`)
 )
+
+// withDetail appends the error description a reason carries.
+func withDetail(sentence, detail string) string {
+	if detail == "" {
+		return sentence
+	}
+	return sentence + ": " + detail
+}
 
 // reasonHints explain the reason codes a command reports.
 //

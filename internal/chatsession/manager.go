@@ -579,7 +579,10 @@ func (m *Manager) HandleInbound(ctx context.Context, msg *messages.InboundMessag
 		w.Report(messages.Outcome{
 			Status:  messages.OutcomeFailed,
 			Summary: err.Error(),
-			Data:    map[string]string{"reason": "no_agent"},
+			Data: map[string]string{
+				"reason":                 "no_agent",
+				messages.OutcomeKeyError: err.Error(),
+			},
 		})
 		w.Release()
 		if errors.Is(err, ErrNoSelectedCwd) {

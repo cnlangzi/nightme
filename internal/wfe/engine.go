@@ -3,6 +3,7 @@ package wfe
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // DecisionKind is what the engine decided about a run.
@@ -90,10 +91,10 @@ func Decide(state *RunState, wf *Workflow) (Decision, error) {
 			}, nil
 		case blocked:
 			// The round does not advance on its own: the agent decides
-			// what to do about the step that did not end ok.
+			// what to do about the step that broke.
 			return Decision{
 				Kind:    DecisionJudgment,
-				Reason:  fmt.Sprintf("the previous step %q ended as %q", prev.ID, prev.Outcome.Status),
+				Reason:  prevReason(prev),
 				Subject: prev.ID,
 			}, nil
 		case len(repeating) > 1:
@@ -142,7 +143,7 @@ func Decide(state *RunState, wf *Workflow) (Decision, error) {
 		return Decision{
 			Kind:    DecisionJudgment,
 			Ready:   steps,
-			Reason:  fmt.Sprintf("the previous step %q ended as %q", prev.ID, prev.Outcome.Status),
+			Reason:  prevReason(prev),
 			Subject: prev.ID,
 		}, nil
 	}
@@ -354,6 +355,35 @@ func exhaustedReason(prev StepState, hasPrev bool) string {
 			prev.ID, prev.Outcome.Status)
 	}
 	return "the plan is exhausted: every step has run"
+}
+
+// prevReason explains why the last step that ran stops the chain.
+//
+// The error description rides along: it says what broke, and the agent
+// reads the reason before anything else.
+func prevReason(prev StepState) string {
+	reason := fmt.Sprintf("the previous step %q ended as %q", prev.ID, prev.Outcome.Status)
+	if desc := reasonDetail(prev.Outcome.Data[OutcomeKeyError]); desc != "" {
+		reason += ": " + desc
+	}
+	return reason
+}
+
+// maxReasonDetail is how much of the error description the reason
+// carries.
+const maxReasonDetail = 160
+
+// reasonDetail renders the error description as one line.
+//
+// The reason travels through the run state, the card and the report,
+// and a description that spans lines belongs in neither.
+func reasonDetail(desc string) string {
+	desc = strings.Join(strings.Fields(desc), " ")
+	runes := []rune(desc)
+	if len(runes) > maxReasonDetail {
+		return string(runes[:maxReasonDetail]) + "…"
+	}
+	return desc
 }
 
 // subjectOf returns the step a judgment is about: the step that ran

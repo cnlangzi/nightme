@@ -155,6 +155,16 @@ func TestHoldUntilPromptEnd_MapsReason(t *testing.T) {
 			if got[0].Outcome.Data["end_reason"] == "" {
 				t.Error("settled outcome has no end_reason")
 			}
+			// A turn that broke carries the error description: its
+			// presence is what tells a consumer that the outcome is an
+			// exception rather than a normal result.
+			desc := got[0].Outcome.Data[messages.OutcomeKeyError]
+			if tc.want == messages.OutcomeFailed && desc == "" {
+				t.Error("the settled outcome has no error description")
+			}
+			if tc.want != messages.OutcomeFailed && desc != "" {
+				t.Errorf("the settled outcome carries the error description %q, want none", desc)
+			}
 		})
 	}
 }

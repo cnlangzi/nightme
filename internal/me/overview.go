@@ -244,6 +244,12 @@ func (r *run) roundsTree(current iteration) string {
 	records := append([]roundRecord(nil), r.roundRecords...)
 	r.mu.Unlock()
 
+	// The rounds of a job are numbered from one, so a run with several
+	// jobs has rounds of the same number. The tree names the job when
+	// there is more than one: with a single job the plan of the run
+	// says which job the rounds belong to.
+	several := len(r.workflow.JobOrder()) > 1
+
 	bodies := make([]string, 0, len(records)+2)
 	folded := 0
 	if len(records) > maxTreeRounds {
@@ -254,9 +260,9 @@ func (r *run) roundsTree(current iteration) string {
 		bodies = append(bodies, fmt.Sprintf("… +%d", folded))
 	}
 	for _, rec := range records {
-		bodies = append(bodies, roundNode(rec))
+		bodies = append(bodies, roundNode(rec, several))
 	}
-	bodies = append(bodies, currentNode(current, r.roundStart(current.job, current.round)))
+	bodies = append(bodies, currentNode(current, several, r.roundStart(current.job, current.round)))
 
 	lines := make([]string, 0, len(bodies)+1)
 	lines = append(lines, "rounds:")
@@ -275,13 +281,25 @@ func (r *run) roundsTree(current iteration) string {
 //
 // The numbers are the numbers of the run so far: the tree reads as a
 // ledger, and the last node carries the totals of the run.
-func roundNode(rec roundRecord) string {
-	return fmt.Sprintf("[ %s ] %d: %s · %s %s",
+func roundNode(rec roundRecord, several bool) string {
+	return fmt.Sprintf("[ %s ] %s%d: %s · %s %s",
 		outcomeIcon(rec.Outcome.Status),
+		jobPrefix(rec.Job, several),
 		rec.Round,
 		clockTime(rec.StartedAt),
 		durationText(rec.EndedAt.Sub(rec.StartedAt)),
 		decisionsText(rec))
+}
+
+// jobPrefix names the job of a round when the run has more than one.
+//
+// The rounds of a job are numbered from one: without the job, two
+// rounds of two jobs read the same.
+func jobPrefix(job string, several bool) string {
+	if !several {
+		return ""
+	}
+	return job + " · "
 }
 
 // currentNode renders the node of the round that is going: its number
@@ -289,8 +307,8 @@ func roundNode(rec roundRecord) string {
 //
 // The round has not settled: it has no duration and no verdict yet, so
 // its node carries nothing else.
-func currentNode(it iteration, at time.Time) string {
-	return fmt.Sprintf("[ > ] %d: %s", it.round, clockTime(at))
+func currentNode(it iteration, several bool, at time.Time) string {
+	return fmt.Sprintf("[ > ] %s%d: %s", jobPrefix(it.job, several), it.round, clockTime(at))
 }
 
 // roundEndedLine renders the closing line of a finished round: the
@@ -346,10 +364,15 @@ func abbrevTokens(n int) string {
 
 // abbrevOneDecimal renders a number with one decimal and a unit.
 //
-// A whole number drops its decimal: "1M", not "1.0M".
+// A whole number drops its decimal: "1M", not "1.0M". The unit stays:
+// the decimal goes, the unit does not.
 func abbrevOneDecimal(v float64, unit string) string {
 	s := fmt.Sprintf("%.1f%s", v, unit)
-	return strings.TrimSuffix(s, ".0"+unit)
+	zeroSuffix := ".0" + unit
+	if strings.HasSuffix(s, zeroSuffix) {
+		s = s[:len(s)-len(zeroSuffix)] + unit
+	}
+	return s
 }
 
 // outcomeIcon returns the icon of an outcome.

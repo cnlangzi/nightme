@@ -462,6 +462,31 @@ func (f *fakeOperator) answer(chatID, requestID, optionID string) error {
 	return errors.New("no execution is waiting")
 }
 
+// fail settles the open execution of a chat with a failure: the
+// command the chat was running did not work.
+func (f *fakeOperator) fail(chatID, summary string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, ex := range f.execs {
+		if ex.ex.ChatID != chatID || ex.ex.Phase == observe.PhaseSettled {
+			continue
+		}
+		ex.ex.Phase = observe.PhaseSettled
+		ex.ex.Outcome = messages.Outcome{
+			Status:  messages.OutcomeFailed,
+			Summary: summary,
+			Data:    map[string]string{"error": summary},
+		}
+		for _, w := range ex.watchers {
+			w <- ex.ex
+			close(w)
+		}
+		ex.watchers = nil
+		return nil
+	}
+	return errors.New("no execution is waiting")
+}
+
 // Watched returns the messages the run watched.
 func (f *fakeOperator) Watched() []string {
 	f.mu.Lock()

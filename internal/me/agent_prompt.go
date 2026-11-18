@@ -28,7 +28,7 @@ func (s *Service) systemPrompt(r *run) string {
 
 	b.WriteString("## Your tools\n")
 	b.WriteString("- resume() runs the step that broke again, after you repaired the gap.\n")
-	b.WriteString("- next() says the step is already done and lets the engine continue with the workflow.\n")
+	b.WriteString("- next() skips the step the judgment is about and lets the engine continue with the workflow.\n")
 	b.WriteString("- ntm_* run nightme commands, as the owner. Only you can run them.\n")
 	if s.hasBrain(r) {
 		b.WriteString("- agent(task) is the owner's thinking. Ask it about the step that failed — what went wrong and what to do — in plain words; it investigates and comes back with the cause and a recommendation; it changes nothing; it remembers this round's questions only, so give it the context it needs.\n")
@@ -52,7 +52,7 @@ func (s *Service) systemPrompt(r *run) string {
 	b.WriteString("3. Repair the gap with the smallest action: a nightme command, an instruct, or asking the owner when only they can answer.\n")
 	b.WriteString("4. Then tell the engine which way to go:\n")
 	b.WriteString("   - resume — the gap is repaired; run the step again.\n")
-	b.WriteString("   - next — the step is already done: the work happened, or the outcome was misleading. Do not run it again; let the engine continue.\n")
+	b.WriteString("   - next — the step is not worth doing: skip it. The engine continues with the workflow, and the facts the step produced are kept.\n")
 	b.WriteString("5. Give the control back. The engine decides what runs next. If the step breaks again, the engine comes back to you.\n")
 
 	b.WriteString("\n## When a step produced nothing\n")
@@ -75,7 +75,7 @@ func (s *Service) systemPrompt(r *run) string {
 	b.WriteString("- A job that repeats until the run is stopped has no end of its own: get it back on course and let it continue.\n")
 
 	b.WriteString("\n## Outcomes\n")
-	b.WriteString("ok and noop mean the step did its job. A failed without an error description is a normal result: the workflow goes on by itself. A failed that carries an error description means the step broke, and the reason and the error say how. incomplete means part of it is still open. cancelled means somebody stopped it; timeout means it ran out of time. unknown means nobody reported a verdict — check the facts before you trust or retry it. waiting means the command is still running and needs an answer or an instruction. error means your call was refused; the message says why.\n")
+	b.WriteString("ok means the step did its job. noop means there was nothing to do: the step was skipped, or the world already satisfied it. A failed without an error description is a normal result: the workflow goes on by itself. A failed that carries an error description means the step broke, and the reason and the error say how. incomplete means part of it is still open. cancelled means somebody stopped it; timeout means it ran out of time. unknown means nobody reported a verdict — check the facts before you trust or retry it. waiting means the command is still running and needs an answer or an instruction. error means your call was refused; the message says why.\n")
 	b.WriteString("The outcome is the evidence; the transcript explains it.\n")
 
 	b.WriteString("\nAlways act through a tool.\n")

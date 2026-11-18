@@ -689,25 +689,62 @@ func (s *Service) Pause(ctx context.Context, chatID string) error {
 	return nil
 }
 
-// Continue hands the control back to a paused run.
+// Resume runs the step the run is on again.
+//
+// It reports the id of the step the command acted on.
 //
 // A note is the operator's instruction: it joins the conversation the
 // chat model reads.
-func (s *Service) Continue(ctx context.Context, chatID, note string) error {
+//
+// The decision is carried by the run and applied by the run's loop: a
+// step takes as long as the work takes, so it cannot run in the
+// command's own goroutine. The state is written before the run is
+// woken, so a daemon that dies in between comes back with the
+// decision in its state file.
+func (s *Service) Resume(ctx context.Context, chatID, note string) (string, error) {
 	s.mu.Lock()
 	r, ok := s.active[chatID]
 	s.mu.Unlock()
 	if !ok {
-		return errors.New("this chat has no run in it")
+		return "", &Refusal{Reason: ReasonNoRun, Message: "this chat has no run in it"}
 	}
-	if err := r.handBack(note); err != nil {
-		return err
+	step, paused, err := r.prepareDecision(directiveResume, note)
+	if err != nil {
+		return "", err
 	}
-	// The reset of the step's budget is part of the run's state: a
-	// daemon that goes away now comes back with it.
 	s.persist(r)
+	if paused {
+		r.wake()
+	}
 	s.refreshSessions(r)
-	return nil
+	return step.ID, nil
+}
+
+// Next skips the step the run is on.
+//
+// It reports the id of the step the command acted on. The plan goes on
+// with the workflow: the step is recorded as skipped, and the facts it
+// produced are kept.
+//
+// A note is the operator's instruction: it joins the conversation the
+// chat model reads.
+func (s *Service) Next(ctx context.Context, chatID, note string) (string, error) {
+	s.mu.Lock()
+	r, ok := s.active[chatID]
+	s.mu.Unlock()
+	if !ok {
+		return "", &Refusal{Reason: ReasonNoRun, Message: "this chat has no run in it"}
+	}
+	step, paused, err := r.prepareDecision(directiveNext, note)
+	if err != nil {
+		return "", err
+	}
+	s.persist(r)
+	if paused {
+		r.wake()
+	}
+	s.refreshSessions(r)
+	return step.ID, nil
 }
 
 // Show puts the run back in front of the operator.

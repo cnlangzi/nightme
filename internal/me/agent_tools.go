@@ -105,7 +105,7 @@ func (s *Service) toolCatalogue(r *run) []llm.Tool {
 		},
 		{
 			Name:        toolNext,
-			Description: "Say the step is already done and let the engine continue with the workflow.",
+			Description: "Skip the step the judgment is about and let the engine continue with the workflow.",
 			Schema:      json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`),
 		},
 	}
@@ -367,6 +367,19 @@ func (s *Service) toolResume(ctx context.Context, r *run, _ pendingCall) (stepRe
 	if !r.runnableStep(step.ID) {
 		return stepResult{}, toolErrorf("the step %q cannot run now: it did not run this round and it is not ready", step.ID)
 	}
+	return s.runStepAgain(ctx, r, step, false)
+}
+
+// runStepAgain runs the step again and records its verdict.
+//
+// The step's budget for the round starts over when the operator asked
+// for the step to run again: the chances the agent spent are spent no
+// more. The agent's own resume spends nothing: its budget is checked
+// like the budget of any other action.
+func (s *Service) runStepAgain(ctx context.Context, r *run, step wfe.Step, freshBudget bool) (stepResult, error) {
+	if freshBudget {
+		r.record(wfe.ActionKindReset, "", step.ID, wfe.Outcome{})
+	}
 	if err := r.checkStep(step); err != nil {
 		return stepResult{}, toolErrorf("%s", err.Error())
 	}
@@ -395,12 +408,11 @@ func (s *Service) toolResume(ctx context.Context, r *run, _ pendingCall) (stepRe
 	}, nil
 }
 
-// toolNext records the step as done and hands the control back.
+// toolNext skips the step the judgment is about.
 //
 // The step is the one the run is on: the judgment names it, and the
-// run knows it. The facts the step produced are kept, the summary says
-// the agent decided the step was done, and the engine plans the next
-// step.
+// run knows it. The step is recorded as skipped — the facts it produced
+// are kept, the error goes — and the engine plans the next step.
 func (s *Service) toolNext(ctx context.Context, r *run, _ pendingCall) (stepResult, error) {
 	step, err := judgmentStep(r)
 	if err != nil {
@@ -408,30 +420,43 @@ func (s *Service) toolNext(ctx context.Context, r *run, _ pendingCall) (stepResu
 	}
 	st, ok := r.stepState(step.ID)
 	if !ok {
-		return stepResult{}, toolErrorf("the step %q has not run: there is nothing to declare done", step.ID)
+		return stepResult{}, toolErrorf("the step %q has not run: there is nothing to skip", step.ID)
 	}
 	if st.Pending {
 		// The step is still running: the work is in flight.
 		return stepResult{}, toolErrorf("the step %q is still running: wait for it", step.ID)
 	}
 	if st.Outcome.Succeeded() {
-		// The step did its job: there is nothing to repair.
-		return stepResult{}, toolErrorf("the step %q is already done: there is nothing to repair", step.ID)
+		// The step did its job: there is nothing to skip.
+		return stepResult{}, toolErrorf("the step %q is already done: there is nothing to skip", step.ID)
 	}
+	return s.skipStep(ctx, r, step, agentSkippedSummary), nil
+}
+
+// skipStep records the step as skipped and returns the outcome.
+//
+// The facts the step produced are kept, the error goes, and the
+// history agrees with the run state: the step is skipped, and the run
+// says so.
+func (s *Service) skipStep(ctx context.Context, r *run, step wfe.Step, summary string) stepResult {
+	out := wfe.Outcome{}
+	if st, ok := r.stepState(step.ID); ok {
+		out = st.Outcome
+	}
+	skipped := skippedOutcome(out, summary)
 	job := wfe.JobOf(r.workflow, step.ID)
-	done := doneOutcome(st.Outcome)
-	r.recordStep(job, step, done)
+	r.recordStep(job, step, skipped)
 	s.recordStepOutcome(ctx, r)
-	// The history has to agree with the run state: the step is done,
-	// and the run says so.
-	r.record(wfe.ActionKindRun, s.stepCommand(r, step), step.ID, done)
+	// The history has to agree with the run state: the step is
+	// skipped, and the run says so.
+	r.record(wfe.ActionKindRun, s.stepCommand(r, step), step.ID, skipped)
 	s.persist(r)
 	s.refreshSessions(r)
 	return stepResult{
-		Status:  string(done.Status),
-		Summary: done.Summary,
-		Data:    done.Data,
-	}, nil
+		Status:  string(skipped.Status),
+		Summary: skipped.Summary,
+		Data:    skipped.Data,
+	}
 }
 
 // stepCommand renders the command a step runs, the way the run records

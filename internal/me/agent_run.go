@@ -178,6 +178,12 @@ type run struct {
 	pauseRequested bool
 	// pauseReason says why the run paused.
 	pauseReason string
+	// directive is the operator's decision for the run's next turn: it
+	// is empty, a "resume" or a "next". The run's loop applies it.
+	directive *directive
+	// runningStep is the id of the step whose work is in flight. It is
+	// empty when no step is running.
+	runningStep string
 
 	// runSession is the session of the run: its card hangs under the
 	// message that started the run.
@@ -514,56 +520,6 @@ func (r *run) isPaused() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.paused
-}
-
-// handBack hands the control back to a paused run.
-//
-// A pause that has not taken effect yet — the step it was asked for
-// is still running — is cancelled: the operator changed their mind
-// before the run stopped.
-//
-// A note is the operator's instruction: it joins the conversation the
-// chat model reads.
-//
-// The step the run was on gets a fresh budget: the operator took the
-// chat back, so the chances the agent spent there are spent no more.
-func (r *run) handBack(note string) error {
-	r.mu.Lock()
-	if !r.paused && !r.pauseRequested {
-		waiting := r.ask != nil
-		r.mu.Unlock()
-		if waiting {
-			return errors.New("this run is waiting for an answer: use /me reply <text>")
-		}
-		return errors.New("this run is not paused")
-	}
-	pending := r.pauseRequested
-	r.pauseRequested = false
-	r.paused = false
-	r.pauseReason = ""
-	r.phase = PhaseRunning
-	if strings.TrimSpace(note) != "" {
-		r.messages = append(r.messages, llm.Message{
-			Role:  llm.RoleUser,
-			Parts: []llm.Part{{Type: llm.PartText, Text: note}},
-		})
-	}
-	r.mu.Unlock()
-
-	// The operator took over: the step the run was on starts over.
-	if stepID := r.budgetStep(); stepID != "" {
-		r.record(wfe.ActionKindReset, "", stepID, wfe.Outcome{})
-	}
-
-	if pending {
-		// The pause had not taken effect: there is nobody to wake up.
-		return nil
-	}
-	select {
-	case r.unpause <- struct{}{}:
-	default:
-	}
-	return nil
 }
 
 // resolveChoice turns a reply that names an option by its number into
@@ -1304,6 +1260,7 @@ type persistedRun struct {
 	Inflight        *inflightState     `json:"inflight,omitempty"`
 	Phase           Phase              `json:"phase"`
 	JudgmentStep    string             `json:"judgment_step,omitempty"`
+	Directive       *directive         `json:"directive,omitempty"`
 	Question        string             `json:"question"`
 	Error           string             `json:"error"`
 	Paused          bool               `json:"paused"`
@@ -1369,6 +1326,7 @@ func (s *Service) persist(r *run) {
 		Inflight:          r.inflight,
 		Phase:             r.phase,
 		JudgmentStep:      r.judgmentStep,
+		Directive:         r.directive,
 		Question:          r.question,
 		Error:             r.errMsg,
 		Paused:            r.paused,
@@ -1393,8 +1351,7 @@ func (s *Service) persist(r *run) {
 		RoundRecords:      append([]roundRecord(nil), r.roundRecords...),
 		RoundAnswers:      r.roundAnswers,
 		RoundUsage:        r.roundUsage,
-		OperatorDecisions: r.operatorDecisions,
-	}
+		OperatorDecisions: r.operatorDecisions}
 	r.mu.Unlock()
 
 	if err := os.MkdirAll(s.cfg.StateDir, 0o755); err != nil {
@@ -1568,8 +1525,7 @@ func (s *Service) restoreRun(state persistedRun) *run {
 		cancel:            cancel,
 		resume:            make(chan struct{}, 1),
 		unpause:           make(chan struct{}, 1),
-		done:              make(chan struct{}),
-	}
+		done:              make(chan struct{})}
 	if r.state == nil {
 		r.state = newRunState(r.id, state.Workflow.Name, state.Cwd, time.Now())
 	}

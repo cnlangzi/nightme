@@ -670,7 +670,7 @@ The agent answers a judgment point with a **directive**:
 | Directive | What it does |
 |---|---|
 | `resume()` | Runs the step the judgment is about again — the step that broke. |
-| `next()` | Says the step is already done: the engine records it as complete and continues with the workflow. |
+| `next()` | Skips the step the judgment is about: the engine records it as skipped and continues with the workflow. |
 | `ntm_<command>` | Runs a nightme command, as the owner. One tool per registered command. |
 | `agent(task)` | Asks the owner's thinking. It investigates and recommends; it changes nothing. |
 | `instruct(text)` | Sends a free-form instruction to the chat. |
@@ -681,7 +681,7 @@ The agent answers a judgment point with a **directive**:
 | `end_round()` | Ends the round of the job the run is on: the steps of the round that did not run are skipped, the job's final step runs, and the job starts its next round. |
 | `finish(status, summary)` | Ends the run. `status` is `done` or `failed`. |
 
-`resume` and `next` name no step: the run knows the one the judgment is about, and the engine decides what runs next. `resume` runs that step again — its budget for the round is checked first — and `next` records it as complete: the facts the step produced are kept, and the engine plans the next step. Both refuse a step that did its job already: there is nothing to repair, and nothing to declare done. `next` refuses a step that is still running: the work is in flight.
+`resume` and `next` name no step: the run knows the one the judgment is about, and the engine decides what runs next. `resume` runs that step again — its budget for the round is checked first — and `next` records it as skipped: the facts the step produced are kept, the error goes, and the engine plans the next step. Both refuse a step that did its job already: there is nothing to repair, and nothing to skip. `next` refuses a step that is still running: the work is in flight.
 
 The nightme commands are the ones the command registry holds, minus the ones that would take the run with them (`/me`, `/close`, `/new`, `/stop`, `/cwd`, `/use`, `/resume`, `/steer`, `/wiki`), the ones that only show something (`/help`, `/think`, `/tools`, `/watch`, `/format`) and the subcommands that shape the project or tear the run's own workspace down instead of moving the work on (`/gtw config`, `/gtw plan`, `/gtw new`, `/gtw close`, `/gtw back`, `/gtw sync`, `/gtw abort`). A command that belongs to no step is a repair: it counts against the step the run is on, but it never becomes that step's verdict.
 
@@ -701,11 +701,11 @@ The policy is the bound on what a run may do. It is a pure function of the workf
 | `Render()` | The workflow as a compact text block: the identity, the title, the steps, the notes and the limits. |
 | `StepCommands()` | The step messages the policy accepts right now. |
 
-A step's message belongs to that step, and a step that spent its budget leaves the list. The budget counts the actions of the current round only: the step's own execution, the agent's decision that the step is done, the nightme commands and the instructions issued for it, and the turns of the chat model that produced no tool call. It starts over at every round.
+A step's message belongs to that step, and a step that spent its budget leaves the list. The budget counts the actions of the current round only: the step's own execution, the agent's decision that the step is skipped, the nightme commands and the instructions issued for it, and the turns of the chat model that produced no tool call. It starts over at every round.
 
 A judgment that names no step — the plan forks, a job starts a new round — is charged to the last step that ran in the round. A run that has done no work yet is charged to the step the plan may run now. Every turn the agent spends without acting costs a chance somewhere: a turn that costs nothing bounds nothing.
 
-The budget is one number for every step and every round, set by the personal agent from `me.max_judgments` (50 by default). A workflow file does not carry it. When the budget of the step the run is on is spent, the run pauses and says so in the chat: the operator hands the control back with `/me continue`, and the step's budget starts over.
+The budget is one number for every step and every round, set by the personal agent from `me.max_judgments` (50 by default). A workflow file does not carry it. When the budget of the step the run is on is spent, the run pauses and says so in the chat: the operator runs the step again with `/me resume`, and the step's budget starts over.
 
 The registered nightme commands are not the workflow's own: they are accepted without belonging to a step, and they are recorded against the step the run is on. The step's own verdict is the one the plan reads, so a repair that succeeded does not turn a failed step into a finished one.
 
@@ -826,10 +826,13 @@ The cap on an answer defaults to 40960 tokens; a configuration that does not nam
 | `/me start <workflow> [args...] [-i <rounds>]` | Starts a workflow in this chat. The name is the base name of the workflow's file. The run inherits the chat's workspace and agent. A chat without a workspace is refused. A second run in the same chat is refused. `-i` sets how many rounds every job of the workflow runs in this run. The command posts no reply: the card of the run carries the acknowledgement. |
 | `/me reply <text>` | Answers the question the run is waiting for. |
 | `/me pause` | Stops the run after the step it is on. The step that is running is not interrupted: its outcome is recorded. |
-| `/me continue [note]` | Hands the control back to a paused run. The note is the operator's instruction; it joins the conversation the chat model reads. |
+| `/me resume [note]` | Runs the step the run is on again. The step's budget for the current round starts over before the retry. The note is the operator's instruction; it joins the conversation the chat model reads. |
+| `/me next [note]` | Skips the step the run is on: the plan goes on with the workflow, and the facts the step produced are kept. The note is the operator's instruction; it joins the conversation the chat model reads. |
 | `/me show` | Puts the plan of the run back in front of the operator as a card of its own. The live state of the work stays on the card of the round. |
 | `/me stop` | Cancels the run, tells the chat to stop working, and leaves a summary of the session in the chat. |
 | `/me status` | Reports the current step, the phase and progress of the running command, the remaining budget, and what each capability decided and spent. |
+
+The step the run is on is the step its last judgment was about. A run that has no judgment — the operator took the chat back, the agent was throttled — is on the step it ran last, when that step did not succeed; a run whose last step succeeded is on the first step of the plan's ready set. `/me resume` and `/me next` act on that step, and the decision rides on the run until its loop applies it: the state is written before the run is woken, so a daemon that dies in between comes back and applies it.
 
 The run speaks in agent sessions, and the chat renders every session the way it renders a coding agent's turn: an identity line, the entries of the session, the tool calls as thread events and a status bar in the footer. A round also carries the steps of the round as a checklist. A run opens three kinds of session, and every session owns exactly one card:
 
@@ -845,7 +848,7 @@ The card of a session is posted by the run itself and is patched in place from t
 
 `/me stop` leaves a summary of the session in the chat: a card of its own that says what the run did, what went wrong and what the models decided. The summary is posted once the run has unwound, so the step that was in flight counts as a step that did not run unless it produced an outcome.
 
-No card of the run carries a button: the operator drives the run with `/me pause`, `/me continue` and `/me stop`. A question the run asks is the chat's own interactive choice card, and a click on an option is the answer — the answer never reaches the agent. A person who quotes the question instead answers it in their own words — the answer is claimed by the run before the agent sees it.
+No card of the run carries a button: the operator drives the run with `/me pause`, `/me resume`, `/me next` and `/me stop`. A question the run asks is the chat's own interactive choice card, and a click on an option is the answer — the answer never reaches the agent. A person who quotes the question instead answers it in their own words — the answer is claimed by the run before the agent sees it.
 
 The question itself never reaches the agent either: it is a message of the chat, not a turn of the conversation. The agent sees the commands the run speaks, not the questions the run asks.
 
@@ -864,7 +867,7 @@ The run judges from facts, not from text. Every command the agent sends reports 
 | Status | Meaning |
 |---|---|
 | `ok` | The step did what it was asked to do. |
-| `noop` | There was nothing to do — the request was valid, the world already satisfied it. |
+| `noop` | There was nothing to do — the request was valid, the world already satisfied it. A step that was skipped is `noop` too: it did not complete by the workflow's execution, and the plan moved past it. |
 | `incomplete` | The step partly worked; the rest is still open. |
 | `failed` | The step did not work. A command that ran *because* something existed and found nothing to do reports `failed`: nothing to commit, nothing to push, no diff to review, an empty queue. Whether that is a breakage or a normal branch is the error description's business. |
 | `cancelled` | Somebody stopped it. |
@@ -1034,7 +1037,7 @@ A provider that failed or that never answered costs the same one chance. The wai
 
 One turn of the chat model lasts at most five minutes: the provider call carries that deadline, so the run does not wait for the client's own timeout.
 
-A command the underlying agent answered 429 pauses the run: the agent is throttled, and running the command again makes it worse. The run waits for the operator, who continues it with `/me continue`. The pause is the run's own: the model is not asked to think about a throttle.
+A command the underlying agent answered 429 pauses the run: the agent is throttled, and running the command again makes it worse. The run waits for the operator, who sets it going again with `/me resume`. The pause is the run's own: the model is not asked to think about a throttle.
 
 The run has no clock of its own. Every command it issues carries its own budget — the agent behind the command reports its own outcome when that budget runs out — and the run acts on that outcome. A timeout is the agent's timeout, never the run's. The run watches: it stops when the command reports, when the operator stops it, or when the daemon shuts down.
 
@@ -1042,7 +1045,7 @@ The run is persisted after every tool result: one file in `<DataDir>/workflows/r
 
 - a command that was in flight is resolved through the tracker; if its execution is gone, it reports `interrupted`;
 - a suspended run keeps waiting for `/me reply`;
-- a run that was paused keeps waiting for `/me continue`;
+- a run that was paused keeps waiting for `/me resume` or `/me next`;
 - a state file left by an older daemon names a chat that no longer exists: the run cannot go on there and is dropped.
 
 Recovery is silent. The chat is told only when a run cannot go on — an authentication error from the model, for instance.

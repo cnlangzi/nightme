@@ -84,9 +84,13 @@ type MeController interface {
 	Reply(ctx context.Context, chatID, text string) error
 	// Pause asks the run to stop after the step it is on.
 	Pause(ctx context.Context, chatID string) error
-	// Continue hands the control back to a paused run. The note is
-	// the operator's instruction.
-	Continue(ctx context.Context, chatID, note string) error
+	// Resume runs the step the run is on again. It returns the id of
+	// the step the command acted on. The note is the operator's
+	// instruction.
+	Resume(ctx context.Context, chatID, note string) (string, error)
+	// Next skips the step the run is on. It returns the id of the step
+	// the command acted on. The note is the operator's instruction.
+	Next(ctx context.Context, chatID, note string) (string, error)
 	// Show puts the run's state back in front of the operator.
 	Show(ctx context.Context, chatID string) error
 	// Stop cancels the run of a chat.

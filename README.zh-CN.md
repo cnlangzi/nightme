@@ -609,7 +609,8 @@ me:
 | `/me start <workflow> [args...] [-i <rounds>]` | 在当前 chat 里启动一个 workflow。`-i` 指定这个 workflow 的每个 job 跑多少轮。 |
 | `/me reply <text>` | 回答运行正在等的问题。 |
 | `/me pause` | 当前这一步跑完后停下。 |
-| `/me continue [note]` | 把控制权交回运行；note 是你的指示。 |
+| `/me resume [note]` | 把运行所在的那一步再跑一遍；这一轮里它的预算重新开始；note 是你的指示。 |
+| `/me next [note]` | 跳过运行所在的那一步：计划继续往下走，这一步产出的事实留着；note 是你的指示。 |
 | `/me show` | 把运行的状态重新贴到当前对话里。 |
 | `/me stop` | 取消这次运行，让 chat 停下手上的活，并在 chat 里留下一份这次会话的总结。 |
 | `/me status` | 报告当前 step、运行中命令的阶段与进度、剩余预算，以及两个能力各自决定和花费了什么。 |
@@ -635,7 +636,7 @@ me:
 
 能这样跑的 channel 有两个：飞书和 Telegram。其他 channel 上 `/me start` 会说明原因并拒绝。
 
-运行的生死只归 `/me` 管：`/close`、`/stop`、`/new` 结束的是 chat 的会话，不是这次运行。运行期间有人在 chat 里说话，就是把 chat 拿回去了——当前这一步跑完运行就停下，`/me continue` 把控制权交回来。
+运行的生死只归 `/me` 管：`/close`、`/stop`、`/new` 结束的是 chat 的会话，不是这次运行。运行期间有人在 chat 里说话，就是把 chat 拿回去了——当前这一步跑完运行就停下，`/me resume` 把这一步再跑一遍。
 
 ### 快路径与判断点
 
@@ -646,11 +647,11 @@ workflow 说了下一步是什么，所以大部分步骤根本不需要模型�
 - 其它都是**判断点**：就绪集空了或者分叉、上一步没有以 `ok` 或 `noop` 收尾、或者一条命令还在等回答。这时由 agent 决定——它挑下一个节点、修当前这一步，或者结束这次运行。
 - 一个 job 的这一轮跑完时，它开下一轮，而不是结束这次运行：这一轮的 step 产出被清空，每个 step 的预算也重新开始。
 
-agent 在每个 step 上有一个预算：一个数字，每个 step、每一轮都一样，由 `me.max_judgments` 定（默认 50）。一次机会是这次 step 自己的执行、agent 判定这一步已经做完、为它发出的一条 nightme 命令或一段自由指令，或者 chat 模型一轮没有工具调用的回答。运行所在那个 step 的预算用完时，运行暂停下来，在 chat 里说清楚；`/me continue` 把控制权交回来，那个 step 的预算重新开始。
+agent 在每个 step 上有一个预算：一个数字，每个 step、每一轮都一样，由 `me.max_judgments` 定（默认 50）。一次机会是这次 step 自己的执行、agent 判定这一步被跳过、为它发出的一条 nightme 命令或一段自由指令，或者 chat 模型一轮没有工具调用的回答。运行所在那个 step 的预算用完时，运行暂停下来，在 chat 里说清楚；`/me resume` 把这一步再跑一遍，那个 step 的预算重新开始。
 
 除了每个 step 的预算之外没有别的预算：一次运行结束于计划跑完、agent 调用 `finish`，或者你发 `/me stop`，或者 daemon 关掉。chat 模型一轮没有工具调用的回答、provider 调用失败，都不结束运行——运行会再问一次，界限由预算给出。
 
-agent 在判断点上给出一个指令：`resume`（修好之后把坏掉的那一步再跑一遍）、`next`（这一步已经做完了，让引擎继续往下走）、`ntm_<command>`（以你的身份跑一条 nightme 命令）、`agent`（问 owner 的思考为什么这一步失败）、`instruct`（给 chat 发一段自由指令）、`answer_choice`（回答 chat 在等的一个提示）、`ask_human`（问你）、`repo_status`（读分支和工作树）、`wait`（等一会儿再看——后台还有活在跑时）、`end_round`（结束当前 job 的这一轮：没跑的 step 记成跳过，job 的 final step 顶上，然后开下一轮）、`finish`（结束运行）。`resume` 和 `next` 不接 step：运行知道判断点说的是哪一步，下一步跑什么由引擎决定。运行不允许做的事会以错误回来，agent 自己纠正。
+agent 在判断点上给出一个指令：`resume`（修好之后把坏掉的那一步再跑一遍）、`next`（跳过判断点说的那一步，让引擎继续往下走）、`ntm_<command>`（以你的身份跑一条 nightme 命令）、`agent`（问 owner 的思考为什么这一步失败）、`instruct`（给 chat 发一段自由指令）、`answer_choice`（回答 chat 在等的一个提示）、`ask_human`（问你）、`repo_status`（读分支和工作树）、`wait`（等一会儿再看——后台还有活在跑时）、`end_round`（结束当前 job 的这一轮：没跑的 step 记成跳过，job 的 final step 顶上，然后开下一轮）、`finish`（结束运行）。`resume` 和 `next` 不接 step：运行知道判断点说的是哪一步，下一步跑什么由引擎决定。运行不允许做的事会以错误回来，agent 自己纠正。
 
 ### 结果模型
 
@@ -693,7 +694,7 @@ workflows 目录里的 YAML 写坏了，个人 agent 起不来——`nightme log
 
 ## Slash commands
 
-Chat 级别的斜杠命令。`/gtw` 子命令见 [它们自己的 section](#git-team-workflow-gtw)，这里不列；`/me` 子命令——`/me start` · `/me reply` · `/me pause` · `/me continue` · `/me stop` · `/me status`——见 [它们自己的 section](#workflow-与个人-agent-me)。
+Chat 级别的斜杠命令。`/gtw` 子命令见 [它们自己的 section](#git-team-workflow-gtw)，这里不列；`/me` 子命令——`/me start` · `/me reply` · `/me pause` · `/me resume` · `/me next` · `/me stop` · `/me status`——见 [它们自己的 section](#workflow-与个人-agent-me)。
 
 | 命令 | 干什么 |
 |---|---|

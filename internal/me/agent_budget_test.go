@@ -104,19 +104,21 @@ func TestBudget_TheRunPausesWhenTheStepSpentItsBudget(t *testing.T) {
 	}
 }
 
-// TestBudget_ContinueHandsTheControlBackWithAFreshBudget — the
-// operator takes the chat back and hands the control to the run: the
-// note joins the conversation and the step's budget starts over.
-func TestBudget_ContinueHandsTheControlBackWithAFreshBudget(t *testing.T) {
+// TestBudget_ResumeStartsTheStepOver — the operator runs the step
+// again: the note joins the conversation and the step's budget starts
+// over.
+func TestBudget_ResumeStartsTheStepOver(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", budgetWorkflow)
 
 	provider := &scriptedProvider{responses: []llm.Response{
 		{Message: textMsg("I think I should commit.")},
-		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "failed", "summary": "the operator took over"})},
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider, MaxJudgments: 2})
-	op.steps = []fakeStep{pendingStep("still going")}
+	op.steps = []fakeStep{
+		failedStep("the commit failed"),
+		failedStep("the commit failed again"),
+	}
 
 	runID, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
@@ -129,12 +131,21 @@ func TestBudget_ContinueHandsTheControlBackWithAFreshBudget(t *testing.T) {
 	svc.mu.Unlock()
 	waitPaused(t, svc, "obs-1")
 
-	if err := svc.Continue(context.Background(), "obs-1", "the branch was reset, try again"); err != nil {
-		t.Fatalf("continue: %v", err)
+	if _, err := svc.Resume(context.Background(), "obs-1", "the branch was reset, try again"); err != nil {
+		t.Fatalf("resume: %v", err)
 	}
-	waitRun(t, svc, "obs-1")
+
+	// The step runs again: its command goes to the chat a second time.
+	waitSentCount(t, op, 2)
+
+	// The step's budget starts over: the reset is in the history.
+	waitForAction(t, r, wfe.ActionKindReset, "commit", 1)
 
 	// The agent was asked again, and it read the note of the operator.
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) && provider.Calls() < 2 {
+		time.Sleep(2 * time.Millisecond)
+	}
 	if provider.Calls() < 2 {
 		t.Fatalf("the chat model was called %d times, want the agent to be asked again", provider.Calls())
 	}
@@ -149,18 +160,6 @@ func TestBudget_ContinueHandsTheControlBackWithAFreshBudget(t *testing.T) {
 	}
 	if !carried {
 		t.Fatalf("the agent did not read the note of the operator: %v", req.Messages)
-	}
-
-	// The step's chances are back to zero.
-	r.mu.Lock()
-	idx := r.stepIndex("commit")
-	left := r.policy.Remaining().Steps[idx]
-	r.mu.Unlock()
-	if idx < 0 {
-		t.Fatal("the workflow has no commit step")
-	}
-	if left != 2 {
-		t.Errorf("the step has %d chances left, want the whole budget of 2", left)
 	}
 }
 

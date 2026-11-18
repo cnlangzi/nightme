@@ -311,7 +311,7 @@ func TestThePrompt_TheWayOfWorking(t *testing.T) {
 		}
 		at = i
 	}
-	for _, want := range []string{"resume — the gap is repaired", "next — the step is already done"} {
+	for _, want := range []string{"resume — the gap is repaired", "next — the step is not worth doing"} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("the prompt does not carry %q:\n%s", want, prompt)
 		}

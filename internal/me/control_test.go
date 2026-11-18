@@ -10,8 +10,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
 // waitForStatus waits until the run of a chat stands in the given
@@ -68,81 +70,700 @@ func TestPause_DoesNotInterruptTheRunningStep(t *testing.T) {
 	}
 }
 
-// TestContinue_HandsTheControlBack — the run goes on where it
-// stopped.
-func TestContinue_HandsTheControlBack(t *testing.T) {
+// TestResume_RunsTheStepAgain — the operator runs the step the run is
+// on again: its command goes to the chat a second time.
+func TestResume_RunsTheStepAgain(t *testing.T) {
 	dir := t.TempDir()
-	writeWorkflow(t, dir, "one", continueWorkflow)
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
-	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
-	op.steps = []fakeStep{{open: true}}
+	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}, MaxJudgments: 1})
+	op.steps = []fakeStep{
+		failedStep("the commit failed"),
+		failedStep("the commit failed again"),
+	}
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitSent(t, op, "/gtw commit")
+	waitPaused(t, svc, "obs-1")
 
-	if err := svc.Pause(context.Background(), "obs-1"); err != nil {
-		t.Fatalf("pause: %v", err)
+	step, err := svc.Resume(context.Background(), "obs-1", "")
+	if err != nil {
+		t.Fatalf("resume: %v", err)
 	}
-	if err := op.answer("obs-1", "", ""); err != nil {
-		t.Fatalf("settle the step: %v", err)
+	if step != "commit" {
+		t.Errorf("the command acted on %q, want commit", step)
 	}
-	waitForStatus(t, svc, "obs-1", PhasePaused)
 
-	if err := svc.Continue(context.Background(), "obs-1", ""); err != nil {
-		t.Fatalf("continue: %v", err)
-	}
-	waitForStatus(t, svc, "obs-1", PhaseRunning)
-}
+	// The step's command goes to the chat a second time.
+	waitSentCount(t, op, 2)
 
-// TestContinue_CarriesTheNote — the note is the operator's
-// instruction: it joins the conversation the chat model reads.
-func TestContinue_CarriesTheNote(t *testing.T) {
-	dir := t.TempDir()
-	writeWorkflow(t, dir, "one", continueWorkflow)
+	r := activeRun(t, svc, "obs-1")
+	waitForAction(t, r, wfe.ActionKindRun, "commit", 2)
 
-	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
-	op.steps = []fakeStep{{open: true}}
-
-	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
-	}); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	waitSent(t, op, "/gtw commit")
-
-	if err := svc.Pause(context.Background(), "obs-1"); err != nil {
-		t.Fatalf("pause: %v", err)
-	}
-	if err := op.answer("obs-1", "", ""); err != nil {
-		t.Fatalf("settle the step: %v", err)
-	}
-	waitForStatus(t, svc, "obs-1", PhasePaused)
-
-	if err := svc.Continue(context.Background(), "obs-1", "use the other branch"); err != nil {
-		t.Fatalf("continue: %v", err)
-	}
-	waitForStatus(t, svc, "obs-1", PhaseRunning)
-
-	svc.mu.Lock()
-	r := svc.active["obs-1"]
-	svc.mu.Unlock()
-	if r == nil {
-		t.Fatal("the run is gone")
-	}
-	found := false
-	for _, m := range r.conversation() {
-		for _, p := range m.Parts {
-			if p.Type == "text" && strings.Contains(p.Text, "use the other branch") {
-				found = true
-			}
+	// The budget of the step starts over before the retry.
+	history := runHistory(r)
+	reset, retry := -1, -1
+	for i, rec := range history {
+		if rec.StepID != "commit" {
+			continue
+		}
+		switch rec.Kind {
+		case wfe.ActionKindReset:
+			reset = i
+		case wfe.ActionKindRun:
+			retry = i
 		}
 	}
-	if !found {
+	if reset < 0 {
+		t.Fatalf("the history holds no reset of the step: %+v", history)
+	}
+	if retry < 0 {
+		t.Fatalf("the history holds no run of the step: %+v", history)
+	}
+	if reset > retry {
+		t.Errorf("the reset comes after the retry: %+v", history)
+	}
+
+	// The retry's verdict is the step's verdict.
+	out, ok := stepOutcome(r, "commit")
+	if !ok {
+		t.Fatal("the commit step has no state")
+	}
+	if out.Summary != "the commit failed again" {
+		t.Errorf("the step ended as %q, want the verdict of the retry", out.Summary)
+	}
+}
+
+// TestResume_CarriesTheNote — the note is the operator's
+// instruction: it joins the conversation the chat model reads.
+func TestResume_CarriesTheNote(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}, MaxJudgments: 1})
+	op.steps = []fakeStep{failedStep("the commit failed")}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitPaused(t, svc, "obs-1")
+
+	if _, err := svc.Resume(context.Background(), "obs-1", "use the other branch"); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+
+	r := activeRun(t, svc, "obs-1")
+	if !conversationCarries(r, "use the other branch") {
 		t.Error("the note did not join the conversation")
+	}
+}
+
+// TestTheOperatorActionIsInTheConversation — the model sees what the
+// operator did: the action is a synthetic assistant tool call with its
+// result.
+func TestTheOperatorActionIsInTheConversation(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}, MaxJudgments: 1})
+	op.steps = []fakeStep{failedStep("the commit failed")}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitPaused(t, svc, "obs-1")
+
+	r := activeRun(t, svc, "obs-1")
+	if _, err := svc.Next(context.Background(), "obs-1", ""); err != nil {
+		t.Fatalf("next: %v", err)
+	}
+	waitForAction(t, r, wfe.ActionKindRun, "commit", 2)
+
+	// The model sees what the operator did: the action is a synthetic
+	// assistant tool call with its result.
+	waitForToolCall(t, r, toolNext)
+}
+
+// TestNext_SkipsTheStep — the operator skips the step the run is on:
+// the plan goes on with the workflow.
+func TestNext_SkipsTheStep(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "two", commitPushWorkflow)
+
+	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}, MaxJudgments: 1})
+	op.steps = []fakeStep{
+		{outcome: messages.Outcome{
+			Status:  messages.OutcomeFailed,
+			Summary: "the commit failed",
+			Data:    map[string]string{"error": "the commit failed", "reason": "conflict"},
+		}},
+		okStep("pushed"),
+	}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "two", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitPaused(t, svc, "obs-1")
+
+	step, err := svc.Next(context.Background(), "obs-1", "")
+	if err != nil {
+		t.Fatalf("next: %v", err)
+	}
+	if step != "commit" {
+		t.Errorf("the command acted on %q, want commit", step)
+	}
+
+	r := activeRun(t, svc, "obs-1")
+	waitForAction(t, r, wfe.ActionKindRun, "commit", 2)
+
+	// The step is recorded as skipped: the facts it produced are kept
+	// and the error is gone.
+	st, ok := r.stepState("commit")
+	if !ok {
+		t.Fatal("the commit step has no state")
+	}
+	out := st.Outcome
+	if out.Status != wfe.OutcomeNoop {
+		t.Errorf("the step ended as %q, want the skipped one", out.Status)
+	}
+	if out.Summary != operatorSkippedSummary {
+		t.Errorf("the summary is %q, want %q", out.Summary, operatorSkippedSummary)
+	}
+	if out.Data["reason"] != "conflict" {
+		t.Errorf("the facts are %v, want the ones the step produced", out.Data)
+	}
+	if _, ok := out.Data[wfe.OutcomeKeyError]; ok {
+		t.Errorf("the error is still on the step: %v", out.Data)
+	}
+	if st.Skipped {
+		t.Error("the step is marked as never run: it did run")
+	}
+
+	// The history agrees with the run state.
+	var skipped bool
+	for _, rec := range runHistory(r) {
+		if rec.Kind != wfe.ActionKindRun || rec.StepID != "commit" {
+			continue
+		}
+		if rec.Outcome.Status == wfe.OutcomeNoop && rec.Outcome.Summary == operatorSkippedSummary {
+			skipped = true
+		}
+	}
+	if !skipped {
+		t.Errorf("the history holds no skipped run of the step: %+v", runHistory(r))
+	}
+
+	// The plan goes on with the workflow.
+	waitSent(t, op, "/gtw push")
+}
+
+// TestNext_SkipsTheStepTheJudgmentIsAbout — the step the command acts
+// on is the subject of the judgment, not the step that comes next.
+func TestNext_SkipsTheStepTheJudgmentIsAbout(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "two", commitPushWorkflow)
+
+	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}, MaxJudgments: 1})
+	op.steps = []fakeStep{
+		failedStep("the commit failed"),
+		okStep("pushed"),
+	}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "two", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitPaused(t, svc, "obs-1")
+
+	if _, err := svc.Next(context.Background(), "obs-1", ""); err != nil {
+		t.Fatalf("next: %v", err)
+	}
+
+	r := activeRun(t, svc, "obs-1")
+	waitSent(t, op, "/gtw push")
+
+	// The step that failed is the one that was skipped.
+	st, ok := r.stepState("commit")
+	if !ok {
+		t.Fatal("the commit step has no state")
+	}
+	if st.Outcome.Status != wfe.OutcomeNoop {
+		t.Errorf("the commit step ended as %q, want the skipped one", st.Outcome.Status)
+	}
+	pushed := waitForStep(t, r, "push")
+	if pushed.Outcome.Status == wfe.OutcomeNoop {
+		t.Error("the push step was skipped although it ran")
+	}
+}
+
+// TestNextOnAStepThatSucceededChangesNothing — a step that did its job
+// has nothing to skip: the plan goes on and the step keeps its verdict.
+func TestNextOnAStepThatSucceededChangesNothing(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "two", commitPushWorkflow)
+
+	svc, _ := testService(t, dir, Config{})
+	r := testRun(t, svc, "two")
+
+	commit, ok := r.stepByID("commit")
+	if !ok {
+		t.Fatal("the workflow has no commit step")
+	}
+	r.setJudgmentStep("commit")
+	r.recordStep("main", commit, wfe.Outcome{Status: wfe.OutcomeOK, Summary: "committed"})
+
+	if err := svc.applyNext(context.Background(), r, "commit"); err != nil {
+		t.Fatalf("next: %v", err)
+	}
+	st, ok := r.stepState("commit")
+	if !ok {
+		t.Fatal("the commit step has no state")
+	}
+	if st.Outcome.Status != wfe.OutcomeOK {
+		t.Errorf("the step ended as %q, want the one it had", st.Outcome.Status)
+	}
+	if st.Outcome.Summary != "committed" {
+		t.Errorf("the summary is %q, want the one the step had", st.Outcome.Summary)
+	}
+}
+
+// TestResume_AfterATakeoverRunsTheBrokenStepAgain — the operator took
+// the chat back over a step that broke: the run is on that step, and
+// the operator's word runs it again.
+func TestResume_AfterATakeoverRunsTheBrokenStepAgain(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "two", commitPushWorkflow)
+
+	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}, MaxJudgments: 1})
+	op.steps = []fakeStep{
+		{open: true},
+		failedStep("the commit failed again"),
+	}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "two", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitSent(t, op, "/gtw commit")
+
+	// Somebody takes the chat back while the step is running.
+	svc.Seen(&messages.InboundMessage{
+		ChatID:    "obs-1",
+		MessageID: "om_human",
+		Text:      "wait, stop there",
+		Origin:    messages.OriginHuman,
+	})
+
+	// The step breaks.
+	if err := op.fail("obs-1", "the commit failed"); err != nil {
+		t.Fatalf("break the step: %v", err)
+	}
+	waitForStatus(t, svc, "obs-1", PhasePaused)
+
+	// The run is on the step that broke: the operator's word runs it
+	// again.
+	step, err := svc.Resume(context.Background(), "obs-1", "")
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if step != "commit" {
+		t.Errorf("the command acted on %q, want the step that broke", step)
+	}
+	waitSentCount(t, op, 2)
+}
+
+// TestTheTargetStep_IsTheStepTheRunWorkedOn — a run that has no
+// judgment is on the step it ran last, when that step did not succeed.
+// A step that succeeded is not the step to act on: the run is on the
+// next step of the plan.
+func TestTheTargetStep_IsTheStepTheRunWorkedOn(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "two", commitPushWorkflow)
+
+	svc, _ := testService(t, dir, Config{})
+	r := testRun(t, svc, "two")
+
+	commit, ok := r.stepByID("commit")
+	if !ok {
+		t.Fatal("the workflow has no commit step")
+	}
+	r.recordStep("main", commit, wfe.Outcome{Status: wfe.OutcomeFailed, Summary: "the commit failed"})
+	r.record(wfe.ActionKindRun, "/gtw commit", "commit", wfe.Outcome{
+		Status:  wfe.OutcomeFailed,
+		Summary: "the commit failed",
+	})
+
+	step, ok := r.targetStep()
+	if !ok {
+		t.Fatal("the run is on no step")
+	}
+	if step.ID != "commit" {
+		t.Errorf("the run is on %q, want the step it worked on", step.ID)
+	}
+
+	// The judgment wins over the step the run worked on.
+	r.setJudgmentStep("push")
+	step, ok = r.targetStep()
+	if !ok {
+		t.Fatal("the run is on no step")
+	}
+	if step.ID != "push" {
+		t.Errorf("the run is on %q, want the step the judgment is about", step.ID)
+	}
+	r.setJudgmentStep("")
+
+	// A step that succeeded is not the step to act on: the run is on
+	// the next step of the plan.
+	r.recordStep("main", commit, wfe.Outcome{Status: wfe.OutcomeOK, Summary: "committed"})
+	step, ok = r.targetStep()
+	if !ok {
+		t.Fatal("the run is on no step")
+	}
+	if step.ID != "push" {
+		t.Errorf("the run is on %q, want the next step of the plan", step.ID)
+	}
+}
+
+// TestTheGate_IgnoresAStaleWake — a wake that came before the run
+// waited belongs to a pause the operator already took back: it must
+// not swallow the next pause.
+func TestTheGate_IgnoresAStaleWake(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	svc, _ := testService(t, dir, Config{})
+	r := testRun(t, svc, "one")
+
+	r.wake()
+	r.pauseNow("the operator paused the run")
+
+	done := make(chan error, 1)
+	go func() { done <- svc.checkGate(context.Background(), r) }()
+
+	select {
+	case err := <-done:
+		t.Fatalf("the run went on although it is paused: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// The operator hands the control back: the run goes on.
+	r.wake()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("the gate: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the run did not go on")
+	}
+}
+
+// TestTheBusyStep_IsTheStepACommandIsOn — the run waits for a command:
+// the step it is on is busy, and a step cannot be skipped.
+func TestTheBusyStep_IsTheStepACommandIsOn(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "two", commitPushWorkflow)
+
+	svc, _ := testService(t, dir, Config{})
+	r := testRun(t, svc, "two")
+
+	r.setJudgmentStep("commit")
+	r.setInflight(&inflightState{MsgID: "msg-1", Command: "/gtw commit"})
+
+	r.mu.Lock()
+	busy := r.busyStepIDLocked()
+	r.mu.Unlock()
+	if busy != "commit" {
+		t.Errorf("the busy step is %q, want the step the command is on", busy)
+	}
+}
+
+// TestTheRoundCardShowsTheErrorOfABrokenStep — a step that broke with
+// a noop verdict is not a step that was passed over: its error is on
+// the row.
+func TestTheRoundCardShowsTheErrorOfABrokenStep(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	svc, _ := testService(t, dir, Config{})
+	r := testRun(t, svc, "one")
+
+	commit, ok := r.stepByID("commit")
+	if !ok {
+		t.Fatal("the workflow has no commit step")
+	}
+	r.recordStep("main", commit, wfe.Outcome{
+		Status:  wfe.OutcomeNoop,
+		Summary: "nothing to do",
+		Data:    map[string]string{"error": "the worktree is gone"},
+	})
+
+	items := r.roundTasks("main", 1)
+	if len(items) != 1 {
+		t.Fatalf("the round holds %d steps, want 1", len(items))
+	}
+	if !strings.Contains(items[0].ActiveForm, "the worktree is gone") {
+		t.Errorf("the row says %q, want the error of the step", items[0].ActiveForm)
+	}
+}
+
+// TestTheCommandsRefuseARunThatIsNotWaiting — the commands act on a
+// paused run and on nothing else.
+func TestTheCommandsRefuseARunThatIsNotWaiting(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
+	op.steps = []fakeStep{{open: true}}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitSent(t, op, "/gtw commit")
+
+	// The run is working: it is not paused.
+	_, err := svc.Resume(context.Background(), "obs-1", "")
+	if err == nil {
+		t.Fatal("the run was resumed although it is working")
+	}
+	if !strings.Contains(err.Error(), "this run is not paused") {
+		t.Errorf("the refusal is %q, want the reason", err)
+	}
+	if reason := RefusalReason(err); reason != ReasonNotPaused {
+		t.Errorf("the reason is %q, want %q", reason, ReasonNotPaused)
+	}
+
+	// A chat without a run has nothing to act on.
+	_, err = svc.Next(context.Background(), "obs-2", "")
+	if err == nil {
+		t.Fatal("a chat without a run was skipped")
+	}
+	if !strings.Contains(err.Error(), "this chat has no run in it") {
+		t.Errorf("the refusal is %q, want the reason", err)
+	}
+	if reason := RefusalReason(err); reason != ReasonNoRun {
+		t.Errorf("the reason is %q, want %q", reason, ReasonNoRun)
+	}
+}
+
+// TestTheCommandsRefuseARunThatIsAsking — a question is answered with
+// `/me reply`, not with a decision about the step.
+func TestTheCommandsRefuseARunThatIsAsking(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	provider := &scriptedProvider{responses: []llm.Response{
+		{Message: toolCallMsg("c1", toolAskHuman, map[string]any{"question": "Which branch?"})},
+	}}
+	svc, op := testService(t, dir, Config{Provider: provider})
+	op.steps = []fakeStep{pendingStep("still going")}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitAsked(t, op, "Which branch?")
+
+	for _, cmd := range []struct {
+		name string
+		call func() (string, error)
+	}{
+		{"resume", func() (string, error) { return svc.Resume(context.Background(), "obs-1", "") }},
+		{"next", func() (string, error) { return svc.Next(context.Background(), "obs-1", "") }},
+	} {
+		_, err := cmd.call()
+		if err == nil {
+			t.Fatalf("the run was %sd although it is asking", cmd.name)
+		}
+		if !strings.Contains(err.Error(), "waiting for an answer") {
+			t.Errorf("the refusal is %q, want the reason", err)
+		}
+		if reason := RefusalReason(err); reason != ReasonNotPaused {
+			t.Errorf("the reason is %q, want %q", reason, ReasonNotPaused)
+		}
+	}
+}
+
+// TestTheDirectiveSurvivesARestart — the operator's decision is in the
+// run's state: a daemon that dies in between comes back and applies
+// it.
+func TestTheDirectiveSurvivesARestart(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	op := newFakeOperator()
+	op.steps = []fakeStep{
+		failedStep("the commit failed"),
+		failedStep("the commit failed again"),
+	}
+	cfg := Config{
+		Provider:     &scriptedProvider{},
+		MaxJudgments: 1,
+		Operator:     op,
+		WorkflowsDir: dir,
+		StateDir:     filepath.Join(dir, "runs"),
+	}
+	svc := New(cfg)
+	if err := svc.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	runID, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	})
+	if err != nil {
+		t.Fatalf("start workflow: %v", err)
+	}
+	waitPaused(t, svc, "obs-1")
+
+	// The daemon goes away before the run applies the decision.
+	if err := svc.Shutdown(context.Background()); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+
+	if _, err := svc.Resume(context.Background(), "obs-1", ""); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+
+	// The state of the run holds the decision.
+	state := waitForDirective(t, filepath.Join(dir, "runs", runID+".json"))
+	directive, ok := state["directive"].(map[string]any)
+	if !ok {
+		t.Fatalf("the state holds no directive: %v", state["directive"])
+	}
+	if directive["kind"] != "resume" {
+		t.Errorf("the state holds the directive %v, want resume", directive["kind"])
+	}
+	if directive["step"] != "commit" {
+		t.Errorf("the state holds the step %v, want commit", directive["step"])
+	}
+
+	resumed := New(cfg)
+	t.Cleanup(func() { _ = resumed.Shutdown(context.Background()) })
+	if err := resumed.Start(context.Background()); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	// The restored run applies the decision on its first turn: the
+	// step's command goes to the chat a second time.
+	waitSentCount(t, op, 2)
+}
+
+// TestResume_CancelsAPauseThatHasNotTakenEffect — the operator changed
+// their mind before the step ended: the run does not pause.
+func TestResume_CancelsAPauseThatHasNotTakenEffect(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
+	op.steps = []fakeStep{{open: true}}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitSent(t, op, "/gtw commit")
+
+	if err := svc.Pause(context.Background(), "obs-1"); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	if _, err := svc.Resume(context.Background(), "obs-1", ""); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+
+	r := activeRun(t, svc, "obs-1")
+	r.mu.Lock()
+	paused, requested := r.paused, r.pauseRequested
+	r.mu.Unlock()
+	if paused || requested {
+		t.Errorf("the run is still paused (paused %t, requested %t)", paused, requested)
+	}
+
+	// The step ends: the run goes on instead of pausing.
+	if err := op.answer("obs-1", "", ""); err != nil {
+		t.Fatalf("settle the step: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if st := svc.Status("obs-1"); st.Paused {
+		t.Fatal("the run paused although the operator cancelled the pause")
+	}
+}
+
+// TestNext_RefusesAStepThatIsStillRunning — the work is in flight: it
+// cannot be skipped.
+func TestNext_RefusesAStepThatIsStillRunning(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
+	op.steps = []fakeStep{{open: true}}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitSent(t, op, "/gtw commit")
+
+	if err := svc.Pause(context.Background(), "obs-1"); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	_, err := svc.Next(context.Background(), "obs-1", "")
+	if err == nil {
+		t.Fatal("a step that is still running was skipped")
+	}
+	if !strings.Contains(err.Error(), "commit") {
+		t.Errorf("the refusal is %q, want it to name the step", err)
+	}
+	if reason := RefusalReason(err); reason != ReasonStepRunning {
+		t.Errorf("the reason is %q, want %q", reason, ReasonStepRunning)
+	}
+}
+
+// TestTheRoundCardShowsASkippedStep — a step whose outcome is noop is
+// rendered as skipped, and the row says why.
+func TestTheRoundCardShowsASkippedStep(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}, MaxJudgments: 1})
+	op.steps = []fakeStep{failedStep("the commit failed")}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitPaused(t, svc, "obs-1")
+
+	r := activeRun(t, svc, "obs-1")
+	if _, err := svc.Next(context.Background(), "obs-1", ""); err != nil {
+		t.Fatalf("next: %v", err)
+	}
+	waitForAction(t, r, wfe.ActionKindRun, "commit", 2)
+
+	items := r.roundTasks("main", 1)
+	if len(items) != 1 {
+		t.Fatalf("the round holds %d steps, want 1", len(items))
+	}
+	if items[0].Status != agent.TaskSkipped {
+		t.Errorf("the row is %q, want the skipped one", items[0].Status)
+	}
+	if !strings.Contains(items[0].ActiveForm, operatorSkippedSummary) {
+		t.Errorf("the row says %q, want the summary of the skip", items[0].ActiveForm)
 	}
 }
 
@@ -274,39 +895,6 @@ func TestANumberedAnswerIsTheOption(t *testing.T) {
 		t.Fatalf("reply: %v", err)
 	}
 	waitSent(t, op, "/gtw commit")
-}
-
-// TestContinue_CancelsAPauseThatHasNotTakenEffect — the operator
-// changed their mind before the step ended: the run does not pause.
-func TestContinue_CancelsAPauseThatHasNotTakenEffect(t *testing.T) {
-	dir := t.TempDir()
-	writeWorkflow(t, dir, "one", oneStepWorkflow)
-
-	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
-	op.steps = []fakeStep{{open: true}}
-
-	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
-	}); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	waitSent(t, op, "/gtw commit")
-
-	if err := svc.Pause(context.Background(), "obs-1"); err != nil {
-		t.Fatalf("pause: %v", err)
-	}
-	if err := svc.Continue(context.Background(), "obs-1", ""); err != nil {
-		t.Fatalf("continue: %v", err)
-	}
-
-	// The step ends: the run goes on instead of pausing.
-	if err := op.answer("obs-1", "", ""); err != nil {
-		t.Fatalf("settle the step: %v", err)
-	}
-	time.Sleep(50 * time.Millisecond)
-	if st := svc.Status("obs-1"); st.Paused {
-		t.Fatal("the run paused although the operator cancelled the pause")
-	}
 }
 
 // TestOneIterationGetsOneCard — a card covers every step of a job in
@@ -504,11 +1092,11 @@ func TestAQuestionOpensNoCardOfItsOwn(t *testing.T) {
 	}
 }
 
-// TestAPauseUpdatesTheCardInPlace — a run that is paused and
-// continued keeps the card it has.
+// TestAPauseUpdatesTheCardInPlace — a run that is paused and set going
+// again keeps the card it has.
 func TestAPauseUpdatesTheCardInPlace(t *testing.T) {
 	dir := t.TempDir()
-	writeWorkflow(t, dir, "one", oneStepWorkflow)
+	writeWorkflow(t, dir, "one", commitPushWorkflow)
 
 	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
 	op.steps = []fakeStep{{open: true}}
@@ -528,8 +1116,8 @@ func TestAPauseUpdatesTheCardInPlace(t *testing.T) {
 	}
 	waitForStatus(t, svc, "obs-1", PhasePaused)
 
-	if err := svc.Continue(context.Background(), "obs-1", ""); err != nil {
-		t.Fatalf("continue: %v", err)
+	if _, err := svc.Resume(context.Background(), "obs-1", ""); err != nil {
+		t.Fatalf("resume: %v", err)
 	}
 	waitRun(t, svc, "obs-1")
 
@@ -875,18 +1463,6 @@ jobs:
         message: /gtw push
 `
 
-// continueWorkflow is a workflow that keeps the run going after the
-// step it pauses on: the wait gives the run something to do.
-const continueWorkflow = `title: Do the one thing, then wait.
-jobs:
-  main:
-    steps:
-      - id: commit
-        message: /gtw commit
-      - id: rest
-        wait: 1h
-`
-
 // buildTagWorkflow is a workflow whose build job has two steps: the
 // run comes back to it after it has worked somewhere else.
 const buildTagWorkflow = `title: two jobs.
@@ -920,6 +1496,123 @@ jobs:
       - id: tag
         message: /gtw tag
 `
+
+// commitPushWorkflow is a workflow of one job with two steps: the one
+// that breaks and the one that comes after it.
+const commitPushWorkflow = `title: two steps.
+jobs:
+  main:
+    steps:
+      - id: commit
+        message: /gtw commit
+      - id: push
+        message: /gtw push
+`
+
+// failedStep is a step that breaks.
+func failedStep(summary string) fakeStep {
+	return fakeStep{outcome: messages.Outcome{
+		Status:  messages.OutcomeFailed,
+		Summary: summary,
+		Data:    map[string]string{"error": summary},
+	}}
+}
+
+// conversationCarries reports whether the conversation holds the text.
+func conversationCarries(r *run, text string) bool {
+	for _, m := range r.conversation() {
+		for _, p := range m.Parts {
+			if p.Type == llm.PartText && strings.Contains(p.Text, text) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// waitForToolCall waits until the conversation holds a call of the tool
+// and its result.
+func waitForToolCall(t *testing.T, r *run, tool string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		var call, result bool
+		for _, m := range r.conversation() {
+			for _, p := range m.Parts {
+				switch p.Type {
+				case llm.PartToolCall:
+					if p.ToolName == tool {
+						call = true
+					}
+				case llm.PartToolResult:
+					if p.ToolName == tool {
+						result = true
+					}
+				}
+			}
+		}
+		if call && result {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("the conversation holds no call of %q with its result", tool)
+}
+
+// waitForStep waits until the run state holds a record of the step.
+func waitForStep(t *testing.T, r *run, stepID string) wfe.StepState {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if st, ok := r.stepState(stepID); ok {
+			return st
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("the run state holds no record of the step %q", stepID)
+	return wfe.StepState{}
+}
+
+// waitForAction waits until the run's history holds that many actions
+// of the kind for the step.
+func waitForAction(t *testing.T, r *run, kind wfe.ActionKind, stepID string, count int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		n := 0
+		for _, rec := range runHistory(r) {
+			if rec.Kind == kind && rec.StepID == stepID {
+				n++
+			}
+		}
+		if n >= count {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("the history holds %d %s records for %q, want %d", count, kind, stepID, count)
+}
+
+// waitForDirective waits until the state of a run holds the operator's
+// decision.
+func waitForDirective(t *testing.T, path string) map[string]any {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		raw, err := os.ReadFile(path)
+		if err == nil {
+			var state map[string]any
+			if err := json.Unmarshal(raw, &state); err == nil {
+				if directive, ok := state["directive"].(map[string]any); ok && directive["kind"] != "" {
+					return state
+				}
+			}
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("the state of the run never held the operator's decision: %s", path)
+	return nil
+}
 
 // lastCardBody returns the body that was written to the card with the
 // given id last.
@@ -1113,7 +1806,7 @@ func TestTakeover_APersonsMessagePausesTheRun(t *testing.T) {
 	waitForStatus(t, svc, "obs-1", PhasePaused)
 
 	st := svc.Status("obs-1")
-	if !strings.Contains(st.PauseReason, "continue") {
+	if !strings.Contains(st.PauseReason, "resume") {
 		t.Errorf("the pause reason is %q, want it to name the way back", st.PauseReason)
 	}
 }

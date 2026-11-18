@@ -551,9 +551,9 @@ func TestResumeTool_TheBudgetOfTheStepIsChecked(t *testing.T) {
 	}
 }
 
-// TestNextTool_TheStepIsRecordedAsDone — the agent says the step is
-// done: the engine continues with the workflow.
-func TestNextTool_TheStepIsRecordedAsDone(t *testing.T) {
+// TestNextTool_TheStepIsRecordedAsSkipped — the agent skips the step:
+// the engine continues with the workflow.
+func TestNextTool_TheStepIsRecordedAsSkipped(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "two", `title: two
 jobs:
@@ -583,8 +583,8 @@ jobs:
 	if err != nil {
 		t.Fatalf("next: %v", err)
 	}
-	if res.Status != string(wfe.OutcomeOK) {
-		t.Errorf("the verdict is %q, want the one of the completed step", res.Status)
+	if res.Status != string(wfe.OutcomeNoop) {
+		t.Errorf("the verdict is %q, want the one of the skipped step", res.Status)
 	}
 
 	st, ok := r.stepState("commit")
@@ -592,17 +592,20 @@ jobs:
 		t.Fatal("the commit step has no state")
 	}
 	out := st.Outcome
-	if out.Status != wfe.OutcomeOK {
-		t.Errorf("the step ended as %q, want the completed one", out.Status)
+	if out.Status != wfe.OutcomeNoop {
+		t.Errorf("the step ended as %q, want the skipped one", out.Status)
 	}
-	if out.Summary != doneSummary {
-		t.Errorf("the summary is %q, want %q", out.Summary, doneSummary)
+	if out.Summary != agentSkippedSummary {
+		t.Errorf("the summary is %q, want %q", out.Summary, agentSkippedSummary)
 	}
 	if out.Data["reason"] != "conflict" {
 		t.Errorf("the facts are %v, want the ones the step produced", out.Data)
 	}
 	if _, ok := out.Data[wfe.OutcomeKeyError]; ok {
 		t.Errorf("the error is still on the step: %v", out.Data)
+	}
+	if st.Skipped {
+		t.Error("the step is marked as never run: it did run")
 	}
 
 	// The engine goes on with the workflow.
@@ -667,7 +670,7 @@ func TestNextTool_AStepThatIsStillRunningIsRefused(t *testing.T) {
 }
 
 // TestNextTool_AStepThatSucceededIsRefused — a step that did its job
-// has nothing to repair.
+// has nothing to skip.
 func TestNextTool_AStepThatSucceededIsRefused(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
@@ -685,7 +688,7 @@ func TestNextTool_AStepThatSucceededIsRefused(t *testing.T) {
 	if err == nil || !isToolError(err) {
 		t.Fatalf("err = %v, want a tool error the model can correct", err)
 	}
-	if !strings.Contains(err.Error(), "already done") {
+	if !strings.Contains(err.Error(), "nothing to skip") {
 		t.Errorf("the refusal does not say why: %v", err)
 	}
 }
@@ -717,8 +720,8 @@ func TestResumeTool_AStepThatSucceededIsRefused(t *testing.T) {
 	}
 }
 
-// TestNextTool_TheRunGoesOnWithTheWorkflow — the agent declares the
-// step done: the engine runs the step after it.
+// TestNextTool_TheRunGoesOnWithTheWorkflow — the agent skips the step:
+// the engine runs the step after it.
 func TestNextTool_TheRunGoesOnWithTheWorkflow(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "two", `title: two
@@ -753,7 +756,7 @@ jobs:
 	waitRun(t, svc, "obs-1")
 
 	// The engine went on with the workflow: the step after the one the
-	// agent declared done ran.
+	// agent skipped ran.
 	var pushed bool
 	for _, cmd := range op.Sent() {
 		if cmd == "/gtw push" {
@@ -761,13 +764,13 @@ jobs:
 		}
 	}
 	if !pushed {
-		t.Errorf("the chat got %v, want the step after the one the agent declared done", op.Sent())
+		t.Errorf("the chat got %v, want the step after the one the agent skipped", op.Sent())
 	}
 }
 
-// TestNextTool_TheHistoryAgreesWithTheRunState — the step is done in
-// the run state and in the history: the run can end as done, and the
-// report does not contradict itself.
+// TestNextTool_TheHistoryAgreesWithTheRunState — the step is skipped
+// in the run state and in the history: the run can end as done, and
+// the report does not contradict itself.
 func TestNextTool_TheHistoryAgreesWithTheRunState(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
@@ -795,18 +798,18 @@ func TestNextTool_TheHistoryAgreesWithTheRunState(t *testing.T) {
 		t.Fatalf("next: %v", err)
 	}
 
-	// The policy reads the last run of the step: it ended ok, so the
+	// The policy reads the last run of the step: it ended noop, so the
 	// run may end as done.
 	if err := r.checkFinish("done"); err != nil {
 		t.Errorf("the run may not end as done: %v", err)
 	}
-	// The report shows the done step, not the failed run.
+	// The report shows the skipped step, not the failed run.
 	report := svc.renderSituation(context.Background(), r)
 	if strings.Contains(report, "last outcome") {
 		t.Errorf("the report carries a verdict the step list already has:\n%s", report)
 	}
-	if !strings.Contains(report, doneSummary) {
-		t.Errorf("the report does not carry the step the agent declared done:\n%s", report)
+	if !strings.Contains(report, agentSkippedSummary) {
+		t.Errorf("the report does not carry the step the agent skipped:\n%s", report)
 	}
 }
 

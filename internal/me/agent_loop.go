@@ -137,6 +137,9 @@ func (s *Service) checkGate(ctx context.Context, r *run) error {
 	if !r.isPaused() {
 		return nil
 	}
+	// A wake that came before the run waited is stale: the pause it
+	// belonged to was taken back. It must not swallow the next pause.
+	r.drainUnpause()
 	if err := r.awaitUnpause(ctx); err != nil {
 		return err
 	}
@@ -149,6 +152,11 @@ func (s *Service) checkGate(ctx context.Context, r *run) error {
 // The workflow decides when it can: the step runs as it is, and no
 // model is asked. Where the workflow cannot decide, the agent does.
 func (s *Service) turn(ctx context.Context, r *run) (bool, error) {
+	// The operator's decision comes first: the plan then sees the state
+	// it left behind.
+	if err := s.applyDirective(ctx, r); err != nil {
+		return false, err
+	}
 	decision, err := s.plan(ctx, r)
 	if err != nil {
 		return false, err
@@ -227,9 +235,8 @@ func (s *Service) budgetSpent(r *run) bool {
 // pauseForBudget pauses the run because the step it is on used up its
 // budget.
 //
-// The run keeps its state and its place: the operator hands the
-// control back with `/me continue`, and the step's budget starts
-// over.
+// The run keeps its state and its place: the operator runs the step
+// again with `/me resume`, and the step's budget starts over.
 func (s *Service) pauseForBudget(ctx context.Context, r *run) {
 	stepID := r.budgetStep()
 	used, limit := r.stepUsage(stepID)
@@ -239,7 +246,7 @@ func (s *Service) pauseForBudget(ctx context.Context, r *run) {
 	s.persist(r)
 	s.publishState(ctx, r, "paused: "+reason)
 	s.refreshSessions(r)
-	if _, err := s.speak(ctx, r, pauseMark+"The run paused: "+reason+". Send /me continue to hand the control back.", ""); err != nil {
+	if _, err := s.speak(ctx, r, pauseMark+"The run paused: "+reason+". Send /me resume to run the step again, or /me next to skip it.", ""); err != nil {
 		s.logger.Warn("me: the pause could not be spoken", "run_id", r.id, "err", err)
 	}
 }
@@ -355,6 +362,11 @@ func (s *Service) goalMet(r *run) bool {
 func (s *Service) loopDeciderOnly(ctx context.Context, r *run) error {
 	for {
 		if err := s.checkGate(ctx, r); err != nil {
+			return err
+		}
+		// The operator's decision comes first: the plan then sees the
+		// state it left behind.
+		if err := s.applyDirective(ctx, r); err != nil {
 			return err
 		}
 		// A question from an earlier turn is still open.

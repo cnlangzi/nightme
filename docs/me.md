@@ -63,6 +63,7 @@ type Outcome struct {
 | `selected_by` | issue 是怎么选出来的（`auto` = `/gtw fix *` 自己挑的） |
 | `wake_after` | 队列里没有可选项时，个人 agent 多久之后再来（`"5m"`） |
 | `candidates` | `/gtw fix *` 看了多少个候选 issue（数字）；`/gtw back` 前缀没命中时列出候选的 worktree 分支（逗号分隔的分支名） |
+| `claimed` | 其中多少个因为已被认领（`nightme/wip`）而不在候选里 |
 | `blocked` | 其中多少个因为前置依赖没落地被跳过 |
 | `branch_exists` | 其中多少个因为本地已有同名分支被跳过 |
 | `pr_open` | 其中多少个因为已经开了 PR 被跳过 |

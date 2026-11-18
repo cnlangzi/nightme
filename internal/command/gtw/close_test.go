@@ -1081,7 +1081,7 @@ func TestRunClose_TransientStatError_PreservesState(t *testing.T) {
 		t.Errorf("pool after transient stat error = %d entries, want %d (preserved)", n, poolLenBefore)
 	}
 	// No git calls at all — the safety net short-circuits before
-	// step 4 (WorktreeRemove), and step 2.5 (close pinned ASes)
+	// step 4 (WorktreeRemove), and step 2.6 (close pinned ASes)
 	// did not run either (stat failure path is above both).
 	if len(rig.git.calls) != gitCallsBefore {
 		t.Errorf("git runner got %d new calls on transient stat error, want 0",

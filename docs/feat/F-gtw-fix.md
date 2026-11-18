@@ -173,7 +173,9 @@ AddBlockedBy(ctx context.Context, owner, repo string, id, blocker int) error
 
 **队列没有原子认领**：`ListIssues` 和贴 `nightme/wip` 之间有窗口，两台机器同时跑 `/gtw fix *` 可能挑到同一个 issue。这跟具名 fix 的既有窗口是同一类 —— label 是协作信号，不是锁（见 §3.2）。
 
-**没有可选项时**：回复卡片保留 `❌ No eligible assigned issue` 抬头和队列那一行。队列**一个候选都没有**的时候，卡片补一行说明队列为什么是空的：label catalog 检查刚建出 `nightme/assigned`（或者它本来就在），所以队列要等人工把这个 label 贴到某个 issue 上才有内容。队列里有候选但全被跳过时（阻塞 / 已有分支 / 已有 PR）不出现这一行 —— 卡片上写的是它们各自被跳过的原因，贴 label 解决不了那些原因。outcome 是 `failed`（`reason: no_candidate`）：命令被要求修一个 issue 却没能修，判成失败；`Data` 另外带 `wake_after: "5m"` 和 `candidates` / `blocked` / `branch_exists` / `pr_open` 四个计数。`wake_after` 是个人 agent 读的契约：它告诉 agent 过一会儿再来挑一次，而不是把这一轮当作结束。
+**没有可选项时**：回复卡片保留 `❌ No eligible assigned issue` 抬头和队列那一行。队列**一个候选都没有**的时候，卡片补一行说明队列为什么是空的：label catalog 检查刚建出 `nightme/assigned`（或者它本来就在），所以队列要等人工把这个 label 贴到某个 issue 上才有内容。队列里有候选但全被跳过时（阻塞 / 已有分支 / 已有 PR）不出现这一行 —— 卡片上写的是它们各自被跳过的原因，贴 label 解决不了那些原因。
+
+**队列里的 issue 全被认领时**：认领中的 issue 仍然带着 `nightme/assigned`，只是被 `nightme/wip` 挡在候选之外。队列这时是空的，但空的**原因**不是没人贴标签。卡片因此说的是「N 个已认领的 issue 不参与挑选」，`attach it to an issue` 那一行不出现 —— 标签已经贴在 issue 上了，再贴一个也换不来可选项。outcome 是 `failed`（`reason: no_candidate`）：命令被要求修一个 issue 却没能修，判成失败；`Data` 另外带 `wake_after: "5m"` 和 `candidates` / `claimed` / `blocked` / `branch_exists` / `pr_open` 五个计数。`wake_after` 是个人 agent 读的契约：它告诉 agent 过一会儿再来挑一次，而不是把这一轮当作结束。
 
 ---
 
@@ -258,15 +260,15 @@ Local 模式（`/gtw fix --name`）同样：branch 存在即失败，无决策�
 
 ```text
 ❌ Issue #42 is already claimed — label "nightme/wip" is present
-→ another /gtw fix holds this issue (or an earlier one never closed)
+→ a fix claimed this issue; the claim marker is never removed
 ↳ to release it: remove the nightme/wip label on the issue page
-↳ to tear down that fix's worktree: /cwd into it and run `/gtw close`
+↳ to tear down a live fix's worktree: /cwd into it and run `/gtw close`
 ```
 
 两条退出指引各自对应一种场景：
 
 - 解除 claim：在 issue 页面上删掉 `nightme/wip`。gtw 只加 label，不摘 label，所以这是唯一的解除路径。
-- 拆掉本地残留：把 chat `/cwd` 进那个 worktree 再跑 `/gtw close` —— 它删掉 worktree + branch，从 `cs.SelectedCwd()` 读 `.nightme/gtw.yml` 作为唯一真相来源。
+- 拆掉本地残留：那个 fix 还活着的时候，把 chat `/cwd` 进它的 worktree 再跑 `/gtw close` —— 它删掉 worktree + branch，从 `cs.SelectedCwd()` 读 `.nightme/gtw.yml` 作为唯一真相来源。fix 已经 close 掉的话，worktree 早就没了，只剩 label 要人工摘。
 
 **没有 `--force` 逃生舱**：`/gtw fix` 不接受 `--force` / `-f`（见 §2.2）。解除 claim 的路径（issue 页面删 label）明确存在。
 

@@ -144,6 +144,34 @@ func TestFixAuto_NoCandidate_ReportsFailure(t *testing.T) {
 	}
 }
 
+// TestFixAuto_ClaimedQueue_ReplyNamesTheClaim pins the reply of a
+// queue whose issues are all claimed: the issues still carry the
+// queue marker — the claim marker is what excludes them — so the
+// card must name the claim as the reason the queue is empty instead
+// of claiming the label is missing and asking for it again.
+func TestFixAuto_ClaimedQueue_ReplyNamesTheClaim(t *testing.T) {
+	rig := newFixRemoteRig(t)
+	rig.prov.SetListIssues([]*Issue{{
+		ID:        42,
+		Title:     "feat: the claimed one",
+		State:     "open",
+		Labels:    []string{LabelAssigned, LabelWIP},
+		CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	}})
+
+	if _, err := rig.driveAuto(t); err != nil {
+		t.Fatalf("RunFix: %v", err)
+	}
+
+	last := rig.rec.lastText()
+	if !strings.Contains(last, "are claimed") {
+		t.Errorf("reply must name the claim as the reason the queue is empty:\n%s", last)
+	}
+	if strings.Contains(last, "attach it to an issue") {
+		t.Errorf("reply must not ask for a label that is already attached:\n%s", last)
+	}
+}
+
 // TestFixAuto_SkipsBlockedCandidate pins the dependency gate in
 // the full flow: the blocked candidate is passed over and the
 // next one is worked on.
@@ -280,7 +308,11 @@ func TestFixAuto_ClaimedIssueIsNotOfferedAgain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListIssues: %v", err)
 	}
-	if cands := assignedCandidates(issues); len(cands) != 0 {
+	cands, claimed := assignedCandidates(issues)
+	if len(cands) != 0 {
 		t.Errorf("candidates = %+v, want none (the claimed issue is out of the queue)", cands)
+	}
+	if claimed != 1 {
+		t.Errorf("claimed = %d, want 1 (the issue carries the queue marker and a claim)", claimed)
 	}
 }

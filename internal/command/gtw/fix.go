@@ -202,10 +202,9 @@ func RunFix(
 //  7. WorktreeAdd (creates the durable worktree first; failure
 //     here surfaces the git error and bails without touching
 //     the label).
-//  8. AddIssueLabel(LabelWIP). The claimed issue carries both
-//     markers: the queue marker `nightme/assigned` stays and the
-//     claim marker `nightme/wip` goes on. Failure rolls back the
-//     worktree and branch via rollbackLabelStep.
+//  8. AddIssueLabel(LabelWIP). The claim marker goes on; a queue
+//     marker the issue carries is left alone. Failure rolls back
+//     the worktree and branch via rollbackLabelStep.
 //  9. SetSelectedCwd → WriteGTWYml (the yml is the cwd-scoped
 //     source of truth for hooks, /gtw close, and recovery).
 //  10. Render success card.
@@ -417,9 +416,9 @@ func runFixRemote(
 	if issueHasLabel(issue, LabelWIP) {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, fmt.Sprintf(
 			"❌ Issue #%d is already claimed — label %q is present\n"+
-				"→ another /gtw fix holds this issue (or an earlier one never closed)\n"+
+				"→ a fix claimed this issue; the claim marker is never removed\n"+
 				"↳ to release it: remove the %s label on the issue page\n"+
-				"↳ to tear down that fix's worktree: /cwd into it and run `/gtw close`",
+				"↳ to tear down a live fix's worktree: /cwd into it and run `/gtw close`",
 			issueID, LabelWIP, LabelWIP),
 			command.FailedOutcome("issue_claimed", "the issue is already claimed by another fix")), nil
 	}
@@ -534,9 +533,9 @@ func runFixRemote(
 			command.FailedOutcome("label_error", "the issue could not be labelled")), nil
 	}
 
-	// The queue marker stays: the pick filter excludes issues by
-	// `nightme/wip`, so the claim alone keeps the issue out of the
-	// next pick.
+	// A queue marker the issue carries stays: the pick filter
+	// excludes issues by `nightme/wip`, so the claim alone keeps the
+	// issue out of the next pick.
 
 	// --- switch cwd + write context + render + dispatch ----------
 	return completeFixAndDispatch(ctx, cs, deps, chatID, messageID,

@@ -212,11 +212,6 @@ func RunClose(
 			command.FailedOutcome("bad_state", "the gtw state file is malformed")), nil
 	}
 
-	// --- step 2.5: the claim marker stays -------------------------
-	// Nothing lifts `nightme/wip` from the issue: a closed issue
-	// keeps its claim, which is what keeps it out of the automatic
-	// queue.
-
 	// --- step 2.6: close ASes pinned to the about-to-be-gone worktree ---
 	// Every AgentSession whose Cwd == c.Worktree is orphaned the
 	// moment `git worktree remove` (step 4) succeeds — its cwd

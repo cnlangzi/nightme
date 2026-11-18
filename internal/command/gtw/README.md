@@ -523,6 +523,16 @@ agent 没写这一节时,卡片上方会带一行 ⚠️ 提醒 reviewer 拿不�
 上才有内容。队列里本来就有候选、只是全被跳过时(阻塞 / 已有分支 / 已有 PR),
 这一行不出现 —— 它讲的是"队列空了",而那种情况下队列没空。
 
+队列里的 issue 全被认领(`nightme/wip`)时,标签是在用的,卡片说的是这件事:
+
+```
+❌ No eligible assigned issue
+→ queue: empty — 2 assigned issue(s) are claimed (`nightme/wip`) and are not offered
+↳ come back in 5m for another pick.
+```
+
+这种情况下"贴标签"那一行不出现 —— 标签已经贴在 issue 上了。
+
 平台不暴露 issue 关系图时,队列只按年龄排序,卡片里明说依赖顺序没有生效:
 
 ```

@@ -448,10 +448,13 @@ func (s *Service) workflowsReason() string {
 }
 
 // failureLines renders the failures of the directory, one per line.
+//
+// A failure carries every problem its file has, one per line: the
+// reason is one line, so the lines of a failure are joined.
 func failureLines(failures []error) []string {
 	out := make([]string, 0, len(failures))
 	for _, err := range failures {
-		out = append(out, err.Error())
+		out = append(out, strings.Join(strings.Split(err.Error(), "\n"), "; "))
 	}
 	return out
 }

@@ -264,7 +264,7 @@ func RunClose(
 	// wherever the close ends. The sync card that follows is a
 	// separate step and does not repeat it.
 	withWarning := func(body string) string {
-		return prependWarning(labelWarning, body)
+		return prependWarning(body, labelWarning)
 	}
 
 	// --- step 2.6: close ASes pinned to the about-to-be-gone worktree ---
@@ -554,10 +554,10 @@ func removeWIPLabel(
 
 	if rmErr := prov.RemoveIssueLabel(ctx, owner, repo, c.Issue, LabelWIP); rmErr != nil {
 		reply(ctx, cs.Emitter(), chatID, messageID,
-			prependWarning(warning, fmt.Sprintf("❌ could not remove label %q from issue #%d: %v\n"+
+			prependWarning(fmt.Sprintf("❌ could not remove label %q from issue #%d: %v\n"+
 				"worktree and branch are left intact — retry /gtw close once "+
 				"the platform call succeeds (auth / network / repo moved).",
-				LabelWIP, c.Issue, rmErr)))
+				LabelWIP, c.Issue, rmErr), warning))
 		return false, nil, "", "", true, ""
 	}
 

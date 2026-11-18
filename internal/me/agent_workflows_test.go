@@ -337,10 +337,7 @@ jobs:
 	}
 	waitForState(t, svc.statePath(runID))
 
-	raw, err := os.ReadFile(svc.statePath(runID))
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
+	raw := readStateFile(t, svc.statePath(runID))
 	var state persistedRun
 	if err := json.Unmarshal(raw, &state); err != nil {
 		t.Fatalf("decode: %v", err)

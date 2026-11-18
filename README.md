@@ -624,6 +624,21 @@ A step carries exactly one kind:
 | `continue-on-error` | Whether the chain continues when the step fails. |
 | `note` | Why the step is there, and which fixes the owner uses for it. It is the description the decision model reads. |
 | `final` | The step cleans up after the round: it runs when the round ends, however the round ends. A step marked `final: true` runs in the place of the steps a round that ended early cut short. |
+| `agents` | The agents the step runs, in order. Each entry has a `mode` and the `names` it applies to. |
+
+A step that names agents runs them in order and falls through to the next one
+when an attempt breaks. The `args` mode puts the agent on the command line
+(`/review -a omp`), the `use` mode switches the chat's own agent for the length
+of the attempt — the operator's `/use` choice is left alone, but their own
+messages reach the switched agent while the attempt runs.
+
+```yaml
+- id: review
+  message: "/review"
+  agents:
+    - mode: use
+      names: [omp, claude]
+```
 
 The budget of the agent is one number for every step and every round, set by
 `me.max_judgments`.

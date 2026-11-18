@@ -15,6 +15,7 @@ package runtime
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"path/filepath"
 	"time"
@@ -61,6 +62,7 @@ func buildPersonalAgent(cfg *config.Config, chs []channel.Channel, op *operator,
 		Shell:         me.ExecShell{},
 		Git:           gtw.ExecGitRunner{},
 		Cwd:           chatCwd{},
+		AgentSwitcher: chatAgentSwitcher{},
 	})
 	svc.SetLogger(logger)
 	return svc
@@ -166,4 +168,17 @@ func (chatCwd) Cwd(chatID string) string {
 		return ""
 	}
 	return cs.SelectedCwd()
+}
+
+// chatAgentSwitcher switches the agent a chat works with, for the
+// length of one attempt.
+type chatAgentSwitcher struct{}
+
+// SwitchAgent implements me.AgentSwitcher.
+func (chatAgentSwitcher) SwitchAgent(chatID, agent string) (func(), error) {
+	cs := findChatSession(chatID)
+	if cs == nil {
+		return nil, fmt.Errorf("no chat session owns %q", chatID)
+	}
+	return cs.SwitchAgentTransient(agent), nil
 }

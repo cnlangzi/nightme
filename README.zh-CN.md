@@ -550,6 +550,20 @@ jobs:
 | `continue-on-error` | 这个 step 失败时链条是否继续。 |
 | `note` | 这个 step 为什么在这儿，owner 平时怎么修它。它是决策模型读的那段描述。 |
 | `final` | 这个 step 负责收尾：这一轮怎么结束它都跑。标了 `final: true` 的 step 在提前结束的一轮里顶上被跳过的那几步。 |
+| `agents` | 这个 step 依次用哪些 agent 干活。每一项带一个 `mode` 和它适用的 `names`。 |
+
+写了 agent 的 step 按顺序一个个试，某一次坏了就换下一个。`args` 模式把 agent
+写在命令行上（`/review -a omp`），`use` 模式在这一次尝试期间把 chat 自己的 agent
+换掉——owner 用 `/use` 选的那个不动，但这期间 owner 自己发的消息会走到换上去的
+那个 agent。
+
+```yaml
+- id: review
+  message: "/review"
+  agents:
+    - mode: use
+      names: [omp, claude]
+```
 
 agent 的预算是一个数字，对每个 step、每一轮都一样，由 `me.max_judgments` 定。
 

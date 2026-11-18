@@ -967,7 +967,8 @@ func (f *Factory) runBack(ctx context.Context, _ command.RuntimeServices, cs *ch
 	}
 
 	// --- /gtw back <branch>: enter the worktree of that branch --
-	// Inverse direction: cwd must BE the repo root
+	// Inverse direction: cwd must BE a root of the repository —
+	// the main checkout or any worktree of it
 	// (RunBackToWorktree's own gate refuses otherwise). Hooks
 	// reuse cfg.Back.Hooks — the user's "before / after back"
 	// rules apply symmetrically to both directions.

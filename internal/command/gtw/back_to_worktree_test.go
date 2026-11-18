@@ -1,6 +1,7 @@
 package gtw
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -77,6 +78,31 @@ func settledOutcome(rec *closeTestRecCh) *messages.Outcome {
 	return nil
 }
 
+// replyTexts returns the text of every reply the recorder captured —
+// the cards the user read, in order.
+func replyTexts(rec *closeTestRecCh) []string {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	var out []string
+	for _, m := range rec.sends {
+		if m.Kind == messages.OutReply {
+			out = append(out, m.Text)
+		}
+	}
+	return out
+}
+
+// ymlBytes reads the state file of a worktree so a test can compare
+// it before and after a jump.
+func ymlBytes(t *testing.T, wt string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(gtwYmlPath(wt))
+	if err != nil {
+		t.Fatalf("read %s: %v", gtwYmlPath(wt), err)
+	}
+	return b
+}
+
 // TestRunBackToWorktree_HappyPath: yml exists in the target
 // worktree → cmd moves cwd into the worktree, yml is left
 // alone ("preserved"), no destructive git calls fire.
@@ -133,6 +159,11 @@ func TestRunBackToWorktree_HappyPath(t *testing.T) {
 	// The card names the branch that was entered.
 	if !strings.Contains(card, "→ branch: fix-42") {
 		t.Errorf("card missing the branch row:\n%s", card)
+	}
+	// A jump out of the main repo has no "from" row — the card is
+	// the one the main repo always got.
+	if strings.Contains(card, "→ from:") {
+		t.Errorf("card must not carry a 'from' row when the chat sat at the main repo:\n%s", card)
 	}
 
 	// No destructive git calls.
@@ -626,17 +657,20 @@ func TestRunBackToWorktree_NonWorktreeDirectoryIsNeverEntered(t *testing.T) {
 	}
 }
 
-// TestRunBackToWorktree_RejectsWhenCwdIsALinkedWorktreeRoot: the
-// chat sits exactly at a linked worktree's root. Real git's
+// TestRunBackToWorktree_JumpsFromALinkedWorktreeRoot: the chat
+// sits exactly at a linked worktree's root. Real git's
 // `rev-parse --show-toplevel` reports THAT worktree's own root, so
-// a gate that compared the cwd against it would let the command
-// through — and the main checkout would become a candidate. The
-// command must refuse and leave the cwd alone.
-func TestRunBackToWorktree_RejectsWhenCwdIsALinkedWorktreeRoot(t *testing.T) {
+// the gate must read the worktree listing instead — the primary
+// checkout stays the listing's first record, and the jump lands on
+// the branch the user named.
+func TestRunBackToWorktree_JumpsFromALinkedWorktreeRoot(t *testing.T) {
 	repoRoot := t.TempDir()
 	wt := WorktreePath(repoRoot, "other")
-	if err := os.MkdirAll(wt, 0o755); err != nil {
-		t.Fatalf("mkdir wt: %v", err)
+	wtTarget := WorktreePath(repoRoot, "42-feat")
+	for _, d := range []string{wt, wtTarget} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("mkdir wt: %v", err)
+		}
 	}
 
 	rig := newCloseRig(t)
@@ -645,27 +679,30 @@ func TestRunBackToWorktree_RejectsWhenCwdIsALinkedWorktreeRoot(t *testing.T) {
 	rig.git.revParseShowToplevelByDir = map[string]string{wt: wt}
 	rig.git.revParseShowToplevel = repoRoot
 	rig.git.worktreeListPorcelain =
-		porcelainFor(repoRoot, "main") + "\n" + porcelainFor(wt, "other")
+		porcelainFor(repoRoot, "main") + "\n" +
+			porcelainFor(wt, "other") + "\n" +
+			porcelainFor(wtTarget, "42-feat")
 
-	if err := rig.cs.SetSelectedCwd(wt); err != nil {
-		t.Fatalf("SetSelectedCwd(%s): %v", wt, err)
-	}
+	seedFix(t, rig, wtTarget, repoRoot)
+	seedFix(t, rig, wt, repoRoot) // leaves SelectedCwd at the linked worktree
 
-	card, outcome := runBack(t, rig, "main")
+	card, outcome := runBack(t, rig, "42-f")
 	if outcome == nil {
 		t.Fatalf("no settled outcome: the command reported nothing")
 	}
-	if outcome.Status != messages.OutcomeFailed {
-		t.Errorf("outcome status = %s, want %s", outcome.Status, messages.OutcomeFailed)
+	if outcome.Status != messages.OutcomeOK {
+		t.Errorf("outcome status = %s, want %s", outcome.Status, messages.OutcomeOK)
 	}
-	if outcome.Data["reason"] != "wrong_cwd" {
-		t.Errorf("outcome data[reason] = %q, want %q", outcome.Data["reason"], "wrong_cwd")
+	if got := rig.cs.SelectedCwd(); got != wtTarget {
+		t.Errorf("SelectedCwd = %q, want %q", got, wtTarget)
 	}
-	if got := rig.cs.SelectedCwd(); got != wt {
-		t.Errorf("SelectedCwd must not move on rejection; got %q, want %q", got, wt)
+	// The primary checkout is the listing's first record — not the
+	// root `rev-parse` reports from inside the linked worktree.
+	if got := outcome.Data["repo_root"]; got != repoRoot {
+		t.Errorf("outcome data[repo_root] = %q, want %q", got, repoRoot)
 	}
-	if !strings.Contains(card, "main repo root") {
-		t.Errorf("reply should explain the cwd-is-not-root constraint:\n%s", card)
+	if !strings.Contains(card, fmt.Sprintf("→ from: %s (preserved)", wt)) {
+		t.Errorf("card should name the worktree the chat came from:\n%s", card)
 	}
 }
 
@@ -709,45 +746,422 @@ func TestRunBackToWorktree_ForeignWorktreeGetsNoOwnershipToken(t *testing.T) {
 	}
 }
 
-// TestRunBackToWorktree_RejectsWhenCwdIsWorktree: the gate is
-// the symmetric counterpart of RunBack's gate. If the chat's
-// cwd is itself inside a worktree (not the repo root), refuse
-// with the "run /gtw back first" hint.
-func TestRunBackToWorktree_RejectsWhenCwdIsWorktree(t *testing.T) {
+// TestRunBackToWorktree_JumpsFromAWorktreeRoot: the chat sits at
+// the root of a worktree and names the branch of another one — the
+// command moves the chat straight there. The worktree it left keeps
+// its directory, its branch and its state file.
+func TestRunBackToWorktree_JumpsFromAWorktreeRoot(t *testing.T) {
 	repoRoot := t.TempDir()
-	wtOther := WorktreePath(repoRoot, "other")
-	if err := os.MkdirAll(wtOther, 0o755); err != nil {
+	wtA := WorktreePath(repoRoot, "other")
+	wtB := WorktreePath(repoRoot, "42-feat")
+	for _, d := range []string{wtA, wtB} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("mkdir wt: %v", err)
+		}
+	}
+
+	rig := newCloseRig(t)
+	rig.git.revParseShowToplevel = repoRoot
+	rig.git.worktreeListPorcelain =
+		porcelainFor(repoRoot, "main") + "\n" +
+			porcelainFor(wtA, "other") + "\n" +
+			porcelainFor(wtB, "42-feat")
+
+	seedFix(t, rig, wtB, repoRoot)
+	seedFix(t, rig, wtA, repoRoot) // leaves SelectedCwd at A
+	ymlA := ymlBytes(t, wtA)
+	ymlB := ymlBytes(t, wtB)
+
+	card, outcome := runBack(t, rig, "42-f")
+	if outcome == nil {
+		t.Fatalf("no settled outcome: the command reported nothing")
+	}
+	if outcome.Status != messages.OutcomeOK {
+		t.Errorf("outcome status = %s, want %s", outcome.Status, messages.OutcomeOK)
+	}
+	if got := outcome.Data["worktree"]; got != wtB {
+		t.Errorf("outcome data[worktree] = %q, want %q", got, wtB)
+	}
+	if got := outcome.Data["branch"]; got != "42-feat" {
+		t.Errorf("outcome data[branch] = %q, want %q", got, "42-feat")
+	}
+	if got := outcome.Data["repo_root"]; got != repoRoot {
+		t.Errorf("outcome data[repo_root] = %q, want %q", got, repoRoot)
+	}
+	if got := rig.cs.SelectedCwd(); got != wtB {
+		t.Errorf("SelectedCwd = %q, want %q", got, wtB)
+	}
+
+	if !strings.HasPrefix(card, "✅ back into") {
+		t.Errorf("card should open with the success headline:\n%s", card)
+	}
+	if !strings.Contains(card, wtB) {
+		t.Errorf("card should name the target worktree:\n%s", card)
+	}
+	if !strings.Contains(card, "→ branch: 42-feat") {
+		t.Errorf("card should name the target branch:\n%s", card)
+	}
+	if !strings.Contains(card, fmt.Sprintf("→ from: %s (preserved)", wtA)) {
+		t.Errorf("card should name the worktree the chat came from:\n%s", card)
+	}
+
+	// The worktree the chat left is untouched: directory, state
+	// file, content.
+	if _, err := os.Stat(wtA); err != nil {
+		t.Errorf("the worktree the chat left is gone: %v", err)
+	}
+	if got := ymlBytes(t, wtA); !bytes.Equal(got, ymlA) {
+		t.Errorf("the worktree the chat left had its yml rewritten:\ngot %s\nwant %s", got, ymlA)
+	}
+	if got := ymlBytes(t, wtB); !bytes.Equal(got, ymlB) {
+		t.Errorf("the target worktree had its yml rewritten:\ngot %s\nwant %s", got, ymlB)
+	}
+
+	// One card: a jump does not sync the default branch.
+	if replies := replyTexts(rig.rec); len(replies) != 1 {
+		t.Errorf("the command sent %d replies, want 1:\n%v", len(replies), replies)
+	}
+
+	// No destructive git calls.
+	for _, args := range rig.git.calls {
+		if len(args) >= 2 && args[0] == "worktree" && args[1] == "remove" {
+			t.Errorf("back-to-worktree ran worktree remove: %v", args)
+		}
+		if len(args) >= 3 && args[0] == "branch" && args[1] == "-D" {
+			t.Errorf("back-to-worktree ran branch -D: %v", args)
+		}
+	}
+}
+
+// TestRunBackToWorktree_SelfJumpKeepsCwd: the branch the user
+// names is the branch the chat's own worktree holds — there is
+// nowhere to jump to. The command says so and leaves the cwd where
+// it is.
+func TestRunBackToWorktree_SelfJumpKeepsCwd(t *testing.T) {
+	repoRoot := t.TempDir()
+	wtA := WorktreePath(repoRoot, "other")
+	wtB := WorktreePath(repoRoot, "42-feat")
+	for _, d := range []string{wtA, wtB} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("mkdir wt: %v", err)
+		}
+	}
+
+	rig := newCloseRig(t)
+	rig.git.revParseShowToplevel = repoRoot
+	rig.git.worktreeListPorcelain =
+		porcelainFor(repoRoot, "main") + "\n" +
+			porcelainFor(wtA, "other") + "\n" +
+			porcelainFor(wtB, "42-feat")
+
+	seedFix(t, rig, wtA, repoRoot) // leaves SelectedCwd at A
+	ymlA := ymlBytes(t, wtA)
+
+	card, outcome := runBack(t, rig, "other")
+	if outcome == nil {
+		t.Fatalf("no settled outcome: the command reported nothing")
+	}
+	if outcome.Status != messages.OutcomeOK {
+		t.Errorf("outcome status = %s, want %s", outcome.Status, messages.OutcomeOK)
+	}
+	if got := outcome.Data["reason"]; got != "already_in_worktree" {
+		t.Errorf("outcome data[reason] = %q, want %q", got, "already_in_worktree")
+	}
+	if got := outcome.Data["worktree"]; got != wtA {
+		t.Errorf("outcome data[worktree] = %q, want %q", got, wtA)
+	}
+	if got := outcome.Data["branch"]; got != "other" {
+		t.Errorf("outcome data[branch] = %q, want %q", got, "other")
+	}
+	if got := rig.cs.SelectedCwd(); got != wtA {
+		t.Errorf("SelectedCwd must not move on a self-jump; got %q, want %q", got, wtA)
+	}
+
+	if !strings.HasPrefix(card, "ℹ️") {
+		t.Errorf("card should open with the info marker:\n%s", card)
+	}
+	if strings.Contains(card, "back into") {
+		t.Errorf("a self-jump must not read as an entry:\n%s", card)
+	}
+	if !strings.Contains(card, "other") {
+		t.Errorf("card should name the branch:\n%s", card)
+	}
+	if !strings.Contains(card, wtA) {
+		t.Errorf("card should name the worktree:\n%s", card)
+	}
+	if !strings.Contains(card, ".nightme/gtw.yml") {
+		t.Errorf("card should carry the yml status line:\n%s", card)
+	}
+	if got := ymlBytes(t, wtA); !bytes.Equal(got, ymlA) {
+		t.Errorf("the yml must be left alone on a self-jump:\ngot %s\nwant %s", got, ymlA)
+	}
+}
+
+// TestRunBackToWorktree_SelfJumpRepairsMissingYml: the chat sits
+// in an owned worktree whose yml went missing, and names that
+// worktree's own branch. There is no jump to make, but the yml is
+// still repaired — this is the only path that heals an owned
+// worktree without a `/cwd`.
+func TestRunBackToWorktree_SelfJumpRepairsMissingYml(t *testing.T) {
+	repoRoot := t.TempDir()
+	wtA := WorktreePath(repoRoot, "other")
+	if err := os.MkdirAll(wtA, 0o755); err != nil {
 		t.Fatalf("mkdir wt: %v", err)
 	}
 
 	rig := newCloseRig(t)
-	// rev-parse on wtOther should report the same repoRoot —
-	// that is precisely what tells the handler we're inside a
-	// worktree (cwd != repoRoot).
 	rig.git.revParseShowToplevel = repoRoot
 	rig.git.worktreeListPorcelain =
-		porcelainFor(repoRoot, "main") + "\n" + porcelainFor(wtOther, "other")
+		porcelainFor(repoRoot, "main") + "\n" + porcelainFor(wtA, "other")
 
-	if err := rig.cs.SetSelectedCwd(wtOther); err != nil {
-		t.Fatalf("SetSelectedCwd(%s): %v", wtOther, err)
+	// No seedFix — the yml must be missing.
+	if err := rig.cs.SetSelectedCwd(wtA); err != nil {
+		t.Fatalf("SetSelectedCwd(%s): %v", wtA, err)
+	}
+	if _, err := os.Stat(gtwYmlPath(wtA)); err == nil {
+		t.Fatalf("precondition: yml must not exist yet")
 	}
 
-	res, err := RunBackToWorktree(context.Background(), rig.cs, rig.deps, "chat-btw", "msg-1", "main")
+	card, outcome := runBack(t, rig, "other")
+	if outcome == nil {
+		t.Fatalf("no settled outcome: the command reported nothing")
+	}
+	if outcome.Status != messages.OutcomeOK {
+		t.Errorf("outcome status = %s, want %s", outcome.Status, messages.OutcomeOK)
+	}
+	if got := outcome.Data["reason"]; got != "already_in_worktree" {
+		t.Errorf("outcome data[reason] = %q, want %q", got, "already_in_worktree")
+	}
+	if got := rig.cs.SelectedCwd(); got != wtA {
+		t.Errorf("SelectedCwd must not move on a self-jump; got %q, want %q", got, wtA)
+	}
+
+	c, err := ReadGTWYml(wtA)
 	if err != nil {
-		t.Fatalf("RunBackToWorktree: %v", err)
+		t.Fatalf("ReadGTWYml after repair: %v", err)
 	}
-	if res == nil || !res.Consumed {
-		t.Fatalf("Result = %+v, want Consumed=true", res)
+	if c.Mode != ModeLocal {
+		t.Errorf("repaired yml Mode = %q, want %q", c.Mode, ModeLocal)
 	}
-	if got := rig.cs.SelectedCwd(); got != wtOther {
-		t.Errorf("SelectedCwd must not move on rejection; got %q, want %q", got, wtOther)
+	if c.Branch != "other" {
+		t.Errorf("repaired yml Branch = %q, want %q (from the worktree listing)",
+			c.Branch, "other")
 	}
-	card := rig.rec.lastText()
-	if !strings.Contains(card, "main repo root") {
-		t.Errorf("reply should explain the cwd-is-not-root constraint:\n%s", card)
+	if c.RepoRoot != repoRoot {
+		t.Errorf("repaired yml RepoRoot = %q, want %q", c.RepoRoot, repoRoot)
 	}
-	if !strings.Contains(card, "/gtw back") {
-		t.Errorf("reply should suggest /gtw back (no arg) first:\n%s", card)
+
+	if !strings.HasPrefix(card, "ℹ️") {
+		t.Errorf("card should open with the info marker:\n%s", card)
+	}
+	if !strings.Contains(card, "repaired") {
+		t.Errorf("card should report the repair:\n%s", card)
+	}
+}
+
+// TestRunBackToWorktree_RepairsMissingYmlInTargetFromWorktree:
+// the chat jumps out of worktree A into worktree B, and B has no
+// yml yet. The repair fills it in — with the primary checkout as
+// RepoRoot, not the worktree the chat started from.
+func TestRunBackToWorktree_RepairsMissingYmlInTargetFromWorktree(t *testing.T) {
+	repoRoot := t.TempDir()
+	wtA := WorktreePath(repoRoot, "other")
+	wtB := WorktreePath(repoRoot, "42-feat")
+	for _, d := range []string{wtA, wtB} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("mkdir wt: %v", err)
+		}
+	}
+
+	rig := newCloseRig(t)
+	rig.git.revParseShowToplevel = repoRoot
+	rig.git.worktreeListPorcelain =
+		porcelainFor(repoRoot, "main") + "\n" +
+			porcelainFor(wtA, "other") + "\n" +
+			porcelainFor(wtB, "42-feat")
+
+	seedFix(t, rig, wtA, repoRoot) // leaves SelectedCwd at A
+	ymlA := ymlBytes(t, wtA)
+
+	card, outcome := runBack(t, rig, "42-f")
+	if outcome == nil {
+		t.Fatalf("no settled outcome: the command reported nothing")
+	}
+	if outcome.Status != messages.OutcomeOK {
+		t.Errorf("outcome status = %s, want %s", outcome.Status, messages.OutcomeOK)
+	}
+	if got := rig.cs.SelectedCwd(); got != wtB {
+		t.Errorf("SelectedCwd = %q, want %q", got, wtB)
+	}
+
+	c, err := ReadGTWYml(wtB)
+	if err != nil {
+		t.Fatalf("ReadGTWYml after repair: %v", err)
+	}
+	if c.Mode != ModeLocal {
+		t.Errorf("repaired yml Mode = %q, want %q", c.Mode, ModeLocal)
+	}
+	if c.Branch != "42-feat" {
+		t.Errorf("repaired yml Branch = %q, want %q (from the worktree listing)",
+			c.Branch, "42-feat")
+	}
+	if c.RepoRoot != repoRoot {
+		t.Errorf("repaired yml RepoRoot = %q, want %q (the primary checkout)",
+			c.RepoRoot, repoRoot)
+	}
+	if got := ymlBytes(t, wtA); !bytes.Equal(got, ymlA) {
+		t.Errorf("the worktree the chat left had its yml rewritten:\ngot %s\nwant %s", got, ymlA)
+	}
+	if !strings.Contains(card, "repaired") {
+		t.Errorf("card should report the repair:\n%s", card)
+	}
+}
+
+// TestRunBackToWorktree_JumpsFromForeignWorktree: a worktree the
+// user made by hand is a legal departure point too. The jump works
+// — and nightme writes nothing into the worktree it left.
+func TestRunBackToWorktree_JumpsFromForeignWorktree(t *testing.T) {
+	repoRoot := t.TempDir()
+	wtB := WorktreePath(repoRoot, "42-feat")
+	if err := os.MkdirAll(wtB, 0o755); err != nil {
+		t.Fatalf("mkdir wt: %v", err)
+	}
+	// Outside <repo>.nightme/ — the user made this one.
+	foreign := filepath.Join(t.TempDir(), "scratch")
+	if err := os.MkdirAll(foreign, 0o755); err != nil {
+		t.Fatalf("mkdir wt: %v", err)
+	}
+
+	rig := newCloseRig(t)
+	rig.git.revParseShowToplevel = repoRoot
+	rig.git.worktreeListPorcelain =
+		porcelainFor(repoRoot, "main") + "\n" +
+			porcelainFor(foreign, "scratch") + "\n" +
+			porcelainFor(wtB, "42-feat")
+
+	seedFix(t, rig, wtB, repoRoot)
+	if err := rig.cs.SetSelectedCwd(foreign); err != nil {
+		t.Fatalf("SetSelectedCwd(%s): %v", foreign, err)
+	}
+
+	card, outcome := runBack(t, rig, "42-f")
+	if outcome == nil {
+		t.Fatalf("no settled outcome: the command reported nothing")
+	}
+	if outcome.Status != messages.OutcomeOK {
+		t.Errorf("outcome status = %s, want %s", outcome.Status, messages.OutcomeOK)
+	}
+	if got := rig.cs.SelectedCwd(); got != wtB {
+		t.Errorf("SelectedCwd = %q, want %q", got, wtB)
+	}
+	if !strings.Contains(card, fmt.Sprintf("→ from: %s (preserved)", foreign)) {
+		t.Errorf("card should name the worktree the chat came from:\n%s", card)
+	}
+	// Nightme claims no worktree it did not create.
+	if _, err := os.Stat(gtwYmlPath(foreign)); err == nil {
+		t.Errorf("no yml must be written into a worktree nightme did not create")
+	}
+}
+
+// TestRunBackToWorktree_RejectsSubdirectoryCwd: a cwd inside the
+// main repo or inside a worktree — but not at its root — is not a
+// root the command can work from.
+func TestRunBackToWorktree_RejectsSubdirectoryCwd(t *testing.T) {
+	repoRoot := t.TempDir()
+	wt := WorktreePath(repoRoot, "other")
+	if err := os.MkdirAll(wt, 0o755); err != nil {
+		t.Fatalf("mkdir wt: %v", err)
+	}
+	inRepo := filepath.Join(repoRoot, "internal")
+	inWorktree := filepath.Join(wt, "internal")
+	for _, d := range []string{inRepo, inWorktree} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("mkdir subdir: %v", err)
+		}
+	}
+
+	for _, tc := range []struct {
+		name string
+		cwd  string
+	}{
+		{"main repo subdirectory", inRepo},
+		{"worktree subdirectory", inWorktree},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rig := newCloseRig(t)
+			rig.git.revParseShowToplevel = repoRoot
+			rig.git.worktreeListPorcelain =
+				porcelainFor(repoRoot, "main") + "\n" + porcelainFor(wt, "other")
+
+			if err := rig.cs.SetSelectedCwd(tc.cwd); err != nil {
+				t.Fatalf("SetSelectedCwd(%s): %v", tc.cwd, err)
+			}
+
+			card, outcome := runBack(t, rig, "other")
+			if outcome == nil {
+				t.Fatalf("no settled outcome: the command reported nothing")
+			}
+			if outcome.Status != messages.OutcomeFailed {
+				t.Errorf("outcome status = %s, want %s", outcome.Status, messages.OutcomeFailed)
+			}
+			if got := outcome.Data["reason"]; got != "wrong_cwd" {
+				t.Errorf("outcome data[reason] = %q, want %q", got, "wrong_cwd")
+			}
+			if got := rig.cs.SelectedCwd(); got != tc.cwd {
+				t.Errorf("SelectedCwd must not move on rejection; got %q, want %q", got, tc.cwd)
+			}
+			if !strings.Contains(card, "main repo root or a worktree root") {
+				t.Errorf("reply should name the legal cwds:\n%s", card)
+			}
+			if strings.Contains(card, "run `/gtw back` (no arg) first") {
+				t.Errorf("reply must not send the user back to the main repo first:\n%s", card)
+			}
+		})
+	}
+}
+
+// TestRunBackToWorktree_NoMatchFromWorktreeHintsMainRepo: from a
+// worktree, a prefix that matches no branch names the branches
+// there are and points at the main repo as the next step.
+func TestRunBackToWorktree_NoMatchFromWorktreeHintsMainRepo(t *testing.T) {
+	repoRoot := t.TempDir()
+	wtA := WorktreePath(repoRoot, "other")
+	wtB := WorktreePath(repoRoot, "42-feat")
+	for _, d := range []string{wtA, wtB} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("mkdir wt: %v", err)
+		}
+	}
+
+	rig := newCloseRig(t)
+	rig.git.revParseShowToplevel = repoRoot
+	rig.git.worktreeListPorcelain =
+		porcelainFor(repoRoot, "main") + "\n" +
+			porcelainFor(wtA, "other") + "\n" +
+			porcelainFor(wtB, "42-feat")
+
+	seedFix(t, rig, wtA, repoRoot) // leaves SelectedCwd at A
+
+	card, outcome := runBack(t, rig, "no-such-prefix")
+	if outcome == nil {
+		t.Fatalf("no settled outcome: the command reported nothing")
+	}
+	if outcome.Status != messages.OutcomeFailed {
+		t.Errorf("outcome status = %s, want %s", outcome.Status, messages.OutcomeFailed)
+	}
+	if got := outcome.Data["reason"]; got != "not_found" {
+		t.Errorf("outcome data[reason] = %q, want %q", got, "not_found")
+	}
+	if got := rig.cs.SelectedCwd(); got != wtA {
+		t.Errorf("SelectedCwd must not move on failure; got %q, want %q", got, wtA)
+	}
+	for _, want := range []string{"other", "42-feat"} {
+		if !strings.Contains(card, want) {
+			t.Errorf("reply should name %q:\n%s", want, card)
+		}
+	}
+	if !strings.Contains(card, "hint: run `/gtw back` (no arg) to return to the main repo") {
+		t.Errorf("reply should point at the main repo:\n%s", card)
 	}
 }
 

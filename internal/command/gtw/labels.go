@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 )
 
@@ -160,6 +161,19 @@ func prependWarning(warning, body string) string {
 		return body
 	}
 	return warning + "\n" + body
+}
+
+// warningBlock joins the warning lines into one block, in the order
+// they are given. Empty lines are dropped, so a caller can pass the
+// warnings it has without checking each one.
+func warningBlock(lines ...string) string {
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if line != "" {
+			kept = append(kept, line)
+		}
+	}
+	return strings.Join(kept, "\n")
 }
 
 // staleCatalogNote explains why attaching a label can fail even

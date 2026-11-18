@@ -438,7 +438,8 @@ repos:
 
 语言值是自由文本——`简体中文`、`zh-CN`、`Simplified Chinese` 都可以。结构化
 标记不论什么语言都保持英文：`## Summary by NightMe`
-标题、PR 分类标签、`Risk:` 行、`Issue: #<id>` 与 `Closes #N` trailer、
+标题、PR 分类标签（含 `Deviations from Issue #<id>:`）、`Risk:` 行、
+`Issue: #<id>` 与 `Closes #N` trailer、
 Conventional Commits 的 type 关键词。issue 标题保持英文 / ASCII——分支名是从它
 派生的。
 

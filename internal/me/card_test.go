@@ -814,25 +814,39 @@ func TestTheTotalsOfTheRunSurviveARestart(t *testing.T) {
 		Decisions: roundDecisions{System1: 6, Operator: 2},
 		Usage:     llm.Usage{InputTokens: 6000, OutputTokens: 1000},
 	}}
-	r.roundCounters = roundDecisions{System1: 1}
+	r.system1Decisions = 6
+	r.system2Decisions = 3
+	r.operatorDecisions = 2
+	r.roundAnswers = 1
+	r.roundUsage = llm.Usage{InputTokens: 100, OutputTokens: 10}
 
 	restored := svc.restoreRun(persistedRun{
-		RunID:         "one-1",
-		ChatID:        "obs-1",
-		Cwd:           "/tmp/work",
-		Workflow:      r.workflow,
-		State:         r.state,
-		RoundRecords:  r.roundRecords,
-		RoundCounters: r.roundCounters,
+		RunID:             "one-1",
+		ChatID:            "obs-1",
+		Cwd:               "/tmp/work",
+		Workflow:          r.workflow,
+		State:             r.state,
+		RoundRecords:      r.roundRecords,
+		System1Decisions:  r.system1Decisions,
+		System2Decisions:  r.system2Decisions,
+		OperatorDecisions: r.operatorDecisions,
+		RoundAnswers:      r.roundAnswers,
+		RoundUsage:        r.roundUsage,
 	})
-	if restored.cumDecisions.System1 != 6 || restored.cumDecisions.Operator != 2 {
-		t.Errorf("the restored totals are %+v, want the numbers of the last round", restored.cumDecisions)
+	if restored.system1Decisions != 6 || restored.system2Decisions != 3 {
+		t.Errorf("the restored decisions are %d and %d, want the numbers of the run", restored.system1Decisions, restored.system2Decisions)
+	}
+	if restored.operatorDecisions != 2 {
+		t.Errorf("the restored run counts %d answers of the operator, want 2", restored.operatorDecisions)
 	}
 	if restored.cumUsage.InputTokens != 6000 || restored.cumUsage.OutputTokens != 1000 {
 		t.Errorf("the restored totals are %+v, want the numbers of the last round", restored.cumUsage)
 	}
-	if restored.roundCounters.System1 != 1 {
-		t.Errorf("the restored round counts %+v, want the numbers of the round", restored.roundCounters)
+	if restored.roundAnswers != 1 {
+		t.Errorf("the restored round counts %d answers of the operator, want 1", restored.roundAnswers)
+	}
+	if restored.roundUsage.InputTokens != 100 {
+		t.Errorf("the restored round spent %+v, want what it spent", restored.roundUsage)
 	}
 }
 
@@ -875,6 +889,47 @@ func TestTheStateOfTheRunDoesNotNameTheRoundThatEnded(t *testing.T) {
 	}
 }
 
+// TestTheTokensOfTheCardKeepTheirUnit — a round that spent exactly a
+// thousand tokens says "1k", not "1": the unit is part of the number.
+func TestTheTokensOfTheCardKeepTheirUnit(t *testing.T) {
+	rec := roundRecord{Usage: llm.Usage{InputTokens: 1000, OutputTokens: 1000000}}
+	got := decisionsText(rec)
+	if !strings.Contains(got, "tokens - 1k / 1M") {
+		t.Errorf("the decisions line is %q, want the units of the tokens", got)
+	}
+}
+
+// TestTheTreeNamesTheJobOfARound — the rounds of a job are numbered
+// from one, so a run with several jobs names the job in its tree.
+func TestTheTreeNamesTheJobOfARound(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "two", flowWorkflow)
+	svc, _ := testService(t, dir, noModels())
+	wf, ok := svc.catalog.Lookup("two")
+	if !ok {
+		t.Fatal("the workflow is not in the catalogue")
+	}
+	bound, err := wfe.Bind(wf, map[string]string{})
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	r := newRun(svc, Request{Name: "two", ChatID: "obs-1", Cwd: "/tmp/work"}, bound, nil)
+	t.Cleanup(r.cancel)
+
+	start := time.Date(2026, 11, 18, 10, 33, 4, 0, time.UTC)
+	r.roundRecords = []roundRecord{
+		{Round: 1, Job: "ship", StartedAt: start, EndedAt: start.Add(time.Minute), Outcome: wfe.Outcome{Status: wfe.OutcomeOK}},
+		{Round: 1, Job: "verify", StartedAt: start.Add(time.Minute), EndedAt: start.Add(2 * time.Minute), Outcome: wfe.Outcome{Status: wfe.OutcomeOK}},
+	}
+
+	tree := r.roundsTree(iteration{job: "ship", round: 2})
+	for _, want := range []string{"[ √ ] ship · 1: ", "[ √ ] verify · 1: ", "[ > ] ship · 2: "} {
+		if !strings.Contains(tree, want) {
+			t.Errorf("the tree does not carry %q: %q", want, tree)
+		}
+	}
+}
+
 // TestTheRoundThatEndsIsRecorded — a round that ends leaves its facts
 // with the run: the tree of the rounds reads them back.
 func TestTheRoundThatEndsIsRecorded(t *testing.T) {
@@ -900,13 +955,13 @@ func TestTheRoundThatEndsIsRecorded(t *testing.T) {
 		Outcome: wfe.Outcome{Status: wfe.OutcomeOK, Summary: "the commit landed"},
 		At:      at,
 	}}
-	r.roundCounters.System1 = 1
-	r.roundCounters.Operator = 2
+	r.system1Decisions = 1
+	r.operatorDecisions = 2
 	r.roundUsage = llm.Usage{InputTokens: 100, OutputTokens: 20}
 
 	rec := r.closeRound("main", 1, at.Add(time.Minute))
 	if rec.Decisions.System1 != 1 || rec.Decisions.Operator != 2 {
-		t.Errorf("the record counts %+v, want the decisions of the round", rec.Decisions)
+		t.Errorf("the record counts %+v, want the decisions of the run", rec.Decisions)
 	}
 	if rec.Usage.InputTokens != 100 || rec.Usage.OutputTokens != 20 {
 		t.Errorf("the record carries %+v, want what the round spent", rec.Usage)
@@ -1008,11 +1063,8 @@ func TestTheDecisionsOfTheRoundAreCounted(t *testing.T) {
 	r.recordWake(wakeRecord{Who: decisionChat})
 	r.recordWake(wakeRecord{Who: decisionChat})
 
-	if r.roundCounters.System1 != 1 {
-		t.Errorf("the round counts %d decisions of the decision model, want 1", r.roundCounters.System1)
-	}
-	if r.roundCounters.System2 != 2 {
-		t.Errorf("the round counts %d turns of the chat model, want 2", r.roundCounters.System2)
+	if len(r.wakeRecords()) != 3 {
+		t.Errorf("the run holds %d decisions, want 3", len(r.wakeRecords()))
 	}
 }
 
@@ -1041,15 +1093,21 @@ func TestTheAnswerOfTheOperatorCountsOnce(t *testing.T) {
 	if err := r.deliver("/gtw commit"); err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
-	if r.roundCounters.Operator != 1 {
-		t.Errorf("the round counts %d answers of the operator, want 1", r.roundCounters.Operator)
+	if r.roundAnswers != 1 {
+		t.Errorf("the round counts %d answers of the operator, want 1", r.roundAnswers)
+	}
+	if r.operatorDecisions != 1 {
+		t.Errorf("the run counts %d answers of the operator, want 1", r.operatorDecisions)
 	}
 	// The run is no longer waiting: a second answer is not an answer.
 	if err := r.deliver("/gtw commit"); err == nil {
 		t.Error("the run took a second answer")
 	}
-	if r.roundCounters.Operator != 1 {
-		t.Errorf("the round counts %d answers of the operator, want 1", r.roundCounters.Operator)
+	if r.roundAnswers != 1 {
+		t.Errorf("the round counts %d answers of the operator, want 1", r.roundAnswers)
+	}
+	if r.operatorDecisions != 1 {
+		t.Errorf("the run counts %d answers of the operator, want 1", r.operatorDecisions)
 	}
 }
 

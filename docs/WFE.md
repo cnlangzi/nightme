@@ -919,6 +919,8 @@ settled, so it has no duration and no verdict yet.
 The tree shows the last five rounds of the run: the earlier ones fold into
 one node, `… +3`.
 
+The rounds of a job are numbered from one, so a run with several jobs has rounds of the same number. The tree names the job when there is more than one — `[ √ ] ship · 1: 10:33:04 · …` — and leaves it out when the run has a single job: the plan of the run says which job the rounds belong to.
+
 When the round ends, its card carries the closing block: what the round came
 to and the numbers of the run through that round.
 

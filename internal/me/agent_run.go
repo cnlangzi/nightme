@@ -527,7 +527,41 @@ func (r *run) isPaused() bool {
 func (r *run) pausePending() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.pausePendingLocked()
+}
+
+// pausePendingLocked reports whether the run waits for the operator.
+// The caller holds the lock.
+func (r *run) pausePendingLocked() bool {
 	return r.paused || r.pauseRequested
+}
+
+// ended reports whether the run is over.
+func (r *run) ended() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	switch r.phase {
+	case PhaseDone, PhaseFailed, PhaseStopped:
+		return true
+	}
+	return false
+}
+
+// adoptRoundSession makes a session the live card of the round, if
+// the run is still in that round.
+//
+// The run moves between rounds on its own goroutine: a card that was
+// posted for a round the run has left is the record of that round, not
+// the card the run works on.
+func (r *run) adoptRoundSession(it iteration, sess *session) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	current := r.roundSession
+	if current == nil || current.job != it.job || current.round != it.round {
+		return false
+	}
+	r.roundSession = sess
+	return true
 }
 
 // roundIteration returns the round the run is in.

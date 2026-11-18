@@ -57,7 +57,9 @@ func (s *Service) Seen(msg *messages.InboundMessage) {
 // dropped rather than added to a wait group that is already waiting.
 func (s *Service) postStateCard(r *run) {
 	s.mu.Lock()
-	if !s.started {
+	if !s.started || s.active[r.chatID] != r {
+		// The daemon is going down, or the run is over: there is no
+		// state left to show.
 		s.mu.Unlock()
 		return
 	}
@@ -65,6 +67,11 @@ func (s *Service) postStateCard(r *run) {
 	s.mu.Unlock()
 	go func() {
 		defer s.wg.Done()
+		// The run may have ended while the card was on its way: a card
+		// that says the run is working while it is over would lie.
+		if r.ended() {
+			return
+		}
 		s.showState(context.WithoutCancel(r.ctx), r)
 	}()
 }

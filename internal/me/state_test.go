@@ -409,6 +409,73 @@ func TestARunWithoutARoundShowsTheOverview(t *testing.T) {
 	}
 }
 
+// TestTheStateCardDoesNotTakeOverARoundTheRunLeft — the run moves
+// between rounds on its own goroutine: a card posted for a round the
+// run has left does not become the card the run works on.
+func TestTheStateCardDoesNotTakeOverARoundTheRunLeft(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
+	op.steps = []fakeStep{{open: true}}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitSent(t, op, "/gtw commit")
+
+	r := activeRun(t, svc, "obs-1")
+	// The run leaves the round while the card is posted.
+	op.onCard = func() {
+		r.setRoundSession(&session{kind: sessionRound, id: "main · round 2", job: "main", round: 2})
+	}
+
+	if err := svc.Status(context.Background(), "obs-1"); err != nil {
+		t.Fatalf("status: %v", err)
+	}
+
+	sess := r.roundSessionRef()
+	if sess == nil || sess.job != "main" || sess.round != 2 {
+		t.Fatalf("the live card is %v, want the card of the round the run is in", sess)
+	}
+}
+
+// TestTheOverviewDoesNotReplaceTheCardOfTheRun — a run that has not
+// entered a round yet shows the overview of the run as a card of its
+// own: the card the run started from keeps the verdict of the run.
+func TestTheOverviewDoesNotReplaceTheCardOfTheRun(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
+	op.steps = []fakeStep{{open: true}}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitSent(t, op, "/gtw commit")
+
+	r := activeRun(t, svc, "obs-1")
+	// The run has not entered a round yet.
+	r.setRoundSession(nil)
+	before := r.runSessionRef()
+	cards := op.Posted()
+
+	if err := svc.Status(context.Background(), "obs-1"); err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if op.Posted() != cards+1 {
+		t.Fatalf("the run published %d cards, want one more", op.Posted())
+	}
+	if got := r.runSessionRef(); got != before {
+		t.Error("the overview took the place of the card of the run")
+	}
+}
+
 // TestTheStatusRequestOfAChatWithoutARunIsRefused — a chat without a
 // run has no state to show.
 func TestTheStatusRequestOfAChatWithoutARunIsRefused(t *testing.T) {

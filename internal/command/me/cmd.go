@@ -277,8 +277,8 @@ func (f *Factory) stop(ctx context.Context, rt command.RuntimeServices, input co
 // status shows the state of the run again.
 //
 // The state card carries the state: the phase of the run, the tree of
-// the rounds, the checklist of the round and the counters. A chat
-// without a run has no state to show.
+// the rounds, the checklist of the round and the counters of the run in
+// its header. A chat without a run has no state to show.
 func (f *Factory) status(ctx context.Context, rt command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
 	err := f.ctrl.Status(ctx, input.ChatID)
 	if err == nil {

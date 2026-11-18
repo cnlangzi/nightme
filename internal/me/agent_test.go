@@ -126,6 +126,9 @@ type fakeOperator struct {
 	// choiceGen counts the handlers that were installed, so that the
 	// removal of a handler does not take a newer one with it.
 	choiceGen int
+	// onCard is called while the chat takes a card: the test uses it to
+	// change the run in the time the card is posted.
+	onCard func()
 }
 
 func newFakeOperator(steps ...fakeStep) *fakeOperator {
@@ -238,6 +241,9 @@ func (f *fakeOperator) PostCard(_ context.Context, _ string, spec channel.CardSp
 	id := fmt.Sprintf("card-%d", f.cardSeq)
 	f.cards = append(f.cards, cardRecord{ID: id, Title: spec.Title, Body: spec.Body, ReplyTo: spec.ReplyTo, Posted: true})
 	f.log = append(f.log, "card:"+id)
+	if f.onCard != nil {
+		f.onCard()
+	}
 	return id, nil
 }
 

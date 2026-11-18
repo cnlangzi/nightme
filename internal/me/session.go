@@ -68,16 +68,21 @@ type session struct {
 
 // openSession posts the placeholder card of a session and returns it.
 //
-// The body is the one line the card carries until the session's own
-// events fill it.
-//
 // The placeholder is the card the session owns: the chat adopts it
 // and patches it in place when the session's first event lands.
 //
 // A chat that refuses the card leaves the session without one: the
 // run goes on, and the session's events fall back to the chat's
 // orphan handling.
-func (s *Service) openSession(ctx context.Context, r *run, kind sessionKind, id, job string, round int, replyTo, body string) *session {
+func (s *Service) openSession(ctx context.Context, r *run, kind sessionKind, id, job string, round int, replyTo string) *session {
+	return s.openSessionBody(ctx, r, kind, id, job, round, replyTo, placeholderLine(kind, job, round))
+}
+
+// openSessionBody posts the card of a session with a body of its own.
+//
+// The body is the one line the card carries until the session's own
+// events fill it.
+func (s *Service) openSessionBody(ctx context.Context, r *run, kind sessionKind, id, job string, round int, replyTo, body string) *session {
 	sess := &session{kind: kind, id: id, job: job, round: round}
 	if s.cfg.Operator == nil {
 		return sess
@@ -167,7 +172,7 @@ func (s *Service) adoptSessionCards(r *run) {
 // start to the end, and the live state of the work is on the card of
 // the round.
 func (s *Service) openRunSession(ctx context.Context, r *run, replyTo string) bool {
-	sess := s.openSession(ctx, r, sessionRun, r.id, "", 0, replyTo, placeholderLine(sessionRun, "", 0))
+	sess := s.openSession(ctx, r, sessionRun, r.id, "", 0, replyTo)
 	if sess.cardID == "" {
 		// The chat refused the card: the run goes on with the card it
 		// has, and the session's events fall back to the chat's
@@ -191,7 +196,7 @@ func (s *Service) openRoundSession(ctx context.Context, r *run, it iteration) {
 	if runSess := r.runSessionRef(); runSess != nil {
 		replyTo = runSess.cardID
 	}
-	sess := s.openSession(ctx, r, sessionRound, roundIdentity(it), it.job, it.round, replyTo, placeholderLine(sessionRound, it.job, it.round))
+	sess := s.openSession(ctx, r, sessionRound, roundIdentity(it), it.job, it.round, replyTo)
 	r.setRoundSession(sess)
 	r.resetRound()
 	// The round starts when its card opens: the first action of the
@@ -212,6 +217,11 @@ func (s *Service) openRoundSession(ctx context.Context, r *run, it iteration) {
 // run goes on with it: the round is not started over, so its counters
 // and its start time stay what they were.
 //
+// The run moves between rounds on its own goroutine: the card takes the
+// place of the round's card only while the run is still in that round.
+// A card posted for a round the run has left stays in the chat as a
+// card of its own, and the round keeps the card it had.
+//
 // It returns nil when the run has no round: there is no round state to
 // show.
 func (s *Service) openRoundStateCard(ctx context.Context, r *run) *session {
@@ -219,21 +229,44 @@ func (s *Service) openRoundStateCard(ctx context.Context, r *run) *session {
 	if !ok {
 		return nil
 	}
-	card := s.openSession(ctx, r, sessionRound, roundIdentity(it), it.job, it.round, "", stateLine(it.job, it.round))
+	card := s.openSessionBody(ctx, r, sessionRound, roundIdentity(it), it.job, it.round, "", stateLine(it.job, it.round))
 	if card.cardID == "" {
 		// The chat refused the card: the run keeps the live card it
 		// has, and the run goes on.
 		return nil
 	}
-	r.setRoundSession(card)
+	if !r.adoptRoundSession(it, card) {
+		// The run has left that round while the card was posted: the
+		// card says nothing the round does not already say, and the
+		// run goes on with the card it has.
+		return card
+	}
 	r.rememberRoundSession(it, card)
 	r.setGitStatus(s.gitStatus(r))
 	s.publishInit(ctx, r, card)
 	s.publishReply(ctx, r, card, r.phaseLine())
 	s.publishReply(ctx, r, card, r.roundsTree(it))
 	s.publishTasks(ctx, r, card, r.roundTasks(it.job, it.round))
-	s.publishHeartbeat(ctx, r)
+	s.publishHeartbeatTo(ctx, r, card)
 	return card
+}
+
+// openRunOverview posts the overview of the run as a card of its own.
+//
+// The card is a snapshot of the plan: the run keeps the session it had,
+// so the card the operator started the run from keeps the verdict of
+// the run.
+func (s *Service) openRunOverview(ctx context.Context, r *run) bool {
+	sess := s.openSession(ctx, r, sessionRun, r.id, "", 0, "")
+	if sess.cardID == "" {
+		// The chat refused the card: the run goes on with the card it
+		// has.
+		return false
+	}
+	r.setGitStatus(s.gitStatus(r))
+	s.publishInit(ctx, r, sess)
+	s.publishReply(ctx, r, sess, r.runCard())
+	return true
 }
 
 // showState posts the state of the run in the chat.
@@ -245,7 +278,7 @@ func (s *Service) openRoundStateCard(ctx context.Context, r *run) *session {
 // It reports whether a card was posted.
 func (s *Service) showState(ctx context.Context, r *run) bool {
 	if _, ok := r.roundIteration(); !ok {
-		return s.openRunSession(ctx, r, "")
+		return s.openRunOverview(ctx, r)
 	}
 	return s.openRoundStateCard(ctx, r) != nil
 }
@@ -274,7 +307,7 @@ func (s *Service) openDecisionSession(ctx context.Context, r *run) {
 	r.mu.Unlock()
 	r.resetDecisionUsage()
 
-	sess := s.openSession(ctx, r, sessionDecision, id, "", 0, replyTo, placeholderLine(sessionDecision, "", 0))
+	sess := s.openSession(ctx, r, sessionDecision, id, "", 0, replyTo)
 	r.setDecisionSession(sess)
 	s.publishInit(ctx, r, sess)
 	s.publishReply(ctx, r, sess, r.decisionReasonLine())
@@ -542,7 +575,14 @@ func (s *Service) publishResult(ctx context.Context, r *run, sess *session, verd
 // last did something. The card of the run is static, so it carries
 // none.
 func (s *Service) publishHeartbeat(ctx context.Context, r *run) {
-	sess := r.roundSessionRef()
+	s.publishHeartbeatTo(ctx, r, r.roundSessionRef())
+}
+
+// publishHeartbeatTo publishes what the run did so far to a card.
+//
+// The card is named: a card that is not the live card of the round
+// carries the counters of the run all the same.
+func (s *Service) publishHeartbeatTo(ctx context.Context, r *run, sess *session) {
 	if sess == nil {
 		return
 	}

@@ -52,7 +52,7 @@ func (s *Service) postSummary(r *run) {
 	// summary is posted after that. The context outlives the run here
 	// on purpose.
 	ctx := context.WithoutCancel(r.ctx)
-	sess := s.openSession(ctx, r, sessionRun, r.id, "", 0, "", placeholderLine(sessionRun, "", 0))
+	sess := s.openSession(ctx, r, sessionRun, r.id, "", 0, "")
 	if sess.cardID == "" {
 		// The chat refused the card: the run still ends, and no error
 		// reaches the operator.

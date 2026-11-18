@@ -667,7 +667,7 @@ func (s *Service) Reply(ctx context.Context, chatID, text string) error {
 	r, ok := s.active[chatID]
 	s.mu.Unlock()
 	if !ok {
-		return errors.New("this chat has no run in it")
+		return ErrNoRun
 	}
 	if strings.TrimSpace(text) == "" {
 		return errors.New("the reply is empty")
@@ -685,7 +685,7 @@ func (s *Service) Pause(ctx context.Context, chatID string) error {
 	r, ok := s.active[chatID]
 	s.mu.Unlock()
 	if !ok {
-		return errors.New("this chat has no run in it")
+		return ErrNoRun
 	}
 	r.requestPause("the operator paused the run")
 	s.refreshSessions(r)
@@ -787,7 +787,7 @@ func (s *Service) Stop(ctx context.Context, chatID string) error {
 	r, ok := s.active[chatID]
 	s.mu.Unlock()
 	if !ok {
-		return errors.New("this chat has no run in it")
+		return ErrNoRun
 	}
 	r.markStoppedByOperator()
 	r.cancel()

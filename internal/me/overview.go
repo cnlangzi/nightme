@@ -66,7 +66,7 @@ func (r *run) phaseLine() string {
 	if r.inflight != nil {
 		command = r.inflight.Command
 	}
-	pending := r.paused || r.pauseRequested
+	pending := r.pausePendingLocked()
 	r.mu.Unlock()
 
 	switch {

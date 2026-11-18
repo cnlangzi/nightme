@@ -84,9 +84,6 @@ func (r *run) runCard() string {
 
 // runFacts renders the facts of the run: how big it is, when it
 // started and what it was given.
-//
-// The values start at the same column: the key, its colon, and the
-// padding to the column.
 func runFacts(wf *wfe.Workflow, started time.Time, names []string, values map[string]string) []string {
 	facts := []fact{
 		{key: "jobs", value: strconv.Itoa(len(wf.JobOrder()))},
@@ -96,6 +93,15 @@ func runFacts(wf *wfe.Workflow, started time.Time, names []string, values map[st
 	if len(names) > 0 {
 		facts = append(facts, fact{key: "args", value: argsValue(names, values)})
 	}
+	return factLines(facts)
+}
+
+// factLines renders the rows of a facts block.
+//
+// The values start at the same column: the key, its colon, and the
+// padding to the column. Every facts block is rendered this way, so
+// the two card layouts cannot drift apart.
+func factLines(facts []fact) []string {
 	out := make([]string, 0, len(facts))
 	for _, f := range facts {
 		out = append(out, fmt.Sprintf("%-*s%s", factColumn, f.key+":", f.value))
@@ -126,11 +132,17 @@ func (r *run) recordCard() string {
 	history := append([]wfe.ActionRecord(nil), r.policy.History...)
 	inflight := r.inflight
 	phase := r.phase
+	reason := r.errMsg
 	r.mu.Unlock()
 	wakes := r.wakeRecords()
 
 	lines := make([]string, 0, 24)
 	lines = append(lines, "■ [ "+r.workflow.Name+" ] "+string(phase))
+	// The reason the run ended is the run's own: an error that never
+	// reached an action of the run leaves no row in the errors block.
+	if reason != "" {
+		lines = append(lines, clipLine("reason: "+reason, maxSummaryLine))
+	}
 	if inflight != nil && inflight.Command != "" {
 		lines = append(lines, clipLine("stopped while: "+inflight.Command, maxSummaryLine))
 	}
@@ -146,9 +158,7 @@ func (r *run) recordCard() string {
 		fact{key: "actions", value: actionsValue(history)},
 		fact{key: "steps", value: stepsValue(workflowStepIDs(r.workflow), history)},
 	)
-	for _, f := range facts {
-		lines = append(lines, fmt.Sprintf("%-*s%s", factColumn, f.key+":", f.value))
-	}
+	lines = append(lines, factLines(facts)...)
 
 	if finished := r.finishedRounds(); len(finished) > 0 {
 		lines = append(lines, "")

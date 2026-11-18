@@ -207,6 +207,37 @@ func TestTheRecordIsPostedWhenTheRunEndsOnItsOwn(t *testing.T) {
 	}
 }
 
+// TestTheRecordOfAFailedRunSaysWhyItFailed — the reason the run gave
+// up is the run's own: an error that never reached an action of the
+// run leaves no row in the errors block, so the card would say
+// "failed" and nothing more.
+func TestTheRecordOfAFailedRunSaysWhyItFailed(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	decider := &scriptedDecider{err: errors.New("the decision model is gone")}
+	svc, op := testService(t, dir, Config{Decider: decider})
+	op.steps = []fakeStep{{outcome: messages.Outcome{
+		Status:  messages.OutcomeFailed,
+		Summary: "the step failed",
+	}}}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitRun(t, svc, "obs-1")
+
+	body := recordBody(t, op)
+	if !strings.Contains(body, "■ [ one ] failed") {
+		t.Errorf("the record does not name the phase of the run:\n%s", body)
+	}
+	if !strings.Contains(body, "reason: the decision model failed: the decision model is gone") {
+		t.Errorf("the record does not say why the run failed:\n%s", body)
+	}
+}
+
 // TestStop_EndsTheRunSessionWithItsPhase — the run's card says how
 // the run ended.
 func TestStop_EndsTheRunSessionWithItsPhase(t *testing.T) {

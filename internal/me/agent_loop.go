@@ -78,6 +78,10 @@ func (s *Service) drive(ctx context.Context, r *run) {
 	// step that was in flight is only known now that the run has
 	// unwound.
 	s.postRecord(r)
+	// The record session goes to the disk with the run: a daemon that
+	// dies before the file goes tells the chat about the record card
+	// when it comes back.
+	s.persist(r)
 	// The run is over: its state goes with it. The record holds what
 	// the run did, so it does not need the file — and a file that
 	// outlives the run would be resumed by the next daemon.

@@ -1210,6 +1210,10 @@ type sessionState struct {
 	Anchor string `json:"anchor"`
 	// Owns reports whether the session posted that message itself.
 	Owns bool `json:"owns"`
+	// CardID is the id the card of the session became in a daemon
+	// that predates the anchor. A state file that names it still
+	// holds a card the run posted itself.
+	CardID string `json:"card_id,omitempty"`
 	// ID names the session.
 	ID string `json:"id,omitempty"`
 	// Job and Round name the round the session is about.
@@ -1237,10 +1241,18 @@ func sessionFromState(st *sessionState) *session {
 	if st == nil {
 		return nil
 	}
+	anchor := st.Anchor
+	owns := st.Owns
+	if anchor == "" && st.CardID != "" {
+		// A state file of an older daemon: the card of the session is
+		// its anchor, and the run posted that card itself.
+		anchor = st.CardID
+		owns = true
+	}
 	return &session{
 		kind:        sessionKind(st.Kind),
-		anchor:      st.Anchor,
-		ownsMessage: st.Owns,
+		anchor:      anchor,
+		ownsMessage: owns,
 		id:          st.ID,
 		job:         st.Job,
 		round:       st.Round,
@@ -1818,6 +1830,14 @@ func (r *run) setDecisionSession(sess *session) {
 	r.mu.Lock()
 	r.decisionSession = sess
 	r.mu.Unlock()
+}
+
+// recordSessionRef returns the session of the record the run leaves
+// behind.
+func (r *run) recordSessionRef() *session {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.recordSession
 }
 
 // setRecordSession records the session of the record.

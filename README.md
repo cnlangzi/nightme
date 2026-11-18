@@ -727,11 +727,11 @@ question itself never reaches the agent — it is a message of the chat, not a t
 of the conversation.
 
 Every run that ends leaves a record of the session in the chat: a card of its own
-that says how the run ended, what it did, what went wrong and what the models
-decided — the facts of the whole session, the actions that went wrong one by one,
-and the judgment the models made at the wake-ups. It is posted once the run has
-unwound, and it carries no buttons: the run is over. A run that ends by itself
-leaves a record too.
+that says how the run ended and why, what it did, what went wrong and what the
+models decided — the facts of the whole session, the actions that went wrong one
+by one, and the judgment the models made at the wake-ups. It is posted once the
+run has unwound, and it carries no buttons: the run is over. A run that ends by
+itself leaves a record too.
 
 The card is the run's receipt. Its first line is a live header — how many turns the
 chat model took, how many tool calls the run made, when it last did something —

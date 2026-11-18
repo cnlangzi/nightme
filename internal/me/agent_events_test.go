@@ -413,6 +413,30 @@ func TestTheHeartbeatCarriesTheCountersOfTheRun(t *testing.T) {
 	}
 }
 
+// TestTheStateOfAnOlderDaemonStillNamesTheCards — a state file of a
+// daemon that predates the anchor names the card of a session: the
+// run that comes back goes on with the card it opened.
+func TestTheStateOfAnOlderDaemonStillNamesTheCards(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	legacy := &sessionState{Kind: string(sessionRound), CardID: "card-9", ID: "main · round 1", Job: "main", Round: 1}
+	sess := sessionFromState(legacy)
+	if sess.anchor != "card-9" {
+		t.Errorf("the session hangs under %q, want the card of the older daemon", sess.anchor)
+	}
+	if !sess.ownsMessage {
+		t.Error("the session does not own the card it posted itself")
+	}
+	// A state of the current shape keeps its anchor.
+	current := &sessionState{Kind: string(sessionRound), Anchor: "om_start", Owns: false}
+	sess = sessionFromState(current)
+	if sess.anchor != "om_start" || sess.ownsMessage {
+		t.Errorf("the session hangs under %q and owns %v, want om_start and no ownership",
+			sess.anchor, sess.ownsMessage)
+	}
+}
+
 // TestTheActivityOfTheRunSurvivesTheDaemon — the counters, the time of
 // the last activity and the open sessions are persisted with the rest
 // of the run.

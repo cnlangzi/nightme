@@ -136,6 +136,30 @@ func TestEventAggregator_AnnouncesTheGroup(t *testing.T) {
 	}
 }
 
+// TestEventAggregator_CodeSpansTheGroupName: the start hint carries
+// the group's name as a code span when the name carries a markdown
+// metacharacter — a glob's `**` would otherwise close the hint's own
+// bold span and mangle the rest of the line.
+func TestEventAggregator_CodeSpansTheGroupName(t *testing.T) {
+	rec := &sinkRecorder{}
+	plan := []ReviewPlanGroup{
+		{Pattern: "**/*.go", Label: "system / **/*.go · Go", Files: []string{"a.go"}},
+	}
+	agg := newEventAggregator(rec.sink(), plan)
+
+	j1 := agg.wrapJob(0)
+	j1(readyEvent("a", "/r", "main"))
+	j1(AgentEvent{Kind: EventAgentText, Text: "the findings"})
+
+	hints := startHints(rec.snapshot())
+	if len(hints) != 1 {
+		t.Fatalf("the group produced %d start hints, want 1: %+v", len(hints), hints)
+	}
+	if !strings.Contains(hints[0], "`system / **/*.go · Go`") {
+		t.Errorf("the start hint does not code-span the group name: %q", hints[0])
+	}
+}
+
 // TestEventAggregator_AnnouncesTheGroupOnce: the group announces
 // itself once, not once per chunk.
 func TestEventAggregator_AnnouncesTheGroupOnce(t *testing.T) {

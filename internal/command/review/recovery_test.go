@@ -166,7 +166,10 @@ func TestReviewVerdict_NamesTheFailedGroupsState(t *testing.T) {
 			outcomes: []reviewOutcome{
 				{pattern: "**/*.go", source: "system", sessionID: "sess-go", err: errors.New("boom")},
 			},
-			want:    []string{"failed: system / **/*.go → /review --continue"},
+			want: []string{
+				"- `system / **/*.go`",
+				"💡 hint: run `/review --continue` to continue the failed groups",
+			},
 			notWant: []string{"(never started)", "(already retried)"},
 		},
 		{
@@ -174,7 +177,10 @@ func TestReviewVerdict_NamesTheFailedGroupsState(t *testing.T) {
 			outcomes: []reviewOutcome{
 				{pattern: "**/*.go", source: "system", prompt: "the prompt", err: errors.New("boom")},
 			},
-			want:    []string{"failed: system / **/*.go (never started) → /review --continue"},
+			want: []string{
+				"- `system / **/*.go` (never started)",
+				"💡 hint: run `/review --continue` to continue the failed groups",
+			},
 			notWant: []string{"(already retried)"},
 		},
 		{
@@ -182,8 +188,8 @@ func TestReviewVerdict_NamesTheFailedGroupsState(t *testing.T) {
 			outcomes: []reviewOutcome{
 				{pattern: "**/*.go", source: "system", sessionID: "sess-go", spent: true, err: errors.New("boom")},
 			},
-			want:    []string{"failed: system / **/*.go (already retried)"},
-			notWant: []string{"/review --continue"},
+			want:    []string{"- `system / **/*.go` (already retried)"},
+			notWant: []string{"/review --continue", "💡 hint:"},
 		},
 		{
 			name: "an actionable group beside a spent one",
@@ -192,7 +198,9 @@ func TestReviewVerdict_NamesTheFailedGroupsState(t *testing.T) {
 				{pattern: "**/*.ts", source: "system", prompt: "the prompt", err: errors.New("boom")},
 			},
 			want: []string{
-				"failed: system / **/*.go (already retried), system / **/*.ts (never started) → /review --continue",
+				"- `system / **/*.go` (already retried)",
+				"- `system / **/*.ts` (never started)",
+				"💡 hint: run `/review --continue` to continue the failed groups",
 			},
 		},
 	}
@@ -223,7 +231,7 @@ func TestRenderPlanLine_MarksTheContinuedGroups(t *testing.T) {
 	}
 	got := renderPlanLine("codex", groups)
 	for _, want := range []string{
-		"1. **/*.go — 1 file (resumed)",
+		"1. `**/*.go` — 1 file (resumed)",
 		"2. Simplify review lens — 1 file (re-run)",
 	} {
 		if !strings.Contains(got, want) {
@@ -342,10 +350,10 @@ func TestReviewVerdict_NamesTheUnrecoverableGroup(t *testing.T) {
 	}
 
 	got := reviewVerdict(outcomes, nil)
-	if !strings.Contains(got, "system / **/*.go (not recoverable)") {
+	if !strings.Contains(got, "- `system / **/*.go` (not recoverable)") {
 		t.Errorf("the verdict does not name the unrecoverable group: %s", got)
 	}
-	if !strings.Contains(got, "system / **/*.ts → /review --continue") {
+	if !strings.Contains(got, "💡 hint: run `/review --continue` to continue the failed groups") {
 		t.Errorf("the verdict does not offer the continuation for the resumable group: %s", got)
 	}
 }

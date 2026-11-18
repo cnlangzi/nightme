@@ -6,9 +6,11 @@
 //     before any group produces output;
 //  2. the findings — each group's findings, one reply per group, in
 //     the thread;
-//  3. the verdict line — what the run found, in one line, followed by
-//     the digest: the findings as one table per severity, one row per
-//     finding, holding what kind of finding it is and where it is.
+//  3. the verdict — what the run found: the counts line, and — when
+//     a group did not finish — the block that names the failed groups
+//     under it, followed by the digest: the findings as one table per
+//     severity, one row per finding, holding what kind of finding it
+//     is and where it is.
 //
 // The merged body is NOT one of them: it is the main agent's input,
 // not the channel's. The thread carries the findings; the card
@@ -66,7 +68,7 @@ func renderPlanLine(runner string, groups []agent.ReviewPlanGroup) string {
 	fmt.Fprintf(&b, "🔍 review · %s · %s · %s",
 		runner, reviewRuleSet(groups), plural(len(groups), "subagent"))
 	for i, g := range groups {
-		fmt.Fprintf(&b, "\n%d. %s — %s", i+1, g.Label, plural(len(g.Files), "file"))
+		fmt.Fprintf(&b, "\n%d. %s — %s", i+1, agent.CodeSpan(g.Label), plural(len(g.Files), "file"))
 		b.WriteString(reviewModeMarker(g.Mode))
 	}
 	return b.String()
@@ -146,16 +148,20 @@ type failedGroup struct {
 }
 
 // text renders the group's name with its state.
+//
+// The state is prose, so it stays outside the code span around the
+// name.
 func (g failedGroup) text() string {
+	name := agent.CodeSpan(g.label)
 	switch g.state {
 	case failedNeverStarted:
-		return g.label + " (never started)"
+		return name + " (never started)"
 	case failedUnrecoverable:
-		return g.label + " (not recoverable)"
+		return name + " (not recoverable)"
 	case failedSpent:
-		return g.label + " (already retried)"
+		return name + " (already retried)"
 	default:
-		return g.label
+		return name
 	}
 }
 
@@ -215,28 +221,52 @@ func (v verdict) icon() string {
 	return "✅"
 }
 
-// body renders the verdict's counts and the groups that failed.
+// body renders the verdict's body: the counts, and — when a group
+// failed — the block that names the failed groups.
+//
+// The counts come first and the block follows them under a blank line.
+// The block is the run's failure, not another count: a failure that
+// hides in the tail of a dense counts line is a failure the reader
+// misses, and the digest below grows with the number of findings.
+//
+// The card's verdict and the thread's end hint share this body, so the
+// two can never disagree.
+func (v verdict) body() string {
+	counts := strings.Join(v.parts(), " · ")
+	block := v.failureBlock()
+	if block == "" {
+		return counts
+	}
+	return counts + "\n\n" + block
+}
+
+// failureBlock renders the groups that did not finish: the header
+// that counts them, one line per group, and — when a failed group is
+// still actionable — the command that recovers them.
 //
 // The continuation is offered only when a failed group is still
 // actionable: the offer must match what the continuation can do.
-func (v verdict) body() string {
-	parts := v.parts()
-	if len(v.failed) > 0 {
-		labels := make([]string, 0, len(v.failed))
-		actionable := false
-		for _, g := range v.failed {
-			labels = append(labels, g.text())
-			if g.actionable() {
-				actionable = true
-			}
-		}
-		segment := "failed: " + strings.Join(labels, ", ")
-		if actionable {
-			segment += " → /review --continue"
-		}
-		parts = append(parts, segment)
+//
+// The hint stands on its own: a line that follows a list item without
+// a blank line is the item's continuation, so the hint would end up
+// inside the last group's bullet.
+func (v verdict) failureBlock() string {
+	if len(v.failed) == 0 {
+		return ""
 	}
-	return strings.Join(parts, " · ")
+	var b strings.Builder
+	fmt.Fprintf(&b, "❌ **%d of %s failed**", len(v.failed), plural(v.groups, "subagent"))
+	actionable := false
+	for _, g := range v.failed {
+		b.WriteString("\n- " + g.text())
+		if g.actionable() {
+			actionable = true
+		}
+	}
+	if actionable {
+		b.WriteString("\n\n💡 hint: run `/review --continue` to continue the failed groups")
+	}
+	return b.String()
 }
 
 // line renders the verdict as the card's line.
@@ -249,7 +279,8 @@ func (v verdict) line() string {
 }
 
 // hint renders the verdict as the thread's end hint — the same
-// numbers, in Markdown, so the thread closes on the outcome.
+// counts and the same failure block as the card's verdict, in
+// Markdown, so the thread closes on the outcome.
 func (v verdict) hint() string {
 	return v.icon() + " **review done** · " + v.body()
 }

@@ -367,7 +367,7 @@ agent 的上下文太长，或者剩下的工作更适合换一个 agent 时：
 
 ### 7. 收尾：`/gtw close`
 
-**`/gtw close`** 结束任务：收尾 issue 上的标签，删掉 worktree，强制删除本地分支，把 chat 的 CWD 切回仓库根目录，并 sync 默认分支。收尾会把 issue 上除队列标记 `nightme/assigned` 以外的 `nightme/*` 标签全部摘掉，再贴上 `nightme/done`——tracker 上从此写的是「做完了」，而不是留一个过期的认领。**`/gtw close --reset`** 只摘状态标签、不贴任何标签：活儿被丢掉，issue 保留队列标记，于是自动队列会重新挑起它。worktree 有未提交改动时拒绝——先 commit、stash 或丢弃。哪一步失败，worktree、分支和状态文件都留在原处，issue 的标签也会被还原，重跑 `/gtw close` 时从同一个状态开始。
+**`/gtw close`** 结束任务：收尾 issue 上的标签，删掉 worktree，强制删除本地分支，把 chat 的 CWD 切回仓库根目录，并 sync 默认分支。收尾会把 issue 上除队列标记 `nightme/assigned` 以外的 `nightme/*` 标签全部摘掉，再贴上 `nightme/done`——tracker 上从此写的是「做完了」，而不是留一个过期的认领。**`/gtw close --reset`** 只摘状态标签、不贴任何标签：活儿被丢掉，issue 保留队列标记，于是自动队列会重新挑起它。worktree 有未提交改动时拒绝——先 commit、stash 或丢弃。哪一步失败，worktree、分支和状态文件都留在原处，issue 的标签也会被还原，重跑 `/gtw close` 时从同一个状态开始。删分支失败是例外：那时 worktree 已经没了，标签就保持收尾后的样子，只剩分支引用要手工清掉。
 
 ### 卡住时：`/gtw abort`
 

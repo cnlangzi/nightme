@@ -63,12 +63,15 @@ const maxDirtyFilesReported = 10
 //     upstream call works.
 //
 //     Symmetric compensation: if a SUBSEQUENT local step (3
-//     dirty / 4 worktree remove / 5 branch -D) fails after the
-//     labels changed, the issue is put back the way it was, so a
-//     retry converges on the same starting state. Without this
-//     compensation the platform would say "done" while the local
-//     side still has the worktree / branch / yml, and the retry
-//     would face that divergence.
+//     dirty / 4 worktree remove) fails after the labels changed,
+//     the issue is put back the way it was, so a retry converges on
+//     the same starting state. Without this compensation the
+//     platform would say "done" while the local side still has the
+//     worktree / branch / yml, and the retry would face that
+//     divergence. Step 5 (branch -D) is NOT compensated: the
+//     worktree — and with it the yml — is already gone by then, so
+//     a retry cannot converge and a restore would only wedge the
+//     issue.
 //
 //  3. Refuse if the worktree has uncommitted changes (`git
 //     status --porcelain` non-empty). Close is intentionally
@@ -334,15 +337,16 @@ func RunClose(
 		body := fmt.Sprintf(
 			"❌ git branch -D %s failed: %v\n"+
 				"[git stderr tail]\n%s\n"+
-				"hint: worktree at %s is already removed; clean up the branch manually with `git branch -D %s`.",
+				"hint: worktree at %s is already removed; clean up the branch manually with `git branch -D %s`\n"+
+				"(the issue keeps the labels this close set — the worktree is already gone, so there is no fix left to close)",
 			c.Branch, brErr, tailLines(brStderr, 10), c.Worktree, c.Branch,
 		)
-		if labels.changed() {
-			// Worktree is gone but the branch ref still exists, so
-			// the fix is half-torn-down. Put the issue's labels back
-			// so a retry sees a consistent state.
-			body += "\n" + restoreIssueLabels(ctx, labels)
-		}
+		// No compensation here. The worktree is gone, and with it the
+		// yml — the recovery source of truth. A retry cannot converge
+		// on anything, so putting the claim back would only leave the
+		// issue claimed with no worktree and no command able to
+		// release it. The labels stay as the close set them: the work
+		// session is over, and only the branch ref is left.
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, withWarning(body),
 			command.FailedOutcome("error", "the branch could not be deleted")), nil
 	}
@@ -478,6 +482,12 @@ type labelFinalize struct {
 	// nothing.
 	added string
 
+	// addedPreexisting is true when the issue already carried
+	// `added` before the close. The restore must leave such a label
+	// alone: it was on the issue before, and the close did not put
+	// it there.
+	addedPreexisting bool
+
 	// provider / owner / repo / issue identify the issue the labels
 	// live on. provider is nil when the label step did not run.
 	provider GitProvider
@@ -565,13 +575,9 @@ func finalizeIssueLabels(
 	// c.Repo / c.Provider shortcut when the snapshot carries one,
 	// the live remote URL otherwise.
 	prov, owner, repo, err := resolveProvider(ctx, c, deps)
-	if err != nil || prov == nil {
-		reason := "provider detection returned no result"
-		if err != nil {
-			reason = err.Error()
-		}
+	if err != nil {
 		reply(ctx, cs.Emitter(), chatID, messageID,
-			"❌ cannot reach GitHub/GitLab to finalize the issue labels: "+reason)
+			"❌ cannot reach GitHub/GitLab to finalize the issue labels: "+err.Error())
 		return labelFinalize{}, true, ""
 	}
 
@@ -607,6 +613,7 @@ func finalizeIssueLabels(
 	// queue marker. The names are the platform's own, so a label the
 	// catalog does not know still comes off.
 	toRemove := make([]string, 0, len(issue.Labels))
+	donePreexisting := false
 	for _, label := range issue.Labels {
 		if !isNightmeLabel(label) {
 			continue
@@ -614,12 +621,15 @@ func finalizeIssueLabels(
 		if strings.EqualFold(label, LabelAssigned) {
 			continue
 		}
-		if !reset && strings.EqualFold(label, LabelDone) {
-			// The default mode puts `nightme/done` on the issue
-			// right after this list is computed; taking it off
-			// again would undo that. A stale `nightme/done` stays
-			// — which is the state the close wants.
-			continue
+		if strings.EqualFold(label, LabelDone) {
+			donePreexisting = true
+			if !reset {
+				// The default mode puts `nightme/done` on the issue
+				// right after this list is computed; taking it off
+				// again would undo that. A stale `nightme/done` stays
+				// — which is the state the close wants.
+				continue
+			}
 		}
 		toRemove = append(toRemove, label)
 	}
@@ -654,29 +664,32 @@ func finalizeIssueLabels(
 	}
 
 	return labelFinalize{
-		removed:  toRemove,
-		added:    added,
-		provider: prov,
-		owner:    owner,
-		repo:     repo,
-		issue:    c.Issue,
+		removed:          toRemove,
+		added:            added,
+		addedPreexisting: donePreexisting,
+		provider:         prov,
+		owner:            owner,
+		repo:             repo,
+		issue:            c.Issue,
 	}, false, warning
 }
 
 // restoreIssueLabels is the symmetric rollback to finalizeIssueLabels.
-// Called when a local cleanup step (dirty check, worktree remove,
-// branch -D) fails AFTER the labels changed — the platform would
-// otherwise say "done" while the local side still has the worktree /
-// branch / yml, and the retry would face that divergence.
+// Called when a local cleanup step (dirty check, worktree remove)
+// fails AFTER the labels changed — the platform would otherwise say
+// "done" while the local side still has the worktree / branch / yml,
+// and the retry would face that divergence.
 //
 // Best-effort: the returned line names whatever could not be put
 // back. A restore failure is communicated but does NOT escalate into
 // a second top-level error — the user already has the original local
 // error to act on.
 //
-// NOT called for the steps after the branch delete (cwd switch, sync):
-// by then the local close is functionally complete and the labels
-// correctly describe it.
+// NOT called for the steps after the worktree remove (branch delete,
+// cwd switch, sync): by then the worktree — and with it the yml, the
+// recovery source of truth — is gone, so a retry cannot converge and
+// a restore would only wedge the issue in a state no command can
+// release.
 func restoreIssueLabels(ctx context.Context, l labelFinalize) string {
 	var failed []string
 	for _, label := range l.removed {
@@ -684,7 +697,7 @@ func restoreIssueLabels(ctx context.Context, l labelFinalize) string {
 			failed = append(failed, fmt.Sprintf("%s (%v)", label, err))
 		}
 	}
-	if l.added != "" {
+	if l.added != "" && !l.addedPreexisting {
 		if err := l.provider.RemoveIssueLabel(ctx, l.owner, l.repo, l.issue, l.added); err != nil {
 			failed = append(failed, fmt.Sprintf("%s (%v)", l.added, err))
 		}

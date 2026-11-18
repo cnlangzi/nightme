@@ -1272,11 +1272,14 @@ func TestRunClose_ModeRemote_WorktreeRemoveFailsRestoresTheIssue(t *testing.T) {
 	}
 }
 
-// TestRunClose_ModeRemote_BranchDeleteFailsRestoresTheIssue pins
-// that a close that stops at `git branch -D` puts the issue's labels
-// back: the worktree is gone, the branch ref survives, and the reply
-// names the manual cleanup.
-func TestRunClose_ModeRemote_BranchDeleteFailsRestoresTheIssue(t *testing.T) {
+// TestRunClose_ModeRemote_BranchDeleteFailsKeepsTheLabelsFinalized
+// pins that a close that stops at `git branch -D` does NOT put the
+// issue's labels back: the worktree — and with it the yml, the
+// recovery source of truth — is already gone, so a retry cannot
+// converge and a restore would leave the issue claimed with no
+// worktree and no command able to release it. The labels stay as the
+// close set them; the reply names the leftover branch ref.
+func TestRunClose_ModeRemote_BranchDeleteFailsKeepsTheLabelsFinalized(t *testing.T) {
 	wt := t.TempDir()
 	repoRoot := t.TempDir()
 
@@ -1294,12 +1297,14 @@ func TestRunClose_ModeRemote_BranchDeleteFailsRestoresTheIssue(t *testing.T) {
 		t.Fatalf("Result = %+v, want Consumed=true", res)
 	}
 
+	// The issue keeps the labels the close set: the work session is
+	// over, only the branch ref is left.
 	got := prov.IssueLabels(42)
-	if !slices.Contains(got, LabelWIP) {
-		t.Errorf("issue labels = %v, want %q to be back", got, LabelWIP)
+	if !slices.Contains(got, LabelDone) {
+		t.Errorf("issue labels = %v, want %q to stay", got, LabelDone)
 	}
-	if slices.Contains(got, LabelDone) {
-		t.Errorf("issue labels = %v, want %q to be absent", got, LabelDone)
+	if slices.Contains(got, LabelWIP) {
+		t.Errorf("issue labels = %v, want %q to be absent", got, LabelWIP)
 	}
 
 	// worktree remove ran (it's step 4, before step 5).
@@ -1317,7 +1322,11 @@ func TestRunClose_ModeRemote_BranchDeleteFailsRestoresTheIssue(t *testing.T) {
 	if !strings.Contains(reply, "git branch -D") {
 		t.Errorf("reply missing branch-delete error:\n%s", reply)
 	}
-	if !strings.Contains(reply, "restored") {
-		t.Errorf("reply must report the restore:\n%s", reply)
+	if !strings.Contains(reply, "the issue keeps the labels") {
+		t.Errorf("reply must say the labels stay as the close set them:\n%s", reply)
+	}
+	// No restore happened, so no retry hint that cannot work.
+	if strings.Contains(reply, "restored") {
+		t.Errorf("reply must not report a restore:\n%s", reply)
 	}
 }

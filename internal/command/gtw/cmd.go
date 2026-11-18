@@ -299,7 +299,7 @@ func (f *Factory) Spec() command.Spec {
 			"/gtw fix <issue-id> [-y|--yes]   claim, label, and create a worktree\n" +
 			"/gtw fix * [-y|--yes]            pick the next assigned issue and fix it\n" +
 			"/gtw fix --name <branch>          create a local worktree (no issue)\n" +
-			"/gtw close [--reset]              tear down the worktree, finalize the issue labels, and sync main\n" +
+			"/gtw close [--reset]              finalize the issue labels, tear down the worktree, and sync main\n" +
 			"/gtw back                         exit the fix worktree (cwd → repoRoot) and sync main — worktree preserved\n" +
 			"/gtw back <branch>                 enter the worktree whose branch starts with <branch> (cwd → worktree); repairs a missing .nightme/gtw.yml\n" +
 			"/gtw commit [-a <agent>]          commit uncommitted work via the configured agent (no push)\n" +
@@ -326,7 +326,7 @@ func (f *Factory) Spec() command.Spec {
 				Summary: "claim an issue, create a worktree, dispatch to the agent",
 				Usage:   fixCmdSpec.Usage,
 			},
-			{Name: "close", Summary: "tear down the worktree, finalize the issue labels, delete the branch, and sync main", Usage: closeCmdSpec.Usage},
+			{Name: "close", Summary: "finalize the issue labels, tear down the worktree, delete the branch, and sync main", Usage: closeCmdSpec.Usage},
 			{Name: "back", Summary: "exit the fix worktree (cwd → repoRoot) and sync main; `/gtw back <branch>` jumps into the worktree of that branch", Usage: "/gtw back [<branch>]"},
 			{Name: "commit", Summary: "commit uncommitted work via the configured agent", Usage: "/gtw commit [-a <agent>]"},
 			{Name: "push", Summary: "push the worktree branch (clean only — refuses dirty)"},

@@ -463,6 +463,28 @@ func TestRunClose_ModeRemote_ResetReturnsTheIssueToTheQueue(t *testing.T) {
 	}
 }
 
+// TestRunClose_ModeRemote_RestoreKeepsAPreexistingDone pins that
+// the restore puts the issue back exactly as it was: a `nightme/done`
+// the issue already carried (left by an earlier cycle) is not a
+// label this close added, so the restore must leave it on.
+func TestRunClose_ModeRemote_RestoreKeepsAPreexistingDone(t *testing.T) {
+	wt := t.TempDir()
+	repoRoot := t.TempDir()
+
+	rig := newCloseRig(t)
+	prov := newFakeGitProvider(ProviderGitHub, "github.com")
+	seedFixRemote(t, rig, prov, wt, repoRoot)
+	seedRemoteLabels(t, prov, LabelAssigned, LabelWIP, LabelDone)
+	rig.git.worktreeRemoveErr = &fakeExitError{code: 128, msg: "worktree remove failed"}
+
+	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false); err != nil {
+		t.Fatalf("RunClose: %v", err)
+	}
+
+	// The pre-close label set, exactly.
+	assertLabels(t, prov, LabelAssigned, LabelWIP, LabelDone)
+}
+
 // --- the `--reset` flag on the command line ---
 
 // TestCloseCmdSpec pins the argv grammar: `--reset` is a boolean

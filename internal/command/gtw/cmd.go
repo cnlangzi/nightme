@@ -299,7 +299,7 @@ func (f *Factory) Spec() command.Spec {
 			"/gtw fix <issue-id> [-y|--yes]   claim, label, and create a worktree\n" +
 			"/gtw fix * [-y|--yes]            pick the next assigned issue and fix it\n" +
 			"/gtw fix --name <branch>          create a local worktree (no issue)\n" +
-			"/gtw close                        tear down the worktree, delete the branch, and sync main\n" +
+			"/gtw close [--reset]              finalize the issue labels, tear down the worktree, and sync main\n" +
 			"/gtw back                         exit the fix worktree (cwd → repoRoot) and sync main — worktree preserved\n" +
 			"/gtw back <branch>                 enter the worktree whose branch starts with <branch> (cwd → worktree); repairs a missing .nightme/gtw.yml\n" +
 			"/gtw commit [-a <agent>]          commit uncommitted work via the configured agent (no push)\n" +
@@ -326,7 +326,7 @@ func (f *Factory) Spec() command.Spec {
 				Summary: "claim an issue, create a worktree, dispatch to the agent",
 				Usage:   fixCmdSpec.Usage,
 			},
-			{Name: "close", Summary: "tear down the worktree, delete the branch, and sync main"},
+			{Name: "close", Summary: "finalize the issue labels, tear down the worktree, delete the branch, and sync main", Usage: closeCmdSpec.Usage},
 			{Name: "back", Summary: "exit the fix worktree (cwd → repoRoot) and sync main; `/gtw back <branch>` jumps into the worktree of that branch", Usage: "/gtw back [<branch>]"},
 			{Name: "commit", Summary: "commit uncommitted work via the configured agent", Usage: "/gtw commit [-a <agent>]"},
 			{Name: "push", Summary: "push the worktree branch (clean only — refuses dirty)"},
@@ -786,6 +786,24 @@ func parseFixArgs(argv []string) (fixArgs, error) {
 	}
 }
 
+// closeCmdSpec is the argv grammar for /gtw close.
+//
+// `--reset` clears the issue's `nightme/*` state labels without
+// marking the work done: the default close puts `nightme/done` on the
+// issue, `--reset` only takes the state labels off.
+//
+// The flag is boolean — it takes no value — so `--reset` alone is the
+// whole argument.
+var closeCmdSpec = command.CmdSpec{
+	Name:  "/gtw close",
+	Usage: "/gtw close [--reset]",
+	Flags: map[string]command.FlagSpec{
+		"--reset": {Name: "reset"},
+	},
+	MinArgs: 0,
+	MaxArgs: 0,
+}
+
 // runClose handles `/gtw close`. Tears down the worktree
 // created by `/gtw fix`, deletes the local branch, switches CWD
 // back to the main repo, clears gtw state, and then runs the
@@ -794,11 +812,12 @@ func parseFixArgs(argv []string) (fixArgs, error) {
 // See wip/gtw.md §14.5 for the full flow and RunClose for the
 // implementation.
 //
-// No flags — close is intentionally all-or-nothing. If the
-// worktree is dirty the user must commit / stash / discard
-// before re-running; we don't expose a force-escape hatch.
-// Neither /gtw close nor /gtw fix exposes a --force: stale
-// worktree paths are cleaned manually via
+// One flag: `--reset` clears the issue's state labels instead of
+// marking the work done. Close is otherwise intentionally
+// all-or-nothing — if the worktree is dirty the user must commit /
+// stash / discard before re-running; we don't expose a
+// force-escape hatch. Neither /gtw close nor /gtw fix exposes a
+// --force: stale worktree paths are cleaned manually via
 // `git worktree remove --force <path>` or by re-running
 // `/gtw close` after the user has unblocked the worktree.
 //
@@ -807,33 +826,30 @@ func parseFixArgs(argv []string) (fixArgs, error) {
 // reply path is RunClose's own cs.Emitter() (no extra wiring).
 // Wrapped in withHooks so close.before / close.after fire.
 func (f *Factory) runClose(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
-	// Issue #291: /gtw close takes no flags and no positional
-	// args, so anything in the tail is a user mistake — most
+	// Issue #291: /gtw close takes no positional args, so anything
+	// in the tail that is not `--reset` is a user mistake — most
 	// importantly `/gtw close --force`, which the F-XX removal
-	// note explicitly tells users not to expect. Before this
-	// gate the token was silently swallowed and the close ran
-	// anyway, so the user got no signal that --force did nothing.
-	if _, err := command.ParseCmdArgs(input.Args[2:], command.CmdSpec{
-		Name:    "/gtw close",
-		Usage:   "/gtw close",
-		MinArgs: 0,
-		MaxArgs: 0,
-	}); err != nil {
+	// note explicitly tells users not to expect. Before this gate
+	// the token was silently swallowed and the close ran anyway, so
+	// the user got no signal that --force did nothing.
+	parsed, err := command.ParseCmdArgs(input.Args[2:], closeCmdSpec)
+	if err != nil {
 		reportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ %v", err),
 			Consumed: true,
 		}, nil
 	}
+	reset := parsed.Bool("reset")
 
 	cfg, loadNotes := Load()
 
 	hc := f.deriveHookContext(ctx, cs, "close")
 	hcFn := func() HookContext { return hc }
-	err := f.withHooks(ctx, cs, input.ChatID, input.MessageID,
+	err = f.withHooks(ctx, cs, input.ChatID, input.MessageID,
 		loadNotes, hcFn, cfg.Close.Hooks.Before, cfg.Close.Hooks.After,
 		func() error {
-			res, e := RunClose(ctx, cs, f.deps, input.ChatID, input.MessageID)
+			res, e := RunClose(ctx, cs, f.deps, input.ChatID, input.MessageID, reset)
 			_ = res // RunClose already sent the reply via cs.Emitter()
 			// RunClose tears down the worktree + branch +
 			// .nightme/gtw.yml and resets cs.SelectedCwd

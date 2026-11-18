@@ -83,13 +83,17 @@ func isGroupTimeout(err error) bool {
 
 // timedOutGroupNames names the groups of a run that timed out. The
 // count of the timed-out groups is the length of the slice.
+//
+// The names go through the same code-span rule the verdict's failure
+// block uses: a glob carries markdown metacharacters, and a glob left
+// bare in the markdown stream turns the text around it bold.
 func timedOutGroupNames(outcomes []reviewOutcome) []string {
 	var names []string
 	for _, o := range outcomes {
 		if !isGroupTimeout(o.err) {
 			continue
 		}
-		names = append(names, agent.ReviewGroupName(o.source, o.pattern))
+		names = append(names, agent.CodeSpan(agent.ReviewGroupName(o.source, o.pattern)))
 	}
 	return names
 }

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -174,11 +175,11 @@ func TestFixRemote_AddIssueLabelFailure_NamesStaleCatalog(t *testing.T) {
 	}
 }
 
-// TestRunClose_UnreadableCatalog_ClosesWithoutWarning pins that
-// the close reads no label catalog at all: a repository whose
-// catalog cannot be read does not slow the close down, and no
-// reply of the close carries a warning line.
-func TestRunClose_UnreadableCatalog_ClosesWithoutWarning(t *testing.T) {
+// TestRunClose_UnreadableCatalog_ClosesWithWarning pins that a
+// failing catalog check does not stop the close: the check warns,
+// the labels are finalised anyway, and the warning rides along on
+// the close's card.
+func TestRunClose_UnreadableCatalog_ClosesWithWarning(t *testing.T) {
 	wt := t.TempDir()
 	repoRoot := t.TempDir()
 
@@ -187,7 +188,7 @@ func TestRunClose_UnreadableCatalog_ClosesWithoutWarning(t *testing.T) {
 	prov.SetListLabelsErr(errors.New("403 Forbidden: missing Labels read scope"))
 	seedFixRemote(t, rig, prov, wt, repoRoot)
 
-	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1"); err != nil {
+	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false); err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
 
@@ -196,12 +197,18 @@ func TestRunClose_UnreadableCatalog_ClosesWithoutWarning(t *testing.T) {
 	if !strings.Contains(last, "closed") {
 		t.Errorf("reply must report the close:\n%s", last)
 	}
-	if strings.Contains(last, "⚠️") {
-		t.Errorf("reply must not carry a warning line:\n%s", last)
+	// The warning names the failed check.
+	if !strings.Contains(last, "⚠️ could not ensure gtw labels on cnlangzi/nightme") {
+		t.Errorf("reply must carry the warning line:\n%s", last)
 	}
-	// The catalog was never read — the close is a local teardown.
-	if n := len(prov.CallsByMethod("ListLabels")); n != 0 {
-		t.Errorf("ListLabels calls = %d, want 0 (the close reads no catalog)", n)
+	// The catalog was read — the close attaches a label of its own.
+	if n := len(prov.CallsByMethod("ListLabels")); n != 1 {
+		t.Errorf("ListLabels calls = %d, want 1 (the close checks the catalog)", n)
+	}
+	// The issue was finalised despite the failed check.
+	got := prov.IssueLabels(42)
+	if !slices.Contains(got, LabelDone) {
+		t.Errorf("issue labels = %v, want %q to be present", got, LabelDone)
 	}
 }
 

@@ -255,7 +255,7 @@ func TestReviewTimeoutNotice_NamesEveryGroup(t *testing.T) {
 		{pattern: "**/*.ts", err: &agent.GroupTimeoutError{Group: "**/*.ts", Timeout: time.Minute}},
 	}
 	got := reviewTimeoutNotice(outcomes, time.Minute)
-	for _, want := range []string{"2 of 2 subagents timed out", "**/*.go, **/*.ts"} {
+	for _, want := range []string{"2 of 2 subagents timed out", "`**/*.go`, `**/*.ts`"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("the notice does not carry %q: %s", want, got)
 		}
@@ -287,9 +287,12 @@ func TestReviewVerdict_MarksTheTimedOutGroup(t *testing.T) {
 		},
 	}
 	got := reviewVerdict(outcomes, nil)
-	want := "failed: system / **/*.go (timed out) → /review --continue"
-	if !strings.Contains(got, want) {
-		t.Errorf("the verdict does not carry %q: %s", want, got)
+	want := "⚠️ review · 1 subagent · 0 findings\n\n" +
+		"❌ **1 of 1 subagent failed**\n" +
+		"- `system / **/*.go` (timed out)\n\n" +
+		"💡 hint: run `/review --continue` to continue the failed groups"
+	if got != want {
+		t.Errorf("the verdict is:\n%s\nwant:\n%s", got, want)
 	}
 }
 

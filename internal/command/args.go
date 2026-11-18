@@ -270,7 +270,7 @@ func (s CmdSpec) checkArity(args []string) error {
 		// mistake is a stray word, not a miscount. When the spec
 		// also declares no flags, collapse "no positional args
 		// (/cmd takes no flags)" into one statement so the
-		// message reads cleanly for the /stop / /gtw close case.
+		// message reads cleanly for the /stop case.
 		if len(s.Flags) == 0 {
 			return fmt.Errorf("unexpected positional argument %q: %s takes no arguments%s",
 				args[0], s.name(), s.usageTail())

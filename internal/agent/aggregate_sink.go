@@ -1091,7 +1091,7 @@ func (a *eventAggregator) announceGroup(state *perJobState, ev AgentEvent) {
 	}
 	a.emitOne(AgentEvent{
 		Kind:      EventAgentThinking,
-		Text:      fmt.Sprintf("▶ **[%d] %s** — %s", state.index+1, g.Label, pluralFiles(len(g.Files))),
+		Text:      fmt.Sprintf("▶ **[%d] %s** — %s", state.index+1, CodeSpan(g.Label), pluralFiles(len(g.Files))),
 		SessionID: ev.SessionID,
 		Model:     ev.Model,
 		AgentName: ev.AgentName,

@@ -756,10 +756,9 @@ func TestHandle_ContinuationVerdictCarriesTheDigest(t *testing.T) {
 
 	verdict := em.waitForOutReply(t, "**high** · 2")
 	for _, want := range []string{
-		"| path | content |",
-		"| --- | --- |",
-		"| a.go:42 | the first finding |",
-		"| b.go:7 | the second finding |",
+		"| path |\n| --- |\n",
+		"| a.go:42 |",
+		"| b.go:7 |",
 	} {
 		if !strings.Contains(verdict.Text, want) {
 			t.Errorf("the verdict does not carry %q:\n%s", want, verdict.Text)

@@ -7,12 +7,12 @@
 //  2. the findings — each group's findings, one reply per group, in
 //     the thread;
 //  3. the verdict line — what the run found, in one line, followed by
-//     the digest: the findings as one table per severity, so the card
-//     answers "what was found" on its own.
+//     the digest: the findings as one table per severity, one row per
+//     finding, holding where the finding is and what kind it is.
 //
 // The merged body is NOT one of them: it is the main agent's input,
 // not the channel's. The thread carries the findings; the card
-// carries their digest.
+// carries their index.
 
 package review
 
@@ -30,13 +30,26 @@ import (
 // reviewPromptFrame is the instruction appended to the review text
 // injected into the chat session's agent session.
 //
-// The findings already reached the chat through the thread. Without
-// this instruction the agent's answer becomes a third copy of them;
-// with it, the agent answers with a verdict and the next step.
-const reviewPromptFrame = "\n\n---\n\n" +
-	"Answer with a verdict and the next step: which findings block the merge, " +
-	"how severe they are, and what you would do next. Do not restate the " +
-	"findings — they are in this message and in the chat already."
+// The card's digest lists where the findings are, not what they say,
+// so the finding text reaches the reader in one of two places: the
+// thread, which the chat's /think decides, or the agent's answer.
+// With /think on the findings are already in the thread and the agent
+// must not copy them; with /think off — the default — the thread
+// carries nothing, and the agent's answer is the reader's only view
+// of what the findings say.
+func reviewPromptFrame(thinkShows bool) string {
+	if thinkShows {
+		return "\n\n---\n\n" +
+			"Answer with a verdict and the next step: which findings block the merge, " +
+			"how severe they are, and what you would do next. Do not restate the " +
+			"findings — they are in this message and in the chat already."
+	}
+	return "\n\n---\n\n" +
+		"Answer with a verdict and the next step: which findings block the merge, " +
+		"how severe they are, what each of them says, and what you would do next. " +
+		"The chat shows where the findings are, not what they say — state the ones " +
+		"that block the merge."
+}
 
 // renderPlanLine renders the plan of a review run: the runner, the
 // rule set the review ran against, the subagent count, and one entry
@@ -348,9 +361,11 @@ func failedOutcomes(outcomes []reviewOutcome) []reviewOutcome {
 // built from the same parsed reports the verdict line counts, so the
 // two can never disagree.
 //
-// Every finding of the run is in the digest, with its content in
-// full. The review layer carries no channel-length policy: how a
-// long body reaches the chat is the channel's business.
+// The digest is an index of the findings, not their prose: a row
+// names where the finding is and what kind it is. The finding's text
+// stays in the main agent's input, and reaches the reader through the
+// thread (/think on) or the main agent's answer (/think off), so the
+// card stays proportional to the number of findings.
 //
 // A run with no findings produces no digest: the verdict message is
 // then the verdict line alone.
@@ -403,9 +418,9 @@ func digestTables(findings []agent.ReviewFinding) []digestTable {
 			break
 		}
 	}
-	header := "| path | content |\n| --- | --- |\n"
+	header := "| path |\n| --- |\n"
 	if hasCategory {
-		header = "| path | category | content |\n| --- | --- | --- |\n"
+		header = "| path | category |\n| --- | --- |\n"
 	}
 	buckets := make(map[string][]agent.ReviewFinding, len(agent.SeverityOrder()))
 	for _, f := range findings {
@@ -426,15 +441,14 @@ func digestTables(findings []agent.ReviewFinding) []digestTable {
 	return tables
 }
 
-// digestRow renders one finding as a table row.
+// digestRow renders one finding as a table row: where the finding is
+// and, when the run carries a category column, what kind it is.
 func digestRow(f agent.ReviewFinding, hasCategory bool) string {
-	var b strings.Builder
-	b.WriteString("| " + digestPath(f) + " | ")
+	row := "| " + digestPath(f) + " |"
 	if hasCategory {
-		b.WriteString(digestCategory(f) + " | ")
+		row += " " + digestCategory(f) + " |"
 	}
-	b.WriteString(digestContent(f.Content) + " |\n")
-	return b.String()
+	return row + "\n"
 }
 
 // digestFindings returns the run's findings in the order the digest
@@ -497,11 +511,6 @@ func digestCategory(f agent.ReviewFinding) string {
 		return "—"
 	}
 	return category
-}
-
-// digestContent renders a finding's text: sanitized, in full.
-func digestContent(content string) string {
-	return sanitizeCell(content)
 }
 
 // sanitizeCell makes a cell safe to render inside a markdown table
@@ -573,9 +582,10 @@ func planObserver(ctx context.Context, em messages.Emitter, collector *outcomeCo
 // as a reply, so it reaches the card whatever the chat's /think
 // setting says.
 //
-// The message carries every finding of the run. How a long body
-// reaches the chat is the channel's business — the review layer
-// holds no length budget of its own.
+// The message carries an index of the run's findings, not their
+// prose: the card stays proportional to the number of findings, and
+// the finding text reaches the reader through the thread (/think on)
+// or the main agent's answer (/think off).
 func sendVerdict(ctx context.Context, em messages.Emitter, chatID, replyTo, runner string,
 	result agent.RunResult, outcomes []reviewOutcome, plan []agent.ReviewPlanGroup,
 ) {

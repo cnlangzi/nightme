@@ -14,7 +14,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/messages"
@@ -233,15 +232,15 @@ func TestReviewDigest_GroupsBySeverity(t *testing.T) {
 
 	got := reviewDigest(outcomes, plan)
 	want := "**high** · 2\n" +
-		"| path | content |\n" +
-		"| --- | --- |\n" +
-		"| a.go:42 | first |\n" +
-		"| b.go:7 | second |\n" +
+		"| path |\n" +
+		"| --- |\n" +
+		"| a.go:42 |\n" +
+		"| b.go:7 |\n" +
 		"\n" +
 		"**low** · 1\n" +
-		"| path | content |\n" +
-		"| --- | --- |\n" +
-		"| c.ts:3 | third |"
+		"| path |\n" +
+		"| --- |\n" +
+		"| c.ts:3 |"
 	if got != want {
 		t.Errorf("the digest is:\n%s\nwant:\n%s", got, want)
 	}
@@ -286,8 +285,8 @@ func TestReviewDigest_CategoryColumn(t *testing.T) {
 	}
 
 	got := reviewDigest(plain, nil)
-	if !strings.Contains(got, "| path | content |") {
-		t.Errorf("the table has no content column:\n%s", got)
+	if !strings.Contains(got, "| path |\n| --- |\n") {
+		t.Errorf("the table has no path column:\n%s", got)
 	}
 	if strings.Contains(got, "category") {
 		t.Errorf("the table has a category column although no finding named one:\n%s", got)
@@ -301,35 +300,33 @@ func TestReviewDigest_CategoryColumn(t *testing.T) {
 	}
 
 	got = reviewDigest(mixed, nil)
-	if !strings.Contains(got, "| path | category | content |") {
+	if !strings.Contains(got, "| path | category |\n") {
 		t.Errorf("the table has no category column:\n%s", got)
 	}
-	if !strings.Contains(got, "| --- | --- | --- |") {
+	if !strings.Contains(got, "| --- | --- |\n") {
 		t.Errorf("the separator row does not have one dash per column:\n%s", got)
 	}
-	if !strings.Contains(got, "| b.go:7 | — | second |") {
+	if !strings.Contains(got, "| b.go:7 | — |") {
 		t.Errorf("the finding without a category does not show the em dash:\n%s", got)
 	}
 }
 
 // TestReviewDigest_Sanitizes: a cell stays one line — a pipe becomes
-// a slash, a line break a space — and the content is rendered in
-// full.
+// a slash, a line break or a tab a space — and the cell is trimmed.
 func TestReviewDigest_Sanitizes(t *testing.T) {
 	outcomes := []reviewOutcome{
 		{pattern: "**/*.go", report: agent.ReviewReport{Parsed: true, Findings: []agent.ReviewFinding{
-			{Path: "a.go", Line: "42", Severity: agent.SeverityHigh, Content: "a | b\nc"},
-			{Path: "b.go", Severity: agent.SeverityHigh, Content: strings.Repeat("错", 300)},
+			{Path: "a.go|", Line: "42", Severity: agent.SeverityHigh, Category: "error | handling\nx\ty"},
+			{Path: " b.go ", Severity: agent.SeverityHigh},
 		}}},
 	}
 
 	got := reviewDigest(outcomes, nil)
-	if !strings.Contains(got, "| a.go:42 | a / b c |") {
+	if !strings.Contains(got, "| a.go/:42 | error / handling x y |") {
 		t.Errorf("the cell was not sanitized:\n%s", got)
 	}
-	full := strings.Repeat("错", 300)
-	if !strings.Contains(got, "| b.go | "+full+" |") {
-		t.Errorf("the content was not rendered in full:\n%s", got)
+	if !strings.Contains(got, "| b.go | — |") {
+		t.Errorf("the cell was not trimmed:\n%s", got)
 	}
 }
 
@@ -359,7 +356,7 @@ func TestReviewDigest_SkipsFailedGroups(t *testing.T) {
 	if strings.Contains(got, "**/*.go") {
 		t.Errorf("the failed group reached the digest:\n%s", got)
 	}
-	if !strings.Contains(got, "| c.ts:3 | the ts finding |") {
+	if !strings.Contains(got, "| c.ts:3 |") {
 		t.Errorf("the digest does not carry the finished group's finding:\n%s", got)
 	}
 }
@@ -423,13 +420,16 @@ func TestSendVerdict_CarriesTheWholeDigest(t *testing.T) {
 	if strings.Contains(text, "more findings") {
 		t.Errorf("the verdict message names findings it left out:\n%s", text)
 	}
+	if prose := strings.Repeat("错", 80); strings.Contains(text, prose) {
+		t.Errorf("the verdict message carries the findings' prose:\n%s", text)
+	}
 }
 
-// TestSendVerdict_CarriesEveryFindingInFull: the verdict message
-// holds every finding's content in full, and the message grows past
-// the length the review layer used to hold it to — nothing is cut to
-// make the body fit a channel.
-func TestSendVerdict_CarriesEveryFindingInFull(t *testing.T) {
+// TestSendVerdict_CarriesEveryLocationAndNoProse: the verdict
+// message holds every finding's location and none of their prose —
+// the card is an index of the findings, their text stays in the
+// thread and in the main agent's input.
+func TestSendVerdict_CarriesEveryLocationAndNoProse(t *testing.T) {
 	var findings []agent.ReviewFinding
 	for i := 0; i < 40; i++ {
 		findings = append(findings, agent.ReviewFinding{
@@ -451,12 +451,12 @@ func TestSendVerdict_CarriesEveryFindingInFull(t *testing.T) {
 	}
 	text := msgs[0].Text
 	for i := range findings {
-		if want := fmt.Sprintf("finding %d: ", i); !strings.Contains(text, want) {
+		if want := fmt.Sprintf("internal/agent/review.go:%d", 100+i); !strings.Contains(text, want) {
 			t.Errorf("the verdict message does not carry %q:\n%s", want, text)
 		}
-	}
-	if n := utf8.RuneCountInString(text); n <= 1900 {
-		t.Errorf("the verdict message is %d runes, under the length the review layer used to hold it to:\n%s", n, text)
+		if prose := fmt.Sprintf("finding %d: ", i); strings.Contains(text, prose) {
+			t.Errorf("the verdict message carries the finding's prose %q:\n%s", prose, text)
+		}
 	}
 }
 
@@ -537,8 +537,8 @@ func TestSendVerdict_CarriesTheDigest(t *testing.T) {
 	for _, want := range []string{
 		"1 subagent",
 		"**high** · 1",
-		"| path | category | content |",
-		"| a.go:42 | error-handling | the finding |",
+		"| path | category |",
+		"| a.go:42 | error-handling |",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("the verdict message does not carry %q:\n%s", want, text)
@@ -555,6 +555,27 @@ func TestSendVerdict_CarriesTheDigest(t *testing.T) {
 	}
 	if text := msgs[0].Text; strings.Contains(text, "|") || strings.HasSuffix(text, "\n") {
 		t.Errorf("the verdict message of a run without findings changed:\n%q", text)
+	}
+}
+
+// TestReviewPromptFrame_FollowsTheThinkMode: the frame asks the
+// agent to state the findings' substance when the thread carries
+// none, and to leave them alone when the thread already has them.
+//
+// The card's digest lists only the locations, so with /think off the
+// agent's answer is the reader's only view of what the findings say.
+func TestReviewPromptFrame_FollowsTheThinkMode(t *testing.T) {
+	shown := reviewPromptFrame(true)
+	if !strings.Contains(shown, "Do not restate the findings") {
+		t.Errorf("the frame lets the agent copy the findings the thread already carries:\n%s", shown)
+	}
+
+	hidden := reviewPromptFrame(false)
+	if strings.Contains(hidden, "Do not restate the findings") {
+		t.Errorf("the frame tells the agent to withhold the findings the chat no longer shows:\n%s", hidden)
+	}
+	if !strings.Contains(hidden, "what each of them says") {
+		t.Errorf("the frame does not ask for the findings' substance:\n%s", hidden)
 	}
 }
 
@@ -729,7 +750,7 @@ func waitForBlocks(t *testing.T, d *recordingDriver, n int) []agent.ContentBlock
 // TestHandle_ReviewDeliversThePlanAndTheVerdict: the channel sees
 // the plan first and the verdict last, and never the merged body —
 // the merged text goes to the main agent's session instead, with the
-// instruction to answer with a verdict rather than restate it.
+// instruction to answer with a verdict and the next step.
 func TestHandle_ReviewDeliversThePlanAndTheVerdict(t *testing.T) {
 	agents := newTestAgents(t)
 	starter := &planReviewStarter{
@@ -791,6 +812,47 @@ func TestHandle_ReviewDeliversThePlanAndTheVerdict(t *testing.T) {
 	}
 	if !strings.Contains(injected, "verdict") {
 		t.Errorf("the injected turn does not ask for a verdict:\n%s", injected)
+	}
+}
+
+// TestHandle_ReviewFrameFollowsTheChat: the injected turn asks the
+// agent to state the findings when the chat's /think keeps the
+// thread empty, and to leave them alone when the thread has them.
+//
+// The card's digest lists only the locations — with /think off the
+// agent's answer is the reader's only view of what the findings say.
+func TestHandle_ReviewFrameFollowsTheChat(t *testing.T) {
+	agents := newTestAgents(t)
+	starter := &planReviewStarter{
+		name:   "review-frame-agent",
+		groups: []agent.ReviewPlanGroup{{Pattern: "**/*.go", Label: "**/*.go", Files: []string{"a.go"}}},
+		merged: "### Group: pattern **/*.go — files: a.go\n\nthe go findings\n\n",
+	}
+	agents.registry.Register(starter)
+
+	hiddenEmitter := newRecordingEmitter()
+	const hiddenChat = "review-frame-hidden-chat"
+	hiddenSession, hiddenDriver := newContinueChatSession(t, hiddenChat, starter.name, t.TempDir(), hiddenEmitter)
+
+	f := NewFactory()
+	dispatchContinue(t, f, hiddenSession, hiddenChat, "review")
+
+	hidden := waitForBlocks(t, hiddenDriver, 1)[0].Text
+	if !strings.Contains(hidden, "what each of them says") {
+		t.Errorf("the injected turn does not ask for the findings the chat does not show:\n%s", hidden)
+	}
+
+	shownEmitter := newRecordingEmitter()
+	const shownChat = "review-frame-shown-chat"
+	shownSession, shownDriver := newContinueChatSession(t, shownChat, starter.name, t.TempDir(), shownEmitter)
+	enableThink(t, shownSession)
+
+	shown := NewFactory()
+	dispatchContinue(t, shown, shownSession, shownChat, "review")
+
+	injected := waitForBlocks(t, shownDriver, 1)[0].Text
+	if !strings.Contains(injected, "Do not restate the findings") {
+		t.Errorf("the injected turn lets the agent copy the findings the thread already carries:\n%s", injected)
 	}
 }
 
@@ -915,10 +977,10 @@ func TestHandle_ReviewVerdictCarriesTheDigest(t *testing.T) {
 		"2 subagents",
 		"2 high",
 		"**high** · 2",
-		"| path | category | content |",
-		"| --- | --- | --- |",
-		"| file1.go:1 | correctness | issue 1 in group 1 |",
-		"| file2.go:2 | correctness | issue 2 in group 2 |",
+		"| path | category |",
+		"| --- | --- |",
+		"| file1.go:1 | correctness |",
+		"| file2.go:2 | correctness |",
 	} {
 		if !strings.Contains(verdict.Text, want) {
 			t.Errorf("the verdict does not carry %q:\n%s", want, verdict.Text)

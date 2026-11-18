@@ -12,6 +12,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/httpclient"
+	"github.com/cnlangzi/nightme/internal/yamlfile"
 )
 
 // validWorkflow is a workflow the hub could serve.
@@ -447,8 +448,8 @@ func TestWriteFile_LeavesNoPartialFile(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "nightme")
 	path := filepath.Join(dir, "coder.yml")
 
-	if err := writeFile(path, []byte(validWorkflow)); err != nil {
-		t.Fatalf("writeFile: %v", err)
+	if err := yamlfile.WriteFileAtomic(path, []byte(validWorkflow)); err != nil {
+		t.Fatalf("WriteFileAtomic: %v", err)
 	}
 	content, err := os.ReadFile(path)
 	if err != nil {
@@ -474,8 +475,8 @@ func TestWriteFile_ReplacesTheFileThatIsThere(t *testing.T) {
 	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if err := writeFile(path, []byte("new")); err != nil {
-		t.Fatalf("writeFile: %v", err)
+	if err := yamlfile.WriteFileAtomic(path, []byte("new")); err != nil {
+		t.Fatalf("WriteFileAtomic: %v", err)
 	}
 	content, err := os.ReadFile(path)
 	if err != nil {

@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/httpclient"
@@ -147,32 +145,4 @@ func httpClient() *http.Client {
 func sha256hex(content []byte) string {
 	sum := sha256.Sum256(content)
 	return hex.EncodeToString(sum[:])
-}
-
-// writeFile writes the content to path atomically.
-//
-// The content goes into a temporary file in the destination's own
-// directory and is renamed over the target: a reader never sees a
-// half-written workflow, and an interrupted write leaves nothing
-// behind. The directory is created when it is missing.
-func writeFile(path string, content []byte) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp*")
-	if err != nil {
-		return err
-	}
-	name := tmp.Name()
-	defer func() { _ = os.Remove(name) }()
-
-	if _, err := tmp.Write(content); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return replaceFile(name, path)
 }

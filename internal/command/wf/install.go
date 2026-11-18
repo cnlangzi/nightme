@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/yamlfile"
 	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
@@ -167,7 +168,7 @@ func (f *Factory) install(ctx context.Context, list *checklist, addr Address) Re
 	default:
 		reason = ReasonInstalled
 	}
-	if err := writeFile(path, content); err != nil {
+	if err := yamlfile.WriteFileAtomic(path, content); err != nil {
 		list.set(rowInstall, agent.TaskFailed, err.Error())
 		_ = list.send()
 		result.Reason = ReasonWriteFailed

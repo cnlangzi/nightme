@@ -86,7 +86,7 @@ type richTurn struct {
 
 	// taskList is the most recent task snapshot. Same render path
 	// as chain.chunks[0].taskList.
-	taskList []taskListItem
+	taskList []agent.AgentTaskItem
 
 	// footer is the most recent StatusBar footer. Set by footer-
 	// bearing events; nil until first such event.
@@ -106,18 +106,6 @@ type richTurn struct {
 	// Set by sendOutResultMessage when it ships a rich path. Zero
 	// when no OutResult was sent this turn.
 	resultMessageID int64
-}
-
-// taskListItem is the minimal task snapshot the rich turn renders.
-// It mirrors the chain's agent.AgentTaskItem shape — kept local so
-// the rich file does not carry the whole agent event. The state of
-// the row is the agent's own, so the marker of the state is the one
-// every channel draws.
-type taskListItem struct {
-	Status     agent.AgentTaskStatus
-	ID         string
-	Subject    string
-	ActiveForm string
 }
 
 // Append a text body to the rich turn. Returns an error if the
@@ -393,7 +381,7 @@ func (a *Adapter) setRichTurnTaskList(
 	chatID string,
 	topicID int,
 	userMessageID int,
-	items []taskListItem,
+	items []agent.AgentTaskItem,
 	footer []string,
 ) {
 	turn := a.richTurns.getOrCreate(chatID, topicID, userMessageID)
@@ -688,7 +676,7 @@ const (
 	richTurnTaskListHeadline            = "📋 Tasks"
 	richTurnTaskListBudgetRunes         = 3000
 	richTurnTaskListMore                = "…"
-	richTurnTaskListOverflowPlaceholder = "• …"
+	richTurnTaskListOverflowPlaceholder = "1. [ ] …"
 )
 
 // renderRichTurnTaskListBlock builds the heading + native list
@@ -703,21 +691,15 @@ const (
 // can be in is rendered: a task that failed or was cancelled is a row
 // the operator has to see. A deleted task is not: the bridges drop
 // it before they emit the snapshot.
-func renderRichTurnTaskListBlocks(items []taskListItem) ([]map[string]any, bool) {
+//
+// The text of a row is the shared row of agent.VisibleTaskRows,
+// number included: Telegram's `list` block has no ordered flag, so
+// the number rides in the text of the item.
+func renderRichTurnTaskListBlocks(items []agent.AgentTaskItem) ([]map[string]any, bool) {
 	if len(items) == 0 {
 		return nil, false
 	}
-
-	visible := make([]taskListItem, 0, len(items))
-	for _, it := range items {
-		// Filter TaskDeleted defensively: the bridge is supposed to
-		// remove deleted tasks before emitting, but a corrupt snapshot
-		// must not produce a visible "deleted" row.
-		if it.Status == agent.TaskDeleted {
-			continue
-		}
-		visible = append(visible, it)
-	}
+	visible := agent.VisibleTaskRows(items)
 	if len(visible) == 0 {
 		return nil, false
 	}
@@ -727,8 +709,7 @@ func renderRichTurnTaskListBlocks(items []taskListItem) ([]map[string]any, bool)
 	const truncationSuffixRunes = 2
 	rowTexts := make([]string, 0, len(visible))
 	total := headlineRunes
-	for _, it := range visible {
-		rowText := renderTaskRowText(it)
+	for _, rowText := range visible {
 		cost := utf8.RuneCountInString(rowText) + 1 // +1 for inter-row separator
 		if total+cost+truncationSuffixRunes > richTurnTaskListBudgetRunes {
 			break
@@ -760,22 +741,4 @@ func renderRichTurnTaskListBlocks(items []taskListItem) ([]map[string]any, bool)
 		{"type": "heading", "text": richTurnTaskListHeadline, "size": 1},
 		{"type": "list", "items": items2},
 	}, true
-}
-
-// renderTaskRowText formats one task row for the rich block list.
-// The row carries the marker of its state and the detail of the row,
-// so a task that failed never reads like a task that has not
-// started. Subject is trimmed; whitespace-only Subject falls back to
-// the (also-trimmed) ID so a malformed snapshot yields the ID rather
-// than an empty row.
-func renderTaskRowText(it taskListItem) string {
-	subject := strings.TrimSpace(it.Subject)
-	if subject == "" {
-		subject = strings.TrimSpace(it.ID)
-	}
-	row := agent.TaskStatusMarker(it.Status) + " " + subject
-	if detail := strings.TrimSpace(it.ActiveForm); detail != "" {
-		row += " (" + detail + ")"
-	}
-	return row
 }

@@ -74,13 +74,22 @@ func TestTheRunCardCarriesTheOverviewOfTheRun(t *testing.T) {
 	overview := entries[0]
 	for _, want := range []string{
 		"**one** — Do the one thing.",
-		"1 round · 1 job · 1 step · started ",
-		"jobs:",
-		"  - main",
-		"     - commit",
+		"→ rounds:  1 round",
+		"→ jobs:    1 · steps: 1",
+		"→ started: ",
+		"→ main:    commit",
 	} {
 		if !strings.Contains(overview, want) {
 			t.Errorf("the overview does not carry %q: %q", want, overview)
+		}
+	}
+	// The jobs are a flow row each, not a nested list.
+	for _, line := range strings.Split(overview, "\n") {
+		if strings.HasPrefix(line, "  - ") || strings.HasPrefix(line, "     - ") {
+			t.Errorf("the overview carries a nested list item: %q", overview)
+		}
+		if line == "jobs:" {
+			t.Errorf("the overview carries a jobs list: %q", overview)
 		}
 	}
 	// The first line names the run.
@@ -129,7 +138,7 @@ func TestTheRoundCardNamesTheRunItBelongsTo(t *testing.T) {
 	if len(entries) == 0 {
 		t.Fatal("the card of the round carries no entry")
 	}
-	if !strings.HasPrefix(entries[0], "Run: one-") {
+	if !strings.HasPrefix(entries[0], "→ run: one-") {
 		t.Errorf("the block does not name the run: %q", entries[0])
 	}
 	var named bool
@@ -301,8 +310,8 @@ func TestTheRoundCardCarriesTheStepsOfTheRound(t *testing.T) {
 			round = m.TaskList.Items[0].Subject
 		}
 	}
-	if !strings.Contains(round, "/gtw commit") {
-		t.Errorf("the checklist of the round is %q, want the step of the round", round)
+	if round != "commit" {
+		t.Errorf("the checklist of the round is %q, want the id of the step", round)
 	}
 }
 
@@ -332,12 +341,12 @@ func TestTheRunBlockListsTheRoundsThatHaveFinished(t *testing.T) {
 	}
 
 	block := r.runBlock()
-	if !strings.HasPrefix(block, "Run: one-") {
+	if !strings.HasPrefix(block, "→ run:     one-") {
 		t.Errorf("the block does not name the run: %q", block)
 	}
 	for _, want := range []string{
-		"|- round 1: main · 14:07:41",
-		"|- round 2: main · 14:08:41",
+		"→ round 1: main · 14:07:41",
+		"→ round 2: main · 14:08:41",
 	} {
 		if !strings.Contains(block, want) {
 			t.Errorf("the block does not list %q: %q", want, block)
@@ -373,7 +382,7 @@ func TestTheRunBlockListsTheLastRoundOfAJobThatIsDone(t *testing.T) {
 	}
 
 	block := r.runBlock()
-	if !strings.Contains(block, "|- round 1: main · 14:07:41") {
+	if !strings.Contains(block, "→ round 1: main · 14:07:41") {
 		t.Errorf("the block does not list the finished round: %q", block)
 	}
 }
@@ -413,13 +422,13 @@ func TestTheRoundCardGivesEveryStepItsOwnState(t *testing.T) {
 	if items[0].Status != agent.TaskCompleted {
 		t.Errorf("the step that landed is %q, want it completed", items[0].Status)
 	}
-	if items[0].ActiveForm != "ok: the commit landed" {
+	if items[0].ActiveForm != "the commit landed" {
 		t.Errorf("the detail of the step that landed is %q", items[0].ActiveForm)
 	}
 	if items[1].Status != agent.TaskFailed {
 		t.Errorf("the step that failed is %q, want it failed", items[1].Status)
 	}
-	for _, want := range []string{"failed", "the remote refused", "no_remote"} {
+	for _, want := range []string{"the remote refused", "no_remote"} {
 		if !strings.Contains(items[1].ActiveForm, want) {
 			t.Errorf("the detail of the step that failed is %q, want it to name %q", items[1].ActiveForm, want)
 		}
@@ -464,6 +473,230 @@ func TestTheDetailOfAStepIsCutShort(t *testing.T) {
 		t.Errorf("the detail is %q, want it cut short", detail)
 	}
 }
+
+// TestTheRunCardIsRenderedAsArrowRows — the body of the run card is a
+// flat flow: the facts of the run are arrow rows and every job is a
+// row of its own. The values of the rows start at the same column.
+func TestTheRunCardIsRenderedAsArrowRows(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "two", flowWorkflow)
+	svc, _ := testService(t, dir, noModels())
+	wf, ok := svc.catalog.Lookup("two")
+	if !ok {
+		t.Fatal("the workflow is not in the catalogue")
+	}
+	bound, err := wfe.Bind(wf, map[string]string{})
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	r := newRun(svc, Request{Name: "two", ChatID: "obs-1", Cwd: "/tmp/work"}, bound, map[string]string{"id": "42"})
+	t.Cleanup(r.cancel)
+
+	want := []string{
+		BotMark + r.id,
+		"**two** — Two jobs.",
+		"→ rounds:  1 round",
+		"→ jobs:    2 · steps: 3",
+		"→ started: " + clockTime(r.state.StartedAt),
+		"→ args:    id=42",
+		"→ ship:    fix → commit",
+		"→ verify:  review",
+	}
+	got := strings.Split(r.runOverview(), "\n")
+	if len(got) != len(want) {
+		t.Fatalf("the overview holds %d lines, want %d: %q", len(got), len(want), r.runOverview())
+	}
+	for i, line := range got {
+		if line != want[i] {
+			t.Errorf("line %d is %q, want %q", i, line, want[i])
+		}
+	}
+}
+
+// TestTheRunCardOmitsTheRoundsRowWhenTheJobsDiffer — the round count
+// is the count every job shares: a workflow whose jobs declare
+// different counts carries the count of each job on its own row.
+func TestTheRunCardOmitsTheRoundsRowWhenTheJobsDiffer(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "rounds", roundWorkflow)
+	svc, _ := testService(t, dir, noModels())
+	wf, ok := svc.catalog.Lookup("rounds")
+	if !ok {
+		t.Fatal("the workflow is not in the catalogue")
+	}
+	bound, err := wfe.Bind(wf, map[string]string{})
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	r := newRun(svc, Request{Name: "rounds", ChatID: "obs-1", Cwd: "/tmp/work"}, bound, nil)
+	t.Cleanup(r.cancel)
+
+	overview := r.runOverview()
+	if strings.Contains(overview, "rounds:") && !strings.Contains(overview, "· 2 rounds") {
+		t.Errorf("the overview carries a shared rounds row: %q", overview)
+	}
+	for _, want := range []string{
+		"→ ship:    fix · 2 rounds",
+		"→ verify:  review · 3 rounds",
+	} {
+		if !strings.Contains(overview, want) {
+			t.Errorf("the overview does not carry %q: %q", want, overview)
+		}
+	}
+	for _, line := range strings.Split(overview, "\n") {
+		if strings.HasPrefix(line, "→ rounds:") {
+			t.Errorf("the overview carries a shared rounds row: %q", overview)
+		}
+	}
+}
+
+// TestTheDetailOfAStepDropsTheBranch — the branch is in the status
+// bar of the card: the detail of a row does not repeat it.
+func TestTheDetailOfAStepDropsTheBranch(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+	svc, _ := testService(t, dir, noModels())
+	wf, ok := svc.catalog.Lookup("one")
+	if !ok {
+		t.Fatal("the workflow is not in the catalogue")
+	}
+	bound, err := wfe.Bind(wf, map[string]string{})
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	r := newRun(svc, Request{Name: "one", ChatID: "obs-1", Cwd: "/tmp/work"}, bound, nil)
+	t.Cleanup(r.cancel)
+	r.state.Steps = []wfe.StepState{
+		{ID: "commit", Job: "main", Outcome: wfe.Outcome{
+			Status:  wfe.OutcomeOK,
+			Summary: "the agent produced 12 change(s) on 12-fix-client-refuse",
+			Data:    map[string]string{outcomeKeyBranch: "12-fix-client-refuse"},
+		}},
+		{ID: "push", Job: "main", Outcome: wfe.Outcome{
+			Status:  wfe.OutcomeOK,
+			Summary: "the work landed on 12-fix-client-refuse already",
+			Data:    map[string]string{outcomeKeyBranch: "12-fix-client-refuse"},
+		}},
+	}
+
+	items := r.roundTasks("main", 1)
+	if len(items) != 1 {
+		t.Fatalf("the checklist holds %d rows, want one per step of the round", len(items))
+	}
+	if items[0].ActiveForm != "the agent produced 12 change(s)" {
+		t.Errorf("the detail is %q, want it without the branch", items[0].ActiveForm)
+	}
+}
+
+// TestTheDetailOfAStepKeepsABranchItDoesNotEndWith — only a trailing
+// " on <branch>" is dropped: the rest of the summary stays.
+func TestTheDetailOfAStepKeepsABranchItDoesNotEndWith(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+	svc, _ := testService(t, dir, noModels())
+	wf, ok := svc.catalog.Lookup("one")
+	if !ok {
+		t.Fatal("the workflow is not in the catalogue")
+	}
+	bound, err := wfe.Bind(wf, map[string]string{})
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	r := newRun(svc, Request{Name: "one", ChatID: "obs-1", Cwd: "/tmp/work"}, bound, nil)
+	t.Cleanup(r.cancel)
+	r.state.Steps = []wfe.StepState{
+		{ID: "commit", Job: "main", Outcome: wfe.Outcome{
+			Status:  wfe.OutcomeOK,
+			Summary: "the work landed on 12-fix-client-refuse already",
+			Data:    map[string]string{outcomeKeyBranch: "12-fix-client-refuse"},
+		}},
+	}
+
+	items := r.roundTasks("main", 1)
+	if len(items) != 1 {
+		t.Fatalf("the checklist holds %d rows, want one per step of the round", len(items))
+	}
+	if items[0].ActiveForm != "the work landed on 12-fix-client-refuse already" {
+		t.Errorf("the detail is %q, want the summary unchanged", items[0].ActiveForm)
+	}
+}
+
+// TestTheDetailOfAStepIsCutShortAfterTheBranchIsDropped — the branch
+// is dropped before the detail is cut short, so it cannot eat the
+// budget of the row.
+func TestTheDetailOfAStepIsCutShortAfterTheBranchIsDropped(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+	svc, _ := testService(t, dir, noModels())
+	wf, ok := svc.catalog.Lookup("one")
+	if !ok {
+		t.Fatal("the workflow is not in the catalogue")
+	}
+	bound, err := wfe.Bind(wf, map[string]string{})
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	r := newRun(svc, Request{Name: "one", ChatID: "obs-1", Cwd: "/tmp/work"}, bound, nil)
+	t.Cleanup(r.cancel)
+	branch := "12-fix-client-refuse"
+	r.state.Steps = []wfe.StepState{
+		{ID: "commit", Job: "main", Outcome: wfe.Outcome{
+			Status:  wfe.OutcomeFailed,
+			Summary: strings.Repeat("x", 4000) + " on " + branch,
+			Data:    map[string]string{outcomeKeyBranch: branch},
+		}},
+	}
+
+	items := r.roundTasks("main", 1)
+	if len(items) != 1 {
+		t.Fatalf("the checklist holds %d rows, want one per step of the round", len(items))
+	}
+	detail := items[0].ActiveForm
+	if n := len([]rune(detail)); n > maxStepDetail {
+		t.Errorf("the detail is %d runes, want at most %d", n, maxStepDetail)
+	}
+	if !strings.HasSuffix(detail, "…") {
+		t.Errorf("the detail is %q, want it cut short", detail)
+	}
+	if strings.Contains(detail, branch) {
+		t.Errorf("the detail carries the branch: %q", detail)
+	}
+}
+
+// flowWorkflow is a workflow of two jobs: the first one holds two
+// steps, the second one holds a single step.
+const flowWorkflow = `title: Two jobs.
+args:
+  - name: id
+    default: "1"
+jobs:
+  ship:
+    steps:
+      - id: fix
+        message: /gtw fix
+      - id: commit
+        message: /gtw commit
+  verify:
+    steps:
+      - id: review
+        message: /review
+`
+
+// roundWorkflow is a workflow whose jobs declare different round
+// counts.
+const roundWorkflow = `title: Different rounds.
+jobs:
+  ship:
+    iterations: 2
+    steps:
+      - id: fix
+        message: /gtw fix
+  verify:
+    iterations: 3
+    steps:
+      - id: review
+        message: /review
+`
 
 // threeStepWorkflow is a workflow with three steps in one job.
 const threeStepWorkflow = `title: Three things.

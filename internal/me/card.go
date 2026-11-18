@@ -9,7 +9,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/messages"
-	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
 // speak says something in the chat the run works in.
@@ -137,19 +136,4 @@ func choiceOptions(options []llm.Option) []messages.ChoiceOption {
 type iteration struct {
 	job   string
 	round int
-}
-
-// stepLabel renders what a step does.
-func stepLabel(step wfe.Step) string {
-	switch step.Kind() {
-	case wfe.StepKindMessage:
-		return step.Message
-	case wfe.StepKindShell:
-		return "(shell) " + step.Shell
-	case wfe.StepKindUse:
-		return "(use) " + step.Use
-	case wfe.StepKindWait:
-		return "(wait) " + step.Wait
-	}
-	return step.ID
 }

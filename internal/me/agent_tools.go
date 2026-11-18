@@ -701,9 +701,9 @@ func (s *Service) toolRepoStatus(ctx context.Context, r *run, _ pendingCall) (st
 		return stepResult{}, toolErrorf("the repository facts could not be read: %v", err)
 	}
 	data := map[string]string{
-		"branch": facts.Branch,
-		"dirty":  strconv.FormatBool(facts.Dirty),
-		"cwd":    dir,
+		outcomeKeyBranch: facts.Branch,
+		"dirty":          strconv.FormatBool(facts.Dirty),
+		"cwd":            dir,
 	}
 	if facts.Upstream != "" {
 		data["upstream"] = facts.Upstream

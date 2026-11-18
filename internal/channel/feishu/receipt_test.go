@@ -268,8 +268,8 @@ func TestBuildReceiptCard_TaskOnly(t *testing.T) {
 		`"elements":[`,
 		`"tag":"markdown"`,
 		`**📋 Tasks**`,
-		`- [ ] first task`,
-		`- [√] second task`,
+		`1. [ ] first task`,
+		`2. [v] second task`,
 	} {
 		if !strings.Contains(body, marker) {
 			t.Errorf("body missing marker %q\nbody: %s", marker, body)

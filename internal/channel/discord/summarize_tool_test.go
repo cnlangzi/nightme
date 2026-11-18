@@ -86,10 +86,10 @@ func TestFormatTaskList_HeaderAndRows(t *testing.T) {
 	if !strings.HasPrefix(got, "📋 Tasks") {
 		t.Errorf("missing header in %q", got)
 	}
-	if !strings.Contains(got, "- [ ] first") {
+	if !strings.Contains(got, "1. [ ] first") {
 		t.Errorf("missing pending row in %q", got)
 	}
-	if !strings.Contains(got, "- [√] second") {
+	if !strings.Contains(got, "2. [v] second") {
 		t.Errorf("missing completed row in %q", got)
 	}
 }
@@ -116,6 +116,18 @@ func TestFormatTaskList_KeepsTheOrderOfTheSender(t *testing.T) {
 	if !(pendingIdx < doneIdx && doneIdx < activeIdx) {
 		t.Errorf("order = pending(%d) done(%d) active(%d), want pending<done<active",
 			pendingIdx, doneIdx, activeIdx)
+	}
+}
+
+// TestFormatTaskList_OverflowPlaceholder — the fallback row is a row
+// of the checklist: the body stays a well-formed markdown list.
+func TestFormatTaskList_OverflowPlaceholder(t *testing.T) {
+	items := []agent.AgentTaskItem{
+		{ID: "1", Subject: strings.Repeat("x", 5000), Status: agent.TaskPending},
+	}
+	got := formatTaskList(items)
+	if !strings.HasSuffix(got, "1. [ ] …") {
+		t.Errorf("the placeholder is %q, want it to end with %q", got, "1. [ ] …")
 	}
 }
 

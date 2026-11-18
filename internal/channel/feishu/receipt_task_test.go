@@ -39,22 +39,29 @@ func TestBuildTaskChecklistChunks_KeepsTheOrderOfTheSender(t *testing.T) {
 	}
 	// Every row carries the marker of its state, and the detail of
 	// the row:
-	//   - pending     → "- [ ]"
-	//   - in_progress → "- [>]"
-	//   - completed   → "- [√]"
-	if !strings.Contains(rendered, "- [√] completed task (ok: it landed)") {
+	//   - pending     → "2. [ ]"
+	//   - in_progress → "3. [>]"
+	//   - completed   → "1. [v]"
+	if !strings.Contains(rendered, "1. [v] completed task (ok: it landed)") {
 		t.Errorf("completed line missing its marker or detail: %q", rendered)
 	}
-	if !strings.Contains(rendered, "- [ ] pending task") {
+	if !strings.Contains(rendered, "2. [ ] pending task") {
 		t.Errorf("pending line missing its marker: %q", rendered)
 	}
-	if !strings.Contains(rendered, "- [>] active task (writing)") {
+	if !strings.Contains(rendered, "3. [>] active task (writing)") {
 		t.Errorf("in-progress line missing its marker or detail: %q", rendered)
 	}
 	// The legacy glyphs MUST NOT appear anymore.
 	for _, g := range []string{"⏳", "🔄", "✅"} {
 		if strings.Contains(rendered, g) {
 			t.Errorf("legacy glyph %q should not appear in todo list output: %q", g, rendered)
+		}
+	}
+	// No row starts with a todo marker: Feishu's `lark_md` parses the
+	// leading "[ ]" of such a row as a checkbox.
+	for _, line := range strings.Split(rendered, "\n") {
+		if strings.HasPrefix(line, "- [") {
+			t.Errorf("the row %q starts with a todo marker: %q", line, rendered)
 		}
 	}
 }
@@ -75,13 +82,29 @@ func TestBuildTaskChecklistChunks_RendersEveryState(t *testing.T) {
 	}
 	rendered := chunks[0]
 	for _, want := range []string{
-		"- [!] failed task (failed: the remote refused)",
-		"- [-] cancelled task (cancelled)",
-		"- [/] skipped task (skipped)",
+		"1. [!] failed task (failed: the remote refused)",
+		"2. [x] cancelled task (cancelled)",
+		"3. [-] skipped task (skipped)",
 	} {
 		if !strings.Contains(rendered, want) {
 			t.Errorf("the row %q is missing: %q", want, rendered)
 		}
+	}
+}
+
+// TestBuildTaskChecklistChunks_OverflowPlaceholder — the fallback row
+// is a row of the checklist: the body stays a well-formed markdown
+// list.
+func TestBuildTaskChecklistChunks_OverflowPlaceholder(t *testing.T) {
+	items := []agent.AgentTaskItem{
+		{ID: "1", Subject: strings.Repeat("x", 5000), Status: agent.TaskPending},
+	}
+	chunks := buildTaskChecklistChunks(items)
+	if len(chunks) != 1 {
+		t.Fatalf("the checklist holds %d chunks, want one", len(chunks))
+	}
+	if chunks[0] != "1. [ ] …" {
+		t.Errorf("the placeholder is %q, want %q", chunks[0], "1. [ ] …")
 	}
 }
 

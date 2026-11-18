@@ -70,7 +70,7 @@ func TestEndToEnd_TheRunWorksInTheChatItStartedIn(t *testing.T) {
 	roundCard := op.Cards()[1].ID
 	var shown bool
 	for _, item := range op.Checklist(roundCard) {
-		if strings.Contains(item.Subject, "/gtw fix 42 -y") {
+		if item.Subject == "fix" {
 			shown = true
 		}
 	}

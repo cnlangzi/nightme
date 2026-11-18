@@ -165,6 +165,16 @@ REST 客户端 (`httpREST`) 在每次请求前 `limiter.Wait(ctx)`，所以调�
 
 `Send` 中未匹配的 `Kind` 同样走 default 静默丢弃分支（与 `OutHeartbeat` 同路径）。
 
+**Task list 形状**：`OutTaskCreate` / `OutTaskUpdate` 的 body 是 `📋 Tasks` header + 空行 + markdown 有序列表，每行是共享行（`agent.FormatTaskRow`）—— 行号 + 状态 marker + subject + 括号里的 detail。marker 表跟 Feishu / Telegram 同源（`internal/agent`），三端渲染同一段文字：
+
+```
+📋 Tasks
+
+1. [ ] task one
+2. [>] task two (writing unit tests)
+3. [v] task three
+```
+
 **消息体长度上限**：Discord 单条 message 的 `content` 上限 2000 字符，超限整条被拒（HTTP 400，`code 50035`），不是截断。适配器在 `sendBody`（`send.go`）按 `maxMessageRunes = 2000` 切分后分多条发：切点优先落在段落边界，其次行边界、空格边界；按 rune 计，不会把一个多字节字符劈开。切分是无损的 —— 各块拼起来就是原文。走 `sendBody` 的是 `OutReply` / `OutCommandReply` / `OutThinking` / `OutToolStart` / `OutToolEnd` / `OutTaskCreate` / `OutTaskUpdate` / `OutResult` / `OutError`。`OutResult` 被切成多条时，记入 `lastResultMessageIDDB` 的是最后一条，🎉 落在正文结尾。`OutChoice` / `OutChoicePatch` 的卡片正文不切分 —— 组件与正文同属一条 message，拆开会让卡片失去按钮。
 
 ## 9. Attachments（CDN + F-61 retry）

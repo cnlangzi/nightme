@@ -826,6 +826,40 @@ func TestShow_PutsTheStateBackInFrontOfTheOperator(t *testing.T) {
 	waitForSessionUpdate(t, op, shown.ID)
 }
 
+// TestShowPublishesTheOverviewOfTheRun — /me show publishes the same
+// body as the run card: the overview of the run is the same text
+// wherever it is shown.
+func TestShowPublishesTheOverviewOfTheRun(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	svc, op := testService(t, dir, noModels())
+	op.steps = []fakeStep{{open: true}}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitSent(t, op, "/gtw commit")
+
+	if err := svc.Show(context.Background(), "obs-1"); err != nil {
+		t.Fatalf("show: %v", err)
+	}
+	cards := op.Cards()
+	if len(cards) < 2 {
+		t.Fatalf("the run published %d cards, want the run card and the shown card", len(cards))
+	}
+	run := op.Entries(cards[0].ID)
+	shown := op.Entries(cards[len(cards)-1].ID)
+	if len(run) != 1 || len(shown) != 1 {
+		t.Fatalf("the cards carry %d and %d entries, want the overview alone", len(run), len(shown))
+	}
+	if run[0] != shown[0] {
+		t.Errorf("the shown card carries %q, want the overview of the run %q", shown[0], run[0])
+	}
+}
+
 // twoJobWorkflow is a workflow of two jobs: the second one waits for
 // the first.
 const twoJobWorkflow = `title: two jobs.

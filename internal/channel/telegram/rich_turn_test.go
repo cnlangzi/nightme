@@ -649,7 +649,7 @@ func TestRenderRichTurnBlocksLocked_TaskListSection(t *testing.T) {
 		messageID:     100,
 		headerLine:    "💭 1",
 		hasContent:    true,
-		taskList: []taskListItem{
+		taskList: []agent.AgentTaskItem{
 			{ID: "t1", Subject: "Plan the API", Status: agent.TaskCompleted},
 			{ID: "t2", Subject: "Write code", Status: agent.TaskInProgress, ActiveForm: "coding"},
 			{ID: "t3", Subject: "Write tests", Status: agent.TaskPending},
@@ -715,7 +715,7 @@ func TestRenderRichTurnBlocksLocked_TaskListSection(t *testing.T) {
 		text, _ := p["text"].(string)
 		gotRows = append(gotRows, row{text})
 	}
-	wantPrefixes := []string{"[√] ", "[>] ", "[ ] "}
+	wantPrefixes := []string{"1. [v] ", "2. [>] ", "3. [ ] "}
 	wantSubjects := []string{"Plan the API", "Write code (coding)", "Write tests"}
 	for i, r := range gotRows {
 		if !strings.HasPrefix(r.text, wantPrefixes[i]) {
@@ -736,10 +736,10 @@ func TestRenderRichTurnBlocksLocked_TaskListSection(t *testing.T) {
 func TestRenderRichTurnBlocksLocked_EmptyTaskListOmitsSection(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
-		items []taskListItem
+		items []agent.AgentTaskItem
 	}{
 		{"nil slice", nil},
-		{"empty slice", []taskListItem{}},
+		{"empty slice", []agent.AgentTaskItem{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a, _ := newTestAdapter(t)
@@ -772,7 +772,7 @@ func TestRenderRichTurnBlocksLocked_TaskCancelledRenderedDeletedDropped(t *testi
 	turn := &richTurn{
 		chatID: "123", topicID: 0, userMessageID: 0, messageID: 100,
 		headerLine: "💭 0", hasContent: true,
-		taskList: []taskListItem{
+		taskList: []agent.AgentTaskItem{
 			{ID: "t1", Subject: "alive-pending", Status: agent.TaskPending},
 			{ID: "t2", Subject: "gone-cancelled", Status: agent.TaskCancelled},
 			{ID: "t3", Subject: "alive-completed", Status: agent.TaskCompleted},
@@ -809,7 +809,7 @@ func TestRenderRichTurnBlocksLocked_TaskEveryRowDeletedOmitsSection(t *testing.T
 	turn := &richTurn{
 		chatID: "123", topicID: 0, userMessageID: 0, messageID: 100,
 		headerLine: "💭 0", hasContent: true,
-		taskList: []taskListItem{
+		taskList: []agent.AgentTaskItem{
 			{ID: "t1", Subject: "gone-deleted", Status: agent.TaskDeleted},
 			{ID: "t2", Subject: "gone-deleted-too", Status: agent.TaskDeleted},
 		},
@@ -834,7 +834,7 @@ func TestRenderRichTurnBlocksLocked_TaskEveryRowCancelledRenders(t *testing.T) {
 	turn := &richTurn{
 		chatID: "123", topicID: 0, userMessageID: 0, messageID: 100,
 		headerLine: "💭 0", hasContent: true,
-		taskList: []taskListItem{
+		taskList: []agent.AgentTaskItem{
 			{ID: "t1", Subject: "gone-cancelled", Status: agent.TaskCancelled},
 			{ID: "t2", Subject: "gone-failed", Status: agent.TaskFailed},
 		},
@@ -860,9 +860,9 @@ func TestRenderRichTurnBlocksLocked_TaskEveryRowCancelledRenders(t *testing.T) {
 func TestRenderRichTurnBlocksLocked_TaskListTruncatesAtBudget(t *testing.T) {
 	a, _ := newTestAdapter(t)
 	const totalTasks = 60
-	tasks := make([]taskListItem, totalTasks)
+	tasks := make([]agent.AgentTaskItem, totalTasks)
 	for i := range tasks {
-		tasks[i] = taskListItem{
+		tasks[i] = agent.AgentTaskItem{
 			ID:      "t" + strconv.Itoa(i),
 			Subject: strings.Repeat("x", 80), // 80-char subject
 			Status:  agent.TaskPending,
@@ -928,7 +928,7 @@ func TestRenderRichTurnBlocksLocked_TaskSubjectEscapesHTML(t *testing.T) {
 	turn := &richTurn{
 		chatID: "123", topicID: 0, userMessageID: 0, messageID: 100,
 		headerLine: "💭 0", hasContent: true,
-		taskList: []taskListItem{
+		taskList: []agent.AgentTaskItem{
 			{ID: "t1", Subject: "<script>alert('xss')</script>", Status: agent.TaskPending},
 			{ID: "t2", Subject: "with & ampersand", Status: agent.TaskPending},
 		},
@@ -946,28 +946,75 @@ func TestRenderRichTurnBlocksLocked_TaskSubjectEscapesHTML(t *testing.T) {
 	}
 }
 
-// TestRenderTaskRowText_FallbackSubjectTrimmed locks the
-// subject→id fallback contract: a whitespace-only Subject must
-// fall back to a (also-trimmed) ID, not produce a row of just
-// "• ". Regression guard for the review finding that the fallback
-// path skipped TrimSpace.
-func TestRenderTaskRowText_FallbackSubjectTrimmed(t *testing.T) {
+// TestRenderRichTurnTaskListBlocks_UsesTheSharedRow — the text of a
+// row is the shared row of agent.FormatTaskRow, number included: the
+// Telegram client reads an ordered list out of the `N.` prefix.
+func TestRenderRichTurnTaskListBlocks_UsesTheSharedRow(t *testing.T) {
 	cases := []struct {
 		name string
-		in   taskListItem
+		in   agent.AgentTaskItem
 		want string
 	}{
-		{"empty subject falls back to id", taskListItem{ID: "t1", Status: agent.TaskPending}, "[ ] t1"},
-		{"whitespace subject falls back to id", taskListItem{ID: "t2", Subject: "   ", Status: agent.TaskPending}, "[ ] t2"},
-		{"whitespace id still produces a useful row", taskListItem{ID: "   ", Subject: "real", Status: agent.TaskPending}, "[ ] real"},
-		{"completed marker intact with trimmed subject", taskListItem{ID: "x", Subject: "  done  ", Status: agent.TaskCompleted}, "[√] done"},
+		{"empty subject falls back to id", agent.AgentTaskItem{ID: "t1", Status: agent.TaskPending}, "1. [ ] t1"},
+		{"whitespace subject falls back to id", agent.AgentTaskItem{ID: "t2", Subject: "   ", Status: agent.TaskPending}, "1. [ ] t2"},
+		{"whitespace id still produces a useful row", agent.AgentTaskItem{ID: "   ", Subject: "real", Status: agent.TaskPending}, "1. [ ] real"},
+		{"completed marker intact with trimmed subject", agent.AgentTaskItem{ID: "x", Subject: "  done  ", Status: agent.TaskCompleted}, "1. [v] done"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := renderTaskRowText(c.in); got != c.want {
-				t.Errorf("renderTaskRowText(%+v) = %q, want %q", c.in, got, c.want)
+			blocks, ok := renderRichTurnTaskListBlocks([]agent.AgentTaskItem{c.in})
+			if !ok {
+				t.Fatalf("expected ok=true")
+			}
+			var list map[string]any
+			for _, b := range blocks {
+				if b["type"] == "list" {
+					list = b
+				}
+			}
+			if list == nil {
+				t.Fatalf("no list block: %v", blocks)
+			}
+			rawItems, _ := list["items"].([]map[string]any)
+			if len(rawItems) != 1 {
+				t.Fatalf("the list holds %d items, want one", len(rawItems))
+			}
+			it := rawItems[0]
+			bs, _ := it["blocks"].([]map[string]any)
+			p := bs[0]
+			text, _ := p["text"].(string)
+			if text != c.want {
+				t.Errorf("the row is %q, want %q", text, c.want)
 			}
 		})
+	}
+}
+
+// TestRenderRichTurnTaskListBlocks_OverflowPlaceholder — the fallback
+// row is a row of the checklist: the list block stays well-formed.
+func TestRenderRichTurnTaskListBlocks_OverflowPlaceholder(t *testing.T) {
+	items := []agent.AgentTaskItem{{ID: "t1", Subject: strings.Repeat("x", 5000), Status: agent.TaskPending}}
+	blocks, ok := renderRichTurnTaskListBlocks(items)
+	if !ok {
+		t.Fatalf("expected ok=true")
+	}
+	var list map[string]any
+	for _, b := range blocks {
+		if b["type"] == "list" {
+			list = b
+		}
+	}
+	if list == nil {
+		t.Fatalf("no list block: %v", blocks)
+	}
+	rawItems, _ := list["items"].([]map[string]any)
+	if len(rawItems) != 1 {
+		t.Fatalf("the list holds %d items, want one", len(rawItems))
+	}
+	bs, _ := rawItems[0]["blocks"].([]map[string]any)
+	text, _ := bs[0]["text"].(string)
+	if text != "1. [ ] …" {
+		t.Errorf("the placeholder is %q, want %q", text, "1. [ ] …")
 	}
 }
 
@@ -986,9 +1033,9 @@ func TestRenderRichTurnTaskListBlocks_BudgetAccountsForSuffix(t *testing.T) {
 	//  → headline (7) + 5*(len+1) + 2 = 3000  →  len = (3000-9)/5 - 1 = 597.4
 	// pick a safe size that fits with margin
 	subject := strings.Repeat("a", 590)
-	items := make([]taskListItem, totalRows)
+	items := make([]agent.AgentTaskItem, totalRows)
 	for i := range items {
-		items[i] = taskListItem{ID: "t", Subject: subject, Status: agent.TaskPending}
+		items[i] = agent.AgentTaskItem{ID: "t", Subject: subject, Status: agent.TaskPending}
 	}
 	blocks, ok := renderRichTurnTaskListBlocks(items)
 	if !ok {
@@ -1024,7 +1071,7 @@ func TestRenderRichTurnBlocksLocked_TaskListOrderAfterEntries(t *testing.T) {
 		entries: []richTurnEntry{
 			{kind: "reply", body: "thinking out loud"},
 		},
-		taskList: []taskListItem{
+		taskList: []agent.AgentTaskItem{
 			{ID: "t1", Subject: "Plan", Status: agent.TaskPending},
 		},
 		footer: []string{"🤖: claude", "💰: tokens"},

@@ -195,14 +195,14 @@ func TestBuildChatModel_NoWarningWithoutAProvider(t *testing.T) {
 }
 
 func TestWorkflowsDir(t *testing.T) {
-	dir, err := workflowsDir(&config.Config{Paths: config.PathsConfig{DataDir: t.TempDir()}})
+	dir, err := WorkflowsDir(&config.Config{Paths: config.PathsConfig{DataDir: t.TempDir()}})
 	if err != nil {
 		t.Fatalf("workflowsDir: %v", err)
 	}
 	if filepath.Base(dir) != "workflows" {
 		t.Errorf("dir = %q, want it to end in %q", dir, "workflows")
 	}
-	if _, err := workflowsDir(&config.Config{}); err == nil {
+	if _, err := WorkflowsDir(&config.Config{}); err == nil {
 		t.Error("expected an error for an empty data dir")
 	}
 }

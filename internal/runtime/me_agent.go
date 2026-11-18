@@ -39,7 +39,7 @@ func buildPersonalAgent(cfg *config.Config, chs []channel.Channel, op *operator,
 		logger.Info("run: no channel; the personal agent stays off")
 		return nil
 	}
-	dir, err := workflowsDir(cfg)
+	dir, err := WorkflowsDir(cfg)
 	if err != nil {
 		logger.Warn("run: the personal agent has no workflows dir", "err", err)
 		return nil

@@ -21,7 +21,7 @@ func noModels() Config {
 }
 
 // TestStartWorkflow_TheNameIsTheFileName — a workflow's identity is
-// the base name of its file: the run and its state carry it.
+// its path under the workflows dir: the run and its state carry it.
 func TestStartWorkflow_TheNameIsTheFileName(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "fix", `title: do the thing

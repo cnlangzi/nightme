@@ -51,9 +51,9 @@ func ValidateDir(dir string) []Diagnostic {
 		return []Diagnostic{{Path: dir, Message: err.Error()}}
 	}
 	var diags []Diagnostic
-	claims := map[string][]string{} // base name -> the files that claim it
+	claims := map[string][]string{} // name -> the files that claim it
 	for _, path := range paths {
-		name := BaseName(path)
+		name := WorkflowName(dir, path)
 		if name == "" {
 			continue
 		}

@@ -83,6 +83,7 @@ import (
 	_ "github.com/cnlangzi/nightme/internal/command/tools"
 	_ "github.com/cnlangzi/nightme/internal/command/use"
 	_ "github.com/cnlangzi/nightme/internal/command/watch"
+	_ "github.com/cnlangzi/nightme/internal/command/wf"
 	_ "github.com/cnlangzi/nightme/internal/command/wiki"
 
 	"github.com/cnlangzi/nightme/internal/gateway"
@@ -435,6 +436,14 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	// starts, which is long after the channels are up.
 	personal := buildPersonalAgent(cfg, chs, op, logger)
 
+	// The workflows dir is the directory the daemon reads its
+	// workflows from. A command that installs a workflow writes it
+	// there, so the daemon finds it without a second configuration.
+	workflows, err := WorkflowsDir(cfg)
+	if err != nil {
+		logger.Warn("run: the workflows dir is not known", "err", err)
+	}
+
 	command.SetDeps(command.Deps{
 		Primary: cfg.Primary,
 		// GTWExt carries gtw's HandlerDeps for the /gtw
@@ -449,6 +458,8 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 		// Me is the personal agent the /me command drives. A daemon
 		// without a channel has none.
 		Me: mec.NewController(personal),
+		// WorkflowsDir is where a command installs a workflow.
+		WorkflowsDir: workflows,
 	})
 	reg := command.Default()
 	commander := command.NewCommander(reg)

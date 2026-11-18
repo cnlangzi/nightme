@@ -304,7 +304,7 @@ func (f *Factory) Spec() command.Spec {
 			"/gtw back <branch>                 enter the worktree whose branch starts with <branch> (cwd → worktree); repairs a missing .nightme/gtw.yml\n" +
 			"/gtw commit [-a <agent>]          commit uncommitted work via the configured agent (no push)\n" +
 			"/gtw push                         push the worktree branch (clean only — refuses dirty)\n" +
-			"/gtw pr                           generate PR title+body, then open the PR\n" +
+			"/gtw pr [-a <agent>] [--ready]    generate PR title+body, then open the PR\n" +
 			"/gtw pr -a claude                 override which agent runs the one-shot\n" +
 			"/gtw config lang [value]          show or set the output language for this repository\n" +
 			"/gtw config -g lang [value]       show or set the user-level output language\n" +
@@ -330,7 +330,7 @@ func (f *Factory) Spec() command.Spec {
 			{Name: "back", Summary: "exit the fix worktree (cwd → repoRoot) and sync main; `/gtw back <branch>` jumps into the worktree of that branch", Usage: "/gtw back [<branch>]"},
 			{Name: "commit", Summary: "commit uncommitted work via the configured agent", Usage: "/gtw commit [-a <agent>]"},
 			{Name: "push", Summary: "push the worktree branch (clean only — refuses dirty)"},
-			{Name: "pr", Summary: "generate PR title+body, then open the PR", Usage: "/gtw pr [-a <agent>]"},
+			{Name: "pr", Summary: "generate PR title+body, then open the PR", Usage: "/gtw pr [-a <agent>] [--ready]"},
 			{Name: "config", Summary: "show or set the gtw output language (repo scope by default, -g for the user scope)", Usage: configCmdSpec.Usage},
 			{Name: "sync", Summary: "checkout the default branch and pull --rebase from origin"},
 			{Name: "abort", Summary: "cancel the gtw command currently running in this chat"},
@@ -1229,19 +1229,21 @@ type commitArgs struct {
 }
 
 // parseAgentOnlyFlag implements the CLI lexer for
-// /gtw commit / /gtw push / /gtw pr — three subcommands that
-// accept exactly one flag (`-a <name>` / `--agent <name>`)
-// and no positional arg.
+// /gtw commit / /gtw push — two subcommands that accept exactly
+// one flag (`-a <name>` / `--agent <name>`) and no positional arg.
 //
-// Extracted as a helper because all three parsers were
-// byte-identical except for the surrounding struct type
-// (pushArgs / commitArgs / prArgs). Issue #291 then moved the
-// lexer core itself into command.ParseCmdArgs so the whole
-// /<cmd> surface shares one implementation of the contract
-// (docs/feat/F-gtw-fix.md §1.2 + §10) — this function is now
-// just the spec declaration plus the "no positional args"
-// arity, and the "unknown flag" / "positional" / "missing
-// value" wording comes from the shared lexer.
+// Extracted as a helper because both parsers were byte-identical
+// except for the surrounding struct type (pushArgs / commitArgs).
+// Issue #291 then moved the lexer core itself into
+// command.ParseCmdArgs so the whole /<cmd> surface shares one
+// implementation of the contract (docs/feat/F-gtw-fix.md §1.2 +
+// §10) — this function is now just the spec declaration plus the
+// "no positional args" arity, and the "unknown flag" /
+// "positional" / "missing value" wording comes from the shared
+// lexer.
+//
+// /gtw pr has its own spec (prCmdSpec) because it also takes
+// `--ready`.
 //
 // name is the user-facing subcommand ("/gtw push") echoed in
 // error messages.
@@ -1331,18 +1333,40 @@ func (f *Factory) runConfig(ctx context.Context, cs *chatsession.ChatSession, in
 	return &command.SlashOutput{Consumed: true}, nil
 }
 
+// prCmdSpec is the argv grammar for /gtw pr.
+//
+// /gtw pr gets its own spec instead of the shared parseAgentOnlyFlag
+// because it is the only one of the three agent-flag commands that
+// takes a second flag: `--ready` moves the linked issue from
+// "claimed" to "waiting for review" once the pull request exists.
+//
+// The flag is boolean — it takes no value — so `--ready` alone is the
+// whole argument and `/gtw pr --ready -a codex` reads both.
+var prCmdSpec = command.CmdSpec{
+	Name:  "/gtw pr",
+	Usage: "/gtw pr [-a <agent>] [--ready]",
+	Flags: map[string]command.FlagSpec{
+		"-a":      {Name: "agent", TakesValue: true},
+		"--agent": {Name: "agent", TakesValue: true},
+		"--ready": {Name: "ready"},
+	},
+	MinArgs: 0,
+	MaxArgs: 0,
+}
+
 // parsePRArgs implements the CLI lexer for /gtw pr.
 // Recognised flags:
 //
 //	-a / --agent <name>   override one-shot agent
+//	--ready                move the linked issue to `nightme/ready`
 //
 // Unknown tokens are hard-rejected with "unknown flag";
 // positional args are rejected too (/gtw pr takes none).
 // See parseFixArgs / parsePushArgs for the rationale.
 func parsePRArgs(argv []string) (prArgs, error) {
-	agent, err := parseAgentOnlyFlag("/gtw pr", argv)
+	parsed, err := command.ParseCmdArgs(argv, prCmdSpec)
 	if err != nil {
 		return prArgs{}, err
 	}
-	return prArgs{Agent: agent}, nil
+	return prArgs{Agent: parsed.Value("agent"), Ready: parsed.Bool("ready")}, nil
 }

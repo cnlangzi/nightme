@@ -1195,7 +1195,7 @@ func TestDispatchPush_NoCountUnpushedAtEntry(t *testing.T) {
 > 方法；`ensureRepoLabels` 读仓库的 label catalog、只把 `AllLabels`
 > 里缺的那些建出来，并按仓库把结果缓存进 `LabelCache`；检查在
 > `/gtw fix` 的队列挑选**之前**跑（失败即致命，此时还没有
-> worktree），在 `/gtw close` / `/gtw pr` / `/gtw new -y` 里只给
+> worktree），在 `/gtw pr` / `/gtw new -y` 里只给
 > 一行 `⚠️` 警告；provider 探测不做检查。
 
 详细设计、错误处理矩阵、决策记录、不在范围内的 followups

@@ -3,6 +3,8 @@ package gtw
 import (
 	"context"
 	"fmt"
+	"slices"
+	"strings"
 	"sync"
 )
 
@@ -411,6 +413,19 @@ func (f *fakeGitProvider) CallsByMethod(method string) []fakeProviderCall {
 	return out
 }
 
+// IssueLabels returns the labels the fake holds for the issue with
+// the given id. Lets a test assert what the issue carries after a
+// fix claimed it.
+func (f *fakeGitProvider) IssueLabels(id int) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	iss, ok := f.issueByID[id]
+	if !ok {
+		return nil
+	}
+	return append([]string{}, iss.Labels...)
+}
+
 // --- GitProvider interface ---
 
 func (f *fakeGitProvider) Kind() ProviderKind { return f.kind }
@@ -522,24 +537,82 @@ func (f *fakeGitProvider) CreateIssue(_ context.Context, owner, repo, title, bod
 	return &cp, nil
 }
 
+// AddIssueLabel records the call and updates the stored issue's
+// label set, so a test can assert what the issue carries after a
+// fix. gtw only ever adds a label: nothing here removes one.
 func (f *fakeGitProvider) AddIssueLabel(_ context.Context, owner, repo string, id int, label string) error {
 	f.mu.Lock()
 	f.calls = append(f.calls, fakeProviderCall{
 		Method: "AddIssueLabel", Owner: owner, Repo: repo, ID: id, Label: label,
 	})
 	err := f.addIssueLabelErr
+	if err == nil {
+		f.addLabelTo(id, label)
+	}
 	f.mu.Unlock()
 	return err
 }
 
+// addLabelTo records `label` on the issue with the given id, in
+// the per-issue map and in the list response alike — the tracker
+// holds one issue, not two. Caller holds the mutex.
+func (f *fakeGitProvider) addLabelTo(id int, label string) {
+	withLabel := func(iss *Issue) *Issue {
+		cp := *iss
+		if !slices.Contains(cp.Labels, label) {
+			cp.Labels = append(append([]string{}, iss.Labels...), label)
+		}
+		return &cp
+	}
+	if iss, ok := f.issueByID[id]; ok {
+		f.issueByID[id] = withLabel(iss)
+	}
+	for i, iss := range f.listIssues {
+		if iss != nil && iss.ID == id {
+			f.listIssues[i] = withLabel(iss)
+		}
+	}
+}
+
+// RemoveIssueLabel records the call and drops the label from the
+// stored issue, so a test can assert what the issue carries after a
+// state transition.
 func (f *fakeGitProvider) RemoveIssueLabel(_ context.Context, owner, repo string, id int, label string) error {
 	f.mu.Lock()
 	f.calls = append(f.calls, fakeProviderCall{
 		Method: "RemoveIssueLabel", Owner: owner, Repo: repo, ID: id, Label: label,
 	})
 	err := f.removeIssueLabelErr
+	if err == nil {
+		f.removeLabelFrom(id, label)
+	}
 	f.mu.Unlock()
 	return err
+}
+
+// removeLabelFrom drops `label` from the issue with the given id, in
+// the per-issue map and in the list response alike. Caller holds the
+// mutex.
+func (f *fakeGitProvider) removeLabelFrom(id int, label string) {
+	withoutLabel := func(iss *Issue) *Issue {
+		cp := *iss
+		kept := make([]string, 0, len(iss.Labels))
+		for _, l := range iss.Labels {
+			if !strings.EqualFold(l, label) {
+				kept = append(kept, l)
+			}
+		}
+		cp.Labels = kept
+		return &cp
+	}
+	if iss, ok := f.issueByID[id]; ok {
+		f.issueByID[id] = withoutLabel(iss)
+	}
+	for i, iss := range f.listIssues {
+		if iss != nil && iss.ID == id {
+			f.listIssues[i] = withoutLabel(iss)
+		}
+	}
 }
 
 // CreateLabel records the call and returns createLabelErr (nil

@@ -130,6 +130,47 @@ func TestSelectNextAssignedIssue_SkipsClaimedIssues(t *testing.T) {
 	if sel.Counters.Candidates != 1 {
 		t.Errorf("candidates = %d, want 1 (the claimed issue is not a candidate)", sel.Counters.Candidates)
 	}
+	if sel.Counters.Held != 1 {
+		t.Errorf("held counter = %d, want 1", sel.Counters.Held)
+	}
+}
+
+// TestRenderAutoNoCandidate_HeldQueueSaysSo pins the card of a
+// queue whose issues are all held. They still carry the queue
+// marker — the state label is what excludes them — so the card must
+// name the hold as the reason the queue is empty instead of
+// claiming the label is absent and telling the user to attach it
+// again.
+func TestRenderAutoNoCandidate_HeldQueueSaysSo(t *testing.T) {
+	prov := newFakeGitProvider(ProviderGitHub, "github.com")
+	prov.SetListIssues([]*Issue{
+		autoIssue(1, "feat: claimed", 1, LabelAssigned, LabelWIP),
+	})
+
+	sel, err := autoSelect(t, prov)
+	if err != nil {
+		t.Fatalf("selectNextAssignedIssue: %v", err)
+	}
+	if sel.Issue != nil {
+		t.Fatalf("picked %+v, want nothing", sel.Issue)
+	}
+	if sel.Counters.Candidates != 0 {
+		t.Errorf("candidates = %d, want 0", sel.Counters.Candidates)
+	}
+	if sel.Counters.Held != 1 {
+		t.Errorf("held counter = %d, want 1", sel.Counters.Held)
+	}
+
+	card := renderAutoNoCandidate(sel, labelCatalogNote(labelCheck{Verified: true}))
+	if !strings.Contains(card, "1 assigned issue(s) are held") {
+		t.Errorf("card must name the hold as the reason the queue is empty:\n%s", card)
+	}
+	if strings.Contains(card, "none of the 100 oldest open issues carries") {
+		t.Errorf("card must not claim the queue marker is absent:\n%s", card)
+	}
+	if strings.Contains(card, "attach it to an issue") {
+		t.Errorf("card must not ask for a label that is already attached:\n%s", card)
+	}
 }
 
 // TestSelectNextAssignedIssue_SkipsUnlandedBlocker pins the
@@ -327,6 +368,7 @@ func TestAutoNoCandidateOutcome(t *testing.T) {
 		"reason":        "no_candidate",
 		"wake_after":    "5m",
 		"candidates":    "4",
+		"held":          "0",
 		"blocked":       "1",
 		"branch_exists": "2",
 		"pr_open":       "1",

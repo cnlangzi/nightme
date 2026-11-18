@@ -63,6 +63,9 @@ const (
 type autoCounters struct {
 	// Candidates is how many issues the queue held.
 	Candidates int
+	// Held is how many carried the queue marker but are held by
+	// another agent — they are not candidates.
+	Held int
 	// Blocked is how many were skipped for an unlanded blocker.
 	Blocked int
 	// BranchExists is how many were skipped because their derived
@@ -122,8 +125,8 @@ func selectNextAssignedIssue(
 	if err != nil {
 		return nil, err
 	}
-	candidates := assignedCandidates(issues)
-	sel := &autoSelection{Counters: autoCounters{Candidates: len(candidates)}}
+	candidates, held := assignedCandidates(issues)
+	sel := &autoSelection{Counters: autoCounters{Candidates: len(candidates), Held: held}}
 
 	for _, c := range candidates {
 		if !sel.RelationsUnavailable {
@@ -188,13 +191,23 @@ func selectNextAssignedIssue(
 // The queue marker alone is what makes an issue available: any other
 // state label means another agent holds it (claimed, under review,
 // waiting for a revision, done).
-func assignedCandidates(issues []*Issue) []*Issue {
+//
+// The second return value counts the issues that carry the queue
+// marker but are held. They are not candidates, but they are why the
+// queue can come up empty while the label is in use — and the reply
+// has to say that instead of claiming the label is absent.
+func assignedCandidates(issues []*Issue) ([]*Issue, int) {
 	out := make([]*Issue, 0, len(issues))
+	held := 0
 	for _, iss := range issues {
 		if iss == nil {
 			continue
 		}
-		if !issueHasLabel(iss, LabelAssigned) || heldLabel(iss) != "" {
+		if !issueHasLabel(iss, LabelAssigned) {
+			continue
+		}
+		if heldLabel(iss) != "" {
+			held++
 			continue
 		}
 		out = append(out, iss)
@@ -205,7 +218,7 @@ func assignedCandidates(issues []*Issue) []*Issue {
 		}
 		return cmp.Compare(a.ID, b.ID)
 	})
-	return out
+	return out, held
 }
 
 // unlandedBlockers returns the blockers that have not landed yet.
@@ -241,10 +254,10 @@ func blockerNumbers(blockers []*Issue) string {
 // labelNote explains the empty queue in terms of the label catalog:
 // the queue marker is in the repository's catalog, so the queue is
 // empty because nobody has attached it to an issue yet. It is
-// rendered only when the queue held no candidate at all — a queue
-// whose candidates were all passed over has its own reasons, spelled
-// out in the rows above, and "attach the label to an issue" would
-// not change that.
+// rendered only when no issue in the window carries the marker at
+// all — a queue whose issues are held, or whose candidates were
+// all passed over, has its own reasons, spelled out in the rows
+// above, and "attach the label to an issue" would not change that.
 //
 // The queue row says the same thing in the queue's own terms: the
 // candidate must carry the queue marker alone.
@@ -256,14 +269,22 @@ func renderAutoNoCandidate(sel *autoSelection, labelNote string) string {
 	b.WriteString("✅ No eligible assigned issue\n")
 
 	rows := make([][2]string, 0, len(sel.Skipped)+2)
-	if sel.Counters.Candidates == 0 {
-		rows = append(rows, [2]string{"queue", fmt.Sprintf(
-			"empty — none of the %d oldest open issues carries `%s` on its own",
-			listIssuesPerPage, LabelAssigned)})
-	} else {
+	switch {
+	case sel.Counters.Candidates > 0:
 		rows = append(rows, [2]string{"queue", fmt.Sprintf(
 			"%d candidate(s) — %d blocked, %d with an existing branch, %d with an open pull request",
 			sel.Counters.Candidates, sel.Counters.Blocked, sel.Counters.BranchExists, sel.Counters.PROpen)})
+	case sel.Counters.Held > 0:
+		// The issues carry the queue marker and are held, so the
+		// marker is in use — saying it is absent would send the user
+		// to attach a label that is already attached.
+		rows = append(rows, [2]string{"queue", fmt.Sprintf(
+			"empty — %d assigned issue(s) are held and are not offered",
+			sel.Counters.Held)})
+	default:
+		rows = append(rows, [2]string{"queue", fmt.Sprintf(
+			"empty — none of the %d oldest open issues carries `%s` on its own",
+			listIssuesPerPage, LabelAssigned)})
 	}
 	for _, s := range sel.Skipped {
 		switch s.Reason {
@@ -288,7 +309,7 @@ func renderAutoNoCandidate(sel *autoSelection, labelNote string) string {
 	for _, r := range rows {
 		fmt.Fprintf(&b, "→ %-*s %s\n", width, r[0]+":", r[1])
 	}
-	if labelNote != "" && sel.Counters.Candidates == 0 {
+	if labelNote != "" && sel.Counters.Candidates == 0 && sel.Counters.Held == 0 {
 		fmt.Fprintf(&b, "→ %s\n", labelNote)
 	}
 	fmt.Fprintf(&b, "↳ come back in %s for another pick.\n", autoWakeAfter)
@@ -307,6 +328,7 @@ func autoNoCandidateOutcome(sel *autoSelection) messages.Outcome {
 		map[string]string{
 			"wake_after":    autoWakeAfter,
 			"candidates":    strconv.Itoa(sel.Counters.Candidates),
+			"held":          strconv.Itoa(sel.Counters.Held),
 			"blocked":       strconv.Itoa(sel.Counters.Blocked),
 			"branch_exists": strconv.Itoa(sel.Counters.BranchExists),
 			"pr_open":       strconv.Itoa(sel.Counters.PROpen),

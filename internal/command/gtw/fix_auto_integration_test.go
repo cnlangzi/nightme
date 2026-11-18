@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -24,9 +25,9 @@ import (
 
 // TestFixAuto_PicksAssignedIssue pins the automatic mode end to
 // end: the oldest assigned issue is claimed, its worktree is
-// created, it carries `nightme/wip` and no longer
-// `nightme/assigned`, and the issue is dispatched to the agent.
-// The open issue that carries no queue label is left alone.
+// created, it carries `nightme/wip` and keeps `nightme/assigned`,
+// and the issue is dispatched to the agent. The open issue that
+// carries no queue label is left alone.
 func TestFixAuto_PicksAssignedIssue(t *testing.T) {
 	rig := newFixRemoteRig(t)
 	assigned := &Issue{
@@ -59,10 +60,13 @@ func TestFixAuto_PicksAssignedIssue(t *testing.T) {
 	if len(addCalls) != 1 || addCalls[0].Label != LabelWIP || addCalls[0].ID != 42 {
 		t.Errorf("AddIssueLabel calls = %+v, want one call stamping %q on issue 42", addCalls, LabelWIP)
 	}
-	// The issue leaves the queue: `nightme/assigned` comes off.
-	rmCalls := rig.prov.CallsByMethod("RemoveIssueLabel")
-	if len(rmCalls) != 1 || rmCalls[0].Label != LabelAssigned || rmCalls[0].ID != 42 {
-		t.Errorf("RemoveIssueLabel calls = %+v, want one call removing %q from issue 42", rmCalls, LabelAssigned)
+	// The queue marker stays: gtw only adds labels. The claim
+	// marker alone keeps the issue out of the next pick.
+	gotLabels := rig.prov.IssueLabels(42)
+	for _, want := range []string{LabelAssigned, LabelWIP} {
+		if !slices.Contains(gotLabels, want) {
+			t.Errorf("issue labels = %v, want %q to be present", gotLabels, want)
+		}
 	}
 	// The picked issue is fetched like any named issue, so the
 	// agent gets its body and attachments.
@@ -137,6 +141,34 @@ func TestFixAuto_NoCandidate_ReportsFailure(t *testing.T) {
 	}
 	if !strings.Contains(last, "5m") {
 		t.Errorf("reply must say when to come back:\n%s", last)
+	}
+}
+
+// TestFixAuto_HeldQueue_ReplyNamesTheHold pins the reply of a
+// queue whose issues are all held: the issues still carry the queue
+// marker — the state label is what excludes them — so the card must
+// name the hold as the reason the queue is empty instead of
+// claiming the label is missing and asking for it again.
+func TestFixAuto_HeldQueue_ReplyNamesTheHold(t *testing.T) {
+	rig := newFixRemoteRig(t)
+	rig.prov.SetListIssues([]*Issue{{
+		ID:        42,
+		Title:     "feat: the claimed one",
+		State:     "open",
+		Labels:    []string{LabelAssigned, LabelWIP},
+		CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	}})
+
+	if _, err := rig.driveAuto(t); err != nil {
+		t.Fatalf("RunFix: %v", err)
+	}
+
+	last := rig.rec.lastText()
+	if !strings.Contains(last, "are held") {
+		t.Errorf("reply must name the hold as the reason the queue is empty:\n%s", last)
+	}
+	if strings.Contains(last, "attach it to an issue") {
+		t.Errorf("reply must not ask for a label that is already attached:\n%s", last)
 	}
 }
 
@@ -228,5 +260,59 @@ func TestFixAuto_NoCandidate_OutcomeCarriesWakeUp(t *testing.T) {
 	// error description.
 	if desc, ok := settled.Data["error"]; ok {
 		t.Errorf("an empty queue is a normal branch: it carries no error description, got %q", desc)
+	}
+}
+
+// TestFixAuto_ClaimedIssueIsNotOfferedAgain pins that a claimed
+// issue drops out of the automatic queue for good: the claim
+// marker `nightme/wip` stays on the issue — the close leaves it
+// there too — and the pick filter drops every issue that carries
+// it. gtw never removes the queue marker, so it is not what
+// keeps the issue out; the claim is.
+func TestFixAuto_ClaimedIssueIsNotOfferedAgain(t *testing.T) {
+	rig := newFixRemoteRig(t)
+	assigned := &Issue{
+		ID:        42,
+		Title:     "feat: the assigned one",
+		Body:      "Do the assigned work.",
+		State:     "open",
+		Labels:    []string{LabelAssigned},
+		CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
+	rig.prov.SetListIssues([]*Issue{assigned})
+	rig.prov.SetIssue(42, assigned)
+
+	if _, err := rig.driveAuto(t); err != nil {
+		t.Fatalf("RunFix: %v", err)
+	}
+
+	// The claim marker is on the issue and the queue marker stays.
+	got := rig.prov.IssueLabels(42)
+	for _, want := range []string{LabelAssigned, LabelWIP} {
+		if !slices.Contains(got, want) {
+			t.Fatalf("issue labels = %v, want %q to be present", got, want)
+		}
+	}
+
+	// Closing the fix is a local teardown: the claim marker stays
+	// on the issue.
+	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-close"); err != nil {
+		t.Fatalf("RunClose: %v", err)
+	}
+	if got := rig.prov.IssueLabels(42); !slices.Contains(got, LabelWIP) {
+		t.Fatalf("issue labels after the close = %v, want %q to stay", got, LabelWIP)
+	}
+
+	// The queue does not offer the issue any more.
+	issues, err := rig.prov.ListIssues(context.Background(), "cnlangzi", "nightme")
+	if err != nil {
+		t.Fatalf("ListIssues: %v", err)
+	}
+	cands, claimed := assignedCandidates(issues)
+	if len(cands) != 0 {
+		t.Errorf("candidates = %+v, want none (the claimed issue is out of the queue)", cands)
+	}
+	if claimed != 1 {
+		t.Errorf("claimed = %d, want 1 (the issue carries the queue marker and a claim)", claimed)
 	}
 }

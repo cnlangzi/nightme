@@ -116,7 +116,7 @@ func TestGitHubCreateLabel_AlreadyExistsIsSuccess(t *testing.T) {
 // (e.g. 403 forbidden, network failure, label-name validation),
 // the error must be returned to the caller verbatim. This is
 // the "preserves operator-visible signal" branch — the same
-// semantic as AddIssueLabel / RemoveIssueLabel.
+// semantic as AddIssueLabel.
 func TestGitHubCreateLabel_OtherErrorSurfaces(t *testing.T) {
 	cli := &stubCLIRunner{
 		stderr: "403 Forbidden: missing Labels write scope\n",

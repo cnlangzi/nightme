@@ -174,10 +174,11 @@ func TestFixRemote_AddIssueLabelFailure_NamesStaleCatalog(t *testing.T) {
 	}
 }
 
-// TestRunClose_LabelCheckFailure_WarnsAndContinues pins that a
-// failing check does not stop /gtw close: the close runs to its
-// normal result and the reply carries the warning.
-func TestRunClose_LabelCheckFailure_WarnsAndContinues(t *testing.T) {
+// TestRunClose_UnreadableCatalog_ClosesWithoutWarning pins that
+// the close reads no label catalog at all: a repository whose
+// catalog cannot be read does not slow the close down, and no
+// reply of the close carries a warning line.
+func TestRunClose_UnreadableCatalog_ClosesWithoutWarning(t *testing.T) {
 	wt := t.TempDir()
 	repoRoot := t.TempDir()
 
@@ -195,16 +196,12 @@ func TestRunClose_LabelCheckFailure_WarnsAndContinues(t *testing.T) {
 	if !strings.Contains(last, "closed") {
 		t.Errorf("reply must report the close:\n%s", last)
 	}
-	if !strings.Contains(last, "⚠️ could not ensure gtw labels on cnlangzi/nightme") {
-		t.Errorf("reply must carry the warning line:\n%s", last)
+	if strings.Contains(last, "⚠️") {
+		t.Errorf("reply must not carry a warning line:\n%s", last)
 	}
-	if !strings.Contains(last, "403 Forbidden: missing Labels read scope") {
-		t.Errorf("reply must echo the provider error verbatim:\n%s", last)
-	}
-	// The claim marker was still lifted — the warning does not
-	// change what the close does.
-	if n := len(prov.CallsByMethod("RemoveIssueLabel")); n != 1 {
-		t.Errorf("RemoveIssueLabel calls = %d, want 1 (the close still runs)", n)
+	// The catalog was never read — the close is a local teardown.
+	if n := len(prov.CallsByMethod("ListLabels")); n != 0 {
+		t.Errorf("ListLabels calls = %d, want 0 (the close reads no catalog)", n)
 	}
 }
 

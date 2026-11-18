@@ -348,6 +348,10 @@ type GitProvider interface {
 
 	// RemoveIssueLabel removes `label` from the issue. Idempotent:
 	// removing an already-absent label is a no-op.
+	//
+	// The one place gtw removes a label: the state transition of
+	// `/gtw pr --ready`, which moves the linked issue from the claim
+	// to "waiting for review". The queue marker never comes off.
 	RemoveIssueLabel(ctx context.Context, owner, repo string, id int, label string) error
 
 	// CreatePR opens a pull request (GitHub) or merge request

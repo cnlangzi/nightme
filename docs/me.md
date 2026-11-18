@@ -64,6 +64,7 @@ type Outcome struct {
 | `wake_after` | 队列里没有可选项时，个人 agent 多久之后再来（`"5m"`） |
 | `label` | 挡住这次 fix 的 issue 状态 label（`nightme/wip` / `nightme/ready` / …）——`/gtw fix` 拒绝一个被别的 agent 占用的 issue 时给出 |
 | `candidates` | `/gtw fix *` 看了多少个候选 issue（数字）；`/gtw back` 前缀没命中时列出候选的 worktree 分支（逗号分隔的分支名） |
+| `held` | `/gtw fix *` 看了多少个被别的 agent 占用（带 `nightme/*` 状态 label）而不在候选里的 issue（数字） |
 | `blocked` | 其中多少个因为前置依赖没落地被跳过 |
 | `branch_exists` | 其中多少个因为本地已有同名分支被跳过 |
 | `pr_open` | 其中多少个因为已经开了 PR 被跳过 |
@@ -275,7 +276,7 @@ chatsession: message settled chat_id=… message_id=… status=… summary=…
 | `branch_exists` | 分支已经存在 | `/gtw fix` | 异常 |
 | `already_active` | 当前目录已经在一个 `/gtw fix` 里 | `/gtw fix` | 异常 |
 | `no_changes` | agent 的回合结束了，但工作区一个改动都没留下 | `/gtw fix` | 异常 |
-| `label_error` | issue 标签没能加上 / 摘掉 | `/gtw fix` / `/gtw close` | 异常 |
+| `label_error` | issue 标签没能加上 | `/gtw fix` | 异常 |
 | `bad_state` | `.nightme/gtw.yml` 缺失 / 损坏 / 读不了 | `/gtw close` / `/gtw back` | 异常 |
 | `no_active_fix` | 这个聊天没有正在进行的 fix | `/gtw close` / `/gtw back` | 异常 |
 | `dirty` | 工作区有未提交的改动 | `/gtw push` / `/gtw close` | 异常 |

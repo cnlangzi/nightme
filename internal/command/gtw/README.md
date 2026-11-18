@@ -532,6 +532,16 @@ agent 没写这一节时,卡片上方会带一行 ⚠️ 提醒 reviewer 拿不�
 状态 label(`nightme/wip`、`nightme/ready`、`nightme/revise` …)都说明别的
 agent 正在做它,`/gtw fix *` 不会挑它。
 
+队列里的 issue 全被占用时,标签是在用的,卡片说的是这件事:
+
+```
+❌ No eligible assigned issue
+→ queue: empty — 2 assigned issue(s) are held and are not offered
+↳ come back in 5m for another pick.
+```
+
+这种情况下"贴标签"那一行不出现 —— 标签已经贴在 issue 上了。
+
 平台不暴露 issue 关系图时,队列只按年龄排序,卡片里明说依赖顺序没有生效:
 
 ```

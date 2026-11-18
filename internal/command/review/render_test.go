@@ -888,7 +888,11 @@ func TestHandle_ReviewDeliversTheFindingsToTheThread(t *testing.T) {
 	f := NewFactory()
 	dispatchContinue(t, f, cs, chatID, "review")
 
-	msgs := waitForReviewMessages(t, em, 4)
+	// Five messages carry the run: the plan, one thread message per
+	// group, the end hint, and the verdict. Waiting for fewer lets
+	// the poll catch the run mid-flight — the verdict lands last,
+	// so a snapshot taken before it arrives misses a reply.
+	msgs := waitForReviewMessages(t, em, 5)
 
 	// The card carries the plan and the verdict — and no group text.
 	var replies []string

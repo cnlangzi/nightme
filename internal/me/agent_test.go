@@ -726,6 +726,26 @@ func writeWorkflow(t *testing.T, dir, name, body string) {
 	}
 }
 
+// readStateFile reads the persisted state of a run.
+//
+// The daemon replaces the file as the run goes, and Windows refuses to
+// open a file that is being replaced: the read waits for the file to
+// settle.
+func readStateFile(t *testing.T, path string) []byte {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		raw, err := os.ReadFile(path)
+		if err == nil {
+			return raw
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("read state: %v", err)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // testService builds a personal agent with fakes.
 //
 // The service is shut down when the test ends. A run that is still
@@ -1376,10 +1396,7 @@ func TestPersist_HoldsTheProgressTheConversationAndTheHistory(t *testing.T) {
 	svc.mu.Lock()
 	runID := svc.active["obs-1"].id
 	svc.mu.Unlock()
-	raw, err := os.ReadFile(filepath.Join(dir, "runs", runID+".json"))
-	if err != nil {
-		t.Fatalf("read state: %v", err)
-	}
+	raw := readStateFile(t, filepath.Join(dir, "runs", runID+".json"))
 	var state map[string]any
 	if err := json.Unmarshal(raw, &state); err != nil {
 		t.Fatalf("decode state: %v", err)

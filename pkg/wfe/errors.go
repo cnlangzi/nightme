@@ -14,7 +14,8 @@ var (
 	// an action name that no registered action provides.
 	ErrUnknownAction = errors.New("wfe: unknown action")
 
-	// ErrValidationFailed wraps schema validation errors from
-	// Parse/LoadFile/LoadDir.
+	// ErrValidationFailed is wrapped in the error of a workflow that
+	// does not validate. Parse/LoadFile/LoadDir return it as a
+	// *ValidationError, which carries every problem that was found.
 	ErrValidationFailed = errors.New("wfe: validation failed")
 )

@@ -315,7 +315,7 @@ stdout:
 | 4. 提交 | `/gtw commit [-a <agent>]` | agent 暂存改动并写出符合 Conventional Commits 的 commit message。只在本地。 |
 | 5. 推送 | `/gtw push` | 把分支推到 `origin`。worktree 有未提交改动时拒绝。 |
 | 6. PR | `/gtw pr [-a <agent>]` | 用 Conventional Commits 标题、结构化正文和 `Closes #<id>` 创建 PR / MR。 |
-| 7. 收尾 | `/gtw close` | 移除 `nightme/wip` 标签、worktree 和本地分支；chat 回到默认分支，并 sync 到最新。 |
+| 7. 收尾 | `/gtw close` | 移除 worktree 和本地分支；chat 回到默认分支，并 sync 到最新。issue 上的 `nightme/wip` 标签保持不变。 |
 
 第 1–2 步跑在 chat 当前的 agent session 里，你一直在和做分析的那个 agent 对话。`commit` 和 `pr` 起一个 one-shot agent，做完就退出，不污染主对话。`push`、`close`、`back`、`sync` 是纯 Git / 平台操作，不经过 agent。每一步回复一张 IM 卡。GitHub（`gh`）和 GitLab（`glab`）根据 `origin` 自动识别；新仓库第一次用无需任何配置。
 
@@ -343,7 +343,7 @@ issue 标题遵循 Conventional Commits，`/gtw fix` 据此生成可读的分支
 
 **`/gtw fix --name <branch>`**（或 `-n`）创建一个不关联 issue 的本地 worktree，由你自己指挥 agent。和带 issue 的模式一样，它会先 sync 默认分支：chat 必须停在主仓库（不能在 worktree 里），仓库需要有 `origin` remote，主仓库工作区不能有未提交改动。
 
-**`/gtw fix *`** 自己从待办队列里取下一件事：挑一个 issue，跑完全一样的流程，然后告诉你挑中了哪个 issue。队列在 tracker 上——NightMe 可以动的 issue 带着 `nightme/assigned` 标签，由人或者 tracker 上的外部自动化加上；fix 在打上 `nightme/wip` 的同时把它摘掉。队列里最老的可选项胜出：前置依赖还没落地的，分支本地已经存在的，或者已经开了 PR 的，都会被跳过。依赖关系取自平台自己的 issue 关系图——GitHub issue dependencies、GitLab blocking issues（Premium）——所以"先做前置"不靠 issue 正文里的文字；平台不提供关系图时队列只按年龄排序，回复里会说明这一点。当队列里没有可选项时，命令会说明原因，并请人在几分钟后叫醒它，而不是直接失败。注意：fix 认领 issue 时就把它移出了队列——没做完就 close 掉，这个 issue 就不在队列里了，要等人重新贴上标签。
+**`/gtw fix *`** 自己从待办队列里取下一件事：挑一个 issue，跑完全一样的流程，然后告诉你挑中了哪个 issue。队列在 tracker 上——NightMe 可以动的 issue 带着 `nightme/assigned` 标签，由人或者 tracker 上的外部自动化加上；fix 保留这个标签，再打上 `nightme/wip` 表示认领。队列里最老的可选项胜出：前置依赖还没落地的，分支本地已经存在的，或者已经开了 PR 的，都会被跳过。依赖关系取自平台自己的 issue 关系图——GitHub issue dependencies、GitLab blocking issues（Premium）——所以"先做前置"不靠 issue 正文里的文字；平台不提供关系图时队列只按年龄排序，回复里会说明这一点。当队列里没有可选项时，命令会说明原因，并请人在几分钟后叫醒它，而不是直接失败。被认领的 issue 靠 `nightme/wip` 标签离开队列，而这个标签会一直留着：想再动同一个 issue，就在 issue 页面上把标签删掉。
 
 **`/gtw back`** 临时离开 fix worktree 而不拆掉它——chat 的 CWD 回到仓库根目录并 sync 默认分支，worktree、分支和未提交的改动都留在磁盘上。**`/gtw back <branch>`** 再切回去：参数是 worktree 分支名的**前缀**，所以 `42-feat` 就能进入 `42-feat-login-state-expires` 所在的 worktree。前缀命中多个分支时，分支名完全相等的那个优先；都不相等时命令把这些分支列出来，不替人猜。手工建的 worktree 同样能进——分支名就是把手——但 nightme 不往里面写自己的状态文件，`/gtw close` 因此拆不掉一个不是 nightme 建的 worktree 和分支。
 
@@ -367,7 +367,7 @@ agent 的上下文太长，或者剩下的工作更适合换一个 agent 时：
 
 ### 7. 收尾：`/gtw close`
 
-**`/gtw close`** 结束任务：移除 issue 上的 `nightme/wip` 标签，删掉 worktree，强制删除本地分支，把 chat 的 CWD 切回仓库根目录，并 sync 默认分支。worktree 有未提交改动时拒绝——先 commit、stash 或丢弃。如果标签移除之后的某一步失败，标签会被加回去，重跑 `/gtw close` 时从同一个状态开始。
+**`/gtw close`** 结束任务：删掉 worktree，强制删除本地分支，把 chat 的 CWD 切回仓库根目录，并 sync 默认分支。它不碰任何平台——issue 上的 `nightme/wip` 标签保持不变，认领也就还在。worktree 有未提交改动时拒绝——先 commit、stash 或丢弃。哪一步失败，worktree、分支和状态文件都留在原处，重跑 `/gtw close` 时从同一个状态开始。
 
 ### 卡住时：`/gtw abort`
 

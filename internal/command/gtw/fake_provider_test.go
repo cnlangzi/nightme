@@ -3,6 +3,7 @@ package gtw
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 )
 
@@ -12,8 +13,8 @@ import (
 // end-to-end without touching github.com / gitlab.com.
 //
 // Tests construct one via newFakeGitProvider(kind, host),
-// seed it via SetIssue / SetGetIssueErr / SetAddIssueLabelErr /
-// SetRemoveIssueLabelErr, then wire the package-level fakeDetect
+// seed it via SetIssue / SetGetIssueErr / SetAddIssueLabelErr,
+// then wire the package-level fakeDetect
 // into deps.Detect so runFixRemote's `detect(ctx, remoteURL,
 // prober)` returns it.
 //
@@ -53,10 +54,8 @@ type fakeGitProvider struct {
 	addBlockedByErr error
 	addBlockedByFn  func(id, blocker int) error
 
-	// Generic response for AddIssueLabel / RemoveIssueLabel. Returning
-	// nil = success.
-	addIssueLabelErr    error
-	removeIssueLabelErr error
+	// Generic response for AddIssueLabel. Returning nil = success.
+	addIssueLabelErr error
 
 	// Generic response for CreateLabel. Returning nil = success.
 	// Used by tests that simulate a label-create failure
@@ -121,11 +120,11 @@ type fakeGitProvider struct {
 // named after the interface method (one variant per interface
 // method) so tests can pattern-match cleanly.
 type fakeProviderCall struct {
-	Method string // "GetIssue" / "ListIssues" / "ListBlockedBy" / "AddBlockedBy" / "AddIssueLabel" / "RemoveIssueLabel" / "CreatePR" / "GetPR" / "CreateLabel"
+	Method string // "GetIssue" / "ListIssues" / "ListBlockedBy" / "AddBlockedBy" / "AddIssueLabel" / "CreatePR" / "GetPR" / "CreateLabel"
 	Owner  string
 	Repo   string
 	ID     int
-	Label  string // only set for AddIssueLabel / RemoveIssueLabel / CreateLabel
+	Label  string // only set for AddIssueLabel / CreateLabel
 	Head   string // only set for CreatePR / GetPR
 
 	// Blocker is only set for AddBlockedBy: the issue that
@@ -258,14 +257,6 @@ func (f *fakeGitProvider) SetAddIssueLabelErr(err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.addIssueLabelErr = err
-}
-
-// SetRemoveIssueLabelErr configures the response for all RemoveIssueLabel
-// calls.
-func (f *fakeGitProvider) SetRemoveIssueLabelErr(err error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.removeIssueLabelErr = err
 }
 
 // SetCreateLabelErr configures the response for all CreateLabel
@@ -411,6 +402,19 @@ func (f *fakeGitProvider) CallsByMethod(method string) []fakeProviderCall {
 	return out
 }
 
+// IssueLabels returns the labels the fake holds for the issue with
+// the given id. Lets a test assert what the issue carries after a
+// fix claimed it.
+func (f *fakeGitProvider) IssueLabels(id int) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	iss, ok := f.issueByID[id]
+	if !ok {
+		return nil
+	}
+	return append([]string{}, iss.Labels...)
+}
+
 // --- GitProvider interface ---
 
 func (f *fakeGitProvider) Kind() ProviderKind { return f.kind }
@@ -522,24 +526,41 @@ func (f *fakeGitProvider) CreateIssue(_ context.Context, owner, repo, title, bod
 	return &cp, nil
 }
 
+// AddIssueLabel records the call and updates the stored issue's
+// label set, so a test can assert what the issue carries after a
+// fix. gtw only ever adds a label: nothing here removes one.
 func (f *fakeGitProvider) AddIssueLabel(_ context.Context, owner, repo string, id int, label string) error {
 	f.mu.Lock()
 	f.calls = append(f.calls, fakeProviderCall{
 		Method: "AddIssueLabel", Owner: owner, Repo: repo, ID: id, Label: label,
 	})
 	err := f.addIssueLabelErr
+	if err == nil {
+		f.addLabelTo(id, label)
+	}
 	f.mu.Unlock()
 	return err
 }
 
-func (f *fakeGitProvider) RemoveIssueLabel(_ context.Context, owner, repo string, id int, label string) error {
-	f.mu.Lock()
-	f.calls = append(f.calls, fakeProviderCall{
-		Method: "RemoveIssueLabel", Owner: owner, Repo: repo, ID: id, Label: label,
-	})
-	err := f.removeIssueLabelErr
-	f.mu.Unlock()
-	return err
+// addLabelTo records `label` on the issue with the given id, in
+// the per-issue map and in the list response alike — the tracker
+// holds one issue, not two. Caller holds the mutex.
+func (f *fakeGitProvider) addLabelTo(id int, label string) {
+	withLabel := func(iss *Issue) *Issue {
+		cp := *iss
+		if !slices.Contains(cp.Labels, label) {
+			cp.Labels = append(append([]string{}, iss.Labels...), label)
+		}
+		return &cp
+	}
+	if iss, ok := f.issueByID[id]; ok {
+		f.issueByID[id] = withLabel(iss)
+	}
+	for i, iss := range f.listIssues {
+		if iss != nil && iss.ID == id {
+			f.listIssues[i] = withLabel(iss)
+		}
+	}
 }
 
 // CreateLabel records the call and returns createLabelErr (nil
@@ -549,7 +570,7 @@ func (f *fakeGitProvider) RemoveIssueLabel(_ context.Context, owner, repo string
 // label; tests that simulate a blanket bootstrap failure use
 // SetCreateLabelErr.
 //
-// Mirrors the AddIssueLabel / RemoveIssueLabel pattern so tests
+// Mirrors the AddIssueLabel pattern so tests
 // can assert chronological ordering (e.g. all 6 CreateLabels
 // BEFORE AddIssueLabel) via CallsByMethod.
 func (f *fakeGitProvider) CreateLabel(_ context.Context, owner, repo, name, color, description string) error {

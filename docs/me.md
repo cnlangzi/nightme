@@ -273,7 +273,7 @@ chatsession: message settled chat_id=… message_id=… status=… summary=…
 | `branch_exists` | 分支已经存在 | `/gtw fix` | 异常 |
 | `already_active` | 当前目录已经在一个 `/gtw fix` 里 | `/gtw fix` | 异常 |
 | `no_changes` | agent 的回合结束了，但工作区一个改动都没留下 | `/gtw fix` | 异常 |
-| `label_error` | issue 标签没能加上 / 摘掉 | `/gtw fix` / `/gtw close` | 异常 |
+| `label_error` | issue 标签没能加上 | `/gtw fix` | 异常 |
 | `bad_state` | `.nightme/gtw.yml` 缺失 / 损坏 / 读不了 | `/gtw close` / `/gtw back` | 异常 |
 | `no_active_fix` | 这个聊天没有正在进行的 fix | `/gtw close` / `/gtw back` | 异常 |
 | `dirty` | 工作区有未提交的改动 | `/gtw push` / `/gtw close` | 异常 |

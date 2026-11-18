@@ -38,9 +38,9 @@ label catalog 里没有某个标签，那个标签就**挂不到任何 issue 上
 3. **缓存**：`LabelCache` 按仓库记住「这个仓库的 catalog 齐全
    了」。只进内存，daemon 重启后重新检查；失败的检查不写缓存。
 4. **跑在哪**：`/gtw fix` 在**队列挑选之前**跑，失败即致命（此时
-   还没有 worktree，没有东西要回滚）；`/gtw close` / `/gtw pr` /
-   `/gtw new -y` 跑在各自的 tracker 路径上，失败只给一行 `⚠️`
-   警告，命令照常跑完。provider 探测不跑检查。
+   还没有 worktree，没有东西要回滚）；`/gtw pr` / `/gtw new -y` 跑在
+   各自的 tracker 路径上，失败只给一行 `⚠️` 警告，命令照常跑完。
+   `/gtw close` 不跑检查 —— 它是纯本地收尾。provider 探测不跑检查。
 
 设计上保证：任何一条会跟 tracker 说话的 gtw 命令，都不会因为
 仓库少一个标签而卡住；队列为空的回复会说明队列为什么是空的。
@@ -295,15 +295,14 @@ type LabelCache struct {
 | 命令 | 什么时候 | 失败时 |
 |---|---|---|
 | `/gtw fix` | remote 路径，owner/repo 解析之后、**队列挑选之前** | 致命 —— 命令回显错误就停，此时还没有 worktree |
-| `/gtw close` | 贴 / 摘 label 的那一步（provider 解析之后） | 回复里给一行 `⚠️` 警告，命令继续 |
 | `/gtw pr` | provider 解析之后、开 PR 之前 | 回复里给一行 `⚠️` 警告，命令继续 |
 | `/gtw new -y` | 建 issue 的路径（provider 解析之后） | 回复里给一行 `⚠️` 警告，命令继续 |
+
+`/gtw close` 不检查 —— 它是纯本地收尾，不做任何 label 操作。
 
 `/gtw new` 不带 `-y` 只把讨论变成草稿，不写 tracker，所以不检查。
 
 **警告行出现在每一条回复的最前面** —— 无论命令是成功还是失败。
-`/gtw close` 的警告跟着 close 自己的卡片走（成功卡和失败卡都带），
-跟在其后的 sync 卡片是另一个步骤，不重复这行。
 
 **检查不在 provider 探测里跑**：`detectProvider` /
 `resolveProvider` 每次消息刷新都会被 workspace footer 的 PR 查询
@@ -321,8 +320,10 @@ resolve provider + owner/repo
        └─ 挑到了
             → worktree + branch
             → AddIssueLabel(nightme/wip)   失败 → rollbackLabelStep
-            → RemoveIssueLabel(nightme/assigned)（只记 warning）
 ```
+
+认领之后 issue 同时带 `nightme/assigned` 和 `nightme/wip` 两个
+label —— gtw 只加 label，从不摘。
 
 label catalog 检查在 worktree 之前，所以它的失败不需要回滚 ——
 `rollbackLabelStep` 只覆盖 `AddIssueLabel` 这一步。
@@ -341,7 +342,7 @@ label catalog 检查在 worktree 之前，所以它的失败不需要回滚 —�
   <err>` 后面补一行，说明 catalog 可能是验证之后被人改过，办法是
   重启 daemon 重新验证，或者手工建这个标签。这一行是一个**可能**
   而不是诊断 —— 平台自己的错误文本说的是实际失败的原因。
-- **检查失败（`/gtw close` / `/gtw pr` / `/gtw new -y`）**：
+- **检查失败（`/gtw pr` / `/gtw new -y`）**：
   `⚠️ could not ensure gtw labels on <owner>/<repo>: <err>`，
   放在回复正文的最前面。
 
@@ -374,7 +375,7 @@ label catalog 检查在 worktree 之前，所以它的失败不需要回滚 —�
   `WorktreeAdd` 之后的 bootstrap 步骤和它的回滚分支。
 - 贴 label 失败的回复加上 stale-catalog 那一行。
 
-### 3.4 `internal/command/gtw/close.go` / `pr.go` / `new.go`
+### 3.4 `internal/command/gtw/pr.go` / `new.go`
 
 - 各自在 provider 解析之后跑检查，失败只产生一行 `⚠️` 警告，
   塞进回复正文的最前面。
@@ -410,9 +411,8 @@ label catalog 检查在 worktree 之前，所以它的失败不需要回滚 —�
       `TestFixAuto_SkippedCandidate_DropsTheQueueNote`。
 - [x] 检查失败时 `/gtw fix` 致命且不留痕迹。测试
       `TestFixRemote_LabelCheckFailure_IsFatal`。
-- [x] 检查失败时 `/gtw close` / `/gtw pr` / `/gtw new -y` 只警告，
+- [x] 检查失败时 `/gtw pr` / `/gtw new -y` 只警告，
       而且警告出现在每一条回复上（成功和失败都有）。测试
-      `TestRunClose_LabelCheckFailure_WarnsAndContinues`、
       `TestDispatchPR_LabelCheckFailure_WarnsAndContinues`、
       `TestDispatchPR_LabelCheckFailure_WarnsOnFailureToo`、
       `TestRunNewCreate_LabelCheckFailure_WarnsAndContinues`。
@@ -466,10 +466,9 @@ label catalog 检查在 worktree 之前，所以它的失败不需要回滚 —�
 - ✅ `TestFixRemote_LabelCheckFailure_IsFatal` — 致命 + 无残留。
 - ✅ `TestFixRemote_AddIssueLabelFailure_NamesStaleCatalog` — stale
   catalog 那一行。
-- ✅ `TestRunClose_LabelCheckFailure_WarnsAndContinues` /
-  `TestDispatchPR_LabelCheckFailure_WarnsAndContinues` /
+- ✅ `TestDispatchPR_LabelCheckFailure_WarnsAndContinues` /
   `TestDispatchPR_LabelCheckFailure_WarnsOnFailureToo` /
-  `TestRunNewCreate_LabelCheckFailure_WarnsAndContinues` — 三个命令
+  `TestRunNewCreate_LabelCheckFailure_WarnsAndContinues` — 两个命令
   的警告路径（成功和失败都有）。
 - ✅ `TestCollectPR_DoesNotTouchTheLabelCatalog` — 探测路径不检查。
 - ✅ `TestFixRemote_CheckRunsOncePerRepository` — 每个仓库只查一次。
@@ -571,7 +570,6 @@ label 就失败）。
 
 ### 9.3 监控
 
-- `gtw: could not remove the assigned label` 日志：保持不变。
 - 检查失败没有单独的日志行：错误文本直接进用户的回复。
 
 ---

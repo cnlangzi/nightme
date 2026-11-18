@@ -167,9 +167,9 @@ AddBlockedBy(ctx context.Context, owner, repo string, id, blocker int) error
 
 **`/gtw new -y` 写关系**：草稿里的 `{{ISSUE:NN}}` 引用就是依赖，被引用的 issue 挡着引用它的 issue。建 issue 的循环里，每建好一个 issue 就把它引用到的每个 issue 的关系写进平台 —— 写不进去只警告，命令照旧成功，卡片上多一行 `deps` 列出建成的依赖。关系不落盘：草稿建好 issue 后就被 `.created` 记录换掉，同一对 issue 不会重复建关系。
 
-**label 替换**：fix 认领 issue 时把队列标记换成进行中标记 —— 先加 `nightme/wip`，再摘 `nightme/assigned`。先加后摘：两步之间失败，issue 同时带两个 label，而队列过滤会把它挡在下一轮之外。摘 label 失败只记 warning，不回滚 fix。
+**认领 = 加一个 label**：fix 认领 issue 时只加 `nightme/wip`，队列标记 `nightme/assigned` 留在 issue 上 —— gtw 只加 label，从不摘。认领之后 issue 同时带两个 label，队列过滤按 `nightme/wip` 把它挡在下一轮之外。
 
-**认领之后放弃 = 离开队列**：`/gtw close` 只摘 `nightme/wip`，不把 `nightme/assigned` 加回去（nightme 从不自己加这个 label）。所以「挑起来 → 没做完就 close」的 issue 从此不在队列里了；要让它回到队列，人工或者外部自动化重新贴上 `nightme/assigned`。
+**认领之后放弃 = 离开队列**：`/gtw close` 是纯本地收尾，一个 label 都不碰 —— `nightme/wip` 留在 issue 上，`nightme/assigned` 也在。所以「挑起来 → 没做完就 close」的 issue 从此不在队列里了；要让它回到队列，人工在 issue 页面上删掉 `nightme/wip`。
 
 **队列没有原子认领**：`ListIssues` 和贴 `nightme/wip` 之间有窗口，两台机器同时跑 `/gtw fix *` 可能挑到同一个 issue。这跟具名 fix 的既有窗口是同一类 —— label 是协作信号，不是锁（见 §3.2）。
 
@@ -214,7 +214,7 @@ label catalog 检查在 owner/repo 解析之后、队列挑选之前跑。它读
 
 **检查的结果缓存**：`LabelCache` 按仓库（平台 + `owner/repo`）记住「这个仓库的 catalog 齐全了」。label catalog 是仓库的属性，不是 worktree 的属性，所以同一仓库的每个 worktree 共用一条记录；平台也在 key 里，因为 GitHub 仓库和 GitLab 项目可以同名同 owner，而两个平台的 catalog 是两套。缓存只进内存，daemon 重启后重新检查；失败的检查不写缓存，下一条命令会重试。
 
-**别处也检查**：`/gtw close`、`/gtw pr`、`/gtw new -y` 同样会检查仓库的 catalog —— 这三个命令不贴 label，所以检查失败只给一行 `⚠️` 警告，命令照常跑完。provider 探测（`detectProvider` / `resolveProvider`）**不**检查：workspace footer 每次刷新消息都会解析一个 provider，在那里检查会把读变成对用户仓库的写。
+**别处也检查**：`/gtw pr`、`/gtw new -y` 同样会检查仓库的 catalog —— 这两个命令不贴 label，所以检查失败只给一行 `⚠️` 警告，命令照常跑完。`/gtw close` 不检查，也不做任何 label 操作 —— 它是纯本地收尾。provider 探测（`detectProvider` / `resolveProvider`）**不**检查：workspace footer 每次刷新消息都会解析一个 provider，在那里检查会把读变成对用户仓库的写。
 
 详见 [`F-59-gtw-label-bootstrap.md`](./F-59-gtw-label-bootstrap.md)。
 
@@ -245,11 +245,11 @@ Local 模式（`/gtw fix --name`）同样：branch 存在即失败，无决策�
 
 ### 3.2 Issue 已被认领（`nightme/wip`）：硬失败
 
-`nightme/wip` 是 gtw 的 claim 标记：`/gtw fix` 贴上，`/gtw close` 摘掉。远端模式取到 issue 时若该 label 已存在，说明这次 fix 仍被某处持有（本机或另一台机器），本次 `/gtw fix` 直接拒绝。
+`nightme/wip` 是 gtw 的 claim 标记：`/gtw fix` 贴上，之后没有人摘掉。远端模式取到 issue 时若该 label 已存在，说明这个 issue 已被认领（本机或另一台机器），本次 `/gtw fix` 直接拒绝。
 
 **判定位置**：`BranchExists` 检查**之后**、任何副作用（preflight / refresh / worktree add / 贴 label / dispatch）**之前**。
 
-- 放在 branch-exists **之后**：branch-exists 覆盖「本机已认领」这一类，它的补救动作 `/gtw close` 同时会摘掉 label，是更准确的出口；gate 只负责本地 checkout 无法解释的 claim（另一台机器的 fix，或分支被手工删掉）。
+- 放在 branch-exists **之后**：branch-exists 覆盖「本机已认领」这一类，它的补救动作 `/gtw close` 会拆掉那个 worktree 和分支，是更准确的出口；gate 只负责本地 checkout 无法解释的 claim（另一台机器的 fix，或分支被手工删掉）。
 - 放在副作用**之前**：被拒绝的运行不留任何痕迹——不建 worktree、不建分支、不写 label、不 dispatch。
 
 **这是协作信号，不是锁**：`GetIssue` 读标签与 `AddIssueLabel` 写标签之间存在时间窗，两台机器同时认领同一个 issue 时可能都通过 gate。gate 缩小窗口但不消除它——label 是幂等写入，平台没有“只允许一个写入者”的原语。
@@ -259,16 +259,16 @@ Local 模式（`/gtw fix --name`）同样：branch 存在即失败，无决策�
 ```text
 ❌ Issue #42 is already claimed — label "nightme/wip" is present
 → another /gtw fix holds this issue (or an earlier one never closed)
-↳ to release it: /cwd into that fix's worktree and run `/gtw close`
-↳ if the claim is stale, remove the nightme/wip label on the issue page
+↳ to release it: remove the nightme/wip label on the issue page
+↳ to tear down that fix's worktree: /cwd into it and run `/gtw close`
 ```
 
 两条退出指引各自对应一种场景：
 
-- `/gtw close` 摘掉 `nightme/wip` 并删掉 worktree + branch，但它从 `cs.SelectedCwd()` 读 `.nightme/gtw.yml` 作为唯一真相来源，因此必须先 `/cwd` 进那个 worktree。
-- claim 已失效（对端机器的 fix 已经不在了、或分支被手工删掉）时，本地没有任何 `/gtw` 命令能摘掉远端 label，只能在 issue 页面上手工移除。
+- 解除 claim：在 issue 页面上删掉 `nightme/wip`。gtw 只加 label，不摘 label，所以这是唯一的解除路径。
+- 拆掉本地残留：把 chat `/cwd` 进那个 worktree 再跑 `/gtw close` —— 它删掉 worktree + branch，从 `cs.SelectedCwd()` 读 `.nightme/gtw.yml` 作为唯一真相来源。
 
-**没有 `--force` 逃生舱**：`/gtw fix` 不接受 `--force` / `-f`（见 §2.2）。解除 claim 的路径（`/gtw close` 或 issue 页面摘 label）都明确存在。
+**没有 `--force` 逃生舱**：`/gtw fix` 不接受 `--force` / `-f`（见 §2.2）。解除 claim 的路径（issue 页面删 label）明确存在。
 
 **Local 模式不受影响**：`/gtw fix --name <branch>` 不接触 issue，没有 label 可读，也就没有 claim 可查——它不受这个 gate 约束。
 
@@ -856,7 +856,7 @@ label catalog 检查在 worktree 创建之前跑，所以 `rollbackLabelStep` �
 | **依赖关系取自平台的关系图** | 机器可读的关系才让「先做前置」可靠；两个平台都提供；正文里的 `#12` 多数是「见 #12」或「Closes #12」，不是依赖 |
 | **blocker 只在 closed 时算已落地** | 前置的 PR 得先 merge，依赖项才建在它之上 |
 | **关系不可用要上报，不能当没有依赖** | 默默忽略依赖会挑错 issue；「平台不支持」和「没有依赖」是两回事 |
-| **label 替换先加后摘** | 两步之间失败时 issue 仍然显示「进行中」，而不是悄悄从队列里消失 |
+| **claim 只加不摘** | 队列标记 `nightme/assigned` 留在 issue 上，tracker 上的记录不丢；队列过滤按 `nightme/wip` 排除认领中的 issue，一个标记就够 |
 | **选择逻辑单独成文件** | `fix.go` 已经很大，选择是一个自洽的单元 |
 
 ---

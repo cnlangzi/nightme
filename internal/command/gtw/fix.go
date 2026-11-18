@@ -202,14 +202,21 @@ func RunFix(
 //  7. WorktreeAdd (creates the durable worktree first; failure
 //     here surfaces the git error and bails without touching
 //     the label).
-//  8. AddIssueLabel(LabelWIP). Failure rolls back the worktree
-//     and branch via rollbackLabelStep.
+//  8. AddIssueLabel(LabelWIP). The claimed issue carries both
+//     markers: the queue marker `nightme/assigned` stays and the
+//     claim marker `nightme/wip` goes on. Failure rolls back the
+//     worktree and branch via rollbackLabelStep.
 //  9. SetSelectedCwd → WriteGTWYml (the yml is the cwd-scoped
 //     source of truth for hooks, /gtw close, and recovery).
 //  10. Render success card.
 //  11. Dispatch issue body to ChatSession.QueueUserMessage so
 //     the agent picks it up. Failure here does NOT roll back
 //     the worktree — the user can re-trigger manually.
+//
+// gtw only ever adds a label. The claim marker does double duty:
+// it says a fix holds the issue, and it keeps the issue out of the
+// automatic queue — the pick filter drops every issue that carries
+// `nightme/wip`, so a claimed issue is not offered again.
 //
 // The label catalog is verified at step 1, before the queue is
 // consulted: a repository whose catalog predates `nightme/assigned`
@@ -396,13 +403,12 @@ func runFixRemote(
 
 	// --- already-claimed gate -------------------------------------
 	// `nightme/wip` is the claim marker: /gtw fix stamps it on
-	// the issue, /gtw close lifts it. Its presence at fetch time
-	// means some fix still holds this issue — on this machine or
-	// another one.
+	// the issue and nothing lifts it again, so its presence at
+	// fetch time means the issue is claimed — by a fix on this
+	// machine or on another one.
 	//
 	// The gate sits AFTER the branch-exists check because that
-	// check owns the "you already own this locally" case, whose
-	// remedy is `/gtw close` (which also drops the label). What
+	// check owns the "you already own this locally" case. What
 	// reaches the gate is a claim the local checkout cannot
 	// explain: another machine's fix, or a branch deleted by hand.
 	//
@@ -412,8 +418,8 @@ func runFixRemote(
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, fmt.Sprintf(
 			"❌ Issue #%d is already claimed — label %q is present\n"+
 				"→ another /gtw fix holds this issue (or an earlier one never closed)\n"+
-				"↳ to release it: /cwd into that fix's worktree and run `/gtw close`\n"+
-				"↳ if the claim is stale, remove the %s label on the issue page",
+				"↳ to release it: remove the %s label on the issue page\n"+
+				"↳ to tear down that fix's worktree: /cwd into it and run `/gtw close`",
 			issueID, LabelWIP, LabelWIP),
 			command.FailedOutcome("issue_claimed", "the issue is already claimed by another fix")), nil
 	}
@@ -528,20 +534,9 @@ func runFixRemote(
 			command.FailedOutcome("label_error", "the issue could not be labelled")), nil
 	}
 
-	// The issue left the queue. `nightme/assigned` is what
-	// `/gtw fix *` draws from, and the fix now holds the issue —
-	// so the queue marker comes off as `nightme/wip` goes on.
-	//
-	// Add-before-remove: a failure between the two leaves the
-	// issue carrying both labels, and the queue filter keeps it
-	// out of the next pick. The removal is therefore warn-only —
-	// it never rolls the fix back.
-	if err := provider.RemoveIssueLabel(ctx, owner, repo, issueID, LabelAssigned); err != nil {
-		slog.Default().Warn("gtw: could not remove the assigned label",
-			"issue_id", issueID,
-			"label", LabelAssigned,
-			"err", err)
-	}
+	// The queue marker stays: the pick filter excludes issues by
+	// `nightme/wip`, so the claim alone keeps the issue out of the
+	// next pick.
 
 	// --- switch cwd + write context + render + dispatch ----------
 	return completeFixAndDispatch(ctx, cs, deps, chatID, messageID,

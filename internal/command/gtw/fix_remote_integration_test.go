@@ -20,6 +20,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -354,11 +355,12 @@ func TestFixRemote_HappyPath(t *testing.T) {
 	rig := newFixRemoteRig(t)
 	issueID := 42
 	rig.prov.SetIssue(issueID, &Issue{
-		ID:    issueID,
-		Title: "Add /gtw close subcommand",
-		Body:  "The /gtw fix flow needs a way to tear down worktrees.",
-		State: "open",
-		URL:   "https://github.com/cnlangzi/nightme/issues/42",
+		ID:     issueID,
+		Title:  "Add /gtw close subcommand",
+		Body:   "The /gtw fix flow needs a way to tear down worktrees.",
+		State:  "open",
+		Labels: []string{LabelAssigned},
+		URL:    "https://github.com/cnlangzi/nightme/issues/42",
 	})
 
 	res, err := rig.drive(t, "42")
@@ -424,15 +426,14 @@ func TestFixRemote_HappyPath(t *testing.T) {
 	if addCalls[0].ID != issueID {
 		t.Errorf("AddIssueLabel id = %d, want %d", addCalls[0].ID, issueID)
 	}
-	// RemoveIssueLabel is called once, for the queue marker: the
-	// fix takes the issue out of the `nightme/assigned` queue as
-	// it stamps `nightme/wip` on it. The `nightme/wip` label
-	// itself is never removed here — that is /gtw close's job.
-	rms := rig.prov.CallsByMethod("RemoveIssueLabel")
-	if len(rms) != 1 {
-		t.Errorf("RemoveIssueLabel calls = %+v, want exactly one (the assigned label)", rms)
-	} else if rms[0].Label != LabelAssigned || rms[0].ID != issueID {
-		t.Errorf("RemoveIssueLabel = %+v, want label %q on issue %d", rms[0], LabelAssigned, issueID)
+	// The claim is the only label mutation: the fix stamps
+	// `nightme/wip` on the issue and leaves the queue marker
+	// `nightme/assigned` in place.
+	gotLabels := rig.prov.IssueLabels(issueID)
+	for _, want := range []string{LabelAssigned, LabelWIP} {
+		if !slices.Contains(gotLabels, want) {
+			t.Errorf("issue labels = %v, want %q to be present", gotLabels, want)
+		}
 	}
 
 	// --- git side effects --------------------------------------
@@ -644,7 +645,10 @@ func TestFixRemote_AlreadyClaimed_Rejected(t *testing.T) {
 		},
 	})
 
-	res, err := rig.drive(t, fmt.Sprint(issueID))
+	work := rig.cs.Hold("msg-fix-remote")
+	ctx := chatsession.WithWork(context.Background(), work)
+	res, err := RunFix(ctx, ModeRemote, rig.cs, rig.deps, rig.cs.ChatID,
+		"msg-fix-remote", []string{fmt.Sprint(issueID)}, false, false)
 	if err != nil {
 		t.Fatalf("RunFix: %v", err)
 	}
@@ -652,6 +656,8 @@ func TestFixRemote_AlreadyClaimed_Rejected(t *testing.T) {
 		t.Fatalf("Result = %+v, want Consumed=true", res)
 	}
 
+	// The reply card, read before the work settles: releasing the
+	// work publishes the settled message, which is not the card.
 	last := rig.rec.lastText()
 	if !strings.Contains(last, "already claimed") {
 		t.Errorf("reply missing 'already claimed':\n%s", last)
@@ -659,21 +665,28 @@ func TestFixRemote_AlreadyClaimed_Rejected(t *testing.T) {
 	if !strings.Contains(last, LabelWIP) {
 		t.Errorf("reply missing %q:\n%s", LabelWIP, last)
 	}
-	// The reply must offer both exits: run /gtw close in the
-	// holding worktree, or drop the label by hand.
+	// The reply must offer both exits: drop the label by hand, or
+	// tear down that fix's worktree.
 	if !strings.Contains(last, "/gtw close") {
 		t.Errorf("reply missing '/gtw close' hint:\n%s", last)
 	}
-	if !strings.Contains(last, "label on the issue page") {
+	if !strings.Contains(last, "remove the nightme/wip label on the issue page") {
 		t.Errorf("reply missing manual label-removal hint:\n%s", last)
+	}
+
+	// The outcome a program reads says why the run failed.
+	work.Release()
+	settled := waitSettled(rig.rec)
+	if settled == nil {
+		t.Fatalf("no settled outcome: the command reported nothing")
+	}
+	if settled.Data["reason"] != "issue_claimed" {
+		t.Errorf("outcome reason = %q, want issue_claimed", settled.Data["reason"])
 	}
 
 	// No label write of any kind on the issue.
 	if addCalls := rig.prov.CallsByMethod("AddIssueLabel"); len(addCalls) != 0 {
 		t.Errorf("AddIssueLabel unexpectedly called: %+v", addCalls)
-	}
-	if rms := rig.prov.CallsByMethod("RemoveIssueLabel"); len(rms) != 0 {
-		t.Errorf("RemoveIssueLabel unexpectedly called: %+v", rms)
 	}
 	// The label catalog check runs before the queue pick, so it
 	// reads the catalog and creates the labels the repository is
@@ -711,8 +724,8 @@ func TestFixRemote_AlreadyClaimed_Rejected(t *testing.T) {
 // TestFixRemote_BranchExistsBeatsClaimGate pins the precedence
 // between the two hard-fails: when the target branch already
 // exists locally, the branch-exists reply wins — its remedy
-// (`/gtw close`) also drops the claim label, so it is the
-// accurate exit.
+// (`/gtw close`) tears down that worktree, so it is the accurate
+// exit.
 func TestFixRemote_BranchExistsBeatsClaimGate(t *testing.T) {
 	rig := newFixRemoteRig(t)
 	issueID := 42
@@ -763,13 +776,8 @@ func TestFixRemote_AddIssueLabelFailure_RollsBackWorktreeAndBranch(t *testing.T)
 	if addCalls := rig.prov.CallsByMethod("AddIssueLabel"); len(addCalls) != 1 {
 		t.Errorf("AddIssueLabel calls = %d, want 1", len(addCalls))
 	}
-	// RemoveIssueLabel must NOT be called — we never added the label
-	// in the first place (AddIssueLabel failed), so there's nothing
-	// to remove on the provider side. Cleanup is purely local
-	// (worktree + branch).
-	if rms := rig.prov.CallsByMethod("RemoveIssueLabel"); len(rms) != 0 {
-		t.Errorf("RemoveIssueLabel unexpectedly called: %+v", rms)
-	}
+	// Cleanup is purely local (worktree + branch): the label was
+	// never attached, so the tracker needs no fixing up.
 	// The worktree must be gone. 1 = main repo only; the failed
 	// fix's worktree must NOT survive a label failure.
 	wtOut, _ := mustGitOut(t, rig.repoRoot, "worktree", "list", "--porcelain")
@@ -860,13 +868,9 @@ func TestFixRemote_CreateLabelFailure_LeavesNoWorktree(t *testing.T) {
 			ensureCalls[1].Label, AllLabels[1])
 	}
 	// AddIssueLabel must NOT be called — the check halted before
-	// reaching it (no RemoveIssueLabel either, since the label
-	// was never applied to the issue).
+	// reaching it, so the label was never applied to the issue.
 	if addCalls := rig.prov.CallsByMethod("AddIssueLabel"); len(addCalls) != 0 {
 		t.Errorf("AddIssueLabel called despite CreateLabel failure: %+v", addCalls)
-	}
-	if rms := rig.prov.CallsByMethod("RemoveIssueLabel"); len(rms) != 0 {
-		t.Errorf("RemoveIssueLabel unexpectedly called: %+v", rms)
 	}
 	// The check runs before the worktree is created, so there is
 	// nothing to roll back: the repository is left as it was.
@@ -899,11 +903,9 @@ func TestFixRemote_CreateLabelFailure_LeavesNoWorktree(t *testing.T) {
 }
 
 // TestFixRemote_WorktreeFailDoesNotApplyLabel verifies the
-// post-refactor ordering invariant: when WorktreeAdd fails,
-// AddIssueLabel must NEVER have been called. Pre-refactor this was
-// an explicit RemoveIssueLabel rollback path; the refactor moved
-// AddIssueLabel after WorktreeAdd so the rollback is structurally
-// unnecessary, and this test pins that ordering.
+// ordering invariant: when WorktreeAdd fails, AddIssueLabel must
+// NEVER have been called. AddIssueLabel runs after WorktreeAdd, so
+// a failed worktree leaves the tracker untouched.
 //
 // Trigger: pre-create a worktree at the exact path the fix
 // flow will derive, so the preflight's "path occupied" check

@@ -86,10 +86,10 @@ func TestFormatTaskList_HeaderAndRows(t *testing.T) {
 	if !strings.HasPrefix(got, "📋 Tasks") {
 		t.Errorf("missing header in %q", got)
 	}
-	if !strings.Contains(got, "- [ ] first") {
+	if !strings.Contains(got, "1. [ ] first") {
 		t.Errorf("missing pending row in %q", got)
 	}
-	if !strings.Contains(got, "- [√] second") {
+	if !strings.Contains(got, "2. [v] second") {
 		t.Errorf("missing completed row in %q", got)
 	}
 }

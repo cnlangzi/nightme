@@ -688,7 +688,7 @@ const (
 	richTurnTaskListHeadline            = "📋 Tasks"
 	richTurnTaskListBudgetRunes         = 3000
 	richTurnTaskListMore                = "…"
-	richTurnTaskListOverflowPlaceholder = "• …"
+	richTurnTaskListOverflowPlaceholder = "1. [ ] …"
 )
 
 // renderRichTurnTaskListBlock builds the heading + native list
@@ -703,6 +703,11 @@ const (
 // can be in is rendered: a task that failed or was cancelled is a row
 // the operator has to see. A deleted task is not: the bridges drop
 // it before they emit the snapshot.
+//
+// The text of a row is the shared row of agent.FormatTaskRow, number
+// included: Telegram's `list` block has no ordered flag, but the
+// client reads an ordered list out of the `N.` prefix of the item
+// text.
 func renderRichTurnTaskListBlocks(items []taskListItem) ([]map[string]any, bool) {
 	if len(items) == 0 {
 		return nil, false
@@ -727,8 +732,13 @@ func renderRichTurnTaskListBlocks(items []taskListItem) ([]map[string]any, bool)
 	const truncationSuffixRunes = 2
 	rowTexts := make([]string, 0, len(visible))
 	total := headlineRunes
-	for _, it := range visible {
-		rowText := renderTaskRowText(it)
+	for i, it := range visible {
+		rowText := agent.FormatTaskRow(i+1, agent.AgentTaskItem{
+			Status:     it.Status,
+			ID:         it.ID,
+			Subject:    it.Subject,
+			ActiveForm: it.ActiveForm,
+		})
 		cost := utf8.RuneCountInString(rowText) + 1 // +1 for inter-row separator
 		if total+cost+truncationSuffixRunes > richTurnTaskListBudgetRunes {
 			break
@@ -760,22 +770,4 @@ func renderRichTurnTaskListBlocks(items []taskListItem) ([]map[string]any, bool)
 		{"type": "heading", "text": richTurnTaskListHeadline, "size": 1},
 		{"type": "list", "items": items2},
 	}, true
-}
-
-// renderTaskRowText formats one task row for the rich block list.
-// The row carries the marker of its state and the detail of the row,
-// so a task that failed never reads like a task that has not
-// started. Subject is trimmed; whitespace-only Subject falls back to
-// the (also-trimmed) ID so a malformed snapshot yields the ID rather
-// than an empty row.
-func renderTaskRowText(it taskListItem) string {
-	subject := strings.TrimSpace(it.Subject)
-	if subject == "" {
-		subject = strings.TrimSpace(it.ID)
-	}
-	row := agent.TaskStatusMarker(it.Status) + " " + subject
-	if detail := strings.TrimSpace(it.ActiveForm); detail != "" {
-		row += " (" + detail + ")"
-	}
-	return row
 }

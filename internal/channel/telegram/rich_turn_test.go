@@ -715,7 +715,7 @@ func TestRenderRichTurnBlocksLocked_TaskListSection(t *testing.T) {
 		text, _ := p["text"].(string)
 		gotRows = append(gotRows, row{text})
 	}
-	wantPrefixes := []string{"[√] ", "[>] ", "[ ] "}
+	wantPrefixes := []string{"1. [v] ", "2. [>] ", "3. [ ] "}
 	wantSubjects := []string{"Plan the API", "Write code (coding)", "Write tests"}
 	for i, r := range gotRows {
 		if !strings.HasPrefix(r.text, wantPrefixes[i]) {
@@ -946,26 +946,45 @@ func TestRenderRichTurnBlocksLocked_TaskSubjectEscapesHTML(t *testing.T) {
 	}
 }
 
-// TestRenderTaskRowText_FallbackSubjectTrimmed locks the
-// subject→id fallback contract: a whitespace-only Subject must
-// fall back to a (also-trimmed) ID, not produce a row of just
-// "• ". Regression guard for the review finding that the fallback
-// path skipped TrimSpace.
-func TestRenderTaskRowText_FallbackSubjectTrimmed(t *testing.T) {
+// TestRenderRichTurnTaskListBlocks_UsesTheSharedRow — the text of a
+// row is the shared row of agent.FormatTaskRow, number included: the
+// Telegram client reads an ordered list out of the `N.` prefix.
+func TestRenderRichTurnTaskListBlocks_UsesTheSharedRow(t *testing.T) {
 	cases := []struct {
 		name string
 		in   taskListItem
 		want string
 	}{
-		{"empty subject falls back to id", taskListItem{ID: "t1", Status: agent.TaskPending}, "[ ] t1"},
-		{"whitespace subject falls back to id", taskListItem{ID: "t2", Subject: "   ", Status: agent.TaskPending}, "[ ] t2"},
-		{"whitespace id still produces a useful row", taskListItem{ID: "   ", Subject: "real", Status: agent.TaskPending}, "[ ] real"},
-		{"completed marker intact with trimmed subject", taskListItem{ID: "x", Subject: "  done  ", Status: agent.TaskCompleted}, "[√] done"},
+		{"empty subject falls back to id", taskListItem{ID: "t1", Status: agent.TaskPending}, "1. [ ] t1"},
+		{"whitespace subject falls back to id", taskListItem{ID: "t2", Subject: "   ", Status: agent.TaskPending}, "1. [ ] t2"},
+		{"whitespace id still produces a useful row", taskListItem{ID: "   ", Subject: "real", Status: agent.TaskPending}, "1. [ ] real"},
+		{"completed marker intact with trimmed subject", taskListItem{ID: "x", Subject: "  done  ", Status: agent.TaskCompleted}, "1. [v] done"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := renderTaskRowText(c.in); got != c.want {
-				t.Errorf("renderTaskRowText(%+v) = %q, want %q", c.in, got, c.want)
+			blocks, ok := renderRichTurnTaskListBlocks([]taskListItem{c.in})
+			if !ok {
+				t.Fatalf("expected ok=true")
+			}
+			var list map[string]any
+			for _, b := range blocks {
+				if b["type"] == "list" {
+					list = b
+				}
+			}
+			if list == nil {
+				t.Fatalf("no list block: %v", blocks)
+			}
+			rawItems, _ := list["items"].([]map[string]any)
+			if len(rawItems) != 1 {
+				t.Fatalf("the list holds %d items, want one", len(rawItems))
+			}
+			it := rawItems[0]
+			bs, _ := it["blocks"].([]map[string]any)
+			p := bs[0]
+			text, _ := p["text"].(string)
+			if text != c.want {
+				t.Errorf("the row is %q, want %q", text, c.want)
 			}
 		})
 	}

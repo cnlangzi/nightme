@@ -9,17 +9,15 @@
 //
 // The renderer emits one row per task, in the order the sender
 // listed the items in: the order is what makes a plan readable.
-// Every row carries the marker of its state — one character between
-// the brackets, so the status column has the same width on every
-// row — and the detail of the row in a soft-grey suffix (Feishu
-// `lark_md` ignores backticks in the middle of a line, so plain
-// parens are used). A task that failed therefore never reads like a
-// task that has not started. The generic status enum
-// (agent.AgentTaskStatus) is the only input the renderer reads.
+// The row itself is the shared row of agent.FormatTaskRow: a
+// numbered markdown list item whose marker carries the state of the
+// task and whose detail carries the detail of the row. A task that
+// failed therefore never reads like a task that has not started. The
+// generic status enum (agent.AgentTaskStatus) is the only input the
+// renderer reads.
 package feishu
 
 import (
-	"strings"
 	"unicode/utf8"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -27,17 +25,16 @@ import (
 
 // checklistMore is appended to the last visible line when the
 // input did not fit within the budget. Pure ellipsis — no
-// label — keeps the visual shape of a single todo row and
+// label — keeps the visual shape of a single row and
 // avoids mixed-language suffixes (the user's locale may not be
 // the same as the source-code author).
 const checklistMore = "…"
 
 // checklistOverflowPlaceholder is the single-line fallback used
 // when the renderer has to drop every line to fit the budget.
-// It is a single todo row so the user still sees a checkbox
-// block and the receipt body stays a well-formed markdown todo
-// list.
-const checklistOverflowPlaceholder = "- [ ] …"
+// It is a single row of the checklist, so the receipt body stays a
+// well-formed markdown list.
+const checklistOverflowPlaceholder = "1. [ ] …"
 
 // checklistBudgetRunes is the maximum total length of the
 // rendered checklist (rune count, summed across all chunks).
@@ -63,15 +60,15 @@ func buildTaskChecklistChunks(items []agent.AgentTaskItem) []string {
 	}
 	// The rows keep the order the sender listed them in: the order is
 	// what makes a plan readable.
-	order := make([]int, 0, len(items))
-	for i, it := range items {
+	visible := make([]agent.AgentTaskItem, 0, len(items))
+	for _, it := range items {
 		// Filter TaskDeleted defensively: the bridge is supposed
 		// to remove deleted tasks before emitting, but a corrupt
 		// snapshot must not produce a visible "deleted" row.
 		if it.Status == agent.TaskDeleted {
 			continue
 		}
-		order = append(order, i)
+		visible = append(visible, it)
 	}
 
 	// Render the visible lines in order. The line collector
@@ -79,11 +76,11 @@ func buildTaskChecklistChunks(items []agent.AgentTaskItem) []string {
 	// next line would push it past checklistBudgetRunes the
 	// remainder is dropped and a footer is appended to the last
 	// chunk.
-	lines := make([]string, 0, len(order))
+	lines := make([]string, 0, len(visible))
 	total := 0
 	rendered := 0
-	for _, idx := range order {
-		line := renderTaskLine(items[idx])
+	for i, it := range visible {
+		line := agent.FormatTaskRow(i+1, it)
 		cost := utf8.RuneCountInString(line) + 1 // +1 for the joining newline
 		if total+cost > checklistBudgetRunes {
 			break
@@ -95,14 +92,14 @@ func buildTaskChecklistChunks(items []agent.AgentTaskItem) []string {
 	if rendered == 0 {
 		return []string{checklistOverflowPlaceholder}
 	}
-	omitted := len(order) - rendered
+	omitted := len(visible) - rendered
 
 	// Join the rendered lines with newlines and split into
 	// per-element chunks that each respect divTextCharLimit.
 	// splitMarkdownForDivs already preserves code blocks / list
-	// atomicity; our checklist is a list of `- [ ]` / `- [√]`
-	// task lines, all of which share the same list item shape
-	// and are trivially paragraph-safe to split.
+	// atomicity; our checklist is a list of numbered rows, all of
+	// which share the same list item shape and are trivially
+	// paragraph-safe to split.
 	//
 	// F-42: prepend the markdown section header `**📋 Tasks**`
 	// so the checklist is visually distinct from the surrounding
@@ -153,25 +150,4 @@ func joinLines(lines []string) string {
 		buf = append(buf, l...)
 	}
 	return string(buf)
-}
-
-// renderTaskLine builds one row of the checklist. The status enum
-// decides the marker of the row and the (optional) detail suffix;
-// the row shape is identical for every status so the output reads as
-// a single coherent list.
-//
-//   - pending      → - [ ] Subject
-//   - in_progress  → - [>] Subject (detail)
-//   - completed    → - [√] Subject (detail)
-//   - failed       → - [!] Subject (detail)
-func renderTaskLine(it agent.AgentTaskItem) string {
-	subject := strings.TrimSpace(it.Subject)
-	if subject == "" {
-		subject = it.ID
-	}
-	line := "- " + agent.TaskStatusMarker(it.Status) + " " + subject
-	if detail := strings.TrimSpace(it.ActiveForm); detail != "" {
-		line += " (" + detail + ")"
-	}
-	return line
 }

@@ -109,7 +109,7 @@ func TestStop_PostsTheRecordOfTheSession(t *testing.T) {
 	}
 	waitAsked(t, op, "Which step should run next?")
 
-	before := svc.Status("obs-1")
+	before := svc.Snapshot("obs-1")
 	r := chatRun(t, svc, "obs-1")
 	if err := svc.Stop(context.Background(), "obs-1"); err != nil {
 		t.Fatalf("stop: %v", err)

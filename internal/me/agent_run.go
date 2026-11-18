@@ -380,11 +380,11 @@ func newRunState(runID, workflow, cwd string, now time.Time) *wfe.RunState {
 	}
 }
 
-// status returns the run's state.
-func (r *run) status() Status {
+// snapshot returns the run's state.
+func (r *run) snapshot() Snapshot {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	st := Status{
+	st := Snapshot{
 		RunID:            r.id,
 		Phase:            r.phase,
 		Actions:          len(r.policy.History),
@@ -523,6 +523,60 @@ func (r *run) isPaused() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.paused
+}
+
+// pausePending reports whether the run waits for the operator, or a
+// pause was asked for and has not taken effect yet.
+func (r *run) pausePending() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.pausePendingLocked()
+}
+
+// pausePendingLocked reports whether the run waits for the operator.
+// The caller holds the lock.
+func (r *run) pausePendingLocked() bool {
+	return r.paused || r.pauseRequested
+}
+
+// ended reports whether the run is over.
+func (r *run) ended() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	switch r.phase {
+	case PhaseDone, PhaseFailed, PhaseStopped:
+		return true
+	}
+	return false
+}
+
+// adoptRoundSession makes a session the live card of the round, if
+// the run is still in that round.
+//
+// The run moves between rounds on its own goroutine: a card that was
+// posted for a round the run has left is the record of that round, not
+// the card the run works on.
+func (r *run) adoptRoundSession(it iteration, sess *session) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	current := r.roundSession
+	if current == nil || current.job != it.job || current.round != it.round {
+		return false
+	}
+	r.roundSession = sess
+	return true
+}
+
+// roundIteration returns the round the run is in.
+//
+// A run that has not entered a round yet has none: there is no round
+// state to show.
+func (r *run) roundIteration() (iteration, bool) {
+	sess := r.roundSessionRef()
+	if sess == nil {
+		return iteration{}, false
+	}
+	return iteration{job: sess.job, round: sess.round}, true
 }
 
 // resolveChoice turns a reply that names an option by its number into

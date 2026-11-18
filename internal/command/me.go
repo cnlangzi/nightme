@@ -39,40 +39,6 @@ type MeRequest struct {
 	MessageID string
 }
 
-// MeStatus is the state of a run.
-type MeStatus struct {
-	// Phase is where the run stands: idle, running, paused, asking,
-	// done, failed or stopped.
-	Phase string
-	// RunID is the run's id.
-	RunID string
-	// Step is the command the run is on.
-	Step string
-	// Execution is the phase of the running command.
-	Execution string
-	// Progress is the heartbeat view of the running command.
-	Progress string
-	// Actions is the number of actions the run took.
-	Actions int
-	// System1Decisions is the number of decisions the decision model
-	// made.
-	System1Decisions int
-	// System2Decisions is the number of turns the chat model took.
-	System2Decisions int
-	// System1Tokens is the token usage of the decision model.
-	System1Tokens int
-	// System2Tokens is the token usage of the chat model.
-	System2Tokens int
-	// Question is the question the run is waiting for.
-	Question string
-	// Paused reports whether the run waits for the operator.
-	Paused bool
-	// PauseReason says why the run paused.
-	PauseReason string
-	// Error is why the run cannot go on, when it cannot.
-	Error string
-}
-
 // MeController is the personal agent the /me command drives.
 //
 // One run is active per chat: the chat that starts a run is the chat
@@ -92,10 +58,12 @@ type MeController interface {
 	// Next skips the step the run is on. It returns the id of the step
 	// the command acted on. The note is the operator's instruction.
 	Next(ctx context.Context, chatID, note string) (string, error)
-	// Show puts the run's state back in front of the operator.
-	Show(ctx context.Context, chatID string) error
 	// Stop cancels the run of a chat.
 	Stop(ctx context.Context, chatID string) error
-	// Status returns the state of the run of a chat.
-	Status(chatID string) MeStatus
+	// Status posts the state of the run of a chat: the state card of
+	// the round the run is in.
+	Status(ctx context.Context, chatID string) error
+	// DisabledReason says why the personal agent cannot run, or
+	// returns an empty string when it can.
+	DisabledReason() string
 }

@@ -90,7 +90,7 @@ func TestStatus_ReportsTheRunWhileItWorks(t *testing.T) {
 	// The status is read while the run works.
 	deadline := time.Now().Add(200 * time.Millisecond)
 	for time.Now().Before(deadline) {
-		st := svc.Status("obs-1")
+		st := svc.Snapshot("obs-1")
 		if st.RunID == "" {
 			t.Fatal("the status has no run")
 		}
@@ -651,7 +651,7 @@ func TestRunStep_WaitsForTheAgentToFinish(t *testing.T) {
 		t.Fatalf("the decision model was asked %d times, want 0 — the run waits for the agent",
 			decider.Calls())
 	}
-	if st := svc.Status("obs-1"); st.Phase != PhaseRunning {
+	if st := svc.Snapshot("obs-1"); st.Phase != PhaseRunning {
 		t.Errorf("the run is %q, want it waiting for the agent", st.Phase)
 	}
 
@@ -808,7 +808,7 @@ func waitForReply(t *testing.T, svc *Service, chatID string) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		st := svc.Status(chatID)
+		st := svc.Snapshot(chatID)
 		if st.Phase == PhaseAsking {
 			return
 		}

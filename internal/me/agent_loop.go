@@ -246,7 +246,9 @@ func (s *Service) pauseForBudget(ctx context.Context, r *run) {
 		stepID, used, limit)
 	r.pauseNow(reason)
 	s.persist(r)
-	s.publishState(ctx, r, "paused: "+reason)
+	// The run stops: the state card carries the state of the round, and
+	// it becomes the round's live card.
+	s.showState(ctx, r)
 	s.refreshSessions(r)
 	if _, err := s.speak(ctx, r, pauseMark+"The run paused: "+reason+". Send /me resume to run the step again, or /me next to skip it.", ""); err != nil {
 		s.logger.Warn("me: the pause could not be spoken", "run_id", r.id, "err", err)

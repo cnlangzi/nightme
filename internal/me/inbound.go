@@ -14,7 +14,9 @@ const meCommandPrefix = "/me "
 //
 // A message a person sent while the run is going means the person
 // wants the chat back: the run stops after the step it is on, and
-// `/me resume` hands the control back.
+// `/me resume` hands the control back. The person took the chat back,
+// so the state of the run is posted at once: the card keeps being
+// updated while the run unwinds.
 //
 // A reply to the run's own question is an answer, not a takeover. A
 // command that steers the run is not a takeover either.
@@ -34,7 +36,44 @@ func (s *Service) Seen(msg *messages.InboundMessage) {
 	if isMeCommand(msg.Text) {
 		return
 	}
+	if r.pausePending() {
+		// The run already waits for the operator: the takeover is not
+		// new, and no second card is posted.
+		return
+	}
 	r.requestPause("you took over — `/me resume` hands the control back")
+	s.postStateCard(r)
+}
+
+// postStateCard posts the state card of the run on a goroutine of its
+// own.
+//
+// The inbound pump must stay free for the operator's next message: a
+// `/me resume` may not queue behind a slow chat API call.
+//
+// The goroutine is tracked by the service's wait group, so a shutdown
+// waits for the post to finish. The service's own lock guards the
+// bookkeeping: a post that starts after the service went down is
+// dropped rather than added to a wait group that is already waiting.
+func (s *Service) postStateCard(r *run) {
+	s.mu.Lock()
+	if !s.started || s.active[r.chatID] != r {
+		// The daemon is going down, or the run is over: there is no
+		// state left to show.
+		s.mu.Unlock()
+		return
+	}
+	s.wg.Add(1)
+	s.mu.Unlock()
+	go func() {
+		defer s.wg.Done()
+		// The run may have ended while the card was on its way: a card
+		// that says the run is working while it is over would lie.
+		if r.ended() {
+			return
+		}
+		s.showState(context.WithoutCancel(r.ctx), r)
+	}()
 }
 
 // Claim implements the inbound router's reply claimer.

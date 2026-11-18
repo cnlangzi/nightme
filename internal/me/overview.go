@@ -45,6 +45,51 @@ const (
 // otherwise make the row unreadable.
 const maxStepDetail = 100
 
+// The budgets of the phase line.
+const (
+	// maxPhaseQuestion is how long the question of the phase line is.
+	maxPhaseQuestion = 100
+	// maxPhaseLine is how long the phase line is.
+	maxPhaseLine = 120
+)
+
+// phaseLine renders where the run stands: the first entry of the state
+// card.
+//
+// The line is read from the run's own state, so every source that
+// posts the card says the same thing and the card cannot disagree with
+// the run about why it stopped.
+func (r *run) phaseLine() string {
+	r.mu.Lock()
+	phase := r.phase
+	reason := r.pauseReason
+	question := r.question
+	command := ""
+	if r.inflight != nil {
+		command = r.inflight.Command
+	}
+	pending := r.pausePendingLocked()
+	r.mu.Unlock()
+
+	switch {
+	case pending:
+		if reason == "" {
+			return "paused"
+		}
+		return clipLine("paused: "+reason, maxPhaseLine)
+	case phase == PhaseAsking:
+		if question == "" {
+			return "asking"
+		}
+		return clipLine("asking: "+clipLine(question, maxPhaseQuestion), maxPhaseLine)
+	default:
+		if command == "" {
+			return "running"
+		}
+		return clipLine("running · step: "+command, maxPhaseLine)
+	}
+}
+
 // outcomeKeyBranch is the Data key the branch of a step rides in.
 //
 // The card the operator read names the branch — the `/gtw` card of the

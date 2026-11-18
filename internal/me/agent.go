@@ -151,8 +151,8 @@ type Request struct {
 	MessageID string
 }
 
-// Status is the state of a run.
-type Status struct {
+// Snapshot is the state of a run.
+type Snapshot struct {
 	// RunID is the run's id.
 	RunID string
 	// Phase is where the run stands.
@@ -185,6 +185,9 @@ type Status struct {
 	// Error is why the run cannot go on, when it cannot.
 	Error string
 }
+
+// ErrNoRun is what a request finds in a chat that holds no run.
+var ErrNoRun = errors.New("this chat has no run in it")
 
 // Operator drives the chat a run works in.
 //
@@ -664,7 +667,7 @@ func (s *Service) Reply(ctx context.Context, chatID, text string) error {
 	r, ok := s.active[chatID]
 	s.mu.Unlock()
 	if !ok {
-		return errors.New("this chat has no run in it")
+		return ErrNoRun
 	}
 	if strings.TrimSpace(text) == "" {
 		return errors.New("the reply is empty")
@@ -682,10 +685,13 @@ func (s *Service) Pause(ctx context.Context, chatID string) error {
 	r, ok := s.active[chatID]
 	s.mu.Unlock()
 	if !ok {
-		return errors.New("this chat has no run in it")
+		return ErrNoRun
 	}
 	r.requestPause("the operator paused the run")
 	s.refreshSessions(r)
+	// The operator asked for the state of the run: the state card
+	// carries it, and it becomes the round's live card.
+	s.showState(ctx, r)
 	return nil
 }
 
@@ -747,21 +753,22 @@ func (s *Service) Next(ctx context.Context, chatID, note string) (string, error)
 	return step.ID, nil
 }
 
-// Show puts the run back in front of the operator.
+// Status puts the state of the run back in front of the operator.
 //
-// The card the chat holds for the message that started the run is not
-// always the one the operator wants to look at: `/me show` posts the
-// plan of the run as a card of its own. The card is static — the live
-// state of the work is on the card of the round, and the run goes on
-// with the card it has.
-func (s *Service) Show(ctx context.Context, chatID string) error {
+// The state card is the card of the round the run is in: it carries
+// the state of that round and becomes the round's live card, so the
+// state on it keeps being true. A run that has no round has no round
+// state to show: the overview of the run is posted instead.
+//
+// A chat without a run gets ErrNoRun.
+func (s *Service) Status(ctx context.Context, chatID string) error {
 	s.mu.Lock()
 	r, ok := s.active[chatID]
 	s.mu.Unlock()
 	if !ok {
-		return errors.New("this chat has no run in it")
+		return ErrNoRun
 	}
-	if !s.showRunCard(ctx, r) {
+	if !s.showState(ctx, r) {
 		return errors.New("me: the chat cannot show the run's state")
 	}
 	return nil
@@ -781,31 +788,31 @@ func (s *Service) Stop(ctx context.Context, chatID string) error {
 	r, ok := s.active[chatID]
 	s.mu.Unlock()
 	if !ok {
-		return errors.New("this chat has no run in it")
+		return ErrNoRun
 	}
 	r.markStoppedByOperator()
 	r.cancel()
 	return nil
 }
 
-// Status returns the state of the run in a chat.
+// Snapshot returns the state of the run in a chat.
 //
-// A chat without a run gets an idle status; the error says why the
+// A chat without a run gets an idle snapshot; the error says why the
 // personal agent cannot start one.
-func (s *Service) Status(chatID string) Status {
+func (s *Service) Snapshot(chatID string) Snapshot {
 	s.mu.Lock()
 	r, ok := s.active[chatID]
 	s.mu.Unlock()
 	if !ok {
 		// The error says why the personal agent cannot start a run;
 		// a chat without a run has nothing to report.
-		st := Status{Phase: PhaseIdle}
+		st := Snapshot{Phase: PhaseIdle}
 		if reason := s.DisabledReason(); reason != "" {
 			st.Error = reason
 		}
 		return st
 	}
-	return r.status()
+	return r.snapshot()
 }
 
 // finish records how a run ended and frees its chat.

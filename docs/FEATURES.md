@@ -144,7 +144,7 @@
 | 两种模型能力：System 1 决策模型 + System 2 聊天模型 | [WFE.md](./WFE.md) §8.6 |
 | 三种模式（仅 `me.llm` / 仅 `me.decider` / 两者都有）| [WFE.md](./WFE.md) §8.7 |
 | `me.llm` / `me.decider` 配置（模型与凭据由用户指定）| [WFE.md](./WFE.md) §8.8 |
-| `/me start` / `/me reply` / `/me pause` / `/me resume` / `/me next` / `/me show` / `/me stop` / `/me status` | [WFE.md](./WFE.md) §8.9 |
+| `/me start` / `/me reply` / `/me pause` / `/me resume` / `/me next` / `/me stop` / `/me status` | [WFE.md](./WFE.md) §8.9 |
 | Outcome 词汇表与 settled 协议 | [me.md](./me.md) |
 | Guardrails 与恢复（迭代 / token 预算 / 超时 / stall / 持久化）| [WFE.md](./WFE.md) §8.11 |
 

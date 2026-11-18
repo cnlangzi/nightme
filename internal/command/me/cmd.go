@@ -12,7 +12,7 @@
 //	/me resume [note]                         — run the step the run is on again
 //	/me next [note]                           — skip the step the run is on
 //	/me stop                                  — stop the run
-//	/me status                                — report where the run stands
+//	/me status                                — show the state of the run again
 //
 // The `-i` flag of `/me start` sets how many rounds every job of the
 // workflow runs in that run. The workflow file keeps its own counts.
@@ -20,10 +20,10 @@ package me
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
@@ -56,7 +56,7 @@ func (f *Factory) Spec() command.Spec {
 	return command.Spec{
 		Name:     "me",
 		Summary:  "Run a workflow: /me start <workflow> [args...] [-i <rounds>]",
-		Usage:    "/me start <workflow> [args...] [-i <rounds>]\n/me reply <text>\n/me pause\n/me resume [note]\n/me next [note]\n/me show\n/me stop\n/me status",
+		Usage:    "/me start <workflow> [args...] [-i <rounds>]\n/me reply <text>\n/me pause\n/me resume [note]\n/me next [note]\n/me stop\n/me status",
 		Category: "agent",
 		Subcommands: []command.SubcommandSpec{
 			{Name: "start", Summary: "Start a workflow in this chat. -i sets the rounds."},
@@ -64,9 +64,8 @@ func (f *Factory) Spec() command.Spec {
 			{Name: "pause", Summary: "Stop the run after the current step."},
 			{Name: "resume", Summary: "Run the step the run is on again."},
 			{Name: "next", Summary: "Skip the step the run is on."},
-			{Name: "show", Summary: "Show the plan of the run again."},
 			{Name: "stop", Summary: "Stop the run of this chat."},
-			{Name: "status", Summary: "Report where the run stands."},
+			{Name: "status", Summary: "Show the state of the run again."},
 		},
 	}
 }
@@ -108,8 +107,6 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 		return f.resume(ctx, rt, input)
 	case "next":
 		return f.next(ctx, rt, input)
-	case "show":
-		return f.show(ctx, rt, input)
 	case "stop":
 		return f.stop(ctx, rt, input)
 	case "status":
@@ -261,19 +258,6 @@ func refusalReason(err error) string {
 	return "error"
 }
 
-// show puts the plan of the run back in front of the operator.
-func (f *Factory) show(ctx context.Context, rt command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
-	if err := f.ctrl.Show(ctx, input.ChatID); err != nil {
-		chatsession.ReportOutcome(ctx, command.FailedOutcome("error", "the run could not be shown"))
-		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
-	}
-	chatsession.ReportOutcome(ctx, messages.Outcome{
-		Status:  messages.OutcomeOK,
-		Summary: "the plan of the run is shown again",
-	})
-	return command.Reply(ctx, rt, "📋 The plan of the run is shown again."), nil
-}
-
 // stop stops the run of this chat.
 //
 // The record of the session is on its way: the run posts it once it
@@ -290,51 +274,33 @@ func (f *Factory) stop(ctx context.Context, rt command.RuntimeServices, input co
 	return command.Reply(ctx, rt, "⏹ The run was stopped — the record is on its way. The turn of the chat agent goes on."), nil
 }
 
-// status reports where the run stands.
+// status shows the state of the run again.
+//
+// The state card carries the state: the phase of the run, the tree of
+// the rounds, the checklist of the round and the counters of the run in
+// its header. A chat without a run has no state to show.
 func (f *Factory) status(ctx context.Context, rt command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
-	st := f.ctrl.Status(input.ChatID)
-	if st.Phase == "" || st.Phase == "idle" {
-		if st.Error != "" {
-			chatsession.ReportOutcome(ctx, command.FailedOutcome("no_agent", st.Error))
-			return command.Reply(ctx, rt, "❌ "+st.Error), nil
-		}
-		chatsession.ReportOutcome(ctx, command.NoopOutcome("this chat has no run in it", nil))
-		return command.Reply(ctx, rt, "This chat has no run in it."), nil
+	err := f.ctrl.Status(ctx, input.ChatID)
+	if err == nil {
+		chatsession.ReportOutcome(ctx, messages.Outcome{
+			Status:  messages.OutcomeOK,
+			Summary: "the run's state is shown again",
+		})
+		return command.Reply(ctx, rt, "📋 The run's state is shown again."), nil
 	}
-	chatsession.ReportOutcome(ctx, messages.Outcome{
-		Status:  messages.OutcomeOK,
-		Summary: "the run is " + st.Phase,
-		Data:    map[string]string{"run_id": st.RunID, "phase": st.Phase},
-	})
-	return command.Reply(ctx, rt, renderStatus(st)), nil
-}
-
-// renderStatus renders the state of a run.
-func renderStatus(st command.MeStatus) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "%s · %s\n", st.Phase, st.RunID)
-	if st.Step != "" {
-		fmt.Fprintf(&b, "step: %s\n", st.Step)
+	if !errors.Is(err, mesvc.ErrNoRun) {
+		chatsession.ReportOutcome(ctx, command.FailedOutcome("error", "the run's state could not be shown"))
+		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
-	if st.Execution != "" {
-		fmt.Fprintf(&b, "execution: %s\n", st.Execution)
+	// The personal agent cannot start a run at all: the reply says why,
+	// so the operator knows the difference between a chat that has no
+	// run and a daemon that cannot make one.
+	if reason := f.ctrl.DisabledReason(); reason != "" {
+		chatsession.ReportOutcome(ctx, command.FailedOutcome("no_agent", reason))
+		return command.Reply(ctx, rt, "This chat has no run in it. — me is disabled: "+reason), nil
 	}
-	if st.Progress != "" {
-		fmt.Fprintf(&b, "progress: %s\n", st.Progress)
-	}
-	if st.Paused {
-		fmt.Fprintf(&b, "paused: %s\n", st.PauseReason)
-	}
-	fmt.Fprintf(&b, "actions: %d taken\n", st.Actions)
-	fmt.Fprintf(&b, "system-1: %d decisions, %d tokens\n", st.System1Decisions, st.System1Tokens)
-	fmt.Fprintf(&b, "system-2: %d decisions, %d tokens\n", st.System2Decisions, st.System2Tokens)
-	if st.Question != "" {
-		fmt.Fprintf(&b, "question: %s\n", st.Question)
-	}
-	if st.Error != "" {
-		fmt.Fprintf(&b, "error: %s\n", st.Error)
-	}
-	return strings.TrimRight(b.String(), "\n")
+	chatsession.ReportOutcome(ctx, command.NoopOutcome("this chat has no run in it", nil))
+	return command.Reply(ctx, rt, "This chat has no run in it."), nil
 }
 
 // replyText returns the text of a /me reply: everything after the
@@ -449,44 +415,17 @@ func (c *controller) Next(ctx context.Context, chatID, note string) (string, err
 	return c.svc.Next(ctx, chatID, note)
 }
 
-// Show implements command.MeController.
-func (c *controller) Show(ctx context.Context, chatID string) error {
-	return c.svc.Show(ctx, chatID)
-}
-
 // Stop implements command.MeController.
 func (c *controller) Stop(ctx context.Context, chatID string) error {
 	return c.svc.Stop(ctx, chatID)
 }
 
 // Status implements command.MeController.
-func (c *controller) Status(chatID string) command.MeStatus {
-	st := c.svc.Status(chatID)
-	out := command.MeStatus{
-		Phase:            string(st.Phase),
-		RunID:            st.RunID,
-		Step:             st.Step,
-		Execution:        string(st.Execution),
-		Actions:          st.Actions,
-		System1Decisions: st.System1Decisions,
-		System2Decisions: st.System2Decisions,
-		System1Tokens:    st.System1Usage.Total(),
-		System2Tokens:    st.System2Usage.Total(),
-		Question:         st.Question,
-		Paused:           st.Paused,
-		PauseReason:      st.PauseReason,
-		Error:            st.Error,
-	}
-	if st.Progress.LastBeatAt.IsZero() {
-		out.Progress = fmt.Sprintf("%d tools", st.Progress.ToolCount)
-	} else {
-		out.Progress = fmt.Sprintf("%d tools, last beat %s ago",
-			st.Progress.ToolCount, roundDuration(time.Since(st.Progress.LastBeatAt)))
-	}
-	return out
+func (c *controller) Status(ctx context.Context, chatID string) error {
+	return c.svc.Status(ctx, chatID)
 }
 
-// roundDuration renders a duration in whole seconds.
-func roundDuration(d time.Duration) string {
-	return fmt.Sprintf("%ds", int(d.Seconds()))
+// DisabledReason implements command.MeController.
+func (c *controller) DisabledReason() string {
+	return c.svc.DisabledReason()
 }

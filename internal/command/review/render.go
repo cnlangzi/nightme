@@ -441,8 +441,8 @@ func digestTables(findings []agent.ReviewFinding) []digestTable {
 	return tables
 }
 
-// digestRow renders one finding as a table row: what kind of finding
-// it is, when the run carries a category column, and where it is.
+// digestRow renders one finding as a table row: its category, when the
+// run carries a category column, and its location.
 func digestRow(f agent.ReviewFinding, hasCategory bool) string {
 	if hasCategory {
 		return "| " + digestCategory(f) + " | " + digestPath(f) + " |\n"

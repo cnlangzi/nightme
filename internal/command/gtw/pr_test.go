@@ -61,7 +61,7 @@ func TestParsePRReply_WithFenceInfoString(t *testing.T) {
 // TestParsePRReply_NoFenceAgentForgotFence is the regression test
 // for the bug reported 2026-08-10: an LLM agent emitted a perfectly
 // good PR description but forgot the ``` fence wrapper, and the
-// strict parser hard-errored with "could not parse agent reply".
+// strict parser hard-errored on the parse.
 // The agent output (verbatim, the actual text that failed in
 // production) is preserved below — DO NOT replace with a
 // hand-condensed variant, the whole point is that the fix must
@@ -1362,7 +1362,7 @@ func newPRTestRig(t *testing.T) *prTestRig {
 	// "no active workspace" early return fires unless the test
 	// explicitly opts in.
 	git := newPushGit()
-	claude := &recordingAgent{name: "claude", runOnceText: "```\nfeat: hi\n```"}
+	claude := &recordingAgent{name: "claude", runOnceText: "```\nfeat: hi\n\n## Summary by NightMe\n\nBody.\n```"}
 	withAgent(t, claude)
 	prov := newFakeGitProvider(ProviderGitHub, "github.com")
 	return &prTestRig{
@@ -1391,6 +1391,18 @@ func captureCh(t *testing.T, cs *chatsession.ChatSession) *recordingCh {
 	ch := &recordingCh{}
 	cs.WithEmitter(ch)
 	return ch
+}
+
+// lastOutbound returns the most recent message the emitter received —
+// the reply the dispatcher stamped the agent footer onto.
+func lastOutbound(t *testing.T, ch *recordingCh) messages.OutboundMessage {
+	t.Helper()
+	ch.mu.Lock()
+	defer ch.mu.Unlock()
+	if len(ch.sends) == 0 {
+		t.Fatalf("no message was sent")
+	}
+	return ch.sends[len(ch.sends)-1]
 }
 
 func TestDispatchPR_NoWorkspace(t *testing.T) {
@@ -2083,15 +2095,19 @@ func TestDispatchPR_AgentRunOnceFails(t *testing.T) {
 	}
 }
 
+// TestDispatchPR_AgentOutputUnparsable covers the reply that
+// carries nothing at all: whitespace only. The permissive parser
+// still can't recover from it — there's no non-empty line to take
+// as a title. Everything else (no fences, JSON wrappers, heading
+// prefixes, etc.) falls through to the "first non-empty line" path;
+// see the parsePRReply unit tests for those cases.
+//
+// The reply fails the gate's parse step, so it is put back to the
+// agent once — and the second attempt fails the same way. No PR is
+// opened, and the refusal names the failed check.
 func TestDispatchPR_AgentOutputUnparsable(t *testing.T) {
 	rig := newPRTestRig(t)
 	setupPRWorktree(t, rig, Context{Branch: "wt"})
-	// Whitespace-only agent output is the ONLY case the
-	// permissive parser still can't recover from — there's no
-	// non-empty line to take as a title. Everything else
-	// (no fences, JSON wrappers, heading prefixes, etc.) now
-	// falls through to the "first non-empty line" path; see
-	// the parsePRReply unit tests for those cases.
 	rig.agent.runOnceText = "   \n\n  \n"
 	setupPRGit(rig, "wt", 0)
 	rig.installDeps()
@@ -2103,8 +2119,11 @@ func TestDispatchPR_AgentOutputUnparsable(t *testing.T) {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
 	r := s.lastText()
-	if !strings.Contains(r, "could not parse agent reply") {
+	if !strings.Contains(r, "could not be parsed as a PR title") {
 		t.Fatalf("expected parse-fail reply, got:\n%s", r)
+	}
+	if calls := rig.prov.CallsByMethod("CreatePR"); len(calls) != 0 {
+		t.Fatalf("CreatePR calls = %d, want 0", len(calls))
 	}
 }
 
@@ -2114,6 +2133,9 @@ func TestDispatchPR_AgentOutputUnparsable(t *testing.T) {
 // (the user's actual 2026-08-10 production failure) was hard-
 // errored at dispatch; now the PR is created with the first line
 // of the agent output as the title.
+//
+// The fence is still optional; the title and the summary heading
+// are not — the format gate requires them.
 func TestDispatchPR_AgentOutputNoFenceNowSucceeds(t *testing.T) {
 	rig := newPRTestRig(t)
 	setupPRWorktree(t, rig, Context{Branch: "wt"})
@@ -2121,6 +2143,7 @@ func TestDispatchPR_AgentOutputNoFenceNowSucceeds(t *testing.T) {
 	// well-formed Conventional Commits title, no fence wrapper,
 	// multi-paragraph body.
 	rig.agent.runOnceText = "feat(gtw): add per-instance name\n\n" +
+		"## Summary by NightMe\n\n" +
 		"This is the descriptive body.\n\n" +
 		"- bullet one\n- bullet two\n"
 	setupPRGit(rig, "wt", 0)
@@ -2138,9 +2161,9 @@ func TestDispatchPR_AgentOutputNoFenceNowSucceeds(t *testing.T) {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
 	r := s.lastText()
-	// Should NOT contain "could not parse" — the parse
-	// succeeds thanks to the permissive regex scan.
-	if strings.Contains(r, "could not parse agent reply") {
+	// Should NOT contain the parse failure — the parse succeeds
+	// thanks to the permissive regex scan.
+	if strings.Contains(r, "could not be parsed as a PR title") {
 		t.Fatalf("dispatch hard-errored on unfenced agent output:\n%s", r)
 	}
 	// PR should have been created; the success card mentions
@@ -2192,9 +2215,10 @@ func TestDispatchPR_MissingTitleRefusesPR(t *testing.T) {
 }
 
 // TestDispatchPR_NonConventionalTitleStillOpens pins the gate's
-// scope: only the summary heading is refused. A title that is not
-// Conventional Commits (but is a real title) opens the PR as
-// before.
+// scope: the title is checked for SHAPE, not for the Conventional
+// Commits type allow-list. `Fix(x): a near-miss title` is not a
+// type the allow-list knows, but it carries the shape
+// <type>(<scope>): <subject> — so the PR opens, exactly as before.
 func TestDispatchPR_NonConventionalTitleStillOpens(t *testing.T) {
 	rig := newPRTestRig(t)
 	setupPRWorktree(t, rig, Context{Branch: "wt"})
@@ -2220,6 +2244,384 @@ func TestDispatchPR_NonConventionalTitleStillOpens(t *testing.T) {
 	}
 	if calls[0].PRTitle != "Fix(x): a near-miss title" {
 		t.Fatalf("PR title = %q", calls[0].PRTitle)
+	}
+}
+
+// -----------------------------------------------------------------------------
+// The format gate
+//
+// Three checks over the extracted title + body: the title is not
+// the summary heading, the title carries the Conventional Commits
+// shape, the body opens with the summary heading. The first failure
+// names the reason.
+// -----------------------------------------------------------------------------
+
+// TestValidatePRText_Accepts pins the titles and bodies the gate
+// lets through.
+//
+// The type word is NOT restricted to the Conventional Commits
+// allow-list: the gate checks the shape of the title, not which
+// type words appear.
+func TestValidatePRText_Accepts(t *testing.T) {
+	body := "## Summary by NightMe\n\nFoo.\n"
+	for _, title := range []string{
+		"feat(gtw): add x",
+		"fix: y",
+		"chore(deps)!: drop z",
+		"Fix(x): a near-miss title",
+		"feat(api)!: x",
+	} {
+		if failure := validatePRText(title, body); failure != nil {
+			t.Fatalf("validatePRText(%q) = %v, want accepted", title, failure.Reason)
+		}
+	}
+}
+
+// TestValidatePRText_RejectsTitle pins the titles the gate refuses:
+// the summary heading (the title is missing), and the titles that
+// do not carry the <type>(<optional-scope>): <subject> shape.
+func TestValidatePRText_RejectsTitle(t *testing.T) {
+	body := "## Summary by NightMe\n\nFoo.\n"
+	cases := []struct {
+		title string
+		code  string
+	}{
+		{"## Summary by NightMe", prFormatTitleMissing},
+		{"## summary by nightme", prFormatTitleMissing},
+		{"627-feat-cards-arrow-rows", prFormatTitleFormat},
+		{"Now I have a complete picture of the changes.", prFormatTitleFormat},
+		{"feat:", prFormatTitleFormat},
+		{"feat(x):", prFormatTitleFormat},
+		{"feat(): x", prFormatTitleFormat},
+	}
+	for _, tc := range cases {
+		failure := validatePRText(tc.title, body)
+		if failure == nil {
+			t.Fatalf("validatePRText(%q) = accepted, want %s", tc.title, tc.code)
+		}
+		if failure.Code != tc.code {
+			t.Fatalf("validatePRText(%q) code = %q, want %q", tc.title, failure.Code, tc.code)
+		}
+	}
+}
+
+// TestValidatePRText_RejectsBody pins the bodies the gate refuses:
+// the body's first line has to be the summary heading.
+func TestValidatePRText_RejectsBody(t *testing.T) {
+	for _, body := range []string{
+		"",
+		"Now I have a complete picture of the changes.",
+		"## Summary by NightMe Notes\n\nFoo.\n",
+		"Foo.\n\n## Summary by NightMe\n\nBar.\n",
+	} {
+		failure := validatePRText("feat(gtw): add x", body)
+		if failure == nil {
+			t.Fatalf("validatePRText with body %q = accepted, want %s", body, prFormatSummaryHeading)
+		}
+		if failure.Code != prFormatSummaryHeading {
+			t.Fatalf("validatePRText with body %q code = %q, want %q", body, failure.Code, prFormatSummaryHeading)
+		}
+	}
+}
+
+// TestValidatePRText_AcceptsHeadingVariants pins the body headings
+// the gate accepts: the plain form, the linked form, any casing. A
+// body that is nothing but the heading passes too — only the first
+// line is checked.
+func TestValidatePRText_AcceptsHeadingVariants(t *testing.T) {
+	for _, body := range []string{
+		"## Summary by NightMe\n\nFoo.\n",
+		"## Summary by [NightMe](https://nightme.dev)\n\nFoo.\n",
+		"## summary by nightme\n\nFoo.\n",
+		"## Summary by NightMe",
+	} {
+		if failure := validatePRText("feat(gtw): add x", body); failure != nil {
+			t.Fatalf("validatePRText with body %q = %v, want accepted", body, failure.Reason)
+		}
+	}
+}
+
+// TestCheckPRReply_ParseFailure pins the parse step of the gate: a
+// reply that carries nothing usable fails with the parse code.
+func TestCheckPRReply_ParseFailure(t *testing.T) {
+	_, _, failure := checkPRReply("   \n\n  \n")
+	if failure == nil {
+		t.Fatalf("checkPRReply = accepted, want a parse failure")
+	}
+	if failure.Code != prFormatParseFailed {
+		t.Fatalf("failure code = %q, want %q", failure.Code, prFormatParseFailed)
+	}
+}
+
+// TestNormalizeSummaryHeading_CaseVariants pins that the normalizer
+// rewrites every heading form the gate accepts into the canonical
+// plain heading — the gate and the normalizer share one rule.
+func TestNormalizeSummaryHeading_CaseVariants(t *testing.T) {
+	for _, body := range []string{
+		"## summary by nightme\n\nFoo.\n",
+		"## SUMMARY BY NIGHTME\n\nFoo.\n",
+		"## Summary by [NightMe](https://nightme.dev)\n\nFoo.\n",
+	} {
+		want := "## Summary by NightMe\n\nFoo.\n"
+		if got := normalizeSummaryHeading(body); got != want {
+			t.Fatalf("normalizeSummaryHeading(%q) mismatch:\nwant: %q\ngot:  %q", body, want, got)
+		}
+	}
+}
+
+// TestBuildPRCorrectionPrompt pins the correction round: the PR
+// prompt, then the correction section — the reason, the rejected
+// reply, and the format the reply has to carry.
+func TestBuildPRCorrectionPrompt(t *testing.T) {
+	base := "You are preparing the Pull Request for the current Git branch.\n"
+	got := buildPRCorrectionPrompt(base, "the agent's PR title is not in `<type>(<optional-scope>): <subject>` form",
+		"627-feat-cards\n\n<function_calls>\n")
+	if !strings.HasPrefix(got, base) {
+		t.Fatalf("the correction must keep the PR prompt:\n%s", got)
+	}
+	for _, want := range []string{
+		"## Correction",
+		"Your previous reply was rejected: the agent's PR title is not in `<type>(<optional-scope>): <subject>` form.",
+		"Your previous reply was:\n\n627-feat-cards",
+		"the FIRST line is the PR title: `<type>(<optional-scope>): <subject>`",
+		"the THIRD line is `## Summary by NightMe`",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("the correction prompt lacks %q:\n%s", want, got)
+		}
+	}
+}
+
+// TestBuildPRCorrectionPrompt_Truncates pins the elision: a reply
+// longer than the limit is quoted back from its tail, behind the
+// elision marker.
+func TestBuildPRCorrectionPrompt_Truncates(t *testing.T) {
+	reply := strings.Repeat("x", prCorrectionReplyLimit+500) + "TAIL"
+	got := buildPRCorrectionPrompt("base", "reason", reply)
+	if !strings.Contains(got, "… (truncated)") {
+		t.Fatalf("a long reply must be elided:\n%s", got)
+	}
+	if !strings.Contains(got, "TAIL\n\nProduce the corrected reply now.") {
+		t.Fatalf("the tail of the reply must survive:\n%s", got)
+	}
+	// The quoted excerpt is the tail, not the whole reply.
+	if strings.Contains(got, strings.Repeat("x", prCorrectionReplyLimit+1)) {
+		t.Fatalf("the excerpt must be truncated:\n%s", got)
+	}
+}
+
+// -----------------------------------------------------------------------------
+// The format gate at dispatch level
+// -----------------------------------------------------------------------------
+
+// TestDispatchPR_BranchNameTitleRefusesPR covers the production
+// regression the gate exists for: the agent echoed the branch name
+// as its first line, parsePRReply's "first non-empty line" fallback
+// promoted it to the PR title, and the body kept the agent's raw
+// transcript. The platform accepted the PR; a reviewer got nothing.
+//
+// No PR may be opened for such a reply.
+func TestDispatchPR_BranchNameTitleRefusesPR(t *testing.T) {
+	rig := newPRTestRig(t)
+	setupPRWorktree(t, rig, Context{Branch: "wt"})
+	setupPRGit(rig, "wt", 0)
+	rig.git.on("remote", "git@github.com:octocat/hello.git", "", nil)
+	rig.prov.SetCreatePRResp("https://github.com/octocat/hello/pull/7")
+	rig.agent.runOnceText = "627-feat-cards-arrow-rows-for-run-cards\n\n" +
+		"<function_calls>\n" +
+		"go build ./... | head -20\n"
+	rig.installDeps()
+
+	cs := rig.cs
+	s := captureCh(t, cs)
+	if _, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, Config{}); err != nil {
+		t.Fatalf("dispatchPR err: %v", err)
+	}
+	r := s.lastText()
+	if !strings.HasPrefix(r, "❌") {
+		t.Fatalf("expected a ❌ reply, got:\n%s", r)
+	}
+	if !strings.Contains(r, "is not in `<type>(<optional-scope>): <subject>` form") {
+		t.Fatalf("expected the title-format reason, got:\n%s", r)
+	}
+	if calls := rig.prov.CallsByMethod("CreatePR"); len(calls) != 0 {
+		t.Fatalf("CreatePR calls = %d, want 0", len(calls))
+	}
+}
+
+// TestDispatchPR_RetryOpensPRFromSecondReply covers the retry: the
+// first reply does not pass the gate, the second one does, and the
+// PR is opened from the second reply — title, body and all.
+func TestDispatchPR_RetryOpensPRFromSecondReply(t *testing.T) {
+	rig := newPRTestRig(t)
+	setupPRWorktree(t, rig, Context{Branch: "wt"})
+	setupPRGit(rig, "wt", 0)
+	rig.git.on("remote", "git@github.com:octocat/hello.git", "", nil)
+	rig.prov.SetCreatePRResp("https://github.com/octocat/hello/pull/7")
+	rig.agent.runOnceReplies = []runOnceReply{
+		{Text: "627-feat-cards-arrow-rows\n\n<function_calls>\n", Model: "model-1"},
+		{Text: "```\nfeat(gtw): add the format gate\n\n## Summary by NightMe\n\n" +
+			"Does the thing.\n\nRisk: low — gate only\n```", Model: "model-2"},
+	}
+	rig.installDeps()
+
+	cs := rig.cs
+	s := captureCh(t, cs)
+	if _, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, Config{}); err != nil {
+		t.Fatalf("dispatchPR err: %v", err)
+	}
+	calls := rig.prov.CallsByMethod("CreatePR")
+	if len(calls) != 1 {
+		t.Fatalf("CreatePR calls = %d, want 1", len(calls))
+	}
+	if calls[0].PRTitle != "feat(gtw): add the format gate" {
+		t.Fatalf("PR title = %q, want the second reply's title", calls[0].PRTitle)
+	}
+	if !strings.HasPrefix(calls[0].PRBody, "## Summary by NightMe\n") {
+		t.Fatalf("PR body must come from the second reply:\n%s", calls[0].PRBody)
+	}
+	if strings.Contains(calls[0].PRBody, "<function_calls>") {
+		t.Fatalf("the first reply must not reach the PR:\n%s", calls[0].PRBody)
+	}
+	// The agent stamp names the attempt that opened the PR.
+	if got := lastOutbound(t, s).Model; got != "model-2" {
+		t.Fatalf("agent footer model = %q, want model-2", got)
+	}
+	// The retry asked the same agent again, with the PR prompt plus
+	// the correction section.
+	rig.agent.mu.Lock()
+	agentCalls := rig.agent.calls
+	rig.agent.mu.Unlock()
+	if len(agentCalls) != 2 {
+		t.Fatalf("agent calls = %d, want 2", len(agentCalls))
+	}
+	if !strings.Contains(agentCalls[1].blocks[0].Text, "## Correction") {
+		t.Fatalf("the retry must carry the correction section")
+	}
+	if !strings.Contains(agentCalls[1].blocks[0].Text, "627-feat-cards-arrow-rows") {
+		t.Fatalf("the correction must quote the rejected reply")
+	}
+	// Each attempt carries a deadline, and the retry's is never
+	// earlier than the first attempt's: the first attempt's expiry
+	// does not cancel the retry. The two attempts share the
+	// command's own wall clock (timeouts.Command, applied by
+	// Factory.Handle), so the retry is not guaranteed an agent
+	// budget of its own — but it is never cut short by the attempt
+	// it follows.
+	for i, c := range agentCalls {
+		if c.deadline.IsZero() {
+			t.Fatalf("attempt %d ran without a deadline", i)
+		}
+	}
+	if agentCalls[1].deadline.Before(agentCalls[0].deadline) {
+		t.Fatalf("the retry deadline %v is earlier than the first attempt's %v",
+			agentCalls[1].deadline, agentCalls[0].deadline)
+	}
+}
+
+// TestDispatchPR_RetryThatCannotRunReportsFormatFailure covers the
+// retry running into the command's own clock: the agent call dies,
+// and the user gets the format diagnosis — the reason the first
+// attempt was rejected — rather than a bare deadline error that
+// says nothing about the reply.
+func TestDispatchPR_RetryThatCannotRunReportsFormatFailure(t *testing.T) {
+	rig := newPRTestRig(t)
+	setupPRWorktree(t, rig, Context{Branch: "wt"})
+	setupPRGit(rig, "wt", 0)
+	rig.git.on("remote", "git@github.com:octocat/hello.git", "", nil)
+	rig.prov.SetCreatePRResp("https://github.com/octocat/hello/pull/7")
+	rig.agent.runOnceReplies = []runOnceReply{
+		{Text: "627-feat-cards-arrow-rows\n\n<function_calls>\n", Model: "model-1"},
+		{Err: context.DeadlineExceeded},
+	}
+	rig.installDeps()
+
+	cs := rig.cs
+	s := captureCh(t, cs)
+	work := cs.Hold("msg")
+	ctx := chatsession.WithWork(context.Background(), work)
+	if _, err := dispatchPR(ctx, cs, rig.deps, "chat", "msg", prArgs{}, Config{}); err != nil {
+		t.Fatalf("dispatchPR err: %v", err)
+	}
+	r := s.lastText()
+	if !strings.HasPrefix(r, "❌") {
+		t.Fatalf("expected a ❌ reply, got:\n%s", r)
+	}
+	if !strings.Contains(r, "is not in `<type>(<optional-scope>): <subject>` form") {
+		t.Fatalf("expected the title-format reason, got:\n%s", r)
+	}
+	if strings.Contains(r, "context deadline exceeded") {
+		t.Fatalf("the refusal must name the format, not the deadline:\n%s", r)
+	}
+	if calls := rig.prov.CallsByMethod("CreatePR"); len(calls) != 0 {
+		t.Fatalf("CreatePR calls = %d, want 0", len(calls))
+	}
+	work.Release()
+	out := settledOutcomeOf(s)
+	if out == nil {
+		t.Fatalf("no settled outcome: the command reported nothing")
+	}
+	if out.Data["format"] != prFormatTitleFormat {
+		t.Fatalf("outcome format = %q, want %q", out.Data["format"], prFormatTitleFormat)
+	}
+	if out.Data["attempts"] != "2" {
+		t.Fatalf("outcome attempts = %q, want 2", out.Data["attempts"])
+	}
+}
+
+// TestDispatchPR_RetryStillFailsRefusesPR covers the refusal: both
+// attempts fail the gate, no PR is opened, and the card names the
+// reason, the rejected reply and the way out.
+func TestDispatchPR_RetryStillFailsRefusesPR(t *testing.T) {
+	rig := newPRTestRig(t)
+	setupPRWorktree(t, rig, Context{Branch: "wt"})
+	setupPRGit(rig, "wt", 0)
+	rig.git.on("remote", "git@github.com:octocat/hello.git", "", nil)
+	rig.prov.SetCreatePRResp("https://github.com/octocat/hello/pull/7")
+	rig.agent.runOnceReplies = []runOnceReply{
+		{Text: "627-feat-cards-arrow-rows\n\n<function_calls>\n", Model: "model-1"},
+		{Text: "still-not-a-title\n\n<function_calls>\n", Model: "model-2"},
+	}
+	rig.installDeps()
+
+	cs := rig.cs
+	s := captureCh(t, cs)
+	work := cs.Hold("msg")
+	ctx := chatsession.WithWork(context.Background(), work)
+	if _, err := dispatchPR(ctx, cs, rig.deps, "chat", "msg", prArgs{}, Config{}); err != nil {
+		t.Fatalf("dispatchPR err: %v", err)
+	}
+	r := s.lastText()
+	if !strings.HasPrefix(r, "❌") {
+		t.Fatalf("expected a ❌ reply, got:\n%s", r)
+	}
+	if !strings.Contains(r, "(after 2 attempts)") {
+		t.Fatalf("expected the attempt count, got:\n%s", r)
+	}
+	if !strings.Contains(r, "  still-not-a-title") {
+		t.Fatalf("expected the rejected reply, indented, got:\n%s", r)
+	}
+	if !strings.Contains(r, "↳ re-run `/gtw pr` to retry (or try another agent with `-a <name>`)") {
+		t.Fatalf("expected the retry hint, got:\n%s", r)
+	}
+	if calls := rig.prov.CallsByMethod("CreatePR"); len(calls) != 0 {
+		t.Fatalf("CreatePR calls = %d, want 0", len(calls))
+	}
+	// The outcome names the failed check and how many attempts were
+	// made.
+	work.Release()
+	out := settledOutcomeOf(s)
+	if out == nil {
+		t.Fatalf("no settled outcome: the command reported nothing")
+	}
+	if out.Data["reason"] != "agent_error" {
+		t.Fatalf("outcome reason = %q, want agent_error", out.Data["reason"])
+	}
+	if out.Data["format"] != prFormatTitleFormat {
+		t.Fatalf("outcome format = %q, want %q", out.Data["format"], prFormatTitleFormat)
+	}
+	if out.Data["attempts"] != "2" {
+		t.Fatalf("outcome attempts = %q, want 2", out.Data["attempts"])
 	}
 }
 
@@ -3231,7 +3633,7 @@ func TestDispatchPR_AgentFlagOverride(t *testing.T) {
 	// Note: we don't use newPRTestRig here because it would
 	// re-install Builtins with only claude, wiping out the
 	// opencode registration. Build the rig manually.
-	opencode := &recordingAgent{name: "opencode", runOnceText: "```\nfeat: hi\n```"}
+	opencode := &recordingAgent{name: "opencode", runOnceText: "```\nfeat: hi\n\n## Summary by NightMe\n\nBody.\n```"}
 	claude := &recordingAgent{name: "claude", runOnceText: "should-not-be-called"}
 	withAgent(t, claude, opencode)
 
@@ -3374,7 +3776,7 @@ func TestLoadDispatchContext_NonWorktree_DetachedHEAD(t *testing.T) {
 // on a non-/gtw fix branch: no yml, derived Branch / Worktree /
 // RepoRoot. The Detect fallback path provides the provider.
 func TestDispatchPR_NonWorktree_HappyPath(t *testing.T) {
-	opencode := &recordingAgent{name: "opencode", runOnceText: "```\nfeat: hi\n```"}
+	opencode := &recordingAgent{name: "opencode", runOnceText: "```\nfeat: hi\n\n## Summary by NightMe\n\nBody.\n```"}
 	withAgent(t, opencode)
 
 	cs := &chatsession.ChatSession{}

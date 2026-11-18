@@ -111,9 +111,9 @@ func TestRealPi_PRPromptV2(t *testing.T) {
 		truncateOutput(rawText, 1500))
 
 	// parsePRReply is the same parser the daemon uses; if it
-	// rejects the LLM output, downstream fails closed with a
-	// "could not parse agent reply" error and the user has to
-	// paste title + body manually. Verify it accepts.
+	// rejects the LLM output, downstream fails closed on the
+	// parse and the user has to paste title + body manually.
+	// Verify it accepts.
 	title, body, perr := parsePRReply(rawText)
 	outPath := filepath.Join(t.TempDir(), "nightme-v2-prompt-output.md")
 	if perr != nil {

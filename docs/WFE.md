@@ -15,6 +15,7 @@ The personal agent (`/me`) runs a workflow in a chat. The same file is the plan 
 ## Table of Contents
 
 - [1. File location & layout](#1-file-location--layout)
+  - [1.1 Checking a workflow](#11-checking-a-workflow)
 - [2. Top-level fields](#2-top-level-fields)
 - [3. Triggers (`on:`)](#3-triggers-on)
   - [3.1 `schedule`](#31-schedule)
@@ -63,6 +64,29 @@ Workflows are read from:
 - A file that does not load stops only itself: the workflows beside it load and run as usual, and the failure is reported against the name the file would have provided.
 - The action scripts live in `~/.nightme/workflows/actions/`, and the run state in `~/.nightme/workflows/runs/`.
 
+### 1.1 Checking a workflow
+
+`nightme workflow validate` checks the workflow files and reports every problem it found:
+
+```
+nightme workflow validate [path...]
+        --json    print the diagnostics as a JSON array
+```
+
+With no argument it validates the workflows dir; with arguments it validates the files and the directories it is given, and a directory contributes its `*.yaml` and `*.yml` files. Every problem is one line — `path:line:column: message` — and a run where every workflow is valid prints nothing. The exit code is `0` when every workflow is valid, `8` when a workflow does not validate, and `9` when a path does not exist or cannot be read.
+
+The engine offers the same check as an API (`pkg/wfe`):
+
+| Function | Returns |
+|---|---|
+| `Validate(raw []byte) []Diagnostic` | Every problem in the given YAML bytes. |
+| `ValidateFile(path string) []Diagnostic` | Every problem in the file at that path. |
+| `ValidateDir(dir string) []Diagnostic` | Every problem in every workflow file of that directory. |
+
+A `Diagnostic` carries the file, the line, the column and the message. The load path — `Parse`, `LoadFile`, `LoadDir` — reports the problems of the schema as a `*wfe.ValidationError`, which matches `wfe.ErrValidationFailed` under `errors.Is`.
+
+The two surfaces differ in one thing: the load path ignores the keys the schema does not have, so a workflow file that carries extra fields keeps running; the validation surface reports them, because a typo changes what the workflow does without saying so.
+
 ---
 
 ## 2. Top-level fields
@@ -81,7 +105,7 @@ what the workflow is for.
 
 A workflow names **no agent**. The run uses the agent of the chat that started it — the chat's `/use` choice, or its primary agent.
 
-A key the schema does not have is ignored: the file loads, and the key has no effect.
+A key the schema does not have is ignored: the file loads, and the key has no effect. `nightme workflow validate` reports it (see §1.1).
 
 Minimal skeleton (`~/.nightme/workflows/my-workflow.yaml`):
 

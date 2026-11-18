@@ -3,6 +3,7 @@
 //	nightme workflow list              # list configured workflows
 //	nightme workflow show <name>       # show one workflow's parsed details
 //	nightme workflow run <name>        # dry-run a workflow (prints run plan)
+//	nightme workflow validate [path...] # check the workflows and report what is wrong
 //
 // Workflows are read from the workflows dir (default
 // `~/.nightme/workflows/`). The CLI is self-contained — it does
@@ -13,6 +14,10 @@
 // builds a plan (what the steps are, in what order) and prints it.
 // A workflow is started by a person, with `/me start <name>` in a
 // chat — the CLI is a planning/inspection tool.
+//
+// `nightme workflow validate` is a linter: it reports every problem
+// a workflow file has, where the problem is, and exits with a code a
+// CI job can act on.
 
 package main
 
@@ -28,6 +33,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	nmerrors "github.com/cnlangzi/nightme/internal/errors"
 	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
@@ -59,7 +65,7 @@ func loadWorkflows() ([]*wfe.Workflow, []wfe.Failure, string, error) {
 }
 
 // newWorkflowCmd builds the `nightme workflow` parent command and
-// attaches list/show/run as subcommands.
+// attaches list/show/run/validate as subcommands.
 func newWorkflowCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "workflow",
@@ -71,6 +77,7 @@ func newWorkflowCmd() *cobra.Command {
 	cmd.AddCommand(newWorkflowListCmd())
 	cmd.AddCommand(newWorkflowShowCmd())
 	cmd.AddCommand(newWorkflowRunCmd())
+	cmd.AddCommand(newWorkflowValidateCmd())
 	return cmd
 }
 
@@ -411,6 +418,97 @@ func printWorkflowRun(w io.Writer, wf *wfe.Workflow, workspace string) error {
 		}
 	}
 	fmt.Fprintln(w, "\n(this is a dry-run; no agent is actually invoked)")
+	return nil
+}
+
+// newWorkflowValidateCmd implements `nightme workflow validate
+// [path...]`.
+//
+// It is a linter: it reports every problem a workflow file has and
+// exits with a code a CI job can act on.
+func newWorkflowValidateCmd() *cobra.Command {
+	var jsonOut bool
+	cmd := &cobra.Command{
+		Use:   "validate [path...]",
+		Short: "Validate workflow files",
+		Long: "validate checks the workflow files and reports every problem " +
+			"it found: a missing title, a job without steps, a step that " +
+			"names two kinds, a key the schema does not have. Each problem is " +
+			"one line — \"path:line:column: message\" — and a run where every " +
+			"workflow is valid prints nothing.\n\n" +
+			"With no argument it validates the workflows dir. With arguments " +
+			"it validates the files and the directories it is given; a " +
+			"directory contributes its *.yaml and *.yml files. The exit code " +
+			"is 0 when every workflow is valid, 8 when a workflow does not " +
+			"validate, and 9 when a path does not exist or cannot be read.\n\n" +
+			"--json swaps the lines for a JSON array.",
+		Args: cobra.ArbitraryArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runWorkflowValidate(cmd.OutOrStdout(), cmd.ErrOrStderr(), args, jsonOut)
+		},
+	}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit a JSON array of diagnostics")
+	return cmd
+}
+
+// runWorkflowValidate validates the workflows and reports what is
+// wrong with them.
+//
+// The exit code says what happened: 0 when every workflow is valid,
+// 8 when a workflow does not validate, 9 when a path does not exist
+// or cannot be read. A path that cannot be read does not stop the
+// other paths: they are validated anyway.
+func runWorkflowValidate(out io.Writer, errOut io.Writer, args []string, asJSON bool) error {
+	var diags []wfe.Diagnostic
+	unreadable := false
+	if len(args) == 0 {
+		dir, err := workflowsDir()
+		if err != nil {
+			return err
+		}
+		diags = wfe.ValidateDir(dir)
+	} else {
+		for _, path := range args {
+			info, err := os.Stat(path)
+			if err != nil {
+				fmt.Fprintf(errOut, "%s: %v\n", path, err)
+				unreadable = true
+				continue
+			}
+			if info.IsDir() {
+				diags = append(diags, wfe.ValidateDir(path)...)
+				continue
+			}
+			file, err := os.Open(path)
+			if err != nil {
+				fmt.Fprintf(errOut, "%s: %v\n", path, err)
+				unreadable = true
+				continue
+			}
+			file.Close()
+			diags = append(diags, wfe.ValidateFile(path)...)
+		}
+	}
+	if asJSON {
+		if diags == nil {
+			diags = []wfe.Diagnostic{}
+		}
+		enc := json.NewEncoder(out)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(diags); err != nil {
+			return err
+		}
+	} else {
+		for _, d := range diags {
+			fmt.Fprintln(out, d.Error())
+		}
+	}
+	if unreadable {
+		return nmerrors.New(nmerrors.CodeNotFound, "workflow: a path does not exist or cannot be read")
+	}
+	if len(diags) > 0 {
+		return nmerrors.New(nmerrors.CodeValidationError, "workflow: a workflow does not validate")
+	}
 	return nil
 }
 

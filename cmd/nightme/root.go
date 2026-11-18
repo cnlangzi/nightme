@@ -86,7 +86,7 @@ func newRootCmd() (*cobra.Command, *cmdRegistry) {
 	reg.addNoTray(newMeCmd(), "me              configure the personal agent's chat model")
 	reg.add(newVersionCmd(), "version         version info")
 	reg.add(newUpdateCmd(), "update          check for a newer release")
-	reg.addNoTray(newWorkflowCmd(), "workflow ...   list/show/run workflow YAMLs")
+	reg.addNoTray(newWorkflowCmd(), "workflow ...   list/show/run/validate workflow YAMLs")
 	reg.add(newSTTCmd(), "stt ...         inspect the nightme-stt worker")
 
 	addLifecycleCommands(reg)

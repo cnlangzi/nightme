@@ -250,7 +250,7 @@ Most of the time you live in chat. These are the few things you do from a termin
 | `nightme me` | Interactive wizard for the personal agent's chat model: endpoint, model, answer cap, thinking agent, credential. |
 | `nightme update` | In-place upgrade: check, download, SHA256-verify, install, restart the daemon. |
 | `nightme clean` | Truncate logs and clear the attachment inbox; `--all` for a full local reset (stop the daemon first). |
-| `nightme workflow` | List / show / dry-run the workflow YAMLs under `~/.nightme/workflows/`. |
+| `nightme workflow` | List / show / dry-run / validate the workflow YAMLs under `~/.nightme/workflows/`. |
 | `nightme doctor` | Check NightMe's health when something feels off. Unix only. |
 | `nightme version` | Print version info. |
 
@@ -507,8 +507,11 @@ outcome, so the agent decides the next step from facts instead of from prose.
 | `nightme workflow list` | Summarize every workflow: name, title, workspaces, triggers, jobs. The files that did not load are reported below the table. `--json` for machine output. |
 | `nightme workflow show <name>` | Print one workflow's parsed details: triggers, jobs, steps. |
 | `nightme workflow run <name>` | Print the execution plan — which steps run, in what order. `--workspace` overrides the workspace. |
+| `nightme workflow validate [path...]` | Check the workflow files and report every problem: a missing title, a step that names two kinds, a key the schema does not have. One line per problem — `path:line:column: message`. The exit code is `0` when every workflow is valid, `8` when one does not validate, `9` when a path does not exist or cannot be read. `--json` for machine output. |
 
 `run` is a planning dry-run: it parses and plans but does not invoke an agent.
+
+`validate` is a linter: with no path it checks the workflows dir, with paths it checks the files and the directories it is given.
 
 ### Write a workflow
 

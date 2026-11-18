@@ -243,10 +243,16 @@ func TestStop_FailsInFlightPromptRPC(t *testing.T) {
 			t.Errorf("SendBlocks took %s after Stop; prompt RPC was not failed (want < 2s)", r.d)
 		}
 		t.Logf("SendBlocks unblocked in %s after Stop: %v", r.d, r.err)
-		// ErrSessionClosed is the natural return value: the
-		// pending channel closed without a response envelope.
-		if !errors.Is(r.err, ErrSessionClosed) && !strings.Contains(r.err.Error(), "session closed") {
-			t.Errorf("SendBlocks error %v does not look like a session-closed signal", r.err)
+		// Stop runs two paths in parallel: it closes the pending
+		// channel of the prompt RPC and it cancels the prompt's
+		// context. Which of the two the waiter sees is a race, and
+		// both say the turn is over: ErrSessionClosed when the
+		// channel closed without a response envelope, the context
+		// error when the cancellation won.
+		if !errors.Is(r.err, ErrSessionClosed) &&
+			!strings.Contains(r.err.Error(), "session closed") &&
+			!errors.Is(r.err, context.Canceled) {
+			t.Errorf("SendBlocks error %v does not look like the end of the turn", r.err)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("SendBlocks did not return within 3s after Stop; failResponse did not unblock the prompt RPC")

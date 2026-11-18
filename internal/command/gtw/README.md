@@ -475,6 +475,11 @@ abc1234 fix(gtw): hooks output uses standard ✅ title
 PR body 里的 `Deviations from Issue #42:` 分类说明实现与 issue 的差异;
 agent 没写这一节时,卡片上方会带一行 ⚠️ 提醒 reviewer 拿不到对比。
 
+`/gtw pr --ready` 在 PR 出现之后把关联 issue 从 `nightme/wip` 挪到
+`nightme/ready`(先加 ready 再摘 wip,中间失败 issue 仍然是"被占用"的
+状态)。卡片本身不多一行 —— 状态在 issue 上,不在卡片上。label 调用失败
+只带一行 ⚠️,PR 已经开出来了,命令不算失败。
+
 ### 4.6 Format 1(`/gtw fix` — assess-first)
 
 ```
@@ -513,8 +518,8 @@ agent 没写这一节时,卡片上方会带一行 ⚠️ 提醒 reviewer 拿不�
 
 ```
 ❌ No eligible assigned issue
-→ queue: empty — none of the 100 oldest open issues carries the `nightme/assigned` label
-→ `nightme/assigned` is in this repository's label catalog — attach it to an issue to fill the queue
+→ queue: empty — none of the 100 oldest open issues carries `nightme/assigned` on its own
+→ `nightme/assigned` is in this repository's label catalog — attach it to an issue that carries no other `nightme/*` label to fill the queue
 ↳ come back in 5m for another pick.
 ```
 
@@ -523,11 +528,15 @@ agent 没写这一节时,卡片上方会带一行 ⚠️ 提醒 reviewer 拿不�
 上才有内容。队列里本来就有候选、只是全被跳过时(阻塞 / 已有分支 / 已有 PR),
 这一行不出现 —— 它讲的是"队列空了",而那种情况下队列没空。
 
-队列里的 issue 全被认领(`nightme/wip`)时,标签是在用的,卡片说的是这件事:
+入队条件是"`nightme/assigned` 一个标签":issue 上再带任何一个 `nightme/*`
+状态 label(`nightme/wip`、`nightme/ready`、`nightme/revise` …)都说明别的
+agent 正在做它,`/gtw fix *` 不会挑它。
+
+队列里的 issue 全被占用时,标签是在用的,卡片说的是这件事:
 
 ```
 ❌ No eligible assigned issue
-→ queue: empty — 2 assigned issue(s) are claimed (`nightme/wip`) and are not offered
+→ queue: empty — 2 assigned issue(s) are held and are not offered
 ↳ come back in 5m for another pick.
 ```
 
@@ -543,6 +552,31 @@ agent 没写这一节时,卡片上方会带一行 ⚠️ 提醒 reviewer 拿不�
 → deps:     not ordered — this platform does not expose issue dependencies
 ↳ agent is analyzing — review the plan in chat, then tell the agent when to proceed
 ```
+
+### 4.7c Format 1(`/gtw fix <id>` — 拒绝一个被别的 agent 占用的 issue)
+
+issue 带着 `nightme/*` 状态 label 时具名 fix 拒绝它。`nightme/wip` 是
+claim(别的 `/gtw fix` 持着它),保留原来的措辞:
+
+```
+❌ Issue #42 is already claimed — label "nightme/wip" is present
+→ another /gtw fix holds this issue (or an earlier one never closed)
+↳ to release it: /cwd into that fix's worktree and run `/gtw close`
+↳ if the claim is stale, remove the nightme/wip label on the issue page
+```
+
+其它状态 label(`nightme/ready`、`nightme/revise`、`nightme/done` …)用另一
+张卡 —— claim 的说法对它们不成立:
+
+```
+❌ Issue #42 is not available for a fix
+→ it carries the `nightme/ready` label — another agent is working on it
+↳ remove that label on the issue page to take the issue over
+```
+
+两种拒绝都带 `Data["label"]`(挡住这次 fix 的那个 label),`reason` 分别是
+`issue_claimed` 与 `issue_in_state`。issue 同时带 `nightme/wip` 和别的状态
+label 时走 claim 拒绝 —— 它此刻正被一个 fix 持着。
 
 ### 4.8 Format 1(`/gtw new -y`)
 

@@ -1,3 +1,9 @@
+// summary.go — the record a finished run leaves behind.
+//
+// The record is the account of the session: it says what the run did,
+// what went wrong and what the models decided. It is a card of its
+// own — the run is over, and its live card is no longer the record of
+// it.
 package me
 
 import (
@@ -6,17 +12,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
-// The caps of the summary.
+// The caps of the record.
 //
 // A repeating workflow can produce hundreds of wake-ups and dozens of
 // failures. The card has to stay readable, and the totals stay in the
-// facts lines.
+// tree of the rounds.
 const (
 	maxSummaryErrors    = 5
 	maxSummaryDecisions = 10
@@ -35,81 +40,36 @@ const (
 	maxSummaryLine = 300
 )
 
-// postSummary posts the summary of a run the operator stopped.
+// postRecord posts the card a finished run leaves behind.
 //
-// The summary is the record of the session: it says what the run did,
-// what went wrong and what the models decided. It is a card of its
-// own — the run is over, and its live card is no longer the record
-// of it.
+// The record is posted whenever the run ends, whatever ended it: a
+// run that finishes on its own has a session worth recording too.
 //
 // A chat that refuses the card changes nothing else: the run still
 // ends, and no error reaches the operator.
-func (s *Service) postSummary(r *run) {
+func (s *Service) postRecord(r *run) {
 	if s.cfg.Operator == nil {
 		return
 	}
+	if r.recordSessionRef() != nil {
+		// The session is already recorded: the run came back after the
+		// daemon went away, and the record is in the chat.
+		return
+	}
 	// The run's own scope is cancelled when the run ends, and the
-	// summary is posted after that. The context outlives the run here
+	// record is posted after that. The context outlives the run here
 	// on purpose.
 	ctx := context.WithoutCancel(r.ctx)
-	sess := s.openSession(ctx, r, sessionRun, r.id, "", 0, "")
-	if sess.cardID == "" {
+	sess := s.openSession(ctx, r, sessionRecord, r.id, "", 0, "")
+	if sess.anchor == "" {
 		// The chat refused the card: the run still ends, and no error
 		// reaches the operator.
 		return
 	}
+	r.setRecordSession(sess)
 	s.publishInit(ctx, r, sess)
-	for _, line := range r.summaryLines() {
-		s.publishReply(ctx, r, sess, line)
-	}
+	s.publishReply(ctx, r, sess, r.recordCard())
 	s.publishResult(ctx, r, sess, string(r.currentPhase()))
-}
-
-// summaryLines renders the summary of a stopped run.
-//
-// The facts come first: the run, how long it went, the jobs it
-// entered, what it did, how often it woke a model and what each
-// capability decided and spent. The errors and the decisions follow,
-// one per line, and the totals stay in the facts.
-func (r *run) summaryLines() []string {
-	r.mu.Lock()
-	id := r.id
-	started := r.state.StartedAt
-	rounds := make(map[string]int, len(r.state.Rounds))
-	for job, round := range r.state.Rounds {
-		rounds[job] = round
-	}
-	history := append([]wfe.ActionRecord(nil), r.policy.History...)
-	s1d, s2d := r.system1Decisions, r.system2Decisions
-	s1u, s2u := r.system1Usage.Total(), r.system2Usage.Total()
-	inflight := r.inflight
-	stepIDs := workflowStepIDs(r.workflow)
-	jobs := r.workflow.JobOrder()
-	r.mu.Unlock()
-	wakes := r.wakeRecords()
-
-	lines := make([]string, 0, 16)
-	lines = append(lines, "run: "+id)
-	lines = append(lines, "duration: "+compactDuration(r.svc.now().Sub(started)))
-	if line := jobsLine(jobs, rounds); line != "" {
-		lines = append(lines, clipLine(line, maxSummaryLine))
-	}
-	lines = append(lines, actionsLine(history))
-	lines = append(lines, wakeLine(wakes))
-	lines = append(lines, stepsLine(stepIDs, history))
-	lines = append(lines, fmt.Sprintf("system-1: %d decisions, %d tokens", s1d, s1u))
-	lines = append(lines, fmt.Sprintf("system-2: %d decisions, %d tokens", s2d, s2u))
-
-	if errs := errorLines(history); len(errs) > 0 {
-		lines = append(lines, errs...)
-	}
-	if decs := decisionLines(wakes); len(decs) > 0 {
-		lines = append(lines, decs...)
-	}
-	if inflight != nil && inflight.Command != "" {
-		lines = append(lines, clipLine("stopped while: "+inflight.Command, maxSummaryLine))
-	}
-	return lines
 }
 
 // workflowStepIDs returns the ids of the steps of the workflow.
@@ -120,98 +80,6 @@ func workflowStepIDs(wf *wfe.Workflow) []string {
 		out = append(out, step.ID)
 	}
 	return out
-}
-
-// jobsLine renders the jobs the run entered and the round of each.
-//
-// A run that entered no job yet has no line: the map of the rounds is
-// empty then.
-func jobsLine(jobs []string, rounds map[string]int) string {
-	parts := make([]string, 0, len(rounds))
-	for _, job := range jobs {
-		if round, ok := rounds[job]; ok {
-			parts = append(parts, fmt.Sprintf("%s × %d", job, round))
-		}
-	}
-	if len(parts) == 0 {
-		return ""
-	}
-	return "jobs: " + strings.Join(parts, " · ")
-}
-
-// outcomeStatusOrder is the order the counts of the actions follow.
-var outcomeStatusOrder = []wfe.OutcomeStatus{
-	wfe.OutcomeOK,
-	wfe.OutcomeNoop,
-	wfe.OutcomeIncomplete,
-	wfe.OutcomeFailed,
-	wfe.OutcomeCancelled,
-	wfe.OutcomeTimeout,
-	wfe.OutcomeUnknown,
-}
-
-// actionsLine renders what the run did and how the actions ended.
-func actionsLine(history []wfe.ActionRecord) string {
-	counts := map[wfe.OutcomeStatus]int{}
-	for _, rec := range history {
-		status := rec.Outcome.Status
-		if status == "" {
-			status = wfe.OutcomeUnknown
-		}
-		counts[status]++
-	}
-	parts := make([]string, 0, len(counts))
-	for _, status := range outcomeStatusOrder {
-		if counts[status] == 0 {
-			continue
-		}
-		parts = append(parts, fmt.Sprintf("%d %s", counts[status], status))
-	}
-	line := fmt.Sprintf("actions: %d", len(history))
-	if len(parts) > 0 {
-		line += " (" + strings.Join(parts, " · ") + ")"
-	}
-	return line
-}
-
-// wakeLine renders how often the run woke a model and who woke.
-func wakeLine(wakes []wakeRecord) string {
-	counts := map[string]int{}
-	for _, rec := range wakes {
-		counts[rec.Who]++
-	}
-	parts := make([]string, 0, len(counts))
-	for _, who := range []string{decisionDecider, decisionChat} {
-		if counts[who] == 0 {
-			continue
-		}
-		parts = append(parts, fmt.Sprintf("%d by %s", counts[who], who))
-	}
-	line := fmt.Sprintf("wake-ups: %d", len(wakes))
-	if len(parts) > 0 {
-		line += " (" + strings.Join(parts, " · ") + ")"
-	}
-	return line
-}
-
-// stepsLine renders how many steps of the workflow ran.
-//
-// A step whose condition did not hold is recorded in the run state but
-// not in the history, so it counts as a step that did not run.
-func stepsLine(stepIDs []string, history []wfe.ActionRecord) string {
-	ran := map[string]bool{}
-	for _, rec := range history {
-		if rec.Kind == wfe.ActionKindRun && rec.StepID != "" {
-			ran[rec.StepID] = true
-		}
-	}
-	count := 0
-	for _, id := range stepIDs {
-		if ran[id] {
-			count++
-		}
-	}
-	return fmt.Sprintf("steps: %d ran · %d not run", count, len(stepIDs)-count)
 }
 
 // isErrorStatus reports whether an action went wrong.
@@ -239,15 +107,15 @@ func errorLines(history []wfe.ActionRecord) []string {
 	if len(failed) == 0 {
 		return nil
 	}
-	heading := "errors"
+	heading := "errors:"
 	if len(failed) > maxSummaryErrors {
-		heading = fmt.Sprintf("errors (last %d of %d)", maxSummaryErrors, len(failed))
+		heading = fmt.Sprintf("errors (last %d of %d):", maxSummaryErrors, len(failed))
 		failed = failed[len(failed)-maxSummaryErrors:]
 	}
 	lines := make([]string, 0, len(failed)+1)
 	lines = append(lines, heading)
-	for _, rec := range failed {
-		lines = append(lines, "· "+errorLine(rec))
+	for i, rec := range failed {
+		lines = append(lines, treeRow(i, len(failed), errorLine(rec)))
 	}
 	return lines
 }
@@ -258,7 +126,8 @@ func errorLines(history []wfe.ActionRecord) []string {
 // build log as its summary, and a card that carries it is unreadable.
 func errorLine(rec wfe.ActionRecord) string {
 	out := rec.Outcome
-	line := fmt.Sprintf("%s — %s", clipLine(rec.Command, maxSummaryCommand), out.Status)
+	line := fmt.Sprintf("[ %s ] %s — %s",
+		outcomeIcon(out.Status), clipLine(rec.Command, maxSummaryCommand), out.Status)
 	if out.Summary != "" {
 		line += ": " + clipLine(out.Summary, maxSummaryText)
 	}
@@ -273,19 +142,19 @@ func decisionLines(wakes []wakeRecord) []string {
 	if len(wakes) == 0 {
 		return nil
 	}
-	heading := "decisions"
+	heading := "decisions:"
 	if len(wakes) > maxSummaryDecisions {
-		heading = fmt.Sprintf("decisions (last %d of %d)", maxSummaryDecisions, len(wakes))
+		heading = fmt.Sprintf("decisions (last %d of %d):", maxSummaryDecisions, len(wakes))
 		wakes = wakes[len(wakes)-maxSummaryDecisions:]
 	}
 	lines := make([]string, 0, len(wakes)+1)
 	lines = append(lines, heading)
-	for _, rec := range wakes {
-		line := "· " + rec.Who + " — " + clipLine(rec.What, maxSummaryCommand)
+	for i, rec := range wakes {
+		line := rec.Who + " — " + clipLine(rec.What, maxSummaryCommand)
 		if rec.Why != "" {
 			line += " · because: " + clipLine(rec.Why, maxSummaryText)
 		}
-		lines = append(lines, clipLine(line, maxSummaryLine))
+		lines = append(lines, treeRow(i, len(wakes), clipLine(line, maxSummaryLine)))
 	}
 	return lines
 }
@@ -353,20 +222,4 @@ func argValue(raw json.RawMessage) string {
 		return text
 	}
 	return strings.TrimSpace(string(raw))
-}
-
-// compactDuration renders a duration in the short form: the seconds,
-// the minutes, or the hours and the minutes.
-func compactDuration(d time.Duration) string {
-	if d < 0 {
-		d = 0
-	}
-	switch {
-	case d < time.Minute:
-		return fmt.Sprintf("%ds", int(d.Seconds()))
-	case d < time.Hour:
-		return fmt.Sprintf("%dm", int(d.Minutes()))
-	default:
-		return fmt.Sprintf("%dh%dm", int(d.Hours()), int(d.Minutes())%60)
-	}
 }

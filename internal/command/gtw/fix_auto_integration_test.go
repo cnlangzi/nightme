@@ -144,12 +144,12 @@ func TestFixAuto_NoCandidate_ReportsFailure(t *testing.T) {
 	}
 }
 
-// TestFixAuto_ClaimedQueue_ReplyNamesTheClaim pins the reply of a
-// queue whose issues are all claimed: the issues still carry the
-// queue marker — the claim marker is what excludes them — so the
-// card must name the claim as the reason the queue is empty instead
-// of claiming the label is missing and asking for it again.
-func TestFixAuto_ClaimedQueue_ReplyNamesTheClaim(t *testing.T) {
+// TestFixAuto_HeldQueue_ReplyNamesTheHold pins the reply of a
+// queue whose issues are all held: the issues still carry the queue
+// marker — the state label is what excludes them — so the card must
+// name the hold as the reason the queue is empty instead of
+// claiming the label is missing and asking for it again.
+func TestFixAuto_HeldQueue_ReplyNamesTheHold(t *testing.T) {
 	rig := newFixRemoteRig(t)
 	rig.prov.SetListIssues([]*Issue{{
 		ID:        42,
@@ -164,8 +164,8 @@ func TestFixAuto_ClaimedQueue_ReplyNamesTheClaim(t *testing.T) {
 	}
 
 	last := rig.rec.lastText()
-	if !strings.Contains(last, "are claimed") {
-		t.Errorf("reply must name the claim as the reason the queue is empty:\n%s", last)
+	if !strings.Contains(last, "are held") {
+		t.Errorf("reply must name the hold as the reason the queue is empty:\n%s", last)
 	}
 	if strings.Contains(last, "attach it to an issue") {
 		t.Errorf("reply must not ask for a label that is already attached:\n%s", last)
@@ -267,7 +267,7 @@ func TestFixAuto_NoCandidate_OutcomeCarriesWakeUp(t *testing.T) {
 // issue drops out of the automatic queue for good: the claim
 // marker `nightme/wip` stays on the issue — the close leaves it
 // there too — and the pick filter drops every issue that carries
-// it. gtw never removes a label, so the queue marker is not what
+// it. gtw never removes the queue marker, so it is not what
 // keeps the issue out; the claim is.
 func TestFixAuto_ClaimedIssueIsNotOfferedAgain(t *testing.T) {
 	rig := newFixRemoteRig(t)

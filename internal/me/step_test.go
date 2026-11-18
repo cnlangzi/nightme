@@ -315,7 +315,7 @@ jobs:
 	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider, Shell: shell})
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "sh", ChatID: "obs-1", Cwd: "/tmp/work",
+		Name: "sh", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -327,13 +327,13 @@ jobs:
 		}
 	}
 	var told bool
-	for _, entry := range op.Entries(op.Cards()[1].ID) {
+	for _, entry := range op.Entries(op.Cards()[0].ID) {
 		if strings.Contains(entry, "ended: [ ! ]") {
 			told = true
 		}
 	}
 	if !told {
-		t.Errorf("the observer was not told about the failure: %v", op.Entries(op.Cards()[1].ID))
+		t.Errorf("the observer was not told about the failure: %v", op.Entries(op.Cards()[0].ID))
 	}
 }
 

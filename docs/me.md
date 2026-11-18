@@ -62,8 +62,9 @@ type Outcome struct {
 | `mode` | `/gtw fix` 的模式（`remote` / `local`） |
 | `selected_by` | issue 是怎么选出来的（`auto` = `/gtw fix *` 自己挑的） |
 | `wake_after` | 队列里没有可选项时，个人 agent 多久之后再来（`"5m"`） |
+| `label` | 挡住这次 fix 的 issue 状态 label（`nightme/wip` / `nightme/ready` / …）——`/gtw fix` 拒绝一个被别的 agent 占用的 issue 时给出 |
 | `candidates` | `/gtw fix *` 看了多少个候选 issue（数字）；`/gtw back` 前缀没命中时列出候选的 worktree 分支（逗号分隔的分支名） |
-| `claimed` | 其中多少个因为已被认领（`nightme/wip`）而不在候选里 |
+| `held` | `/gtw fix *` 看了多少个被别的 agent 占用（带 `nightme/*` 状态 label）而不在候选里的 issue（数字） |
 | `blocked` | 其中多少个因为前置依赖没落地被跳过 |
 | `branch_exists` | 其中多少个因为本地已有同名分支被跳过 |
 | `pr_open` | 其中多少个因为已经开了 PR 被跳过 |
@@ -270,6 +271,7 @@ chatsession: message settled chat_id=… message_id=… status=… summary=…
 | `provider_error` | git 平台解析 / 连接失败 | `/gtw fix` / `/gtw new` / `/gtw pr` | 异常 |
 | `invalid_issue` / `invalid_branch` | issue 号 / 分支名不合法 | `/gtw fix` | 异常 |
 | `issue_not_found` / `issue_claimed` | issue 不存在 / 已被别的 fix 占用 | `/gtw fix` | 异常 |
+| `issue_in_state` | issue 带着 `nightme/assigned` 以外的 `nightme/*` 状态 label，别的 agent 正在做 | `/gtw fix` | 异常 |
 | `no_candidate` | `/gtw fix *` 的队列里没有可选项（`Data` 带 `wake_after`） | `/gtw fix` | 正常分支 |
 | `branch_exists` | 分支已经存在 | `/gtw fix` | 异常 |
 | `already_active` | 当前目录已经在一个 `/gtw fix` 里 | `/gtw fix` | 异常 |

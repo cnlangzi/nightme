@@ -100,10 +100,12 @@ Local mode 不 dispatch agent prompt，Assess / Execute 无意义；不报错但
 
 **队列在 tracker 上**：NightMe 可以动的 issue 带着 `nightme/assigned` label —— 由人或者 tracker 上的外部自动化加上。gtw 从不自己加这个 label：它只认。`nightme/assigned` 在 `AllLabels` 里，所以 label catalog 检查会把它建进仓库的 label catalog —— 检查在队列挑选**之前**跑，否则一个 catalog 里还没有这个 label 的仓库永远挑不出 issue（见 §3.0）。
 
+**入队条件是「`nightme/assigned` 一个标签」**：issue 上再带任何一个 `nightme/*` 状态 label（`nightme/wip`、`nightme/ready`、`nightme/revise`、`nightme/done` …）都说明别的 agent 正在做它，队列不收。判断由一个共享的检查做（`heldLabel`，`internal/command/gtw/labels.go`）：issue 带着 `nightme/` 命名空间里除 `nightme/assigned` 以外的 label 就是「被占用」。label 名按大小写不敏感匹配，跟 `issueHasLabel` 同一条规则。
+
 **选择算法**（`internal/command/gtw/auto.go`）：
 
 ```
-candidates := open issues carrying nightme/assigned, minus those carrying nightme/wip
+candidates := open issues carrying nightme/assigned and no other nightme/* label
 sort candidates by (CreatedAt asc, ID asc)
 
 for each candidate c:
@@ -167,15 +169,15 @@ AddBlockedBy(ctx context.Context, owner, repo string, id, blocker int) error
 
 **`/gtw new -y` 写关系**：草稿里的 `{{ISSUE:NN}}` 引用就是依赖，被引用的 issue 挡着引用它的 issue。建 issue 的循环里，每建好一个 issue 就把它引用到的每个 issue 的关系写进平台 —— 写不进去只警告，命令照旧成功，卡片上多一行 `deps` 列出建成的依赖。关系不落盘：草稿建好 issue 后就被 `.created` 记录换掉，同一对 issue 不会重复建关系。
 
-**认领 = 加一个 label**：fix 认领 issue 时只加 `nightme/wip`，队列标记 `nightme/assigned` 留在 issue 上 —— gtw 只加 label，从不摘。认领之后 issue 同时带两个 label，队列过滤按 `nightme/wip` 把它挡在下一轮之外。
+**认领 = 加一个 label**：fix 认领 issue 时只加 `nightme/wip`，队列标记 `nightme/assigned` 留在 issue 上 —— gtw 从不摘队列标记，它记录的是这个 issue 属于 NightMe 的队列。认领之后 issue 同时带两个 label，队列过滤按「`nightme/assigned` 一个标签」把它挡在下一轮之外。claim 本身只有在 `/gtw pr --ready` 把 issue 挪到 `nightme/ready` 时才摘（见 §3.3）。
 
 **认领之后放弃 = 离开队列**：`/gtw close` 是纯本地收尾，一个 label 都不碰 —— `nightme/wip` 留在 issue 上，`nightme/assigned` 也在。所以「挑起来 → 没做完就 close」的 issue 从此不在队列里了；要让它回到队列，人工在 issue 页面上删掉 `nightme/wip`。
 
 **队列没有原子认领**：`ListIssues` 和贴 `nightme/wip` 之间有窗口，两台机器同时跑 `/gtw fix *` 可能挑到同一个 issue。这跟具名 fix 的既有窗口是同一类 —— label 是协作信号，不是锁（见 §3.2）。
 
-**没有可选项时**：回复卡片保留 `❌ No eligible assigned issue` 抬头和队列那一行。队列**一个候选都没有**的时候，卡片补一行说明队列为什么是空的：label catalog 检查刚建出 `nightme/assigned`（或者它本来就在），所以队列要等人工把这个 label 贴到某个 issue 上才有内容。队列里有候选但全被跳过时（阻塞 / 已有分支 / 已有 PR）不出现这一行 —— 卡片上写的是它们各自被跳过的原因，贴 label 解决不了那些原因。
+**没有可选项时**：回复卡片保留 `❌ No eligible assigned issue` 抬头和队列那一行。队列**一个候选都没有**的时候，卡片补一行说明队列为什么是空的：label catalog 检查刚建出 `nightme/assigned`（或者它本来就在），所以队列要等人工把这个 label 贴到某个 issue 上才有内容 —— 而且那个 issue 不能带别的 `nightme/*` label，否则它是被占用的，不入队。队列里有候选但全被跳过时（阻塞 / 已有分支 / 已有 PR）不出现这一行 —— 卡片上写的是它们各自被跳过的原因，贴 label 解决不了那些原因。
 
-**队列里的 issue 全被认领时**：认领中的 issue 仍然带着 `nightme/assigned`，只是被 `nightme/wip` 挡在候选之外。队列这时是空的，但空的**原因**不是没人贴标签。卡片因此说的是「N 个已认领的 issue 不参与挑选」，`attach it to an issue` 那一行不出现 —— 标签已经贴在 issue 上了，再贴一个也换不来可选项。outcome 是 `failed`（`reason: no_candidate`）：命令被要求修一个 issue 却没能修，判成失败；`Data` 另外带 `wake_after: "5m"` 和 `candidates` / `claimed` / `blocked` / `branch_exists` / `pr_open` 五个计数。`wake_after` 是个人 agent 读的契约：它告诉 agent 过一会儿再来挑一次，而不是把这一轮当作结束。
+**队列里的 issue 全被占用时**：被占用的 issue 仍然带着 `nightme/assigned`，只是被 `nightme/wip` / `nightme/ready` 这类状态 label 挡在候选之外。队列这时是空的，但空的**原因**不是没人贴标签。卡片因此说的是「N 个被占用的 issue 不参与挑选」，`attach it to an issue` 那一行不出现 —— 标签已经贴在 issue 上了，再贴一个也换不来可选项。outcome 是 `failed`（`reason: no_candidate`）：命令被要求修一个 issue 却没能修，判成失败；`Data` 另外带 `wake_after: "5m"` 和 `candidates` / `held` / `blocked` / `branch_exists` / `pr_open` 五个计数。`wake_after` 是个人 agent 读的契约：它告诉 agent 过一会儿再来挑一次，而不是把这一轮当作结束。
 
 ---
 
@@ -192,8 +194,8 @@ flowchart TD
     B -->|ok| C["DeriveBranch"]
     C --> D{BranchExists?}
     D -->|yes| E["❌ branch already exists"]
-    D -->|no| G{issue 带 nightme/wip?}
-    G -->|yes| H["❌ issue already claimed"]
+    D -->|no| G{issue 带 nightme/* 状态 label?}
+    G -->|yes| H["❌ issue 被别的 agent 占用"]
     G -->|no| F["PreflightWorktreeCreate"]
     F --> I["RefreshDefaultBranch"]
     I --> J["WorktreeAdd"]
@@ -206,7 +208,7 @@ flowchart TD
     O --> Q["agent 直接改代码"]
 ```
 
-dispatch 之前的步骤顺序：label catalog 检查 → 队列挑选（自动模式）→ GetIssue → preflight → RefreshDefaultBranch → WorktreeAdd → AddIssueLabel → WriteGTWYml → success card。分支冲突（§3.1）与 claim（§3.2）都在 worktree 之前硬失败，不产生任何副作用。
+dispatch 之前的步骤顺序：label catalog 检查 → 队列挑选（自动模式）→ GetIssue → preflight → RefreshDefaultBranch → WorktreeAdd → AddIssueLabel → WriteGTWYml → success card。分支冲突（§3.1）与占用（§3.2）都在 worktree 之前硬失败，不产生任何副作用。
 
 ### 3.0 label catalog 检查（§5.2.①）
 
@@ -245,9 +247,9 @@ Local 模式（`/gtw fix --name`）同样：branch 存在即失败，无决策�
 
 **保留**：`WorktreeFailChoice` / `DraftFixWorktreeFail`（`git worktree add` 失败仍可 🔄 重试 / ❌ 取消）。
 
-### 3.2 Issue 已被认领（`nightme/wip`）：硬失败
+### 3.2 Issue 被别的 agent 占用：硬失败
 
-`nightme/wip` 是 gtw 的 claim 标记：`/gtw fix` 贴上，之后没有人摘掉。远端模式取到 issue 时若该 label 已存在，说明这个 issue 已被认领（本机或另一台机器），本次 `/gtw fix` 直接拒绝。
+`nightme/wip` 是 gtw 的 claim 标记：`/gtw fix` 贴上，`/gtw pr --ready` 在 PR 出现后把它摘掉换成 `nightme/ready`（见 §3.3），`/gtw close` 不碰它。远端模式取到 issue 时若该 label 已存在，说明这个 issue 已被认领（本机或另一台机器），本次 `/gtw fix` 直接拒绝。
 
 **判定位置**：`BranchExists` 检查**之后**、任何副作用（preflight / refresh / worktree add / 贴 label / dispatch）**之前**。
 
@@ -258,23 +260,57 @@ Local 模式（`/gtw fix --name`）同样：branch 存在即失败，无决策�
 
 **label 匹配大小写不敏感**：GitHub / GitLab 的 label 名按大小写不敏感处理，手工建的 `Nightme/WIP` 与 `nightme/wip` 是同一个 label。
 
+**gate 覆盖所有状态 label，不只是 claim**：issue 带着 `nightme/` 命名空间里除 `nightme/assigned` 以外的 label（`nightme/wip`、`nightme/ready`、`nightme/revise`、`nightme/done` …）都说明别的 agent 正在做它，具名 fix 一律拒绝。判定由共享的 `heldLabel` 做（`internal/command/gtw/labels.go`），自动挑选的队列过滤和这里的 gate 用同一个判断，两条路径不会对「被占用」的定义漂移。claim 优先：issue 同时带 `nightme/wip` 和别的状态 label 时走 claim 拒绝 —— 它此刻正被一个 fix 持着，补救动作是拆掉那个 fix 的本地残留，或者在 issue 页面上摘 label。
+
+claim 保留自己的措辞：
+
 ```text
 ❌ Issue #42 is already claimed — label "nightme/wip" is present
-→ a fix claimed this issue; the claim marker is never removed
+→ a fix claimed this issue; the claim marker comes off with `/gtw pr --ready`
 ↳ to release it: remove the nightme/wip label on the issue page
 ↳ to tear down a live fix's worktree: /cwd into it and run `/gtw close`
 ```
 
 两条退出指引各自对应一种场景：
 
-- 解除 claim：在 issue 页面上删掉 `nightme/wip`。gtw 只加 label，不摘 label，所以这是唯一的解除路径。
+- 解除 claim：在 issue 页面上删掉 `nightme/wip`，或者用 `/gtw pr --ready` 开 PR —— 那一步把 claim 换成 `nightme/ready`（见 §3.3）。
 - 拆掉本地残留：那个 fix 还活着的时候，把 chat `/cwd` 进它的 worktree 再跑 `/gtw close` —— 它删掉 worktree + branch，从 `cs.SelectedCwd()` 读 `.nightme/gtw.yml` 作为唯一真相来源。fix 已经 close 掉的话，worktree 早就没了，只剩 label 要人工摘。
 
-**没有 `--force` 逃生舱**：`/gtw fix` 不接受 `--force` / `-f`（见 §2.2）。解除 claim 的路径（issue 页面删 label）明确存在。
+其它状态 label 用另一张卡 —— claim 的说法（「另一个 `/gtw fix` 持着它」）对它们不成立：
 
-**Local 模式不受影响**：`/gtw fix --name <branch>` 不接触 issue，没有 label 可读，也就没有 claim 可查——它不受这个 gate 约束。
+```text
+❌ Issue #42 is not available for a fix
+→ it carries the `nightme/ready` label — another agent is working on it
+↳ remove that label on the issue page to take the issue over
+```
 
-### 3.3 gtw 职责边界（dispatch 之后）
+两种拒绝都带 `Data["label"]`（挡住这次 fix 的那个 label）；`reason` 分别是 `issue_claimed` 与 `issue_in_state`（见 [docs/me.md](../../docs/me.md) §7.1）。
+
+**具名 fix 不要求 `nightme/assigned`**：点名 issue 本身就是手动分派，替代队列标记。所以没有 label 的 issue 具名 fix 照做（自动挑选不认它 —— 没有队列标记就不在队列里）。
+
+**没有 `--force` 逃生舱**：`/gtw fix` 不接受 `--force` / `-f`（见 §2.2）。解除占用的路径（issue 页面摘 label，或 `/gtw pr --ready` 把 claim 换成 `nightme/ready`）明确存在。
+
+**Local 模式不受影响**：`/gtw fix --name <branch>` 不接触 issue，没有 label 可读，也就没有占用可查——它不受这个 gate 约束。
+
+### 3.3 `/gtw pr --ready`：把 issue 挪到 `nightme/ready`
+
+`nightme/*` 的 label 是 gtw 的状态机：`nightme/assigned` 是入队标记，`nightme/wip` 是「fix 持有着它」，`nightme/ready` 是「等 review」，`nightme/reviewing` / `nightme/revise` / `nightme/done` / `nightme/stuck` 是 review 之后的状态。
+
+`/gtw pr --ready` 把关联 issue 从 `nightme/wip` 挪到 `nightme/ready`：PR 出现了，活就不再是「进行中」，而是「等 review」。
+
+**触发时机**：PR 存在之后 —— 这次开出来的，这个分支上早就开着的，以及 gate 2 与 CreatePR 之间的竞态窗口（`CreatePR` 报 PR 已存在，说明 PR 确实开着）。没有 PR 的路径一律不做（PR 没开成时不动 label）。
+
+**顺序**：先加 `nightme/ready`，再摘 `nightme/wip`。两步之间失败，issue 还带着 `nightme/wip` —— 仍然是「被占用」的状态，两条 fix 路径都不会碰它。反过来（先摘后加）失败会留下一个什么状态 label 都没有的 issue，看起来像没人做它。加失败时跳过摘除，理由同上。
+
+**只动两个 label**：加 `nightme/ready`，摘 `nightme/wip`，不碰 `nightme/assigned`。
+
+**这是 gtw 唯一摘 label 的地方**：队列标记 `nightme/assigned` 永远留在 issue 上，`/gtw fix` 和 `/gtw close` 都不摘任何 label。
+
+**失败只警告**：PR 已经开出来了，label 是记账。label 调用失败时卡片上带一行 `⚠️`，命令的结论不变。worktree 没有关联 issue（`issue <= 0`）时也带一行 `⚠️`，说明没有 label 可改。
+
+`/gtw close` 一个 label 都不碰 —— `nightme/wip` 和 `nightme/ready` 都留着。PR 通常还开着，「等 review」这件事仍然成立。
+
+### 3.4 gtw 职责边界（dispatch 之后）
 
 ```
 gtw                          agent + user chat
@@ -824,9 +860,10 @@ label catalog 检查在 worktree 创建之前跑，所以 `rollbackLabelStep` �
 9. **未知 flag（`--dry-run` / `--foo` / `-d` 等）** → 显式报错"unknown flag"（CLI 惯例）
 10. **arity 过多** → `--name foo extra` / `42 extra` 报错"exactly one argument"
 11. **空 argv / 只传 flag** → `parseFixArgs` 报错"missing argument"
-12. **自动模式** → 挑中最老的可选项；带 `nightme/wip` 的、blocker 未落地的、分支本地已存在的、PR 已开的一律跳过
+12. **自动模式** → 挑中最老的可选项；带 `nightme/assigned` 以外的 `nightme/*` label 的、blocker 未落地的、分支本地已存在的、PR 已开的一律跳过
 13. **关系不可用** → 选择继续按年龄，回复说明依赖顺序没有生效
 14. **队列为空** → `failed`（`reason: no_candidate`）+ `wake_after`，不建 worktree、不贴 label
+15. **具名 fix 撞上被占用的 issue** → `nightme/wip` 走 claim 拒绝（`issue_claimed`），其它状态 label 走「不可用」拒绝（`issue_in_state`），都带 `Data["label"]`，都不建 worktree
 
 ---
 
@@ -858,7 +895,7 @@ label catalog 检查在 worktree 创建之前跑，所以 `rollbackLabelStep` �
 | **依赖关系取自平台的关系图** | 机器可读的关系才让「先做前置」可靠；两个平台都提供；正文里的 `#12` 多数是「见 #12」或「Closes #12」，不是依赖 |
 | **blocker 只在 closed 时算已落地** | 前置的 PR 得先 merge，依赖项才建在它之上 |
 | **关系不可用要上报，不能当没有依赖** | 默默忽略依赖会挑错 issue；「平台不支持」和「没有依赖」是两回事 |
-| **claim 只加不摘** | 队列标记 `nightme/assigned` 留在 issue 上，tracker 上的记录不丢；队列过滤按 `nightme/wip` 排除认领中的 issue，一个标记就够 |
+| **队列标记只加不摘** | 队列标记 `nightme/assigned` 留在 issue 上，tracker 上的记录不丢；认领中的 issue 靠 `nightme/wip` 排除在候选之外，一个标记就够 |
 | **选择逻辑单独成文件** | `fix.go` 已经很大，选择是一个自洽的单元 |
 
 ---

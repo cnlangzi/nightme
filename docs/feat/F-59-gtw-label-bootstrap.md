@@ -323,7 +323,8 @@ resolve provider + owner/repo
 ```
 
 认领之后 issue 同时带 `nightme/assigned` 和 `nightme/wip` 两个
-label —— gtw 只加 label，从不摘。
+label —— 队列标记 gtw 从不摘。claim 本身只有在 `/gtw pr --ready`
+把 issue 挪到 `nightme/ready` 时才摘。
 
 label catalog 检查在 worktree 之前，所以它的失败不需要回滚 ——
 `rollbackLabelStep` 只覆盖 `AddIssueLabel` 这一步。
@@ -338,8 +339,8 @@ label catalog 检查在 worktree 之前，所以它的失败不需要回滚 —�
   队列要等人工把它贴到某个 issue 上才有内容。这一行**只在窗口里
   没有任何 issue 带队列标记时出现**：队列里有候选但全被跳过时，
   卡片上写的是它们各自被跳过的原因，"贴标签"解决不了那些原因；
-  队列里的 issue 全被认领（`nightme/wip`）时，标签是在用的，卡片
-  说的是「N 个已认领的 issue 不参与挑选」。
+  队列里的 issue 全被占用（带着别的 `nightme/*` 状态 label）时，
+  标签是在用的，卡片说的是「N 个被占用的 issue 不参与挑选」。
 - **贴 label 失败**：`❌ Could not add label <name> to issue #<id>:
   <err>` 后面补一行，说明 catalog 可能是验证之后被人改过，办法是
   重启 daemon 重新验证，或者手工建这个标签。这一行是一个**可能**

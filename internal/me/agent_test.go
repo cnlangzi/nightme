@@ -83,7 +83,7 @@ type emittedMessage struct {
 // fakeOperator is a scripted chat.
 //
 // The commands settle on their own unless a step says otherwise. The
-// questions the run asks and the /stop it speaks do not consume a
+// questions the run asks and the pause it announces do not consume a
 // scripted step: they are not steps of the workflow.
 type fakeOperator struct {
 	mu      sync.Mutex
@@ -530,10 +530,9 @@ func (f *fakeOperator) Has(text string) bool {
 }
 
 // isControlText reports whether the text is something the run says
-// outside a workflow step: a question, the /stop or the pause.
+// outside a workflow step: a question or the pause.
 func isControlText(text string) bool {
 	return strings.HasPrefix(text, "❓") ||
-		strings.HasPrefix(text, "/stop") ||
 		strings.HasPrefix(text, pauseMark)
 }
 
@@ -1445,26 +1444,22 @@ func TestPersist_HoldsTheProgressTheConversationAndTheHistory(t *testing.T) {
 	waitRun(t, svc, "obs-1")
 }
 
-// TestSetup_FailureEndsTheRunBeforeAnyStep — a chat that cannot
-// take the run's overview ends the run before a step executes.
-func TestSetup_FailureEndsTheRunBeforeAnyStep(t *testing.T) {
+// TestTheRunStartsWhenTheChatRefusesACard — the run posts no card of
+// its own when it starts: there is nothing to refuse before the run
+// does any work.
+func TestTheRunStartsWhenTheChatRefusesACard(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
 	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
 	op.failCard = true
 
-	_, err := svc.StartWorkflow(context.Background(), Request{
+	if _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
-	})
-	if err == nil {
-		t.Fatal("the run started with a chat that cannot show its overview")
+	}); err != nil {
+		t.Fatalf("the run did not start: %v", err)
 	}
-	for _, cmd := range op.Sent() {
-		if cmd == "/gtw commit" {
-			t.Fatalf("a step ran although the run could not start: %v", op.Sent())
-		}
-	}
+	waitRun(t, svc, "obs-1")
 }
 
 // TestStepKind_ShellRunsInTheWorkspace — a shell step runs its

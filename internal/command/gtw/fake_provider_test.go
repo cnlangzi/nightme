@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 )
 
@@ -13,8 +14,8 @@ import (
 // end-to-end without touching github.com / gitlab.com.
 //
 // Tests construct one via newFakeGitProvider(kind, host),
-// seed it via SetIssue / SetGetIssueErr / SetAddIssueLabelErr,
-// then wire the package-level fakeDetect
+// seed it via SetIssue / SetGetIssueErr / SetAddIssueLabelErr /
+// SetRemoveIssueLabelErr, then wire the package-level fakeDetect
 // into deps.Detect so runFixRemote's `detect(ctx, remoteURL,
 // prober)` returns it.
 //
@@ -54,8 +55,10 @@ type fakeGitProvider struct {
 	addBlockedByErr error
 	addBlockedByFn  func(id, blocker int) error
 
-	// Generic response for AddIssueLabel. Returning nil = success.
-	addIssueLabelErr error
+	// Generic response for AddIssueLabel / RemoveIssueLabel. Returning
+	// nil = success.
+	addIssueLabelErr    error
+	removeIssueLabelErr error
 
 	// Generic response for CreateLabel. Returning nil = success.
 	// Used by tests that simulate a label-create failure
@@ -120,11 +123,11 @@ type fakeGitProvider struct {
 // named after the interface method (one variant per interface
 // method) so tests can pattern-match cleanly.
 type fakeProviderCall struct {
-	Method string // "GetIssue" / "ListIssues" / "ListBlockedBy" / "AddBlockedBy" / "AddIssueLabel" / "CreatePR" / "GetPR" / "CreateLabel"
+	Method string // "GetIssue" / "ListIssues" / "ListBlockedBy" / "AddBlockedBy" / "AddIssueLabel" / "RemoveIssueLabel" / "CreatePR" / "GetPR" / "CreateLabel"
 	Owner  string
 	Repo   string
 	ID     int
-	Label  string // only set for AddIssueLabel / CreateLabel
+	Label  string // only set for AddIssueLabel / RemoveIssueLabel / CreateLabel
 	Head   string // only set for CreatePR / GetPR
 
 	// Blocker is only set for AddBlockedBy: the issue that
@@ -257,6 +260,14 @@ func (f *fakeGitProvider) SetAddIssueLabelErr(err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.addIssueLabelErr = err
+}
+
+// SetRemoveIssueLabelErr configures the response for all RemoveIssueLabel
+// calls.
+func (f *fakeGitProvider) SetRemoveIssueLabelErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.removeIssueLabelErr = err
 }
 
 // SetCreateLabelErr configures the response for all CreateLabel
@@ -563,6 +574,47 @@ func (f *fakeGitProvider) addLabelTo(id int, label string) {
 	}
 }
 
+// RemoveIssueLabel records the call and drops the label from the
+// stored issue, so a test can assert what the issue carries after a
+// state transition.
+func (f *fakeGitProvider) RemoveIssueLabel(_ context.Context, owner, repo string, id int, label string) error {
+	f.mu.Lock()
+	f.calls = append(f.calls, fakeProviderCall{
+		Method: "RemoveIssueLabel", Owner: owner, Repo: repo, ID: id, Label: label,
+	})
+	err := f.removeIssueLabelErr
+	if err == nil {
+		f.removeLabelFrom(id, label)
+	}
+	f.mu.Unlock()
+	return err
+}
+
+// removeLabelFrom drops `label` from the issue with the given id, in
+// the per-issue map and in the list response alike. Caller holds the
+// mutex.
+func (f *fakeGitProvider) removeLabelFrom(id int, label string) {
+	withoutLabel := func(iss *Issue) *Issue {
+		cp := *iss
+		kept := make([]string, 0, len(iss.Labels))
+		for _, l := range iss.Labels {
+			if !strings.EqualFold(l, label) {
+				kept = append(kept, l)
+			}
+		}
+		cp.Labels = kept
+		return &cp
+	}
+	if iss, ok := f.issueByID[id]; ok {
+		f.issueByID[id] = withoutLabel(iss)
+	}
+	for i, iss := range f.listIssues {
+		if iss != nil && iss.ID == id {
+			f.listIssues[i] = withoutLabel(iss)
+		}
+	}
+}
+
 // CreateLabel records the call and returns createLabelErr (nil
 // by default). Per-name overrides via SetCreateLabelErrFor win
 // over the generic createLabelErr — tests that simulate a
@@ -570,7 +622,7 @@ func (f *fakeGitProvider) addLabelTo(id int, label string) {
 // label; tests that simulate a blanket bootstrap failure use
 // SetCreateLabelErr.
 //
-// Mirrors the AddIssueLabel pattern so tests
+// Mirrors the AddIssueLabel / RemoveIssueLabel pattern so tests
 // can assert chronological ordering (e.g. all 6 CreateLabels
 // BEFORE AddIssueLabel) via CallsByMethod.
 func (f *fakeGitProvider) CreateLabel(_ context.Context, owner, repo, name, color, description string) error {

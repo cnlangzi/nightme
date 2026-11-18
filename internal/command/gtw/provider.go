@@ -346,6 +346,14 @@ type GitProvider interface {
 	// missing but actually present is created as a no-op.
 	ListLabels(ctx context.Context, owner, repo string) ([]string, error)
 
+	// RemoveIssueLabel removes `label` from the issue. Idempotent:
+	// removing an already-absent label is a no-op.
+	//
+	// The one place gtw removes a label: the state transition of
+	// `/gtw pr --ready`, which moves the linked issue from the claim
+	// to "waiting for review". The queue marker never comes off.
+	RemoveIssueLabel(ctx context.Context, owner, repo string, id int, label string) error
+
 	// CreatePR opens a pull request (GitHub) or merge request
 	// (GitLab). We keep the method name uniform across
 	// providers because the user-facing /gtw pr UX is identical
@@ -1624,6 +1632,19 @@ func (c *GitHubProvider) AddIssueLabel(ctx context.Context, owner, repo string, 
 	return nil
 }
 
+// RemoveIssueLabel runs `gh issue edit <id> --remove-label <label> --repo ...`.
+func (c *GitHubProvider) RemoveIssueLabel(ctx context.Context, owner, repo string, id int, label string) error {
+	_, stderr, err := c.runner().Run(ctx, "gh",
+		"issue", "edit", fmt.Sprintf("%d", id),
+		"--repo", owner+"/"+repo,
+		"--remove-label", label,
+	)
+	if err != nil {
+		return fmt.Errorf("gh issue edit --remove-label: %v: %s", err, stderr)
+	}
+	return nil
+}
+
 // CreateLabel runs `gh label create <name> --color <color>
 // --description <description> --repo <owner>/<repo>`. Idempotent:
 // gh creates the label if missing. When the label already exists,
@@ -2254,6 +2275,19 @@ func (c *GitLabProvider) AddIssueLabel(ctx context.Context, owner, repo string, 
 	)
 	if err != nil {
 		return fmt.Errorf("glab issue update --label: %v: %s", err, stderr)
+	}
+	return nil
+}
+
+// RemoveIssueLabel runs `glab issue update <id> --unlabel <label> --repo ...`.
+func (c *GitLabProvider) RemoveIssueLabel(ctx context.Context, owner, repo string, id int, label string) error {
+	_, stderr, err := c.runner().Run(ctx, "glab",
+		"issue", "update", fmt.Sprintf("%d", id),
+		"--repo", owner+"/"+repo,
+		"--unlabel", label,
+	)
+	if err != nil {
+		return fmt.Errorf("glab issue update --unlabel: %v: %s", err, stderr)
 	}
 	return nil
 }

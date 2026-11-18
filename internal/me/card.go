@@ -40,7 +40,7 @@ func (s *Service) speakQuestion(ctx context.Context, r *run, question string) (s
 	}
 	replyTo := ""
 	if sess := r.runSessionRef(); sess != nil {
-		replyTo = sess.cardID
+		replyTo = sess.anchor
 	}
 	return s.cfg.Operator.Ask(ctx, r.chatID, "❓ "+question, channel.SpeakOptions{
 		ReplyTo: replyTo,

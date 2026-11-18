@@ -193,8 +193,9 @@ func RunFix(
 //     (automatic mode: pick the assigned issue) → GetIssue.
 //  2. Branch name = DeriveBranchFromTitle(issue.Title, id).
 //  3. BranchExists? → hard-fail reply (F-XX §3.1; no card).
-//  4. Issue carries LabelWIP? → hard-fail reply (the issue is
-//     already claimed by another fix; no card, no side effect).
+//  4. Issue carries a state label other than LabelAssigned? →
+//     hard-fail reply (the issue is held by another agent; no
+//     card, no side effect).
 //  5. PreflightWorktreeCreate → catches path / branch / parent
 //     errors before WorktreeAdd.
 //  6. RefreshDefaultBranch → syncs the default branch so the
@@ -401,10 +402,11 @@ func runFixRemote(
 	}
 
 	// --- already-claimed gate -------------------------------------
-	// `nightme/wip` is the claim marker: /gtw fix stamps it on
-	// the issue and nothing lifts it again, so its presence at
-	// fetch time means the issue is claimed — by a fix on this
-	// machine or on another one.
+	// `nightme/wip` is the claim marker: /gtw fix stamps it on the
+	// issue, and only `/gtw pr --ready` lifts it again — by moving
+	// the issue to `nightme/ready`. Its presence at fetch time means
+	// the issue is claimed, by a fix on this machine or on another
+	// one.
 	//
 	// The gate sits AFTER the branch-exists check because that
 	// check owns the "you already own this locally" case. What
@@ -413,14 +415,29 @@ func runFixRemote(
 	//
 	// It sits BEFORE every mutation (preflight / refresh /
 	// worktree add), so a rejected run leaves nothing behind.
-	if issueHasLabel(issue, LabelWIP) {
+	//
+	// The gate covers every state label, not just the claim: an
+	// issue under review or already done is held by another agent
+	// too. The claim keeps its own wording and reason code; every
+	// other state gets the "not available" refusal.
+	if held := heldLabel(issue); held != "" {
+		if strings.EqualFold(held, LabelWIP) {
+			return replyOutcome(ctx, cs.Emitter(), chatID, messageID, fmt.Sprintf(
+				"❌ Issue #%d is already claimed — label %q is present\n"+
+					"→ a fix claimed this issue; the claim marker comes off with `/gtw pr --ready`\n"+
+					"↳ to release it: remove the %s label on the issue page\n"+
+					"↳ to tear down a live fix's worktree: /cwd into it and run `/gtw close`",
+				issueID, LabelWIP, LabelWIP),
+				command.FailedOutcomeData("issue_claimed", "the issue is already claimed by another fix",
+					map[string]string{"label": LabelWIP})), nil
+		}
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, fmt.Sprintf(
-			"❌ Issue #%d is already claimed — label %q is present\n"+
-				"→ a fix claimed this issue; the claim marker is never removed\n"+
-				"↳ to release it: remove the %s label on the issue page\n"+
-				"↳ to tear down a live fix's worktree: /cwd into it and run `/gtw close`",
-			issueID, LabelWIP, LabelWIP),
-			command.FailedOutcome("issue_claimed", "the issue is already claimed by another fix")), nil
+			"❌ Issue #%d is not available for a fix\n"+
+				"→ it carries the `%s` label — another agent is working on it\n"+
+				"↳ remove that label on the issue page to take the issue over",
+			issueID, held),
+			command.FailedOutcomeData("issue_in_state", "the issue is held in another state",
+				map[string]string{"label": held})), nil
 	}
 
 	// --- preflight (path / branch / parent) ----------------------

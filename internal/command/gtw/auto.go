@@ -19,8 +19,8 @@ import (
 // The backlog lives on the tracker, not in nightme: an issue that
 // nightme may work on carries the `nightme/assigned` label, which
 // a human or an external automation attaches. The queue is the open
-// issues carrying that label, minus the ones carrying
-// `nightme/wip` (a fix holds them already).
+// issues carrying that label and no other `nightme/*` label — any
+// other state label means another agent holds the issue already.
 //
 // The pick is the oldest eligible issue: no unlanded blocker, no
 // local branch of its own, no open pull request.
@@ -63,9 +63,9 @@ const (
 type autoCounters struct {
 	// Candidates is how many issues the queue held.
 	Candidates int
-	// Claimed is how many carried the queue marker but are claimed
-	// — a fix holds them, so they are not candidates.
-	Claimed int
+	// Held is how many carried the queue marker but are held by
+	// another agent — they are not candidates.
+	Held int
 	// Blocked is how many were skipped for an unlanded blocker.
 	Blocked int
 	// BranchExists is how many were skipped because their derived
@@ -125,8 +125,8 @@ func selectNextAssignedIssue(
 	if err != nil {
 		return nil, err
 	}
-	candidates, claimed := assignedCandidates(issues)
-	sel := &autoSelection{Counters: autoCounters{Candidates: len(candidates), Claimed: claimed}}
+	candidates, held := assignedCandidates(issues)
+	sel := &autoSelection{Counters: autoCounters{Candidates: len(candidates), Held: held}}
 
 	for _, c := range candidates {
 		if !sel.RelationsUnavailable {
@@ -183,18 +183,22 @@ func selectNextAssignedIssue(
 }
 
 // assignedCandidates filters the issue list down to the queue —
-// open issues carrying `nightme/assigned`, minus those carrying
-// `nightme/wip` — and orders them oldest first. Issues created at
-// the same instant are ordered by ascending issue number, so the
-// order is total and stable.
+// open issues carrying `nightme/assigned` and no other `nightme/*`
+// label — and orders them oldest first. Issues created at the same
+// instant are ordered by ascending issue number, so the order is
+// total and stable.
+//
+// The queue marker alone is what makes an issue available: any other
+// state label means another agent holds it (claimed, under review,
+// waiting for a revision, done).
 //
 // The second return value counts the issues that carry the queue
-// marker but are claimed. They are not candidates, but they are why
-// the queue can come up empty while the label is in use — and the
-// reply has to say that instead of claiming the label is absent.
+// marker but are held. They are not candidates, but they are why the
+// queue can come up empty while the label is in use — and the reply
+// has to say that instead of claiming the label is absent.
 func assignedCandidates(issues []*Issue) ([]*Issue, int) {
 	out := make([]*Issue, 0, len(issues))
-	claimed := 0
+	held := 0
 	for _, iss := range issues {
 		if iss == nil {
 			continue
@@ -202,8 +206,8 @@ func assignedCandidates(issues []*Issue) ([]*Issue, int) {
 		if !issueHasLabel(iss, LabelAssigned) {
 			continue
 		}
-		if issueHasLabel(iss, LabelWIP) {
-			claimed++
+		if heldLabel(iss) != "" {
+			held++
 			continue
 		}
 		out = append(out, iss)
@@ -214,7 +218,7 @@ func assignedCandidates(issues []*Issue) ([]*Issue, int) {
 		}
 		return cmp.Compare(a.ID, b.ID)
 	})
-	return out, claimed
+	return out, held
 }
 
 // unlandedBlockers returns the blockers that have not landed yet.
@@ -251,9 +255,12 @@ func blockerNumbers(blockers []*Issue) string {
 // the queue marker is in the repository's catalog, so the queue is
 // empty because nobody has attached it to an issue yet. It is
 // rendered only when no issue in the window carries the marker at
-// all — a queue whose issues are claimed, or whose candidates were
+// all — a queue whose issues are held, or whose candidates were
 // all passed over, has its own reasons, spelled out in the rows
 // above, and "attach the label to an issue" would not change that.
+//
+// The queue row says the same thing in the queue's own terms: the
+// candidate must carry the queue marker alone.
 //
 // The card reads like the outcome: the command was asked to fix an
 // issue and there was none to fix — a normal branch, nothing broke.
@@ -267,16 +274,16 @@ func renderAutoNoCandidate(sel *autoSelection, labelNote string) string {
 		rows = append(rows, [2]string{"queue", fmt.Sprintf(
 			"%d candidate(s) — %d blocked, %d with an existing branch, %d with an open pull request",
 			sel.Counters.Candidates, sel.Counters.Blocked, sel.Counters.BranchExists, sel.Counters.PROpen)})
-	case sel.Counters.Claimed > 0:
-		// The issues carry the queue marker and are claimed, so the
+	case sel.Counters.Held > 0:
+		// The issues carry the queue marker and are held, so the
 		// marker is in use — saying it is absent would send the user
 		// to attach a label that is already attached.
 		rows = append(rows, [2]string{"queue", fmt.Sprintf(
-			"empty — %d assigned issue(s) are claimed (`%s`) and are not offered",
-			sel.Counters.Claimed, LabelWIP)})
+			"empty — %d assigned issue(s) are held and are not offered",
+			sel.Counters.Held)})
 	default:
 		rows = append(rows, [2]string{"queue", fmt.Sprintf(
-			"empty — none of the %d oldest open issues carries the `%s` label",
+			"empty — none of the %d oldest open issues carries `%s` on its own",
 			listIssuesPerPage, LabelAssigned)})
 	}
 	for _, s := range sel.Skipped {
@@ -302,7 +309,7 @@ func renderAutoNoCandidate(sel *autoSelection, labelNote string) string {
 	for _, r := range rows {
 		fmt.Fprintf(&b, "→ %-*s %s\n", width, r[0]+":", r[1])
 	}
-	if labelNote != "" && sel.Counters.Candidates == 0 && sel.Counters.Claimed == 0 {
+	if labelNote != "" && sel.Counters.Candidates == 0 && sel.Counters.Held == 0 {
 		fmt.Fprintf(&b, "→ %s\n", labelNote)
 	}
 	fmt.Fprintf(&b, "↳ come back in %s for another pick.\n", autoWakeAfter)
@@ -321,7 +328,7 @@ func autoNoCandidateOutcome(sel *autoSelection) messages.Outcome {
 		map[string]string{
 			"wake_after":    autoWakeAfter,
 			"candidates":    strconv.Itoa(sel.Counters.Candidates),
-			"claimed":       strconv.Itoa(sel.Counters.Claimed),
+			"held":          strconv.Itoa(sel.Counters.Held),
 			"blocked":       strconv.Itoa(sel.Counters.Blocked),
 			"branch_exists": strconv.Itoa(sel.Counters.BranchExists),
 			"pr_open":       strconv.Itoa(sel.Counters.PROpen),

@@ -8,7 +8,7 @@
 //     the thread;
 //  3. the verdict line — what the run found, in one line, followed by
 //     the digest: the findings as one table per severity, one row per
-//     finding, holding where the finding is and what kind it is.
+//     finding, holding what kind of finding it is and where it is.
 //
 // The merged body is NOT one of them: it is the main agent's input,
 // not the channel's. The thread carries the findings; the card
@@ -362,7 +362,7 @@ func failedOutcomes(outcomes []reviewOutcome) []reviewOutcome {
 // two can never disagree.
 //
 // The digest is an index of the findings, not their prose: a row
-// names where the finding is and what kind it is. The finding's text
+// names what kind of finding it is and where it is. The finding's text
 // stays in the main agent's input, and reaches the reader through the
 // thread (/think on) or the main agent's answer (/think off), so the
 // card stays proportional to the number of findings.
@@ -420,7 +420,7 @@ func digestTables(findings []agent.ReviewFinding) []digestTable {
 	}
 	header := "| path |\n| --- |\n"
 	if hasCategory {
-		header = "| path | category |\n| --- | --- |\n"
+		header = "| category | path |\n| --- | --- |\n"
 	}
 	buckets := make(map[string][]agent.ReviewFinding, len(agent.SeverityOrder()))
 	for _, f := range findings {
@@ -441,14 +441,13 @@ func digestTables(findings []agent.ReviewFinding) []digestTable {
 	return tables
 }
 
-// digestRow renders one finding as a table row: where the finding is
-// and, when the run carries a category column, what kind it is.
+// digestRow renders one finding as a table row: its category, when the
+// run carries a category column, and its location.
 func digestRow(f agent.ReviewFinding, hasCategory bool) string {
-	row := "| " + digestPath(f) + " |"
 	if hasCategory {
-		row += " " + digestCategory(f) + " |"
+		return "| " + digestCategory(f) + " | " + digestPath(f) + " |\n"
 	}
-	return row + "\n"
+	return "| " + digestPath(f) + " |\n"
 }
 
 // digestFindings returns the run's findings in the order the digest

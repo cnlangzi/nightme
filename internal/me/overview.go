@@ -175,7 +175,7 @@ func roundsCount(rounds int) string {
 	return countText(rounds, "round")
 }
 
-// countText renders a count with its unit: "1 job", "3 rounds".
+// countText renders a count with its unit: "1 round", "3 chances".
 func countText(n int, unit string) string {
 	if n == 1 {
 		return fmt.Sprintf("%d %s", n, unit)

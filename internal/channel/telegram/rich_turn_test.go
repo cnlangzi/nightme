@@ -990,6 +990,34 @@ func TestRenderRichTurnTaskListBlocks_UsesTheSharedRow(t *testing.T) {
 	}
 }
 
+// TestRenderRichTurnTaskListBlocks_OverflowPlaceholder — the fallback
+// row is a row of the checklist: the list block stays well-formed.
+func TestRenderRichTurnTaskListBlocks_OverflowPlaceholder(t *testing.T) {
+	items := []taskListItem{{ID: "t1", Subject: strings.Repeat("x", 5000), Status: agent.TaskPending}}
+	blocks, ok := renderRichTurnTaskListBlocks(items)
+	if !ok {
+		t.Fatalf("expected ok=true")
+	}
+	var list map[string]any
+	for _, b := range blocks {
+		if b["type"] == "list" {
+			list = b
+		}
+	}
+	if list == nil {
+		t.Fatalf("no list block: %v", blocks)
+	}
+	rawItems, _ := list["items"].([]map[string]any)
+	if len(rawItems) != 1 {
+		t.Fatalf("the list holds %d items, want one", len(rawItems))
+	}
+	bs, _ := rawItems[0]["blocks"].([]map[string]any)
+	text, _ := bs[0]["text"].(string)
+	if text != "1. [ ] …" {
+		t.Errorf("the placeholder is %q, want %q", text, "1. [ ] …")
+	}
+}
+
 // TestRenderRichTurnTaskListBlocks_BudgetAccountsForSuffix pins
 // the budget accounting: the trailing " " + … suffix is 2 runes
 // (space + ellipsis), so the budget loop must reserve 2 — not 1 —

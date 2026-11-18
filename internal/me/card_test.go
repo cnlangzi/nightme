@@ -479,7 +479,7 @@ func TestTheDetailOfAStepIsCutShort(t *testing.T) {
 // row of its own. The values of the rows start at the same column.
 func TestTheRunCardIsRenderedAsArrowRows(t *testing.T) {
 	dir := t.TempDir()
-	writeWorkflow(t, dir, "two", twoJobWorkflow)
+	writeWorkflow(t, dir, "two", flowWorkflow)
 	svc, _ := testService(t, dir, noModels())
 	wf, ok := svc.catalog.Lookup("two")
 	if !ok {
@@ -663,9 +663,9 @@ func TestTheDetailOfAStepIsCutShortAfterTheBranchIsDropped(t *testing.T) {
 	}
 }
 
-// twoJobWorkflow is a workflow of two jobs: the first one holds two
+// flowWorkflow is a workflow of two jobs: the first one holds two
 // steps, the second one holds a single step.
-const twoJobWorkflow = `title: Two jobs.
+const flowWorkflow = `title: Two jobs.
 args:
   - name: id
     default: "1"

@@ -119,6 +119,18 @@ func TestFormatTaskList_KeepsTheOrderOfTheSender(t *testing.T) {
 	}
 }
 
+// TestFormatTaskList_OverflowPlaceholder — the fallback row is a row
+// of the checklist: the body stays a well-formed markdown list.
+func TestFormatTaskList_OverflowPlaceholder(t *testing.T) {
+	items := []agent.AgentTaskItem{
+		{ID: "1", Subject: strings.Repeat("x", 5000), Status: agent.TaskPending},
+	}
+	got := formatTaskList(items)
+	if !strings.HasSuffix(got, "1. [ ] …") {
+		t.Errorf("the placeholder is %q, want it to end with %q", got, "1. [ ] …")
+	}
+}
+
 // TestToolResultLine_ShowsTheSummaryVerbatim — the producer's verdict
 // is safe to show: it goes to the chat as it is, where the per-tool
 // heuristics would reduce the output to a byte count.

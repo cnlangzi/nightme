@@ -374,6 +374,16 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	return f.handleReview(ctx, rt, cs, input, spec, notices)
 }
 
+// threadShowsFindings reports whether the chat's /think lets the
+// review's findings reach the thread.
+//
+// The findings ride the thinking kind, and the gate drops that kind
+// while /think is off — the default. With the thread empty, the
+// agent's answer is the reader's only view of what the findings say.
+func threadShowsFindings(cs *chatsession.ChatSession) bool {
+	return cs != nil && cs.ThinkMode() != chatsession.ThinkModeHide
+}
+
 // handleReview starts a new review.
 //
 // Steps:
@@ -746,10 +756,14 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 		// reads it. The channel does NOT get it: the findings
 		// already reached the chat through the coalesced stream, and
 		// a second copy would say the same thing twice.
+		//
+		// The card's digest carries only the locations, so the
+		// agent's answer is where the findings' text reaches the
+		// reader when /think keeps the thread empty.
 		formatted := agent.FormatReviewMessage(workspace, runnerName, result.Text, result.Notes...)
 		blocks := []agent.ContentBlock{{
 			Type: agent.ContentText,
-			Text: formatted + reviewPromptFrame,
+			Text: formatted + reviewPromptFrame(threadShowsFindings(cs)),
 		}}
 
 		// The review itself succeeded. The outcome the consumer
@@ -1126,7 +1140,7 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 		formatted := agent.FormatReviewMessage(workspace, runnerName, result.Text, result.Notes...)
 		blocks := []agent.ContentBlock{{
 			Type: agent.ContentText,
-			Text: formatted + reviewPromptFrame,
+			Text: formatted + reviewPromptFrame(threadShowsFindings(cs)),
 		}}
 
 		// A continued group that failed again did not finish its

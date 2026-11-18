@@ -558,6 +558,27 @@ func TestSendVerdict_CarriesTheDigest(t *testing.T) {
 	}
 }
 
+// TestReviewPromptFrame_FollowsTheThinkMode: the frame asks the
+// agent to state the findings' substance when the thread carries
+// none, and to leave them alone when the thread already has them.
+//
+// The card's digest lists only the locations, so with /think off the
+// agent's answer is the reader's only view of what the findings say.
+func TestReviewPromptFrame_FollowsTheThinkMode(t *testing.T) {
+	shown := reviewPromptFrame(true)
+	if !strings.Contains(shown, "Do not restate the findings") {
+		t.Errorf("the frame lets the agent copy the findings the thread already carries:\n%s", shown)
+	}
+
+	hidden := reviewPromptFrame(false)
+	if strings.Contains(hidden, "Do not restate the findings") {
+		t.Errorf("the frame tells the agent to withhold the findings the chat no longer shows:\n%s", hidden)
+	}
+	if !strings.Contains(hidden, "what each of them says") {
+		t.Errorf("the frame does not ask for the findings' substance:\n%s", hidden)
+	}
+}
+
 // planReviewStarter is a fake starter that reports a plan and one
 // outcome per group — the way the real fan-out does — and returns a
 // merged text.
@@ -729,7 +750,7 @@ func waitForBlocks(t *testing.T, d *recordingDriver, n int) []agent.ContentBlock
 // TestHandle_ReviewDeliversThePlanAndTheVerdict: the channel sees
 // the plan first and the verdict last, and never the merged body —
 // the merged text goes to the main agent's session instead, with the
-// instruction to answer with a verdict rather than restate it.
+// instruction to answer with a verdict and the next step.
 func TestHandle_ReviewDeliversThePlanAndTheVerdict(t *testing.T) {
 	agents := newTestAgents(t)
 	starter := &planReviewStarter{
@@ -791,6 +812,47 @@ func TestHandle_ReviewDeliversThePlanAndTheVerdict(t *testing.T) {
 	}
 	if !strings.Contains(injected, "verdict") {
 		t.Errorf("the injected turn does not ask for a verdict:\n%s", injected)
+	}
+}
+
+// TestHandle_ReviewFrameFollowsTheChat: the injected turn asks the
+// agent to state the findings when the chat's /think keeps the
+// thread empty, and to leave them alone when the thread has them.
+//
+// The card's digest lists only the locations — with /think off the
+// agent's answer is the reader's only view of what the findings say.
+func TestHandle_ReviewFrameFollowsTheChat(t *testing.T) {
+	agents := newTestAgents(t)
+	starter := &planReviewStarter{
+		name:   "review-frame-agent",
+		groups: []agent.ReviewPlanGroup{{Pattern: "**/*.go", Label: "**/*.go", Files: []string{"a.go"}}},
+		merged: "### Group: pattern **/*.go — files: a.go\n\nthe go findings\n\n",
+	}
+	agents.registry.Register(starter)
+
+	hiddenEmitter := newRecordingEmitter()
+	const hiddenChat = "review-frame-hidden-chat"
+	hiddenSession, hiddenDriver := newContinueChatSession(t, hiddenChat, starter.name, t.TempDir(), hiddenEmitter)
+
+	f := NewFactory()
+	dispatchContinue(t, f, hiddenSession, hiddenChat, "review")
+
+	hidden := waitForBlocks(t, hiddenDriver, 1)[0].Text
+	if !strings.Contains(hidden, "what each of them says") {
+		t.Errorf("the injected turn does not ask for the findings the chat does not show:\n%s", hidden)
+	}
+
+	shownEmitter := newRecordingEmitter()
+	const shownChat = "review-frame-shown-chat"
+	shownSession, shownDriver := newContinueChatSession(t, shownChat, starter.name, t.TempDir(), shownEmitter)
+	enableThink(t, shownSession)
+
+	shown := NewFactory()
+	dispatchContinue(t, shown, shownSession, shownChat, "review")
+
+	injected := waitForBlocks(t, shownDriver, 1)[0].Text
+	if !strings.Contains(injected, "Do not restate the findings") {
+		t.Errorf("the injected turn lets the agent copy the findings the thread already carries:\n%s", injected)
 	}
 }
 

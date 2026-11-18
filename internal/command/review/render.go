@@ -30,13 +30,26 @@ import (
 // reviewPromptFrame is the instruction appended to the review text
 // injected into the chat session's agent session.
 //
-// The findings already reached the chat through the thread. Without
-// this instruction the agent's answer becomes a third copy of them;
-// with it, the agent answers with a verdict and the next step.
-const reviewPromptFrame = "\n\n---\n\n" +
-	"Answer with a verdict and the next step: which findings block the merge, " +
-	"how severe they are, and what you would do next. Do not restate the " +
-	"findings — they are in this message and in the chat already."
+// The card's digest lists where the findings are, not what they say,
+// so the finding text reaches the reader in one of two places: the
+// thread, which the chat's /think decides, or the agent's answer.
+// With /think on the findings are already in the thread and the agent
+// must not copy them; with /think off — the default — the thread
+// carries nothing, and the agent's answer is the reader's only view
+// of what the findings say.
+func reviewPromptFrame(thinkShows bool) string {
+	if thinkShows {
+		return "\n\n---\n\n" +
+			"Answer with a verdict and the next step: which findings block the merge, " +
+			"how severe they are, and what you would do next. Do not restate the " +
+			"findings — they are in this message and in the chat already."
+	}
+	return "\n\n---\n\n" +
+		"Answer with a verdict and the next step: which findings block the merge, " +
+		"how severe they are, what each of them says, and what you would do next. " +
+		"The chat shows where the findings are, not what they say — state the ones " +
+		"that block the merge."
+}
 
 // renderPlanLine renders the plan of a review run: the runner, the
 // rule set the review ran against, the subagent count, and one entry
@@ -350,8 +363,9 @@ func failedOutcomes(outcomes []reviewOutcome) []reviewOutcome {
 //
 // The digest is an index of the findings, not their prose: a row
 // names where the finding is and what kind it is. The finding's text
-// stays in the thread and in the main agent's input, so the card
-// stays proportional to the number of findings.
+// stays in the main agent's input, and reaches the reader through the
+// thread (/think on) or the main agent's answer (/think off), so the
+// card stays proportional to the number of findings.
 //
 // A run with no findings produces no digest: the verdict message is
 // then the verdict line alone.
@@ -430,13 +444,11 @@ func digestTables(findings []agent.ReviewFinding) []digestTable {
 // digestRow renders one finding as a table row: where the finding is
 // and, when the run carries a category column, what kind it is.
 func digestRow(f agent.ReviewFinding, hasCategory bool) string {
-	var b strings.Builder
-	b.WriteString("| " + digestPath(f) + " |")
+	row := "| " + digestPath(f) + " |"
 	if hasCategory {
-		b.WriteString(" " + digestCategory(f) + " |")
+		row += " " + digestCategory(f) + " |"
 	}
-	b.WriteString("\n")
-	return b.String()
+	return row + "\n"
 }
 
 // digestFindings returns the run's findings in the order the digest
@@ -572,8 +584,8 @@ func planObserver(ctx context.Context, em messages.Emitter, collector *outcomeCo
 //
 // The message carries an index of the run's findings, not their
 // prose: the card stays proportional to the number of findings, and
-// the finding text stays in the thread and in the main agent's
-// input.
+// the finding text reaches the reader through the thread (/think on)
+// or the main agent's answer (/think off).
 func sendVerdict(ctx context.Context, em messages.Emitter, chatID, replyTo, runner string,
 	result agent.RunResult, outcomes []reviewOutcome, plan []agent.ReviewPlanGroup,
 ) {

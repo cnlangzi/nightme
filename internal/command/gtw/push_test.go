@@ -170,10 +170,12 @@ type recordingAgent struct {
 
 // runOnceReply is one scripted answer of the recording agent. The
 // Model is what the answer reports on the agent footer, so a test
-// can tell the attempts apart.
+// can tell the attempts apart; Err fails the call the way a real
+// agent fails when its context is done.
 type runOnceReply struct {
 	Text  string
 	Model string
+	Err   error
 }
 
 type runOnceCall struct {
@@ -207,6 +209,9 @@ func (r *recordingAgent) RunOnce(ctx context.Context, cfg agent.StartConfig, blo
 			i = n - 1
 		}
 		res = agent.RunResult{Text: r.runOnceReplies[i].Text, Model: r.runOnceReplies[i].Model}
+		if err := r.runOnceReplies[i].Err; err != nil {
+			return res, err
+		}
 	}
 	return res, r.runOnceErr
 }

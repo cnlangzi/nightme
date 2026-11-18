@@ -9,13 +9,11 @@ import (
 	"strings"
 	"syscall"
 	"testing"
-	"time"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/prcache"
-	"github.com/cnlangzi/nightme/internal/timeouts"
 )
 
 // -----------------------------------------------------------------------------
@@ -2208,15 +2206,71 @@ func TestDispatchPR_RetryOpensPRFromSecondReply(t *testing.T) {
 	if !strings.Contains(agentCalls[1].blocks[0].Text, "627-feat-cards-arrow-rows") {
 		t.Fatalf("the correction must quote the rejected reply")
 	}
-	// Each attempt carries its own budget: the retry is not bound by
-	// the deadline the first attempt ran into.
+	// Each attempt carries a deadline, and the retry's is never
+	// earlier than the first attempt's: the first attempt's expiry
+	// does not cancel the retry. The two attempts share the
+	// command's own wall clock (timeouts.Command, applied by
+	// Factory.Handle), so the retry is not guaranteed an agent
+	// budget of its own — but it is never cut short by the attempt
+	// it follows.
 	for i, c := range agentCalls {
 		if c.deadline.IsZero() {
 			t.Fatalf("attempt %d ran without a deadline", i)
 		}
-		if left := time.Until(c.deadline); left > timeouts.Agent || left < timeouts.Agent-time.Minute {
-			t.Fatalf("attempt %d budget = %v, want ~%v", i, left, timeouts.Agent)
-		}
+	}
+	if agentCalls[1].deadline.Before(agentCalls[0].deadline) {
+		t.Fatalf("the retry deadline %v is earlier than the first attempt's %v",
+			agentCalls[1].deadline, agentCalls[0].deadline)
+	}
+}
+
+// TestDispatchPR_RetryThatCannotRunReportsFormatFailure covers the
+// retry running into the command's own clock: the agent call dies,
+// and the user gets the format diagnosis — the reason the first
+// attempt was rejected — rather than a bare deadline error that
+// says nothing about the reply.
+func TestDispatchPR_RetryThatCannotRunReportsFormatFailure(t *testing.T) {
+	rig := newPRTestRig(t)
+	setupPRWorktree(t, rig, Context{Branch: "wt"})
+	setupPRGit(rig, "wt", 0)
+	rig.git.on("remote", "git@github.com:octocat/hello.git", "", nil)
+	rig.prov.SetCreatePRResp("https://github.com/octocat/hello/pull/7")
+	rig.agent.runOnceReplies = []runOnceReply{
+		{Text: "627-feat-cards-arrow-rows\n\n<function_calls>\n", Model: "model-1"},
+		{Err: context.DeadlineExceeded},
+	}
+	rig.installDeps()
+
+	cs := rig.cs
+	s := captureCh(t, cs)
+	work := cs.Hold("msg")
+	ctx := chatsession.WithWork(context.Background(), work)
+	if _, err := dispatchPR(ctx, cs, rig.deps, "chat", "msg", prArgs{}, Config{}); err != nil {
+		t.Fatalf("dispatchPR err: %v", err)
+	}
+	r := s.lastText()
+	if !strings.HasPrefix(r, "❌") {
+		t.Fatalf("expected a ❌ reply, got:\n%s", r)
+	}
+	if !strings.Contains(r, "is not in `<type>(<optional-scope>): <subject>` form") {
+		t.Fatalf("expected the title-format reason, got:\n%s", r)
+	}
+	if strings.Contains(r, "context deadline exceeded") {
+		t.Fatalf("the refusal must name the format, not the deadline:\n%s", r)
+	}
+	if calls := rig.prov.CallsByMethod("CreatePR"); len(calls) != 0 {
+		t.Fatalf("CreatePR calls = %d, want 0", len(calls))
+	}
+	work.Release()
+	out := settledOutcomeOf(s)
+	if out == nil {
+		t.Fatalf("no settled outcome: the command reported nothing")
+	}
+	if out.Data["format"] != prFormatTitleFormat {
+		t.Fatalf("outcome format = %q, want %q", out.Data["format"], prFormatTitleFormat)
+	}
+	if out.Data["attempts"] != "2" {
+		t.Fatalf("outcome attempts = %q, want 2", out.Data["attempts"])
 	}
 }
 

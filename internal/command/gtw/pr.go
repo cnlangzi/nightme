@@ -439,14 +439,21 @@ type prAgentRun struct {
 // passes the format gate, or the attempt budget runs out.
 //
 // At most two attempts: the first one, and one correction round
-// that names what was wrong with the first reply. Each attempt gets
-// its own timeouts.Agent budget, so an attempt that used up its
-// whole budget does not cancel the one that follows it.
+// that names what was wrong with the first reply.
 //
-// A failing agent call (no agent selected, the binary is missing,
-// the run crashed) is not a format problem: it returns right away
-// with the error, and the caller reports it as the agent error it
-// is.
+// Both attempts share the command's wall clock (timeouts.Command,
+// applied by Factory.Handle) and each is additionally capped at
+// timeouts.Agent. The retry never inherits the first attempt's
+// expiry — it runs on the command's context — but it is not
+// guaranteed an agent budget of its own: a first attempt that used
+// the command's clock up leaves the retry nothing to run on.
+//
+// A failing agent call is not a format problem. When the FIRST
+// attempt fails that way there is no reply to judge, and the caller
+// gets the agent error. When the RETRY fails that way, the format
+// failure of the first attempt is the diagnosis the user can act
+// on — it is what the refusal is about — so that is what the
+// refusal names.
 func runPRAgent(
 	ctx context.Context,
 	cs *chatsession.ChatSession,
@@ -468,10 +475,13 @@ func runPRAgent(
 		cancel()
 		out.Res = res
 		out.AgentName = name
+		out.Attempts++
 		if err != nil {
+			if out.Failure != nil {
+				return out, nil
+			}
 			return out, err
 		}
-		out.Attempts++
 		title, body, failure := checkPRReply(res.Text)
 		if failure == nil {
 			out.Title = title
@@ -799,10 +809,9 @@ func buildPRPrompt(c Context, base string, lang string) string {
 //     after the closing fence
 //   - multiple blank lines between the prose and the fence
 //
-// Returns errParseAgentReply when:
-//   - no opening fence found
-//   - no closing fence after the opening
-//   - fence is empty
+// Returns errParseAgentReply when the reply carries nothing that
+// can serve as a title — the reply is empty once the surrounding
+// noise is stripped.
 //
 // Title is trimmed of leading/trailing whitespace; body keeps
 // its interior layout (we only strip a single leading newline
@@ -1148,9 +1157,10 @@ func extractRiskLevel(body string) (level, reason string) {
 //     the title — that's exactly the production regression
 //     case.
 //  4. If no line matches the CC regex, fall back to the first
-//     non-empty line as title. Better to open a PR with a
-//     non-conforming title than to fail outright — the user
-//     can edit before merging.
+//     non-empty line as title. The fallback only decides WHICH
+//     line is the title — the format gate then judges it, and a
+//     title that does not carry the Conventional Commits shape is
+//     refused rather than opened.
 //
 // The classic fenced-block path is still preferred (cleaner
 // inputs produce the same result either way); this version
@@ -1225,7 +1235,8 @@ func parsePRReply(text string) (title, body string, err error) {
 	// Phase 2: fallback — first non-empty line is the title.
 	// Reaching here means the agent emitted something that doesn't
 	// even pretend to follow Conventional Commits. Take what we
-	// can get; the user can fix the title before merging.
+	// can get: the format gate judges it next, and a title it
+	// refuses is put back to the agent rather than opened.
 	if titleIdx == -1 {
 		for i, line := range lines {
 			if trimmed := strings.TrimSpace(line); trimmed != "" {

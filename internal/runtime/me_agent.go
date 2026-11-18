@@ -180,16 +180,5 @@ func (chatAgentSwitcher) SwitchAgent(chatID, agent string) (func(), error) {
 	if cs == nil {
 		return nil, fmt.Errorf("no chat session owns %q", chatID)
 	}
-	previous := cs.SelectedAgent()
-	if err := cs.SetSelectedAgentTransient(agent); err != nil {
-		return nil, err
-	}
-	return func() {
-		// The operator may have switched the chat's agent themselves
-		// while the attempt ran: their choice wins.
-		if cs.SelectedAgent() != agent {
-			return
-		}
-		_ = cs.SetSelectedAgentTransient(previous)
-	}, nil
+	return cs.SwitchAgentTransient(agent), nil
 }

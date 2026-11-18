@@ -618,15 +618,7 @@ func (s *Service) runStep(ctx context.Context, r *run, command string) (stepResu
 // attempts.
 func (s *Service) runStepChain(ctx context.Context, r *run, step wfe.Step, command string) (stepResult, error) {
 	job := wfe.JobOf(r.workflow, step.ID)
-	if err := checkArgsMessage(step, command); err != nil {
-		out := failedOutcome(err.Error(), nil)
-		r.record(wfe.ActionKindRun, command, step.ID, out)
-		r.recordStep(job, step, out)
-		s.recordStepOutcome(ctx, r)
-		return stepResult{}, toolErrorf("%s", err.Error())
-	}
-	attempts := s.composeAttempts(r, step, command)
-	verdict, res, err := s.runAttempts(ctx, r, job, step, attempts)
+	verdict, res, err := s.runMessage(ctx, r, job, step, command)
 	if err != nil {
 		return stepResult{}, err
 	}
@@ -637,8 +629,8 @@ func (s *Service) runStepChain(ctx context.Context, r *run, step wfe.Step, comma
 	r.recordStep(job, step, verdict.Outcome)
 	s.recordStepOutcome(ctx, r)
 	if verdict.Failure != nil {
-		// The chat could not take the command: the agent reads what
-		// went wrong and tries again.
+		// The attempt could not run: the agent reads what went wrong
+		// and tries again.
 		return stepResult{}, toolErrorf("%s", verdict.Failure.Error())
 	}
 	return res, nil

@@ -797,9 +797,9 @@ func expandWorkflowArgs(wf *Workflow, args map[string]string) {
 				step.Env[k] = expandArgs(v, args)
 			}
 			step.With = expandAnyMap(step.With, args)
-			for i := range step.Agents {
-				for j, name := range step.Agents[i].Names {
-					step.Agents[i].Names[j] = expandArgs(name, args)
+			for chain := range step.Agents {
+				for n, agent := range step.Agents[chain].Names {
+					step.Agents[chain].Names[n] = expandArgs(agent, args)
 				}
 			}
 		}

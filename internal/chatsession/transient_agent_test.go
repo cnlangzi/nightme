@@ -2,10 +2,10 @@ package chatsession
 
 import "testing"
 
-// TestSetSelectedAgentTransient_DoesNotWriteTheStore — the transient
+// TestSwitchAgentTransient_DoesNotWriteTheStore — the transient
 // switch lives in this process: the chat store keeps the agent the
 // operator picked.
-func TestSetSelectedAgentTransient_DoesNotWriteTheStore(t *testing.T) {
+func TestSwitchAgentTransient_DoesNotWriteTheStore(t *testing.T) {
 	csFile, asFile := newTestStores(t)
 	cs, _ := New("oc_xxx", "claude")
 	cs = cs.WithPersistence(csFile, asFile)
@@ -14,9 +14,7 @@ func TestSetSelectedAgentTransient_DoesNotWriteTheStore(t *testing.T) {
 		t.Fatalf("SetSelectedCwd: %v", err)
 	}
 
-	if err := cs.SetSelectedAgentTransient("omp"); err != nil {
-		t.Fatalf("SetSelectedAgentTransient: %v", err)
-	}
+	restore := cs.SwitchAgentTransient("omp")
 	if got := cs.SelectedAgent(); got != "omp" {
 		t.Errorf("SelectedAgent = %q, want omp", got)
 	}
@@ -27,12 +25,13 @@ func TestSetSelectedAgentTransient_DoesNotWriteTheStore(t *testing.T) {
 	if entry.SelectedAgent != "claude" {
 		t.Errorf("the chat store holds %q, want the agent the operator picked", entry.SelectedAgent)
 	}
+	restore()
 }
 
-// TestSetSelectedAgentTransient_DetachesTheAgentSession — the next
-// message mounts the session of the new agent, so the session of the
-// old one is detached.
-func TestSetSelectedAgentTransient_DetachesTheAgentSession(t *testing.T) {
+// TestSwitchAgentTransient_DetachesTheAgentSession — the next message
+// mounts the session of the new agent, so the session of the old one
+// is detached.
+func TestSwitchAgentTransient_DetachesTheAgentSession(t *testing.T) {
 	csFile, asFile := newTestStores(t)
 	cs, _ := New("oc_xxx", "claude")
 	cs = cs.WithPersistence(csFile, asFile)
@@ -48,9 +47,7 @@ func TestSetSelectedAgentTransient_DetachesTheAgentSession(t *testing.T) {
 		t.Fatal("no agent session is mounted")
 	}
 
-	if err := cs.SetSelectedAgentTransient("omp"); err != nil {
-		t.Fatalf("SetSelectedAgentTransient: %v", err)
-	}
+	cs.SwitchAgentTransient("omp")
 	if cs.selectedAS != nil {
 		t.Error("the session of the old agent is still mounted")
 	}
@@ -59,17 +56,80 @@ func TestSetSelectedAgentTransient_DetachesTheAgentSession(t *testing.T) {
 	}
 }
 
-// TestSetSelectedAgentTransient_AnEmptyNameClearsTheSelection — the
+// TestSwitchAgentTransient_AnEmptyNameClearsTheSelection — the
 // caller that switches back may have found no agent.
-func TestSetSelectedAgentTransient_AnEmptyNameClearsTheSelection(t *testing.T) {
+func TestSwitchAgentTransient_AnEmptyNameClearsTheSelection(t *testing.T) {
 	csFile, asFile := newTestStores(t)
 	cs, _ := New("oc_xxx", "claude")
 	cs = cs.WithPersistence(csFile, asFile)
 
-	if err := cs.SetSelectedAgentTransient(""); err != nil {
-		t.Fatalf("SetSelectedAgentTransient: %v", err)
-	}
+	cs.SwitchAgentTransient("")
 	if got := cs.SelectedAgent(); got != "" {
 		t.Errorf("SelectedAgent = %q, want none", got)
+	}
+}
+
+// TestSwitchAgentTransient_TheRestorePutsThePreviousAgentBack — the
+// switch lasts as long as the attempt.
+func TestSwitchAgentTransient_TheRestorePutsThePreviousAgentBack(t *testing.T) {
+	csFile, asFile := newTestStores(t)
+	cs, _ := New("oc_xxx", "claude")
+	cs = cs.WithPersistence(csFile, asFile)
+
+	restore := cs.SwitchAgentTransient("omp")
+	if got := cs.SelectedAgent(); got != "omp" {
+		t.Errorf("SelectedAgent = %q, want omp", got)
+	}
+	restore()
+	if got := cs.SelectedAgent(); got != "claude" {
+		t.Errorf("SelectedAgent = %q, want the agent the chat had before", got)
+	}
+}
+
+// TestSwitchAgentTransient_TheOperatorChoiceStands — an operator who
+// chose an agent while the attempt ran keeps their choice, even when
+// it is the agent the attempt works with.
+func TestSwitchAgentTransient_TheOperatorChoiceStands(t *testing.T) {
+	for _, agent := range []string{"codex", "omp"} {
+		t.Run(agent, func(t *testing.T) {
+			csFile, asFile := newTestStores(t)
+			cs, _ := New("oc_xxx", "claude")
+			cs = cs.WithPersistence(csFile, asFile)
+
+			restore := cs.SwitchAgentTransient("omp")
+			// The operator takes the chat back.
+			if err := cs.SetSelectedAgent(agent); err != nil {
+				t.Fatalf("SetSelectedAgent: %v", err)
+			}
+			restore()
+			if got := cs.SelectedAgent(); got != agent {
+				t.Errorf("SelectedAgent = %q, want the agent the operator chose", got)
+			}
+		})
+	}
+}
+
+// TestSwitchAgentTransient_TheOperatorChoiceIsPersisted — the chat
+// store holds the agent the chat had before the switch: the operator's
+// choice is written even when the chat already works with that agent.
+func TestSwitchAgentTransient_TheOperatorChoiceIsPersisted(t *testing.T) {
+	csFile, asFile := newTestStores(t)
+	cs, _ := New("oc_xxx", "claude")
+	cs = cs.WithPersistence(csFile, asFile)
+	if err := cs.SetSelectedCwd(testCwdBailing); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
+	}
+
+	// The run holds the chat with the agent the operator wants.
+	cs.SwitchAgentTransient("omp")
+	if err := cs.SetSelectedAgent("omp"); err != nil {
+		t.Fatalf("SetSelectedAgent: %v", err)
+	}
+	entry, ok := csFile.Get("oc_xxx")
+	if !ok {
+		t.Fatal("the chat store has no entry")
+	}
+	if entry.SelectedAgent != "omp" {
+		t.Errorf("the chat store holds %q, want the agent the operator chose", entry.SelectedAgent)
 	}
 }

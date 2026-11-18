@@ -21,8 +21,9 @@ type stepVerdict struct {
 	// Transcript is what the coding agent said, when the step talked
 	// to it.
 	Transcript string
-	// Failure is why the command could not be sent at all. It is
-	// empty when the command ran.
+	// Failure is why the attempt could not run at all: the chat could
+	// not take the command, or the attempt had no agent to work with.
+	// It is empty when the command ran.
 	Failure error
 }
 
@@ -67,18 +68,27 @@ func (s *Service) executeStep(ctx context.Context, r *run, job string, step wfe.
 // cannot go on by itself, so the agent decides what to do next.
 func (s *Service) executeMessage(ctx context.Context, r *run, job string, step wfe.Step) (stepVerdict, error) {
 	base := s.evalText(r, step.Message)
-	if err := checkArgsMessage(step, base); err != nil {
-		out := failedOutcome(err.Error(), nil)
-		r.record(wfe.ActionKindRun, base, step.ID, out)
-		s.refreshSessions(r)
-		return stepVerdict{Outcome: out, Settled: true}, nil
-	}
-	attempts := s.composeAttempts(r, step, base)
-	verdict, _, err := s.runAttempts(ctx, r, job, step, attempts)
+	verdict, _, err := s.runMessage(ctx, r, job, step, base)
 	if err != nil {
 		return stepVerdict{}, err
 	}
 	return verdict, nil
+}
+
+// runMessage runs a step's message and the chain of agents the step
+// names.
+//
+// The base is the text the attempts are built from: the step's own
+// message, or the command the decision model issued for it.
+func (s *Service) runMessage(ctx context.Context, r *run, job string, step wfe.Step, base string) (stepVerdict, stepResult, error) {
+	if err := checkArgsMessage(step, base); err != nil {
+		out := failedOutcome(err.Error(), nil)
+		r.record(wfe.ActionKindRun, base, step.ID, out)
+		s.refreshSessions(r)
+		return stepVerdict{Outcome: out, Settled: true, Failure: err}, stepResult{}, nil
+	}
+	attempts := s.composeAttempts(r, step, base)
+	return s.runAttempts(ctx, r, job, step, attempts)
 }
 
 // attempt is one run of a step's message with one agent.
@@ -163,14 +173,17 @@ func (s *Service) runAttempts(ctx context.Context, r *run, job string, step wfe.
 // The chat's agent is switched for the attempt when the attempt names
 // one, and the chat's own agent is put back when the attempt returns.
 func (s *Service) runAttempt(ctx context.Context, r *run, job string, step wfe.Step, a attempt) (stepVerdict, stepResult, error) {
+	if a.mode != "" && a.agent == "" {
+		// The name of the agent resolved to nothing: the attempt has
+		// no agent to work with, so it breaks.
+		err := fmt.Errorf("the step %q names an agent that resolved to nothing", step.ID)
+		return s.breakAttempt(r, step, a, err), stepResult{}, nil
+	}
 	restore, err := s.switchAgent(r, step, a)
 	if err != nil {
 		// The chat cannot work with that agent: the attempt breaks and
 		// the chain moves on.
-		out := failedOutcome(err.Error(), nil)
-		r.record(wfe.ActionKindRun, a.recorded, step.ID, out)
-		s.refreshSessions(r)
-		return stepVerdict{Outcome: out, Settled: true}, stepResult{}, nil
+		return s.breakAttempt(r, step, a, err), stepResult{}, nil
 	}
 	if restore != nil {
 		defer restore()
@@ -202,6 +215,18 @@ func (s *Service) runAttempt(ctx context.Context, r *run, job string, step wfe.S
 	}
 	r.record(wfe.ActionKindRun, a.recorded, step.ID, out)
 	return stepVerdict{Outcome: out, Settled: true, Transcript: res.Transcript}, res, nil
+}
+
+// breakAttempt records an attempt that could not run and returns its
+// verdict.
+//
+// The attempt breaks: the chain moves on to the next agent, and the
+// last attempt that broke is the step's outcome.
+func (s *Service) breakAttempt(r *run, step wfe.Step, a attempt, err error) stepVerdict {
+	out := failedOutcome(err.Error(), nil)
+	r.record(wfe.ActionKindRun, a.recorded, step.ID, out)
+	s.refreshSessions(r)
+	return stepVerdict{Outcome: out, Settled: true, Failure: err}
 }
 
 // switchAgent switches the chat's agent for the attempt.

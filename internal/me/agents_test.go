@@ -506,6 +506,92 @@ jobs:
 	}
 }
 
+// TestStepChain_ANameThatResolvesToNothingBreaksTheAttempt — the
+// agent of the attempt is known when the step runs: a name that
+// resolves to nothing leaves the attempt no agent to work with.
+func TestStepChain_ANameThatResolvesToNothingBreaksTheAttempt(t *testing.T) {
+	sw := &fakeSwitcher{current: "claude"}
+	svc, op := chainService(t, `title: chain
+jobs:
+  main:
+    steps:
+      - id: review
+        message: "/review"
+        agents:
+          - mode: use
+            names: ["${{ steps.gone.outputs.data.agent }}"]
+`, sw)
+	op.steps = []fakeStep{okStep("never")}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "chain", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	r := activeRun(t, svc, "obs-1")
+	waitRun(t, svc, "obs-1")
+
+	if sent := op.Sent(); len(sent) != 0 {
+		t.Errorf("the chat got %v, want no command", sent)
+	}
+	out, ok := stepOutcome(r, "review")
+	if !ok {
+		t.Fatal("the review step has no outcome")
+	}
+	if desc := out.Data[wfe.OutcomeKeyError]; !strings.Contains(desc, "resolved to nothing") {
+		t.Errorf("the step carries the error %q, want it to name the empty agent", desc)
+	}
+}
+
+// TestStepChain_AFailedSwitchComesBackToTheModel — the attempt could
+// not run: the model reads why.
+func TestStepChain_AFailedSwitchComesBackToTheModel(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "chain", `title: chain
+jobs:
+  main:
+    steps:
+      - id: commit
+        message: "/gtw commit"
+        agents:
+          - mode: use
+            names: [omp]
+`)
+
+	sw := &fakeSwitcher{err: errors.New("the chat session is gone")}
+	provider := &scriptedProvider{responses: []llm.Response{
+		{Message: toolCallMsg("c1", "ntm_gtw", map[string]any{"subcommand": "commit"})},
+		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "failed", "summary": "stopped"})},
+	}}
+	svc, op := testService(t, dir, Config{Provider: provider, AgentSwitcher: sw})
+	sw.watch(op)
+	op.steps = []fakeStep{okStep("never")}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "chain", ChatID: "obs-1", Cwd: "/tmp/work",
+		Commands: []CommandInfo{{Name: "gtw", Subcommands: []CommandInfo{{Name: "commit"}}}},
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitRun(t, svc, "obs-1")
+
+	req := provider.Request(1)
+	found := false
+	for _, m := range req.Messages {
+		if m.Role != llm.RoleTool {
+			continue
+		}
+		for _, p := range m.Parts {
+			if strings.Contains(p.Text, "the chat session is gone") {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("the reason the attempt broke did not come back to the model")
+	}
+}
+
 // TestStepChain_EveryAttemptCostsAChance — an attempt is real work: it
 // costs a chance of the step's budget.
 func TestStepChain_EveryAttemptCostsAChance(t *testing.T) {

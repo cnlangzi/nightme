@@ -231,6 +231,12 @@ type ChatSession struct {
 	// no active session (ChatSession exists but no /cwd + /use yet).
 	selectedAS *AgentSession
 
+	// agentEpoch counts the choices the operator made of an agent.
+	//
+	// The transient switch of a run does not move it: the operator's
+	// choice is the truth a run has to yield to.
+	agentEpoch uint64
+
 	// Timestamps.
 	createdAt         time.Time
 	lastInteractionAt time.Time
@@ -659,10 +665,13 @@ func (cs *ChatSession) SetSelectedAgent(agent string) error {
 	cs.routeMu.Lock()
 	defer cs.routeMu.Unlock()
 
-	cs.mu.RLock()
+	cs.mu.Lock()
+	// The operator's choice is recorded even when the agent does not
+	// change: a run that switched the chat must not undo it.
+	cs.agentEpoch++
 	unchanged := cs.selectedAgent == agent
-	cs.mu.RUnlock()
-	if unchanged {
+	cs.mu.Unlock()
+	if unchanged && !cs.storeHoldsAnotherAgent(agent) {
 		return nil
 	}
 	if cs.csStore != nil {
@@ -703,16 +712,43 @@ func (cs *ChatSession) SetSelectedAgent(agent string) error {
 	return nil
 }
 
-// SetSelectedAgentTransient switches the active agent family without
+// SwitchAgentTransient switches the active agent family without
 // writing the chat store: the switch lives in this process only.
+//
+// It returns the function that puts the chat's previous agent back.
+// The function puts it back only when the operator has not chosen an
+// agent since: their choice is the persisted truth, and it wins over
+// the switch of the run.
 //
 // Unlike SetSelectedAgent it accepts an empty name, which clears the
 // selection — the caller that switches back may have found none.
-func (cs *ChatSession) SetSelectedAgentTransient(agent string) error {
+func (cs *ChatSession) SwitchAgentTransient(agent string) (restore func()) {
 	cs.routeMu.Lock()
 	defer cs.routeMu.Unlock()
 
 	cs.mu.Lock()
+	previous := cs.selectedAgent
+	epoch := cs.agentEpoch
+	cs.setAgentLocked(agent)
+	cs.mu.Unlock()
+
+	return func() {
+		cs.routeMu.Lock()
+		defer cs.routeMu.Unlock()
+
+		cs.mu.Lock()
+		defer cs.mu.Unlock()
+		if cs.agentEpoch != epoch {
+			// The operator chose an agent: their choice stands.
+			return
+		}
+		cs.setAgentLocked(previous)
+	}
+}
+
+// setAgentLocked switches the agent family and detaches the session
+// of the old one. The caller holds cs.mu.
+func (cs *ChatSession) setAgentLocked(agent string) {
 	if cs.selectedAgent != agent {
 		// The session of the old agent is detached: the next message
 		// mounts the session of the new one.
@@ -720,8 +756,23 @@ func (cs *ChatSession) SetSelectedAgentTransient(agent string) error {
 	}
 	cs.selectedAgent = agent
 	cs.lastInteractionAt = time.Now()
-	cs.mu.Unlock()
-	return nil
+}
+
+// storeHoldsAnotherAgent reports whether the chat store holds an agent
+// other than the one the chat works with.
+//
+// A run may hold the chat for the length of an attempt: the chat works
+// with an agent the store does not know yet. The operator's choice is
+// persisted even then.
+func (cs *ChatSession) storeHoldsAnotherAgent(agent string) bool {
+	if cs.csStore == nil {
+		return false
+	}
+	entry, ok := cs.csStore.Get(cs.ChatID)
+	if !ok {
+		return true
+	}
+	return entry.SelectedAgent != agent
 }
 
 // SelectedCwd returns the current active workspace.

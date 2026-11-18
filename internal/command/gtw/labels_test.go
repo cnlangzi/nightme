@@ -279,13 +279,20 @@ func TestLabelCatalogNote_SaysWhatTheQueueNeeds(t *testing.T) {
 }
 
 // TestPrependWarning pins the shared warning helper: an empty
-// warning leaves the body alone, a non-empty one leads the body.
+// warning leaves the body alone, a non-empty one leads the body, and
+// several warnings ride as one block in the order they are given.
 func TestPrependWarning(t *testing.T) {
-	if got := prependWarning("", "body"); got != "body" {
+	if got := prependWarning("body"); got != "body" {
 		t.Errorf("prependWarning with no warning = %q, want %q", got, "body")
 	}
-	if got := prependWarning("⚠️ boom", "body"); got != "⚠️ boom\nbody" {
+	if got := prependWarning("body", ""); got != "body" {
+		t.Errorf("prependWarning with an empty warning = %q, want %q", got, "body")
+	}
+	if got := prependWarning("body", "⚠️ boom"); got != "⚠️ boom\nbody" {
 		t.Errorf("prependWarning = %q, want %q", got, "⚠️ boom\nbody")
+	}
+	if got := prependWarning("body", "⚠️ one", "", "⚠️ two"); got != "⚠️ one\n⚠️ two\nbody" {
+		t.Errorf("prependWarning = %q, want %q", got, "⚠️ one\n⚠️ two\nbody")
 	}
 }
 

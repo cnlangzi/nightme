@@ -695,7 +695,7 @@ func TestBuildAgentPrompt_CarriesOutputLanguage(t *testing.T) {
 }
 
 func TestBuildPRPrompt_CarriesOutputLanguage(t *testing.T) {
-	p := buildPRPrompt(Context{Worktree: "/w", Branch: "x"}, "main", "简体中文")
+	p := buildPRPrompt(Context{Worktree: "/w", Branch: "x"}, "main", "简体中文", nil)
 	mustContain(t, p, "## Output language")
 	mustContain(t, p, "Write the PR title subject and the body prose in 简体中文.")
 	mustContain(t, p, "Keep these exactly in English, whatever the output language: the `## Summary by NightMe` heading, the category labels (`New Features:`, `Bug Fixes:`, `Enhancements:`, `Tests:`, `Documentation:`, `Chore / Build / CI:`), the `Risk: <low|medium|high> — <reason>` line, and the Conventional Commits type keyword.")
@@ -705,6 +705,21 @@ func TestBuildPRPrompt_CarriesOutputLanguage(t *testing.T) {
 	// The structural markers the wrapper parses must stay in the
 	// prompt unchanged.
 	mustContain(t, p, "Risk: <low|medium|high> — <concise reason>")
+}
+
+// TestBuildPRPrompt_DeviationLabelStaysEnglish: the deviation label
+// is a structural marker — it keeps its English spelling whatever
+// the output language, while the prose around it follows the
+// language.
+func TestBuildPRPrompt_DeviationLabelStaysEnglish(t *testing.T) {
+	p := buildPRPrompt(Context{Worktree: "/w", Branch: "x", Issue: 42}, "main", "简体中文",
+		&Issue{ID: 42, Title: "t", Body: "b"})
+	mustContain(t, p, "Write the PR title subject and the body prose in 简体中文.")
+	mustContain(t, p, "Deviations from Issue #42:")
+	mustContain(t, p, "`Deviations from Issue #<id>:`")
+	if strings.Contains(p, placeholderLanguage) {
+		t.Errorf("placeholder survived:\n%s", p)
+	}
 }
 
 func TestRenderNewIssuePrompt_CarriesOutputLanguage(t *testing.T) {
@@ -722,7 +737,7 @@ func TestRenderNewIssuePrompt_CarriesOutputLanguage(t *testing.T) {
 // between the language rule and extractRiskLevel: the Risk marker
 // the prompt asks for is the one the parser reads back.
 func TestPRPromptLanguage_KeepsRiskLineParseable(t *testing.T) {
-	p := buildPRPrompt(Context{Worktree: "/w", Branch: "x"}, "main", "简体中文")
+	p := buildPRPrompt(Context{Worktree: "/w", Branch: "x"}, "main", "简体中文", nil)
 	body := "## Summary by NightMe\n\n做了一些事情。\n\nRisk: low — 只是文档改动\n"
 	level, reason := extractRiskLevel(body)
 	if level != "low" {

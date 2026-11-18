@@ -104,7 +104,8 @@ repos:
 作用域取值 `repo scope` / `global scope` / `default`。
 
 语言只跟随**正文**:commit 的 subject 与 body、PR 标题的 subject、PR body 正文、
-issue body 正文。`## Summary by NightMe` 标题、PR 分类标签、
+issue body 正文。`## Summary by NightMe` 标题、PR 分类标签
+(含 `Deviations from Issue #<id>:`)、
 `Risk:` 行、`Issue: #<id>`、`Closes #N`、Conventional Commits 的 type 关键词、
 issue 草稿的小节标题一律保持英文 —— `Risk:` 被 `extractRiskLevel` 正则解析,
 issue 标题的 ASCII 是 `DeriveBranchFromTitle` 产出可读分支名的前提。
@@ -462,11 +463,17 @@ abc1234 fix(gtw): hooks output uses standard ✅ title
 
 ```
 ✅ PR opened
-→ branch:   fix-gtw-hooks
+→ branch:   42-fix-gtw-hooks
 → base:     main
 → url:      https://github.com/...
 → worktree: /Users/.../fix-gtw-hooks
+→ issue:    #42
 ```
+
+`→ issue:` 行只在 worktree 关联了 issue 时出现(`.nightme/gtw.yml` 的 `issue:`)。
+
+PR body 里的 `Deviations from Issue #42:` 分类说明实现与 issue 的差异;
+agent 没写这一节时,卡片上方会带一行 ⚠️ 提醒 reviewer 拿不到对比。
 
 ### 4.6 Format 1(`/gtw fix` — assess-first)
 

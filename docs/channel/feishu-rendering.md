@@ -1483,17 +1483,21 @@ No Channel interface, ChatSession, binding, registry, or receipt map API changes
 
 ### 5.1 Status mapping
 
-The Feishu receipt renders the task snapshot as a markdown list. Every row carries the marker of its state — one character between the brackets, so the status column has the same width on every row — and the detail of the row in a grey suffix. The rows keep the order the sender listed them in.
+The Feishu receipt renders the task snapshot as a markdown ordered list. The row text is the shared row of `agent.FormatTaskRow`: the number of the row, the marker of its state — one ASCII character between the brackets, so the status column has the same width on every row — the subject and the detail of the row in a grey suffix. The rows keep the order the sender listed them in.
 
-- `pending` — render as `- [ ] Subject`
-- `in_progress` — render as `- [>] Subject (ActiveForm)`
-- `completed` — render as `- [√] Subject (ActiveForm)`
-- `failed` — render as `- [!] Subject (ActiveForm)`
-- `cancelled` — render as `- [-] Subject (ActiveForm)`
-- `skipped` — render as `- [/] Subject (ActiveForm)`
+- `pending` — render as `1. [ ] Subject`
+- `in_progress` — render as `2. [>] Subject (ActiveForm)`
+- `completed` — render as `3. [v] Subject (ActiveForm)`
+- `failed` — render as `4. [!] Subject (ActiveForm)`
+- `skipped` — render as `5. [-] Subject (ActiveForm)`
+- `cancelled` — render as `6. [x] Subject (ActiveForm)`
 - `deleted` — bridge-only; the receipt MUST NOT render any row with this status (defensive filter in `buildTaskChecklistChunks`)
 
-The suffix `(ActiveForm)` is appended only when the field is non-empty. Feishu's `lark_md` parses the leading `[ ]` of a todo row as a checkbox, so the not-started row renders as a checkbox and the other rows as plain text.
+The suffix `(ActiveForm)` is appended only when the field is non-empty.
+
+No row starts with `- [`: Feishu's `lark_md` parses the leading `[ ]` of a todo row as a checkbox and then renders that row by other rules than the rest of the list. The rows are numbered list items instead, so every row is rendered by the same rules.
+
+The checklist has one shape in every channel: Telegram and Discord render the same row text. A change to `agent.FormatTaskRow` changes the checklist of every channel at once.
 
 ### 5.2 Capacity
 
@@ -2989,7 +2993,7 @@ Feishu receipt 在 + F-25 落地后已经形成完整 rolling-log 形态，但�
 
 ### 0.3 TaskList 没标题，视觉不清晰
 
-**现状**：`buildTaskChecklistChunks` 产出 `- [ ] Subject` `- [x] Subject` 直接挂在一堆 reply entries 后面，没 section header。
+**现状**：`buildTaskChecklistChunks` 产出 `1. [ ] Subject` `2. [v] Subject` 直接挂在一堆 reply entries 后面，没 section header。
 
 **问题**：当 TaskList 是 receipt 唯一内容（agent 只调 TaskCreate 不出 OutReply），用户看到一堆 checkbox 但没"这是什么"的语境。
 

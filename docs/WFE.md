@@ -856,23 +856,18 @@ The outcome of a step reaches the run state and the expressions of the steps aft
 The chat sees the outcome on the card of the session it belongs to — one
 message, patched in place. The card of the run is the overview of the run: it
 names the run, the workflow it works through and what the workflow is for, how
-big the run is, the arguments it was given and the jobs it has with the steps
-of each. It is published once and never changes. The footer of the card names
+big the run is, the arguments it was given and the flow of every job. It is
+published once and never changes. The footer of the card names
 the run, the model and the verdict the run reached:
 
 ```
 🧑‍💻: fix-issue-1752661200000000000
 **fix-issue** — Fix issue #42 and ship it as a PR.
-1 round · 1 job · 5 steps · started 14:03:22
-args:
- - id: 42
-jobs:
-  - main
-     - fix
-     - commit
-     - review
-     - push
-     - pr
+→ rounds:  1 round
+→ jobs:    1 · steps: 5
+→ started: 14:03:22
+→ args:    id=42
+→ main:    fix → commit → review → push → pr
 
 ---
 🤖: me · jev-1.14 · fix-issue-1752661200000000000 · fix-issue is complete
@@ -880,31 +875,47 @@ jobs:
 📁: code/nightme · ⎇ main · + 2 · ± 3 · − 1
 ```
 
+The body of the card is a flat flow. The facts of the run are arrow rows and
+every job is a row of its own, listing the ids of the steps the job runs. The
+values of the rows start at the same column: the key of a row — the colon
+included — is padded to the width of the longest key of the block.
+
+The `rounds` row carries the round count every job of the workflow shares. A
+workflow whose jobs declare different counts has no shared count: each job
+carries its own count at the end of its own row.
+
 The card of a round is the live state of the round: it names the run the
 round belongs to, lists the rounds that have finished, and shows every step of
 the round with the state it is in. The header carries the counters of the run:
 how many turns the chat model took, how many tool calls the run made and when
 it last did something.
 
-Every row of the checklist carries a marker of one character — `[ ]` not
-started, `[>]` running, `[√]` done, `[!]` failed, `[-]` cancelled, `[/]`
-skipped — and the detail of the row: what the step is doing, what it came to
-and how many chances it has left. A step that failed never reads like a step
-that has not started.
+Every row of the checklist is a numbered markdown list item — `1. [v] fix (the
+fix landed)` — and every marker is one ASCII character: `[ ]` not started,
+`[>]` running, `[v]` done, `[!]` failed, `[-]` skipped, `[x]` cancelled. The
+detail of the row says what the step came to and how many chances it has left.
+A step that failed never reads like a step that has not started.
+
+The row is the same row in every channel that renders a checklist: Feishu,
+Telegram and Discord all render the number, the marker, the subject and the
+detail of the row in the same way. The subject of a `/me` row is the id of the
+step, and its detail carries facts only — the summary of the outcome, the
+error description and the chances left. The branch the step worked on is not
+in the detail: the status bar of the card carries it.
 
 ```
 💭 8 · 🔧 6 · ⏱ 14:35:22
 
-Run: fix-issue-1752661200000000000 · 14:03:22
-|- round 1: main · 14:07:41
+→ run:     fix-issue-1752661200000000000 · 14:03:22
+→ round 1: main · 14:07:41
 🧑‍💻: main · round 2
 
 **📋 Tasks**
-- [√] /gtw fix 42 -y (ok: the fix landed)
-- [>] /gtw commit (running · 3 chances left)
-- [!] /gtw push (failed: the remote refused · 1 chance left)
-- [ ] /gtw pr
-- [/] /gtw back (skipped)
+1. [v] fix (the fix landed)
+2. [>] commit (3 chances left)
+3. [!] review (the review is incomplete · 1 chance left)
+4. [ ] push
+5. [-] pr
 
 ---
 🤖: me · jev-1.14 · main · round 2

@@ -697,9 +697,9 @@ func TestStop_StopsTheRun(t *testing.T) {
 	}
 }
 
-// TestStop_SaysTheSummaryIsOnItsWay — the reply tells the operator
-// that the summary of the session is coming.
-func TestStop_SaysTheSummaryIsOnItsWay(t *testing.T) {
+// TestStop_SaysTheRecordIsOnItsWay — the reply tells the operator
+// that the record of the session is coming.
+func TestStop_SaysTheRecordIsOnItsWay(t *testing.T) {
 	ctrl := &fakeController{}
 	cs := newSession(t, "me-8", "/tmp/work")
 
@@ -707,8 +707,8 @@ func TestStop_SaysTheSummaryIsOnItsWay(t *testing.T) {
 	if !strings.Contains(reply, "stopped") {
 		t.Fatalf("reply = %q, want the stop", reply)
 	}
-	if !strings.Contains(reply, "summary") {
-		t.Fatalf("reply = %q, want the summary", reply)
+	if !strings.Contains(reply, "record") {
+		t.Fatalf("reply = %q, want the record", reply)
 	}
 }
 

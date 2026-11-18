@@ -276,7 +276,7 @@ func (f *Factory) show(ctx context.Context, rt command.RuntimeServices, input co
 
 // stop stops the run of this chat.
 //
-// The summary of the session is on its way: the run posts it once it
+// The record of the session is on its way: the run posts it once it
 // has unwound.
 func (f *Factory) stop(ctx context.Context, rt command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
 	if err := f.ctrl.Stop(ctx, input.ChatID); err != nil {
@@ -287,7 +287,7 @@ func (f *Factory) stop(ctx context.Context, rt command.RuntimeServices, input co
 		Status:  messages.OutcomeOK,
 		Summary: "the run was stopped",
 	})
-	return command.Reply(ctx, rt, "⏹ The run was stopped — the summary is on its way."), nil
+	return command.Reply(ctx, rt, "⏹ The run was stopped — the record is on its way."), nil
 }
 
 // status reports where the run stands.

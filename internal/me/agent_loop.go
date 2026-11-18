@@ -73,19 +73,17 @@ func (s *Service) drive(ctx context.Context, r *run) {
 	s.closeRoundSession(ctx, r)
 	s.closeDecisionSession(ctx, r)
 	s.publishResult(context.WithoutCancel(r.ctx), r, r.runSessionRef(), r.runVerdict())
-	// The run is over: its state goes with it. The summary is built
-	// from the run's own record, so it does not need the file — and a
-	// file that outlives the run would be resumed by the next daemon.
+	// The session is over: the chat gets the record of it. The record
+	// is built here and not in the command, because the outcome of the
+	// step that was in flight is only known now that the run has
+	// unwound.
+	s.postRecord(r)
+	// The run is over: its state goes with it. The record holds what
+	// the run did, so it does not need the file — and a file that
+	// outlives the run would be resumed by the next daemon.
 	s.removeState(r.id)
-	if r.wasStoppedByOperator() {
-		// The session is over: the chat gets the record of it. The
-		// summary is built here and not in the command, because the
-		// outcome of the step that was in flight is only known now
-		// that the run has unwound.
-		s.postSummary(r)
-		// The card of the last iteration shows where the run ended.
-		s.refreshSessions(r)
-	}
+	// The card of the last iteration shows where the run ended.
+	s.refreshSessions(r)
 }
 
 // loop is the run's main cycle.

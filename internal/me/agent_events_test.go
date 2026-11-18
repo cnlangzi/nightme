@@ -301,7 +301,7 @@ func TestRun_PublishesEveryReplyOfTheDecision(t *testing.T) {
 	// The decision keeps every reply it got: the number of them is
 	// not capped.
 	r := &run{svc: svc, id: "one-1"}
-	r.setDecisionSession(&session{kind: sessionDecision, id: "decision-1", cardID: "card-9"})
+	r.setDecisionSession(&session{kind: sessionDecision, id: "decision-1", anchor: "card-9"})
 	for i := 0; i < 5; i++ {
 		svc.recordReply(context.Background(), r, fmt.Sprintf("reply %d", i))
 	}
@@ -427,7 +427,7 @@ func TestTheActivityOfTheRunSurvivesTheDaemon(t *testing.T) {
 	svc, op := testService(t, dir, Config{Provider: provider})
 	op.steps = []fakeStep{pendingStep("still going")}
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -449,13 +449,16 @@ func TestTheActivityOfTheRunSurvivesTheDaemon(t *testing.T) {
 	if state.LastBeatAt.IsZero() {
 		t.Error("the state file holds no time of the last activity")
 	}
-	if state.RunSession == nil || state.RunSession.CardID == "" {
-		t.Error("the state file holds no card of the run")
+	if state.RunSession == nil || state.RunSession.Anchor != "om_start" {
+		t.Errorf("the state file holds no anchor of the run: %+v", state.RunSession)
 	}
-	if state.RoundSession == nil || state.RoundSession.CardID == "" {
+	if state.RunSession.Owns {
+		t.Error("the run owns the message that started it")
+	}
+	if state.RoundSession == nil || state.RoundSession.Anchor == "" {
 		t.Error("the state file holds no card of the round")
 	}
-	if state.DecisionSession == nil || state.DecisionSession.CardID == "" {
+	if state.DecisionSession == nil || state.DecisionSession.Anchor == "" {
 		t.Error("the state file holds no card of the decision")
 	}
 
@@ -467,10 +470,13 @@ func TestTheActivityOfTheRunSurvivesTheDaemon(t *testing.T) {
 	if !restored.lastBeatAt.Equal(state.LastBeatAt) {
 		t.Errorf("the restored run stands at %v, want %v", restored.lastBeatAt, state.LastBeatAt)
 	}
-	if restored.runSessionRef() == nil || restored.runSessionRef().cardID != state.RunSession.CardID {
-		t.Error("the restored run lost the card of the run")
+	if restored.runSessionRef() == nil || restored.runSessionRef().anchor != state.RunSession.Anchor {
+		t.Error("the restored run lost the anchor of the run")
 	}
-	if restored.decisionSessionRef() == nil || restored.decisionSessionRef().cardID != state.DecisionSession.CardID {
+	if restored.runSessionRef().ownsMessage {
+		t.Error("the restored run owns the message that started it")
+	}
+	if restored.decisionSessionRef() == nil || restored.decisionSessionRef().anchor != state.DecisionSession.Anchor {
 		t.Error("the restored run lost the card of the decision")
 	}
 }
@@ -493,10 +499,10 @@ func TestTheCardFollowsTheSnapshotsOfTheCommand(t *testing.T) {
 		t.Fatalf("bind: %v", err)
 	}
 	r := newRun(svc, Request{Name: "one", ChatID: "obs-1", Cwd: "/tmp/work"}, bound, nil)
-	r.setRunSession(&session{kind: sessionRun, id: r.id, cardID: "card-1"})
+	r.setRunSession(&session{kind: sessionRun, id: r.id, anchor: "card-1"})
 	// The heartbeat rides on the card of the round: the card of the
 	// run is the static overview of the run.
-	r.setRoundSession(&session{kind: sessionRound, id: "main · round 1", job: "main", round: 1, cardID: "card-2"})
+	r.setRoundSession(&session{kind: sessionRound, id: "main · round 1", job: "main", round: 1, anchor: "card-2"})
 	t.Cleanup(r.cancel)
 
 	// The run watches the command it waits for.

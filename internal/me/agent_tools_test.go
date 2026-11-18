@@ -330,7 +330,7 @@ jobs:
 
 	// The step keeps the verdict it had: the checklist still shows it
 	// as the one that did not finish.
-	items := op.Checklist(op.Cards()[1].ID)
+	items := op.Checklist(op.Cards()[0].ID)
 	if len(items) == 0 {
 		t.Fatalf("the card of the round has no checklist")
 	}

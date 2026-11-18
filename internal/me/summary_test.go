@@ -40,7 +40,7 @@ func chatRun(t *testing.T, svc *Service, chatID string) *run {
 
 // waitDone waits until the run is over.
 //
-// The run is over when its goroutine is: the summary is posted before
+// The run is over when its goroutine is: the record is posted before
 // that, so a test that waits here sees the whole card.
 func waitDone(t *testing.T, r *run) {
 	t.Helper()
@@ -51,8 +51,8 @@ func waitDone(t *testing.T, r *run) {
 	}
 }
 
-// summaryCard returns the card the summary was posted as.
-func summaryCard(t *testing.T, op *fakeOperator) cardRecord {
+// recordCardOf returns the card the record was posted as.
+func recordCardOf(t *testing.T, op *fakeOperator) cardRecord {
 	t.Helper()
 	cards := op.Cards()
 	for i := len(cards) - 1; i >= 0; i-- {
@@ -60,18 +60,18 @@ func summaryCard(t *testing.T, op *fakeOperator) cardRecord {
 			return cards[i]
 		}
 	}
-	t.Fatalf("the run posted no summary card: %+v", cards)
+	t.Fatalf("the run posted no record card: %+v", cards)
 	return cardRecord{}
 }
 
-// summaryEntries returns the entries the summary card carries.
+// recordEntries returns the entries the record card carries.
 //
-// The summary is a card of its own: its content rides on the entries
-// of the session that posted it.
-func summaryEntries(t *testing.T, op *fakeOperator) []string {
+// The record is one entry: the whole body of the card is one reply,
+// not one reply per line.
+func recordEntries(t *testing.T, op *fakeOperator) []string {
 	t.Helper()
-	card := summaryCard(t, op)
-	out := make([]string, 0, 16)
+	card := recordCardOf(t, op)
+	out := make([]string, 0, 4)
 	for _, m := range op.EmittedOf(messages.OutReply) {
 		if m.ReplyTo == card.ID {
 			out = append(out, m.Text)
@@ -80,15 +80,15 @@ func summaryEntries(t *testing.T, op *fakeOperator) []string {
 	return out
 }
 
-// summaryBody renders the entries of the summary card as one body.
-func summaryBody(t *testing.T, op *fakeOperator) string {
+// recordBody renders the entries of the record card as one body.
+func recordBody(t *testing.T, op *fakeOperator) string {
 	t.Helper()
-	return strings.Join(summaryEntries(t, op), "\n")
+	return strings.Join(recordEntries(t, op), "\n")
 }
 
-// TestStop_PostsTheSummaryOfTheSession — the operator stops the run:
+// TestStop_PostsTheRecordOfTheSession — the operator stops the run:
 // the chat gets the record of the session.
-func TestStop_PostsTheSummaryOfTheSession(t *testing.T) {
+func TestStop_PostsTheRecordOfTheSession(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
@@ -119,29 +119,48 @@ func TestStop_PostsTheSummaryOfTheSession(t *testing.T) {
 	}
 	waitDone(t, r)
 
-	body := summaryBody(t, op)
-	for _, want := range []string{
-		"run: ",
-		"duration: ",
-		"actions: 1 (1 failed)",
-		"wake-ups: 1 (1 by the decision model)",
-		"steps: 1 ran · 0 not run",
-		"system-1: 1 decisions, 0 tokens",
-		"system-2: 0 decisions, 0 tokens",
-		"errors",
-		"· /gtw commit — failed: the issue is claimed by another run (reason: issue_claimed)",
-		"decisions",
-		"· the decision model — escalate (p=0.10)",
-	} {
-		if !strings.Contains(body, want) {
-			t.Errorf("the summary does not carry %q:\n%s", want, body)
+	body := recordBody(t, op)
+	card := recordCardOf(t, op)
+	// The card says what it is: the run is finishing.
+	if card.Body != "the run is finishing…" {
+		t.Errorf("the record card says %q, want the placeholder of the record", card.Body)
+	}
+	// The footer of the card carries the phase the run ended in.
+	var phase bool
+	for _, m := range op.EmittedOf(messages.OutResult) {
+		if m.ReplyTo == card.ID && m.Result == string(PhaseStopped) {
+			phase = true
 		}
 	}
-	// The summary is rendered from the run's own record: stopping a run
-	// asks no model, so the counters do not move.
-	if !strings.Contains(body, "system-1: 1 decisions, 0 tokens") ||
-		!strings.Contains(body, "system-2: 0 decisions, 0 tokens") {
-		t.Errorf("the summary does not carry the counters of the run:\n%s", body)
+	if !phase {
+		t.Errorf("the record card carries no phase in its footer: %v", op.EmittedOf(messages.OutResult))
+	}
+	for _, want := range []string{
+		"■ [ one ] stopped",
+		"duration: ",
+		"jobs:     main × 1",
+		"actions:  1 (1 failed)",
+		"steps:    1 ran · 0 not run",
+		"errors:",
+		"└─ [ ! ] /gtw commit — failed: the issue is claimed by another run (reason: issue_claimed)",
+		"decisions:",
+		"└─ the decision model — escalate (p=0.10)",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the record does not carry %q:\n%s", want, body)
+		}
+	}
+	// The record is one entry: one reply per line would render the
+	// card as a paragraph per line.
+	if entries := recordEntries(t, op); len(entries) != 1 {
+		t.Errorf("the record card carries %d entries, want the whole body in one: %v", len(entries), entries)
+	}
+	// The counters of the run ride in the tree of the rounds: a card
+	// that counts them a second time says two things about one number.
+	for _, unwanted := range []string{"wake-ups:", "system-1:", "system-2:", "tokens:"} {
+		if strings.Contains(body, unwanted) {
+			t.Errorf("the record carries a %q of its own:\n%s", unwanted, body)
+		}
 	}
 	if before.System1Decisions != 1 || before.System2Decisions != 0 {
 		t.Errorf("the run decided %d times with the decision model and %d times with the chat model, want 1 and 0",
@@ -151,6 +170,40 @@ func TestStop_PostsTheSummaryOfTheSession(t *testing.T) {
 	// the run would be resumed by the next daemon.
 	if _, err := os.Stat(filepath.Join(dir, "runs", r.id+".json")); !os.IsNotExist(err) {
 		t.Errorf("the state of the stopped run is still on disk: %v", err)
+	}
+}
+
+// TestTheRecordIsPostedWhenTheRunEndsOnItsOwn — a run that finishes
+// its workflow leaves a record too: the session is worth recording
+// however it ended.
+func TestTheRecordIsPostedWhenTheRunEndsOnItsOwn(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	svc, op := testService(t, dir, noModels())
+	op.steps = []fakeStep{okStep("the commit landed")}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitRun(t, svc, "obs-1")
+
+	body := recordBody(t, op)
+	for _, want := range []string{
+		"■ [ one ] done",
+		"actions:  1 (1 ok)",
+		"steps:    1 ran · 0 not run",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the record does not carry %q:\n%s", want, body)
+		}
+	}
+	// A run that went well has nothing to report about errors and
+	// decisions.
+	if strings.Contains(body, "\nerrors:") || strings.Contains(body, "\ndecisions:") {
+		t.Errorf("the record lists what did not happen:\n%s", body)
 	}
 }
 
@@ -193,9 +246,9 @@ func TestStop_EndsTheRunSessionWithItsPhase(t *testing.T) {
 	}
 }
 
-// TestTheSummaryComesAfterTheRunUnwinds — the step that was in flight
+// TestTheRecordComesAfterTheRunUnwinds — the step that was in flight
 // when the operator stopped the run counts as a step that did not run.
-func TestTheSummaryComesAfterTheRunUnwinds(t *testing.T) {
+func TestTheRecordComesAfterTheRunUnwinds(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", twoStepWorkflow)
 
@@ -218,21 +271,21 @@ func TestTheSummaryComesAfterTheRunUnwinds(t *testing.T) {
 	}
 	waitDone(t, r)
 
-	body := summaryBody(t, op)
+	body := recordBody(t, op)
 	for _, want := range []string{
-		"actions: 1 (1 ok)",
-		"steps: 1 ran · 1 not run",
+		"actions:  1 (1 ok)",
+		"steps:    1 ran · 1 not run",
 		"stopped while: /gtw commit",
 	} {
 		if !strings.Contains(body, want) {
-			t.Errorf("the summary does not carry %q:\n%s", want, body)
+			t.Errorf("the record does not carry %q:\n%s", want, body)
 		}
 	}
 }
 
-// TestTheSummaryListsOnlyTheActionsThatWentWrong — the actions that
+// TestTheRecordListsOnlyTheActionsThatWentWrong — the actions that
 // went well are counted, not listed.
-func TestTheSummaryListsOnlyTheActionsThatWentWrong(t *testing.T) {
+func TestTheRecordListsOnlyTheActionsThatWentWrong(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", twoStepWorkflow)
 
@@ -261,21 +314,21 @@ func TestTheSummaryListsOnlyTheActionsThatWentWrong(t *testing.T) {
 	}
 	waitDone(t, r)
 
-	body := summaryBody(t, op)
-	if !strings.Contains(body, "actions: 2 (1 ok · 1 failed)") {
-		t.Errorf("the summary does not count the actions:\n%s", body)
+	body := recordBody(t, op)
+	if !strings.Contains(body, "actions:  2 (1 ok · 1 failed)") {
+		t.Errorf("the record does not count the actions:\n%s", body)
 	}
 	if strings.Contains(body, "/gtw fix 1 -y —") {
-		t.Errorf("the summary lists an action that went well:\n%s", body)
+		t.Errorf("the record lists an action that went well:\n%s", body)
 	}
-	if !strings.Contains(body, "· /gtw commit — failed: the commit failed") {
-		t.Errorf("the summary does not list the action that failed:\n%s", body)
+	if !strings.Contains(body, "└─ [ ! ] /gtw commit — failed: the commit failed") {
+		t.Errorf("the record does not list the action that failed:\n%s", body)
 	}
 }
 
-// TestTheSummaryCapsTheErrorsAndTheDecisions — a long session keeps
+// TestTheRecordCapsTheErrorsAndTheDecisions — a long session keeps
 // the card readable; the totals stay in the facts.
-func TestTheSummaryCapsTheErrorsAndTheDecisions(t *testing.T) {
+func TestTheRecordCapsTheErrorsAndTheDecisions(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 	svc, _ := testService(t, dir, Config{})
@@ -309,32 +362,36 @@ func TestTheSummaryCapsTheErrorsAndTheDecisions(t *testing.T) {
 		})
 	}
 
-	body := strings.Join(r.summaryLines(), "\n")
+	body := r.recordCard()
 	for _, want := range []string{
-		"errors (last 5 of 6)",
-		"decisions (last 10 of 23)",
-		"actions: 6 (6 failed)",
-		"wake-ups: 23 (23 by the decision model)",
+		"errors (last 5 of 6):",
+		"decisions (last 10 of 23):",
+		"actions:  6 (6 failed)",
 	} {
 		if !strings.Contains(body, want) {
-			t.Errorf("the summary does not carry %q:\n%s", want, body)
+			t.Errorf("the record does not carry %q:\n%s", want, body)
 		}
 	}
-	if got := countLines(body, "· "); got != 15 {
-		t.Errorf("the summary lists %d lines, want 15", got)
+	// Five errors and ten decisions: four rows and nine rows carry the
+	// branch prefix, the last row of each block the last prefix.
+	if got := countLines(body, "├─ "); got != 13 {
+		t.Errorf("the record lists %d branch rows, want 13", got)
+	}
+	if got := countLines(body, "└─ "); got != 2 {
+		t.Errorf("the record lists %d last rows, want 2", got)
 	}
 
 	// A short session carries the plain headings.
 	r.policy.History = r.policy.History[:2]
 	r.wakes = r.wakes[:3]
-	body = strings.Join(r.summaryLines(), "\n")
-	for _, want := range []string{"\nerrors\n", "\ndecisions\n"} {
+	body = r.recordCard()
+	for _, want := range []string{"\nerrors:\n", "\ndecisions:\n"} {
 		if !strings.Contains(body, want) {
-			t.Errorf("the summary does not carry %q:\n%s", want, body)
+			t.Errorf("the record does not carry %q:\n%s", want, body)
 		}
 	}
 	if strings.Contains(body, "(last") {
-		t.Errorf("the summary counts a short session:\n%s", body)
+		t.Errorf("the record counts a short session:\n%s", body)
 	}
 }
 
@@ -350,9 +407,9 @@ func countLines(body, prefix string) int {
 	return n
 }
 
-// TestTheSummaryClipsItsRows — a card that carries a whole build log
+// TestTheRecordClipsItsRows — a card that carries a whole build log
 // is unreadable, and a card that is too long is refused.
-func TestTheSummaryClipsItsRows(t *testing.T) {
+func TestTheRecordClipsItsRows(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 	svc, _ := testService(t, dir, Config{})
@@ -386,16 +443,16 @@ func TestTheSummaryClipsItsRows(t *testing.T) {
 		Why:  strings.Repeat("because ", 100),
 	}}
 
-	body := strings.Join(r.summaryLines(), "\n")
+	body := r.recordCard()
 	for _, line := range strings.Split(body, "\n") {
 		if n := len([]rune(line)); n > maxSummaryLine {
-			t.Errorf("a line of the summary is %d runes long, want at most %d: %q", n, maxSummaryLine, line)
+			t.Errorf("a line of the record is %d runes long, want at most %d: %q", n, maxSummaryLine, line)
 		}
 	}
 	// The reason code is the machine-readable part of the row: the cut
 	// must not swallow it.
 	if !strings.Contains(body, "reason: agent_error") {
-		t.Errorf("the summary lost the reason code:\n%s", body)
+		t.Errorf("the record lost the reason code:\n%s", body)
 	}
 }
 
@@ -513,9 +570,9 @@ func TestTheWakeLogSurvivesTheDaemon(t *testing.T) {
 	}
 }
 
-// TestTheDaemonShutdownPostsNoSummary — the daemon is going away, not
+// TestTheDaemonShutdownPostsNoRecord — the daemon is going away, not
 // the run: the run keeps its state and resumes when it comes back.
-func TestTheDaemonShutdownPostsNoSummary(t *testing.T) {
+func TestTheDaemonShutdownPostsNoRecord(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
@@ -538,10 +595,5 @@ func TestTheDaemonShutdownPostsNoSummary(t *testing.T) {
 
 	if op.Posted() != before {
 		t.Errorf("the run posted %d cards after the shutdown, want none", op.Posted()-before)
-	}
-	for _, c := range op.Cards() {
-		if strings.HasSuffix(c.Title, " · stopped") {
-			t.Errorf("the run posted a summary card: %+v", c)
-		}
 	}
 }

@@ -59,13 +59,13 @@ func TestSystem2_ToolDispatch(t *testing.T) {
 		t.Fatalf("the chat got %v, want /gtw commit", sent)
 	}
 	var settled bool
-	for _, item := range op.Checklist(op.Cards()[1].ID) {
+	for _, item := range op.Checklist(op.Cards()[0].ID) {
 		if item.Subject == "commit" && item.Status == agent.TaskCompleted {
 			settled = true
 		}
 	}
 	if !settled {
-		t.Fatalf("the card of the round did not show the settled step: %+v", op.Checklist(op.Cards()[1].ID))
+		t.Fatalf("the card of the round did not show the settled step: %+v", op.Checklist(op.Cards()[0].ID))
 	}
 }
 
@@ -247,13 +247,13 @@ func TestSystem2_TextOnlyReplyKeepsTheRunGoing(t *testing.T) {
 		t.Fatalf("the run ended as %q, want it to keep going", phase)
 	}
 	var listed bool
-	for _, item := range op.Checklist(op.Cards()[1].ID) {
+	for _, item := range op.Checklist(op.Cards()[0].ID) {
 		if item.Subject == "commit" {
 			listed = true
 		}
 	}
 	if !listed {
-		t.Fatalf("the card of the round lost the step list: %+v", op.Checklist(op.Cards()[1].ID))
+		t.Fatalf("the card of the round lost the step list: %+v", op.Checklist(op.Cards()[0].ID))
 	}
 
 	// The words of the model stayed in the conversation, and the next
@@ -724,13 +724,13 @@ func TestIntegration_TheWorkflowRunsEndToEnd(t *testing.T) {
 	// The card of the round shows the steps and how they ended, and
 	// the run's card says how the run ended.
 	var steps bool
-	for _, item := range op.Checklist(op.Cards()[1].ID) {
+	for _, item := range op.Checklist(op.Cards()[0].ID) {
 		if item.Subject == "fix" {
 			steps = true
 		}
 	}
 	if !steps {
-		t.Fatalf("the card of the round never showed the step: %+v", op.Checklist(op.Cards()[1].ID))
+		t.Fatalf("the card of the round never showed the step: %+v", op.Checklist(op.Cards()[0].ID))
 	}
 	var done bool
 	for _, m := range op.EmittedOf(messages.OutResult) {

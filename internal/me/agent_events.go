@@ -46,9 +46,9 @@ const cardRefreshInterval = 5 * time.Second
 
 // emit publishes an outbound message for a session.
 //
-// The message hangs under the session's card: the card is the
+// The message hangs under the session's anchor: the anchor is the
 // session's state board, and the thread under it is the session's
-// live log. A session without a card publishes without an anchor, and
+// live log. A session without an anchor publishes without one, and
 // the chat falls back to its orphan handling.
 //
 // A message that does not reach the chat is reported and the run goes
@@ -59,7 +59,7 @@ func (s *Service) emit(ctx context.Context, r *run, sess *session, msg messages.
 	}
 	msg.ChatID = r.chatID
 	if sess != nil {
-		msg.ReplyTo = sess.cardID
+		msg.ReplyTo = sess.anchor
 		msg.SessionID = sess.id
 		msg.AgentName = meAgentName
 		msg.Model = r.modelName()

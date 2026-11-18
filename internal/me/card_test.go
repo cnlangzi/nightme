@@ -31,9 +31,10 @@ func sessionService(t *testing.T) (*Service, *fakeOperator) {
 	return testService(t, dir, noModels())
 }
 
-// TestTheRunCardHangsUnderTheMessageThatStartedTheRun — the run's card
-// answers the message the run was started with.
-func TestTheRunCardHangsUnderTheMessageThatStartedTheRun(t *testing.T) {
+// TestTheRunStartLeavesOneCard — the run writes into the card the
+// chat already holds for the message that started it: the plan is a
+// reply under that message, and the verdict lands on the same card.
+func TestTheRunStartLeavesOneCard(t *testing.T) {
 	svc, op := sessionService(t)
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
@@ -43,12 +44,34 @@ func TestTheRunCardHangsUnderTheMessageThatStartedTheRun(t *testing.T) {
 	}
 	waitRun(t, svc, "obs-1")
 
-	cards := op.Cards()
-	if len(cards) == 0 {
-		t.Fatal("the run published no card")
+	// The plan is a reply under the message that started the run.
+	var plan bool
+	for _, m := range op.EmittedOf(messages.OutReply) {
+		if m.ReplyTo == "om_start" && strings.Contains(m.Text, "▶ [ one ] started") {
+			plan = true
+		}
 	}
-	if cards[0].ReplyTo != "om_start" {
-		t.Errorf("the run card hangs under %q, want om_start", cards[0].ReplyTo)
+	if !plan {
+		t.Errorf("the plan does not hang under the message that started the run: %v", op.EmittedOf(messages.OutReply))
+	}
+	// The verdict of the run lands on the same card.
+	var verdict bool
+	for _, m := range op.EmittedOf(messages.OutResult) {
+		if m.ReplyTo == "om_start" {
+			verdict = true
+		}
+	}
+	if !verdict {
+		t.Errorf("the verdict of the run does not land on the card of the start message: %v",
+			op.EmittedOf(messages.OutResult))
+	}
+	// The run posts no card of its own for the plan.
+	for _, c := range op.Cards() {
+		for _, entry := range op.Entries(c.ID) {
+			if strings.Contains(entry, "▶ [ one ] started") {
+				t.Errorf("the run posted the plan as a card of its own: %+v", c)
+			}
+		}
 	}
 }
 
@@ -62,20 +85,17 @@ func TestTheRunCardCarriesThePlanOfTheRun(t *testing.T) {
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "fix", ChatID: "obs-1", Cwd: "/tmp/work", Args: []string{"issue=*"},
+		MessageID: "om_start",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	// The job of the workflow repeats until the run ends: the card is
+	// The job of the workflow repeats until the run ends: the plan is
 	// published when the run opens, and the run never ends.
 	waitEntry(t, op, "▶ [ fix ] started")
 
-	cards := op.Cards()
-	if len(cards) == 0 {
-		t.Fatal("the run published no card")
-	}
-	entries := op.Entries(cards[0].ID)
+	entries := op.Entries("om_start")
 	if len(entries) != 1 {
-		t.Fatalf("the card of the run carries %d entries, want the plan alone: %v", len(entries), entries)
+		t.Fatalf("the card of the start message carries %d entries, want the plan alone: %v", len(entries), entries)
 	}
 	card := entries[0]
 	for _, want := range []string{
@@ -98,13 +118,13 @@ func TestTheRunCardCarriesThePlanOfTheRun(t *testing.T) {
 		t.Errorf("the card of the run carries the id of the run: %q", card)
 	}
 	// The run publishes no checklist of its own.
-	if tasks := op.Checklist(cards[0].ID); len(tasks) != 0 {
+	if tasks := op.Checklist("om_start"); len(tasks) != 0 {
 		t.Errorf("the run published a checklist of its own: %+v", tasks)
 	}
 	// The counters of the run are on the card of the round: the card
 	// of the run is static.
 	for _, m := range op.EmittedOf(messages.OutHeartbeat) {
-		if m.ReplyTo == cards[0].ID {
+		if m.ReplyTo == "om_start" {
 			t.Errorf("the run card carries a heartbeat: %+v", m.Heartbeat)
 		}
 	}
@@ -137,10 +157,10 @@ func TestTheRoundCardCarriesTheTreeOfTheRounds(t *testing.T) {
 	waitRun(t, svc, "obs-1")
 
 	cards := op.Cards()
-	if len(cards) < 2 {
-		t.Fatalf("the run published %d cards, want the run card and the round card", len(cards))
+	if len(cards) < 1 {
+		t.Fatalf("the run published %d cards, want the card of the round", len(cards))
 	}
-	entries := op.Entries(cards[1].ID)
+	entries := op.Entries(cards[0].ID)
 	if len(entries) == 0 {
 		t.Fatal("the card of the round carries no entry")
 	}
@@ -152,12 +172,6 @@ func TestTheRoundCardCarriesTheTreeOfTheRounds(t *testing.T) {
 	for _, entry := range entries {
 		if strings.Contains(entry, "main · round 1") {
 			t.Errorf("the card of the round carries the identity of the round: %q", entry)
-		}
-	}
-	// The card of the run stays the plan it was.
-	for _, entry := range op.Entries(cards[0].ID) {
-		if strings.Contains(entry, "rounds:") {
-			t.Errorf("the card of the run carries the tree of the rounds: %q", entry)
 		}
 	}
 }
@@ -183,12 +197,13 @@ func TestTheRunCardHasNoButtons(t *testing.T) {
 
 // TestEveryEventOfASessionCarriesItsCard — the card of a session is
 // the anchor of its events: the chat renders the session onto that
-// card.
+// card. The run's own events hang under the message that started the
+// run: the chat folds them into the card it already holds.
 func TestEveryEventOfASessionCarriesItsCard(t *testing.T) {
 	svc, op := sessionService(t)
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -203,33 +218,36 @@ func TestEveryEventOfASessionCarriesItsCard(t *testing.T) {
 		t.Fatal("the run published no event")
 	}
 	for _, m := range emitted {
+		if m.ReplyTo == "om_start" {
+			continue
+		}
 		if !cards[m.ReplyTo] {
 			t.Fatalf("the event hangs under %q, want the card of its session", m.ReplyTo)
 		}
 	}
 }
 
-// TestTheRoundCardHangsUnderTheRunCard — the round is the run's work,
-// one level below it.
-func TestTheRoundCardHangsUnderTheRunCard(t *testing.T) {
+// TestTheRoundCardHangsUnderTheStartMessage — the round is the run's
+// work, one level below the message that started the run.
+func TestTheRoundCardHangsUnderTheStartMessage(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 	svc, op := testService(t, dir, noModels())
 	op.steps = []fakeStep{okStep("committed")}
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	waitRun(t, svc, "obs-1")
 
 	cards := op.Cards()
-	if len(cards) < 2 {
-		t.Fatalf("the run published %d cards, want the run card and the round card", len(cards))
+	if len(cards) < 1 {
+		t.Fatalf("the run published %d cards, want the card of the round", len(cards))
 	}
-	if cards[1].ReplyTo != cards[0].ID {
-		t.Errorf("the round card hangs under %q, want the run card %q", cards[1].ReplyTo, cards[0].ID)
+	if cards[0].ReplyTo != "om_start" {
+		t.Errorf("the round card hangs under %q, want the start message om_start", cards[0].ReplyTo)
 	}
 }
 
@@ -868,7 +886,7 @@ func TestTheStateOfTheRunDoesNotNameTheRoundThatEnded(t *testing.T) {
 	r := newRun(svc, Request{Name: "one", ChatID: "obs-1", Cwd: "/tmp/work"}, bound, nil)
 	t.Cleanup(r.cancel)
 
-	r.setRoundSession(&session{kind: sessionRound, id: "main · round 1", job: "main", round: 1, cardID: "card-1"})
+	r.setRoundSession(&session{kind: sessionRound, id: "main · round 1", job: "main", round: 1, anchor: "card-1"})
 	svc.closeRoundSession(context.Background(), r)
 	if r.roundSessionRef() != nil {
 		t.Error("the run still holds the round that ended")

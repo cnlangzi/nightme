@@ -26,29 +26,32 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 
+	"github.com/cnlangzi/nightme/internal/config"
 	nmerrors "github.com/cnlangzi/nightme/internal/errors"
+	"github.com/cnlangzi/nightme/internal/runtime"
 	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
 // workflowsDir returns the directory where workflow YAML files
-// live. Default: `$HOME/.nightme/workflows/`. Overridable via
-// $NIGHTME_WORKFLOWS_DIR for testing.
+// live: the workflows dir under the configured data dir — the same
+// directory the daemon reads its workflows from.
+//
+// $NIGHTME_WORKFLOWS_DIR overrides it, for testing.
 func workflowsDir() (string, error) {
 	if d := os.Getenv("NIGHTME_WORKFLOWS_DIR"); d != "" {
 		return d, nil
 	}
-	home, err := os.UserHomeDir()
+	cfg, err := config.Load(config.DefaultPath())
 	if err != nil {
-		return "", fmt.Errorf("resolve home: %w", err)
+		return "", err
 	}
-	return filepath.Join(home, ".nightme", "workflows"), nil
+	return runtime.WorkflowsDir(cfg)
 }
 
 // loadWorkflows loads all workflows from the workflows dir.
@@ -87,9 +90,11 @@ func newWorkflowListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List configured workflows",
-		Long: "list reads every *.yaml and *.yml in the workflows dir and " +
-			"prints a summary table. A workflow's name is the base name of " +
-			"its file. The files that did not load are reported below the " +
+		Long: "list reads every *.yaml and *.yml under the workflows dir " +
+			"and prints a summary table. A workflow's name is its path " +
+			"under the workflows dir without the extension: fix.yml is the " +
+			"workflow fix, nightme/coder.yml is the workflow nightme/coder. " +
+			"The files that did not load are reported below the " +
 			"table. The --json flag swaps the table for a JSON array (one " +
 			"element per workflow); the failures go to stderr, so the " +
 			"output stays machine-readable.",
@@ -217,8 +222,9 @@ func newWorkflowShowCmd() *cobra.Command {
 		Use:   "show <name>",
 		Short: "Show one workflow's parsed details",
 		Long: "show prints the full workflow details: triggers, jobs, steps, " +
-			"and effective agent resolution. The name is the base name of " +
-			"the workflow's file. The --json flag emits the raw parsed " +
+			"and effective agent resolution. The name is the path of the " +
+			"workflow's file under the workflows dir without the extension. " +
+			"The --json flag emits the raw parsed " +
 			"Workflow struct.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -442,7 +448,10 @@ func newWorkflowValidateCmd() *cobra.Command {
 			"workflow is valid prints nothing.\n\n" +
 			"With no argument it validates the workflows dir. With arguments " +
 			"it validates the files and the directories it is given; a " +
-			"directory contributes its *.yaml and *.yml files. The exit code " +
+			"directory contributes its *.yaml and *.yml files. An argument " +
+			"that is not a path on disk is looked up as a workflow name, so " +
+			"`nightme workflow validate nightme/coder` validates the file " +
+			"of that name. The exit code " +
 			"is 0 when every workflow is valid, 8 when a workflow does not " +
 			"validate, and 9 when a path does not exist or cannot be read.\n\n" +
 			"--json swaps the lines for a JSON array.",
@@ -464,12 +473,17 @@ func newWorkflowValidateCmd() *cobra.Command {
 // other paths: they are validated anyway, and the path that could
 // not be read wins the exit code — the command could not check what
 // it was asked to check.
+//
+// An argument that is not a path on disk is looked up as a workflow
+// name: the workflows directory holds the workflows, and a name is
+// the path of a workflow under it. An argument that is neither is
+// reported as a path that does not exist.
 func runWorkflowValidate(out io.Writer, errOut io.Writer, args []string, asJSON bool) error {
+	dir, dirErr := workflowsDir()
 	paths := args
 	if len(paths) == 0 {
-		dir, err := workflowsDir()
-		if err != nil {
-			return err
+		if dirErr != nil {
+			return dirErr
 		}
 		paths = []string{dir}
 	}
@@ -477,16 +491,41 @@ func runWorkflowValidate(out io.Writer, errOut io.Writer, args []string, asJSON 
 	unreadable := false
 	for _, path := range paths {
 		isDir, err := readablePath(path)
-		if err != nil {
+		if err == nil {
+			if isDir {
+				diags = append(diags, wfe.ValidateDir(path)...)
+				continue
+			}
+			diags = append(diags, wfe.ValidateFile(path)...)
+			continue
+		}
+		if !os.IsNotExist(err) {
+			// The path is there but cannot be read: that is a path the
+			// command could not check, not a workflow name.
 			fmt.Fprintf(errOut, "%s: %v\n", path, err)
 			unreadable = true
 			continue
 		}
-		if isDir {
-			diags = append(diags, wfe.ValidateDir(path)...)
+		// The argument is not a path on disk: it may be the name of a
+		// workflow in the workflows directory.
+		matched, nameErr := wfe.WorkflowPathsByName(dir, path)
+		if nameErr != nil || len(matched) == 0 {
+			fmt.Fprintf(errOut, "%s: %v\n", path, err)
+			unreadable = true
 			continue
 		}
-		diags = append(diags, wfe.ValidateFile(path)...)
+		for _, match := range matched {
+			diags = append(diags, wfe.ValidateFile(match)...)
+		}
+		if len(matched) > 1 {
+			// Two files claim the name: it is ambiguous, and neither
+			// file is the workflow of that name.
+			diags = append(diags, wfe.Diagnostic{
+				Path: matched[1],
+				Message: fmt.Sprintf("duplicate workflow name %q in %s and %s",
+					path, matched[0], matched[1]),
+			})
+		}
 	}
 	if asJSON {
 		if diags == nil {

@@ -74,6 +74,10 @@ type Deps struct {
 	// always provides one; a nil value means the deps were assembled
 	// without a runtime (tests).
 	Me MeController
+	// WorkflowsDir is the directory the workflows live in — the one
+	// the daemon reads. A command that writes a workflow installs it
+	// here, so the daemon finds it.
+	WorkflowsDir string
 }
 
 var (

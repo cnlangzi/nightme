@@ -18,9 +18,13 @@ import (
 	"github.com/cnlangzi/nightme/internal/config"
 )
 
-// workflowsDir returns <DataDir>/workflows — the directory the
+// WorkflowsDir returns <DataDir>/workflows — the directory the
 // workflow YAML files live in.
-func workflowsDir(cfg *config.Config) (string, error) {
+//
+// The daemon reads its workflows from here, and the CLI reads the
+// same directory: a workflow the operator installed is a workflow the
+// CLI can see.
+func WorkflowsDir(cfg *config.Config) (string, error) {
 	if cfg == nil || cfg.Paths.DataDir == "" {
 		return "", errors.New("cfg.Paths.DataDir is empty")
 	}

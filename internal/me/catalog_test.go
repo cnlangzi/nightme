@@ -11,18 +11,18 @@ import (
 // writeWorkflowFile writes a workflow file into a directory.
 func writeWorkflowFile(t *testing.T, dir, name, body string) string {
 	t.Helper()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	path := filepath.Join(dir, name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	path := filepath.Join(dir, name)
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
 	}
 	return path
 }
 
-// TestCatalog_TheNameIsTheFileName — a workflow's identity is the base
-// name of its file.
+// TestCatalog_TheNameIsTheFileName — a workflow's identity is the path
+// of its file under the workflows directory.
 func TestCatalog_TheNameIsTheFileName(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflowFile(t, dir, "fix.yml", "title: do the thing\njobs:\n  main:\n    steps: [{message: hi}]\n")
@@ -237,5 +237,47 @@ func TestCatalog_ADirectoryThatCannotBeRead(t *testing.T) {
 	}
 	if _, ok := c.Lookup("fix"); !ok {
 		t.Error("the catalogue forgot the workflow it held")
+	}
+}
+
+// TestCatalog_ResolvesANameUnderASubdirectory — the catalogue indexes
+// a workflow under the name of its path, so an installed workflow is
+// found by its address.
+func TestCatalog_ResolvesANameUnderASubdirectory(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflowFile(t, dir, filepath.Join("nightme", "coder.yml"),
+		"title: do the thing\njobs:\n  main:\n    steps: [{message: hi}]\n")
+
+	c := NewCatalog(dir)
+	if err := c.Refresh(); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	wf, ok := c.Lookup("nightme/coder")
+	if !ok {
+		t.Fatalf("the workflow was not found: %v", c.Names())
+	}
+	if wf.Name != "nightme/coder" {
+		t.Errorf("Name = %q, want nightme/coder", wf.Name)
+	}
+}
+
+// TestCatalog_ABrokenFileUnderASubdirectoryIsAFailureOfItsOwnName —
+// the name a broken file would have provided reports why it is
+// unusable.
+func TestCatalog_ABrokenFileUnderASubdirectoryIsAFailureOfItsOwnName(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflowFile(t, dir, filepath.Join("nightme", "broken.yml"),
+		"goal: no title\njobs:\n  main:\n    steps: [{message: hi}]\n")
+
+	c := NewCatalog(dir)
+	if err := c.Refresh(); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	failure, ok := c.Failure("nightme/broken")
+	if !ok {
+		t.Fatalf("the broken file carries no failure: %v", c.Failures())
+	}
+	if !strings.Contains(failure.Error(), "broken.yml") {
+		t.Errorf("failure = %v, want it to name the file", failure)
 	}
 }

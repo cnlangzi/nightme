@@ -15,7 +15,8 @@ The personal agent (`/me`) runs a workflow in a chat. The same file is the plan 
 ## Table of Contents
 
 - [1. File location & layout](#1-file-location--layout)
-  - [1.1 Checking a workflow](#11-checking-a-workflow)
+  - [1.1 Installing a workflow](#11-installing-a-workflow)
+  - [1.2 Checking a workflow](#12-checking-a-workflow)
 - [2. Top-level fields](#2-top-level-fields)
 - [3. Triggers (`on:`)](#3-triggers-on)
   - [3.1 `schedule`](#31-schedule)
@@ -57,14 +58,34 @@ Workflows are read from:
 ```
 ~/.nightme/workflows/*.yaml
 ~/.nightme/workflows/*.yml
+~/.nightme/workflows/<owner>/<name>.yml
 ```
 
-- One workflow per file; the file name without its extension is the workflow's name — `fix-issue.yaml` is the workflow `fix-issue`. Two files with the same base name make that name unusable.
+The directory is `<data_dir>/workflows` — `~/.nightme/workflows` with the default `data_dir`. The daemon and the `nightme workflow` CLI read the same directory.
+
+- One workflow per file; a workflow's name is its path under the workflows directory without the extension — `fix-issue.yaml` is the workflow `fix-issue`, `nightme/coder.yml` is the workflow `nightme/coder`. Two files that claim the same name make that name unusable.
+- The directory is read at any depth, except the reserved directories `actions` and `runs`.
 - The workflows are read when they are asked for: the daemon reads the directory at startup and again before every `/me start`. An edited file takes effect on the next `/me start`, without a restart. A file whose size and modification time did not change is not parsed again. The fingerprint is best-effort: a change that keeps the size and lands in the same modification-time tick is noticed when the daemon restarts.
 - A file that does not load stops only itself: the workflows beside it load and run as usual, and the failure is reported against the name the file would have provided.
 - The action scripts live in `~/.nightme/workflows/actions/`, and the run state in `~/.nightme/workflows/runs/`.
 
-### 1.1 Checking a workflow
+### 1.1 Installing a workflow
+
+`/wf install <owner>/<name>` fetches a published workflow and installs it:
+
+```
+/wf install nightme/coder
+```
+
+The workflow is written to `~/.nightme/workflows/nightme/coder.yml`, so its name keeps the address it was published with and `/me start nightme/coder` runs it. The install is shown as a checklist of three rows — the download, the validation, the write — and the rows update as the install goes.
+
+The file is fetched from the hub through three tiers, in order: GitHub, jsDelivr, jsdmirror. Every tier is probed before its file is fetched, so a tier that cannot be reached is skipped instead of costing a transfer timeout. The downloaded content is checked before it is written: a file that does not validate is not installed, and the workflow that is already there stays as it is. A file that is already installed and did not change is not rewritten.
+
+The address is `<owner>/<name>`: the owner is the namespace the workflow is published under and the name is its lowercase kebab-case short name. `actions` and `runs` are reserved by the workflows directory, so they are not owners.
+
+The install's outcome carries the reason it came to: `installed`, `updated`, `unchanged`, `not_found`, `invalid_address`, `unreachable`, `invalid_content` or `write_failed`.
+
+### 1.2 Checking a workflow
 
 `nightme workflow validate` checks the workflow files and reports every problem it found:
 
@@ -73,7 +94,7 @@ nightme workflow validate [path...]
         --json    print the diagnostics as a JSON array
 ```
 
-With no argument it validates the workflows dir; with arguments it validates the files and the directories it is given, and a directory contributes its `*.yaml` and `*.yml` files. Every problem is one line — `path:line:column: message` — and a run where every workflow is valid prints nothing. The exit code is `0` when every workflow is valid, `8` when a workflow does not validate, and `9` when a path does not exist or cannot be read — the workflows dir among them.
+With no argument it validates the workflows dir; with arguments it validates the files and the directories it is given, and a directory contributes its `*.yaml` and `*.yml` files. An argument that is not a path on disk is looked up as a workflow name, so `nightme workflow validate nightme/coder` validates the file of that name. Every problem is one line — `path:line:column: message` — and a run where every workflow is valid prints nothing. The exit code is `0` when every workflow is valid, `8` when a workflow does not validate, and `9` when a path does not exist or cannot be read — the workflows dir among them.
 
 The engine offers the same check as an API (`pkg/wfe`):
 
@@ -100,8 +121,9 @@ The two surfaces differ in one thing: the load path ignores the keys the schema 
 | `on` | object | ❌ | — | Trigger spec (see §3). Parsed and displayed; nothing fires it. |
 | `jobs` | map | ✅ | — | Named jobs, each with ordered `steps` (see §4). |
 
-The workflow's name is **not** a field: it is the name of the file. `title:` says
-what the workflow is for.
+The workflow's name is **not** a field: it is the path of the file under the
+workflows directory, without the extension. `title:` says what the workflow is
+for.
 
 A workflow names **no agent**. The run uses the agent of the chat that started it — the chat's `/use` choice, or its primary agent.
 
@@ -823,7 +845,7 @@ The cap on an answer defaults to 40960 tokens; a configuration that does not nam
 
 | Command | Behaviour |
 |---|---|
-| `/me start <workflow> [args...] [-i <rounds>]` | Starts a workflow in this chat. The name is the base name of the workflow's file. The run inherits the chat's workspace and agent. A chat without a workspace is refused. A second run in the same chat is refused. `-i` sets how many rounds every job of the workflow runs in this run. The command posts no reply: the card of the run carries the acknowledgement. |
+| `/me start <workflow> [args...] [-i <rounds>]` | Starts a workflow in this chat. The name is the path of the workflow's file under the workflows dir, without the extension. The run inherits the chat's workspace and agent. A chat without a workspace is refused. A second run in the same chat is refused. `-i` sets how many rounds every job of the workflow runs in this run. The command posts no reply: the card of the run carries the acknowledgement. |
 | `/me reply <text>` | Answers the question the run is waiting for. |
 | `/me pause` | Stops the run after the step it is on. The step that is running is not interrupted: its outcome is recorded. |
 | `/me resume [note]` | Runs the step the run is on again. The step's budget for the current round starts over before the retry. The note is the operator's instruction; it joins the conversation the chat model reads. |

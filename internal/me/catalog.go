@@ -6,8 +6,8 @@
 //
 // Every file is remembered by its fingerprint — its size and its
 // modification time — so a refresh parses only what changed. Every
-// base name carries either the workflow the file holds or the failure
-// that made the name unusable.
+// name carries either the workflow the file holds or the failure that
+// made the name unusable.
 package me
 
 import (
@@ -35,28 +35,33 @@ type catalogEntry struct {
 	err error
 }
 
-// name returns the base name the entry provides.
-func (e *catalogEntry) name() string {
+// name returns the name the entry provides.
+//
+// The name is the path of the file under the workflows directory,
+// without the extension: `nightme/coder.yml` provides the workflow
+// `nightme/coder`.
+func (e *catalogEntry) name(root string) string {
 	if e.wf != nil {
 		return e.wf.Name
 	}
-	return wfe.BaseName(e.path)
+	return wfe.WorkflowName(root, e.path)
 }
 
 // Catalog is the daemon's view of the workflows directory.
 //
-// A workflow's identity is the base name of its file: `fix.yml` is the
-// workflow `fix`, and two files that share a base name make that name
-// unusable.
+// A workflow's identity is its path under the workflows directory:
+// `fix.yml` is the workflow `fix`, `nightme/coder.yml` is the workflow
+// `nightme/coder`, and two files that claim the same name make that
+// name unusable.
 type Catalog struct {
 	dir string
 
 	mu sync.Mutex
 	// files holds every file of the directory, by path.
 	files map[string]*catalogEntry
-	// byName holds the workflows that loaded, by base name.
+	// byName holds the workflows that loaded, by name.
 	byName map[string]*catalogEntry
-	// errs holds the failures, by base name.
+	// errs holds the failures, by name.
 	errs map[string]error
 }
 
@@ -76,13 +81,13 @@ func NewCatalog(dir string) *Catalog {
 //
 // Every file is stat'ed: a file whose fingerprint did not change keeps
 // its workflow, a file that is new or changed is parsed again, and a
-// file that is gone is dropped. The base names are checked afterwards:
+// file that is gone is dropped. The names are checked afterwards:
 // a name two files claim is a failure, and neither file is offered
 // under it.
 //
-// A file that does not load is remembered under its base name, so the
-// name it would have provided reports the reason instead of "there is
-// no workflow named".
+// A file that does not load is remembered under the name it would have
+// provided, so that name reports the reason instead of "there is no
+// workflow named".
 //
 // A directory that cannot be read is an error, and the catalogue keeps
 // what it has: the workflows it holds are still the ones on disk.
@@ -116,7 +121,7 @@ func (c *Catalog) load(path string) *catalogEntry {
 		return prev
 	}
 	entry := &catalogEntry{path: path, size: info.Size(), mod: info.ModTime()}
-	wf, err := wfe.LoadFile(path)
+	wf, err := wfe.LoadFile(c.dir, path)
 	if err != nil {
 		entry.err = err
 		return entry
@@ -130,10 +135,10 @@ func (c *Catalog) load(path string) *catalogEntry {
 //
 // The caller holds the lock.
 func (c *Catalog) index() {
-	claims := map[string][]*catalogEntry{} // base name -> the files that claim it
+	claims := map[string][]*catalogEntry{} // name -> the files that claim it
 	for _, path := range c.sortedPaths() {
 		entry := c.files[path]
-		name := entry.name()
+		name := entry.name(c.dir)
 		if name == "" {
 			continue
 		}
@@ -169,7 +174,7 @@ func (c *Catalog) sortedPaths() []string {
 	return out
 }
 
-// Lookup returns the workflow with the given base name.
+// Lookup returns the workflow with the given name.
 //
 // The name is matched as it is spelled on disk.
 func (c *Catalog) Lookup(name string) (*wfe.Workflow, bool) {
@@ -182,14 +187,14 @@ func (c *Catalog) Lookup(name string) (*wfe.Workflow, bool) {
 	return entry.wf, true
 }
 
-// Names returns the base names of the workflows that loaded, sorted.
+// Names returns the names of the workflows that loaded, sorted.
 func (c *Catalog) Names() []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return sortedNames(c.byName)
 }
 
-// Failure returns why the given base name is unusable.
+// Failure returns why the given name is unusable.
 //
 // A file that did not load carries its failure under the name it would
 // have provided; a name two files claim carries the duplicate.

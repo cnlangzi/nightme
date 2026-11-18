@@ -119,6 +119,92 @@ func TestWorkflowValidate_AMissingPath(t *testing.T) {
 	}
 }
 
+// TestWorkflowValidate_AMissingWorkflowsDir — a workflows dir that is
+// not there is a path that does not exist: the command says so
+// instead of passing silently.
+func TestWorkflowValidate_AMissingWorkflowsDir(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "nowhere")
+	t.Setenv("NIGHTME_WORKFLOWS_DIR", missing)
+
+	var err error
+	errOut := captureStderr(t, func() error {
+		err = runRoot("workflow", "validate")
+		return nil
+	})
+	if !strings.Contains(errOut, missing) {
+		t.Errorf("stderr = %q, want it to name the path", errOut)
+	}
+	if code := nmerrors.ExitCode(err); code != nmerrors.CodeNotFound {
+		t.Errorf("exit code = %d, want %d", code, nmerrors.CodeNotFound)
+	}
+}
+
+// TestWorkflowValidate_AWorkflowsDirThatCannotBeRead — a directory
+// the command cannot read is a path it cannot check: the same exit
+// code as a missing one, whether the path is a file or a directory.
+func TestWorkflowValidate_AWorkflowsDirThatCannotBeRead(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads every path")
+	}
+	dir := t.TempDir()
+	body := "title: review the changes\njobs:\n  main:\n    steps: [{id: s1, message: /review}]\n"
+	if err := os.WriteFile(filepath.Join(dir, "reviewer.yaml"), []byte(body), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := os.Chmod(dir, 0000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0755) })
+
+	var err error
+	captureStderr(t, func() error {
+		err = runRoot("workflow", "validate", dir)
+		return nil
+	})
+	if code := nmerrors.ExitCode(err); code != nmerrors.CodeNotFound {
+		t.Errorf("exit code = %d, want %d", code, nmerrors.CodeNotFound)
+	}
+}
+
+// TestWorkflowList_IndentsEveryLineOfAFailure — a file that did not
+// load carries every problem it has, one per line, and every line of
+// it is indented.
+func TestWorkflowList_IndentsEveryLineOfAFailure(t *testing.T) {
+	dir := t.TempDir()
+	body := `
+jobs:
+  a:
+    steps: []
+  main:
+    steps:
+      - message: hi
+        shell: echo
+`
+	if err := os.WriteFile(filepath.Join(dir, "broken.yaml"), []byte(body), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
+
+	out := captureStdout(t, func() error {
+		return runRoot("workflow", "list")
+	})
+	_, list, found := strings.Cut(out, "the files that did not load:")
+	if !found {
+		t.Fatalf("output = %q, want the failures", out)
+	}
+	for _, line := range strings.Split(list, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if !strings.HasPrefix(line, "  ") {
+			t.Errorf("the line %q is not indented", line)
+		}
+	}
+	if !strings.Contains(out, `job "a" has no steps`) {
+		t.Errorf("output = %q, want every problem of the file", out)
+	}
+}
+
 // TestWorkflowValidate_TheJSONArray — the --json flag swaps the lines
 // for a JSON array.
 func TestWorkflowValidate_TheJSONArray(t *testing.T) {

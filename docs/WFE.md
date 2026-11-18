@@ -73,7 +73,7 @@ nightme workflow validate [path...]
         --json    print the diagnostics as a JSON array
 ```
 
-With no argument it validates the workflows dir; with arguments it validates the files and the directories it is given, and a directory contributes its `*.yaml` and `*.yml` files. Every problem is one line — `path:line:column: message` — and a run where every workflow is valid prints nothing. The exit code is `0` when every workflow is valid, `8` when a workflow does not validate, and `9` when a path does not exist or cannot be read.
+With no argument it validates the workflows dir; with arguments it validates the files and the directories it is given, and a directory contributes its `*.yaml` and `*.yml` files. Every problem is one line — `path:line:column: message` — and a run where every workflow is valid prints nothing. The exit code is `0` when every workflow is valid, `8` when a workflow does not validate, and `9` when a path does not exist or cannot be read — the workflows dir among them.
 
 The engine offers the same check as an API (`pkg/wfe`):
 

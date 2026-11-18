@@ -160,14 +160,18 @@ func printWorkflowList(w io.Writer, wfs []*wfe.Workflow, failures []wfe.Failure,
 // printWorkflowFailures writes the files that did not load to w.
 //
 // A file that did not load does not take the workflows beside it down
-// with it: the failures are reported next to the ones that loaded.
+// with it: the failures are reported next to the ones that loaded. A
+// failure carries every problem the file has, one per line, and every
+// line of it is indented.
 func printWorkflowFailures(w io.Writer, failures []wfe.Failure) error {
 	if len(failures) == 0 {
 		return nil
 	}
 	fmt.Fprintln(w, "\nthe files that did not load:")
 	for _, f := range failures {
-		fmt.Fprintf(w, "  %s\n", f.Error())
+		for _, line := range strings.Split(f.Error(), "\n") {
+			fmt.Fprintf(w, "  %s\n", line)
+		}
 	}
 	return nil
 }
@@ -457,37 +461,32 @@ func newWorkflowValidateCmd() *cobra.Command {
 // The exit code says what happened: 0 when every workflow is valid,
 // 8 when a workflow does not validate, 9 when a path does not exist
 // or cannot be read. A path that cannot be read does not stop the
-// other paths: they are validated anyway.
+// other paths: they are validated anyway, and the path that could
+// not be read wins the exit code — the command could not check what
+// it was asked to check.
 func runWorkflowValidate(out io.Writer, errOut io.Writer, args []string, asJSON bool) error {
-	var diags []wfe.Diagnostic
-	unreadable := false
-	if len(args) == 0 {
+	paths := args
+	if len(paths) == 0 {
 		dir, err := workflowsDir()
 		if err != nil {
 			return err
 		}
-		diags = wfe.ValidateDir(dir)
-	} else {
-		for _, path := range args {
-			info, err := os.Stat(path)
-			if err != nil {
-				fmt.Fprintf(errOut, "%s: %v\n", path, err)
-				unreadable = true
-				continue
-			}
-			if info.IsDir() {
-				diags = append(diags, wfe.ValidateDir(path)...)
-				continue
-			}
-			file, err := os.Open(path)
-			if err != nil {
-				fmt.Fprintf(errOut, "%s: %v\n", path, err)
-				unreadable = true
-				continue
-			}
-			file.Close()
-			diags = append(diags, wfe.ValidateFile(path)...)
+		paths = []string{dir}
+	}
+	var diags []wfe.Diagnostic
+	unreadable := false
+	for _, path := range paths {
+		isDir, err := readablePath(path)
+		if err != nil {
+			fmt.Fprintf(errOut, "%s: %v\n", path, err)
+			unreadable = true
+			continue
 		}
+		if isDir {
+			diags = append(diags, wfe.ValidateDir(path)...)
+			continue
+		}
+		diags = append(diags, wfe.ValidateFile(path)...)
 	}
 	if asJSON {
 		if diags == nil {
@@ -510,6 +509,26 @@ func runWorkflowValidate(out io.Writer, errOut io.Writer, args []string, asJSON 
 		return nmerrors.New(nmerrors.CodeValidationError, "workflow: a workflow does not validate")
 	}
 	return nil
+}
+
+// readablePath reports whether the path can be read, and whether it is
+// a directory.
+//
+// A path that cannot be read is a command error — the exit code says
+// so — and not a problem of a workflow. The library reports it as a
+// diagnostic like any other; the command looks for it here, because
+// the exit code tells the two kinds of failure apart.
+func readablePath(path string) (bool, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false, err
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	file.Close()
+	return info.IsDir(), nil
 }
 
 // jsonNewEncoder is unused (kept for future expansion). Kept

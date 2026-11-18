@@ -511,7 +511,7 @@ outcome, so the agent decides the next step from facts instead of from prose.
 
 `run` is a planning dry-run: it parses and plans but does not invoke an agent.
 
-`validate` is a linter: with no path it checks the workflows dir, with paths it checks the files and the directories it is given.
+`validate` is a linter: with no path it checks the workflows dir, with paths it checks the files and the directories it is given. A path that is not there is reported, not skipped.
 
 ### Write a workflow
 

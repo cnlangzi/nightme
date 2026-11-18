@@ -209,6 +209,73 @@ func TestValidate_TheUnknownKeyOfAStepIsReported(t *testing.T) {
 	}
 }
 
+// TestValidate_TheUnknownKeyIsReportedBesideAShapeProblem — the
+// unknown-key check reads the tree, so it says what it found even
+// when the shape of the document is wrong.
+func TestValidate_TheUnknownKeyIsReportedBesideAShapeProblem(t *testing.T) {
+	diags := Validate([]byte("args: notalist\nbogus: 1\njobs:\n  main:\n    steps: [{message: hi}]\n"))
+	if len(diags) != 2 {
+		t.Fatalf("diagnostics = %v, want two", diags)
+	}
+	if !strings.Contains(diags[0].Message, "`args:` must be a list") {
+		t.Errorf("the diagnostic = %q, want the shape problem", diags[0].Message)
+	}
+	if !strings.Contains(diags[1].Message, "bogus") {
+		t.Errorf("the diagnostic = %q, want the unknown key", diags[1].Message)
+	}
+}
+
+// TestValidate_ADecodeErrorCarriesItsLine — the decoder says where it
+// gave up, and the line is the position of the problem.
+func TestValidate_ADecodeErrorCarriesItsLine(t *testing.T) {
+	diags := Validate([]byte("title: x\njobs:\n  main:\n    steps: [{message: {a: b}}]\n"))
+	if len(diags) != 1 {
+		t.Fatalf("diagnostics = %v, want one", diags)
+	}
+	if diags[0].Line != 4 {
+		t.Errorf("the diagnostic is on line %d, want the line the decoder reported", diags[0].Line)
+	}
+	if strings.HasPrefix(diags[0].Message, "line ") {
+		t.Errorf("the diagnostic = %q, want the line out of the message", diags[0].Message)
+	}
+}
+
+// TestValidate_AnUnknownNeedIsNotACircle — a job that needs a job
+// that does not exist is not a circle.
+func TestValidate_AnUnknownNeedIsNotACircle(t *testing.T) {
+	diags := Validate([]byte("title: x\njobs:\n  a:\n    needs: [b]\n    steps: [{message: hi}]\n"))
+	if len(diags) != 1 {
+		t.Fatalf("diagnostics = %v, want one", diags)
+	}
+	if !strings.Contains(diags[0].Message, `needs unknown job "b"`) {
+		t.Errorf("the diagnostic = %q, want the unknown need", diags[0].Message)
+	}
+}
+
+// TestValidate_JobsInACircleAreACircle — the circle is reported when
+// the jobs really need each other.
+func TestValidate_JobsInACircleAreACircle(t *testing.T) {
+	diags := Validate([]byte(`
+title: x
+jobs:
+  a:
+    needs: [b]
+    steps: [{message: hi}]
+  b:
+    needs: [a]
+    steps: [{message: hi}]
+`))
+	found := false
+	for _, d := range diags {
+		if strings.Contains(d.Message, "in a circle") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("diagnostics = %v, want the circle", diags)
+	}
+}
+
 // TestKnownKeys_AreTheTagsOfTheStruct — the known keys are the yaml
 // tags of the struct: a field that is added to one is a key the
 // validator accepts.

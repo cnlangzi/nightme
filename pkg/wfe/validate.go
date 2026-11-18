@@ -101,27 +101,31 @@ func collect(raw []byte, unknownKeys bool) (*Workflow, []Diagnostic) {
 		return nil, []Diagnostic{{Message: "the file is not a workflow: it has no keys"}}
 	}
 
+	var diags []Diagnostic
+	// The unknown-key check reads the tree, so it says what it found
+	// whatever the shape of the document is.
+	if unknownKeys {
+		diags = append(diags, checkRootKeys(root)...)
+	}
 	// A document of the wrong shape cannot be judged further: the
 	// workflow it decodes into is not the workflow the file describes.
-	diags := checkShape(root)
-	if len(diags) > 0 {
-		sortDiagnostics(diags)
+	shape := checkShape(root)
+	if len(shape) > 0 {
+		diags = append(diags, shape...)
+		sortByPath(diags)
 		return nil, diags
 	}
 
 	var wf Workflow
 	if err := root.Decode(&wf); err != nil {
-		diags := decodeDiagnostics(err)
-		sortDiagnostics(diags)
-		return nil, diags
+		decodeDiags := decodeDiagnostics(err)
+		sortByPath(decodeDiags)
+		return nil, decodeDiags
 	}
 
-	diags = checkSemantics(&wf, root)
-	if unknownKeys {
-		diags = append(diags, checkUnknownKeys(root)...)
-	}
+	diags = append(diags, checkSemantics(&wf, root)...)
 	if len(diags) > 0 {
-		sortDiagnostics(diags)
+		sortByPath(diags)
 		return nil, diags
 	}
 	return &wf, nil
@@ -235,10 +239,12 @@ func checkSemantics(wf *Workflow, root *yaml.Node) []Diagnostic {
 	for name := range wf.Jobs {
 		jobNames[name] = true
 	}
+	needsKnown := true
 	for name, job := range wf.Jobs {
 		jobMapping := jobNode(root, name)
 		for _, need := range job.Needs {
 			if !jobNames[need] {
+				needsKnown = false
 				diags = append(diags, diagnosticAt(jobMapping, fmt.Errorf("job %q needs unknown job %q", name, need)))
 			}
 		}
@@ -247,7 +253,10 @@ func checkSemantics(wf *Workflow, root *yaml.Node) []Diagnostic {
 				fmt.Errorf("job %q: iterations must be >= 0", name)))
 		}
 	}
-	if len(wf.JobOrder()) != len(wf.Jobs) {
+	// The circle is only worth reporting when every job can be placed:
+	// an unknown need is a different problem, and it keeps a job from
+	// being placed as well.
+	if needsKnown && len(wf.JobOrder()) != len(wf.Jobs) {
 		diags = append(diags, diagnosticAt(root, errors.New("the jobs need each other in a circle")))
 	}
 	seenSteps := map[string]string{} // step id -> the job it belongs to
@@ -310,70 +319,65 @@ func checkArgExpressions(wf *Workflow, root *yaml.Node) []Diagnostic {
 	return diags
 }
 
-// checkUnknownKeys reports the keys the schema does not have.
+// checkRootKeys reports the keys the schema does not have.
 //
 // The known keys are read from the yaml tags of the workflow structs:
 // the schema lives in one place, and a field that is added to a struct
 // is a key the validator accepts.
-func checkUnknownKeys(root *yaml.Node) []Diagnostic {
-	var diags []Diagnostic
-	checkRootKeys(root, &diags)
-	return diags
-}
-
-// checkRootKeys reports the unknown keys of the root mapping and of
-// the blocks below it.
-func checkRootKeys(node *yaml.Node, diags *[]Diagnostic) {
-	checkKeys(node, reflect.TypeOf(Workflow{}), "", diags)
+func checkRootKeys(node *yaml.Node) []Diagnostic {
+	diags := checkKeys(node, reflect.TypeOf(Workflow{}), "")
 	for _, e := range mappingPairs(node) {
 		switch e.key {
 		case "args":
 			for i, item := range sequenceItems(e.val) {
-				checkKeys(item, reflect.TypeOf(Arg{}), fmt.Sprintf("argument %d", i+1), diags)
+				diags = append(diags, checkKeys(item, reflect.TypeOf(Arg{}), fmt.Sprintf("argument %d", i+1))...)
 			}
 		case "on":
-			checkTriggerKeys(e.val, diags)
+			diags = append(diags, checkTriggerKeys(e.val)...)
 		case "jobs":
 			for _, je := range mappingPairs(e.val) {
-				checkJobKeys(je.val, fmt.Sprintf("job %q", je.key), diags)
+				diags = append(diags, checkJobKeys(je.val, fmt.Sprintf("job %q", je.key))...)
 			}
 		}
 	}
+	return diags
 }
 
 // checkJobKeys reports the unknown keys of a job and of its steps.
-func checkJobKeys(node *yaml.Node, ctx string, diags *[]Diagnostic) {
-	checkKeys(node, reflect.TypeOf(Job{}), ctx, diags)
+func checkJobKeys(node *yaml.Node, ctx string) []Diagnostic {
+	diags := checkKeys(node, reflect.TypeOf(Job{}), ctx)
 	for _, e := range mappingPairs(node) {
 		if e.key != "steps" {
 			continue
 		}
 		for i, item := range sequenceItems(e.val) {
-			checkKeys(item, reflect.TypeOf(Step{}), fmt.Sprintf("%s step %d", ctx, i+1), diags)
+			diags = append(diags, checkKeys(item, reflect.TypeOf(Step{}), fmt.Sprintf("%s step %d", ctx, i+1))...)
 		}
 	}
+	return diags
 }
 
 // checkTriggerKeys reports the unknown keys of the `on:` block and of
 // the trigger blocks below it.
-func checkTriggerKeys(node *yaml.Node, diags *[]Diagnostic) {
-	checkKeys(node, reflect.TypeOf(Trigger{}), "on", diags)
+func checkTriggerKeys(node *yaml.Node) []Diagnostic {
+	diags := checkKeys(node, reflect.TypeOf(Trigger{}), "on")
 	for _, e := range mappingPairs(node) {
 		switch e.key {
 		case "schedule":
 			for i, item := range sequenceItems(e.val) {
-				checkKeys(item, reflect.TypeOf(ScheduleEntry{}), fmt.Sprintf("schedule entry %d", i+1), diags)
+				diags = append(diags, checkKeys(item, reflect.TypeOf(ScheduleEntry{}), fmt.Sprintf("schedule entry %d", i+1))...)
 			}
 		case "pull_request":
-			checkKeys(e.val, reflect.TypeOf(PRTrigger{}), "pull_request", diags)
+			diags = append(diags, checkKeys(e.val, reflect.TypeOf(PRTrigger{}), "pull_request")...)
 		case "branch":
-			checkKeys(e.val, reflect.TypeOf(BranchTrigger{}), "branch", diags)
+			diags = append(diags, checkKeys(e.val, reflect.TypeOf(BranchTrigger{}), "branch")...)
 		case "issue":
-			checkKeys(e.val, reflect.TypeOf(EventFilter{}), "issue", diags)
+			diags = append(diags, checkKeys(e.val, reflect.TypeOf(EventFilter{}), "issue")...)
 		case "mention":
-			checkKeys(e.val, reflect.TypeOf(MentionTrigger{}), "mention", diags)
+			diags = append(diags, checkKeys(e.val, reflect.TypeOf(MentionTrigger{}), "mention")...)
 		}
 	}
+	return diags
 }
 
 // checkKeys reports the keys of a mapping node the schema does not
@@ -382,15 +386,17 @@ func checkTriggerKeys(node *yaml.Node, diags *[]Diagnostic) {
 // The type says which keys are known. The context says where the
 // mapping is, so a message read on its own still says what it is
 // about.
-func checkKeys(node *yaml.Node, t reflect.Type, ctx string, diags *[]Diagnostic) {
+func checkKeys(node *yaml.Node, t reflect.Type, ctx string) []Diagnostic {
 	known := knownKeys(t)
+	var diags []Diagnostic
 	for _, e := range mappingPairs(node) {
 		if known[e.key] {
 			continue
 		}
-		*diags = append(*diags, diagnosticAt(e.keyNode,
+		diags = append(diags, diagnosticAt(e.keyNode,
 			fmt.Errorf("%sunknown key %q", contextPrefix(ctx), e.key)))
 	}
+	return diags
 }
 
 // knownKeys returns the keys the schema defines for a struct type.
@@ -439,16 +445,7 @@ func diagnosticAt(node *yaml.Node, err error) Diagnostic {
 // The parser says where it gave up — "yaml: line 3: ..." — and the
 // line becomes the position of the problem.
 func yamlDiagnostic(err error) Diagnostic {
-	msg := err.Error()
-	line := 0
-	if rest, ok := strings.CutPrefix(msg, "yaml: line "); ok {
-		if n, tail, ok := strings.Cut(rest, ": "); ok {
-			if parsed, convErr := strconv.Atoi(n); convErr == nil {
-				line = parsed
-				msg = tail
-			}
-		}
-	}
+	line, msg := splitLine(err.Error())
 	return Diagnostic{Line: line, Message: msg}
 }
 
@@ -463,16 +460,34 @@ func decodeDiagnostics(err error) []Diagnostic {
 	}
 	out := make([]Diagnostic, 0, len(typeErr.Errors))
 	for _, msg := range typeErr.Errors {
-		line := 0
-		if n, tail, ok := strings.Cut(msg, ": "); ok {
-			if parsed, convErr := strconv.Atoi(n); convErr == nil {
-				line = parsed
-				msg = tail
-			}
-		}
-		out = append(out, Diagnostic{Line: line, Message: msg})
+		line, text := splitLine(msg)
+		out = append(out, Diagnostic{Line: line, Message: text})
 	}
 	return out
+}
+
+// splitLine takes the line number a yaml.v3 message starts with and
+// returns the line and the message without it.
+//
+// The parser writes "yaml: line 3: ..." and the decoder writes
+// "line 3: ...". A message that starts with neither has no line.
+func splitLine(msg string) (int, string) {
+	rest, ok := strings.CutPrefix(msg, "yaml: line ")
+	if !ok {
+		rest, ok = strings.CutPrefix(msg, "line ")
+		if !ok {
+			return 0, msg
+		}
+	}
+	n, tail, ok := strings.Cut(rest, ": ")
+	if !ok {
+		return 0, msg
+	}
+	line, err := strconv.Atoi(n)
+	if err != nil {
+		return 0, msg
+	}
+	return line, tail
 }
 
 // findTextNode returns the first node whose text holds the needle.
@@ -493,17 +508,9 @@ func findTextNode(node *yaml.Node, needle string) *yaml.Node {
 	return nil
 }
 
-// sortDiagnostics orders the problems of one file by position: by
-// line, then by column. A problem that has no place in the file
-// comes last.
-func sortDiagnostics(diags []Diagnostic) {
-	sort.SliceStable(diags, func(i, j int) bool {
-		return lessPosition(diags[i], diags[j])
-	})
-}
-
-// sortByPath orders the problems of many files by path, then by
-// position within the file.
+// sortByPath orders the problems by path, then by position within the
+// file: by line, then by column. A problem that has no place in the
+// file comes last.
 func sortByPath(diags []Diagnostic) {
 	sort.SliceStable(diags, func(i, j int) bool {
 		if diags[i].Path != diags[j].Path {

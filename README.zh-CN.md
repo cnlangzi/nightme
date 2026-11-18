@@ -461,7 +461,7 @@ agent——`/me`——在你发起它的那个 chat 里跑一个 workflow。每�
 
 `run` 是规划 dry-run：只解析和排计划，不真正调 agent。
 
-`validate` 是个 linter：不带路径时检查 workflows 目录，带路径时检查给的文件和目录。
+`validate` 是个 linter：不带路径时检查 workflows 目录，带路径时检查给的文件和目录。路径不存在会报出来，不会被跳过。
 
 ### 写一个 workflow
 

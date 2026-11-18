@@ -32,7 +32,7 @@ func TestRenderPlanLine(t *testing.T) {
 		"codex",
 		"open-code-review",
 		"2 subagents",
-		"1. system / **/*.go · Go — 2 files",
+		"1. `system / **/*.go · Go` — 2 files",
 		"2. Simplify review lens · Go — 1 file",
 	} {
 		if !strings.Contains(got, want) {
@@ -113,10 +113,140 @@ func TestVerdictLine(t *testing.T) {
 	}
 
 	failed := newVerdict(3, reports, []failedGroup{{label: "**/*.ts", state: failedResumable}}).line()
-	for _, want := range []string{"**/*.ts", "/review --continue"} {
+	for _, want := range []string{"`**/*.ts`", "💡 hint: run `/review --continue` to continue the failed groups"} {
 		if !strings.Contains(failed, want) {
 			t.Errorf("the verdict line does not carry %q: %s", want, failed)
 		}
+	}
+}
+
+// TestVerdictLine_FailedGroupsAreTheirOwnBlock: the groups that did
+// not finish leave the counts line and stand on their own under it —
+// the counts line carries counts and nothing else.
+func TestVerdictLine_FailedGroupsAreTheirOwnBlock(t *testing.T) {
+	reports := []agent.ReviewReport{
+		{Parsed: true, Findings: []agent.ReviewFinding{{Severity: agent.SeverityHigh}}},
+	}
+
+	got := newVerdict(2, reports, []failedGroup{
+		{label: "system / **/*.go · Go", state: failedResumable},
+	}).line()
+
+	want := "⚠️ review · 2 subagents · 1 finding · 1 high\n\n" +
+		"❌ **1 of 2 subagents failed**\n" +
+		"- `system / **/*.go · Go`\n" +
+		"💡 hint: run `/review --continue` to continue the failed groups"
+	if got != want {
+		t.Errorf("the verdict line is:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// TestVerdictLine_FailureBlockCountsTheGroups: the block's header
+// names how many groups failed out of the run's subagents, and the
+// noun follows the count.
+func TestVerdictLine_FailureBlockCountsTheGroups(t *testing.T) {
+	got := newVerdict(2, nil, []failedGroup{
+		{label: "a", state: failedResumable},
+		{label: "b", state: failedNeverStarted},
+	}).line()
+	if !strings.Contains(got, "❌ **2 of 2 subagents failed**") {
+		t.Errorf("the block does not count the failed groups: %s", got)
+	}
+
+	one := newVerdict(1, nil, []failedGroup{{label: "a", state: failedResumable}}).line()
+	if !strings.Contains(one, "❌ **1 of 1 subagent failed**") {
+		t.Errorf("the block pluralized the single subagent: %s", one)
+	}
+}
+
+// TestVerdictLine_ListsEveryFailedGroup: the block names every group
+// that failed — the list is not capped.
+func TestVerdictLine_ListsEveryFailedGroup(t *testing.T) {
+	var failed []failedGroup
+	for i := 0; i < 5; i++ {
+		failed = append(failed, failedGroup{label: fmt.Sprintf("group-%d", i), state: failedResumable})
+	}
+
+	got := newVerdict(5, nil, failed).line()
+	for i := 0; i < 5; i++ {
+		want := fmt.Sprintf("- group-%d\n", i)
+		if !strings.Contains(got, want) {
+			t.Errorf("the block does not list %q: %s", want, got)
+		}
+	}
+}
+
+// TestVerdictLine_CodeSpansTheGroupName: a name that carries a
+// markdown metacharacter is code-spanned — a glob's `**` would
+// otherwise pair with another name's `**` into a bold span. A plain
+// name is left alone, and a name carrying a backtick is left alone
+// too: a code span would break on it.
+func TestVerdictLine_CodeSpansTheGroupName(t *testing.T) {
+	glob := newVerdict(1, nil, []failedGroup{{label: "system / **/*.go", state: failedResumable}}).line()
+	if !strings.Contains(glob, "- `system / **/*.go`") {
+		t.Errorf("the glob is not code-spanned: %s", glob)
+	}
+
+	italic := newVerdict(1, nil, []failedGroup{{label: "internal/me/my_file.go", state: failedResumable}}).line()
+	if !strings.Contains(italic, "- `internal/me/my_file.go`") {
+		t.Errorf("the underscored name is not code-spanned: %s", italic)
+	}
+
+	plain := newVerdict(1, nil, []failedGroup{{label: "nightme code reviewer", state: failedResumable}}).line()
+	if !strings.Contains(plain, "- nightme code reviewer\n") {
+		t.Errorf("the plain name was code-spanned: %s", plain)
+	}
+
+	ticked := newVerdict(1, nil, []failedGroup{{label: "a `b` c", state: failedResumable}}).line()
+	if !strings.Contains(ticked, "- a `b` c\n") {
+		t.Errorf("the name with a backtick was code-spanned: %s", ticked)
+	}
+}
+
+// TestVerdictLine_KeepsTheUnparsedCountOnTheCountsLine: the unparsed
+// groups are a count, so they stay on the counts line — and the
+// failure block is unaffected by them.
+func TestVerdictLine_KeepsTheUnparsedCountOnTheCountsLine(t *testing.T) {
+	got := newVerdict(2, []agent.ReviewReport{
+		{Parsed: false},
+		{Parsed: false},
+	}, []failedGroup{{label: "a", state: failedResumable}}).line()
+
+	counts, block, ok := strings.Cut(got, "\n\n")
+	if !ok {
+		t.Fatalf("the verdict line has no failure block:\n%s", got)
+	}
+	if !strings.Contains(counts, "2 unparsed subagents") {
+		t.Errorf("the counts line does not report the unparsed subagents: %s", counts)
+	}
+	if strings.Contains(counts, "failed") {
+		t.Errorf("the counts line carries the failure: %s", counts)
+	}
+	if !strings.Contains(block, "❌ **1 of 2 subagents failed**") {
+		t.Errorf("the failure block does not count the failed group: %s", block)
+	}
+}
+
+// TestVerdictHint_CarriesTheSameBody: the thread's end hint carries
+// the same counts and the same failure block as the card's verdict —
+// the two differ only in their lead.
+func TestVerdictHint_CarriesTheSameBody(t *testing.T) {
+	v := newVerdict(2, []agent.ReviewReport{
+		{Parsed: true, Findings: []agent.ReviewFinding{{Severity: agent.SeverityHigh}}},
+	}, []failedGroup{{label: "system / **/*.go", state: failedResumable}})
+
+	hint := v.hint()
+	want := "⚠️ **review done** · 2 subagents · 1 finding · 1 high\n\n" +
+		"❌ **1 of 2 subagents failed**\n" +
+		"- `system / **/*.go`\n" +
+		"💡 hint: run `/review --continue` to continue the failed groups"
+	if hint != want {
+		t.Errorf("the end hint is:\n%s\nwant:\n%s", hint, want)
+	}
+
+	body := v.body()
+	if !strings.HasSuffix(v.line(), body) || !strings.HasSuffix(hint, body) {
+		t.Errorf("the card and the hint do not share the body:\n%s\n%s", v.line(), hint)
 	}
 }
 
@@ -561,6 +691,38 @@ func TestSendVerdict_CarriesTheDigest(t *testing.T) {
 	}
 }
 
+// TestSendVerdict_PutsTheFailureBlockBetweenTheCountsAndTheDigest:
+// the card message reads as the counts, the failure and the digest —
+// the failure block sits under the counts line and above the digest.
+func TestSendVerdict_PutsTheFailureBlockBetweenTheCountsAndTheDigest(t *testing.T) {
+	outcomes := []reviewOutcome{
+		{pattern: "**/*.go", report: agent.ReviewReport{Parsed: true, Findings: []agent.ReviewFinding{
+			{Path: "a.go", Line: "42", Severity: agent.SeverityHigh, Content: "the finding"},
+		}}},
+		{pattern: "**/*.ts", source: "system", err: errors.New("boom"), sessionID: "sess-ts"},
+	}
+
+	em := newRecordingEmitter()
+	sendVerdict(context.Background(), em, "chat", "msg", "codex", agent.RunResult{}, outcomes, nil)
+
+	msgs := em.messages()
+	if len(msgs) != 1 {
+		t.Fatalf("the review sent %d messages, want the one verdict message: %+v", len(msgs), msgs)
+	}
+
+	want := "⚠️ review · 2 subagents · 1 finding · 1 high\n\n" +
+		"❌ **1 of 2 subagents failed**\n" +
+		"- `system / **/*.ts`\n" +
+		"💡 hint: run `/review --continue` to continue the failed groups\n\n" +
+		"**high** · 1\n" +
+		"| path |\n" +
+		"| --- |\n" +
+		"| a.go:42 |"
+	if msgs[0].Text != want {
+		t.Errorf("the verdict message is:\n%s\nwant:\n%s", msgs[0].Text, want)
+	}
+}
+
 // TestReviewPromptFrame_FollowsTheThinkMode: the frame asks the
 // agent to state the findings' substance when the thread carries
 // none, and to leave them alone when the thread already has them.
@@ -914,7 +1076,7 @@ func TestHandle_ReviewDeliversTheFindingsToTheThread(t *testing.T) {
 	if !strings.Contains(replies[0], "🔍 review") || !strings.Contains(replies[0], "2 subagents") {
 		t.Errorf("the first line is not the plan: %q", replies[0])
 	}
-	if !strings.Contains(replies[0], "1. system / **/*.go · Go — 2 files") {
+	if !strings.Contains(replies[0], "1. `system / **/*.go · Go` — 2 files") {
 		t.Errorf("the first line does not list the groups: %q", replies[0])
 	}
 	if !strings.Contains(replies[1], "2 subagents") || !strings.Contains(replies[1], "2 high") {

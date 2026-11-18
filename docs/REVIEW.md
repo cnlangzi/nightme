@@ -368,9 +368,19 @@ severity 归一到 `critical` / `high` / `medium` / `low` / `unspecified`(`block
 
 review 在 channel 上只有这几样东西,顺序固定:
 
-1. **plan 行**(任何 group 产出之前):`🔍 review · codex · open-code-review · 4 subagents` + 每组一行(`N. 组名 · 文件摘要 — N files`)。plan 由 agent 层产出(`agent.ReviewPlanGroup` + `agent.WithReviewPlanObserver`,fan-out 开始前触发一次),由 command 层渲染。第一行的规则集由 plan 里有没有 builtin 组决定:有就是 nightme 自己的 rubric(`nightme code reviewer`),没有就是 ocr 的规则集(`open-code-review`)。组数说的是 **subagent** 数 —— 每组就是一个独立的 agent session。续跑的 plan 行在每组后面标这次要做什么:`(resumed)`(重新打开该组自己的 session)或 `(re-run)`(开新 session 重发该组的 prompt);普通 review 不带标记。
+1. **plan 行**(任何 group 产出之前):`🔍 review · codex · open-code-review · 4 subagents` + 每组一行(`N. 组名 · 文件摘要 — N files`)。plan 由 agent 层产出(`agent.ReviewPlanGroup` + `agent.WithReviewPlanObserver`,fan-out 开始前触发一次),由 command 层渲染。第一行的规则集由 plan 里有没有 builtin 组决定:有就是 nightme 自己的 rubric(`nightme code reviewer`),没有就是 ocr 的规则集(`open-code-review`)。组数说的是 **subagent** 数 —— 每组就是一个独立的 agent session。续跑的 plan 行在每组后面标这次要做什么:`(resumed)`(重新打开该组自己的 session)或 `(re-run)`(开新 session 重发该组的 prompt);普通 review 不带标记。组名带 markdown 元字符(`*` 或 `_`)时按 code span 渲染:glob 里的 `**` 会和另一个组名的 `**` 配成一段粗体,把中间的正文吞掉,所以组名不能裸着躺在 markdown 里;带反引号的组名按原样渲染(code span 会在反引号上断掉)。
 2. **每组的 findings**(thread):每组一条回复,正文前带 `[N] ` 编号(N = 该组在 plan 里的位置)。findings 走 **think kind**,所以落在 thread 而不是 card。一条回复放不下一组 findings 时按攒批边界切成连续几条,每条都带同一个编号。组开始产出时会先发一条开始提示(`▶ **[N] 组名** — N files`,同样是 think kind),thread 因此读起来是"一组一段"。
-3. **verdict 行**(fan-out 结束,card):subagent 数、findings 数、按 severity 的分布、失败组(点名,并按失败组的状态标注)、unparsed 组数。失败组的名字后面带状态:跑到了 agent 的组没有后缀,没跑到 agent 的组带 `(never started)`,恢复机会已用完的组带 `(already retried)`。` → /review --continue` 的后缀**只在还有失败组可恢复时才出现** —— 承诺必须是续跑做得到的。thread 末尾另有一条同样数字的收尾提示(`✅ **review done** · ...`,think kind),thread 以结果收尾。
+3. **verdict 行**(fan-out 结束,card):一行计数,失败的时候再来一块失败块。计数行是 subagent 数、findings 数、按 severity 的分布、unparsed 组数 —— 只放计数,不放失败。失败组不在计数行里,而是单独成块,紧跟在计数行下面、digest 上面:
+
+   ```text
+   ⚠️ review · 2 subagents · 8 findings · 2 medium · 6 low
+
+   ❌ **1 of 2 subagents failed**
+   - `system / **/*.go · Go`
+   💡 hint: run `/review --continue` to continue the failed groups
+   ```
+
+   块头报几组没跑完(`N of M`:N = 失败的组数,M = 本次 run 的 subagent 数,跟计数行报的是同一个数),每个失败的组一行 `- `,按失败的先后排;组名后面带状态:跑到了 agent 的组没有后缀,没跑到 agent 的组带 `(never started)`,恢复机会已用完的组带 `(already retried)`,既没跑到 agent 也没有存下来的 prompt 的组带 `(not recoverable)`。最后一行的 `💡 hint:` **只在还有失败组可恢复时才出现** —— 承诺必须是续跑做得到的;失败组要么用完了恢复机会、要么救不回来的 run,只有块头和组行,没有这行。失败块里的组名与 plan 行一样按 code span 渲染(见第 1 条)。thread 末尾另有一条收尾提示(`✅ **review done** · ...` 加同一块,think kind),thread 以结果收尾 —— card 与 thread 共用同一份 body,两个面的数字与失败块不会打架。
 4. **digest**(紧跟 verdict 行,同一条 card 消息):按 severity 分组的 markdown 表,每个 bucket 一张表,每条 finding 一行。表头是 bucket 名与它的条数(`**high** · 2`),列是 `category` 与 `path`(`path:line`)—— severity 是表头,不是列。`category` 列只在**本次 review 有 finding 报了 category** 时出现,没报的那一格写 `—`;行内的换行/制表符变成空格、`|` 变成 `/`,所以一行 finding 不会撑破列。
    digest 是 findings 的索引,不是它们的正文:每条 finding 只留位置与分类,一条不落。finding 的正文不进 card —— 它在 thread 里(`/think` 开时),或由主 agent 的回答带出(`/think` 关着,默认),合并文本里也有一份给 agent 读。card 因此只跟 finding 的条数成正比,不会被一段长正文撑破。
 

@@ -103,7 +103,7 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	if err != nil {
 		// The address does not fit the hub's shape: nothing is
 		// fetched and nothing is written.
-		list := newChecklist("download "+address, f.emitter(ctx, cs, input.ChatID))
+		list := newChecklist("download "+address, f.emitter(ctx, cs, input.ChatID, input.MessageID))
 		list.set(rowDownload, agent.TaskFailed, err.Error())
 		list.set(rowValidate, agent.TaskSkipped, "")
 		list.set(rowInstall, agent.TaskSkipped, "")
@@ -114,7 +114,7 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 		return &command.SlashOutput{Consumed: true}, nil
 	}
 
-	list := newChecklist("download "+addr.String(), f.emitter(ctx, cs, input.ChatID))
+	list := newChecklist("download "+addr.String(), f.emitter(ctx, cs, input.ChatID, input.MessageID))
 	result := f.install(ctx, list, addr)
 	f.report(ctx, addr, result)
 	return &command.SlashOutput{Consumed: true}, nil
@@ -136,12 +136,17 @@ func (f *Factory) report(ctx context.Context, addr Address, result Result) {
 		data["sha256"] = result.SHA256
 	}
 	switch result.Reason {
-	case ReasonInstalled, ReasonUpdated, ReasonUnchanged:
+	case ReasonInstalled, ReasonUpdated:
 		chatsession.ReportOutcome(ctx, messages.Outcome{
 			Status:  messages.OutcomeOK,
 			Summary: "the workflow " + addr.String() + " is " + result.Reason,
 			Data:    data,
 		})
+	case ReasonUnchanged:
+		// The workflow was already current: the request was valid and
+		// there was nothing to write.
+		chatsession.ReportOutcome(ctx, command.NoopOutcome(
+			"the workflow "+addr.String()+" is already current", data))
 	default:
 		chatsession.ReportOutcome(ctx, command.FailedOutcomeData(result.Reason,
 			"the workflow "+addr.String()+" was not installed",
@@ -154,7 +159,11 @@ func (f *Factory) report(ctx context.Context, addr Address, result Result) {
 // The checklist goes out through the chat session's emitter: a
 // command's SlashOutput is returned once, at the end of the handle,
 // and cannot carry a mid-flight update.
-func (f *Factory) emitter(ctx context.Context, cs *chatsession.ChatSession, chatID string) func([]agent.AgentTaskItem) error {
+//
+// Every snapshot is anchored to the message the operator sent: the
+// channel that can patch a card in place updates the one card the
+// message opened, instead of posting a card per snapshot.
+func (f *Factory) emitter(ctx context.Context, cs *chatsession.ChatSession, chatID, replyTo string) func([]agent.AgentTaskItem) error {
 	first := true
 	return func(items []agent.AgentTaskItem) error {
 		if cs == nil {
@@ -171,6 +180,7 @@ func (f *Factory) emitter(ctx context.Context, cs *chatsession.ChatSession, chat
 		}
 		return emitter.Send(ctx, messages.OutboundMessage{
 			ChatID:   chatID,
+			ReplyTo:  replyTo,
 			Kind:     kind,
 			TaskList: &agent.AgentTaskListEvent{Items: items},
 		})

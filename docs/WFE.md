@@ -61,6 +61,8 @@ Workflows are read from:
 ~/.nightme/workflows/<owner>/<name>.yml
 ```
 
+The directory is `<data_dir>/workflows` — `~/.nightme/workflows` with the default `data_dir`. The daemon and the `nightme workflow` CLI read the same directory.
+
 - One workflow per file; a workflow's name is its path under the workflows directory without the extension — `fix-issue.yaml` is the workflow `fix-issue`, `nightme/coder.yml` is the workflow `nightme/coder`. Two files that claim the same name make that name unusable.
 - The directory is read at any depth, except the reserved directories `actions` and `runs`.
 - The workflows are read when they are asked for: the daemon reads the directory at startup and again before every `/me start`. An edited file takes effect on the next `/me start`, without a restart. A file whose size and modification time did not change is not parsed again. The fingerprint is best-effort: a change that keeps the size and lands in the same modification-time tick is noticed when the daemon restarts.
@@ -78,6 +80,10 @@ Workflows are read from:
 The workflow is written to `~/.nightme/workflows/nightme/coder.yml`, so its name keeps the address it was published with and `/me start nightme/coder` runs it. The install is shown as a checklist of three rows — the download, the validation, the write — and the rows update as the install goes.
 
 The file is fetched from the hub through three tiers, in order: GitHub, jsDelivr, jsdmirror. Every tier is probed before its file is fetched, so a tier that cannot be reached is skipped instead of costing a transfer timeout. The downloaded content is checked before it is written: a file that does not validate is not installed, and the workflow that is already there stays as it is. A file that is already installed and did not change is not rewritten.
+
+The address is `<owner>/<name>`: the owner is the namespace the workflow is published under and the name is its lowercase kebab-case short name. `actions` and `runs` are reserved by the workflows directory, so they are not owners.
+
+The install's outcome carries the reason it came to: `installed`, `updated`, `unchanged`, `not_found`, `invalid_address`, `unreachable`, `invalid_content` or `write_failed`.
 
 ### 1.2 Checking a workflow
 

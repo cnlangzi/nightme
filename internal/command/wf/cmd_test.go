@@ -227,3 +227,121 @@ func TestTheCommandIsRegistered(t *testing.T) {
 		t.Errorf("the command is not registered: %v", command.Default().Specs())
 	}
 }
+
+// TestHandle_TheReservedOwnersAreRefused — an owner that names a
+// reserved directory would write a workflow the loader never sees.
+func TestHandle_TheReservedOwnersAreRefused(t *testing.T) {
+	dir := t.TempDir()
+	gets := 0
+	srv := newCountingServer(&gets, validWorkflow)
+	defer srv.Close()
+
+	cs, em := newChat(t)
+	f := testFactory(dir, []Source{{Name: "github", BaseURL: srv.URL + "/"}}, nil)
+	work := cs.Hold("msg-3")
+	ctx := chatsession.WithWork(context.Background(), work)
+
+	for _, address := range []string{"actions/foo", "runs/foo"} {
+		out, err := f.Handle(ctx, command.RuntimeServices{}, nil, cs, command.SlashInput{
+			ChatID:    "chat-1",
+			MessageID: "msg-3",
+			Args:      []string{"wf", "install", address},
+		})
+		if err != nil {
+			t.Fatalf("Handle: %v", err)
+		}
+		if out.Reply != "" {
+			t.Errorf("the reply is %q, want none", out.Reply)
+		}
+	}
+	if gets != 0 {
+		t.Errorf("the hub was asked %d times, want none", gets)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("the workflows dir holds %d files, want none", len(entries))
+	}
+
+	work.Release()
+	outcome := em.settled()
+	if outcome == nil {
+		t.Fatal("the message settled without an outcome")
+	}
+	if outcome.Data["reason"] != ReasonInvalidAddress {
+		t.Errorf("the reason is %q, want %q", outcome.Data["reason"], ReasonInvalidAddress)
+	}
+}
+
+// TestHandle_TheChecklistIsAnchoredToTheMessage — every snapshot
+// carries the message the operator sent, so the channel updates one
+// card instead of posting one per snapshot.
+func TestHandle_TheChecklistIsAnchoredToTheMessage(t *testing.T) {
+	dir := t.TempDir()
+	tier, srv := servingTier("github", validWorkflow)
+	defer srv.Close()
+
+	cs, em := newChat(t)
+	f := testFactory(dir, []Source{tier}, nil)
+	ctx := context.Background()
+
+	if _, err := f.Handle(ctx, command.RuntimeServices{}, nil, cs, command.SlashInput{
+		ChatID:    "chat-1",
+		MessageID: "msg-4",
+		Args:      []string{"wf", "install", "nightme/coder"},
+	}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	tasks := em.tasks()
+	if len(tasks) == 0 {
+		t.Fatal("the checklist was never published")
+	}
+	for _, msg := range tasks {
+		if msg.ReplyTo != "msg-4" {
+			t.Errorf("a snapshot is anchored to %q, want msg-4", msg.ReplyTo)
+		}
+	}
+}
+
+// TestHandle_AnUnchangedInstallIsANoop — the request was valid and
+// there was nothing to write.
+func TestHandle_AnUnchangedInstallIsANoop(t *testing.T) {
+	dir := t.TempDir()
+	tier, srv := servingTier("github", validWorkflow)
+	defer srv.Close()
+
+	// The workflow is already installed and current.
+	path := filepath.Join(dir, "nightme", "coder.yml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(validWorkflow), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	cs, em := newChat(t)
+	f := testFactory(dir, []Source{tier}, nil)
+	work := cs.Hold("msg-5")
+	ctx := chatsession.WithWork(context.Background(), work)
+
+	if _, err := f.Handle(ctx, command.RuntimeServices{}, nil, cs, command.SlashInput{
+		ChatID:    "chat-1",
+		MessageID: "msg-5",
+		Args:      []string{"wf", "install", "nightme/coder"},
+	}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	work.Release()
+	outcome := em.settled()
+	if outcome == nil {
+		t.Fatal("the message settled without an outcome")
+	}
+	if outcome.Status != messages.OutcomeNoop {
+		t.Errorf("the status is %q, want %q", outcome.Status, messages.OutcomeNoop)
+	}
+	if outcome.Data["reason"] != ReasonUnchanged {
+		t.Errorf("the reason is %q, want %q", outcome.Data["reason"], ReasonUnchanged)
+	}
+}

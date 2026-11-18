@@ -26,29 +26,32 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 
+	"github.com/cnlangzi/nightme/internal/config"
 	nmerrors "github.com/cnlangzi/nightme/internal/errors"
+	"github.com/cnlangzi/nightme/internal/runtime"
 	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
 // workflowsDir returns the directory where workflow YAML files
-// live. Default: `$HOME/.nightme/workflows/`. Overridable via
-// $NIGHTME_WORKFLOWS_DIR for testing.
+// live: the workflows dir under the configured data dir — the same
+// directory the daemon reads its workflows from.
+//
+// $NIGHTME_WORKFLOWS_DIR overrides it, for testing.
 func workflowsDir() (string, error) {
 	if d := os.Getenv("NIGHTME_WORKFLOWS_DIR"); d != "" {
 		return d, nil
 	}
-	home, err := os.UserHomeDir()
+	cfg, err := config.Load(config.DefaultPath())
 	if err != nil {
-		return "", fmt.Errorf("resolve home: %w", err)
+		return "", err
 	}
-	return filepath.Join(home, ".nightme", "workflows"), nil
+	return runtime.WorkflowsDir(cfg)
 }
 
 // loadWorkflows loads all workflows from the workflows dir.
@@ -496,9 +499,16 @@ func runWorkflowValidate(out io.Writer, errOut io.Writer, args []string, asJSON 
 			diags = append(diags, wfe.ValidateFile(path)...)
 			continue
 		}
+		if !os.IsNotExist(err) {
+			// The path is there but cannot be read: that is a path the
+			// command could not check, not a workflow name.
+			fmt.Fprintf(errOut, "%s: %v\n", path, err)
+			unreadable = true
+			continue
+		}
 		// The argument is not a path on disk: it may be the name of a
 		// workflow in the workflows directory.
-		matched, nameErr := workflowPathsByName(dir, path)
+		matched, nameErr := wfe.WorkflowPathsByName(dir, path)
 		if nameErr != nil || len(matched) == 0 {
 			fmt.Fprintf(errOut, "%s: %v\n", path, err)
 			unreadable = true
@@ -538,28 +548,6 @@ func runWorkflowValidate(out io.Writer, errOut io.Writer, args []string, asJSON 
 		return nmerrors.New(nmerrors.CodeValidationError, "workflow: a workflow does not validate")
 	}
 	return nil
-}
-
-// workflowPathsByName returns the workflow files of dir whose name is
-// name.
-//
-// A name two files claim is ambiguous: both files come back, so the
-// caller can report the clash.
-func workflowPathsByName(dir, name string) ([]string, error) {
-	if dir == "" {
-		return nil, fmt.Errorf("the workflows directory is not known")
-	}
-	paths, err := wfe.WorkflowPaths(dir)
-	if err != nil {
-		return nil, err
-	}
-	var out []string
-	for _, path := range paths {
-		if wfe.WorkflowName(dir, path) == name {
-			out = append(out, path)
-		}
-	}
-	return out, nil
 }
 
 // readablePath reports whether the path can be read, and whether it is

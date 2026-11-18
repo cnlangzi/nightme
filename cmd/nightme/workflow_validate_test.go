@@ -390,3 +390,30 @@ func TestWorkflowList_NamesTheWorkflowsByTheirPath(t *testing.T) {
 		t.Errorf("output = %q, want the name of the workflow", out)
 	}
 }
+
+// TestWorkflowList_TheConfiguredDataDirHoldsTheWorkflows — the CLI
+// reads the workflows of the directory the daemon reads.
+func TestWorkflowList_TheConfiguredDataDirHoldsTheWorkflows(t *testing.T) {
+	dataDir := t.TempDir()
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("paths:\n  data_dir: "+dataDir+"\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	t.Setenv("NIGHTME_CONFIG", cfgPath)
+
+	dir := filepath.Join(dataDir, "workflows", "nightme")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	body := "title: code it\njobs:\n  main:\n    steps: [{message: hi}]\n"
+	if err := os.WriteFile(filepath.Join(dir, "coder.yml"), []byte(body), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	out := captureStdout(t, func() error {
+		return runRoot("workflow", "list")
+	})
+	if !strings.Contains(out, "nightme/coder") {
+		t.Errorf("output = %q, want the name of the workflow", out)
+	}
+}

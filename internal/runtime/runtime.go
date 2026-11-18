@@ -439,7 +439,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	// The workflows dir is the directory the daemon reads its
 	// workflows from. A command that installs a workflow writes it
 	// there, so the daemon finds it without a second configuration.
-	workflows, err := workflowsDir(cfg)
+	workflows, err := WorkflowsDir(cfg)
 	if err != nil {
 		logger.Warn("run: the workflows dir is not known", "err", err)
 	}

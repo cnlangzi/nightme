@@ -15,6 +15,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
 // The hub: the published workflows live in this repository, one bundle
@@ -65,6 +67,12 @@ func ParseAddress(s string) (Address, error) {
 	}
 	if !nameRe.MatchString(name) {
 		return Address{}, fmt.Errorf("the workflow name %q is not a lowercase kebab-case name", name)
+	}
+	if wfe.IsReservedDir(owner) {
+		// The owner becomes a directory under the workflows directory,
+		// and two of those names are reserved: the workflows under them
+		// are never scanned, so an install there would be invisible.
+		return Address{}, fmt.Errorf("the owner %q is reserved by the workflows directory", owner)
 	}
 	return Address{Owner: owner, Name: name}, nil
 }

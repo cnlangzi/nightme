@@ -144,6 +144,20 @@ func WorkflowPaths(dir string) ([]string, error) {
 	return out, nil
 }
 
+// IsReservedDir reports whether name is a reserved directory of the
+// workflows directory.
+//
+// The reserved directories hold nightme's own state: `actions` holds
+// the user's action scripts and `runs` holds the run state. Neither is
+// a workflow namespace, so a file under them is never a workflow.
+func IsReservedDir(name string) bool {
+	switch name {
+	case "actions", "runs":
+		return true
+	}
+	return false
+}
+
 // isReservedChild reports whether path is one of the workflows
 // directory's own children whose name is reserved.
 //
@@ -159,11 +173,27 @@ func isReservedChild(dir, path string) bool {
 	if strings.Contains(rel, string(filepath.Separator)) {
 		return false
 	}
-	switch filepath.Base(rel) {
-	case "actions", "runs":
-		return true
+	return IsReservedDir(filepath.Base(rel))
+}
+
+// WorkflowPathsByName returns the workflow files of dir whose name is
+// name.
+//
+// The name is the path of a workflow under dir, without the extension
+// (see WorkflowName). A name two files claim is ambiguous: both files
+// come back, so the caller can report the clash.
+func WorkflowPathsByName(dir, name string) ([]string, error) {
+	paths, err := WorkflowPaths(dir)
+	if err != nil {
+		return nil, err
 	}
-	return false
+	var out []string
+	for _, path := range paths {
+		if WorkflowName(dir, path) == name {
+			out = append(out, path)
+		}
+	}
+	return out, nil
 }
 
 // BaseName returns the name of a file without its extension.

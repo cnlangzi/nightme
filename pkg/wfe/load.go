@@ -176,39 +176,21 @@ func Parse(raw []byte) (*Workflow, error) {
 // parse parses and validates raw YAML bytes as a workflow.
 //
 // Its errors carry no prefix: the caller names the file they come
-// from.
+// from. A workflow that does not validate is a *ValidationError: it
+// carries every problem that was found.
 func parse(raw []byte) (*Workflow, error) {
-	var doc yaml.Node
-	if err := yaml.Unmarshal(raw, &doc); err != nil {
-		return nil, err
+	wf, diags := collect(raw, false)
+	if len(diags) > 0 {
+		return nil, &ValidationError{Diagnostics: diags}
 	}
-	root := &doc
-	if doc.Kind == yaml.DocumentNode {
-		if len(doc.Content) == 0 {
-			return nil, fmt.Errorf("the file is empty")
-		}
-		root = doc.Content[0]
-	}
-	if root.Kind != yaml.MappingNode {
-		return nil, fmt.Errorf("the file is not a workflow: it has no keys")
-	}
-	if err := checkDocument(root); err != nil {
-		return nil, err
-	}
-
-	var wf Workflow
-	if err := root.Decode(&wf); err != nil {
-		return nil, err
-	}
-	if err := validate(&wf, root); err != nil {
-		return nil, err
-	}
-	return &wf, nil
+	return wf, nil
 }
 
 // entry is one key/value pair of a YAML mapping.
 type entry struct {
 	key string
+	// keyNode is the node of the key.
+	keyNode *yaml.Node
 	// val is the value of the key.
 	val *yaml.Node
 }
@@ -231,14 +213,69 @@ func mappingEntries(node *yaml.Node) ([]entry, error) {
 	if err := requireMapping(node); err != nil {
 		return nil, err
 	}
+	return mappingPairs(node), nil
+}
+
+// mappingPairs returns the key/value pairs of a YAML mapping.
+//
+// A node that is not a mapping has no pairs.
+func mappingPairs(node *yaml.Node) []entry {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return nil
+	}
 	out := make([]entry, 0, len(node.Content)/2)
 	for i := 0; i+1 < len(node.Content); i += 2 {
 		out = append(out, entry{
-			key: node.Content[i].Value,
-			val: node.Content[i+1],
+			key:     node.Content[i].Value,
+			keyNode: node.Content[i],
+			val:     node.Content[i+1],
 		})
 	}
-	return out, nil
+	return out
+}
+
+// sequenceItems returns the items of a YAML sequence.
+//
+// A node that is not a sequence has no items.
+func sequenceItems(node *yaml.Node) []*yaml.Node {
+	if node == nil || node.Kind != yaml.SequenceNode {
+		return nil
+	}
+	return node.Content
+}
+
+// mappingValue returns the value node of a key in a mapping node.
+func mappingValue(node *yaml.Node, key string) *yaml.Node {
+	for _, e := range mappingPairs(node) {
+		if e.key == key {
+			return e.val
+		}
+	}
+	return nil
+}
+
+// jobNode returns the mapping node of a job.
+func jobNode(root *yaml.Node, name string) *yaml.Node {
+	return mappingValue(mappingValue(root, "jobs"), name)
+}
+
+// stepNode returns the mapping node of a step of a job.
+func stepNode(root *yaml.Node, job string, index int) *yaml.Node {
+	steps := mappingValue(jobNode(root, job), "steps")
+	items := sequenceItems(steps)
+	if index < 0 || index >= len(items) {
+		return nil
+	}
+	return items[index]
+}
+
+// argNode returns the mapping node of an argument.
+func argNode(root *yaml.Node, index int) *yaml.Node {
+	items := sequenceItems(mappingValue(root, "args"))
+	if index < 0 || index >= len(items) {
+		return nil
+	}
+	return items[index]
 }
 
 // nodeKind names the kind of a YAML node, for an error message.
@@ -254,89 +291,6 @@ func nodeKind(node *yaml.Node) string {
 	return "something else"
 }
 
-// checkDocument validates the shape of a workflow file.
-//
-// A key the schema does not have is ignored: the file loads, and the
-// key has no effect.
-func checkDocument(root *yaml.Node) error {
-	entries, err := mappingEntries(root)
-	if err != nil {
-		return err
-	}
-	for _, e := range entries {
-		switch e.key {
-		case "args":
-			if err := checkMappingList("`args:`", e.val); err != nil {
-				return err
-			}
-		case "on":
-			if err := checkTrigger(e.val); err != nil {
-				return err
-			}
-		case "jobs":
-			if err := checkJobs(e.val); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-// checkMappingList checks that a node holds a list of mappings.
-//
-// The label names the list in an error message.
-func checkMappingList(label string, node *yaml.Node) error {
-	if node.Kind != yaml.SequenceNode {
-		return fmt.Errorf("%s must be a list (got %s)", label, nodeKind(node))
-	}
-	for _, item := range node.Content {
-		if err := requireMapping(item); err != nil {
-			return fmt.Errorf("%s: %w", label, err)
-		}
-	}
-	return nil
-}
-
-// checkTrigger validates the `on:` block of a workflow.
-//
-// The block is parsed and displayed; nothing fires it yet.
-func checkTrigger(node *yaml.Node) error {
-	if node.Kind != yaml.MappingNode {
-		return fmt.Errorf("`on:` must be a mapping (got %s)", nodeKind(node))
-	}
-	return nil
-}
-
-// checkJobs validates the jobs of a workflow and their steps.
-func checkJobs(node *yaml.Node) error {
-	if node.Kind != yaml.MappingNode {
-		return fmt.Errorf("`jobs:` must be a mapping (got %s)", nodeKind(node))
-	}
-	entries, err := mappingEntries(node)
-	if err != nil {
-		return fmt.Errorf("`jobs:`: %w", err)
-	}
-	for _, e := range entries {
-		jobEntries, err := mappingEntries(e.val)
-		if err != nil {
-			return fmt.Errorf("job %q: %w", e.key, err)
-		}
-		for _, je := range jobEntries {
-			if je.key == "iterations" {
-				if err := requireWholeNumber(je.key, je.val); err != nil {
-					return fmt.Errorf("job %q: %w", e.key, err)
-				}
-			}
-			if je.key == "steps" {
-				if err := checkMappingList(fmt.Sprintf("job %q: `steps:`", e.key), je.val); err != nil {
-					return err
-				}
-			}
-		}
-	}
-	return nil
-}
-
 // requireWholeNumber checks that a scalar node holds a whole number.
 //
 // yaml.v3 decodes a float into an int field by truncating it, so a
@@ -344,79 +298,6 @@ func checkJobs(node *yaml.Node) error {
 func requireWholeNumber(key string, node *yaml.Node) error {
 	if node.Kind != yaml.ScalarNode || node.Tag != "!!int" {
 		return fmt.Errorf("%s must be a whole number, got %q", key, node.Value)
-	}
-	return nil
-}
-
-// validate checks the semantics of a workflow and gives every step an
-// id.
-//
-// The root node is the parsed document: it says which keys the file
-// actually wrote, so a missing key can be told apart from a key that
-// was written with a zero value.
-func validate(wf *Workflow, root *yaml.Node) error {
-	if strings.TrimSpace(wf.Title) == "" {
-		return fmt.Errorf("title is required")
-	}
-	if !hasKey(root, "instruct") {
-		wf.Instruct = true
-	}
-
-	seenArgs := map[string]bool{}
-	for i, arg := range wf.Args {
-		if strings.TrimSpace(arg.Name) == "" {
-			return fmt.Errorf("argument %d has no name", i+1)
-		}
-		if seenArgs[arg.Name] {
-			return fmt.Errorf("duplicate argument %q", arg.Name)
-		}
-		seenArgs[arg.Name] = true
-	}
-
-	if len(wf.Jobs) == 0 {
-		return fmt.Errorf("jobs is required (at least one)")
-	}
-	jobNames := map[string]bool{}
-	for name := range wf.Jobs {
-		jobNames[name] = true
-	}
-	for name, job := range wf.Jobs {
-		for _, need := range job.Needs {
-			if !jobNames[need] {
-				return fmt.Errorf("job %q needs unknown job %q", name, need)
-			}
-		}
-		if job.Iterations != nil && *job.Iterations < 0 {
-			return fmt.Errorf("job %q: iterations must be >= 0", name)
-		}
-	}
-	if len(wf.JobOrder()) != len(wf.Jobs) {
-		return fmt.Errorf("the jobs need each other in a circle")
-	}
-	seenSteps := map[string]string{} // step id -> the job it belongs to
-	for _, name := range sortedJobNames(wf.Jobs) {
-		job := wf.Jobs[name]
-		if len(job.Steps) == 0 {
-			return fmt.Errorf("job %q has no steps", name)
-		}
-		for i := range job.Steps {
-			step := &job.Steps[i]
-			if err := validateStep(step); err != nil {
-				return fmt.Errorf("job %q step %d: %w", name, i+1, err)
-			}
-			if step.ID == "" {
-				step.ID = syntheticStepID(name, i+1)
-			}
-			// The run state is keyed by step id, so two steps may
-			// not share one.
-			if prev, ok := seenSteps[step.ID]; ok {
-				return fmt.Errorf("the step id %q is used by job %q and job %q", step.ID, prev, name)
-			}
-			seenSteps[step.ID] = name
-		}
-	}
-	if err := checkArgExpressions(wf); err != nil {
-		return err
 	}
 	return nil
 }
@@ -602,28 +483,6 @@ func Bind(wf *Workflow, args map[string]string) (*Workflow, error) {
 		}
 	}
 	return out, nil
-}
-
-// checkArgExpressions reports the first expression that names an
-// argument the workflow does not declare.
-func checkArgExpressions(wf *Workflow) error {
-	declared := map[string]bool{}
-	for _, a := range wf.Args {
-		declared[a.Name] = true
-	}
-	for _, text := range workflowTexts(wf) {
-		for _, m := range exprRef.FindAllStringSubmatch(text, -1) {
-			expr := strings.TrimSpace(m[1])
-			arg := argExpr.FindStringSubmatch(expr)
-			if arg == nil {
-				continue
-			}
-			if !declared[arg[1]] {
-				return fmt.Errorf("unknown argument %q (declared: %s)", arg[1], describeArgs(wf.ArgNames()))
-			}
-		}
-	}
-	return nil
 }
 
 // workflowTexts returns every string of a workflow that may hold an

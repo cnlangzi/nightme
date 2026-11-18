@@ -215,7 +215,7 @@ nightme start          # daemon 在后台跑起来
 | `nightme me` | 交互向导：配置个人 agent 的 chat model——接口地址、模型、回答上限、思考用的 agent、凭据。 |
 | `nightme update` | 就地升级：检查、下载、SHA256 校验、安装、重启 daemon。 |
 | `nightme clean` | 清空日志、清掉附件 inbox；`--all` 全量本地重置（先停 daemon）。 |
-| `nightme workflow` | list / show / dry-run `~/.nightme/workflows/` 下的 workflow YAML。 |
+| `nightme workflow` | list / show / dry-run / validate `~/.nightme/workflows/` 下的 workflow YAML。 |
 | `nightme doctor` | 觉得哪里不对时，看一眼 NightMe 是否健康。仅 Unix。 |
 | `nightme version` | 打印版本信息。 |
 
@@ -457,8 +457,11 @@ agent——`/me`——在你发起它的那个 chat 里跑一个 workflow。每�
 | `nightme workflow list` | 汇总每个 workflow：名称、title、workspaces、触发器、jobs。没加载成功的文件列在表格下面。`--json` 输出机器可读。 |
 | `nightme workflow show <name>` | 打印一个 workflow 的解析细节：触发器、jobs、steps。 |
 | `nightme workflow run <name>` | 打印执行计划——哪些 step 跑、什么顺序。`--workspace` 覆盖 workspace。 |
+| `nightme workflow validate [path...]` | 检查 workflow 文件，把每个问题都报出来：缺 title、一个 step 写了两种类型、schema 里没有的 key。每个问题一行——`path:line:column: message`。全部合法时退出码 `0`，有 workflow 不合法是 `8`，给的路径不存在或读不了是 `9`。`--json` 输出机器可读。 |
 
 `run` 是规划 dry-run：只解析和排计划，不真正调 agent。
+
+`validate` 是个 linter：不带路径时检查 workflows 目录，带路径时检查给的文件和目录。路径不存在会报出来，不会被跳过。
 
 ### 写一个 workflow
 

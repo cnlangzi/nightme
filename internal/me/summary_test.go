@@ -495,10 +495,7 @@ func TestTheWakeLogSurvivesTheDaemon(t *testing.T) {
 	waitStateFile(t, dir)
 
 	r := chatRun(t, svc, "obs-1")
-	raw, err := os.ReadFile(filepath.Join(dir, "runs", r.id+".json"))
-	if err != nil {
-		t.Fatalf("read state: %v", err)
-	}
+	raw := readStateFile(t, filepath.Join(dir, "runs", r.id+".json"))
 	var state persistedRun
 	if err := json.Unmarshal(raw, &state); err != nil {
 		t.Fatalf("decode state: %v", err)

@@ -382,6 +382,12 @@ legacy case"兜底。
 
 ### 4.1c Format 1(`/gtw back <branch>` — 跳进 worktree)
 
+出发点可以是主仓库根目录,也可以是同一个仓库里任一 linked worktree 的根目录。
+两边读的是同一份 `git worktree list --porcelain`,所以跳转解析出来的目标与出发点
+无关。子目录不算根目录。
+
+从主仓库根目录跳进 worktree:
+
 ```
 ✅ back into `/Users/.../fix-gtw-hooks`
 → worktree: /Users/.../fix-gtw-hooks
@@ -389,7 +395,27 @@ legacy case"兜底。
 → .nightme/gtw.yml (preserved)
 ```
 
-`<branch>` 是 worktree 分支名的**前缀**,不是目录名。命中多个分支时不猜:
+从 worktree A 跳进 worktree B 时多一行 `from`,说明来处原样留着:
+
+```
+✅ back into `/Users/.../fix-gtw-hooks`
+→ from: /Users/.../fix-42 (preserved)
+→ worktree: /Users/.../fix-gtw-hooks
+→ branch: fix-gtw-hooks
+→ .nightme/gtw.yml (preserved)
+```
+
+`<branch>` 是 worktree 分支名的**前缀**,不是目录名。命中的就是当前这个
+worktree 时没有可跳的目标:cwd 不动,缺 yml 的修补照跑。
+
+```
+ℹ️ already in the worktree for `fix-42`
+→ worktree: /Users/.../fix-42
+→ branch: fix-42
+→ .nightme/gtw.yml (preserved)
+```
+
+命中多个分支时不猜:
 
 ```
 ❌ "42-f" matches 2 worktree branches:
@@ -398,13 +424,15 @@ legacy case"兜底。
 hint: type the full branch name
 ```
 
-一个都没命中时列出这个仓库的所有 worktree 分支:
+一个都没命中时列出这个仓库的所有 worktree 分支;从 worktree 出发时补一行回主
+仓库的提示:
 
 ```
 ❌ no worktree branch matches "42-f"
 worktree branches:
 → 42-feat-login-state-expires
 → 42-fix-other
+hint: run `/gtw back` (no arg) to return to the main repo
 ```
 
 仓库还没有任何 worktree 时指向 `/gtw fix`:
@@ -430,6 +458,13 @@ nightme 不给自己没建的 worktree 发这个凭据:
 → worktree: /Users/.../scratch
 → branch: scratch
 → .nightme/gtw.yml (not created — this worktree is not a /gtw fix worktree)
+```
+
+cwd 不在根目录时拒绝,并指出该去哪个根目录:
+
+```
+❌ /gtw back <branch> requires cwd at the main repo root or a worktree root
+current cwd is not a repository root; run `/cwd /Users/.../nightme` first.
 ```
 
 ### 4.2 Format 2(sync)

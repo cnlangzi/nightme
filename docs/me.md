@@ -260,9 +260,10 @@ chatsession: message settled chat_id=… message_id=… status=… summary=…
 | --- | --- | --- | --- |
 | `usage` | 命令行不合法（未知 flag / 参数缺失 / 位置参数不对） | 全部 | 异常 |
 | `no_cwd` | 命令需要工作区，但没有 | 全部 | 异常 |
-| `wrong_cwd` | `/gtw back <branch>` 要求当前在主仓库根目录 | `/gtw back` | 异常 |
+| `wrong_cwd` | `/gtw back <branch>` 要求当前在主仓库根目录或某个 worktree 的根目录 | `/gtw back` | 异常 |
 | `not_found` | 没有 worktree 分支匹配这个前缀（或 worktree 目录没了） | `/gtw back` | 异常 |
 | `ambiguous` | 前缀匹配到多个 worktree 分支，无法确定 | `/gtw back` | 异常 |
+| `already_in_worktree` | chat 已经在这个分支所在的 worktree 里，没有可跳的目标 | `/gtw back` | 正常分支 |
 | `no_session` | 没有聊天会话 | `/stop` | 异常 |
 | `no_agent` | 没有选中的 agent | `/use` / `/review` / `/stop` | 异常 |
 | `unknown_agent` | agent 名没注册 | `/review` | 异常 |

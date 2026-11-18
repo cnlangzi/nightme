@@ -333,8 +333,7 @@ func renderWorktreeMatchError(e *worktreeMatchError) string {
 }
 
 // RunBackToWorktree is the entry point for `/gtw back <branch>`.
-// The mirror of RunBack: jump from the chat's main repo root
-// into the fix worktree that holds the matching branch, repairing a
+// Jump into the worktree that holds the matching branch, repairing a
 // missing .nightme/gtw.yml when needed.
 //
 // `branch` is a PREFIX of a worktree branch name — the whole branch
@@ -348,18 +347,17 @@ func renderWorktreeMatchError(e *worktreeMatchError) string {
 // the ones under `<repo>.nightme/`: a worktree the user made by hand
 // is reachable the same way.
 //
-// The new path is the strict inverse of the existing RunBack
-// path:
+// The chat may start from the primary checkout or from any linked
+// worktree of the same repository — both are roots of the listing
+// this command reads, so the target resolves the same way from
+// either side. Leaving a worktree this way keeps that worktree
+// whole: its directory, its branch, its uncommitted work and its
+// state file all stay on disk, and the default branch is not
+// synced — the chat never lands on it.
 //
-//   - RunBack requires cwd to be IN a worktree (refuses when
-//     at the repo root — no worktree to step out of).
-//   - RunBackToWorktree requires cwd to BE the primary checkout
-//     (refuses when inside a worktree — caller must `/gtw back`
-//     first).
-//
-// These two gates make the two directions non-overlapping: a
-// user inside a worktree types `/gtw back` to leave it; only
-// from the main repo does `/gtw back <branch>` make sense.
+// A cwd that is not a root — a subdirectory of the main repo or of a
+// worktree — is refused: the command needs a directory it can name
+// in a card.
 //
 // yml repair (when <wt>/.nightme/gtw.yml is missing):
 //
@@ -429,21 +427,35 @@ func RunBackToWorktree(
 	}
 	primary := entries[0].Path
 
-	// --- gate: must be at the primary checkout -----------------
-	// Symmetric to RunBack's "must be inside a worktree" gate.
-	// The two together keep the directions from being able to
-	// fire in the wrong context.
+	// --- the worktree the chat sits in, if any ----------------
+	// A linked worktree of this repository whose root IS the
+	// chat's cwd. The jump is legal from there: the target
+	// resolves out of the same listing, so where the chat
+	// starts does not change what the target is.
+	current := linkedWorktreeAt(entries, primary, selectedCwd)
+
+	// --- gate: cwd must be a root of this repository ----------
+	// The primary checkout or a linked worktree's root — either
+	// one names a directory the card can point at. A
+	// subdirectory of either is refused.
 	//
-	// The comparison is against the primary checkout from the
+	// The comparison is against the paths in the worktree
 	// listing, not against `rev-parse --show-toplevel`: inside a
 	// linked worktree that command reports the worktree's own
 	// root, so a cwd sitting exactly at a linked worktree's root
-	// would compare equal to it and slip through.
-	if !sameWorktreePath(selectedCwd, primary) {
+	// would compare equal to it and slip through as the primary.
+	if !sameWorktreePath(selectedCwd, primary) && current == nil {
+		// Name the root the cwd sits in — a placeholder would
+		// leave the user with no way to learn the path.
+		root := rootContaining(entries, selectedCwd)
+		if root == "" {
+			root = primary
+		}
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-			"❌ /gtw back <branch> requires cwd at the main repo root.\n"+
-				"current cwd is inside a worktree; run `/gtw back` (no arg) first.",
-			command.FailedOutcome("wrong_cwd", "the chat is not at the main repo root")), nil
+			"❌ /gtw back <branch> requires cwd at the main repo root or a worktree root\n"+
+				fmt.Sprintf("current cwd is not a repository root; run `/cwd %s` first.", root),
+			command.FailedOutcome("wrong_cwd",
+				"the chat is not at the main repo root or a worktree root")), nil
 	}
 
 	// --- resolve the branch prefix → worktree ------------------
@@ -455,8 +467,14 @@ func RunBackToWorktree(
 	}
 	entry, matchErr := resolveWorktreeBranch(entries, primary, branch)
 	if matchErr != nil {
+		card := renderWorktreeMatchError(matchErr)
+		if current != nil && matchErr.Reason == "not_found" {
+			// From a worktree the main repo is one command away,
+			// and the branch the user wants may well live there.
+			card += "\nhint: run `/gtw back` (no arg) to return to the main repo"
+		}
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-			renderWorktreeMatchError(matchErr),
+			card,
 			command.FailedOutcomeData(matchErr.Reason, matchErr.Error(),
 				map[string]string{
 					"candidates": strings.Join(branchNames(matchErr.candidates()), ", "),
@@ -531,6 +549,47 @@ func RunBackToWorktree(
 		}
 	}
 
+	// --- the yml line both cards end with ---------------------
+	// The only visual hint that distinguishes a ModeLocal stub
+	// from a yml that survived a previous `/gtw fix` — and from
+	// a worktree nightme does not own, which gets no yml at all.
+	ymlLine := "→ .nightme/gtw.yml (preserved)"
+	switch {
+	case repaired:
+		ymlLine = "→ .nightme/gtw.yml (repaired — ModeLocal stub; re-dispatch any issue manually)"
+	case !owned:
+		ymlLine = "→ .nightme/gtw.yml (not created — this worktree is not a /gtw fix worktree)"
+	}
+
+	// --- already in the target worktree -----------------------
+	// The branch the user named is the branch this worktree
+	// holds — there is nowhere to jump to. The cwd stays where it
+	// is, but the yml repair above still ran: an owned worktree
+	// whose yml went missing is repaired by this command, and
+	// this is the only path that reaches it without a `/cwd`.
+	if current != nil && sameWorktreePath(entry.Path, current.Path) {
+		rows := []string{
+			fmt.Sprintf("→ worktree: %s", current.Path),
+			fmt.Sprintf("→ branch: %s", entry.Branch),
+			ymlLine,
+		}
+		body := fmt.Sprintf("ℹ️ already in the worktree for `%s`\n%s",
+			entry.Branch, strings.Join(rows, "\n"))
+		reply(ctx, cs.Emitter(), chatID, messageID, body)
+
+		reportOutcome(ctx, messages.Outcome{
+			Status:  messages.OutcomeOK,
+			Summary: fmt.Sprintf("the chat is already in the worktree %s", current.Path),
+			Data: map[string]string{
+				"reason":    "already_in_worktree",
+				"worktree":  current.Path,
+				"repo_root": primary,
+				"branch":    entry.Branch,
+			},
+		})
+		return &Result{Consumed: true}, nil
+	}
+
 	// --- switch cwd into the worktree --------------------------
 	if serr := cs.SetSelectedCwd(worktreePath); serr != nil {
 		slog.Default().Warn("gtw: SetSelectedCwd into worktree failed",
@@ -557,19 +616,18 @@ func RunBackToWorktree(
 
 	// --- success card -----------------------------------------
 	// Mirrors RunBack's row-style card so the two directions
-	// read the same shape at a glance. The last line is the
-	// only visual hint that distinguishes a ModeLocal stub from
-	// a yml that survived a previous `/gtw fix` — and from a
-	// worktree nightme does not own, which gets no yml at all.
-	ymlLine := "→ .nightme/gtw.yml (preserved)"
-	switch {
-	case repaired:
-		ymlLine = "→ .nightme/gtw.yml (repaired — ModeLocal stub; re-dispatch any issue manually)"
-	case !owned:
-		ymlLine = "→ .nightme/gtw.yml (not created — this worktree is not a /gtw fix worktree)"
+	// read the same shape at a glance. A jump out of a worktree
+	// adds the row that names where the chat came from — and
+	// says that the worktree it left is still there.
+	var rows []string
+	if current != nil {
+		rows = append(rows, fmt.Sprintf("→ from: %s (preserved)", current.Path))
 	}
-	body := fmt.Sprintf("✅ back into `%s`\n→ worktree: %s\n→ branch: %s\n%s",
-		worktreePath, worktreePath, entry.Branch, ymlLine)
+	rows = append(rows,
+		fmt.Sprintf("→ worktree: %s", worktreePath),
+		fmt.Sprintf("→ branch: %s", entry.Branch),
+		ymlLine)
+	body := fmt.Sprintf("✅ back into `%s`\n%s", worktreePath, strings.Join(rows, "\n"))
 	reply(ctx, cs.Emitter(), chatID, messageID, body)
 
 	reportOutcome(ctx, messages.Outcome{
@@ -584,6 +642,64 @@ func RunBackToWorktree(
 	return &Result{Consumed: true}, nil
 }
 
+// linkedWorktreeAt returns the linked worktree of the repository
+// whose root is dir, or nil when dir is not the root of one.
+//
+// The primary checkout is not a linked worktree and never matches:
+// the caller asks about the worktree the chat sits in, and the
+// primary checkout has its own handling.
+//
+// The comparison is exact — a subdirectory of a worktree is not that
+// worktree's root and does not match.
+func linkedWorktreeAt(entries []WorktreeEntry, primary, dir string) *WorktreeEntry {
+	for i := range entries {
+		if sameWorktreePath(entries[i].Path, primary) {
+			continue
+		}
+		if sameWorktreePath(dir, entries[i].Path) {
+			return &entries[i]
+		}
+	}
+	return nil
+}
+
+// rootContaining returns the root of the repository — the primary
+// checkout or a linked worktree — that holds dir, or "" when dir
+// sits outside every root of the repository.
+//
+// The deepest root wins: the one that names the directory the cwd
+// is actually in.
+func rootContaining(entries []WorktreeEntry, dir string) string {
+	best := ""
+	for _, e := range entries {
+		if !isUnderPath(dir, e.Path) {
+			continue
+		}
+		if len(e.Path) > len(best) {
+			best = e.Path
+		}
+	}
+	return best
+}
+
+// isUnderPath reports whether dir is inside root. Symlinks are
+// resolved on both sides: on macOS the same directory is spelled
+// /var/... by one caller and /private/var/... by the other.
+func isUnderPath(dir, root string) bool {
+	if pathutil.IsUnder(dir, root) {
+		return true
+	}
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return false
+	}
+	realRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return false
+	}
+	return pathutil.IsUnder(realDir, realRoot)
+}
+
 // underNightmeLayout reports whether worktreePath lives in the
 // nightme worktree directory of the repository at primary —
 // <parent>/<repoName>.nightme/ — the directory `/gtw fix` creates
@@ -593,24 +709,8 @@ func RunBackToWorktree(
 // not create it and must not claim it: the `.nightme/gtw.yml` it
 // would stamp is the token `/gtw close` tears the worktree and its
 // branch down with.
-//
-// The comparison resolves symlinks on both sides: on macOS the
-// same directory is spelled /var/... by one caller and
-// /private/var/... by the other.
 func underNightmeLayout(primary, worktreePath string) bool {
-	layout := WorktreeLayoutDir(primary)
-	if pathutil.IsUnder(worktreePath, layout) {
-		return true
-	}
-	realLayout, err := filepath.EvalSymlinks(layout)
-	if err != nil {
-		return false
-	}
-	realWorktree, err := filepath.EvalSymlinks(worktreePath)
-	if err != nil {
-		return false
-	}
-	return pathutil.IsUnder(realWorktree, realLayout)
+	return isUnderPath(worktreePath, WorktreeLayoutDir(primary))
 }
 
 // ymlRepairSuffix returns a short parenthetical describing

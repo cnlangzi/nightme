@@ -345,9 +345,9 @@ issue 标题遵循 Conventional Commits，`/gtw fix` 据此生成可读的分支
 
 **`/gtw fix *`** 自己从待办队列里取下一件事：挑一个 issue，跑完全一样的流程，然后告诉你挑中了哪个 issue。队列在 tracker 上——NightMe 可以动的 issue 带着 `nightme/assigned` 标签，由人或者 tracker 上的外部自动化加上；fix 保留这个标签，再打上 `nightme/wip` 表示认领。只有只带 `nightme/assigned` 一个标签的 issue 才在队列里：再带任何一个 `nightme/*` 状态 label 就说明别的 agent 正在做它。队列里最老的可选项胜出：前置依赖还没落地的，分支本地已经存在的，或者已经开了 PR 的，都会被跳过。依赖关系取自平台自己的 issue 关系图——GitHub issue dependencies、GitLab blocking issues（Premium）——所以"先做前置"不靠 issue 正文里的文字；平台不提供关系图时队列只按年龄排序，回复里会说明这一点。当队列里没有可选项时，命令会说明原因，并请人在几分钟后叫醒它，而不是直接失败。被认领的 issue 靠 `nightme/wip` 标签离开队列，这个标签到 `/gtw pr --ready` 把 issue 挪到 `nightme/ready` 时才摘下来。
 
-**`/gtw back`** 临时离开 fix worktree 而不拆掉它——chat 的 CWD 回到仓库根目录并 sync 默认分支，worktree、分支和未提交的改动都留在磁盘上。**`/gtw back <branch>`** 再切回去：参数是 worktree 分支名的**前缀**，所以 `42-feat` 就能进入 `42-feat-login-state-expires` 所在的 worktree。前缀命中多个分支时，分支名完全相等的那个优先；都不相等时命令把这些分支列出来，不替人猜。手工建的 worktree 同样能进——分支名就是把手——但 nightme 不往里面写自己的状态文件，`/gtw close` 因此拆不掉一个不是 nightme 建的 worktree 和分支。
+**`/gtw back`** 临时离开 fix worktree 而不拆掉它——chat 的 CWD 回到仓库根目录并 sync 默认分支，worktree、分支和未提交的改动都留在磁盘上。**`/gtw back <branch>`** 再切回去：参数是 worktree 分支名的**前缀**，所以 `42-feat` 就能进入 `42-feat-login-state-expires` 所在的 worktree。出发点可以是主仓库根目录，也可以是同一个仓库里任一 worktree 的根目录——从一个 worktree 跳进另一个时，前一个的目录、分支、未提交的改动和状态文件都原样留着。前缀命中多个分支时，分支名完全相等的那个优先；都不相等时命令把这些分支列出来，不替人猜。手工建的 worktree 同样能进——分支名就是把手——但 nightme 不往里面写自己的状态文件，`/gtw close` 因此拆不掉一个不是 nightme 建的 worktree 和分支。
 
-> **`/gtw sync`**（`git checkout <default> && git pull --rebase origin <default>`）是主仓库操作，在 worktree 里会拒绝执行。`/gtw fix`、`/gtw back`、`/gtw close` 都已经自带 sync，整个流程里不需要手动调用。
+> **`/gtw sync`**（`git checkout <default> && git pull --rebase origin <default>`）是主仓库操作，在 worktree 里会拒绝执行。`/gtw fix`、不带参数的 `/gtw back`、`/gtw close` 都已经自带 sync，整个流程里不需要手动调用。
 
 ### 3. 交接：`/handoff` · `/resume`
 

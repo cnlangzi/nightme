@@ -249,6 +249,8 @@ func (s *Service) switchRoundSession(ctx context.Context, r *run, it iteration) 
 		// The round has a session of its own: the run goes back to it.
 		r.setRoundSession(sess)
 		r.resetRound()
+		// The round starts again when the run enters it again.
+		r.setRoundStarted(it, s.now())
 		s.publishTasks(ctx, r, sess, r.roundTasks(it.job, it.round))
 		return
 	}
@@ -269,10 +271,12 @@ func (s *Service) closeRoundSession(ctx context.Context, r *run) {
 	s.publishReply(ctx, r, sess, roundEndedLine(rec))
 	s.publishReply(ctx, r, sess, decisionsText(rec))
 	s.publishResult(ctx, r, sess, string(rec.Outcome.Status))
-	// The facts of the round belong to the run: a daemon that comes
-	// back renders the tree of the rounds the same way.
-	s.persist(r)
 	r.setRoundSession(nil)
+	// The facts of the round belong to the run: a daemon that comes
+	// back renders the tree of the rounds the same way. The state goes
+	// to the disk after the session is closed: a state that still named
+	// the round that just ended would close it a second time.
+	s.persist(r)
 }
 
 // closeDecisionSession ends the session of the decision that is open.

@@ -104,6 +104,13 @@ type roundDecisions struct {
 	Operator int `json:"operator"`
 }
 
+// add counts the numbers of one round into the numbers of the run.
+func (d *roundDecisions) add(o roundDecisions) {
+	d.System1 += o.System1
+	d.System2 += o.System2
+	d.Operator += o.Operator
+}
+
 // roundRecord is what a finished round of a job came to.
 //
 // The record is what the card of the run reads: the tree of the rounds
@@ -258,13 +265,8 @@ type run struct {
 	gitStatus *messages.GitStatus
 	// roundUsage counts what the round the run is in spent.
 	roundUsage llm.Usage
-	// roundSystem1Decisions and roundSystem2Decisions count what each
-	// capability decided in the round the run is in.
-	roundSystem1Decisions int
-	roundSystem2Decisions int
-	// roundOperatorDecisions counts the answers the operator gave in
-	// the round the run is in.
-	roundOperatorDecisions int
+	// roundCounters counts what decided in the round the run is in.
+	roundCounters roundDecisions
 	// cumDecisions counts what decided over the whole run, and
 	// cumUsage what it spent: the totals the tree of the rounds shows.
 	cumDecisions roundDecisions
@@ -445,7 +447,7 @@ func (r *run) deliver(text string) error {
 	r.phase = PhaseRunning
 	// The answer is one intervention of the operator: a click on an
 	// option is the same answer as a typed reply.
-	r.roundOperatorDecisions++
+	r.roundCounters.Operator++
 	r.mu.Unlock()
 
 	select {
@@ -1332,6 +1334,10 @@ type persistedRun struct {
 	// The tree of the rounds is rendered from them, so the tree of a
 	// run that comes back looks the way it looked before.
 	RoundRecords []roundRecord `json:"round_records,omitempty"`
+	// RoundCounters counts what decided in the round the run is in.
+	// The counters are the run's own: a round that is resumed keeps
+	// the decisions it already counted.
+	RoundCounters roundDecisions `json:"round_counters,omitempty"`
 }
 
 // persist writes the run's state to disk.
@@ -1384,6 +1390,7 @@ func (s *Service) persist(r *run) {
 		DecisionCount:    r.decisionCount,
 		QuestionCount:    r.questionCount,
 		RoundRecords:     append([]roundRecord(nil), r.roundRecords...),
+		RoundCounters:    r.roundCounters,
 	}
 	r.mu.Unlock()
 
@@ -1550,6 +1557,7 @@ func (s *Service) restoreRun(state persistedRun) *run {
 		decisionCount:    state.DecisionCount,
 		questionCount:    state.QuestionCount,
 		roundRecords:     state.RoundRecords,
+		roundCounters:    state.RoundCounters,
 		situationIdx:     situationIndex(state.Messages),
 		ctx:              ctx,
 		cancel:           cancel,
@@ -1576,6 +1584,15 @@ func (s *Service) restoreRun(state persistedRun) *run {
 	for _, entry := range state.RoundSessions {
 		sess := sessionFromState(&entry)
 		r.roundSessions[iteration{job: entry.Job, round: entry.Round}] = sess
+	}
+	// The totals of the run are the numbers of its last round: the
+	// record of that round carries them. Without them the tree of a
+	// run that comes back would count less than the tree before the
+	// restart.
+	if n := len(r.roundRecords); n > 0 {
+		last := r.roundRecords[n-1]
+		r.cumDecisions = last.Decisions
+		r.cumUsage = last.Usage
 	}
 	r.policy.SetRounds(r.state.Rounds)
 	if len(r.argVals) > 0 {
@@ -1737,9 +1754,7 @@ func (r *run) lastCommandMsgIDValue() string {
 func (r *run) resetRound() {
 	r.mu.Lock()
 	r.roundUsage = llm.Usage{}
-	r.roundSystem1Decisions = 0
-	r.roundSystem2Decisions = 0
-	r.roundOperatorDecisions = 0
+	r.roundCounters = roundDecisions{}
 	r.mu.Unlock()
 }
 
@@ -1942,9 +1957,7 @@ func (r *run) closeRound(job string, round int, now time.Time) roundRecord {
 	out := r.roundOutcome(job, round)
 	start := r.roundStart(job, round)
 	r.mu.Lock()
-	r.cumDecisions.System1 += r.roundSystem1Decisions
-	r.cumDecisions.System2 += r.roundSystem2Decisions
-	r.cumDecisions.Operator += r.roundOperatorDecisions
+	r.cumDecisions.add(r.roundCounters)
 	r.cumUsage.Add(r.roundUsage)
 	rec := roundRecord{
 		Round:     round,
@@ -1964,13 +1977,15 @@ func (r *run) closeRound(job string, round int, now time.Time) roundRecord {
 //
 // The caller holds the lock. A run that comes back to a round it has
 // been in writes the record of that round again: the record of a round
-// is the record of its last pass.
+// is the record of its last pass. The record goes to the end of the
+// list, so the list reads in the order the rounds ended.
 func (r *run) storeRoundRecord(rec roundRecord) []roundRecord {
 	for i := range r.roundRecords {
-		if r.roundRecords[i].Job == rec.Job && r.roundRecords[i].Round == rec.Round {
-			r.roundRecords[i] = rec
-			return r.roundRecords
+		if r.roundRecords[i].Job != rec.Job || r.roundRecords[i].Round != rec.Round {
+			continue
 		}
+		r.roundRecords = append(r.roundRecords[:i], r.roundRecords[i+1:]...)
+		break
 	}
 	return append(r.roundRecords, rec)
 }
@@ -2037,9 +2052,9 @@ func (r *run) recordWake(rec wakeRecord) {
 	r.wakes = append(r.wakes, rec)
 	switch rec.Who {
 	case decisionDecider:
-		r.roundSystem1Decisions++
+		r.roundCounters.System1++
 	case decisionChat:
-		r.roundSystem2Decisions++
+		r.roundCounters.System2++
 	}
 	r.mu.Unlock()
 }

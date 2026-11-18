@@ -9,6 +9,9 @@ package me
 
 import (
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -787,6 +790,91 @@ func TestTheCurrentRoundSaysWhenItStarted(t *testing.T) {
 	}
 }
 
+// TestTheTotalsOfTheRunSurviveARestart — the numbers of the run are
+// the numbers of its last round: a run that comes back keeps counting
+// up, and the tree never runs backwards.
+func TestTheTotalsOfTheRunSurviveARestart(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+	svc, _ := testService(t, dir, noModels())
+	wf, ok := svc.catalog.Lookup("one")
+	if !ok {
+		t.Fatal("the workflow is not in the catalogue")
+	}
+	bound, err := wfe.Bind(wf, map[string]string{})
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	r := newRun(svc, Request{Name: "one", ChatID: "obs-1", Cwd: "/tmp/work"}, bound, nil)
+	t.Cleanup(r.cancel)
+
+	r.roundRecords = []roundRecord{{
+		Round:     1,
+		Job:       "main",
+		Decisions: roundDecisions{System1: 6, Operator: 2},
+		Usage:     llm.Usage{InputTokens: 6000, OutputTokens: 1000},
+	}}
+	r.roundCounters = roundDecisions{System1: 1}
+
+	restored := svc.restoreRun(persistedRun{
+		RunID:         "one-1",
+		ChatID:        "obs-1",
+		Cwd:           "/tmp/work",
+		Workflow:      r.workflow,
+		State:         r.state,
+		RoundRecords:  r.roundRecords,
+		RoundCounters: r.roundCounters,
+	})
+	if restored.cumDecisions.System1 != 6 || restored.cumDecisions.Operator != 2 {
+		t.Errorf("the restored totals are %+v, want the numbers of the last round", restored.cumDecisions)
+	}
+	if restored.cumUsage.InputTokens != 6000 || restored.cumUsage.OutputTokens != 1000 {
+		t.Errorf("the restored totals are %+v, want the numbers of the last round", restored.cumUsage)
+	}
+	if restored.roundCounters.System1 != 1 {
+		t.Errorf("the restored round counts %+v, want the numbers of the round", restored.roundCounters)
+	}
+}
+
+// TestTheStateOfTheRunDoesNotNameTheRoundThatEnded — the state on
+// disk must not name a round that has ended as the current one: a
+// daemon that comes back would close that round a second time.
+func TestTheStateOfTheRunDoesNotNameTheRoundThatEnded(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+	svc, _ := testService(t, dir, noModels())
+	wf, ok := svc.catalog.Lookup("one")
+	if !ok {
+		t.Fatal("the workflow is not in the catalogue")
+	}
+	bound, err := wfe.Bind(wf, map[string]string{})
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	r := newRun(svc, Request{Name: "one", ChatID: "obs-1", Cwd: "/tmp/work"}, bound, nil)
+	t.Cleanup(r.cancel)
+
+	r.setRoundSession(&session{kind: sessionRound, id: "main · round 1", job: "main", round: 1, cardID: "card-1"})
+	svc.closeRoundSession(context.Background(), r)
+	if r.roundSessionRef() != nil {
+		t.Error("the run still holds the round that ended")
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "runs", r.id+".json"))
+	if err != nil {
+		t.Fatalf("read the state: %v", err)
+	}
+	var state persistedRun
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatalf("decode the state: %v", err)
+	}
+	if state.RoundSession != nil {
+		t.Errorf("the state names the round that ended: %+v", state.RoundSession)
+	}
+	if len(state.RoundRecords) != 1 {
+		t.Errorf("the state holds %d records, want the round that ended", len(state.RoundRecords))
+	}
+}
+
 // TestTheRoundThatEndsIsRecorded — a round that ends leaves its facts
 // with the run: the tree of the rounds reads them back.
 func TestTheRoundThatEndsIsRecorded(t *testing.T) {
@@ -812,8 +900,8 @@ func TestTheRoundThatEndsIsRecorded(t *testing.T) {
 		Outcome: wfe.Outcome{Status: wfe.OutcomeOK, Summary: "the commit landed"},
 		At:      at,
 	}}
-	r.roundSystem1Decisions = 1
-	r.roundOperatorDecisions = 2
+	r.roundCounters.System1 = 1
+	r.roundCounters.Operator = 2
 	r.roundUsage = llm.Usage{InputTokens: 100, OutputTokens: 20}
 
 	rec := r.closeRound("main", 1, at.Add(time.Minute))
@@ -920,11 +1008,11 @@ func TestTheDecisionsOfTheRoundAreCounted(t *testing.T) {
 	r.recordWake(wakeRecord{Who: decisionChat})
 	r.recordWake(wakeRecord{Who: decisionChat})
 
-	if r.roundSystem1Decisions != 1 {
-		t.Errorf("the round counts %d decisions of the decision model, want 1", r.roundSystem1Decisions)
+	if r.roundCounters.System1 != 1 {
+		t.Errorf("the round counts %d decisions of the decision model, want 1", r.roundCounters.System1)
 	}
-	if r.roundSystem2Decisions != 2 {
-		t.Errorf("the round counts %d turns of the chat model, want 2", r.roundSystem2Decisions)
+	if r.roundCounters.System2 != 2 {
+		t.Errorf("the round counts %d turns of the chat model, want 2", r.roundCounters.System2)
 	}
 }
 
@@ -953,15 +1041,15 @@ func TestTheAnswerOfTheOperatorCountsOnce(t *testing.T) {
 	if err := r.deliver("/gtw commit"); err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
-	if r.roundOperatorDecisions != 1 {
-		t.Errorf("the round counts %d answers of the operator, want 1", r.roundOperatorDecisions)
+	if r.roundCounters.Operator != 1 {
+		t.Errorf("the round counts %d answers of the operator, want 1", r.roundCounters.Operator)
 	}
 	// The run is no longer waiting: a second answer is not an answer.
 	if err := r.deliver("/gtw commit"); err == nil {
 		t.Error("the run took a second answer")
 	}
-	if r.roundOperatorDecisions != 1 {
-		t.Errorf("the round counts %d answers of the operator, want 1", r.roundOperatorDecisions)
+	if r.roundCounters.Operator != 1 {
+		t.Errorf("the round counts %d answers of the operator, want 1", r.roundCounters.Operator)
 	}
 }
 

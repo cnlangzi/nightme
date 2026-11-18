@@ -328,7 +328,7 @@ jobs:
 	}
 	var told bool
 	for _, entry := range op.Entries(op.Cards()[1].ID) {
-		if strings.Contains(entry, "failed") {
+		if strings.Contains(entry, "ended: [ ! ]") {
 			told = true
 		}
 	}

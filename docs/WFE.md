@@ -823,11 +823,11 @@ The cap on an answer defaults to 40960 tokens; a configuration that does not nam
 
 | Command | Behaviour |
 |---|---|
-| `/me start <workflow> [args...] [-i <rounds>]` | Starts a workflow in this chat. The name is the base name of the workflow's file. The run inherits the chat's workspace and agent. A chat without a workspace is refused. A second run in the same chat is refused. `-i` sets how many rounds every job of the workflow runs in this run. |
+| `/me start <workflow> [args...] [-i <rounds>]` | Starts a workflow in this chat. The name is the base name of the workflow's file. The run inherits the chat's workspace and agent. A chat without a workspace is refused. A second run in the same chat is refused. `-i` sets how many rounds every job of the workflow runs in this run. The command posts no reply: the card of the run carries the acknowledgement. |
 | `/me reply <text>` | Answers the question the run is waiting for. |
 | `/me pause` | Stops the run after the step it is on. The step that is running is not interrupted: its outcome is recorded. |
 | `/me continue [note]` | Hands the control back to a paused run. The note is the operator's instruction; it joins the conversation the chat model reads. |
-| `/me show` | Puts the overview of the run back in front of the operator as a card of its own. The live state of the work stays on the card of the round. |
+| `/me show` | Puts the plan of the run back in front of the operator as a card of its own. The live state of the work stays on the card of the round. |
 | `/me stop` | Cancels the run, tells the chat to stop working, and leaves a summary of the session in the chat. |
 | `/me status` | Reports the current step, the phase and progress of the running command, the remaining budget, and what each capability decided and spent. |
 
@@ -835,8 +835,8 @@ The run speaks in agent sessions, and the chat renders every session the way it 
 
 | Session | Its card hangs under | It carries |
 |---|---|---|
-| The run | The `/me start` message | The overview of the run: its id, the workflow it works through, the arguments it was given and its jobs with the steps of each. The card is published once and never changes; the verdict of the run rides in its footer. |
-| A job round | The card of the run | The block that names the run and the rounds that have finished, the identity of the round, the steps of the round with the state of each, the counters of the run in its header, and the round's identity, token usage and repository facts in its footer. |
+| The run | The `/me start` message | The plan of the run: the workflow it works through, what the workflow is for, the facts of the run and its steps with the command of each. The card is published once and never changes; the verdict of the run rides in its footer. |
+| A job round | The card of the run | The tree of the rounds of the run, the closing block of the round that ended, the steps of the round with the state of each, the counters of the run in its header, and the round's identity, token usage and repository facts in its footer. |
 | A decision | The command message of the step the decision is about | The reason the decision was taken as its first entry, the thinking of the chat model, the tool calls of the decision as thread events under the card, one entry per reply, and the verdict of the decision in its footer. |
 
 A decision about a step that never sent a command to the chat — a shell step, a `use:` step, a judgment that names no step — hangs under the card of the round instead.
@@ -878,20 +878,27 @@ A step that is still running reports `waiting`, and a step whose execution is go
 The outcome of a step reaches the run state and the expressions of the steps after it: the status as `${{ steps.<id>.outputs.status }}`, the facts under `${{ steps.<id>.outputs.data.<key> }}`.
 
 The chat sees the outcome on the card of the session it belongs to — one
-message, patched in place. The card of the run is the overview of the run: it
-names the run, the workflow it works through and what the workflow is for, how
-big the run is, the arguments it was given and the flow of every job. It is
-published once and never changes. The footer of the card names
+message, patched in place. The card of the run is the plan of the run: it names
+the workflow it works through and what the workflow is for, how big the run is,
+the arguments it was given and the steps of every job. It is published once and
+never changes. The footer of the card names
 the run, the model and the verdict the run reached:
 
 ```
-🧑‍💻: fix-issue-1752661200000000000
-**fix-issue** — Fix issue #42 and ship it as a PR.
-→ rounds:  1 round
-→ jobs:    1 · steps: 5
-→ started: 14:03:22
-→ args:    id=42
-→ main:    fix → commit → review → push → pr
+▶ [ fix-issue ] started
+Fix issue #42 and ship it as a PR.
+
+jobs:     1
+steps:    5
+started:  14:03:22
+args:     id=42
+
+main
+├─ [ 1 ]: fix      /gtw fix 42 -y
+├─ [ 2 ]: commit   /gtw commit
+├─ [ 3 ]: review   /review
+├─ [ 4 ]: push     /gtw push
+└─ [ 5 ]: pr       /gtw pr
 
 ---
 🤖: me · jev-1.14 · fix-issue-1752661200000000000 · fix-issue is complete
@@ -899,20 +906,50 @@ the run, the model and the verdict the run reached:
 📁: code/nightme · ⎇ main · + 2 · ± 3 · − 1
 ```
 
-The body of the card is a flat flow. The facts of the run are arrow rows and
-every job is a row of its own, listing the ids of the steps the job runs. The
-values of the rows start at the same column: the key of a row — the colon
-included — is padded to the width of the longest key of the block.
+The body of the card reads like the output of a command. The headline names
+the workflow, the second line is what the workflow is for, and the facts of the
+run follow: how many jobs it has, how many steps they hold, when the run
+started and what it was given. The values of the facts start at the same
+column: the key, its colon, and the padding to the column.
 
-The `rounds` row carries the round count every job of the workflow shares. A
-workflow whose jobs declare different counts has no shared count: each job
-carries its own count at the end of its own row.
+The plan follows the facts, one block per job. The header of a block says how
+many rounds the job runs — `main` for one round, `main ⟳ 3 rounds` for three,
+`main ⟳ until the run ends` for a job that repeats until the run ends. Every
+step is a node of its own, numbered across the whole plan, with its id and the
+command it runs. The ids of a job are padded, so the commands of a job all
+start at the same column. A job with more than 24 steps lists its first 24 and
+folds the rest into one node: `└─ [ 25 ]: … +6 more steps`.
 
-The card of a round is the live state of the round: it names the run the
-round belongs to, lists the rounds that have finished, and shows every step of
-the round with the state it is in. The header carries the counters of the run:
-how many turns the chat model took, how many tool calls the run made and when
-it last did something.
+The card of a round carries the tree of the rounds of the run: the rounds that
+have finished, with their own facts, and the round that is going. The tree is
+published once, when the round opens, and is never published again — a
+published entry cannot be edited.
+
+```
+rounds:
+├─ [ √ ] 1: 10:33:04 · 5m25s decisions:  system-1 ×1 · operator ×1 ·  tokens - 32.4k / 8.1k
+├─ [ ! ] 2: 10:38:29 · 5m14s decisions:  system-1 ×1 · operator ×1 ·  tokens - 32.4k / 8.1k
+├─ [ √ ] 3: 10:43:43 · 5m14s decisions:  system-1 ×1 · operator ×1 ·  tokens - 32.4k / 8.1k
+└─ [ > ] 4: 10:48:57
+```
+
+The node of a finished round carries its marker, when it started, how long it
+took, what decided in it and what the run spent up to its end. The numbers are
+the numbers of the run over the rounds up to that one: the tree reads as a
+ledger, and the last node carries the totals of the run. The node of the round
+that is going carries its number and the time it started — the round has not
+settled, so it has no duration and no verdict yet.
+
+The tree shows the last five rounds of the run: the earlier ones fold into
+one node, `… +3`.
+
+When the round ends, its card carries the closing block: what the round came
+to and the numbers of the run through that round.
+
+```
+ended: [ √ ] the fix landed · 5m14s
+decisions:  system-1 ×1 · operator ×1 ·  tokens - 32.4k / 8.1k
+```
 
 Every row of the checklist is a numbered markdown list item — `1. [v] fix (the
 fix landed)` — and every marker is one ASCII character: `[ ]` not started,
@@ -930,8 +967,9 @@ in the detail: the card the operator read names it.
 ```
 💭 8 · 🔧 6 · ⏱ 14:35:22
 
-→ run:     fix-issue-1752661200000000000 · 14:03:22
-→ round 1: main · 14:07:41
+rounds:
+├─ [ √ ] 1: 10:33:04 · 5m25s decisions:  system-1 ×1 · operator ×1 ·  tokens - 32.4k / 8.1k
+└─ [ > ] 2: 10:38:29
 🧑‍💻: main · round 2
 
 **📋 Tasks**

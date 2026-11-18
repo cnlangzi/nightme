@@ -183,10 +183,7 @@ func TestStart_MapsTheArguments(t *testing.T) {
 		t.Fatalf("SetSelectedAgent: %v", err)
 	}
 
-	reply := runMe(t, ctrl, cs, "/me", "start", "fix-issue", "42")
-	if !strings.Contains(reply, "started") {
-		t.Fatalf("reply = %q, want the run to start", reply)
-	}
+	runMe(t, ctrl, cs, "/me", "start", "fix-issue", "42")
 	if len(ctrl.started) != 1 {
 		t.Fatalf("the controller got %d requests, want 1", len(ctrl.started))
 	}
@@ -398,17 +395,41 @@ func TestStart_NamesTheRecognisedFlags(t *testing.T) {
 	}
 }
 
-// TestStart_ReportsTheRoundCount — the reply names the count and the
-// outcome carries it.
+// TestStart_RepliesNothingWhenTheRunStarts — the run's own card
+// carries the acknowledgement: one command posts one card.
+func TestStart_RepliesNothingWhenTheRunStarts(t *testing.T) {
+	ctrl := &fakeController{}
+	cs, ch := newSessionWithOutcome(t, "me-1", "/tmp/work")
+
+	reply := runMe(t, ctrl, cs, "/me", "start", "fix-issue")
+
+	if reply != "" {
+		t.Errorf("reply = %q, want none", reply)
+	}
+	outcome := ch.settled()
+	if outcome == nil {
+		t.Fatal("the command reported no outcome")
+	}
+	if outcome.Status != messages.OutcomeOK {
+		t.Errorf("the outcome is %q, want it ok", outcome.Status)
+	}
+	if outcome.Summary != "started fix-issue" {
+		t.Errorf("the outcome says %q, want it to name the run", outcome.Summary)
+	}
+	for key, want := range map[string]string{"workflow": "fix-issue", "run_id": "run-1"} {
+		if outcome.Data[key] != want {
+			t.Errorf("the outcome carries %q = %q, want %q", key, outcome.Data[key], want)
+		}
+	}
+}
+
+// TestStart_ReportsTheRoundCount — the outcome carries the count.
 func TestStart_ReportsTheRoundCount(t *testing.T) {
 	ctrl := &fakeController{}
 	cs, ch := newSessionWithOutcome(t, "me-rounds", "/tmp/work")
 
-	reply := runMe(t, ctrl, cs, "/me", "start", "fix-issue", "-i", "1")
+	runMe(t, ctrl, cs, "/me", "start", "fix-issue", "-i", "1")
 
-	if want := "▶ fix-issue started (run-1) · rounds: 1"; reply != want {
-		t.Errorf("reply = %q, want %q", reply, want)
-	}
 	outcome := ch.settled()
 	if outcome == nil {
 		t.Fatal("the command reported no outcome")
@@ -419,16 +440,13 @@ func TestStart_ReportsTheRoundCount(t *testing.T) {
 }
 
 // TestStart_ZeroRoundsMeansUntilTheRunEnds — a count of zero is not
-// "no rounds": it is "until the run ends", and the reply says so.
+// "no rounds": it is "until the run ends".
 func TestStart_ZeroRoundsMeansUntilTheRunEnds(t *testing.T) {
 	ctrl := &fakeController{}
 	cs, ch := newSessionWithOutcome(t, "me-zero-rounds", "/tmp/work")
 
-	reply := runMe(t, ctrl, cs, "/me", "start", "fix-issue", "-i", "0")
+	runMe(t, ctrl, cs, "/me", "start", "fix-issue", "-i", "0")
 
-	if want := "▶ fix-issue started (run-1) · rounds: until the run ends"; reply != want {
-		t.Errorf("reply = %q, want %q", reply, want)
-	}
 	outcome := ch.settled()
 	if outcome == nil {
 		t.Fatal("the command reported no outcome")
@@ -438,17 +456,14 @@ func TestStart_ZeroRoundsMeansUntilTheRunEnds(t *testing.T) {
 	}
 }
 
-// TestStart_WithoutTheFlagTheCountIsAbsent — the reply and the
-// outcome of a run that names no count stay as they were.
+// TestStart_WithoutTheFlagTheCountIsAbsent — the outcome of a run
+// that names no count stays as it was.
 func TestStart_WithoutTheFlagTheCountIsAbsent(t *testing.T) {
 	ctrl := &fakeController{}
 	cs, ch := newSessionWithOutcome(t, "me-no-rounds", "/tmp/work")
 
-	reply := runMe(t, ctrl, cs, "/me", "start", "fix-issue")
+	runMe(t, ctrl, cs, "/me", "start", "fix-issue")
 
-	if strings.Contains(reply, "rounds") {
-		t.Errorf("reply = %q, want no round count", reply)
-	}
 	outcome := ch.settled()
 	if outcome == nil {
 		t.Fatal("the command reported no outcome")

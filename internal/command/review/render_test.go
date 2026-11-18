@@ -14,7 +14,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/messages"
@@ -233,15 +232,15 @@ func TestReviewDigest_GroupsBySeverity(t *testing.T) {
 
 	got := reviewDigest(outcomes, plan)
 	want := "**high** · 2\n" +
-		"| path | content |\n" +
-		"| --- | --- |\n" +
-		"| a.go:42 | first |\n" +
-		"| b.go:7 | second |\n" +
+		"| path |\n" +
+		"| --- |\n" +
+		"| a.go:42 |\n" +
+		"| b.go:7 |\n" +
 		"\n" +
 		"**low** · 1\n" +
-		"| path | content |\n" +
-		"| --- | --- |\n" +
-		"| c.ts:3 | third |"
+		"| path |\n" +
+		"| --- |\n" +
+		"| c.ts:3 |"
 	if got != want {
 		t.Errorf("the digest is:\n%s\nwant:\n%s", got, want)
 	}
@@ -286,8 +285,8 @@ func TestReviewDigest_CategoryColumn(t *testing.T) {
 	}
 
 	got := reviewDigest(plain, nil)
-	if !strings.Contains(got, "| path | content |") {
-		t.Errorf("the table has no content column:\n%s", got)
+	if !strings.Contains(got, "| path |\n| --- |\n") {
+		t.Errorf("the table has no path column:\n%s", got)
 	}
 	if strings.Contains(got, "category") {
 		t.Errorf("the table has a category column although no finding named one:\n%s", got)
@@ -301,35 +300,33 @@ func TestReviewDigest_CategoryColumn(t *testing.T) {
 	}
 
 	got = reviewDigest(mixed, nil)
-	if !strings.Contains(got, "| path | category | content |") {
+	if !strings.Contains(got, "| path | category |\n") {
 		t.Errorf("the table has no category column:\n%s", got)
 	}
-	if !strings.Contains(got, "| --- | --- | --- |") {
+	if !strings.Contains(got, "| --- | --- |\n") {
 		t.Errorf("the separator row does not have one dash per column:\n%s", got)
 	}
-	if !strings.Contains(got, "| b.go:7 | — | second |") {
+	if !strings.Contains(got, "| b.go:7 | — |") {
 		t.Errorf("the finding without a category does not show the em dash:\n%s", got)
 	}
 }
 
 // TestReviewDigest_Sanitizes: a cell stays one line — a pipe becomes
-// a slash, a line break a space — and the content is rendered in
-// full.
+// a slash, a line break or a tab a space — and the cell is trimmed.
 func TestReviewDigest_Sanitizes(t *testing.T) {
 	outcomes := []reviewOutcome{
 		{pattern: "**/*.go", report: agent.ReviewReport{Parsed: true, Findings: []agent.ReviewFinding{
-			{Path: "a.go", Line: "42", Severity: agent.SeverityHigh, Content: "a | b\nc"},
-			{Path: "b.go", Severity: agent.SeverityHigh, Content: strings.Repeat("错", 300)},
+			{Path: "a.go|", Line: "42", Severity: agent.SeverityHigh, Category: "error | handling\nx\ty"},
+			{Path: " b.go ", Severity: agent.SeverityHigh},
 		}}},
 	}
 
 	got := reviewDigest(outcomes, nil)
-	if !strings.Contains(got, "| a.go:42 | a / b c |") {
+	if !strings.Contains(got, "| a.go/:42 | error / handling x y |") {
 		t.Errorf("the cell was not sanitized:\n%s", got)
 	}
-	full := strings.Repeat("错", 300)
-	if !strings.Contains(got, "| b.go | "+full+" |") {
-		t.Errorf("the content was not rendered in full:\n%s", got)
+	if !strings.Contains(got, "| b.go | — |") {
+		t.Errorf("the cell was not trimmed:\n%s", got)
 	}
 }
 
@@ -359,7 +356,7 @@ func TestReviewDigest_SkipsFailedGroups(t *testing.T) {
 	if strings.Contains(got, "**/*.go") {
 		t.Errorf("the failed group reached the digest:\n%s", got)
 	}
-	if !strings.Contains(got, "| c.ts:3 | the ts finding |") {
+	if !strings.Contains(got, "| c.ts:3 |") {
 		t.Errorf("the digest does not carry the finished group's finding:\n%s", got)
 	}
 }
@@ -423,13 +420,16 @@ func TestSendVerdict_CarriesTheWholeDigest(t *testing.T) {
 	if strings.Contains(text, "more findings") {
 		t.Errorf("the verdict message names findings it left out:\n%s", text)
 	}
+	if prose := strings.Repeat("错", 80); strings.Contains(text, prose) {
+		t.Errorf("the verdict message carries the findings' prose:\n%s", text)
+	}
 }
 
-// TestSendVerdict_CarriesEveryFindingInFull: the verdict message
-// holds every finding's content in full, and the message grows past
-// the length the review layer used to hold it to — nothing is cut to
-// make the body fit a channel.
-func TestSendVerdict_CarriesEveryFindingInFull(t *testing.T) {
+// TestSendVerdict_CarriesEveryLocationAndNoProse: the verdict
+// message holds every finding's location and none of their prose —
+// the card is an index of the findings, their text stays in the
+// thread and in the main agent's input.
+func TestSendVerdict_CarriesEveryLocationAndNoProse(t *testing.T) {
 	var findings []agent.ReviewFinding
 	for i := 0; i < 40; i++ {
 		findings = append(findings, agent.ReviewFinding{
@@ -451,12 +451,12 @@ func TestSendVerdict_CarriesEveryFindingInFull(t *testing.T) {
 	}
 	text := msgs[0].Text
 	for i := range findings {
-		if want := fmt.Sprintf("finding %d: ", i); !strings.Contains(text, want) {
+		if want := fmt.Sprintf("internal/agent/review.go:%d", 100+i); !strings.Contains(text, want) {
 			t.Errorf("the verdict message does not carry %q:\n%s", want, text)
 		}
-	}
-	if n := utf8.RuneCountInString(text); n <= 1900 {
-		t.Errorf("the verdict message is %d runes, under the length the review layer used to hold it to:\n%s", n, text)
+		if prose := fmt.Sprintf("finding %d: ", i); strings.Contains(text, prose) {
+			t.Errorf("the verdict message carries the finding's prose %q:\n%s", prose, text)
+		}
 	}
 }
 
@@ -537,8 +537,8 @@ func TestSendVerdict_CarriesTheDigest(t *testing.T) {
 	for _, want := range []string{
 		"1 subagent",
 		"**high** · 1",
-		"| path | category | content |",
-		"| a.go:42 | error-handling | the finding |",
+		"| path | category |",
+		"| a.go:42 | error-handling |",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("the verdict message does not carry %q:\n%s", want, text)
@@ -915,10 +915,10 @@ func TestHandle_ReviewVerdictCarriesTheDigest(t *testing.T) {
 		"2 subagents",
 		"2 high",
 		"**high** · 2",
-		"| path | category | content |",
-		"| --- | --- | --- |",
-		"| file1.go:1 | correctness | issue 1 in group 1 |",
-		"| file2.go:2 | correctness | issue 2 in group 2 |",
+		"| path | category |",
+		"| --- | --- |",
+		"| file1.go:1 | correctness |",
+		"| file2.go:2 | correctness |",
 	} {
 		if !strings.Contains(verdict.Text, want) {
 			t.Errorf("the verdict does not carry %q:\n%s", want, verdict.Text)

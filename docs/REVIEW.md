@@ -22,7 +22,7 @@
 | 1 | `/review` 全异步:Handle 立即返回,goroutine 跑 review | dispatch worker / readpump 阻塞,chat 卡死 |
 | 2 | review 走 agent session 路径(独立进程 / 独立 session),独立 context 窗口 | 主 chat 上下文被 review 推理污染(可烧数万 token) |
 | 3 | review session 的 ctx 派生自 chat session ctx,`/close` 自动取消 | orphan review 进程 / session 残留 |
-| 4 | findings **单路分发**:合并全文注入 AS(当 user turn);channel 上 findings 原文只出现一次(thread 里每组一条),card 上是 verdict 行与其下的 severity 分组 digest(路径 + 分类 + 结论) | 主 agent 看不到 findings,或用户在 chat 里读三遍同样的 findings |
+| 4 | findings **单路分发**:合并全文注入 AS(当 user turn);channel 上 findings 原文只出现一次(thread 里每组一条),card 上是 verdict 行与其下的 severity 分组 digest(路径 + 分类) | 主 agent 看不到 findings,或用户在 chat 里读三遍同样的 findings |
 | 5 | `--agent` **不切 AS**(不同 reviewer,同一 chat) | 切 AS 副作用太大,破坏"多 reviewer 汇聚"工作流 |
 | 6 | fix **对话式**:不自动 apply,用户说"fix critical findings"(沿用 output schema 的 severity 词汇 critical/high/medium/low)主 agent 用原生 Edit | 违反 v1 "纯 review"边界 |
 | 7 | **二选一**:`OcrAvailable() ? ReviewWithOcr : ReviewWithPrompt`,所有 bridge 走 `agent.ReviewDispatch` 同一入口 | review 行为跨 agent 不一致,或不同环境不可复现 |
@@ -371,10 +371,10 @@ review 在 channel 上只有这几样东西,顺序固定:
 1. **plan 行**(任何 group 产出之前):`🔍 review · codex · open-code-review · 4 subagents` + 每组一行(`N. 组名 · 文件摘要 — N files`)。plan 由 agent 层产出(`agent.ReviewPlanGroup` + `agent.WithReviewPlanObserver`,fan-out 开始前触发一次),由 command 层渲染。第一行的规则集由 plan 里有没有 builtin 组决定:有就是 nightme 自己的 rubric(`nightme code reviewer`),没有就是 ocr 的规则集(`open-code-review`)。组数说的是 **subagent** 数 —— 每组就是一个独立的 agent session。续跑的 plan 行在每组后面标这次要做什么:`(resumed)`(重新打开该组自己的 session)或 `(re-run)`(开新 session 重发该组的 prompt);普通 review 不带标记。
 2. **每组的 findings**(thread):每组一条回复,正文前带 `[N] ` 编号(N = 该组在 plan 里的位置)。findings 走 **think kind**,所以落在 thread 而不是 card。一条回复放不下一组 findings 时按攒批边界切成连续几条,每条都带同一个编号。组开始产出时会先发一条开始提示(`▶ **[N] 组名** — N files`,同样是 think kind),thread 因此读起来是"一组一段"。
 3. **verdict 行**(fan-out 结束,card):subagent 数、findings 数、按 severity 的分布、失败组(点名,并按失败组的状态标注)、unparsed 组数。失败组的名字后面带状态:跑到了 agent 的组没有后缀,没跑到 agent 的组带 `(never started)`,恢复机会已用完的组带 `(already retried)`。` → /review --continue` 的后缀**只在还有失败组可恢复时才出现** —— 承诺必须是续跑做得到的。thread 末尾另有一条同样数字的收尾提示(`✅ **review done** · ...`,think kind),thread 以结果收尾。
-4. **digest**(紧跟 verdict 行,同一条 card 消息):按 severity 分组的 markdown 表,每个 bucket 一张表,每条 finding 一行。表头是 bucket 名与它的条数(`**high** · 2`),列是 `path`(`path:line`)、`category`、`content` —— severity 是表头,不是列。`category` 列只在**本次 review 有 finding 报了 category** 时出现,没报的那一格写 `—`;content 原文进表,行内的换行/制表符变成空格、`|` 变成 `/`,所以一行 finding 不会撑破列。
-   digest 带全本次 review 的每一条 finding,content 不截断 —— review 层不预扣任何 channel 的长度上限:长消息怎么送达是 channel 的事(Feishu 满了另起一条顶层消息,Slack 按 12000 runes 切块,Telegram 走 rich message,Discord 按 2000 字符切块)。
+4. **digest**(紧跟 verdict 行,同一条 card 消息):按 severity 分组的 markdown 表,每个 bucket 一张表,每条 finding 一行。表头是 bucket 名与它的条数(`**high** · 2`),列是 `path`(`path:line`)与 `category` —— severity 是表头,不是列。`category` 列只在**本次 review 有 finding 报了 category** 时出现,没报的那一格写 `—`;行内的换行/制表符变成空格、`|` 变成 `/`,所以一行 finding 不会撑破列。
+   digest 是 findings 的索引,不是它们的正文:每条 finding 只留位置与分类,一条不落。finding 的正文不进 card —— 它在 thread 里(`/think` 开时),也在注入主 agent 的那份合并文本里。card 因此只跟 finding 的条数成正比,不会被一段长正文撑破。
 
-card 上只有 plan 行、verdict 行和 digest —— findings 原文不进 card。digest 走的是 verdict 那条消息(reply kind),所以它不受 `/think` 控制:`/think` 关着时 thread 上没有 findings,card 上的 digest 照样在。
+card 上只有 plan 行、verdict 行和 digest —— findings 原文不进 card,digest 只是它们的索引(位置 + 分类)。digest 走的是 verdict 那条消息(reply kind),所以它不受 `/think` 控制:`/think` 关着时 thread 上没有 findings,card 上的 digest 照样在。
 
 sink 的 drain 在 verdict 之前排空:各组的 findings 还排在 drain goroutine 的队列里,verdict 必须落在它们之后(否则 verdict 会盖过它总结的 findings)。收尾提示在 drain 之前入队(sink 是 FIFO),所以它落在各组 findings 之后。
 
@@ -394,7 +394,7 @@ sink 的 drain 在 verdict 之前排空:各组的 findings 还排在 drain gorou
 - bridge 可能把回复的**尾巴**留在终态事件上(pi / omp 把最后一段放在 result 事件;claudecode / codex 全走 text 事件、result 为空)。尾巴属于该组,先并进该组的批再交付 —— 否则 channel 永远看不到它。**已经流过的尾巴不重复发**:dsh 把最后一条消息同时放在 text 事件和 result 事件上,组已经说过的话不再说一遍(判定:尾巴是该组已发文本的后缀)。
 - 交付出去的一条 = 一个 AgentEvent,**kind 是 think**(findings 走 thread,不是 card),正文前加 `[N] ` 编号(行内,不另起一行)。编号走**文本内部**:outbound 层没有 group 字段,编号必须跟着它命名的正文走。
 
-**findings 的可见性 = think 的可见性**:findings 与提示都走 think kind,所以 chat 的 `/think` 设置决定它们是否送达(`/think` 默认关:findings 与提示都被 gate 丢掉,card 上仍有 plan 行、组清单、verdict 行和 digest;主 agent 那边不受影响 —— 合并文本照常注入)。
+**findings 的可见性 = think 的可见性**:findings 与提示都走 think kind,所以 chat 的 `/think` 设置决定它们是否送达(`/think` 默认关:findings 与提示都被 gate 丢掉,card 上仍有 plan 行、组清单、verdict 行和 digest(digest 只有位置与分类,没有 findings 正文);主 agent 那边不受影响 —— 合并文本照常注入)。
 
 ### 2.5.6 边界
 
@@ -410,7 +410,7 @@ sink 的 drain 在 verdict 之前排空:各组的 findings 还排在 drain gorou
 - **一条 chunk 超过 2 KiB**:不劈开,按原样算一批(比阈值大的一条消息是单个事件的下限,不是可以切的东西)。
 - **组没产出任何正文**:该组没有可交付的 findings,verdict 行把它算成 unparsed 组(不是 failed);thread 里也不会有它的开始提示。正文有、但解析器读不出来时,该组先拿自己的 session 做一次 schema 重发(§2.5.4),仍读不出来才算 unparsed。
 - **一组 findings 装不下一条回复**:按攒批边界切成连续几条,每条都带同一个编号,读者知道它们属于同一组。
-- **`/think` 关着(默认)**:findings 与提示都被 think gate 丢掉,card 上仍有 plan 行、组清单、verdict 行和 digest;主 agent 那边照常拿到合并文本。
+- **`/think` 关着(默认)**:findings 与提示都被 think gate 丢掉,card 上仍有 plan 行、组清单、verdict 行和 digest(digest 只有位置与分类);主 agent 那边照常拿到合并文本 —— findings 正文仍在主 agent 的输入里。
 - **digest 的表吃 Feishu card 的表格预算**:Feishu 一张 card 最多五张 markdown 表,digest 一个 severity bucket 一张表 —— 五个 bucket 的 review 用光这张 card 的预算,主 agent 回答里的表随后按纯文本行渲染(内容不丢,表的形状没了)。
 - **digest 超过一个 Feishu div**:card 的 entry 按 1000 字符切成多个 div,切点落在表与表之间(表之间有空行)或某张表的行之间 —— 后一种情况下后续 div 没有表头,那些行按带竖线的纯文本渲染,内容仍然可读。
 
@@ -447,7 +447,7 @@ sink 的 drain 在 verdict 之前排空:各组的 findings 还排在 drain gorou
 | **每个 group 的 outcome 观察者**(pattern / source / files / session id / prompt / error / 解析后的 report) | `internal/agent/agent.go::ReviewJob` / `::WithReviewJobObserver` |
 | **失败 turn 保留 session id**(进程没了但 agent 侧会话还在,session id 是重新打开它的钥匙) | `internal/agent/run_session.go::drainSessionEvents` / `::ResumeSession` |
 | **plan 行 / verdict 行渲染**(card 上的两行) | `internal/command/review/render.go::renderPlanLine` / `::reviewVerdict` |
-| **digest 渲染**(按 severity 分组的 markdown 表,接在 verdict 行后面,走同一条消息;带全本次 review 的每一条 finding) | `internal/command/review/render.go::reviewDigest` / `::digestTables` / `::digestFindings` / `::sanitizeCell` |
+| **digest 渲染**(按 severity 分组的 markdown 表,接在 verdict 行后面,走同一条消息;每条 finding 一行,只列位置与分类) | `internal/command/review/render.go::reviewDigest` / `::digestTables` / `::digestFindings` / `::sanitizeCell` |
 | **完成的组与失败的组的划分**(verdict 行与 digest 共用,两者的计数与行因此不会打架) | `internal/command/review/render.go::finishedOutcomes` / `::failedOutcomes` |
 | **thread 的收尾提示**(verdict 的 Markdown 版,走 sink 因此受 `/think` 控制) | `internal/command/review/render.go::reviewVerdictHint` / `::sendVerdictHint` |
 | **注入主 agent 的那一轮**(合并全文 + 要 verdict 不要复述的 frame) | `internal/command/review/render.go::reviewPromptFrame` |
@@ -459,7 +459,7 @@ sink 的 drain 在 verdict 之前排空:各组的 findings 还排在 drain gorou
 - **#1 全异步**:`Handle` 立即返回,goroutine 跑 review,revCtx 派生自 chat session ctx。
 - **#2 / #9 session 隔离**:每个 per-job 是独立 `agent.RunSession`(独立进程 / 独立 session + 独立 context),多 job 间不共享、不累积。
 - **#3 ctx 派生 + /close 取消**:所有 job 共用 `revCtx`(chat session ctx + 30min 超时)。
-- **#4 单路分发**:`FormatReviewMessage` 一次产出的合并文本 → 注入 AS(user turn)一次;**不发 channel**。channel 上是 plan 行 + thread 里每组一条 findings + verdict 行与其下的 digest。
+- **#4 单路分发**:`FormatReviewMessage` 一次产出的合并文本 → 注入 AS(user turn)一次;**不发 channel**。channel 上是 plan 行 + thread 里每组一条 findings + verdict 行与其下的 digest(digest 只列位置与分类)。
 - **#10 自动并发 + sem + merge 一次返回**:`sem chan struct{}` cap 为 `maxConcurrentReviewJobs = 4`;`wg.Wait()` 同步;`mergeRunResults` 一次产出最终 RunResult。
 - **#11 单 outer lifecycle**:eventAggregator 的三相状态机在 readyCount/doneCount all-wait 时各合成一次 outer Ready / outer Result,per-job lifecycle 不外泄。
 - **#12 per-job ToolStart/End 配对**:eventAggregator 的 `perJob.pendingToolStarts` 按 ID 缓冲 ToolStart,等配对 ToolEnd 时按 Start→End 顺序连续转发。

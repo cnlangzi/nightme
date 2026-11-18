@@ -27,9 +27,11 @@ package gtw
 //  6. Pick an agent (CLI -a > yml cfg.PR.Agent > SelectedAgent),
 //     one-shot RunOnce to generate the PR text.
 //  7. parsePRReply extracts (title, body) from the fenced block.
-//  8. Gate 3: the parsed title must not be the summary heading — a
-//     body-only agent reply would otherwise open a PR titled
-//     `## Summary by NightMe`.
+//  8. Gate 3: the format gate — the title must not be the summary
+//     heading, the title must carry the Conventional Commits shape,
+//     the body must open with the summary heading. A reply that
+//     fails is put back to the agent once, with the reason; a reply
+//     that fails again opens no PR.
 //  9. provider.CreatePR → URL.
 // 10. Reply with ✅ PR opened + branch / base / url / worktree card.
 //
@@ -50,6 +52,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/messages"
@@ -57,11 +60,12 @@ import (
 )
 
 // errParseAgentReply is the sentinel returned by parsePRReply
-// when the agent's reply cannot be parsed into a title + body
-// (no fence, empty fence, malformed fence). The dispatcher
-// surfaces the agent's text verbatim in the error reply so the
-// user can still paste title + body manually into gh/glab.
-var errParseAgentReply = errors.New("could not parse agent reply as fenced PR block")
+// when the agent's reply carries nothing that can serve as a PR
+// title (the reply is empty once the surrounding noise is
+// stripped). The dispatcher surfaces the agent's text verbatim in
+// the error reply so the user can still paste title + body manually
+// into gh/glab.
+var errParseAgentReply = errors.New("the reply could not be parsed as a PR title + body")
 
 // errMissingPRTitle is the sentinel reported when the parsed PR
 // title is the NightMe summary heading — the shape a model leaves
@@ -69,6 +73,27 @@ var errParseAgentReply = errors.New("could not parse agent reply as fenced PR bl
 // dispatcher refuses to open the PR instead of shipping one titled
 // `## Summary by NightMe`, and points the user at a retry.
 var errMissingPRTitle = errors.New("agent output is missing the PR title (the output starts with the summary heading)")
+
+// errPRTitleFormat is the sentinel reported when the parsed PR
+// title does not carry the Conventional Commits shape — the shape a
+// model lands on when it echoes the branch name or answers in
+// prose.
+var errPRTitleFormat = errors.New("the agent's PR title is not in `<type>(<optional-scope>): <subject>` form")
+
+// errPRMissingSummaryHeading is the sentinel reported when the
+// parsed PR body does not open with the NightMe summary heading —
+// the section the reviewer reads first, and the one the normalizer
+// rewrites into its canonical form.
+var errPRMissingSummaryHeading = errors.New("the agent's PR body does not start with `" + summaryHeading + "`")
+
+// The codes the format gate reports in the outcome's Data["format"]:
+// which check rejected the agent's reply.
+const (
+	prFormatParseFailed    = "parse_failed"
+	prFormatTitleMissing   = "title_missing"
+	prFormatTitleFormat    = "title_format"
+	prFormatSummaryHeading = "summary_heading"
+)
 
 // prArgs bundles the parsed argv tail of `/gtw pr <...>`.
 // Mirrors pushArgs (cmd.go) — Agent override + room for
@@ -91,9 +116,12 @@ type prArgs struct {
 //  2. no open PR for this branch (provider layer; FindOpenPRForBranch)
 //
 // A third gate runs on the agent's output rather than on the
-// worktree: the parsed title must not be the summary heading, so a
-// model that wrote the body and forgot the title line fails loudly
-// instead of opening a malformed PR.
+// worktree: the format gate. The extracted title must carry the
+// Conventional Commits shape, and the extracted body must open with
+// the NightMe summary heading — so a model that answered in prose,
+// or wrote the body and forgot the title line, fails loudly instead
+// of opening a malformed PR. A rejected reply is put back to the
+// agent once, with the reason; a reply that fails again opens no PR.
 //
 // Everything else (detached HEAD / uncommitted / untracked /
 // ahead vs upstream / ahead vs base / behind vs upstream /
@@ -218,58 +246,45 @@ func dispatchPR(
 	}
 
 	// --- run agent --------------------------------------------------
-	// runAgentFor returns the full RunResult so the success-path
-	// reply can stamp Model / SessionID / Usage onto the
-	// OutboundMessage — see replyAgent's doc for the footer
-	// stamping rationale (F-CLAUDE-PRINT-002 follow-up: agentbar /
-	// usagebar must reach the channel even when GTW bypasses the
-	// runtime event pipeline).
+	// The agent part of /gtw pr is a two-attempt loop: the format
+	// gate rejects a reply that does not carry a Conventional Commits
+	// title and a NightMe summary heading, and a rejected reply is
+	// put back to the agent once — with the reason — before the
+	// command gives up.
+	//
 	// The language is resolved before the agent clock starts: the
 	// lookup shells out to git, and its latency must not eat the
 	// agent's budget.
 	lang := resolveLanguage(ctx, cfg, c.Worktree, deps.Git)
 
-	prCtx, prCancel := context.WithTimeout(ctx, timeouts.Agent)
-	defer prCancel()
-	runRes, agentName, err := runAgentFor(prCtx, cs, c.Worktree,
-		buildPRPrompt(c, baseBranch, lang), chatID, messageID, args.Agent, cfg.PR.Agent,
-		// Drop OutResult; replyAgent below is the only result card.
-		messages.OutResult)
+	run, err := runPRAgent(ctx, cs, c, cfg, args, chatID, messageID,
+		buildPRPrompt(c, baseBranch, lang))
 	if err != nil {
+		// The agent itself failed — no agent selected, the binary
+		// is missing, the run crashed. That is not a format
+		// problem, so there is no second attempt.
 		return replyAgentOutcome(ctx, cs.Emitter(), chatID, messageID,
-			withWarning(err.Error()), agentName, runRes,
+			withWarning(err.Error()), run.AgentName, run.Res,
 			command.FailedOutcomeData("agent_error", "the agent did not produce a pull request",
-				map[string]string{"agent": agentName})), nil
+				map[string]string{"agent": run.AgentName})), nil
 	}
-	text := runRes.Text
-
-	title, body, perr := parsePRReply(text)
-	if perr != nil {
-		// Agent output wasn't usable. Echo the raw text so
-		// the user can copy/paste into gh/glab themselves.
+	if run.Failure != nil {
+		// The reply did not carry the format the PR needs, twice.
+		// No PR is opened: the user reads why, sees the reply the
+		// agent produced, and gets the hint.
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			withWarning(fmt.Sprintf(
-				"❌ %v — agent output was:\n%s",
-				perr, indentLines(text, "  "))),
-			command.FailedOutcomeData("agent_error", "the agent reply could not be parsed",
-				map[string]string{"agent": agentName})), nil
+				"❌ %v (after %d attempts) — agent output was:\n%s\n↳ re-run `/gtw pr` to retry (or try another agent with `-a <name>`)",
+				run.Failure.Reason, run.Attempts, indentLines(run.Rejected, "  "))),
+			command.FailedOutcomeData("agent_error", "the agent reply did not match the pull request format",
+				map[string]string{
+					"agent":    run.AgentName,
+					"format":   run.Failure.Code,
+					"attempts": strconv.Itoa(run.Attempts),
+				})), nil
 	}
 
-	// Gate 3: the title is missing. A model that wrote the body
-	// only leaves the summary heading as its first line, and
-	// parsePRReply's permissive fallback then takes that heading
-	// as the title — the PR would ship titled `## Summary by
-	// NightMe`, with the summary section missing from the body.
-	// Refuse instead of opening a malformed PR; the user
-	// re-runs /gtw pr.
-	if isSummaryHeading(title) {
-		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-			withWarning(fmt.Sprintf(
-				"❌ %v — agent output was:\n%s\n↳ re-run `/gtw pr` to retry (or try another agent with `-a <name>`)",
-				errMissingPRTitle, indentLines(text, "  "))),
-			command.FailedOutcomeData("agent_error", "the agent reply has no pull request title",
-				map[string]string{"agent": agentName})), nil
-	}
+	title, body := run.Title, run.Body
 
 	// Normalize the summary heading on the body in Go. The agent
 	// is asked to write the plain heading, but a model that
@@ -370,10 +385,12 @@ func dispatchPR(
 		deps.PRCache.WritePR(c.Worktree, newPR)
 	}
 
-	// Success path: forward runRes so the footer (agentbar +
-	// usagebar) renders. Failure paths above (parsePRReply,
-	// resolveProvider, CreatePR, ErrPRExists) stay on the
-	// no-stamp reply — they're not the agent-result surface.
+	// Success path: forward the run result so the footer (agentbar
+	// + usagebar) renders. It is the result of the attempt whose
+	// reply opened the PR — the retry's when the retry passed.
+	// Failure paths above (the format gate, resolveProvider,
+	// CreatePR, ErrPRExists) stay on the no-stamp reply — they're
+	// not the agent-result surface.
 	// The PR number comes from the URL. A URL that does not carry
 	// one (a self-hosted host with a non-standard PR path) yields
 	// no number at all — publishing a zero would name a PR that
@@ -381,18 +398,97 @@ func dispatchPR(
 	prData := map[string]string{
 		"branch": c.Branch,
 		"pr_url": url,
-		"agent":  agentName,
+		"agent":  run.AgentName,
 	}
 	if number := prNumberFromURL(url); number > 0 {
 		prData["pr_number"] = fmt.Sprintf("%d", number)
 	}
 	return replyAgentOutcome(ctx, cs.Emitter(), chatID, messageID,
-		card, agentName, runRes,
+		card, run.AgentName, run.Res,
 		messages.Outcome{
 			Status:  messages.OutcomeOK,
 			Summary: "opened the pull request",
 			Data:    prData,
 		}), nil
+}
+
+// prAgentRun is what the agent phase of /gtw pr produced.
+type prAgentRun struct {
+	// Title / Body are the extracted PR text. They are valid only
+	// when Failure is nil.
+	Title string
+	Body  string
+	// Res is the RunResult of the attempt that produced the text —
+	// or of the attempt that failed, on the agent-error path. The
+	// success reply stamps it onto the OutboundMessage, so the
+	// agent footer names the attempt that opened the PR.
+	Res agent.RunResult
+	// AgentName is the agent the attempts ran on.
+	AgentName string
+	// Failure is the format failure that stopped the run. nil when
+	// the reply passed the gate.
+	Failure *prFormatFailure
+	// Rejected is the reply the gate rejected — the last one, when
+	// the run made two attempts.
+	Rejected string
+	// Attempts counts the agent calls that were made.
+	Attempts int
+}
+
+// runPRAgent runs the PR agent until it produces a reply that
+// passes the format gate, or the attempt budget runs out.
+//
+// At most two attempts: the first one, and one correction round
+// that names what was wrong with the first reply. Each attempt gets
+// its own timeouts.Agent budget, so an attempt that used up its
+// whole budget does not cancel the one that follows it.
+//
+// A failing agent call (no agent selected, the binary is missing,
+// the run crashed) is not a format problem: it returns right away
+// with the error, and the caller reports it as the agent error it
+// is.
+func runPRAgent(
+	ctx context.Context,
+	cs *chatsession.ChatSession,
+	c Context,
+	cfg Config,
+	args prArgs,
+	chatID, messageID string,
+	basePrompt string,
+) (prAgentRun, error) {
+	out := prAgentRun{}
+	prompt := basePrompt
+	for attempt := 1; attempt <= 2; attempt++ {
+		attemptCtx, cancel := context.WithTimeout(ctx, timeouts.Agent)
+		res, name, err := runAgentFor(attemptCtx, cs, c.Worktree, prompt, chatID, messageID,
+			args.Agent, cfg.PR.Agent,
+			// Drop OutResult; the dispatcher's card is the only
+			// result surface.
+			messages.OutResult)
+		cancel()
+		out.Res = res
+		out.AgentName = name
+		if err != nil {
+			return out, err
+		}
+		out.Attempts++
+		title, body, failure := checkPRReply(res.Text)
+		if failure == nil {
+			out.Title = title
+			out.Body = body
+			// The retry passed: the failure of the first attempt is
+			// no longer the outcome.
+			out.Failure = nil
+			out.Rejected = ""
+			return out, nil
+		}
+		out.Failure = failure
+		out.Rejected = res.Text
+		if attempt == 1 {
+			prompt = buildPRCorrectionPrompt(basePrompt, failure.Reason.Error(), res.Text)
+		}
+	}
+	return out, nil
 }
 
 // buildPRPrompt renders the text block the agent receives.
@@ -731,6 +827,20 @@ var prTitleRegex = regexp.MustCompile(
 	`^(feat|fix|chore|refactor|docs|test|build|ci|perf|style|revert)(?:\([^)]+\))?!?: \S`,
 )
 
+// prTitleFormatRegex is the shape the format gate requires of the
+// extracted PR title: <type>(<optional-scope>): <subject>.
+//
+// The type token stops at whitespace, `(` or `:`, so the scope and
+// the colon can only appear where the shape puts them; the scope
+// must be non-empty; the subject only has to start with a
+// non-whitespace character.
+//
+// This is NOT the same rule as prTitleRegex: that one LOCATES the
+// title in the agent's reply and carries the fixed Conventional
+// Commits type allow-list; this one checks the shape of whatever was
+// located, and deliberately accepts any type word.
+var prTitleFormatRegex = regexp.MustCompile(`^[^\s(:]+(\([^)\n]+\))?!?: \S`)
+
 // prTitleAnywhereRegex is the multiline variant: matches a CC
 // title at the start of any line in the cleaned text. Used as
 // the final fallback when per-line noise stripping can't find a
@@ -866,11 +976,21 @@ func appendPRFooter(body string) string {
 // `## Summary by [NightMe](https://nightme.dev)` reduces to the
 // plain heading.
 //
-// This belongs to the missing-title gate only.
-// normalizeSummaryHeading keeps its own, stricter rules.
+// This is the one rule the format gate and the body normalizer
+// share: every heading the gate accepts is rewritten into the
+// canonical plain form, and a line that merely starts like the
+// heading (e.g. `## Summary by NightMe Notes`) is neither accepted
+// nor rewritten.
 func isSummaryHeading(line string) bool {
 	trimmed := strings.TrimSpace(line)
 	return strings.EqualFold(brandLinkRegex.ReplaceAllString(trimmed, "NightMe"), summaryHeading)
+}
+
+// hasSummaryHeading reports whether the body's first line is the
+// NightMe summary heading.
+func hasSummaryHeading(body string) bool {
+	line, _, _ := strings.Cut(body, "\n")
+	return isSummaryHeading(line)
 }
 
 // normalizeSummaryHeading rewrites the body's leading summary
@@ -884,27 +1004,99 @@ func isSummaryHeading(line string) bool {
 // show up on some PRs. Doing it in code is deterministic and
 // zero-cost, the same reasoning as appendClosesFooter.
 //
-// The leading line is rewritten when it is the plain heading or any
-// linked variant of it; trailing spaces and a CR from CRLF input
-// are dropped with it. A line that merely starts like the heading
-// (e.g. `## Summary by NightMe Notes`), and a heading that is not
-// the body's first line, keep their text.
+// The leading line is rewritten when isSummaryHeading accepts it —
+// the plain heading, any linked variant of it, any casing; trailing
+// spaces and a CR from CRLF input are dropped with it. A heading
+// that is not the body's first line keeps its text.
 func normalizeSummaryHeading(body string) string {
 	line, rest, found := strings.Cut(body, "\n")
-	if !found {
-		rest = ""
-	}
-	trimmed := strings.TrimRight(line, " \t\r")
-	switch {
-	case trimmed == summaryHeading:
-	case strings.HasPrefix(trimmed, summaryHeadingLinkedPrefix):
-	default:
+	if !isSummaryHeading(line) {
 		return body
 	}
 	if !found {
 		return summaryHeading
 	}
 	return summaryHeading + "\n" + rest
+}
+
+// prFormatFailure is the verdict of the format gate over one agent
+// reply: which check rejected it, and the reason the user reads.
+type prFormatFailure struct {
+	// Code names the failed check; it rides on the outcome's
+	// Data["format"].
+	Code string
+	// Reason is the sentence the user reads, and the sentence the
+	// correction prompt names.
+	Reason error
+}
+
+// validatePRText is the format gate over an extracted PR title and
+// body: nil means the pair may open a PR.
+//
+// The checks run in order — the title is present, the title carries
+// the Conventional Commits shape, the body opens with the summary
+// heading — so the first failure names the reason.
+func validatePRText(title, body string) *prFormatFailure {
+	switch {
+	case isSummaryHeading(title):
+		return &prFormatFailure{Code: prFormatTitleMissing, Reason: errMissingPRTitle}
+	case !prTitleFormatRegex.MatchString(title):
+		return &prFormatFailure{Code: prFormatTitleFormat, Reason: errPRTitleFormat}
+	case !hasSummaryHeading(body):
+		return &prFormatFailure{Code: prFormatSummaryHeading, Reason: errPRMissingSummaryHeading}
+	}
+	return nil
+}
+
+// checkPRReply extracts the PR text from one agent reply and puts it
+// through the format gate.
+//
+// The failure names the check that rejected the reply: the parse
+// step, or one of the three format checks.
+func checkPRReply(text string) (title, body string, failure *prFormatFailure) {
+	title, body, err := parsePRReply(text)
+	if err != nil {
+		return "", "", &prFormatFailure{Code: prFormatParseFailed, Reason: err}
+	}
+	if failure := validatePRText(title, body); failure != nil {
+		return "", "", failure
+	}
+	return title, body, nil
+}
+
+// prCorrectionReplyLimit caps how much of the rejected reply the
+// correction prompt quotes back.
+const prCorrectionReplyLimit = 4000
+
+// buildPRCorrectionPrompt appends the correction round to the PR
+// prompt: what was rejected, why, and the format the reply has to
+// carry.
+//
+// The rejected reply is quoted back — truncated to its last
+// prCorrectionReplyLimit characters, behind an elision marker —
+// because the agent has to see what it wrote to know what to fix.
+func buildPRCorrectionPrompt(prompt, reason, reply string) string {
+	excerpt := reply
+	elided := false
+	if runes := []rune(reply); len(runes) > prCorrectionReplyLimit {
+		excerpt = string(runes[len(runes)-prCorrectionReplyLimit:])
+		elided = true
+	}
+	var sb strings.Builder
+	sb.WriteString(prompt)
+	sb.WriteString("\n\n## Correction\n\n")
+	sb.WriteString("Your previous reply was rejected: " + reason + ".\n\n")
+	sb.WriteString("Your previous reply was:\n\n")
+	if elided {
+		sb.WriteString("… (truncated)\n")
+	}
+	sb.WriteString(excerpt)
+	sb.WriteString("\n\nProduce the corrected reply now. Keep the same format:\n\n")
+	sb.WriteString("- the FIRST line is the PR title: `<type>(<optional-scope>): <subject>`\n")
+	sb.WriteString("- the SECOND line is empty\n")
+	sb.WriteString("- the THIRD line is `" + summaryHeading + "`\n")
+	sb.WriteString("- the remaining lines are the PR body\n")
+	return sb.String()
 }
 
 // extractRiskLevel pulls the `Risk: <level> — <reason>` line out
@@ -934,10 +1126,9 @@ func extractRiskLevel(body string) (level, reason string) {
 // around the reply. LLMs are unreliable at exact format compliance:
 // they may forget the fence, wrap the output in JSON, prefix it
 // with a Markdown heading, or scatter the title inside a bullet
-// list. Any of those made the daemon hard-error with
-// "could not parse agent reply", forcing the user to re-invoke
-// /gtw pr manually — a bad experience for a feature whose whole
-// point is automation.
+// list. Any of those made the daemon hard-error on the parse,
+// forcing the user to re-invoke /gtw pr manually — a bad
+// experience for a feature whose whole point is automation.
 //
 // This version is permissive:
 //

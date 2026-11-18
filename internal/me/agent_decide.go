@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/llm"
-	"github.com/cnlangzi/nightme/internal/wfe"
+	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
 // The options the decision model may pick besides a command.

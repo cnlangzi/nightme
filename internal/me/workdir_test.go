@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/llm"
-	"github.com/cnlangzi/nightme/internal/wfe"
+	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
 // movableCwd reports the directory a chat works in, and lets the

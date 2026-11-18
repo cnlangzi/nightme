@@ -578,7 +578,7 @@ This section answers "where do runs actually execute, and how do the pieces fit?
   │  decision model (System 1) first, the chat      │
   │  model (System 2) when it is not sure           │
   │                                                │
-  │  the policy (internal/wfe.Policy) bounds every   │
+  │  the policy (pkg/wfe.Policy) bounds every       │
   │  action a run may take                         │
   └───────┬──────────────────────────┬─────────────┘
           │ "🧑‍💻: /gtw fix 42 -y"   │ the run's cards
@@ -602,7 +602,7 @@ This section answers "where do runs actually execute, and how do the pieces fit?
 | The side channel | `internal/gateway/observe` | What the daemon said about the messages the run sent: the phase, the heartbeat, the prompts, the outcome. |
 | The agent | `internal/me` | The run: what to do next, what the policy allows, and the sessions the run speaks in. |
 | The models | `internal/llm` | Two capabilities: `Provider` (chat and tool calling) and `Decider` (typed decision questions). |
-| The engine | `internal/wfe` | The workflow schema, the plan of a run, the judgment points, and the `Policy` that bounds a run. |
+| The engine | `pkg/wfe` | The workflow schema, the plan of a run, the judgment points, and the `Policy` that bounds a run. |
 
 The engine is a pure library: no I/O, no clock, no secrets. It parses, validates, computes the plan of a run and evaluates expressions — the runner owns the external capabilities and hands the engine their results.
 
@@ -997,5 +997,5 @@ These are deliberately **not** in the workflow engine; they belong in a later it
 | Agent names | [`primary-agent-detection.md`](./primary-agent-detection.md) |
 | The chat a run works in | [`../internal/channel`](../../internal/channel) |
 | What the daemon said | [`../internal/gateway/observe`](../../internal/gateway/observe) |
-| The `wfe` engine | [`../../internal/wfe`](../../internal/wfe) |
+| The `wfe` engine | [`../../pkg/wfe`](../../pkg/wfe) |
 | The outcome contract | [`me.md`](./me.md) |

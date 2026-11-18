@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/cnlangzi/nightme/internal/wfe"
+	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
 // errFinished ends the loop when the model called the finish tool.

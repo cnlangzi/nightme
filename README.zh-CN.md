@@ -872,6 +872,8 @@ internal/
   statusbar/                       # Feishu footer-card stamp runtime (per F-58, F-133)
   testdata/                        # shared test fixtures
   version/                         # build-time version metadata
+pkg/
+  wfe/                             # 工作流引擎 — 可作为 github.com/cnlangzi/nightme/pkg/wfe 导入
 ```
 
 ### Exit codes

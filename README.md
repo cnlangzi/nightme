@@ -1049,6 +1049,8 @@ internal/
   statusbar/                       # Feishu footer-card stamp runtime (per F-58, F-133)
   testdata/                        # shared test fixtures
   version/                         # build-time version metadata
+pkg/
+  wfe/                             # the workflow engine — published, importable as github.com/cnlangzi/nightme/pkg/wfe
 ```
 
 ### Exit codes

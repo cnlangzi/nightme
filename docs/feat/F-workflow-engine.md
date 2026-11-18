@@ -49,10 +49,10 @@ internal/
 依赖方向严格单向：
 
 ```
-internal/wfe ── (no deps on bot)
-       ▲
-       │ uses Runtime interface (4 methods, all channel entries)
-       │
+pkg/wfe ── (no deps on bot)
+▲
+│ uses Runtime interface (4 methods, all channel entries)
+│
 internal/channel/bot ──► internal/gateway (bot 注册到 AttachChannels)
                        └► internal/gitprovider (借, trigger events)
                        └► internal/registry (state dir)
@@ -65,7 +65,7 @@ wfe 不 import bot 的任何东西。bot import wfe + nightme 的 channel/gatewa
 
 ---
 
-## 3. wfe 库（`internal/wfe/`）
+## 3. wfe 库（`pkg/wfe/`）
 
 ### 3.1 核心类型（`types.go`）
 
@@ -1231,7 +1231,7 @@ bot is a transparent message pipe. The workflow + existing nightme slash command
 
 ## 7. Test plan
 
-### 7.1 wfe 单元测试（`internal/wfe/*_test.go`）
+### 7.1 wfe 单元测试（`pkg/wfe/*_test.go`）
 
 | Test | 覆盖 |
 |------|------|
@@ -1300,8 +1300,8 @@ func (m *mockRT) RunShell(ctx, s) (*ShellResult, error) { m.shellCalls = append(
 
 ### Phase 0: wfe 库 only（无 bot 集成）
 
-- 写完 `internal/wfe/` 全套 + 单测
-- 用 `go test ./internal/wfe/...` 100% 覆盖
+- 写完 `pkg/wfe/` 全套 + 单测
+- 用 `go test ./pkg/wfe/...` 100% 覆盖
 - **没有** bot subsystem 集成——纯库
 - 持续 1 周
 

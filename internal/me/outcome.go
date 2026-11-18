@@ -3,7 +3,7 @@ package me
 import (
 	"maps"
 
-	"github.com/cnlangzi/nightme/internal/wfe"
+	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
 // fallbackErrorDescription is the last link of the description chain:

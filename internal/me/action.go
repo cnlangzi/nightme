@@ -11,7 +11,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/cnlangzi/nightme/internal/wfe"
+	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
 // Action is one resource channel that a workflow can invoke via

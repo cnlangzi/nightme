@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/proc"
-	"github.com/cnlangzi/nightme/internal/wfe"
+	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
 // ShellRunner runs the shell command of a workflow step.

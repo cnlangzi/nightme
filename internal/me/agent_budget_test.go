@@ -60,7 +60,7 @@ func TestBudget_TheRunPausesWhenTheStepSpentItsBudget(t *testing.T) {
 	op.steps = []fakeStep{pendingStep("still going")}
 
 	runID, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
 	})
 	if err != nil {
 		t.Fatalf("start: %v", err)
@@ -472,20 +472,20 @@ func TestTheCard_ShowsTheWaitingLineAndTheChancesLeft(t *testing.T) {
 	op.steps = []fakeStep{pendingStep("still going")}
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	waitRun(t, svc, "obs-1")
 
 	var chances bool
-	for _, item := range op.Checklist(op.Cards()[1].ID) {
+	for _, item := range op.Checklist(op.Cards()[0].ID) {
 		if strings.Contains(item.ActiveForm, "chances left") {
 			chances = true
 		}
 	}
 	if !chances {
-		t.Errorf("the card does not carry the chances left: %+v", op.Checklist(op.Cards()[1].ID))
+		t.Errorf("the card does not carry the chances left: %+v", op.Checklist(op.Cards()[0].ID))
 	}
 }
 

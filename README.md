@@ -347,7 +347,7 @@ stdout:
 | 3. Hand off *(optional)* | `/handoff <name>` · `/resume <name>` | Task state is written to a file, so a fresh session or a different agent continues without losing progress. |
 | 4. Commit | `/gtw commit [-a <agent>]` | An agent stages the changes and writes Conventional Commits messages. Local only. |
 | 5. Push | `/gtw push` | Pushes the branch to `origin`. Refuses a dirty worktree. |
-| 6. PR | `/gtw pr [-a <agent>]` | Opens a PR / MR with a Conventional Commits title, a structured body, and `Closes #<id>`. |
+| 6. PR | `/gtw pr [-a <agent>] [--ready]` | Opens a PR / MR with a Conventional Commits title, a structured body, and `Closes #<id>`. With `--ready` the issue moves from `nightme/wip` to `nightme/ready`. |
 | 7. Close | `/gtw close` | Removes the `nightme/wip` label, the worktree, and the local branch; returns the chat to the default branch, synced. |
 
 Steps 1–2 run in the chat's current agent session, so you keep talking to the agent that did the analysis. `commit` and `pr` run a one-shot agent that exits when done, keeping the main conversation clean. `push`, `close`, `back`, and `sync` are pure Git / platform operations with no agent involved. Each step replies with one IM card. GitHub (`gh`) and GitLab (`glab`) are detected from `origin`; first use on a new repo needs no setup.
@@ -369,14 +369,14 @@ Issue titles follow Conventional Commits, so `/gtw fix` can derive a readable br
 
 ### 2. Implement: `/gtw fix`
 
-**`/gtw fix <issue-id>`** syncs the default branch, creates a worktree and branch named after the issue title, labels the issue `nightme/wip`, moves the chat's CWD into the worktree, runs the `fix` hooks, and dispatches the issue (body and attachments) to the chat's current agent.
+**`/gtw fix <issue-id>`** syncs the default branch, creates a worktree and branch named after the issue title, labels the issue `nightme/wip`, moves the chat's CWD into the worktree, runs the `fix` hooks, and dispatches the issue (body and attachments) to the chat's current agent. Naming the issue is the manual assignment: it does not need the `nightme/assigned` label. What it does refuse is an issue another agent holds — one carrying a `nightme/*` state label such as `nightme/wip`, `nightme/ready` or `nightme/revise`. The claim (`nightme/wip`) keeps its own refusal; every other state says the issue is not available and names the label that holds it, so you can drop that label on the issue page to take the issue over.
 
 - **Assess first (default)** — the agent checks the issue against the code, posts a plan, and waits. Review it in chat, then tell the agent to proceed.
 - **`-y` / `--yes`** — the agent implements directly.
 
 **`/gtw fix --name <branch>`** (or `-n`) creates a local worktree without an issue; you drive the agent yourself. Like the issue-backed mode it syncs the default branch first: the chat has to sit in the primary checkout (not inside a worktree), the repository needs an `origin` remote, and the primary checkout must have no uncommitted changes.
 
-**`/gtw fix *`** takes the next piece of work from the backlog by itself: it picks an issue and runs the very same flow on it, then says which issue it picked. The queue lives on the tracker — an issue NightMe may work on carries the `nightme/assigned` label, put there by a human or by an external automation on the tracker; the fix takes that label off as it stamps `nightme/wip` on. Of the queued issues the oldest eligible one wins: an issue whose prerequisites have not landed yet is passed over, and so is one whose branch already exists locally or already has an open pull request. Prerequisites come from the platform's own issue-relations graph — GitHub issue dependencies, GitLab blocking issues (Premium) — so "do the prerequisite first" does not depend on prose in the issue body; on a platform that exposes no relations the queue is ordered by age alone, and the reply says so. When nothing in the queue is eligible, the command says why and asks to be woken again in a few minutes instead of failing. Note that the fix takes the issue out of the queue when it claims it: closing a fix without finishing the work leaves the issue out of the queue until someone puts the label back.
+**`/gtw fix *`** takes the next piece of work from the backlog by itself: it picks an issue and runs the very same flow on it, then says which issue it picked. The queue lives on the tracker — an issue NightMe may work on carries the `nightme/assigned` label, put there by a human or by an external automation on the tracker; the fix takes that label off as it stamps `nightme/wip` on. Only an issue carrying `nightme/assigned` alone is in the queue: any other `nightme/*` label means another agent holds it, so an issue under review or already done is never picked up again. Of the queued issues the oldest eligible one wins: an issue whose prerequisites have not landed yet is passed over, and so is one whose branch already exists locally or already has an open pull request. Prerequisites come from the platform's own issue-relations graph — GitHub issue dependencies, GitLab blocking issues (Premium) — so "do the prerequisite first" does not depend on prose in the issue body; on a platform that exposes no relations the queue is ordered by age alone, and the reply says so. When nothing in the queue is eligible, the command says why and asks to be woken again in a few minutes instead of failing. Note that the fix takes the issue out of the queue when it claims it: closing a fix without finishing the work leaves the issue out of the queue until someone puts the label back.
 
 **`/gtw back`** steps out of the fix worktree without tearing it down — the chat's CWD returns to the repo root, the default branch is synced, and the worktree, branch, and uncommitted work stay on disk. **`/gtw back <branch>`** jumps back in: the argument is a *prefix* of the worktree's branch name, so `42-feat` enters the worktree on `42-feat-login-state-expires`. A branch name that matches exactly always wins over the longer branches that share its prefix; when several branches match and none is exact, the command names them instead of guessing. Worktrees you made by hand are reachable the same way — the branch is the handle — but nightme leaves its own state file out of them, so `/gtw close` cannot tear down a worktree and branch it did not create.
 
@@ -394,7 +394,7 @@ When the agent's context is getting long, or another agent is a better fit for t
 
 1. **`/gtw commit [-a <agent>]`** — a one-shot agent stages the worktree's changes and commits them as one or more Conventional Commits (`<type>(<scope>): <subject>`). NightMe verifies the commit actually landed and the worktree is clean. Refuses on merge conflicts or detached HEAD; a clean worktree has nothing to commit and reports a failure. Never pushes.
 2. **`/gtw push`** — pushes the branch to `origin`. Clean worktree only: uncommitted changes are refused with a hint to run `/gtw commit` first. A branch with no unpushed commit has nothing to push and reports a failure.
-3. **`/gtw pr [-a <agent>]`** — a one-shot agent writes a Conventional Commits title and a structured body from the branch's changes; NightMe appends `Closes #<id>` for issue-backed fixes and ends the body with a *Generated by NightMe* line, then opens the PR / MR. The branch must already be on `origin`; if a PR for it is already open, the reply links to it.
+3. **`/gtw pr [-a <agent>] [--ready]`** — a one-shot agent writes a Conventional Commits title and a structured body from the branch's changes; NightMe appends `Closes #<id>` for issue-backed fixes and ends the body with a *Generated by NightMe* line, then opens the PR / MR. The branch must already be on `origin`; if a PR for it is already open, the reply links to it. With **`--ready`** the linked issue also moves from `nightme/wip` to `nightme/ready` once the PR exists — the work is waiting for review, and the tracker says so. The transition adds `nightme/ready` before it drops `nightme/wip`, so a failure in between leaves the issue claimed; a label call that fails only warns, because the PR is open either way.
 
 The agent for `commit` and `pr` is chosen by `-a <agent>`, then `commit.agent` / `pr.agent` in `~/.nightme/gtw.yml`, then the chat's current agent.
 
@@ -703,7 +703,7 @@ key — is reported in `nightme logs` and left out. The daemon still starts, and
 | `/me pause` | Stops the run after the step it is on. |
 | `/me resume [note]` | Runs the step the run is on again. Its budget for the current round starts over. The note is your instruction. |
 | `/me next [note]` | Skips the step the run is on: the plan goes on with the workflow, and the facts the step produced are kept. The note is your instruction. |
-| `/me stop` | Cancels the run, tells the chat to stop working, and leaves a summary of the session in the chat. |
+| `/me stop` | Cancels the run and leaves the record of the session in the chat. The work the chat agent does on its own goes on to its end. |
 | `/me status` | Shows the state of the run again: a new card of the round the run is in carries the phase of the run, the tree of the rounds, the checklist of the round and the counters of the run in its header. |
 
 The arguments of `/me start` fill the workflow's declared arguments: a positional
@@ -739,11 +739,12 @@ asks a question, the choices become the card's buttons: a click is the answer. T
 question itself never reaches the agent — it is a message of the chat, not a turn
 of the conversation.
 
-`/me stop` leaves a summary of the session in the chat: a card of its own that
-says what the run did, what went wrong and what the models decided — the facts
-of the whole session, the actions that went wrong one by one, and the judgment
-the models made at the wake-ups. It is posted once the run has unwound, and it
-carries no buttons: the run is over.
+Every run that ends leaves a record of the session in the chat: a card of its own
+that says how the run ended and why, what it did, what went wrong and what the
+models decided — the facts of the whole session, the actions that went wrong one
+by one, and the judgment the models made at the wake-ups. It is posted once the
+run has unwound, and it carries no buttons: the run is over. A run that ends by
+itself leaves a record too.
 
 The card is the run's receipt. Its first line is a live header — how many turns the
 chat model took, how many tool calls the run made, when it last did something —
@@ -869,7 +870,7 @@ here; the `/me` subcommands — `/me start` · `/me reply` · `/me pause` ·
 | `/tools on\|off` | Show or hide per-tool thread replies (default off to keep the card quiet). |
 | `/handoff <name>` | Serialize the current task into `~/.nightme/handoff/<name>.md` so the next agent (or a fresh session) continues from any directory. |
 | `/resume <name>` | Continue the task described by `~/.nightme/handoff/<name>.md` in the current session. |
-| `/review [-a\|--agent <agent>] [-g\|--global] [--unset] [-c\|--continue] [--abort]` | Review the current branch against the default branch (PR mode); findings are injected back into this chat. The review's verdict line is followed by a digest of the findings — one table per severity, one row per finding, naming where each finding is and what kind it is — on the card, whatever `/think` says; the findings' text itself stays in the thread (`/think` on) and in the main agent's answer (`/think` off, the default). `--agent` runs the review with a specific agent; `-g` also stores it as the global `review.agent` in `~/.nightme/config.yaml`; `--unset` removes that global setting. `-c` resumes the groups of the last review in this chat that failed, by reopening their agent sessions and sending them "continue". `--abort` stops the review running in this chat — its agent sessions are closed and the stopped groups stay resumable with `-c`. A review has no time limit: it runs until the user aborts it or the daemon shuts down. |
+| `/review [-a\|--agent <agent>] [-g\|--global] [--unset] [-c\|--continue] [--abort]` | Review the current branch against the default branch (PR mode); findings are injected back into this chat. The review's verdict line is followed by a digest of the findings — one table per severity, one row per finding, naming what kind of finding it is and where it is — on the card, whatever `/think` says; the findings' text itself stays in the thread (`/think` on) and in the main agent's answer (`/think` off, the default). `--agent` runs the review with a specific agent; `-g` also stores it as the global `review.agent` in `~/.nightme/config.yaml`; `--unset` removes that global setting. `-c` resumes the groups of the last review in this chat that failed, by reopening their agent sessions and sending them "continue". `--abort` stops the review running in this chat — its agent sessions are closed and the stopped groups stay resumable with `-c`. A review has no time limit: it runs until the user aborts it or the daemon shuts down. |
 | `/wiki init [--modules] [--llmstxt] [--arch]` | Read the codebase, design modules, and write per-module wiki files — the repo wiki as a project asset. |
 | `/queue <message>` | Append `<message>` to the queue as a standalone Prompt. |
 | `/wf install <owner>/<name>` | Install a published workflow into the workflows directory. The address is the workflow's name: `nightme/coder` is installed as `~/.nightme/workflows/nightme/coder.yml` and is started with `/me start nightme/coder`. The install is shown as a checklist — the download, the validation, the write. |

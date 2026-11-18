@@ -300,13 +300,16 @@ func TestReviewDigest_CategoryColumn(t *testing.T) {
 	}
 
 	got = reviewDigest(mixed, nil)
-	if !strings.Contains(got, "| path | category |\n") {
+	if !strings.Contains(got, "| category | path |\n") {
 		t.Errorf("the table has no category column:\n%s", got)
 	}
 	if !strings.Contains(got, "| --- | --- |\n") {
 		t.Errorf("the separator row does not have one dash per column:\n%s", got)
 	}
-	if !strings.Contains(got, "| b.go:7 | — |") {
+	if !strings.Contains(got, "| error-handling | a.go:42 |") {
+		t.Errorf("the row does not lead with the category:\n%s", got)
+	}
+	if !strings.Contains(got, "| — | b.go:7 |") {
 		t.Errorf("the finding without a category does not show the em dash:\n%s", got)
 	}
 }
@@ -322,10 +325,10 @@ func TestReviewDigest_Sanitizes(t *testing.T) {
 	}
 
 	got := reviewDigest(outcomes, nil)
-	if !strings.Contains(got, "| a.go/:42 | error / handling x y |") {
+	if !strings.Contains(got, "| error / handling x y | a.go/:42 |") {
 		t.Errorf("the cell was not sanitized:\n%s", got)
 	}
-	if !strings.Contains(got, "| b.go | — |") {
+	if !strings.Contains(got, "| — | b.go |") {
 		t.Errorf("the cell was not trimmed:\n%s", got)
 	}
 }
@@ -414,7 +417,7 @@ func TestSendVerdict_CarriesTheWholeDigest(t *testing.T) {
 	if !strings.Contains(text, "60 findings") {
 		t.Errorf("the verdict line does not report every finding:\n%s", text)
 	}
-	if rows := strings.Count(text, "| internal/gateway/outbound/policy.go:"); rows != len(findings) {
+	if rows := strings.Count(text, "internal/gateway/outbound/policy.go:"); rows != len(findings) {
 		t.Errorf("the verdict message holds %d of %d rows:\n%s", rows, len(findings), text)
 	}
 	if strings.Contains(text, "more findings") {
@@ -537,8 +540,8 @@ func TestSendVerdict_CarriesTheDigest(t *testing.T) {
 	for _, want := range []string{
 		"1 subagent",
 		"**high** · 1",
-		"| path | category |",
-		"| a.go:42 | error-handling |",
+		"| category | path |",
+		"| error-handling | a.go:42 |",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("the verdict message does not carry %q:\n%s", want, text)
@@ -888,7 +891,11 @@ func TestHandle_ReviewDeliversTheFindingsToTheThread(t *testing.T) {
 	f := NewFactory()
 	dispatchContinue(t, f, cs, chatID, "review")
 
-	msgs := waitForReviewMessages(t, em, 4)
+	// Five messages carry the run: the plan, one thread message per
+	// group, the end hint, and the verdict. Waiting for fewer lets
+	// the poll catch the run mid-flight — the verdict lands last,
+	// so a snapshot taken before it arrives misses a reply.
+	msgs := waitForReviewMessages(t, em, 5)
 
 	// The card carries the plan and the verdict — and no group text.
 	var replies []string
@@ -977,10 +984,10 @@ func TestHandle_ReviewVerdictCarriesTheDigest(t *testing.T) {
 		"2 subagents",
 		"2 high",
 		"**high** · 2",
-		"| path | category |",
+		"| category | path |",
 		"| --- | --- |",
-		"| file1.go:1 | correctness |",
-		"| file2.go:2 | correctness |",
+		"| correctness | file1.go:1 |",
+		"| correctness | file2.go:2 |",
 	} {
 		if !strings.Contains(verdict.Text, want) {
 			t.Errorf("the verdict does not carry %q:\n%s", want, verdict.Text)

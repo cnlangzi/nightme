@@ -1475,18 +1475,19 @@ jobs:
             #   - dsh shared-host binds 127.0.0.1:3080 and prints
             #     the URL on stdout.
             #
-            # Threshold of 80 bytes matches the banner length
-            # exactly — anything below means the banner itself
-            # was truncated; anything at-or-above 80 means the
-            # agent emitted at least one additional byte, which
-            # is the cross-protocol "agent acknowledged" signal.
-            # The previous threshold of 150 implicitly assumed
-            # every stdio agent logs a multi-line parse error,
-            # which is brittle: opencode on a fresh CI runner
-            # terminates without writing anything to stderr (no
-            # auth, no parse-failure log), leaving only the banner
-            # plus pumpIO's "send: EOF" (~138 bytes) — sub-150,
-            # false-FAIL. 80 covers all known agents.
+            # The 80-byte threshold only ends the wait early — the
+            # verdict is decided by the captured output below, not
+            # by the poll. It stays below the banner's length
+            # (~92 bytes on unix, ~130 on Windows, where the temp
+            # path is long) so the wait ends as soon as nightme has
+            # said anything at all. The previous threshold of 150
+            # implicitly assumed every stdio agent logs a
+            # multi-line parse error, which is brittle: opencode on
+            # a fresh CI runner terminates without writing anything
+            # to stderr (no auth, no parse-failure log), leaving
+            # only the banner plus pumpIO's "send: EOF" (~138
+            # bytes) — sub-150, false-FAIL. 80 covers all known
+            # agents.
             #
             # Observation window of 30s (was 15s, was 8s): the dsh
             # bridge's own webURLParseTimeout is 10s
@@ -1504,55 +1505,103 @@ jobs:
             # comfortable headroom (claude ≈0.7s, codex
             # ≈1.3s, opencode ≈5s, pi ≈2s, dsh ≈6.4s, cursor
             # ≈8-12s) while still catching a hung agent within
-            # ~2× its expected cold-start cost.
+            # ~2× its expected cold-start cost. Measured on
+            # windows-11-arm: the slowest agent took 3.8s — a
+            # failure inside the window is a broken spawn, not a
+            # slow one, so the window is not the thing to widen.
             set +e
             printf 'PONG\n' | "$bin" test \
                 --agent "$agent" \
                 --workspace "$workspace" \
                 >"$out_file" 2>&1 &
             pid=$!
-            # Wait up to 30 seconds for output to grow past the
-            # banner. Nightme's banner is exactly:
+            # Wait up to 30 seconds for the child to say something.
+            # Nightme's banner is exactly:
             #   "[nightme] session <id> started in <ws> (agent=…, args=…)\n"
-            # which is ~80–120 bytes. We poll the output file
-            # every 0.5s for size > 80 bytes; first observation
-            # past that threshold is the "agent acknowledged"
-            # signal we care about.
+            # which is ~80–120 bytes. We poll the output file every
+            # 0.5s and stop waiting as soon as it grows past the
+            # banner — the wait ends early, the verdict is decided
+            # by the captured output below.
             banner_threshold=80
             deadline=$(( $(date +%s) + 30 ))
-            acknowledged=0
             while [ "$(date +%s)" -lt "$deadline" ]; do
               size=$(wc -c < "$out_file" 2>/dev/null | tr -d ' ' || echo 0)
               if [ "$size" -gt "$banner_threshold" ]; then
-                acknowledged=1
                 break
               fi
               if ! kill -0 "$pid" 2>/dev/null; then
-                # Process exited — no point waiting longer. If
-                # we never crossed the threshold, captured
-                # output is what we get.
+                # Process exited — no point waiting longer.
                 break
               fi
               sleep 0.5
             done
+            # Did the child exit on its own, or is it still running
+            # (and about to be killed)? Ask BEFORE the teardown:
+            # after the kill every child looks dead. bash reaps a
+            # background child on its own, so a child that already
+            # exited is gone from the process table and the probe
+            # fails.
+            exited=0
+            if ! kill -0 "$pid" 2>/dev/null; then
+              exited=1
+            fi
             # Always tear down the spawned process; CI doesn't
             # leave orphans behind regardless of pass/fail.
             kill "$pid" 2>/dev/null || true
             wait "$pid" 2>/dev/null || true
             output=$(cat "$out_file")
+            # The captured output decides — not the poll above.
+            #
+            # The poll reads the size and then checks whether the
+            # child is still alive, and that gap is a whole `wc` +
+            # `tr` pipeline wide. A child that exits on its own can
+            # slip its output through unseen: nightme writes the
+            # error and exits, the poll reads 0 bytes just before
+            # the write and notices the child gone just after, and
+            # the gate reports a hang what was a finished run.
+            # Git Bash pays tens of milliseconds per spawned
+            # helper, so the gap is an order of magnitude wider on
+            # Windows than on linux/macos (~2ms there) — the same
+            # race, far easier to lose on Windows.
+            #
+            # Whatever the child managed to say counts, and the
+            # verdict is read once, from the output the child left
+            # behind. nightme's own error text counts too, because
+            # the bridge relays the child's own words inside it:
+            #   - omp, with no API key and no models.yml, prints
+            #     "No default model selected" and exits before it
+            #     serves RPC; the bridge carries that out on stderr,
+            #   - copilot, with no GitHub auth, answers session/new
+            #     with "json-rpc error -32000: Authentication
+            #     required"; the bridge relays that error,
+            # and both prove the binary ran and spoke.
+            #
+            # So this gate answers one question — did the child say
+            # anything at all? That the binary exists, is on PATH
+            # and runs is the PATH and --help gates' job, two steps
+            # above.
+            final_size=$(wc -c < "$out_file" 2>/dev/null | tr -d ' ')
+            [ -n "$final_size" ] || final_size=0
+            acknowledged=0
+            if [ "$final_size" -gt "$banner_threshold" ]; then
+              acknowledged=1
+            fi
             if [ "$acknowledged" -eq 1 ]; then
-              echo "OK: $agent acknowledged within window ($(wc -c < "$out_file" | tr -d ' ') bytes)"
+              echo "OK: $agent acknowledged within window ($final_size bytes)"
               continue
             fi
-            # Never crossed the banner threshold. Could be:
-            #   (a) bridge couldn't find/launch the binary  → FAIL
-            #   (b) agent is genuinely hung (no auth error,
-            #       no echo, no protocol log)               → FAIL
-            # In both cases the surface symptom is identical
-            # from CI's perspective: no agent response within
-            # 30s. We surface the captured output so the
-            # post-mortem is one click away.
-            echo "::error::$agent: no response within 30s (bridge failed to launch, or agent hung)"
+            # The child never showed signs of life. Two shapes, and
+            # they need different words:
+            #   (a) the child exited on its own with nothing to say
+            #       → it died before it could say anything
+            #   (b) the child was still running and silent → hung
+            # The old wording said "no response within 30s" for
+            # both, which misreported (a): it exited in seconds.
+            if [ "$exited" -eq 1 ]; then
+              echo "::error::$agent: the agent exited without producing output beyond the banner"
+            else
+              echo "::error::$agent: no response within 30s (the agent is running but silent)"
+            fi
             echo "----- captured output -----"
             echo "$output"
             echo "----- end output -----"

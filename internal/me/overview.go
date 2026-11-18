@@ -3,11 +3,13 @@
 // The card of the run is static: it says what the run is and what the
 // plan of the run is. The card of a round carries the history of the
 // run: the rounds that have finished, with their own facts, and the
-// round that is going.
+// round that is going. The record of a finished run is a card of its
+// own: it accounts for the whole session.
 package me
 
 import (
 	"fmt"
+	"maps"
 	"strconv"
 	"strings"
 	"time"
@@ -127,9 +129,6 @@ func (r *run) runCard() string {
 
 // runFacts renders the facts of the run: how big it is, when it
 // started and what it was given.
-//
-// The values start at the same column: the key, its colon, and the
-// padding to the column.
 func runFacts(wf *wfe.Workflow, started time.Time, names []string, values map[string]string) []string {
 	facts := []fact{
 		{key: "jobs", value: strconv.Itoa(len(wf.JobOrder()))},
@@ -139,6 +138,15 @@ func runFacts(wf *wfe.Workflow, started time.Time, names []string, values map[st
 	if len(names) > 0 {
 		facts = append(facts, fact{key: "args", value: argsValue(names, values)})
 	}
+	return factLines(facts)
+}
+
+// factLines renders the rows of a facts block.
+//
+// The values start at the same column: the key, its colon, and the
+// padding to the column. Every facts block is rendered this way, so
+// the two card layouts cannot drift apart.
+func factLines(facts []fact) []string {
 	out := make([]string, 0, len(facts))
 	for _, f := range facts {
 		out = append(out, fmt.Sprintf("%-*s%s", factColumn, f.key+":", f.value))
@@ -151,6 +159,134 @@ func runFacts(wf *wfe.Workflow, started time.Time, names []string, values map[st
 type fact struct {
 	key   string
 	value string
+}
+
+// recordCard renders the card a finished run leaves behind.
+//
+// The card is the account of the session: the headline says how the
+// run ended, the facts say what it did, and the blocks below say what
+// went wrong and what the models decided.
+//
+// The card speaks the vocabulary of the run and the round cards: the
+// same icons, the same tree prefixes, the same facts and the same
+// durations.
+func (r *run) recordCard() string {
+	r.mu.Lock()
+	started := r.state.StartedAt
+	rounds := maps.Clone(r.state.Rounds)
+	history := append([]wfe.ActionRecord(nil), r.policy.History...)
+	inflight := r.inflight
+	phase := r.phase
+	reason := r.errMsg
+	r.mu.Unlock()
+	wakes := r.wakeRecords()
+
+	lines := make([]string, 0, 24)
+	lines = append(lines, "■ [ "+r.workflow.Name+" ] "+string(phase))
+	// The reason the run ended is the run's own: an error that never
+	// reached an action of the run leaves no row in the errors block.
+	if reason != "" {
+		lines = append(lines, clipLine("reason: "+reason, maxSummaryLine))
+	}
+	if inflight != nil && inflight.Command != "" {
+		lines = append(lines, clipLine("stopped while: "+inflight.Command, maxSummaryLine))
+	}
+	lines = append(lines, "")
+
+	facts := []fact{
+		{key: "duration", value: durationText(r.svc.now().Sub(started))},
+	}
+	if jobs := jobsValue(r.workflow.JobOrder(), rounds); jobs != "" {
+		facts = append(facts, fact{key: "jobs", value: jobs})
+	}
+	facts = append(facts,
+		fact{key: "actions", value: actionsValue(history)},
+		fact{key: "steps", value: stepsValue(workflowStepIDs(r.workflow), history)},
+	)
+	lines = append(lines, factLines(facts)...)
+
+	if finished := r.finishedRounds(); len(finished) > 0 {
+		lines = append(lines, "")
+		lines = append(lines, treeBlock("rounds:", finished))
+	}
+	if errs := errorLines(history); len(errs) > 0 {
+		lines = append(lines, "")
+		lines = append(lines, errs...)
+	}
+	if decs := decisionLines(wakes); len(decs) > 0 {
+		lines = append(lines, "")
+		lines = append(lines, decs...)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// jobsValue renders the jobs the run entered and the round of each.
+//
+// A run that entered no job yet has no value: the map of the rounds is
+// empty then.
+func jobsValue(jobs []string, rounds map[string]int) string {
+	parts := make([]string, 0, len(rounds))
+	for _, job := range jobs {
+		if round, ok := rounds[job]; ok {
+			parts = append(parts, fmt.Sprintf("%s × %d", job, round))
+		}
+	}
+	return strings.Join(parts, " · ")
+}
+
+// outcomeStatusOrder is the order the counts of the actions follow.
+var outcomeStatusOrder = []wfe.OutcomeStatus{
+	wfe.OutcomeOK,
+	wfe.OutcomeNoop,
+	wfe.OutcomeIncomplete,
+	wfe.OutcomeFailed,
+	wfe.OutcomeCancelled,
+	wfe.OutcomeTimeout,
+	wfe.OutcomeUnknown,
+}
+
+// actionsValue renders what the run did and how the actions ended.
+func actionsValue(history []wfe.ActionRecord) string {
+	counts := map[wfe.OutcomeStatus]int{}
+	for _, rec := range history {
+		status := rec.Outcome.Status
+		if status == "" {
+			status = wfe.OutcomeUnknown
+		}
+		counts[status]++
+	}
+	parts := make([]string, 0, len(counts))
+	for _, status := range outcomeStatusOrder {
+		if counts[status] == 0 {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%d %s", counts[status], status))
+	}
+	value := strconv.Itoa(len(history))
+	if len(parts) > 0 {
+		value += " (" + strings.Join(parts, " · ") + ")"
+	}
+	return value
+}
+
+// stepsValue renders how many steps of the workflow ran.
+//
+// A step whose condition did not hold is recorded in the run state but
+// not in the history, so it counts as a step that did not run.
+func stepsValue(stepIDs []string, history []wfe.ActionRecord) string {
+	ran := map[string]bool{}
+	for _, rec := range history {
+		if rec.Kind == wfe.ActionKindRun && rec.StepID != "" {
+			ran[rec.StepID] = true
+		}
+	}
+	count := 0
+	for _, id := range stepIDs {
+		if ran[id] {
+			count++
+		}
+	}
+	return fmt.Sprintf("%d ran · %d not run", count, len(stepIDs)-count)
 }
 
 // argsValue renders the arguments of the run: the name and the value
@@ -285,17 +421,27 @@ func stepCommand(step wfe.Step) string {
 // has not settled has no duration and no verdict, so its node carries
 // nothing but the time it started.
 func (r *run) roundsTree(current iteration) string {
+	bodies := r.finishedRounds()
+	bodies = append(bodies, currentNode(current, r.manyJobs(), r.roundStart(current.job, current.round)))
+	return treeBlock("rounds:", bodies)
+}
+
+// finishedRounds renders the rows of the rounds that have finished.
+//
+// The rounds of a job are numbered from one, so a run with several
+// jobs has rounds of the same number. The tree names the job when
+// there is more than one: with a single job the plan of the run says
+// which job the rounds belong to.
+//
+// A run with more rounds than the tree shows folds the older ones into
+// one row.
+func (r *run) finishedRounds() []string {
 	r.mu.Lock()
 	records := append([]roundRecord(nil), r.roundRecords...)
 	r.mu.Unlock()
 
-	// The rounds of a job are numbered from one, so a run with several
-	// jobs has rounds of the same number. The tree names the job when
-	// there is more than one: with a single job the plan of the run
-	// says which job the rounds belong to.
-	several := len(r.workflow.JobOrder()) > 1
-
-	bodies := make([]string, 0, len(records)+2)
+	several := r.manyJobs()
+	bodies := make([]string, 0, len(records)+1)
 	folded := 0
 	if len(records) > maxTreeRounds {
 		folded = len(records) - maxTreeRounds
@@ -307,18 +453,33 @@ func (r *run) roundsTree(current iteration) string {
 	for _, rec := range records {
 		bodies = append(bodies, roundNode(rec, several))
 	}
-	bodies = append(bodies, currentNode(current, several, r.roundStart(current.job, current.round)))
+	return bodies
+}
 
+// manyJobs reports whether the run works through more than one job.
+func (r *run) manyJobs() bool {
+	return len(r.workflow.JobOrder()) > 1
+}
+
+// treeBlock renders a headed block of tree rows.
+//
+// The rows of a block are the same rows everywhere: the prefix says
+// which row is the last one, and the body carries the facts.
+func treeBlock(heading string, bodies []string) string {
 	lines := make([]string, 0, len(bodies)+1)
-	lines = append(lines, "rounds:")
+	lines = append(lines, heading)
 	for i, body := range bodies {
-		prefix := "├─ "
-		if i == len(bodies)-1 {
-			prefix = "└─ "
-		}
-		lines = append(lines, prefix+body)
+		lines = append(lines, treeRow(i, len(bodies), body))
 	}
 	return strings.Join(lines, "\n")
+}
+
+// treeRow renders one row of a tree block.
+func treeRow(index, total int, body string) string {
+	if index == total-1 {
+		return "└─ " + body
+	}
+	return "├─ " + body
 }
 
 // roundNode renders the node of a finished round: its marker, when it

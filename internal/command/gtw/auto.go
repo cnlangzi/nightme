@@ -19,8 +19,8 @@ import (
 // The backlog lives on the tracker, not in nightme: an issue that
 // nightme may work on carries the `nightme/assigned` label, which
 // a human or an external automation attaches. The queue is the open
-// issues carrying that label, minus the ones carrying
-// `nightme/wip` (a fix holds them already).
+// issues carrying that label and no other `nightme/*` label — any
+// other state label means another agent holds the issue already.
 //
 // The pick is the oldest eligible issue: no unlanded blocker, no
 // local branch of its own, no open pull request.
@@ -180,17 +180,21 @@ func selectNextAssignedIssue(
 }
 
 // assignedCandidates filters the issue list down to the queue —
-// open issues carrying `nightme/assigned`, minus those carrying
-// `nightme/wip` — and orders them oldest first. Issues created at
-// the same instant are ordered by ascending issue number, so the
-// order is total and stable.
+// open issues carrying `nightme/assigned` and no other `nightme/*`
+// label — and orders them oldest first. Issues created at the same
+// instant are ordered by ascending issue number, so the order is
+// total and stable.
+//
+// The queue marker alone is what makes an issue available: any other
+// state label means another agent holds it (claimed, under review,
+// waiting for a revision, done).
 func assignedCandidates(issues []*Issue) []*Issue {
 	out := make([]*Issue, 0, len(issues))
 	for _, iss := range issues {
 		if iss == nil {
 			continue
 		}
-		if !issueHasLabel(iss, LabelAssigned) || issueHasLabel(iss, LabelWIP) {
+		if !issueHasLabel(iss, LabelAssigned) || heldLabel(iss) != "" {
 			continue
 		}
 		out = append(out, iss)
@@ -242,6 +246,9 @@ func blockerNumbers(blockers []*Issue) string {
 // out in the rows above, and "attach the label to an issue" would
 // not change that.
 //
+// The queue row says the same thing in the queue's own terms: the
+// candidate must carry the queue marker alone.
+//
 // The card reads like the outcome: the command was asked to fix an
 // issue and there was none to fix — a normal branch, nothing broke.
 func renderAutoNoCandidate(sel *autoSelection, labelNote string) string {
@@ -251,7 +258,7 @@ func renderAutoNoCandidate(sel *autoSelection, labelNote string) string {
 	rows := make([][2]string, 0, len(sel.Skipped)+2)
 	if sel.Counters.Candidates == 0 {
 		rows = append(rows, [2]string{"queue", fmt.Sprintf(
-			"empty — none of the %d oldest open issues carries the `%s` label",
+			"empty — none of the %d oldest open issues carries `%s` on its own",
 			listIssuesPerPage, LabelAssigned)})
 	} else {
 		rows = append(rows, [2]string{"queue", fmt.Sprintf(

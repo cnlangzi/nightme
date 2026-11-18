@@ -321,7 +321,7 @@ jobs:
 	op.steps = []fakeStep{pendingStep("still going"), okStep("synced")}
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
 		Commands: []CommandInfo{{Name: "gtw", Subcommands: []CommandInfo{{Name: "sync"}}}},
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -330,7 +330,7 @@ jobs:
 
 	// The step keeps the verdict it had: the checklist still shows it
 	// as the one that did not finish.
-	items := op.Checklist(op.Cards()[1].ID)
+	items := op.Checklist(op.Cards()[0].ID)
 	if len(items) == 0 {
 		t.Fatalf("the card of the round has no checklist")
 	}

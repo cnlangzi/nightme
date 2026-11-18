@@ -749,7 +749,7 @@ The chat model acts through the tools below. Every handler enforces the policy: 
 | `repo_status()` | Reads the chat's repository: the branch, whether the tree is dirty, and how far the branch is ahead of or behind its upstream and its base branch. |
 | `wait(duration)` | Blocks the agent's turn for the duration, at most 10 minutes, and hands the turn back to the model when it is over. The wait belongs to the run: stopping the run or shutting the daemon ends it at once. |
 | `end_round()` | Ends the round of the job the run is on: the steps of the round that did not run are recorded as skipped, the job's final step runs in their place, and the job starts its next round. A round whose step is still running cannot end. |
-| `finish(status, summary)` | Runs `Policy.CheckFinish`, ends the run and posts the summary. `status` is `done` or `failed`. |
+| `finish(status, summary)` | Runs `Policy.CheckFinish` and ends the run. The record of the session is posted when the run ends. `status` is `done` or `failed`. |
 
 A free-form text that names a nightme command is refused: the command has a tool of its own, and a command in a free-form text would run as a turn of the chat instead of as a command of the run.
 
@@ -845,32 +845,33 @@ The cap on an answer defaults to 40960 tokens; a configuration that does not nam
 
 | Command | Behaviour |
 |---|---|
-| `/me start <workflow> [args...] [-i <rounds>]` | Starts a workflow in this chat. The name is the path of the workflow's file under the workflows dir, without the extension. The run inherits the chat's workspace and agent. A chat without a workspace is refused. A second run in the same chat is refused. `-i` sets how many rounds every job of the workflow runs in this run. The command posts no reply: the card of the run carries the acknowledgement. |
+| `/me start <workflow> [args...] [-i <rounds>]` | Starts a workflow in this chat. The name is the path of the workflow's file under the workflows dir, without the extension. The run inherits the chat's workspace and agent. A chat without a workspace is refused. A second run in the same chat is refused. `-i` sets how many rounds every job of the workflow runs in this run. The command posts no reply: the chat's own card for the `/me start` message carries the plan of the run and the acknowledgement. |
 | `/me reply <text>` | Answers the question the run is waiting for. |
 | `/me pause` | Stops the run after the step it is on. The step that is running is not interrupted: its outcome is recorded. The state card of the round is posted, and its phase line says why the run stopped. |
 | `/me resume [note]` | Runs the step the run is on again. The step's budget for the current round starts over before the retry. The note is the operator's instruction; it joins the conversation the chat model reads. |
 | `/me next [note]` | Skips the step the run is on: the plan goes on with the workflow, and the facts the step produced are kept. The note is the operator's instruction; it joins the conversation the chat model reads. |
-| `/me stop` | Cancels the run, tells the chat to stop working, and leaves a summary of the session in the chat. |
+| `/me stop` | Cancels the run and leaves the record of the session in the chat. The work the chat agent does on its own goes on to its end. |
 | `/me status` | Shows the state of the run again: a new card of the round the run is in carries the phase of the run, the tree of the rounds, the checklist of the round and the counters of the run in its header. A run that has not entered a round yet shows the overview of the run instead. |
 
 The step the run is on is the step its last judgment was about. A run that has no judgment — the operator took the chat back, the agent was throttled — is on the step it ran last, when that step did not succeed; a run whose last step succeeded is on the first step of the plan's ready set. `/me resume` and `/me next` act on that step, and the decision rides on the run until its loop applies it: the state is written before the run is woken, so a daemon that dies in between comes back and applies it.
 
-The run speaks in agent sessions, and the chat renders every session the way it renders a coding agent's turn: an identity line, the entries of the session, the tool calls as thread events and a status bar in the footer. A round also carries the steps of the round as a checklist. A run opens three kinds of session, and every session owns exactly one card:
+The run speaks in agent sessions, and the chat renders every session the way it renders a coding agent's turn: an identity line, the entries of the session, the tool calls as thread events and a status bar in the footer. A round also carries the steps of the round as a checklist. A run opens four kinds of session, and every session hangs under one message:
 
 | Session | Its card hangs under | It carries |
 |---|---|---|
-| The run | The `/me start` message | The plan of the run: the workflow it works through, what the workflow is for, the facts of the run and its steps with the command of each. The card is published once and never changes; the verdict of the run rides in its footer. |
-| A job round | The card of the run | The tree of the rounds of the run, the closing block of the round that ended, the steps of the round with the state of each, the counters of the run in its header, and the round's identity, token usage and repository facts in its footer. |
+| The run | The `/me start` message — the chat's own card, which the run patches in place | The plan of the run: the workflow it works through, what the workflow is for, the facts of the run and its steps with the command of each. The plan is published once and never changes; the status bar and the verdict of the run ride in the same card. |
+| A job round | The `/me start` message | The tree of the rounds of the run, the closing block of the round that ended, the steps of the round with the state of each, the counters of the run in its header, and the round's identity, token usage and repository facts in its footer. |
 | The state card of a round | The top of the chat | The phase line of the run, the tree of the rounds, the checklist of the round and the counters of the run in its header. It takes the place of the card the round had. |
 | A decision | The command message of the step the decision is about | The reason the decision was taken as its first entry, the thinking of the chat model, the tool calls of the decision as thread events under the card, one entry per reply, and the verdict of the decision in its footer. |
+| The record of the finished run | Nothing — it is a card of its own | The account of the session: how the run ended, how long it went, what it did, what went wrong and what the models decided. |
 
 A decision about a step that never sent a command to the chat — a shell step, a `use:` step, a judgment that names no step — hangs under the card of the round instead.
 
-The card of a session is posted by the run itself and is patched in place from then on: the events of a session are rendered onto the card it owns. The card of a round that ended stays in the chat as the record of that round; the next round starts a new one. A run that comes back to a round it has been in before goes on with the card that round has.
+The card of a session is posted by the run itself and is patched in place from then on: a session owns one card, and the chat never posts a second one for it — the state card of a round takes the place of the card the round had. The run's own session is the exception: it posts no card and writes into the card the chat already holds for the message that started the run. A run that no message started — a synthetic inbound, a command without a message id — has no such card and posts one of its own. The card of a round that ended stays in the chat as the record of that round; the next round starts a new one. A run that comes back to a round it has been in before goes on with the card that round has.
 
 The state card is the card of the round the run is in, posted at the top of the chat. It is posted whenever the run stops — the operator pauses it, a person takes the chat back, the step runs out of budget or the agent is throttled — and whenever the operator asks for the state with `/me status`. The round is not started over: the counters, the start time and the tree of the rounds stay what they were, and the card takes the place of the card the round had, so the state on it keeps being true. Its first entry is the phase line: `paused: <the reason the run stopped>`, `asking: <the question the run waits for>`, or `running · step: <the command the run waits for>`.
 
-`/me stop` leaves a summary of the session in the chat: a card of its own that says what the run did, what went wrong and what the models decided. The summary is posted once the run has unwound, so the step that was in flight counts as a step that did not run unless it produced an outcome.
+Every run that ends leaves a record of the session in the chat: a card of its own that says how the run ended, what it did, what went wrong and what the models decided. The record is posted once the run has unwound, so the step that was in flight counts as a step that did not run unless it produced an outcome. A run that ends by itself leaves a record too; a run the daemon suspends leaves none, because the run goes on when the daemon comes back.
 
 No card of the run carries a button: the operator drives the run with `/me pause`, `/me resume`, `/me next` and `/me stop`. A question the run asks is the chat's own interactive choice card, and a click on an option is the answer — the answer never reaches the agent. A person who quotes the question instead answers it in their own words — the answer is claimed by the run before the agent sees it.
 
@@ -1024,25 +1025,31 @@ the review needs a second look, the diff is bigger than I expected
 🤖: me · jev-1.14 · decision-3 · /gtw fix 43 -y (p=0.91)
 ```
 
-The summary of a stopped session is a card of its own:
+The record of a finished session is a card of its own:
 
 ```
-run: fix-issue-1752661200000000000
-duration: 42m
-jobs: ship × 7
-actions: 63 (41 ok · 3 failed · 2 noop · 1 cancelled)
-wake-ups: 23 (18 by the decision model · 5 by the chat model)
-steps: 9 ran · 2 not run
-system-1: 12 decisions, 1204 tokens
-system-2: 31 decisions, 18422 tokens
-errors (last 5 of 6)
-· /gtw fix 43 -y — failed: the issue is claimed by another run (reason: issue_claimed)
-decisions (last 10 of 23)
-· the decision model — /gtw fix 43 -y (p=0.91) · because: the previous step "review" ended as "failed"
-· the chat model — run_step(step_id=review) · because: the plan is exhausted
+■ [ fix-issue ] stopped
+stopped while: /gtw fix 43 -y
+
+duration: 42m14s
+jobs:     ship × 7
+actions:  63 (41 ok · 3 failed · 2 noop · 1 cancelled)
+steps:    9 ran · 2 not run
+
+rounds:
+├─ [ √ ] 1: 10:33:04 · 5m25s decisions:  system-1 ×1 · operator ×1 ·  tokens - 32.4k / 8.1k
+└─ [ ! ] 2: 10:38:29 · 12m02s decisions:  system-1 ×2 · system-2 ×1 ·  tokens - 48.1k / 12.3k
+
+errors (last 5 of 6):
+├─ [ ! ] /gtw fix 43 -y — failed: the issue is claimed by another run (reason: issue_claimed)
+└─ [ ! ] /gtw commit — failed: nothing to commit (reason: no_diff)
+
+decisions (last 10 of 23):
+├─ the decision model — /gtw fix 43 -y (p=0.91) · because: the previous step "review" ended as "failed"
+└─ the chat model — run_step(step_id=review) · because: the plan is exhausted
 ```
 
-The facts come from the run's own record: no model is asked to write the summary. The `errors` are the actions whose outcome was `failed`, `incomplete`, `cancelled` or `timeout`, one per line and at most the last five of them; the `decisions` are the judgments the models made at the wake-ups, at most the last ten. A row is cut short: a shell step reports a whole build log as its summary, and a card that carries it is unreadable. The totals stay in the facts lines.
+The facts come from the run's own record: no model is asked to write the record. The headline names the phase the run ended in, and a run that failed says why under it — an error that never reached an action of the run leaves no row in the `errors` block. The `errors` are the actions whose outcome was `failed`, `incomplete`, `cancelled` or `timeout`, at most the last five of them; the `decisions` are the judgments the models made at the wake-ups, at most the last ten. The tree of the rounds carries the counters of the run: the number of decisions and the tokens ride in its last row, so a run that finished no round shows neither. A row is cut short: a shell step reports a whole build log as its summary, and a card that carries it is unreadable.
 
 The wake log holds the model decisions only: the workflow's own fast path is not a decision a model made, so a run that goes through its workflow without asking a model holds no wake records at all. A decision model answer and a chat model turn are two records. The log is persisted with the rest of the run, so it survives a restart of the daemon.
 

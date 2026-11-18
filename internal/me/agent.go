@@ -146,7 +146,8 @@ type Request struct {
 	// thinks for the owner when the daemon names none itself.
 	Agent string
 	// MessageID is the id of the message that started the run. The
-	// run's card hangs under it.
+	// run's events hang under it: the chat folds them into the card
+	// it already holds for that message.
 	MessageID string
 }
 
@@ -594,15 +595,14 @@ func (s *Service) StartWorkflow(ctx context.Context, req Request) (string, error
 	s.mu.Unlock()
 
 	// The run's session goes up before the first step: the chat shows
-	// what the run is from the start. Its card hangs under the message
-	// that started the run.
+	// what the run is from the start. The session hangs under the
+	// message that started the run, so the chat folds the run's
+	// entries into the card it already holds for that message.
 	//
-	// A chat that cannot show the card cannot show the run: the run
-	// is refused before it does any work.
-	if !s.openRunSession(ctx, r, req.MessageID) {
-		s.finish(r, PhaseFailed, "the chat cannot show the run's card")
-		return "", errors.New("me: the chat cannot show the run's card")
-	}
+	// The run posts no card of its own: there is nothing to refuse
+	// before the run does any work. A chat that cannot be driven
+	// fails on the run's first command, with the channel's own reason.
+	s.openRunSession(ctx, r, req.MessageID)
 
 	s.wg.Add(1)
 	go func() {
@@ -774,14 +774,15 @@ func (s *Service) Status(ctx context.Context, chatID string) error {
 	return nil
 }
 
-// Stop cancels a run and tells the chat to stop working.
+// Stop cancels a run.
 //
-// The run's context is cancelled first, so the loop stops at its next
-// checkpoint; /stop then reaches the agent that is still working.
+// The run's context is cancelled, so the loop stops at its next
+// checkpoint. The turn of the chat agent that is already running goes
+// on to its end: the stop is the run's stop, and nothing else.
 //
 // The run is marked as stopped by the operator before it is cancelled:
 // the mark is what tells an operator's stop from every other way a
-// run ends, and the summary of the session is built from it.
+// run ends, and the record of the session is built from it.
 func (s *Service) Stop(ctx context.Context, chatID string) error {
 	s.mu.Lock()
 	r, ok := s.active[chatID]
@@ -791,11 +792,6 @@ func (s *Service) Stop(ctx context.Context, chatID string) error {
 	}
 	r.markStoppedByOperator()
 	r.cancel()
-	if s.cfg.Operator != nil {
-		if _, err := s.speak(ctx, r, "/stop", ""); err != nil {
-			s.logger.Warn("me: the chat could not be stopped", "run_id", r.id, "err", err)
-		}
-	}
 	return nil
 }
 

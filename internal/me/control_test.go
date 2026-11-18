@@ -913,7 +913,7 @@ jobs:
 
 	svc, op := testService(t, dir, noModels())
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "two", ChatID: "obs-1", Cwd: "/tmp/work",
+		Name: "two", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -926,9 +926,9 @@ jobs:
 	}
 }
 
-// TestTheRoundCardHangsUnderTheCardOfTheRun — the round is the run's
-// work, one level below it.
-func TestTheRoundCardHangsUnderTheCardOfTheRun(t *testing.T) {
+// TestTheRoundCardHangsUnderTheMessageThatStartedTheRun — the round
+// is the run's work, one level below the message that started the run.
+func TestTheRoundCardHangsUnderTheMessageThatStartedTheRun(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
@@ -936,18 +936,18 @@ func TestTheRoundCardHangsUnderTheCardOfTheRun(t *testing.T) {
 	op.steps = []fakeStep{{open: true}}
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	waitSent(t, op, "/gtw commit")
 
 	cards := op.Cards()
-	if len(cards) != 2 {
-		t.Fatalf("the run published %d cards, want the card of the run and the card of the round", len(cards))
+	if len(cards) != 1 {
+		t.Fatalf("the run published %d cards, want the card of the round", len(cards))
 	}
-	if cards[1].ReplyTo != cards[0].ID {
-		t.Errorf("the round card hangs under %q, want the run card %q", cards[1].ReplyTo, cards[0].ID)
+	if cards[0].ReplyTo != "om_start" {
+		t.Errorf("the round card hangs under %q, want the start message om_start", cards[0].ReplyTo)
 	}
 }
 
@@ -967,7 +967,7 @@ jobs:
 
 	svc, op := testService(t, dir, noModels())
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "repeat", ChatID: "obs-1", Cwd: "/tmp/work",
+		Name: "repeat", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -1015,7 +1015,7 @@ func TestAnotherJobGetsACardOfItsOwn(t *testing.T) {
 
 	svc, op := testService(t, dir, noModels())
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "ship", ChatID: "obs-1", Cwd: "/tmp/work",
+		Name: "ship", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -1087,8 +1087,14 @@ func TestAQuestionOpensNoCardOfItsOwn(t *testing.T) {
 		t.Fatalf("reply: %v", err)
 	}
 	waitRun(t, svc, "obs-1")
-	if posted := op.Posted(); posted != before {
-		t.Fatalf("the run published %d cards, want the ones it had", posted-before)
+	// The question opened no card of its own: the only card the run
+	// published after it is the record of the finished run.
+	if posted := op.Posted(); posted != before+1 {
+		t.Fatalf("the run published %d cards, want the record alone", posted-before)
+	}
+	card := lastPostedCard(op)
+	if body := strings.Join(op.Entries(card.ID), "\n"); !strings.Contains(body, "■ [ one ] done") {
+		t.Errorf("the run published a card that is not its record: %+v", card)
 	}
 }
 
@@ -1288,22 +1294,25 @@ func TestResume_KeepsTheCardItOwns(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	runID, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
 	})
 	if err != nil {
 		t.Fatalf("start workflow: %v", err)
 	}
 	waitSent(t, op, "/gtw commit")
 
-	// The state carries the cards of the open sessions: a run that
+	// The state carries the anchors of the open sessions: a run that
 	// comes back goes on with the cards it opened.
 	state := waitForSession(t, filepath.Join(dir, "runs", runID+".json"))
 	runSession, ok := state["run_session"].(map[string]any)
-	if !ok || runSession["card_id"] == "" {
-		t.Fatalf("the state holds no card of the run: %v", state["run_session"])
+	if !ok || runSession["anchor"] != "om_start" {
+		t.Fatalf("the state holds no anchor of the run: %v", state["run_session"])
+	}
+	if runSession["owns"] == true {
+		t.Errorf("the run owns the message that started it: %v", state["run_session"])
 	}
 	roundSession, ok := state["round_session"].(map[string]any)
-	if !ok || roundSession["card_id"] == "" {
+	if !ok || roundSession["anchor"] == "" {
 		t.Fatalf("the state holds no card of the round: %v", state["round_session"])
 	}
 	if roundSession["job"] != "main" || roundSession["round"] != float64(1) {
@@ -1342,6 +1351,13 @@ func TestResume_KeepsTheCardItOwns(t *testing.T) {
 	for _, cardID := range adopted {
 		if !want[cardID] {
 			t.Errorf("the run told the chat about %q, want a card it owns", cardID)
+		}
+	}
+	// The message that started the run is not a card of the run: the
+	// chat must not patch a message the user sent.
+	for _, cardID := range adopted {
+		if cardID == "om_start" {
+			t.Errorf("the run told the chat to adopt the message that started it: %v", adopted)
 		}
 	}
 }
@@ -1575,7 +1591,7 @@ func waitForSession(t *testing.T, path string) map[string]any {
 		if err == nil {
 			var state map[string]any
 			if err := json.Unmarshal(raw, &state); err == nil {
-				if sess, ok := state["round_session"].(map[string]any); ok && sess["card_id"] != "" {
+				if sess, ok := state["round_session"].(map[string]any); ok && sess["anchor"] != "" {
 					return state
 				}
 			}
@@ -1775,9 +1791,10 @@ func TestStop_EndsTheRun(t *testing.T) {
 	if st := svc.Snapshot("obs-1"); st.Phase != PhaseIdle {
 		t.Errorf("the run is %q, want it gone", st.Phase)
 	}
-	// The chat is told to stop working.
-	if !containsText(op.Sent(), "/stop") {
-		t.Errorf("the chat was not told to stop: %v", op.Sent())
+	// The chat is not told to stop working: the stop is the run's
+	// stop, and nothing else.
+	if containsText(op.Sent(), "/stop") {
+		t.Errorf("the chat was told to stop: %v", op.Sent())
 	}
 }
 

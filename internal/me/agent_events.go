@@ -7,8 +7,8 @@
 // like the agent it drives.
 //
 // Every event carries the anchor of the session it belongs to: the
-// card the run posted for that session. The chat patches that card in
-// place, so a session owns exactly one card.
+// message the session's events hang under. The chat patches the card
+// of that message in place, so a session owns exactly one card.
 //
 // The counts of what the run did are taken here, before the events
 // leave the run: a chat that hides them does not change what the run
@@ -46,9 +46,9 @@ const cardRefreshInterval = 5 * time.Second
 
 // emit publishes an outbound message for a session.
 //
-// The message hangs under the session's card: the card is the
+// The message hangs under the session's anchor: the anchor is the
 // session's state board, and the thread under it is the session's
-// live log. A session without a card publishes without an anchor, and
+// live log. A session without an anchor publishes without one, and
 // the chat falls back to its orphan handling.
 //
 // A message that does not reach the chat is reported and the run goes
@@ -59,7 +59,7 @@ func (s *Service) emit(ctx context.Context, r *run, sess *session, msg messages.
 	}
 	msg.ChatID = r.chatID
 	if sess != nil {
-		msg.ReplyTo = sess.cardID
+		msg.ReplyTo = sess.anchor
 		msg.SessionID = sess.id
 		msg.AgentName = meAgentName
 		msg.Model = r.modelName()

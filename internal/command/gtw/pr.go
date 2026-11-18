@@ -38,8 +38,9 @@ package gtw
 // 10. provider.CreatePR → URL.
 // 11. With --ready: move the linked issue from `nightme/wip` to
 //     `nightme/ready` — the pull request exists, so the work is
-//     waiting for review. The transition runs on the path where
-//     the pull request was already open too (step 5).
+//     waiting for review. The transition runs on the paths where
+//     a pull request is open for the branch: this one, the one
+//     that was already open (step 5), and the ErrPRExists race.
 // 12. Reply with ✅ PR opened + branch / base / url / worktree /
 //     issue card.
 //
@@ -414,11 +415,17 @@ func dispatchPR(
 		case errors.Is(err, ErrPRExists):
 			// The race window of gate 2: no pull request when the
 			// gate ran, one when the pull request was opened. The
-			// pull request is there — a normal branch.
+			// pull request is there — a normal branch — so the
+			// --ready transition runs here too: a pull request is
+			// open for the branch, whichever run opened it.
+			var readyWarnings []string
+			if args.Ready {
+				readyWarnings = applyReadyTransition(ctx, provider, owner, repo, c)
+			}
 			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 				withWarning(fmt.Sprintf(
 					"✅ a PR for %s already exists — check your repo's PR list.",
-					c.Branch)),
+					c.Branch), readyWarnings...),
 				command.BranchOutcome("pr_exists", "the branch already has an open pull request",
 					map[string]string{"branch": c.Branch})), nil
 		case errors.Is(err, ErrCLINotInstalled):
@@ -492,8 +499,8 @@ func dispatchPR(
 // applyReadyTransition moves the linked issue from "claimed" to
 // "waiting for review": `nightme/ready` goes on, `nightme/wip` comes
 // off. It runs on every path where a pull request is open for the
-// branch — the one this run opened and the one that was already
-// there.
+// branch — the one this run opened, the one that was already there,
+// and the ErrPRExists race window.
 //
 // Add before remove: a failure between the two steps leaves the issue
 // claimed, and a claimed issue stays out of both fix paths. The

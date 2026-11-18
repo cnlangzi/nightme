@@ -296,7 +296,7 @@ claim 保留自己的措辞：
 
 `/gtw pr --ready` 把关联 issue 从 `nightme/wip` 挪到 `nightme/ready`：PR 出现了，活就不再是「进行中」，而是「等 review」。
 
-**触发时机**：PR 存在之后 —— 这次开出来的，和这个分支上早就开着的（已经开着 PR 的那条路径同样做这个转换）。没有 PR 的路径一律不做（PR 没开成时不动 label）。
+**触发时机**：PR 存在之后 —— 这次开出来的，这个分支上早就开着的，以及 gate 2 与 CreatePR 之间的竞态窗口（`CreatePR` 报 PR 已存在，说明 PR 确实开着）。没有 PR 的路径一律不做（PR 没开成时不动 label）。
 
 **顺序**：先加 `nightme/ready`，再摘 `nightme/wip`。两步之间失败，issue 还带着 `nightme/wip` —— 仍然是「被占用」的状态，两条 fix 路径都不会碰它。反过来（先摘后加）失败会留下一个什么状态 label 都没有的 issue，看起来像没人做它。加失败时跳过摘除，理由同上。
 

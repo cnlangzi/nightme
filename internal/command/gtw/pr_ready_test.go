@@ -7,6 +7,7 @@ package gtw
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -249,6 +250,30 @@ func TestDispatchPR_Ready_ExistingPRStillTransitions(t *testing.T) {
 	}
 	r := s.lastText()
 	mustContain(t, r, "already has an open PR")
+}
+
+// TestDispatchPR_Ready_PRExistsRaceStillTransitions pins that the
+// transition also runs on the race window where a pull request
+// appeared between the gate and CreatePR: a pull request is open for
+// the branch, so the issue is waiting for review.
+func TestDispatchPR_Ready_PRExistsRaceStillTransitions(t *testing.T) {
+	rig := readyRig(t)
+	rig.prov.SetCreatePRErr(fmt.Errorf("%w: a pull request for wt already exists", ErrPRExists))
+	cs := rig.cs
+	s := captureCh(t, cs)
+	if _, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg",
+		prArgs{Ready: true}, Config{}); err != nil {
+		t.Fatalf("dispatchPR err: %v", err)
+	}
+
+	calls := rig.prov.Calls()
+	if labelCallIndex(calls, "AddIssueLabel", LabelReady) < 0 {
+		t.Errorf("the issue did not gain %q; calls = %+v", LabelReady, calls)
+	}
+	if labelCallIndex(calls, "RemoveIssueLabel", LabelWIP) < 0 {
+		t.Errorf("the issue did not lose %q; calls = %+v", LabelWIP, calls)
+	}
+	mustContain(t, s.lastText(), "already exists")
 }
 
 // TestDispatchPR_Ready_NoPRNoLabelCall pins that the transition

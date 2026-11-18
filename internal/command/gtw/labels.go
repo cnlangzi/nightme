@@ -144,14 +144,13 @@ func heldLabel(issue *Issue) string {
 	prefix := LabelPrefix + "/"
 	var other string
 	for _, label := range issue.Labels {
-		folded := strings.ToLower(label)
-		if !strings.HasPrefix(folded, prefix) {
+		if len(label) < len(prefix) || !strings.EqualFold(label[:len(prefix)], prefix) {
 			continue
 		}
-		if folded == strings.ToLower(LabelAssigned) {
+		if strings.EqualFold(label, LabelAssigned) {
 			continue
 		}
-		if folded == strings.ToLower(LabelWIP) {
+		if strings.EqualFold(label, LabelWIP) {
 			return label
 		}
 		if other == "" {

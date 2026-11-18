@@ -265,10 +265,15 @@ func TestFixAuto_NoCandidate_OutcomeCarriesWakeUp(t *testing.T) {
 
 // TestFixAuto_ClaimedIssueIsNotOfferedAgain pins that a claimed
 // issue drops out of the automatic queue for good: the claim
-// marker `nightme/wip` stays on the issue — the close leaves it
-// there too — and the pick filter drops every issue that carries
-// it. gtw never removes the queue marker, so it is not what
-// keeps the issue out; the claim is.
+// marker `nightme/wip` stays on the issue and the pick filter drops
+// every issue that carries it. gtw never removes the queue marker,
+// so it is not what keeps the issue out; the claim is.
+//
+// The close is not driven here: it resolves its provider from the
+// yml's cached platform, which in this rig is the real GitHub — a
+// test must not talk to the real tracker. The close's label
+// finalization is covered by close_labels_test.go, against an
+// injected provider.
 func TestFixAuto_ClaimedIssueIsNotOfferedAgain(t *testing.T) {
 	rig := newFixRemoteRig(t)
 	assigned := &Issue{
@@ -292,15 +297,6 @@ func TestFixAuto_ClaimedIssueIsNotOfferedAgain(t *testing.T) {
 		if !slices.Contains(got, want) {
 			t.Fatalf("issue labels = %v, want %q to be present", got, want)
 		}
-	}
-
-	// Closing the fix is a local teardown: the claim marker stays
-	// on the issue.
-	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-close"); err != nil {
-		t.Fatalf("RunClose: %v", err)
-	}
-	if got := rig.prov.IssueLabels(42); !slices.Contains(got, LabelWIP) {
-		t.Fatalf("issue labels after the close = %v, want %q to stay", got, LabelWIP)
 	}
 
 	// The queue does not offer the issue any more.

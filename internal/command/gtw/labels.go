@@ -123,6 +123,15 @@ func ensureRepoLabels(
 	return chk, nil
 }
 
+// isNightmeLabel reports whether `label` lives in the gtw namespace.
+//
+// The namespace test is case-insensitive: a hand-created
+// "Nightme/Ready" is the same label as "nightme/ready".
+func isNightmeLabel(label string) bool {
+	prefix := LabelPrefix + "/"
+	return len(label) >= len(prefix) && strings.EqualFold(label[:len(prefix)], prefix)
+}
+
 // heldLabel returns the state label that blocks a fix, or "" when
 // the issue is free. Any label in the `nightme/` namespace other
 // than `nightme/assigned` means another agent holds the issue —
@@ -136,17 +145,16 @@ func ensureRepoLabels(
 //
 // The claim wins when several state labels are present: an issue
 // carrying `nightme/wip` is held by a fix right now, whatever else
-// it carries, and the claim has its own remedy — the worktree goes
-// with `/gtw close`, the label with `/gtw pr --ready` or with a
-// manual removal on the issue page.
+// it carries, and the claim has its own remedy — the worktree and
+// the label go with `/gtw close`, the label with `/gtw pr --ready`
+// or with a manual removal on the issue page.
 func heldLabel(issue *Issue) string {
 	if issue == nil {
 		return ""
 	}
-	prefix := LabelPrefix + "/"
 	var other string
 	for _, label := range issue.Labels {
-		if len(label) < len(prefix) || !strings.EqualFold(label[:len(prefix)], prefix) {
+		if !isNightmeLabel(label) {
 			continue
 		}
 		if strings.EqualFold(label, LabelAssigned) {

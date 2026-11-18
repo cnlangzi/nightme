@@ -60,6 +60,12 @@ type fakeGitProvider struct {
 	addIssueLabelErr    error
 	removeIssueLabelErr error
 
+	// Per-call response for AddIssueLabel. When set, the function
+	// answers instead of the generic error — lets a test fail one
+	// specific call (e.g. the restore of a removed label) and let
+	// the others through.
+	addIssueLabelFn func(id int, label string) error
+
 	// Generic response for CreateLabel. Returning nil = success.
 	// Used by tests that simulate a label-create failure
 	// (network / 403 / etc.) on the bootstrap path.
@@ -268,6 +274,16 @@ func (f *fakeGitProvider) SetRemoveIssueLabelErr(err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.removeIssueLabelErr = err
+}
+
+// SetAddIssueLabelFunc makes AddIssueLabel answer through fn, so a
+// test can fail one specific label (e.g. the restore of a removed
+// label) and let the others through. fn wins over
+// SetAddIssueLabelErr.
+func (f *fakeGitProvider) SetAddIssueLabelFunc(fn func(id int, label string) error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.addIssueLabelFn = fn
 }
 
 // SetCreateLabelErr configures the response for all CreateLabel
@@ -546,10 +562,16 @@ func (f *fakeGitProvider) AddIssueLabel(_ context.Context, owner, repo string, i
 		Method: "AddIssueLabel", Owner: owner, Repo: repo, ID: id, Label: label,
 	})
 	err := f.addIssueLabelErr
-	if err == nil {
-		f.addLabelTo(id, label)
-	}
+	fn := f.addIssueLabelFn
 	f.mu.Unlock()
+	if fn != nil {
+		err = fn(id, label)
+	}
+	if err == nil {
+		f.mu.Lock()
+		f.addLabelTo(id, label)
+		f.mu.Unlock()
+	}
 	return err
 }
 

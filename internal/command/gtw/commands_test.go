@@ -334,41 +334,54 @@ func TestFactory_Handle_UnknownSubcommandReleasesLock(t *testing.T) {
 // with no signal. The dispatch sites construct a CmdSpec
 // directly (no gtw-side helper), so the lexer contract is
 // pinned here using the same literal form.
+//
+// /gtw close carries one flag of its own — `--reset` — so its
+// spec is the gtw-side one; /gtw sync takes none.
 func TestGtwSubcommandNoArgs(t *testing.T) {
-	spec := command.CmdSpec{
-		Name:    "/gtw close",
-		Usage:   "/gtw close",
-		MinArgs: 0,
-		MaxArgs: 0,
-	}
-
-	if _, err := command.ParseCmdArgs(nil, spec); err != nil {
-		t.Fatalf("ParseCmdArgs(nil): %v", err)
-	}
-	if _, err := command.ParseCmdArgs([]string{}, spec); err != nil {
-		t.Fatalf("ParseCmdArgs(empty): %v", err)
-	}
-
-	cases := []struct {
-		name     string
-		argv     []string
-		wantText string
+	specs := []struct {
+		name string
+		spec command.CmdSpec
 	}{
-		{"removed force flag", []string{"--force"}, "unknown flag"},
-		{"short flag", []string{"-f"}, "unknown flag"},
-		{"positional", []string{"extra"}, "positional"},
+		{"close", closeCmdSpec},
+		{"sync", command.CmdSpec{
+			Name:    "/gtw sync",
+			Usage:   "/gtw sync",
+			MinArgs: 0,
+			MaxArgs: 0,
+		}},
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			_, err := command.ParseCmdArgs(c.argv, spec)
-			if err == nil {
-				t.Fatalf("ParseCmdArgs(%q) = nil, want error", c.argv)
+
+	for _, s := range specs {
+		t.Run(s.name, func(t *testing.T) {
+			if _, err := command.ParseCmdArgs(nil, s.spec); err != nil {
+				t.Fatalf("ParseCmdArgs(nil): %v", err)
 			}
-			if !strings.Contains(err.Error(), c.wantText) {
-				t.Errorf("error lacks %q: %q", c.wantText, err)
+			if _, err := command.ParseCmdArgs([]string{}, s.spec); err != nil {
+				t.Fatalf("ParseCmdArgs(empty): %v", err)
 			}
-			if !strings.Contains(err.Error(), "Usage: /gtw close") {
-				t.Errorf("error lacks usage tail: %q", err)
+
+			cases := []struct {
+				name     string
+				argv     []string
+				wantText string
+			}{
+				{"removed force flag", []string{"--force"}, "unknown flag"},
+				{"short flag", []string{"-f"}, "unknown flag"},
+				{"positional", []string{"extra"}, "positional"},
+			}
+			for _, c := range cases {
+				t.Run(c.name, func(t *testing.T) {
+					_, err := command.ParseCmdArgs(c.argv, s.spec)
+					if err == nil {
+						t.Fatalf("ParseCmdArgs(%q) = nil, want error", c.argv)
+					}
+					if !strings.Contains(err.Error(), c.wantText) {
+						t.Errorf("error lacks %q: %q", c.wantText, err)
+					}
+					if !strings.Contains(err.Error(), "Usage: "+s.spec.Name) {
+						t.Errorf("error lacks usage tail: %q", err)
+					}
+				})
 			}
 		})
 	}

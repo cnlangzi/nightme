@@ -31,24 +31,37 @@ func failedOutcome(summary string, data map[string]string) wfe.Outcome {
 	return out
 }
 
-// doneSummary is what a step the agent declared done carries.
-const doneSummary = "the agent decided the step was done"
+// The summaries a skipped step carries: they name who skipped it.
+const (
+	// agentSkippedSummary is what a step the agent skipped carries.
+	agentSkippedSummary = "the agent skipped this step"
+	// operatorSkippedSummary is what a step the operator skipped carries.
+	operatorSkippedSummary = "the operator skipped this step"
+)
 
-// doneOutcome builds the outcome of a step the agent declared done.
+// skippedOutcome builds the outcome of a step that was not completed by
+// the workflow's execution but whose plan moves past.
+//
+// The status is `noop`: the step did not complete, and a workflow's
+// `${{ steps.<id>.outputs.status }}` reads it as such — a later step
+// that is gated on this step having succeeded does not run.
 //
 // The facts the step produced are kept: they say what it did before it
-// broke. The error description goes: the step is done, so the flow can
-// go on by itself.
-func doneOutcome(out wfe.Outcome) wfe.Outcome {
-	done := wfe.Outcome{
-		Status:  wfe.OutcomeOK,
-		Summary: doneSummary,
+// was skipped. The error description goes: the step did not break, it
+// was passed over.
+//
+// The step's own record keeps its `Skipped` flag false: the step did
+// run, it did not complete.
+func skippedOutcome(out wfe.Outcome, summary string) wfe.Outcome {
+	skipped := wfe.Outcome{
+		Status:  wfe.OutcomeNoop,
+		Summary: summary,
 	}
 	if len(out.Data) == 0 {
-		return done
+		return skipped
 	}
-	done.Data = make(map[string]string, len(out.Data))
-	maps.Copy(done.Data, out.Data)
-	delete(done.Data, wfe.OutcomeKeyError)
-	return done
+	skipped.Data = make(map[string]string, len(out.Data))
+	maps.Copy(skipped.Data, out.Data)
+	delete(skipped.Data, wfe.OutcomeKeyError)
+	return skipped
 }

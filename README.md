@@ -687,7 +687,8 @@ key — is reported in `nightme logs` and left out. The daemon still starts, and
 | `/me start <workflow> [args...] [-i <rounds>]` | Starts a workflow in this chat. `-i` sets how many rounds every job of the workflow runs. |
 | `/me reply <text>` | Answers the question the run is waiting for. |
 | `/me pause` | Stops the run after the step it is on. |
-| `/me continue [note]` | Hands the control back to a paused run. The note is your instruction. |
+| `/me resume [note]` | Runs the step the run is on again. Its budget for the current round starts over. The note is your instruction. |
+| `/me next [note]` | Skips the step the run is on: the plan goes on with the workflow, and the facts the step produced are kept. The note is your instruction. |
 | `/me show` | Puts the run's state back in front of you as a card of its own. |
 | `/me stop` | Cancels the run, tells the chat to stop working, and leaves a summary of the session in the chat. |
 | `/me status` | Reports the current step, the phase and the progress of the running command, the remaining budget, and what each capability decided and spent. |
@@ -746,7 +747,7 @@ Two channels can be driven this way: Feishu and Telegram. On any other channel
 The run's lifecycle belongs to the `/me` commands alone: `/close`, `/stop` and
 `/new` end the chat's session, not the run. A person who writes in the chat while
 the run is going takes the chat back — the run stops after the step it is on, and
-`/me continue` hands the control back.
+`/me resume` runs the step again.
 
 ### The fast path and the judgment point
 
@@ -765,11 +766,11 @@ The workflow says what comes next, so most steps need no model at all.
 
 The agent has a budget at every step: one number, the same for every step and
 every round, set by `me.max_judgments` (50 by default). A chance is the step's
-own execution, the agent's decision that the step is done, a nightme command or
-an instruction issued for it, or a turn of
+own execution, the agent's decision that the step is skipped, a nightme command
+or an instruction issued for it, or a turn of
 the chat model that produced no tool call. When the budget of the step the run is on is
-spent, the run pauses and says so in the chat; `/me continue` hands the
-control back and the step's budget starts over.
+spent, the run pauses and says so in the chat; `/me resume` runs the step again
+and the step's budget starts over.
 
 There is no budget beyond the per-step one: a run ends when the plan is
 exhausted and the agent finishes it, when the agent calls `finish`, when you
@@ -778,8 +779,8 @@ produced no tool call and a provider that failed end nothing: the run asks
 again, and the budget is what bounds it.
 
 The agent answers a judgment point with a directive: `resume` (run the step that
-broke again, after the gap was repaired), `next` (say the step is already done
-and let the engine continue), `ntm_<command>` (run a nightme command as you),
+broke again, after the gap was repaired), `next` (skip the step the judgment is
+about and let the engine continue), `ntm_<command>` (run a nightme command as you),
 `agent` (ask the owner's thinking why a step failed), `instruct` (send a
 free-form instruction to the chat), `answer_choice` (answer a prompt the work
 agent is waiting for), `ask_human` (ask you), `repo_status` (read the branch and
@@ -839,7 +840,7 @@ and the guardrails — is in [`docs/WFE.md` §8](./docs/WFE.md#8-runtime-archite
 Chat-level slash commands. The `/gtw` subcommands live in
 [their own section](#git-team-workflow-gtw) and are not listed
 here; the `/me` subcommands — `/me start` · `/me reply` · `/me pause` ·
-`/me continue` · `/me stop` · `/me status` — live in
+`/me resume` · `/me next` · `/me stop` · `/me status` — live in
 [their own section](#workflows-and-the-personal-agent-me).
 
 | Command | What it does |

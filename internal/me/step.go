@@ -28,6 +28,10 @@ type stepVerdict struct {
 // chat, a shell command runs in the chat's directory, an action
 // runs through the action registry, and a wait runs out the clock.
 func (s *Service) executeStep(ctx context.Context, r *run, job string, step wfe.Step) (stepVerdict, error) {
+	// The run knows which step is running: the operator's commands act
+	// on the step the run is on.
+	r.setRunningStep(step.ID)
+	defer r.clearRunningStep()
 	// The step runs where the chat stands: the run's declared context
 	// follows the chat before the step begins.
 	s.syncWorkDir(r)

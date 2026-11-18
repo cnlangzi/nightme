@@ -10,6 +10,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
+	mesvc "github.com/cnlangzi/nightme/internal/me"
 	"github.com/cnlangzi/nightme/internal/messages"
 )
 
@@ -26,8 +27,10 @@ type fakeController struct {
 	stopErr error
 	// pauseErr is the error a pause reports.
 	pauseErr error
-	// continueErr is the error a continue reports.
-	continueErr error
+	// resumeErr is the error a resume reports.
+	resumeErr error
+	// nextErr is the error a next reports.
+	nextErr error
 	// showErr is the error a show reports.
 	showErr error
 	// shown counts the shows.
@@ -38,10 +41,14 @@ type fakeController struct {
 	stopped int
 	// paused counts the pauses.
 	paused int
-	// continued counts the continues.
-	continued int
-	// notes holds the notes the continues carried.
+	// resumed counts the resumes.
+	resumed int
+	// nexted counts the nexts.
+	nexted int
+	// notes holds the notes the commands carried.
 	notes []string
+	// step is the step the controller acted on.
+	step string
 	// status is the state the controller reports.
 	status command.MeStatus
 }
@@ -70,12 +77,26 @@ func (c *fakeController) Pause(_ context.Context, _ string) error {
 	return c.pauseErr
 }
 
-func (c *fakeController) Continue(_ context.Context, _ string, note string) error {
+func (c *fakeController) Resume(_ context.Context, _ string, note string) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.continued++
+	c.resumed++
 	c.notes = append(c.notes, note)
-	return c.continueErr
+	if c.resumeErr != nil {
+		return "", c.resumeErr
+	}
+	return c.step, nil
+}
+
+func (c *fakeController) Next(_ context.Context, _ string, note string) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.nexted++
+	c.notes = append(c.notes, note)
+	if c.nextErr != nil {
+		return "", c.nextErr
+	}
+	return c.step, nil
 }
 
 func (c *fakeController) Show(_ context.Context, _ string) error {
@@ -540,29 +561,98 @@ func TestPause_PausesTheRun(t *testing.T) {
 	}
 }
 
-func TestContinue_HandsTheControlBack(t *testing.T) {
-	ctrl := &fakeController{}
+// TestResume_RunsTheStepAgain — the command names the step it acted
+// on.
+func TestResume_RunsTheStepAgain(t *testing.T) {
+	ctrl := &fakeController{step: "build"}
 	cs := newSession(t, "me-12", "/tmp/work")
 
-	reply := runMe(t, ctrl, cs, "/me", "continue")
-	if !strings.Contains(reply, "goes on") {
-		t.Fatalf("reply = %q, want the continuation", reply)
+	reply := runMe(t, ctrl, cs, "/me", "resume")
+	if !strings.Contains(reply, "The step runs again: build.") {
+		t.Fatalf("reply = %q, want the step to run again", reply)
 	}
-	if ctrl.continued != 1 {
-		t.Fatalf("the controller continued %d runs, want 1", ctrl.continued)
+	if ctrl.resumed != 1 {
+		t.Fatalf("the controller resumed %d runs, want 1", ctrl.resumed)
 	}
 	if len(ctrl.notes) != 1 || ctrl.notes[0] != "" {
 		t.Fatalf("the controller got the notes %v, want none", ctrl.notes)
 	}
 }
 
-func TestContinue_CarriesTheNote(t *testing.T) {
-	ctrl := &fakeController{}
+// TestNext_SkipsTheStep — the command names the step it acted on and
+// says that the run goes on.
+func TestNext_SkipsTheStep(t *testing.T) {
+	ctrl := &fakeController{step: "build"}
+	cs := newSession(t, "me-15", "/tmp/work")
+
+	reply := runMe(t, ctrl, cs, "/me", "next")
+	if !strings.Contains(reply, "The step is skipped: build.") {
+		t.Fatalf("reply = %q, want the step to be skipped", reply)
+	}
+	if !strings.Contains(reply, "goes on with the workflow") {
+		t.Fatalf("reply = %q, want the run to go on", reply)
+	}
+	if ctrl.nexted != 1 {
+		t.Fatalf("the controller skipped %d steps, want 1", ctrl.nexted)
+	}
+}
+
+// TestResume_CarriesTheNote — the note is the operator's instruction.
+func TestResume_CarriesTheNote(t *testing.T) {
+	ctrl := &fakeController{step: "build"}
 	cs := newSession(t, "me-13", "/tmp/work")
 
-	runMe(t, ctrl, cs, "/me", "continue", "use", "the", "other", "branch")
+	runMe(t, ctrl, cs, "/me", "resume", "use", "the", "other", "branch")
 	if len(ctrl.notes) != 1 || ctrl.notes[0] != "use the other branch" {
 		t.Fatalf("the controller got the notes %v, want the note", ctrl.notes)
+	}
+}
+
+// TestNext_CarriesTheNote — the note is the operator's instruction.
+func TestNext_CarriesTheNote(t *testing.T) {
+	ctrl := &fakeController{step: "build"}
+	cs := newSession(t, "me-16", "/tmp/work")
+
+	runMe(t, ctrl, cs, "/me", "next", "the", "branch", "is", "gone")
+	if len(ctrl.notes) != 1 || ctrl.notes[0] != "the branch is gone" {
+		t.Fatalf("the controller got the notes %v, want the note", ctrl.notes)
+	}
+}
+
+// TestTheRetiredContinueIsUnknown — `/me continue` is gone: the
+// command line is not valid.
+func TestTheRetiredContinueIsUnknown(t *testing.T) {
+	ctrl := &fakeController{}
+	cs := newSession(t, "me-17", "/tmp/work")
+
+	reply := runMe(t, ctrl, cs, "/me", "continue")
+	if !strings.Contains(reply, "Unknown /me subcommand: continue") {
+		t.Fatalf("reply = %q, want the unknown subcommand", reply)
+	}
+	if ctrl.resumed != 0 || ctrl.nexted != 0 {
+		t.Fatalf("the controller ran %d resumes and %d nexts, want none", ctrl.resumed, ctrl.nexted)
+	}
+}
+
+// TestResume_ReportsTheRefusal — a refusal carries its stable reason
+// code.
+func TestResume_ReportsTheRefusal(t *testing.T) {
+	ctrl := &fakeController{resumeErr: &mesvc.Refusal{
+		Reason:  mesvc.ReasonNotPaused,
+		Message: "this run is not paused",
+	}}
+	cs, ch := newSessionWithOutcome(t, "me-18", "/tmp/work")
+
+	reply := runMe(t, ctrl, cs, "/me", "resume")
+	if !strings.Contains(reply, "this run is not paused") {
+		t.Fatalf("reply = %q, want the refusal", reply)
+	}
+	out := ch.settled()
+	if out == nil {
+		t.Fatal("the command reported no outcome")
+	}
+	if out.Data["reason"] != mesvc.ReasonNotPaused {
+		t.Errorf("the reason is %q, want %q", out.Data["reason"], mesvc.ReasonNotPaused)
 	}
 }
 

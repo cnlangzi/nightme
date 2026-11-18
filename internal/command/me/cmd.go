@@ -9,7 +9,8 @@
 //	/me start <workflow> [args...] [-i <rounds>] — start a workflow
 //	/me reply <text>                          — answer the question the run asked
 //	/me pause                                 — stop the run after the current step
-//	/me continue [note]                       — hand the control back to the run
+//	/me resume [note]                         — run the step the run is on again
+//	/me next [note]                           — skip the step the run is on
 //	/me stop                                  — stop the run
 //	/me status                                — report where the run stands
 //
@@ -55,13 +56,14 @@ func (f *Factory) Spec() command.Spec {
 	return command.Spec{
 		Name:     "me",
 		Summary:  "Run a workflow: /me start <workflow> [args...] [-i <rounds>]",
-		Usage:    "/me start <workflow> [args...] [-i <rounds>]\n/me reply <text>\n/me pause\n/me continue [note]\n/me show\n/me stop\n/me status",
+		Usage:    "/me start <workflow> [args...] [-i <rounds>]\n/me reply <text>\n/me pause\n/me resume [note]\n/me next [note]\n/me show\n/me stop\n/me status",
 		Category: "agent",
 		Subcommands: []command.SubcommandSpec{
 			{Name: "start", Summary: "Start a workflow in this chat. -i sets the rounds."},
 			{Name: "reply", Summary: "Answer the question the run asked."},
 			{Name: "pause", Summary: "Stop the run after the current step."},
-			{Name: "continue", Summary: "Hand the control back to the run."},
+			{Name: "resume", Summary: "Run the step the run is on again."},
+			{Name: "next", Summary: "Skip the step the run is on."},
 			{Name: "show", Summary: "Show the run's state again."},
 			{Name: "stop", Summary: "Stop the run of this chat."},
 			{Name: "status", Summary: "Report where the run stands."},
@@ -102,8 +104,10 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 		return f.reply(ctx, rt, input)
 	case "pause":
 		return f.pause(ctx, rt, input)
-	case "continue":
-		return f.continueRun(ctx, rt, input)
+	case "resume":
+		return f.resume(ctx, rt, input)
+	case "next":
+		return f.next(ctx, rt, input)
 	case "show":
 		return f.show(ctx, rt, input)
 	case "stop":
@@ -227,18 +231,45 @@ func (f *Factory) pause(ctx context.Context, rt command.RuntimeServices, input c
 	return command.Reply(ctx, rt, "⏸ The run pauses after the current step."), nil
 }
 
-// continueRun hands the control back to a paused run.
-func (f *Factory) continueRun(ctx context.Context, rt command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
-	note := continueNote(input.Text)
-	if err := f.ctrl.Continue(ctx, input.ChatID, note); err != nil {
-		chatsession.ReportOutcome(ctx, command.FailedOutcome("error", "the run could not be continued"))
+// resume runs the step the run is on again.
+func (f *Factory) resume(ctx context.Context, rt command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
+	note := decisionNote(input.Text)
+	step, err := f.ctrl.Resume(ctx, input.ChatID, note)
+	if err != nil {
+		chatsession.ReportOutcome(ctx, command.FailedOutcome(refusalReason(err), err.Error()))
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
 	chatsession.ReportOutcome(ctx, messages.Outcome{
 		Status:  messages.OutcomeOK,
-		Summary: "the run goes on",
+		Summary: "the step runs again",
+		Data:    map[string]string{"step": step},
 	})
-	return command.Reply(ctx, rt, "▶ The run goes on."), nil
+	return command.Reply(ctx, rt, "▶ The step runs again: "+step+"."), nil
+}
+
+// next skips the step the run is on.
+func (f *Factory) next(ctx context.Context, rt command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
+	note := decisionNote(input.Text)
+	step, err := f.ctrl.Next(ctx, input.ChatID, note)
+	if err != nil {
+		chatsession.ReportOutcome(ctx, command.FailedOutcome(refusalReason(err), err.Error()))
+		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
+	}
+	chatsession.ReportOutcome(ctx, messages.Outcome{
+		Status:  messages.OutcomeOK,
+		Summary: "the step is skipped",
+		Data:    map[string]string{"step": step},
+	})
+	return command.Reply(ctx, rt, "⏭ The step is skipped: "+step+". The run goes on with the workflow."), nil
+}
+
+// refusalReason returns the stable code of a refusal, or the generic
+// one when the failure is not a refusal.
+func refusalReason(err error) string {
+	if reason := mesvc.RefusalReason(err); reason != "" {
+		return reason
+	}
+	return "error"
 }
 
 // show puts the run's state back in front of the operator.
@@ -331,9 +362,9 @@ func replyText(text string) string {
 	return strings.TrimSpace(rest)
 }
 
-// continueNote returns the note of a /me continue: everything after
-// the "continue" token.
-func continueNote(text string) string {
+// decisionNote returns the note of a /me resume or a /me next:
+// everything after the subcommand token.
+func decisionNote(text string) string {
 	rest := skipToken(text)
 	if rest == "" {
 		return ""
@@ -419,9 +450,14 @@ func (c *controller) Pause(ctx context.Context, chatID string) error {
 	return c.svc.Pause(ctx, chatID)
 }
 
-// Continue implements command.MeController.
-func (c *controller) Continue(ctx context.Context, chatID, note string) error {
-	return c.svc.Continue(ctx, chatID, note)
+// Resume implements command.MeController.
+func (c *controller) Resume(ctx context.Context, chatID, note string) (string, error) {
+	return c.svc.Resume(ctx, chatID, note)
+}
+
+// Next implements command.MeController.
+func (c *controller) Next(ctx context.Context, chatID, note string) (string, error) {
+	return c.svc.Next(ctx, chatID, note)
 }
 
 // Show implements command.MeController.

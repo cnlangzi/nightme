@@ -95,6 +95,7 @@ type Outcome struct {
 | `workflow` | `/me start` 启动的 workflow 的名字 |
 | `run_id` | `/me start` 这次运行的 id |
 | `iterations` | `/me start -i` 指定的轮数——没有这个 flag 时不出现 |
+| `step` | `/me resume` 和 `/me next` 作用的那一步的 id |
 
 `Data` 刻意是 `map[string]string` 而不是 struct：不同命令产出不同的事实，程序只读自己关心的键。
 
@@ -299,6 +300,9 @@ chatsession: message settled chat_id=… message_id=… status=… summary=…
 | `workspace_unreachable` | 工作区目录没了，只清了悬空状态 | `/gtw close` | 异常 |
 | `cwd_not_changed` / `cwd_not_restored` | 工作区切了但没切成 | `/gtw close` / `/gtw back` | 异常 |
 | `unknown_subcommand` | `/gtw` 的子命令不存在 | `/gtw` | 异常 |
+| `no_run` | 这个 chat 里没有运行 | `/me resume` / `/me next` | 异常 |
+| `not_paused` | 运行没有在等操作者（也没有在问问题） | `/me resume` / `/me next` | 异常 |
+| `step_running` | 命令作用的那一步还在跑 | `/me next` | 异常 |
 | `error` | 其它失败 | 全部 | 异常 |
 
 † `nothing_to_commit` 与 `nothing_to_push` 两个码都可能落在任一类：命令先看主信号（工作区没改动 / 没有 commit 被推上去），主信号说"什么都没发生"时再查一次（本地日志相对初始 head 的差异 / 远端还没有的 commit 条数）。查到"活其实早就干完了"就是正常分支（没有 `error`），查到"确实还有东西没做"就是异常（带 `error`）。程序读 `Data["error"]` 在不在就知道是哪一类。

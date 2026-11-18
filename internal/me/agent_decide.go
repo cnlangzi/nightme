@@ -242,6 +242,12 @@ func (s *Service) lastOutcomeUnknown(r *run) bool {
 // The chat model reads it as one more step of the run, so the history
 // stays consistent when it takes over.
 func (s *Service) recordSynthetic(r *run, tool string, args map[string]any) {
+	recordSyntheticCall(r, syntheticCallID, tool, args)
+}
+
+// recordSyntheticCall appends a call to the conversation as a synthetic
+// assistant tool call under the given id.
+func recordSyntheticCall(r *run, id, tool string, args map[string]any) {
 	raw, err := json.Marshal(args)
 	if err != nil {
 		raw = json.RawMessage("{}")
@@ -250,7 +256,7 @@ func (s *Service) recordSynthetic(r *run, tool string, args map[string]any) {
 		Role: llm.RoleAssistant,
 		Parts: []llm.Part{{
 			Type:       llm.PartToolCall,
-			ToolCallID: syntheticCallID,
+			ToolCallID: id,
 			ToolName:   tool,
 			Args:       raw,
 		}},

@@ -14,7 +14,7 @@ const meCommandPrefix = "/me "
 //
 // A message a person sent while the run is going means the person
 // wants the chat back: the run stops after the step it is on, and
-// `/me continue` hands the control back.
+// `/me resume` hands the control back.
 //
 // A reply to the run's own question is an answer, not a takeover. A
 // command that steers the run is not a takeover either.
@@ -34,7 +34,7 @@ func (s *Service) Seen(msg *messages.InboundMessage) {
 	if isMeCommand(msg.Text) {
 		return
 	}
-	r.requestPause("you took over — `/me continue` hands the control back")
+	r.requestPause("you took over — `/me resume` hands the control back")
 }
 
 // Claim implements the inbound router's reply claimer.

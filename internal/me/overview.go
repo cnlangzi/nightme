@@ -331,13 +331,16 @@ func (r *run) roundTasks(job string, round int) []agent.AgentTaskItem {
 //
 // A step that has not started is pending, a step that is still running
 // is in progress, a step that came to nothing is failed, and a step
-// whose condition did not hold is skipped.
+// that was skipped is skipped — whether its condition did not hold or
+// the operator passed it over.
 func taskStatusOf(st wfe.StepState) agent.AgentTaskStatus {
 	switch {
 	case st.Skipped:
 		return agent.TaskSkipped
 	case st.Pending:
 		return agent.TaskInProgress
+	case st.Outcome.Status == wfe.OutcomeNoop:
+		return agent.TaskSkipped
 	case st.Outcome.Succeeded():
 		return agent.TaskCompleted
 	case st.Outcome.Status == wfe.OutcomeCancelled:
@@ -369,14 +372,22 @@ func (r *run) stepChances(stepID string, remaining wfe.Remaining) (int, bool) {
 // time. The branch the step worked on is not in the detail either:
 // the card the operator read names it.
 //
+// A step that was skipped says why in its summary: the engine's own
+// skip repeats what the row says, and the summary is left out — the
+// skip of the operator or of the agent names who skipped it, and the
+// row carries it.
+//
 // The detail is cut short: a step that reports a whole build log as
 // its summary would otherwise make the row unreadable.
 func stepDetail(st wfe.StepState, status agent.AgentTaskStatus, chances int, hasChances bool) string {
 	parts := make([]string, 0, 3)
-	if status != agent.TaskSkipped {
+	engineSkipped := status == agent.TaskSkipped && st.Skipped
+	if !engineSkipped {
 		if summary := branchlessSummary(st.Outcome); summary != "" {
 			parts = append(parts, summary)
 		}
+	}
+	if status != agent.TaskSkipped {
 		if errText := st.Outcome.Data[wfe.OutcomeKeyError]; errText != "" {
 			parts = append(parts, errText)
 		}

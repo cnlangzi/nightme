@@ -598,6 +598,9 @@ type planReviewStarter struct {
 	// prompt is the prompt every group ran — the record keeps it, so
 	// a group that never reached the agent can be re-run with it.
 	prompt string
+	// timedOut is how many of the groups report a silence timeout —
+	// the first ones, so the count lines up with `failed`.
+	timedOut int
 }
 
 func (s *planReviewStarter) Info() agent.Info {
@@ -639,11 +642,17 @@ func (s *planReviewStarter) Review(_ context.Context, _ agent.StartConfig, opts 
 	if cfg.OnReviewJob != nil {
 		for i, g := range s.groups {
 			var err error
-			if i < s.failed {
+			switch {
+			case i < s.timedOut:
+				err = &agent.GroupTimeoutError{
+					Group:   agent.ReviewGroupName(g.Source, g.Pattern),
+					Timeout: 15 * time.Minute,
+				}
+			case i < s.failed:
 				err = fmt.Errorf("group %d failed", i+1)
 			}
 			report := agent.ReviewReport{Parsed: true}
-			if i >= s.failed {
+			if i >= s.failed && i >= s.timedOut {
 				report.Findings = []agent.ReviewFinding{{
 					Path:     fmt.Sprintf("file%d.go", i+1),
 					Line:     fmt.Sprintf("%d", i+1),

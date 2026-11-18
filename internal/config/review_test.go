@@ -46,6 +46,40 @@ func TestLoad_NoReviewSectionReadsEmpty(t *testing.T) {
 	}
 }
 
+// TestLoad_ReadsReviewTimeout: the review section carries the
+// per-subagent silence threshold of a review run.
+func TestLoad_ReadsReviewTimeout(t *testing.T) {
+	path := writeConfig(t, t.TempDir(), "primary: cc\nreview:\n  timeout: 5m\n")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Review.Timeout != "5m" {
+		t.Errorf("Review.Timeout = %q, want 5m", cfg.Review.Timeout)
+	}
+}
+
+// TestSetReviewAgent_KeepsTheTimeout: persisting the runner must not
+// drop the timeout that lives beside it.
+func TestSetReviewAgent_KeepsTheTimeout(t *testing.T) {
+	path := writeConfig(t, t.TempDir(), "primary: cc\nreview:\n  timeout: 5m\n")
+
+	if err := SetReviewAgent(path, "pi"); err != nil {
+		t.Fatalf("SetReviewAgent: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Review.Timeout != "5m" {
+		t.Errorf("Review.Timeout = %q, want 5m", cfg.Review.Timeout)
+	}
+	if cfg.Review.Agent != "pi" {
+		t.Errorf("Review.Agent = %q, want pi", cfg.Review.Agent)
+	}
+}
+
 // TestSave_KeepsReviewSection covers R2: a whole-file save must not
 // erase the review key.
 func TestSave_KeepsReviewSection(t *testing.T) {

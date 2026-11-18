@@ -43,6 +43,11 @@
 //     text "continue". A review has no wall-clock deadline: it runs
 //     until the chat session's context is cancelled (the daemon
 //     shutting down) or the user aborts it.
+//   - `--timeout <dur>` bounds how long a review group may stay
+//     silent. A group whose subagent produces no event for that long
+//     is closed, reported as timed out, and stays resumable. The
+//     threshold comes from the flag, else from `review.timeout` in
+//     the config file, else from the built-in default (15m).
 //   - The bridge's Starter.Review method calls agent.Review
 //     (uses the shared session helper internally). Most coding
 //     bridges delegate; pty/bash returns
@@ -62,6 +67,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/agentsession"
@@ -129,7 +135,9 @@ func (f *Factory) Spec() command.Spec {
 /review -c                  # continue the groups of the last review in this chat
                                  #   that failed: a group that reached the agent is
                                  #   resumed, a group that never started is re-run
-/review --abort            # stop the review running in this chat`,
+/review --abort            # stop the review running in this chat
+/review --timeout 5m       # close a subagent that says nothing for 5 minutes
+                                 #   (0 disables the timeout)`,
 		Category: "workspace",
 	}
 }
@@ -139,7 +147,7 @@ func (f *Factory) Spec() command.Spec {
 // contract for the whole /<cmd> surface.
 var reviewCmdSpec = command.CmdSpec{
 	Name:  "/review",
-	Usage: "/review [-a|--agent <name>] [-g|--global] [--unset] [-c|--continue] [--abort]",
+	Usage: "/review [-a|--agent <name>] [-g|--global] [--unset] [-c|--continue] [--abort] [-t|--timeout <dur>]",
 	Flags: map[string]command.FlagSpec{
 		"-a":         {Name: "agent", TakesValue: true},
 		"--agent":    {Name: "agent", TakesValue: true},
@@ -149,6 +157,8 @@ var reviewCmdSpec = command.CmdSpec{
 		"-c":         {Name: "continue"},
 		"--continue": {Name: "continue"},
 		"--abort":    {Name: "abort"},
+		"-t":         {Name: "timeout", TakesValue: true},
+		"--timeout":  {Name: "timeout", TakesValue: true},
 	},
 	MinArgs: 0,
 	MaxArgs: 0,
@@ -189,6 +199,15 @@ type Spec struct {
 	// in this chat. It starts no review and needs neither a
 	// workspace nor a selected agent.
 	Abort bool
+
+	// Timeout is the per-group silence threshold of this invocation:
+	// how long a review group may go without an event before it is
+	// closed and reported as timed out. Zero disables the timeout.
+	//
+	// TimeoutSet says whether the flag was given: not given means the
+	// config value, then the built-in default, decide.
+	Timeout    time.Duration
+	TimeoutSet bool
 }
 
 // parseReviewArgs extracts /review's flags from argv. Returns an
@@ -216,6 +235,17 @@ func parseReviewArgs(argv []string) (Spec, error) {
 	if parsed.Has("agent") && spec.Agent == "" {
 		return Spec{}, errors.New("--agent requires a non-empty agent name")
 	}
+	if parsed.Has("timeout") {
+		d, err := time.ParseDuration(strings.TrimSpace(parsed.Value("timeout")))
+		if err != nil {
+			return Spec{}, errors.New("--timeout requires a duration like 15m")
+		}
+		if d < 0 {
+			return Spec{}, errors.New("--timeout must not be negative")
+		}
+		spec.Timeout = d
+		spec.TimeoutSet = true
+	}
 	return spec, nil
 }
 
@@ -223,7 +253,10 @@ func parseReviewArgs(argv []string) (Spec, error) {
 // act on. Each combination gets its own message so the user knows
 // which flag to fix.
 //
-// The --abort checks come first: the abort targets the run that is
+// The --timeout checks come first: a timeout bounds a run that starts,
+// so the flags that start no run have nothing to bound.
+//
+// The --abort checks come next: the abort targets the run that is
 // already in flight, so the flags that choose or persist a runner
 // have nothing to add to it.
 //
@@ -232,6 +265,10 @@ func parseReviewArgs(argv []string) (Spec, error) {
 // to add to it.
 func validateReviewFlags(spec Spec) error {
 	switch {
+	case spec.TimeoutSet && spec.Abort:
+		return errors.New("--timeout and --abort are mutually exclusive")
+	case spec.TimeoutSet && spec.Unset:
+		return errors.New("--timeout and --unset are mutually exclusive")
 	case spec.Abort && spec.Continue:
 		return errors.New("--abort and --continue are mutually exclusive")
 	case spec.Abort && spec.Agent != "":
@@ -368,10 +405,18 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 		return command.Reply(ctx, rt, strings.Join(notices, "\n")), nil
 	}
 
-	if spec.Continue {
-		return f.handleContinue(ctx, rt, cs, input, notices)
+	// The silence threshold of this run: the flag, else the config
+	// file, else the built-in default. A config value that cannot be
+	// read is a warning — the review still runs.
+	timeout, timeoutNotice := resolveReviewTimeout(spec)
+	if timeoutNotice != "" {
+		notices = append(notices, timeoutNotice)
 	}
-	return f.handleReview(ctx, rt, cs, input, spec, notices)
+
+	if spec.Continue {
+		return f.handleContinue(ctx, rt, cs, input, notices, timeout)
+	}
+	return f.handleReview(ctx, rt, cs, input, spec, notices, timeout)
 }
 
 // threadShowsFindings reports whether the chat's /think lets the
@@ -397,7 +442,8 @@ func threadShowsFindings(cs *chatsession.ChatSession) bool {
 //  5. Delegate to starter.Review — the bridge's Starter owns the
 //     actual prompt invocation (most call agent.Review).
 func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
-	cs *chatsession.ChatSession, input command.SlashInput, spec Spec, notices []string) (*command.SlashOutput, error) {
+	cs *chatsession.ChatSession, input command.SlashInput, spec Spec, notices []string,
+	timeout time.Duration) (*command.SlashOutput, error) {
 
 	// Resolve the inject target. /review always injects findings
 	// back into the chat session's active AS (the
@@ -614,6 +660,9 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 			// the user learns the group list before any group
 			// produces output.
 			agent.WithReviewPlanObserver(planObserver(revCtx, emitter, collector, chatID, replyTo, runnerName)),
+			// The silence threshold of one group: a subagent that
+			// stops producing anything is closed on its own.
+			agent.WithReviewGroupTimeout(timeout),
 		)
 
 		// The fan-out is over: the groups' sessions are closed and the
@@ -667,12 +716,21 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 		// lines must land after them.
 		drain()
 
+		// The timeout notice names the groups that went silent — the
+		// one thing the user must act on. It goes out as a reply of
+		// its own, so it is visible whatever the chat's /think setting
+		// says, and before the verdict line that summarizes the run.
+		if notice := reviewTimeoutNotice(groupOutcomes, timeout); notice != "" {
+			sendReviewLine(revCtx, emitter, chatID, replyTo, runnerName, notice)
+		}
+
 		if err != nil {
 			// The review failed — say so in the machine-readable
 			// channel too. A driver that only reads the settled
 			// message must not see "unknown" for a review that
 			// visibly failed.
 			var text string
+			data := map[string]string{"agent": runnerName}
 			switch {
 			case errors.Is(err, agent.ErrNoDiff):
 				// Pre-compute found zero reviewable files in the
@@ -694,7 +752,7 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 					"agent", runnerName,
 					"workspace", workspace)
 				work.Report(command.FailedOutcomeData("no_diff", "no diff to review",
-					map[string]string{"agent": runnerName},
+					data,
 					"there is no diff to review: the working tree is clean and the branch carries no change against the base"))
 			case errors.Is(err, agent.ErrBaseUnknown):
 				// The repository has an origin remote, but the base
@@ -710,7 +768,7 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 				)
 				work.Report(command.FailedOutcomeData("base_unknown",
 					"the base branch could not be determined",
-					map[string]string{"agent": runnerName},
+					data,
 					"the base branch could neither be read nor repaired: the committed diff was not reviewed"))
 			case errors.Is(err, agent.ErrReviewNotSupported):
 				slog.Default().Warn("/review failed",
@@ -720,7 +778,7 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 				text = fmt.Sprintf("❌ agent %q does not support /review", runnerName)
 				work.Report(command.FailedOutcomeData("not_supported",
 					"the agent does not support /review",
-					map[string]string{"agent": runnerName},
+					data,
 					"the agent cannot review: "+err.Error()))
 			default:
 				slog.Default().Warn("/review failed",
@@ -733,7 +791,7 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 				}
 				text = fmt.Sprintf("❌ /review failed (agent=%s):\n%s", runnerName, msg)
 				work.Report(command.FailedOutcomeData("error", err.Error(),
-					map[string]string{"agent": runnerName},
+					timeoutOutcomeData(data, groupOutcomes),
 					"the review failed: "+err.Error()))
 			}
 			if emitter == nil {
@@ -792,7 +850,7 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 		work.Report(messages.Outcome{
 			Status:  status,
 			Summary: summary,
-			Data:    data,
+			Data:    timeoutOutcomeData(data, groupOutcomes),
 		})
 
 		// 1) The verdict line — what the run found, in one line:
@@ -901,7 +959,8 @@ const continueText = "continue"
 // current AS as a user turn. The channel gets the continued groups'
 // coalesced stream, framed by the plan line and the verdict line.
 func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices,
-	cs *chatsession.ChatSession, input command.SlashInput, notices []string) (*command.SlashOutput, error) {
+	cs *chatsession.ChatSession, input command.SlashInput, notices []string,
+	timeout time.Duration) (*command.SlashOutput, error) {
 	chatID := input.ChatID
 
 	rec, ok := f.lookup(chatID)
@@ -1045,6 +1104,9 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 			// The plan names the continued groups, before the first
 			// one produces output.
 			agent.WithReviewPlanObserver(planObserver(revCtx, emitter, collector, chatID, replyTo, runnerName)),
+			// The silence threshold of one group: a resumed subagent
+			// that stops producing anything is closed on its own.
+			agent.WithReviewGroupTimeout(timeout),
 		)
 
 		// The fan-out is over: the resumed sessions are closed and
@@ -1109,13 +1171,21 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 		// own lines must land after them.
 		drain()
 
+		// The timeout notice names the groups that went silent — the
+		// one thing the user must act on. It goes out as a reply of
+		// its own, so it is visible whatever the chat's /think setting
+		// says, and before the verdict line that summarizes the run.
+		if notice := reviewTimeoutNotice(groupOutcomes, timeout); notice != "" {
+			sendReviewLine(revCtx, emitter, chatID, replyTo, runnerName, notice)
+		}
+
 		if err != nil {
 			slog.Default().Warn("/review --continue failed",
 				"agent", runnerName,
 				"err", err,
 			)
 			work.Report(command.FailedOutcomeData("error", err.Error(),
-				map[string]string{"agent": runnerName},
+				timeoutOutcomeData(map[string]string{"agent": runnerName}, groupOutcomes),
 				"the continuation failed: "+err.Error()))
 			if emitter == nil {
 				return
@@ -1168,7 +1238,7 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 		work.Report(messages.Outcome{
 			Status:  status,
 			Summary: summary,
-			Data:    data,
+			Data:    timeoutOutcomeData(data, groupOutcomes),
 		})
 
 		// The verdict line — the same contract as a plain review: it

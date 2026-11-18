@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/cnlangzi/nightme/internal/gitbase"
 )
@@ -1295,9 +1296,9 @@ type Starter interface {
 // silently ignore it (the option is kept in the package-private
 // config struct, not on the public Starter API).
 //
-// Today WithEventSink and WithReviewJobObserver are defined. The
-// pattern is open for future options (timeout overrides, abort hooks,
-// etc.).
+// Today WithEventSink, WithReviewJobObserver and
+// WithReviewGroupTimeout are defined. The pattern is open for future
+// options (abort hooks, etc.).
 type RunOnceOption func(*runOnceConfig)
 
 // runOnceConfig is the per-call config resolved from RunOnceOption
@@ -1320,6 +1321,9 @@ type RunOnceOption func(*runOnceConfig)
 //     the group list, before the first group starts. Only the review
 //     fan-out reads it.
 //
+//   - ReviewGroupTimeout: the per-group silence threshold of a review
+//     fan-out. Only the review fan-out reads it.
+//
 // The struct is package-private so bridges don't accidentally grow
 // their own public RunOnceOption type. The "Options" pattern is
 // exposed via exported functional helpers (e.g. WithEventSink)
@@ -1338,6 +1342,12 @@ type runOnceConfig struct {
 	// starts. Set by WithReviewPlanObserver; the fan-out core
 	// invokes it on the goroutine that drives the fan-out.
 	OnReviewPlan func([]ReviewPlanGroup)
+
+	// ReviewGroupTimeout is the silence threshold one review group
+	// gets. nil means "not set" — the fan-out uses
+	// DefaultReviewGroupTimeout. A pointer to 0 disables the timeout.
+	// Set by WithReviewGroupTimeout; the fan-out core reads it.
+	ReviewGroupTimeout *time.Duration
 }
 
 // The modes a review fan-out can run a group in.

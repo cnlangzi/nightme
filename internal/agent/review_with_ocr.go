@@ -27,6 +27,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os/exec"
@@ -155,15 +156,22 @@ type reviewGroupRunner func(ctx context.Context, groupIdx int, cfg StartConfig, 
 // results merged by mergeRunResults.
 //
 // opts carries the caller's outer sink (WithEventSink), the
-// per-group observer (WithReviewJobObserver) and the plan observer
-// (WithReviewPlanObserver). The outer sink is replaced per group by
-// the aggregator's wrapped sink; the observers are invoked here, not
-// forwarded to the per-group turn.
+// per-group observer (WithReviewJobObserver), the plan observer
+// (WithReviewPlanObserver) and the silence threshold
+// (WithReviewGroupTimeout). The outer sink is replaced per group by
+// the aggregator's wrapped sink; the observers and the threshold are
+// consumed here, not forwarded to the per-group turn.
 //
 // A failed group reports the session id its session ran under, so the
 // caller can reopen that session later (see ResumeSession), and the
 // prompt the group was asked to run, so a group that never reached
 // the agent can be re-run with it.
+//
+// Every group runs under its own child context and its own watchdog: a
+// group whose subagent stops producing events is closed on its own,
+// while its siblings keep running and their findings still reach the
+// caller. The group's failure is a *GroupTimeoutError, so the caller
+// can tell a timeout from any other failure.
 //
 // A group whose output the parser cannot read gets one re-emit turn:
 // its own session is reopened and asked to state the findings again
@@ -195,6 +203,15 @@ func runReviewGroups(
 		cfgOpts.OnReviewPlan(plan)
 	}
 
+	// The silence threshold of one group. The option is consumed here
+	// and not forwarded to the group's turn: the threshold belongs to
+	// the fan-out, not to the turn it runs. A threshold of 0 disables
+	// the watchdog.
+	timeout := DefaultReviewGroupTimeout
+	if cfgOpts.ReviewGroupTimeout != nil {
+		timeout = *cfgOpts.ReviewGroupTimeout
+	}
+
 	results := make([]RunResult, len(groups))
 	errs := make([]error, len(groups))
 	sem := make(chan struct{}, maxConcurrentReviewJobs)
@@ -220,14 +237,36 @@ func runReviewGroups(
 			}
 			defer func() { <-sem }()
 
-			var runOpts []RunOnceOption
-			if agg != nil {
-				runOpts = []RunOnceOption{WithEventSink(agg.wrapJob(i))}
+			// The group's own context: a child of the run's, so
+			// closing this group leaves the run and its siblings
+			// alone.
+			gctx, gcancel := context.WithCancelCause(ctx)
+			defer gcancel(nil)
+
+			// The watchdog starts with the group, not with the
+			// fan-out: the time a group spends queueing for a slot is
+			// not its silence.
+			var watchdog *groupWatchdog
+			if timeout > 0 {
+				watchdog = newGroupWatchdog(timeout, gcancel)
 			}
 
-			res, err := run(ctx, i, cfg, runOpts)
-			results[i] = res
-			errs[i] = err
+			// The composite sink: the heartbeat is recorded first, so
+			// a beat counts even when the aggregator drops the event.
+			// The aggregator's per-job sink is unchanged — the
+			// terminal counting must not see a second terminal.
+			forward := func(AgentEvent) {}
+			if agg != nil {
+				forward = agg.wrapJob(i)
+			}
+			runOpts := []RunOnceOption{WithEventSink(func(ev AgentEvent) {
+				if watchdog != nil {
+					watchdog.beat()
+				}
+				forward(ev)
+			})}
+
+			res, err := run(gctx, i, cfg, runOpts)
 			// The group's own output is parsed on its own — the
 			// merged document is free-form text written for an LLM
 			// consumer and is never parsed.
@@ -236,10 +275,36 @@ func runReviewGroups(
 				// The group's answer is in a shape the parser cannot
 				// read. One re-emit turn gives it a second chance to
 				// state its findings in the schema the parser reads.
-				if repaired, ok := reemitReviewFindings(ctx, s, cfg, res.SessionID); ok {
+				//
+				// The re-emit runs under the group's context and beats
+				// the watchdog, but forwards nothing: a second
+				// terminal for the same job would double-count in the
+				// aggregator.
+				repaired, ok := reemitReviewFindings(gctx, s, cfg, res.SessionID,
+					WithEventSink(func(AgentEvent) {
+						if watchdog != nil {
+							watchdog.beat()
+						}
+					}))
+				if ok {
 					report = repaired
 				}
 			}
+
+			// The watchdog is disarmed before the outcome is read: a
+			// timeout that fires after the group ended must not
+			// rewrite what the group produced.
+			if watchdog != nil {
+				watchdog.stop()
+			}
+			if err != nil && errors.Is(context.Cause(gctx), ErrGroupTimeout) {
+				err = &GroupTimeoutError{
+					Group:   ReviewGroupName(groups[i].Source, groups[i].Pattern),
+					Timeout: timeout,
+				}
+			}
+			results[i] = res
+			errs[i] = err
 			if cfgOpts.OnReviewJob != nil {
 				cfgOpts.OnReviewJob(ReviewJob{
 					Pattern:   groups[i].Pattern,

@@ -32,18 +32,22 @@ If you found no problems, reply exactly: no findings`
 // reemitReviewFindings reopens the group's own session and asks it to
 // re-emit its findings in the schema the parser reads.
 //
-// The turn runs WITHOUT an event sink: the aggregator counts one
-// terminal per job, and a second terminal for the same job would
+// The turn runs WITHOUT an event sink by default: the aggregator counts
+// one terminal per job, and a second terminal for the same job would
 // double-count it. The re-emit therefore does not appear in the
 // thread — it feeds the counts only.
 //
+// opts may carry a sink of its own. The fan-out passes one that only
+// records the heartbeat: the re-emit is activity, so it must reset the
+// group's silence timer, but it must not reach the aggregator.
+//
 // It reports whether the re-emit produced a readable answer.
-func reemitReviewFindings(ctx context.Context, s Starter, cfg StartConfig, sessionID string) (ReviewReport, bool) {
+func reemitReviewFindings(ctx context.Context, s Starter, cfg StartConfig, sessionID string, opts ...RunOnceOption) (ReviewReport, bool) {
 	cfg.SessionID = sessionID
 	res, err := ResumeSession(ctx, s, cfg, []ContentBlock{{
 		Type: ContentText,
 		Text: reviewReemitInstruction,
-	}})
+	}}, opts...)
 	if err != nil {
 		slog.Default().Warn("/review: the schema re-emit failed",
 			"session_id", sessionID,

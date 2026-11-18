@@ -91,6 +91,41 @@ type wakeRecord struct {
 	At time.Time `json:"at"`
 }
 
+// roundDecisions counts what decided over a run.
+//
+// The counts are the ones the card of a round shows: how many times
+// each capability decided, and how many answers the operator gave.
+type roundDecisions struct {
+	// System1 is the number of decisions the decision model made.
+	System1 int `json:"system1"`
+	// System2 is the number of turns the chat model took.
+	System2 int `json:"system2"`
+	// Operator is the number of answers the operator gave.
+	Operator int `json:"operator"`
+}
+
+// roundRecord is what a finished round of a job came to.
+//
+// The record is what the card of the run reads: the tree of the rounds
+// shows the facts of every round the run finished. The record is
+// persisted with the run, so the tree survives a restart of the daemon.
+type roundRecord struct {
+	// Round is the number of the round.
+	Round int `json:"round"`
+	// Job is the job the round belongs to.
+	Job string `json:"job"`
+	// StartedAt is when the round started.
+	StartedAt time.Time `json:"started_at"`
+	// EndedAt is when the round ended.
+	EndedAt time.Time `json:"ended_at"`
+	// Outcome is what the round came to.
+	Outcome wfe.Outcome `json:"outcome"`
+	// Decisions counts what decided up to the end of the round.
+	Decisions roundDecisions `json:"decisions"`
+	// Usage is what the run spent up to the end of the round.
+	Usage llm.Usage `json:"usage"`
+}
+
 // run is one workflow run.
 type run struct {
 	svc *Service
@@ -229,6 +264,25 @@ type run struct {
 	gitStatus *messages.GitStatus
 	// roundUsage counts what the round the run is in spent.
 	roundUsage llm.Usage
+	// roundAnswers counts the answers the operator gave in the round
+	// the run is in.
+	roundAnswers int
+	// operatorDecisions counts the answers the operator gave over the
+	// whole run.
+	operatorDecisions int
+	// cumUsage counts what the run spent over the whole run: the
+	// totals the tree of the rounds shows.
+	cumUsage llm.Usage
+	// roundRecords holds what every round the run finished came to.
+	roundRecords []roundRecord
+	// roundStartedAt is when the round the run is in opened, and
+	// roundStarted which round that was.
+	//
+	// The round starts when its card opens: the first action of the
+	// round follows a moment later, and a round that has not acted yet
+	// has no action to read.
+	roundStartedAt time.Time
+	roundStarted   iteration
 	// decisionUsage counts what the open decision spent.
 	decisionUsage llm.Usage
 	// decisionCount is how many decisions the run has taken. It
@@ -393,6 +447,10 @@ func (r *run) deliver(text string) error {
 	r.ask = nil
 	r.question = ""
 	r.phase = PhaseRunning
+	// The answer is one intervention of the operator: a click on an
+	// option is the same answer as a typed reply.
+	r.roundAnswers++
+	r.operatorDecisions++
 	r.mu.Unlock()
 
 	select {
@@ -1226,6 +1284,18 @@ type persistedRun struct {
 	LastBeatAt       time.Time         `json:"last_beat_at"`
 	DecisionCount    int               `json:"decision_count"`
 	QuestionCount    int               `json:"question_count"`
+	// RoundRecords holds what every round the run finished came to.
+	// The tree of the rounds is rendered from them, so the tree of a
+	// run that comes back looks the way it looked before.
+	RoundRecords []roundRecord `json:"round_records,omitempty"`
+	// RoundAnswers counts the answers the operator gave in the round
+	// the run is in, and RoundUsage what that round spent. Both are the
+	// run's own: a round that is resumed keeps what it counted.
+	RoundAnswers int       `json:"round_answers,omitempty"`
+	RoundUsage   llm.Usage `json:"round_usage,omitempty"`
+	// OperatorDecisions counts the answers the operator gave over the
+	// whole run.
+	OperatorDecisions int `json:"operator_decisions,omitempty"`
 }
 
 // persist writes the run's state to disk.
@@ -1241,44 +1311,47 @@ func (s *Service) persist(r *run) {
 	rounds := r.roundSessionStates()
 	r.mu.Lock()
 	state := persistedRun{
-		RunID:            r.id,
-		ChatID:           r.chatID,
-		Cwd:              r.cwd,
-		Owner:            r.owner,
-		Args:             r.argVals,
-		Workflow:         r.workflow,
-		State:            snapshotState(r.state),
-		History:          append([]wfe.ActionRecord(nil), r.policy.History...),
-		Transcripts:      append([]actionTranscript(nil), r.transcripts...),
-		Messages:         append([]llm.Message(nil), r.messages...),
-		PendingCalls:     append([]pendingCall(nil), r.pendingCalls...),
-		Ask:              r.ask,
-		Inflight:         r.inflight,
-		Phase:            r.phase,
-		JudgmentStep:     r.judgmentStep,
-		Directive:        r.directive,
-		Question:         r.question,
-		Error:            r.errMsg,
-		Paused:           r.paused,
-		PauseReason:      r.pauseReason,
-		RunSession:       sessionStateOf(r.runSession),
-		RoundSession:     sessionStateOf(r.roundSession),
-		DecisionSession:  sessionStateOf(r.decisionSession),
-		RoundSessions:    rounds,
-		CommandMsgIDs:    r.commandMsgIDsLocked(),
-		System1Decisions: r.system1Decisions,
-		System2Decisions: r.system2Decisions,
-		System1Usage:     r.system1Usage,
-		System2Usage:     r.system2Usage,
-		Commands:         r.registry,
-		Agent:            r.agentName,
-		Wakes:            append([]wakeRecord(nil), r.wakes...),
-		ThinkCount:       r.thinkCount,
-		ToolCount:        r.toolCount,
-		LastBeatAt:       r.lastBeatAt,
-		DecisionCount:    r.decisionCount,
-		QuestionCount:    r.questionCount,
-	}
+		RunID:             r.id,
+		ChatID:            r.chatID,
+		Cwd:               r.cwd,
+		Owner:             r.owner,
+		Args:              r.argVals,
+		Workflow:          r.workflow,
+		State:             snapshotState(r.state),
+		History:           append([]wfe.ActionRecord(nil), r.policy.History...),
+		Transcripts:       append([]actionTranscript(nil), r.transcripts...),
+		Messages:          append([]llm.Message(nil), r.messages...),
+		PendingCalls:      append([]pendingCall(nil), r.pendingCalls...),
+		Ask:               r.ask,
+		Inflight:          r.inflight,
+		Phase:             r.phase,
+		JudgmentStep:      r.judgmentStep,
+		Directive:         r.directive,
+		Question:          r.question,
+		Error:             r.errMsg,
+		Paused:            r.paused,
+		PauseReason:       r.pauseReason,
+		RunSession:        sessionStateOf(r.runSession),
+		RoundSession:      sessionStateOf(r.roundSession),
+		DecisionSession:   sessionStateOf(r.decisionSession),
+		RoundSessions:     rounds,
+		CommandMsgIDs:     r.commandMsgIDsLocked(),
+		System1Decisions:  r.system1Decisions,
+		System2Decisions:  r.system2Decisions,
+		System1Usage:      r.system1Usage,
+		System2Usage:      r.system2Usage,
+		Commands:          r.registry,
+		Agent:             r.agentName,
+		Wakes:             append([]wakeRecord(nil), r.wakes...),
+		ThinkCount:        r.thinkCount,
+		ToolCount:         r.toolCount,
+		LastBeatAt:        r.lastBeatAt,
+		DecisionCount:     r.decisionCount,
+		QuestionCount:     r.questionCount,
+		RoundRecords:      append([]roundRecord(nil), r.roundRecords...),
+		RoundAnswers:      r.roundAnswers,
+		RoundUsage:        r.roundUsage,
+		OperatorDecisions: r.operatorDecisions}
 	r.mu.Unlock()
 
 	if err := os.MkdirAll(s.cfg.StateDir, 0o755); err != nil {
@@ -1406,51 +1479,53 @@ func (s *Service) restoreRun(state persistedRun) *run {
 	commands := usableCommands(state.Commands)
 	policy := s.newPolicy(state.Workflow, state.History, commands)
 	r := &run{
-		svc:              s,
-		id:               state.RunID,
-		chatID:           state.ChatID,
-		cwd:              state.Cwd,
-		owner:            state.Owner,
-		argVals:          state.Args,
-		workflow:         state.Workflow,
-		policy:           policy,
-		state:            state.State,
-		transcripts:      state.Transcripts,
-		messages:         state.Messages,
-		pendingCalls:     state.PendingCalls,
-		ask:              state.Ask,
-		inflight:         state.Inflight,
-		phase:            state.Phase,
-		judgmentStep:     state.JudgmentStep,
-		directive:        state.Directive,
-		question:         state.Question,
-		errMsg:           state.Error,
-		paused:           state.Paused,
-		pauseReason:      state.PauseReason,
-		runSession:       sessionFromState(state.RunSession),
-		roundSession:     sessionFromState(state.RoundSession),
-		decisionSession:  sessionFromState(state.DecisionSession),
-		commandMsgIDs:    maps.Clone(state.CommandMsgIDs),
-		system1Decisions: state.System1Decisions,
-		system2Decisions: state.System2Decisions,
-		system1Usage:     state.System1Usage,
-		system2Usage:     state.System2Usage,
-		registry:         state.Commands,
-		commands:         commands,
-		agentName:        s.agentName(state.Agent),
-		wakes:            state.Wakes,
-		thinkCount:       state.ThinkCount,
-		toolCount:        state.ToolCount,
-		lastBeatAt:       state.LastBeatAt,
-		decisionCount:    state.DecisionCount,
-		questionCount:    state.QuestionCount,
-		situationIdx:     situationIndex(state.Messages),
-		ctx:              ctx,
-		cancel:           cancel,
-		resume:           make(chan struct{}, 1),
-		unpause:          make(chan struct{}, 1),
-		done:             make(chan struct{}),
-	}
+		svc:               s,
+		id:                state.RunID,
+		chatID:            state.ChatID,
+		cwd:               state.Cwd,
+		owner:             state.Owner,
+		argVals:           state.Args,
+		workflow:          state.Workflow,
+		policy:            policy,
+		state:             state.State,
+		transcripts:       state.Transcripts,
+		messages:          state.Messages,
+		pendingCalls:      state.PendingCalls,
+		ask:               state.Ask,
+		inflight:          state.Inflight,
+		phase:             state.Phase,
+		judgmentStep:      state.JudgmentStep,
+		question:          state.Question,
+		errMsg:            state.Error,
+		paused:            state.Paused,
+		pauseReason:       state.PauseReason,
+		runSession:        sessionFromState(state.RunSession),
+		roundSession:      sessionFromState(state.RoundSession),
+		decisionSession:   sessionFromState(state.DecisionSession),
+		commandMsgIDs:     maps.Clone(state.CommandMsgIDs),
+		system1Decisions:  state.System1Decisions,
+		system2Decisions:  state.System2Decisions,
+		system1Usage:      state.System1Usage,
+		system2Usage:      state.System2Usage,
+		registry:          state.Commands,
+		commands:          commands,
+		agentName:         s.agentName(state.Agent),
+		wakes:             state.Wakes,
+		thinkCount:        state.ThinkCount,
+		toolCount:         state.ToolCount,
+		lastBeatAt:        state.LastBeatAt,
+		decisionCount:     state.DecisionCount,
+		questionCount:     state.QuestionCount,
+		roundRecords:      state.RoundRecords,
+		roundAnswers:      state.RoundAnswers,
+		roundUsage:        state.RoundUsage,
+		operatorDecisions: state.OperatorDecisions,
+		situationIdx:      situationIndex(state.Messages),
+		ctx:               ctx,
+		cancel:            cancel,
+		resume:            make(chan struct{}, 1),
+		unpause:           make(chan struct{}, 1),
+		done:              make(chan struct{})}
 	if r.state == nil {
 		r.state = newRunState(r.id, state.Workflow.Name, state.Cwd, time.Now())
 	}
@@ -1470,6 +1545,13 @@ func (s *Service) restoreRun(state persistedRun) *run {
 	for _, entry := range state.RoundSessions {
 		sess := sessionFromState(&entry)
 		r.roundSessions[iteration{job: entry.Job, round: entry.Round}] = sess
+	}
+	// The tokens of the run are the tokens of its last round: the
+	// record of that round carries them. Without them the tree of a
+	// run that comes back would count less than the tree before the
+	// restart.
+	if n := len(r.roundRecords); n > 0 {
+		r.cumUsage = r.roundRecords[n-1].Usage
 	}
 	r.policy.SetRounds(r.state.Rounds)
 	if len(r.argVals) > 0 {
@@ -1624,13 +1706,14 @@ func (r *run) lastCommandMsgIDValue() string {
 	return r.lastCommandMsgID
 }
 
-// resetRoundUsage forgets what the round the run was in spent.
+// resetRound forgets what the round the run is in spent and decided.
 //
 // The round session shows what the round spent since the run entered
 // it: a run that comes back to a round starts its count over.
-func (r *run) resetRoundUsage() {
+func (r *run) resetRound() {
 	r.mu.Lock()
 	r.roundUsage = llm.Usage{}
+	r.roundAnswers = 0
 	r.mu.Unlock()
 }
 
@@ -1823,7 +1906,119 @@ func (r *run) isFinished() bool {
 	return r.finished
 }
 
+// closeRound records what a round of a job came to.
+//
+// The record is what the card of the run reads: the tree of the rounds
+// shows the facts of every round the run finished. The counters of the
+// round and what it spent join the totals of the run, so the numbers
+// of the tree are the numbers of the run so far.
+func (r *run) closeRound(job string, round int, now time.Time) roundRecord {
+	out := r.roundOutcome(job, round)
+	start := r.roundStart(job, round)
+	r.mu.Lock()
+	r.cumUsage.Add(r.roundUsage)
+	rec := roundRecord{
+		Round:     round,
+		Job:       job,
+		StartedAt: start,
+		EndedAt:   now,
+		Outcome:   out,
+		Decisions: roundDecisions{
+			System1:  r.system1Decisions,
+			System2:  r.system2Decisions,
+			Operator: r.operatorDecisions,
+		},
+		Usage: r.cumUsage,
+	}
+	r.roundRecords = r.storeRoundRecord(rec)
+	r.mu.Unlock()
+	return rec
+}
+
+// storeRoundRecord keeps the record of a round and returns the list.
+//
+// The caller holds the lock. A run that comes back to a round it has
+// been in writes the record of that round again: the record of a round
+// is the record of its last pass. The record goes to the end of the
+// list, so the list reads in the order the rounds ended.
+func (r *run) storeRoundRecord(rec roundRecord) []roundRecord {
+	for i := range r.roundRecords {
+		if r.roundRecords[i].Job != rec.Job || r.roundRecords[i].Round != rec.Round {
+			continue
+		}
+		r.roundRecords = append(r.roundRecords[:i], r.roundRecords[i+1:]...)
+		break
+	}
+	return append(r.roundRecords, rec)
+}
+
+// roundStart returns when a round started: the time of the first
+// action the round took.
+//
+// The round the run is in started when its card opened: its first
+// action follows a moment later, and a round that has not acted yet has
+// no action to read. A round that has not acted yet falls back to the
+// run's start.
+func (r *run) roundStart(job string, round int) time.Time {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.roundStartedAt.IsZero() && r.roundStarted.job == job && r.roundStarted.round == round {
+		return r.roundStartedAt
+	}
+	return r.roundStartLocked(job, round)
+}
+
+// setRoundStarted records when a round opened.
+func (r *run) setRoundStarted(it iteration, at time.Time) {
+	r.mu.Lock()
+	r.roundStartedAt = at
+	r.roundStarted = it
+	r.mu.Unlock()
+}
+
+// roundStartLocked returns when a round started. The caller holds the
+// lock.
+func (r *run) roundStartLocked(job string, round int) time.Time {
+	first := time.Time{}
+	found := false
+	jobs := map[string]string{}
+	for _, rec := range r.policy.History {
+		if rec.StepID == "" {
+			continue
+		}
+		// An action without a round belongs to the first one: the
+		// history of a run that was persisted before the rounds were
+		// counted says nothing else.
+		at := rec.Round
+		if at <= 0 {
+			at = 1
+		}
+		if at != round {
+			continue
+		}
+		name, known := jobs[rec.StepID]
+		if !known {
+			name = wfe.JobOf(r.workflow, rec.StepID)
+			jobs[rec.StepID] = name
+		}
+		if name != job {
+			continue
+		}
+		if !found || rec.At.Before(first) {
+			first = rec.At
+			found = true
+		}
+	}
+	if !found {
+		return r.state.StartedAt
+	}
+	return first
+}
+
 // recordWake appends a decision to the wake log.
+//
+// The counts of the run already carry what each capability decided, so
+// the log is the record of the decisions, not their tally.
 func (r *run) recordWake(rec wakeRecord) {
 	r.mu.Lock()
 	r.wakes = append(r.wakes, rec)

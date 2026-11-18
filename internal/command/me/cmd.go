@@ -152,17 +152,17 @@ func (f *Factory) start(ctx context.Context, rt command.RuntimeServices,
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
 	data := map[string]string{"workflow": name, "run_id": runID}
-	reply := "▶ " + name + " started (" + runID + ")"
 	if iterations != nil {
 		data["iterations"] = strconv.Itoa(*iterations)
-		reply += " · rounds: " + roundsText(*iterations)
 	}
 	chatsession.ReportOutcome(ctx, messages.Outcome{
 		Status:  messages.OutcomeOK,
 		Summary: "started " + name,
 		Data:    data,
 	})
-	return command.Reply(ctx, rt, reply), nil
+	// The run's own card carries the acknowledgement: one command posts
+	// one card.
+	return &command.SlashOutput{Consumed: true}, nil
 }
 
 // parseStartArgs reads the command line of /me start: the positional
@@ -187,17 +187,6 @@ func parseStartArgs(argv []string) (command.ParsedArgs, *int, error) {
 			raw, startCmdSpec.UsageTail())
 	}
 	return parsed, &rounds, nil
-}
-
-// roundsText renders the round count a run was given.
-//
-// Zero is not "no rounds": it is "until the run ends", the same
-// meaning `iterations: 0` has in the file.
-func roundsText(rounds int) string {
-	if rounds == 0 {
-		return "until the run ends"
-	}
-	return strconv.Itoa(rounds)
 }
 
 // reply hands the user's answer to the run.

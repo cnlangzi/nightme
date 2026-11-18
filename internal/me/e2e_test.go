@@ -57,12 +57,15 @@ func TestEndToEnd_TheRunWorksInTheChatItStartedIn(t *testing.T) {
 		}
 	}
 
-	// The run's card shows the overview of the run, and the card of
-	// the round shows the state of its steps.
+	// The run's card shows the plan of the run, and the card of the
+	// round shows the state of its steps.
 	runCard := op.Cards()[0].ID
-	overview := strings.Join(op.Entries(runCard), "\n")
-	if !strings.Contains(overview, "**fix-issue**") {
-		t.Fatalf("the card of the run does not name the workflow: %v", overview)
+	card := strings.Join(op.Entries(runCard), "\n")
+	if !strings.Contains(card, "▶ [ fix-issue ] started") {
+		t.Fatalf("the card of the run does not name the workflow: %v", card)
+	}
+	if !strings.Contains(card, "├─ [ 1 ]: fix") {
+		t.Fatalf("the card of the run does not show the plan: %v", card)
 	}
 	if jobs := op.Checklist(runCard); len(jobs) != 0 {
 		t.Fatalf("the checklist of the run is %+v, want none", jobs)

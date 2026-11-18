@@ -1,19 +1,40 @@
 // overview.go — what the cards of a run carry.
 //
-// The card of the run is static: it says what the run is, how big it
-// is and which jobs it has. The card of a round is live: it names the
-// run the round belongs to, lists the rounds that have finished and
-// shows the state of every step of the round.
+// The card of the run is static: it says what the run is and what the
+// plan of the run is. The card of a round carries the history of the
+// run: the rounds that have finished, with their own facts, and the
+// round that is going.
 package me
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/pkg/wfe"
+)
+
+// The budgets of the cards.
+//
+// A card is read on a phone: a title that fills a line is a title
+// nobody reads, and a plan with fifty nodes is a plan nobody scans.
+// Every budget is one constant.
+const (
+	// maxCardTitle is how long the title of the workflow is.
+	maxCardTitle = 120
+	// maxStepID is how long the id of a step is.
+	maxStepID = 15
+	// maxStepCommand is how long the command of a step is.
+	maxStepCommand = 40
+	// maxPlanNodes is how many steps a job lists in the plan.
+	maxPlanNodes = 24
+	// maxTreeRounds is how many rounds the tree of the rounds lists.
+	maxTreeRounds = 5
+	// factColumn is the column the values of the facts start at.
+	factColumn = 10
 )
 
 // maxStepDetail is how long the detail of a task row is.
@@ -30,16 +51,14 @@ const maxStepDetail = 100
 // the reader already has.
 const outcomeKeyBranch = "branch"
 
-// runOverview renders the overview of the run: the run itself, the
-// workflow it works through, the arguments it was given and the jobs
-// it has.
+// runCard renders the card of the run: the headline, the facts of the
+// run and the plan it works through.
 //
-// The overview is published once and never changed: the card answers
-// "what is this run", and the live state of the work is on the card
-// of the round.
-func (r *run) runOverview() string {
+// The card is published once and never changed: it answers "what is
+// this run", and the live state of the work is on the card of the
+// round.
+func (r *run) runCard() string {
 	r.mu.Lock()
-	id := r.id
 	started := r.state.StartedAt
 	names := append([]string(nil), r.argNames...)
 	values := make(map[string]string, len(r.argVals))
@@ -49,132 +68,356 @@ func (r *run) runOverview() string {
 	r.mu.Unlock()
 
 	wf := r.workflow
-	jobs := wf.JobOrder()
-	counts := sharedRounds(wf, jobs)
-
-	rows := make([]arrowRow, 0, len(jobs)+4)
-	if counts.shared {
-		rows = append(rows, arrowRow{key: "rounds:", value: roundsCount(counts.count)})
+	lines := make([]string, 0, 16)
+	lines = append(lines, "▶ [ "+wf.Name+" ] started")
+	if title := cutText(wf.Title, maxCardTitle); title != "" {
+		lines = append(lines, title)
 	}
-	rows = append(rows, arrowRow{key: "jobs:", value: jobsValue(wf, jobs)})
-	rows = append(rows, arrowRow{key: "started:", value: clockTime(started)})
-	if len(names) > 0 {
-		rows = append(rows, arrowRow{key: "args:", value: argsValue(names, values)})
-	}
-	for _, name := range jobs {
-		rows = append(rows, arrowRow{key: name + ":", value: jobFlow(wf, name, counts)})
-	}
-
-	lines := make([]string, 0, len(rows)+2)
-	lines = append(lines, BotMark+id)
-	lines = append(lines, workflowLine(wf))
-	lines = append(lines, arrowRows(rows)...)
+	lines = append(lines, "")
+	lines = append(lines, runFacts(wf, started, names, values)...)
+	lines = append(lines, "")
+	lines = append(lines, runPlan(wf)...)
 	return strings.Join(lines, "\n")
 }
 
-// workflowLine renders the workflow of the run: its name in bold and
-// what it is for.
-func workflowLine(wf *wfe.Workflow) string {
-	line := "**" + wf.Name + "**"
-	if wf.Title != "" {
-		line += " — " + wf.Title
-	}
-	return line
-}
-
-// arrowRow is one row of a block: a key and the value of that key.
-type arrowRow struct {
-	key   string
-	value string
-}
-
-// arrowRows renders the rows of a block as arrow rows.
+// runFacts renders the facts of the run: how big it is, when it
+// started and what it was given.
 //
-// The key of a row is padded to the width of the longest key of the
-// block, so the values of the block start at the same column.
-func arrowRows(rows []arrowRow) []string {
-	width := 0
-	for _, row := range rows {
-		if n := utf8.RuneCountInString(row.key); n > width {
-			width = n
-		}
+// The values start at the same column: the key, its colon, and the
+// padding to the column.
+func runFacts(wf *wfe.Workflow, started time.Time, names []string, values map[string]string) []string {
+	facts := []fact{
+		{key: "jobs", value: strconv.Itoa(len(wf.JobOrder()))},
+		{key: "steps", value: strconv.Itoa(len(wf.Steps()))},
+		{key: "started", value: clockTime(started)},
 	}
-	out := make([]string, 0, len(rows))
-	for _, row := range rows {
-		pad := strings.Repeat(" ", width-utf8.RuneCountInString(row.key))
-		out = append(out, "→ "+row.key+pad+" "+row.value)
+	if len(names) > 0 {
+		facts = append(facts, fact{key: "args", value: argsValue(names, values)})
+	}
+	out := make([]string, 0, len(facts))
+	for _, f := range facts {
+		out = append(out, fmt.Sprintf("%-*s%s", factColumn, f.key+":", f.value))
 	}
 	return out
 }
 
-// jobsValue renders how many jobs the run has and how many steps
-// those jobs hold.
-func jobsValue(wf *wfe.Workflow, jobs []string) string {
-	return fmt.Sprintf("%d · steps: %d", len(jobs), len(wf.Steps()))
-}
-
-// jobFlow renders the flow of a job: the ids of its steps, in the
-// order the job runs them.
-//
-// A workflow whose jobs declare different round counts carries the
-// count of the job on its own row.
-func jobFlow(wf *wfe.Workflow, name string, counts roundCounts) string {
-	steps := wf.Jobs[name].Steps
-	ids := make([]string, 0, len(steps))
-	for _, step := range steps {
-		ids = append(ids, step.ID)
-	}
-	flow := "(no steps)"
-	if len(ids) > 0 {
-		flow = strings.Join(ids, " → ")
-	}
-	if !counts.shared {
-		flow += " · " + roundsCount(wf.Jobs[name].Rounds())
-	}
-	return flow
+// fact is one row of the facts of a block: a key and the value of
+// that key.
+type fact struct {
+	key   string
+	value string
 }
 
 // argsValue renders the arguments of the run: the name and the value
-// of every argument, in the order the arguments were declared in.
+// of every argument, in the order the run was given them.
 func argsValue(names []string, values map[string]string) string {
 	parts := make([]string, 0, len(names))
 	for _, name := range names {
 		parts = append(parts, name+"="+values[name])
 	}
-	return strings.Join(parts, " · ")
+	return strings.Join(parts, ", ")
 }
 
-// roundCounts holds the round count of the jobs of a workflow.
-type roundCounts struct {
-	// count is the count the jobs share.
-	count int
-	// shared reports whether every job declares the same count.
-	shared bool
-}
-
-// sharedRounds returns the round count the jobs of the workflow
-// share. The count is not shared when the jobs declare different
-// counts.
-func sharedRounds(wf *wfe.Workflow, jobs []string) roundCounts {
-	if len(jobs) == 0 {
-		return roundCounts{}
+// runPlan renders the plan of the run: one block per job, in the
+// order the jobs run.
+func runPlan(wf *wfe.Workflow) []string {
+	jobs := wf.JobOrder()
+	numbers := planNumbers(wf)
+	lines := make([]string, 0, 32)
+	for i, job := range jobs {
+		if i > 0 {
+			lines = append(lines, "")
+		}
+		lines = append(lines, planJob(wf, job, numbers)...)
 	}
-	count := wf.Jobs[jobs[0]].Rounds()
-	for _, name := range jobs[1:] {
-		if wf.Jobs[name].Rounds() != count {
-			return roundCounts{}
+	return lines
+}
+
+// planJob renders the block of one job: the header of the job and one
+// node per step.
+//
+// A job with many steps lists its first steps and folds the rest into
+// one node: the plan of a job is a plan, not every command the job may
+// run.
+func planJob(wf *wfe.Workflow, name string, numbers map[string]int) []string {
+	steps := wf.Jobs[name].Steps
+	shown := steps
+	folded := 0
+	if len(steps) > maxPlanNodes {
+		shown = steps[:maxPlanNodes]
+		folded = len(steps) - maxPlanNodes
+	}
+	width := planIDWidth(shown)
+	lines := make([]string, 0, len(shown)+2)
+	lines = append(lines, jobHeader(wf, name))
+	for i, step := range shown {
+		prefix := "├─ "
+		if i == len(shown)-1 && folded == 0 {
+			prefix = "└─ "
+		}
+		lines = append(lines, prefix+planNode(numbers[step.ID], step, width))
+	}
+	if folded > 0 {
+		last := shown[len(shown)-1]
+		lines = append(lines, fmt.Sprintf("└─ [ %d ]: … +%d more steps", numbers[last.ID]+1, folded))
+	}
+	return lines
+}
+
+// planNode renders one node of the plan: the number of the step, its
+// id and the command it runs.
+//
+// The id is padded, so the commands of a job all start at the same
+// column: the eye reads the commands, not the ids.
+func planNode(number int, step wfe.Step, width int) string {
+	return fmt.Sprintf("[ %d ]: %-*s%s", number, width, cutText(step.ID, maxStepID), stepCommand(step))
+}
+
+// planIDWidth returns the width of the id column of a job: the
+// longest id of the job plus three spaces.
+func planIDWidth(steps []wfe.Step) int {
+	width := 0
+	for _, step := range steps {
+		if n := utf8.RuneCountInString(cutText(step.ID, maxStepID)); n > width {
+			width = n
 		}
 	}
-	return roundCounts{count: count, shared: true}
+	return width + 3
 }
 
-// roundsCount renders how many rounds a job runs. Zero rounds means
-// the job repeats until the run ends.
-func roundsCount(rounds int) string {
-	if rounds == 0 {
-		return "until the run ends"
+// planNumbers returns the number of every step of the workflow.
+//
+// The steps are numbered across the jobs: the number of a step says
+// where it stands in the whole plan.
+func planNumbers(wf *wfe.Workflow) map[string]int {
+	out := make(map[string]int)
+	for i, step := range wf.Steps() {
+		out[step.ID] = i + 1
 	}
-	return countText(rounds, "round")
+	return out
+}
+
+// jobHeader renders the header of a job's block: the job and the
+// rounds it runs.
+//
+// A job with no round count of its own runs one round: its steps run
+// once. A count of zero means the job repeats until the run ends.
+func jobHeader(wf *wfe.Workflow, name string) string {
+	switch rounds := wf.Jobs[name].Rounds(); {
+	case rounds == 0:
+		return name + " ⟳ until the run ends"
+	case rounds == 1:
+		return name
+	default:
+		return name + " ⟳ " + countText(rounds, "round")
+	}
+}
+
+// stepCommand renders the command a step runs.
+//
+// A step is one of four things: a message to the chat, a shell
+// command, a registered action or a wait. The kind is part of the
+// command, so the reader knows what the step does.
+func stepCommand(step wfe.Step) string {
+	switch step.Kind() {
+	case wfe.StepKindMessage:
+		return cutText(step.Message, maxStepCommand)
+	case wfe.StepKindShell:
+		return cutText("(shell) "+step.Shell, maxStepCommand)
+	case wfe.StepKindUse:
+		return cutText("(use) "+step.Use, maxStepCommand)
+	case wfe.StepKindWait:
+		return cutText("(wait) "+step.Wait, maxStepCommand)
+	}
+	return ""
+}
+
+// roundsTree renders the tree of the rounds of the run: the rounds
+// that have finished, with their own facts, and the round that is
+// going.
+//
+// The tree is a snapshot of the moment the round opened: a round that
+// has not settled has no duration and no verdict, so its node carries
+// nothing but the time it started.
+func (r *run) roundsTree(current iteration) string {
+	r.mu.Lock()
+	records := append([]roundRecord(nil), r.roundRecords...)
+	r.mu.Unlock()
+
+	// The rounds of a job are numbered from one, so a run with several
+	// jobs has rounds of the same number. The tree names the job when
+	// there is more than one: with a single job the plan of the run
+	// says which job the rounds belong to.
+	several := len(r.workflow.JobOrder()) > 1
+
+	bodies := make([]string, 0, len(records)+2)
+	folded := 0
+	if len(records) > maxTreeRounds {
+		folded = len(records) - maxTreeRounds
+		records = records[len(records)-maxTreeRounds:]
+	}
+	if folded > 0 {
+		bodies = append(bodies, fmt.Sprintf("… +%d", folded))
+	}
+	for _, rec := range records {
+		bodies = append(bodies, roundNode(rec, several))
+	}
+	bodies = append(bodies, currentNode(current, several, r.roundStart(current.job, current.round)))
+
+	lines := make([]string, 0, len(bodies)+1)
+	lines = append(lines, "rounds:")
+	for i, body := range bodies {
+		prefix := "├─ "
+		if i == len(bodies)-1 {
+			prefix = "└─ "
+		}
+		lines = append(lines, prefix+body)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// roundNode renders the node of a finished round: its marker, when it
+// started, how long it took and what it decided.
+//
+// The numbers are the numbers of the run so far: the tree reads as a
+// ledger, and the last node carries the totals of the run.
+func roundNode(rec roundRecord, several bool) string {
+	return fmt.Sprintf("[ %s ] %s%d: %s · %s %s",
+		outcomeIcon(rec.Outcome.Status),
+		jobPrefix(rec.Job, several),
+		rec.Round,
+		clockTime(rec.StartedAt),
+		durationText(rec.EndedAt.Sub(rec.StartedAt)),
+		decisionsText(rec))
+}
+
+// jobPrefix names the job of a round when the run has more than one.
+//
+// The rounds of a job are numbered from one: without the job, two
+// rounds of two jobs read the same.
+func jobPrefix(job string, several bool) string {
+	if !several {
+		return ""
+	}
+	return job + " · "
+}
+
+// currentNode renders the node of the round that is going: its number
+// and when it started.
+//
+// The round has not settled: it has no duration and no verdict yet, so
+// its node carries nothing else.
+func currentNode(it iteration, several bool, at time.Time) string {
+	return fmt.Sprintf("[ > ] %s%d: %s", jobPrefix(it.job, several), it.round, clockTime(at))
+}
+
+// roundEndedLine renders the closing line of a finished round: the
+// marker of its outcome, what it came to and how long it took.
+func roundEndedLine(rec roundRecord) string {
+	line := "ended: [ " + outcomeIcon(rec.Outcome.Status) + " ]"
+	if summary := strings.TrimSpace(rec.Outcome.Summary); summary != "" {
+		line += " " + summary
+	}
+	return line + " · " + durationText(rec.EndedAt.Sub(rec.StartedAt))
+}
+
+// decisionsText renders what decided up to the end of a round and what
+// the run spent: the counts of the decisions and the tokens.
+//
+// A round in which nothing was decided says so: a part that is empty
+// would read like a part that was cut.
+func decisionsText(rec roundRecord) string {
+	parts := make([]string, 0, 3)
+	if n := rec.Decisions.System1; n > 0 {
+		parts = append(parts, fmt.Sprintf("system-1 ×%d", n))
+	}
+	if n := rec.Decisions.System2; n > 0 {
+		parts = append(parts, fmt.Sprintf("system-2 ×%d", n))
+	}
+	if n := rec.Decisions.Operator; n > 0 {
+		parts = append(parts, fmt.Sprintf("operator ×%d", n))
+	}
+	if len(parts) == 0 {
+		parts = append(parts, "none")
+	}
+	return "decisions:  " + strings.Join(parts, " · ") +
+		" ·  tokens - " + abbrevTokens(rec.Usage.InputTokens) +
+		" / " + abbrevTokens(rec.Usage.OutputTokens)
+}
+
+// abbrevTokens renders a token count the way the status bar renders it:
+// "4.2k", "1.1M".
+//
+// The card keeps the rule to itself: the status bar's helper is not
+// exported, and a card that counted its tokens differently from the bar
+// that reports them would say two things about one number.
+func abbrevTokens(n int) string {
+	switch {
+	case n >= 1_000_000:
+		return abbrevOneDecimal(float64(n)/1_000_000, "M")
+	case n >= 1_000:
+		return abbrevOneDecimal(float64(n)/1_000, "k")
+	default:
+		return strconv.Itoa(n)
+	}
+}
+
+// abbrevOneDecimal renders a number with one decimal and a unit.
+//
+// A whole number drops its decimal: "1M", not "1.0M". The unit stays:
+// the decimal goes, the unit does not.
+func abbrevOneDecimal(v float64, unit string) string {
+	s := fmt.Sprintf("%.1f%s", v, unit)
+	zeroSuffix := ".0" + unit
+	if strings.HasSuffix(s, zeroSuffix) {
+		s = s[:len(s)-len(zeroSuffix)] + unit
+	}
+	return s
+}
+
+// outcomeIcon returns the icon of an outcome.
+//
+// The icons are the ones the checklist of a step uses, so a card reads
+// the same way everywhere it is read. The marker of a card is wider
+// than the marker of a checklist: a space on each side of the icon
+// keeps the glyph from crowding it.
+func outcomeIcon(status wfe.OutcomeStatus) string {
+	switch status {
+	case wfe.OutcomeOK, wfe.OutcomeNoop:
+		return "√"
+	case wfe.OutcomeFailed, wfe.OutcomeIncomplete, wfe.OutcomeTimeout:
+		return "!"
+	case wfe.OutcomeCancelled:
+		return "-"
+	}
+	return " "
+}
+
+// durationText renders a duration compactly: "13s", "5m14s", "1h05m".
+func durationText(d time.Duration) string {
+	seconds := int(d.Seconds())
+	if seconds < 0 {
+		seconds = 0
+	}
+	switch {
+	case seconds < 60:
+		return fmt.Sprintf("%ds", seconds)
+	case seconds < 3600:
+		return fmt.Sprintf("%dm%02ds", seconds/60, seconds%60)
+	default:
+		return fmt.Sprintf("%dh%02dm", seconds/3600, (seconds%3600)/60)
+	}
+}
+
+// cutText cuts a text to a number of runes and marks the cut.
+//
+// The ellipsis sits on top of the budget: a text that was cut says so.
+func cutText(text string, n int) string {
+	runes := []rune(text)
+	if len(runes) <= n {
+		return text
+	}
+	return string(runes[:n]) + "…"
 }
 
 // countText renders a count with its unit: "1 round", "3 chances".
@@ -188,101 +431,6 @@ func countText(n int, unit string) string {
 // clockTime renders a moment as the time of day.
 func clockTime(at time.Time) string {
 	return at.Format("15:04:05")
-}
-
-// runBlock renders the block that names the run a round belongs to:
-// the run's id and start time, and the rounds that have finished.
-//
-// The block is published when the round opens: the card of a round
-// has to say which run it is part of, and the operator has to see the
-// run's history at a glance.
-func (r *run) runBlock() string {
-	r.mu.Lock()
-	id := r.id
-	started := r.state.StartedAt
-	state := r.state
-	history := append([]wfe.ActionRecord(nil), r.policy.History...)
-	r.mu.Unlock()
-
-	wf := r.workflow
-	ends := roundEndTimes(history, wf)
-	rows := []arrowRow{{key: "run:", value: id + " · " + clockTime(started)}}
-	for _, job := range wf.JobOrder() {
-		for _, round := range finishedRounds(state, wf, job) {
-			value := job
-			if at, ok := ends[roundKey{job: job, round: round}]; ok {
-				value += " · " + clockTime(at)
-			}
-			rows = append(rows, arrowRow{key: fmt.Sprintf("round %d:", round), value: value})
-		}
-	}
-	return strings.Join(arrowRows(rows), "\n")
-}
-
-// finishedRounds returns the rounds of a job that have finished: the
-// rounds before the round the job is in, plus the round it is in when
-// every step of the job has run.
-func finishedRounds(state *wfe.RunState, wf *wfe.Workflow, job string) []int {
-	current := state.RoundOf(job)
-	last := current - 1
-	if wfe.JobComplete(state, wf, job) {
-		last = current
-	}
-	if last < 1 {
-		return nil
-	}
-	out := make([]int, 0, last)
-	for round := 1; round <= last; round++ {
-		out = append(out, round)
-	}
-	return out
-}
-
-// roundKey names one round of one job.
-type roundKey struct {
-	job   string
-	round int
-}
-
-// roundEndTimes returns when each round of a job ended: the time of
-// the last action the round took.
-//
-// The history is walked once: a run that repeats its rounds has a
-// history that grows with every round, and the block is built again
-// for every round the run enters.
-//
-// The history is persisted with the run, so the time of a round
-// survives a restart of the daemon.
-func roundEndTimes(history []wfe.ActionRecord, wf *wfe.Workflow) map[roundKey]time.Time {
-	out := make(map[roundKey]time.Time, len(history))
-	jobs := make(map[string]string, len(history))
-	for _, rec := range history {
-		if rec.StepID == "" {
-			continue
-		}
-		job, known := jobs[rec.StepID]
-		if !known {
-			job = wfe.JobOf(wf, rec.StepID)
-			jobs[rec.StepID] = job
-		}
-		if job == "" {
-			continue
-		}
-		key := roundKey{job: job, round: recordRound(rec)}
-		if at, seen := out[key]; !seen || rec.At.After(at) {
-			out[key] = rec.At
-		}
-	}
-	return out
-}
-
-// recordRound returns the round an action was taken in. An action
-// without a round belongs to the first one.
-func recordRound(rec wfe.ActionRecord) int {
-	if rec.Round <= 0 {
-		return 1
-	}
-	return rec.Round
 }
 
 // roundTasks renders the steps of a round as the checklist of the

@@ -169,11 +169,18 @@ func (s *Service) adoptSessionCards(r *run) {
 // posts no card of its own, and the chat folds the run's entries into
 // the card it already holds for that message.
 //
+// A run that no message started — a synthetic inbound, a command
+// without a message id — has no such card: it posts one of its own,
+// and the chat folds the entries into that one.
+//
 // The session carries the plan of the run and nothing else: what the
 // run is stays the same from the start to the end, and the live state
 // of the work is on the card of the round.
 func (s *Service) openRunSession(ctx context.Context, r *run, anchor string) {
 	sess := &session{kind: sessionRun, id: r.id, anchor: anchor}
+	if anchor == "" {
+		sess = s.openSession(ctx, r, sessionRun, r.id, "", 0, "")
+	}
 	r.setRunSession(sess)
 	r.setGitStatus(s.gitStatus(r))
 	s.publishInit(ctx, r, sess)

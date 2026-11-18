@@ -913,7 +913,7 @@ jobs:
 
 	svc, op := testService(t, dir, noModels())
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "two", ChatID: "obs-1", Cwd: "/tmp/work",
+		Name: "two", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -967,7 +967,7 @@ jobs:
 
 	svc, op := testService(t, dir, noModels())
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "repeat", ChatID: "obs-1", Cwd: "/tmp/work",
+		Name: "repeat", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -1015,7 +1015,7 @@ func TestAnotherJobGetsACardOfItsOwn(t *testing.T) {
 
 	svc, op := testService(t, dir, noModels())
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "ship", ChatID: "obs-1", Cwd: "/tmp/work",
+		Name: "ship", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -1108,7 +1108,7 @@ func TestAPauseUpdatesTheCardInPlace(t *testing.T) {
 	op.steps = []fakeStep{{open: true}}
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -1127,9 +1127,10 @@ func TestAPauseUpdatesTheCardInPlace(t *testing.T) {
 	}
 	waitRun(t, svc, "obs-1")
 
-	// The run keeps the cards it has: a pause is not a session.
+	// The run keeps the cards it has: a pause is not a session. The
+	// cards are the one of the round and the record of the run.
 	if posted := op.Posted(); posted > 2 {
-		t.Fatalf("the run published %d cards, want the card of the run and the card of the round", posted)
+		t.Fatalf("the run published %d cards, want the card of the round and the record", posted)
 	}
 }
 
@@ -1408,7 +1409,7 @@ func TestShow_PutsTheStateBackInFrontOfTheOperator(t *testing.T) {
 	op.steps = []fakeStep{{open: true}}
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}

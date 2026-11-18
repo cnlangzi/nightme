@@ -75,6 +75,43 @@ func TestTheRunStartLeavesOneCard(t *testing.T) {
 	}
 }
 
+// TestARunWithoutAMessagePostsACardOfItsOwn — a run that no message
+// started has no card of the chat to write into: it posts one of its
+// own, and the chat folds the run's entries into that one.
+func TestARunWithoutAMessagePostsACardOfItsOwn(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+	svc, op := testService(t, dir, noModels())
+	op.steps = []fakeStep{okStep("committed")}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitRun(t, svc, "obs-1")
+
+	cards := op.Cards()
+	if len(cards) == 0 {
+		t.Fatal("the run published no card")
+	}
+	entries := op.Entries(cards[0].ID)
+	if len(entries) != 1 || !strings.Contains(entries[0], "▶ [ one ] started") {
+		t.Fatalf("the card of the run carries %v, want the plan alone", entries)
+	}
+	// The verdict of the run lands on that card.
+	var verdict bool
+	for _, m := range op.EmittedOf(messages.OutResult) {
+		if m.ReplyTo == cards[0].ID {
+			verdict = true
+		}
+	}
+	if !verdict {
+		t.Errorf("the verdict of the run does not land on the card of the run: %v",
+			op.EmittedOf(messages.OutResult))
+	}
+}
+
 // TestTheRunCardCarriesThePlanOfTheRun — the card of the run is the
 // plan of the run: its headline, its facts and its steps. It is
 // published once and never changed.
@@ -150,7 +187,7 @@ func TestTheRoundCardCarriesTheTreeOfTheRounds(t *testing.T) {
 	op.steps = []fakeStep{okStep("committed")}
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}

@@ -60,7 +60,7 @@ func TestBudget_TheRunPausesWhenTheStepSpentItsBudget(t *testing.T) {
 	op.steps = []fakeStep{pendingStep("still going")}
 
 	runID, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
 	})
 	if err != nil {
 		t.Fatalf("start: %v", err)
@@ -471,7 +471,7 @@ func TestTheCard_ShowsTheWaitingLineAndTheChancesLeft(t *testing.T) {
 	op.steps = []fakeStep{pendingStep("still going")}
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}

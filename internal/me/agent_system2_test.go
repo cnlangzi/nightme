@@ -42,7 +42,7 @@ func TestSystem2_ToolDispatch(t *testing.T) {
 	op.steps = []fakeStep{pendingStep("still going"), okStep("committed")}
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -229,7 +229,7 @@ func TestSystem2_TextOnlyReplyKeepsTheRunGoing(t *testing.T) {
 	op.steps = []fakeStep{pendingStep("still going")}
 
 	runID, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
 	})
 	if err != nil {
 		t.Fatalf("start: %v", err)
@@ -699,7 +699,7 @@ func TestIntegration_TheWorkflowRunsEndToEnd(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "fix-issue", Args: []string{"42"}, ChatID: "obs-1", Cwd: "/tmp/work",
+		Name: "fix-issue", Args: []string{"42"}, ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
 		Commands: []CommandInfo{{Name: "review"}},
 	}); err != nil {
 		t.Fatalf("start workflow: %v", err)

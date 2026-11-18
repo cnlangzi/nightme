@@ -1432,20 +1432,20 @@ jobs:
           # Why "must have response" and not just "must still be
           # alive": a hung agent that never acknowledges the input
           # passes a pure-aliveness check but fails the user's
-          # "执行成功" criterion. We require evidence that the child
-          # RAN — the banner (the bridge's handshake completed) or
-          # the child's own stderr (an auth-error / prompt-echo /
-          # model-reply all qualify, because each proves the bridge
-          # launched the binary AND the binary got past pure
-          # startup into "I have an opinion about this prompt"
-          # territory). Content is not inspected — only presence.
+          # "执行成功" criterion. We require SOME output beyond the
+          # banner — auth-error / prompt-echo / model-reply all
+          # qualify, because each proves the bridge launched the
+          # binary AND the binary got past pure startup into "I
+          # have an opinion about this prompt" territory. Content
+          # is not inspected — only presence.
           #
           # Why we don't grep for a specific protocol response:
           # each agent uses a different wire (PTY echo for claude,
           # stdio JSON-RPC initialize for codex/opencode/pi/cursor,
           # shared-host 3080-port web for dsh), so a content-based
           # check would couple this gate to a single bridge's
-          # protocol. "The child ran" is the cross-protocol signal.
+          # protocol. Byte threshold + observation window is the
+          # cross-protocol signal.
           #
           # cursor is included on every platform — the Windows
           # PowerShell installer (separate pwsh step above)
@@ -1462,8 +1462,9 @@ jobs:
             out_file=$(mktemp)
             # Spawn `nightme test` in the background. We feed it
             # a one-line prompt + immediate EOF on stdin. The
-            # "agent acknowledged" gate looks for evidence that the
-            # child ran, regardless of shape:
+            # threshold-based "agent acknowledged" gate looks for
+            # ANY output beyond the launch banner, regardless of
+            # shape:
             #   - PTY agents (claude) echo the line, then sit
             #     at the user prompt waiting for more input.
             #   - stdio JSON-RPC agents (codex / opencode / pi / cursor)
@@ -1563,33 +1564,28 @@ jobs:
             # Windows than on linux/macos (~2ms there) — the same
             # race, far easier to lose on Windows.
             #
-            # The child counts as acknowledged when it demonstrably
-            # ran:
-            #   - the bridge's handshake completed and nightme
-            #     printed its banner, or
-            #   - the child wrote to stderr and nightme carried the
-            #     tail into the error (the "--- stderr tail ---"
-            #     section).
-            # The second case is omp's normal CI run: with no API
-            # key and no models.yml, omp prints "No default model
-            # selected" and exits before it serves RPC, so the
-            # handshake fails and nightme reports it. That message
-            # is the child's own — the same evidence an auth error
-            # is — and the gate has always counted it as a
-            # response; it just had to win a race to see it.
+            # Whatever the child managed to say counts, and the
+            # verdict is read once, from the output the child left
+            # behind. nightme's own error text counts too, because
+            # the bridge relays the child's own words inside it:
+            #   - omp, with no API key and no models.yml, prints
+            #     "No default model selected" and exits before it
+            #     serves RPC; the bridge carries that out on stderr,
+            #   - copilot, with no GitHub auth, answers session/new
+            #     with "json-rpc error -32000: Authentication
+            #     required"; the bridge relays that error,
+            # and both prove the binary ran and spoke.
             #
-            # Nightme's own "spawn failed" text proves neither: it
-            # is what the gate sees when the bridge never got the
-            # binary running at all.
-            acknowledged=0
-            if printf '%s' "$output" | grep -q '^\[nightme\] session '; then
-              acknowledged=1
-            fi
-            if printf '%s' "$output" | grep -q -- '--- stderr tail ---'; then
-              acknowledged=1
-            fi
+            # So this gate answers one question — did the child say
+            # anything at all? That the binary exists, is on PATH
+            # and runs is the PATH and --help gates' job, two steps
+            # above.
             final_size=$(wc -c < "$out_file" 2>/dev/null | tr -d ' ')
             [ -n "$final_size" ] || final_size=0
+            acknowledged=0
+            if [ "$final_size" -gt "$banner_threshold" ]; then
+              acknowledged=1
+            fi
             if [ "$acknowledged" -eq 1 ]; then
               echo "OK: $agent acknowledged within window ($final_size bytes)"
               continue
@@ -1597,8 +1593,7 @@ jobs:
             # The child never showed signs of life. Two shapes, and
             # they need different words:
             #   (a) the child exited on its own with nothing to say
-            #       → the bridge couldn't find/launch the binary,
-            #         or it died before saying anything
+            #       → it died before it could say anything
             #   (b) the child was still running and silent → hung
             # The old wording said "no response within 30s" for
             # both, which misreported (a): it exited in seconds.

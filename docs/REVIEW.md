@@ -34,11 +34,12 @@
 | 13 | 跨 job 的 EventAgentTaskCreate/Update **按 task ID 去重 merge**,同一 ID 多个 job 的最新版本只发一份 | chat checklist 看到 N 份重复 task 条目,数量 = N × tasks |
 | 14 | `--continue` **只续跑失败的 group**,已完成的 group 不再问一遍 | 重复的 findings 混进输出 |
 | 15 | 每个 group 的 findings **整组一次性交付**(think kind,一条回复一个 group,正文前带 `[N]` 编号);thinking 仍按组攒批(2 KiB / 2 秒)边跑边流 | chat 里几百条碎片,sink 缓冲与 channel 的 PATCH 频率扛不住,findings 被丢;多组并发时碎片互相穿插,读者跟不住任何一组 |
+| 16 | 每个 group 有自己的**静默阈值**(默认 15m):窗口内没有心跳的 group 被单独关掉并记成超时,别的 group 不受影响;超时不吃掉这个 group 的恢复机会 | 一个卡死的 subagent 把整个 review 拖死:findings 永远不来,group 也不会被记成 failed,`--continue` 无从捡起 |
 
 ### 1.2 边界
 
 - **是**:对"当前分支 vs 默认分支"(PR 模式)的代码变更做 review,产出 findings 文本回 chat,主 agent 可对话式 fix。
-- **不是**:不开 `--fix` / `--post`(留 v2 的 `/review-fix` / `/review-comment`);不限定文件 / base(只认 `--agent` / `--global` / `--unset` / `--continue` / `--abort` 五个 flag,短写 `-a` / `-g` / `-c`,不收位置参数);不当 CI gating;不自动改代码。
+- **不是**:不开 `--fix` / `--post`(留 v2 的 `/review-fix` / `/review-comment`);不限定文件 / base(只认 `--agent` / `--global` / `--unset` / `--continue` / `--abort` / `--timeout` 六个 flag,短写 `-a` / `-g` / `-c` / `-t`,不收位置参数);不当 CI gating;不自动改代码。
 
 ---
 
@@ -49,7 +50,7 @@ review 由所有 bridge 统一走 `agent.ReviewDispatch`(单一入口):`OcrAvail
 agent 包不再区分 "native / mixed / delegate" 桥——每条桥的 `Starter.Review` 都是同一行 `return agent.ReviewDispatch(ctx, s, cfg, opts...)`。Agent 自带的 review 子命令(`claude -p code-review` / `codex review` / `cursor-agent -p /review-bugbot`)用户直接在 chat 发 slash command,nightme 透传给底层 agent——不再通过 `Starter.Review` 特殊路径触发。
 
 ```text
-/review [-a|--agent <name>] [-g|--global] [--unset] [-c|--continue] [--abort]
+/review [-a|--agent <name>] [-g|--global] [--unset] [-c|--continue] [--abort] [-t|--timeout <dur>]
    │  解析 flags(共享 lexer),选定 runner;runner ≠ 当前 AS 时,findings 仍回当前 AS
    │  -g / --global:把 runner 落成全局 `review.agent`(~/.nightme/config.yaml)
    │  --unset:删掉全局 `review.agent`,不跑 review
@@ -57,6 +58,8 @@ agent 包不再区分 "native / mixed / delegate" 桥——每条桥的 `Starter
    │                  与 -a / -g / --unset 互斥
    │  --abort:停掉本 chat 正在跑的 review(或续跑)(见 §2.8);
    │          与 -a / -g / --unset / -c 互斥
+   │  -t / --timeout:<dur> 定每个 group 的静默阈值(见 §2.9);
+   │                  与 --abort / --unset 互斥
    ▼
 Starter.Review(所有 bridge 都是同一行)
    │
@@ -277,7 +280,7 @@ review 路径没有交互用户,drain 遇到 `EventAgentPermission` 时用**第�
 
 - **sem 上限**(如 4):防 N 个 agent session 同时跑爆 token / 撞 API rate。超 sem 的 job 排队等空位。
 - **单 job 失败不阻塞**:某组 session turn 失败,其他组仍出结果;merge 时该组标"failed"。
-- **ctx 派生**:所有 job 共用 `ReviewWithOcr` / `ReviewWithPrompt` 的 revCtx(chat session ctx + 30min 超时)。`/close` → 全部取消。
+- **ctx 派生**:所有 job 共用 `ReviewWithOcr` / `ReviewWithPrompt` 的 revCtx(chat session ctx 派生,run 本身无 wall-clock 上限)。`/close` → 全部取消。每个 job 另有一个自己的子 ctx + 静默阈值(§2.9):某个 group 卡死只关掉它自己,不影响别的 group。
 
 ### 2.5.4 merge(一次返回)+ 每组 findings 解析
 
@@ -381,7 +384,7 @@ review 在 channel 上只有这几样东西,顺序固定:
    💡 hint: run `/review --continue` to continue the failed groups
    ```
 
-   块头报几组没跑完(`N of M`:N = 失败的组数,M = 本次 run 的 subagent 数,跟计数行报的是同一个数),每个失败的组一行 `- `,按失败的先后排;组名后面带状态:跑到了 agent 的组没有后缀,没跑到 agent 的组带 `(never started)`,恢复机会已用完的组带 `(already retried)`,既没跑到 agent 也没有存下来的 prompt 的组带 `(not recoverable)`。`💡 hint:` 单独成段 —— 紧跟在列表项后面而中间没有空行的那一行是那个列表项的延续,提示会落进最后一个组的那条 bullet 里。提示 **只在还有失败组可恢复时才出现** —— 承诺必须是续跑做得到的;失败组要么用完了恢复机会、要么救不回来的 run,只有块头和组行,没有这行。失败块里的组名与 plan 行一样按 code span 渲染(见第 1 条)。thread 末尾另有一条收尾提示(`✅ **review done** · ...` 加同一块,think kind),thread 以结果收尾 —— card 与 thread 共用同一份 body,两个面的数字与失败块不会打架。
+   块头报几组没跑完(`N of M`:N = 失败的组数,M = 本次 run 的 subagent 数,跟计数行报的是同一个数),每个失败的组一行 `- `,按失败的先后排;组名后面带状态:跑到了 agent 的组没有后缀,没跑到 agent 的组带 `(never started)`,恢复机会已用完的组带 `(already retried)`,既没跑到 agent 也没有存下来的 prompt 的组带 `(not recoverable)`,超时的组带 `(timed out)`(它取代本来的状态后缀——超时组仍然可续跑,见 §2.9)。`💡 hint:` 单独成段 —— 紧跟在列表项后面而中间没有空行的那一行是那个列表项的延续,提示会落进最后一个组的那条 bullet 里。提示 **只在还有失败组可恢复时才出现** —— 承诺必须是续跑做得到的;失败组要么用完了恢复机会、要么救不回来的 run,只有块头和组行,没有这行。失败块里的组名与 plan 行一样按 code span 渲染(见第 1 条)。thread 末尾另有一条收尾提示(`✅ **review done** · ...` 加同一块,think kind),thread 以结果收尾 —— card 与 thread 共用同一份 body,两个面的数字与失败块不会打架。
 4. **digest**(紧跟 verdict 行,同一条 card 消息):按 severity 分组的 markdown 表,每个 bucket 一张表,每条 finding 一行。表头是 bucket 名与它的条数(`**high** · 2`),列是 `category` 与 `path`(`path:line`)—— severity 是表头,不是列。`category` 列只在**本次 review 有 finding 报了 category** 时出现,没报的那一格写 `—`;行内的换行/制表符变成空格、`|` 变成 `/`,所以一行 finding 不会撑破列。
    digest 是 findings 的索引,不是它们的正文:每条 finding 只留位置与分类,一条不落。finding 的正文不进 card —— 它在 thread 里(`/think` 开时),或由主 agent 的回答带出(`/think` 关着,默认),合并文本里也有一份给 agent 读。card 因此只跟 finding 的条数成正比,不会被一段长正文撑破。
 
@@ -464,13 +467,14 @@ sink 的 drain 在 verdict 之前排空:各组的 findings 还排在 drain gorou
 | **thread 的收尾提示**(verdict 的 Markdown 版,走 sink 因此受 `/think` 控制) | `internal/command/review/render.go::reviewVerdictHint` / `::sendVerdictHint` |
 | **注入主 agent 的那一轮**(合并全文 + 随 `/think` 变的 frame) | `internal/command/review/render.go::reviewPromptFrame` |
 | **`/review` 的续跑状态**(按 chat id,只活在 daemon 进程内存里) | `internal/command/review/record.go` |
-| 单元测试(聚合器 / 攒批 / 解析 / 合并 / 并发 / 配对 / session drain) | `internal/agent/aggregate_sink_test.go`、`internal/agent/review_coalesce_test.go`、`internal/agent/review_label_test.go`、`internal/agent/review_findings_test.go`、`internal/agent/merge_results_test.go`、`internal/agent/fanout_test.go`、`internal/agent/run_session_test.go` |
+| **每个 group 的静默阈值**(watchdog / 子 ctx / 心跳 sink / 超时错误 / flag 与 config 解析 / 超时报告) | `internal/agent/review_timeout.go` / `internal/command/review/timeout.go` |
+| 单元测试(聚合器 / 攒批 / 解析 / 合并 / 并发 / 配对 / session drain / 静默阈值) | `internal/agent/aggregate_sink_test.go`、`internal/agent/review_coalesce_test.go`、`internal/agent/review_label_test.go`、`internal/agent/review_findings_test.go`、`internal/agent/merge_results_test.go`、`internal/agent/fanout_test.go`、`internal/agent/run_session_test.go`、`internal/agent/review_timeout_test.go`、`internal/agent/review_timeout_fanout_test.go`、`internal/command/review/timeout_test.go` |
 
 **不变量与实现的对应**:
 
 - **#1 全异步**:`Handle` 立即返回,goroutine 跑 review,revCtx 派生自 chat session ctx。
 - **#2 / #9 session 隔离**:每个 per-job 是独立 `agent.RunSession`(独立进程 / 独立 session + 独立 context),多 job 间不共享、不累积。
-- **#3 ctx 派生 + /close 取消**:所有 job 共用 `revCtx`(chat session ctx + 30min 超时)。
+- **#3 ctx 派生 + /close 取消**:所有 job 共用 `revCtx`(chat session ctx 派生,run 本身无 wall-clock 上限);每个 job 另有一个自己的子 ctx,静默阈值到点只关掉它自己(§2.9)。
 - **#4 单路分发**:`FormatReviewMessage` 一次产出的合并文本 → 注入 AS(user turn)一次;**不发 channel**。channel 上是 plan 行 + thread 里每组一条 findings + verdict 行与其下的 digest(digest 只列位置与分类)。
 - **#10 自动并发 + sem + merge 一次返回**:`sem chan struct{}` cap 为 `maxConcurrentReviewJobs = 4`;`wg.Wait()` 同步;`mergeRunResults` 一次产出最终 RunResult。
 - **#11 单 outer lifecycle**:eventAggregator 的三相状态机在 readyCount/doneCount all-wait 时各合成一次 outer Ready / outer Result,per-job lifecycle 不外泄。
@@ -478,6 +482,7 @@ sink 的 drain 在 verdict 之前排空:各组的 findings 还排在 drain gorou
 - **#13 Task 跨 job 去重**:eventAggregator 的 `tasks map[string]AgentTaskItem`,latest-wins 写入,forward 合并 snapshot。
 - **#14 分组投递**(新):一组一个 chunk 不单独成消息;findings 按 2 KiB 攒批、组结束时整组交付(think kind,`[N]` 行内编号),太长时按攒批边界切成连续几条;thinking 按 2 KiB / 2 秒 flush(2 秒在下一个事件到达时判定);组的终态与 fan-out 结束各兜底交付一次,不留字;没报 Ready 的组由 fan-out 结束时的 replay 兜底,不留字。
 - **#15 verdict 确定性**(新):verdict 行的 findings 计数来自每组自己的输出解析,合并文本不解析;失败组算 failed 不算 unparsed。
+- **#16 每个 group 的静默阈值**(新):fan-out 内核给每个 group 一个自己的子 ctx + watchdog;事件流上的任何事件都算心跳,重置计时器;到点用 `ErrGroupTimeout` 关掉这个 group,别的 group 不受影响(§2.9)。
 
 ---
 
@@ -773,21 +778,146 @@ run 照常报失败,不发中止通知。
 
 ---
 
+## 2.9 每个 group 的静默阈值(`/review --timeout`)
+
+review 是 fan-out:每个 group 一个独立 agent session(§2.5)。一个 subagent 卡死
+——进程还活着,但不再产出任何东西(挂住的 API 调用、bridge 没察觉的死管道)——
+会把它的 session 一直挂着:run 永远不结束,这个 group 的 findings 永远不来,group
+也不会被记成 failed,于是 `--continue` 无从捡起。
+
+阈值解决的就是这件事:**每个 group 有自己的静默窗口**。窗口内一声不吭的 group 被
+单独关掉,run 报告它超时,而它仍然可续跑(§2.7)。
+
+### 判据:心跳
+
+**心跳 = 该 group 的 session 事件流上的任何一个事件**:`EventAgentReady` /
+`EventAgentText` / `EventAgentThinking` / `EventAgentToolStart` /
+`EventAgentToolEnd` / `EventAgentTaskCreate` / `EventAgentTaskUpdate` /
+`EventAgentPermission` / `EventAgentPermissionSettled` / `EventAgentResult` /
+`EventAgentDone`。每来一个心跳,这个 group 的静默计时器就重新开始。
+
+心跳不是 ping/pong 协议:没有任何 bridge 有这个协议(`pty` 连协议都没有),
+`driver.Keepalive` 只看子进程活没活(活着 ≠ 在干活),而 fan-out 层拿不到
+subagent 的进程句柄。事件流是唯一一条跨 bridge 都有的"subagent 还在干活"的信号。
+
+### 阈值从哪来
+
+优先级:**flag → config → 内置默认**。内置默认是 `agent.DefaultReviewGroupTimeout`
+= 15 分钟。
+
+| 来源 | 写法 | 说明 |
+|---|---|---|
+| `--timeout <dur>` / `-t <dur>` | `15m` / `90s` / `1h` | 这次调用生效;`0` 表示关掉阈值 |
+| `review.timeout` | `~/.nightme/config.yaml` 里的 duration 字符串 | 整机生效;`0` 表示关掉阈值 |
+| 内置默认 | 15 分钟 | flag 与 config 都没说时用这个 |
+
+`--timeout` 的值用 `time.ParseDuration` 解析:解析不了是用法错误,负数是用法错误。
+config 里的值解析不了(或文件读不了)只告警,review 照跑,用内置默认:
+
+```
+⚠️ review.timeout "soon" is not a duration — using 15m0s
+⚠️ cannot read review.timeout from /home/me/.nightme/config.yaml: … — using 15m0s
+```
+
+阈值是**每次调用 / 整机**两个粒度,不是全局持久化的:`/review --global` 落的仍然
+只有 runner(`review.agent`),`review.timeout` 只读不写。
+
+### 阈值怎么落地
+
+阈值是 fan-out 的事:"一个 group = 一个 subagent"只存在于 fan-out 里。共享的
+session drain(`drainSessionEvents`)同时服务 `/gtw commit` / `/gtw pr`,不该知道
+review 的语义。
+
+`runReviewGroups`(`internal/agent/review_with_ocr.go`)给每个 group:
+
+- 一个自己的子 ctx(`context.WithCancelCause(runCtx)`)——取消它不影响 run,也不
+  影响别的 group;
+- 一个自己的 watchdog(`internal/agent/review_timeout.go`):`time.AfterFunc` 计时器
+  + 最近一次心跳的时间戳。计时器到点时,如果窗口内有心跳就重新武装(下一次到期
+  落在 `lastBeat + 阈值`),否则用 `ErrGroupTimeout` 取消这个 group 的 ctx。
+
+group 的 turn 因此按既有链路收场:ctx 取消 → `drainSessionEvents` 在 `ctx.Done()`
+上返回 → `ResumeSession` 的 `defer a.Close()` → `driver.Close()`(SIGTERM,宽限期
+后 SIGKILL)。没有新的关闭路径,也不直接给进程发信号。
+
+计时器从 **group 的 goroutine 真正开跑**那一刻起算——也就是它抢到并发槽位之后。
+等槽位的时间不算这个 group 的静默;它的 spawn 在计时窗口之内。
+
+事件 sink 变成复合的:先记心跳(aggregator 就算丢掉这个事件,心跳也算数),再把事件
+原样转给 aggregator 的 per-job sink(per-job 终态计数不受影响)。schema re-emit
+那一轮(`reemitReviewFindings`)拿到的是**只记心跳、不转发**的 sink:它是 group 的
+活动(要重置计时器),但它不能再给同一个 job 贡献第二个终态。
+
+阈值到点时,group 的哪一段工作被切掉,决定它算不算超时:
+
+- turn 被切 → 该 group 超时。
+- turn 完成了,但 re-emit 那一轮被切 → 同样算超时:活没干完,而且还能续。
+- 两段都干完了,计时器随后才响 → 该 group 照旧算成功,它的 findings 不丢。
+
+也就是说,"超时"说的是**这个 group 的活被切断了**,不是"计时器响过"。一个把活干完
+的 group 不是超时——把它记成超时会让它的 findings 从合并文本里消失,那是白丢。
+
+### 报告
+
+超时是一个 failed group,所以该有的标记都有,另外还多一处:
+
+| 位置 | 内容 |
+|---|---|
+| run 自己的消息 | `⏱️ 1 of 3 subagents timed out — no heartbeat for 15m0s (nightme code reviewer) → /review -c` |
+| verdict 行 | 失败块里的一行:组名 + `(timed out)`;块尾照旧有 `💡 hint: run /review --continue …` |
+| 合并文本(inline) | `### Group: pattern <p> — failed: review group "nightme code reviewer" timed out after 15m0s without a heartbeat` |
+| run 的 outcome data | `timed_out_groups: "<n>"`(成功交付的 run 和失败的 run 都带) |
+
+run 自己的消息走 `messages.OutReply`,所以 `/think` 关着也看得见;它在 sink 排空
+之后、verdict 行之前发出。多个 group 超时时,名字用 `, ` 连起来。
+
+### 超时之后还能续跑
+
+超时**不**吃掉这个 group 唯一的恢复机会:环境卡住了,不是 group 的内容不对,用户
+应该还能再试一次。于是:
+
+- 跑到了 agent 的 group(session id 还在)→ `--continue` 重开那个 session;
+- 没跑到 agent 的 group(存着 prompt)→ `--continue` 用那份 prompt 重跑。
+
+续跑里又超时的 group 同样不算 spent,还能再续一次。
+
+### 边界
+
+| 场景 | 行为 |
+|---|---|
+| 一个 group 卡死,其它 group 正常 | 只关掉卡死的那个;别的 group 的 findings 照常合并、照常交付 |
+| 所有 group 都超时 | 所有 subagent 被关掉;run 失败(`all N review jobs failed`),发失败回复,超时通知照发 |
+| group 在到达 agent 之前就超时(没有 session id) | `--continue` 用存下的 prompt 重跑它 |
+| group 在 `EventAgentReady` 之后超时 | session id 留在 record 里;`--continue` 续那个 session |
+| 续跑里又超时 | 该 group 不算 spent,还能再续 |
+| `--timeout 0` | 这次调用没有静默阈值,行为跟以前一样 |
+| config 里的 `review.timeout` 不是 duration | 告警,用内置默认(15m),review 照跑 |
+| config 文件读不了 | 告警,用内置默认,review 照跑 |
+| `--timeout` 与 `--abort` / `--unset` 同用 | 用法错误,两个 flag 都点名,不跑 review |
+| `--timeout` 与 `--global` 同用 | 允许:runner 照落盘,review 用这个阈值跑 |
+| 一个 group 憋着一次长 LLM 调用,超过阈值没动静 | 该 group 被当成超时关掉。这是设计接受的那个误报;阈值可配就是为了这个 |
+| 阈值在 schema re-emit 那一轮到点 | 该 group 记成超时(re-emit 被切 = 活没干完),还能 `--continue`;turn 与 re-emit 都干完、计时器随后才响的 group 照旧算成功,findings 不丢 |
+| 用户中止了一个已经有 group 超时的 run | 发中止通知;不发超时通知(中止分支先返回) |
+| 阈值到点的瞬间 bridge 正好发终态事件 | 谁先谁赢:阈值先到,该 group 记成超时 |
+
+---
+
 ## 3. 数据流:从 `/review` 到 findings
 
-1. 用户发 `/review [-a|--agent <name>] [-g|--global] [--unset] [-c|--continue] [--abort]`。
-2. dispatcher 用共享 lexer(`command.ParseCmdArgs`)解析 args,inline 校验未知 flag、位置参数与非法 flag 组合(`--unset` 需要 `--global`、`--unset` 与 `--agent` 互斥、`--global` 需要 `--agent`、`--continue` 与 `--agent` / `--global` / `--unset` 互斥、`--abort` 与 `--continue` / `--agent` / `--global` / `--unset` 互斥)。
+1. 用户发 `/review [-a|--agent <name>] [-g|--global] [--unset] [-c|--continue] [--abort] [-t|--timeout <dur>]`。
+2. dispatcher 用共享 lexer(`command.ParseCmdArgs`)解析 args,inline 校验未知 flag、位置参数与非法 flag 组合(`--unset` 需要 `--global`、`--unset` 与 `--agent` 互斥、`--global` 需要 `--agent`、`--continue` 与 `--agent` / `--global` / `--unset` 互斥、`--abort` 与 `--continue` / `--agent` / `--global` / `--unset` 互斥、`--timeout` 与 `--abort` / `--unset` 互斥)。
 3. **落全局设置**:`-g` 把 runner 写进 `~/.nightme/config.yaml` 的 `review.agent`,`--unset` 删掉它(`--unset` 不跑 review)。写盘发生在查 chat session 之前——全局设置与本 chat 有没有 workspace 无关;写失败只告警(`⚠️ failed to save review.agent: … — reviewing with <name> anyway`),review 照跑。落盘走 node 级写入,config 文件里的注释 / 未建模的 key / 其它 section 原样保留。
 4. 解析 **inject 目标**:当前 chat 的 selected AS(lookup,daemon 重启后自动 spawn)。
 5. 解析 **review runner**(4 级):① `-a` / `--agent` → ② 全局 `review.agent` → ③ 当前 AS 的 agent → ④ 都没有 → `❌ no active agent configured. Run /use <agent> first.`。② 里的名字没在 agent 注册表里时降级到 ③ 并告警(`⚠️ review.agent "x" is not a registered agent — using <session agent>`),config 文件里的陈旧名字不会让 `/review` 变成死命令。查 agent 注册表拿 Starter。
-6. 启动 goroutine(chat session ctx 派生,无超时;run 在 goroutine 之前登记,可被 `--abort` 取消):
+6. 解析 **静默阈值**:① `-t` / `--timeout` → ② 全局 `review.timeout` → ③ 内置默认 15 分钟(§2.9)。② 里的值不是 duration(或 config 文件读不了)时告警,用 ③ 继续跑。
+7. 启动 goroutine(chat session ctx 派生,run 本身无超时;run 在 goroutine 之前登记,可被 `--abort` 取消):
    1. 接 sink,把 review 的中间事件(思考 / 工具调用)**流式**进 chat(观察用)。
    2. `Starter.Review` → **统一 dispatcher**:
       - 所有 bridge 调 `agent.ReviewDispatch` → `OcrAvailable() ? ReviewWithOcr : ReviewWithPrompt`。
       - Agent 自带的 review 子命令(`claude -p code-review` / `codex review` / `cursor-agent -p /review-bugbot`)不在 `Starter.Review` 路径里触发——用户直接在 chat 发 slash command,nightme 透传给底层 agent。
    3. `FormatReviewMessage` 包前缀(workspace + runner 标注,让主 agent 知道"这是谁跑的 review";run 级备注——比如这次补写了 `refs/remotes/origin/HEAD`——也进前缀)。
    4. **单路分发**:合并文本注入 AS 当 user turn(主 agent 能"fix critical findings"),**不发 channel**。channel 上看到的是 plan 行 + thread 里每组一条 findings + verdict 行与其下的 digest(§2.5.5)。
-7. Handle 立即返回 `Consumed=true`。readpump 继续,dispatch worker 释放,用户可继续发消息。findings 异步到达;全局设置的回执(写入确认 / 写失败告警 / 降级告警)随本条命令的 reply 一起发出,先于 findings 到达。
+8. Handle 立即返回 `Consumed=true`。readpump 继续,dispatch worker 释放,用户可继续发消息。findings 异步到达;全局设置的回执(写入确认 / 写失败告警 / 降级告警)随本条命令的 reply 一起发出,先于 findings 到达。
 
 `--continue` 走另一条路:查本 chat 的 review 记录 → 本 chat 有 review 在跑就拒绝 →
 挑出"失败且还有恢复机会"的 group(有 session id 的续跑,只有 prompt 的重跑)→ 用记录里
@@ -809,7 +939,7 @@ record 让停掉的 group 还能 `--continue`(§2.8)。
 - **session 是隔离机制**:每 group 一个独立 agent session(独立进程 / 独立 session id),独立 context 窗口。review 推理(可烧数万 token)不污染主 chat。
 - **多 job 各自独立 context**:大 changeset 按 rule group 拆的每个 job 都是独立 fresh session——不共享 context、不累积,防爆。区别于"同进程多轮 + /new reset"的弱隔离(依赖 agent reset 彻底),fresh session 是 OS 级强隔离,零信任。
 - **prompt 走管道**:group prompt 经 session 的协议管道送达 agent,不占 argv(见 §2.5 传输层)。管道无长度上限,大 changeset 的 group prompt 不会撑爆 spawn 参数。
-- **没有超时**:review 没有 wall-clock 上限——它跑到用户中止或 chat session 的 ctx 被取消(daemon 关闭)为止。大 changeset 的 review 本来就可能跑很久,与其被一个固定的帽子截断,不如让用户自己决定什么时候停(`/review --abort`,见 §2.8)。
+- **run 本身没有超时**:review 没有 wall-clock 上限——它跑到用户中止或 chat session 的 ctx 被取消(daemon 关闭)为止。大 changeset 的 review 本来就可能跑很久,与其被一个固定的帽子截断,不如让用户自己决定什么时候停(`/review --abort`,见 §2.8)。每个 group 另有静默阈值(§2.9):卡死的 subagent 会被单独关掉,不会把整个 run 拖死。
 - **ctx 派生**:goroutine 用 chat session 的 ctx 当 parent。chat 的 ctx 被取消(daemon 关闭走 `ResetContext`)→ 所有 review session 关闭 → goroutine 退出。无 orphan。run 的 ctx 是 `context.WithCancelCause(cs.Context())`:用户中止装的是哨兵原因(§2.8),ctx 被取消装的是父 ctx 的原因,两者在 `context.Cause` 上分得开。
 - **多 reviewer 并行**:多个 `/review --agent` 并发,各自独立 session,findings 全注入同一 AS。用户体验:多条 review 接连出现,然后一次"fix"。
 - **续跑同样是 session 隔离**:resume 打开的是 agent 侧同一个 session(新进程 + 老 session id),agent 的上下文延续,主 chat 上下文依旧不被污染。

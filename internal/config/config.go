@@ -60,7 +60,9 @@ var configWriteMu sync.Mutex
 //	session: ...
 //	logging: ...
 //	paths: ...
-//	review: ...                      # /review's global runner (optional)
+//	review:                          # /review's global preferences (optional)
+//	  agent: cc                      # the runner /review uses by default
+//	  timeout: 15m                   # the per-subagent silence threshold
 //
 // User-configured `agents:` entries override built-in agents with the
 // same name (merge happens at runtime, not parse time).
@@ -167,6 +169,12 @@ type ReviewConfig struct {
 	// carries no -a / --agent flag. Empty means "fall back to the
 	// chat session's selected agent".
 	Agent string `yaml:"agent,omitempty"`
+
+	// Timeout is the per-subagent silence threshold of a review run:
+	// a group whose subagent produced no event for this long is
+	// closed and reported as timed out. A duration string ("15m").
+	// Empty means the built-in default.
+	Timeout string `yaml:"timeout,omitempty"`
 }
 
 // EffectiveName returns the configured Name, or the local machine

@@ -452,10 +452,14 @@ func (c *outcomeCollector) results() []reviewOutcome {
 // merged text already carries the inline "failed:" marker, and the
 // group's one recovery attempt is used up. The session id stays in the
 // record: the failure is still the group's, only the retry is gone.
+//
+// A timeout is the exception: the environment stalled, not the group's
+// content, so the group keeps its recovery attempt and can be
+// continued again.
 func (c *outcomeCollector) spentResults() []reviewOutcome {
 	out := c.results()
 	for i := range out {
-		if out[i].err != nil {
+		if out[i].err != nil && !isGroupTimeout(out[i].err) {
 			out[i].spent = true
 		}
 	}

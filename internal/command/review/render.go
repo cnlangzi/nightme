@@ -145,6 +145,10 @@ type failedGroup struct {
 	label string
 	// state is what the continuation can still do with the group.
 	state failedState
+	// timedOut marks a group whose subagent went silent. The group is
+	// still resumable — a timeout does not spend its recovery
+	// attempt — but the user needs to know why it ended.
+	timedOut bool
 }
 
 // text renders the group's name with its state.
@@ -153,6 +157,9 @@ type failedGroup struct {
 // name.
 func (g failedGroup) text() string {
 	name := agent.CodeSpan(g.label)
+	if g.timedOut {
+		return name + " (timed out)"
+	}
 	switch g.state {
 	case failedNeverStarted:
 		return name + " (never started)"
@@ -334,7 +341,11 @@ func verdictInputs(outcomes []reviewOutcome, plan []agent.ReviewPlanGroup) (repo
 		if label == "" {
 			label = agent.ReviewGroupName(o.source, o.pattern)
 		}
-		failed = append(failed, failedGroup{label: label, state: failedStateOf(o)})
+		failed = append(failed, failedGroup{
+			label:    label,
+			state:    failedStateOf(o),
+			timedOut: isGroupTimeout(o.err),
+		})
 	}
 	return reports, failed
 }

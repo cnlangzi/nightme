@@ -134,10 +134,25 @@ func TestVerdictLine_FailedGroupsAreTheirOwnBlock(t *testing.T) {
 
 	want := "⚠️ review · 2 subagents · 1 finding · 1 high\n\n" +
 		"❌ **1 of 2 subagents failed**\n" +
-		"- `system / **/*.go · Go`\n" +
+		"- `system / **/*.go · Go`\n\n" +
 		"💡 hint: run `/review --continue` to continue the failed groups"
 	if got != want {
 		t.Errorf("the verdict line is:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// TestVerdictLine_HintStandsOnItsOwn: the hint is a paragraph of its
+// own — a line that follows a list item without a blank line is that
+// item's continuation, so the hint would end up inside the last
+// group's bullet.
+func TestVerdictLine_HintStandsOnItsOwn(t *testing.T) {
+	got := newVerdict(2, nil, []failedGroup{
+		{label: "a", state: failedResumable},
+		{label: "b", state: failedNeverStarted},
+	}).line()
+
+	if !strings.Contains(got, "\n\n💡 hint:") {
+		t.Errorf("the hint is not a paragraph of its own: %s", got)
 	}
 }
 
@@ -238,7 +253,7 @@ func TestVerdictHint_CarriesTheSameBody(t *testing.T) {
 	hint := v.hint()
 	want := "⚠️ **review done** · 2 subagents · 1 finding · 1 high\n\n" +
 		"❌ **1 of 2 subagents failed**\n" +
-		"- `system / **/*.go`\n" +
+		"- `system / **/*.go`\n\n" +
 		"💡 hint: run `/review --continue` to continue the failed groups"
 	if hint != want {
 		t.Errorf("the end hint is:\n%s\nwant:\n%s", hint, want)
@@ -712,7 +727,7 @@ func TestSendVerdict_PutsTheFailureBlockBetweenTheCountsAndTheDigest(t *testing.
 
 	want := "⚠️ review · 2 subagents · 1 finding · 1 high\n\n" +
 		"❌ **1 of 2 subagents failed**\n" +
-		"- `system / **/*.ts`\n" +
+		"- `system / **/*.ts`\n\n" +
 		"💡 hint: run `/review --continue` to continue the failed groups\n\n" +
 		"**high** · 1\n" +
 		"| path |\n" +

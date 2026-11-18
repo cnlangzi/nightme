@@ -42,6 +42,24 @@ func reviewGroupName(g reviewGroup) string {
 	return ReviewGroupName(g.Source, g.Pattern)
 }
 
+// CodeSpan renders a group's name for the chat: a code span when the
+// name carries a markdown metacharacter — `*` (bold, italic, glob) or
+// `_` (italic). The plan's label — the name plus the file summary —
+// goes through the same rule.
+//
+// A glob's `**` pairs with another name's `**` into a bold span and
+// swallows the text between them, so a name that carries one must not
+// sit in the markdown stream bare.
+//
+// A name that carries a backtick is left alone: a code span would
+// break on it.
+func CodeSpan(name string) string {
+	if strings.ContainsAny(name, "*_") && !strings.Contains(name, "`") {
+		return "`" + name + "`"
+	}
+	return name
+}
+
 // simplifyGroupName is the simplify group's name: the heading of its
 // prompt, without the internal marker the heading carries.
 func simplifyGroupName() string {

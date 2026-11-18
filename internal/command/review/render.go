@@ -6,9 +6,11 @@
 //     before any group produces output;
 //  2. the findings — each group's findings, one reply per group, in
 //     the thread;
-//  3. the verdict line — what the run found, in one line, followed by
-//     the digest: the findings as one table per severity, one row per
-//     finding, holding what kind of finding it is and where it is.
+//  3. the verdict — what the run found: the counts line, and — when
+//     a group did not finish — the block that names the failed groups
+//     under it, followed by the digest: the findings as one table per
+//     severity, one row per finding, holding what kind of finding it
+//     is and where it is.
 //
 // The merged body is NOT one of them: it is the main agent's input,
 // not the channel's. The thread carries the findings; the card
@@ -66,27 +68,10 @@ func renderPlanLine(runner string, groups []agent.ReviewPlanGroup) string {
 	fmt.Fprintf(&b, "🔍 review · %s · %s · %s",
 		runner, reviewRuleSet(groups), plural(len(groups), "subagent"))
 	for i, g := range groups {
-		fmt.Fprintf(&b, "\n%d. %s — %s", i+1, codeSpan(g.Label), plural(len(g.Files), "file"))
+		fmt.Fprintf(&b, "\n%d. %s — %s", i+1, agent.CodeSpan(g.Label), plural(len(g.Files), "file"))
 		b.WriteString(reviewModeMarker(g.Mode))
 	}
 	return b.String()
-}
-
-// codeSpan renders a group's name as a code span when the name
-// carries a markdown metacharacter — `*` (bold, italic, glob) or `_`
-// (italic).
-//
-// A glob's `**` pairs with another name's `**` into a bold span and
-// swallows the text between them, so a name that carries one must not
-// sit in the markdown stream bare.
-//
-// A name that carries a backtick is left alone: a code span would
-// break on it.
-func codeSpan(name string) string {
-	if strings.ContainsAny(name, "*_") && !strings.Contains(name, "`") {
-		return "`" + name + "`"
-	}
-	return name
 }
 
 // reviewModeMarker names what a continuation does with a group.
@@ -167,7 +152,7 @@ type failedGroup struct {
 // The state is prose, so it stays outside the code span around the
 // name.
 func (g failedGroup) text() string {
-	name := codeSpan(g.label)
+	name := agent.CodeSpan(g.label)
 	switch g.state {
 	case failedNeverStarted:
 		return name + " (never started)"
@@ -261,6 +246,10 @@ func (v verdict) body() string {
 //
 // The continuation is offered only when a failed group is still
 // actionable: the offer must match what the continuation can do.
+//
+// The hint stands on its own: a line that follows a list item without
+// a blank line is the item's continuation, so the hint would end up
+// inside the last group's bullet.
 func (v verdict) failureBlock() string {
 	if len(v.failed) == 0 {
 		return ""
@@ -275,7 +264,7 @@ func (v verdict) failureBlock() string {
 		}
 	}
 	if actionable {
-		b.WriteString("\n💡 hint: run `/review --continue` to continue the failed groups")
+		b.WriteString("\n\n💡 hint: run `/review --continue` to continue the failed groups")
 	}
 	return b.String()
 }
@@ -290,7 +279,8 @@ func (v verdict) line() string {
 }
 
 // hint renders the verdict as the thread's end hint — the same
-// numbers, in Markdown, so the thread closes on the outcome.
+// counts and the same failure block as the card's verdict, in
+// Markdown, so the thread closes on the outcome.
 func (v verdict) hint() string {
 	return v.icon() + " **review done** · " + v.body()
 }

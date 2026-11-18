@@ -123,6 +123,48 @@ func ensureRepoLabels(
 	return chk, nil
 }
 
+// heldLabel returns the state label that blocks a fix, or "" when
+// the issue is free. Any label in the `nightme/` namespace other
+// than `nightme/assigned` means another agent holds the issue —
+// under review, waiting for a revision, already done.
+//
+// The namespace test is case-insensitive, like issueHasLabel: a
+// hand-created "Nightme/Ready" is the same label as
+// "nightme/ready". The label is returned as the platform reports
+// it, so the reply and the outcome name the label that is really
+// on the issue.
+//
+// The claim wins when several state labels are present: an issue
+// carrying `nightme/wip` is held by a fix right now, whatever else
+// it carries, and the claim has its own remedy (`/gtw close`).
+func heldLabel(issue *Issue) string {
+	if issue == nil {
+		return ""
+	}
+	prefix := LabelPrefix + "/"
+	var other string
+	for _, label := range issue.Labels {
+		folded := strings.ToLower(label)
+		if !strings.HasPrefix(folded, prefix) {
+			continue
+		}
+		if folded == strings.ToLower(LabelAssigned) {
+			continue
+		}
+		if folded == strings.ToLower(LabelWIP) {
+			return label
+		}
+		if other == "" {
+			other = label
+		}
+	}
+	return other
+}
+
+// queueNeedsLabel is the tail every labelCatalogNote variant ends
+// with: what the queue needs from the user.
+const queueNeedsLabel = "attach it to an issue that carries no other `nightme/*` label to fill the queue"
+
 // labelCatalogNote explains an empty queue in terms of the label
 // catalog: the queue marker is in the repository's catalog, so the
 // queue is empty because nobody has attached it to an issue yet.
@@ -132,17 +174,21 @@ func ensureRepoLabels(
 // fills the queue. When the answer came from the cache, the note
 // says the catalog was verified earlier: a label deleted since then
 // would have left the queue empty the same way.
+//
+// Every variant ends the same way: the queue needs an issue that
+// carries the queue marker alone, because any other `nightme/*`
+// label means another agent holds it.
 func labelCatalogNote(chk labelCheck) string {
 	switch {
 	case slices.Contains(chk.Created, LabelAssigned):
-		return fmt.Sprintf("`%s` was just created in this repository — attach it to an issue to fill the queue",
-			LabelAssigned)
+		return fmt.Sprintf("`%s` was just created in this repository — %s",
+			LabelAssigned, queueNeedsLabel)
 	case !chk.Verified:
-		return fmt.Sprintf("`%s` was verified in this repository's label catalog earlier in this session — attach it to an issue to fill the queue",
-			LabelAssigned)
+		return fmt.Sprintf("`%s` was verified in this repository's label catalog earlier in this session — %s",
+			LabelAssigned, queueNeedsLabel)
 	default:
-		return fmt.Sprintf("`%s` is in this repository's label catalog — attach it to an issue to fill the queue",
-			LabelAssigned)
+		return fmt.Sprintf("`%s` is in this repository's label catalog — %s",
+			LabelAssigned, queueNeedsLabel)
 	}
 }
 

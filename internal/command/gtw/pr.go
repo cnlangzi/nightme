@@ -36,7 +36,11 @@ package gtw
 //     fails is put back to the agent once, with the reason; a reply
 //     that fails again opens no PR.
 // 10. provider.CreatePR → URL.
-// 11. Reply with ✅ PR opened + branch / base / url / worktree /
+// 11. With --ready: move the linked issue from `nightme/wip` to
+//     `nightme/ready` — the pull request exists, so the work is
+//     waiting for review. The transition runs on the path where
+//     the pull request was already open too (step 5).
+// 12. Reply with ✅ PR opened + branch / base / url / worktree /
 //     issue card.
 //
 // Pre-PR state (detached HEAD / uncommitted / untracked / ahead vs
@@ -110,6 +114,11 @@ type prArgs struct {
 	// from `-a <name>` / `--agent <name>`. Empty means:
 	// use cs.SelectedAgent().
 	Agent string
+
+	// Ready moves the linked issue from "claimed" to "waiting for
+	// review" once the pull request exists: `nightme/ready` goes
+	// on, `nightme/wip` comes off. Comes from `--ready`.
+	Ready bool
 }
 
 // dispatchPR implements /gtw pr. The readiness contract is
@@ -131,6 +140,11 @@ type prArgs struct {
 // agent runs so the PR body can report how the implementation deviates
 // from it. A failed fetch and a missing deviation category both warn
 // on the reply; neither blocks the pull request.
+//
+// With --ready, the linked issue also moves from "claimed" to
+// "waiting for review" once the pull request exists. The transition
+// is best-effort: it warns on the reply when a label call fails and
+// never turns an opened pull request into a failed command.
 //
 // Everything else (detached HEAD / uncommitted / untracked /
 // ahead vs upstream / ahead vs base / behind vs upstream /
@@ -221,8 +235,8 @@ func dispatchPR(
 	// them to say.
 	issueWarning := ""
 	deviationWarning := ""
-	withWarning := func(body string) string {
-		return prependWarning(body, labelWarning)
+	withWarning := func(body string, extra ...string) string {
+		return prependWarning(body, append([]string{labelWarning}, extra...)...)
 	}
 
 	// --- gate 2: no open PR for this branch -------------------------
@@ -248,11 +262,17 @@ func dispatchPR(
 	if existing != nil {
 		// The branch already has a pull request: a normal branch —
 		// the pull request the command was asked for is there, and
-		// nothing broke.
+		// nothing broke. The --ready transition still runs: a pull
+		// request is open for the branch, so the issue is waiting
+		// for review whichever run opened it.
+		var readyWarnings []string
+		if args.Ready {
+			readyWarnings = applyReadyTransition(ctx, provider, owner, repo, c)
+		}
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			withWarning(fmt.Sprintf(
 				"✅ branch %s already has an open PR (#%d): %s",
-				c.Branch, existing.Number, existing.URL)),
+				c.Branch, existing.Number, existing.URL), readyWarnings...),
 			command.BranchOutcome("pr_exists", "the branch already has an open pull request",
 				map[string]string{
 					"branch":    c.Branch,
@@ -413,9 +433,13 @@ func dispatchPR(
 	}
 
 	riskLevel, riskReason := extractRiskLevel(body)
+	var readyWarnings []string
+	if args.Ready {
+		readyWarnings = applyReadyTransition(ctx, provider, owner, repo, c)
+	}
 	card := prependWarning(
 		renderPROpenedCard(c, baseBranch, url, riskLevel, riskReason),
-		labelWarning, issueWarning, deviationWarning)
+		append([]string{labelWarning, issueWarning, deviationWarning}, readyWarnings...)...)
 
 	// Stamp the new PR into the workspace's cache before we
 	// reply. Registry.WritePR allocates the cache on first
@@ -463,6 +487,43 @@ func dispatchPR(
 			Summary: "opened the pull request",
 			Data:    prData,
 		}), nil
+}
+
+// applyReadyTransition moves the linked issue from "claimed" to
+// "waiting for review": `nightme/ready` goes on, `nightme/wip` comes
+// off. It runs on every path where a pull request is open for the
+// branch — the one this run opened and the one that was already
+// there.
+//
+// Add before remove: a failure between the two steps leaves the issue
+// claimed, and a claimed issue stays out of both fix paths. The
+// reverse order would leave an issue with no state label at all,
+// which reads as "nobody is working on it" — so a failed add skips
+// the removal.
+//
+// Both calls are best-effort. The pull request is already open and
+// the label is bookkeeping: a failure warns on the reply and leaves
+// the outcome where it was.
+func applyReadyTransition(
+	ctx context.Context,
+	provider GitProvider,
+	owner, repo string,
+	c Context,
+) []string {
+	if c.Issue <= 0 {
+		return []string{"⚠️ this worktree links no issue — no label was changed"}
+	}
+	var warnings []string
+	if err := provider.AddIssueLabel(ctx, owner, repo, c.Issue, LabelReady); err != nil {
+		warnings = append(warnings, fmt.Sprintf(
+			"⚠️ could not add the `%s` label to issue #%d: %v", LabelReady, c.Issue, err))
+		return warnings
+	}
+	if err := provider.RemoveIssueLabel(ctx, owner, repo, c.Issue, LabelWIP); err != nil {
+		warnings = append(warnings, fmt.Sprintf(
+			"⚠️ could not remove the `%s` label from issue #%d: %v", LabelWIP, c.Issue, err))
+	}
+	return warnings
 }
 
 // prAgentRun is what the agent phase of /gtw pr produced.

@@ -703,6 +703,27 @@ func (cs *ChatSession) SetSelectedAgent(agent string) error {
 	return nil
 }
 
+// SetSelectedAgentTransient switches the active agent family without
+// writing the chat store: the switch lives in this process only.
+//
+// Unlike SetSelectedAgent it accepts an empty name, which clears the
+// selection — the caller that switches back may have found none.
+func (cs *ChatSession) SetSelectedAgentTransient(agent string) error {
+	cs.routeMu.Lock()
+	defer cs.routeMu.Unlock()
+
+	cs.mu.Lock()
+	if cs.selectedAgent != agent {
+		// The session of the old agent is detached: the next message
+		// mounts the session of the new one.
+		cs.selectedAS = nil
+	}
+	cs.selectedAgent = agent
+	cs.lastInteractionAt = time.Now()
+	cs.mu.Unlock()
+	return nil
+}
+
 // SelectedCwd returns the current active workspace.
 func (cs *ChatSession) SelectedCwd() string {
 	cs.mu.RLock()

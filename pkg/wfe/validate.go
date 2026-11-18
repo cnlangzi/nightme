@@ -273,6 +273,9 @@ func checkSemantics(wf *Workflow, root *yaml.Node) []Diagnostic {
 			if err := validateStep(step); err != nil {
 				diags = append(diags, diagnosticAt(stepMapping, fmt.Errorf("job %q step %d: %w", name, i+1, err)))
 			}
+			if err := validateStepMessage(step); err != nil {
+				diags = append(diags, diagnosticAt(stepMapping, fmt.Errorf("job %q step %d: %w", name, i+1, err)))
+			}
 			if step.ID == "" {
 				step.ID = syntheticStepID(name, i+1)
 			}
@@ -351,8 +354,20 @@ func checkJobKeys(node *yaml.Node, ctx string) []Diagnostic {
 			continue
 		}
 		for i, item := range sequenceItems(e.val) {
-			diags = append(diags, checkKeys(item, reflect.TypeOf(Step{}), fmt.Sprintf("%s step %d", ctx, i+1))...)
+			stepCtx := fmt.Sprintf("%s step %d", ctx, i+1)
+			diags = append(diags, checkKeys(item, reflect.TypeOf(Step{}), stepCtx)...)
+			diags = append(diags, checkAgentChainKeys(item, stepCtx)...)
 		}
+	}
+	return diags
+}
+
+// checkAgentChainKeys reports the unknown keys of the chain entries of
+// a step.
+func checkAgentChainKeys(node *yaml.Node, ctx string) []Diagnostic {
+	var diags []Diagnostic
+	for i, entry := range sequenceItems(mappingValue(node, "agents")) {
+		diags = append(diags, checkKeys(entry, reflect.TypeOf(AgentChain{}), fmt.Sprintf("%s agents entry %d", ctx, i+1))...)
 	}
 	return diags
 }

@@ -244,6 +244,16 @@ type CwdProvider interface {
 	Cwd(chatID string) string
 }
 
+// AgentSwitcher switches the agent a chat works with.
+//
+// The switch is temporary: the function it returns puts the chat's
+// previous agent back.
+type AgentSwitcher interface {
+	// SwitchAgent switches the chat to the agent and returns the
+	// function that puts the chat's previous agent back.
+	SwitchAgent(chatID, agent string) (restore func(), err error)
+}
+
 // AgentOpener opens the session that thinks for the owner.
 //
 // The package does not know the agent layer: the daemon injects the
@@ -320,6 +330,10 @@ type Config struct {
 	// Cwd reports the directory a chat currently works in. Nil means
 	// the shell steps run in the workspace the run started in.
 	Cwd CwdProvider
+	// AgentSwitcher switches the agent a chat works with, for the
+	// length of one attempt. Nil means a step cannot name an agent
+	// the `use` mode reaches for.
+	AgentSwitcher AgentSwitcher
 
 	// Logger is the logger the agent logs through. Nil means
 	// slog.Default().

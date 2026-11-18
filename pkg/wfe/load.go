@@ -418,7 +418,77 @@ func validateStep(s *Step) error {
 			return fmt.Errorf("wait: %q is not a duration", s.Wait)
 		}
 	}
+	return validateStepAgents(s)
+}
+
+// validateStepAgents checks the chain of agents a step declares.
+//
+// The agents are for a message step: an agent is what does the work,
+// and only a message reaches an agent.
+func validateStepAgents(s *Step) error {
+	if len(s.Agents) == 0 {
+		return nil
+	}
+	if s.Kind() != StepKindMessage {
+		return fmt.Errorf("the agents are for a message step")
+	}
+	for i, entry := range s.Agents {
+		if err := validateAgentChain(i+1, entry); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// validateAgentChain checks one entry of a step's chain of agents.
+//
+// The position of the entry names it: the diagnostic says which entry
+// it is about.
+func validateAgentChain(position int, entry AgentChain) error {
+	switch entry.Mode {
+	case AgentModeUse, AgentModeArgs:
+	default:
+		return fmt.Errorf("the agents entry %d needs a mode: use or args", position)
+	}
+	if len(entry.Names) == 0 {
+		return fmt.Errorf("the agents entry %d has no agent names", position)
+	}
+	for _, name := range entry.Names {
+		if strings.TrimSpace(name) == "" {
+			return fmt.Errorf("the agents entry %d names an empty agent", position)
+		}
+	}
+	return nil
+}
+
+// validateStepMessage checks the message of a step against its chain.
+//
+// The message of the args mode has to be a command: the agent goes on
+// the command line, and only a command takes one.
+//
+// The check belongs to the load path: a message that holds an
+// expression is accepted there, and the step checks what the
+// expression became when it runs.
+func validateStepMessage(s *Step) error {
+	for i, entry := range s.Agents {
+		if entry.Mode != AgentModeArgs {
+			continue
+		}
+		if !commandMessage(s.Message) {
+			return fmt.Errorf("the agents entry %d uses the args mode: the message must be a slash command", i+1)
+		}
+	}
+	return nil
+}
+
+// commandMessage reports whether a message is a slash command.
+//
+// A message that starts with an expression is one: the expression is
+// what the message becomes when the step runs, and the command
+// dispatcher sees that.
+func commandMessage(message string) bool {
+	text := strings.TrimSpace(message)
+	return strings.HasPrefix(text, "/") || strings.HasPrefix(text, "${{")
 }
 
 // syntheticStepID builds the id of a step that declares none: the job
@@ -591,6 +661,9 @@ func workflowTexts(wf *Workflow) []string {
 				texts = append(texts, v)
 			}
 			texts = append(texts, mapValues(step.With)...)
+			for _, entry := range step.Agents {
+				texts = append(texts, entry.Names...)
+			}
 		}
 	}
 	return texts
@@ -655,6 +728,9 @@ func cloneWorkflow(wf *Workflow) *Workflow {
 			if len(step.With) > 0 {
 				steps[i].With = cloneAnyMap(step.With)
 			}
+			if len(step.Agents) > 0 {
+				steps[i].Agents = cloneAgentChains(step.Agents)
+			}
 		}
 		cloned := Job{
 			Needs: append([]string(nil), job.Needs...),
@@ -688,6 +764,18 @@ func cloneAnyMap(m map[string]any) map[string]any {
 	return out
 }
 
+// cloneAgentChains copies the chain of agents of a step.
+func cloneAgentChains(chains []AgentChain) []AgentChain {
+	out := make([]AgentChain, len(chains))
+	for i, chain := range chains {
+		out[i] = AgentChain{
+			Mode:  chain.Mode,
+			Names: append([]string(nil), chain.Names...),
+		}
+	}
+	return out
+}
+
 // expandWorkflowArgs replaces the `${{ args.NAME }}` references of a
 // workflow with the given values.
 //
@@ -709,6 +797,11 @@ func expandWorkflowArgs(wf *Workflow, args map[string]string) {
 				step.Env[k] = expandArgs(v, args)
 			}
 			step.With = expandAnyMap(step.With, args)
+			for i := range step.Agents {
+				for j, name := range step.Agents[i].Names {
+					step.Agents[i].Names[j] = expandArgs(name, args)
+				}
+			}
 		}
 		wf.Jobs[name] = job
 	}

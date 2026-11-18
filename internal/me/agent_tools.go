@@ -556,14 +556,20 @@ func (s *Service) runStep(ctx context.Context, r *run, command string) (stepResu
 	// runs in the job and the round of that step, and the card records
 	// where the run is working.
 	s.switchRoundSession(ctx, r, r.iterationOfStep(idx))
+	step, hasStep := r.stepAt(idx)
+	if owned && hasStep && len(step.Agents) > 0 {
+		// The step names a chain of agents: the chain is the step's
+		// agent policy, so it runs wherever the step's own message
+		// runs.
+		return s.runStepChain(ctx, r, step, command)
+	}
 	res, err := s.runCommand(ctx, r, command, false)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return stepResult{}, err
 		}
 		out := failedOutcome(err.Error(), nil)
-		step, ok := r.stepAt(idx)
-		if !ok {
+		if !hasStep {
 			r.record(actionKind(owned), command, "", out)
 			return stepResult{}, toolErrorf("%s", err.Error())
 		}
@@ -580,9 +586,7 @@ func (s *Service) runStep(ctx context.Context, r *run, command string) (stepResu
 		// A repair changes nothing: the command it started is picked
 		// up where it left off.
 		if owned {
-			if step, ok := r.stepAt(idx); ok {
-				r.recordPending(wfe.JobOf(r.workflow, step.ID), step)
-			}
+			r.recordPending(wfe.JobOf(r.workflow, step.ID), step)
 		}
 		return res, nil
 	}
@@ -591,8 +595,7 @@ func (s *Service) runStep(ctx context.Context, r *run, command string) (stepResu
 		Summary: res.Summary,
 		Data:    res.Data,
 	}
-	step, ok := r.stepAt(idx)
-	if !ok {
+	if !hasStep {
 		// The action still happened, so it is recorded — the budget
 		// has to know about it.
 		r.record(actionKind(owned), command, "", out)
@@ -603,6 +606,40 @@ func (s *Service) runStep(ctx context.Context, r *run, command string) (stepResu
 		// The step ran: the run state carries the outcome.
 		r.recordStep(wfe.JobOf(r.workflow, step.ID), step, out)
 		s.recordStepOutcome(ctx, r)
+	}
+	return res, nil
+}
+
+// runStepChain runs the chain of agents of a step the decision model
+// ran again.
+//
+// The chain is the step's agent policy: it runs wherever the step's
+// own message runs. The command of the model is the base of the
+// attempts.
+func (s *Service) runStepChain(ctx context.Context, r *run, step wfe.Step, command string) (stepResult, error) {
+	job := wfe.JobOf(r.workflow, step.ID)
+	if err := checkArgsMessage(step, command); err != nil {
+		out := failedOutcome(err.Error(), nil)
+		r.record(wfe.ActionKindRun, command, step.ID, out)
+		r.recordStep(job, step, out)
+		s.recordStepOutcome(ctx, r)
+		return stepResult{}, toolErrorf("%s", err.Error())
+	}
+	attempts := s.composeAttempts(r, step, command)
+	verdict, res, err := s.runAttempts(ctx, r, job, step, attempts)
+	if err != nil {
+		return stepResult{}, err
+	}
+	if !verdict.Settled {
+		// The command is still running: the step has no verdict yet.
+		return res, nil
+	}
+	r.recordStep(job, step, verdict.Outcome)
+	s.recordStepOutcome(ctx, r)
+	if verdict.Failure != nil {
+		// The chat could not take the command: the agent reads what
+		// went wrong and tries again.
+		return stepResult{}, toolErrorf("%s", verdict.Failure.Error())
 	}
 	return res, nil
 }

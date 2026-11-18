@@ -31,7 +31,8 @@ The personal agent (`/me`) runs a workflow in a chat. The same file is the plan 
   - [5.3 `wait` — sit out a duration](#53-wait--sit-out-a-duration)
   - [5.4 `use` — invoke a registered action](#54-use--invoke-a-registered-action)
   - [5.5 Common step fields](#55-common-step-fields)
-  - [5.6 `final` — the step that cleans up after the round](#56-final--the-step-that-cleans-up-after-the-round)
+  - [5.6 `agents` — the chain of agents the step runs](#56-agents--the-chain-of-agents-the-step-runs)
+  - [5.7 `final` — the step that cleans up after the round](#57-final--the-step-that-cleans-up-after-the-round)
 - [6. Expressions (`${{ ... }}`)](#6-expressions--)
 - [7. Complete examples](#7-complete-examples)
 - [8. Runtime architecture](#8-runtime-architecture)
@@ -329,7 +330,7 @@ A **round** is one pass through a job's step list. When a round ends, the job st
 
 A round in which no step ran does not repeat: a job whose every step is skipped had nothing to do, so it does not start another round. The plan is exhausted and the agent decides whether the run is over.
 
-A round can also end **early**: the agent ends it when there is genuinely nothing left to do in it. The steps of the round that did not run are recorded as skipped, the job's final step (see §5.6) runs in their place, and the job starts its next round. A job that names no final step just starts its next round.
+A round can also end **early**: the agent ends it when there is genuinely nothing left to do in it. The steps of the round that did not run are recorded as skipped, the job's final step (see §5.7) runs in their place, and the job starts its next round. A job that names no final step just starts its next round.
 
 A job waits for the jobs it `needs` — a repeating needed job releases the waiting job after its first round, because a job that repeats until the run ends never finishes.
 
@@ -455,8 +456,60 @@ Every step supports:
 | `continue-on-error` | bool | `false` | Whether the chain continues when this step fails. |
 | `note` | string | — | Why the step is there, and which fixes the owner uses for it. It is the description the decision model reads. |
 | `final` | bool | `false` | The step cleans up after the round. It runs when the round ends, however the round ends. |
+| `agents` | chain[] | — | The agents the step runs, in order (see §5.6). |
 
-### 5.6 `final` — the step that cleans up after the round
+### 5.6 `agents` — the chain of agents the step runs
+
+A step may name the agents that do its work. The chain is a list of entries, and each entry has a `mode` and the `names` it applies to:
+
+```yaml
+- id: review
+  message: "/review"
+  agents:
+    - mode: use
+      names: [omp, claude]
+```
+
+The step runs the agents in the order they are declared, and the names of an entry in the order they are declared. The first agent that does not break is the step's outcome; an attempt that breaks hands over to the next one. When every attempt broke, the step fails and the decision model is asked what happens next — the same path a single failed step takes.
+
+| Field | Type | Required | Purpose |
+|---|---|---|---|
+| `mode` | string | ✅ | How the agent is applied: `args` or `use`. |
+| `names` | string[] | ✅ | The agents to try, in order. Every name is non-empty. |
+
+The names are strings of the workflow: they may hold expressions, and `${{ args.NAME }}` is expanded when the run binds its arguments.
+
+**`args` — the agent goes on the command line.** The step's message is sent with `-a <agent>` appended, so the command itself names the agent:
+
+```yaml
+- id: review
+  message: "/review"
+  agents:
+    - mode: args
+      names: [omp, claude]
+```
+
+The message has to be a slash command: the agent goes on the command line, and only a command takes one. A message that holds an expression is accepted when the file is loaded and checked again when the step runs, because the command dispatcher sees what the expression became.
+
+**`use` — the chat's agent is switched for the attempt.** The message goes to the chat unchanged, with the chat's selected agent switched to the attempt's agent for the length of the attempt. The chat's own agent comes back when the attempt returns — unless the operator switched the chat's agent themselves in the meantime, which wins.
+
+```yaml
+- id: fix
+  message: "/gtw fix"
+  agents:
+    - mode: use
+      names: [omp, claude]
+```
+
+The switch is process-local: the chat store keeps the agent the operator picked with `/use`, so the run never changes what the operator's own choice is. The cost of the mode is that the operator's own messages go to the switched agent while the attempt runs.
+
+`use` is the mode for the commands that take no agent of their own (`/gtw fix`, `/gtw new`, `/gtw plan`): they dispatch to the chat's selected agent. `args` is the mode for the commands that take one (`/review`, `/gtw commit`, `/gtw pr`).
+
+A workflow that names no `agents` sends its message once, unchanged.
+
+Every attempt is recorded in the run's action history as the step's own run, and every attempt costs one chance of the step's budget. The `args` attempt records the command that ran (`/review -a omp`); the `use` attempt records the step's message with the agent noted (`/review [agent: omp]`), because the command itself does not name the agent.
+
+### 5.7 `final` — the step that cleans up after the round
 
 ```yaml
 jobs:

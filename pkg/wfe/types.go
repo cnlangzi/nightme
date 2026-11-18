@@ -117,6 +117,21 @@ func OverrideIterations(wf *Workflow, rounds int) {
 	}
 }
 
+// The ways a step reaches its agents.
+const (
+	// AgentModeUse switches the chat's selected agent for the attempt.
+	AgentModeUse = "use"
+	// AgentModeArgs passes the agent on the command line.
+	AgentModeArgs = "args"
+)
+
+// AgentChain is one way a step reaches its agents: the mode says how
+// the agent is applied, the names are the agents to try, in order.
+type AgentChain struct {
+	Mode  string   `yaml:"mode" json:"mode"`
+	Names []string `yaml:"names" json:"names"`
+}
+
 // Step is one unit of work inside a job: exactly one of message,
 // shell, use or wait is set.
 //
@@ -141,6 +156,10 @@ type Step struct {
 	With map[string]any `yaml:"with,omitempty" json:"with,omitempty"`
 	// Wait is the duration the step waits before it reports ok.
 	Wait string `yaml:"wait,omitempty" json:"wait,omitempty"`
+
+	// Agents are the agents the step runs, in order. The first agent
+	// that does not break is the step's.
+	Agents []AgentChain `yaml:"agents,omitempty" json:"agents,omitempty"`
 }
 
 // StepKind is the dispatch category of a Step.

@@ -34,7 +34,8 @@ type MeRequest struct {
 	// Agent is the name of the chat's agent.
 	Agent string
 	// MessageID is the id of the message that started the run. The
-	// run's card hangs under it.
+	// run's events hang under it: the chat folds them into the card
+	// it already holds for that message.
 	MessageID string
 }
 

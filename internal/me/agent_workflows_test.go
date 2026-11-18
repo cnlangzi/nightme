@@ -205,6 +205,7 @@ jobs:
       - id: rest
         wait: 5m
   check:
+    needs: [main]
     steps:
       - id: look
         wait: 5m

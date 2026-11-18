@@ -60,7 +60,7 @@ func TestBudget_TheRunPausesWhenTheStepSpentItsBudget(t *testing.T) {
 	op.steps = []fakeStep{pendingStep("still going")}
 
 	runID, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
 	})
 	if err != nil {
 		t.Fatalf("start: %v", err)
@@ -77,13 +77,13 @@ func TestBudget_TheRunPausesWhenTheStepSpentItsBudget(t *testing.T) {
 	// The pause notice rides on the card of the round: the card of
 	// the run is the static overview of the run.
 	var named bool
-	for _, entry := range op.Entries(op.Cards()[1].ID) {
+	for _, entry := range op.Entries(op.Cards()[0].ID) {
 		if strings.Contains(entry, `the step "commit" used up its budget (2 of 2 chances)`) {
 			named = true
 		}
 	}
 	if !named {
-		t.Errorf("the card does not name the step and its chances: %v", op.Entries(op.Cards()[1].ID))
+		t.Errorf("the card does not name the step and its chances: %v", op.Entries(op.Cards()[0].ID))
 	}
 
 	// The chat is told once that the run waits for a human.
@@ -471,20 +471,20 @@ func TestTheCard_ShowsTheWaitingLineAndTheChancesLeft(t *testing.T) {
 	op.steps = []fakeStep{pendingStep("still going")}
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	waitRun(t, svc, "obs-1")
 
 	var chances bool
-	for _, item := range op.Checklist(op.Cards()[1].ID) {
+	for _, item := range op.Checklist(op.Cards()[0].ID) {
 		if strings.Contains(item.ActiveForm, "chances left") {
 			chances = true
 		}
 	}
 	if !chances {
-		t.Errorf("the card does not carry the chances left: %+v", op.Checklist(op.Cards()[1].ID))
+		t.Errorf("the card does not carry the chances left: %+v", op.Checklist(op.Cards()[0].ID))
 	}
 }
 

@@ -64,7 +64,7 @@ func (f *Factory) Spec() command.Spec {
 			{Name: "pause", Summary: "Stop the run after the current step."},
 			{Name: "resume", Summary: "Run the step the run is on again."},
 			{Name: "next", Summary: "Skip the step the run is on."},
-			{Name: "show", Summary: "Show the run's state again."},
+			{Name: "show", Summary: "Show the plan of the run again."},
 			{Name: "stop", Summary: "Stop the run of this chat."},
 			{Name: "status", Summary: "Report where the run stands."},
 		},
@@ -261,7 +261,7 @@ func refusalReason(err error) string {
 	return "error"
 }
 
-// show puts the run's state back in front of the operator.
+// show puts the plan of the run back in front of the operator.
 func (f *Factory) show(ctx context.Context, rt command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
 	if err := f.ctrl.Show(ctx, input.ChatID); err != nil {
 		chatsession.ReportOutcome(ctx, command.FailedOutcome("error", "the run could not be shown"))
@@ -269,14 +269,14 @@ func (f *Factory) show(ctx context.Context, rt command.RuntimeServices, input co
 	}
 	chatsession.ReportOutcome(ctx, messages.Outcome{
 		Status:  messages.OutcomeOK,
-		Summary: "the run's state is shown again",
+		Summary: "the plan of the run is shown again",
 	})
-	return command.Reply(ctx, rt, "📋 The run's state is shown again."), nil
+	return command.Reply(ctx, rt, "📋 The plan of the run is shown again."), nil
 }
 
 // stop stops the run of this chat.
 //
-// The summary of the session is on its way: the run posts it once it
+// The record of the session is on its way: the run posts it once it
 // has unwound.
 func (f *Factory) stop(ctx context.Context, rt command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
 	if err := f.ctrl.Stop(ctx, input.ChatID); err != nil {
@@ -287,7 +287,7 @@ func (f *Factory) stop(ctx context.Context, rt command.RuntimeServices, input co
 		Status:  messages.OutcomeOK,
 		Summary: "the run was stopped",
 	})
-	return command.Reply(ctx, rt, "⏹ The run was stopped — the summary is on its way."), nil
+	return command.Reply(ctx, rt, "⏹ The run was stopped — the record is on its way. The turn of the chat agent goes on."), nil
 }
 
 // status reports where the run stands.

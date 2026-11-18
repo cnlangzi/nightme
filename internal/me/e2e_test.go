@@ -18,11 +18,12 @@ func TestEndToEnd_TheRunWorksInTheChatItStartedIn(t *testing.T) {
 
 	svc, op := testService(t, dir, noModels())
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name:   "fix-issue",
-		Args:   []string{"42"},
-		ChatID: "oc_user",
-		Cwd:    "/tmp/work",
-		Owner:  "ou_user",
+		Name:      "fix-issue",
+		Args:      []string{"42"},
+		ChatID:    "oc_user",
+		Cwd:       "/tmp/work",
+		Owner:     "ou_user",
+		MessageID: "om_start",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -57,20 +58,19 @@ func TestEndToEnd_TheRunWorksInTheChatItStartedIn(t *testing.T) {
 		}
 	}
 
-	// The run's card shows the plan of the run, and the card of the
-	// round shows the state of its steps.
-	runCard := op.Cards()[0].ID
-	card := strings.Join(op.Entries(runCard), "\n")
+	// The plan of the run hangs under the message that started it, and
+	// the card of the round shows the state of its steps.
+	card := strings.Join(op.Entries("om_start"), "\n")
 	if !strings.Contains(card, "▶ [ fix-issue ] started") {
 		t.Fatalf("the card of the run does not name the workflow: %v", card)
 	}
 	if !strings.Contains(card, "├─ [ 1 ]: fix") {
 		t.Fatalf("the card of the run does not show the plan: %v", card)
 	}
-	if jobs := op.Checklist(runCard); len(jobs) != 0 {
+	if jobs := op.Checklist("om_start"); len(jobs) != 0 {
 		t.Fatalf("the checklist of the run is %+v, want none", jobs)
 	}
-	roundCard := op.Cards()[1].ID
+	roundCard := op.Cards()[0].ID
 	var shown bool
 	for _, item := range op.Checklist(roundCard) {
 		if item.Subject == "fix" {

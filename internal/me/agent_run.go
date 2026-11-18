@@ -185,13 +185,16 @@ type run struct {
 	// empty when no step is running.
 	runningStep string
 
-	// runSession is the session of the run: its card hangs under the
-	// message that started the run.
+	// runSession is the session of the run: it hangs under the message
+	// that started the run.
 	runSession *session
 	// roundSession is the session of the job round the run is in.
 	roundSession *session
 	// decisionSession is the session of the decision that is open.
 	decisionSession *session
+	// recordSession is the session of the record the run leaves behind
+	// when it ends.
+	recordSession *session
 	// roundSessions holds the session of every round the run has
 	// been in. A run that comes back to a round goes on with the card
 	// that round has.
@@ -1203,8 +1206,14 @@ func outcomeLine(o messages.Outcome) string {
 type sessionState struct {
 	// Kind is what the session is.
 	Kind string `json:"kind"`
-	// CardID is the id of the message the session's card became.
-	CardID string `json:"card_id"`
+	// Anchor is the message the session's events hang under.
+	Anchor string `json:"anchor"`
+	// Owns reports whether the session posted that message itself.
+	Owns bool `json:"owns"`
+	// CardID is the id the card of the session became in a daemon
+	// that predates the anchor. A state file that names it still
+	// holds a card the run posted itself.
+	CardID string `json:"card_id,omitempty"`
 	// ID names the session.
 	ID string `json:"id,omitempty"`
 	// Job and Round name the round the session is about.
@@ -1219,7 +1228,8 @@ func sessionStateOf(sess *session) *sessionState {
 	}
 	return &sessionState{
 		Kind:   string(sess.kind),
-		CardID: sess.cardID,
+		Anchor: sess.anchor,
+		Owns:   sess.ownsMessage,
 		ID:     sess.id,
 		Job:    sess.job,
 		Round:  sess.round,
@@ -1231,12 +1241,21 @@ func sessionFromState(st *sessionState) *session {
 	if st == nil {
 		return nil
 	}
+	anchor := st.Anchor
+	owns := st.Owns
+	if anchor == "" && st.CardID != "" {
+		// A state file of an older daemon: the card of the session is
+		// its anchor, and the run posted that card itself.
+		anchor = st.CardID
+		owns = true
+	}
 	return &session{
-		kind:   sessionKind(st.Kind),
-		cardID: st.CardID,
-		id:     st.ID,
-		job:    st.Job,
-		round:  st.Round,
+		kind:        sessionKind(st.Kind),
+		anchor:      anchor,
+		ownsMessage: owns,
+		id:          st.ID,
+		job:         st.Job,
+		round:       st.Round,
 	}
 }
 
@@ -1268,6 +1287,7 @@ type persistedRun struct {
 	RunSession      *sessionState      `json:"run_session,omitempty"`
 	RoundSession    *sessionState      `json:"round_session,omitempty"`
 	DecisionSession *sessionState      `json:"decision_session,omitempty"`
+	RecordSession   *sessionState      `json:"record_session,omitempty"`
 	RoundSessions   []sessionState     `json:"round_sessions,omitempty"`
 	// CommandMsgIDs holds the chat message every step that sent a
 	// command became. The decision about a step hangs under it.
@@ -1334,6 +1354,7 @@ func (s *Service) persist(r *run) {
 		RunSession:        sessionStateOf(r.runSession),
 		RoundSession:      sessionStateOf(r.roundSession),
 		DecisionSession:   sessionStateOf(r.decisionSession),
+		RecordSession:     sessionStateOf(r.recordSession),
 		RoundSessions:     rounds,
 		CommandMsgIDs:     r.commandMsgIDsLocked(),
 		System1Decisions:  r.system1Decisions,
@@ -1502,6 +1523,7 @@ func (s *Service) restoreRun(state persistedRun) *run {
 		runSession:        sessionFromState(state.RunSession),
 		roundSession:      sessionFromState(state.RoundSession),
 		decisionSession:   sessionFromState(state.DecisionSession),
+		recordSession:     sessionFromState(state.RecordSession),
 		commandMsgIDs:     maps.Clone(state.CommandMsgIDs),
 		system1Decisions:  state.System1Decisions,
 		system2Decisions:  state.System2Decisions,
@@ -1810,6 +1832,21 @@ func (r *run) setDecisionSession(sess *session) {
 	r.mu.Unlock()
 }
 
+// recordSessionRef returns the session of the record the run leaves
+// behind.
+func (r *run) recordSessionRef() *session {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.recordSession
+}
+
+// setRecordSession records the session of the record.
+func (r *run) setRecordSession(sess *session) {
+	r.mu.Lock()
+	r.recordSession = sess
+	r.mu.Unlock()
+}
+
 // roundSessionOf returns the session of a round the run has been in.
 func (r *run) roundSessionOf(it iteration) (*session, bool) {
 	r.mu.Lock()
@@ -1840,7 +1877,8 @@ func (r *run) roundSessionStates() []sessionState {
 		}
 		out = append(out, sessionState{
 			Kind:   string(sess.kind),
-			CardID: sess.cardID,
+			Anchor: sess.anchor,
+			Owns:   sess.ownsMessage,
 			ID:     sess.id,
 			Job:    it.job,
 			Round:  it.round,

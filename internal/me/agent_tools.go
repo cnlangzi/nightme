@@ -912,6 +912,9 @@ func (s *Service) runCommand(ctx context.Context, r *run, command string, instru
 	s.reportOutcome(r, command, res)
 	if throttled(res) {
 		r.requestPause(rateLimitReason)
+		// The run stops: the state card carries the state of the round,
+		// and it becomes the round's live card.
+		s.showState(ctx, r)
 	}
 	return res, nil
 }

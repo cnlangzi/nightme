@@ -703,9 +703,8 @@ key — is reported in `nightme logs` and left out. The daemon still starts, and
 | `/me pause` | Stops the run after the step it is on. |
 | `/me resume [note]` | Runs the step the run is on again. Its budget for the current round starts over. The note is your instruction. |
 | `/me next [note]` | Skips the step the run is on: the plan goes on with the workflow, and the facts the step produced are kept. The note is your instruction. |
-| `/me show` | Puts the run's state back in front of you as a card of its own. |
 | `/me stop` | Cancels the run, tells the chat to stop working, and leaves a summary of the session in the chat. |
-| `/me status` | Reports the current step, the phase and the progress of the running command, the remaining budget, and what each capability decided and spent. |
+| `/me status` | Shows the state of the run again: a new card of the round the run is in carries the phase of the run, the tree of the rounds, the checklist of the round and the counters. |
 
 The arguments of `/me start` fill the workflow's declared arguments: a positional
 token fills the next argument that is still unassigned, in declaration order, and

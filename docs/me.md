@@ -301,7 +301,7 @@ chatsession: message settled chat_id=… message_id=… status=… summary=…
 | `cwd_not_changed` / `cwd_not_restored` | 工作区切了但没切成 | `/gtw close` / `/gtw back` | 异常 |
 | `unknown_subcommand` | `/gtw` 的子命令不存在 | `/gtw` | 异常 |
 | `no_run` | 这个 chat 里没有运行 | `/me resume` / `/me next` | 异常 |
-| `not_paused` | 运行没有在等操作者（也没有在问问题） | `/me resume` / `/me next` | 异常 |
+| `not_paused` | 运行没有在等操作者：它在干活，或者它在等一个回答 | `/me resume` / `/me next` | 异常 |
 | `step_running` | 命令作用的那一步还在跑 | `/me next` | 异常 |
 | `error` | 其它失败 | 全部 | 异常 |
 

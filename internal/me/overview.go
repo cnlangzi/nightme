@@ -377,6 +377,9 @@ func (r *run) stepChances(stepID string, remaining wfe.Remaining) (int, bool) {
 // skip of the operator or of the agent names who skipped it, and the
 // row carries it.
 //
+// The error of a step that broke is on every row: a step that carries
+// one is not a step that was passed over.
+//
 // The detail is cut short: a step that reports a whole build log as
 // its summary would otherwise make the row unreadable.
 func stepDetail(st wfe.StepState, status agent.AgentTaskStatus, chances int, hasChances bool) string {
@@ -387,10 +390,8 @@ func stepDetail(st wfe.StepState, status agent.AgentTaskStatus, chances int, has
 			parts = append(parts, summary)
 		}
 	}
-	if status != agent.TaskSkipped {
-		if errText := st.Outcome.Data[wfe.OutcomeKeyError]; errText != "" {
-			parts = append(parts, errText)
-		}
+	if errText := st.Outcome.Data[wfe.OutcomeKeyError]; errText != "" {
+		parts = append(parts, errText)
 	}
 	// The chances matter for the steps that may still run: a step that
 	// is over is over, whatever its budget was.

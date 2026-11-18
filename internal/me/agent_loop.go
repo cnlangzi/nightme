@@ -137,6 +137,9 @@ func (s *Service) checkGate(ctx context.Context, r *run) error {
 	if !r.isPaused() {
 		return nil
 	}
+	// A wake that came before the run waited is stale: the pause it
+	// belonged to was taken back. It must not swallow the next pause.
+	r.drainUnpause()
 	if err := r.awaitUnpause(ctx); err != nil {
 		return err
 	}

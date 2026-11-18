@@ -144,8 +144,8 @@ type run struct {
 	// pauseReason says why the run paused.
 	pauseReason string
 	// directive is the operator's decision for the run's next turn: it
-	// is empty, "resume" or "next". The run's loop applies it.
-	directive string
+	// is empty, a "resume" or a "next". The run's loop applies it.
+	directive *directive
 	// runningStep is the id of the step whose work is in flight. It is
 	// empty when no step is running.
 	runningStep string
@@ -1202,7 +1202,7 @@ type persistedRun struct {
 	Inflight        *inflightState     `json:"inflight,omitempty"`
 	Phase           Phase              `json:"phase"`
 	JudgmentStep    string             `json:"judgment_step,omitempty"`
-	Directive       string             `json:"directive,omitempty"`
+	Directive       *directive         `json:"directive,omitempty"`
 	Question        string             `json:"question"`
 	Error           string             `json:"error"`
 	Paused          bool               `json:"paused"`

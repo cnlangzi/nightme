@@ -430,8 +430,21 @@ func (s *Service) toolNext(ctx context.Context, r *run, _ pendingCall) (stepResu
 		// The step did its job: there is nothing to skip.
 		return stepResult{}, toolErrorf("the step %q is already done: there is nothing to skip", step.ID)
 	}
+	return s.skipStep(ctx, r, step, agentSkippedSummary), nil
+}
+
+// skipStep records the step as skipped and returns the outcome.
+//
+// The facts the step produced are kept, the error goes, and the
+// history agrees with the run state: the step is skipped, and the run
+// says so.
+func (s *Service) skipStep(ctx context.Context, r *run, step wfe.Step, summary string) stepResult {
+	out := wfe.Outcome{}
+	if st, ok := r.stepState(step.ID); ok {
+		out = st.Outcome
+	}
+	skipped := skippedOutcome(out, summary)
 	job := wfe.JobOf(r.workflow, step.ID)
-	skipped := skippedOutcome(st.Outcome, agentSkippedSummary)
 	r.recordStep(job, step, skipped)
 	s.recordStepOutcome(ctx, r)
 	// The history has to agree with the run state: the step is
@@ -443,7 +456,7 @@ func (s *Service) toolNext(ctx context.Context, r *run, _ pendingCall) (stepResu
 		Status:  string(skipped.Status),
 		Summary: skipped.Summary,
 		Data:    skipped.Data,
-	}, nil
+	}
 }
 
 // stepCommand renders the command a step runs, the way the run records

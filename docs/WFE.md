@@ -832,6 +832,8 @@ The cap on an answer defaults to 40960 tokens; a configuration that does not nam
 | `/me stop` | Cancels the run, tells the chat to stop working, and leaves a summary of the session in the chat. |
 | `/me status` | Reports the current step, the phase and progress of the running command, the remaining budget, and what each capability decided and spent. |
 
+The step the run is on is the step its last judgment was about. A run that has no judgment — the operator took the chat back, the agent was throttled — is on the step it ran last, when that step did not succeed; a run whose last step succeeded is on the first step of the plan's ready set. `/me resume` and `/me next` act on that step, and the decision rides on the run until its loop applies it: the state is written before the run is woken, so a daemon that dies in between comes back and applies it.
+
 The run speaks in agent sessions, and the chat renders every session the way it renders a coding agent's turn: an identity line, the entries of the session, the tool calls as thread events and a status bar in the footer. A round also carries the steps of the round as a checklist. A run opens three kinds of session, and every session owns exactly one card:
 
 | Session | Its card hangs under | It carries |

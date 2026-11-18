@@ -36,7 +36,8 @@ const operatorCallID = "operator"
 const (
 	// ReasonNoRun says the chat holds no run.
 	ReasonNoRun = "no_run"
-	// ReasonNotPaused says the run does not wait for the operator.
+	// ReasonNotPaused says the run does not wait for the operator:
+	// it is working, or it is waiting for an answer.
 	ReasonNotPaused = "not_paused"
 	// ReasonStepRunning says the step the command acts on is still
 	// running.
@@ -69,6 +70,17 @@ func RefusalReason(err error) string {
 		return refusal.Reason
 	}
 	return ""
+}
+
+// directive is the operator's decision for the run's next turn.
+//
+// The step is part of the decision: the operator was told which step
+// the command acts on, and the run acts on that one.
+type directive struct {
+	// Kind is the decision: "resume" or "next".
+	Kind string `json:"kind"`
+	// Step is the id of the step the decision acts on.
+	Step string `json:"step,omitempty"`
 }
 
 // prepareDecision records the operator's decision for the run's next
@@ -131,7 +143,7 @@ func (r *run) prepareDecision(kind, note string) (wfe.Step, bool, error) {
 	r.paused = false
 	r.pauseReason = ""
 	r.phase = PhaseRunning
-	r.directive = kind
+	r.directive = &directive{Kind: kind, Step: step.ID}
 	// The note is the operator's instruction: it joins the
 	// conversation the chat model reads.
 	if strings.TrimSpace(note) != "" {
@@ -156,21 +168,16 @@ func directiveVerb(kind string) string {
 // takeDirective takes the operator's decision and forgets it.
 //
 // A decision is taken once: the loop applies it on its next turn.
-func (r *run) takeDirective() string {
+func (r *run) takeDirective() *directive {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	kind := r.directive
-	r.directive = ""
-	return kind
+	d := r.directive
+	r.directive = nil
+	return d
 }
 
 // targetStep returns the step the run is on: the subject of the last
-// judgment, or, when there is no judgment, the first step of the plan's
-// ready set.
-//
-// It is not the step whose budget bounds the run: that one names the
-// step that ran last once that step succeeded, and the operator would
-// act on the wrong step.
+// judgment, or the step the run worked on when it has no judgment.
 func (r *run) targetStep() (wfe.Step, bool) {
 	r.mu.Lock()
 	stepID := r.targetStepLocked()
@@ -183,9 +190,22 @@ func (r *run) targetStep() (wfe.Step, bool) {
 
 // targetStepLocked returns the id of the step the run is on. The
 // caller holds the lock.
+//
+// The judgment names the step it is about. A run that has no judgment
+// — the operator took the chat back, the agent was throttled — is on
+// the step it ran last, when that step did not succeed: the operator
+// took the chat back over that step. A run whose last step succeeded
+// is on the first step of the plan's ready set.
+//
+// It is not the step whose budget bounds the run: that one names the
+// step that ran last once that step succeeded, and the operator would
+// act on the wrong step.
 func (r *run) targetStepLocked() string {
 	if r.judgmentStep != "" {
 		return r.judgmentStep
+	}
+	if id := r.policy.CurrentStepID(); id != "" && !r.stepSucceededLocked(id) {
+		return id
 	}
 	if ids := r.readyStepIDsLocked(); len(ids) > 0 {
 		return ids[0]
@@ -193,13 +213,29 @@ func (r *run) targetStepLocked() string {
 	return ""
 }
 
-// busyStepIDLocked returns the id of the step that is still running: the
-// one whose work is in flight, or the one the chat waits for.
+// stepSucceededLocked reports whether the step ended ok. The caller
+// holds the lock.
+func (r *run) stepSucceededLocked(stepID string) bool {
+	for _, st := range r.state.Steps {
+		if st.ID == stepID {
+			return st.Outcome.Succeeded()
+		}
+	}
+	return false
+}
+
+// busyStepIDLocked returns the id of the step that is still running:
+// the one whose work is in flight, the one a command is on, or the one
+// the chat waits for.
 //
 // The caller holds the lock.
 func (r *run) busyStepIDLocked() string {
 	if r.runningStep != "" {
 		return r.runningStep
+	}
+	if r.inflight != nil {
+		// The run waits for a command: the step it is on is busy.
+		return r.targetStepLocked()
 	}
 	for _, st := range r.state.Steps {
 		if st.Pending {
@@ -233,21 +269,41 @@ func (r *run) wake() {
 	}
 }
 
+// drainUnpause forgets a wake that came before the run waited.
+//
+// The operator's decision takes the pause back and wakes the run. A
+// wake that arrives before the run reaches the gate is stale: the
+// pause it belonged to is gone, and the next pause must not be
+// swallowed by it.
+func (r *run) drainUnpause() {
+	select {
+	case <-r.unpause:
+	default:
+	}
+}
+
 // applyDirective carries out the operator's decision.
 //
 // The decision is applied at the start of a turn, before the plan runs:
 // the plan then sees the state the decision left behind.
 func (s *Service) applyDirective(ctx context.Context, r *run) error {
-	switch r.takeDirective() {
+	d := r.takeDirective()
+	if d == nil {
+		return nil
+	}
+	// The decision is taken once: the state no longer carries it, so a
+	// daemon that dies in the middle does not apply it twice.
+	s.persist(r)
+	switch d.Kind {
 	case directiveResume:
-		return s.applyResume(ctx, r)
+		return s.applyResume(ctx, r, d.Step)
 	case directiveNext:
-		return s.applyNext(ctx, r)
+		return s.applyNext(ctx, r, d.Step)
 	}
 	return nil
 }
 
-// applyResume runs the step the run is on again.
+// applyResume runs the step the decision names again.
 //
 // The step's budget for the round starts over: the operator asked for
 // the step to run again, and the chances the agent spent are spent no
@@ -255,8 +311,11 @@ func (s *Service) applyDirective(ctx context.Context, r *run) error {
 //
 // A step that has not run yet, that is still running or that succeeded
 // has nothing to retry: the decision is dropped and the plan goes on.
-func (s *Service) applyResume(ctx context.Context, r *run) error {
-	step, ok := r.targetStep()
+func (s *Service) applyResume(ctx context.Context, r *run, stepID string) error {
+	if stepID == "" {
+		return nil
+	}
+	step, ok := r.stepByID(stepID)
 	if !ok {
 		return nil
 	}
@@ -270,7 +329,7 @@ func (s *Service) applyResume(ctx context.Context, r *run) error {
 	res, err := s.runStepAgain(ctx, r, step, true)
 	if err != nil {
 		if isToolError(err) {
-			// The budget is spent: the plan goes on and the model
+			// The step may not run now: the plan goes on and the model
 			// decides what happens next.
 			return nil
 		}
@@ -281,15 +340,18 @@ func (s *Service) applyResume(ctx context.Context, r *run) error {
 	return nil
 }
 
-// applyNext skips the step the run is on.
+// applyNext skips the step the decision names.
 //
 // The step is recorded as skipped: the facts it produced are kept, the
 // error goes, and the plan goes on with the workflow.
 //
 // A step that is still running is left alone: the work is in flight.
 // A step that did its job is left alone too: there is nothing to skip.
-func (s *Service) applyNext(ctx context.Context, r *run) error {
-	step, ok := r.targetStep()
+func (s *Service) applyNext(ctx context.Context, r *run, stepID string) error {
+	if stepID == "" {
+		return nil
+	}
+	step, ok := r.stepByID(stepID)
 	if !ok {
 		return nil
 	}
@@ -302,20 +364,8 @@ func (s *Service) applyNext(ctx context.Context, r *run) error {
 			return nil
 		}
 	}
-	job := wfe.JobOf(r.workflow, step.ID)
-	skipped := skippedOutcome(st.Outcome, operatorSkippedSummary)
-	r.recordStep(job, step, skipped)
-	s.recordStepOutcome(ctx, r)
-	// The history has to agree with the run state: the step is
-	// skipped, and the run says so.
-	r.record(wfe.ActionKindRun, s.stepCommand(r, step), step.ID, skipped)
-	s.persist(r)
-	s.refreshSessions(r)
-	s.recordOperatorAction(r, toolNext, stepResult{
-		Status:  string(skipped.Status),
-		Summary: skipped.Summary,
-		Data:    skipped.Data,
-	})
+	res := s.skipStep(ctx, r, step, operatorSkippedSummary)
+	s.recordOperatorAction(r, toolNext, res)
 	s.persist(r)
 	return nil
 }

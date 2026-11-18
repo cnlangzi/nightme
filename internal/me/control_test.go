@@ -322,7 +322,7 @@ func TestNextOnAStepThatSucceededChangesNothing(t *testing.T) {
 	r.setJudgmentStep("commit")
 	r.recordStep("main", commit, wfe.Outcome{Status: wfe.OutcomeOK, Summary: "committed"})
 
-	if err := svc.applyNext(context.Background(), r); err != nil {
+	if err := svc.applyNext(context.Background(), r, "commit"); err != nil {
 		t.Fatalf("next: %v", err)
 	}
 	st, ok := r.stepState("commit")
@@ -334,6 +334,187 @@ func TestNextOnAStepThatSucceededChangesNothing(t *testing.T) {
 	}
 	if st.Outcome.Summary != "committed" {
 		t.Errorf("the summary is %q, want the one the step had", st.Outcome.Summary)
+	}
+}
+
+// TestResume_AfterATakeoverRunsTheBrokenStepAgain — the operator took
+// the chat back over a step that broke: the run is on that step, and
+// the operator's word runs it again.
+func TestResume_AfterATakeoverRunsTheBrokenStepAgain(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "two", commitPushWorkflow)
+
+	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}, MaxJudgments: 1})
+	op.steps = []fakeStep{
+		{open: true},
+		failedStep("the commit failed again"),
+	}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "two", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitSent(t, op, "/gtw commit")
+
+	// Somebody takes the chat back while the step is running.
+	svc.Seen(&messages.InboundMessage{
+		ChatID:    "obs-1",
+		MessageID: "om_human",
+		Text:      "wait, stop there",
+		Origin:    messages.OriginHuman,
+	})
+
+	// The step breaks.
+	if err := op.fail("obs-1", "the commit failed"); err != nil {
+		t.Fatalf("break the step: %v", err)
+	}
+	waitForStatus(t, svc, "obs-1", PhasePaused)
+
+	// The run is on the step that broke: the operator's word runs it
+	// again.
+	step, err := svc.Resume(context.Background(), "obs-1", "")
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if step != "commit" {
+		t.Errorf("the command acted on %q, want the step that broke", step)
+	}
+	waitSentCount(t, op, 2)
+}
+
+// TestTheTargetStep_IsTheStepTheRunWorkedOn — a run that has no
+// judgment is on the step it ran last, when that step did not succeed.
+// A step that succeeded is not the step to act on: the run is on the
+// next step of the plan.
+func TestTheTargetStep_IsTheStepTheRunWorkedOn(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "two", commitPushWorkflow)
+
+	svc, _ := testService(t, dir, Config{})
+	r := testRun(t, svc, "two")
+
+	commit, ok := r.stepByID("commit")
+	if !ok {
+		t.Fatal("the workflow has no commit step")
+	}
+	r.recordStep("main", commit, wfe.Outcome{Status: wfe.OutcomeFailed, Summary: "the commit failed"})
+	r.record(wfe.ActionKindRun, "/gtw commit", "commit", wfe.Outcome{
+		Status:  wfe.OutcomeFailed,
+		Summary: "the commit failed",
+	})
+
+	step, ok := r.targetStep()
+	if !ok {
+		t.Fatal("the run is on no step")
+	}
+	if step.ID != "commit" {
+		t.Errorf("the run is on %q, want the step it worked on", step.ID)
+	}
+
+	// The judgment wins over the step the run worked on.
+	r.setJudgmentStep("push")
+	step, ok = r.targetStep()
+	if !ok {
+		t.Fatal("the run is on no step")
+	}
+	if step.ID != "push" {
+		t.Errorf("the run is on %q, want the step the judgment is about", step.ID)
+	}
+	r.setJudgmentStep("")
+
+	// A step that succeeded is not the step to act on: the run is on
+	// the next step of the plan.
+	r.recordStep("main", commit, wfe.Outcome{Status: wfe.OutcomeOK, Summary: "committed"})
+	step, ok = r.targetStep()
+	if !ok {
+		t.Fatal("the run is on no step")
+	}
+	if step.ID != "push" {
+		t.Errorf("the run is on %q, want the next step of the plan", step.ID)
+	}
+}
+
+// TestTheGate_IgnoresAStaleWake — a wake that came before the run
+// waited belongs to a pause the operator already took back: it must
+// not swallow the next pause.
+func TestTheGate_IgnoresAStaleWake(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	svc, _ := testService(t, dir, Config{})
+	r := testRun(t, svc, "one")
+
+	r.wake()
+	r.pauseNow("the operator paused the run")
+
+	done := make(chan error, 1)
+	go func() { done <- svc.checkGate(context.Background(), r) }()
+
+	select {
+	case err := <-done:
+		t.Fatalf("the run went on although it is paused: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// The operator hands the control back: the run goes on.
+	r.wake()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("the gate: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the run did not go on")
+	}
+}
+
+// TestTheBusyStep_IsTheStepACommandIsOn — the run waits for a command:
+// the step it is on is busy, and a step cannot be skipped.
+func TestTheBusyStep_IsTheStepACommandIsOn(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "two", commitPushWorkflow)
+
+	svc, _ := testService(t, dir, Config{})
+	r := testRun(t, svc, "two")
+
+	r.setJudgmentStep("commit")
+	r.setInflight(&inflightState{MsgID: "msg-1", Command: "/gtw commit"})
+
+	r.mu.Lock()
+	busy := r.busyStepIDLocked()
+	r.mu.Unlock()
+	if busy != "commit" {
+		t.Errorf("the busy step is %q, want the step the command is on", busy)
+	}
+}
+
+// TestTheRoundCardShowsTheErrorOfABrokenStep — a step that broke with
+// a noop verdict is not a step that was passed over: its error is on
+// the row.
+func TestTheRoundCardShowsTheErrorOfABrokenStep(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	svc, _ := testService(t, dir, Config{})
+	r := testRun(t, svc, "one")
+
+	commit, ok := r.stepByID("commit")
+	if !ok {
+		t.Fatal("the workflow has no commit step")
+	}
+	r.recordStep("main", commit, wfe.Outcome{
+		Status:  wfe.OutcomeNoop,
+		Summary: "nothing to do",
+		Data:    map[string]string{"error": "the worktree is gone"},
+	})
+
+	items := r.roundTasks("main", 1)
+	if len(items) != 1 {
+		t.Fatalf("the round holds %d steps, want 1", len(items))
+	}
+	if !strings.Contains(items[0].ActiveForm, "the worktree is gone") {
+		t.Errorf("the row says %q, want the error of the step", items[0].ActiveForm)
 	}
 }
 
@@ -425,7 +606,10 @@ func TestTheDirectiveSurvivesARestart(t *testing.T) {
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
 	op := newFakeOperator()
-	op.steps = []fakeStep{failedStep("the commit failed")}
+	op.steps = []fakeStep{
+		failedStep("the commit failed"),
+		failedStep("the commit failed again"),
+	}
 	cfg := Config{
 		Provider:     &scriptedProvider{},
 		MaxJudgments: 1,
@@ -445,19 +629,26 @@ func TestTheDirectiveSurvivesARestart(t *testing.T) {
 	}
 	waitPaused(t, svc, "obs-1")
 
+	// The daemon goes away before the run applies the decision.
+	if err := svc.Shutdown(context.Background()); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+
 	if _, err := svc.Resume(context.Background(), "obs-1", ""); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
 
 	// The state of the run holds the decision.
 	state := waitForDirective(t, filepath.Join(dir, "runs", runID+".json"))
-	if state["directive"] != "resume" {
-		t.Errorf("the state holds the directive %v, want resume", state["directive"])
+	directive, ok := state["directive"].(map[string]any)
+	if !ok {
+		t.Fatalf("the state holds no directive: %v", state["directive"])
 	}
-
-	// The daemon goes away before the run applies it.
-	if err := svc.Shutdown(context.Background()); err != nil {
-		t.Fatalf("shutdown: %v", err)
+	if directive["kind"] != "resume" {
+		t.Errorf("the state holds the directive %v, want resume", directive["kind"])
+	}
+	if directive["step"] != "commit" {
+		t.Errorf("the state holds the step %v, want commit", directive["step"])
 	}
 
 	resumed := New(cfg)
@@ -558,10 +749,10 @@ func TestTheRoundCardShowsASkippedStep(t *testing.T) {
 	}
 	waitPaused(t, svc, "obs-1")
 
+	r := activeRun(t, svc, "obs-1")
 	if _, err := svc.Next(context.Background(), "obs-1", ""); err != nil {
 		t.Fatalf("next: %v", err)
 	}
-	r := activeRun(t, svc, "obs-1")
 	waitForAction(t, r, wfe.ActionKindRun, "commit", 2)
 
 	items := r.roundTasks("main", 1)
@@ -1412,7 +1603,7 @@ func waitForDirective(t *testing.T, path string) map[string]any {
 		if err == nil {
 			var state map[string]any
 			if err := json.Unmarshal(raw, &state); err == nil {
-				if directive, ok := state["directive"].(string); ok && directive != "" {
+				if directive, ok := state["directive"].(map[string]any); ok && directive["kind"] != "" {
 					return state
 				}
 			}

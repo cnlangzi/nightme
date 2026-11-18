@@ -492,9 +492,10 @@ Issue titles stay English/ASCII — the branch name is derived from them.
 
 A **workflow** is a YAML file that says what to do and how far to go. It is the
 only automation artifact: the same file is the plan the agent follows and the
-bound it may not cross. Workflows live in `~/.nightme/workflows/*.yaml` or
-`~/.nightme/workflows/*.yml`, and the file name is the workflow's name:
-`fix-issue.yaml` is the workflow `fix-issue`.
+bound it may not cross. Workflows live under `~/.nightme/workflows/`, and a
+workflow's name is its path under that directory without the extension:
+`fix-issue.yaml` is the workflow `fix-issue`, `nightme/coder.yml` is the
+workflow `nightme/coder`.
 
 The agent — `/me` — runs a workflow in the chat you start it from. Every command
 is a real message with a real id, and every command reports a structured
@@ -507,11 +508,24 @@ outcome, so the agent decides the next step from facts instead of from prose.
 | `nightme workflow list` | Summarize every workflow: name, title, workspaces, triggers, jobs. The files that did not load are reported below the table. `--json` for machine output. |
 | `nightme workflow show <name>` | Print one workflow's parsed details: triggers, jobs, steps. |
 | `nightme workflow run <name>` | Print the execution plan — which steps run, in what order. `--workspace` overrides the workspace. |
-| `nightme workflow validate [path...]` | Check the workflow files and report every problem: a missing title, a step that names two kinds, a key the schema does not have. One line per problem — `path:line:column: message`. The exit code is `0` when every workflow is valid, `8` when one does not validate, `9` when a path does not exist or cannot be read. `--json` for machine output. |
+| `nightme workflow validate [path...]` | Check the workflow files and report every problem: a missing title, a step that names two kinds, a key the schema does not have. One line per problem — `path:line:column: message`. An argument that is not a path on disk is looked up as a workflow name, so `nightme workflow validate nightme/coder` validates that workflow. The exit code is `0` when every workflow is valid, `8` when one does not validate, `9` when a path does not exist or cannot be read. `--json` for machine output. |
 
 `run` is a planning dry-run: it parses and plans but does not invoke an agent.
 
 `validate` is a linter: with no path it checks the workflows dir, with paths it checks the files and the directories it is given. A path that is not there is reported, not skipped.
+
+### Install a published workflow
+
+`/wf install <owner>/<name>` fetches a published workflow and installs it into
+the workflows directory, where the personal agent finds it. The address is the
+workflow's name: `/wf install nightme/coder` writes
+`~/.nightme/workflows/nightme/coder.yml`, and `/me start nightme/coder` runs
+it.
+
+The install is shown as a checklist of three rows — the download, the
+validation, the write — and the rows update as the install goes. The
+downloaded file is checked before it is written, and a file that is already
+there and did not change is left alone.
 
 ### Write a workflow
 
@@ -858,6 +872,7 @@ here; the `/me` subcommands — `/me start` · `/me reply` · `/me pause` ·
 | `/review [-a\|--agent <agent>] [-g\|--global] [--unset] [-c\|--continue] [--abort]` | Review the current branch against the default branch (PR mode); findings are injected back into this chat. The review's verdict line is followed by a digest of the findings — one table per severity, one row per finding, naming where each finding is and what kind it is — on the card, whatever `/think` says; the findings' text itself stays in the thread (`/think` on) and in the main agent's answer (`/think` off, the default). `--agent` runs the review with a specific agent; `-g` also stores it as the global `review.agent` in `~/.nightme/config.yaml`; `--unset` removes that global setting. `-c` resumes the groups of the last review in this chat that failed, by reopening their agent sessions and sending them "continue". `--abort` stops the review running in this chat — its agent sessions are closed and the stopped groups stay resumable with `-c`. A review has no time limit: it runs until the user aborts it or the daemon shuts down. |
 | `/wiki init [--modules] [--llmstxt] [--arch]` | Read the codebase, design modules, and write per-module wiki files — the repo wiki as a project asset. |
 | `/queue <message>` | Append `<message>` to the queue as a standalone Prompt. |
+| `/wf install <owner>/<name>` | Install a published workflow into the workflows directory. The address is the workflow's name: `nightme/coder` is installed as `~/.nightme/workflows/nightme/coder.yml` and is started with `/me start nightme/coder`. The install is shown as a checklist — the download, the validation, the write. |
 | `/help` | List every slash command in-chat. |
 
 `!cmd` runs shell commands directly in the chat's CWD — see

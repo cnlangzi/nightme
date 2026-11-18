@@ -36,11 +36,17 @@ const maxDirtyFilesReported = 10
 // RunClose is the entry point for `/gtw close`. Mirrors RunFix
 // in shape (ctx, cs, deps, chatID, messageID; returns
 // *Result, error) so the factory can wire it through the same
-// dispatcher pipeline.
+// dispatcher pipeline. The trailing reset flag is the `--reset`
+// switch: clear the issue's state labels without marking the work
+// done.
 //
-// The close is a purely local teardown: it talks to no platform.
-// The `nightme/wip` claim marker stays on the issue, so a closed
-// issue keeps its claim and stays out of the automatic queue.
+// The close tears the fix down on both sides: locally (worktree,
+// branch, cwd) and on the tracker (the issue's `nightme/*` labels).
+// The default mode finalises the issue — every `nightme/*` label
+// but the queue marker comes off and `nightme/done` goes on; the
+// `reset` mode only clears the state labels and marks nothing, for
+// dropping the work without calling it done. A local fix has no
+// issue, so the label step is skipped entirely.
 //
 // Flow (wip/gtw.md §14.5):
 //
@@ -48,6 +54,24 @@ const maxDirtyFilesReported = 10
 //     by design — see §14.4 design rationale).
 //
 //  2. Refuse if missing — there's no active fix in this chat.
+//
+//     2.5. Finalise the issue's labels (ModeRemote only). Runs
+//     BEFORE any local cleanup so a platform-API failure (auth
+//     expired, network down, repo moved) leaves the worktree +
+//     branch + ASes fully intact — the yml is still the recovery
+//     source of truth and the user can retry /gtw close once the
+//     upstream call works.
+//
+//     Symmetric compensation: if a SUBSEQUENT local step (3
+//     dirty / 4 worktree remove) fails after the labels changed,
+//     the issue is put back the way it was, so a retry converges on
+//     the same starting state. Without this compensation the
+//     platform would say "done" while the local side still has the
+//     worktree / branch / yml, and the retry would face that
+//     divergence. Step 5 (branch -D) is NOT compensated: the
+//     worktree — and with it the yml — is already gone by then, so
+//     a retry cannot converge and a restore would only wedge the
+//     issue.
 //
 //  3. Refuse if the worktree has uncommitted changes (`git
 //     status --porcelain` non-empty). Close is intentionally
@@ -97,6 +121,7 @@ func RunClose(
 	cs *chatsession.ChatSession,
 	deps HandlerDeps,
 	chatID, messageID string,
+	reset bool,
 ) (*Result, error) {
 	selectedCwd := cs.SelectedCwd()
 
@@ -212,6 +237,33 @@ func RunClose(
 			command.FailedOutcome("bad_state", "the gtw state file is malformed")), nil
 	}
 
+	// --- step 2.5: finalize the issue's labels (issue-backed fixes) ---
+	// GATES every local cleanup step that follows. The local cleanup
+	// (worktree remove / branch delete / AS drop) is destructive and
+	// one-way; if it ran first and the label call then failed, the
+	// issue would keep a stale state label forever with no local
+	// evidence pointing back at it. By running the label step first
+	// and aborting on failure, the yml remains the recovery source
+	// of truth and the user can retry once the platform call works.
+	labels, aborted, labelWarning := finalizeIssueLabels(ctx, c, deps, cs, chatID, messageID, reset)
+	if aborted {
+		// The helper already sent a user-facing error reply. Bail
+		// before any local cleanup so the yml-driven state
+		// (worktree + branch + ASes) stays fully intact.
+		reportOutcome(ctx, command.FailedOutcome("label_error",
+			"the issue labels could not be finalized"))
+		return &Result{Consumed: true}, nil
+	}
+	// A failed label-catalog check is a warning, not a failure: the
+	// close still runs to its normal result. The warning rides
+	// along on every reply the close itself produces — its success
+	// card and its failure cards — so the user learns about it
+	// wherever the close ends. The sync card that follows is a
+	// separate step and does not repeat it.
+	withWarning := func(body string) string {
+		return prependWarning(body, labelWarning)
+	}
+
 	// --- step 2.6: close ASes pinned to the about-to-be-gone worktree ---
 	// Every AgentSession whose Cwd == c.Worktree is orphaned the
 	// moment `git worktree remove` (step 4) succeeds — its cwd
@@ -241,7 +293,14 @@ func RunClose(
 	// and stale worktree paths are cleaned manually via
 	// `git worktree remove --force <path>`.
 	if err := assertWorktreeClean(ctx, c.Worktree, deps); err != nil {
-		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, err.Error(),
+		body := err.Error()
+		if labels.changed() {
+			// Local state untouched — put the issue's labels back
+			// the way they were so a retry converges on the same
+			// starting state.
+			body += "\n" + restoreIssueLabels(ctx, labels)
+		}
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, withWarning(body),
 			command.FailedOutcome("dirty", "the worktree has uncommitted changes")), nil
 	}
 
@@ -258,7 +317,12 @@ func RunClose(
 		if stderr != "" {
 			body += "\n[git stderr tail]\n" + stderr
 		}
-		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, body,
+		if labels.changed() {
+			// Local state untouched — put the issue's labels back
+			// so a retry converges on the same starting state.
+			body += "\n" + restoreIssueLabels(ctx, labels)
+		}
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, withWarning(body),
 			command.FailedOutcome("error", "the worktree could not be removed")), nil
 	}
 
@@ -273,10 +337,17 @@ func RunClose(
 		body := fmt.Sprintf(
 			"❌ git branch -D %s failed: %v\n"+
 				"[git stderr tail]\n%s\n"+
-				"hint: worktree at %s is already removed; clean up the branch manually with `git branch -D %s`.",
+				"hint: worktree at %s is already removed; clean up the branch manually with `git branch -D %s`\n"+
+				"(the issue keeps the labels this close set — the worktree is already gone, so there is no fix left to close)",
 			c.Branch, brErr, tailLines(brStderr, 10), c.Worktree, c.Branch,
 		)
-		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, body,
+		// No compensation here. The worktree is gone, and with it the
+		// yml — the recovery source of truth. A retry cannot converge
+		// on anything, so putting the claim back would only leave the
+		// issue claimed with no worktree and no command able to
+		// release it. The labels stay as the close set them: the work
+		// session is over, and only the branch ref is left.
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, withWarning(body),
 			command.FailedOutcome("error", "the branch could not be deleted")), nil
 	}
 
@@ -290,8 +361,8 @@ func RunClose(
 			"repo_root", c.RepoRoot,
 			"err", err)
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("⚠️ worktree removed but SetSelectedCwd(%s) failed: %v\n"+
-				"run `/cwd %s` manually.", c.RepoRoot, err, c.RepoRoot),
+			withWarning(fmt.Sprintf("⚠️ worktree removed but SetSelectedCwd(%s) failed: %v\n"+
+				"run `/cwd %s` manually.", c.RepoRoot, err, c.RepoRoot)),
 			messages.Outcome{
 				Status:  messages.OutcomeIncomplete,
 				Summary: "the worktree was removed but the chat stayed in it",
@@ -330,6 +401,12 @@ func RunClose(
 			"→ cwd → %s",
 		c.Branch, c.Worktree, c.Branch, c.RepoRoot,
 	)
+	// The platform half of the close: what came off the issue and
+	// what went on. The row is absent when the close touched no
+	// issue (a local fix, or an issue the tracker no longer knows).
+	if line := labels.cardLine(); line != "" {
+		body += "\n" + line
+	}
 	if n := droppedN; n > 0 {
 		// Surface the agent-process cleanup only when it
 		// actually fired. The no-agents happy path keeps
@@ -341,7 +418,7 @@ func RunClose(
 	// separate sync card. Every other reply path in this file
 	// uses `return reply(...), nil` because they're terminal;
 	// step 8 is mid-flow by design.
-	reply(ctx, cs.Emitter(), chatID, messageID, body)
+	reply(ctx, cs.Emitter(), chatID, messageID, withWarning(body))
 
 	// --- step 9: sync main (separate card) ----------------------
 	// buildSyncReply shares the /gtw sync card formatter and
@@ -390,6 +467,250 @@ func RunClose(
 		},
 	})
 	return &Result{Consumed: true}, nil
+}
+
+// labelFinalize records what the label step did to the issue, so the
+// success card can report it and a failed local step can put the
+// issue back the way it was.
+type labelFinalize struct {
+	// removed lists the labels this close took off the issue, by the
+	// name the platform reported.
+	removed []string
+
+	// added is the label this close put on the issue — LabelDone in
+	// the default mode. Empty in the --reset mode, which marks
+	// nothing.
+	added string
+
+	// addedPreexisting is true when the issue already carried
+	// `added` before the close. The restore must leave such a label
+	// alone: it was on the issue before, and the close did not put
+	// it there.
+	addedPreexisting bool
+
+	// provider / owner / repo / issue identify the issue the labels
+	// live on. provider is nil when the label step did not run.
+	provider GitProvider
+	owner    string
+	repo     string
+	issue    int
+}
+
+// changed reports whether the label step changed the issue at all.
+// The compensation runs only then: there is nothing to put back when
+// no label moved.
+func (l labelFinalize) changed() bool {
+	return len(l.removed) > 0 || l.added != ""
+}
+
+// cardLine renders the issue row of the close card: one `-<label>`
+// entry per label that came off the issue, one `+<label>` entry per
+// label that went on. Empty when the close touched no issue.
+func (l labelFinalize) cardLine() string {
+	if l.provider == nil {
+		return ""
+	}
+	parts := make([]string, 0, len(l.removed)+1)
+	for _, label := range l.removed {
+		parts = append(parts, "-"+label)
+	}
+	if l.added != "" {
+		parts = append(parts, "+"+l.added)
+	}
+	if len(parts) == 0 {
+		parts = append(parts, "no nightme/* labels")
+	}
+	return fmt.Sprintf("→ issue: %s/%s#%d %s",
+		l.owner, l.repo, l.issue, strings.Join(parts, " "))
+}
+
+// finalizeIssueLabels drives the platform half of the close: it
+// brings the issue's `nightme/*` labels to the state the close means.
+//
+// The default mode marks the work done — every `nightme/*` label but
+// the queue marker comes off and `nightme/done` goes on. The reset
+// mode only clears: the state labels come off, nothing goes on.
+//
+// The removal set comes from the issue's own labels, not from
+// AllLabels: a hand-made `nightme/custom` is a nightme label too,
+// and the platform reports the name it knows. The queue marker
+// `nightme/assigned` is never touched — it belongs to the queue, not
+// to the close.
+//
+// The step GATES the local cleanup: the worktree remove and the
+// branch delete are one-way, so a label failure must abort the close
+// before them. The yml then stays the recovery source of truth and
+// the user retries once the platform call works.
+//
+// Returns:
+//
+//   - (labels, false, warning): the labels the step changed (empty
+//     when the step did not run) and the warning to ride along on
+//     the close's replies.
+//   - (labels, true, warning): a user-facing error reply was sent;
+//     the close must abort BEFORE any local cleanup.
+//
+// The helper sends its own error replies (with the ❌ prefix the
+// rest of the close uses) so RunClose's main flow stays linear — it
+// only inspects the `aborted` flag.
+func finalizeIssueLabels(
+	ctx context.Context,
+	c Context,
+	deps HandlerDeps,
+	cs *chatsession.ChatSession,
+	chatID, messageID string,
+	reset bool,
+) (labelFinalize, bool, string) {
+	// ModeLocal always writes Issue == -1 (types.go), and legacy yml
+	// snapshots that predate the Mode field still have a positive
+	// issue number per the empty-Mode-treats-as-ModeRemote
+	// convention — so `c.Issue > 0` alone is the right gate.
+	// c.RepoRoot == "" catches malformed snapshots (already filtered
+	// by RunClose, but cheap to repeat here).
+	if c.Issue <= 0 || c.RepoRoot == "" {
+		return labelFinalize{}, false, ""
+	}
+
+	// The same resolution policy as /gtw pr: the yml-cached
+	// c.Repo / c.Provider shortcut when the snapshot carries one,
+	// the live remote URL otherwise.
+	prov, owner, repo, err := resolveProvider(ctx, c, deps)
+	if err != nil {
+		reply(ctx, cs.Emitter(), chatID, messageID,
+			"❌ cannot reach GitHub/GitLab to finalize the issue labels: "+err.Error())
+		return labelFinalize{}, true, ""
+	}
+
+	// The label catalog is verified before the labels change, so the
+	// repository keeps the gtw labels the next fix needs — and
+	// `nightme/done` has to exist before it can be attached. A failed
+	// check only warns: the attach that follows reports its own
+	// failure if the label really is missing.
+	var warning string
+	if _, err := ensureRepoLabels(ctx, deps, prov, owner, repo); err != nil {
+		warning = labelCheckWarning(owner, repo, err)
+	}
+
+	issue, err := prov.GetIssue(ctx, owner, repo, c.Issue)
+	if err != nil {
+		if errors.Is(err, ErrIssueNotFound) {
+			// A deleted issue can never be labelled, and a close
+			// that refused to run would strand the worktree for
+			// good. Warn and carry on with the local cleanup.
+			return labelFinalize{}, false, prependWarning(warning, fmt.Sprintf(
+				"⚠️ issue #%d not found in %s/%s — no label was changed",
+				c.Issue, owner, repo))
+		}
+		reply(ctx, cs.Emitter(), chatID, messageID, prependWarning(fmt.Sprintf(
+			"❌ could not read issue #%d: %v\n"+
+				"worktree and branch are left intact — retry /gtw close once "+
+				"the platform call succeeds (auth / network / repo moved).",
+			c.Issue, err), warning))
+		return labelFinalize{}, true, warning
+	}
+
+	// The removal set: every nightme label the issue carries but the
+	// queue marker. The names are the platform's own, so a label the
+	// catalog does not know still comes off.
+	toRemove := make([]string, 0, len(issue.Labels))
+	donePreexisting := false
+	for _, label := range issue.Labels {
+		if !isNightmeLabel(label) {
+			continue
+		}
+		if strings.EqualFold(label, LabelAssigned) {
+			continue
+		}
+		if strings.EqualFold(label, LabelDone) {
+			donePreexisting = true
+			if !reset {
+				// The default mode puts `nightme/done` on the issue
+				// right after this list is computed; taking it off
+				// again would undo that. A stale `nightme/done` stays
+				// — which is the state the close wants.
+				continue
+			}
+		}
+		toRemove = append(toRemove, label)
+	}
+
+	// Add before remove: a failed add leaves the issue with the
+	// state labels it had, which is a state the user can read. The
+	// reverse order would strip the issue bare and then fail.
+	added := ""
+	if !reset {
+		if err := prov.AddIssueLabel(ctx, owner, repo, c.Issue, LabelDone); err != nil {
+			reply(ctx, cs.Emitter(), chatID, messageID, prependWarning(fmt.Sprintf(
+				"❌ could not add label %q to issue #%d: %v\n"+
+					"worktree and branch are left intact — retry /gtw close once "+
+					"the platform call succeeds (auth / network / repo moved).",
+				LabelDone, c.Issue, err), warning))
+			return labelFinalize{}, true, warning
+		}
+		added = LabelDone
+	}
+
+	for _, label := range toRemove {
+		if err := prov.RemoveIssueLabel(ctx, owner, repo, c.Issue, label); err != nil {
+			// The labels already taken off stay off; a retry reads
+			// the issue again and converges on the same end state.
+			reply(ctx, cs.Emitter(), chatID, messageID, prependWarning(fmt.Sprintf(
+				"❌ could not remove label %q from issue #%d: %v\n"+
+					"worktree and branch are left intact — retry /gtw close once "+
+					"the platform call succeeds (auth / network / repo moved).",
+				label, c.Issue, err), warning))
+			return labelFinalize{}, true, warning
+		}
+	}
+
+	return labelFinalize{
+		removed:          toRemove,
+		added:            added,
+		addedPreexisting: donePreexisting,
+		provider:         prov,
+		owner:            owner,
+		repo:             repo,
+		issue:            c.Issue,
+	}, false, warning
+}
+
+// restoreIssueLabels is the symmetric rollback to finalizeIssueLabels.
+// Called when a local cleanup step (dirty check, worktree remove)
+// fails AFTER the labels changed — the platform would otherwise say
+// "done" while the local side still has the worktree / branch / yml,
+// and the retry would face that divergence.
+//
+// Best-effort: the returned line names whatever could not be put
+// back. A restore failure is communicated but does NOT escalate into
+// a second top-level error — the user already has the original local
+// error to act on.
+//
+// NOT called for the steps after the worktree remove (branch delete,
+// cwd switch, sync): by then the worktree — and with it the yml, the
+// recovery source of truth — is gone, so a retry cannot converge and
+// a restore would only wedge the issue in a state no command can
+// release.
+func restoreIssueLabels(ctx context.Context, l labelFinalize) string {
+	var failed []string
+	for _, label := range l.removed {
+		if err := l.provider.AddIssueLabel(ctx, l.owner, l.repo, l.issue, label); err != nil {
+			failed = append(failed, fmt.Sprintf("%s (%v)", label, err))
+		}
+	}
+	if l.added != "" && !l.addedPreexisting {
+		if err := l.provider.RemoveIssueLabel(ctx, l.owner, l.repo, l.issue, l.added); err != nil {
+			failed = append(failed, fmt.Sprintf("%s (%v)", l.added, err))
+		}
+	}
+	if len(failed) > 0 {
+		return fmt.Sprintf(
+			"(could not restore %s on %s/%s#%d — the issue may be in an inconsistent state; "+
+				"fix the labels by hand if a retry is needed)",
+			strings.Join(failed, ", "), l.owner, l.repo, l.issue)
+	}
+	return fmt.Sprintf(
+		"(issue labels restored on %s/%s#%d — fix the local state above and retry /gtw close)",
+		l.owner, l.repo, l.issue)
 }
 
 // assertWorktreeClean returns a user-friendly error if `dir` has

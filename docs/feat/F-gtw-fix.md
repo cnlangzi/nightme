@@ -169,9 +169,9 @@ AddBlockedBy(ctx context.Context, owner, repo string, id, blocker int) error
 
 **`/gtw new -y` 写关系**：草稿里的 `{{ISSUE:NN}}` 引用就是依赖，被引用的 issue 挡着引用它的 issue。建 issue 的循环里，每建好一个 issue 就把它引用到的每个 issue 的关系写进平台 —— 写不进去只警告，命令照旧成功，卡片上多一行 `deps` 列出建成的依赖。关系不落盘：草稿建好 issue 后就被 `.created` 记录换掉，同一对 issue 不会重复建关系。
 
-**认领 = 加一个 label**：fix 认领 issue 时只加 `nightme/wip`，队列标记 `nightme/assigned` 留在 issue 上 —— gtw 从不摘队列标记，它记录的是这个 issue 属于 NightMe 的队列。认领之后 issue 同时带两个 label，队列过滤按「`nightme/assigned` 一个标签」把它挡在下一轮之外。claim 本身只有在 `/gtw pr --ready` 把 issue 挪到 `nightme/ready` 时才摘（见 §3.3）。
+**认领 = 加一个 label**：fix 认领 issue 时只加 `nightme/wip`，队列标记 `nightme/assigned` 留在 issue 上 —— gtw 从不摘队列标记，它记录的是这个 issue 属于 NightMe 的队列。认领之后 issue 同时带两个 label，队列过滤按「`nightme/assigned` 一个标签」把它挡在下一轮之外。claim 本身在 `/gtw pr --ready` 把 issue 挪到 `nightme/ready`（见 §3.3）、或者 `/gtw close` 收尾 issue 时才摘。
 
-**认领之后放弃 = 离开队列**：`/gtw close` 是纯本地收尾，一个 label 都不碰 —— `nightme/wip` 留在 issue 上，`nightme/assigned` 也在。所以「挑起来 → 没做完就 close」的 issue 从此不在队列里了；要让它回到队列，人工在 issue 页面上删掉 `nightme/wip`。
+**认领之后放弃 = 离开队列**：`/gtw close` 收尾 issue 的 label —— 默认把 `nightme/wip` 等状态 label 摘掉、贴上 `nightme/done`，队列标记 `nightme/assigned` 留着。所以「挑起来 → 没做完就 close」的 issue 变成了「做完了」，不在队列里；`/gtw close --reset` 只摘不贴，issue 带着 `nightme/assigned` 回到队列。
 
 **队列没有原子认领**：`ListIssues` 和贴 `nightme/wip` 之间有窗口，两台机器同时跑 `/gtw fix *` 可能挑到同一个 issue。这跟具名 fix 的既有窗口是同一类 —— label 是协作信号，不是锁（见 §3.2）。
 
@@ -218,7 +218,7 @@ label catalog 检查在 owner/repo 解析之后、队列挑选之前跑。它读
 
 **检查的结果缓存**：`LabelCache` 按仓库（平台 + `owner/repo`）记住「这个仓库的 catalog 齐全了」。label catalog 是仓库的属性，不是 worktree 的属性，所以同一仓库的每个 worktree 共用一条记录；平台也在 key 里，因为 GitHub 仓库和 GitLab 项目可以同名同 owner，而两个平台的 catalog 是两套。缓存只进内存，daemon 重启后重新检查；失败的检查不写缓存，下一条命令会重试。
 
-**别处也检查**：`/gtw pr`、`/gtw new -y` 同样会检查仓库的 catalog —— 这两个命令不贴 label，所以检查失败只给一行 `⚠️` 警告，命令照常跑完。`/gtw close` 不检查，也不做任何 label 操作 —— 它是纯本地收尾。provider 探测（`detectProvider` / `resolveProvider`）**不**检查：workspace footer 每次刷新消息都会解析一个 provider，在那里检查会把读变成对用户仓库的写。
+**别处也检查**：`/gtw pr`、`/gtw new -y`、`/gtw close` 同样会检查仓库的 catalog —— 检查失败只给一行 `⚠️` 警告，命令照常跑完。provider 探测（`detectProvider` / `resolveProvider`）**不**检查：workspace footer 每次刷新消息都会解析一个 provider，在那里检查会把读变成对用户仓库的写。
 
 详见 [`F-59-gtw-label-bootstrap.md`](./F-59-gtw-label-bootstrap.md)。
 
@@ -249,7 +249,7 @@ Local 模式（`/gtw fix --name`）同样：branch 存在即失败，无决策�
 
 ### 3.2 Issue 被别的 agent 占用：硬失败
 
-`nightme/wip` 是 gtw 的 claim 标记：`/gtw fix` 贴上，`/gtw pr --ready` 在 PR 出现后把它摘掉换成 `nightme/ready`（见 §3.3），`/gtw close` 不碰它。远端模式取到 issue 时若该 label 已存在，说明这个 issue 已被认领（本机或另一台机器），本次 `/gtw fix` 直接拒绝。
+`nightme/wip` 是 gtw 的 claim 标记：`/gtw fix` 贴上，`/gtw pr --ready` 在 PR 出现后把它摘掉换成 `nightme/ready`（见 §3.3），`/gtw close` 在收尾时也把它摘掉（换成 `nightme/done`）。远端模式取到 issue 时若该 label 已存在，说明这个 issue 已被认领（本机或另一台机器），本次 `/gtw fix` 直接拒绝。
 
 **判定位置**：`BranchExists` 检查**之后**、任何副作用（preflight / refresh / worktree add / 贴 label / dispatch）**之前**。
 
@@ -304,11 +304,11 @@ claim 保留自己的措辞：
 
 **只动两个 label**：加 `nightme/ready`，摘 `nightme/wip`，不碰 `nightme/assigned`。
 
-**这是 gtw 唯一摘 label 的地方**：队列标记 `nightme/assigned` 永远留在 issue 上，`/gtw fix` 和 `/gtw close` 都不摘任何 label。
+**这里摘的只有状态 label**：队列标记 `nightme/assigned` 永远留在 issue 上，`/gtw fix` 不摘任何 label，`/gtw close` 也不摘它。
 
 **失败只警告**：PR 已经开出来了，label 是记账。label 调用失败时卡片上带一行 `⚠️`，命令的结论不变。worktree 没有关联 issue（`issue <= 0`）时也带一行 `⚠️`，说明没有 label 可改。
 
-`/gtw close` 一个 label 都不碰 —— `nightme/wip` 和 `nightme/ready` 都留着。PR 通常还开着，「等 review」这件事仍然成立。
+`/gtw close` 会摘状态 label —— 默认把 `nightme/wip`、`nightme/ready` 都摘掉，贴上 `nightme/done`；`--reset` 只摘不贴。close 收的是这一轮 fix 的本地会话，PR 还开不开着不改变它把 issue 标成「做完了」这件事。
 
 ### 3.4 gtw 职责边界（dispatch 之后）
 

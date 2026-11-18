@@ -213,10 +213,12 @@ func RunFix(
 //     the agent picks it up. Failure here does NOT roll back
 //     the worktree — the user can re-trigger manually.
 //
-// gtw only ever adds a label. The claim marker does double duty:
+// The fix only adds a label. The claim marker does double duty:
 // it says a fix holds the issue, and it keeps the issue out of the
 // automatic queue — the pick filter drops every issue that carries
-// `nightme/wip`, so a claimed issue is not offered again.
+// `nightme/wip`, so a claimed issue is not offered again. The close
+// is the other half of the claim: it finalises the issue's labels
+// when the work is over.
 //
 // The label catalog is verified at step 1, before the queue is
 // consulted: a repository whose catalog predates `nightme/assigned`

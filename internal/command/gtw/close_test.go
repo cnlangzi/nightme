@@ -318,7 +318,7 @@ func TestRunClose_CleanWorktree_Success(t *testing.T) {
 	rig := newCloseRig(t)
 	seedFix(t, rig, wt, repoRoot)
 
-	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1")
+	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false)
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
@@ -394,7 +394,7 @@ func TestRunClose_DirtyWorktree_Rejected(t *testing.T) {
 
 	rig.git.statusResp = " M foo.txt\n?? untracked.go\n"
 
-	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1")
+	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false)
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
@@ -439,7 +439,7 @@ func TestRunClose_NoYml(t *testing.T) {
 		t.Fatalf("SetSelectedCwd: %v", err)
 	}
 
-	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1")
+	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false)
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
@@ -472,7 +472,7 @@ func TestRunClose_GitRemoveFails(t *testing.T) {
 	rig.git.worktreeRemoveErr = &fakeExitError{code: 128, msg: "worktree remove failed"}
 	rig.git.worktreeRemoveStderr = "fatal: could not remove worktree"
 
-	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1")
+	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false)
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
@@ -517,7 +517,7 @@ func TestRunClose_BranchDeleteFails(t *testing.T) {
 	rig.git.branchDeleteErr = &fakeExitError{code: 1, msg: "branch delete failed"}
 	rig.git.branchDeleteStderr = "error: branch 'fix/42-test' not found"
 
-	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1")
+	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false)
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
@@ -595,7 +595,7 @@ func TestRunClose_CleanWorktree_Syncs(t *testing.T) {
 	rig.git.syncOriginRef = "origin/main"
 	rig.git.syncPullOut = "Already up to date.\n"
 
-	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1")
+	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false)
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
@@ -649,7 +649,7 @@ func TestRunClose_SyncFails(t *testing.T) {
 	// error, RunClose emits the sync-failure card.
 	rig.git.symbolicRefErr = &fakeExitError{code: 128, msg: "no upstream"}
 
-	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1")
+	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false)
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
@@ -764,7 +764,7 @@ func TestRunClose_DanglingSelectedCwd(t *testing.T) {
 		t.Fatalf("RemoveAll wt: %v", err)
 	}
 
-	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1")
+	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false)
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
@@ -820,7 +820,7 @@ func TestRunClose_EmptySelectedCwd(t *testing.T) {
 	// new public API to exercise the empty-cwd branch.
 	rig.cs.ClearSelectedCwd()
 
-	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1")
+	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false)
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
@@ -861,7 +861,7 @@ func TestRunClose_Success_NoAgents_NoExtraLine(t *testing.T) {
 	// below verify both effects indirectly via CWD + slot
 	// state.
 
-	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1")
+	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false)
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
@@ -904,7 +904,7 @@ func TestRunClose_Success_ClosesOrphanedAgents(t *testing.T) {
 	// below verify both effects indirectly via CWD + slot
 	// state.
 
-	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1")
+	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false)
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
@@ -971,7 +971,7 @@ func TestRunClose_Success_PreservesRepoRootAgentContext(t *testing.T) {
 		t.Fatalf("setup: SessionID = %q, want pre-populated", got)
 	}
 
-	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1")
+	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false)
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
@@ -1064,7 +1064,7 @@ func TestRunClose_TransientStatError_PreservesState(t *testing.T) {
 		return nil, os.ErrPermission
 	})
 
-	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1")
+	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false)
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
@@ -1117,13 +1117,12 @@ func TestRunClose_TransientStatError_PreservesState(t *testing.T) {
 	}
 }
 
-// --- the close makes no platform call ---------------------------
+// --- the close finalises the issue's labels ---------------------
 
-// TestRunClose_ModeRemote_NoLabelCall pins that the close is a
-// purely local teardown: it makes no platform call of any kind.
-// The `nightme/wip` claim marker stays on the issue, so a closed
-// issue keeps its claim and stays out of the automatic queue.
-func TestRunClose_ModeRemote_NoLabelCall(t *testing.T) {
+// TestRunClose_ModeRemote_FinalizesTheIssue pins the platform half
+// of the close: the claim marker comes off the issue, `nightme/done`
+// goes on, and the queue marker stays. The card names both.
+func TestRunClose_ModeRemote_FinalizesTheIssue(t *testing.T) {
 	wt := t.TempDir()
 	repoRoot := t.TempDir()
 
@@ -1131,7 +1130,7 @@ func TestRunClose_ModeRemote_NoLabelCall(t *testing.T) {
 	prov := newFakeGitProvider(ProviderGitHub, "github.com")
 	seedFixRemote(t, rig, prov, wt, repoRoot)
 
-	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1")
+	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false)
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
@@ -1139,44 +1138,39 @@ func TestRunClose_ModeRemote_NoLabelCall(t *testing.T) {
 		t.Fatalf("Result = %+v, want Consumed=true", res)
 	}
 
-	// No label mutation, no catalog read, no provider call at all.
-	for _, method := range []string{"AddIssueLabel", "CreateLabel", "ListLabels"} {
-		if calls := prov.CallsByMethod(method); len(calls) != 0 {
-			t.Errorf("%s calls = %+v, want 0 (the close talks to no platform)", method, calls)
-		}
-	}
-	if calls := prov.Calls(); len(calls) != 0 {
-		t.Errorf("provider calls = %+v, want none (the close is a local teardown)", calls)
-	}
-
-	// The issue keeps both markers: the queue marker and the claim.
+	// The claim is gone, the work is marked done, the queue marker
+	// stays.
 	got := prov.IssueLabels(42)
-	for _, want := range []string{LabelAssigned, LabelWIP} {
-		if !slices.Contains(got, want) {
-			t.Errorf("issue labels = %v, want %q to be present", got, want)
-		}
+	if !slices.Contains(got, LabelDone) {
+		t.Errorf("issue labels = %v, want %q to be present", got, LabelDone)
+	}
+	if slices.Contains(got, LabelWIP) {
+		t.Errorf("issue labels = %v, want %q to be absent", got, LabelWIP)
+	}
+	if !slices.Contains(got, LabelAssigned) {
+		t.Errorf("issue labels = %v, want %q to be present", got, LabelAssigned)
 	}
 
-	// The card reports the local teardown and nothing else.
+	// The card reports the local teardown and the label change.
 	card := rig.rec.lastText()
-	for _, want := range []string{"✅ closed", "→ worktree:", "→ branch:", "→ .nightme/gtw.yml", "→ cwd →"} {
+	for _, want := range []string{
+		"✅ closed", "→ worktree:", "→ branch:", "→ .nightme/gtw.yml", "→ cwd →",
+		"→ issue: cnlangzi/nightme#42 -" + LabelWIP + " +" + LabelDone,
+	} {
 		if !strings.Contains(card, want) {
 			t.Errorf("reply missing %q:\n%s", want, card)
 		}
-	}
-	if strings.Contains(card, "→ issue:") {
-		t.Errorf("reply must not carry an issue row:\n%s", card)
 	}
 	if strings.Contains(card, "⚠️") {
 		t.Errorf("reply must not carry a label-check warning:\n%s", card)
 	}
 }
 
-// TestRunClose_ModeRemote_DirtyMakesNoLabelCall pins that a close
-// that stops at the dirty check issues no label call: the
-// worktree, the branch and the yml are left in place so the user
-// can retry.
-func TestRunClose_ModeRemote_DirtyMakesNoLabelCall(t *testing.T) {
+// TestRunClose_ModeRemote_DirtyRestoresTheIssue pins that a close
+// that stops at the dirty check puts the issue's labels back: the
+// worktree, the branch and the yml are left in place, so the issue
+// must not read as finished either.
+func TestRunClose_ModeRemote_DirtyRestoresTheIssue(t *testing.T) {
 	wt := t.TempDir()
 	repoRoot := t.TempDir()
 
@@ -1185,7 +1179,7 @@ func TestRunClose_ModeRemote_DirtyMakesNoLabelCall(t *testing.T) {
 	seedFixRemote(t, rig, prov, wt, repoRoot)
 	rig.git.statusResp = " M foo.txt\n" // dirty
 
-	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1")
+	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false)
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
@@ -1193,8 +1187,13 @@ func TestRunClose_ModeRemote_DirtyMakesNoLabelCall(t *testing.T) {
 		t.Fatalf("Result = %+v, want Consumed=true", res)
 	}
 
-	if calls := prov.Calls(); len(calls) != 0 {
-		t.Errorf("provider calls = %+v, want none (the failed close talks to no platform)", calls)
+	// The issue carries the labels it had before the close.
+	got := prov.IssueLabels(42)
+	if !slices.Contains(got, LabelWIP) {
+		t.Errorf("issue labels = %v, want %q to be back", got, LabelWIP)
+	}
+	if slices.Contains(got, LabelDone) {
+		t.Errorf("issue labels = %v, want %q to be absent", got, LabelDone)
 	}
 
 	// No local cleanup must have run.
@@ -1212,19 +1211,19 @@ func TestRunClose_ModeRemote_DirtyMakesNoLabelCall(t *testing.T) {
 		t.Errorf("SelectedCwd = %q, want %q (unchanged for retry)", got, wt)
 	}
 
-	got := rig.rec.lastText()
-	if !strings.Contains(got, "uncommitted changes") {
-		t.Errorf("reply must surface the dirty worktree:\n%s", got)
+	reply := rig.rec.lastText()
+	if !strings.Contains(reply, "uncommitted changes") {
+		t.Errorf("reply must surface the dirty worktree:\n%s", reply)
 	}
-	if strings.Contains(got, "nightme/wip") {
-		t.Errorf("reply must not talk about labels:\n%s", got)
+	if !strings.Contains(reply, "restored") {
+		t.Errorf("reply must report the restore:\n%s", reply)
 	}
 }
 
-// TestRunClose_ModeRemote_WorktreeRemoveFailsMakesNoLabelCall
-// pins that a close that stops at `git worktree remove` issues no
-// label call and leaves the branch alone.
-func TestRunClose_ModeRemote_WorktreeRemoveFailsMakesNoLabelCall(t *testing.T) {
+// TestRunClose_ModeRemote_WorktreeRemoveFailsRestoresTheIssue pins
+// that a close that stops at `git worktree remove` puts the issue's
+// labels back and leaves the branch alone.
+func TestRunClose_ModeRemote_WorktreeRemoveFailsRestoresTheIssue(t *testing.T) {
 	wt := t.TempDir()
 	repoRoot := t.TempDir()
 
@@ -1234,7 +1233,7 @@ func TestRunClose_ModeRemote_WorktreeRemoveFailsMakesNoLabelCall(t *testing.T) {
 	rig.git.worktreeRemoveErr = &fakeExitError{code: 128, msg: "worktree remove failed"}
 	rig.git.worktreeRemoveStderr = "fatal: could not remove worktree"
 
-	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1")
+	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false)
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
@@ -1242,8 +1241,12 @@ func TestRunClose_ModeRemote_WorktreeRemoveFailsMakesNoLabelCall(t *testing.T) {
 		t.Fatalf("Result = %+v, want Consumed=true", res)
 	}
 
-	if calls := prov.Calls(); len(calls) != 0 {
-		t.Errorf("provider calls = %+v, want none (the failed close talks to no platform)", calls)
+	got := prov.IssueLabels(42)
+	if !slices.Contains(got, LabelWIP) {
+		t.Errorf("issue labels = %v, want %q to be back", got, LabelWIP)
+	}
+	if slices.Contains(got, LabelDone) {
+		t.Errorf("issue labels = %v, want %q to be absent", got, LabelDone)
 	}
 
 	// branch -D must NOT have run — worktree remove failed first.
@@ -1260,20 +1263,23 @@ func TestRunClose_ModeRemote_WorktreeRemoveFailsMakesNoLabelCall(t *testing.T) {
 		t.Errorf("SelectedCwd = %q, want %q (unchanged for retry)", got, wt)
 	}
 
-	got := rig.rec.lastText()
-	if !strings.Contains(got, "git worktree remove failed") {
-		t.Errorf("reply missing git error:\n%s", got)
+	reply := rig.rec.lastText()
+	if !strings.Contains(reply, "git worktree remove failed") {
+		t.Errorf("reply missing git error:\n%s", reply)
 	}
-	if strings.Contains(got, "nightme/wip") {
-		t.Errorf("reply must not talk about labels:\n%s", got)
+	if !strings.Contains(reply, "restored") {
+		t.Errorf("reply must report the restore:\n%s", reply)
 	}
 }
 
-// TestRunClose_ModeRemote_BranchDeleteFailsMakesNoLabelCall pins
-// that a close that stops at `git branch -D` issues no label call:
-// the worktree is gone, the branch ref survives, and the reply
-// names the manual cleanup.
-func TestRunClose_ModeRemote_BranchDeleteFailsMakesNoLabelCall(t *testing.T) {
+// TestRunClose_ModeRemote_BranchDeleteFailsKeepsTheLabelsFinalized
+// pins that a close that stops at `git branch -D` does NOT put the
+// issue's labels back: the worktree — and with it the yml, the
+// recovery source of truth — is already gone, so a retry cannot
+// converge and a restore would leave the issue claimed with no
+// worktree and no command able to release it. The labels stay as the
+// close set them; the reply names the leftover branch ref.
+func TestRunClose_ModeRemote_BranchDeleteFailsKeepsTheLabelsFinalized(t *testing.T) {
 	wt := t.TempDir()
 	repoRoot := t.TempDir()
 
@@ -1283,7 +1289,7 @@ func TestRunClose_ModeRemote_BranchDeleteFailsMakesNoLabelCall(t *testing.T) {
 	rig.git.branchDeleteErr = &fakeExitError{code: 1, msg: "branch delete failed"}
 	rig.git.branchDeleteStderr = "error: branch 'fix/42-test' not found"
 
-	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1")
+	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false)
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
@@ -1291,8 +1297,14 @@ func TestRunClose_ModeRemote_BranchDeleteFailsMakesNoLabelCall(t *testing.T) {
 		t.Fatalf("Result = %+v, want Consumed=true", res)
 	}
 
-	if calls := prov.Calls(); len(calls) != 0 {
-		t.Errorf("provider calls = %+v, want none (the failed close talks to no platform)", calls)
+	// The issue keeps the labels the close set: the work session is
+	// over, only the branch ref is left.
+	got := prov.IssueLabels(42)
+	if !slices.Contains(got, LabelDone) {
+		t.Errorf("issue labels = %v, want %q to stay", got, LabelDone)
+	}
+	if slices.Contains(got, LabelWIP) {
+		t.Errorf("issue labels = %v, want %q to be absent", got, LabelWIP)
 	}
 
 	// worktree remove ran (it's step 4, before step 5).
@@ -1306,11 +1318,15 @@ func TestRunClose_ModeRemote_BranchDeleteFailsMakesNoLabelCall(t *testing.T) {
 		t.Errorf("git worktree remove not called; calls=%v", rig.git.calls)
 	}
 
-	got := rig.rec.lastText()
-	if !strings.Contains(got, "git branch -D") {
-		t.Errorf("reply missing branch-delete error:\n%s", got)
+	reply := rig.rec.lastText()
+	if !strings.Contains(reply, "git branch -D") {
+		t.Errorf("reply missing branch-delete error:\n%s", reply)
 	}
-	if strings.Contains(got, "nightme/wip") {
-		t.Errorf("reply must not talk about labels:\n%s", got)
+	if !strings.Contains(reply, "the issue keeps the labels") {
+		t.Errorf("reply must say the labels stay as the close set them:\n%s", reply)
+	}
+	// No restore happened, so no retry hint that cannot work.
+	if strings.Contains(reply, "restored") {
+		t.Errorf("reply must not report a restore:\n%s", reply)
 	}
 }

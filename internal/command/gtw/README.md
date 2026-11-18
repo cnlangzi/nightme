@@ -364,7 +364,13 @@ legacy case"兜底。
 → branch: fix-gtw-hooks (deleted)
 → .nightme/gtw.yml (removed with worktree)
 → cwd → /Users/.../nightme
+→ issue: cnlangzi/nightme#42 -nightme/wip +nightme/done
 ```
+
+`→ issue:` 这一行只在 close 动过 issue 时出现:每个摘掉的 label 一个 `-`,
+每个贴上的一个 `+`;issue 上本来就没有 `nightme/*` label 时写
+`no nightme/* labels`。本地 fix(`/gtw fix --name <branch>`)没有 issue,
+不带这一行。`/gtw close --reset` 只摘不贴,所以只有 `-`。
 
 ### 4.1b Format 1(back)
 

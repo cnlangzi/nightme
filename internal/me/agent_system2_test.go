@@ -60,7 +60,7 @@ func TestSystem2_ToolDispatch(t *testing.T) {
 	}
 	var settled bool
 	for _, item := range op.Checklist(op.Cards()[1].ID) {
-		if strings.Contains(item.Subject, "/gtw commit") && item.Status == agent.TaskCompleted {
+		if item.Subject == "commit" && item.Status == agent.TaskCompleted {
 			settled = true
 		}
 	}
@@ -248,7 +248,7 @@ func TestSystem2_TextOnlyReplyKeepsTheRunGoing(t *testing.T) {
 	}
 	var listed bool
 	for _, item := range op.Checklist(op.Cards()[1].ID) {
-		if strings.Contains(item.Subject, "/gtw commit") {
+		if item.Subject == "commit" {
 			listed = true
 		}
 	}
@@ -725,7 +725,7 @@ func TestIntegration_TheWorkflowRunsEndToEnd(t *testing.T) {
 	// the run's card says how the run ended.
 	var steps bool
 	for _, item := range op.Checklist(op.Cards()[1].ID) {
-		if strings.Contains(item.Subject, "/gtw fix 42 -y") {
+		if item.Subject == "fix" {
 			steps = true
 		}
 	}

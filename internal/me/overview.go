@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/pkg/wfe"
@@ -20,6 +21,12 @@ import (
 // A step that reports a whole build log as its summary would
 // otherwise make the row unreadable.
 const maxStepDetail = 100
+
+// outcomeKeyBranch is the Data key the branch of a step rides in.
+//
+// The branch is in the status bar of the card: a detail that repeats
+// it spends its budget on a fact the reader already has.
+const outcomeKeyBranch = "branch"
 
 // runOverview renders the overview of the run: the run itself, the
 // workflow it works through, the arguments it was given and the jobs
@@ -42,18 +49,24 @@ func (r *run) runOverview() string {
 	wf := r.workflow
 	jobs := wf.JobOrder()
 	counts := sharedRounds(wf, jobs)
-	lines := make([]string, 0, 8)
+
+	rows := make([]arrowRow, 0, len(jobs)+4)
+	if counts.shared {
+		rows = append(rows, arrowRow{key: "rounds:", value: roundsCount(counts.count)})
+	}
+	rows = append(rows, arrowRow{key: "jobs:", value: jobsValue(wf, jobs)})
+	rows = append(rows, arrowRow{key: "started:", value: clockTime(started)})
+	if len(names) > 0 {
+		rows = append(rows, arrowRow{key: "args:", value: argsValue(names, values)})
+	}
+	for _, name := range jobs {
+		rows = append(rows, arrowRow{key: name + ":", value: jobFlow(wf, name, counts)})
+	}
+
+	lines := make([]string, 0, len(rows)+2)
 	lines = append(lines, BotMark+id)
 	lines = append(lines, workflowLine(wf))
-	lines = append(lines, factsLine(wf, jobs, counts, started))
-	lines = append(lines, argLines(names, values)...)
-	lines = append(lines, "jobs:")
-	for _, name := range jobs {
-		lines = append(lines, "  - "+jobLine(wf, name, counts))
-		for _, step := range wf.Jobs[name].Steps {
-			lines = append(lines, "     - "+step.ID)
-		}
-	}
+	lines = append(lines, arrowRows(rows)...)
 	return strings.Join(lines, "\n")
 }
 
@@ -67,21 +80,65 @@ func workflowLine(wf *wfe.Workflow) string {
 	return line
 }
 
-// factsLine renders how big the run is: how many rounds it runs, how
-// many jobs it has, how many steps those jobs hold and when the run
-// started.
+// arrowRow is one row of a block: a key and the value of that key.
+type arrowRow struct {
+	key   string
+	value string
+}
+
+// arrowRows renders the rows of a block as arrow rows.
 //
-// The round count is the count every job of the workflow shares. A
-// workflow whose jobs declare different counts carries no count here:
-// each job carries its own count on its own line.
-func factsLine(wf *wfe.Workflow, jobs []string, counts roundCounts, started time.Time) string {
-	parts := make([]string, 0, 4)
-	if counts.shared {
-		parts = append(parts, roundsCount(counts.count))
+// The key of a row is padded to the width of the longest key of the
+// block, so the values of the block start at the same column.
+func arrowRows(rows []arrowRow) []string {
+	width := 0
+	for _, row := range rows {
+		if n := utf8.RuneCountInString(row.key); n > width {
+			width = n
+		}
 	}
-	parts = append(parts, countText(len(jobs), "job"))
-	parts = append(parts, countText(len(wf.Steps()), "step"))
-	parts = append(parts, "started "+clockTime(started))
+	out := make([]string, 0, len(rows))
+	for _, row := range rows {
+		pad := strings.Repeat(" ", width-utf8.RuneCountInString(row.key))
+		out = append(out, "→ "+row.key+pad+" "+row.value)
+	}
+	return out
+}
+
+// jobsValue renders how many jobs the run has and how many steps
+// those jobs hold.
+func jobsValue(wf *wfe.Workflow, jobs []string) string {
+	return fmt.Sprintf("%d · steps: %d", len(jobs), len(wf.Steps()))
+}
+
+// jobFlow renders the flow of a job: the ids of its steps, in the
+// order the job runs them.
+//
+// A workflow whose jobs declare different round counts carries the
+// count of the job on its own row.
+func jobFlow(wf *wfe.Workflow, name string, counts roundCounts) string {
+	steps := wf.Jobs[name].Steps
+	ids := make([]string, 0, len(steps))
+	for _, step := range steps {
+		ids = append(ids, step.ID)
+	}
+	flow := "(no steps)"
+	if len(ids) > 0 {
+		flow = strings.Join(ids, " → ")
+	}
+	if !counts.shared {
+		flow += " · " + roundsCount(wf.Jobs[name].Rounds())
+	}
+	return flow
+}
+
+// argsValue renders the arguments of the run: the name and the value
+// of every argument, in the order the arguments were declared in.
+func argsValue(names []string, values map[string]string) string {
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		parts = append(parts, name+"="+values[name])
+	}
 	return strings.Join(parts, " · ")
 }
 
@@ -109,15 +166,6 @@ func sharedRounds(wf *wfe.Workflow, jobs []string) roundCounts {
 	return roundCounts{count: count, shared: true}
 }
 
-// jobLine renders the line of a job: its name and, when the jobs of
-// the workflow declare different round counts, its own count.
-func jobLine(wf *wfe.Workflow, name string, counts roundCounts) string {
-	if counts.shared {
-		return name
-	}
-	return name + " · " + roundsCount(wf.Jobs[name].Rounds())
-}
-
 // roundsCount renders how many rounds a job runs. Zero rounds means
 // the job repeats until the run ends.
 func roundsCount(rounds int) string {
@@ -133,20 +181,6 @@ func countText(n int, unit string) string {
 		return fmt.Sprintf("%d %s", n, unit)
 	}
 	return fmt.Sprintf("%d %ss", n, unit)
-}
-
-// argLines renders the arguments of the run: one list item per
-// argument. A run without arguments has no list at all.
-func argLines(names []string, values map[string]string) []string {
-	if len(names) == 0 {
-		return nil
-	}
-	lines := make([]string, 0, len(names)+1)
-	lines = append(lines, "args:")
-	for _, name := range names {
-		lines = append(lines, " - "+name+": "+values[name])
-	}
-	return lines
 }
 
 // clockTime renders a moment as the time of day.
@@ -170,17 +204,17 @@ func (r *run) runBlock() string {
 
 	wf := r.workflow
 	ends := roundEndTimes(history, wf)
-	lines := []string{"Run: " + id + " · " + clockTime(started)}
+	rows := []arrowRow{{key: "run:", value: id + " · " + clockTime(started)}}
 	for _, job := range wf.JobOrder() {
 		for _, round := range finishedRounds(state, wf, job) {
-			line := fmt.Sprintf("|- round %d: %s", round, job)
+			value := job
 			if at, ok := ends[roundKey{job: job, round: round}]; ok {
-				line += " · " + clockTime(at)
+				value += " · " + clockTime(at)
 			}
-			lines = append(lines, line)
+			rows = append(rows, arrowRow{key: fmt.Sprintf("round %d:", round), value: value})
 		}
 	}
-	return strings.Join(lines, "\n")
+	return strings.Join(arrowRows(rows), "\n")
 }
 
 // finishedRounds returns the rounds of a job that have finished: the
@@ -280,7 +314,7 @@ func (r *run) roundTasks(job string, round int) []agent.AgentTaskItem {
 	}
 	items := make([]agent.AgentTaskItem, 0, len(steps))
 	for _, step := range steps {
-		item := agent.AgentTaskItem{ID: step.ID, Subject: stepLabel(step), Status: agent.TaskPending}
+		item := agent.AgentTaskItem{ID: step.ID, Subject: step.ID, Status: agent.TaskPending}
 		if st, ok := states[step.ID]; ok {
 			item.Status = taskStatusOf(st)
 			chances, hasChances := r.stepChances(step.ID, remaining)
@@ -325,35 +359,50 @@ func (r *run) stepChances(stepID string, remaining wfe.Remaining) (int, bool) {
 	return n, true
 }
 
-// stepDetail renders the detail of a step's row: what the step is
-// doing, what it came to and what it may still do.
+// stepDetail renders the detail of a step's row: what the step came
+// to and what it may still do.
+//
+// The detail carries facts only: the marker of the row already says
+// what state the step is in, so the detail does not say it a second
+// time. The branch the step worked on is not in the detail either —
+// the status bar of the card carries it.
 //
 // The detail is cut short: a step that reports a whole build log as
 // its summary would otherwise make the row unreadable.
 func stepDetail(st wfe.StepState, status agent.AgentTaskStatus, chances int, hasChances bool) string {
 	parts := make([]string, 0, 3)
-	switch status {
-	case agent.TaskSkipped:
-		parts = append(parts, "skipped")
-	case agent.TaskInProgress:
-		parts = append(parts, "running")
-	default:
-		word := string(st.Outcome.Status)
-		if word == "" {
-			word = string(wfe.OutcomeUnknown)
+	if status != agent.TaskSkipped {
+		if summary := branchlessSummary(st.Outcome); summary != "" {
+			parts = append(parts, summary)
 		}
-		if st.Outcome.Summary != "" {
-			word += ": " + st.Outcome.Summary
-		}
-		parts = append(parts, word)
 		if errText := st.Outcome.Data[wfe.OutcomeKeyError]; errText != "" {
 			parts = append(parts, errText)
 		}
 	}
 	// The chances matter for the steps that may still run: a step that
 	// is over is over, whatever its budget was.
-	if hasChances && (status == agent.TaskInProgress || status == agent.TaskFailed) {
+	if hasChances && chances > 0 && (status == agent.TaskInProgress || status == agent.TaskFailed) {
 		parts = append(parts, countText(chances, "chance")+" left")
 	}
 	return clipLine(strings.Join(parts, " · "), maxStepDetail)
+}
+
+// branchlessSummary renders the summary of an outcome without the
+// branch it names.
+//
+// The summary of a step that worked on a branch repeats that branch at
+// its end. The branch is in the status bar of the card, so the suffix
+// is dropped — a summary that does not end with the branch is left
+// alone.
+func branchlessSummary(out wfe.Outcome) string {
+	summary := strings.TrimSpace(out.Summary)
+	branch := strings.TrimSpace(out.Data[outcomeKeyBranch])
+	if branch == "" {
+		return summary
+	}
+	suffix := " on " + branch
+	if !strings.HasSuffix(summary, suffix) {
+		return summary
+	}
+	return strings.TrimSpace(strings.TrimSuffix(summary, suffix))
 }

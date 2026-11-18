@@ -49,19 +49,22 @@ func TestTheRunCardHangsUnderTheMessageThatStartedTheRun(t *testing.T) {
 	}
 }
 
-// TestTheRunCardCarriesTheOverviewOfTheRun — the card of the run is
-// the overview of the run: the workflow it works through, the jobs it
-// has and the steps of those jobs. It is published once and never
-// changed.
-func TestTheRunCardCarriesTheOverviewOfTheRun(t *testing.T) {
-	svc, op := sessionService(t)
+// TestTheRunCardCarriesThePlanOfTheRun — the card of the run is the
+// plan of the run: its headline, its facts and its steps. It is
+// published once and never changed.
+func TestTheRunCardCarriesThePlanOfTheRun(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "fix", cliWorkflow)
+	svc, op := testService(t, dir, noModels())
 
 	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+		Name: "fix", ChatID: "obs-1", Cwd: "/tmp/work", Args: []string{"issue=*"},
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitRun(t, svc, "obs-1")
+	// The job of the workflow repeats until the run ends: the card is
+	// published when the run opens, and the run never ends.
+	waitEntry(t, op, "▶ [ fix ] started")
 
 	cards := op.Cards()
 	if len(cards) == 0 {
@@ -69,38 +72,27 @@ func TestTheRunCardCarriesTheOverviewOfTheRun(t *testing.T) {
 	}
 	entries := op.Entries(cards[0].ID)
 	if len(entries) != 1 {
-		t.Fatalf("the card of the run carries %d entries, want the overview alone: %v", len(entries), entries)
+		t.Fatalf("the card of the run carries %d entries, want the plan alone: %v", len(entries), entries)
 	}
-	overview := entries[0]
+	card := entries[0]
 	for _, want := range []string{
-		"**one** — Do the one thing.",
-		"→ rounds:  1 round",
-		"→ jobs:    1 · steps: 1",
-		"→ started: ",
-		"→ main:    commit",
+		"▶ [ fix ] started",
+		"jobs:     1",
+		"steps:    8",
+		"started: ",
+		"args:     issue=*",
+		"ship ⟳ until the run ends",
+		"├─ [ 1 ]: fix             /gtw fix * -y",
+		"└─ [ 8 ]: wait            (wait) 5m",
 	} {
-		if !strings.Contains(overview, want) {
-			t.Errorf("the overview does not carry %q: %q", want, overview)
+		if !strings.Contains(card, want) {
+			t.Errorf("the card of the run does not carry %q: %q", want, card)
 		}
 	}
-	// The jobs are a flow row each, not a nested list.
-	for _, line := range strings.Split(overview, "\n") {
-		if strings.HasPrefix(line, "  - ") || strings.HasPrefix(line, "     - ") {
-			t.Errorf("the overview carries a nested list item: %q", overview)
-		}
-		if line == "jobs:" {
-			t.Errorf("the overview carries a jobs list: %q", overview)
-		}
-	}
-	// The first line names the run.
-	var runID string
-	for _, m := range op.EmittedOf(messages.OutReply) {
-		if m.ReplyTo == cards[0].ID {
-			runID = m.SessionID
-		}
-	}
-	if !strings.HasPrefix(overview, BotMark+runID) {
-		t.Errorf("the overview does not start with the run id %q: %q", runID, overview)
+	// The card carries no identifier of its own: the status bar names
+	// the run.
+	if runID := runIDOf(svc, "obs-1"); runID != "" && strings.Contains(card, runID) {
+		t.Errorf("the card of the run carries the id of the run: %q", card)
 	}
 	// The run publishes no checklist of its own.
 	if tasks := op.Checklist(cards[0].ID); len(tasks) != 0 {
@@ -115,9 +107,20 @@ func TestTheRunCardCarriesTheOverviewOfTheRun(t *testing.T) {
 	}
 }
 
-// TestTheRoundCardNamesTheRunItBelongsTo — the card of a round names
-// the run it belongs to, and the round it is.
-func TestTheRoundCardNamesTheRunItBelongsTo(t *testing.T) {
+// runIDOf returns the id of the run of a chat.
+func runIDOf(svc *Service, chatID string) string {
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	r, ok := svc.active[chatID]
+	if !ok {
+		return ""
+	}
+	return r.id
+}
+
+// TestTheRoundCardCarriesTheTreeOfTheRounds — the card of a round
+// carries the tree of the rounds of the run.
+func TestTheRoundCardCarriesTheTreeOfTheRounds(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 	svc, op := testService(t, dir, noModels())
@@ -138,23 +141,20 @@ func TestTheRoundCardNamesTheRunItBelongsTo(t *testing.T) {
 	if len(entries) == 0 {
 		t.Fatal("the card of the round carries no entry")
 	}
-	if !strings.HasPrefix(entries[0], "→ run: one-") {
-		t.Errorf("the block does not name the run: %q", entries[0])
+	if !strings.HasPrefix(entries[0], "rounds:\n") {
+		t.Errorf("the card of the round does not open with the tree of the rounds: %q", entries[0])
 	}
-	var named bool
+	// The card of the round carries no identity of its own: the status
+	// bar names the run and the round.
 	for _, entry := range entries {
 		if strings.Contains(entry, "main · round 1") {
-			named = true
+			t.Errorf("the card of the round carries the identity of the round: %q", entry)
 		}
 	}
-	if !named {
-		t.Errorf("the card of the round does not name its round: %v", entries)
-	}
-	// The round's outcome rides on the card of the round: the card of
-	// the run stays the overview it was.
+	// The card of the run stays the plan it was.
 	for _, entry := range op.Entries(cards[0].ID) {
-		if strings.Contains(entry, "round 1 —") {
-			t.Errorf("the card of the run names the outcome of a round: %q", entry)
+		if strings.Contains(entry, "rounds:") {
+			t.Errorf("the card of the run carries the tree of the rounds: %q", entry)
 		}
 	}
 }
@@ -315,10 +315,10 @@ func TestTheRoundCardCarriesTheStepsOfTheRound(t *testing.T) {
 	}
 }
 
-// TestTheRunBlockListsTheRoundsThatHaveFinished — the block that
-// names the run lists the rounds that have finished, with the time
-// each of them ended. The round the run is in is not among them.
-func TestTheRunBlockListsTheRoundsThatHaveFinished(t *testing.T) {
+// TestTheRoundsTreeCarriesTheFactsOfEveryRound — the tree reads as a
+// ledger: every finished round carries its marker, when it started, how
+// long it took and the numbers of the run so far.
+func TestTheRoundsTreeCarriesTheFactsOfEveryRound(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 	svc, _ := testService(t, dir, noModels())
@@ -333,33 +333,39 @@ func TestTheRunBlockListsTheRoundsThatHaveFinished(t *testing.T) {
 	r := newRun(svc, Request{Name: "one", ChatID: "obs-1", Cwd: "/tmp/work"}, bound, nil)
 	t.Cleanup(r.cancel)
 
-	ended := time.Date(2026, 11, 18, 14, 7, 41, 0, time.UTC)
-	r.state.Rounds = map[string]int{"main": 3}
-	r.policy.History = []wfe.ActionRecord{
-		{Kind: wfe.ActionKindRun, StepID: "commit", Round: 1, At: ended},
-		{Kind: wfe.ActionKindRun, StepID: "commit", Round: 2, At: ended.Add(time.Minute)},
+	start := time.Date(2026, 11, 18, 10, 33, 4, 0, time.UTC)
+	r.roundRecords = []roundRecord{
+		{
+			Round:     1,
+			Job:       "main",
+			StartedAt: start,
+			EndedAt:   start.Add(5*time.Minute + 25*time.Second),
+			Outcome:   wfe.Outcome{Status: wfe.OutcomeOK, Summary: "the fix landed"},
+			Decisions: roundDecisions{System1: 1, Operator: 1},
+			Usage:     llm.Usage{InputTokens: 32400, OutputTokens: 8100},
+		},
 	}
 
-	block := r.runBlock()
-	if !strings.HasPrefix(block, "→ run:     one-") {
-		t.Errorf("the block does not name the run: %q", block)
+	tree := r.roundsTree(iteration{job: "main", round: 2})
+	want := []string{
+		"rounds:",
+		"├─ [ √ ] 1: 10:33:04 · 5m25s decisions:  system-1 ×1 · operator ×1 ·  tokens - 32.4k / 8.1k",
+		"└─ [ > ] 2: ",
 	}
-	for _, want := range []string{
-		"→ round 1: main · 14:07:41",
-		"→ round 2: main · 14:08:41",
-	} {
-		if !strings.Contains(block, want) {
-			t.Errorf("the block does not list %q: %q", want, block)
+	got := strings.Split(tree, "\n")
+	if len(got) != len(want) {
+		t.Fatalf("the tree holds %d lines, want %d: %q", len(got), len(want), tree)
+	}
+	for i, line := range got {
+		if !strings.HasPrefix(line, want[i]) {
+			t.Errorf("line %d is %q, want %q", i, line, want[i])
 		}
-	}
-	if strings.Contains(block, "round 3") {
-		t.Errorf("the block lists the round the run is in: %q", block)
 	}
 }
 
-// TestTheRunBlockListsTheLastRoundOfAJobThatIsDone — a job whose
-// steps all ran has finished its round: the block lists it.
-func TestTheRunBlockListsTheLastRoundOfAJobThatIsDone(t *testing.T) {
+// TestTheRoundsTreeFoldsTheOldRounds — the tree shows the last rounds
+// of the run: the earlier ones fold into one node.
+func TestTheRoundsTreeFoldsTheOldRounds(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 	svc, _ := testService(t, dir, noModels())
@@ -374,16 +380,106 @@ func TestTheRunBlockListsTheLastRoundOfAJobThatIsDone(t *testing.T) {
 	r := newRun(svc, Request{Name: "one", ChatID: "obs-1", Cwd: "/tmp/work"}, bound, nil)
 	t.Cleanup(r.cancel)
 
-	ended := time.Date(2026, 11, 18, 14, 7, 41, 0, time.UTC)
-	r.state.Rounds = map[string]int{"main": 1}
-	r.state.Steps = []wfe.StepState{{ID: "commit", Job: "main"}}
-	r.policy.History = []wfe.ActionRecord{
-		{Kind: wfe.ActionKindRun, StepID: "commit", Round: 1, At: ended},
+	start := time.Date(2026, 11, 18, 10, 33, 4, 0, time.UTC)
+	for i := 1; i <= 8; i++ {
+		r.roundRecords = append(r.roundRecords, roundRecord{
+			Round:     i,
+			Job:       "main",
+			StartedAt: start.Add(time.Duration(i) * time.Minute),
+			EndedAt:   start.Add(time.Duration(i)*time.Minute + time.Second),
+			Outcome:   wfe.Outcome{Status: wfe.OutcomeOK},
+		})
 	}
 
-	block := r.runBlock()
-	if !strings.Contains(block, "→ round 1: main · 14:07:41") {
-		t.Errorf("the block does not list the finished round: %q", block)
+	tree := r.roundsTree(iteration{job: "main", round: 9})
+	if !strings.Contains(tree, "├─ … +3") {
+		t.Errorf("the tree does not fold the old rounds: %q", tree)
+	}
+	for _, want := range []string{"4: ", "5: ", "6: ", "7: ", "8: "} {
+		if !strings.Contains(tree, want) {
+			t.Errorf("the tree does not list round %s: %q", want, tree)
+		}
+	}
+	if strings.Contains(tree, "1: ") {
+		t.Errorf("the tree lists a folded round: %q", tree)
+	}
+}
+
+// TestTheRoundThatFailedSaysSo — the marker of a round tells how it
+// came to.
+func TestTheRoundThatFailedSaysSo(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+	svc, _ := testService(t, dir, noModels())
+	wf, ok := svc.catalog.Lookup("one")
+	if !ok {
+		t.Fatal("the workflow is not in the catalogue")
+	}
+	bound, err := wfe.Bind(wf, map[string]string{})
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	r := newRun(svc, Request{Name: "one", ChatID: "obs-1", Cwd: "/tmp/work"}, bound, nil)
+	t.Cleanup(r.cancel)
+
+	start := time.Date(2026, 11, 18, 10, 33, 4, 0, time.UTC)
+	r.roundRecords = []roundRecord{{
+		Round:     1,
+		Job:       "main",
+		StartedAt: start,
+		EndedAt:   start.Add(time.Second),
+		Outcome:   wfe.Outcome{Status: wfe.OutcomeFailed, Summary: "the remote refused"},
+	}}
+
+	tree := r.roundsTree(iteration{job: "main", round: 2})
+	if !strings.Contains(tree, "[ ! ]") {
+		t.Errorf("the tree does not mark the round that failed: %q", tree)
+	}
+	rec := r.roundRecords[0]
+	if got := roundEndedLine(rec); !strings.Contains(got, "[ ! ] the remote refused") {
+		t.Errorf("the closing line does not name the failure: %q", got)
+	}
+}
+
+// TestTheClosingBlockOfARoundCarriesItsNumbers — the closing block
+// carries the numbers of the run through that round.
+func TestTheClosingBlockOfARoundCarriesItsNumbers(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+	svc, _ := testService(t, dir, noModels())
+	wf, ok := svc.catalog.Lookup("one")
+	if !ok {
+		t.Fatal("the workflow is not in the catalogue")
+	}
+	bound, err := wfe.Bind(wf, map[string]string{})
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	r := newRun(svc, Request{Name: "one", ChatID: "obs-1", Cwd: "/tmp/work"}, bound, nil)
+	t.Cleanup(r.cancel)
+
+	start := time.Date(2026, 11, 18, 10, 33, 4, 0, time.UTC)
+	rec := roundRecord{
+		Round:     1,
+		Job:       "main",
+		StartedAt: start,
+		EndedAt:   start.Add(5*time.Minute + 14*time.Second),
+		Outcome:   wfe.Outcome{Status: wfe.OutcomeOK, Summary: "the fix landed"},
+		Decisions: roundDecisions{System1: 1, Operator: 1},
+		Usage:     llm.Usage{InputTokens: 32400, OutputTokens: 8100},
+	}
+
+	if got := roundEndedLine(rec); got != "ended: [ √ ] the fix landed · 5m14s" {
+		t.Errorf("the closing line is %q", got)
+	}
+	want := "decisions:  system-1 ×1 · operator ×1 ·  tokens - 32.4k / 8.1k"
+	if got := decisionsText(rec); got != want {
+		t.Errorf("the decisions line is %q, want %q", got, want)
+	}
+	// A round in which nothing was decided says so.
+	empty := roundRecord{Outcome: wfe.Outcome{Status: wfe.OutcomeOK}}
+	if got := decisionsText(empty); !strings.HasPrefix(got, "decisions:  none") {
+		t.Errorf("the decisions line is %q, want it to say none", got)
 	}
 }
 
@@ -474,10 +570,10 @@ func TestTheDetailOfAStepIsCutShort(t *testing.T) {
 	}
 }
 
-// TestTheRunCardIsRenderedAsArrowRows — the body of the run card is a
-// flat flow: the facts of the run are arrow rows and every job is a
-// row of its own. The values of the rows start at the same column.
-func TestTheRunCardIsRenderedAsArrowRows(t *testing.T) {
+// TestTheRunCardIsRenderedAsACommandLine — the body of the run card
+// reads like the output of a command: a headline, the facts of the run
+// and the tree of its plan.
+func TestTheRunCardIsRenderedAsACommandLine(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "two", flowWorkflow)
 	svc, _ := testService(t, dir, noModels())
@@ -493,18 +589,24 @@ func TestTheRunCardIsRenderedAsArrowRows(t *testing.T) {
 	t.Cleanup(r.cancel)
 
 	want := []string{
-		BotMark + r.id,
-		"**two** — Two jobs.",
-		"→ rounds:  1 round",
-		"→ jobs:    2 · steps: 3",
-		"→ started: " + clockTime(r.state.StartedAt),
-		"→ args:    id=42",
-		"→ ship:    fix → commit",
-		"→ verify:  review",
+		"▶ [ two ] started",
+		"Two jobs.",
+		"",
+		"jobs:     2",
+		"steps:    3",
+		"started:  " + clockTime(r.state.StartedAt),
+		"args:     id=42",
+		"",
+		"ship",
+		"├─ [ 1 ]: fix      /gtw fix",
+		"└─ [ 2 ]: commit   /gtw commit",
+		"",
+		"verify",
+		"└─ [ 3 ]: review   /review",
 	}
-	got := strings.Split(r.runOverview(), "\n")
+	got := strings.Split(r.runCard(), "\n")
 	if len(got) != len(want) {
-		t.Fatalf("the overview holds %d lines, want %d: %q", len(got), len(want), r.runOverview())
+		t.Fatalf("the card holds %d lines, want %d: %q", len(got), len(want), r.runCard())
 	}
 	for i, line := range got {
 		if line != want[i] {
@@ -513,10 +615,9 @@ func TestTheRunCardIsRenderedAsArrowRows(t *testing.T) {
 	}
 }
 
-// TestTheRunCardOmitsTheRoundsRowWhenTheJobsDiffer — the round count
-// is the count every job shares: a workflow whose jobs declare
-// different counts carries the count of each job on its own row.
-func TestTheRunCardOmitsTheRoundsRowWhenTheJobsDiffer(t *testing.T) {
+// TestTheRunCardNamesTheRoundsOfEveryJob — every job says how many
+// rounds it runs.
+func TestTheRunCardNamesTheRoundsOfEveryJob(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "rounds", roundWorkflow)
 	svc, _ := testService(t, dir, noModels())
@@ -531,22 +632,18 @@ func TestTheRunCardOmitsTheRoundsRowWhenTheJobsDiffer(t *testing.T) {
 	r := newRun(svc, Request{Name: "rounds", ChatID: "obs-1", Cwd: "/tmp/work"}, bound, nil)
 	t.Cleanup(r.cancel)
 
-	overview := r.runOverview()
-	if strings.Contains(overview, "rounds:") && !strings.Contains(overview, "· 2 rounds") {
-		t.Errorf("the overview carries a shared rounds row: %q", overview)
-	}
+	card := r.runCard()
 	for _, want := range []string{
-		"→ ship:    fix · 2 rounds",
-		"→ verify:  review · 3 rounds",
+		"ship ⟳ 2 rounds",
+		"verify ⟳ 3 rounds",
 	} {
-		if !strings.Contains(overview, want) {
-			t.Errorf("the overview does not carry %q: %q", want, overview)
+		if !strings.Contains(card, want) {
+			t.Errorf("the card does not carry %q: %q", want, card)
 		}
 	}
-	for _, line := range strings.Split(overview, "\n") {
-		if strings.HasPrefix(line, "→ rounds:") {
-			t.Errorf("the overview carries a shared rounds row: %q", overview)
-		}
+	// A run without arguments carries no args row.
+	if strings.Contains(card, "args:") {
+		t.Errorf("the card carries an args row: %q", card)
 	}
 }
 
@@ -663,6 +760,211 @@ func TestTheDetailOfAStepIsCutShortAfterTheBranchIsDropped(t *testing.T) {
 	}
 }
 
+// TestTheCurrentRoundSaysWhenItStarted — the node of the round that
+// is going says when the round started.
+func TestTheCurrentRoundSaysWhenItStarted(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+	svc, _ := testService(t, dir, noModels())
+	wf, ok := svc.catalog.Lookup("one")
+	if !ok {
+		t.Fatal("the workflow is not in the catalogue")
+	}
+	bound, err := wfe.Bind(wf, map[string]string{})
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	r := newRun(svc, Request{Name: "one", ChatID: "obs-1", Cwd: "/tmp/work"}, bound, nil)
+	t.Cleanup(r.cancel)
+
+	start := time.Date(2026, 11, 18, 10, 33, 4, 0, time.UTC)
+	r.setRoundStarted(iteration{job: "main", round: 2}, start.Add(time.Minute))
+
+	tree := r.roundsTree(iteration{job: "main", round: 2})
+	want := "└─ [ > ] 2: " + clockTime(start.Add(time.Minute))
+	if !strings.Contains(tree, want) {
+		t.Errorf("the tree does not say when the round started: %q", tree)
+	}
+}
+
+// TestTheRoundThatEndsIsRecorded — a round that ends leaves its facts
+// with the run: the tree of the rounds reads them back.
+func TestTheRoundThatEndsIsRecorded(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+	svc, _ := testService(t, dir, noModels())
+	wf, ok := svc.catalog.Lookup("one")
+	if !ok {
+		t.Fatal("the workflow is not in the catalogue")
+	}
+	bound, err := wfe.Bind(wf, map[string]string{})
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	r := newRun(svc, Request{Name: "one", ChatID: "obs-1", Cwd: "/tmp/work"}, bound, nil)
+	t.Cleanup(r.cancel)
+
+	at := time.Date(2026, 11, 18, 10, 33, 4, 0, time.UTC)
+	r.policy.History = []wfe.ActionRecord{{
+		Kind:    wfe.ActionKindRun,
+		StepID:  "commit",
+		Round:   1,
+		Outcome: wfe.Outcome{Status: wfe.OutcomeOK, Summary: "the commit landed"},
+		At:      at,
+	}}
+	r.roundSystem1Decisions = 1
+	r.roundOperatorDecisions = 2
+	r.roundUsage = llm.Usage{InputTokens: 100, OutputTokens: 20}
+
+	rec := r.closeRound("main", 1, at.Add(time.Minute))
+	if rec.Decisions.System1 != 1 || rec.Decisions.Operator != 2 {
+		t.Errorf("the record counts %+v, want the decisions of the round", rec.Decisions)
+	}
+	if rec.Usage.InputTokens != 100 || rec.Usage.OutputTokens != 20 {
+		t.Errorf("the record carries %+v, want what the round spent", rec.Usage)
+	}
+	if rec.StartedAt != at {
+		t.Errorf("the round started at %v, want %v", rec.StartedAt, at)
+	}
+	if rec.EndedAt != at.Add(time.Minute) {
+		t.Errorf("the round ended at %v, want %v", rec.EndedAt, at.Add(time.Minute))
+	}
+	if len(r.roundRecords) != 1 || r.roundRecords[0].Round != 1 {
+		t.Errorf("the run holds %+v, want the record of the round", r.roundRecords)
+	}
+	if rec.Outcome.Summary != "the commit landed" {
+		t.Errorf("the record carries %q, want what the round came to", rec.Outcome.Summary)
+	}
+}
+
+// TestTheRoundsSurviveARestart — the facts of the rounds a run
+// finished are persisted with the run: the tree of the rounds looks the
+// same after a restart of the daemon.
+func TestTheRoundsSurviveARestart(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+	svc, _ := testService(t, dir, noModels())
+	wf, ok := svc.catalog.Lookup("one")
+	if !ok {
+		t.Fatal("the workflow is not in the catalogue")
+	}
+	bound, err := wfe.Bind(wf, map[string]string{})
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	r := newRun(svc, Request{Name: "one", ChatID: "obs-1", Cwd: "/tmp/work"}, bound, nil)
+	t.Cleanup(r.cancel)
+
+	start := time.Date(2026, 11, 18, 10, 33, 4, 0, time.UTC)
+	r.roundRecords = []roundRecord{
+		{
+			Round:     1,
+			Job:       "main",
+			StartedAt: start,
+			EndedAt:   start.Add(time.Minute),
+			Outcome:   wfe.Outcome{Status: wfe.OutcomeOK, Summary: "the fix landed"},
+			Decisions: roundDecisions{System1: 1},
+			Usage:     llm.Usage{InputTokens: 100, OutputTokens: 20},
+		},
+		{
+			Round:     2,
+			Job:       "main",
+			StartedAt: start.Add(time.Minute),
+			EndedAt:   start.Add(2 * time.Minute),
+			Outcome:   wfe.Outcome{Status: wfe.OutcomeOK, Summary: "the fix landed again"},
+			Decisions: roundDecisions{System1: 1, Operator: 1},
+			Usage:     llm.Usage{InputTokens: 200, OutputTokens: 40},
+		},
+	}
+
+	restored := svc.restoreRun(persistedRun{
+		RunID:        "one-1",
+		ChatID:       "obs-1",
+		Cwd:          "/tmp/work",
+		Workflow:     r.workflow,
+		State:        r.state,
+		RoundRecords: r.roundRecords,
+	})
+	if len(restored.roundRecords) != 2 {
+		t.Fatalf("the restored run holds %d records, want 2", len(restored.roundRecords))
+	}
+	tree := restored.roundsTree(iteration{job: "main", round: 3})
+	for _, want := range []string{
+		"[ √ ] 1: 10:33:04 · 1m00s decisions:  system-1 ×1 ·  tokens - 100 / 20",
+		"[ √ ] 2: 10:34:04 · 1m00s decisions:  system-1 ×1 · operator ×1 ·  tokens - 200 / 40",
+	} {
+		if !strings.Contains(tree, want) {
+			t.Errorf("the tree does not carry %q: %q", want, tree)
+		}
+	}
+}
+
+// TestTheDecisionsOfTheRoundAreCounted — the round counts what each
+// capability decided.
+func TestTheDecisionsOfTheRoundAreCounted(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+	svc, _ := testService(t, dir, noModels())
+	wf, ok := svc.catalog.Lookup("one")
+	if !ok {
+		t.Fatal("the workflow is not in the catalogue")
+	}
+	bound, err := wfe.Bind(wf, map[string]string{})
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	r := newRun(svc, Request{Name: "one", ChatID: "obs-1", Cwd: "/tmp/work"}, bound, nil)
+	t.Cleanup(r.cancel)
+
+	r.recordWake(wakeRecord{Who: decisionDecider})
+	r.recordWake(wakeRecord{Who: decisionChat})
+	r.recordWake(wakeRecord{Who: decisionChat})
+
+	if r.roundSystem1Decisions != 1 {
+		t.Errorf("the round counts %d decisions of the decision model, want 1", r.roundSystem1Decisions)
+	}
+	if r.roundSystem2Decisions != 2 {
+		t.Errorf("the round counts %d turns of the chat model, want 2", r.roundSystem2Decisions)
+	}
+}
+
+// TestTheAnswerOfTheOperatorCountsOnce — the answers of the operator
+// are counted once: a click on an option is the same answer as a typed
+// reply.
+func TestTheAnswerOfTheOperatorCountsOnce(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+	svc, _ := testService(t, dir, noModels())
+	wf, ok := svc.catalog.Lookup("one")
+	if !ok {
+		t.Fatal("the workflow is not in the catalogue")
+	}
+	bound, err := wfe.Bind(wf, map[string]string{})
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	r := newRun(svc, Request{Name: "one", ChatID: "obs-1", Cwd: "/tmp/work"}, bound, nil)
+	t.Cleanup(r.cancel)
+
+	r.mu.Lock()
+	r.ask = &askState{Question: "which one?", Options: []llm.Option{{Value: "/gtw commit"}}, RequestID: "req-1"}
+	r.mu.Unlock()
+
+	if err := r.deliver("/gtw commit"); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	if r.roundOperatorDecisions != 1 {
+		t.Errorf("the round counts %d answers of the operator, want 1", r.roundOperatorDecisions)
+	}
+	// The run is no longer waiting: a second answer is not an answer.
+	if err := r.deliver("/gtw commit"); err == nil {
+		t.Error("the run took a second answer")
+	}
+	if r.roundOperatorDecisions != 1 {
+		t.Errorf("the round counts %d answers of the operator, want 1", r.roundOperatorDecisions)
+	}
+}
+
 // flowWorkflow is a workflow of two jobs: the first one holds two
 // steps, the second one holds a single step.
 const flowWorkflow = `title: Two jobs.
@@ -709,4 +1011,32 @@ jobs:
         message: /gtw push
       - id: pr
         message: /gtw pr
+`
+
+// cliWorkflow is a workflow that reads like a command line: one job
+// that repeats until the run ends, with eight steps.
+const cliWorkflow = `title: 自动挑选处于 open 状态的 nightme/assigned 的 issue,执行修复,review,并提交 PR
+args:
+  - name: issue
+    default: "*"
+jobs:
+  ship:
+    iterations: 0
+    steps:
+      - id: fix
+        message: /gtw fix * -y
+      - id: commit
+        message: /gtw commit
+      - id: review
+        message: /review
+      - id: commit-revise
+        message: /gtw commit
+      - id: push
+        message: /gtw push
+      - id: pr
+        message: /gtw pr
+      - id: back
+        message: /gtw back
+      - id: wait
+        wait: 5m
 `

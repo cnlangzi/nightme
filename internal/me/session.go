@@ -151,10 +151,10 @@ func (s *Service) adoptSessionCards(r *run) {
 // openRunSession opens the session of the run.
 //
 // The card hangs under the message that started the run, so the
-// operator finds it where the run began. The card carries the
-// overview of the run and nothing else: what the run is stays the
-// same from the start to the end, and the live state of the work is
-// on the card of the round.
+// operator finds it where the run began. The card carries the plan of
+// the run and nothing else: what the run is stays the same from the
+// start to the end, and the live state of the work is on the card of
+// the round.
 func (s *Service) openRunSession(ctx context.Context, r *run, replyTo string) bool {
 	sess := s.openSession(ctx, r, sessionRun, r.id, "", 0, replyTo)
 	if sess.cardID == "" {
@@ -166,15 +166,15 @@ func (s *Service) openRunSession(ctx context.Context, r *run, replyTo string) bo
 	r.setRunSession(sess)
 	r.setGitStatus(s.gitStatus(r))
 	s.publishInit(ctx, r, sess)
-	s.publishReply(ctx, r, sess, r.runOverview())
+	s.publishReply(ctx, r, sess, r.runCard())
 	return true
 }
 
 // openRoundSession opens the session of a job round.
 //
 // The card hangs under the run's card: the round is the run's work,
-// one level below it. The card names the run the round belongs to and
-// carries the steps of the round as its checklist.
+// one level below it. The card carries the tree of the rounds of the
+// run and the steps of the round as its checklist.
 func (s *Service) openRoundSession(ctx context.Context, r *run, it iteration) {
 	replyTo := ""
 	if runSess := r.runSessionRef(); runSess != nil {
@@ -182,11 +182,13 @@ func (s *Service) openRoundSession(ctx context.Context, r *run, it iteration) {
 	}
 	sess := s.openSession(ctx, r, sessionRound, roundIdentity(it), it.job, it.round, replyTo)
 	r.setRoundSession(sess)
-	r.resetRoundUsage()
+	r.resetRound()
+	// The round starts when its card opens: the first action of the
+	// round follows a moment later.
+	r.setRoundStarted(it, s.now())
 	r.rememberRoundSession(it, sess)
 	s.publishInit(ctx, r, sess)
-	s.publishReply(ctx, r, sess, r.runBlock())
-	s.publishReply(ctx, r, sess, BotMark+roundIdentity(it))
+	s.publishReply(ctx, r, sess, r.roundsTree(it))
 	s.publishTasks(ctx, r, sess, r.roundTasks(it.job, it.round))
 }
 
@@ -246,7 +248,7 @@ func (s *Service) switchRoundSession(ctx context.Context, r *run, it iteration) 
 	if sess, known := r.roundSessionOf(it); known && sess != nil {
 		// The round has a session of its own: the run goes back to it.
 		r.setRoundSession(sess)
-		r.resetRoundUsage()
+		r.resetRound()
 		s.publishTasks(ctx, r, sess, r.roundTasks(it.job, it.round))
 		return
 	}
@@ -262,10 +264,14 @@ func (s *Service) closeRoundSession(ctx context.Context, r *run) {
 	if sess == nil {
 		return
 	}
-	out := r.roundOutcome(sess.job, sess.round)
+	rec := r.closeRound(sess.job, sess.round, s.now())
 	ctx = context.WithoutCancel(r.ctx)
-	s.publishReply(ctx, r, sess, roundOutcomeLine(sess.job, sess.round, out))
-	s.publishResult(ctx, r, sess, string(out.Status))
+	s.publishReply(ctx, r, sess, roundEndedLine(rec))
+	s.publishReply(ctx, r, sess, decisionsText(rec))
+	s.publishResult(ctx, r, sess, string(rec.Outcome.Status))
+	// The facts of the round belong to the run: a daemon that comes
+	// back renders the tree of the rounds the same way.
+	s.persist(r)
 	r.setRoundSession(nil)
 }
 
@@ -498,15 +504,6 @@ func (s *Service) publishHeartbeat(ctx context.Context, r *run) {
 		Kind:      messages.OutHeartbeat,
 		Heartbeat: &snap,
 	})
-}
-
-// roundOutcomeLine renders a finished job round as one entry of the
-// round's card.
-func roundOutcomeLine(job string, round int, out wfe.Outcome) string {
-	if out.Summary == "" {
-		return fmt.Sprintf("%s · round %d — %s", job, round, out.Status)
-	}
-	return fmt.Sprintf("%s · round %d — %s: %s", job, round, out.Status, out.Summary)
 }
 
 // modelName returns the name of the model the run thinks with.

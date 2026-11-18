@@ -2,6 +2,7 @@ package wfe
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -14,10 +15,10 @@ import (
 
 // Failure is one workflow file that did not load.
 //
-// The name is the base name the file would have provided: it is what
-// the operator asks for, so the failure is reported against it.
+// The name is the name the file would have provided: it is what the
+// operator asks for, so the failure is reported against it.
 type Failure struct {
-	// Name is the base name of the file.
+	// Name is the name of the workflow the file would have provided.
 	Name string
 	// Path is the file that did not load.
 	Path string
@@ -32,25 +33,26 @@ func (f Failure) Error() string {
 
 // LoadDir loads the workflow files of dir.
 //
-// Both `*.yaml` and `*.yml` are read, and a workflow's identity is the
-// base name of its file. The workflows that loaded come back with one
-// failure per base name that is unusable: a broken file does not take
-// the workflows beside it down with it.
+// Both `*.yaml` and `*.yml` are read, at any depth, and a workflow's
+// identity is its path relative to dir without the extension. The
+// workflows that loaded come back with one failure per name that is
+// unusable: a broken file does not take the workflows beside it down
+// with it.
 func LoadDir(dir string) ([]*Workflow, []Failure) {
 	paths, err := WorkflowPaths(dir)
 	if err != nil {
 		return nil, []Failure{{Path: dir, Err: fmt.Errorf("the workflows directory %s cannot be read: %w", dir, err)}}
 	}
-	claims := map[string][]string{}  // base name -> the files that claim it
-	loaded := map[string]*Workflow{} // base name -> the workflow that loaded
-	broken := map[string]Failure{}   // base name -> why the file did not load
+	claims := map[string][]string{}  // name -> the files that claim it
+	loaded := map[string]*Workflow{} // name -> the workflow that loaded
+	broken := map[string]Failure{}   // name -> why the file did not load
 	for _, path := range paths {
-		name := BaseName(path)
+		name := WorkflowName(dir, path)
 		if name == "" {
 			continue
 		}
 		claims[name] = append(claims[name], path)
-		wf, err := LoadFile(path)
+		wf, err := LoadFile(dir, path)
 		if err != nil {
 			broken[name] = Failure{
 				Name: name,
@@ -93,9 +95,13 @@ func LoadDir(dir string) ([]*Workflow, []Failure) {
 
 // WorkflowPaths returns the workflow files of dir, sorted.
 //
-// A workflow file is a `*.yaml` or a `*.yml` file. A directory that
-// cannot be read is an error: the caller says so instead of reporting
-// an empty directory.
+// The directory is read at any depth: a workflow file is a `*.yaml` or
+// a `*.yml` file, wherever it sits under dir. The reserved directories
+// — the workflows directory's own `actions` and `runs` children — are
+// never descended into.
+//
+// A directory that cannot be read is an error: the caller says so
+// instead of reporting an empty directory.
 //
 // The directory is checked before it is read: a path that is not a
 // directory is refused on every platform, because reading it does not
@@ -114,37 +120,94 @@ func WorkflowPaths(dir string) ([]string, error) {
 	if !info.IsDir() {
 		return nil, fmt.Errorf("%s is not a directory", dir)
 	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, err
-	}
 	var out []string
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
+	walkErr := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
 		}
-		switch filepath.Ext(e.Name()) {
-		case ".yaml", ".yml":
-			out = append(out, filepath.Join(dir, e.Name()))
+		if !entry.IsDir() {
+			switch filepath.Ext(entry.Name()) {
+			case ".yaml", ".yml":
+				out = append(out, path)
+			}
+			return nil
 		}
+		if path == dir || !isReservedChild(dir, path) {
+			return nil
+		}
+		return fs.SkipDir
+	})
+	if walkErr != nil {
+		return nil, walkErr
 	}
 	sort.Strings(out)
 	return out, nil
 }
 
-// BaseName returns the identity of a workflow file: its name without
-// the extension.
+// isReservedChild reports whether path is one of the workflows
+// directory's own children whose name is reserved.
+//
+// The reserved directories are the workflows directory's own children:
+// `actions` holds the user's action scripts and `runs` holds the run
+// state. A directory of the same name deeper down is an ordinary
+// namespace.
+func isReservedChild(dir, path string) bool {
+	rel, err := filepath.Rel(dir, path)
+	if err != nil {
+		return false
+	}
+	if strings.Contains(rel, string(filepath.Separator)) {
+		return false
+	}
+	switch filepath.Base(rel) {
+	case "actions", "runs":
+		return true
+	}
+	return false
+}
+
+// BaseName returns the name of a file without its extension.
+//
+// It names the file, not the workflow: the workflow's name is its path
+// under the workflows directory (see WorkflowName).
 func BaseName(path string) string {
 	base := filepath.Base(path)
 	return strings.TrimSuffix(base, filepath.Ext(base))
 }
 
+// WorkflowName returns the name of the workflow file at path: its path
+// relative to root, without the extension.
+//
+// "nightme/coder.yml" under root is the workflow "nightme/coder". The
+// separator is always "/", so a workflow's name is the same on every
+// platform. An empty root means the file's own directory.
+func WorkflowName(root, path string) string {
+	if strings.TrimSpace(root) == "" {
+		root = filepath.Dir(path)
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		rel = filepath.Base(path)
+	}
+	rel = filepath.ToSlash(rel)
+	if rel == ".." || strings.HasPrefix(rel, "../") {
+		// The file is not under the root: it has no path-relative
+		// name, so it keeps the name of its file.
+		return BaseName(path)
+	}
+	name := strings.TrimSuffix(rel, filepath.Ext(rel))
+	if name == "" || name == "." {
+		return ""
+	}
+	return name
+}
+
 // LoadFile parses and validates a single workflow file.
 //
-// The file's base name is the workflow's identity and the workflow's
-// title states what it is for. The identity is set on the workflow;
-// the file does not carry it.
-func LoadFile(path string) (*Workflow, error) {
+// The file's path under root is the workflow's identity and the
+// workflow's title states what it is for. The identity is set on the
+// workflow; the file does not carry it.
+func LoadFile(root, path string) (*Workflow, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("wfe: %s: %w", filepath.Base(path), err)
@@ -153,7 +216,7 @@ func LoadFile(path string) (*Workflow, error) {
 	if err != nil {
 		return nil, fmt.Errorf("wfe: %s: %w", filepath.Base(path), err)
 	}
-	name := BaseName(path)
+	name := WorkflowName(root, path)
 	if name == "" {
 		return nil, fmt.Errorf("wfe: %s: the file has no name", filepath.Base(path))
 	}

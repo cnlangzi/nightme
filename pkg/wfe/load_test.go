@@ -45,13 +45,14 @@ func mustParse(t *testing.T, src string) *Workflow {
 
 // mustLoadFile writes a workflow file and loads it.
 //
-// The file's base name is the workflow's identity, so the file has to
-// carry the name the test expects.
+// The file's path under the workflows directory is the workflow's
+// identity, so the file has to carry the name the test expects.
 func mustLoadFile(t *testing.T, name, body string) *Workflow {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), name)
+	dir := t.TempDir()
+	path := filepath.Join(dir, name)
 	writeFile(t, path, body)
-	wf, err := LoadFile(path)
+	wf, err := LoadFile(dir, path)
 	if err != nil {
 		t.Fatalf("LoadFile: %v", err)
 	}
@@ -680,7 +681,7 @@ jobs:
 }
 
 // TestLoadFile_TheNameIsTheFileName — the identity of a workflow is
-// the base name of the file it was loaded from.
+// the path of the file it was loaded from, under the workflows dir.
 func TestLoadFile_TheNameIsTheFileName(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "fix.yml")
@@ -690,7 +691,7 @@ jobs:
   main:
     steps: [{message: hi}]
 `)
-	wf, err := LoadFile(path)
+	wf, err := LoadFile(dir, path)
 	if err != nil {
 		t.Fatalf("LoadFile: %v", err)
 	}
@@ -726,7 +727,7 @@ func TestLoadFile_IgnoresTheRetiredKeys(t *testing.T) {
 			dir := t.TempDir()
 			path := filepath.Join(dir, "fix.yml")
 			writeFile(t, path, tt.body)
-			wf, err := LoadFile(path)
+			wf, err := LoadFile(dir, path)
 			if err != nil {
 				t.Fatalf("the unused key was refused: %v", err)
 			}
@@ -746,14 +747,14 @@ func TestLoadFile_RefusesAFileWithoutATitle(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "fix.yml")
 	writeFile(t, path, "jobs:\n  main:\n    steps: [{message: hi}]\n")
-	_, err := LoadFile(path)
+	_, err := LoadFile(dir, path)
 	if err == nil || !strings.Contains(err.Error(), "title is required") {
 		t.Errorf("error = %v, want the title to be required", err)
 	}
 }
 
 // TestLoadDir_ReadsBothExtensions — a workflow is a *.yaml or a *.yml
-// file, and its name is the base name of that file.
+// file, and its name is its path under the workflows dir.
 func TestLoadDir_ReadsBothExtensions(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "fix.yaml"), "title: fix it\njobs:\n  main:\n    steps: [{message: hi}]\n")
@@ -862,6 +863,9 @@ jobs:
 // writeFile writes a file, failing the test when it cannot.
 func writeFile(t *testing.T, path, body string) {
 	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+	}
 	if err := os.WriteFile(path, []byte(body), 0644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
 	}
@@ -1044,5 +1048,122 @@ func TestWorkflowPaths_AnEmptyDirectoryHoldsNoWorkflows(t *testing.T) {
 	}
 	if len(paths) != 0 {
 		t.Errorf("paths = %v, want none", paths)
+	}
+}
+
+// TestWorkflowPaths_ReadsTheTreeAndSkipsTheReservedDirectories — the
+// loader walks the workflows directory at any depth, and the reserved
+// directories are never descended into.
+func TestWorkflowPaths_ReadsTheTreeAndSkipsTheReservedDirectories(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "top.yml"), "title: top\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeFile(t, filepath.Join(dir, "a", "b", "c.yml"), "title: deep\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeFile(t, filepath.Join(dir, "actions", "x.yml"), "title: action\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeFile(t, filepath.Join(dir, "runs", "r.json"), "{}\n")
+
+	paths, err := WorkflowPaths(dir)
+	if err != nil {
+		t.Fatalf("WorkflowPaths: %v", err)
+	}
+	want := []string{
+		filepath.Join(dir, "a", "b", "c.yml"),
+		filepath.Join(dir, "top.yml"),
+	}
+	if len(paths) != len(want) {
+		t.Fatalf("paths = %v, want %v", paths, want)
+	}
+	for i := range want {
+		if paths[i] != want[i] {
+			t.Errorf("paths[%d] = %q, want %q", i, paths[i], want[i])
+		}
+	}
+}
+
+// TestLoadDir_NamesTheWorkflowsByTheirPath — a workflow's name is its
+// path under the workflows directory, without the extension.
+func TestLoadDir_NamesTheWorkflowsByTheirPath(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "fix.yml"), "title: fix\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeFile(t, filepath.Join(dir, "nightme", "coder.yml"), "title: coder\njobs:\n  main:\n    steps: [{message: hi}]\n")
+
+	wfs, failures := LoadDir(dir)
+	if len(failures) != 0 {
+		t.Fatalf("failures = %v, want none", failures)
+	}
+	names := make([]string, 0, len(wfs))
+	for _, wf := range wfs {
+		names = append(names, wf.Name)
+	}
+	want := []string{"fix", "nightme/coder"}
+	if len(names) != len(want) {
+		t.Fatalf("names = %v, want %v", names, want)
+	}
+	for i := range want {
+		if names[i] != want[i] {
+			t.Errorf("names[%d] = %q, want %q", i, names[i], want[i])
+		}
+	}
+}
+
+// TestLoadFile_NamesTheWorkflowByItsPathUnderTheRoot — the loader
+// names the workflow after its place under the root.
+func TestLoadFile_NamesTheWorkflowByItsPathUnderTheRoot(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "nightme", "coder.yml")
+	writeFile(t, path, "title: coder\njobs:\n  main:\n    steps: [{message: hi}]\n")
+
+	wf, err := LoadFile(root, path)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	if wf.Name != "nightme/coder" {
+		t.Errorf("Name = %q, want nightme/coder", wf.Name)
+	}
+}
+
+// TestLoadDir_TwoFilesThatClaimOneNameMakeItUnusable — a duplicate
+// name is one failure, and neither file is offered under it.
+func TestLoadDir_TwoFilesThatClaimOneNameMakeItUnusable(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "nightme", "coder.yml"), "title: coder\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeFile(t, filepath.Join(dir, "nightme", "coder.yaml"), "title: coder\njobs:\n  main:\n    steps: [{message: hi}]\n")
+
+	wfs, failures := LoadDir(dir)
+	if len(wfs) != 0 {
+		t.Fatalf("workflows = %v, want none", wfs)
+	}
+	if len(failures) != 1 {
+		t.Fatalf("failures = %v, want one", failures)
+	}
+	if failures[0].Name != "nightme/coder" {
+		t.Errorf("the failure names %q, want nightme/coder", failures[0].Name)
+	}
+	if !strings.Contains(failures[0].Err.Error(), "duplicate workflow name") {
+		t.Errorf("the failure says %q, want it to name the clash", failures[0].Err)
+	}
+}
+
+// TestWorkflowName_AnEmptyRootMeansTheFilesOwnDirectory — a file
+// loaded without a root keeps the name of its file.
+func TestWorkflowName_AnEmptyRootMeansTheFilesOwnDirectory(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fix.yml")
+	writeFile(t, path, "title: fix\njobs:\n  main:\n    steps: [{message: hi}]\n")
+
+	if got := WorkflowName("", path); got != "fix" {
+		t.Errorf("WorkflowName = %q, want fix", got)
+	}
+}
+
+// TestWorkflowName_AFileOutsideTheRootKeepsTheNameOfItsFile — a file
+// that is not under the root has no path-relative name.
+func TestWorkflowName_AFileOutsideTheRootKeepsTheNameOfItsFile(t *testing.T) {
+	root := t.TempDir()
+	other := t.TempDir()
+	path := filepath.Join(other, "fix.yml")
+	writeFile(t, path, "title: fix\njobs:\n  main:\n    steps: [{message: hi}]\n")
+
+	if got := WorkflowName(root, path); got != "fix" {
+		t.Errorf("WorkflowName = %q, want fix", got)
 	}
 }

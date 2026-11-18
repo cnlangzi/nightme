@@ -295,3 +295,98 @@ func TestWorkflowValidate_TheOtherCommandsStillWork(t *testing.T) {
 		}
 	}
 }
+
+// TestWorkflowValidate_AWorkflowName — an argument that is not a path
+// on disk is looked up as a workflow name.
+func TestWorkflowValidate_AWorkflowName(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nightme", "coder.yml")
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("title: code it\njobs:\n  main:\n    steps: [{message: hi}]\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
+
+	var err error
+	out := captureStdout(t, func() error {
+		err = runRoot("workflow", "validate", "nightme/coder")
+		return nil
+	})
+	if out != "" {
+		t.Errorf("output = %q, want nothing", out)
+	}
+	if code := nmerrors.ExitCode(err); code != nmerrors.CodeSuccess {
+		t.Errorf("exit code = %d, want %d", code, nmerrors.CodeSuccess)
+	}
+}
+
+// TestWorkflowValidate_AWorkflowNameThatDoesNotValidate — the name
+// resolves to the file, and the file's problems are reported.
+func TestWorkflowValidate_AWorkflowNameThatDoesNotValidate(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nightme", "coder.yml")
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("jobs:\n  main:\n    steps: [{message: hi}]\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
+
+	var err error
+	out := captureStdout(t, func() error {
+		err = runRoot("workflow", "validate", "nightme/coder")
+		return nil
+	})
+	if !strings.Contains(out, path) {
+		t.Errorf("output = %q, want it to name the file", out)
+	}
+	if !strings.Contains(out, "title is required") {
+		t.Errorf("output = %q, want the title to be required", out)
+	}
+	if code := nmerrors.ExitCode(err); code != nmerrors.CodeValidationError {
+		t.Errorf("exit code = %d, want %d", code, nmerrors.CodeValidationError)
+	}
+}
+
+// TestWorkflowValidate_ANameThatIsNeitherAPathNorAWorkflow — an
+// argument that names nothing is a path that does not exist.
+func TestWorkflowValidate_ANameThatIsNeitherAPathNorAWorkflow(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
+
+	var err error
+	errOut := captureStderr(t, func() error {
+		err = runRoot("workflow", "validate", "nightme/nope")
+		return nil
+	})
+	if !strings.Contains(errOut, "nightme/nope") {
+		t.Errorf("stderr = %q, want it to name the argument", errOut)
+	}
+	if code := nmerrors.ExitCode(err); code != nmerrors.CodeNotFound {
+		t.Errorf("exit code = %d, want %d", code, nmerrors.CodeNotFound)
+	}
+}
+
+// TestWorkflowList_NamesTheWorkflowsByTheirPath — the list carries
+// the names the workflows are started by.
+func TestWorkflowList_NamesTheWorkflowsByTheirPath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nightme", "coder.yml")
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("title: code it\njobs:\n  main:\n    steps: [{message: hi}]\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
+
+	out := captureStdout(t, func() error {
+		return runRoot("workflow", "list")
+	})
+	if !strings.Contains(out, "nightme/coder") {
+		t.Errorf("output = %q, want the name of the workflow", out)
+	}
+}

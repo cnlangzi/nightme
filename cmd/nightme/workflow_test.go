@@ -251,8 +251,8 @@ jobs:
 }
 
 // TestWorkflowList_ReadsBothExtensionsAndTheTitle — a workflow is a
-// *.yaml or a *.yml file, its name is the base name of that file and
-// the list shows its title.
+// *.yaml or a *.yml file, its name is its path under the workflows
+// dir and the list shows its title.
 func TestWorkflowList_ReadsBothExtensionsAndTheTitle(t *testing.T) {
 	dir := t.TempDir()
 	for _, name := range []string{"fix.yaml", "other.yml"} {
@@ -274,7 +274,7 @@ func TestWorkflowList_ReadsBothExtensionsAndTheTitle(t *testing.T) {
 }
 
 // TestWorkflowShow_FindsAWorkflowByItsFileName — the name of a
-// workflow is the base name of its file.
+// workflow is its path under the workflows dir.
 func TestWorkflowShow_FindsAWorkflowByItsFileName(t *testing.T) {
 	dir := t.TempDir()
 	body := `

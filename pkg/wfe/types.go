@@ -9,7 +9,8 @@
 //
 //	import "github.com/cnlangzi/nightme/pkg/wfe"
 //
-//	wf, err := wfe.LoadFile("workflows/fix.yml")   // loads and validates
+//	wf, err := wfe.LoadFile("workflows", "workflows/nightme/coder.yml")
+//	// loads and validates; the workflow's name is "nightme/coder"
 package wfe
 
 import (
@@ -26,8 +27,10 @@ type Workflow struct {
 	// Title states what the workflow is for. It is what the operator
 	// reads and what the agent is given.
 	Title string `yaml:"title" json:"title"`
-	// Name is the workflow's identity: the base name of the file it was
-	// loaded from. The loader sets it; the file does not carry it.
+	// Name is the workflow's identity: the path of the file it was
+	// loaded from under the workflows directory, without the extension.
+	// "nightme/coder.yml" is the workflow "nightme/coder". The loader
+	// sets it; the file does not carry it.
 	Name       string         `yaml:"-" json:"name"`
 	Args       []Arg          `yaml:"args" json:"args,omitempty"`
 	Instruct   bool           `yaml:"instruct" json:"instruct"`

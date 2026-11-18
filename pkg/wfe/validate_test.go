@@ -468,7 +468,7 @@ func TestLoadFile_RefusesAWorkflowThatDoesNotValidate(t *testing.T) {
 	path := filepath.Join(dir, "fix.yml")
 	writeFile(t, path, "jobs:\n  main:\n    steps: [{message: hi}]\n")
 
-	wf, err := LoadFile(path)
+	wf, err := LoadFile(dir, path)
 	if err == nil {
 		t.Fatal("the workflow was accepted")
 	}
@@ -516,11 +516,27 @@ func TestLoadFile_IgnoresTheKeysTheSchemaDoesNotHave(t *testing.T) {
 	path := filepath.Join(dir, "fix.yml")
 	writeFile(t, path, "title: x\njobs:\n  main:\n    need: [a]\n    steps: [{message: hi}]\n")
 
-	wf, err := LoadFile(path)
+	wf, err := LoadFile(dir, path)
 	if err != nil {
 		t.Fatalf("the unknown key was refused: %v", err)
 	}
 	if wf.Title != "x" {
 		t.Errorf("Title = %q, want x", wf.Title)
+	}
+}
+
+// TestValidateDir_ReportsADuplicateUnderItsRelativeName — the clash
+// is reported against the name the two files claim.
+func TestValidateDir_ReportsADuplicateUnderItsRelativeName(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "nightme", "coder.yml"), "title: one\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeFile(t, filepath.Join(dir, "nightme", "coder.yaml"), "title: two\njobs:\n  main:\n    steps: [{message: hi}]\n")
+
+	diags := ValidateDir(dir)
+	if len(diags) != 1 {
+		t.Fatalf("diagnostics = %v, want one", diags)
+	}
+	if !strings.Contains(diags[0].Message, `duplicate workflow name "nightme/coder"`) {
+		t.Errorf("the diagnostic = %q, want the clash", diags[0].Message)
 	}
 }

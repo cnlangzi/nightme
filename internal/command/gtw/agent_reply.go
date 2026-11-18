@@ -58,8 +58,8 @@ import (
 // already-resolved cliAgent / ymlAgent in. The workspace + prompt
 // are also caller's responsibility: commit builds its prompt via
 // buildAgentPrompt(c) on the worktree; pr builds via
-// buildPRPrompt(c, baseBranch). runAgentFor doesn't know about
-// prompts — it just spawns and drains.
+// buildPRPrompt(c, baseBranch, lang, issue). runAgentFor doesn't
+// know about prompts — it just spawns and drains.
 //
 // Returns:
 //

@@ -154,26 +154,20 @@ func labelCheckWarning(owner, repo string, err error) string {
 	return fmt.Sprintf("⚠️ could not ensure gtw labels on %s/%s: %v", owner, repo, err)
 }
 
-// prependWarning puts the warning line at the front of a reply
-// body. An empty warning leaves the body alone.
-func prependWarning(warning, body string) string {
-	if warning == "" {
-		return body
-	}
-	return warning + "\n" + body
-}
-
-// warningBlock joins the warning lines into one block, in the order
-// they are given. Empty lines are dropped, so a caller can pass the
-// warnings it has without checking each one.
-func warningBlock(lines ...string) string {
-	kept := make([]string, 0, len(lines))
-	for _, line := range lines {
-		if line != "" {
-			kept = append(kept, line)
+// prependWarning puts the warning lines at the front of a reply
+// body, in the order they are given. Empty warnings are dropped; a
+// reply without any warning is left alone.
+func prependWarning(body string, warnings ...string) string {
+	kept := make([]string, 0, len(warnings))
+	for _, warning := range warnings {
+		if warning != "" {
+			kept = append(kept, warning)
 		}
 	}
-	return strings.Join(kept, "\n")
+	if len(kept) == 0 {
+		return body
+	}
+	return strings.Join(kept, "\n") + "\n" + body
 }
 
 // staleCatalogNote explains why attaching a label can fail even

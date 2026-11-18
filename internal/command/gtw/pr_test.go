@@ -676,6 +676,13 @@ func TestBuildPRPrompt_LinkedIssue_ReferenceIssue(t *testing.T) {
 	mustContain(t, p, "Statements marked [inferred] are assumptions")
 	mustContain(t, p, "The Implementation Plan is a starting point to re-validate against the current worktree, not a script.")
 	mustContain(t, p, "Open Questions are the first candidates for user questions")
+
+	// The paragraph must not name a section the PR body format does
+	// not define — `User Decisions Required` belongs to the /gtw fix
+	// plan, and a model that follows it literally would ship an
+	// extra top-level section in the body.
+	mustNotContain(t, p, "User Decisions Required")
+	mustContain(t, p, "report a decision the implementation had to make — with the reason — in the `Deviations from Issue #42:` section")
 }
 
 // TestBuildPRPrompt_LinkedIssue_ReferenceIssueIsLastSection: the
@@ -815,6 +822,21 @@ func TestNormalizeDeviationHeading(t *testing.T) {
 			want: "deviations from issue #42\n",
 		},
 		{
+			name: "label promoted to a heading",
+			body: "### Deviations from Issue #7:\n- something — because\n",
+			want: "### Deviations from Issue #42:\n- something — because\n",
+		},
+		{
+			name: "label copied from the generic marker form",
+			body: "Deviations from Issue #<id>:\n- something — because\n",
+			want: "Deviations from Issue #42:\n- something — because\n",
+		},
+		{
+			name: "prose that merely starts with the phrase is untouched",
+			body: "deviations from issue #7 were introduced upstream\n",
+			want: "deviations from issue #7 were introduced upstream\n",
+		},
+		{
 			name: "body without the label is untouched",
 			body: "## Summary by NightMe\n\nStuff.\n\nRisk: low — none\n",
 			want: "## Summary by NightMe\n\nStuff.\n\nRisk: low — none\n",
@@ -855,8 +877,12 @@ func TestHasDeviationSection(t *testing.T) {
 		{"bolded", "## Summary by NightMe\n\n**Deviations from Issue #42:**\n- x — y\n", true},
 		{"lower case without colon", "deviations from issue #42\n- x — y\n", true},
 		{"indented", "  Deviations from Issue #42:\n- x — y\n", true},
+		{"promoted to a heading", "## Summary by NightMe\n\n### Deviations from Issue #42:\n- x — y\n", true},
+		{"copied from the generic marker form", "Deviations from Issue #<id>:\n- x — y\n", true},
+		{"CRLF line ending", "## Summary by NightMe\r\n\r\nDeviations from Issue #42:\r\n- x — y\r\n", true},
 		{"absent", "## Summary by NightMe\n\nNew Features:\n- x\n\nRisk: low — none\n", false},
 		{"mentioned inside a bullet", "## Summary by NightMe\n\n- the Deviations from Issue #42: section is missing\n", false},
+		{"prose that merely starts with the phrase", "deviations from issue #42 were introduced upstream\n", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

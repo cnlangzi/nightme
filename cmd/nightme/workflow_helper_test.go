@@ -9,7 +9,7 @@ import (
 
 // runRoot invokes the nightme root cobra command with the given
 // args and returns the first non-nil error. Used by workflow
-// tests to exercise list/show/run without spinning up the
+// tests to exercise list/show/run/validate without spinning up the
 // full daemon. The cobra root is built fresh per call so tests
 // don't share state.
 func runRoot(args ...string) error {

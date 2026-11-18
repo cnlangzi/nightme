@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
@@ -158,14 +159,31 @@ type recordingAgent struct {
 	name        string
 	detectErr   error
 	runOnceText string
-	runOnceErr  error
-	mu          sync.Mutex
-	calls       []runOnceCall
+	// runOnceReplies scripts the answers: call N answers with
+	// runOnceReplies[N-1] (the last entry answers every call past
+	// the script). Empty means every call answers runOnceText.
+	runOnceReplies []runOnceReply
+	runOnceErr     error
+	mu             sync.Mutex
+	calls          []runOnceCall
+}
+
+// runOnceReply is one scripted answer of the recording agent. The
+// Model is what the answer reports on the agent footer, so a test
+// can tell the attempts apart; Err fails the call the way a real
+// agent fails when its context is done.
+type runOnceReply struct {
+	Text  string
+	Model string
+	Err   error
 }
 
 type runOnceCall struct {
 	workspace string
 	blocks    []agent.ContentBlock
+	// deadline is the deadline of the context the call ran on; the
+	// zero time when the context carries none.
+	deadline time.Time
 }
 
 func (r *recordingAgent) Info() agent.Info {
@@ -174,16 +192,28 @@ func (r *recordingAgent) Info() agent.Info {
 func (r *recordingAgent) Detect() error { return r.detectErr }
 func (r *recordingAgent) Init(string)   {}
 func (r *recordingAgent) Clone() agent.Starter {
-	return &recordingAgent{name: r.name, detectErr: r.detectErr, runOnceText: r.runOnceText}
+	return &recordingAgent{name: r.name, detectErr: r.detectErr, runOnceText: r.runOnceText, runOnceReplies: r.runOnceReplies}
 }
 func (r *recordingAgent) Start(context.Context, agent.StartConfig) (*agent.Agent, error) {
 	return nil, errors.New("recordingAgent: Start not implemented")
 }
-func (r *recordingAgent) RunOnce(_ context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock, opts ...agent.RunOnceOption) (agent.RunResult, error) {
+func (r *recordingAgent) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.calls = append(r.calls, runOnceCall{workspace: cfg.Workspace, blocks: append([]agent.ContentBlock(nil), blocks...)})
-	return agent.RunResult{Text: r.runOnceText}, r.runOnceErr
+	deadline, _ := ctx.Deadline()
+	r.calls = append(r.calls, runOnceCall{workspace: cfg.Workspace, blocks: append([]agent.ContentBlock(nil), blocks...), deadline: deadline})
+	res := agent.RunResult{Text: r.runOnceText}
+	if n := len(r.runOnceReplies); n > 0 {
+		i := len(r.calls) - 1
+		if i >= n {
+			i = n - 1
+		}
+		res = agent.RunResult{Text: r.runOnceReplies[i].Text, Model: r.runOnceReplies[i].Model}
+		if err := r.runOnceReplies[i].Err; err != nil {
+			return res, err
+		}
+	}
+	return res, r.runOnceErr
 }
 
 // Review is unimplemented for the gtw-push test fake — push tests

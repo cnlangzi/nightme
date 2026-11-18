@@ -222,7 +222,7 @@ func RunNewCreate(
 	}
 	card, outcome := createIssuesFromDrafts(ctx, draftDir, resolve)
 	return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-		prependWarning(labelWarning, card), outcome), nil
+		prependWarning(card, labelWarning), outcome), nil
 }
 
 // issueDraft is one pending draft file of the chat's draft set.
@@ -448,7 +448,7 @@ func (d issueDeps) warningLines() string {
 // card puts the warnings of the refused relations at the front of
 // the reply: the issues exist, but a dependency is missing.
 func (d issueDeps) card(body string) string {
-	return prependWarning(d.warningLines(), body)
+	return prependWarning(body, d.warningLines())
 }
 
 // recordIssueCreated replaces draft d with its NN.created record.

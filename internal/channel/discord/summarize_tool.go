@@ -243,22 +243,12 @@ func formatTaskList(items []agent.AgentTaskItem) string {
 	if len(items) == 0 {
 		return ""
 	}
-	order := make([]int, 0, len(items))
-	for i, it := range items {
-		// Filter TaskDeleted defensively: the bridge is supposed to
-		// remove deleted tasks before emitting, but a corrupt snapshot
-		// must not produce a visible "deleted" row.
-		if it.Status == agent.TaskDeleted {
-			continue
-		}
-		order = append(order, i)
-	}
+	rows := agent.VisibleTaskRows(items)
 
-	lines := make([]string, 0, len(order))
+	lines := make([]string, 0, len(rows))
 	total := 0
 	rendered := 0
-	for n, idx := range order {
-		line := agent.FormatTaskRow(n+1, items[idx])
+	for _, line := range rows {
 		cost := utf8.RuneCountInString(line) + 1
 		if total+cost > taskListBudgetRunes {
 			break
@@ -271,7 +261,7 @@ func formatTaskList(items []agent.AgentTaskItem) string {
 		return taskListHeader + "\n\n" + taskListOverflowPlaceholder
 	}
 	body := strings.Join(lines, "\n")
-	if rendered < len(order) {
+	if rendered < len(rows) {
 		body += "\n" + taskListMore
 	}
 	return taskListHeader + "\n\n" + body

@@ -1235,7 +1235,7 @@ Telegram 只支持 `<b>` `<i>` `<u>` `<s>` `<strike>` `<del>` `<code>` `<pre>` `
 
 Telegram 只能用文本模拟。当前 rich turn 用 `list` block 渲染 task snapshot，点击切换需走 callback。
 
-`list` block 没有 ordered 标记，client 从 item 文本的 `N.` 前缀推断有序列表 —— 所以每个 item 的文本就是共享行（`agent.FormatTaskRow`）的完整文本，编号前缀在内：`1. [v] fix (the fix landed)`。marker 表跟 Feishu / Discord 同源（`internal/agent`），三端同一条 item 渲染出同一段文字。
+`list` block 没有 ordered 标记（Bot API 10.1 `InputRichBlockList` 无 ordered/unordered 枚举），所以编号只能留在 item 文本里 —— 每个 item 的文本就是共享行（`agent.VisibleTaskRows`）的完整文本：`1. [v] fix (the fix landed)`。marker 表跟 Feishu / Discord 同源（`internal/agent`），三端同一条 item 渲染出同一段文字。
 
 #### L8. 没有 "Mini App form" 原生输入控件（除 ForceReply）
 

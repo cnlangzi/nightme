@@ -1558,16 +1558,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		if msg.TaskList == nil {
 			return nil
 		}
-		items := make([]taskListItem, 0, len(msg.TaskList.Items))
-		for _, it := range msg.TaskList.Items {
-			items = append(items, taskListItem{
-				Status:     it.Status,
-				ID:         it.ID,
-				Subject:    it.Subject,
-				ActiveForm: it.ActiveForm,
-			})
-		}
-		a.setRichTurnTaskList(rawChatID, topicID, replyAnchor, items, statusbar.StatusBarLines(&msg))
+		a.setRichTurnTaskList(rawChatID, topicID, replyAnchor, msg.TaskList.Items, statusbar.StatusBarLines(&msg))
 		return nil
 	case messages.OutError:
 		// L3: route through richTurn. The error body lands as one

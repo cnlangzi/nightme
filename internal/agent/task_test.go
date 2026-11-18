@@ -117,3 +117,22 @@ func TestFormatTaskRowNeverStartsWithATodoMarker(t *testing.T) {
 		}
 	}
 }
+
+// TestVisibleTaskRows_DropsDeletedAndNumbersTheRest — a deleted task
+// is not a row, and the rows that are left are numbered from one.
+func TestVisibleTaskRows_DropsDeletedAndNumbersTheRest(t *testing.T) {
+	rows := VisibleTaskRows([]AgentTaskItem{
+		{ID: "1", Subject: "first", Status: TaskPending},
+		{ID: "2", Subject: "gone", Status: TaskDeleted},
+		{ID: "3", Subject: "second", Status: TaskCompleted},
+	})
+	want := []string{"1. [ ] first", "2. [v] second"}
+	if len(rows) != len(want) {
+		t.Fatalf("the checklist holds %d rows, want %d: %q", len(rows), len(want), rows)
+	}
+	for i, row := range rows {
+		if row != want[i] {
+			t.Errorf("row %d is %q, want %q", i, row, want[i])
+		}
+	}
+}

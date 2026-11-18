@@ -61,3 +61,20 @@ func FormatTaskRow(index int, item AgentTaskItem) string {
 	}
 	return row
 }
+
+// VisibleTaskRows renders the rows of a checklist: the rows the
+// operator may see, in the order the sender listed them in.
+//
+// A deleted task is not a row: the bridges drop it before they emit
+// the snapshot, and a corrupt snapshot must not produce a visible
+// "deleted" row. The rest are numbered from one.
+func VisibleTaskRows(items []AgentTaskItem) []string {
+	rows := make([]string, 0, len(items))
+	for _, item := range items {
+		if item.Status == TaskDeleted {
+			continue
+		}
+		rows = append(rows, FormatTaskRow(len(rows)+1, item))
+	}
+	return rows
+}

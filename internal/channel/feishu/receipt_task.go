@@ -60,27 +60,17 @@ func buildTaskChecklistChunks(items []agent.AgentTaskItem) []string {
 	}
 	// The rows keep the order the sender listed them in: the order is
 	// what makes a plan readable.
-	visible := make([]agent.AgentTaskItem, 0, len(items))
-	for _, it := range items {
-		// Filter TaskDeleted defensively: the bridge is supposed
-		// to remove deleted tasks before emitting, but a corrupt
-		// snapshot must not produce a visible "deleted" row.
-		if it.Status == agent.TaskDeleted {
-			continue
-		}
-		visible = append(visible, it)
-	}
+	rows := agent.VisibleTaskRows(items)
 
 	// Render the visible lines in order. The line collector
 	// tracks how many bytes the budget has consumed; once the
 	// next line would push it past checklistBudgetRunes the
 	// remainder is dropped and a footer is appended to the last
 	// chunk.
-	lines := make([]string, 0, len(visible))
+	lines := make([]string, 0, len(rows))
 	total := 0
 	rendered := 0
-	for i, it := range visible {
-		line := agent.FormatTaskRow(i+1, it)
+	for _, line := range rows {
 		cost := utf8.RuneCountInString(line) + 1 // +1 for the joining newline
 		if total+cost > checklistBudgetRunes {
 			break
@@ -92,7 +82,7 @@ func buildTaskChecklistChunks(items []agent.AgentTaskItem) []string {
 	if rendered == 0 {
 		return []string{checklistOverflowPlaceholder}
 	}
-	omitted := len(visible) - rendered
+	omitted := len(rows) - rendered
 
 	// Join the rendered lines with newlines and split into
 	// per-element chunks that each respect divTextCharLimit.

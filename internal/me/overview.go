@@ -24,8 +24,10 @@ const maxStepDetail = 100
 
 // outcomeKeyBranch is the Data key the branch of a step rides in.
 //
-// The branch is in the status bar of the card: a detail that repeats
-// it spends its budget on a fact the reader already has.
+// The card the operator read names the branch — the `/gtw` card of the
+// step, and the status bar of the run card for the branch of the
+// workspace — so a detail that repeats it spends its budget on a fact
+// the reader already has.
 const outcomeKeyBranch = "branch"
 
 // runOverview renders the overview of the run: the run itself, the
@@ -364,8 +366,8 @@ func (r *run) stepChances(stepID string, remaining wfe.Remaining) (int, bool) {
 //
 // The detail carries facts only: the marker of the row already says
 // what state the step is in, so the detail does not say it a second
-// time. The branch the step worked on is not in the detail either —
-// the status bar of the card carries it.
+// time. The branch the step worked on is not in the detail either:
+// the card the operator read names it.
 //
 // The detail is cut short: a step that reports a whole build log as
 // its summary would otherwise make the row unreadable.
@@ -391,7 +393,7 @@ func stepDetail(st wfe.StepState, status agent.AgentTaskStatus, chances int, has
 // branch it names.
 //
 // The summary of a step that worked on a branch repeats that branch at
-// its end. The branch is in the status bar of the card, so the suffix
+// its end. The card the operator read names the branch, so the suffix
 // is dropped — a summary that does not end with the branch is left
 // alone.
 func branchlessSummary(out wfe.Outcome) string {

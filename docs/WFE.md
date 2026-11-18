@@ -901,7 +901,7 @@ Telegram and Discord all render the number, the marker, the subject and the
 detail of the row in the same way. The subject of a `/me` row is the id of the
 step, and its detail carries facts only — the summary of the outcome, the
 error description and the chances left. The branch the step worked on is not
-in the detail: the status bar of the card carries it.
+in the detail: the card the operator read names it.
 
 ```
 💭 8 · 🔧 6 · ⏱ 14:35:22

@@ -93,7 +93,7 @@ func TestEndToEnd_TheRunWorksInTheChatItStartedIn(t *testing.T) {
 	}
 
 	// The chat holds no run any more.
-	if st := svc.Status("oc_user"); st.Phase != PhaseIdle {
+	if st := svc.Snapshot("oc_user"); st.Phase != PhaseIdle {
 		t.Errorf("the chat is %q, want it free", st.Phase)
 	}
 }

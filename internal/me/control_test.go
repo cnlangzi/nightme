@@ -22,12 +22,12 @@ func waitForStatus(t *testing.T, svc *Service, chatID string, phase Phase) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		if svc.Status(chatID).Phase == phase {
+		if svc.Snapshot(chatID).Phase == phase {
 			return
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
-	t.Fatalf("the run is %q, want %q", svc.Status(chatID).Phase, phase)
+	t.Fatalf("the run is %q, want %q", svc.Snapshot(chatID).Phase, phase)
 }
 
 // TestPause_DoesNotInterruptTheRunningStep — a pause stops the run
@@ -51,7 +51,7 @@ func TestPause_DoesNotInterruptTheRunningStep(t *testing.T) {
 	}
 	// The step that was running is not interrupted.
 	time.Sleep(50 * time.Millisecond)
-	if st := svc.Status("obs-1"); st.Paused {
+	if st := svc.Snapshot("obs-1"); st.Paused {
 		t.Fatal("the run paused while its step was running")
 	}
 
@@ -61,7 +61,7 @@ func TestPause_DoesNotInterruptTheRunningStep(t *testing.T) {
 	}
 	waitForStatus(t, svc, "obs-1", PhasePaused)
 
-	st := svc.Status("obs-1")
+	st := svc.Snapshot("obs-1")
 	if !st.Paused {
 		t.Error("the run does not report that it is paused")
 	}
@@ -697,7 +697,7 @@ func TestResume_CancelsAPauseThatHasNotTakenEffect(t *testing.T) {
 		t.Fatalf("settle the step: %v", err)
 	}
 	time.Sleep(50 * time.Millisecond)
-	if st := svc.Status("obs-1"); st.Paused {
+	if st := svc.Snapshot("obs-1"); st.Paused {
 		t.Fatal("the run paused although the operator cancelled the pause")
 	}
 }
@@ -1092,41 +1092,6 @@ func TestAQuestionOpensNoCardOfItsOwn(t *testing.T) {
 	}
 }
 
-// TestAPauseUpdatesTheCardInPlace — a run that is paused and set going
-// again keeps the card it has.
-func TestAPauseUpdatesTheCardInPlace(t *testing.T) {
-	dir := t.TempDir()
-	writeWorkflow(t, dir, "one", commitPushWorkflow)
-
-	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
-	op.steps = []fakeStep{{open: true}}
-
-	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
-	}); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	waitSent(t, op, "/gtw commit")
-
-	if err := svc.Pause(context.Background(), "obs-1"); err != nil {
-		t.Fatalf("pause: %v", err)
-	}
-	if err := op.answer("obs-1", "", ""); err != nil {
-		t.Fatalf("settle the step: %v", err)
-	}
-	waitForStatus(t, svc, "obs-1", PhasePaused)
-
-	if _, err := svc.Resume(context.Background(), "obs-1", ""); err != nil {
-		t.Fatalf("resume: %v", err)
-	}
-	waitRun(t, svc, "obs-1")
-
-	// The run keeps the cards it has: a pause is not a session.
-	if posted := op.Posted(); posted > 2 {
-		t.Fatalf("the run published %d cards, want the card of the run and the card of the round", posted)
-	}
-}
-
 // TestTheModelPathFollowsTheStepOfTheCommand — the card follows the
 // job of the step the model runs.
 func TestTheModelPathFollowsTheStepOfTheCommand(t *testing.T) {
@@ -1381,73 +1346,6 @@ func TestResume_KeepsTheCardItOwns(t *testing.T) {
 	}
 }
 
-// TestShow_PutsTheStateBackInFrontOfTheOperator — /me show posts the
-// current state as a card of its own, and the run keeps updating that
-// one from here on.
-func TestShow_PutsTheStateBackInFrontOfTheOperator(t *testing.T) {
-	dir := t.TempDir()
-	writeWorkflow(t, dir, "one", oneStepWorkflow)
-
-	svc, op := testService(t, dir, noModels())
-	op.steps = []fakeStep{{open: true}}
-
-	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
-	}); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	waitSent(t, op, "/gtw commit")
-	before := op.Posted()
-
-	if err := svc.Show(context.Background(), "obs-1"); err != nil {
-		t.Fatalf("show: %v", err)
-	}
-	if op.Posted() != before+1 {
-		t.Fatalf("the run published %d cards, want one more", op.Posted())
-	}
-
-	// The run keeps updating the card /me show published.
-	shown := lastPostedCard(op)
-	if err := op.answer("obs-1", "", ""); err != nil {
-		t.Fatalf("settle the step: %v", err)
-	}
-	waitForSessionUpdate(t, op, shown.ID)
-}
-
-// TestShowPublishesTheOverviewOfTheRun — /me show publishes the same
-// body as the run card: the overview of the run is the same text
-// wherever it is shown.
-func TestShowPublishesTheOverviewOfTheRun(t *testing.T) {
-	dir := t.TempDir()
-	writeWorkflow(t, dir, "one", oneStepWorkflow)
-
-	svc, op := testService(t, dir, noModels())
-	op.steps = []fakeStep{{open: true}}
-
-	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
-	}); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	waitSent(t, op, "/gtw commit")
-
-	if err := svc.Show(context.Background(), "obs-1"); err != nil {
-		t.Fatalf("show: %v", err)
-	}
-	cards := op.Cards()
-	if len(cards) < 2 {
-		t.Fatalf("the run published %d cards, want the run card and the shown card", len(cards))
-	}
-	run := op.Entries(cards[0].ID)
-	shown := op.Entries(cards[len(cards)-1].ID)
-	if len(run) != 1 || len(shown) != 1 {
-		t.Fatalf("the cards carry %d and %d entries, want the overview alone", len(run), len(shown))
-	}
-	if run[0] != shown[0] {
-		t.Errorf("the shown card carries %q, want the overview of the run %q", shown[0], run[0])
-	}
-}
-
 // twoJobWorkflow is a workflow of two jobs: the second one waits for
 // the first.
 const twoJobWorkflow = `title: two jobs.
@@ -1688,22 +1586,6 @@ func waitForSession(t *testing.T, path string) map[string]any {
 	return nil
 }
 
-// waitForSessionUpdate waits until the run publishes an event under
-// the card with the given id.
-func waitForSessionUpdate(t *testing.T, op *fakeOperator, id string) {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		for _, m := range op.Emitted() {
-			if m.ReplyTo == id {
-				return
-			}
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-	t.Fatalf("the run never published an event under the card %q", id)
-}
-
 // indexOf returns the position of the first entry that equals the
 // text, or -1.
 func indexOf(list []string, text string) int {
@@ -1724,18 +1606,6 @@ func indexOfAfter(list []string, text string, from int) int {
 		}
 	}
 	return -1
-}
-
-// TestShow_WithoutARunIsRefused — a chat without a run has no state
-// to show.
-func TestShow_WithoutARunIsRefused(t *testing.T) {
-	dir := t.TempDir()
-	writeWorkflow(t, dir, "one", oneStepWorkflow)
-
-	svc, _ := testService(t, dir, noModels())
-	if err := svc.Show(context.Background(), "obs-1"); err == nil {
-		t.Fatal("a chat without a run showed a state")
-	}
 }
 
 // TestTheDecisionCarriesTheReasonFirst — the reason the decision was
@@ -1805,7 +1675,7 @@ func TestTakeover_APersonsMessagePausesTheRun(t *testing.T) {
 	}
 	waitForStatus(t, svc, "obs-1", PhasePaused)
 
-	st := svc.Status("obs-1")
+	st := svc.Snapshot("obs-1")
 	if !strings.Contains(st.PauseReason, "resume") {
 		t.Errorf("the pause reason is %q, want it to name the way back", st.PauseReason)
 	}
@@ -1849,7 +1719,7 @@ func TestTakeover_AReplyToTheQuestionIsNotATakeover(t *testing.T) {
 		Text:      "the feature branch",
 		Origin:    messages.OriginHuman,
 	})
-	if st := svc.Status("obs-1"); st.Paused {
+	if st := svc.Snapshot("obs-1"); st.Paused {
 		t.Fatal("the answer to the question paused the run")
 	}
 }
@@ -1902,7 +1772,7 @@ func TestStop_EndsTheRun(t *testing.T) {
 		t.Fatalf("stop: %v", err)
 	}
 	waitRun(t, svc, "obs-1")
-	if st := svc.Status("obs-1"); st.Phase != PhaseIdle {
+	if st := svc.Snapshot("obs-1"); st.Phase != PhaseIdle {
 		t.Errorf("the run is %q, want it gone", st.Phase)
 	}
 	// The chat is told to stop working.

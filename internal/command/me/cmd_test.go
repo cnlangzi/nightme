@@ -31,10 +31,12 @@ type fakeController struct {
 	resumeErr error
 	// nextErr is the error a next reports.
 	nextErr error
-	// showErr is the error a show reports.
-	showErr error
-	// shown counts the shows.
-	shown int
+	// statusErr is the error a status reports.
+	statusErr error
+	// statusCalls counts the status requests.
+	statusCalls int
+	// disabled says why the personal agent is off.
+	disabled string
 	// replies holds the replies the command sent.
 	replies []string
 	// stopped counts the stops.
@@ -49,8 +51,6 @@ type fakeController struct {
 	notes []string
 	// step is the step the controller acted on.
 	step string
-	// status is the state the controller reports.
-	status command.MeStatus
 }
 
 func (c *fakeController) StartWorkflow(_ context.Context, req command.MeRequest) (string, error) {
@@ -99,13 +99,6 @@ func (c *fakeController) Next(_ context.Context, _ string, note string) (string,
 	return c.step, nil
 }
 
-func (c *fakeController) Show(_ context.Context, _ string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.shown++
-	return c.showErr
-}
-
 func (c *fakeController) Stop(_ context.Context, _ string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -113,10 +106,17 @@ func (c *fakeController) Stop(_ context.Context, _ string) error {
 	return c.stopErr
 }
 
-func (c *fakeController) Status(_ string) command.MeStatus {
+func (c *fakeController) Status(_ context.Context, _ string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.status
+	c.statusCalls++
+	return c.statusErr
+}
+
+func (c *fakeController) DisabledReason() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.disabled
 }
 
 // request returns the n-th start request.
@@ -671,16 +671,64 @@ func TestResume_ReportsTheRefusal(t *testing.T) {
 	}
 }
 
-func TestShow_PutsTheStateBackInFrontOfTheOperator(t *testing.T) {
+// TestStatus_PostsTheStateCard — /me status shows the state of the run
+// again: the card of the round is the state.
+func TestStatus_PostsTheStateCard(t *testing.T) {
 	ctrl := &fakeController{}
-	cs := newSession(t, "me-14", "/tmp/work")
+	cs, ch := newSessionWithOutcome(t, "me-14", "/tmp/work")
 
-	reply := runMe(t, ctrl, cs, "/me", "show")
+	reply := runMe(t, ctrl, cs, "/me", "status")
 	if !strings.Contains(reply, "shown again") {
 		t.Fatalf("reply = %q, want the show", reply)
 	}
-	if ctrl.shown != 1 {
-		t.Fatalf("the controller showed %d times, want 1", ctrl.shown)
+	if ctrl.statusCalls != 1 {
+		t.Fatalf("the controller was asked %d times, want 1", ctrl.statusCalls)
+	}
+	outcome := ch.settled()
+	if outcome == nil {
+		t.Fatal("the command reported no outcome")
+	}
+	if outcome.Status != messages.OutcomeOK {
+		t.Errorf("the outcome is %q, want it ok", outcome.Status)
+	}
+	if outcome.Summary != "the run's state is shown again" {
+		t.Errorf("the outcome says %q, want it to name the state", outcome.Summary)
+	}
+	if len(outcome.Data) != 0 {
+		t.Errorf("the outcome carries %v, want no facts", outcome.Data)
+	}
+}
+
+// TestShow_IsUnknown — /me show is gone: the state card is the status.
+func TestShow_IsUnknown(t *testing.T) {
+	ctrl := &fakeController{}
+	cs := newSession(t, "me-16", "/tmp/work")
+
+	reply := runMe(t, ctrl, cs, "/me", "show")
+	if !strings.Contains(reply, "Unknown /me subcommand") {
+		t.Fatalf("reply = %q, want the unknown subcommand", reply)
+	}
+	if ctrl.statusCalls != 0 {
+		t.Fatalf("the controller was asked %d times, want none", ctrl.statusCalls)
+	}
+}
+
+// TestStatus_InAChatWithoutARun — a chat without a run has no state to
+// show.
+func TestStatus_InAChatWithoutARun(t *testing.T) {
+	ctrl := &fakeController{statusErr: mesvc.ErrNoRun}
+	cs, ch := newSessionWithOutcome(t, "me-15", "/tmp/work")
+
+	reply := runMe(t, ctrl, cs, "/me", "status")
+	if reply != "This chat has no run in it." {
+		t.Fatalf("reply = %q, want the no run", reply)
+	}
+	outcome := ch.settled()
+	if outcome == nil {
+		t.Fatal("the command reported no outcome")
+	}
+	if outcome.Status != messages.OutcomeNoop {
+		t.Errorf("the outcome is %q, want it noop", outcome.Status)
 	}
 }
 
@@ -712,38 +760,31 @@ func TestStop_SaysTheSummaryIsOnItsWay(t *testing.T) {
 	}
 }
 
-func TestStatus_ReportsWhereTheRunStands(t *testing.T) {
-	ctrl := &fakeController{status: command.MeStatus{
-		Phase:            "running",
-		RunID:            "run-1",
-		Step:             "/gtw commit",
-		Execution:        "running",
-		Actions:          2,
-		System1Decisions: 3,
-		System2Decisions: 1,
-		System1Tokens:    120,
-		System2Tokens:    800,
-	}}
-	cs := newSession(t, "me-7", "/tmp/work")
-
-	reply := runMe(t, ctrl, cs, "/me", "status")
-	for _, want := range []string{"running", "run-1", "/gtw commit", "2 taken", "system-1: 3 decisions"} {
-		if !strings.Contains(reply, want) {
-			t.Fatalf("reply = %q, want it to mention %q", reply, want)
-		}
-	}
-}
-
+// TestStatus_ReportsWhyTheAgentIsOff — a daemon that cannot make a
+// run says why.
 func TestStatus_ReportsWhyTheAgentIsOff(t *testing.T) {
-	ctrl := &fakeController{status: command.MeStatus{
-		Phase: "idle",
-		Error: "neither me.llm nor me.decider is configured",
-	}}
-	cs := newSession(t, "me-8", "/tmp/work")
+	ctrl := &fakeController{
+		statusErr: mesvc.ErrNoRun,
+		disabled:  "neither me.llm nor me.decider is configured",
+	}
+	cs, ch := newSessionWithOutcome(t, "me-8", "/tmp/work")
 
 	reply := runMe(t, ctrl, cs, "/me", "status")
-	if !strings.Contains(reply, "neither me.llm nor me.decider is configured") {
+	if !strings.Contains(reply, "This chat has no run in it.") {
+		t.Fatalf("reply = %q, want the no run", reply)
+	}
+	if !strings.Contains(reply, "me is disabled: neither me.llm nor me.decider is configured") {
 		t.Fatalf("reply = %q, want the reason", reply)
+	}
+	outcome := ch.settled()
+	if outcome == nil {
+		t.Fatal("the command reported no outcome")
+	}
+	if outcome.Status != messages.OutcomeFailed {
+		t.Errorf("the outcome is %q, want it failed", outcome.Status)
+	}
+	if outcome.Data["reason"] != "no_agent" {
+		t.Errorf("the reason is %q, want it no_agent", outcome.Data["reason"])
 	}
 }
 

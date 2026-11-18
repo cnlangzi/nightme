@@ -30,7 +30,7 @@ func TestARateLimitedAgentPausesTheRun(t *testing.T) {
 	}
 	waitForStatus(t, svc, "obs-1", PhasePaused)
 
-	st := svc.Status("obs-1")
+	st := svc.Snapshot("obs-1")
 	if !strings.Contains(st.PauseReason, "429") {
 		t.Errorf("the pause reason is %q, want it to name the rate limit", st.PauseReason)
 	}
@@ -143,7 +143,7 @@ func TestACommandThatWorkedIsNotThrottled(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	waitRun(t, svc, "obs-1")
-	if st := svc.Status("obs-1"); st.Paused {
+	if st := svc.Snapshot("obs-1"); st.Paused {
 		t.Error("the run paused although the command worked")
 	}
 }

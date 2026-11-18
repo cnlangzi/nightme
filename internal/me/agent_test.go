@@ -361,6 +361,20 @@ func (f *fakeOperator) RoundSessions() []string {
 	return append([]string(nil), f.roundSessions...)
 }
 
+// EventsOf returns the number of events the run published under the
+// card with the given id.
+func (f *fakeOperator) EventsOf(id string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, m := range f.emitted {
+		if m.ReplyTo == id {
+			n++
+		}
+	}
+	return n
+}
+
 // Entries returns the entries of the card with the given id.
 //
 // The entries are what the chat folds into the card: the reason of a

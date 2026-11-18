@@ -53,6 +53,11 @@ func resolveReviewTimeout(spec Spec) (time.Duration, string) {
 			"⚠️ review.timeout %q is not a duration — using %s",
 			raw, agent.DefaultReviewGroupTimeout)
 	}
+	if d < 0 {
+		return agent.DefaultReviewGroupTimeout, fmt.Sprintf(
+			"⚠️ review.timeout %q must not be negative — using %s",
+			raw, agent.DefaultReviewGroupTimeout)
+	}
 	return d, ""
 }
 
@@ -76,18 +81,8 @@ func isGroupTimeout(err error) bool {
 	return errors.Is(err, agent.ErrGroupTimeout)
 }
 
-// timedOutGroups counts the groups of a run that timed out.
-func timedOutGroups(outcomes []reviewOutcome) int {
-	n := 0
-	for _, o := range outcomes {
-		if isGroupTimeout(o.err) {
-			n++
-		}
-	}
-	return n
-}
-
-// timedOutGroupNames names the groups of a run that timed out.
+// timedOutGroupNames names the groups of a run that timed out. The
+// count of the timed-out groups is the length of the slice.
 func timedOutGroupNames(outcomes []reviewOutcome) []string {
 	var names []string
 	for _, o := range outcomes {
@@ -117,7 +112,7 @@ func reviewTimeoutNotice(outcomes []reviewOutcome, timeout time.Duration) string
 // timeoutOutcomeData adds the timed-out group count to a run's outcome
 // data. A run without a timed-out group carries no key.
 func timeoutOutcomeData(data map[string]string, outcomes []reviewOutcome) map[string]string {
-	if n := timedOutGroups(outcomes); n > 0 {
+	if n := len(timedOutGroupNames(outcomes)); n > 0 {
 		data["timed_out_groups"] = fmt.Sprintf("%d", n)
 	}
 	return data

@@ -18,9 +18,14 @@ import (
 // timeoutFakeStarter starts one session per group. The group whose
 // prompt carries silentPattern gets a session that never says
 // anything; every other group gets a session that answers.
+//
+// reemitSilent makes the SECOND session of a group silent: the first
+// turn answers in a shape the parser cannot read, and the repair turn
+// that follows it never answers.
 type timeoutFakeStarter struct {
 	name          string
 	silentPattern string
+	reemitSilent  bool
 
 	mu       sync.Mutex
 	closed   []string
@@ -36,9 +41,10 @@ func (s *timeoutFakeStarter) Init(string)   {}
 func (s *timeoutFakeStarter) Start(_ context.Context, _ StartConfig) (*Agent, error) {
 	s.mu.Lock()
 	s.sessions++
+	index := s.sessions
 	s.mu.Unlock()
 	events := make(chan AgentEvent, 8)
-	d := &timeoutFakeDriver{starter: s, events: events}
+	d := &timeoutFakeDriver{starter: s, index: index, events: events}
 	return NewAgent(s.Info(), 0, events, d), nil
 }
 
@@ -61,7 +67,10 @@ func (s *timeoutFakeStarter) closedSessions() []string {
 // and stays silent for the others.
 type timeoutFakeDriver struct {
 	starter *timeoutFakeStarter
-	events  chan AgentEvent
+	// index is the session's number: the first session of a group
+	// carries its first turn, the second one the repair turn.
+	index  int
+	events chan AgentEvent
 
 	mu     sync.Mutex
 	prompt string
@@ -81,11 +90,21 @@ func (d *timeoutFakeDriver) SendBlocks(_ context.Context, blocks []ContentBlock)
 		// group's context.
 		return nil
 	}
+	if d.starter.reemitSilent && d.index > 1 {
+		// The repair turn: it never answers either.
+		return nil
+	}
 	go func() {
 		d.events <- sessionReadyEvent("sess-ok", "model")
+		text := reviewReply("the findings")
+		if d.starter.reemitSilent {
+			// An answer the parser cannot read: the fan-out spends a
+			// repair turn on it.
+			text = "the findings, in prose"
+		}
 		d.events <- AgentEvent{
 			Kind:   EventAgentResult,
-			Result: &AgentResultEvent{Text: reviewReply("the findings")},
+			Result: &AgentResultEvent{Text: text},
 		}
 		close(d.events)
 	}()
@@ -209,6 +228,34 @@ func TestRunReviewGroups_ClosesTheSilentGroup(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("the silent group's session was not closed; closed: %v", closed)
+	}
+}
+
+// TestRunReviewGroups_TimesOutTheRepairTurn: a watchdog that fires
+// while the schema re-emit runs must not leave the group looking like
+// a clean success. The group was cut short, so it is a timeout — and
+// it stays resumable.
+func TestRunReviewGroups_TimesOutTheRepairTurn(t *testing.T) {
+	groups := []reviewGroup{{Pattern: "**/*.go", Files: []string{"a.go"}}}
+	fs := &timeoutFakeStarter{
+		name:          "reemit-timeout-agent",
+		silentPattern: "**/*.nonexistent",
+		reemitSilent:  true,
+	}
+
+	seen, _, err := collectGroups(t, fs, groups, WithReviewGroupTimeout(100*time.Millisecond))
+	if err == nil {
+		t.Fatal("the fan-out succeeded although its only group was cut short")
+	}
+	if len(seen) != 1 {
+		t.Fatalf("the observer saw %d groups, want 1", len(seen))
+	}
+	var timeout *GroupTimeoutError
+	if !errors.As(seen[0].err, &timeout) {
+		t.Fatalf("the group failed with %v, want a *GroupTimeoutError", seen[0].err)
+	}
+	if seen[0].job.SessionID == "" {
+		t.Error("the cut-short group reported no session id: it cannot be resumed")
 	}
 }
 

@@ -271,6 +271,11 @@ func runReviewGroups(
 			// merged document is free-form text written for an LLM
 			// consumer and is never parsed.
 			report := ParseReviewFindings(res.Text)
+			// timedOut marks a group whose work the watchdog cut
+			// short: the turn itself, or the repair turn that follows
+			// it. A group that finished its work on its own keeps its
+			// result, even when the timer fired a moment later.
+			timedOut := err != nil && errors.Is(context.Cause(gctx), ErrGroupTimeout)
 			if err == nil && !report.Parsed && res.SessionID != "" {
 				// The group's answer is in a shape the parser cannot
 				// read. One re-emit turn gives it a second chance to
@@ -286,8 +291,13 @@ func runReviewGroups(
 							watchdog.beat()
 						}
 					}))
-				if ok {
+				switch {
+				case ok:
 					report = repaired
+				case errors.Is(context.Cause(gctx), ErrGroupTimeout):
+					// The watchdog cut the repair turn short: the
+					// group never finished its work.
+					timedOut = true
 				}
 			}
 
@@ -297,7 +307,7 @@ func runReviewGroups(
 			if watchdog != nil {
 				watchdog.stop()
 			}
-			if err != nil && errors.Is(context.Cause(gctx), ErrGroupTimeout) {
+			if timedOut {
 				err = &GroupTimeoutError{
 					Group:   ReviewGroupName(groups[i].Source, groups[i].Pattern),
 					Timeout: timeout,

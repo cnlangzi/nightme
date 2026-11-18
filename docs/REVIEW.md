@@ -836,6 +836,15 @@ group 的 turn 因此按既有链路收场:ctx 取消 → `drainSessionEvents` �
 那一轮(`reemitReviewFindings`)拿到的是**只记心跳、不转发**的 sink:它是 group 的
 活动(要重置计时器),但它不能再给同一个 job 贡献第二个终态。
 
+阈值到点时,group 的哪一段工作被切掉,决定它算不算超时:
+
+- turn 被切 → 该 group 超时。
+- turn 完成了,但 re-emit 那一轮被切 → 同样算超时:活没干完,而且还能续。
+- 两段都干完了,计时器随后才响 → 该 group 照旧算成功,它的 findings 不丢。
+
+也就是说,"超时"说的是**这个 group 的活被切断了**,不是"计时器响过"。一个把活干完
+的 group 不是超时——把它记成超时会让它的 findings 从合并文本里消失,那是白丢。
+
 ### 报告
 
 超时是一个 failed group,所以该有的标记都有,另外还多一处:
@@ -875,6 +884,7 @@ run 自己的消息走 `messages.OutReply`,所以 `/think` 关着也看得见;�
 | `--timeout` 与 `--abort` / `--unset` 同用 | 用法错误,两个 flag 都点名,不跑 review |
 | `--timeout` 与 `--global` 同用 | 允许:runner 照落盘,review 用这个阈值跑 |
 | 一个 group 憋着一次长 LLM 调用,超过阈值没动静 | 该 group 被当成超时关掉。这是设计接受的那个误报;阈值可配就是为了这个 |
+| 阈值在 schema re-emit 那一轮到点 | 该 group 记成超时(re-emit 被切 = 活没干完),还能 `--continue`;turn 与 re-emit 都干完、计时器随后才响的 group 照旧算成功,findings 不丢 |
 | 用户中止了一个已经有 group 超时的 run | 发中止通知;不发超时通知(中止分支先返回) |
 | 阈值到点的瞬间 bridge 正好发终态事件 | 谁先谁赢:阈值先到,该 group 记成超时 |
 

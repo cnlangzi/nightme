@@ -1296,9 +1296,9 @@ type Starter interface {
 // silently ignore it (the option is kept in the package-private
 // config struct, not on the public Starter API).
 //
-// Today WithEventSink, WithReviewJobObserver and
-// WithReviewGroupTimeout are defined. The pattern is open for future
-// options (abort hooks, etc.).
+// Today WithEventSink, WithReviewJobObserver, WithReviewPlanObserver
+// and WithReviewGroupTimeout are defined. The pattern is open for
+// future options (abort hooks, etc.).
 type RunOnceOption func(*runOnceConfig)
 
 // runOnceConfig is the per-call config resolved from RunOnceOption

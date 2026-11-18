@@ -197,6 +197,20 @@ func TestResolveReviewTimeout(t *testing.T) {
 		}
 	})
 
+	t.Run("a negative config value warns", func(t *testing.T) {
+		// A negative threshold would silence the watchdog without
+		// saying so: the flag path rejects it, so the config path
+		// must not accept it either.
+		writeReviewConfig(t, "review:\n  timeout: -5m\n")
+		got, notice := resolveReviewTimeout(Spec{})
+		if got != agent.DefaultReviewGroupTimeout {
+			t.Errorf("the threshold = %s, want %s", got, agent.DefaultReviewGroupTimeout)
+		}
+		if !strings.Contains(notice, `review.timeout "-5m" must not be negative`) {
+			t.Errorf("the notice does not name the bad value: %q", notice)
+		}
+	})
+
 	t.Run("a config file that cannot be read warns", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "config.yaml")
 		t.Setenv("NIGHTME_CONFIG", path)

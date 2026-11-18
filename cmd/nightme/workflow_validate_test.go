@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -143,6 +144,9 @@ func TestWorkflowValidate_AMissingWorkflowsDir(t *testing.T) {
 // the command cannot read is a path it cannot check: the same exit
 // code as a missing one, whether the path is a file or a directory.
 func TestWorkflowValidate_AWorkflowsDirThatCannotBeRead(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("windows has no permission bits: the directory stays readable")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("root reads every path")
 	}

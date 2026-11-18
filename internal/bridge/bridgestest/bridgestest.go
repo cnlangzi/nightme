@@ -126,9 +126,13 @@ func BuildFakeCLI(dir, name, source string) (string, error) {
 //	rpc_reject — like rpc, but get_state is rejected too, so the
 //	             boot handshake fails
 //
-// The crash / resume modes sleep ~100 ms after writing to stderr so
+// The crash / resume modes sleep ~500 ms after writing to stderr so
 // the bridge's stderr drain has certainly read the line before the
-// child dies — the assertion is deterministic.
+// child dies — the assertion is deterministic. The window is wide on
+// purpose: a bridge does work between the spawn and the handshake it
+// writes (the codex bridge reads the branch with a git call), and a
+// child that dies before that write reports a broken pipe instead of
+// the stderr it left behind.
 const FakeCLISource = `package main
 
 import (
@@ -143,13 +147,13 @@ func main() {
 	switch os.Getenv("FAKE_BRIDGE_MODE") {
 	case "crash":
 		fmt.Fprintln(os.Stderr, "fake bridge: fatal: cannot load provider config")
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(500 * time.Millisecond)
 		os.Exit(3)
 	case "silent":
 		os.Exit(0)
 	case "resume":
 		fmt.Fprintln(os.Stderr, "Error: Session \"fake-session\" not found.")
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(500 * time.Millisecond)
 		os.Exit(0)
 	case "rpc":
 		serve(false)

@@ -534,36 +534,6 @@ func (s AgentTaskStatus) String() string {
 	return "task(unknown)"
 }
 
-// TaskStatusMarker returns the bracketed marker of a task status.
-//
-// The marker is the state of a row in a checklist, and every marker
-// is one character between the brackets: the status column then has
-// the same width on every row and the labels start at the same
-// column. An emoji is two cells wide and would shift every row after
-// it, so the markers are plain characters.
-//
-// The table lives next to the status enum, so the channels that
-// render a checklist cannot drift apart.
-func TaskStatusMarker(status AgentTaskStatus) string {
-	switch status {
-	case TaskPending:
-		return "[ ]"
-	case TaskInProgress:
-		return "[>]"
-	case TaskCompleted:
-		return "[√]"
-	case TaskFailed:
-		return "[!]"
-	case TaskCancelled:
-		return "[-]"
-	case TaskSkipped:
-		return "[/]"
-	case TaskDeleted:
-		return "[×]"
-	}
-	return "[ ]"
-}
-
 // AgentTaskItem is one row in the per-turn checklist. ID is the
 // provider-assigned stable identifier (e.g. Claude's `Task #1`);
 // bridges MUST populate it so follow-up updates can correlate by

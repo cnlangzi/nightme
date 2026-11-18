@@ -23,7 +23,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/messages"
-	"github.com/cnlangzi/nightme/internal/wfe"
+	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
 // sessionKind is what a session of the run is.

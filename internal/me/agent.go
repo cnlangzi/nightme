@@ -29,7 +29,7 @@
 //     and how a click comes back.
 //   - internal/gateway/observe — the side channel that reports what
 //     the daemon said about the messages the run sent.
-//   - internal/wfe — the workflow schema, the engine that computes
+//   - pkg/wfe — the workflow schema, the engine that computes
 //     the plan of a run, and the policy that bounds what a run may
 //     do.
 //   - internal/llm — the two model capabilities: decisions and chat.
@@ -50,7 +50,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/gateway/observe"
 	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/messages"
-	"github.com/cnlangzi/nightme/internal/wfe"
+	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
 // Defaults of the personal agent.

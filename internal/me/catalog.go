@@ -18,7 +18,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cnlangzi/nightme/internal/wfe"
+	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
 // catalogEntry is one workflow file of the directory.

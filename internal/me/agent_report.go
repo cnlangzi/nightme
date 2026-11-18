@@ -7,7 +7,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/cnlangzi/nightme/internal/wfe"
+	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
 // renderWorkflow renders the workflow as the model reads it.

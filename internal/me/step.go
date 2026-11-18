@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/cnlangzi/nightme/internal/wfe"
+	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
 // stepVerdict is what a step produced.

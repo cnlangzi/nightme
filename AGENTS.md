@@ -35,7 +35,8 @@ Read every sentence as a first-time reader. If removing the timestamp or context
 - Entry: `cmd/nightme/` (CLI + daemon + tray)
 - Per-AI-agent backends: `internal/bridge/{claudecode,codex,copilot,cursor,dsh,omp,opencode,pi,pty,acp}`
 - Per-chat-platform channels: `internal/channel/{feishu,slack,telegram,echo}`
-- Core runtime: `internal/{chatsession,chatstore,command,config,gateway,messages,wfe,llm,registry,runtime,login,me}`
+- Core runtime: `internal/{chatsession,chatstore,command,config,gateway,messages,llm,registry,runtime,login,me}`
+- Published package: `pkg/wfe` — import path `github.com/cnlangzi/nightme/pkg/wfe`
 - README.md has the full map and concepts (ChatSession, CWD = project, Bridge, Channel, Messages, WFE).
 
 ## 4. Verify Before Done

@@ -3,6 +3,13 @@
 // ${{ }} expressions. Zero I/O, no clock, no secrets. Every
 // external capability is injected through the Runtime interface (see
 // runtime.go).
+//
+// The package is published and importable from outside this
+// repository:
+//
+//	import "github.com/cnlangzi/nightme/pkg/wfe"
+//
+//	wf, err := wfe.LoadFile("workflows/fix.yml")   // loads and validates
 package wfe
 
 import (

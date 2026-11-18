@@ -9,7 +9,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/messages"
-	"github.com/cnlangzi/nightme/internal/wfe"
+	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
 // speak says something in the chat the run works in.

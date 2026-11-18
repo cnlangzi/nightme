@@ -7,7 +7,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/cnlangzi/nightme/internal/wfe"
+	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
 // writeScript writes a file into dir with the given mode.

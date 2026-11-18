@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
-	"github.com/cnlangzi/nightme/internal/wfe"
+	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
 // maxStepDetail is how long the detail of a task row is.

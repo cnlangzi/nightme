@@ -5,7 +5,7 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/cnlangzi/nightme/internal/wfe"
+	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
 // brainBytes is how much of a session's answer the model reads.

@@ -10,7 +10,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/messages"
-	"github.com/cnlangzi/nightme/internal/wfe"
+	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
 // TestRenderWorkflow_HidesTheMachinery — the model reads the steps and

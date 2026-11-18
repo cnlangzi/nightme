@@ -3,7 +3,7 @@ package me
 import (
 	"strings"
 
-	"github.com/cnlangzi/nightme/internal/wfe"
+	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
 // rateLimitReason is why a run pauses when the agent is throttled.

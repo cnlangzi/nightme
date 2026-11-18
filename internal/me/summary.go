@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/llm"
-	"github.com/cnlangzi/nightme/internal/wfe"
+	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
 // The caps of the summary.

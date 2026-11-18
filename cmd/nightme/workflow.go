@@ -28,7 +28,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/cnlangzi/nightme/internal/wfe"
+	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
 // workflowsDir returns the directory where workflow YAML files

@@ -417,8 +417,7 @@ var reasonHints = map[string]string{
 	"not_found":             "no worktree branch matched the name that was given.",
 	"ambiguous":             "the name matched several worktree branches: the full branch name is needed.",
 	"no_run":                "this chat has no run in it.",
-	"not_paused":            "the run is not waiting for the operator.",
-	"step_running":          "the step the command acts on is still running.",
+	"not_paused":            "the run is waiting for an answer: it asked a question of its own.",
 }
 
 // reasonHint explains a reason code, or returns an empty string when

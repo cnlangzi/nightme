@@ -3,7 +3,6 @@ package me
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/llm"
@@ -36,12 +35,9 @@ const operatorCallID = "operator"
 const (
 	// ReasonNoRun says the chat holds no run.
 	ReasonNoRun = "no_run"
-	// ReasonNotPaused says the run does not wait for the operator:
-	// it is working, or it is waiting for an answer.
+	// ReasonNotPaused says the run waits for an answer: it asked the
+	// operator a question, and `/me reply` is the way to answer it.
 	ReasonNotPaused = "not_paused"
-	// ReasonStepRunning says the step the command acts on is still
-	// running.
-	ReasonStepRunning = "step_running"
 )
 
 // reasonError is the generic reason code: the failure has no code of
@@ -83,59 +79,44 @@ type directive struct {
 	Step string `json:"step,omitempty"`
 }
 
+// OperatorDecision is what an operator's command did with the step the
+// run is on.
+//
+// The command decides at command time: it acts on the step only when
+// there is something to do. A command that acts on nothing holds no
+// decision, and the state of the run answers instead.
+type OperatorDecision struct {
+	// Step is the id of the step the command acted on — or the step it
+	// looked at when it acted on none.
+	Step string
+	// Act reports whether the command recorded a decision: the step
+	// runs again, or it is skipped.
+	Act bool
+}
+
 // prepareDecision records the operator's decision for the run's next
 // turn and hands the control back to the run.
 //
-// It reports the step the command acts on and whether the run was
-// waiting at the gate: a run that was working goes on by itself, and
-// there is nobody to wake up.
+// It reports what the command did with the step the run is on, and
+// whether the run was waiting at the gate: a run that waits for the
+// operator has to be woken, a run that is working goes on by itself.
 //
-// The decision is refused when the run does not wait for the operator:
-// a run that is working has nothing to decide, and a run that is
-// asking a question is answered with `/me reply`.
-func (r *run) prepareDecision(kind, note string) (wfe.Step, bool, error) {
+// The command hands the control back either way: a run that waits for
+// the operator goes on. A command that acts on nothing records no
+// decision: the run keeps none for the turn, and the plan runs the
+// step it was going to run anyway.
+//
+// The decision is refused when the run waits for an answer: that
+// state has its own command, `/me reply`.
+func (r *run) prepareDecision(kind, note string) (OperatorDecision, bool, error) {
 	r.mu.Lock()
-	if r.ask != nil {
-		r.mu.Unlock()
-		return wfe.Step{}, false, &Refusal{
-			Reason:  ReasonNotPaused,
-			Message: "this run is waiting for an answer: use /me reply <text>",
-		}
-	}
-	if !r.paused && !r.pauseRequested {
-		r.mu.Unlock()
-		return wfe.Step{}, false, &Refusal{
-			Reason:  ReasonNotPaused,
-			Message: "this run is not paused",
-		}
-	}
-	if kind == directiveNext {
-		if busy := r.busyStepIDLocked(); busy != "" {
-			r.mu.Unlock()
-			return wfe.Step{}, false, &Refusal{
-				Reason:  ReasonStepRunning,
-				Message: fmt.Sprintf("the step %q is still running: wait for it", busy),
-			}
-		}
-	}
-	stepID := r.targetStepLocked()
-	r.mu.Unlock()
+	defer r.mu.Unlock()
 
-	if stepID == "" {
-		return wfe.Step{}, false, &Refusal{
-			Reason:  reasonError,
-			Message: "there is no step to " + directiveVerb(kind),
-		}
-	}
-	step, ok := r.stepByID(stepID)
-	if !ok {
-		return wfe.Step{}, false, &Refusal{
-			Reason:  reasonError,
-			Message: "there is no step to " + directiveVerb(kind),
-		}
+	d, err := r.decideDirectiveLocked(kind)
+	if err != nil {
+		return OperatorDecision{}, false, err
 	}
 
-	r.mu.Lock()
 	// A pause that has not taken effect yet is taken back: the run
 	// goes on.
 	paused := r.paused
@@ -143,7 +124,9 @@ func (r *run) prepareDecision(kind, note string) (wfe.Step, bool, error) {
 	r.paused = false
 	r.pauseReason = ""
 	r.phase = PhaseRunning
-	r.directive = &directive{Kind: kind, Step: step.ID}
+	if d.Act {
+		r.directive = &directive{Kind: kind, Step: d.Step}
+	}
 	// The note is the operator's instruction: it joins the
 	// conversation the chat model reads.
 	if strings.TrimSpace(note) != "" {
@@ -152,8 +135,74 @@ func (r *run) prepareDecision(kind, note string) (wfe.Step, bool, error) {
 			Parts: []llm.Part{{Type: llm.PartText, Text: note}},
 		})
 	}
-	r.mu.Unlock()
-	return step, paused, nil
+	return d, paused, nil
+}
+
+// decideDirectiveLocked says what the operator's command will do with
+// the step the run is on. The caller holds the lock.
+//
+// The command acts only on a step that ran and did not succeed: that
+// is the step the run's own execution layer acts on, so the promise
+// the command makes and the action the run performs agree. A step
+// that is still running, that succeeded, or that the plan runs anyway
+// has nothing to decide: the command holds no decision, and the state
+// of the run answers.
+//
+// A run that is working decides for itself: there is nothing for the
+// operator to decide there either.
+//
+// The run refuses a decision while it waits for an answer: that state
+// has its own command, `/me reply`.
+func (r *run) decideDirectiveLocked(kind string) (OperatorDecision, error) {
+	if r.ask != nil {
+		return OperatorDecision{}, &Refusal{
+			Reason:  ReasonNotPaused,
+			Message: "this run is waiting for an answer: use /me reply <text>",
+		}
+	}
+	stepID := r.targetStepLocked()
+	if stepID == "" {
+		return OperatorDecision{}, &Refusal{
+			Reason:  reasonError,
+			Message: "there is no step to " + directiveVerb(kind),
+		}
+	}
+	if _, ok := r.stepByIDLocked(stepID); !ok {
+		return OperatorDecision{}, &Refusal{
+			Reason:  reasonError,
+			Message: "there is no step to " + directiveVerb(kind),
+		}
+	}
+
+	d := OperatorDecision{Step: stepID}
+	// The work is in flight: the step cannot run again, and it cannot
+	// be skipped either.
+	if busy := r.busyStepIDLocked(); busy != "" {
+		return d, nil
+	}
+	// The run is working: it decides for itself.
+	if !r.pausePendingLocked() {
+		return d, nil
+	}
+	st, ran := r.stepStateLocked(stepID)
+	switch {
+	case ran && st.Outcome.Succeeded():
+		// The step did its job: there is nothing to repair, and
+		// nothing to skip.
+		return d, nil
+	case ran:
+		// The step ran and did not succeed: it is the step a decision
+		// acts on.
+		d.Act = true
+		return d, nil
+	default:
+		// The step has not run: the plan runs it. `/me next` passes it
+		// over anyway — the operator asked for it.
+		if kind == directiveNext {
+			d.Act = true
+		}
+		return d, nil
+	}
 }
 
 // directiveVerb renders what the directive does, for the messages the

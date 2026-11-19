@@ -768,6 +768,12 @@ func (r *run) isStepMessage(idx int, command string) bool {
 func (r *run) stepByID(stepID string) (wfe.Step, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.stepByIDLocked(stepID)
+}
+
+// stepByIDLocked returns the workflow's step with the given id. The
+// caller holds the lock.
+func (r *run) stepByIDLocked(stepID string) (wfe.Step, bool) {
 	idx := r.stepIndex(stepID)
 	if idx < 0 {
 		return wfe.Step{}, false
@@ -1064,6 +1070,12 @@ func (r *run) stepCommands() []string {
 func (r *run) stepState(stepID string) (wfe.StepState, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.stepStateLocked(stepID)
+}
+
+// stepStateLocked returns the state of a step. The caller holds the
+// lock.
+func (r *run) stepStateLocked(stepID string) (wfe.StepState, bool) {
 	for _, st := range r.state.Steps {
 		if st.ID != stepID {
 			continue

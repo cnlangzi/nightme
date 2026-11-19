@@ -36,6 +36,16 @@ import (
 	"github.com/cnlangzi/nightme/internal/messages"
 )
 
+// The line and the summary of a command that answers with the state of
+// the run: the state card is the answer, and the line says so.
+const (
+	// stateShownLine is what the operator reads when the state of the
+	// run answers the command.
+	stateShownLine = "📋 The run's state is shown again."
+	// stateShownSummary is the one-line account of that answer.
+	stateShownSummary = "the run's state is shown again"
+)
+
 // Factory is the command.SlashCommandFactory for /me.
 type Factory struct {
 	// ctrl is the personal agent. A nil value means the daemon runs
@@ -222,35 +232,53 @@ func (f *Factory) pause(ctx context.Context, rt command.RuntimeServices, input c
 }
 
 // resume runs the step the run is on again.
+//
+// The command decides at command time what it does with that step: it
+// promises a retry only when the step ran and did not succeed. A step
+// that is still running, that succeeded, or that the plan runs anyway
+// is answered with the state of the run.
 func (f *Factory) resume(ctx context.Context, rt command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
 	note := decisionNote(input.Text)
-	step, err := f.ctrl.Resume(ctx, input.ChatID, input.MessageID, note)
+	d, err := f.ctrl.Resume(ctx, input.ChatID, input.MessageID, note)
 	if err != nil {
 		chatsession.ReportOutcome(ctx, command.FailedOutcome(refusalReason(err), err.Error()))
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
+	}
+	if !d.Act {
+		chatsession.ReportOutcome(ctx, command.NoopOutcome(stateShownSummary, map[string]string{"step": d.Step}))
+		return command.Reply(ctx, rt, stateShownLine), nil
 	}
 	chatsession.ReportOutcome(ctx, messages.Outcome{
 		Status:  messages.OutcomeOK,
 		Summary: "the step runs again",
-		Data:    map[string]string{"step": step},
+		Data:    map[string]string{"step": d.Step},
 	})
-	return command.Reply(ctx, rt, "▶ The step runs again: "+step+"."), nil
+	return command.Reply(ctx, rt, "▶ The step runs again: "+d.Step+"."), nil
 }
 
 // next skips the step the run is on.
+//
+// The command decides at command time what it does with that step: it
+// promises a skip only when there is a step to pass over. A step that
+// is still running or that succeeded is answered with the state of the
+// run.
 func (f *Factory) next(ctx context.Context, rt command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
 	note := decisionNote(input.Text)
-	step, err := f.ctrl.Next(ctx, input.ChatID, input.MessageID, note)
+	d, err := f.ctrl.Next(ctx, input.ChatID, input.MessageID, note)
 	if err != nil {
 		chatsession.ReportOutcome(ctx, command.FailedOutcome(refusalReason(err), err.Error()))
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
+	if !d.Act {
+		chatsession.ReportOutcome(ctx, command.NoopOutcome(stateShownSummary, map[string]string{"step": d.Step}))
+		return command.Reply(ctx, rt, stateShownLine), nil
+	}
 	chatsession.ReportOutcome(ctx, messages.Outcome{
 		Status:  messages.OutcomeOK,
 		Summary: "the step is skipped",
-		Data:    map[string]string{"step": step},
+		Data:    map[string]string{"step": d.Step},
 	})
-	return command.Reply(ctx, rt, "⏭ The step is skipped: "+step+". The run goes on with the workflow."), nil
+	return command.Reply(ctx, rt, "⏭ The step is skipped: "+d.Step+". The run goes on with the workflow."), nil
 }
 
 // refusalReason returns the stable code of a refusal, or the generic
@@ -289,7 +317,7 @@ func (f *Factory) status(ctx context.Context, rt command.RuntimeServices, input 
 	if err == nil {
 		chatsession.ReportOutcome(ctx, messages.Outcome{
 			Status:  messages.OutcomeOK,
-			Summary: "the run's state is shown again",
+			Summary: stateShownSummary,
 		})
 		// The state is on the card of the command: the command posts no
 		// reply of its own.
@@ -413,12 +441,12 @@ func (c *controller) Pause(ctx context.Context, chatID, messageID string) error 
 }
 
 // Resume implements command.MeController.
-func (c *controller) Resume(ctx context.Context, chatID, messageID, note string) (string, error) {
+func (c *controller) Resume(ctx context.Context, chatID, messageID, note string) (mesvc.OperatorDecision, error) {
 	return c.svc.Resume(ctx, chatID, messageID, note)
 }
 
 // Next implements command.MeController.
-func (c *controller) Next(ctx context.Context, chatID, messageID, note string) (string, error) {
+func (c *controller) Next(ctx context.Context, chatID, messageID, note string) (mesvc.OperatorDecision, error) {
 	return c.svc.Next(ctx, chatID, messageID, note)
 }
 

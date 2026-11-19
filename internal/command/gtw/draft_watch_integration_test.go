@@ -15,8 +15,8 @@ import (
 )
 
 // renders returns the captured messages that are draft renders
-// anchored at msgID: an OutReply whose body leads with the first
-// draft (or its ⚠️ flag).
+// anchored at msgID: an OutReply whose body leads with the rule that
+// introduces the first draft block.
 func renders(r *recordingCh, msgID string) []messages.OutboundMessage {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -25,7 +25,7 @@ func renders(r *recordingCh, msgID string) []messages.OutboundMessage {
 		if m.Kind != messages.OutReply || m.ReplyTo != msgID {
 			continue
 		}
-		if strings.HasPrefix(m.Text, "01.md\n") || strings.HasPrefix(m.Text, "⚠️ 01.md:") {
+		if strings.HasPrefix(m.Text, "---\n") {
 			out = append(out, m)
 		}
 	}
@@ -94,7 +94,7 @@ func TestFactory_New_RendersDraftsWhenTheTurnEnds(t *testing.T) {
 	publishCleanEnd(rig.cs, "msg-1")
 
 	out := waitRender(t, rig.ch, "msg-1")
-	want := "01.md\n" + raw1 + "\n02.md\n" + raw2
+	want := "---\n01.md\n" + raw1 + "\n---\n02.md\n" + raw2 + "\n---\n" + newIssueHint + "\n"
 	if out.Text != want {
 		t.Errorf("render body =\n%q\nwant\n%q", out.Text, want)
 	}
@@ -196,7 +196,8 @@ func TestFactory_New_LaterTurnsRender(t *testing.T) {
 	publishCleanEnd(rig.cs, "msg-1")
 
 	out := waitRender(t, rig.ch, "msg-1")
-	if out.Text != "01.md\n"+raw {
-		t.Errorf("render body =\n%q\nwant\n%q", out.Text, "01.md\n"+raw)
+	want := "---\n01.md\n" + raw + "\n---\n" + newIssueHint + "\n"
+	if out.Text != want {
+		t.Errorf("render body =\n%q\nwant\n%q", out.Text, want)
 	}
 }

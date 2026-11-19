@@ -59,7 +59,7 @@ func TestBudget_TheRunPausesWhenTheStepSpentItsBudget(t *testing.T) {
 	svc, op := testService(t, dir, Config{Provider: provider, MaxJudgments: 2})
 	op.steps = []fakeStep{pendingStep("still going")}
 
-	runID, err := svc.StartWorkflow(context.Background(), Request{
+	runID, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
 	})
 	if err != nil {
@@ -124,7 +124,7 @@ func TestBudget_ResumeStartsTheStepOver(t *testing.T) {
 		failedStep("the commit failed again"),
 	}
 
-	runID, err := svc.StartWorkflow(context.Background(), Request{
+	runID, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	})
 	if err != nil {
@@ -185,7 +185,7 @@ func TestBudget_TheStepRefusesAnotherCommandWhenItsBudgetIsSpent(t *testing.T) {
 	})
 	op.steps = []fakeStep{pendingStep("still going"), okStep("the first fix"), okStep("the second fix")}
 
-	runID, err := svc.StartWorkflow(context.Background(), Request{
+	runID, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 		Commands: []CommandInfo{{Name: "gtw", Summary: "the gtw command"}},
 	})
@@ -242,7 +242,7 @@ func TestBudget_AStallCostsAChance(t *testing.T) {
 	svc, op := testService(t, dir, Config{Provider: provider, MaxJudgments: 50})
 	op.steps = []fakeStep{pendingStep("still going")}
 
-	runID, err := svc.StartWorkflow(context.Background(), Request{
+	runID, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	})
 	if err != nil {
@@ -276,7 +276,7 @@ func TestProviderFailure_TheRunKeepsAsking(t *testing.T) {
 	svc, op := testService(t, dir, Config{Provider: provider, MaxJudgments: 3})
 	op.steps = []fakeStep{pendingStep("still going")}
 
-	runID, err := svc.StartWorkflow(context.Background(), Request{
+	runID, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	})
 	if err != nil {
@@ -318,7 +318,7 @@ func TestProviderFailure_TheAttemptsAreSpacedByTheBackoff(t *testing.T) {
 	})
 	op.steps = []fakeStep{pendingStep("still going")}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -381,7 +381,7 @@ func TestProviderFailure_TheTurnIsBounded(t *testing.T) {
 	svc, op := testService(t, dir, Config{Provider: provider})
 	op.steps = []fakeStep{pendingStep("still going")}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -479,7 +479,7 @@ func TestTheState_ShowsTheWaitingLineAndTheChancesLeft(t *testing.T) {
 	svc, op := testService(t, dir, Config{Provider: provider, MaxJudgments: 7})
 	op.steps = []fakeStep{pendingStep("still going")}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -531,7 +531,7 @@ func TestTheRunDoesNotFailOnAProseReply(t *testing.T) {
 	svc, op := testService(t, dir, Config{Provider: provider})
 	op.steps = []fakeStep{pendingStep("still going")}
 
-	runID, err := svc.StartWorkflow(context.Background(), Request{
+	runID, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	})
 	if err != nil {
@@ -627,7 +627,7 @@ jobs:
 	svc, op := testService(t, dir, Config{Provider: provider})
 	op.steps = []fakeStep{pendingStep("still going"), okStep("committed"), okStep("pushed")}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "two", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -700,7 +700,7 @@ jobs:
 	svc, op := testService(t, dir, Config{Provider: provider, MaxJudgments: 3})
 	op.steps = []fakeStep{okStep("a"), okStep("b")}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "fork", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -728,7 +728,7 @@ func TestBudget_AnInstructionCostsAChance(t *testing.T) {
 		Summary: "the command failed",
 	}}}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -758,7 +758,7 @@ func TestBudget_TheConversationKeepsOneSituationReport(t *testing.T) {
 		Summary: "the command failed",
 	}}}
 
-	runID, err := svc.StartWorkflow(context.Background(), Request{
+	runID, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	})
 	if err != nil {

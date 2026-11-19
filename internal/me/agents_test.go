@@ -166,7 +166,7 @@ jobs:
 `, nil)
 	op.steps = []fakeStep{okStep("reviewed")}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "chain", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -344,7 +344,7 @@ jobs:
 `, sw)
 	op.steps = []fakeStep{okStep("reviewed")}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "chain", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -389,7 +389,7 @@ jobs:
 `, sw)
 	op.steps = []fakeStep{brokenStep("omp broke")}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "chain", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -465,7 +465,7 @@ jobs:
 	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
 	op.steps = []fakeStep{brokenStep("omp broke"), brokenStep("claude broke"), okStep("omp did it")}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "chain", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -505,7 +505,7 @@ jobs:
 	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
 	op.steps = []fakeStep{brokenStep("omp broke"), brokenStep("claude broke")}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "chain", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -577,7 +577,7 @@ jobs:
 	sw.watch(op)
 	op.steps = []fakeStep{okStep("never")}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "chain", ChatID: "obs-1", Cwd: "/tmp/work",
 		Commands: []CommandInfo{{Name: "gtw", Subcommands: []CommandInfo{{Name: "commit"}}}},
 	}); err != nil {
@@ -689,7 +689,7 @@ jobs:
 	svc, op := testService(t, dir, Config{Provider: provider})
 	op.steps = []fakeStep{okStep("committed")}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "chain", ChatID: "obs-1", Cwd: "/tmp/work",
 		Commands: []CommandInfo{{Name: "gtw", Subcommands: []CommandInfo{{Name: "commit"}}}},
 	}); err != nil {
@@ -720,7 +720,7 @@ jobs:
 `, nil)
 	op.steps = []fakeStep{okStep("reviewed")}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "chain", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)

@@ -21,6 +21,9 @@
 // `nightme workflow validate` is a linter: it reports every problem
 // a workflow file has, where the problem is, and exits with a code a
 // CI job can act on.
+//
+// A name that carries no owner is the project's own namespace:
+// "coder" is the workflow "nightme/coder".
 
 package main
 
@@ -38,6 +41,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/config"
 	nmerrors "github.com/cnlangzi/nightme/internal/errors"
 	"github.com/cnlangzi/nightme/internal/runtime"
+	"github.com/cnlangzi/nightme/internal/wfname"
 	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
@@ -228,7 +232,8 @@ func newWorkflowShowCmd() *cobra.Command {
 		Long: "show prints the full workflow details: triggers, jobs, steps, " +
 			"and effective agent resolution. The name is the path of the " +
 			"workflow's bundle under the workflows dir: the directory that " +
-			"holds its workflow.yml. " +
+			"holds its workflow.yml. A name that carries no owner is " +
+			"the project's own: \"coder\" is \"nightme/coder\". " +
 			"The --json flag emits the raw parsed " +
 			"Workflow struct.",
 		Args: cobra.ExactArgs(1),
@@ -253,18 +258,27 @@ func newWorkflowShowCmd() *cobra.Command {
 // A file that did not load carries its own reason: the operator asked
 // for that name, and the file is on disk.
 func notFound(name string, failures []wfe.Failure) error {
-	for _, f := range failures {
-		if f.Name == name {
-			return f.Err
+	for _, candidate := range wfname.Names(name) {
+		for _, f := range failures {
+			if f.Name == candidate {
+				return f.Err
+			}
 		}
 	}
 	return fmt.Errorf("workflow %q not found", name)
 }
 
+// findWorkflow returns the workflow the name stands for.
+//
+// A name that carries no owner is the workflow of that name first, and
+// the project's own namespace second: "coder" is the workflow "coder"
+// when there is one, and the workflow "nightme/coder" otherwise.
 func findWorkflow(wfs []*wfe.Workflow, name string) *wfe.Workflow {
-	for _, wf := range wfs {
-		if wf.Name == name {
-			return wf
+	for _, candidate := range wfname.Names(name) {
+		for _, wf := range wfs {
+			if wf.Name == candidate {
+				return wf
+			}
 		}
 	}
 	return nil
@@ -362,7 +376,9 @@ func newWorkflowRunCmd() *cobra.Command {
 			"started by a person, with /me start <name> in a chat. Use " +
 			"this to verify the step ordering before relying on the real run.\n\n" +
 			"The name is the path of the workflow's bundle under the " +
-			"workflows dir: the directory that holds its workflow.yml.\n\n" +
+			"workflows dir: the directory that holds its workflow.yml. A " +
+			"name that carries no owner is the project's own: \"coder\" " +
+			"is \"nightme/coder\".\n\n" +
 			"--workspace overrides one of the workflow's workspaces " +
 			"(defaults to the first one). A workflow that declares no " +
 			"workspace works where the chat works.",
@@ -460,7 +476,8 @@ func newWorkflowValidateCmd() *cobra.Command {
 			"argument " +
 			"that is not a path on disk is looked up as a workflow name, so " +
 			"`nightme workflow validate nightme/coder` validates the file " +
-			"of that name. The exit code " +
+			"of that name. A name that carries no owner is the project's " +
+			"own: \"coder\" is \"nightme/coder\". The exit code " +
 			"is 0 when every workflow is valid, 8 when a workflow does not " +
 			"validate, and 9 when a path does not exist or cannot be read.\n\n" +
 			"--json swaps the lines for a JSON array.",
@@ -485,8 +502,9 @@ func newWorkflowValidateCmd() *cobra.Command {
 //
 // An argument that is not a path on disk is looked up as a workflow
 // name: the workflows directory holds the workflows, and a name is
-// the path of a bundle under it. An argument that is neither is
-// reported as a path that does not exist.
+// the path of a bundle under it. A name that carries no owner is the
+// project's own namespace: "coder" is "nightme/coder". An argument
+// that names no workflow is reported by the name it stands for.
 func runWorkflowValidate(out io.Writer, errOut io.Writer, args []string, asJSON bool) error {
 	dir, dirErr := workflowsDir()
 	paths := args
@@ -517,9 +535,18 @@ func runWorkflowValidate(out io.Writer, errOut io.Writer, args []string, asJSON 
 		}
 		// The argument is not a path on disk: it may be the name of a
 		// workflow in the workflows directory.
-		matched, nameErr := wfe.WorkflowPathsByName(dir, path)
-		if nameErr != nil || len(matched) == 0 {
-			fmt.Fprintf(errOut, "%s: %v\n", path, err)
+		matched, resolved, lookupErr := workflowPaths(dir, path)
+		if lookupErr != nil {
+			fmt.Fprintf(errOut, "%s: %v\n", path, lookupErr)
+			unreadable = true
+			continue
+		}
+		if len(matched) == 0 {
+			// The argument is neither a path on disk nor a workflow
+			// name: the command could not check what it was asked to
+			// check. The argument is written as it was typed — a
+			// Windows path keeps its backslashes.
+			fmt.Fprintf(errOut, "%s: no such path, and no workflow of that name\n", path)
 			unreadable = true
 			continue
 		}
@@ -532,7 +559,7 @@ func runWorkflowValidate(out io.Writer, errOut io.Writer, args []string, asJSON 
 			diags = append(diags, wfe.Diagnostic{
 				Path: matched[1],
 				Message: fmt.Sprintf("duplicate workflow name %q in %s and %s",
-					path, matched[0], matched[1]),
+					resolved, matched[0], matched[1]),
 			})
 		}
 	}
@@ -577,6 +604,25 @@ func readablePath(path string) (bool, error) {
 	}
 	file.Close()
 	return info.IsDir(), nil
+}
+
+// workflowPaths returns the files of the workflow the name stands for,
+// and the name it is known by.
+//
+// A name that carries no owner is the workflow of that name first, and
+// the project's own namespace second: "coder" is the workflow "coder"
+// when there is one, and the workflow "nightme/coder" otherwise.
+func workflowPaths(dir, name string) ([]string, string, error) {
+	for _, candidate := range wfname.Names(name) {
+		paths, err := wfe.WorkflowPathsByName(dir, candidate)
+		if err != nil {
+			return nil, candidate, err
+		}
+		if len(paths) > 0 {
+			return paths, candidate, nil
+		}
+	}
+	return nil, name, nil
 }
 
 // jsonNewEncoder is unused (kept for future expansion). Kept

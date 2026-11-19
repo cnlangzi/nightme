@@ -95,7 +95,6 @@ func TestParseAddress_RefusesTheAddressesThatDoNotFit(t *testing.T) {
 	for _, address := range []string{
 		"../etc/passwd",
 		"Nightme/Coder",
-		"nightme",
 		"nightme/",
 		"/coder",
 		"nightme/coder/extra",
@@ -132,6 +131,34 @@ func TestParseAddress_TheOwnerIsAnyNamespace(t *testing.T) {
 		if addr.Owner != owner {
 			t.Errorf("the owner is %q, want %q", addr.Owner, owner)
 		}
+	}
+}
+
+// TestParseAddress_ANameWithoutAnOwnerIsTheAddressOfTheProject —
+// "coder" is the address "nightme/coder".
+func TestParseAddress_ANameWithoutAnOwnerIsTheAddressOfTheProject(t *testing.T) {
+	addr, err := ParseAddress("coder")
+	if err != nil {
+		t.Fatalf("ParseAddress: %v", err)
+	}
+	if addr.Owner != "nightme" || addr.Name != "coder" {
+		t.Errorf("the address is %q/%q", addr.Owner, addr.Name)
+	}
+	if addr.String() != "nightme/coder" {
+		t.Errorf("the address reads %q", addr.String())
+	}
+}
+
+// TestParseAddress_ANameWithoutAnOwnerKeepsTheShapeOfTheHub — the
+// owner is filled in first, so the name it carries has to fit the
+// hub's shape like any other name.
+func TestParseAddress_ANameWithoutAnOwnerKeepsTheShapeOfTheHub(t *testing.T) {
+	_, err := ParseAddress("Coder")
+	if err == nil {
+		t.Fatal("the name that is not kebab-case was accepted")
+	}
+	if !strings.Contains(err.Error(), "kebab-case") {
+		t.Errorf("the error is %q, want it to name the shape of the name", err)
 	}
 }
 

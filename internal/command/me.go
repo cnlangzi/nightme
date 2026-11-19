@@ -45,8 +45,9 @@ type MeRequest struct {
 // the run works in, and the chat that gets its overview and answers
 // its questions.
 type MeController interface {
-	// StartWorkflow starts a workflow and returns the run's id.
-	StartWorkflow(ctx context.Context, req MeRequest) (string, error)
+	// StartWorkflow starts a workflow and returns the run's id and the
+	// name of the workflow it started.
+	StartWorkflow(ctx context.Context, req MeRequest) (string, string, error)
 	// Reply hands the user's reply to the run that waits for one.
 	Reply(ctx context.Context, chatID, text string) error
 	// Pause asks the run to stop after the step it is on. The message

@@ -281,7 +281,7 @@ jobs:
 	svc, op := testService(t, dir, Config{Provider: provider})
 	op.steps = []fakeStep{pendingStep("still going"), okStep("committed")}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 		Commands: []CommandInfo{{Name: "gtw", Subcommands: []CommandInfo{{Name: "commit"}}}},
 	}); err != nil {
@@ -320,7 +320,7 @@ jobs:
 	svc, op := testService(t, dir, Config{Provider: provider})
 	op.steps = []fakeStep{pendingStep("still going"), okStep("synced")}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
 		Commands: []CommandInfo{{Name: "gtw", Subcommands: []CommandInfo{{Name: "sync"}}}},
 	}); err != nil {
@@ -357,7 +357,7 @@ jobs:
 	svc, op := testService(t, dir, Config{Provider: provider})
 	op.steps = []fakeStep{pendingStep("still going"), {open: true}}
 
-	runID, err := svc.StartWorkflow(context.Background(), Request{
+	runID, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 		Commands: []CommandInfo{{Name: "gtw", Subcommands: []CommandInfo{{Name: "sync"}}}},
 	})
@@ -466,7 +466,7 @@ func TestResumeTool_AStepThatRanMayRunAgain(t *testing.T) {
 	svc, op := testService(t, dir, Config{Provider: provider})
 	op.steps = []fakeStep{pendingStep("still going"), okStep("committed")}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -748,7 +748,7 @@ jobs:
 		okStep("pushed"),
 	}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "two", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -837,7 +837,7 @@ jobs:
 	svc, op := testService(t, dir, Config{Provider: provider, AgentOpener: &fakeOpener{}})
 	op.steps = []fakeStep{pendingStep("still going")}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 		Commands: []CommandInfo{{Name: "gtw"}, {Name: "close"}},
 		Agent:    "claude",
@@ -912,7 +912,7 @@ func TestTheBrainTool_TheFastPathDoesNotOpenTheSession(t *testing.T) {
 	svc, op := testService(t, dir, Config{Provider: provider, AgentOpener: opener})
 	op.steps = []fakeStep{okStep("committed")}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -940,7 +940,7 @@ func TestTheBrainTool_TheSessionIsOpenedOnceAndReused(t *testing.T) {
 	svc, op := testService(t, dir, Config{Provider: provider, AgentOpener: opener})
 	op.steps = []fakeStep{pendingStep("still going")}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -1065,7 +1065,7 @@ func TestTheBrainTool_TheSessionEndsWithTheRun(t *testing.T) {
 	svc, op := testService(t, dir, Config{Provider: provider, AgentOpener: opener})
 	op.steps = []fakeStep{pendingStep("still going")}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -1100,7 +1100,7 @@ jobs:
 	svc, op := testService(t, dir, Config{Provider: provider, AgentOpener: opener})
 	op.steps = []fakeStep{pendingStep("still going"), okStep("committed"), pendingStep("still going")}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "loop", ChatID: "obs-1", Cwd: "/tmp/work", Agent: "claude",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -1149,7 +1149,7 @@ jobs:
 	// agent ended the round.
 	op.steps = []fakeStep{pendingStep("nothing to fix"), okStep("closed")}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -1203,7 +1203,7 @@ func TestWaitTool_TheModelWaitsAndLooksAgain(t *testing.T) {
 	// the agent takes over.
 	op.steps = []fakeStep{pendingStep("still going")}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)

@@ -97,7 +97,7 @@ func TestTheStateCarriesTheStateOfTheRound(t *testing.T) {
 	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
 	op.steps = []fakeStep{{open: true}}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -162,7 +162,7 @@ func TestTheStateHangsUnderTheMessageThatAskedForIt(t *testing.T) {
 	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
 	op.steps = []fakeStep{{open: true}}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -197,7 +197,7 @@ func TestTheStateTakesNoCardOver(t *testing.T) {
 	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
 	op.steps = []fakeStep{{open: true}}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -232,7 +232,7 @@ func TestTheStateIsNotPartOfTheRun(t *testing.T) {
 	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
 	op.steps = []fakeStep{{open: true}}
 
-	runID, err := svc.StartWorkflow(context.Background(), Request{
+	runID, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	})
 	if err != nil {
@@ -269,7 +269,7 @@ func TestTheRoundCardIsASnapshot(t *testing.T) {
 	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
 	op.steps = []fakeStep{{open: true}}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -306,7 +306,7 @@ func TestAPausePublishesTheState(t *testing.T) {
 	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
 	op.steps = []fakeStep{{open: true}}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -335,7 +335,7 @@ func TestAPauseOfAPausedRunPublishesTheState(t *testing.T) {
 	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
 	op.steps = []fakeStep{{open: true}}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -371,7 +371,7 @@ func TestAResumePublishesTheState(t *testing.T) {
 		{open: true},
 	}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -422,7 +422,7 @@ func TestANextPublishesTheState(t *testing.T) {
 		{open: true},
 	}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "two", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -499,7 +499,7 @@ func TestATakeoverPublishesTheState(t *testing.T) {
 	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
 	op.steps = []fakeStep{{open: true}}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -543,7 +543,7 @@ func TestATakeoverOfAPausedRunPublishesNoState(t *testing.T) {
 	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
 	op.steps = []fakeStep{{open: true}}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -579,7 +579,7 @@ func TestTheBudgetPausePublishesTheState(t *testing.T) {
 	svc, op := testService(t, dir, Config{Provider: provider, MaxJudgments: 2})
 	op.steps = []fakeStep{pendingStep("still going")}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -616,7 +616,7 @@ func TestTheRateLimitPausePublishesTheState(t *testing.T) {
 		Summary: "429 Too Many Requests",
 	}}}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -709,7 +709,7 @@ func TestTheStatusDoesNotReplaceTheCardOfTheRun(t *testing.T) {
 	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
 	op.steps = []fakeStep{{open: true}}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)

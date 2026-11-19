@@ -784,6 +784,12 @@ func (r *run) stepByID(stepID string) (wfe.Step, bool) {
 func (r *run) runnableStep(stepID string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.runnableStepLocked(stepID)
+}
+
+// runnableStepLocked reports whether the step may run now. The caller
+// holds the lock.
+func (r *run) runnableStepLocked(stepID string) bool {
 	ready, err := wfe.ReadySet(r.state, r.workflow)
 	if err == nil {
 		for _, step := range ready {
@@ -1064,6 +1070,12 @@ func (r *run) stepCommands() []string {
 func (r *run) stepState(stepID string) (wfe.StepState, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.stepStateLocked(stepID)
+}
+
+// stepStateLocked returns the state of a step. The caller holds the
+// lock.
+func (r *run) stepStateLocked(stepID string) (wfe.StepState, bool) {
 	for _, st := range r.state.Steps {
 		if st.ID != stepID {
 			continue

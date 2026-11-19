@@ -92,12 +92,15 @@ func TestResume_RunsTheStepAgain(t *testing.T) {
 	// its chat, and the run of a chat that is over is gone.
 	r := activeRun(t, svc, "obs-1")
 
-	step, err := svc.Resume(context.Background(), "obs-1", "", "")
+	d, err := svc.Resume(context.Background(), "obs-1", "", "")
 	if err != nil {
 		t.Fatalf("resume: %v", err)
 	}
-	if step != "commit" {
-		t.Errorf("the command acted on %q, want commit", step)
+	if d.Step != "commit" {
+		t.Errorf("the command acted on %q, want commit", d.Step)
+	}
+	if !d.Act {
+		t.Error("the command decided nothing, want the step to run again")
 	}
 
 	// The step's command goes to the chat a second time.
@@ -236,12 +239,15 @@ func TestNext_SkipsTheStep(t *testing.T) {
 	// its chat, and the run of a chat that is over is gone.
 	r := activeRun(t, svc, "obs-1")
 
-	step, err := svc.Next(context.Background(), "obs-1", "", "")
+	d, err := svc.Next(context.Background(), "obs-1", "", "")
 	if err != nil {
 		t.Fatalf("next: %v", err)
 	}
-	if step != "commit" {
-		t.Errorf("the command acted on %q, want commit", step)
+	if d.Step != "commit" {
+		t.Errorf("the command acted on %q, want commit", d.Step)
+	}
+	if !d.Act {
+		t.Error("the command decided nothing, want the step to be skipped")
 	}
 
 	waitForAction(t, r, wfe.ActionKindRun, "commit", 2)
@@ -396,12 +402,15 @@ func TestResume_AfterATakeoverRunsTheBrokenStepAgain(t *testing.T) {
 
 	// The run is on the step that broke: the operator's word runs it
 	// again.
-	step, err := svc.Resume(context.Background(), "obs-1", "", "")
+	d, err := svc.Resume(context.Background(), "obs-1", "", "")
 	if err != nil {
 		t.Fatalf("resume: %v", err)
 	}
-	if step != "commit" {
-		t.Errorf("the command acted on %q, want the step that broke", step)
+	if d.Step != "commit" {
+		t.Errorf("the command acted on %q, want the step that broke", d.Step)
+	}
+	if !d.Act {
+		t.Error("the command decided nothing, want the step to run again")
 	}
 	waitSentCount(t, op, 2)
 }
@@ -541,9 +550,10 @@ func TestTheRoundCardShowsTheErrorOfABrokenStep(t *testing.T) {
 	}
 }
 
-// TestTheCommandsRefuseARunThatIsNotWaiting — the commands act on a
-// paused run and on nothing else.
-func TestTheCommandsRefuseARunThatIsNotWaiting(t *testing.T) {
+// TestTheCommandsDecideNothingOnARunThatIsWorking — a run that is
+// working decides for itself: the command holds no decision, and the
+// state of the run answers.
+func TestTheCommandsDecideNothingOnARunThatIsWorking(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
@@ -558,19 +568,32 @@ func TestTheCommandsRefuseARunThatIsNotWaiting(t *testing.T) {
 	waitSent(t, op, "/gtw commit")
 
 	// The run is working: it is not paused.
-	_, err := svc.Resume(context.Background(), "obs-1", "", "")
-	if err == nil {
-		t.Fatal("the run was resumed although it is working")
+	for _, cmd := range []struct {
+		name string
+		call func() (OperatorDecision, error)
+	}{
+		{"resume", func() (OperatorDecision, error) { return svc.Resume(context.Background(), "obs-1", "", "") }},
+		{"next", func() (OperatorDecision, error) { return svc.Next(context.Background(), "obs-1", "", "") }},
+	} {
+		d, err := cmd.call()
+		if err != nil {
+			t.Fatalf("%s: %v", cmd.name, err)
+		}
+		if d.Act {
+			t.Errorf("the %s decided something, want the run to decide for itself", cmd.name)
+		}
+		if d.Step != "commit" {
+			t.Errorf("the %s looked at %q, want the step the run is on", cmd.name, d.Step)
+		}
 	}
-	if !strings.Contains(err.Error(), "this run is not paused") {
-		t.Errorf("the refusal is %q, want the reason", err)
-	}
-	if reason := RefusalReason(err); reason != ReasonNotPaused {
-		t.Errorf("the reason is %q, want %q", reason, ReasonNotPaused)
+	// The run holds no decision for the turn.
+	r := activeRun(t, svc, "obs-1")
+	if r.takeDirective() != nil {
+		t.Error("the run holds a decision, want none")
 	}
 
 	// A chat without a run has nothing to act on.
-	_, err = svc.Next(context.Background(), "obs-2", "", "")
+	_, err := svc.Next(context.Background(), "obs-2", "", "")
 	if err == nil {
 		t.Fatal("a chat without a run was skipped")
 	}
@@ -603,10 +626,10 @@ func TestTheCommandsRefuseARunThatIsAsking(t *testing.T) {
 
 	for _, cmd := range []struct {
 		name string
-		call func() (string, error)
+		call func() (OperatorDecision, error)
 	}{
-		{"resume", func() (string, error) { return svc.Resume(context.Background(), "obs-1", "", "") }},
-		{"next", func() (string, error) { return svc.Next(context.Background(), "obs-1", "", "") }},
+		{"resume", func() (OperatorDecision, error) { return svc.Resume(context.Background(), "obs-1", "", "") }},
+		{"next", func() (OperatorDecision, error) { return svc.Next(context.Background(), "obs-1", "", "") }},
 	} {
 		_, err := cmd.call()
 		if err == nil {
@@ -725,9 +748,10 @@ func TestResume_CancelsAPauseThatHasNotTakenEffect(t *testing.T) {
 	}
 }
 
-// TestNext_RefusesAStepThatIsStillRunning — the work is in flight: it
-// cannot be skipped.
-func TestNext_RefusesAStepThatIsStillRunning(t *testing.T) {
+// TestTheCommandsDecideNothingOnAStepThatIsStillRunning — the work is
+// in flight: the step can neither run again nor be skipped, so the
+// command holds no decision.
+func TestTheCommandsDecideNothingOnAStepThatIsStillRunning(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
@@ -744,16 +768,183 @@ func TestNext_RefusesAStepThatIsStillRunning(t *testing.T) {
 	if err := svc.Pause(context.Background(), "obs-1", "om_pause"); err != nil {
 		t.Fatalf("pause: %v", err)
 	}
-	_, err := svc.Next(context.Background(), "obs-1", "", "")
-	if err == nil {
-		t.Fatal("a step that is still running was skipped")
+	for _, cmd := range []struct {
+		name string
+		call func() (OperatorDecision, error)
+	}{
+		{"resume", func() (OperatorDecision, error) { return svc.Resume(context.Background(), "obs-1", "", "") }},
+		{"next", func() (OperatorDecision, error) { return svc.Next(context.Background(), "obs-1", "", "") }},
+	} {
+		d, err := cmd.call()
+		if err != nil {
+			t.Fatalf("%s: %v", cmd.name, err)
+		}
+		if d.Act {
+			t.Errorf("the %s decided something, want nothing to decide", cmd.name)
+		}
+		if d.Step != "commit" {
+			t.Errorf("the %s looked at %q, want the step that is running", cmd.name, d.Step)
+		}
 	}
-	if !strings.Contains(err.Error(), "commit") {
-		t.Errorf("the refusal is %q, want it to name the step", err)
+	// The run holds no decision for the turn.
+	r := activeRun(t, svc, "obs-1")
+	if r.takeDirective() != nil {
+		t.Error("the run holds a decision, want none")
 	}
-	if reason := RefusalReason(err); reason != ReasonStepRunning {
-		t.Errorf("the reason is %q, want %q", reason, ReasonStepRunning)
+}
+
+// TestTheCommandsDecideOnTheStateOfTheTargetStep — the state of the
+// step the run is on decides what the commands do with it: a step that
+// ran and did not succeed is the step a decision acts on, and a step
+// that has not run is left to the plan.
+func TestTheCommandsDecideOnTheStateOfTheTargetStep(t *testing.T) {
+	cases := []struct {
+		name string
+		// outcome is the verdict of the step, and ran says whether it
+		// ran at all.
+		outcome wfe.Outcome
+		ran     bool
+		// wantResume and wantNext say whether the command acts on the
+		// step.
+		wantResume bool
+		wantNext   bool
+	}{
+		{
+			name:       "the step succeeded",
+			outcome:    wfe.Outcome{Status: wfe.OutcomeOK, Summary: "committed"},
+			ran:        true,
+			wantResume: false,
+			wantNext:   false,
+		},
+		{
+			name:       "the step failed",
+			outcome:    wfe.Outcome{Status: wfe.OutcomeFailed, Summary: "the commit failed"},
+			ran:        true,
+			wantResume: true,
+			wantNext:   true,
+		},
+		{
+			name:       "the step was cancelled",
+			outcome:    wfe.Outcome{Status: wfe.OutcomeCancelled, Summary: "the commit was cancelled"},
+			ran:        true,
+			wantResume: true,
+			wantNext:   true,
+		},
+		{
+			name:       "the step has not run",
+			outcome:    wfe.Outcome{},
+			ran:        false,
+			wantResume: false,
+			wantNext:   true,
+		},
 	}
+	for _, tc := range cases {
+		for _, cmd := range []struct {
+			name string
+			kind string
+			want bool
+		}{
+			{"resume", directiveResume, tc.wantResume},
+			{"next", directiveNext, tc.wantNext},
+		} {
+			t.Run(tc.name+" with "+cmd.name, func(t *testing.T) {
+				dir := t.TempDir()
+				writeWorkflow(t, dir, "two", commitPushWorkflow)
+				svc, _ := testService(t, dir, Config{})
+				r := pausedRun(t, svc, "commit", tc.outcome, tc.ran)
+
+				var d OperatorDecision
+				var err error
+				if cmd.kind == directiveResume {
+					d, err = svc.Resume(context.Background(), "obs-1", "", "")
+				} else {
+					d, err = svc.Next(context.Background(), "obs-1", "", "")
+				}
+				if err != nil {
+					t.Fatalf("%s: %v", cmd.name, err)
+				}
+				if d.Act != cmd.want {
+					t.Errorf("the command decided %t, want %t", d.Act, cmd.want)
+				}
+				if d.Step != "commit" {
+					t.Errorf("the command looked at %q, want commit", d.Step)
+				}
+				// The run holds the decision only when the command
+				// acted on the step.
+				directive := r.takeDirective()
+				if !cmd.want {
+					if directive != nil {
+						t.Errorf("the run holds the decision %+v, want none", directive)
+					}
+					return
+				}
+				if directive == nil {
+					t.Fatal("the run holds no decision, want one")
+				}
+				if directive.Kind != cmd.kind || directive.Step != "commit" {
+					t.Errorf("the run holds the decision %+v, want %q on commit", directive, cmd.kind)
+				}
+			})
+		}
+	}
+}
+
+// TestResume_OnAStepThatCannotRunAgainDecidesNothing — a step the plan
+// has moved on from cannot run again: the command does not promise a
+// retry it cannot keep.
+func TestResume_OnAStepThatCannotRunAgainDecidesNothing(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "two", commitPushWorkflow)
+
+	svc, _ := testService(t, dir, Config{})
+	r := pausedRun(t, svc, "commit", wfe.Outcome{Status: wfe.OutcomeFailed, Summary: "the commit failed"}, true)
+
+	// The job went on to its next round: the step cannot run again.
+	r.mu.Lock()
+	if r.state.Rounds == nil {
+		r.state.Rounds = map[string]int{}
+	}
+	r.state.Rounds["main"] = 2
+	r.mu.Unlock()
+
+	d, err := svc.Resume(context.Background(), "obs-1", "", "")
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if d.Act {
+		t.Error("the command promised a retry of a step that cannot run again")
+	}
+	if d.Step != "commit" {
+		t.Errorf("the command looked at %q, want commit", d.Step)
+	}
+	if r.takeDirective() != nil {
+		t.Error("the run holds a decision, want none")
+	}
+}
+
+// pausedRun builds a run of a workflow that waits for the operator,
+// with the given step in the given state.
+//
+// The step is the step the run is on: the run holds a judgment about
+// it.
+func pausedRun(t *testing.T, svc *Service, stepID string, outcome wfe.Outcome, ran bool) *run {
+	t.Helper()
+	r := testRun(t, svc, "two")
+	t.Cleanup(r.cancel)
+	step, ok := r.stepByID(stepID)
+	if !ok {
+		t.Fatalf("the workflow has no %q step", stepID)
+	}
+	if ran {
+		r.recordStep("main", step, outcome)
+		r.record(wfe.ActionKindRun, "/gtw "+stepID, stepID, outcome)
+	}
+	r.setJudgmentStep(stepID)
+	r.pauseNow("the operator paused the run")
+	svc.mu.Lock()
+	svc.active[r.chatID] = r
+	svc.mu.Unlock()
+	return r
 }
 
 // TestTheRoundCardShowsASkippedStep — a step whose outcome is noop is

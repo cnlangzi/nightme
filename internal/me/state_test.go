@@ -11,6 +11,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
 // TestThePhaseLineNamesTheStep — a run that is working says which
@@ -402,6 +403,32 @@ func TestAResumePublishesTheState(t *testing.T) {
 	// The card of the round is the card the run works on.
 	if got := r.roundSessionRef(); got != round {
 		t.Error("the state took the place of the card of the round")
+	}
+}
+
+// TestAResumeThatDecidesNothingPublishesTheState — the command had
+// nothing to decide: the state of the run is published all the same,
+// under the message the operator asked from.
+func TestAResumeThatDecidesNothingPublishesTheState(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "two", commitPushWorkflow)
+
+	svc, op := testService(t, dir, Config{})
+	pausedRun(t, svc, "commit", wfe.Outcome{Status: wfe.OutcomeOK, Summary: "committed"}, true)
+
+	if _, err := svc.Resume(context.Background(), "obs-1", "om_resume", ""); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	state := waitForStateUnder(t, op, "om_resume", 2)
+	if len(state) < 2 {
+		t.Fatalf("the state carries %d messages, want the identity line and the phase line", len(state))
+	}
+	if state[0].Kind != messages.OutInit {
+		t.Errorf("the first message is %q, want the identity line", state[0].Kind)
+	}
+	// The run waits for the operator no more: it goes on.
+	if state[1].Kind != messages.OutReply || !strings.HasPrefix(state[1].Text, "running") {
+		t.Errorf("the phase line is %q (%q), want the phase of the run", state[1].Kind, state[1].Text)
 	}
 }
 

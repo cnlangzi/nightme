@@ -54,16 +54,18 @@ type MeController interface {
 	// id is the message the operator asked from: the state of the run
 	// hangs under it.
 	Pause(ctx context.Context, chatID, messageID string) error
-	// Resume runs the step the run is on again. It returns the id of
-	// the step the command acted on. The message id is the message the
-	// operator asked from: the state of the run hangs under it. The
-	// note is the operator's instruction.
-	Resume(ctx context.Context, chatID, messageID, note string) (string, error)
-	// Next skips the step the run is on. It returns the id of the step
-	// the command acted on. The message id is the message the operator
+	// Resume runs the step the run is on again. It returns what the
+	// command did with that step: its id, and whether the command
+	// recorded a decision. The message id is the message the operator
 	// asked from: the state of the run hangs under it. The note is the
 	// operator's instruction.
-	Next(ctx context.Context, chatID, messageID, note string) (string, error)
+	Resume(ctx context.Context, chatID, messageID, note string) (me.OperatorDecision, error)
+	// Next skips the step the run is on. It returns what the command
+	// did with that step: its id, and whether the command recorded a
+	// decision. The message id is the message the operator asked from:
+	// the state of the run hangs under it. The note is the operator's
+	// instruction.
+	Next(ctx context.Context, chatID, messageID, note string) (me.OperatorDecision, error)
 	// Stop cancels the run of a chat.
 	Stop(ctx context.Context, chatID string) error
 	// Status posts the state of the run of a chat. The message id is

@@ -721,6 +721,10 @@ func (s *Service) Pause(ctx context.Context, chatID string) error {
 // command's own goroutine. The state is written before the run is
 // woken, so a daemon that dies in between comes back with the
 // decision in its state file.
+//
+// The state card is posted before the run is woken: the card is the
+// live card of the round, so the entries of the resumed step belong to
+// it.
 func (s *Service) Resume(ctx context.Context, chatID, note string) (string, error) {
 	s.mu.Lock()
 	r, ok := s.active[chatID]
@@ -733,10 +737,11 @@ func (s *Service) Resume(ctx context.Context, chatID, note string) (string, erro
 		return "", err
 	}
 	s.persist(r)
+	s.refreshSessions(r)
+	s.showState(ctx, r)
 	if paused {
 		r.wake()
 	}
-	s.refreshSessions(r)
 	return step.ID, nil
 }
 
@@ -748,6 +753,9 @@ func (s *Service) Resume(ctx context.Context, chatID, note string) (string, erro
 //
 // A note is the operator's instruction: it joins the conversation the
 // chat model reads.
+//
+// The state card is posted before the run is woken: the card is the
+// live card of the round, so the entries of the run belong to it.
 func (s *Service) Next(ctx context.Context, chatID, note string) (string, error) {
 	s.mu.Lock()
 	r, ok := s.active[chatID]
@@ -760,10 +768,11 @@ func (s *Service) Next(ctx context.Context, chatID, note string) (string, error)
 		return "", err
 	}
 	s.persist(r)
+	s.refreshSessions(r)
+	s.showState(ctx, r)
 	if paused {
 		r.wake()
 	}
-	s.refreshSessions(r)
 	return step.ID, nil
 }
 

@@ -726,23 +726,7 @@ func (s *Service) Pause(ctx context.Context, chatID string) error {
 // live card of the round, so the entries of the resumed step belong to
 // it.
 func (s *Service) Resume(ctx context.Context, chatID, note string) (string, error) {
-	s.mu.Lock()
-	r, ok := s.active[chatID]
-	s.mu.Unlock()
-	if !ok {
-		return "", &Refusal{Reason: ReasonNoRun, Message: "this chat has no run in it"}
-	}
-	step, paused, err := r.prepareDecision(directiveResume, note)
-	if err != nil {
-		return "", err
-	}
-	s.persist(r)
-	s.refreshSessions(r)
-	s.showState(ctx, r)
-	if paused {
-		r.wake()
-	}
-	return step.ID, nil
+	return s.operatorDecision(ctx, chatID, note, directiveResume)
 }
 
 // Next skips the step the run is on.
@@ -757,13 +741,25 @@ func (s *Service) Resume(ctx context.Context, chatID, note string) (string, erro
 // The state card is posted before the run is woken: the card is the
 // live card of the round, so the entries of the run belong to it.
 func (s *Service) Next(ctx context.Context, chatID, note string) (string, error) {
+	return s.operatorDecision(ctx, chatID, note, directiveNext)
+}
+
+// operatorDecision records the operator's decision for the run and
+// hands the control back to the run.
+//
+// It reports the id of the step the decision acted on.
+//
+// The decision is persisted, the state of the run is refreshed and the
+// state card is posted before the run is woken: the card is the live
+// card of the round, so the entries of the run belong to it.
+func (s *Service) operatorDecision(ctx context.Context, chatID, note, kind string) (string, error) {
 	s.mu.Lock()
 	r, ok := s.active[chatID]
 	s.mu.Unlock()
 	if !ok {
 		return "", &Refusal{Reason: ReasonNoRun, Message: "this chat has no run in it"}
 	}
-	step, paused, err := r.prepareDecision(directiveNext, note)
+	step, paused, err := r.prepareDecision(kind, note)
 	if err != nil {
 		return "", err
 	}

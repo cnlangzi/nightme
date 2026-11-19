@@ -79,6 +79,24 @@ func newChat(t *testing.T) (*chatsession.ChatSession, *captureEmitter) {
 	return cs, em
 }
 
+// TestTheUsageNamesTheShortName — the usage lines tell the operator
+// that a name without an owner is another way of writing the address.
+func TestTheUsageNamesTheShortName(t *testing.T) {
+	f := testFactory(t.TempDir(), nil, nil)
+	spec := f.Spec()
+	for _, sub := range spec.Subcommands {
+		if !strings.Contains(sub.Usage, "| <name>") {
+			t.Errorf("the usage of %s is %q, want it to name the short form", sub.Name, sub.Usage)
+		}
+	}
+	if !strings.Contains(spec.Usage, "| <name>") {
+		t.Errorf("the usage of the command is %q, want it to name the short form", spec.Usage)
+	}
+	if !strings.Contains(spec.Usage, "\n") {
+		t.Errorf("the usage of the command is %q, want a line per subcommand", spec.Usage)
+	}
+}
+
 // TestHandle_InstallsTheWorkflowAndCarriesTheReason — the command
 // installs the workflow, the checklist carries the progress, and the
 // settled message carries the reason.
@@ -577,9 +595,10 @@ func TestHandle_UninstallRefusesAnAddressThatDoesNotFit(t *testing.T) {
 	}
 }
 
-// TestHandle_TheShorthandInstallsTheSameWorkflow — "@coder" installs
-// the workflow the full address installs, under the same path.
-func TestHandle_TheShorthandInstallsTheSameWorkflow(t *testing.T) {
+// TestHandle_ANameWithoutAnOwnerInstallsTheSameWorkflow — "coder"
+// installs the workflow the full address installs, under the same
+// path.
+func TestHandle_ANameWithoutAnOwnerInstallsTheSameWorkflow(t *testing.T) {
 	dir := t.TempDir()
 	tier, srv := servingTier("github", validWorkflow)
 	defer srv.Close()
@@ -592,7 +611,7 @@ func TestHandle_TheShorthandInstallsTheSameWorkflow(t *testing.T) {
 	if _, err := f.Handle(ctx, command.RuntimeServices{}, nil, cs, command.SlashInput{
 		ChatID:    "chat-1",
 		MessageID: "msg-11",
-		Args:      []string{"wf", "install", "@coder"},
+		Args:      []string{"wf", "install", "coder"},
 	}); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -622,9 +641,9 @@ func TestHandle_TheShorthandInstallsTheSameWorkflow(t *testing.T) {
 	}
 }
 
-// TestHandle_TheShorthandAsksTheHubForTheSameFile — the shorthand
-// fetches the file of the full address.
-func TestHandle_TheShorthandAsksTheHubForTheSameFile(t *testing.T) {
+// TestHandle_ANameWithoutAnOwnerAsksTheHubForTheSameFile — the short
+// name fetches the file of the full address.
+func TestHandle_ANameWithoutAnOwnerAsksTheHubForTheSameFile(t *testing.T) {
 	dir := t.TempDir()
 	var mu sync.Mutex
 	var asked []string
@@ -643,7 +662,7 @@ func TestHandle_TheShorthandAsksTheHubForTheSameFile(t *testing.T) {
 
 	cs, _ := newChat(t)
 	f := testFactory(dir, []Source{{Name: "github", BaseURL: srv.URL + "/"}}, nil)
-	for _, address := range []string{"nightme/coder", "@coder"} {
+	for _, address := range []string{"nightme/coder", "coder"} {
 		work := cs.Hold("msg-12")
 		ctx := chatsession.WithWork(context.Background(), work)
 		if _, err := f.Handle(ctx, command.RuntimeServices{}, nil, cs, command.SlashInput{
@@ -666,9 +685,9 @@ func TestHandle_TheShorthandAsksTheHubForTheSameFile(t *testing.T) {
 	}
 }
 
-// TestHandle_TheShorthandRemovesTheSameWorkflow — "@coder" takes
-// away the workflow the full address takes away.
-func TestHandle_TheShorthandRemovesTheSameWorkflow(t *testing.T) {
+// TestHandle_ANameWithoutAnOwnerRemovesTheSameWorkflow — "coder"
+// takes away the workflow the full address takes away.
+func TestHandle_ANameWithoutAnOwnerRemovesTheSameWorkflow(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "nightme", "coder", "workflow.yml")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -686,7 +705,7 @@ func TestHandle_TheShorthandRemovesTheSameWorkflow(t *testing.T) {
 	if _, err := f.Handle(ctx, command.RuntimeServices{}, nil, cs, command.SlashInput{
 		ChatID:    "chat-1",
 		MessageID: "msg-13",
-		Args:      []string{"wf", "uninstall", "@coder"},
+		Args:      []string{"wf", "uninstall", "coder"},
 	}); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -707,9 +726,9 @@ func TestHandle_TheShorthandRemovesTheSameWorkflow(t *testing.T) {
 	}
 }
 
-// TestHandle_TheAddressThatDoesNotFitIsEchoedAsItWasTyped — a
-// shorthand that names no workflow is refused, and the checklist and
-// the outcome carry the address as it was typed.
+// TestHandle_TheAddressThatDoesNotFitIsEchoedAsItWasTyped — an
+// address that does not fit the hub's shape is refused, and the
+// checklist and the outcome carry the address as it was typed.
 func TestHandle_TheAddressThatDoesNotFitIsEchoedAsItWasTyped(t *testing.T) {
 	dir := t.TempDir()
 	gets := 0
@@ -724,7 +743,7 @@ func TestHandle_TheAddressThatDoesNotFitIsEchoedAsItWasTyped(t *testing.T) {
 	out, err := f.Handle(ctx, command.RuntimeServices{}, nil, cs, command.SlashInput{
 		ChatID:    "chat-1",
 		MessageID: "msg-14",
-		Args:      []string{"wf", "install", "@"},
+		Args:      []string{"wf", "install", "Coder"},
 	})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
@@ -744,18 +763,18 @@ func TestHandle_TheAddressThatDoesNotFitIsEchoedAsItWasTyped(t *testing.T) {
 	if outcome.Data["reason"] != ReasonInvalidAddress {
 		t.Errorf("the reason is %q, want %q", outcome.Data["reason"], ReasonInvalidAddress)
 	}
-	if outcome.Data["address"] != "@" {
+	if outcome.Data["address"] != "Coder" {
 		t.Errorf("the address is %q, want the one that was typed", outcome.Data["address"])
 	}
-	if detail := outcome.Data[messages.OutcomeKeyError]; !strings.Contains(detail, "shorthand") {
-		t.Errorf("the detail is %q, want it to name the shorthand", detail)
+	if detail := outcome.Data[messages.OutcomeKeyError]; !strings.Contains(detail, "kebab-case") {
+		t.Errorf("the detail is %q, want it to name the shape of the name", detail)
 	}
 
 	tasks := em.tasks()
 	if len(tasks) == 0 {
 		t.Fatal("the checklist was never published")
 	}
-	if subject := tasks[0].TaskList.Items[0].Subject; subject != "download @" {
+	if subject := tasks[0].TaskList.Items[0].Subject; subject != "download Coder" {
 		t.Errorf("the first row says %q, want the address that was typed", subject)
 	}
 }

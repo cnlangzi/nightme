@@ -315,16 +315,16 @@ func TestWorkflowValidate_AWorkflowNameThatDoesNotValidate(t *testing.T) {
 	}
 }
 
-// TestWorkflowValidate_TheShorthandIsAWorkflowName — "@coder" is the
-// workflow "nightme/coder".
-func TestWorkflowValidate_TheShorthandIsAWorkflowName(t *testing.T) {
+// TestWorkflowValidate_ANameWithoutAnOwnerIsAWorkflowName — "coder"
+// is the workflow "nightme/coder".
+func TestWorkflowValidate_ANameWithoutAnOwnerIsAWorkflowName(t *testing.T) {
 	dir := t.TempDir()
 	writeBundle(t, dir, "nightme/coder", "title: code it\njobs:\n  main:\n    steps: [{message: hi}]\n")
 	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
 
 	var err error
 	out := captureStdout(t, func() error {
-		err = runRoot("workflow", "validate", "@coder")
+		err = runRoot("workflow", "validate", "coder")
 		return nil
 	})
 	if out != "" {
@@ -335,19 +335,20 @@ func TestWorkflowValidate_TheShorthandIsAWorkflowName(t *testing.T) {
 	}
 }
 
-// TestWorkflowValidate_TheShorthandThatNamesNoWorkflow — an argument
-// that names no workflow is a path the command could not check.
-func TestWorkflowValidate_TheShorthandThatNamesNoWorkflow(t *testing.T) {
+// TestWorkflowValidate_ANameThatAnswersToNoWorkflow — the report
+// names the workflow the command looked for, not a file that was
+// never there.
+func TestWorkflowValidate_ANameThatAnswersToNoWorkflow(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
 
 	var err error
 	errOut := captureStderr(t, func() error {
-		err = runRoot("workflow", "validate", "@")
+		err = runRoot("workflow", "validate", "coder")
 		return nil
 	})
-	if !strings.Contains(errOut, "@") {
-		t.Errorf("stderr = %q, want it to name the argument", errOut)
+	if !strings.Contains(errOut, `no workflow named "coder"`) {
+		t.Errorf("stderr = %q, want it to name the workflow it looked for", errOut)
 	}
 	if code := nmerrors.ExitCode(err); code != nmerrors.CodeNotFound {
 		t.Errorf("exit code = %d, want %d", code, nmerrors.CodeNotFound)

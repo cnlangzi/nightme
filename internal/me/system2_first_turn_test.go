@@ -27,7 +27,7 @@ func TestTheFirstTurnOfTheChatModelHasAUserMessage(t *testing.T) {
 		Summary: "the step did not work",
 	}}}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)

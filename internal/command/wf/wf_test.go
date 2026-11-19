@@ -95,7 +95,6 @@ func TestParseAddress_RefusesTheAddressesThatDoNotFit(t *testing.T) {
 	for _, address := range []string{
 		"../etc/passwd",
 		"Nightme/Coder",
-		"nightme",
 		"nightme/",
 		"/coder",
 		"nightme/coder/extra",
@@ -135,10 +134,10 @@ func TestParseAddress_TheOwnerIsAnyNamespace(t *testing.T) {
 	}
 }
 
-// TestParseAddress_TheShorthandIsTheAddressOfTheProject — "@coder"
-// is the address "nightme/coder".
-func TestParseAddress_TheShorthandIsTheAddressOfTheProject(t *testing.T) {
-	addr, err := ParseAddress("@coder")
+// TestParseAddress_ANameWithoutAnOwnerIsTheAddressOfTheProject —
+// "coder" is the address "nightme/coder".
+func TestParseAddress_ANameWithoutAnOwnerIsTheAddressOfTheProject(t *testing.T) {
+	addr, err := ParseAddress("coder")
 	if err != nil {
 		t.Fatalf("ParseAddress: %v", err)
 	}
@@ -150,25 +149,13 @@ func TestParseAddress_TheShorthandIsTheAddressOfTheProject(t *testing.T) {
 	}
 }
 
-// TestParseAddress_RefusesTheShorthandsThatDoNotFit — a shorthand
-// that names no workflow, and one that names a path, are refused.
-func TestParseAddress_RefusesTheShorthandsThatDoNotFit(t *testing.T) {
-	for _, address := range []string{"@", "@a/b"} {
-		t.Run(address, func(t *testing.T) {
-			if _, err := ParseAddress(address); err == nil {
-				t.Errorf("the address %q was accepted", address)
-			}
-		})
-	}
-}
-
-// TestParseAddress_TheShorthandKeepsTheShapeOfTheHub — the shorthand
-// is expanded first, so the name it carries has to fit the hub's
-// shape like any other name.
-func TestParseAddress_TheShorthandKeepsTheShapeOfTheHub(t *testing.T) {
-	_, err := ParseAddress("@Coder")
+// TestParseAddress_ANameWithoutAnOwnerKeepsTheShapeOfTheHub — the
+// owner is filled in first, so the name it carries has to fit the
+// hub's shape like any other name.
+func TestParseAddress_ANameWithoutAnOwnerKeepsTheShapeOfTheHub(t *testing.T) {
+	_, err := ParseAddress("Coder")
 	if err == nil {
-		t.Fatal("the shorthand with a name that is not kebab-case was accepted")
+		t.Fatal("the name that is not kebab-case was accepted")
 	}
 	if !strings.Contains(err.Error(), "kebab-case") {
 		t.Errorf("the error is %q, want it to name the shape of the name", err)

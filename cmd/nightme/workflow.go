@@ -22,8 +22,8 @@
 // a workflow file has, where the problem is, and exits with a code a
 // CI job can act on.
 //
-// A workflow of the project's own namespace may be named in short:
-// "@coder" is the workflow "nightme/coder".
+// A name that carries no owner is the project's own namespace:
+// "coder" is the workflow "nightme/coder".
 
 package main
 
@@ -232,8 +232,8 @@ func newWorkflowShowCmd() *cobra.Command {
 		Long: "show prints the full workflow details: triggers, jobs, steps, " +
 			"and effective agent resolution. The name is the path of the " +
 			"workflow's bundle under the workflows dir: the directory that " +
-			"holds its workflow.yml. A workflow of the project's own " +
-			"namespace may be named in short: \"@coder\" is \"nightme/coder\". " +
+			"holds its workflow.yml. A name that carries no owner is " +
+			"the project's own: \"coder\" is \"nightme/coder\". " +
 			"The --json flag emits the raw parsed " +
 			"Workflow struct.",
 		Args: cobra.ExactArgs(1),
@@ -242,13 +242,9 @@ func newWorkflowShowCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			name, err := wfname.Expand(args[0])
-			if err != nil {
-				return err
-			}
-			wf := findWorkflow(wfs, name)
+			wf := findWorkflow(wfs, args[0])
 			if wf == nil {
-				return notFound(name, failures)
+				return notFound(args[0], failures)
 			}
 			return printWorkflowShow(cmd.OutOrStdout(), wf, jsonOut)
 		},
@@ -262,18 +258,27 @@ func newWorkflowShowCmd() *cobra.Command {
 // A file that did not load carries its own reason: the operator asked
 // for that name, and the file is on disk.
 func notFound(name string, failures []wfe.Failure) error {
-	for _, f := range failures {
-		if f.Name == name {
-			return f.Err
+	for _, candidate := range wfname.Names(name) {
+		for _, f := range failures {
+			if f.Name == candidate {
+				return f.Err
+			}
 		}
 	}
 	return fmt.Errorf("workflow %q not found", name)
 }
 
+// findWorkflow returns the workflow the name stands for.
+//
+// A name that carries no owner is the workflow of that name first, and
+// the project's own namespace second: "coder" is the workflow "coder"
+// when there is one, and the workflow "nightme/coder" otherwise.
 func findWorkflow(wfs []*wfe.Workflow, name string) *wfe.Workflow {
-	for _, wf := range wfs {
-		if wf.Name == name {
-			return wf
+	for _, candidate := range wfname.Names(name) {
+		for _, wf := range wfs {
+			if wf.Name == candidate {
+				return wf
+			}
 		}
 	}
 	return nil
@@ -372,8 +377,8 @@ func newWorkflowRunCmd() *cobra.Command {
 			"this to verify the step ordering before relying on the real run.\n\n" +
 			"The name is the path of the workflow's bundle under the " +
 			"workflows dir: the directory that holds its workflow.yml. A " +
-			"workflow of the project's own namespace may be named in " +
-			"short: \"@coder\" is \"nightme/coder\".\n\n" +
+			"name that carries no owner is the project's own: \"coder\" " +
+			"is \"nightme/coder\".\n\n" +
 			"--workspace overrides one of the workflow's workspaces " +
 			"(defaults to the first one). A workflow that declares no " +
 			"workspace works where the chat works.",
@@ -383,13 +388,9 @@ func newWorkflowRunCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			name, err := wfname.Expand(args[0])
-			if err != nil {
-				return err
-			}
-			wf := findWorkflow(wfs, name)
+			wf := findWorkflow(wfs, args[0])
 			if wf == nil {
-				return notFound(name, failures)
+				return notFound(args[0], failures)
 			}
 			ws := workspace
 			if ws == "" && len(wf.Workspaces) > 0 {
@@ -475,8 +476,8 @@ func newWorkflowValidateCmd() *cobra.Command {
 			"argument " +
 			"that is not a path on disk is looked up as a workflow name, so " +
 			"`nightme workflow validate nightme/coder` validates the file " +
-			"of that name. A workflow of the project's own namespace may be " +
-			"named in short: \"@coder\" is \"nightme/coder\". The exit code " +
+			"of that name. A name that carries no owner is the project's " +
+			"own: \"coder\" is \"nightme/coder\". The exit code " +
 			"is 0 when every workflow is valid, 8 when a workflow does not " +
 			"validate, and 9 when a path does not exist or cannot be read.\n\n" +
 			"--json swaps the lines for a JSON array.",
@@ -501,9 +502,9 @@ func newWorkflowValidateCmd() *cobra.Command {
 //
 // An argument that is not a path on disk is looked up as a workflow
 // name: the workflows directory holds the workflows, and a name is
-// the path of a bundle under it. A name of the project's own
-// namespace may be written in short: "@coder" is "nightme/coder". An
-// argument that is neither is reported as a path that does not exist.
+// the path of a bundle under it. A name that carries no owner is the
+// project's own namespace: "coder" is "nightme/coder". An argument
+// that names no workflow is reported by the name it stands for.
 func runWorkflowValidate(out io.Writer, errOut io.Writer, args []string, asJSON bool) error {
 	dir, dirErr := workflowsDir()
 	paths := args
@@ -534,15 +535,16 @@ func runWorkflowValidate(out io.Writer, errOut io.Writer, args []string, asJSON 
 		}
 		// The argument is not a path on disk: it may be the name of a
 		// workflow in the workflows directory.
-		name, nameErr := wfname.Expand(path)
-		if nameErr != nil {
-			fmt.Fprintf(errOut, "%s: %v\n", path, nameErr)
+		matched, resolved, lookupErr := workflowPaths(dir, path)
+		if lookupErr != nil {
+			fmt.Fprintf(errOut, "%s: %v\n", path, lookupErr)
 			unreadable = true
 			continue
 		}
-		matched, lookupErr := wfe.WorkflowPathsByName(dir, name)
-		if lookupErr != nil || len(matched) == 0 {
-			fmt.Fprintf(errOut, "%s: %v\n", path, err)
+		if len(matched) == 0 {
+			// The name answers to no workflow: the command could not
+			// check what it was asked to check.
+			fmt.Fprintf(errOut, "no workflow named %q\n", path)
 			unreadable = true
 			continue
 		}
@@ -555,7 +557,7 @@ func runWorkflowValidate(out io.Writer, errOut io.Writer, args []string, asJSON 
 			diags = append(diags, wfe.Diagnostic{
 				Path: matched[1],
 				Message: fmt.Sprintf("duplicate workflow name %q in %s and %s",
-					name, matched[0], matched[1]),
+					resolved, matched[0], matched[1]),
 			})
 		}
 	}
@@ -600,6 +602,25 @@ func readablePath(path string) (bool, error) {
 	}
 	file.Close()
 	return info.IsDir(), nil
+}
+
+// workflowPaths returns the files of the workflow the name stands for,
+// and the name it is known by.
+//
+// A name that carries no owner is the workflow of that name first, and
+// the project's own namespace second: "coder" is the workflow "coder"
+// when there is one, and the workflow "nightme/coder" otherwise.
+func workflowPaths(dir, name string) ([]string, string, error) {
+	for _, candidate := range wfname.Names(name) {
+		paths, err := wfe.WorkflowPathsByName(dir, candidate)
+		if err != nil {
+			return nil, candidate, err
+		}
+		if len(paths) > 0 {
+			return paths, candidate, nil
+		}
+	}
+	return nil, name, nil
 }
 
 // jsonNewEncoder is unused (kept for future expansion). Kept

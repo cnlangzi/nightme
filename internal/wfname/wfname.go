@@ -1,39 +1,46 @@
 // Package wfname resolves the name of a workflow.
 //
 // A workflow of the project's own namespace is addressed by its short
-// name: "@coder" is the workflow "nightme/coder". Every place that
+// name: "coder" is the workflow "nightme/coder". Every place that
 // takes a workflow name resolves it through this package, so the
-// shorthand is written the same way everywhere.
+// short name is written the same way everywhere.
 package wfname
 
-import (
-	"errors"
-	"strings"
-)
+import "strings"
 
 // Owner is the namespace the project's own workflows live under.
 const Owner = "nightme"
 
-// marker is what a shorthand starts with.
-const marker = "@"
-
-// Expand turns "@<name>" into the workflow name it stands for:
-// "<Owner>/<name>". A name that is not the shorthand is returned as
-// it is.
+// Expand turns a name that carries no owner into the name it stands
+// for: "coder" is "nightme/coder". A name that carries an owner is
+// returned as it is.
 //
 // The expansion is a change of spelling only: whether the workflow
 // exists — in the workflows directory or on the hub — is the caller's
 // business.
-func Expand(s string) (string, error) {
-	if !strings.HasPrefix(s, marker) {
-		return s, nil
+func Expand(s string) string {
+	if s == "" || hasOwner(s) {
+		return s
 	}
-	name := strings.TrimPrefix(s, marker)
-	if name == "" {
-		return "", errors.New("the shorthand needs a workflow name")
+	return Owner + "/" + s
+}
+
+// Names returns the names a workflow name answers to, most specific
+// first: "coder" answers to the workflow "coder" and to the workflow
+// "nightme/coder".
+//
+// A workflow's name is the path of its bundle under the workflows
+// directory, so a name that carries no owner is a workflow of its
+// own: it comes first, and the project's own namespace is the
+// fallback.
+func Names(s string) []string {
+	if s == "" || hasOwner(s) {
+		return []string{s}
 	}
-	if strings.Contains(name, "/") {
-		return "", errors.New("the shorthand takes a workflow name only")
-	}
-	return Owner + "/" + name, nil
+	return []string{s, Owner + "/" + s}
+}
+
+// hasOwner reports whether the name carries an owner: a slash in it.
+func hasOwner(s string) bool {
+	return strings.Contains(s, "/")
 }

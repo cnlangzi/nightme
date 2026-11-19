@@ -950,12 +950,12 @@ func TestStartWorkflow_RefusesASecondRunInTheSameChat(t *testing.T) {
 	// for a second one, and the test would prove nothing.
 	op.steps = []fakeStep{{open: true}}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err == nil {
 		t.Fatal("a second run in the same chat was accepted")
@@ -967,7 +967,7 @@ func TestStartWorkflow_ReportsAnUnknownWorkflow(t *testing.T) {
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
 	svc, _ := testService(t, dir, Config{Provider: &scriptedProvider{}})
-	_, err := svc.StartWorkflow(context.Background(), Request{
+	_, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "nope", ChatID: "obs-1", Cwd: "/tmp/work",
 	})
 	if err == nil {
@@ -990,7 +990,7 @@ jobs:
 `)
 
 	svc, _ := testService(t, dir, Config{Provider: &scriptedProvider{}})
-	_, err := svc.StartWorkflow(context.Background(), Request{
+	_, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", Args: []string{"42", "43"}, ChatID: "obs-1", Cwd: "/tmp/work",
 	})
 	if err == nil {
@@ -1018,7 +1018,7 @@ jobs:
 	decider := &scriptedDecider{err: errors.New("the decision model must not be called")}
 	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", Args: []string{"issue=42"}, ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -1033,7 +1033,7 @@ func TestStartWorkflow_RefusesAnUnknownNamedArgument(t *testing.T) {
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
 	svc, _ := testService(t, dir, Config{Provider: &scriptedProvider{}})
-	_, err := svc.StartWorkflow(context.Background(), Request{
+	_, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", Args: []string{"nope=1"}, ChatID: "obs-1", Cwd: "/tmp/work",
 	})
 	if err == nil {
@@ -1049,7 +1049,7 @@ func TestStartWorkflow_ReportsThatTheAgentIsOff(t *testing.T) {
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
 	svc, _ := testService(t, dir, Config{})
-	_, err := svc.StartWorkflow(context.Background(), Request{
+	_, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	})
 	if err == nil {
@@ -1072,7 +1072,7 @@ func TestFastPath_RunsEveryStepWithoutAModel(t *testing.T) {
 	decider := &scriptedDecider{err: errors.New("the decision model must not be called")}
 	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name:   "fix-issue",
 		Args:   []string{"42"},
 		ChatID: "obs-1",
@@ -1129,7 +1129,7 @@ jobs:
 		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "committed"}},
 	}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -1182,7 +1182,7 @@ jobs:
 		{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}},
 	}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -1235,7 +1235,7 @@ jobs:
 		Data:    map[string]string{"issue": "42", "groups": "3"},
 	}}}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -1294,7 +1294,7 @@ jobs:
 		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "review finished"}},
 	}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "repair", ChatID: "obs-1", Cwd: "/tmp/work",
 		Commands: []CommandInfo{{Name: "review"}},
 	}); err != nil {
@@ -1347,7 +1347,7 @@ jobs:
 		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "the repair worked"}},
 	}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "repair", ChatID: "obs-1", Cwd: "/tmp/work",
 		Commands: []CommandInfo{{Name: "review"}},
 	}); err != nil {
@@ -1391,7 +1391,7 @@ jobs:
 		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "the review worked"}},
 	}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "repair", ChatID: "obs-1", Cwd: "/tmp/work",
 		Commands: []CommandInfo{{Name: "review"}},
 	}); err != nil {
@@ -1434,7 +1434,7 @@ func TestPersist_HoldsTheProgressTheConversationAndTheHistory(t *testing.T) {
 	svc, op := testService(t, dir, Config{Decider: decider})
 	op.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}}}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -1479,7 +1479,7 @@ func TestTheRunStartsWhenTheChatRefusesACard(t *testing.T) {
 	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
 	op.failCard = true
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("the run did not start: %v", err)
@@ -1506,7 +1506,7 @@ jobs:
 	decider := &scriptedDecider{err: errors.New("the decision model must not be called")}
 	svc, _ := testService(t, dir, Config{Provider: provider, Decider: decider, Shell: shell})
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "sh", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -1572,7 +1572,7 @@ jobs:
 	decider := &scriptedDecider{err: errors.New("the decision model must not be called")}
 	svc, _ := testService(t, dir, Config{Provider: provider, Decider: decider, Shell: shell})
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "sh", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -1612,7 +1612,7 @@ jobs:
 	action := &recordingAction{name: "hello"}
 	svc.actions.Register(action)
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "act", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -1647,7 +1647,7 @@ jobs:
 	}}
 	svc, op := testService(t, dir, Config{Decider: decider})
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "act", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -1692,7 +1692,7 @@ func TestJudgmentPoint_ANonOkOutcomeAsksTheAgent(t *testing.T) {
 	// The first step does not finish.
 	op.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}}}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "fix-issue", Args: []string{"42"}, ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -1721,7 +1721,7 @@ func TestJudgmentPoint_LowConfidenceEscalatesToTheChatModel(t *testing.T) {
 	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
 	op.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}}}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "fix-issue", Args: []string{"42"}, ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -1757,7 +1757,7 @@ func TestJudgmentPoint_ARefusedDecisionEscalatesToTheChatModel(t *testing.T) {
 	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
 	op.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}}}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "fix-issue", Args: []string{"42"}, ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -1779,7 +1779,7 @@ func TestJudgmentPoint_NeedsHumanAsksTheUserWhenThereIsNoChatModel(t *testing.T)
 	svc, op := testService(t, dir, Config{Decider: decider})
 	op.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}}}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "fix-issue", Args: []string{"42"}, ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -1810,7 +1810,7 @@ func TestJudgmentPoint_PolicyRejectedChoiceEscalates(t *testing.T) {
 	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
 	op.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}}}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "fix-issue", Args: []string{"42"}, ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -1846,7 +1846,7 @@ func TestSystem1_UnknownOutcomeAsksWhetherTheStepSucceeded(t *testing.T) {
 	// The first step reports nothing.
 	op.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeUnknown}}}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "fix-issue", Args: []string{"42"}, ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -1884,7 +1884,7 @@ func TestSystem1_KnownOutcomeDoesNotAskWhetherTheStepSucceeded(t *testing.T) {
 	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
 	op.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}}}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "fix-issue", Args: []string{"42"}, ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -1914,7 +1914,7 @@ func TestSystem1_DecisionIsRecordedAsASyntheticToolCall(t *testing.T) {
 	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
 	op.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}}}
 
-	runID, err := svc.StartWorkflow(context.Background(), Request{
+	runID, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "fix-issue", Args: []string{"42"}, ChatID: "obs-1", Cwd: "/tmp/work",
 	})
 	if err != nil {
@@ -1966,7 +1966,7 @@ func TestSystem1_ANoopStepIsNotAToolError(t *testing.T) {
 		{outcome: messages.Outcome{Status: messages.OutcomeNoop, Summary: "nothing to commit"}},
 	}
 
-	runID, err := svc.StartWorkflow(context.Background(), Request{
+	runID, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	})
 	if err != nil {
@@ -2005,7 +2005,7 @@ func TestSystem1_AFailedStepIsAToolError(t *testing.T) {
 		{outcome: messages.Outcome{Status: messages.OutcomeFailed, Summary: "the commit failed"}},
 	}
 
-	runID, err := svc.StartWorkflow(context.Background(), Request{
+	runID, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	})
 	if err != nil {

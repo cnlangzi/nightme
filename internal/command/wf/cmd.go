@@ -49,13 +49,13 @@ func (f *Factory) Spec() command.Spec {
 		Subcommands: []command.SubcommandSpec{
 			{
 				Name:    "install",
-				Summary: "Install a published workflow by its address.",
-				Usage:   "/wf install [-f] <owner>/<name> | @<name>",
+				Summary: "Install a published workflow by its address. A name without an owner is the project's own: coder is nightme/coder.",
+				Usage:   installCmdSpec.Usage,
 			},
 			{
 				Name:    "uninstall",
-				Summary: "Remove an installed workflow by its address.",
-				Usage:   "/wf uninstall <owner>/<name> | @<name>",
+				Summary: "Remove an installed workflow by its address. A name without an owner is the project's own: coder is nightme/coder.",
+				Usage:   uninstallCmdSpec.Usage,
 			},
 		},
 	}
@@ -73,7 +73,7 @@ const (
 // the address is one argument, and only the force flag is known.
 var installCmdSpec = command.CmdSpec{
 	Name:       "/wf install",
-	Usage:      "/wf install [-f] <owner>/<name> | @<name>",
+	Usage:      "/wf install [-f] <owner>/<name> | <name>",
 	Subcommand: subInstall,
 	Flags: map[string]command.FlagSpec{
 		"-f":      {Name: "force"},
@@ -89,14 +89,15 @@ var installCmdSpec = command.CmdSpec{
 // else.
 var uninstallCmdSpec = command.CmdSpec{
 	Name:       "/wf uninstall",
-	Usage:      "/wf uninstall <owner>/<name> | @<name>",
+	Usage:      "/wf uninstall <owner>/<name> | <name>",
 	Subcommand: subUninstall,
 	MinArgs:    1,
 	MaxArgs:    1,
 }
 
-// wfUsage is the usage line of the /wf command.
-const wfUsage = "/wf install [-f] <owner>/<name> | @<name>\n/wf uninstall <owner>/<name> | @<name>"
+// wfUsage is the usage line of the /wf command: the two subcommands
+// on a line each.
+var wfUsage = installCmdSpec.Usage + "\n" + uninstallCmdSpec.Usage
 
 // Handle implements command.SlashCommandFactory.
 //

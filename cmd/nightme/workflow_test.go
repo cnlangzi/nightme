@@ -403,9 +403,9 @@ func TestWorkflowShow_ReportsTheClashOfTwoFiles(t *testing.T) {
 	}
 }
 
-// TestWorkflowShow_TheShorthandFindsTheWorkflow — "@coder" is the
-// workflow "nightme/coder".
-func TestWorkflowShow_TheShorthandFindsTheWorkflow(t *testing.T) {
+// TestWorkflowShow_ANameWithoutAnOwnerFindsTheWorkflow — "coder" is
+// the workflow "nightme/coder".
+func TestWorkflowShow_ANameWithoutAnOwnerFindsTheWorkflow(t *testing.T) {
 	dir := t.TempDir()
 	body := `
 title: code it
@@ -419,7 +419,7 @@ jobs:
 	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
 
 	out := captureStdout(t, func() error {
-		return runRoot("workflow", "show", "@coder")
+		return runRoot("workflow", "show", "coder")
 	})
 	for _, want := range []string{"name:       nightme/coder", "title:      code it"} {
 		if !strings.Contains(out, want) {
@@ -428,31 +428,33 @@ jobs:
 	}
 }
 
-// TestWorkflowShow_TheShorthandThatNamesNoWorkflowIsRefused — "@"
-// names no workflow.
-func TestWorkflowShow_TheShorthandThatNamesNoWorkflowIsRefused(t *testing.T) {
+// TestWorkflowShow_TheWorkflowOfThatNameComesFirst — a workflow of
+// that name is more specific than the project's own namespace.
+func TestWorkflowShow_TheWorkflowOfThatNameComesFirst(t *testing.T) {
 	dir := t.TempDir()
+	body := "title: do the thing\njobs:\n  main:\n    steps: [{message: hi}]\n"
+	writeBundle(t, dir, "coder", body)
+	writeBundle(t, dir, "nightme/coder", "title: the other one\njobs:\n  main:\n    steps: [{message: hi}]\n")
 	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
 
-	err := runRoot("workflow", "show", "@")
-	if err == nil {
-		t.Fatal("the shorthand without a name was accepted")
-	}
-	if !strings.Contains(err.Error(), "shorthand") {
-		t.Errorf("err = %v, want it to name the shorthand", err)
+	out := captureStdout(t, func() error {
+		return runRoot("workflow", "show", "coder")
+	})
+	if !strings.Contains(out, "name:       coder") {
+		t.Errorf("output = %q, want the workflow of that name", out)
 	}
 }
 
-// TestWorkflowRun_TheShorthandFindsTheWorkflow — "@coder" is the
-// workflow "nightme/coder".
-func TestWorkflowRun_TheShorthandFindsTheWorkflow(t *testing.T) {
+// TestWorkflowRun_ANameWithoutAnOwnerFindsTheWorkflow — "coder" is
+// the workflow "nightme/coder".
+func TestWorkflowRun_ANameWithoutAnOwnerFindsTheWorkflow(t *testing.T) {
 	dir := t.TempDir()
 	body := "title: code it\njobs:\n  main:\n    steps: [{id: s1, message: /review}]\n"
 	writeBundle(t, dir, "nightme/coder", body)
 	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
 
 	out := captureStdout(t, func() error {
-		return runRoot("workflow", "run", "@coder")
+		return runRoot("workflow", "run", "coder")
 	})
 	for _, want := range []string{"workflow:   nightme/coder", "execution plan"} {
 		if !strings.Contains(out, want) {

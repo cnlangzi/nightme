@@ -1,56 +1,46 @@
 package wfname
 
 import (
-	"strings"
+	"slices"
 	"testing"
 )
 
-// TestExpand_TheShorthandIsTheOwnerAndTheName — "@coder" is the
+// TestExpand_ANameWithoutAnOwnerIsTheProjectsOwn — "coder" is the
 // workflow "nightme/coder".
-func TestExpand_TheShorthandIsTheOwnerAndTheName(t *testing.T) {
-	name, err := Expand("@coder")
-	if err != nil {
-		t.Fatalf("Expand: %v", err)
-	}
-	if name != "nightme/coder" {
-		t.Errorf("the name is %q, want nightme/coder", name)
+func TestExpand_ANameWithoutAnOwnerIsTheProjectsOwn(t *testing.T) {
+	if got := Expand("coder"); got != "nightme/coder" {
+		t.Errorf("Expand(%q) = %q, want nightme/coder", "coder", got)
 	}
 }
 
-// TestExpand_ANameThatIsNotTheShorthandIsAsItIs — the expansion only
-// rewrites the shorthand: every other name is handed back untouched.
-func TestExpand_ANameThatIsNotTheShorthandIsAsItIs(t *testing.T) {
-	for _, s := range []string{"nightme/coder", "acme/foo", "fix", ""} {
-		name, err := Expand(s)
-		if err != nil {
-			t.Errorf("Expand(%q): %v", s, err)
-			continue
-		}
-		if name != s {
-			t.Errorf("Expand(%q) = %q, want it unchanged", s, name)
+// TestExpand_ANameThatCarriesAnOwnerIsAsItIs — the expansion only
+// fills in an owner: every other name is handed back untouched.
+func TestExpand_ANameThatCarriesAnOwnerIsAsItIs(t *testing.T) {
+	for _, s := range []string{"nightme/coder", "acme/foo", ""} {
+		if got := Expand(s); got != s {
+			t.Errorf("Expand(%q) = %q, want it unchanged", s, got)
 		}
 	}
 }
 
-// TestExpand_TheShorthandNeedsAName — the marker alone names nothing.
-func TestExpand_TheShorthandNeedsAName(t *testing.T) {
-	_, err := Expand("@")
-	if err == nil {
-		t.Fatal("the shorthand without a name was accepted")
-	}
-	if !strings.Contains(err.Error(), "needs a workflow name") {
-		t.Errorf("the error is %q, want it to ask for a name", err)
+// TestNames_TheWorkflowOfThatNameComesFirst — a name without an owner
+// is a workflow of its own, and the project's own namespace is the
+// fallback.
+func TestNames_TheWorkflowOfThatNameComesFirst(t *testing.T) {
+	got := Names("coder")
+	want := []string{"coder", "nightme/coder"}
+	if !slices.Equal(got, want) {
+		t.Errorf("Names(%q) = %v, want %v", "coder", got, want)
 	}
 }
 
-// TestExpand_TheShorthandTakesOneName — the shorthand names a
-// workflow, not a path.
-func TestExpand_TheShorthandTakesOneName(t *testing.T) {
-	_, err := Expand("@a/b")
-	if err == nil {
-		t.Fatal("the shorthand with a path was accepted")
-	}
-	if !strings.Contains(err.Error(), "takes a workflow name only") {
-		t.Errorf("the error is %q, want it to refuse the path", err)
+// TestNames_ANameThatCarriesAnOwnerIsTheOnlyOne — a name that carries
+// an owner answers to itself alone.
+func TestNames_ANameThatCarriesAnOwnerIsTheOnlyOne(t *testing.T) {
+	for _, s := range []string{"nightme/coder", "acme/foo", ""} {
+		got := Names(s)
+		if len(got) != 1 || got[0] != s {
+			t.Errorf("Names(%q) = %v, want just itself", s, got)
+		}
 	}
 }

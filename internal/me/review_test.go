@@ -29,7 +29,7 @@ jobs:
 	decider := &scriptedDecider{err: errors.New("the decision model must not be called")}
 	svc, _ := testService(t, dir, Config{Provider: provider, Decider: decider})
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "wait", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -67,7 +67,7 @@ jobs:
 	decider := &scriptedDecider{err: errors.New("the decision model must not be called")}
 	svc, _ := testService(t, dir, Config{Provider: provider, Decider: decider, Shell: shell})
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "sh", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -132,7 +132,7 @@ jobs:
 		{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}, open: true},
 	}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 		Commands: []CommandInfo{{Name: "two"}},
 	}); err != nil {
@@ -169,7 +169,7 @@ func TestActOnDecision_ARuntimeFailureEscalates(t *testing.T) {
 	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
 	op.failCommand = "/gtw commit"
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -198,7 +198,7 @@ jobs:
 	decider := &scriptedDecider{err: errors.New("the decision model must not be called")}
 	svc, _ := testService(t, dir, Config{Provider: provider, Decider: decider, Shell: shell})
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "sh", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -250,7 +250,7 @@ jobs:
 	action := &recordingAction{name: "notify"}
 	svc.actions.Register(action)
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "act", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)

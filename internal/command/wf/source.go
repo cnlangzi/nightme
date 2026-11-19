@@ -1,7 +1,7 @@
 // Package wf implements the `/wf` slash command.
 //
-//	/wf install [-f] <owner>/<name> | @<name>
-//	/wf uninstall <owner>/<name> | @<name>
+//	/wf install [-f] <owner>/<name> | <name>
+//	/wf uninstall <owner>/<name> | <name>
 //
 // The command fetches a published workflow from the hub and installs
 // it into the daemon's workflows directory, where the personal agent
@@ -9,8 +9,8 @@
 // installed is left alone unless the install is forced; the uninstall
 // takes an installed workflow away again.
 //
-// The address of a workflow of the project's own namespace may be
-// written in short: "@coder" is the address "nightme/coder".
+// An address that carries no owner is the project's own namespace:
+// "coder" is the address "nightme/coder".
 //
 // The install is reported in the chat as a three-row checklist — the
 // download, the validation and the write — and the uninstall as a
@@ -63,20 +63,16 @@ var nameRe = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
 
 // ParseAddress parses "<owner>/<name>" and checks its shape.
 //
-// The address of a workflow of the project's own namespace may be
-// written in short: "@coder" is the address "nightme/coder". The
-// shorthand is expanded first, so the shape rules below are the
-// hub's: the owner is the namespace the workflow is published under
-// and the name is a lowercase kebab-case short name. An address that
-// does not fit them is refused before anything is fetched, so an
-// address can never reach outside the hub's tree.
+// An address that carries no owner is the project's own namespace:
+// "coder" is the address "nightme/coder". The owner is filled in
+// first, so the shape rules below are the hub's: the owner is the
+// namespace the workflow is published under and the name is a
+// lowercase kebab-case short name. An address that does not fit them
+// is refused before anything is fetched, so an address can never reach
+// outside the hub's tree.
 func ParseAddress(s string) (Address, error) {
 	trimmed := strings.TrimSpace(s)
-	expanded, err := wfname.Expand(trimmed)
-	if err != nil {
-		return Address{}, err
-	}
-	owner, name, ok := strings.Cut(expanded, "/")
+	owner, name, ok := strings.Cut(wfname.Expand(trimmed), "/")
 	if !ok || owner == "" || name == "" {
 		return Address{}, fmt.Errorf("the address %q is not <owner>/<name>", s)
 	}

@@ -494,7 +494,7 @@ func TestTheConversation_HoldsNoHints(t *testing.T) {
 	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
 	op.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}}}
 
-	runID, err := svc.StartWorkflow(context.Background(), Request{
+	runID, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	})
 	if err != nil {
@@ -539,7 +539,7 @@ func TestTheConversation_TheSyntheticCallHasTheNewShape(t *testing.T) {
 	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
 	op.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}}}
 
-	runID, err := svc.StartWorkflow(context.Background(), Request{
+	runID, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	})
 	if err != nil {
@@ -596,7 +596,7 @@ func TestTheDecisionModelCannotAnswerWithACommandItWasNotGiven(t *testing.T) {
 	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
 	op.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}}}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 		Commands: []CommandInfo{{Name: "gtw"}},
 	}); err != nil {

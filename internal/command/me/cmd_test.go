@@ -37,6 +37,9 @@ type fakeController struct {
 	statusCalls int
 	// disabled says why the personal agent is off.
 	disabled string
+	// resolved is the name of the workflow the fake ran. Empty means
+	// the name the command asked for.
+	resolved string
 	// replies holds the replies the command sent.
 	replies []string
 	// stopped counts the stops.
@@ -53,14 +56,18 @@ type fakeController struct {
 	step string
 }
 
-func (c *fakeController) StartWorkflow(_ context.Context, req command.MeRequest) (string, error) {
+func (c *fakeController) StartWorkflow(_ context.Context, req command.MeRequest) (string, string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.started = append(c.started, req)
 	if c.startErr != nil {
-		return "", c.startErr
+		return "", "", c.startErr
 	}
-	return "run-1", nil
+	name := c.resolved
+	if name == "" {
+		name = req.Name
+	}
+	return "run-1", name, nil
 }
 
 func (c *fakeController) Reply(_ context.Context, _ string, text string) error {
@@ -530,19 +537,19 @@ func TestStart_WithoutAWorkflowName(t *testing.T) {
 	}
 }
 
-// TestStart_TheShorthandRunsTheWorkflowOfTheProject — "@coder" runs
-// the workflow "nightme/coder", and the outcome names it.
-func TestStart_TheShorthandRunsTheWorkflowOfTheProject(t *testing.T) {
-	ctrl := &fakeController{}
-	cs, ch := newSessionWithOutcome(t, "me-shorthand", "/tmp/work")
+// TestStart_TheOutcomeNamesTheWorkflowThatRan — the outcome carries
+// the name the agent resolved, not the name the operator typed.
+func TestStart_TheOutcomeNamesTheWorkflowThatRan(t *testing.T) {
+	ctrl := &fakeController{resolved: "nightme/coder"}
+	cs, ch := newSessionWithOutcome(t, "me-resolved", "/tmp/work")
 
-	runMe(t, ctrl, cs, "/me", "start", "@coder")
+	runMe(t, ctrl, cs, "/me", "start", "coder")
 
 	if len(ctrl.started) != 1 {
 		t.Fatalf("the controller got %d requests, want 1", len(ctrl.started))
 	}
-	if req := ctrl.request(0); req.Name != "nightme/coder" {
-		t.Errorf("name = %q, want nightme/coder", req.Name)
+	if req := ctrl.request(0); req.Name != "coder" {
+		t.Errorf("name = %q, want the name the operator typed", req.Name)
 	}
 	outcome := ch.settled()
 	if outcome == nil {
@@ -553,28 +560,6 @@ func TestStart_TheShorthandRunsTheWorkflowOfTheProject(t *testing.T) {
 	}
 	if !strings.Contains(outcome.Summary, "nightme/coder") {
 		t.Errorf("the summary is %q, want it to name the workflow", outcome.Summary)
-	}
-}
-
-// TestStart_TheShorthandThatNamesNoWorkflowIsRefused — "@" names no
-// workflow, so the run does not start.
-func TestStart_TheShorthandThatNamesNoWorkflowIsRefused(t *testing.T) {
-	ctrl := &fakeController{}
-	cs, ch := newSessionWithOutcome(t, "me-shorthand-bad", "/tmp/work")
-
-	reply := runMe(t, ctrl, cs, "/me", "start", "@")
-	if len(ctrl.started) != 0 {
-		t.Fatal("the run was started without a workflow")
-	}
-	if !strings.Contains(reply, "shorthand") {
-		t.Errorf("reply = %q, want it to name the shorthand", reply)
-	}
-	outcome := ch.settled()
-	if outcome == nil {
-		t.Fatal("the command reported no outcome")
-	}
-	if outcome.Data["reason"] != "usage" {
-		t.Errorf("the reason is %q, want usage", outcome.Data["reason"])
 	}
 }
 

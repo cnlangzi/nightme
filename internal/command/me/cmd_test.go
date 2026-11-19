@@ -57,6 +57,9 @@ type fakeController struct {
 	notes []string
 	// step is the step the controller acted on.
 	step string
+	// noDecision says the controller recorded no decision: the run
+	// had nothing to do at that moment.
+	noDecision bool
 }
 
 func (c *fakeController) StartWorkflow(_ context.Context, req command.MeRequest) (string, string, error) {
@@ -88,28 +91,28 @@ func (c *fakeController) Pause(_ context.Context, _ string, messageID string) er
 	return c.pauseErr
 }
 
-func (c *fakeController) Resume(_ context.Context, _ string, messageID string, note string) (string, error) {
+func (c *fakeController) Resume(_ context.Context, _ string, messageID string, note string) (mesvc.OperatorDecision, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.resumed++
 	c.notes = append(c.notes, note)
 	c.messageIDs = append(c.messageIDs, messageID)
 	if c.resumeErr != nil {
-		return "", c.resumeErr
+		return mesvc.OperatorDecision{}, c.resumeErr
 	}
-	return c.step, nil
+	return mesvc.OperatorDecision{Step: c.step, Act: !c.noDecision}, nil
 }
 
-func (c *fakeController) Next(_ context.Context, _ string, messageID string, note string) (string, error) {
+func (c *fakeController) Next(_ context.Context, _ string, messageID string, note string) (mesvc.OperatorDecision, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.nexted++
 	c.notes = append(c.notes, note)
 	c.messageIDs = append(c.messageIDs, messageID)
 	if c.nextErr != nil {
-		return "", c.nextErr
+		return mesvc.OperatorDecision{}, c.nextErr
 	}
-	return c.step, nil
+	return mesvc.OperatorDecision{Step: c.step, Act: !c.noDecision}, nil
 }
 
 func (c *fakeController) Stop(_ context.Context, _ string) error {
@@ -689,6 +692,64 @@ func TestNext_SkipsTheStep(t *testing.T) {
 	}
 }
 
+// TestResume_ThatDecidesNothingAnswersWithTheState — the command had
+// nothing to do: the state of the run answers, and the outcome says
+// so.
+func TestResume_ThatDecidesNothingAnswersWithTheState(t *testing.T) {
+	ctrl := &fakeController{step: "build", noDecision: true}
+	cs, ch := newSessionWithOutcome(t, "me-19", "/tmp/work")
+
+	reply := runMe(t, ctrl, cs, "/me", "resume")
+	if reply != "📋 The run's state is shown again." {
+		t.Fatalf("reply = %q, want the state of the run", reply)
+	}
+	out := ch.settled()
+	if out == nil {
+		t.Fatal("the command reported no outcome")
+	}
+	if out.Status != messages.OutcomeNoop {
+		t.Errorf("the outcome is %q, want it noop", out.Status)
+	}
+	if out.Summary != "the run's state is shown again" {
+		t.Errorf("the outcome says %q, want it to name the state", out.Summary)
+	}
+	if out.Data["step"] != "build" {
+		t.Errorf("the outcome names the step %q, want build", out.Data["step"])
+	}
+	if _, ok := out.Data["reason"]; ok {
+		t.Errorf("the outcome carries a reason: %v", out.Data)
+	}
+}
+
+// TestNext_ThatDecidesNothingAnswersWithTheState — the command had
+// nothing to do: the state of the run answers, and the outcome says
+// so.
+func TestNext_ThatDecidesNothingAnswersWithTheState(t *testing.T) {
+	ctrl := &fakeController{step: "build", noDecision: true}
+	cs, ch := newSessionWithOutcome(t, "me-20", "/tmp/work")
+
+	reply := runMe(t, ctrl, cs, "/me", "next")
+	if reply != "📋 The run's state is shown again." {
+		t.Fatalf("reply = %q, want the state of the run", reply)
+	}
+	out := ch.settled()
+	if out == nil {
+		t.Fatal("the command reported no outcome")
+	}
+	if out.Status != messages.OutcomeNoop {
+		t.Errorf("the outcome is %q, want it noop", out.Status)
+	}
+	if out.Summary != "the run's state is shown again" {
+		t.Errorf("the outcome says %q, want it to name the state", out.Summary)
+	}
+	if out.Data["step"] != "build" {
+		t.Errorf("the outcome names the step %q, want build", out.Data["step"])
+	}
+	if _, ok := out.Data["reason"]; ok {
+		t.Errorf("the outcome carries a reason: %v", out.Data)
+	}
+}
+
 // TestResume_CarriesTheNote — the note is the operator's instruction.
 func TestResume_CarriesTheNote(t *testing.T) {
 	ctrl := &fakeController{step: "build"}
@@ -731,12 +792,12 @@ func TestTheRetiredContinueIsUnknown(t *testing.T) {
 func TestResume_ReportsTheRefusal(t *testing.T) {
 	ctrl := &fakeController{resumeErr: &mesvc.Refusal{
 		Reason:  mesvc.ReasonNotPaused,
-		Message: "this run is not paused",
+		Message: "this run is waiting for an answer: use /me reply <text>",
 	}}
 	cs, ch := newSessionWithOutcome(t, "me-18", "/tmp/work")
 
 	reply := runMe(t, ctrl, cs, "/me", "resume")
-	if !strings.Contains(reply, "this run is not paused") {
+	if !strings.Contains(reply, "this run is waiting for an answer") {
 		t.Fatalf("reply = %q, want the refusal", reply)
 	}
 	out := ch.settled()

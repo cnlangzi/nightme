@@ -22,6 +22,9 @@ import (
 const (
 	// ReasonInstalled is a workflow that was not there before.
 	ReasonInstalled = "installed"
+	// ReasonSkipped is a workflow that was already there: the install
+	// leaves it alone unless it is forced.
+	ReasonSkipped = "skipped"
 	// ReasonUpdated is a workflow that was there and changed.
 	ReasonUpdated = "updated"
 	// ReasonUnchanged is a workflow that was there and did not change.
@@ -73,10 +76,11 @@ type Result struct {
 	Detail string
 }
 
-// checklist is the three-row task list the install renders.
+// checklist is the task list the command renders.
 //
-// Every message carries the whole snapshot, so a channel that cannot
-// patch a message in place still shows the current state.
+// The install renders three rows and the uninstall one. Every message
+// carries the whole snapshot, so a channel that cannot patch a
+// message in place still shows the current state.
 type checklist struct {
 	emit  func(items []agent.AgentTaskItem) error
 	items []agent.AgentTaskItem
@@ -99,7 +103,14 @@ func newChecklist(subject string, emit func(items []agent.AgentTaskItem) error) 
 }
 
 // set records the state of one row.
+//
+// A row index outside the checklist is ignored: each checklist has
+// its own row index space, and an index that belongs to another one
+// is a mistake in this package, not a crash in the command.
 func (c *checklist) set(row int, status agent.AgentTaskStatus, detail string) {
+	if row < 0 || row >= len(c.items) {
+		return
+	}
 	c.items[row].Status = status
 	c.items[row].ActiveForm = detail
 }
@@ -116,12 +127,30 @@ func (c *checklist) send() error {
 
 // install fetches the workflow at addr and installs it.
 //
+// A workflow that is already installed is left alone unless the
+// install is forced: the skip costs nothing, no request and no write.
+//
 // The three steps of the install are reported in the checklist: the
 // download, the validation and the write. The result carries the
 // reason the install came to.
-func (f *Factory) install(ctx context.Context, list *checklist, addr Address) Result {
+func (f *Factory) install(ctx context.Context, list *checklist, addr Address, force bool) Result {
 	path := f.pathFor(addr)
 	result := Result{Path: path}
+
+	if !force {
+		// A file that is there is an installed workflow, whatever the
+		// hub would serve for it: the local one is left alone. A path
+		// that is not a file is not an installed workflow, so the
+		// install goes on and says why it could not write.
+		if fi, err := os.Stat(path); err == nil && fi.Mode().IsRegular() {
+			list.set(rowDownload, agent.TaskSkipped, ReasonSkipped+" · "+displayPath(path))
+			list.set(rowValidate, agent.TaskSkipped, "")
+			list.set(rowInstall, agent.TaskSkipped, "")
+			_ = list.send()
+			result.Reason = ReasonSkipped
+			return result
+		}
+	}
 
 	// ── download ──────────────────────────────────────────────
 	content, tier, reason, detail := f.download(ctx, list, addr)

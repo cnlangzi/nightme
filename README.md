@@ -516,16 +516,24 @@ outcome, so the agent decides the next step from facts instead of from prose.
 
 ### Install a published workflow
 
-`/wf install <owner>/<name>` fetches a published workflow and installs it into
-the workflows directory, where the personal agent finds it. The address is the
-workflow's name: `/wf install nightme/coder` writes
+`/wf install [-f] <owner>/<name>` fetches a published workflow and installs it
+into the workflows directory, where the personal agent finds it. The address is
+the workflow's name: `/wf install nightme/coder` writes
 `~/.nightme/workflows/nightme/coder.yml`, and `/me start nightme/coder` runs
 it.
 
 The install is shown as a checklist of three rows — the download, the
 validation, the write — and the rows update as the install goes. The
-downloaded file is checked before it is written, and a file that is already
-there and did not change is left alone.
+downloaded file is checked before it is written, and a file that did not
+change is not rewritten.
+
+A workflow that is already installed is skipped: the hub is not asked and the
+local file is left alone. `-f` (`--force`) installs it again and writes over
+the local file.
+
+`/wf uninstall <owner>/<name>` takes an installed workflow away again: the
+file is removed, and the owner directory goes with it when nothing else is
+left in it.
 
 ### Write a workflow
 
@@ -888,7 +896,8 @@ here; the `/me` subcommands — `/me start` · `/me reply` · `/me pause` ·
 | `/review [-a\|--agent <agent>] [-g\|--global] [--unset] [-c\|--continue] [--abort] [-t\|--timeout <dur>]` | Review the current branch against the default branch (PR mode); findings are injected back into this chat. The review's verdict line is followed by a digest of the findings — one table per severity, one row per finding, naming what kind of finding it is and where it is — on the card, whatever `/think` says; the findings' text itself stays in the thread (`/think` on) and in the main agent's answer (`/think` off, the default). `--agent` runs the review with a specific agent; `-g` also stores it as the global `review.agent` in `~/.nightme/config.yaml`; `--unset` removes that global setting. `-c` resumes the groups of the last review in this chat that failed, by reopening their agent sessions and sending them "continue". `--abort` stops the review running in this chat — its agent sessions are closed and the stopped groups stay resumable with `-c`. `--timeout` bounds how long a subagent may stay silent (default 15m; `0` disables it): a subagent that says nothing for that long is closed, reported as timed out, and stays resumable with `-c`. The threshold comes from the flag, else from `review.timeout` in `~/.nightme/config.yaml`, else from the default. The review run itself has no time limit: it runs until the user aborts it or the daemon shuts down. |
 | `/wiki init [--modules] [--llmstxt] [--arch]` | Read the codebase, design modules, and write per-module wiki files — the repo wiki as a project asset. |
 | `/queue <message>` | Append `<message>` to the queue as a standalone Prompt. |
-| `/wf install <owner>/<name>` | Install a published workflow into the workflows directory. The address is the workflow's name: `nightme/coder` is installed as `~/.nightme/workflows/nightme/coder.yml` and is started with `/me start nightme/coder`. The install is shown as a checklist — the download, the validation, the write. |
+| `/wf install [-f] <owner>/<name>` | Install a published workflow into the workflows directory. The address is the workflow's name: `nightme/coder` is installed as `~/.nightme/workflows/nightme/coder.yml` and is started with `/me start nightme/coder`. The install is shown as a checklist — the download, the validation, the write. An address that is already installed is skipped; `-f` installs it again. |
+| `/wf uninstall <owner>/<name>` | Remove an installed workflow. The file is removed, and the owner directory goes with it when nothing else is left in it. |
 | `/help` | List every slash command in-chat. |
 
 `!cmd` runs shell commands directly in the chat's CWD — see

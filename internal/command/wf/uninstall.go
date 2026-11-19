@@ -20,6 +20,9 @@ const (
 )
 
 // rowRemove is the row of the removal checklist.
+//
+// The removal checklist has one row of its own: the row indices of
+// the install's checklist are a separate index space.
 const rowRemove = 0
 
 // newRemovalChecklist builds the checklist of one uninstall.
@@ -40,7 +43,8 @@ func newRemovalChecklist(subject string, emit func(items []agent.AgentTaskItem) 
 // uninstall removes the workflow at addr.
 //
 // The owner directory goes with the file when nothing else is left in
-// it: the uninstall never removes a file the install did not write.
+// it: the uninstall removes the one file it was asked for and never
+// a sibling beside it.
 func (f *Factory) uninstall(list *checklist, addr Address) Result {
 	path := f.pathFor(addr)
 	result := Result{Path: path}

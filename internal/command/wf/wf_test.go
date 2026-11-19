@@ -316,6 +316,38 @@ func TestInstall_AnInstalledWorkflowIsSkippedUnlessForced(t *testing.T) {
 	}
 }
 
+// TestInstall_APathThatIsNotAFileIsNotSkipped — a directory where the
+// workflow file should be is not an installed workflow: the install
+// does not claim it is one.
+func TestInstall_APathThatIsNotAFileIsNotSkipped(t *testing.T) {
+	dir := t.TempDir()
+	tier, srv := servingTier("github", validWorkflow)
+	defer srv.Close()
+
+	path := filepath.Join(dir, "nightme", "coder.yml")
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	f := testFactory(dir, []Source{tier}, nil)
+	result := f.install(context.Background(), newChecklist("download x", nil),
+		Address{Owner: "nightme", Name: "coder"}, false)
+	if result.Reason != ReasonWriteFailed {
+		t.Fatalf("the reason is %q (%s), want %q", result.Reason, result.Detail, ReasonWriteFailed)
+	}
+}
+
+// TestChecklist_ASetOnARowThatIsNotThereIsIgnored — the row indices
+// of the two checklists are separate, so a row that belongs to the
+// other one is ignored instead of crashing the command.
+func TestChecklist_ASetOnARowThatIsNotThereIsIgnored(t *testing.T) {
+	list := newRemovalChecklist("remove nightme/coder", nil)
+	list.set(rowInstall, agent.TaskFailed, "boom")
+	if list.items[0].Status != agent.TaskPending {
+		t.Errorf("the row is %v, want it untouched", list.items[0].Status)
+	}
+}
+
 // TestInstall_TheNextTierServesTheFile — a tier that cannot be
 // reached is skipped, and the next one is tried.
 func TestInstall_TheNextTierServesTheFile(t *testing.T) {

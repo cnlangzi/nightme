@@ -76,10 +76,11 @@ type Result struct {
 	Detail string
 }
 
-// checklist is the three-row task list the install renders.
+// checklist is the task list the command renders.
 //
-// Every message carries the whole snapshot, so a channel that cannot
-// patch a message in place still shows the current state.
+// The install renders three rows and the uninstall one. Every message
+// carries the whole snapshot, so a channel that cannot patch a
+// message in place still shows the current state.
 type checklist struct {
 	emit  func(items []agent.AgentTaskItem) error
 	items []agent.AgentTaskItem
@@ -102,7 +103,14 @@ func newChecklist(subject string, emit func(items []agent.AgentTaskItem) error) 
 }
 
 // set records the state of one row.
+//
+// A row index outside the checklist is ignored: each checklist has
+// its own row index space, and an index that belongs to another one
+// is a mistake in this package, not a crash in the command.
 func (c *checklist) set(row int, status agent.AgentTaskStatus, detail string) {
+	if row < 0 || row >= len(c.items) {
+		return
+	}
 	c.items[row].Status = status
 	c.items[row].ActiveForm = detail
 }
@@ -130,7 +138,11 @@ func (f *Factory) install(ctx context.Context, list *checklist, addr Address, fo
 	result := Result{Path: path}
 
 	if !force {
-		if _, err := os.Stat(path); err == nil {
+		// A file that is there is an installed workflow, whatever the
+		// hub would serve for it: the local one is left alone. A path
+		// that is not a file is not an installed workflow, so the
+		// install goes on and says why it could not write.
+		if fi, err := os.Stat(path); err == nil && fi.Mode().IsRegular() {
 			list.set(rowDownload, agent.TaskSkipped, ReasonSkipped+" · "+displayPath(path))
 			list.set(rowValidate, agent.TaskSkipped, "")
 			list.set(rowInstall, agent.TaskSkipped, "")

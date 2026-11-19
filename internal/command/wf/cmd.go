@@ -61,6 +61,12 @@ func (f *Factory) Spec() command.Spec {
 	}
 }
 
+// The subcommands of /wf.
+const (
+	subInstall   = "install"
+	subUninstall = "uninstall"
+)
+
 // installCmdSpec declares /wf install's argv grammar.
 //
 // The shared lexer enforces the contract: the subcommand is required,
@@ -68,7 +74,7 @@ func (f *Factory) Spec() command.Spec {
 var installCmdSpec = command.CmdSpec{
 	Name:       "/wf install",
 	Usage:      "/wf install [-f] <owner>/<name>",
-	Subcommand: "install",
+	Subcommand: subInstall,
 	Flags: map[string]command.FlagSpec{
 		"-f":      {Name: "force"},
 		"--force": {Name: "force"},
@@ -84,7 +90,7 @@ var installCmdSpec = command.CmdSpec{
 var uninstallCmdSpec = command.CmdSpec{
 	Name:       "/wf uninstall",
 	Usage:      "/wf uninstall <owner>/<name>",
-	Subcommand: "uninstall",
+	Subcommand: subUninstall,
 	MinArgs:    1,
 	MaxArgs:    1,
 }
@@ -116,14 +122,14 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 
 	if f.dir == "" {
 		chatsession.ReportOutcome(ctx, command.FailedOutcome("no_workflows_dir",
-			"the daemon has no workflows directory to install into"))
+			"the daemon has no workflows directory"))
 		return &command.SlashOutput{
-			Reply:    "❌ This daemon has no workflows directory to install into.",
+			Reply:    "❌ This daemon has no workflows directory.",
 			Consumed: true,
 		}, nil
 	}
 
-	if strings.EqualFold(parsed.Subcommand, "uninstall") {
+	if spec.Subcommand == subUninstall {
 		return f.runUninstall(ctx, cs, input, parsed.Arg(0))
 	}
 	return f.runInstall(ctx, cs, input, parsed.Arg(0), parsed.Bool("force"))
@@ -137,16 +143,16 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 func specFor(argv []string) (command.CmdSpec, error) {
 	if len(argv) == 0 {
 		return command.CmdSpec{}, fmt.Errorf("missing subcommand: want %q or %q (Usage: %s)",
-			"install", "uninstall", wfUsage)
+			subInstall, subUninstall, wfUsage)
 	}
 	switch {
-	case strings.EqualFold(argv[0], "install"):
+	case strings.EqualFold(argv[0], subInstall):
 		return installCmdSpec, nil
-	case strings.EqualFold(argv[0], "uninstall"):
+	case strings.EqualFold(argv[0], subUninstall):
 		return uninstallCmdSpec, nil
 	}
 	return command.CmdSpec{}, fmt.Errorf("unexpected subcommand %q: want %q or %q (Usage: %s)",
-		argv[0], "install", "uninstall", wfUsage)
+		argv[0], subInstall, subUninstall, wfUsage)
 }
 
 // usageError answers a command line that does not fit.
@@ -209,10 +215,7 @@ func (f *Factory) runUninstall(ctx context.Context, cs *chatsession.ChatSession,
 // The reason is the verdict: a program reacts to it without parsing
 // anything.
 func (f *Factory) report(ctx context.Context, addr Address, result Result) {
-	data := map[string]string{"reason": result.Reason}
-	if result.Path != "" {
-		data["path"] = result.Path
-	}
+	data := outcomeData(result)
 	if result.Source != "" {
 		data["source"] = result.Source
 	}
@@ -248,10 +251,7 @@ func (f *Factory) report(ctx context.Context, addr Address, result Result) {
 // The reason is the verdict: a program reacts to it without parsing
 // anything.
 func (f *Factory) reportUninstall(ctx context.Context, addr Address, result Result) {
-	data := map[string]string{"reason": result.Reason}
-	if result.Path != "" {
-		data["path"] = result.Path
-	}
+	data := outcomeData(result)
 	switch result.Reason {
 	case ReasonUninstalled:
 		chatsession.ReportOutcome(ctx, messages.Outcome{
@@ -269,6 +269,17 @@ func (f *Factory) reportUninstall(ctx context.Context, addr Address, result Resu
 			"the workflow "+addr.String()+" was not uninstalled",
 			data, result.Detail))
 	}
+}
+
+// outcomeData builds the machine-readable facts of an outcome.
+//
+// The reason is the verdict; the path is where the workflow is.
+func outcomeData(result Result) map[string]string {
+	data := map[string]string{"reason": result.Reason}
+	if result.Path != "" {
+		data["path"] = result.Path
+	}
+	return data
 }
 
 // emitter publishes the checklist in the chat.

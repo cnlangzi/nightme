@@ -179,9 +179,9 @@ func draftDigest(drafts []issueDraft) string {
 }
 
 // draftRenderRule introduces a block of the render: a horizontal
-// rule on a line of its own, separated from the text above by a
-// blank line — a rule directly under a text line is a setext
-// heading in markdown, not a rule.
+// rule on a line of its own, separated from the text of the block
+// above by a blank line — a rule directly under a text line is a
+// setext heading in markdown, not a rule.
 const draftRenderRule = "---"
 
 // renderPendingDrafts builds the render body: a sequence of blocks,
@@ -197,22 +197,18 @@ const draftRenderRule = "---"
 func renderPendingDrafts(drafts []issueDraft) string {
 	var sb strings.Builder
 	for _, d := range drafts {
-		sb.WriteString(draftRenderRule)
-		sb.WriteByte('\n')
+		fmt.Fprintln(&sb, draftRenderRule)
 		if _, _, err := parseIssueDraft(d.raw); err != nil {
 			fmt.Fprintf(&sb, "⚠️ %s: %v\n", d.name(), err)
 		}
-		sb.WriteString(d.name())
-		sb.WriteByte('\n')
+		fmt.Fprintln(&sb, d.name())
 		sb.WriteString(d.raw)
 		if !strings.HasSuffix(d.raw, "\n") {
 			sb.WriteByte('\n')
 		}
 		sb.WriteByte('\n')
 	}
-	sb.WriteString(draftRenderRule)
-	sb.WriteByte('\n')
-	sb.WriteString(newIssueHint)
-	sb.WriteByte('\n')
+	fmt.Fprintln(&sb, draftRenderRule)
+	fmt.Fprintln(&sb, newIssueHint)
 	return sb.String()
 }

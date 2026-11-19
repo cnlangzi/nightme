@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/pathutil"
 	"github.com/cnlangzi/nightme/internal/yamlfile"
 	"github.com/cnlangzi/nightme/pkg/wfe"
 )
@@ -269,10 +270,20 @@ func (f *Factory) fetch(ctx context.Context, src Source, addr Address, list *che
 
 // pathFor returns the file the workflow of addr is installed as.
 //
-// The file sits under the address, so the workflow's name keeps the
-// address it was published with.
+// The file is the workflow file of the address's bundle, so the local
+// tree has the shape of the published one and the workflow's name
+// keeps the address it was published with.
 func (f *Factory) pathFor(addr Address) string {
-	return filepath.Join(f.dir, addr.Owner, addr.Name+".yml")
+	return pathutil.Join(f.bundleFor(addr), wfe.WorkflowFileName)
+}
+
+// bundleFor returns the directory the workflow of addr is installed
+// as.
+//
+// The bundle is the unit: it holds the workflow file and everything
+// else that belongs to the workflow.
+func (f *Factory) bundleFor(addr Address) string {
+	return pathutil.Join(f.dir, addr.Owner, addr.Name)
 }
 
 // isMissing reports whether the tier said the workflow is not there.
@@ -348,19 +359,24 @@ func sizeLabel(size int) string {
 	}
 }
 
-// displayPath renders a path the way the operator writes it: the home
-// directory is a "~".
+// displayPath renders a path the way the operator reads it: the home
+// directory is a "~" and the components are separated by forward
+// slashes.
+//
+// The rendering is the same on every operating system, and it survives
+// the chat's markdown: a backslash after the "~" is an escape there,
+// and the operator would read a broken path.
 func displayPath(path string) string {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
-		return path
+		return pathutil.ToSlash(path)
 	}
 	if path == home {
 		return "~"
 	}
 	rel, err := filepath.Rel(home, path)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return path
+		return pathutil.ToSlash(path)
 	}
-	return filepath.Join("~", rel)
+	return "~/" + pathutil.ToSlash(rel)
 }

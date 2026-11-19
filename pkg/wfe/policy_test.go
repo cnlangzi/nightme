@@ -8,7 +8,7 @@ import (
 // boundFixIssue binds the example workflow to an issue number.
 func boundFixIssue(t *testing.T) *Workflow {
 	t.Helper()
-	wf := mustLoadFile(t, "fix-issue.yaml", fixIssueYAML)
+	wf := mustLoadFile(t, "fix-issue", fixIssueYAML)
 	bound, err := Bind(wf, map[string]string{"issue": "42"})
 	if err != nil {
 		t.Fatalf("Bind: %v", err)

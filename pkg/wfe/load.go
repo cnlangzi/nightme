@@ -33,11 +33,12 @@ func (f Failure) Error() string {
 
 // LoadDir loads the workflow files of dir.
 //
-// Both `*.yaml` and `*.yml` are read, at any depth, and a workflow's
-// identity is its path relative to dir without the extension. The
-// workflows that loaded come back with one failure per name that is
-// unusable: a broken file does not take the workflows beside it down
-// with it.
+// A workflow is a bundle: a directory under dir that holds a
+// `workflow.yml`. The bundle's path under dir is the workflow's
+// identity, so `nightme/coder/workflow.yml` is the workflow
+// `nightme/coder`. The workflows that loaded come back with one
+// failure per name that is unusable: a broken bundle does not take
+// the workflows beside it down with it.
 func LoadDir(dir string) ([]*Workflow, []Failure) {
 	paths, err := WorkflowPaths(dir)
 	if err != nil {
@@ -57,7 +58,7 @@ func LoadDir(dir string) ([]*Workflow, []Failure) {
 			broken[name] = Failure{
 				Name: name,
 				Path: path,
-				Err:  fmt.Errorf("%s could not be loaded: %w", filepath.Base(path), err),
+				Err:  fmt.Errorf("%s could not be loaded: %w", name, err),
 			}
 			continue
 		}
@@ -95,10 +96,12 @@ func LoadDir(dir string) ([]*Workflow, []Failure) {
 
 // WorkflowPaths returns the workflow files of dir, sorted.
 //
-// The directory is read at any depth: a workflow file is a `*.yaml` or
-// a `*.yml` file, wherever it sits under dir. The reserved directories
-// — the workflows directory's own `actions` and `runs` children — are
-// never descended into.
+// A workflow is a bundle: a directory under dir that holds a
+// `workflow.yml`. The file is what the bundle offers, and everything
+// else under dir is not a workflow — not a `*.yml` file that lies
+// directly in dir, and not a file that sits beside a bundle's
+// `workflow.yml`. The reserved directories — the workflows directory's
+// own `actions` and `runs` children — are never descended into.
 //
 // A directory that cannot be read is an error: the caller says so
 // instead of reporting an empty directory.
@@ -126,8 +129,7 @@ func WorkflowPaths(dir string) ([]string, error) {
 			return err
 		}
 		if !entry.IsDir() {
-			switch filepath.Ext(entry.Name()) {
-			case ".yaml", ".yml":
+			if isWorkflowFile(entry.Name()) && isBundleDir(dir, path) {
 				out = append(out, path)
 			}
 			return nil
@@ -142,6 +144,53 @@ func WorkflowPaths(dir string) ([]string, error) {
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// WorkflowFileName is the name a bundle's workflow file carries.
+//
+// It is the name the hub publishes a workflow under, and the name the
+// install writes it under.
+const WorkflowFileName = "workflow.yml"
+
+// workflowFiles are the names a bundle's workflow file can have.
+var workflowFiles = map[string]bool{
+	WorkflowFileName: true,
+	"workflow.yaml":  true,
+}
+
+// isWorkflowFile reports whether name is the name of a bundle's
+// workflow file.
+func isWorkflowFile(name string) bool {
+	return workflowFiles[name]
+}
+
+// isBundleDir reports whether the file at path sits in a bundle: a
+// directory under root.
+//
+// A file that lies directly in root is not in a bundle: the workflows
+// directory is not a bundle.
+func isBundleDir(root, path string) bool {
+	rel, ok := bundleRel(root, filepath.Dir(path))
+	return ok && underRoot(rel)
+}
+
+// bundleRel returns the path of the bundle directory dir relative to
+// root, with "/" as the separator.
+//
+// ok is false when the two cannot be related — different volumes, for
+// example.
+func bundleRel(root, dir string) (string, bool) {
+	rel, err := filepath.Rel(root, dir)
+	if err != nil {
+		return "", false
+	}
+	return filepath.ToSlash(rel), true
+}
+
+// underRoot reports whether rel names a directory under root: not
+// root itself, and not outside it.
+func underRoot(rel string) bool {
+	return rel != "." && rel != ".." && !strings.HasPrefix(rel, "../")
 }
 
 // IsReservedDir reports whether name is a reserved directory of the
@@ -179,9 +228,9 @@ func isReservedChild(dir, path string) bool {
 // WorkflowPathsByName returns the workflow files of dir whose name is
 // name.
 //
-// The name is the path of a workflow under dir, without the extension
-// (see WorkflowName). A name two files claim is ambiguous: both files
-// come back, so the caller can report the clash.
+// The name is the path of a bundle under dir (see WorkflowName). A
+// name two files claim is ambiguous: both files come back, so the
+// caller can report the clash.
 func WorkflowPathsByName(dir, name string) ([]string, error) {
 	paths, err := WorkflowPaths(dir)
 	if err != nil {
@@ -196,59 +245,61 @@ func WorkflowPathsByName(dir, name string) ([]string, error) {
 	return out, nil
 }
 
-// BaseName returns the name of a file without its extension.
+// WorkflowName returns the name of the workflow the file at path
+// provides: the path of its bundle directory relative to root.
 //
-// It names the file, not the workflow: the workflow's name is its path
-// under the workflows directory (see WorkflowName).
-func BaseName(path string) string {
-	base := filepath.Base(path)
-	return strings.TrimSuffix(base, filepath.Ext(base))
-}
-
-// WorkflowName returns the name of the workflow file at path: its path
-// relative to root, without the extension.
-//
-// "nightme/coder.yml" under root is the workflow "nightme/coder". The
-// separator is always "/", so a workflow's name is the same on every
-// platform. An empty root means the file's own directory.
+// "nightme/coder/workflow.yml" under root is the workflow
+// "nightme/coder". The separator is always "/", so a workflow's name
+// is the same on every platform. An empty root means the file's own
+// bundle: the directory it sits in.
 func WorkflowName(root, path string) string {
+	bundle := filepath.Dir(path)
 	if strings.TrimSpace(root) == "" {
-		root = filepath.Dir(path)
+		root = filepath.Dir(bundle)
 	}
-	rel, err := filepath.Rel(root, path)
-	if err != nil {
-		rel = filepath.Base(path)
+	rel, ok := bundleRel(root, bundle)
+	if !ok {
+		// The bundle and the root are not related: the file keeps the
+		// name of its bundle.
+		return filepath.Base(bundle)
 	}
-	rel = filepath.ToSlash(rel)
-	if rel == ".." || strings.HasPrefix(rel, "../") {
-		// The file is not under the root: it has no path-relative
-		// name, so it keeps the name of its file.
-		return BaseName(path)
-	}
-	name := strings.TrimSuffix(rel, filepath.Ext(rel))
-	if name == "" || name == "." {
+	switch {
+	case rel == ".":
+		// The file sits in the root itself: it is not in a bundle, so
+		// it has no name.
 		return ""
+	case !underRoot(rel):
+		// The file is not under the root: it has no path-relative
+		// name, so it keeps the name of its bundle.
+		return filepath.Base(bundle)
 	}
-	return name
+	return rel
 }
 
 // LoadFile parses and validates a single workflow file.
 //
-// The file's path under root is the workflow's identity and the
-// workflow's title states what it is for. The identity is set on the
-// workflow; the file does not carry it.
+// The file is the workflow file of a bundle: the bundle's path under
+// root is the workflow's identity and the workflow's title states what
+// it is for. The identity is set on the workflow; the file does not
+// carry it.
 func LoadFile(root, path string) (*Workflow, error) {
+	base := filepath.Base(path)
+	// The file is refused before it is read: a file that is not a
+	// bundle's workflow file is not a workflow, whatever it holds.
+	if !isWorkflowFile(base) {
+		return nil, fmt.Errorf("wfe: %s: not a workflow file: a workflow is a bundle directory holding a workflow.yml", base)
+	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("wfe: %s: %w", filepath.Base(path), err)
-	}
-	wf, err := parse(raw)
-	if err != nil {
-		return nil, fmt.Errorf("wfe: %s: %w", filepath.Base(path), err)
+		return nil, fmt.Errorf("wfe: %s: %w", base, err)
 	}
 	name := WorkflowName(root, path)
 	if name == "" {
-		return nil, fmt.Errorf("wfe: %s: the file has no name", filepath.Base(path))
+		return nil, fmt.Errorf("wfe: %s: the file is not in a bundle directory", base)
+	}
+	wf, err := parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("wfe: %s: %w", base, err)
 	}
 	wf.Name = name
 	return wf, nil
@@ -256,8 +307,8 @@ func LoadFile(root, path string) (*Workflow, error) {
 
 // Parse parses and validates raw YAML bytes as a workflow.
 //
-// The workflow carries no identity: the identity is the name of the
-// file it came from, and the loader sets it (see LoadFile).
+// The workflow carries no identity: the identity is the name of its
+// bundle, and the loader sets it (see LoadFile).
 func Parse(raw []byte) (*Workflow, error) {
 	wf, err := parse(raw)
 	if err != nil {

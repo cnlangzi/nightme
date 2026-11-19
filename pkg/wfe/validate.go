@@ -43,6 +43,9 @@ func ValidateFile(path string) []Diagnostic {
 
 // ValidateDir returns every problem in every workflow file of dir.
 //
+// A workflow file is the `workflow.yml` of a bundle — a directory
+// under dir — so the files that are not workflows are not checked.
+//
 // Two files that claim the same workflow name are one problem of
 // their own: the name is ambiguous.
 func ValidateDir(dir string) []Diagnostic {

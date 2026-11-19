@@ -106,7 +106,7 @@ func TestHandle_InstallsTheWorkflowAndCarriesTheReason(t *testing.T) {
 	if !out.Consumed {
 		t.Error("the command did not consume the message")
 	}
-	if _, err := os.Stat(filepath.Join(dir, "nightme", "coder.yml")); err != nil {
+	if _, err := os.Stat(filepath.Join(dir, "nightme", "coder", "workflow.yml")); err != nil {
 		t.Fatalf("the workflow was not written: %v", err)
 	}
 
@@ -120,6 +120,9 @@ func TestHandle_InstallsTheWorkflowAndCarriesTheReason(t *testing.T) {
 	}
 	if outcome.Status != messages.OutcomeOK {
 		t.Errorf("the status is %q, want %q", outcome.Status, messages.OutcomeOK)
+	}
+	if outcome.Data["path"] != filepath.Join(dir, "nightme", "coder", "workflow.yml") {
+		t.Errorf("the path is %q, want the absolute path of the file", outcome.Data["path"])
 	}
 
 	tasks := em.tasks()
@@ -340,7 +343,7 @@ func TestHandle_AnUnchangedInstallIsANoop(t *testing.T) {
 	defer srv.Close()
 
 	// The workflow is already installed and current.
-	path := filepath.Join(dir, "nightme", "coder.yml")
+	path := filepath.Join(dir, "nightme", "coder", "workflow.yml")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -381,7 +384,7 @@ func TestHandle_AnInstalledWorkflowIsSkippedUnlessForced(t *testing.T) {
 	tier, srv := servingTier("github", validWorkflow)
 	defer srv.Close()
 
-	path := filepath.Join(dir, "nightme", "coder.yml")
+	path := filepath.Join(dir, "nightme", "coder", "workflow.yml")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -453,7 +456,7 @@ func TestHandle_AnInstalledWorkflowIsSkippedUnlessForced(t *testing.T) {
 // workflow away, and a second one finds nothing to remove.
 func TestHandle_UninstallRemovesTheWorkflow(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "nightme", "coder.yml")
+	path := filepath.Join(dir, "nightme", "coder", "workflow.yml")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -485,10 +488,16 @@ func TestHandle_UninstallRemovesTheWorkflow(t *testing.T) {
 	if outcome.Status != messages.OutcomeOK {
 		t.Errorf("the status is %q, want %q", outcome.Status, messages.OutcomeOK)
 	}
+	if outcome.Data["path"] != filepath.Join(dir, "nightme", "coder", "workflow.yml") {
+		t.Errorf("the path is %q, want the absolute path of the file", outcome.Data["path"])
+	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Errorf("the workflow is still there: %v", err)
 	}
 	if _, err := os.Stat(filepath.Dir(path)); !os.IsNotExist(err) {
+		t.Errorf("the bundle is still there: %v", err)
+	}
+	if _, err := os.Stat(filepath.Dir(filepath.Dir(path))); !os.IsNotExist(err) {
 		t.Errorf("the owner directory is still there: %v", err)
 	}
 

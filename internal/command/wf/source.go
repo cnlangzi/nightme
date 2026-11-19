@@ -28,7 +28,7 @@ import (
 const (
 	hubRepo   = "nightme-dev/workflows"
 	hubBranch = "main"
-	hubPath   = "workflows/%s/%s/workflow.yml"
+	hubPath   = "workflows/%s/%s/" + wfe.WorkflowFileName
 )
 
 // Address is the address of a published workflow: <owner>/<name>.

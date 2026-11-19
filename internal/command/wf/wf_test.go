@@ -2,6 +2,7 @@ package wf
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -61,6 +62,17 @@ func (c *collector) last(row int) (agent.AgentTaskStatus, string) {
 		return agent.TaskPending, ""
 	}
 	return items[row].Status, items[row].ActiveForm
+}
+
+// sandboxHome points os.UserHomeDir at a scratch directory, so a test
+// that renders a home-relative path does not read the developer's own
+// home. USERPROFILE is set too — os.UserHomeDir reads it on Windows.
+func sandboxHome(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	return home
 }
 
 // TestParseAddress_TheShapeOfAnAddress — an address is <owner>/<name>.
@@ -124,7 +136,8 @@ func TestParseAddress_TheOwnerIsAnyNamespace(t *testing.T) {
 }
 
 // TestInstall_WritesTheWorkflowUnderItsAddress — the installed file
-// sits under the address, so the workflow keeps its name.
+// is the workflow file of the address's bundle, so the workflow keeps
+// its name.
 func TestInstall_WritesTheWorkflowUnderItsAddress(t *testing.T) {
 	dir := t.TempDir()
 	tier, srv := servingTier("github", validWorkflow)
@@ -137,8 +150,89 @@ func TestInstall_WritesTheWorkflowUnderItsAddress(t *testing.T) {
 	if result.Reason != ReasonInstalled {
 		t.Fatalf("the reason is %q (%s), want %q", result.Reason, result.Detail, ReasonInstalled)
 	}
-	path := filepath.Join(dir, "nightme", "coder.yml")
+	path := filepath.Join(dir, "nightme", "coder", "workflow.yml")
 	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("the workflow was not written: %v", err)
+	}
+	if string(content) != validWorkflow {
+		t.Errorf("the file holds %q", content)
+	}
+}
+
+// TestInstall_TheReportedPathIsCrossPlatform — the path the operator
+// reads is the same on every platform: the home directory as a "~"
+// and forward slashes between the components. The outcome carries the
+// absolute path, as the operating system spells it.
+func TestInstall_TheReportedPathIsCrossPlatform(t *testing.T) {
+	home := sandboxHome(t)
+	dir := filepath.Join(home, ".nightme", "workflows")
+	tier, srv := servingTier("github", validWorkflow)
+	defer srv.Close()
+
+	f := testFactory(dir, []Source{tier}, nil)
+	col := &collector{}
+	list := newChecklist("download nightme/coder", col.emit)
+
+	result := f.install(context.Background(), list, Address{Owner: "nightme", Name: "coder"}, false)
+	if result.Reason != ReasonInstalled {
+		t.Fatalf("the reason is %q (%s), want %q", result.Reason, result.Detail, ReasonInstalled)
+	}
+	_, detail := col.last(rowInstall)
+	want := ReasonInstalled + " · ~/.nightme/workflows/nightme/coder/workflow.yml"
+	if detail != want {
+		t.Errorf("the install row says %q, want %q", detail, want)
+	}
+	if strings.Contains(detail, "\\") {
+		t.Errorf("the install row holds a backslash: %q", detail)
+	}
+	if result.Path != filepath.Join(dir, "nightme", "coder", "workflow.yml") {
+		t.Errorf("the path is %q, want the absolute path of the file", result.Path)
+	}
+}
+
+// TestDisplayPath_APathOutsideTheHomeIsRenderedAsItIs — a path that
+// is not under the home directory keeps its shape, with forward
+// slashes.
+func TestDisplayPath_APathOutsideTheHomeIsRenderedAsItIs(t *testing.T) {
+	sandboxHome(t)
+
+	got := displayPath(filepath.Join(string(filepath.Separator), "srv", "nightme"))
+	if strings.Contains(got, "\\") {
+		t.Errorf("the path holds a backslash: %q", got)
+	}
+	if got != "/srv/nightme" {
+		t.Errorf("the path is %q, want /srv/nightme", got)
+	}
+}
+
+// TestInstall_TheFilesBesideTheWorkflowStay — the bundle belongs to
+// the workflow: the install writes the workflow file and leaves the
+// rest of the bundle alone.
+func TestInstall_TheFilesBesideTheWorkflowStay(t *testing.T) {
+	dir := t.TempDir()
+	tier, srv := servingTier("github", validWorkflow)
+	defer srv.Close()
+
+	bundle := filepath.Join(dir, "nightme", "coder")
+	if err := os.MkdirAll(bundle, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	notes := filepath.Join(bundle, "notes.md")
+	if err := os.WriteFile(notes, []byte("# notes\n"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	f := testFactory(dir, []Source{tier}, nil)
+	result := f.install(context.Background(), newChecklist("download x", nil),
+		Address{Owner: "nightme", Name: "coder"}, false)
+	if result.Reason != ReasonInstalled {
+		t.Fatalf("the reason is %q (%s), want %q", result.Reason, result.Detail, ReasonInstalled)
+	}
+	if _, err := os.Stat(notes); err != nil {
+		t.Errorf("the file beside the workflow is gone: %v", err)
+	}
+	content, err := os.ReadFile(filepath.Join(bundle, "workflow.yml"))
 	if err != nil {
 		t.Fatalf("the workflow was not written: %v", err)
 	}
@@ -156,7 +250,7 @@ func TestInstall_TheSameContentTwiceChangesNothing(t *testing.T) {
 
 	f := testFactory(dir, []Source{tier}, nil)
 	addr := Address{Owner: "nightme", Name: "coder"}
-	path := filepath.Join(dir, "nightme", "coder.yml")
+	path := filepath.Join(dir, "nightme", "coder", "workflow.yml")
 
 	first := f.install(context.Background(), newChecklist("download x", nil), addr, false)
 	if first.Reason != ReasonInstalled {
@@ -190,7 +284,7 @@ func TestInstall_DifferentContentOverwritesTheFile(t *testing.T) {
 
 	f := testFactory(dir, []Source{tier}, nil)
 	addr := Address{Owner: "nightme", Name: "coder"}
-	path := filepath.Join(dir, "nightme", "coder.yml")
+	path := filepath.Join(dir, "nightme", "coder", "workflow.yml")
 
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -223,7 +317,7 @@ func TestInstall_ContentThatDoesNotValidateIsNotWritten(t *testing.T) {
 
 	f := testFactory(dir, []Source{tier}, nil)
 	addr := Address{Owner: "nightme", Name: "coder"}
-	path := filepath.Join(dir, "nightme", "coder.yml")
+	path := filepath.Join(dir, "nightme", "coder", "workflow.yml")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -262,7 +356,7 @@ func TestInstall_AnInstalledWorkflowIsSkippedUnlessForced(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	path := filepath.Join(dir, "nightme", "coder.yml")
+	path := filepath.Join(dir, "nightme", "coder", "workflow.yml")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -324,7 +418,7 @@ func TestInstall_APathThatIsNotAFileIsNotSkipped(t *testing.T) {
 	tier, srv := servingTier("github", validWorkflow)
 	defer srv.Close()
 
-	path := filepath.Join(dir, "nightme", "coder.yml")
+	path := filepath.Join(dir, "nightme", "coder", "workflow.yml")
 	if err := os.MkdirAll(path, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -574,8 +668,8 @@ func TestInstall_TheProgressUpdatesAreThrottled(t *testing.T) {
 // TestWriteFile_LeavesNoPartialFile — the write is a temporary file
 // and a rename.
 func TestWriteFile_LeavesNoPartialFile(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "nightme")
-	path := filepath.Join(dir, "coder.yml")
+	dir := filepath.Join(t.TempDir(), "nightme", "coder")
+	path := filepath.Join(dir, "workflow.yml")
 
 	if err := yamlfile.WriteFileAtomic(path, []byte(validWorkflow)); err != nil {
 		t.Fatalf("WriteFileAtomic: %v", err)
@@ -669,17 +763,23 @@ func TestInstall_TheThirdTierServesTheFile(t *testing.T) {
 	}
 }
 
-// TestUninstall_RemovesTheWorkflowAndTheEmptyOwnerDirectory — the
-// file goes, and the owner directory goes with it when nothing else
-// is left in it.
-func TestUninstall_RemovesTheWorkflowAndTheEmptyOwnerDirectory(t *testing.T) {
+// TestUninstall_RemovesTheBundleAndTheEmptyOwnerDirectory — the
+// bundle goes with everything under it, and the owner directory goes
+// with it when nothing else is left in it.
+func TestUninstall_RemovesTheBundleAndTheEmptyOwnerDirectory(t *testing.T) {
 	dir := t.TempDir()
 	addr := Address{Owner: "nightme", Name: "coder"}
-	path := filepath.Join(dir, "nightme", "coder.yml")
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	bundle := filepath.Join(dir, "nightme", "coder")
+	if err := os.MkdirAll(bundle, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
+	path := filepath.Join(bundle, "workflow.yml")
 	if err := os.WriteFile(path, []byte(validWorkflow), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	// The bundle holds more than the workflow file: it all goes.
+	notes := filepath.Join(bundle, "notes.md")
+	if err := os.WriteFile(notes, []byte("# notes\n"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 
@@ -694,7 +794,13 @@ func TestUninstall_RemovesTheWorkflowAndTheEmptyOwnerDirectory(t *testing.T) {
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Errorf("the workflow is still there: %v", err)
 	}
-	if _, err := os.Stat(filepath.Dir(path)); !os.IsNotExist(err) {
+	if _, err := os.Stat(notes); !os.IsNotExist(err) {
+		t.Errorf("the file beside the workflow is still there: %v", err)
+	}
+	if _, err := os.Stat(bundle); !os.IsNotExist(err) {
+		t.Errorf("the bundle is still there: %v", err)
+	}
+	if _, err := os.Stat(filepath.Dir(bundle)); !os.IsNotExist(err) {
 		t.Errorf("the owner directory is still there: %v", err)
 	}
 	status, detail := col.last(rowRemove)
@@ -711,12 +817,15 @@ func TestUninstall_RemovesTheWorkflowAndTheEmptyOwnerDirectory(t *testing.T) {
 func TestUninstall_KeepsTheOwnerDirectoryThatHoldsAnotherWorkflow(t *testing.T) {
 	dir := t.TempDir()
 	addr := Address{Owner: "nightme", Name: "coder"}
-	path := filepath.Join(dir, "nightme", "coder.yml")
-	sibling := filepath.Join(dir, "nightme", "reviewer.yml")
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	bundle := filepath.Join(dir, "nightme", "coder")
+	sibling := filepath.Join(dir, "nightme", "reviewer", "workflow.yml")
+	if err := os.MkdirAll(bundle, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	if err := os.WriteFile(path, []byte(validWorkflow), 0o600); err != nil {
+	if err := os.MkdirAll(filepath.Dir(sibling), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(bundle, "workflow.yml"), []byte(validWorkflow), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	if err := os.WriteFile(sibling, []byte(validWorkflow), 0o600); err != nil {
@@ -731,7 +840,7 @@ func TestUninstall_KeepsTheOwnerDirectoryThatHoldsAnotherWorkflow(t *testing.T) 
 	if result.Reason != ReasonUninstalled {
 		t.Fatalf("the reason is %q (%s), want %q", result.Reason, result.Detail, ReasonUninstalled)
 	}
-	if _, err := os.Stat(filepath.Dir(path)); err != nil {
+	if _, err := os.Stat(filepath.Dir(bundle)); err != nil {
 		t.Errorf("the owner directory is gone: %v", err)
 	}
 	if _, err := os.Stat(sibling); err != nil {
@@ -748,7 +857,7 @@ func TestUninstall_KeepsTheOwnerDirectoryThatHoldsAnotherWorkflow(t *testing.T) 
 func TestUninstall_AWorkflowThatIsNotInstalledIsSkipped(t *testing.T) {
 	dir := t.TempDir()
 	addr := Address{Owner: "nightme", Name: "coder"}
-	path := filepath.Join(dir, "nightme", "coder.yml")
+	bundle := filepath.Join(dir, "nightme", "coder")
 
 	f := testFactory(dir, nil, nil)
 	col := &collector{}
@@ -762,21 +871,86 @@ func TestUninstall_AWorkflowThatIsNotInstalledIsSkipped(t *testing.T) {
 	if status != agent.TaskSkipped {
 		t.Errorf("the remove row is %v, want it skipped", status)
 	}
-	if detail != ReasonNotInstalled+" · "+displayPath(path) {
+	if detail != ReasonNotInstalled+" · "+displayPath(bundle) {
 		t.Errorf("the remove row says %q", detail)
 	}
 }
 
-// TestUninstall_AFileThatCannotBeRemovedFails — a path that cannot
-// be removed is a failure, not a removal.
-func TestUninstall_AFileThatCannotBeRemovedFails(t *testing.T) {
+// withRemoveAllStub swaps the package-level removeAll for the
+// duration of the test and restores it via t.Cleanup.
+//
+// The stub is what makes the failure path of the removal reachable:
+// chmod'ing the owner directory does not stop the removal on a
+// machine whose permissions the test user bypasses (root, or a
+// filesystem that ignores the mode bits), so the test would report a
+// successful removal where it means to fail one.
+func withRemoveAllStub(t *testing.T, fn func(string) error) {
+	t.Helper()
+	orig := removeAll
+	removeAll = fn
+	t.Cleanup(func() { removeAll = orig })
+}
+
+// TestUninstall_ABundleThatCannotBeRemovedFails — a bundle that
+// cannot be removed is a failure, not a removal.
+func TestUninstall_ABundleThatCannotBeRemovedFails(t *testing.T) {
 	dir := t.TempDir()
 	addr := Address{Owner: "nightme", Name: "coder"}
-	path := filepath.Join(dir, "nightme", "coder.yml")
-	// A directory where the file should be: it cannot be removed.
-	if err := os.MkdirAll(filepath.Join(path, "inside"), 0o755); err != nil {
+	bundle := filepath.Join(dir, "nightme", "coder")
+	if err := os.MkdirAll(bundle, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(bundle, "workflow.yml"), []byte(validWorkflow), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	withRemoveAllStub(t, func(string) error {
+		return errors.New("the bundle is locked")
+	})
+
+	f := testFactory(dir, nil, nil)
+	col := &collector{}
+	list := newRemovalChecklist("remove nightme/coder", col.emit)
+
+	result := f.uninstall(list, addr)
+	if result.Reason != ReasonRemoveFailed {
+		t.Fatalf("the reason is %q (%s), want %q", result.Reason, result.Detail, ReasonRemoveFailed)
+	}
+	if result.Detail == "" {
+		t.Error("the detail is empty, want the error")
+	}
+	status, _ := col.last(rowRemove)
+	if status != agent.TaskFailed {
+		t.Errorf("the remove row is %v, want it failed", status)
+	}
+	if _, err := os.Stat(bundle); err != nil {
+		t.Errorf("the bundle is gone: %v", err)
+	}
+}
+
+// withStatStub swaps the package-level statPath for the duration of
+// the test and restores it via t.Cleanup.
+//
+// The stub is what makes the "cannot be reached" branch reachable:
+// whether a path whose parent is a file is "not there" or "not a
+// directory" depends on the operating system, so the file system
+// cannot steer the branch on every platform.
+func withStatStub(t *testing.T, fn func(string) (os.FileInfo, error)) {
+	t.Helper()
+	orig := statPath
+	statPath = fn
+	t.Cleanup(func() { statPath = orig })
+}
+
+// TestUninstall_ABundleThatCannotBeReachedFails — a bundle that
+// cannot even be looked at is a failure, not a removal.
+func TestUninstall_ABundleThatCannotBeReachedFails(t *testing.T) {
+	dir := t.TempDir()
+	addr := Address{Owner: "nightme", Name: "coder"}
+	// The ask fails with something other than "not there": the bundle
+	// is there, and the failure is in reaching it.
+	withStatStub(t, func(string) (os.FileInfo, error) {
+		return nil, os.ErrPermission
+	})
 
 	f := testFactory(dir, nil, nil)
 	col := &collector{}

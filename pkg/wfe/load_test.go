@@ -45,12 +45,13 @@ func mustParse(t *testing.T, src string) *Workflow {
 
 // mustLoadFile writes a workflow file and loads it.
 //
-// The file's path under the workflows directory is the workflow's
-// identity, so the file has to carry the name the test expects.
+// A workflow is a bundle: the file sits in a directory under the
+// workflows directory, and the directory's path is the workflow's
+// name.
 func mustLoadFile(t *testing.T, name, body string) *Workflow {
 	t.Helper()
 	dir := t.TempDir()
-	path := filepath.Join(dir, name)
+	path := filepath.Join(dir, name, "workflow.yml")
 	writeFile(t, path, body)
 	wf, err := LoadFile(dir, path)
 	if err != nil {
@@ -680,11 +681,11 @@ jobs:
 	}
 }
 
-// TestLoadFile_TheNameIsTheFileName — the identity of a workflow is
-// the path of the file it was loaded from, under the workflows dir.
-func TestLoadFile_TheNameIsTheFileName(t *testing.T) {
+// TestLoadFile_TheNameIsTheBundle — the identity of a workflow is the
+// path of the bundle it was loaded from, under the workflows dir.
+func TestLoadFile_TheNameIsTheBundle(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "fix.yml")
+	path := filepath.Join(dir, "fix", "workflow.yml")
 	writeFile(t, path, `
 title: do the thing
 jobs:
@@ -700,6 +701,32 @@ jobs:
 	}
 	if wf.Title != "do the thing" {
 		t.Errorf("Title = %q", wf.Title)
+	}
+}
+
+// TestLoadFile_RefusesAFileThatIsNotAWorkflowFile — a file that is
+// not the workflow file of a bundle is not a workflow.
+func TestLoadFile_RefusesAFileThatIsNotAWorkflowFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fix", "extra.yml")
+	writeFile(t, path, "title: x\njobs:\n  main:\n    steps: [{message: hi}]\n")
+
+	_, err := LoadFile(dir, path)
+	if err == nil || !strings.Contains(err.Error(), "not a workflow file") {
+		t.Errorf("error = %v, want the file to be refused", err)
+	}
+}
+
+// TestLoadFile_RefusesAFileThatIsNotInABundle — a file that lies
+// directly in the workflows directory is not in a bundle.
+func TestLoadFile_RefusesAFileThatIsNotInABundle(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "workflow.yml")
+	writeFile(t, path, "title: x\njobs:\n  main:\n    steps: [{message: hi}]\n")
+
+	_, err := LoadFile(dir, path)
+	if err == nil || !strings.Contains(err.Error(), "not in a bundle directory") {
+		t.Errorf("error = %v, want the file to be refused", err)
 	}
 }
 
@@ -725,7 +752,7 @@ func TestLoadFile_IgnoresTheRetiredKeys(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
-			path := filepath.Join(dir, "fix.yml")
+			path := filepath.Join(dir, "fix", "workflow.yml")
 			writeFile(t, path, tt.body)
 			wf, err := LoadFile(dir, path)
 			if err != nil {
@@ -745,7 +772,7 @@ func TestLoadFile_IgnoresTheRetiredKeys(t *testing.T) {
 // workflow is for, and the agent is given it.
 func TestLoadFile_RefusesAFileWithoutATitle(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "fix.yml")
+	path := filepath.Join(dir, "fix", "workflow.yml")
 	writeFile(t, path, "jobs:\n  main:\n    steps: [{message: hi}]\n")
 	_, err := LoadFile(dir, path)
 	if err == nil || !strings.Contains(err.Error(), "title is required") {
@@ -753,12 +780,13 @@ func TestLoadFile_RefusesAFileWithoutATitle(t *testing.T) {
 	}
 }
 
-// TestLoadDir_ReadsBothExtensions — a workflow is a *.yaml or a *.yml
-// file, and its name is its path under the workflows dir.
-func TestLoadDir_ReadsBothExtensions(t *testing.T) {
+// TestLoadDir_ReadsBothFileNames — a bundle's workflow file is a
+// workflow.yml or a workflow.yaml, and the bundle's path under the
+// workflows dir is the name.
+func TestLoadDir_ReadsBothFileNames(t *testing.T) {
 	dir := t.TempDir()
-	writeFile(t, filepath.Join(dir, "fix.yaml"), "title: fix it\njobs:\n  main:\n    steps: [{message: hi}]\n")
-	writeFile(t, filepath.Join(dir, "other.yml"), "title: other it\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeFile(t, filepath.Join(dir, "fix", "workflow.yaml"), "title: fix it\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeFile(t, filepath.Join(dir, "other", "workflow.yml"), "title: other it\njobs:\n  main:\n    steps: [{message: hi}]\n")
 
 	wfs, failures := LoadDir(dir)
 	if len(failures) != 0 {
@@ -777,9 +805,9 @@ func TestLoadDir_ReadsBothExtensions(t *testing.T) {
 // does not take the workflows beside it down with it.
 func TestLoadDir_AFileThatDoesNotLoadAffectsOnlyItself(t *testing.T) {
 	dir := t.TempDir()
-	writeFile(t, filepath.Join(dir, "fix.yml"), "title: fix it\njobs:\n  main:\n    steps: [{message: hi}]\n")
-	writeFile(t, filepath.Join(dir, "broken.yml"), "goal: no title\njobs:\n  main:\n    steps: [{message: hi}]\n")
-	writeFile(t, filepath.Join(dir, "other.yml"), "title: other it\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeFile(t, filepath.Join(dir, "fix", "workflow.yml"), "title: fix it\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeFile(t, filepath.Join(dir, "broken", "workflow.yml"), "goal: no title\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeFile(t, filepath.Join(dir, "other", "workflow.yml"), "title: other it\njobs:\n  main:\n    steps: [{message: hi}]\n")
 
 	wfs, failures := LoadDir(dir)
 	if len(wfs) != 2 {
@@ -791,8 +819,8 @@ func TestLoadDir_AFileThatDoesNotLoadAffectsOnlyItself(t *testing.T) {
 	if failures[0].Name != "broken" {
 		t.Errorf("the failure names %q, want broken", failures[0].Name)
 	}
-	if !strings.Contains(failures[0].Error(), "broken.yml") {
-		t.Errorf("failure = %v, want it to name the file", failures[0])
+	if !strings.Contains(failures[0].Error(), "broken") {
+		t.Errorf("failure = %v, want it to name the workflow", failures[0])
 	}
 }
 
@@ -800,9 +828,9 @@ func TestLoadDir_AFileThatDoesNotLoadAffectsOnlyItself(t *testing.T) {
 // ambiguous, and neither file is offered under it.
 func TestLoadDir_TwoFilesWithTheSameNameMakeItUnusable(t *testing.T) {
 	dir := t.TempDir()
-	writeFile(t, filepath.Join(dir, "fix.yaml"), "title: one\njobs:\n  main:\n    steps: [{message: hi}]\n")
-	writeFile(t, filepath.Join(dir, "fix.yml"), "title: two\njobs:\n  main:\n    steps: [{message: hi}]\n")
-	writeFile(t, filepath.Join(dir, "other.yml"), "title: other it\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeFile(t, filepath.Join(dir, "fix", "workflow.yaml"), "title: one\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeFile(t, filepath.Join(dir, "fix", "workflow.yml"), "title: two\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeFile(t, filepath.Join(dir, "other", "workflow.yml"), "title: other it\njobs:\n  main:\n    steps: [{message: hi}]\n")
 
 	wfs, failures := LoadDir(dir)
 	if len(wfs) != 1 || wfs[0].Name != "other" {
@@ -815,7 +843,7 @@ func TestLoadDir_TwoFilesWithTheSameNameMakeItUnusable(t *testing.T) {
 	if !strings.Contains(msg, `duplicate workflow name "fix"`) {
 		t.Errorf("failure = %v, want the duplicate", failures[0])
 	}
-	if !strings.Contains(msg, "fix.yaml") || !strings.Contains(msg, "fix.yml") {
+	if !strings.Contains(msg, "workflow.yaml") || !strings.Contains(msg, "workflow.yml") {
 		t.Errorf("failure = %v, want it to name both files", failures[0])
 	}
 }
@@ -824,8 +852,8 @@ func TestLoadDir_TwoFilesWithTheSameNameMakeItUnusable(t *testing.T) {
 // claim carries one failure: the clash, not the state of one of them.
 func TestLoadDir_TheClashIsTheOnlyFailureOfAName(t *testing.T) {
 	dir := t.TempDir()
-	writeFile(t, filepath.Join(dir, "fix.yaml"), "title: one\njobs:\n  main:\n    steps: [{message: hi}]\n")
-	writeFile(t, filepath.Join(dir, "fix.yml"), "goal: no title\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeFile(t, filepath.Join(dir, "fix", "workflow.yaml"), "title: one\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeFile(t, filepath.Join(dir, "fix", "workflow.yml"), "goal: no title\njobs:\n  main:\n    steps: [{message: hi}]\n")
 
 	wfs, failures := LoadDir(dir)
 	if len(wfs) != 0 {
@@ -1056,9 +1084,9 @@ func TestWorkflowPaths_AnEmptyDirectoryHoldsNoWorkflows(t *testing.T) {
 // directories are never descended into.
 func TestWorkflowPaths_ReadsTheTreeAndSkipsTheReservedDirectories(t *testing.T) {
 	dir := t.TempDir()
-	writeFile(t, filepath.Join(dir, "top.yml"), "title: top\njobs:\n  main:\n    steps: [{message: hi}]\n")
-	writeFile(t, filepath.Join(dir, "a", "b", "c.yml"), "title: deep\njobs:\n  main:\n    steps: [{message: hi}]\n")
-	writeFile(t, filepath.Join(dir, "actions", "x.yml"), "title: action\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeFile(t, filepath.Join(dir, "top", "workflow.yml"), "title: top\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeFile(t, filepath.Join(dir, "a", "b", "workflow.yml"), "title: deep\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeFile(t, filepath.Join(dir, "actions", "x", "workflow.yml"), "title: action\njobs:\n  main:\n    steps: [{message: hi}]\n")
 	writeFile(t, filepath.Join(dir, "runs", "r.json"), "{}\n")
 
 	paths, err := WorkflowPaths(dir)
@@ -1066,8 +1094,8 @@ func TestWorkflowPaths_ReadsTheTreeAndSkipsTheReservedDirectories(t *testing.T) 
 		t.Fatalf("WorkflowPaths: %v", err)
 	}
 	want := []string{
-		filepath.Join(dir, "a", "b", "c.yml"),
-		filepath.Join(dir, "top.yml"),
+		filepath.Join(dir, "a", "b", "workflow.yml"),
+		filepath.Join(dir, "top", "workflow.yml"),
 	}
 	if len(paths) != len(want) {
 		t.Fatalf("paths = %v, want %v", paths, want)
@@ -1079,12 +1107,67 @@ func TestWorkflowPaths_ReadsTheTreeAndSkipsTheReservedDirectories(t *testing.T) 
 	}
 }
 
-// TestLoadDir_NamesTheWorkflowsByTheirPath — a workflow's name is its
-// path under the workflows directory, without the extension.
+// TestWorkflowPaths_OnlyTheWorkflowFileOfABundleIsAWorkflow — a file
+// that lies directly in the workflows directory, and a file that sits
+// beside a bundle's workflow.yml, are not workflows.
+func TestWorkflowPaths_OnlyTheWorkflowFileOfABundleIsAWorkflow(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "fix.yml"), "title: flat\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeFile(t, filepath.Join(dir, "nightme", "coder", "workflow.yml"), "title: coder\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeFile(t, filepath.Join(dir, "nightme", "coder", "extra.yml"), "title: extra\njobs:\n  main:\n    steps: [{message: hi}]\n")
+
+	paths, err := WorkflowPaths(dir)
+	if err != nil {
+		t.Fatalf("WorkflowPaths: %v", err)
+	}
+	want := []string{filepath.Join(dir, "nightme", "coder", "workflow.yml")}
+	if len(paths) != len(want) {
+		t.Fatalf("paths = %v, want %v", paths, want)
+	}
+	for i := range want {
+		if paths[i] != want[i] {
+			t.Errorf("paths[%d] = %q, want %q", i, paths[i], want[i])
+		}
+	}
+}
+
+// TestWorkflowPaths_AFolderWithoutAWorkflowFileIsNoBundle — a
+// directory that holds no workflow file offers nothing.
+func TestWorkflowPaths_AFolderWithoutAWorkflowFileIsNoBundle(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "notes.md"), "# notes\n")
+
+	paths, err := WorkflowPaths(dir)
+	if err != nil {
+		t.Fatalf("WorkflowPaths: %v", err)
+	}
+	if len(paths) != 0 {
+		t.Errorf("paths = %v, want none", paths)
+	}
+}
+
+// TestWorkflowPaths_TheReservedDirectoriesAreNotWorkflows — a bundle
+// under `actions` or `runs` is never offered.
+func TestWorkflowPaths_TheReservedDirectoriesAreNotWorkflows(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "actions", "fix", "workflow.yml"), "title: fix\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeFile(t, filepath.Join(dir, "runs", "fix", "workflow.yml"), "title: fix\njobs:\n  main:\n    steps: [{message: hi}]\n")
+
+	paths, err := WorkflowPaths(dir)
+	if err != nil {
+		t.Fatalf("WorkflowPaths: %v", err)
+	}
+	if len(paths) != 0 {
+		t.Errorf("paths = %v, want none", paths)
+	}
+}
+
+// TestLoadDir_NamesTheWorkflowsByTheirPath — a workflow's name is the
+// path of its bundle under the workflows directory.
 func TestLoadDir_NamesTheWorkflowsByTheirPath(t *testing.T) {
 	dir := t.TempDir()
-	writeFile(t, filepath.Join(dir, "fix.yml"), "title: fix\njobs:\n  main:\n    steps: [{message: hi}]\n")
-	writeFile(t, filepath.Join(dir, "nightme", "coder.yml"), "title: coder\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeFile(t, filepath.Join(dir, "fix", "workflow.yml"), "title: fix\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeFile(t, filepath.Join(dir, "nightme", "coder", "workflow.yml"), "title: coder\njobs:\n  main:\n    steps: [{message: hi}]\n")
 
 	wfs, failures := LoadDir(dir)
 	if len(failures) != 0 {
@@ -1109,7 +1192,7 @@ func TestLoadDir_NamesTheWorkflowsByTheirPath(t *testing.T) {
 // names the workflow after its place under the root.
 func TestLoadFile_NamesTheWorkflowByItsPathUnderTheRoot(t *testing.T) {
 	root := t.TempDir()
-	path := filepath.Join(root, "nightme", "coder.yml")
+	path := filepath.Join(root, "nightme", "coder", "workflow.yml")
 	writeFile(t, path, "title: coder\njobs:\n  main:\n    steps: [{message: hi}]\n")
 
 	wf, err := LoadFile(root, path)
@@ -1125,8 +1208,8 @@ func TestLoadFile_NamesTheWorkflowByItsPathUnderTheRoot(t *testing.T) {
 // name is one failure, and neither file is offered under it.
 func TestLoadDir_TwoFilesThatClaimOneNameMakeItUnusable(t *testing.T) {
 	dir := t.TempDir()
-	writeFile(t, filepath.Join(dir, "nightme", "coder.yml"), "title: coder\njobs:\n  main:\n    steps: [{message: hi}]\n")
-	writeFile(t, filepath.Join(dir, "nightme", "coder.yaml"), "title: coder\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeFile(t, filepath.Join(dir, "nightme", "coder", "workflow.yml"), "title: coder\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeFile(t, filepath.Join(dir, "nightme", "coder", "workflow.yaml"), "title: coder\njobs:\n  main:\n    steps: [{message: hi}]\n")
 
 	wfs, failures := LoadDir(dir)
 	if len(wfs) != 0 {
@@ -1143,11 +1226,11 @@ func TestLoadDir_TwoFilesThatClaimOneNameMakeItUnusable(t *testing.T) {
 	}
 }
 
-// TestWorkflowName_AnEmptyRootMeansTheFilesOwnDirectory — a file
-// loaded without a root keeps the name of its file.
-func TestWorkflowName_AnEmptyRootMeansTheFilesOwnDirectory(t *testing.T) {
+// TestWorkflowName_AnEmptyRootMeansTheFilesOwnBundle — a file loaded
+// without a root keeps the name of the bundle it sits in.
+func TestWorkflowName_AnEmptyRootMeansTheFilesOwnBundle(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "fix.yml")
+	path := filepath.Join(dir, "fix", "workflow.yml")
 	writeFile(t, path, "title: fix\njobs:\n  main:\n    steps: [{message: hi}]\n")
 
 	if got := WorkflowName("", path); got != "fix" {
@@ -1155,15 +1238,27 @@ func TestWorkflowName_AnEmptyRootMeansTheFilesOwnDirectory(t *testing.T) {
 	}
 }
 
-// TestWorkflowName_AFileOutsideTheRootKeepsTheNameOfItsFile — a file
-// that is not under the root has no path-relative name.
-func TestWorkflowName_AFileOutsideTheRootKeepsTheNameOfItsFile(t *testing.T) {
+// TestWorkflowName_AFileOutsideTheRootKeepsTheNameOfItsBundle — a
+// file that is not under the root has no path-relative name.
+func TestWorkflowName_AFileOutsideTheRootKeepsTheNameOfItsBundle(t *testing.T) {
 	root := t.TempDir()
 	other := t.TempDir()
-	path := filepath.Join(other, "fix.yml")
+	path := filepath.Join(other, "fix", "workflow.yml")
 	writeFile(t, path, "title: fix\njobs:\n  main:\n    steps: [{message: hi}]\n")
 
 	if got := WorkflowName(root, path); got != "fix" {
 		t.Errorf("WorkflowName = %q, want fix", got)
+	}
+}
+
+// TestWorkflowName_AFileInTheRootHasNoName — the workflows directory
+// is not a bundle: a file that lies in it has no name.
+func TestWorkflowName_AFileInTheRootHasNoName(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "workflow.yml")
+	writeFile(t, path, "title: fix\njobs:\n  main:\n    steps: [{message: hi}]\n")
+
+	if got := WorkflowName(root, path); got != "" {
+		t.Errorf("WorkflowName = %q, want no name", got)
 	}
 }

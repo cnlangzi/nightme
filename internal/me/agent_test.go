@@ -760,12 +760,17 @@ jobs:
 `
 
 // writeWorkflow writes a workflow into a workflows directory.
+//
+// A workflow is a bundle: a directory under the workflows directory
+// that holds a workflow.yml, and the directory's path is the
+// workflow's name.
 func writeWorkflow(t *testing.T, dir, name, body string) {
 	t.Helper()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	bundle := filepath.Join(dir, name)
+	if err := os.MkdirAll(bundle, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, name+".yaml"), []byte(body), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(bundle, "workflow.yml"), []byte(body), 0o644); err != nil {
 		t.Fatalf("write workflow: %v", err)
 	}
 }

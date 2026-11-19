@@ -23,9 +23,7 @@ jobs:
       - id: s1
         run: echo
 `
-	if err := os.WriteFile(filepath.Join(dir, "reviewer.yaml"), []byte(body), 0644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	writeBundle(t, dir, "reviewer", body)
 	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
 
 	var err error
@@ -36,7 +34,7 @@ jobs:
 	if !strings.Contains(out, "exactly one of message / shell / use / wait must be set") {
 		t.Errorf("output = %q, want the problem of the file", out)
 	}
-	if !strings.Contains(out, filepath.Join(dir, "reviewer.yaml")) {
+	if !strings.Contains(out, filepath.Join(dir, "reviewer", "workflow.yml")) {
 		t.Errorf("output = %q, want it to name the file", out)
 	}
 	if code := nmerrors.ExitCode(err); code != nmerrors.CodeValidationError {
@@ -49,9 +47,7 @@ jobs:
 func TestWorkflowValidate_AValidWorkflowPrintsNothing(t *testing.T) {
 	dir := t.TempDir()
 	body := "title: review the changes\njobs:\n  main:\n    steps: [{id: s1, message: /review}]\n"
-	if err := os.WriteFile(filepath.Join(dir, "reviewer.yaml"), []byte(body), 0644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	writeBundle(t, dir, "reviewer", body)
 	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
 
 	var err error
@@ -71,15 +67,9 @@ func TestWorkflowValidate_AValidWorkflowPrintsNothing(t *testing.T) {
 // files and the directories it is given.
 func TestWorkflowValidate_TheGivenPaths(t *testing.T) {
 	dir := t.TempDir()
-	file := filepath.Join(dir, "reviewer.yaml")
 	body := "title: review the changes\njobs:\n  main:\n    steps: [{id: s1, message: /review}]\n"
-	if err := os.WriteFile(file, []byte(body), 0644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	broken := filepath.Join(dir, "broken.yaml")
-	if err := os.WriteFile(broken, []byte("jobs:\n  main:\n    steps: [{message: hi}]\n"), 0644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	file := writeBundle(t, dir, "reviewer", body)
+	broken := writeBundle(t, dir, "broken", "jobs:\n  main:\n    steps: [{message: hi}]\n")
 
 	var err error
 	out := captureStdout(t, func() error {
@@ -102,9 +92,7 @@ func TestWorkflowValidate_TheGivenPaths(t *testing.T) {
 func TestWorkflowValidate_AMissingPath(t *testing.T) {
 	dir := t.TempDir()
 	body := "title: review the changes\njobs:\n  main:\n    steps: [{id: s1, message: /review}]\n"
-	if err := os.WriteFile(filepath.Join(dir, "reviewer.yaml"), []byte(body), 0644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	writeBundle(t, dir, "reviewer", body)
 	missing := filepath.Join(dir, "nope.yaml")
 
 	var err error
@@ -152,9 +140,7 @@ func TestWorkflowValidate_AWorkflowsDirThatCannotBeRead(t *testing.T) {
 	}
 	dir := t.TempDir()
 	body := "title: review the changes\njobs:\n  main:\n    steps: [{id: s1, message: /review}]\n"
-	if err := os.WriteFile(filepath.Join(dir, "reviewer.yaml"), []byte(body), 0644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	writeBundle(t, dir, "reviewer", body)
 	if err := os.Chmod(dir, 0000); err != nil {
 		t.Fatalf("chmod: %v", err)
 	}
@@ -184,9 +170,7 @@ jobs:
       - message: hi
         shell: echo
 `
-	if err := os.WriteFile(filepath.Join(dir, "broken.yaml"), []byte(body), 0644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	writeBundle(t, dir, "broken", body)
 	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
 
 	out := captureStdout(t, func() error {
@@ -213,11 +197,7 @@ jobs:
 // for a JSON array.
 func TestWorkflowValidate_TheJSONArray(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "reviewer.yaml")
-	body := "jobs:\n  main:\n    steps: [{message: hi}]\n"
-	if err := os.WriteFile(path, []byte(body), 0644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	path := writeBundle(t, dir, "reviewer", "jobs:\n  main:\n    steps: [{message: hi}]\n")
 
 	out := captureStdout(t, func() error {
 		return runRoot("workflow", "validate", path, "--json")
@@ -249,11 +229,7 @@ func TestWorkflowValidate_TheJSONArray(t *testing.T) {
 // prints an empty array.
 func TestWorkflowValidate_TheJSONArrayOfAValidWorkflow(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "reviewer.yaml")
-	body := "title: review the changes\njobs:\n  main:\n    steps: [{id: s1, message: /review}]\n"
-	if err := os.WriteFile(path, []byte(body), 0644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	path := writeBundle(t, dir, "reviewer", "title: review the changes\njobs:\n  main:\n    steps: [{id: s1, message: /review}]\n")
 
 	out := captureStdout(t, func() error {
 		return runRoot("workflow", "validate", path, "--json")
@@ -300,13 +276,7 @@ func TestWorkflowValidate_TheOtherCommandsStillWork(t *testing.T) {
 // on disk is looked up as a workflow name.
 func TestWorkflowValidate_AWorkflowName(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "nightme", "coder.yml")
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.WriteFile(path, []byte("title: code it\njobs:\n  main:\n    steps: [{message: hi}]\n"), 0644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	writeBundle(t, dir, "nightme/coder", "title: code it\njobs:\n  main:\n    steps: [{message: hi}]\n")
 	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
 
 	var err error
@@ -326,13 +296,7 @@ func TestWorkflowValidate_AWorkflowName(t *testing.T) {
 // resolves to the file, and the file's problems are reported.
 func TestWorkflowValidate_AWorkflowNameThatDoesNotValidate(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "nightme", "coder.yml")
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.WriteFile(path, []byte("jobs:\n  main:\n    steps: [{message: hi}]\n"), 0644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	path := writeBundle(t, dir, "nightme/coder", "jobs:\n  main:\n    steps: [{message: hi}]\n")
 	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
 
 	var err error
@@ -374,13 +338,7 @@ func TestWorkflowValidate_ANameThatIsNeitherAPathNorAWorkflow(t *testing.T) {
 // the names the workflows are started by.
 func TestWorkflowList_NamesTheWorkflowsByTheirPath(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "nightme", "coder.yml")
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.WriteFile(path, []byte("title: code it\njobs:\n  main:\n    steps: [{message: hi}]\n"), 0644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	writeBundle(t, dir, "nightme/coder", "title: code it\njobs:\n  main:\n    steps: [{message: hi}]\n")
 	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
 
 	out := captureStdout(t, func() error {
@@ -401,14 +359,8 @@ func TestWorkflowList_TheConfiguredDataDirHoldsTheWorkflows(t *testing.T) {
 	}
 	t.Setenv("NIGHTME_CONFIG", cfgPath)
 
-	dir := filepath.Join(dataDir, "workflows", "nightme")
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
 	body := "title: code it\njobs:\n  main:\n    steps: [{message: hi}]\n"
-	if err := os.WriteFile(filepath.Join(dir, "coder.yml"), []byte(body), 0644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	writeBundle(t, filepath.Join(dataDir, "workflows"), "nightme/coder", body)
 
 	out := captureStdout(t, func() error {
 		return runRoot("workflow", "list")

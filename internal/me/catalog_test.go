@@ -8,10 +8,22 @@ import (
 	"time"
 )
 
-// writeWorkflowFile writes a workflow file into a directory.
+// writeWorkflowFile writes a workflow file into the bundle of the
+// given name under a directory.
+//
+// A workflow is a bundle: a directory under the workflows directory
+// that holds a workflow.yml, and the directory's path is the
+// workflow's name.
 func writeWorkflowFile(t *testing.T, dir, name, body string) string {
 	t.Helper()
-	path := filepath.Join(dir, name)
+	return writeBundleFile(t, dir, name, "workflow.yml", body)
+}
+
+// writeBundleFile writes a file into the bundle of the given name
+// under a directory.
+func writeBundleFile(t *testing.T, dir, name, file, body string) string {
+	t.Helper()
+	path := filepath.Join(dir, name, file)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -21,11 +33,11 @@ func writeWorkflowFile(t *testing.T, dir, name, body string) string {
 	return path
 }
 
-// TestCatalog_TheNameIsTheFileName — a workflow's identity is the path
-// of its file under the workflows directory.
-func TestCatalog_TheNameIsTheFileName(t *testing.T) {
+// TestCatalog_TheNameIsTheBundle — a workflow's identity is the path
+// of its bundle under the workflows directory.
+func TestCatalog_TheNameIsTheBundle(t *testing.T) {
 	dir := t.TempDir()
-	writeWorkflowFile(t, dir, "fix.yml", "title: do the thing\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeWorkflowFile(t, dir, "fix", "title: do the thing\njobs:\n  main:\n    steps: [{message: hi}]\n")
 
 	c := NewCatalog(dir)
 	if err := c.Refresh(); err != nil {
@@ -43,12 +55,12 @@ func TestCatalog_TheNameIsTheFileName(t *testing.T) {
 	}
 }
 
-// TestCatalog_ReadsBothExtensions — a workflow is a *.yaml or a *.yml
-// file.
-func TestCatalog_ReadsBothExtensions(t *testing.T) {
+// TestCatalog_ReadsTheBundles — a workflow is a bundle, and its name
+// is the path of the bundle under the workflows directory.
+func TestCatalog_ReadsTheBundles(t *testing.T) {
 	dir := t.TempDir()
-	writeWorkflowFile(t, dir, "fix.yaml", "title: one\njobs:\n  main:\n    steps: [{message: hi}]\n")
-	writeWorkflowFile(t, dir, "other.yml", "title: two\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeWorkflowFile(t, dir, "fix", "title: one\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeBundleFile(t, dir, "other", "workflow.yaml", "title: two\njobs:\n  main:\n    steps: [{message: hi}]\n")
 
 	c := NewCatalog(dir)
 	if err := c.Refresh(); err != nil {
@@ -64,7 +76,7 @@ func TestCatalog_ReadsBothExtensions(t *testing.T) {
 // whether a file changed since it was parsed.
 func TestCatalog_AnUnchangedFileIsNotParsedAgain(t *testing.T) {
 	dir := t.TempDir()
-	path := writeWorkflowFile(t, dir, "fix.yml",
+	path := writeWorkflowFile(t, dir, "fix",
 		"title: first\njobs:\n  main:\n    steps: [{message: one}]\n")
 
 	c := NewCatalog(dir)
@@ -80,7 +92,7 @@ func TestCatalog_AnUnchangedFileIsNotParsedAgain(t *testing.T) {
 
 	// The file changes, but its fingerprint does not: the catalogue
 	// keeps the workflow it parsed.
-	writeWorkflowFile(t, dir, "fix.yml",
+	writeWorkflowFile(t, dir, "fix",
 		"title: other\njobs:\n  main:\n    steps: [{message: two}]\n")
 	if err := os.Chtimes(path, mod, mod); err != nil {
 		t.Fatalf("chtimes: %v", err)
@@ -117,7 +129,7 @@ func TestCatalog_AnUnchangedFileIsNotParsedAgain(t *testing.T) {
 // holds what the directory holds.
 func TestCatalog_ANewFileIsPickedUpAndAGoneOneIsDropped(t *testing.T) {
 	dir := t.TempDir()
-	writeWorkflowFile(t, dir, "fix.yml", "title: one\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeWorkflowFile(t, dir, "fix", "title: one\njobs:\n  main:\n    steps: [{message: hi}]\n")
 
 	c := NewCatalog(dir)
 	if err := c.Refresh(); err != nil {
@@ -127,7 +139,7 @@ func TestCatalog_ANewFileIsPickedUpAndAGoneOneIsDropped(t *testing.T) {
 		t.Fatal("the workflow was not found")
 	}
 
-	writeWorkflowFile(t, dir, "other.yml", "title: two\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeWorkflowFile(t, dir, "other", "title: two\njobs:\n  main:\n    steps: [{message: hi}]\n")
 	if err := c.Refresh(); err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
@@ -135,7 +147,7 @@ func TestCatalog_ANewFileIsPickedUpAndAGoneOneIsDropped(t *testing.T) {
 		t.Fatalf("the new workflow was not found: %v", c.Names())
 	}
 
-	if err := os.Remove(filepath.Join(dir, "fix.yml")); err != nil {
+	if err := os.RemoveAll(filepath.Join(dir, "fix")); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 	if err := c.Refresh(); err != nil {
@@ -150,8 +162,8 @@ func TestCatalog_ANewFileIsPickedUpAndAGoneOneIsDropped(t *testing.T) {
 // file would have provided reports why it is unusable.
 func TestCatalog_ABrokenFileIsAFailureOfItsOwnName(t *testing.T) {
 	dir := t.TempDir()
-	writeWorkflowFile(t, dir, "fix.yml", "title: one\njobs:\n  main:\n    steps: [{message: hi}]\n")
-	writeWorkflowFile(t, dir, "broken.yml", "goal: no title\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeWorkflowFile(t, dir, "fix", "title: one\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeWorkflowFile(t, dir, "broken", "goal: no title\njobs:\n  main:\n    steps: [{message: hi}]\n")
 
 	c := NewCatalog(dir)
 	if err := c.Refresh(); err != nil {
@@ -164,8 +176,8 @@ func TestCatalog_ABrokenFileIsAFailureOfItsOwnName(t *testing.T) {
 	if !ok {
 		t.Fatalf("the broken file carries no failure: %v", c.Failures())
 	}
-	if !strings.Contains(failure.Error(), "broken.yml") {
-		t.Errorf("failure = %v, want it to name the file", failure)
+	if !strings.Contains(failure.Error(), "broken") {
+		t.Errorf("failure = %v, want it to name the workflow", failure)
 	}
 	if !strings.Contains(failure.Error(), "title") {
 		t.Errorf("failure = %v, want it to name the replacement", failure)
@@ -179,9 +191,9 @@ func TestCatalog_ABrokenFileIsAFailureOfItsOwnName(t *testing.T) {
 // ambiguous, and neither file is offered under it.
 func TestCatalog_TwoFilesWithTheSameNameMakeItUnusable(t *testing.T) {
 	dir := t.TempDir()
-	writeWorkflowFile(t, dir, "fix.yaml", "title: one\njobs:\n  main:\n    steps: [{message: hi}]\n")
-	writeWorkflowFile(t, dir, "fix.yml", "title: two\njobs:\n  main:\n    steps: [{message: hi}]\n")
-	writeWorkflowFile(t, dir, "other.yml", "title: three\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeBundleFile(t, dir, "fix", "workflow.yaml", "title: one\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeWorkflowFile(t, dir, "fix", "title: two\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeWorkflowFile(t, dir, "other", "title: three\njobs:\n  main:\n    steps: [{message: hi}]\n")
 
 	c := NewCatalog(dir)
 	if err := c.Refresh(); err != nil {
@@ -218,7 +230,7 @@ func TestCatalog_AMissingDirectoryIsNotAnError(t *testing.T) {
 // keeps the workflows the catalogue holds.
 func TestCatalog_ADirectoryThatCannotBeRead(t *testing.T) {
 	dir := t.TempDir()
-	writeWorkflowFile(t, dir, "fix.yml", "title: one\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeWorkflowFile(t, dir, "fix", "title: one\njobs:\n  main:\n    steps: [{message: hi}]\n")
 
 	c := NewCatalog(dir)
 	if err := c.Refresh(); err != nil {
@@ -245,7 +257,7 @@ func TestCatalog_ADirectoryThatCannotBeRead(t *testing.T) {
 // found by its address.
 func TestCatalog_ResolvesANameUnderASubdirectory(t *testing.T) {
 	dir := t.TempDir()
-	writeWorkflowFile(t, dir, filepath.Join("nightme", "coder.yml"),
+	writeWorkflowFile(t, dir, filepath.Join("nightme", "coder"),
 		"title: do the thing\njobs:\n  main:\n    steps: [{message: hi}]\n")
 
 	c := NewCatalog(dir)
@@ -266,7 +278,7 @@ func TestCatalog_ResolvesANameUnderASubdirectory(t *testing.T) {
 // unusable.
 func TestCatalog_ABrokenFileUnderASubdirectoryIsAFailureOfItsOwnName(t *testing.T) {
 	dir := t.TempDir()
-	writeWorkflowFile(t, dir, filepath.Join("nightme", "broken.yml"),
+	writeWorkflowFile(t, dir, filepath.Join("nightme", "broken"),
 		"goal: no title\njobs:\n  main:\n    steps: [{message: hi}]\n")
 
 	c := NewCatalog(dir)
@@ -277,7 +289,7 @@ func TestCatalog_ABrokenFileUnderASubdirectoryIsAFailureOfItsOwnName(t *testing.
 	if !ok {
 		t.Fatalf("the broken file carries no failure: %v", c.Failures())
 	}
-	if !strings.Contains(failure.Error(), "broken.yml") {
-		t.Errorf("failure = %v, want it to name the file", failure)
+	if !strings.Contains(failure.Error(), "broken") {
+		t.Errorf("failure = %v, want it to name the workflow", failure)
 	}
 }

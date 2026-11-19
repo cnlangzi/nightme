@@ -69,6 +69,13 @@ type HandlerDeps struct {
 	LabelCache *LabelCache
 	// Now is the clock. Tests override for deterministic drafts.
 	Now func() time.Time
+	// Sleep waits for a duration.
+	//
+	// The wait between two reads of a pull request's merge state
+	// uses it: the platforms compute that state asynchronously, so
+	// the command waits for the computation instead of reporting
+	// "not ready yet". Nil means the real clock.
+	Sleep func(ctx context.Context, d time.Duration) error
 	// PRCache is the runtime-owned *prcache.Registry that
 	// /gtw {pr, close} success paths write into directly
 	// (we already know the answer; no refresh round-trip).

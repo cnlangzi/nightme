@@ -10,6 +10,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
+	"github.com/cnlangzi/nightme/internal/command/gtw"
 	mesvc "github.com/cnlangzi/nightme/internal/me"
 	"github.com/cnlangzi/nightme/internal/messages"
 )
@@ -300,6 +301,34 @@ func TestCommandInfos_TheHiddenSubcommandsStayHidden(t *testing.T) {
 	}
 	if len(infos[0].Subcommands) != 1 || infos[0].Subcommands[0].Name != "fix" {
 		t.Errorf("the subcommands are %v, want the visible one", infos[0].Subcommands)
+	}
+}
+
+// TestCommandInfos_TheGtwPRViewStaysOutOfTheModelEnum — the run's
+// agent tool lists the subcommands the model may issue. `/gtw pr
+// view` sits one word away from `/gtw pr`, which opens a pull
+// request: a model that picks the wrong one opens a PR. The
+// read-only path stays out of the enum; the model reaches it through
+// the free-text args of `pr`.
+func TestCommandInfos_TheGtwPRViewStaysOutOfTheModelEnum(t *testing.T) {
+	spec := gtw.NewFactoryWithDeps(gtw.NewManager(), gtw.HandlerDeps{}).Spec()
+	infos := commandInfos([]command.Spec{spec})
+	if len(infos) != 1 {
+		t.Fatalf("the commands are %v, want one", infos)
+	}
+	for _, sub := range infos[0].Subcommands {
+		if sub.Name == "pr view" {
+			t.Errorf("the model sees the `pr view` subcommand: %v", infos[0].Subcommands)
+		}
+	}
+	var sawPR bool
+	for _, sub := range infos[0].Subcommands {
+		if sub.Name == "pr" {
+			sawPR = true
+		}
+	}
+	if !sawPR {
+		t.Errorf("the model does not see the `pr` subcommand: %v", infos[0].Subcommands)
 	}
 }
 

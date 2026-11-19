@@ -121,6 +121,15 @@ type fakeGitProvider struct {
 	prByHead map[string]*PR
 	prErr    map[string]error
 
+	// GetPRMergeState response. mergeStateByNumber[number] is
+	// returned when GetPRMergeState is called with that number;
+	// mergeStateErr[number] wins when set. mergeStateFn, when
+	// set, answers per call and wins over both — it lets a test
+	// make the platform compute the state on the second read.
+	mergeStateByNumber map[int]*PRMergeState
+	mergeStateErr      map[int]error
+	mergeStateFn       func(number int) (*PRMergeState, error)
+
 	// Recorded calls (chronological).
 	calls []fakeProviderCall
 }
@@ -161,16 +170,18 @@ type fakeProviderCall struct {
 // seed issue maps / errors before driving /gtw fix.
 func newFakeGitProvider(kind ProviderKind, host string) *fakeGitProvider {
 	return &fakeGitProvider{
-		kind:              kind,
-		host:              host,
-		version:           "v0.0.0-test",
-		issueByID:         make(map[int]*Issue),
-		issueErr:          make(map[int]error),
-		prByHead:          make(map[string]*PR),
-		prErr:             make(map[string]error),
-		createLabelErrFor: make(map[string]error),
-		blockedBy:         make(map[int][]*Issue),
-		blockedByErr:      make(map[int]error),
+		kind:               kind,
+		host:               host,
+		version:            "v0.0.0-test",
+		issueByID:          make(map[int]*Issue),
+		issueErr:           make(map[int]error),
+		prByHead:           make(map[string]*PR),
+		prErr:              make(map[string]error),
+		mergeStateByNumber: make(map[int]*PRMergeState),
+		mergeStateErr:      make(map[int]error),
+		createLabelErrFor:  make(map[string]error),
+		blockedBy:          make(map[int][]*Issue),
+		blockedByErr:       make(map[int]error),
 	}
 }
 
@@ -405,6 +416,35 @@ func (f *fakeGitProvider) SetGetPRErr(head string, err error) {
 	defer f.mu.Unlock()
 	f.prErr[head] = err
 	delete(f.prByHead, head)
+}
+
+// SetPRMergeState registers the merge state GetPRMergeState
+// returns for the given pull request number.
+func (f *fakeGitProvider) SetPRMergeState(number int, state *PRMergeState) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.mergeStateByNumber[number] = state
+	delete(f.mergeStateErr, number)
+}
+
+// SetPRMergeStateErr configures GetPRMergeState(number) to return
+// err. Wrap ErrPRNotFound to simulate a pull request that does not
+// exist.
+func (f *fakeGitProvider) SetPRMergeStateErr(number int, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.mergeStateErr[number] = err
+	delete(f.mergeStateByNumber, number)
+}
+
+// SetPRMergeStateFunc makes GetPRMergeState answer through fn, so
+// a test can vary the answer per read — the platform computing the
+// merge state on its second read, for instance. fn wins over the
+// per-number response and error.
+func (f *fakeGitProvider) SetPRMergeStateFunc(fn func(number int) (*PRMergeState, error)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.mergeStateFn = fn
 }
 
 // Calls returns a snapshot of recorded calls (so the caller
@@ -754,6 +794,29 @@ func (f *fakeGitProvider) GetPR(_ context.Context, owner, repo, head string) (*P
 		return nil, nil
 	}
 	cp := *pr
+	return &cp, nil
+}
+
+// GetPRMergeState is the fake implementation of
+// GitProvider.GetPRMergeState. It answers from the per-number
+// response, or through the per-call function when one is set.
+func (f *fakeGitProvider) GetPRMergeState(_ context.Context, owner, repo string, number int) (*PRMergeState, error) {
+	f.mu.Lock()
+	f.calls = append(f.calls, fakeProviderCall{
+		Method: "GetPRMergeState", Owner: owner, Repo: repo, ID: number,
+	})
+	state, err, fn := f.mergeStateByNumber[number], f.mergeStateErr[number], f.mergeStateFn
+	f.mu.Unlock()
+	if fn != nil {
+		return fn(number)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if state == nil {
+		return nil, fmt.Errorf("%w: fake has no merge state for PR %d", ErrPRNotFound, number)
+	}
+	cp := *state
 	return &cp, nil
 }
 

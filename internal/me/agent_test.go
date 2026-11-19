@@ -80,6 +80,32 @@ type emittedMessage struct {
 	Usage *messages.UsageInfo
 }
 
+// gate holds a run until the test opens it.
+//
+// A run that is over frees its chat: the run of a chat that is over is
+// gone, and a test that wants to look at what a run did has to hold on
+// to the run while it is still there. The fakes wait at the gate, so
+// the run is still there when the test looks.
+type gate struct {
+	once sync.Once
+	ch   chan struct{}
+}
+
+// newGate builds a gate that is closed.
+func newGate() *gate {
+	return &gate{ch: make(chan struct{})}
+}
+
+// open lets the run go on.
+func (g *gate) open() {
+	g.once.Do(func() { close(g.ch) })
+}
+
+// wait blocks until the gate is open.
+func (g *gate) wait() {
+	<-g.ch
+}
+
 // fakeOperator is a scripted chat.
 //
 // The commands settle on their own unless a step says otherwise. The
@@ -97,6 +123,8 @@ type fakeOperator struct {
 	seq     int
 	cardSeq int
 	watched []string
+	// gate holds the chat's commands until the test opens it.
+	gate *gate
 	// emitted are the outbound messages the run published.
 	emitted []emittedMessage
 	// failCommand is the command that cannot be sent at all, the way
@@ -147,6 +175,12 @@ type spokenMessage struct {
 
 // Speak says something in the chat.
 func (f *fakeOperator) Speak(_ context.Context, chatID, text string, opts channel.SpeakOptions) (string, error) {
+	f.mu.Lock()
+	gate := f.gate
+	f.mu.Unlock()
+	if gate != nil {
+		gate.wait()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sent = append(f.sent, text)
@@ -602,9 +636,17 @@ type fakeShell struct {
 	calls []wfe.ShellSpec
 	ret   *wfe.ShellResult
 	err   error
+	// gate holds the shell's commands until the test opens it.
+	gate *gate
 }
 
 func (f *fakeShell) RunShell(_ context.Context, spec wfe.ShellSpec) (*wfe.ShellResult, error) {
+	f.mu.Lock()
+	gate := f.gate
+	f.mu.Unlock()
+	if gate != nil {
+		gate.wait()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, spec)
@@ -654,9 +696,17 @@ type scriptedProvider struct {
 	// block holds a turn open: the provider waits for the channel to
 	// be closed before it answers.
 	block chan struct{}
+	// gate holds the answers until the test opens it.
+	gate *gate
 }
 
 func (p *scriptedProvider) Complete(_ context.Context, req llm.Request) (*llm.Response, error) {
+	p.mu.Lock()
+	gate := p.gate
+	p.mu.Unlock()
+	if gate != nil {
+		gate.wait()
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.requests = append(p.requests, req)
@@ -694,9 +744,17 @@ type scriptedDecider struct {
 	answers  []llm.DecisionResponse
 	err      error
 	requests []llm.DecisionRequest
+	// gate holds the decisions until the test opens it.
+	gate *gate
 }
 
 func (d *scriptedDecider) Decide(_ context.Context, req llm.DecisionRequest) (*llm.DecisionResponse, error) {
+	d.mu.Lock()
+	gate := d.gate
+	d.mu.Unlock()
+	if gate != nil {
+		gate.wait()
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.requests = append(d.requests, req)
@@ -806,7 +864,18 @@ func readStateFile(t *testing.T, path string) []byte {
 // first-out.
 func testService(t *testing.T, dir string, cfg Config) (*Service, *fakeOperator) {
 	t.Helper()
+	return testServiceGated(t, dir, cfg, nil)
+}
+
+// testServiceGated starts a service whose chat waits at the gate.
+//
+// The gate holds the runs of the service until the test opens it: a
+// run that is over frees its chat, and the run of a chat that is over
+// is gone.
+func testServiceGated(t *testing.T, dir string, cfg Config, g *gate) (*Service, *fakeOperator) {
+	t.Helper()
 	op := newFakeOperator()
+	op.gate = g
 	cfg.WorkflowsDir = dir
 	cfg.StateDir = filepath.Join(dir, "runs")
 	cfg.Operator = op
@@ -871,13 +940,24 @@ func decisionResp(model, next string, confidence, needsHuman float64) llm.Decisi
 // not for the chat.
 func waitRun(t *testing.T, svc *Service, chatID string) {
 	t.Helper()
+	waitRunFor(t, svc, chatID, 10*time.Second)
+}
+
+// waitRunFor waits until the run of a chat is over, or the timeout
+// passes.
+//
+// A run with many steps needs more time than a run with one: every
+// step is a turn of the run, and the race detector and a loaded
+// machine slow every turn down.
+func waitRunFor(t *testing.T, svc *Service, chatID string, timeout time.Duration) {
+	t.Helper()
 	svc.mu.Lock()
 	r := svc.active[chatID]
 	svc.mu.Unlock()
 	if r != nil {
 		select {
 		case <-r.done:
-		case <-time.After(10 * time.Second):
+		case <-time.After(timeout):
 			t.Fatal("the run did not finish")
 		}
 		return
@@ -889,7 +969,7 @@ func waitRun(t *testing.T, svc *Service, chatID string) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
+	case <-time.After(timeout):
 		t.Fatal("the run did not finish")
 	}
 }
@@ -934,6 +1014,23 @@ func activeRun(t *testing.T, svc *Service, chatID string) *run {
 	if r == nil {
 		t.Fatal("the run is not registered")
 	}
+	return r
+}
+
+// startRun starts a workflow and returns the run of the chat.
+//
+// The gate holds the run until the test opens it: a run that is over
+// frees its chat, and the run of a chat that is over is gone. The
+// fakes the run meets wait at the gate, so the test looks at the run
+// while it is still there.
+func startRun(t *testing.T, svc *Service, g *gate, req Request) *run {
+	t.Helper()
+	t.Cleanup(g.open)
+	if _, _, err := svc.StartWorkflow(context.Background(), req); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	r := activeRun(t, svc, req.ChatID)
+	g.open()
 	return r
 }
 
@@ -1294,13 +1391,12 @@ jobs:
 		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "review finished"}},
 	}
 
-	if _, _, err := svc.StartWorkflow(context.Background(), Request{
+	g := newGate()
+	op.gate = g
+	r := startRun(t, svc, g, Request{
 		Name: "repair", ChatID: "obs-1", Cwd: "/tmp/work",
 		Commands: []CommandInfo{{Name: "review"}},
-	}); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	r := activeRun(t, svc, "obs-1")
+	})
 	waitRun(t, svc, "obs-1")
 
 	history := runHistory(r)
@@ -1347,13 +1443,12 @@ jobs:
 		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "the repair worked"}},
 	}
 
-	if _, _, err := svc.StartWorkflow(context.Background(), Request{
+	g := newGate()
+	op.gate = g
+	r := startRun(t, svc, g, Request{
 		Name: "repair", ChatID: "obs-1", Cwd: "/tmp/work",
 		Commands: []CommandInfo{{Name: "review"}},
-	}); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	r := activeRun(t, svc, "obs-1")
+	})
 	waitRun(t, svc, "obs-1")
 
 	out, ok := stepOutcome(r, "review")
@@ -1391,13 +1486,12 @@ jobs:
 		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "the review worked"}},
 	}
 
-	if _, _, err := svc.StartWorkflow(context.Background(), Request{
+	g := newGate()
+	op.gate = g
+	r := startRun(t, svc, g, Request{
 		Name: "repair", ChatID: "obs-1", Cwd: "/tmp/work",
 		Commands: []CommandInfo{{Name: "review"}},
-	}); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	r := activeRun(t, svc, "obs-1")
+	})
 	waitRun(t, svc, "obs-1")
 
 	out, ok := stepOutcome(r, "review")
@@ -1914,15 +2008,11 @@ func TestSystem1_DecisionIsRecordedAsASyntheticToolCall(t *testing.T) {
 	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
 	op.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}}}
 
-	runID, _, err := svc.StartWorkflow(context.Background(), Request{
+	g := newGate()
+	op.gate = g
+	r := startRun(t, svc, g, Request{
 		Name: "fix-issue", Args: []string{"42"}, ChatID: "obs-1", Cwd: "/tmp/work",
 	})
-	if err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	svc.mu.Lock()
-	r := svc.runs[runID]
-	svc.mu.Unlock()
 	if r == nil {
 		t.Fatal("the run is not registered")
 	}
@@ -1966,15 +2056,11 @@ func TestSystem1_ANoopStepIsNotAToolError(t *testing.T) {
 		{outcome: messages.Outcome{Status: messages.OutcomeNoop, Summary: "nothing to commit"}},
 	}
 
-	runID, _, err := svc.StartWorkflow(context.Background(), Request{
+	g := newGate()
+	op.gate = g
+	r := startRun(t, svc, g, Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	})
-	if err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	svc.mu.Lock()
-	r := svc.runs[runID]
-	svc.mu.Unlock()
 	waitRun(t, svc, "obs-1")
 
 	if decider.Calls() == 0 {
@@ -2005,15 +2091,11 @@ func TestSystem1_AFailedStepIsAToolError(t *testing.T) {
 		{outcome: messages.Outcome{Status: messages.OutcomeFailed, Summary: "the commit failed"}},
 	}
 
-	runID, _, err := svc.StartWorkflow(context.Background(), Request{
+	g := newGate()
+	op.gate = g
+	r := startRun(t, svc, g, Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	})
-	if err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	svc.mu.Lock()
-	r := svc.runs[runID]
-	svc.mu.Unlock()
 	waitRun(t, svc, "obs-1")
 
 	if provider.Calls() == 0 {
@@ -2103,4 +2185,22 @@ func waitAsked(t *testing.T, op *fakeOperator, text string) {
 		time.Sleep(2 * time.Millisecond)
 	}
 	t.Fatalf("the run never asked %q: %v", text, op.Asked())
+}
+
+// waitAskID waits until the run has recorded the id of the message its
+// question became.
+//
+// The chat knows the question before the run does: the operator hands
+// the message its id back to the run, and the run records it after.
+func waitAskID(t *testing.T, r *run) string {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if id := r.askMsgID(); id != "" {
+			return id
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatal("the question has no message id")
+	return ""
 }

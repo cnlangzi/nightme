@@ -258,10 +258,11 @@ jobs:
         shell: make build
 `)
 
+	g := newGate()
 	shell := &fakeShell{ret: &wfe.ShellResult{
 		ExitCode: 0,
 		Outputs:  map[string]string{"error": "0 issues found"},
-	}}
+	}, gate: g}
 	provider := &scriptedProvider{err: errors.New("the chat model must not be called")}
 	decider := &scriptedDecider{err: errors.New("the decision model must not be called")}
 	svc, _ := testService(t, dir, Config{
@@ -271,12 +272,9 @@ jobs:
 		Cwd:      fakeCwd{dir: "/tmp/worktree"},
 	})
 
-	if _, _, err := svc.StartWorkflow(context.Background(), Request{
+	r := startRun(t, svc, g, Request{
 		Name: "sh", ChatID: "obs-1", Cwd: "/tmp/work",
-	}); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	r := activeRun(t, svc, "obs-1")
+	})
 	waitRun(t, svc, "obs-1")
 
 	out, ok := stepOutcome(r, "build")

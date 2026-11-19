@@ -242,6 +242,76 @@ func hasHTTPStatus(stderr string, code int) bool {
 // gtw callers keep working via this alias.
 type PR = messages.PR
 
+// PRMergeVerdict is the platform-neutral judgement of a pull
+// request's merge state. The platforms name the same facts
+// differently — GitHub says "CONFLICTING" / "DIRTY" / "BEHIND",
+// GitLab says "conflicts" / "need_rebase" — so the provider
+// normalises them into these five words and the command layer
+// never learns a platform field name.
+type PRMergeVerdict string
+
+const (
+	// PRMergeMergeable: the platform says the PR can be merged.
+	PRMergeMergeable PRMergeVerdict = "mergeable"
+	// PRMergeConflicting: the PR conflicts with its base.
+	PRMergeConflicting PRMergeVerdict = "conflicting"
+	// PRMergeBehind: the PR's head is behind its base.
+	PRMergeBehind PRMergeVerdict = "behind"
+	// PRMergeUnknown: the platform has not computed the state yet.
+	PRMergeUnknown PRMergeVerdict = "unknown"
+	// PRMergeBlocked: the platform refuses the merge for a reason
+	// of its own (draft, unapproved, checks that must pass).
+	PRMergeBlocked PRMergeVerdict = "blocked"
+)
+
+// PRMergeState is a pull request's merge state, in the vocabulary
+// both platforms agree on.
+type PRMergeState struct {
+	// Number is the pull request's number in its repository.
+	Number int
+	// URL is the pull request's page on the platform.
+	URL string
+	// Head is the branch the pull request proposes to merge.
+	Head string
+	// Base is the branch the pull request merges into.
+	Base string
+	// State is the pull request's own state: open / closed / merged.
+	State string
+	// Verdict is the platform-neutral merge judgement.
+	Verdict PRMergeVerdict
+	// Raw is the platform's own word for the merge state
+	// (GitHub's "DIRTY", GitLab's "need_rebase"). It rides on the
+	// card only — the Data keys carry the normalised verdict.
+	Raw string
+}
+
+// normalizePRState maps a platform's pull request state word to the
+// cross-platform vocabulary: open / closed / merged. GitLab says
+// "opened" where GitHub says "open", and "locked" while a merge
+// train merges the request — a locked request is still live, so it
+// counts as open.
+func normalizePRState(state string) string {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "open", "opened", "locked":
+		return "open"
+	case "merged":
+		return "merged"
+	case "closed":
+		return "closed"
+	}
+	return strings.ToLower(strings.TrimSpace(state))
+}
+
+// prStateOrOpen normalises a platform's pull request state and
+// falls back to "open" when the platform named none — the same
+// default the pull request lookups use.
+func prStateOrOpen(state string) string {
+	if normalized := normalizePRState(state); normalized != "" {
+		return normalized
+	}
+	return "open"
+}
+
 // GitProvider is the abstract /gtw interface to a git hosting
 // platform's issue tracker. Production has two implementations
 // (GitHubProvider / GitLabProvider wrapping the user's local `gh`
@@ -407,12 +477,31 @@ type GitProvider interface {
 	// lookup failures is the warn-level log the runtime emits
 	// when applicable.
 	GetPR(ctx context.Context, owner, repo, head string) (*PR, error)
+
+	// GetPRMergeState reads the merge state the platform computed
+	// for the pull request (GitHub) / merge request (GitLab) with
+	// the given number.
+	//
+	// The platform computes the state asynchronously: GitHub's
+	// `mergeable` reads UNKNOWN until its background job is done,
+	// GitLab's `detailed_merge_status` reads "checking" for the
+	// same window. The caller sees that as PRMergeUnknown and
+	// decides whether to wait.
+	//
+	// Returns ErrPRNotFound when the platform says no pull request
+	// carries that number.
+	GetPRMergeState(ctx context.Context, owner, repo string, number int) (*PRMergeState, error)
 }
 
 // ErrIssueNotFound is returned by GetIssue when the platform
 // responds with 404 (or the glab/gh equivalent). Surfaces to the
 // user as "issue #N not found in <repo>".
 var ErrIssueNotFound = errors.New("gtw: issue not found")
+
+// ErrPRNotFound is returned by GetPRMergeState when the platform
+// says no pull request carries the requested number. Distinct from
+// ErrIssueNotFound: the number names a pull request, not an issue.
+var ErrPRNotFound = errors.New("gtw: no such pull request")
 
 // ErrRelationsUnsupported is returned by ListBlockedBy and
 // AddBlockedBy when the platform does not expose an issue relation
@@ -541,6 +630,23 @@ func isExecutableNotFound(err error) bool {
 	return false
 }
 
+// wrapCLINotInstalled translates a missing provider binary into
+// ErrCLINotInstalled with the install hint.
+//
+// It returns nil when the error is not about a missing binary, so
+// the caller falls through to its own wrapping. Every provider call
+// goes through it: one missing binary must read the same way
+// everywhere, whether the command asked for a pull request list, a
+// pull request view, or a new pull request.
+func wrapCLINotInstalled(err error, providerName string) error {
+	if !isExecutableNotFound(err) {
+		return nil
+	}
+	return fmt.Errorf("%w: %s — install via `brew install %s` or visit https://%s (%w)",
+		ErrCLINotInstalled, providerName, providerName,
+		providerCLIInstallURL(providerName), err)
+}
+
 // wrapCreatePRError is the SHARED, provider-agnostic fallback
 // for CreatePR error mapping. Provider-specific detection
 // (gh's "No commits between" / GraphQL validator messages,
@@ -569,10 +675,8 @@ func wrapCreatePRError(err error, stderr, providerName string) error {
 	if err == nil {
 		return nil
 	}
-	if isExecutableNotFound(err) {
-		return fmt.Errorf("%w: %s — install via `brew install %s` or visit https://%s (%w)",
-			ErrCLINotInstalled, providerName, providerName,
-			providerCLIInstallURL(providerName), err)
+	if wrapped := wrapCLINotInstalled(err, providerName); wrapped != nil {
+		return wrapped
 	}
 	trimmed := strings.TrimSpace(stderr)
 	// Generic cross-platform "already exists" fallback. Both gh
@@ -597,10 +701,8 @@ func wrapListPRError(err error, stderr, providerName string) error {
 	if err == nil {
 		return nil
 	}
-	if isExecutableNotFound(err) {
-		return fmt.Errorf("%w: %s — install via `brew install %s` or visit https://%s (%w)",
-			ErrCLINotInstalled, providerName, providerName,
-			providerCLIInstallURL(providerName), err)
+	if wrapped := wrapCLINotInstalled(err, providerName); wrapped != nil {
+		return wrapped
 	}
 	trimmed := strings.TrimSpace(stderr)
 	if trimmed != "" {
@@ -609,14 +711,29 @@ func wrapListPRError(err error, stderr, providerName string) error {
 	return fmt.Errorf("%s pr/mr list: %w", providerName, err)
 }
 
+// wrapPRMergeStateError is the GetPRMergeState error-mapping
+// helper. A missing binary becomes ErrCLINotInstalled with the
+// install hint; every other failure keeps the CLI's stderr.
+func wrapPRMergeStateError(err error, stderr, providerName string) error {
+	if err == nil {
+		return nil
+	}
+	if wrapped := wrapCLINotInstalled(err, providerName); wrapped != nil {
+		return wrapped
+	}
+	trimmed := strings.TrimSpace(stderr)
+	if trimmed != "" {
+		return fmt.Errorf("%s pr/mr view: %v: %s", providerName, err, trimmed)
+	}
+	return fmt.Errorf("%s pr/mr view: %w", providerName, err)
+}
+
 // wrapCreateIssueError maps CreateIssue failures: a missing CLI
 // becomes ErrCLINotInstalled with the install hint; everything
 // else keeps the CLI's stderr verbatim.
 func wrapCreateIssueError(err error, stderr, providerName string) error {
-	if isExecutableNotFound(err) {
-		return fmt.Errorf("%w: %s — install via `brew install %s` or visit https://%s (%w)",
-			ErrCLINotInstalled, providerName, providerName,
-			providerCLIInstallURL(providerName), err)
+	if wrapped := wrapCLINotInstalled(err, providerName); wrapped != nil {
+		return wrapped
 	}
 	if trimmed := strings.TrimSpace(stderr); trimmed != "" {
 		return fmt.Errorf("%s issue create: %v: %s", providerName, err, trimmed)
@@ -1890,6 +2007,118 @@ func (c *GitHubProvider) GetPR(ctx context.Context, owner, repo, head string) (*
 	return &PR{Number: row.Number, URL: row.URL, State: state}, nil
 }
 
+// GetPRMergeState runs `gh pr view <number> --json
+// number,url,state,mergeable,mergeStateStatus,baseRefName,headRefName
+// --repo <owner>/<repo>` and reads the merge state GitHub computed
+// for the pull request.
+//
+// gh asks GitHub's GraphQL API for the mergeability; the answer
+// arrives asynchronously, so a pull request whose state was never
+// computed reads mergeable=UNKNOWN / mergeStateStatus=UNKNOWN. That
+// is reported as PRMergeUnknown — the caller waits, the provider
+// does not.
+func (c *GitHubProvider) GetPRMergeState(ctx context.Context, owner, repo string, number int) (*PRMergeState, error) {
+	args := []string{
+		"pr", "view", strconv.Itoa(number),
+		"--json", "number,url,state,mergeable,mergeStateStatus,baseRefName,headRefName",
+		"--repo", owner + "/" + repo,
+	}
+	stdout, stderr, err := c.runner().Run(ctx, "gh", args...)
+	if err != nil {
+		if isGHPRNotFound(stderr) {
+			return nil, fmt.Errorf("%w: PR #%d in %s/%s", ErrPRNotFound, number, owner, repo)
+		}
+		return nil, wrapPRMergeStateError(err, stderr, "gh")
+	}
+	var raw struct {
+		Number           int    `json:"number"`
+		URL              string `json:"url"`
+		State            string `json:"state"`
+		Mergeable        string `json:"mergeable"`
+		MergeStateStatus string `json:"mergeStateStatus"`
+		BaseRefName      string `json:"baseRefName"`
+		HeadRefName      string `json:"headRefName"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &raw); err != nil {
+		return nil, fmt.Errorf("gh pr view %d: decode json: %w", number, err)
+	}
+	// The card shows the platform's own word. GitHub splits the
+	// judgement over two fields, so the state status is the word
+	// that names it; the mergeability is the fallback for a pull
+	// request whose state status GitHub left empty.
+	word := strings.TrimSpace(raw.MergeStateStatus)
+	if word == "" {
+		word = strings.TrimSpace(raw.Mergeable)
+	}
+	// The number the caller asked for is the authoritative one: a
+	// response that leaves it out still describes the pull request
+	// that was asked about.
+	if raw.Number == 0 {
+		raw.Number = number
+	}
+	return &PRMergeState{
+		Number:  raw.Number,
+		URL:     raw.URL,
+		Head:    raw.HeadRefName,
+		Base:    raw.BaseRefName,
+		State:   prStateOrOpen(raw.State),
+		Verdict: ghMergeVerdict(raw.Mergeable, raw.MergeStateStatus),
+		Raw:     word,
+	}, nil
+}
+
+// ghMergeVerdict maps GitHub's own merge words to the
+// platform-neutral verdict.
+//
+// The order matters: a pull request that is both dirty and behind
+// reports the conflict (that is what blocks the merge), and one the
+// platform has not computed yet reports unknown (that is what the
+// caller waits for) before either.
+//
+// UNSTABLE and HAS_HOOKS are mergeable, not blocked: GitHub reports
+// them next to mergeable=MERGEABLE, and both name a condition that
+// does not gate the merge — a check that did not pass, a workflow
+// still running on the head branch. A pull request the platform
+// itself refuses carries mergeable=CONFLICTING or a state status of
+// BLOCKED, and lands in the blocked branch below.
+func ghMergeVerdict(mergeable, mergeStateStatus string) PRMergeVerdict {
+	m := strings.ToUpper(strings.TrimSpace(mergeable))
+	s := strings.ToUpper(strings.TrimSpace(mergeStateStatus))
+	switch {
+	case m == "CONFLICTING" || s == "DIRTY":
+		return PRMergeConflicting
+	case m == "UNKNOWN" || s == "UNKNOWN":
+		return PRMergeUnknown
+	case s == "BEHIND":
+		return PRMergeBehind
+	case m == "MERGEABLE" && (s == "CLEAN" || s == "UNSTABLE" || s == "HAS_HOOKS" || s == ""):
+		return PRMergeMergeable
+	default:
+		// BLOCKED, DRAFT — and any word this build
+		// does not know: the platform stands in the way, and an
+		// unknown word is no reason to call the pull request
+		// mergeable.
+		return PRMergeBlocked
+	}
+}
+
+// isGHPRNotFound reports whether gh's stderr says the pull request
+// does not exist. gh reports a missing pull request as a GraphQL
+// resolution failure; a 404 shows up on GitHub Enterprise hosts
+// that answer the REST route instead.
+func isGHPRNotFound(stderr string) bool {
+	lower := strings.ToLower(stderr)
+	for _, s := range []string{
+		"could not resolve to a pullrequest",
+		"no pull requests found",
+	} {
+		if strings.Contains(lower, s) {
+			return true
+		}
+	}
+	return hasHTTPStatus(stderr, http.StatusNotFound)
+}
+
 // GitLabProvider wraps the `glab` CLI. Same auth delegation as gh.
 // host is set by Detect / NewProvider; version is populated from
 // /api/v4/version probe when Detect's Stage B succeeds.
@@ -2015,6 +2244,100 @@ func (c *GitLabProvider) GetPR(ctx context.Context, owner, repo, head string) (*
 		state = "open"
 	}
 	return &PR{Number: row.IID, URL: row.WebURL, State: state}, nil
+}
+
+// GetPRMergeState runs `glab api
+// "projects/<owner%2Frepo>/merge_requests/<iid>"` and reads the merge
+// state GitLab computed for the merge request.
+//
+// GitLab reports the judgement in `detailed_merge_status` since
+// 15.6; older instances only have the legacy `merge_status`. The
+// legacy word is read as the fallback, never as a second opinion:
+// a detailed status that is present wins.
+//
+// GitLab computes the state asynchronously too — the window before
+// the computation finishes reads "checking", which is reported as
+// PRMergeUnknown.
+func (c *GitLabProvider) GetPRMergeState(ctx context.Context, owner, repo string, number int) (*PRMergeState, error) {
+	projectPath := url.PathEscape(owner + "/" + repo)
+	path := fmt.Sprintf("projects/%s/merge_requests/%d", projectPath, number)
+	stdout, stderr, err := c.runner().Run(ctx, "glab", "api", path)
+	if err != nil {
+		if hasHTTPStatus(stderr, http.StatusNotFound) {
+			return nil, fmt.Errorf("%w: PR #%d in %s/%s", ErrPRNotFound, number, owner, repo)
+		}
+		return nil, wrapPRMergeStateError(err, stderr, "glab")
+	}
+	var raw struct {
+		IID                 int    `json:"iid"`
+		WebURL              string `json:"web_url"`
+		State               string `json:"state"`
+		SourceBranch        string `json:"source_branch"`
+		TargetBranch        string `json:"target_branch"`
+		MergeStatus         string `json:"merge_status"`
+		DetailedMergeStatus string `json:"detailed_merge_status"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &raw); err != nil {
+		return nil, fmt.Errorf("glab api %s: decode json: %w", path, err)
+	}
+	word := strings.TrimSpace(raw.DetailedMergeStatus)
+	if word == "" {
+		word = strings.TrimSpace(raw.MergeStatus)
+	}
+	// The number the caller asked for is the authoritative one: a
+	// response that leaves it out still describes the merge request
+	// that was asked about.
+	if raw.IID == 0 {
+		raw.IID = number
+	}
+	return &PRMergeState{
+		Number:  raw.IID,
+		URL:     raw.WebURL,
+		Head:    raw.SourceBranch,
+		Base:    raw.TargetBranch,
+		State:   prStateOrOpen(raw.State),
+		Verdict: gitlabMergeVerdict(raw.DetailedMergeStatus, raw.MergeStatus),
+		Raw:     word,
+	}, nil
+}
+
+// gitlabMergeVerdict maps GitLab's own merge words to the
+// platform-neutral verdict.
+//
+// The detailed status wins over the legacy one; the legacy word is
+// the fallback for an instance that predates the detailed status.
+// Both vocabularies land in the same table:
+//
+//	conflicts / cannot_be_merged          → conflicting
+//	checking / unchecked / cannot_be_merged_recheck → unknown
+//	need_rebase / diverged_commits         → behind
+//	mergeable / can_be_merged / ci_still_running → mergeable
+//	not_approved / ci_must_pass / draft_status / unknown word → blocked
+//
+// ci_still_running names a pipeline that is still running. GitLab
+// reports ci_must_pass when a required pipeline holds the merge
+// back, so a running pipeline is not what blocks it.
+func gitlabMergeVerdict(detailed, legacy string) PRMergeVerdict {
+	word := strings.ToLower(strings.TrimSpace(detailed))
+	if word == "" {
+		word = strings.ToLower(strings.TrimSpace(legacy))
+	}
+	switch word {
+	case "conflicts", "cannot_be_merged":
+		return PRMergeConflicting
+	case "checking", "unchecked", "cannot_be_merged_recheck":
+		return PRMergeUnknown
+	case "need_rebase", "diverged_commits":
+		return PRMergeBehind
+	case "mergeable", "can_be_merged", "ci_still_running":
+		return PRMergeMergeable
+	default:
+		// not_approved, ci_must_pass, draft_status — and any word
+		// this build does not know: GitLab stands in the way, and
+		// an unknown word is no reason to call the merge request
+		// mergeable.
+		return PRMergeBlocked
+	}
 }
 
 // Kind implements GitProvider.

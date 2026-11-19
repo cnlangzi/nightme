@@ -88,6 +88,9 @@ func TestResume_RunsTheStepAgain(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	waitPaused(t, svc, "obs-1")
+	// The run is taken before the command: a run that is over frees
+	// its chat, and the run of a chat that is over is gone.
+	r := activeRun(t, svc, "obs-1")
 
 	step, err := svc.Resume(context.Background(), "obs-1", "")
 	if err != nil {
@@ -100,7 +103,6 @@ func TestResume_RunsTheStepAgain(t *testing.T) {
 	// The step's command goes to the chat a second time.
 	waitSentCount(t, op, 2)
 
-	r := activeRun(t, svc, "obs-1")
 	waitForAction(t, r, wfe.ActionKindRun, "commit", 2)
 
 	// The budget of the step starts over before the retry.
@@ -152,15 +154,32 @@ func TestResume_CarriesTheNote(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	waitPaused(t, svc, "obs-1")
+	// The run is taken before the command: a run that is over frees
+	// its chat, and the run of a chat that is over is gone.
+	r := activeRun(t, svc, "obs-1")
 
 	if _, err := svc.Resume(context.Background(), "obs-1", "use the other branch"); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
 
-	r := activeRun(t, svc, "obs-1")
-	if !conversationCarries(r, "use the other branch") {
-		t.Error("the note did not join the conversation")
+	waitForNote(t, r, "use the other branch")
+}
+
+// waitForNote waits until the note of the operator joins the
+// conversation the chat model reads.
+//
+// The run applies the note in its own turn: the operator hands the
+// note over, and the run joins it to the conversation a moment later.
+func waitForNote(t *testing.T, r *run, text string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if conversationCarries(r, text) {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
+	t.Fatalf("the note %q did not join the conversation", text)
 }
 
 // TestTheOperatorActionIsInTheConversation — the model sees what the
@@ -213,6 +232,9 @@ func TestNext_SkipsTheStep(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	waitPaused(t, svc, "obs-1")
+	// The run is taken before the command: a run that is over frees
+	// its chat, and the run of a chat that is over is gone.
+	r := activeRun(t, svc, "obs-1")
 
 	step, err := svc.Next(context.Background(), "obs-1", "")
 	if err != nil {
@@ -222,7 +244,6 @@ func TestNext_SkipsTheStep(t *testing.T) {
 		t.Errorf("the command acted on %q, want commit", step)
 	}
 
-	r := activeRun(t, svc, "obs-1")
 	waitForAction(t, r, wfe.ActionKindRun, "commit", 2)
 
 	// The step is recorded as skipped: the facts it produced are kept
@@ -284,12 +305,14 @@ func TestNext_SkipsTheStepTheJudgmentIsAbout(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	waitPaused(t, svc, "obs-1")
+	// The run is taken before the command: a run that is over frees
+	// its chat, and the run of a chat that is over is gone.
+	r := activeRun(t, svc, "obs-1")
 
 	if _, err := svc.Next(context.Background(), "obs-1", ""); err != nil {
 		t.Fatalf("next: %v", err)
 	}
 
-	r := activeRun(t, svc, "obs-1")
 	waitSent(t, op, "/gtw push")
 
 	// The step that failed is the one that was skipped.
@@ -1224,6 +1247,9 @@ func TestTheCardOfAnAnsweredQuestionOffersNoChoice(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	waitAsked(t, op, "Which step should run next?")
+	// The choice follows the question: the run publishes it a moment
+	// later.
+	waitChoice(t, op)
 	choices := op.EmittedOf(messages.OutChoice)
 	if len(choices) != 1 {
 		t.Fatalf("the run published %d choices, want one", len(choices))
@@ -1722,10 +1748,7 @@ func TestTakeover_AReplyToTheQuestionIsNotATakeover(t *testing.T) {
 	if r == nil {
 		t.Fatal("the run is gone")
 	}
-	askID := r.askMsgID()
-	if askID == "" {
-		t.Fatal("the question has no message id")
-	}
+	askID := waitAskID(t, r)
 
 	// The person answers the question.
 	svc.Seen(&messages.InboundMessage{

@@ -43,6 +43,8 @@ func emptyStep(summary string) fakeStep {
 // attempt.
 type fakeSwitcher struct {
 	mu sync.Mutex
+	// gate holds the switches until the test opens it.
+	gate *gate
 	// current is the agent the chat works with now.
 	current string
 	// switched are the agents the chain switched to.
@@ -61,6 +63,12 @@ type fakeSwitcher struct {
 
 // SwitchAgent implements AgentSwitcher.
 func (f *fakeSwitcher) SwitchAgent(_ string, agent string) (func(), error) {
+	f.mu.Lock()
+	gate := f.gate
+	f.mu.Unlock()
+	if gate != nil {
+		gate.wait()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.err != nil {
@@ -117,13 +125,21 @@ func (f *fakeSwitcher) switchedCommands() []int {
 
 // chainService starts a service with a workflow whose step names a
 // chain of agents.
-func chainService(t *testing.T, body string, sw *fakeSwitcher) (*Service, *fakeOperator) {
+// chainService starts a service that runs a chain of agents.
+//
+// The gate, when there is one, holds the decisions of the service:
+// the decision model is the first thing a chain that breaks before it
+// speaks to the chat meets.
+func chainService(t *testing.T, body string, sw *fakeSwitcher, gates ...*gate) (*Service, *fakeOperator) {
 	t.Helper()
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "chain", body)
 
 	provider := &scriptedProvider{err: errors.New("the chat model must not be called")}
 	decider := &scriptedDecider{err: errors.New("the decision model must not be called")}
+	if len(gates) > 0 {
+		decider.gate = gates[0]
+	}
 	svc, op := testService(t, dir, Config{
 		Provider:      provider,
 		Decider:       decider,
@@ -178,12 +194,11 @@ jobs:
 `, nil)
 	op.steps = []fakeStep{brokenStep("omp broke"), okStep("claude did it")}
 
-	if _, _, err := svc.StartWorkflow(context.Background(), Request{
+	g := newGate()
+	op.gate = g
+	r := startRun(t, svc, g, Request{
 		Name: "chain", ChatID: "obs-1", Cwd: "/tmp/work",
-	}); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	r := activeRun(t, svc, "obs-1")
+	})
 	waitRun(t, svc, "obs-1")
 
 	sent := op.Sent()
@@ -221,12 +236,11 @@ jobs:
 `, nil)
 	op.steps = []fakeStep{cancelledStep("the run stopped"), okStep("never")}
 
-	if _, _, err := svc.StartWorkflow(context.Background(), Request{
+	g := newGate()
+	op.gate = g
+	r := startRun(t, svc, g, Request{
 		Name: "chain", ChatID: "obs-1", Cwd: "/tmp/work",
-	}); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	r := activeRun(t, svc, "obs-1")
+	})
 	waitRun(t, svc, "obs-1")
 
 	if sent := op.Sent(); len(sent) != 1 {
@@ -257,12 +271,11 @@ jobs:
 `, nil)
 	op.steps = []fakeStep{emptyStep("nothing to review"), okStep("never")}
 
-	if _, _, err := svc.StartWorkflow(context.Background(), Request{
+	g := newGate()
+	op.gate = g
+	r := startRun(t, svc, g, Request{
 		Name: "chain", ChatID: "obs-1", Cwd: "/tmp/work",
-	}); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	r := activeRun(t, svc, "obs-1")
+	})
 	waitRun(t, svc, "obs-1")
 
 	if sent := op.Sent(); len(sent) != 1 {
@@ -292,12 +305,11 @@ jobs:
 `, nil)
 	op.steps = []fakeStep{brokenStep("omp broke"), brokenStep("claude broke")}
 
-	if _, _, err := svc.StartWorkflow(context.Background(), Request{
+	g := newGate()
+	op.gate = g
+	r := startRun(t, svc, g, Request{
 		Name: "chain", ChatID: "obs-1", Cwd: "/tmp/work",
-	}); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	r := activeRun(t, svc, "obs-1")
+	})
 	waitRun(t, svc, "obs-1")
 
 	if sent := op.Sent(); len(sent) != 2 {
@@ -405,12 +417,11 @@ jobs:
 `, sw)
 	op.steps = []fakeStep{brokenStep("omp broke"), okStep("claude did it")}
 
-	if _, _, err := svc.StartWorkflow(context.Background(), Request{
+	g := newGate()
+	op.gate = g
+	r := startRun(t, svc, g, Request{
 		Name: "chain", ChatID: "obs-1", Cwd: "/tmp/work",
-	}); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	r := activeRun(t, svc, "obs-1")
+	})
 	waitRun(t, svc, "obs-1")
 
 	var runs []wfe.ActionRecord
@@ -510,6 +521,7 @@ jobs:
 // agent of the attempt is known when the step runs: a name that
 // resolves to nothing leaves the attempt no agent to work with.
 func TestStepChain_ANameThatResolvesToNothingBreaksTheAttempt(t *testing.T) {
+	g := newGate()
 	sw := &fakeSwitcher{current: "claude"}
 	svc, op := chainService(t, `title: chain
 jobs:
@@ -520,15 +532,13 @@ jobs:
         agents:
           - mode: use
             names: ["${{ steps.gone.outputs.data.agent }}"]
-`, sw)
+`, sw, g)
 	op.steps = []fakeStep{okStep("never")}
 
-	if _, _, err := svc.StartWorkflow(context.Background(), Request{
+	op.gate = g
+	r := startRun(t, svc, g, Request{
 		Name: "chain", ChatID: "obs-1", Cwd: "/tmp/work",
-	}); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	r := activeRun(t, svc, "obs-1")
+	})
 	waitRun(t, svc, "obs-1")
 
 	if sent := op.Sent(); len(sent) != 0 {
@@ -607,12 +617,11 @@ jobs:
 `, nil)
 	op.steps = []fakeStep{brokenStep("omp broke"), okStep("claude did it")}
 
-	if _, _, err := svc.StartWorkflow(context.Background(), Request{
+	g := newGate()
+	op.gate = g
+	r := startRun(t, svc, g, Request{
 		Name: "chain", ChatID: "obs-1", Cwd: "/tmp/work",
-	}); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	r := activeRun(t, svc, "obs-1")
+	})
 	waitRun(t, svc, "obs-1")
 
 	if used := stepUsage(r, "review"); used != 2 {
@@ -624,6 +633,7 @@ jobs:
 // command line, so the message has to be a command. The load-time
 // check sees the expression; the run sees what it became.
 func TestStepChain_TheArgsModeNeedsACommand(t *testing.T) {
+	g := newGate()
 	svc, op := chainService(t, `title: chain
 args:
   - name: cmd
@@ -636,15 +646,13 @@ jobs:
         agents:
           - mode: args
             names: [omp]
-`, nil)
+`, nil, g)
 	op.steps = []fakeStep{okStep("never")}
 
-	if _, _, err := svc.StartWorkflow(context.Background(), Request{
+	op.gate = g
+	r := startRun(t, svc, g, Request{
 		Name: "chain", ChatID: "obs-1", Cwd: "/tmp/work",
-	}); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	r := activeRun(t, svc, "obs-1")
+	})
 	waitRun(t, svc, "obs-1")
 
 	if sent := op.Sent(); len(sent) != 0 {

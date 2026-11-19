@@ -246,12 +246,12 @@ type run struct {
 	// thinkCount counts the turns the chat model took, and toolCount
 	// the tool calls the run made.
 	//
-	// The counts are taken before the run's events leave it: a chat
-	// that hides them does not change what the run did.
+	// The counts are taken before the run's events leave it: what the
+	// run did does not depend on what the chat shows. They go with the
+	// run's state, so a daemon that comes back knows what the run did.
 	thinkCount int
 	toolCount  int
-	// lastBeatAt is when the run last did something. The card shows
-	// it as the time of day.
+	// lastBeatAt is when the run last did something.
 	lastBeatAt time.Time
 	// commandMsgIDs holds the id of the chat message every step that
 	// sent a command became. The decision about a step hangs under
@@ -294,10 +294,10 @@ type run struct {
 	// questionCount is how many questions the run has asked. It names
 	// the question that is open.
 	questionCount int
-	// cardRefreshedAt is when the card was refreshed last. The
-	// snapshots of the command the run waits for refresh the card,
-	// and they are throttled.
-	cardRefreshedAt time.Time
+	// refreshedAt is when the run read its own facts last. The
+	// snapshots of the command the run waits for ask for them, and
+	// they are throttled.
+	refreshedAt time.Time
 	// summary is how the run ended.
 	summary string
 	// finished records that the model called the finish tool.
@@ -548,23 +548,6 @@ func (r *run) ended() bool {
 		return true
 	}
 	return false
-}
-
-// adoptRoundSession makes a session the live card of the round, if
-// the run is still in that round.
-//
-// The run moves between rounds on its own goroutine: a card that was
-// posted for a round the run has left is the record of that round, not
-// the card the run works on.
-func (r *run) adoptRoundSession(it iteration, sess *session) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	current := r.roundSession
-	if current == nil || current.job != it.job || current.round != it.round {
-		return false
-	}
-	r.roundSession = sess
-	return true
 }
 
 // roundIteration returns the round the run is in.
@@ -1022,18 +1005,18 @@ func (r *run) beat(now time.Time) {
 	r.mu.Unlock()
 }
 
-// takeCardRefresh reports whether the card may be refreshed now, and
-// remembers when it was.
+// takeRefresh reports whether the run may read its own facts now, and
+// remembers when it did.
 //
-// The throttle keeps a run from writing to the chat on every snapshot
-// of the command it waits for.
-func (r *run) takeCardRefresh(now time.Time) bool {
+// The throttle keeps a run from reading the repository on every
+// snapshot of the command it waits for.
+func (r *run) takeRefresh(now time.Time) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if !r.cardRefreshedAt.IsZero() && now.Sub(r.cardRefreshedAt) < cardRefreshInterval {
+	if !r.refreshedAt.IsZero() && now.Sub(r.refreshedAt) < refreshInterval {
 		return false
 	}
-	r.cardRefreshedAt = now
+	r.refreshedAt = now
 	return true
 }
 
@@ -1873,6 +1856,24 @@ func (r *run) setRoundSession(sess *session) {
 	r.mu.Unlock()
 }
 
+// stateAnchor returns the message the state of the run hangs under.
+//
+// The state lands where the operator is looking: the message that
+// asked for it, or the card of the round the run is in. A run that has
+// no round has the card it started from.
+func (r *run) stateAnchor(messageID string) string {
+	if messageID != "" {
+		return messageID
+	}
+	if sess := r.roundSessionRef(); sess != nil && sess.anchor != "" {
+		return sess.anchor
+	}
+	if sess := r.runSessionRef(); sess != nil {
+		return sess.anchor
+	}
+	return ""
+}
+
 // decisionSessionRef returns the session of the decision that is open.
 func (r *run) decisionSessionRef() *session {
 	r.mu.Lock()
@@ -2237,7 +2238,7 @@ func (s *Service) askUser(ctx context.Context, r *run, question string, options 
 			r.mu.Unlock()
 		}
 		s.persist(r)
-		s.refreshSessions(r)
+		s.refreshRun(r)
 	}
 	reply, err := r.awaitReply(ctx)
 	if err != nil {
@@ -2245,6 +2246,6 @@ func (s *Service) askUser(ctx context.Context, r *run, question string, options 
 	}
 	r.clearAsk()
 	r.setPhase(PhaseRunning)
-	s.refreshSessions(r)
+	s.refreshRun(r)
 	return reply, nil
 }

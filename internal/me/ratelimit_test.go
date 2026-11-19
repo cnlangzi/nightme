@@ -35,8 +35,14 @@ func TestARateLimitedAgentPausesTheRun(t *testing.T) {
 		t.Errorf("the pause reason is %q, want it to name the rate limit", st.PauseReason)
 	}
 	// The command is not run again.
-	if sent := op.Sent(); len(sent) != 1 {
-		t.Errorf("the chat got %v, want the command once", sent)
+	var commands []string
+	for _, text := range op.Sent() {
+		if !strings.HasPrefix(text, pauseMark) {
+			commands = append(commands, text)
+		}
+	}
+	if len(commands) != 1 {
+		t.Errorf("the chat got %v, want the command once", commands)
 	}
 }
 

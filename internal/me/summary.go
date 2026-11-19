@@ -2,8 +2,8 @@
 //
 // The record is the account of the session: it says what the run did,
 // what went wrong and what the models decided. It is a card of its
-// own — the run is over, and its live card is no longer the record of
-// it.
+// own — the run is over, and the card it worked on is no longer the
+// record of it.
 package me
 
 import (

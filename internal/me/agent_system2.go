@@ -78,7 +78,6 @@ func (s *Service) system2(ctx context.Context, r *run) (bool, error) {
 	// The turn is counted before the run's events leave it: a chat
 	// that hides them does not change what the run did.
 	r.countThink(s.now())
-	s.publishHeartbeat(ctx, r)
 	r.recordWake(wakeRecord{
 		Who:   decisionChat,
 		What:  toolCallsLine(resp.Message.ToolCalls()),
@@ -89,9 +88,7 @@ func (s *Service) system2(ctx context.Context, r *run) (bool, error) {
 	// The model's own words are the decision's own: they go on the
 	// decision's card, where the operator reads them.
 	s.recordReply(ctx, r, resp.Message.Text())
-	// The decision's card changed: the checklist follows the run's
-	// progress.
-	s.refreshSessions(r)
+	s.refreshRun(r)
 
 	calls := resp.Message.ToolCalls()
 	if len(calls) == 0 {
@@ -103,7 +100,7 @@ func (s *Service) system2(ctx context.Context, r *run) (bool, error) {
 		// again has to see what it just said.
 		r.appendMessage(resp.Message)
 		s.chargeStall(r, "the chat model answered without a tool call")
-		s.refreshSessions(r)
+		s.refreshRun(r)
 		return false, nil
 	}
 
@@ -130,9 +127,9 @@ func (s *Service) askModel(ctx context.Context, r *run, req llm.Request) (*llm.R
 	turnCtx, cancelTurn := context.WithTimeout(execCtx, maxAgentTurn)
 	defer cancelTurn()
 
-	s.refreshSessions(r)
+	s.refreshRun(r)
 	defer func() {
-		s.refreshSessions(r)
+		s.refreshRun(r)
 	}()
 
 	resp, err := s.cfg.Provider.Complete(turnCtx, req)

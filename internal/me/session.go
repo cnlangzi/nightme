@@ -9,6 +9,11 @@
 // is the message that started the run, and the chat folds the run's
 // entries into the card it already holds for that message.
 //
+// The state of the run is no session the run keeps: it borrows the
+// identity of the round it describes, hangs under the message the
+// operator is looking at, and the run forgets it as soon as it is
+// published.
+//
 // The package speaks the standard outbound vocabulary
 // (internal/messages), and the chat renders it. The blocks the run
 // publishes itself — the overview of the run and the block that names
@@ -84,20 +89,12 @@ type session struct {
 // run goes on, and the session's events fall back to the chat's
 // orphan handling.
 func (s *Service) openSession(ctx context.Context, r *run, kind sessionKind, id, job string, round int, replyTo string) *session {
-	return s.openSessionBody(ctx, r, kind, id, job, round, replyTo, placeholderLine(kind, job, round))
-}
-
-// openSessionBody posts the card of a session with a body of its own.
-//
-// The body is the one line the card carries until the session's own
-// events fill it.
-func (s *Service) openSessionBody(ctx context.Context, r *run, kind sessionKind, id, job string, round int, replyTo, body string) *session {
 	sess := &session{kind: kind, id: id, job: job, round: round}
 	if s.cfg.Operator == nil {
 		return sess
 	}
 	cardID, err := s.cfg.Operator.PostCard(ctx, r.chatID, channel.CardSpec{
-		Body:    body,
+		Body:    placeholderLine(kind, job, round),
 		ReplyTo: replyTo,
 	})
 	if err != nil {
@@ -125,14 +122,6 @@ func placeholderLine(kind sessionKind, job string, round int) string {
 	default:
 		return "the run is starting…"
 	}
-}
-
-// stateLine is the one line the state card carries.
-//
-// The card shows the state of the round: it does not start the round,
-// and the line says so.
-func stateLine(job string, round int) string {
-	return fmt.Sprintf("%s · round %d — the state of the run", job, round)
 }
 
 // ownedSessions returns every session of the run that posted its own
@@ -190,8 +179,8 @@ func (s *Service) adoptSessionCards(r *run) {
 // and the chat folds the entries into that one.
 //
 // The session carries the plan of the run and nothing else: what the
-// run is stays the same from the start to the end, and the live state
-// of the work is on the card of the round.
+// run is stays the same from the start to the end, and the state of the
+// work is published on its own.
 func (s *Service) openRunSession(ctx context.Context, r *run, anchor string) {
 	sess := &session{kind: sessionRun, id: r.id, anchor: anchor}
 	if anchor == "" {
@@ -203,30 +192,14 @@ func (s *Service) openRunSession(ctx context.Context, r *run, anchor string) {
 	s.publishReply(ctx, r, sess, r.runCard())
 }
 
-// showRunCard posts the plan of the run as a card of its own.
-//
-// The card is for the operator who wants the plan back in front of
-// them. The run goes on with the card it has: the card the chat holds
-// for the message that started the run keeps the run's verdict.
-//
-// It reports whether the chat took the card.
-func (s *Service) showRunCard(ctx context.Context, r *run) bool {
-	sess := s.openSession(ctx, r, sessionRun, r.id, "", 0, "")
-	if sess.anchor == "" {
-		// The chat refused the card: the run goes on with the card it
-		// has.
-		return false
-	}
-	s.publishInit(ctx, r, sess)
-	s.publishReply(ctx, r, sess, r.runCard())
-	return true
-}
-
 // openRoundSession opens the session of a job round.
 //
 // The card hangs under the message that started the run: the round is
 // the run's work, one level below it. The card carries the tree of the
-// rounds of the run and the steps of the round as its checklist.
+// rounds of the run and the steps of the round as its checklist — the
+// checklist as it was when the round started. The card is a snapshot:
+// the run does not write to it again, unless a state of the run is
+// published on it.
 func (s *Service) openRoundSession(ctx context.Context, r *run, it iteration) {
 	replyTo := ""
 	if runSess := r.runSessionRef(); runSess != nil {
@@ -244,61 +217,34 @@ func (s *Service) openRoundSession(ctx context.Context, r *run, it iteration) {
 	s.publishTasks(ctx, r, sess, r.roundTasks(it.job, it.round))
 }
 
-// openRoundStateCard posts the state card of the round the run is in
-// and makes it the round's live card.
+// showState publishes the state of the run under the given anchor.
 //
-// The card hangs at the top of the chat: the operator asked for the
-// state where they are looking. It carries the phase line, the tree of
-// the rounds, the checklist of the round and the heartbeat, and the
-// run goes on with it: the round is not started over, so its counters
-// and its start time stay what they were.
+// The state is a snapshot: the phase line of the run, the tree of the
+// rounds and the checklist of the round the run is in. A run that has
+// not entered a round yet has no round state to show: only the phase
+// line is published.
 //
-// The run moves between rounds on its own goroutine: the card takes the
-// place of the round's card only while the run is still in that round.
-// A card posted for a round the run has left stays in the chat as a
-// card of its own, and the round keeps the card it had.
-//
-// It returns nil when the run has no round: there is no round state to
-// show.
-func (s *Service) openRoundStateCard(ctx context.Context, r *run) *session {
-	it, ok := r.roundIteration()
-	if !ok {
-		return nil
+// The state hangs under the message the operator is looking at — the
+// message that asked for it, or the card of the round — and it takes no
+// card over. The session it hangs under is used and thrown away: the
+// run does not remember it, and a daemon that comes back does not hold
+// it.
+func (s *Service) showState(ctx context.Context, r *run, anchor string) {
+	it, inRound := r.roundIteration()
+	sess := &session{kind: sessionRun, id: r.id, anchor: anchor}
+	if inRound {
+		sess.kind = sessionRound
+		sess.id = roundIdentity(it)
+		sess.job = it.job
+		sess.round = it.round
 	}
-	card := s.openSessionBody(ctx, r, sessionRound, roundIdentity(it), it.job, it.round, "", stateLine(it.job, it.round))
-	if card.anchor == "" {
-		// The chat refused the card: the run keeps the live card it
-		// has, and the run goes on.
-		return nil
+	s.publishInit(ctx, r, sess)
+	s.publishReply(ctx, r, sess, r.phaseLine())
+	if !inRound {
+		return
 	}
-	if !r.adoptRoundSession(it, card) {
-		// The run has left that round while the card was posted: the
-		// card says nothing the round does not already say, and the
-		// run goes on with the card it has.
-		return card
-	}
-	r.rememberRoundSession(it, card)
-	r.setGitStatus(s.gitStatus(r))
-	s.publishInit(ctx, r, card)
-	s.publishReply(ctx, r, card, r.phaseLine())
-	s.publishReply(ctx, r, card, r.roundsTree(it))
-	s.publishTasks(ctx, r, card, r.roundTasks(it.job, it.round))
-	s.publishHeartbeatTo(ctx, r, card)
-	return card
-}
-
-// showState posts the state of the run in the chat.
-//
-// The state card carries the state of the round the run is in. A run
-// that has not entered a round yet has no round state to show: the
-// overview of the run is posted instead.
-//
-// It reports whether a card was posted.
-func (s *Service) showState(ctx context.Context, r *run) bool {
-	if _, ok := r.roundIteration(); !ok {
-		return s.showRunCard(ctx, r)
-	}
-	return s.openRoundStateCard(ctx, r) != nil
+	s.publishReply(ctx, r, sess, r.roundsTree(it))
+	s.publishTasks(ctx, r, sess, r.roundTasks(it.job, it.round))
 }
 
 // openDecisionSession opens the session of a decision.
@@ -506,19 +452,6 @@ func (r *run) roundOutcome(job string, round int) wfe.Outcome {
 	return wfe.Outcome{Status: wfe.OutcomeUnknown}
 }
 
-// recordStepOutcome publishes the outcome of a step.
-//
-// The row of the step carries the outcome: the checklist of the round
-// is the state of the round, and an entry per step would say the same
-// thing a second time.
-func (s *Service) recordStepOutcome(ctx context.Context, r *run) {
-	sess := r.roundSessionRef()
-	if sess == nil {
-		return
-	}
-	s.publishTasks(ctx, r, sess, r.roundTasks(sess.job, sess.round))
-}
-
 // roundIdentity renders the name of a job round.
 func roundIdentity(it iteration) string {
 	return fmt.Sprintf("%s · round %d", it.job, it.round)
@@ -583,38 +516,6 @@ func (s *Service) publishResult(ctx context.Context, r *run, sess *session, verd
 		// not a message of its own.
 		Result:        &agent.AgentResultEvent{},
 		SessionResult: verdict,
-	})
-}
-
-// publishHeartbeat publishes what the run did so far.
-//
-// The counters ride in the header of the round's card: how many turns
-// the chat model took, how many tool calls the run made and when it
-// last did something. The card of the run is static, so it carries
-// none.
-func (s *Service) publishHeartbeat(ctx context.Context, r *run) {
-	s.publishHeartbeatTo(ctx, r, r.roundSessionRef())
-}
-
-// publishHeartbeatTo publishes what the run did so far to a card.
-//
-// The card is named: a card that is not the live card of the round
-// carries the counters of the run all the same.
-func (s *Service) publishHeartbeatTo(ctx context.Context, r *run, sess *session) {
-	if sess == nil {
-		return
-	}
-	r.mu.Lock()
-	snap := messages.HeartbeatSnapshot{
-		ThinkCount: r.thinkCount,
-		ToolCount:  r.toolCount,
-		LastBeatAt: r.lastBeatAt,
-		Status:     messages.HeartbeatRunning,
-	}
-	r.mu.Unlock()
-	s.emit(ctx, r, sess, messages.OutboundMessage{
-		Kind:      messages.OutHeartbeat,
-		Heartbeat: &snap,
 	})
 }
 

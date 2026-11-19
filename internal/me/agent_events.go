@@ -36,13 +36,13 @@ import (
 // text.
 const maxEventLine = 300
 
-// cardRefreshInterval is how long the run waits between two card
-// updates of its own.
+// refreshInterval is how long the run waits between two readings of
+// its own facts.
 //
 // The snapshots of the command the run waits for come at the pace of
-// that command: without a throttle the card would be written on
+// that command: without a throttle the repository would be read on
 // every line the command produces.
-const cardRefreshInterval = 5 * time.Second
+const refreshInterval = 5 * time.Second
 
 // emit publishes an outbound message for a session.
 //
@@ -112,32 +112,20 @@ func (s *Service) recordReply(ctx context.Context, r *run, text string) {
 	s.publishReply(ctx, r, sess, strings.TrimSpace(reply))
 }
 
-// countToolCall records a tool call the run made.
+// refreshRun refreshes what the run knows about itself.
 //
-// The count is taken before the call leaves the run: a chat that
-// hides the run's tool calls does not change what the run did.
-func (s *Service) countToolCall(ctx context.Context, r *run) {
-	r.countTool(s.now())
-	s.publishHeartbeat(ctx, r)
-}
-
-// refreshSessions republishes the state of the round the run is in.
-//
-// The checklist of the round follows the run's progress: a step that
-// ran shows up on the card of the round it belongs to.
-func (s *Service) refreshSessions(r *run) {
+// The repository facts of the workspace ride in the footer of the
+// messages the run publishes, and they go stale: the run reads them
+// again from time to time. The refresh is throttled: the run does not
+// read the repository on every line the command it waits for
+// produces.
+func (s *Service) refreshRun(r *run) {
 	now := s.now()
-	if !r.takeCardRefresh(now) {
+	if !r.takeRefresh(now) {
 		return
 	}
 	r.beat(now)
-	ctx := context.WithoutCancel(r.ctx)
 	r.setGitStatus(s.gitStatus(r))
-	s.publishHeartbeat(ctx, r)
-	sess := r.roundSessionRef()
-	if sess != nil {
-		s.publishTasks(ctx, r, sess, r.roundTasks(sess.job, sess.round))
-	}
 }
 
 // publishToolStart publishes a tool call that is about to run.

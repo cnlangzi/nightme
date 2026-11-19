@@ -752,7 +752,7 @@ key — is reported in `nightme logs` and left out. The daemon still starts, and
 | `/me resume [note]` | Runs the step the run is on again. Its budget for the current round starts over. The note is your instruction. |
 | `/me next [note]` | Skips the step the run is on: the plan goes on with the workflow, and the facts the step produced are kept. The note is your instruction. |
 | `/me stop` | Cancels the run and leaves the record of the session in the chat. The work the chat agent does on its own goes on to its end. |
-| `/me status` | Shows the state of the run again: a new card of the round the run is in carries the phase of the run, the tree of the rounds, the checklist of the round and the counters of the run in its header. |
+| `/me status` | Shows the state of the run again: the state hangs under the `/me status` message and carries the phase of the run, the tree of the rounds and the checklist of the round. |
 
 The arguments of `/me start` fill the workflow's declared arguments: a positional
 token fills the next argument that is still unassigned, in declaration order, and
@@ -794,14 +794,12 @@ by one, and the judgment the models made at the wake-ups. It is posted once the
 run has unwound, and it carries no buttons: the run is over. A run that ends by
 itself leaves a record too.
 
-The card is the run's receipt. Its first line is a live header — how many turns the
-chat model took, how many tool calls the run made, when it last did something —
-and the card carries the decision the run made last and the run's own words. The
-run's tool calls leave the card and appear in the chat as a `● call` /
-`⎿ result` pair, the way a coding agent's are. The chat's `/tools` setting gates
-them exactly as it gates a coding agent's: the pairs stay hidden until the chat
-turns them on with `/tools on`. `/think` does not apply to the run: its words are
-on the card, not in a thinking card of their own.
+The card is the run's receipt. It carries the decision the run made last and the
+run's own words. The run's tool calls leave the card and appear in the chat as a
+`● call` / `⎿ result` pair, the way a coding agent's are. The chat's `/tools`
+setting gates them exactly as it gates a coding agent's: the pairs stay hidden
+until the chat turns them on with `/tools on`. `/think` does not apply to the
+run: its words are on the card, not in a thinking card of their own.
 
 Two channels can be driven this way: Feishu and Telegram. On any other channel
 `/me start` says so and refuses.

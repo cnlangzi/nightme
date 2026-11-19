@@ -46,7 +46,7 @@ func TestPause_DoesNotInterruptTheRunningStep(t *testing.T) {
 	}
 	waitSent(t, op, "/gtw commit")
 
-	if err := svc.Pause(context.Background(), "obs-1"); err != nil {
+	if err := svc.Pause(context.Background(), "obs-1", "om_pause"); err != nil {
 		t.Fatalf("pause: %v", err)
 	}
 	// The step that was running is not interrupted.
@@ -92,7 +92,7 @@ func TestResume_RunsTheStepAgain(t *testing.T) {
 	// its chat, and the run of a chat that is over is gone.
 	r := activeRun(t, svc, "obs-1")
 
-	step, err := svc.Resume(context.Background(), "obs-1", "")
+	step, err := svc.Resume(context.Background(), "obs-1", "", "")
 	if err != nil {
 		t.Fatalf("resume: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestResume_CarriesTheNote(t *testing.T) {
 	// its chat, and the run of a chat that is over is gone.
 	r := activeRun(t, svc, "obs-1")
 
-	if _, err := svc.Resume(context.Background(), "obs-1", "use the other branch"); err != nil {
+	if _, err := svc.Resume(context.Background(), "obs-1", "", "use the other branch"); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
 
@@ -200,7 +200,7 @@ func TestTheOperatorActionIsInTheConversation(t *testing.T) {
 	waitPaused(t, svc, "obs-1")
 
 	r := activeRun(t, svc, "obs-1")
-	if _, err := svc.Next(context.Background(), "obs-1", ""); err != nil {
+	if _, err := svc.Next(context.Background(), "obs-1", "", ""); err != nil {
 		t.Fatalf("next: %v", err)
 	}
 	waitForAction(t, r, wfe.ActionKindRun, "commit", 2)
@@ -236,7 +236,7 @@ func TestNext_SkipsTheStep(t *testing.T) {
 	// its chat, and the run of a chat that is over is gone.
 	r := activeRun(t, svc, "obs-1")
 
-	step, err := svc.Next(context.Background(), "obs-1", "")
+	step, err := svc.Next(context.Background(), "obs-1", "", "")
 	if err != nil {
 		t.Fatalf("next: %v", err)
 	}
@@ -309,7 +309,7 @@ func TestNext_SkipsTheStepTheJudgmentIsAbout(t *testing.T) {
 	// its chat, and the run of a chat that is over is gone.
 	r := activeRun(t, svc, "obs-1")
 
-	if _, err := svc.Next(context.Background(), "obs-1", ""); err != nil {
+	if _, err := svc.Next(context.Background(), "obs-1", "", ""); err != nil {
 		t.Fatalf("next: %v", err)
 	}
 
@@ -396,7 +396,7 @@ func TestResume_AfterATakeoverRunsTheBrokenStepAgain(t *testing.T) {
 
 	// The run is on the step that broke: the operator's word runs it
 	// again.
-	step, err := svc.Resume(context.Background(), "obs-1", "")
+	step, err := svc.Resume(context.Background(), "obs-1", "", "")
 	if err != nil {
 		t.Fatalf("resume: %v", err)
 	}
@@ -558,7 +558,7 @@ func TestTheCommandsRefuseARunThatIsNotWaiting(t *testing.T) {
 	waitSent(t, op, "/gtw commit")
 
 	// The run is working: it is not paused.
-	_, err := svc.Resume(context.Background(), "obs-1", "")
+	_, err := svc.Resume(context.Background(), "obs-1", "", "")
 	if err == nil {
 		t.Fatal("the run was resumed although it is working")
 	}
@@ -570,7 +570,7 @@ func TestTheCommandsRefuseARunThatIsNotWaiting(t *testing.T) {
 	}
 
 	// A chat without a run has nothing to act on.
-	_, err = svc.Next(context.Background(), "obs-2", "")
+	_, err = svc.Next(context.Background(), "obs-2", "", "")
 	if err == nil {
 		t.Fatal("a chat without a run was skipped")
 	}
@@ -605,8 +605,8 @@ func TestTheCommandsRefuseARunThatIsAsking(t *testing.T) {
 		name string
 		call func() (string, error)
 	}{
-		{"resume", func() (string, error) { return svc.Resume(context.Background(), "obs-1", "") }},
-		{"next", func() (string, error) { return svc.Next(context.Background(), "obs-1", "") }},
+		{"resume", func() (string, error) { return svc.Resume(context.Background(), "obs-1", "", "") }},
+		{"next", func() (string, error) { return svc.Next(context.Background(), "obs-1", "", "") }},
 	} {
 		_, err := cmd.call()
 		if err == nil {
@@ -657,7 +657,7 @@ func TestTheDirectiveSurvivesARestart(t *testing.T) {
 		t.Fatalf("shutdown: %v", err)
 	}
 
-	if _, err := svc.Resume(context.Background(), "obs-1", ""); err != nil {
+	if _, err := svc.Resume(context.Background(), "obs-1", "", ""); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
 
@@ -700,10 +700,10 @@ func TestResume_CancelsAPauseThatHasNotTakenEffect(t *testing.T) {
 	}
 	waitSent(t, op, "/gtw commit")
 
-	if err := svc.Pause(context.Background(), "obs-1"); err != nil {
+	if err := svc.Pause(context.Background(), "obs-1", "om_pause"); err != nil {
 		t.Fatalf("pause: %v", err)
 	}
-	if _, err := svc.Resume(context.Background(), "obs-1", ""); err != nil {
+	if _, err := svc.Resume(context.Background(), "obs-1", "", ""); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
 
@@ -741,10 +741,10 @@ func TestNext_RefusesAStepThatIsStillRunning(t *testing.T) {
 	}
 	waitSent(t, op, "/gtw commit")
 
-	if err := svc.Pause(context.Background(), "obs-1"); err != nil {
+	if err := svc.Pause(context.Background(), "obs-1", "om_pause"); err != nil {
 		t.Fatalf("pause: %v", err)
 	}
-	_, err := svc.Next(context.Background(), "obs-1", "")
+	_, err := svc.Next(context.Background(), "obs-1", "", "")
 	if err == nil {
 		t.Fatal("a step that is still running was skipped")
 	}
@@ -773,7 +773,7 @@ func TestTheRoundCardShowsASkippedStep(t *testing.T) {
 	waitPaused(t, svc, "obs-1")
 
 	r := activeRun(t, svc, "obs-1")
-	if _, err := svc.Next(context.Background(), "obs-1", ""); err != nil {
+	if _, err := svc.Next(context.Background(), "obs-1", "", ""); err != nil {
 		t.Fatalf("next: %v", err)
 	}
 	waitForAction(t, r, wfe.ActionKindRun, "commit", 2)

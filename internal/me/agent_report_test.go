@@ -505,8 +505,7 @@ func TestTheConversation_HoldsNoHints(t *testing.T) {
 	provider := &scriptedProvider{responses: []llm.Response{
 		{Message: toolCallMsg("c1", toolFinish, map[string]any{"status": "failed", "summary": "stopped"})},
 	}}
-	// The model waits until the test has the run: the run deletes
-	// itself when it ends.
+	// The model waits until the test is done with it.
 	provider.block = make(chan struct{})
 	decider := &scriptedDecider{answers: []llm.DecisionResponse{
 		decisionResp("jev-1.14", "/gtw commit", 0.2, 0.8),
@@ -514,18 +513,13 @@ func TestTheConversation_HoldsNoHints(t *testing.T) {
 	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
 	op.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}}}
 
-	runID, err := svc.StartWorkflow(context.Background(), Request{
+	// The chat waits until the test has the run: the run deletes
+	// itself when it ends.
+	g := newGate()
+	op.gate = g
+	r := startRun(t, svc, g, Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	})
-	if err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	svc.mu.Lock()
-	r := svc.runs[runID]
-	svc.mu.Unlock()
-	if r == nil {
-		t.Fatal("the run is not registered")
-	}
 	close(provider.block)
 	waitRun(t, svc, "obs-1")
 
@@ -550,8 +544,7 @@ func TestTheConversation_TheSyntheticCallHasTheNewShape(t *testing.T) {
 	provider := &scriptedProvider{responses: []llm.Response{
 		{Message: toolCallMsg("c1", toolFinish, map[string]any{"status": "failed", "summary": "stopped"})},
 	}}
-	// The model waits until the test has the run: the run deletes
-	// itself when it ends.
+	// The model waits until the test is done with it.
 	provider.block = make(chan struct{})
 	decider := &scriptedDecider{answers: []llm.DecisionResponse{
 		decisionResp("jev-1.14", "/gtw commit", 0.95, 0),
@@ -559,19 +552,15 @@ func TestTheConversation_TheSyntheticCallHasTheNewShape(t *testing.T) {
 	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
 	op.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}}}
 
-	runID, err := svc.StartWorkflow(context.Background(), Request{
+	// The chat waits until the test has the run: the run deletes
+	// itself when it ends.
+	g := newGate()
+	op.gate = g
+	r := startRun(t, svc, g, Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	})
-	if err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	svc.mu.Lock()
-	r := svc.runs[runID]
-	svc.mu.Unlock()
+	close(provider.block)
 	waitRun(t, svc, "obs-1")
-	if r == nil {
-		t.Fatal("the run is not registered")
-	}
 
 	found := false
 	for _, m := range r.conversation() {

@@ -760,6 +760,10 @@ func TestClient_HostStreamDispatch(t *testing.T) {
 	waitFor(t, 2*time.Second, func() bool {
 		return mock.muxConnectCount.Load() > 0
 	})
+	// The connection says nothing about the host stream: the client
+	// opens that stream after the connection is up, and the mock only
+	// knows the stream once the open frame reached it.
+	mock.waitForHostStream(t)
 
 	// Inject a host/session-added frame (no sessionId on host stream).
 	mock.pushHostFrame(t, "host/session-added", "rpc-h-1", map[string]any{
@@ -866,6 +870,20 @@ func (m *mockDSH) waitForSessionStream(t *testing.T, sessionID string) {
 	waitFor(t, 2*time.Second, func() bool {
 		m.streamsMu.RLock()
 		_, ok := m.sessionToStream[sessionID]
+		m.streamsMu.RUnlock()
+		return ok
+	})
+}
+
+// waitForHostStream waits until the host stream is open on the mock.
+//
+// The client opens the host stream after the mux connection is up, so
+// the connection alone says nothing about the stream being ready.
+func (m *mockDSH) waitForHostStream(t *testing.T) {
+	t.Helper()
+	waitFor(t, 2*time.Second, func() bool {
+		m.streamsMu.RLock()
+		_, ok := m.streams["host-$events"]
 		m.streamsMu.RUnlock()
 		return ok
 	})

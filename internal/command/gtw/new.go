@@ -103,9 +103,10 @@ func isYesFlag(token string) bool {
 // prompt into the chat's CURRENT agent session — not a one-shot
 // agent like /gtw commit or /gtw pr — because the discussion only
 // exists in that session's context. The agent either asks its
-// blocking questions or writes the chat's draft files and shows
-// them in chat. The command returns as soon as the prompt is
-// queued; it never waits on the agent.
+// blocking questions or writes the chat's draft files; nightme
+// renders the drafts into the chat when the turn ends. The command
+// returns as soon as the prompt is queued; it never waits on the
+// agent.
 //
 // Previous drafts of this chat are removed first so that a run
 // ending in questions cannot leave older documents behind for
@@ -122,6 +123,7 @@ func RunNewDraft(
 	ctx context.Context,
 	cs *chatsession.ChatSession,
 	deps HandlerDeps,
+	mgr *Manager,
 	chatID, messageID string,
 	cfg Config,
 	material string,
@@ -161,6 +163,13 @@ func RunNewDraft(
 			fmt.Sprintf("❌ prepare issue drafts: %v", err),
 			command.FailedOutcome("error", "the draft directory could not be prepared")), nil
 	}
+
+	// Arm the draft watcher as the last step before the dispatch:
+	// the subscription must be in place before the turn that writes
+	// the drafts can end, and arming only after every precheck
+	// passed keeps a failed run from replacing the previous
+	// watcher.
+	mgr.armDrafts(ctx, cs, chatID, draftDir)
 
 	lang := resolveLanguage(ctx, cfg, cwd, deps.Git)
 	blocks := []agent.ContentBlock{{Type: agent.ContentText, Text: renderNewIssuePrompt(draftDir, lang, material)}}
@@ -733,7 +742,10 @@ Draft directory (absolute path):
 
 Write each issue as its own file in that directory, named 01.md, 02.md, ... in the order they are built. That order is also dependency order: an issue another issue depends on gets the lower number. Most discussions produce a single issue, 01.md. Apart from the NN.created records described below, the directory holds exactly the current drafts and nothing else.
 
-The user reviews the drafts in chat; when they approve, they run /gtw new -y and nightme creates one issue per draft, in file order. Do NOT run gh / glab or create issues yourself. Do NOT modify any file outside the draft directory.
+The user reviews the drafts once they are written; when they approve, they run /gtw new -y and nightme creates one issue per draft, in file order. Do NOT run gh / glab or create issues yourself. Do NOT modify any file outside the draft directory.
+
+nightme shows the drafts to the user in the chat when your turn ends — the draft files are
+the deliverable.
 
 Each time nightme creates an issue it replaces NN.md with NN.created, whose first line is "#<issue number> <title>". You are not told when this happens, so list the directory before every rewrite. An NN.created file means that issue already exists: never write, edit, or delete NN.created, never write NN.md again for it, and keep referring to it as {{ISSUE:NN}}. If the user asks to change an issue that already exists, tell them to edit it on the platform instead.
 
@@ -744,15 +756,15 @@ Each time nightme creates an issue it replaces NN.md with NN.created, whose firs
 - Never invent requirements, decisions, numbers, interfaces, or file paths. When completeness forces you to add something the discussion did not state, mark it inline with [inferred].
 
 ## Workflow
-1. Extract (do not print). List every meaningful point of the discussion as an atomic, verifiable statement, typed as: GOAL, REQUIREMENT, CONSTRAINT, DECISION (with rationale), REJECTED (with reason), EDGE CASE, INTERFACE (API, data shape, config key, command, path), NON-GOAL, OPEN QUESTION, TERM. Note for each whether it is final, superseded (by which point), or uncertain.
-2. Reconcile (do not print). For conflicting points, the later and more explicit statement wins. If a later remark was casual and contradicts an explicit earlier decision, do not decide — turn it into an open question. A superseded DECISION becomes REJECTED and keeps its reason. Also list implicit assumptions you had to make and the information a developer would ask for before starting. Decide whether the work is one issue or several, following "One issue or several" below.
+1. Extract. List every meaningful point of the discussion as an atomic, verifiable statement, typed as: GOAL, REQUIREMENT, CONSTRAINT, DECISION (with rationale), REJECTED (with reason), EDGE CASE, INTERFACE (API, data shape, config key, command, path), NON-GOAL, OPEN QUESTION, TERM. Note for each whether it is final, superseded (by which point), or uncertain.
+2. Reconcile. For conflicting points, the later and more explicit statement wins. If a later remark was casual and contradicts an explicit earlier decision, do not decide — turn it into an open question. A superseded DECISION becomes REJECTED and keeps its reason. Also list implicit assumptions you had to make and the information a developer would ask for before starting. Decide whether the work is one issue or several, following "One issue or several" below.
 3. Confirm. Ask now if step 2 produced questions whose answers change scope, behavior, interfaces, or acceptance criteria, or if you recommend splitting the work into several issues and the user has not agreed to that split yet. Ask in one chat message, numbered, each question with your recommended default and a one-line reason; a proposed split lists each issue with its title, a one-line scope, and why it counts as done even if the other issues are never implemented. Then STOP — do not write any draft in this turn, and end with: "Answer the questions above and I will write the drafts."
    When the user answers — in a later message, or by running /gtw new again — use those answers, do not ask again, and continue with step 4. Questions that do not block implementation are not asked — they go under "Open Questions". If nothing is blocking, continue.
 4. Write the draft files following the template below, one file per issue.
-5. Review every draft against the conversation and fix it before finishing: requirements, constraints, or edge cases that were agreed but are missing from every draft; statements that differ from what was agreed; content with no basis in the discussion and no [inferred] mark; rejected options appearing anywhere except "Decisions"; items a developer could not act on (missing parameters, ambiguous interfaces, unverifiable acceptance criteria); every {{ISSUE:NN}} points at a lower file number. When one points forward, renumber so the referenced issue comes first, or drop the reference.
-6. Show the drafts: print the complete content of every draft file in chat, verbatim, in file order, each preceded by its file name, then end with: "Reply with changes, or run /gtw new -y to create the issues."
+5. Review every draft file against the conversation and fix the file before finishing: requirements, constraints, or edge cases that were agreed but are missing from every draft; statements that differ from what was agreed; content with no basis in the discussion and no [inferred] mark; rejected options appearing anywhere except "Decisions"; items a developer could not act on (missing parameters, ambiguous interfaces, unverifiable acceptance criteria); every {{ISSUE:NN}} points at a lower file number. When one points forward, renumber so the referenced issue comes first, or drop the reference.
+6. Reply with one line naming the files you wrote, e.g. "Drafts written: 01, 02", then end with: "Reply with changes, or run /gtw new -y to create the issues."
 
-If the user asks for changes later in this conversation — including splitting or merging issues — rewrite the draft files so the directory holds exactly the current set of drafts not yet created, delete the drafts of issues that are no longer wanted, then show the complete content of every remaining draft again the same way. Give a new issue a number no file in the directory uses.
+If the user asks for changes later in this conversation — including splitting or merging issues — rewrite the draft files so the directory holds exactly the current set of drafts not yet created, delete the drafts of issues that are no longer wanted, then reply with the names of the files you wrote and end with: "Reply with changes, or run /gtw new -y to create the issues." Give a new issue a number no file in the directory uses.
 
 ## One issue or several
 One issue is the default. An issue is the whole change one pull request delivers: the code together with its tests, documentation, configuration, and migration. A large issue is fine — its Implementation Plan carries the steps.

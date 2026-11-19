@@ -123,11 +123,22 @@ func TestRenderNewIssuePrompt(t *testing.T) {
 		"must point to a lower-numbered draft of this set",
 		"A reference is a dependency: the referenced issue must land before this one does. Name another issue in prose when it is not a prerequisite.",
 		"every {{ISSUE:NN}} points at a lower file number",
-		"print the complete content of every draft file in chat",
+		"nightme shows the drafts to the user in the chat",
+		`6. Reply with one line naming the files you wrote, e.g. "Drafts written: 01, 02"`,
+		`then reply with the names of the files you wrote and end with: "Reply with changes, or run /gtw new -y to create the issues."`,
 		"run /gtw new -y to create the issues",
 	} {
 		if !strings.Contains(p, want) {
 			t.Errorf("prompt missing %q", want)
+		}
+	}
+	for _, stale := range []string{
+		"print the complete content of every draft file in chat",
+		"show the complete content of every remaining draft",
+		"(do not print)",
+	} {
+		if strings.Contains(p, stale) {
+			t.Errorf("prompt contains wording R13 removed: %q", stale)
 		}
 	}
 }

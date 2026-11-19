@@ -187,15 +187,11 @@ func TestSystem2_ANoopStepIsNotAToolError(t *testing.T) {
 	svc, op := testService(t, dir, Config{Provider: provider})
 	op.steps = []fakeStep{pendingStep("still going"), {outcome: messages.Outcome{Status: messages.OutcomeNoop, Summary: "nothing to commit"}}}
 
-	runID, err := svc.StartWorkflow(context.Background(), Request{
+	g := newGate()
+	op.gate = g
+	r := startRun(t, svc, g, Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	})
-	if err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	svc.mu.Lock()
-	r := svc.runs[runID]
-	svc.mu.Unlock()
 	waitRun(t, svc, "obs-1")
 
 	if provider.Calls() == 0 {
@@ -228,15 +224,11 @@ func TestSystem2_TextOnlyReplyKeepsTheRunGoing(t *testing.T) {
 	svc, op := testService(t, dir, Config{Provider: provider})
 	op.steps = []fakeStep{pendingStep("still going")}
 
-	runID, err := svc.StartWorkflow(context.Background(), Request{
+	g := newGate()
+	op.gate = g
+	r := startRun(t, svc, g, Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
 	})
-	if err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	svc.mu.Lock()
-	r := svc.runs[runID]
-	svc.mu.Unlock()
 	waitCalls(t, provider, 2)
 
 	// The run is still going: it did not end as a failure.
@@ -314,7 +306,9 @@ func TestRun_HasNoTurnCap(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitRun(t, svc, "obs-1")
+	// A hundred steps are a hundred turns of the run: the wait is longer
+	// than the wait of a run with one step.
+	waitRunFor(t, svc, "obs-1", 2*time.Minute)
 
 	sent := op.Sent()
 	for i := 1; i <= steps; i++ {
@@ -362,15 +356,11 @@ jobs:
 	if err := svc.Start(context.Background()); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	runID, err := svc.StartWorkflow(context.Background(), Request{
+	g := newGate()
+	op.gate = g
+	r := startRun(t, svc, g, Request{
 		Name: "two", ChatID: "obs-1", Cwd: "/tmp/work",
 	})
-	if err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	svc.mu.Lock()
-	r := svc.runs[runID]
-	svc.mu.Unlock()
 	waitRun(t, svc, "obs-1")
 
 	// The run keeps the transcript of its command: the compaction is
@@ -543,7 +533,12 @@ func TestRestart_ResolvesAnInFlightCommandAsInterrupted(t *testing.T) {
 
 	// The daemon restarts with a fresh tracker: the execution of the
 	// in-flight command is gone.
-	restarted, _ := testService(t, dir, Config{Provider: provider})
+	//
+	// The chat of the new daemon waits at the gate: the run it picks up
+	// is gone as soon as it ends, and the test looks at it.
+	g := newGate()
+	t.Cleanup(g.open)
+	restarted, _ := testServiceGated(t, dir, Config{Provider: provider}, g)
 	restarted.mu.Lock()
 	var restored *run
 	for _, r := range restarted.runs {
@@ -553,6 +548,7 @@ func TestRestart_ResolvesAnInFlightCommandAsInterrupted(t *testing.T) {
 	if restored == nil {
 		t.Fatal("the run was not resumed")
 	}
+	g.open()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		restored.mu.Lock()

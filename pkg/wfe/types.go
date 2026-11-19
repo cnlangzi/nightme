@@ -28,9 +28,9 @@ type Workflow struct {
 	// reads and what the agent is given.
 	Title string `yaml:"title" json:"title"`
 	// Name is the workflow's identity: the path of the bundle it was
-	// loaded from under the workflows directory. "nightme/coder" is the
-	// workflow "nightme/coder". The loader sets it; the file does not
-	// carry it.
+	// loaded from under the workflows directory.
+	// "nightme/coder/workflow.yml" is the workflow "nightme/coder".
+	// The loader sets it; the file does not carry it.
 	Name       string         `yaml:"-" json:"name"`
 	Args       []Arg          `yaml:"args" json:"args,omitempty"`
 	Instruct   bool           `yaml:"instruct" json:"instruct"`

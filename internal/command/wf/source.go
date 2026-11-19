@@ -28,13 +28,8 @@ import (
 const (
 	hubRepo   = "nightme-dev/workflows"
 	hubBranch = "main"
-	hubPath   = "workflows/%s/%s/workflow.yml"
+	hubPath   = "workflows/%s/%s/" + wfe.WorkflowFileName
 )
-
-// workflowFileName is the name the hub publishes a workflow under. It
-// is the name the install writes it under too: the workflow file of
-// the bundle.
-const workflowFileName = "workflow.yml"
 
 // Address is the address of a published workflow: <owner>/<name>.
 type Address struct {

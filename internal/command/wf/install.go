@@ -274,7 +274,7 @@ func (f *Factory) fetch(ctx context.Context, src Source, addr Address, list *che
 // tree has the shape of the published one and the workflow's name
 // keeps the address it was published with.
 func (f *Factory) pathFor(addr Address) string {
-	return pathutil.Join(f.dir, addr.Owner, addr.Name, workflowFileName)
+	return pathutil.Join(f.bundleFor(addr), wfe.WorkflowFileName)
 }
 
 // bundleFor returns the directory the workflow of addr is installed

@@ -146,10 +146,16 @@ func WorkflowPaths(dir string) ([]string, error) {
 	return out, nil
 }
 
+// WorkflowFileName is the name a bundle's workflow file carries.
+//
+// It is the name the hub publishes a workflow under, and the name the
+// install writes it under.
+const WorkflowFileName = "workflow.yml"
+
 // workflowFiles are the names a bundle's workflow file can have.
 var workflowFiles = map[string]bool{
-	"workflow.yml":  true,
-	"workflow.yaml": true,
+	WorkflowFileName: true,
+	"workflow.yaml":  true,
 }
 
 // isWorkflowFile reports whether name is the name of a bundle's
@@ -164,14 +170,27 @@ func isWorkflowFile(name string) bool {
 // A file that lies directly in root is not in a bundle: the workflows
 // directory is not a bundle.
 func isBundleDir(root, path string) bool {
-	rel, err := filepath.Rel(root, filepath.Dir(path))
+	rel, ok := bundleRel(root, filepath.Dir(path))
+	return ok && underRoot(rel)
+}
+
+// bundleRel returns the path of the bundle directory dir relative to
+// root, with "/" as the separator.
+//
+// ok is false when the two cannot be related — different volumes, for
+// example.
+func bundleRel(root, dir string) (string, bool) {
+	rel, err := filepath.Rel(root, dir)
 	if err != nil {
-		return false
+		return "", false
 	}
-	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return false
-	}
-	return true
+	return filepath.ToSlash(rel), true
+}
+
+// underRoot reports whether rel names a directory under root: not
+// root itself, and not outside it.
+func underRoot(rel string) bool {
+	return rel != "." && rel != ".." && !strings.HasPrefix(rel, "../")
 }
 
 // IsReservedDir reports whether name is a reserved directory of the
@@ -238,17 +257,18 @@ func WorkflowName(root, path string) string {
 	if strings.TrimSpace(root) == "" {
 		root = filepath.Dir(bundle)
 	}
-	rel, err := filepath.Rel(root, bundle)
-	if err != nil {
+	rel, ok := bundleRel(root, bundle)
+	if !ok {
+		// The bundle and the root are not related: the file keeps the
+		// name of its bundle.
 		return filepath.Base(bundle)
 	}
-	rel = filepath.ToSlash(rel)
 	switch {
 	case rel == ".":
 		// The file sits in the root itself: it is not in a bundle, so
 		// it has no name.
 		return ""
-	case rel == ".." || strings.HasPrefix(rel, "../"):
+	case !underRoot(rel):
 		// The file is not under the root: it has no path-relative
 		// name, so it keeps the name of its bundle.
 		return filepath.Base(bundle)
@@ -264,12 +284,14 @@ func WorkflowName(root, path string) string {
 // carry it.
 func LoadFile(root, path string) (*Workflow, error) {
 	base := filepath.Base(path)
+	// The file is refused before it is read: a file that is not a
+	// bundle's workflow file is not a workflow, whatever it holds.
+	if !isWorkflowFile(base) {
+		return nil, fmt.Errorf("wfe: %s: not a workflow file: a workflow is a bundle directory holding a workflow.yml", base)
+	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("wfe: %s: %w", base, err)
-	}
-	if !isWorkflowFile(base) {
-		return nil, fmt.Errorf("wfe: %s: not a workflow file: a workflow is a bundle directory holding a workflow.yml", base)
 	}
 	name := WorkflowName(root, path)
 	if name == "" {

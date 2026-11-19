@@ -456,7 +456,8 @@ func newWorkflowValidateCmd() *cobra.Command {
 			"With no argument it validates the workflows dir. With arguments " +
 			"it validates the files and the directories it is given; a " +
 			"directory contributes the workflow.yml of every bundle under " +
-			"it. An argument " +
+			"it, and a file that is named is checked for its content. An " +
+			"argument " +
 			"that is not a path on disk is looked up as a workflow name, so " +
 			"`nightme workflow validate nightme/coder` validates the file " +
 			"of that name. The exit code " +

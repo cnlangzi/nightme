@@ -6,9 +6,12 @@
 //	nightme workflow validate [path...] # check the workflows and report what is wrong
 //
 // Workflows are read from the workflows dir (default
-// `~/.nightme/workflows/`). The CLI is self-contained — it does
-// not require the daemon to be running, and it does not actually
-// trigger an agent (the daemon does that through internal/me).
+// `~/.nightme/workflows/`). A workflow is a bundle: a directory under
+// the workflows dir that holds a `workflow.yml`, and the bundle's path
+// under that dir is the workflow's name. The CLI is self-contained —
+// it does not require the daemon to be running, and it does not
+// actually trigger an agent (the daemon does that through
+// internal/me).
 //
 // `nightme workflow run` is a dry-run: it parses the workflow,
 // builds a plan (what the steps are, in what order) and prints it.
@@ -90,11 +93,12 @@ func newWorkflowListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List configured workflows",
-		Long: "list reads every *.yaml and *.yml under the workflows dir " +
-			"and prints a summary table. A workflow's name is its path " +
-			"under the workflows dir without the extension: fix.yml is the " +
-			"workflow fix, nightme/coder.yml is the workflow nightme/coder. " +
-			"The files that did not load are reported below the " +
+		Long: "list reads every bundle under the workflows dir and prints a " +
+			"summary table. A workflow is a bundle: a directory under the " +
+			"workflows dir that holds a workflow.yml. A workflow's name is " +
+			"the path of its bundle under the workflows dir: fix/workflow.yml " +
+			"is the workflow fix, nightme/coder/workflow.yml is the workflow " +
+			"nightme/coder. The files that did not load are reported below the " +
 			"table. The --json flag swaps the table for a JSON array (one " +
 			"element per workflow); the failures go to stderr, so the " +
 			"output stays machine-readable.",
@@ -157,7 +161,7 @@ func printWorkflowList(w io.Writer, wfs []*wfe.Workflow, failures []wfe.Failure,
 	}
 	if len(wfs) == 0 && len(failures) == 0 {
 		fmt.Fprintf(w, "\nno workflows found in %s\n", dir)
-		fmt.Fprintf(w, "hint: create a *.yaml or *.yml file there, or set $NIGHTME_WORKFLOWS_DIR\n")
+		fmt.Fprintf(w, "hint: create a <name>/workflow.yml bundle there, or set $NIGHTME_WORKFLOWS_DIR\n")
 	}
 	return nil
 }
@@ -223,7 +227,8 @@ func newWorkflowShowCmd() *cobra.Command {
 		Short: "Show one workflow's parsed details",
 		Long: "show prints the full workflow details: triggers, jobs, steps, " +
 			"and effective agent resolution. The name is the path of the " +
-			"workflow's file under the workflows dir without the extension. " +
+			"workflow's bundle under the workflows dir: the directory that " +
+			"holds its workflow.yml. " +
 			"The --json flag emits the raw parsed " +
 			"Workflow struct.",
 		Args: cobra.ExactArgs(1),
@@ -356,6 +361,8 @@ func newWorkflowRunCmd() *cobra.Command {
 			"plan. It does NOT actually execute anything — a workflow is " +
 			"started by a person, with /me start <name> in a chat. Use " +
 			"this to verify the step ordering before relying on the real run.\n\n" +
+			"The name is the path of the workflow's bundle under the " +
+			"workflows dir: the directory that holds its workflow.yml.\n\n" +
 			"--workspace overrides one of the workflow's workspaces " +
 			"(defaults to the first one). A workflow that declares no " +
 			"workspace works where the chat works.",
@@ -448,7 +455,8 @@ func newWorkflowValidateCmd() *cobra.Command {
 			"workflow is valid prints nothing.\n\n" +
 			"With no argument it validates the workflows dir. With arguments " +
 			"it validates the files and the directories it is given; a " +
-			"directory contributes its *.yaml and *.yml files. An argument " +
+			"directory contributes the workflow.yml of every bundle under " +
+			"it. An argument " +
 			"that is not a path on disk is looked up as a workflow name, so " +
 			"`nightme workflow validate nightme/coder` validates the file " +
 			"of that name. The exit code " +
@@ -476,7 +484,7 @@ func newWorkflowValidateCmd() *cobra.Command {
 //
 // An argument that is not a path on disk is looked up as a workflow
 // name: the workflows directory holds the workflows, and a name is
-// the path of a workflow under it. An argument that is neither is
+// the path of a bundle under it. An argument that is neither is
 // reported as a path that does not exist.
 func runWorkflowValidate(out io.Writer, errOut io.Writer, args []string, asJSON bool) error {
 	dir, dirErr := workflowsDir()

@@ -495,10 +495,11 @@ Issue titles stay English/ASCII — the branch name is derived from them.
 
 A **workflow** is a YAML file that says what to do and how far to go. It is the
 only automation artifact: the same file is the plan the agent follows and the
-bound it may not cross. Workflows live under `~/.nightme/workflows/`, and a
-workflow's name is its path under that directory without the extension:
-`fix-issue.yaml` is the workflow `fix-issue`, `nightme/coder.yml` is the
-workflow `nightme/coder`.
+bound it may not cross. A workflow is a bundle: a directory under
+`~/.nightme/workflows/` that holds a `workflow.yml`. A workflow's name is the
+path of its bundle under that directory: `fix-issue/workflow.yml` is the
+workflow `fix-issue`, `nightme/coder/workflow.yml` is the workflow
+`nightme/coder`.
 
 The agent — `/me` — runs a workflow in the chat you start it from. Every command
 is a real message with a real id, and every command reports a structured
@@ -522,21 +523,22 @@ outcome, so the agent decides the next step from facts instead of from prose.
 `/wf install [-f] <owner>/<name>` fetches a published workflow and installs it
 into the workflows directory, where the personal agent finds it. The address is
 the workflow's name: `/wf install nightme/coder` writes
-`~/.nightme/workflows/nightme/coder.yml`, and `/me start nightme/coder` runs
-it.
+`~/.nightme/workflows/nightme/coder/workflow.yml`, and `/me start
+nightme/coder` runs it.
 
 The install is shown as a checklist of three rows — the download, the
 validation, the write — and the rows update as the install goes. The
 downloaded file is checked before it is written, and a file that did not
-change is not rewritten.
+change is not rewritten. The path the rows report is home-relative and uses
+forward slashes, so it reads the same on every operating system.
 
 A workflow that is already installed is skipped: the hub is not asked and the
 local file is left alone. `-f` (`--force`) installs it again and writes over
 the local file.
 
 `/wf uninstall <owner>/<name>` takes an installed workflow away again: the
-file is removed, and the owner directory goes with it when nothing else is
-left in it.
+bundle directory and every file under it are removed, and the owner directory
+goes with it when nothing else is left in it.
 
 ### Write a workflow
 
@@ -587,9 +589,10 @@ jobs:
         note: 修复做完后回到主仓库目录 —— 下一轮的 fix 必须从 main 开始，worktree 里不允许开下一个 fix（/gtw fix 会报 already_active）。
 ```
 
-Deploy it by writing the file to `~/.nightme/workflows/fix-issue.yaml`:
-`/me start fix-issue` runs it. A file that does not load is reported against
-its own name, and the workflows beside it keep working.
+Deploy it by writing the file to
+`~/.nightme/workflows/fix-issue/workflow.yml`: `/me start fix-issue` runs it. A
+file that does not load is reported against its own name, and the workflows
+beside it keep working.
 
 The guard on the steps after `fix` reads `data.issue`: a fix that picked an
 issue reports `issue` in its outcome, a fix that found nothing does not — so
@@ -899,8 +902,8 @@ here; the `/me` subcommands — `/me start` · `/me reply` · `/me pause` ·
 | `/review [-a\|--agent <agent>] [-g\|--global] [--unset] [-c\|--continue] [--abort] [-t\|--timeout <dur>]` | Review the current branch against the default branch (PR mode); findings are injected back into this chat. The review's verdict line is followed by a digest of the findings — one table per severity, one row per finding, naming what kind of finding it is and where it is — on the card, whatever `/think` says; the findings' text itself stays in the thread (`/think` on) and in the main agent's answer (`/think` off, the default). `--agent` runs the review with a specific agent; `-g` also stores it as the global `review.agent` in `~/.nightme/config.yaml`; `--unset` removes that global setting. `-c` resumes the groups of the last review in this chat that failed, by reopening their agent sessions and sending them "continue". `--abort` stops the review running in this chat — its agent sessions are closed and the stopped groups stay resumable with `-c`. `--timeout` bounds how long a subagent may stay silent (default 15m; `0` disables it): a subagent that says nothing for that long is closed, reported as timed out, and stays resumable with `-c`. The threshold comes from the flag, else from `review.timeout` in `~/.nightme/config.yaml`, else from the default. The review run itself has no time limit: it runs until the user aborts it or the daemon shuts down. |
 | `/wiki init [--modules] [--llmstxt] [--arch]` | Read the codebase, design modules, and write per-module wiki files — the repo wiki as a project asset. |
 | `/queue <message>` | Append `<message>` to the queue as a standalone Prompt. |
-| `/wf install [-f] <owner>/<name>` | Install a published workflow into the workflows directory. The address is the workflow's name: `nightme/coder` is installed as `~/.nightme/workflows/nightme/coder.yml` and is started with `/me start nightme/coder`. The install is shown as a checklist — the download, the validation, the write. An address that is already installed is skipped; `-f` installs it again. |
-| `/wf uninstall <owner>/<name>` | Remove an installed workflow. The file is removed, and the owner directory goes with it when nothing else is left in it. |
+| `/wf install [-f] <owner>/<name>` | Install a published workflow into the workflows directory. The address is the workflow's name: `nightme/coder` is installed as `~/.nightme/workflows/nightme/coder/workflow.yml` and is started with `/me start nightme/coder`. The install is shown as a checklist — the download, the validation, the write. An address that is already installed is skipped; `-f` installs it again. |
+| `/wf uninstall <owner>/<name>` | Remove an installed workflow. The bundle directory and every file under it are removed, and the owner directory goes with it when nothing else is left in it. |
 | `/help` | List every slash command in-chat. |
 
 `!cmd` runs shell commands directly in the chat's CWD — see

@@ -22,6 +22,9 @@ func TestWorkflowList_NoWorkflows(t *testing.T) {
 	if !strings.Contains(out, dir) {
 		t.Errorf("output = %q, want to mention dir %s", out, dir)
 	}
+	if !strings.Contains(out, "<name>/workflow.yml") {
+		t.Errorf("output = %q, want the hint to name a bundle", out)
+	}
 }
 
 // TestWorkflowList_OneWorkflow exercises the happy path: write
@@ -38,9 +41,7 @@ jobs:
   main:
     steps: [{id: s, message: /review}]
 `
-	if err := os.WriteFile(filepath.Join(dir, "reviewer.yaml"), []byte(yaml), 0644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	writeBundle(t, dir, "reviewer", yaml)
 	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
 
 	out := captureStdout(t, func() error {
@@ -73,9 +74,7 @@ jobs:
         use: notify
         with: { channel: feishu, target: oc_xxx, message: hi }
 `
-	if err := os.WriteFile(filepath.Join(dir, "reviewer.yaml"), []byte(yaml), 0644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	writeBundle(t, dir, "reviewer", yaml)
 	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
 
 	out := captureStdout(t, func() error {
@@ -107,9 +106,7 @@ jobs:
       - id: rest
         wait: 5m
 `
-	if err := os.WriteFile(filepath.Join(dir, "reviewer.yaml"), []byte(yaml), 0644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	writeBundle(t, dir, "reviewer", yaml)
 	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
 
 	out := captureStdout(t, func() error {
@@ -158,9 +155,7 @@ jobs:
       - id: s2
         message: "do thing"
 `
-	if err := os.WriteFile(filepath.Join(dir, "reviewer.yaml"), []byte(yaml), 0644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	writeBundle(t, dir, "reviewer", yaml)
 	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
 
 	out := captureStdout(t, func() error {
@@ -192,9 +187,7 @@ jobs:
       - id: s1
         message: /review
 `
-	if err := os.WriteFile(filepath.Join(dir, "reviewer.yaml"), []byte(yaml), 0644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	writeBundle(t, dir, "reviewer", yaml)
 	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
 
 	out := captureStdout(t, func() error {
@@ -228,12 +221,8 @@ jobs:
       - id: s1
         message: /gtw commit
 `
-	if err := os.WriteFile(filepath.Join(dir, "reviewer.yaml"), []byte(broken), 0644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "ship.yml"), []byte(good), 0644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	writeBundle(t, dir, "reviewer", broken)
+	writeBundle(t, dir, "ship", good)
 	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
 
 	out := captureStdout(t, func() error {
@@ -242,7 +231,7 @@ jobs:
 	if !strings.Contains(out, "ship") {
 		t.Errorf("output = %q, want the workflow that loaded", out)
 	}
-	if !strings.Contains(out, "reviewer.yaml") {
+	if !strings.Contains(out, "reviewer could not be loaded") {
 		t.Errorf("output = %q, want the file that did not load", out)
 	}
 	if !strings.Contains(out, "exactly one of message / shell / use / wait must be set") {
@@ -250,17 +239,14 @@ jobs:
 	}
 }
 
-// TestWorkflowList_ReadsBothExtensionsAndTheTitle — a workflow is a
-// *.yaml or a *.yml file, its name is its path under the workflows
-// dir and the list shows its title.
-func TestWorkflowList_ReadsBothExtensionsAndTheTitle(t *testing.T) {
+// TestWorkflowList_ReadsTheBundlesAndTheTitle — a workflow is a
+// bundle, its name is the path of the bundle under the workflows dir
+// and the list shows its title.
+func TestWorkflowList_ReadsTheBundlesAndTheTitle(t *testing.T) {
 	dir := t.TempDir()
-	for _, name := range []string{"fix.yaml", "other.yml"} {
-		body := "title: do the thing\njobs:\n  main:\n    steps: [{message: hi}]\n"
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0644); err != nil {
-			t.Fatalf("write: %v", err)
-		}
-	}
+	body := "title: do the thing\njobs:\n  main:\n    steps: [{message: hi}]\n"
+	writeBundle(t, dir, "fix", body)
+	writeBundleFile(t, dir, "other", "workflow.yaml", body)
 	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
 
 	out := captureStdout(t, func() error {
@@ -273,9 +259,9 @@ func TestWorkflowList_ReadsBothExtensionsAndTheTitle(t *testing.T) {
 	}
 }
 
-// TestWorkflowShow_FindsAWorkflowByItsFileName — the name of a
-// workflow is its path under the workflows dir.
-func TestWorkflowShow_FindsAWorkflowByItsFileName(t *testing.T) {
+// TestWorkflowShow_FindsAWorkflowByItsBundlePath — the name of a
+// workflow is the path of its bundle under the workflows dir.
+func TestWorkflowShow_FindsAWorkflowByItsBundlePath(t *testing.T) {
 	dir := t.TempDir()
 	body := `
 title: review the changes
@@ -285,9 +271,7 @@ jobs:
       - id: s1
         message: /review
 `
-	if err := os.WriteFile(filepath.Join(dir, "reviewer.yml"), []byte(body), 0644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	writeBundle(t, dir, "reviewer", body)
 	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
 
 	out := captureStdout(t, func() error {
@@ -297,6 +281,49 @@ jobs:
 		if !strings.Contains(out, want) {
 			t.Errorf("output = %q, want %q", out, want)
 		}
+	}
+}
+
+// TestWorkflowShow_FindsAWorkflowUnderANestedBundle — the name of a
+// workflow is the path of its bundle under the workflows dir.
+func TestWorkflowShow_FindsAWorkflowUnderANestedBundle(t *testing.T) {
+	dir := t.TempDir()
+	body := `
+title: code it
+jobs:
+  main:
+    steps:
+      - id: s1
+        message: /review
+`
+	writeBundle(t, dir, "nightme/coder", body)
+	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
+
+	out := captureStdout(t, func() error {
+		return runRoot("workflow", "show", "nightme/coder")
+	})
+	for _, want := range []string{"name:       nightme/coder", "title:      code it"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output = %q, want %q", out, want)
+		}
+	}
+}
+
+// TestWorkflowList_AFlatFileIsNoWorkflow — a file that lies in the
+// workflows dir is not a workflow: only a bundle is.
+func TestWorkflowList_AFlatFileIsNoWorkflow(t *testing.T) {
+	dir := t.TempDir()
+	body := "title: do the thing\njobs:\n  main:\n    steps: [{message: hi}]\n"
+	if err := os.WriteFile(filepath.Join(dir, "fix.yml"), []byte(body), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
+
+	out := captureStdout(t, func() error {
+		return runRoot("workflow", "list")
+	})
+	if !strings.Contains(out, "no workflows found") {
+		t.Errorf("output = %q, want the flat file to be no workflow", out)
 	}
 }
 
@@ -343,9 +370,7 @@ jobs:
       - id: s1
         run: echo
 `
-	if err := os.WriteFile(filepath.Join(dir, "reviewer.yaml"), []byte(body), 0644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	writeBundle(t, dir, "reviewer", body)
 	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
 
 	out := captureStdout(t, func() error {
@@ -354,7 +379,7 @@ jobs:
 	if strings.Contains(out, "no workflows found") {
 		t.Errorf("output = %q, want the failure of the file", out)
 	}
-	if !strings.Contains(out, "reviewer.yaml") {
+	if !strings.Contains(out, "reviewer could not be loaded") {
 		t.Errorf("output = %q, want the file that did not load", out)
 	}
 }
@@ -365,12 +390,8 @@ func TestWorkflowShow_ReportsTheClashOfTwoFiles(t *testing.T) {
 	dir := t.TempDir()
 	good := "title: one\njobs:\n  main:\n    steps: [{message: hi}]\n"
 	broken := "goal: no title\njobs:\n  main:\n    steps: [{message: hi}]\n"
-	if err := os.WriteFile(filepath.Join(dir, "fix.yaml"), []byte(good), 0644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "fix.yml"), []byte(broken), 0644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	writeBundle(t, dir, "fix", good)
+	writeBundleFile(t, dir, "fix", "workflow.yaml", broken)
 	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
 
 	err := runRoot("workflow", "show", "fix")

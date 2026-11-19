@@ -20,9 +20,10 @@ func noModels() Config {
 	}
 }
 
-// TestStartWorkflow_TheNameIsTheFileName — a workflow's identity is
-// its path under the workflows dir: the run and its state carry it.
-func TestStartWorkflow_TheNameIsTheFileName(t *testing.T) {
+// TestStartWorkflow_TheNameIsTheBundle — a workflow's identity is the
+// path of its bundle under the workflows dir: the run and its state
+// carry it.
+func TestStartWorkflow_TheNameIsTheBundle(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "fix", `title: do the thing
 jobs:
@@ -160,8 +161,8 @@ jobs:
 	if err == nil {
 		t.Fatal("the broken workflow was accepted")
 	}
-	if !strings.Contains(err.Error(), "broken.yaml could not be loaded") {
-		t.Errorf("error = %v, want the failure of the file", err)
+	if !strings.Contains(err.Error(), "broken could not be loaded") {
+		t.Errorf("error = %v, want the failure of the workflow", err)
 	}
 	if !strings.Contains(err.Error(), "title") {
 		t.Errorf("error = %v, want it to name the replacement", err)
@@ -415,7 +416,7 @@ jobs:
         wait: 5m
 `)
 	// A second file claims the same name.
-	if err := os.WriteFile(filepath.Join(dir, "fix.yml"), []byte("goal: no title\njobs:\n  main:\n    steps: [{message: hi}]\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "fix", "workflow.yaml"), []byte("goal: no title\njobs:\n  main:\n    steps: [{message: hi}]\n"), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 

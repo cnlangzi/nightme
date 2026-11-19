@@ -450,7 +450,7 @@ Conventional Commits 的 type 关键词。issue 标题保持英文 / ASCII——
 
 ## Workflow 与个人 Agent (`/me`)
 
-**workflow** 是一份 YAML，写清楚做什么、能走多远。它是唯一的自动化产物：同一份文件既是 agent 照着走的计划，也是它不能越过的边界。workflow 放在 `~/.nightme/workflows/` 下面，workflow 的名字就是它在这个目录下的相对路径去掉扩展名：`fix-issue.yaml` 就是 workflow `fix-issue`，`nightme/coder.yml` 就是 workflow `nightme/coder`。
+**workflow** 是一份 YAML，写清楚做什么、能走多远。它是唯一的自动化产物：同一份文件既是 agent 照着走的计划，也是它不能越过的边界。workflow 放在 `~/.nightme/workflows/` 下面，一个 workflow 就是一个 bundle：里面放着 `workflow.yml` 的目录。workflow 的名字就是它的 bundle 在这个目录下的路径：`fix-issue/workflow.yml` 就是 workflow `fix-issue`，`nightme/coder/workflow.yml` 就是 workflow `nightme/coder`。
 
 agent——`/me`——在你发起它的那个 chat 里跑一个 workflow。每条命令都是一条带真实 id 的真实消息，每条命令都回报一个结构化结果，所以它是从事实而不是从文字里决定下一步。
 
@@ -469,13 +469,13 @@ agent——`/me`——在你发起它的那个 chat 里跑一个 workflow。每�
 
 ### 安装一个已发布的 workflow
 
-`/wf install [-f] <owner>/<name>` 把一个已发布的 workflow 取回来，装进 workflows 目录，个人 agent 在那里找它。地址就是 workflow 的名字：`/wf install nightme/coder` 写到 `~/.nightme/workflows/nightme/coder.yml`，用 `/me start nightme/coder` 跑它。
+`/wf install [-f] <owner>/<name>` 把一个已发布的 workflow 取回来，装进 workflows 目录，个人 agent 在那里找它。地址就是 workflow 的名字：`/wf install nightme/coder` 写到 `~/.nightme/workflows/nightme/coder/workflow.yml`，用 `/me start nightme/coder` 跑它。
 
-安装过程在 Chat 里显示成三行的清单——下载、校验、写入——每一步都实时更新。下载下来的文件先校验再写；内容没变的文件不会被重写。
+安装过程在 Chat 里显示成三行的清单——下载、校验、写入——每一步都实时更新。下载下来的文件先校验再写；内容没变的文件不会被重写。清单里报的路径是相对 home 的，斜杠一律用 `/`，所以每个系统上读到的都是同一个字符串。
 
 已经装过的地址会被跳过：不问 hub，也不改本地文件。`-f`（`--force`）会再装一次，把本地文件覆盖掉。
 
-`/wf uninstall <owner>/<name>` 把装好的 workflow 拿走：文件被删掉，owner 目录里没别的东西时目录也一起删掉。
+`/wf uninstall <owner>/<name>` 把装好的 workflow 拿走：bundle 目录连同里面的每个文件一起删掉，owner 目录里没别的东西时目录也一起删掉。
 
 ### 写一个 workflow
 
@@ -525,7 +525,7 @@ jobs:
         note: 修复做完后回到主仓库目录 —— 下一轮的 fix 必须从 main 开始，worktree 里不允许开下一个 fix（/gtw fix 会报 already_active）。
 ```
 
-部署方式：把这份文件写到 `~/.nightme/workflows/fix-issue.yaml`，`/me start fix-issue` 就跑它。没加载成功的文件按它自己的名字报错，旁边的 workflow 照常工作。
+部署方式：把这份文件写到 `~/.nightme/workflows/fix-issue/workflow.yml`，`/me start fix-issue` 就跑它。没加载成功的文件按它自己的名字报错，旁边的 workflow 照常工作。
 
 `fix` 之后的那些 step 都用 `data.issue` 守卫：挑到了 issue 的 fix 会在结果里报 `issue`，没挑到的不会——所以这个守卫读的就是"挑到了 issue"，这一轮的其余部分会被跳过。
 
@@ -738,8 +738,8 @@ Chat 级别的斜杠命令。`/gtw` 子命令见 [它们自己的 section](#git-
 | `/review [-a\|--agent <agent>] [-g\|--global] [--unset] [-c\|--continue] [--abort] [-t\|--timeout <dur>]` | 当前分支对比默认分支做 review（PR 模式），findings 注回当前 chat。`--agent` 指定用哪个 agent 跑 review；`-g` 把它存成 `~/.nightme/config.yaml` 里的全局 `review.agent`；`--unset` 删掉这个全局设置。`-c` 续跑本 chat 上一次 review 中失败的 group：重新打开那些 group 的 agent session，给它们发 "continue"。`--abort` 停掉本 chat 正在跑的 review —— 它的 agent session 被关掉，停掉的 group 还能用 `-c` 续跑。`--timeout` 定一个 subagent 最长能沉默多久（默认 15m，`0` 表示关掉）：沉默超过这个窗口的 subagent 会被关掉、报成超时，并且还能用 `-c` 续跑。阈值依次取自 flag、`~/.nightme/config.yaml` 里的 `review.timeout`、内置默认值。review 这一轮本身没有时限：一直跑到用户中止或 daemon 关闭为止。 |
 | `/wiki init [--modules] [--llmstxt] [--arch]` | 读码、分模块、写每个模块的 wiki 文件——把仓库 wiki 作为项目资产。 |
 | `/queue <message>` | 把一条消息作为独立 Prompt 追加进队列。 |
-| `/wf install [-f] <owner>/<name>` | 把一个已发布的 workflow 装进 workflows 目录。地址就是 workflow 的名字：`nightme/coder` 装成 `~/.nightme/workflows/nightme/coder.yml`，用 `/me start nightme/coder` 跑。安装过程显示成一张清单——下载、校验、写入。已经装过的地址会被跳过；`-f` 会再装一次。 |
-| `/wf uninstall <owner>/<name>` | 删掉一个装好的 workflow。文件被删掉，owner 目录里没别的东西时目录也一起删掉。 |
+| `/wf install [-f] <owner>/<name>` | 把一个已发布的 workflow 装进 workflows 目录。地址就是 workflow 的名字：`nightme/coder` 装成 `~/.nightme/workflows/nightme/coder/workflow.yml`，用 `/me start nightme/coder` 跑。安装过程显示成一张清单——下载、校验、写入。已经装过的地址会被跳过；`-f` 会再装一次。 |
+| `/wf uninstall <owner>/<name>` | 删掉一个装好的 workflow。bundle 目录连同里面的每个文件一起删掉，owner 目录里没别的东西时目录也一起删掉。 |
 | `/help` | 在 Chat 里列出所有斜杠命令。 |
 
 `!cmd` 在当前 Chat 的 CWD 里直接跑 shell 命令——规则见 [Shell mode](#shell-mode)。

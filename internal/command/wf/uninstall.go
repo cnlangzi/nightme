@@ -2,9 +2,9 @@ package wf
 
 import (
 	"os"
-	"path/filepath"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/pathutil"
 )
 
 // The reasons an uninstall can come to. They are the reason codes of
@@ -42,18 +42,24 @@ func newRemovalChecklist(subject string, emit func(items []agent.AgentTaskItem) 
 
 // uninstall removes the workflow at addr.
 //
-// The owner directory goes with the file when nothing else is left in
-// it: the uninstall removes the one file it was asked for and never
-// a sibling beside it.
+// The bundle goes with it: every file under the bundle directory
+// belongs to the workflow. The owner directory goes with the bundle
+// when nothing else is left in it: the uninstall removes the one
+// bundle it was asked for and never a sibling beside it.
 func (f *Factory) uninstall(list *checklist, addr Address) Result {
 	path := f.pathFor(addr)
+	bundle := f.bundleFor(addr)
+	owner := pathutil.Dir(bundle)
 	result := Result{Path: path}
 
 	list.set(rowRemove, agent.TaskInProgress, "")
 	_ = list.send()
-	if err := os.Remove(path); err != nil {
+	// The bundle is asked for before it is removed: the removal
+	// succeeds for a path that was never there, and a workflow that
+	// was never installed is not a removal.
+	if _, err := os.Stat(bundle); err != nil {
 		if os.IsNotExist(err) {
-			list.set(rowRemove, agent.TaskSkipped, ReasonNotInstalled+" · "+displayPath(path))
+			list.set(rowRemove, agent.TaskSkipped, ReasonNotInstalled+" · "+displayPath(bundle))
 			_ = list.send()
 			result.Reason = ReasonNotInstalled
 			return result
@@ -64,12 +70,18 @@ func (f *Factory) uninstall(list *checklist, addr Address) Result {
 		result.Detail = err.Error()
 		return result
 	}
+	if err := os.RemoveAll(bundle); err != nil {
+		list.set(rowRemove, agent.TaskFailed, err.Error())
+		_ = list.send()
+		result.Reason = ReasonRemoveFailed
+		result.Detail = err.Error()
+		return result
+	}
 
-	detail := "removed · " + displayPath(path)
-	dir := filepath.Dir(path)
-	if entries, err := os.ReadDir(dir); err == nil && len(entries) == 0 {
-		if err := os.Remove(dir); err == nil {
-			detail += " · " + displayPath(dir) + " removed too"
+	detail := "removed · " + displayPath(bundle)
+	if entries, err := os.ReadDir(owner); err == nil && len(entries) == 0 {
+		if err := os.Remove(owner); err == nil {
+			detail += " · " + displayPath(owner) + " removed too"
 		}
 	}
 	list.set(rowRemove, agent.TaskCompleted, detail)

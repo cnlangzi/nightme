@@ -367,17 +367,17 @@ func TestValidateFile_AValidFileHasNoProblem(t *testing.T) {
 // ordered by path, then by position within the file.
 func TestValidateDir_ReturnsTheProblemsOfEveryFile(t *testing.T) {
 	dir := t.TempDir()
-	writeFile(t, filepath.Join(dir, "a.yml"), "jobs:\n  main:\n    steps: [{message: hi}]\n")
-	writeFile(t, filepath.Join(dir, "b.yml"), "title: x\njobs:\n  main:\n    steps: []\n")
+	writeFile(t, filepath.Join(dir, "a", "workflow.yml"), "jobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeFile(t, filepath.Join(dir, "b", "workflow.yml"), "title: x\njobs:\n  main:\n    steps: []\n")
 
 	diags := ValidateDir(dir)
 	if len(diags) != 2 {
 		t.Fatalf("diagnostics = %v, want two", diags)
 	}
-	if diags[0].Path != filepath.Join(dir, "a.yml") {
+	if diags[0].Path != filepath.Join(dir, "a", "workflow.yml") {
 		t.Errorf("the first diagnostic names %q, want the first file", diags[0].Path)
 	}
-	if diags[1].Path != filepath.Join(dir, "b.yml") {
+	if diags[1].Path != filepath.Join(dir, "b", "workflow.yml") {
 		t.Errorf("the second diagnostic names %q, want the second file", diags[1].Path)
 	}
 }
@@ -386,7 +386,7 @@ func TestValidateDir_ReturnsTheProblemsOfEveryFile(t *testing.T) {
 // every workflow is valid.
 func TestValidateDir_AValidDirectoryHasNoProblem(t *testing.T) {
 	dir := t.TempDir()
-	writeFile(t, filepath.Join(dir, "fix.yml"), "title: x\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeFile(t, filepath.Join(dir, "fix", "workflow.yml"), "title: x\njobs:\n  main:\n    steps: [{message: hi}]\n")
 
 	if diags := ValidateDir(dir); len(diags) != 0 {
 		t.Fatalf("diagnostics = %v, want none", diags)
@@ -397,8 +397,8 @@ func TestValidateDir_AValidDirectoryHasNoProblem(t *testing.T) {
 // and the clash is a problem of its own.
 func TestValidateDir_TwoFilesClaimTheSameName(t *testing.T) {
 	dir := t.TempDir()
-	writeFile(t, filepath.Join(dir, "fix.yml"), "title: one\njobs:\n  main:\n    steps: [{message: hi}]\n")
-	writeFile(t, filepath.Join(dir, "fix.yaml"), "title: two\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeFile(t, filepath.Join(dir, "fix", "workflow.yml"), "title: one\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeFile(t, filepath.Join(dir, "fix", "workflow.yaml"), "title: two\njobs:\n  main:\n    steps: [{message: hi}]\n")
 
 	diags := ValidateDir(dir)
 	if len(diags) != 1 {
@@ -465,7 +465,7 @@ func TestValidationError_RendersEveryDiagnostic(t *testing.T) {
 // reports the failure as a validation error.
 func TestLoadFile_RefusesAWorkflowThatDoesNotValidate(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "fix.yml")
+	path := filepath.Join(dir, "fix", "workflow.yml")
 	writeFile(t, path, "jobs:\n  main:\n    steps: [{message: hi}]\n")
 
 	wf, err := LoadFile(dir, path)
@@ -488,7 +488,7 @@ func TestLoadFile_RefusesAWorkflowThatDoesNotValidate(t *testing.T) {
 // load is reported against the name it would have provided.
 func TestLoadDir_TheFailureOfAFileKeepsItsFields(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "broken.yml")
+	path := filepath.Join(dir, "broken", "workflow.yml")
 	writeFile(t, path, "jobs:\n  main:\n    steps: [{message: hi}]\n")
 
 	wfs, failures := LoadDir(dir)
@@ -513,7 +513,7 @@ func TestLoadDir_TheFailureOfAFileKeepsItsFields(t *testing.T) {
 // lenient: a workflow file that carries extra fields keeps running.
 func TestLoadFile_IgnoresTheKeysTheSchemaDoesNotHave(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "fix.yml")
+	path := filepath.Join(dir, "fix", "workflow.yml")
 	writeFile(t, path, "title: x\njobs:\n  main:\n    need: [a]\n    steps: [{message: hi}]\n")
 
 	wf, err := LoadFile(dir, path)
@@ -529,8 +529,8 @@ func TestLoadFile_IgnoresTheKeysTheSchemaDoesNotHave(t *testing.T) {
 // is reported against the name the two files claim.
 func TestValidateDir_ReportsADuplicateUnderItsRelativeName(t *testing.T) {
 	dir := t.TempDir()
-	writeFile(t, filepath.Join(dir, "nightme", "coder.yml"), "title: one\njobs:\n  main:\n    steps: [{message: hi}]\n")
-	writeFile(t, filepath.Join(dir, "nightme", "coder.yaml"), "title: two\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeFile(t, filepath.Join(dir, "nightme", "coder", "workflow.yml"), "title: one\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	writeFile(t, filepath.Join(dir, "nightme", "coder", "workflow.yaml"), "title: two\njobs:\n  main:\n    steps: [{message: hi}]\n")
 
 	diags := ValidateDir(dir)
 	if len(diags) != 1 {

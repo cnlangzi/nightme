@@ -37,9 +37,8 @@ type catalogEntry struct {
 
 // name returns the name the entry provides.
 //
-// The name is the path of the file under the workflows directory,
-// without the extension: `nightme/coder.yml` provides the workflow
-// `nightme/coder`.
+// The name is the path of the bundle under the workflows directory:
+// `nightme/coder/workflow.yml` provides the workflow `nightme/coder`.
 func (e *catalogEntry) name(root string) string {
 	if e.wf != nil {
 		return e.wf.Name
@@ -49,10 +48,10 @@ func (e *catalogEntry) name(root string) string {
 
 // Catalog is the daemon's view of the workflows directory.
 //
-// A workflow's identity is its path under the workflows directory:
-// `fix.yml` is the workflow `fix`, `nightme/coder.yml` is the workflow
-// `nightme/coder`, and two files that claim the same name make that
-// name unusable.
+// A workflow's identity is the path of its bundle under the workflows
+// directory: `fix/workflow.yml` is the workflow `fix`,
+// `nightme/coder/workflow.yml` is the workflow `nightme/coder`, and
+// two files that claim the same name make that name unusable.
 type Catalog struct {
 	dir string
 
@@ -155,7 +154,7 @@ func (c *Catalog) index() {
 		}
 		entry := files[0]
 		if entry.err != nil {
-			errs[name] = fmt.Errorf("%s could not be loaded: %w", filepath.Base(entry.path), entry.err)
+			errs[name] = fmt.Errorf("%s could not be loaded: %w", name, entry.err)
 			continue
 		}
 		byName[name] = entry

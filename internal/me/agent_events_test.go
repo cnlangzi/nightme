@@ -41,7 +41,7 @@ func eventsRun(t *testing.T, provider *scriptedProvider) (*Service, *fakeOperato
 
 	svc, op := testService(t, dir, Config{Provider: provider})
 	op.steps = []fakeStep{pendingStep("still going"), okStep("committed")}
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -189,7 +189,7 @@ func TestRun_PublishesNoResultForACallThatIsStillRunning(t *testing.T) {
 	// point and the model runs the step again. The second command
 	// never settles: the call has no verdict.
 	op.steps = []fakeStep{pendingStep("still going"), {open: true}}
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -259,7 +259,7 @@ func TestRun_KeepsTheCallAndItsResultUnderOneCard(t *testing.T) {
 	})
 	// The command never settles: the run stays in the chat.
 	op.steps = []fakeStep{{open: true}}
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -358,7 +358,7 @@ func TestRun_CountsItsActivityEvenWhenTheChatHidesIt(t *testing.T) {
 	// The second never settles: the run stays in the chat and the
 	// counters can be read.
 	op.steps = []fakeStep{pendingStep("still going"), {open: true}}
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -393,7 +393,7 @@ func TestTheHeartbeatCarriesTheCountersOfTheRun(t *testing.T) {
 		}},
 	})
 	op.steps = []fakeStep{pendingStep("still going"), okStep("committed")}
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -450,7 +450,7 @@ func TestTheActivityOfTheRunSurvivesTheDaemon(t *testing.T) {
 	}}
 	svc, op := testService(t, dir, Config{Provider: provider})
 	op.steps = []fakeStep{pendingStep("still going")}
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
 	}); err != nil {
 		t.Fatalf("start: %v", err)

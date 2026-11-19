@@ -102,7 +102,7 @@ func TestStop_PostsTheRecordOfTheSession(t *testing.T) {
 		Data:    map[string]string{"reason": "issue_claimed"},
 	}}}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -183,7 +183,7 @@ func TestTheRecordIsPostedWhenTheRunEndsOnItsOwn(t *testing.T) {
 	svc, op := testService(t, dir, noModels())
 	op.steps = []fakeStep{okStep("the commit landed")}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -222,7 +222,7 @@ func TestTheRecordOfAFailedRunSaysWhyItFailed(t *testing.T) {
 		Summary: "the step failed",
 	}}}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -253,7 +253,7 @@ func TestStop_EndsTheRunSessionWithItsPhase(t *testing.T) {
 		Summary: "the step failed",
 	}}}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -289,7 +289,7 @@ func TestTheRecordComesAfterTheRunUnwinds(t *testing.T) {
 		{open: true},
 	}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -332,7 +332,7 @@ func TestTheRecordListsOnlyTheActionsThatWentWrong(t *testing.T) {
 		}},
 	}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -497,7 +497,7 @@ func TestTheFastPathHoldsNoWakeRecords(t *testing.T) {
 	svc, op := testService(t, dir, Config{Decider: decider})
 	op.steps = []fakeStep{{open: true}}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -528,7 +528,7 @@ func TestTheWakeLogHoldsOneRecordPerModelCall(t *testing.T) {
 		Summary: "the step failed",
 	}}}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -574,7 +574,7 @@ func TestTheWakeLogSurvivesTheDaemon(t *testing.T) {
 		Summary: "the step failed",
 	}}}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -610,7 +610,7 @@ func TestTheDaemonShutdownPostsNoRecord(t *testing.T) {
 	svc, op := testService(t, dir, Config{Decider: &scriptedDecider{}})
 	op.steps = []fakeStep{{open: true}}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)

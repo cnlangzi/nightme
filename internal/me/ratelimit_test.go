@@ -23,7 +23,7 @@ func TestARateLimitedAgentPausesTheRun(t *testing.T) {
 		Summary: "429 Too Many Requests",
 	}}}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -54,7 +54,7 @@ func TestARateLimitedAgentInTheTranscriptPausesTheRun(t *testing.T) {
 		{Kind: messages.OutResult, Text: "API error: 429 rate_limit_error"},
 	}}}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -76,7 +76,7 @@ func TestARateLimitWordWithoutTheCodeIsEnough(t *testing.T) {
 		{Kind: messages.OutResult, Text: `{"type":"error","error":{"type":"rate_limit_error"}}`},
 	}}}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -115,7 +115,7 @@ func TestARateLimitInTheMiddleOfALongTurnIsFound(t *testing.T) {
 		Summary: "the command failed",
 	}, transcript: entries}}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -137,7 +137,7 @@ func TestACommandThatWorkedIsNotThrottled(t *testing.T) {
 		{Kind: messages.OutResult, Text: "handled 429 responses before"},
 	}}}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)

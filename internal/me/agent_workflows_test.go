@@ -20,6 +20,66 @@ func noModels() Config {
 	}
 }
 
+// TestStartWorkflow_ANameWithoutAnOwnerIsTheProjectsOwn — a name that
+// carries no owner is the workflow of that name when there is one, and
+// the project's own namespace otherwise.
+func TestStartWorkflow_ANameWithoutAnOwnerIsTheProjectsOwn(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "nightme/coder", `title: code it
+jobs:
+  main:
+    steps:
+      - id: rest
+        wait: 5m
+`)
+
+	svc, _ := testService(t, dir, noModels())
+	_, name, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "coder", ChatID: "obs-1", Cwd: "/tmp/work",
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if name != "nightme/coder" {
+		t.Errorf("the workflow is %q, want nightme/coder", name)
+	}
+	if err := svc.Stop(context.Background(), "obs-1"); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	waitRun(t, svc, "obs-1")
+}
+
+// TestStartWorkflow_TheWorkflowOfThatNameComesFirst — a workflow of
+// that name is more specific than the project's own namespace, and it
+// is the one that runs.
+func TestStartWorkflow_TheWorkflowOfThatNameComesFirst(t *testing.T) {
+	dir := t.TempDir()
+	body := `title: do the thing
+jobs:
+  main:
+    steps:
+      - id: rest
+        wait: 5m
+`
+	writeWorkflow(t, dir, "coder", body)
+	writeWorkflow(t, dir, "nightme/coder", body)
+
+	svc, _ := testService(t, dir, noModels())
+	_, name, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "coder", ChatID: "obs-1", Cwd: "/tmp/work",
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if name != "coder" {
+		t.Errorf("the workflow is %q, want coder", name)
+	}
+	if err := svc.Stop(context.Background(), "obs-1"); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	waitRun(t, svc, "obs-1")
+}
+
 // TestStartWorkflow_TheNameIsTheBundle — a workflow's identity is the
 // path of its bundle under the workflows dir: the run and its state
 // carry it.
@@ -34,7 +94,7 @@ jobs:
 `)
 
 	svc, _ := testService(t, dir, noModels())
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "fix", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -72,7 +132,7 @@ jobs:
 `)
 
 	svc, _ := testService(t, dir, noModels())
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "fix", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -102,7 +162,7 @@ jobs:
       - id: rest
         wait: 5m
 `)
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "fix", ChatID: "obs-2", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -145,7 +205,7 @@ jobs:
 `)
 
 	svc, _ := testService(t, dir, noModels())
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "fix", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -155,7 +215,7 @@ jobs:
 	}
 	waitRun(t, svc, "obs-1")
 
-	_, err := svc.StartWorkflow(context.Background(), Request{
+	_, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "broken", ChatID: "obs-2", Cwd: "/tmp/work",
 	})
 	if err == nil {
@@ -182,7 +242,7 @@ jobs:
 `)
 
 	svc, _ := testService(t, dir, noModels())
-	_, err := svc.StartWorkflow(context.Background(), Request{
+	_, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "nope", ChatID: "obs-1", Cwd: "/tmp/work",
 	})
 	if err == nil {
@@ -214,7 +274,7 @@ jobs:
 
 	svc, _ := testService(t, dir, noModels())
 	rounds := 2
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "fix", ChatID: "obs-1", Cwd: "/tmp/work", Iterations: &rounds,
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -257,7 +317,7 @@ jobs:
 
 	svc, _ := testService(t, dir, noModels())
 	rounds := 1
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "fix", ChatID: "obs-1", Cwd: "/tmp/work", Iterations: &rounds,
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -290,7 +350,7 @@ jobs:
 `)
 
 	svc, _ := testService(t, dir, noModels())
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "fix", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -331,7 +391,7 @@ jobs:
 
 	svc, _ := testService(t, dir, noModels())
 	rounds := 1
-	runID, err := svc.StartWorkflow(context.Background(), Request{
+	runID, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "fix", ChatID: "obs-1", Cwd: "/tmp/work", Iterations: &rounds,
 	})
 	if err != nil {
@@ -367,7 +427,7 @@ jobs:
 `)
 
 	svc, _ := testService(t, dir, noModels())
-	runID, err := svc.StartWorkflow(context.Background(), Request{
+	runID, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "wait", ChatID: "obs-1", Cwd: "/tmp/work",
 	})
 	if err != nil {
@@ -393,7 +453,7 @@ jobs:
 		t.Errorf("the run state is still there: %v", err)
 	}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "wait", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("the chat could not start a new run: %v", err)
@@ -421,7 +481,7 @@ jobs:
 	}
 
 	svc, _ := testService(t, dir, noModels())
-	_, err := svc.StartWorkflow(context.Background(), Request{
+	_, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "fix", ChatID: "obs-1", Cwd: "/tmp/work",
 	})
 	if err == nil {

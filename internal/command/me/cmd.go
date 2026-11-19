@@ -16,6 +16,11 @@
 //
 // The `-i` flag of `/me start` sets how many rounds every job of the
 // workflow runs in that run. The workflow file keeps its own counts.
+//
+// A workflow's name is the path of its bundle under the workflows
+// directory. A name that carries no owner is the workflow of that
+// name when there is one, and the project's own namespace otherwise:
+// "coder" is the workflow "nightme/coder".
 package me
 
 import (
@@ -59,7 +64,7 @@ func (f *Factory) Spec() command.Spec {
 		Usage:    "/me start <workflow> [args...] [-i <rounds>]\n/me reply <text>\n/me pause\n/me resume [note]\n/me next [note]\n/me stop\n/me status",
 		Category: "agent",
 		Subcommands: []command.SubcommandSpec{
-			{Name: "start", Summary: "Start a workflow in this chat. -i sets the rounds."},
+			{Name: "start", Summary: "Start a workflow in this chat. -i sets the rounds. A name without an owner is the project's own: coder is nightme/coder."},
 			{Name: "reply", Summary: "Answer the question the run asked."},
 			{Name: "pause", Summary: "Stop the run after the current step."},
 			{Name: "resume", Summary: "Run the step the run is on again."},
@@ -132,9 +137,8 @@ func (f *Factory) start(ctx context.Context, rt command.RuntimeServices,
 		return failOut, nil
 	}
 
-	name := parsed.Arg(0)
-	runID, err := f.ctrl.StartWorkflow(ctx, command.MeRequest{
-		Name:       name,
+	runID, workflow, err := f.ctrl.StartWorkflow(ctx, command.MeRequest{
+		Name:       parsed.Arg(0),
 		Args:       parsed.Args[1:],
 		Iterations: iterations,
 		ChatID:     input.ChatID,
@@ -148,13 +152,13 @@ func (f *Factory) start(ctx context.Context, rt command.RuntimeServices,
 		chatsession.ReportOutcome(ctx, command.FailedOutcome("error", "the workflow could not be started"))
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
-	data := map[string]string{"workflow": name, "run_id": runID}
+	data := map[string]string{"workflow": workflow, "run_id": runID}
 	if iterations != nil {
 		data["iterations"] = strconv.Itoa(*iterations)
 	}
 	chatsession.ReportOutcome(ctx, messages.Outcome{
 		Status:  messages.OutcomeOK,
-		Summary: "started " + name,
+		Summary: "started " + workflow,
 		Data:    data,
 	})
 	// The run's own card carries the acknowledgement: one command posts
@@ -354,7 +358,7 @@ func NewController(svc *mesvc.Service) command.MeController {
 }
 
 // StartWorkflow implements command.MeController.
-func (c *controller) StartWorkflow(ctx context.Context, req command.MeRequest) (string, error) {
+func (c *controller) StartWorkflow(ctx context.Context, req command.MeRequest) (string, string, error) {
 	return c.svc.StartWorkflow(ctx, mesvc.Request{
 		Name:       req.Name,
 		Args:       req.Args,

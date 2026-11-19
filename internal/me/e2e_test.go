@@ -17,7 +17,7 @@ func TestEndToEnd_TheRunWorksInTheChatItStartedIn(t *testing.T) {
 	writeWorkflow(t, dir, "fix-issue", fixIssueWorkflow)
 
 	svc, op := testService(t, dir, noModels())
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name:      "fix-issue",
 		Args:      []string{"42"},
 		ChatID:    "oc_user",
@@ -106,14 +106,14 @@ func TestEndToEnd_OneRunPerChat(t *testing.T) {
 	svc, op := testService(t, dir, noModels())
 	op.steps = []fakeStep{{open: true}}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "oc_user", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	waitSent(t, op, "/gtw commit")
 
-	_, err := svc.StartWorkflow(context.Background(), Request{
+	_, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "oc_user", Cwd: "/tmp/work",
 	})
 	if err == nil {

@@ -402,3 +402,63 @@ func TestWorkflowShow_ReportsTheClashOfTwoFiles(t *testing.T) {
 		t.Errorf("err = %v, want the clash", err)
 	}
 }
+
+// TestWorkflowShow_ANameWithoutAnOwnerFindsTheWorkflow — "coder" is
+// the workflow "nightme/coder".
+func TestWorkflowShow_ANameWithoutAnOwnerFindsTheWorkflow(t *testing.T) {
+	dir := t.TempDir()
+	body := `
+title: code it
+jobs:
+  main:
+    steps:
+      - id: s1
+        message: /review
+`
+	writeBundle(t, dir, "nightme/coder", body)
+	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
+
+	out := captureStdout(t, func() error {
+		return runRoot("workflow", "show", "coder")
+	})
+	for _, want := range []string{"name:       nightme/coder", "title:      code it"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output = %q, want %q", out, want)
+		}
+	}
+}
+
+// TestWorkflowShow_TheWorkflowOfThatNameComesFirst — a workflow of
+// that name is more specific than the project's own namespace.
+func TestWorkflowShow_TheWorkflowOfThatNameComesFirst(t *testing.T) {
+	dir := t.TempDir()
+	body := "title: do the thing\njobs:\n  main:\n    steps: [{message: hi}]\n"
+	writeBundle(t, dir, "coder", body)
+	writeBundle(t, dir, "nightme/coder", "title: the other one\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
+
+	out := captureStdout(t, func() error {
+		return runRoot("workflow", "show", "coder")
+	})
+	if !strings.Contains(out, "name:       coder") {
+		t.Errorf("output = %q, want the workflow of that name", out)
+	}
+}
+
+// TestWorkflowRun_ANameWithoutAnOwnerFindsTheWorkflow — "coder" is
+// the workflow "nightme/coder".
+func TestWorkflowRun_ANameWithoutAnOwnerFindsTheWorkflow(t *testing.T) {
+	dir := t.TempDir()
+	body := "title: code it\njobs:\n  main:\n    steps: [{id: s1, message: /review}]\n"
+	writeBundle(t, dir, "nightme/coder", body)
+	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
+
+	out := captureStdout(t, func() error {
+		return runRoot("workflow", "run", "coder")
+	})
+	for _, want := range []string{"workflow:   nightme/coder", "execution plan"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output = %q, want %q", out, want)
+		}
+	}
+}

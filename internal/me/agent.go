@@ -50,6 +50,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/gateway/observe"
 	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/internal/wfname"
 	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
@@ -552,41 +553,43 @@ func (s *Service) actionsDir() string {
 //
 // The chat gets one run at a time: a second start in the same chat
 // is refused.
-func (s *Service) StartWorkflow(ctx context.Context, req Request) (string, error) {
+//
+// The name the operator wrote is resolved to the workflow it stands
+// for, and that name comes back with the run's id: the outcome says
+// which workflow ran.
+func (s *Service) StartWorkflow(ctx context.Context, req Request) (string, string, error) {
 	if err := s.catalog.Refresh(); err != nil {
-		return "", fmt.Errorf("me: %w", err)
+		return "", "", fmt.Errorf("me: %w", err)
 	}
 	if reason := s.modelsReason(); reason != "" {
-		return "", fmt.Errorf("me is disabled: %s", reason)
+		return "", "", fmt.Errorf("me is disabled: %s", reason)
 	}
 	if reason := s.operatorReason(); reason != "" {
-		return "", fmt.Errorf("me is disabled: %s", reason)
+		return "", "", fmt.Errorf("me is disabled: %s", reason)
 	}
 	if strings.TrimSpace(req.ChatID) == "" {
-		return "", errors.New("me: the run has no chat")
+		return "", "", errors.New("me: the run has no chat")
 	}
 
-	wf, ok := s.catalog.Lookup(req.Name)
-	if !ok {
-		// A file that did not load carries its own failure: the
-		// operator asked for that name, and the file is on disk.
-		if failure, broken := s.catalog.Failure(req.Name); broken {
-			return "", failure
-		}
+	name, wf, err := s.resolve(req.Name)
+	if err != nil {
+		return "", "", err
+	}
+	if wf == nil {
 		if reason := s.workflowsReason(); reason != "" {
-			return "", fmt.Errorf("me is disabled: %s", reason)
+			return "", "", fmt.Errorf("me is disabled: %s", reason)
 		}
-		return "", fmt.Errorf("there is no workflow named %q (known: %s)",
+		return "", "", fmt.Errorf("there is no workflow named %q (known: %s)",
 			req.Name, strings.Join(s.catalog.Names(), ", "))
 	}
 
 	values, err := mapArgValues(wf, req.Args)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	bound, err := wfe.Bind(wf, values)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	// The override lands on the bound workflow — the copy the run
 	// owns. The file and the catalogue's copy of it keep their own
@@ -602,7 +605,7 @@ func (s *Service) StartWorkflow(ctx context.Context, req Request) (string, error
 	s.mu.Lock()
 	if existing, ok := s.active[req.ChatID]; ok {
 		s.mu.Unlock()
-		return "", fmt.Errorf("this chat already has a run in it (%s)", existing.id)
+		return "", "", fmt.Errorf("this chat already has a run in it (%s)", existing.id)
 	}
 	s.runs[r.id] = r
 	s.active[req.ChatID] = r
@@ -623,7 +626,28 @@ func (s *Service) StartWorkflow(ctx context.Context, req Request) (string, error
 		defer s.wg.Done()
 		s.drive(ctx, r)
 	}()
-	return r.id, nil
+	return r.id, name, nil
+}
+
+// resolve finds the workflow the given name stands for, and the name it
+// is known by.
+//
+// A name that carries no owner is the workflow of that name first, and
+// the project's own namespace second: "coder" is the workflow "coder"
+// when there is one, and the workflow "nightme/coder" otherwise.
+//
+// A file that did not load carries its own failure: the operator asked
+// for that name, and the file is on disk.
+func (s *Service) resolve(name string) (string, *wfe.Workflow, error) {
+	for _, candidate := range wfname.Names(name) {
+		if wf, ok := s.catalog.Lookup(candidate); ok {
+			return candidate, wf, nil
+		}
+		if failure, broken := s.catalog.Failure(candidate); broken {
+			return candidate, nil, failure
+		}
+	}
+	return name, nil, nil
 }
 
 // mapArgValues maps the command line's tokens onto the workflow's

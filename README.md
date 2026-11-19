@@ -503,6 +503,12 @@ path of its bundle under that directory: `fix-issue/workflow.yml` is the
 workflow `fix-issue`, `nightme/coder/workflow.yml` is the workflow
 `nightme/coder`.
 
+A name that carries no owner is the project's own namespace: `coder` is the
+workflow `nightme/coder`. A workflow of that name is more specific, though —
+where the workflows directory holds one of its own called `coder`, that is the
+workflow the short name starts, and `nightme/coder` is the one it falls back
+to.
+
 The agent — `/me` — runs a workflow in the chat you start it from. Every command
 is a real message with a real id, and every command reports a structured
 outcome, so the agent decides the next step from facts instead of from prose.
@@ -516,6 +522,10 @@ outcome, so the agent decides the next step from facts instead of from prose.
 | `nightme workflow run <name>` | Print the execution plan — which steps run, in what order. `--workspace` overrides the workspace. |
 | `nightme workflow validate [path...]` | Check the workflow files and report every problem: a missing title, a step that names two kinds, a key the schema does not have. One line per problem — `path:line:column: message`. An argument that is not a path on disk is looked up as a workflow name, so `nightme workflow validate nightme/coder` validates that workflow. The exit code is `0` when every workflow is valid, `8` when one does not validate, `9` when a path does not exist or cannot be read. `--json` for machine output. |
 
+A name that carries no owner is the project's own namespace: `coder` is the
+workflow `nightme/coder`. `show`, `run` and `validate` take the short name
+wherever they take the full one.
+
 `run` is a planning dry-run: it parses and plans but does not invoke an agent.
 
 `validate` is a linter: with no path it checks the workflows dir, with paths it checks the files and the directories it is given. A path that is not there is reported, not skipped.
@@ -527,6 +537,12 @@ into the workflows directory, where the personal agent finds it. The address is
 the workflow's name: `/wf install nightme/coder` writes
 `~/.nightme/workflows/nightme/coder/workflow.yml`, and `/me start
 nightme/coder` runs it.
+
+An address that carries no owner is the project's own namespace: `coder` is the
+address `nightme/coder`. The short name is another way of writing the
+address, so `/wf install coder` fetches the same file and writes it under the
+same path as `/wf install nightme/coder` — the same hub, the same path, the
+same reasons.
 
 The install is shown as a checklist of three rows — the download, the
 validation, the write — and the rows update as the install goes. The
@@ -540,7 +556,8 @@ the local file.
 
 `/wf uninstall <owner>/<name>` takes an installed workflow away again: the
 bundle directory and every file under it are removed, and the owner directory
-goes with it when nothing else is left in it.
+goes with it when nothing else is left in it. The short name works here too:
+`/wf uninstall coder` takes away the same workflow.
 
 ### Write a workflow
 
@@ -729,7 +746,7 @@ key — is reported in `nightme logs` and left out. The daemon still starts, and
 
 | Command | What it does |
 |---|---|
-| `/me start <workflow> [args...] [-i <rounds>]` | Starts a workflow in this chat. `-i` sets how many rounds every job of the workflow runs. |
+| `/me start <workflow> [args...] [-i <rounds>]` | Starts a workflow in this chat. `-i` sets how many rounds every job of the workflow runs. A name that carries no owner is the project's own namespace: `coder` is the workflow `nightme/coder`. |
 | `/me reply <text>` | Answers the question the run is waiting for. |
 | `/me pause` | Stops the run after the step it is on. |
 | `/me resume [note]` | Runs the step the run is on again. Its budget for the current round starts over. The note is your instruction. |
@@ -904,8 +921,8 @@ here; the `/me` subcommands — `/me start` · `/me reply` · `/me pause` ·
 | `/review [-a\|--agent <agent>] [-g\|--global] [--unset] [-c\|--continue] [--abort] [-t\|--timeout <dur>]` | Review the current branch against the default branch (PR mode); findings are injected back into this chat. The review's verdict line is followed by a digest of the findings — one table per severity, one row per finding, naming what kind of finding it is and where it is — on the card, whatever `/think` says; the findings' text itself stays in the thread (`/think` on) and in the main agent's answer (`/think` off, the default). `--agent` runs the review with a specific agent; `-g` also stores it as the global `review.agent` in `~/.nightme/config.yaml`; `--unset` removes that global setting. `-c` resumes the groups of the last review in this chat that failed, by reopening their agent sessions and sending them "continue". `--abort` stops the review running in this chat — its agent sessions are closed and the stopped groups stay resumable with `-c`. `--timeout` bounds how long a subagent may stay silent (default 15m; `0` disables it): a subagent that says nothing for that long is closed, reported as timed out, and stays resumable with `-c`. The threshold comes from the flag, else from `review.timeout` in `~/.nightme/config.yaml`, else from the default. The review run itself has no time limit: it runs until the user aborts it or the daemon shuts down. |
 | `/wiki init [--modules] [--llmstxt] [--arch]` | Read the codebase, design modules, and write per-module wiki files — the repo wiki as a project asset. |
 | `/queue <message>` | Append `<message>` to the queue as a standalone Prompt. |
-| `/wf install [-f] <owner>/<name>` | Install a published workflow into the workflows directory. The address is the workflow's name: `nightme/coder` is installed as `~/.nightme/workflows/nightme/coder/workflow.yml` and is started with `/me start nightme/coder`. The install is shown as a checklist — the download, the validation, the write. An address that is already installed is skipped; `-f` installs it again. |
-| `/wf uninstall <owner>/<name>` | Remove an installed workflow. The bundle directory and every file under it are removed, and the owner directory goes with it when nothing else is left in it. |
+| `/wf install [-f] <owner>/<name>` | Install a published workflow into the workflows directory. The address is the workflow's name: `nightme/coder` is installed as `~/.nightme/workflows/nightme/coder/workflow.yml` and is started with `/me start nightme/coder`. The install is shown as a checklist — the download, the validation, the write. An address that is already installed is skipped; `-f` installs it again. An address that carries no owner is the project's own namespace: `coder` is the address `nightme/coder`. |
+| `/wf uninstall <owner>/<name>` | Remove an installed workflow. The bundle directory and every file under it are removed, and the owner directory goes with it when nothing else is left in it. The short name works here too: `coder` is the address `nightme/coder`. |
 | `/help` | List every slash command in-chat. |
 
 `!cmd` runs shell commands directly in the chat's CWD — see

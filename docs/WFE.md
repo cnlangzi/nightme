@@ -81,11 +81,13 @@ The directory is `<data_dir>/workflows` — `~/.nightme/workflows` with the defa
 
 The workflow is written to `~/.nightme/workflows/nightme/coder/workflow.yml`, so its name keeps the address it was published with and `/me start nightme/coder` runs it. The install is shown as a checklist of three rows — the download, the validation, the write — and the rows update as the install goes. The path the rows report is home-relative and uses forward slashes, so it reads the same on every operating system.
 
+An address that carries no owner is the project's own namespace: `coder` is the address `nightme/coder`. The short name is another way of writing the address — the same file is fetched and written under the same path.
+
 An address that is already installed is skipped: the hub is not asked and the local file is left alone. `-f` (`--force`) installs it again — the workflow is fetched once more and written over the local file, unless its content did not change, in which case the file is not rewritten.
 
 The file is fetched from the hub through three tiers, in order: GitHub, jsDelivr, jsdmirror. Every tier is probed before its file is fetched, so a tier that cannot be reached is skipped instead of costing a transfer timeout. The downloaded content is checked before it is written: a file that does not validate is not installed, and the workflow that is already there stays as it is.
 
-The address is `<owner>/<name>`: the owner is the namespace the workflow is published under — lowercase letters, digits, dashes and underscores, starting with a letter or a digit — and the name is its lowercase kebab-case short name. `actions` and `runs` are reserved by the workflows directory, so they are not owners.
+The address is `<owner>/<name>`: the owner is the namespace the workflow is published under — lowercase letters, digits, dashes and underscores, starting with a letter or a digit — and the name is its lowercase kebab-case short name. `actions` and `runs` are reserved by the workflows directory, so they are not owners. An address that carries no owner is the project's own namespace, and the owner is filled in before the shape is checked, so the name it carries has to fit the same rules: `Coder` is refused.
 
 The install's outcome carries the reason it came to: `installed`, `skipped`, `updated`, `unchanged`, `not_found`, `invalid_address`, `unreachable`, `invalid_content` or `write_failed`.
 
@@ -97,7 +99,7 @@ The install's outcome carries the reason it came to: `installed`, `skipped`, `up
 /wf uninstall nightme/coder
 ```
 
-The bundle `~/.nightme/workflows/nightme/coder/` is removed, with every file under it. The owner directory `~/.nightme/workflows/nightme/` goes with it when nothing else is left in it; a directory that still holds another workflow — or any other file — stays as it is. The removal is shown as a checklist of one row, and the path it reports is home-relative and uses forward slashes.
+The bundle `~/.nightme/workflows/nightme/coder/` is removed, with every file under it. The owner directory `~/.nightme/workflows/nightme/` goes with it when nothing else is left in it; a directory that still holds another workflow — or any other file — stays as it is. The removal is shown as a checklist of one row, and the path it reports is home-relative and uses forward slashes. The short name works here too: `/wf uninstall coder` takes away the same workflow.
 
 The uninstall's outcome carries the reason it came to: `uninstalled`, `not_installed` or `remove_failed`.
 
@@ -110,7 +112,7 @@ nightme workflow validate [path...]
         --json    print the diagnostics as a JSON array
 ```
 
-With no argument it validates the workflows dir; with arguments it validates the files and the directories it is given, and a directory contributes the `workflow.yml` of every bundle under it. An argument that is not a path on disk is looked up as a workflow name, so `nightme workflow validate nightme/coder` validates the file of that name. Every problem is one line — `path:line:column: message` — and a run where every workflow is valid prints nothing. The exit code is `0` when every workflow is valid, `8` when a workflow does not validate, and `9` when a path does not exist or cannot be read — the workflows dir among them.
+With no argument it validates the workflows dir; with arguments it validates the files and the directories it is given, and a directory contributes the `workflow.yml` of every bundle under it. An argument that is not a path on disk is looked up as a workflow name, so `nightme workflow validate nightme/coder` validates the file of that name. A name that carries no owner is the project's own namespace: `coder` is `nightme/coder`. Every problem is one line — `path:line:column: message` — and a run where every workflow is valid prints nothing. The exit code is `0` when every workflow is valid, `8` when a workflow does not validate, and `9` when a path does not exist or cannot be read — the workflows dir among them.
 
 The engine offers the same check as an API (`pkg/wfe`):
 

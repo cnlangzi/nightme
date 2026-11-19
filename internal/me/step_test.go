@@ -41,7 +41,7 @@ jobs:
 		{outcome: messages.Outcome{Status: messages.OutcomeOK, Summary: "ok"}},
 	}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "repeat", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -76,7 +76,7 @@ jobs:
 	svc, _ := testService(t, dir, Config{Provider: provider, Decider: decider})
 
 	start := time.Now()
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "wait", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -104,7 +104,7 @@ jobs:
 	decider := &scriptedDecider{err: errors.New("the decision model must not be called")}
 	svc, _ := testService(t, dir, Config{Provider: provider, Decider: decider})
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "wait", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -144,7 +144,7 @@ jobs:
 		Cwd:      fakeCwd{dir: "/tmp/worktree"},
 	})
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "sh", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -206,7 +206,7 @@ jobs:
 	decider := &scriptedDecider{err: errors.New("the decision model must not be called")}
 	svc, _ := testService(t, dir, Config{Provider: provider, Decider: decider, Shell: shell})
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "sh", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -312,7 +312,7 @@ jobs:
 	decider := &scriptedDecider{err: errors.New("the decision model must not be called")}
 	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider, Shell: shell})
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "sh", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -356,7 +356,7 @@ jobs:
 	decider := &scriptedDecider{err: errors.New("the decision model must not be called")}
 	svc, _ := testService(t, dir, Config{Provider: provider, Decider: decider, Shell: shell})
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "sh", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -407,7 +407,7 @@ jobs:
 	svc, op := testService(t, dir, Config{Provider: provider})
 	op.failCommand = "/gtw commit"
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -454,7 +454,7 @@ jobs:
 	decider := &scriptedDecider{err: errors.New("the decision model must not be called")}
 	svc, _ := testService(t, dir, Config{Provider: provider, Decider: decider, Shell: shell})
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "mixed", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)

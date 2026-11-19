@@ -37,7 +37,7 @@ func sessionService(t *testing.T) (*Service, *fakeOperator) {
 func TestTheRunStartLeavesOneCard(t *testing.T) {
 	svc, op := sessionService(t)
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -84,7 +84,7 @@ func TestARunWithoutAMessagePostsACardOfItsOwn(t *testing.T) {
 	svc, op := testService(t, dir, noModels())
 	op.steps = []fakeStep{okStep("committed")}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -120,7 +120,7 @@ func TestTheRunCardCarriesThePlanOfTheRun(t *testing.T) {
 	writeWorkflow(t, dir, "fix", cliWorkflow)
 	svc, op := testService(t, dir, noModels())
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "fix", ChatID: "obs-1", Cwd: "/tmp/work", Args: []string{"issue=*"},
 		MessageID: "om_start",
 	}); err != nil {
@@ -186,7 +186,7 @@ func TestTheRoundCardCarriesTheTreeOfTheRounds(t *testing.T) {
 	svc, op := testService(t, dir, noModels())
 	op.steps = []fakeStep{okStep("committed")}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -218,7 +218,7 @@ func TestTheRoundCardCarriesTheTreeOfTheRounds(t *testing.T) {
 func TestTheRunCardHasNoButtons(t *testing.T) {
 	svc, op := sessionService(t)
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -239,7 +239,7 @@ func TestTheRunCardHasNoButtons(t *testing.T) {
 func TestEveryEventOfASessionCarriesItsCard(t *testing.T) {
 	svc, op := sessionService(t)
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -272,7 +272,7 @@ func TestTheRoundCardHangsUnderTheStartMessage(t *testing.T) {
 	svc, op := testService(t, dir, noModels())
 	op.steps = []fakeStep{okStep("committed")}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -301,7 +301,7 @@ func TestTheRunCardCarriesTheTokensOfTheRun(t *testing.T) {
 	svc, op := testService(t, dir, Config{Provider: provider})
 	op.steps = []fakeStep{pendingStep("still going"), okStep("committed")}
 
-	runID, err := svc.StartWorkflow(context.Background(), Request{
+	runID, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	})
 	if err != nil {
@@ -355,7 +355,7 @@ func TestTheRoundCardCarriesTheStepsOfTheRound(t *testing.T) {
 	svc, op := testService(t, dir, noModels())
 	op.steps = []fakeStep{okStep("committed")}
 
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
@@ -469,7 +469,7 @@ jobs:
 
 	svc, _ := testService(t, dir, noModels())
 	rounds := 5
-	if _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "fix", ChatID: "obs-1", Cwd: "/tmp/work", Iterations: &rounds,
 	}); err != nil {
 		t.Fatalf("start: %v", err)

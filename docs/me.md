@@ -55,7 +55,7 @@ type Outcome struct {
 | `reason` | 结束原因分类（见 §7.1）——命令**因为有东西要做**才跑、又发现没东西可做时，它报 `failed` 并带上这里的码 |
 | `error` | 出错说明——坏了的时候，这里是一句人话；没有这个键说明不是坏了，只是没东西可做（见 §2） |
 | `agent` | 跑这件事的 agent 名 |
-| `issue` | `/gtw fix` 处理的 issue 号（本地模式为 `-1`） |
+| `issue` | `/gtw fix` 处理的 issue 号（本地模式为 `-1`）；`/gtw assign` 处理的是被贴 / 摘队列标记的 issue 号 |
 | `branch` | 分支名 |
 | `worktree` | worktree 路径 |
 | `repo_root` | 主仓库根目录 |
@@ -79,6 +79,8 @@ type Outcome struct {
 | `untracked` | 其中 git 没跟踪的 |
 | `remote_head` | push 之后 `origin/<branch>` 指向的 sha（读不到时这个键不出现） |
 | `pr_number` / `pr_url` | PR 的编号 / 链接 |
+| `url` | issue 在平台上的链接（`/gtw assign` 给出被改动的那个 issue） |
+| `action` | `/gtw assign` 做的是哪一步（`added` / `removed`） |
 | `groups` | review 跑了几组（`/review`） |
 | `findings` | review 收集到的 findings 条数（`/review`） |
 | `continued_groups` | 续跑完成了几组（`/review --continue` 只跑没完成的那几组：跑到 agent 的那几组续跑，没跑到的那几组重跑） |
@@ -206,7 +208,7 @@ settled 不是"命令返回时"发，是"**这条消息引发的工作全部结�
 | `/steer` | 文本进队首 → 下一个回合 | 承载该文本的回合结束 |
 | `/gtw commit` `/gtw pr` | `agent.RunOnce` 同步跑在命令里 | 命令返回时（agent 已跑完） |
 | `/gtw push` | 不跑回合（纯 git push） | 命令返回时 |
-| `/gtw close` `/gtw back` `/gtw config` `/gtw sync` `/gtw abort` | 不跑回合 | 命令返回时 |
+| `/gtw close` `/gtw back` `/gtw config` `/gtw sync` `/gtw abort` `/gtw assign` | 不跑回合 | 命令返回时 |
 | `/cwd` `/use` `/think` `/tools` `/watch` `/format` | 不跑回合 | 命令返回时 |
 | `/new` | 重置会话上下文（不跑回合） | 命令返回时 |
 | `/stop` | 同步结束当前回合 | 被停止的**那条用户消息** settle 成 `cancelled`；`/stop` 自己结算它停掉的那次停（`ok` / `noop` / `failed`） |
@@ -268,16 +270,17 @@ chatsession: message settled chat_id=… message_id=… status=… summary=…
 | `no_agent` | 没有选中的 agent | `/use` / `/review` / `/stop` | 异常 |
 | `unknown_agent` | agent 名没注册 | `/review` | 异常 |
 | `not_a_repo` | 工作区不在 git 仓库里 | `/gtw` | 异常 |
-| `no_remote` | 仓库没有 `origin` remote | `/gtw fix` | 异常 |
-| `provider_error` | git 平台解析 / 连接失败 | `/gtw fix` / `/gtw new` / `/gtw pr` | 异常 |
+| `no_remote` | 仓库没有 `origin` remote | `/gtw fix` / `/gtw assign` | 异常 |
+| `provider_error` | git 平台解析 / 连接失败 | `/gtw fix` / `/gtw new` / `/gtw pr` / `/gtw assign` | 异常 |
 | `invalid_issue` / `invalid_branch` | issue 号 / 分支名不合法 | `/gtw fix` | 异常 |
-| `issue_not_found` / `issue_claimed` | issue 不存在 / 已被别的 fix 占用 | `/gtw fix` | 异常 |
+| `issue_not_found` | issue 不存在 | `/gtw fix` / `/gtw assign` | 异常 |
+| `issue_claimed` | 已被别的 fix 占用 | `/gtw fix` | 异常 |
 | `issue_in_state` | issue 带着 `nightme/assigned` 以外的 `nightme/*` 状态 label，别的 agent 正在做 | `/gtw fix` | 异常 |
 | `no_candidate` | `/gtw fix *` 的队列里没有可选项（`Data` 带 `wake_after`） | `/gtw fix` | 正常分支 |
 | `branch_exists` | 分支已经存在 | `/gtw fix` | 异常 |
 | `already_active` | 当前目录已经在一个 `/gtw fix` 里 | `/gtw fix` | 异常 |
 | `no_changes` | agent 的回合结束了，但工作区一个改动都没留下 | `/gtw fix` | 异常 |
-| `label_error` | issue 标签没能加上 | `/gtw fix` | 异常 |
+| `label_error` | issue 标签没能加上 / 摘掉 | `/gtw fix` / `/gtw assign` | 异常 |
 | `bad_state` | `.nightme/gtw.yml` 缺失 / 损坏 / 读不了 | `/gtw close` / `/gtw back` | 异常 |
 | `no_active_fix` | 这个聊天没有正在进行的 fix | `/gtw close` / `/gtw back` | 异常 |
 | `dirty` | 工作区有未提交的改动 | `/gtw push` / `/gtw close` | 异常 |

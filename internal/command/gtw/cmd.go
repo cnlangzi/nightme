@@ -293,23 +293,24 @@ func (f *Factory) Spec() command.Spec {
 		Name:    "gtw",
 		Aliases: []string{"team"},
 		Summary: "GTW: Git-driven team workflow (claim, label, worktree).",
-		Usage: "/gtw plan [topic]                 put the agent in plan mode: settle the design before any change\n" +
-			"/gtw new [<material>]              have the agent draft issues from this chat's discussion, with the material in the same message\n" +
-			"/gtw new -y                       create the issues from the reviewed drafts\n" +
-			"/gtw fix <issue-id> [-y|--yes]   claim, label, and create a worktree\n" +
-			"/gtw fix * [-y|--yes]            pick the next assigned issue and fix it\n" +
-			"/gtw fix --name <branch>          create a local worktree (no issue)\n" +
-			"/gtw close [--reset]              finalize the issue labels, tear down the worktree, and sync main\n" +
-			"/gtw back                         exit the fix worktree (cwd → repoRoot) and sync main — worktree preserved\n" +
-			"/gtw back <branch>                 enter the worktree whose branch starts with <branch> (cwd → worktree); repairs a missing .nightme/gtw.yml\n" +
-			"/gtw commit [-a <agent>]          commit uncommitted work via the configured agent (no push)\n" +
-			"/gtw push                         push the worktree branch (clean only — refuses dirty)\n" +
-			"/gtw pr [-a <agent>] [--ready]    generate PR title+body, then open the PR\n" +
-			"/gtw pr -a claude                 override which agent runs the one-shot\n" +
-			"/gtw config lang [value]          show or set the output language for this repository\n" +
-			"/gtw config -g lang [value]       show or set the user-level output language\n" +
-			"/gtw sync                         checkout the default branch and pull --rebase from origin\n" +
-			"/gtw abort                        cancel the /gtw command currently running in this chat",
+		Usage: "/gtw plan [topic]                   put the agent in plan mode: settle the design before any change\n" +
+			"/gtw new [<material>]                have the agent draft issues from this chat's discussion, with the material in the same message\n" +
+			"/gtw new -y                         create the issues from the reviewed drafts\n" +
+			"/gtw fix <issue-id> [-y|--yes]     claim, label, and create a worktree\n" +
+			"/gtw fix * [-y|--yes]              pick the next assigned issue and fix it\n" +
+			"/gtw fix --name <branch>            create a local worktree (no issue)\n" +
+			"/gtw assign <issue-id> [--remove|-r] attach or remove the `nightme/assigned` queue marker\n" +
+			"/gtw close [--reset]                finalize the issue labels, tear down the worktree, and sync main\n" +
+			"/gtw back                           exit the fix worktree (cwd → repoRoot) and sync main — worktree preserved\n" +
+			"/gtw back <branch>                  enter the worktree whose branch starts with <branch> (cwd → worktree); repairs a missing .nightme/gtw.yml\n" +
+			"/gtw commit [-a <agent>]            commit uncommitted work via the configured agent (no push)\n" +
+			"/gtw push                           push the worktree branch (clean only — refuses dirty)\n" +
+			"/gtw pr [-a <agent>] [--ready]      generate PR title+body, then open the PR\n" +
+			"/gtw pr -a claude                   override which agent runs the one-shot\n" +
+			"/gtw config lang [value]            show or set the output language for this repository\n" +
+			"/gtw config -g lang [value]         show or set the user-level output language\n" +
+			"/gtw sync                           checkout the default branch and pull --rebase from origin\n" +
+			"/gtw abort                          cancel the /gtw command currently running in this chat",
 		Subcommands: []command.SubcommandSpec{
 			{
 				Name:    "plan",
@@ -325,6 +326,11 @@ func (f *Factory) Spec() command.Spec {
 				Name:    "fix",
 				Summary: "claim an issue, create a worktree, dispatch to the agent",
 				Usage:   fixCmdSpec.Usage,
+			},
+			{
+				Name:    "assign",
+				Summary: "attach the `nightme/assigned` queue marker to an issue, or take it off again",
+				Usage:   assignCmdSpec.Usage,
 			},
 			{Name: "close", Summary: "finalize the issue labels, tear down the worktree, delete the branch, and sync main", Usage: closeCmdSpec.Usage},
 			{Name: "back", Summary: "exit the fix worktree (cwd → repoRoot) and sync main; `/gtw back <branch>` jumps into the worktree of that branch", Usage: "/gtw back [<branch>]"},
@@ -396,7 +402,9 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, mgr *c
 	// every chat, so its read-modify-write is serialised by
 	// configWriteMu rather than by the per-chat lock. /gtw abort
 	// takes no lock either — it must not queue behind the very
-	// command it has to cancel.
+	// command it has to cancel. /gtw assign flips a label on the
+	// tracker and touches nothing else, so it needs no lock either
+	// — see RunAssign for the label-write window that leaves open.
 	switch input.Args[1] {
 	case "plan":
 		return f.runPlan(ctx, cs, input)
@@ -406,6 +414,8 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, mgr *c
 		return f.runConfig(ctx, cs, input)
 	case "abort":
 		return f.runAbort(ctx, cs, input)
+	case "assign":
+		return f.runAssign(ctx, cs, input)
 	}
 
 	// The run's own context: cancellable with ErrAborted so
@@ -490,6 +500,26 @@ func (f *Factory) runPlan(ctx context.Context, cs *chatsession.ChatSession, inpu
 	}
 	topic, _ := gtwTail(input)
 	_, _ = RunPlan(ctx, cs, f.deps, input.ChatID, input.MessageID, topic)
+	return &command.SlashOutput{Consumed: true}, nil
+}
+
+// runAssign handles `/gtw assign <issue-id> [--remove|-r]`: it puts
+// the queue marker `nightme/assigned` on an issue, or takes it off.
+//
+// The command touches the tracker and nothing else — no worktree, no
+// branch, no agent, no state file — so it takes no run lock, fires no
+// hooks and dispatches no agent.
+func (f *Factory) runAssign(ctx context.Context, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
+	args, err := parseAssignArgs(input.Args[2:])
+	if err != nil {
+		reportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
+		return &command.SlashOutput{
+			Reply:    fmt.Sprintf("❌ %v", err),
+			Consumed: true,
+		}, nil
+	}
+
+	_, _ = RunAssign(ctx, cs, f.deps, input.ChatID, input.MessageID, args.IssueID, args.Remove)
 	return &command.SlashOutput{Consumed: true}, nil
 }
 

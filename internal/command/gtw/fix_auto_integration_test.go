@@ -167,7 +167,7 @@ func TestFixAuto_HeldQueue_ReplyNamesTheHold(t *testing.T) {
 	if !strings.Contains(last, "are held") {
 		t.Errorf("reply must name the hold as the reason the queue is empty:\n%s", last)
 	}
-	if strings.Contains(last, "attach it to an issue") {
+	if strings.Contains(last, "run `/gtw assign") {
 		t.Errorf("reply must not ask for a label that is already attached:\n%s", last)
 	}
 }
@@ -266,8 +266,8 @@ func TestFixAuto_NoCandidate_OutcomeCarriesWakeUp(t *testing.T) {
 // TestFixAuto_ClaimedIssueIsNotOfferedAgain pins that a claimed
 // issue drops out of the automatic queue for good: the claim
 // marker `nightme/wip` stays on the issue and the pick filter drops
-// every issue that carries it. gtw never removes the queue marker,
-// so it is not what keeps the issue out; the claim is.
+// every issue that carries it. The automatic flows never remove the
+// queue marker, so it is not what keeps the issue out; the claim is.
 //
 // The close is not driven here: it resolves its provider from the
 // yml's cached platform, which in this rig is the real GitHub — a

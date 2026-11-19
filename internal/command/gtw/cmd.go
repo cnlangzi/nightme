@@ -403,7 +403,8 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, mgr *c
 	// configWriteMu rather than by the per-chat lock. /gtw abort
 	// takes no lock either — it must not queue behind the very
 	// command it has to cancel. /gtw assign flips a label on the
-	// tracker and touches nothing else, so it needs no lock either.
+	// tracker and touches nothing else, so it needs no lock either
+	// — see RunAssign for the label-write window that leaves open.
 	switch input.Args[1] {
 	case "plan":
 		return f.runPlan(ctx, cs, input)

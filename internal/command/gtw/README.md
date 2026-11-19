@@ -683,7 +683,7 @@ label 时走 claim 拒绝 —— 它此刻正被一个 fix 持着。
 → issue: owner/repo#42 — Login state expiration
 → label: `nightme/assigned`
 → url:   https://github.com/owner/repo/issues/42
-↳ `/gtw fix *` picks it up on the next run
+↳ `/gtw fix *` picks the oldest eligible issue — this one is queued
 ```
 
 标签本来就在时,抬头说明没变:
@@ -693,17 +693,28 @@ label 时走 claim 拒绝 —— 它此刻正被一个 fix 持着。
 → issue: owner/repo#42 — Login state expiration
 → label: `nightme/assigned`
 → url:   https://github.com/owner/repo/issues/42
-↳ `/gtw fix *` picks it up on the next run
+↳ `/gtw fix *` picks the oldest eligible issue — this one is queued
 ```
 
-摘标记时,末行说的是它离队了:
+摘标记时,末行说的是队列标记离身了:
 
 ```
 ✅ `nightme/assigned` removed from #42
 → issue: owner/repo#42 — Login state expiration
 → label: `nightme/assigned`
 → url:   https://github.com/owner/repo/issues/42
-↳ the issue is out of the `/gtw fix *` queue
+↳ the queue marker is off the issue — `/gtw fix *` will not offer it
+```
+
+末行说的是 issue 在队列里的位置,不会许一个不会来的挑选。队列只收 open
+的 issue:issue 已经关掉时末行说这件事。
+
+```
+✅ `nightme/assigned` added to #42
+→ issue: owner/repo#42 — Login state expiration
+→ label: `nightme/assigned`
+→ url:   https://github.com/owner/repo/issues/42
+↳ the `/gtw fix *` queue holds open issues — this one is closed
 ```
 
 issue 带着别的 `nightme/*` 状态 label 时,末行说的是它仍然不入队 —— 队列
@@ -725,7 +736,7 @@ issue 带着别的 `nightme/*` 状态 label 时,末行说的是它仍然不入�
 → issue: owner/repo#42 — Login state expiration
 → label: `nightme/assigned`
 → url:   https://github.com/owner/repo/issues/42
-↳ the issue is out of the `/gtw fix *` queue
+↳ the queue marker is off the issue — `/gtw fix *` will not offer it
 ```
 
 ---

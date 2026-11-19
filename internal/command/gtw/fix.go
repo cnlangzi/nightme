@@ -267,48 +267,21 @@ func runFixRemote(
 	// retrying /gtw fix.
 
 	// --- locate repo + remote (§5.2.② prep) -----------------------
-	repoRoot, err := RepoRoot(ctx, cs.SelectedCwd(), deps.Git)
-	if err != nil {
-		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-			"❌ Not in a git repository. Run /cwd <inside a repo> first.",
-			command.FailedOutcome("not_a_repo", "the workspace is not inside a git repository")), nil
-	}
-	remoteURL, err := RemoteOriginURL(ctx, repoRoot, deps.Git)
-	if err != nil || remoteURL == "" {
-		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-			"❌ No `origin` remote. Add one with `git remote add origin <url>`.",
-			command.FailedOutcome("no_remote", "the repository has no origin remote")), nil
-	}
 	// The worktree doesn't exist yet at this point — runFixRemote
 	// runs BEFORE WorktreeAdd so we can use provider hints to name
 	// the worktree. But provider.GetIssue / AddIssueLabel calls below
-	// still need a valid CWD so `gh` can fork `git`. Pass repoRoot
-	// — it's always a real directory (we just computed it from
-	// `git rev-parse --show-toplevel`), so the CWD contract holds
-	// even when the daemon's own CWD has been stale'd.
-	provider, err := detectProvider(ctx, deps, remoteURL, repoRoot)
-	if err != nil {
-		// D3 split: distinguish "URL is malformed" (user error),
-		// "daemon can't reach the host" (network) from "host not
-		// recognised as GitHub/GitLab". The card and the summary
-		// live in providerErrorCard so every command that resolves a
-		// provider reads the same words.
-		card, summary := providerErrorCard(remoteURL, err)
-		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, card,
-			command.FailedOutcome("provider_error", summary)), nil
+	// still need a valid CWD so `gh` can fork `git`. The resolver
+	// passes the repository root — it's always a real directory (it
+	// comes from `git rev-parse --show-toplevel`), so the CWD
+	// contract holds even when the daemon's own CWD has been stale'd.
+	target, res := resolveRemoteTarget(ctx, cs, deps, chatID, messageID)
+	if res != nil {
+		return res, nil
 	}
-	if provider == nil {
-		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-			"❌ Provider detection returned no result (deps.Detect override bug).",
-			command.FailedOutcome("provider_error", "the git platform could not be detected")), nil
-	}
+	repoRoot := target.RepoRoot
+	provider := target.Provider
 	providerKind := provider.Kind()
-	owner, repo, err := ParseRepoOwner(remoteURL)
-	if err != nil {
-		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ Cannot parse owner/repo from remote URL %s.", redactForDisplay(remoteURL)),
-			command.FailedOutcome("provider_error", "the remote URL does not name a repository")), nil
-	}
+	owner, repo := target.Owner, target.Repo
 
 	// --- ensure the gtw label catalog (§5.2.①) -------------------
 	// The repository's catalog must hold every label in AllLabels

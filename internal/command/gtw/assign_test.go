@@ -304,6 +304,71 @@ func TestAssign_CatalogCheckWarnsOnRemove(t *testing.T) {
 	assertOutcome(t, got, messages.OutcomeOK, map[string]string{"action": "removed"})
 }
 
+// TestAssign_LabelWriteFailure_ReportsLabelError pins the reason
+// code of a failed label write: the label did not land, which is
+// what `label_error` means — the same code /gtw fix reports.
+func TestAssign_LabelWriteFailure_ReportsLabelError(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		err  error
+	}{
+		{"add", []string{"42"}, errors.New("HTTP 403: missing label write scope")},
+		{"remove", []string{"42", "--remove"}, errors.New("HTTP 403: missing label write scope")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rig := newAssignRig(t)
+			rig.seedIssue(42, "Login state expiration")
+			rig.prov.SetAddIssueLabelErr(tc.err)
+			rig.prov.SetRemoveIssueLabelErr(tc.err)
+
+			rig.drive(t, tc.args...)
+
+			got := rig.settle(t)
+			assertOutcome(t, got, messages.OutcomeFailed, map[string]string{"reason": "label_error"})
+		})
+	}
+}
+
+// TestAssign_ClosedIssue_MakesNoPickPromise pins that the card does
+// not promise a pick the queue cannot deliver: the queue holds open
+// issues only.
+func TestAssign_ClosedIssue_MakesNoPickPromise(t *testing.T) {
+	rig := newAssignRig(t)
+	rig.prov.SetIssue(42, &Issue{
+		ID:    42,
+		Title: "Login state expiration",
+		State: "closed",
+		URL:   "https://github.com/cnlangzi/nightme/issues/42",
+	})
+
+	last := rig.drive(t, "42")
+
+	if strings.Contains(last, "picks it up on the next run") {
+		t.Errorf("reply must not promise a pick of a closed issue:\n%s", last)
+	}
+	if !strings.Contains(last, "queue holds open issues") {
+		t.Errorf("reply must say the queue holds open issues:\n%s", last)
+	}
+}
+
+// TestAssign_HeldIssue_MakesNoPickPromise is the same promise, for
+// an issue another agent holds.
+func TestAssign_HeldIssue_MakesNoPickPromise(t *testing.T) {
+	rig := newAssignRig(t)
+	rig.seedIssue(42, "Login state expiration", LabelWIP)
+
+	last := rig.drive(t, "42")
+
+	if strings.Contains(last, "picks it up on the next run") {
+		t.Errorf("reply must not promise a pick of a held issue:\n%s", last)
+	}
+	if !strings.Contains(last, LabelWIP) {
+		t.Errorf("reply must name the label that holds the issue:\n%s", last)
+	}
+}
+
 // TestAssign_UnknownIssue pins the error card of a missing issue:
 // the same shape as /gtw fix's.
 func TestAssign_UnknownIssue(t *testing.T) {

@@ -93,6 +93,14 @@ func parseAssignArgs(argv []string) (assignArgs, error) {
 // bookkeeping, and which issues the automatic pick may offer is the
 // pick's own filter (see selectNextAssignedIssue). A refusal would
 // add a second, drift-prone definition of eligibility.
+//
+// It takes no per-chat run lock. The platform's label API is a
+// read-modify-write of the issue's whole label set, so two label
+// writers on one issue can lose one another's change — that window
+// already exists between two chats, and the run lock is per chat
+// anyway. What the lock would buy here is a narrower one: /gtw fix
+// and /gtw close cannot run at the same time as this command in the
+// same chat.
 func RunAssign(
 	ctx context.Context,
 	cs *chatsession.ChatSession,
@@ -107,40 +115,18 @@ func RunAssign(
 			command.FailedOutcome("no_cwd", "the command needs an active workspace")), nil
 	}
 
-	repoRoot, err := RepoRoot(ctx, cs.SelectedCwd(), deps.Git)
-	if err != nil {
-		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-			"❌ Not in a git repository. Run /cwd <inside a repo> first.",
-			command.FailedOutcome("not_a_repo", "the workspace is not inside a git repository")), nil
+	target, res := resolveRemoteTarget(ctx, cs, deps, chatID, messageID)
+	if res != nil {
+		return res, nil
 	}
-	remoteURL, err := RemoteOriginURL(ctx, repoRoot, deps.Git)
-	if err != nil || remoteURL == "" {
-		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-			"❌ No `origin` remote. Add one with `git remote add origin <url>`.",
-			command.FailedOutcome("no_remote", "the repository has no origin remote")), nil
-	}
-	provider, err := detectProvider(ctx, deps, remoteURL, repoRoot)
-	if err != nil {
-		card, summary := providerErrorCard(remoteURL, err)
-		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, card,
-			command.FailedOutcome("provider_error", summary)), nil
-	}
-	if provider == nil {
-		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-			"❌ Provider detection returned no result (deps.Detect override bug).",
-			command.FailedOutcome("provider_error", "the git platform could not be detected")), nil
-	}
-	owner, repo, err := ParseRepoOwner(remoteURL)
-	if err != nil {
-		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ Cannot parse owner/repo from remote URL %s.", redactForDisplay(remoteURL)),
-			command.FailedOutcome("provider_error", "the remote URL does not name a repository")), nil
-	}
+	provider := target.Provider
+	owner, repo := target.Owner, target.Repo
 
-	// The catalog check runs before the mutation. Adding the marker
-	// needs it in the catalog; removing it does not — a repository
-	// whose catalog cannot be read is still a repository whose issue
-	// can lose a label.
+	// The catalog check runs before the mutation. It also repairs the
+	// catalog — it creates the labels the repository is missing — so
+	// it runs on the remove path too; a repository whose catalog
+	// cannot be read is still a repository whose issue can lose a
+	// label, and the removal goes ahead with a warning.
 	var warning string
 	if _, err := ensureRepoLabels(ctx, deps, provider, owner, repo); err != nil {
 		if !remove {
@@ -172,63 +158,90 @@ func RunAssign(
 		if err := provider.RemoveIssueLabel(ctx, owner, repo, issueID, LabelAssigned); err != nil {
 			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 				fmt.Sprintf("❌ Failed to remove %s from issue #%d: %v", LabelAssigned, issueID, err),
-				command.FailedOutcome("provider_error", "the label could not be removed")), nil
+				command.FailedOutcome("label_error", "the label could not be removed")), nil
 		}
 	} else {
 		if err := provider.AddIssueLabel(ctx, owner, repo, issueID, LabelAssigned); err != nil {
 			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 				fmt.Sprintf("❌ Failed to add %s to issue #%d: %v", LabelAssigned, issueID, err),
-				command.FailedOutcome("provider_error", "the label could not be added")), nil
+				command.FailedOutcome("label_error", "the label could not be added")), nil
 		}
 	}
 
-	action := "added"
-	summary := fmt.Sprintf("the queue marker was added to issue #%d", issueID)
-	if remove {
-		action = "removed"
-		summary = fmt.Sprintf("the queue marker was removed from issue #%d", issueID)
-	}
-	if had != remove {
-		// Nothing changed: the marker was already where the user
-		// wanted it.
-		if remove {
-			summary = fmt.Sprintf("issue #%d did not carry the queue marker", issueID)
-		} else {
-			summary = fmt.Sprintf("issue #%d already carried the queue marker", issueID)
-		}
-	}
+	result := assignResultFor(issueID, remove, had)
 	out := messages.Outcome{
 		Status:  messages.OutcomeOK,
-		Summary: summary,
+		Summary: result.summary,
 		Data: map[string]string{
 			"issue":  strconv.Itoa(issueID),
 			"url":    issue.URL,
-			"action": action,
+			"action": result.action,
 		},
 	}
-	body := renderAssignCard(issue, owner+"/"+repo, remove, had)
+	body := renderAssignCard(issue, owner+"/"+repo, result)
 	return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 		prependWarning(body, warning), out), nil
 }
 
-// renderAssignCard builds the /gtw assign card (Format 1: a header
-// line plus `→ field: value` rows).
+// assignResult is what the command did to the queue marker: the
+// card's header line, the outcome summary, and the operation the
+// outcome reports.
 //
-// `had` is what the issue carried before the call — the card says
-// whether anything changed, so an idempotent call does not claim a
-// change it did not make.
-func renderAssignCard(issue *Issue, repo string, remove, had bool) string {
-	var b strings.Builder
+// One value carries all three so the card and the outcome cannot
+// disagree about whether anything changed.
+type assignResult struct {
+	// header is the card's title line, without the ✅.
+	header string
+	// summary is the outcome's one-line restatement.
+	summary string
+	// action is the operation the outcome reports: "added" or
+	// "removed" — the operation the user asked for, which on a
+	// no-op is the operation the label was already in.
+	action string
+}
+
+// assignResultFor names what the command did, given whether the
+// marker was on the issue before the call.
+//
+// The marker is idempotent to attach and to detach, so the provider
+// call happens either way; what differs is what the user is told.
+// The card says "nothing changed" when the marker was already where
+// the user wanted it, so an idempotent call never claims a change it
+// did not make.
+func assignResultFor(issueID int, remove, had bool) assignResult {
 	switch {
 	case remove && had:
-		fmt.Fprintf(&b, "✅ `%s` removed from #%d\n", LabelAssigned, issue.ID)
+		return assignResult{
+			header:  fmt.Sprintf("`%s` removed from #%d", LabelAssigned, issueID),
+			summary: fmt.Sprintf("the queue marker was removed from issue #%d", issueID),
+			action:  "removed",
+		}
 	case remove:
-		fmt.Fprintf(&b, "✅ `%s` was not on #%d — nothing changed\n", LabelAssigned, issue.ID)
+		return assignResult{
+			header:  fmt.Sprintf("`%s` was not on #%d — nothing changed", LabelAssigned, issueID),
+			summary: fmt.Sprintf("issue #%d did not carry the queue marker", issueID),
+			action:  "removed",
+		}
 	case had:
-		fmt.Fprintf(&b, "✅ `%s` was already on #%d — nothing changed\n", LabelAssigned, issue.ID)
+		return assignResult{
+			header:  fmt.Sprintf("`%s` was already on #%d — nothing changed", LabelAssigned, issueID),
+			summary: fmt.Sprintf("issue #%d already carried the queue marker", issueID),
+			action:  "added",
+		}
 	default:
-		fmt.Fprintf(&b, "✅ `%s` added to #%d\n", LabelAssigned, issue.ID)
+		return assignResult{
+			header:  fmt.Sprintf("`%s` added to #%d", LabelAssigned, issueID),
+			summary: fmt.Sprintf("the queue marker was added to issue #%d", issueID),
+			action:  "added",
+		}
 	}
+}
+
+// renderAssignCard builds the /gtw assign card (Format 1: a header
+// line plus `→ field: value` rows).
+func renderAssignCard(issue *Issue, repo string, result assignResult) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "✅ %s\n", result.header)
 	fmt.Fprintf(&b, "→ issue: %s#%d", repo, issue.ID)
 	if issue.Title != "" {
 		fmt.Fprintf(&b, " — %s", issue.Title)
@@ -238,25 +251,26 @@ func renderAssignCard(issue *Issue, repo string, remove, had bool) string {
 	if issue.URL != "" {
 		fmt.Fprintf(&b, "→ url:   %s\n", issue.URL)
 	}
-	b.WriteString(assignHint(issue, remove, had))
+	b.WriteString(assignHint(issue, result))
 	return b.String()
 }
 
-// assignHint is the card's closing hint: what the change means for
-// the queue. An issue held by another agent stays out of the queue
-// whatever the marker says, so the hint says so rather than
-// promising a pick that will not come.
-func assignHint(issue *Issue, remove, had bool) string {
+// assignHint is the card's closing hint: where the issue stands in
+// the `/gtw fix *` queue after the command.
+//
+// The hint never promises a pick that will not come. The queue holds
+// open issues that carry the queue marker alone: a closed issue is
+// not in it, and an issue another agent holds is not offered either.
+func assignHint(issue *Issue, result assignResult) string {
+	held := heldLabel(issue)
 	switch {
-	case remove:
-		if had {
-			return "↳ the issue is out of the `/gtw fix *` queue\n"
-		}
-		return "↳ nothing changed\n"
+	case result.action == "removed":
+		return "↳ the queue marker is off the issue — `/gtw fix *` will not offer it\n"
+	case issue.State == "closed":
+		return "↳ the `/gtw fix *` queue holds open issues — this one is closed\n"
+	case held != "":
+		return fmt.Sprintf("↳ `%s` on this issue keeps it out of the `/gtw fix *` queue\n", held)
 	default:
-		if held := heldLabel(issue); held != "" {
-			return fmt.Sprintf("↳ `%s` on this issue keeps it out of the `/gtw fix *` queue\n", held)
-		}
-		return "↳ `/gtw fix *` picks it up on the next run\n"
+		return "↳ `/gtw fix *` picks the oldest eligible issue — this one is queued\n"
 	}
 }

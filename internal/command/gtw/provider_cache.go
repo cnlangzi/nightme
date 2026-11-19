@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+
+	"github.com/cnlangzi/nightme/internal/chatsession"
+	"github.com/cnlangzi/nightme/internal/command"
 )
 
 // providerIdentity is the cacheable half of a detected provider.
@@ -146,8 +149,8 @@ func (d HandlerDeps) prober() HTTPProber {
 // the network's, and an unrecognised host is a platform nightme does
 // not speak to. The remote URL is redacted — it may carry userinfo.
 //
-// Every command that resolves a provider reads its card here, so
-// the paths cannot drift apart.
+// The commands that answer the user with a card read it here, so
+// their cards cannot drift apart.
 func providerErrorCard(remoteURL string, err error) (card, summary string) {
 	redacted := redactForDisplay(remoteURL)
 	switch {
@@ -165,4 +168,76 @@ func providerErrorCard(remoteURL string, err error) (card, summary string) {
 		return fmt.Sprintf("❌ 暂不支持的 Git 平台 (host: %s — neither github.com/gitlab.com URL hint nor /api/v3/meta or /api/v4/version probe recognised it).", redacted),
 			"the git platform is not supported"
 	}
+}
+
+// remoteTarget is the tracker a command talks to: the repository the
+// chat's current working directory lives in, and the provider behind
+// its origin remote.
+type remoteTarget struct {
+	// RepoRoot is the repository root of the chat's cwd.
+	RepoRoot string
+	// Provider is the resolved platform provider.
+	Provider GitProvider
+	// Owner and Repo are the "owner/repo" half of the remote URL.
+	Owner string
+	Repo  string
+}
+
+// resolveRemoteTarget resolves the tracker for the chat's current
+// working directory.
+//
+// It answers the user itself when the resolution fails: the reply is
+// sent and the outcome reported, and a non-nil *Result comes back —
+// the same shape loadDispatchContext uses. The caller returns that
+// result verbatim.
+//
+// The chat's cwd must be set; the callers check that before they
+// get here.
+func resolveRemoteTarget(
+	ctx context.Context,
+	cs *chatsession.ChatSession,
+	deps HandlerDeps,
+	chatID, messageID string,
+) (remoteTarget, *Result) {
+	repoRoot, err := RepoRoot(ctx, cs.SelectedCwd(), deps.Git)
+	if err != nil {
+		return remoteTarget{}, replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+			"❌ Not in a git repository. Run /cwd <inside a repo> first.",
+			command.FailedOutcome("not_a_repo", "the workspace is not inside a git repository"))
+	}
+	remoteURL, err := RemoteOriginURL(ctx, repoRoot, deps.Git)
+	if err != nil || remoteURL == "" {
+		return remoteTarget{}, replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+			"❌ No `origin` remote. Add one with `git remote add origin <url>`.",
+			command.FailedOutcome("no_remote", "the repository has no origin remote"))
+	}
+	// The provider needs a real directory to run gh / glab in — the
+	// repository root is one, even when the daemon's own cwd is
+	// stale.
+	provider, err := detectProvider(ctx, deps, remoteURL, repoRoot)
+	if err != nil {
+		// D3 split: distinguish "URL is malformed" (user error),
+		// "daemon can't reach the host" (network) from "host not
+		// recognised as GitHub/GitLab".
+		card, summary := providerErrorCard(remoteURL, err)
+		return remoteTarget{}, replyOutcome(ctx, cs.Emitter(), chatID, messageID, card,
+			command.FailedOutcome("provider_error", summary))
+	}
+	if provider == nil {
+		return remoteTarget{}, replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+			"❌ Provider detection returned no result (deps.Detect override bug).",
+			command.FailedOutcome("provider_error", "the git platform could not be detected"))
+	}
+	owner, repo, err := ParseRepoOwner(remoteURL)
+	if err != nil {
+		return remoteTarget{}, replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+			fmt.Sprintf("❌ Cannot parse owner/repo from remote URL %s.", redactForDisplay(remoteURL)),
+			command.FailedOutcome("provider_error", "the remote URL does not name a repository"))
+	}
+	return remoteTarget{
+		RepoRoot: repoRoot,
+		Provider: provider,
+		Owner:    owner,
+		Repo:     repo,
+	}, nil
 }

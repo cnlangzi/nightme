@@ -1439,13 +1439,14 @@ func (s *Service) persist(r *run) {
 		return
 	}
 	path := s.statePath(r.id)
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+	tmp, err := writeStateTemp(path, raw)
+	if err != nil {
 		s.logger.Warn("me: the run state could not be written", "run_id", r.id, "err", err)
 		return
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := replaceStateFile(tmp, path); err != nil {
 		s.logger.Warn("me: the run state could not be replaced", "run_id", r.id, "err", err)
+		_ = os.Remove(tmp)
 	}
 }
 

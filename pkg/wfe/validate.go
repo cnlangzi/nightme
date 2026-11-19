@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -254,6 +255,13 @@ func checkSemantics(wf *Workflow, root *yaml.Node) []Diagnostic {
 		if job.Iterations != nil && *job.Iterations < 0 {
 			diags = append(diags, diagnosticAt(mappingValue(jobMapping, "iterations"),
 				fmt.Errorf("job %q: iterations must be >= 0", name)))
+		}
+		if job.Sleep != "" {
+			// The gap is a duration, the way the wait of a step is one.
+			if _, err := time.ParseDuration(job.Sleep); err != nil {
+				diags = append(diags, diagnosticAt(mappingValue(jobMapping, "sleep"),
+					fmt.Errorf("job %q: sleep: %q is not a duration", name, job.Sleep)))
+			}
 		}
 	}
 	// The circle is only worth reporting when every job can be placed:

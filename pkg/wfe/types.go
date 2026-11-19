@@ -84,8 +84,12 @@ type Job struct {
 	// A missing value means one round: the job's steps run once. Zero
 	// means the job's steps run until the run ends. N means the job's
 	// steps run N rounds in total.
-	Iterations *int   `yaml:"iterations,omitempty" json:"iterations,omitempty"`
-	Steps      []Step `yaml:"steps" json:"steps"`
+	Iterations *int `yaml:"iterations,omitempty" json:"iterations,omitempty"`
+	// Sleep is the gap between two rounds of the job.
+	//
+	// A missing value means no gap: the next round starts at once.
+	Sleep string `yaml:"sleep,omitempty" json:"sleep,omitempty"`
+	Steps []Step `yaml:"steps" json:"steps"`
 }
 
 // Rounds returns how many rounds the job runs.
@@ -96,6 +100,17 @@ func (j Job) Rounds() int {
 		return 1
 	}
 	return *j.Iterations
+}
+
+// Gap returns the time between two rounds of the job.
+//
+// A job that names no gap has none: its next round starts at once.
+func (j Job) Gap() time.Duration {
+	d, err := time.ParseDuration(j.Sleep)
+	if err != nil || d < 0 {
+		return 0
+	}
+	return d
 }
 
 // OverrideIterations sets the round count of every job of the

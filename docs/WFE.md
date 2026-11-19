@@ -341,9 +341,14 @@ jobs:
 | `needs` | string \| string[] | ❌ | Other job(s) this one waits for. |
 | `if` | string | ❌ | Condition expression (see §6). A job whose condition does not hold is skipped. |
 | `iterations` | int | ❌ | How many rounds the job runs. Missing means one round, `0` means the job's steps run until the run ends, `N` means `N` rounds in total. `/me start -i <rounds>` overrides it for that run (see §8.9). |
+| `sleep` | duration | ❌ | The gap between two rounds of the job. Missing means no gap: the next round starts at once. The value is a Go duration (`30s`, `5m`), the way the `wait` of a step is one; a value that does not parse is refused when the file is loaded. |
 | `steps` | step[] | ✅ | Ordered steps to execute. |
 
 A **round** is one pass through a job's step list. When a round ends, the job starts the next one: the round's step outputs are cleared — so `${{ steps.fix.outputs.data.issue }}` reads the next round's fix — and the per-step budgets start over. The job's `if:` conditions are read from the state of the round that is running.
+
+A job that names a `sleep` waits that long between two of its rounds. The gap is waited after a round ends — whether it ended on its own or the agent ended it early — and before the next round starts. The first round of a job waits for nothing: it starts as soon as the jobs it `needs` have finished. A job whose last round ends waits for nothing either: there is no next round to wait for.
+
+The gap is not a step: it shows up nowhere in the chat and nowhere on the card of the round. `/me stop` and the shutdown of the daemon end the wait at once.
 
 A round in which no step ran does not repeat: a job whose every step is skipped had nothing to do, so it does not start another round. The plan is exhausted and the agent decides whether the run is over.
 
@@ -419,9 +424,9 @@ The step's outputs carry what the command produced: `data.exit_code`, `data.stdo
 
 The step waits five minutes and then reports `ok`. The duration is a Go duration (`30s`, `5m`, `1h30m`); a value that does not parse is refused when the file is loaded. A wait carries no command.
 
-A wait is how a repeating job backs off when there is nothing to do: it belongs at the start of the round, because the expression language has no negation — a wait that runs only when the queue was empty cannot be written as a condition on the step's outcome. A repeating job wants one: without it the rounds follow each other as fast as the chat answers.
+A wait is a step of a round: it waits inside the round, and it runs only when the round reaches it — the expression language has no negation, so a wait that runs only when the queue was empty cannot be written as a condition on the step's outcome. The gap between two rounds of a job is the job's own `sleep` (see §4): the engine keeps it however the round ended, so the back-off of a repeating job survives the round the agent ended early.
 
-`/me stop` ends a wait at once: the wait belongs to the run.
+`/me stop` ends a wait at once: the wait belongs to the run. The same goes for the gap between two rounds.
 
 ### 5.4 `use` — invoke a registered action
 
@@ -542,7 +547,7 @@ jobs:
 
 A final step is normally the last step of its job. It runs in the ordinary order when the round completes. When the round ends early — the agent ends it because there is genuinely nothing left to do — the final step runs in place of the steps the round cut short, and the job starts its next round.
 
-A wait that belongs at the start of the round (the back-off a repeating job wants, see §5.3) has already run when the round ends early, so the back-off is not lost. A wait at the *end* of the round is one of the steps the early end cuts short — mark it `final: true` if it is the back-off you want.
+A wait at the *end* of the round is one of the steps the early end cuts short — mark it `final: true` if it is the back-off you want. The gap between two rounds needs no such care: it is the job's `sleep` (see §4), and the engine keeps it however the round ended.
 
 The author says which step cleans up, so no existing workflow changes meaning: a workflow without a `final: true` step behaves exactly as before.
 
@@ -590,9 +595,8 @@ args:
 jobs:
   ship:
     iterations: 0                     # 0 = the job repeats until the run ends
+    sleep: 5m                         # the gap between two rounds
     steps:
-      - id: wait
-        wait: 5m
       - id: fix
         message: "/gtw fix ${{ args.issue }} -y"
         note: 从 nightme/assigned 队列里挑一个
@@ -617,6 +621,8 @@ jobs:
 The guard on the steps after `fix` reads `data.issue`: a fix that picked an issue reports `issue` in its outcome, a fix that found nothing does not — so the guard means "an issue was picked" and the rest of the round is skipped.
 
 The `close` step is the final step: it runs however the round ends. When the queue was empty, the agent ends the round instead of walking past the work that was never done, and `close` still tidies up the worktree the previous round left behind.
+
+The `sleep` is the gap between two rounds: the round that ends early is followed by five minutes of nothing, and the next round looks at the queue again.
 
 ### 7.2 Build, test and report
 
@@ -744,7 +750,7 @@ The plan reads the **error description** of the previous outcome to tell a norma
 
 A run that has not executed anything yet counts as a normal result, so the first step runs on the fast path.
 
-A round ends when the job's steps are done. The next round starts with the job's first step, the round's step outputs are cleared and the per-step budgets start over. The ready set of the next round is computed from the state of that round.
+A round ends when the job's steps are done. The next round starts with the job's first step, the round's step outputs are cleared and the per-step budgets start over. The ready set of the next round is computed from the state of that round. A job that names a `sleep` waits its gap before that first step runs.
 
 A round can also end early, when the agent ends it: the steps of the round that did not run are recorded as skipped, the job's final step runs in their place, and the round advances as it does after an ordinary round. The step whose exception the agent resolved is not a judgment point any more — the agent has already decided what happens next.
 
@@ -756,6 +762,8 @@ A judgment point is where the workflow cannot decide and the agent does. It is r
 - the plan forks — the ready set holds more than one step, or more than one job is ready to start a round;
 - the ready step is still running — a command waits for an answer;
 - the plan is exhausted — the ready set is empty and no job repeats.
+
+A job that repeats knows how many rounds it runs: when they are spent, the workflow is over and the run ends on its own — no model is asked what comes next. A job that runs one round has no rounds to spend: the plan is exhausted because its steps ran, and the agent still has a say about it.
 
 The agent answers a judgment point with a **directive**:
 

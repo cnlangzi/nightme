@@ -165,6 +165,9 @@ func (s *Service) turn(ctx context.Context, r *run) (bool, error) {
 		if err := r.checkStep(decision.Step); err == nil {
 			r.setJudgment("")
 			r.setJudgmentStep("")
+			if err := s.waitGap(ctx, r, decision.Gap); err != nil {
+				return false, err
+			}
 			if err := s.runPlanStep(ctx, r, decision); err != nil {
 				return false, err
 			}
@@ -181,6 +184,13 @@ func (s *Service) turn(ctx context.Context, r *run) (bool, error) {
 	}
 	r.setJudgment(decision.Reason)
 	r.setJudgmentStep(decision.Subject)
+	if decision.Over {
+		// The workflow is over: the rounds of its jobs are spent and
+		// nothing broke. The run ends on its own — no model is asked
+		// what comes next.
+		s.finishDone(r, s.overSummary(r))
+		return true, nil
+	}
 	if decision.Exhausted && s.goalMet(r) {
 		// Every step ran and the last one ended ok: the goal is met
 		// and no model is asked to say so.
@@ -356,6 +366,37 @@ func (s *Service) runPlanStep(ctx context.Context, r *run, decision wfe.Decision
 	return nil
 }
 
+// waitGap waits out the gap between two rounds of a job.
+//
+// The gap belongs to the run: `/me stop` and the daemon's shutdown end
+// it at once, the way they end the wait of a step.
+func (s *Service) waitGap(ctx context.Context, r *run, gap time.Duration) error {
+	if gap <= 0 {
+		return nil
+	}
+	execCtx, cancel := r.runContext(ctx)
+	defer cancel()
+	timer := time.NewTimer(gap)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-execCtx.Done():
+		return execCtx.Err()
+	}
+}
+
+// overSummary renders how a run that is over says so.
+//
+// A run whose last step ended ok is complete. A run whose last step
+// did not is over: the workflow ran out of rounds, and nothing broke.
+func (s *Service) overSummary(r *run) string {
+	if s.goalMet(r) {
+		return r.workflow.Name + " is complete"
+	}
+	return r.workflow.Name + " is over"
+}
+
 // goalMet reports whether the plan is done and every step ended ok.
 //
 // The title of a workflow is written for a person; the engine can only
@@ -405,6 +446,9 @@ func (s *Service) loopDeciderOnly(ctx context.Context, r *run) error {
 			if err := r.checkStep(decision.Step); err == nil {
 				r.setJudgment("")
 				r.setJudgmentStep("")
+				if err := s.waitGap(ctx, r, decision.Gap); err != nil {
+					return err
+				}
 				if err := s.runPlanStep(ctx, r, decision); err != nil {
 					return err
 				}
@@ -421,6 +465,13 @@ func (s *Service) loopDeciderOnly(ctx context.Context, r *run) error {
 		}
 		r.setJudgment(decision.Reason)
 		r.setJudgmentStep(decision.Subject)
+		if decision.Over {
+			// The workflow is over: the rounds of its jobs are spent
+			// and nothing broke. The run ends on its own — no model is
+			// asked what comes next.
+			s.finishDone(r, s.overSummary(r))
+			return errFinished
+		}
 		if decision.Exhausted && s.goalMet(r) {
 			s.finishDone(r, r.workflow.Name+" is complete")
 			return errFinished

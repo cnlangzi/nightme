@@ -749,14 +749,27 @@ key — is reported in `nightme logs` and left out. The daemon still starts, and
 | `/me start <workflow> [args...] [-i <rounds>]` | Starts a workflow in this chat. `-i` sets how many rounds every job of the workflow runs. A name that carries no owner is the project's own namespace: `coder` is the workflow `nightme/coder`. |
 | `/me reply <text>` | Answers the question the run is waiting for. |
 | `/me pause` | Stops the run after the step it is on. |
-| `/me resume [note]` | Runs the step the run is on again. Its budget for the current round starts over. The note is your instruction. |
-| `/me next [note]` | Skips the step the run is on: the plan goes on with the workflow, and the facts the step produced are kept. The note is your instruction. |
+| `/me resume [note]` | Runs the step the run is on again. Its budget for the current round starts over. The note is your instruction. A step that is running, that succeeded, or that has not run yet is not run again: the state card answers instead. |
+| `/me next [note]` | Skips the step the run is on: the plan goes on with the workflow, and the facts the step produced are kept. The note is your instruction. A step that is running or that succeeded is not skipped: the state card answers instead. |
 | `/me stop` | Cancels the run and leaves the record of the session in the chat. The work the chat agent does on its own goes on to its end. |
 | `/me status` | Shows the state of the run again: the state hangs under the `/me status` message and carries the phase of the run, the tree of the rounds and the checklist of the round. |
 
 The arguments of `/me start` fill the workflow's declared arguments: a positional
 token fills the next argument that is still unassigned, in declaration order, and
 a token of the form `name=value` assigns that argument by name.
+
+`/me resume` and `/me next` decide at command time what they do with the step the
+run is on, and they answer accordingly: the promise only when there is something to
+do, and the state card when there is not.
+
+| The state of the run and of the step | `/me resume` | `/me next` |
+|---|---|---|
+| The run is waiting for an answer | refused: answer it with `/me reply` | refused: answer it with `/me reply` |
+| The step is running | the state card answers | the state card answers |
+| The step succeeded | the state card answers | the state card answers |
+| The step failed or was cancelled | the step runs again | the step is skipped |
+| The step has not run | the plan runs it | the step is skipped |
+| The run is working | the state card answers | the state card answers |
 
 A token that starts with `-` is a flag. `-i <rounds>` (or `--iterations <rounds>`)
 sets how many rounds every job of the workflow runs in that run — `0` means "until
@@ -807,7 +820,7 @@ Two channels can be driven this way: Feishu and Telegram. On any other channel
 The run's lifecycle belongs to the `/me` commands alone: `/close`, `/stop` and
 `/new` end the chat's session, not the run. A person who writes in the chat while
 the run is going takes the chat back — the run stops after the step it is on, and
-`/me resume` runs the step again.
+`/me resume` hands the control back.
 
 ### The fast path and the judgment point
 

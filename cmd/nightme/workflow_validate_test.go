@@ -336,8 +336,7 @@ func TestWorkflowValidate_ANameWithoutAnOwnerIsAWorkflowName(t *testing.T) {
 }
 
 // TestWorkflowValidate_ANameThatAnswersToNoWorkflow — the report
-// names the workflow the command looked for, not a file that was
-// never there.
+// names the argument, not a file that was never there.
 func TestWorkflowValidate_ANameThatAnswersToNoWorkflow(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
@@ -347,8 +346,28 @@ func TestWorkflowValidate_ANameThatAnswersToNoWorkflow(t *testing.T) {
 		err = runRoot("workflow", "validate", "coder")
 		return nil
 	})
-	if !strings.Contains(errOut, `no workflow named "coder"`) {
+	if !strings.Contains(errOut, "coder: no such path, and no workflow of that name") {
 		t.Errorf("stderr = %q, want it to name the workflow it looked for", errOut)
+	}
+	if code := nmerrors.ExitCode(err); code != nmerrors.CodeNotFound {
+		t.Errorf("exit code = %d, want %d", code, nmerrors.CodeNotFound)
+	}
+}
+
+// TestWorkflowValidate_ThePathIsNamedAsItWasTyped — the report writes
+// the argument as it was typed: a Windows path keeps its backslashes.
+func TestWorkflowValidate_ThePathIsNamedAsItWasTyped(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
+	missing := `C:\Users\test\nope.yaml`
+
+	var err error
+	errOut := captureStderr(t, func() error {
+		err = runRoot("workflow", "validate", missing)
+		return nil
+	})
+	if !strings.Contains(errOut, missing) {
+		t.Errorf("stderr = %q, want it to name the path as it was typed", errOut)
 	}
 	if code := nmerrors.ExitCode(err); code != nmerrors.CodeNotFound {
 		t.Errorf("exit code = %d, want %d", code, nmerrors.CodeNotFound)

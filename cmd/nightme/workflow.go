@@ -542,9 +542,11 @@ func runWorkflowValidate(out io.Writer, errOut io.Writer, args []string, asJSON 
 			continue
 		}
 		if len(matched) == 0 {
-			// The name answers to no workflow: the command could not
-			// check what it was asked to check.
-			fmt.Fprintf(errOut, "no workflow named %q\n", path)
+			// The argument is neither a path on disk nor a workflow
+			// name: the command could not check what it was asked to
+			// check. The argument is written as it was typed — a
+			// Windows path keeps its backslashes.
+			fmt.Fprintf(errOut, "%s: no such path, and no workflow of that name\n", path)
 			unreadable = true
 			continue
 		}

@@ -48,9 +48,9 @@ type activeRun struct {
 // boundary — two chats must remain independent.
 //
 // The runtime instantiates one Manager per process and shares
-// it across all chats. The only per-chat state left is the run
-// lock map and the active-run registry that names the command
-// holding each chat's chain.
+// it across all chats. Per-chat state: the run lock map, the
+// active-run registry that names the command holding each chat's
+// chain, and the draft watcher /gtw new armed.
 type Manager struct {
 	// runs is the per-chat run lock that serialises /gtw
 	// subcommand execution. Acquired at the top of
@@ -82,6 +82,17 @@ type Manager struct {
 	// here. Entries are removed when the run is aborted or when
 	// it releases the chain.
 	active sync.Map // map[chatID]*activeRun
+
+	// watchers is the per-chat registry of the draft watcher
+	// /gtw new armed (draft_watch.go). The next /gtw new of the
+	// same chat replaces the entry; entries are never freed
+	// otherwise — a watcher costs one bus subscription.
+	watchers sync.Map // map[chatID]*draftWatcher
+
+	// watcherMu serialises armDrafts' take-old + unsubscribe +
+	// store-new sequence, so one chat never has two active
+	// watchers.
+	watcherMu sync.Mutex
 }
 
 // NewManager returns an empty Manager. The run lock map is

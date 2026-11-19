@@ -525,7 +525,7 @@ func (f *Factory) runNew(ctx context.Context, _ command.RuntimeServices, cs *cha
 		if notes := formatLoadNotes(loadNotes); notes != "" {
 			_ = reply(ctx, cs.Emitter(), input.ChatID, input.MessageID, notes)
 		}
-		_, _ = RunNewDraft(ctx, cs, f.deps, input.ChatID, input.MessageID, cfg, args.Answers)
+		_, _ = RunNewDraft(ctx, cs, f.deps, f.mgr, input.ChatID, input.MessageID, cfg, args.Answers)
 		return &command.SlashOutput{Consumed: true}, nil
 	}
 

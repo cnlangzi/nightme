@@ -63,6 +63,7 @@ type materialRig struct {
 	cs   *chatsession.ChatSession
 	prov *fakeGitProvider
 	cap  *captureAgent
+	ch   *recordingCh
 }
 
 func newMaterialRig(t *testing.T, chatID string) *materialRig {
@@ -91,7 +92,7 @@ func newMaterialRig(t *testing.T, chatID string) *materialRig {
 		Detect: fakeDetect(prov),
 		Now:    time.Now,
 	})
-	return &materialRig{f: f, cs: cs, prov: prov, cap: cap}
+	return &materialRig{f: f, cs: cs, prov: prov, cap: cap, ch: ch}
 }
 
 // draftDir is the chat's issue draft directory.

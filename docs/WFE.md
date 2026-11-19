@@ -1022,38 +1022,59 @@ published once, when the round opens, and is never published again — a
 published entry cannot be edited.
 
 ```
-rounds:
-├─ [ √ ] 1: 10:33:04 · 5m25s decisions:  system-1 ×1 · operator ×1 ·  tokens - 32.4k / 8.1k
-├─ [ ! ] 2: 10:38:29 · 5m14s decisions:  system-1 ×1 · operator ×1 ·  tokens - 32.4k / 8.1k
-├─ [ √ ] 3: 10:43:43 · 5m14s decisions:  system-1 ×1 · operator ×1 ·  tokens - 32.4k / 8.1k
-└─ [ > ] 4: 10:48:57
+rounds: 4
+├─ [ 1 ] v 10:33:04 · 5m25s decisions:  system-1 ×1 · operator ×1 ·  tokens - 32.4k / 8.1k
+├─ [ 2 ] ! 10:38:29 · 5m14s decisions:  system-1 ×1 · operator ×1 ·  tokens - 32.4k / 8.1k
+├─ [ 3 ] v 10:43:43 · 5m14s decisions:  system-1 ×1 · operator ×1 ·  tokens - 32.4k / 8.1k
+└─ [ 4 ] > 10:48:57
 ```
 
-The node of a finished round carries its marker, when it started, how long it
-took, what decided in it and what the run spent up to its end. The numbers are
-the numbers of the run over the rounds up to that one: the tree reads as a
-ledger, and the last node carries the totals of the run. The node of the round
-that is going carries its number and the time it started — the round has not
-settled, so it has no duration and no verdict yet.
+The heading of the tree names the number of rounds the run is configured for:
+the count of the job the round belongs to, whether the workflow declares it or
+`/me start -i <rounds>` set it for that run. A job that repeats until the run
+ends has no count, and the heading says so: `rounds: ⟳ until the run ends`.
+
+The node of a finished round carries its number, the icon of its outcome, when
+it started, how long it took, what decided in it and what the run spent up to
+its end. The numbers are the numbers of the run over the rounds up to that
+one: the tree reads as a ledger, and the last node carries the totals of the
+run. The node of the round that is going carries its number, the icon `>` and
+the time it started — the round has not settled, so it has no duration and no
+verdict yet.
+
+The icon of a row is the marker of the checklist without the brackets, so one
+card carries one vocabulary: `v` for a round that went well, `!` for one that
+went wrong, `x` for one that was stopped, `?` for one that reported no verdict
+and `>` for the round that is going. Every icon is one character wide, so the
+icon column of the tree stays aligned.
 
 The tree shows the last five rounds of the run: the earlier ones fold into
 one node, `… +3`.
 
-The rounds of a job are numbered from one, so a run with several jobs has rounds of the same number. The tree names the job when there is more than one — `[ √ ] ship · 1: 10:33:04 · …` — and leaves it out when the run has a single job: the plan of the run says which job the rounds belong to.
+The rounds of a job are numbered from one, so a run with several jobs has rounds of the same number. The tree names the job when there is more than one — `[ 1 ] v ship · 10:33:04 · …` — and leaves it out when the run has a single job: the plan of the run says which job the rounds belong to.
 
 When the round ends, its card carries the closing block: what the round came
 to and the numbers of the run through that round.
 
 ```
-ended: [ √ ] the fix landed · 5m14s
+ended: [ v ] the fix landed · 5m14s
 decisions:  system-1 ×1 · operator ×1 ·  tokens - 32.4k / 8.1k
 ```
 
 Every row of the checklist is a numbered markdown list item — `1. [v] fix (the
-fix landed)` — and every marker is one ASCII character: `[ ]` not started,
-`[>]` running, `[v]` done, `[!]` failed, `[-]` skipped, `[x]` cancelled. The
-detail of the row says what the step came to and how many chances it has left.
-A step that failed never reads like a step that has not started.
+fix landed)` — and every marker is one ASCII character:
+
+| Marker | State |
+|---|---|
+| `[ ]` | Not started. |
+| `[>]` | Running. |
+| `[v]` | Done. |
+| `[!]` | Failed. |
+| `[-]` | Skipped. |
+| `[x]` | Cancelled or deleted. |
+
+The detail of the row says what the step came to and how many chances it has
+left. A step that failed never reads like a step that has not started.
 
 The row is the same row in every channel that renders a checklist: Feishu,
 Telegram and Discord all render the number, the marker, the subject and the
@@ -1065,9 +1086,9 @@ in the detail: the card the operator read names it.
 ```
 💭 8 · 🔧 6 · ⏱ 14:35:22
 
-rounds:
-├─ [ √ ] 1: 10:33:04 · 5m25s decisions:  system-1 ×1 · operator ×1 ·  tokens - 32.4k / 8.1k
-└─ [ > ] 2: 10:38:29
+rounds: 4
+├─ [ 1 ] v 10:33:04 · 5m25s decisions:  system-1 ×1 · operator ×1 ·  tokens - 32.4k / 8.1k
+└─ [ 2 ] > 10:38:29
 🧑‍💻: main · round 2
 
 **📋 Tasks**
@@ -1105,8 +1126,8 @@ actions:  63 (41 ok · 3 failed · 2 noop · 1 cancelled)
 steps:    9 ran · 2 not run
 
 rounds:
-├─ [ √ ] 1: 10:33:04 · 5m25s decisions:  system-1 ×1 · operator ×1 ·  tokens - 32.4k / 8.1k
-└─ [ ! ] 2: 10:38:29 · 12m02s decisions:  system-1 ×2 · system-2 ×1 ·  tokens - 48.1k / 12.3k
+├─ [ 1 ] v 10:33:04 · 5m25s decisions:  system-1 ×1 · operator ×1 ·  tokens - 32.4k / 8.1k
+└─ [ 2 ] ! 10:38:29 · 12m02s decisions:  system-1 ×2 · system-2 ×1 ·  tokens - 48.1k / 12.3k
 
 errors (last 5 of 6):
 ├─ [ ! ] /gtw fix 43 -y — failed: the issue is claimed by another run (reason: issue_claimed)
@@ -1117,7 +1138,7 @@ decisions (last 10 of 23):
 └─ the chat model — run_step(step_id=review) · because: the plan is exhausted
 ```
 
-The facts come from the run's own record: no model is asked to write the record. The headline names the phase the run ended in, and a run that failed says why under it — an error that never reached an action of the run leaves no row in the `errors` block. The `errors` are the actions whose outcome was `failed`, `incomplete`, `cancelled` or `timeout`, at most the last five of them; the `decisions` are the judgments the models made at the wake-ups, at most the last ten. The tree of the rounds carries the counters of the run: the number of decisions and the tokens ride in its last row, so a run that finished no round shows neither. A row is cut short: a shell step reports a whole build log as its summary, and a card that carries it is unreadable.
+The facts come from the run's own record: no model is asked to write the record. The headline names the phase the run ended in, and a run that failed says why under it — an error that never reached an action of the run leaves no row in the `errors` block. The `errors` are the actions whose outcome was `failed`, `incomplete`, `cancelled` or `timeout`, at most the last five of them; the `decisions` are the judgments the models made at the wake-ups, at most the last ten. The tree of the rounds carries the counters of the run: the number of decisions and the tokens ride in its last row, so a run that finished no round shows neither. Its heading stays plain: the number of rounds is the state of a run that is still going, and the record describes a run that is over. A row is cut short: a shell step reports a whole build log as its summary, and a card that carries it is unreadable.
 
 The wake log holds the model decisions only: the workflow's own fast path is not a decision a model made, so a run that goes through its workflow without asking a model holds no wake records at all. A decision model answer and a chat model turn are two records. The log is persisted with the rest of the run, so it survives a restart of the daemon.
 

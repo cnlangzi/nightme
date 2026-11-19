@@ -201,7 +201,7 @@ func TestTheRoundCardCarriesTheTreeOfTheRounds(t *testing.T) {
 	if len(entries) == 0 {
 		t.Fatal("the card of the round carries no entry")
 	}
-	if !strings.HasPrefix(entries[0], "rounds:\n") {
+	if !strings.HasPrefix(entries[0], "rounds: ") {
 		t.Errorf("the card of the round does not open with the tree of the rounds: %q", entries[0])
 	}
 	// The card of the round carries no identity of its own: the status
@@ -374,8 +374,9 @@ func TestTheRoundCardCarriesTheStepsOfTheRound(t *testing.T) {
 }
 
 // TestTheRoundsTreeCarriesTheFactsOfEveryRound — the tree reads as a
-// ledger: every finished round carries its marker, when it started, how
-// long it took and the numbers of the run so far.
+// ledger: every finished round carries its number, the icon of its
+// outcome, when it started, how long it took and the numbers of the run
+// so far.
 func TestTheRoundsTreeCarriesTheFactsOfEveryRound(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
@@ -406,9 +407,9 @@ func TestTheRoundsTreeCarriesTheFactsOfEveryRound(t *testing.T) {
 
 	tree := r.roundsTree(iteration{job: "main", round: 2})
 	want := []string{
-		"rounds:",
-		"├─ [ √ ] 1: 10:33:04 · 5m25s decisions:  system-1 ×1 · operator ×1 ·  tokens - 32.4k / 8.1k",
-		"└─ [ > ] 2: ",
+		"rounds: 1",
+		"├─ [ 1 ] v 10:33:04 · 5m25s decisions:  system-1 ×1 · operator ×1 ·  tokens - 32.4k / 8.1k",
+		"└─ [ 2 ] > ",
 	}
 	got := strings.Split(tree, "\n")
 	if len(got) != len(want) {
@@ -417,6 +418,121 @@ func TestTheRoundsTreeCarriesTheFactsOfEveryRound(t *testing.T) {
 	for i, line := range got {
 		if !strings.HasPrefix(line, want[i]) {
 			t.Errorf("line %d is %q, want %q", i, line, want[i])
+		}
+	}
+}
+
+// TestTheRoundsTreeNamesTheCountOfTheJob — the heading of the tree
+// says how many rounds the run has: the count of the job the round
+// belongs to.
+func TestTheRoundsTreeNamesTheCountOfTheJob(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "rounds", roundWorkflow)
+	svc, _ := testService(t, dir, noModels())
+	wf, ok := svc.catalog.Lookup("rounds")
+	if !ok {
+		t.Fatal("the workflow is not in the catalogue")
+	}
+	bound, err := wfe.Bind(wf, map[string]string{})
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	r := newRun(svc, Request{Name: "rounds", ChatID: "obs-1", Cwd: "/tmp/work"}, bound, nil)
+	t.Cleanup(r.cancel)
+
+	for _, c := range []struct {
+		job  string
+		want string
+	}{
+		{job: "ship", want: "rounds: 2"},
+		{job: "verify", want: "rounds: 3"},
+	} {
+		tree := r.roundsTree(iteration{job: c.job, round: 1})
+		if !strings.HasPrefix(tree, c.want+"\n") {
+			t.Errorf("the tree of %s opens with %q, want %q", c.job, tree, c.want)
+		}
+	}
+}
+
+// TestTheRoundsTreeNamesTheCountOfTheRun — the count the run was
+// started with is the count the heading names.
+func TestTheRoundsTreeNamesTheCountOfTheRun(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "fix", `title: do the thing
+jobs:
+  main:
+    iterations: 3
+    steps:
+      - id: rest
+        wait: 5m
+`)
+
+	svc, _ := testService(t, dir, noModels())
+	rounds := 5
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "fix", ChatID: "obs-1", Cwd: "/tmp/work", Iterations: &rounds,
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() {
+		if err := svc.Stop(context.Background(), "obs-1"); err != nil {
+			t.Fatalf("stop: %v", err)
+		}
+		waitRun(t, svc, "obs-1")
+	}()
+
+	r := activeRun(t, svc, "obs-1")
+	tree := r.roundsTree(iteration{job: "main", round: 1})
+	if !strings.HasPrefix(tree, "rounds: 5\n") {
+		t.Errorf("the tree opens with %q, want the count of the run", tree)
+	}
+}
+
+// TestTheRoundsTreeOfAJobThatRepeatsUntilTheRunEnds — a job with no
+// count has no maximum: the heading says so.
+func TestTheRoundsTreeOfAJobThatRepeatsUntilTheRunEnds(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "cli", cliWorkflow)
+	svc, _ := testService(t, dir, noModels())
+	wf, ok := svc.catalog.Lookup("cli")
+	if !ok {
+		t.Fatal("the workflow is not in the catalogue")
+	}
+	bound, err := wfe.Bind(wf, map[string]string{})
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	r := newRun(svc, Request{Name: "cli", ChatID: "obs-1", Cwd: "/tmp/work"}, bound, nil)
+	t.Cleanup(r.cancel)
+
+	tree := r.roundsTree(iteration{job: "ship", round: 1})
+	if !strings.HasPrefix(tree, "rounds: ⟳ until the run ends\n") {
+		t.Errorf("the tree opens with %q, want it to say the job repeats", tree)
+	}
+}
+
+// TestTheIconOfAnOutcome — the cards of a run and the checklist of a
+// step share one vocabulary of icons.
+func TestTheIconOfAnOutcome(t *testing.T) {
+	for _, c := range []struct {
+		status wfe.OutcomeStatus
+		want   string
+	}{
+		{status: wfe.OutcomeOK, want: "v"},
+		{status: wfe.OutcomeNoop, want: "v"},
+		{status: wfe.OutcomeFailed, want: "!"},
+		{status: wfe.OutcomeIncomplete, want: "!"},
+		{status: wfe.OutcomeTimeout, want: "!"},
+		{status: wfe.OutcomeCancelled, want: "x"},
+		{status: wfe.OutcomeUnknown, want: "?"},
+		{status: "", want: "?"},
+	} {
+		got := outcomeIcon(c.status)
+		if got != c.want {
+			t.Errorf("the icon of %q is %q, want %q", c.status, got, c.want)
+		}
+		if n := len([]rune(got)); n != 1 {
+			t.Errorf("the icon of %q is %d characters wide, want one", c.status, n)
 		}
 	}
 }
@@ -453,17 +569,17 @@ func TestTheRoundsTreeFoldsTheOldRounds(t *testing.T) {
 	if !strings.Contains(tree, "├─ … +3") {
 		t.Errorf("the tree does not fold the old rounds: %q", tree)
 	}
-	for _, want := range []string{"4: ", "5: ", "6: ", "7: ", "8: "} {
+	for _, want := range []string{"[ 4 ]", "[ 5 ]", "[ 6 ]", "[ 7 ]", "[ 8 ]"} {
 		if !strings.Contains(tree, want) {
 			t.Errorf("the tree does not list round %s: %q", want, tree)
 		}
 	}
-	if strings.Contains(tree, "1: ") {
+	if strings.Contains(tree, "[ 1 ]") {
 		t.Errorf("the tree lists a folded round: %q", tree)
 	}
 }
 
-// TestTheRoundThatFailedSaysSo — the marker of a round tells how it
+// TestTheRoundThatFailedSaysSo — the icon of a round tells how it
 // came to.
 func TestTheRoundThatFailedSaysSo(t *testing.T) {
 	dir := t.TempDir()
@@ -490,7 +606,7 @@ func TestTheRoundThatFailedSaysSo(t *testing.T) {
 	}}
 
 	tree := r.roundsTree(iteration{job: "main", round: 2})
-	if !strings.Contains(tree, "[ ! ]") {
+	if !strings.Contains(tree, "[ 1 ] ! ") {
 		t.Errorf("the tree does not mark the round that failed: %q", tree)
 	}
 	rec := r.roundRecords[0]
@@ -527,7 +643,7 @@ func TestTheClosingBlockOfARoundCarriesItsNumbers(t *testing.T) {
 		Usage:     llm.Usage{InputTokens: 32400, OutputTokens: 8100},
 	}
 
-	if got := roundEndedLine(rec); got != "ended: [ √ ] the fix landed · 5m14s" {
+	if got := roundEndedLine(rec); got != "ended: [ v ] the fix landed · 5m14s" {
 		t.Errorf("the closing line is %q", got)
 	}
 	want := "decisions:  system-1 ×1 · operator ×1 ·  tokens - 32.4k / 8.1k"
@@ -839,7 +955,7 @@ func TestTheCurrentRoundSaysWhenItStarted(t *testing.T) {
 	r.setRoundStarted(iteration{job: "main", round: 2}, start.Add(time.Minute))
 
 	tree := r.roundsTree(iteration{job: "main", round: 2})
-	want := "└─ [ > ] 2: " + clockTime(start.Add(time.Minute))
+	want := "└─ [ 2 ] > " + clockTime(start.Add(time.Minute))
 	if !strings.Contains(tree, want) {
 		t.Errorf("the tree does not say when the round started: %q", tree)
 	}
@@ -978,7 +1094,7 @@ func TestTheTreeNamesTheJobOfARound(t *testing.T) {
 	}
 
 	tree := r.roundsTree(iteration{job: "ship", round: 2})
-	for _, want := range []string{"[ √ ] ship · 1: ", "[ √ ] verify · 1: ", "[ > ] ship · 2: "} {
+	for _, want := range []string{"[ 1 ] v ship · ", "[ 1 ] v verify · ", "[ 2 ] > ship · "} {
 		if !strings.Contains(tree, want) {
 			t.Errorf("the tree does not carry %q: %q", want, tree)
 		}
@@ -1088,8 +1204,8 @@ func TestTheRoundsSurviveARestart(t *testing.T) {
 	}
 	tree := restored.roundsTree(iteration{job: "main", round: 3})
 	for _, want := range []string{
-		"[ √ ] 1: 10:33:04 · 1m00s decisions:  system-1 ×1 ·  tokens - 100 / 20",
-		"[ √ ] 2: 10:34:04 · 1m00s decisions:  system-1 ×1 · operator ×1 ·  tokens - 200 / 40",
+		"[ 1 ] v 10:33:04 · 1m00s decisions:  system-1 ×1 ·  tokens - 100 / 20",
+		"[ 2 ] v 10:34:04 · 1m00s decisions:  system-1 ×1 · operator ×1 ·  tokens - 200 / 40",
 	} {
 		if !strings.Contains(tree, want) {
 			t.Errorf("the tree does not carry %q: %q", want, tree)

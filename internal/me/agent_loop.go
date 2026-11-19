@@ -187,6 +187,13 @@ func (s *Service) turn(ctx context.Context, r *run) (bool, error) {
 		s.finishDone(r, r.workflow.Name+" is complete")
 		return true, nil
 	}
+	if decision.Over {
+		// The workflow is over: the rounds of its jobs are spent and
+		// nothing broke. The run ends on its own — no model is asked
+		// what comes next.
+		s.finishDone(r, r.workflow.Name+" is over")
+		return true, nil
+	}
 	// The budget of the step the run is on bounds what the agent may
 	// do at it. When it is spent, the run waits for a human: the run
 	// keeps its place, and the operator decides what happens to a
@@ -268,6 +275,9 @@ func (s *Service) announcePause(ctx context.Context, r *run, reason string) {
 // and advances the round of a job that repeats. The policy follows the
 // rounds, so the per-step budgets count the current round only.
 //
+// The gap between two rounds is waited out here, before the round
+// starts: the engine reports it and the run waits it.
+//
 // The card follows the iteration the plan enters: a run that moves to
 // another job or to the next round of its job gets a card of its own,
 // and the switch happens before the command of that iteration is sent
@@ -293,6 +303,12 @@ func (s *Service) plan(ctx context.Context, r *run) (wfe.Decision, error) {
 	// rounds are compared around it: the thinking session of the round
 	// that ended goes with it.
 	s.closeBrainOnNewRound(r, before, decision)
+	// The gap is waited before the round that starts goes to the disk:
+	// a daemon that comes back while the run waits finds the round
+	// that ended, starts the round again and waits the gap again.
+	if err := waitFor(ctx, r, decision.Gap); err != nil {
+		return decision, err
+	}
 	s.switchRoundSession(ctx, r, it)
 	return decision, nil
 }
@@ -423,6 +439,13 @@ func (s *Service) loopDeciderOnly(ctx context.Context, r *run) error {
 		r.setJudgmentStep(decision.Subject)
 		if decision.Exhausted && s.goalMet(r) {
 			s.finishDone(r, r.workflow.Name+" is complete")
+			return errFinished
+		}
+		if decision.Over {
+			// The workflow is over: the rounds of its jobs are spent
+			// and nothing broke. The run ends on its own — no model is
+			// asked what comes next.
+			s.finishDone(r, r.workflow.Name+" is over")
 			return errFinished
 		}
 		if s.budgetSpent(r) {

@@ -786,6 +786,7 @@ func cloneWorkflow(wf *Workflow) *Workflow {
 		cloned := Job{
 			Needs: append([]string(nil), job.Needs...),
 			If:    job.If,
+			Sleep: job.Sleep,
 			Steps: steps,
 		}
 		if job.Iterations != nil {

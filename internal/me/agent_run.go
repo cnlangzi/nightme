@@ -1194,6 +1194,26 @@ func (r *run) runContext(ctx context.Context) (context.Context, context.CancelFu
 	}
 }
 
+// waitFor waits out a duration that belongs to the run.
+//
+// The wait belongs to the run: `/me stop` and the daemon's shutdown end
+// it at once, the way they end a command the run spawned.
+func waitFor(ctx context.Context, r *run, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+	execCtx, cancel := r.runContext(ctx)
+	defer cancel()
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-execCtx.Done():
+		return execCtx.Err()
+	}
+}
+
 // env returns the run's environment.
 func (r *run) env() map[string]string {
 	r.mu.Lock()

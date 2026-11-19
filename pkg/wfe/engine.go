@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // DecisionKind is what the engine decided about a run.
@@ -30,6 +31,15 @@ type Decision struct {
 	Reason string
 	// Exhausted is true when the plan has nothing left to run.
 	Exhausted bool
+	// Over is true when the workflow is over: the plan is exhausted
+	// because the rounds of a repeating job are spent, and the last
+	// step did not break. The run ends on its own — no model is asked
+	// what comes next.
+	Over bool
+	// Gap is the time between the round that ended and the round that
+	// starts. It is set on the decision that starts a job's next
+	// round: the engine reports the gap, the run waits it out.
+	Gap time.Duration
 	// Subject is the step the judgment is about.
 	//
 	// It is set when the judgment names one step: the step that
@@ -51,7 +61,9 @@ type Decision struct {
 //
 // A job whose round is over starts its next round instead of ending
 // the run: the round's outputs are cleared and the step budgets start
-// over.
+// over. The decision that starts that round carries the gap the job
+// waits between its rounds: the engine reports the gap, the run waits
+// it out.
 //
 // The state is the engine's: the steps whose condition did not hold
 // are recorded as skipped before the decision is made.
@@ -78,17 +90,15 @@ func Decide(state *RunState, wf *Workflow) (Decision, error) {
 	// cannot go on by itself. A round the agent ended early is not a
 	// judgment point: the agent has already decided.
 	blocked := hasPrev && prevBlocks(state, wf, prev) && !roundEnded(state, prev)
+	// gap is the time between the round that ends and the round that
+	// starts. The engine reports it; the run waits it out.
+	var gap time.Duration
 
 	if len(ready) == 0 {
 		repeating := repeatingJobs(state, wf)
 		switch {
 		case len(repeating) == 0:
-			return Decision{
-				Kind:      DecisionJudgment,
-				Reason:    exhaustedReason(prev, hasPrev),
-				Exhausted: true,
-				Subject:   subjectOf(prev, hasPrev),
-			}, nil
+			return exhaustedDecision(state, wf, prev, hasPrev, blocked), nil
 		case blocked:
 			// The round does not advance on its own: the agent decides
 			// what to do about the step that broke.
@@ -105,6 +115,7 @@ func Decide(state *RunState, wf *Workflow) (Decision, error) {
 		}
 		// The round is over: the job starts the next one.
 		startRound(state, wf, repeating[0])
+		gap = wf.Jobs[repeating[0]].Gap()
 		ready, skipped, err = readySet(state, wf)
 		if err != nil {
 			return Decision{}, err
@@ -115,12 +126,7 @@ func Decide(state *RunState, wf *Workflow) (Decision, error) {
 			steps = append(steps, step.Step)
 		}
 		if len(ready) == 0 {
-			return Decision{
-				Kind:      DecisionJudgment,
-				Reason:    exhaustedReason(prev, hasPrev),
-				Exhausted: true,
-				Subject:   subjectOf(prev, hasPrev),
-			}, nil
+			return exhaustedDecision(state, wf, prev, hasPrev, blocked), nil
 		}
 	}
 
@@ -152,6 +158,7 @@ func Decide(state *RunState, wf *Workflow) (Decision, error) {
 		Step:  ready[0].Step,
 		Job:   ready[0].Job,
 		Ready: steps,
+		Gap:   gap,
 	}, nil
 }
 
@@ -226,6 +233,42 @@ func jobDidSomething(state *RunState, wf *Workflow, name string) bool {
 		}
 	}
 	return false
+}
+
+// roundsSpent reports whether a job of the workflow spent its rounds.
+//
+// A job that runs one round has no rounds to spend: it ran its steps,
+// and the plan is exhausted because of that — the agent may still have
+// something to say about it. A job that repeats knows how many rounds
+// it runs: when they are spent, the workflow is over, and the run ends
+// on its own.
+func roundsSpent(state *RunState, wf *Workflow) bool {
+	for _, name := range wf.JobOrder() {
+		rounds := wf.Jobs[name].Rounds()
+		if rounds < 2 {
+			continue
+		}
+		if state.Rounds[name] >= rounds {
+			return true
+		}
+	}
+	return false
+}
+
+// exhaustedDecision is the decision of a plan that has nothing left to
+// run.
+//
+// The workflow is over when the rounds of a repeating job are spent and
+// nothing broke: the run ends on its own, and no model is asked what
+// comes next.
+func exhaustedDecision(state *RunState, wf *Workflow, prev StepState, hasPrev, blocked bool) Decision {
+	return Decision{
+		Kind:      DecisionJudgment,
+		Reason:    exhaustedReason(prev, hasPrev),
+		Exhausted: true,
+		Over:      hasPrev && !blocked && roundsSpent(state, wf),
+		Subject:   subjectOf(prev, hasPrev),
+	}
 }
 
 // startRound begins the next round of a job.

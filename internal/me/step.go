@@ -400,15 +400,8 @@ func (s *Service) executeWait(ctx context.Context, r *run, job string, step wfe.
 	if err != nil {
 		return stepVerdict{}, fmt.Errorf("the step %q waits for %q, which is not a duration", step.ID, step.Wait)
 	}
-
-	execCtx, cancel := r.runContext(ctx)
-	defer cancel()
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-	select {
-	case <-timer.C:
-	case <-execCtx.Done():
-		return stepVerdict{}, execCtx.Err()
+	if err := waitFor(ctx, r, d); err != nil {
+		return stepVerdict{}, err
 	}
 	out := wfe.Outcome{Status: wfe.OutcomeOK, Summary: "waited " + d.String()}
 	r.record(wfe.ActionKindRun, "wait "+d.String(), step.ID, out)

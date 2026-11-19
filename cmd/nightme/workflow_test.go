@@ -93,8 +93,8 @@ jobs:
 }
 
 // TestWorkflowShow_TheMergedSchema — the detail view carries the
-// rounds and the wait step, and names no agent: the run uses the
-// agent of the chat that starts it.
+// rounds, the gap and the wait step, and names no agent: the run uses
+// the agent of the chat that starts it.
 func TestWorkflowShow_TheMergedSchema(t *testing.T) {
 	dir := t.TempDir()
 	yaml := `
@@ -102,6 +102,7 @@ title: review the changes
 jobs:
   main:
     iterations: 0
+    sleep: 5m
     steps:
       - id: rest
         wait: 5m
@@ -112,7 +113,7 @@ jobs:
 	out := captureStdout(t, func() error {
 		return runRoot("workflow", "show", "reviewer")
 	})
-	for _, want := range []string{"wait: 5m", "iterations: until the run ends"} {
+	for _, want := range []string{"wait: 5m", "iterations: until the run ends", "sleep: 5m"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q\n--- output ---\n%s", want, out)
 		}

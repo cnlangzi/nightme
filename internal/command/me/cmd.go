@@ -16,6 +16,9 @@
 //
 // The `-i` flag of `/me start` sets how many rounds every job of the
 // workflow runs in that run. The workflow file keeps its own counts.
+//
+// A workflow of the project's own namespace may be named in short:
+// "@coder" is the workflow "nightme/coder".
 package me
 
 import (
@@ -29,6 +32,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/command"
 	mesvc "github.com/cnlangzi/nightme/internal/me"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/internal/wfname"
 )
 
 // Factory is the command.SlashCommandFactory for /me.
@@ -59,7 +63,7 @@ func (f *Factory) Spec() command.Spec {
 		Usage:    "/me start <workflow> [args...] [-i <rounds>]\n/me reply <text>\n/me pause\n/me resume [note]\n/me next [note]\n/me stop\n/me status",
 		Category: "agent",
 		Subcommands: []command.SubcommandSpec{
-			{Name: "start", Summary: "Start a workflow in this chat. -i sets the rounds."},
+			{Name: "start", Summary: "Start a workflow in this chat. -i sets the rounds. @<name> is the shorthand for nightme/<name>."},
 			{Name: "reply", Summary: "Answer the question the run asked."},
 			{Name: "pause", Summary: "Stop the run after the current step."},
 			{Name: "resume", Summary: "Run the step the run is on again."},
@@ -132,7 +136,11 @@ func (f *Factory) start(ctx context.Context, rt command.RuntimeServices,
 		return failOut, nil
 	}
 
-	name := parsed.Arg(0)
+	name, err := wfname.Expand(parsed.Arg(0))
+	if err != nil {
+		chatsession.ReportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
+		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
+	}
 	runID, err := f.ctrl.StartWorkflow(ctx, command.MeRequest{
 		Name:       name,
 		Args:       parsed.Args[1:],

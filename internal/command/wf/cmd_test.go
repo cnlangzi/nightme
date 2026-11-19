@@ -576,3 +576,186 @@ func TestHandle_UninstallRefusesAnAddressThatDoesNotFit(t *testing.T) {
 		t.Errorf("the reason is %q, want %q", outcome.Data["reason"], ReasonInvalidAddress)
 	}
 }
+
+// TestHandle_TheShorthandInstallsTheSameWorkflow — "@coder" installs
+// the workflow the full address installs, under the same path.
+func TestHandle_TheShorthandInstallsTheSameWorkflow(t *testing.T) {
+	dir := t.TempDir()
+	tier, srv := servingTier("github", validWorkflow)
+	defer srv.Close()
+
+	cs, em := newChat(t)
+	f := testFactory(dir, []Source{tier}, nil)
+	work := cs.Hold("msg-11")
+	ctx := chatsession.WithWork(context.Background(), work)
+
+	if _, err := f.Handle(ctx, command.RuntimeServices{}, nil, cs, command.SlashInput{
+		ChatID:    "chat-1",
+		MessageID: "msg-11",
+		Args:      []string{"wf", "install", "@coder"},
+	}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	path := filepath.Join(dir, "nightme", "coder", "workflow.yml")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("the workflow was not written: %v", err)
+	}
+
+	work.Release()
+	outcome := em.settled()
+	if outcome == nil {
+		t.Fatal("the message settled without an outcome")
+	}
+	if outcome.Data["reason"] != ReasonInstalled {
+		t.Errorf("the reason is %q, want %q", outcome.Data["reason"], ReasonInstalled)
+	}
+	if outcome.Data["path"] != path {
+		t.Errorf("the path is %q, want %q", outcome.Data["path"], path)
+	}
+
+	tasks := em.tasks()
+	if len(tasks) == 0 {
+		t.Fatal("the checklist was never published")
+	}
+	if subject := tasks[0].TaskList.Items[0].Subject; subject != "download nightme/coder" {
+		t.Errorf("the first row says %q, want the full address", subject)
+	}
+}
+
+// TestHandle_TheShorthandAsksTheHubForTheSameFile — the shorthand
+// fetches the file of the full address.
+func TestHandle_TheShorthandAsksTheHubForTheSameFile(t *testing.T) {
+	dir := t.TempDir()
+	var mu sync.Mutex
+	var asked []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodHead, http.MethodOptions:
+			w.WriteHeader(http.StatusOK)
+		default:
+			mu.Lock()
+			asked = append(asked, r.URL.Path)
+			mu.Unlock()
+			_, _ = w.Write([]byte(validWorkflow))
+		}
+	}))
+	defer srv.Close()
+
+	cs, _ := newChat(t)
+	f := testFactory(dir, []Source{{Name: "github", BaseURL: srv.URL + "/"}}, nil)
+	for _, address := range []string{"nightme/coder", "@coder"} {
+		work := cs.Hold("msg-12")
+		ctx := chatsession.WithWork(context.Background(), work)
+		if _, err := f.Handle(ctx, command.RuntimeServices{}, nil, cs, command.SlashInput{
+			ChatID:    "chat-1",
+			MessageID: "msg-12",
+			Args:      []string{"wf", "install", "-f", address},
+		}); err != nil {
+			t.Fatalf("Handle: %v", err)
+		}
+		work.Release()
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(asked) != 2 {
+		t.Fatalf("the hub was asked for %d files, want two", len(asked))
+	}
+	if asked[0] != asked[1] {
+		t.Errorf("the hub was asked for %q and %q, want the same file", asked[0], asked[1])
+	}
+}
+
+// TestHandle_TheShorthandRemovesTheSameWorkflow — "@coder" takes
+// away the workflow the full address takes away.
+func TestHandle_TheShorthandRemovesTheSameWorkflow(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nightme", "coder", "workflow.yml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(validWorkflow), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	cs, em := newChat(t)
+	f := testFactory(dir, nil, nil)
+	work := cs.Hold("msg-13")
+	ctx := chatsession.WithWork(context.Background(), work)
+
+	if _, err := f.Handle(ctx, command.RuntimeServices{}, nil, cs, command.SlashInput{
+		ChatID:    "chat-1",
+		MessageID: "msg-13",
+		Args:      []string{"wf", "uninstall", "@coder"},
+	}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	work.Release()
+
+	outcome := em.settled()
+	if outcome == nil {
+		t.Fatal("the message settled without an outcome")
+	}
+	if outcome.Data["reason"] != ReasonUninstalled {
+		t.Errorf("the reason is %q, want %q", outcome.Data["reason"], ReasonUninstalled)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("the workflow is still there: %v", err)
+	}
+	if _, err := os.Stat(filepath.Dir(filepath.Dir(path))); !os.IsNotExist(err) {
+		t.Errorf("the owner directory is still there: %v", err)
+	}
+}
+
+// TestHandle_TheAddressThatDoesNotFitIsEchoedAsItWasTyped — a
+// shorthand that names no workflow is refused, and the checklist and
+// the outcome carry the address as it was typed.
+func TestHandle_TheAddressThatDoesNotFitIsEchoedAsItWasTyped(t *testing.T) {
+	dir := t.TempDir()
+	gets := 0
+	srv := newCountingServer(&gets, validWorkflow)
+	defer srv.Close()
+
+	cs, em := newChat(t)
+	f := testFactory(dir, []Source{{Name: "github", BaseURL: srv.URL + "/"}}, nil)
+	work := cs.Hold("msg-14")
+	ctx := chatsession.WithWork(context.Background(), work)
+
+	out, err := f.Handle(ctx, command.RuntimeServices{}, nil, cs, command.SlashInput{
+		ChatID:    "chat-1",
+		MessageID: "msg-14",
+		Args:      []string{"wf", "install", "@"},
+	})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if out.Reply != "" {
+		t.Errorf("the reply is %q, want none", out.Reply)
+	}
+	if gets != 0 {
+		t.Errorf("the hub was asked %d times, want none", gets)
+	}
+
+	work.Release()
+	outcome := em.settled()
+	if outcome == nil {
+		t.Fatal("the message settled without an outcome")
+	}
+	if outcome.Data["reason"] != ReasonInvalidAddress {
+		t.Errorf("the reason is %q, want %q", outcome.Data["reason"], ReasonInvalidAddress)
+	}
+	if outcome.Data["address"] != "@" {
+		t.Errorf("the address is %q, want the one that was typed", outcome.Data["address"])
+	}
+	if detail := outcome.Data[messages.OutcomeKeyError]; !strings.Contains(detail, "shorthand") {
+		t.Errorf("the detail is %q, want it to name the shorthand", detail)
+	}
+
+	tasks := em.tasks()
+	if len(tasks) == 0 {
+		t.Fatal("the checklist was never published")
+	}
+	if subject := tasks[0].TaskList.Items[0].Subject; subject != "download @" {
+		t.Errorf("the first row says %q, want the address that was typed", subject)
+	}
+}

@@ -21,6 +21,9 @@
 // `nightme workflow validate` is a linter: it reports every problem
 // a workflow file has, where the problem is, and exits with a code a
 // CI job can act on.
+//
+// A workflow of the project's own namespace may be named in short:
+// "@coder" is the workflow "nightme/coder".
 
 package main
 
@@ -38,6 +41,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/config"
 	nmerrors "github.com/cnlangzi/nightme/internal/errors"
 	"github.com/cnlangzi/nightme/internal/runtime"
+	"github.com/cnlangzi/nightme/internal/wfname"
 	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
@@ -228,7 +232,8 @@ func newWorkflowShowCmd() *cobra.Command {
 		Long: "show prints the full workflow details: triggers, jobs, steps, " +
 			"and effective agent resolution. The name is the path of the " +
 			"workflow's bundle under the workflows dir: the directory that " +
-			"holds its workflow.yml. " +
+			"holds its workflow.yml. A workflow of the project's own " +
+			"namespace may be named in short: \"@coder\" is \"nightme/coder\". " +
 			"The --json flag emits the raw parsed " +
 			"Workflow struct.",
 		Args: cobra.ExactArgs(1),
@@ -237,9 +242,13 @@ func newWorkflowShowCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			wf := findWorkflow(wfs, args[0])
+			name, err := wfname.Expand(args[0])
+			if err != nil {
+				return err
+			}
+			wf := findWorkflow(wfs, name)
 			if wf == nil {
-				return notFound(args[0], failures)
+				return notFound(name, failures)
 			}
 			return printWorkflowShow(cmd.OutOrStdout(), wf, jsonOut)
 		},
@@ -362,7 +371,9 @@ func newWorkflowRunCmd() *cobra.Command {
 			"started by a person, with /me start <name> in a chat. Use " +
 			"this to verify the step ordering before relying on the real run.\n\n" +
 			"The name is the path of the workflow's bundle under the " +
-			"workflows dir: the directory that holds its workflow.yml.\n\n" +
+			"workflows dir: the directory that holds its workflow.yml. A " +
+			"workflow of the project's own namespace may be named in " +
+			"short: \"@coder\" is \"nightme/coder\".\n\n" +
 			"--workspace overrides one of the workflow's workspaces " +
 			"(defaults to the first one). A workflow that declares no " +
 			"workspace works where the chat works.",
@@ -372,9 +383,13 @@ func newWorkflowRunCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			wf := findWorkflow(wfs, args[0])
+			name, err := wfname.Expand(args[0])
+			if err != nil {
+				return err
+			}
+			wf := findWorkflow(wfs, name)
 			if wf == nil {
-				return notFound(args[0], failures)
+				return notFound(name, failures)
 			}
 			ws := workspace
 			if ws == "" && len(wf.Workspaces) > 0 {
@@ -460,7 +475,8 @@ func newWorkflowValidateCmd() *cobra.Command {
 			"argument " +
 			"that is not a path on disk is looked up as a workflow name, so " +
 			"`nightme workflow validate nightme/coder` validates the file " +
-			"of that name. The exit code " +
+			"of that name. A workflow of the project's own namespace may be " +
+			"named in short: \"@coder\" is \"nightme/coder\". The exit code " +
 			"is 0 when every workflow is valid, 8 when a workflow does not " +
 			"validate, and 9 when a path does not exist or cannot be read.\n\n" +
 			"--json swaps the lines for a JSON array.",
@@ -485,8 +501,9 @@ func newWorkflowValidateCmd() *cobra.Command {
 //
 // An argument that is not a path on disk is looked up as a workflow
 // name: the workflows directory holds the workflows, and a name is
-// the path of a bundle under it. An argument that is neither is
-// reported as a path that does not exist.
+// the path of a bundle under it. A name of the project's own
+// namespace may be written in short: "@coder" is "nightme/coder". An
+// argument that is neither is reported as a path that does not exist.
 func runWorkflowValidate(out io.Writer, errOut io.Writer, args []string, asJSON bool) error {
 	dir, dirErr := workflowsDir()
 	paths := args
@@ -517,8 +534,14 @@ func runWorkflowValidate(out io.Writer, errOut io.Writer, args []string, asJSON 
 		}
 		// The argument is not a path on disk: it may be the name of a
 		// workflow in the workflows directory.
-		matched, nameErr := wfe.WorkflowPathsByName(dir, path)
-		if nameErr != nil || len(matched) == 0 {
+		name, nameErr := wfname.Expand(path)
+		if nameErr != nil {
+			fmt.Fprintf(errOut, "%s: %v\n", path, nameErr)
+			unreadable = true
+			continue
+		}
+		matched, lookupErr := wfe.WorkflowPathsByName(dir, name)
+		if lookupErr != nil || len(matched) == 0 {
 			fmt.Fprintf(errOut, "%s: %v\n", path, err)
 			unreadable = true
 			continue
@@ -532,7 +555,7 @@ func runWorkflowValidate(out io.Writer, errOut io.Writer, args []string, asJSON 
 			diags = append(diags, wfe.Diagnostic{
 				Path: matched[1],
 				Message: fmt.Sprintf("duplicate workflow name %q in %s and %s",
-					path, matched[0], matched[1]),
+					name, matched[0], matched[1]),
 			})
 		}
 	}

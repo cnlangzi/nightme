@@ -402,3 +402,61 @@ func TestWorkflowShow_ReportsTheClashOfTwoFiles(t *testing.T) {
 		t.Errorf("err = %v, want the clash", err)
 	}
 }
+
+// TestWorkflowShow_TheShorthandFindsTheWorkflow — "@coder" is the
+// workflow "nightme/coder".
+func TestWorkflowShow_TheShorthandFindsTheWorkflow(t *testing.T) {
+	dir := t.TempDir()
+	body := `
+title: code it
+jobs:
+  main:
+    steps:
+      - id: s1
+        message: /review
+`
+	writeBundle(t, dir, "nightme/coder", body)
+	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
+
+	out := captureStdout(t, func() error {
+		return runRoot("workflow", "show", "@coder")
+	})
+	for _, want := range []string{"name:       nightme/coder", "title:      code it"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output = %q, want %q", out, want)
+		}
+	}
+}
+
+// TestWorkflowShow_TheShorthandThatNamesNoWorkflowIsRefused — "@"
+// names no workflow.
+func TestWorkflowShow_TheShorthandThatNamesNoWorkflowIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
+
+	err := runRoot("workflow", "show", "@")
+	if err == nil {
+		t.Fatal("the shorthand without a name was accepted")
+	}
+	if !strings.Contains(err.Error(), "shorthand") {
+		t.Errorf("err = %v, want it to name the shorthand", err)
+	}
+}
+
+// TestWorkflowRun_TheShorthandFindsTheWorkflow — "@coder" is the
+// workflow "nightme/coder".
+func TestWorkflowRun_TheShorthandFindsTheWorkflow(t *testing.T) {
+	dir := t.TempDir()
+	body := "title: code it\njobs:\n  main:\n    steps: [{id: s1, message: /review}]\n"
+	writeBundle(t, dir, "nightme/coder", body)
+	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
+
+	out := captureStdout(t, func() error {
+		return runRoot("workflow", "run", "@coder")
+	})
+	for _, want := range []string{"workflow:   nightme/coder", "execution plan"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output = %q, want %q", out, want)
+		}
+	}
+}

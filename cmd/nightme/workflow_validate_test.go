@@ -315,6 +315,45 @@ func TestWorkflowValidate_AWorkflowNameThatDoesNotValidate(t *testing.T) {
 	}
 }
 
+// TestWorkflowValidate_TheShorthandIsAWorkflowName — "@coder" is the
+// workflow "nightme/coder".
+func TestWorkflowValidate_TheShorthandIsAWorkflowName(t *testing.T) {
+	dir := t.TempDir()
+	writeBundle(t, dir, "nightme/coder", "title: code it\njobs:\n  main:\n    steps: [{message: hi}]\n")
+	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
+
+	var err error
+	out := captureStdout(t, func() error {
+		err = runRoot("workflow", "validate", "@coder")
+		return nil
+	})
+	if out != "" {
+		t.Errorf("output = %q, want nothing", out)
+	}
+	if code := nmerrors.ExitCode(err); code != nmerrors.CodeSuccess {
+		t.Errorf("exit code = %d, want %d", code, nmerrors.CodeSuccess)
+	}
+}
+
+// TestWorkflowValidate_TheShorthandThatNamesNoWorkflow — an argument
+// that names no workflow is a path the command could not check.
+func TestWorkflowValidate_TheShorthandThatNamesNoWorkflow(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("NIGHTME_WORKFLOWS_DIR", dir)
+
+	var err error
+	errOut := captureStderr(t, func() error {
+		err = runRoot("workflow", "validate", "@")
+		return nil
+	})
+	if !strings.Contains(errOut, "@") {
+		t.Errorf("stderr = %q, want it to name the argument", errOut)
+	}
+	if code := nmerrors.ExitCode(err); code != nmerrors.CodeNotFound {
+		t.Errorf("exit code = %d, want %d", code, nmerrors.CodeNotFound)
+	}
+}
+
 // TestWorkflowValidate_ANameThatIsNeitherAPathNorAWorkflow — an
 // argument that names nothing is a path that does not exist.
 func TestWorkflowValidate_ANameThatIsNeitherAPathNorAWorkflow(t *testing.T) {

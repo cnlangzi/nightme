@@ -463,6 +463,8 @@ agent——`/me`——在你发起它的那个 chat 里跑一个 workflow。每�
 | `nightme workflow run <name>` | 打印执行计划——哪些 step 跑、什么顺序。`--workspace` 覆盖 workspace。 |
 | `nightme workflow validate [path...]` | 检查 workflow 文件，把每个问题都报出来：缺 title、一个 step 写了两种类型、schema 里没有的 key。每个问题一行——`path:line:column: message`。不是磁盘上路径的参数会当成 workflow 名字查，所以 `nightme workflow validate nightme/coder` 校验的就是那个 workflow。全部合法时退出码 `0`，有 workflow 不合法是 `8`，给的路径不存在或读不了是 `9`。`--json` 输出机器可读。 |
 
+项目自己这个命名空间下的 workflow 名字可以写短：`@coder` 就是 workflow `nightme/coder`。`show`、`run`、`validate` 收全名的地方都收这个短写法。
+
 `run` 是规划 dry-run：只解析和排计划，不真正调 agent。
 
 `validate` 是个 linter：不带路径时检查 workflows 目录，带路径时检查给的文件和目录。路径不存在会报出来，不会被跳过。
@@ -471,11 +473,13 @@ agent——`/me`——在你发起它的那个 chat 里跑一个 workflow。每�
 
 `/wf install [-f] <owner>/<name>` 把一个已发布的 workflow 取回来，装进 workflows 目录，个人 agent 在那里找它。地址就是 workflow 的名字：`/wf install nightme/coder` 写到 `~/.nightme/workflows/nightme/coder/workflow.yml`，用 `/me start nightme/coder` 跑它。
 
+项目自己这个命名空间下的 workflow 地址可以写短：`@coder` 就是地址 `nightme/coder`。短写法只是地址的另一种写法——`/wf install @coder` 取的是同一个文件，落在同一个路径上，回报的 reason 码也一样。
+
 安装过程在 Chat 里显示成三行的清单——下载、校验、写入——每一步都实时更新。下载下来的文件先校验再写；内容没变的文件不会被重写。清单里报的路径是相对 home 的，斜杠一律用 `/`，所以每个系统上读到的都是同一个字符串。
 
 已经装过的地址会被跳过：不问 hub，也不改本地文件。`-f`（`--force`）会再装一次，把本地文件覆盖掉。
 
-`/wf uninstall <owner>/<name>` 把装好的 workflow 拿走：bundle 目录连同里面的每个文件一起删掉，owner 目录里没别的东西时目录也一起删掉。
+`/wf uninstall <owner>/<name>` 把装好的 workflow 拿走：bundle 目录连同里面的每个文件一起删掉，owner 目录里没别的东西时目录也一起删掉。短写法在这里也一样：`/wf uninstall @coder` 删掉的是同一个 workflow。
 
 ### 写一个 workflow
 
@@ -633,7 +637,7 @@ me:
 
 | 命令 | 作用 |
 |---|---|
-| `/me start <workflow> [args...] [-i <rounds>]` | 在当前 chat 里启动一个 workflow。`-i` 指定这个 workflow 的每个 job 跑多少轮。 |
+| `/me start <workflow> [args...] [-i <rounds>]` | 在当前 chat 里启动一个 workflow。`-i` 指定这个 workflow 的每个 job 跑多少轮。项目自己这个命名空间下的 workflow 名字可以写短：`@coder` 就是 workflow `nightme/coder`。 |
 | `/me reply <text>` | 回答运行正在等的问题。 |
 | `/me pause` | 当前这一步跑完后停下。 |
 | `/me resume [note]` | 把运行所在的那一步再跑一遍；这一轮里它的预算重新开始；note 是你的指示。 |
@@ -738,8 +742,8 @@ Chat 级别的斜杠命令。`/gtw` 子命令见 [它们自己的 section](#git-
 | `/review [-a\|--agent <agent>] [-g\|--global] [--unset] [-c\|--continue] [--abort] [-t\|--timeout <dur>]` | 当前分支对比默认分支做 review（PR 模式），findings 注回当前 chat。`--agent` 指定用哪个 agent 跑 review；`-g` 把它存成 `~/.nightme/config.yaml` 里的全局 `review.agent`；`--unset` 删掉这个全局设置。`-c` 续跑本 chat 上一次 review 中失败的 group：重新打开那些 group 的 agent session，给它们发 "continue"。`--abort` 停掉本 chat 正在跑的 review —— 它的 agent session 被关掉，停掉的 group 还能用 `-c` 续跑。`--timeout` 定一个 subagent 最长能沉默多久（默认 15m，`0` 表示关掉）：沉默超过这个窗口的 subagent 会被关掉、报成超时，并且还能用 `-c` 续跑。阈值依次取自 flag、`~/.nightme/config.yaml` 里的 `review.timeout`、内置默认值。review 这一轮本身没有时限：一直跑到用户中止或 daemon 关闭为止。 |
 | `/wiki init [--modules] [--llmstxt] [--arch]` | 读码、分模块、写每个模块的 wiki 文件——把仓库 wiki 作为项目资产。 |
 | `/queue <message>` | 把一条消息作为独立 Prompt 追加进队列。 |
-| `/wf install [-f] <owner>/<name>` | 把一个已发布的 workflow 装进 workflows 目录。地址就是 workflow 的名字：`nightme/coder` 装成 `~/.nightme/workflows/nightme/coder/workflow.yml`，用 `/me start nightme/coder` 跑。安装过程显示成一张清单——下载、校验、写入。已经装过的地址会被跳过；`-f` 会再装一次。 |
-| `/wf uninstall <owner>/<name>` | 删掉一个装好的 workflow。bundle 目录连同里面的每个文件一起删掉，owner 目录里没别的东西时目录也一起删掉。 |
+| `/wf install [-f] <owner>/<name>` | 把一个已发布的 workflow 装进 workflows 目录。地址就是 workflow 的名字：`nightme/coder` 装成 `~/.nightme/workflows/nightme/coder/workflow.yml`，用 `/me start nightme/coder` 跑。安装过程显示成一张清单——下载、校验、写入。已经装过的地址会被跳过；`-f` 会再装一次。项目自己这个命名空间下的 workflow 地址可以写短：`@coder` 就是地址 `nightme/coder`。 |
+| `/wf uninstall <owner>/<name>` | 删掉一个装好的 workflow。bundle 目录连同里面的每个文件一起删掉，owner 目录里没别的东西时目录也一起删掉。短写法在这里也一样：`@coder` 就是地址 `nightme/coder`。 |
 | `/help` | 在 Chat 里列出所有斜杠命令。 |
 
 `!cmd` 在当前 Chat 的 CWD 里直接跑 shell 命令——规则见 [Shell mode](#shell-mode)。

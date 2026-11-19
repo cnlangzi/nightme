@@ -135,6 +135,46 @@ func TestParseAddress_TheOwnerIsAnyNamespace(t *testing.T) {
 	}
 }
 
+// TestParseAddress_TheShorthandIsTheAddressOfTheProject — "@coder"
+// is the address "nightme/coder".
+func TestParseAddress_TheShorthandIsTheAddressOfTheProject(t *testing.T) {
+	addr, err := ParseAddress("@coder")
+	if err != nil {
+		t.Fatalf("ParseAddress: %v", err)
+	}
+	if addr.Owner != "nightme" || addr.Name != "coder" {
+		t.Errorf("the address is %q/%q", addr.Owner, addr.Name)
+	}
+	if addr.String() != "nightme/coder" {
+		t.Errorf("the address reads %q", addr.String())
+	}
+}
+
+// TestParseAddress_RefusesTheShorthandsThatDoNotFit — a shorthand
+// that names no workflow, and one that names a path, are refused.
+func TestParseAddress_RefusesTheShorthandsThatDoNotFit(t *testing.T) {
+	for _, address := range []string{"@", "@a/b"} {
+		t.Run(address, func(t *testing.T) {
+			if _, err := ParseAddress(address); err == nil {
+				t.Errorf("the address %q was accepted", address)
+			}
+		})
+	}
+}
+
+// TestParseAddress_TheShorthandKeepsTheShapeOfTheHub — the shorthand
+// is expanded first, so the name it carries has to fit the hub's
+// shape like any other name.
+func TestParseAddress_TheShorthandKeepsTheShapeOfTheHub(t *testing.T) {
+	_, err := ParseAddress("@Coder")
+	if err == nil {
+		t.Fatal("the shorthand with a name that is not kebab-case was accepted")
+	}
+	if !strings.Contains(err.Error(), "kebab-case") {
+		t.Errorf("the error is %q, want it to name the shape of the name", err)
+	}
+}
+
 // TestInstall_WritesTheWorkflowUnderItsAddress — the installed file
 // is the workflow file of the address's bundle, so the workflow keeps
 // its name.

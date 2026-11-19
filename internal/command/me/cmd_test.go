@@ -530,6 +530,54 @@ func TestStart_WithoutAWorkflowName(t *testing.T) {
 	}
 }
 
+// TestStart_TheShorthandRunsTheWorkflowOfTheProject — "@coder" runs
+// the workflow "nightme/coder", and the outcome names it.
+func TestStart_TheShorthandRunsTheWorkflowOfTheProject(t *testing.T) {
+	ctrl := &fakeController{}
+	cs, ch := newSessionWithOutcome(t, "me-shorthand", "/tmp/work")
+
+	runMe(t, ctrl, cs, "/me", "start", "@coder")
+
+	if len(ctrl.started) != 1 {
+		t.Fatalf("the controller got %d requests, want 1", len(ctrl.started))
+	}
+	if req := ctrl.request(0); req.Name != "nightme/coder" {
+		t.Errorf("name = %q, want nightme/coder", req.Name)
+	}
+	outcome := ch.settled()
+	if outcome == nil {
+		t.Fatal("the command reported no outcome")
+	}
+	if outcome.Data["workflow"] != "nightme/coder" {
+		t.Errorf("the outcome names %q, want nightme/coder", outcome.Data["workflow"])
+	}
+	if !strings.Contains(outcome.Summary, "nightme/coder") {
+		t.Errorf("the summary is %q, want it to name the workflow", outcome.Summary)
+	}
+}
+
+// TestStart_TheShorthandThatNamesNoWorkflowIsRefused — "@" names no
+// workflow, so the run does not start.
+func TestStart_TheShorthandThatNamesNoWorkflowIsRefused(t *testing.T) {
+	ctrl := &fakeController{}
+	cs, ch := newSessionWithOutcome(t, "me-shorthand-bad", "/tmp/work")
+
+	reply := runMe(t, ctrl, cs, "/me", "start", "@")
+	if len(ctrl.started) != 0 {
+		t.Fatal("the run was started without a workflow")
+	}
+	if !strings.Contains(reply, "shorthand") {
+		t.Errorf("reply = %q, want it to name the shorthand", reply)
+	}
+	outcome := ch.settled()
+	if outcome == nil {
+		t.Fatal("the command reported no outcome")
+	}
+	if outcome.Data["reason"] != "usage" {
+		t.Errorf("the reason is %q, want usage", outcome.Data["reason"])
+	}
+}
+
 func TestReply_DeliversTheText(t *testing.T) {
 	ctrl := &fakeController{}
 	cs := newSession(t, "me-5", "/tmp/work")

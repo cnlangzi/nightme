@@ -70,19 +70,17 @@ func (m *Manager) armDrafts(ctx context.Context, cs *chatsession.ChatSession, ch
 // slow channel must not block — and always returns false: returning
 // true would consume the event and starve later subscribers, so the
 // message's own hold-until-prompt-end would never release.
+//
+// Subscribe is nil-receiver-safe: a chat without a bus gets a no-op
+// unsubscribe and the watcher simply never fires.
 func newDraftWatcher(ctx context.Context, cs *chatsession.ChatSession, chatID, draftDir string) *draftWatcher {
 	w := &draftWatcher{
-		unsub:    func() {},
 		chatID:   chatID,
 		draftDir: draftDir,
 		ctx:      context.WithoutCancel(ctx),
 		em:       cs.Emitter(),
 	}
-	bus := cs.PromptEndBus
-	if bus == nil {
-		return w
-	}
-	w.unsub = bus.Subscribe(func(e chatsession.PromptEndedEvent) bool {
+	w.unsub = cs.PromptEndBus.Subscribe(func(e chatsession.PromptEndedEvent) bool {
 		if e.Reason != agent.PromptEndClean {
 			return false
 		}
@@ -95,9 +93,7 @@ func newDraftWatcher(ctx context.Context, cs *chatsession.ChatSession, chatID, d
 // unsubscribe drops the bus subscription; the next /gtw new calls
 // it when it replaces this watcher.
 func (w *draftWatcher) unsubscribe() {
-	if w.unsub != nil {
-		w.unsub()
-	}
+	w.unsub()
 }
 
 // render sends the pending drafts as one reply anchored at the
@@ -131,6 +127,8 @@ func (w *draftWatcher) render(anchorMsgID string) {
 		Text:    renderPendingDrafts(drafts),
 	}
 	if err := w.em.Send(w.ctx, out); err != nil {
+		slog.Default().Warn("gtw: could not send the rendered issue drafts",
+			"dir", w.draftDir, "err", err)
 		return
 	}
 	w.lastDigest = digest

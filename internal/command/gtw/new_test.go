@@ -138,7 +138,7 @@ func TestRenderNewIssuePrompt(t *testing.T) {
 		"(do not print)",
 	} {
 		if strings.Contains(p, stale) {
-			t.Errorf("prompt still asks the agent to reprint the drafts: %q", stale)
+			t.Errorf("prompt contains wording R13 removed: %q", stale)
 		}
 	}
 }

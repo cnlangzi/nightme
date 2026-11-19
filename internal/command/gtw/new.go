@@ -722,6 +722,13 @@ func renderAnswersSection(material string) string {
 // in the archive prompt.
 const placeholderAnswersSection = "{{ANSWERS_SECTION}}"
 
+// newIssueHint is the sentence that closes the conversation about
+// the drafts: what the operator can do with them. The agent ends its
+// own reply with it, and the render of the drafts ends with it too,
+// so the operator reads the same instruction wherever the drafts are
+// shown.
+const newIssueHint = "Reply with changes, or run /gtw new -y to create the issues."
+
 // newIssuePrompt is the archive task queued into the current agent
 // session. It runs inside the user's own agent, which cannot see
 // this repository's docs, so it is fully self-contained. Later turns
@@ -762,9 +769,9 @@ Each time nightme creates an issue it replaces NN.md with NN.created, whose firs
    When the user answers — in a later message, or by running /gtw new again — use those answers, do not ask again, and continue with step 4. Questions that do not block implementation are not asked — they go under "Open Questions". If nothing is blocking, continue.
 4. Write the draft files following the template below, one file per issue.
 5. Review every draft file against the conversation and fix the file before finishing: requirements, constraints, or edge cases that were agreed but are missing from every draft; statements that differ from what was agreed; content with no basis in the discussion and no [inferred] mark; rejected options appearing anywhere except "Decisions"; items a developer could not act on (missing parameters, ambiguous interfaces, unverifiable acceptance criteria); every {{ISSUE:NN}} points at a lower file number. When one points forward, renumber so the referenced issue comes first, or drop the reference.
-6. Reply with one line naming the files you wrote, e.g. "Drafts written: 01, 02", then end with: "Reply with changes, or run /gtw new -y to create the issues."
+6. Reply with one line naming the files you wrote, e.g. "Drafts written: 01, 02", then end with: "` + newIssueHint + `"
 
-If the user asks for changes later in this conversation — including splitting or merging issues — rewrite the draft files so the directory holds exactly the current set of drafts not yet created, delete the drafts of issues that are no longer wanted, then reply with the names of the files you wrote and end with: "Reply with changes, or run /gtw new -y to create the issues." Give a new issue a number no file in the directory uses.
+If the user asks for changes later in this conversation — including splitting or merging issues — rewrite the draft files so the directory holds exactly the current set of drafts not yet created, delete the drafts of issues that are no longer wanted, then reply with the names of the files you wrote and end with: "` + newIssueHint + `" Give a new issue a number no file in the directory uses.
 
 ## One issue or several
 One issue is the default. An issue is the whole change one pull request delivers: the code together with its tests, documentation, configuration, and migration. A large issue is fine — its Implementation Plan carries the steps.

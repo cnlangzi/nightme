@@ -2,7 +2,8 @@ package gtw
 
 // Unit tests for the draft watcher /gtw new arms: the render
 // trigger (clean turn end + non-empty + changed fingerprint), the
-// render body, the ⚠️ annotation of invalid drafts, the retry after
+// render body (a rule before every block, the closing hint at the
+// end), the ⚠️ annotation of invalid drafts, the retry after
 // a failed send, the lenient directory read, and the bus etiquette
 // (never consume the event, never block the publish pump).
 
@@ -128,12 +129,12 @@ func TestDraftWatcher_RendersPendingDrafts(t *testing.T) {
 	if out.ReplyTo != "u1" {
 		t.Errorf("ReplyTo = %q, want the ended turn's message id u1", out.ReplyTo)
 	}
-	want := "01.md\n" + raw1 + "\n02.md\n" + raw2
+	want := "---\n01.md\n" + raw1 + "\n---\n02.md\n" + raw2 + "\n---\n" + newIssueHint + "\n"
 	if out.Text != want {
 		t.Errorf("render body =\n%q\nwant\n%q", out.Text, want)
 	}
-	if strings.Contains(out.Text, "Reply with changes") {
-		t.Error("the render carries the closing hint; the agent says it, nightme does not")
+	if !strings.HasSuffix(out.Text, "---\n"+newIssueHint+"\n") {
+		t.Errorf("the render does not end with the closing block:\n%q", out.Text)
 	}
 }
 
@@ -193,9 +194,124 @@ func TestDraftWatcher_InvalidDraftIsAnnotated(t *testing.T) {
 	publishCleanEnd(cs, "u1")
 
 	sends := waitSends(t, em, 1)
-	want := "⚠️ 01.md: first line must be `# <issue title>`\n01.md\n" + raw
+	want := "---\n⚠️ 01.md: first line must be `# <issue title>`\n01.md\n" + raw + "\n---\n" + newIssueHint + "\n"
 	if sends[0].Text != want {
 		t.Errorf("render body =\n%q\nwant\n%q", sends[0].Text, want)
+	}
+}
+
+// TestRenderPendingDrafts_BlocksAreIntroducedByRules pins the shape
+// of the render: every draft is a block of its own, introduced by a
+// horizontal rule, and the closing hint is the last block.
+func TestRenderPendingDrafts_BlocksAreIntroducedByRules(t *testing.T) {
+	raw1 := "# feat(a): first\n\nbody one\n"
+	raw2 := "# feat(b): second\n\nbody two\n"
+	drafts := []issueDraft{{key: "01", raw: raw1}, {key: "02", raw: raw2}}
+
+	got := renderPendingDrafts(drafts)
+
+	want := "---\n01.md\n" + raw1 + "\n---\n02.md\n" + raw2 +
+		"\n---\nReply with changes, or run /gtw new -y to create the issues.\n"
+	if got != want {
+		t.Errorf("render =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// TestRenderPendingDrafts_ClosingHintAppearsOnce pins that the
+// closing hint belongs to the render alone: the sentence appears
+// once, after the last draft.
+func TestRenderPendingDrafts_ClosingHintAppearsOnce(t *testing.T) {
+	raw1 := "# feat(a): first\n\nbody one\n"
+	raw2 := "# feat(b): second\n\nbody two\n"
+	drafts := []issueDraft{{key: "01", raw: raw1}, {key: "02", raw: raw2}}
+
+	got := renderPendingDrafts(drafts)
+
+	if n := strings.Count(got, newIssueHint); n != 1 {
+		t.Errorf("the closing hint appears %d times, want 1:\n%s", n, got)
+	}
+	if !strings.HasSuffix(got, "---\n"+newIssueHint+"\n") {
+		t.Errorf("the render does not end with the closing block:\n%q", got)
+	}
+}
+
+// TestRenderPendingDrafts_RuleStandsOnItsOwnLine pins the blank line
+// around the rule: a rule directly under a text line is a setext
+// heading in markdown, not a rule.
+func TestRenderPendingDrafts_RuleStandsOnItsOwnLine(t *testing.T) {
+	raw := "# feat(a): first\n\nbody one\n"
+	drafts := []issueDraft{{key: "01", raw: raw}}
+
+	got := renderPendingDrafts(drafts)
+
+	if !strings.Contains(got, "body one\n\n---\n") {
+		t.Errorf("the rule is not separated from the text above it:\n%q", got)
+	}
+	if !strings.HasPrefix(got, "---\n01.md\n") {
+		t.Errorf("the rule does not introduce the file name:\n%q", got)
+	}
+}
+
+// TestRenderPendingDrafts_ContentWithoutTrailingNewline pins that
+// the rule that follows a draft starts on its own line even when the
+// draft's content does not end with a newline.
+func TestRenderPendingDrafts_ContentWithoutTrailingNewline(t *testing.T) {
+	raw := "# feat(a): first\n\nbody without a newline"
+	drafts := []issueDraft{{key: "01", raw: raw}}
+
+	got := renderPendingDrafts(drafts)
+
+	want := "---\n01.md\n" + raw + "\n\n---\n" + newIssueHint + "\n"
+	if got != want {
+		t.Errorf("render =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// TestRenderPendingDrafts_EndsWithTheAgentsClosingSentence pins that
+// the render closes with the same sentence the agent is told to end
+// its own reply with.
+func TestRenderPendingDrafts_EndsWithTheAgentsClosingSentence(t *testing.T) {
+	prompt := renderNewIssuePrompt("/tmp/drafts", defaultLanguage, "")
+	if !strings.Contains(prompt, newIssueHint) {
+		t.Errorf("the prompt does not name the closing sentence %q", newIssueHint)
+	}
+	got := renderPendingDrafts([]issueDraft{{key: "01", raw: "# feat(a): first\n\nbody\n"}})
+	if !strings.HasSuffix(got, newIssueHint+"\n") {
+		t.Errorf("the render does not end with the closing sentence:\n%q", got)
+	}
+}
+
+// TestDraftWatcher_LeavesTheDraftFilesUntouched pins that the render
+// is a view: the files on disk keep their bytes, so /gtw new -y
+// submits what the agent wrote.
+func TestDraftWatcher_LeavesTheDraftFilesUntouched(t *testing.T) {
+	cs, em, dir := newWatchTestRig(t)
+	raw1 := "# feat(a): first\n\nbody one\n"
+	raw2 := "# feat(b): second\n\nbody two\n"
+	writeDraft(t, dir, "01.md", raw1)
+	writeDraft(t, dir, "02.md", raw2)
+	newDraftWatcher(context.Background(), cs, cs.ChatID, dir)
+
+	publishCleanEnd(cs, "u1")
+	waitSends(t, em, 1)
+
+	if got := readDraft(t, dir, "01.md"); got != raw1 {
+		t.Errorf("01.md = %q, want %q", got, raw1)
+	}
+	if got := readDraft(t, dir, "02.md"); got != raw2 {
+		t.Errorf("02.md = %q, want %q", got, raw2)
+	}
+	// The creation path reads the same files and submits the same
+	// content.
+	set, err := loadIssueDrafts(dir)
+	if err != nil {
+		t.Fatalf("loadIssueDrafts: %v", err)
+	}
+	if len(set.pending) != 2 {
+		t.Fatalf("pending drafts = %d, want 2", len(set.pending))
+	}
+	if set.pending[0].raw != raw1 || set.pending[1].raw != raw2 {
+		t.Errorf("the creation path reads %q and %q", set.pending[0].raw, set.pending[1].raw)
 	}
 }
 
@@ -229,7 +345,7 @@ func TestDraftWatcher_IgnoresNonDraftEntries(t *testing.T) {
 	publishCleanEnd(cs, "u1")
 
 	sends := waitSends(t, em, 1)
-	want := "01.md\n" + raw
+	want := "---\n01.md\n" + raw + "\n---\n" + newIssueHint + "\n"
 	if sends[0].Text != want {
 		t.Errorf("render body =\n%q\nwant\n%q", sends[0].Text, want)
 	}

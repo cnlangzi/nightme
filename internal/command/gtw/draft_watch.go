@@ -178,26 +178,41 @@ func draftDigest(drafts []issueDraft) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// renderPendingDrafts builds the render body: each draft its file
-// name followed by the file content verbatim, drafts separated by
-// exactly one blank line. A draft /gtw new -y would refuse is
-// flagged with a ⚠️ line carrying the parse error, then shown like
-// the rest — flagging one draft must not hide the others.
+// draftRenderRule introduces a block of the render: a horizontal
+// rule on a line of its own, separated from the text above by a
+// blank line — a rule directly under a text line is a setext
+// heading in markdown, not a rule.
+const draftRenderRule = "---"
+
+// renderPendingDrafts builds the render body: a sequence of blocks,
+// each introduced by a horizontal rule. A draft block is the file
+// name and then the file content verbatim; a draft /gtw new -y
+// would refuse opens with a ⚠️ line carrying the parse error —
+// flagging one draft must not hide the others. The last block is the
+// closing hint, so the operator reads what to do next after the
+// drafts.
+//
+// The files on disk are untouched: the render is a view of what the
+// agent wrote and of what /gtw new -y will submit.
 func renderPendingDrafts(drafts []issueDraft) string {
 	var sb strings.Builder
-	for i, d := range drafts {
+	for _, d := range drafts {
+		sb.WriteString(draftRenderRule)
+		sb.WriteByte('\n')
 		if _, _, err := parseIssueDraft(d.raw); err != nil {
 			fmt.Fprintf(&sb, "⚠️ %s: %v\n", d.name(), err)
 		}
 		sb.WriteString(d.name())
 		sb.WriteByte('\n')
 		sb.WriteString(d.raw)
-		if i < len(drafts)-1 {
-			if !strings.HasSuffix(d.raw, "\n") {
-				sb.WriteByte('\n')
-			}
+		if !strings.HasSuffix(d.raw, "\n") {
 			sb.WriteByte('\n')
 		}
+		sb.WriteByte('\n')
 	}
+	sb.WriteString(draftRenderRule)
+	sb.WriteByte('\n')
+	sb.WriteString(newIssueHint)
+	sb.WriteByte('\n')
 	return sb.String()
 }

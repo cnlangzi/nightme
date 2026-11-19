@@ -311,6 +311,7 @@ stdout:
 |---|---|---|
 | 1. 需求 | `/gtw plan` → `/gtw new [<material>]` → `/gtw new -y` | 先在 chat 里把方案定下来、不动代码，再把讨论变成一个自包含的 issue：背景、范围、带验收标准的需求、方案设计、关键决策、实施计划。 |
 | 2. 开发 | `/gtw fix <id> [-y]` | 一个 issue = 一个分支 = 一个 worktree，从刚 sync 过的默认分支切出。issue 打上 `nightme/wip` 标签并派发给 agent。 |
+| 2b. 队列 | `/gtw assign <id> [--remove]` | 给 issue 贴上队列标记 `nightme/assigned`，或者摘掉它——`/gtw fix *` 才会挑到它，或者不再挑它。 |
 | 3. 交接 *(可选)* | `/handoff <name>` · `/resume <name>` | 把任务状态写进文件，新 session 或另一个 agent 接着做，进度不丢。 |
 | 4. 提交 | `/gtw commit [-a <agent>]` | agent 暂存改动并写出符合 Conventional Commits 的 commit message。只在本地。 |
 | 5. 推送 | `/gtw push` | 把分支推到 `origin`。worktree 有未提交改动时拒绝。 |
@@ -343,7 +344,9 @@ issue 标题遵循 Conventional Commits，`/gtw fix` 据此生成可读的分支
 
 **`/gtw fix --name <branch>`**（或 `-n`）创建一个不关联 issue 的本地 worktree，由你自己指挥 agent。和带 issue 的模式一样，它会先 sync 默认分支：chat 必须停在主仓库（不能在 worktree 里），仓库需要有 `origin` remote，主仓库工作区不能有未提交改动。
 
-**`/gtw fix *`** 自己从待办队列里取下一件事：挑一个 issue，跑完全一样的流程，然后告诉你挑中了哪个 issue。队列在 tracker 上——NightMe 可以动的 issue 带着 `nightme/assigned` 标签，由人或者 tracker 上的外部自动化加上；fix 保留这个标签，再打上 `nightme/wip` 表示认领。只有只带 `nightme/assigned` 一个标签的 issue 才在队列里：再带任何一个 `nightme/*` 状态 label 就说明别的 agent 正在做它。队列里最老的可选项胜出：前置依赖还没落地的，分支本地已经存在的，或者已经开了 PR 的，都会被跳过。依赖关系取自平台自己的 issue 关系图——GitHub issue dependencies、GitLab blocking issues（Premium）——所以"先做前置"不靠 issue 正文里的文字；平台不提供关系图时队列只按年龄排序，回复里会说明这一点。当队列里没有可选项时，命令会说明原因，并请人在几分钟后叫醒它，而不是直接失败。被认领的 issue 靠 `nightme/wip` 标签离开队列，这个标签到 `/gtw pr --ready` 把 issue 挪到 `nightme/ready`、或者 `/gtw close` 收尾 issue 时才摘下来。
+**`/gtw fix *`** 自己从待办队列里取下一件事：挑一个 issue，跑完全一样的流程，然后告诉你挑中了哪个 issue。队列在 tracker 上——NightMe 可以动的 issue 带着 `nightme/assigned` 标签，由 `/gtw assign <issue-id>`、人、或者 tracker 上的外部自动化加上；fix 保留这个标签，再打上 `nightme/wip` 表示认领。只有只带 `nightme/assigned` 一个标签的 issue 才在队列里：再带任何一个 `nightme/*` 状态 label 就说明别的 agent 正在做它。队列里最老的可选项胜出：前置依赖还没落地的，分支本地已经存在的，或者已经开了 PR 的，都会被跳过。依赖关系取自平台自己的 issue 关系图——GitHub issue dependencies、GitLab blocking issues（Premium）——所以"先做前置"不靠 issue 正文里的文字；平台不提供关系图时队列只按年龄排序，回复里会说明这一点。当队列里没有可选项时，命令会说明原因，并请人在几分钟后叫醒它，而不是直接失败。被认领的 issue 靠 `nightme/wip` 标签离开队列，这个标签到 `/gtw pr --ready` 把 issue 挪到 `nightme/ready`、或者 `/gtw close` 收尾 issue 时才摘下来。
+
+**`/gtw assign <issue-id>`** 给 issue 贴上队列标记 `nightme/assigned`，`/gtw fix *` 就会挑它；**`/gtw assign <issue-id> --remove`**（或 `-r`）把标记摘掉。它只改 issue 上的标签，别的一概不碰——不建 worktree、不建分支、不派发 agent、不写状态文件——所以你不用离开 chat 就能往队列里放东西、或者把它清空。自动流程自己不这么做：`/gtw fix` 只认领（打 `nightme/wip`）并保留队列标记，`/gtw close` 收尾状态标签也保留它，`/gtw pr --ready` 把认领挪到 `nightme/ready`。别的 agent 正在做的 issue 无论标记怎么贴都不在队列里——标记是你入队的动作，别的 `nightme/*` 标签才是占住它的东西。
 
 **`/gtw back`** 临时离开 fix worktree 而不拆掉它——chat 的 CWD 回到仓库根目录并 sync 默认分支，worktree、分支和未提交的改动都留在磁盘上。**`/gtw back <branch>`** 再切回去：参数是 worktree 分支名的**前缀**，所以 `42-feat` 就能进入 `42-feat-login-state-expires` 所在的 worktree。出发点可以是主仓库根目录，也可以是同一个仓库里任一 worktree 的根目录——从一个 worktree 跳进另一个时，前一个的目录、分支、未提交的改动和状态文件都原样留着。前缀命中多个分支时，分支名完全相等的那个优先；都不相等时命令把这些分支列出来，不替人猜。手工建的 worktree 同样能进——分支名就是把手——但 nightme 不往里面写自己的状态文件，`/gtw close` 因此拆不掉一个不是 nightme 建的 worktree 和分支。
 

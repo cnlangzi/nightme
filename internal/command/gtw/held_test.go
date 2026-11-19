@@ -83,9 +83,10 @@ func TestRenderAutoNoCandidate_QueueRow(t *testing.T) {
 
 // TestLabelCatalogNote_EndsWithTheQueueRequirement pins that every
 // variant of the note tells the reader what the queue needs: the
-// queue marker on an issue that carries no other state label.
+// queue marker on an issue that carries no other state label, put
+// there with `/gtw assign`.
 func TestLabelCatalogNote_EndsWithTheQueueRequirement(t *testing.T) {
-	want := "attach it to an issue that carries no other `nightme/*` label to fill the queue"
+	want := "run `/gtw assign <issue-id>` on an issue that carries no other `nightme/*` label to fill the queue"
 	variants := map[string]labelCheck{
 		"just created": {Created: []string{LabelAssigned}, Verified: true},
 		"cached":       {},

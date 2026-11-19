@@ -267,64 +267,21 @@ func runFixRemote(
 	// retrying /gtw fix.
 
 	// --- locate repo + remote (§5.2.② prep) -----------------------
-	repoRoot, err := RepoRoot(ctx, cs.SelectedCwd(), deps.Git)
-	if err != nil {
-		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-			"❌ Not in a git repository. Run /cwd <inside a repo> first.",
-			command.FailedOutcome("not_a_repo", "the workspace is not inside a git repository")), nil
-	}
-	remoteURL, err := RemoteOriginURL(ctx, repoRoot, deps.Git)
-	if err != nil || remoteURL == "" {
-		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-			"❌ No `origin` remote. Add one with `git remote add origin <url>`.",
-			command.FailedOutcome("no_remote", "the repository has no origin remote")), nil
-	}
 	// The worktree doesn't exist yet at this point — runFixRemote
 	// runs BEFORE WorktreeAdd so we can use provider hints to name
 	// the worktree. But provider.GetIssue / AddIssueLabel calls below
-	// still need a valid CWD so `gh` can fork `git`. Pass repoRoot
-	// — it's always a real directory (we just computed it from
-	// `git rev-parse --show-toplevel`), so the CWD contract holds
-	// even when the daemon's own CWD has been stale'd.
-	provider, err := detectProvider(ctx, deps, remoteURL, repoRoot)
-	if err != nil {
-		// D3 split: distinguish "URL is malformed" (user error),
-		// "daemon can't reach the host" (network) from "host not
-		// recognised as GitHub/GitLab". Never echo the raw
-		// remoteURL — it may carry userinfo.
-		redacted := redactForDisplay(remoteURL)
-		switch {
-		case errors.Is(err, ErrInvalidRemoteURL):
-			if redacted == "" {
-				return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-					"❌ 无效的 remote URL（凭证已脱敏）\n  Expected: https://github.com/<owner>/<repo>.git, git@github.com:<owner>/<repo>.git, ssh://git@<host>/path, git://<host>/path, etc.",
-					command.FailedOutcome("provider_error", "the remote URL is not valid")), nil
-			}
-			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-				fmt.Sprintf("❌ 无效的 remote URL: %s\n  Expected: https://github.com/<owner>/<repo>.git, git@github.com:<owner>/<repo>.git, ssh://git@<host>/path, git://<host>/path, etc.", redacted),
-				command.FailedOutcome("provider_error", "the remote URL is not valid")), nil
-		case errors.Is(err, ErrProviderUnreachable):
-			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-				fmt.Sprintf("❌ 无法连接 Git 主机 (%s)\n  → %v", redacted, err),
-				command.FailedOutcome("provider_error", "the git host could not be reached")), nil
-		default:
-			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-				fmt.Sprintf("❌ 暂不支持的 Git 平台 (host: %s — neither github.com/gitlab.com URL hint nor /api/v3/meta or /api/v4/version probe recognised it).", redacted),
-				command.FailedOutcome("provider_error", "the git platform is not supported")), nil
-		}
+	// still need a valid CWD so `gh` can fork `git`. The resolver
+	// passes the repository root — it's always a real directory (it
+	// comes from `git rev-parse --show-toplevel`), so the CWD
+	// contract holds even when the daemon's own CWD has been stale'd.
+	target, res := resolveRemoteTarget(ctx, cs, deps, chatID, messageID)
+	if res != nil {
+		return res, nil
 	}
-	if provider == nil {
-		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-			"❌ Provider detection returned no result (deps.Detect override bug).",
-			command.FailedOutcome("provider_error", "the git platform could not be detected")), nil
-	}
+	repoRoot := target.RepoRoot
+	provider := target.Provider
 	providerKind := provider.Kind()
-	owner, repo, err := ParseRepoOwner(remoteURL)
-	if err != nil {
-		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ Cannot parse owner/repo from remote URL %s.", redactForDisplay(remoteURL)),
-			command.FailedOutcome("provider_error", "the remote URL does not name a repository")), nil
-	}
+	owner, repo := target.Owner, target.Repo
 
 	// --- ensure the gtw label catalog (§5.2.①) -------------------
 	// The repository's catalog must hold every label in AllLabels

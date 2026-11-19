@@ -172,7 +172,7 @@ func heldLabel(issue *Issue) string {
 
 // queueNeedsLabel is the tail every labelCatalogNote variant ends
 // with: what the queue needs from the user.
-const queueNeedsLabel = "attach it to an issue that carries no other `nightme/*` label to fill the queue"
+const queueNeedsLabel = "run `/gtw assign <issue-id>` on an issue that carries no other `nightme/*` label to fill the queue"
 
 // labelCatalogNote explains an empty queue in terms of the label
 // catalog: the queue marker is in the repository's catalog, so the
@@ -186,7 +186,8 @@ const queueNeedsLabel = "attach it to an issue that carries no other `nightme/*`
 //
 // Every variant ends the same way: the queue needs an issue that
 // carries the queue marker alone, because any other `nightme/*`
-// label means another agent holds it.
+// label means another agent holds it. `/gtw assign` is how the user
+// puts the marker there.
 func labelCatalogNote(chk labelCheck) string {
 	switch {
 	case slices.Contains(chk.Created, LabelAssigned):

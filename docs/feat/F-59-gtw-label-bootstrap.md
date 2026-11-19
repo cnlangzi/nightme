@@ -326,8 +326,9 @@ resolve provider + owner/repo
 ```
 
 认领之后 issue 同时带 `nightme/assigned` 和 `nightme/wip` 两个
-label —— 队列标记 gtw 从不摘。claim 本身只有在 `/gtw pr --ready`
-把 issue 挪到 `nightme/ready` 时才摘。
+label —— 自动流程从不摘队列标记，只有 `/gtw assign --remove` 摘。
+claim 本身只有在 `/gtw pr --ready` 把 issue 挪到 `nightme/ready`
+时才摘。
 
 label catalog 检查在 worktree 之前，所以它的失败不需要回滚 ——
 `rollbackLabelStep` 只覆盖 `AddIssueLabel` 这一步。

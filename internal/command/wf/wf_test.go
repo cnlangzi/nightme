@@ -2,6 +2,7 @@ package wf
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -875,12 +876,24 @@ func TestUninstall_AWorkflowThatIsNotInstalledIsSkipped(t *testing.T) {
 	}
 }
 
+// withRemoveAllStub swaps the package-level removeAll for the
+// duration of the test and restores it via t.Cleanup.
+//
+// The stub is what makes the failure path of the removal reachable:
+// chmod'ing the owner directory does not stop the removal on a
+// machine whose permissions the test user bypasses (root, or a
+// filesystem that ignores the mode bits), so the test would report a
+// successful removal where it means to fail one.
+func withRemoveAllStub(t *testing.T, fn func(string) error) {
+	t.Helper()
+	orig := removeAll
+	removeAll = fn
+	t.Cleanup(func() { removeAll = orig })
+}
+
 // TestUninstall_ABundleThatCannotBeRemovedFails — a bundle that
 // cannot be removed is a failure, not a removal.
 func TestUninstall_ABundleThatCannotBeRemovedFails(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root removes every path")
-	}
 	dir := t.TempDir()
 	addr := Address{Owner: "nightme", Name: "coder"}
 	bundle := filepath.Join(dir, "nightme", "coder")
@@ -890,12 +903,40 @@ func TestUninstall_ABundleThatCannotBeRemovedFails(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(bundle, "workflow.yml"), []byte(validWorkflow), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	// The owner directory cannot be written to: the bundle cannot be
-	// taken out of it.
-	if err := os.Chmod(filepath.Dir(bundle), 0o500); err != nil {
-		t.Fatalf("chmod: %v", err)
+	withRemoveAllStub(t, func(string) error {
+		return errors.New("the bundle is locked")
+	})
+
+	f := testFactory(dir, nil, nil)
+	col := &collector{}
+	list := newRemovalChecklist("remove nightme/coder", col.emit)
+
+	result := f.uninstall(list, addr)
+	if result.Reason != ReasonRemoveFailed {
+		t.Fatalf("the reason is %q (%s), want %q", result.Reason, result.Detail, ReasonRemoveFailed)
 	}
-	t.Cleanup(func() { _ = os.Chmod(filepath.Dir(bundle), 0o700) })
+	if result.Detail == "" {
+		t.Error("the detail is empty, want the error")
+	}
+	status, _ := col.last(rowRemove)
+	if status != agent.TaskFailed {
+		t.Errorf("the remove row is %v, want it failed", status)
+	}
+	if _, err := os.Stat(bundle); err != nil {
+		t.Errorf("the bundle is gone: %v", err)
+	}
+}
+
+// TestUninstall_ABundleThatCannotBeReachedFails — a bundle that
+// cannot even be looked at is a failure, not a removal: the owner
+// path is a file, so the bundle path is not a directory.
+func TestUninstall_ABundleThatCannotBeReachedFails(t *testing.T) {
+	dir := t.TempDir()
+	addr := Address{Owner: "nightme", Name: "coder"}
+	owner := filepath.Join(dir, "nightme")
+	if err := os.WriteFile(owner, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
 
 	f := testFactory(dir, nil, nil)
 	col := &collector{}

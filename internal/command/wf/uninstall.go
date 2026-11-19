@@ -25,6 +25,14 @@ const (
 // the install's checklist are a separate index space.
 const rowRemove = 0
 
+// removeAll removes the bundle directory and everything under it.
+//
+// It is a variable so a test can make the removal fail: the failure
+// path of the uninstall is otherwise unreachable on a machine whose
+// file permissions the test user bypasses (root, or a filesystem that
+// ignores the mode bits). Production removes the bundle directly.
+var removeAll = os.RemoveAll
+
 // newRemovalChecklist builds the checklist of one uninstall.
 //
 // The uninstall is one step, so the checklist holds one row. Its
@@ -70,7 +78,7 @@ func (f *Factory) uninstall(list *checklist, addr Address) Result {
 		result.Detail = err.Error()
 		return result
 	}
-	if err := os.RemoveAll(bundle); err != nil {
+	if err := removeAll(bundle); err != nil {
 		list.set(rowRemove, agent.TaskFailed, err.Error())
 		_ = list.send()
 		result.Reason = ReasonRemoveFailed

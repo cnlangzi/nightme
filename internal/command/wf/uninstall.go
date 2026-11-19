@@ -33,6 +33,14 @@ const rowRemove = 0
 // ignores the mode bits). Production removes the bundle directly.
 var removeAll = os.RemoveAll
 
+// statPath asks whether the bundle is there.
+//
+// It is a variable so a test can make the ask fail with something
+// other than "not there": the ask cannot be steered with the file
+// system itself, because a path whose parent is a file is "not there"
+// on one operating system and "not a directory" on another.
+var statPath = os.Stat
+
 // newRemovalChecklist builds the checklist of one uninstall.
 //
 // The uninstall is one step, so the checklist holds one row. Its
@@ -65,7 +73,7 @@ func (f *Factory) uninstall(list *checklist, addr Address) Result {
 	// The bundle is asked for before it is removed: the removal
 	// succeeds for a path that was never there, and a workflow that
 	// was never installed is not a removal.
-	if _, err := os.Stat(bundle); err != nil {
+	if _, err := statPath(bundle); err != nil {
 		if os.IsNotExist(err) {
 			list.set(rowRemove, agent.TaskSkipped, ReasonNotInstalled+" · "+displayPath(bundle))
 			_ = list.send()

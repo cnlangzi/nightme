@@ -927,16 +927,30 @@ func TestUninstall_ABundleThatCannotBeRemovedFails(t *testing.T) {
 	}
 }
 
+// withStatStub swaps the package-level statPath for the duration of
+// the test and restores it via t.Cleanup.
+//
+// The stub is what makes the "cannot be reached" branch reachable:
+// whether a path whose parent is a file is "not there" or "not a
+// directory" depends on the operating system, so the file system
+// cannot steer the branch on every platform.
+func withStatStub(t *testing.T, fn func(string) (os.FileInfo, error)) {
+	t.Helper()
+	orig := statPath
+	statPath = fn
+	t.Cleanup(func() { statPath = orig })
+}
+
 // TestUninstall_ABundleThatCannotBeReachedFails — a bundle that
-// cannot even be looked at is a failure, not a removal: the owner
-// path is a file, so the bundle path is not a directory.
+// cannot even be looked at is a failure, not a removal.
 func TestUninstall_ABundleThatCannotBeReachedFails(t *testing.T) {
 	dir := t.TempDir()
 	addr := Address{Owner: "nightme", Name: "coder"}
-	owner := filepath.Join(dir, "nightme")
-	if err := os.WriteFile(owner, []byte("not a directory"), 0o600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	// The ask fails with something other than "not there": the bundle
+	// is there, and the failure is in reaching it.
+	withStatStub(t, func(string) (os.FileInfo, error) {
+		return nil, os.ErrPermission
+	})
 
 	f := testFactory(dir, nil, nil)
 	col := &collector{}

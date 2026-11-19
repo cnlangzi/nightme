@@ -1045,8 +1045,9 @@ verdict yet.
 The icon of a row is the marker of the checklist without the brackets, so one
 card carries one vocabulary: `v` for a round that went well, `!` for one that
 went wrong, `x` for one that was stopped, `?` for one that reported no verdict
-and `>` for the round that is going. Every icon is one character wide, so the
-icon column of the tree stays aligned.
+and `>` for the round that is going. Every icon is one character wide, and the
+round number is as wide as the largest number the tree shows, so the icons of
+the rows start at the same column.
 
 The tree shows the last five rounds of the run: the earlier ones fold into
 one node, `… +3`.

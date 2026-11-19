@@ -579,6 +579,54 @@ func TestTheRoundsTreeFoldsTheOldRounds(t *testing.T) {
 	}
 }
 
+// TestTheRoundsTreeKeepsTheIconsInOneColumn — the round number is as
+// wide as the largest one the tree shows, so the icons of the rows
+// start at the same column.
+func TestTheRoundsTreeKeepsTheIconsInOneColumn(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+	svc, _ := testService(t, dir, noModels())
+	wf, ok := svc.catalog.Lookup("one")
+	if !ok {
+		t.Fatal("the workflow is not in the catalogue")
+	}
+	bound, err := wfe.Bind(wf, map[string]string{})
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	r := newRun(svc, Request{Name: "one", ChatID: "obs-1", Cwd: "/tmp/work"}, bound, nil)
+	t.Cleanup(r.cancel)
+
+	start := time.Date(2026, 11, 18, 10, 33, 4, 0, time.UTC)
+	r.roundRecords = []roundRecord{
+		{
+			Round:     9,
+			Job:       "main",
+			StartedAt: start,
+			EndedAt:   start.Add(time.Minute),
+			Outcome:   wfe.Outcome{Status: wfe.OutcomeOK},
+		},
+		{
+			Round:     10,
+			Job:       "main",
+			StartedAt: start.Add(time.Minute),
+			EndedAt:   start.Add(2 * time.Minute),
+			Outcome:   wfe.Outcome{Status: wfe.OutcomeFailed},
+		},
+	}
+
+	tree := r.roundsTree(iteration{job: "main", round: 11})
+	for _, want := range []string{
+		"├─ [  9 ] v ",
+		"├─ [ 10 ] ! ",
+		"└─ [ 11 ] > ",
+	} {
+		if !strings.Contains(tree, want) {
+			t.Errorf("the tree does not carry %q: %q", want, tree)
+		}
+	}
+}
+
 // TestTheRoundThatFailedSaysSo — the icon of a round tells how it
 // came to.
 func TestTheRoundThatFailedSaysSo(t *testing.T) {

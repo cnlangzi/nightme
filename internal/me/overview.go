@@ -421,8 +421,11 @@ func stepCommand(step wfe.Step) string {
 // has not settled has no duration and no verdict, so its node carries
 // nothing but the time it started.
 func (r *run) roundsTree(current iteration) string {
-	bodies := r.finishedRounds()
-	bodies = append(bodies, currentNode(current, r.manyJobs(), r.roundStart(current.job, current.round)))
+	records, folded := r.finishedRecords()
+	several := r.manyJobs()
+	width := roundWidth(records, current.round)
+	bodies := r.finishedRows(records, folded, several, width)
+	bodies = append(bodies, currentNode(current, several, width, r.roundStart(current.job, current.round)))
 	return treeBlock(r.roundsHeading(current.job), bodies)
 }
 
@@ -451,24 +454,49 @@ func (r *run) roundsHeading(job string) string {
 // A run with more rounds than the tree shows folds the older ones into
 // one row.
 func (r *run) finishedRounds() []string {
+	records, folded := r.finishedRecords()
+	return r.finishedRows(records, folded, r.manyJobs(), roundWidth(records, 0))
+}
+
+// finishedRecords returns the records of the rounds that have finished
+// and the number of the ones the tree folds away.
+func (r *run) finishedRecords() ([]roundRecord, int) {
 	r.mu.Lock()
 	records := append([]roundRecord(nil), r.roundRecords...)
 	r.mu.Unlock()
 
-	several := r.manyJobs()
-	bodies := make([]string, 0, len(records)+1)
 	folded := 0
 	if len(records) > maxTreeRounds {
 		folded = len(records) - maxTreeRounds
 		records = records[len(records)-maxTreeRounds:]
 	}
+	return records, folded
+}
+
+// finishedRows renders the rows of the records: the folded ones first.
+func (r *run) finishedRows(records []roundRecord, folded int, several bool, width int) []string {
+	bodies := make([]string, 0, len(records)+1)
 	if folded > 0 {
 		bodies = append(bodies, fmt.Sprintf("… +%d", folded))
 	}
 	for _, rec := range records {
-		bodies = append(bodies, roundNode(rec, several))
+		bodies = append(bodies, roundNode(rec, several, width))
 	}
 	return bodies
+}
+
+// roundWidth is the width of the round number in a tree.
+//
+// The number is as wide as the largest one the tree shows, so the
+// icons of the rows start at the same column.
+func roundWidth(records []roundRecord, current int) int {
+	width := len(strconv.Itoa(current))
+	for _, rec := range records {
+		if n := len(strconv.Itoa(rec.Round)); n > width {
+			width = n
+		}
+	}
+	return width
 }
 
 // manyJobs reports whether the run works through more than one job.
@@ -503,8 +531,9 @@ func treeRow(index, total int, body string) string {
 //
 // The numbers are the numbers of the run so far: the tree reads as a
 // ledger, and the last node carries the totals of the run.
-func roundNode(rec roundRecord, several bool) string {
-	return fmt.Sprintf("[ %d ] %s %s%s · %s %s",
+func roundNode(rec roundRecord, several bool, width int) string {
+	return fmt.Sprintf("[ %*d ] %s %s%s · %s %s",
+		width,
 		rec.Round,
 		outcomeIcon(rec.Outcome.Status),
 		jobPrefix(rec.Job, several),
@@ -529,8 +558,8 @@ func jobPrefix(job string, several bool) string {
 //
 // The round has not settled: it has no duration and no verdict yet, so
 // its node carries nothing else.
-func currentNode(it iteration, several bool, at time.Time) string {
-	return fmt.Sprintf("[ %d ] > %s%s", it.round, jobPrefix(it.job, several), clockTime(at))
+func currentNode(it iteration, several bool, width int, at time.Time) string {
+	return fmt.Sprintf("[ %*d ] > %s%s", width, it.round, jobPrefix(it.job, several), clockTime(at))
 }
 
 // roundEndedLine renders the closing line of a finished round: the
@@ -599,11 +628,11 @@ func abbrevOneDecimal(v float64, unit string) string {
 
 // outcomeIcon returns the icon of an outcome.
 //
-// The icons are the ones the checklist of a step uses, so a card reads
-// the same way everywhere it is read: `v` for a round that went well,
-// `!` for one that went wrong, `x` for one that was stopped and `?`
-// for one that reported no verdict. Every icon is one character wide,
-// so the icon column of the tree stays aligned.
+// The icons are the ones the checklist of a step uses, without the
+// brackets: `v` for an outcome that went through, `!` for one that
+// went wrong, `x` for one that was stopped and `?` for one that
+// reported no verdict. Every icon is one character wide, so an icon
+// never shifts the rest of the row.
 func outcomeIcon(status wfe.OutcomeStatus) string {
 	switch status {
 	case wfe.OutcomeOK, wfe.OutcomeNoop:

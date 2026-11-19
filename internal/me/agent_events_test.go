@@ -14,14 +14,11 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
-	"github.com/cnlangzi/nightme/internal/gateway/observe"
 	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/messages"
-	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
 // textAndToolCall builds an assistant message that says something and
@@ -379,40 +376,6 @@ func TestRun_CountsItsActivityEvenWhenTheChatHidesIt(t *testing.T) {
 	t.Fatal("the run counted nothing")
 }
 
-// TestTheHeartbeatCarriesTheCountersOfTheRun — the counters ride in
-// the header of the run's card.
-func TestTheHeartbeatCarriesTheCountersOfTheRun(t *testing.T) {
-	dir := t.TempDir()
-	writeWorkflow(t, dir, "one", oneStepWorkflow)
-
-	clock := &testClock{now: time.Date(2026, 11, 16, 14, 35, 22, 0, time.UTC)}
-	svc, op := testService(t, dir, Config{
-		Now: clock.Now,
-		Provider: &scriptedProvider{responses: []llm.Response{
-			{Message: toolCallMsg("c1", toolResume, map[string]any{})},
-		}},
-	})
-	op.steps = []fakeStep{pendingStep("still going"), okStep("committed")}
-	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
-	}); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	waitRun(t, svc, "obs-1")
-
-	beats := op.EmittedOf(messages.OutHeartbeat)
-	if len(beats) == 0 {
-		t.Fatalf("the run published no heartbeat: %v", op.Emitted())
-	}
-	last := beats[len(beats)-1].Heartbeat
-	if last == nil {
-		t.Fatal("the heartbeat carries no snapshot")
-	}
-	if last.ThinkCount == 0 && last.ToolCount == 0 {
-		t.Fatalf("the heartbeat carries no counters: %+v", last)
-	}
-}
-
 // TestTheStateOfAnOlderDaemonStillNamesTheCards — a state file of a
 // daemon that predates the anchor names the card of a session: the
 // run that comes back goes on with the card it opened.
@@ -503,87 +466,4 @@ func TestTheActivityOfTheRunSurvivesTheDaemon(t *testing.T) {
 	if restored.decisionSessionRef() == nil || restored.decisionSessionRef().anchor != state.DecisionSession.Anchor {
 		t.Error("the restored run lost the card of the decision")
 	}
-}
-
-// TestTheCardFollowsTheSnapshotsOfTheCommand — the card follows the
-// command the run waits for, and it does not write to the chat on
-// every snapshot of it.
-func TestTheCardFollowsTheSnapshotsOfTheCommand(t *testing.T) {
-	dir := t.TempDir()
-	writeWorkflow(t, dir, "one", oneStepWorkflow)
-
-	clock := &testClock{now: time.Date(2026, 11, 16, 14, 35, 22, 0, time.UTC)}
-	svc, op := testService(t, dir, Config{Now: clock.Now})
-	wf, ok := svc.catalog.Lookup("one")
-	if !ok {
-		t.Fatal("the workflow is not in the catalogue")
-	}
-	bound, err := wfe.Bind(wf, map[string]string{})
-	if err != nil {
-		t.Fatalf("bind: %v", err)
-	}
-	r := newRun(svc, Request{Name: "one", ChatID: "obs-1", Cwd: "/tmp/work"}, bound, nil)
-	r.setRunSession(&session{kind: sessionRun, id: r.id, anchor: "card-1"})
-	// The heartbeat rides on the card of the round: the card of the
-	// run is the static overview of the run.
-	r.setRoundSession(&session{kind: sessionRound, id: "main · round 1", job: "main", round: 1, anchor: "card-2"})
-	t.Cleanup(r.cancel)
-
-	// The run watches the command it waits for.
-	snapshots := make(chan observe.Execution, 8)
-	r.setWatchChannel(snapshots)
-	go svc.watchCommand(context.Background(), r, "msg-1", "/gtw commit")
-
-	// A snapshot of the command refreshes the card.
-	snapshots <- observe.Execution{Phase: observe.PhaseRunning}
-	waitBeats(t, op, 1)
-	first := op.EmittedOf(messages.OutHeartbeat)[0].Heartbeat
-	if first == nil || first.LastBeatAt.Format("15:04:05") != "14:35:22" {
-		t.Fatalf("the card does not say when the run did something last: %+v", first)
-	}
-
-	// A second snapshot within the window does not.
-	snapshots <- observe.Execution{Phase: observe.PhaseRunning}
-	time.Sleep(100 * time.Millisecond)
-	if n := len(op.EmittedOf(messages.OutHeartbeat)); n != 1 {
-		t.Fatalf("the card was written %d times, want once", n)
-	}
-
-	// A snapshot after the window refreshes it again.
-	clock.Advance(cardRefreshInterval)
-	snapshots <- observe.Execution{Phase: observe.PhaseRunning}
-	waitBeats(t, op, 2)
-}
-
-// testClock is a clock a test moves by hand.
-type testClock struct {
-	mu  sync.Mutex
-	now time.Time
-}
-
-// Now returns the time the clock stands at.
-func (c *testClock) Now() time.Time {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.now
-}
-
-// Advance moves the clock.
-func (c *testClock) Advance(d time.Duration) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.now = c.now.Add(d)
-}
-
-// waitBeats waits until the run published that many heartbeats.
-func waitBeats(t *testing.T, op *fakeOperator, n int) {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if len(op.EmittedOf(messages.OutHeartbeat)) >= n {
-			return
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-	t.Fatalf("the run published %d heartbeats, want %d", len(op.EmittedOf(messages.OutHeartbeat)), n)
 }

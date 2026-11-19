@@ -58,14 +58,12 @@ func TestSystem2_ToolDispatch(t *testing.T) {
 	if !found {
 		t.Fatalf("the chat got %v, want /gtw commit", sent)
 	}
-	var settled bool
+	// The card of the round is a snapshot of the start of the round: the
+	// step that ran does not show on it.
 	for _, item := range op.Checklist(op.Cards()[0].ID) {
-		if item.Subject == "commit" && item.Status == agent.TaskCompleted {
-			settled = true
+		if item.Subject == "commit" && item.Status != agent.TaskPending {
+			t.Fatalf("the card of the round was written again: %+v", item)
 		}
-	}
-	if !settled {
-		t.Fatalf("the card of the round did not show the settled step: %+v", op.Checklist(op.Cards()[0].ID))
 	}
 }
 

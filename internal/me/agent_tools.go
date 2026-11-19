@@ -260,18 +260,17 @@ func (s *Service) runPendingCalls(ctx context.Context, r *run) error {
 		// The call hangs under the decision that made it: the call and
 		// its result belong under the same card.
 		sess := r.decisionSessionRef()
-		// The call is counted before it leaves the run: a chat that
-		// hides the run's tool calls does not change what the run did.
-		s.countToolCall(ctx, r)
+		// The call is counted before it leaves the run: what the run
+		// did does not depend on what the chat shows.
+		r.countTool(s.now())
 		s.publishToolStart(ctx, r, sess, call)
-		// The run moved: the card counts the call it is making.
-		s.refreshSessions(r)
+		s.refreshRun(r)
 		res, err := s.execTool(ctx, r, call)
 		if err != nil {
 			var te *toolError
 			if errors.As(err, &te) {
 				s.publishToolEnd(ctx, r, sess, call, stepResult{Status: "error", Summary: te.Error()}, nil)
-				s.refreshSessions(r)
+				s.refreshRun(r)
 				s.appendToolResult(r, call, stepResult{Status: "error", Summary: te.Error()}, true)
 				r.dropPendingCall()
 				s.persist(r)
@@ -285,7 +284,7 @@ func (s *Service) runPendingCalls(ctx context.Context, r *run) error {
 			// has no verdict yet: the result comes when the run picks
 			// the command up again.
 			s.publishToolEnd(ctx, r, sess, call, res, nil)
-			s.refreshSessions(r)
+			s.refreshRun(r)
 		}
 		r.dropPendingCall()
 		s.appendToolResult(r, call, res, false)
@@ -397,9 +396,8 @@ func (s *Service) runStepAgain(ctx context.Context, r *run, step wfe.Step, fresh
 		return stepResult{Status: statusWaiting, Summary: verdict.Outcome.Summary}, nil
 	}
 	r.recordStep(job, step, verdict.Outcome)
-	s.recordStepOutcome(ctx, r)
 	s.persist(r)
-	s.refreshSessions(r)
+	s.refreshRun(r)
 	return stepResult{
 		Status:     string(verdict.Outcome.Status),
 		Summary:    verdict.Outcome.Summary,
@@ -446,12 +444,11 @@ func (s *Service) skipStep(ctx context.Context, r *run, step wfe.Step, summary s
 	skipped := skippedOutcome(out, summary)
 	job := wfe.JobOf(r.workflow, step.ID)
 	r.recordStep(job, step, skipped)
-	s.recordStepOutcome(ctx, r)
 	// The history has to agree with the run state: the step is
 	// skipped, and the run says so.
 	r.record(wfe.ActionKindRun, s.stepCommand(r, step), step.ID, skipped)
 	s.persist(r)
-	s.refreshSessions(r)
+	s.refreshRun(r)
 	return stepResult{
 		Status:  string(skipped.Status),
 		Summary: skipped.Summary,
@@ -577,7 +574,6 @@ func (s *Service) runStep(ctx context.Context, r *run, command string) (stepResu
 		if owned {
 			// The step ran: the run state carries the outcome.
 			r.recordStep(wfe.JobOf(r.workflow, step.ID), step, out)
-			s.recordStepOutcome(ctx, r)
 		}
 		return stepResult{}, toolErrorf("%s", err.Error())
 	}
@@ -605,7 +601,6 @@ func (s *Service) runStep(ctx context.Context, r *run, command string) (stepResu
 	if owned {
 		// The step ran: the run state carries the outcome.
 		r.recordStep(wfe.JobOf(r.workflow, step.ID), step, out)
-		s.recordStepOutcome(ctx, r)
 	}
 	return res, nil
 }
@@ -627,7 +622,6 @@ func (s *Service) runStepChain(ctx context.Context, r *run, step wfe.Step, comma
 		return res, nil
 	}
 	r.recordStep(job, step, verdict.Outcome)
-	s.recordStepOutcome(ctx, r)
 	if verdict.Failure != nil {
 		// The attempt could not run: the agent reads what went wrong
 		// and tries again.
@@ -799,9 +793,9 @@ func (s *Service) toolWait(ctx context.Context, r *run, call pendingCall) (stepR
 		d = maxWait
 	}
 
-	s.refreshSessions(r)
+	s.refreshRun(r)
 	defer func() {
-		s.refreshSessions(r)
+		s.refreshRun(r)
 	}()
 
 	execCtx, cancel := r.runContext(ctx)
@@ -843,7 +837,7 @@ func (s *Service) toolEndRound(ctx context.Context, r *run, _ pendingCall) (step
 	// decides again.
 	r.markSituation()
 	s.persist(r)
-	s.refreshSessions(r)
+	s.refreshRun(r)
 	return stepResult{
 		Status:  string(wfe.OutcomeOK),
 		Summary: fmt.Sprintf("the round %d of %s is over", round, job),
@@ -873,7 +867,7 @@ func (s *Service) toolFinish(ctx context.Context, r *run, call pendingCall) (ste
 		r.setSummary(summary)
 		s.finish(r, PhaseDone, "")
 	}
-	s.refreshSessions(r)
+	s.refreshRun(r)
 	s.persist(r)
 	return stepResult{Status: status, Summary: summary}, nil
 }
@@ -941,9 +935,10 @@ func (s *Service) runCommand(ctx context.Context, r *run, command string, instru
 	s.reportOutcome(r, command, res)
 	if throttled(res) {
 		r.requestPause(rateLimitReason)
-		// The run stops: the state card carries the state of the round,
-		// and it becomes the round's live card.
-		s.showState(ctx, r)
+		// The run stops: the state of the round hangs under the card of
+		// the round.
+		s.showState(ctx, r, r.stateAnchor(""))
+		s.announcePause(ctx, r, rateLimitReason)
 	}
 	return res, nil
 }
@@ -952,7 +947,7 @@ func (s *Service) runCommand(ctx context.Context, r *run, command string, instru
 // overview.
 func (s *Service) reportOutcome(r *run, command string, res stepResult) {
 	r.setTranscript(command, res.Transcript)
-	s.refreshSessions(r)
+	s.refreshRun(r)
 }
 
 // groupsSuffix renders how many review groups are still open.
@@ -1000,7 +995,7 @@ func (s *Service) runCommandInner(ctx context.Context, r *run, command string, i
 		// The in-flight command is persisted right away: a daemon
 		// that dies while it runs comes back and resolves it.
 		s.persist(r)
-		s.refreshSessions(r)
+		s.refreshRun(r)
 	}
 	return s.watchCommand(ctx, r, msgID, command)
 }
@@ -1051,11 +1046,11 @@ func (s *Service) watchCommand(ctx context.Context, r *run, msgID, command strin
 			if len(ex.Choices) > 0 {
 				return s.waitingResult(fmt.Sprintf("the chat is waiting for an answer: %s", ex.Choices[0].Title)), nil
 			}
-			// The command is still running: the card follows it
-			// through the snapshots of the tracker. The refresh is
-			// throttled, so a chatty command does not write to the
-			// chat on every line it produces.
-			s.refreshSessions(r)
+			// The command is still running: the run reads its own facts
+			// again now and then. The read is throttled, so a chatty
+			// command does not read the repository on every line it
+			// produces.
+			s.refreshRun(r)
 		}
 	}
 }

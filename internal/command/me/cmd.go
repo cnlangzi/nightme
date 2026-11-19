@@ -206,7 +206,7 @@ func (f *Factory) reply(ctx context.Context, rt command.RuntimeServices, input c
 
 // pause stops the run after the step it is on.
 func (f *Factory) pause(ctx context.Context, rt command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
-	if err := f.ctrl.Pause(ctx, input.ChatID); err != nil {
+	if err := f.ctrl.Pause(ctx, input.ChatID, input.MessageID); err != nil {
 		chatsession.ReportOutcome(ctx, command.FailedOutcome("error", "the run could not be paused"))
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
@@ -220,7 +220,7 @@ func (f *Factory) pause(ctx context.Context, rt command.RuntimeServices, input c
 // resume runs the step the run is on again.
 func (f *Factory) resume(ctx context.Context, rt command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
 	note := decisionNote(input.Text)
-	step, err := f.ctrl.Resume(ctx, input.ChatID, note)
+	step, err := f.ctrl.Resume(ctx, input.ChatID, input.MessageID, note)
 	if err != nil {
 		chatsession.ReportOutcome(ctx, command.FailedOutcome(refusalReason(err), err.Error()))
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
@@ -236,7 +236,7 @@ func (f *Factory) resume(ctx context.Context, rt command.RuntimeServices, input 
 // next skips the step the run is on.
 func (f *Factory) next(ctx context.Context, rt command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
 	note := decisionNote(input.Text)
-	step, err := f.ctrl.Next(ctx, input.ChatID, note)
+	step, err := f.ctrl.Next(ctx, input.ChatID, input.MessageID, note)
 	if err != nil {
 		chatsession.ReportOutcome(ctx, command.FailedOutcome(refusalReason(err), err.Error()))
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
@@ -276,17 +276,20 @@ func (f *Factory) stop(ctx context.Context, rt command.RuntimeServices, input co
 
 // status shows the state of the run again.
 //
-// The state card carries the state: the phase of the run, the tree of
-// the rounds, the checklist of the round and the counters of the run in
-// its header. A chat without a run has no state to show.
+// The state hangs under the message the command was typed in: the
+// phase of the run, the tree of the rounds and the checklist of the
+// round are on the card of that message. A chat without a run has no
+// state to show.
 func (f *Factory) status(ctx context.Context, rt command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
-	err := f.ctrl.Status(ctx, input.ChatID)
+	err := f.ctrl.Status(ctx, input.ChatID, input.MessageID)
 	if err == nil {
 		chatsession.ReportOutcome(ctx, messages.Outcome{
 			Status:  messages.OutcomeOK,
 			Summary: "the run's state is shown again",
 		})
-		return command.Reply(ctx, rt, "📋 The run's state is shown again."), nil
+		// The state is on the card of the command: the command posts no
+		// reply of its own.
+		return &command.SlashOutput{Consumed: true}, nil
 	}
 	if !errors.Is(err, mesvc.ErrNoRun) {
 		chatsession.ReportOutcome(ctx, command.FailedOutcome("error", "the run's state could not be shown"))
@@ -401,18 +404,18 @@ func (c *controller) Reply(ctx context.Context, chatID, text string) error {
 }
 
 // Pause implements command.MeController.
-func (c *controller) Pause(ctx context.Context, chatID string) error {
-	return c.svc.Pause(ctx, chatID)
+func (c *controller) Pause(ctx context.Context, chatID, messageID string) error {
+	return c.svc.Pause(ctx, chatID, messageID)
 }
 
 // Resume implements command.MeController.
-func (c *controller) Resume(ctx context.Context, chatID, note string) (string, error) {
-	return c.svc.Resume(ctx, chatID, note)
+func (c *controller) Resume(ctx context.Context, chatID, messageID, note string) (string, error) {
+	return c.svc.Resume(ctx, chatID, messageID, note)
 }
 
 // Next implements command.MeController.
-func (c *controller) Next(ctx context.Context, chatID, note string) (string, error) {
-	return c.svc.Next(ctx, chatID, note)
+func (c *controller) Next(ctx context.Context, chatID, messageID, note string) (string, error) {
+	return c.svc.Next(ctx, chatID, messageID, note)
 }
 
 // Stop implements command.MeController.
@@ -421,8 +424,8 @@ func (c *controller) Stop(ctx context.Context, chatID string) error {
 }
 
 // Status implements command.MeController.
-func (c *controller) Status(ctx context.Context, chatID string) error {
-	return c.svc.Status(ctx, chatID)
+func (c *controller) Status(ctx context.Context, chatID, messageID string) error {
+	return c.svc.Status(ctx, chatID, messageID)
 }
 
 // DisabledReason implements command.MeController.

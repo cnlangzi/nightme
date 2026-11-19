@@ -36,6 +36,8 @@ type fakeController struct {
 	statusErr error
 	// statusCalls counts the status requests.
 	statusCalls int
+	// messageIDs holds the message the commands were asked from.
+	messageIDs []string
 	// disabled says why the personal agent is off.
 	disabled string
 	// replies holds the replies the command sent.
@@ -71,29 +73,32 @@ func (c *fakeController) Reply(_ context.Context, _ string, text string) error {
 	return c.replyErr
 }
 
-func (c *fakeController) Pause(_ context.Context, _ string) error {
+func (c *fakeController) Pause(_ context.Context, _ string, messageID string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.paused++
+	c.messageIDs = append(c.messageIDs, messageID)
 	return c.pauseErr
 }
 
-func (c *fakeController) Resume(_ context.Context, _ string, note string) (string, error) {
+func (c *fakeController) Resume(_ context.Context, _ string, messageID string, note string) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.resumed++
 	c.notes = append(c.notes, note)
+	c.messageIDs = append(c.messageIDs, messageID)
 	if c.resumeErr != nil {
 		return "", c.resumeErr
 	}
 	return c.step, nil
 }
 
-func (c *fakeController) Next(_ context.Context, _ string, note string) (string, error) {
+func (c *fakeController) Next(_ context.Context, _ string, messageID string, note string) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.nexted++
 	c.notes = append(c.notes, note)
+	c.messageIDs = append(c.messageIDs, messageID)
 	if c.nextErr != nil {
 		return "", c.nextErr
 	}
@@ -107,10 +112,11 @@ func (c *fakeController) Stop(_ context.Context, _ string) error {
 	return c.stopErr
 }
 
-func (c *fakeController) Status(_ context.Context, _ string) error {
+func (c *fakeController) Status(_ context.Context, _ string, messageID string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.statusCalls++
+	c.messageIDs = append(c.messageIDs, messageID)
 	return c.statusErr
 }
 
@@ -603,6 +609,9 @@ func TestPause_PausesTheRun(t *testing.T) {
 	if ctrl.paused != 1 {
 		t.Fatalf("the controller paused %d runs, want 1", ctrl.paused)
 	}
+	if len(ctrl.messageIDs) != 1 || ctrl.messageIDs[0] != "msg-1" {
+		t.Fatalf("the controller got the messages %v, want the message of the command", ctrl.messageIDs)
+	}
 }
 
 // TestResume_RunsTheStepAgain — the command names the step it acted
@@ -621,6 +630,9 @@ func TestResume_RunsTheStepAgain(t *testing.T) {
 	if len(ctrl.notes) != 1 || ctrl.notes[0] != "" {
 		t.Fatalf("the controller got the notes %v, want none", ctrl.notes)
 	}
+	if len(ctrl.messageIDs) != 1 || ctrl.messageIDs[0] != "msg-1" {
+		t.Fatalf("the controller got the messages %v, want the message of the command", ctrl.messageIDs)
+	}
 }
 
 // TestNext_SkipsTheStep — the command names the step it acted on and
@@ -638,6 +650,9 @@ func TestNext_SkipsTheStep(t *testing.T) {
 	}
 	if ctrl.nexted != 1 {
 		t.Fatalf("the controller skipped %d steps, want 1", ctrl.nexted)
+	}
+	if len(ctrl.messageIDs) != 1 || ctrl.messageIDs[0] != "msg-1" {
+		t.Fatalf("the controller got the messages %v, want the message of the command", ctrl.messageIDs)
 	}
 }
 
@@ -700,18 +715,22 @@ func TestResume_ReportsTheRefusal(t *testing.T) {
 	}
 }
 
-// TestStatus_PostsTheStateCard — /me status shows the state of the run
-// again: the card of the round is the state.
-func TestStatus_PostsTheStateCard(t *testing.T) {
+// TestStatus_AsksForTheStateOfTheRun — /me status shows the state of
+// the run again: the state hangs under the message the command was
+// typed in, and the command posts no reply of its own.
+func TestStatus_AsksForTheStateOfTheRun(t *testing.T) {
 	ctrl := &fakeController{}
 	cs, ch := newSessionWithOutcome(t, "me-14", "/tmp/work")
 
 	reply := runMe(t, ctrl, cs, "/me", "status")
-	if !strings.Contains(reply, "shown again") {
-		t.Fatalf("reply = %q, want the show", reply)
+	if reply != "" {
+		t.Fatalf("reply = %q, want none", reply)
 	}
 	if ctrl.statusCalls != 1 {
 		t.Fatalf("the controller was asked %d times, want 1", ctrl.statusCalls)
+	}
+	if len(ctrl.messageIDs) != 1 || ctrl.messageIDs[0] != "msg-1" {
+		t.Fatalf("the controller got the messages %v, want the message of the command", ctrl.messageIDs)
 	}
 	outcome := ch.settled()
 	if outcome == nil {
@@ -728,7 +747,7 @@ func TestStatus_PostsTheStateCard(t *testing.T) {
 	}
 }
 
-// TestShow_IsUnknown — /me show is gone: the state card is the status.
+// TestShow_IsUnknown — /me show is gone: the status is the state.
 func TestShow_IsUnknown(t *testing.T) {
 	ctrl := &fakeController{}
 	cs := newSession(t, "me-16", "/tmp/work")

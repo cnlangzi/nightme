@@ -84,7 +84,7 @@ func (s *Service) runMessage(ctx context.Context, r *run, job string, step wfe.S
 	if err := checkArgsMessage(step, base); err != nil {
 		out := failedOutcome(err.Error(), nil)
 		r.record(wfe.ActionKindRun, base, step.ID, out)
-		s.refreshSessions(r)
+		s.refreshRun(r)
 		return stepVerdict{Outcome: out, Settled: true, Failure: err}, stepResult{}, nil
 	}
 	attempts := s.composeAttempts(r, step, base)
@@ -198,7 +198,7 @@ func (s *Service) runAttempt(ctx context.Context, r *run, job string, step wfe.S
 		}
 		out := failedOutcome(err.Error(), nil)
 		r.record(wfe.ActionKindRun, a.recorded, step.ID, out)
-		s.refreshSessions(r)
+		s.refreshRun(r)
 		return stepVerdict{Outcome: out, Settled: true, Failure: err}, stepResult{}, nil
 	}
 	if res.Status == statusWaiting {
@@ -225,7 +225,7 @@ func (s *Service) runAttempt(ctx context.Context, r *run, job string, step wfe.S
 func (s *Service) breakAttempt(r *run, step wfe.Step, a attempt, err error) stepVerdict {
 	out := failedOutcome(err.Error(), nil)
 	r.record(wfe.ActionKindRun, a.recorded, step.ID, out)
-	s.refreshSessions(r)
+	s.refreshRun(r)
 	return stepVerdict{Outcome: out, Settled: true, Failure: err}
 }
 
@@ -289,7 +289,7 @@ func (s *Service) executeShell(ctx context.Context, r *run, job string, step wfe
 	if s.cfg.Shell == nil {
 		out := failedOutcome(fmt.Sprintf("the step %q needs a shell runner, and the daemon has none", step.ID), nil)
 		r.record(wfe.ActionKindRun, command, step.ID, out)
-		s.refreshSessions(r)
+		s.refreshRun(r)
 		return stepVerdict{Outcome: out, Settled: true}, nil
 	}
 
@@ -317,7 +317,7 @@ func (s *Service) executeShell(ctx context.Context, r *run, job string, step wfe
 		out = failedOutcome(summary, out.Data)
 	}
 	r.record(wfe.ActionKindRun, command, step.ID, out)
-	s.refreshSessions(r)
+	s.refreshRun(r)
 	return stepVerdict{Outcome: out, Settled: true}, nil
 }
 
@@ -412,7 +412,7 @@ func (s *Service) executeWait(ctx context.Context, r *run, job string, step wfe.
 	}
 	out := wfe.Outcome{Status: wfe.OutcomeOK, Summary: "waited " + d.String()}
 	r.record(wfe.ActionKindRun, "wait "+d.String(), step.ID, out)
-	s.refreshSessions(r)
+	s.refreshRun(r)
 	return stepVerdict{Outcome: out, Settled: true}, nil
 }
 
@@ -444,7 +444,7 @@ func (s *Service) executeUse(ctx context.Context, r *run, job string, step wfe.S
 		out = failedOutcome(err.Error(), data)
 	}
 	r.record(wfe.ActionKindRun, name, step.ID, out)
-	s.refreshSessions(r)
+	s.refreshRun(r)
 	return stepVerdict{Outcome: out, Settled: true}, nil
 }
 

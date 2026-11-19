@@ -2,10 +2,13 @@ package me
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/messages"
 )
@@ -84,10 +87,10 @@ func TestThePhaseLineCutsTheQuestion(t *testing.T) {
 	}
 }
 
-// TestTheStateCardCarriesTheStateOfTheRound — the state card carries
-// the phase line, the tree of the rounds, the checklist of the round
-// and the heartbeat.
-func TestTheStateCardCarriesTheStateOfTheRound(t *testing.T) {
+// TestTheStateCarriesTheStateOfTheRound — the state carries the
+// phase line, the tree of the rounds and the checklist of the round.
+// It is a snapshot: it carries no heartbeat.
+func TestTheStateCarriesTheStateOfTheRound(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", commitPushWorkflow)
 
@@ -107,27 +110,33 @@ func TestTheStateCardCarriesTheStateOfTheRound(t *testing.T) {
 	spent := r.roundUsage.Total()
 	r.mu.Unlock()
 
-	if err := svc.Status(context.Background(), "obs-1"); err != nil {
+	if err := svc.Status(context.Background(), "obs-1", "om_status"); err != nil {
 		t.Fatalf("status: %v", err)
 	}
 
-	state := waitForStateCard(t, op)
-	entries := op.Entries(state.ID)
-	if len(entries) < 2 {
-		t.Fatalf("the state card carries %d entries, want the phase line and the tree", len(entries))
+	state := stateUnder(op, "om_status")
+	if len(state) != 4 {
+		t.Fatalf("the state carries %d messages, want the identity line, the phase line, the tree and the checklist", len(state))
 	}
-	if !strings.HasPrefix(entries[0], "running") {
-		t.Errorf("the first entry is %q, want the phase line", entries[0])
+	if state[0].Kind != messages.OutInit {
+		t.Errorf("the first message is %q, want the identity line", state[0].Kind)
 	}
-	if !strings.HasPrefix(entries[1], "rounds:") {
-		t.Errorf("the second entry is %q, want the tree of the rounds", entries[1])
+	if state[1].Kind != messages.OutReply || !strings.HasPrefix(state[1].Text, "running") {
+		t.Errorf("the second message is %q (%q), want the phase line", state[1].Kind, state[1].Text)
 	}
-	items := op.Checklist(state.ID)
-	if len(items) != 2 {
-		t.Fatalf("the state card carries %d rows, want one per step of the round", len(items))
+	if state[2].Kind != messages.OutReply || !strings.HasPrefix(state[2].Text, "rounds:") {
+		t.Errorf("the third message is %q (%q), want the tree of the rounds", state[2].Kind, state[2].Text)
 	}
-	if !heartbeatOn(op, state.ID) {
-		t.Error("the state card carries no heartbeat")
+	if state[3].Kind != messages.OutTaskUpdate || state[3].TaskList == nil {
+		t.Fatalf("the fourth message is %q, want the checklist of the round", state[3].Kind)
+	}
+	if items := state[3].TaskList.Items; len(items) != 2 {
+		t.Errorf("the checklist carries %d rows, want one per step of the round", len(items))
+	}
+	for _, m := range state {
+		if m.Kind == messages.OutHeartbeat {
+			t.Error("the state carries a heartbeat")
+		}
 	}
 
 	// The round is not started over: its start time and what it spent
@@ -143,9 +152,10 @@ func TestTheStateCardCarriesTheStateOfTheRound(t *testing.T) {
 	}
 }
 
-// TestTheStateCardHangsAtTheTopOfTheChat — the operator asked for the
-// state where they are looking.
-func TestTheStateCardHangsAtTheTopOfTheChat(t *testing.T) {
+// TestTheStateHangsUnderTheMessageThatAskedForIt — the operator asked
+// for the state where they are looking: the state hangs under the
+// message of the command.
+func TestTheStateHangsUnderTheMessageThatAskedForIt(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
@@ -158,20 +168,29 @@ func TestTheStateCardHangsAtTheTopOfTheChat(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	waitSent(t, op, "/gtw commit")
+	cards := op.Posted()
 
-	if err := svc.Status(context.Background(), "obs-1"); err != nil {
+	if err := svc.Status(context.Background(), "obs-1", "om_status"); err != nil {
 		t.Fatalf("status: %v", err)
 	}
-	state := waitForStateCard(t, op)
-	if state.ReplyTo != "" {
-		t.Errorf("the state card hangs under %q, want the top of the chat", state.ReplyTo)
+	state := stateUnder(op, "om_status")
+	if len(state) == 0 {
+		t.Fatal("the run published no state")
+	}
+	for _, m := range state {
+		if m.ReplyTo != "om_status" {
+			t.Errorf("the message hangs under %q, want om_status", m.ReplyTo)
+		}
+	}
+	// The state posts no card of its own.
+	if op.Posted() != cards {
+		t.Errorf("the run published %d cards, want none", op.Posted()-cards)
 	}
 }
 
-// TestTheStateCardBecomesTheLiveCardOfTheRound — the events of the run
-// are anchored to the state card from then on, and the card the round
-// had receives nothing more.
-func TestTheStateCardBecomesTheLiveCardOfTheRound(t *testing.T) {
+// TestTheStateTakesNoCardOver — the state is a snapshot: the round
+// keeps the card it has, and that card receives nothing more.
+func TestTheStateTakesNoCardOver(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
@@ -185,32 +204,102 @@ func TestTheStateCardBecomesTheLiveCardOfTheRound(t *testing.T) {
 	}
 	waitSent(t, op, "/gtw commit")
 
-	round := lastPostedCard(op)
+	r := activeRun(t, svc, "obs-1")
+	round := r.roundSessionRef()
+	if round == nil {
+		t.Fatal("the run has no card of the round")
+	}
+	seen := op.EventsOf(round.anchor)
 
-	if err := svc.Status(context.Background(), "obs-1"); err != nil {
+	if err := svc.Status(context.Background(), "obs-1", "om_status"); err != nil {
 		t.Fatalf("status: %v", err)
 	}
-	state := waitForStateCard(t, op)
-	// The state card is the live card of the round from here on: the
-	// card the round had receives nothing more.
-	seen := op.EventsOf(round.ID)
-	before := op.EventsOf(state.ID)
 
-	// The step settles and the run goes on: the state card is the card
-	// the run works on.
-	if err := op.answer("obs-1", "", ""); err != nil {
-		t.Fatalf("settle the step: %v", err)
+	if got := r.roundSessionRef(); got != round {
+		t.Error("the state took the place of the card of the round")
 	}
-	waitForCardEvent(t, op, state.ID, before)
-
-	if got := op.EventsOf(round.ID); got != seen {
+	if got := op.EventsOf(round.anchor); got != seen {
 		t.Errorf("the card of the round got %d events, want the %d it had", got, seen)
 	}
 }
 
-// TestAPausePostsTheStateCard — a pause stops the run and shows the
-// state of the round.
-func TestAPausePostsTheStateCard(t *testing.T) {
+// TestTheStateIsNotPartOfTheRun — the state is a snapshot: the run does
+// not keep it, and the state file of the run does not hold it.
+func TestTheStateIsNotPartOfTheRun(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
+	op.steps = []fakeStep{{open: true}}
+
+	runID, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitSent(t, op, "/gtw commit")
+
+	r := activeRun(t, svc, "obs-1")
+	if err := svc.Status(context.Background(), "obs-1", "om_status"); err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	for _, sess := range r.ownedSessions() {
+		if sess.anchor == "om_status" {
+			t.Error("the run owns the session of the state")
+		}
+	}
+	svc.persist(r)
+	raw, err := os.ReadFile(filepath.Join(dir, "runs", runID+".json"))
+	if err != nil {
+		t.Fatalf("the state of the run is gone: %v", err)
+	}
+	if strings.Contains(string(raw), "om_status") {
+		t.Errorf("the state of the run holds the session of the state: %s", raw)
+	}
+}
+
+// TestTheRoundCardIsASnapshot — the card of the round is a snapshot: the
+// checklist it carries is the one the round started with, and the card
+// is not written again while the round runs.
+func TestTheRoundCardIsASnapshot(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
+	op.steps = []fakeStep{{open: true}}
+
+	if _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitSent(t, op, "/gtw commit")
+
+	r := activeRun(t, svc, "obs-1")
+	round := r.roundSessionRef()
+	if round == nil {
+		t.Fatal("the run has no card of the round")
+	}
+
+	// The step settles and the run ends.
+	if err := op.answer("obs-1", "", ""); err != nil {
+		t.Fatalf("settle the step: %v", err)
+	}
+	waitRun(t, svc, "obs-1")
+
+	items := op.Checklist(round.anchor)
+	if len(items) != 1 {
+		t.Fatalf("the card of the round carries %d rows, want the step of the round", len(items))
+	}
+	if items[0].Subject != "commit" || items[0].Status != agent.TaskPending {
+		t.Errorf("the card of the round was written again: %+v", items[0])
+	}
+}
+
+// TestAPausePublishesTheState — a pause stops the run and shows the
+// state of the round under the message the operator paused from.
+func TestAPausePublishesTheState(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
@@ -225,22 +314,21 @@ func TestAPausePostsTheStateCard(t *testing.T) {
 	waitSent(t, op, "/gtw commit")
 	before := op.Posted()
 
-	if err := svc.Pause(context.Background(), "obs-1"); err != nil {
+	if err := svc.Pause(context.Background(), "obs-1", "om_pause"); err != nil {
 		t.Fatalf("pause: %v", err)
 	}
-	if op.Posted() != before+1 {
-		t.Fatalf("the run published %d cards, want one more", op.Posted())
+	if op.Posted() != before {
+		t.Fatalf("the run published %d cards, want none", op.Posted()-before)
 	}
-	state := waitForStateCard(t, op)
-	entries := op.Entries(state.ID)
+	entries := op.Entries("om_pause")
 	if len(entries) == 0 || !strings.HasPrefix(entries[0], "paused: the operator paused the run") {
 		t.Fatalf("the phase line is %v, want it to name the pause", entries)
 	}
 }
 
-// TestAPauseOfAPausedRunPostsTheStateCard — every explicit pause shows
+// TestAPauseOfAPausedRunPublishesTheState — every explicit pause shows
 // the state again.
-func TestAPauseOfAPausedRunPostsTheStateCard(t *testing.T) {
+func TestAPauseOfAPausedRunPublishesTheState(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
@@ -253,27 +341,27 @@ func TestAPauseOfAPausedRunPostsTheStateCard(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	waitSent(t, op, "/gtw commit")
-	if err := svc.Pause(context.Background(), "obs-1"); err != nil {
+	if err := svc.Pause(context.Background(), "obs-1", "om_pause"); err != nil {
 		t.Fatalf("pause: %v", err)
 	}
 	if err := op.answer("obs-1", "", ""); err != nil {
 		t.Fatalf("settle the step: %v", err)
 	}
 	waitForStatus(t, svc, "obs-1", PhasePaused)
-	before := op.Posted()
+	before := len(op.Emitted())
 
-	if err := svc.Pause(context.Background(), "obs-1"); err != nil {
+	if err := svc.Pause(context.Background(), "obs-1", "om_pause"); err != nil {
 		t.Fatalf("pause: %v", err)
 	}
-	if op.Posted() != before+1 {
-		t.Fatalf("the run published %d cards, want one more", op.Posted())
+	if got := len(op.Emitted()); got <= before {
+		t.Fatalf("the run published %d messages, want the state again", got-before)
 	}
 }
 
-// TestAResumePostsTheStateCard — the operator hands the run back to
-// work: the state of the round is posted, and the card is the live
-// card of the round before the run goes on.
-func TestAResumePostsTheStateCard(t *testing.T) {
+// TestAResumePublishesTheState — the operator hands the run back to
+// work: the state of the round is published under the message the
+// operator asked from.
+func TestAResumePublishesTheState(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
@@ -289,42 +377,38 @@ func TestAResumePostsTheStateCard(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	waitPaused(t, svc, "obs-1")
-	paused := waitForStateCard(t, op)
+	r := activeRun(t, svc, "obs-1")
+	round := r.roundSessionRef()
+	if round == nil {
+		t.Fatal("the run has no card of the round")
+	}
 
-	if _, err := svc.Resume(context.Background(), "obs-1", ""); err != nil {
+	if _, err := svc.Resume(context.Background(), "obs-1", "om_resume", ""); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
-	state := waitForStateCard(t, op)
-	if state.ID == paused.ID {
-		t.Fatalf("the resume posted no state card: %v", op.Cards())
+	state := waitForStateUnder(t, op, "om_resume", 4)
+	if len(state) < 4 {
+		t.Fatalf("the state carries %d messages, want the identity line, the phase line, the tree and the checklist", len(state))
 	}
-	entries := op.Entries(state.ID)
-	if len(entries) < 2 {
-		t.Fatalf("the state card carries %d entries, want the phase line and the tree", len(entries))
+	if state[0].Kind != messages.OutInit {
+		t.Errorf("the first message is %q, want the identity line", state[0].Kind)
 	}
-	if !strings.HasPrefix(entries[0], "running") {
-		t.Errorf("the first entry is %q, want the phase line", entries[0])
+	if state[1].Kind != messages.OutReply || !strings.HasPrefix(state[1].Text, "running") {
+		t.Errorf("the phase line is %q (%q), want the phase of the run", state[1].Kind, state[1].Text)
 	}
-	if !strings.HasPrefix(entries[1], "rounds:") {
-		t.Errorf("the second entry is %q, want the tree of the rounds", entries[1])
+	if state[2].Kind != messages.OutReply || !strings.HasPrefix(state[2].Text, "rounds:") {
+		t.Errorf("the tree is %q (%q), want the tree of the rounds", state[2].Kind, state[2].Text)
 	}
-
-	// The card is the live card of the round: the entries of the
-	// resumed step land on it.
-	r := activeRun(t, svc, "obs-1")
-	sess := r.roundSessionRef()
-	if sess == nil || sess.anchor != state.ID {
-		t.Fatalf("the live card of the round is %v, want the state card", sess)
-	}
-	waitSentCount(t, op, 2)
-	if op.EventsOf(state.ID) == 0 {
-		t.Errorf("the state card received no event of the resumed step")
+	// The card of the round is the card the run works on.
+	if got := r.roundSessionRef(); got != round {
+		t.Error("the state took the place of the card of the round")
 	}
 }
 
-// TestANextPostsTheStateCard — the operator skips the step the run is
-// on: the state of the round is posted.
-func TestANextPostsTheStateCard(t *testing.T) {
+// TestANextPublishesTheState — the operator skips the step the run is
+// on: the state of the round is published under the message the
+// operator asked from.
+func TestANextPublishesTheState(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "two", commitPushWorkflow)
 
@@ -344,31 +428,38 @@ func TestANextPostsTheStateCard(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	waitPaused(t, svc, "obs-1")
-	paused := waitForStateCard(t, op)
+	r := activeRun(t, svc, "obs-1")
+	round := r.roundSessionRef()
+	if round == nil {
+		t.Fatal("the run has no card of the round")
+	}
 
-	if _, err := svc.Next(context.Background(), "obs-1", ""); err != nil {
+	if _, err := svc.Next(context.Background(), "obs-1", "om_next", ""); err != nil {
 		t.Fatalf("next: %v", err)
 	}
-	state := waitForStateCard(t, op)
-	if state.ID == paused.ID {
-		t.Fatalf("the command posted no state card: %v", op.Cards())
+	state := waitForStateUnder(t, op, "om_next", 4)
+	if len(state) < 4 {
+		t.Fatalf("the state carries %d messages, want the identity line, the phase line, the tree and the checklist", len(state))
 	}
-	entries := op.Entries(state.ID)
-	if len(entries) < 2 {
-		t.Fatalf("the state card carries %d entries, want the phase line and the tree", len(entries))
+	if state[0].Kind != messages.OutInit {
+		t.Errorf("the first message is %q, want the identity line", state[0].Kind)
 	}
-	if !strings.HasPrefix(entries[0], "running") {
-		t.Errorf("the first entry is %q, want the phase line", entries[0])
+	if state[1].Kind != messages.OutReply || !strings.HasPrefix(state[1].Text, "running") {
+		t.Errorf("the phase line is %q (%q), want the phase of the run", state[1].Kind, state[1].Text)
 	}
-	if !strings.HasPrefix(entries[1], "rounds:") {
-		t.Errorf("the second entry is %q, want the tree of the rounds", entries[1])
+	if state[2].Kind != messages.OutReply || !strings.HasPrefix(state[2].Text, "rounds:") {
+		t.Errorf("the tree is %q (%q), want the tree of the rounds", state[2].Kind, state[2].Text)
+	}
+	// The card of the round keeps the checklist it started with.
+	if got := r.roundSessionRef(); got != round {
+		t.Error("the state took the place of the card of the round")
 	}
 }
 
-// TestAResumeOfARunWithoutARoundPostsThePlanCard — a run that has
-// not entered a round has no round state: the plan of the run is
-// posted instead.
-func TestAResumeOfARunWithoutARoundPostsThePlanCard(t *testing.T) {
+// TestAResumeOfARunWithoutARoundPublishesThePhaseLine — a run that
+// has not entered a round has no round state: only the phase line is
+// published, and no card of its own.
+func TestAResumeOfARunWithoutARoundPublishesThePhaseLine(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
@@ -380,22 +471,28 @@ func TestAResumeOfARunWithoutARoundPostsThePlanCard(t *testing.T) {
 	svc.mu.Unlock()
 	r.pauseNow("the operator paused the run")
 
-	if _, err := svc.Resume(context.Background(), "obs-1", ""); err != nil {
+	if _, err := svc.Resume(context.Background(), "obs-1", "", ""); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
-	cards := op.Cards()
-	if len(cards) != 1 {
-		t.Fatalf("the run published %d cards, want the plan alone", len(cards))
+	if op.Posted() != 0 {
+		t.Fatalf("the run published %d cards, want none", op.Posted())
 	}
-	entries := op.Entries(cards[0].ID)
-	if len(entries) != 1 || !strings.Contains(entries[0], "started") {
-		t.Fatalf("the card carries %v, want the overview of the run", entries)
+	state := stateUnder(op, "")
+	if len(state) != 2 {
+		t.Fatalf("the state carries %d messages, want the identity line and the phase line", len(state))
+	}
+	if state[0].Kind != messages.OutInit {
+		t.Errorf("the first message is %q, want the identity line", state[0].Kind)
+	}
+	if state[1].Kind != messages.OutReply {
+		t.Errorf("the second message is %q, want the phase line", state[1].Kind)
 	}
 }
 
-// TestATakeoverPostsTheStateCard — a person who writes in the chat
-// takes the chat back: the state of the run is posted at once.
-func TestATakeoverPostsTheStateCard(t *testing.T) {
+// TestATakeoverPublishesTheState — a person who writes in the chat
+// takes the chat back: the state of the run is published at once,
+// under the card of the round.
+func TestATakeoverPublishesTheState(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
@@ -408,6 +505,11 @@ func TestATakeoverPostsTheStateCard(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	waitSent(t, op, "/gtw commit")
+	r := activeRun(t, svc, "obs-1")
+	round := r.roundSessionRef()
+	if round == nil {
+		t.Fatal("the run has no card of the round")
+	}
 	before := op.Posted()
 
 	svc.Seen(&messages.InboundMessage{
@@ -416,18 +518,25 @@ func TestATakeoverPostsTheStateCard(t *testing.T) {
 		Text:      "wait, stop there",
 		Origin:    messages.OriginHuman,
 	})
-	waitForCards(t, op, before+1)
+	waitForStateUnder(t, op, round.anchor, 4)
 
-	state := waitForStateCard(t, op)
-	entries := op.Entries(state.ID)
-	if len(entries) == 0 || !strings.HasPrefix(entries[0], "paused: you took over") {
-		t.Fatalf("the phase line is %v, want it to name the takeover", entries)
+	var takeover bool
+	for _, entry := range op.Entries(round.anchor) {
+		if strings.HasPrefix(entry, "paused: you took over") {
+			takeover = true
+		}
+	}
+	if !takeover {
+		t.Fatalf("the phase line is %v, want it to name the takeover", op.Entries(round.anchor))
+	}
+	if op.Posted() != before {
+		t.Errorf("the run published %d cards, want none", op.Posted()-before)
 	}
 }
 
-// TestATakeoverOfAPausedRunPostsNoCard — the takeover is not new when
-// the run already waits for the operator.
-func TestATakeoverOfAPausedRunPostsNoCard(t *testing.T) {
+// TestATakeoverOfAPausedRunPublishesNoState — the takeover is not new
+// when the run already waits for the operator.
+func TestATakeoverOfAPausedRunPublishesNoState(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
@@ -440,10 +549,10 @@ func TestATakeoverOfAPausedRunPostsNoCard(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	waitSent(t, op, "/gtw commit")
-	if err := svc.Pause(context.Background(), "obs-1"); err != nil {
+	if err := svc.Pause(context.Background(), "obs-1", "om_pause"); err != nil {
 		t.Fatalf("pause: %v", err)
 	}
-	before := op.Posted()
+	before := len(op.Emitted())
 
 	svc.Seen(&messages.InboundMessage{
 		ChatID:    "obs-1",
@@ -452,14 +561,15 @@ func TestATakeoverOfAPausedRunPostsNoCard(t *testing.T) {
 		Origin:    messages.OriginHuman,
 	})
 	time.Sleep(100 * time.Millisecond)
-	if op.Posted() != before {
-		t.Fatalf("the run published %d cards, want none", op.Posted()-before)
+	if got := len(op.Emitted()); got != before {
+		t.Fatalf("the run published %d messages, want none", got-before)
 	}
 }
 
-// TestTheBudgetPausePostsTheStateCard — the run stops because the step
-// used up its budget: the state of the round is posted.
-func TestTheBudgetPausePostsTheStateCard(t *testing.T) {
+// TestTheBudgetPausePublishesTheState — the run stops because the step
+// used up its budget: the state of the round is published under the
+// card of the round.
+func TestTheBudgetPausePublishesTheState(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", budgetWorkflow)
 
@@ -475,17 +585,28 @@ func TestTheBudgetPausePostsTheStateCard(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	waitPaused(t, svc, "obs-1")
+	r := activeRun(t, svc, "obs-1")
+	round := r.roundSessionRef()
+	if round == nil {
+		t.Fatal("the run has no card of the round")
+	}
 
-	state := waitForStateCard(t, op)
-	entries := op.Entries(state.ID)
-	if len(entries) == 0 || !strings.HasPrefix(entries[0], "paused: the step \"commit\" used up its budget") {
-		t.Fatalf("the phase line is %v, want it to name the budget", entries)
+	waitForStateUnder(t, op, round.anchor, 4)
+	var budget bool
+	for _, entry := range op.Entries(round.anchor) {
+		if strings.HasPrefix(entry, `paused: the step "commit" used up its budget`) {
+			budget = true
+		}
+	}
+	if !budget {
+		t.Fatalf("the phase line is %v, want it to name the budget", op.Entries(round.anchor))
 	}
 }
 
-// TestTheRateLimitPausePostsTheStateCard — the run stops because the
-// agent was throttled: the state of the round is posted.
-func TestTheRateLimitPausePostsTheStateCard(t *testing.T) {
+// TestTheRateLimitPausePublishesTheState — the run stops because the
+// agent was throttled: the state of the round is published under the
+// card of the round, and the chat is told that the run waits.
+func TestTheRateLimitPausePublishesTheState(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
@@ -501,74 +622,87 @@ func TestTheRateLimitPausePostsTheStateCard(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	waitForStatus(t, svc, "obs-1", PhasePaused)
+	r := activeRun(t, svc, "obs-1")
+	round := r.roundSessionRef()
+	if round == nil {
+		t.Fatal("the run has no card of the round")
+	}
 
-	state := waitForStateCard(t, op)
-	entries := op.Entries(state.ID)
-	if len(entries) == 0 || !strings.HasPrefix(entries[0], "paused: the agent is rate limited (429)") {
-		t.Fatalf("the phase line is %v, want it to name the rate limit", entries)
+	waitForStateUnder(t, op, round.anchor, 4)
+	var limit bool
+	for _, entry := range op.Entries(round.anchor) {
+		if strings.HasPrefix(entry, "paused: the agent is rate limited (429)") {
+			limit = true
+		}
+	}
+	if !limit {
+		t.Fatalf("the phase line is %v, want it to name the rate limit", op.Entries(round.anchor))
+	}
+
+	// The chat is told that the run waits: the state is a snapshot in a
+	// card, and the chat does not push it.
+	var notice string
+	for _, msg := range op.Spoken() {
+		if strings.HasPrefix(msg.Text, pauseMark) {
+			notice = msg.Text
+		}
+	}
+	if notice == "" {
+		t.Fatalf("the chat was not told that the run waits: %v", op.Spoken())
+	}
+	if !strings.Contains(notice, rateLimitReason) {
+		t.Errorf("the notice is %q, want it to name the rate limit", notice)
+	}
+	for _, want := range []string{"/me resume", "/me next"} {
+		if !strings.Contains(notice, want) {
+			t.Errorf("the notice is %q, want it to mention %q", notice, want)
+		}
 	}
 }
 
-// TestARunWithoutARoundShowsTheOverview — a run that has not entered a
-// round has no round state to show: the overview of the run is posted
-// instead.
-func TestARunWithoutARoundShowsTheOverview(t *testing.T) {
+// TestARunWithoutARoundShowsThePhaseLine — a run that has not entered
+// a round has no round state to show: only the phase line is
+// published, and no card of its own.
+func TestARunWithoutARoundShowsThePhaseLine(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
 	svc, op := testService(t, dir, noModels())
 	r := testRun(t, svc, "one")
+	svc.mu.Lock()
+	svc.active["obs-1"] = r
+	svc.mu.Unlock()
 
-	if !svc.showState(context.Background(), r) {
-		t.Fatal("the run published no card")
-	}
-	cards := op.Cards()
-	if len(cards) != 1 {
-		t.Fatalf("the run published %d cards, want the overview alone", len(cards))
-	}
-	entries := op.Entries(cards[0].ID)
-	if len(entries) != 1 || !strings.Contains(entries[0], "started") {
-		t.Fatalf("the card carries %v, want the overview of the run", entries)
-	}
-}
-
-// TestTheStateCardDoesNotTakeOverARoundTheRunLeft — the run moves
-// between rounds on its own goroutine: a card posted for a round the
-// run has left does not become the card the run works on.
-func TestTheStateCardDoesNotTakeOverARoundTheRunLeft(t *testing.T) {
-	dir := t.TempDir()
-	writeWorkflow(t, dir, "one", oneStepWorkflow)
-
-	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
-	op.steps = []fakeStep{{open: true}}
-
-	if _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
-	}); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	waitSent(t, op, "/gtw commit")
-
-	r := activeRun(t, svc, "obs-1")
-	// The run leaves the round while the card is posted.
-	op.onCard = func() {
-		r.setRoundSession(&session{kind: sessionRound, id: "main · round 2", job: "main", round: 2})
-	}
-
-	if err := svc.Status(context.Background(), "obs-1"); err != nil {
+	if err := svc.Status(context.Background(), "obs-1", "om_status"); err != nil {
 		t.Fatalf("status: %v", err)
 	}
-
-	sess := r.roundSessionRef()
-	if sess == nil || sess.job != "main" || sess.round != 2 {
-		t.Fatalf("the live card is %v, want the card of the round the run is in", sess)
+	if op.Posted() != 0 {
+		t.Fatalf("the run published %d cards, want none", op.Posted())
+	}
+	state := stateUnder(op, "om_status")
+	if len(state) != 2 {
+		t.Fatalf("the state carries %d messages, want the identity line and the phase line", len(state))
+	}
+	if state[0].Kind != messages.OutInit {
+		t.Errorf("the first message is %q, want the identity line", state[0].Kind)
+	}
+	if state[1].Kind != messages.OutReply {
+		t.Errorf("the second message is %q, want the phase line", state[1].Kind)
+	}
+	for _, m := range state {
+		if m.Kind == messages.OutTaskUpdate {
+			t.Error("the state carries a checklist of a round that does not exist")
+		}
+		if strings.HasPrefix(m.Text, "rounds:") {
+			t.Error("the state carries the tree of the rounds")
+		}
 	}
 }
 
-// TestTheOverviewDoesNotReplaceTheCardOfTheRun — a run that has not
-// entered a round yet shows the overview of the run as a card of its
-// own: the card the run started from keeps the verdict of the run.
-func TestTheOverviewDoesNotReplaceTheCardOfTheRun(t *testing.T) {
+// TestTheStatusDoesNotReplaceTheCardOfTheRun — the state of a run
+// that has not entered a round yet is the phase line alone: the plan
+// of the run stays on the card the run started from.
+func TestTheStatusDoesNotReplaceTheCardOfTheRun(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
@@ -588,14 +722,14 @@ func TestTheOverviewDoesNotReplaceTheCardOfTheRun(t *testing.T) {
 	before := r.runSessionRef()
 	cards := op.Posted()
 
-	if err := svc.Status(context.Background(), "obs-1"); err != nil {
+	if err := svc.Status(context.Background(), "obs-1", "om_status"); err != nil {
 		t.Fatalf("status: %v", err)
 	}
-	if op.Posted() != cards+1 {
-		t.Fatalf("the run published %d cards, want one more", op.Posted())
+	if op.Posted() != cards {
+		t.Fatalf("the run published %d cards, want none", op.Posted()-cards)
 	}
 	if got := r.runSessionRef(); got != before {
-		t.Error("the overview took the place of the card of the run")
+		t.Error("the state took the place of the card of the run")
 	}
 }
 
@@ -606,71 +740,50 @@ func TestTheStatusRequestOfAChatWithoutARunIsRefused(t *testing.T) {
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
 	svc, _ := testService(t, dir, noModels())
-	if err := svc.Status(context.Background(), "obs-1"); err == nil {
+	if err := svc.Status(context.Background(), "obs-1", "om_status"); err == nil {
 		t.Fatal("a chat without a run showed a state")
 	} else if err != ErrNoRun {
 		t.Errorf("the failure is %v, want %v", err, ErrNoRun)
 	}
 }
 
-// heartbeatOn reports whether the run published a heartbeat for the
-// card with the given id.
-func heartbeatOn(op *fakeOperator, id string) bool {
-	for _, m := range op.EmittedOf(messages.OutHeartbeat) {
-		if m.ReplyTo == id {
-			return true
+// stateUnder returns the outbound messages the run published under the
+// given anchor.
+func stateUnder(op *fakeOperator, anchor string) []emittedMessage {
+	var out []emittedMessage
+	for _, m := range op.Emitted() {
+		if m.ReplyTo == anchor {
+			out = append(out, m)
 		}
 	}
-	return false
+	return out
 }
 
-// waitForCards waits until the run published that many cards.
-func waitForCards(t *testing.T, op *fakeOperator, n int) {
+// waitForStateUnder waits until the run published that many messages
+// under the given anchor.
+func waitForStateUnder(t *testing.T, op *fakeOperator, anchor string, n int) []emittedMessage {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		if op.Posted() >= n {
+		msgs := stateUnder(op, anchor)
+		if len(msgs) >= n {
+			return msgs
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("the run published %d messages under %q, want %d", len(stateUnder(op, anchor)), anchor, n)
+	return nil
+}
+
+// waitForStepState waits until the run records what came of the step.
+func waitForStepState(t *testing.T, r *run, stepID string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := r.stepState(stepID); ok {
 			return
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
-	t.Fatalf("the run published %d cards, want %d", op.Posted(), n)
-}
-
-// waitForStateCard waits until the run posts the state card of the
-// round and returns it.
-//
-// The state card is the one whose body names the state of the run, and
-// it is returned once its phase line has landed.
-func waitForStateCard(t *testing.T, op *fakeOperator) cardRecord {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		cards := op.Cards()
-		for i := len(cards) - 1; i >= 0; i-- {
-			if !strings.Contains(cards[i].Body, "the state of the run") {
-				continue
-			}
-			if len(op.Entries(cards[i].ID)) > 0 {
-				return cards[i]
-			}
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-	t.Fatalf("the run posted no state card: %v", op.Cards())
-	return cardRecord{}
-}
-
-// waitForCardEvent waits until the run publishes a new event under the
-// card with the given id.
-func waitForCardEvent(t *testing.T, op *fakeOperator, id string, seen int) {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if op.EventsOf(id) > seen {
-			return
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-	t.Fatalf("the run never published an event under the card %q", id)
+	t.Fatalf("the step %q never ran", stepID)
 }

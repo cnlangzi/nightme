@@ -694,7 +694,10 @@ func (s *Service) Reply(ctx context.Context, chatID, text string) error {
 // The step that is running is not interrupted: its outcome is
 // recorded, and the run waits for the operator to hand the control
 // back.
-func (s *Service) Pause(ctx context.Context, chatID string) error {
+//
+// The state of the run hangs under the message the operator asked
+// from: the operator is looking right at it.
+func (s *Service) Pause(ctx context.Context, chatID, messageID string) error {
 	s.mu.Lock()
 	r, ok := s.active[chatID]
 	s.mu.Unlock()
@@ -702,10 +705,8 @@ func (s *Service) Pause(ctx context.Context, chatID string) error {
 		return ErrNoRun
 	}
 	r.requestPause("the operator paused the run")
-	s.refreshSessions(r)
-	// The operator asked for the state of the run: the state card
-	// carries it, and it becomes the round's live card.
-	s.showState(ctx, r)
+	s.refreshRun(r)
+	s.showState(ctx, r, r.stateAnchor(messageID))
 	return nil
 }
 
@@ -722,11 +723,11 @@ func (s *Service) Pause(ctx context.Context, chatID string) error {
 // woken, so a daemon that dies in between comes back with the
 // decision in its state file.
 //
-// The state card is posted before the run is woken: the card is the
-// live card of the round, so the entries of the resumed step belong to
-// it.
-func (s *Service) Resume(ctx context.Context, chatID, note string) (string, error) {
-	return s.operatorDecision(ctx, chatID, note, directiveResume)
+// The state of the run is published before the run is woken: it hangs
+// under the message the operator asked from, and it says where the run
+// stands.
+func (s *Service) Resume(ctx context.Context, chatID, messageID, note string) (string, error) {
+	return s.operatorDecision(ctx, chatID, messageID, note, directiveResume)
 }
 
 // Next skips the step the run is on.
@@ -738,10 +739,11 @@ func (s *Service) Resume(ctx context.Context, chatID, note string) (string, erro
 // A note is the operator's instruction: it joins the conversation the
 // chat model reads.
 //
-// The state card is posted before the run is woken: the card is the
-// live card of the round, so the entries of the run belong to it.
-func (s *Service) Next(ctx context.Context, chatID, note string) (string, error) {
-	return s.operatorDecision(ctx, chatID, note, directiveNext)
+// The state of the run is published before the run is woken: it hangs
+// under the message the operator asked from, and it says where the run
+// stands.
+func (s *Service) Next(ctx context.Context, chatID, messageID, note string) (string, error) {
+	return s.operatorDecision(ctx, chatID, messageID, note, directiveNext)
 }
 
 // operatorDecision records the operator's decision for the run and
@@ -750,9 +752,8 @@ func (s *Service) Next(ctx context.Context, chatID, note string) (string, error)
 // It reports the id of the step the decision acted on.
 //
 // The decision is persisted, the state of the run is refreshed and the
-// state card is posted before the run is woken: the card is the live
-// card of the round, so the entries of the run belong to it.
-func (s *Service) operatorDecision(ctx context.Context, chatID, note, kind string) (string, error) {
+// state of the run is published before the run is woken.
+func (s *Service) operatorDecision(ctx context.Context, chatID, messageID, note, kind string) (string, error) {
 	s.mu.Lock()
 	r, ok := s.active[chatID]
 	s.mu.Unlock()
@@ -764,8 +765,8 @@ func (s *Service) operatorDecision(ctx context.Context, chatID, note, kind strin
 		return "", err
 	}
 	s.persist(r)
-	s.refreshSessions(r)
-	s.showState(ctx, r)
+	s.refreshRun(r)
+	s.showState(ctx, r, r.stateAnchor(messageID))
 	if paused {
 		r.wake()
 	}
@@ -774,22 +775,20 @@ func (s *Service) operatorDecision(ctx context.Context, chatID, note, kind strin
 
 // Status puts the state of the run back in front of the operator.
 //
-// The state card is the card of the round the run is in: it carries
-// the state of that round and becomes the round's live card, so the
-// state on it keeps being true. A run that has no round has no round
-// state to show: the overview of the run is posted instead.
+// The state hangs under the message the operator asked from: it is
+// where the operator is looking. It is a snapshot — the phase line of
+// the run, the tree of the rounds and the checklist of the round — and
+// a run that has no round has no round state to show.
 //
 // A chat without a run gets ErrNoRun.
-func (s *Service) Status(ctx context.Context, chatID string) error {
+func (s *Service) Status(ctx context.Context, chatID, messageID string) error {
 	s.mu.Lock()
 	r, ok := s.active[chatID]
 	s.mu.Unlock()
 	if !ok {
 		return ErrNoRun
 	}
-	if !s.showState(ctx, r) {
-		return errors.New("me: the chat cannot show the run's state")
-	}
+	s.showState(ctx, r, r.stateAnchor(messageID))
 	return nil
 }
 

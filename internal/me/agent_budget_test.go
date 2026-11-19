@@ -74,17 +74,20 @@ func TestBudget_TheRunPausesWhenTheStepSpentItsBudget(t *testing.T) {
 		t.Fatalf("the run stands at %q, want %q", phase, PhasePaused)
 	}
 	waitEntry(t, op, "paused:")
-	// The pause notice rides on the state card: it is the live card of
-	// the round from then on.
-	state := waitForStateCard(t, op)
+	// The state of the run hangs under the card of the round.
+	round := r.roundSessionRef()
+	if round == nil {
+		t.Fatal("the run has no card of the round")
+	}
+	waitForStateUnder(t, op, round.anchor, 4)
 	var named bool
-	for _, entry := range op.Entries(state.ID) {
+	for _, entry := range op.Entries(round.anchor) {
 		if strings.Contains(entry, `the step "commit" used up its budget (2 of 2 chances)`) {
 			named = true
 		}
 	}
 	if !named {
-		t.Errorf("the card does not name the step and its chances: %v", op.Entries(state.ID))
+		t.Errorf("the card does not name the step and its chances: %v", op.Entries(round.anchor))
 	}
 
 	// The chat is told once that the run waits for a human.
@@ -132,7 +135,7 @@ func TestBudget_ResumeStartsTheStepOver(t *testing.T) {
 	svc.mu.Unlock()
 	waitPaused(t, svc, "obs-1")
 
-	if _, err := svc.Resume(context.Background(), "obs-1", "the branch was reset, try again"); err != nil {
+	if _, err := svc.Resume(context.Background(), "obs-1", "", "the branch was reset, try again"); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
 
@@ -459,15 +462,20 @@ func TestTheSituationReport_CarriesTheRepair(t *testing.T) {
 	}
 }
 
-// TestTheCard_ShowsTheWaitingLineAndTheChancesLeft — the card says
+// TestTheState_ShowsTheWaitingLineAndTheChancesLeft — the state says
 // what the run waits for and what the step has left.
-func TestTheCard_ShowsTheWaitingLineAndTheChancesLeft(t *testing.T) {
+//
+// The card of the round is a snapshot of the start of the round: it
+// says nothing about the step that runs after it.
+func TestTheState_ShowsTheWaitingLineAndTheChancesLeft(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", budgetWorkflow)
 
 	provider := &scriptedProvider{responses: []llm.Response{
 		{Message: toolCallMsg("c1", toolFinish, map[string]any{"status": "failed", "summary": "the step did not work"})},
 	}}
+	// The model waits until the test is done with it.
+	provider.block = make(chan struct{})
 	svc, op := testService(t, dir, Config{Provider: provider, MaxJudgments: 7})
 	op.steps = []fakeStep{pendingStep("still going")}
 
@@ -476,17 +484,39 @@ func TestTheCard_ShowsTheWaitingLineAndTheChancesLeft(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitRun(t, svc, "obs-1")
+	waitSent(t, op, "/gtw commit")
+	r := activeRun(t, svc, "obs-1")
+	round := r.roundSessionRef()
+	if round == nil {
+		t.Fatal("the run has no card of the round")
+	}
+	// The step ran: the run records what came of it.
+	waitForStepState(t, r, "commit")
 
+	// The card of the round is a snapshot of the start of the round: it
+	// says nothing about the step that ran since.
+	for _, item := range op.Checklist(round.anchor) {
+		if strings.Contains(item.ActiveForm, "chances left") {
+			t.Errorf("the card of the round carries the chances left: %+v", item)
+		}
+	}
+
+	// The operator asks for the state: it says what the step has left.
+	if err := svc.Status(context.Background(), "obs-1", "om_status"); err != nil {
+		t.Fatalf("status: %v", err)
+	}
 	var chances bool
-	for _, item := range op.Checklist(op.Cards()[0].ID) {
+	for _, item := range op.Checklist("om_status") {
 		if strings.Contains(item.ActiveForm, "chances left") {
 			chances = true
 		}
 	}
 	if !chances {
-		t.Errorf("the card does not carry the chances left: %+v", op.Checklist(op.Cards()[0].ID))
+		t.Errorf("the state does not carry the chances left: %+v", op.Checklist("om_status"))
 	}
+
+	close(provider.block)
+	waitRun(t, svc, "obs-1")
 }
 
 // TestTheRunDoesNotFailOnAProseReply — no path in the personal agent

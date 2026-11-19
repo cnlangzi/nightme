@@ -66,7 +66,7 @@ func (s *Service) drive(ctx context.Context, r *run) {
 		} else {
 			s.finish(r, PhaseFailed, err.Error())
 			r.setSummary("the run failed")
-			s.refreshSessions(r)
+			s.refreshRun(r)
 		}
 	}
 	// The run is over: its sessions end with it.
@@ -86,8 +86,6 @@ func (s *Service) drive(ctx context.Context, r *run) {
 	// the run did, so it does not need the file — and a file that
 	// outlives the run would be resumed by the next daemon.
 	s.removeState(r.id)
-	// The card of the last iteration shows where the run ended.
-	s.refreshSessions(r)
 }
 
 // loop is the run's main cycle.
@@ -134,7 +132,7 @@ func (s *Service) checkGate(ctx context.Context, r *run) error {
 		return err
 	}
 	if r.applyPause() {
-		s.refreshSessions(r)
+		s.refreshRun(r)
 	}
 	if !r.isPaused() {
 		return nil
@@ -145,7 +143,7 @@ func (s *Service) checkGate(ctx context.Context, r *run) error {
 	if err := r.awaitUnpause(ctx); err != nil {
 		return err
 	}
-	s.refreshSessions(r)
+	s.refreshRun(r)
 	return nil
 }
 
@@ -246,10 +244,19 @@ func (s *Service) pauseForBudget(ctx context.Context, r *run) {
 		stepID, used, limit)
 	r.pauseNow(reason)
 	s.persist(r)
-	// The run stops: the state card carries the state of the round, and
-	// it becomes the round's live card.
-	s.showState(ctx, r)
-	s.refreshSessions(r)
+	// The run stops: the state of the round hangs under the card of the
+	// round.
+	s.showState(ctx, r, r.stateAnchor(""))
+	s.refreshRun(r)
+	s.announcePause(ctx, r, reason)
+}
+
+// announcePause tells the operator that the run waits for them.
+//
+// The state of the run hangs in the card of the round: the chat does
+// not push it, so the operator is told that the run stopped and what
+// they can do about it.
+func (s *Service) announcePause(ctx context.Context, r *run, reason string) {
 	if _, err := s.speak(ctx, r, pauseMark+"The run paused: "+reason+". Send /me resume to run the step again, or /me next to skip it.", ""); err != nil {
 		s.logger.Warn("me: the pause could not be spoken", "run_id", r.id, "err", err)
 	}
@@ -344,9 +351,8 @@ func (s *Service) runPlanStep(ctx context.Context, r *run, decision wfe.Decision
 		return nil
 	}
 	r.recordStep(decision.Job, decision.Step, verdict.Outcome)
-	s.recordStepOutcome(ctx, r)
 	s.persist(r)
-	s.refreshSessions(r)
+	s.refreshRun(r)
 	return nil
 }
 
@@ -482,7 +488,7 @@ func (s *Service) finishDone(r *run, summary string) {
 	r.markFinished()
 	r.setSummary(summary)
 	s.finish(r, PhaseDone, "")
-	s.refreshSessions(r)
+	s.refreshRun(r)
 	s.persist(r)
 }
 
@@ -589,7 +595,7 @@ func (s *Service) actOnDecision(ctx context.Context, r *run, dec decision) (sys1
 		}
 		s.appendToolResult(r, pendingCall{ID: syntheticCallID, Name: tool}, outcome, !outcomeSucceeded(outcome.Status))
 		s.persist(r)
-		s.refreshSessions(r)
+		s.refreshRun(r)
 		return sys1Act, nil
 	}
 }
@@ -616,7 +622,7 @@ func (s *Service) actOnChoice(ctx context.Context, r *run, command string) (bool
 	if command == optionDone {
 		if err := r.checkFinish("done"); err != nil {
 			r.setSummary(err.Error())
-			s.refreshSessions(r)
+			s.refreshRun(r)
 			return false, nil
 		}
 		s.finishDone(r, r.workflow.Name+" is complete")
@@ -624,7 +630,7 @@ func (s *Service) actOnChoice(ctx context.Context, r *run, command string) (bool
 	}
 	if _, err := r.checkRun(command); err != nil {
 		r.setSummary(err.Error())
-		s.refreshSessions(r)
+		s.refreshRun(r)
 		return false, nil
 	}
 	tool, args := s.syntheticCall(r, command)
@@ -635,13 +641,13 @@ func (s *Service) actOnChoice(ctx context.Context, r *run, command string) (bool
 			// The command could not run: the user is told and the run
 			// goes on.
 			r.setSummary(err.Error())
-			s.refreshSessions(r)
+			s.refreshRun(r)
 			return false, nil
 		}
 		return false, err
 	}
 	s.appendToolResult(r, pendingCall{ID: syntheticCallID, Name: tool}, outcome, !outcomeSucceeded(outcome.Status))
 	s.persist(r)
-	s.refreshSessions(r)
+	s.refreshRun(r)
 	return false, nil
 }

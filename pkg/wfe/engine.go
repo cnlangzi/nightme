@@ -98,13 +98,7 @@ func Decide(state *RunState, wf *Workflow) (Decision, error) {
 		repeating := repeatingJobs(state, wf)
 		switch {
 		case len(repeating) == 0:
-			return Decision{
-				Kind:      DecisionJudgment,
-				Reason:    exhaustedReason(prev, hasPrev),
-				Exhausted: true,
-				Over:      hasPrev && !blocked && roundsSpent(state, wf),
-				Subject:   subjectOf(prev, hasPrev),
-			}, nil
+			return exhaustedDecision(state, wf, prev, hasPrev, blocked), nil
 		case blocked:
 			// The round does not advance on its own: the agent decides
 			// what to do about the step that broke.
@@ -132,13 +126,7 @@ func Decide(state *RunState, wf *Workflow) (Decision, error) {
 			steps = append(steps, step.Step)
 		}
 		if len(ready) == 0 {
-			return Decision{
-				Kind:      DecisionJudgment,
-				Reason:    exhaustedReason(prev, hasPrev),
-				Exhausted: true,
-				Over:      hasPrev && !blocked && roundsSpent(state, wf),
-				Subject:   subjectOf(prev, hasPrev),
-			}, nil
+			return exhaustedDecision(state, wf, prev, hasPrev, blocked), nil
 		}
 	}
 
@@ -265,6 +253,22 @@ func roundsSpent(state *RunState, wf *Workflow) bool {
 		}
 	}
 	return false
+}
+
+// exhaustedDecision is the decision of a plan that has nothing left to
+// run.
+//
+// The workflow is over when the rounds of a repeating job are spent and
+// nothing broke: the run ends on its own, and no model is asked what
+// comes next.
+func exhaustedDecision(state *RunState, wf *Workflow, prev StepState, hasPrev, blocked bool) Decision {
+	return Decision{
+		Kind:      DecisionJudgment,
+		Reason:    exhaustedReason(prev, hasPrev),
+		Exhausted: true,
+		Over:      hasPrev && !blocked && roundsSpent(state, wf),
+		Subject:   subjectOf(prev, hasPrev),
+	}
 }
 
 // startRound begins the next round of a job.

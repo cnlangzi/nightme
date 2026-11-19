@@ -328,6 +328,9 @@ func printWorkflowShow(w io.Writer, wf *wfe.Workflow, asJSON bool) error {
 		} else if rounds > 1 {
 			fmt.Fprintf(w, "    iterations: %d\n", rounds)
 		}
+		if job.Gap() > 0 {
+			fmt.Fprintf(w, "    sleep: %s\n", job.Sleep)
+		}
 		for i, step := range job.Steps {
 			fmt.Fprintf(w, "    [%d] %s\n", i, describeStep(step))
 		}
@@ -445,6 +448,9 @@ func printWorkflowRun(w io.Writer, wf *wfe.Workflow, workspace string) error {
 			fmt.Fprintf(w, "    iterations: until the run ends\n")
 		} else if rounds > 1 {
 			fmt.Fprintf(w, "    iterations: %d\n", rounds)
+		}
+		if job.Gap() > 0 {
+			fmt.Fprintf(w, "    sleep: %s\n", job.Sleep)
 		}
 		for i, step := range job.Steps {
 			fmt.Fprintf(w, "    [%d] %s\n", i, describeStep(step))

@@ -341,14 +341,14 @@ jobs:
 | `needs` | string \| string[] | ❌ | Other job(s) this one waits for. |
 | `if` | string | ❌ | Condition expression (see §6). A job whose condition does not hold is skipped. |
 | `iterations` | int | ❌ | How many rounds the job runs. Missing means one round, `0` means the job's steps run until the run ends, `N` means `N` rounds in total. `/me start -i <rounds>` overrides it for that run (see §8.9). |
-| `sleep` | duration | ❌ | The gap between two rounds of the job. Missing means no gap: the next round starts at once. The value is a Go duration (`30s`, `5m`), the way the `wait` of a step is one; a value that does not parse is refused when the file is loaded. |
+| `sleep` | duration | ❌ | The gap between two rounds of the job. Missing means no gap: the next round starts at once. The value is a Go duration (`30s`, `5m`), the way the `wait` of a step is one; a value that does not parse — or one that runs backwards — is refused when the file is loaded. |
 | `steps` | step[] | ✅ | Ordered steps to execute. |
 
 A **round** is one pass through a job's step list. When a round ends, the job starts the next one: the round's step outputs are cleared — so `${{ steps.fix.outputs.data.issue }}` reads the next round's fix — and the per-step budgets start over. The job's `if:` conditions are read from the state of the round that is running.
 
 A job that names a `sleep` waits that long between two of its rounds. The gap is waited after a round ends — whether it ended on its own or the agent ended it early — and before the next round starts. The first round of a job waits for nothing: it starts as soon as the jobs it `needs` have finished. A job whose last round ends waits for nothing either: there is no next round to wait for.
 
-The gap is not a step: it shows up nowhere in the chat and nowhere on the card of the round. `/me stop` and the shutdown of the daemon end the wait at once.
+The gap is not a step: it shows up nowhere in the chat and nowhere on the card of the round. `/me stop` and the shutdown of the daemon end the wait at once — and the run that comes back after the daemon went away waits the gap again: the back-off is not lost with the daemon.
 
 A round in which no step ran does not repeat: a job whose every step is skipped had nothing to do, so it does not start another round. The plan is exhausted and the agent decides whether the run is over.
 

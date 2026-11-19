@@ -58,6 +58,25 @@ jobs:
 	}
 }
 
+// TestLoad_ANegativeSleepIsRefused — a gap is a duration, and a
+// duration that runs backwards is no gap at all: it is refused.
+func TestLoad_ANegativeSleepIsRefused(t *testing.T) {
+	raw := []byte(`
+title: sleeps
+jobs:
+  ship:
+    sleep: -5m
+    steps: [{id: fix, message: "/fix"}]
+`)
+	_, err := Parse(raw)
+	if err == nil {
+		t.Fatal("the workflow loaded")
+	}
+	if !strings.Contains(err.Error(), "sleep") {
+		t.Errorf("error = %v, want it to name the setting", err)
+	}
+}
+
 // TestBind_TheGapSurvivesTheBinding — a bound workflow keeps the gap
 // of every job.
 func TestBind_TheGapSurvivesTheBinding(t *testing.T) {

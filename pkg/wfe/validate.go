@@ -258,9 +258,14 @@ func checkSemantics(wf *Workflow, root *yaml.Node) []Diagnostic {
 		}
 		if job.Sleep != "" {
 			// The gap is a duration, the way the wait of a step is one.
-			if _, err := time.ParseDuration(job.Sleep); err != nil {
+			d, err := time.ParseDuration(job.Sleep)
+			switch {
+			case err != nil:
 				diags = append(diags, diagnosticAt(mappingValue(jobMapping, "sleep"),
 					fmt.Errorf("job %q: sleep: %q is not a duration", name, job.Sleep)))
+			case d < 0:
+				diags = append(diags, diagnosticAt(mappingValue(jobMapping, "sleep"),
+					fmt.Errorf("job %q: sleep must be >= 0", name)))
 			}
 		}
 	}

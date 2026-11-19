@@ -165,9 +165,6 @@ func (s *Service) turn(ctx context.Context, r *run) (bool, error) {
 		if err := r.checkStep(decision.Step); err == nil {
 			r.setJudgment("")
 			r.setJudgmentStep("")
-			if err := s.waitGap(ctx, r, decision.Gap); err != nil {
-				return false, err
-			}
 			if err := s.runPlanStep(ctx, r, decision); err != nil {
 				return false, err
 			}
@@ -184,17 +181,17 @@ func (s *Service) turn(ctx context.Context, r *run) (bool, error) {
 	}
 	r.setJudgment(decision.Reason)
 	r.setJudgmentStep(decision.Subject)
-	if decision.Over {
-		// The workflow is over: the rounds of its jobs are spent and
-		// nothing broke. The run ends on its own — no model is asked
-		// what comes next.
-		s.finishDone(r, s.overSummary(r))
-		return true, nil
-	}
 	if decision.Exhausted && s.goalMet(r) {
 		// Every step ran and the last one ended ok: the goal is met
 		// and no model is asked to say so.
 		s.finishDone(r, r.workflow.Name+" is complete")
+		return true, nil
+	}
+	if decision.Over {
+		// The workflow is over: the rounds of its jobs are spent and
+		// nothing broke. The run ends on its own — no model is asked
+		// what comes next.
+		s.finishDone(r, r.workflow.Name+" is over")
 		return true, nil
 	}
 	// The budget of the step the run is on bounds what the agent may
@@ -278,6 +275,9 @@ func (s *Service) announcePause(ctx context.Context, r *run, reason string) {
 // and advances the round of a job that repeats. The policy follows the
 // rounds, so the per-step budgets count the current round only.
 //
+// The gap between two rounds is waited out here, before the round
+// starts: the engine reports it and the run waits it.
+//
 // The card follows the iteration the plan enters: a run that moves to
 // another job or to the next round of its job gets a card of its own,
 // and the switch happens before the command of that iteration is sent
@@ -303,6 +303,12 @@ func (s *Service) plan(ctx context.Context, r *run) (wfe.Decision, error) {
 	// rounds are compared around it: the thinking session of the round
 	// that ended goes with it.
 	s.closeBrainOnNewRound(r, before, decision)
+	// The gap is waited before the round that starts goes to the disk:
+	// a daemon that comes back while the run waits finds the round
+	// that ended, starts the round again and waits the gap again.
+	if err := waitFor(ctx, r, decision.Gap); err != nil {
+		return decision, err
+	}
 	s.switchRoundSession(ctx, r, it)
 	return decision, nil
 }
@@ -366,37 +372,6 @@ func (s *Service) runPlanStep(ctx context.Context, r *run, decision wfe.Decision
 	return nil
 }
 
-// waitGap waits out the gap between two rounds of a job.
-//
-// The gap belongs to the run: `/me stop` and the daemon's shutdown end
-// it at once, the way they end the wait of a step.
-func (s *Service) waitGap(ctx context.Context, r *run, gap time.Duration) error {
-	if gap <= 0 {
-		return nil
-	}
-	execCtx, cancel := r.runContext(ctx)
-	defer cancel()
-	timer := time.NewTimer(gap)
-	defer timer.Stop()
-	select {
-	case <-timer.C:
-		return nil
-	case <-execCtx.Done():
-		return execCtx.Err()
-	}
-}
-
-// overSummary renders how a run that is over says so.
-//
-// A run whose last step ended ok is complete. A run whose last step
-// did not is over: the workflow ran out of rounds, and nothing broke.
-func (s *Service) overSummary(r *run) string {
-	if s.goalMet(r) {
-		return r.workflow.Name + " is complete"
-	}
-	return r.workflow.Name + " is over"
-}
-
 // goalMet reports whether the plan is done and every step ended ok.
 //
 // The title of a workflow is written for a person; the engine can only
@@ -446,9 +421,6 @@ func (s *Service) loopDeciderOnly(ctx context.Context, r *run) error {
 			if err := r.checkStep(decision.Step); err == nil {
 				r.setJudgment("")
 				r.setJudgmentStep("")
-				if err := s.waitGap(ctx, r, decision.Gap); err != nil {
-					return err
-				}
 				if err := s.runPlanStep(ctx, r, decision); err != nil {
 					return err
 				}
@@ -465,15 +437,15 @@ func (s *Service) loopDeciderOnly(ctx context.Context, r *run) error {
 		}
 		r.setJudgment(decision.Reason)
 		r.setJudgmentStep(decision.Subject)
+		if decision.Exhausted && s.goalMet(r) {
+			s.finishDone(r, r.workflow.Name+" is complete")
+			return errFinished
+		}
 		if decision.Over {
 			// The workflow is over: the rounds of its jobs are spent
 			// and nothing broke. The run ends on its own — no model is
 			// asked what comes next.
-			s.finishDone(r, s.overSummary(r))
-			return errFinished
-		}
-		if decision.Exhausted && s.goalMet(r) {
-			s.finishDone(r, r.workflow.Name+" is complete")
+			s.finishDone(r, r.workflow.Name+" is over")
 			return errFinished
 		}
 		if s.budgetSpent(r) {

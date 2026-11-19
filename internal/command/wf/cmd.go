@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
@@ -42,14 +43,19 @@ func NewFactory(dir string) *Factory {
 func (f *Factory) Spec() command.Spec {
 	return command.Spec{
 		Name:     "wf",
-		Summary:  "Install a published workflow: /wf install <owner>/<name>",
-		Usage:    "/wf install <owner>/<name>",
+		Summary:  "Install or remove a published workflow by its address.",
+		Usage:    wfUsage,
 		Category: "agent",
 		Subcommands: []command.SubcommandSpec{
 			{
 				Name:    "install",
 				Summary: "Install a published workflow by its address.",
-				Usage:   "/wf install <owner>/<name>",
+				Usage:   "/wf install [-f] <owner>/<name>",
+			},
+			{
+				Name:    "uninstall",
+				Summary: "Remove an installed workflow by its address.",
+				Usage:   "/wf uninstall <owner>/<name>",
 			},
 		},
 	}
@@ -58,19 +64,38 @@ func (f *Factory) Spec() command.Spec {
 // installCmdSpec declares /wf install's argv grammar.
 //
 // The shared lexer enforces the contract: the subcommand is required,
-// the address is one argument, and a flag is an error.
+// the address is one argument, and only the force flag is known.
 var installCmdSpec = command.CmdSpec{
 	Name:       "/wf install",
-	Usage:      "/wf install <owner>/<name>",
+	Usage:      "/wf install [-f] <owner>/<name>",
 	Subcommand: "install",
+	Flags: map[string]command.FlagSpec{
+		"-f":      {Name: "force"},
+		"--force": {Name: "force"},
+	},
+	MinArgs: 1,
+	MaxArgs: 1,
+}
+
+// uninstallCmdSpec declares /wf uninstall's argv grammar.
+//
+// The uninstall takes no flags: it removes one address and nothing
+// else.
+var uninstallCmdSpec = command.CmdSpec{
+	Name:       "/wf uninstall",
+	Usage:      "/wf uninstall <owner>/<name>",
+	Subcommand: "uninstall",
 	MinArgs:    1,
 	MaxArgs:    1,
 }
 
+// wfUsage is the usage line of the /wf command.
+const wfUsage = "/wf install [-f] <owner>/<name> | /wf uninstall <owner>/<name>"
+
 // Handle implements command.SlashCommandFactory.
 //
-// The install's result reaches the operator through the checklist
-// alone: the command's SlashOutput carries no reply text.
+// The result reaches the operator through the checklist alone: the
+// command's SlashOutput carries no reply text.
 func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	mgr *chatsession.Manager, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 
@@ -80,13 +105,13 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	if len(argv) > 0 {
 		argv = argv[1:]
 	}
-	parsed, err := command.ParseCmdArgs(argv, installCmdSpec)
+	spec, err := specFor(argv)
 	if err != nil {
-		chatsession.ReportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
-		return &command.SlashOutput{
-			Reply:    fmt.Sprintf("❌ %v", err),
-			Consumed: true,
-		}, nil
+		return usageError(ctx, err), nil
+	}
+	parsed, err := command.ParseCmdArgs(argv, spec)
+	if err != nil {
+		return usageError(ctx, err), nil
 	}
 
 	if f.dir == "" {
@@ -98,7 +123,44 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 		}, nil
 	}
 
-	address := parsed.Arg(0)
+	if strings.EqualFold(parsed.Subcommand, "uninstall") {
+		return f.runUninstall(ctx, cs, input, parsed.Arg(0))
+	}
+	return f.runInstall(ctx, cs, input, parsed.Arg(0), parsed.Bool("force"))
+}
+
+// specFor returns the grammar of the subcommand the command line
+// names.
+//
+// The subcommand is matched without regard to case, like the shared
+// lexer does.
+func specFor(argv []string) (command.CmdSpec, error) {
+	if len(argv) == 0 {
+		return command.CmdSpec{}, fmt.Errorf("missing subcommand: want %q or %q (Usage: %s)",
+			"install", "uninstall", wfUsage)
+	}
+	switch {
+	case strings.EqualFold(argv[0], "install"):
+		return installCmdSpec, nil
+	case strings.EqualFold(argv[0], "uninstall"):
+		return uninstallCmdSpec, nil
+	}
+	return command.CmdSpec{}, fmt.Errorf("unexpected subcommand %q: want %q or %q (Usage: %s)",
+		argv[0], "install", "uninstall", wfUsage)
+}
+
+// usageError answers a command line that does not fit.
+func usageError(ctx context.Context, err error) *command.SlashOutput {
+	chatsession.ReportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
+	return &command.SlashOutput{
+		Reply:    fmt.Sprintf("❌ %v", err),
+		Consumed: true,
+	}
+}
+
+// runInstall installs the workflow of the given address.
+func (f *Factory) runInstall(ctx context.Context, cs *chatsession.ChatSession,
+	input command.SlashInput, address string, force bool) (*command.SlashOutput, error) {
 	addr, err := ParseAddress(address)
 	if err != nil {
 		// The address does not fit the hub's shape: nothing is
@@ -115,8 +177,30 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	}
 
 	list := newChecklist("download "+addr.String(), f.emitter(ctx, cs, input.ChatID, input.MessageID))
-	result := f.install(ctx, list, addr)
+	result := f.install(ctx, list, addr, force)
 	f.report(ctx, addr, result)
+	return &command.SlashOutput{Consumed: true}, nil
+}
+
+// runUninstall removes the installed workflow of the given address.
+func (f *Factory) runUninstall(ctx context.Context, cs *chatsession.ChatSession,
+	input command.SlashInput, address string) (*command.SlashOutput, error) {
+	addr, err := ParseAddress(address)
+	if err != nil {
+		// The address does not fit the hub's shape: nothing is
+		// removed.
+		list := newRemovalChecklist("remove "+address, f.emitter(ctx, cs, input.ChatID, input.MessageID))
+		list.set(rowRemove, agent.TaskFailed, err.Error())
+		_ = list.send()
+		chatsession.ReportOutcome(ctx, command.FailedOutcomeData(ReasonInvalidAddress,
+			"the address is not valid",
+			map[string]string{"address": address}, err.Error()))
+		return &command.SlashOutput{Consumed: true}, nil
+	}
+
+	list := newRemovalChecklist("remove "+addr.String(), f.emitter(ctx, cs, input.ChatID, input.MessageID))
+	result := f.uninstall(list, addr)
+	f.reportUninstall(ctx, addr, result)
 	return &command.SlashOutput{Consumed: true}, nil
 }
 
@@ -142,6 +226,11 @@ func (f *Factory) report(ctx context.Context, addr Address, result Result) {
 			Summary: "the workflow " + addr.String() + " is " + result.Reason,
 			Data:    data,
 		})
+	case ReasonSkipped:
+		// The workflow was already there: the request was valid and
+		// there was nothing to fetch.
+		chatsession.ReportOutcome(ctx, command.NoopOutcome(
+			"the workflow "+addr.String()+" is already installed — /wf install -f overwrites it", data))
 	case ReasonUnchanged:
 		// The workflow was already current: the request was valid and
 		// there was nothing to write.
@@ -150,6 +239,34 @@ func (f *Factory) report(ctx context.Context, addr Address, result Result) {
 	default:
 		chatsession.ReportOutcome(ctx, command.FailedOutcomeData(result.Reason,
 			"the workflow "+addr.String()+" was not installed",
+			data, result.Detail))
+	}
+}
+
+// reportUninstall publishes the outcome of an uninstall.
+//
+// The reason is the verdict: a program reacts to it without parsing
+// anything.
+func (f *Factory) reportUninstall(ctx context.Context, addr Address, result Result) {
+	data := map[string]string{"reason": result.Reason}
+	if result.Path != "" {
+		data["path"] = result.Path
+	}
+	switch result.Reason {
+	case ReasonUninstalled:
+		chatsession.ReportOutcome(ctx, messages.Outcome{
+			Status:  messages.OutcomeOK,
+			Summary: "the workflow " + addr.String() + " is uninstalled",
+			Data:    data,
+		})
+	case ReasonNotInstalled:
+		// There was nothing to remove: the request was valid and the
+		// workflow was already gone.
+		chatsession.ReportOutcome(ctx, command.NoopOutcome(
+			"the workflow "+addr.String()+" is not installed", data))
+	default:
+		chatsession.ReportOutcome(ctx, command.FailedOutcomeData(result.Reason,
+			"the workflow "+addr.String()+" was not uninstalled",
 			data, result.Detail))
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -51,6 +52,19 @@ func (e *captureEmitter) settled() *messages.Outcome {
 		}
 	}
 	return nil
+}
+
+// lastSettled returns the outcome of the last settled message.
+func (e *captureEmitter) lastSettled() *messages.Outcome {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var out *messages.Outcome
+	for _, msg := range e.msgs {
+		if msg.Kind == messages.OutMessageSettled {
+			out = msg.Outcome
+		}
+	}
+	return out
 }
 
 // newChat builds a chat session with a capturing emitter.
@@ -177,9 +191,14 @@ func TestHandle_TheCommandLineIsChecked(t *testing.T) {
 	ctx := context.Background()
 
 	for _, args := range [][]string{
+		{"wf"},
+		{"wf", "bogus"},
 		{"wf", "install"},
 		{"wf", "install", "a", "b"},
+		{"wf", "install", "--bogus", "a/b"},
 		{"wf", "install", "--force"},
+		{"wf", "uninstall"},
+		{"wf", "uninstall", "-f", "a/b"},
 	} {
 		out, err := f.Handle(ctx, command.RuntimeServices{}, nil, cs, command.SlashInput{
 			ChatID: "chat-1",
@@ -193,6 +212,10 @@ func TestHandle_TheCommandLineIsChecked(t *testing.T) {
 		}
 		if out.Reply == "" {
 			t.Errorf("the command line %v was accepted without a word", args)
+			continue
+		}
+		if !strings.HasPrefix(out.Reply, "❌") {
+			t.Errorf("the command line %v was answered with %q", args, out.Reply)
 		}
 	}
 }
@@ -218,8 +241,12 @@ func TestTheCommandIsRegistered(t *testing.T) {
 	for _, spec := range command.Default().Specs() {
 		if spec.Name == "wf" {
 			found = true
-			if len(spec.Subcommands) != 1 || spec.Subcommands[0].Name != "install" {
-				t.Errorf("the subcommands are %v, want install", spec.Subcommands)
+			names := make([]string, 0, len(spec.Subcommands))
+			for _, sub := range spec.Subcommands {
+				names = append(names, sub.Name)
+			}
+			if len(names) != 2 || names[0] != "install" || names[1] != "uninstall" {
+				t.Errorf("the subcommands are %v, want install and uninstall", names)
 			}
 		}
 	}
@@ -329,7 +356,7 @@ func TestHandle_AnUnchangedInstallIsANoop(t *testing.T) {
 	if _, err := f.Handle(ctx, command.RuntimeServices{}, nil, cs, command.SlashInput{
 		ChatID:    "chat-1",
 		MessageID: "msg-5",
-		Args:      []string{"wf", "install", "nightme/coder"},
+		Args:      []string{"wf", "install", "-f", "nightme/coder"},
 	}); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -343,5 +370,200 @@ func TestHandle_AnUnchangedInstallIsANoop(t *testing.T) {
 	}
 	if outcome.Data["reason"] != ReasonUnchanged {
 		t.Errorf("the reason is %q, want %q", outcome.Data["reason"], ReasonUnchanged)
+	}
+}
+
+// TestHandle_AnInstalledWorkflowIsSkippedUnlessForced — the workflow
+// that is already there is left alone, and only a forced install goes
+// to the hub and writes over it.
+func TestHandle_AnInstalledWorkflowIsSkippedUnlessForced(t *testing.T) {
+	dir := t.TempDir()
+	tier, srv := servingTier("github", validWorkflow)
+	defer srv.Close()
+
+	path := filepath.Join(dir, "nightme", "coder.yml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	local := "title: local\njobs:\n  main:\n    steps: [{message: hi}]\n"
+	if err := os.WriteFile(path, []byte(local), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	cs, em := newChat(t)
+	f := testFactory(dir, []Source{tier}, nil)
+
+	work := cs.Hold("msg-6")
+	ctx := chatsession.WithWork(context.Background(), work)
+	if _, err := f.Handle(ctx, command.RuntimeServices{}, nil, cs, command.SlashInput{
+		ChatID:    "chat-1",
+		MessageID: "msg-6",
+		Args:      []string{"wf", "install", "nightme/coder"},
+	}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	work.Release()
+
+	outcome := em.settled()
+	if outcome == nil {
+		t.Fatal("the message settled without an outcome")
+	}
+	if outcome.Data["reason"] != ReasonSkipped {
+		t.Errorf("the reason is %q, want %q", outcome.Data["reason"], ReasonSkipped)
+	}
+	if outcome.Status != messages.OutcomeNoop {
+		t.Errorf("the status is %q, want %q", outcome.Status, messages.OutcomeNoop)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(content) != local {
+		t.Errorf("the file holds %q, want the local one", content)
+	}
+
+	work = cs.Hold("msg-7")
+	ctx = chatsession.WithWork(context.Background(), work)
+	if _, err := f.Handle(ctx, command.RuntimeServices{}, nil, cs, command.SlashInput{
+		ChatID:    "chat-1",
+		MessageID: "msg-7",
+		Args:      []string{"wf", "install", "-f", "nightme/coder"},
+	}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	work.Release()
+
+	outcome = em.lastSettled()
+	if outcome == nil {
+		t.Fatal("the message settled without an outcome")
+	}
+	if outcome.Data["reason"] != ReasonUpdated {
+		t.Errorf("the reason is %q, want %q", outcome.Data["reason"], ReasonUpdated)
+	}
+	content, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(content) != validWorkflow {
+		t.Errorf("the file holds %q, want the hub's", content)
+	}
+}
+
+// TestHandle_UninstallRemovesTheWorkflow — the uninstall takes the
+// workflow away, and a second one finds nothing to remove.
+func TestHandle_UninstallRemovesTheWorkflow(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nightme", "coder.yml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(validWorkflow), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	cs, em := newChat(t)
+	f := testFactory(dir, nil, nil)
+
+	work := cs.Hold("msg-8")
+	ctx := chatsession.WithWork(context.Background(), work)
+	if _, err := f.Handle(ctx, command.RuntimeServices{}, nil, cs, command.SlashInput{
+		ChatID:    "chat-1",
+		MessageID: "msg-8",
+		Args:      []string{"wf", "uninstall", "nightme/coder"},
+	}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	work.Release()
+
+	outcome := em.settled()
+	if outcome == nil {
+		t.Fatal("the message settled without an outcome")
+	}
+	if outcome.Data["reason"] != ReasonUninstalled {
+		t.Errorf("the reason is %q, want %q", outcome.Data["reason"], ReasonUninstalled)
+	}
+	if outcome.Status != messages.OutcomeOK {
+		t.Errorf("the status is %q, want %q", outcome.Status, messages.OutcomeOK)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("the workflow is still there: %v", err)
+	}
+	if _, err := os.Stat(filepath.Dir(path)); !os.IsNotExist(err) {
+		t.Errorf("the owner directory is still there: %v", err)
+	}
+
+	tasks := em.tasks()
+	if len(tasks) == 0 {
+		t.Fatal("the checklist was never published")
+	}
+	items := tasks[0].TaskList.Items
+	if len(items) != 1 {
+		t.Fatalf("the checklist holds %d rows, want one", len(items))
+	}
+	if items[0].ID != "remove" {
+		t.Errorf("the row is %q, want remove", items[0].ID)
+	}
+	if items[0].Subject != "remove nightme/coder" {
+		t.Errorf("the row says %q", items[0].Subject)
+	}
+
+	work = cs.Hold("msg-9")
+	ctx = chatsession.WithWork(context.Background(), work)
+	if _, err := f.Handle(ctx, command.RuntimeServices{}, nil, cs, command.SlashInput{
+		ChatID:    "chat-1",
+		MessageID: "msg-9",
+		Args:      []string{"wf", "uninstall", "nightme/coder"},
+	}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	work.Release()
+
+	outcome = em.lastSettled()
+	if outcome == nil {
+		t.Fatal("the message settled without an outcome")
+	}
+	if outcome.Data["reason"] != ReasonNotInstalled {
+		t.Errorf("the reason is %q, want %q", outcome.Data["reason"], ReasonNotInstalled)
+	}
+	if outcome.Status != messages.OutcomeNoop {
+		t.Errorf("the status is %q, want %q", outcome.Status, messages.OutcomeNoop)
+	}
+}
+
+// TestHandle_UninstallRefusesAnAddressThatDoesNotFit — the address is
+// checked before anything is removed.
+func TestHandle_UninstallRefusesAnAddressThatDoesNotFit(t *testing.T) {
+	dir := t.TempDir()
+	cs, em := newChat(t)
+	f := testFactory(dir, nil, nil)
+	work := cs.Hold("msg-10")
+	ctx := chatsession.WithWork(context.Background(), work)
+
+	out, err := f.Handle(ctx, command.RuntimeServices{}, nil, cs, command.SlashInput{
+		ChatID:    "chat-1",
+		MessageID: "msg-10",
+		Args:      []string{"wf", "uninstall", "actions/foo"},
+	})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if out.Reply != "" {
+		t.Errorf("the reply is %q, want none", out.Reply)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("the workflows dir holds %d files, want none", len(entries))
+	}
+
+	work.Release()
+	outcome := em.settled()
+	if outcome == nil {
+		t.Fatal("the message settled without an outcome")
+	}
+	if outcome.Data["reason"] != ReasonInvalidAddress {
+		t.Errorf("the reason is %q, want %q", outcome.Data["reason"], ReasonInvalidAddress)
 	}
 }

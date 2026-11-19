@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -89,12 +90,36 @@ func TestParseAddress_RefusesTheAddressesThatDoNotFit(t *testing.T) {
 		"nightme/Coder",
 		"nightme/coder_1",
 		"night me/coder",
+		"john.doe/coder",
+		"-nightme/coder",
+		"actions/foo",
+		"runs/foo",
 	} {
 		t.Run(address, func(t *testing.T) {
 			if _, err := ParseAddress(address); err == nil {
 				t.Errorf("the address %q was accepted", address)
 			}
 		})
+	}
+}
+
+// TestParseAddress_TheOwnerIsAnyNamespace — the owner is a namespace
+// of the hub, not an account name of the host: it may carry an
+// underscore and it may be longer than an account name.
+func TestParseAddress_TheOwnerIsAnyNamespace(t *testing.T) {
+	const long = "a-very-long-namespace-name-over-the-account-limits"
+	if len(long) != 50 {
+		t.Fatalf("the long owner is %d characters, want 50", len(long))
+	}
+	for _, owner := range []string{"john_doe", long} {
+		addr, err := ParseAddress(owner + "/coder")
+		if err != nil {
+			t.Errorf("the owner %q was refused: %v", owner, err)
+			continue
+		}
+		if addr.Owner != owner {
+			t.Errorf("the owner is %q, want %q", addr.Owner, owner)
+		}
 	}
 }
 
@@ -108,7 +133,7 @@ func TestInstall_WritesTheWorkflowUnderItsAddress(t *testing.T) {
 	f := testFactory(dir, []Source{tier}, nil)
 	list := newChecklist("download nightme/coder", func([]agent.AgentTaskItem) error { return nil })
 
-	result := f.install(context.Background(), list, Address{Owner: "nightme", Name: "coder"})
+	result := f.install(context.Background(), list, Address{Owner: "nightme", Name: "coder"}, false)
 	if result.Reason != ReasonInstalled {
 		t.Fatalf("the reason is %q (%s), want %q", result.Reason, result.Detail, ReasonInstalled)
 	}
@@ -123,7 +148,7 @@ func TestInstall_WritesTheWorkflowUnderItsAddress(t *testing.T) {
 }
 
 // TestInstall_TheSameContentTwiceChangesNothing — the content decides
-// whether the file is rewritten.
+// whether a forced install rewrites the file.
 func TestInstall_TheSameContentTwiceChangesNothing(t *testing.T) {
 	dir := t.TempDir()
 	tier, srv := servingTier("github", validWorkflow)
@@ -133,7 +158,7 @@ func TestInstall_TheSameContentTwiceChangesNothing(t *testing.T) {
 	addr := Address{Owner: "nightme", Name: "coder"}
 	path := filepath.Join(dir, "nightme", "coder.yml")
 
-	first := f.install(context.Background(), newChecklist("download x", nil), addr)
+	first := f.install(context.Background(), newChecklist("download x", nil), addr, false)
 	if first.Reason != ReasonInstalled {
 		t.Fatalf("the reason is %q, want %q", first.Reason, ReasonInstalled)
 	}
@@ -143,7 +168,7 @@ func TestInstall_TheSameContentTwiceChangesNothing(t *testing.T) {
 	}
 	time.Sleep(10 * time.Millisecond)
 
-	second := f.install(context.Background(), newChecklist("download x", nil), addr)
+	second := f.install(context.Background(), newChecklist("download x", nil), addr, true)
 	if second.Reason != ReasonUnchanged {
 		t.Fatalf("the reason is %q, want %q", second.Reason, ReasonUnchanged)
 	}
@@ -156,8 +181,8 @@ func TestInstall_TheSameContentTwiceChangesNothing(t *testing.T) {
 	}
 }
 
-// TestInstall_DifferentContentOverwritesTheFile — a workflow that
-// changed is written over the old one.
+// TestInstall_DifferentContentOverwritesTheFile — a forced install of
+// a workflow that changed is written over the old one.
 func TestInstall_DifferentContentOverwritesTheFile(t *testing.T) {
 	dir := t.TempDir()
 	tier, srv := servingTier("github", validWorkflow)
@@ -175,7 +200,7 @@ func TestInstall_DifferentContentOverwritesTheFile(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	result := f.install(context.Background(), newChecklist("download x", nil), addr)
+	result := f.install(context.Background(), newChecklist("download x", nil), addr, true)
 	if result.Reason != ReasonUpdated {
 		t.Fatalf("the reason is %q, want %q", result.Reason, ReasonUpdated)
 	}
@@ -189,7 +214,8 @@ func TestInstall_DifferentContentOverwritesTheFile(t *testing.T) {
 }
 
 // TestInstall_ContentThatDoesNotValidateIsNotWritten — a broken file
-// from the hub does not replace a working local one.
+// from the hub does not replace a working local one, not even in a
+// forced install.
 func TestInstall_ContentThatDoesNotValidateIsNotWritten(t *testing.T) {
 	dir := t.TempDir()
 	tier, srv := servingTier("github", "jobs:\n  main:\n    steps: [{message: hi}]\n")
@@ -206,7 +232,7 @@ func TestInstall_ContentThatDoesNotValidateIsNotWritten(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	result := f.install(context.Background(), newChecklist("download x", nil), addr)
+	result := f.install(context.Background(), newChecklist("download x", nil), addr, true)
 	if result.Reason != ReasonInvalidContent {
 		t.Fatalf("the reason is %q, want %q", result.Reason, ReasonInvalidContent)
 	}
@@ -216,6 +242,77 @@ func TestInstall_ContentThatDoesNotValidateIsNotWritten(t *testing.T) {
 	}
 	if string(content) != local {
 		t.Errorf("the file holds %q, want the local one", content)
+	}
+}
+
+// TestInstall_AnInstalledWorkflowIsSkippedUnlessForced — the
+// workflow that is already there is left alone: the install costs no
+// request and writes nothing.
+func TestInstall_AnInstalledWorkflowIsSkippedUnlessForced(t *testing.T) {
+	dir := t.TempDir()
+	var requests atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		switch r.Method {
+		case http.MethodHead, http.MethodOptions:
+			w.WriteHeader(http.StatusOK)
+		default:
+			_, _ = w.Write([]byte(validWorkflow))
+		}
+	}))
+	defer srv.Close()
+
+	path := filepath.Join(dir, "nightme", "coder.yml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	local := "title: local\njobs:\n  main:\n    steps: [{message: hi}]\n"
+	if err := os.WriteFile(path, []byte(local), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+
+	f := testFactory(dir, []Source{{Name: "github", BaseURL: srv.URL + "/"}}, nil)
+	col := &collector{}
+	list := newChecklist("download nightme/coder", col.emit)
+
+	result := f.install(context.Background(), list, Address{Owner: "nightme", Name: "coder"}, false)
+	if result.Reason != ReasonSkipped {
+		t.Fatalf("the reason is %q (%s), want %q", result.Reason, result.Detail, ReasonSkipped)
+	}
+	if got := requests.Load(); got != 0 {
+		t.Errorf("the hub was asked %d times, want none", got)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(content) != local {
+		t.Errorf("the file holds %q, want the local one", content)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if !before.ModTime().Equal(after.ModTime()) {
+		t.Errorf("the file was rewritten: %v -> %v", before.ModTime(), after.ModTime())
+	}
+	for row, name := range map[int]string{
+		rowDownload: "download",
+		rowValidate: "validate",
+		rowInstall:  "install",
+	} {
+		status, _ := col.last(row)
+		if status != agent.TaskSkipped {
+			t.Errorf("the %s row is %v, want it skipped", name, status)
+		}
+	}
+	_, detail := col.last(rowDownload)
+	if detail != ReasonSkipped+" · "+displayPath(path) {
+		t.Errorf("the download row says %q", detail)
 	}
 }
 
@@ -238,7 +335,7 @@ func TestInstall_TheNextTierServesTheFile(t *testing.T) {
 	col := &collector{}
 	list := newChecklist("download nightme/coder", col.emit)
 
-	result := f.install(context.Background(), list, Address{Owner: "nightme", Name: "coder"})
+	result := f.install(context.Background(), list, Address{Owner: "nightme", Name: "coder"}, false)
 	if result.Reason != ReasonInstalled {
 		t.Fatalf("the reason is %q (%s), want %q", result.Reason, result.Detail, ReasonInstalled)
 	}
@@ -271,7 +368,7 @@ func TestInstall_ATierThatRefusesHEADIsAskedWithOPTIONS(t *testing.T) {
 
 	f := testFactory(dir, []Source{{Name: "github", BaseURL: srv.URL + "/"}}, nil)
 	result := f.install(context.Background(), newChecklist("download x", nil),
-		Address{Owner: "nightme", Name: "coder"})
+		Address{Owner: "nightme", Name: "coder"}, false)
 	if result.Reason != ReasonInstalled {
 		t.Fatalf("the reason is %q (%s), want %q", result.Reason, result.Detail, ReasonInstalled)
 	}
@@ -300,7 +397,7 @@ func TestInstall_ATierThatCannotBeReachedIsSkippedWithoutAGET(t *testing.T) {
 	f := testFactory(dir, []Source{{Name: "github", BaseURL: srv.URL + "/"}},
 		&http.Client{Timeout: 50 * time.Millisecond})
 	result := f.install(context.Background(), newChecklist("download x", nil),
-		Address{Owner: "nightme", Name: "coder"})
+		Address{Owner: "nightme", Name: "coder"}, false)
 	if result.Reason != ReasonUnreachable {
 		t.Fatalf("the reason is %q (%s), want %q", result.Reason, result.Detail, ReasonUnreachable)
 	}
@@ -320,7 +417,7 @@ func TestInstall_EveryTierAnswers404IsNotFound(t *testing.T) {
 
 	f := testFactory(dir, []Source{{Name: "github", BaseURL: srv.URL + "/"}}, nil)
 	result := f.install(context.Background(), newChecklist("download x", nil),
-		Address{Owner: "nightme", Name: "coder"})
+		Address{Owner: "nightme", Name: "coder"}, false)
 	if result.Reason != ReasonNotFound {
 		t.Fatalf("the reason is %q (%s), want %q", result.Reason, result.Detail, ReasonNotFound)
 	}
@@ -342,7 +439,7 @@ func TestInstall_TheChecklistHasThreeRows(t *testing.T) {
 	col := &collector{}
 	list := newChecklist("download nightme/coder", col.emit)
 
-	f.install(context.Background(), list, Address{Owner: "nightme", Name: "coder"})
+	f.install(context.Background(), list, Address{Owner: "nightme", Name: "coder"}, false)
 
 	if len(col.snapshots) == 0 {
 		t.Fatal("the checklist was never published")
@@ -426,7 +523,7 @@ func TestInstall_TheProgressUpdatesAreThrottled(t *testing.T) {
 	col := &collector{}
 	list := newChecklist("download nightme/coder", col.emit)
 
-	f.install(context.Background(), list, Address{Owner: "nightme", Name: "coder"})
+	f.install(context.Background(), list, Address{Owner: "nightme", Name: "coder"}, false)
 
 	progress := 0
 	for _, snapshot := range col.snapshots {
@@ -527,7 +624,7 @@ func TestInstall_TheThirdTierServesTheFile(t *testing.T) {
 	col := &collector{}
 	list := newChecklist("download nightme/coder", col.emit)
 
-	result := f.install(context.Background(), list, Address{Owner: "nightme", Name: "coder"})
+	result := f.install(context.Background(), list, Address{Owner: "nightme", Name: "coder"}, false)
 	if result.Reason != ReasonInstalled {
 		t.Fatalf("the reason is %q (%s), want %q", result.Reason, result.Detail, ReasonInstalled)
 	}
@@ -537,5 +634,131 @@ func TestInstall_TheThirdTierServesTheFile(t *testing.T) {
 	_, detail := col.last(rowDownload)
 	if !strings.Contains(detail, "jsdmirror") {
 		t.Errorf("the download row says %q, want the tier that served it", detail)
+	}
+}
+
+// TestUninstall_RemovesTheWorkflowAndTheEmptyOwnerDirectory — the
+// file goes, and the owner directory goes with it when nothing else
+// is left in it.
+func TestUninstall_RemovesTheWorkflowAndTheEmptyOwnerDirectory(t *testing.T) {
+	dir := t.TempDir()
+	addr := Address{Owner: "nightme", Name: "coder"}
+	path := filepath.Join(dir, "nightme", "coder.yml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(validWorkflow), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	f := testFactory(dir, nil, nil)
+	col := &collector{}
+	list := newRemovalChecklist("remove nightme/coder", col.emit)
+
+	result := f.uninstall(list, addr)
+	if result.Reason != ReasonUninstalled {
+		t.Fatalf("the reason is %q (%s), want %q", result.Reason, result.Detail, ReasonUninstalled)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("the workflow is still there: %v", err)
+	}
+	if _, err := os.Stat(filepath.Dir(path)); !os.IsNotExist(err) {
+		t.Errorf("the owner directory is still there: %v", err)
+	}
+	status, detail := col.last(rowRemove)
+	if status != agent.TaskCompleted {
+		t.Errorf("the remove row is %v, want it completed", status)
+	}
+	if !strings.Contains(detail, "removed too") {
+		t.Errorf("the remove row says %q, want it to name the removed directory", detail)
+	}
+}
+
+// TestUninstall_KeepsTheOwnerDirectoryThatHoldsAnotherWorkflow — the
+// uninstall removes the workflow it was asked for and nothing else.
+func TestUninstall_KeepsTheOwnerDirectoryThatHoldsAnotherWorkflow(t *testing.T) {
+	dir := t.TempDir()
+	addr := Address{Owner: "nightme", Name: "coder"}
+	path := filepath.Join(dir, "nightme", "coder.yml")
+	sibling := filepath.Join(dir, "nightme", "reviewer.yml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(validWorkflow), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := os.WriteFile(sibling, []byte(validWorkflow), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	f := testFactory(dir, nil, nil)
+	col := &collector{}
+	list := newRemovalChecklist("remove nightme/coder", col.emit)
+
+	result := f.uninstall(list, addr)
+	if result.Reason != ReasonUninstalled {
+		t.Fatalf("the reason is %q (%s), want %q", result.Reason, result.Detail, ReasonUninstalled)
+	}
+	if _, err := os.Stat(filepath.Dir(path)); err != nil {
+		t.Errorf("the owner directory is gone: %v", err)
+	}
+	if _, err := os.Stat(sibling); err != nil {
+		t.Errorf("the sibling workflow is gone: %v", err)
+	}
+	_, detail := col.last(rowRemove)
+	if strings.Contains(detail, "removed too") {
+		t.Errorf("the remove row says %q, want it to leave the directory alone", detail)
+	}
+}
+
+// TestUninstall_AWorkflowThatIsNotInstalledIsSkipped — removing what
+// is not there is not a failure.
+func TestUninstall_AWorkflowThatIsNotInstalledIsSkipped(t *testing.T) {
+	dir := t.TempDir()
+	addr := Address{Owner: "nightme", Name: "coder"}
+	path := filepath.Join(dir, "nightme", "coder.yml")
+
+	f := testFactory(dir, nil, nil)
+	col := &collector{}
+	list := newRemovalChecklist("remove nightme/coder", col.emit)
+
+	result := f.uninstall(list, addr)
+	if result.Reason != ReasonNotInstalled {
+		t.Fatalf("the reason is %q (%s), want %q", result.Reason, result.Detail, ReasonNotInstalled)
+	}
+	status, detail := col.last(rowRemove)
+	if status != agent.TaskSkipped {
+		t.Errorf("the remove row is %v, want it skipped", status)
+	}
+	if detail != ReasonNotInstalled+" · "+displayPath(path) {
+		t.Errorf("the remove row says %q", detail)
+	}
+}
+
+// TestUninstall_AFileThatCannotBeRemovedFails — a path that cannot
+// be removed is a failure, not a removal.
+func TestUninstall_AFileThatCannotBeRemovedFails(t *testing.T) {
+	dir := t.TempDir()
+	addr := Address{Owner: "nightme", Name: "coder"}
+	path := filepath.Join(dir, "nightme", "coder.yml")
+	// A directory where the file should be: it cannot be removed.
+	if err := os.MkdirAll(filepath.Join(path, "inside"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	f := testFactory(dir, nil, nil)
+	col := &collector{}
+	list := newRemovalChecklist("remove nightme/coder", col.emit)
+
+	result := f.uninstall(list, addr)
+	if result.Reason != ReasonRemoveFailed {
+		t.Fatalf("the reason is %q (%s), want %q", result.Reason, result.Detail, ReasonRemoveFailed)
+	}
+	if result.Detail == "" {
+		t.Error("the detail is empty, want the error")
+	}
+	status, _ := col.last(rowRemove)
+	if status != agent.TaskFailed {
+		t.Errorf("the remove row is %v, want it failed", status)
 	}
 }

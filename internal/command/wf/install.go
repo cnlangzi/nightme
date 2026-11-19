@@ -22,6 +22,9 @@ import (
 const (
 	// ReasonInstalled is a workflow that was not there before.
 	ReasonInstalled = "installed"
+	// ReasonSkipped is a workflow that was already there: the install
+	// leaves it alone unless it is forced.
+	ReasonSkipped = "skipped"
 	// ReasonUpdated is a workflow that was there and changed.
 	ReasonUpdated = "updated"
 	// ReasonUnchanged is a workflow that was there and did not change.
@@ -116,12 +119,26 @@ func (c *checklist) send() error {
 
 // install fetches the workflow at addr and installs it.
 //
+// A workflow that is already installed is left alone unless the
+// install is forced: the skip costs nothing, no request and no write.
+//
 // The three steps of the install are reported in the checklist: the
 // download, the validation and the write. The result carries the
 // reason the install came to.
-func (f *Factory) install(ctx context.Context, list *checklist, addr Address) Result {
+func (f *Factory) install(ctx context.Context, list *checklist, addr Address, force bool) Result {
 	path := f.pathFor(addr)
 	result := Result{Path: path}
+
+	if !force {
+		if _, err := os.Stat(path); err == nil {
+			list.set(rowDownload, agent.TaskSkipped, ReasonSkipped+" · "+displayPath(path))
+			list.set(rowValidate, agent.TaskSkipped, "")
+			list.set(rowInstall, agent.TaskSkipped, "")
+			_ = list.send()
+			result.Reason = ReasonSkipped
+			return result
+		}
+	}
 
 	// ── download ──────────────────────────────────────────────
 	content, tier, reason, detail := f.download(ctx, list, addr)

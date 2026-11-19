@@ -16,7 +16,8 @@ The personal agent (`/me`) runs a workflow in a chat. The same file is the plan 
 
 - [1. File location & layout](#1-file-location--layout)
   - [1.1 Installing a workflow](#11-installing-a-workflow)
-  - [1.2 Checking a workflow](#12-checking-a-workflow)
+  - [1.2 Uninstalling a workflow](#12-uninstalling-a-workflow)
+  - [1.3 Checking a workflow](#13-checking-a-workflow)
 - [2. Top-level fields](#2-top-level-fields)
 - [3. Triggers (`on:`)](#3-triggers-on)
   - [3.1 `schedule`](#31-schedule)
@@ -72,7 +73,7 @@ The directory is `<data_dir>/workflows` — `~/.nightme/workflows` with the defa
 
 ### 1.1 Installing a workflow
 
-`/wf install <owner>/<name>` fetches a published workflow and installs it:
+`/wf install [-f] <owner>/<name>` fetches a published workflow and installs it:
 
 ```
 /wf install nightme/coder
@@ -80,13 +81,27 @@ The directory is `<data_dir>/workflows` — `~/.nightme/workflows` with the defa
 
 The workflow is written to `~/.nightme/workflows/nightme/coder.yml`, so its name keeps the address it was published with and `/me start nightme/coder` runs it. The install is shown as a checklist of three rows — the download, the validation, the write — and the rows update as the install goes.
 
-The file is fetched from the hub through three tiers, in order: GitHub, jsDelivr, jsdmirror. Every tier is probed before its file is fetched, so a tier that cannot be reached is skipped instead of costing a transfer timeout. The downloaded content is checked before it is written: a file that does not validate is not installed, and the workflow that is already there stays as it is. A file that is already installed and did not change is not rewritten.
+An address that is already installed is skipped: the hub is not asked and the local file is left alone. `-f` (`--force`) installs it again — the workflow is fetched once more and written over the local file, unless its content did not change, in which case the file is not rewritten.
 
-The address is `<owner>/<name>`: the owner is the namespace the workflow is published under and the name is its lowercase kebab-case short name. `actions` and `runs` are reserved by the workflows directory, so they are not owners.
+The file is fetched from the hub through three tiers, in order: GitHub, jsDelivr, jsdmirror. Every tier is probed before its file is fetched, so a tier that cannot be reached is skipped instead of costing a transfer timeout. The downloaded content is checked before it is written: a file that does not validate is not installed, and the workflow that is already there stays as it is.
 
-The install's outcome carries the reason it came to: `installed`, `updated`, `unchanged`, `not_found`, `invalid_address`, `unreachable`, `invalid_content` or `write_failed`.
+The address is `<owner>/<name>`: the owner is the namespace the workflow is published under — lowercase letters, digits, dashes and underscores, starting with a letter or a digit — and the name is its lowercase kebab-case short name. `actions` and `runs` are reserved by the workflows directory, so they are not owners.
 
-### 1.2 Checking a workflow
+The install's outcome carries the reason it came to: `installed`, `skipped`, `updated`, `unchanged`, `not_found`, `invalid_address`, `unreachable`, `invalid_content` or `write_failed`.
+
+### 1.2 Uninstalling a workflow
+
+`/wf uninstall <owner>/<name>` takes an installed workflow away again:
+
+```
+/wf uninstall nightme/coder
+```
+
+The file `~/.nightme/workflows/nightme/coder.yml` is removed. The owner directory `~/.nightme/workflows/nightme/` goes with it when nothing else is left in it; a directory that still holds another workflow — or any other file — stays as it is. The removal is shown as a checklist of one row.
+
+The uninstall's outcome carries the reason it came to: `uninstalled`, `not_installed` or `remove_failed`.
+
+### 1.3 Checking a workflow
 
 `nightme workflow validate` checks the workflow files and reports every problem it found:
 

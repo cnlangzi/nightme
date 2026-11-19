@@ -466,9 +466,13 @@ agent——`/me`——在你发起它的那个 chat 里跑一个 workflow。每�
 
 ### 安装一个已发布的 workflow
 
-`/wf install <owner>/<name>` 把一个已发布的 workflow 取回来，装进 workflows 目录，个人 agent 在那里找它。地址就是 workflow 的名字：`/wf install nightme/coder` 写到 `~/.nightme/workflows/nightme/coder.yml`，用 `/me start nightme/coder` 跑它。
+`/wf install [-f] <owner>/<name>` 把一个已发布的 workflow 取回来，装进 workflows 目录，个人 agent 在那里找它。地址就是 workflow 的名字：`/wf install nightme/coder` 写到 `~/.nightme/workflows/nightme/coder.yml`，用 `/me start nightme/coder` 跑它。
 
-安装过程在 Chat 里显示成三行的清单——下载、校验、写入——每一步都实时更新。下载下来的文件先校验再写；已经装过、内容又没变的文件不会被重写。
+安装过程在 Chat 里显示成三行的清单——下载、校验、写入——每一步都实时更新。下载下来的文件先校验再写；内容没变的文件不会被重写。
+
+已经装过的地址会被跳过：不问 hub，也不改本地文件。`-f`（`--force`）会再装一次，把本地文件覆盖掉。
+
+`/wf uninstall <owner>/<name>` 把装好的 workflow 拿走：文件被删掉，owner 目录里没别的东西时目录也一起删掉。
 
 ### 写一个 workflow
 
@@ -731,7 +735,8 @@ Chat 级别的斜杠命令。`/gtw` 子命令见 [它们自己的 section](#git-
 | `/review [-a\|--agent <agent>] [-g\|--global] [--unset] [-c\|--continue] [--abort] [-t\|--timeout <dur>]` | 当前分支对比默认分支做 review（PR 模式），findings 注回当前 chat。`--agent` 指定用哪个 agent 跑 review；`-g` 把它存成 `~/.nightme/config.yaml` 里的全局 `review.agent`；`--unset` 删掉这个全局设置。`-c` 续跑本 chat 上一次 review 中失败的 group：重新打开那些 group 的 agent session，给它们发 "continue"。`--abort` 停掉本 chat 正在跑的 review —— 它的 agent session 被关掉，停掉的 group 还能用 `-c` 续跑。`--timeout` 定一个 subagent 最长能沉默多久（默认 15m，`0` 表示关掉）：沉默超过这个窗口的 subagent 会被关掉、报成超时，并且还能用 `-c` 续跑。阈值依次取自 flag、`~/.nightme/config.yaml` 里的 `review.timeout`、内置默认值。review 这一轮本身没有时限：一直跑到用户中止或 daemon 关闭为止。 |
 | `/wiki init [--modules] [--llmstxt] [--arch]` | 读码、分模块、写每个模块的 wiki 文件——把仓库 wiki 作为项目资产。 |
 | `/queue <message>` | 把一条消息作为独立 Prompt 追加进队列。 |
-| `/wf install <owner>/<name>` | 把一个已发布的 workflow 装进 workflows 目录。地址就是 workflow 的名字：`nightme/coder` 装成 `~/.nightme/workflows/nightme/coder.yml`，用 `/me start nightme/coder` 跑。安装过程显示成一张清单——下载、校验、写入。 |
+| `/wf install [-f] <owner>/<name>` | 把一个已发布的 workflow 装进 workflows 目录。地址就是 workflow 的名字：`nightme/coder` 装成 `~/.nightme/workflows/nightme/coder.yml`，用 `/me start nightme/coder` 跑。安装过程显示成一张清单——下载、校验、写入。已经装过的地址会被跳过；`-f` 会再装一次。 |
+| `/wf uninstall <owner>/<name>` | 删掉一个装好的 workflow。文件被删掉，owner 目录里没别的东西时目录也一起删掉。 |
 | `/help` | 在 Chat 里列出所有斜杠命令。 |
 
 `!cmd` 在当前 Chat 的 CWD 里直接跑 shell 命令——规则见 [Shell mode](#shell-mode)。

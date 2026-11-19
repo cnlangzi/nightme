@@ -290,28 +290,12 @@ func runFixRemote(
 	if err != nil {
 		// D3 split: distinguish "URL is malformed" (user error),
 		// "daemon can't reach the host" (network) from "host not
-		// recognised as GitHub/GitLab". Never echo the raw
-		// remoteURL — it may carry userinfo.
-		redacted := redactForDisplay(remoteURL)
-		switch {
-		case errors.Is(err, ErrInvalidRemoteURL):
-			if redacted == "" {
-				return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-					"❌ 无效的 remote URL（凭证已脱敏）\n  Expected: https://github.com/<owner>/<repo>.git, git@github.com:<owner>/<repo>.git, ssh://git@<host>/path, git://<host>/path, etc.",
-					command.FailedOutcome("provider_error", "the remote URL is not valid")), nil
-			}
-			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-				fmt.Sprintf("❌ 无效的 remote URL: %s\n  Expected: https://github.com/<owner>/<repo>.git, git@github.com:<owner>/<repo>.git, ssh://git@<host>/path, git://<host>/path, etc.", redacted),
-				command.FailedOutcome("provider_error", "the remote URL is not valid")), nil
-		case errors.Is(err, ErrProviderUnreachable):
-			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-				fmt.Sprintf("❌ 无法连接 Git 主机 (%s)\n  → %v", redacted, err),
-				command.FailedOutcome("provider_error", "the git host could not be reached")), nil
-		default:
-			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
-				fmt.Sprintf("❌ 暂不支持的 Git 平台 (host: %s — neither github.com/gitlab.com URL hint nor /api/v3/meta or /api/v4/version probe recognised it).", redacted),
-				command.FailedOutcome("provider_error", "the git platform is not supported")), nil
-		}
+		// recognised as GitHub/GitLab". The card and the summary
+		// live in providerErrorCard so every command that resolves a
+		// provider reads the same words.
+		card, summary := providerErrorCard(remoteURL, err)
+		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, card,
+			command.FailedOutcome("provider_error", summary)), nil
 	}
 	if provider == nil {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,

@@ -168,7 +168,7 @@ func TestRenderAutoNoCandidate_HeldQueueSaysSo(t *testing.T) {
 	if strings.Contains(card, "none of the 100 oldest open issues carries") {
 		t.Errorf("card must not claim the queue marker is absent:\n%s", card)
 	}
-	if strings.Contains(card, "attach it to an issue") {
+	if strings.Contains(card, "run `/gtw assign") {
 		t.Errorf("card must not ask for a label that is already attached:\n%s", card)
 	}
 }

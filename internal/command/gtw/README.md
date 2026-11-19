@@ -560,14 +560,15 @@ agent 没写这一节时,卡片上方会带一行 ⚠️ 提醒 reviewer 拿不�
 ```
 ❌ No eligible assigned issue
 → queue: empty — none of the 100 oldest open issues carries `nightme/assigned` on its own
-→ `nightme/assigned` is in this repository's label catalog — attach it to an issue that carries no other `nightme/*` label to fill the queue
+→ `nightme/assigned` is in this repository's label catalog — run `/gtw assign <issue-id>` on an issue that carries no other `nightme/*` label to fill the queue
 ↳ come back in 5m for another pick.
 ```
 
 队列为空的卡片额外用一行说明队列为什么是空的:label catalog 检查确认(或
-建出了)队列标记 `nightme/assigned`,队列要等人工把这个标签贴到某个 issue
-上才有内容。队列里本来就有候选、只是全被跳过时(阻塞 / 已有分支 / 已有 PR),
-这一行不出现 —— 它讲的是"队列空了",而那种情况下队列没空。
+建出了)队列标记 `nightme/assigned`,队列要等有人把这个标签贴到某个 issue
+上才有内容 —— `/gtw assign <issue-id>` 就是这一步。队列里本来就有候选、
+只是全被跳过时(阻塞 / 已有分支 / 已有 PR),这一行不出现 —— 它讲的是
+"队列空了",而那种情况下队列没空。
 
 入队条件是"`nightme/assigned` 一个标签":issue 上再带任何一个 `nightme/*`
 状态 label(`nightme/wip`、`nightme/ready`、`nightme/revise` …)都说明别的
@@ -670,6 +671,62 @@ label 时走 claim 拒绝 —— 它此刻正被一个 fix 持着。
 ```
 
 失败之前已经建好的依赖关系照样列出来(`deps` 行)。
+
+### 4.9 Format 1(`/gtw assign` — 队列标记)
+
+`/gtw assign <issue-id>` 把队列标记 `nightme/assigned` 贴到 issue 上,
+`/gtw assign <issue-id> --remove`(或 `-r`)把它摘下来。卡片说清是"贴上了"
+还是"本来就有",不谎报变化:
+
+```
+✅ `nightme/assigned` added to #42
+→ issue: owner/repo#42 — Login state expiration
+→ label: `nightme/assigned`
+→ url:   https://github.com/owner/repo/issues/42
+↳ `/gtw fix *` picks it up on the next run
+```
+
+标签本来就在时,抬头说明没变:
+
+```
+✅ `nightme/assigned` was already on #42 — nothing changed
+→ issue: owner/repo#42 — Login state expiration
+→ label: `nightme/assigned`
+→ url:   https://github.com/owner/repo/issues/42
+↳ `/gtw fix *` picks it up on the next run
+```
+
+摘标记时,末行说的是它离队了:
+
+```
+✅ `nightme/assigned` removed from #42
+→ issue: owner/repo#42 — Login state expiration
+→ label: `nightme/assigned`
+→ url:   https://github.com/owner/repo/issues/42
+↳ the issue is out of the `/gtw fix *` queue
+```
+
+issue 带着别的 `nightme/*` 状态 label 时,末行说的是它仍然不入队 —— 队列
+标记是你入队的动作,状态 label 才是占住它的东西:
+
+```
+✅ `nightme/assigned` added to #42
+→ issue: owner/repo#42 — Login state expiration
+→ label: `nightme/assigned`
+→ url:   https://github.com/owner/repo/issues/42
+↳ `nightme/wip` on this issue keeps it out of the `/gtw fix *` queue
+```
+
+摘标记时 catalog 检查失败只警告,摘除照做,警告行在卡片最前面:
+
+```
+⚠️ could not ensure gtw labels on owner/repo: read label catalog: 403 Forbidden
+✅ `nightme/assigned` removed from #42
+→ issue: owner/repo#42 — Login state expiration
+→ label: `nightme/assigned`
+→ url:   https://github.com/owner/repo/issues/42
+↳ the issue is out of the `/gtw fix *` queue
+```
 
 ---
 

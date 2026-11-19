@@ -71,7 +71,7 @@ func TestFixAuto_CreatesMissingAssignedLabelBeforePick(t *testing.T) {
 	if !strings.Contains(last, "just created") {
 		t.Errorf("reply must say the label was just created:\n%s", last)
 	}
-	if !strings.Contains(last, "attach it to an issue") {
+	if !strings.Contains(last, "run `/gtw assign") {
 		t.Errorf("reply must say how the queue is filled:\n%s", last)
 	}
 }
@@ -100,7 +100,7 @@ func TestFixAuto_SkippedCandidate_DropsTheQueueNote(t *testing.T) {
 	if !strings.Contains(last, "blocked") {
 		t.Errorf("reply must name the reason the candidate was passed over:\n%s", last)
 	}
-	if strings.Contains(last, "attach it to an issue") {
+	if strings.Contains(last, "run `/gtw assign") {
 		t.Errorf("reply must not tell the user to attach the label — the queue holds a candidate:\n%s", last)
 	}
 }

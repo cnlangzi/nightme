@@ -2,6 +2,8 @@ package gtw
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
 )
 
@@ -134,4 +136,33 @@ func (d HandlerDeps) prober() HTTPProber {
 		return d.Prober
 	}
 	return &ExecHTTPProber{}
+}
+
+// providerErrorCard maps a provider-detection failure to the card
+// the user reads and the outcome summary the program reads.
+//
+// The three failures are told apart because their remedies differ: a
+// malformed remote URL is the user's to fix, an unreachable host is
+// the network's, and an unrecognised host is a platform nightme does
+// not speak to. The remote URL is redacted — it may carry userinfo.
+//
+// Every command that resolves a provider reads its card here, so
+// the paths cannot drift apart.
+func providerErrorCard(remoteURL string, err error) (card, summary string) {
+	redacted := redactForDisplay(remoteURL)
+	switch {
+	case errors.Is(err, ErrInvalidRemoteURL):
+		if redacted == "" {
+			return "❌ 无效的 remote URL（凭证已脱敏）\n  Expected: https://github.com/<owner>/<repo>.git, git@github.com:<owner>/<repo>.git, ssh://git@<host>/path, git://<host>/path, etc.",
+				"the remote URL is not valid"
+		}
+		return fmt.Sprintf("❌ 无效的 remote URL: %s\n  Expected: https://github.com/<owner>/<repo>.git, git@github.com:<owner>/<repo>.git, ssh://git@<host>/path, git://<host>/path, etc.", redacted),
+			"the remote URL is not valid"
+	case errors.Is(err, ErrProviderUnreachable):
+		return fmt.Sprintf("❌ 无法连接 Git 主机 (%s)\n  → %v", redacted, err),
+			"the git host could not be reached"
+	default:
+		return fmt.Sprintf("❌ 暂不支持的 Git 平台 (host: %s — neither github.com/gitlab.com URL hint nor /api/v3/meta or /api/v4/version probe recognised it).", redacted),
+			"the git platform is not supported"
+	}
 }

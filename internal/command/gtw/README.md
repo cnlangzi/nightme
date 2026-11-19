@@ -521,6 +521,29 @@ agent 没写这一节时,卡片上方会带一行 ⚠️ 提醒 reviewer 拿不�
 状态)。卡片本身不多一行 —— 状态在 issue 上,不在卡片上。label 调用失败
 只带一行 ⚠️,PR 已经开出来了,命令不算失败。
 
+### 4.5b Format 1(`/gtw pr view`)
+
+```
+❌ PR #123 has merge conflicts
+→ branch:   fix-42
+→ base:     main
+→ state:    DIRTY
+→ url:      https://github.com/owner/repo/pull/123
+↳ merge main into the branch, then push
+```
+
+`→ state:` 行是平台自己的词(GitHub 的 `DIRTY` / `BEHIND` /
+`BLOCKED`,GitLab 的 `conflicts` / `need_rebase`);平台中立的判定在
+结论的 `Data["merge_state"]` 里。
+
+标题按判定取:`✅ PR #123 is mergeable` / `❌ PR #123 has merge
+conflicts` / `❌ PR #123 is behind main` / `❌ PR #123 is blocked` /
+`❌ PR #123 state is unknown` / `✨ PR #123 is already merged` /
+`✨ no open pull request for fix-42`。
+
+`↳` hint 只在 `conflicting` 与 `behind` 两档出现 —— 别的判定没有
+"下一步该做什么"可给。
+
 ### 4.6 Format 1(`/gtw fix` — assess-first)
 
 ```

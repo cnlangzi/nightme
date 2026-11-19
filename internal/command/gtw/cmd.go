@@ -307,6 +307,7 @@ func (f *Factory) Spec() command.Spec {
 			"/gtw push                           push the worktree branch (clean only — refuses dirty)\n" +
 			"/gtw pr [-a <agent>] [--ready]      generate PR title+body, then open the PR\n" +
 			"/gtw pr -a claude                   override which agent runs the one-shot\n" +
+			"/gtw pr view [number]               read the merge state of a pull request (read-only)\n" +
 			"/gtw config lang [value]            show or set the output language for this repository\n" +
 			"/gtw config -g lang [value]         show or set the user-level output language\n" +
 			"/gtw sync                           checkout the default branch and pull --rebase from origin\n" +
@@ -337,6 +338,12 @@ func (f *Factory) Spec() command.Spec {
 			{Name: "commit", Summary: "commit uncommitted work via the configured agent", Usage: "/gtw commit [-a <agent>]"},
 			{Name: "push", Summary: "push the worktree branch (clean only — refuses dirty)"},
 			{Name: "pr", Summary: "generate PR title+body, then open the PR", Usage: "/gtw pr [-a <agent>] [--ready]"},
+			{
+				Name:    "pr view",
+				Summary: "read the merge state of a pull request (read-only)",
+				Usage:   "/gtw pr view [number]",
+				Hidden:  true,
+			},
 			{Name: "config", Summary: "show or set the gtw output language (repo scope by default, -g for the user scope)", Usage: configCmdSpec.Usage},
 			{Name: "sync", Summary: "checkout the default branch and pull --rebase from origin"},
 			{Name: "abort", Summary: "cancel the gtw command currently running in this chat"},
@@ -450,7 +457,11 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, mgr *c
 	case "push":
 		out, err = f.runPush(runCtx, rt, cs, input)
 	case "pr":
-		out, err = f.runPR(runCtx, rt, cs, input)
+		if isPRView(input.Args) {
+			out, err = f.runPRView(runCtx, cs, input)
+		} else {
+			out, err = f.runPR(runCtx, rt, cs, input)
+		}
 	case "sync":
 		out, err = f.runSync(runCtx, rt, cs, input)
 	default:
@@ -1367,6 +1378,32 @@ func (f *Factory) runPR(ctx context.Context, _ command.RuntimeServices, cs *chat
 			Consumed: true,
 		}, nil
 	}
+	return &command.SlashOutput{Consumed: true}, nil
+}
+
+// isPRView reports whether the argv names `/gtw pr view`.
+//
+// The subcommand is the token right after "pr", matched the way the
+// shared lexer matches it. Anything else — including a bare
+// `/gtw pr` — is the path that opens a pull request, and that path
+// is untouched by the read-only view.
+func isPRView(args []string) bool {
+	return len(args) > 2 && strings.EqualFold(args[2], prViewSubcommand)
+}
+
+// runPRView handles `/gtw pr view [number]`. The command reads the
+// merge state of a pull request and reports it; it opens nothing,
+// changes no label and runs no hook.
+func (f *Factory) runPRView(ctx context.Context, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
+	number, err := parsePRViewArgs(input.Args[2:])
+	if err != nil {
+		reportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
+		return &command.SlashOutput{
+			Reply:    fmt.Sprintf("❌ %v", err),
+			Consumed: true,
+		}, nil
+	}
+	_, _ = dispatchPRView(ctx, cs, f.deps, input.ChatID, input.MessageID, number)
 	return &command.SlashOutput{Consumed: true}, nil
 }
 

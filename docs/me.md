@@ -79,6 +79,11 @@ type Outcome struct {
 | `untracked` | 其中 git 没跟踪的 |
 | `remote_head` | push 之后 `origin/<branch>` 指向的 sha（读不到时这个键不出现） |
 | `pr_number` / `pr_url` | PR 的编号 / 链接 |
+| `pr_state` | PR 自己的状态（`open` / `closed` / `merged`）——`/gtw pr view` 给出 |
+| `base_branch` | PR 的目标分支——`/gtw pr view` 给出 |
+| `mergeable` | PR 现在能不能合（`"1"` / `"0"`）——`/gtw pr view` 给出 |
+| `conflict` | PR 现在有没有冲突（`"1"` / `"0"`）——`/gtw pr view` 给出 |
+| `merge_state` | 平台中立的合并判定（`mergeable` / `conflicting` / `behind` / `unknown` / `blocked`）——`/gtw pr view` 给出 |
 | `url` | issue 在平台上的链接（`/gtw assign` 给出被改动的那个 issue） |
 | `action` | `/gtw assign` 做的是哪一步（`added` / `removed`） |
 | `groups` | review 跑了几组（`/review`） |
@@ -271,7 +276,7 @@ chatsession: message settled chat_id=… message_id=… status=… summary=…
 | `unknown_agent` | agent 名没注册 | `/review` | 异常 |
 | `not_a_repo` | 工作区不在 git 仓库里 | `/gtw` | 异常 |
 | `no_remote` | 仓库没有 `origin` remote | `/gtw fix` / `/gtw assign` | 异常 |
-| `provider_error` | git 平台解析 / 连接失败 | `/gtw fix` / `/gtw new` / `/gtw pr` / `/gtw assign` | 异常 |
+| `provider_error` | git 平台解析 / 连接失败 | `/gtw fix` / `/gtw new` / `/gtw pr` / `/gtw pr view` / `/gtw assign` | 异常 |
 | `invalid_issue` / `invalid_branch` | issue 号 / 分支名不合法 | `/gtw fix` | 异常 |
 | `issue_not_found` | issue 不存在 | `/gtw fix` / `/gtw assign` | 异常 |
 | `issue_claimed` | 已被别的 fix 占用 | `/gtw fix` | 异常 |
@@ -294,6 +299,13 @@ chatsession: message settled chat_id=… message_id=… status=… summary=…
 | `no_remote_branch` | 分支还没发布到 origin | `/gtw pr` | 异常 |
 | `no_commits` | 分支和 base 之间没有 commit | `/gtw pr` | 异常 |
 | `pr_exists` | 这个分支已经有 PR 了 | `/gtw pr` | 正常分支 |
+| `merge_conflict` | PR 现在有冲突，合不进去 | `/gtw pr view` | 正常分支 |
+| `pr_behind` | PR 的分支落后于 base | `/gtw pr view` | 正常分支 |
+| `pr_blocked` | 平台挡着这个 PR（草稿 / 未批准 / 检查没过） | `/gtw pr view` | 正常分支 |
+| `state_unknown` | 平台还没算出来这个 PR 能不能合 | `/gtw pr view` | 异常 |
+| `pr_closed` | PR 已经不在 open 状态（`closed` / `merged`） | `/gtw pr view` | 正常分支 |
+| `no_pr` | 这个分支上没有 open 的 PR | `/gtw pr view` | 正常分支 |
+| `pr_not_found` | 这个编号没有对应的 PR | `/gtw pr view` | 异常 |
 | `no_drafts` / `invalid_draft` | 没有草稿 / 草稿不可用 | `/gtw new -y` | 异常 |
 | `config_write_failed` | 全局 review agent 没能持久化 | `/review -g` | 异常 |
 | `no_review` / `already_running` | 没有可续的 review / 已有 review 在跑 | `/review -c` | 异常 |

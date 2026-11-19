@@ -103,8 +103,9 @@ type OperatorDecision struct {
 //
 // The command hands the control back either way: a run that waits for
 // the operator goes on. A command that acts on nothing records no
-// decision: the run keeps none for the turn, and the plan runs the
-// step it was going to run anyway.
+// decision: the plan runs the step it was going to run anyway. A
+// decision the run still holds — one it has not taken yet — is the
+// run's own: this command does not touch it.
 //
 // The decision is refused when the run waits for an answer: that
 // state has its own command, `/me reply`.
@@ -141,12 +142,12 @@ func (r *run) prepareDecision(kind, note string) (OperatorDecision, bool, error)
 // decideDirectiveLocked says what the operator's command will do with
 // the step the run is on. The caller holds the lock.
 //
-// The command acts only on a step that ran and did not succeed: that
-// is the step the run's own execution layer acts on, so the promise
-// the command makes and the action the run performs agree. A step
-// that is still running, that succeeded, or that the plan runs anyway
-// has nothing to decide: the command holds no decision, and the state
-// of the run answers.
+// The command acts only on a step that ran and did not succeed, and
+// only when that step may run again: that is the step the run's own
+// execution layer acts on, so the promise the command makes and the
+// action the run performs agree. A step that is still running, that
+// succeeded, or that the plan runs anyway has nothing to decide: the
+// command holds no decision, and the state of the run answers.
 //
 // A run that is working decides for itself: there is nothing for the
 // operator to decide there either.
@@ -161,13 +162,7 @@ func (r *run) decideDirectiveLocked(kind string) (OperatorDecision, error) {
 		}
 	}
 	stepID := r.targetStepLocked()
-	if stepID == "" {
-		return OperatorDecision{}, &Refusal{
-			Reason:  reasonError,
-			Message: "there is no step to " + directiveVerb(kind),
-		}
-	}
-	if _, ok := r.stepByIDLocked(stepID); !ok {
+	if stepID == "" || r.stepIndex(stepID) < 0 {
 		return OperatorDecision{}, &Refusal{
 			Reason:  reasonError,
 			Message: "there is no step to " + directiveVerb(kind),
@@ -185,24 +180,23 @@ func (r *run) decideDirectiveLocked(kind string) (OperatorDecision, error) {
 		return d, nil
 	}
 	st, ran := r.stepStateLocked(stepID)
-	switch {
-	case ran && st.Outcome.Succeeded():
+	if ran && st.Outcome.Succeeded() {
 		// The step did its job: there is nothing to repair, and
 		// nothing to skip.
 		return d, nil
-	case ran:
+	}
+	if ran {
 		// The step ran and did not succeed: it is the step a decision
-		// acts on.
-		d.Act = true
-		return d, nil
-	default:
-		// The step has not run: the plan runs it. `/me next` passes it
-		// over anyway — the operator asked for it.
-		if kind == directiveNext {
-			d.Act = true
-		}
+		// acts on. `/me resume` needs a step that may run again: a
+		// step of an earlier round cannot, the plan has moved on
+		// without it.
+		d.Act = kind == directiveNext || r.runnableStepLocked(stepID)
 		return d, nil
 	}
+	// The step has not run: the plan runs it. `/me next` passes it
+	// over anyway — the operator asked for it.
+	d.Act = kind == directiveNext
+	return d, nil
 }
 
 // directiveVerb renders what the directive does, for the messages the

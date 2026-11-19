@@ -889,6 +889,39 @@ func TestTheCommandsDecideOnTheStateOfTheTargetStep(t *testing.T) {
 	}
 }
 
+// TestResume_OnAStepThatCannotRunAgainDecidesNothing — a step the plan
+// has moved on from cannot run again: the command does not promise a
+// retry it cannot keep.
+func TestResume_OnAStepThatCannotRunAgainDecidesNothing(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "two", commitPushWorkflow)
+
+	svc, _ := testService(t, dir, Config{})
+	r := pausedRun(t, svc, "commit", wfe.Outcome{Status: wfe.OutcomeFailed, Summary: "the commit failed"}, true)
+
+	// The job went on to its next round: the step cannot run again.
+	r.mu.Lock()
+	if r.state.Rounds == nil {
+		r.state.Rounds = map[string]int{}
+	}
+	r.state.Rounds["main"] = 2
+	r.mu.Unlock()
+
+	d, err := svc.Resume(context.Background(), "obs-1", "", "")
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if d.Act {
+		t.Error("the command promised a retry of a step that cannot run again")
+	}
+	if d.Step != "commit" {
+		t.Errorf("the command looked at %q, want commit", d.Step)
+	}
+	if r.takeDirective() != nil {
+		t.Error("the run holds a decision, want none")
+	}
+}
+
 // pausedRun builds a run of a workflow that waits for the operator,
 // with the given step in the given state.
 //

@@ -936,7 +936,7 @@ The two commands decide at command time what they do with that step, and they an
 | The step has not run | the plan runs it | the step is skipped |
 | The run is working | the state card answers; no decision | the state card answers; no decision |
 
-A command that decides nothing records no decision: the run keeps none for the turn, and the plan goes on with the step it was going to run anyway. A command that decides records the decision on the run, and the run's loop applies it at its next turn — the same rule the run's own execution layer follows, so the promise the command makes and the action the run performs agree.
+Both commands hand the control back to the run: a run that waits for the operator goes on, whatever the command decided about the step. A command that decides records the decision on the run, and the run's loop applies it at its next turn — the same rule the run's own execution layer follows, so the promise the command makes and the action the run performs agree. A command that decides nothing records no decision: the plan goes on with the step it was going to run anyway.
 
 The run speaks in agent sessions, and the chat renders every session the way it renders a coding agent's turn: an identity line, the entries of the session, the tool calls as thread events and a status bar in the footer. A round also carries the steps of the round as a checklist. A run opens four kinds of session, and every session hangs under one message:
 

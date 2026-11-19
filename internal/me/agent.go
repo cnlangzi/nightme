@@ -779,8 +779,8 @@ func (s *Service) Next(ctx context.Context, chatID, messageID, note string) (Ope
 // of the step and whether the command recorded a decision.
 //
 // A command that acts on nothing records nothing: the state of the run
-// is published all the same, and the run keeps no decision for the
-// turn.
+// is published all the same, and the run holds no decision of its own
+// for the turn.
 //
 // The decision is persisted, the state of the run is refreshed and the
 // state of the run is published before the run is woken.

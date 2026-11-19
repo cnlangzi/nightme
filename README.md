@@ -760,7 +760,8 @@ a token of the form `name=value` assigns that argument by name.
 
 `/me resume` and `/me next` decide at command time what they do with the step the
 run is on, and they answer accordingly: the promise only when there is something to
-do, and the state card when there is not.
+do, and the state card when there is not. Both hand the control back to the run: a
+run that waits for you goes on, whatever the command decided about the step.
 
 | The state of the run and of the step | `/me resume` | `/me next` |
 |---|---|---|

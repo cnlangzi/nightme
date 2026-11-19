@@ -245,8 +245,7 @@ func (f *Factory) resume(ctx context.Context, rt command.RuntimeServices, input 
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
 	if !d.Act {
-		chatsession.ReportOutcome(ctx, command.NoopOutcome(stateShownSummary, map[string]string{"step": d.Step}))
-		return command.Reply(ctx, rt, stateShownLine), nil
+		return stateShown(ctx, rt, d.Step), nil
 	}
 	chatsession.ReportOutcome(ctx, messages.Outcome{
 		Status:  messages.OutcomeOK,
@@ -270,8 +269,7 @@ func (f *Factory) next(ctx context.Context, rt command.RuntimeServices, input co
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
 	if !d.Act {
-		chatsession.ReportOutcome(ctx, command.NoopOutcome(stateShownSummary, map[string]string{"step": d.Step}))
-		return command.Reply(ctx, rt, stateShownLine), nil
+		return stateShown(ctx, rt, d.Step), nil
 	}
 	chatsession.ReportOutcome(ctx, messages.Outcome{
 		Status:  messages.OutcomeOK,
@@ -279,6 +277,16 @@ func (f *Factory) next(ctx context.Context, rt command.RuntimeServices, input co
 		Data:    map[string]string{"step": d.Step},
 	})
 	return command.Reply(ctx, rt, "⏭ The step is skipped: "+d.Step+". The run goes on with the workflow."), nil
+}
+
+// stateShown answers a command that had nothing to decide: the state
+// of the run is the answer, and the line says so.
+//
+// The outcome is a noop: the request was valid, and there was nothing
+// to do to the step.
+func stateShown(ctx context.Context, rt command.RuntimeServices, step string) *command.SlashOutput {
+	chatsession.ReportOutcome(ctx, command.NoopOutcome(stateShownSummary, map[string]string{"step": step}))
+	return command.Reply(ctx, rt, stateShownLine)
 }
 
 // refusalReason returns the stable code of a refusal, or the generic

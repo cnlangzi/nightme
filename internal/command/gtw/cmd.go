@@ -1383,18 +1383,19 @@ func (f *Factory) runPR(ctx context.Context, _ command.RuntimeServices, cs *chat
 
 // isPRView reports whether the argv names `/gtw pr view`.
 //
-// The subcommand is the token right after "pr". Anything else —
-// including a bare `/gtw pr` — is the path that opens a pull
-// request, and that path is untouched by the read-only view.
+// The subcommand is the token right after "pr", matched the way the
+// shared lexer matches it. Anything else — including a bare
+// `/gtw pr` — is the path that opens a pull request, and that path
+// is untouched by the read-only view.
 func isPRView(args []string) bool {
-	return len(args) > 2 && args[2] == "view"
+	return len(args) > 2 && strings.EqualFold(args[2], prViewSubcommand)
 }
 
 // runPRView handles `/gtw pr view [number]`. The command reads the
 // merge state of a pull request and reports it; it opens nothing,
 // changes no label and runs no hook.
 func (f *Factory) runPRView(ctx context.Context, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
-	number, err := parsePRViewArgs(input.Args[3:])
+	number, err := parsePRViewArgs(input.Args[2:])
 	if err != nil {
 		reportOutcome(ctx, command.FailedOutcome("usage", "the command line is not valid"))
 		return &command.SlashOutput{

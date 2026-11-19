@@ -77,7 +77,8 @@ func dispatchPRView(
 		if err != nil {
 			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 				fmt.Sprintf("❌ %v", err),
-				command.FailedOutcome("provider_error", "the pull requests could not be listed")), nil
+				command.FailedOutcome("provider_error",
+					"the pull requests could not be listed", err.Error())), nil
 		}
 		if existing == nil {
 			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
@@ -97,7 +98,8 @@ func dispatchPRView(
 		}
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ %v", err),
-			command.FailedOutcome("provider_error", "the merge state could not be read")), nil
+			command.FailedOutcome("provider_error",
+				"the merge state could not be read", err.Error())), nil
 	}
 
 	return replyPRViewOutcome(ctx, cs.Emitter(), chatID, messageID, state), nil
@@ -164,20 +166,23 @@ func replyPRViewOutcome(
 	state *PRMergeState,
 ) *Result {
 	data := map[string]string{
-		"pr_number":   strconv.Itoa(state.Number),
-		"pr_url":      state.URL,
-		"pr_state":    state.State,
+		"pr_number": strconv.Itoa(state.Number),
+		"pr_url":    state.URL,
+		// The state vocabulary is open / closed / merged: whatever
+		// the platform called the pull request, the command reports
+		// one of the three.
+		"pr_state":    prStateOrOpen(state.State),
 		"base_branch": state.Base,
 		"mergeable":   "0",
 		"conflict":    "0",
 		"merge_state": string(state.Verdict),
 	}
 
-	// A pull request that is no longer open is never going to
+	// A pull request that was closed or merged is never going to
 	// merge — the platform stopped computing its merge state when
-	// it was closed or merged. Nothing is broken and nothing is
+	// it left the open state. Nothing is broken and nothing is
 	// waiting: the request has nothing to do.
-	if state.State != "" && state.State != "open" {
+	if state.State == "closed" || state.State == "merged" {
 		data["reason"] = "pr_closed"
 		return replyOutcome(ctx, em, chatID, messageID,
 			renderPRViewCard(prViewTitle(state), state, ""),
@@ -219,73 +224,70 @@ func replyPRViewOutcome(
 			fmt.Sprintf("the platform did not compute the merge state of PR #%d", state.Number)))
 }
 
+// prViewVerdict names the decision once.
+//
+// The card's title and the outcome's summary are two faces of the
+// same decision, so they are written here side by side: a verdict
+// added later cannot update one and forget the other.
+//
+// emoji is the gtw emoji for the outcome status (README §1.2);
+// title is the card's first line without the emoji; summary is the
+// outcome's one-line restatement — empty when the title says it
+// already.
+func prViewVerdict(state *PRMergeState) (emoji, title, summary string) {
+	switch state.State {
+	case "merged":
+		return "✨", fmt.Sprintf("PR #%d is already merged", state.Number), ""
+	case "closed":
+		return "✨", fmt.Sprintf("PR #%d is closed", state.Number), ""
+	}
+	switch state.Verdict {
+	case PRMergeMergeable:
+		return "✅", fmt.Sprintf("PR #%d is mergeable", state.Number), ""
+	case PRMergeConflicting:
+		return "❌", fmt.Sprintf("PR #%d has merge conflicts", state.Number), ""
+	case PRMergeBehind:
+		if state.Base != "" {
+			return "❌", fmt.Sprintf("PR #%d is behind %s", state.Number, state.Base), ""
+		}
+		return "❌", fmt.Sprintf("PR #%d is behind its base", state.Number), ""
+	case PRMergeBlocked:
+		return "❌", fmt.Sprintf("PR #%d is blocked", state.Number), ""
+	}
+	// The platform never computed the state: the card names it in
+	// short, the outcome says what could not be computed.
+	return "❌",
+		fmt.Sprintf("PR #%d state is unknown", state.Number),
+		fmt.Sprintf("the merge state of PR #%d could not be computed", state.Number)
+}
+
 // prViewTitle is the card's title line.
 //
 // The emoji comes from the gtw emoji dictionary (README §1.1) and
 // sits on the same side as the outcome status (§1.2): ✅ for ok, ❌
 // for failed, ✨ for noop.
 func prViewTitle(state *PRMergeState) string {
-	switch state.State {
-	case "merged":
-		return fmt.Sprintf("✨ PR #%d is already merged", state.Number)
-	case "closed":
-		return fmt.Sprintf("✨ PR #%d is closed", state.Number)
-	}
-	switch state.Verdict {
-	case PRMergeMergeable:
-		return fmt.Sprintf("✅ PR #%d is mergeable", state.Number)
-	case PRMergeConflicting:
-		return fmt.Sprintf("❌ PR #%d has merge conflicts", state.Number)
-	case PRMergeBehind:
-		if state.Base != "" {
-			return fmt.Sprintf("❌ PR #%d is behind %s", state.Number, state.Base)
-		}
-		return fmt.Sprintf("❌ PR #%d is behind its base", state.Number)
-	case PRMergeBlocked:
-		return fmt.Sprintf("❌ PR #%d is blocked", state.Number)
-	default:
-		return fmt.Sprintf("❌ PR #%d state is unknown", state.Number)
-	}
+	emoji, title, _ := prViewVerdict(state)
+	return emoji + " " + title
 }
 
 // prViewSummary is the outcome's one-line restatement of the same
 // decision the card shows.
 func prViewSummary(state *PRMergeState) string {
-	switch state.State {
-	case "merged":
-		return fmt.Sprintf("PR #%d is already merged", state.Number)
-	case "closed":
-		return fmt.Sprintf("PR #%d is closed", state.Number)
+	_, title, summary := prViewVerdict(state)
+	if summary == "" {
+		summary = title
 	}
-	switch state.Verdict {
-	case PRMergeMergeable:
-		return fmt.Sprintf("PR #%d is mergeable", state.Number)
-	case PRMergeConflicting:
-		return fmt.Sprintf("PR #%d has merge conflicts", state.Number)
-	case PRMergeBehind:
-		if state.Base != "" {
-			return fmt.Sprintf("PR #%d is behind %s", state.Number, state.Base)
-		}
-		return fmt.Sprintf("PR #%d is behind its base", state.Number)
-	case PRMergeBlocked:
-		return fmt.Sprintf("PR #%d is blocked", state.Number)
-	default:
-		return fmt.Sprintf("the merge state of PR #%d could not be computed", state.Number)
-	}
+	return summary
 }
 
-// prViewHint is the card's closing "↳" line. Only the two
-// verdicts the user can act on carry one — the rest say what the
-// state is, and no action follows from that.
+// prViewHint is the card's closing "↳" line — the next step for the
+// two verdicts that have one.
 func prViewHint(state *PRMergeState) string {
-	switch state.Verdict {
-	case PRMergeConflicting, PRMergeBehind:
-		if state.Base == "" {
-			return "merge the base into the branch, then push"
-		}
-		return fmt.Sprintf("merge %s into the branch, then push", state.Base)
+	if state.Base == "" {
+		return "merge the base into the branch, then push"
 	}
-	return ""
+	return fmt.Sprintf("merge %s into the branch, then push", state.Base)
 }
 
 // renderPRViewCard builds the status card.
@@ -326,20 +328,29 @@ func prViewStateWord(state *PRMergeState) string {
 	return state.Raw
 }
 
+// prViewSubcommand is the token that names the read-only path under
+// `/gtw pr`.
+const prViewSubcommand = "view"
+
 // prViewCmdSpec is the argv grammar for `/gtw pr view`.
 //
 // The command takes no flag and one optional positional: the pull
 // request number. The shared lexer rejects a flag-shaped token and
 // a second positional, so a typo never reads a different pull
-// request.
+// request. The subcommand token is the lexer's own: it is matched
+// without regard to case and consumed before the positionals.
 var prViewCmdSpec = command.CmdSpec{
-	Name:    "/gtw pr view",
-	Usage:   "/gtw pr view [number]",
-	MinArgs: 0,
-	MaxArgs: 1,
+	Name:       "/gtw pr view",
+	Usage:      "/gtw pr view [number]",
+	Subcommand: prViewSubcommand,
+	MinArgs:    0,
+	MaxArgs:    1,
 }
 
 // parsePRViewArgs reads the optional pull request number.
+//
+// argv starts at the subcommand token — the shared lexer consumes it
+// and leaves the positionals.
 //
 // The number is optional: without it the command reads the open
 // pull request of the branch the chat works on. A number that is

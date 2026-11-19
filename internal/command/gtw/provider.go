@@ -287,10 +287,12 @@ type PRMergeState struct {
 
 // normalizePRState maps a platform's pull request state word to the
 // cross-platform vocabulary: open / closed / merged. GitLab says
-// "opened" where GitHub says "open".
+// "opened" where GitHub says "open", and "locked" while a merge
+// train merges the request — a locked request is still live, so it
+// counts as open.
 func normalizePRState(state string) string {
 	switch strings.ToLower(strings.TrimSpace(state)) {
-	case "open", "opened":
+	case "open", "opened", "locked":
 		return "open"
 	case "merged":
 		return "merged"
@@ -628,6 +630,23 @@ func isExecutableNotFound(err error) bool {
 	return false
 }
 
+// wrapCLINotInstalled translates a missing provider binary into
+// ErrCLINotInstalled with the install hint.
+//
+// It returns nil when the error is not about a missing binary, so
+// the caller falls through to its own wrapping. Every provider call
+// goes through it: one missing binary must read the same way
+// everywhere, whether the command asked for a pull request list, a
+// pull request view, or a new pull request.
+func wrapCLINotInstalled(err error, providerName string) error {
+	if !isExecutableNotFound(err) {
+		return nil
+	}
+	return fmt.Errorf("%w: %s — install via `brew install %s` or visit https://%s (%w)",
+		ErrCLINotInstalled, providerName, providerName,
+		providerCLIInstallURL(providerName), err)
+}
+
 // wrapCreatePRError is the SHARED, provider-agnostic fallback
 // for CreatePR error mapping. Provider-specific detection
 // (gh's "No commits between" / GraphQL validator messages,
@@ -656,10 +675,8 @@ func wrapCreatePRError(err error, stderr, providerName string) error {
 	if err == nil {
 		return nil
 	}
-	if isExecutableNotFound(err) {
-		return fmt.Errorf("%w: %s — install via `brew install %s` or visit https://%s (%w)",
-			ErrCLINotInstalled, providerName, providerName,
-			providerCLIInstallURL(providerName), err)
+	if wrapped := wrapCLINotInstalled(err, providerName); wrapped != nil {
+		return wrapped
 	}
 	trimmed := strings.TrimSpace(stderr)
 	// Generic cross-platform "already exists" fallback. Both gh
@@ -684,10 +701,8 @@ func wrapListPRError(err error, stderr, providerName string) error {
 	if err == nil {
 		return nil
 	}
-	if isExecutableNotFound(err) {
-		return fmt.Errorf("%w: %s — install via `brew install %s` or visit https://%s (%w)",
-			ErrCLINotInstalled, providerName, providerName,
-			providerCLIInstallURL(providerName), err)
+	if wrapped := wrapCLINotInstalled(err, providerName); wrapped != nil {
+		return wrapped
 	}
 	trimmed := strings.TrimSpace(stderr)
 	if trimmed != "" {
@@ -696,14 +711,29 @@ func wrapListPRError(err error, stderr, providerName string) error {
 	return fmt.Errorf("%s pr/mr list: %w", providerName, err)
 }
 
+// wrapPRMergeStateError is the GetPRMergeState error-mapping
+// helper. A missing binary becomes ErrCLINotInstalled with the
+// install hint; every other failure keeps the CLI's stderr.
+func wrapPRMergeStateError(err error, stderr, providerName string) error {
+	if err == nil {
+		return nil
+	}
+	if wrapped := wrapCLINotInstalled(err, providerName); wrapped != nil {
+		return wrapped
+	}
+	trimmed := strings.TrimSpace(stderr)
+	if trimmed != "" {
+		return fmt.Errorf("%s pr/mr view: %v: %s", providerName, err, trimmed)
+	}
+	return fmt.Errorf("%s pr/mr view: %w", providerName, err)
+}
+
 // wrapCreateIssueError maps CreateIssue failures: a missing CLI
 // becomes ErrCLINotInstalled with the install hint; everything
 // else keeps the CLI's stderr verbatim.
 func wrapCreateIssueError(err error, stderr, providerName string) error {
-	if isExecutableNotFound(err) {
-		return fmt.Errorf("%w: %s — install via `brew install %s` or visit https://%s (%w)",
-			ErrCLINotInstalled, providerName, providerName,
-			providerCLIInstallURL(providerName), err)
+	if wrapped := wrapCLINotInstalled(err, providerName); wrapped != nil {
+		return wrapped
 	}
 	if trimmed := strings.TrimSpace(stderr); trimmed != "" {
 		return fmt.Errorf("%s issue create: %v: %s", providerName, err, trimmed)
@@ -1998,7 +2028,7 @@ func (c *GitHubProvider) GetPRMergeState(ctx context.Context, owner, repo string
 		if isGHPRNotFound(stderr) {
 			return nil, fmt.Errorf("%w: PR #%d in %s/%s", ErrPRNotFound, number, owner, repo)
 		}
-		return nil, fmt.Errorf("gh pr view %d: %v: %s", number, err, strings.TrimSpace(stderr))
+		return nil, wrapPRMergeStateError(err, stderr, "gh")
 	}
 	var raw struct {
 		Number           int    `json:"number"`
@@ -2045,9 +2075,12 @@ func (c *GitHubProvider) GetPRMergeState(ctx context.Context, owner, repo string
 // platform has not computed yet reports unknown (that is what the
 // caller waits for) before either.
 //
-// UNSTABLE is mergeable, not blocked: GitHub's UNSTABLE means
-// "a check did not pass but does not gate the merge" — the pull
-// request merges as usual.
+// UNSTABLE and HAS_HOOKS are mergeable, not blocked: GitHub reports
+// them next to mergeable=MERGEABLE, and both name a condition that
+// does not gate the merge — a check that did not pass, a workflow
+// still running on the head branch. A pull request the platform
+// itself refuses carries mergeable=CONFLICTING or a state status of
+// BLOCKED, and lands in the blocked branch below.
 func ghMergeVerdict(mergeable, mergeStateStatus string) PRMergeVerdict {
 	m := strings.ToUpper(strings.TrimSpace(mergeable))
 	s := strings.ToUpper(strings.TrimSpace(mergeStateStatus))
@@ -2058,10 +2091,10 @@ func ghMergeVerdict(mergeable, mergeStateStatus string) PRMergeVerdict {
 		return PRMergeUnknown
 	case s == "BEHIND":
 		return PRMergeBehind
-	case m == "MERGEABLE" && (s == "CLEAN" || s == "UNSTABLE" || s == ""):
+	case m == "MERGEABLE" && (s == "CLEAN" || s == "UNSTABLE" || s == "HAS_HOOKS" || s == ""):
 		return PRMergeMergeable
 	default:
-		// BLOCKED, DRAFT, HAS_HOOKS — and any word this build
+		// BLOCKED, DRAFT — and any word this build
 		// does not know: the platform stands in the way, and an
 		// unknown word is no reason to call the pull request
 		// mergeable.
@@ -2233,7 +2266,7 @@ func (c *GitLabProvider) GetPRMergeState(ctx context.Context, owner, repo string
 		if hasHTTPStatus(stderr, http.StatusNotFound) {
 			return nil, fmt.Errorf("%w: PR #%d in %s/%s", ErrPRNotFound, number, owner, repo)
 		}
-		return nil, fmt.Errorf("glab api %s: %v: %s", path, err, strings.TrimSpace(stderr))
+		return nil, wrapPRMergeStateError(err, stderr, "glab")
 	}
 	var raw struct {
 		IID                 int    `json:"iid"`
@@ -2278,8 +2311,12 @@ func (c *GitLabProvider) GetPRMergeState(ctx context.Context, owner, repo string
 //	conflicts / cannot_be_merged          → conflicting
 //	checking / unchecked / cannot_be_merged_recheck → unknown
 //	need_rebase / diverged_commits         → behind
-//	mergeable / can_be_merged              → mergeable
+//	mergeable / can_be_merged / ci_still_running → mergeable
 //	not_approved / ci_must_pass / draft_status / unknown word → blocked
+//
+// ci_still_running names a pipeline that is still running. GitLab
+// reports ci_must_pass when a required pipeline holds the merge
+// back, so a running pipeline is not what blocks it.
 func gitlabMergeVerdict(detailed, legacy string) PRMergeVerdict {
 	word := strings.ToLower(strings.TrimSpace(detailed))
 	if word == "" {
@@ -2292,7 +2329,7 @@ func gitlabMergeVerdict(detailed, legacy string) PRMergeVerdict {
 		return PRMergeUnknown
 	case "need_rebase", "diverged_commits":
 		return PRMergeBehind
-	case "mergeable", "can_be_merged":
+	case "mergeable", "can_be_merged", "ci_still_running":
 		return PRMergeMergeable
 	default:
 		// not_approved, ci_must_pass, draft_status — and any word

@@ -470,6 +470,12 @@ func TestPRView_ProviderFailureIsAnException(t *testing.T) {
 	if out.Data[messages.OutcomeKeyError] == "" {
 		t.Error("an exception carries no error description")
 	}
+	// The provider's own message rides on the description, so a
+	// program reads what actually broke.
+	if !strings.Contains(out.Data[messages.OutcomeKeyError], "authentication required") {
+		t.Errorf("the description drops the provider's own message: %q",
+			out.Data[messages.OutcomeKeyError])
+	}
 	if !strings.Contains(card, "authentication required") {
 		t.Errorf("the card drops the provider's own message: %q", card)
 	}
@@ -612,6 +618,42 @@ func TestPRView_ReadsNothingElse(t *testing.T) {
 	}
 }
 
+// TestPRView_LockedStateAgreesWithTheOutcome: GitLab locks a merge
+// request while a merge train merges it. The state is not "closed"
+// and not "merged", so it must not be reported as a pull request
+// that will never merge: the card and the outcome have to say the
+// same thing.
+func TestPRView_LockedStateAgreesWithTheOutcome(t *testing.T) {
+	r := newPRViewRig(t)
+	r.prov.SetPRMergeState(123, &PRMergeState{
+		Number:  123,
+		URL:     "https://github.com/cnlangzi/nightme/pull/123",
+		Head:    "fix-42",
+		Base:    "main",
+		State:   "locked",
+		Verdict: PRMergeMergeable,
+		Raw:     "mergeable",
+	})
+
+	card := r.drive(t, "123")
+	out := r.settle(t)
+	if out == nil {
+		t.Fatal("the command settled no outcome")
+	}
+	if out.Status != messages.OutcomeOK {
+		t.Fatalf("the status is %q, want ok", out.Status)
+	}
+	if out.Data["mergeable"] != "1" {
+		t.Errorf("Data[mergeable] = %q, want 1", out.Data["mergeable"])
+	}
+	if out.Data["pr_state"] != "open" {
+		t.Errorf("Data[pr_state] = %q, want open", out.Data["pr_state"])
+	}
+	if !strings.HasPrefix(card, "✅ PR #123 is mergeable") {
+		t.Errorf("the card is %q, want the same verdict the outcome reports", card)
+	}
+}
+
 // TestPRView_IsHiddenFromTheAgentTool: the run's agent tool lists
 // the subcommands it may issue. "pr view" sits next to "pr" — one
 // letter apart, and picking the wrong one opens a pull request — so
@@ -649,5 +691,10 @@ func TestPRView_DoesNotChangeThePRPath(t *testing.T) {
 	}
 	if !isPRView([]string{"gtw", "pr", "view", "123"}) {
 		t.Error("`/gtw pr view 123` is not read as `pr view`")
+	}
+	// The shared lexer matches a subcommand without regard to case,
+	// and the dispatch does the same.
+	if !isPRView([]string{"gtw", "pr", "VIEW"}) {
+		t.Error("`/gtw pr VIEW` is not read as `pr view`")
 	}
 }

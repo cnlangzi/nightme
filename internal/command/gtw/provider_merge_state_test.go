@@ -7,6 +7,7 @@ package gtw
 import (
 	"context"
 	"errors"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -14,8 +15,9 @@ import (
 // TestGitHubMergeVerdict pins the GitHub mapping table. Every row of
 // it has a case here.
 //
-// UNSTABLE is mergeable, not blocked: GitHub's UNSTABLE means "a
-// check did not pass but does not gate the merge".
+// UNSTABLE and HAS_HOOKS are mergeable, not blocked: GitHub reports
+// them next to mergeable=MERGEABLE, and both name a condition that
+// does not gate the merge.
 func TestGitHubMergeVerdict(t *testing.T) {
 	cases := []struct {
 		mergeable string
@@ -24,6 +26,7 @@ func TestGitHubMergeVerdict(t *testing.T) {
 	}{
 		{"MERGEABLE", "CLEAN", PRMergeMergeable},
 		{"MERGEABLE", "UNSTABLE", PRMergeMergeable},
+		{"MERGEABLE", "HAS_HOOKS", PRMergeMergeable},
 		{"MERGEABLE", "", PRMergeMergeable},
 		{"CONFLICTING", "DIRTY", PRMergeConflicting},
 		{"MERGEABLE", "DIRTY", PRMergeConflicting},
@@ -32,7 +35,6 @@ func TestGitHubMergeVerdict(t *testing.T) {
 		{"MERGEABLE", "BEHIND", PRMergeBehind},
 		{"MERGEABLE", "BLOCKED", PRMergeBlocked},
 		{"MERGEABLE", "DRAFT", PRMergeBlocked},
-		{"MERGEABLE", "HAS_HOOKS", PRMergeBlocked},
 		{"MERGEABLE", "SOMETHING_NEW", PRMergeBlocked},
 	}
 	for _, tc := range cases {
@@ -60,6 +62,7 @@ func TestGitLabMergeVerdict(t *testing.T) {
 		{"need_rebase", "can_be_merged", PRMergeBehind},
 		{"diverged_commits", "can_be_merged", PRMergeBehind},
 		{"mergeable", "cannot_be_merged", PRMergeMergeable},
+		{"ci_still_running", "", PRMergeMergeable},
 		{"not_approved", "", PRMergeBlocked},
 		{"ci_must_pass", "", PRMergeBlocked},
 		{"draft_status", "", PRMergeBlocked},
@@ -82,13 +85,16 @@ func TestGitLabMergeVerdict(t *testing.T) {
 }
 
 // TestNormalizePRState pins the cross-platform state vocabulary:
-// GitLab says "opened" where GitHub says "open".
+// GitLab says "opened" where GitHub says "open", and "locked" while
+// a merge train merges the request — a locked request is still live.
 func TestNormalizePRState(t *testing.T) {
 	cases := map[string]string{
 		"OPEN":    "open",
 		"open":    "open",
 		"opened":  "open",
 		"OPENED":  "open",
+		"locked":  "open",
+		"LOCKED":  "open",
 		"CLOSED":  "closed",
 		"MERGED":  "merged",
 		"unknown": "unknown",
@@ -181,6 +187,37 @@ func TestGitHubGetPRMergeState_CLIFailure(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "GH_TOKEN") {
 		t.Errorf("the error is %v, want the CLI's own stderr", err)
+	}
+}
+
+// TestGetPRMergeState_MissingCLI: a host without gh / glab reads
+// the same way every other provider call does — ErrCLINotInstalled
+// with the install hint — so one missing binary has one message.
+func TestGetPRMergeState_MissingCLI(t *testing.T) {
+	missing := &exec.Error{Name: "gh", Err: exec.ErrNotFound}
+
+	gh := &GitHubProvider{
+		Runner: &stubCLIRunner{err: missing},
+		host:   "github.com",
+	}
+	_, err := gh.GetPRMergeState(context.Background(), "cnlangzi", "nightme", 1)
+	if !errors.Is(err, ErrCLINotInstalled) {
+		t.Fatalf("the gh error is %v, want ErrCLINotInstalled", err)
+	}
+	if !strings.Contains(err.Error(), "install via `brew install gh`") {
+		t.Errorf("the gh error is %v, want the install hint", err)
+	}
+
+	glab := &GitLabProvider{
+		Runner: &stubCLIRunner{err: &exec.Error{Name: "glab", Err: exec.ErrNotFound}},
+		host:   "gitlab.com",
+	}
+	_, err = glab.GetPRMergeState(context.Background(), "cnlangzi", "nightme", 1)
+	if !errors.Is(err, ErrCLINotInstalled) {
+		t.Fatalf("the glab error is %v, want ErrCLINotInstalled", err)
+	}
+	if !strings.Contains(err.Error(), "install via `brew install glab`") {
+		t.Errorf("the glab error is %v, want the install hint", err)
 	}
 }
 

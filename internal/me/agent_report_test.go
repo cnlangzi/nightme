@@ -435,6 +435,26 @@ func TestTheReasonHints_ExplainTheEmptyQueue(t *testing.T) {
 	}
 }
 
+// TestTheReasonHints_ExplainTheMergeStates — every reason code
+// `/gtw pr view` reports has a hint. A program that branches on the
+// code reads the hint next to it; a code without one leaves the
+// program guessing.
+func TestTheReasonHints_ExplainTheMergeStates(t *testing.T) {
+	for _, code := range []string{
+		"merge_conflict",
+		"pr_behind",
+		"pr_blocked",
+		"state_unknown",
+		"pr_closed",
+		"no_pr",
+		"pr_not_found",
+	} {
+		if reasonHint(code) == "" {
+			t.Errorf("the reason %q has no hint", code)
+		}
+	}
+}
+
 // TestThePrompt_AWorkflowWithoutInstructions — a workflow that does
 // not allow instructions says so.
 func TestThePrompt_AWorkflowWithoutInstructions(t *testing.T) {

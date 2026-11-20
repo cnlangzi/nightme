@@ -371,6 +371,21 @@ func (o Outcome) Succeeded() bool {
 // outcome type, so it keeps its own copy of the key too.
 const OutcomeKeyError = "error"
 
+// OutcomeKeyUnfinished is the Data key the number of unfinished items
+// rides in.
+//
+// The count says how much of the work is still open: a command that
+// finished part of its work reports the number of items it did not
+// finish. It is the switch a consumer reads to decide how to pick the
+// work up — the chain of a step hands the unfinished part over to the
+// next agent, and the count is what tells it that there is a part to
+// hand over. A command that reports no count leaves nothing behind:
+// the next agent runs the whole thing again.
+//
+// The count is a number, not a list: the items themselves stay with
+// the command that produced them.
+const OutcomeKeyUnfinished = "unfinished"
+
 // Exception reports whether the outcome is an exception: the flow
 // cannot go on by itself and the agent has to decide what happens
 // next.

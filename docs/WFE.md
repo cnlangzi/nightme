@@ -527,9 +527,15 @@ The switch is process-local: the chat store keeps the agent the operator picked 
 
 `use` is the mode for the commands that take no agent of their own (`/gtw fix`, `/gtw new`, `/gtw plan`): they dispatch to the chat's selected agent. `args` is the mode for the commands that take one (`/review`, `/gtw commit`, `/gtw pr`).
 
+**The handover — what a broken attempt leaves behind.** A broken attempt hands the step over to the next one, and what the handover carries depends on what the broken attempt reported: an attempt that said how much of its work it did not finish — the `unfinished` count in its outcome — hands that work over, and the next agent finishes it instead of running the whole thing again. The `args` command of the next attempt is then the step's message plus `--continue` (`/review --continue -a claude`). An attempt that reported no count leaves nothing behind, so the next agent runs the whole thing again (`/review -a claude`).
+
+A command joins the handover by reporting the count, and it must accept `--continue`: that is the flag the handover adds.
+
+The `use` mode has no handover: the message goes to the chat as it is, and there is no place to put the handover in it.
+
 A workflow that names no `agents` sends its message once, unchanged.
 
-Every attempt is recorded in the run's action history as the step's own run, and every attempt costs one chance of the step's budget. The `args` attempt records the command that ran (`/review -a omp`); the `use` attempt records the step's message with the agent noted (`/review [agent: omp]`), because the command itself does not name the agent.
+Every attempt is recorded in the run's action history as the step's own run, and every attempt costs one chance of the step's budget. The `args` attempt records the command that ran (`/review -a omp`, or `/review --continue -a omp` when it took the work of the attempt before it over); the `use` attempt records the step's message with the agent noted (`/review [agent: omp]`), because the command itself does not name the agent.
 
 ### 5.7 `final` — the step that cleans up after the round
 

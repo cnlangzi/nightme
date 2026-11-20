@@ -142,7 +142,6 @@ func TestValidateReviewFlags(t *testing.T) {
 		{"unset without global", Spec{Unset: true}, "--unset requires --global"},
 		{"unset with agent", Spec{Unset: true, Global: true, Agent: "pi"}, "--unset and --agent are mutually exclusive"},
 		{"global without agent", Spec{Global: true}, "--global requires --agent <name>"},
-		{"continue with agent", Spec{Continue: true, Agent: "pi"}, "--continue and --agent are mutually exclusive"},
 		{"continue with global", Spec{Continue: true, Global: true}, "--continue and --global are mutually exclusive"},
 		{"continue with unset", Spec{Continue: true, Unset: true}, "--continue and --unset are mutually exclusive"},
 		{"abort with continue", Spec{Abort: true, Continue: true}, "--abort and --continue are mutually exclusive"},
@@ -153,6 +152,7 @@ func TestValidateReviewFlags(t *testing.T) {
 		{"global with agent", Spec{Global: true, Agent: "pi"}, ""},
 		{"global with unset", Spec{Global: true, Unset: true}, ""},
 		{"continue alone", Spec{Continue: true}, ""},
+		{"continue with agent", Spec{Continue: true, Agent: "pi"}, ""},
 		{"abort alone", Spec{Abort: true}, ""},
 		{"nothing", Spec{}, ""},
 	}
@@ -413,7 +413,6 @@ func TestHandle_FlagCombinationsAreRejected(t *testing.T) {
 		{"unset without global", []string{"review", "--unset"}, "--unset requires --global"},
 		{"unset with agent", []string{"review", "-a", "pi", "-g", "--unset"}, "--unset and --agent are mutually exclusive"},
 		{"global without agent", []string{"review", "-g"}, "--global requires --agent <name>"},
-		{"continue with agent", []string{"review", "-c", "-a", "pi"}, "--continue and --agent are mutually exclusive"},
 		{"continue with global", []string{"review", "-c", "-g"}, "--continue and --global are mutually exclusive"},
 		{"continue with unset", []string{"review", "-c", "--unset"}, "--continue and --unset are mutually exclusive"},
 		{"abort with continue", []string{"review", "--abort", "-c"}, "--abort and --continue are mutually exclusive"},

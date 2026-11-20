@@ -950,19 +950,6 @@ func (s *Service) reportOutcome(r *run, command string, res stepResult) {
 	s.refreshRun(r)
 }
 
-// groupsSuffix renders how many review groups are still open.
-func groupsSuffix(data map[string]string) string {
-	unfinished, ok := data["unfinished_groups"]
-	if !ok {
-		return ""
-	}
-	total, ok := data["groups"]
-	if !ok {
-		return ""
-	}
-	return fmt.Sprintf(" · %s/%s groups unfinished", unfinished, total)
-}
-
 // runCommandInner sends the command and waits for it.
 func (s *Service) runCommandInner(ctx context.Context, r *run, command string, instruct bool) (stepResult, error) {
 	if s.cfg.Operator == nil {

@@ -332,8 +332,8 @@ func TestReviewContinueOutcome_SpeaksOfContinuedGroups(t *testing.T) {
 	hold.Release()
 	got := waitOutcome(t, em, 5*time.Second)
 	assertOutcome(t, got, messages.OutcomeIncomplete, map[string]string{
-		"continued_groups":  "2",
-		"unfinished_groups": "1",
+		"continued_groups": "2",
+		"unfinished":       "1",
 	})
 	if got.Summary != "1 of 2 continued groups unfinished" {
 		t.Errorf("the summary = %q, want %q", got.Summary, "1 of 2 continued groups unfinished")

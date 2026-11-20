@@ -37,6 +37,9 @@ type groupReviewStarter struct {
 	failed int
 	// findings is how many findings each group reports.
 	findings int
+	// allGroupsFail makes the run fail with every group: the fan-out
+	// returns an error when no group survives.
+	allGroupsFail bool
 	// err is what the whole run fails with (ErrNoDiff,
 	// ErrReviewNotSupported, …). Nil means the run succeeded.
 	err error
@@ -81,6 +84,9 @@ func (s *groupReviewStarter) Review(_ context.Context, _ agent.StartConfig, opts
 				Report:    report,
 			}, err)
 		}
+	}
+	if s.allGroupsFail {
+		return agent.RunResult{}, fmt.Errorf("all %d review groups failed", s.groups)
 	}
 	return agent.RunResult{Text: "reviewed"}, nil
 }
@@ -217,17 +223,23 @@ func TestReviewOutcome(t *testing.T) {
 		groups int
 		failed int
 		err    error
-		want   messages.OutcomeStatus
-		data   map[string]string
+		// allGroupsFail makes the fan-out fail with every group.
+		allGroupsFail bool
+		want          messages.OutcomeStatus
+		data          map[string]string
 		// wantErr says the outcome must carry an error description —
 		// the review's failures are exceptions, not normal branches.
 		wantErr bool
+		// noUnfinished says the outcome must carry no unfinished
+		// count: the fan-out never ran, so there is no work to pick
+		// up.
+		noUnfinished bool
 	}{
 		{
 			name:   "all groups finished",
 			groups: 3,
 			want:   messages.OutcomeOK,
-			data:   map[string]string{"groups": "3", "agent": "reviewer"},
+			data:   map[string]string{"groups": "3", "unfinished": "0", "agent": "reviewer"},
 		},
 		{
 			name:   "one group failed",
@@ -235,24 +247,39 @@ func TestReviewOutcome(t *testing.T) {
 			failed: 1,
 			want:   messages.OutcomeIncomplete,
 			data: map[string]string{
-				"groups":            "3",
-				"unfinished_groups": "1",
-				"agent":             "reviewer",
+				"groups":     "3",
+				"unfinished": "1",
+				"agent":      "reviewer",
 			},
 		},
 		{
-			name:    "no diff",
-			err:     agent.ErrNoDiff,
-			want:    messages.OutcomeFailed,
-			data:    map[string]string{"reason": "no_diff", "agent": "reviewer"},
+			name:          "every group failed",
+			groups:        2,
+			failed:        2,
+			allGroupsFail: true,
+			want:          messages.OutcomeFailed,
+			data: map[string]string{
+				"reason":     "error",
+				"unfinished": "2",
+				"agent":      "reviewer",
+			},
 			wantErr: true,
 		},
 		{
-			name:    "not supported",
-			err:     agent.ErrReviewNotSupported,
-			want:    messages.OutcomeFailed,
-			data:    map[string]string{"reason": "not_supported", "agent": "reviewer"},
-			wantErr: true,
+			name:         "no diff",
+			err:          agent.ErrNoDiff,
+			want:         messages.OutcomeFailed,
+			data:         map[string]string{"reason": "no_diff", "agent": "reviewer"},
+			wantErr:      true,
+			noUnfinished: true,
+		},
+		{
+			name:         "not supported",
+			err:          agent.ErrReviewNotSupported,
+			want:         messages.OutcomeFailed,
+			data:         map[string]string{"reason": "not_supported", "agent": "reviewer"},
+			wantErr:      true,
+			noUnfinished: true,
 		},
 	}
 
@@ -260,10 +287,11 @@ func TestReviewOutcome(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			set := newTestAgents(t)
 			set.registry.Register(&groupReviewStarter{
-				name:   "reviewer",
-				groups: tc.groups,
-				failed: tc.failed,
-				err:    tc.err,
+				name:          "reviewer",
+				groups:        tc.groups,
+				failed:        tc.failed,
+				allGroupsFail: tc.allGroupsFail,
+				err:           tc.err,
 			})
 
 			cs, em := newOutcomeChat(t, "review-outcome-"+t.Name(), "reviewer")
@@ -293,6 +321,11 @@ func TestReviewOutcome(t *testing.T) {
 				}
 			} else if desc, ok := got.Data["error"]; ok {
 				t.Errorf("a normal result carries no error description, got %q", desc)
+			}
+			if tc.noUnfinished {
+				if n, ok := got.Data["unfinished"]; ok {
+					t.Errorf("the outcome carries the unfinished count %q, want none", n)
+				}
 			}
 		})
 	}
@@ -364,9 +397,9 @@ func TestReviewContinueOutcome(t *testing.T) {
 		hold.Release()
 		got := waitOutcome(t, em, 5*time.Second)
 		assertOutcome(t, got, messages.OutcomeIncomplete, map[string]string{
-			"continued_groups":  "2",
-			"unfinished_groups": "1",
-			"agent":             "reviewer",
+			"continued_groups": "2",
+			"unfinished":       "1",
+			"agent":            "reviewer",
 		})
 	})
 

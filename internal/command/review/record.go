@@ -224,12 +224,16 @@ type reviewRecord struct {
 // group with neither is not actionable — there is nothing the
 // continuation could do with it.
 //
+// A takeover re-runs every group with the prompt it was asked to run:
+// the session belongs to the agent that ran the group, and a session
+// cannot be moved to another agent.
+//
 // The groups that completed are not re-asked — their findings already
 // reached the chat, and asking again would duplicate them.
 //
 // why is the user-facing reason there is nothing to resume; empty
 // when there is work to do.
-func (r reviewRecord) resumable() ([]agent.ReviewJob, string) {
+func (r reviewRecord) resumable(takeover bool) ([]agent.ReviewJob, string) {
 	var jobs []agent.ReviewJob
 	failed := false
 	spent := false
@@ -244,6 +248,18 @@ func (r reviewRecord) resumable() ([]agent.ReviewJob, string) {
 			// not retried, and neither "never reached the agent" nor
 			// "already retried" describes it alone.
 			spent = true
+		case takeover:
+			// The session belongs to the agent that ran the group:
+			// the takeover re-runs it with the prompt it was asked
+			// to run.
+			if o.prompt != "" {
+				jobs = append(jobs, agent.ReviewJob{
+					Pattern: o.pattern,
+					Source:  o.source,
+					Files:   o.files,
+					Prompt:  o.prompt,
+				})
+			}
 		case o.sessionID != "":
 			jobs = append(jobs, agent.ReviewJob{
 				Pattern:   o.pattern,

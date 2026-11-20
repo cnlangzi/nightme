@@ -543,6 +543,107 @@ func TestHandle_ContinueWithAnUnknownAgent(t *testing.T) {
 	}
 }
 
+// TestHandle_ContinueWithAnotherAgentTakesTheGroupsOver — the
+// takeover: another agent runs the unfinished groups with the prompt
+// they were asked to run. The session of the agent that ran them
+// belongs to it, so it is not reopened.
+func TestHandle_ContinueWithAnotherAgentTakesTheGroupsOver(t *testing.T) {
+	agents := newTestAgents(t)
+	recorded := &reviewSessionStarter{name: "review-takeover-old-agent", reply: "must not run"}
+	taker := &reviewSessionStarter{name: "review-takeover-new-agent", reply: "taken over"}
+	agents.registry.Register(recorded)
+	agents.registry.Register(taker)
+
+	em := newRecordingEmitter()
+	const chatID = "review-takeover-chat"
+	cs, _ := newContinueChatSession(t, chatID, recorded.name, t.TempDir(), em)
+	enableThink(t, cs)
+
+	const prompt = "the stored prompt of the group"
+	f := NewFactory()
+	f.record(chatID, recorded.name, "/recorded/ws", []reviewOutcome{
+		{pattern: "**/*.go", files: []string{"a.go"}},
+		{pattern: "**/*.ts", files: []string{"c.ts"}, sessionID: "sess-ts", prompt: prompt, err: errors.New("boom")},
+	})
+
+	out := dispatchContinue(t, f, cs, chatID, "review", "-c", "-a", taker.name)
+	if out.Reply != "" {
+		t.Fatalf("unexpected reply: %q", out.Reply)
+	}
+
+	em.waitForOutThinking(t, "taken over")
+
+	// The new agent ran the group with the stored prompt — in a new
+	// session: the session of the old agent cannot be moved.
+	cfgs := taker.startedConfigs()
+	if len(cfgs) != 1 {
+		t.Fatalf("the takeover started %d sessions, want 1 (the failed group only)", len(cfgs))
+	}
+	if cfgs[0].SessionID != "" {
+		t.Errorf("the takeover reopened the session %q, want a new one", cfgs[0].SessionID)
+	}
+	if cfgs[0].Workspace != "/recorded/ws" {
+		t.Errorf("the takeover workspace = %q, want the recorded workspace", cfgs[0].Workspace)
+	}
+	blocks := taker.receivedBlocks()
+	if len(blocks) != 1 {
+		t.Fatalf("the takeover sent %d blocks, want 1", len(blocks))
+	}
+	if blocks[0].Text != prompt {
+		t.Errorf("the takeover sent %q, want the stored prompt %q", blocks[0].Text, prompt)
+	}
+
+	// The old agent's session was not reopened.
+	if got := recorded.startedConfigs(); len(got) != 0 {
+		t.Errorf("the old agent started %d sessions, want 0", len(got))
+	}
+}
+
+// TestHandle_TakeoverFailureKeepsTheRecoveryAttempt — the takeover is
+// another agent's attempt: the operator's own recovery attempt is
+// still theirs to spend.
+func TestHandle_TakeoverFailureKeepsTheRecoveryAttempt(t *testing.T) {
+	agents := newTestAgents(t)
+	recorded := &reviewSessionStarter{name: "review-takeover-fail-old-agent"}
+	taker := &reviewSessionStarter{name: "review-takeover-fail-new-agent", fail: true}
+	agents.registry.Register(recorded)
+	agents.registry.Register(taker)
+
+	em := newRecordingEmitter()
+	const chatID = "review-takeover-fail-chat"
+	cs, _ := newContinueChatSession(t, chatID, recorded.name, t.TempDir(), em)
+
+	f := NewFactory()
+	f.record(chatID, recorded.name, "/recorded/ws", []reviewOutcome{
+		{pattern: "**/*.ts", files: []string{"c.ts"}, sessionID: "sess-ts", prompt: "the stored prompt", err: errors.New("boom")},
+	})
+
+	dispatchContinue(t, f, cs, chatID, "review", "-c", "-a", taker.name)
+	em.waitForOutReply(t, "/review continue failed")
+	waitUntilIdle(t, f, chatID)
+
+	rec, ok := f.lookup(chatID)
+	if !ok {
+		t.Fatal("the record is gone")
+	}
+	if len(rec.outcomes) != 1 {
+		t.Fatalf("the record carries %d outcomes, want 1", len(rec.outcomes))
+	}
+	if rec.outcomes[0].spent {
+		t.Error("the takeover spent the group's recovery attempt")
+	}
+	if rec.agent != taker.name {
+		t.Errorf("the record agent = %q, want the runner %q", rec.agent, taker.name)
+	}
+
+	// The group is still the operator's to pick up.
+	out := dispatchContinue(t, f, cs, chatID, "review", "-c")
+	if strings.Contains(out.Reply, "nothing to resume") {
+		t.Fatalf("the group cannot be picked up any more: %q", out.Reply)
+	}
+	waitUntilIdle(t, f, chatID)
+}
+
 // TestHandle_ContinueWithNothingToResume covers the "nothing left to
 // resume" replies: the last review completed, the unfinished group
 // was already retried, or it reached neither the agent nor a stored
@@ -786,6 +887,20 @@ func TestHandle_ContinueAfterAFailedRetryReportsTheSpentAttempt(t *testing.T) {
 
 	dispatchContinue(t, f, cs, chatID, "review", "-c")
 	em.waitForOutReply(t, "/review continue failed")
+	waitUntilIdle(t, f, chatID)
+
+	// The group's one recovery attempt is spent: the failure stays in
+	// the record, the retry does not.
+	rec, ok := f.lookup(chatID)
+	if !ok {
+		t.Fatal("the record is gone")
+	}
+	if len(rec.outcomes) != 1 {
+		t.Fatalf("the record carries %d outcomes, want 1", len(rec.outcomes))
+	}
+	if !rec.outcomes[0].spent {
+		t.Error("the failed group kept its recovery attempt")
+	}
 
 	out := dispatchContinue(t, f, cs, chatID, "review", "-c")
 

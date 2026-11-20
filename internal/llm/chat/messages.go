@@ -1,29 +1,26 @@
-// Package anthropic implements the Anthropic Messages protocol.
-//
-// The protocol is the Messages API: a system prompt, a conversation
-// and a tool catalogue go out, an assistant turn with text and tool
-// calls comes back. The implementation stays lenient — a missing usage
-// block, a tool call without arguments and an unknown content block
-// are all facts of the wild, not errors.
-package anthropic
+package chat
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
-	"strings"
-	"time"
 
 	"github.com/cnlangzi/nightme/internal/llm"
 )
 
 func init() {
-	llm.Register("anthropic", New)
+	llm.RegisterChatProtocol(protocolMessages, NewMessages)
 }
 
-// apiVersion is the version of the Messages API the provider speaks.
+// protocolMessages is the name the messages protocol is registered
+// under.
+const protocolMessages = "messages"
+
+// messagesPath is the path the protocol appends to the base URL.
+const messagesPath = "/messages"
+
+// apiVersion is the version of the Messages API the protocol speaks.
 const apiVersion = "2026-10-21"
 
 // defaultMaxTokens is the length cap of a call that does not name
@@ -36,54 +33,40 @@ const (
 	roleAssistant = "assistant"
 )
 
-// Provider talks to an Anthropic-compatible Messages endpoint.
-type Provider struct {
-	baseURL string
-	model   string
-	apiKey  string
-	maxTok  int
-	client  *http.Client
+// Messages talks to a Messages endpoint.
+type Messages struct {
+	settings
 }
 
-// New builds a provider from the configuration.
+// NewMessages builds a provider for the Messages protocol.
 //
 // The base URL is the root of the API; the provider appends the path
 // of the endpoint it calls.
-func New(cfg llm.Config) (llm.Provider, error) {
-	base := strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/")
-	if base == "" {
-		return nil, fmt.Errorf("llm/anthropic: base_url is required")
-	}
-	key, err := llm.APIKey(cfg)
+func NewMessages(cfg llm.ChatConfig) (llm.Provider, error) {
+	s, err := newSettings(cfg)
 	if err != nil {
 		return nil, err
 	}
-	return &Provider{
-		baseURL: base,
-		model:   strings.TrimSpace(cfg.Model),
-		apiKey:  key,
-		maxTok:  cfg.MaxTokens,
-		client:  &http.Client{Timeout: 10 * time.Minute},
-	}, nil
+	return &Messages{settings: s}, nil
 }
 
 // messagesRequest is the body of a Messages call.
 type messagesRequest struct {
-	Model     string        `json:"model"`
-	MaxTokens int           `json:"max_tokens"`
-	System    string        `json:"system,omitempty"`
-	Messages  []wireMessage `json:"messages"`
-	Tools     []wireTool    `json:"tools,omitempty"`
+	Model     string         `json:"model"`
+	MaxTokens int            `json:"max_tokens"`
+	System    string         `json:"system,omitempty"`
+	Messages  []messageTurn  `json:"messages"`
+	Tools     []messagesTool `json:"tools,omitempty"`
 }
 
-// wireMessage is one message of the wire protocol.
-type wireMessage struct {
-	Role    string      `json:"role"`
-	Content []wireBlock `json:"content"`
+// messageTurn is one message of the wire protocol.
+type messageTurn struct {
+	Role    string         `json:"role"`
+	Content []contentBlock `json:"content"`
 }
 
-// wireBlock is one content block of a message.
-type wireBlock struct {
+// contentBlock is one content block of a message.
+type contentBlock struct {
 	Type      string          `json:"type"`
 	Text      string          `json:"text,omitempty"`
 	ID        string          `json:"id,omitempty"`
@@ -94,8 +77,8 @@ type wireBlock struct {
 	IsError   bool            `json:"is_error,omitempty"`
 }
 
-// wireTool is a callable tool in the catalogue.
-type wireTool struct {
+// messagesTool is a callable tool in the catalogue.
+type messagesTool struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
 	InputSchema json.RawMessage `json:"input_schema"`
@@ -103,8 +86,8 @@ type wireTool struct {
 
 // messagesResponse is the answer of a Messages call.
 type messagesResponse struct {
-	Content    []wireBlock `json:"content"`
-	StopReason string      `json:"stop_reason"`
+	Content    []contentBlock `json:"content"`
+	StopReason string         `json:"stop_reason"`
 	Usage      *struct {
 		InputTokens  int `json:"input_tokens"`
 		OutputTokens int `json:"output_tokens"`
@@ -112,8 +95,8 @@ type messagesResponse struct {
 }
 
 // Complete implements llm.Provider.
-func (p *Provider) Complete(ctx context.Context, req llm.Request) (*llm.Response, error) {
-	msgs, err := toWireMessages(req)
+func (p *Messages) Complete(ctx context.Context, req llm.Request) (*llm.Response, error) {
+	msgs, err := toMessageTurns(req)
 	if err != nil {
 		return nil, err
 	}
@@ -124,7 +107,7 @@ func (p *Provider) Complete(ctx context.Context, req llm.Request) (*llm.Response
 		Messages:  msgs,
 	}
 	for _, t := range req.Tools {
-		body.Tools = append(body.Tools, wireTool{
+		body.Tools = append(body.Tools, messagesTool{
 			Name:        t.Name,
 			Description: t.Description,
 			InputSchema: toolSchema(t.Schema),
@@ -136,8 +119,8 @@ func (p *Provider) Complete(ctx context.Context, req llm.Request) (*llm.Response
 	if p.apiKey != "" {
 		headers["x-api-key"] = p.apiKey
 	}
-	url := p.baseURL + "/v1/messages"
-	if err := llm.PostJSON(ctx, p.client, url, headers, body, &answer); err != nil {
+	url := llm.Endpoint(p.baseURL, messagesPath)
+	if err := llm.PostJSON(ctx, p.client, url, p.requestHeaders(headers), body, &answer); err != nil {
 		return nil, err
 	}
 
@@ -160,7 +143,7 @@ func (p *Provider) Complete(ctx context.Context, req llm.Request) (*llm.Response
 			})
 		}
 	}
-	out.StopReason = stopReason(answer.StopReason, out.Message)
+	out.StopReason = messagesStopReason(answer.StopReason, out.Message)
 	if answer.Usage != nil {
 		out.Usage = llm.Usage{
 			InputTokens:  answer.Usage.InputTokens,
@@ -172,7 +155,7 @@ func (p *Provider) Complete(ctx context.Context, req llm.Request) (*llm.Response
 
 // maxTokens caps the length of an answer. The API requires the field,
 // so a call that names no cap gets the default.
-func (p *Provider) maxTokens(requested int) int {
+func (p *Messages) maxTokens(requested int) int {
 	if requested > 0 {
 		return requested
 	}
@@ -182,17 +165,17 @@ func (p *Provider) maxTokens(requested int) int {
 	return defaultMaxTokens
 }
 
-// toWireMessages maps a conversation onto the Messages protocol.
+// toMessageTurns maps a conversation onto the Messages protocol.
 //
 // A tool result is a user message to the API, and the API wants one
 // user message per turn: the results of a round of calls travel
 // together, and the text that follows them joins them. The messages
 // therefore alternate between user and assistant, which is what the
 // API asks for.
-func toWireMessages(req llm.Request) ([]wireMessage, error) {
-	var out []wireMessage
+func toMessageTurns(req llm.Request) ([]messageTurn, error) {
+	var out []messageTurn
 	for _, m := range req.Messages {
-		msg, err := toWireMessage(m)
+		msg, err := toMessageTurn(m)
 		if err != nil {
 			return nil, err
 		}
@@ -208,14 +191,14 @@ func toWireMessages(req llm.Request) ([]wireMessage, error) {
 	return out, nil
 }
 
-// toWireMessage maps one message of the conversation onto the wire
+// toMessageTurn maps one message of the conversation onto the wire
 // protocol.
-func toWireMessage(m llm.Message) (wireMessage, error) {
+func toMessageTurn(m llm.Message) (messageTurn, error) {
 	role := roleUser
 	if m.Role == llm.RoleAssistant {
 		role = roleAssistant
 	}
-	blocks := make([]wireBlock, 0, len(m.Parts))
+	blocks := make([]contentBlock, 0, len(m.Parts))
 	for _, p := range m.Parts {
 		switch p.Type {
 		case llm.PartText:
@@ -223,13 +206,13 @@ func toWireMessage(m llm.Message) (wireMessage, error) {
 			if p.Text == "" {
 				continue
 			}
-			blocks = append(blocks, wireBlock{Type: "text", Text: p.Text})
+			blocks = append(blocks, contentBlock{Type: "text", Text: p.Text})
 		case llm.PartToolCall:
 			input, err := wireInput(p.Args)
 			if err != nil {
-				return wireMessage{}, fmt.Errorf("llm/anthropic: the arguments of %s are not a JSON object: %w", p.ToolName, err)
+				return messageTurn{}, fmt.Errorf("llm/chat: the arguments of %s are not a JSON object: %w", p.ToolName, err)
 			}
-			blocks = append(blocks, wireBlock{
+			blocks = append(blocks, contentBlock{
 				Type:  "tool_use",
 				ID:    p.ToolCallID,
 				Name:  p.ToolName,
@@ -237,7 +220,7 @@ func toWireMessage(m llm.Message) (wireMessage, error) {
 			})
 		case llm.PartToolResult:
 			text := p.Text
-			blocks = append(blocks, wireBlock{
+			blocks = append(blocks, contentBlock{
 				Type:      "tool_result",
 				ToolUseID: p.ToolCallID,
 				Content:   &text,
@@ -247,11 +230,11 @@ func toWireMessage(m llm.Message) (wireMessage, error) {
 			// A part without a type that carries text is text — the
 			// neutral message reads it that way.
 			if p.Type == "" && p.Text != "" {
-				blocks = append(blocks, wireBlock{Type: "text", Text: p.Text})
+				blocks = append(blocks, contentBlock{Type: "text", Text: p.Text})
 			}
 		}
 	}
-	return wireMessage{Role: role, Content: blocks}, nil
+	return messageTurn{Role: role, Content: blocks}, nil
 }
 
 // wireInput renders the arguments of a tool call as the JSON object
@@ -294,10 +277,10 @@ func toolSchema(schema json.RawMessage) json.RawMessage {
 	return schema
 }
 
-// stopReason maps the wire stop_reason onto the neutral one. A
-// response that carries tool calls is a tool call whatever the server
-// said.
-func stopReason(reason string, msg llm.Message) string {
+// messagesStopReason maps the wire stop_reason onto the neutral one.
+// A response that carries tool calls is a tool call whatever the
+// server said.
+func messagesStopReason(reason string, msg llm.Message) string {
 	if len(msg.ToolCalls()) > 0 {
 		return llm.StopToolCalls
 	}

@@ -95,7 +95,7 @@ func TestBuildChatModel_UsesTheInlineKey(t *testing.T) {
 	defer srv.Close()
 
 	cfg := &config.Config{Me: config.MeConfig{LLM: config.MeLLMConfig{
-		Provider: "openai", BaseURL: srv.URL, Model: "m", APIKey: "sk-inline",
+		Protocol: "chat_completions", BaseURL: srv.URL, Model: "m", APIKey: "sk-inline",
 	}}}
 	p := buildChatModel(cfg, slog.Default())
 	if p == nil {
@@ -145,7 +145,7 @@ func TestBuildChatModel_WarnsOnBothChannels(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
 
 	cfg := &config.Config{Me: config.MeConfig{LLM: config.MeLLMConfig{
-		Provider: "openai", BaseURL: "https://example.test", Model: "m",
+		Protocol: "chat_completions", BaseURL: "https://example.test", Model: "m",
 		APIKey: "sk-inline", APIKeyEnv: "NIGHTME_TEST_KEY",
 	}}}
 	buildChatModel(cfg, logger)
@@ -166,7 +166,7 @@ func TestBuildChatModel_NoWarningOnOneChannel(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
 
 	cfg := &config.Config{Me: config.MeConfig{LLM: config.MeLLMConfig{
-		Provider: "openai", BaseURL: "https://example.test", Model: "m",
+		Protocol: "chat_completions", BaseURL: "https://example.test", Model: "m",
 		APIKey: "sk-inline",
 	}}}
 	buildChatModel(cfg, logger)
@@ -176,10 +176,10 @@ func TestBuildChatModel_NoWarningOnOneChannel(t *testing.T) {
 	}
 }
 
-// TestBuildChatModel_NoWarningWithoutAProvider — a capability that is
+// TestBuildChatModel_NoWarningWithoutAProtocol — a capability that is
 // not configured is not built, so its credentials are nobody's
 // business.
-func TestBuildChatModel_NoWarningWithoutAProvider(t *testing.T) {
+func TestBuildChatModel_NoWarningWithoutAProtocol(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
 
@@ -187,7 +187,7 @@ func TestBuildChatModel_NoWarningWithoutAProvider(t *testing.T) {
 		APIKey: "sk-inline", APIKeyEnv: "NIGHTME_TEST_KEY",
 	}}}
 	if p := buildChatModel(cfg, logger); p != nil {
-		t.Fatal("a chat model without a provider was built")
+		t.Fatal("a chat model without a protocol was built")
 	}
 	if out := buf.String(); out != "" {
 		t.Fatalf("the log is not empty: %s", out)
@@ -218,5 +218,131 @@ func TestCountIMChannels(t *testing.T) {
 	}
 	if got := countIMChannels([]channel.Channel{newStubChannel("a", nil), newStubChannel("b", nil)}); got != 2 {
 		t.Errorf("count = %d, want 2", got)
+	}
+}
+
+// TestBuildChatModel_ReportsAMissingProtocol — a chat model that
+// names no protocol is not built, and the log says why.
+//
+// The key that names the protocol is not read under its old name any
+// more: a file that carries only that one has no chat model, and the
+// operator learns it from the log.
+func TestBuildChatModel_ReportsAMissingProtocol(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+
+	cfg := &config.Config{Me: config.MeConfig{LLM: config.MeLLMConfig{
+		BaseURL: "https://example.test", Model: "m",
+	}}}
+	if p := buildChatModel(cfg, logger); p != nil {
+		t.Fatal("a chat model without a protocol was built")
+	}
+	out := buf.String()
+	if !strings.Contains(out, "me.llm.protocol") {
+		t.Fatalf("the log does not name the missing protocol: %s", out)
+	}
+}
+
+// TestBuildChatModel_ReportsAMissingModel — a chat model that names
+// no model is not built, and the log says why.
+func TestBuildChatModel_ReportsAMissingModel(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+
+	cfg := &config.Config{Me: config.MeConfig{LLM: config.MeLLMConfig{
+		Protocol: "chat_completions", BaseURL: "https://example.test",
+	}}}
+	if p := buildChatModel(cfg, logger); p != nil {
+		t.Fatal("a chat model without a model was built")
+	}
+	out := buf.String()
+	if !strings.Contains(out, "me.llm.model") {
+		t.Fatalf("the log does not name the missing model: %s", out)
+	}
+}
+
+// TestPersonalAgentConfig_UsesTheMeAgent — the agent that thinks for
+// the owner comes from the me section, not from the chat model.
+func TestPersonalAgentConfig_UsesTheMeAgent(t *testing.T) {
+	cfg := &config.Config{Me: config.MeConfig{Agent: "codex"}}
+	got := personalAgentConfig(cfg, t.TempDir(), nil, nil, nil)
+	if got.Agent != "codex" {
+		t.Fatalf("Agent = %q, want codex", got.Agent)
+	}
+}
+
+// TestBuildDecider_WarnsOnBothChannels — a decision model that names
+// the key twice is reported, and the report carries no credential.
+func TestBuildDecider_WarnsOnBothChannels(t *testing.T) {
+	t.Setenv("NIGHTME_TEST_KEY", "sk-env-value")
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+
+	cfg := &config.Config{Me: config.MeConfig{Decider: config.MeDeciderConfig{
+		Protocol: "decisions", BaseURL: "https://example.test", Model: "m",
+		APIKey: "sk-inline", APIKeyEnv: "NIGHTME_TEST_KEY",
+	}}}
+	buildDecider(cfg, logger)
+
+	out := buf.String()
+	if !strings.Contains(out, "api_key_env") || !strings.Contains(out, "api_key wins") {
+		t.Fatalf("the warning does not name the two keys and the winner: %s", out)
+	}
+	if strings.Contains(out, "sk-inline") || strings.Contains(out, "sk-env-value") {
+		t.Fatalf("the warning carries a credential: %s", out)
+	}
+}
+
+// TestBuildModels_ReachTheEndpointsOfTheirProtocols — the daemon
+// builds both models from the configuration and reaches the endpoints
+// their protocols name.
+func TestBuildModels_ReachTheEndpointsOfTheirProtocols(t *testing.T) {
+	var chatPath, deciderPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/chat/completions":
+			chatPath = r.URL.Path
+			w.Write([]byte(`{"choices":[]}`))
+		case "/decisions":
+			deciderPath = r.URL.Path
+			w.Write([]byte(`{"answers":{}}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{Me: config.MeConfig{
+		LLM: config.MeLLMConfig{
+			Protocol: "chat_completions", BaseURL: srv.URL, Model: "m",
+		},
+		Decider: config.MeDeciderConfig{
+			Protocol: "decisions", BaseURL: srv.URL, Model: "m",
+		},
+	}}
+
+	p := buildChatModel(cfg, slog.Default())
+	if p == nil {
+		t.Fatal("no chat model was built")
+	}
+	if _, err := p.Complete(context.Background(), llm.Request{}); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	d := buildDecider(cfg, slog.Default())
+	if d == nil {
+		t.Fatal("no decision model was built")
+	}
+	if _, err := d.Decide(context.Background(), llm.DecisionRequest{
+		State:     "halfway",
+		Questions: []llm.Question{{Name: "next", Type: llm.QuestionYesNo}},
+	}); err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+
+	if chatPath != "/chat/completions" {
+		t.Errorf("the chat model called %q, want /chat/completions", chatPath)
+	}
+	if deciderPath != "/decisions" {
+		t.Errorf("the decision model called %q, want /decisions", deciderPath)
 	}
 }

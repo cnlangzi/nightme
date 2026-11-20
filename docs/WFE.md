@@ -809,7 +809,7 @@ The budget is one number for every step and every round, set by the personal age
 
 The registered nightme commands are not the workflow's own: they are accepted without belonging to a step, and they are recorded against the step the run is on. The step's own verdict is the one the plan reads, so a repair that succeeded does not turn a failed step into a finished one.
 
-There is no cap on the number of model turns: a run ends when the plan is exhausted and the agent finishes it, when the agent calls `finish`, when the operator sends `/me stop`, or when the daemon shuts down. A turn of the chat model that produced no tool call and a provider that failed end nothing: the run asks again, and the budget is what bounds it.
+There is no cap on the number of model turns: a run ends when the plan is exhausted and the agent finishes it, when the agent calls `finish`, when the operator sends `/me stop`, or when the daemon shuts down. A turn of the chat model that produced no tool call and a chat model that failed end nothing: the run asks again, and the budget is what bounds it.
 
 ### 8.5 The tools
 
@@ -860,7 +860,7 @@ The model is the owner's hands inside the workflow: what it runs executes exactl
 
 The model is called with a situation report: why the run needs it, the round it is in, the state of the repository, the steps of that round and which one is ready, what every step of the round produced — its status, its summary, its error, its facts and the hint that explains its reason code — the step the judgment is about with its note, the commands the policy accepts now, the chances left for it, the turns the agent spent without acting, the directives it may take, and the transcripts of the last two actions, each cut to its last 4 KB.
 
-The report is a user turn, and only the latest one is kept: the report is rendered again on every turn of the agent, and a conversation that holds one report per turn grows past what the provider accepts.
+The report is a user turn, and only the latest one is kept: the report is rendered again on every turn of the agent, and a conversation that holds one report per turn grows past what the chat model accepts.
 
 Anything that needs text — an instruction, an answer to a prompt — always goes to System 2.
 
@@ -882,26 +882,44 @@ The fast path needs no model at all: a workflow whose every step ends `ok` runs 
 
 ```yaml
 me:
-  llm:
-    provider: openai              # a registered chat provider: openai | anthropic
+  llm:                              # the chat model (System 2)
+    protocol: chat_completions      # chat_completions | messages
     base_url: https://api.openai.com/v1
     model: gpt-4.1-mini
-    api_key: sk-xxxx              # the key itself, in the file
-    max_tokens: 40960             # the cap on one answer (the default)
-    agent: claude                 # the agent that thinks for the owner
-  decider:
-    protocol: decisions           # decisions | systemone
-    base_url: https://openrouter.ai/api/v1
+    api_key: sk-xxxx                # the key itself, in the file
+    max_tokens: 40960               # the cap on one answer (the default)
+    timeout: 10m                    # the deadline of one call (the default)
+    headers:                        # extra headers every request carries
+      HTTP-Referer: https://nightme.dev
+  decider:                          # the decision model (System 1)
+    protocol: decisions             # decisions | systemone
+    base_url: https://api.typesafe.ai/v1
     model: typesafe/jev-1.14
     api_key_env: OPENROUTER_API_KEY # the name of a variable that holds the key
-    min_confidence: 0.8           # below this the agent escalates
-  max_judgments: 50              # the chances the agent has at one step in one round
+    min_confidence: 0.8             # below this the agent escalates
+  agent: claude                     # the agent that thinks for the owner
+  max_judgments: 50                 # the chances the agent has at one step in one round
 ```
 
-The decider's base is the root of the API; the version segment is added
-when the base does not carry it. The two protocols live at
-`{base}/v1/decisions` and `{base}/v1/systemone` — `https://api.openai.com`
-and `https://api.typesafe.ai` are the roots of the two APIs.
+The protocol names the wire format, not the vendor — the vendor is the one the
+base URL points at. Four protocols are known:
+
+| Protocol | The endpoint it calls |
+|---|---|
+| `chat_completions` | `{base_url}/chat/completions` |
+| `messages` | `{base_url}/messages` |
+| `decisions` | `{base_url}/decisions` |
+| `systemone` | `{base_url}/systemone` |
+
+The base URL is used as it is written: the client appends the path of its own
+protocol and nothing else — no version segment is added, no default endpoint
+exists. Copy the address out of the vendor's documentation and it works:
+`https://api.openai.com/v1` reaches `https://api.openai.com/v1/chat/completions`
+and `https://api.anthropic.com/v1` reaches `https://api.anthropic.com/v1/messages`.
+
+`timeout` is the deadline of one call — a call that runs longer is cut off. It
+defaults to ten minutes for the chat model and five for the decision model.
+`headers` are extra headers every request carries — the ones a gateway asks for.
 
 The credential comes from one of two channels: `api_key` holds the key itself in
 the configuration file, `api_key_env` names an environment variable that holds it.
@@ -911,11 +929,11 @@ header. `config.yaml` is written with mode 0600 and should be kept out of git.
 
 The user picks the models. nightme never chooses one, and it never injects a model into the coding agents — those keep their own configuration.
 
-`me.llm.agent` names the agent that thinks for the owner: the run asks it about the step that failed and what to do about it, and it answers with the cause and a recommendation. It changes nothing — the run's own hands carry out every change. When it is not set, the agent of the chat that started the run is used; a run without an agent has nobody to ask.
+`me.agent` names the agent that thinks for the owner: the run asks it about the step that failed and what to do about it, and it answers with the cause and a recommendation. It changes nothing — the run's own hands carry out every change. When it is not set, the agent of the chat that started the run is used; a run without an agent has nobody to ask.
 
-`me.llm` and `me.decider` are independent. A model that is configured but cannot be built — an unknown provider, a missing key — is reported in the daemon log and left out; the daemon still starts, and `/me` says why it cannot run.
+`me.llm` and `me.decider` are independent. A model that is configured but cannot be built — an unknown protocol, a missing key — is reported in the daemon log and left out; the daemon still starts, and `/me` says why it cannot run.
 
-`nightme me` configures `me.llm` from the terminal: it shows the current values, asks for the endpoint, the model, the cap on an answer, the agent that thinks for the owner and the credential, and writes them into the configuration file without touching the rest of it. The wizard is the whole interface — there is no `nightme me get` and no `nightme me set`. The daemon builds its models at start-up, so a new chat model takes effect on the next `nightme restart`.
+`nightme me` configures `me.llm` from the terminal: it shows the current values, asks for the protocol, the endpoint, the model, the cap on an answer, the agent that thinks for the owner and the credential, and writes them into the configuration file without touching the rest of it. The wizard is the whole interface — there is no `nightme me get` and no `nightme me set`. The daemon builds its models at start-up, so a new chat model takes effect on the next `nightme restart`.
 
 The cap on an answer defaults to 40960 tokens; a configuration that does not name one gets it.
 
@@ -1179,9 +1197,9 @@ The wake log holds the model decisions only: the workflow's own fast path is not
 
 A text-only answer — words without a tool call — does not end the run. The words stay in the conversation, the turn costs one chance of the step the judgment was about, and the run asks the agent again with a fresh situation report.
 
-A provider that failed or that never answered costs the same one chance. The wait before the next attempt grows: the first failure waits 30 seconds, the next waits 60, then 120, 240, and 300 seconds from then on. The wait belongs to the run — stopping the run or shutting the daemon ends it at once.
+A chat model that failed or that never answered costs the same one chance. The wait before the next attempt grows: the first failure waits 30 seconds, the next waits 60, then 120, 240, and 300 seconds from then on. The wait belongs to the run — stopping the run or shutting the daemon ends it at once.
 
-One turn of the chat model lasts at most five minutes: the provider call carries that deadline, so the run does not wait for the client's own timeout.
+One turn of the chat model lasts at most five minutes: the chat model call carries that deadline, so the run does not wait for the client's own timeout.
 
 A command the underlying agent answered 429 pauses the run: the agent is throttled, and running the command again makes it worse. The run waits for the operator, who sets it going again with `/me resume`. The pause is the run's own: the model is not asked to think about a throttle.
 

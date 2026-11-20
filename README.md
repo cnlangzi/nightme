@@ -693,36 +693,41 @@ Two model capabilities, both optional, both yours to pick:
 ```yaml
 me:
   llm:
-    provider: openai              # a registered chat provider: openai | anthropic
+    protocol: chat_completions      # chat_completions | messages
     base_url: https://api.openai.com/v1
     model: gpt-4.1-mini
     api_key: sk-xxxx              # the key itself, in the file
     max_tokens: 4096
+    timeout: 10m                   # the deadline of one call
+    headers:                       # extra headers every request carries
+      HTTP-Referer: https://nightme.dev
   decider:
     protocol: decisions           # decisions | systemone
-    base_url: https://openrouter.ai/api/v1
+    base_url: https://api.typesafe.ai/v1
     model: typesafe/jev-1.14
     api_key_env: OPENROUTER_API_KEY # the name of a variable that holds the key
     min_confidence: 0.8           # below this the agent escalates
+  agent: claude                   # the agent that thinks for the owner
   max_judgments: 50              # the chances the agent has at one step in one round
 ```
 
-`provider` is what selects the chat provider and `protocol` the decision protocol: a
-`me.llm` block without a `provider`, or a `me.decider` block without a
-`protocol`, counts as no model at all.
+`protocol` names the wire format, not the vendor — the vendor is the one the
+base URL points at. A `me.llm` block without a `protocol` and a model, or a
+`me.decider` block without a `protocol` and a model, counts as no model at all.
 
-**`base_url` is the root of the API** — the path of the endpoint is added to it:
+**`base_url` is used as it is written** — the client appends the path of its own
+protocol and nothing else:
 
-| `provider` / `protocol` | The endpoint it calls | Base |
-|---|---|---|
-| `openai` | `<base_url>/chat/completions` | `https://api.openai.com/v1` |
-| `anthropic` | `<base_url>/v1/messages` | `https://api.anthropic.com` |
-| `decisions` | `<base_url>/v1/decisions` | `https://openrouter.ai/api/v1` |
-| `systemone` | `<base_url>/v1/systemone` | `https://api.typesafe.ai` |
+| `protocol` | The endpoint it calls |
+|---|---|
+| `chat_completions` | `<base_url>/chat/completions` |
+| `messages` | `<base_url>/messages` |
+| `decisions` | `<base_url>/decisions` |
+| `systemone` | `<base_url>/systemone` |
 
-The decision protocols add `/v1` only when the base does not carry it:
-`https://openrouter.ai/api/v1` becomes `https://openrouter.ai/api/v1/decisions`,
-and `https://api.typesafe.ai` becomes `https://api.typesafe.ai/v1/systemone`.
+Copy the address out of the vendor's documentation and it works: no version
+segment is added and no default endpoint exists. `timeout` is the deadline of
+one call — ten minutes for the chat model, five for the decision model.
 
 **The credential.** `api_key` holds the key itself, in the file. `api_key_env` names
 an environment variable that holds it — `OPENROUTER_API_KEY` above. Either channel
@@ -738,7 +743,7 @@ are set, and a configuration with neither sends no authentication header.
 | unset | set | Decision model only: confident decisions run, everything else asks you. |
 | set | set | Decision model first; the chat model takes the escalations. |
 
-A model that is configured but cannot be built — an unknown provider, a missing
+A model that is configured but cannot be built — an unknown protocol, a missing
 key — is reported in `nightme logs` and left out. The daemon still starts, and
 `/me` says why it cannot run.
 
@@ -849,7 +854,7 @@ and the step's budget starts over.
 There is no budget beyond the per-step one: a run ends when the plan is
 exhausted and the agent finishes it, when the agent calls `finish`, when you
 send `/me stop`, or when the daemon shuts down. A turn of the chat model that
-produced no tool call and a provider that failed end nothing: the run asks
+produced no tool call and a chat model that failed end nothing: the run asks
 again, and the budget is what bounds it.
 
 The agent answers a judgment point with a directive: `resume` (run the step that
@@ -1119,7 +1124,7 @@ internal/
   gitbase/                         # base-branch resolver (+ repairs a missing origin/HEAD)
   logging/                         # slog + secret redaction
   llm/                             # LLM clients — chat + tool calling (Provider) and decision models (Decider)
-    anthropic/  decision/  openai/ # the chat providers and the decision protocols
+    chat/  decision/              # the chat protocols and the decision protocols
   login/                           # IM bot registration — feishu / slack / telegram onboarding
   me/                              # the personal agent — runs the workflows in the chat they started in
   messages/                        # IM message types + dispatch

@@ -111,28 +111,35 @@ paths:
 # `api_key` wins when both are set, and a model with neither needs
 # no authentication.
 #
-# The decider's base is the root of the API; the version segment is
-# added when the base does not carry it. The protocols live at
-# {base}/v1/decisions and {base}/v1/systemone.
+# The protocol names the wire format, not the vendor: the vendor is
+# the one the base URL points at. The base URL is used as it is
+# written — the client appends the path of its own protocol and
+# nothing else. The protocols live at {base}/chat/completions,
+# {base}/messages, {base}/decisions and {base}/systemone.
 me:
   # llm:
-  #   provider: openai
+  #   protocol: chat_completions
   #   base_url: https://api.openai.com/v1
   #   model: gpt-4.1-mini
   #   api_key: sk-xxxx
   #   max_tokens: 4096
-  #   # The agent that thinks for the owner: the run asks it why a
-  #   # step failed and what to do about it. Unset means the agent of
-  #   # the chat that started the run is used.
-  #   agent: claude
+  #   # The deadline of one call. Unset means ten minutes.
+  #   timeout: 10m
+  #   # Extra headers every request carries.
+  #   headers:
+  #     HTTP-Referer: https://nightme.dev
   # decider:
   #   protocol: decisions
-  #   base_url: https://openrouter.ai/api/v1
+  #   base_url: https://api.typesafe.ai/v1
   #   model: typesafe/jev-1.14
   #   api_key_env: OPENROUTER_API_KEY
   #   min_confidence: 0.8
-  # For protocol: systemone the base is https://api.typesafe.ai and the
-  # model is jev-latest.
+  # For protocol: systemone the base is https://api.typesafe.ai/v1 and
+  # the model is jev-latest.
+  # The agent that thinks for the owner: the run asks it why a step
+  # failed and what to do about it. Unset means the agent of the chat
+  # that started the run is used.
+  # agent: claude
   # The chances the agent has at one step in one round: the step's own
   # execution, a nightme command or an instruction issued for it and a
   # turn of the chat model that produced no tool call each cost one.

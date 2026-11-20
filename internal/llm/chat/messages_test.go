@@ -1,4 +1,4 @@
-package anthropic
+package chat
 
 import (
 	"context"
@@ -14,17 +14,17 @@ import (
 	"github.com/cnlangzi/nightme/internal/llm"
 )
 
-// newProvider builds a provider pointed at a test server.
-func newProvider(t *testing.T, url string) llm.Provider {
+// newMessages builds a provider pointed at a test server.
+func newMessages(t *testing.T, url string) llm.Provider {
 	t.Helper()
-	p, err := New(llm.Config{Provider: "anthropic", BaseURL: url, Model: "test-model"})
+	p, err := NewMessages(llm.ChatConfig{Protocol: "messages", BaseURL: url, Model: "test-model"})
 	if err != nil {
 		t.Fatalf("new provider: %v", err)
 	}
 	return p
 }
 
-func TestProvider_TextReply(t *testing.T) {
+func TestMessages_TextReply(t *testing.T) {
 	var body map[string]any
 	var path string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -35,7 +35,7 @@ func TestProvider_TextReply(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	resp, err := newProvider(t, srv.URL).Complete(context.Background(), llm.Request{
+	resp, err := newMessages(t, srv.URL).Complete(context.Background(), llm.Request{
 		System:   "be brief",
 		Messages: []llm.Message{{Role: llm.RoleUser, Parts: []llm.Part{{Type: llm.PartText, Text: "hi"}}}},
 	})
@@ -51,8 +51,8 @@ func TestProvider_TextReply(t *testing.T) {
 	if resp.Usage.InputTokens != 3 || resp.Usage.OutputTokens != 4 {
 		t.Fatalf("usage = %+v, want 3 input and 4 output tokens", resp.Usage)
 	}
-	if path != "/v1/messages" {
-		t.Fatalf("the call went to %q, want /v1/messages", path)
+	if path != "/messages" {
+		t.Fatalf("the call went to %q, want /messages", path)
 	}
 	if body["system"] != "be brief" {
 		t.Fatalf("the system prompt is %v, want it in the top-level field", body["system"])
@@ -67,7 +67,7 @@ func TestProvider_TextReply(t *testing.T) {
 	}
 }
 
-func TestProvider_SendsTheVersionHeader(t *testing.T) {
+func TestMessages_SendsTheVersionHeader(t *testing.T) {
 	var version string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		version = r.Header.Get("anthropic-version")
@@ -75,7 +75,7 @@ func TestProvider_SendsTheVersionHeader(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := newProvider(t, srv.URL).Complete(context.Background(), llm.Request{}); err != nil {
+	if _, err := newMessages(t, srv.URL).Complete(context.Background(), llm.Request{}); err != nil {
 		t.Fatalf("complete: %v", err)
 	}
 	if version == "" {
@@ -83,7 +83,7 @@ func TestProvider_SendsTheVersionHeader(t *testing.T) {
 	}
 }
 
-func TestProvider_SendsTheKeyHeader(t *testing.T) {
+func TestMessages_SendsTheKeyHeader(t *testing.T) {
 	t.Setenv("NIGHTME_TEST_ANTHROPIC_KEY", "secret-key")
 	var key string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -92,8 +92,8 @@ func TestProvider_SendsTheKeyHeader(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p, err := New(llm.Config{
-		Provider: "anthropic", BaseURL: srv.URL, Model: "test-model", APIKeyEnv: "NIGHTME_TEST_ANTHROPIC_KEY",
+	p, err := NewMessages(llm.ChatConfig{
+		Protocol: "messages", BaseURL: srv.URL, Model: "test-model", APIKeyEnv: "NIGHTME_TEST_ANTHROPIC_KEY",
 	})
 	if err != nil {
 		t.Fatalf("new provider: %v", err)
@@ -106,13 +106,13 @@ func TestProvider_SendsTheKeyHeader(t *testing.T) {
 	}
 }
 
-func TestProvider_ToolUse(t *testing.T) {
+func TestMessages_ToolUse(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"content":[{"type":"tool_use","id":"toolu_1","name":"run_step","input":{"command":"/gtw commit"}}],"stop_reason":"tool_use"}`))
 	}))
 	defer srv.Close()
 
-	resp, err := newProvider(t, srv.URL).Complete(context.Background(), llm.Request{
+	resp, err := newMessages(t, srv.URL).Complete(context.Background(), llm.Request{
 		Messages: []llm.Message{{Role: llm.RoleUser, Parts: []llm.Part{{Type: llm.PartText, Text: "go"}}}},
 	})
 	if err != nil {
@@ -136,7 +136,7 @@ func TestProvider_ToolUse(t *testing.T) {
 	}
 }
 
-func TestProvider_ToolResultRoundTrip(t *testing.T) {
+func TestMessages_ToolResultRoundTrip(t *testing.T) {
 	var body map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(r.Body)
@@ -145,7 +145,7 @@ func TestProvider_ToolResultRoundTrip(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := newProvider(t, srv.URL).Complete(context.Background(), llm.Request{
+	_, err := newMessages(t, srv.URL).Complete(context.Background(), llm.Request{
 		Messages: []llm.Message{
 			{Role: llm.RoleAssistant, Parts: []llm.Part{{
 				Type: llm.PartToolCall, ToolCallID: "c1", ToolName: "run_step",
@@ -198,7 +198,7 @@ func TestProvider_ToolResultRoundTrip(t *testing.T) {
 	}
 }
 
-func TestProvider_MergesConsecutiveToolResults(t *testing.T) {
+func TestMessages_MergesConsecutiveToolResults(t *testing.T) {
 	var body map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(r.Body)
@@ -207,7 +207,7 @@ func TestProvider_MergesConsecutiveToolResults(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := newProvider(t, srv.URL).Complete(context.Background(), llm.Request{
+	_, err := newMessages(t, srv.URL).Complete(context.Background(), llm.Request{
 		Messages: []llm.Message{
 			{Role: llm.RoleAssistant, Parts: []llm.Part{{
 				Type: llm.PartToolCall, ToolCallID: "c1", ToolName: "run_step",
@@ -247,7 +247,7 @@ func TestProvider_MergesConsecutiveToolResults(t *testing.T) {
 	}
 }
 
-func TestProvider_SendsTheToolCatalogue(t *testing.T) {
+func TestMessages_SendsTheToolCatalogue(t *testing.T) {
 	var body map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(r.Body)
@@ -256,7 +256,7 @@ func TestProvider_SendsTheToolCatalogue(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := newProvider(t, srv.URL).Complete(context.Background(), llm.Request{
+	_, err := newMessages(t, srv.URL).Complete(context.Background(), llm.Request{
 		Tools: []llm.Tool{{
 			Name:        "run_step",
 			Description: "run a step",
@@ -280,7 +280,7 @@ func TestProvider_SendsTheToolCatalogue(t *testing.T) {
 	}
 }
 
-func TestProvider_RetriesAfterARateLimit(t *testing.T) {
+func TestMessages_RetriesAfterARateLimit(t *testing.T) {
 	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if atomic.AddInt32(&calls, 1) == 1 {
@@ -294,7 +294,7 @@ func TestProvider_RetriesAfterARateLimit(t *testing.T) {
 	defer srv.Close()
 
 	started := time.Now()
-	resp, err := newProvider(t, srv.URL).Complete(context.Background(), llm.Request{})
+	resp, err := newMessages(t, srv.URL).Complete(context.Background(), llm.Request{})
 	if err != nil {
 		t.Fatalf("complete: %v", err)
 	}
@@ -311,7 +311,7 @@ func TestProvider_RetriesAfterARateLimit(t *testing.T) {
 	}
 }
 
-func TestProvider_RetriesAfterAnOverloadedError(t *testing.T) {
+func TestMessages_RetriesAfterAnOverloadedError(t *testing.T) {
 	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if atomic.AddInt32(&calls, 1) == 1 {
@@ -323,7 +323,7 @@ func TestProvider_RetriesAfterAnOverloadedError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	resp, err := newProvider(t, srv.URL).Complete(context.Background(), llm.Request{})
+	resp, err := newMessages(t, srv.URL).Complete(context.Background(), llm.Request{})
 	if err != nil {
 		t.Fatalf("complete: %v", err)
 	}
@@ -335,14 +335,14 @@ func TestProvider_RetriesAfterAnOverloadedError(t *testing.T) {
 	}
 }
 
-func TestProvider_ReportsANonRetryableFailure(t *testing.T) {
+func TestMessages_ReportsANonRetryableFailure(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		w.Write([]byte(`{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}`))
 	}))
 	defer srv.Close()
 
-	_, err := newProvider(t, srv.URL).Complete(context.Background(), llm.Request{})
+	_, err := newMessages(t, srv.URL).Complete(context.Background(), llm.Request{})
 	if err == nil {
 		t.Fatal("the call was accepted")
 	}
@@ -354,13 +354,13 @@ func TestProvider_ReportsANonRetryableFailure(t *testing.T) {
 	}
 }
 
-func TestProvider_DropsAnEmptyTextBlock(t *testing.T) {
+func TestMessages_DropsAnEmptyTextBlock(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"content":[{"type":"text","text":""},{"type":"text","text":"hi"}],"stop_reason":"end_turn"}`))
 	}))
 	defer srv.Close()
 
-	resp, err := newProvider(t, srv.URL).Complete(context.Background(), llm.Request{})
+	resp, err := newMessages(t, srv.URL).Complete(context.Background(), llm.Request{})
 	if err != nil {
 		t.Fatalf("complete: %v", err)
 	}
@@ -372,7 +372,7 @@ func TestProvider_DropsAnEmptyTextBlock(t *testing.T) {
 	}
 }
 
-func TestProvider_KeepsTheHistorySendable(t *testing.T) {
+func TestMessages_KeepsTheHistorySendable(t *testing.T) {
 	// A gateway that answers a tool call with arguments that are not
 	// an object leaves the history unsendable: every turn that
 	// replays it fails. The call carries no arguments instead.
@@ -384,7 +384,7 @@ func TestProvider_KeepsTheHistorySendable(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	resp, err := newProvider(t, srv.URL).Complete(context.Background(), llm.Request{})
+	resp, err := newMessages(t, srv.URL).Complete(context.Background(), llm.Request{})
 	if err != nil {
 		t.Fatalf("complete: %v", err)
 	}
@@ -397,7 +397,7 @@ func TestProvider_KeepsTheHistorySendable(t *testing.T) {
 	}
 
 	// The call replays into the next turn without a failure.
-	_, err = newProvider(t, srv.URL).Complete(context.Background(), llm.Request{
+	_, err = newMessages(t, srv.URL).Complete(context.Background(), llm.Request{
 		Messages: []llm.Message{resp.Message},
 	})
 	if err != nil {
@@ -413,7 +413,7 @@ func TestProvider_KeepsTheHistorySendable(t *testing.T) {
 	}
 }
 
-func TestProvider_ReadsAnUntypedPartAsText(t *testing.T) {
+func TestMessages_ReadsAnUntypedPartAsText(t *testing.T) {
 	var body map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(r.Body)
@@ -422,7 +422,7 @@ func TestProvider_ReadsAnUntypedPartAsText(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := newProvider(t, srv.URL).Complete(context.Background(), llm.Request{
+	_, err := newMessages(t, srv.URL).Complete(context.Background(), llm.Request{
 		Messages: []llm.Message{{Role: llm.RoleUser, Parts: []llm.Part{{Text: "hi"}}}},
 	})
 	if err != nil {
@@ -443,7 +443,7 @@ func TestProvider_ReadsAnUntypedPartAsText(t *testing.T) {
 	}
 }
 
-func TestProvider_DropsAnEmptyTextPart(t *testing.T) {
+func TestMessages_DropsAnEmptyTextPart(t *testing.T) {
 	var body map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(r.Body)
@@ -452,7 +452,7 @@ func TestProvider_DropsAnEmptyTextPart(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := newProvider(t, srv.URL).Complete(context.Background(), llm.Request{
+	_, err := newMessages(t, srv.URL).Complete(context.Background(), llm.Request{
 		Messages: []llm.Message{{Role: llm.RoleUser, Parts: []llm.Part{
 			{Type: llm.PartText, Text: ""},
 			{Type: llm.PartText, Text: "hi"},
@@ -473,8 +473,8 @@ func TestProvider_DropsAnEmptyTextPart(t *testing.T) {
 	}
 }
 
-func TestNew_IsRegisteredUnderItsName(t *testing.T) {
-	p, err := llm.New(llm.Config{Provider: "anthropic", BaseURL: "https://example.test", Model: "m"})
+func TestMessagesNew_IsRegisteredUnderItsName(t *testing.T) {
+	p, err := llm.New(llm.ChatConfig{Protocol: "messages", BaseURL: "https://example.test", Model: "m"})
 	if err != nil {
 		t.Fatalf("the provider is not registered: %v", err)
 	}
@@ -483,16 +483,16 @@ func TestNew_IsRegisteredUnderItsName(t *testing.T) {
 	}
 }
 
-func TestNew_RequiresABaseURL(t *testing.T) {
-	if _, err := New(llm.Config{Provider: "anthropic", Model: "m"}); err == nil {
+func TestMessagesNew_RequiresABaseURL(t *testing.T) {
+	if _, err := NewMessages(llm.ChatConfig{Protocol: "messages", Model: "m"}); err == nil {
 		t.Fatal("a provider without a base url was accepted")
 	}
 }
 
-func TestNew_ReportsAMissingKey(t *testing.T) {
+func TestMessagesNew_ReportsAMissingKey(t *testing.T) {
 	t.Setenv("NIGHTME_TEST_ANTHROPIC_KEY", "")
-	if _, err := New(llm.Config{
-		Provider: "anthropic", BaseURL: "https://example.test", Model: "m", APIKeyEnv: "NIGHTME_TEST_ANTHROPIC_KEY",
+	if _, err := NewMessages(llm.ChatConfig{
+		Protocol: "messages", BaseURL: "https://example.test", Model: "m", APIKeyEnv: "NIGHTME_TEST_ANTHROPIC_KEY",
 	}); err == nil {
 		t.Fatal("a missing api key was accepted")
 	}

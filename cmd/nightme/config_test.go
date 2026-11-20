@@ -287,7 +287,7 @@ func TestConfigInteractive_KeepsTheMeBlockChangedOnDisk(t *testing.T) {
 
 	// The me.llm block changes on disk while the menu is open.
 	if err := config.SetMeLLM(cfgPath, config.MeLLMValues{
-		Provider: "openai",
+		Protocol: "chat_completions",
 		Model:    "gpt-4.1-mini",
 	}); err != nil {
 		t.Fatalf("SetMeLLM: %v", err)

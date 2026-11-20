@@ -476,7 +476,7 @@ func TestUpdate_KeepsAChangeMadeOnDisk(t *testing.T) {
 
 	// ...and the me.llm block changes on disk while the menu is open.
 	if err := SetMeLLM(path, MeLLMValues{
-		Provider: "openai",
+		Protocol: "chat_completions",
 		Model:    "gpt-4.1-mini",
 	}); err != nil {
 		t.Fatalf("SetMeLLM: %v", err)

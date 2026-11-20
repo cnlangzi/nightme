@@ -16,43 +16,43 @@ func TestAPIKey_ResolvesTheChannel(t *testing.T) {
 
 	cases := []struct {
 		name string
-		cfg  Config
+		cfg  ChatConfig
 		want string
 		err  string
 	}{
 		{
 			name: "the inline key wins",
-			cfg:  Config{APIKey: "sk-inline", APIKeyEnv: "NIGHTME_TEST_KEY"},
+			cfg:  ChatConfig{APIKey: "sk-inline", APIKeyEnv: "NIGHTME_TEST_KEY"},
 			want: "sk-inline",
 		},
 		{
 			name: "the inline key is trimmed",
-			cfg:  Config{APIKey: "  sk-x  "},
+			cfg:  ChatConfig{APIKey: "  sk-x  "},
 			want: "sk-x",
 		},
 		{
 			name: "a whitespace-only key counts as unset",
-			cfg:  Config{APIKey: "   ", APIKeyEnv: "NIGHTME_TEST_KEY"},
+			cfg:  ChatConfig{APIKey: "   ", APIKeyEnv: "NIGHTME_TEST_KEY"},
 			want: "sk-env",
 		},
 		{
 			name: "the environment channel alone",
-			cfg:  Config{APIKeyEnv: "NIGHTME_TEST_KEY"},
+			cfg:  ChatConfig{APIKeyEnv: "NIGHTME_TEST_KEY"},
 			want: "sk-env",
 		},
 		{
 			name: "the inline key covers an unset variable",
-			cfg:  Config{APIKey: "sk-inline", APIKeyEnv: "NIGHTME_TEST_EMPTY"},
+			cfg:  ChatConfig{APIKey: "sk-inline", APIKeyEnv: "NIGHTME_TEST_EMPTY"},
 			want: "sk-inline",
 		},
 		{
 			name: "no channel means no credential",
-			cfg:  Config{},
+			cfg:  ChatConfig{},
 			want: "",
 		},
 		{
 			name: "an unset variable is an error",
-			cfg:  Config{APIKeyEnv: "NIGHTME_TEST_EMPTY"},
+			cfg:  ChatConfig{APIKeyEnv: "NIGHTME_TEST_EMPTY"},
 			err:  "llm: the environment variable NIGHTME_TEST_EMPTY is empty or unset",
 		},
 	}
@@ -83,14 +83,14 @@ func TestAPIKey_ResolvesTheChannel(t *testing.T) {
 func TestDualCredential(t *testing.T) {
 	cases := []struct {
 		name string
-		cfg  Config
+		cfg  ChatConfig
 		want bool
 	}{
-		{name: "both channels", cfg: Config{APIKey: "sk-inline", APIKeyEnv: "NIGHTME_TEST_KEY"}, want: true},
-		{name: "the inline key alone", cfg: Config{APIKey: "sk-inline"}},
-		{name: "the environment channel alone", cfg: Config{APIKeyEnv: "NIGHTME_TEST_KEY"}},
-		{name: "a whitespace-only key", cfg: Config{APIKey: "   ", APIKeyEnv: "NIGHTME_TEST_KEY"}},
-		{name: "no channel", cfg: Config{}},
+		{name: "both channels", cfg: ChatConfig{APIKey: "sk-inline", APIKeyEnv: "NIGHTME_TEST_KEY"}, want: true},
+		{name: "the inline key alone", cfg: ChatConfig{APIKey: "sk-inline"}},
+		{name: "the environment channel alone", cfg: ChatConfig{APIKeyEnv: "NIGHTME_TEST_KEY"}},
+		{name: "a whitespace-only key", cfg: ChatConfig{APIKey: "   ", APIKeyEnv: "NIGHTME_TEST_KEY"}},
+		{name: "no channel", cfg: ChatConfig{}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

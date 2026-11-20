@@ -24,7 +24,7 @@ func TestSetMeLLM_CreatesTheSection(t *testing.T) {
 	path := writeMeConfig(t, "primary: claude\n")
 
 	err := SetMeLLM(path, MeLLMValues{
-		Provider:  "openai",
+		Protocol:  "chat_completions",
 		BaseURL:   "https://example.test/v1",
 		Model:     "gpt-4.1-mini",
 		MaxTokens: 40960,
@@ -39,8 +39,8 @@ func TestSetMeLLM_CreatesTheSection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Me.LLM.Provider != "openai" {
-		t.Errorf("Provider = %q, want openai", cfg.Me.LLM.Provider)
+	if cfg.Me.LLM.Protocol != "chat_completions" {
+		t.Errorf("Protocol = %q, want chat_completions", cfg.Me.LLM.Protocol)
 	}
 	if cfg.Me.LLM.BaseURL != "https://example.test/v1" {
 		t.Errorf("BaseURL = %q", cfg.Me.LLM.BaseURL)
@@ -51,8 +51,8 @@ func TestSetMeLLM_CreatesTheSection(t *testing.T) {
 	if cfg.Me.LLM.MaxTokens != 40960 {
 		t.Errorf("MaxTokens = %d, want 40960", cfg.Me.LLM.MaxTokens)
 	}
-	if cfg.Me.LLM.Agent != "claude" {
-		t.Errorf("Agent = %q", cfg.Me.LLM.Agent)
+	if cfg.Me.Agent != "claude" {
+		t.Errorf("Agent = %q", cfg.Me.Agent)
 	}
 	if cfg.Me.LLM.APIKey != "sk-secret" {
 		t.Errorf("APIKey = %q", cfg.Me.LLM.APIKey)
@@ -81,7 +81,7 @@ me:
 `)
 
 	err := SetMeLLM(path, MeLLMValues{
-		Provider:  "openai",
+		Protocol:  "chat_completions",
 		BaseURL:   "https://example.test/v1",
 		Model:     "gpt-4.1",
 		MaxTokens: 8192,
@@ -115,16 +115,16 @@ me:
 func TestSetMeLLM_EmptyValueRemovesTheKey(t *testing.T) {
 	path := writeMeConfig(t, `me:
   llm:
-    provider: openai
+    protocol: chat_completions
     base_url: https://example.test/v1
     model: gpt-4.1-mini
-    agent: claude
     api_key: sk-old
     api_key_env: OLD_KEY
+  agent: claude
 `)
 
 	err := SetMeLLM(path, MeLLMValues{
-		Provider: "openai",
+		Protocol: "chat_completions",
 		BaseURL:  "https://example.test/v1",
 		Model:    "gpt-4.1-mini",
 	})
@@ -179,7 +179,7 @@ func TestSetMeLLM_OneCredentialChannel(t *testing.T) {
     api_key_env: OLD_KEY
 `)
 			values := tc.values
-			values.Provider = "openai"
+			values.Protocol = "chat_completions"
 			values.Model = "gpt-4.1-mini"
 			if err := SetMeLLM(path, values); err != nil {
 				t.Fatalf("SetMeLLM: %v", err)
@@ -208,7 +208,7 @@ func TestSetMeLLM_RemovesBothCredentialChannels(t *testing.T) {
     api_key_env: OLD_KEY
 `)
 
-	if err := SetMeLLM(path, MeLLMValues{Provider: "openai"}); err != nil {
+	if err := SetMeLLM(path, MeLLMValues{Protocol: "chat_completions"}); err != nil {
 		t.Fatalf("SetMeLLM: %v", err)
 	}
 
@@ -230,7 +230,7 @@ func TestSetMeLLM_ZeroMaxTokensRemovesTheKey(t *testing.T) {
     max_tokens: 8192
 `)
 
-	if err := SetMeLLM(path, MeLLMValues{Provider: "openai"}); err != nil {
+	if err := SetMeLLM(path, MeLLMValues{Protocol: "chat_completions"}); err != nil {
 		t.Fatalf("SetMeLLM: %v", err)
 	}
 
@@ -248,7 +248,7 @@ func TestSetMeLLM_ZeroMaxTokensRemovesTheKey(t *testing.T) {
 func TestSetMeLLM_MaxTokensIsAnInteger(t *testing.T) {
 	path := writeMeConfig(t, "primary: claude\n")
 
-	if err := SetMeLLM(path, MeLLMValues{Provider: "openai", MaxTokens: 40960}); err != nil {
+	if err := SetMeLLM(path, MeLLMValues{Protocol: "chat_completions", MaxTokens: 40960}); err != nil {
 		t.Fatalf("SetMeLLM: %v", err)
 	}
 
@@ -274,7 +274,7 @@ func TestSetMeLLM_MalformedFileIsAnError(t *testing.T) {
 	broken := "primary: [unclosed\n"
 	path := writeMeConfig(t, broken)
 
-	if err := SetMeLLM(path, MeLLMValues{Provider: "openai"}); err == nil {
+	if err := SetMeLLM(path, MeLLMValues{Protocol: "chat_completions"}); err == nil {
 		t.Fatal("expected an error for a malformed file")
 	}
 
@@ -293,7 +293,7 @@ func TestSetMeLLM_MissingFileIsCreated(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sub", "config.yaml")
 
-	if err := SetMeLLM(path, MeLLMValues{Provider: "openai", Model: "gpt-4.1-mini"}); err != nil {
+	if err := SetMeLLM(path, MeLLMValues{Protocol: "chat_completions", Model: "gpt-4.1-mini"}); err != nil {
 		t.Fatalf("SetMeLLM: %v", err)
 	}
 
@@ -304,8 +304,8 @@ func TestSetMeLLM_MissingFileIsCreated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Me.LLM.Provider != "openai" {
-		t.Errorf("Provider = %q, want openai", cfg.Me.LLM.Provider)
+	if cfg.Me.LLM.Protocol != "chat_completions" {
+		t.Errorf("Protocol = %q, want chat_completions", cfg.Me.LLM.Protocol)
 	}
 }
 
@@ -316,7 +316,7 @@ func TestSetMeLLM_MissingFileIsCreated(t *testing.T) {
 func TestSetMeLLM_QuotedNumberBecomesANumber(t *testing.T) {
 	path := writeMeConfig(t, "me:\n  llm:\n    max_tokens: \"8192\"\n")
 
-	if err := SetMeLLM(path, MeLLMValues{Provider: "openai", MaxTokens: 40960}); err != nil {
+	if err := SetMeLLM(path, MeLLMValues{Protocol: "chat_completions", MaxTokens: 40960}); err != nil {
 		t.Fatalf("SetMeLLM: %v", err)
 	}
 
@@ -329,5 +329,40 @@ func TestSetMeLLM_QuotedNumberBecomesANumber(t *testing.T) {
 	}
 	if _, err := Load(path); err != nil {
 		t.Errorf("the rewritten file does not load: %v", err)
+	}
+}
+
+// TestSetMeLLM_WritesTheAgentAtTheMeLevel — the agent that thinks
+// for the owner is a run of its own, not a property of the chat
+// model: it lands in the me section.
+func TestSetMeLLM_WritesTheAgentAtTheMeLevel(t *testing.T) {
+	path := writeMeConfig(t, "primary: claude\n")
+
+	if err := SetMeLLM(path, MeLLMValues{
+		Protocol: "chat_completions",
+		Model:    "gpt-4.1-mini",
+		Agent:    "claude",
+	}); err != nil {
+		t.Fatalf("SetMeLLM: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	got := string(data)
+	if !strings.Contains(got, "\n  agent: claude\n") {
+		t.Errorf("the agent is not written at the me level:\n%s", got)
+	}
+	if strings.Contains(got, "llm:\n    agent:") {
+		t.Errorf("the agent is written into the chat model:\n%s", got)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Me.Agent != "claude" {
+		t.Errorf("Agent = %q, want claude", cfg.Me.Agent)
 	}
 }

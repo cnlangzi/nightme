@@ -465,8 +465,8 @@ func TestTheSituationReport_CarriesTheRepair(t *testing.T) {
 // TestTheState_ShowsTheWaitingLineAndTheChancesLeft — the state says
 // what the run waits for and what the step has left.
 //
-// The card of the round is a snapshot of the start of the round: it
-// says nothing about the step that runs after it.
+// The checklist of the round follows the steps: the card of the round
+// says what the step that ran came to.
 func TestTheState_ShowsTheWaitingLineAndTheChancesLeft(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", budgetWorkflow)
@@ -493,26 +493,31 @@ func TestTheState_ShowsTheWaitingLineAndTheChancesLeft(t *testing.T) {
 	// The step ran: the run records what came of it.
 	waitForStepState(t, r, "commit")
 
-	// The card of the round is a snapshot of the start of the round: it
-	// says nothing about the step that ran since.
+	// The card of the round follows the step that ran: it says what the
+	// step has left.
+	var chances bool
 	for _, item := range op.Checklist(round.anchor) {
 		if strings.Contains(item.ActiveForm, "chances left") {
-			t.Errorf("the card of the round carries the chances left: %+v", item)
+			chances = true
 		}
+	}
+	if !chances {
+		t.Errorf("the card of the round does not carry the chances left: %+v", op.Checklist(round.anchor))
 	}
 
 	// The operator asks for the state: it says what the step has left.
 	if err := svc.Status(context.Background(), "obs-1", "om_status"); err != nil {
 		t.Fatalf("status: %v", err)
 	}
-	var chances bool
-	for _, item := range op.Checklist("om_status") {
+	card, _ := stateCard(op, "om_status")
+	chances = false
+	for _, item := range op.Checklist(card.ID) {
 		if strings.Contains(item.ActiveForm, "chances left") {
 			chances = true
 		}
 	}
 	if !chances {
-		t.Errorf("the state does not carry the chances left: %+v", op.Checklist("om_status"))
+		t.Errorf("the state does not carry the chances left: %+v", op.Checklist(card.ID))
 	}
 
 	close(provider.block)

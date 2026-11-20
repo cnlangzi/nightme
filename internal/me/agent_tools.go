@@ -935,8 +935,8 @@ func (s *Service) runCommand(ctx context.Context, r *run, command string, instru
 	s.reportOutcome(r, command, res)
 	if throttled(res) {
 		r.requestPause(rateLimitReason)
-		// The run stops: the state of the round hangs under the card of
-		// the round.
+		// The run stops: it publishes the state of the round on a card
+		// of its own.
 		s.showState(ctx, r, r.stateAnchor(""))
 		s.announcePause(ctx, r, rateLimitReason)
 	}

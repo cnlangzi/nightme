@@ -1001,14 +1001,9 @@ func TestTheQuestionIsOfferedAsAChoiceCard(t *testing.T) {
 	}
 	waitAsked(t, op, "Which step should run next?")
 
-	choices := op.EmittedOf(messages.OutChoice)
-	if len(choices) == 0 {
-		t.Fatalf("the run published no choice: %v", op.Emitted())
-	}
-	choice := choices[0].Choice
-	if choice == nil {
-		t.Fatal("the choice carries no payload")
-	}
+	// The choice follows the question: the run publishes it a moment
+	// later.
+	choice := waitChoice(t, op)
 	if choice.RequestID == "" {
 		t.Error("the choice has no request id: the answer could not be correlated")
 	}
@@ -1071,7 +1066,7 @@ func TestTheQuestionIsNotDispatched(t *testing.T) {
 	}
 	waitAsked(t, op, "Which branch?")
 
-	asked := op.Asked()
+	asked := op.Questions()
 	if len(asked) != 1 {
 		t.Fatalf("the run asked %d questions, want 1", len(asked))
 	}
@@ -1133,10 +1128,10 @@ jobs:
 	}
 	waitRun(t, svc, "obs-1")
 
-	// The card of the run and the card of the round: every session
-	// owns one card.
-	if posted := op.Posted(); posted != 2 {
-		t.Fatalf("the run published %d cards, want one for the run and one for the round", posted)
+	// The card of the round: the card of the run is the one the chat
+	// already holds for the message that started the run.
+	if posted := op.Posted(); posted != 1 {
+		t.Fatalf("the run opened %d cards, want the card of the round", posted)
 	}
 }
 
@@ -1187,8 +1182,8 @@ jobs:
 	}
 	waitRun(t, svc, "obs-1")
 
-	if posted := op.Posted(); posted != 3 {
-		t.Fatalf("the run published %d cards, want the card of the run and one per round", posted)
+	if posted := op.Posted(); posted != 2 {
+		t.Fatalf("the run opened %d cards, want one per round", posted)
 	}
 
 	// The card of the second round stands in front of the command of
@@ -1235,8 +1230,8 @@ func TestAnotherJobGetsACardOfItsOwn(t *testing.T) {
 	}
 	waitRun(t, svc, "obs-1")
 
-	if posted := op.Posted(); posted != 3 {
-		t.Fatalf("the run published %d cards, want the card of the run and one per job", posted)
+	if posted := op.Posted(); posted != 2 {
+		t.Fatalf("the run opened %d cards, want one per job", posted)
 	}
 	rounds := op.RoundSessions()
 	if len(rounds) != 2 {
@@ -1301,14 +1296,19 @@ func TestAQuestionOpensNoCardOfItsOwn(t *testing.T) {
 		t.Fatalf("reply: %v", err)
 	}
 	waitRun(t, svc, "obs-1")
-	// The question opened no card of its own: the only card the run
-	// published after it is the record of the finished run.
-	if posted := op.Posted(); posted != before+1 {
-		t.Fatalf("the run published %d cards, want the record alone", posted-before)
+	// The question opened no card of its own, and the record of the
+	// finished run rides on the card of the run: it opens no card.
+	if posted := op.Posted(); posted != before {
+		t.Fatalf("the run opened %d cards, want none", posted-before)
 	}
-	card := lastPostedCard(op)
-	if body := strings.Join(op.Entries(card.ID), "\n"); !strings.Contains(body, "■ [ one ] done") {
-		t.Errorf("the run published a card that is not its record: %+v", card)
+	var record bool
+	for _, m := range op.EmittedOf(messages.OutReply) {
+		if strings.Contains(m.Text, "■ [ one ] done") {
+			record = true
+		}
+	}
+	if !record {
+		t.Errorf("the run published no record: %v", op.EmittedOf(messages.OutReply))
 	}
 }
 
@@ -1408,7 +1408,7 @@ func TestACardTheChatRefusedIsPublishedLater(t *testing.T) {
 	}
 	waitRun(t, svc, "obs-1")
 
-	if !logged(logger, "the session card could not be posted") {
+	if !logged(logger, "the session placeholder could not be posted") {
 		t.Errorf("the failure was not logged: %v", logger.Lines())
 	}
 	if posted := op.Posted(); posted < 2 {
@@ -1486,14 +1486,14 @@ func TestACardThatCannotBePublishedDoesNotStopTheRun(t *testing.T) {
 	if posted := op.Posted(); posted != 1 {
 		t.Errorf("the run published %d cards, want the one the chat took", posted)
 	}
-	if !logged(logger, "the session card could not be posted") {
+	if !logged(logger, "the session placeholder could not be posted") {
 		t.Errorf("the failure was not logged: %v", logger.Lines())
 	}
 }
 
 // TestResume_KeepsTheCardItOwns — a run that comes back after a
-// daemon restart keeps the card it owns: the card's iteration travels
-// with the run's state.
+// daemon restart keeps the message it hangs its sessions under: the
+// iteration travels with the run's state.
 func TestResume_KeepsTheCardItOwns(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
@@ -1519,14 +1519,11 @@ func TestResume_KeepsTheCardItOwns(t *testing.T) {
 	waitSent(t, op, "/gtw commit")
 
 	// The state carries the anchors of the open sessions: a run that
-	// comes back goes on with the cards it opened.
+	// comes back goes on with the messages it hung its sessions under.
 	state := waitForSession(t, filepath.Join(dir, "runs", runID+".json"))
 	runSession, ok := state["run_session"].(map[string]any)
 	if !ok || runSession["anchor"] != "om_start" {
 		t.Fatalf("the state holds no anchor of the run: %v", state["run_session"])
-	}
-	if runSession["owns"] == true {
-		t.Errorf("the run owns the message that started it: %v", state["run_session"])
 	}
 	roundSession, ok := state["round_session"].(map[string]any)
 	if !ok || roundSession["anchor"] == "" {
@@ -1547,35 +1544,11 @@ func TestResume_KeepsTheCardItOwns(t *testing.T) {
 	if err := resumed.Start(context.Background()); err != nil {
 		t.Fatalf("restart: %v", err)
 	}
-	// The resumed run stays in the same iteration: it publishes no
-	// card of its own.
+	// The resumed run stays in the same iteration: it opens no card of
+	// its own.
 	time.Sleep(100 * time.Millisecond)
 	if op.Posted() != posted {
-		t.Errorf("the resumed run published %d cards, want none", op.Posted()-posted)
-	}
-
-	// The chat has forgotten the cards the run opened: the run tells
-	// it again, so the chat patches them instead of sending a second
-	// card for the same session.
-	adopted := op.Adopted()
-	if len(adopted) == 0 {
-		t.Fatalf("the resumed run told the chat about no card: %v", adopted)
-	}
-	want := map[string]bool{}
-	for _, card := range op.Cards() {
-		want[card.ID] = true
-	}
-	for _, cardID := range adopted {
-		if !want[cardID] {
-			t.Errorf("the run told the chat about %q, want a card it owns", cardID)
-		}
-	}
-	// The message that started the run is not a card of the run: the
-	// chat must not patch a message the user sent.
-	for _, cardID := range adopted {
-		if cardID == "om_start" {
-			t.Errorf("the run told the chat to adopt the message that started it: %v", adopted)
-		}
+		t.Errorf("the resumed run opened %d cards, want none", op.Posted()-posted)
 	}
 }
 
@@ -1704,6 +1677,26 @@ func waitForStep(t *testing.T, r *run, stepID string) wfe.StepState {
 	return wfe.StepState{}
 }
 
+// waitForStepSummary waits until the step ended with the given summary.
+//
+// The outcome of a step follows its action in the history: the test
+// waits for the outcome, not for the action that came before it.
+func waitForStepSummary(t *testing.T, r *run, stepID, summary string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if out, ok := stepOutcome(r, stepID); ok && out.Summary == summary {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	out, ok := stepOutcome(r, stepID)
+	if !ok {
+		t.Fatalf("the step %q has no state", stepID)
+	}
+	t.Fatalf("the step %q ended as %q, want %q", stepID, out.Summary, summary)
+}
+
 // waitForAction waits until the run's history holds that many actions
 // of the kind for the step.
 func waitForAction(t *testing.T, r *run, kind wfe.ActionKind, stepID string, count int) {
@@ -1771,31 +1764,13 @@ func waitForPosted(t *testing.T, op *fakeOperator, n int) {
 	t.Fatalf("the run published %d cards, want %d", op.Posted(), n)
 }
 
-// lastPostedCard returns the card the run published last.
+// lastPostedCard returns the card the run opened last.
 func lastPostedCard(op *fakeOperator) cardRecord {
 	cards := op.Cards()
-	for i := len(cards) - 1; i >= 0; i-- {
-		if cards[i].Posted {
-			return cards[i]
-		}
+	if len(cards) == 0 {
+		return cardRecord{}
 	}
-	return cardRecord{}
-}
-
-// waitForCardUpdate waits until the run updates the card with the
-// given id.
-func waitForCardUpdate(t *testing.T, op *fakeOperator, id string) {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		for _, c := range op.Cards() {
-			if c.ID == id && !c.Posted {
-				return
-			}
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-	t.Fatalf("the run never updated the card %q: %v", id, op.Cards())
+	return cards[len(cards)-1]
 }
 
 // waitForSession waits until the run's state file carries the card of

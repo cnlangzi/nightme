@@ -222,41 +222,6 @@ func (a *Adapter) sendRichFromHTML(
 	return result, nil
 }
 
-// sendRichBlocks sends a Telegram message whose rich_message blocks
-// are already built.
-//
-// It is the twin of sendRichFromHTML for the callers that build
-// their own blocks.
-func (a *Adapter) sendRichBlocks(
-	ctx context.Context,
-	chatID string,
-	topicID int,
-	replyToMessageID int,
-	blocks string,
-	keyboard map[string]any,
-) (SendMessageResult, error) {
-	params := map[string]any{
-		"chat_id": chatID,
-		"rich_message": map[string]any{
-			"blocks": json.RawMessage(blocks),
-		},
-	}
-	if topicID > 0 {
-		params["message_thread_id"] = topicID
-	}
-	if replyToMessageID > 0 {
-		params["reply_to_message_id"] = replyToMessageID
-	}
-	if keyboard != nil {
-		params["reply_markup"] = keyboard
-	}
-	var result SendMessageResult
-	if err := a.apiCall(ctx, "sendRichMessage", params, &result); err != nil {
-		return SendMessageResult{}, err
-	}
-	return result, nil
-}
-
 // editRichFromHTML edits a Telegram message in rich_message[blocks]
 // format. Mirrors editTelegramMessage's signature, replacing
 // text + parse_mode with rich_message[blocks].

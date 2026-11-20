@@ -100,6 +100,49 @@ func countTableGroups(groups []int) int {
 	return count
 }
 
+// limitCardTableLines keeps the tables of one part of a card inside
+// Feishu Card 2.0's hard cap of five markdown tables.
+//
+// The lines are the markdown of the part in render order. used is the
+// number of tables the parts before this one hold: the cap is a
+// property of the card and not of one part, so a card that holds six
+// tables flattens the sixth whatever part it lives in. The returned
+// count is the number of tables this part holds.
+//
+// The tables past the fifth lose their table shape: their rows are
+// rendered as plain text and their delimiter row is dropped, so what is
+// left is not a table any more and the card is still created and still
+// PATCHed — Feishu refuses a card that carries more than five tables.
+func limitCardTableLines(lines []string, used int) ([]string, int) {
+	groups := tableGroups(lines)
+	out := make([]string, 0, len(lines))
+	for i, line := range lines {
+		if groups[i] == 0 || used+groups[i] <= resultCardTableLimit {
+			out = append(out, line)
+			continue
+		}
+		// The delimiter row is the table's syntax and not its text:
+		// dropping it is what keeps the rows around it from reading
+		// as a table again.
+		if tableDelimiterRow(line) {
+			continue
+		}
+		out = append(out, plainTableRow(line))
+	}
+	return out, used + countTableGroups(groups)
+}
+
+// plainTableRow renders a row of a markdown table as plain text.
+//
+// The border of the row is the table's syntax and not its text: what
+// is left is the cells of the row.
+func plainTableRow(line string) string {
+	trimmed := strings.TrimSpace(line)
+	trimmed = strings.TrimPrefix(trimmed, "|")
+	trimmed = strings.TrimSuffix(trimmed, "|")
+	return strings.TrimSpace(trimmed)
+}
+
 // tableGroups numbers the tables the lines hold.
 //
 // A table is a run of consecutive lines that are pipe-delimited rows.

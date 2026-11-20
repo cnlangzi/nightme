@@ -194,28 +194,21 @@ var ErrNoRun = errors.New("this chat has no run in it")
 //
 // It is the slice of the channel the personal agent needs: say
 // something in the chat, answer a prompt the chat is waiting for,
-// publish the run's overview, and watch how a message went.
+// publish the run's events, and watch how a message went.
 type Operator interface {
 	// Speak says something in the chat. The text is what the daemon
 	// dispatches; the display is what the chat shows. It returns the
 	// id of the message it became.
 	Speak(ctx context.Context, chatID, text string, opts channel.SpeakOptions) (string, error)
-	// Ask puts a question in the chat and returns the id of the
-	// message it became. The question is visible and the operator
+	// Ask puts a message in the chat and returns the id of the
+	// message it became. The message is visible and the operator
 	// can answer it, but the daemon does not take it as a turn of
-	// its own.
+	// its own: a question the run asks, and the placeholder the run
+	// posts to open a card, both go this way.
 	Ask(ctx context.Context, chatID, text string, opts channel.SpeakOptions) (string, error)
 	// Act answers a prompt the chat is waiting for, as if a person
 	// had clicked the button.
 	Act(ctx context.Context, chatID string, action messages.ActionPayload) error
-	// PostCard publishes the card of a session and returns the id of
-	// the message it became. The card is the session's own: the chat
-	// patches it in place when the session's events land.
-	PostCard(ctx context.Context, chatID string, spec channel.CardSpec) (string, error)
-	// AdoptCard tells the chat that the message with the given id is
-	// the card of a session: the events that carry it as their anchor
-	// are rendered onto that card instead of onto a new one.
-	AdoptCard(chatID, cardID string)
 	// Emit publishes an outbound message in the chat the run works in.
 	// The kind decides how the chat renders it: thinking becomes a
 	// 💭 card, a tool call a ● line, a reply a message.

@@ -41,19 +41,18 @@ type fakeExec struct {
 	watchers []chan observe.Execution
 }
 
-// cardRecord is one card the run published.
+// cardRecord is one card the run opened.
+//
+// A card is a message of the chat: the run posts it to open a
+// session, and the chat renders the session onto the card of that
+// message.
 type cardRecord struct {
 	// ID is the id of the message the card became.
 	ID string
-	// Title is the card's title.
-	Title string
-	// Body is the card's body.
+	// Body is the one line the placeholder carries.
 	Body string
 	// ReplyTo names the message the card hangs under.
 	ReplyTo string
-	// Posted reports whether the card was published as a card of its
-	// own.
-	Posted bool
 }
 
 // emittedMessage is one outbound message the run published.
@@ -121,7 +120,6 @@ type fakeOperator struct {
 	log     []string
 	execs   map[string]*fakeExec
 	seq     int
-	cardSeq int
 	watched []string
 	// gate holds the chat's commands until the test opens it.
 	gate *gate
@@ -130,15 +128,15 @@ type fakeOperator struct {
 	// failCommand is the command that cannot be sent at all, the way
 	// a dead chat cannot take it.
 	failCommand string
-	// failCard makes the chat refuse the run's overview.
+	// failCard makes the chat refuse every placeholder the run posts.
 	failCard bool
 	// failCardAfter makes the chat refuse the cards after it has
 	// published that many of them.
 	failCardAfter int
-	// refuseAttempt makes the chat refuse that attempt to publish a
+	// refuseAttempt makes the chat refuse that attempt to open a
 	// card. Zero refuses none.
 	refuseAttempt int
-	// cardAttempts counts the attempts to publish a card.
+	// cardAttempts counts the attempts to open a card.
 	cardAttempts int
 	// dropOutbound makes the chat hide every outbound message: the
 	// run's events do not reach it.
@@ -149,8 +147,6 @@ type fakeOperator struct {
 	// roundSessions are the names of the round sessions the run
 	// opened.
 	roundSessions []string
-	// adopted are the cards the run told the chat about.
-	adopted []string
 	// choiceGen counts the handlers that were installed, so that the
 	// removal of a handler does not take a newer one with it.
 	choiceGen int
@@ -234,10 +230,20 @@ type askedMessage struct {
 // Ask puts a question in the chat.
 //
 // The question is not dispatched: it belongs to the run, not to the
-// agent.
+// agent. The placeholder a session opens is asked the same way, and
+// the chat opens a card for it.
 func (f *fakeOperator) Ask(_ context.Context, _ string, text string, opts channel.SpeakOptions) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	card := isPlaceholder(text)
+	if card {
+		f.cardAttempts++
+		if f.failCard ||
+			f.refuseAttempt == f.cardAttempts ||
+			(f.failCardAfter > 0 && len(f.cards) >= f.failCardAfter) {
+			return "", errors.New("the chat cannot take the message")
+		}
+	}
 	f.seq++
 	id := fmt.Sprintf("msg-%d", f.seq)
 	f.asked = append(f.asked, askedMessage{
@@ -246,7 +252,23 @@ func (f *fakeOperator) Ask(_ context.Context, _ string, text string, opts channe
 		ReplyTo: opts.ReplyTo,
 		MsgID:   id,
 	})
+	if card {
+		f.cards = append(f.cards, cardRecord{ID: id, Body: text, ReplyTo: opts.ReplyTo})
+		f.log = append(f.log, "card:"+id)
+		if f.onCard != nil {
+			f.onCard()
+		}
+	}
 	return id, nil
+}
+
+// isPlaceholder reports whether the text is a placeholder the run
+// posted to open a session.
+//
+// The questions the run asks begin with the question mark; a
+// placeholder says what is coming.
+func isPlaceholder(text string) bool {
+	return !strings.HasPrefix(text, questionMark)
 }
 
 // Asked returns the questions the run asked.
@@ -256,63 +278,31 @@ func (f *fakeOperator) Asked() []askedMessage {
 	return append([]askedMessage(nil), f.asked...)
 }
 
+// Questions returns the questions the run asked.
+//
+// A placeholder opens a card; it is not a question.
+func (f *fakeOperator) Questions() []askedMessage {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]askedMessage, 0, len(f.asked))
+	for _, m := range f.asked {
+		if strings.HasPrefix(m.Text, questionMark) {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
 // Act answers a prompt the chat is waiting for.
 func (f *fakeOperator) Act(_ context.Context, chatID string, action messages.ActionPayload) error {
 	return f.answer(chatID, action.RequestID, action.Option)
 }
 
-// PostCard publishes the run's overview.
-func (f *fakeOperator) PostCard(_ context.Context, _ string, spec channel.CardSpec) (string, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.cardAttempts++
-	if f.failCard ||
-		f.refuseAttempt == f.cardAttempts ||
-		(f.failCardAfter > 0 && f.postedCount() >= f.failCardAfter) {
-		return "", errors.New("the chat cannot show a card")
-	}
-	f.cardSeq++
-	id := fmt.Sprintf("card-%d", f.cardSeq)
-	f.cards = append(f.cards, cardRecord{ID: id, Title: spec.Title, Body: spec.Body, ReplyTo: spec.ReplyTo, Posted: true})
-	f.log = append(f.log, "card:"+id)
-	if f.onCard != nil {
-		f.onCard()
-	}
-	return id, nil
-}
-
-// postedCount returns the number of cards the run published. The
-// caller holds the lock.
-func (f *fakeOperator) postedCount() int {
-	n := 0
-	for _, c := range f.cards {
-		if c.Posted {
-			n++
-		}
-	}
-	return n
-}
-
-// Posted returns the number of cards the run published.
+// Posted returns the number of cards the run opened.
 func (f *fakeOperator) Posted() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.postedCount()
-}
-
-// AdoptCard tells the chat that the message with the given id is the
-// card of a session.
-func (f *fakeOperator) AdoptCard(_ string, cardID string) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.adopted = append(f.adopted, cardID)
-}
-
-// Adopted returns the cards the run told the chat about.
-func (f *fakeOperator) Adopted() []string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return append([]string(nil), f.adopted...)
+	return len(f.cards)
 }
 
 // OnChoice installs the handler that takes the answer of an
@@ -448,8 +438,8 @@ func (f *fakeOperator) Checklist(id string) []agent.AgentTaskItem {
 	return out
 }
 
-// Cards returns the cards the run published and updated, in the order
-// it did it.
+// Cards returns the cards the run opened, in the order it opened
+// them.
 func (f *fakeOperator) Cards() []cardRecord {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -457,7 +447,7 @@ func (f *fakeOperator) Cards() []cardRecord {
 }
 
 // Log returns what the run did in the chat, in the order it did it:
-// "card:<id>" for a card it published, "speak:<text>" for a command.
+// "card:<id>" for a card it opened, "speak:<text>" for a command.
 func (f *fakeOperator) Log() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -562,13 +552,16 @@ func (f *fakeOperator) Spoken() []spokenMessage {
 	return append([]spokenMessage(nil), f.spoken...)
 }
 
-// Lines returns the bodies the run's overview showed.
+// Lines returns the bodies the run published.
 func (f *fakeOperator) Lines() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	out := make([]string, 0, len(f.cards))
-	for _, c := range f.cards {
-		out = append(out, c.Body)
+	out := make([]string, 0, len(f.emitted))
+	for _, m := range f.emitted {
+		if m.Kind != messages.OutReply {
+			continue
+		}
+		out = append(out, m.Text)
 	}
 	return out
 }
@@ -586,7 +579,7 @@ func (f *fakeOperator) Has(text string) bool {
 // isControlText reports whether the text is something the run says
 // outside a workflow step: a question or the pause.
 func isControlText(text string) bool {
-	return strings.HasPrefix(text, "❓") ||
+	return strings.HasPrefix(text, questionMark) ||
 		strings.HasPrefix(text, pauseMark)
 }
 

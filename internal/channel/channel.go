@@ -168,42 +168,6 @@ type SpeakOptions struct {
 	RunID string
 }
 
-// CardSpec is what a card shows: a title and a body.
-type CardSpec struct {
-	Title string
-	Body  string
-	// ReplyTo names the message the card is posted as a reply to.
-	// Empty means the card stands on its own in the chat.
-	//
-	// The personal agent posts the card of its session itself and
-	// then addresses the session by that card's id: the card is
-	// where the session's events hang.
-	ReplyTo string
-}
-
-// CardPublisher renders a card in a chat.
-//
-// A card is a message of the chat: it is posted like any other
-// message and edited in place afterwards, so the chat keeps one
-// overview rather than a stream of updates.
-type CardPublisher interface {
-	// PostCard publishes the card and returns the id of the message
-	// it became.
-	//
-	// A card the publisher posted is a card it can adopt: the events
-	// that carry the card's id as their anchor are rendered onto
-	// that card instead of onto a new one.
-	PostCard(ctx context.Context, chatID string, spec CardSpec) (string, error)
-	// AdoptCard tells the publisher that the message with the given id
-	// is a card of its own.
-	//
-	// The events that carry such an anchor are rendered onto that
-	// card instead of onto a new one. A daemon that comes back has
-	// forgotten the cards it posted, and the owner of a card tells it
-	// again.
-	AdoptCard(chatID, cardID string)
-}
-
 // Message is an alias for messages.InboundMessage. Kept for
 // back-compat with adapter code that imports channel.Message.
 type Message = messages.InboundMessage

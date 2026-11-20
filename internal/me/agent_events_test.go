@@ -388,15 +388,11 @@ func TestTheStateOfAnOlderDaemonStillNamesTheCards(t *testing.T) {
 	if sess.anchor != "card-9" {
 		t.Errorf("the session hangs under %q, want the card of the older daemon", sess.anchor)
 	}
-	if !sess.ownsMessage {
-		t.Error("the session does not own the card it posted itself")
-	}
 	// A state of the current shape keeps its anchor.
-	current := &sessionState{Kind: string(sessionRound), Anchor: "om_start", Owns: false}
+	current := &sessionState{Kind: string(sessionRound), Anchor: "om_start"}
 	sess = sessionFromState(current)
-	if sess.anchor != "om_start" || sess.ownsMessage {
-		t.Errorf("the session hangs under %q and owns %v, want om_start and no ownership",
-			sess.anchor, sess.ownsMessage)
+	if sess.anchor != "om_start" {
+		t.Errorf("the session hangs under %q, want om_start", sess.anchor)
 	}
 }
 
@@ -439,9 +435,6 @@ func TestTheActivityOfTheRunSurvivesTheDaemon(t *testing.T) {
 	if state.RunSession == nil || state.RunSession.Anchor != "om_start" {
 		t.Errorf("the state file holds no anchor of the run: %+v", state.RunSession)
 	}
-	if state.RunSession.Owns {
-		t.Error("the run owns the message that started it")
-	}
 	if state.RoundSession == nil || state.RoundSession.Anchor == "" {
 		t.Error("the state file holds no card of the round")
 	}
@@ -459,9 +452,6 @@ func TestTheActivityOfTheRunSurvivesTheDaemon(t *testing.T) {
 	}
 	if restored.runSessionRef() == nil || restored.runSessionRef().anchor != state.RunSession.Anchor {
 		t.Error("the restored run lost the anchor of the run")
-	}
-	if restored.runSessionRef().ownsMessage {
-		t.Error("the restored run owns the message that started it")
 	}
 	if restored.decisionSessionRef() == nil || restored.decisionSessionRef().anchor != state.DecisionSession.Anchor {
 		t.Error("the restored run lost the card of the decision")

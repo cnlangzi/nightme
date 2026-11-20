@@ -215,12 +215,11 @@ type MessageReceipt struct {
 // PatchMessage on subsequent). F-44 callers pass `a`; passing nil
 // will panic on the first render.
 //
-// The replyMsgID parameter is the Feishu message id of any
-// pre-existing reply card (legacy F-44 path that no longer applies
-// post-F-44-revert — kept for the constructor signature so the
-// task-only caller can still pass a placeholder). Pass "" for
-// fresh receipts (the typical F-44 revert case); the first
-// SendCard in renderLocked populates cardMsgID.
+// The replyMsgID parameter names the card the receipt patches: the
+// receipt sends a card of its own when it is empty. The callers of
+// the chat pass "" — the card of a session is opened by the chat,
+// not by the adapter — and the first SendCard in renderLocked
+// populates cardMsgID.
 func NewMessageReceiptForReply(chatID, userMsgID, replyMsgID string, bot receiptBot) *MessageReceipt {
 	return &MessageReceipt{
 		chatID:     chatID,

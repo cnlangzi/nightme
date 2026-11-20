@@ -139,44 +139,6 @@ func TestAsk_PostsTheQuestionWithoutDispatchingIt(t *testing.T) {
 	}
 }
 
-// TestPostCard_RendersOneLinePerElement — Feishu's markdown element
-// treats a newline as a soft break: a body with newlines in a single
-// element runs together on the card.
-func TestPostCard_RendersOneLinePerElement(t *testing.T) {
-	a := testAdapter(t)
-
-	var sent string
-	a.sendFunc = func(_ context.Context, _, _, content, _ string, _ bool) (string, error) {
-		sent = content
-		return "om_card", nil
-	}
-
-	spec := channel.CardSpec{
-		Title: "fix · running",
-		Body:  "1. ✅ /gtw commit\n2. 🔄 /gtw push\nerror: the agent is rate limited",
-	}
-	if _, err := a.PostCard(context.Background(), "oc_test", spec); err != nil {
-		t.Fatalf("PostCard: %v", err)
-	}
-
-	var card map[string]any
-	if err := json.Unmarshal([]byte(sent), &card); err != nil {
-		t.Fatalf("decode card: %v", err)
-	}
-	body, _ := card["body"].(map[string]any)
-	elements, _ := body["elements"].([]any)
-	lines := 0
-	for _, el := range elements {
-		m, _ := el.(map[string]any)
-		if m["tag"] == "markdown" {
-			lines++
-		}
-	}
-	if lines != 3 {
-		t.Fatalf("the card has %d markdown elements, want one per line", lines)
-	}
-}
-
 // TestAct_ClicksTheCardAndShowsTheChoice — the run answers a prompt
 // the way a person does: the card shows the choice and the click
 // reaches the daemon.
@@ -228,49 +190,5 @@ func TestAct_WithoutACardIsRefused(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("the click was accepted although no card waits for it")
-	}
-}
-
-// TestPostCard_PublishesTheCardUnderItsAnchor — the card of a
-// session hangs under the message the session is about.
-func TestPostCard_PublishesTheCardUnderItsAnchor(t *testing.T) {
-	a := testAdapter(t)
-
-	var sent, rootID string
-	a.sendFunc = func(_ context.Context, _, _, content, root string, _ bool) (string, error) {
-		sent = content
-		rootID = root
-		return "om_card", nil
-	}
-
-	spec := channel.CardSpec{
-		Body:    "the run is starting…",
-		ReplyTo: "om_start",
-	}
-	id, err := a.PostCard(context.Background(), "oc_test", spec)
-	if err != nil {
-		t.Fatalf("PostCard: %v", err)
-	}
-	if id != "om_card" {
-		t.Fatalf("id = %q, want om_card", id)
-	}
-	if rootID != "om_start" {
-		t.Errorf("root id = %q, want om_start", rootID)
-	}
-	if sent == "" {
-		t.Fatal("the card was not published")
-	}
-	var card map[string]any
-	if err := json.Unmarshal([]byte(sent), &card); err != nil {
-		t.Fatalf("decode card: %v", err)
-	}
-	if card["schema"] != "2.0" {
-		t.Errorf("schema = %v, want 2.0", card["schema"])
-	}
-	if _, ok := card["header"]; ok {
-		t.Error("the card has a header: a session card has none")
-	}
-	if a.adoptableCard("oc_test", "om_card") != "om_card" {
-		t.Error("the posted card is not adoptable: a session would post a second card")
 	}
 }

@@ -1030,12 +1030,14 @@ func (r *run) takeRefresh(now time.Time) bool {
 //
 // The engine owns the state: the step that ran and its outcome go
 // in together. The run's situation moved on, so the model reads it
-// again before it decides.
+// again before it decides. The checklist of the round follows the
+// step: it says what the round has done.
 func (r *run) recordStep(job string, step wfe.Step, out wfe.Outcome) {
 	r.mu.Lock()
 	wfe.RecordStep(r.state, job, step, out, false)
 	r.mu.Unlock()
 	r.markSituation()
+	r.svc.refreshRoundTasks(r)
 }
 
 // recordPending records that a step started and has not settled.
@@ -1271,14 +1273,13 @@ func outcomeLine(o messages.Outcome) string {
 // sessionState is the on-disk shape of an open session.
 //
 // The anchors of the open sessions are part of the run's state: a run
-// that comes back after a restart goes on with the cards it opened.
+// that comes back after a restart goes on with the messages it hung
+// its sessions under.
 type sessionState struct {
 	// Kind is what the session is.
 	Kind string `json:"kind"`
 	// Anchor is the message the session's events hang under.
 	Anchor string `json:"anchor"`
-	// Owns reports whether the session posted that message itself.
-	Owns bool `json:"owns"`
 	// CardID is the id the card of the session became in a daemon
 	// that predates the anchor. A state file that names it still
 	// holds a card the run posted itself.
@@ -1298,7 +1299,6 @@ func sessionStateOf(sess *session) *sessionState {
 	return &sessionState{
 		Kind:   string(sess.kind),
 		Anchor: sess.anchor,
-		Owns:   sess.ownsMessage,
 		ID:     sess.id,
 		Job:    sess.job,
 		Round:  sess.round,
@@ -1311,20 +1311,17 @@ func sessionFromState(st *sessionState) *session {
 		return nil
 	}
 	anchor := st.Anchor
-	owns := st.Owns
 	if anchor == "" && st.CardID != "" {
 		// A state file of an older daemon: the card of the session is
-		// its anchor, and the run posted that card itself.
+		// its anchor.
 		anchor = st.CardID
-		owns = true
 	}
 	return &session{
-		kind:        sessionKind(st.Kind),
-		anchor:      anchor,
-		ownsMessage: owns,
-		id:          st.ID,
-		job:         st.Job,
-		round:       st.Round,
+		kind:   sessionKind(st.Kind),
+		anchor: anchor,
+		id:     st.ID,
+		job:    st.Job,
+		round:  st.Round,
 	}
 }
 
@@ -1547,10 +1544,6 @@ func (s *Service) resumeRuns(ctx context.Context) {
 			continue
 		}
 		r := s.restoreRun(state)
-		// The chat has forgotten the cards the run opened: it is told
-		// which of its messages are cards again, so the run goes on
-		// with them.
-		s.adoptSessionCards(r)
 		s.mu.Lock()
 		s.runs[r.id] = r
 		s.active[r.chatID] = r
@@ -1966,7 +1959,6 @@ func (r *run) roundSessionStates() []sessionState {
 		out = append(out, sessionState{
 			Kind:   string(sess.kind),
 			Anchor: sess.anchor,
-			Owns:   sess.ownsMessage,
 			ID:     sess.id,
 			Job:    it.job,
 			Round:  it.round,

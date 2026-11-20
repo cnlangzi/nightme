@@ -251,8 +251,8 @@ func (s *Service) pauseForBudget(ctx context.Context, r *run) {
 		stepID, used, limit)
 	r.pauseNow(reason)
 	s.persist(r)
-	// The run stops: the state of the round hangs under the card of the
-	// round.
+	// The run stops: it publishes the state of the round on a card of
+	// its own.
 	s.showState(ctx, r, r.stateAnchor(""))
 	s.refreshRun(r)
 	s.announcePause(ctx, r, reason)

@@ -1,9 +1,9 @@
 // summary.go — the record a finished run leaves behind.
 //
 // The record is the account of the session: it says what the run did,
-// what went wrong and what the models decided. It is a card of its
-// own — the run is over, and the card it worked on is no longer the
-// record of it.
+// what went wrong and what the models decided. It rides on the card of
+// the run — the run is over, and the card it worked on is the record of
+// it.
 package me
 
 import (
@@ -40,13 +40,18 @@ const (
 	maxSummaryLine = 300
 )
 
-// postRecord posts the card a finished run leaves behind.
+// postRecord posts the record a finished run leaves behind.
+//
+// The record is the account of the session: it says what the run did,
+// what went wrong and what the models decided. It rides on the card of
+// the run: the run is over, and the card it worked on is the record of
+// it.
 //
 // The record is posted whenever the run ends, whatever ended it: a
 // run that finishes on its own has a session worth recording too.
 //
-// A chat that refuses the card changes nothing else: the run still
-// ends, and no error reaches the operator.
+// A run that has no card of its own posts the record on its own: the
+// chat shows it the way it shows every other message of the run.
 func (s *Service) postRecord(r *run) {
 	if s.cfg.Operator == nil {
 		return
@@ -60,16 +65,13 @@ func (s *Service) postRecord(r *run) {
 	// record is posted after that. The context outlives the run here
 	// on purpose.
 	ctx := context.WithoutCancel(r.ctx)
-	sess := s.openSession(ctx, r, sessionRecord, r.id, "", 0, "")
-	if sess.anchor == "" {
-		// The chat refused the card: the run still ends, and no error
-		// reaches the operator.
-		return
+	sess := &session{kind: sessionRecord, id: r.id}
+	if runSess := r.runSessionRef(); runSess != nil {
+		sess.anchor = runSess.anchor
 	}
 	r.setRecordSession(sess)
 	s.publishInit(ctx, r, sess)
-	s.publishReply(ctx, r, sess, r.recordCard())
-	s.publishResult(ctx, r, sess, string(r.currentPhase()))
+	s.publishRecord(ctx, r, sess, r.recordCard())
 }
 
 // workflowStepIDs returns the ids of the steps of the workflow.

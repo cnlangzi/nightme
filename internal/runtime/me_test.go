@@ -3,6 +3,7 @@ package runtime
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -13,7 +14,15 @@ import (
 	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/llm"
+	"github.com/cnlangzi/nightme/internal/me"
 )
+
+// stubProvider is a chat model that is never called.
+type stubProvider struct{}
+
+func (stubProvider) Complete(context.Context, llm.Request) (*llm.Response, error) {
+	return nil, errors.New("the stub provider must not be called")
+}
 
 // TestBuildPersonalAgent_NoChannel — the personal agent works in a
 // chat. Without a channel there is no chat to work in, so the agent
@@ -373,15 +382,18 @@ func TestBuildPersonalAgent_LogsNothingConfiguredAsInfo(t *testing.T) {
 	if svc == nil {
 		t.Fatal("expected an agent")
 	}
+	if out := buf.String(); strings.Contains(out, "level=ERROR") {
+		t.Fatalf("a missing model was logged as an error: %s", out)
+	}
+	// The state of the agent is reported once, by the line that says
+	// how the agent came up.
+	logPersonalAgentStart(logger, svc)
 	out := buf.String()
 	if !strings.Contains(out, "level=INFO") {
 		t.Fatalf("the missing models were not logged as info: %s", out)
 	}
 	if !strings.Contains(out, "neither me.llm nor me.decider is configured") {
 		t.Fatalf("the log does not say that no model is configured: %s", out)
-	}
-	if strings.Contains(out, "level=ERROR") {
-		t.Fatalf("a missing model was logged as an error: %s", out)
 	}
 }
 
@@ -396,16 +408,24 @@ func TestPersonalAgentConfig_CarriesTheIssues(t *testing.T) {
 	}
 }
 
-// TestPersonalAgentStartLine_SaysWhetherTheAgentHasModels — the
+// TestLogPersonalAgentStart_SaysWhetherTheAgentHasModels — the
 // startup log says whether the agent has models, and why not when it
 // has none.
-func TestPersonalAgentStartLine_SaysWhetherTheAgentHasModels(t *testing.T) {
-	if got := personalAgentStartLine(""); got != "run: personal agent started" {
-		t.Fatalf("line = %q, want the agent that started", got)
+func TestLogPersonalAgentStart_SaysWhetherTheAgentHasModels(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+
+	logPersonalAgentStart(logger, me.New(me.Config{}))
+	out := buf.String()
+	if !strings.Contains(out, "run: the personal agent has no models: neither me.llm nor me.decider is configured") {
+		t.Fatalf("the log does not say that the agent has no models: %s", out)
 	}
-	want := "run: the personal agent has no models: me.llm.protocol is not set (known: chat_completions, messages)"
-	if got := personalAgentStartLine("me.llm.protocol is not set (known: chat_completions, messages)"); got != want {
-		t.Fatalf("line = %q, want %q", got, want)
+
+	buf.Reset()
+	logPersonalAgentStart(logger, me.New(me.Config{Provider: stubProvider{}}))
+	out = buf.String()
+	if !strings.Contains(out, "run: personal agent started") {
+		t.Fatalf("the log does not say that the agent started: %s", out)
 	}
 }
 

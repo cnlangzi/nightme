@@ -18,7 +18,6 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/channel"
@@ -52,22 +51,15 @@ func buildPersonalAgent(cfg *config.Config, chs []channel.Channel, op *operator,
 	issues := make([]string, 0, 2)
 	if chatIssue != "" {
 		issues = append(issues, chatIssue)
-		logger.Error("run: the chat model did not start: " + chatIssue)
+		logger.Error("run: the chat model did not start", "reason", chatIssue)
 	}
 	if deciderIssue != "" {
 		issues = append(issues, deciderIssue)
-		logger.Error("run: the decision model did not start: " + deciderIssue)
+		logger.Error("run: the decision model did not start", "reason", deciderIssue)
 	}
 
 	svc := me.New(personalAgentConfig(cfg, dir, op, provider, decider, issues))
 	svc.SetLogger(logger)
-	if len(issues) == 0 {
-		// No model was asked for at all: that is a state, not an
-		// error. The agent goes on without one.
-		if reason := svc.ModelsReason(); reason != "" {
-			logger.Info("run: " + reason)
-		}
-	}
 	return svc
 }
 
@@ -125,7 +117,7 @@ func buildChatModel(cfg *config.Config, logger *slog.Logger) (llm.Provider, stri
 	case c.Protocol == "" && c.Model == "":
 		return nil, ""
 	case c.Protocol == "":
-		return nil, fmt.Sprintf("me.llm.protocol is not set (known: %s)", protocolNames(llm.ChatProtocols()))
+		return nil, fmt.Sprintf("me.llm.protocol is not set (known: %s)", llm.ProtocolNames(llm.ChatProtocols()))
 	case c.Model == "":
 		return nil, "me.llm.model is not set"
 	}
@@ -150,7 +142,7 @@ func buildDecider(cfg *config.Config, logger *slog.Logger) (llm.Decider, string)
 	case c.Protocol == "" && c.Model == "":
 		return nil, ""
 	case c.Protocol == "":
-		return nil, fmt.Sprintf("me.decider.protocol is not set (known: %s)", protocolNames(llm.DecisionProtocols()))
+		return nil, fmt.Sprintf("me.decider.protocol is not set (known: %s)", llm.ProtocolNames(llm.DecisionProtocols()))
 	case c.Model == "":
 		return nil, "me.decider.model is not set"
 	}
@@ -171,26 +163,20 @@ func buildDecider(cfg *config.Config, logger *slog.Logger) (llm.Decider, string)
 	return decider, ""
 }
 
-// protocolNames renders the names of the registered protocols for an
-// error message.
-func protocolNames(protocols []llm.Protocol) string {
-	names := make([]string, 0, len(protocols))
-	for _, p := range protocols {
-		names = append(names, p.Name)
-	}
-	return strings.Join(names, ", ")
-}
-
-// personalAgentStartLine renders how the personal agent came up: with
+// logPersonalAgentStart reports how the personal agent came up: with
 // models to decide with, or without them.
 //
 // The reason is the one the agent itself gives, so the log and the
-// chat say the same thing.
-func personalAgentStartLine(reason string) string {
+// chat say the same thing. This is the one report of whether the
+// agent has models; a model that is broken is reported by the builder
+// as an error, with the capability it belongs to.
+func logPersonalAgentStart(logger *slog.Logger, personal *me.Service) {
+	reason := personal.ModelsReason()
 	if reason != "" {
-		return "run: the personal agent has no models: " + reason
+		logger.Info("run: the personal agent has no models: "+reason, "dir", personal.WorkflowsDir())
+		return
 	}
-	return "run: personal agent started"
+	logger.Info("run: personal agent started", "dir", personal.WorkflowsDir())
 }
 
 // warnDualCredential reports a capability that names its key twice.

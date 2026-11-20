@@ -294,21 +294,23 @@ claim 保留自己的措辞：
 
 **Local 模式不受影响**：`/gtw fix --name <branch>` 不接触 issue，没有 label 可读，也就没有占用可查——它不受这个 gate 约束。
 
-### 3.3 `/gtw pr --ready`：把 issue 挪到 `nightme/ready`
+### 3.3 `/gtw pr --ready`：把 issue 和 PR 标成 `nightme/ready`
 
 `nightme/*` 的 label 是 gtw 的状态机：`nightme/assigned` 是入队标记，`nightme/wip` 是「fix 持有着它」，`nightme/ready` 是「等 review」，`nightme/reviewing` / `nightme/revise` / `nightme/done` / `nightme/stuck` 是 review 之后的状态。
 
-`/gtw pr --ready` 把关联 issue 从 `nightme/wip` 挪到 `nightme/ready`：PR 出现了，活就不再是「进行中」，而是「等 review」。
+`/gtw pr --ready` 把关联 issue 从 `nightme/wip` 挪到 `nightme/ready`，并给 PR 本身贴上 `nightme/ready`：PR 出现了，活就不再是「进行中」，而是「等 review」。PR 才是评审单元 —— reviewer 在 PR 列表页看到的是 PR 上的状态，不是 issue 上的。
 
 **触发时机**：PR 存在之后 —— 这次开出来的，这个分支上早就开着的，以及 gate 2 与 CreatePR 之间的竞态窗口（`CreatePR` 报 PR 已存在，说明 PR 确实开着）。没有 PR 的路径一律不做（PR 没开成时不动 label）。
 
 **顺序**：先加 `nightme/ready`，再摘 `nightme/wip`。两步之间失败，issue 还带着 `nightme/wip` —— 仍然是「被占用」的状态，两条 fix 路径都不会碰它。反过来（先摘后加）失败会留下一个什么状态 label 都没有的 issue，看起来像没人做它。加失败时跳过摘除，理由同上。
 
-**只动两个 label**：加 `nightme/ready`，摘 `nightme/wip`，不碰 `nightme/assigned`。
+**issue 侧只动两个 label**：加 `nightme/ready`，摘 `nightme/wip`，不碰 `nightme/assigned`。
+
+**PR 侧只加一个 label**：加 `nightme/ready`，不摘任何 label —— PR 上从来没有 `nightme/wip`。PR 的编号已知就用它（新开出来的 PR 从 URL 读，gate 2 发现的老 PR 用它的编号），编号未知就查这个分支上开着的 PR。
 
 **这里摘的只有状态 label**：队列标记 `nightme/assigned` 留在 issue 上，`/gtw fix` 不摘任何 label，`/gtw close` 也不摘它 —— 只有 `/gtw assign --remove` 摘。
 
-**失败只警告**：PR 已经开出来了，label 是记账。label 调用失败时卡片上带一行 `⚠️`，命令的结论不变。worktree 没有关联 issue（`issue <= 0`）时也带一行 `⚠️`，说明没有 label 可改。
+**失败只警告**：PR 已经开出来了，label 是记账。label 调用失败时卡片上带一行 `⚠️`，命令的结论不变。issue 侧和 PR 侧互不阻断：一边失败不妨碍另一边执行。worktree 没有关联 issue（`issue <= 0`）时 issue 侧带一行 `⚠️`（说明 issue 的 label 没动），PR 侧照常贴 label。
 
 `/gtw close` 会摘状态 label —— 默认把 `nightme/wip`、`nightme/ready` 都摘掉，贴上 `nightme/done`；`--reset` 只摘不贴。close 收的是这一轮 fix 的本地会话，PR 还开不开着不改变它把 issue 标成「做完了」这件事。
 

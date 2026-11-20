@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
@@ -297,12 +298,15 @@ func TestDispatchPR_Ready_NoPRNoLabelCall(t *testing.T) {
 	if labelCallIndex(calls, "RemoveIssueLabel", LabelWIP) >= 0 {
 		t.Errorf("the labels changed although no pull request was opened; calls = %+v", calls)
 	}
+	if labelCallIndex(calls, "AddPRLabel", LabelReady) >= 0 {
+		t.Errorf("the pull request was labelled although no pull request was opened; calls = %+v", calls)
+	}
 	mustContain(t, s.lastText(), "create PR failed")
 }
 
 // TestDispatchPR_Ready_NoLinkedIssueWarns pins the local-mode case:
-// the worktree links no issue, so the pull request opens and the
-// reply says that no label was changed.
+// the worktree links no issue, so the issue side has nothing to
+// change and the reply says so.
 func TestDispatchPR_Ready_NoLinkedIssueWarns(t *testing.T) {
 	rig := newPRTestRig(t)
 	setupPRWorktree(t, rig, Context{Branch: "wt"})
@@ -322,7 +326,7 @@ func TestDispatchPR_Ready_NoLinkedIssueWarns(t *testing.T) {
 		t.Fatalf("CreatePR calls = %d, want 1", len(calls))
 	}
 	r := s.lastText()
-	mustContain(t, r, "no label was changed")
+	mustContain(t, r, "the issue labels were not changed")
 	mustContain(t, r, "✅ PR opened")
 }
 
@@ -351,6 +355,228 @@ func TestDispatchPR_Ready_CardGainsNoRow(t *testing.T) {
 	if strings.Join(readyRows, ",") != strings.Join(plainRows, ",") {
 		t.Errorf("the card rows changed with --ready: %v, want %v", readyRows, plainRows)
 	}
+}
+
+// --- the pull request side ---
+
+// prLabelCall returns the single AddPRLabel call the provider
+// recorded, failing the test when there is not exactly one.
+func prLabelCall(t *testing.T, rig *prTestRig) fakeProviderCall {
+	t.Helper()
+	calls := rig.prov.CallsByMethod("AddPRLabel")
+	if len(calls) != 1 {
+		t.Fatalf("AddPRLabel calls = %d, want 1; calls = %+v", len(calls), rig.prov.Calls())
+	}
+	return calls[0]
+}
+
+// TestDispatchPR_Ready_LabelsTheOpenedPullRequest pins the pull
+// request side on the path where this run opened the pull request:
+// the pull request gains `nightme/ready` — the reviewer sees the
+// state on the pull request, not only on the issue.
+func TestDispatchPR_Ready_LabelsTheOpenedPullRequest(t *testing.T) {
+	rig := readyRig(t)
+	cs := rig.cs
+	captureCh(t, cs)
+	if _, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg",
+		prArgs{Ready: true}, Config{}); err != nil {
+		t.Fatalf("dispatchPR err: %v", err)
+	}
+
+	call := prLabelCall(t, rig)
+	if call.ID != 7 {
+		t.Errorf("AddPRLabel number = %d, want 7 (the number of the PR this run opened)", call.ID)
+	}
+	if call.Label != LabelReady {
+		t.Errorf("AddPRLabel label = %q, want %q", call.Label, LabelReady)
+	}
+}
+
+// TestDispatchPR_Ready_LabelsTheExistingPullRequest pins the pull
+// request side on the path where the branch already had an open pull
+// request: the pull request that was already open gains the label.
+func TestDispatchPR_Ready_LabelsTheExistingPullRequest(t *testing.T) {
+	rig := readyRig(t)
+	rig.prov.SetFindOpenPRResp(&PR{
+		Number: 42,
+		URL:    "https://github.com/octocat/hello/pull/42",
+		State:  "open",
+	})
+	cs := rig.cs
+	captureCh(t, cs)
+	if _, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg",
+		prArgs{Ready: true}, Config{}); err != nil {
+		t.Fatalf("dispatchPR err: %v", err)
+	}
+
+	call := prLabelCall(t, rig)
+	if call.ID != 42 {
+		t.Errorf("AddPRLabel number = %d, want 42 (the PR already open for the branch)", call.ID)
+	}
+	if call.Label != LabelReady {
+		t.Errorf("AddPRLabel label = %q, want %q", call.Label, LabelReady)
+	}
+}
+
+// TestDispatchPR_Ready_LabelsTheRacedPullRequest pins the pull
+// request side on the race window: the pull request appeared between
+// the gate and CreatePR, so its number is resolved from the branch
+// and the label goes there.
+func TestDispatchPR_Ready_LabelsTheRacedPullRequest(t *testing.T) {
+	rig := readyRig(t)
+	rig.prov.SetCreatePRErr(fmt.Errorf("%w: a pull request for wt already exists", ErrPRExists))
+	// The gate must see no pull request; the lookup after the race
+	// must find the one that appeared in between.
+	var lookups atomic.Int32
+	rig.prov.SetFindOpenPRFunc(func(head string) (*PR, error) {
+		if lookups.Add(1) == 1 {
+			return nil, nil
+		}
+		return &PR{
+			Number: 42,
+			URL:    "https://github.com/octocat/hello/pull/42",
+			State:  "open",
+		}, nil
+	})
+	cs := rig.cs
+	captureCh(t, cs)
+	if _, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg",
+		prArgs{Ready: true}, Config{}); err != nil {
+		t.Fatalf("dispatchPR err: %v", err)
+	}
+
+	call := prLabelCall(t, rig)
+	if call.ID != 42 {
+		t.Errorf("AddPRLabel number = %d, want 42 (the PR found on the branch)", call.ID)
+	}
+	if call.Label != LabelReady {
+		t.Errorf("AddPRLabel label = %q, want %q", call.Label, LabelReady)
+	}
+}
+
+// TestDispatchPR_Ready_NoLinkedIssueStillLabelsThePullRequest pins
+// the local-mode case: the worktree links no issue, so the issue
+// side has nothing to change — but the pull request still gains the
+// label, because the pull request is the review unit.
+func TestDispatchPR_Ready_NoLinkedIssueStillLabelsThePullRequest(t *testing.T) {
+	rig := newPRTestRig(t)
+	setupPRWorktree(t, rig, Context{Branch: "wt"})
+	setupPRGit(rig, "wt", 0)
+	rig.git.on("remote", "git@github.com:octocat/hello.git", "", nil)
+	rig.prov.SetCreatePRResp("https://github.com/octocat/hello/pull/7")
+	rig.installDeps()
+
+	cs := rig.cs
+	s := captureCh(t, cs)
+	if _, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg",
+		prArgs{Ready: true}, Config{}); err != nil {
+		t.Fatalf("dispatchPR err: %v", err)
+	}
+
+	call := prLabelCall(t, rig)
+	if call.ID != 7 {
+		t.Errorf("AddPRLabel number = %d, want 7", call.ID)
+	}
+	if call.Label != LabelReady {
+		t.Errorf("AddPRLabel label = %q, want %q", call.Label, LabelReady)
+	}
+	mustContain(t, s.lastText(), "the issue labels were not changed")
+}
+
+// TestDispatchPR_Ready_UnknownPRNumberWarns pins the fallback that
+// fails: the pull request URL carries no number and the branch has
+// no open pull request to look up, so the reply says the number
+// could not be determined.
+func TestDispatchPR_Ready_UnknownPRNumberWarns(t *testing.T) {
+	rig := readyRig(t)
+	// A URL whose pull request path carries no number.
+	rig.prov.SetCreatePRResp("https://github.com/octocat/hello/pull/")
+	cs := rig.cs
+	s := captureCh(t, cs)
+	if _, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg",
+		prArgs{Ready: true}, Config{}); err != nil {
+		t.Fatalf("dispatchPR err: %v", err)
+	}
+
+	if calls := rig.prov.CallsByMethod("AddPRLabel"); len(calls) != 0 {
+		t.Errorf("AddPRLabel calls = %d, want 0 — the number is unknown", len(calls))
+	}
+	mustContain(t, s.lastText(), "could not determine the pull request number")
+	mustContain(t, s.lastText(), LabelReady)
+}
+
+// TestDispatchPR_Ready_PRLabelFailureKeepsTheOutcome pins that a
+// failing pull request label call does not fail the command: the
+// outcome stays `ok` and the reply names the failed call.
+func TestDispatchPR_Ready_PRLabelFailureKeepsTheOutcome(t *testing.T) {
+	rig := readyRig(t)
+	rig.prov.SetAddPRLabelErr(errors.New("403 forbidden"))
+	work := rig.cs.Hold("msg")
+	ctx := chatsession.WithWork(context.Background(), work)
+	ch := captureCh(t, rig.cs)
+	if _, err := dispatchPR(ctx, rig.cs, rig.deps, "chat", "msg",
+		prArgs{Ready: true}, Config{}); err != nil {
+		t.Fatalf("dispatchPR err: %v", err)
+	}
+	reply := ch.lastText()
+	work.Release()
+
+	got := settledOutcomeOf(ch)
+	if got == nil {
+		t.Fatal("no settled outcome")
+	}
+	if got.Status != messages.OutcomeOK {
+		t.Errorf("outcome status = %s, want ok — the pull request is open", got.Status)
+	}
+	mustContain(t, reply, "⚠️")
+	mustContain(t, reply, "could not add the `nightme/ready` label to PR #7")
+}
+
+// TestDispatchPR_Ready_IssueFailureDoesNotBlockThePullRequest pins
+// that the two sides are independent: a failing issue-side label call
+// does not stop the pull request from gaining the label.
+func TestDispatchPR_Ready_IssueFailureDoesNotBlockThePullRequest(t *testing.T) {
+	rig := readyRig(t)
+	rig.prov.SetAddIssueLabelErr(errors.New("404 label not found"))
+	cs := rig.cs
+	s := captureCh(t, cs)
+	if _, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg",
+		prArgs{Ready: true}, Config{}); err != nil {
+		t.Fatalf("dispatchPR err: %v", err)
+	}
+
+	call := prLabelCall(t, rig)
+	if call.ID != 7 {
+		t.Errorf("AddPRLabel number = %d, want 7", call.ID)
+	}
+	if call.Label != LabelReady {
+		t.Errorf("AddPRLabel label = %q, want %q", call.Label, LabelReady)
+	}
+	mustContain(t, s.lastText(), "⚠️")
+}
+
+// TestDispatchPR_Ready_PRFailureDoesNotBlockTheIssue pins the other
+// half of the independence: a failing pull request label call leaves
+// the issue transition complete — `nightme/ready` is on, `nightme/wip`
+// is off.
+func TestDispatchPR_Ready_PRFailureDoesNotBlockTheIssue(t *testing.T) {
+	rig := readyRig(t)
+	rig.prov.SetAddPRLabelErr(errors.New("403 forbidden"))
+	cs := rig.cs
+	s := captureCh(t, cs)
+	if _, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg",
+		prArgs{Ready: true}, Config{}); err != nil {
+		t.Fatalf("dispatchPR err: %v", err)
+	}
+
+	calls := rig.prov.Calls()
+	if labelCallIndex(calls, "AddIssueLabel", LabelReady) < 0 {
+		t.Errorf("the issue did not gain %q; calls = %+v", LabelReady, calls)
+	}
+	if labelCallIndex(calls, "RemoveIssueLabel", LabelWIP) < 0 {
+		t.Errorf("the issue did not lose %q; calls = %+v", LabelWIP, calls)
+	}
+	mustContain(t, s.lastText(), "⚠️")
 }
 
 // cardRowKeys returns the field names of the card's `→ field: value`

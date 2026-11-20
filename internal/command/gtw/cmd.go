@@ -1422,7 +1422,8 @@ func (f *Factory) runConfig(ctx context.Context, cs *chatsession.ChatSession, in
 // /gtw pr gets its own spec instead of the shared parseAgentOnlyFlag
 // because it is the only one of the three agent-flag commands that
 // takes a second flag: `--ready` moves the linked issue from
-// "claimed" to "waiting for review" once the pull request exists.
+// "claimed" to "waiting for review" once the pull request exists, and
+// labels the pull request itself `nightme/ready`.
 //
 // The flag is boolean — it takes no value — so `--ready` alone is the
 // whole argument and `/gtw pr --ready -a codex` reads both.
@@ -1443,6 +1444,7 @@ var prCmdSpec = command.CmdSpec{
 //
 //	-a / --agent <name>   override one-shot agent
 //	--ready                move the linked issue to `nightme/ready`
+//	                       and label the pull request `nightme/ready`
 //
 // Unknown tokens are hard-rejected with "unknown flag";
 // positional args are rejected too (/gtw pr takes none).

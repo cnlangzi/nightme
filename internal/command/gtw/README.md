@@ -516,9 +516,11 @@ abc1234 fix(gtw): hooks output uses standard ✅ title
 PR body 里的 `Deviations from Issue #42:` 分类说明实现与 issue 的差异;
 agent 没写这一节时,卡片上方会带一行 ⚠️ 提醒 reviewer 拿不到对比。
 
-`/gtw pr --ready` 在 PR 出现之后把关联 issue 从 `nightme/wip` 挪到
+`/gtw pr --ready` 在 PR 出现之后做两件事:关联 issue 从 `nightme/wip` 挪到
 `nightme/ready`(先加 ready 再摘 wip,中间失败 issue 仍然是"被占用"的
-状态)。卡片本身不多一行 —— 状态在 issue 上,不在卡片上。label 调用失败
+状态),PR 自己贴上 `nightme/ready` —— PR 才是评审单元,reviewer 在 PR 列表页
+看到的就是这个状态。worktree 没有关联 issue 时,issue 侧无事可做,PR 照样贴
+label。卡片本身不多一行 —— 状态在 issue 和 PR 上,不在卡片上。label 调用失败
 只带一行 ⚠️,PR 已经开出来了,命令不算失败。
 
 ### 4.5b Format 1(`/gtw pr view`)

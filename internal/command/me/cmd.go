@@ -304,9 +304,10 @@ func refusalReason(err error) string {
 // stop stops the run of this chat.
 //
 // The record of the session is on its way: the run posts it once it
-// has unwound.
+// has unwound. It rides on the card of this message, so the stop and
+// the record are one card.
 func (f *Factory) stop(ctx context.Context, rt command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
-	if err := f.ctrl.Stop(ctx, input.ChatID); err != nil {
+	if err := f.ctrl.Stop(ctx, input.ChatID, input.MessageID); err != nil {
 		chatsession.ReportOutcome(ctx, command.FailedOutcome("error", "the run could not be stopped"))
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
@@ -462,8 +463,8 @@ func (c *controller) Next(ctx context.Context, chatID, messageID, note string) (
 }
 
 // Stop implements command.MeController.
-func (c *controller) Stop(ctx context.Context, chatID string) error {
-	return c.svc.Stop(ctx, chatID)
+func (c *controller) Stop(ctx context.Context, chatID, messageID string) error {
+	return c.svc.Stop(ctx, chatID, messageID)
 }
 
 // Status implements command.MeController.

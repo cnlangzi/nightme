@@ -72,7 +72,7 @@ jobs:
 		t.Fatalf("the chat received %v, want only the command of the first round", sent)
 	}
 
-	if err := svc.Stop(context.Background(), "obs-1"); err != nil {
+	if err := svc.Stop(context.Background(), "obs-1", "om_stop"); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
 	waitRun(t, svc, "obs-1")

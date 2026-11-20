@@ -41,12 +41,13 @@ const maxDirtyFilesReported = 10
 // done.
 //
 // The close tears the fix down on both sides: locally (worktree,
-// branch, cwd) and on the tracker (the issue's `nightme/*` labels).
-// The default mode finalises the issue — every `nightme/*` label
-// but the queue marker comes off and `nightme/done` goes on; the
-// `reset` mode only clears the state labels and marks nothing, for
-// dropping the work without calling it done. A local fix has no
-// issue, so the label step is skipped entirely.
+// branch, cwd) and on the tracker (the issue's and the pull
+// request's `nightme/*` labels). The default mode finalises the
+// issue — every `nightme/*` label but the queue marker comes off
+// and `nightme/done` goes on; the `reset` mode only clears the
+// state labels and marks nothing, for dropping the work without
+// calling it done. A local fix has no issue, so the issue-side
+// label step is skipped entirely.
 //
 // Flow (wip/gtw.md §14.5):
 //
@@ -55,9 +56,10 @@ const maxDirtyFilesReported = 10
 //
 //  2. Refuse if missing — there's no active fix in this chat.
 //
-//     2.5. Finalise the issue's labels (ModeRemote only). Runs
-//     BEFORE any local cleanup so a platform-API failure (auth
-//     expired, network down, repo moved) leaves the worktree +
+//     2.5. Finalise the issue's labels (ModeRemote only).
+//
+//     The issue side GATES the local cleanup: a platform-API failure
+//     (auth expired, network down, repo moved) leaves the worktree +
 //     branch + ASes fully intact — the yml is still the recovery
 //     source of truth and the user can retry /gtw close once the
 //     upstream call works.
@@ -72,6 +74,17 @@ const maxDirtyFilesReported = 10
 //     worktree — and with it the yml — is already gone by then, so
 //     a retry cannot converge and a restore would only wedge the
 //     issue.
+//
+//     The pull request's labels are finalised in step 4.5, between
+//     the worktree removal and the branch deletion. They only WARN:
+//     the pull request's labels are bookkeeping that nothing reads,
+//     so a failure there must not keep the branch behind. The PR is
+//     looked up by head branch, so this runs BEFORE the branch is
+//     deleted — once the branch is gone, the platform no longer maps
+//     it to a PR. Running it after the worktree removal means a
+//     close that aborts earlier (step 3 / step 4) leaves the pull
+//     request's labels alone, so they need no compensation. A branch
+//     without a PR has nothing to finalize and nothing to say.
 //
 //  3. Refuse if the worktree has uncommitted changes (`git
 //     status --porcelain` non-empty). Close is intentionally
@@ -237,15 +250,22 @@ func RunClose(
 			command.FailedOutcome("bad_state", "the gtw state file is malformed")), nil
 	}
 
-	// --- step 2.5: finalize the issue's labels (issue-backed fixes) ---
-	// GATES every local cleanup step that follows. The local cleanup
-	// (worktree remove / branch delete / AS drop) is destructive and
-	// one-way; if it ran first and the label call then failed, the
-	// issue would keep a stale state label forever with no local
-	// evidence pointing back at it. By running the label step first
-	// and aborting on failure, the yml remains the recovery source
-	// of truth and the user can retry once the platform call works.
-	labels, aborted, labelWarning := finalizeIssueLabels(ctx, c, deps, cs, chatID, messageID, reset)
+	// --- step 2.5: the issue's labels -------------------------------
+	// The issue's labels GATE every local cleanup step that
+	// follows. The local cleanup (worktree remove / branch delete /
+	// AS drop) is destructive and one-way; if it ran first and the
+	// label call then failed, the issue would keep a stale state
+	// label forever with no local evidence pointing back at it. By
+	// running the label step first and aborting on failure, the yml
+	// remains the recovery source of truth and the user can retry
+	// once the platform call works.
+	//
+	// The pull request's labels are handled later (step 4.5): they
+	// are bookkeeping that nothing reads, so they only WARN, and
+	// they only come off once the local cleanup has succeeded.
+	plat := resolveClosePlatform(ctx, c, deps)
+
+	labels, aborted, labelWarning := finalizeIssueLabels(ctx, c, plat, deps, cs, chatID, messageID, reset)
 	if aborted {
 		// The helper already sent a user-facing error reply. Bail
 		// before any local cleanup so the yml-driven state
@@ -260,8 +280,12 @@ func RunClose(
 	// card and its failure cards — so the user learns about it
 	// wherever the close ends. The sync card that follows is a
 	// separate step and does not repeat it.
+	//
+	// prWarning is filled in by the PR-side finalization further
+	// down (step 4.5); the closure reads it when it runs.
+	var prWarning string
 	withWarning := func(body string) string {
-		return prependWarning(body, labelWarning)
+		return prependWarning(body, labelWarning, prWarning)
 	}
 
 	// --- step 2.6: close ASes pinned to the about-to-be-gone worktree ---
@@ -325,6 +349,26 @@ func RunClose(
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, withWarning(body),
 			command.FailedOutcome("error", "the worktree could not be removed")), nil
 	}
+
+	// --- step 4.5: the PR's labels ---------------------------------
+	// The pull request the branch opened gets its `nightme/*` state
+	// labels off, so the tracker shows the work as finished on both
+	// sides.
+	//
+	// It runs here, between the worktree removal and the branch
+	// deletion: the branch is what maps to the pull request, so the
+	// lookup must happen before the branch is deleted (step 5). It
+	// runs after the local cleanup succeeded, so a close that aborts
+	// on a dirty worktree (step 3) or a failed removal (step 4)
+	// leaves the pull request's labels alone — the issue's labels
+	// are restored on those paths, and the PR's need no
+	// restoration, because they are only touched once there is
+	// nothing left to abort.
+	//
+	// A failure here only WARNs: the PR's labels are bookkeeping
+	// that nothing reads, and the local teardown must not wait for
+	// them.
+	prLabels, prWarning := finalizePRLabels(ctx, c, plat)
 
 	// --- step 5: delete the local branch --------------------------
 	// `-D` (uppercase) is force-delete — refuses to keep the
@@ -405,6 +449,11 @@ func RunClose(
 	// what went on. The row is absent when the close touched no
 	// issue (a local fix, or an issue the tracker no longer knows).
 	if line := labels.cardLine(); line != "" {
+		body += "\n" + line
+	}
+	// The same for the pull request the branch opened. The row is
+	// absent when the branch never had a PR.
+	if line := prLabels.cardLine(); line != "" {
 		body += "\n" + line
 	}
 	if n := droppedN; n > 0 {
@@ -510,21 +559,72 @@ func (l labelFinalize) cardLine() string {
 	if l.provider == nil {
 		return ""
 	}
-	parts := make([]string, 0, len(l.removed)+1)
-	for _, label := range l.removed {
+	return labelCard{removed: l.removed, added: l.added}.
+		row("issue", l.owner, l.repo, l.issue)
+}
+
+// labelCard is the label bookkeeping one row of the close card
+// renders.
+type labelCard struct {
+	// removed lists the labels that came off.
+	removed []string
+
+	// added is the label that went on. Empty when nothing went on.
+	added string
+
+	// kept lists the labels that could not come off.
+	kept []string
+}
+
+// row renders the `→ <kind>: owner/repo#N <labels>` line of the close
+// card.
+//
+// One `-<label>` per label that came off, one `+<label>` per label
+// that went on, one `!<label>` per label that could not come off.
+// "no nightme/* labels" when nothing moved.
+func (c labelCard) row(kind, owner, repo string, number int) string {
+	parts := make([]string, 0, len(c.removed)+len(c.kept)+1)
+	for _, label := range c.removed {
 		parts = append(parts, "-"+label)
 	}
-	if l.added != "" {
-		parts = append(parts, "+"+l.added)
+	if c.added != "" {
+		parts = append(parts, "+"+c.added)
+	}
+	for _, label := range c.kept {
+		parts = append(parts, "!"+label)
 	}
 	if len(parts) == 0 {
 		parts = append(parts, "no nightme/* labels")
 	}
-	return fmt.Sprintf("→ issue: %s/%s#%d %s",
-		l.owner, l.repo, l.issue, strings.Join(parts, " "))
+	return fmt.Sprintf("→ %s: %s/%s#%d %s",
+		kind, owner, repo, number, strings.Join(parts, " "))
 }
 
-// finalizeIssueLabels drives the platform half of the close: it
+// closePlatform is the git platform the close's platform steps talk
+// to: the provider plus the owner/repo it operates on.
+//
+// A platform carrying an error means "no platform reachable" — the
+// tracker half of the close then has nothing to do.
+type closePlatform struct {
+	prov  GitProvider
+	owner string
+	repo  string
+	err   error
+}
+
+// resolveClosePlatform resolves the platform the close works on.
+//
+// The resolution is shared by the issue-side and the PR-side
+// finalization, so the close probes the host at most once.
+func resolveClosePlatform(ctx context.Context, c Context, deps HandlerDeps) closePlatform {
+	prov, owner, repo, err := resolveProvider(ctx, c, deps)
+	if err != nil {
+		return closePlatform{err: err}
+	}
+	return closePlatform{prov: prov, owner: owner, repo: repo}
+}
+
+// finalizeIssueLabels drives the issue half of the close: it
 // brings the issue's `nightme/*` labels to the state the close means.
 //
 // The default mode marks the work done — every `nightme/*` label but
@@ -556,6 +656,7 @@ func (l labelFinalize) cardLine() string {
 func finalizeIssueLabels(
 	ctx context.Context,
 	c Context,
+	plat closePlatform,
 	deps HandlerDeps,
 	cs *chatsession.ChatSession,
 	chatID, messageID string,
@@ -571,15 +672,16 @@ func finalizeIssueLabels(
 		return labelFinalize{}, false, ""
 	}
 
-	// The same resolution policy as /gtw pr: the yml-cached
-	// c.Repo / c.Provider shortcut when the snapshot carries one,
-	// the live remote URL otherwise.
-	prov, owner, repo, err := resolveProvider(ctx, c, deps)
-	if err != nil {
+	// The platform is resolved once for the whole close (see
+	// resolveClosePlatform): the yml-cached c.Repo / c.Provider
+	// shortcut when the snapshot carries one, the live remote URL
+	// otherwise.
+	if plat.err != nil {
 		reply(ctx, cs.Emitter(), chatID, messageID,
-			"❌ cannot reach GitHub/GitLab to finalize the issue labels: "+err.Error())
+			"❌ cannot reach GitHub/GitLab to finalize the issue labels: "+plat.err.Error())
 		return labelFinalize{}, true, ""
 	}
+	prov, owner, repo := plat.prov, plat.owner, plat.repo
 
 	// The label catalog is verified before the labels change, so the
 	// repository keeps the gtw labels the next fix needs — and
@@ -711,6 +813,130 @@ func restoreIssueLabels(ctx context.Context, l labelFinalize) string {
 	return fmt.Sprintf(
 		"(issue labels restored on %s/%s#%d — fix the local state above and retry /gtw close)",
 		l.owner, l.repo, l.issue)
+}
+
+// prLabelFinalize records what the PR-side label step did, so the
+// success card can report it.
+type prLabelFinalize struct {
+	// number is the pull request the step worked on. Zero when the
+	// branch never had one.
+	number int
+
+	// removed lists the labels the step took off the PR, by the name
+	// the platform reported.
+	removed []string
+
+	// kept lists the labels the step could not take off the PR. They
+	// are still on it.
+	kept []string
+
+	// owner / repo identify the repository the PR lives on.
+	owner string
+	repo  string
+}
+
+// cardLine renders the PR row of the close card: one `-<label>`
+// entry per label that came off the PR, one `!<label>` entry per
+// label that stayed on it. Empty when the close touched no PR.
+func (p prLabelFinalize) cardLine() string {
+	if p.number == 0 {
+		return ""
+	}
+	return labelCard{removed: p.removed, kept: p.kept}.
+		row("pr", p.owner, p.repo, p.number)
+}
+
+// finalizePRLabels drives the PR half of the close: it takes the
+// `nightme/*` state labels off the pull request the branch opened.
+//
+// The PR's labels are bookkeeping — nothing reads them — so this step
+// only warns. A failure must not keep the worktree and the branch
+// behind: the local cleanup runs whatever the tracker says. That is
+// the deliberate difference to the issue side, whose labels are the
+// queue's source of truth and therefore gate the local cleanup.
+//
+// The removal set comes from the PR's own labels, so a hand-made
+// `nightme/custom` is a nightme label too. The queue marker
+// `nightme/assigned` is never touched: it belongs to the queue, and
+// the queue marker is not put on a PR.
+//
+// Unlike the issue side, the PR side never adds a label: the PR's
+// finished state is the platform's own "merged", so there is nothing
+// to put on.
+//
+// The caller runs it after the worktree removal and before the branch
+// deletion: the branch is what maps to the pull request, and after the
+// local cleanup there is nothing left that could abort — so the PR's
+// labels need no compensation.
+//
+// Returns what the step did and the warning to ride along on the
+// close's replies. A branch without a PR yields neither — the close's
+// subject is the issue.
+func finalizePRLabels(
+	ctx context.Context,
+	c Context,
+	plat closePlatform,
+) (prLabelFinalize, string) {
+	// No platform to ask, or no branch to ask about: the close has
+	// no PR to finalize. Silent — the close's subject is the issue.
+	if plat.err != nil || c.Branch == "" {
+		return prLabelFinalize{}, ""
+	}
+
+	pr, err := plat.prov.FindPRForBranch(ctx, plat.owner, plat.repo, c.Branch)
+	if err != nil {
+		return prLabelFinalize{}, fmt.Sprintf(
+			"⚠️ could not look up the PR of branch %s: %v", c.Branch, err)
+	}
+	if pr == nil {
+		// The branch never had a PR: nothing to finalize, nothing to
+		// say.
+		return prLabelFinalize{}, ""
+	}
+
+	labels, err := plat.prov.ListPRLabels(ctx, plat.owner, plat.repo, pr.Number)
+	if err != nil {
+		return prLabelFinalize{}, fmt.Sprintf(
+			"⚠️ could not read the labels of %s/%s#%d: %v",
+			plat.owner, plat.repo, pr.Number, err)
+	}
+
+	// The removal set: every nightme label the PR carries but the
+	// queue marker. The names are the platform's own, so a label the
+	// catalog does not know still comes off.
+	var removed []string
+	var kept []string
+	var failed []string
+	for _, label := range labels {
+		if !isNightmeLabel(label) {
+			continue
+		}
+		if strings.EqualFold(label, LabelAssigned) {
+			continue
+		}
+		if err := plat.prov.RemovePRLabel(ctx, plat.owner, plat.repo, pr.Number, label); err != nil {
+			// The labels that came off stay off; the ones that
+			// failed are named in the warning and in the card row.
+			kept = append(kept, label)
+			failed = append(failed, fmt.Sprintf("%s (%v)", label, err))
+			continue
+		}
+		removed = append(removed, label)
+	}
+
+	warning := ""
+	if len(failed) > 0 {
+		warning = fmt.Sprintf(
+			"⚠️ could not remove %s from %s/%s#%d — the PR keeps the label",
+			strings.Join(failed, ", "), plat.owner, plat.repo, pr.Number)
+	}
+	return prLabelFinalize{
+		number:  pr.Number,
+		removed: removed,
+		kept:    kept,
+		owner:   plat.owner,
+		repo:    plat.repo,
+	}, warning
 }
 
 // assertWorktreeClean returns a user-friendly error if `dir` has

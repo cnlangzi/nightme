@@ -828,14 +828,17 @@ func (s *Service) Status(ctx context.Context, chatID, messageID string) error {
 // The run is marked as stopped by the operator before it is cancelled:
 // the mark is what tells an operator's stop from every other way a
 // run ends, and the record of the session is built from it.
-func (s *Service) Stop(ctx context.Context, chatID string) error {
+//
+// The message id is the message the operator stopped the run from: the
+// record of the session rides on the card of that message.
+func (s *Service) Stop(ctx context.Context, chatID, messageID string) error {
 	s.mu.Lock()
 	r, ok := s.active[chatID]
 	s.mu.Unlock()
 	if !ok {
 		return ErrNoRun
 	}
-	r.markStoppedByOperator()
+	r.markStoppedByOperator(messageID)
 	r.cancel()
 	return nil
 }

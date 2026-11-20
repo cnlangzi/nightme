@@ -3,6 +3,7 @@ package me
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -2253,7 +2254,7 @@ func TestStop_EndsTheRun(t *testing.T) {
 	}
 	waitSent(t, op, "/gtw commit")
 
-	if err := svc.Stop(context.Background(), "obs-1"); err != nil {
+	if err := svc.Stop(context.Background(), "obs-1", "om_stop"); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
 	waitRun(t, svc, "obs-1")
@@ -2264,6 +2265,25 @@ func TestStop_EndsTheRun(t *testing.T) {
 	// stop, and nothing else.
 	if containsText(op.Sent(), "/stop") {
 		t.Errorf("the chat was told to stop: %v", op.Sent())
+	}
+}
+
+// TestStop_InAChatWithoutARun — a chat without a run has nothing to
+// stop, and no record of a run that was never there.
+func TestStop_InAChatWithoutARun(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
+
+	err := svc.Stop(context.Background(), "obs-1", "om_stop")
+	if !errors.Is(err, ErrNoRun) {
+		t.Fatalf("the failure is %v, want %v", err, ErrNoRun)
+	}
+	for _, m := range op.EmittedOf(messages.OutReply) {
+		if strings.HasPrefix(m.Text, "■ [") {
+			t.Errorf("the chat got a record of a run that never was: %v", op.EmittedOf(messages.OutReply))
+		}
 	}
 }
 

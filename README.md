@@ -405,7 +405,7 @@ The agent for `commit` and `pr` is chosen by `-a <agent>`, then `commit.agent` /
 
 ### 7. Close: `/gtw close [--reset]`
 
-**`/gtw close`** finishes the task: it finalises the issue's labels, removes the worktree, force-deletes the local branch, moves the chat's CWD back to the repo root, and syncs the default branch. The finalisation takes every `nightme/*` label off the issue except the queue marker `nightme/assigned` and puts `nightme/done` on it, so the tracker shows the work as finished instead of leaving a stale claim behind. **`/gtw close --reset`** only takes the state labels off and marks nothing done — the work is dropped, and the issue keeps its queue marker, so the automatic pick offers it again. It refuses while the worktree has uncommitted changes — commit, stash, or discard first. A failed step leaves the worktree, the branch and the state file in place and puts the issue's labels back, so re-running `/gtw close` starts from the same state. A failed branch delete is the exception: the worktree is gone by then, so the labels stay finalised and only the branch ref is left to clean up by hand.
+**`/gtw close`** finishes the task: it finalises the issue's labels, removes the worktree, force-deletes the local branch, moves the chat's CWD back to the repo root, and syncs the default branch. The finalisation takes every `nightme/*` label off the issue except the queue marker `nightme/assigned` and puts `nightme/done` on it, so the tracker shows the work as finished instead of leaving a stale claim behind. The pull request the branch opened is finalised too — its `nightme/*` labels come off, so both sides of the work show it as finished; that step only warns when it fails, because a pull request's labels are bookkeeping and the teardown does not wait for them. **`/gtw close --reset`** only takes the state labels off and marks nothing done — the work is dropped, and the issue keeps its queue marker, so the automatic pick offers it again. It refuses while the worktree has uncommitted changes — commit, stash, or discard first. A failed step leaves the worktree, the branch and the state file in place and puts the issue's labels back, so re-running `/gtw close` starts from the same state. A failed branch delete is the exception: the worktree is gone by then, so the labels stay finalised and only the branch ref is left to clean up by hand.
 
 ### Stuck: `/gtw abort`
 
@@ -756,7 +756,7 @@ key — is reported in `nightme logs` and left out. The daemon still starts, and
 | `/me pause` | Stops the run after the step it is on. |
 | `/me resume [note]` | Runs the step the run is on again. Its budget for the current round starts over. The note is your instruction. A step that is running, that succeeded, or that has not run yet is not run again: the answer names the step and says why. `/me resume` does not interrupt a step that is running. |
 | `/me next [note]` | Skips the step the run is on: the plan goes on with the workflow, and the facts the step produced are kept. The note is your instruction. A step whose command is still running is skipped: the command it sent to the chat is abandoned, and the run goes on with the next step of the job. The abandoned command is not cancelled — the chat owns it, and what it produces lands in the chat when it finishes. A step that succeeded, and a step whose work is not a chat command, are not skipped: the answer names the step and says why. |
-| `/me stop` | Cancels the run and leaves the record of the session in the chat. The work the chat agent does on its own goes on to its end. |
+| `/me stop` | Cancels the run and leaves the record of the session in the chat. The stop and the record share one card: the card of the `/me stop` message. The work the chat agent does on its own goes on to its end. |
 | `/me status` | Shows the state of the run again: the card of the `/me status` message carries the phase of the run, the tree of the rounds and the checklist of the round. |
 
 The card of a `/me pause`, `/me resume`, `/me next` or `/me status` message is
@@ -827,12 +827,16 @@ asks a question, the choices become the card's buttons: a click is the answer. T
 question itself never reaches the agent — it is a message of the chat, not a turn
 of the conversation.
 
-Every run that ends leaves a record of the session in the chat: the record rides
-on the card of the run and says how the run ended and why, what it did, what went
-wrong and what the models decided — the facts of the whole session, the actions
-that went wrong one by one, and the judgment the models made at the wake-ups. It
-is posted once the run has unwound, and it carries no buttons: the run is over. A
-run that ends by itself leaves a record too.
+Every run that ends leaves a record of the session in the chat: the record says
+how the run ended and why, what it did, what went wrong and what the models
+decided — the facts of the whole session, the actions that went wrong one by
+one, and the judgment the models made at the wake-ups. It is posted once the run
+has unwound, and it carries no buttons: the run is over. A run that ends by
+itself leaves a record too. The record rides on the card of the run, unless the
+operator stopped the run: the record of a stopped run rides on the card of the
+`/me stop` message, so the stop and the record are one card. The two land on
+that card in the order they arrive: the record may show up above the line that
+says the run was stopped.
 
 The card is the run's receipt. It carries the decision the run made last and the
 run's own words. The run's tool calls leave the card and appear in the chat as a

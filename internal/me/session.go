@@ -53,7 +53,8 @@ const (
 	// under the command message of the step the decision is about.
 	sessionDecision sessionKind = "decision"
 	// sessionRecord is the session of the record a finished run
-	// leaves behind: it rides on the card of the run.
+	// leaves behind: it rides on the card of the run, or on the card
+	// of the stop when the operator stopped the run.
 	sessionRecord sessionKind = "record"
 )
 

@@ -380,6 +380,18 @@ type GitProvider interface {
 	// Idempotent: re-adding an already-attached label is a no-op.
 	AddIssueLabel(ctx context.Context, owner, repo string, id int, label string) error
 
+	// AddPRLabel attaches `label` to the pull request (GitHub) or
+	// merge request (GitLab) carrying the given number.
+	//
+	// The pull request is the review unit, so a state label that
+	// says "this work can be reviewed" belongs on it as well as on
+	// the linked issue. The label catalog is shared between issues
+	// and pull requests, so the pull request takes the same label
+	// name the issue side uses.
+	//
+	// Idempotent: re-adding an already-attached label is a no-op.
+	AddPRLabel(ctx context.Context, owner, repo string, number int, label string) error
+
 	// CreateLabel creates `label` in the repository's label catalog
 	// with the given color (6-char hex, no leading '#') and
 	// description. Idempotent: when the label already exists, the
@@ -1766,6 +1778,21 @@ func (c *GitHubProvider) RemoveIssueLabel(ctx context.Context, owner, repo strin
 	return nil
 }
 
+// AddPRLabel runs `gh pr edit <number> --add-label <label> --repo ...`.
+// The label must already exist in the repository's catalog — the
+// catalog is shared with issues, so ensureRepoLabels covers it.
+func (c *GitHubProvider) AddPRLabel(ctx context.Context, owner, repo string, number int, label string) error {
+	_, stderr, err := c.runner().Run(ctx, "gh",
+		"pr", "edit", strconv.Itoa(number),
+		"--add-label", label,
+		"--repo", owner+"/"+repo,
+	)
+	if err != nil {
+		return fmt.Errorf("gh pr edit --add-label: %v: %s", err, stderr)
+	}
+	return nil
+}
+
 // CreateLabel runs `gh label create <name> --color <color>
 // --description <description> --repo <owner>/<repo>`. Idempotent:
 // gh creates the label if missing. When the label already exists,
@@ -2615,6 +2642,21 @@ func (c *GitLabProvider) RemoveIssueLabel(ctx context.Context, owner, repo strin
 	)
 	if err != nil {
 		return fmt.Errorf("glab issue update --unlabel: %v: %s", err, stderr)
+	}
+	return nil
+}
+
+// AddPRLabel runs `glab mr update <number> --label <label> --repo ...`.
+// The label must already exist in the project catalog — the catalog
+// is shared with issues, so ensureRepoLabels covers it.
+func (c *GitLabProvider) AddPRLabel(ctx context.Context, owner, repo string, number int, label string) error {
+	_, stderr, err := c.runner().Run(ctx, "glab",
+		"mr", "update", strconv.Itoa(number),
+		"--label", label,
+		"--repo", owner+"/"+repo,
+	)
+	if err != nil {
+		return fmt.Errorf("glab mr update --label: %v: %s", err, stderr)
 	}
 	return nil
 }

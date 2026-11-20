@@ -36,9 +36,10 @@ package gtw
 //     fails is put back to the agent once, with the reason; a reply
 //     that fails again opens no PR.
 // 10. provider.CreatePR → URL.
-// 11. With --ready: move the linked issue from `nightme/wip` to
+// 11. With --ready: the linked issue moves from `nightme/wip` to
+//     `nightme/ready`, and the pull request itself gains
 //     `nightme/ready` — the pull request exists, so the work is
-//     waiting for review. The transition runs on the paths where
+//     waiting for review. The bookkeeping runs on the paths where
 //     a pull request is open for the branch: this one, the one
 //     that was already open (step 5), and the ErrPRExists race.
 // 12. Reply with ✅ PR opened + branch / base / url / worktree /
@@ -118,7 +119,8 @@ type prArgs struct {
 
 	// Ready moves the linked issue from "claimed" to "waiting for
 	// review" once the pull request exists: `nightme/ready` goes
-	// on, `nightme/wip` comes off. Comes from `--ready`.
+	// on, `nightme/wip` comes off, and the pull request itself
+	// gains `nightme/ready`. Comes from `--ready`.
 	Ready bool
 }
 
@@ -143,8 +145,9 @@ type prArgs struct {
 // on the reply; neither blocks the pull request.
 //
 // With --ready, the linked issue also moves from "claimed" to
-// "waiting for review" once the pull request exists. The transition
-// is best-effort: it warns on the reply when a label call fails and
+// "waiting for review" once the pull request exists, and the pull
+// request itself gains `nightme/ready`. The bookkeeping is
+// best-effort: it warns on the reply when a label call fails and
 // never turns an opened pull request into a failed command.
 //
 // Everything else (detached HEAD / uncommitted / untracked /
@@ -268,7 +271,7 @@ func dispatchPR(
 		// for review whichever run opened it.
 		var readyWarnings []string
 		if args.Ready {
-			readyWarnings = applyReadyTransition(ctx, provider, owner, repo, c)
+			readyWarnings = applyReadyLabels(ctx, provider, owner, repo, c, existing.Number)
 		}
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			withWarning(fmt.Sprintf(
@@ -420,7 +423,7 @@ func dispatchPR(
 			// open for the branch, whichever run opened it.
 			var readyWarnings []string
 			if args.Ready {
-				readyWarnings = applyReadyTransition(ctx, provider, owner, repo, c)
+				readyWarnings = applyReadyLabels(ctx, provider, owner, repo, c, 0)
 			}
 			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 				withWarning(fmt.Sprintf(
@@ -442,7 +445,7 @@ func dispatchPR(
 	riskLevel, riskReason := extractRiskLevel(body)
 	var readyWarnings []string
 	if args.Ready {
-		readyWarnings = applyReadyTransition(ctx, provider, owner, repo, c)
+		readyWarnings = applyReadyLabels(ctx, provider, owner, repo, c, prNumberFromURL(url))
 	}
 	card := prependWarning(
 		renderPROpenedCard(c, baseBranch, url, riskLevel, riskReason),
@@ -496,41 +499,82 @@ func dispatchPR(
 		}), nil
 }
 
-// applyReadyTransition moves the linked issue from "claimed" to
-// "waiting for review": `nightme/ready` goes on, `nightme/wip` comes
-// off. It runs on every path where a pull request is open for the
-// branch — the one this run opened, the one that was already there,
-// and the ErrPRExists race window.
+// applyReadyLabels performs the --ready bookkeeping: the linked issue
+// moves from "claimed" to "waiting for review", and the pull request
+// gains `nightme/ready`.
 //
-// Add before remove: a failure between the two steps leaves the issue
-// claimed, and a claimed issue stays out of both fix paths. The
-// reverse order would leave an issue with no state label at all,
-// which reads as "nobody is working on it" — so a failed add skips
-// the removal.
+// It runs on every path where a pull request is open for the branch —
+// the one this run opened, the one that was already there, and the
+// ErrPRExists race window.
 //
-// Both calls are best-effort. The pull request is already open and
-// the label is bookkeeping: a failure warns on the reply and leaves
+// prNumber is the pull request number the caller already knows; 0
+// means the number is unknown and is resolved from the branch.
+//
+// Both halves are best-effort and independent: a failure on one side
+// does not skip the other. The pull request is already open and the
+// labels are bookkeeping — a failure warns on the reply and leaves
 // the outcome where it was.
-func applyReadyTransition(
+//
+// Add before remove on the issue side: a failure between the two steps
+// leaves the issue claimed, and a claimed issue stays out of both fix
+// paths. The reverse order would leave an issue with no state label
+// at all, which reads as "nobody is working on it" — so a failed add
+// skips the removal.
+func applyReadyLabels(
 	ctx context.Context,
 	provider GitProvider,
 	owner, repo string,
 	c Context,
+	prNumber int,
 ) []string {
-	if c.Issue <= 0 {
-		return []string{"⚠️ this worktree links no issue — no label was changed"}
-	}
 	var warnings []string
-	if err := provider.AddIssueLabel(ctx, owner, repo, c.Issue, LabelReady); err != nil {
+	if c.Issue <= 0 {
+		warnings = append(warnings,
+			"⚠️ this worktree links no issue — the issue labels were not changed")
+	} else if err := provider.AddIssueLabel(ctx, owner, repo, c.Issue, LabelReady); err != nil {
 		warnings = append(warnings, fmt.Sprintf(
 			"⚠️ could not add the `%s` label to issue #%d: %v", LabelReady, c.Issue, err))
-		return warnings
-	}
-	if err := provider.RemoveIssueLabel(ctx, owner, repo, c.Issue, LabelWIP); err != nil {
+	} else if err := provider.RemoveIssueLabel(ctx, owner, repo, c.Issue, LabelWIP); err != nil {
 		warnings = append(warnings, fmt.Sprintf(
 			"⚠️ could not remove the `%s` label from issue #%d: %v", LabelWIP, c.Issue, err))
 	}
+
+	number, err := readyPRNumber(ctx, provider, owner, repo, c.Branch, prNumber)
+	if err != nil {
+		warnings = append(warnings, fmt.Sprintf(
+			"⚠️ could not determine the pull request number: %v — the `%s` label was not added to the PR",
+			err, LabelReady))
+		return warnings
+	}
+	if err := provider.AddPRLabel(ctx, owner, repo, number, LabelReady); err != nil {
+		warnings = append(warnings, fmt.Sprintf(
+			"⚠️ could not add the `%s` label to PR #%d: %v", LabelReady, number, err))
+	}
 	return warnings
+}
+
+// readyPRNumber resolves the number of the pull request that is open
+// for `branch`. known is the number the caller already has (0 = none).
+//
+// Returns an error when the number cannot be determined — including
+// the case where the branch has no open pull request.
+func readyPRNumber(
+	ctx context.Context,
+	provider GitProvider,
+	owner, repo, branch string,
+	known int,
+) (int, error) {
+	if known > 0 {
+		return known, nil
+	}
+	pr, err := provider.FindOpenPRForBranch(ctx, owner, repo, branch)
+	if err != nil {
+		return 0, err
+	}
+	if pr == nil || pr.Number <= 0 {
+		return 0, fmt.Errorf("no open pull request for branch %s", branch)
+	}
+	return pr.Number, nil
 }
 
 // prAgentRun is what the agent phase of /gtw pr produced.

@@ -60,6 +60,9 @@ type fakeGitProvider struct {
 	addIssueLabelErr    error
 	removeIssueLabelErr error
 
+	// Generic response for AddPRLabel. Returning nil = success.
+	addPRLabelErr error
+
 	// Per-call response for AddIssueLabel. When set, the function
 	// answers instead of the generic error — lets a test fail one
 	// specific call (e.g. the restore of a removed label) and let
@@ -138,11 +141,11 @@ type fakeGitProvider struct {
 // named after the interface method (one variant per interface
 // method) so tests can pattern-match cleanly.
 type fakeProviderCall struct {
-	Method string // "GetIssue" / "ListIssues" / "ListBlockedBy" / "AddBlockedBy" / "AddIssueLabel" / "RemoveIssueLabel" / "CreatePR" / "GetPR" / "CreateLabel"
+	Method string // "GetIssue" / "ListIssues" / "ListBlockedBy" / "AddBlockedBy" / "AddIssueLabel" / "RemoveIssueLabel" / "AddPRLabel" / "CreatePR" / "GetPR" / "CreateLabel"
 	Owner  string
 	Repo   string
 	ID     int
-	Label  string // only set for AddIssueLabel / RemoveIssueLabel / CreateLabel
+	Label  string // only set for AddIssueLabel / RemoveIssueLabel / AddPRLabel / CreateLabel
 	Head   string // only set for CreatePR / GetPR
 
 	// Blocker is only set for AddBlockedBy: the issue that
@@ -285,6 +288,14 @@ func (f *fakeGitProvider) SetRemoveIssueLabelErr(err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.removeIssueLabelErr = err
+}
+
+// SetAddPRLabelErr configures the response for all AddPRLabel calls.
+// Used to simulate a label-API failure on the pull request.
+func (f *fakeGitProvider) SetAddPRLabelErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.addPRLabelErr = err
 }
 
 // SetAddIssueLabelFunc makes AddIssueLabel answer through fn, so a
@@ -675,6 +686,18 @@ func (f *fakeGitProvider) removeLabelFrom(id int, label string) {
 			f.listIssues[i] = withoutLabel(iss)
 		}
 	}
+}
+
+// AddPRLabel records the call and returns addPRLabelErr (nil by
+// default). The pull request number rides in ID, the label name in
+// Label — the same fields the issue-side label calls use.
+func (f *fakeGitProvider) AddPRLabel(_ context.Context, owner, repo string, number int, label string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, fakeProviderCall{
+		Method: "AddPRLabel", Owner: owner, Repo: repo, ID: number, Label: label,
+	})
+	return f.addPRLabelErr
 }
 
 // CreateLabel records the call and returns createLabelErr (nil

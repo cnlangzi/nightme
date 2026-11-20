@@ -69,15 +69,7 @@ func (s *Service) postRecord(r *run) {
 	// record is posted after that. The context outlives the run here
 	// on purpose.
 	ctx := context.WithoutCancel(r.ctx)
-	sess := &session{kind: sessionRecord, id: r.id}
-	// The stop is where the operator is looking: its card carries the
-	// record of the run it stopped.
-	sess.anchor = r.stopAnchorValue()
-	if sess.anchor == "" {
-		if runSess := r.runSessionRef(); runSess != nil {
-			sess.anchor = runSess.anchor
-		}
-	}
+	sess := &session{kind: sessionRecord, id: r.id, anchor: r.recordAnchor()}
 	r.setRecordSession(sess)
 	s.publishInit(ctx, r, sess)
 	s.publishRecord(ctx, r, sess, r.recordCard())

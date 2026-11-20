@@ -1962,6 +1962,21 @@ func (r *run) stateAnchor(messageID string) string {
 	return ""
 }
 
+// recordAnchor returns the message the record of the run hangs under.
+//
+// The record rides on the card of the run. A run the operator stopped
+// rides on the card of the stop instead: the stop and the record are
+// one card.
+func (r *run) recordAnchor() string {
+	if anchor := r.stopAnchorValue(); anchor != "" {
+		return anchor
+	}
+	if sess := r.runSessionRef(); sess != nil {
+		return sess.anchor
+	}
+	return ""
+}
+
 // decisionSessionRef returns the session of the decision that is open.
 func (r *run) decisionSessionRef() *session {
 	r.mu.Lock()

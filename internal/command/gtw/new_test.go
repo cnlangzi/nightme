@@ -46,6 +46,10 @@ func TestParseNewIssueArgs(t *testing.T) {
 		{name: "no material"},
 		{name: "yes", tail: "-y", line: "-y", yes: true},
 		{name: "yes long", tail: "--yes", line: "--yes", yes: true},
+		// The dash glyphs a phone keyboard types are the same flag.
+		{name: "yes em dash", tail: "—y", line: "—y", yes: true},
+		{name: "yes fullwidth hyphen", tail: "－y", line: "－y", yes: true},
+		{name: "yes em dash with extra", tail: "—y extra", line: "—y extra", wantErr: true},
 		{name: "yes with extra", tail: "-y extra", line: "-y extra", wantErr: true},
 		{name: "yes long with extra", tail: "--yes\nmore", line: "--yes", wantErr: true},
 		{name: "yes on a later line is material", tail: "-y", wantErr: true},

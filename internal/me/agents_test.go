@@ -3,6 +3,7 @@ package me
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -36,6 +37,16 @@ func emptyStep(summary string) fakeStep {
 	return fakeStep{outcome: messages.Outcome{
 		Status:  messages.OutcomeFailed,
 		Summary: summary,
+	}}
+}
+
+// unfinishedStep is a command that broke with work left behind: the
+// outcome says how much of it there is.
+func unfinishedStep(summary string, unfinished int) fakeStep {
+	return fakeStep{outcome: messages.Outcome{
+		Status:  messages.OutcomeIncomplete,
+		Summary: summary,
+		Data:    map[string]string{wfe.OutcomeKeyUnfinished: strconv.Itoa(unfinished)},
 	}}
 }
 
@@ -738,4 +749,237 @@ func stepUsage(r *run, stepID string) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.policy.StepUsage(r.stepIndex(stepID))
+}
+
+// ── the handover ───────────────────────────────────────────────────
+
+// TestStepChain_TheHandoverCarriesTheUnfinishedWork — an attempt that
+// broke with work left behind hands that work over: the next agent
+// finishes it instead of running the whole thing again.
+func TestStepChain_TheHandoverCarriesTheUnfinishedWork(t *testing.T) {
+	svc, op := chainService(t, `title: chain
+jobs:
+  main:
+    steps:
+      - id: review
+        message: "/review"
+        agents:
+          - mode: args
+            names: [omp, codex]
+`, nil)
+	op.steps = []fakeStep{unfinishedStep("2 of 3 groups unfinished", 2), okStep("codex did it")}
+
+	g := newGate()
+	op.gate = g
+	r := startRun(t, svc, g, Request{
+		Name: "chain", ChatID: "obs-1", Cwd: "/tmp/work",
+	})
+	waitRun(t, svc, "obs-1")
+
+	want := []string{"/review -a omp", "/review --continue -a codex"}
+	sent := op.Sent()
+	if len(sent) != len(want) {
+		t.Fatalf("the chat got %v, want %v", sent, want)
+	}
+	for i, cmd := range want {
+		if sent[i] != cmd {
+			t.Errorf("the chat got %v, want %v", sent, want)
+			break
+		}
+	}
+
+	// The history keeps the command that ran.
+	var runs []wfe.ActionRecord
+	for _, rec := range runHistory(r) {
+		if rec.Kind == wfe.ActionKindRun && rec.StepID == "review" {
+			runs = append(runs, rec)
+		}
+	}
+	if len(runs) != 2 {
+		t.Fatalf("the history holds %d runs of the step, want 2: %+v", len(runs), runs)
+	}
+	if runs[1].Command != "/review --continue -a codex" {
+		t.Errorf("the history records %q, want the handover command", runs[1].Command)
+	}
+
+	// The step's outcome is the outcome of the attempt that did not
+	// break.
+	out, ok := stepOutcome(r, "review")
+	if !ok {
+		t.Fatal("the review step has no outcome")
+	}
+	if out.Status != wfe.OutcomeOK {
+		t.Errorf("the review step ended as %q, want the outcome of the second attempt", out.Status)
+	}
+}
+
+// TestStepChain_TheHandoverFollowsWhatTheAttemptLeftBehind — the
+// command of an attempt depends on the outcome of the one before it:
+// an attempt that left work behind hands it over, an attempt that left
+// nothing behind runs the whole thing again.
+func TestStepChain_TheHandoverFollowsWhatTheAttemptLeftBehind(t *testing.T) {
+	cases := []struct {
+		name string
+		step fakeStep
+		want string
+	}{
+		{"the attempt reported no count", brokenStep("omp broke"), "/review -a codex"},
+		{"the attempt left nothing behind", unfinishedStep("every group finished", 0), "/review -a codex"},
+		{"the attempt left work behind", unfinishedStep("2 of 3 groups unfinished", 2), "/review --continue -a codex"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, op := chainService(t, `title: chain
+jobs:
+  main:
+    steps:
+      - id: review
+        message: "/review"
+        agents:
+          - mode: args
+            names: [omp, codex]
+`, nil)
+			op.steps = []fakeStep{tc.step, okStep("codex did it")}
+
+			g := newGate()
+			op.gate = g
+			startRun(t, svc, g, Request{
+				Name: "chain", ChatID: "obs-1", Cwd: "/tmp/work",
+			})
+			waitRun(t, svc, "obs-1")
+
+			sent := op.Sent()
+			if len(sent) != 2 {
+				t.Fatalf("the chat got %v, want two commands", sent)
+			}
+			if sent[1] != tc.want {
+				t.Errorf("the chat got %v, want %q", sent, tc.want)
+			}
+		})
+	}
+}
+
+// TestStepChain_AFailedHandoverFallsBackToAFullRun — a handover that
+// the command refuses (its flags do not go together) breaks the
+// attempt, and the agent after it runs the whole thing again: the
+// chain lives on, the work is not carried.
+func TestStepChain_AFailedHandoverFallsBackToAFullRun(t *testing.T) {
+	svc, op := chainService(t, `title: chain
+jobs:
+  main:
+    steps:
+      - id: review
+        message: "/review"
+        agents:
+          - mode: args
+            names: [omp, codex, claude]
+`, nil)
+	op.steps = []fakeStep{
+		unfinishedStep("2 of 3 groups unfinished", 2),
+		brokenStep("the flags do not go together"),
+		okStep("claude did it"),
+	}
+
+	g := newGate()
+	op.gate = g
+	startRun(t, svc, g, Request{
+		Name: "chain", ChatID: "obs-1", Cwd: "/tmp/work",
+	})
+	waitRun(t, svc, "obs-1")
+
+	want := []string{
+		"/review -a omp",
+		"/review --continue -a codex",
+		"/review -a claude",
+	}
+	sent := op.Sent()
+	if len(sent) != len(want) {
+		t.Fatalf("the chat got %v, want %v", sent, want)
+	}
+	for i, cmd := range want {
+		if sent[i] != cmd {
+			t.Errorf("the chat got %v, want %v", sent, want)
+			break
+		}
+	}
+}
+
+// TestStepChain_TheUseModeHasNoHandover — the use mode sends the
+// message as it is: there is no place to put the handover in it.
+func TestStepChain_TheUseModeHasNoHandover(t *testing.T) {
+	sw := &fakeSwitcher{current: "claude"}
+	svc, op := chainService(t, `title: chain
+jobs:
+  main:
+    steps:
+      - id: review
+        message: "/review"
+        agents:
+          - mode: use
+            names: [omp, codex]
+`, sw)
+	op.steps = []fakeStep{unfinishedStep("2 of 3 groups unfinished", 2), okStep("codex did it")}
+
+	g := newGate()
+	op.gate = g
+	startRun(t, svc, g, Request{
+		Name: "chain", ChatID: "obs-1", Cwd: "/tmp/work",
+	})
+	waitRun(t, svc, "obs-1")
+
+	want := []string{"/review", "/review"}
+	sent := op.Sent()
+	if len(sent) != len(want) {
+		t.Fatalf("the chat got %v, want %v", sent, want)
+	}
+	for i, cmd := range want {
+		if sent[i] != cmd {
+			t.Errorf("the chat got %v, want %v", sent, want)
+			break
+		}
+	}
+}
+
+// TestStepChain_TheDecisionModelHandsTheWorkOverToo — the chain is
+// the step's agent policy: the decision model runs the step's message
+// through the same chain, and the handover works there too.
+func TestStepChain_TheDecisionModelHandsTheWorkOverToo(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "chain", `title: chain
+jobs:
+  main:
+    steps:
+      - id: review
+        message: "/review"
+        agents:
+          - mode: args
+            names: [omp, codex]
+`)
+
+	provider := &scriptedProvider{responses: []llm.Response{
+		{Message: toolCallMsg("c1", "ntm_review", map[string]any{})},
+		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "done", "summary": "reviewed"})},
+	}}
+	svc, op := testService(t, dir, Config{Provider: provider})
+	op.steps = []fakeStep{unfinishedStep("2 of 3 groups unfinished", 2), okStep("codex did it")}
+
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "chain", ChatID: "obs-1", Cwd: "/tmp/work",
+		Commands: []CommandInfo{{Name: "review"}},
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitRun(t, svc, "obs-1")
+
+	want := []string{"/review -a omp", "/review --continue -a codex"}
+	sent := op.Sent()
+	if len(sent) != len(want) {
+		t.Fatalf("the chat got %v, want %v", sent, want)
+	}
+	for i, cmd := range want {
+		if sent[i] != cmd {
+			t.Errorf("the chat got %v, want %v", sent, want)
+			break
+		}
+	}
 }

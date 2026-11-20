@@ -71,7 +71,7 @@ const OutcomeKeyError = "error"
 //
 // Data is deliberately map[string]string rather than a struct:
 // the set of facts differs per command, and the consumer reads the
-// keys it cares about ("pr_url", "sha_range", "unfinished_groups").
+// keys it cares about ("pr_url", "sha_range", "unfinished").
 type Outcome struct {
 	Status  OutcomeStatus
 	Summary string

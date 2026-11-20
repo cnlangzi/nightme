@@ -135,6 +135,8 @@ func (f *Factory) Spec() command.Spec {
 /review -c                  # continue the groups of the last review in this chat
                                  #   that failed: a group that reached the agent is
                                  #   resumed, a group that never started is re-run
+/review -c -a codex        # continue with codex taking the failed groups over:
+                                 #   the groups are re-run with their stored prompt
 /review --abort            # stop the review running in this chat
 /review --timeout 5m       # close a subagent that says nothing for 5 minutes
                                  #   (0 disables the timeout)`,
@@ -193,6 +195,9 @@ type Spec struct {
 	// chat that failed. The runner is the agent recorded with that
 	// run — a session belongs to one agent and cannot be moved to
 	// another — so the four-tier runner resolution does not apply.
+	//
+	// Agent overrides that runner: another agent takes the groups
+	// over, re-running them with the prompt they were asked to run.
 	Continue bool
 
 	// Abort stops the review (or the continuation) that is running
@@ -260,9 +265,10 @@ func parseReviewArgs(argv []string) (Spec, error) {
 // already in flight, so the flags that choose or persist a runner
 // have nothing to add to it.
 //
-// The --continue checks come next: --continue resumes an existing
-// runner, so the flags that choose or persist a runner have nothing
-// to add to it.
+// The --continue checks come next: --continue picks the last review
+// of this chat back up. It may name the agent that takes it over, so
+// --agent is not in the way — but the flags that persist a runner
+// have nothing to add to a review that is already running.
 func validateReviewFlags(spec Spec) error {
 	switch {
 	case spec.TimeoutSet && spec.Abort:
@@ -277,8 +283,6 @@ func validateReviewFlags(spec Spec) error {
 		return errors.New("--abort and --global are mutually exclusive")
 	case spec.Abort && spec.Unset:
 		return errors.New("--abort and --unset are mutually exclusive")
-	case spec.Continue && spec.Agent != "":
-		return errors.New("--continue and --agent are mutually exclusive")
 	case spec.Continue && spec.Global:
 		return errors.New("--continue and --global are mutually exclusive")
 	case spec.Continue && spec.Unset:
@@ -414,7 +418,7 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	}
 
 	if spec.Continue {
-		return f.handleContinue(ctx, rt, cs, input, notices, timeout)
+		return f.handleContinue(ctx, rt, cs, input, spec, notices, timeout)
 	}
 	return f.handleReview(ctx, rt, cs, input, spec, notices, timeout)
 }
@@ -730,7 +734,12 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 			// message must not see "unknown" for a review that
 			// visibly failed.
 			var text string
-			data := map[string]string{"agent": runnerName}
+			// The fan-out ran: the groups it ran are the work that
+			// is left, and the count of them says how much. A failure
+			// before the fan-out — no diff, an unknown base, an agent
+			// that cannot review — leaves no key behind: there is no
+			// work to pick up.
+			data := unfinishedData(map[string]string{"agent": runnerName}, groupOutcomes)
 			switch {
 			case errors.Is(err, agent.ErrNoDiff):
 				// Pre-compute found zero reviewable files in the
@@ -840,12 +849,9 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 			status = messages.OutcomeIncomplete
 			summary = fmt.Sprintf("%d of %d groups unfinished", unfinished, groups)
 		}
-		data := map[string]string{"agent": runnerName}
+		data := unfinishedData(map[string]string{"agent": runnerName}, groupOutcomes)
 		if groups > 0 {
 			data["groups"] = fmt.Sprintf("%d", groups)
-		}
-		if unfinished > 0 {
-			data["unfinished_groups"] = fmt.Sprintf("%d", unfinished)
 		}
 		work.Report(messages.Outcome{
 			Status:  status,
@@ -954,12 +960,16 @@ const continueText = "continue"
 // resuming it against another working directory would point the
 // agent at the wrong files.
 //
+// An --agent names another runner: the groups are taken over. The
+// takeover re-runs every group with the prompt it was asked to run —
+// the session belongs to the agent that ran it and cannot be moved.
+//
 // The merged result is delivered exactly like a review's: wrapped
 // with agent.FormatReviewMessage and injected into the chat session's
 // current AS as a user turn. The channel gets the continued groups'
 // coalesced stream, framed by the plan line and the verdict line.
 func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices,
-	cs *chatsession.ChatSession, input command.SlashInput, notices []string,
+	cs *chatsession.ChatSession, input command.SlashInput, spec Spec, notices []string,
 	timeout time.Duration) (*command.SlashOutput, error) {
 	chatID := input.ChatID
 
@@ -985,7 +995,16 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 	// continuation ends.
 	release := func() { f.finishReview(chatID) }
 
-	jobs, why := rec.resumable()
+	// The runner of this continuation: the agent of the last review,
+	// unless another one is named. Another one takes the groups over.
+	runnerName := rec.agent
+	takeover := false
+	if spec.Agent != "" {
+		runnerName = spec.Agent
+		takeover = spec.Agent != rec.agent
+	}
+
+	jobs, why := rec.resumable(takeover)
 	if why != "" {
 		release()
 		// The ℹ️ cards here mean "there was nothing to resume" —
@@ -994,7 +1013,6 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 		return replyWith(ctx, rt, notices, why), nil
 	}
 
-	runnerName := rec.agent
 	starter, err := agent.Builtins.Get(runnerName)
 	if err != nil {
 		release()
@@ -1120,16 +1138,21 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 		// spent its one recovery attempt — the failure stays in the
 		// record, the retry does not.
 		//
-		// An ABORTED continuation is the exception: the groups were
-		// stopped, not exhausted, so they keep their resume attempt
-		// and stay resumable.
+		// A TAKEOVER is the exception: another agent picked the
+		// groups up, and the operator's own recovery attempt is
+		// still theirs to spend. The group stays resumable.
+		//
+		// An ABORTED continuation is the exception too: the groups
+		// were stopped, not exhausted, so they keep their resume
+		// attempt and stay resumable.
 		//
 		// The write is conditional on the record still being the one
 		// this continuation resumed from: a review that finished in
 		// the meantime owns the chat's resume state.
 		abortedRun := aborted(revCtx)
 		groupOutcomes := collector.results()
-		if abortedRun {
+		switch {
+		case abortedRun:
 			// A group the abort caught before it spawned reports no
 			// session id — the resume never got that far — but the
 			// session it was reopening is still the one the record
@@ -1137,9 +1160,18 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 			// it never reached the agent, and would not be
 			// resumable.
 			carrySessionIDs(groupOutcomes, jobs)
-		} else {
+		case !takeover:
+			// A takeover does not spend the operator's recovery
+			// attempt: the group failed under another agent, and the
+			// operator may still pick it up.
 			groupOutcomes = collector.spentResults()
 		}
+		// A resumed group keeps its session but loses its prompt: the
+		// resume sent the text "continue", not the prompt the group
+		// was asked to run. The prompt rides along from the record it
+		// came from — it is the only way to run the group on another
+		// agent.
+		carryPrompts(groupOutcomes, rec.outcomes)
 		f.recordIfCurrent(chatID, rec.id, runnerName, workspace, groupOutcomes)
 		finish()
 
@@ -1184,8 +1216,13 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 				"agent", runnerName,
 				"err", err,
 			)
+			// The count rides along even here: the continuation fanned
+			// out over groups, and the ones that failed again are the
+			// work that is left. A chain that hands the step over
+			// reads the count — a continuation that fails without it
+			// would send the next agent back to the beginning.
 			work.Report(command.FailedOutcomeData("error", err.Error(),
-				timeoutOutcomeData(map[string]string{"agent": runnerName}, groupOutcomes),
+				timeoutOutcomeData(unfinishedData(map[string]string{"agent": runnerName}, groupOutcomes), groupOutcomes),
 				"the continuation failed: "+err.Error()))
 			if emitter == nil {
 				return
@@ -1228,12 +1265,9 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 			status = messages.OutcomeIncomplete
 			summary = fmt.Sprintf("%d of %d continued groups unfinished", unfinished, continued)
 		}
-		data := map[string]string{"agent": runnerName}
+		data := unfinishedData(map[string]string{"agent": runnerName}, groupOutcomes)
 		if continued > 0 {
 			data["continued_groups"] = fmt.Sprintf("%d", continued)
-		}
-		if unfinished > 0 {
-			data["unfinished_groups"] = fmt.Sprintf("%d", unfinished)
 		}
 		work.Report(messages.Outcome{
 			Status:  status,

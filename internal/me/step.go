@@ -87,8 +87,7 @@ func (s *Service) runMessage(ctx context.Context, r *run, job string, step wfe.S
 		s.refreshRun(r)
 		return stepVerdict{Outcome: out, Settled: true, Failure: err}, stepResult{}, nil
 	}
-	attempts := s.composeAttempts(r, step, base)
-	return s.runAttempts(ctx, r, job, step, attempts)
+	return s.runAttempts(ctx, r, job, step, base)
 }
 
 // attempt is one run of a step's message with one agent.
@@ -104,54 +103,74 @@ type attempt struct {
 	recorded string
 }
 
-// composeAttempts composes the attempts of a step's message.
+// chainAgents returns the chain of a step's message: the agents of
+// every entry, in the order the entries and their names are declared.
 //
-// The entries run in the order they are declared, and the names of an
-// entry in the order they are declared. A step that names no agent has
-// one attempt: its message, unchanged.
-func (s *Service) composeAttempts(r *run, step wfe.Step, base string) []attempt {
+// The command of an attempt is not filled in yet: what the attempt
+// runs depends on the attempt before it.
+//
+// A step that names no agent has no chain: its message runs once,
+// unchanged.
+func (s *Service) chainAgents(r *run, step wfe.Step) []attempt {
 	if len(step.Agents) == 0 {
-		return []attempt{{command: base, recorded: base}}
+		return nil
 	}
 	out := make([]attempt, 0, len(step.Agents))
 	for _, entry := range step.Agents {
 		for _, name := range entry.Names {
-			agent := strings.TrimSpace(s.evalText(r, name))
-			if entry.Mode == wfe.AgentModeArgs {
-				command := base + " -a " + agent
-				out = append(out, attempt{
-					mode:     entry.Mode,
-					agent:    agent,
-					command:  command,
-					recorded: command,
-				})
-				continue
-			}
 			out = append(out, attempt{
-				mode:     entry.Mode,
-				agent:    agent,
-				command:  base,
-				recorded: base + " [agent: " + agent + "]",
+				mode:  entry.Mode,
+				agent: strings.TrimSpace(s.evalText(r, name)),
 			})
 		}
 	}
 	return out
 }
 
-// runAttempts runs the attempts of a step's message in order.
+// runAttempts runs the chain of agents of a step's message.
 //
-// The attempts run in the order they are composed. An attempt that
+// The attempts are composed one at a time: the command of an attempt
+// depends on what the attempt before it left behind. An attempt that
 // broke hands over to the next one; a cancelled attempt ends the
 // chain. The first attempt that did not break is the step's verdict.
 //
+// A handover carries the work that is left: an attempt that reported
+// how much of its work it did not finish hands that much over, and
+// the next agent finishes it instead of running the whole thing
+// again. An attempt that reported no count leaves nothing behind —
+// the next agent runs the whole thing again.
+//
 // Every attempt is recorded against the step. The error is why the
 // run cannot go on: the run was cancelled.
-func (s *Service) runAttempts(ctx context.Context, r *run, job string, step wfe.Step, attempts []attempt) (stepVerdict, stepResult, error) {
+func (s *Service) runAttempts(ctx context.Context, r *run, job string, step wfe.Step, base string) (stepVerdict, stepResult, error) {
+	agents := s.chainAgents(r, step)
+	if len(agents) == 0 {
+		// The step names no agent: its message runs once, unchanged.
+		return s.runAttempt(ctx, r, job, step, attempt{command: base, recorded: base})
+	}
 	var (
 		verdict stepVerdict
 		res     stepResult
 	)
-	for _, a := range attempts {
+	// unfinished is what the attempt before left behind: the number of
+	// items it did not finish. Zero means there is nothing to hand
+	// over.
+	unfinished := 0
+	for _, a := range agents {
+		if a.mode == wfe.AgentModeArgs {
+			a.command = base + " -a " + a.agent
+			if unfinished > 0 {
+				// The work that is left is handed over: the next
+				// agent finishes it instead of running it again.
+				a.command = base + " --continue -a " + a.agent
+			}
+			a.recorded = a.command
+		} else {
+			// The use mode sends the message as it is: there is no
+			// place to put the handover in it.
+			a.command = base
+			a.recorded = base + " [agent: " + a.agent + "]"
+		}
 		v, raw, err := s.runAttempt(ctx, r, job, step, a)
 		if err != nil {
 			return stepVerdict{}, stepResult{}, err
@@ -164,8 +183,23 @@ func (s *Service) runAttempts(ctx context.Context, r *run, job string, step wfe.
 		if !fallsThrough(v.Outcome) {
 			return verdict, res, nil
 		}
+		unfinished = unfinishedCount(v.Outcome)
 	}
 	return verdict, res, nil
+}
+
+// unfinishedCount returns how many items an outcome left unfinished.
+//
+// The count is a fact the command reports: a command that finished
+// part of its work says how much of it is left. An outcome without
+// the count leaves nothing behind — the next agent runs the whole
+// thing again.
+func unfinishedCount(out wfe.Outcome) int {
+	n, err := strconv.Atoi(out.Data[wfe.OutcomeKeyUnfinished])
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
 }
 
 // runAttempt runs one attempt of a step's message.

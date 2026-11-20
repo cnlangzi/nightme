@@ -676,7 +676,7 @@ func TestIntegration_TheWorkflowRunsEndToEnd(t *testing.T) {
 		fakeStep{outcome: messages.Outcome{
 			Status:  messages.OutcomeIncomplete,
 			Summary: "1 of 3 groups unfinished",
-			Data:    map[string]string{"groups": "3", "unfinished_groups": "1"},
+			Data:    map[string]string{"groups": "3", "unfinished": "1"},
 		}},
 		okStep("review finished"),
 		okStep("review finished"),

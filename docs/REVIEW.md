@@ -55,7 +55,7 @@ agent 包不再区分 "native / mixed / delegate" 桥——每条桥的 `Starter
    │  -g / --global:把 runner 落成全局 `review.agent`(~/.nightme/config.yaml)
    │  --unset:删掉全局 `review.agent`,不跑 review
    │  -c / --continue:续跑本 chat 上一次 review 未完成的 group(见 §2.7);
-   │                  与 -a / -g / --unset 互斥
+   │                  与 -g / --unset 互斥;带 -a 是接管(换 agent 重跑那几组)
    │  --abort:停掉本 chat 正在跑的 review(或续跑)(见 §2.8);
    │          与 -a / -g / --unset / -c 互斥
    │  -t / --timeout:<dur> 定每个 group 的静默阈值(见 §2.9);
@@ -602,14 +602,18 @@ session 挂了,其它 group 的 findings 照常汇入,合并文本里该 group �
 重跑的 prompt 是**原样重放**,不是按当前工作区重新拼的:一次续跑覆盖的是一次快照,
 续跑的组 talk about 的正是 review 当初看到的那棵树。
 
+`--continue` 还可以带 `--agent`:那是**接管**——换另一个 agent 跑那几组。session 属于
+跑它的那个 agent,迁不动,所以接管不是续 session,而是拿存下来的 prompt 在新 agent 上
+**重放**那几组(见下面的边界表)。
+
 ### 续跑需要的状态
 
 | 状态 | 来源 | 说明 |
 |---|---|---|
-| runner | 上一次 review 跑的那个 agent | session 属于某个 agent,换不了,所以 `--continue` 不走四级 runner 解析 |
+| runner | 上一次 review 跑的那个 agent;`--continue` 带 `--agent` 时是那个 agent | session 属于某个 agent,换不了,所以 `--continue` 不走四级 runner 解析 |
 | workspace | 上一次 review 的 workspace | session 属于那个 workspace;换 cwd 会让 agent 看错文件 |
 | 每个 group 的 session id | group 自己的 agent session | 失败的 group 也必须能捞回 session id,否则没有可续跑的 session |
-| 每个 group 的 prompt | group 自己那份组装好的 prompt | 没跑到 agent 的 group 重跑时要发的东西;没有它就无从重跑 |
+| 每个 group 的 prompt | group 自己那份组装好的 prompt | 没跑到 agent 的 group 重跑时要发的东西;没有它就无从重跑;接管时也是它 |
 
 第三项是唯一需要动底层的地方:`drainSessionEvents` 的失败路径原本返回空
 `RunResult`,session id 只留在 error 的 audit 后缀里。失败路径现在返回带上
@@ -659,7 +663,10 @@ workspace / 每个 group 的 outcome)。factory 每个 daemon 进程建一次,�
 - **跑出 group 的 review 结束时** —— 记录换成这次 review 每个 group 的 outcome。
   一个 group 都没跑出来的 review(没有 diff 可 review、bridge 不支持 review)不
   动记录:没有新的 resume 状态,上一次 review 没收尾的 group 依然没收尾。
-- **续跑结束时** —— 记录换成这次续跑的 outcome。写回是**条件写**:只有当记录
+- **续跑结束时** —— 记录换成这次续跑的 outcome,runner 换成这次的 runner(接管的记录
+  归新 agent,操作者之后手动 `--continue` 续的是它)。续跑时组重开 session 会丢掉它
+  的 prompt(续跑发的是字面量 `continue`,不是那份 prompt),所以 prompt 从上一次记录
+  里带过来 —— 没有它,后面的接管就没有东西可重放。写回是**条件写**:只有当记录
   仍然是这次续跑读的那份时才写。续跑期间跑完的另一次 review 拥有这个 chat 的
   resume 状态,不能被更早开始、更晚结束的续跑覆盖。
 
@@ -678,9 +685,16 @@ workspace / 每个 group 的 outcome)。factory 每个 daemon 进程建一次,�
 | bridge 拒绝 resume(`ErrResumeUnhealthy`) | 该 group 在合并文本里 inline 标 failed(所有 group 都失败时:只发 `❌ /review continue failed (agent=<name>): …`) |
 | 续跑又失败 | 合并文本里 inline 标 failed;该 group 的恢复机会已用完,再 `--continue` 无事可做 |
 | 所有 group 都失败 | 整个续跑失败,只发失败回复,不注入 findings |
+| `--continue` 带的 `--agent` 是另一个 agent | 接管:那几组拿存下来的 prompt 在新 agent 上重放(旧 session 不重开) |
+| 接管时某组没有存下 prompt | `ℹ️ the unfinished group has no prompt to re-run on another agent — nothing to resume`(session 属于旧 agent,迁不动,没有 prompt 就重放不了) |
+| 失败的 group 的恢复机会已经用完(操作者自己 `-c` 过) | 接管也不捡它:恢复额度是操作者自己的重试,接管不消费它,也不绕过它 |
+| `--continue` 带的 `--agent` 就是记录里的 agent | 与不带 `--agent` 完全一样:续 session,失败即用掉那组的恢复额度 |
+| 接管又失败 | 那组的恢复额度**没有**用掉:接管是"换 agent 接手",恢复额度留给操作者自己的重试 |
 
-`--continue` 与 `--agent` / `--global` / `--unset` 互斥:那三个 flag 选的是"这次
-用哪个 runner",而 `--continue` 续的是"上一次那个 runner"。
+`--continue` 与 `--global` / `--unset` 互斥:那两个 flag 选的是"这次用哪个 runner",
+而 `--continue` 续的是"上一次那个 runner"。`--continue` 与 `--agent` **不**互斥:
+`--agent` 在这里是接管。接管的记录写回时换成这次的 runner,所以操作者之后手动
+`/review --continue` 续的是最后一个 agent 的组。
 
 ---
 

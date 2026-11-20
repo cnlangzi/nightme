@@ -514,7 +514,7 @@ jobs:
       - id: review
         message: "/review"
         if: ${{ steps.fix.outputs.data.issue }}
-        note: review 当前分支与默认分支的差异，findings 回到聊天里。中断（还有组没跑完）用 /review -c 续跑，不要用 -a（与 --continue 互斥）；already_running 就等它结束。no_diff 是异常：fix 本该改出了东西，分支却和 base 一样 —— instruct 让 agent 真正改出来，再跑 commit 和 review；base_unknown 是 base 分支没解析出来，也什么都没 review，先弄清 base 再跑 review。
+        note: review 当前分支与默认分支的差异，findings 回到聊天里。中断（还有组没跑完）用 /review -c 续跑，换 agent 接手就加 -a；already_running 就等它结束。no_diff 是异常：fix 本该改出了东西，分支却和 base 一样 —— instruct 让 agent 真正改出来，再跑 commit 和 review；base_unknown 是 base 分支没解析出来，也什么都没 review，先弄清 base 再跑 review。
       - id: commit2
         message: "/gtw commit"
         if: ${{ steps.fix.outputs.data.issue }}
@@ -763,7 +763,7 @@ Chat 级别的斜杠命令。`/gtw` 子命令见 [它们自己的 section](#git-
 | `/tools on\|off` | 是否展示每个工具的独立线程回复（默认关）。 |
 | `/handoff <name>` | 把当前任务序列化到 `~/.nightme/handoff/<name>.md`，下一个 agent（或新 session）从任意目录接手。 |
 | `/resume <name>` | 在当前 session 里继续 `~/.nightme/handoff/<name>.md` 描述的任务。 |
-| `/review [-a\|--agent <agent>] [-g\|--global] [--unset] [-c\|--continue] [--abort] [-t\|--timeout <dur>]` | 当前分支对比默认分支做 review（PR 模式），findings 注回当前 chat。`--agent` 指定用哪个 agent 跑 review；`-g` 把它存成 `~/.nightme/config.yaml` 里的全局 `review.agent`；`--unset` 删掉这个全局设置。`-c` 续跑本 chat 上一次 review 中失败的 group：重新打开那些 group 的 agent session，给它们发 "continue"。`--abort` 停掉本 chat 正在跑的 review —— 它的 agent session 被关掉，停掉的 group 还能用 `-c` 续跑。`--timeout` 定一个 subagent 最长能沉默多久（默认 15m，`0` 表示关掉）：沉默超过这个窗口的 subagent 会被关掉、报成超时，并且还能用 `-c` 续跑。阈值依次取自 flag、`~/.nightme/config.yaml` 里的 `review.timeout`、内置默认值。review 这一轮本身没有时限：一直跑到用户中止或 daemon 关闭为止。 |
+| `/review [-a\|--agent <agent>] [-g\|--global] [--unset] [-c\|--continue] [--abort] [-t\|--timeout <dur>]` | 当前分支对比默认分支做 review（PR 模式），findings 注回当前 chat。`--agent` 指定用哪个 agent 跑 review；`-g` 把它存成 `~/.nightme/config.yaml` 里的全局 `review.agent`；`--unset` 删掉这个全局设置。`-c` 续跑本 chat 上一次 review 中失败的 group：重新打开那些 group 的 agent session，给它们发 "continue"；带上 `-a` 就是换一个 agent 接管那几组——拿每组当初那份 prompt 在新 agent 上重放。`--abort` 停掉本 chat 正在跑的 review —— 它的 agent session 被关掉，停掉的 group 还能用 `-c` 续跑。`--timeout` 定一个 subagent 最长能沉默多久（默认 15m，`0` 表示关掉）：沉默超过这个窗口的 subagent 会被关掉、报成超时，并且还能用 `-c` 续跑。阈值依次取自 flag、`~/.nightme/config.yaml` 里的 `review.timeout`、内置默认值。review 这一轮本身没有时限：一直跑到用户中止或 daemon 关闭为止。 |
 | `/wiki init [--modules] [--llmstxt] [--arch]` | 读码、分模块、写每个模块的 wiki 文件——把仓库 wiki 作为项目资产。 |
 | `/queue <message>` | 把一条消息作为独立 Prompt 追加进队列。 |
 | `/wf install [-f] <owner>/<name>` | 把一个已发布的 workflow 装进 workflows 目录。地址就是 workflow 的名字：`nightme/coder` 装成 `~/.nightme/workflows/nightme/coder/workflow.yml`，用 `/me start nightme/coder` 跑。安装过程显示成一张清单——下载、校验、写入。已经装过的地址会被跳过；`-f` 会再装一次。不带 owner 的地址就是项目自己的命名空间：`coder` 就是地址 `nightme/coder`。 |

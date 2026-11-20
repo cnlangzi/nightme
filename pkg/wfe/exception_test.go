@@ -41,6 +41,16 @@ func TestOutcome_Exception(t *testing.T) {
 	}
 }
 
+// TestOutcomeKeyUnfinished pins the name of the key the unfinished
+// count rides in: the command that reports the count and the program
+// that reads it agree on the literal, and a rename would break the
+// handover silently.
+func TestOutcomeKeyUnfinished(t *testing.T) {
+	if OutcomeKeyUnfinished != "unfinished" {
+		t.Errorf("OutcomeKeyUnfinished = %q, want %q", OutcomeKeyUnfinished, "unfinished")
+	}
+}
+
 // TestDecide_ANormalResultKeepsTheFlowGoing — a step that ended
 // failed without an error description is a normal branch: the plan
 // goes on with the next step of its own and asks nobody.

@@ -12,8 +12,7 @@
 //     Legacy JSON with "compactionCount" key is silently ignored.
 //
 // v4 changes (suspect state removed):
-//   - SuspectReason / SuspectSince removed entirely; the flag they
-//     carried had no reader.
+//   - SuspectReason / SuspectSince removed entirely.
 //   - Load compat: legacy JSON with "suspectReason" / "suspectSince"
 //     keys is silently ignored.
 package registry
@@ -85,8 +84,7 @@ type AgentSessionEntry struct {
 }
 
 // AgentSessionFileVersion is the on-disk format version for
-// agent_sessions.json. Bumped to 4 to mark the suspect-state
-// removal. Load is permissive (unknown fields are silently ignored
-// by default), so older files load as v4 entries with the dropped
-// fields defaulting to zero values.
+// agent_sessions.json. Load is permissive (unknown fields are
+// silently ignored by default), so older files load as v4 entries
+// with the dropped fields defaulting to zero values.
 const AgentSessionFileVersion = 4

@@ -15,7 +15,7 @@
 // on Unix and kernel32!OpenProcess on Windows. The shared API
 // (AlivePID, ErrNoPID) is platform-independent; the
 // implementation lives in procutil_unix.go / procutil_windows.go.
-// Same pattern as internal/chatsession/prober_kill_{unix,windows}.go.
+// Same pattern as internal/chatsession/reaper_kill_{unix,windows}.go.
 //
 // Cheap: every call is a single syscall (or one userland call +
 // CloseHandle on Windows) + a couple of field reads. Keepalive

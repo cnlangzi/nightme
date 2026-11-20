@@ -93,8 +93,8 @@ type Result struct {
 // called, so IsReady flips true synchronously and the next TryFlush
 // can land immediately — without waiting for the bridge protocol
 // to emit a terminal event (which the bridge might never do for a
-// wedged turn, leaving the system stuck until the idle-CLI
-// reaper closed the session an hour later).
+// wedged turn — a session whose turn is still in flight is never
+// reclaimed, so only /stop clears it).
 //
 // h.Stop is still called (best-effort) so the bridge has a chance
 // to acknowledge / cancel cleanly. Its return value is for the
@@ -134,7 +134,7 @@ func StopSelectedAgent(c *Cmd) (Result, error) {
 	// TryFlush unblocks. This is the fix for /stop getting stuck
 	// when the bridge swallows the stop signal (or hangs) and
 	// never emits EventAgentDone/Error — pre-fix, IsReady stayed
-	// false until the session was reclaimed.
+	// false and the turn was stuck until the user ran /stop.
 	as.EndPrompt(chatsession.PromptEndUserStopped)
 
 	// best-effort: tell the bridge. Local state is already

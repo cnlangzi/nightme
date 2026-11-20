@@ -507,7 +507,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	// The idle-CLI reaper: it reclaims the agent CLIs the daemon
 	// keeps alive but no longer needs (a parked session, an agent
 	// the user switched away from). It stops before the teardown
-	// below, so it never races the shutdown for the same session.
+	// below, so the shutdown owns the sessions from that point on.
 	reaper := chatsession.NewAgentReaper(stackOpts.asPool, logger)
 	reaper.Start()
 	defer reaper.Stop()
@@ -627,8 +627,11 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	stopPersonalAgent(personal, logger)
 
 	// The reaper stops before the teardown: it closes agent CLIs,
-	// and the teardown owns the same sessions. Stop() is idempotent,
-	// so the deferred call above covers the early-return paths.
+	// and the teardown owns the same sessions. Stop() waits for the
+	// scan loop but not for a batch that already blew its budget —
+	// those closes are idempotent, so a late one is harmless.
+	// Stop() is idempotent, so the deferred call above covers the
+	// early-return paths.
 	reaper.Stop()
 
 	return ShutdownRunMulti(out, startedChannels, csFile, asFile, prCacheReg, logger, cancelProcs)

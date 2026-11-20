@@ -751,10 +751,9 @@ func (d *driver) New(ctx context.Context) error {
 //     flight, `--resume` could hit the "stale resumed turn"
 //     state where the CLI accepts the next user message
 //     but never produces a turn/completed — the user saw
-//     a permanent "Working..." until the idle-CLI reaper
-//     closed the session an hour later. The
-//     `ErrResumeUnhealthy` + chat-layer retry path was the
-//     workaround.
+//     a permanent "Working..." the user could only clear with
+//     /stop. The `ErrResumeUnhealthy` + chat-layer retry path
+//     was the workaround.
 //   - Post-fix: bridge writes the control_request line on
 //     stdin. The CLI cancels the in-flight turn, emits
 //     control_response + result{error_during_execution},
@@ -779,9 +778,10 @@ func (d *driver) New(ctx context.Context) error {
 // It does NOT cover "old CLI that accepts stdin writes but
 // doesn't recognize control_request" — that case would
 // appear as a successful writeLine followed by no terminal
-// event. The daemon's idle-CLI reaper closes such a CLI once it
-// has been silent for an hour. There is no bridge-side SIGINT
-// trigger for that path because we have no reliable way to
+// event. The turn stays in flight, so the session is never
+// reclaimed on its own — the user has to run /stop. There is no
+// bridge-side SIGINT trigger for that path because we have no
+// reliable way to
 // detect "CLI accepted the bytes but didn't understand them" —
 // anything we did would either be a no-op (CLI already
 // processed-and-discarded the bogus bytes) or a wrong SIGINT on a

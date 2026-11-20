@@ -576,9 +576,10 @@ func (as *AgentSession) Shutdown() {
 	// Step 2: snapshot readpumpStop / readpumpDone under lock
 	stop := as.readpumpStop
 	done := as.readpumpDone
-	as.asMu.Unlock()
-
-	// Closing the stop chan wakes the readpump select.
+	// Closing the stop chan wakes the readpump select. The
+	// check-and-close runs under asMu so a concurrent Close() (a
+	// user /close, or the daemon's idle-CLI reaper) cannot close
+	// the same channel twice — that panics.
 	if stop != nil {
 		select {
 		case <-stop:
@@ -587,6 +588,7 @@ func (as *AgentSession) Shutdown() {
 			close(stop)
 		}
 	}
+	as.asMu.Unlock()
 
 	// Wait for readpump to drain remaining work and exit.
 	if done != nil {
@@ -1538,10 +1540,14 @@ func (as *AgentSession) Close() error {
 	h := as.handle
 	stop := as.readpumpStop
 	done := as.readpumpDone
-	as.asMu.Unlock()
-
 	// (1)+(2) force the readpump out so eventQueue push can't
 	// wedge. Same idempotent close pattern as Shutdown (step 2).
+	//
+	// The check-and-close runs under asMu so two closers can never
+	// both see the channel open and close it twice — closing a
+	// closed channel panics. The reaper is a second concurrent
+	// caller (a user /close can land on the same session), and the
+	// daemon shutdown is a third.
 	if stop != nil {
 		select {
 		case <-stop:
@@ -1550,6 +1556,8 @@ func (as *AgentSession) Close() error {
 			close(stop)
 		}
 	}
+	as.asMu.Unlock()
+
 	if done != nil {
 		<-done
 	}

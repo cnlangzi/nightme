@@ -829,6 +829,8 @@ func TestNext_SkipsAStepThatIsStillRunning(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	waitSent(t, op, "/gtw commit")
+	// The run watches the command: it is in flight from then on.
+	waitWatched(t, op)
 	// The run is taken before the command: a run that is over frees
 	// its chat, and the run of a chat that is over is gone.
 	r := activeRun(t, svc, "obs-1")
@@ -870,6 +872,76 @@ func TestNext_SkipsAStepThatIsStillRunning(t *testing.T) {
 	waitSent(t, op, "/gtw push")
 }
 
+// TestNext_OnAStepThatIsNotACommandDecidesNothing — the work of the
+// step is in flight, but it is not a chat command: there is nothing to
+// abandon, so the command holds no decision and says why.
+func TestNext_OnAStepThatIsNotACommandDecidesNothing(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "two", commitPushWorkflow)
+
+	svc, _ := testService(t, dir, Config{})
+	r := testRun(t, svc, "two")
+	t.Cleanup(r.cancel)
+	// The run is working on the step: a shell, a wait or an action
+	// belongs to the run itself, and the run waits for no command.
+	r.setRunningStep("commit")
+	r.setJudgmentStep("commit")
+	svc.mu.Lock()
+	svc.active[r.chatID] = r
+	svc.mu.Unlock()
+
+	d, err := svc.Next(context.Background(), "obs-1", "", "")
+	if err != nil {
+		t.Fatalf("next: %v", err)
+	}
+	if d.Act {
+		t.Error("the command promised a skip of a step it cannot abandon")
+	}
+	if d.Step != "commit" {
+		t.Errorf("the command looked at %q, want commit", d.Step)
+	}
+	if d.Why != reasonRunning {
+		t.Errorf("the reason is %q, want %q", d.Why, reasonRunning)
+	}
+	if r.takeDirective() != nil {
+		t.Error("the run holds a decision, want none")
+	}
+}
+
+// TestTheVerdictOfASkippedStepDoesNotOverwriteTheSkip — a step that
+// was passed over keeps its record: the verdict that arrives late does
+// not put it back into the plan.
+func TestTheVerdictOfASkippedStepDoesNotOverwriteTheSkip(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "two", commitPushWorkflow)
+
+	svc, _ := testService(t, dir, Config{})
+	r := testRun(t, svc, "two")
+	t.Cleanup(r.cancel)
+	commit, ok := r.stepByID("commit")
+	if !ok {
+		t.Fatal("the workflow has no commit step")
+	}
+	r.recordStep("main", commit, wfe.Outcome{
+		Status:  wfe.OutcomeNoop,
+		Summary: operatorSkippedSummary,
+	})
+
+	// The verdict of the command that was abandoned arrives late.
+	r.recordStep("main", commit, wfe.Outcome{Status: wfe.OutcomeOK, Summary: "committed"})
+
+	st, ok := r.stepState("commit")
+	if !ok {
+		t.Fatal("the commit step has no state")
+	}
+	if st.Outcome.Status != wfe.OutcomeNoop {
+		t.Errorf("the step ended as %q, want the skipped one", st.Outcome.Status)
+	}
+	if st.Outcome.Summary != operatorSkippedSummary {
+		t.Errorf("the summary is %q, want %q", st.Outcome.Summary, operatorSkippedSummary)
+	}
+}
+
 // TestTheOutcomeOfAnAbandonedCommandDoesNotOverwriteTheSkip — the
 // command the run abandoned settles after the step was skipped: the
 // step keeps its skip.
@@ -886,6 +958,8 @@ func TestTheOutcomeOfAnAbandonedCommandDoesNotOverwriteTheSkip(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	waitSent(t, op, "/gtw commit")
+	// The run watches the command: it is in flight from then on.
+	waitWatched(t, op)
 	// The run is taken before the command: a run that is over frees
 	// its chat, and the run of a chat that is over is gone.
 	r := activeRun(t, svc, "obs-1")

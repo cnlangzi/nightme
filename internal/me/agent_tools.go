@@ -586,6 +586,11 @@ func (s *Service) runStep(ctx context.Context, r *run, command string) (stepResu
 		}
 		return res, nil
 	}
+	if res.Status == statusAbandoned || (owned && r.stepSkipped(step.ID)) {
+		// The step was passed over while its command was in flight: the
+		// verdict that comes late does not put it back into the plan.
+		return res, nil
+	}
 	out := wfe.Outcome{
 		Status:  outcomeStatus(res.Status),
 		Summary: res.Summary,

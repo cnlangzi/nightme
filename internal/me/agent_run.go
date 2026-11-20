@@ -1039,8 +1039,15 @@ func (r *run) takeRefresh(now time.Time) bool {
 // in together. The run's situation moved on, so the model reads it
 // again before it decides. The checklist of the round follows the
 // step: it says what the round has done.
+//
+// A step that was passed over keeps its record: the verdict that
+// arrives late does not put it back into the plan.
 func (r *run) recordStep(job string, step wfe.Step, out wfe.Outcome) {
 	r.mu.Lock()
+	if r.stepSkippedLocked(step.ID) && !isSkippedOutcome(out) {
+		r.mu.Unlock()
+		return
+	}
 	wfe.RecordStep(r.state, job, step, out, false)
 	r.mu.Unlock()
 	r.markSituation()

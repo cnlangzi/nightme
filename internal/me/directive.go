@@ -203,9 +203,10 @@ func (r *run) decideDirectiveLocked(kind string) (OperatorDecision, error) {
 	d := OperatorDecision{Step: stepID}
 	// The work of the step is in flight: its command was sent to the
 	// chat and has not come back. The step cannot run again, and
-	// `/me next` passes it over anyway.
+	// `/me next` passes it over anyway — when the command can be
+	// abandoned.
 	if r.stepInFlightLocked(stepID) {
-		if kind == directiveNext {
+		if kind == directiveNext && r.canAbandonCommandLocked(stepID) {
 			d.Act = true
 			d.skippedNow = true
 			return d, nil
@@ -339,6 +340,28 @@ func (r *run) stepInFlightLocked(stepID string) bool {
 	return ok && st.Pending
 }
 
+// canAbandonCommandLocked reports whether the run can be told that the
+// command of the step was abandoned: the run waits for that command.
+//
+// Only a chat command can be abandoned. A shell, a wait or an action
+// belongs to the run itself, and the run cannot go on while it runs.
+//
+// The caller holds the lock.
+func (r *run) canAbandonCommandLocked(stepID string) bool {
+	if r.inflight == nil {
+		// The run waits for no command: there is nothing to abandon.
+		return false
+	}
+	if r.runningStep == stepID {
+		// The run is executing the step: its command is on its way.
+		return true
+	}
+	// The step started and has not settled: its command waits for an
+	// answer.
+	st, ok := r.stepStateLocked(stepID)
+	return ok && st.Pending
+}
+
 // stepSkipped reports whether the step was passed over: the operator
 // or the agent skipped it.
 //
@@ -354,10 +377,16 @@ func (r *run) stepSkipped(stepID string) bool {
 // caller holds the lock.
 func (r *run) stepSkippedLocked(stepID string) bool {
 	st, ok := r.stepStateLocked(stepID)
-	if !ok || st.Outcome.Status != wfe.OutcomeNoop {
+	return ok && isSkippedOutcome(st.Outcome)
+}
+
+// isSkippedOutcome reports whether the outcome says the step was passed
+// over.
+func isSkippedOutcome(out wfe.Outcome) bool {
+	if out.Status != wfe.OutcomeNoop {
 		return false
 	}
-	switch st.Outcome.Summary {
+	switch out.Summary {
 	case operatorSkippedSummary, agentSkippedSummary:
 		return true
 	}

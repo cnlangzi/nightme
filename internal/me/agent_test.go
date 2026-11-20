@@ -1313,7 +1313,7 @@ jobs:
 	if steps[1].ID != "commit" || steps[1].Outcome.Status != wfe.OutcomeNoop {
 		t.Errorf("the second step = %+v, want commit with a noop outcome", steps[1])
 	}
-	if err := svc.Stop(context.Background(), "obs-1"); err != nil {
+	if err := svc.Stop(context.Background(), "obs-1", "om_stop"); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
 	waitRun(t, svc, "obs-1")
@@ -1369,7 +1369,7 @@ jobs:
 	if steps[0].Outcome.Data["issue"] != "42" {
 		t.Errorf("the data = %v, want the issue", steps[0].Outcome.Data)
 	}
-	if err := svc.Stop(context.Background(), "obs-1"); err != nil {
+	if err := svc.Stop(context.Background(), "obs-1", "om_stop"); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
 	waitRun(t, svc, "obs-1")
@@ -1566,7 +1566,7 @@ func TestPersist_HoldsTheProgressTheConversationAndTheHistory(t *testing.T) {
 	if !ok || len(steps) == 0 {
 		t.Errorf("the state file holds no step progress: %s", raw)
 	}
-	if err := svc.Stop(context.Background(), "obs-1"); err != nil {
+	if err := svc.Stop(context.Background(), "obs-1", "om_stop"); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
 	waitRun(t, svc, "obs-1")
@@ -1685,7 +1685,7 @@ jobs:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the shell step never ran")
 	}
-	if err := svc.Stop(context.Background(), "obs-1"); err != nil {
+	if err := svc.Stop(context.Background(), "obs-1", "om_stop"); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
 	waitRun(t, svc, "obs-1")
@@ -1775,7 +1775,7 @@ jobs:
 	if !strings.Contains(history[0].Outcome.Summary, `unknown action: "nope"`) {
 		t.Errorf("the summary = %q, want the unknown action", history[0].Outcome.Summary)
 	}
-	if err := svc.Stop(context.Background(), "obs-1"); err != nil {
+	if err := svc.Stop(context.Background(), "obs-1", "om_stop"); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
 	waitRun(t, svc, "obs-1")
@@ -1893,7 +1893,7 @@ func TestJudgmentPoint_NeedsHumanAsksTheUserWhenThereIsNoChatModel(t *testing.T)
 		t.Fatalf("reply: %v", err)
 	}
 	waitSent(t, op, "/gtw fix 42 -y")
-	if err := svc.Stop(context.Background(), "obs-1"); err != nil {
+	if err := svc.Stop(context.Background(), "obs-1", "om_stop"); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
 	waitRun(t, svc, "obs-1")

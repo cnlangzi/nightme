@@ -309,6 +309,9 @@ type run struct {
 	wakes []wakeRecord
 	// stoppedByOperator reports that the operator stopped the run.
 	stoppedByOperator bool
+	// stopAnchor is the message the operator stopped the run from. The
+	// record of the session rides on the card of that message.
+	stopAnchor string
 
 	mu sync.Mutex
 	// ctx is the run's scope. Cancelling it stops the run.
@@ -1959,6 +1962,21 @@ func (r *run) stateAnchor(messageID string) string {
 	return ""
 }
 
+// recordAnchor returns the message the record of the run hangs under.
+//
+// The record rides on the card of the run. A run the operator stopped
+// rides on the card of the stop instead: the stop and the record are
+// one card.
+func (r *run) recordAnchor() string {
+	if anchor := r.stopAnchorValue(); anchor != "" {
+		return anchor
+	}
+	if sess := r.runSessionRef(); sess != nil {
+		return sess.anchor
+	}
+	return ""
+}
+
 // decisionSessionRef returns the session of the decision that is open.
 func (r *run) decisionSessionRef() *session {
 	r.mu.Lock()
@@ -2211,9 +2229,19 @@ func (r *run) wakeRecords() []wakeRecord {
 }
 
 // markStoppedByOperator records that the operator stopped the run.
-func (r *run) markStoppedByOperator() {
+//
+// The message id is the message the operator stopped it from: the
+// record of the session rides on the card of that message, so the stop
+// and the record are one card.
+//
+// The first stop holds the anchor: a second stop of a run that is
+// already unwinding leaves the card of the first one alone.
+func (r *run) markStoppedByOperator(messageID string) {
 	r.mu.Lock()
 	r.stoppedByOperator = true
+	if r.stopAnchor == "" {
+		r.stopAnchor = messageID
+	}
 	r.mu.Unlock()
 }
 
@@ -2222,6 +2250,14 @@ func (r *run) wasStoppedByOperator() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.stoppedByOperator
+}
+
+// stopAnchorValue returns the message the operator stopped the run
+// from.
+func (r *run) stopAnchorValue() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.stopAnchor
 }
 
 // currentRound returns the round of the job the run is on.

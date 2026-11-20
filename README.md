@@ -756,7 +756,7 @@ key — is reported in `nightme logs` and left out. The daemon still starts, and
 | `/me pause` | Stops the run after the step it is on. |
 | `/me resume [note]` | Runs the step the run is on again. Its budget for the current round starts over. The note is your instruction. A step that is running, that succeeded, or that has not run yet is not run again: the command says why and the state card answers as well. `/me resume` does not interrupt a step that is running. |
 | `/me next [note]` | Skips the step the run is on: the plan goes on with the workflow, and the facts the step produced are kept. The note is your instruction. A step whose command is still running is skipped: the command it sent to the chat is abandoned, and the run goes on with the next step of the job. The abandoned command is not cancelled — the chat owns it, and what it produces lands in the chat when it finishes. A step that succeeded, and a step whose work is not a chat command, are not skipped: the command says why and the state card answers as well. |
-| `/me stop` | Cancels the run and leaves the record of the session in the chat. The work the chat agent does on its own goes on to its end. |
+| `/me stop` | Cancels the run and leaves the record of the session in the chat. The stop and the record share one card: the card of the `/me stop` message. The work the chat agent does on its own goes on to its end. |
 | `/me status` | Shows the state of the run again: the run publishes it on a card of its own under the `/me status` message, and the card carries the phase of the run, the tree of the rounds and the checklist of the round. |
 
 The arguments of `/me start` fill the workflow's declared arguments: a positional
@@ -821,12 +821,16 @@ asks a question, the choices become the card's buttons: a click is the answer. T
 question itself never reaches the agent — it is a message of the chat, not a turn
 of the conversation.
 
-Every run that ends leaves a record of the session in the chat: the record rides
-on the card of the run and says how the run ended and why, what it did, what went
-wrong and what the models decided — the facts of the whole session, the actions
-that went wrong one by one, and the judgment the models made at the wake-ups. It
-is posted once the run has unwound, and it carries no buttons: the run is over. A
-run that ends by itself leaves a record too.
+Every run that ends leaves a record of the session in the chat: the record says
+how the run ended and why, what it did, what went wrong and what the models
+decided — the facts of the whole session, the actions that went wrong one by
+one, and the judgment the models made at the wake-ups. It is posted once the run
+has unwound, and it carries no buttons: the run is over. A run that ends by
+itself leaves a record too. The record rides on the card of the run, unless the
+operator stopped the run: the record of a stopped run rides on the card of the
+`/me stop` message, so the stop and the record are one card. The two land on
+that card in the order they arrive: the record may show up above the line that
+says the run was stopped.
 
 The card is the run's receipt. It carries the decision the run made last and the
 run's own words. The run's tool calls leave the card and appear in the chat as a

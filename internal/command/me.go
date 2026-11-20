@@ -66,8 +66,10 @@ type MeController interface {
 	// the state of the run hangs under it. The note is the operator's
 	// instruction.
 	Next(ctx context.Context, chatID, messageID, note string) (me.OperatorDecision, error)
-	// Stop cancels the run of a chat.
-	Stop(ctx context.Context, chatID string) error
+	// Stop cancels the run of a chat. The message id is the message
+	// the operator stopped the run from: the record of the session
+	// rides on the card of that message.
+	Stop(ctx context.Context, chatID, messageID string) error
 	// Status posts the state of the run of a chat. The message id is
 	// the message the operator asked from: the state hangs under it.
 	Status(ctx context.Context, chatID, messageID string) error

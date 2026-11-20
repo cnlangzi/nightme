@@ -101,7 +101,7 @@ func TestStatus_ReportsTheRunWhileItWorks(t *testing.T) {
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
-	if err := svc.Stop(context.Background(), "obs-1"); err != nil {
+	if err := svc.Stop(context.Background(), "obs-1", "om_stop"); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
 	waitRun(t, svc, "obs-1")
@@ -615,7 +615,7 @@ func TestRunStep_WaitsForTheAnswerOfTheWorkAgent(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("the command ran %d times, want once", count)
 	}
-	if err := svc.Stop(context.Background(), "obs-1"); err != nil {
+	if err := svc.Stop(context.Background(), "obs-1", "om_stop"); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
 	waitRun(t, svc, "obs-1")
@@ -653,7 +653,7 @@ func TestRunStep_WaitsForTheAgentToFinish(t *testing.T) {
 		t.Errorf("the run is %q, want it waiting for the agent", st.Phase)
 	}
 
-	if err := svc.Stop(context.Background(), "obs-1"); err != nil {
+	if err := svc.Stop(context.Background(), "obs-1", "om_stop"); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
 	waitRun(t, svc, "obs-1")

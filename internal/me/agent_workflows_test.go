@@ -43,7 +43,7 @@ jobs:
 	if name != "nightme/coder" {
 		t.Errorf("the workflow is %q, want nightme/coder", name)
 	}
-	if err := svc.Stop(context.Background(), "obs-1"); err != nil {
+	if err := svc.Stop(context.Background(), "obs-1", "om_stop"); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
 	waitRun(t, svc, "obs-1")
@@ -74,7 +74,7 @@ jobs:
 	if name != "coder" {
 		t.Errorf("the workflow is %q, want coder", name)
 	}
-	if err := svc.Stop(context.Background(), "obs-1"); err != nil {
+	if err := svc.Stop(context.Background(), "obs-1", "om_stop"); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
 	waitRun(t, svc, "obs-1")
@@ -112,7 +112,7 @@ jobs:
 	if name != "fix" {
 		t.Errorf("the run state names %q, want fix", name)
 	}
-	if err := svc.Stop(context.Background(), "obs-1"); err != nil {
+	if err := svc.Stop(context.Background(), "obs-1", "om_stop"); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
 	waitRun(t, svc, "obs-1")
@@ -149,7 +149,7 @@ jobs:
 	if title != "the first title" {
 		t.Errorf("the run has the title %q, want the first one", title)
 	}
-	if err := svc.Stop(context.Background(), "obs-1"); err != nil {
+	if err := svc.Stop(context.Background(), "obs-1", "om_stop"); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
 	waitRun(t, svc, "obs-1")
@@ -179,7 +179,7 @@ jobs:
 	if title != "the second title" {
 		t.Errorf("the run has the title %q, want the edited one", title)
 	}
-	if err := svc.Stop(context.Background(), "obs-2"); err != nil {
+	if err := svc.Stop(context.Background(), "obs-2", "om_stop"); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
 	waitRun(t, svc, "obs-2")
@@ -210,7 +210,7 @@ jobs:
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	if err := svc.Stop(context.Background(), "obs-1"); err != nil {
+	if err := svc.Stop(context.Background(), "obs-1", "om_stop"); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
 	waitRun(t, svc, "obs-1")
@@ -280,7 +280,7 @@ jobs:
 		t.Fatalf("start: %v", err)
 	}
 	defer func() {
-		if err := svc.Stop(context.Background(), "obs-1"); err != nil {
+		if err := svc.Stop(context.Background(), "obs-1", "om_stop"); err != nil {
 			t.Fatalf("stop: %v", err)
 		}
 		waitRun(t, svc, "obs-1")
@@ -322,7 +322,7 @@ jobs:
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	if err := svc.Stop(context.Background(), "obs-1"); err != nil {
+	if err := svc.Stop(context.Background(), "obs-1", "om_stop"); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
 	waitRun(t, svc, "obs-1")
@@ -356,7 +356,7 @@ jobs:
 		t.Fatalf("start: %v", err)
 	}
 	defer func() {
-		if err := svc.Stop(context.Background(), "obs-1"); err != nil {
+		if err := svc.Stop(context.Background(), "obs-1", "om_stop"); err != nil {
 			t.Fatalf("stop: %v", err)
 		}
 		waitRun(t, svc, "obs-1")
@@ -438,7 +438,7 @@ jobs:
 	if _, err := os.Stat(svc.statePath(runID)); err != nil {
 		t.Fatalf("the run state was not written: %v", err)
 	}
-	if err := svc.Stop(context.Background(), "obs-1"); err != nil {
+	if err := svc.Stop(context.Background(), "obs-1", "om_stop"); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
 	waitRun(t, svc, "obs-1")
@@ -458,7 +458,7 @@ jobs:
 	}); err != nil {
 		t.Fatalf("the chat could not start a new run: %v", err)
 	}
-	if err := svc.Stop(context.Background(), "obs-1"); err != nil {
+	if err := svc.Stop(context.Background(), "obs-1", "om_stop"); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
 	waitRun(t, svc, "obs-1")

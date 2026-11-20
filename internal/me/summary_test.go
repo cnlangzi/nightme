@@ -53,8 +53,8 @@ func waitDone(t *testing.T, r *run) {
 
 // recordEntry returns the entry the record of the run carries.
 //
-// The record rides on the card of the run, and it is one entry: the
-// whole body of it, not one reply per line.
+// The record is one entry: the whole body of it, not one reply per
+// line.
 func recordEntry(t *testing.T, op *fakeOperator) string {
 	t.Helper()
 	for _, m := range op.EmittedOf(messages.OutReply) {
@@ -83,7 +83,7 @@ func TestStop_PostsTheRecordOfTheSession(t *testing.T) {
 	}}}
 
 	if _, _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestStop_PostsTheRecordOfTheSession(t *testing.T) {
 
 	before := svc.Snapshot("obs-1")
 	r := chatRun(t, svc, "obs-1")
-	if err := svc.Stop(context.Background(), "obs-1"); err != nil {
+	if err := svc.Stop(context.Background(), "obs-1", "om_stop"); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
 	if !r.wasStoppedByOperator() {
@@ -101,15 +101,23 @@ func TestStop_PostsTheRecordOfTheSession(t *testing.T) {
 
 	anchor := r.runSessionRef().anchor
 	body := recordEntry(t, op)
-	// The record rides on the card of the run.
-	var onTheCard bool
+	// The record rides on the card of the stop: the stop and the
+	// record are one card.
+	var onTheStopCard bool
 	for _, m := range op.EmittedOf(messages.OutReply) {
-		if m.ReplyTo == anchor && strings.HasPrefix(m.Text, "■ [") {
-			onTheCard = true
+		if m.ReplyTo == "om_stop" && strings.HasPrefix(m.Text, "■ [") {
+			onTheStopCard = true
 		}
 	}
-	if !onTheCard {
-		t.Errorf("the record does not ride on the card of the run: %v", op.EmittedOf(messages.OutReply))
+	if !onTheStopCard {
+		t.Errorf("the record does not ride on the card of the stop: %v", op.EmittedOf(messages.OutReply))
+	}
+	// The card of the run keeps no record of the run: the operator
+	// reads it on the card of the stop.
+	for _, m := range op.EmittedOf(messages.OutReply) {
+		if m.ReplyTo == anchor && strings.HasPrefix(m.Text, "■ [") {
+			t.Errorf("the record rides on the card of the run as well: %v", op.EmittedOf(messages.OutReply))
+		}
 	}
 	// The footer of the card of the run carries the phase the run
 	// ended in.
@@ -141,7 +149,7 @@ func TestStop_PostsTheRecordOfTheSession(t *testing.T) {
 	// card as a paragraph per line.
 	entries := 0
 	for _, m := range op.EmittedOf(messages.OutReply) {
-		if m.ReplyTo == anchor && strings.HasPrefix(m.Text, "■ [") {
+		if m.ReplyTo == "om_stop" && strings.HasPrefix(m.Text, "■ [") {
 			entries++
 		}
 	}
@@ -166,6 +174,43 @@ func TestStop_PostsTheRecordOfTheSession(t *testing.T) {
 	}
 }
 
+// TestStop_TwiceLeavesTheCardOfTheFirstStop — a second stop of a run
+// that is already unwinding does not move the record: the card of the
+// first stop is the one that promised it.
+func TestStop_TwiceLeavesTheCardOfTheFirstStop(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	decider := &scriptedDecider{answers: []llm.DecisionResponse{
+		decisionResp("jev", optionEscalate, 0.1, 0),
+	}}
+	svc, op := testService(t, dir, Config{Decider: decider})
+	op.steps = []fakeStep{{outcome: messages.Outcome{
+		Status:  messages.OutcomeFailed,
+		Summary: "the step failed",
+	}}}
+
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitAsked(t, op, "Which step should run next?")
+
+	r := chatRun(t, svc, "obs-1")
+	if err := svc.Stop(context.Background(), "obs-1", "om_stop"); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	// The run may be gone already: the second stop is refused then,
+	// and the anchor of the record stays where the first stop put it.
+	_ = svc.Stop(context.Background(), "obs-1", "om_stop_2")
+	waitDone(t, r)
+
+	if got := r.stopAnchorValue(); got != "om_stop" {
+		t.Errorf("the record hangs under %q, want the card of the first stop", got)
+	}
+}
+
 // TestTheRecordIsPostedWhenTheRunEndsOnItsOwn — a run that finishes
 // its workflow leaves a record too: the session is worth recording
 // however it ended.
@@ -177,7 +222,7 @@ func TestTheRecordIsPostedWhenTheRunEndsOnItsOwn(t *testing.T) {
 	op.steps = []fakeStep{okStep("the commit landed")}
 
 	if _, _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -197,6 +242,16 @@ func TestTheRecordIsPostedWhenTheRunEndsOnItsOwn(t *testing.T) {
 	// decisions.
 	if strings.Contains(body, "\nerrors:") || strings.Contains(body, "\ndecisions:") {
 		t.Errorf("the record lists what did not happen:\n%s", body)
+	}
+	// A run nobody stopped leaves its record on the card of the run.
+	var onTheCard bool
+	for _, m := range op.EmittedOf(messages.OutReply) {
+		if m.ReplyTo == "om_start" && strings.HasPrefix(m.Text, "■ [") {
+			onTheCard = true
+		}
+	}
+	if !onTheCard {
+		t.Errorf("the record does not ride on the card of the run: %v", op.EmittedOf(messages.OutReply))
 	}
 }
 
@@ -293,7 +348,7 @@ func TestStop_EndsTheRunSessionWithItsPhase(t *testing.T) {
 	waitAsked(t, op, "Which step should run next?")
 
 	r := chatRun(t, svc, "obs-1")
-	if err := svc.Stop(context.Background(), "obs-1"); err != nil {
+	if err := svc.Stop(context.Background(), "obs-1", "om_stop"); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
 	waitDone(t, r)
@@ -329,7 +384,7 @@ func TestTheRecordComesAfterTheRunUnwinds(t *testing.T) {
 	waitSent(t, op, "/gtw commit")
 
 	r := chatRun(t, svc, "obs-1")
-	if err := svc.Stop(context.Background(), "obs-1"); err != nil {
+	if err := svc.Stop(context.Background(), "obs-1", "om_stop"); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
 	waitDone(t, r)
@@ -372,7 +427,7 @@ func TestTheRecordListsOnlyTheActionsThatWentWrong(t *testing.T) {
 	waitAsked(t, op, "Which step should run next?")
 
 	r := chatRun(t, svc, "obs-1")
-	if err := svc.Stop(context.Background(), "obs-1"); err != nil {
+	if err := svc.Stop(context.Background(), "obs-1", "om_stop"); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
 	waitDone(t, r)

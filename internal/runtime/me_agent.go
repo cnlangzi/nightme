@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/channel"
@@ -45,11 +46,28 @@ func buildPersonalAgent(cfg *config.Config, chs []channel.Channel, op *operator,
 		return nil
 	}
 
-	provider := buildChatModel(cfg, logger)
-	decider := buildDecider(cfg, logger)
+	provider, chatIssue := buildChatModel(cfg, logger)
+	decider, deciderIssue := buildDecider(cfg, logger)
 
-	svc := me.New(personalAgentConfig(cfg, dir, op, provider, decider))
+	issues := make([]string, 0, 2)
+	if chatIssue != "" {
+		issues = append(issues, chatIssue)
+		logger.Error("run: the chat model did not start: " + chatIssue)
+	}
+	if deciderIssue != "" {
+		issues = append(issues, deciderIssue)
+		logger.Error("run: the decision model did not start: " + deciderIssue)
+	}
+
+	svc := me.New(personalAgentConfig(cfg, dir, op, provider, decider, issues))
 	svc.SetLogger(logger)
+	if len(issues) == 0 {
+		// No model was asked for at all: that is a state, not an
+		// error. The agent goes on without one.
+		if reason := svc.ModelsReason(); reason != "" {
+			logger.Info("run: " + reason)
+		}
+	}
 	return svc
 }
 
@@ -58,12 +76,13 @@ func buildPersonalAgent(cfg *config.Config, chs []channel.Channel, op *operator,
 //
 // The agent that thinks for the owner comes from the me section: it
 // names a coding agent, not a model.
-func personalAgentConfig(cfg *config.Config, dir string, op *operator, provider llm.Provider, decider llm.Decider) me.Config {
+func personalAgentConfig(cfg *config.Config, dir string, op *operator, provider llm.Provider, decider llm.Decider, issues []string) me.Config {
 	return me.Config{
 		WorkflowsDir:  dir,
 		StateDir:      filepath.Join(dir, "runs"),
 		Provider:      provider,
 		Decider:       decider,
+		ModelIssues:   issues,
 		MinConfidence: cfg.Me.Decider.MinConfidence,
 		MaxJudgments:  cfg.Me.MaxJudgments,
 		Agent:         cfg.Me.Agent,
@@ -97,46 +116,43 @@ func ChatModelConfig(c config.MeLLMConfig) llm.ChatConfig {
 // buildChatModel builds the chat model (System 2).
 //
 // A missing configuration is not an error: the personal agent runs
-// with its fast path alone. A half-written one is reported — the
-// operator learns that the model did not start.
-func buildChatModel(cfg *config.Config, logger *slog.Logger) llm.Provider {
+// with its fast path alone. A half-written one is an issue — the
+// operator learns which key is missing, or why the model does not
+// build.
+func buildChatModel(cfg *config.Config, logger *slog.Logger) (llm.Provider, string) {
 	c := cfg.Me.LLM
 	switch {
 	case c.Protocol == "" && c.Model == "":
-		return nil
+		return nil, ""
 	case c.Protocol == "":
-		logger.Warn("run: the chat model did not start: me.llm.protocol is not set")
-		return nil
+		return nil, fmt.Sprintf("me.llm.protocol is not set (known: %s)", protocolNames(llm.ChatProtocols()))
 	case c.Model == "":
-		logger.Warn("run: the chat model did not start: me.llm.model is not set")
-		return nil
+		return nil, "me.llm.model is not set"
 	}
 	llmCfg := ChatModelConfig(c)
 	warnDualCredential(logger, "me.llm", llmCfg)
 	provider, err := llm.New(llmCfg)
 	if err != nil {
-		logger.Warn("run: the chat model could not be built", "err", err)
-		return nil
+		return nil, "the chat model could not be built: " + err.Error()
 	}
-	return provider
+	return provider, ""
 }
 
 // buildDecider builds the decision model (System 1).
 //
 // A missing configuration is not an error: the personal agent runs
-// with its tool loop alone. A half-written one is reported — the
-// operator learns that the model did not start.
-func buildDecider(cfg *config.Config, logger *slog.Logger) llm.Decider {
+// with its tool loop alone. A half-written one is an issue — the
+// operator learns which key is missing, or why the model does not
+// build.
+func buildDecider(cfg *config.Config, logger *slog.Logger) (llm.Decider, string) {
 	c := cfg.Me.Decider
 	switch {
 	case c.Protocol == "" && c.Model == "":
-		return nil
+		return nil, ""
 	case c.Protocol == "":
-		logger.Warn("run: the decision model did not start: me.decider.protocol is not set")
-		return nil
+		return nil, fmt.Sprintf("me.decider.protocol is not set (known: %s)", protocolNames(llm.DecisionProtocols()))
 	case c.Model == "":
-		logger.Warn("run: the decision model did not start: me.decider.model is not set")
-		return nil
+		return nil, "me.decider.model is not set"
 	}
 	llmCfg := llm.DeciderConfig{
 		Protocol:  c.Protocol,
@@ -150,10 +166,31 @@ func buildDecider(cfg *config.Config, logger *slog.Logger) llm.Decider {
 	warnDualCredential(logger, "me.decider", llmCfg)
 	decider, err := llm.NewDecider(llmCfg)
 	if err != nil {
-		logger.Warn("run: the decision model could not be built", "err", err)
-		return nil
+		return nil, "the decision model could not be built: " + err.Error()
 	}
-	return decider
+	return decider, ""
+}
+
+// protocolNames renders the names of the registered protocols for an
+// error message.
+func protocolNames(protocols []llm.Protocol) string {
+	names := make([]string, 0, len(protocols))
+	for _, p := range protocols {
+		names = append(names, p.Name)
+	}
+	return strings.Join(names, ", ")
+}
+
+// personalAgentStartLine renders how the personal agent came up: with
+// models to decide with, or without them.
+//
+// The reason is the one the agent itself gives, so the log and the
+// chat say the same thing.
+func personalAgentStartLine(reason string) string {
+	if reason != "" {
+		return "run: the personal agent has no models: " + reason
+	}
+	return "run: personal agent started"
 }
 
 // warnDualCredential reports a capability that names its key twice.

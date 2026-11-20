@@ -3,6 +3,7 @@ package me
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -55,6 +56,11 @@ type decision struct {
 // history of the run as outcomes, and — for the last action — its
 // full outcome and the tail of its transcript.
 func (s *Service) decide(ctx context.Context, r *run) (decision, error) {
+	if s.cfg.Decider == nil {
+		// The model is not there: the run asks nothing of a model that
+		// does not exist.
+		return decision{}, errors.New("the decision model is not configured")
+	}
 	questions := s.decisionQuestions(r)
 	resp, err := s.cfg.Decider.Decide(ctx, llm.DecisionRequest{
 		State:     s.decisionState(r),

@@ -586,7 +586,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 		if err := personal.Start(ctx); err != nil {
 			logger.Warn("run: the personal agent did not start", "err", err)
 		} else {
-			logger.Info("run: personal agent started", "dir", personal.WorkflowsDir())
+			logger.Info(personalAgentStartLine(personal.ModelsReason()), "dir", personal.WorkflowsDir())
 		}
 	}
 

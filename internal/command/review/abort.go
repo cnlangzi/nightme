@@ -18,7 +18,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -26,7 +25,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/messages"
-	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
 // errReviewAborted is the cancellation cause an abort installs on a
@@ -114,12 +112,7 @@ func reportAborted(ctx context.Context, work *chatsession.Work, emitter messages
 	chatID, replyTo, runner, kind string, outcomes []reviewOutcome,
 ) {
 	groups, unfinished := groupCounts(outcomes)
-	data := map[string]string{"agent": runner, "reason": "aborted"}
-	if groups > 0 {
-		// The fan-out ran: the groups it ran are the work that is
-		// left, and the count of them says how much.
-		data[wfe.OutcomeKeyUnfinished] = strconv.Itoa(unfinished)
-	}
+	data := unfinishedData(map[string]string{"agent": runner, "reason": "aborted"}, outcomes)
 	work.Report(messages.Outcome{
 		Status:  messages.OutcomeCancelled,
 		Summary: fmt.Sprintf("the %s was aborted (%d of %d groups unfinished)", kind, unfinished, groups),

@@ -224,9 +224,13 @@ type reviewRecord struct {
 // group with neither is not actionable — there is nothing the
 // continuation could do with it.
 //
-// A takeover re-runs every group with the prompt it was asked to run:
-// the session belongs to the agent that ran the group, and a session
-// cannot be moved to another agent.
+// A takeover re-runs the groups it covers with the prompt each was
+// asked to run: the session belongs to the agent that ran the group,
+// and a session cannot be moved to another agent.
+//
+// A group whose recovery attempt is spent is out of the takeover as
+// well: the recovery attempt is the operator's own retry, and a
+// takeover neither spends it nor reaches past it.
 //
 // The groups that completed are not re-asked — their findings already
 // reached the chat, and asking again would duplicate them.
@@ -249,9 +253,11 @@ func (r reviewRecord) resumable(takeover bool) ([]agent.ReviewJob, string) {
 			// "already retried" describes it alone.
 			spent = true
 		case takeover:
-			// The session belongs to the agent that ran the group:
-			// the takeover re-runs it with the prompt it was asked
-			// to run.
+			// The session belongs to the agent that ran the group, so
+			// the takeover re-runs the group with the prompt it was
+			// asked to run. A group with no stored prompt is not
+			// actionable here: there is no session to move and no
+			// prompt to replay.
 			if o.prompt != "" {
 				jobs = append(jobs, agent.ReviewJob{
 					Pattern: o.pattern,
@@ -283,10 +289,39 @@ func (r reviewRecord) resumable(takeover bool) ([]agent.ReviewJob, string) {
 		return nil, "ℹ️ the last review completed — nothing to continue"
 	case spent:
 		return nil, "ℹ️ the unfinished group was already retried — nothing to resume"
+	case takeover:
+		// The group has a session, but the session belongs to the
+		// agent that ran it: there is no prompt to replay it on
+		// another agent.
+		return nil, "ℹ️ the unfinished group has no prompt to re-run on another agent — nothing to resume"
 	default:
 		// The only remaining case: the group failed before it
 		// reached the agent, and no prompt was kept for it.
 		return nil, "ℹ️ the unfinished group has no session and no prompt to re-run — nothing to resume"
+	}
+}
+
+// carryPrompts fills the prompt of an outcome that has none from the
+// record it continues.
+//
+// A group that was resumed keeps its session but loses its prompt:
+// the resume sent the text "continue", not the prompt the group was
+// asked to run. The prompt is the only way to run the group on
+// another agent, so it rides along from the record it came from —
+// without it, a takeover has nothing to replay.
+func carryPrompts(outcomes []reviewOutcome, prev []reviewOutcome) {
+	for i := range outcomes {
+		if outcomes[i].prompt != "" {
+			continue
+		}
+		for _, p := range prev {
+			// The pattern and the source together are the group's
+			// identity — the same pair the record keys them by.
+			if p.pattern == outcomes[i].pattern && p.source == outcomes[i].source && p.prompt != "" {
+				outcomes[i].prompt = p.prompt
+				break
+			}
+		}
 	}
 }
 

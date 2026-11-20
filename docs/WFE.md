@@ -529,7 +529,7 @@ The switch is process-local: the chat store keeps the agent the operator picked 
 
 **The handover — what a broken attempt leaves behind.** A broken attempt hands the step over to the next one, and what the handover carries depends on what the broken attempt reported: an attempt that said how much of its work it did not finish — the `unfinished` count in its outcome — hands that work over, and the next agent finishes it instead of running the whole thing again. The `args` command of the next attempt is then the step's message plus `--continue` (`/review --continue -a claude`). An attempt that reported no count leaves nothing behind, so the next agent runs the whole thing again (`/review -a claude`).
 
-A command joins the handover by reporting the count, and it must accept `--continue`: that is the flag the handover adds.
+A command joins the handover by reporting the count, and it must accept `--continue`: that is the flag the handover adds. A step whose message carries a flag the command refuses together with `--continue` — `/review --global`, whose `--global` and `--continue` are exclusive — breaks the handover: the attempt fails on the flag check, and the next agent runs the whole thing again.
 
 The `use` mode has no handover: the message goes to the chat as it is, and there is no place to put the handover in it.
 

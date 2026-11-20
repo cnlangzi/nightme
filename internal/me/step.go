@@ -103,26 +103,22 @@ type attempt struct {
 	recorded string
 }
 
-// chainAgent is one agent of a step's chain: the mode it runs in and
-// the name it answers to.
-type chainAgent struct {
-	mode  string
-	agent string
-}
-
 // chainAgents returns the chain of a step's message: the agents of
 // every entry, in the order the entries and their names are declared.
 //
+// The command of an attempt is not filled in yet: what the attempt
+// runs depends on the attempt before it.
+//
 // A step that names no agent has no chain: its message runs once,
 // unchanged.
-func (s *Service) chainAgents(r *run, step wfe.Step) []chainAgent {
+func (s *Service) chainAgents(r *run, step wfe.Step) []attempt {
 	if len(step.Agents) == 0 {
 		return nil
 	}
-	out := make([]chainAgent, 0, len(step.Agents))
+	out := make([]attempt, 0, len(step.Agents))
 	for _, entry := range step.Agents {
 		for _, name := range entry.Names {
-			out = append(out, chainAgent{
+			out = append(out, attempt{
 				mode:  entry.Mode,
 				agent: strings.TrimSpace(s.evalText(r, name)),
 			})
@@ -161,22 +157,21 @@ func (s *Service) runAttempts(ctx context.Context, r *run, job string, step wfe.
 	// over.
 	unfinished := 0
 	for _, a := range agents {
-		at := attempt{mode: a.mode, agent: a.agent}
 		if a.mode == wfe.AgentModeArgs {
-			at.command = base + " -a " + a.agent
+			a.command = base + " -a " + a.agent
 			if unfinished > 0 {
 				// The work that is left is handed over: the next
 				// agent finishes it instead of running it again.
-				at.command = base + " --continue -a " + a.agent
+				a.command = base + " --continue -a " + a.agent
 			}
-			at.recorded = at.command
+			a.recorded = a.command
 		} else {
 			// The use mode sends the message as it is: there is no
 			// place to put the handover in it.
-			at.command = base
-			at.recorded = base + " [agent: " + a.agent + "]"
+			a.command = base
+			a.recorded = base + " [agent: " + a.agent + "]"
 		}
-		v, raw, err := s.runAttempt(ctx, r, job, step, at)
+		v, raw, err := s.runAttempt(ctx, r, job, step, a)
 		if err != nil {
 			return stepVerdict{}, stepResult{}, err
 		}

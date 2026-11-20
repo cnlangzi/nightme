@@ -859,6 +859,51 @@ jobs:
 	}
 }
 
+// TestStepChain_AFailedHandoverFallsBackToAFullRun — a handover that
+// the command refuses (its flags do not go together) breaks the
+// attempt, and the agent after it runs the whole thing again: the
+// chain lives on, the work is not carried.
+func TestStepChain_AFailedHandoverFallsBackToAFullRun(t *testing.T) {
+	svc, op := chainService(t, `title: chain
+jobs:
+  main:
+    steps:
+      - id: review
+        message: "/review"
+        agents:
+          - mode: args
+            names: [omp, codex, claude]
+`, nil)
+	op.steps = []fakeStep{
+		unfinishedStep("2 of 3 groups unfinished", 2),
+		brokenStep("the flags do not go together"),
+		okStep("claude did it"),
+	}
+
+	g := newGate()
+	op.gate = g
+	startRun(t, svc, g, Request{
+		Name: "chain", ChatID: "obs-1", Cwd: "/tmp/work",
+	})
+	waitRun(t, svc, "obs-1")
+
+	want := []string{
+		"/review -a omp",
+		"/review --continue -a codex",
+		"/review -a claude",
+	}
+	sent := op.Sent()
+	if len(sent) != len(want) {
+		t.Fatalf("the chat got %v, want %v", sent, want)
+	}
+	for i, cmd := range want {
+		if sent[i] != cmd {
+			t.Errorf("the chat got %v, want %v", sent, want)
+			break
+		}
+	}
+}
+
 // TestStepChain_TheUseModeHasNoHandover — the use mode sends the
 // message as it is: there is no place to put the handover in it.
 func TestStepChain_TheUseModeHasNoHandover(t *testing.T) {

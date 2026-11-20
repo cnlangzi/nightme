@@ -65,7 +65,6 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -78,7 +77,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/gitbase"
 	"github.com/cnlangzi/nightme/internal/messages"
-	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
 // Factory is the command.SlashCommandFactory for /review.
@@ -736,16 +734,12 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 			// message must not see "unknown" for a review that
 			// visibly failed.
 			var text string
-			data := map[string]string{"agent": runnerName}
-			if len(groupOutcomes) > 0 {
-				// The fan-out ran: the groups it ran are the work
-				// that is left, and the count of them says how much.
-				// A failure before the fan-out — no diff, an unknown
-				// base, an agent that cannot review — leaves no key
-				// behind: there is no work to pick up.
-				_, unfinished := groupCounts(groupOutcomes)
-				data[wfe.OutcomeKeyUnfinished] = strconv.Itoa(unfinished)
-			}
+			// The fan-out ran: the groups it ran are the work that
+			// is left, and the count of them says how much. A failure
+			// before the fan-out — no diff, an unknown base, an agent
+			// that cannot review — leaves no key behind: there is no
+			// work to pick up.
+			data := unfinishedData(map[string]string{"agent": runnerName}, groupOutcomes)
 			switch {
 			case errors.Is(err, agent.ErrNoDiff):
 				// Pre-compute found zero reviewable files in the
@@ -855,12 +849,9 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 			status = messages.OutcomeIncomplete
 			summary = fmt.Sprintf("%d of %d groups unfinished", unfinished, groups)
 		}
-		data := map[string]string{"agent": runnerName}
+		data := unfinishedData(map[string]string{"agent": runnerName}, groupOutcomes)
 		if groups > 0 {
 			data["groups"] = fmt.Sprintf("%d", groups)
-			// The count of what is left: the fan-out ran, so the
-			// number is known — zero when every group finished.
-			data[wfe.OutcomeKeyUnfinished] = strconv.Itoa(unfinished)
 		}
 		work.Report(messages.Outcome{
 			Status:  status,
@@ -1175,6 +1166,12 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 			// operator may still pick it up.
 			groupOutcomes = collector.spentResults()
 		}
+		// A resumed group keeps its session but loses its prompt: the
+		// resume sent the text "continue", not the prompt the group
+		// was asked to run. The prompt rides along from the record it
+		// came from — it is the only way to run the group on another
+		// agent.
+		carryPrompts(groupOutcomes, rec.outcomes)
 		f.recordIfCurrent(chatID, rec.id, runnerName, workspace, groupOutcomes)
 		finish()
 
@@ -1219,8 +1216,13 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 				"agent", runnerName,
 				"err", err,
 			)
+			// The count rides along even here: the continuation fanned
+			// out over groups, and the ones that failed again are the
+			// work that is left. A chain that hands the step over
+			// reads the count — a continuation that fails without it
+			// would send the next agent back to the beginning.
 			work.Report(command.FailedOutcomeData("error", err.Error(),
-				timeoutOutcomeData(map[string]string{"agent": runnerName}, groupOutcomes),
+				timeoutOutcomeData(unfinishedData(map[string]string{"agent": runnerName}, groupOutcomes), groupOutcomes),
 				"the continuation failed: "+err.Error()))
 			if emitter == nil {
 				return
@@ -1263,13 +1265,9 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 			status = messages.OutcomeIncomplete
 			summary = fmt.Sprintf("%d of %d continued groups unfinished", unfinished, continued)
 		}
-		data := map[string]string{"agent": runnerName}
+		data := unfinishedData(map[string]string{"agent": runnerName}, groupOutcomes)
 		if continued > 0 {
 			data["continued_groups"] = fmt.Sprintf("%d", continued)
-			// The count of what is left: the fan-out ran, so the
-			// number is known — zero when every continued group
-			// finished.
-			data[wfe.OutcomeKeyUnfinished] = strconv.Itoa(unfinished)
 		}
 		work.Report(messages.Outcome{
 			Status:  status,

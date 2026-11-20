@@ -403,6 +403,43 @@ func TestReviewContinueOutcome(t *testing.T) {
 		})
 	})
 
+	t.Run("every continued group failed again", func(t *testing.T) {
+		// The continuation itself fails: no group survived. The count
+		// of what is left still rides along — a chain that hands the
+		// step over reads it, and a continuation that fails without
+		// it would send the next agent back to the beginning.
+		set := newTestAgents(t)
+		set.registry.Register(&resumeStarter{name: "reviewer", failCount: 2})
+
+		cs, em := newOutcomeChat(t, "review-continue-all-fail", "reviewer")
+		f := NewFactory()
+		f.record(cs.ChatID, "reviewer", cs.SelectedCwd(), []reviewOutcome{
+			{pattern: "group-1", files: []string{"a.go"}, sessionID: "sess-1", err: errors.New("boom")},
+			{pattern: "group-2", files: []string{"b.go"}, sessionID: "sess-2", err: errors.New("boom")},
+		})
+
+		hold := cs.Hold("msg-1")
+		ctx := chatsession.WithWork(context.Background(), hold)
+		out, err := f.Handle(ctx, command.RuntimeServices{}, nil, cs, command.SlashInput{
+			ChatID:    cs.ChatID,
+			MessageID: "msg-1",
+			Text:      "/review -c",
+			Args:      []string{"review", "-c"},
+		})
+		if err != nil {
+			t.Fatalf("Handle: %v", err)
+		}
+		if out == nil {
+			t.Fatal("Handle returned nil SlashOutput")
+		}
+		hold.Release()
+		got := waitOutcome(t, em, 5*time.Second)
+		assertOutcome(t, got, messages.OutcomeFailed, map[string]string{
+			"unfinished": "2",
+			"agent":      "reviewer",
+		})
+	})
+
 	t.Run("nothing to resume", func(t *testing.T) {
 		set := newTestAgents(t)
 		set.registry.Register(&resumeStarter{name: "reviewer"})

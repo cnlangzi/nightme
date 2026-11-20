@@ -664,7 +664,9 @@ workspace / 每个 group 的 outcome)。factory 每个 daemon 进程建一次,�
   一个 group 都没跑出来的 review(没有 diff 可 review、bridge 不支持 review)不
   动记录:没有新的 resume 状态,上一次 review 没收尾的 group 依然没收尾。
 - **续跑结束时** —— 记录换成这次续跑的 outcome,runner 换成这次的 runner(接管的记录
-  归新 agent,操作者之后手动 `--continue` 续的是它)。写回是**条件写**:只有当记录
+  归新 agent,操作者之后手动 `--continue` 续的是它)。续跑时组重开 session 会丢掉它
+  的 prompt(续跑发的是字面量 `continue`,不是那份 prompt),所以 prompt 从上一次记录
+  里带过来 —— 没有它,后面的接管就没有东西可重放。写回是**条件写**:只有当记录
   仍然是这次续跑读的那份时才写。续跑期间跑完的另一次 review 拥有这个 chat 的
   resume 状态,不能被更早开始、更晚结束的续跑覆盖。
 
@@ -684,6 +686,8 @@ workspace / 每个 group 的 outcome)。factory 每个 daemon 进程建一次,�
 | 续跑又失败 | 合并文本里 inline 标 failed;该 group 的恢复机会已用完,再 `--continue` 无事可做 |
 | 所有 group 都失败 | 整个续跑失败,只发失败回复,不注入 findings |
 | `--continue` 带的 `--agent` 是另一个 agent | 接管:那几组拿存下来的 prompt 在新 agent 上重放(旧 session 不重开) |
+| 接管时某组没有存下 prompt | `ℹ️ the unfinished group has no prompt to re-run on another agent — nothing to resume`(session 属于旧 agent,迁不动,没有 prompt 就重放不了) |
+| 失败的 group 的恢复机会已经用完(操作者自己 `-c` 过) | 接管也不捡它:恢复额度是操作者自己的重试,接管不消费它,也不绕过它 |
 | `--continue` 带的 `--agent` 就是记录里的 agent | 与不带 `--agent` 完全一样:续 session,失败即用掉那组的恢复额度 |
 | 接管又失败 | 那组的恢复额度**没有**用掉:接管是"换 agent 接手",恢复额度留给操作者自己的重试 |
 

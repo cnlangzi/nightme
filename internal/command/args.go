@@ -2,8 +2,12 @@ package command
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
+	"unicode/utf8"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 // This file holds the shared argv lexer for slash commands
@@ -17,10 +21,12 @@ import (
 // `parseFixArgs` (internal/command/gtw/cmd.go) established for
 // `/gtw fix` in F-XX — see docs/feat/F-gtw-fix.md §1.2 + §10:
 //
-//  1. Token classification: a token is a flag when it starts
-//     with "-" and is not the literal "-" (a lone dash is a
-//     conventional stdin/positional placeholder). Everything
-//     else is a positional arg.
+//  1. Token classification: a token is a flag candidate when it
+//     starts with a hyphen of any family — the ASCII hyphen-minus
+//     a keyboard types, or one of the dash glyphs a phone keyboard
+//     produces for it. A lone hyphen is the conventional
+//     stdin/positional placeholder; a lone long form ("--", "—")
+//     ends the flags. Everything else is a positional arg.
 //  2. Recognised flags are declared explicitly in CmdSpec.Flags.
 //     Anything else is an `unknown flag` error — never a silent
 //     no-op.
@@ -32,6 +38,15 @@ import (
 //     ("any --yes wins").
 //  5. Arity is enforced: positional args below MinArgs or above
 //     MaxArgs are hard-rejected, not silently dropped.
+//
+// A phone keyboard spells a flag differently from a desktop one: the
+// mobile IME renders the ASCII hyphens of "--abort" as an em dash,
+// a fullwidth hyphen, a pair of en dashes. The lexer folds that
+// whole family onto the ASCII spelling, so the flag the user meant is
+// the flag that runs — whichever keyboard typed it. The folding
+// applies to flag tokens only: flag values and positional args are
+// data (a path, a branch name, a duration) and stay byte-for-byte
+// what the user typed.
 //
 // parseFixArgs itself now uses this helper. Its Plan/Execute
 // mode dispatch (Mode + Yes) and the mutual-exclusion between
@@ -50,6 +65,9 @@ const UnboundedArgs = -1
 // token after it is treated as positional, even flag-shaped
 // ones. This is what lets `/cwd -- -weird-dir-name` work
 // without the path being misread as a flag.
+//
+// The marker is recognised in the dash glyphs as well: "--", "—" and
+// "——" all end the flags.
 const ArgTerminator = "--"
 
 // FlagSpec declares one recognised flag. Register every alias
@@ -160,13 +178,38 @@ func (p ParsedArgs) Arg(i int) string {
 // NArgs returns the number of positional args.
 func (p ParsedArgs) NArgs() int { return len(p.Args) }
 
-// IsFlagToken reports whether tok is flag-shaped per contract
-// rule 1: starts with "-" and is not the literal "-". Exported
-// because handlers occasionally need the same classification
-// outside a full parse (e.g. to decide whether a stray token is
-// a typo'd flag or a bad positional).
+// IsFlagToken reports whether tok starts with a hyphen of any
+// family — the ASCII hyphen-minus a keyboard types, or one of the
+// dash glyphs a phone keyboard produces for it. Exported because
+// handlers occasionally need the same classification outside a full
+// parse (e.g. to decide whether a stray token is a typo'd flag or a
+// bad positional).
+//
+// The lone-hyphen placeholder and the end-of-flags marker are
+// flag-shaped as well: the caller tells them apart by their own
+// rules (see ParseCmdArgs).
 func IsFlagToken(tok string) bool {
-	return len(tok) > 1 && strings.HasPrefix(tok, "-")
+	if tok == "" {
+		return false
+	}
+	r, _ := utf8.DecodeRuneInString(tok)
+	return hyphenWidth(r) > 0
+}
+
+// IsFlag reports whether tok names one of the given aliases, under
+// the same glyph, width and case rules the shared lexer applies. The
+// aliases are the ASCII spellings ("-y", "--yes").
+func IsFlag(tok string, aliases ...string) bool {
+	ft, ok := parseFlagToken(tok)
+	if !ok {
+		return false
+	}
+	for _, cand := range ft.candidates() {
+		if slices.Contains(aliases, cand) {
+			return true
+		}
+	}
+	return false
 }
 
 // ParseCmdArgs is the standard CLI lexer for slash commands.
@@ -202,19 +245,35 @@ func ParseCmdArgs(argv []string, spec CmdSpec) (ParsedArgs, error) {
 	for i := 0; i < len(argv); i++ {
 		tok := argv[i]
 
-		if !terminated && tok == ArgTerminator {
-			// Everything after "--" is positional, flag-shaped
-			// or not.
-			terminated = true
-			continue
-		}
-
-		if terminated || !IsFlagToken(tok) {
+		if terminated {
+			// Everything after the end-of-flags marker is
+			// positional, flag-shaped or not.
 			out.Args = append(out.Args, tok)
 			continue
 		}
 
-		fs, ok := spec.Flags[tok]
+		ft, isFlag := parseFlagToken(tok)
+		if !isFlag {
+			out.Args = append(out.Args, tok)
+			continue
+		}
+
+		if ft.name == "" {
+			if ft.form == formLong {
+				// The end-of-flags marker: everything after it
+				// is positional, flag-shaped or not.
+				terminated = true
+				continue
+			}
+			if ft.form == formShort {
+				// A lone hyphen is the conventional positional
+				// placeholder (stdin).
+				out.Args = append(out.Args, tok)
+				continue
+			}
+		}
+
+		matched, fs, ok := matchFlag(spec, ft)
 		if !ok {
 			return ParsedArgs{}, fmt.Errorf("unknown flag %q (%s)%s",
 				tok, spec.flagHint(), spec.usageTail())
@@ -222,7 +281,7 @@ func ParseCmdArgs(argv []string, spec CmdSpec) (ParsedArgs, error) {
 
 		key := fs.Name
 		if key == "" {
-			key = strings.TrimLeft(tok, "-")
+			key = strings.TrimLeft(matched, "-")
 		}
 
 		if !fs.TakesValue {
@@ -233,7 +292,7 @@ func ParseCmdArgs(argv []string, spec CmdSpec) (ParsedArgs, error) {
 
 		if i+1 >= len(argv) {
 			return ParsedArgs{}, fmt.Errorf("missing value for %s%s",
-				tok, spec.usageTail())
+				matched, spec.usageTail())
 		}
 		// Consume the next token verbatim — even if it is
 		// itself flag-shaped. `--name --foo` names a branch
@@ -368,4 +427,169 @@ func plural(n int, noun string) string {
 		return "1 " + noun
 	}
 	return fmt.Sprintf("%d %ss", n, noun)
+}
+
+// hyphenWidth returns how many ASCII hyphens the rune stands for at
+// the head of a flag token, or 0 when it is not a hyphen of any
+// family.
+//
+// The hyphen family is the short glyph — one ASCII hyphen. The dash
+// family is the long one — two ASCII hyphens, because a dash reads
+// as the long spelling.
+func hyphenWidth(r rune) int {
+	switch r {
+	case '-', // HYPHEN-MINUS
+		'\u2010', // HYPHEN
+		'\u2011', // NON-BREAKING HYPHEN
+		'\u2012', // FIGURE DASH
+		'\u2212', // MINUS SIGN
+		'\ufe63', // SMALL HYPHEN-MINUS
+		'\uff0d': // FULLWIDTH HYPHEN-MINUS
+		return 1
+	case '\u2013', // EN DASH
+		'\u2014', // EM DASH
+		'\u2015', // HORIZONTAL BAR
+		'\ufe58', // SMALL EM DASH
+		'\u2e3a', // TWO-EM DASH
+		'\u2e3b': // THREE-EM DASH
+		return 2
+	}
+	return 0
+}
+
+// flagForm is the shape a flag token's hyphen segment folds to.
+type flagForm int
+
+const (
+	// formNone is a hyphen segment with no usable spelling — three
+	// or more ASCII hyphens. The token stays a flag candidate and
+	// is reported as an unknown flag.
+	formNone flagForm = iota
+	// formShort is the short spelling: "-name".
+	formShort
+	// formLong is the long spelling: "--name".
+	formLong
+)
+
+// prefix returns the ASCII hyphens the form spells.
+func (f flagForm) prefix() string {
+	if f == formShort {
+		return "-"
+	}
+	return "--"
+}
+
+// other returns the same name in the other spelling.
+func (f flagForm) other() flagForm {
+	switch f {
+	case formShort:
+		return formLong
+	case formLong:
+		return formShort
+	}
+	return formNone
+}
+
+// flagToken is one token read as a flag: the hyphen segment folded
+// into a form, and the name that follows it.
+type flagToken struct {
+	form  flagForm
+	name  string // the NFKC-folded name
+	dash  bool   // the segment holds a dash-family glyph
+	ascii bool   // the token is pure ASCII
+}
+
+// parseFlagToken reads tok as a flag token. The second result is
+// false when tok does not start with a hyphen of any family — it is
+// then a positional argument.
+func parseFlagToken(tok string) (flagToken, bool) {
+	ft := flagToken{ascii: isASCII(tok)}
+	i, width := 0, 0
+	for i < len(tok) {
+		r, size := utf8.DecodeRuneInString(tok[i:])
+		w := hyphenWidth(r)
+		if w == 0 {
+			break
+		}
+		width += w
+		if w == 2 {
+			ft.dash = true
+		}
+		i += size
+	}
+	if i == 0 {
+		return flagToken{}, false
+	}
+	// The name is width-folded (NFKC) but not case-folded: CLI
+	// flags are case-sensitive.
+	ft.name = norm.NFKC.String(tok[i:])
+	switch {
+	case ft.dash:
+		// A dash glyph is visually the long form, whatever the
+		// length of the segment.
+		ft.form = formLong
+	case width == 1:
+		ft.form = formShort
+	case width == 2:
+		ft.form = formLong
+	default:
+		ft.form = formNone
+	}
+	return ft, true
+}
+
+// candidates returns the spellings the token may name, in the order
+// they are tried against the registered flags:
+//
+//  1. the spelling its own form gives ("-name" / "--name"),
+//  2. the other spelling, when the segment held a dash glyph — a
+//     dash reads as the long form, but the user may have meant the
+//     short one,
+//  3. the lower-cased spellings of both, when the token is not pure
+//     ASCII: a phone keyboard may have typed the name in capitals.
+//
+// A pure ASCII token has the first candidate only: a keyboard's
+// spelling is unambiguous, and CLI flags stay as strict as git's and
+// kubectl's.
+func (ft flagToken) candidates() []string {
+	if ft.form == formNone || ft.name == "" {
+		return nil
+	}
+	primary := ft.form.prefix() + ft.name
+	other := ft.form.other().prefix() + ft.name
+	out := []string{primary}
+	add := func(s string) {
+		if !slices.Contains(out, s) {
+			out = append(out, s)
+		}
+	}
+	if ft.dash {
+		add(other)
+	}
+	if !ft.ascii {
+		add(strings.ToLower(primary))
+		add(strings.ToLower(other))
+	}
+	return out
+}
+
+// matchFlag looks the token up in the registered flags: the first
+// candidate spelling the spec registers wins.
+func matchFlag(spec CmdSpec, ft flagToken) (string, FlagSpec, bool) {
+	for _, cand := range ft.candidates() {
+		if fs, ok := spec.Flags[cand]; ok {
+			return cand, fs, true
+		}
+	}
+	return "", FlagSpec{}, false
+}
+
+// isASCII reports whether s is made of ASCII bytes only.
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
 }

@@ -1,6 +1,7 @@
 package command
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -511,16 +512,26 @@ func TestParseCmdArgs_NamelessSpec(t *testing.T) {
 
 // TestIsFlagToken pins the token classifier used by both the
 // lexer and handlers that need the same flag/positional split.
+//
+// The classifier reports the shape of the token, not its role: the
+// lone hyphen and the end-of-flags marker are flag-shaped too, and
+// the lexer tells them apart by their own rules.
 func TestIsFlagToken(t *testing.T) {
 	cases := map[string]bool{
 		"-a":      true,
 		"--agent": true,
 		"--":      true, // flag-shaped; the lexer handles it as the terminator
-		"-":       false,
+		"-":       true, // flag-shaped; the lexer handles it as the placeholder
 		"":        false,
 		"agent":   false,
 		"42":      false,
 		"a-b":     false,
+		"abort":   false,
+		// The glyphs a phone keyboard types for the ASCII hyphen.
+		"—abort": true,
+		"–abort": true,
+		"－abort": true,
+		"‐abort": true,
 	}
 	for tok, want := range cases {
 		if got := IsFlagToken(tok); got != want {
@@ -569,5 +580,230 @@ func TestParseCmdArgs_NegativeMaxArgsIsUnbounded(t *testing.T) {
 		if got.NArgs() != 3 {
 			t.Errorf("MaxArgs=%d: NArgs = %d, want 3", max, got.NArgs())
 		}
+	}
+}
+
+// glyphSpec is the /review-shaped grammar the glyph tests run
+// against: a boolean long flag, a short/long pair that takes a
+// value, and no positional args.
+var glyphSpec = CmdSpec{
+	Name:  "/review",
+	Usage: "/review [-a|--agent <name>] [--abort]",
+	Flags: map[string]FlagSpec{
+		"-a":      {Name: "agent", TakesValue: true},
+		"--agent": {Name: "agent", TakesValue: true},
+		"--abort": {Name: "abort"},
+	},
+	MinArgs: 0,
+	MaxArgs: 0,
+}
+
+// TestParseCmdArgs_GlyphFlags pins that the flag a phone keyboard
+// types reaches the same flag a desktop keyboard types: every glyph
+// of the hyphen and dash families folds onto the ASCII spelling.
+func TestParseCmdArgs_GlyphFlags(t *testing.T) {
+	cases := []struct {
+		name      string
+		argv      []string
+		wantName  string
+		wantValue string
+		wantBool  bool
+	}{
+		{"ascii long flag", []string{"--abort"}, "abort", "", true},
+		{"em dash u+2014", []string{"—abort"}, "abort", "", true},
+		{"two em dashes u+2014", []string{"——abort"}, "abort", "", true},
+		{"en dash u+2013", []string{"–abort"}, "abort", "", true},
+		{"horizontal bar u+2015", []string{"―abort"}, "abort", "", true},
+		{"small em dash u+fe58", []string{"﹘abort"}, "abort", "", true},
+		{"two-em dash u+2e3a", []string{"⸺abort"}, "abort", "", true},
+		{"three-em dash u+2e3b", []string{"⸻abort"}, "abort", "", true},
+		{"hyphen u+2010", []string{"‐abort"}, "abort", "", true},
+		{"non-breaking hyphen u+2011", []string{"‑abort"}, "abort", "", true},
+		{"figure dash u+2012", []string{"‒abort"}, "abort", "", true},
+		{"minus sign u+2212", []string{"−abort"}, "abort", "", true},
+		{"small hyphen-minus u+fe63", []string{"﹣abort"}, "abort", "", true},
+		{"fullwidth hyphen-minus u+ff0d", []string{"－abort"}, "abort", "", true},
+		// The dash family reads as the long spelling, but the user
+		// may have meant the short one.
+		{"em dash short flag", []string{"—a", "codex"}, "agent", "codex", false},
+		// The name is width-folded, so a fullwidth letter names the
+		// ASCII flag.
+		{"fullwidth name", []string{"—Ａ", "codex"}, "agent", "codex", false},
+		{"fullwidth name in capitals", []string{"－ＡＢＯＲＴ"}, "abort", "", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			parsed, err := ParseCmdArgs(c.argv, glyphSpec)
+			if err != nil {
+				t.Fatalf("ParseCmdArgs(%q): %v", c.argv, err)
+			}
+			if !parsed.Has(c.wantName) {
+				t.Errorf("ParseCmdArgs(%q): flag %q not set", c.argv, c.wantName)
+			}
+			if got := parsed.Value(c.wantName); got != c.wantValue {
+				t.Errorf("ParseCmdArgs(%q): Value(%q) = %q, want %q", c.argv, c.wantName, got, c.wantValue)
+			}
+			if c.wantBool && !parsed.Bool(c.wantName) {
+				t.Errorf("ParseCmdArgs(%q): Bool(%q) = false, want true", c.argv, c.wantName)
+			}
+		})
+	}
+}
+
+// TestParseCmdArgs_ASCIIFlagsStayStrict pins that a keyboard's
+// spelling is taken literally: the dash-family fallback must not
+// make "-abort" or "--a" pass, the way git and kubectl reject
+// them. The name keeps its case as well — "--Abort" is not
+// "--abort".
+func TestParseCmdArgs_ASCIIFlagsStayStrict(t *testing.T) {
+	for _, in := range [][]string{{"-abort"}, {"--a"}, {"-agent"}, {"---abort"}, {"--Abort"}} {
+		t.Run(strings.Join(in, " "), func(t *testing.T) {
+			_, err := ParseCmdArgs(in, glyphSpec)
+			if err == nil {
+				t.Fatalf("ParseCmdArgs(%q) = nil error, want unknown flag", in)
+			}
+			want := fmt.Sprintf("unknown flag %q", in[0])
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error = %q, want it to contain %q", err, want)
+			}
+		})
+	}
+}
+
+// TestParseCmdArgs_GlyphTerminatorAndPlaceholder pins the two
+// nameless shapes: the long form ends the flags, the short form is
+// the conventional positional placeholder.
+func TestParseCmdArgs_GlyphTerminatorAndPlaceholder(t *testing.T) {
+	posSpec := CmdSpec{Name: "/cwd", Usage: "/cwd [<path>]", MaxArgs: UnboundedArgs}
+
+	for _, term := range []string{"--", "—", "——", "－－"} {
+		t.Run("terminator "+term, func(t *testing.T) {
+			got, err := ParseCmdArgs([]string{term, "--abort"}, posSpec)
+			if err != nil {
+				t.Fatalf("ParseCmdArgs: %v", err)
+			}
+			if got.NArgs() != 1 || got.Arg(0) != "--abort" {
+				t.Errorf("Args = %q, want [--abort]", got.Args)
+			}
+		})
+	}
+
+	for _, ph := range []string{"-", "－"} {
+		t.Run("placeholder "+ph, func(t *testing.T) {
+			got, err := ParseCmdArgs([]string{ph}, posSpec)
+			if err != nil {
+				t.Fatalf("ParseCmdArgs: %v", err)
+			}
+			if got.NArgs() != 1 || got.Arg(0) != ph {
+				t.Errorf("Args = %q, want [%q]", got.Args, ph)
+			}
+		})
+	}
+}
+
+// TestParseCmdArgs_UnknownFlagQuotesTheTypedToken pins that an
+// unknown flag names the token as the user typed it — a dash glyph
+// included — and lists the registered flags in ASCII, so the user
+// can see which spelling to use.
+func TestParseCmdArgs_UnknownFlagQuotesTheTypedToken(t *testing.T) {
+	_, err := ParseCmdArgs([]string{"—abrt"}, glyphSpec)
+	if err == nil {
+		t.Fatal("want error")
+	}
+	if !strings.Contains(err.Error(), "unknown flag \"—abrt\"") {
+		t.Errorf("error does not quote the typed token: %q", err)
+	}
+	if !strings.Contains(err.Error(), "recognised flags: --abort, -a/--agent") {
+		t.Errorf("error does not list the registered flags: %q", err)
+	}
+}
+
+// TestParseCmdArgs_ValuesAndPositionalsStayVerbatim pins that the
+// glyph folding touches flag tokens only: a value and a positional
+// keep every byte the user typed.
+func TestParseCmdArgs_ValuesAndPositionalsStayVerbatim(t *testing.T) {
+	posSpec := CmdSpec{Name: "/cwd", Usage: "/cwd [<path>]", MaxArgs: UnboundedArgs}
+
+	got, err := ParseCmdArgs([]string{"-a", "x—y"}, glyphSpec)
+	if err != nil {
+		t.Fatalf("ParseCmdArgs: %v", err)
+	}
+	if got.Value("agent") != "x—y" {
+		t.Errorf("Value(agent) = %q, want %q", got.Value("agent"), "x—y")
+	}
+
+	got, err = ParseCmdArgs([]string{"/tmp/a—b"}, posSpec)
+	if err != nil {
+		t.Fatalf("ParseCmdArgs: %v", err)
+	}
+	if got.Arg(0) != "/tmp/a—b" {
+		t.Errorf("Arg(0) = %q, want %q", got.Arg(0), "/tmp/a—b")
+	}
+}
+
+// TestParseFlagToken_Form pins which shape each hyphen segment
+// folds to: the dash family is the long form whatever its length,
+// the hyphen family counts its hyphens.
+func TestParseFlagToken_Form(t *testing.T) {
+	cases := []struct {
+		tok  string
+		want flagForm
+	}{
+		{"-", formShort},
+		{"--", formLong},
+		{"---", formNone},
+		{"—", formLong},
+		{"——", formLong},
+		{"–", formLong},
+		{"－－", formLong},
+		{"-—", formLong},
+		{"－", formShort},
+	}
+	for _, c := range cases {
+		t.Run(c.tok, func(t *testing.T) {
+			ft, ok := parseFlagToken(c.tok)
+			if !ok {
+				t.Fatalf("parseFlagToken(%q) is not a flag token", c.tok)
+			}
+			if ft.form != c.want {
+				t.Errorf("parseFlagToken(%q).form = %v, want %v", c.tok, ft.form, c.want)
+			}
+		})
+	}
+}
+
+// TestFlagTokenCandidates pins the order the spellings are tried
+// in: the token's own shape first, then the other shape when the
+// segment held a dash glyph, then the lower-cased spellings when
+// the token is not pure ASCII.
+func TestFlagTokenCandidates(t *testing.T) {
+	cases := []struct {
+		name string
+		tok  string
+		want []string
+	}{
+		{"ascii long", "--abort", []string{"--abort"}},
+		{"ascii short", "-abort", []string{"-abort"}},
+		{"a dash glyph adds the other shape", "—abort", []string{"--abort", "-abort"}},
+		{"a non-ascii token adds the lower-cased shapes", "－abort", []string{"-abort", "--abort"}},
+		{"a fullwidth name", "—Ａ", []string{"--A", "-A", "--a", "-a"}},
+		{"three hyphens have no shape", "---abort", nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ft, ok := parseFlagToken(c.tok)
+			if !ok {
+				t.Fatalf("parseFlagToken(%q) is not a flag token", c.tok)
+			}
+			got := ft.candidates()
+			if len(got) != len(c.want) {
+				t.Fatalf("candidates(%q) = %q, want %q", c.tok, got, c.want)
+			}
+			for i, w := range c.want {
+				if got[i] != w {
+					t.Errorf("candidates(%q) = %q, want %q", c.tok, got, c.want)
+				}
+			}
+		})
 	}
 }

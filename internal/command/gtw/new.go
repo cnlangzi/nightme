@@ -94,9 +94,10 @@ func parseNewIssueArgs(tail, line string) (newIssueArgs, error) {
 	return newIssueArgs{Answers: tail}, nil
 }
 
-// isYesFlag reports whether the token is the create-mode flag.
+// isYesFlag reports whether the token is the create-mode flag. The
+// dash glyphs a phone keyboard produces are read as the same flag.
 func isYesFlag(token string) bool {
-	return token == "-y" || token == "--yes"
+	return command.IsFlag(token, "-y", "--yes")
 }
 
 // RunNewDraft is the first half of /gtw new: it queues the archive

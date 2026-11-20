@@ -60,7 +60,9 @@ func TestSpec_RejectsArgs(t *testing.T) {
 		{"single extra arg", []string{"review", "foo"}, "foo"},
 		{"multiple extra args", []string{"review", "foo", "bar"}, "foo"},
 		{"flag-looking arg", []string{"review", "--base", "main"}, "--base"},
-		{"em-dash variant", []string{"review", "—agent", "codex"}, "—agent"},
+		// A dash glyph names the same flag a keyboard does, so only
+		// a misspelled name is rejected — and it is echoed as typed.
+		{"em-dash typo", []string{"review", "—abrt"}, "—abrt"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -109,6 +111,11 @@ func TestParseReviewArgs(t *testing.T) {
 		{"-c", []string{"-c"}, Spec{Continue: true}, false},
 		{"--continue", []string{"--continue"}, Spec{Continue: true}, false},
 		{"--abort", []string{"--abort"}, Spec{Abort: true}, false},
+		// The dash glyphs a phone keyboard types name the same
+		// flags a desktop keyboard does.
+		{"—abort", []string{"—abort"}, Spec{Abort: true}, false},
+		{"—a codex", []string{"—a", "codex"}, Spec{Agent: "codex"}, false},
+		{"—timeout 5m", []string{"—timeout", "5m"}, Spec{Timeout: 5 * time.Minute, TimeoutSet: true}, false},
 		{"--agent without value", []string{"--agent"}, Spec{}, true},
 		{"-a without value", []string{"-a"}, Spec{}, true},
 		{"positional arg rejected", []string{"foo"}, Spec{}, true},

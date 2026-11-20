@@ -9,7 +9,7 @@ import (
 )
 
 func init() {
-	llm.RegisterChatProtocol(protocolCompletions, NewCompletions)
+	llm.RegisterChatProtocol(protocolCompletions, completionsPath, NewCompletions)
 }
 
 // protocolCompletions is the name the chat completions protocol is

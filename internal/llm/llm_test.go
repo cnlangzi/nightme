@@ -149,7 +149,7 @@ func TestRegistry_UnknownChatProtocol(t *testing.T) {
 // empty in this test binary — the concrete protocols live in their own
 // packages and register themselves — so the test installs one.
 func TestRegistry_RequiresAModel(t *testing.T) {
-	RegisterChatProtocol("zzz-model-test", func(ChatConfig) (Provider, error) { return nil, nil })
+	RegisterChatProtocol("zzz-model-test", "/test", func(ChatConfig) (Provider, error) { return nil, nil })
 	_, err := New(ChatConfig{Protocol: "zzz-model-test"})
 	if err == nil {
 		t.Fatal("a protocol without a model was accepted")
@@ -179,13 +179,13 @@ func TestRegistry_UnknownDecider(t *testing.T) {
 }
 
 func TestRegistry_RegisteredNames(t *testing.T) {
-	RegisterChatProtocol("zzz-test", func(ChatConfig) (Provider, error) { return nil, nil })
-	RegisterDecisionProtocol("zzz-test", func(DeciderConfig) (Decider, error) { return nil, nil })
-	if !contains(ChatProtocolNames(), "zzz-test") {
-		t.Fatalf("the chat protocols are %v, want zzz-test", ChatProtocolNames())
+	RegisterChatProtocol("zzz-test", "/test", func(ChatConfig) (Provider, error) { return nil, nil })
+	RegisterDecisionProtocol("zzz-test", "/test", func(DeciderConfig) (Decider, error) { return nil, nil })
+	if !containsProtocol(ChatProtocols(), "zzz-test") {
+		t.Fatalf("the chat protocols are %v, want zzz-test", ChatProtocols())
 	}
-	if !contains(DecisionProtocolNames(), "zzz-test") {
-		t.Fatalf("the decision protocols are %v, want zzz-test", DecisionProtocolNames())
+	if !containsProtocol(DecisionProtocols(), "zzz-test") {
+		t.Fatalf("the decision protocols are %v, want zzz-test", DecisionProtocols())
 	}
 }
 
@@ -263,12 +263,29 @@ func TestStatusError_ClassifiesTheFailures(t *testing.T) {
 	}
 }
 
-// contains reports whether the list holds the value.
-func contains(values []string, value string) bool {
-	for _, v := range values {
-		if v == value {
+// containsProtocol reports whether the list holds the protocol.
+func containsProtocol(protocols []Protocol, name string) bool {
+	for _, p := range protocols {
+		if p.Name == name {
 			return true
 		}
 	}
 	return false
+}
+
+// TestRegistry_KeepsThePathOfTheProtocol — the path a protocol
+// appends to the base URL travels with its registration, so the
+// configuration tools can show it.
+func TestRegistry_KeepsThePathOfTheProtocol(t *testing.T) {
+	RegisterChatProtocol("zzz-path-test", "/zzz/path", func(ChatConfig) (Provider, error) { return nil, nil })
+	for _, p := range ChatProtocols() {
+		if p.Name != "zzz-path-test" {
+			continue
+		}
+		if p.Path != "/zzz/path" {
+			t.Fatalf("the path = %q, want /zzz/path", p.Path)
+		}
+		return
+	}
+	t.Fatal("the protocol is not registered")
 }

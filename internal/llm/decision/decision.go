@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 	"net/http"
 	"strconv"
 	"strings"
@@ -80,10 +79,7 @@ func newSettings(cfg llm.DeciderConfig) (settings, error) {
 // requestHeaders returns the headers a request carries: the ones the
 // protocol needs, with the ones of the configuration over them.
 func (s settings) requestHeaders(own map[string]string) map[string]string {
-	out := make(map[string]string, len(own)+len(s.headers))
-	maps.Copy(out, own)
-	maps.Copy(out, s.headers)
-	return out
+	return llm.MergeHeaders(own, s.headers)
 }
 
 // typeRefusal is the answer type a refusal carries.

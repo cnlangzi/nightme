@@ -7,7 +7,7 @@ import (
 )
 
 func init() {
-	llm.RegisterDecisionProtocol(protocolDecisions, NewDecisions)
+	llm.RegisterDecisionProtocol(protocolDecisions, decisionsPath, NewDecisions)
 }
 
 // protocolDecisions is the name the decisions protocol is registered

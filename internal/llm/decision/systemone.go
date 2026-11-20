@@ -7,7 +7,7 @@ import (
 )
 
 func init() {
-	llm.RegisterDecisionProtocol(protocolSystemOne, NewSystemOne)
+	llm.RegisterDecisionProtocol(protocolSystemOne, systemonePath, NewSystemOne)
 }
 
 // protocolSystemOne is the name the systemone protocol is registered

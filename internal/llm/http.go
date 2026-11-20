@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"strconv"
@@ -119,6 +120,28 @@ func APIKey(cfg Credentialed) (string, error) {
 // double up.
 func Endpoint(base, path string) string {
 	return strings.TrimRight(strings.TrimSpace(base), "/") + path
+}
+
+// MergeHeaders returns the headers a request carries: the ones the
+// protocol needs, with the ones of the configuration over them.
+//
+// An empty value in the configuration does not erase a header the
+// protocol set — a blank credential is never what an empty header
+// means. Where the protocol set nothing under that name, the empty
+// value goes out as it is: what the server does with it is the
+// server's business.
+func MergeHeaders(own, extra map[string]string) map[string]string {
+	out := make(map[string]string, len(own)+len(extra))
+	maps.Copy(out, own)
+	for name, value := range extra {
+		if value == "" {
+			if _, taken := out[name]; taken {
+				continue
+			}
+		}
+		out[name] = value
+	}
+	return out
 }
 
 // retryPolicy is the shared transient-failure policy: 429, 5xx and

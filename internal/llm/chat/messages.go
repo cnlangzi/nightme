@@ -10,7 +10,7 @@ import (
 )
 
 func init() {
-	llm.RegisterChatProtocol(protocolMessages, NewMessages)
+	llm.RegisterChatProtocol(protocolMessages, messagesPath, NewMessages)
 }
 
 // protocolMessages is the name the messages protocol is registered

@@ -733,3 +733,31 @@ func TestMeCmd_RefusesArguments(t *testing.T) {
 		t.Fatal("expected an error for an unexpected argument")
 	}
 }
+
+// TestMeWizard_ShowsTheTimeoutAndTheHeaders covers the state the
+// wizard prints: the deadline and the extra headers of the chat model
+// are part of it.
+func TestMeWizard_ShowsTheTimeoutAndTheHeaders(t *testing.T) {
+	path := meTestConfig(t, `me:
+  llm:
+    protocol: chat_completions
+    base_url: https://api.example.com/v1
+    model: gpt-4.1-mini
+    timeout: 30s
+    headers:
+      HTTP-Referer: https://nightme.dev
+`)
+
+	out, err := runMeWizard(t, path, "\n\n\n\n\n1\n")
+	if err != nil {
+		t.Fatalf("meWizard: %v\n%s", err, out)
+	}
+	for _, want := range []string{
+		"timeout:     30s",
+		"headers:     HTTP-Referer: https://nightme.dev",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the state does not show %q:\n%s", want, out)
+		}
+	}
+}

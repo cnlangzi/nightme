@@ -18,8 +18,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
@@ -29,7 +31,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/config"
 	nmerrors "github.com/cnlangzi/nightme/internal/errors"
 	"github.com/cnlangzi/nightme/internal/llm"
-	"github.com/cnlangzi/nightme/internal/llm/chat" // registers the chat protocols
+	_ "github.com/cnlangzi/nightme/internal/llm/chat" // registers the chat protocols
 	"github.com/cnlangzi/nightme/internal/runtime"
 )
 
@@ -129,7 +131,7 @@ func meWizard(cfg *config.Config, path string, in io.Reader, out io.Writer) erro
 	}
 
 	values := config.MeLLMValues{
-		Protocol:  protocol,
+		Protocol:  protocol.Name,
 		BaseURL:   baseURL,
 		Model:     model,
 		MaxTokens: maxTokens,
@@ -167,53 +169,55 @@ func meWizard(cfg *config.Config, path string, in io.Reader, out io.Writer) erro
 // empty answer keeps the current one; a configuration that names none
 // has to name one — a chat model without a protocol is no chat model
 // at all.
-func askProtocol(br *bufio.Reader, out io.Writer, current string) (string, bool) {
-	names := llm.ChatProtocolNames()
+func askProtocol(br *bufio.Reader, out io.Writer, current string) (llm.Protocol, bool) {
+	protocols := llm.ChatProtocols()
 	for {
 		fmt.Fprintln(out, "Protocol:")
-		for i, name := range names {
-			fmt.Fprintf(out, "  [%d] %s — POST {base_url}%s\n", i+1, name, chat.Path(name))
+		for i, p := range protocols {
+			fmt.Fprintf(out, "  [%d] %s — POST {base_url}%s\n", i+1, p.Name, p.Path)
 		}
 		fmt.Fprint(out, "> ")
 		answer, ok := readAnswer(br)
 		if !ok {
 			fmt.Fprintln(out)
-			return "", false
+			return llm.Protocol{}, false
 		}
 		if strings.EqualFold(answer, "q") {
-			return "", false
+			return llm.Protocol{}, false
 		}
 		if answer == "" {
 			if current != "" {
-				return current, true
+				if p, ok := matchProtocol(current, protocols); ok {
+					return p, true
+				}
 			}
 			fmt.Fprintln(out, "A protocol is required.")
 			continue
 		}
-		if name, ok := matchProtocol(answer, names); ok {
-			return name, true
+		if p, ok := matchProtocol(answer, protocols); ok {
+			return p, true
 		}
-		fmt.Fprintf(out, "%q is not a protocol — choose a number between 1 and %d, or the name of one.\n", answer, len(names))
+		fmt.Fprintf(out, "%q is not a protocol — choose a number between 1 and %d, or the name of one.\n", answer, len(protocols))
 	}
 }
 
 // matchProtocol returns the protocol the answer names: a number in the
 // list, or the name of one of them.
-func matchProtocol(answer string, names []string) (string, bool) {
+func matchProtocol(answer string, protocols []llm.Protocol) (llm.Protocol, bool) {
 	answer = strings.TrimSpace(answer)
 	if n, err := strconv.Atoi(answer); err == nil {
-		if n < 1 || n > len(names) {
-			return "", false
+		if n < 1 || n > len(protocols) {
+			return llm.Protocol{}, false
 		}
-		return names[n-1], true
+		return protocols[n-1], true
 	}
 	name := strings.ToLower(answer)
-	for _, known := range names {
-		if known == name {
-			return known, true
+	for _, p := range protocols {
+		if p.Name == name {
+			return p, true
 		}
 	}
-	return "", false
+	return llm.Protocol{}, false
 }
 
 // askBaseURL asks for the root of the API.
@@ -221,9 +225,9 @@ func matchProtocol(answer string, names []string) (string, bool) {
 // The protocol decides what is appended to it, so the wizard says
 // which path that is: the address the operator writes is the address
 // the request goes to, plus that path.
-func askBaseURL(br *bufio.Reader, out io.Writer, current, protocol string) (string, bool) {
-	if path := chat.Path(protocol); path != "" {
-		fmt.Fprintf(out, "The %s protocol calls {base_url}%s\n", protocol, path)
+func askBaseURL(br *bufio.Reader, out io.Writer, current string, protocol llm.Protocol) (string, bool) {
+	if protocol.Path != "" {
+		fmt.Fprintf(out, "The %s protocol calls {base_url}%s\n", protocol.Name, protocol.Path)
 	}
 	return askValue(br, out, "base_url", current, acceptAny)
 }
@@ -416,8 +420,37 @@ func printMeValues(out io.Writer, c config.MeLLMConfig) {
 	fmt.Fprintf(out, "  base_url:    %s\n", orNone(c.BaseURL))
 	fmt.Fprintf(out, "  model:       %s\n", orNone(c.Model))
 	fmt.Fprintf(out, "  max_tokens:  %d\n", c.MaxTokens)
+	fmt.Fprintf(out, "  timeout:     %s\n", orNone(durationText(c.Timeout)))
+	fmt.Fprintf(out, "  headers:     %s\n", headersText(c.Headers))
 	fmt.Fprintf(out, "  api_key:     %s\n", maskKey(c.APIKey))
 	fmt.Fprintf(out, "  api_key_env: %s\n", orNone(c.APIKeyEnv))
+}
+
+// durationText renders the deadline of a call. A deadline of zero
+// means the default of the protocol applies.
+func durationText(d time.Duration) string {
+	if d <= 0 {
+		return ""
+	}
+	return d.String()
+}
+
+// headersText renders the extra headers every request carries: by
+// name, in the order of their names.
+func headersText(headers map[string]string) string {
+	if len(headers) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(headers))
+	for name := range headers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		parts = append(parts, name+": "+headers[name])
+	}
+	return strings.Join(parts, ", ")
 }
 
 // builtinAgentNames lists the agents the registry knows, in

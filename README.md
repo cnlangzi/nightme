@@ -703,7 +703,7 @@ me:
       HTTP-Referer: https://nightme.dev
   decider:
     protocol: decisions           # decisions | systemone
-    base_url: https://api.typesafe.ai/v1
+    base_url: https://openrouter.ai/api/v1
     model: typesafe/jev-1.14
     api_key_env: OPENROUTER_API_KEY # the name of a variable that holds the key
     min_confidence: 0.8           # below this the agent escalates

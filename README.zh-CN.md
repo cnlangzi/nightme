@@ -608,7 +608,7 @@ me:
       HTTP-Referer: https://nightme.dev
   decider:
     protocol: decisions           # decisions | systemone
-    base_url: https://api.typesafe.ai/v1
+    base_url: https://openrouter.ai/api/v1
     model: typesafe/jev-1.14
     api_key_env: OPENROUTER_API_KEY # 存 key 的环境变量的名字
     min_confidence: 0.8           # 低于这个置信度就升级

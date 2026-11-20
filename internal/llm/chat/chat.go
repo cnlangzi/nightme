@@ -17,7 +17,6 @@ package chat
 
 import (
 	"errors"
-	"maps"
 	"net/http"
 	"strings"
 	"time"
@@ -78,23 +77,5 @@ func newSettings(cfg llm.ChatConfig) (settings, error) {
 // requestHeaders returns the headers a request carries: the ones the
 // protocol needs, with the ones of the configuration over them.
 func (s settings) requestHeaders(own map[string]string) map[string]string {
-	out := make(map[string]string, len(own)+len(s.headers))
-	maps.Copy(out, own)
-	maps.Copy(out, s.headers)
-	return out
-}
-
-// Path returns the path a protocol appends to the base URL.
-//
-// The base URL is used as it is written, so the path of the protocol
-// is all a client adds. A protocol the package does not know has no
-// path.
-func Path(protocol string) string {
-	switch strings.ToLower(strings.TrimSpace(protocol)) {
-	case protocolCompletions:
-		return completionsPath
-	case protocolMessages:
-		return messagesPath
-	}
-	return ""
+	return llm.MergeHeaders(own, s.headers)
 }

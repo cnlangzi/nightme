@@ -89,37 +89,64 @@ type Factory func(cfg ChatConfig) (Provider, error)
 // DeciderFactory builds a decider from a configuration.
 type DeciderFactory func(cfg DeciderConfig) (Decider, error)
 
-var (
-	registryMu sync.RWMutex
-	protocols  = map[string]Factory{}
-	deciders   = map[string]DeciderFactory{}
-)
-
-// RegisterChatProtocol adds a chat protocol under name. A second
-// registration of the same name replaces the first, so a test can
-// install a fake.
+// Protocol is a registered wire protocol.
 //
-// The concrete protocols register themselves from their package's init.
-func RegisterChatProtocol(name string, f Factory) {
-	name = strings.ToLower(strings.TrimSpace(name))
-	if name == "" || f == nil {
-		return
-	}
-	registryMu.Lock()
-	defer registryMu.Unlock()
-	protocols[name] = f
+// The path is what the protocol appends to the base URL: the base is
+// used as it is written, so the path is all a client adds.
+type Protocol struct {
+	// Name is the name the protocol is registered under.
+	Name string
+	// Path is what the protocol appends to the base URL.
+	Path string
 }
 
-// RegisterDecisionProtocol adds a decision protocol under name. A
-// second registration of the same name replaces the first.
-func RegisterDecisionProtocol(name string, f DeciderFactory) {
+// chatProtocol is a registered chat protocol.
+type chatProtocol struct {
+	factory Factory
+	path    string
+}
+
+// decisionProtocol is a registered decision protocol.
+type decisionProtocol struct {
+	factory DeciderFactory
+	path    string
+}
+
+var (
+	registryMu sync.RWMutex
+	protocols  = map[string]chatProtocol{}
+	deciders   = map[string]decisionProtocol{}
+)
+
+// RegisterChatProtocol adds a chat protocol under name. The path is
+// what the protocol appends to the base URL.
+//
+// A second registration of the same name replaces the first, so a test
+// can install a fake.
+//
+// The concrete protocols register themselves from their package's init.
+func RegisterChatProtocol(name, path string, f Factory) {
 	name = strings.ToLower(strings.TrimSpace(name))
 	if name == "" || f == nil {
 		return
 	}
 	registryMu.Lock()
 	defer registryMu.Unlock()
-	deciders[name] = f
+	protocols[name] = chatProtocol{factory: f, path: path}
+}
+
+// RegisterDecisionProtocol adds a decision protocol under name. The
+// path is what the protocol appends to the base URL.
+//
+// A second registration of the same name replaces the first.
+func RegisterDecisionProtocol(name, path string, f DeciderFactory) {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" || f == nil {
+		return
+	}
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	deciders[name] = decisionProtocol{factory: f, path: path}
 }
 
 // New builds the chat provider the configuration names.
@@ -135,15 +162,15 @@ func New(cfg ChatConfig) (Provider, error) {
 		return nil, fmt.Errorf("llm: no chat protocol configured")
 	}
 	registryMu.RLock()
-	f, ok := protocols[name]
+	p, ok := protocols[name]
 	registryMu.RUnlock()
 	if !ok {
-		return nil, fmt.Errorf("llm: unknown chat protocol %q (known: %s)", name, strings.Join(ChatProtocolNames(), ", "))
+		return nil, fmt.Errorf("llm: unknown chat protocol %q (known: %s)", name, protocolNames(ChatProtocols()))
 	}
 	if strings.TrimSpace(cfg.Model) == "" {
 		return nil, fmt.Errorf("llm: chat protocol %q has no model", name)
 	}
-	return f(cfg)
+	return p.factory(cfg)
 }
 
 // NewDecider builds the decider the configuration names.
@@ -153,38 +180,48 @@ func NewDecider(cfg DeciderConfig) (Decider, error) {
 		return nil, fmt.Errorf("llm: no decision protocol configured")
 	}
 	registryMu.RLock()
-	f, ok := deciders[name]
+	p, ok := deciders[name]
 	registryMu.RUnlock()
 	if !ok {
-		return nil, fmt.Errorf("llm: unknown decision protocol %q (known: %s)", name, strings.Join(DecisionProtocolNames(), ", "))
+		return nil, fmt.Errorf("llm: unknown decision protocol %q (known: %s)", name, protocolNames(DecisionProtocols()))
 	}
 	if strings.TrimSpace(cfg.Model) == "" {
 		return nil, fmt.Errorf("llm: decision protocol %q has no model", name)
 	}
-	return f(cfg)
+	return p.factory(cfg)
 }
 
-// ChatProtocolNames lists the registered chat protocols, sorted.
-func ChatProtocolNames() []string {
+// ChatProtocols lists the registered chat protocols, sorted by name.
+func ChatProtocols() []Protocol {
 	registryMu.RLock()
 	defer registryMu.RUnlock()
-	out := make([]string, 0, len(protocols))
-	for name := range protocols {
-		out = append(out, name)
+	out := make([]Protocol, 0, len(protocols))
+	for name, p := range protocols {
+		out = append(out, Protocol{Name: name, Path: p.path})
 	}
-	sort.Strings(out)
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
 }
 
-// DecisionProtocolNames lists the registered decision protocols,
-// sorted.
-func DecisionProtocolNames() []string {
+// DecisionProtocols lists the registered decision protocols, sorted by
+// name.
+func DecisionProtocols() []Protocol {
 	registryMu.RLock()
 	defer registryMu.RUnlock()
-	out := make([]string, 0, len(deciders))
-	for name := range deciders {
-		out = append(out, name)
+	out := make([]Protocol, 0, len(deciders))
+	for name, p := range deciders {
+		out = append(out, Protocol{Name: name, Path: p.path})
 	}
-	sort.Strings(out)
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
+}
+
+// protocolNames renders the names of the protocols for an error
+// message.
+func protocolNames(protocols []Protocol) string {
+	names := make([]string, 0, len(protocols))
+	for _, p := range protocols {
+		names = append(names, p.Name)
+	}
+	return strings.Join(names, ", ")
 }

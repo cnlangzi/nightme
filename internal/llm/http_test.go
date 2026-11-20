@@ -100,3 +100,41 @@ func TestDualCredential(t *testing.T) {
 		})
 	}
 }
+
+// TestMergeHeaders — the configuration's headers go over the ones the
+// protocol needs, and an empty value never erases what the protocol
+// set: a blank credential is never what an empty header means.
+func TestMergeHeaders(t *testing.T) {
+	own := map[string]string{
+		"Authorization":     "Bearer sk-secret",
+		"anthropic-version": "2026-10-21",
+	}
+	extra := map[string]string{
+		"HTTP-Referer":  "https://nightme.dev",
+		"Authorization": "",
+	}
+
+	got := MergeHeaders(own, extra)
+	if got["HTTP-Referer"] != "https://nightme.dev" {
+		t.Fatalf("the referer = %q, want the configured one", got["HTTP-Referer"])
+	}
+	if got["anthropic-version"] != "2026-10-21" {
+		t.Fatalf("the version = %q, want the protocol's own", got["anthropic-version"])
+	}
+	if got["Authorization"] != "Bearer sk-secret" {
+		t.Fatalf("the authorization = %q, want the credential — an empty header does not erase it", got["Authorization"])
+	}
+}
+
+// TestMergeHeaders_KeepsAnEmptyHeaderOfItsOwn — a header the
+// protocol did not set goes out empty rather than being dropped.
+func TestMergeHeaders_KeepsAnEmptyHeaderOfItsOwn(t *testing.T) {
+	got := MergeHeaders(map[string]string{}, map[string]string{"X-Empty": ""})
+	value, ok := got["X-Empty"]
+	if !ok {
+		t.Fatal("the empty header was dropped")
+	}
+	if value != "" {
+		t.Fatalf("the empty header = %q, want it empty", value)
+	}
+}

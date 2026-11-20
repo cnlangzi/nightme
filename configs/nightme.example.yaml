@@ -130,12 +130,15 @@ me:
   #     HTTP-Referer: https://nightme.dev
   # decider:
   #   protocol: decisions
-  #   base_url: https://api.typesafe.ai/v1
+  #   base_url: https://openrouter.ai/api/v1
   #   model: typesafe/jev-1.14
   #   api_key_env: OPENROUTER_API_KEY
+  #   # The deadline of one call. Unset means five minutes.
+  #   timeout: 5m
   #   min_confidence: 0.8
-  # For protocol: systemone the base is https://api.typesafe.ai/v1 and
-  # the model is jev-latest.
+  # The decider above speaks the decisions protocol at OpenRouter's
+  # address. The systemone protocol lives at typesafe's own API: the
+  # base is https://api.typesafe.ai/v1 and the model jev-latest.
   # The agent that thinks for the owner: the run asks it why a step
   # failed and what to do about it. Unset means the agent of the chat
   # that started the run is used.

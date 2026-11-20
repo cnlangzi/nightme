@@ -314,7 +314,9 @@ claim 保留自己的措辞：
 
 `/gtw close` 同时收尾 PR 上的 label：按分支找到这个 PR，把它上面除 `nightme/assigned` 以外的 `nightme/*` 全部摘掉，只摘不贴 —— PR 的完成状态由平台上的 merged 表达。查询不限状态（close 的正常时机在 merge 之后，merged 的 PR 已经不在 open 里），并且发生在删掉分支之前：分支删掉之后平台就查不到这个 PR 了。分支没开过 PR 时不做任何事，也不告警。
 
-**PR 侧失败只警告**：PR 上的 label 是记账，没有任何逻辑读它，所以摘不掉也只给一行 `⚠️`，close 的本地清理照常跑完。这跟 issue 侧相反 —— issue 的 label 是队列状态的来源，它摘不掉就必须中止 close，否则 worktree 和分支被拆掉之后无法恢复。
+**PR 侧收尾排在 worktree 删除之后**：PR 靠分支名找，删分支之前必须做完；但它排在 worktree 删除之后，所以 close 在脏 worktree、或者 worktree 删除失败时中止（那条路径把 issue 的 label 还原）不会动到 PR —— PR 侧因此不需要还原，中止的 close 让 PR 保持原样。
+
+**PR 侧失败只警告**：PR 上的 label 是记账，没有任何逻辑读它，所以摘不掉也只给一行 `⚠️`，close 的本地清理照常跑完。摘不掉的 label 在卡片上用 `!` 标出 —— 它还在 PR 上，不和摘掉的 label 混在一列。这跟 issue 侧相反 —— issue 的 label 是队列状态的来源，它摘不掉就必须中止 close，否则 worktree 和分支被拆掉之后无法恢复。
 
 ### 3.4 gtw 职责边界（dispatch 之后）
 

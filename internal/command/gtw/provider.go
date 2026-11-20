@@ -1957,14 +1957,7 @@ func (c *GitHubProvider) classifyCreatePRError(stderr string) error {
 // returns empty list, not an error, when the head doesn't exist
 // on origin), so it has no special handling here.
 func (c *GitHubProvider) FindOpenPRForBranch(ctx context.Context, owner, repo, head string) (*PR, error) {
-	args := []string{
-		"pr", "list",
-		"--head", head,
-		"--state", "open",
-		"--json", "number,url,state",
-		"--repo", owner + "/" + repo,
-	}
-	stdout, stderr, err := c.runner().Run(ctx, "gh", args...)
+	stdout, stderr, err := c.listPRsForBranch(ctx, owner, repo, head, "open")
 	if err != nil {
 		return nil, wrapListPRError(err, stderr, "gh")
 	}
@@ -1981,14 +1974,7 @@ func (c *GitHubProvider) FindOpenPRForBranch(ctx context.Context, owner, repo, h
 // stderr (auth failure, network down, rate-limited) wraps the
 // underlying error verbatim.
 func (c *GitHubProvider) GetPR(ctx context.Context, owner, repo, head string) (*PR, error) {
-	args := []string{
-		"pr", "list",
-		"--head", head,
-		"--state", "open",
-		"--json", "number,url,state",
-		"--repo", owner + "/" + repo,
-	}
-	stdout, stderr, err := c.runner().Run(ctx, "gh", args...)
+	stdout, stderr, err := c.listPRsForBranch(ctx, owner, repo, head, "open")
 	if err != nil {
 		return nil, fmt.Errorf("gh pr list --head %s: %v: %s", head, err, strings.TrimSpace(stderr))
 	}
@@ -2004,18 +1990,30 @@ func (c *GitHubProvider) GetPR(ctx context.Context, owner, repo, head string) (*
 // open anymore. gh answers an empty JSON array when the branch
 // never had a PR — that is (nil, nil), not an error.
 func (c *GitHubProvider) FindPRForBranch(ctx context.Context, owner, repo, head string) (*PR, error) {
-	args := []string{
-		"pr", "list",
-		"--head", head,
-		"--state", "all",
-		"--json", "number,url,state",
-		"--repo", owner + "/" + repo,
-	}
-	stdout, stderr, err := c.runner().Run(ctx, "gh", args...)
+	stdout, stderr, err := c.listPRsForBranch(ctx, owner, repo, head, "all")
 	if err != nil {
 		return nil, wrapListPRError(err, stderr, "gh")
 	}
 	return decodeGitHubPRList(stdout)
+}
+
+// listPRsForBranch runs `gh pr list --head <head> --state <state>
+// --json number,url,state --repo <owner>/<repo>` and returns the
+// CLI's stdout and stderr.
+//
+// The three lookups differ only in the state filter: two want the
+// open pull requests, one wants every state. The error wrapping
+// stays with the callers — they do not agree on it.
+func (c *GitHubProvider) listPRsForBranch(ctx context.Context, owner, repo, head, state string) (string, string, error) {
+	args := []string{
+		"pr", "list",
+		"--head", head,
+		"--state", state,
+		"--json", "number,url,state",
+		"--repo", owner + "/" + repo,
+	}
+	stdout, stderr, err := c.runner().Run(ctx, "gh", args...)
+	return stdout, stderr, err
 }
 
 // ListPRLabels runs `gh pr view <number> --json labels --repo

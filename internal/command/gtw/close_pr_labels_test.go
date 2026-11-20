@@ -170,6 +170,15 @@ func TestRunClose_PRFinalizeFailureWarnsButDoesNotAbort(t *testing.T) {
 		}
 	}
 
+	// The PR row says the label stayed on, and does not claim the PR
+	// carries no nightme labels.
+	if !strings.Contains(card, "!"+LabelReady) {
+		t.Errorf("card must mark the label that stayed on:\n%s", card)
+	}
+	if strings.Contains(card, "no nightme/* labels") {
+		t.Errorf("card must not claim the PR has no nightme labels:\n%s", card)
+	}
+
 	// The outcome is a normal one: the close did its work.
 	got := settledOutcomeOfClose(t, rig.rec)
 	if got == nil {
@@ -177,6 +186,39 @@ func TestRunClose_PRFinalizeFailureWarnsButDoesNotAbort(t *testing.T) {
 	}
 	if got.Status != messages.OutcomeOK {
 		t.Errorf("outcome status = %s, want ok — the local cleanup ran", got.Status)
+	}
+}
+
+// TestRunClose_DirtyWorktree_LeavesPRLabelsAlone pins that the PR
+// side is finalised only once the local cleanup has succeeded.
+//
+// The close aborts at the dirty check, so the fix is still live and
+// the pull request must keep its labels — the same way the issue's
+// labels are put back on that path. The PR side therefore needs no
+// compensation: it never runs on a path that can abort.
+func TestRunClose_DirtyWorktree_LeavesPRLabelsAlone(t *testing.T) {
+	wt := t.TempDir()
+	repoRoot := t.TempDir()
+
+	rig := newCloseRig(t)
+	prov := newFakeGitProvider(ProviderGitHub, "github.com")
+	seedFixRemote(t, rig, prov, wt, repoRoot)
+	seedPR(t, prov, "fix/42-test", 7, LabelReady)
+	rig.git.statusResp = " M foo.txt\n"
+
+	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false); err != nil {
+		t.Fatalf("RunClose: %v", err)
+	}
+
+	// The pull request kept its label: the close never got as far as
+	// the tracker.
+	assertPRLabels(t, prov, 7, LabelReady)
+	if calls := prov.CallsByMethod("RemovePRLabel"); len(calls) != 0 {
+		t.Errorf("RemovePRLabel calls = %+v, want 0", calls)
+	}
+	card := rig.rec.lastText()
+	if strings.Contains(card, "→ pr:") {
+		t.Errorf("card must not carry a PR row:\n%s", card)
 	}
 }
 

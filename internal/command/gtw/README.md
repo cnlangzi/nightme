@@ -377,7 +377,14 @@ legacy case"兜底。
 把它上面的 `nightme/*` 状态 label 摘掉(队列标记 `nightme/assigned`
 不摘),只摘不贴——PR 的完成状态由平台上的 merged 表达。分支没开过 PR
 就不带这一行。PR 侧收尾失败只告警,不阻断 close 的本地清理:PR 上的
-label 是记账,没有任何逻辑读它。
+label 是记账,没有任何逻辑读它。摘不掉的 label 用 `!` 标出——它还在
+PR 上,不和摘掉的 label 混在一列。
+
+PR 侧的收尾发生在 worktree 删掉之后、删分支之前。删分支之前必须做完:
+分支没了,平台就查不到这个 PR 了。排在 worktree 删除之后,是因为 close
+还可能因为 worktree 脏、或者 worktree 删除失败而中止——那条路径会把
+issue 的 label 还原,PR 侧放在后面就不需要还原:中止的 close 不动 PR
+上的 label,PR 保持原样。
 
 ### 4.1b Format 1(back)
 

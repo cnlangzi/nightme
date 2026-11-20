@@ -718,6 +718,42 @@ func TestParseCmdArgs_UnknownFlagQuotesTheTypedToken(t *testing.T) {
 	}
 }
 
+// TestParseCmdArgs_TerminatorEndsTheFlags pins the consequence the
+// unbounded-arity commands live with: the end-of-flags marker is
+// consumed rather than kept, so a payload that follows it loses the
+// marker and keeps the rest. A dash glyph inside the payload
+// survives — only the marker itself is dropped.
+func TestParseCmdArgs_TerminatorEndsTheFlags(t *testing.T) {
+	spec := CmdSpec{Name: "/demo", Usage: "/demo [<payload>]", MaxArgs: UnboundedArgs}
+
+	for _, term := range []string{"--", "—", "–", "——"} {
+		t.Run("terminator "+term, func(t *testing.T) {
+			got, err := ParseCmdArgs([]string{"wf", term, "some", "note"}, spec)
+			if err != nil {
+				t.Fatalf("ParseCmdArgs: %v", err)
+			}
+			want := []string{"wf", "some", "note"}
+			if got.NArgs() != len(want) {
+				t.Fatalf("Args = %q, want %q", got.Args, want)
+			}
+			for i, w := range want {
+				if got.Arg(i) != w {
+					t.Errorf("Arg(%d) = %q, want %q", i, got.Arg(i), w)
+				}
+			}
+		})
+	}
+
+	// A dash glyph that is not the marker is payload.
+	got, err := ParseCmdArgs([]string{"wf", "—", "—note"}, spec)
+	if err != nil {
+		t.Fatalf("ParseCmdArgs: %v", err)
+	}
+	if got.NArgs() != 2 || got.Arg(1) != "—note" {
+		t.Errorf("Args = %q, want [wf —note]", got.Args)
+	}
+}
+
 // TestParseCmdArgs_ValuesAndPositionalsStayVerbatim pins that the
 // glyph folding touches flag tokens only: a value and a positional
 // keep every byte the user typed.

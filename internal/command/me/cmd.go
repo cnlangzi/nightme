@@ -95,7 +95,8 @@ func (f *Factory) Spec() command.Spec {
 
 // startCmdSpec declares /me start's argv grammar. The shared lexer
 // (command.ParseCmdArgs) enforces the "unknown flag" / arity contract,
-// and "--" hands the rest of the command line to the workflow.
+// and a lone long-form dash token ("--", "—") hands the rest of the
+// command line to the workflow.
 var startCmdSpec = command.CmdSpec{
 	Name:  "/me start",
 	Usage: "/me start <workflow> [args...] [-i <rounds>]",

@@ -243,7 +243,8 @@ var configCmdSpec = command.CmdSpec{
 	MinArgs: 1,
 	// The value is free text and may carry spaces ("Simplified
 	// Chinese"), so the tail after the key is one value rather
-	// than a fixed number of positionals.
+	// than a fixed number of positionals. A lone long-form dash
+	// token ends the flags, so it never becomes part of the value.
 	MaxArgs: command.UnboundedArgs,
 }
 

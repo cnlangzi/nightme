@@ -25,8 +25,8 @@ import (
 //     starts with a hyphen of any family — the ASCII hyphen-minus
 //     a keyboard types, or one of the dash glyphs a phone keyboard
 //     produces for it. A lone hyphen is the conventional
-//     stdin/positional placeholder; a lone long form ("--", "—")
-//     ends the flags. Everything else is a positional arg.
+//     stdin/positional placeholder; a lone token that folds to the
+//     long form ends the flags. Everything else is a positional arg.
 //  2. Recognised flags are declared explicitly in CmdSpec.Flags.
 //     Anything else is an `unknown flag` error — never a silent
 //     no-op.
@@ -66,8 +66,9 @@ const UnboundedArgs = -1
 // ones. This is what lets `/cwd -- -weird-dir-name` work
 // without the path being misread as a flag.
 //
-// The marker is recognised in the dash glyphs as well: "--", "—" and
-// "——" all end the flags.
+// Any lone token that folds to the long form ends the flags: "--",
+// "—", "–", "——" and the rest of the dash glyphs alike. The marker
+// itself is consumed, so it never reaches the positional args.
 const ArgTerminator = "--"
 
 // FlagSpec declares one recognised flag. Register every alias

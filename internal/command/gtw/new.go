@@ -73,9 +73,10 @@ var newCmdSpec = command.CmdSpec{
 // "-y" (a CLI example inside a document) must not flip the command
 // into create mode.
 //
-// The cost is that a material whose first word is exactly "-y" cannot
-// be expressed: it is refused loudly, as a usage error, rather than
-// mistaken for the flag.
+// The cost is that a material whose first word is the create-mode flag
+// in any dash spelling ("-y", "--yes", "—y") cannot be expressed: it
+// is refused loudly, as a usage error, rather than mistaken for the
+// flag.
 func parseNewIssueArgs(tail, line string) (newIssueArgs, error) {
 	lineFields := strings.Fields(line)
 	if len(lineFields) > 0 && isYesFlag(lineFields[0]) {

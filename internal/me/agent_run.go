@@ -327,6 +327,13 @@ type run struct {
 	// kept across the calls that resume a command, so the tracker
 	// never grows a watcher nobody reads.
 	watch <-chan observe.Execution
+	// abandon carries the signal that the command the run waits for was
+	// abandoned: the wait ends at once, and the run goes on.
+	abandon chan struct{}
+	// abandoned reports that the command the run waits for was
+	// abandoned. A command that was abandoned before the run began to
+	// watch it ends the wait at once as well.
+	abandoned bool
 }
 
 // newRun builds a run for a bound workflow.
@@ -1708,7 +1715,51 @@ func (r *run) inflightState() *inflightState {
 func (r *run) setInflight(st *inflightState) {
 	r.mu.Lock()
 	r.inflight = st
+	// The command is a new one: the abandon of the last one goes with
+	// it.
+	r.abandoned = false
+	r.abandon = make(chan struct{})
 	r.mu.Unlock()
+}
+
+// abandonCommand tells the run that the command it waits for was
+// abandoned.
+//
+// The wait ends at once: the run goes on to its next step. The command
+// itself is not cancelled: the chat owns it, and it may still run to
+// its end.
+func (r *run) abandonCommand() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.inflight == nil {
+		// The run waits for no command: there is nothing to abandon.
+		return
+	}
+	r.inflight = nil
+	r.watch = nil
+	r.abandoned = true
+	if r.abandon != nil {
+		close(r.abandon)
+		r.abandon = nil
+	}
+}
+
+// abandonChannel returns the channel that ends the wait for the command
+// the run is waiting for.
+//
+// The channel is closed when the command is abandoned. A command that
+// was abandoned before the run began to watch it ends the wait at once
+// as well.
+func (r *run) abandonChannel() <-chan struct{} {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.abandon == nil {
+		r.abandon = make(chan struct{})
+		if r.abandoned {
+			close(r.abandon)
+		}
+	}
+	return r.abandon
 }
 
 // clearWatch forgets the channel the running command was watched on.
@@ -1728,6 +1779,8 @@ func (r *run) clearInflight() {
 	r.mu.Lock()
 	r.inflight = nil
 	r.watch = nil
+	r.abandon = nil
+	r.abandoned = false
 	r.mu.Unlock()
 }
 

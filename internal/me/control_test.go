@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/pkg/wfe"
@@ -501,23 +502,46 @@ func TestTheGate_IgnoresAStaleWake(t *testing.T) {
 	}
 }
 
-// TestTheBusyStep_IsTheStepACommandIsOn — the run waits for a command:
-// the step it is on is busy, and a step cannot be skipped.
-func TestTheBusyStep_IsTheStepACommandIsOn(t *testing.T) {
+// TestTheStepInFlight_IsTheStepTheRunWorksOn — the work of a step is
+// in flight while the run executes it, and while its command waits for
+// an answer.
+func TestTheStepInFlight_IsTheStepTheRunWorksOn(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "two", commitPushWorkflow)
 
 	svc, _ := testService(t, dir, Config{})
 	r := testRun(t, svc, "two")
 
-	r.setJudgmentStep("commit")
-	r.setInflight(&inflightState{MsgID: "msg-1", Command: "/gtw commit"})
-
+	// The run is working on the step: its command is on its way.
+	r.setRunningStep("commit")
 	r.mu.Lock()
-	busy := r.busyStepIDLocked()
+	inFlight := r.stepInFlightLocked("commit")
 	r.mu.Unlock()
-	if busy != "commit" {
-		t.Errorf("the busy step is %q, want the step the command is on", busy)
+	if !inFlight {
+		t.Error("the step the run works on is not in flight")
+	}
+
+	// Another step is not in flight.
+	r.mu.Lock()
+	inFlight = r.stepInFlightLocked("push")
+	r.mu.Unlock()
+	if inFlight {
+		t.Error("the step the run does not work on is in flight")
+	}
+
+	// The step started and has not settled: its command waits for an
+	// answer.
+	r.clearRunningStep()
+	commit, ok := r.stepByID("commit")
+	if !ok {
+		t.Fatal("the workflow has no commit step")
+	}
+	r.recordPending("main", commit)
+	r.mu.Lock()
+	inFlight = r.stepInFlightLocked("commit")
+	r.mu.Unlock()
+	if !inFlight {
+		t.Error("the step that waits for an answer is not in flight")
 	}
 }
 
@@ -555,19 +579,18 @@ func TestTheRoundCardShowsTheErrorOfABrokenStep(t *testing.T) {
 // state of the run answers.
 func TestTheCommandsDecideNothingOnARunThatIsWorking(t *testing.T) {
 	dir := t.TempDir()
-	writeWorkflow(t, dir, "one", oneStepWorkflow)
+	writeWorkflow(t, dir, "two", commitPushWorkflow)
 
-	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
-	op.steps = []fakeStep{{open: true}}
+	svc, _ := testService(t, dir, Config{})
+	r := testRun(t, svc, "two")
+	t.Cleanup(r.cancel)
+	// The run works on the step: it is not paused, and no step of its
+	// own is in flight.
+	r.setJudgmentStep("commit")
+	svc.mu.Lock()
+	svc.active[r.chatID] = r
+	svc.mu.Unlock()
 
-	if _, _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
-	}); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	waitSent(t, op, "/gtw commit")
-
-	// The run is working: it is not paused.
 	for _, cmd := range []struct {
 		name string
 		call func() (OperatorDecision, error)
@@ -585,9 +608,11 @@ func TestTheCommandsDecideNothingOnARunThatIsWorking(t *testing.T) {
 		if d.Step != "commit" {
 			t.Errorf("the %s looked at %q, want the step the run is on", cmd.name, d.Step)
 		}
+		if d.Why != reasonWorking {
+			t.Errorf("the %s says %q, want %q", cmd.name, d.Why, reasonWorking)
+		}
 	}
 	// The run holds no decision for the turn.
-	r := activeRun(t, svc, "obs-1")
 	if r.takeDirective() != nil {
 		t.Error("the run holds a decision, want none")
 	}
@@ -748,10 +773,10 @@ func TestResume_CancelsAPauseThatHasNotTakenEffect(t *testing.T) {
 	}
 }
 
-// TestTheCommandsDecideNothingOnAStepThatIsStillRunning — the work is
-// in flight: the step can neither run again nor be skipped, so the
-// command holds no decision.
-func TestTheCommandsDecideNothingOnAStepThatIsStillRunning(t *testing.T) {
+// TestResume_OnAStepThatIsStillRunningDecidesNothing — the work is in
+// flight: the step cannot run again, so the command holds no decision
+// and says why.
+func TestResume_OnAStepThatIsStillRunningDecidesNothing(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
@@ -768,28 +793,170 @@ func TestTheCommandsDecideNothingOnAStepThatIsStillRunning(t *testing.T) {
 	if err := svc.Pause(context.Background(), "obs-1", "om_pause"); err != nil {
 		t.Fatalf("pause: %v", err)
 	}
-	for _, cmd := range []struct {
-		name string
-		call func() (OperatorDecision, error)
-	}{
-		{"resume", func() (OperatorDecision, error) { return svc.Resume(context.Background(), "obs-1", "", "") }},
-		{"next", func() (OperatorDecision, error) { return svc.Next(context.Background(), "obs-1", "", "") }},
-	} {
-		d, err := cmd.call()
-		if err != nil {
-			t.Fatalf("%s: %v", cmd.name, err)
-		}
-		if d.Act {
-			t.Errorf("the %s decided something, want nothing to decide", cmd.name)
-		}
-		if d.Step != "commit" {
-			t.Errorf("the %s looked at %q, want the step that is running", cmd.name, d.Step)
-		}
+	d, err := svc.Resume(context.Background(), "obs-1", "", "")
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if d.Act {
+		t.Error("the command decided something, want nothing to decide")
+	}
+	if d.Step != "commit" {
+		t.Errorf("the command looked at %q, want the step that is running", d.Step)
+	}
+	if d.Why != reasonRunning {
+		t.Errorf("the reason is %q, want %q", d.Why, reasonRunning)
 	}
 	// The run holds no decision for the turn.
 	r := activeRun(t, svc, "obs-1")
 	if r.takeDirective() != nil {
 		t.Error("the run holds a decision, want none")
+	}
+}
+
+// TestNext_SkipsAStepThatIsStillRunning — the work is in flight: the
+// operator passes the step over. The step is recorded as skipped, the
+// command the run waits for is abandoned, and the plan goes on.
+func TestNext_SkipsAStepThatIsStillRunning(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "two", commitPushWorkflow)
+
+	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
+	op.steps = []fakeStep{{open: true}, okStep("pushed")}
+
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "two", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitSent(t, op, "/gtw commit")
+	// The run is taken before the command: a run that is over frees
+	// its chat, and the run of a chat that is over is gone.
+	r := activeRun(t, svc, "obs-1")
+
+	d, err := svc.Next(context.Background(), "obs-1", "", "")
+	if err != nil {
+		t.Fatalf("next: %v", err)
+	}
+	if d.Step != "commit" {
+		t.Errorf("the command looked at %q, want the step that is running", d.Step)
+	}
+	if !d.Act {
+		t.Error("the command decided nothing, want the step to be skipped")
+	}
+	if !d.skippedNow {
+		t.Error("the step was not skipped at once, want it skipped now")
+	}
+
+	// The step is recorded as skipped: the facts it produced are kept
+	// and the plan goes on.
+	st, ok := r.stepState("commit")
+	if !ok {
+		t.Fatal("the commit step has no state")
+	}
+	if st.Outcome.Status != wfe.OutcomeNoop {
+		t.Errorf("the step ended as %q, want the skipped one", st.Outcome.Status)
+	}
+	if st.Outcome.Summary != operatorSkippedSummary {
+		t.Errorf("the summary is %q, want %q", st.Outcome.Summary, operatorSkippedSummary)
+	}
+
+	// The run holds no decision for the turn: the step is skipped
+	// already.
+	if r.takeDirective() != nil {
+		t.Error("the run holds a decision, want none")
+	}
+
+	// The run stops waiting for the command and goes on with the plan.
+	waitSent(t, op, "/gtw push")
+}
+
+// TestTheOutcomeOfAnAbandonedCommandDoesNotOverwriteTheSkip — the
+// command the run abandoned settles after the step was skipped: the
+// step keeps its skip.
+func TestTheOutcomeOfAnAbandonedCommandDoesNotOverwriteTheSkip(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "two", commitPushWorkflow)
+
+	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
+	op.steps = []fakeStep{{open: true}, okStep("pushed")}
+
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "two", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitSent(t, op, "/gtw commit")
+	// The run is taken before the command: a run that is over frees
+	// its chat, and the run of a chat that is over is gone.
+	r := activeRun(t, svc, "obs-1")
+
+	if _, err := svc.Next(context.Background(), "obs-1", "", ""); err != nil {
+		t.Fatalf("next: %v", err)
+	}
+
+	// The command finishes in the chat: what it produces lands there,
+	// and the run does not record it as the outcome of the step.
+	if err := op.answer("obs-1", "", ""); err != nil {
+		t.Fatalf("settle the command: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	st, ok := r.stepState("commit")
+	if !ok {
+		t.Fatal("the commit step has no state")
+	}
+	if st.Outcome.Status != wfe.OutcomeNoop {
+		t.Errorf("the step ended as %q, want the skipped one", st.Outcome.Status)
+	}
+	if st.Outcome.Summary != operatorSkippedSummary {
+		t.Errorf("the summary is %q, want %q", st.Outcome.Summary, operatorSkippedSummary)
+	}
+}
+
+// TestTheAbandonedCommandEndsTheWait — the wait for a command ends at
+// once when the command is abandoned, and the run goes on: the run's own
+// context stays alive.
+func TestTheAbandonedCommandEndsTheWait(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	svc, op := testService(t, dir, Config{})
+	op.steps = []fakeStep{{open: true}}
+	msgID, err := op.Speak(context.Background(), "obs-1", "/gtw commit", channel.SpeakOptions{})
+	if err != nil {
+		t.Fatalf("speak: %v", err)
+	}
+	r := testRun(t, svc, "one")
+	t.Cleanup(r.cancel)
+	r.setInflight(&inflightState{MsgID: msgID, Command: "/gtw commit"})
+
+	type outcome struct {
+		res stepResult
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		res, err := svc.watchCommand(context.Background(), r, msgID, "/gtw commit")
+		done <- outcome{res: res, err: err}
+	}()
+	time.Sleep(50 * time.Millisecond)
+
+	r.abandonCommand()
+
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatalf("watch: %v", got.err)
+		}
+		if got.res.Status != statusAbandoned {
+			t.Errorf("the wait ended as %q, want the abandoned one", got.res.Status)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the wait did not end")
+	}
+	// The run goes on: the wait ended, not the run.
+	if err := r.ctx.Err(); err != nil {
+		t.Errorf("the run was cancelled: %v", err)
 	}
 }
 
@@ -808,6 +975,10 @@ func TestTheCommandsDecideOnTheStateOfTheTargetStep(t *testing.T) {
 		// step.
 		wantResume bool
 		wantNext   bool
+		// whyResume and whyNext are the reasons the commands give when
+		// they act on nothing.
+		whyResume string
+		whyNext   string
 	}{
 		{
 			name:       "the step succeeded",
@@ -815,6 +986,8 @@ func TestTheCommandsDecideOnTheStateOfTheTargetStep(t *testing.T) {
 			ran:        true,
 			wantResume: false,
 			wantNext:   false,
+			whyResume:  reasonSucceeded,
+			whyNext:    reasonSucceeded,
 		},
 		{
 			name:       "the step failed",
@@ -836,6 +1009,7 @@ func TestTheCommandsDecideOnTheStateOfTheTargetStep(t *testing.T) {
 			ran:        false,
 			wantResume: false,
 			wantNext:   true,
+			whyResume:  reasonNotRun,
 		},
 	}
 	for _, tc := range cases {
@@ -843,9 +1017,10 @@ func TestTheCommandsDecideOnTheStateOfTheTargetStep(t *testing.T) {
 			name string
 			kind string
 			want bool
+			why  string
 		}{
-			{"resume", directiveResume, tc.wantResume},
-			{"next", directiveNext, tc.wantNext},
+			{"resume", directiveResume, tc.wantResume, tc.whyResume},
+			{"next", directiveNext, tc.wantNext, tc.whyNext},
 		} {
 			t.Run(tc.name+" with "+cmd.name, func(t *testing.T) {
 				dir := t.TempDir()
@@ -875,6 +1050,10 @@ func TestTheCommandsDecideOnTheStateOfTheTargetStep(t *testing.T) {
 				if !cmd.want {
 					if directive != nil {
 						t.Errorf("the run holds the decision %+v, want none", directive)
+					}
+					// The command says why it acted on nothing.
+					if d.Why != cmd.why {
+						t.Errorf("the command says %q, want %q", d.Why, cmd.why)
 					}
 					return
 				}
@@ -917,8 +1096,35 @@ func TestResume_OnAStepThatCannotRunAgainDecidesNothing(t *testing.T) {
 	if d.Step != "commit" {
 		t.Errorf("the command looked at %q, want commit", d.Step)
 	}
+	if d.Why != reasonCannotRun {
+		t.Errorf("the reason is %q, want %q", d.Why, reasonCannotRun)
+	}
 	if r.takeDirective() != nil {
 		t.Error("the run holds a decision, want none")
+	}
+}
+
+// TestNext_OnAStepThatWasSkippedDecidesNothing — the operator passes
+// the same step over twice: the second command has nothing to skip.
+func TestNext_OnAStepThatWasSkippedDecidesNothing(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "two", commitPushWorkflow)
+
+	svc, _ := testService(t, dir, Config{})
+	pausedRun(t, svc, "commit", wfe.Outcome{Status: wfe.OutcomeNoop, Summary: operatorSkippedSummary}, true)
+
+	d, err := svc.Next(context.Background(), "obs-1", "", "")
+	if err != nil {
+		t.Fatalf("next: %v", err)
+	}
+	if d.Act {
+		t.Error("the command promised a skip of a step that was skipped already")
+	}
+	if d.Step != "commit" {
+		t.Errorf("the command looked at %q, want commit", d.Step)
+	}
+	if d.Why != reasonSkipped {
+		t.Errorf("the reason is %q, want %q", d.Why, reasonSkipped)
 	}
 }
 

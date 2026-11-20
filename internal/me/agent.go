@@ -775,6 +775,10 @@ func (s *Service) Next(ctx context.Context, chatID, messageID, note string) (Ope
 // is published all the same, and the run holds no decision of its own
 // for the turn.
 //
+// A step whose work is in flight is skipped at once: the run waits for
+// the command, and a decision that waited for the run's next turn would
+// wait for the command to finish.
+//
 // The decision is persisted, the state of the run is refreshed and the
 // state of the run is published before the run is woken.
 func (s *Service) operatorDecision(ctx context.Context, chatID, messageID, note, kind string) (OperatorDecision, error) {
@@ -787,6 +791,9 @@ func (s *Service) operatorDecision(ctx context.Context, chatID, messageID, note,
 	d, paused, err := r.prepareDecision(kind, note)
 	if err != nil {
 		return OperatorDecision{}, err
+	}
+	if d.skippedNow {
+		s.skipRunningStep(ctx, r, d.Step)
 	}
 	s.persist(r)
 	s.refreshRun(r)

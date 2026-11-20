@@ -36,14 +36,22 @@ import (
 	"github.com/cnlangzi/nightme/internal/messages"
 )
 
-// The line and the summary of a command that answers with the state of
-// the run: the state card is the answer, and the line says so.
+// The summary of a command that answers with the state of the run: the
+// state card is the answer.
 const (
-	// stateShownLine is what the operator reads when the state of the
-	// run answers the command.
-	stateShownLine = "📋 The run's state is shown again."
 	// stateShownSummary is the one-line account of that answer.
 	stateShownSummary = "the run's state is shown again"
+)
+
+// The marks of the two commands that act on a step.
+//
+// The mark says what the command does with the step: it runs again, or
+// it is skipped.
+const (
+	// resumeMark is the mark of `/me resume`.
+	resumeMark = "▶"
+	// nextMark is the mark of `/me next`.
+	nextMark = "⏭"
 )
 
 // Factory is the command.SlashCommandFactory for /me.
@@ -236,7 +244,7 @@ func (f *Factory) pause(ctx context.Context, rt command.RuntimeServices, input c
 // The command decides at command time what it does with that step: it
 // promises a retry only when the step ran and did not succeed. A step
 // that is still running, that succeeded, or that the plan runs anyway
-// is answered with the state of the run.
+// is answered with the reason.
 func (f *Factory) resume(ctx context.Context, rt command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
 	note := decisionNote(input.Text)
 	d, err := f.ctrl.Resume(ctx, input.ChatID, input.MessageID, note)
@@ -245,22 +253,21 @@ func (f *Factory) resume(ctx context.Context, rt command.RuntimeServices, input 
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
 	if !d.Act {
-		return stateShown(ctx, rt, d.Step), nil
+		return nothingDone(ctx, rt, resumeMark, d.Step, d.Why, "it was not run again"), nil
 	}
 	chatsession.ReportOutcome(ctx, messages.Outcome{
 		Status:  messages.OutcomeOK,
 		Summary: "the step runs again",
 		Data:    map[string]string{"step": d.Step},
 	})
-	return command.Reply(ctx, rt, "▶ The step runs again: "+d.Step+"."), nil
+	return command.Reply(ctx, rt, resumeMark+" The step runs again: "+d.Step+"."), nil
 }
 
 // next skips the step the run is on.
 //
 // The command decides at command time what it does with that step: it
 // promises a skip only when there is a step to pass over. A step that
-// is still running or that succeeded is answered with the state of the
-// run.
+// succeeded is answered with the reason.
 func (f *Factory) next(ctx context.Context, rt command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
 	note := decisionNote(input.Text)
 	d, err := f.ctrl.Next(ctx, input.ChatID, input.MessageID, note)
@@ -269,24 +276,25 @@ func (f *Factory) next(ctx context.Context, rt command.RuntimeServices, input co
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
 	if !d.Act {
-		return stateShown(ctx, rt, d.Step), nil
+		return nothingDone(ctx, rt, nextMark, d.Step, d.Why, "there was nothing to skip"), nil
 	}
 	chatsession.ReportOutcome(ctx, messages.Outcome{
 		Status:  messages.OutcomeOK,
 		Summary: "the step is skipped",
 		Data:    map[string]string{"step": d.Step},
 	})
-	return command.Reply(ctx, rt, "⏭ The step is skipped: "+d.Step+". The run goes on with the workflow."), nil
+	return command.Reply(ctx, rt, nextMark+" The step is skipped: "+d.Step+". The run goes on with the workflow."), nil
 }
 
-// stateShown answers a command that had nothing to decide: the state
-// of the run is the answer, and the line says so.
+// nothingDone answers a command that had nothing to decide: the reply
+// names the step and says what did not happen, so the operator can tell
+// that their command did nothing.
 //
 // The outcome is a noop: the request was valid, and there was nothing
 // to do to the step.
-func stateShown(ctx context.Context, rt command.RuntimeServices, step string) *command.SlashOutput {
+func nothingDone(ctx context.Context, rt command.RuntimeServices, mark, step, why, notHappened string) *command.SlashOutput {
 	chatsession.ReportOutcome(ctx, command.NoopOutcome(stateShownSummary, map[string]string{"step": step}))
-	return command.Reply(ctx, rt, stateShownLine)
+	return command.Reply(ctx, rt, mark+" The step "+step+" "+why+" — "+notHappened+".")
 }
 
 // refusalReason returns the stable code of a refusal, or the generic

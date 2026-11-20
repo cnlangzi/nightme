@@ -895,6 +895,9 @@ const (
 	statusWaiting = "waiting"
 	// statusInterrupted means the execution of the step is gone.
 	statusInterrupted = "interrupted"
+	// statusAbandoned means the operator passed the step over while
+	// its command was in flight.
+	statusAbandoned = "abandoned"
 )
 
 // outcomeStatus maps a step result status onto the outcome
@@ -902,8 +905,9 @@ const (
 //
 // An interrupted command reported no verdict, so it is recorded as
 // unknown — the vocabulary's way of saying that nobody said anything.
+// An abandoned command reported no verdict either.
 func outcomeStatus(status string) wfe.OutcomeStatus {
-	if status == statusInterrupted {
+	if status == statusInterrupted || status == statusAbandoned {
 		return wfe.OutcomeUnknown
 	}
 	return wfe.OutcomeStatus(status)
@@ -1007,13 +1011,17 @@ func (s *Service) runCommandInner(ctx context.Context, r *run, command string, i
 // only watches.
 //
 // It comes back early when the chat asks something — the agent is
-// waiting for an answer, and the model can answer it.
+// waiting for an answer, and the model can answer it — and when the
+// command was abandoned: the operator passed the step over, and the
+// run goes on to its next step.
 func (s *Service) watchCommand(ctx context.Context, r *run, msgID, command string) (stepResult, error) {
 	ch := r.watchChannel()
 	if ch == nil {
 		ch = s.cfg.Operator.Watch(msgID)
 		r.setWatchChannel(ch)
 	}
+	// The command can be abandoned while the run watches it.
+	abandon := r.abandonChannel()
 
 	for {
 		select {
@@ -1021,6 +1029,10 @@ func (s *Service) watchCommand(ctx context.Context, r *run, msgID, command strin
 			return stepResult{}, ctx.Err()
 		case <-r.ctx.Done():
 			return stepResult{}, r.ctx.Err()
+		case <-abandon:
+			// The command was abandoned: the wait ends, and the run
+			// goes on to its next step.
+			return stepResult{Status: statusAbandoned, Summary: "the command was abandoned"}, nil
 		case ex, ok := <-ch:
 			if !ok {
 				// The watcher was closed without a final snapshot.

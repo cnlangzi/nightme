@@ -7,7 +7,40 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
+
+// TestTheSessionNamesItselfBeforeItAnswers — a session names itself
+// before it speaks: a channel that shows the identity as a message of
+// its own leads the card with it.
+func TestTheSessionNamesItselfBeforeItAnswers(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
+	op.steps = []fakeStep{{open: true}}
+
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitSent(t, op, "/gtw commit")
+
+	if err := svc.Pause(context.Background(), "obs-1", "om_pause"); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	msgs := stateUnder(op, "om_pause")
+	if len(msgs) < 2 {
+		t.Fatalf("the card carries %d messages, want the identity and the answer", len(msgs))
+	}
+	if msgs[0].Kind != messages.OutInit {
+		t.Errorf("the first message is %v, want the identity of the session", msgs[0].Kind)
+	}
+	if msgs[1].Kind != messages.OutReply || msgs[1].Text != pauseAnswer {
+		t.Errorf("the second message is %v %q, want the answer of the pause", msgs[1].Kind, msgs[1].Text)
+	}
+}
 
 // TestTheAnswerComesBeforeTheState — the answer of the operator's
 // command is the first entry of the card: the operator reads what their

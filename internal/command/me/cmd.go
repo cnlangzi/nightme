@@ -21,6 +21,11 @@
 // directory. A name that carries no owner is the workflow of that
 // name when there is one, and the project's own namespace otherwise:
 // "coder" is the workflow "nightme/coder".
+//
+// The commands that act on a run — `/me pause`, `/me resume`,
+// `/me next`, `/me status` — answer on the card of their own message:
+// the answer and the state of the run are one card. They post no reply
+// of their own.
 package me
 
 import (
@@ -217,9 +222,6 @@ func (f *Factory) reply(ctx context.Context, rt command.RuntimeServices, input c
 }
 
 // pause stops the run after the step it is on.
-//
-// The card of the command carries the answer and the state of the run:
-// the command posts no reply of its own.
 func (f *Factory) pause(ctx context.Context, rt command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
 	if err := f.ctrl.Pause(ctx, input.ChatID, input.MessageID); err != nil {
 		chatsession.ReportOutcome(ctx, command.FailedOutcome("error", "the run could not be paused"))
@@ -238,9 +240,6 @@ func (f *Factory) pause(ctx context.Context, rt command.RuntimeServices, input c
 // promises a retry only when the step ran and did not succeed. A step
 // that is still running, that succeeded, or that the plan runs anyway
 // is answered with the reason.
-//
-// The card of the command carries the answer and the state of the run:
-// the command posts no reply of its own.
 func (f *Factory) resume(ctx context.Context, rt command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
 	note := decisionNote(input.Text)
 	d, err := f.ctrl.Resume(ctx, input.ChatID, input.MessageID, note)
@@ -265,9 +264,6 @@ func (f *Factory) resume(ctx context.Context, rt command.RuntimeServices, input 
 // The command decides at command time what it does with that step: it
 // promises a skip only when there is a step to pass over. A step that
 // succeeded is answered with the reason.
-//
-// The card of the command carries the answer and the state of the run:
-// the command posts no reply of its own.
 func (f *Factory) next(ctx context.Context, rt command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
 	note := decisionNote(input.Text)
 	d, err := f.ctrl.Next(ctx, input.ChatID, input.MessageID, note)

@@ -72,7 +72,7 @@ func (s *Service) postState(r *run) {
 		if r.ended() {
 			return
 		}
-		s.showState(context.WithoutCancel(r.ctx), r, r.stateAnchor(""))
+		s.showState(context.WithoutCancel(r.ctx), r)
 	}()
 }
 

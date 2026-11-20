@@ -51,25 +51,27 @@ type MeController interface {
 	// Reply hands the user's reply to the run that waits for one.
 	Reply(ctx context.Context, chatID, text string) error
 	// Pause asks the run to stop after the step it is on. The message
-	// id is the message the operator asked from: the state of the run
-	// hangs under it.
+	// id is the message the operator asked from: the answer of the
+	// command and the state of the run go on the card of that message.
 	Pause(ctx context.Context, chatID, messageID string) error
 	// Resume runs the step the run is on again. It returns what the
 	// command did with that step: its id, and whether the command
 	// recorded a decision. The message id is the message the operator
-	// asked from: the state of the run hangs under it. The note is the
-	// operator's instruction.
+	// asked from: the answer of the command and the state of the run go
+	// on the card of that message. The note is the operator's
+	// instruction.
 	Resume(ctx context.Context, chatID, messageID, note string) (me.OperatorDecision, error)
 	// Next skips the step the run is on. It returns what the command
 	// did with that step: its id, and whether the command recorded a
 	// decision. The message id is the message the operator asked from:
-	// the state of the run hangs under it. The note is the operator's
-	// instruction.
+	// the answer of the command and the state of the run go on the card
+	// of that message. The note is the operator's instruction.
 	Next(ctx context.Context, chatID, messageID, note string) (me.OperatorDecision, error)
 	// Stop cancels the run of a chat.
 	Stop(ctx context.Context, chatID string) error
 	// Status posts the state of the run of a chat. The message id is
-	// the message the operator asked from: the state hangs under it.
+	// the message the operator asked from: the state goes on the card
+	// of that message.
 	Status(ctx context.Context, chatID, messageID string) error
 	// DisabledReason says why the personal agent cannot run, or
 	// returns an empty string when it can.

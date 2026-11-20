@@ -18,6 +18,9 @@ import (
 //
 // The mark says what the command did with the step the run is on.
 const (
+	// pauseMark marks a pause in the chat: the answer of `/me pause`
+	// and the notice the run sends when it stops itself carry it.
+	pauseMark = "⏸ "
 	// resumeMark marks the answer of `/me resume`.
 	resumeMark = "▶ "
 	// nextMark marks the answer of `/me next`.
@@ -71,9 +74,9 @@ func decisionAnswer(kind string, d OperatorDecision) string {
 // The answer comes first: it is the answer to the command, and the state
 // says where the run stands after it.
 //
-// A command without a message of its own has no card to ride on: the
-// state opens a card of its own, the way it does when the run reports
-// its state.
+// A run that reports its state on its own has no such message: the
+// state then opens a card of its own, the way the run posts a
+// placeholder for it.
 func (s *Service) answerCommand(ctx context.Context, r *run, messageID, answer string) {
 	it, inRound := r.roundIteration()
 	sess := r.stateSession(it, inRound)
@@ -82,6 +85,9 @@ func (s *Service) answerCommand(ctx context.Context, r *run, messageID, answer s
 	} else {
 		sess.anchor = messageID
 	}
+	// The session names itself before it speaks: a channel that shows
+	// the identity as a message of its own leads the card with it.
+	s.publishInit(ctx, r, sess)
 	s.publishReply(ctx, r, sess, answer)
 	s.adoptState(r, sess, it, inRound)
 	s.publishState(ctx, r, sess, it, inRound)

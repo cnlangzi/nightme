@@ -711,10 +711,6 @@ func (s *Service) Reply(ctx context.Context, chatID, text string) error {
 // The step that is running is not interrupted: its outcome is
 // recorded, and the run waits for the operator to hand the control
 // back.
-//
-// The answer of the command and the state of the run are one card: the
-// card of the message the operator asked from. The operator is looking
-// right at it.
 func (s *Service) Pause(ctx context.Context, chatID, messageID string) error {
 	s.mu.Lock()
 	r, ok := s.active[chatID]
@@ -742,9 +738,8 @@ func (s *Service) Pause(ctx context.Context, chatID, messageID string) error {
 // woken, so a daemon that dies in between comes back with the
 // decision in its state file.
 //
-// The answer of the command and the state of the run are one card: the
-// card of the message the operator asked from. The state is published
-// before the run is woken, and it says where the run stands.
+// The state of the run is published before the run is woken: it says
+// where the run stands.
 func (s *Service) Resume(ctx context.Context, chatID, messageID, note string) (OperatorDecision, error) {
 	return s.operatorDecision(ctx, chatID, messageID, note, directiveResume)
 }
@@ -759,9 +754,8 @@ func (s *Service) Resume(ctx context.Context, chatID, messageID, note string) (O
 // A note is the operator's instruction: it joins the conversation the
 // chat model reads.
 //
-// The answer of the command and the state of the run are one card: the
-// card of the message the operator asked from. The state is published
-// before the run is woken, and it says where the run stands.
+// The state of the run is published before the run is woken: it says
+// where the run stands.
 func (s *Service) Next(ctx context.Context, chatID, messageID, note string) (OperatorDecision, error) {
 	return s.operatorDecision(ctx, chatID, messageID, note, directiveNext)
 }

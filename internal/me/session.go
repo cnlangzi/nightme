@@ -13,10 +13,11 @@
 // anchor is the message that started the run, and the chat folds the
 // run's entries into the card it already holds for that message.
 //
-// The state of the run is a card of its own: the run posts a
-// placeholder for it and the chat renders the state onto the card of
-// that message. The card of the state is the latest card of the round:
-// the run goes on with it.
+// The state of the run is a card of its own when the run reports it:
+// the run posts a placeholder for it and the chat renders the state
+// onto the card of that message. The card of the state is the latest
+// card of the round: the run goes on with it. The state the operator
+// asks for lands on the card of the command's own message instead.
 //
 // The package speaks the standard outbound vocabulary
 // (internal/messages), and the chat renders it. The blocks the run
@@ -175,31 +176,15 @@ func (s *Service) openRoundSession(ctx context.Context, r *run, it iteration) {
 	s.publishTasks(ctx, r, sess, r.roundTasks(it.job, it.round))
 }
 
-// showState publishes the state of the run.
+// showState publishes the state of the run on a card of its own.
 //
-// The state is a snapshot: the phase line of the run, the tree of the
-// rounds and the checklist of the round the run is in. A run that has
-// not entered a round yet has no round state to show: only the phase
-// line is published.
-//
-// The state is a card of its own: the run posts a placeholder for it,
-// and the chat renders the state onto the card of that placeholder. The
-// placeholder hangs under the message the operator asked from, or under
-// the card of the round when the run stops by itself.
-//
-// The card of the state is the latest card of the round: the checklist
-// of the round is refreshed on it, and the card that was there before
-// keeps the state of the moment it was left.
-func (s *Service) showState(ctx context.Context, r *run, anchor string) {
-	it, inRound := r.roundIteration()
-	replyTo := anchor
-	if replyTo == "" {
-		replyTo = r.stateAnchor("")
-	}
-	sess := r.stateSession(it, inRound)
-	sess = s.placeholder(ctx, r, sess, stateLine, replyTo)
-	s.adoptState(r, sess, it, inRound)
-	s.publishState(ctx, r, sess, it, inRound)
+// The run reports its state: it posts a placeholder for the state, and
+// the chat renders the state onto the card of that placeholder. The
+// placeholder hangs under the card of the round the run is in.
+func (s *Service) showState(ctx context.Context, r *run) {
+	// No message of the operator's own and no answer: the state opens a
+	// card of its own.
+	s.answerCommand(ctx, r, "", "")
 }
 
 // stateSession builds the session the state of the run is published in.
@@ -243,8 +228,10 @@ func (s *Service) adoptState(r *run, sess *session, it iteration, inRound bool) 
 // rounds and the checklist of the round the run is in. A run that has
 // not entered a round yet has no round state to show: only the phase
 // line is published.
+//
+// The session names itself before the state goes on it: see
+// answerCommand.
 func (s *Service) publishState(ctx context.Context, r *run, sess *session, it iteration, inRound bool) {
-	s.publishInit(ctx, r, sess)
 	s.publishReply(ctx, r, sess, r.phaseLine())
 	if !inRound {
 		return

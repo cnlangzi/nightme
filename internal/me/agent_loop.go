@@ -361,9 +361,11 @@ func (s *Service) runPlanStep(ctx context.Context, r *run, decision wfe.Decision
 		return err
 	}
 	if !verdict.Settled {
-		// The step is still running: it has no verdict yet, so the
-		// run state must not record it. The command is picked up
-		// where it left off on the next turn.
+		// The step has no verdict yet, so the run state must not
+		// record it. A step whose command is still running is picked up
+		// where it left off on the next turn; a step the operator
+		// passed over is not: it is skipped already, and the plan goes
+		// on with the next step.
 		return nil
 	}
 	r.recordStep(decision.Job, decision.Step, verdict.Outcome)

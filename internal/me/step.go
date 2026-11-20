@@ -201,6 +201,13 @@ func (s *Service) runAttempt(ctx context.Context, r *run, job string, step wfe.S
 		s.refreshRun(r)
 		return stepVerdict{Outcome: out, Settled: true, Failure: err}, stepResult{}, nil
 	}
+	if res.Status == statusAbandoned || r.stepSkipped(step.ID) {
+		// The step was passed over while its command was in flight: the
+		// verdict that comes late does not put it back into the plan.
+		// The step has no verdict of its own, and the run goes on to its
+		// next step.
+		return stepVerdict{Outcome: wfe.Outcome{Status: wfe.OutcomeUnknown, Summary: res.Summary}}, res, nil
+	}
 	if res.Status == statusWaiting {
 		// The command is still running: it has no verdict yet, so the
 		// run state records the step as pending and the agent decides

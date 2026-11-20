@@ -982,6 +982,22 @@ func waitSent(t *testing.T, op *fakeOperator, command string) {
 	t.Fatalf("the chat never received %q: %v", command, op.Sent())
 }
 
+// waitWatched waits until the run watches the command it sent.
+//
+// The command is in flight from then on: the run waits for it, and
+// the operator may pass the step over.
+func waitWatched(t *testing.T, op *fakeOperator) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(op.Watched()) > 0 {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("the run watched no command: %v", op.Watched())
+}
+
 // stepOutcome returns the outcome the run state holds for a step.
 func stepOutcome(r *run, stepID string) (wfe.Outcome, bool) {
 	st, ok := r.stepState(stepID)

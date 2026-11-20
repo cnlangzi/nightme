@@ -84,15 +84,42 @@ type directive struct {
 //
 // The command decides at command time: it acts on the step only when
 // there is something to do. A command that acts on nothing holds no
-// decision, and the state of the run answers instead.
+// decision, and says why.
 type OperatorDecision struct {
 	// Step is the id of the step the command acted on — or the step it
 	// looked at when it acted on none.
 	Step string
-	// Act reports whether the command recorded a decision: the step
-	// runs again, or it is skipped.
+	// Act reports whether the command acted on the step: it runs again,
+	// or it is skipped.
 	Act bool
+	// Why says why the command acted on nothing. The reply of the
+	// command names the step and says what did not happen.
+	Why string
+	// skippedNow reports that the step was skipped at once: its work was
+	// in flight, and the command the run waits for was abandoned. The
+	// run holds no decision for it: the step is skipped already.
+	skippedNow bool
 }
+
+// The reasons a command acts on nothing.
+//
+// A reason names the state of the step the command looked at. The
+// reply of the command reads it: the operator cannot tell that their
+// command did nothing from the state of the run alone.
+const (
+	// reasonSucceeded says the step did its job.
+	reasonSucceeded = "already succeeded"
+	// reasonRunning says the work of the step is in flight.
+	reasonRunning = "is still running"
+	// reasonSkipped says the step was passed over already.
+	reasonSkipped = "is already skipped"
+	// reasonCannotRun says the step cannot run again.
+	reasonCannotRun = "cannot run again"
+	// reasonNotRun says the step has not run yet.
+	reasonNotRun = "has not run"
+	// reasonWorking says the run is working on the step on its own.
+	reasonWorking = "is being worked on"
+)
 
 // prepareDecision records the operator's decision for the run's next
 // turn and hands the control back to the run.
@@ -125,7 +152,7 @@ func (r *run) prepareDecision(kind, note string) (OperatorDecision, bool, error)
 	r.paused = false
 	r.pauseReason = ""
 	r.phase = PhaseRunning
-	if d.Act {
+	if d.Act && !d.skippedNow {
 		r.directive = &directive{Kind: kind, Step: d.Step}
 	}
 	// The note is the operator's instruction: it joins the
@@ -145,9 +172,13 @@ func (r *run) prepareDecision(kind, note string) (OperatorDecision, bool, error)
 // The command acts only on a step that ran and did not succeed, and
 // only when that step may run again: that is the step the run's own
 // execution layer acts on, so the promise the command makes and the
-// action the run performs agree. A step that is still running, that
-// succeeded, or that the plan runs anyway has nothing to decide: the
-// command holds no decision, and the state of the run answers.
+// action the run performs agree. A step that succeeded, that was
+// passed over already, or that the plan runs anyway has nothing to
+// decide: the command holds no decision, and says why.
+//
+// A step whose work is in flight is the exception: `/me next` passes
+// it over. A step that is stuck in a retry loop is exactly the step
+// the operator has to be able to pass over.
 //
 // A run that is working decides for itself: there is nothing for the
 // operator to decide there either.
@@ -170,19 +201,34 @@ func (r *run) decideDirectiveLocked(kind string) (OperatorDecision, error) {
 	}
 
 	d := OperatorDecision{Step: stepID}
-	// The work is in flight: the step cannot run again, and it cannot
-	// be skipped either.
-	if busy := r.busyStepIDLocked(); busy != "" {
+	// The work of the step is in flight: its command was sent to the
+	// chat and has not come back. The step cannot run again, and
+	// `/me next` passes it over anyway — when the command can be
+	// abandoned.
+	if r.stepInFlightLocked(stepID) {
+		if kind == directiveNext && r.canAbandonCommandLocked(stepID) {
+			d.Act = true
+			d.skippedNow = true
+			return d, nil
+		}
+		d.Why = reasonRunning
+		return d, nil
+	}
+	st, ran := r.stepStateLocked(stepID)
+	if ran && r.stepSkippedLocked(stepID) {
+		// The step was passed over already: there is nothing to skip.
+		d.Why = reasonSkipped
+		return d, nil
+	}
+	if ran && st.Outcome.Succeeded() {
+		// The step did its job: there is nothing to repair, and
+		// nothing to skip.
+		d.Why = reasonSucceeded
 		return d, nil
 	}
 	// The run is working: it decides for itself.
 	if !r.pausePendingLocked() {
-		return d, nil
-	}
-	st, ran := r.stepStateLocked(stepID)
-	if ran && st.Outcome.Succeeded() {
-		// The step did its job: there is nothing to repair, and
-		// nothing to skip.
+		d.Why = reasonWorking
 		return d, nil
 	}
 	if ran {
@@ -190,12 +236,24 @@ func (r *run) decideDirectiveLocked(kind string) (OperatorDecision, error) {
 		// acts on. `/me resume` needs a step that may run again: a
 		// step of an earlier round cannot, the plan has moved on
 		// without it.
-		d.Act = kind == directiveNext || r.runnableStepLocked(stepID)
+		if kind == directiveNext {
+			d.Act = true
+			return d, nil
+		}
+		if !r.runnableStepLocked(stepID) {
+			d.Why = reasonCannotRun
+			return d, nil
+		}
+		d.Act = true
 		return d, nil
 	}
 	// The step has not run: the plan runs it. `/me next` passes it
 	// over anyway — the operator asked for it.
-	d.Act = kind == directiveNext
+	if kind == directiveNext {
+		d.Act = true
+		return d, nil
+	}
+	d.Why = reasonNotRun
 	return d, nil
 }
 
@@ -267,25 +325,72 @@ func (r *run) stepSucceededLocked(stepID string) bool {
 	return false
 }
 
-// busyStepIDLocked returns the id of the step that is still running:
-// the one whose work is in flight, the one a command is on, or the one
-// the chat waits for.
+// stepInFlightLocked reports whether the work of the step is in
+// flight: its command was sent to the chat and has not come back.
 //
 // The caller holds the lock.
-func (r *run) busyStepIDLocked() string {
-	if r.runningStep != "" {
-		return r.runningStep
+func (r *run) stepInFlightLocked(stepID string) bool {
+	if r.runningStep == stepID {
+		// The run is executing the step: its command is on its way.
+		return true
 	}
-	if r.inflight != nil {
-		// The run waits for a command: the step it is on is busy.
-		return r.targetStepLocked()
+	// The step started and has not settled: its command waits for an
+	// answer.
+	st, ok := r.stepStateLocked(stepID)
+	return ok && st.Pending
+}
+
+// canAbandonCommandLocked reports whether the run can be told that the
+// command of the step was abandoned: the run waits for that command.
+//
+// Only a chat command can be abandoned. A shell, a wait or an action
+// belongs to the run itself, and the run cannot go on while it runs.
+//
+// The caller holds the lock.
+func (r *run) canAbandonCommandLocked(stepID string) bool {
+	if r.inflight == nil {
+		// The run waits for no command: there is nothing to abandon.
+		return false
 	}
-	for _, st := range r.state.Steps {
-		if st.Pending {
-			return st.ID
-		}
+	if r.runningStep == stepID {
+		// The run is executing the step: its command is on its way.
+		return true
 	}
-	return ""
+	// The step started and has not settled: its command waits for an
+	// answer.
+	st, ok := r.stepStateLocked(stepID)
+	return ok && st.Pending
+}
+
+// stepSkipped reports whether the step was passed over: the operator
+// or the agent skipped it.
+//
+// A step that was passed over keeps its record: the verdict that
+// arrives late does not put it back into the plan.
+func (r *run) stepSkipped(stepID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.stepSkippedLocked(stepID)
+}
+
+// stepSkippedLocked reports whether the step was passed over. The
+// caller holds the lock.
+func (r *run) stepSkippedLocked(stepID string) bool {
+	st, ok := r.stepStateLocked(stepID)
+	return ok && isSkippedOutcome(st.Outcome)
+}
+
+// isSkippedOutcome reports whether the outcome says the step was passed
+// over.
+func isSkippedOutcome(out wfe.Outcome) bool {
+	if out.Status != wfe.OutcomeNoop {
+		return false
+	}
+	switch out.Summary {
+	case operatorSkippedSummary, agentSkippedSummary:
+		return true
+	}
+	return false
 }
 
 // setRunningStep records the step whose work is in flight.
@@ -411,6 +516,24 @@ func (s *Service) applyNext(ctx context.Context, r *run, stepID string) error {
 	s.recordOperatorAction(r, toolNext, res)
 	s.persist(r)
 	return nil
+}
+
+// skipRunningStep skips the step whose work is in flight.
+//
+// The step is recorded as skipped: the facts it produced are kept, the
+// plan goes on. The command the run waits for is abandoned: the wait
+// ends at once, and the run goes on to its next step.
+//
+// The command itself is not cancelled: the chat owns it, and what it
+// produces lands in the chat when it finishes.
+func (s *Service) skipRunningStep(ctx context.Context, r *run, stepID string) {
+	step, ok := r.stepByID(stepID)
+	if !ok {
+		return
+	}
+	res := s.skipStep(ctx, r, step, operatorSkippedSummary)
+	s.recordOperatorAction(r, toolNext, res)
+	r.abandonCommand()
 }
 
 // recordOperatorAction records what the operator did in the

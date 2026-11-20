@@ -57,6 +57,8 @@ type fakeController struct {
 	notes []string
 	// step is the step the controller acted on.
 	step string
+	// why says why the controller acted on nothing.
+	why string
 	// noDecision says the controller recorded no decision: the run
 	// had nothing to do at that moment.
 	noDecision bool
@@ -100,7 +102,7 @@ func (c *fakeController) Resume(_ context.Context, _ string, messageID string, n
 	if c.resumeErr != nil {
 		return mesvc.OperatorDecision{}, c.resumeErr
 	}
-	return mesvc.OperatorDecision{Step: c.step, Act: !c.noDecision}, nil
+	return mesvc.OperatorDecision{Step: c.step, Act: !c.noDecision, Why: c.why}, nil
 }
 
 func (c *fakeController) Next(_ context.Context, _ string, messageID string, note string) (mesvc.OperatorDecision, error) {
@@ -112,7 +114,7 @@ func (c *fakeController) Next(_ context.Context, _ string, messageID string, not
 	if c.nextErr != nil {
 		return mesvc.OperatorDecision{}, c.nextErr
 	}
-	return mesvc.OperatorDecision{Step: c.step, Act: !c.noDecision}, nil
+	return mesvc.OperatorDecision{Step: c.step, Act: !c.noDecision, Why: c.why}, nil
 }
 
 func (c *fakeController) Stop(_ context.Context, _ string) error {
@@ -692,16 +694,16 @@ func TestNext_SkipsTheStep(t *testing.T) {
 	}
 }
 
-// TestResume_ThatDecidesNothingAnswersWithTheState — the command had
-// nothing to do: the state of the run answers, and the outcome says
-// so.
-func TestResume_ThatDecidesNothingAnswersWithTheState(t *testing.T) {
-	ctrl := &fakeController{step: "build", noDecision: true}
+// TestResume_ThatDecidesNothingNamesTheReason — the command had
+// nothing to do: the reply names the step and says what did not
+// happen, and the outcome says so.
+func TestResume_ThatDecidesNothingNamesTheReason(t *testing.T) {
+	ctrl := &fakeController{step: "build", why: "is still running", noDecision: true}
 	cs, ch := newSessionWithOutcome(t, "me-19", "/tmp/work")
 
 	reply := runMe(t, ctrl, cs, "/me", "resume")
-	if reply != "📋 The run's state is shown again." {
-		t.Fatalf("reply = %q, want the state of the run", reply)
+	if reply != "▶ The step build is still running — it was not run again." {
+		t.Fatalf("reply = %q, want the reason the step did not run again", reply)
 	}
 	out := ch.settled()
 	if out == nil {
@@ -721,16 +723,16 @@ func TestResume_ThatDecidesNothingAnswersWithTheState(t *testing.T) {
 	}
 }
 
-// TestNext_ThatDecidesNothingAnswersWithTheState — the command had
-// nothing to do: the state of the run answers, and the outcome says
-// so.
-func TestNext_ThatDecidesNothingAnswersWithTheState(t *testing.T) {
-	ctrl := &fakeController{step: "build", noDecision: true}
+// TestNext_ThatDecidesNothingNamesTheReason — the command had nothing
+// to do: the reply names the step and says what did not happen, and the
+// outcome says so.
+func TestNext_ThatDecidesNothingNamesTheReason(t *testing.T) {
+	ctrl := &fakeController{step: "build", why: "already succeeded", noDecision: true}
 	cs, ch := newSessionWithOutcome(t, "me-20", "/tmp/work")
 
 	reply := runMe(t, ctrl, cs, "/me", "next")
-	if reply != "📋 The run's state is shown again." {
-		t.Fatalf("reply = %q, want the state of the run", reply)
+	if reply != "⏭ The step build already succeeded — there was nothing to skip." {
+		t.Fatalf("reply = %q, want the reason the step was not skipped", reply)
 	}
 	out := ch.settled()
 	if out == nil {

@@ -754,8 +754,8 @@ key — is reported in `nightme logs` and left out. The daemon still starts, and
 | `/me start <workflow> [args...] [-i <rounds>]` | Starts a workflow in this chat. `-i` sets how many rounds every job of the workflow runs. A name that carries no owner is the project's own namespace: `coder` is the workflow `nightme/coder`. |
 | `/me reply <text>` | Answers the question the run is waiting for. |
 | `/me pause` | Stops the run after the step it is on. |
-| `/me resume [note]` | Runs the step the run is on again. Its budget for the current round starts over. The note is your instruction. A step that is running, that succeeded, or that has not run yet is not run again: the state card answers instead. |
-| `/me next [note]` | Skips the step the run is on: the plan goes on with the workflow, and the facts the step produced are kept. The note is your instruction. A step that is running or that succeeded is not skipped: the state card answers instead. |
+| `/me resume [note]` | Runs the step the run is on again. Its budget for the current round starts over. The note is your instruction. A step that is running, that succeeded, or that has not run yet is not run again: the command says why and the state card answers as well. `/me resume` does not interrupt a step that is running. |
+| `/me next [note]` | Skips the step the run is on: the plan goes on with the workflow, and the facts the step produced are kept. The note is your instruction. A step whose command is still running is skipped: the command it sent to the chat is abandoned, and the run goes on with the next step of the job. The abandoned command is not cancelled — the chat owns it, and what it produces lands in the chat when it finishes. A step that succeeded, and a step whose work is not a chat command, are not skipped: the command says why and the state card answers as well. |
 | `/me stop` | Cancels the run and leaves the record of the session in the chat. The work the chat agent does on its own goes on to its end. |
 | `/me status` | Shows the state of the run again: the run publishes it on a card of its own under the `/me status` message, and the card carries the phase of the run, the tree of the rounds and the checklist of the round. |
 
@@ -765,17 +765,31 @@ a token of the form `name=value` assigns that argument by name.
 
 `/me resume` and `/me next` decide at command time what they do with the step the
 run is on, and they answer accordingly: the promise only when there is something to
-do, and the state card when there is not. Both hand the control back to the run: a
-run that waits for you goes on, whatever the command decided about the step.
+do, and the reason when there is not. A command that acts on nothing names the step
+and says what did not happen; the state card answers as well. Both hand the control
+back to the run: a run that waits for you goes on, whatever the command decided about
+the step.
 
 | The state of the run and of the step | `/me resume` | `/me next` |
 |---|---|---|
 | The run is waiting for an answer | refused: answer it with `/me reply` | refused: answer it with `/me reply` |
-| The step is running | the state card answers | the state card answers |
-| The step succeeded | the state card answers | the state card answers |
+| The step's command is running | the step is not run again; the command says why | the step is skipped and the command it sent to the chat is abandoned |
+| The step's work is running, and it is not a command | the step is not run again; the command says why | the step is not skipped; the command says why |
+| The step succeeded | the step is not run again; the command says why | the step is not skipped; the command says why |
 | The step failed or was cancelled | the step runs again | the step is skipped |
 | The step has not run | the plan runs it | the step is skipped |
-| The run is working | the state card answers | the state card answers |
+| The run is working | the command says why | the command says why |
+
+`/me next` on a step whose command is still running is the one decision that does
+not wait for the run's next turn: the run waits for the command, and a decision that
+waited for the run's next turn would wait for the command to finish. The step is
+skipped at once, and the run goes on with the next step of the job. The command
+itself is not cancelled — the chat owns it, and what it produces lands in the chat
+when it finishes.
+
+A step whose work is not a chat command — a shell, a wait, an action — belongs to the
+run itself: the run cannot go on while it runs, so the command holds no decision and
+says why.
 
 A token that starts with `-` is a flag. `-i <rounds>` (or `--iterations <rounds>`)
 sets how many rounds every job of the workflow runs in that run — `0` means "until

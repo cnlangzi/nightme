@@ -883,14 +883,6 @@ func (a *Adapter) ensureReceiptForTyping(ctx context.Context, chatID, userMsgID 
 	a.receiptsByUserMsgID[userMsgID] = transient
 	a.mu.Unlock()
 
-	if transient.cardMsgID != "" {
-		// The anchor names a card this adapter posted: the receipt
-		// adopts it and patches it in place. A session owns one card,
-		// and the card is already in the chat where the operator
-		// expects it.
-		return transient, true, a.renderAdopted(ctx, transient)
-	}
-
 	// Snapshot transient state under r.mu: the receipt is now
 	// visible in a.receiptsByUserMsgID, so a concurrent
 	// SetTaskList from the bridge event pump could mutate
@@ -1022,12 +1014,6 @@ func (a *Adapter) ensureReceiptForReplyWithFooter(ctx context.Context, chatID, u
 	}
 	a.receiptsByUserMsgID[userMsgID] = transient
 	a.mu.Unlock()
-
-	if transient.cardMsgID != "" {
-		// The anchor names a card this adapter posted: the receipt
-		// adopts it and patches it in place.
-		return transient, true, a.renderAdopted(ctx, transient)
-	}
 
 	// Snapshot transient state under r.mu: the receipt is now
 	// visible in a.receiptsByUserMsgID, so a concurrent
@@ -1367,12 +1353,6 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 	}
 	a.receiptsByUserMsgID[userMsgID] = transient
 	a.mu.Unlock()
-
-	if transient.cardMsgID != "" {
-		// The anchor names a card this adapter posted: the receipt
-		// adopts it and patches it in place.
-		return transient, true, a.renderAdopted(ctx, transient)
-	}
 
 	// Snapshot transient state under r.mu: the receipt is now
 	// visible in a.receiptsByUserMsgID, so a concurrent
@@ -3982,21 +3962,6 @@ func (a *Adapter) applyPendingHeartbeat(ctx context.Context, r *MessageReceipt) 
 		return
 	}
 	r.ApplyHeartbeat(ctx, snap)
-}
-
-// renderAdopted paints a receipt that adopted a card this adapter
-// posted.
-//
-// The card is already in the chat: the receipt patches it in place
-// instead of sending a second card for the same session.
-func (a *Adapter) renderAdopted(ctx context.Context, r *MessageReceipt) error {
-	r.mu.Lock()
-	r.initializing = false
-	r.mu.Unlock()
-	a.applyPendingHeartbeat(ctx, r)
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.renderLocked(ctx)
 }
 
 // Per PR #47, the receipt cold-start card routes through ReplyInBoth

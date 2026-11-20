@@ -1273,7 +1273,8 @@ func outcomeLine(o messages.Outcome) string {
 // sessionState is the on-disk shape of an open session.
 //
 // The anchors of the open sessions are part of the run's state: a run
-// that comes back after a restart goes on with the cards it opened.
+// that comes back after a restart goes on with the messages it hung
+// its sessions under.
 type sessionState struct {
 	// Kind is what the session is.
 	Kind string `json:"kind"`

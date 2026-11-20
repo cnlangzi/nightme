@@ -90,6 +90,11 @@ const (
 	stateLine = "the run is reporting its state…"
 )
 
+// roundLine is what the placeholder of a round says.
+func roundLine(job string, round int) string {
+	return fmt.Sprintf("%s · round %d is starting…", job, round)
+}
+
 // placeholder posts the placeholder message of a session and returns
 // the session.
 //
@@ -127,7 +132,8 @@ func (s *Service) placeholder(ctx context.Context, r *run, sess *session, line, 
 //
 // A run that no message started — a synthetic inbound, a command
 // without a message id — has no such card: its entries go to the
-// chat's orphan handling, where the operator sees them all the same.
+// chat's orphan handling, and the chat shows each of them on a card
+// of its own.
 //
 // The session carries the plan of the run and nothing else: what the
 // run is stays the same from the start to the end, and the state of the
@@ -154,7 +160,10 @@ func (s *Service) openRoundSession(ctx context.Context, r *run, it iteration) {
 	}
 	sess := s.placeholder(ctx, r,
 		&session{kind: sessionRound, id: roundIdentity(it), job: it.job, round: it.round},
-		fmt.Sprintf("%s · round %d is starting…", it.job, it.round), replyTo)
+		roundLine(it.job, it.round), replyTo)
+	// The run goes on with the card of the round: everything the run
+	// publishes from now on lands on it, and the card it replaces
+	// keeps what it had.
 	r.setRoundSession(sess)
 	r.resetRound()
 	// The round starts when its card opens: the first action of the
@@ -197,7 +206,11 @@ func (s *Service) showState(ctx context.Context, r *run, anchor string) {
 		sess.round = it.round
 	}
 	sess = s.placeholder(ctx, r, sess, stateLine, replyTo)
-	if inRound && sess.anchor != "" {
+	// The placeholder took a chat round trip: the run may have moved on
+	// to another round while it was posted. The card of the state is
+	// the latest card of the round only while the run is still in it.
+	now, still := r.roundIteration()
+	if inRound && still && now == it && sess.anchor != "" {
 		// The card of the state is the latest card of the round: the
 		// run goes on with it, and the card it replaces keeps what it
 		// had.
@@ -253,7 +266,9 @@ func (s *Service) openDecisionSession(ctx context.Context, r *run) {
 // that ended stays in the chat as the record of that round: the
 // engine clears the round's step records when the next round starts,
 // so the finished card cannot be rebuilt afterwards. A run that comes
-// back to a round goes on with the card that round has.
+// back to a round goes on with the message that round hangs under: the
+// chat opens a new card for it, and the card that was there before stays
+// in the chat as a snapshot.
 //
 // The switch happens before the first command of the round is sent to
 // the chat, so the card of a round stands in front of the commands of
@@ -488,6 +503,22 @@ func (s *Service) publishReply(ctx context.Context, r *run, sess *session, text 
 	s.emit(ctx, r, sess, messages.OutboundMessage{
 		Kind: messages.OutReply,
 		Text: text,
+	})
+}
+
+// publishRecord publishes the record of the run.
+//
+// The record is the last word of the run: it carries the verdict in
+// its footer, so the card of the run still says how the run ended
+// after the record lands on it.
+func (s *Service) publishRecord(ctx context.Context, r *run, sess *session, text string) {
+	if sess == nil || strings.TrimSpace(text) == "" {
+		return
+	}
+	s.emit(ctx, r, sess, messages.OutboundMessage{
+		Kind:          messages.OutReply,
+		Text:          text,
+		SessionResult: r.runVerdict(),
 	})
 }
 

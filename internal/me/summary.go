@@ -71,7 +71,7 @@ func (s *Service) postRecord(r *run) {
 	}
 	r.setRecordSession(sess)
 	s.publishInit(ctx, r, sess)
-	s.publishReply(ctx, r, sess, r.recordCard())
+	s.publishRecord(ctx, r, sess, r.recordCard())
 }
 
 // workflowStepIDs returns the ids of the steps of the workflow.

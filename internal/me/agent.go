@@ -200,10 +200,11 @@ type Operator interface {
 	// dispatches; the display is what the chat shows. It returns the
 	// id of the message it became.
 	Speak(ctx context.Context, chatID, text string, opts channel.SpeakOptions) (string, error)
-	// Ask puts a question in the chat and returns the id of the
-	// message it became. The question is visible and the operator
+	// Ask puts a message in the chat and returns the id of the
+	// message it became. The message is visible and the operator
 	// can answer it, but the daemon does not take it as a turn of
-	// its own.
+	// its own: a question the run asks, and the placeholder the run
+	// posts to open a card, both go this way.
 	Ask(ctx context.Context, chatID, text string, opts channel.SpeakOptions) (string, error)
 	// Act answers a prompt the chat is waiting for, as if a person
 	// had clicked the button.

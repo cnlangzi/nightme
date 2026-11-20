@@ -1142,7 +1142,7 @@ if attached, h := tryAttachExistingDSH(ctx, logger); attached {
 
 ### 7.3 `cli.Start(ctx)` 必须用长生命周期 ctx,不能复用探测 ctx
 
-**踩坑**(2026-09-11 实测):`tryAttachExistingDSH` 里用 `probeCtx` (10s timeout) 调用 `cli.Start(probeCtx)`。attach 成功后,Hub 的 WS pump 收到 10s 超时 → exit → session events 停止回 → 1 分钟后 `agentsession: readpump stalled`。
+**踩坑**(2026-09-11 实测):`tryAttachExistingDSH` 里用 `probeCtx` (10s timeout) 调用 `cli.Start(probeCtx)`。attach 成功后,Hub 的 WS pump 收到 10s 超时 → exit → session events 停止回。
 
 **修复**(`lifecycle.go:383`):`cli.Start(ctx)` 用 `ctx`(StartSharedHost 的 caller ctx,daemon lifetime),**不用** `probeCtx`。`probeCtx` 只给 cookie 探测用,attach 成功后立刻 cancel。
 
@@ -1153,7 +1153,7 @@ if err := cli.Start(probeCtx); err != nil { ... }
 if err := cli.Start(ctx); err != nil { ... }  // caller ctx, lifetime = daemon
 ```
 
-**症状模式**:用户 log 出现 `agentsession: readpump stalled (no events in threshold while in-flight); marking suspect` + attach 之后看不到 `mux stream connected`(deferred open 没 fire)→ 怀疑 Hub pump 已死。
+**症状模式**:session events 停止回 + attach 之后看不到 `mux stream connected`(deferred open 没 fire)→ 怀疑 Hub pump 已死。
 
 ### 7.4 `session.list` 是 POST + slash,不是 GET + dot
 

@@ -6,7 +6,7 @@
 // a fresh process; on a thread whose previous turn was interrupted
 // mid-flight the resume wedged in a state where turn/start was
 // accepted but turn/completed never arrived (silent "Working..."
-// until the HungPrompt watchdog fired 5 minutes later).
+// until the idle-CLI reaper closed the session an hour later).
 //
 // The tests below pin:
 //

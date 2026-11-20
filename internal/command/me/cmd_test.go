@@ -637,13 +637,16 @@ func TestReply_KeepsTheTextTheUserTyped(t *testing.T) {
 	}
 }
 
+// TestPause_PausesTheRun — the command pauses the run and posts no
+// reply of its own: the card of the command carries the answer and the
+// state of the run.
 func TestPause_PausesTheRun(t *testing.T) {
 	ctrl := &fakeController{}
-	cs := newSession(t, "me-10", "/tmp/work")
+	cs, ch := newSessionWithOutcome(t, "me-10", "/tmp/work")
 
 	reply := runMe(t, ctrl, cs, "/me", "pause")
-	if !strings.Contains(reply, "pauses") {
-		t.Fatalf("reply = %q, want the pause", reply)
+	if reply != "" {
+		t.Fatalf("reply = %q, want none", reply)
 	}
 	if ctrl.paused != 1 {
 		t.Fatalf("the controller paused %d runs, want 1", ctrl.paused)
@@ -651,17 +654,28 @@ func TestPause_PausesTheRun(t *testing.T) {
 	if len(ctrl.messageIDs) != 1 || ctrl.messageIDs[0] != "msg-1" {
 		t.Fatalf("the controller got the messages %v, want the message of the command", ctrl.messageIDs)
 	}
+	out := ch.settled()
+	if out == nil {
+		t.Fatal("the command reported no outcome")
+	}
+	if out.Status != messages.OutcomeOK {
+		t.Errorf("the outcome is %q, want it ok", out.Status)
+	}
+	if out.Summary != "the run pauses after the current step" {
+		t.Errorf("the outcome says %q, want it to name the pause", out.Summary)
+	}
 }
 
-// TestResume_RunsTheStepAgain — the command names the step it acted
-// on.
+// TestResume_RunsTheStepAgain — the command runs the step again and
+// posts no reply of its own: the card of the command carries the
+// answer and the state of the run.
 func TestResume_RunsTheStepAgain(t *testing.T) {
 	ctrl := &fakeController{step: "build"}
-	cs := newSession(t, "me-12", "/tmp/work")
+	cs, ch := newSessionWithOutcome(t, "me-12", "/tmp/work")
 
 	reply := runMe(t, ctrl, cs, "/me", "resume")
-	if !strings.Contains(reply, "The step runs again: build.") {
-		t.Fatalf("reply = %q, want the step to run again", reply)
+	if reply != "" {
+		t.Fatalf("reply = %q, want none", reply)
 	}
 	if ctrl.resumed != 1 {
 		t.Fatalf("the controller resumed %d runs, want 1", ctrl.resumed)
@@ -672,20 +686,31 @@ func TestResume_RunsTheStepAgain(t *testing.T) {
 	if len(ctrl.messageIDs) != 1 || ctrl.messageIDs[0] != "msg-1" {
 		t.Fatalf("the controller got the messages %v, want the message of the command", ctrl.messageIDs)
 	}
+	out := ch.settled()
+	if out == nil {
+		t.Fatal("the command reported no outcome")
+	}
+	if out.Status != messages.OutcomeOK {
+		t.Errorf("the outcome is %q, want it ok", out.Status)
+	}
+	if out.Summary != "the step runs again" {
+		t.Errorf("the outcome says %q, want it to name the step", out.Summary)
+	}
+	if out.Data["step"] != "build" {
+		t.Errorf("the outcome names the step %q, want build", out.Data["step"])
+	}
 }
 
-// TestNext_SkipsTheStep — the command names the step it acted on and
-// says that the run goes on.
+// TestNext_SkipsTheStep — the command skips the step and posts no
+// reply of its own: the card of the command carries the answer and the
+// state of the run.
 func TestNext_SkipsTheStep(t *testing.T) {
 	ctrl := &fakeController{step: "build"}
-	cs := newSession(t, "me-15", "/tmp/work")
+	cs, ch := newSessionWithOutcome(t, "me-15", "/tmp/work")
 
 	reply := runMe(t, ctrl, cs, "/me", "next")
-	if !strings.Contains(reply, "The step is skipped: build.") {
-		t.Fatalf("reply = %q, want the step to be skipped", reply)
-	}
-	if !strings.Contains(reply, "goes on with the workflow") {
-		t.Fatalf("reply = %q, want the run to go on", reply)
+	if reply != "" {
+		t.Fatalf("reply = %q, want none", reply)
 	}
 	if ctrl.nexted != 1 {
 		t.Fatalf("the controller skipped %d steps, want 1", ctrl.nexted)
@@ -693,18 +718,31 @@ func TestNext_SkipsTheStep(t *testing.T) {
 	if len(ctrl.messageIDs) != 1 || ctrl.messageIDs[0] != "msg-1" {
 		t.Fatalf("the controller got the messages %v, want the message of the command", ctrl.messageIDs)
 	}
+	out := ch.settled()
+	if out == nil {
+		t.Fatal("the command reported no outcome")
+	}
+	if out.Status != messages.OutcomeOK {
+		t.Errorf("the outcome is %q, want it ok", out.Status)
+	}
+	if out.Summary != "the step is skipped" {
+		t.Errorf("the outcome says %q, want it to name the step", out.Summary)
+	}
+	if out.Data["step"] != "build" {
+		t.Errorf("the outcome names the step %q, want build", out.Data["step"])
+	}
 }
 
-// TestResume_ThatDecidesNothingNamesTheReason — the command had
-// nothing to do: the reply names the step and says what did not
-// happen, and the outcome says so.
-func TestResume_ThatDecidesNothingNamesTheReason(t *testing.T) {
+// TestResume_ThatDecidesNothingReportsANoop — the command had nothing
+// to do: the card of the command says what did not happen, and the
+// outcome says so.
+func TestResume_ThatDecidesNothingReportsANoop(t *testing.T) {
 	ctrl := &fakeController{step: "build", why: "is still running", noDecision: true}
 	cs, ch := newSessionWithOutcome(t, "me-19", "/tmp/work")
 
 	reply := runMe(t, ctrl, cs, "/me", "resume")
-	if reply != "▶ The step build is still running — it was not run again." {
-		t.Fatalf("reply = %q, want the reason the step did not run again", reply)
+	if reply != "" {
+		t.Fatalf("reply = %q, want none", reply)
 	}
 	out := ch.settled()
 	if out == nil {
@@ -724,16 +762,16 @@ func TestResume_ThatDecidesNothingNamesTheReason(t *testing.T) {
 	}
 }
 
-// TestNext_ThatDecidesNothingNamesTheReason — the command had nothing
-// to do: the reply names the step and says what did not happen, and the
-// outcome says so.
-func TestNext_ThatDecidesNothingNamesTheReason(t *testing.T) {
+// TestNext_ThatDecidesNothingReportsANoop — the command had nothing to
+// do: the card of the command says what did not happen, and the outcome
+// says so.
+func TestNext_ThatDecidesNothingReportsANoop(t *testing.T) {
 	ctrl := &fakeController{step: "build", why: "already succeeded", noDecision: true}
 	cs, ch := newSessionWithOutcome(t, "me-20", "/tmp/work")
 
 	reply := runMe(t, ctrl, cs, "/me", "next")
-	if reply != "⏭ The step build already succeeded — there was nothing to skip." {
-		t.Fatalf("reply = %q, want the reason the step was not skipped", reply)
+	if reply != "" {
+		t.Fatalf("reply = %q, want none", reply)
 	}
 	out := ch.settled()
 	if out == nil {

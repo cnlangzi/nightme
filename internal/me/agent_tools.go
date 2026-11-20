@@ -940,7 +940,7 @@ func (s *Service) runCommand(ctx context.Context, r *run, command string, instru
 		r.requestPause(rateLimitReason)
 		// The run stops: it publishes the state of the round on a card
 		// of its own.
-		s.showState(ctx, r, r.stateAnchor(""))
+		s.showState(ctx, r)
 		s.announcePause(ctx, r, rateLimitReason)
 	}
 	return res, nil

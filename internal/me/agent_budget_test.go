@@ -502,15 +502,14 @@ func TestTheState_ShowsTheWaitingLineAndTheChancesLeft(t *testing.T) {
 	if err := svc.Status(context.Background(), "obs-1", "om_status"); err != nil {
 		t.Fatalf("status: %v", err)
 	}
-	card, _ := stateCard(op, "om_status")
 	chances = false
-	for _, item := range op.Checklist(card.ID) {
+	for _, item := range op.Checklist("om_status") {
 		if strings.Contains(item.ActiveForm, "chances left") {
 			chances = true
 		}
 	}
 	if !chances {
-		t.Errorf("the state does not carry the chances left: %+v", op.Checklist(card.ID))
+		t.Errorf("the state does not carry the chances left: %+v", op.Checklist("om_status"))
 	}
 
 	close(provider.block)

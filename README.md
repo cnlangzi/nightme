@@ -405,7 +405,7 @@ The agent for `commit` and `pr` is chosen by `-a <agent>`, then `commit.agent` /
 
 ### 7. Close: `/gtw close [--reset]`
 
-**`/gtw close`** finishes the task: it finalises the issue's labels, removes the worktree, force-deletes the local branch, moves the chat's CWD back to the repo root, and syncs the default branch. The finalisation takes every `nightme/*` label off the issue except the queue marker `nightme/assigned` and puts `nightme/done` on it, so the tracker shows the work as finished instead of leaving a stale claim behind. **`/gtw close --reset`** only takes the state labels off and marks nothing done — the work is dropped, and the issue keeps its queue marker, so the automatic pick offers it again. It refuses while the worktree has uncommitted changes — commit, stash, or discard first. A failed step leaves the worktree, the branch and the state file in place and puts the issue's labels back, so re-running `/gtw close` starts from the same state. A failed branch delete is the exception: the worktree is gone by then, so the labels stay finalised and only the branch ref is left to clean up by hand.
+**`/gtw close`** finishes the task: it finalises the issue's labels, removes the worktree, force-deletes the local branch, moves the chat's CWD back to the repo root, and syncs the default branch. The finalisation takes every `nightme/*` label off the issue except the queue marker `nightme/assigned` and puts `nightme/done` on it, so the tracker shows the work as finished instead of leaving a stale claim behind. The pull request the branch opened is finalised too — its `nightme/*` labels come off, so both sides of the work show it as finished; that step only warns when it fails, because a pull request's labels are bookkeeping and the teardown does not wait for them. **`/gtw close --reset`** only takes the state labels off and marks nothing done — the work is dropped, and the issue keeps its queue marker, so the automatic pick offers it again. It refuses while the worktree has uncommitted changes — commit, stash, or discard first. A failed step leaves the worktree, the branch and the state file in place and puts the issue's labels back, so re-running `/gtw close` starts from the same state. A failed branch delete is the exception: the worktree is gone by then, so the labels stay finalised and only the branch ref is left to clean up by hand.
 
 ### Stuck: `/gtw abort`
 
@@ -754,10 +754,15 @@ key — is reported in `nightme logs` and left out. The daemon still starts, and
 | `/me start <workflow> [args...] [-i <rounds>]` | Starts a workflow in this chat. `-i` sets how many rounds every job of the workflow runs. A name that carries no owner is the project's own namespace: `coder` is the workflow `nightme/coder`. |
 | `/me reply <text>` | Answers the question the run is waiting for. |
 | `/me pause` | Stops the run after the step it is on. |
-| `/me resume [note]` | Runs the step the run is on again. Its budget for the current round starts over. The note is your instruction. A step that is running, that succeeded, or that has not run yet is not run again: the command says why and the state card answers as well. `/me resume` does not interrupt a step that is running. |
-| `/me next [note]` | Skips the step the run is on: the plan goes on with the workflow, and the facts the step produced are kept. The note is your instruction. A step whose command is still running is skipped: the command it sent to the chat is abandoned, and the run goes on with the next step of the job. The abandoned command is not cancelled — the chat owns it, and what it produces lands in the chat when it finishes. A step that succeeded, and a step whose work is not a chat command, are not skipped: the command says why and the state card answers as well. |
+| `/me resume [note]` | Runs the step the run is on again. Its budget for the current round starts over. The note is your instruction. A step that is running, that succeeded, or that has not run yet is not run again: the answer names the step and says why. `/me resume` does not interrupt a step that is running. |
+| `/me next [note]` | Skips the step the run is on: the plan goes on with the workflow, and the facts the step produced are kept. The note is your instruction. A step whose command is still running is skipped: the command it sent to the chat is abandoned, and the run goes on with the next step of the job. The abandoned command is not cancelled — the chat owns it, and what it produces lands in the chat when it finishes. A step that succeeded, and a step whose work is not a chat command, are not skipped: the answer names the step and says why. |
 | `/me stop` | Cancels the run and leaves the record of the session in the chat. The stop and the record share one card: the card of the `/me stop` message. The work the chat agent does on its own goes on to its end. |
-| `/me status` | Shows the state of the run again: the run publishes it on a card of its own under the `/me status` message, and the card carries the phase of the run, the tree of the rounds and the checklist of the round. |
+| `/me status` | Shows the state of the run again: the card of the `/me status` message carries the phase of the run, the tree of the rounds and the checklist of the round. |
+
+The card of a `/me pause`, `/me resume`, `/me next` or `/me status` message is
+the card the chat already holds for that message. The answer of the command is
+its first entry, and the state of the run follows it: one card, one place to
+read both.
 
 The arguments of `/me start` fill the workflow's declared arguments: a positional
 token fills the next argument that is still unassigned, in declaration order, and
@@ -766,9 +771,8 @@ a token of the form `name=value` assigns that argument by name.
 `/me resume` and `/me next` decide at command time what they do with the step the
 run is on, and they answer accordingly: the promise only when there is something to
 do, and the reason when there is not. A command that acts on nothing names the step
-and says what did not happen; the state card answers as well. Both hand the control
-back to the run: a run that waits for you goes on, whatever the command decided about
-the step.
+and says what did not happen. Both hand the control back to the run: a run that
+waits for you goes on, whatever the command decided about the step.
 
 | The state of the run and of the step | `/me resume` | `/me next` |
 |---|---|---|
@@ -815,7 +819,9 @@ current one, the last decision, the token usage — is a card in the chat, and s
 every job iteration of the run: the chat keeps the record of how it went. Each of
 those cards hangs under a message the run posted; the message says in one line
 what the card below it holds. The card of the run is the one the chat already
-holds for the `/me start` message.
+holds for the `/me start` message, and the state of the run lands on the card of
+the `/me pause`, `/me resume`, `/me next` or `/me status` message that asked for
+it.
 When the run
 asks a question, the choices become the card's buttons: a click is the answer. The
 question itself never reaches the agent — it is a message of the chat, not a turn

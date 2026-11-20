@@ -1,53 +1,37 @@
-// Package openai implements the OpenAI-compatible chat protocol.
-//
-// The protocol covers OpenAI, OpenRouter, DeepSeek, Qwen, Ollama and
-// most gateways: they all speak /chat/completions with function
-// tools. The implementation stays lenient — a missing usage block, a
-// null content next to tool calls and empty tool arguments are all
-// facts of the wild, not errors.
-package openai
+package chat
 
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"net/http"
 	"strings"
-	"time"
 
 	"github.com/cnlangzi/nightme/internal/llm"
 )
 
 func init() {
-	llm.Register("openai", New)
+	llm.RegisterChatProtocol(protocolCompletions, completionsPath, NewCompletions)
 }
 
-// Provider talks to an OpenAI-compatible chat completions endpoint.
-type Provider struct {
-	baseURL string
-	model   string
-	apiKey  string
-	maxTok  int
-	client  *http.Client
+// protocolCompletions is the name the chat completions protocol is
+// registered under.
+const protocolCompletions = "chat_completions"
+
+// completionsPath is the path the protocol appends to the base URL.
+const completionsPath = "/chat/completions"
+
+// Completions talks to a chat completions endpoint.
+type Completions struct {
+	settings
 }
 
-// New builds a provider from the configuration.
-func New(cfg llm.Config) (llm.Provider, error) {
-	base := strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/")
-	if base == "" {
-		return nil, fmt.Errorf("llm/openai: base_url is required")
-	}
-	key, err := llm.APIKey(cfg)
+// NewCompletions builds a provider for the chat completions
+// protocol.
+func NewCompletions(cfg llm.ChatConfig) (llm.Provider, error) {
+	s, err := newSettings(cfg)
 	if err != nil {
 		return nil, err
 	}
-	return &Provider{
-		baseURL: base,
-		model:   strings.TrimSpace(cfg.Model),
-		apiKey:  key,
-		maxTok:  cfg.MaxTokens,
-		client:  &http.Client{Timeout: 10 * time.Minute},
-	}, nil
+	return &Completions{settings: s}, nil
 }
 
 // chatRequest is the body of a chat completions call.
@@ -109,10 +93,10 @@ type chatResponse struct {
 }
 
 // Complete implements llm.Provider.
-func (p *Provider) Complete(ctx context.Context, req llm.Request) (*llm.Response, error) {
+func (p *Completions) Complete(ctx context.Context, req llm.Request) (*llm.Response, error) {
 	body := chatRequest{
 		Model:      p.model,
-		Messages:   toWireMessages(req),
+		Messages:   toCompletionsMessages(req),
 		ToolChoice: "auto",
 		MaxTokens:  p.maxTok,
 	}
@@ -135,16 +119,16 @@ func (p *Provider) Complete(ctx context.Context, req llm.Request) (*llm.Response
 	if p.apiKey != "" {
 		headers["Authorization"] = "Bearer " + p.apiKey
 	}
-	url := p.baseURL + "/chat/completions"
-	if err := llm.PostJSON(ctx, p.client, url, headers, body, &answer); err != nil {
+	url := llm.Endpoint(p.baseURL, completionsPath)
+	if err := llm.PostJSON(ctx, p.client, url, p.requestHeaders(headers), body, &answer); err != nil {
 		return nil, err
 	}
 
 	out := &llm.Response{StopReason: llm.StopEnd}
 	if len(answer.Choices) > 0 {
 		choice := answer.Choices[0]
-		out.Message = fromWireMessage(choice.Message)
-		out.StopReason = stopReason(choice.FinishReason, out.Message)
+		out.Message = fromCompletionsMessage(choice.Message)
+		out.StopReason = completionsStopReason(choice.FinishReason, out.Message)
 	} else {
 		out.Message = llm.Message{Role: llm.RoleAssistant}
 	}
@@ -157,12 +141,12 @@ func (p *Provider) Complete(ctx context.Context, req llm.Request) (*llm.Response
 	return out, nil
 }
 
-// toWireMessages maps a conversation onto the wire protocol.
+// toCompletionsMessages maps a conversation onto the wire protocol.
 //
 // The system prompt becomes a system message, the assistant's tool
 // calls become tool_calls, and every tool result becomes its own
 // message with the id of the call it answers.
-func toWireMessages(req llm.Request) []chatMessage {
+func toCompletionsMessages(req llm.Request) []chatMessage {
 	var out []chatMessage
 	if strings.TrimSpace(req.System) != "" {
 		system := req.System
@@ -214,9 +198,9 @@ func toWireMessages(req llm.Request) []chatMessage {
 	return out
 }
 
-// fromWireMessage maps the assistant's answer back onto the neutral
-// shape.
-func fromWireMessage(m chatMessage) llm.Message {
+// fromCompletionsMessage maps the assistant's answer back onto the
+// neutral shape.
+func fromCompletionsMessage(m chatMessage) llm.Message {
 	out := llm.Message{Role: llm.RoleAssistant}
 	if m.Content != nil && *m.Content != "" {
 		out.Parts = append(out.Parts, llm.Part{Type: llm.PartText, Text: *m.Content})
@@ -243,10 +227,10 @@ func wireArguments(args json.RawMessage) string {
 	return string(args)
 }
 
-// stopReason maps the wire finish_reason onto the neutral one. A
-// response that carries tool calls is a tool call whatever the server
-// said.
-func stopReason(finish string, msg llm.Message) string {
+// completionsStopReason maps the wire finish_reason onto the neutral
+// one. A response that carries tool calls is a tool call whatever the
+// server said.
+func completionsStopReason(finish string, msg llm.Message) string {
 	if len(msg.ToolCalls()) > 0 {
 		return llm.StopToolCalls
 	}

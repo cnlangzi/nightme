@@ -116,7 +116,7 @@ func TestDecisions_TheRequestCarriesEveryQuestionType(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	d, err := NewDecisions(llm.Config{Protocol: "decisions", BaseURL: srv.URL, Model: "jev-1.14"})
+	d, err := NewDecisions(llm.DeciderConfig{Protocol: "decisions", BaseURL: srv.URL, Model: "jev-1.14"})
 	if err != nil {
 		t.Fatalf("new decider: %v", err)
 	}
@@ -176,7 +176,7 @@ func TestSystemOne_TheRequestCarriesEveryQuestionType(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	d, err := NewSystemOne(llm.Config{Protocol: "systemone", BaseURL: srv.URL, Model: "jev-1.14"})
+	d, err := NewSystemOne(llm.DeciderConfig{Protocol: "systemone", BaseURL: srv.URL, Model: "jev-1.14"})
 	if err != nil {
 		t.Fatalf("new decider: %v", err)
 	}
@@ -222,11 +222,11 @@ func TestBothProtocols_AnswerTheSameRequestTheSameWay(t *testing.T) {
 	}))
 	defer systemoneSrv.Close()
 
-	d1, err := NewDecisions(llm.Config{Protocol: "decisions", BaseURL: decisionsSrv.URL, Model: "m"})
+	d1, err := NewDecisions(llm.DeciderConfig{Protocol: "decisions", BaseURL: decisionsSrv.URL, Model: "m"})
 	if err != nil {
 		t.Fatalf("new decider: %v", err)
 	}
-	d2, err := NewSystemOne(llm.Config{Protocol: "systemone", BaseURL: systemoneSrv.URL, Model: "m"})
+	d2, err := NewSystemOne(llm.DeciderConfig{Protocol: "systemone", BaseURL: systemoneSrv.URL, Model: "m"})
 	if err != nil {
 		t.Fatalf("new decider: %v", err)
 	}
@@ -256,7 +256,7 @@ func TestDecider_HandlesARefusal(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	d, _ := NewDecisions(llm.Config{Protocol: "decisions", BaseURL: srv.URL, Model: "m"})
+	d, _ := NewDecisions(llm.DeciderConfig{Protocol: "decisions", BaseURL: srv.URL, Model: "m"})
 	resp, err := d.Decide(context.Background(), neutralRequest())
 	if err != nil {
 		t.Fatalf("decide: %v", err)
@@ -274,7 +274,7 @@ func TestDecider_ValidatesBeforeItCalls(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	d, _ := NewDecisions(llm.Config{Protocol: "decisions", BaseURL: srv.URL, Model: "m"})
+	d, _ := NewDecisions(llm.DeciderConfig{Protocol: "decisions", BaseURL: srv.URL, Model: "m"})
 	_, err := d.Decide(context.Background(), llm.DecisionRequest{State: "x"})
 	if err == nil {
 		t.Fatal("a request without questions was accepted")
@@ -296,7 +296,7 @@ func TestDecider_RetriesAfterARateLimit(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	d, _ := NewDecisions(llm.Config{Protocol: "decisions", BaseURL: srv.URL, Model: "m"})
+	d, _ := NewDecisions(llm.DeciderConfig{Protocol: "decisions", BaseURL: srv.URL, Model: "m"})
 	resp, err := d.Decide(context.Background(), neutralRequest())
 	if err != nil {
 		t.Fatalf("decide: %v", err)
@@ -311,7 +311,7 @@ func TestDecider_ReportsANonRetryableFailure(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	d, _ := NewDecisions(llm.Config{Protocol: "decisions", BaseURL: srv.URL, Model: "m"})
+	d, _ := NewDecisions(llm.DeciderConfig{Protocol: "decisions", BaseURL: srv.URL, Model: "m"})
 	_, err := d.Decide(context.Background(), neutralRequest())
 	if err == nil {
 		t.Fatal("the call was accepted")
@@ -331,7 +331,7 @@ func TestDecider_HonoursTheContext(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	d, _ := NewDecisions(llm.Config{Protocol: "decisions", BaseURL: srv.URL, Model: "m"})
+	d, _ := NewDecisions(llm.DeciderConfig{Protocol: "decisions", BaseURL: srv.URL, Model: "m"})
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	_, err := d.Decide(ctx, neutralRequest())
@@ -344,10 +344,10 @@ func TestDecider_HonoursTheContext(t *testing.T) {
 }
 
 func TestNew_RequiresABaseURL(t *testing.T) {
-	if _, err := NewDecisions(llm.Config{Protocol: "decisions", Model: "m"}); err == nil {
+	if _, err := NewDecisions(llm.DeciderConfig{Protocol: "decisions", Model: "m"}); err == nil {
 		t.Fatal("a decider without a base url was accepted")
 	}
-	if _, err := NewSystemOne(llm.Config{Protocol: "systemone", Model: "m"}); err == nil {
+	if _, err := NewSystemOne(llm.DeciderConfig{Protocol: "systemone", Model: "m"}); err == nil {
 		t.Fatal("a decider without a base url was accepted")
 	}
 }
@@ -384,7 +384,7 @@ func TestDecisions_ReadsTheOfficialAnswerShape(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	d, err := NewDecisions(llm.Config{Protocol: "decisions", BaseURL: srv.URL, Model: "gpt-6-luna"})
+	d, err := NewDecisions(llm.DeciderConfig{Protocol: "decisions", BaseURL: srv.URL, Model: "gpt-6-luna"})
 	if err != nil {
 		t.Fatalf("new decider: %v", err)
 	}
@@ -410,7 +410,7 @@ func TestSystemOne_ReadsTheOfficialAnswerShape(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	d, err := NewSystemOne(llm.Config{Protocol: "systemone", BaseURL: srv.URL, Model: "jev-1.14.0"})
+	d, err := NewSystemOne(llm.DeciderConfig{Protocol: "systemone", BaseURL: srv.URL, Model: "jev-1.14.0"})
 	if err != nil {
 		t.Fatalf("new decider: %v", err)
 	}
@@ -432,7 +432,7 @@ func TestDecider_ReadsARefusalOfTheOfficialShape(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	d, _ := NewDecisions(llm.Config{Protocol: "decisions", BaseURL: srv.URL, Model: "m"})
+	d, _ := NewDecisions(llm.DeciderConfig{Protocol: "decisions", BaseURL: srv.URL, Model: "m"})
 	resp, err := d.Decide(context.Background(), neutralRequest())
 	if err != nil {
 		t.Fatalf("decide: %v", err)
@@ -451,7 +451,7 @@ func TestDecisions_PairsUnnamedAnswersWithTheQuestions(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	d, _ := NewDecisions(llm.Config{Protocol: "decisions", BaseURL: srv.URL, Model: "m"})
+	d, _ := NewDecisions(llm.DeciderConfig{Protocol: "decisions", BaseURL: srv.URL, Model: "m"})
 	resp, err := d.Decide(context.Background(), llm.DecisionRequest{
 		State: "s",
 		Questions: []llm.Question{
@@ -482,7 +482,7 @@ func TestDecider_RetriesAfterAnOverload(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	d, _ := NewDecisions(llm.Config{Protocol: "decisions", BaseURL: srv.URL, Model: "m"})
+	d, _ := NewDecisions(llm.DeciderConfig{Protocol: "decisions", BaseURL: srv.URL, Model: "m"})
 	resp, err := d.Decide(context.Background(), neutralRequest())
 	if err != nil {
 		t.Fatalf("decide: %v", err)
@@ -493,15 +493,17 @@ func TestDecider_RetriesAfterAnOverload(t *testing.T) {
 	}
 }
 
-func TestEndpoint_AddsTheVersionOnce(t *testing.T) {
+// The base URL is used as it is written: the client appends the path
+// of its protocol and nothing else.
+func TestEndpoint_UsesTheBaseAsWritten(t *testing.T) {
 	cases := map[string]string{
-		"https://api.openai.com":        "https://api.openai.com/v1/decisions",
-		"https://api.openai.com/":       "https://api.openai.com/v1/decisions",
+		"https://api.openai.com":        "https://api.openai.com/decisions",
+		"https://api.openai.com/":       "https://api.openai.com/decisions",
 		"https://openrouter.ai/api/v1":  "https://openrouter.ai/api/v1/decisions",
 		"https://openrouter.ai/api/v1/": "https://openrouter.ai/api/v1/decisions",
 	}
 	for base, want := range cases {
-		if got := endpoint(base, "/decisions"); got != want {
+		if got := llm.Endpoint(base, "/decisions"); got != want {
 			t.Fatalf("endpoint(%q) = %q, want %q", base, got, want)
 		}
 	}
@@ -513,7 +515,7 @@ func TestDecisions_KeepsLabelKeyedProbabilitiesOverNumericLabels(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	d, _ := NewDecisions(llm.Config{Protocol: "decisions", BaseURL: srv.URL, Model: "m"})
+	d, _ := NewDecisions(llm.DeciderConfig{Protocol: "decisions", BaseURL: srv.URL, Model: "m"})
 	resp, err := d.Decide(context.Background(), llm.DecisionRequest{
 		State: "s",
 		Questions: []llm.Question{{
@@ -543,7 +545,7 @@ func TestDecider_ReportsAnUnknownProbabilityShape(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	d, _ := NewDecisions(llm.Config{Protocol: "decisions", BaseURL: srv.URL, Model: "m"})
+	d, _ := NewDecisions(llm.DeciderConfig{Protocol: "decisions", BaseURL: srv.URL, Model: "m"})
 	_, err := d.Decide(context.Background(), neutralRequest())
 	if err == nil {
 		t.Fatal("a probability that names no option was accepted")
@@ -561,11 +563,66 @@ func TestDecider_CallsTheVersionedPath(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	d, _ := NewDecisions(llm.Config{Protocol: "decisions", BaseURL: srv.URL, Model: "m"})
+	d, _ := NewDecisions(llm.DeciderConfig{Protocol: "decisions", BaseURL: srv.URL, Model: "m"})
 	if _, err := d.Decide(context.Background(), neutralRequest()); err != nil {
 		t.Fatalf("decide: %v", err)
 	}
-	if path != "/v1/decisions" {
-		t.Fatalf("the server was asked for %q, want /v1/decisions", path)
+	if path != "/decisions" {
+		t.Fatalf("the server was asked for %q, want /decisions", path)
+	}
+}
+
+// TestDecisions_SendsTheConfiguredHeaders — the headers of the
+// configuration go out with the request.
+func TestDecisions_SendsTheConfiguredHeaders(t *testing.T) {
+	var referer string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		referer = r.Header.Get("HTTP-Referer")
+		w.Write([]byte(decisionsAnswer))
+	}))
+	defer srv.Close()
+
+	d, err := NewDecisions(llm.DeciderConfig{
+		Protocol: "decisions", BaseURL: srv.URL, Model: "m",
+		Headers: map[string]string{"HTTP-Referer": "https://nightme.dev"},
+	})
+	if err != nil {
+		t.Fatalf("new decisions: %v", err)
+	}
+	if _, err := d.Decide(context.Background(), neutralRequest()); err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	if referer != "https://nightme.dev" {
+		t.Fatalf("the referer header = %q, want the configured one", referer)
+	}
+}
+
+// TestDecisions_UsesTheConfiguredTimeout — the deadline of a call is
+// the one the configuration names, and the default when it names none.
+func TestDecisions_UsesTheConfiguredTimeout(t *testing.T) {
+	d, err := NewDecisions(llm.DeciderConfig{
+		Protocol: "decisions", BaseURL: "https://example.test", Model: "m",
+		Timeout: 30 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("new decisions: %v", err)
+	}
+	dec, ok := d.(*Decisions)
+	if !ok {
+		t.Fatalf("the decider is a %T, want a *Decisions", d)
+	}
+	if dec.client.Timeout != 30*time.Second {
+		t.Fatalf("the timeout = %v, want 30s", dec.client.Timeout)
+	}
+
+	d, err = NewDecisions(llm.DeciderConfig{
+		Protocol: "decisions", BaseURL: "https://example.test", Model: "m",
+	})
+	if err != nil {
+		t.Fatalf("new decisions: %v", err)
+	}
+	dec = d.(*Decisions)
+	if dec.client.Timeout != 5*time.Minute {
+		t.Fatalf("the timeout = %v, want the default of 5m", dec.client.Timeout)
 	}
 }

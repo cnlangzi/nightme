@@ -2,42 +2,33 @@ package decision
 
 import (
 	"context"
-	"fmt"
-	"net/http"
-	"strings"
-	"time"
 
 	"github.com/cnlangzi/nightme/internal/llm"
 )
 
 func init() {
-	llm.RegisterDecider("systemone", NewSystemOne)
+	llm.RegisterDecisionProtocol(protocolSystemOne, systemonePath, NewSystemOne)
 }
 
-// SystemOne talks to a /v1/systemone endpoint.
+// protocolSystemOne is the name the systemone protocol is registered
+// under.
+const protocolSystemOne = "systemone"
+
+// systemonePath is the path the protocol appends to the base URL.
+const systemonePath = "/systemone"
+
+// SystemOne talks to a /systemone endpoint.
 type SystemOne struct {
-	baseURL string
-	model   string
-	apiKey  string
-	client  *http.Client
+	settings
 }
 
 // NewSystemOne builds a decider for the systemone protocol.
-func NewSystemOne(cfg llm.Config) (llm.Decider, error) {
-	base := strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/")
-	if base == "" {
-		return nil, fmt.Errorf("llm/decision: base_url is required")
-	}
-	key, err := llm.APIKey(cfg)
+func NewSystemOne(cfg llm.DeciderConfig) (llm.Decider, error) {
+	s, err := newSettings(cfg)
 	if err != nil {
 		return nil, err
 	}
-	return &SystemOne{
-		baseURL: base,
-		model:   strings.TrimSpace(cfg.Model),
-		apiKey:  key,
-		client:  &http.Client{Timeout: 5 * time.Minute},
-	}, nil
+	return &SystemOne{settings: s}, nil
 }
 
 // systemoneRequest is the body of a systemone call.
@@ -74,7 +65,8 @@ func (s *SystemOne) Decide(ctx context.Context, req llm.DecisionRequest) (*llm.D
 	if s.apiKey != "" {
 		headers["Authorization"] = "Bearer " + s.apiKey
 	}
-	if err := llm.PostJSON(ctx, s.client, endpoint(s.baseURL, "/systemone"), headers, body, &answer); err != nil {
+	url := llm.Endpoint(s.baseURL, systemonePath)
+	if err := llm.PostJSON(ctx, s.client, url, s.requestHeaders(headers), body, &answer); err != nil {
 		return nil, err
 	}
 	return buildResponse(req.Questions, answer, s.model), nil

@@ -13,7 +13,7 @@ import (
 const (
 	meKey       = "me"
 	meLLMKey    = "llm"
-	meProvider  = "provider"
+	meProtocol  = "protocol"
 	meBaseURL   = "base_url"
 	meModel     = "model"
 	meMaxTokens = "max_tokens"
@@ -33,15 +33,17 @@ const defaultMeMaxTokens = 40960
 // removes the key as well, and a positive value is written as the
 // integer it is.
 type MeLLMValues struct {
-	// Provider names the chat provider ("openai").
-	Provider string
+	// Protocol names the chat protocol ("chat_completions" or
+	// "messages").
+	Protocol string
 	// BaseURL is the root of the API.
 	BaseURL string
 	// Model is the model to call.
 	Model string
 	// MaxTokens caps the length of an answer.
 	MaxTokens int
-	// Agent names the agent that thinks for the owner.
+	// Agent names the agent that thinks for the owner. It belongs to
+	// the me section, not to the chat model.
 	Agent string
 	// APIKey holds the key itself. It wins over APIKeyEnv.
 	APIKey string
@@ -50,8 +52,9 @@ type MeLLMValues struct {
 }
 
 // SetMeLLM writes the chat-model values into the me.llm section of
-// the config file at path. Every other node of the document —
-// comments, sections and keys nightme does not model — is preserved.
+// the config file at path, and the agent that thinks for the owner
+// into the me section. Every other node of the document — comments,
+// sections and keys nightme does not model — is preserved.
 //
 // An empty value removes its key. The two credential channels are
 // alternatives: whichever one carries a value is written and the
@@ -85,15 +88,15 @@ func SetMeLLM(path string, v MeLLMValues) error {
 		return err
 	}
 
-	setOrDelete(llmSection, meProvider, v.Provider)
+	setOrDelete(llmSection, meProtocol, v.Protocol)
 	setOrDelete(llmSection, meBaseURL, v.BaseURL)
 	setOrDelete(llmSection, meModel, v.Model)
-	setOrDelete(llmSection, meAgent, v.Agent)
 	if v.MaxTokens > 0 {
 		yamlfile.SetMapValueInt(llmSection, meMaxTokens, v.MaxTokens)
 	} else {
 		yamlfile.DeleteMapKey(llmSection, meMaxTokens)
 	}
+	setOrDelete(me, meAgent, v.Agent)
 
 	switch {
 	case v.APIKey != "":

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"strconv"
@@ -64,13 +65,19 @@ func Retryable(err error) bool {
 	return false
 }
 
-// inlineAPIKey returns the plaintext key a configuration carries,
-// trimmed. It is empty when the configuration carries no inline key.
-func inlineAPIKey(cfg Config) string { return strings.TrimSpace(cfg.APIKey) }
-
-// apiKeyEnvName returns the environment variable a configuration
-// names, trimmed. It is empty when the configuration names none.
-func apiKeyEnvName(cfg Config) string { return strings.TrimSpace(cfg.APIKeyEnv) }
+// Credentialed is a configuration that carries a credential.
+//
+// The chat model and the decision model both do, so the resolver and
+// the warning work on either. The interface is sealed: only the two
+// configurations of this package carry a credential.
+type Credentialed interface {
+	// inlineAPIKey returns the plaintext key the configuration
+	// carries, trimmed.
+	inlineAPIKey() string
+	// apiKeyEnvName returns the environment variable the
+	// configuration names, trimmed.
+	apiKeyEnvName() string
+}
 
 // DualCredential reports whether a configuration names the API key
 // twice — an inline key and an environment variable.
@@ -78,8 +85,8 @@ func apiKeyEnvName(cfg Config) string { return strings.TrimSpace(cfg.APIKeyEnv) 
 // The inline key wins, so the other channel is dead weight. A caller
 // that wants to tell the operator about it asks here rather than
 // re-deriving the rule.
-func DualCredential(cfg Config) bool {
-	return inlineAPIKey(cfg) != "" && apiKeyEnvName(cfg) != ""
+func DualCredential(cfg Credentialed) bool {
+	return cfg.inlineAPIKey() != "" && cfg.apiKeyEnvName() != ""
 }
 
 // APIKey resolves the credential a configuration asks for.
@@ -90,11 +97,11 @@ func DualCredential(cfg Config) bool {
 // unset. An empty result means the endpoint needs no authentication.
 //
 // The error names the variable, never the key.
-func APIKey(cfg Config) (string, error) {
-	if key := inlineAPIKey(cfg); key != "" {
+func APIKey(cfg Credentialed) (string, error) {
+	if key := cfg.inlineAPIKey(); key != "" {
 		return key, nil
 	}
-	name := apiKeyEnvName(cfg)
+	name := cfg.apiKeyEnvName()
 	if name == "" {
 		return "", nil
 	}
@@ -103,6 +110,38 @@ func APIKey(cfg Config) (string, error) {
 		return "", fmt.Errorf("llm: the environment variable %s is empty or unset", name)
 	}
 	return key, nil
+}
+
+// Endpoint returns the URL of a protocol's endpoint.
+//
+// The base URL is used as it is written: the client appends the path
+// of its own protocol and nothing else — no version segment, no
+// default endpoint. A trailing slash is trimmed so the two do not
+// double up.
+func Endpoint(base, path string) string {
+	return strings.TrimRight(strings.TrimSpace(base), "/") + path
+}
+
+// MergeHeaders returns the headers a request carries: the ones the
+// protocol needs, with the ones of the configuration over them.
+//
+// An empty value in the configuration does not erase a header the
+// protocol set — a blank credential is never what an empty header
+// means. Where the protocol set nothing under that name, the empty
+// value goes out as it is: what the server does with it is the
+// server's business.
+func MergeHeaders(own, extra map[string]string) map[string]string {
+	out := make(map[string]string, len(own)+len(extra))
+	maps.Copy(out, own)
+	for name, value := range extra {
+		if value == "" {
+			if _, taken := out[name]; taken {
+				continue
+			}
+		}
+		out[name] = value
+	}
+	return out
 }
 
 // retryPolicy is the shared transient-failure policy: 429, 5xx and
@@ -119,6 +158,10 @@ func defaultRetryPolicy() retryPolicy {
 }
 
 // PostJSON sends body as JSON to url and decodes the answer into out.
+//
+// The headers are sent as they are given: a header the caller names
+// goes out, empty value and all — what the server does with it is the
+// server's business.
 //
 // A 429, a 5xx or a network failure is retried with a growing
 // backoff; a Retry-After header is honoured when the server sends one.
@@ -168,9 +211,7 @@ func postOnce(ctx context.Context, client *http.Client, url string, headers map[
 	}
 	req.Header.Set("Content-Type", "application/json")
 	for k, v := range headers {
-		if v != "" {
-			req.Header.Set(k, v)
-		}
+		req.Header.Set(k, v)
 	}
 
 	resp, err := client.Do(req)

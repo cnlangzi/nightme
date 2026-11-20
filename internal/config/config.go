@@ -26,6 +26,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -113,6 +114,10 @@ type MeConfig struct {
 	LLM MeLLMConfig `yaml:"llm,omitempty"`
 	// Decider is the decision model (System 1).
 	Decider MeDeciderConfig `yaml:"decider,omitempty"`
+	// Agent names the agent that thinks for the owner: the run asks
+	// it when it cannot work out what to do. Empty means the agent of
+	// the chat that started the run is used.
+	Agent string `yaml:"agent,omitempty"`
 	// MaxJudgments is the number of chances the agent has at one step
 	// in one round. A chance is the step's own execution, a nightme
 	// command issued for it, or a turn the agent produced no tool call
@@ -122,9 +127,12 @@ type MeConfig struct {
 
 // MeLLMConfig is the chat model configuration.
 type MeLLMConfig struct {
-	// Provider names the registered chat provider ("openai").
-	Provider string `yaml:"provider,omitempty"`
-	// BaseURL is the root of the API.
+	// Protocol names the registered chat protocol ("chat_completions"
+	// or "messages").
+	Protocol string `yaml:"protocol,omitempty"`
+	// BaseURL is the root of the API. The client appends the path of
+	// its protocol and nothing else: the address is used as it is
+	// written.
 	BaseURL string `yaml:"base_url,omitempty"`
 	// Model is the model to call.
 	Model string `yaml:"model,omitempty"`
@@ -136,10 +144,11 @@ type MeLLMConfig struct {
 	APIKeyEnv string `yaml:"api_key_env,omitempty"`
 	// MaxTokens caps the length of an answer.
 	MaxTokens int `yaml:"max_tokens,omitempty"`
-	// Agent names the agent that thinks for the owner: the run asks it
-	// when it cannot work out what to do. Empty means the agent of
-	// the chat that started the run is used.
-	Agent string `yaml:"agent,omitempty"`
+	// Timeout is the deadline of one call. Zero means the default of
+	// the protocol.
+	Timeout time.Duration `yaml:"timeout,omitempty"`
+	// Headers are the extra headers every request carries.
+	Headers map[string]string `yaml:"headers,omitempty"`
 }
 
 // MeDeciderConfig is the decision model configuration.
@@ -147,7 +156,9 @@ type MeDeciderConfig struct {
 	// Protocol names the registered decision protocol ("decisions" or
 	// "systemone").
 	Protocol string `yaml:"protocol,omitempty"`
-	// BaseURL is the root of the API.
+	// BaseURL is the root of the API. The client appends the path of
+	// its protocol and nothing else: the address is used as it is
+	// written.
 	BaseURL string `yaml:"base_url,omitempty"`
 	// Model is the model to call.
 	Model string `yaml:"model,omitempty"`
@@ -157,6 +168,11 @@ type MeDeciderConfig struct {
 	// APIKeyEnv names the environment variable the API key is read
 	// from when APIKey is empty.
 	APIKeyEnv string `yaml:"api_key_env,omitempty"`
+	// Timeout is the deadline of one call. Zero means the default of
+	// the protocol.
+	Timeout time.Duration `yaml:"timeout,omitempty"`
+	// Headers are the extra headers every request carries.
+	Headers map[string]string `yaml:"headers,omitempty"`
 	// MinConfidence is the confidence a decision must reach before
 	// the personal agent acts on it without the chat model. Zero
 	// means the built-in default.

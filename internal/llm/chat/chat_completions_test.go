@@ -1,4 +1,4 @@
-package openai
+package chat
 
 import (
 	"context"
@@ -15,17 +15,17 @@ import (
 	"github.com/cnlangzi/nightme/internal/llm"
 )
 
-// newProvider builds a provider pointed at a test server.
-func newProvider(t *testing.T, url string) llm.Provider {
+// newCompletions builds a provider pointed at a test server.
+func newCompletions(t *testing.T, url string) llm.Provider {
 	t.Helper()
-	p, err := New(llm.Config{Provider: "openai", BaseURL: url, Model: "test-model"})
+	p, err := NewCompletions(llm.ChatConfig{Protocol: "chat_completions", BaseURL: url, Model: "test-model"})
 	if err != nil {
 		t.Fatalf("new provider: %v", err)
 	}
 	return p
 }
 
-func TestProvider_TextReply(t *testing.T) {
+func TestCompletions_TextReply(t *testing.T) {
 	var body map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(r.Body)
@@ -34,7 +34,7 @@ func TestProvider_TextReply(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	resp, err := newProvider(t, srv.URL).Complete(context.Background(), llm.Request{
+	resp, err := newCompletions(t, srv.URL).Complete(context.Background(), llm.Request{
 		System:   "be brief",
 		Messages: []llm.Message{{Role: llm.RoleUser, Parts: []llm.Part{{Type: llm.PartText, Text: "hi"}}}},
 	})
@@ -60,13 +60,13 @@ func TestProvider_TextReply(t *testing.T) {
 	}
 }
 
-func TestProvider_SingleToolCall(t *testing.T) {
+func TestCompletions_SingleToolCall(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"run_step","arguments":"{\"command\":\"/gtw commit\"}"}}]},"finish_reason":"tool_calls"}]}`))
 	}))
 	defer srv.Close()
 
-	resp, err := newProvider(t, srv.URL).Complete(context.Background(), llm.Request{
+	resp, err := newCompletions(t, srv.URL).Complete(context.Background(), llm.Request{
 		Messages: []llm.Message{{Role: llm.RoleUser, Parts: []llm.Part{{Type: llm.PartText, Text: "go"}}}},
 	})
 	if err != nil {
@@ -90,13 +90,13 @@ func TestProvider_SingleToolCall(t *testing.T) {
 	}
 }
 
-func TestProvider_ParallelToolCalls(t *testing.T) {
+func TestCompletions_ParallelToolCalls(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"run_step","arguments":"{}"}},{"id":"c2","type":"function","function":{"name":"repo_status","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}`))
 	}))
 	defer srv.Close()
 
-	resp, err := newProvider(t, srv.URL).Complete(context.Background(), llm.Request{})
+	resp, err := newCompletions(t, srv.URL).Complete(context.Background(), llm.Request{})
 	if err != nil {
 		t.Fatalf("complete: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestProvider_ParallelToolCalls(t *testing.T) {
 	}
 }
 
-func TestProvider_ToolResultRoundTrip(t *testing.T) {
+func TestCompletions_ToolResultRoundTrip(t *testing.T) {
 	var body map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(r.Body)
@@ -118,7 +118,7 @@ func TestProvider_ToolResultRoundTrip(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := newProvider(t, srv.URL).Complete(context.Background(), llm.Request{
+	_, err := newCompletions(t, srv.URL).Complete(context.Background(), llm.Request{
 		Messages: []llm.Message{
 			{Role: llm.RoleAssistant, Parts: []llm.Part{{
 				Type: llm.PartToolCall, ToolCallID: "c1", ToolName: "run_step",
@@ -148,13 +148,13 @@ func TestProvider_ToolResultRoundTrip(t *testing.T) {
 	}
 }
 
-func TestProvider_CompatQuirks(t *testing.T) {
+func TestCompletions_CompatQuirks(t *testing.T) {
 	t.Run("no usage", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}`))
 		}))
 		defer srv.Close()
-		resp, err := newProvider(t, srv.URL).Complete(context.Background(), llm.Request{})
+		resp, err := newCompletions(t, srv.URL).Complete(context.Background(), llm.Request{})
 		if err != nil {
 			t.Fatalf("complete: %v", err)
 		}
@@ -168,7 +168,7 @@ func TestProvider_CompatQuirks(t *testing.T) {
 			w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"repo_status","arguments":""}}]},"finish_reason":"tool_calls"}]}`))
 		}))
 		defer srv.Close()
-		resp, err := newProvider(t, srv.URL).Complete(context.Background(), llm.Request{})
+		resp, err := newCompletions(t, srv.URL).Complete(context.Background(), llm.Request{})
 		if err != nil {
 			t.Fatalf("complete: %v", err)
 		}
@@ -182,7 +182,7 @@ func TestProvider_CompatQuirks(t *testing.T) {
 	})
 }
 
-func TestProvider_RetriesAfterARateLimit(t *testing.T) {
+func TestCompletions_RetriesAfterARateLimit(t *testing.T) {
 	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if atomic.AddInt32(&calls, 1) == 1 {
@@ -196,7 +196,7 @@ func TestProvider_RetriesAfterARateLimit(t *testing.T) {
 	defer srv.Close()
 
 	started := time.Now()
-	resp, err := newProvider(t, srv.URL).Complete(context.Background(), llm.Request{})
+	resp, err := newCompletions(t, srv.URL).Complete(context.Background(), llm.Request{})
 	if err != nil {
 		t.Fatalf("complete: %v", err)
 	}
@@ -213,7 +213,7 @@ func TestProvider_RetriesAfterARateLimit(t *testing.T) {
 	}
 }
 
-func TestProvider_ReplaysAToolCallWithoutArguments(t *testing.T) {
+func TestCompletions_ReplaysAToolCallWithoutArguments(t *testing.T) {
 	var body map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(r.Body)
@@ -222,7 +222,7 @@ func TestProvider_ReplaysAToolCallWithoutArguments(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := newProvider(t, srv.URL).Complete(context.Background(), llm.Request{
+	_, err := newCompletions(t, srv.URL).Complete(context.Background(), llm.Request{
 		Messages: []llm.Message{{Role: llm.RoleAssistant, Parts: []llm.Part{{
 			Type: llm.PartToolCall, ToolCallID: "c1", ToolName: "repo_status",
 		}}}},
@@ -243,14 +243,14 @@ func TestProvider_ReplaysAToolCallWithoutArguments(t *testing.T) {
 	}
 }
 
-func TestProvider_ReportsANonRetryableFailure(t *testing.T) {
+func TestCompletions_ReportsANonRetryableFailure(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		w.Write([]byte(`{"error":{"message":"invalid api key","type":"invalid_request_error"}}`))
 	}))
 	defer srv.Close()
 
-	_, err := newProvider(t, srv.URL).Complete(context.Background(), llm.Request{})
+	_, err := newCompletions(t, srv.URL).Complete(context.Background(), llm.Request{})
 	if err == nil {
 		t.Fatal("the call was accepted")
 	}
@@ -262,7 +262,7 @@ func TestProvider_ReportsANonRetryableFailure(t *testing.T) {
 	}
 }
 
-func TestProvider_HonoursTheContext(t *testing.T) {
+func TestCompletions_HonoursTheContext(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(2 * time.Second)
 		w.Write([]byte(`{"choices":[]}`))
@@ -271,7 +271,7 @@ func TestProvider_HonoursTheContext(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	_, err := newProvider(t, srv.URL).Complete(ctx, llm.Request{})
+	_, err := newCompletions(t, srv.URL).Complete(ctx, llm.Request{})
 	if err == nil {
 		t.Fatal("the call was not cancelled")
 	}
@@ -280,16 +280,16 @@ func TestProvider_HonoursTheContext(t *testing.T) {
 	}
 }
 
-func TestNew_RequiresABaseURL(t *testing.T) {
-	if _, err := New(llm.Config{Provider: "openai", Model: "m"}); err == nil {
+func TestCompletionsNew_RequiresABaseURL(t *testing.T) {
+	if _, err := NewCompletions(llm.ChatConfig{Protocol: "chat_completions", Model: "m"}); err == nil {
 		t.Fatal("a provider without a base url was accepted")
 	}
 }
 
-func TestNew_ReportsAMissingKey(t *testing.T) {
+func TestCompletionsNew_ReportsAMissingKey(t *testing.T) {
 	t.Setenv("NIGHTME_TEST_LLM_KEY", "")
-	if _, err := New(llm.Config{
-		Provider: "openai", BaseURL: "https://example.test", Model: "m", APIKeyEnv: "NIGHTME_TEST_LLM_KEY",
+	if _, err := NewCompletions(llm.ChatConfig{
+		Protocol: "chat_completions", BaseURL: "https://example.test", Model: "m", APIKeyEnv: "NIGHTME_TEST_LLM_KEY",
 	}); err == nil {
 		t.Fatal("a missing api key was accepted")
 	}
@@ -297,7 +297,7 @@ func TestNew_ReportsAMissingKey(t *testing.T) {
 
 // The inline key is the credential, even when the environment channel
 // is configured too and its variable is unset.
-func TestNew_SendsTheInlineKey(t *testing.T) {
+func TestCompletionsNew_SendsTheInlineKey(t *testing.T) {
 	t.Setenv("NIGHTME_TEST_LLM_KEY", "")
 	var auth string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -306,8 +306,8 @@ func TestNew_SendsTheInlineKey(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p, err := New(llm.Config{
-		Provider: "openai", BaseURL: srv.URL, Model: "m",
+	p, err := NewCompletions(llm.ChatConfig{
+		Protocol: "chat_completions", BaseURL: srv.URL, Model: "m",
 		APIKey: "sk-inline", APIKeyEnv: "NIGHTME_TEST_LLM_KEY",
 	})
 	if err != nil {
@@ -323,7 +323,7 @@ func TestNew_SendsTheInlineKey(t *testing.T) {
 
 // A configuration that names no credential asks for no
 // authentication: the request carries no header.
-func TestNew_SendsNoAuthHeaderWithoutAKey(t *testing.T) {
+func TestCompletionsNew_SendsNoAuthHeaderWithoutAKey(t *testing.T) {
 	var auth string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth = r.Header.Get("Authorization")
@@ -331,7 +331,7 @@ func TestNew_SendsNoAuthHeaderWithoutAKey(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p, err := New(llm.Config{Provider: "openai", BaseURL: srv.URL, Model: "m"})
+	p, err := NewCompletions(llm.ChatConfig{Protocol: "chat_completions", BaseURL: srv.URL, Model: "m"})
 	if err != nil {
 		t.Fatalf("new provider: %v", err)
 	}
@@ -340,5 +340,79 @@ func TestNew_SendsNoAuthHeaderWithoutAKey(t *testing.T) {
 	}
 	if auth != "" {
 		t.Fatalf("authorization = %q, want no header", auth)
+	}
+}
+
+// TestCompletions_CallsThePathOfItsProtocol — the base URL is used
+// as it is written: the protocol appends its own path and nothing
+// else.
+func TestCompletions_CallsThePathOfItsProtocol(t *testing.T) {
+	var path string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path = r.URL.Path
+		w.Write([]byte(`{"choices":[]}`))
+	}))
+	defer srv.Close()
+
+	if _, err := newCompletions(t, srv.URL).Complete(context.Background(), llm.Request{}); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if path != "/chat/completions" {
+		t.Fatalf("the call went to %q, want /chat/completions", path)
+	}
+}
+
+// TestCompletions_SendsTheConfiguredHeaders — the headers of the
+// configuration go out with the request.
+func TestCompletions_SendsTheConfiguredHeaders(t *testing.T) {
+	var referer string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		referer = r.Header.Get("HTTP-Referer")
+		w.Write([]byte(`{"choices":[]}`))
+	}))
+	defer srv.Close()
+
+	p, err := NewCompletions(llm.ChatConfig{
+		Protocol: "chat_completions", BaseURL: srv.URL, Model: "m",
+		Headers: map[string]string{"HTTP-Referer": "https://nightme.dev"},
+	})
+	if err != nil {
+		t.Fatalf("new completions: %v", err)
+	}
+	if _, err := p.Complete(context.Background(), llm.Request{}); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if referer != "https://nightme.dev" {
+		t.Fatalf("the referer header = %q, want the configured one", referer)
+	}
+}
+
+// TestCompletions_UsesTheConfiguredTimeout — the deadline of a call is
+// the one the configuration names, and the default when it names none.
+func TestCompletions_UsesTheConfiguredTimeout(t *testing.T) {
+	p, err := NewCompletions(llm.ChatConfig{
+		Protocol: "chat_completions", BaseURL: "https://example.test", Model: "m",
+		Timeout: 30 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("new completions: %v", err)
+	}
+	c, ok := p.(*Completions)
+	if !ok {
+		t.Fatalf("the provider is a %T, want a *Completions", p)
+	}
+	if c.client.Timeout != 30*time.Second {
+		t.Fatalf("the timeout = %v, want 30s", c.client.Timeout)
+	}
+
+	p, err = NewCompletions(llm.ChatConfig{
+		Protocol: "chat_completions", BaseURL: "https://example.test", Model: "m",
+	})
+	if err != nil {
+		t.Fatalf("new completions: %v", err)
+	}
+	c = p.(*Completions)
+	if c.client.Timeout != 10*time.Minute {
+		t.Fatalf("the timeout = %v, want the default of 10m", c.client.Timeout)
 	}
 }

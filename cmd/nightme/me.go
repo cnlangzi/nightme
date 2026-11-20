@@ -18,8 +18,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
@@ -29,14 +31,9 @@ import (
 	"github.com/cnlangzi/nightme/internal/config"
 	nmerrors "github.com/cnlangzi/nightme/internal/errors"
 	"github.com/cnlangzi/nightme/internal/llm"
-	_ "github.com/cnlangzi/nightme/internal/llm/openai" // registers the OpenAI chat provider
+	_ "github.com/cnlangzi/nightme/internal/llm/chat" // registers the chat protocols
 	"github.com/cnlangzi/nightme/internal/runtime"
 )
-
-// chatProvider is the chat provider the wizard configures. The
-// personal agent's other model — me.decider — is hand-edited in the
-// config file.
-const chatProvider = "openai"
 
 // placeholderKey stands in for a credential the daemon resolves in
 // its own environment. It never leaves the process: the build makes
@@ -49,8 +46,8 @@ func newMeCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		Short: "Configure the personal agent's chat model",
 		Long: "Walk through the chat model of the personal agent (me.llm in\n" +
-			"the config file): the endpoint, the model, the cap on an\n" +
-			"answer, the agent that thinks for the owner and the\n" +
+			"the config file): the protocol, the endpoint, the model, the\n" +
+			"cap on an answer, the agent that thinks for the owner and the\n" +
 			"credential.\n\n" +
 			"The values are written to the config file as they are; the rest\n" +
 			"of the file is left alone. The daemon builds its models at\n" +
@@ -85,22 +82,16 @@ func meWizard(cfg *config.Config, path string, in io.Reader, out io.Writer) erro
 		return nil
 	}
 
-	printMeState(out, current)
-
-	if current.Provider != "" && !strings.EqualFold(current.Provider, chatProvider) {
-		fmt.Fprintf(out, "\nme.llm.provider is %q — this wizard configures the %s chat model.\n",
-			current.Provider, chatProvider)
-		fmt.Fprintf(out, "Switch to %s? [y/N]: ", chatProvider)
-		answer, ok := readAnswer(br)
-		if !ok || !isYes(answer) {
-			return abort()
-		}
-	}
+	printMeState(out, current, cfg.Me.Agent)
 
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Each field keeps its current value when the answer is empty; q aborts.")
 
-	baseURL, ok := askValue(br, out, "base_url", current.BaseURL, acceptAny)
+	protocol, ok := askProtocol(br, out, current.Protocol)
+	if !ok {
+		return abort()
+	}
+	baseURL, ok := askBaseURL(br, out, current.BaseURL, protocol)
 	if !ok {
 		return abort()
 	}
@@ -122,7 +113,7 @@ func meWizard(cfg *config.Config, path string, in io.Reader, out io.Writer) erro
 	if !ok {
 		return abort()
 	}
-	agentName, ok := askValue(br, out, "agent", current.Agent, func(answer string) (string, bool) {
+	agentName, ok := askValue(br, out, "agent", cfg.Me.Agent, func(answer string) (string, bool) {
 		name := strings.TrimSpace(answer)
 		if isBuiltinAgent(name) {
 			return name, true
@@ -140,7 +131,7 @@ func meWizard(cfg *config.Config, path string, in io.Reader, out io.Writer) erro
 	}
 
 	values := config.MeLLMValues{
-		Provider:  chatProvider,
+		Protocol:  protocol.Name,
 		BaseURL:   baseURL,
 		Model:     model,
 		MaxTokens: maxTokens,
@@ -160,8 +151,8 @@ func meWizard(cfg *config.Config, path string, in io.Reader, out io.Writer) erro
 	}
 
 	fmt.Fprintln(out)
-	fmt.Fprintf(out, "✓ wrote me.llm to %s\n", path)
-	printMeValues(out, effective.Me.LLM)
+	fmt.Fprintf(out, "✓ wrote me.llm and me.agent to %s\n", path)
+	printMeState(out, effective.Me.LLM, effective.Me.Agent)
 
 	buildErr := reportChatModel(out, effective.Me.LLM)
 	fmt.Fprintln(out, "⚠ the daemon builds its models at start-up — restart it to pick up the new one:")
@@ -170,6 +161,75 @@ func meWizard(cfg *config.Config, path string, in io.Reader, out io.Writer) erro
 		return nmerrors.Wrap(nmerrors.CodeConfigError, "the chat model does not build", buildErr)
 	}
 	return nil
+}
+
+// askProtocol asks which wire protocol the chat model speaks.
+//
+// The answer is the number of a registered protocol or its name. An
+// empty answer keeps the current one; a configuration that names none
+// has to name one — a chat model without a protocol is no chat model
+// at all.
+func askProtocol(br *bufio.Reader, out io.Writer, current string) (llm.Protocol, bool) {
+	protocols := llm.ChatProtocols()
+	for {
+		fmt.Fprintln(out, "Protocol:")
+		for i, p := range protocols {
+			fmt.Fprintf(out, "  [%d] %s — POST {base_url}%s\n", i+1, p.Name, p.Path)
+		}
+		fmt.Fprint(out, "> ")
+		answer, ok := readAnswer(br)
+		if !ok {
+			fmt.Fprintln(out)
+			return llm.Protocol{}, false
+		}
+		if strings.EqualFold(answer, "q") {
+			return llm.Protocol{}, false
+		}
+		if answer == "" {
+			if current != "" {
+				if p, ok := matchProtocol(current, protocols); ok {
+					return p, true
+				}
+			}
+			fmt.Fprintln(out, "A protocol is required.")
+			continue
+		}
+		if p, ok := matchProtocol(answer, protocols); ok {
+			return p, true
+		}
+		fmt.Fprintf(out, "%q is not a protocol — choose a number between 1 and %d, or the name of one.\n", answer, len(protocols))
+	}
+}
+
+// matchProtocol returns the protocol the answer names: a number in the
+// list, or the name of one of them.
+func matchProtocol(answer string, protocols []llm.Protocol) (llm.Protocol, bool) {
+	answer = strings.TrimSpace(answer)
+	if n, err := strconv.Atoi(answer); err == nil {
+		if n < 1 || n > len(protocols) {
+			return llm.Protocol{}, false
+		}
+		return protocols[n-1], true
+	}
+	name := strings.ToLower(answer)
+	for _, p := range protocols {
+		if p.Name == name {
+			return p, true
+		}
+	}
+	return llm.Protocol{}, false
+}
+
+// askBaseURL asks for the root of the API.
+//
+// The protocol decides what is appended to it, so the wizard says
+// which path that is: the address the operator writes is the address
+// the request goes to, plus that path.
+func askBaseURL(br *bufio.Reader, out io.Writer, current string, protocol llm.Protocol) (string, bool) {
+	if protocol.Path != "" {
+		fmt.Fprintf(out, "The %s protocol calls {base_url}%s\n", protocol.Name, protocol.Path)
+	}
+	return askValue(br, out, "base_url", current, acceptAny)
 }
 
 // askValue asks for one field and returns the value to write.
@@ -211,12 +271,6 @@ func askValue[T any](br *bufio.Reader, out io.Writer, name string, current T, pa
 
 // acceptAny takes the answer as it is.
 func acceptAny(answer string) (string, bool) { return answer, true }
-
-// isYes reports whether the answer is a yes.
-func isYes(answer string) bool {
-	answer = strings.ToLower(strings.TrimSpace(answer))
-	return answer == "y" || answer == "yes"
-}
 
 // askCredential asks which credential the chat model uses.
 //
@@ -337,35 +391,66 @@ func reportChatModel(out io.Writer, c config.MeLLMConfig) error {
 
 	_, err := llm.New(llmCfg)
 	if err != nil {
-		fmt.Fprintf(out, "chat model: provider=%s model=%s — does not build: %v\n",
-			c.Provider, c.Model, err)
+		fmt.Fprintf(out, "chat model: protocol=%s model=%s — does not build: %v\n",
+			c.Protocol, c.Model, err)
 		return err
 	}
 	if credentialPending {
-		fmt.Fprintf(out, "chat model: provider=%s model=%s — builds (the credential is the daemon's to resolve)\n",
-			c.Provider, c.Model)
+		fmt.Fprintf(out, "chat model: protocol=%s model=%s — builds (the credential is the daemon's to resolve)\n",
+			c.Protocol, c.Model)
 		return nil
 	}
-	fmt.Fprintf(out, "chat model: provider=%s model=%s — builds ✓\n", c.Provider, c.Model)
+	fmt.Fprintf(out, "chat model: protocol=%s model=%s — builds ✓\n", c.Protocol, c.Model)
 	return nil
 }
 
-// printMeState renders the chat model as it is configured now.
-func printMeState(out io.Writer, c config.MeLLMConfig) {
+// printMeState renders the chat model and the agent that thinks for
+// the owner as they are configured now.
+func printMeState(out io.Writer, c config.MeLLMConfig, agent string) {
 	fmt.Fprintln(out, "Current chat model (me.llm):")
 	printMeValues(out, c)
+	fmt.Fprintln(out, "Current agent that thinks for the owner (me.agent):")
+	fmt.Fprintf(out, "  agent:       %s\n", orNone(agent))
 }
 
 // printMeValues renders the fields of the chat model. The credential
 // is masked — the wizard never prints a key in full.
 func printMeValues(out io.Writer, c config.MeLLMConfig) {
-	fmt.Fprintf(out, "  provider:    %s\n", orNone(c.Provider))
+	fmt.Fprintf(out, "  protocol:    %s\n", orNone(c.Protocol))
 	fmt.Fprintf(out, "  base_url:    %s\n", orNone(c.BaseURL))
 	fmt.Fprintf(out, "  model:       %s\n", orNone(c.Model))
 	fmt.Fprintf(out, "  max_tokens:  %d\n", c.MaxTokens)
-	fmt.Fprintf(out, "  agent:       %s\n", orNone(c.Agent))
+	fmt.Fprintf(out, "  timeout:     %s\n", orNone(durationText(c.Timeout)))
+	fmt.Fprintf(out, "  headers:     %s\n", headersText(c.Headers))
 	fmt.Fprintf(out, "  api_key:     %s\n", maskKey(c.APIKey))
 	fmt.Fprintf(out, "  api_key_env: %s\n", orNone(c.APIKeyEnv))
+}
+
+// durationText renders the deadline of a call. A deadline of zero
+// means the default of the protocol applies.
+func durationText(d time.Duration) string {
+	if d <= 0 {
+		return ""
+	}
+	return d.String()
+}
+
+// headersText renders the extra headers every request carries: by
+// name, in the order of their names.
+func headersText(headers map[string]string) string {
+	if len(headers) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(headers))
+	for name := range headers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		parts = append(parts, name+": "+headers[name])
+	}
+	return strings.Join(parts, ", ")
 }
 
 // builtinAgentNames lists the agents the registry knows, in

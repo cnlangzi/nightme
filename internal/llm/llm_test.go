@@ -131,60 +131,68 @@ func TestDecisionRequest_Validate(t *testing.T) {
 	}
 }
 
-func TestRegistry_UnknownProvider(t *testing.T) {
-	if _, err := New(Config{Provider: "nope", Model: "m"}); err == nil {
-		t.Fatal("an unknown provider was accepted")
+func TestRegistry_UnknownChatProtocol(t *testing.T) {
+	if _, err := New(ChatConfig{Protocol: "nope", Model: "m"}); err == nil {
+		t.Fatal("an unknown protocol was accepted")
 	}
-	if _, err := New(Config{Model: "m"}); err == nil {
-		t.Fatal("a missing provider was accepted")
+	if _, err := New(ChatConfig{Model: "m"}); err == nil {
+		t.Fatal("a missing protocol was accepted")
+	}
+	_, err := New(ChatConfig{Protocol: "nope", Model: "m"})
+	if !strings.Contains(err.Error(), "unknown chat protocol") {
+		t.Fatalf("error = %q, want it to report the unknown chat protocol", err)
 	}
 }
 
-// The provider is looked up before the model is checked, so the model
-// check is only reachable for a registered provider. The registry is
+// The protocol is looked up before the model is checked, so the model
+// check is only reachable for a registered protocol. The registry is
 // empty in this test binary — the concrete protocols live in their own
 // packages and register themselves — so the test installs one.
 func TestRegistry_RequiresAModel(t *testing.T) {
-	Register("zzz-model-test", func(Config) (Provider, error) { return nil, nil })
-	_, err := New(Config{Provider: "zzz-model-test"})
+	RegisterChatProtocol("zzz-model-test", "/test", func(ChatConfig) (Provider, error) { return nil, nil })
+	_, err := New(ChatConfig{Protocol: "zzz-model-test"})
 	if err == nil {
-		t.Fatal("a provider without a model was accepted")
+		t.Fatal("a protocol without a model was accepted")
 	}
 	if !strings.Contains(err.Error(), "no model") {
 		t.Fatalf("error = %q, want it to report the missing model", err)
 	}
-	if _, err := New(Config{Provider: "zzz-model-test", Model: "m"}); err != nil {
-		t.Fatalf("a provider with a model was rejected: %v", err)
+	if _, err := New(ChatConfig{Protocol: "zzz-model-test", Model: "m"}); err != nil {
+		t.Fatalf("a protocol with a model was rejected: %v", err)
 	}
 }
 
 func TestRegistry_UnknownDecider(t *testing.T) {
-	if _, err := NewDecider(Config{Protocol: "nope", Model: "m"}); err == nil {
+	if _, err := NewDecider(DeciderConfig{Protocol: "nope", Model: "m"}); err == nil {
 		t.Fatal("an unknown protocol was accepted")
 	}
-	if _, err := NewDecider(Config{Model: "m"}); err == nil {
+	if _, err := NewDecider(DeciderConfig{Model: "m"}); err == nil {
 		t.Fatal("a missing protocol was accepted")
 	}
-	if _, err := NewDecider(Config{Protocol: "decisions"}); err == nil {
+	if _, err := NewDecider(DeciderConfig{Protocol: "decisions"}); err == nil {
 		t.Fatal("a protocol without a model was accepted")
+	}
+	_, err := NewDecider(DeciderConfig{Protocol: "nope", Model: "m"})
+	if !strings.Contains(err.Error(), "unknown decision protocol") {
+		t.Fatalf("error = %q, want it to report the unknown decision protocol", err)
 	}
 }
 
 func TestRegistry_RegisteredNames(t *testing.T) {
-	Register("zzz-test", func(Config) (Provider, error) { return nil, nil })
-	RegisterDecider("zzz-test", func(Config) (Decider, error) { return nil, nil })
-	if !contains(ProviderNames(), "zzz-test") {
-		t.Fatalf("the providers are %v, want zzz-test", ProviderNames())
+	RegisterChatProtocol("zzz-test", "/test", func(ChatConfig) (Provider, error) { return nil, nil })
+	RegisterDecisionProtocol("zzz-test", "/test", func(DeciderConfig) (Decider, error) { return nil, nil })
+	if !containsProtocol(ChatProtocols(), "zzz-test") {
+		t.Fatalf("the chat protocols are %v, want zzz-test", ChatProtocols())
 	}
-	if !contains(DeciderNames(), "zzz-test") {
-		t.Fatalf("the deciders are %v, want zzz-test", DeciderNames())
+	if !containsProtocol(DecisionProtocols(), "zzz-test") {
+		t.Fatalf("the decision protocols are %v, want zzz-test", DecisionProtocols())
 	}
 }
 
 // The credential must not leave the package through a serializer: a
 // status dump or a log line would otherwise carry it.
 func TestConfig_DoesNotSerializeTheKey(t *testing.T) {
-	cfg := Config{Provider: "openai", Model: "m", APIKey: "sk-secret"}
+	cfg := ChatConfig{Protocol: "chat_completions", Model: "m", APIKey: "sk-secret"}
 
 	raw, err := json.Marshal(cfg)
 	if err != nil {
@@ -255,12 +263,29 @@ func TestStatusError_ClassifiesTheFailures(t *testing.T) {
 	}
 }
 
-// contains reports whether the list holds the value.
-func contains(values []string, value string) bool {
-	for _, v := range values {
-		if v == value {
+// containsProtocol reports whether the list holds the protocol.
+func containsProtocol(protocols []Protocol, name string) bool {
+	for _, p := range protocols {
+		if p.Name == name {
 			return true
 		}
 	}
 	return false
+}
+
+// TestRegistry_KeepsThePathOfTheProtocol — the path a protocol
+// appends to the base URL travels with its registration, so the
+// configuration tools can show it.
+func TestRegistry_KeepsThePathOfTheProtocol(t *testing.T) {
+	RegisterChatProtocol("zzz-path-test", "/zzz/path", func(ChatConfig) (Provider, error) { return nil, nil })
+	for _, p := range ChatProtocols() {
+		if p.Name != "zzz-path-test" {
+			continue
+		}
+		if p.Path != "/zzz/path" {
+			t.Fatalf("the path = %q, want /zzz/path", p.Path)
+		}
+		return
+	}
+	t.Fatal("the protocol is not registered")
 }

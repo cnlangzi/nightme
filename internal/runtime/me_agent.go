@@ -24,9 +24,8 @@ import (
 	"github.com/cnlangzi/nightme/internal/command/gtw"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/llm"
-	_ "github.com/cnlangzi/nightme/internal/llm/anthropic" // registers the Anthropic chat provider
-	_ "github.com/cnlangzi/nightme/internal/llm/decision"  // registers the decision protocols
-	_ "github.com/cnlangzi/nightme/internal/llm/openai"    // registers the OpenAI-compatible chat provider
+	_ "github.com/cnlangzi/nightme/internal/llm/chat"     // registers the chat protocols
+	_ "github.com/cnlangzi/nightme/internal/llm/decision" // registers the decision protocols
 	"github.com/cnlangzi/nightme/internal/me"
 )
 
@@ -49,23 +48,32 @@ func buildPersonalAgent(cfg *config.Config, chs []channel.Channel, op *operator,
 	provider := buildChatModel(cfg, logger)
 	decider := buildDecider(cfg, logger)
 
-	svc := me.New(me.Config{
+	svc := me.New(personalAgentConfig(cfg, dir, op, provider, decider))
+	svc.SetLogger(logger)
+	return svc
+}
+
+// personalAgentConfig maps the configuration onto the personal agent's
+// own configuration.
+//
+// The agent that thinks for the owner comes from the me section: it
+// names a coding agent, not a model.
+func personalAgentConfig(cfg *config.Config, dir string, op *operator, provider llm.Provider, decider llm.Decider) me.Config {
+	return me.Config{
 		WorkflowsDir:  dir,
 		StateDir:      filepath.Join(dir, "runs"),
 		Provider:      provider,
 		Decider:       decider,
 		MinConfidence: cfg.Me.Decider.MinConfidence,
 		MaxJudgments:  cfg.Me.MaxJudgments,
-		Agent:         cfg.Me.LLM.Agent,
+		Agent:         cfg.Me.Agent,
 		AgentOpener:   brainOpener{},
 		Operator:      op,
 		Shell:         me.ExecShell{},
 		Git:           gtw.ExecGitRunner{},
 		Cwd:           chatCwd{},
 		AgentSwitcher: chatAgentSwitcher{},
-	})
-	svc.SetLogger(logger)
-	return svc
+	}
 }
 
 // ChatModelConfig maps the chat-model configuration onto the
@@ -73,26 +81,37 @@ func buildPersonalAgent(cfg *config.Config, chs []channel.Channel, op *operator,
 //
 // The daemon and the `nightme me` wizard build the chat model from
 // the same block; they must build the same one.
-func ChatModelConfig(c config.MeLLMConfig) llm.Config {
-	return llm.Config{
-		Provider:  c.Provider,
+func ChatModelConfig(c config.MeLLMConfig) llm.ChatConfig {
+	return llm.ChatConfig{
+		Protocol:  c.Protocol,
 		BaseURL:   c.BaseURL,
 		Model:     c.Model,
 		APIKey:    c.APIKey,
 		APIKeyEnv: c.APIKeyEnv,
 		MaxTokens: c.MaxTokens,
+		Timeout:   c.Timeout,
+		Headers:   c.Headers,
 	}
 }
 
 // buildChatModel builds the chat model (System 2).
 //
 // A missing configuration is not an error: the personal agent runs
-// with its fast path alone.
+// with its fast path alone. A half-written one is reported — the
+// operator learns that the model did not start.
 func buildChatModel(cfg *config.Config, logger *slog.Logger) llm.Provider {
-	if cfg.Me.LLM.Provider == "" {
+	c := cfg.Me.LLM
+	switch {
+	case c.Protocol == "" && c.Model == "":
+		return nil
+	case c.Protocol == "":
+		logger.Warn("run: the chat model did not start: me.llm.protocol is not set")
+		return nil
+	case c.Model == "":
+		logger.Warn("run: the chat model did not start: me.llm.model is not set")
 		return nil
 	}
-	llmCfg := ChatModelConfig(cfg.Me.LLM)
+	llmCfg := ChatModelConfig(c)
 	warnDualCredential(logger, "me.llm", llmCfg)
 	provider, err := llm.New(llmCfg)
 	if err != nil {
@@ -105,17 +124,28 @@ func buildChatModel(cfg *config.Config, logger *slog.Logger) llm.Provider {
 // buildDecider builds the decision model (System 1).
 //
 // A missing configuration is not an error: the personal agent runs
-// with its tool loop alone.
+// with its tool loop alone. A half-written one is reported — the
+// operator learns that the model did not start.
 func buildDecider(cfg *config.Config, logger *slog.Logger) llm.Decider {
-	if cfg.Me.Decider.Protocol == "" {
+	c := cfg.Me.Decider
+	switch {
+	case c.Protocol == "" && c.Model == "":
+		return nil
+	case c.Protocol == "":
+		logger.Warn("run: the decision model did not start: me.decider.protocol is not set")
+		return nil
+	case c.Model == "":
+		logger.Warn("run: the decision model did not start: me.decider.model is not set")
 		return nil
 	}
-	llmCfg := llm.Config{
-		Protocol:  cfg.Me.Decider.Protocol,
-		BaseURL:   cfg.Me.Decider.BaseURL,
-		Model:     cfg.Me.Decider.Model,
-		APIKey:    cfg.Me.Decider.APIKey,
-		APIKeyEnv: cfg.Me.Decider.APIKeyEnv,
+	llmCfg := llm.DeciderConfig{
+		Protocol:  c.Protocol,
+		BaseURL:   c.BaseURL,
+		Model:     c.Model,
+		APIKey:    c.APIKey,
+		APIKeyEnv: c.APIKeyEnv,
+		Timeout:   c.Timeout,
+		Headers:   c.Headers,
 	}
 	warnDualCredential(logger, "me.decider", llmCfg)
 	decider, err := llm.NewDecider(llmCfg)
@@ -131,7 +161,7 @@ func buildDecider(cfg *config.Config, logger *slog.Logger) llm.Decider {
 // The inline key wins, so the configuration is unambiguous — but the
 // operator should know that one of the two is dead weight. The warning
 // carries neither of the credentials.
-func warnDualCredential(logger *slog.Logger, capability string, cfg llm.Config) {
+func warnDualCredential(logger *slog.Logger, capability string, cfg llm.Credentialed) {
 	if !llm.DualCredential(cfg) {
 		return
 	}

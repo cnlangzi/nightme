@@ -2,42 +2,33 @@ package decision
 
 import (
 	"context"
-	"fmt"
-	"net/http"
-	"strings"
-	"time"
 
 	"github.com/cnlangzi/nightme/internal/llm"
 )
 
 func init() {
-	llm.RegisterDecider("decisions", NewDecisions)
+	llm.RegisterDecisionProtocol(protocolDecisions, decisionsPath, NewDecisions)
 }
 
-// Decisions talks to a /v1/decisions endpoint.
+// protocolDecisions is the name the decisions protocol is registered
+// under.
+const protocolDecisions = "decisions"
+
+// decisionsPath is the path the protocol appends to the base URL.
+const decisionsPath = "/decisions"
+
+// Decisions talks to a /decisions endpoint.
 type Decisions struct {
-	baseURL string
-	model   string
-	apiKey  string
-	client  *http.Client
+	settings
 }
 
 // NewDecisions builds a decider for the decisions protocol.
-func NewDecisions(cfg llm.Config) (llm.Decider, error) {
-	base := strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/")
-	if base == "" {
-		return nil, fmt.Errorf("llm/decision: base_url is required")
-	}
-	key, err := llm.APIKey(cfg)
+func NewDecisions(cfg llm.DeciderConfig) (llm.Decider, error) {
+	s, err := newSettings(cfg)
 	if err != nil {
 		return nil, err
 	}
-	return &Decisions{
-		baseURL: base,
-		model:   strings.TrimSpace(cfg.Model),
-		apiKey:  key,
-		client:  &http.Client{Timeout: 5 * time.Minute},
-	}, nil
+	return &Decisions{settings: s}, nil
 }
 
 // decisionsRequest is the body of a decisions call.
@@ -105,7 +96,8 @@ func (d *Decisions) Decide(ctx context.Context, req llm.DecisionRequest) (*llm.D
 	if d.apiKey != "" {
 		headers["Authorization"] = "Bearer " + d.apiKey
 	}
-	if err := llm.PostJSON(ctx, d.client, endpoint(d.baseURL, "/decisions"), headers, body, &answer); err != nil {
+	url := llm.Endpoint(d.baseURL, decisionsPath)
+	if err := llm.PostJSON(ctx, d.client, url, d.requestHeaders(headers), body, &answer); err != nil {
 		return nil, err
 	}
 	return buildResponse(req.Questions, answer, d.model), nil

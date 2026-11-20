@@ -2,10 +2,13 @@
 //
 // Two wire formats are supported:
 //
-//   - decisions — POST {base}/v1/decisions, an ordered question list
-//     of predicate, choice and score questions;
-//   - systemone — POST {base}/v1/systemone, a question map keyed by
-//     name with noul, choice and score questions.
+//   - decisions — POST {base}/decisions, an ordered question list of
+//     predicate, choice and score questions;
+//   - systemone — POST {base}/systemone, a question map keyed by name
+//     with noul, choice and score questions.
+//
+// The base URL is used as it is written: the client appends the path
+// of its own protocol and nothing else.
 //
 // The two protocols answer in different shapes — the decisions
 // protocol with an array of answers, the systemone protocol with a
@@ -16,12 +19,68 @@ package decision
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/cnlangzi/nightme/internal/llm"
 )
+
+// defaultTimeout is the deadline of one call when the configuration
+// names none.
+const defaultTimeout = 5 * time.Minute
+
+// settings are the parts of a decision configuration every protocol
+// needs.
+type settings struct {
+	// baseURL is the root of the API.
+	baseURL string
+	// model is the model to call.
+	model string
+	// apiKey is the credential. Empty means no authentication.
+	apiKey string
+	// headers are the extra headers every request carries.
+	headers map[string]string
+	// client carries the deadline of a call.
+	client *http.Client
+}
+
+// newSettings reads the parts of the configuration every decision
+// protocol needs.
+//
+// The base URL is required: a client has no endpoint of its own to
+// fall back on. The credential comes from the two channels the
+// configuration names.
+func newSettings(cfg llm.DeciderConfig) (settings, error) {
+	base := strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/")
+	if base == "" {
+		return settings{}, errors.New("llm/decision: base_url is required")
+	}
+	key, err := llm.APIKey(cfg)
+	if err != nil {
+		return settings{}, err
+	}
+	timeout := cfg.Timeout
+	if timeout <= 0 {
+		timeout = defaultTimeout
+	}
+	return settings{
+		baseURL: base,
+		model:   strings.TrimSpace(cfg.Model),
+		apiKey:  key,
+		headers: cfg.Headers,
+		client:  &http.Client{Timeout: timeout},
+	}, nil
+}
+
+// requestHeaders returns the headers a request carries: the ones the
+// protocol needs, with the ones of the configuration over them.
+func (s settings) requestHeaders(own map[string]string) map[string]string {
+	return llm.MergeHeaders(own, s.headers)
+}
 
 // typeRefusal is the answer type a refusal carries.
 const typeRefusal = "refusal"
@@ -350,16 +409,4 @@ func instructions(q llm.Question) string {
 		return llm.DefaultInstructions
 	}
 	return q.Instructions
-}
-
-// endpoint returns the URL of a versioned endpoint.
-//
-// The base of a gateway usually already carries the version segment,
-// so the version is added only when it is missing.
-func endpoint(base, path string) string {
-	base = strings.TrimRight(base, "/")
-	if strings.HasSuffix(base, "/v1") {
-		return base + path
-	}
-	return base + "/v1" + path
 }

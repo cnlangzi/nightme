@@ -598,32 +598,36 @@ agent 的预算是一个数字，对每个 step、每一轮都一样，由 `me.m
 ```yaml
 me:
   llm:
-    provider: openai              # 已注册的 chat provider：openai | anthropic
+    protocol: chat_completions      # chat_completions | messages
     base_url: https://api.openai.com/v1
     model: gpt-4.1-mini
     api_key: sk-xxxx              # key 本身，就写在配置里
     max_tokens: 4096
+    timeout: 10m                   # 一次调用的期限
+    headers:                       # 每次请求都带的头
+      HTTP-Referer: https://nightme.dev
   decider:
     protocol: decisions           # decisions | systemone
     base_url: https://openrouter.ai/api/v1
     model: typesafe/jev-1.14
     api_key_env: OPENROUTER_API_KEY # 存 key 的环境变量的名字
     min_confidence: 0.8           # 低于这个置信度就升级
+  agent: claude                   # 替 owner 思考的 agent
   max_judgments: 50              # agent 在一个 step 一轮里的机会数
 ```
 
-`provider` 决定用哪个 chat provider，`protocol` 决定用哪个决策协议：`me.llm` 不写 `provider`、或者 `me.decider` 不写 `protocol`，就等于这一半根本没有配。
+`protocol` 说的是线协议，不是厂商——厂商由 `base_url` 指向谁决定。`me.llm` 不写 `protocol` 和 `model`、或者 `me.decider` 不写 `protocol` 和 `model`，就等于这一半根本没有配。
 
-**`base_url` 是 API 的根**——endpoint 的路径由它拼出来：
+**`base_url` 照写照用**——客户端只在自己那段路径前面拼上它：
 
-| `provider` / `protocol` | 调用的 endpoint | 根 |
-|---|---|---|
-| `openai` | `<base_url>/chat/completions` | `https://api.openai.com/v1` |
-| `anthropic` | `<base_url>/v1/messages` | `https://api.anthropic.com` |
-| `decisions` | `<base_url>/v1/decisions` | `https://openrouter.ai/api/v1` |
-| `systemone` | `<base_url>/v1/systemone` | `https://api.typesafe.ai` |
+| `protocol` | 调用的 endpoint |
+|---|---|
+| `chat_completions` | `<base_url>/chat/completions` |
+| `messages` | `<base_url>/messages` |
+| `decisions` | `<base_url>/decisions` |
+| `systemone` | `<base_url>/systemone` |
 
-决策协议只在根里没有 `/v1` 时才补上：`https://openrouter.ai/api/v1` 变成 `https://openrouter.ai/api/v1/decisions`，`https://api.typesafe.ai` 变成 `https://api.typesafe.ai/v1/systemone`。
+从厂商文档里把地址抄下来就能用：不补版本段，也没有默认端点。`timeout` 是一次调用的期限——chat 模型十分钟，决策模型五分钟。
 
 **凭据。** `api_key` 写的是 key 本身，就放在配置文件里；`api_key_env` 写的是存 key 的环境变量的名字——上面是 `OPENROUTER_API_KEY`。两个通道对两个能力都通用：写一个就够，不要两个都写——两个都写时 `api_key` 生效，两个都不写时请求不带任何鉴权头。`config.yaml` 以 0600 写入——不要把它提交进 git。
 
@@ -635,7 +639,7 @@ me:
 | 未配 | 已配 | 只有决策模型：有把握的决定直接执行，其余都问你。 |
 | 已配 | 已配 | 决策模型先行，需要升级的交给 chat 模型。 |
 
-配了但建不起来的模型——provider 认不出、key 缺失——会记在 `nightme logs` 里并被跳过。daemon 照常起来，`/me` 会说明它为什么跑不了。
+配了但建不起来的模型——协议认不出、key 缺失——会记在 `nightme logs` 里并被跳过。daemon 照常起来，`/me` 会说明它为什么跑不了。
 
 ### 跑一个 workflow
 
@@ -694,7 +698,7 @@ workflow 说了下一步是什么，所以大部分步骤根本不需要模型�
 
 agent 在每个 step 上有一个预算：一个数字，每个 step、每一轮都一样，由 `me.max_judgments` 定（默认 50）。一次机会是这次 step 自己的执行、agent 判定这一步被跳过、为它发出的一条 nightme 命令或一段自由指令，或者 chat 模型一轮没有工具调用的回答。运行所在那个 step 的预算用完时，运行暂停下来，在 chat 里说清楚；`/me resume` 把这一步再跑一遍，那个 step 的预算重新开始。
 
-除了每个 step 的预算之外没有别的预算：一次运行结束于计划跑完、agent 调用 `finish`，或者你发 `/me stop`，或者 daemon 关掉。chat 模型一轮没有工具调用的回答、provider 调用失败，都不结束运行——运行会再问一次，界限由预算给出。
+除了每个 step 的预算之外没有别的预算：一次运行结束于计划跑完、agent 调用 `finish`，或者你发 `/me stop`，或者 daemon 关掉。chat 模型一轮没有工具调用的回答、chat 模型调用失败，都不结束运行——运行会再问一次，界限由预算给出。
 
 agent 在判断点上给出一个指令：`resume`（修好之后把坏掉的那一步再跑一遍）、`next`（跳过判断点说的那一步，让引擎继续往下走）、`ntm_<command>`（以你的身份跑一条 nightme 命令）、`agent`（问 owner 的思考为什么这一步失败）、`instruct`（给 chat 发一段自由指令）、`answer_choice`（回答 chat 在等的一个提示）、`ask_human`（问你）、`repo_status`（读分支和工作树）、`wait`（等一会儿再看——后台还有活在跑时）、`end_round`（结束当前 job 的这一轮：没跑的 step 记成跳过，job 的 final step 顶上，然后开下一轮）、`finish`（结束运行）。`resume` 和 `next` 不接 step：运行知道判断点说的是哪一步，下一步跑什么由引擎决定。运行不允许做的事会以错误回来，agent 自己纠正。
 

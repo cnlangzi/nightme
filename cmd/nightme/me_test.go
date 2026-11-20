@@ -40,11 +40,13 @@ func runMeWizard(t *testing.T, path, answers string) (string, error) {
 }
 
 // TestMeWizard_WritesTheChatModel covers the happy path: the answers
-// land in the me.llm block of the config file.
+// land in the me.llm block of the config file, and the agent lands in
+// the me block.
 func TestMeWizard_WritesTheChatModel(t *testing.T) {
 	path := meTestConfig(t, "primary: claude\n")
 
 	out, err := runMeWizard(t, path, strings.Join([]string{
+		"1", // the chat_completions protocol
 		"https://api.example.com/v1",
 		"gpt-4.1-mini",
 		"40960",
@@ -61,8 +63,8 @@ func TestMeWizard_WritesTheChatModel(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	llmCfg := cfg.Me.LLM
-	if llmCfg.Provider != "openai" {
-		t.Errorf("Provider = %q, want openai", llmCfg.Provider)
+	if llmCfg.Protocol != "chat_completions" {
+		t.Errorf("Protocol = %q, want chat_completions", llmCfg.Protocol)
 	}
 	if llmCfg.BaseURL != "https://api.example.com/v1" {
 		t.Errorf("BaseURL = %q", llmCfg.BaseURL)
@@ -73,8 +75,8 @@ func TestMeWizard_WritesTheChatModel(t *testing.T) {
 	if llmCfg.MaxTokens != 40960 {
 		t.Errorf("MaxTokens = %d, want 40960", llmCfg.MaxTokens)
 	}
-	if llmCfg.Agent != "claude" {
-		t.Errorf("Agent = %q", llmCfg.Agent)
+	if cfg.Me.Agent != "claude" {
+		t.Errorf("Agent = %q, want claude", cfg.Me.Agent)
 	}
 	if llmCfg.APIKey != "sk-test-1234" {
 		t.Errorf("APIKey = %q", llmCfg.APIKey)
@@ -87,19 +89,108 @@ func TestMeWizard_WritesTheChatModel(t *testing.T) {
 	}
 }
 
+// TestMeWizard_WritesTheChosenProtocol covers the protocol the
+// operator picked: the wizard writes the one it was given, not a
+// fixed one.
+func TestMeWizard_WritesTheChosenProtocol(t *testing.T) {
+	path := meTestConfig(t, "primary: claude\n")
+
+	out, err := runMeWizard(t, path, strings.Join([]string{
+		"2", // the messages protocol
+		"https://api.anthropic.com/v1",
+		"claude-sonnet-4",
+		"",
+		"",
+		"1",
+	}, "\n")+"\n")
+	if err != nil {
+		t.Fatalf("meWizard: %v\n%s", err, out)
+	}
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Me.LLM.Protocol != "messages" {
+		t.Errorf("Protocol = %q, want messages", cfg.Me.LLM.Protocol)
+	}
+	if cfg.Me.LLM.BaseURL != "https://api.anthropic.com/v1" {
+		t.Errorf("BaseURL = %q", cfg.Me.LLM.BaseURL)
+	}
+}
+
+// TestMeWizard_OffersEveryProtocol covers the question: the wizard
+// offers the protocols the registry knows, and names the path each one
+// appends to the base URL.
+func TestMeWizard_OffersEveryProtocol(t *testing.T) {
+	path := meTestConfig(t, "primary: claude\n")
+
+	out, err := runMeWizard(t, path, strings.Join([]string{
+		"1",
+		"https://api.example.com/v1",
+		"gpt-4.1-mini",
+		"",
+		"",
+		"1",
+	}, "\n")+"\n")
+	if err != nil {
+		t.Fatalf("meWizard: %v\n%s", err, out)
+	}
+	for _, want := range []string{
+		"chat_completions",
+		"messages",
+		"/chat/completions",
+		"/messages",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the wizard did not offer %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestMeWizard_UnknownProtocolIsRefused covers the question: a name
+// that is not a protocol is refused and the question is asked again.
+func TestMeWizard_UnknownProtocolIsRefused(t *testing.T) {
+	path := meTestConfig(t, "primary: claude\n")
+
+	out, err := runMeWizard(t, path, strings.Join([]string{
+		"openai",
+		"1",
+		"https://api.example.com/v1",
+		"gpt-4.1-mini",
+		"",
+		"",
+		"1",
+	}, "\n")+"\n")
+	if err != nil {
+		t.Fatalf("meWizard: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "openai") {
+		t.Errorf("the wizard did not report the unknown protocol:\n%s", out)
+	}
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Me.LLM.Protocol != "chat_completions" {
+		t.Errorf("Protocol = %q, want chat_completions", cfg.Me.LLM.Protocol)
+	}
+}
+
 // TestMeWizard_EmptyAnswerKeepsTheCurrentValue covers the keep
 // semantics: an empty answer leaves the field as it was.
 func TestMeWizard_EmptyAnswerKeepsTheCurrentValue(t *testing.T) {
 	path := meTestConfig(t, `me:
   llm:
-    provider: openai
+    protocol: chat_completions
     base_url: https://old.example.com/v1
     model: old-model
     max_tokens: 8192
-    agent: codex
+  agent: codex
 `)
 
-	out, err := runMeWizard(t, path, "\n\n\n\n1\n")
+	out, err := runMeWizard(t, path, "\n\n\n\n\n1\n")
 	if err != nil {
 		t.Fatalf("meWizard: %v\n%s", err, out)
 	}
@@ -109,6 +200,9 @@ func TestMeWizard_EmptyAnswerKeepsTheCurrentValue(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	llmCfg := cfg.Me.LLM
+	if llmCfg.Protocol != "chat_completions" {
+		t.Errorf("Protocol = %q, want chat_completions", llmCfg.Protocol)
+	}
 	if llmCfg.BaseURL != "https://old.example.com/v1" {
 		t.Errorf("BaseURL = %q", llmCfg.BaseURL)
 	}
@@ -118,8 +212,8 @@ func TestMeWizard_EmptyAnswerKeepsTheCurrentValue(t *testing.T) {
 	if llmCfg.MaxTokens != 8192 {
 		t.Errorf("MaxTokens = %d, want 8192", llmCfg.MaxTokens)
 	}
-	if llmCfg.Agent != "codex" {
-		t.Errorf("Agent = %q", llmCfg.Agent)
+	if cfg.Me.Agent != "codex" {
+		t.Errorf("Agent = %q, want codex", cfg.Me.Agent)
 	}
 }
 
@@ -128,13 +222,13 @@ func TestMeWizard_EmptyAnswerKeepsTheCurrentValue(t *testing.T) {
 func TestMeWizard_PromptShowsTheCurrentValue(t *testing.T) {
 	path := meTestConfig(t, `me:
   llm:
-    provider: openai
+    protocol: chat_completions
     base_url: https://old.example.com/v1
     model: old-model
     max_tokens: 8192
 `)
 
-	out, err := runMeWizard(t, path, "\n\n\n\n1\n")
+	out, err := runMeWizard(t, path, "\n\n\n\n\n1\n")
 	if err != nil {
 		t.Fatalf("meWizard: %v\n%s", err, out)
 	}
@@ -156,6 +250,7 @@ func TestMeWizard_UnsetMaxTokensShowsTheDefault(t *testing.T) {
 	path := meTestConfig(t, "primary: claude\n")
 
 	out, err := runMeWizard(t, path, strings.Join([]string{
+		"1",
 		"https://api.example.com/v1",
 		"gpt-4.1-mini",
 		"",
@@ -187,74 +282,13 @@ func TestMeWizard_QAborts(t *testing.T) {
 	}
 }
 
-// TestMeWizard_ProviderSwitchNeedsConfirmation covers a file that
-// names another provider: the wizard says what it configures and
-// asks before switching.
-func TestMeWizard_ProviderSwitchNeedsConfirmation(t *testing.T) {
-	path := meTestConfig(t, `me:
-  llm:
-    provider: anthropic
-    model: claude-sonnet-4
-`)
-
-	out, err := runMeWizard(t, path, "n\n")
-	if err != nil {
-		t.Fatalf("meWizard: %v\n%s", err, out)
-	}
-	if !strings.Contains(out, "openai") {
-		t.Errorf("the wizard did not say which provider it configures:\n%s", out)
-	}
-	if !strings.Contains(out, "Nothing changed") {
-		t.Errorf("the wizard did not report that nothing changed:\n%s", out)
-	}
-
-	cfg, err := config.Load(path)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if cfg.Me.LLM.Provider != "anthropic" {
-		t.Errorf("Provider = %q, want anthropic (declining writes nothing)", cfg.Me.LLM.Provider)
-	}
-}
-
-// TestMeWizard_ProviderSwitchAccepted covers the confirmed switch.
-func TestMeWizard_ProviderSwitchAccepted(t *testing.T) {
-	path := meTestConfig(t, `me:
-  llm:
-    provider: anthropic
-    model: claude-sonnet-4
-`)
-
-	out, err := runMeWizard(t, path, strings.Join([]string{
-		"y",
-		"https://api.example.com/v1",
-		"gpt-4.1-mini",
-		"",
-		"",
-		"1",
-	}, "\n")+"\n")
-	if err != nil {
-		t.Fatalf("meWizard: %v\n%s", err, out)
-	}
-
-	cfg, err := config.Load(path)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if cfg.Me.LLM.Provider != "openai" {
-		t.Errorf("Provider = %q, want openai", cfg.Me.LLM.Provider)
-	}
-	if cfg.Me.LLM.Model != "gpt-4.1-mini" {
-		t.Errorf("Model = %q", cfg.Me.LLM.Model)
-	}
-}
-
 // TestMeWizard_UnknownAgentIsRefused covers the agent field: a name
 // that is not a built-in is refused and the built-ins are listed.
 func TestMeWizard_UnknownAgentIsRefused(t *testing.T) {
 	path := meTestConfig(t, "primary: claude\n")
 
 	out, err := runMeWizard(t, path, strings.Join([]string{
+		"1",
 		"https://api.example.com/v1",
 		"gpt-4.1-mini",
 		"",
@@ -276,8 +310,8 @@ func TestMeWizard_UnknownAgentIsRefused(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Me.LLM.Agent != "claude" {
-		t.Errorf("Agent = %q, want claude", cfg.Me.LLM.Agent)
+	if cfg.Me.Agent != "claude" {
+		t.Errorf("Agent = %q, want claude", cfg.Me.Agent)
 	}
 }
 
@@ -287,6 +321,7 @@ func TestMeWizard_InvalidMaxTokensIsRefused(t *testing.T) {
 	path := meTestConfig(t, "primary: claude\n")
 
 	out, err := runMeWizard(t, path, strings.Join([]string{
+		"1",
 		"https://api.example.com/v1",
 		"gpt-4.1-mini",
 		"not-a-number",
@@ -314,14 +349,14 @@ func TestMeWizard_InvalidMaxTokensIsRefused(t *testing.T) {
 func TestMeWizard_KeepsOneCredentialChannel(t *testing.T) {
 	path := meTestConfig(t, `me:
   llm:
-    provider: openai
+    protocol: chat_completions
     base_url: https://api.example.com/v1
     model: gpt-4.1-mini
     api_key: sk-old
     api_key_env: OLD_KEY
 `)
 
-	out, err := runMeWizard(t, path, "\n\n\n\n1\n")
+	out, err := runMeWizard(t, path, "\n\n\n\n\n1\n")
 	if err != nil {
 		t.Fatalf("meWizard: %v\n%s", err, out)
 	}
@@ -343,13 +378,13 @@ func TestMeWizard_KeepsOneCredentialChannel(t *testing.T) {
 func TestMeWizard_RemovesTheCredential(t *testing.T) {
 	path := meTestConfig(t, `me:
   llm:
-    provider: openai
+    protocol: chat_completions
     base_url: https://api.example.com/v1
     model: gpt-4.1-mini
     api_key: sk-old
 `)
 
-	out, err := runMeWizard(t, path, "\n\n\n\n4\n")
+	out, err := runMeWizard(t, path, "\n\n\n\n\n4\n")
 	if err != nil {
 		t.Fatalf("meWizard: %v\n%s", err, out)
 	}
@@ -373,6 +408,7 @@ func TestMeWizard_NeverPrintsTheKey(t *testing.T) {
 	const key = "sk-super-secret-abcd"
 
 	out, err := runMeWizard(t, path, strings.Join([]string{
+		"1",
 		"https://api.example.com/v1",
 		"gpt-4.1-mini",
 		"",
@@ -400,6 +436,7 @@ func TestMeWizard_MissingEnvVarWarns(t *testing.T) {
 	path := meTestConfig(t, "primary: claude\n")
 
 	out, err := runMeWizard(t, path, strings.Join([]string{
+		"1",
 		"https://api.example.com/v1",
 		"gpt-4.1-mini",
 		"",
@@ -429,6 +466,7 @@ func TestMeWizard_ReportsTheRestartHint(t *testing.T) {
 	path := meTestConfig(t, "primary: claude\n")
 
 	out, err := runMeWizard(t, path, strings.Join([]string{
+		"1",
 		"https://api.example.com/v1",
 		"gpt-4.1-mini",
 		"",
@@ -453,6 +491,7 @@ func TestMeWizard_BuildFailureIsAConfigError(t *testing.T) {
 	path := meTestConfig(t, "primary: claude\n")
 
 	out, err := runMeWizard(t, path, strings.Join([]string{
+		"1",
 		"https://api.example.com/v1",
 		"", // no model
 		"",
@@ -476,6 +515,7 @@ func TestMeWizard_MissingBaseURLIsReported(t *testing.T) {
 	path := meTestConfig(t, "primary: claude\n")
 
 	out, err := runMeWizard(t, path, strings.Join([]string{
+		"1",
 		"", // no base_url
 		"gpt-4.1-mini",
 		"",
@@ -526,9 +566,9 @@ func TestMeCmd_IsInTheTreeAndTheBanner(t *testing.T) {
 	root, reg := newRootCmd()
 
 	var found *cobra.Command
-	for _, c := range root.Commands() {
-		if c.Name() == "me" {
-			found = c
+	for _, cmd := range root.Commands() {
+		if cmd.Name() == "me" {
+			found = cmd
 			break
 		}
 	}
@@ -565,6 +605,7 @@ func TestMeCmd_InsideTheREPL(t *testing.T) {
 
 	in := strings.NewReader(strings.Join([]string{
 		"me",
+		"1",
 		"https://api.example.com/v1",
 		"gpt-4.1-mini",
 		"",
@@ -606,48 +647,19 @@ func TestCanReadPassword_NeedsATerminal(t *testing.T) {
 	}
 }
 
-// TestMeWizard_ProviderSwitchAcceptsYes covers the confirmation: a
-// full "yes" switches, the way an operator would answer it.
-func TestMeWizard_ProviderSwitchAcceptsYes(t *testing.T) {
-	path := meTestConfig(t, `me:
-  llm:
-    provider: anthropic
-    model: claude-sonnet-4
-`)
-
-	out, err := runMeWizard(t, path, strings.Join([]string{
-		"yes",
-		"https://api.example.com/v1",
-		"gpt-4.1-mini",
-		"",
-		"",
-		"1",
-	}, "\n")+"\n")
-	if err != nil {
-		t.Fatalf("meWizard: %v\n%s", err, out)
-	}
-
-	cfg, err := config.Load(path)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if cfg.Me.LLM.Provider != "openai" {
-		t.Errorf("Provider = %q, want openai", cfg.Me.LLM.Provider)
-	}
-}
-
 // TestMeWizard_ZeroMaxTokensRemovesTheCap covers the cap of zero:
 // the key leaves the file and the shipped default takes its place.
 func TestMeWizard_ZeroMaxTokensRemovesTheCap(t *testing.T) {
 	path := meTestConfig(t, `me:
   llm:
-    provider: openai
+    protocol: chat_completions
     base_url: https://api.example.com/v1
     model: gpt-4.1-mini
     max_tokens: 8192
 `)
 
 	out, err := runMeWizard(t, path, strings.Join([]string{
+		"",
 		"",
 		"",
 		"0",
@@ -684,6 +696,7 @@ func TestMeWizard_CreatesAMissingConfigFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".nightme", "config.yaml")
 
 	out, err := runMeWizard(t, path, strings.Join([]string{
+		"1",
 		"https://api.example.com/v1",
 		"gpt-4.1-mini",
 		"",
@@ -718,5 +731,33 @@ func TestMeCmd_RefusesArguments(t *testing.T) {
 
 	if err := cmd.Execute(); err == nil {
 		t.Fatal("expected an error for an unexpected argument")
+	}
+}
+
+// TestMeWizard_ShowsTheTimeoutAndTheHeaders covers the state the
+// wizard prints: the deadline and the extra headers of the chat model
+// are part of it.
+func TestMeWizard_ShowsTheTimeoutAndTheHeaders(t *testing.T) {
+	path := meTestConfig(t, `me:
+  llm:
+    protocol: chat_completions
+    base_url: https://api.example.com/v1
+    model: gpt-4.1-mini
+    timeout: 30s
+    headers:
+      HTTP-Referer: https://nightme.dev
+`)
+
+	out, err := runMeWizard(t, path, "\n\n\n\n\n1\n")
+	if err != nil {
+		t.Fatalf("meWizard: %v\n%s", err, out)
+	}
+	for _, want := range []string{
+		"timeout:     30s",
+		"headers:     HTTP-Referer: https://nightme.dev",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the state does not show %q:\n%s", want, out)
+		}
 	}
 }

@@ -141,14 +141,6 @@ func (cs *ChatSession) routeEvent(as *AgentSession, ev EnrichedEvent) {
 		})
 	case KindPromptEnded:
 		cs.writebackMessageState(as, ev.Prompt)
-		// F-61: arm HungPrompt + clear suspect on clean turn end.
-		// The synchronous respawn path (KindLifecycle below) handles
-		// bridge deaths; this timer catches the rarer "bridge alive
-		// but hung" case where no event ever fires.
-		if as == cs.SelectedAgentSession() {
-			cs.Watchdog().disarmHungPrompt()
-		}
-		as.ClearSuspect()
 		// After a PromptEnds, the AS is ready again. TryFlush
 		// will pick up the queued messages if any.
 		_ = cs.TryFlush()
@@ -180,15 +172,6 @@ func (cs *ChatSession) routeEvent(as *AgentSession, ev EnrichedEvent) {
 				exitCode = registry.ExitCodeTerminatedByNightme
 			}
 			as.SetExited(exitCode)
-			// F-61: disarm HungPrompt. The bridge died without
-			// emitting KindPromptEnded, so the 5min timer armed
-			// at Submit is still live. Without this, it would
-			// fire later and mark the freshly-respawned bridge
-			// as Suspect("hung_prompt") — wrong: the respawned
-			// bridge just started, the previous one died.
-			if as == cs.SelectedAgentSession() {
-				cs.Watchdog().disarmHungPrompt()
-			}
 			// Use the AS's actual agent name (e.g. "dsh", "codex")
 			// instead of a hardcoded "claude" — pre-fix the log
 			// line said "claude process exited" even when the
@@ -213,19 +196,15 @@ func (cs *ChatSession) routeEvent(as *AgentSession, ev EnrichedEvent) {
 			// The specific turn that was running when the old
 			// bridge died is NOT replayed; the user sees the
 			// next message sent after the respawn land
-			// normally. No need to wait for the async watchdog
-			// prober.
+			// normally.
 			//
 			// /close path is excluded via as.closedByUser
-			// (set by Close()). Respawn failures fall through
-			// to the watchdog/prober retry under the 5min
-			// cooldown.
+			// (set by Close()).
 			if cs.spawner != nil {
 				if err := as.RestartFromDeath(cs.ctx, cs.spawner); err != nil {
-					slog.Warn("chatsession: immediate respawn after bridge death failed; watchdog will retry",
+					slog.Warn("chatsession: immediate respawn after bridge death failed",
 						"chat_id", ev.ChatID, "as_id", ev.AgentSessionID,
 						"err", err)
-					as.SetSuspect("immediate_respawn_failed")
 				} else {
 					// F-61: drain queue with the freshly-
 					// respawned AS. Any further queued user
@@ -237,7 +216,6 @@ func (cs *ChatSession) routeEvent(as *AgentSession, ev EnrichedEvent) {
 			} else {
 				slog.Warn("chatsession: cannot respawn after bridge death — no spawner on chat session",
 					"chat_id", ev.ChatID, "as_id", ev.AgentSessionID)
-				as.SetSuspect("immediate_respawn_no_spawner")
 			}
 		}
 	}

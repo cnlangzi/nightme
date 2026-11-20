@@ -353,16 +353,6 @@ type ChatSession struct {
 	// must nil-check via Emitter() before calling Send.
 	emitter messages.Emitter
 
-	// watchdog (F-61) is the per-chat diagnostic timer. nil
-	// until lazily initialized by Watchdog(). Owned by the chat
-	// session; lifetime matches the CS. watchdogOnce guarantees
-	// the first-init write is visible to all subsequent
-	// readers — without it, two goroutines (e.g. TryFlush in
-	// the dispatcher and routeEvent on KindLifecycle) race on
-	// the lazy-init read/write pair (F-61 data race fix).
-	watchdog     *Watchdog
-	watchdogOnce sync.Once
-
 	// --- F-45 teamflow (gtw) state ------------------------------
 	//
 	// REMOVED in F-51: gtwContext, gtwDrafts, and the
@@ -456,24 +446,6 @@ func (cs *ChatSession) Spawner() Spawner {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 	return cs.spawner
-}
-
-// Watchdog returns the per-chat watchdog, lazily constructing it
-// on first call. Used by routeEvent to arm/disarm timers; tests
-// inject fakes by setting cs.watchdog directly.
-//
-// sync.Once provides the happens-before guarantee needed for
-// safe concurrent lazy init — without it, callers racing on the
-// first Watchdog() would see a torn pointer write (data race).
-// After Once returns, the pointer is safely published to all
-// subsequent goroutines.
-func (cs *ChatSession) Watchdog() *Watchdog {
-	cs.watchdogOnce.Do(func() {
-		if cs.watchdog == nil {
-			cs.watchdog = newWatchdog(cs)
-		}
-	})
-	return cs.watchdog
 }
 
 // deriveIDFromChatID produces a deterministic ID from the chat ID
@@ -1594,12 +1566,6 @@ func (cs *ChatSession) TryFlush() error {
 		return err
 	}
 
-	// F-61: arm HungPrompt. If no KindPromptEnded arrives
-	// within HungMins, the watchdog marks the active AS as
-	// Suspect("hung_prompt") so the prober revives it under
-	// cooldown. Submit succeeded — the prompt is in flight.
-	cs.Watchdog().ArmHungPrompt()
-
 	// On success: commit the in-flight batch (removes it from
 	// the queue), then emit MessageSubmitted wire events
 	// OUTSIDE the lock (the callback may run ch.Send() which
@@ -1843,9 +1809,9 @@ func (cs *ChatSession) attachAgentSessionLocked(as *AgentSession) {
 		return
 	}
 	// Wire the per-AS persist callback so lifecycle setters
-	// (SetExited / SetSuspect / ClearSuspect) can flush their
-	// state transitions without depending on the caller to call
-	// asFile.Upsert at the right moments. nil asFile (chat
+	// (SetExited) can flush their state transitions without
+	// depending on the caller to call asFile.Upsert at the right
+	// moments. nil asFile (chat
 	// constructed without persistence) leaves persist nil and the
 	// in-memory state still works.
 	if cs.asFile != nil {

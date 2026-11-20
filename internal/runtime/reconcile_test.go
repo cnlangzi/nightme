@@ -2,11 +2,14 @@ package runtime
 
 import (
 	"bytes"
+	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -140,12 +143,12 @@ func TestReconcile_ReapsDeadRunningPID(t *testing.T) {
 	}
 }
 
-// TestReconcile_ClearsSuspectState pins the F-61 contract: a dead
-// AS has nothing left to probe, so SuspectReason / SuspectSince
-// must be cleared on the terminal transition (mirrors the
-// in-memory AgentSession.SetExited path).
-func TestReconcile_ClearsSuspectState(t *testing.T) {
-	asFile, _ := reconcileFixture(t)
+// TestReconcile_LoadsLegacySuspectFields pins the v4 loader's
+// tolerance: a file written by the v3 schema still carries the
+// suspect fields. They are ignored on load, and the file is written
+// back as v4 without them.
+func TestReconcile_LoadsLegacySuspectFields(t *testing.T) {
+	_, path := reconcileFixture(t)
 
 	cmd := exec.Command("/bin/sh", "-c", "exit 0")
 	if err := cmd.Start(); err != nil {
@@ -155,22 +158,44 @@ func TestReconcile_ClearsSuspectState(t *testing.T) {
 	_ = cmd.Wait()
 
 	now := time.Now()
-	if err := asFile.Upsert(&registry.AgentSessionEntry{
-		ID:            "as_suspect",
-		ChatSessionID: "cs_test",
-		Agent:         "claude",
-		Cwd:           "/code/test",
-		PID:           deadPID,
-		Status:        registry.StatusRunning,
-		SuspectReason: "hung_prompt",
-		SuspectSince:  &now,
-		CreatedAt:     now,
-		LastRunAt:     now,
-	}); err != nil {
-		t.Fatalf("Upsert suspect: %v", err)
+	legacy := map[string]any{
+		"version": 3,
+		"agentSessions": map[string]any{
+			"as_legacy": map[string]any{
+				"id":            "as_legacy",
+				"chatSessionId": "cs_test",
+				"agent":         "claude",
+				"cwd":           "/code/test",
+				"pid":           deadPID,
+				"status":        "running",
+				"createdAt":     now,
+				"lastRunAt":     now,
+				"suspectReason": "hung_prompt",
+				"suspectSince":  now,
+			},
+		},
+	}
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatalf("marshal legacy: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write legacy file: %v", err)
 	}
 
-	res, err := ReconcileAgentSessions(asFile, PidAlive, silentLogger(), &bytes.Buffer{})
+	loaded, err := registry.OpenAgentSessionFile(path)
+	if err != nil {
+		t.Fatalf("OpenAgentSessionFile: %v", err)
+	}
+	e, ok := loaded.Get("as_legacy")
+	if !ok {
+		t.Fatal("legacy entry did not load")
+	}
+	if e.PID != deadPID {
+		t.Errorf("PID = %d, want %d (legacy entry must load intact)", e.PID, deadPID)
+	}
+
+	res, err := ReconcileAgentSessions(loaded, PidAlive, silentLogger(), &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("ReconcileAgentSessions: %v", err)
 	}
@@ -178,12 +203,15 @@ func TestReconcile_ClearsSuspectState(t *testing.T) {
 		t.Errorf("Reaped = %d, want 1", res.Reaped)
 	}
 
-	e, _ := asFile.Get("as_suspect")
-	if e.SuspectReason != "" {
-		t.Errorf("SuspectReason = %q, want \"\" (must clear on terminal transition)", e.SuspectReason)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
 	}
-	if e.SuspectSince != nil {
-		t.Errorf("SuspectSince = %v, want nil", e.SuspectSince)
+	if strings.Contains(string(raw), "suspectReason") {
+		t.Errorf("written file still carries suspectReason: %s", raw)
+	}
+	if !strings.Contains(string(raw), fmt.Sprintf(`"version": %d`, registry.AgentSessionFileVersion)) {
+		t.Errorf("written file is not version %d: %s", registry.AgentSessionFileVersion, raw)
 	}
 }
 

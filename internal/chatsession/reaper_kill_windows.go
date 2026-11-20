@@ -16,7 +16,7 @@ var (
 
 // errEPERMValue is the sentinel for "exists but not ours" —
 // on Windows OpenProcess access-denied maps to syscall.Errno(5)
-// which is ERROR_ACCESS_DENIED. The prober treats that as "alive".
+// which is ERROR_ACCESS_DENIED. The reaper treats that as "alive".
 var errEPERMValue = errors.New("epERM")
 
 // platformKill0 invokes Windows OpenProcess + CloseHandle as a

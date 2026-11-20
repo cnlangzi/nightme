@@ -14,7 +14,6 @@ import (
 // F-61 test coverage:
 //
 //   - SetExited persists (so the JSON isn't stale on next read)
-//   - SetSuspect/ClearSuspect toggle persisted state correctly
 //   - RestartFromDeath skips when closedByUser
 //   - RestartFromDeath concurrent Close → respawn rolls back
 //   - Spawn() clears closedByUser (explicit user action overrides)
@@ -63,30 +62,6 @@ func TestF61_SetExitedPersists(t *testing.T) {
 	}
 	if persist.last.PID != 0 {
 		t.Errorf("pid = %d, want 0", persist.last.PID)
-	}
-}
-
-// TestF61_SetSuspectPersists verifies SetSuspect writes the new
-// suspect state and ClearSuspect resets it.
-func TestF61_SetSuspectPersists(t *testing.T) {
-	as := newAgentSessionRuntime("as_test", "cs_x", "claude", "/tmp", nil)
-	persist := &f61Persist{}
-	as.SetPersist(persist.save)
-
-	as.SetSuspect("no_fast_ack")
-	if got := persist.Calls(); got != 1 {
-		t.Fatalf("SetSuspect calls = %d, want 1", got)
-	}
-	if reason, _ := as.Suspect(); reason != "no_fast_ack" {
-		t.Errorf("Suspect() = %q, want no_fast_ack", reason)
-	}
-
-	as.ClearSuspect()
-	if got := persist.Calls(); got != 2 {
-		t.Fatalf("ClearSuspect calls = %d, want 2", got)
-	}
-	if reason, _ := as.Suspect(); reason != "" {
-		t.Errorf("Suspect() = %q, want empty", reason)
 	}
 }
 

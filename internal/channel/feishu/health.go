@@ -175,16 +175,16 @@ type WSHealthSnapshot struct {
 	// dial).
 	Rebuild RebuildSnapshot `json:"rebuild"`
 
-	// F-61: agent process liveness prober (fallback for readpump-
-	// missed bridge deaths). Mirrors Prober's shape but tracks
-	// pool-wide AS heartbeats rather than WS reconnect attempts.
-	// Currently zero-valued — the daemon-level wiring to populate
-	// this from chatsession.AgentProber.Snapshot() is a follow-up.
+	// F-61: the daemon's idle-CLI reaper. Mirrors Prober's shape
+	// but tracks the agent sessions the reaper reclaimed rather than
+	// WS reconnect attempts. Currently zero-valued — the daemon-level
+	// wiring to populate this from chatsession.AgentReaper.Snapshot()
+	// is a follow-up.
 	AgentProber AgentProberSnapshot `json:"agent_prober"`
 }
 
 // AgentProberSnapshot (F-61) is the wire mirror of
-// chatsession.AgentProberSnapshot. Defined locally to avoid
+// chatsession.AgentReaperSnapshot. Defined locally to avoid
 // importing chatsession (the wire format only needs plain data;
 // the actual snapshot lives in chatsession). The two structs
 // must stay in sync — keep fields identical.

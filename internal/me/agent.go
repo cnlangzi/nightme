@@ -284,12 +284,8 @@ type AgentReply struct {
 // Config holds the personal agent's configuration.
 type Config struct {
 	// WorkflowsDir is the directory the workflows live in. The action
-	// scripts live in <WorkflowsDir>/actions and the runs in
-	// <WorkflowsDir>/runs.
+	// scripts live in <WorkflowsDir>/actions.
 	WorkflowsDir string
-	// StateDir is where the runs are persisted. Empty means the
-	// runs are not persisted at all.
-	StateDir string
 
 	// Provider is the chat model (System 2). Nil turns System 2
 	// off.
@@ -471,15 +467,11 @@ func failureLines(failures []error) []string {
 	return out
 }
 
-// Start reads the workflows, registers the actions and resumes the
-// runs that were left behind by a previous daemon.
+// Start reads the workflows and registers the actions.
 //
 // A file that does not load is not fatal: the daemon comes up and the
 // workflows beside it work. The failure is logged and reported by
 // `/me`.
-//
-// A run that cannot go on is reported to its chat; a run that can
-// is resumed silently.
 func (s *Service) Start(ctx context.Context) error {
 	err := s.catalog.Refresh()
 	s.mu.Lock()
@@ -496,13 +488,13 @@ func (s *Service) Start(ctx context.Context) error {
 	if err := s.actions.ScanUserScripts(s.actionsDir()); err != nil {
 		return fmt.Errorf("me: scan action scripts: %w", err)
 	}
-
-	s.resumeRuns(ctx)
 	return nil
 }
 
-// Shutdown stops every run and waits for them to write their final
-// state.
+// Shutdown stops every run and waits for them to end.
+//
+// A run that is still going stops where it stands: the chat keeps the
+// cards it has, and nothing more is published to it.
 func (s *Service) Shutdown(ctx context.Context) error {
 	s.mu.Lock()
 	s.started = false
@@ -513,7 +505,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	s.mu.Unlock()
 
 	for _, r := range runs {
-		r.suspend()
+		r.markDaemonGone()
 	}
 	done := make(chan struct{})
 	go func() {
@@ -734,9 +726,7 @@ func (s *Service) Pause(ctx context.Context, chatID, messageID string) error {
 //
 // The decision is carried by the run and applied by the run's loop: a
 // step takes as long as the work takes, so it cannot run in the
-// command's own goroutine. The state is written before the run is
-// woken, so a daemon that dies in between comes back with the
-// decision in its state file.
+// command's own goroutine.
 //
 // The state of the run is published before the run is woken: it says
 // where the run stands.
@@ -774,9 +764,8 @@ func (s *Service) Next(ctx context.Context, chatID, messageID, note string) (Ope
 // the command, and a decision that waited for the run's next turn would
 // wait for the command to finish.
 //
-// The decision is persisted, the state of the run is refreshed and the
-// answer with the state of the run is published before the run is
-// woken.
+// The state of the run is refreshed and the answer with the state of
+// the run is published before the run is woken.
 func (s *Service) operatorDecision(ctx context.Context, chatID, messageID, note, kind string) (OperatorDecision, error) {
 	s.mu.Lock()
 	r, ok := s.active[chatID]
@@ -791,7 +780,6 @@ func (s *Service) operatorDecision(ctx context.Context, chatID, messageID, note,
 	if d.skippedNow {
 		s.skipRunningStep(ctx, r, d.Step)
 	}
-	s.persist(r)
 	s.refreshRun(r)
 	s.answerCommand(ctx, r, messageID, decisionAnswer(kind, d))
 	if paused {
@@ -880,9 +868,4 @@ func (s *Service) executionOf(msgID string) (observe.Execution, bool) {
 		return observe.Execution{}, false
 	}
 	return s.cfg.Operator.Get(msgID)
-}
-
-// statePath returns the file a run is persisted in.
-func (s *Service) statePath(runID string) string {
-	return filepath.Join(s.cfg.StateDir, runID+".json")
 }

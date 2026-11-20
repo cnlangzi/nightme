@@ -2,13 +2,11 @@ package me
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 // noModels is a pair of models that must not be called: the fast path
@@ -375,47 +373,9 @@ jobs:
 	}
 }
 
-// TestResume_ARunKeepsItsOverriddenCount — the bound workflow is
-// persisted whole, so a resumed run keeps the count it was started
-// with.
-func TestResume_ARunKeepsItsOverriddenCount(t *testing.T) {
-	dir := t.TempDir()
-	writeWorkflow(t, dir, "fix", `title: do the thing
-jobs:
-  main:
-    iterations: 0
-    steps:
-      - id: rest
-        wait: 5m
-`)
-
-	svc, _ := testService(t, dir, noModels())
-	rounds := 1
-	runID, _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "fix", ChatID: "obs-1", Cwd: "/tmp/work", Iterations: &rounds,
-	})
-	if err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	waitForState(t, svc.statePath(runID))
-
-	raw := readStateFile(t, svc.statePath(runID))
-	var state persistedRun
-	if err := json.Unmarshal(raw, &state); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-
-	restored := svc.restoreRun(state)
-	restored.mu.Lock()
-	defer restored.mu.Unlock()
-	if got := restored.workflow.Jobs["main"].Rounds(); got != 1 {
-		t.Errorf("the rounds of the resumed run = %d, want 1", got)
-	}
-}
-
 // TestStop_StopsTheRunOfTheChat — `/me stop` ends the run of the chat
-// it is typed in: the waiting step ends at once, the state file is
-// gone and the chat is free for a new run.
+// it is typed in: the waiting step ends at once and the chat is free
+// for a new run.
 func TestStop_StopsTheRunOfTheChat(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "wait", `title: wait for it
@@ -427,16 +387,10 @@ jobs:
 `)
 
 	svc, _ := testService(t, dir, noModels())
-	runID, _, err := svc.StartWorkflow(context.Background(), Request{
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "wait", ChatID: "obs-1", Cwd: "/tmp/work",
-	})
-	if err != nil {
+	}); err != nil {
 		t.Fatalf("start: %v", err)
-	}
-	waitForState(t, svc.statePath(runID))
-
-	if _, err := os.Stat(svc.statePath(runID)); err != nil {
-		t.Fatalf("the run state was not written: %v", err)
 	}
 	if err := svc.Stop(context.Background(), "obs-1", "om_stop"); err != nil {
 		t.Fatalf("stop: %v", err)
@@ -448,9 +402,6 @@ jobs:
 	svc.mu.Unlock()
 	if running {
 		t.Error("the chat still holds a run")
-	}
-	if _, err := os.Stat(svc.statePath(runID)); !os.IsNotExist(err) {
-		t.Errorf("the run state is still there: %v", err)
 	}
 
 	if _, _, err := svc.StartWorkflow(context.Background(), Request{
@@ -490,128 +441,4 @@ jobs:
 	if !strings.Contains(err.Error(), `duplicate workflow name "fix"`) {
 		t.Errorf("error = %v, want the clash", err)
 	}
-}
-
-// TestResume_ARunPersistedBeforeTheTitleKeepsItsPurpose — a run that
-// was persisted before the title replaced the goal keeps its purpose
-// when the daemon resumes it.
-func TestResume_ARunPersistedBeforeTheTitleKeepsItsPurpose(t *testing.T) {
-	dir := t.TempDir()
-	writeWorkflow(t, dir, "one", oneStepWorkflow)
-
-	// A run state written before the title replaced the goal.
-	state := `{
-  "run_id": "one-1",
-  "chat_id": "obs-1",
-  "cwd": "/tmp/work",
-  "agent": "claude",
-  "workflow": {
-    "name": "one",
-    "goal": "Do the one thing.",
-    "jobs": {"main": {"steps": [{"id": "rest", "wait": "5m"}]}}
-  },
-  "state": {
-    "run_id": "one-1",
-    "workflow": "one",
-    "workspace": "/tmp/work",
-    "status": "running",
-    "steps": [],
-    "started_at": "2026-01-01T00:00:00Z"
-  },
-  "history": [],
-  "messages": [],
-  "phase": "running"
-}`
-	runs := filepath.Join(dir, "runs")
-	if err := os.MkdirAll(runs, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(runs, "one-1.json"), []byte(state), 0o600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-
-	svc, _ := testService(t, dir, noModels())
-	svc.mu.Lock()
-	var restored *run
-	for _, r := range svc.runs {
-		restored = r
-	}
-	svc.mu.Unlock()
-	if restored == nil {
-		t.Fatal("the run was not resumed")
-	}
-	restored.mu.Lock()
-	title := restored.workflow.Title
-	restored.mu.Unlock()
-	if title != "Do the one thing." {
-		t.Errorf("the resumed run has the title %q, want the migrated goal", title)
-	}
-	if rendered := restored.renderPolicy(); !strings.Contains(rendered, "title: Do the one thing.") {
-		t.Errorf("the resumed policy does not carry the purpose:\n%s", rendered)
-	}
-}
-
-// TestResume_ARunOfAnOlderDaemonIsDropped — a state file left by a
-// daemon that ran workflows in a work chat names a chat that does
-// not exist any more: the run cannot go on there, so it is dropped
-// and its file removed.
-func TestResume_ARunOfAnOlderDaemonIsDropped(t *testing.T) {
-	dir := t.TempDir()
-	writeWorkflow(t, dir, "one", oneStepWorkflow)
-
-	state := `{
-  "run_id": "one-1",
-  "observer_chat_id": "obs-1",
-  "work_chat_id": "lb_one-1",
-  "cwd": "/tmp/work",
-  "agent": "claude",
-  "workflow": {
-    "name": "one",
-    "title": "Do the one thing.",
-    "jobs": {"main": {"steps": [{"id": "rest", "wait": "5m"}]}}
-  },
-  "state": {
-    "run_id": "one-1",
-    "workflow": "one",
-    "workspace": "/tmp/work",
-    "status": "running",
-    "steps": [],
-    "started_at": "2026-01-01T00:00:00Z"
-  },
-  "history": [],
-  "messages": [],
-  "phase": "running"
-}`
-	runs := filepath.Join(dir, "runs")
-	if err := os.MkdirAll(runs, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	path := filepath.Join(runs, "one-1.json")
-	if err := os.WriteFile(path, []byte(state), 0o600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-
-	svc, _ := testService(t, dir, noModels())
-	svc.mu.Lock()
-	restored := len(svc.runs)
-	svc.mu.Unlock()
-	if restored != 0 {
-		t.Fatalf("%d runs were resumed, want none", restored)
-	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Errorf("the state file of the dropped run is still there: %v", err)
-	}
-}
-
-// waitForState waits until the run state file is on disk.
-func waitForState(t *testing.T, path string) {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(path); err == nil {
-			return
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-	t.Fatalf("the run state was not written: %s", path)
 }

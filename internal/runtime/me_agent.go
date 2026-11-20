@@ -17,7 +17,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"path/filepath"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/channel"
@@ -61,7 +60,6 @@ func buildPersonalAgent(cfg *config.Config, chs []channel.Channel, op *operator,
 func personalAgentConfig(cfg *config.Config, dir string, op *operator, provider llm.Provider, decider llm.Decider) me.Config {
 	return me.Config{
 		WorkflowsDir:  dir,
-		StateDir:      filepath.Join(dir, "runs"),
 		Provider:      provider,
 		Decider:       decider,
 		MinConfidence: cfg.Me.Decider.MinConfidence,

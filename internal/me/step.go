@@ -40,10 +40,6 @@ func (s *Service) executeStep(ctx context.Context, r *run, job string, step wfe.
 	// The step runs where the chat stands: the run's declared context
 	// follows the chat before the step begins.
 	s.syncWorkDir(r)
-	// A step may run for a long time: the state is written first, so a
-	// daemon that goes away in the middle of it comes back and runs the
-	// step again.
-	s.persist(r)
 	switch step.Kind() {
 	case wfe.StepKindMessage:
 		return s.executeMessage(ctx, r, job, step)

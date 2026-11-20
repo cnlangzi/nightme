@@ -3,8 +3,6 @@ package me
 import (
 	"context"
 	"errors"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -12,80 +10,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/pkg/wfe"
 )
-
-// TestRun_AWaitSurvivesARestart — a daemon that goes away while a run
-// waits comes back and finds the run.
-func TestRun_AWaitSurvivesARestart(t *testing.T) {
-	dir := t.TempDir()
-	writeWorkflow(t, dir, "wait", `title: wait
-jobs:
-  main:
-    steps:
-      - id: rest
-        wait: 1h
-`)
-
-	provider := &scriptedProvider{err: errors.New("the chat model must not be called")}
-	decider := &scriptedDecider{err: errors.New("the decision model must not be called")}
-	svc, _ := testService(t, dir, Config{Provider: provider, Decider: decider})
-
-	if _, _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "wait", ChatID: "obs-1", Cwd: "/tmp/work",
-	}); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	// The wait runs for an hour: the run is still going when the
-	// daemon goes away.
-	time.Sleep(100 * time.Millisecond)
-
-	entries, err := os.ReadDir(filepath.Join(dir, "runs"))
-	if err != nil {
-		t.Fatalf("read the runs dir: %v", err)
-	}
-	if len(entries) == 0 {
-		t.Fatal("the wait wrote no state: a restart would lose the run")
-	}
-
-	if err := svc.Shutdown(context.Background()); err != nil {
-		t.Fatalf("shutdown: %v", err)
-	}
-}
-
-// TestRun_AShellStepSurvivesARestart — the same for a shell step.
-func TestRun_AShellStepSurvivesARestart(t *testing.T) {
-	dir := t.TempDir()
-	writeWorkflow(t, dir, "sh", `title: sh
-jobs:
-  main:
-    steps:
-      - id: build
-        shell: make build
-`)
-
-	shell := newBlockingShell()
-	provider := &scriptedProvider{err: errors.New("the chat model must not be called")}
-	decider := &scriptedDecider{err: errors.New("the decision model must not be called")}
-	svc, _ := testService(t, dir, Config{Provider: provider, Decider: decider, Shell: shell})
-
-	if _, _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "sh", ChatID: "obs-1", Cwd: "/tmp/work",
-	}); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	select {
-	case <-shell.started:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the shell step never ran")
-	}
-
-	entries, err := os.ReadDir(filepath.Join(dir, "runs"))
-	if err != nil {
-		t.Fatalf("read the runs dir: %v", err)
-	}
-	if len(entries) == 0 {
-		t.Fatal("the shell step wrote no state: a restart would lose the run")
-	}
-}
 
 // TestShellOutputs_TheReservedFactsWin — a command that prints
 // `exit_code=0` does not report an exit code it never had.

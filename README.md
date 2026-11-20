@@ -853,6 +853,14 @@ The run's lifecycle belongs to the `/me` commands alone: `/close`, `/stop` and
 the run is going takes the chat back — the run stops after the step it is on, and
 `/me resume` hands the control back.
 
+The run lives in the chat that started it and in the daemon's memory: nothing of
+it is written to disk, and it does not survive a restart of the daemon. A daemon
+that comes back finds no run in that chat — `/me status` says the chat has no run
+in it, and `/me resume` and `/me next` are refused with the same reason, so the
+operator starts the run again. A daemon that shuts down ends the runs it holds
+without saying anything: the chat keeps the cards it has, and the last one still
+reads "running".
+
 ### The fast path and the judgment point
 
 The workflow says what comes next, so most steps need no model at all.

@@ -2,11 +2,8 @@ package me
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -15,7 +12,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/gateway/observe"
 	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/messages"
-	"github.com/cnlangzi/nightme/pkg/wfe"
 )
 
 // okStep is a command that succeeded.
@@ -351,7 +347,6 @@ jobs:
 	)
 	svc := New(Config{
 		WorkflowsDir: dir,
-		StateDir:     dir + "/runs",
 		Provider:     provider,
 		Operator:     op,
 	})
@@ -452,124 +447,6 @@ jobs:
 	if !messagesContain(req, "the feature branch") {
 		t.Fatalf("the reply did not become the tool result: %v", req.Messages)
 	}
-}
-
-func TestRestart_ResumesASuspendedRun(t *testing.T) {
-	dir := t.TempDir()
-	writeWorkflow(t, dir, "one", oneStepWorkflow)
-
-	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolAskHuman, map[string]any{"question": "Which branch?"})},
-		{Message: toolCallMsg("c2", toolResume, map[string]any{})},
-		{Message: toolCallMsg("c3", toolFinish, map[string]any{"status": "done", "summary": "committed"})},
-	}}
-	svc, op := testService(t, dir, Config{Provider: provider})
-	op.steps = []fakeStep{pendingStep("still going")}
-	if _, _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
-	}); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	waitAsked(t, op, "Which branch?")
-
-	// The daemon restarts: a new service picks the run up.
-	restarted, op2 := testService(t, dir, Config{Provider: provider})
-	waitForReply(t, restarted, "obs-1")
-
-	if err := restarted.Reply(context.Background(), "obs-1", "the feature branch"); err != nil {
-		t.Fatalf("reply: %v", err)
-	}
-	waitRun(t, restarted, "obs-1")
-	waitSent(t, op2, "/gtw commit")
-}
-
-func TestShutdown_KeepsTheRunForTheNextDaemon(t *testing.T) {
-	dir := t.TempDir()
-	writeWorkflow(t, dir, "one", oneStepWorkflow)
-
-	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolAskHuman, map[string]any{"question": "Which branch?"})},
-		{Message: toolCallMsg("c2", toolResume, map[string]any{})},
-		{Message: toolCallMsg("c3", toolFinish, map[string]any{"status": "done", "summary": "committed"})},
-	}}
-	svc, op := testService(t, dir, Config{Provider: provider})
-	op.steps = []fakeStep{pendingStep("still going")}
-	if _, _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
-	}); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	waitAsked(t, op, "Which branch?")
-
-	// The daemon goes away while the run waits for an answer.
-	if err := svc.Shutdown(context.Background()); err != nil {
-		t.Fatalf("shutdown: %v", err)
-	}
-	waitStateFile(t, dir)
-
-	// The next daemon picks the run up and it keeps waiting.
-	restarted, _ := testService(t, dir, Config{Provider: provider})
-	waitForReply(t, restarted, "obs-1")
-}
-
-func TestRestart_ResolvesAnInFlightCommandAsInterrupted(t *testing.T) {
-	dir := t.TempDir()
-	writeWorkflow(t, dir, "one", oneStepWorkflow)
-
-	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: toolCallMsg("c1", toolResume, map[string]any{})},
-	}}
-	svc, op := testService(t, dir, Config{Provider: provider})
-	// The command never settles: the run waits for it.
-	op.steps = []fakeStep{{open: true}}
-
-	if _, _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
-	}); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	waitSent(t, op, "/gtw commit")
-	// Wait until the run persisted the in-flight command: a state file
-	// without it would restart the step from the beginning.
-	waitInFlight(t, dir)
-
-	// The daemon restarts with a fresh tracker: the execution of the
-	// in-flight command is gone.
-	//
-	// The chat of the new daemon waits at the gate: the run it picks up
-	// is gone as soon as it ends, and the test looks at it.
-	g := newGate()
-	t.Cleanup(g.open)
-	restarted, _ := testServiceGated(t, dir, Config{Provider: provider}, g)
-	restarted.mu.Lock()
-	var restored *run
-	for _, r := range restarted.runs {
-		restored = r
-	}
-	restarted.mu.Unlock()
-	if restored == nil {
-		t.Fatal("the run was not resumed")
-	}
-	g.open()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		restored.mu.Lock()
-		history := append([]wfe.ActionRecord(nil), restored.policy.History...)
-		restored.mu.Unlock()
-		if len(history) > 0 {
-			if !strings.Contains(history[0].Outcome.Summary, "interrupted") {
-				t.Fatalf("the in-flight command was resolved as %q, want an interruption",
-					history[0].Outcome.Summary)
-			}
-			if history[0].Outcome.Status != wfe.OutcomeUnknown {
-				t.Fatalf("the interrupted command was recorded as %q, want unknown",
-					history[0].Outcome.Status)
-			}
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatal("the in-flight command was never resolved")
 }
 
 // TestRunStep_WaitsForTheAnswerOfTheWorkAgent — the coding agent asks
@@ -689,7 +566,6 @@ func TestIntegration_TheWorkflowRunsEndToEnd(t *testing.T) {
 	)
 	svc := New(Config{
 		WorkflowsDir: dir,
-		StateDir:     dir + "/runs",
 		Provider:     provider,
 		Operator:     op,
 	})
@@ -741,54 +617,6 @@ func TestIntegration_TheWorkflowRunsEndToEnd(t *testing.T) {
 	}
 }
 
-// waitStateFile waits until a run persisted its state.
-// waitInFlight waits until the persisted run carries the command it
-// was waiting for.
-func waitInFlight(t *testing.T, dir string) {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		entries, err := os.ReadDir(filepath.Join(dir, "runs"))
-		if err == nil {
-			for _, e := range entries {
-				if !strings.HasSuffix(e.Name(), ".json") {
-					continue
-				}
-				raw, err := os.ReadFile(filepath.Join(dir, "runs", e.Name()))
-				if err != nil {
-					continue
-				}
-				var state persistedRun
-				if err := json.Unmarshal(raw, &state); err != nil {
-					continue
-				}
-				if state.Inflight != nil {
-					return
-				}
-			}
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-	t.Fatal("the run did not persist its in-flight command")
-}
-
-func waitStateFile(t *testing.T, dir string) {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		entries, err := os.ReadDir(filepath.Join(dir, "runs"))
-		if err == nil {
-			for _, e := range entries {
-				if strings.HasSuffix(e.Name(), ".json") {
-					return
-				}
-			}
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-	t.Fatal("the run did not persist its state")
-}
-
 // messagesContain reports whether a request carries the given text.
 func messagesContain(req llm.Request, text string) bool {
 	for _, m := range req.Messages {
@@ -799,18 +627,4 @@ func messagesContain(req llm.Request, text string) bool {
 		}
 	}
 	return false
-}
-
-// waitForReply waits until a run waits for a reply.
-func waitForReply(t *testing.T, svc *Service, chatID string) {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		st := svc.Snapshot(chatID)
-		if st.Phase == PhaseAsking {
-			return
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-	t.Fatal("the run is not waiting for a reply")
 }

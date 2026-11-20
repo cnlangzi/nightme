@@ -826,35 +826,10 @@ func writeWorkflow(t *testing.T, dir, name, body string) {
 	}
 }
 
-// readStateFile reads the persisted state of a run.
-//
-// The daemon replaces the file as the run goes, and Windows refuses to
-// open a file that is being replaced: the read waits for the file to
-// settle.
-func readStateFile(t *testing.T, path string) []byte {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		raw, err := os.ReadFile(path)
-		if err == nil {
-			return raw
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("read state: %v", err)
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-}
-
 // testService builds a personal agent with fakes.
 //
-// The service is shut down when the test ends. A run that is still
-// working keeps writing its state file, and Windows refuses to
-// remove a directory that holds a file being written — so a test
-// that leaves the service running fails in its own cleanup rather
-// than in an assertion. The cleanup runs before the temp dir's own:
-// t.TempDir registers its cleanup first, and cleanups run last-in
-// first-out.
+// The service is shut down when the test ends, so a run that is still
+// working is over before the test's own directory goes away.
 func testService(t *testing.T, dir string, cfg Config) (*Service, *fakeOperator) {
 	t.Helper()
 	return testServiceGated(t, dir, cfg, nil)
@@ -870,7 +845,6 @@ func testServiceGated(t *testing.T, dir string, cfg Config, g *gate) (*Service, 
 	op := newFakeOperator()
 	op.gate = g
 	cfg.WorkflowsDir = dir
-	cfg.StateDir = filepath.Join(dir, "runs")
 	cfg.Operator = op
 	if cfg.Sleep == nil {
 		// The backoff between two attempts of the chat model is real
@@ -1525,51 +1499,88 @@ jobs:
 	}
 }
 
-// TestPersist_HoldsTheProgressTheConversationAndTheHistory — one file
-// holds everything a resumed run needs.
-func TestPersist_HoldsTheProgressTheConversationAndTheHistory(t *testing.T) {
+// TestTheRunKeepsNoStateOnDisk — a run lives in the chat it started
+// in: it writes no file of its own.
+func TestTheRunKeepsNoStateOnDisk(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
-	decider := &scriptedDecider{answers: []llm.DecisionResponse{
-		decisionResp("jev-1.14", optionEscalate, 0.1, 0),
+	provider := &scriptedProvider{responses: []llm.Response{
+		{Message: toolCallMsg("c1", toolResume, map[string]any{})},
 	}}
-	svc, op := testService(t, dir, Config{Decider: decider})
-	op.steps = []fakeStep{{outcome: messages.Outcome{Status: messages.OutcomeIncomplete, Summary: "still going"}}}
-
+	svc, op := testService(t, dir, Config{Provider: provider})
+	op.steps = []fakeStep{pendingStep("still going")}
 	if _, _, err := svc.StartWorkflow(context.Background(), Request{
 		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
 	}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitAsked(t, op, "Which step should run next?")
-	waitStateFile(t, dir)
+	waitSent(t, op, "/gtw commit")
 
-	svc.mu.Lock()
-	runID := svc.active["obs-1"].id
-	svc.mu.Unlock()
-	raw := readStateFile(t, filepath.Join(dir, "runs", runID+".json"))
-	var state map[string]any
-	if err := json.Unmarshal(raw, &state); err != nil {
-		t.Fatalf("decode state: %v", err)
+	// The workflows directory holds the workflow and nothing else: the
+	// run wrote no state of its own.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read the workflows dir: %v", err)
 	}
-	for _, key := range []string{"state", "workflow", "history", "messages"} {
-		if _, ok := state[key]; !ok {
-			t.Errorf("the state file has no %q key: %s", key, raw)
+	for _, e := range entries {
+		if e.Name() != "one" {
+			t.Errorf("the workflows dir holds %q, want only the workflow", e.Name())
 		}
 	}
-	run, ok := state["state"].(map[string]any)
-	if !ok {
-		t.Fatalf("the state file has no run state: %s", raw)
+}
+
+// TestTheChatOfALostRunHasNoRun — the daemon goes away while a run is
+// going: the run is over, and the chat that started it holds no run.
+func TestTheChatOfALostRunHasNoRun(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	provider := &scriptedProvider{responses: []llm.Response{
+		{Message: toolCallMsg("c1", toolResume, map[string]any{})},
+	}}
+	svc, op := testService(t, dir, Config{Provider: provider})
+	op.steps = []fakeStep{pendingStep("still going")}
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
 	}
-	steps, ok := run["steps"].([]any)
-	if !ok || len(steps) == 0 {
-		t.Errorf("the state file holds no step progress: %s", raw)
+	waitSent(t, op, "/gtw commit")
+
+	if err := svc.Shutdown(context.Background()); err != nil {
+		t.Fatalf("shutdown: %v", err)
 	}
-	if err := svc.Stop(context.Background(), "obs-1", "om_stop"); err != nil {
-		t.Fatalf("stop: %v", err)
+
+	// The next daemon comes up: the chat holds no run any more.
+	restarted, _ := testService(t, dir, Config{Provider: provider})
+	if err := restarted.Status(context.Background(), "obs-1", "om_status"); !errors.Is(err, ErrNoRun) {
+		t.Errorf("the status of the chat is %v, want %v", err, ErrNoRun)
 	}
-	waitRun(t, svc, "obs-1")
+	for _, cmd := range []struct {
+		name string
+		call func() error
+	}{
+		{"resume", func() error {
+			_, err := restarted.Resume(context.Background(), "obs-1", "om_resume", "")
+			return err
+		}},
+		{"next", func() error {
+			_, err := restarted.Next(context.Background(), "obs-1", "om_next", "")
+			return err
+		}},
+	} {
+		err := cmd.call()
+		if err == nil {
+			t.Fatalf("the %s of a chat without a run was accepted", cmd.name)
+		}
+		if !strings.Contains(err.Error(), "this chat has no run in it") {
+			t.Errorf("the refusal of %s is %q, want the reason", cmd.name, err)
+		}
+		if reason := RefusalReason(err); reason != ReasonNoRun {
+			t.Errorf("the reason of %s is %q, want %q", cmd.name, reason, ReasonNoRun)
+		}
+	}
 }
 
 // TestTheRunStartsWhenTheChatRefusesACard — the run posts no card of

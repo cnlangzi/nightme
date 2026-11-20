@@ -6,8 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"os"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -107,8 +105,7 @@ type roundDecisions struct {
 // roundRecord is what a finished round of a job came to.
 //
 // The record is what the card of the run reads: the tree of the rounds
-// shows the facts of every round the run finished. The record is
-// persisted with the run, so the tree survives a restart of the daemon.
+// shows the facts of every round the run finished.
 type roundRecord struct {
 	// Round is the number of the round.
 	Round int `json:"round"`
@@ -192,9 +189,6 @@ type run struct {
 	roundSession *session
 	// decisionSession is the session of the decision that is open.
 	decisionSession *session
-	// recordSession is the session of the record the run leaves behind
-	// when it ends.
-	recordSession *session
 	// roundSessions holds the session of every round the run has
 	// been in. A run that comes back to a round goes on with the card
 	// that round has.
@@ -239,16 +233,12 @@ type run struct {
 	// providerWait is how long the run waits before it asks the chat
 	// model again. It grows with every failed turn and starts over
 	// when the model answers.
-	//
-	// It is not persisted: a daemon that comes back starts the wait
-	// over. The chances the agent spent are what the history keeps.
 	providerWait time.Duration
 	// thinkCount counts the turns the chat model took, and toolCount
 	// the tool calls the run made.
 	//
 	// The counts are taken before the run's events leave it: what the
-	// run did does not depend on what the chat shows. They go with the
-	// run's state, so a daemon that comes back knows what the run did.
+	// run did does not depend on what the chat shows.
 	thinkCount int
 	toolCount  int
 	// lastBeatAt is when the run last did something.
@@ -302,9 +292,9 @@ type run struct {
 	summary string
 	// finished records that the model called the finish tool.
 	finished bool
-	// suspended records that the daemon went away while the run was
-	// going: the run keeps its state and resumes when it comes back.
-	suspended bool
+	// daemonGone records that the daemon went away while the run was
+	// going: the run stops where it stands.
+	daemonGone bool
 	// wakes holds the decisions the models made at the judgment points.
 	wakes []wakeRecord
 	// stoppedByOperator reports that the operator stopped the run.
@@ -678,23 +668,6 @@ func (r *run) appendSituation(text string) {
 	}
 	r.messages = append(r.messages, situationMessage(text))
 	r.situationIdx = len(r.messages) - 1
-}
-
-// situationIndex returns where the last situation report sits in a
-// conversation, or -1 when it holds none.
-//
-// The report is the user turn that opens with the reason the run
-// needs the model.
-func situationIndex(msgs []llm.Message) int {
-	for i := len(msgs) - 1; i >= 0; i-- {
-		if msgs[i].Role != llm.RoleUser {
-			continue
-		}
-		if strings.HasPrefix(msgs[i].Text(), situationMark) {
-			return i
-		}
-	}
-	return -1
 }
 
 // markSituation records that the workflow moved on by itself.
@@ -1287,410 +1260,6 @@ func outcomeLine(o messages.Outcome) string {
 	return string(o.Status)
 }
 
-// sessionState is the on-disk shape of an open session.
-//
-// The anchors of the open sessions are part of the run's state: a run
-// that comes back after a restart goes on with the messages it hung
-// its sessions under.
-type sessionState struct {
-	// Kind is what the session is.
-	Kind string `json:"kind"`
-	// Anchor is the message the session's events hang under.
-	Anchor string `json:"anchor"`
-	// CardID is the id the card of the session became in a daemon
-	// that predates the anchor. A state file that names it still
-	// holds a card the run posted itself.
-	CardID string `json:"card_id,omitempty"`
-	// ID names the session.
-	ID string `json:"id,omitempty"`
-	// Job and Round name the round the session is about.
-	Job   string `json:"job,omitempty"`
-	Round int    `json:"round,omitempty"`
-}
-
-// sessionStateOf renders a session for the disk.
-func sessionStateOf(sess *session) *sessionState {
-	if sess == nil {
-		return nil
-	}
-	return &sessionState{
-		Kind:   string(sess.kind),
-		Anchor: sess.anchor,
-		ID:     sess.id,
-		Job:    sess.job,
-		Round:  sess.round,
-	}
-}
-
-// sessionFromState rebuilds a session from the disk.
-func sessionFromState(st *sessionState) *session {
-	if st == nil {
-		return nil
-	}
-	anchor := st.Anchor
-	if anchor == "" && st.CardID != "" {
-		// A state file of an older daemon: the card of the session is
-		// its anchor.
-		anchor = st.CardID
-	}
-	return &session{
-		kind:   sessionKind(st.Kind),
-		anchor: anchor,
-		id:     st.ID,
-		job:    st.Job,
-		round:  st.Round,
-	}
-}
-
-// persistedRun is the on-disk shape of a run.
-//
-// One file holds everything: the DAG progress, the conversation and
-// the judgment history.
-type persistedRun struct {
-	RunID           string             `json:"run_id"`
-	ChatID          string             `json:"chat_id"`
-	Cwd             string             `json:"cwd"`
-	Owner           string             `json:"owner"`
-	Args            map[string]string  `json:"args,omitempty"`
-	Workflow        *wfe.Workflow      `json:"workflow"`
-	State           *wfe.RunState      `json:"state"`
-	History         []wfe.ActionRecord `json:"history"`
-	Transcripts     []actionTranscript `json:"transcripts,omitempty"`
-	Messages        []llm.Message      `json:"messages"`
-	PendingCalls    []pendingCall      `json:"pending_calls"`
-	Ask             *askState          `json:"ask,omitempty"`
-	Inflight        *inflightState     `json:"inflight,omitempty"`
-	Phase           Phase              `json:"phase"`
-	JudgmentStep    string             `json:"judgment_step,omitempty"`
-	Directive       *directive         `json:"directive,omitempty"`
-	Question        string             `json:"question"`
-	Error           string             `json:"error"`
-	Paused          bool               `json:"paused"`
-	PauseReason     string             `json:"pause_reason,omitempty"`
-	RunSession      *sessionState      `json:"run_session,omitempty"`
-	RoundSession    *sessionState      `json:"round_session,omitempty"`
-	DecisionSession *sessionState      `json:"decision_session,omitempty"`
-	RecordSession   *sessionState      `json:"record_session,omitempty"`
-	RoundSessions   []sessionState     `json:"round_sessions,omitempty"`
-	// CommandMsgIDs holds the chat message every step that sent a
-	// command became. The decision about a step hangs under it.
-	CommandMsgIDs    map[string]string `json:"command_msg_ids,omitempty"`
-	System1Decisions int               `json:"system1_decisions"`
-	System2Decisions int               `json:"system2_decisions"`
-	System1Usage     llm.Usage         `json:"system1_usage"`
-	System2Usage     llm.Usage         `json:"system2_usage"`
-	Commands         []CommandInfo     `json:"commands,omitempty"`
-	Agent            string            `json:"agent,omitempty"`
-	Wakes            []wakeRecord      `json:"wakes,omitempty"`
-	ThinkCount       int               `json:"think_count"`
-	ToolCount        int               `json:"tool_count"`
-	LastBeatAt       time.Time         `json:"last_beat_at"`
-	DecisionCount    int               `json:"decision_count"`
-	QuestionCount    int               `json:"question_count"`
-	// RoundRecords holds what every round the run finished came to.
-	// The tree of the rounds is rendered from them, so the tree of a
-	// run that comes back looks the way it looked before.
-	RoundRecords []roundRecord `json:"round_records,omitempty"`
-	// RoundAnswers counts the answers the operator gave in the round
-	// the run is in, and RoundUsage what that round spent. Both are the
-	// run's own: a round that is resumed keeps what it counted.
-	RoundAnswers int       `json:"round_answers,omitempty"`
-	RoundUsage   llm.Usage `json:"round_usage,omitempty"`
-	// OperatorDecisions counts the answers the operator gave over the
-	// whole run.
-	OperatorDecisions int `json:"operator_decisions,omitempty"`
-}
-
-// persist writes the run's state to disk.
-//
-// The state is written after every tool result, so a daemon that dies
-// mid-run comes back with the conversation and the policy intact.
-func (s *Service) persist(r *run) {
-	if s.cfg.StateDir == "" {
-		return
-	}
-	// The sessions are read before the lock: the run holds it while it
-	// writes the state.
-	rounds := r.roundSessionStates()
-	r.mu.Lock()
-	state := persistedRun{
-		RunID:             r.id,
-		ChatID:            r.chatID,
-		Cwd:               r.cwd,
-		Owner:             r.owner,
-		Args:              r.argVals,
-		Workflow:          r.workflow,
-		State:             snapshotState(r.state),
-		History:           append([]wfe.ActionRecord(nil), r.policy.History...),
-		Transcripts:       append([]actionTranscript(nil), r.transcripts...),
-		Messages:          append([]llm.Message(nil), r.messages...),
-		PendingCalls:      append([]pendingCall(nil), r.pendingCalls...),
-		Ask:               r.ask,
-		Inflight:          r.inflight,
-		Phase:             r.phase,
-		JudgmentStep:      r.judgmentStep,
-		Directive:         r.directive,
-		Question:          r.question,
-		Error:             r.errMsg,
-		Paused:            r.paused,
-		PauseReason:       r.pauseReason,
-		RunSession:        sessionStateOf(r.runSession),
-		RoundSession:      sessionStateOf(r.roundSession),
-		DecisionSession:   sessionStateOf(r.decisionSession),
-		RecordSession:     sessionStateOf(r.recordSession),
-		RoundSessions:     rounds,
-		CommandMsgIDs:     r.commandMsgIDsLocked(),
-		System1Decisions:  r.system1Decisions,
-		System2Decisions:  r.system2Decisions,
-		System1Usage:      r.system1Usage,
-		System2Usage:      r.system2Usage,
-		Commands:          r.registry,
-		Agent:             r.agentName,
-		Wakes:             append([]wakeRecord(nil), r.wakes...),
-		ThinkCount:        r.thinkCount,
-		ToolCount:         r.toolCount,
-		LastBeatAt:        r.lastBeatAt,
-		DecisionCount:     r.decisionCount,
-		QuestionCount:     r.questionCount,
-		RoundRecords:      append([]roundRecord(nil), r.roundRecords...),
-		RoundAnswers:      r.roundAnswers,
-		RoundUsage:        r.roundUsage,
-		OperatorDecisions: r.operatorDecisions}
-	r.mu.Unlock()
-
-	if err := os.MkdirAll(s.cfg.StateDir, 0o755); err != nil {
-		s.logger.Warn("me: the state directory could not be created", "err", err)
-		return
-	}
-	raw, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		s.logger.Warn("me: the run state could not be encoded", "run_id", r.id, "err", err)
-		return
-	}
-	path := s.statePath(r.id)
-	tmp, err := writeStateTemp(path, raw)
-	if err != nil {
-		s.logger.Warn("me: the run state could not be written", "run_id", r.id, "err", err)
-		return
-	}
-	if err := replaceStateFile(tmp, path); err != nil {
-		s.logger.Warn("me: the run state could not be replaced", "run_id", r.id, "err", err)
-		_ = os.Remove(tmp)
-	}
-}
-
-// snapshotState copies the progress of a run.
-//
-// The state is written to disk outside the run's lock, and the run
-// moves on while the file is written: the state is copied first.
-func snapshotState(state *wfe.RunState) *wfe.RunState {
-	if state == nil {
-		return nil
-	}
-	out := *state
-	out.Env = maps.Clone(state.Env)
-	out.Rounds = maps.Clone(state.Rounds)
-	if state.EndedRounds != nil {
-		out.EndedRounds = make(map[string]wfe.EndedRound, len(state.EndedRounds))
-		for job, ended := range state.EndedRounds {
-			out.EndedRounds[job] = ended
-		}
-	}
-	out.Steps = make([]wfe.StepState, len(state.Steps))
-	for i, st := range state.Steps {
-		out.Steps[i] = st
-		out.Steps[i].Outcome.Data = maps.Clone(st.Outcome.Data)
-	}
-	return &out
-}
-
-// removeState deletes the persisted state of a run that ended.
-func (s *Service) removeState(runID string) {
-	if s.cfg.StateDir == "" {
-		return
-	}
-	if err := os.Remove(s.statePath(runID)); err != nil && !os.IsNotExist(err) {
-		s.logger.Warn("me: the run state could not be removed", "run_id", runID, "err", err)
-	}
-}
-
-// resumeRuns brings the runs a previous daemon left behind back to
-// life.
-//
-// A run that was waiting for a reply keeps waiting. A run that was
-// working is resumed: the command it was waiting for is resolved
-// through the tracker, and a command whose execution is gone comes
-// back as interrupted.
-//
-// A state file left by an older daemon names a chat that no longer
-// exists: the run cannot go on there, so it is dropped.
-func (s *Service) resumeRuns(ctx context.Context) {
-	if s.cfg.StateDir == "" {
-		return
-	}
-	entries, err := os.ReadDir(s.cfg.StateDir)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			s.logger.Warn("me: the state directory could not be read", "err", err)
-		}
-		return
-	}
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
-			continue
-		}
-		raw, err := os.ReadFile(filepath.Join(s.cfg.StateDir, e.Name()))
-		if err != nil {
-			s.logger.Warn("me: a run state could not be read", "file", e.Name(), "err", err)
-			continue
-		}
-		var state persistedRun
-		if err := json.Unmarshal(raw, &state); err != nil {
-			s.logger.Warn("me: a run state could not be decoded", "file", e.Name(), "err", err)
-			continue
-		}
-		if state.RunID == "" || state.Workflow == nil {
-			continue
-		}
-		if state.ChatID == "" {
-			// The state names a chat the daemon no longer has.
-			// The run cannot go on: it is dropped.
-			s.logger.Warn("me: a run from an older daemon was dropped",
-				"run_id", state.RunID, "file", e.Name())
-			s.removeState(state.RunID)
-			continue
-		}
-		r := s.restoreRun(state)
-		s.mu.Lock()
-		s.runs[r.id] = r
-		s.active[r.chatID] = r
-		s.mu.Unlock()
-
-		s.wg.Add(1)
-		go func() {
-			defer s.wg.Done()
-			s.drive(ctx, r)
-		}()
-	}
-}
-
-// restoreRun rebuilds a run from its persisted state.
-func (s *Service) restoreRun(state persistedRun) *run {
-	ctx, cancel := context.WithCancel(context.Background())
-	commands := usableCommands(state.Commands)
-	policy := s.newPolicy(state.Workflow, state.History, commands)
-	r := &run{
-		svc:               s,
-		id:                state.RunID,
-		chatID:            state.ChatID,
-		cwd:               state.Cwd,
-		owner:             state.Owner,
-		argVals:           state.Args,
-		workflow:          state.Workflow,
-		policy:            policy,
-		state:             state.State,
-		transcripts:       state.Transcripts,
-		messages:          state.Messages,
-		pendingCalls:      state.PendingCalls,
-		ask:               state.Ask,
-		inflight:          state.Inflight,
-		phase:             state.Phase,
-		judgmentStep:      state.JudgmentStep,
-		question:          state.Question,
-		errMsg:            state.Error,
-		paused:            state.Paused,
-		pauseReason:       state.PauseReason,
-		runSession:        sessionFromState(state.RunSession),
-		roundSession:      sessionFromState(state.RoundSession),
-		decisionSession:   sessionFromState(state.DecisionSession),
-		recordSession:     sessionFromState(state.RecordSession),
-		commandMsgIDs:     maps.Clone(state.CommandMsgIDs),
-		system1Decisions:  state.System1Decisions,
-		system2Decisions:  state.System2Decisions,
-		system1Usage:      state.System1Usage,
-		system2Usage:      state.System2Usage,
-		registry:          state.Commands,
-		commands:          commands,
-		agentName:         s.agentName(state.Agent),
-		wakes:             state.Wakes,
-		thinkCount:        state.ThinkCount,
-		toolCount:         state.ToolCount,
-		lastBeatAt:        state.LastBeatAt,
-		decisionCount:     state.DecisionCount,
-		questionCount:     state.QuestionCount,
-		roundRecords:      state.RoundRecords,
-		roundAnswers:      state.RoundAnswers,
-		roundUsage:        state.RoundUsage,
-		operatorDecisions: state.OperatorDecisions,
-		situationIdx:      situationIndex(state.Messages),
-		ctx:               ctx,
-		cancel:            cancel,
-		resume:            make(chan struct{}, 1),
-		unpause:           make(chan struct{}, 1),
-		done:              make(chan struct{})}
-	if r.state == nil {
-		r.state = newRunState(r.id, state.Workflow.Name, state.Cwd, time.Now())
-	}
-	if r.phase == "" {
-		r.phase = PhaseRunning
-	}
-	if oldConversation(r.messages) {
-		// The conversation was written by an older daemon, in a shape
-		// the tools no longer have. The run starts over from the
-		// situation report instead. The pending calls go with it: a
-		// call the model never saw answered would come back as a
-		// result without a question.
-		r.messages = nil
-		r.pendingCalls = nil
-	}
-	r.roundSessions = map[iteration]*session{}
-	for _, entry := range state.RoundSessions {
-		sess := sessionFromState(&entry)
-		r.roundSessions[iteration{job: entry.Job, round: entry.Round}] = sess
-	}
-	// The tokens of the run are the tokens of its last round: the
-	// record of that round carries them. Without them the tree of a
-	// run that comes back would count less than the tree before the
-	// restart.
-	if n := len(r.roundRecords); n > 0 {
-		r.cumUsage = r.roundRecords[n-1].Usage
-	}
-	r.policy.SetRounds(r.state.Rounds)
-	if len(r.argVals) > 0 {
-		names := make([]string, 0, len(r.argVals))
-		for name := range r.argVals {
-			names = append(names, name)
-		}
-		slices.Sort(names)
-		r.argNames = names
-	}
-	return r
-}
-
-// oldConversation reports whether the conversation was written in a
-// shape the tools no longer have.
-//
-// The old run_step took a command; the new one takes a step's id. A
-// conversation that carries the old call cannot be read by the model
-// the way it was written, so it is dropped.
-func oldConversation(msgs []llm.Message) bool {
-	for _, m := range msgs {
-		for _, p := range m.Parts {
-			if p.Type != llm.PartToolCall || p.ToolName != toolRunStep {
-				continue
-			}
-			var args map[string]any
-			if err := json.Unmarshal(p.Args, &args); err != nil {
-				continue
-			}
-			if _, ok := args["command"]; ok {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // pendingCallList returns the tool calls that still have to run.
 func (r *run) pendingCallList() []pendingCall {
 	r.mu.Lock()
@@ -1991,21 +1560,6 @@ func (r *run) setDecisionSession(sess *session) {
 	r.mu.Unlock()
 }
 
-// recordSessionRef returns the session of the record the run leaves
-// behind.
-func (r *run) recordSessionRef() *session {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.recordSession
-}
-
-// setRecordSession records the session of the record.
-func (r *run) setRecordSession(sess *session) {
-	r.mu.Lock()
-	r.recordSession = sess
-	r.mu.Unlock()
-}
-
 // roundSessionOf returns the session of a round the run has been in.
 func (r *run) roundSessionOf(it iteration) (*session, bool) {
 	r.mu.Lock()
@@ -2024,35 +1578,6 @@ func (r *run) rememberRoundSession(it iteration, sess *session) {
 	r.mu.Unlock()
 }
 
-// roundSessionStates returns the session of every round the run has
-// entered.
-func (r *run) roundSessionStates() []sessionState {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	out := make([]sessionState, 0, len(r.roundSessions))
-	for it, sess := range r.roundSessions {
-		if sess == nil {
-			continue
-		}
-		out = append(out, sessionState{
-			Kind:   string(sess.kind),
-			Anchor: sess.anchor,
-			ID:     sess.id,
-			Job:    it.job,
-			Round:  it.round,
-		})
-	}
-	// The map has no order of its own: the file is written in the
-	// order of the rounds.
-	slices.SortFunc(out, func(a, b sessionState) int {
-		if a.Job != b.Job {
-			return strings.Compare(a.Job, b.Job)
-		}
-		return a.Round - b.Round
-	})
-	return out
-}
-
 // iterationOfStep returns the iteration a step of the workflow runs
 // in: the job it belongs to and the round of that job.
 func (r *run) iterationOfStep(idx int) iteration {
@@ -2069,23 +1594,23 @@ func (r *run) iterationOfStep(idx int) iteration {
 	return iteration{job: job, round: r.state.RoundOf(job)}
 }
 
-// suspend stops the run without ending it.
+// markDaemonGone stops the run without ending it.
 //
-// The daemon is going away, not the run: the state is kept, so the
-// run resumes when the daemon comes back.
-func (r *run) suspend() {
+// The daemon is going away, not the run: the run stops where it
+// stands, and nothing of it is published to the chat.
+func (r *run) markDaemonGone() {
 	r.mu.Lock()
-	r.suspended = true
+	r.daemonGone = true
 	r.mu.Unlock()
 	r.cancel()
 }
 
-// isSuspended reports whether the daemon went away while the run was
+// isDaemonGone reports whether the daemon went away while the run was
 // going.
-func (r *run) isSuspended() bool {
+func (r *run) isDaemonGone() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.suspended
+	return r.daemonGone
 }
 
 // markFinished records that the model ended the run.
@@ -2182,9 +1707,7 @@ func (r *run) roundStartLocked(job string, round int) time.Time {
 		if rec.StepID == "" {
 			continue
 		}
-		// An action without a round belongs to the first one: the
-		// history of a run that was persisted before the rounds were
-		// counted says nothing else.
+		// An action without a round belongs to the first one.
 		at := rec.Round
 		if at <= 0 {
 			at = 1
@@ -2319,12 +1842,6 @@ func (r *run) setSummary(text string) {
 // The question is asked in the chat the run works in, as a reply to
 // the run's overview: the answer comes back the way a person's reply
 // comes back, and the run does not need a channel of its own.
-//
-// The run is persisted before the question is asked, and the wait
-// starts after both. The order matters: the state that says "this
-// run is waiting for an answer" has to be durable before the
-// operator is told, so a daemon that restarts in the window between
-// the two picks the run up as asking.
 func (s *Service) askUser(ctx context.Context, r *run, question string, options []llm.Option) (string, error) {
 	r.mu.Lock()
 	waiting := r.ask != nil
@@ -2346,7 +1863,6 @@ func (s *Service) askUser(ctx context.Context, r *run, question string, options 
 	}
 
 	if !waiting {
-		s.persist(r)
 		msgID, err := s.askQuestion(ctx, r, question, options)
 		if err != nil {
 			s.logger.Warn("me: the question could not be asked", "run_id", r.id, "err", err)
@@ -2357,7 +1873,6 @@ func (s *Service) askUser(ctx context.Context, r *run, question string, options 
 			}
 			r.mu.Unlock()
 		}
-		s.persist(r)
 		s.refreshRun(r)
 	}
 	reply, err := r.awaitReply(ctx)

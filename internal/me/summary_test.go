@@ -2,10 +2,7 @@ package me
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -166,11 +163,6 @@ func TestStop_PostsTheRecordOfTheSession(t *testing.T) {
 	if before.System1Decisions != 1 || before.System2Decisions != 0 {
 		t.Errorf("the run decided %d times with the decision model and %d times with the chat model, want 1 and 0",
 			before.System1Decisions, before.System2Decisions)
-	}
-	// The state of a run that ended goes with it: a file that outlived
-	// the run would be resumed by the next daemon.
-	if _, err := os.Stat(filepath.Join(dir, "runs", r.id+".json")); !os.IsNotExist(err) {
-		t.Errorf("the state of the stopped run is still on disk: %v", err)
 	}
 }
 
@@ -646,50 +638,8 @@ func TestTheWakeLogHoldsOneRecordPerModelCall(t *testing.T) {
 	}
 }
 
-// TestTheWakeLogSurvivesTheDaemon — the wake log is persisted with the
-// rest of the run.
-func TestTheWakeLogSurvivesTheDaemon(t *testing.T) {
-	dir := t.TempDir()
-	writeWorkflow(t, dir, "one", oneStepWorkflow)
-
-	decider := &scriptedDecider{answers: []llm.DecisionResponse{
-		decisionResp("jev", optionEscalate, 0.1, 0),
-	}}
-	svc, op := testService(t, dir, Config{Decider: decider})
-	op.steps = []fakeStep{{outcome: messages.Outcome{
-		Status:  messages.OutcomeFailed,
-		Summary: "the step failed",
-	}}}
-
-	if _, _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
-	}); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	waitAsked(t, op, "Which step should run next?")
-	waitStateFile(t, dir)
-
-	r := chatRun(t, svc, "obs-1")
-	raw := readStateFile(t, filepath.Join(dir, "runs", r.id+".json"))
-	var state persistedRun
-	if err := json.Unmarshal(raw, &state); err != nil {
-		t.Fatalf("decode state: %v", err)
-	}
-	if len(state.Wakes) != 1 {
-		t.Fatalf("the state file holds %d wake records, want 1", len(state.Wakes))
-	}
-	if state.Wakes[0].Who != decisionDecider {
-		t.Errorf("the persisted record is %q, want %q", state.Wakes[0].Who, decisionDecider)
-	}
-
-	restored := svc.restoreRun(state)
-	if wakes := restored.wakeRecords(); len(wakes) != 1 {
-		t.Errorf("the restored run holds %d wake records, want 1", len(wakes))
-	}
-}
-
-// TestTheDaemonShutdownPostsNoRecord — the daemon is going away, not
-// the run: the run keeps its state and resumes when it comes back.
+// TestTheDaemonShutdownPostsNoRecord — the daemon is going away: the
+// run stops where it stands and publishes nothing.
 func TestTheDaemonShutdownPostsNoRecord(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)

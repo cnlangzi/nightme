@@ -12,7 +12,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -374,86 +373,4 @@ func TestRun_CountsItsActivityEvenWhenTheChatHidesIt(t *testing.T) {
 		time.Sleep(2 * time.Millisecond)
 	}
 	t.Fatal("the run counted nothing")
-}
-
-// TestTheStateOfAnOlderDaemonStillNamesTheCards — a state file of a
-// daemon that predates the anchor names the card of a session: the
-// run that comes back goes on with the card it opened.
-func TestTheStateOfAnOlderDaemonStillNamesTheCards(t *testing.T) {
-	dir := t.TempDir()
-	writeWorkflow(t, dir, "one", oneStepWorkflow)
-
-	legacy := &sessionState{Kind: string(sessionRound), CardID: "card-9", ID: "main · round 1", Job: "main", Round: 1}
-	sess := sessionFromState(legacy)
-	if sess.anchor != "card-9" {
-		t.Errorf("the session hangs under %q, want the card of the older daemon", sess.anchor)
-	}
-	// A state of the current shape keeps its anchor.
-	current := &sessionState{Kind: string(sessionRound), Anchor: "om_start"}
-	sess = sessionFromState(current)
-	if sess.anchor != "om_start" {
-		t.Errorf("the session hangs under %q, want om_start", sess.anchor)
-	}
-}
-
-// TestTheActivityOfTheRunSurvivesTheDaemon — the counters, the time of
-// the last activity and the open sessions are persisted with the rest
-// of the run.
-func TestTheActivityOfTheRunSurvivesTheDaemon(t *testing.T) {
-	dir := t.TempDir()
-	writeWorkflow(t, dir, "one", oneStepWorkflow)
-
-	provider := &scriptedProvider{responses: []llm.Response{
-		{Message: textAndToolCall("which branch?", "c1", toolAskHuman,
-			map[string]any{"question": "Which branch?"})},
-	}}
-	svc, op := testService(t, dir, Config{Provider: provider})
-	op.steps = []fakeStep{pendingStep("still going")}
-	if _, _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
-	}); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	waitAsked(t, op, "Which branch?")
-	waitStateFile(t, dir)
-
-	r := chatRun(t, svc, "obs-1")
-	raw := readStateFile(t, filepath.Join(dir, "runs", r.id+".json"))
-	var state persistedRun
-	if err := json.Unmarshal(raw, &state); err != nil {
-		t.Fatalf("decode state: %v", err)
-	}
-	if state.ThinkCount != 1 {
-		t.Errorf("the state file holds %d model turns, want 1", state.ThinkCount)
-	}
-	if state.ToolCount != 1 {
-		t.Errorf("the state file holds %d tool calls, want 1", state.ToolCount)
-	}
-	if state.LastBeatAt.IsZero() {
-		t.Error("the state file holds no time of the last activity")
-	}
-	if state.RunSession == nil || state.RunSession.Anchor != "om_start" {
-		t.Errorf("the state file holds no anchor of the run: %+v", state.RunSession)
-	}
-	if state.RoundSession == nil || state.RoundSession.Anchor == "" {
-		t.Error("the state file holds no card of the round")
-	}
-	if state.DecisionSession == nil || state.DecisionSession.Anchor == "" {
-		t.Error("the state file holds no card of the decision")
-	}
-
-	restored := svc.restoreRun(state)
-	if restored.thinkCount != 1 || restored.toolCount != 1 {
-		t.Errorf("the restored run holds %d model turns and %d tool calls, want 1 and 1",
-			restored.thinkCount, restored.toolCount)
-	}
-	if !restored.lastBeatAt.Equal(state.LastBeatAt) {
-		t.Errorf("the restored run stands at %v, want %v", restored.lastBeatAt, state.LastBeatAt)
-	}
-	if restored.runSessionRef() == nil || restored.runSessionRef().anchor != state.RunSession.Anchor {
-		t.Error("the restored run lost the anchor of the run")
-	}
-	if restored.decisionSessionRef() == nil || restored.decisionSessionRef().anchor != state.DecisionSession.Anchor {
-		t.Error("the restored run lost the card of the decision")
-	}
 }

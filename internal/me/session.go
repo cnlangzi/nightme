@@ -218,9 +218,6 @@ func (s *Service) adoptState(r *run, sess *session, it iteration, inRound bool) 
 	}
 	r.setRoundSession(sess)
 	r.rememberRoundSession(it, sess)
-	// The anchor of the round moved: the state on the disk names the
-	// card the run goes on with.
-	s.persist(r)
 }
 
 // publishState publishes the state of the run in the given session.
@@ -323,11 +320,6 @@ func (s *Service) closeRoundSession(ctx context.Context, r *run) {
 	s.publishReply(ctx, r, sess, decisionsText(rec))
 	s.publishResult(ctx, r, sess, string(rec.Outcome.Status))
 	r.setRoundSession(nil)
-	// The facts of the round belong to the run: a daemon that comes
-	// back renders the tree of the rounds the same way. The state goes
-	// to the disk after the session is closed: a state that still named
-	// the round that just ended would close it a second time.
-	s.persist(r)
 }
 
 // closeDecisionSession ends the session of the decision that is open.

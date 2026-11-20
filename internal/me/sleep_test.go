@@ -88,8 +88,8 @@ jobs:
 	}
 }
 
-// TestTheDaemonShutdownEndsTheGapAtOnce — the daemon is going away,
-// not the run: the wait ends at once and the run comes back later.
+// TestTheDaemonShutdownEndsTheGapAtOnce — the daemon is going away:
+// the wait ends at once and the run stops where it stands.
 func TestTheDaemonShutdownEndsTheGapAtOnce(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "sleep", `title: Sleeps between the rounds.
@@ -119,64 +119,6 @@ jobs:
 	if sent := op.Sent(); len(sent) != 1 {
 		t.Errorf("the chat received %v, want only the command of the first round", sent)
 	}
-}
-
-// TestTheGapSurvivesTheDaemon — the daemon goes away while the run
-// waits the gap: the run that comes back waits it again. The back-off
-// is not lost with the daemon.
-func TestTheGapSurvivesTheDaemon(t *testing.T) {
-	dir := t.TempDir()
-	writeWorkflow(t, dir, "sleep", `title: Sleeps between the rounds.
-jobs:
-  main:
-    iterations: 2
-    sleep: 1h
-    steps:
-      - id: fix
-        message: /gtw fix
-`)
-
-	svc, op := testService(t, dir, noModels())
-	if _, _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "sleep", ChatID: "obs-1", Cwd: "/tmp/work",
-	}); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	waitSent(t, op, "/gtw fix")
-	r := chatRun(t, svc, "obs-1")
-	// The run entered the next round and waits the gap.
-	waitRound(t, r, "main", 2)
-	time.Sleep(50 * time.Millisecond)
-
-	// The daemon goes away while the run waits the gap.
-	if err := svc.Shutdown(context.Background()); err != nil {
-		t.Fatalf("shutdown: %v", err)
-	}
-	waitStateFile(t, dir)
-
-	// The next daemon picks the run up: it waits the gap again, so
-	// the round does not start.
-	_, op2 := testService(t, dir, noModels())
-	time.Sleep(200 * time.Millisecond)
-	if sent := op2.Sent(); len(sent) != 0 {
-		t.Errorf("the chat received %v, want the round to wait the gap", sent)
-	}
-}
-
-// waitRound waits until the run is in the round of the job.
-func waitRound(t *testing.T, r *run, job string, round int) {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		r.mu.Lock()
-		got := r.state.Rounds[job]
-		r.mu.Unlock()
-		if got >= round {
-			return
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-	t.Fatalf("the run did not reach the round %d of %s", round, job)
 }
 
 // TestTheGapIsSilent — the gap is not a step: it carries no row on the

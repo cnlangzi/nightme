@@ -132,7 +132,7 @@
 | Action 注入模型（ActionRegistry + ShellAction 包装用户脚本）| [WFE.md](./WFE.md) §5.3 + [feat/F-workflow-engine.md](./feat/F-workflow-engine.md) |
 | 就绪集与快路径（唯一就绪步骤 + 上一步 ok/noop → 不问模型）| [WFE.md](./WFE.md) §8.2 |
 | 判断点（就绪集为空 / 分叉 / 上一步不是 ok/noop / 步骤失败 / 命令还在等）| [WFE.md](./WFE.md) §8.3 |
-| Run 状态持久化（`~/.nightme/workflows/runs/<run-id>.json`：DAG 进度 + 对话 + 判断历史）| [WFE.md](./WFE.md) §8.11 |
+| Run 只活在内存里（不落盘；daemon 重启即失去这次运行）| [WFE.md](./WFE.md) §8.11 |
 
 ### 8.1 个人 Agent（`me`）
 
@@ -147,7 +147,7 @@
 | `me.llm` / `me.decider` 配置（模型与凭据由用户指定）| [WFE.md](./WFE.md) §8.8 |
 | `/me start` / `/me reply` / `/me pause` / `/me resume` / `/me next` / `/me stop` / `/me status` | [WFE.md](./WFE.md) §8.9 |
 | Outcome 词汇表与 settled 协议 | [me.md](./me.md) |
-| Guardrails 与恢复（迭代 / token 预算 / 超时 / stall / 持久化）| [WFE.md](./WFE.md) §8.11 |
+| Guardrails 与恢复（迭代 / token 预算 / 超时 / stall）| [WFE.md](./WFE.md) §8.11 |
 
 Workflow 文件位置：`~/.nightme/workflows/<name>/workflow.yml`，一个 bundle 目录就是 workflow，目录在 workflows 目录下的路径就是 workflow 的名字，被问到时才读取。Engine 入口：`pkg/wfe/`；个人 agent：`internal/me`。
 

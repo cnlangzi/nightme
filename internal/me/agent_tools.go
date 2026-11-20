@@ -273,7 +273,6 @@ func (s *Service) runPendingCalls(ctx context.Context, r *run) error {
 				s.refreshRun(r)
 				s.appendToolResult(r, call, stepResult{Status: "error", Summary: te.Error()}, true)
 				r.dropPendingCall()
-				s.persist(r)
 				continue
 			}
 			s.publishToolEnd(ctx, r, sess, call, stepResult{}, err)
@@ -288,7 +287,6 @@ func (s *Service) runPendingCalls(ctx context.Context, r *run) error {
 		}
 		r.dropPendingCall()
 		s.appendToolResult(r, call, res, false)
-		s.persist(r)
 		if r.isFinished() {
 			return errFinished
 		}
@@ -396,7 +394,6 @@ func (s *Service) runStepAgain(ctx context.Context, r *run, step wfe.Step, fresh
 		return stepResult{Status: statusWaiting, Summary: verdict.Outcome.Summary}, nil
 	}
 	r.recordStep(job, step, verdict.Outcome)
-	s.persist(r)
 	s.refreshRun(r)
 	return stepResult{
 		Status:     string(verdict.Outcome.Status),
@@ -447,7 +444,6 @@ func (s *Service) skipStep(ctx context.Context, r *run, step wfe.Step, summary s
 	// The history has to agree with the run state: the step is
 	// skipped, and the run says so.
 	r.record(wfe.ActionKindRun, s.stepCommand(r, step), step.ID, skipped)
-	s.persist(r)
 	s.refreshRun(r)
 	return stepResult{
 		Status:  string(skipped.Status),
@@ -841,7 +837,6 @@ func (s *Service) toolEndRound(ctx context.Context, r *run, _ pendingCall) (step
 	// The round moved on: the model reads the new situation before it
 	// decides again.
 	r.markSituation()
-	s.persist(r)
 	s.refreshRun(r)
 	return stepResult{
 		Status:  string(wfe.OutcomeOK),
@@ -873,7 +868,6 @@ func (s *Service) toolFinish(ctx context.Context, r *run, call pendingCall) (ste
 		s.finish(r, PhaseDone, "")
 	}
 	s.refreshRun(r)
-	s.persist(r)
 	return stepResult{Status: status, Summary: summary}, nil
 }
 
@@ -988,9 +982,8 @@ func (s *Service) runCommandInner(ctx context.Context, r *run, command string, i
 		msgID = id
 		r.setLastCommandMsgID(msgID)
 		r.setInflight(&inflightState{MsgID: msgID, Command: command, Instruct: instruct})
-		// The in-flight command is persisted right away: a daemon
-		// that dies while it runs comes back and resolves it.
-		s.persist(r)
+		// The state of the run goes to the chat right away: the
+		// command is in flight.
 		s.refreshRun(r)
 	}
 	return s.watchCommand(ctx, r, msgID, command)

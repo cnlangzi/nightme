@@ -2,8 +2,6 @@ package me
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -223,37 +221,6 @@ func TestTheStateTakesTheCardOfTheRoundOver(t *testing.T) {
 	}
 	if got := op.EventsOf(round.anchor); got != seen {
 		t.Errorf("the card of the round got %d events, want the %d it had", got, seen)
-	}
-}
-
-// TestTheStateCardIsTheCardOfTheRound — the card of the state is the
-// card the round goes on with: the state on the disk names it.
-func TestTheStateCardIsTheCardOfTheRound(t *testing.T) {
-	dir := t.TempDir()
-	writeWorkflow(t, dir, "one", oneStepWorkflow)
-
-	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
-	op.steps = []fakeStep{{open: true}}
-
-	runID, _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
-	})
-	if err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	waitSent(t, op, "/gtw commit")
-
-	r := activeRun(t, svc, "obs-1")
-	if err := svc.Status(context.Background(), "obs-1", "om_status"); err != nil {
-		t.Fatalf("status: %v", err)
-	}
-	svc.persist(r)
-	raw, err := os.ReadFile(filepath.Join(dir, "runs", runID+".json"))
-	if err != nil {
-		t.Fatalf("the state of the run is gone: %v", err)
-	}
-	if !strings.Contains(string(raw), "om_status") {
-		t.Errorf("the state of the run does not name the card of the state: %s", raw)
 	}
 }
 

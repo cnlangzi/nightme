@@ -79,6 +79,10 @@ func decisionAnswer(kind string, d OperatorDecision) string {
 // placeholder for it.
 func (s *Service) answerCommand(ctx context.Context, r *run, messageID, answer string) {
 	it, inRound := r.roundIteration()
+	// A card of the run's own is opened for a pause: the run stops and
+	// shows where it stands. A card the operator asked from is where the
+	// operator is looking.
+	own := messageID == ""
 	sess := r.stateSession(it, inRound)
 	if messageID == "" {
 		sess = s.placeholder(ctx, r, sess, stateLine, r.stateAnchor(""))
@@ -89,6 +93,6 @@ func (s *Service) answerCommand(ctx context.Context, r *run, messageID, answer s
 	// the identity as a message of its own leads the card with it.
 	s.publishInit(ctx, r, sess)
 	s.publishReply(ctx, r, sess, answer)
-	s.adoptState(r, sess, it, inRound)
+	s.adoptState(r, sess, it, inRound, own)
 	s.publishState(ctx, r, sess, it, inRound)
 }

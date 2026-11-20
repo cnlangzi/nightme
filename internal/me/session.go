@@ -211,9 +211,18 @@ func (r *run) stateSession(it iteration, inRound bool) *session {
 //
 // The run may have moved on to another round while the state was on its
 // way: the card of the round stays the one it had.
-func (s *Service) adoptState(r *run, sess *session, it iteration, inRound bool) {
+//
+// A card the run opened for itself is a card of a pause. The operator
+// may take the pause away while the state is on its way — the run goes
+// on, and the operator is answered on the card of their own command.
+// The card of the pause is then a snapshot of a moment that has passed,
+// and it does not take the card of the round.
+func (s *Service) adoptState(r *run, sess *session, it iteration, inRound, own bool) {
 	now, still := r.roundIteration()
 	if !inRound || !still || now != it || sess.anchor == "" {
+		return
+	}
+	if own && !r.pausePending() {
 		return
 	}
 	r.setRoundSession(sess)

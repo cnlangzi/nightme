@@ -731,10 +731,18 @@ agent 在判断点上给出一个指令：`resume`（修好之后把坏掉的那
 |---|---|
 | `there is no workflow named "<name>" (known: ...)` | 没有名字叫这个的 workflow。 |
 | `neither me.llm nor me.decider is configured` | 两个模型都没配，agent 没有可决策的东西。 |
+| `me.llm.protocol is not set (known: ...)` | chat 模型没有填协议名；已经注册的协议列在后面。 |
+| `me.llm.model is not set` | chat 模型没有填模型名。 |
+| `me.decider.protocol is not set (known: ...)` | 决策模型没有填协议名；已经注册的协议列在后面。 |
+| `me.decider.model is not set` | 决策模型没有填模型名。 |
+| `the chat model could not be built: ...` | chat 模型的配置建不起来。 |
+| `the decision model could not be built: ...` | 决策模型的配置建不起来。 |
 | `there are no workflows in <dir>` | workflows 目录里没有 workflow。 |
 | `me is disabled: the workflows in <dir> cannot be loaded: ...` | workflows 目录里的 YAML 写坏了。 |
 
 workflows 目录里的 YAML 写坏了，个人 agent 起不来——`nightme logs` 会报出来。daemon 照常起来，`/me` 用加载错误拒绝每一次运行。
+
+模型配了但建不起来，只停掉那一个模型：daemon 照常起来，agent 用还在的那个模型照常工作，`nightme logs` 报出这个失败，`/me` 说清楚是哪个键坏了。
 
 ### 护栏与参考
 

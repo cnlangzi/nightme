@@ -922,10 +922,20 @@ as `${{ steps.<id>.outputs.status }}`, the facts under
 | `there is no workflow named "<name>" (known: ...)` | No loaded workflow carries that name. |
 | `<file> could not be loaded: ...` | The file of that name did not load. The workflows beside it still run. |
 | `neither me.llm nor me.decider is configured` | Neither model is configured, so the agent has nothing to decide with. |
+| `me.llm.protocol is not set (known: ...)` | The chat model names no protocol. The protocols that are registered are listed. |
+| `me.llm.model is not set` | The chat model names no model. |
+| `me.decider.protocol is not set (known: ...)` | The decision model names no protocol. The protocols that are registered are listed. |
+| `me.decider.model is not set` | The decision model names no model. |
+| `the chat model could not be built: ...` | The configuration of the chat model does not build. |
+| `the decision model could not be built: ...` | The configuration of the decision model does not build. |
 | `there are no workflows in <dir>` | The workflows directory holds no workflow. |
 
 A file that does not load stops only itself: the daemon comes up, the workflows
 beside it work, and `nightme logs` reports the failure.
+
+A model that is configured but cannot be built stops only that model: the daemon
+comes up, the agent runs with the model that is there, `nightme logs` reports
+the failure, and `/me` says which key is broken.
 
 ### Guardrails and reference
 

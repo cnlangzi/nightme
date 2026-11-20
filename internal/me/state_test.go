@@ -115,34 +115,30 @@ func TestTheStateCarriesTheStateOfTheRound(t *testing.T) {
 		t.Fatalf("status: %v", err)
 	}
 
-	card, state := lastState(op)
-	if len(state) != 4 {
-		t.Fatalf("the state carries %d messages, want the identity line, the phase line, the tree and the checklist", len(state))
+	card, msgs := stateCard(op, "om_status")
+	if len(msgs) == 0 {
+		t.Fatal("the run published no state")
 	}
 	// The card of the state hangs under the message the operator asked
 	// from.
 	if card.ReplyTo != "om_status" {
 		t.Errorf("the card of the state hangs under %q, want om_status", card.ReplyTo)
 	}
-	if state[0].Kind != messages.OutInit {
-		t.Errorf("the first message is %q, want the identity line", state[0].Kind)
+	state := readState(msgs)
+	if !state.identity {
+		t.Error("the state carries no identity line")
 	}
-	if state[1].Kind != messages.OutReply || !strings.HasPrefix(state[1].Text, "running") {
-		t.Errorf("the second message is %q (%q), want the phase line", state[1].Kind, state[1].Text)
+	if !strings.HasPrefix(state.phase, "running") {
+		t.Errorf("the phase line is %q, want the phase of the run", state.phase)
 	}
-	if state[2].Kind != messages.OutReply || !strings.HasPrefix(state[2].Text, "rounds:") {
-		t.Errorf("the third message is %q (%q), want the tree of the rounds", state[2].Kind, state[2].Text)
+	if !state.tree {
+		t.Error("the state carries no tree of the rounds")
 	}
-	if state[3].Kind != messages.OutTaskUpdate || state[3].TaskList == nil {
-		t.Fatalf("the fourth message is %q, want the checklist of the round", state[3].Kind)
+	if len(state.checklist) != 2 {
+		t.Errorf("the checklist carries %d rows, want one per step of the round", len(state.checklist))
 	}
-	if items := state[3].TaskList.Items; len(items) != 2 {
-		t.Errorf("the checklist carries %d rows, want one per step of the round", len(items))
-	}
-	for _, m := range state {
-		if m.Kind == messages.OutHeartbeat {
-			t.Error("the state carries a heartbeat")
-		}
+	if state.heartbeats != 0 {
+		t.Error("the state carries a heartbeat")
 	}
 
 	// The round is not started over: its start time and what it spent
@@ -183,7 +179,7 @@ func TestTheStateOpensACardUnderTheMessageThatAskedForIt(t *testing.T) {
 	if op.Posted() != cards+1 {
 		t.Fatalf("the run opened %d cards, want the card of the state", op.Posted()-cards)
 	}
-	card, state := lastState(op)
+	card, state := stateCard(op, "om_status")
 	if len(state) == 0 {
 		t.Fatal("the run published no state")
 	}
@@ -225,7 +221,7 @@ func TestTheStateTakesTheCardOfTheRoundOver(t *testing.T) {
 		t.Fatalf("status: %v", err)
 	}
 
-	card, _ := lastState(op)
+	card, _ := stateCard(op, "om_status")
 	got := r.roundSessionRef()
 	if got == nil || got.anchor != card.ID {
 		t.Errorf("the round goes on with %v, want the card of the state", got)
@@ -256,7 +252,7 @@ func TestTheStateCardIsTheCardOfTheRound(t *testing.T) {
 	if err := svc.Status(context.Background(), "obs-1", "om_status"); err != nil {
 		t.Fatalf("status: %v", err)
 	}
-	card, _ := lastState(op)
+	card, _ := stateCard(op, "om_status")
 	svc.persist(r)
 	raw, err := os.ReadFile(filepath.Join(dir, "runs", runID+".json"))
 	if err != nil {
@@ -328,7 +324,7 @@ func TestAPausePublishesTheState(t *testing.T) {
 	if op.Posted() != before+1 {
 		t.Fatalf("the run opened %d cards, want the card of the state", op.Posted()-before)
 	}
-	card, _ := lastState(op)
+	card, _ := stateCard(op, "om_pause")
 	if card.ReplyTo != "om_pause" {
 		t.Errorf("the card of the state hangs under %q, want om_pause", card.ReplyTo)
 	}
@@ -398,21 +394,22 @@ func TestAResumePublishesTheState(t *testing.T) {
 	if _, err := svc.Resume(context.Background(), "obs-1", "om_resume", ""); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
-	card, state := waitForStateCard(t, op, 4)
+	card, msgs := waitForStateCard(t, op, "om_resume", 4)
 	if card.ReplyTo != "om_resume" {
 		t.Errorf("the card of the state hangs under %q, want om_resume", card.ReplyTo)
 	}
-	if len(state) < 4 {
-		t.Fatalf("the state carries %d messages, want the identity line, the phase line, the tree and the checklist", len(state))
+	state := readState(msgs)
+	if !state.identity {
+		t.Error("the state carries no identity line")
 	}
-	if state[0].Kind != messages.OutInit {
-		t.Errorf("the first message is %q, want the identity line", state[0].Kind)
+	if !strings.HasPrefix(state.phase, "running") {
+		t.Errorf("the phase line is %q, want the phase of the run", state.phase)
 	}
-	if state[1].Kind != messages.OutReply || !strings.HasPrefix(state[1].Text, "running") {
-		t.Errorf("the phase line is %q (%q), want the phase of the run", state[1].Kind, state[1].Text)
+	if !state.tree {
+		t.Error("the state carries no tree of the rounds")
 	}
-	if state[2].Kind != messages.OutReply || !strings.HasPrefix(state[2].Text, "rounds:") {
-		t.Errorf("the tree is %q (%q), want the tree of the rounds", state[2].Kind, state[2].Text)
+	if state.checklist == nil {
+		t.Error("the state carries no checklist of the round")
 	}
 	// The card of the state is the card the run works on from now on.
 	if got := r.roundSessionRef(); got == nil || got.anchor != card.ID {
@@ -433,16 +430,14 @@ func TestAResumeThatDecidesNothingPublishesTheState(t *testing.T) {
 	if _, err := svc.Resume(context.Background(), "obs-1", "om_resume", ""); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
-	_, state := waitForStateCard(t, op, 2)
-	if len(state) < 2 {
-		t.Fatalf("the state carries %d messages, want the identity line and the phase line", len(state))
-	}
-	if state[0].Kind != messages.OutInit {
-		t.Errorf("the first message is %q, want the identity line", state[0].Kind)
+	_, msgs := waitForStateCard(t, op, "om_resume", 2)
+	state := readState(msgs)
+	if !state.identity {
+		t.Error("the state carries no identity line")
 	}
 	// The run waits for the operator no more: it goes on.
-	if state[1].Kind != messages.OutReply || !strings.HasPrefix(state[1].Text, "running") {
-		t.Errorf("the phase line is %q (%q), want the phase of the run", state[1].Kind, state[1].Text)
+	if !strings.HasPrefix(state.phase, "running") {
+		t.Errorf("the phase line is %q, want the phase of the run", state.phase)
 	}
 }
 
@@ -478,21 +473,22 @@ func TestANextPublishesTheState(t *testing.T) {
 	if _, err := svc.Next(context.Background(), "obs-1", "om_next", ""); err != nil {
 		t.Fatalf("next: %v", err)
 	}
-	card, state := waitForStateCard(t, op, 4)
+	card, msgs := waitForStateCard(t, op, "om_next", 4)
 	if card.ReplyTo != "om_next" {
 		t.Errorf("the card of the state hangs under %q, want om_next", card.ReplyTo)
 	}
-	if len(state) < 4 {
-		t.Fatalf("the state carries %d messages, want the identity line, the phase line, the tree and the checklist", len(state))
+	state := readState(msgs)
+	if !state.identity {
+		t.Error("the state carries no identity line")
 	}
-	if state[0].Kind != messages.OutInit {
-		t.Errorf("the first message is %q, want the identity line", state[0].Kind)
+	if !strings.HasPrefix(state.phase, "running") {
+		t.Errorf("the phase line is %q, want the phase of the run", state.phase)
 	}
-	if state[1].Kind != messages.OutReply || !strings.HasPrefix(state[1].Text, "running") {
-		t.Errorf("the phase line is %q (%q), want the phase of the run", state[1].Kind, state[1].Text)
+	if !state.tree {
+		t.Error("the state carries no tree of the rounds")
 	}
-	if state[2].Kind != messages.OutReply || !strings.HasPrefix(state[2].Text, "rounds:") {
-		t.Errorf("the tree is %q (%q), want the tree of the rounds", state[2].Kind, state[2].Text)
+	if state.checklist == nil {
+		t.Error("the state carries no checklist of the round")
 	}
 	// The card of the state is the card the run works on from now on.
 	if got := r.roundSessionRef(); got == nil || got.anchor != card.ID {
@@ -521,15 +517,16 @@ func TestAResumeOfARunWithoutARoundPublishesThePhaseLine(t *testing.T) {
 	if op.Posted() != 1 {
 		t.Fatalf("the run opened %d cards, want the card of the state", op.Posted())
 	}
-	card, state := lastState(op)
-	if len(state) != 2 {
-		t.Fatalf("the state carries %d messages, want the identity line and the phase line", len(state))
+	card, msgs := stateCard(op, "")
+	if len(msgs) == 0 {
+		t.Fatal("the run published no state")
 	}
-	if state[0].Kind != messages.OutInit {
-		t.Errorf("the first message is %q, want the identity line", state[0].Kind)
+	state := readState(msgs)
+	if !state.identity {
+		t.Error("the state carries no identity line")
 	}
-	if state[1].Kind != messages.OutReply {
-		t.Errorf("the second message is %q, want the phase line", state[1].Kind)
+	if state.phase == "" {
+		t.Error("the state carries no phase line")
 	}
 	if card.ID == "" {
 		t.Error("the run opened no card for the state")
@@ -565,19 +562,9 @@ func TestATakeoverPublishesTheState(t *testing.T) {
 		Text:      "wait, stop there",
 		Origin:    messages.OriginHuman,
 	})
-	card, _ := waitForStateCard(t, op, 4)
+	card, _ := waitForStateCardWith(t, op, "paused: you took over", 4)
 	if card.ReplyTo != round.anchor {
 		t.Errorf("the card of the state hangs under %q, want the card of the round", card.ReplyTo)
-	}
-
-	var takeover bool
-	for _, entry := range op.Entries(card.ID) {
-		if strings.HasPrefix(entry, "paused: you took over") {
-			takeover = true
-		}
-	}
-	if !takeover {
-		t.Fatalf("the phase line is %v, want it to name the takeover", op.Entries(card.ID))
 	}
 	if op.Posted() != before+1 {
 		t.Errorf("the run opened %d cards, want the card of the state", op.Posted()-before)
@@ -641,18 +628,9 @@ func TestTheBudgetPausePublishesTheState(t *testing.T) {
 		t.Fatal("the run has no card of the round")
 	}
 
-	card, _ := waitForStateCard(t, op, 4)
+	card, _ := waitForStateCardWith(t, op, `paused: the step "commit" used up its budget`, 4)
 	if card.ReplyTo == "" {
 		t.Error("the card of the state hangs under nothing")
-	}
-	var budget bool
-	for _, entry := range op.Entries(card.ID) {
-		if strings.HasPrefix(entry, `paused: the step "commit" used up its budget`) {
-			budget = true
-		}
-	}
-	if !budget {
-		t.Fatalf("the phase line is %v, want it to name the budget", op.Entries(card.ID))
 	}
 }
 
@@ -681,18 +659,9 @@ func TestTheRateLimitPausePublishesTheState(t *testing.T) {
 		t.Fatal("the run has no card of the round")
 	}
 
-	card, _ := waitForStateCard(t, op, 4)
+	card, _ := waitForStateCardWith(t, op, "paused: the agent is rate limited (429)", 4)
 	if card.ReplyTo == "" {
 		t.Error("the card of the state hangs under nothing")
-	}
-	var limit bool
-	for _, entry := range op.Entries(card.ID) {
-		if strings.HasPrefix(entry, "paused: the agent is rate limited (429)") {
-			limit = true
-		}
-	}
-	if !limit {
-		t.Fatalf("the phase line is %v, want it to name the rate limit", op.Entries(card.ID))
 	}
 
 	// The chat is told that the run waits: the state is a snapshot in a
@@ -735,26 +704,25 @@ func TestARunWithoutARoundShowsThePhaseLine(t *testing.T) {
 	if op.Posted() != 1 {
 		t.Fatalf("the run opened %d cards, want the card of the state", op.Posted())
 	}
-	card, state := lastState(op)
+	card, msgs := stateCard(op, "om_status")
 	if card.ReplyTo != "om_status" {
 		t.Errorf("the card of the state hangs under %q, want om_status", card.ReplyTo)
 	}
-	if len(state) != 2 {
-		t.Fatalf("the state carries %d messages, want the identity line and the phase line", len(state))
+	if len(msgs) == 0 {
+		t.Fatal("the run published no state")
 	}
-	if state[0].Kind != messages.OutInit {
-		t.Errorf("the first message is %q, want the identity line", state[0].Kind)
+	state := readState(msgs)
+	if !state.identity {
+		t.Error("the state carries no identity line")
 	}
-	if state[1].Kind != messages.OutReply {
-		t.Errorf("the second message is %q, want the phase line", state[1].Kind)
+	if state.phase == "" {
+		t.Error("the state carries no phase line")
 	}
-	for _, m := range state {
-		if m.Kind == messages.OutTaskUpdate {
-			t.Error("the state carries a checklist of a round that does not exist")
-		}
-		if strings.HasPrefix(m.Text, "rounds:") {
-			t.Error("the state carries the tree of the rounds")
-		}
+	if state.checklist != nil {
+		t.Error("the state carries a checklist of a round that does not exist")
+	}
+	if state.tree {
+		t.Error("the state carries the tree of the rounds")
 	}
 }
 
@@ -806,32 +774,137 @@ func TestTheStatusRequestOfAChatWithoutARunIsRefused(t *testing.T) {
 	}
 }
 
-// lastState returns the card the run opened last and the outbound
-// messages it carries.
-func lastState(op *fakeOperator) (cardRecord, []emittedMessage) {
-	cards := op.Cards()
-	if len(cards) == 0 {
-		return cardRecord{}, nil
+// stateCardWith returns the card that carries the phase line that
+// starts with the given text.
+func stateCardWith(op *fakeOperator, prefix string) (cardRecord, []emittedMessage) {
+	for _, c := range op.Cards() {
+		msgs := stateUnder(op, c.ID)
+		for _, m := range msgs {
+			if m.Kind != messages.OutReply {
+				continue
+			}
+			if strings.HasPrefix(m.Text, prefix) {
+				return c, msgs
+			}
+		}
 	}
-	last := cards[len(cards)-1]
-	return last, stateUnder(op, last.ID)
+	return cardRecord{}, nil
 }
 
-// waitForStateCard waits until the run published that many messages on the
-// card it opened last, and returns the card with them.
-func waitForStateCard(t *testing.T, op *fakeOperator, n int) (cardRecord, []emittedMessage) {
+// waitForStateCardWith waits until the run published a card that
+// carries the phase line that starts with the given text.
+func waitForStateCardWith(t *testing.T, op *fakeOperator, prefix string, n int) (cardRecord, []emittedMessage) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		card, msgs := lastState(op)
+		card, msgs := stateCardWith(op, prefix)
 		if len(msgs) >= n {
 			return card, msgs
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
-	card, msgs := lastState(op)
-	t.Fatalf("the state carries %d messages, want %d", len(msgs), n)
-	return card, msgs
+	for _, c := range op.Cards() {
+		t.Logf("CARD %s replyTo=%s body=%q", c.ID, c.ReplyTo, c.Body)
+	}
+	for _, m := range op.Emitted() {
+		t.Logf("MSG kind=%v replyTo=%s sid=%s text=%.40q", m.Kind, m.ReplyTo, m.SessionID, m.Text)
+	}
+	t.Fatalf("the run published no card with the phase line %q", prefix)
+	return cardRecord{}, nil
+}
+
+// theState is what the state of the run carries.
+//
+// The order of the messages is not what the test is about: a refresh
+// of the checklist may come in while the state is published.
+type theState struct {
+	// identity reports the identity line of the session.
+	identity bool
+	// phase is the phase line of the run.
+	phase string
+	// tree reports the tree of the rounds.
+	tree bool
+	// checklist is the checklist of the round.
+	checklist []agent.AgentTaskItem
+	// heartbeats counts the heartbeats the state carries.
+	heartbeats int
+}
+
+// readState reads the state of the run off the messages of a card.
+func readState(msgs []emittedMessage) theState {
+	var out theState
+	for _, m := range msgs {
+		switch {
+		case m.Kind == messages.OutHeartbeat:
+			out.heartbeats++
+		case m.Kind == messages.OutInit:
+			out.identity = true
+		case m.Kind == messages.OutTaskUpdate && m.TaskList != nil:
+			out.checklist = m.TaskList.Items
+		case m.Kind == messages.OutReply && strings.HasPrefix(m.Text, "rounds:"):
+			out.tree = true
+		case m.Kind == messages.OutReply:
+			out.phase = m.Text
+		}
+	}
+	return out
+}
+
+// stateCard returns the card the run opened under the given message
+// and the outbound messages it carries.
+//
+// The card is the one that carries the phase line: the run opens a
+// card for the state of the run, and the phase line says so.
+func stateCard(op *fakeOperator, parent string) (cardRecord, []emittedMessage) {
+	for _, c := range op.Cards() {
+		if c.ReplyTo != parent {
+			continue
+		}
+		msgs := stateUnder(op, c.ID)
+		if !carriesPhaseLine(msgs) {
+			continue
+		}
+		return c, msgs
+	}
+	return cardRecord{}, nil
+}
+
+// waitForStateCard waits until the run published the card of the state
+// under the given message, and returns the card with its messages.
+func waitForStateCard(t *testing.T, op *fakeOperator, parent string, n int) (cardRecord, []emittedMessage) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		card, msgs := stateCard(op, parent)
+		if len(msgs) >= n {
+			return card, msgs
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	for _, c := range op.Cards() {
+		t.Logf("CARD %s replyTo=%s body=%q", c.ID, c.ReplyTo, c.Body)
+	}
+	for _, m := range op.Emitted() {
+		t.Logf("MSG kind=%v replyTo=%s sid=%s text=%.40q", m.Kind, m.ReplyTo, m.SessionID, m.Text)
+	}
+	t.Fatalf("the run published no card with the state of the run under %q", parent)
+	return cardRecord{}, nil
+}
+
+// carriesPhaseLine reports whether the messages carry the phase line of
+// the run: the state of the run is the only thing that carries it.
+func carriesPhaseLine(msgs []emittedMessage) bool {
+	for _, m := range msgs {
+		if m.Kind != messages.OutReply {
+			continue
+		}
+		if strings.HasPrefix(m.Text, "running") ||
+			strings.HasPrefix(m.Text, "paused") ||
+			strings.HasPrefix(m.Text, "asking") {
+			return true
+		}
+	}
+	return false
 }
 
 // stateUnder returns the outbound messages the run published under the

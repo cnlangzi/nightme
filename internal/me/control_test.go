@@ -1001,14 +1001,9 @@ func TestTheQuestionIsOfferedAsAChoiceCard(t *testing.T) {
 	}
 	waitAsked(t, op, "Which step should run next?")
 
-	choices := op.EmittedOf(messages.OutChoice)
-	if len(choices) == 0 {
-		t.Fatalf("the run published no choice: %v", op.Emitted())
-	}
-	choice := choices[0].Choice
-	if choice == nil {
-		t.Fatal("the choice carries no payload")
-	}
+	// The choice follows the question: the run publishes it a moment
+	// later.
+	choice := waitChoice(t, op)
 	if choice.RequestID == "" {
 		t.Error("the choice has no request id: the answer could not be correlated")
 	}
@@ -1497,8 +1492,8 @@ func TestACardThatCannotBePublishedDoesNotStopTheRun(t *testing.T) {
 }
 
 // TestResume_KeepsTheCardItOwns — a run that comes back after a
-// daemon restart keeps the card it owns: the card's iteration travels
-// with the run's state.
+// daemon restart keeps the message it hangs its sessions under: the
+// iteration travels with the run's state.
 func TestResume_KeepsTheCardItOwns(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
@@ -1524,7 +1519,7 @@ func TestResume_KeepsTheCardItOwns(t *testing.T) {
 	waitSent(t, op, "/gtw commit")
 
 	// The state carries the anchors of the open sessions: a run that
-	// comes back goes on with the cards it opened.
+	// comes back goes on with the messages it hung its sessions under.
 	state := waitForSession(t, filepath.Join(dir, "runs", runID+".json"))
 	runSession, ok := state["run_session"].(map[string]any)
 	if !ok || runSession["anchor"] != "om_start" {
@@ -1680,6 +1675,26 @@ func waitForStep(t *testing.T, r *run, stepID string) wfe.StepState {
 	}
 	t.Fatalf("the run state holds no record of the step %q", stepID)
 	return wfe.StepState{}
+}
+
+// waitForStepSummary waits until the step ended with the given summary.
+//
+// The outcome of a step follows its action in the history: the test
+// waits for the outcome, not for the action that came before it.
+func waitForStepSummary(t *testing.T, r *run, stepID, summary string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if out, ok := stepOutcome(r, stepID); ok && out.Summary == summary {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	out, ok := stepOutcome(r, stepID)
+	if !ok {
+		t.Fatalf("the step %q has no state", stepID)
+	}
+	t.Fatalf("the step %q ended as %q, want %q", stepID, out.Summary, summary)
 }
 
 // waitForAction waits until the run's history holds that many actions

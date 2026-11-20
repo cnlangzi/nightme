@@ -384,7 +384,7 @@ func TestTheChecklistOfAnOlderCardIsFrozen(t *testing.T) {
 	if err := svc.Status(context.Background(), "obs-1", "om_status"); err != nil {
 		t.Fatalf("status: %v", err)
 	}
-	card, _ := lastState(op)
+	card, _ := stateCard(op, "om_status")
 	if card.ID == round.anchor {
 		t.Fatal("the state did not open a card of its own")
 	}

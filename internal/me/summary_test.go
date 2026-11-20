@@ -200,6 +200,45 @@ func TestTheRecordIsPostedWhenTheRunEndsOnItsOwn(t *testing.T) {
 	}
 }
 
+// TestTheRecordCarriesTheVerdictOfTheRun — the record is the last word
+// of the run: it carries the verdict in its footer, so the card of the
+// run still says how the run ended after the record lands on it.
+func TestTheRecordCarriesTheVerdictOfTheRun(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	svc, op := testService(t, dir, noModels())
+	op.steps = []fakeStep{okStep("the commit landed")}
+
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitRun(t, svc, "obs-1")
+
+	var verdict string
+	for _, m := range op.EmittedOf(messages.OutResult) {
+		verdict = m.Result
+	}
+	if verdict == "" {
+		t.Fatalf("the run published no verdict: %v", op.EmittedOf(messages.OutResult))
+	}
+	var record bool
+	for _, m := range op.EmittedOf(messages.OutReply) {
+		if !strings.HasPrefix(m.Text, "■ [") {
+			continue
+		}
+		record = true
+		if m.Result != verdict {
+			t.Errorf("the record carries the verdict %q, want %q", m.Result, verdict)
+		}
+	}
+	if !record {
+		t.Errorf("the run published no record: %v", op.EmittedOf(messages.OutReply))
+	}
+}
+
 // TestTheRecordOfAFailedRunSaysWhyItFailed — the reason the run gave
 // up is the run's own: an error that never reached an action of the
 // run leaves no row in the errors block, so the card would say

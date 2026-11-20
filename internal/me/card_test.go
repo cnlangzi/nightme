@@ -379,14 +379,11 @@ func TestTheChecklistOfAnOlderCardIsFrozen(t *testing.T) {
 		t.Errorf("the card of the round does not show the step that ran: %+v", frozen[0])
 	}
 
-	// The operator asks for the state: the card of the state is the
-	// latest card of the round.
+	// The operator asks for the state: it lands on the card the chat
+	// already holds for the message they asked from, and the round goes
+	// on with that card.
 	if err := svc.Status(context.Background(), "obs-1", "om_status"); err != nil {
 		t.Fatalf("status: %v", err)
-	}
-	card, _ := stateCard(op, "om_status")
-	if card.ID == round.anchor {
-		t.Fatal("the state did not open a card of its own")
 	}
 
 	// The card the round had keeps the checklist it had.
@@ -394,7 +391,7 @@ func TestTheChecklistOfAnOlderCardIsFrozen(t *testing.T) {
 		t.Errorf("the card of the round carries %d rows, want the %d it had", len(got), len(frozen))
 	}
 	// The latest card carries the checklist of the round.
-	latest := op.Checklist(card.ID)
+	latest := op.Checklist("om_status")
 	if len(latest) != 2 {
 		t.Fatalf("the card of the state carries %d rows, want one per step", len(latest))
 	}

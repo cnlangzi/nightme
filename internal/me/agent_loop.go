@@ -12,7 +12,8 @@ import (
 // errFinished ends the loop when the model called the finish tool.
 var errFinished = errors.New("me: the run finished")
 
-// pauseMark marks the run's own notice in the chat.
+// pauseMark marks a pause in the chat: the run's own notice and the
+// answer of `/me pause` carry it.
 //
 // The notice is not a command of the workflow: it is the run telling
 // the operator what it waits for.

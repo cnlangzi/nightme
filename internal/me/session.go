@@ -194,10 +194,19 @@ func (s *Service) showState(ctx context.Context, r *run, anchor string) {
 	it, inRound := r.roundIteration()
 	replyTo := anchor
 	if replyTo == "" {
-		if roundSess := r.roundSessionRef(); roundSess != nil {
-			replyTo = roundSess.anchor
-		}
+		replyTo = r.stateAnchor("")
 	}
+	sess := r.stateSession(it, inRound)
+	sess = s.placeholder(ctx, r, sess, stateLine, replyTo)
+	s.adoptState(r, sess, it, inRound)
+	s.publishState(ctx, r, sess, it, inRound)
+}
+
+// stateSession builds the session the state of the run is published in.
+//
+// The state rides in the session of the round the run is in: the card of
+// that round is the card the state goes on.
+func (r *run) stateSession(it iteration, inRound bool) *session {
 	sess := &session{kind: sessionRun, id: r.id}
 	if inRound {
 		sess.kind = sessionRound
@@ -205,21 +214,36 @@ func (s *Service) showState(ctx context.Context, r *run, anchor string) {
 		sess.job = it.job
 		sess.round = it.round
 	}
-	sess = s.placeholder(ctx, r, sess, stateLine, replyTo)
-	// The placeholder took a chat round trip: the run may have moved on
-	// to another round while it was posted. The card of the state is
-	// the latest card of the round only while the run is still in it.
+	return sess
+}
+
+// adoptState makes the card of the state the card the round goes on
+// with.
+//
+// The card of the state is the latest card of the round: the run goes
+// on with it, and the card it replaces keeps the content it had.
+//
+// The run may have moved on to another round while the state was on its
+// way: the card of the round stays the one it had.
+func (s *Service) adoptState(r *run, sess *session, it iteration, inRound bool) {
 	now, still := r.roundIteration()
-	if inRound && still && now == it && sess.anchor != "" {
-		// The card of the state is the latest card of the round: the
-		// run goes on with it, and the card it replaces keeps what it
-		// had.
-		r.setRoundSession(sess)
-		r.rememberRoundSession(it, sess)
-		// The anchor of the round moved: the state on the disk names
-		// the card the run goes on with.
-		s.persist(r)
+	if !inRound || !still || now != it || sess.anchor == "" {
+		return
 	}
+	r.setRoundSession(sess)
+	r.rememberRoundSession(it, sess)
+	// The anchor of the round moved: the state on the disk names the
+	// card the run goes on with.
+	s.persist(r)
+}
+
+// publishState publishes the state of the run in the given session.
+//
+// The state is a snapshot: the phase line of the run, the tree of the
+// rounds and the checklist of the round the run is in. A run that has
+// not entered a round yet has no round state to show: only the phase
+// line is published.
+func (s *Service) publishState(ctx context.Context, r *run, sess *session, it iteration, inRound bool) {
 	s.publishInit(ctx, r, sess)
 	s.publishReply(ctx, r, sess, r.phaseLine())
 	if !inRound {

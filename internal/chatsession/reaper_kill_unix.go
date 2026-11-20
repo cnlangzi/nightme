@@ -9,7 +9,7 @@ import (
 
 // errEPERMValue is the sentinel returned when kill(pid, 0) hits a
 // process owned by another user (still considered "alive" by the
-// prober).
+// reaper).
 var errEPERMValue = errors.New("epERM")
 
 // platformKill0 invokes syscall.Kill(pid, 0). Returns nil on

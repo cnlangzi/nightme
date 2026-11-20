@@ -23,7 +23,7 @@ ChatSession 由 channel 的 **chatID** 驱动，经 gateway 的 `GetOrCreate` �
 | **D2** | CS 只由 GW `GetOrCreate(chatID)` 创建；启动不做 `RestoreFromRegistry` | 与 CHANNEL lazy 契约一致；避免每 channel Manager 灌全站 chat |
 | **D3** | 全局 asPool + 按需 Lookup 挂载；`/cwd` 拆主动关系、保留 warm | 切回不丢 handle；CS 工作集 = 当前 cwd |
 | **D4** | 主动 / 被动分离：不向 warm Submit；warm 事件不丢弃 | 后台回合仍出站；用户新消息只打当前子集 |
-| **D5** | Evict/Kill(cwd) 以 asPool 为准；Watchdog 仅跟随 `selectedAS` | 漏杀与误 disarm 的两个硬坑 |
+| **D5** | Evict/Kill(cwd) 与 idle 回收都以 asPool 为准 | 漏杀的硬坑 |
 
 ---
 
@@ -83,20 +83,14 @@ flowchart TD
 | | 主动（仅 `cs.pool` / `selectedAS`） | 被动（warm 也做） |
 |---|---|---|
 | 含义 | CS/用户**发起** | AS **推回来** |
-| 包含 | Lookup 选中、Submit、Steer Stop、TryFlush **投递目标**、prober 扫描 | `routeEvent`：AgentEvent→出站、PromptEnded→writeback、Lifecycle→SetExited/RestartFromDeath |
+| 包含 | Lookup 选中、Submit、Steer Stop、TryFlush **投递目标** | `routeEvent`：AgentEvent→出站、PromptEnded→writeback、Lifecycle→SetExited/RestartFromDeath |
 | `/cwd` 后 | 旧 AS 不再当目标 | 订阅保留，事件仍进同一 CS |
 
-### 3.1 Watchdog 例外（必要）
-
-`ArmHungPrompt` / `disarmHungPrompt` 是 **per-CS** 状态。warm 的 PromptEnded/Lifecycle **不得** disarm/arm 当前会话的 HungPrompt。仅当 `as == cs.selectedAS` 时动 Watchdog。否则 A（warm）结束回合会清掉 B 上已 arm 的挂起检测。
-
-本轮不把 Watchdog 改成 per-AS；用 selected 守卫即可。
-
-### 3.2 TryFlush
+### 3.1 TryFlush
 
 `TryFlush` 已只读 `selectedAS`。切 cwd 时 Clear queue 后，warm PromptEnded 触发的 TryFlush 为空转，无需再按 `as ∉ cs.pool` gate。
 
-### 3.3 出站元数据
+### 3.2 出站元数据
 
 AgentEvent 出站 footer / AgentBar 必须用 **envelope 里的 `AgentSession`**，禁止回退 `cs.SelectedAgentSession()`，避免 warm 回复贴错 cwd/agent 栏。
 
@@ -108,9 +102,9 @@ AgentEvent 出站 footer / AgentBar 必须用 **envelope 里的 `AgentSession`**
 2. CS 持久化字段只经 `chatstore.Store`：`Bootstrap` / `Get` / `SetXxx`。禁止生产路径 `Save(cs.Entry())` 整表覆盖。
 3. `cs.pool` ⊆ 当前 `selectedCwd` 的主动工作集。其它 cwd 的 AS 在 asPool warm（除非 Evict/kill）。
 4. 切回同一 key `chatID+cwd+agent` → 同一 `as.ID` + live handle（**进程内**；跨 daemon 重启无 live warm，只能 asFile→Detached→spawn）。
-5. 不向 warm AS 主动发新用户回合；warm 被动事件不丢弃（Watchdog 副作用除外，见 §3.1）。
+5. 不向 warm AS 主动发新用户回合；warm 被动事件不丢弃。
 6. AS 身份 `(ChatSessionID, Agent, Cwd)` 不可变；任一变化即新 AS。
-7. 不主动 prober warm；其 Lifecycle 事件仍走 `routeEvent`（含 `RestartFromDeath`）。
+7. daemon 级 idle 回收（`AgentReaper`）是唯一主动动 warm AS 的路径：只关底层 CLI + 置 exited，不提交回合，不改会话身份。
 8. **Evict / Kill(cwd) 以 asPool 为准**，不能只扫 `cs.pool`。
 
 ---
@@ -223,11 +217,11 @@ func (p *AgentSessionPool) ListByChatCwd(chatID, cwd string) []*AgentSession
 3. asFile：按 `ChatSessionID + Clean(Cwd) + Agent` 查（`List`+filter 或 helper）→ `FromAgentSessionEntry` → Put → mount → spawn。
 4. `NewAgentSession` → Put + asFile.Upsert → mount → spawn。
 
-### 7.3 `routeEvent` / PumpEvents / Prober
+### 7.3 `routeEvent` / PumpEvents / Reaper
 
-- `routeEvent`：AgentEvent / writeback / Lifecycle 对 warm **全开**；Watchdog 仅 `as == selectedAS`。
+- `routeEvent`：AgentEvent / writeback / Lifecycle 对 warm **全开**。
 - PumpEvents：只扫 `cs.pool` 做*新*挂载；warm handler 已在，不必扫 asPool。
-- Prober：只扫 `cs.pool`（本轮不扩展 warm prober）。
+- Reaper：daemon 级，每小时扫一遍**全局 asPool**；底层 CLI 已死、或已连续 1 小时没有事件的 AS 被关闭并置 exited，会话身份（resume id / 池条目 / asFile 行）不变。
 
 ### 7.4 Evict / Drop / Kill
 
@@ -258,10 +252,10 @@ func (p *AgentSessionPool) ListByChatCwd(chatID, cwd string) []*AgentSession
 
 PR1 单独合入后：多 cwd 不再在 hydrate 时灌进 `cs.pool`（空池直到 Lookup）。asPool API 可先就位，完整 rebind 语义在 PR2。
 
-### PR2 — 拆主动关系；按需挂载；Evict 打 asPool；Watchdog 守卫
+### PR2 — 拆主动关系；按需挂载；Evict 打 asPool
 
 - `SetSelectedCwd` 拆 `cs.pool` / 清 queue；Lookup 三级挂载。
-- `routeEvent` Watchdog 守卫；出站用 envelope AS。
+- 出站用 envelope AS。
 - Evict/Kill 扫 asPool。
 - 命令路径对齐；测试补齐。
 
@@ -274,11 +268,10 @@ PR1 单独合入后：多 cwd 不再在 hydrate 时灌进 `cs.pool`（空池直�
 | T1 | Wire 后 `mgr.List()` 空；不再 Restore |
 | T2 | GetOrCreate → store 立刻有 entry（Bootstrap）；hydrate 后 `cs.Pool()` 空直至 Lookup；CS `ID` == as entry `ChatSessionID` |
 | T3 | A→spawn→B：`cs.Pool()` 无 A；asPool 有 A；A 仍推 AgentEvent → 出站发生且 AgentBar = A 的 cwd/agent；再 `/cwd A`+Lookup → 同一 `as.ID` |
-| T4 | warm A PromptEnded **不** disarm 当前 B 上已 arm 的 HungPrompt |
-| T5 | Evict(cwd) 能杀掉 **仅在 asPool、不在 cs.pool** 的同 cwd AS；asPool+asFile 无残留 |
-| T6 | `SetWatchMode` 与 `SetSelectedCwd` 并发，磁盘非 torn |
-| T7 | `findChatSession` 未知 chatID → nil |
-| T8 | `/gtw close`：worktree 从 asPool 消失；repoRoot 可 warm 挂回 |
+| T4 | Evict(cwd) 能杀掉 **仅在 asPool、不在 cs.pool** 的同 cwd AS；asPool+asFile 无残留 |
+| T5 | `SetWatchMode` 与 `SetSelectedCwd` 并发，磁盘非 torn |
+| T6 | `findChatSession` 未知 chatID → nil |
+| T7 | `/gtw close`：worktree 从 asPool 消失；repoRoot 可 warm 挂回 |
 
 ---
 
@@ -291,13 +284,13 @@ PR1 单独合入后：多 cwd 不再在 hydrate 时灌进 `cs.pool`（空池直�
 - hydrate / GetOrCreate 时按 ChatSessionID 全量 attach AS。
 - 丢弃 warm 被动事件；为 warm 做 EventBus Unsubscribe。
 - Evict 只扫 `cs.pool`。
-- warm 事件动 Watchdog；出站用 `SelectedAgentSession()` 元数据。
+- 出站用 `SelectedAgentSession()` 元数据。
 - 生产 `Save(cs.Entry())` 整表覆盖。
 
 ### 刻意不做（本轮）
 
 - EventBus 真 Unsubscribe；`routeEvent` 丢弃 gate。
-- warm 的主动 prober 扫描；Watchdog 改 per-AS。
+- 主动向 warm AS 提交新回合。
 - 抽出 `agentstore`。
 - `/cwd` 时 spawn 或批量预挂载该 cwd 全部 agent。
 - 跨 daemon 保留 live warm。
@@ -312,4 +305,4 @@ PR1 单独合入后：多 cwd 不再在 hydrate 时灌进 `cs.pool`（空池直�
 |------|------|
 | F-CHATSTORE-001 | 抽出 Store、修 lost-update、删死字段——**必要但未完成**；本文要求生产路径真正改走 `SetXxx`，并去掉 CS 双写与 shutdown Save |
 | CHANNEL.md lazy restore | 与「启动不 Restore、GetOrCreate 驱动」对齐；本文补 Bootstrap + 不 hydrate AS |
-| F-61 | Lifecycle respawn 对 warm 仍走 routeEvent；prober 仍只扫主动池 |
+| `internal/chatsession/reaper.go` | Lifecycle respawn 对 warm 仍走 routeEvent；idle 回收由 daemon 级 `AgentReaper` 扫全局 asPool |

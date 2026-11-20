@@ -1,4 +1,4 @@
-// Package registry — AgentSessionEntry (v3 schema).
+// Package registry — AgentSessionEntry (v4 schema).
 //
 // See docs/SPEC.md v1.2 §1.2 and docs/feat/F-29-agent-session-pool.md
 // for the full model.
@@ -10,6 +10,11 @@
 //   - Load compat: legacy JSON with "resumeId" key is silently
 //     ignored (SessionID defaults to "" → next spawn starts fresh).
 //     Legacy JSON with "compactionCount" key is silently ignored.
+//
+// v4 changes (suspect state removed):
+//   - SuspectReason / SuspectSince removed entirely.
+//   - Load compat: legacy JSON with "suspectReason" / "suspectSince"
+//     keys is silently ignored.
 package registry
 
 import (
@@ -63,14 +68,6 @@ type AgentSessionEntry struct {
 	LastRunAt     time.Time `json:"lastRunAt"`
 	ExitCode      *int      `json:"exitCode,omitempty"`
 	Model         string    `json:"model,omitempty"`
-	// F-61: watchdog suspect state. Set when the per-ChatSession
-	// watchdog marks this AS as suspect (no_fast_ack / hung_prompt /
-	// probed_dead). Cleared on a successful prompt end. omitempty:
-	// legacy entries without the field round-trip as zero values.
-	SuspectReason string `json:"suspectReason,omitempty"`
-	// F-61: when SuspectReason was last set; used to compute the
-	// respawn cooldown window (5 min per AS).
-	SuspectSince *time.Time `json:"suspectSince,omitempty"`
 
 	// SessionID (already declared above) doubles as the dsh web
 	// sessionId for the dsh bridge. F-dsh-shared-host: at daemon
@@ -87,8 +84,7 @@ type AgentSessionEntry struct {
 }
 
 // AgentSessionFileVersion is the on-disk format version for
-// agent_sessions.json. Bumped to 3 to mark the SessionID rename +
-// CompactionCount removal. Load is permissive (unknown fields are
-// silently ignored by default), so v2 files load as v3 entries with
-// SessionID="" and no CompactionCount.
-const AgentSessionFileVersion = 3
+// agent_sessions.json. Load is permissive (unknown fields are
+// silently ignored by default), so older files load as v4 entries
+// with the dropped fields defaulting to zero values.
+const AgentSessionFileVersion = 4

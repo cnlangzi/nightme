@@ -594,7 +594,6 @@ buildReceiptCard 的 switch 仍允许它落到后半部分分支(条件已扩为
 ### 7.3 回归
 
 - F-53 `Message`/`Prompt`/`endPrompt` 全量(不动)
-- F-61 HungPrompt → respawn 全量(不动)
 - `cmd/nightme/test.go` 涉及 `NewEventHandler` 的所有用例
 
 ---
@@ -636,7 +635,6 @@ buildReceiptCard 的 switch 仍允许它落到后半部分分支(条件已扩为
 - [`F-08-channel-abstraction`](./F-08-channel-abstraction.md) — `Channel` 接口为何不变(走 OutboundMessage 主流水线)
 - [`F-CLAUDE-PRINT-002-statusbar-refactor`](./F-CLAUDE-PRINT-002-statusbar-refactor.md) — 相邻的"中央观测 + per-channel 渲染"模式(StatusBarStampPolicy + OutboundMessage.StatusBar)
 - [`F-53-message-prompt-lifecycle`](./F-53-message-prompt-lifecycle.md) — `Message`/`Prompt`/`endPrompt` 语义源头,确认 heartbeat 不动这套语义
-- [`F-61-bot-failure-recovery`](./F-61-bot-failure-recovery.md) — watchdog / respawn,与心跳独立但同属"agent 健康度"维度
 - [`../SPEC.md`](../SPEC.md) §4.3 — 并发约束与 EventCallback 切换
 - [`internal/runtime/policy.go`](../../internal/runtime/policy.go) — `ThinkModeGatePolicy` / `ToolsModeGatePolicy` 源码,验证不变量
 - [`internal/channel/feishu/adapter.go`](../../internal/channel/feishu/adapter.go) — `ensureReceiptForTyping` / `buildReceiptCard` 源码

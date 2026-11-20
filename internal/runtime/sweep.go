@@ -129,8 +129,6 @@ func SweepOrphanAgents(
 		e.Status = registry.StatusExited
 		e.PID = 0
 		e.ExitCode = &code
-		e.SuspectReason = ""
-		e.SuspectSince = nil
 		if err := asFile.Upsert(e); err != nil {
 			return swept, err
 		}

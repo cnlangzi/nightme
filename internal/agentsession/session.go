@@ -102,6 +102,16 @@ type AgentSession struct {
 	createdAt time.Time
 	lastRunAt time.Time
 
+	// lastEventAt is when the last bridge event arrived on this
+	// AS's readpump. The readpump is the only writer; it bumps
+	// the field on every event it drains.
+	//
+	// Purely in-memory: it is the idleness signal for the daemon's
+	// idle-CLI reaper, not a persisted fact. A restored AS has no
+	// live bridge until it is re-spawned, and the spawn re-arms the
+	// clock.
+	lastEventAt time.Time
+
 	// Exit code (set when stat == Exited, nil otherwise).
 	exitCode *int
 
@@ -133,13 +143,6 @@ type AgentSession struct {
 	// restart via FromAgentSessionEntry. Empty before the first
 	// EventAgentReady lands.
 	model string
-
-	// F-61: watchdog suspect state (mirrors Entry fields).
-	// SetSuspect/ClearSuscept maintain the invariant "SuspectSince
-	// is non-nil iff SuspectReason != ''". Read by the prober to
-	// gate proactive respawn under the 5min cooldown window.
-	suspectReason string
-	suspectSince  *time.Time
 
 	// F-61: closedByUser is set by Close() to tell the immediate
 	// respawn path "this death was intentional, don't respawn".
@@ -411,15 +414,6 @@ func FromAgentSessionEntry(e *registry.AgentSessionEntry) *AgentSession {
 	as.lastRunAt = e.LastRunAt
 	as.sessionID = e.SessionID
 	as.model = e.Model
-	// F-61: restore suspect state verbatim. Cooldown window is
-	// measured from SuspectSince; on restart, the prober picks up
-	// from there so a suspect-then-crashed AS doesn't immediately
-	// re-trigger a respawn.
-	as.suspectReason = e.SuspectReason
-	if e.SuspectSince != nil {
-		t := *e.SuspectSince
-		as.suspectSince = &t
-	}
 	// commit fix-6: any persisted "running" agent is actually dead
 	// after daemon restart (the process handle is in-memory only).
 	// Demote to Detached so the next LookupSelectedAgentSession will
@@ -582,9 +576,10 @@ func (as *AgentSession) Shutdown() {
 	// Step 2: snapshot readpumpStop / readpumpDone under lock
 	stop := as.readpumpStop
 	done := as.readpumpDone
-	as.asMu.Unlock()
-
-	// Closing the stop chan wakes the readpump select.
+	// Closing the stop chan wakes the readpump select. The
+	// check-and-close runs under asMu so a concurrent Close() (a
+	// user /close, or the daemon's idle-CLI reaper) cannot close
+	// the same channel twice — that panics.
 	if stop != nil {
 		select {
 		case <-stop:
@@ -593,6 +588,7 @@ func (as *AgentSession) Shutdown() {
 			close(stop)
 		}
 	}
+	as.asMu.Unlock()
 
 	// Wait for readpump to drain remaining work and exit.
 	if done != nil {
@@ -719,6 +715,24 @@ func (as *AgentSession) LastRunAt() time.Time {
 	return as.lastRunAt
 }
 
+// LastEventAt returns when the last bridge event arrived on this
+// AgentSession. Zero until the first event lands after the last
+// spawn. The idle-CLI reaper reads it to decide whether a live CLI
+// has gone silent for too long.
+func (as *AgentSession) LastEventAt() time.Time {
+	as.asMu.RLock()
+	defer as.asMu.RUnlock()
+	return as.lastEventAt
+}
+
+// noteEvent records the arrival of a bridge event. The readpump is
+// the only writer.
+func (as *AgentSession) noteEvent() {
+	as.asMu.Lock()
+	as.lastEventAt = time.Now()
+	as.asMu.Unlock()
+}
+
 // ExitCode returns the exit code (nil if not exited).
 func (as *AgentSession) ExitCode() *int {
 	as.asMu.RLock()
@@ -816,13 +830,14 @@ func (as *AgentSession) PersistIfDirty(persist func(*registry.AgentSessionEntry)
 }
 
 // SetRunning marks the AgentSession as running with the given PID.
-// Bumps LastRunAt.
+// Bumps LastRunAt and re-arms the idleness clock.
 func (as *AgentSession) SetRunning(pid int) {
 	as.asMu.Lock()
 	defer as.asMu.Unlock()
 	as.pid = pid
 	as.stat = StatusRunning
 	as.lastRunAt = time.Now()
+	as.lastEventAt = as.lastRunAt
 	as.exitCode = nil
 }
 
@@ -844,11 +859,6 @@ func (as *AgentSession) SetExited(code int) {
 	as.stat = StatusExited
 	as.lastRunAt = time.Now()
 	as.exitCode = &code
-	// F-61: clear suspect state on terminal transition — a dead AS
-	// has nothing left to probe. The cooldown window is implicit
-	// (next Spawn will overwrite SuspectReason anyway).
-	as.suspectReason = ""
-	as.suspectSince = nil
 	persist := as.persist
 	as.asMu.Unlock()
 
@@ -857,90 +867,6 @@ func (as *AgentSession) SetExited(code int) {
 	if persist != nil {
 		if err := persist(as.Entry()); err != nil {
 			slog.Warn("agentsession: persist after SetExited failed; JSON may be stale",
-				"as_id", as.ID, "err", err)
-		}
-	}
-}
-
-// SetSuspect (F-61) marks the AS as suspect for the given reason.
-// Persists the new state so a daemon restart can honor the
-// cooldown window. Cooldown window is enforced by the prober
-// (5min per AS) — not here. Setting the same reason twice is a
-// no-op (only the first timestamp sticks) so spam from a flapping
-// bridge doesn't reset the cooldown.
-func (as *AgentSession) SetSuspect(reason string) {
-	if reason == "" {
-		return
-	}
-	as.asMu.Lock()
-	if as.suspectReason == reason {
-		as.asMu.Unlock()
-		return
-	}
-	now := time.Now()
-	as.suspectReason = reason
-	as.suspectSince = &now
-	persist := as.persist
-	as.asMu.Unlock()
-
-	if persist != nil {
-		if err := persist(as.Entry()); err != nil {
-			slog.Warn("agentsession: persist after SetSuspect failed; JSON may be stale",
-				"as_id", as.ID, "reason", reason, "err", err)
-		}
-	}
-}
-
-// ClearSuspect (F-61) removes the suspect marking. Called when a
-// prompt ends cleanly (KindPromptEnded in pump_events) so the
-// prober stops considering this AS for proactive respawn.
-func (as *AgentSession) ClearSuspect() {
-	as.asMu.Lock()
-	if as.suspectReason == "" {
-		as.asMu.Unlock()
-		return
-	}
-	as.suspectReason = ""
-	as.suspectSince = nil
-	persist := as.persist
-	as.asMu.Unlock()
-
-	if persist != nil {
-		if err := persist(as.Entry()); err != nil {
-			slog.Warn("agentsession: persist after ClearSuspect failed; JSON may be stale",
-				"as_id", as.ID, "err", err)
-		}
-	}
-}
-
-// Suspect (F-61) returns the current suspect reason and since
-// timestamp. Used by the prober to decide whether to probe + respawn.
-// Both are zero-valued when not suspect.
-func (as *AgentSession) Suspect() (reason string, since time.Time) {
-	as.asMu.RLock()
-	defer as.asMu.RUnlock()
-	if as.suspectSince == nil {
-		return as.suspectReason, time.Time{}
-	}
-	return as.suspectReason, *as.suspectSince
-}
-
-// SetSuspectAt (F-61, test-only) sets the suspect state with an
-// explicit timestamp. Exported because tests need to backdate
-// SuspectSince to exercise the cooldown gate. Production code
-// uses SetSuspect (no timestamp arg).
-func (as *AgentSession) SetSuspectAt(reason string, at time.Time) {
-	if reason == "" {
-		return
-	}
-	as.asMu.Lock()
-	as.suspectReason = reason
-	as.suspectSince = &at
-	persist := as.persist
-	as.asMu.Unlock()
-	if persist != nil {
-		if err := persist(as.Entry()); err != nil {
-			slog.Warn("agentsession: persist after SetSuspectAt failed",
 				"as_id", as.ID, "err", err)
 		}
 	}
@@ -956,8 +882,6 @@ func (as *AgentSession) Entry() *registry.AgentSessionEntry {
 	lastRun := as.lastRunAt
 	resume := as.sessionID
 	model := as.model
-	sr := as.suspectReason
-	ss := as.suspectSince
 	var ec *int
 	if as.exitCode != nil {
 		v := *as.exitCode
@@ -978,8 +902,6 @@ func (as *AgentSession) Entry() *registry.AgentSessionEntry {
 		LastRunAt:     lastRun,
 		ExitCode:      ec,
 		Model:         model,
-		SuspectReason: sr,
-		SuspectSince:  ss,
 	}
 }
 
@@ -1135,6 +1057,7 @@ func (as *AgentSession) respawn(
 	as.pid = handle.PID()
 	as.stat = StatusRunning
 	as.lastRunAt = time.Now()
+	as.lastEventAt = as.lastRunAt
 	as.exitCode = nil
 	// F-61: race-detect against Close() during the spawn. fork+
 	// exec+handshake is multi-second; Close() can flip
@@ -1617,10 +1540,14 @@ func (as *AgentSession) Close() error {
 	h := as.handle
 	stop := as.readpumpStop
 	done := as.readpumpDone
-	as.asMu.Unlock()
-
 	// (1)+(2) force the readpump out so eventQueue push can't
 	// wedge. Same idempotent close pattern as Shutdown (step 2).
+	//
+	// The check-and-close runs under asMu so two closers can never
+	// both see the channel open and close it twice — closing a
+	// closed channel panics. The reaper is a second concurrent
+	// caller (a user /close can land on the same session), and the
+	// daemon shutdown is a third.
 	if stop != nil {
 		select {
 		case <-stop:
@@ -1629,6 +1556,8 @@ func (as *AgentSession) Close() error {
 			close(stop)
 		}
 	}
+	as.asMu.Unlock()
+
 	if done != nil {
 		<-done
 	}
@@ -1666,8 +1595,8 @@ func (as *AgentSession) Close() error {
 //
 // Returns nil on a clean respawn; the AS is then StatusRunning
 // and the caller's TryFlush will drain any queued messages. On
-// error the AS stays StatusExited and the watchdog/prober takes
-// over with its 5min cooldown.
+// error the AS stays StatusExited; the next user message respawns
+// it.
 //
 // ClosedByUser skips the respawn entirely — the /close path goes
 // through here when the bridge actually exits AFTER Close was

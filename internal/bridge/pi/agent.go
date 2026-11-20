@@ -785,7 +785,7 @@ func (d *driver) New(ctx context.Context) error {
 //     readpumpLoop which calls endPrompt → IsReady=true. If pi
 //     is well-behaved (the documented contract), this happens
 //     within a few hundred ms of the abort response; if not, the
-//     HungPrompt watchdog will eventually mark the AS Suspect.
+//     turn stays in flight and only /stop clears it.
 //
 // Stop is fire-and-forget: it returns as soon as the abort RPC
 // completes (success or failure) and does NOT wait for agent_settled.

@@ -186,8 +186,7 @@ func TestNextBackoff_DoublesUntilCap(t *testing.T) {
 // We can't easily mock the lark client (it's a concrete type with
 // private internals), so this test exercises the empty-input and
 // lark-nil-client paths only. The retry-vs-succeed path is covered
-// manually via /close + image scenarios; see F-61 §7.2 in
-// docs/feat/F-61-bot-failure-recovery.md.
+// manually via /close + image scenarios.
 func TestDownloadAttachmentsWithRetry_EmptyInput(t *testing.T) {
 	res := DownloadAttachmentsWithRetry(context.Background(), nil, "om_xxx", nil, "sess_1", nil)
 	if res.HasAttachments || res.AllFailed || len(res.Atts) != 0 {

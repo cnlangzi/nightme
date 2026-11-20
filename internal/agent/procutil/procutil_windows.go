@@ -9,7 +9,7 @@ import (
 
 // Windows process liveness uses kernel32!OpenProcess with
 // PROCESS_QUERY_LIMITED_INFO. Same access mask used by
-// internal/chatsession/prober_kill_windows.go — we mirror
+// internal/chatsession/reaper_kill_windows.go — we mirror
 // the established pattern rather than reinventing it.
 //
 // OpenProcess returns a non-zero handle when the PID exists

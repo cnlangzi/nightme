@@ -114,18 +114,11 @@ func ReconcileAgentSessions(
 		// end (batch Upsert is not exposed by AgentSessionFile, so
 		// we Upsert per entry — acceptable at this scale; a handful
 		// of stale entries per daemon lifetime).
-		//
-		// F-61: clear suspect state on terminal transition — a dead
-		// AS has nothing left to probe. The cooldown window is
-		// implicit (next Spawn overwrites SuspectReason anyway).
-		// Mirrors agentsession.SetExited.
 		code := exitedReconcileCode
 		previousStatus := e.Status
 		e.Status = registry.StatusExited
 		e.PID = 0
 		e.ExitCode = &code
-		e.SuspectReason = ""
-		e.SuspectSince = nil
 		if err := asFile.Upsert(e); err != nil {
 			return result, err
 		}

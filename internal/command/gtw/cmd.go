@@ -862,6 +862,12 @@ var closeCmdSpec = command.CmdSpec{
 // `git worktree remove --force <path>` or by re-running
 // `/gtw close` after the user has unblocked the worktree.
 //
+// The close also finalises the pull request the branch opened: its
+// `nightme/*` state labels come off, so the tracker shows the work
+// as finished on both sides. That step only warns when it fails —
+// the PR's labels are bookkeeping, and the teardown must not wait
+// for them.
+//
 // No shim is needed; RunClose reads its state from the
 // cwd-scoped yml directly. Deps are forwarded verbatim; the
 // reply path is RunClose's own cs.Emitter() (no extra wiring).

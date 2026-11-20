@@ -121,6 +121,24 @@ type fakeGitProvider struct {
 	prByHead map[string]*PR
 	prErr    map[string]error
 
+	// FindPRForBranch response. prByBranch[head] is the PR the
+	// fake reports for that head branch, whatever its state;
+	// findPRByBranchErr[head] wins when set. Missing key returns
+	// (nil, nil) — the branch never had a PR.
+	//
+	// findPRByBranchFn, when set, answers per head branch and
+	// wins over both. It lets a test read the state of the world
+	// at the moment of the lookup (e.g. "the branch is gone").
+	prByBranch        map[string]*PR
+	findPRByBranchErr map[string]error
+	findPRByBranchFn  func(head string) (*PR, error)
+
+	// PR label state. prLabels[number] is the label set the fake
+	// reports for the PR with that number; removePRLabelErr is
+	// returned by every RemovePRLabel call.
+	prLabels         map[int][]string
+	removePRLabelErr error
+
 	// GetPRMergeState response. mergeStateByNumber[number] is
 	// returned when GetPRMergeState is called with that number;
 	// mergeStateErr[number] wins when set. mergeStateFn, when
@@ -177,6 +195,9 @@ func newFakeGitProvider(kind ProviderKind, host string) *fakeGitProvider {
 		issueErr:           make(map[int]error),
 		prByHead:           make(map[string]*PR),
 		prErr:              make(map[string]error),
+		prByBranch:         make(map[string]*PR),
+		findPRByBranchErr:  make(map[string]error),
+		prLabels:           make(map[int][]string),
 		mergeStateByNumber: make(map[int]*PRMergeState),
 		mergeStateErr:      make(map[int]error),
 		createLabelErrFor:  make(map[string]error),
@@ -416,6 +437,60 @@ func (f *fakeGitProvider) SetGetPRErr(head string, err error) {
 	defer f.mu.Unlock()
 	f.prErr[head] = err
 	delete(f.prByHead, head)
+}
+
+// SetPRForBranch registers the PR FindPRForBranch reports for the
+// given head branch — the lookup /gtw close uses, which sees the
+// PRs of every state. Use it to seed a merged PR.
+func (f *fakeGitProvider) SetPRForBranch(head string, pr *PR) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.prByBranch[head] = pr
+	delete(f.findPRByBranchErr, head)
+}
+
+// SetFindPRForBranchErr configures FindPRForBranch(head) to return
+// err.
+func (f *fakeGitProvider) SetFindPRForBranchErr(head string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.findPRByBranchErr[head] = err
+	delete(f.prByBranch, head)
+}
+
+// SetFindPRForBranchFunc makes FindPRForBranch answer through fn,
+// so a test can vary the answer per head branch — and read the
+// state of the world at the moment of the lookup. fn wins over
+// SetPRForBranch / SetFindPRForBranchErr.
+func (f *fakeGitProvider) SetFindPRForBranchFunc(fn func(head string) (*PR, error)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.findPRByBranchFn = fn
+}
+
+// SetPRLabels registers the labels the PR with the given number
+// carries.
+func (f *fakeGitProvider) SetPRLabels(number int, labels []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.prLabels[number] = append([]string{}, labels...)
+}
+
+// SetRemovePRLabelErr configures the response for all
+// RemovePRLabel calls.
+func (f *fakeGitProvider) SetRemovePRLabelErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.removePRLabelErr = err
+}
+
+// PRLabels returns the labels the fake holds for the PR with the
+// given number. Lets a test assert what the PR carries after a
+// close.
+func (f *fakeGitProvider) PRLabels(number int) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string{}, f.prLabels[number]...)
 }
 
 // SetPRMergeState registers the merge state GetPRMergeState
@@ -795,6 +870,68 @@ func (f *fakeGitProvider) GetPR(_ context.Context, owner, repo, head string) (*P
 	}
 	cp := *pr
 	return &cp, nil
+}
+
+// FindPRForBranch is the fake implementation of
+// GitProvider.FindPRForBranch — the lookup that sees the PRs of
+// every state. It answers from the per-branch response, or through
+// the per-call function when one is set.
+func (f *fakeGitProvider) FindPRForBranch(_ context.Context, owner, repo, head string) (*PR, error) {
+	f.mu.Lock()
+	f.calls = append(f.calls, fakeProviderCall{
+		Method: "FindPRForBranch", Owner: owner, Repo: repo, Head: head,
+	})
+	pr, err, fn := f.prByBranch[head], f.findPRByBranchErr[head], f.findPRByBranchFn
+	f.mu.Unlock()
+	if fn != nil {
+		return fn(head)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if pr == nil {
+		return nil, nil
+	}
+	cp := *pr
+	return &cp, nil
+}
+
+// ListPRLabels is the fake implementation of
+// GitProvider.ListPRLabels. It reports the label set the test
+// seeded for that PR number.
+func (f *fakeGitProvider) ListPRLabels(_ context.Context, owner, repo string, number int) ([]string, error) {
+	f.mu.Lock()
+	f.calls = append(f.calls, fakeProviderCall{
+		Method: "ListPRLabels", Owner: owner, Repo: repo, ID: number,
+	})
+	labels := f.prLabels[number]
+	f.mu.Unlock()
+	out := make([]string, len(labels))
+	copy(out, labels)
+	return out, nil
+}
+
+// RemovePRLabel is the fake implementation of
+// GitProvider.RemovePRLabel. It records the call and drops the label
+// from the PR's label set, so a test can assert what the PR carries
+// after the close.
+func (f *fakeGitProvider) RemovePRLabel(_ context.Context, owner, repo string, number int, label string) error {
+	f.mu.Lock()
+	f.calls = append(f.calls, fakeProviderCall{
+		Method: "RemovePRLabel", Owner: owner, Repo: repo, ID: number, Label: label,
+	})
+	err := f.removePRLabelErr
+	if err == nil {
+		kept := make([]string, 0, len(f.prLabels[number]))
+		for _, l := range f.prLabels[number] {
+			if !strings.EqualFold(l, label) {
+				kept = append(kept, l)
+			}
+		}
+		f.prLabels[number] = kept
+	}
+	f.mu.Unlock()
+	return err
 }
 
 // GetPRMergeState is the fake implementation of

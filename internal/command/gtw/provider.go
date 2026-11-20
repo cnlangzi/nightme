@@ -478,6 +478,36 @@ type GitProvider interface {
 	// when applicable.
 	GetPR(ctx context.Context, owner, repo, head string) (*PR, error)
 
+	// FindPRForBranch returns the pull request (GitHub) or merge
+	// request (GitLab) whose head branch matches `head`, in ANY
+	// state, or (nil, nil) when the branch never had one.
+	//
+	// Distinct from FindOpenPRForBranch / GetPR, which only see
+	// the open ones: /gtw close finalizes the pull request after
+	// the merge, and a merged pull request is not open anymore.
+	//
+	// When the branch carries more than one pull request, the
+	// freshest one wins — the platforms list them newest-first.
+	FindPRForBranch(ctx context.Context, owner, repo, head string) (*PR, error)
+
+	// ListPRLabels returns the names of the labels attached to the
+	// pull request (GitHub) or merge request (GitLab) with the
+	// given number.
+	//
+	// The names are the platform's own, so a label the repository's
+	// catalog does not list still comes back — the caller decides
+	// what to do with it.
+	ListPRLabels(ctx context.Context, owner, repo string, number int) ([]string, error)
+
+	// RemovePRLabel removes `label` from the pull request (GitHub)
+	// or merge request (GitLab) with the given number. Idempotent:
+	// removing an already-absent label is a no-op.
+	//
+	// The PR counterpart of RemoveIssueLabel: /gtw close takes the
+	// `nightme/*` state labels off the pull request the branch
+	// opened.
+	RemovePRLabel(ctx context.Context, owner, repo string, number int, label string) error
+
 	// GetPRMergeState reads the merge state the platform computed
 	// for the pull request (GitHub) / merge request (GitLab) with
 	// the given number.
@@ -1938,27 +1968,7 @@ func (c *GitHubProvider) FindOpenPRForBranch(ctx context.Context, owner, repo, h
 	if err != nil {
 		return nil, wrapListPRError(err, stderr, "gh")
 	}
-	out := strings.TrimSpace(stdout)
-	if out == "" || out == "[]" {
-		return nil, nil
-	}
-	var rows []struct {
-		Number int    `json:"number"`
-		URL    string `json:"url"`
-		State  string `json:"state"`
-	}
-	if err := json.Unmarshal([]byte(out), &rows); err != nil {
-		return nil, fmt.Errorf("gh pr list: decode json: %w", err)
-	}
-	if len(rows) == 0 {
-		return nil, nil
-	}
-	row := rows[0]
-	state := strings.ToLower(row.State)
-	if state == "" {
-		state = "open"
-	}
-	return &PR{Number: row.Number, URL: row.URL, State: state}, nil
+	return decodeGitHubPRList(stdout)
 }
 
 // GetPR runs `gh pr list --head <head> --state open --json
@@ -1982,6 +1992,82 @@ func (c *GitHubProvider) GetPR(ctx context.Context, owner, repo, head string) (*
 	if err != nil {
 		return nil, fmt.Errorf("gh pr list --head %s: %v: %s", head, err, strings.TrimSpace(stderr))
 	}
+	return decodeGitHubPRList(stdout)
+}
+
+// FindPRForBranch runs `gh pr list --head <head> --state all
+// --json number,url,state --repo <owner>/<repo>` and returns the
+// freshest PR of the branch, whatever its state.
+//
+// The state filter is "all" on purpose: /gtw close finalizes the
+// pull request after the merge, and a merged pull request is not
+// open anymore. gh answers an empty JSON array when the branch
+// never had a PR — that is (nil, nil), not an error.
+func (c *GitHubProvider) FindPRForBranch(ctx context.Context, owner, repo, head string) (*PR, error) {
+	args := []string{
+		"pr", "list",
+		"--head", head,
+		"--state", "all",
+		"--json", "number,url,state",
+		"--repo", owner + "/" + repo,
+	}
+	stdout, stderr, err := c.runner().Run(ctx, "gh", args...)
+	if err != nil {
+		return nil, wrapListPRError(err, stderr, "gh")
+	}
+	return decodeGitHubPRList(stdout)
+}
+
+// ListPRLabels runs `gh pr view <number> --json labels --repo
+// <owner>/<repo>` and returns the names of the labels the pull
+// request carries.
+func (c *GitHubProvider) ListPRLabels(ctx context.Context, owner, repo string, number int) ([]string, error) {
+	args := []string{
+		"pr", "view", strconv.Itoa(number),
+		"--json", "labels",
+		"--repo", owner + "/" + repo,
+	}
+	stdout, stderr, err := c.runner().Run(ctx, "gh", args...)
+	if err != nil {
+		return nil, fmt.Errorf("gh pr view --json labels: %v: %s", err, strings.TrimSpace(stderr))
+	}
+	var raw struct {
+		Labels []struct {
+			Name string `json:"name"`
+		} `json:"labels"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &raw); err != nil {
+		return nil, fmt.Errorf("gh pr view --json labels: decode json: %w", err)
+	}
+	labels := make([]string, 0, len(raw.Labels))
+	for _, l := range raw.Labels {
+		labels = append(labels, l.Name)
+	}
+	return labels, nil
+}
+
+// RemovePRLabel runs `gh pr edit <number> --remove-label <label>
+// --repo <owner>/<repo>`.
+func (c *GitHubProvider) RemovePRLabel(ctx context.Context, owner, repo string, number int, label string) error {
+	_, stderr, err := c.runner().Run(ctx, "gh",
+		"pr", "edit", fmt.Sprintf("%d", number),
+		"--repo", owner+"/"+repo,
+		"--remove-label", label,
+	)
+	if err != nil {
+		return fmt.Errorf("gh pr edit --remove-label: %v: %s", err, stderr)
+	}
+	return nil
+}
+
+// decodeGitHubPRList decodes the JSON array `gh pr list --json
+// number,url,state` returns and picks the freshest PR in it.
+//
+// gh lists the PRs of a head branch newest-first, so the first
+// entry is the one a caller wants when the branch carries more than
+// one PR. Returns (nil, nil) for an empty array — the common case
+// when the branch has no PR in the queried state.
+func decodeGitHubPRList(stdout string) (*PR, error) {
 	out := strings.TrimSpace(stdout)
 	if out == "" || out == "[]" {
 		return nil, nil
@@ -1997,8 +2083,6 @@ func (c *GitHubProvider) GetPR(ctx context.Context, owner, repo, head string) (*
 	if len(rows) == 0 {
 		return nil, nil
 	}
-	// gh returns all open PRs for the head, sorted by recency;
-	// the footer only ever shows one. Pick the freshest.
 	row := rows[0]
 	state := strings.ToLower(row.State)
 	if state == "" {
@@ -2162,33 +2246,7 @@ func (c *GitLabProvider) FindOpenPRForBranch(ctx context.Context, owner, repo, h
 	if err != nil {
 		return nil, wrapListPRError(err, stderr, "glab")
 	}
-	out := strings.TrimSpace(stdout)
-	if out == "" || out == "[]" {
-		return nil, nil
-	}
-	var rows []struct {
-		IID    int    `json:"iid"`
-		WebURL string `json:"web_url"`
-		State  string `json:"state"`
-	}
-	if err := json.Unmarshal([]byte(out), &rows); err != nil {
-		return nil, fmt.Errorf("glab mr list: decode json: %w", err)
-	}
-	if len(rows) == 0 {
-		return nil, nil
-	}
-	row := rows[0]
-	state := strings.ToLower(row.State)
-	if state == "" {
-		state = "open"
-	}
-	// glab reports "opened" not "open" — normalise to the
-	// convention the PR.State comment documents ("open") so
-	// downstream consumers don't have to know the platform.
-	if state == "opened" {
-		state = "open"
-	}
-	return &PR{Number: row.IID, URL: row.WebURL, State: state}, nil
+	return decodeGitLabMRList(stdout)
 }
 
 // GetPR runs `glab mr list --source-branch <head> --output json
@@ -2217,6 +2275,75 @@ func (c *GitLabProvider) GetPR(ctx context.Context, owner, repo, head string) (*
 	if err != nil {
 		return nil, fmt.Errorf("glab mr list --source-branch %s: %v: %s", head, err, strings.TrimSpace(stderr))
 	}
+	return decodeGitLabMRList(stdout)
+}
+
+// FindPRForBranch runs `glab api "projects/<owner%2Frepo>/
+// merge_requests?source_branch=<branch>&state=all"` and returns
+// the freshest MR of the branch, whatever its state.
+//
+// The API is used instead of `glab mr list` because the CLI lost
+// its `--state` flag in 1.36 and the replacement flags
+// (--closed / --merged / --draft) do not spell "every state". The
+// REST endpoint has always taken `state=all`.
+//
+// The branch is query-escaped: a branch name carries a slash
+// ("fix/42-test"), which would otherwise split the query string.
+//
+// The API answers an empty JSON array when the branch never had an
+// MR — that is (nil, nil), not an error.
+func (c *GitLabProvider) FindPRForBranch(ctx context.Context, owner, repo, head string) (*PR, error) {
+	projectPath := url.PathEscape(owner + "/" + repo)
+	path := fmt.Sprintf("projects/%s/merge_requests?source_branch=%s&state=all",
+		projectPath, url.QueryEscape(head))
+	stdout, stderr, err := c.runner().Run(ctx, "glab", "api", path)
+	if err != nil {
+		return nil, fmt.Errorf("glab api merge requests: %v: %s", err, strings.TrimSpace(stderr))
+	}
+	return decodeGitLabMRList(stdout)
+}
+
+// ListPRLabels runs `glab api "projects/<owner%2Frepo>/
+// merge_requests/<iid>"` and returns the names of the labels the
+// merge request carries.
+func (c *GitLabProvider) ListPRLabels(ctx context.Context, owner, repo string, number int) ([]string, error) {
+	projectPath := url.PathEscape(owner + "/" + repo)
+	path := fmt.Sprintf("projects/%s/merge_requests/%d", projectPath, number)
+	stdout, stderr, err := c.runner().Run(ctx, "glab", "api", path)
+	if err != nil {
+		return nil, fmt.Errorf("glab api merge request %d: %v: %s", number, err, strings.TrimSpace(stderr))
+	}
+	var raw struct {
+		Labels []string `json:"labels"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &raw); err != nil {
+		return nil, fmt.Errorf("glab api merge request %d: decode json: %w", number, err)
+	}
+	return raw.Labels, nil
+}
+
+// RemovePRLabel runs `glab mr update <number> --unlabel <label>
+// --repo <owner>/<repo>`.
+func (c *GitLabProvider) RemovePRLabel(ctx context.Context, owner, repo string, number int, label string) error {
+	_, stderr, err := c.runner().Run(ctx, "glab",
+		"mr", "update", fmt.Sprintf("%d", number),
+		"--repo", owner+"/"+repo,
+		"--unlabel", label,
+	)
+	if err != nil {
+		return fmt.Errorf("glab mr update --unlabel: %v: %s", err, stderr)
+	}
+	return nil
+}
+
+// decodeGitLabMRList decodes the JSON array of merge requests
+// `glab` reports and picks the freshest one in it.
+//
+// GitLab lists the merge requests of a branch newest-first, so the
+// first entry is the one a caller wants when the branch carries
+// more than one MR. Returns (nil, nil) for an empty array — the
+// common case when the branch has no MR in the queried state.
+func decodeGitLabMRList(stdout string) (*PR, error) {
 	out := strings.TrimSpace(stdout)
 	if out == "" || out == "[]" {
 		return nil, nil
@@ -2227,7 +2354,7 @@ func (c *GitLabProvider) GetPR(ctx context.Context, owner, repo, head string) (*
 		State  string `json:"state"`
 	}
 	if err := json.Unmarshal([]byte(out), &rows); err != nil {
-		return nil, fmt.Errorf("glab mr list: decode json: %w", err)
+		return nil, fmt.Errorf("glab merge requests: decode json: %w", err)
 	}
 	if len(rows) == 0 {
 		return nil, nil
@@ -2235,7 +2362,7 @@ func (c *GitLabProvider) GetPR(ctx context.Context, owner, repo, head string) (*
 	row := rows[0]
 	state := strings.ToLower(row.State)
 	if state == "" {
-		state = "opened"
+		state = "open"
 	}
 	// glab reports "opened" not "open" — normalise to the
 	// convention the PR.State comment documents ("open") so

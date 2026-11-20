@@ -312,6 +312,10 @@ claim 保留自己的措辞：
 
 `/gtw close` 会摘状态 label —— 默认把 `nightme/wip`、`nightme/ready` 都摘掉，贴上 `nightme/done`；`--reset` 只摘不贴。close 收的是这一轮 fix 的本地会话，PR 还开不开着不改变它把 issue 标成「做完了」这件事。
 
+`/gtw close` 同时收尾 PR 上的 label：按分支找到这个 PR，把它上面除 `nightme/assigned` 以外的 `nightme/*` 全部摘掉，只摘不贴 —— PR 的完成状态由平台上的 merged 表达。查询不限状态（close 的正常时机在 merge 之后，merged 的 PR 已经不在 open 里），并且发生在删掉分支之前：分支删掉之后平台就查不到这个 PR 了。分支没开过 PR 时不做任何事，也不告警。
+
+**PR 侧失败只警告**：PR 上的 label 是记账，没有任何逻辑读它，所以摘不掉也只给一行 `⚠️`，close 的本地清理照常跑完。这跟 issue 侧相反 —— issue 的 label 是队列状态的来源，它摘不掉就必须中止 close，否则 worktree 和分支被拆掉之后无法恢复。
+
 ### 3.4 gtw 职责边界（dispatch 之后）
 
 ```

@@ -51,39 +51,19 @@ func waitDone(t *testing.T, r *run) {
 	}
 }
 
-// recordCardOf returns the card the record was posted as.
-func recordCardOf(t *testing.T, op *fakeOperator) cardRecord {
-	t.Helper()
-	cards := op.Cards()
-	for i := len(cards) - 1; i >= 0; i-- {
-		if cards[i].Posted {
-			return cards[i]
-		}
-	}
-	t.Fatalf("the run posted no record card: %+v", cards)
-	return cardRecord{}
-}
-
-// recordEntries returns the entries the record card carries.
+// recordEntry returns the entry the record of the run carries.
 //
-// The record is one entry: the whole body of the card is one reply,
-// not one reply per line.
-func recordEntries(t *testing.T, op *fakeOperator) []string {
+// The record rides on the card of the run, and it is one entry: the
+// whole body of it, not one reply per line.
+func recordEntry(t *testing.T, op *fakeOperator) string {
 	t.Helper()
-	card := recordCardOf(t, op)
-	out := make([]string, 0, 4)
 	for _, m := range op.EmittedOf(messages.OutReply) {
-		if m.ReplyTo == card.ID {
-			out = append(out, m.Text)
+		if strings.HasPrefix(m.Text, "■ [") {
+			return m.Text
 		}
 	}
-	return out
-}
-
-// recordBody renders the entries of the record card as one body.
-func recordBody(t *testing.T, op *fakeOperator) string {
-	t.Helper()
-	return strings.Join(recordEntries(t, op), "\n")
+	t.Fatalf("the run published no record: %v", op.EmittedOf(messages.OutReply))
+	return ""
 }
 
 // TestStop_PostsTheRecordOfTheSession — the operator stops the run:
@@ -119,21 +99,28 @@ func TestStop_PostsTheRecordOfTheSession(t *testing.T) {
 	}
 	waitDone(t, r)
 
-	body := recordBody(t, op)
-	card := recordCardOf(t, op)
-	// The card says what it is: the run is finishing.
-	if card.Body != "the run is finishing…" {
-		t.Errorf("the record card says %q, want the placeholder of the record", card.Body)
+	anchor := r.runSessionRef().anchor
+	body := recordEntry(t, op)
+	// The record rides on the card of the run.
+	var onTheCard bool
+	for _, m := range op.EmittedOf(messages.OutReply) {
+		if m.ReplyTo == anchor && strings.HasPrefix(m.Text, "■ [") {
+			onTheCard = true
+		}
 	}
-	// The footer of the card carries the phase the run ended in.
+	if !onTheCard {
+		t.Errorf("the record does not ride on the card of the run: %v", op.EmittedOf(messages.OutReply))
+	}
+	// The footer of the card of the run carries the phase the run
+	// ended in.
 	var phase bool
 	for _, m := range op.EmittedOf(messages.OutResult) {
-		if m.ReplyTo == card.ID && m.Result == string(PhaseStopped) {
+		if m.ReplyTo == anchor && m.Result == string(PhaseStopped) {
 			phase = true
 		}
 	}
 	if !phase {
-		t.Errorf("the record card carries no phase in its footer: %v", op.EmittedOf(messages.OutResult))
+		t.Errorf("the card of the run carries no phase in its footer: %v", op.EmittedOf(messages.OutResult))
 	}
 	for _, want := range []string{
 		"■ [ one ] stopped",
@@ -152,8 +139,14 @@ func TestStop_PostsTheRecordOfTheSession(t *testing.T) {
 	}
 	// The record is one entry: one reply per line would render the
 	// card as a paragraph per line.
-	if entries := recordEntries(t, op); len(entries) != 1 {
-		t.Errorf("the record card carries %d entries, want the whole body in one: %v", len(entries), entries)
+	entries := 0
+	for _, m := range op.EmittedOf(messages.OutReply) {
+		if m.ReplyTo == anchor && strings.HasPrefix(m.Text, "■ [") {
+			entries++
+		}
+	}
+	if entries != 1 {
+		t.Errorf("the record carries %d entries, want the whole body in one", entries)
 	}
 	// The counters of the run ride in the tree of the rounds: a card
 	// that counts them a second time says two things about one number.
@@ -190,7 +183,7 @@ func TestTheRecordIsPostedWhenTheRunEndsOnItsOwn(t *testing.T) {
 	}
 	waitRun(t, svc, "obs-1")
 
-	body := recordBody(t, op)
+	body := recordEntry(t, op)
 	for _, want := range []string{
 		"■ [ one ] done",
 		"actions:  1 (1 ok)",
@@ -229,7 +222,7 @@ func TestTheRecordOfAFailedRunSaysWhyItFailed(t *testing.T) {
 	}
 	waitRun(t, svc, "obs-1")
 
-	body := recordBody(t, op)
+	body := recordEntry(t, op)
 	if !strings.Contains(body, "■ [ one ] failed") {
 		t.Errorf("the record does not name the phase of the run:\n%s", body)
 	}
@@ -302,7 +295,7 @@ func TestTheRecordComesAfterTheRunUnwinds(t *testing.T) {
 	}
 	waitDone(t, r)
 
-	body := recordBody(t, op)
+	body := recordEntry(t, op)
 	for _, want := range []string{
 		"actions:  1 (1 ok)",
 		"steps:    1 ran · 1 not run",
@@ -345,7 +338,7 @@ func TestTheRecordListsOnlyTheActionsThatWentWrong(t *testing.T) {
 	}
 	waitDone(t, r)
 
-	body := recordBody(t, op)
+	body := recordEntry(t, op)
 	if !strings.Contains(body, "actions:  2 (1 ok · 1 failed)") {
 		t.Errorf("the record does not count the actions:\n%s", body)
 	}

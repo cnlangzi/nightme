@@ -27,6 +27,9 @@ func (s *Service) speak(ctx context.Context, r *run, text, replyTo string) (stri
 	})
 }
 
+// questionMark is what a question the run asks begins with.
+const questionMark = "❓ "
+
 // speakQuestion asks the operator something in the chat.
 //
 // The question is a reply to the run's card, so the answer comes back
@@ -42,9 +45,9 @@ func (s *Service) speakQuestion(ctx context.Context, r *run, question string) (s
 	if sess := r.runSessionRef(); sess != nil {
 		replyTo = sess.anchor
 	}
-	return s.cfg.Operator.Ask(ctx, r.chatID, "❓ "+question, channel.SpeakOptions{
+	return s.cfg.Operator.Ask(ctx, r.chatID, questionMark+question, channel.SpeakOptions{
 		ReplyTo: replyTo,
-		Display: BotMark + "❓ " + question,
+		Display: BotMark + questionMark + question,
 		Owner:   r.owner,
 		RunID:   r.id,
 	})

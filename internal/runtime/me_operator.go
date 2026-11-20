@@ -86,35 +86,6 @@ func (o *operator) Act(ctx context.Context, chatID string, action messages.Actio
 	return imp.Act(ctx, chatID, action)
 }
 
-// PostCard publishes the run's overview in the chat.
-//
-// The chat is checked for the ability to speak first: a channel that
-// cannot be driven is the clearer reason to refuse a run.
-func (o *operator) PostCard(ctx context.Context, chatID string, spec channel.CardSpec) (string, error) {
-	if _, err := o.impersonatorFor(chatID); err != nil {
-		return "", err
-	}
-	pub, err := o.cardPublisherFor(chatID)
-	if err != nil {
-		return "", err
-	}
-	return pub.PostCard(ctx, chatID, spec)
-}
-
-// AdoptCard tells the chat that the message with the given id is the
-// card of a session.
-//
-// A daemon that comes back has forgotten the cards it posted: the run
-// that owns them tells it again, so the run goes on with the card it
-// opened before the restart.
-func (o *operator) AdoptCard(chatID, cardID string) {
-	pub, err := o.cardPublisherFor(chatID)
-	if err != nil {
-		return
-	}
-	pub.AdoptCard(chatID, cardID)
-}
-
 // OnChoice installs the handler that takes the answer of an
 // interactive choice back into the run.
 //
@@ -186,20 +157,6 @@ func (o *operator) impersonatorFor(chatID string) (channel.Impersonator, error) 
 		return nil, fmt.Errorf("the %s channel cannot be driven by the personal agent", ch.Name())
 	}
 	return imp, nil
-}
-
-// cardPublisherFor returns the channel that owns the chat, when it can
-// publish a card.
-func (o *operator) cardPublisherFor(chatID string) (channel.CardPublisher, error) {
-	ch, err := o.channelFor(chatID)
-	if err != nil {
-		return nil, err
-	}
-	pub, ok := ch.(channel.CardPublisher)
-	if !ok {
-		return nil, fmt.Errorf("the %s channel cannot show a run card", ch.Name())
-	}
-	return pub, nil
 }
 
 // channelFor returns the channel that owns the chat.

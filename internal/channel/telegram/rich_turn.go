@@ -138,13 +138,8 @@ func (a *Adapter) appendRichTurn(
 	// Lazy first-send: ensure the rich message exists before
 	// scheduling an edit. On first call we don't have a messageID
 	// yet, so we send (not edit). Subsequent calls edit.
-	//
-	// The anchor may name a card this adapter posted: the turn then
-	// starts on that card, and the session owns one message.
 	if turn.messageID == 0 {
-		if a.adoptableCard(turn.chatID, userMessageID) {
-			turn.messageID = int64(userMessageID)
-		} else if err := a.sendRichTurnColdCreate(turn); err != nil {
+		if err := a.sendRichTurnColdCreate(turn); err != nil {
 			a.logger.Warn("telegram: rich turn cold-create failed",
 				"chat_id", chatID,
 				"err", err)
@@ -386,11 +381,6 @@ func (a *Adapter) setRichTurnTaskList(
 ) {
 	turn := a.richTurns.getOrCreate(chatID, topicID, userMessageID)
 	turn.mu.Lock()
-	// The anchor may name a card this adapter posted: the turn then
-	// starts on that card, and the checklist lands on it.
-	if turn.messageID == 0 && a.adoptableCard(turn.chatID, userMessageID) {
-		turn.messageID = int64(userMessageID)
-	}
 	if len(items) == 0 {
 		turn.taskList = nil
 	} else {

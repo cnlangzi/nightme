@@ -75,10 +75,11 @@ func TestTheRunStartLeavesOneCard(t *testing.T) {
 	}
 }
 
-// TestARunWithoutAMessagePostsACardOfItsOwn — a run that no message
-// started has no card of the chat to write into: it posts one of its
-// own, and the chat folds the run's entries into that one.
-func TestARunWithoutAMessagePostsACardOfItsOwn(t *testing.T) {
+// TestARunWithoutAMessagePublishesThePlanOfItsOwn — a run that no
+// message started has no card of the chat to write into: it posts no
+// message of its own, and the chat shows the plan the way it shows
+// every message of the run.
+func TestARunWithoutAMessagePublishesThePlanOfItsOwn(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 	svc, op := testService(t, dir, noModels())
@@ -91,18 +92,19 @@ func TestARunWithoutAMessagePostsACardOfItsOwn(t *testing.T) {
 	}
 	waitRun(t, svc, "obs-1")
 
-	cards := op.Cards()
-	if len(cards) == 0 {
-		t.Fatal("the run published no card")
+	var plan bool
+	for _, m := range op.EmittedOf(messages.OutReply) {
+		if m.ReplyTo == "" && strings.Contains(m.Text, "▶ [ one ] started") {
+			plan = true
+		}
 	}
-	entries := op.Entries(cards[0].ID)
-	if len(entries) != 1 || !strings.Contains(entries[0], "▶ [ one ] started") {
-		t.Fatalf("the card of the run carries %v, want the plan alone", entries)
+	if !plan {
+		t.Errorf("the run published no plan of its own: %v", op.EmittedOf(messages.OutReply))
 	}
-	// The verdict of the run lands on that card.
+	// The verdict of the run lands on the same card.
 	var verdict bool
 	for _, m := range op.EmittedOf(messages.OutResult) {
-		if m.ReplyTo == cards[0].ID {
+		if m.ReplyTo == "" {
 			verdict = true
 		}
 	}
@@ -213,9 +215,9 @@ func TestTheRoundCardCarriesTheTreeOfTheRounds(t *testing.T) {
 	}
 }
 
-// TestTheRunCardHasNoButtons — the operator drives the run with the
-// /me commands, not with buttons on a card.
-func TestTheRunCardHasNoButtons(t *testing.T) {
+// TestThePlaceholderSaysWhatIsComing — the placeholder is a message
+// of the chat: it says in one line what the card below it is about.
+func TestThePlaceholderSaysWhatIsComing(t *testing.T) {
 	svc, op := sessionService(t)
 
 	if _, _, err := svc.StartWorkflow(context.Background(), Request{
@@ -225,10 +227,12 @@ func TestTheRunCardHasNoButtons(t *testing.T) {
 	}
 	waitRun(t, svc, "obs-1")
 
-	for _, card := range op.Cards() {
-		if card.Title != "" {
-			t.Errorf("the card %q carries a title, want the session's own header", card.Title)
-		}
+	cards := op.Cards()
+	if len(cards) == 0 {
+		t.Fatal("the run opened no card")
+	}
+	if cards[0].Body != "main · round 1 is starting…" {
+		t.Errorf("the placeholder says %q, want the round that starts", cards[0].Body)
 	}
 }
 
@@ -320,6 +324,116 @@ func TestTheRunCardCarriesTheTokensOfTheRun(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("the run's card carries no usage: %v", op.Emitted())
+	}
+}
+
+// TestThePlaceholderStartsNoTurnOfTheAgent — the placeholder is a
+// message of the chat, not a turn of the agent: the daemon does not
+// take it as one.
+func TestThePlaceholderStartsNoTurnOfTheAgent(t *testing.T) {
+	svc, op := sessionService(t)
+
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitRun(t, svc, "obs-1")
+
+	cards := op.Cards()
+	if len(cards) == 0 {
+		t.Fatal("the run opened no card")
+	}
+	if _, ok := op.Get(cards[0].ID); ok {
+		t.Errorf("the placeholder %q started a turn of the agent", cards[0].ID)
+	}
+}
+
+// TestTheChecklistOfAnOlderCardIsFrozen — the card the round had keeps
+// the checklist of the moment it was left: the checklist of the round
+// follows the steps on the latest card only.
+func TestTheChecklistOfAnOlderCardIsFrozen(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "two", commitPushWorkflow)
+
+	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}})
+	op.steps = []fakeStep{okStep("the commit landed"), {open: true}}
+
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "two", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitSent(t, op, "/gtw push")
+
+	r := activeRun(t, svc, "obs-1")
+	round := r.roundSessionRef()
+	if round == nil {
+		t.Fatal("the run has no card of the round")
+	}
+	frozen := op.Checklist(round.anchor)
+	if len(frozen) != 2 {
+		t.Fatalf("the card of the round carries %d rows, want one per step", len(frozen))
+	}
+	if frozen[0].Status != agent.TaskCompleted {
+		t.Errorf("the card of the round does not show the step that ran: %+v", frozen[0])
+	}
+
+	// The operator asks for the state: the card of the state is the
+	// latest card of the round.
+	if err := svc.Status(context.Background(), "obs-1", "om_status"); err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	card, _ := lastState(op)
+	if card.ID == round.anchor {
+		t.Fatal("the state did not open a card of its own")
+	}
+
+	// The card the round had keeps the checklist it had.
+	if got := op.Checklist(round.anchor); len(got) != len(frozen) {
+		t.Errorf("the card of the round carries %d rows, want the %d it had", len(got), len(frozen))
+	}
+	// The latest card carries the checklist of the round.
+	latest := op.Checklist(card.ID)
+	if len(latest) != 2 {
+		t.Fatalf("the card of the state carries %d rows, want one per step", len(latest))
+	}
+	if latest[0].Status != agent.TaskCompleted {
+		t.Errorf("the card of the state does not show the step that ran: %+v", latest[0])
+	}
+}
+
+// TestACardTheChatRefusesGoesToTheOrphanPath — a chat that refuses the
+// placeholder leaves the session without an anchor: the run goes on and
+// the content of the session goes to the chat's orphan handling.
+func TestACardTheChatRefusesGoesToTheOrphanPath(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	svc, op := testService(t, dir, noModels())
+	op.steps = []fakeStep{okStep("committed")}
+	op.failCard = true
+
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitRun(t, svc, "obs-1")
+
+	if op.Posted() != 0 {
+		t.Errorf("the run opened %d cards, want none", op.Posted())
+	}
+	// The tree of the round hangs under no message at all: the chat
+	// shows it the way it shows every message of a run.
+	var orphan bool
+	for _, m := range op.Emitted() {
+		if m.Kind == messages.OutReply && m.ReplyTo == "" && strings.HasPrefix(m.Text, "rounds: ") {
+			orphan = true
+		}
+	}
+	if !orphan {
+		t.Errorf("the content of the round does not go to the orphan path: %v", op.Emitted())
 	}
 }
 

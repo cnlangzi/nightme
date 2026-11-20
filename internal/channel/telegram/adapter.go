@@ -69,15 +69,6 @@ type Adapter struct {
 	// fallback when RichMode is off.
 	richTurns *richTurnsIndex
 
-	// postedCards holds the cards this adapter posted, keyed by the
-	// chat they live in and their message id.
-	//
-	// The personal agent posts the card of its session itself and
-	// addresses the session by that card's id: the rich turn for
-	// such an anchor starts on that card instead of cold-creating a
-	// message of its own. Guarded by a.mu.
-	postedCards map[postedCardKey]bool
-
 	// draftStreamer (sendMessageDraft path) was retired after
 	// observing the animated draft locks the user's send button
 	// for the duration of the turn — preventing the user from
@@ -133,18 +124,17 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 		return nil, fmt.Errorf("telegram: load state: %w", err)
 	}
 	out := &Adapter{
-		name:        "telegram",
-		api:         newHTTPClient(botToken),
-		state:       state,
-		incoming:    make(chan messages.InboundMessage, 128),
-		logger:      slog.Default(),
-		config:      cfgCopy,
-		dataDir:     dataDir,
-		callbacks:   make(map[string]struct{}),
-		limiter:     NewLimiter(nil, slog.Default()),
-		retry:       DefaultRetryConfig,
-		richTurns:   newRichTurnsIndex(defaultRichTurnCap),
-		postedCards: make(map[postedCardKey]bool),
+		name:      "telegram",
+		api:       newHTTPClient(botToken),
+		state:     state,
+		incoming:  make(chan messages.InboundMessage, 128),
+		logger:    slog.Default(),
+		config:    cfgCopy,
+		dataDir:   dataDir,
+		callbacks: make(map[string]struct{}),
+		limiter:   NewLimiter(nil, slog.Default()),
+		retry:     DefaultRetryConfig,
+		richTurns: newRichTurnsIndex(defaultRichTurnCap),
 	}
 	out.liveDraft = newLiveDraftManager(out.api, out.logger)
 	out.wireVoiceHandler()
@@ -208,19 +198,18 @@ func NewAdapterWithClient(cfg *config.Config, api apiClient, dataDir string) *Ad
 		api = newHTTPClient("test-token")
 	}
 	return &Adapter{
-		name:        "telegram",
-		api:         api,
-		state:       state,
-		incoming:    make(chan messages.InboundMessage, 128),
-		logger:      slog.Default(),
-		config:      copy,
-		dataDir:     dataDir,
-		callbacks:   make(map[string]struct{}),
-		limiter:     NewLimiter(nil, slog.Default()),
-		retry:       DefaultRetryConfig,
-		richTurns:   newRichTurnsIndex(defaultRichTurnCap),
-		postedCards: make(map[postedCardKey]bool),
-		liveDraft:   newLiveDraftManager(api, slog.Default()),
+		name:      "telegram",
+		api:       api,
+		state:     state,
+		incoming:  make(chan messages.InboundMessage, 128),
+		logger:    slog.Default(),
+		config:    copy,
+		dataDir:   dataDir,
+		callbacks: make(map[string]struct{}),
+		limiter:   NewLimiter(nil, slog.Default()),
+		retry:     DefaultRetryConfig,
+		richTurns: newRichTurnsIndex(defaultRichTurnCap),
+		liveDraft: newLiveDraftManager(api, slog.Default()),
 	}
 }
 

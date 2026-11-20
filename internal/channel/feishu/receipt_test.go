@@ -94,7 +94,8 @@ func (m *mockReceiptBot) PatchMessage(_ context.Context, messageID, body string)
 // Running/Done).
 func TestSetTaskList_ReceiptBornRunning(t *testing.T) {
 	bot := &mockReceiptBot{}
-	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_card", bot)
+	r := NewMessageReceiptForReply("oc_chat", "om_user", bot)
+	r.cardMsgID = "om_card"
 
 	if got := r.PromptState(); got != chatsession.PromptRunning {
 		t.Fatalf("initial promptState = %v, want chatsession.PromptRunning", got)
@@ -122,7 +123,8 @@ func TestSetTaskList_ReceiptBornRunning(t *testing.T) {
 // items clears the existing checklist (F-38 §1.2 contract).
 func TestSetTaskList_EmptyClearsTasks(t *testing.T) {
 	bot := &mockReceiptBot{}
-	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_card", bot)
+	r := NewMessageReceiptForReply("oc_chat", "om_user", bot)
+	r.cardMsgID = "om_card"
 
 	// First snapshot: 2 items.
 	if err := r.SetTaskList(context.Background(), &agent.AgentTaskListEvent{
@@ -154,7 +156,8 @@ func TestSetTaskList_EmptyClearsTasks(t *testing.T) {
 // the latest one verbatim.
 func TestSetTaskList_ReplacesSnapshot(t *testing.T) {
 	bot := &mockReceiptBot{}
-	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_card", bot)
+	r := NewMessageReceiptForReply("oc_chat", "om_user", bot)
+	r.cardMsgID = "om_card"
 
 	first := &agent.AgentTaskListEvent{
 		Items: []agent.AgentTaskItem{
@@ -187,14 +190,15 @@ func TestSetTaskList_ReplacesSnapshot(t *testing.T) {
 }
 
 // TestSetTaskList_PATCHesOnSubsequentCall verifies that the
-// pre-seeded cardMsgID (from NewMessageReceiptForReply) is used as
-// the PATCH target across successive SetTaskList calls. The receipt
-// never calls SendCard itself — the caller (ensureReceiptForTask
-// in adapter.go) is responsible for the initial card post; the
-// receipt just maintains the rolling-log PATCH cycle.
+// pre-seeded cardMsgID is used as the PATCH target across
+// successive SetTaskList calls. The receipt never calls SendCard
+// itself — the caller (ensureReceiptForTask in adapter.go) is
+// responsible for the initial card post; the receipt just
+// maintains the rolling-log PATCH cycle.
 func TestSetTaskList_PATCHesOnSubsequentCall(t *testing.T) {
 	bot := &mockReceiptBot{}
-	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_card_initial", bot)
+	r := NewMessageReceiptForReply("oc_chat", "om_user", bot)
+	r.cardMsgID = "om_card_initial"
 
 	list1 := &agent.AgentTaskListEvent{
 		Items: []agent.AgentTaskItem{
@@ -233,7 +237,8 @@ func TestSetTaskList_PATCHesOnSubsequentCall(t *testing.T) {
 // an explicit error rather than silently clearing the list.
 func TestSetTaskList_NilListReturnsError(t *testing.T) {
 	bot := &mockReceiptBot{}
-	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_card", bot)
+	r := NewMessageReceiptForReply("oc_chat", "om_user", bot)
+	r.cardMsgID = "om_card"
 
 	if err := r.SetTaskList(context.Background(), nil); err == nil {
 		t.Errorf("SetTaskList(nil) = nil, want error")
@@ -326,7 +331,8 @@ func TestBuildReceiptCard_NoTasksEmptyBody(t *testing.T) {
 // keeps append-only order.
 func TestAppendEntry_FoldsIntoReceipt(t *testing.T) {
 	bot := &mockReceiptBot{}
-	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_card_initial", bot)
+	r := NewMessageReceiptForReply("oc_chat", "om_user", bot)
+	r.cardMsgID = "om_card_initial"
 	// Seed the first entry (the cold-start path installs the first
 	// entry before AppendEntry is called; the test mirrors that
 	// pattern by directly mutating r.entries).
@@ -361,7 +367,8 @@ func TestAppendEntry_FoldsIntoReceipt(t *testing.T) {
 // receipt's existing entries stay intact.
 func TestAppendEntry_OverflowBailsOut(t *testing.T) {
 	bot := &mockReceiptBot{}
-	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_card_initial", bot)
+	r := NewMessageReceiptForReply("oc_chat", "om_user", bot)
+	r.cardMsgID = "om_card_initial"
 
 	// Pre-fill entries so the next append would push the card over
 	// the element cap. 50 entries × 1 element each = at the cap.
@@ -418,7 +425,8 @@ func TestAppendEntry_OverflowBailsOut(t *testing.T) {
 //     PATCH after the rollover.
 func TestAppendEntry_OverflowRolloverPatchesNewCard(t *testing.T) {
 	bot := &mockReceiptBot{}
-	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_card_initial", bot)
+	r := NewMessageReceiptForReply("oc_chat", "om_user", bot)
+	r.cardMsgID = "om_card_initial"
 
 	// (1) Pre-fill to the element cap.
 	entries := make([]LogEntry, receiptMaxElements)
@@ -502,7 +510,7 @@ func TestAppendEntry_OverflowRolloverPatchesNewCard(t *testing.T) {
 // TestRolloverTo_ResetsEntriesAndFooter verifies the receipt's
 // internal state after a RolloverTo call:
 //
-//   - cardMsgID / replyMsgID switch to the new card.
+//   - cardMsgID switches to the new card.
 //   - entries is reset to exactly [firstEntry] (NOT appended to the
 //     pre-rollover slice — otherwise the new card would re-overflow
 //     immediately).
@@ -516,7 +524,8 @@ func TestAppendEntry_OverflowRolloverPatchesNewCard(t *testing.T) {
 //     card's last PATCH time.
 func TestRolloverTo_ResetsEntriesAndFooter(t *testing.T) {
 	bot := &mockReceiptBot{}
-	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_card_initial", bot)
+	r := NewMessageReceiptForReply("oc_chat", "om_user", bot)
+	r.cardMsgID = "om_card_initial"
 
 	// Seed: 3 entries, a footer, and 2 tasks. Also set lastBody +
 	// lastBodyPatch to non-zero values so we can verify the reset.
@@ -544,9 +553,6 @@ func TestRolloverTo_ResetsEntriesAndFooter(t *testing.T) {
 
 	if r.cardMsgID != "om_card_new" {
 		t.Errorf("cardMsgID = %q, want %q", r.cardMsgID, "om_card_new")
-	}
-	if r.replyMsgID != "om_card_new" {
-		t.Errorf("replyMsgID = %q, want %q", r.replyMsgID, "om_card_new")
 	}
 	if got := len(r.entries); got != 1 {
 		t.Fatalf("entries len = %d, want 1 (reset to firstEntry only)", got)
@@ -587,7 +593,8 @@ func TestRolloverTo_NilReceiptIsNoop(t *testing.T) {
 // untracked card, breaking the next PATCH.
 func TestRolloverTo_EmptyMsgIDIsNoop(t *testing.T) {
 	bot := &mockReceiptBot{}
-	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_card_initial", bot)
+	r := NewMessageReceiptForReply("oc_chat", "om_user", bot)
+	r.cardMsgID = "om_card_initial"
 	r.mu.Lock()
 	r.entries = []LogEntry{{Icon: "💬", Text: "keep-me"}}
 	r.mu.Unlock()
@@ -612,7 +619,8 @@ func TestRolloverTo_EmptyMsgIDIsNoop(t *testing.T) {
 // reading, even after the receipt has overflowed once or more.
 func TestSetPromptState_AfterRollover_ReactionGoesToLastCard(t *testing.T) {
 	bot := &mockReceiptBot{}
-	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_card_initial", bot)
+	r := NewMessageReceiptForReply("oc_chat", "om_user", bot)
+	r.cardMsgID = "om_card_initial"
 
 	// Rollover: receipt now tracks a new placeholder.
 	r.RolloverTo("om_card_overflow_1", LogEntry{Icon: "💬", Text: "x"}, nil)
@@ -651,7 +659,8 @@ func TestSetPromptState_AfterRollover_ReactionGoesToLastCard(t *testing.T) {
 //     missing.
 func TestTasks_ReturnsSnapshotUnderLock(t *testing.T) {
 	bot := &mockReceiptBot{}
-	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_card_initial", bot)
+	r := NewMessageReceiptForReply("oc_chat", "om_user", bot)
+	r.cardMsgID = "om_card_initial"
 
 	// Empty case: fresh receipt, no SetTaskList call yet.
 	if got := r.Tasks(); got != nil {
@@ -740,7 +749,7 @@ func TestTasks_NilReceiptReturnsNil(t *testing.T) {
 func TestStampFooterLines_FollowupF44(t *testing.T) {
 	t.Run("patches pre-existing receipt", func(t *testing.T) {
 		bot := &mockReceiptBot{}
-		r := NewMessageReceiptForReply("oc_chat", "om_user", "om_card", bot)
+		r := NewMessageReceiptForReply("oc_chat", "om_user", bot)
 		// Simulate a previously-sendCard'd receipt — renderLocked's
 		// PATCH branch fires when cardMsgID is non-empty.
 		r.cardMsgID = "om_card_existing"
@@ -756,7 +765,7 @@ func TestStampFooterLines_FollowupF44(t *testing.T) {
 
 	t.Run("empty footerLines preserves prior footer", func(t *testing.T) {
 		bot := &mockReceiptBot{}
-		r := NewMessageReceiptForReply("oc_chat", "om_user", "om_card", bot)
+		r := NewMessageReceiptForReply("oc_chat", "om_user", bot)
 		r.cardMsgID = "om_card"
 		prior := []string{"prior: agent · model"}
 		r.footerLines = prior

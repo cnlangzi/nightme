@@ -863,7 +863,7 @@ func (a *Adapter) ensureReceiptForTyping(ctx context.Context, chatID, userMsgID 
 		return nil, false, errors.New("feishu: ensureReceiptForTyping requires userMsgID")
 	}
 
-	transient := NewMessageReceiptForReply(chatID, userMsgID, "", a)
+	transient := NewMessageReceiptForReply(chatID, userMsgID, a)
 	// No entries / no tasks — buildReceiptCard will render the
 	// "⌨️ Working..." placeholder header line. F-48: footer is
 	// rendered up-front so the placeholder card shows the
@@ -932,7 +932,6 @@ func (a *Adapter) ensureReceiptForTyping(ctx context.Context, chatID, userMsgID 
 	// The receipt's own lock guards its fields: renderLocked reads
 	// them under it.
 	transient.mu.Lock()
-	transient.replyMsgID = msgID
 	transient.cardMsgID = msgID
 	transient.initializing = false
 	transient.mu.Unlock()
@@ -999,7 +998,7 @@ func (a *Adapter) ensureReceiptForReplyWithFooter(ctx context.Context, chatID, u
 		return nil, false, errors.New("feishu: ensureReceiptForReply requires non-empty firstEntryText")
 	}
 
-	transient := NewMessageReceiptForReply(chatID, userMsgID, "", a)
+	transient := NewMessageReceiptForReply(chatID, userMsgID, a)
 	transient.entries = []LogEntry{newOutReplyEntry(firstEntryText)}
 	transient.footerLines = footerLines
 	transient.promptState = agentsession.PromptRunning
@@ -1077,7 +1076,6 @@ func (a *Adapter) ensureReceiptForReplyWithFooter(ctx context.Context, chatID, u
 	// The receipt's own lock guards its fields: renderLocked reads
 	// them under it.
 	transient.mu.Lock()
-	transient.replyMsgID = msgID
 	transient.cardMsgID = msgID
 	transient.initializing = false
 	transient.mu.Unlock()
@@ -1332,7 +1330,7 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 		return nil, false, errors.New("feishu: ensureReceiptForTask requires non-nil AgentTaskListEvent")
 	}
 
-	transient := NewMessageReceiptForReply(chatID, userMsgID, "", a)
+	transient := NewMessageReceiptForReply(chatID, userMsgID, a)
 	// Copy the items exactly like SetTaskList does, so the
 	// snapshot we hand to buildReceiptCard is independent of any
 	// later mutations on the caller's AgentTaskListEvent.
@@ -1402,7 +1400,6 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 	// The receipt's own lock guards its fields: renderLocked reads
 	// them under it.
 	transient.mu.Lock()
-	transient.replyMsgID = msgID
 	transient.cardMsgID = msgID
 	transient.initializing = false
 	transient.mu.Unlock()

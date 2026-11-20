@@ -36,13 +36,17 @@ import (
 //   - Incoming:    the channel publishes inbound user messages on
 //     this channel; the Gateway reads it in pumpInbound.
 //     Closed when the channel shuts down.
-//   - Send:        the sole outbound egress. Every OutboundKind
-//     (text, thinking, tool, OutChoice, OutChoicePatch,
-//     receipt, reaction, …) goes through here.
-//     Channel routes by Kind; interactive-choice
-//     correlation is Channel-private via
-//     Choice.RequestID. Callers never see a platform
-//     message id and never pick a second send method.
+//   - Send:        the sole egress for the messages the runtime
+//     sends itself. Every OutboundKind (text, thinking, tool,
+//     OutChoice, OutChoicePatch, receipt, reaction, …) goes
+//     through here. Channel routes by Kind; interactive-choice
+//     correlation is Channel-private via Choice.RequestID.
+//     Callers never see a platform message id and never pick a
+//     second send method.
+//
+// Impersonator is a different contract: what a program says in a
+// chat has to come back into the daemon as an inbound message, so
+// it has an interface of its own.
 //
 // "Abstract stays abstract, concrete stays concrete": the Gateway
 // knows only this surface. Receipt shape and card handles are

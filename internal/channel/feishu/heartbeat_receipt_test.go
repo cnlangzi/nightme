@@ -33,7 +33,8 @@ import (
 func newTestReceipt(t *testing.T) (*MessageReceipt, *mockReceiptBot) {
 	t.Helper()
 	bot := &mockReceiptBot{}
-	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_card", bot)
+	r := NewMessageReceiptForReply("oc_chat", "om_user", bot)
+	r.cardMsgID = "om_card"
 	r.heartbeatMinInterval = 0 // disable throttle for deterministic tests
 	return r, bot
 }

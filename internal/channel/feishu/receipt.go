@@ -110,7 +110,7 @@ const divTextCharLimit = 1000
 //     the caller can send it as a fresh top-level Create (F-40
 //     bail-out, F-44 follow-up styling).
 //   - tasks: latest snapshot, replaced wholesale on each SetTaskList.
-//   - cardMsgID / replyMsgID / initializing / lastBody / lastBodyPatch:
+//   - cardMsgID / initializing / lastBody / lastBodyPatch:
 //     SendCard → PatchMessage bookkeeping (unchanged from F-42).
 //   - bot / logger / mu / chatID / userMsgID: infrastructure.
 //
@@ -122,11 +122,10 @@ const divTextCharLimit = 1000
 //     overflow now bails out to fresh messages instead of FIFO
 //     truncating the receipt).
 type MessageReceipt struct {
-	chatID     string
-	userMsgID  string
-	replyMsgID string
-	bot        receiptBot
-	logger     *slog.Logger
+	chatID    string
+	userMsgID string
+	bot       receiptBot
+	logger    *slog.Logger
 
 	mu          sync.Mutex
 	promptState chatsession.PromptState // F-53: feishu-local 2-value enum (was agent.PromptState 4-value)
@@ -215,19 +214,17 @@ type MessageReceipt struct {
 // PatchMessage on subsequent). F-44 callers pass `a`; passing nil
 // will panic on the first render.
 //
-// The replyMsgID parameter names the card the receipt patches: the
-// receipt sends a card of its own when it is empty. The callers of
-// the chat pass "" — the card of a session is opened by the chat,
-// not by the adapter — and the first SendCard in renderLocked
-// populates cardMsgID.
-func NewMessageReceiptForReply(chatID, userMsgID, replyMsgID string, bot receiptBot) *MessageReceipt {
+// The receipt owns the card it rewrites: the first render sends a
+// card of its own under userMsgID and stores the message id in
+// cardMsgID, every later render patches that same card. No caller
+// hands the receipt a card to rewrite. The card of a session is
+// opened by the chat, not by the adapter.
+func NewMessageReceiptForReply(chatID, userMsgID string, bot receiptBot) *MessageReceipt {
 	return &MessageReceipt{
-		chatID:     chatID,
-		userMsgID:  userMsgID,
-		replyMsgID: replyMsgID,
-		cardMsgID:  replyMsgID,
-		bot:        bot,
-		logger:     slog.Default(),
+		chatID:    chatID,
+		userMsgID: userMsgID,
+		bot:       bot,
+		logger:    slog.Default(),
 		// F-63: 2s heartbeat throttle. Dense thinking streams can
 		// fire 10+ OutHeartbeat events per second; we coalesce them
 		// into one PATCH every 2s to stay well under Feishu's
@@ -608,14 +605,14 @@ func (r *MessageReceipt) AppendEntryWithFooter(ctx context.Context, entry LogEnt
 // followed by N-1 PATCHes, instead of N standalone bubbles in main
 // chat.
 //
-// Why a method, not just field assignment: cardMsgID, replyMsgID,
-// entries, footerLines, lastBody, and lastBodyPatch all need to
-// move together. Doing it under r.mu keeps a concurrent
-// renderLocked / SetPromptState from observing a half-migrated
-// state. lastBody + lastBodyPatch also need to be reset so the
-// first PATCH onto the new card isn't suppressed by the
-// duplicate-body short-circuit or delayed by the 300ms rate
-// limiter measured against the OLD card's last PATCH.
+// Why a method, not just field assignment: cardMsgID, entries,
+// footerLines, lastBody, and lastBodyPatch all need to move
+// together. Doing it under r.mu keeps a concurrent renderLocked
+// / SetPromptState from observing a half-migrated state.
+// lastBody + lastBodyPatch also need to be reset so the first
+// PATCH onto the new card isn't suppressed by the duplicate-body
+// short-circuit or delayed by the 300ms rate limiter measured
+// against the OLD card's last PATCH.
 //
 // tasks are intentionally preserved across the rollover — the
 // checklist is a global view across the whole turn; freezing it on
@@ -643,7 +640,6 @@ func (r *MessageReceipt) RolloverTo(msgID string, firstEntry LogEntry, footerLin
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.cardMsgID = msgID
-	r.replyMsgID = msgID
 	r.entries = []LogEntry{firstEntry}
 	r.footerLines = footerLines
 	// Reset render-state cache so the first PATCH on the new card
@@ -715,7 +711,6 @@ func (r *MessageReceipt) renderLocked(ctx context.Context) error {
 			return fmt.Errorf("feishu receipt: create card: %w", sendErr)
 		}
 		r.cardMsgID = msgID
-		r.replyMsgID = msgID // keep alias in sync
 		r.lastBody = body
 		r.lastBodyPatch = time.Now()
 		// F-53 follow-up: add the 🔄 "Running" reaction on the

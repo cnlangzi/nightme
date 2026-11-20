@@ -439,8 +439,7 @@ func (s *Service) applyDirective(ctx context.Context, r *run) error {
 	if d == nil {
 		return nil
 	}
-	// The decision is taken once: the state no longer carries it, so a
-	// daemon that dies in the middle does not apply it twice.
+	// The decision is taken once: the run no longer carries it.
 	switch d.Kind {
 	case directiveResume:
 		return s.applyResume(ctx, r, d.Step)

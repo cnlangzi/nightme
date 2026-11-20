@@ -294,9 +294,8 @@ func (s *Service) plan(ctx context.Context, r *run) (wfe.Decision, error) {
 	// rounds are compared around it: the thinking session of the round
 	// that ended goes with it.
 	s.closeBrainOnNewRound(r, before, decision)
-	// The gap is waited before the round that starts goes to the disk:
-	// a daemon that comes back while the run waits finds the round
-	// that ended, starts the round again and waits the gap again.
+	// The gap is waited before the run enters the next round: the card
+	// of the round opens when the round starts.
 	if err := waitFor(ctx, r, decision.Gap); err != nil {
 		return decision, err
 	}

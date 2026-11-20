@@ -309,10 +309,6 @@ func (s *Service) closeRoundSession(ctx context.Context, r *run) {
 	s.publishReply(ctx, r, sess, decisionsText(rec))
 	s.publishResult(ctx, r, sess, string(rec.Outcome.Status))
 	r.setRoundSession(nil)
-	// The facts of the round belong to the run: a daemon that comes
-	// back renders the tree of the rounds the same way. The state goes
-	// to the disk after the session is closed: a state that still named
-	// the round that just ended would close it a second time.
 }
 
 // closeDecisionSession ends the session of the decision that is open.

@@ -711,9 +711,6 @@ func (s *Service) Reply(ctx context.Context, chatID, text string) error {
 // The step that is running is not interrupted: its outcome is
 // recorded, and the run waits for the operator to hand the control
 // back.
-//
-// The state of the run hangs under the message the operator asked
-// from: the operator is looking right at it.
 func (s *Service) Pause(ctx context.Context, chatID, messageID string) error {
 	s.mu.Lock()
 	r, ok := s.active[chatID]
@@ -723,7 +720,7 @@ func (s *Service) Pause(ctx context.Context, chatID, messageID string) error {
 	}
 	r.requestPause("the operator paused the run")
 	s.refreshRun(r)
-	s.showState(ctx, r, r.stateAnchor(messageID))
+	s.answerCommand(ctx, r, messageID, pauseAnswer)
 	return nil
 }
 
@@ -741,9 +738,8 @@ func (s *Service) Pause(ctx context.Context, chatID, messageID string) error {
 // woken, so a daemon that dies in between comes back with the
 // decision in its state file.
 //
-// The state of the run is published before the run is woken: it hangs
-// under the message the operator asked from, and it says where the run
-// stands.
+// The state of the run is published before the run is woken: it says
+// where the run stands.
 func (s *Service) Resume(ctx context.Context, chatID, messageID, note string) (OperatorDecision, error) {
 	return s.operatorDecision(ctx, chatID, messageID, note, directiveResume)
 }
@@ -758,9 +754,8 @@ func (s *Service) Resume(ctx context.Context, chatID, messageID, note string) (O
 // A note is the operator's instruction: it joins the conversation the
 // chat model reads.
 //
-// The state of the run is published before the run is woken: it hangs
-// under the message the operator asked from, and it says where the run
-// stands.
+// The state of the run is published before the run is woken: it says
+// where the run stands.
 func (s *Service) Next(ctx context.Context, chatID, messageID, note string) (OperatorDecision, error) {
 	return s.operatorDecision(ctx, chatID, messageID, note, directiveNext)
 }
@@ -771,16 +766,17 @@ func (s *Service) Next(ctx context.Context, chatID, messageID, note string) (Ope
 // It reports what the command did with the step the run is on: the id
 // of the step and whether the command recorded a decision.
 //
-// A command that acts on nothing records nothing: the state of the run
-// is published all the same, and the run holds no decision of its own
-// for the turn.
+// A command that acts on nothing records nothing: the answer says what
+// did not happen, the state of the run is published all the same, and
+// the run holds no decision of its own for the turn.
 //
 // A step whose work is in flight is skipped at once: the run waits for
 // the command, and a decision that waited for the run's next turn would
 // wait for the command to finish.
 //
 // The decision is persisted, the state of the run is refreshed and the
-// state of the run is published before the run is woken.
+// answer with the state of the run is published before the run is
+// woken.
 func (s *Service) operatorDecision(ctx context.Context, chatID, messageID, note, kind string) (OperatorDecision, error) {
 	s.mu.Lock()
 	r, ok := s.active[chatID]
@@ -797,7 +793,7 @@ func (s *Service) operatorDecision(ctx context.Context, chatID, messageID, note,
 	}
 	s.persist(r)
 	s.refreshRun(r)
-	s.showState(ctx, r, r.stateAnchor(messageID))
+	s.answerCommand(ctx, r, messageID, decisionAnswer(kind, d))
 	if paused {
 		r.wake()
 	}
@@ -819,7 +815,7 @@ func (s *Service) Status(ctx context.Context, chatID, messageID string) error {
 	if !ok {
 		return ErrNoRun
 	}
-	s.showState(ctx, r, r.stateAnchor(messageID))
+	s.answerCommand(ctx, r, messageID, "")
 	return nil
 }
 

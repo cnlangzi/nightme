@@ -21,6 +21,11 @@
 // directory. A name that carries no owner is the workflow of that
 // name when there is one, and the project's own namespace otherwise:
 // "coder" is the workflow "nightme/coder".
+//
+// The commands that act on a run — `/me pause`, `/me resume`,
+// `/me next`, `/me status` — answer on the card of their own message:
+// the answer and the state of the run are one card. They post no reply
+// of their own.
 package me
 
 import (
@@ -41,17 +46,6 @@ import (
 const (
 	// stateShownSummary is the one-line account of that answer.
 	stateShownSummary = "the run's state is shown again"
-)
-
-// The marks of the two commands that act on a step.
-//
-// The mark says what the command does with the step: it runs again, or
-// it is skipped.
-const (
-	// resumeMark is the mark of `/me resume`.
-	resumeMark = "▶"
-	// nextMark is the mark of `/me next`.
-	nextMark = "⏭"
 )
 
 // Factory is the command.SlashCommandFactory for /me.
@@ -237,7 +231,7 @@ func (f *Factory) pause(ctx context.Context, rt command.RuntimeServices, input c
 		Status:  messages.OutcomeOK,
 		Summary: "the run pauses after the current step",
 	})
-	return command.Reply(ctx, rt, "⏸ The run pauses after the current step."), nil
+	return &command.SlashOutput{Consumed: true}, nil
 }
 
 // resume runs the step the run is on again.
@@ -254,14 +248,15 @@ func (f *Factory) resume(ctx context.Context, rt command.RuntimeServices, input 
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
 	if !d.Act {
-		return nothingDone(ctx, rt, resumeMark, d.Step, d.Why, "it was not run again"), nil
+		nothingDone(ctx, d.Step)
+		return &command.SlashOutput{Consumed: true}, nil
 	}
 	chatsession.ReportOutcome(ctx, messages.Outcome{
 		Status:  messages.OutcomeOK,
 		Summary: "the step runs again",
 		Data:    map[string]string{"step": d.Step},
 	})
-	return command.Reply(ctx, rt, resumeMark+" The step runs again: "+d.Step+"."), nil
+	return &command.SlashOutput{Consumed: true}, nil
 }
 
 // next skips the step the run is on.
@@ -277,25 +272,24 @@ func (f *Factory) next(ctx context.Context, rt command.RuntimeServices, input co
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
 	if !d.Act {
-		return nothingDone(ctx, rt, nextMark, d.Step, d.Why, "there was nothing to skip"), nil
+		nothingDone(ctx, d.Step)
+		return &command.SlashOutput{Consumed: true}, nil
 	}
 	chatsession.ReportOutcome(ctx, messages.Outcome{
 		Status:  messages.OutcomeOK,
 		Summary: "the step is skipped",
 		Data:    map[string]string{"step": d.Step},
 	})
-	return command.Reply(ctx, rt, nextMark+" The step is skipped: "+d.Step+". The run goes on with the workflow."), nil
+	return &command.SlashOutput{Consumed: true}, nil
 }
 
-// nothingDone answers a command that had nothing to decide: the reply
-// names the step and says what did not happen, so the operator can tell
-// that their command did nothing.
+// nothingDone reports a command that had nothing to decide.
 //
 // The outcome is a noop: the request was valid, and there was nothing
-// to do to the step.
-func nothingDone(ctx context.Context, rt command.RuntimeServices, mark, step, why, notHappened string) *command.SlashOutput {
+// to do to the step. The card of the command says what did not happen,
+// so the operator can tell that their command did nothing.
+func nothingDone(ctx context.Context, step string) {
 	chatsession.ReportOutcome(ctx, command.NoopOutcome(stateShownSummary, map[string]string{"step": step}))
-	return command.Reply(ctx, rt, mark+" The step "+step+" "+why+" — "+notHappened+".")
 }
 
 // refusalReason returns the stable code of a refusal, or the generic

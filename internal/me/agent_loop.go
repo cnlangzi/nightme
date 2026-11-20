@@ -12,12 +12,6 @@ import (
 // errFinished ends the loop when the model called the finish tool.
 var errFinished = errors.New("me: the run finished")
 
-// pauseMark marks the run's own notice in the chat.
-//
-// The notice is not a command of the workflow: it is the run telling
-// the operator what it waits for.
-const pauseMark = "⏸ "
-
 // sys1Action is what the decision model led to.
 type sys1Action int
 
@@ -253,7 +247,7 @@ func (s *Service) pauseForBudget(ctx context.Context, r *run) {
 	s.persist(r)
 	// The run stops: it publishes the state of the round on a card of
 	// its own.
-	s.showState(ctx, r, r.stateAnchor(""))
+	s.showState(ctx, r)
 	s.refreshRun(r)
 	s.announcePause(ctx, r, reason)
 }
@@ -263,6 +257,9 @@ func (s *Service) pauseForBudget(ctx context.Context, r *run) {
 // The state of the run hangs in the card of the round: the chat does
 // not push it, so the operator is told that the run stopped and what
 // they can do about it.
+//
+// The notice is not a command of the workflow: it is the run telling
+// the operator what it waits for.
 func (s *Service) announcePause(ctx context.Context, r *run, reason string) {
 	if _, err := s.speak(ctx, r, pauseMark+"The run paused: "+reason+". Send /me resume to run the step again, or /me next to skip it.", ""); err != nil {
 		s.logger.Warn("me: the pause could not be spoken", "run_id", r.id, "err", err)

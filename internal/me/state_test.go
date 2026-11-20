@@ -467,6 +467,51 @@ func TestANextPublishesTheState(t *testing.T) {
 	}
 }
 
+// TestALateStateOfAPauseDoesNotTakeTheCardOfTheRound — the state a
+// run opens for its pause may reach the chat after the operator has
+// let the run go. The card it names is then a snapshot of a moment
+// that has passed: it does not take the card of the round, which is
+// the card the operator was answered on.
+func TestALateStateOfAPauseDoesNotTakeTheCardOfTheRound(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "two", commitPushWorkflow)
+
+	svc, op := testService(t, dir, Config{Provider: &scriptedProvider{}, MaxJudgments: 1})
+	op.steps = []fakeStep{
+		{outcome: messages.Outcome{
+			Status:  messages.OutcomeFailed,
+			Summary: "the commit failed",
+			Data:    map[string]string{"error": "the commit failed", "reason": "conflict"},
+		}},
+		{open: true},
+	}
+
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "two", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitPaused(t, svc, "obs-1")
+	r := activeRun(t, svc, "obs-1")
+
+	// The operator lets the run go: the card of the round is the card
+	// of their command.
+	if _, err := svc.Next(context.Background(), "obs-1", "om_next", ""); err != nil {
+		t.Fatalf("next: %v", err)
+	}
+	if got := r.roundSessionRef(); got == nil || got.anchor != "om_next" {
+		t.Fatalf("the round goes on with %v, want the message the operator asked from", got)
+	}
+
+	// The pause publishes its state now: the run opened that card
+	// before the operator's command and publishes it after.
+	svc.showState(context.Background(), r)
+
+	if got := r.roundSessionRef(); got == nil || got.anchor != "om_next" {
+		t.Errorf("the late state took the card of the round: %v, want the message the operator asked from", got)
+	}
+}
+
 // TestAResumeOfARunWithoutARoundPublishesThePhaseLine — a run that
 // has not entered a round has no round state: only the phase line is
 // published, on a card of its own.

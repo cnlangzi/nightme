@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"time"
 
 	"github.com/cnlangzi/nightme/pkg/wfe"
@@ -34,7 +35,7 @@ const (
 // drive runs one workflow to its end and reports how it ended.
 func (s *Service) drive(ctx context.Context, r *run) {
 	defer close(r.done)
-	err := s.loop(ctx, r)
+	err := s.runLoop(ctx, r)
 	// The session that thinks for the owner belongs to the run: it
 	// goes with it, whatever ended the run.
 	s.closeBrain(r)
@@ -72,6 +73,27 @@ func (s *Service) drive(ctx context.Context, r *run) {
 	// step that was in flight is only known now that the run has
 	// unwound.
 	s.postRecord(r)
+}
+
+// runLoop runs the run's cycle and keeps a panic of it from taking the
+// daemon with it.
+//
+// A bug in one run is that run's business: the panic is reported with
+// its stack and the run ends as failed. The daemon goes on serving the
+// other chats.
+func (s *Service) runLoop(ctx context.Context, r *run) (err error) {
+	defer func() {
+		rec := recover()
+		if rec == nil {
+			return
+		}
+		s.logger.Error("me: a run panicked",
+			"run_id", r.id,
+			"panic", rec,
+			"stack", string(debug.Stack()))
+		err = fmt.Errorf("the run crashed: %v", rec)
+	}()
+	return s.loop(ctx, r)
 }
 
 // loop is the run's main cycle.

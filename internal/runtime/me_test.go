@@ -3,6 +3,7 @@ package runtime
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -13,7 +14,15 @@ import (
 	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/llm"
+	"github.com/cnlangzi/nightme/internal/me"
 )
+
+// stubProvider is a chat model that is never called.
+type stubProvider struct{}
+
+func (stubProvider) Complete(context.Context, llm.Request) (*llm.Response, error) {
+	return nil, errors.New("the stub provider must not be called")
+}
 
 // TestBuildPersonalAgent_NoChannel — the personal agent works in a
 // chat. Without a channel there is no chat to work in, so the agent
@@ -97,9 +106,12 @@ func TestBuildChatModel_UsesTheInlineKey(t *testing.T) {
 	cfg := &config.Config{Me: config.MeConfig{LLM: config.MeLLMConfig{
 		Protocol: "chat_completions", BaseURL: srv.URL, Model: "m", APIKey: "sk-inline",
 	}}}
-	p := buildChatModel(cfg, slog.Default())
+	p, issue := buildChatModel(cfg, slog.Default())
 	if p == nil {
 		t.Fatal("no chat model was built")
+	}
+	if issue != "" {
+		t.Fatalf("issue = %q, want none", issue)
 	}
 	if _, err := p.Complete(context.Background(), llm.Request{}); err != nil {
 		t.Fatalf("complete: %v", err)
@@ -122,9 +134,12 @@ func TestBuildDecider_UsesTheInlineKey(t *testing.T) {
 	cfg := &config.Config{Me: config.MeConfig{Decider: config.MeDeciderConfig{
 		Protocol: "decisions", BaseURL: srv.URL, Model: "m", APIKey: "sk-inline",
 	}}}
-	d := buildDecider(cfg, slog.Default())
+	d, issue := buildDecider(cfg, slog.Default())
 	if d == nil {
 		t.Fatal("no decision model was built")
+	}
+	if issue != "" {
+		t.Fatalf("issue = %q, want none", issue)
 	}
 	if _, err := d.Decide(context.Background(), llm.DecisionRequest{
 		State:     "halfway",
@@ -186,8 +201,12 @@ func TestBuildChatModel_NoWarningWithoutAProtocol(t *testing.T) {
 	cfg := &config.Config{Me: config.MeConfig{LLM: config.MeLLMConfig{
 		APIKey: "sk-inline", APIKeyEnv: "NIGHTME_TEST_KEY",
 	}}}
-	if p := buildChatModel(cfg, logger); p != nil {
+	p, issue := buildChatModel(cfg, logger)
+	if p != nil {
 		t.Fatal("a chat model without a protocol was built")
+	}
+	if issue != "" {
+		t.Fatalf("issue = %q, want none", issue)
 	}
 	if out := buf.String(); out != "" {
 		t.Fatalf("the log is not empty: %s", out)
@@ -222,42 +241,191 @@ func TestCountIMChannels(t *testing.T) {
 }
 
 // TestBuildChatModel_ReportsAMissingProtocol — a chat model that
-// names no protocol is not built, and the log says why.
+// names no protocol is not built, and the issue says which key is
+// missing.
 //
 // The key that names the protocol is not read under its old name any
 // more: a file that carries only that one has no chat model, and the
-// operator learns it from the log.
+// operator learns it from the issue.
 func TestBuildChatModel_ReportsAMissingProtocol(t *testing.T) {
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, nil))
-
 	cfg := &config.Config{Me: config.MeConfig{LLM: config.MeLLMConfig{
 		BaseURL: "https://example.test", Model: "m",
 	}}}
-	if p := buildChatModel(cfg, logger); p != nil {
+	p, issue := buildChatModel(cfg, slog.Default())
+	if p != nil {
 		t.Fatal("a chat model without a protocol was built")
 	}
-	out := buf.String()
-	if !strings.Contains(out, "me.llm.protocol") {
-		t.Fatalf("the log does not name the missing protocol: %s", out)
+	want := "me.llm.protocol is not set (known: chat_completions, messages)"
+	if issue != want {
+		t.Fatalf("issue = %q, want %q", issue, want)
 	}
 }
 
 // TestBuildChatModel_ReportsAMissingModel — a chat model that names
-// no model is not built, and the log says why.
+// no model is not built, and the issue says which key is missing.
 func TestBuildChatModel_ReportsAMissingModel(t *testing.T) {
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, nil))
-
 	cfg := &config.Config{Me: config.MeConfig{LLM: config.MeLLMConfig{
 		Protocol: "chat_completions", BaseURL: "https://example.test",
 	}}}
-	if p := buildChatModel(cfg, logger); p != nil {
+	p, issue := buildChatModel(cfg, slog.Default())
+	if p != nil {
 		t.Fatal("a chat model without a model was built")
 	}
+	if issue != "me.llm.model is not set" {
+		t.Fatalf("issue = %q, want the missing model", issue)
+	}
+}
+
+// TestBuildChatModel_ReportsAnUnknownProtocol — a chat model that
+// names a protocol nobody registered is not built, and the issue says
+// what went wrong.
+func TestBuildChatModel_ReportsAnUnknownProtocol(t *testing.T) {
+	cfg := &config.Config{Me: config.MeConfig{LLM: config.MeLLMConfig{
+		Protocol: "nope", BaseURL: "https://example.test", Model: "m",
+	}}}
+	p, issue := buildChatModel(cfg, slog.Default())
+	if p != nil {
+		t.Fatal("a chat model of an unknown protocol was built")
+	}
+	want := `the chat model could not be built: llm: unknown chat protocol "nope" (known: chat_completions, messages)`
+	if issue != want {
+		t.Fatalf("issue = %q, want %q", issue, want)
+	}
+}
+
+// TestBuildDecider_ReportsAMissingProtocol — a decision model that
+// names no protocol is not built, and the issue says which key is
+// missing.
+func TestBuildDecider_ReportsAMissingProtocol(t *testing.T) {
+	cfg := &config.Config{Me: config.MeConfig{Decider: config.MeDeciderConfig{
+		BaseURL: "https://example.test", Model: "m",
+	}}}
+	d, issue := buildDecider(cfg, slog.Default())
+	if d != nil {
+		t.Fatal("a decision model without a protocol was built")
+	}
+	want := "me.decider.protocol is not set (known: decisions, systemone)"
+	if issue != want {
+		t.Fatalf("issue = %q, want %q", issue, want)
+	}
+}
+
+// TestBuildDecider_ReportsAMissingModel — a decision model that names
+// no model is not built, and the issue says which key is missing.
+func TestBuildDecider_ReportsAMissingModel(t *testing.T) {
+	cfg := &config.Config{Me: config.MeConfig{Decider: config.MeDeciderConfig{
+		Protocol: "decisions", BaseURL: "https://example.test",
+	}}}
+	d, issue := buildDecider(cfg, slog.Default())
+	if d != nil {
+		t.Fatal("a decision model without a model was built")
+	}
+	if issue != "me.decider.model is not set" {
+		t.Fatalf("issue = %q, want the missing model", issue)
+	}
+}
+
+// TestBuildDecider_ReportsAnUnknownProtocol — a decision model that
+// names a protocol nobody registered is not built, and the issue says
+// what went wrong.
+func TestBuildDecider_ReportsAnUnknownProtocol(t *testing.T) {
+	cfg := &config.Config{Me: config.MeConfig{Decider: config.MeDeciderConfig{
+		Protocol: "nope", BaseURL: "https://example.test", Model: "m",
+	}}}
+	d, issue := buildDecider(cfg, slog.Default())
+	if d != nil {
+		t.Fatal("a decision model of an unknown protocol was built")
+	}
+	want := `the decision model could not be built: llm: unknown decision protocol "nope" (known: decisions, systemone)`
+	if issue != want {
+		t.Fatalf("issue = %q, want %q", issue, want)
+	}
+}
+
+// TestBuildPersonalAgent_LogsABrokenModelAsAnError — a model that
+// is configured but cannot be built is an error the daemon reports.
+func TestBuildPersonalAgent_LogsABrokenModelAsAnError(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+
+	cfg := &config.Config{
+		Paths: config.PathsConfig{DataDir: t.TempDir()},
+		Me: config.MeConfig{LLM: config.MeLLMConfig{
+			BaseURL: "https://example.test", Model: "m",
+		}},
+	}
+	ch := newStubChannel("stub", nil)
+	op := newOperator(nil, []channel.Channel{ch}, slog.Default())
+	svc := buildPersonalAgent(cfg, []channel.Channel{ch}, op, logger)
+	if svc == nil {
+		t.Fatal("expected an agent")
+	}
 	out := buf.String()
-	if !strings.Contains(out, "me.llm.model") {
-		t.Fatalf("the log does not name the missing model: %s", out)
+	if !strings.Contains(out, "level=ERROR") {
+		t.Fatalf("the broken model was not logged as an error: %s", out)
+	}
+	if !strings.Contains(out, "me.llm.protocol is not set") {
+		t.Fatalf("the log does not name the missing protocol: %s", out)
+	}
+}
+
+// TestBuildPersonalAgent_LogsNothingConfiguredAsInfo — no model at
+// all is a state, not an error.
+func TestBuildPersonalAgent_LogsNothingConfiguredAsInfo(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+
+	cfg := &config.Config{Paths: config.PathsConfig{DataDir: t.TempDir()}}
+	ch := newStubChannel("stub", nil)
+	op := newOperator(nil, []channel.Channel{ch}, slog.Default())
+	svc := buildPersonalAgent(cfg, []channel.Channel{ch}, op, logger)
+	if svc == nil {
+		t.Fatal("expected an agent")
+	}
+	if out := buf.String(); strings.Contains(out, "level=ERROR") {
+		t.Fatalf("a missing model was logged as an error: %s", out)
+	}
+	// The state of the agent is reported once, by the line that says
+	// how the agent came up.
+	logPersonalAgentStart(logger, svc)
+	out := buf.String()
+	if !strings.Contains(out, "level=INFO") {
+		t.Fatalf("the missing models were not logged as info: %s", out)
+	}
+	if !strings.Contains(out, "neither me.llm nor me.decider is configured") {
+		t.Fatalf("the log does not say that no model is configured: %s", out)
+	}
+}
+
+// TestPersonalAgentConfig_CarriesTheIssues — the issues reach the
+// personal agent, so it can tell the operator what is broken.
+func TestPersonalAgentConfig_CarriesTheIssues(t *testing.T) {
+	issues := []string{"me.llm.protocol is not set (known: chat_completions, messages)"}
+	cfg := &config.Config{Me: config.MeConfig{Agent: "codex"}}
+	got := personalAgentConfig(cfg, t.TempDir(), nil, nil, nil, issues)
+	if len(got.ModelIssues) != 1 || got.ModelIssues[0] != issues[0] {
+		t.Fatalf("ModelIssues = %v, want %v", got.ModelIssues, issues)
+	}
+}
+
+// TestLogPersonalAgentStart_SaysWhetherTheAgentHasModels — the
+// startup log says whether the agent has models, and why not when it
+// has none.
+func TestLogPersonalAgentStart_SaysWhetherTheAgentHasModels(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+
+	logPersonalAgentStart(logger, me.New(me.Config{}))
+	out := buf.String()
+	if !strings.Contains(out, "run: the personal agent has no models: neither me.llm nor me.decider is configured") {
+		t.Fatalf("the log does not say that the agent has no models: %s", out)
+	}
+
+	buf.Reset()
+	logPersonalAgentStart(logger, me.New(me.Config{Provider: stubProvider{}}))
+	out = buf.String()
+	if !strings.Contains(out, "run: personal agent started") {
+		t.Fatalf("the log does not say that the agent started: %s", out)
 	}
 }
 
@@ -265,7 +433,7 @@ func TestBuildChatModel_ReportsAMissingModel(t *testing.T) {
 // the owner comes from the me section, not from the chat model.
 func TestPersonalAgentConfig_UsesTheMeAgent(t *testing.T) {
 	cfg := &config.Config{Me: config.MeConfig{Agent: "codex"}}
-	got := personalAgentConfig(cfg, t.TempDir(), nil, nil, nil)
+	got := personalAgentConfig(cfg, t.TempDir(), nil, nil, nil, nil)
 	if got.Agent != "codex" {
 		t.Fatalf("Agent = %q, want codex", got.Agent)
 	}
@@ -321,14 +489,14 @@ func TestBuildModels_ReachTheEndpointsOfTheirProtocols(t *testing.T) {
 		},
 	}}
 
-	p := buildChatModel(cfg, slog.Default())
+	p, _ := buildChatModel(cfg, slog.Default())
 	if p == nil {
 		t.Fatal("no chat model was built")
 	}
 	if _, err := p.Complete(context.Background(), llm.Request{}); err != nil {
 		t.Fatalf("complete: %v", err)
 	}
-	d := buildDecider(cfg, slog.Default())
+	d, _ := buildDecider(cfg, slog.Default())
 	if d == nil {
 		t.Fatal("no decision model was built")
 	}

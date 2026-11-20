@@ -165,7 +165,7 @@ func New(cfg ChatConfig) (Provider, error) {
 	p, ok := protocols[name]
 	registryMu.RUnlock()
 	if !ok {
-		return nil, fmt.Errorf("llm: unknown chat protocol %q (known: %s)", name, protocolNames(ChatProtocols()))
+		return nil, fmt.Errorf("llm: unknown chat protocol %q (known: %s)", name, ProtocolNames(ChatProtocols()))
 	}
 	if strings.TrimSpace(cfg.Model) == "" {
 		return nil, fmt.Errorf("llm: chat protocol %q has no model", name)
@@ -183,7 +183,7 @@ func NewDecider(cfg DeciderConfig) (Decider, error) {
 	p, ok := deciders[name]
 	registryMu.RUnlock()
 	if !ok {
-		return nil, fmt.Errorf("llm: unknown decision protocol %q (known: %s)", name, protocolNames(DecisionProtocols()))
+		return nil, fmt.Errorf("llm: unknown decision protocol %q (known: %s)", name, ProtocolNames(DecisionProtocols()))
 	}
 	if strings.TrimSpace(cfg.Model) == "" {
 		return nil, fmt.Errorf("llm: decision protocol %q has no model", name)
@@ -216,9 +216,12 @@ func DecisionProtocols() []Protocol {
 	return out
 }
 
-// protocolNames renders the names of the protocols for an error
+// ProtocolNames renders the names of the protocols for an error
 // message.
-func protocolNames(protocols []Protocol) string {
+//
+// The daemon names the registered protocols when a configuration asks
+// for one that is not there: the operator learns what to write.
+func ProtocolNames(protocols []Protocol) string {
 	names := make([]string, 0, len(protocols))
 	for _, p := range protocols {
 		names = append(names, p.Name)

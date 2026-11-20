@@ -122,6 +122,11 @@ func (s *Service) system2(ctx context.Context, r *run) (bool, error) {
 //
 // It reports an error only when the run itself is over.
 func (s *Service) askModel(ctx context.Context, r *run, req llm.Request) (*llm.Response, error) {
+	if s.cfg.Provider == nil {
+		// The model is not there: the run asks nothing of a model that
+		// does not exist.
+		return nil, errors.New("the chat model is not configured")
+	}
 	execCtx, cancel := r.runContext(ctx)
 	defer cancel()
 	turnCtx, cancelTurn := context.WithTimeout(execCtx, maxAgentTurn)

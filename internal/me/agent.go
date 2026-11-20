@@ -294,6 +294,10 @@ type Config struct {
 	// off.
 	Decider llm.Decider
 
+	// ModelIssues says why a model is missing or cannot be built. Each
+	// entry is one sentence about one capability.
+	ModelIssues []string
+
 	// MinConfidence is the confidence a System 1 decision must reach
 	// before it is acted on. Zero means DefaultMinConfidence.
 	MinConfidence float64
@@ -427,10 +431,22 @@ func (s *Service) DisabledReason() string {
 
 // modelsReason reports why the agent has nothing to decide with.
 func (s *Service) modelsReason() string {
-	if s.cfg.Provider == nil && s.cfg.Decider == nil {
-		return "neither me.llm nor me.decider is configured"
+	if s.cfg.Provider != nil || s.cfg.Decider != nil {
+		return ""
 	}
-	return ""
+	if len(s.cfg.ModelIssues) > 0 {
+		return strings.Join(s.cfg.ModelIssues, "; ")
+	}
+	return "neither me.llm nor me.decider is configured"
+}
+
+// ModelsReason reports why the personal agent has no model to decide
+// with, or returns an empty string when it has one.
+//
+// The daemon logs it when it starts: the reason belongs to one place,
+// so the log and the chat say the same thing.
+func (s *Service) ModelsReason() string {
+	return s.modelsReason()
 }
 
 // operatorReason reports why the agent cannot drive a chat.

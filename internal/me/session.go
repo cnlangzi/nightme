@@ -217,9 +217,6 @@ func (s *Service) showState(ctx context.Context, r *run, anchor string) {
 		// had.
 		r.setRoundSession(sess)
 		r.rememberRoundSession(it, sess)
-		// The anchor of the round moved: the state on the disk names
-		// the card the run goes on with.
-		s.persist(r)
 	}
 	s.publishInit(ctx, r, sess)
 	s.publishReply(ctx, r, sess, r.phaseLine())
@@ -316,7 +313,6 @@ func (s *Service) closeRoundSession(ctx context.Context, r *run) {
 	// back renders the tree of the rounds the same way. The state goes
 	// to the disk after the session is closed: a state that still named
 	// the round that just ended would close it a second time.
-	s.persist(r)
 }
 
 // closeDecisionSession ends the session of the decision that is open.

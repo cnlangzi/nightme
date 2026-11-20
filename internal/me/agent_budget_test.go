@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -100,11 +98,6 @@ func TestBudget_TheRunPausesWhenTheStepSpentItsBudget(t *testing.T) {
 	}
 	if notices != 1 {
 		t.Errorf("the chat got %d notices about the pause, want 1: %v", notices, op.Spoken())
-	}
-
-	// The state of the run is kept: it is resumable.
-	if _, err := os.Stat(filepath.Join(dir, "runs", runID+".json")); err != nil {
-		t.Errorf("the state of the run is gone: %v", err)
 	}
 }
 

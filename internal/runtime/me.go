@@ -5,8 +5,9 @@
 // state; the channel owns the transport.
 //
 // The agent stops before the channels do: the runs that are still
-// going are cancelled and given a moment to write their final state
-// while their chat is still up.
+// going are cancelled and given a moment to unwind while their chat is
+// still up. A run keeps no state on disk, so a run that is still
+// going is over when the daemon comes back.
 
 package runtime
 

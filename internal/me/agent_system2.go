@@ -180,7 +180,6 @@ func (s *Service) chargeStall(r *run, summary string) {
 		Summary: summary,
 	})
 	r.markSituation()
-	s.persist(r)
 }
 
 // situationMark opens the situation report.

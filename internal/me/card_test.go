@@ -9,9 +9,6 @@ package me
 
 import (
 	"context"
-	"encoding/json"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -1123,10 +1120,10 @@ func TestTheCurrentRoundSaysWhenItStarted(t *testing.T) {
 	}
 }
 
-// TestTheTotalsOfTheRunSurviveARestart — the numbers of the run are
-// the numbers of its last round: a run that comes back keeps counting
-// up, and the tree never runs backwards.
-func TestTheTotalsOfTheRunSurviveARestart(t *testing.T) {
+// TestTheTotalsOfTheRunAreTheNumbersOfItsLastRound — the numbers of
+// the run are the numbers of its last round: the tree never runs
+// backwards.
+func TestTheTotalsOfTheRunAreTheNumbersOfItsLastRound(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 	svc, _ := testService(t, dir, noModels())
@@ -1141,51 +1138,32 @@ func TestTheTotalsOfTheRunSurviveARestart(t *testing.T) {
 	r := newRun(svc, Request{Name: "one", ChatID: "obs-1", Cwd: "/tmp/work"}, bound, nil)
 	t.Cleanup(r.cancel)
 
-	r.roundRecords = []roundRecord{{
-		Round:     1,
-		Job:       "main",
-		Decisions: roundDecisions{System1: 6, Operator: 2},
-		Usage:     llm.Usage{InputTokens: 6000, OutputTokens: 1000},
-	}}
 	r.system1Decisions = 6
 	r.system2Decisions = 3
 	r.operatorDecisions = 2
 	r.roundAnswers = 1
 	r.roundUsage = llm.Usage{InputTokens: 100, OutputTokens: 10}
 
-	restored := svc.restoreRun(persistedRun{
-		RunID:             "one-1",
-		ChatID:            "obs-1",
-		Cwd:               "/tmp/work",
-		Workflow:          r.workflow,
-		State:             r.state,
-		RoundRecords:      r.roundRecords,
-		System1Decisions:  r.system1Decisions,
-		System2Decisions:  r.system2Decisions,
-		OperatorDecisions: r.operatorDecisions,
-		RoundAnswers:      r.roundAnswers,
-		RoundUsage:        r.roundUsage,
-	})
-	if restored.system1Decisions != 6 || restored.system2Decisions != 3 {
-		t.Errorf("the restored decisions are %d and %d, want the numbers of the run", restored.system1Decisions, restored.system2Decisions)
+	at := time.Date(2026, 11, 18, 10, 33, 4, 0, time.UTC)
+	r.closeRound("main", 1, at.Add(time.Minute))
+	r.roundUsage = llm.Usage{InputTokens: 50, OutputTokens: 5}
+	r.closeRound("main", 2, at.Add(2*time.Minute))
+
+	if len(r.roundRecords) != 2 {
+		t.Fatalf("the run holds %d records, want the two rounds", len(r.roundRecords))
 	}
-	if restored.operatorDecisions != 2 {
-		t.Errorf("the restored run counts %d answers of the operator, want 2", restored.operatorDecisions)
+	last := r.roundRecords[len(r.roundRecords)-1]
+	if last.Usage.InputTokens != 150 || last.Usage.OutputTokens != 15 {
+		t.Errorf("the totals of the run are %+v, want the numbers of the last round", last.Usage)
 	}
-	if restored.cumUsage.InputTokens != 6000 || restored.cumUsage.OutputTokens != 1000 {
-		t.Errorf("the restored totals are %+v, want the numbers of the last round", restored.cumUsage)
-	}
-	if restored.roundAnswers != 1 {
-		t.Errorf("the restored round counts %d answers of the operator, want 1", restored.roundAnswers)
-	}
-	if restored.roundUsage.InputTokens != 100 {
-		t.Errorf("the restored round spent %+v, want what it spent", restored.roundUsage)
+	if r.roundAnswers != 1 {
+		t.Errorf("the round counts %d answers of the operator, want 1", r.roundAnswers)
 	}
 }
 
-// TestTheStateOfTheRunDoesNotNameTheRoundThatEnded — the state on
-// disk must not name a round that has ended as the current one: a
-// daemon that comes back would close that round a second time.
+// TestTheStateOfTheRunDoesNotNameTheRoundThatEnded — the run must not
+// name a round that has ended as the current one: the round would be
+// closed a second time.
 func TestTheStateOfTheRunDoesNotNameTheRoundThatEnded(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
@@ -1206,19 +1184,8 @@ func TestTheStateOfTheRunDoesNotNameTheRoundThatEnded(t *testing.T) {
 	if r.roundSessionRef() != nil {
 		t.Error("the run still holds the round that ended")
 	}
-	raw, err := os.ReadFile(filepath.Join(dir, "runs", r.id+".json"))
-	if err != nil {
-		t.Fatalf("read the state: %v", err)
-	}
-	var state persistedRun
-	if err := json.Unmarshal(raw, &state); err != nil {
-		t.Fatalf("decode the state: %v", err)
-	}
-	if state.RoundSession != nil {
-		t.Errorf("the state names the round that ended: %+v", state.RoundSession)
-	}
-	if len(state.RoundRecords) != 1 {
-		t.Errorf("the state holds %d records, want the round that ended", len(state.RoundRecords))
+	if len(r.roundRecords) != 1 {
+		t.Errorf("the run holds %d records, want the round that ended", len(r.roundRecords))
 	}
 }
 
@@ -1313,10 +1280,10 @@ func TestTheRoundThatEndsIsRecorded(t *testing.T) {
 	}
 }
 
-// TestTheRoundsSurviveARestart — the facts of the rounds a run
-// finished are persisted with the run: the tree of the rounds looks the
-// same after a restart of the daemon.
-func TestTheRoundsSurviveARestart(t *testing.T) {
+// TestTheTreeOfTheRoundsReadsTheRecordsOfTheRun — the facts of the
+// rounds a run finished are kept with the run: the tree of the rounds
+// reads them back.
+func TestTheTreeOfTheRoundsReadsTheRecordsOfTheRun(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 	svc, _ := testService(t, dir, noModels())
@@ -1353,18 +1320,10 @@ func TestTheRoundsSurviveARestart(t *testing.T) {
 		},
 	}
 
-	restored := svc.restoreRun(persistedRun{
-		RunID:        "one-1",
-		ChatID:       "obs-1",
-		Cwd:          "/tmp/work",
-		Workflow:     r.workflow,
-		State:        r.state,
-		RoundRecords: r.roundRecords,
-	})
-	if len(restored.roundRecords) != 2 {
-		t.Fatalf("the restored run holds %d records, want 2", len(restored.roundRecords))
+	if len(r.roundRecords) != 2 {
+		t.Fatalf("the run holds %d records, want 2", len(r.roundRecords))
 	}
-	tree := restored.roundsTree(iteration{job: "main", round: 3})
+	tree := r.roundsTree(iteration{job: "main", round: 3})
 	for _, want := range []string{
 		"[ 1 ] v 10:33:04 · 1m00s decisions:  system-1 ×1 ·  tokens - 100 / 20",
 		"[ 2 ] v 10:34:04 · 1m00s decisions:  system-1 ×1 · operator ×1 ·  tokens - 200 / 40",

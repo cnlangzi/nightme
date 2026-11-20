@@ -44,9 +44,9 @@ func (s *Service) drive(ctx context.Context, r *run) {
 	// The session that thinks for the owner belongs to the run: it
 	// goes with it, whatever ended the run.
 	s.closeBrain(r)
-	if r.isSuspended() {
-		// The daemon is going away, not the run: the state is kept and
-		// the run resumes when the daemon comes back.
+	if r.isDaemonGone() {
+		// The daemon is going away: the run stops where it stands and
+		// publishes nothing.
 		return
 	}
 	switch {
@@ -78,14 +78,6 @@ func (s *Service) drive(ctx context.Context, r *run) {
 	// step that was in flight is only known now that the run has
 	// unwound.
 	s.postRecord(r)
-	// The record session goes to the disk with the run: a daemon that
-	// dies before the file goes tells the chat about the record card
-	// when it comes back.
-	s.persist(r)
-	// The run is over: its state goes with it. The record holds what
-	// the run did, so it does not need the file — and a file that
-	// outlives the run would be resumed by the next daemon.
-	s.removeState(r.id)
 }
 
 // loop is the run's main cycle.
@@ -250,7 +242,6 @@ func (s *Service) pauseForBudget(ctx context.Context, r *run) {
 	reason := fmt.Sprintf("the step %q used up its budget (%d of %d chances) — the run waits for you",
 		stepID, used, limit)
 	r.pauseNow(reason)
-	s.persist(r)
 	// The run stops: it publishes the state of the round on a card of
 	// its own.
 	s.showState(ctx, r, r.stateAnchor(""))
@@ -369,7 +360,6 @@ func (s *Service) runPlanStep(ctx context.Context, r *run, decision wfe.Decision
 		return nil
 	}
 	r.recordStep(decision.Job, decision.Step, verdict.Outcome)
-	s.persist(r)
 	s.refreshRun(r)
 	return nil
 }
@@ -514,7 +504,6 @@ func (s *Service) finishDone(r *run, summary string) {
 	r.setSummary(summary)
 	s.finish(r, PhaseDone, "")
 	s.refreshRun(r)
-	s.persist(r)
 }
 
 // now returns the current time.
@@ -619,7 +608,6 @@ func (s *Service) actOnDecision(ctx context.Context, r *run, dec decision) (sys1
 			return sys1None, err
 		}
 		s.appendToolResult(r, pendingCall{ID: syntheticCallID, Name: tool}, outcome, !outcomeSucceeded(outcome.Status))
-		s.persist(r)
 		s.refreshRun(r)
 		return sys1Act, nil
 	}
@@ -672,7 +660,6 @@ func (s *Service) actOnChoice(ctx context.Context, r *run, command string) (bool
 		return false, err
 	}
 	s.appendToolResult(r, pendingCall{ID: syntheticCallID, Name: tool}, outcome, !outcomeSucceeded(outcome.Status))
-	s.persist(r)
 	s.refreshRun(r)
 	return false, nil
 }

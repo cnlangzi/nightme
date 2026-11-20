@@ -2,11 +2,8 @@ package me
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -668,69 +665,6 @@ func TestTheCommandsRefuseARunThatIsAsking(t *testing.T) {
 			t.Errorf("the reason is %q, want %q", reason, ReasonNotPaused)
 		}
 	}
-}
-
-// TestTheDirectiveSurvivesARestart — the operator's decision is in the
-// run's state: a daemon that dies in between comes back and applies
-// it.
-func TestTheDirectiveSurvivesARestart(t *testing.T) {
-	dir := t.TempDir()
-	writeWorkflow(t, dir, "one", oneStepWorkflow)
-
-	op := newFakeOperator()
-	op.steps = []fakeStep{
-		failedStep("the commit failed"),
-		failedStep("the commit failed again"),
-	}
-	cfg := Config{
-		Provider:     &scriptedProvider{},
-		MaxJudgments: 1,
-		Operator:     op,
-		WorkflowsDir: dir,
-		StateDir:     filepath.Join(dir, "runs"),
-	}
-	svc := New(cfg)
-	if err := svc.Start(context.Background()); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	runID, _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
-	})
-	if err != nil {
-		t.Fatalf("start workflow: %v", err)
-	}
-	waitPaused(t, svc, "obs-1")
-
-	// The daemon goes away before the run applies the decision.
-	if err := svc.Shutdown(context.Background()); err != nil {
-		t.Fatalf("shutdown: %v", err)
-	}
-
-	if _, err := svc.Resume(context.Background(), "obs-1", "", ""); err != nil {
-		t.Fatalf("resume: %v", err)
-	}
-
-	// The state of the run holds the decision.
-	state := waitForDirective(t, filepath.Join(dir, "runs", runID+".json"))
-	directive, ok := state["directive"].(map[string]any)
-	if !ok {
-		t.Fatalf("the state holds no directive: %v", state["directive"])
-	}
-	if directive["kind"] != "resume" {
-		t.Errorf("the state holds the directive %v, want resume", directive["kind"])
-	}
-	if directive["step"] != "commit" {
-		t.Errorf("the state holds the step %v, want commit", directive["step"])
-	}
-
-	resumed := New(cfg)
-	t.Cleanup(func() { _ = resumed.Shutdown(context.Background()) })
-	if err := resumed.Start(context.Background()); err != nil {
-		t.Fatalf("restart: %v", err)
-	}
-	// The restored run applies the decision on its first turn: the
-	// step's command goes to the chat a second time.
-	waitSentCount(t, op, 2)
 }
 
 // TestResume_CancelsAPauseThatHasNotTakenEffect — the operator changed
@@ -1772,67 +1706,6 @@ func TestACardThatCannotBePublishedDoesNotStopTheRun(t *testing.T) {
 	}
 }
 
-// TestResume_KeepsTheCardItOwns — a run that comes back after a
-// daemon restart keeps the message it hangs its sessions under: the
-// iteration travels with the run's state.
-func TestResume_KeepsTheCardItOwns(t *testing.T) {
-	dir := t.TempDir()
-	writeWorkflow(t, dir, "one", oneStepWorkflow)
-
-	op := newFakeOperator()
-	op.steps = []fakeStep{{open: true}}
-	cfg := Config{
-		Provider:     &scriptedProvider{},
-		Operator:     op,
-		WorkflowsDir: dir,
-		StateDir:     filepath.Join(dir, "runs"),
-	}
-	svc := New(cfg)
-	if err := svc.Start(context.Background()); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	runID, _, err := svc.StartWorkflow(context.Background(), Request{
-		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
-	})
-	if err != nil {
-		t.Fatalf("start workflow: %v", err)
-	}
-	waitSent(t, op, "/gtw commit")
-
-	// The state carries the anchors of the open sessions: a run that
-	// comes back goes on with the messages it hung its sessions under.
-	state := waitForSession(t, filepath.Join(dir, "runs", runID+".json"))
-	runSession, ok := state["run_session"].(map[string]any)
-	if !ok || runSession["anchor"] != "om_start" {
-		t.Fatalf("the state holds no anchor of the run: %v", state["run_session"])
-	}
-	roundSession, ok := state["round_session"].(map[string]any)
-	if !ok || roundSession["anchor"] == "" {
-		t.Fatalf("the state holds no card of the round: %v", state["round_session"])
-	}
-	if roundSession["job"] != "main" || roundSession["round"] != float64(1) {
-		t.Errorf("the state names the round %v, want main round 1", roundSession)
-	}
-
-	// The daemon goes away and comes back.
-	if err := svc.Shutdown(context.Background()); err != nil {
-		t.Fatalf("shutdown: %v", err)
-	}
-	posted := op.Posted()
-
-	resumed := New(cfg)
-	t.Cleanup(func() { _ = resumed.Shutdown(context.Background()) })
-	if err := resumed.Start(context.Background()); err != nil {
-		t.Fatalf("restart: %v", err)
-	}
-	// The resumed run stays in the same iteration: it opens no card of
-	// its own.
-	time.Sleep(100 * time.Millisecond)
-	if op.Posted() != posted {
-		t.Errorf("the resumed run opened %d cards, want none", op.Posted()-posted)
-	}
-}
-
 // twoJobWorkflow is a workflow of two jobs: the second one waits for
 // the first.
 const twoJobWorkflow = `title: two jobs.
@@ -1998,27 +1871,6 @@ func waitForAction(t *testing.T, r *run, kind wfe.ActionKind, stepID string, cou
 	t.Fatalf("the history holds %d %s records for %q, want %d", count, kind, stepID, count)
 }
 
-// waitForDirective waits until the state of a run holds the operator's
-// decision.
-func waitForDirective(t *testing.T, path string) map[string]any {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		raw, err := os.ReadFile(path)
-		if err == nil {
-			var state map[string]any
-			if err := json.Unmarshal(raw, &state); err == nil {
-				if directive, ok := state["directive"].(map[string]any); ok && directive["kind"] != "" {
-					return state
-				}
-			}
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-	t.Fatalf("the state of the run never held the operator's decision: %s", path)
-	return nil
-}
-
 // lastCardBody returns the body that was written to the card with the
 // given id last.
 func lastCardBody(op *fakeOperator, id string) string {
@@ -2052,27 +1904,6 @@ func lastPostedCard(op *fakeOperator) cardRecord {
 		return cardRecord{}
 	}
 	return cards[len(cards)-1]
-}
-
-// waitForSession waits until the run's state file carries the card of
-// the round the run is in.
-func waitForSession(t *testing.T, path string) map[string]any {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		raw, err := os.ReadFile(path)
-		if err == nil {
-			var state map[string]any
-			if err := json.Unmarshal(raw, &state); err == nil {
-				if sess, ok := state["round_session"].(map[string]any); ok && sess["anchor"] != "" {
-					return state
-				}
-			}
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-	t.Fatalf("the run state never carried the card of the round: %s", path)
-	return nil
 }
 
 // indexOf returns the position of the first entry that equals the

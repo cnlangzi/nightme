@@ -60,17 +60,11 @@ func (s *Service) postRecord(r *run) {
 	if s.cfg.Operator == nil {
 		return
 	}
-	if r.recordSessionRef() != nil {
-		// The session is already recorded: the run came back after the
-		// daemon went away, and the record is in the chat.
-		return
-	}
 	// The run's own scope is cancelled when the run ends, and the
 	// record is posted after that. The context outlives the run here
 	// on purpose.
 	ctx := context.WithoutCancel(r.ctx)
 	sess := &session{kind: sessionRecord, id: r.id, anchor: r.recordAnchor()}
-	r.setRecordSession(sess)
 	s.publishInit(ctx, r, sess)
 	s.publishRecord(ctx, r, sess, r.recordCard())
 }

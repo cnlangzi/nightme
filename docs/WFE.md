@@ -69,7 +69,7 @@ The directory is `<data_dir>/workflows` — `~/.nightme/workflows` with the defa
 - The directory is read at any depth, except the reserved directories `actions` and `runs`.
 - The workflows are read when they are asked for: the daemon reads the directory at startup and again before every `/me start`. An edited file takes effect on the next `/me start`, without a restart. A file whose size and modification time did not change is not parsed again. The fingerprint is best-effort: a change that keeps the size and lands in the same modification-time tick is noticed when the daemon restarts.
 - A file that does not load stops only itself: the workflows beside it load and run as usual, and the failure is reported against the name the file would have provided.
-- The action scripts live in `~/.nightme/workflows/actions/`, and the run state in `~/.nightme/workflows/runs/`.
+- The action scripts live in `~/.nightme/workflows/actions/`. A run keeps no state of its own on disk.
 
 ### 1.1 Installing a workflow
 
@@ -348,7 +348,7 @@ A **round** is one pass through a job's step list. When a round ends, the job st
 
 A job that names a `sleep` waits that long between two of its rounds. The gap is waited after a round ends — whether it ended on its own or the agent ended it early — and before the next round starts. The first round of a job waits for nothing: it starts as soon as the jobs it `needs` have finished. A job whose last round ends waits for nothing either: there is no next round to wait for.
 
-The gap is not a step: it shows up nowhere in the chat and nowhere on the card of the round. `/me stop` and the shutdown of the daemon end the wait at once — and the run that comes back after the daemon went away waits the gap again: the back-off is not lost with the daemon.
+The gap is not a step: it shows up nowhere in the chat and nowhere on the card of the round. `/me stop` and the shutdown of the daemon end the wait at once.
 
 A round in which no step ran does not repeat: a job whose every step is skipped had nothing to do, so it does not start another round. The plan is exhausted and the agent decides whether the run is over.
 
@@ -955,7 +955,7 @@ The cap on an answer defaults to 40960 tokens; a configuration that does not nam
 | `/me stop` | Cancels the run and leaves the record of the session in the chat. The stop and the record share one card: the card of the `/me stop` message. The work the chat agent does on its own goes on to its end. |
 | `/me status` | Shows the state of the run again: the run publishes it on a card of its own under the `/me status` message, and the card carries the phase of the run, the tree of the rounds and the checklist of the round. A run that has not entered a round yet shows its phase line alone. The command posts no reply of its own. |
 
-The step the run is on is the step its last judgment was about. A run that has no judgment — the operator took the chat back, the agent was throttled — is on the step it ran last, when that step did not succeed; a run whose last step succeeded is on the first step of the plan's ready set. `/me resume` and `/me next` act on that step, and the decision rides on the run until its loop applies it: the state is written before the run is woken, so a daemon that dies in between comes back and applies it.
+The step the run is on is the step its last judgment was about. A run that has no judgment — the operator took the chat back, the agent was throttled — is on the step it ran last, when that step did not succeed; a run whose last step succeeded is on the first step of the plan's ready set. `/me resume` and `/me next` act on that step, and the decision rides on the run until its loop applies it.
 
 The two commands decide at command time what they do with that step, and they answer accordingly: the promise only when there is something to do, and the reason when there is not. A command that acts on nothing names the step and says what did not happen — the state card answers as well.
 
@@ -987,13 +987,13 @@ The run speaks in agent sessions, and the chat renders every session the way it 
 
 A decision about a step that never sent a command to the chat — a shell step, a `use:` step, a judgment that names no step — hangs under the card of the round instead.
 
-The card of a session is a card of the chat: the run posts a message of its own, and the chat renders the session onto the card of that message. The message says in one line what the card below it holds. A session owns one card, and the chat never posts a second one for it. The run's own session is the exception: it posts no message and writes into the card the chat already holds for the message that started the run. A run that no message started — a synthetic inbound, a command without a message id — has no such card: its entries go to the chat's orphan handling. The card of a round that ended stays in the chat as the record of that round; the next round starts a new one. A run that comes back to a round it has been in before goes on with the card that round has. A daemon that comes back has forgotten the cards it posted: the chat opens a new card for the session, and the card that was there before stays in the chat as a snapshot.
+The card of a session is a card of the chat: the run posts a message of its own, and the chat renders the session onto the card of that message. The message says in one line what the card below it holds. A session owns one card, and the chat never posts a second one for it. The run's own session is the exception: it posts no message and writes into the card the chat already holds for the message that started the run. A run that no message started — a synthetic inbound, a command without a message id — has no such card: its entries go to the chat's orphan handling. The card of a round that ended stays in the chat as the record of that round; the next round starts a new one. A run that comes back to a round it has been in before goes on with the card that round has.
 
 The state of the run is a card of its own: the run posts a message of its own for it, and the chat renders the state onto the card of that message. The card of the state is the latest card of the round: the run goes on with it, and the card it replaces keeps the content it had.
 
 The state of the run is published whenever the operator asks for it with `/me status`, `/me pause`, `/me resume` or `/me next`, and whenever the run stops by itself — a person took the chat back, the step ran out of budget or the agent was throttled. The run posts its message under the message the operator asked from, and under the card of the round when the run stops by itself. Its first entry is the phase line: `paused: <the reason the run stopped>`, `asking: <the question the run waits for>`, or `running · step: <the command the run waits for>`.
 
-Every run that ends leaves a record of the session in the chat: the record says how the run ended, what it did, what went wrong and what the models decided. The record is posted once the run has unwound, so the step that was in flight counts as a step that did not run unless it produced an outcome. A run that ends by itself leaves a record too; a run the daemon suspends leaves none, because the run goes on when the daemon comes back. The record rides on the card of the run, unless the operator stopped the run: the record of a stopped run rides on the card of the `/me stop` message, so the stop and the record are one card. The two lines land on that card in the order they arrive: the record may come before the line that says the run was stopped.
+Every run that ends leaves a record of the session in the chat: the record says how the run ended, what it did, what went wrong and what the models decided. The record is posted once the run has unwound, so the step that was in flight counts as a step that did not run unless it produced an outcome. A run that ends by itself leaves a record too; a run the daemon abandons at its shutdown leaves none, because the run stops where it stands and publishes nothing. The record rides on the card of the run, unless the operator stopped the run: the record of a stopped run rides on the card of the `/me stop` message, so the stop and the record are one card. The two lines land on that card in the order they arrive: the record may come before the line that says the run was stopped.
 
 No card of the run carries a button: the operator drives the run with `/me pause`, `/me resume`, `/me next` and `/me stop`. A question the run asks is the chat's own interactive choice card, and a click on an option is the answer — the answer never reaches the agent. A person who quotes the question instead answers it in their own words — the answer is claimed by the run before the agent sees it.
 
@@ -1195,7 +1195,7 @@ decisions (last 10 of 23):
 
 The facts come from the run's own record: no model is asked to write the record. The headline names the phase the run ended in, and a run that failed says why under it — an error that never reached an action of the run leaves no row in the `errors` block. The `errors` are the actions whose outcome was `failed`, `incomplete`, `cancelled` or `timeout`, at most the last five of them; the `decisions` are the judgments the models made at the wake-ups, at most the last ten. The tree of the rounds carries the counters of the run: the number of decisions and the tokens ride in its last row, so a run that finished no round shows neither. Its heading stays plain: the number of rounds is the state of a run that is still going, and the record describes a run that is over. A row is cut short: a shell step reports a whole build log as its summary, and a card that carries it is unreadable.
 
-The wake log holds the model decisions only: the workflow's own fast path is not a decision a model made, so a run that goes through its workflow without asking a model holds no wake records at all. A decision model answer and a chat model turn are two records. The log is persisted with the rest of the run, so it survives a restart of the daemon.
+The wake log holds the model decisions only: the workflow's own fast path is not a decision a model made, so a run that goes through its workflow without asking a model holds no wake records at all. A decision model answer and a chat model turn are two records.
 
 ### 8.11 Guardrails and recovery
 
@@ -1216,14 +1216,7 @@ A command the underlying agent answered 429 pauses the run: the agent is throttl
 
 The run has no clock of its own. Every command it issues carries its own budget — the agent behind the command reports its own outcome when that budget runs out — and the run acts on that outcome. A timeout is the agent's timeout, never the run's. The run watches: it stops when the command reports, when the operator stops it, or when the daemon shuts down.
 
-The run is persisted after every tool result: one file in `<DataDir>/workflows/runs/<run-id>.json` holds the DAG progress, the conversation, the judgment history and the paused state. On startup, running runs resume:
-
-- a command that was in flight is resolved through the tracker; if its execution is gone, it reports `interrupted`;
-- a suspended run keeps waiting for `/me reply`;
-- a run that was paused keeps waiting for `/me resume` or `/me next`;
-- a state file left by an older daemon names a chat that no longer exists: the run cannot go on there and is dropped.
-
-Recovery is silent. The chat is told only when a run cannot go on — an authentication error from the model, for instance.
+A run lives in the chat it started in and in the memory of the daemon that runs it. Nothing of it is written to disk, and a daemon restart loses it: the chat that started the run holds no run any more, `/me status` says so, and `/me resume` and `/me next` are refused with the same reason. A run that the daemon abandons at its shutdown stops where it stands and publishes nothing to the chat: the cards the run posted stay, and the last one still reads "running". A run state file left in `<DataDir>/workflows/runs/` by an older daemon stays where it is: nothing reads it.
 
 ## 9. Out of scope
 

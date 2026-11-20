@@ -441,7 +441,6 @@ func (s *Service) applyDirective(ctx context.Context, r *run) error {
 	}
 	// The decision is taken once: the state no longer carries it, so a
 	// daemon that dies in the middle does not apply it twice.
-	s.persist(r)
 	switch d.Kind {
 	case directiveResume:
 		return s.applyResume(ctx, r, d.Step)
@@ -484,7 +483,6 @@ func (s *Service) applyResume(ctx context.Context, r *run, stepID string) error 
 		return err
 	}
 	s.recordOperatorAction(r, toolResume, res)
-	s.persist(r)
 	return nil
 }
 
@@ -514,7 +512,6 @@ func (s *Service) applyNext(ctx context.Context, r *run, stepID string) error {
 	}
 	res := s.skipStep(ctx, r, step, operatorSkippedSummary)
 	s.recordOperatorAction(r, toolNext, res)
-	s.persist(r)
 	return nil
 }
 

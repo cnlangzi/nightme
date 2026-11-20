@@ -3,8 +3,6 @@ package me
 import (
 	"context"
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -650,63 +648,8 @@ func TestTheDecisionModelStillSeesTheSameFacts(t *testing.T) {
 	}
 }
 
-// TestAResumedRunDropsAnOldConversation — a conversation written by an
-// older daemon cannot be read by the model the way it was written: it
-// is dropped and the run starts from the situation report.
-func TestAResumedRunDropsAnOldConversation(t *testing.T) {
-	dir := t.TempDir()
-	writeWorkflow(t, dir, "one", oneStepWorkflow)
-
-	svc, _ := testService(t, dir, Config{})
-	r := testRun(t, svc, "one")
-	r.messages = []llm.Message{
-		{Role: llm.RoleAssistant, Parts: []llm.Part{{
-			Type:       llm.PartToolCall,
-			ToolCallID: "c1",
-			ToolName:   toolRunStep,
-			Args:       json.RawMessage(`{"command":"/gtw commit"}`),
-		}}},
-	}
-	raw, err := json.Marshal(persistedRun{
-		RunID:    "one-1",
-		ChatID:   "obs-1",
-		Cwd:      "/tmp/work",
-		Workflow: r.workflow,
-		State:    r.state,
-		Messages: r.messages,
-	})
-	if err != nil {
-		t.Fatalf("encode: %v", err)
-	}
-	path := filepath.Join(dir, "runs", "one-1.json")
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.WriteFile(path, raw, 0o600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-
-	restored := svc.restoreRun(persistedRun{
-		RunID:    "one-1",
-		ChatID:   "obs-1",
-		Cwd:      "/tmp/work",
-		Workflow: r.workflow,
-		State:    r.state,
-		Messages: r.messages,
-		PendingCalls: []pendingCall{
-			{ID: "c1", Name: toolRunStep, Args: json.RawMessage(`{"command":"/gtw commit"}`)},
-		},
-	})
-	if len(restored.conversation()) != 0 {
-		t.Errorf("the old conversation was kept: %v", restored.conversation())
-	}
-	if len(restored.pendingCallList()) != 0 {
-		t.Errorf("the old tool call was kept: %v", restored.pendingCallList())
-	}
-}
-
-// TestARunKeepsItsCommandsAndItsAgent — a run that is resumed keeps
-// the commands it may issue and the agent that thinks for the owner.
+// TestARunKeepsItsCommandsAndItsAgent — a run keeps the commands it
+// may issue and the agent that thinks for the owner.
 func TestARunKeepsItsCommandsAndItsAgent(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
@@ -719,31 +662,20 @@ func TestARunKeepsItsCommandsAndItsAgent(t *testing.T) {
 	if len(r.commands) != 1 || r.commands[0].Name != "gtw" {
 		t.Errorf("the commands are %v, want the usable ones", r.commands)
 	}
+	if len(r.policy.Commands) != 1 || r.policy.Commands[0] != "gtw" {
+		t.Errorf("the policy knows %v, want the usable commands", r.policy.Commands)
+	}
 
+	// The chat's agent wins when the daemon names none.
 	plain, _ := testService(t, dir, Config{})
-	restored := plain.restoreRun(persistedRun{
-		RunID:    "one-1",
-		ChatID:   "obs-1",
-		Cwd:      "/tmp/work",
-		Workflow: r.workflow,
-		State:    r.state,
-		Commands: []CommandInfo{{Name: "gtw"}, {Name: "me"}},
-		Agent:    "chat",
-	})
-	if len(restored.commands) != 1 || restored.commands[0].Name != "gtw" {
-		t.Errorf("the restored commands are %v, want the usable ones", restored.commands)
-	}
-	if len(restored.policy.Commands) != 1 || restored.policy.Commands[0] != "gtw" {
-		t.Errorf("the restored policy knows %v, want the usable commands", restored.policy.Commands)
-	}
-	if restored.agentName != "chat" {
-		t.Errorf("the restored agent is %q, want the chat's agent", restored.agentName)
+	fromChat := testRunWith(t, plain, "one", []CommandInfo{{Name: "gtw"}, {Name: "me"}}, "chat")
+	if fromChat.agentName != "chat" {
+		t.Errorf("the agent is %q, want the chat's agent", fromChat.agentName)
 	}
 }
 
-// TestARunKeepsItsEvidence — a run that comes back after a daemon
-// restart still shows the evidence of the actions that led to the
-// judgment point.
+// TestARunKeepsItsEvidence — a run shows the evidence of the actions
+// that led to the judgment point.
 func TestARunKeepsItsEvidence(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
@@ -753,18 +685,7 @@ func TestARunKeepsItsEvidence(t *testing.T) {
 	r.setTranscript("/gtw fix", "the agent said it could not find the file")
 	r.setTranscript("/gtw commit", "nothing to commit")
 
-	restored := svc.restoreRun(persistedRun{
-		RunID:    "one-1",
-		ChatID:   "obs-1",
-		Cwd:      "/tmp/work",
-		Workflow: r.workflow,
-		State:    r.state,
-		Transcripts: []actionTranscript{
-			{Command: "/gtw fix", Text: "the agent said it could not find the file"},
-			{Command: "/gtw commit", Text: "nothing to commit"},
-		},
-	})
-	report := svc.renderSituation(context.Background(), restored)
+	report := svc.renderSituation(context.Background(), r)
 	for _, want := range []string{
 		"--- /gtw fix ---",
 		"the agent said it could not find the file",
@@ -772,7 +693,7 @@ func TestARunKeepsItsEvidence(t *testing.T) {
 		"nothing to commit",
 	} {
 		if !strings.Contains(report, want) {
-			t.Errorf("the restored situation does not carry %q:\n%s", want, report)
+			t.Errorf("the situation does not carry %q:\n%s", want, report)
 		}
 	}
 }

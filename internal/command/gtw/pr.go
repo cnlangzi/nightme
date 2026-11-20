@@ -443,9 +443,14 @@ func dispatchPR(
 	}
 
 	riskLevel, riskReason := extractRiskLevel(body)
+	// The PR number comes from the URL. A URL that does not carry
+	// one (a self-hosted host with a non-standard PR path) yields
+	// no number at all — publishing a zero would name a PR that
+	// does not exist.
+	number := prNumberFromURL(url)
 	var readyWarnings []string
 	if args.Ready {
-		readyWarnings = applyReadyLabels(ctx, provider, owner, repo, c, prNumberFromURL(url))
+		readyWarnings = applyReadyLabels(ctx, provider, owner, repo, c, number)
 	}
 	card := prependWarning(
 		renderPROpenedCard(c, baseBranch, url, riskLevel, riskReason),
@@ -462,7 +467,7 @@ func dispatchPR(
 	// PR link until the next TTL tick.
 	if deps.PRCache != nil {
 		newPR := &messages.PR{
-			Number: prNumberFromURL(url),
+			Number: number,
 			URL:    url,
 			State:  "open",
 		}
@@ -478,16 +483,12 @@ func dispatchPR(
 	// Failure paths above (the format gate, resolveProvider,
 	// CreatePR, ErrPRExists) stay on the no-stamp reply — they're
 	// not the agent-result surface.
-	// The PR number comes from the URL. A URL that does not carry
-	// one (a self-hosted host with a non-standard PR path) yields
-	// no number at all — publishing a zero would name a PR that
-	// does not exist.
 	prData := map[string]string{
 		"branch": c.Branch,
 		"pr_url": url,
 		"agent":  run.AgentName,
 	}
-	if number := prNumberFromURL(url); number > 0 {
+	if number > 0 {
 		prData["pr_number"] = fmt.Sprintf("%d", number)
 	}
 	return replyAgentOutcome(ctx, cs.Emitter(), chatID, messageID,

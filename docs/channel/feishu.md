@@ -300,7 +300,7 @@ PATCH 失败时不降级为新消息 -- 简单实现,日志告警即可;下次 `
 | 轨道 | 源 | 抽象事件 | 渲染目标 | Feishu 实现 |
 |---|---|---|---|---|
 | **MessageState** | ChatSession lifecycle | `OutboundMessage{Kind: OutMessageState, Meta: {message_id, state}}` | **userMsgID** | `AddReaction(userMsgID, emoji_type)` |
-| **Card Body** | Rolling-log receipt (v1.3 实现;Channel 自治) | `OutboundMessage{ReplyTo: userMsgID}` → Channel.Send → 内部 cold-create / PATCH | replyMsgID / cardMsgID | `SendCard / PatchMessage` |
+| **Card Body** | Rolling-log receipt (v1.3 实现;Channel 自治) | `OutboundMessage{ReplyTo: userMsgID}` → Channel.Send → 内部 cold-create / PATCH | cardMsgID | `SendCard / PatchMessage` |
 
 两者**完全独立**:
 - 一个失败不影响另一个 (MessageState 渲染失败仅 log warn,不阻塞 card body)

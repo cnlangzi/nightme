@@ -3694,7 +3694,7 @@ func (r *MessageReceipt) evictOverflowLocked()       // ← 删除(appendEntryLo
 //     completedAt                         ← promptHeaderLine 整体删除,无读者;footer PR 重新引入 header 时同步加回
 // 保留的字段:
 //     promptState                         ← 保留(用于 footer PR 状态恢复,见 §6.2;当前 EventDone/EventError 不通过 Send 触发 transition,实际也是 dead state,见 §5.2)
-//     chatID / userMsgID / replyMsgID / cardMsgID / bot / logger / tasks / mu
+//     chatID / userMsgID / cardMsgID / bot / logger / tasks / mu
 ```
 
 **删除的代码**：
@@ -6858,7 +6858,7 @@ MessageState(reaction emoji 轨道)与 Receipt(card body 轨道)解耦为两个�
 | 轨道 | 源 | 抽象事件 | 渲染目标 | Feishu 实现 |
 |---|---|---|---|---|
 | **MessageState** | ChatSession lifecycle | `OutboundMessage{Kind: OutMessageState, Meta: {message_id, state}}` | **userMsgID** | `AddReaction(userMsgID, emoji_type)` |
-| **Card Body** | Rolling-log receipt（Channel 自治）| `OutboundMessage{ReplyTo: userMsgID}` → Channel.Send → 内部 cold-create / PATCH | replyMsgID / cardMsgID | `SendCard / PatchMessage` |
+| **Card Body** | Rolling-log receipt（Channel 自治）| `OutboundMessage{ReplyTo: userMsgID}` → Channel.Send → 内部 cold-create / PATCH | cardMsgID | `SendCard / PatchMessage` |
 
 两者**完全独立**:
 - 一个失败不影响另一个 (MessageState 渲染失败仅 log warn,不阻塞 card body)

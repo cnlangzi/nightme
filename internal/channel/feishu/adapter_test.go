@@ -1865,7 +1865,8 @@ func TestSend_OutResult_EmptyPatchesReceiptFooter(t *testing.T) {
 	// Pre-existing receipt bound to userMsgID "om_patch" — simulates
 	// the rolling-log receipt that OutReply chunks have been
 	// accumulating during the turn.
-	preExisting := NewMessageReceiptForReply("oc_test", "om_patch", "oc_card_1", a)
+	preExisting := NewMessageReceiptForReply("oc_test", "om_patch", a)
+	preExisting.cardMsgID = "oc_card_1"
 	preExisting.footerLines = []string{"old footer line"}
 	a.receiptsByUserMsgID["om_patch"] = preExisting
 
@@ -1908,7 +1909,8 @@ func TestSend_OutResult_EmptyPatchesReceiptFooter(t *testing.T) {
 // without a mock, matching the empty+Usage case above.
 func TestSend_OutResult_EmptyWithErrPatchesReceipt(t *testing.T) {
 	a := testAdapter(t)
-	preExisting := NewMessageReceiptForReply("oc_test", "om_err", "oc_card_err", a)
+	preExisting := NewMessageReceiptForReply("oc_test", "om_err", a)
+	preExisting.cardMsgID = "oc_card_err"
 	a.receiptsByUserMsgID["om_err"] = preExisting
 
 	var sends int

@@ -62,7 +62,7 @@ func newAdapterWithBot(bot receiptBot) *Adapter {
 // e2e tests the lark send is irrelevant — we only care about
 // the ApplyHeartbeat + PATCH path on the existing receipt.
 func installReceipt(a *Adapter, bot receiptBot, chatID, userMsgID, msgID string) *MessageReceipt {
-	r := NewMessageReceiptForReply(chatID, userMsgID, msgID, bot)
+	r := NewMessageReceiptForReply(chatID, userMsgID, bot)
 	r.cardMsgID = msgID // pretend a card was already sent
 	a.mu.Lock()
 	a.receiptsByUserMsgID[userMsgID] = r

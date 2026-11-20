@@ -35,7 +35,7 @@ import (
 // producing a PATCH body Feishu's API rejected.
 func TestAppendEntry_OverflowWithHeartbeatHeader_BailsOut(t *testing.T) {
 	bot := &mockReceiptBot{}
-	r := NewMessageReceiptForReply("oc_overflow", "om_overflow", "om_card", bot)
+	r := NewMessageReceiptForReply("oc_overflow", "om_overflow", bot)
 	r.cardMsgID = "om_overflow_card"
 	// Non-empty heartbeat — the F-63.1 regression scenario.
 	r.heartbeat = messages.HeartbeatSnapshot{
@@ -91,7 +91,7 @@ func TestAppendEntry_OverflowWithHeartbeatHeader_BailsOut(t *testing.T) {
 // check to be too aggressive).
 func TestAppendEntry_OverflowWithoutHeartbeatHeader_NoEarlyBail(t *testing.T) {
 	bot := &mockReceiptBot{}
-	r := NewMessageReceiptForReply("oc_overflow2", "om_overflow2", "om_card", bot)
+	r := NewMessageReceiptForReply("oc_overflow2", "om_overflow2", bot)
 	r.cardMsgID = "om_card2"
 	// NO heartbeat — entries only.
 	r.heartbeatMinInterval = 0

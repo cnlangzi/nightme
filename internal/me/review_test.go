@@ -214,7 +214,7 @@ jobs:
 	if r == nil {
 		t.Fatal("the run is gone")
 	}
-	if err := svc.Stop(context.Background(), "obs-1"); err != nil {
+	if err := svc.Stop(context.Background(), "obs-1", "om_stop"); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
 	waitRun(t, svc, "obs-1")

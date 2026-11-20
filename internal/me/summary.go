@@ -3,7 +3,8 @@
 // The record is the account of the session: it says what the run did,
 // what went wrong and what the models decided. It rides on the card of
 // the run — the run is over, and the card it worked on is the record of
-// it.
+// it. A run the operator stopped rides on the card of the stop
+// instead: the stop and the record are one card.
 package me
 
 import (
@@ -43,9 +44,12 @@ const (
 // postRecord posts the record a finished run leaves behind.
 //
 // The record is the account of the session: it says what the run did,
-// what went wrong and what the models decided. It rides on the card of
-// the run: the run is over, and the card it worked on is the record of
-// it.
+// what went wrong and what the models decided.
+//
+// The record rides on the card of the run: the run is over, and the
+// card it worked on is the record of it. A run the operator stopped
+// rides on the card of the stop instead: the stop and the record are
+// one card.
 //
 // The record is posted whenever the run ends, whatever ended it: a
 // run that finishes on its own has a session worth recording too.
@@ -66,8 +70,13 @@ func (s *Service) postRecord(r *run) {
 	// on purpose.
 	ctx := context.WithoutCancel(r.ctx)
 	sess := &session{kind: sessionRecord, id: r.id}
-	if runSess := r.runSessionRef(); runSess != nil {
-		sess.anchor = runSess.anchor
+	// The stop is where the operator is looking: its card carries the
+	// record of the run it stopped.
+	sess.anchor = r.stopAnchorValue()
+	if sess.anchor == "" {
+		if runSess := r.runSessionRef(); runSess != nil {
+			sess.anchor = runSess.anchor
+		}
 	}
 	r.setRecordSession(sess)
 	s.publishInit(ctx, r, sess)

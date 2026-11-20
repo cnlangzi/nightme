@@ -117,10 +117,11 @@ func (c *fakeController) Next(_ context.Context, _ string, messageID string, not
 	return mesvc.OperatorDecision{Step: c.step, Act: !c.noDecision, Why: c.why}, nil
 }
 
-func (c *fakeController) Stop(_ context.Context, _ string) error {
+func (c *fakeController) Stop(_ context.Context, _ string, messageID string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.stopped++
+	c.messageIDs = append(c.messageIDs, messageID)
 	return c.stopErr
 }
 
@@ -887,6 +888,11 @@ func TestStop_StopsTheRun(t *testing.T) {
 	if ctrl.stopped != 1 {
 		t.Fatalf("the controller stopped %d runs, want 1", ctrl.stopped)
 	}
+	// The record of the session rides on the card of the stop: the
+	// controller needs the message the operator stopped the run from.
+	if len(ctrl.messageIDs) != 1 || ctrl.messageIDs[0] != "msg-1" {
+		t.Fatalf("the controller got the messages %v, want the message of the command", ctrl.messageIDs)
+	}
 }
 
 // TestStop_SaysTheRecordIsOnItsWay — the reply tells the operator
@@ -905,6 +911,28 @@ func TestStop_SaysTheRecordIsOnItsWay(t *testing.T) {
 	// The chat agent's own turn goes on: the stop is the run's stop.
 	if !strings.Contains(reply, "agent") {
 		t.Fatalf("reply = %q, want the turn of the chat agent", reply)
+	}
+}
+
+// TestStop_InAChatWithoutARun — a chat without a run has nothing to
+// stop: the command says so, and no record is on its way.
+func TestStop_InAChatWithoutARun(t *testing.T) {
+	ctrl := &fakeController{stopErr: mesvc.ErrNoRun}
+	cs, ch := newSessionWithOutcome(t, "me-16", "/tmp/work")
+
+	reply := runMe(t, ctrl, cs, "/me", "stop")
+	if !strings.Contains(reply, "❌") {
+		t.Fatalf("reply = %q, want the refusal", reply)
+	}
+	if strings.Contains(reply, "record") {
+		t.Fatalf("reply = %q, want no promise of a record", reply)
+	}
+	outcome := ch.settled()
+	if outcome == nil {
+		t.Fatal("the command reported no outcome")
+	}
+	if outcome.Status != messages.OutcomeFailed {
+		t.Errorf("the outcome is %q, want it failed", outcome.Status)
 	}
 }
 

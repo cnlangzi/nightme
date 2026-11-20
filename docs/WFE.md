@@ -952,7 +952,7 @@ The cap on an answer defaults to 40960 tokens; a configuration that does not nam
 | `/me pause` | Stops the run after the step it is on. The step that is running is not interrupted: its outcome is recorded. The run publishes the state of the run on a card of its own under the `/me pause` message, and its phase line says why the run stopped. |
 | `/me resume [note]` | Runs the step the run is on again. The step's budget for the current round starts over before the retry. The run publishes the state of the run on a card of its own under the `/me resume` message. The note is the operator's instruction; it joins the conversation the chat model reads. A step that is running, that succeeded, or that has not run yet is not run again: the command says why and the state card answers as well. `/me resume` does not interrupt a step that is running. |
 | `/me next [note]` | Skips the step the run is on: the plan goes on with the workflow, and the facts the step produced are kept. The run publishes the state of the run on a card of its own under the `/me next` message. The note is the operator's instruction; it joins the conversation the chat model reads. A step whose command is still running is skipped: the command it sent to the chat is abandoned, and the run goes on with the next step of the job. The abandoned command is not cancelled — the chat owns it, and what it produces lands in the chat when it finishes. A step that succeeded, and a step whose work is not a chat command, are not skipped: the command says why and the state card answers as well. |
-| `/me stop` | Cancels the run and leaves the record of the session in the chat. The work the chat agent does on its own goes on to its end. |
+| `/me stop` | Cancels the run and leaves the record of the session in the chat. The record rides on the card of the `/me stop` message, under the line that says the run was stopped. The work the chat agent does on its own goes on to its end. |
 | `/me status` | Shows the state of the run again: the run publishes it on a card of its own under the `/me status` message, and the card carries the phase of the run, the tree of the rounds and the checklist of the round. A run that has not entered a round yet shows its phase line alone. The command posts no reply of its own. |
 
 The step the run is on is the step its last judgment was about. A run that has no judgment — the operator took the chat back, the agent was throttled — is on the step it ran last, when that step did not succeed; a run whose last step succeeded is on the first step of the plan's ready set. `/me resume` and `/me next` act on that step, and the decision rides on the run until its loop applies it: the state is written before the run is woken, so a daemon that dies in between comes back and applies it.
@@ -983,7 +983,7 @@ The run speaks in agent sessions, and the chat renders every session the way it 
 | A job round | A message the run posted under the `/me start` message | The tree of the rounds of the run, the closing block of the round that ended, the steps of the round as a checklist, and the round's identity, token usage and repository facts in its footer. The checklist follows the steps of the round. |
 | The state of the run | A message the run posted under the message that asked for it: the `/me status`, `/me pause`, `/me resume` or `/me next` message, or under the card of the round when the run stops by itself | The phase line of the run, the tree of the rounds and the checklist of the round. It is a snapshot: it is published once and never changed. |
 | A decision | A message the run posted under the command message of the step the decision is about | The reason the decision was taken as its first entry, the thinking of the chat model, the tool calls of the decision as thread events under the card, one entry per reply, and the verdict of the decision in its footer. |
-| The record of the finished run | The card of the run | The account of the session: how the run ended, how long it went, what it did, what went wrong and what the models decided. |
+| The record of the finished run | The card of the run, or the card of the `/me stop` message when the operator stopped the run | The account of the session: how the run ended, how long it went, what it did, what went wrong and what the models decided. |
 
 A decision about a step that never sent a command to the chat — a shell step, a `use:` step, a judgment that names no step — hangs under the card of the round instead.
 
@@ -993,7 +993,7 @@ The state of the run is a card of its own: the run posts a message of its own fo
 
 The state of the run is published whenever the operator asks for it with `/me status`, `/me pause`, `/me resume` or `/me next`, and whenever the run stops by itself — a person took the chat back, the step ran out of budget or the agent was throttled. The run posts its message under the message the operator asked from, and under the card of the round when the run stops by itself. Its first entry is the phase line: `paused: <the reason the run stopped>`, `asking: <the question the run waits for>`, or `running · step: <the command the run waits for>`.
 
-Every run that ends leaves a record of the session in the chat: the record rides on the card of the run and says how the run ended, what it did, what went wrong and what the models decided. The record is posted once the run has unwound, so the step that was in flight counts as a step that did not run unless it produced an outcome. A run that ends by itself leaves a record too; a run the daemon suspends leaves none, because the run goes on when the daemon comes back.
+Every run that ends leaves a record of the session in the chat: the record says how the run ended, what it did, what went wrong and what the models decided. The record is posted once the run has unwound, so the step that was in flight counts as a step that did not run unless it produced an outcome. A run that ends by itself leaves a record too; a run the daemon suspends leaves none, because the run goes on when the daemon comes back. The record rides on the card of the run, unless the operator stopped the run: the record of a stopped run rides on the card of the `/me stop` message, under the line that says the run was stopped, so the stop and the record are one card.
 
 No card of the run carries a button: the operator drives the run with `/me pause`, `/me resume`, `/me next` and `/me stop`. A question the run asks is the chat's own interactive choice card, and a click on an option is the answer — the answer never reaches the agent. A person who quotes the question instead answers it in their own words — the answer is claimed by the run before the agent sees it.
 
@@ -1169,7 +1169,7 @@ the review needs a second look, the diff is bigger than I expected
 🤖: me · jev-1.14 · decision-3 · /gtw fix 43 -y (p=0.91)
 ```
 
-The record of a finished session rides on the card of the run:
+The record of a finished session rides on the card of the run — or on the card of the `/me stop` message when the operator stopped the run:
 
 ```
 ■ [ fix-issue ] stopped

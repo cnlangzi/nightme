@@ -19,7 +19,7 @@
 
 当前 nightme 的 receipt 走纯文本路径(`msg_type: "text"`):
 - `internal/channel/feishu/adapter.go:890 SendMessageText` 编码为 `{"text": "..."}` 后 `sendContent` 发出
-- `internal/channel/feishu/receipt.go:515 renderLocked` 每个事件 `SendMessageText` 发一条新消息
+- `internal/channel/feishu/receipt.go:515 render` 每个事件 `SendMessageText` 发一条新消息
 - 没有 footer / 没有按钮 / 表格需要 markdown hack 才能近似
 
 切到 interactive card 可以:
@@ -141,7 +141,7 @@ Agent: main | Model: MiniMax-M2.7 | Provider: minimax
 | `internal/channel/feishu/adapter.go:890 SendMessageText` | 发 `msg_type: "text"` 消息,返回 messageID |
 | `internal/channel/feishu/adapter.go:765 buildInteractiveCard` | 已有的 OutChoice 卡片构建(permission card),仅用于 OutChoice 路径 |
 | `internal/channel/feishu/adapter.go:1066 sendContent` | 透传到 lark client,支持任意 msgType |
-| `internal/channel/feishu/receipt.go:515 renderLocked` | 每个事件 `SendMessageText` 发新消息 |
+| `internal/channel/feishu/receipt.go:515 render` | 每个事件 `SendMessageText` 发新消息 |
 | `internal/channel/feishu/receipt.go:455 formatLocked` | 构造 plain text body(header + entries) |
 | `internal/channel/feishu/receipt.go:188 headerLine` | 单行 header(⏳ / 🔄 / ✅) |
 | `internal/gateway/messages.go:162 OutChoice` / `:254 Card` | 已存在 interactive card 的抽象类型 |
@@ -171,10 +171,10 @@ Agent: main | Model: MiniMax-M2.7 | Provider: minimax
 Adapter.Send(OutboundMessage)
    │
    ├── OutText / OutResult / OutUsage / OutToolStart / OutToolEnd / OutThinking / OutCompaction
-   │     → receipt.Append(AgentEvent) → renderLocked(ctx) → SendCard(首次) / PatchMessage(后续)
+   │     → receipt.Append(AgentEvent) → render(ctx) → SendCard(首次) / PatchMessage(后续)
    │
    ├── OutInit
-   │     → receipt.Append(AgentConnectedEvent) → renderLocked → Patch(刷新 footer)
+   │     → receipt.Append(AgentConnectedEvent) → render → Patch(刷新 footer)
    │
    └── OutChoice (permission)
          → sendContent(interactive, buildInteractiveCard(...))   ← 不变
@@ -191,7 +191,7 @@ type MessageReceipt struct {
 
 **本期不**新增 `agentName` / `provider` / `model` 字段 -- foot note 全部从已有 state 字段组装(state.String() + eventCount + lastEventAt)。这样不需要触动 `agent.AgentConnectedEvent` / `gateway/translate.go` / `OutboundMessage.Meta` 任何上游。
 
-`renderLocked` 替换为新的 card-first 策略:
+`render` 替换为新的 card-first 策略:
 - 第一次:`sendContent(chatID, MsgTypeInteractive, buildReceiptCard(r))` 拿到 messageID
 - 之后:`PatchMessage(messageID, buildReceiptCard(r))` 整体替换
 
@@ -257,12 +257,12 @@ func (a *Adapter) SendCard(ctx context.Context, chatID, content string) (string,
 
 `UpdateMessage` 调 `larkClient.Im.V1.Message.Patch(...)`(注意是 **Patch**,不是 Update -- Update 只能改文本)。`SendCard` 是 `sendContent(chatID, larkim.MsgTypeInteractive, content)` 的薄包装。
 
-PATCH 失败时不降级为新消息 -- 简单实现,日志告警即可;下次 `renderLocked` 仍然 PATCH 同一个 messageID。
+PATCH 失败时不降级为新消息 -- 简单实现,日志告警即可;下次 `render` 仍然 PATCH 同一个 messageID。
 
 ### 5.5 迁移步骤(本期)
 
 1. **Phase 1 - adapter 层支持**: 加 `SendCard` / `UpdateMessage`(内部调 Patch),`buildReceiptCard` + `footLine` 静态实现
-2. **Phase 2 - receipt 切换**: `renderLocked` 改为 first-send-then-PATCH;`MessageReceipt` 加 `cardMsgID`;`evictOverflowLocked` 扩展为字节+元素双约束
+2. **Phase 2 - receipt 切换**: `render` 改为 first-send-then-PATCH;`MessageReceipt` 加 `cardMsgID`;`evictOverflowLocked` 扩展为字节+元素双约束
 3. **Phase 3 - 测试更新**: `mockReceiptBot` 加 SendCard / PatchMessage stubs;`TestReceipt_PerEventFreshMessage` 改为断言 PATCH 行为;新增 `TestFootLine_*` / `TestBuildReceiptCard_*` 系列
 4. **Phase 4 - 文档收尾**: 在 §11 记录本期落地状态;把"未做"留给 follow-up issue
 
@@ -466,7 +466,7 @@ text, hasMention := stripAndDetectMention(
 
 - 单元: `buildReceiptCard` 产出合法 JSON,`elements` 末尾是 `<hr>` + `<text_tag color='neutral'>` foot note;`footLine` 为空时整段省略
 - 单元: `footLine` 在 `state=executing, eventCount=5, lastEventAt=14:32:05` → `"executing · 5 entries · 14:32:05"`;`eventCount=0` 时不渲染 `0 entries`
-- 单元: `MessageReceipt.renderLocked` 第一次调 → `SendCard`;之后 → `PatchMessage` 同一个 messageID;**不再**调 `SendMessageText`
+- 单元: `MessageReceipt.render` 第一次调 → `SendCard`;之后 → `PatchMessage` 同一个 messageID;**不再**调 `SendMessageText`
 - 单元: 元素数 = 60 entries → 47 entries + `...(前 N 条已省略)` 标记
 - 单元: 字节数 = 收到超大 entries → 驱逐最老直到 < 24 KiB
 - 单元: 回归 `mockReceiptBot.AddReaction` 不变(v1.3 后,reaction 由 MessageState FSM 触发,仍走 userMsgID,但已从 MessageReceipt 解耦到 Adapter 顶层)
@@ -498,7 +498,7 @@ text, hasMention := stripAndDetectMention(
 | 文件 | 改动 |
 |---|---|
 | `internal/channel/feishu/adapter.go` | 新增 `updateMessageFunc` 字段、`patchViaLark`、`patchContent`、`UpdateMessage`、`SendCard`、`buildReceiptCard` |
-| `internal/channel/feishu/receipt.go` | 改 `renderLocked` 走 SendCard/PatchMessage;`receiptBot` 接口加 `SendCard`/`PatchMessage`;`MessageReceipt` 加 `cardMsgID`;`ReceiptState` 加 `footLine`;`replyMaxBytes` 改 24576 |
+| `internal/channel/feishu/receipt.go` | 改 `render` 走 SendCard/PatchMessage;`receiptBot` 接口加 `SendCard`/`PatchMessage`;`MessageReceipt` 加 `cardMsgID`;`ReceiptState` 加 `footLine`;`replyMaxBytes` 改 24576 |
 | `internal/channel/feishu/receipt_test.go` | `mockReceiptBot` 加 stubs;新增 / 重写 §7 列出的测试 |
 | `internal/channel/feishu/adapter_test.go` | 加 SendCard / PatchMessage 走通测试 |
 
@@ -521,7 +521,7 @@ type MessageReceipt struct {
     cardMsgID string  // 新增:首次 SendCard 后记录
 }
 
-func (r *MessageReceipt) renderLocked(ctx context.Context) error {
+func (r *MessageReceipt) render(ctx context.Context) error {
     r.appendReactionLocked(ctx, r.state.Emoji())
     body, err := buildReceiptCard(r)
     if err != nil { return err }
@@ -590,7 +590,7 @@ func (a *Adapter) UpdateMessage(ctx context.Context, messageID, content string) 
 **本期防御**:
 - `replyMaxBytes = 24 KB` -- 留 6 KB 头空间
 - entries 上限 = 47 -- 留 3 元素给 header/hr/footer
-- 5 QPS 频控靠 receipt 单线程 `renderLocked`(已串行)+ 实际 agent event 频率远低于 5/s,不主动限流
+- 5 QPS 频控靠 receipt 自己的 300ms 显式节流(两次 PATCH 间隔 ≥300ms,≈3.3 QPS)+ 实际 agent event 频率远低于 5/s,不主动限流
 
 **超出限制时的降级**: `PatchMessage` 失败 → 记录日志 + 下次 render 仍 PATCH 同一 messageID;不重发新消息以避免重复 receipt。**已知风险**: 持续失败 → 卡片一直不更新,直到 receipt 销毁。后续可加重试/降级到"再发新卡"。
 
@@ -2682,7 +2682,7 @@ nightme 的 feishu adapter hot path 完全同步 —— readPump → `EventCallb
 | PATCH message | 50 | 1000 | **5 QPS per message_id** |
 | Delete / AddReaction / Upload | 50 | 1000 | — |
 
-nightme 热路径被 **per-user 5 QPS** 约束 —— 单 chat PATCH storm 受 per-message_id 5 QPS 限制(由 `renderLocked` mutex 天然满足),多 chat 并发受 per-user 5 QPS 限制。
+nightme 热路径被 **per-user 5 QPS** 约束 —— 单 chat PATCH storm 受 per-message_id 5 QPS 限制(由 receipt 的 300ms 显式节流保证,mutex 提供串行化),多 chat 并发受 per-user 5 QPS 限制。
 
 ### 16.4 配置
 
@@ -2724,7 +2724,7 @@ var StrictDefault = config.FeishuRateLimitConfig{
 
 - **不改 `Channel` 接口契约**(`Send` 仍 fire-and-ack)
 - **不与 Layer 1 重试耦合**(retry 在 sendContent 外层,limiter 在 SDK call 内层;二者正交)
-- **不影响 per-message_id 5 QPS**(`renderLocked` mutex 天然满足)
+- **不影响 per-message_id 5 QPS**(由 receipt 的 300ms 显式节流保证,mutex 提供串行化)
 
 ### 16.7 监控埋点
 
@@ -2891,7 +2891,7 @@ Claude Code 的 `TaskCreate` / `TaskUpdate` 在 `--output-format stream-json` �
 
 - 整个 checklist 限定在 `divTextCharLimit` 内，超过时按 in-progress → pending → completed 优先级裁剪，并显示 `…另有 N 项任务`。
 - `buildReceiptCard` 在 element reservation 中预留 checklist element，与 entries / footer / hr 一起受 50 element / 24KB 预算约束。
-- 同 snapshot 重复导致 `body` 不变，依赖现有 `renderLocked` body diff 跳过 PATCH。
+- 同 snapshot 重复导致 `body` 不变，依赖现有 `render` body diff 跳过 PATCH。
 
 ### 18.5 测试
 

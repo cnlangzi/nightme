@@ -2,7 +2,7 @@
 //
 // Exercises the full path: bridge AgentEvent → handler (built
 // inline, see buildHandler below) → messages.Emitter →
-// *Adapter.Send → receiptFor → ApplyHeartbeat → renderLocked →
+// *Adapter.Send → receiptFor → ApplyHeartbeat → render →
 // PATCH body containing the heartbeat header.
 //
 // Why we build the handler inline instead of importing
@@ -239,7 +239,7 @@ func TestEndToEnd_Heartbeat_ThinkOff_HeaderStillUpdates(t *testing.T) {
 }
 
 // TestEndToEnd_Heartbeat_ConcurrentApply_NoRace is the -race
-// canary for the lock-through-renderLocked contract
+// canary for the receipt's lock contract
 // (optimization #1's fix). The semantic guarantee ("no
 // counter increment is lost") cannot be asserted purely by
 // the final value because ApplyHeartbeat takes an ABSOLUTE
@@ -262,7 +262,7 @@ func TestEndToEnd_Heartbeat_ConcurrentApply_NoRace(t *testing.T) {
 	bot := &mockReceiptBot{}
 	adapter := newAdapterWithBot(bot)
 	receipt := installReceipt(adapter, bot, "oc_e2e_concurrent", "om_e2e_user", "om_e2e_card_1")
-	// Disable throttle so every call exercises renderLocked.
+	// Disable throttle so every call exercises render.
 	receipt.heartbeatMinInterval = 0
 
 	const goroutines = 20

@@ -46,8 +46,8 @@
 // one-shot dispatchers (/gtw commit, /gtw pr, /review): the
 // dispatcher's WithTimeout(ctx, timeouts.Agent) defers cancel(),
 // which races the receipt's 300ms PATCH throttle inside
-// renderLocked. When defer cancel fires mid-throttle, renderLocked
-// returns ctx.Err() and the receipt's terminal ✅ PATCH never
+// render. When defer cancel fires mid-throttle, the PATCH fails
+// with ctx.Err() and the receipt's terminal ✅ PATCH never
 // lands — the card stays stuck on the pre-terminal ⏱ / 💭 / 🔧
 // header. Decoupling the drain's ctx from the caller's lets the
 // terminal OutHeartbeat finish rendering before dispatchCommit
@@ -134,9 +134,9 @@ func StreamRunOnceToEmitter(
 	// runs on drainCtx, NOT on the caller's ctx. Decoupling matters
 	// for one-shot dispatchers (/gtw commit, /gtw pr, /review)
 	// whose defer cancel() at function return would otherwise
-	// cancel the terminal OutHeartbeat's renderLocked while it is
+	// cancel the terminal OutHeartbeat's render while it is
 	// still in flight. The receipt's 300ms PATCH throttle can keep
-	// renderLocked blocked on its timer for hundreds of ms after
+	// render blocked on its timer for hundreds of ms after
 	// the last counter bump; defer cancel at dispatcher return
 	// races that timer and produces the
 	// "feishu receipt: heartbeat render failed err="context
@@ -203,7 +203,7 @@ func StreamRunOnceToEmitter(
 	// closes the channel, and blocks until the terminal
 	// OutHeartbeat's PATCH has landed on the receipt card.
 	// Without this guarantee, the dispatcher's defer cancel()
-	// could race renderLocked's 300ms throttle timer and cancel
+	// could race render's 300ms throttle timer and cancel
 	// the terminal render mid-flight (see drainCtx comment).
 	finalize = func() {
 		close(ch)

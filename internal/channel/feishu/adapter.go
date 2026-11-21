@@ -855,7 +855,7 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string, r
 // F-42 review finding #5: same orphan-card race fix as
 // ensureReceiptForTask. Register-before-SendCard with the
 // `initializing` flag so concurrent SendCard / SetTaskList /
-// AppendEntry calls hit the renderLocked short-circuit instead of
+// AppendEntry calls hit the render short-circuit instead of
 // issuing a second SendCard (the loser doesn't leave an orphan
 // card with a stale Typing header in chat).
 func (a *Adapter) ensureReceiptForTyping(ctx context.Context, chatID, userMsgID string, footerLines []string) (*MessageReceipt, bool, error) {
@@ -929,7 +929,7 @@ func (a *Adapter) ensureReceiptForTyping(ctx context.Context, chatID, userMsgID 
 		return nil, false, err
 	}
 
-	// The receipt's own lock guards its fields: renderLocked reads
+	// The receipt's own lock guards its fields: render reads
 	// them under it.
 	transient.mu.Lock()
 	transient.cardMsgID = msgID
@@ -980,7 +980,7 @@ func (a *Adapter) ensureReceiptForTyping(ctx context.Context, chatID, userMsgID 
 // F-42 review finding #5: same orphan-card race fix as
 // ensureReceiptForTask. Register-before-SendCard with the
 // `initializing` flag — concurrent AppendEntry / SetTaskList calls
-// during the SendCard window hit the renderLocked short-circuit
+// during the SendCard window hit the render short-circuit
 // instead of issuing a second SendCard, so the loser doesn't leave
 // an orphan card in chat with a stale entry / task snapshot.
 func (a *Adapter) ensureReceiptForReply(ctx context.Context, chatID, userMsgID, firstEntryText string) (*MessageReceipt, bool, error) {
@@ -1073,7 +1073,7 @@ func (a *Adapter) ensureReceiptForReplyWithFooter(ctx context.Context, chatID, u
 		return nil, false, err
 	}
 
-	// The receipt's own lock guards its fields: renderLocked reads
+	// The receipt's own lock guards its fields: render reads
 	// them under it.
 	transient.mu.Lock()
 	transient.cardMsgID = msgID
@@ -1309,7 +1309,7 @@ func (a *Adapter) postOrphanTaskCard(ctx context.Context, chatID string, list *a
 // F-42 review finding #5: same orphan-card race fix as
 // ensureReceiptForReply. Register-before-SendCard with the
 // `initializing` flag — concurrent SetTaskList calls during the
-// SendCard window hit the renderLocked short-circuit instead of
+// SendCard window hit the render short-circuit instead of
 // issuing a second SendCard, so the loser doesn't leave an orphan
 // card in chat with a stale task snapshot.
 //
@@ -1397,7 +1397,7 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 		return nil, false, err
 	}
 
-	// The receipt's own lock guards its fields: renderLocked reads
+	// The receipt's own lock guards its fields: render reads
 	// them under it.
 	transient.mu.Lock()
 	transient.cardMsgID = msgID
@@ -1878,7 +1878,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// header on one-shot / review flows. Now we stamp the
 		// rendered footer onto the existing receipt card via
 		// MessageReceipt.StampFooterLines (which re-renders through
-		// renderLocked).
+		// render).
 		//
 		// Orphan guard: when ReplyTo is empty (startup EventAgentReady
 		// or internal log) we have no receipt to stamp — silently
@@ -3999,7 +3999,7 @@ func (a *Adapter) SendCardForReceipt(ctx context.Context, chatID, content, rootI
 // and §6.3.
 //
 // Returns "" on success (PATCH has no useful body). The
-// receipt's renderLocked is the only caller today; it ignores the
+// receipt's render is the only caller today; it ignores the
 // return value other than nil/non-nil.
 func (a *Adapter) PatchMessage(ctx context.Context, messageID, content string) error {
 	if strings.TrimSpace(messageID) == "" {
@@ -4097,8 +4097,8 @@ func (a *Adapter) updateViaLark(ctx context.Context, messageID, content string) 
 		return errors.New("feishu: REST client is nil")
 	}
 	// F-36: transient 错误（timeout/EOF）按指数退避重试。
-	// PATCH 5/s per message_id 由 MessageReceipt.renderLocked
-	// mutex 天然满足；F-35 limiter 在 retry 内层守住全局
+	// PATCH 5/s per message_id 由 receipt 的 300ms 显式节流保证，
+	// mutex 只提供串行化；F-35 limiter 在 retry 内层守住全局
 	// 5/s per-user / per-group 桶。
 	return WithTransientRetry(ctx, RetryOpts{
 		Op:     "patch_message",

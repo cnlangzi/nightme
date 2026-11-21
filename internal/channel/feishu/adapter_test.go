@@ -1094,7 +1094,7 @@ func TestSend_OutCommandReply_PatchesPlaceholderReceipt(t *testing.T) {
 	if sends != 1 {
 		t.Errorf("sendFunc calls = %d, want 1 (OutCommandReply must PATCH, not Create)", sends)
 	}
-	// Exactly one PATCH (AppendEntryWithFooter → renderLocked).
+	// Exactly one PATCH (AppendEntryWithFooter → render).
 	if patches != 1 {
 		t.Errorf("updateFunc calls = %d, want 1 (AppendEntryWithFooter PATCHes the placeholder)", patches)
 	}
@@ -2294,11 +2294,11 @@ func TestSend_OutReply_ColdStartSendCardFails_StillProducesCard(t *testing.T) {
 // renderer.
 //
 // Test setup: AppendEntryWithFooter's budget check (wouldReceiptOverflow)
-// runs BEFORE renderLocked, so we trip it by stuffing the receipt
+// runs BEFORE render, so we trip it by stuffing the receipt
 // with enough entries to push elementCount past the limit. The
 // second chunk's AppendEntryWithFooter then sees the would-be
 // overflow and returns ErrReceiptOverflow without ever calling
-// renderLocked — exercising the Send() bail-out path directly.
+// render — exercising the Send() bail-out path directly.
 func TestSend_OutReply_AppendEntryOverflow_StillProducesCard(t *testing.T) {
 	t.Skip("F-CLAUDE-PRINT-002: stub pending rewrite")
 }
@@ -2558,7 +2558,7 @@ func TestSend_OutInit_StampsFooterOnReceipt(t *testing.T) {
 	// ReplyTo, the adapter looks up the existing receipt (created
 	// by the dispatcher for /review and /gtw) and stamps the
 	// StatusBar footer onto the receipt card via
-	// MessageReceipt.StampFooterLines → renderLocked → PATCH.
+	// MessageReceipt.StampFooterLines → render → PATCH.
 	//
 	// Cold-start path (no pre-existing receipt; the dispatcher
 	// didn't pre-create one) flows through

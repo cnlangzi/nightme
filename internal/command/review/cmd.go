@@ -645,7 +645,7 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 		//
 		// defer drain() (F-63 follow-up fix-gtw-command-done):
 		// the sink's drain goroutine runs on its own ctx so the
-		// terminal OutHeartbeat's renderLocked is not canceled
+		// terminal OutHeartbeat's render is not canceled
 		// when revCtx is cancelled at goroutine return.
 		//
 		// The drain is called once more below, right after the

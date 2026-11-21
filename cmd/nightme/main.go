@@ -40,7 +40,14 @@ func init() {
 }
 
 func main() {
-	cfg, err := config.LoadDefault()
+	// The config is loaded, not loaded-and-defaulted: LoadDefault
+	// probes the built-in agents and writes the one it finds into the
+	// user's config file. Every command would then change the file it
+	// was asked to look at — a diagnostic command most of all. The
+	// paths that need a primary agent (the daemon start, the daemon
+	// child, `nightme run`) load the config themselves and persist
+	// the agent they picked.
+	cfg, err := config.Load(config.DefaultPath())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(1)

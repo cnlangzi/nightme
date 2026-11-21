@@ -216,7 +216,7 @@ nightme start          # daemon 在后台跑起来
 | `nightme update` | 就地升级：检查、下载、SHA256 校验、安装、重启 daemon。 |
 | `nightme clean` | 清空日志、清掉附件 inbox；`--all` 全量本地重置（先停 daemon）。 |
 | `nightme workflow` | list / show / dry-run / validate `~/.nightme/workflows/` 下的 workflow YAML。 |
-| `nightme doctor` | 觉得哪里不对时，看一眼 NightMe 是否健康。仅 Unix。 |
+| `nightme doctor` | 觉得哪里不对时，看一眼 NightMe 是否健康，并检查配置文件有没有写错。 |
 | `nightme version` | 打印版本信息。 |
 
 `nightme test` 在 PTY 里起一个 CLI，做本地快速验证。

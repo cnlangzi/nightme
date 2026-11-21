@@ -457,8 +457,7 @@ func TestCache_ConcurrentGetAndWritePR(t *testing.T) {
 // cancels every Cache's in-flight refresh goroutine. We drive the
 // inflight state directly via Cache.mu (this is the same-package
 // test, no exported test helpers needed) — the production caller
-// is cmd/nightme/shutdownRun, whose wiring is covered by
-// cmd/nightme/run_test.go::TestShutdownRun_CloseAllCancelsCaches.
+// is cmd/nightme/shutdownRun, whose wiring is covered by internal/runtime/runtime_test.go::TestShutdownRun_CloseAllCancelsCaches.
 //
 // The cancel is observed via a goroutine that watches ctx.Done();
 // CloseAll must reach the cache, grab mu, read cancel, and invoke

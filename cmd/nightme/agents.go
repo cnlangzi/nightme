@@ -93,14 +93,6 @@ func init() {
 	// One-shot invocations (/gtw commit, /gtw pr) run over the
 	// same ACP transport — the prompt travels over the protocol
 	// pipe, so it is not bounded by the platform's argv limit.
-	//
-	// Migration history: prior versions of this package shipped
-	// an HTTP `opencode serve` SSE bridge (~3500 lines of
-	// opencode-private event translation). That implementation
-	// was retired in F-OPENCODE-ACP-MIGRATION — the same wire
-	// surface is now available via the standard ACP protocol
-	// with a thin per-bridge sessionUpdate translator (see
-	// internal/bridge/opencode/update.go).
 	agent.Builtins.Register(opencode.NewStarter("opencode", "opencode", []string{"acp"}))
 
 	// cursor — the `cursor-agent acp` Agent Client Protocol bridge.

@@ -111,7 +111,7 @@ func (s *Starter) Command() string { return s.command }
 // events that the generic acp bridge handles via its fallback
 // path (text/tool events). If future Cursor CLI versions emit
 // custom sessionUpdate variants, a translator can be added
-// following the opencode/update.go pattern.
+// here.
 //
 // cfg.SessionID, when non-empty, is forwarded to the generic ACP
 // bridge. cursor-agent advertises loadSession and not

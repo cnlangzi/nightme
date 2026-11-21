@@ -375,6 +375,75 @@ func (p *Policy) StepUsage(idx int) int {
 	return n
 }
 
+// RoundStatus reports how a round of a job ended: whether it produced
+// work.
+//
+// The history is the record of what a round did: the run state forgets
+// the steps of a round when the job enters its next one, the history
+// keeps them. An action belongs to the round when it was taken in it
+// — an action that names no round belongs to the first one, as the
+// budgets count it — and when it served a step of the job.
+func (p *Policy) RoundStatus(job string, round int) RoundStatus {
+	for _, rec := range p.History {
+		if rec.StepID == "" {
+			continue
+		}
+		if JobOf(p.Workflow, rec.StepID) != job {
+			continue
+		}
+		if recordRound(rec) != round {
+			continue
+		}
+		if p.actionWorked(rec) {
+			return RoundStatusWorked
+		}
+	}
+	return RoundStatusSilent
+}
+
+// actionWorked reports whether an action of the history produced work.
+//
+// A command the run issued and an instruction it gave are work the run
+// caused. A turn of the chat model that produced no tool call and a
+// reset of a budget are the run's own bookkeeping.
+func (p *Policy) actionWorked(rec ActionRecord) bool {
+	switch rec.Kind {
+	case ActionKindRun:
+		return p.runWorked(rec)
+	case ActionKindCommand, ActionKindInstruct:
+		return true
+	}
+	return false
+}
+
+// runWorked reports whether a step that ran produced work.
+//
+// A wait is a pause, not a result: the step reports ok and the round
+// it sits in says nothing.
+func (p *Policy) runWorked(rec ActionRecord) bool {
+	if step := StepByID(p.Workflow, rec.StepID); step != nil && step.Kind() == StepKindWait {
+		return false
+	}
+	return outcomeWorked(rec.Outcome)
+}
+
+// outcomeWorked reports whether an outcome says the work got done.
+//
+// The normal branches of the outcome contract say the request was
+// valid and there was nothing to do: a `noop`, or a `failed` without
+// an error description. The error description is the axis the contract
+// names (see Outcome.Exception); every other outcome says the world
+// moved, and a breakage is worth seeing.
+func outcomeWorked(out Outcome) bool {
+	switch out.Status {
+	case OutcomeNoop:
+		return false
+	case OutcomeFailed:
+		return out.Data[OutcomeKeyError] != ""
+	}
+	return true
+}
+
 // ConsecutiveStalls returns the number of turns the agent produced no
 // tool call in, counted from the end of the history.
 //

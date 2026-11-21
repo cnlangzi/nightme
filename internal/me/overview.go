@@ -10,6 +10,7 @@ package me
 import (
 	"fmt"
 	"maps"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -460,10 +461,19 @@ func (r *run) finishedRounds() []string {
 
 // finishedRecords returns the records of the rounds that have finished
 // and the number of the ones the tree folds away.
+//
+// A round that produced nothing stays out: it is a round that was
+// passed over or that had nothing to do, and its row would be noise.
+// A record that carries no status stays: a missing fact must not cost
+// a round its row.
 func (r *run) finishedRecords() ([]roundRecord, int) {
 	r.mu.Lock()
 	records := append([]roundRecord(nil), r.roundRecords...)
 	r.mu.Unlock()
+
+	records = slices.DeleteFunc(records, func(rec roundRecord) bool {
+		return rec.Status == wfe.RoundStatusSilent
+	})
 
 	folded := 0
 	if len(records) > maxTreeRounds {

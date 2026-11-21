@@ -451,3 +451,18 @@ type ActionRecord struct {
 	Outcome Outcome    `json:"outcome"`
 	At      time.Time  `json:"at"`
 }
+
+// RoundStatus is how a round of a job ended: whether it produced work.
+//
+// A round that produced nothing says nothing worth reading: every step
+// of it was passed over or had nothing to do. The round still happened
+// and its own card still tells it, but a consumer that lists the rounds
+// of a run leaves it out.
+type RoundStatus string
+
+const (
+	// RoundStatusWorked means the round produced work.
+	RoundStatusWorked RoundStatus = "worked"
+	// RoundStatusSilent means the round produced nothing.
+	RoundStatusSilent RoundStatus = "silent"
+)

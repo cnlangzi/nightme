@@ -1106,6 +1106,14 @@ the rows start at the same column.
 The tree shows the last five rounds of the run: the earlier ones fold into
 one node, `… +3`.
 
+A round that produced nothing stays out of the tree: a round in which no
+step produced work — every step was passed over, waited, or reported that
+there was nothing to do — says nothing that the rounds around it do not
+say. The card of such a round stays, with its checklist and its closing
+block: the round happened, and what it did is on it. The folded rounds are
+the rounds that produced work and are too old: the rounds that produced
+nothing are not counted at all.
+
 The rounds of a job are numbered from one, so a run with several jobs has rounds of the same number. The tree names the job when there is more than one — `[ 1 ] v ship · 10:33:04 · …` — and leaves it out when the run has a single job: the plan of the run says which job the rounds belong to.
 
 When the round ends, its card carries the closing block: what the round came

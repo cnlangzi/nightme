@@ -117,6 +117,9 @@ type roundRecord struct {
 	EndedAt time.Time `json:"ended_at"`
 	// Outcome is what the round came to.
 	Outcome wfe.Outcome `json:"outcome"`
+	// Status says whether the round produced work. A round that
+	// produced nothing stays out of the tree of the rounds.
+	Status wfe.RoundStatus `json:"status,omitempty"`
 	// Decisions counts what decided up to the end of the round.
 	Decisions roundDecisions `json:"decisions"`
 	// Usage is what the run spent up to the end of the round.
@@ -1632,7 +1635,9 @@ func (r *run) isFinished() bool {
 // The record is what the card of the run reads: the tree of the rounds
 // shows the facts of every round the run finished. The counters of the
 // round and what it spent join the totals of the run, so the numbers
-// of the tree are the numbers of the run so far.
+// of the tree are the numbers of the run so far. The status of the
+// record says whether the round produced work: a round that produced
+// nothing stays out of the tree.
 func (r *run) closeRound(job string, round int, now time.Time) roundRecord {
 	out := r.roundOutcome(job, round)
 	start := r.roundStart(job, round)
@@ -1644,6 +1649,7 @@ func (r *run) closeRound(job string, round int, now time.Time) roundRecord {
 		StartedAt: start,
 		EndedAt:   now,
 		Outcome:   out,
+		Status:    r.policy.RoundStatus(job, round),
 		Decisions: roundDecisions{
 			System1:  r.system1Decisions,
 			System2:  r.system2Decisions,

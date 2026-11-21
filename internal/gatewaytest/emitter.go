@@ -34,8 +34,8 @@ type emitterLike interface {
 }
 
 // NoopEmitter is a do-nothing implementation that satisfies
-// messages.Emitter. Tests use it to construct a Gateway (which
-// requires an Emitter at New() time) or to bind to a
+// messages.Emitter. Tests use it as the emitter of an
+// inbound.Router (so replies are swallowed) or bind it to a
 // ChatSession without exercising the outbound path. Send
 // returns nil.
 type NoopEmitter struct{}

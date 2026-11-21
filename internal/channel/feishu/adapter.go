@@ -5167,8 +5167,8 @@ func messageText(content string) string {
 
 // normalizeChatType was removed in F-33 (D1+D2). Feishu's native
 // chat_type values (p2p / group / topic_group) no longer flow into
-// the nightme data model: ChatSession, BindingEntry, and the
-// registry schema no longer carry a ChatType field. topic_group
+// the nightme data model: ChatSession and the registry schema no
+// longer carry a ChatType field. topic_group
 // (Feishu threads) is intentionally treated identically to plain
 // groups — both share the same chat_id space (oc_xxx) and the
 // thread is a Feishu-side rendering detail handled by the adapter

@@ -3,7 +3,7 @@
 //
 // Layered architecture (top-down):
 //
-//	gateway                — pump (channel → channelCh) + binding table
+//	gateway                — multi-pump
 //	  └─ inbound (here)    — dispatch chain (the only inbound behaviour)
 //	       ├─ chatsession  — message routing (WatchMode gate, GetOrCreate, …)
 //	       ├─ command      — slash command dispatcher
@@ -21,8 +21,8 @@
 // extracted the call-target wiring into per-package dispatchers
 // (shell, command) and F-58 lifted the chain out of gateway
 // entirely into this package. The result: gateway is now a
-// pump + routing table; this package is the only place that
-// knows "given an inbound message, who handles it".
+// multi-pump; this package is the only place that knows "given an
+// inbound message, who handles it".
 //
 // Dispatch chain (priority order, first match wins):
 //

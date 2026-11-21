@@ -24,7 +24,6 @@
 package runtime
 
 import (
-	"os"
 	"path/filepath"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -49,7 +48,6 @@ type Deps struct {
 	OpenAgentSessions func(*config.Config) (*registry.AgentSessionFile, error)
 	BuildAgents       func(*config.Config) *agent.Registry
 	NewChannels       func(*config.Config) ([]channel.Channel, error)
-	Signals           <-chan os.Signal
 	OnReady           func()
 
 	// RegisterHealth, if non-nil, is called once per started

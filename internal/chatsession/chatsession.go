@@ -1,8 +1,7 @@
 // Package chatsession — ChatSession (v1.2 per-chat session context).
 //
 // ChatSession owns the persistent per-chat state and the pool of
-// AgentSessions. It replaces v1.1's Session + Gateway BindingEntry
-// pair with a single coherent structure.
+// AgentSessions.
 //
 // See docs/SPEC.md v1.2 §1.1 and docs/feat/F-chat-session.md.
 package chatsession

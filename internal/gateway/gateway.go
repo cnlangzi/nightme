@@ -1,5 +1,4 @@
-// Package gateway — the multi-channel inbound pump and the
-// chat → session binding table. v1.3+ multi-channel: each
+// Package gateway — the multi-channel inbound pump. Each
 // attached (Channel, Manager) tuple runs its own pumpOne
 // goroutine that calls the shared inbound.Router's Dispatch
 // with the per-channel Manager (the chatID → channel mapping
@@ -7,7 +6,7 @@
 //
 // Layered architecture (top-down, no cycles):
 //
-//	gateway                — multi-pump + binding table
+//	gateway                — multi-pump
 //	  └─ inbound (package)  — priority dispatch chain
 //	                         (chatsession / command / shell / services)
 //
@@ -23,16 +22,6 @@
 //   - DispatchInbound: thin delegate to the wired
 //     *inbound.Router, used by the v0.x single-channel tests
 //     and the legacy call sites.
-//   - Bind / LookupByChat / ListBindings / RestoreBindings /
-//     Unbind: the chat → ChatSession binding table (v1.2
-//     surface).
-//
-// v1.3 history: AttachChannels + pumpInbound + dispatchLoop
-// (the central goroutine that read from a fan-in channelCh
-// and called DispatchInbound) were replaced with AttachPumps
-// + pumpOne. Each pump's goroutine calls Dispatch directly
-// with its own mgr, eliminating the routing table
-// (chatToChan / defaultChannel / channelCh).
 package gateway
 
 import (
@@ -48,8 +37,8 @@ import (
 	"github.com/cnlangzi/nightme/internal/messages"
 )
 
-// Router is the multi-pump + binding table. Constructed once
-// per daemon via New; the runtime holds the *Router and calls
+// Router is the multi-pump gateway. Constructed once per daemon
+// via New; the runtime holds the *Router and calls
 // AttachPumps + Start + Stop.
 type Router struct {
 	mu sync.RWMutex
@@ -72,9 +61,6 @@ type Router struct {
 	// stopping latches once Stop has begun draining, so a late
 	// AttachPumps cannot call wg.Add while Stop is inside wg.Wait.
 	stopping bool
-
-	// v1.2 binding table (chat_id → session_id). Owned by Router.
-	bindings map[string]*BindingEntry
 
 	// mgrFallback is the chatsession.Manager of the first
 	// attached pump. It is used by the legacy DispatchInbound
@@ -107,7 +93,7 @@ type InboundObserver interface {
 	Seen(msg *messages.InboundMessage)
 }
 
-// New constructs a Router (the multi-pump + binding table).
+// New constructs a Router (the multi-pump gateway).
 //
 // ir is the dispatch chain. It is required and must be
 // non-nil — the gateway is useless without it.
@@ -126,8 +112,7 @@ func New(ir *inbound.Router) *Router {
 		panic("gateway.New: inbound.Router must not be nil")
 	}
 	return &Router{
-		inbound:  ir,
-		bindings: make(map[string]*BindingEntry),
+		inbound: ir,
 	}
 }
 
@@ -165,15 +150,6 @@ func (r *Router) AttachPumps(pumps ...Pump) {
 		go r.pumpOne(r.startCtx, p)
 	}
 }
-
-// Emitter returns the outbound chokepoint bound at
-// construction. Reserved for back-compat with v0.x call sites
-// that fetched the Emitter via Router.Emitter(); production
-// multi-channel code uses Manager.emitter (per-channel).
-//
-// Returns nil for v1.3+ Routers (no shared emitter). Use
-// ch.Manager.Emitter() instead.
-func (r *Router) Emitter() *struct{} { return nil }
 
 // Start launches one pumpOne goroutine per attached pump. Each
 // pump reads from its own channel and calls the shared
@@ -290,63 +266,4 @@ func (r *Router) DispatchInbound(ctx context.Context, msg *messages.InboundMessa
 		mgr = chatsession.NewManager()
 	}
 	return r.inbound.Dispatch(ctx, mgr, msg)
-}
-
-// --- v1.1 binding table (commit 3) ----------------------------------
-
-// Bind registers the binding (chatID → sessionID). Called by
-// the /cwd handler after it creates a fresh session via
-// MemoryManager.Register. The BindingEntry type itself lives in
-// binding.go (canonical location per SPEC §1.2).
-func (r *Router) Bind(chatID, sessionID, workspace, agent string) *BindingEntry {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	b := &BindingEntry{
-		ChatID:    chatID,
-		SessionID: sessionID,
-		Workspace: workspace,
-		Agent:     agent,
-	}
-	r.bindings[chatID] = b
-	return b
-}
-
-// LookupByChat returns the binding for chatID, or nil.
-func (r *Router) LookupByChat(chatID string) *BindingEntry {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.bindings[chatID]
-}
-
-// ListBindings returns a snapshot of every binding in
-// unspecified order. The slice is freshly allocated.
-func (r *Router) ListBindings() []BindingEntry {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	out := make([]BindingEntry, 0, len(r.bindings))
-	for _, b := range r.bindings {
-		out = append(out, *b)
-	}
-	return out
-}
-
-// RestoreBindings populates the binding table from a snapshot
-// (typically loaded from the registry at startup). Replaces
-// any existing entries.
-func (r *Router) RestoreBindings(entries []BindingEntry) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.bindings = make(map[string]*BindingEntry, len(entries))
-	for i := range entries {
-		e := entries[i]
-		r.bindings[e.ChatID] = &e
-	}
-}
-
-// Unbind removes the binding for chatID without affecting the
-// underlying session.
-func (r *Router) Unbind(chatID string) {
-	r.mu.Lock()
-	delete(r.bindings, chatID)
-	r.mu.Unlock()
 }

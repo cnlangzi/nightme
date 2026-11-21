@@ -337,11 +337,14 @@ func runDaemonChild(cmd *cobra.Command, reg *cmdRegistry) (retErr error) {
 	// runTrayOwning owns the main thread (or in Windows' case,
 	// the cobra-dispatched thread; systray.Run is happy to
 	// block there).
+	logger := loggerFromContext(cmd.Context())
 	err = runTrayOwning(cmd, deps, trayOptions{
-		reg:              reg,
-		logger:           loggerFromContext(cmd.Context()),
-		onStopRequest:    onStopRequestDefault,
-		onRestartRequest: onRestartRequestDefault,
+		reg:           reg,
+		logger:        logger,
+		onStopRequest: onStopRequestDefault,
+		onRestartRequest: func() {
+			onRestartRequestDefault(cfg, logger)
+		},
 	})
 	if err != nil && server.Status().State == "starting" {
 		report.SetError(err.Error())

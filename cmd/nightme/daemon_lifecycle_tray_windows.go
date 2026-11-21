@@ -1,36 +1,40 @@
 //go:build windows
 
-// Windows production defaults for the systray click handlers
-// wired up in tray.go.
-//
-// Windows has no SIGTERM (signal.Notify silently drops it — see
-// cmd/nightme/signals_windows.go), and the daemon child runs
-// DETACHED_PROCESS so there is no console to send a Ctrl+Break
-// event to. The cleanest "stop the daemon" signal we have on
-// Windows is os.Kill on self, which terminates the process
-// without giving the runtime a graceful-shutdown window.
-//
-// We accept the abrupt exit on Windows because:
-//   1. The daemon child has no console and no interactive
-//      client — there is no UI state to save on shutdown.
-//   2. agentsession.reapOrphan (the F-61 supervisor) cleans up
-//      any leftover agent subprocesses on next nightme run /
-//      start, so even if the daemon crashes mid-stop the agents
-//      are not leaked.
-//   3. signals_windows.go already documents that os.Kill is
-//      what task manager / `taskkill /F` use to terminate the
-//      daemon — we are doing the same thing from the inside.
-
 package main
 
 import (
+	"context"
+	"fmt"
+	"log/slog"
 	"os"
+
+	"github.com/cnlangzi/nightme/internal/config"
+	"github.com/cnlangzi/nightme/internal/proc"
 )
 
 func onStopRequestDefault() {
 	os.Exit(0)
 }
 
-func onRestartRequestDefault() {
-	onStopRequestDefault()
+func onRestartRequestDefault(cfg *config.Config, logger *slog.Logger) {
+	exe, err := os.Executable()
+	if err != nil {
+		logClickErr(logger, "restart", fmt.Errorf("resolve nightme executable: %w", err))
+		return
+	}
+
+	// The restart command owns the stop/start handoff and must outlive this daemon.
+	cmd := proc.New(context.Background(), exe, "restart")
+	stderr, _, closeStderr := openDaemonStderrOrDevNull(cfg, nil, os.Stderr)
+	if closeStderr != nil {
+		defer closeStderr()
+	}
+	if stderr != nil {
+		cmd.Stderr = stderr
+	}
+	if err := cmd.Start(); err != nil {
+		logClickErr(logger, "restart", fmt.Errorf("start restart process: %w", err))
+		return
+	}
+	_ = cmd.Process.Release()
 }

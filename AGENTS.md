@@ -11,6 +11,7 @@ Docs describe the system **as it is now**. History, process, and change narrativ
 - **Temporal words**: now / recently / newly / "as of vX"; 中文：新增了 / 现已支持 / 之前 / 原本
 - **Process artifacts**: task splits, debug logs, file lists, verification steps, options considered
 - **Preambles**: "This document introduces..."; "The following changes..."
+- **Pinned anchors**: `docs/SPEC.md §1.2`, `internal/registry/chat_session_entry.go:3`, `详见 §5.5` — name the target instead of its position: the file for another file, the heading for this one
 
 ### Don't create
 
@@ -26,8 +27,9 @@ Read every sentence as a first-time reader. If removing the timestamp or context
 
 ## 2. Comment Rules
 
-- Write code that speaks for itself. Comment only when necessary to explain **WHY**, not WHAT. We do not need comments most of the time.
-- ❌ AVOID — **Obvious Comments**(复述代码)、**Redundant Comments**、**Outdated Comments**、**Commented-out Code**、**Changelog Comments**、**Divider Comments**
+- Write code that speaks for itself. We do not need comments most of the time. A comment earns its place only when it explains **WHY** — and only the part the code cannot state by itself: the constraint behind the line, the invariant it protects, the reason a surprising choice was made. A comment that restates the code goes stale as soon as the code moves.
+- When a comment points at a source of truth, point at the file or the symbol — `docs/feat/F-gtw.md`, `pathutil.Join` — never at a line number or a section number. Anchors rot on the first edit; a file or a symbol can still be found.
+- ❌ AVOID — **Obvious Comments**(复述代码)、**Redundant Comments**、**Outdated Comments**、**Commented-out Code**、**Changelog Comments**、**Divider Comments**、**Pinned Anchors**(行号/章节引用)
 
 ## 3. Project Layout
 

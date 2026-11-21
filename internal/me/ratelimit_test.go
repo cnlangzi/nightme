@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/gateway/observe"
+	"github.com/cnlangzi/nightme/internal/llm"
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/pkg/wfe"
 )
@@ -34,13 +35,20 @@ func TestARateLimitedAgentPausesTheRun(t *testing.T) {
 	if !strings.Contains(st.PauseReason, "429") {
 		t.Errorf("the pause reason is %q, want it to name the rate limit", st.PauseReason)
 	}
-	// The command is not run again.
+	// The operator is told that the run waits.
+	var notice string
 	var commands []string
 	for _, text := range op.Sent() {
-		if !strings.HasPrefix(text, pauseMark) {
-			commands = append(commands, text)
+		if strings.HasPrefix(text, pauseMark) {
+			notice = text
+			continue
 		}
+		commands = append(commands, text)
 	}
+	if notice == "" {
+		t.Errorf("the chat got no pause announcement: %v", op.Sent())
+	}
+	// The command is not run again.
 	if len(commands) != 1 {
 		t.Errorf("the chat got %v, want the command once", commands)
 	}
@@ -127,6 +135,84 @@ func TestARateLimitInTheMiddleOfALongTurnIsFound(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	waitForStatus(t, svc, "obs-1", PhasePaused)
+}
+
+// TestAThrottledCommandTheChatModelIssuedPausesTheRun — no chain
+// covers the command the chat model issued: its result is the run's
+// own, so a throttle holds the run up.
+func TestAThrottledCommandTheChatModelIssuedPausesTheRun(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	provider := &scriptedProvider{responses: []llm.Response{
+		{Message: toolCallMsg("c1", "ntm_review", map[string]any{})},
+	}}
+	svc, op := testService(t, dir, Config{Provider: provider})
+	op.steps = []fakeStep{
+		{outcome: messages.Outcome{
+			Status:  messages.OutcomeFailed,
+			Summary: "the commit failed",
+		}},
+		{outcome: messages.Outcome{
+			Status:  messages.OutcomeFailed,
+			Summary: "429 Too Many Requests",
+		}},
+	}
+
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+		Commands: []CommandInfo{{Name: "gtw"}, {Name: "review"}},
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitForStatus(t, svc, "obs-1", PhasePaused)
+
+	st := svc.Snapshot("obs-1")
+	if !strings.Contains(st.PauseReason, "429") {
+		t.Errorf("the pause reason is %q, want it to name the rate limit", st.PauseReason)
+	}
+}
+
+// TestAThrottledInstructionPausesTheRun — no chain covers the
+// free-form instruction: its result is the run's own, so a throttle
+// holds the run up.
+func TestAThrottledInstructionPausesTheRun(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", `title: Do the one thing.
+instruct: true
+jobs:
+  main:
+    steps:
+      - id: commit
+        message: "/gtw commit"
+`)
+
+	provider := &scriptedProvider{responses: []llm.Response{
+		{Message: toolCallMsg("c1", toolInstruct, map[string]any{"text": "review the changes"})},
+	}}
+	svc, op := testService(t, dir, Config{Provider: provider})
+	op.steps = []fakeStep{
+		{outcome: messages.Outcome{
+			Status:  messages.OutcomeFailed,
+			Summary: "the commit failed",
+		}},
+		{outcome: messages.Outcome{
+			Status:  messages.OutcomeFailed,
+			Summary: "429 Too Many Requests",
+		}},
+	}
+
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitForStatus(t, svc, "obs-1", PhasePaused)
+
+	st := svc.Snapshot("obs-1")
+	if !strings.Contains(st.PauseReason, "429") {
+		t.Errorf("the pause reason is %q, want it to name the rate limit", st.PauseReason)
+	}
 }
 
 // TestACommandThatWorkedIsNotThrottled — a command that succeeded is

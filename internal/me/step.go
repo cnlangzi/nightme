@@ -136,24 +136,32 @@ func (s *Service) chainAgents(r *run, step wfe.Step) []attempt {
 // again. An attempt that reported no count leaves nothing behind —
 // the next agent runs the whole thing again.
 //
-// Every attempt is recorded against the step. The error is why the
-// run cannot go on: the run was cancelled.
+// One execution of the step is one run of it: it costs one chance of
+// the step's budget and it is recorded once, with the command of the
+// attempt the chain ended on. An attempt the chain swallowed leaves
+// nothing behind but a line in the daemon's log — its error is not the
+// step's error.
 func (s *Service) runAttempts(ctx context.Context, r *run, job string, step wfe.Step, base string) (stepVerdict, stepResult, error) {
 	agents := s.chainAgents(r, step)
 	if len(agents) == 0 {
 		// The step names no agent: its message runs once, unchanged.
-		return s.runAttempt(ctx, r, job, step, attempt{command: base, recorded: base})
+		agents = []attempt{{}}
 	}
 	var (
 		verdict stepVerdict
 		res     stepResult
+		// last is the attempt the chain ended on: its command is the
+		// command the chain records.
+		last attempt
 	)
 	// unfinished is what the attempt before left behind: the number of
 	// items it did not finish. Zero means there is nothing to hand
 	// over.
 	unfinished := 0
-	for _, a := range agents {
-		if a.mode == wfe.AgentModeArgs {
+	for i := range agents {
+		a := agents[i]
+		switch a.mode {
+		case wfe.AgentModeArgs:
 			a.command = base + " -a " + a.agent
 			if unfinished > 0 {
 				// The work that is left is handed over: the next
@@ -161,12 +169,18 @@ func (s *Service) runAttempts(ctx context.Context, r *run, job string, step wfe.
 				a.command = base + " --continue -a " + a.agent
 			}
 			a.recorded = a.command
-		} else {
+		case wfe.AgentModeUse:
 			// The use mode sends the message as it is: there is no
 			// place to put the handover in it.
 			a.command = base
 			a.recorded = base + " [agent: " + a.agent + "]"
+		default:
+			// The step names no agent: its message runs once,
+			// unchanged.
+			a.command = base
+			a.recorded = base
 		}
+		last = a
 		v, raw, err := s.runAttempt(ctx, r, job, step, a)
 		if err != nil {
 			return stepVerdict{}, stepResult{}, err
@@ -177,10 +191,32 @@ func (s *Service) runAttempts(ctx context.Context, r *run, job string, step wfe.
 			return verdict, res, nil
 		}
 		if !fallsThrough(v.Outcome) {
-			return verdict, res, nil
+			break
+		}
+		if i+1 < len(agents) {
+			// The attempt broke and another agent is left: the chain
+			// swallows the attempt and tries the next one. The
+			// attempt's error is not the step's error, so it leaves
+			// no trace in the run but this line. The summary says why
+			// it broke: the attempt that could not run at all carries
+			// its reason there too.
+			s.logger.Info("me: an attempt of the chain broke; the chain tries the next agent",
+				"run_id", r.id,
+				"step_id", step.ID,
+				"command", a.command,
+				"agent", a.agent,
+				"next_agent", agents[i+1].agent,
+				"status", v.Outcome.Status,
+				"summary", v.Outcome.Summary)
 		}
 		unfinished = unfinishedCount(v.Outcome)
 	}
+	r.record(wfe.ActionKindRun, last.recorded, step.ID, verdict.Outcome)
+	s.refreshRun(r)
+	// The chain's result decides whether the run pauses: an attempt the
+	// chain swallowed does not hold the run up, and an attempt that is
+	// still in flight has no verdict to act on yet.
+	s.pauseForRateLimit(ctx, r, res)
 	return verdict, res, nil
 }
 
@@ -202,18 +238,21 @@ func unfinishedCount(out wfe.Outcome) int {
 //
 // The chat's agent is switched for the attempt when the attempt names
 // one, and the chat's own agent is put back when the attempt returns.
+//
+// The attempt records nothing: the chain records the run of the step,
+// and an attempt the chain swallows leaves no trace in the run.
 func (s *Service) runAttempt(ctx context.Context, r *run, job string, step wfe.Step, a attempt) (stepVerdict, stepResult, error) {
 	if a.mode != "" && a.agent == "" {
 		// The name of the agent resolved to nothing: the attempt has
 		// no agent to work with, so it breaks.
 		err := fmt.Errorf("the step %q names an agent that resolved to nothing", step.ID)
-		return s.breakAttempt(r, step, a, err), stepResult{}, nil
+		return breakAttempt(err), stepResult{}, nil
 	}
 	restore, err := s.switchAgent(r, step, a)
 	if err != nil {
 		// The chat cannot work with that agent: the attempt breaks and
 		// the chain moves on.
-		return s.breakAttempt(r, step, a, err), stepResult{}, nil
+		return breakAttempt(err), stepResult{}, nil
 	}
 	if restore != nil {
 		defer restore()
@@ -226,10 +265,9 @@ func (s *Service) runAttempt(ctx context.Context, r *run, job string, step wfe.S
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return stepVerdict{}, stepResult{}, err
 		}
-		out := failedOutcome(err.Error(), nil)
-		r.record(wfe.ActionKindRun, a.recorded, step.ID, out)
-		s.refreshRun(r)
-		return stepVerdict{Outcome: out, Settled: true, Failure: err}, stepResult{}, nil
+		// The command could not run at all: the attempt breaks and the
+		// chain moves on.
+		return breakAttempt(err), stepResult{}, nil
 	}
 	if res.Status == statusAbandoned || r.stepSkipped(step.ID) {
 		// The step was passed over while its command was in flight: the
@@ -250,19 +288,15 @@ func (s *Service) runAttempt(ctx context.Context, r *run, job string, step wfe.S
 		Summary: res.Summary,
 		Data:    res.Data,
 	}
-	r.record(wfe.ActionKindRun, a.recorded, step.ID, out)
 	return stepVerdict{Outcome: out, Settled: true, Transcript: res.Transcript}, res, nil
 }
 
-// breakAttempt records an attempt that could not run and returns its
-// verdict.
+// breakAttempt returns the verdict of an attempt that could not run.
 //
 // The attempt breaks: the chain moves on to the next agent, and the
 // last attempt that broke is the step's outcome.
-func (s *Service) breakAttempt(r *run, step wfe.Step, a attempt, err error) stepVerdict {
+func breakAttempt(err error) stepVerdict {
 	out := failedOutcome(err.Error(), nil)
-	r.record(wfe.ActionKindRun, a.recorded, step.ID, out)
-	s.refreshRun(r)
 	return stepVerdict{Outcome: out, Settled: true, Failure: err}
 }
 

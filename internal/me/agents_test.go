@@ -1,8 +1,10 @@
 package me
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
@@ -43,6 +45,16 @@ func emptyStep(summary string) fakeStep {
 // unfinishedStep is a command that broke with work left behind: the
 // outcome says how much of it there is.
 func unfinishedStep(summary string, unfinished int) fakeStep {
+	return fakeStep{outcome: messages.Outcome{
+		Status:  messages.OutcomeIncomplete,
+		Summary: summary,
+		Data:    map[string]string{wfe.OutcomeKeyUnfinished: strconv.Itoa(unfinished)},
+	}}
+}
+
+// throttledStep is a command that broke because the agent was
+// throttled: the outcome says 429 and leaves work behind.
+func throttledStep(summary string, unfinished int) fakeStep {
 	return fakeStep{outcome: messages.Outcome{
 		Status:  messages.OutcomeIncomplete,
 		Summary: summary,
@@ -412,9 +424,9 @@ jobs:
 	}
 }
 
-// TestStepChain_TheHistoryHoldsEveryAttempt — every attempt is a run
-// of the step, and the use mode names the agent it ran with.
-func TestStepChain_TheHistoryHoldsEveryAttempt(t *testing.T) {
+// TestStepChain_TheHistoryHoldsOneRunOfTheChain — the chain is one
+// run of the step: the attempt the chain swallowed leaves no trace.
+func TestStepChain_TheHistoryHoldsOneRunOfTheChain(t *testing.T) {
 	sw := &fakeSwitcher{current: "claude"}
 	svc, op := chainService(t, `title: chain
 jobs:
@@ -435,19 +447,15 @@ jobs:
 	})
 	waitRun(t, svc, "obs-1")
 
-	var runs []wfe.ActionRecord
-	for _, rec := range runHistory(r) {
-		if rec.Kind == wfe.ActionKindRun && rec.StepID == "review" {
-			runs = append(runs, rec)
-		}
+	runs := stepRuns(r, "review")
+	if len(runs) != 1 {
+		t.Fatalf("the history holds %d runs of the step, want 1: %+v", len(runs), runs)
 	}
-	if len(runs) != 2 {
-		t.Fatalf("the history holds %d runs of the step, want 2: %+v", len(runs), runs)
+	if !strings.Contains(runs[0].Command, "[agent: ") {
+		t.Errorf("the run %q does not name the agent it ran with", runs[0].Command)
 	}
-	for _, rec := range runs {
-		if !strings.Contains(rec.Command, "[agent: ") {
-			t.Errorf("the run %q does not name the agent it ran with", rec.Command)
-		}
+	if runs[0].Command != "/review [agent: claude]" {
+		t.Errorf("the history records %q, want the command of the attempt the chain ended on", runs[0].Command)
 	}
 }
 
@@ -613,9 +621,10 @@ jobs:
 	}
 }
 
-// TestStepChain_EveryAttemptCostsAChance — an attempt is real work: it
-// costs a chance of the step's budget.
-func TestStepChain_EveryAttemptCostsAChance(t *testing.T) {
+// TestStepChain_TheChainCostsOneChance — the chain is one execution of
+// the step: it costs one chance of the step's budget, however many
+// agents it tried.
+func TestStepChain_TheChainCostsOneChance(t *testing.T) {
 	svc, op := chainService(t, `title: chain
 jobs:
   main:
@@ -635,8 +644,8 @@ jobs:
 	})
 	waitRun(t, svc, "obs-1")
 
-	if used := stepUsage(r, "review"); used != 2 {
-		t.Errorf("the step spent %d chances, want 2", used)
+	if used := stepUsage(r, "review"); used != 1 {
+		t.Errorf("the step spent %d chances, want 1", used)
 	}
 }
 
@@ -751,6 +760,17 @@ func stepUsage(r *run, stepID string) int {
 	return r.policy.StepUsage(r.stepIndex(stepID))
 }
 
+// stepRuns returns the runs the history holds for a step.
+func stepRuns(r *run, stepID string) []wfe.ActionRecord {
+	var runs []wfe.ActionRecord
+	for _, rec := range runHistory(r) {
+		if rec.Kind == wfe.ActionKindRun && rec.StepID == stepID {
+			runs = append(runs, rec)
+		}
+	}
+	return runs
+}
+
 // ── the handover ───────────────────────────────────────────────────
 
 // TestStepChain_TheHandoverCarriesTheUnfinishedWork — an attempt that
@@ -788,18 +808,14 @@ jobs:
 		}
 	}
 
-	// The history keeps the command that ran.
-	var runs []wfe.ActionRecord
-	for _, rec := range runHistory(r) {
-		if rec.Kind == wfe.ActionKindRun && rec.StepID == "review" {
-			runs = append(runs, rec)
-		}
+	// The history keeps the command that ran: the chain is one run of
+	// the step.
+	runs := stepRuns(r, "review")
+	if len(runs) != 1 {
+		t.Fatalf("the history holds %d runs of the step, want 1: %+v", len(runs), runs)
 	}
-	if len(runs) != 2 {
-		t.Fatalf("the history holds %d runs of the step, want 2: %+v", len(runs), runs)
-	}
-	if runs[1].Command != "/review --continue -a codex" {
-		t.Errorf("the history records %q, want the handover command", runs[1].Command)
+	if runs[0].Command != "/review --continue -a codex" {
+		t.Errorf("the history records %q, want the handover command", runs[0].Command)
 	}
 
 	// The step's outcome is the outcome of the attempt that did not
@@ -981,5 +997,244 @@ jobs:
 			t.Errorf("the chat got %v, want %v", sent, want)
 			break
 		}
+	}
+}
+
+// ── the chain swallows a broken attempt ────────────────────────────
+
+// TestStepChain_ABrokenAttemptDoesNotPauseTheRun — the chain absorbs
+// the attempt that broke: the run goes on with the next agent instead
+// of waiting for the operator.
+func TestStepChain_ABrokenAttemptDoesNotPauseTheRun(t *testing.T) {
+	svc, op := chainService(t, `title: chain
+jobs:
+  main:
+    steps:
+      - id: review
+        message: "/review"
+        agents:
+          - mode: args
+            names: [omp, codex]
+`, nil)
+	op.steps = []fakeStep{
+		throttledStep("429 rpm exhausted (type=quota_exceeded_error param=8)", 1),
+		okStep("codex did it"),
+	}
+
+	g := newGate()
+	op.gate = g
+	r := startRun(t, svc, g, Request{
+		Name: "chain", ChatID: "obs-1", Cwd: "/tmp/work",
+	})
+	waitRun(t, svc, "obs-1")
+
+	want := []string{"/review -a omp", "/review --continue -a codex"}
+	sent := op.Sent()
+	if len(sent) != len(want) {
+		t.Fatalf("the chat got %v, want %v", sent, want)
+	}
+	for i, cmd := range want {
+		if sent[i] != cmd {
+			t.Errorf("the chat got %v, want %v", sent, want)
+			break
+		}
+	}
+
+	if st := svc.Snapshot("obs-1"); st.Paused {
+		t.Errorf("the run paused: %s", st.PauseReason)
+	}
+	for _, text := range op.Sent() {
+		if strings.HasPrefix(text, pauseMark) {
+			t.Errorf("the chat got the pause announcement %q", text)
+		}
+	}
+
+	out, ok := stepOutcome(r, "review")
+	if !ok {
+		t.Fatal("the review step has no outcome")
+	}
+	if out.Status != wfe.OutcomeOK {
+		t.Errorf("the review step ended as %q, want the outcome of the second attempt", out.Status)
+	}
+}
+
+// TestStepChain_EveryAttemptThrottledPausesTheRun — the chain is
+// exhausted and its result is a throttle: the run waits for the
+// operator.
+func TestStepChain_EveryAttemptThrottledPausesTheRun(t *testing.T) {
+	svc, op := chainService(t, `title: chain
+jobs:
+  main:
+    steps:
+      - id: review
+        message: "/review"
+        agents:
+          - mode: args
+            names: [omp, codex]
+`, nil)
+	op.steps = []fakeStep{
+		throttledStep("429 rpm exhausted (type=quota_exceeded_error param=8)", 1),
+		throttledStep("429 rpm exhausted (type=quota_exceeded_error param=8)", 1),
+	}
+
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "chain", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitForStatus(t, svc, "obs-1", PhasePaused)
+
+	st := svc.Snapshot("obs-1")
+	if !strings.Contains(st.PauseReason, "429") {
+		t.Errorf("the pause reason is %q, want it to name the rate limit", st.PauseReason)
+	}
+	var notice string
+	for _, text := range op.Sent() {
+		if strings.HasPrefix(text, pauseMark) {
+			notice = text
+			break
+		}
+	}
+	if notice == "" {
+		t.Fatalf("the chat got no pause announcement: %v", op.Sent())
+	}
+	if !strings.Contains(notice, "/me resume") || !strings.Contains(notice, "/me next") {
+		t.Errorf("the pause announcement %q does not name both ways on", notice)
+	}
+}
+
+// TestStepChain_TheSwallowedAttemptLeavesNoTrace — the attempt the
+// chain absorbed is not in the run's record: the operator reads the
+// result of the chain, not the failures it swallowed.
+func TestStepChain_TheSwallowedAttemptLeavesNoTrace(t *testing.T) {
+	svc, op := chainService(t, `title: chain
+jobs:
+  main:
+    steps:
+      - id: review
+        message: "/review"
+        agents:
+          - mode: args
+            names: [omp, codex]
+`, nil)
+	op.steps = []fakeStep{brokenStep("omp broke"), okStep("codex did it")}
+
+	g := newGate()
+	op.gate = g
+	r := startRun(t, svc, g, Request{
+		Name: "chain", ChatID: "obs-1", Cwd: "/tmp/work",
+	})
+	waitRun(t, svc, "obs-1")
+
+	runs := stepRuns(r, "review")
+	if len(runs) != 1 {
+		t.Fatalf("the history holds %d runs of the step, want 1: %+v", len(runs), runs)
+	}
+	if runs[0].Command != "/review -a codex" {
+		t.Errorf("the history records %q, want the command of the attempt the chain ended on", runs[0].Command)
+	}
+	if lines := errorLines(runHistory(r)); len(lines) != 0 {
+		t.Errorf("the record lists the errors %v, want none", lines)
+	}
+	out, ok := stepOutcome(r, "review")
+	if !ok {
+		t.Fatal("the review step has no outcome")
+	}
+	if out.Status != wfe.OutcomeOK {
+		t.Errorf("the review step ended as %q, want the outcome of the second attempt", out.Status)
+	}
+}
+
+// TestStepChain_ARepairWhileTheChainIsInFlightCountsAgainstTheStep —
+// the chain's attempt waits for an answer: the run holds no record of
+// the step yet, and a repair counts against the step the run is on.
+func TestStepChain_ARepairWhileTheChainIsInFlightCountsAgainstTheStep(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "chain", `title: chain
+jobs:
+  main:
+    steps:
+      - id: review
+        message: "/review"
+        agents:
+          - mode: args
+            names: [omp, codex]
+`)
+
+	provider := &scriptedProvider{responses: []llm.Response{
+		{Message: toolCallMsg("c1", "ntm_push", map[string]any{})},
+		{Message: toolCallMsg("c2", toolFinish, map[string]any{"status": "failed", "summary": "stopped"})},
+	}}
+	svc, op := testService(t, dir, Config{Provider: provider})
+	op.steps = []fakeStep{
+		brokenStep("omp broke"),
+		{open: true, choices: []messages.Choice{{Title: "which one?"}}},
+	}
+	// The chat cannot take the repair: the repair is recorded all the
+	// same, against the step the run is on.
+	op.failCommand = "/push"
+
+	g := newGate()
+	op.gate = g
+	r := startRun(t, svc, g, Request{
+		Name: "chain", ChatID: "obs-1", Cwd: "/tmp/work",
+		Commands: []CommandInfo{{Name: "push"}},
+	})
+	waitRun(t, svc, "obs-1")
+
+	var repairs []wfe.ActionRecord
+	for _, rec := range runHistory(r) {
+		if rec.Kind == wfe.ActionKindCommand {
+			repairs = append(repairs, rec)
+		}
+	}
+	if len(repairs) != 1 {
+		t.Fatalf("the history holds %d repairs, want 1: %+v", len(repairs), repairs)
+	}
+	if repairs[0].StepID != "review" {
+		t.Errorf("the repair is recorded against %q, want the step the run is on", repairs[0].StepID)
+	}
+	if used := stepUsage(r, "review"); used != 1 {
+		t.Errorf("the step spent %d chances, want 1", used)
+	}
+}
+
+// TestStepChain_TheSwallowedAttemptIsLogged — the attempt the chain
+// absorbed leaves a trace in the daemon's log: the step it belongs to
+// and the command that broke.
+func TestStepChain_TheSwallowedAttemptIsLogged(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "chain", `title: chain
+jobs:
+  main:
+    steps:
+      - id: swallowed
+        message: "/review"
+        agents:
+          - mode: args
+            names: [omp, codex]
+`)
+
+	var buf bytes.Buffer
+	svc, op := testService(t, dir, Config{
+		Provider: &scriptedProvider{err: errors.New("the chat model must not be called")},
+		Decider:  &scriptedDecider{err: errors.New("the decision model must not be called")},
+		Logger:   slog.New(slog.NewTextHandler(&buf, nil)),
+	})
+	op.steps = []fakeStep{brokenStep("omp broke"), okStep("codex did it")}
+
+	g := newGate()
+	op.gate = g
+	startRun(t, svc, g, Request{
+		Name: "chain", ChatID: "obs-1", Cwd: "/tmp/work",
+	})
+	waitRun(t, svc, "obs-1")
+
+	out := buf.String()
+	if !strings.Contains(out, "swallowed") {
+		t.Errorf("the log does not name the step:\n%s", out)
+	}
+	if !strings.Contains(out, "/review -a omp") {
+		t.Errorf("the log does not name the command that broke:\n%s", out)
 	}
 }

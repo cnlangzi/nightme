@@ -299,12 +299,17 @@ jobs:
       # which Windows refuses to do (the file is locked by the
       # process running it), and the release download is the same
       # on every OS.
+      #
+      # The run is narrowed to the live tests: the data directory
+      # below is an environment override, and it would move the
+      # workflows of every other test of the package away from the
+      # directory their own config points at.
       - name: Test (live update path)
         if: matrix.os == 'ubuntu-latest'
         shell: bash
         env:
           NIGHTME_PATHS_DATA_DIR: ${{ runner.temp }}/nightme-live-update
-        run: go test -race -tags liveupdate -count=1 ./cmd/nightme/
+        run: go test -race -tags liveupdate -count=1 -run 'TestPrompt_LiveUpdate' ./cmd/nightme/
 
       # macOS-only race-stress sweep on the codex bridge.
       # The stderr-drain / cmd.Wait pipe race (fixed in

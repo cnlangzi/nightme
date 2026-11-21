@@ -9,8 +9,8 @@
 // Why this exists: replaces the three single-observer callback fields
 // on ChatSession (eventHandler / onMessageState / onPromptEnd), which
 // were last-wins, single-subscriber, and had distinct parameter
-// shapes per event kind. The invariants are listed in this package
-// doc; docs/SPEC.md §1.1a says where the buses live in the runtime.
+// shapes per event kind. Where the buses live in the runtime:
+// docs/SPEC.md §1.1a.
 //
 // Semantics:
 //

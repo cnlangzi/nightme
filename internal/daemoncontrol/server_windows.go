@@ -321,7 +321,12 @@ func (s *Server) handle(conn *pipeInstance) {
 			// runtime's own "daemon stopping" line names the cause
 			// (a context cancellation); only this line says the
 			// control socket asked for it.
-			s.log().Info("daemon stop requested", "source", "control socket")
+			//
+			// Warn, not Info: the daemon's log level defaults to
+			// Warn, so an Info record would leave the attribution
+			// out of nightme.log unless the user asked for verbose
+			// logging.
+			s.log().Warn("daemon stop requested", "source", "control socket")
 			// Mirror server_unix.go's stop handler. See
 			// stop_fastpath.go for the shared fast-path rationale
 			// and stop_fastpath_test.go for the cross-platform

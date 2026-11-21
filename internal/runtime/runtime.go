@@ -615,7 +615,14 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	// daemons on one machine apart — the released build and a local
 	// `go run` write to the same lines, and the operator has to
 	// infer which one is running from the wording.
-	logger.Info("daemon running",
+	//
+	// Warn, not Info: the log level defaults to Warn (see
+	// internal/logging), so an Info record reaches nightme.log only
+	// for the users who opted into verbose logging. These records
+	// are one per daemon lifetime and they are the answer to "which
+	// daemon is this and why did it stop" — they have to be there
+	// without a configuration change.
+	logger.Warn("daemon running",
 		"channels", len(startedChannels),
 		"configured", len(chs),
 		"primary", cfg.Primary,
@@ -632,13 +639,16 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	// them into one line would throw the attribution away.
 	select {
 	case <-ctx.Done():
-		logger.Info("daemon stopping", "reason", "context cancelled", "err", ctx.Err())
+		logger.Warn("daemon stopping", "reason", "context cancelled", "err", ctx.Err())
 	case sig, ok := <-sigCh:
-		if ok && sig != nil {
+		switch {
+		case !ok:
+			logger.Warn("daemon stopping", "reason", "signal channel closed")
+		case sig == nil:
+			logger.Warn("daemon stopping", "reason", "nil signal received")
+		default:
 			fmt.Fprintf(out, "[nightme] received %s\n", sig)
-			logger.Info("daemon stopping", "reason", "signal", "signal", sig.String())
-		} else {
-			logger.Info("daemon stopping", "reason", "signal channel closed")
+			logger.Warn("daemon stopping", "reason", "signal", "signal", sig.String())
 		}
 	}
 
@@ -661,12 +671,13 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	// The shutdown is only complete once every channel stopped, every
 	// agent child is gone and the state is persisted. The record says
 	// so — a daemon that was killed outright never reaches this line,
-	// and the last line in the log is then the clue.
+	// and the last line in the log is then the clue. Warn, for the
+	// same reason as the records above.
 	duration := time.Since(shutdownStart)
 	if shutdownErr != nil {
 		logger.Error("daemon stopped", "duration", duration.String(), "err", shutdownErr)
 	} else {
-		logger.Info("daemon stopped", "duration", duration.String())
+		logger.Warn("daemon stopped", "duration", duration.String())
 	}
 
 	return shutdownErr

@@ -36,13 +36,18 @@ type logRecord struct {
 
 // logCapture collects the records the daemon logs so a test can
 // assert on the level and the attributes rather than on the
-// rendered text.
+// rendered text. minLevel is the threshold the capture filters at —
+// the zero value is Info, and slog.LevelWarn reproduces the daemon's
+// default log level.
 type logCapture struct {
-	mu      sync.Mutex
-	records []logRecord
+	minLevel slog.Level
+	mu       sync.Mutex
+	records  []logRecord
 }
 
-func (c *logCapture) Enabled(context.Context, slog.Level) bool { return true }
+func (c *logCapture) Enabled(_ context.Context, level slog.Level) bool {
+	return level >= c.minLevel
+}
 
 func (c *logCapture) Handle(_ context.Context, r slog.Record) error {
 	rec := logRecord{level: r.Level, msg: r.Message, attrs: map[string]string{}}
@@ -96,7 +101,7 @@ func (h *daemonHarness) stopWithSignal(t *testing.T, sigCh chan os.Signal, sig o
 
 // startDaemon boots the daemon with the given channels and waits for
 // it to become ready.
-func startDaemon(t *testing.T, chs []channel.Channel) (*daemonHarness, chan os.Signal, context.CancelFunc) {
+func startDaemon(t *testing.T, chs []channel.Channel, logs *logCapture) (*daemonHarness, chan os.Signal, context.CancelFunc) {
 	t.Helper()
 	clearAllMgrs(t)
 
@@ -115,7 +120,6 @@ func startDaemon(t *testing.T, chs []channel.Channel) (*daemonHarness, chan os.S
 		OnReady:           func() { close(ready) },
 	}
 
-	logs := &logCapture{}
 	out := &bytes.Buffer{}
 	sigCh := make(chan os.Signal, 1)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -139,7 +143,7 @@ func startDaemon(t *testing.T, chs []channel.Channel) (*daemonHarness, chan os.S
 // the build and the data dir, the operator can only guess which one
 // is running.
 func TestRunDaemon_LogsItsIdentity(t *testing.T) {
-	h, sigCh, _ := startDaemon(t, nil)
+	h, sigCh, _ := startDaemon(t, nil, &logCapture{})
 	if err := h.stopWithSignal(t, sigCh, os.Interrupt); err != nil {
 		t.Fatalf("daemon returned %v, want nil after a clean shutdown", err)
 	}
@@ -163,7 +167,7 @@ func TestRunDaemon_LogsItsIdentity(t *testing.T) {
 // the daemon's stdout line is invisible once it is detached, so the
 // signal name has to reach the log too.
 func TestRunDaemon_LogsTheSignalThatStoppedIt(t *testing.T) {
-	h, sigCh, _ := startDaemon(t, nil)
+	h, sigCh, _ := startDaemon(t, nil, &logCapture{})
 	if err := h.stopWithSignal(t, sigCh, os.Interrupt); err != nil {
 		t.Fatalf("daemon returned %v, want nil after a clean shutdown", err)
 	}
@@ -190,7 +194,7 @@ func TestRunDaemon_LogsTheSignalThatStoppedIt(t *testing.T) {
 // stop` does, and the reason the record names the cause — the
 // daemoncontrol server logs the request separately.
 func TestRunDaemon_LogsTheContextCancellation(t *testing.T) {
-	h, _, cancel := startDaemon(t, nil)
+	h, _, cancel := startDaemon(t, nil, &logCapture{})
 	cancel()
 
 	select {
@@ -218,7 +222,7 @@ func TestRunDaemon_LogsTheContextCancellation(t *testing.T) {
 // log has to say that the shutdown finished and how long it took, so
 // a missing line can be read as "it never got that far".
 func TestRunDaemon_LogsTheShutdownOutcome(t *testing.T) {
-	h, sigCh, _ := startDaemon(t, nil)
+	h, sigCh, _ := startDaemon(t, nil, &logCapture{})
 	if err := h.stopWithSignal(t, sigCh, os.Interrupt); err != nil {
 		t.Fatalf("daemon returned %v, want nil after a clean shutdown", err)
 	}
@@ -227,8 +231,8 @@ func TestRunDaemon_LogsTheShutdownOutcome(t *testing.T) {
 	if !ok {
 		t.Fatalf("no %q record in the log", "daemon stopped")
 	}
-	if rec.level != slog.LevelInfo {
-		t.Errorf("level = %v, want %v", rec.level, slog.LevelInfo)
+	if rec.level != slog.LevelWarn {
+		t.Errorf("level = %v, want %v", rec.level, slog.LevelWarn)
 	}
 	if rec.attrs["duration"] == "" {
 		t.Error("the stopped record carries no duration")
@@ -244,7 +248,7 @@ func TestRunDaemon_LogsAFailedShutdown(t *testing.T) {
 	ch := newStartFuncChannel("broken", nil)
 	ch.stop = func(context.Context) error { return errors.New("channel stop failed: boom") }
 
-	h, sigCh, _ := startDaemon(t, []channel.Channel{ch})
+	h, sigCh, _ := startDaemon(t, []channel.Channel{ch}, &logCapture{})
 	if err := h.stopWithSignal(t, sigCh, os.Interrupt); err == nil {
 		t.Fatal("daemon returned nil, want the channel stop failure")
 	}
@@ -258,5 +262,56 @@ func TestRunDaemon_LogsAFailedShutdown(t *testing.T) {
 	}
 	if !strings.Contains(rec.attrs["err"], "channel stop failed") {
 		t.Errorf("err = %q, want the channel stop failure", rec.attrs["err"])
+	}
+}
+
+// TestRunDaemon_LifecycleRecordsSurviveTheDefaultLogLevel is the
+// regression test for the daemon's default log level: internal/logging
+// resolves an unset level to Warn, so a lifecycle record at Info
+// never reaches nightme.log unless the user asked for verbose
+// logging — and the answer to "why did the daemon stop" would be
+// missing exactly when it is needed.
+func TestRunDaemon_LifecycleRecordsSurviveTheDefaultLogLevel(t *testing.T) {
+	logs := &logCapture{minLevel: slog.LevelWarn}
+	h, sigCh, _ := startDaemon(t, nil, logs)
+	if err := h.stopWithSignal(t, sigCh, os.Interrupt); err != nil {
+		t.Fatalf("daemon returned %v, want nil after a clean shutdown", err)
+	}
+
+	for _, msg := range []string{"daemon running", "daemon stopping", "daemon stopped"} {
+		rec, ok := logs.find(msg)
+		if !ok {
+			t.Errorf("no %q record at the default log level", msg)
+			continue
+		}
+		if rec.level < slog.LevelWarn {
+			t.Errorf("%q is at level %v, want Warn or above", msg, rec.level)
+		}
+	}
+}
+
+// TestRunDaemon_LogsTheClosedSignalChannel covers the degenerate
+// stop: the signal channel is closed without a signal. The record has
+// to name that, not claim a signal arrived.
+func TestRunDaemon_LogsTheClosedSignalChannel(t *testing.T) {
+	logs := &logCapture{}
+	h, sigCh, _ := startDaemon(t, nil, logs)
+	close(sigCh)
+
+	select {
+	case err := <-h.done:
+		if err != nil {
+			t.Fatalf("daemon returned %v, want nil after a clean shutdown", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("daemon did not shut down within 30s")
+	}
+
+	rec, ok := logs.find("daemon stopping")
+	if !ok {
+		t.Fatalf("no %q record in the log", "daemon stopping")
+	}
+	if rec.attrs["reason"] != "signal channel closed" {
+		t.Errorf("reason = %q, want %q", rec.attrs["reason"], "signal channel closed")
 	}
 }

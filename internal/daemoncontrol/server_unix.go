@@ -122,7 +122,12 @@ func (s *Server) handle(conn *net.UnixConn) {
 			// runtime's own "daemon stopping" line names the cause
 			// (a context cancellation); only this line says the
 			// control socket asked for it.
-			s.log().Info("daemon stop requested", "source", "control socket")
+			//
+			// Warn, not Info: the daemon's log level defaults to
+			// Warn, so an Info record would leave the attribution
+			// out of nightme.log unless the user asked for verbose
+			// logging.
+			s.log().Warn("daemon stop requested", "source", "control socket")
 			// CAS "starting" → "stopping". If the CAS succeeds we
 			// are still in the window where SetReady() has NOT
 			// fired — cancel() would be unconsumed by runDaemon's

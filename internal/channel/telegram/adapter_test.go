@@ -327,6 +327,51 @@ func TestSend_OrphanMessageIsAddressedByItsOwnId(t *testing.T) {
 	}
 }
 
+// TestSend_OrphanTaskListOpensACard — a checklist that names no card
+// opens a card of its own: the checklist has content, and a turn
+// without a card has nowhere to put it.
+func TestSend_OrphanTaskListOpensACard(t *testing.T) {
+	a, api := newTestAdapter(t)
+	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 0, UserMessageID: "77"})
+
+	id, err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "tg_100",
+		Kind:   messages.OutTaskUpdate,
+		TaskList: &agent.AgentTaskListEvent{
+			Items: []agent.AgentTaskItem{{Subject: "fix"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("OutTaskUpdate Send: %v", err)
+	}
+	if id == "" {
+		t.Fatal("the chat named no message for the card it opened")
+	}
+	if sends := len(findCalls(api.snapshotCalls(), "sendRichMessage")); sends != 1 {
+		t.Fatalf("sendRichMessage calls = %d, want 1", sends)
+	}
+
+	// The checklist reaches the card.
+	deadline := time.Now().Add(2 * time.Second)
+	var blocks []map[string]any
+	for time.Now().Before(deadline) {
+		if b, ok := lastEditBlocks(api.snapshotCalls()); ok {
+			blocks = b
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	var found bool
+	for _, b := range blocks {
+		if b["type"] == "heading" && b["text"] == "📋 Tasks" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the card carries no checklist: %+v", blocks)
+	}
+}
+
 // TestE2E_RichPathFailureSurfaces ensures that when sendRichMessage
 // errors (e.g., pre-10.1 client returning 400, or transient
 // network failure), the error surfaces to the caller rather than

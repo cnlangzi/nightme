@@ -385,6 +385,19 @@ func (a *Adapter) setRichTurnTaskList(
 ) string {
 	turn := a.richTurns.getOrCreate(chatID, topicID, userMessageID)
 	turn.mu.Lock()
+	if turn.messageID == 0 {
+		// The checklist is content: a turn that has no card yet gets
+		// one, the way a reply opens a card of its own. Without it
+		// the checklist would have nowhere to go — the flush has no
+		// message to patch.
+		if err := a.sendRichTurnColdCreate(turn); err != nil {
+			turn.mu.Unlock()
+			a.logger.Warn("telegram: rich turn cold-create failed",
+				"chat_id", chatID,
+				"err", err)
+			return ""
+		}
+	}
 	if len(items) == 0 {
 		turn.taskList = nil
 	} else {

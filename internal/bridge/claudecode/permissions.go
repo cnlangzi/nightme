@@ -48,8 +48,7 @@ package claudecode
 // With `--print` + held-open stdin (the production model), init
 // emits immediately and the SAME claude process handles every turn
 // of a chat via repeated SendBlocks. `--resume <id>` is only needed
-// on daemon restart / AS respawn (not on every in-chat turn). See
-// docs/bridge/claude.md §2.
+// on daemon restart / AS respawn (not on every in-chat turn). See docs/bridge/claude.md §2.
 //
 // We deliberately do NOT pass --model. Selection is the user's choice via
 // Claude Code's own config / --settings, and forcing a model here would

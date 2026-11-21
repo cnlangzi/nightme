@@ -965,8 +965,7 @@ func (cs *ChatSession) MarkWatcherHintEmitted() error {
 // State semantics:
 //   - ToolsModeShow — runtime forwards OutToolStart / OutToolEnd
 //     to the Channel. Feishu adapter merges each pair into a
-//     single thread reply via PATCH on the start message_id (see
-//     internal/channel/feishu/tool_thread_merge.go).
+//     single thread reply via PATCH on the start message_id (see internal/channel/feishu/tool_thread_merge.go).
 //   - ToolsModeHide — runtime drops OutToolStart and OutToolEnd
 //     at the EventHandler gate (after Translate + ReplyTo
 //     stamping, before ch.Send). Other OutboundKinds are

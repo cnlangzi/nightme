@@ -310,8 +310,7 @@ func (m *Manager) GetOrCreate(chatID, primaryAgent string) (*ChatSession, error)
 
 // constructChatSession builds a ChatSession for chatID via
 // chatstore.Bootstrap (create-or-load). AS are NOT attached here —
-// LookupSelectedAgentSession mounts from asPool / asFile on demand
-// (docs/CHATSTORE.md).
+// LookupSelectedAgentSession mounts from asPool / asFile on demand (docs/CHATSTORE.md).
 func (m *Manager) constructChatSession(chatID, primaryAgent string, spawner Spawner, csFile *chatstore.Store, asFile *registry.AgentSessionFile, emitter messages.Emitter, asPool *AgentSessionPool) (*ChatSession, error) {
 	var entry *registry.ChatSessionEntry
 	if csFile != nil {

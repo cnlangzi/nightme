@@ -145,8 +145,7 @@ type InboundMessage struct {
 	// with ChatSession.WatchMode() to drop non-mention group
 	// messages when WatchMode == WatchModeMention (default). The
 	// gate used to live in gateway.applyWatchModeGate; it moved
-	// to chatsession so the policy sits next to its state. See
-	// docs/SPEC.md §3.1.1.
+	// to chatsession so the policy sits next to its state. See docs/SPEC.md §3.1.1.
 	HasMention bool
 }
 

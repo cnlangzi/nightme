@@ -393,5 +393,4 @@ func writeYmlRaw(wt string, doc gtwYmlDoc) error {
 // fakeGit (defined in commitGitignore_test.go) that just
 // answers "yes, dirty" for status, and asserts the commit
 // args are well-formed. The end-to-end "real git" behavior
-// is covered by TestIntegration_CommitGitignore in
-// close_integration_test.go.
+// is covered by TestIntegration_CommitGitignore in close_integration_test.go.

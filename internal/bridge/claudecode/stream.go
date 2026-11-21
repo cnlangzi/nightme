@@ -202,8 +202,7 @@ type contentBlock struct {
 // pendingAsk with TextFallback=true, and starts an interceptor that
 // rewrites the emitted EventAgentPermission's ResponseCh. The (a)
 // tool_use path uses askHandler for the same wiring with
-// TextFallback=false. See claudecode.go::armPendingAsk and
-// docs/bridge/claude.md §5.5.
+// TextFallback=false. See claudecode.go::armPendingAsk and docs/bridge/claude.md §5.5.
 //
 // agentName + workspace are stamped onto the EventAgentReady payload by
 // translate (so channel-layer receipts can render the "Agent ·

@@ -1,8 +1,7 @@
 // Package wfe — workflow engine. Pure library: parses YAML,
 // validates the schema, computes the plan of a run and evaluates
 // ${{ }} expressions. Zero I/O, no clock, no secrets. Every
-// external capability is injected through the Runtime interface (see
-// runtime.go).
+// external capability is injected through the Runtime interface (see runtime.go).
 //
 // The package is published and importable from outside this
 // repository:

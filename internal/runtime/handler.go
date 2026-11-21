@@ -65,8 +65,7 @@ import (
 //
 // F-54: the handler takes a typed chatsession.AgentEventEnvelope
 // (delivered by cs.AgentEventBus). The legacy
-// `chatsession.EventHandler` callback signature is gone — see
-// docs/SPEC.md §1.2.
+// `chatsession.EventHandler` callback signature is gone — see docs/SPEC.md §1.2.
 func NewEventHandler(
 	em messages.Emitter,
 	cs *chatsession.ChatSession,

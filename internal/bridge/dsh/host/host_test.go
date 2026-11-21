@@ -144,8 +144,7 @@ func (m *mockDSH) url() string { return m.server.URL }
 // upgrade will send in its `ready` frame. Tests use this to
 // simulate a fresh dsh process assigning a new per-connection
 // clientId; the bridge's dispatch path must overwrite any
-// previously captured value (see
-// host_state_test.go::TestReadyFrame_ReconnectOverwritesClientID).
+// previously captured value (see host_state_test.go::TestReadyFrame_ReconnectOverwritesClientID).
 func (m *mockDSH) setReadyClientID(id string) {
 	m.readyClientID.Store(id)
 }

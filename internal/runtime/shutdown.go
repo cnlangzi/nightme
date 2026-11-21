@@ -49,8 +49,7 @@ import (
 const (
 	// channelStopBudget bounds how long the daemon waits for the
 	// channels to stop. It plus agentExitBudget has to stay inside
-	// the 15s window `nightme stop` waits for (lifecycleWait in
-	// cmd/nightme/daemon_lifecycle.go).
+	// the 15s window `nightme stop` waits for (lifecycleWait in cmd/nightme/daemon_lifecycle.go).
 	channelStopBudget = 5 * time.Second
 
 	// agentExitBudget bounds how long the daemon waits for the

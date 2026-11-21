@@ -49,8 +49,7 @@ const (
 	// CLI with --input-format stream-json --output-format stream-json
 	// and parses line-delimited JSON events from stdout. Provides
 	// structured events (text, tool_use, tool_result, AskUserQuestion,
-	// result) without requiring an ACP / SDK implementation. See
-	// docs/bridge/claude.md.
+	// result) without requiring an ACP / SDK implementation. See docs/bridge/claude.md.
 	ModeJSONIO
 )
 
@@ -344,8 +343,7 @@ type AgentDoneEvent struct {
 	// default" (process exit for one-shot bridges). Bridges that
 	// multiplex turns over a single process set Reason to
 	// "settled" (or another agreed value) so callers can tell a
-	// turn-end EventAgentDone from a process-end one. See
-	// docs/bridge/pi.md §3.
+	// turn-end EventAgentDone from a process-end one. See docs/bridge/pi.md §3.
 	Reason string
 
 	// Usage is the per-turn token usage observed on the same wire

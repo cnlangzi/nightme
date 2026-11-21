@@ -377,8 +377,7 @@ func TestSendPermission_FailingRPCKeepsPendingEntry(t *testing.T) {
 	// clientId empty; SendPermission must return the
 	// empty-clientId error and leave the pending entry alive.
 	// The reset lives in host/ (the dsh-level var moved there
-	// to close the dispatch-vs-handler install race — see
-	// host/host_state.go).
+	// to close the dispatch-vs-handler install race — see host/host_state.go).
 	host.ResetHostClientIDForTest()
 
 	if err := d.SendPermission(approvalAllowOnce); err == nil {

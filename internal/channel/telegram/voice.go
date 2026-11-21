@@ -37,8 +37,7 @@ type VoiceOutcome struct {
 // SetVoiceHandler; handleMessage invokes HandleVoice whenever a
 // message carries a Voice attachment. The handler is the seam
 // between the chat-platform's "voice bytes" world and the
-// runtime's "text prompt" world — see docs/channel/telegram.md
-// §21.
+// runtime's "text prompt" world — see docs/channel/telegram.md §21.
 type VoiceHandler struct {
 	manager stt.ProcessManager
 	logger  *slog.Logger

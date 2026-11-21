@@ -466,8 +466,7 @@ func TestSlash_E2E_NewReply_WithCwd_ReachesEchoChannel(t *testing.T) {
 
 	// Drive /new. selectedCwd is set; the pool is empty;
 	// newcmd's Handle returns "No agent session in current
-	// workspace to reset. Send a message to start one." (see
-	// internal/command/newcmd/cmd.go).
+	// workspace to reset. Send a message to start one." (see internal/command/newcmd/cmd.go).
 	newMsg := &messages.InboundMessage{
 		ChatID:    chatID,
 		UserID:    "ou_e2e_user",

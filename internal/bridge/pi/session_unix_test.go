@@ -8,8 +8,7 @@
 //
 // We inject the mock via PATH so that Agent.Detect() succeeds
 // without requiring `pi` to be installed on the test host.
-// This matches the pattern used in
-// internal/bridge/claudecode/claudecode_test.go.
+// This matches the pattern used in internal/bridge/claudecode/claudecode_test.go.
 
 package pi
 

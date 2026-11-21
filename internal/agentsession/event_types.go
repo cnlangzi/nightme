@@ -8,8 +8,7 @@
 //
 // File lives in the agentsession subpackage on purpose — the
 // structs depend only on `agent.MessageState` and the
-// internal `agent.PromptEndReason` / `Status` types defined here. F-54
-// §3.1.
+// internal `agent.PromptEndReason` / `Status` types defined here. F-54 §3.1.
 package agentsession
 
 import (

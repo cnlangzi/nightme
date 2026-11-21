@@ -84,8 +84,7 @@ func RepoRoot(ctx context.Context, dir string, git GitRunner) (string, error) {
 // GitHub Enterprise / GitLab). Local mode (runFixLocal) does not
 // call this — local worktrees have no remote issue.
 //
-// The provider abstraction lives in
-// internal/command/gtw/provider.go.
+// The provider abstraction lives in internal/command/gtw/provider.go.
 func RemoteOriginURL(ctx context.Context, dir string, git GitRunner) (string, error) {
 	out, _, err := git.Run(ctx, dir, "remote", "get-url", "origin")
 	if err != nil {

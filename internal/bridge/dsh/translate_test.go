@@ -5,8 +5,7 @@
 // `assistant/message.usage` payload into the existing
 // EventAgentResult.Usage / EventAgentDone.Usage fields — the
 // receipt footer's "Line 2" already renders from these via
-// gateway/outbound/translate.go → messages.OutboundMessage.Usage
-// → internal/statusbar/statusbar.go.
+// gateway/outbound/translate.go → messages.OutboundMessage.Usage → internal/statusbar/statusbar.go.
 //
 // No new fields, no new types. The path is:
 //

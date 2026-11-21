@@ -1518,8 +1518,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// Runtime gate (cmd/nightme/run.go::newEventHandler):
 		// when the chat has /think off, OutThinking is dropped
 		// before reaching this case. This case therefore assumes
-		// the chat wants thinking rendered — see docs/SPEC.md
-		// §3.1.2.
+		// the chat wants thinking rendered — see docs/SPEC.md §3.1.2.
 		return a.postThreadMarkdownReply(ctx, msg.ChatID, msg.ReplyTo, "💭 "+msg.Text, true)
 
 	case messages.OutMessageState:
@@ -5173,8 +5172,7 @@ func messageText(content string) string {
 // (Feishu threads) is intentionally treated identically to plain
 // groups — both share the same chat_id space (oc_xxx) and the
 // thread is a Feishu-side rendering detail handled by the adapter
-// via the Reply API path parameter. See docs/SPEC.md §3.1 and
-// docs/channel/feishu.md §13.11.
+// via the Reply API path parameter. See docs/SPEC.md §3.1 and docs/channel/feishu.md §13.11.
 
 func messageTime(value *string) time.Time {
 	if value != nil {

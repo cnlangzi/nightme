@@ -6,8 +6,7 @@ import (
 
 // computeHasMention decides whether an inbound message is addressed
 // to the bot. The adapter only stamps the flag; the actual gate lives
-// in chatsession, which combines it with the chat's WatchMode (see
-// internal/chatsession/watchmode.go).
+// in chatsession, which combines it with the chat's WatchMode (see internal/chatsession/watchmode.go).
 //
 // Rules, mirroring the feishu adapter's contract:
 //

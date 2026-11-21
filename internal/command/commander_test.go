@@ -338,8 +338,7 @@ func TestNewCommander_HandlerError_BecomesReply(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Framework-level ⏳ → ✅ reaction contract (F-XX, see
-// docs/feat/slash-command-reactions.md)
+// Framework-level ⏳ → ✅ reaction contract (F-XX, see docs/feat/slash-command-reactions.md)
 // ---------------------------------------------------------------------------
 //
 // These tests verify that commander.Dispatch automatically emits

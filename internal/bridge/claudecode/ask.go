@@ -165,8 +165,7 @@ func emitAskFromText(q Question, events chan<- agent.AgentEvent, logger *slog.Lo
 			Action:  formatQuestionAction(q),
 			Options: opts,
 			// ResponseCh is injected by the caller's
-			// armPendingAsk interceptor — see
-			// claudecode.go::armPendingAsk.
+			// armPendingAsk interceptor — see claudecode.go::armPendingAsk.
 		},
 	}
 	if logger != nil {

@@ -1337,8 +1337,7 @@ func TestFactory_Handle_BackRejectsTwoArgs(t *testing.T) {
 // newManagerForTest returns a *Manager whose only role is to
 // satisfy the Factory constructor's mgr parameter. Tests
 // driving Handle directly don't exercise the per-chat run lock
-// (chatID is empty), so the lock is a no-op as documented in
-// cmd.go.
+// (chatID is empty), so the lock is a no-op as documented in cmd.go.
 func newManagerForTest(t *testing.T) *Manager {
 	t.Helper()
 	return NewManager()

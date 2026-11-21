@@ -56,8 +56,7 @@ type Adapter struct {
 	// muMessageStates guards messageStates. The map stores the last
 	// rendered MessageState per userMsgID so duplicate emits of the
 	// same state can short-circuit without hitting Telegram's API.
-	// Mirrors feishu's messageStates dedup (see
-	// internal/channel/feishu/adapter.go).
+	// Mirrors feishu's messageStates dedup (see internal/channel/feishu/adapter.go).
 	muMessageStates sync.Mutex
 	messageStates   map[string]agent.MessageState
 
@@ -853,8 +852,7 @@ func (a *Adapter) ensurePlaceholder(ctx context.Context, chatID string, topicID,
 //     for any non-agent turn (slash command reply, error path,
 //     reaction-only click). Compose's
 //     "render header iff hasHeartbeat || entries==empty" rule
-//     is what hides the legacy frozen-banner bug — see
-//     §11.12.5.
+//     is what hides the legacy frozen-banner bug — see §11.12.5.
 //
 // What this removed: the lazy bootstrap attempt from Send()
 // (create placeholder on demand if handleMessage hadn't

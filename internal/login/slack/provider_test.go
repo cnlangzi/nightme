@@ -436,8 +436,7 @@ func TestAppManifest_IsValidYAML(t *testing.T) {
 }
 
 // The manifest is the contract for what the adapter is allowed to do
-// at runtime. These assertions pin the decisions in
-// docs/channel/slack.md §6.
+// at runtime. These assertions pin the decisions in docs/channel/slack.md §6.
 func TestAppManifest_CarriesRequiredScopesAndEvents(t *testing.T) {
 	parsed, err := parseManifest(AppManifest)
 	if err != nil {

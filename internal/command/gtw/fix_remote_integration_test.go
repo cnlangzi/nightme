@@ -1031,8 +1031,7 @@ func TestFixRemote_WithAttachments_EndToEnd(t *testing.T) {
 	// Seed the issue WITH attachments — this is what
 	// (*GitHubProvider).GetIssue would return after the body
 	// parser populated Attachments. The fake's GetIssue returns
-	// the pre-seeded Issue verbatim (defensive copy at
-	// fake_provider_test.go).
+	// the pre-seeded Issue verbatim (defensive copy at fake_provider_test.go).
 	rig.prov.SetIssue(issueID, &Issue{
 		ID:    issueID,
 		Title: "Crash on login — see attached",

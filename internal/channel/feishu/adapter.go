@@ -65,6 +65,26 @@ const actionNeededTitleEmoji = "👉"
 // eviction only happens for genuinely stale ids.
 const messageStatesLRUSize = 5000
 
+// receiptsLRUSize bounds the in-memory receipt index.
+//
+// The index holds one receipt per user message that opened a card,
+// and a long-running daemon opens one per turn. A receipt stores its
+// content twice — the rendered card body (up to the 28 KB card
+// envelope cap) and the raw entries it was rendered from — plus the
+// task snapshot, so a receipt sitting at the envelope cap costs
+// ~56 KB and the worst case is a few hundred MB. The typical
+// receipt is a few KB (tens of MB in total).
+//
+// Eviction drops the receipt, not the card: the card stays in the
+// chat but stops being updated, and a later event for that id takes
+// the orphan path and opens a new card.
+const receiptsLRUSize = 5000
+
+// newReceiptsCache builds the receipt index.
+func newReceiptsCache() (*lru.Cache[string, *MessageReceipt], error) {
+	return lru.New[string, *MessageReceipt](receiptsLRUSize)
+}
+
 // sendMessageFunc is kept behind the adapter so unit tests can exercise the
 // channel without making an HTTP request to Feishu.
 //
@@ -156,7 +176,7 @@ type Adapter struct {
 	limiter *Limiter
 
 	// mu is the adapter's state mutex. It guards:
-	//   - receipts and receiptsByUserMsgID (concurrent writers:
+	//   - receiptsByUserMsgID (concurrent writers:
 	//     dispatchLoop's SendUserMessage and pumpOutbound's
 	//     receiptFor are independent goroutines per chat)
 	//   - stopped, incomingClosed (Stop vs incoming handlers)
@@ -192,25 +212,26 @@ type Adapter struct {
 	// slog.Default(); settable via SetLogger.
 	logger *slog.Logger
 
-	// Stage 3: rolling-log receipt state lives on the adapter
-	// (Channel.Send is the display strategy). The map is keyed by
-	// chatID; one receipt per chat at a time. When the gateway's
-	// per-session pump emits the first OutReply for a chat that
-	// doesn't have an active receipt, we lazily create one (this
-	// covers the case where the user message is forwarded via
-	// the gateway's messageDispatcher but the renderer path is gone).
-	receipts map[string]*MessageReceipt
-
-	// receiptsByUserMsgID is the secondary index that lets
-	// MarkExecuting and incoming card-action callbacks find the
-	// receipt from the Feishu user message id. Same lifecycle
-	// rules as receipts (delete together when SetCompleted).
+	// receiptsByUserMsgID is the index that lets the runtime and
+	// the incoming card-action callbacks find the receipt from the
+	// Feishu user message id.
 	//
 	// It holds two kinds of key: the id of the message the card
 	// hangs under, and the id of the card itself — a card is
 	// addressed by its own message id, so an event that names it
-	// lands on that card.
-	receiptsByUserMsgID map[string]*MessageReceipt
+	// lands on that card. One receipt per card, so a card claims
+	// two entries.
+	//
+	// Bounded by receiptsLRUSize (LRU eviction). A receipt leaves
+	// the index only when the card it opens fails to send (the
+	// ensure* helpers roll the registration back); the receipts of
+	// finished turns stay until the LRU evicts them. Eviction
+	// semantics and the memory trade-off: receiptsLRUSize.
+	//
+	// The cache is internally synchronized (the LRU has its own
+	// mutex); we additionally hold a.mu around every access so the
+	// read-modify-write sections stay atomic.
+	receiptsByUserMsgID *lru.Cache[string, *MessageReceipt]
 
 	// pendingHeartbeats (F-63.1) buffers the latest heartbeat
 	// snapshot for userMsgIDs whose receipt hasn't been created
@@ -288,8 +309,9 @@ type Adapter struct {
 	// adapter stop (clearAllToolEvents).
 	//
 	// Concurrency: reads/writes go through a.mu. Same lock as
-	// receipts / messageStates — adapter.Send is single-threaded
-	// per ChatSession (SPEC §1.3), so contention is non-issue.
+	// receiptsByUserMsgID / messageStates — adapter.Send is
+	// single-threaded per ChatSession (SPEC §1.3), so contention is
+	// non-issue.
 	toolEventBuf map[string][]toolEventEntry
 
 	// These hooks have production defaults and are intentionally kept as
@@ -333,9 +355,13 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 	if err != nil {
 		return nil, fmt.Errorf("feishu: init messageStates LRU: %w", err)
 	}
+	receipts, err := newReceiptsCache()
+	if err != nil {
+		return nil, fmt.Errorf("feishu: init receipts LRU: %w", err)
+	}
 	a := &Adapter{
 		incoming:            make(chan channel.Message, 128),
-		receiptsByUserMsgID: make(map[string]*MessageReceipt),
+		receiptsByUserMsgID: receipts,
 		pendingHeartbeats:   make(map[string]messages.HeartbeatSnapshot),
 		optCards:            make(map[string]*messages.Choice),
 		optWizards:          make(map[string]*choiceWizard),
@@ -787,7 +813,25 @@ func (a *Adapter) receiptFor(ctx context.Context, chatID, userMsgID string) *Mes
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.receiptsByUserMsgID[userMsgID] // nil on miss — caller decides
+	r, ok := a.receiptsByUserMsgID.Get(userMsgID)
+	if !ok {
+		return nil // miss — caller decides
+	}
+	return r
+}
+
+// removeTransientReceipt rolls back the registration of a receipt
+// whose card failed to open. The identity check keeps a receipt that
+// replaced the transient one in the meantime — or an entry the LRU
+// already evicted — from being dropped.
+//
+// Locking: takes a.mu; callers must not hold it.
+func (a *Adapter) removeTransientReceipt(userMsgID string, transient *MessageReceipt) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if cur, ok := a.receiptsByUserMsgID.Get(userMsgID); ok && cur == transient {
+		a.receiptsByUserMsgID.Remove(userMsgID)
+	}
 }
 
 // OnPromptEnded (F-53 follow-up; Phase 2.1 channel-ext) transitions
@@ -883,11 +927,11 @@ func (a *Adapter) ensureReceiptForTyping(ctx context.Context, chatID, userMsgID 
 	transient.initializing = true
 
 	a.mu.Lock()
-	if existing, ok := a.receiptsByUserMsgID[userMsgID]; ok && existing != nil {
+	if existing, ok := a.receiptsByUserMsgID.Get(userMsgID); ok && existing != nil {
 		a.mu.Unlock()
 		return existing, false, nil
 	}
-	a.receiptsByUserMsgID[userMsgID] = transient
+	a.receiptsByUserMsgID.Add(userMsgID, transient)
 	a.mu.Unlock()
 
 	// Snapshot transient state under r.mu: the receipt is now
@@ -903,11 +947,7 @@ func (a *Adapter) ensureReceiptForTyping(ctx context.Context, chatID, userMsgID 
 
 	body, _, err := buildReceiptCard(nil, nil, footerLinesSnap, nil)
 	if err != nil {
-		a.mu.Lock()
-		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
-			delete(a.receiptsByUserMsgID, userMsgID)
-		}
-		a.mu.Unlock()
+		a.removeTransientReceipt(userMsgID, transient)
 		return nil, false, fmt.Errorf("feishu: ensure typing receipt build card: %w", err)
 	}
 
@@ -926,11 +966,7 @@ func (a *Adapter) ensureReceiptForTyping(ctx context.Context, chatID, userMsgID 
 	// turn.
 	msgID, err := a.sendCardContent(ctx, chatID, body, userMsgID, false)
 	if err != nil {
-		a.mu.Lock()
-		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
-			delete(a.receiptsByUserMsgID, userMsgID)
-		}
-		a.mu.Unlock()
+		a.removeTransientReceipt(userMsgID, transient)
 		a.logger.Warn("feishu: ensureReceiptForTyping send card failed",
 			"err", err, "chat_id", chatID, "user_msg_id", userMsgID)
 		return nil, false, err
@@ -1015,11 +1051,11 @@ func (a *Adapter) ensureReceiptForReplyWithFooter(ctx context.Context, chatID, u
 	// Register-before-SendCard (see ensureReceiptForTask for the
 	// full rationale — same race fix applied symmetrically here).
 	a.mu.Lock()
-	if existing, ok := a.receiptsByUserMsgID[userMsgID]; ok && existing != nil {
+	if existing, ok := a.receiptsByUserMsgID.Get(userMsgID); ok && existing != nil {
 		a.mu.Unlock()
 		return existing, false, nil
 	}
-	a.receiptsByUserMsgID[userMsgID] = transient
+	a.receiptsByUserMsgID.Add(userMsgID, transient)
 	a.mu.Unlock()
 
 	// Snapshot transient state under r.mu: the receipt is now
@@ -1037,11 +1073,7 @@ func (a *Adapter) ensureReceiptForReplyWithFooter(ctx context.Context, chatID, u
 
 	body, _, err := buildReceiptCard(entriesSnap, tasksSnap, footerLinesSnap, nil)
 	if err != nil {
-		a.mu.Lock()
-		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
-			delete(a.receiptsByUserMsgID, userMsgID)
-		}
-		a.mu.Unlock()
+		a.removeTransientReceipt(userMsgID, transient)
 		return nil, false, fmt.Errorf("feishu: ensure reply receipt build card: %w", err)
 	}
 
@@ -1071,11 +1103,7 @@ func (a *Adapter) ensureReceiptForReplyWithFooter(ctx context.Context, chatID, u
 	// postOrphanReplyCard.
 	msgID, err := a.sendCardContent(ctx, chatID, body, userMsgID, false)
 	if err != nil {
-		a.mu.Lock()
-		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
-			delete(a.receiptsByUserMsgID, userMsgID)
-		}
-		a.mu.Unlock()
+		a.removeTransientReceipt(userMsgID, transient)
 		a.logger.Warn("feishu: ensureReceiptForReply send card failed",
 			"err", err, "chat_id", chatID, "user_msg_id", userMsgID)
 		return nil, false, err
@@ -1243,7 +1271,7 @@ func (a *Adapter) registerCardID(cardMsgID string, r *MessageReceipt) {
 		return
 	}
 	a.mu.Lock()
-	a.receiptsByUserMsgID[cardMsgID] = r
+	a.receiptsByUserMsgID.Add(cardMsgID, r)
 	a.mu.Unlock()
 }
 
@@ -1413,11 +1441,11 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 	// Register-before-SendCard (see ensureReceiptForReply for the
 	// full rationale — same race fix applied symmetrically here).
 	a.mu.Lock()
-	if existing, ok := a.receiptsByUserMsgID[userMsgID]; ok && existing != nil {
+	if existing, ok := a.receiptsByUserMsgID.Get(userMsgID); ok && existing != nil {
 		a.mu.Unlock()
 		return existing, false, nil
 	}
-	a.receiptsByUserMsgID[userMsgID] = transient
+	a.receiptsByUserMsgID.Add(userMsgID, transient)
 	a.mu.Unlock()
 
 	// Snapshot transient state under r.mu: the receipt is now
@@ -1434,11 +1462,7 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 
 	body, _, err := buildReceiptCard(nil, tasksSnap, footerLinesSnap, nil)
 	if err != nil {
-		a.mu.Lock()
-		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
-			delete(a.receiptsByUserMsgID, userMsgID)
-		}
-		a.mu.Unlock()
+		a.removeTransientReceipt(userMsgID, transient)
 		return nil, false, fmt.Errorf("feishu: ensure task receipt build card: %w", err)
 	}
 
@@ -1455,11 +1479,7 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 	// (returns existing, created=false).
 	msgID, err := a.sendCardContent(ctx, chatID, body, userMsgID, false)
 	if err != nil {
-		a.mu.Lock()
-		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
-			delete(a.receiptsByUserMsgID, userMsgID)
-		}
-		a.mu.Unlock()
+		a.removeTransientReceipt(userMsgID, transient)
 		a.logger.Warn("feishu: ensureReceiptForTask send card failed",
 			"err", err, "chat_id", chatID, "user_msg_id", userMsgID)
 		return nil, false, err

@@ -28,8 +28,9 @@ import (
 // don't call NewAdapter here because that path would try to dial.
 func newTestAdapterForRebuild() *Adapter {
 	return &Adapter{
-		rebuild: newRebuildState(),
-		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		rebuild:             newRebuildState(),
+		logger:              slog.New(slog.NewTextHandler(io.Discard, nil)),
+		receiptsByUserMsgID: mustReceiptsCache(),
 		// cfg is left nil. The rebuild path reads cfg.Feishu.AppID
 		// only for log fields — slog with io.Discard handles the
 		// nil deref safely because the closures that touch cfg
@@ -261,9 +262,10 @@ func TestRebuildWSClient_HappyPath(t *testing.T) {
 				AppSecret: "test_secret",
 			},
 		},
-		rebuild: newRebuildState(),
-		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
-		health:  &WSHealth{},
+		rebuild:             newRebuildState(),
+		logger:              slog.New(slog.NewTextHandler(io.Discard, nil)),
+		health:              &WSHealth{},
+		receiptsByUserMsgID: mustReceiptsCache(),
 		// prober is required by buildWSClient's WithOnDisconnected
 		// callback (it calls a.prober.Start). nil prober is OK
 		// because the callback nil-checks; we don't fire it here.
@@ -335,9 +337,10 @@ func TestMarkSDKConnectedClearsRebuildState(t *testing.T) {
 				AppSecret: "test_secret",
 			},
 		},
-		rebuild: newRebuildState(),
-		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
-		health:  &WSHealth{},
+		rebuild:             newRebuildState(),
+		logger:              slog.New(slog.NewTextHandler(io.Discard, nil)),
+		health:              &WSHealth{},
+		receiptsByUserMsgID: mustReceiptsCache(),
 	}
 
 	// Pre-arm a terminal-state-and-stranded scenario — the post-
@@ -461,9 +464,10 @@ func TestMaybeRebuildClient_StrandedTriggersRebuild(t *testing.T) {
 				AppSecret: "test_secret",
 			},
 		},
-		rebuild: newRebuildState(),
-		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
-		health:  &WSHealth{},
+		rebuild:             newRebuildState(),
+		logger:              slog.New(slog.NewTextHandler(io.Discard, nil)),
+		health:              &WSHealth{},
+		receiptsByUserMsgID: mustReceiptsCache(),
 	}
 
 	oldClient := a.buildWSClient(nil)

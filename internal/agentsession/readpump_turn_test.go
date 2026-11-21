@@ -7,8 +7,8 @@
 // an orphan prompt end.
 //
 // So the readpump drops the turn-scoped events and ends no prompt.
-// The session identity, the bridge failure and a pending permission
-// question keep flowing: they carry information no turn owns.
+// The session identity, the bridge failure and the permission
+// lifecycle keep flowing: they carry information no turn owns.
 package agentsession
 
 import (
@@ -146,7 +146,6 @@ func TestReadPump_DropsTurnScopedEventsWithNoPromptInFlight(t *testing.T) {
 		agent.EventAgentResult,
 		agent.EventAgentTaskCreate,
 		agent.EventAgentTaskUpdate,
-		agent.EventAgentPermissionSettled,
 		agent.EventAgentDone,
 	}
 	for _, kind := range kinds {
@@ -169,14 +168,20 @@ func TestReadPump_DropsTurnScopedEventsWithNoPromptInFlight(t *testing.T) {
 }
 
 // TestReadPump_KeepsTheEventsThatNoTurnOwns pins the survivors: the
-// session identity, the bridge failure and a pending permission
-// question carry information no turn owns, so they keep flowing with
-// no prompt in flight.
+// session identity, the bridge failure and the permission lifecycle
+// carry information no turn owns, so they keep flowing with no
+// prompt in flight.
+//
+// The settlement travels with its question: it PATCHes the card the
+// question created, and the card is addressed by its own id — not by
+// the anchor. Dropping the settlement would leave the card's buttons
+// live for a permission the user already answered.
 func TestReadPump_KeepsTheEventsThatNoTurnOwns(t *testing.T) {
 	kinds := []agent.EventKind{
 		agent.EventAgentReady,
 		agent.EventAgentError,
 		agent.EventAgentPermission,
+		agent.EventAgentPermissionSettled,
 	}
 	for _, kind := range kinds {
 		t.Run(kind.String(), func(t *testing.T) {
@@ -195,6 +200,40 @@ func TestReadPump_KeepsTheEventsThatNoTurnOwns(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestIsTurnScoped_ClassifiesEveryEventKind pins the
+// classification of every kind the agent layer declares, so a kind
+// added later is a conscious decision: the table is the list of
+// kinds to classify, and the default is turn-scoped — a kind nobody
+// classified is dropped rather than injected into the turn pipeline.
+func TestIsTurnScoped_ClassifiesEveryEventKind(t *testing.T) {
+	all := []agent.EventKind{
+		agent.EventAgentText,
+		agent.EventAgentThinking,
+		agent.EventAgentPermission,
+		agent.EventAgentToolStart,
+		agent.EventAgentToolEnd,
+		agent.EventAgentDone,
+		agent.EventAgentError,
+		agent.EventAgentResult,
+		agent.EventAgentReady,
+		agent.EventAgentTaskCreate,
+		agent.EventAgentTaskUpdate,
+		agent.EventAgentPermissionSettled,
+	}
+	notTurnScoped := map[agent.EventKind]bool{
+		agent.EventAgentReady:             true,
+		agent.EventAgentError:             true,
+		agent.EventAgentPermission:        true,
+		agent.EventAgentPermissionSettled: true,
+	}
+	for _, kind := range all {
+		want := !notTurnScoped[kind]
+		if got := isTurnScoped(kind); got != want {
+			t.Errorf("isTurnScoped(%v) = %v, want %v", kind, got, want)
+		}
 	}
 }
 

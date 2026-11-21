@@ -311,6 +311,36 @@ subagent 一直不回来时 turn 会一直挂着：CLI 死了由 readpump 的 ch
 收尾（`PromptEndProcessDied`），CLI 还活着就由用户 `/stop` 收尾——reaper 不动
 in-flight 的 turn。
 
+#### 3.3.1 后台 task 表：CLI 报告的后台工作量
+
+CLI 用一族 `system` 帧描述会话的后台工作量，其中一帧带全集，其余各帧描述单个
+task：
+
+- `system{background_tasks_changed, tasks: [...]}` —— 全部还活着的后台 task，
+  **替换语义**：消费方拿这份 payload 换掉自己那份集合
+- `system{task_started, task_id, is_backgrounded, description, task_type}` ——
+  起了一个 task；`is_backgrounded: true` 的进表
+- `system{task_progress, task_id, description}` —— 进度；不带状态，不把已经
+  结束的 task 变回 running
+- `system{task_updated, task_id, patch: {status, description, end_time,
+  is_backgrounded}}` —— 状态变化；`patch.is_backgrounded` 决定进出表
+- `system{task_notification, task_id, status}` —— task 收尾，`status` 是终态
+
+bridge 把这张表留在自己这边（`internal/bridge/claudecode/bgtask.go`），表变了就
+发一个 `EventAgentSubagents`，payload 是整张表。表留在 bridge 而不是 runtime：
+per-task 帧是增量，全集帧是整张整张地报，放在 runtime 就得让每个消费方各存一
+份 CLI 已经公布的集合。帧里还带着 subagent 的 prompt 和输出文件路径，这些不出
+bridge——往上只报身份、描述、状态三样。
+
+实测（Claude Code 2.1.311，stdin 持有不关）里 CLI 发的是 `task_started` /
+`task_notification` 这两帧：`task_started` 把后台 agent 放进来（`is_backgrounded:
+true`），`task_notification` 收尾。agent 自己起的后台 shell 也带 task 帧，但
+`is_backgrounded: false`，不进后台表——它的收尾帧也不带 `is_backgrounded`，所以
+bridge 记住这些 id，收尾帧不会把它们塞进后台表。
+
+这些帧**不是** turn 边界：`task_started` / `task_notification` 不发
+`EventAgentResult`，也不发 `EventAgentDone`。
+
 ### 3.4 In-flight 取消：`/stop` 的真实协议
 
 **2026-08-15 fix-stop**：用户报"第二次 /stop 后发送消息卡死在 Working…"。审计发现 claudecode bridge 用 `SignalProcessGroup(SIGINT)` 走 PTY，这跟 codex 老的 SIGINT 路径同款——子进程死了，聊天层 `--resume` 重启，撞上"幽灵 turn"。本文档记录**反向工程**过程、实际 wire 格式、以及最终方案。

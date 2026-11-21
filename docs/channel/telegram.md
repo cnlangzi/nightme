@@ -156,6 +156,7 @@ Topic
 | `OutResult` | 独立 sendRichMessage | `sendOutResultMessage` → `sendRichMessage(rich_message[blocks])`，reply-anchored 到 user message |
 | `OutChoice` / `OutChoicePatch` | 独立 InlineKeyboard 消息 | `sendChoice` / `patchChoice` → `sendRichMessage(rich_message=…)` / `editMessageText(rich_message=…)` |
 | `OutHeartbeat` | rich turn header PATCH | `patchChainHeader` → `updateRichTurnHeader`（header line 走 `paragraph` block，无 footer） |
+| `OutSubagents` | rich turn 状态行 | `setRichTurnSubagents`（`🔀 N 个后台 agent 在跑` 一行，走 `paragraph` block；没有后台 task 时这行消失） |
 | `OutMessageState` / `OutMessageStateRemoved` | reactions 独立轨道 | `setMessageReaction` 贴到 user message（Telegram Bot 单 reaction 预算，每条消息只能有一个 emoji） |
 | `OutInit` | silent drop | — |
 
@@ -731,6 +732,7 @@ DM / 群主窗口（thread_id=0）和真实 topic（thread_id > 0）走**统一�
 - `OutResult` 单独 `sendRichMessage` 走独立消息，reply-anchored 到 user message，不进 rich turn。
 - turn 状态走 **message reaction**：runtime `MessageStateBus` → `OutMessageState` 触发 `setMessageReaction(userMsgID, 👌)`（Telegram Bot 单 reaction 预算）；`OnPromptEnded` 在 result 消息（fallback rich message）上贴 🎉 / ❌。
 - `OutHeartbeat` PATCH 当前 turn 的 rich message header（`💭 N · 🔧 M · ⏱ HH:MM:SS`）—— 是 in-turn 状态 ticker，单独 paragraph block，不带 footer。
+- `OutSubagents` 在当前 turn 的 rich message 上渲染后台 agent 行（`🔀 N 个后台 agent 在跑`）—— CLI 报告的后台 task 表，一个后台 task 都不剩时这行消失；turn 结束时这行也跟着消失（这行属于 turn，不是会话）。
 - 跨 turn：老 rich message 留作历史证据（不再被 PATCH），新 turn 创建新 rich message 独立承载新状态。
 
 详细 spec 见 §11.11。
@@ -859,6 +861,7 @@ type richTurn struct {
 | `OutReply` / `OutCommandReply` | `appendSegmentForKind` → `appendRichTurn`（debounced PATCH） |
 | `OutThinking` / `OutToolStart` / `OutToolEnd` | 先调 `streamDraftEvent`（DM/group draft path）失败或非 draft 路径则 `appendRichTurn`/`appendAndFlush`；`OutToolEnd` 走同步 flush 让 `● Tool(args)` + `⎿ result` 紧邻出现 |
 | `OutTaskCreate` / `OutTaskUpdate` | `setRichTurnTaskList`（taskList section） |
+| `OutSubagents` | `setRichTurnSubagents`（后台 agent 行，不是 log entry） |
 | `OutError` | `appendRichTurn`（stderr tail 拼成 fenced-code block） |
 | `OutHeartbeat` | `patchChainHeader` → `updateRichTurnHeader`（只动 headerLine，不带 footer） |
 | `OutResult` | `sendOutResultMessage` → `sendRichMessage(rich_message[blocks])`，reply 到 user message，独立消息；resultMessageID 写入 turn |

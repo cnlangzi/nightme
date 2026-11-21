@@ -58,7 +58,7 @@ func receiptTableEntries(n int) []LogEntry {
 // that carries more than five tables. The tables past the fifth lose
 // their table shape: the card is still created and still PATCHed.
 func TestBuildReceiptCard_KeepsInsideTheTableCap(t *testing.T) {
-	body, _, err := buildReceiptCard(receiptTableEntries(7), nil, nil, nil)
+	body, _, err := buildReceiptCard(receiptTableEntries(7), nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("buildReceiptCard: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestBuildReceiptCard_KeepsInsideTheTableCap(t *testing.T) {
 // the row is dropped, the cells of the row remain readable as plain
 // lines.
 func TestBuildReceiptCard_KeepsTheRowsOfTheTablesPastTheCap(t *testing.T) {
-	body, _, err := buildReceiptCard(receiptTableEntries(7), nil, nil, nil)
+	body, _, err := buildReceiptCard(receiptTableEntries(7), nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("buildReceiptCard: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestBuildReceiptCard_KeepsTheRowsOfTheTablesPastTheCap(t *testing.T) {
 // TestBuildReceiptCard_KeepsTheTablesOfTheFirstFive — a receipt that
 // stays inside the cap is unchanged: the tables it holds are tables.
 func TestBuildReceiptCard_KeepsTheTablesOfTheFirstFive(t *testing.T) {
-	body, _, err := buildReceiptCard(receiptTableEntries(5), nil, nil, nil)
+	body, _, err := buildReceiptCard(receiptTableEntries(5), nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("buildReceiptCard: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestBuildReceiptCard_KeepsInsideTheTableCap_SingleEntry(t *testing.T) {
 	for i := 0; i < 7; i++ {
 		text.WriteString(fmt.Sprintf("| c%d | h%d |\n| --- | --- |\n| x%d | y%d |\n\n", i, i, i, i))
 	}
-	body, _, err := buildReceiptCard([]LogEntry{{Text: text.String()}}, nil, nil, nil)
+	body, _, err := buildReceiptCard([]LogEntry{{Text: text.String()}}, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("buildReceiptCard: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestBuildReceiptCard_KeepsInsideTheTableCap_SingleEntry(t *testing.T) {
 // table, so the flattened tables have to lose their delimiter row: what
 // is left are plain lines.
 func TestBuildReceiptCard_DropsTheDelimiterOfTheTablesPastTheCap(t *testing.T) {
-	body, _, err := buildReceiptCard(receiptTableEntries(7), nil, nil, nil)
+	body, _, err := buildReceiptCard(receiptTableEntries(7), nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("buildReceiptCard: %v", err)
 	}
@@ -147,7 +147,7 @@ func TestBuildReceiptCard_DropsTheDelimiterOfTheTablesPastTheCap(t *testing.T) {
 func TestBuildReceiptCard_KeepsTheCodeSamples(t *testing.T) {
 	entries := receiptTableEntries(5)
 	entries = append(entries, LogEntry{Text: "```markdown\n| keep | me |\n| --- | --- |\n```"})
-	body, _, err := buildReceiptCard(entries, nil, nil, nil)
+	body, _, err := buildReceiptCard(entries, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("buildReceiptCard: %v", err)
 	}

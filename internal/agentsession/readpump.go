@@ -16,6 +16,8 @@
 //     and emits `KindPromptEnded`.
 //   - Other events are wrapped as `KindAgentEvent` and pushed to
 //     eventQueue for the dispatcher.
+//   - An event that arrives with no turn in flight belongs to no turn:
+//     the turn-scoped ones are dropped, the rest keep flowing.
 package agentsession
 
 import (
@@ -82,6 +84,13 @@ func (as *AgentSession) releaseReadPumpSlot(done chan struct{}) {
 //  4. On channel close (`!ok`), call `endPrompt(ProcessDied)`
 //     (fixes the F-53 deadlock), emit `KindLifecycle{StatusExited}`.
 //  5. Return on either readpumpStop close (Shutdown) or handler exit.
+//
+// Turn ownership: an event that arrives with no prompt in flight
+// belongs to no turn. The turn-scoped kinds are dropped, and a
+// terminal event ends no prompt — `endPrompt` with no prompt
+// installed fabricates a `<as>-end` prompt record. The session
+// identity, the bridge failure and a pending permission question
+// keep flowing: they carry information no turn owns.
 //
 // Shutdown semantics: every push to eventQueue is `select`'d against
 // readpumpStop — so a Shutdown during a saturated eventQueue
@@ -157,6 +166,21 @@ func (as *AgentSession) readpumpLoop(stop <-chan struct{}, done chan struct{}) {
 				userMsgID = override
 			}
 
+			// An event that arrives with no turn in flight belongs to
+			// no turn. Its anchor is empty, and every consumer of
+			// the anchor reads an empty one as "not mine": the
+			// receipt's ticker never ticks, the turn's text lands in
+			// a card of its own, and the readpump records an orphan
+			// prompt end. A turn-scoped event is dropped here.
+			//
+			// The session identity, the bridge failure and a pending
+			// permission question carry information no turn owns, so
+			// they keep flowing.
+			inTurn := prompt != nil || override != ""
+			if !inTurn && isTurnScoped(ev.Kind) {
+				continue
+			}
+
 			// CRITICAL: copy ev to heap before taking its address.
 			// Go's range loop gives each iteration its own ev
 			// variable, but the address is still on the readpump's
@@ -186,7 +210,11 @@ func (as *AgentSession) readpumpLoop(stop <-chan struct{}, done chan struct{}) {
 			// Terminal handling: EventAgentDone / EventAgentError ends the
 			// in-flight Prompt. The PromptEnded event is emitted
 			// by endPrompt itself.
-			if ev.Kind == agent.EventAgentDone || ev.Kind == agent.EventAgentError {
+			//
+			// With no turn in flight there is nothing to end, and
+			// endPrompt would fabricate a `<as>-end` prompt record
+			// and publish a prompt-end no message is waiting for.
+			if inTurn && (ev.Kind == agent.EventAgentDone || ev.Kind == agent.EventAgentError) {
 				reason := agent.PromptEndClean
 				if ev.Kind == agent.EventAgentError {
 					reason = agent.PromptEndError
@@ -194,6 +222,25 @@ func (as *AgentSession) readpumpLoop(stop <-chan struct{}, done chan struct{}) {
 				as.endPrompt(reason)
 			}
 		}
+	}
+}
+
+// isTurnScoped reports whether an event's meaning is "this happened
+// during the user's turn" — its text, its thinking, its tool calls,
+// its result, its task list, its settled permission.
+//
+// The kinds that are not turn-scoped carry information no turn owns:
+// the session identity (the bridge's session id and model), the
+// bridge failure, and the permission question the bridge's ask
+// handler is blocked on. Every other kind — including kinds added
+// later — is turn-scoped, so it is dropped when no turn is in
+// flight.
+func isTurnScoped(kind agent.EventKind) bool {
+	switch kind {
+	case agent.EventAgentReady, agent.EventAgentError, agent.EventAgentPermission:
+		return false
+	default:
+		return true
 	}
 }
 
@@ -242,10 +289,15 @@ func (as *AgentSession) emitLifecycleLocked(status Status) {
 // `messagesByID` via the KindPromptEnded event — see
 // `ChatSession.writebackMessageState`.
 //
-// A terminal event still publishes KindPromptEnded when no
-// currentPrompt is installed. /review injects via WithReplyTo
-// and the completion has to reach the channel either way. The
-// reply-to override is the anchor in that case.
+// endPrompt publishes KindPromptEnded even when no currentPrompt is
+// installed but a reply-to override is: /review injects via
+// WithReplyTo and the completion has to reach the channel either
+// way. The reply-to override is the anchor in that case.
+//
+// The readpump reaches endPrompt only for a terminal event that
+// belongs to a turn: with no prompt and no override in flight the
+// record it would fabricate (`<as>-end`) belongs to no turn, and
+// the prompt-end it would publish waits for no message.
 func (as *AgentSession) endPrompt(reason agent.PromptEndReason) {
 	as.asMu.Lock()
 	now := time.Now()

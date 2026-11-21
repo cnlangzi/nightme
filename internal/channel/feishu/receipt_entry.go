@@ -1,6 +1,6 @@
 // F-44 revert: rolling-log OutReply entries folded into the receipt
 // card (F-25 → F-40 model). Each OutReply chunk lands as a LogEntry
-// in the receipt's entries slice; the receipt's renderLocked
+// in the receipt's entries slice; the receipt's render
 // function maps each entry to one or more `div` elements (split via
 // splitMarkdownForDivs when the entry text exceeds divTextCharLimit).
 //

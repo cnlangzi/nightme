@@ -35,18 +35,18 @@ token refill 在 `Wait()` 调用时按 elapsed 时间计算，无 ticker、无 c
 
 - **不改 `Channel` 接口契约**（`internal/channel/channel.go::Send` 仍是 fire-and-ack）
 - **不动 `sendContent` 包装层**（rootID fallback 路径仍生效）
-- **不影响 PATCH 5 QPS / message_id**（由 `MessageReceipt.renderLocked` 单 mutex 天然满足）
+- **不影响 PATCH 5 QPS / message_id**（由 receipt 的 300ms 显式节流保证，mutex 只提供串行化）
 - **不与 F-36 retry 耦合**（retry 在 sendContent 外层做，限速在最底层 SDK call 前做；二者职责严格分离）
 
 ### 1.5 PATCH 5 QPS per-message_id 为什么不在 limiter 里强制
 
 理论上可以按 message_id 分桶，但**没必要**：
 
-- `MessageReceipt.renderLocked` 是单 mutex 串行化 per-receipt 的 PATCH
-- 即同一 receipt 内多次 PATCH 也是 mutex 顺序执行，不会并发
-- 串行化天然保证 PATCH ≤ 1/200ms = 5 QPS per message_id
+- `MessageReceipt.render` 用 300ms 显式节流保证同一张卡的两次 PATCH 间隔 ≥300ms（≈3.3 QPS）
+- receipt 的 mutex 只负责把同一 receipt 的渲染串行化，不参与限频判定
+- 节流等待发生在 mutex 之外，不会阻塞 receipt 的其他读路径
 
-Limiter 只守住"app 级 + per-user + per-group"三个 hard limit。per-message_id 限速交给 `renderLocked` mutex。
+Limiter 只守住"app 级 + per-user + per-group"三个 hard limit。per-message_id 限速由 receipt 自己的节流窗口负责。
 
 ### 1.6 UX 权衡（5 QPS 不是没有代价）
 
@@ -72,7 +72,7 @@ Receipt PATCH storm（一个 agent turn 内 receipt 被 PATCH 多次）受 F-35 
 
 **nightme 热路径分析**：
 - 用户发消息 → bot reply → 同 user 的 5 QPS 限制是瓶颈
-- Receipt PATCH storm（一个 turn 5-20 次 PATCH）→ per-message_id 5 QPS 由 `renderLocked` mutex 天然满足
+- Receipt PATCH storm（一个 turn 5-20 次 PATCH）→ per-message_id 5 QPS 由 receipt 的 300ms 显式节流保证，mutex 只提供串行化
 - 多个 chat 并发 → App 级 50 QPS 是天花板
 
 **结论**：把全局桶设为 **5 QPS / burst 1** 同时满足：
@@ -267,7 +267,7 @@ if waitDur > 100*time.Millisecond {
 |---|---|
 | `larkws.WebSocket`（SDK 内置重连） | 不变；limiter 只约束**出口** API call，不约束 inbound |
 | `sendContent` rootID fallback（230011/231003） | 不变；fallback 第二次走 Create 仍经 Wait（单桶自动覆盖） |
-| `MessageReceipt.renderLocked` mutex | 不变；5 QPS / message_id 由它天然满足，不需 limiter 介入 |
+| `MessageReceipt.render` mutex | 不变；5 QPS / message_id 由 receipt 的 300ms 显式节流保证，mutex 只提供串行化，不需 limiter 介入 |
 | Layer 1 `WithTransientRetry` | 正交；retry 在 sendContent 外层，limiter 在 SDK call 内层，互不感知 |
 | Echo channel（test only） | 不走 feishu，无影响 |
 

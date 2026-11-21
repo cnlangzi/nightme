@@ -92,6 +92,15 @@ type receiptBot interface {
 // for long task lists.
 const divTextCharLimit = 1000
 
+// minPatchInterval is the minimum gap between two PATCHes on the same
+// receipt card. Feishu hard-limits message updates to 5 QPS per
+// message_id (docs/channel/feishu.md §16.3); 300ms ≈ 3.3 QPS leaves
+// headroom.
+//
+// The pacing is explicit — the receipt's mutex serialises renders but
+// says nothing about how fast they fire.
+const minPatchInterval = 300 * time.Millisecond
+
 // MessageReceipt is the per-user-message rolling-log + task-checklist
 // display (F-25 → F-40 + F-38 + F-44 simplification + F-44 revert
 // for OutReply folding). One receipt owns ONE Feishu card message
@@ -167,9 +176,9 @@ type MessageReceipt struct {
 	// with a real cardMsgID. During that brief window the
 	// placeholder is visible to other goroutines (receiptFor /
 	// ensureReceiptForReply return it), but its cardMsgID is still
-	// empty — so a renderLocked driven by a concurrent AppendEntry
+	// empty — so a render driven by a concurrent AppendEntry
 	// / SetTaskList would otherwise issue a second SendCard
-	// (orphan). renderLocked checks this flag and short-circuits
+	// (orphan). render checks this flag and short-circuits
 	// while true, dropping the render so the ensure helper's own
 	// SendCard is the only card in chat. The flag is cleared under
 	// r.mu immediately after the SendCard return value is stored.
@@ -192,7 +201,7 @@ type MessageReceipt struct {
 
 	// heartbeatMinInterval is the minimum gap between two
 	// heartbeat-driven PATCHes. ApplyHeartbeat consults this
-	// against lastBodyPatch (renderLocked's own throttle state)
+	// against lastBodyPatch (render's own throttle state)
 	// so any successful PATCH — entry / task / heartbeat —
 	// bumps the window and prevents double-PATCHes when
 	// entries and heartbeat both want to update within the same
@@ -210,7 +219,7 @@ type MessageReceipt struct {
 // helper); the constructor itself just wires infrastructure.
 //
 // bot is the adapter (or any receiptBot implementation) used by
-// renderLocked to ship card bodies (SendCard on first render,
+// render to ship card bodies (SendCard on first render,
 // PatchMessage on subsequent). F-44 callers pass `a`; passing nil
 // will panic on the first render.
 //
@@ -271,7 +280,6 @@ func (r *MessageReceipt) SetTaskListWithFooter(ctx context.Context, list *agent.
 		return errors.New("feishu receipt: SetTaskList called with nil AgentTaskListEvent")
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	items := list.Items
 	if len(items) == 0 {
 		r.tasks = nil
@@ -283,12 +291,13 @@ func (r *MessageReceipt) SetTaskListWithFooter(ctx context.Context, list *agent.
 	if len(footerLines) > 0 {
 		r.footerLines = footerLines
 	}
+	r.mu.Unlock()
 	// F-53: Pending→Running transition removed. Initial state is
 	// already chatsession.PromptRunning (set at construction). Receipt never
 	// transitions to chatsession.PromptDone in Phase 0 — that value is reserved
 	// for a future UX PR that surfaces terminal state on the card
 	// (see docs/feat/F-53-message-prompt-lifecycle.md §7).
-	return r.renderLocked(ctx)
+	return r.render(ctx)
 }
 
 // chatsession.PromptState returns the current prompt execution state. Useful for
@@ -352,52 +361,67 @@ func (r *MessageReceipt) Tasks() []agent.AgentTaskItem {
 //
 // Called from two sites:
 //
-//  1. `renderLocked` after the first successful
+//  1. `render` after the first successful
 //     `SendCardForReceipt` (chatsession.PromptRunning) — adds 🔄 once.
 //  2. The adapter's prompt-end wiring (chatsession.PromptDone) when
 //     ChatSession.endPrompt fires — adds ✅ once.
 //
 // If `cardMsgID` is empty (receipt not yet rendered, or first
-// render failed), the reaction is silently skipped — the
-// `cardMsgID` set just before this call ensures the cold-start
-// path always has a card to react on.
+// render failed), the reaction is silently skipped.
 //
-// Best-effort: AddReaction failures are logged at the adapter
-// level (via the runtime's reaction handler) and do not propagate.
+// Best-effort: AddReaction failures are logged and do not propagate.
 // The receipt's `promptState` is updated regardless — the FSM is
 // the source of truth, the reaction is visual decoration.
 func (r *MessageReceipt) SetPromptState(ctx context.Context, state chatsession.PromptState) {
 	r.mu.Lock()
+	emoji, msgID, due := r.setPromptStateLocked(state)
+	r.mu.Unlock()
+
+	if due {
+		r.addReaction(ctx, msgID, emoji, state)
+	}
+}
+
+// setPromptStateLocked migrates the prompt FSM and reports whether a
+// reaction is due. Caller must hold r.mu; the function performs no
+// I/O.
+//
+// A reaction is due only on a real transition (prev != state) on a
+// receipt that already has a card, and only when the state maps to an
+// emoji.
+func (r *MessageReceipt) setPromptStateLocked(state chatsession.PromptState) (emoji, msgID string, due bool) {
 	prev := r.promptState
 	cardMsgID := r.cardMsgID
 	r.promptState = state
-	r.mu.Unlock()
-
 	if prev == state || cardMsgID == "" {
-		return
+		return "", "", false
 	}
-
-	emoji := mapPromptStateToFeishuEmoji(state)
+	emoji = mapPromptStateToFeishuEmoji(state)
 	if emoji == "" {
-		return
+		return "", "", false
 	}
-	if _, err := r.bot.AddReaction(ctx, cardMsgID, emoji); err != nil {
-		// Best-effort: log and move on. We don't want a transient
-		// Feishu reaction-API failure to derail the receipt FSM.
+	return emoji, cardMsgID, true
+}
+
+// addReaction sends the prompt-state reaction. Must be called
+// outside r.mu — the reaction API is network I/O and the receipt
+// mutex only guards state.
+//
+// Best-effort: a transient Feishu reaction-API failure must not
+// derail the receipt FSM.
+func (r *MessageReceipt) addReaction(ctx context.Context, msgID, emoji string, state chatsession.PromptState) {
+	if _, err := r.bot.AddReaction(ctx, msgID, emoji); err != nil {
 		r.logger.Warn("feishu receipt: add prompt-state reaction failed",
-			"err", err, "state", state, "emoji", emoji, "card_msg_id", cardMsgID)
+			"err", err, "state", state, "emoji", emoji, "card_msg_id", msgID)
 	}
 }
 
 // StampFooterLines (F-44 follow-up) replaces the receipt card's
-// StatusBar footer in place and re-renders via renderLocked. Used
+// StatusBar footer in place and re-renders via render. Used
 // by the adapter's OutInit handler to surface the agent's
 // bootstrap data (SessionID / Model / AgentName / Workspace /
 // Branch) on the existing receipt card instead of silently
 // dropping the event (the previous F-44 behaviour).
-//
-// Locking: holds r.mu through renderLocked, matching the existing
-// AppendEntryWithFooter / SetTaskListWithFooter pattern.
 //
 // Nil-safe: returns nil when called on a nil receiver, matching
 // the existing guard pattern.
@@ -410,7 +434,7 @@ func (r *MessageReceipt) SetPromptState(ctx context.Context, state chatsession.P
 //
 // Cold-start edge case: if cardMsgID is still empty (the cold-
 // start sendCard hasn't returned yet, or this is an orphan
-// event without a receipt), renderLocked's own `if r.cardMsgID
+// event without a receipt), render's own `if r.cardMsgID
 // == ""` branch will issue the FIRST sendCard with the stamped
 // footer. That's the right behaviour for `/review -a foo` paths
 // where the dispatcher pre-creates a placeholder receipt and
@@ -420,25 +444,12 @@ func (r *MessageReceipt) StampFooterLines(ctx context.Context, footerLines []str
 	if r == nil {
 		return nil
 	}
-	// P1 follow-up: hold r.mu through renderLocked. renderLocked
-	// reads entries / tasks / footerLines / heartbeat / cardMsgID
-	// / lastBody / lastBodyPatch (see its docstring at
-	// receipt.go and the buildReceiptCard call inside).
-	// Releasing the lock between the footerLines update and the
-	// render lets a concurrent goroutine — e.g. the runtime
-	// dispatching an OutReply AppendEntryWithFooter while the
-	// bridge sink emits OutInit StampFooterLines — observe a
-	// torn state (one writer's footer with another writer's
-	// tasks / entries) and ship a PATCH that diverges from
-	// either caller's intent. Same pattern as
-	// AppendEntryWithFooter / SetTaskListWithFooter (both hold
-	// r.mu through renderLocked).
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if len(footerLines) > 0 {
 		r.footerLines = footerLines
 	}
-	return r.renderLocked(ctx)
+	r.mu.Unlock()
+	return r.render(ctx)
 }
 
 // AppendEntry appends a new rolling-log entry (typically an OutReply
@@ -493,27 +504,18 @@ func (r *MessageReceipt) AppendEntry(ctx context.Context, entry LogEntry) error 
 // ToolCount increases always PATCH immediately — a second Read
 // 1.94s after the first must show 🔧 2, not stay stuck at 🔧 1.
 // Thinking deltas still coalesce against r.lastBodyPatch (the
-// SAME field renderLocked updates on every successful PATCH).
+// SAME field render updates on every successful PATCH).
 // Done flips also bypass the thinking throttle — see the gate
 // below for the rationale.
 //
-// Locking: holds r.mu through renderLocked (matching the
-// existing AppendEntryWithFooter pattern). renderLocked's
-// "Locked" suffix is the contract — it accesses r.entries,
-// r.tasks, r.heartbeat, r.cardMsgID, r.lastBody, r.lastBodyPatch
-// without acquiring the lock itself. The lock duration is
-// bounded by Feishu PATCH latency (~50-200ms in practice);
-// contention is between the same receipt's per-turn goroutines,
-// never across chats. renderLocked has its own same-body
-// short-circuit and 300ms minimum PATCH interval, so holding
-// the lock while it runs is not a regression vs the prior
-// code that unlocked first.
+// Locking: the snapshot write and the throttle decision happen
+// under r.mu; the render itself runs unlocked so a pacing wait
+// never blocks the receipt's other readers.
 func (r *MessageReceipt) ApplyHeartbeat(ctx context.Context, snap messages.HeartbeatSnapshot) {
 	if r == nil {
 		return
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
 
 	prev := r.heartbeat
 	r.heartbeat = snap
@@ -521,6 +523,7 @@ func (r *MessageReceipt) ApplyHeartbeat(ctx context.Context, snap messages.Heart
 	toolChanged := snap.ToolCount != prev.ToolCount
 	doneChanged := snap.Status != prev.Status
 	if !thinkChanged && !toolChanged && !doneChanged {
+		r.mu.Unlock()
 		return
 	}
 	// Thinking streams are dense (10+ deltas/s) — coalesce those
@@ -539,13 +542,17 @@ func (r *MessageReceipt) ApplyHeartbeat(ctx context.Context, snap messages.Heart
 		!doneChanged &&
 		!r.lastBodyPatch.IsZero() &&
 		time.Since(r.lastBodyPatch) < r.heartbeatMinInterval {
+		r.mu.Unlock()
 		return
 	}
-	if err := r.renderLocked(ctx); err != nil {
+	cardMsgID := r.cardMsgID
+	r.mu.Unlock()
+
+	if err := r.render(ctx); err != nil {
 		r.logger.Warn("feishu receipt: heartbeat render failed",
-			"err", err, "card_msg_id", r.cardMsgID)
+			"err", err, "card_msg_id", cardMsgID)
 	}
-	// renderLocked already updates r.lastBodyPatch on success —
+	// render already updates r.lastBodyPatch on success —
 	// the throttle window advances automatically.
 }
 
@@ -563,12 +570,11 @@ func (r *MessageReceipt) AppendEntryWithFooter(ctx context.Context, entry LogEnt
 		return nil
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	// Build the would-be card body first so we can check the
 	// element / envelope budget BEFORE issuing any PATCH. The
 	// receipt's own lastBody is unchanged in the overflow path,
 	// so a subsequent successful append is a no-op (buildReceiptCard
-	// returns the same body, renderLocked skips the PATCH).
+	// returns the same body, render skips the PATCH).
 	//
 	// buildReceiptCard takes (entries, tasks, footerLines) directly
 	// — no struct copy — so we don't bypass the r.mu lock
@@ -580,6 +586,7 @@ func (r *MessageReceipt) AppendEntryWithFooter(ctx context.Context, entry LogEnt
 	}
 	body, elementCount, err := buildReceiptCard(proposed, r.tasks, r.footerLines, &r.heartbeat)
 	if err != nil {
+		r.mu.Unlock()
 		return fmt.Errorf("feishu receipt: build card for overflow check: %w", err)
 	}
 	// receiptBodyStats takes the elementCount from buildReceiptCard
@@ -589,11 +596,13 @@ func (r *MessageReceipt) AppendEntryWithFooter(ctx context.Context, entry LogEnt
 	// structurally impossible now.
 	elementCount, bodyBytes := receiptBodyStats(proposed, r.tasks, r.footerLines, body, elementCount)
 	if wouldReceiptOverflow(elementCount, bodyBytes) {
+		r.mu.Unlock()
 		return ErrReceiptOverflow
 	}
-	// Commit the entry + render.
+	// Commit the entry, then render unlocked.
 	r.entries = proposed
-	return r.renderLocked(ctx)
+	r.mu.Unlock()
+	return r.render(ctx)
 }
 
 // RolloverTo (fix-reply-placehold-card) transitions the receipt to
@@ -607,7 +616,7 @@ func (r *MessageReceipt) AppendEntryWithFooter(ctx context.Context, entry LogEnt
 //
 // Why a method, not just field assignment: cardMsgID, entries,
 // footerLines, lastBody, and lastBodyPatch all need to move
-// together. Doing it under r.mu keeps a concurrent renderLocked
+// together. Doing it under r.mu keeps a concurrent render
 // / SetPromptState from observing a half-migrated state.
 // lastBody + lastBodyPatch also need to be reset so the first
 // PATCH onto the new card isn't suppressed by the duplicate-body
@@ -644,7 +653,7 @@ func (r *MessageReceipt) RolloverTo(msgID string, firstEntry LogEntry, footerLin
 	r.footerLines = footerLines
 	// Reset render-state cache so the first PATCH on the new card
 	// is not skipped by the duplicate-body short-circuit
-	// (`body == r.lastBody` in renderLocked) and is not delayed by
+	// (`body == r.lastBody` in render) and is not delayed by
 	// the 300ms rate limiter measured against the old card's last
 	// PATCH time.
 	r.lastBody = ""
@@ -652,9 +661,14 @@ func (r *MessageReceipt) RolloverTo(msgID string, firstEntry LogEntry, footerLin
 	// tasks intentionally preserved — see method doc.
 }
 
-// renderLocked pushes the current rolling-log + task-checklist
-// snapshot to Feishu. Caller must hold r.mu.
-// Caller must hold r.mu.
+// render pushes the current rolling-log + task-checklist snapshot to
+// Feishu.
+//
+// Locking: render takes r.mu itself. Callers must NOT hold r.mu when
+// they call it — the mutex is not reentrant. The mutex guards the
+// receipt's state and serialises the render; the Feishu round-trip
+// still runs under it, so a slow API blocks the receipt's readers for
+// the duration of that call.
 //
 // F-44 simplified semantics:
 //   - If r.cardMsgID == "" → first render. Call SendCard to create the
@@ -669,90 +683,144 @@ func (r *MessageReceipt) RolloverTo(msgID string, firstEntry LogEntry, footerLin
 //     The card surface may be stale until the next render; we do NOT
 //     auto-create a new card on PATCH failure (avoids duplicate
 //     surfaces).
-func (r *MessageReceipt) renderLocked(ctx context.Context) error {
-	// F-42 review finding #4/#5: while ensureReceiptForTask is
-	// mid-SendCard, this placeholder is visible to concurrent
-	// goroutines but cardMsgID is still empty. If we proceeded to the
-	// `cardMsgID == ""` SendCard branch, a concurrent SetTaskList would
-	// create a SECOND card in chat (orphan). The ensure helper's own
-	// SendCard is the only legitimate card; any render triggered from
-	// elsewhere during this window is dropped — the data it added stays
-	// in the buffer, and the next renderLocked call AFTER the ensure
-	// helper finishes will pick it up and PATCH it into the canonical
-	// card. Data is preserved; visual churn is avoided.
-	if r.initializing {
-		return nil
-	}
-
-	// Build the card body. buildReceiptCard is in adapter.go.
-	body, _, err := buildReceiptCard(r.entries, r.tasks, r.footerLines, &r.heartbeat)
-	if err != nil {
-		r.logger.Warn("feishu receipt: build card failed",
-			"err", err, "state", r.promptState)
-		return fmt.Errorf("feishu receipt: build card: %w", err)
-	}
-
-	if r.cardMsgID == "" {
-		// First send: create the card. Capture the message id for
-		// subsequent PATCH calls.
-		//
-		// v1.3.x (§13.10): pass userMsgID as rootID so the cold-start
-		// card is rendered as a reply to the user's message. Once the
-		// card exists, PatchMessage preserves the thread across
-		// subsequent in-place edits.
-		//
-		// F-37: replyInThread=false — the cold-start card IS the
-		// pinned main-chat answer; thread-only would leave the main
-		// chat empty until the receipt PATCHes happen.
-		msgID, sendErr := r.bot.SendCardForReceipt(ctx, r.chatID, body, r.userMsgID, false)
-		if sendErr != nil {
-			r.logger.Warn("feishu receipt: create card failed",
-				"err", sendErr, "state", r.promptState)
-			return fmt.Errorf("feishu receipt: create card: %w", sendErr)
+//
+// The pacing WAIT runs OUTSIDE r.mu — the mutex is never held across a
+// sleep. A render that has to wait releases the lock, so Tasks() /
+// PromptState() / SetPromptState keep answering while the receipt is
+// pacing.
+func (r *MessageReceipt) render(ctx context.Context) error {
+	for {
+		// ── decide under the lock ──
+		r.mu.Lock()
+		// F-42 review finding #4/#5: while ensureReceiptForTask is
+		// mid-SendCard, this placeholder is visible to concurrent
+		// goroutines but cardMsgID is still empty. If we proceeded to the
+		// `cardMsgID == ""` SendCard branch, a concurrent SetTaskList would
+		// create a SECOND card in chat (orphan). The ensure helper's own
+		// SendCard is the only legitimate card; any render triggered from
+		// elsewhere during this window is dropped — the data it added stays
+		// in the buffer, and the next render call AFTER the ensure
+		// helper finishes will pick it up and PATCH it into the canonical
+		// card. Data is preserved; visual churn is avoided.
+		if r.initializing {
+			r.mu.Unlock()
+			return nil
 		}
-		r.cardMsgID = msgID
+
+		// Build the card body. buildReceiptCard is in adapter.go.
+		// The four inputs are read in the same critical section, so one
+		// render sees one self-consistent snapshot.
+		body, _, err := buildReceiptCard(r.entries, r.tasks, r.footerLines, &r.heartbeat)
+		if err != nil {
+			state := r.promptState
+			r.mu.Unlock()
+			r.logger.Warn("feishu receipt: build card failed",
+				"err", err, "state", state)
+			return fmt.Errorf("feishu receipt: build card: %w", err)
+		}
+
+		if r.cardMsgID == "" {
+			// First send: create the card. Capture the message id for
+			// subsequent PATCH calls.
+			//
+			// v1.3.x (§13.10): pass userMsgID as rootID so the cold-start
+			// card is rendered as a reply to the user's message. Once the
+			// card exists, PatchMessage preserves the thread across
+			// subsequent in-place edits.
+			//
+			// F-37: replyInThread=false — the cold-start card IS the
+			// pinned main-chat answer; thread-only would leave the main
+			// chat empty until the receipt PATCHes happen.
+			msgID, sendErr := r.bot.SendCardForReceipt(ctx, r.chatID, body, r.userMsgID, false)
+			if sendErr != nil {
+				state := r.promptState
+				r.mu.Unlock()
+				r.logger.Warn("feishu receipt: create card failed",
+					"err", sendErr, "state", state)
+				return fmt.Errorf("feishu receipt: create card: %w", sendErr)
+			}
+			r.cardMsgID = msgID
+			r.lastBody = body
+			r.lastBodyPatch = time.Now()
+			// F-53 follow-up: the cold-start card belongs to the running
+			// turn. The receipt is born chatsession.PromptRunning, so the
+			// FSM write below is normally a no-op and no reaction is due;
+			// when one IS due it goes out unlocked, since it is network
+			// I/O.
+			emoji, reactMsgID, due := r.setPromptStateLocked(chatsession.PromptRunning)
+			r.mu.Unlock()
+			if due {
+				r.addReaction(ctx, reactMsgID, emoji, chatsession.PromptRunning)
+			}
+			return nil
+		}
+
+		// Skip PATCHes when the body is identical to the previous render
+		// (common when rapid events don't actually change the card).
+		if body == r.lastBody {
+			r.mu.Unlock()
+			return nil
+		}
+		deadline := r.lastBodyPatch.Add(minPatchInterval)
+		r.mu.Unlock()
+
+		// ── pace outside the lock ──
+		waitUntil(deadline)
+
+		// ── re-check under the lock, then ship ──
+		r.mu.Lock()
+		// Rebuild from the current state: a PATCH must never ship a body
+		// older than what the card already shows.
+		body, _, err = buildReceiptCard(r.entries, r.tasks, r.footerLines, &r.heartbeat)
+		if err != nil {
+			state := r.promptState
+			r.mu.Unlock()
+			r.logger.Warn("feishu receipt: build card failed",
+				"err", err, "state", state)
+			return fmt.Errorf("feishu receipt: build card: %w", err)
+		}
+		if body == r.lastBody {
+			// Somebody else shipped this body while we waited.
+			r.mu.Unlock()
+			return nil
+		}
+		if time.Now().Before(r.lastBodyPatch.Add(minPatchInterval)) {
+			// A PATCH landed during our wait — pace another round.
+			r.mu.Unlock()
+			continue
+		}
+		// Subsequent: PATCH the existing card in place. The whole body
+		// is replaced; the server doesn't accept diffs.
+		if patchErr := r.bot.PatchMessage(ctx, r.cardMsgID, body); patchErr != nil {
+			state := r.promptState
+			cardMsgID := r.cardMsgID
+			r.mu.Unlock()
+			r.logger.Warn("feishu receipt: patch card failed",
+				"err", patchErr, "state", state, "card_msg_id", cardMsgID)
+			// F-46 follow-up: was wrapping the outer `err` (already
+			// returned from buildReceiptCard above), producing a
+			// "%!w(<nil>)" message and making errors.Is(err,
+			// ErrReceiptOverflow) return false in callers. Wrap
+			// patchErr so the upstream AppendEntryWithFooter caller
+			// can correctly route the overflow bail-out.
+			return fmt.Errorf("feishu receipt: patch card: %w", patchErr)
+		}
 		r.lastBody = body
 		r.lastBodyPatch = time.Now()
-		// F-53 follow-up: add the 🔄 "Running" reaction on the
-		// newly-created card. Idempotent — SetPromptState skips
-		// when state is already chatsession.PromptRunning.
-		r.SetPromptState(ctx, chatsession.PromptRunning)
+		r.mu.Unlock()
 		return nil
 	}
+}
 
-	// Skip PATCHes when the body is identical to the previous render
-	// (common when rapid events don't actually change the card) and
-	// pace the real PATCHes below Feishu's message-update rate limit.
-	if body == r.lastBody {
-		return nil
+// waitUntil sleeps until t.
+//
+// Deliberately not cancellable: the PATCH it guards carries a body the
+// caller already committed, and abandoning the wait would drop that
+// body. A single wait is bounded by minPatchInterval (300ms).
+func waitUntil(t time.Time) {
+	if d := time.Until(t); d > 0 {
+		time.Sleep(d)
 	}
-	const minPatchInterval = 300 * time.Millisecond
-	if wait := minPatchInterval - time.Since(r.lastBodyPatch); wait > 0 {
-		t := time.NewTimer(wait)
-		select {
-		case <-ctx.Done():
-			t.Stop()
-			return ctx.Err()
-		case <-t.C:
-		}
-	}
-
-	// Subsequent: PATCH the existing card in place. The whole body
-	// is replaced; the server doesn't accept diffs.
-	if patchErr := r.bot.PatchMessage(ctx, r.cardMsgID, body); patchErr != nil {
-		r.logger.Warn("feishu receipt: patch card failed",
-			"err", patchErr, "state", r.promptState, "card_msg_id", r.cardMsgID)
-		// F-46 follow-up: was wrapping the outer `err` (already
-		// returned from buildReceiptCard above), producing a
-		// "%!w(<nil>)" message and making errors.Is(err,
-		// ErrReceiptOverflow) return false in callers. Wrap
-		// patchErr so the upstream AppendEntryWithFooter caller
-		// can correctly route the overflow bail-out.
-		return fmt.Errorf("feishu receipt: patch card: %w", patchErr)
-	}
-	r.lastBody = body
-	r.lastBodyPatch = time.Now()
-	return nil
 }
 
 // receiptBodyStats returns the byte size of a card body and the

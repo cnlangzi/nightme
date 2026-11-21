@@ -18,7 +18,7 @@
 ## 1. 背景:为什么用 interactive card
 
 Feishu 适配器的出站消息走 `msg_type: "interactive"`(卡片),不是 `msg_type: "text"`:
-- `internal/channel/feishu/receipt.go` 的 `MessageReceipt.renderLocked` 首次 `SendCardForReceipt` 建卡,之后每次内容变化 `PatchMessage` 原地替换整张卡的 body
+- `internal/channel/feishu/receipt.go` 的 `MessageReceipt.render` 首次 `SendCardForReceipt` 建卡,之后每次内容变化 `PatchMessage` 原地替换整张卡的 body
 - `internal/channel/feishu/adapter.go` 的 `buildReceiptCard` 组装 card body(rolling-log entries + task checklist + heartbeat header + footer)
 - footer 用 `<hr>` + `<font color='grey'>`;按钮用 `action` + `button`
 
@@ -138,7 +138,7 @@ Agent: main | Model: MiniMax-M2.7 | Provider: minimax
 
 | 文件 / 符号 | 作用 |
 |---|---|
-| `internal/channel/feishu/receipt.go` `MessageReceipt.renderLocked` | 组装 card body 并发出:首帧 `SendCardForReceipt`,后续 `PatchMessage` 原地替换 |
+| `internal/channel/feishu/receipt.go` `MessageReceipt.render` | 组装 card body 并发出:首帧 `SendCardForReceipt`,后续 `PatchMessage` 原地替换 |
 | `internal/channel/feishu/adapter.go` `buildReceiptCard` | 构造 card body(heartbeat header + rolling-log entries + task checklist + footer) |
 | `internal/channel/feishu/adapter.go` `buildInteractiveCard` | `OutChoice` 权限卡 / 选择卡的 body 构造 |
 | `internal/channel/feishu/adapter.go` `sendContent` / `sendCardContent` | 透传到 lark client,支持任意 msgType;后者发已构建好的 card JSON |
@@ -173,7 +173,7 @@ Adapter.Send(OutboundMessage)
    │
    ├── OutReply / OutCommandReply
    │     → ensureReceiptForReplyWithFooter(首帧) / appendReplyToReceipt(后续)
-   │       → renderLocked(ctx) → SendCardForReceipt(首次) / PatchMessage(后续)
+   │       → render(ctx) → SendCardForReceipt(首次) / PatchMessage(后续)
    │     → 无锚点或溢出时 postOrphanReplyCard(顶层 card)
    │
    ├── OutTaskCreate / OutTaskUpdate
@@ -202,7 +202,7 @@ type MessageReceipt struct {
 }
 ```
 
-`renderLocked` 的 card-first 策略:
+`render` 的 card-first 策略:
 - 第一次:`SendCardForReceipt(chatID, buildReceiptCard(...), userMsgID, false)` 拿到 messageID
 - 之后:`PatchMessage(messageID, buildReceiptCard(...))` 整体替换
 
@@ -223,7 +223,7 @@ func (a *Adapter) PatchMessage(ctx context.Context, messageID, content string) e
 
 `PatchMessage` 调 `larkClient.Im.V1.Message.Patch(...)`(注意是 **Patch**,不是 Update -- Update 只能改文本)。`SendCardForReceipt` 是 `sendCardContent` 的薄包装。
 
-PATCH 失败时不降级为新消息 -- 记日志告警;下次 `renderLocked` 仍然 PATCH 同一个 messageID。
+PATCH 失败时不降级为新消息 -- 记日志告警;下次 `render` 仍然 PATCH 同一个 messageID。
 
 ### 5.5 卡片预算
 
@@ -433,7 +433,7 @@ text, hasMention := stripAndDetectMention(
 
 - 单元: `buildReceiptCard` 产出合法 JSON,`elements` 末尾是 `<hr>` + `<text_tag color='neutral'>` foot note;`footLine` 为空时整段省略
 - 单元: `footLine` 在 `state=executing, eventCount=5, lastEventAt=14:32:05` → `"executing · 5 entries · 14:32:05"`;`eventCount=0` 时不渲染 `0 entries`
-- 单元: `MessageReceipt.renderLocked` 第一次调 → `SendCard`;之后 → `PatchMessage` 同一个 messageID;**不再**调 `SendMessageText`
+- 单元: `MessageReceipt.render` 第一次调 → `SendCard`;之后 → `PatchMessage` 同一个 messageID;**不再**调 `SendMessageText`
 - 单元: 元素数 = 60 entries → 47 entries + `...(前 N 条已省略)` 标记
 - 单元: 字节数 = 收到超大 entries → 驱逐最老直到 < 24 KiB
 - 单元: 回归 `mockReceiptBot.AddReaction` 不变(v1.3 后,reaction 由 MessageState FSM 触发,仍走 userMsgID,但已从 MessageReceipt 解耦到 Adapter 顶层)
@@ -465,7 +465,7 @@ text, hasMention := stripAndDetectMention(
 | 文件 | 改动 |
 |---|---|
 | `internal/channel/feishu/adapter.go` | 新增 `updateMessageFunc` 字段、`patchViaLark`、`patchContent`、`UpdateMessage`、`SendCard`、`buildReceiptCard` |
-| `internal/channel/feishu/receipt.go` | 改 `renderLocked` 走 SendCard/PatchMessage;`receiptBot` 接口加 `SendCard`/`PatchMessage`;`MessageReceipt` 加 `cardMsgID`;`ReceiptState` 加 `footLine`;`replyMaxBytes` 改 24576 |
+| `internal/channel/feishu/receipt.go` | 改 `render` 走 SendCard/PatchMessage;`receiptBot` 接口加 `SendCard`/`PatchMessage`;`MessageReceipt` 加 `cardMsgID`;`ReceiptState` 加 `footLine`;`replyMaxBytes` 改 24576 |
 | `internal/channel/feishu/receipt_test.go` | `mockReceiptBot` 加 stubs;新增 / 重写 §7 列出的测试 |
 | `internal/channel/feishu/adapter_test.go` | 加 SendCard / PatchMessage 走通测试 |
 
@@ -488,7 +488,7 @@ type MessageReceipt struct {
     cardMsgID string  // 新增:首次 SendCard 后记录
 }
 
-func (r *MessageReceipt) renderLocked(ctx context.Context) error {
+func (r *MessageReceipt) render(ctx context.Context) error {
     r.appendReactionLocked(ctx, r.state.Emoji())
     body, err := buildReceiptCard(r)
     if err != nil { return err }
@@ -557,7 +557,7 @@ func (a *Adapter) UpdateMessage(ctx context.Context, messageID, content string) 
 **本期防御**:
 - `replyMaxBytes = 24 KB` -- 留 6 KB 头空间
 - entries 上限 = 47 -- 留 3 元素给 header/hr/footer
-- 5 QPS 频控靠 receipt 单线程 `renderLocked`(已串行)+ 实际 agent event 频率远低于 5/s,不主动限流
+- 5 QPS 频控靠 receipt 自己的 300ms 显式节流(两次 PATCH 间隔 ≥300ms,≈3.3 QPS)+ 实际 agent event 频率远低于 5/s,不主动限流
 
 **超出限制时的降级**: `PatchMessage` 失败 → 记录日志 + 下次 render 仍 PATCH 同一 messageID;不重发新消息以避免重复 receipt。**已知风险**: 持续失败 → 卡片一直不更新,直到 receipt 销毁。后续可加重试/降级到"再发新卡"。
 
@@ -2651,7 +2651,7 @@ nightme 的 feishu adapter hot path 完全同步 —— readPump → `EventCallb
 | PATCH message | 50 | 1000 | **5 QPS per message_id** |
 | Delete / AddReaction / Upload | 50 | 1000 | — |
 
-nightme 热路径被 **per-user 5 QPS** 约束 —— 单 chat PATCH storm 受 per-message_id 5 QPS 限制(由 `renderLocked` mutex 天然满足),多 chat 并发受 per-user 5 QPS 限制。
+nightme 热路径被 **per-user 5 QPS** 约束 —— 单 chat PATCH storm 受 per-message_id 5 QPS 限制(由 receipt 的 300ms 显式节流保证,mutex 提供串行化),多 chat 并发受 per-user 5 QPS 限制。
 
 ### 16.4 配置
 
@@ -2693,7 +2693,7 @@ var StrictDefault = config.FeishuRateLimitConfig{
 
 - **不改 `Channel` 接口契约**(`Send` 仍 fire-and-ack)
 - **不与 Layer 1 重试耦合**(retry 在 sendContent 外层,limiter 在 SDK call 内层;二者正交)
-- **不影响 per-message_id 5 QPS**(`renderLocked` mutex 天然满足)
+- **不影响 per-message_id 5 QPS**(由 receipt 的 300ms 显式节流保证,mutex 提供串行化)
 
 ### 16.7 监控埋点
 
@@ -2860,7 +2860,7 @@ Claude Code 的 `TaskCreate` / `TaskUpdate` 在 `--output-format stream-json` �
 
 - 整个 checklist 限定在 `divTextCharLimit` 内，超过时按 in-progress → pending → completed 优先级裁剪，并显示 `…另有 N 项任务`。
 - `buildReceiptCard` 在 element reservation 中预留 checklist element，与 entries / footer / hr 一起受 50 element / 24KB 预算约束。
-- 同 snapshot 重复导致 `body` 不变，依赖现有 `renderLocked` body diff 跳过 PATCH。
+- 同 snapshot 重复导致 `body` 不变，依赖现有 `render` body diff 跳过 PATCH。
 
 ### 18.5 测试
 

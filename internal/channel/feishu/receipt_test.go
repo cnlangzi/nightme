@@ -28,7 +28,12 @@ import (
 // the receiptBot interface for backward compatibility but no longer
 // called from production paths. The mock implements them as no-ops
 // to satisfy the interface contract.
+//
+// The recorded calls are guarded by mu so a test can inspect them
+// while a render is still in flight (the render path releases the
+// receipt's mutex while it paces).
 type mockReceiptBot struct {
+	mu          sync.Mutex
 	cards       []cardCall
 	patches     []cardCall
 	reactions   []reactionCall
@@ -48,7 +53,41 @@ type cardCall struct {
 	Body      string
 }
 
+// cardCount / patchCount / reactionCount read the recorded calls
+// under the mock's lock — safe to call while a render goroutine is
+// still running.
+func (m *mockReceiptBot) cardCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.cards)
+}
+
+func (m *mockReceiptBot) patchCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.patches)
+}
+
+func (m *mockReceiptBot) reactionCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.reactions)
+}
+
+// patchBodies returns a copy of the recorded PATCH bodies.
+func (m *mockReceiptBot) patchBodies() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]string, 0, len(m.patches))
+	for _, p := range m.patches {
+		out = append(out, p.Body)
+	}
+	return out
+}
+
 func (m *mockReceiptBot) AddReaction(_ context.Context, msgID, emoji string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.reactions = append(m.reactions, reactionCall{msgID, emoji})
 	return "mock-reaction-" + emoji, nil
 }
@@ -58,11 +97,15 @@ func (m *mockReceiptBot) UpdateMessage(_ context.Context, _, _ string) error {
 }
 
 func (m *mockReceiptBot) SendMessageText(_ context.Context, _, text, _ string, _ bool) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.messages = append(m.messages, text)
 	return "mock-text-msg", nil
 }
 
 func (m *mockReceiptBot) SendCardForReceipt(_ context.Context, _, body, _ string, _ bool) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.sendCardErr != nil {
 		return "", m.sendCardErr
 	}
@@ -76,6 +119,8 @@ func (m *mockReceiptBot) SendCardForReceipt(_ context.Context, _, body, _ string
 }
 
 func (m *mockReceiptBot) PatchMessage(_ context.Context, messageID, body string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.patchErr != nil {
 		return m.patchErr
 	}
@@ -283,7 +328,7 @@ func TestBuildReceiptCard_TaskOnly(t *testing.T) {
 
 	// Negative: with empty footerLines, no header / hr / footer
 	// markers. F-44 follow-up note: OutInit now stamps footer via
-	// StampFooterLines, which calls renderLocked AFTER populating
+	// StampFooterLines, which calls render AFTER populating
 	// r.footerLines, so the receipt-render path still picks up
 	// the footer. This test exercises the bare-tasks case (no
 	// StatusBar stamped) — the populated-footer case is covered
@@ -739,7 +784,7 @@ func TestTasks_NilReceiptReturnsNil(t *testing.T) {
 // the new OutInit handler's interaction with the receipt FSM.
 //
 // Three sub-cases:
-//  1. Pre-existing receipt → renderLocked's PATCH branch runs
+//  1. Pre-existing receipt → render's PATCH branch runs
 //     (PatchMessage observed by mockReceiptBot).
 //  2. Empty footerLines preserves a previously-stamped footer
 //     (symmetric with SetTaskListWithFooter's preserve-on-empty
@@ -750,7 +795,7 @@ func TestStampFooterLines_FollowupF44(t *testing.T) {
 	t.Run("patches pre-existing receipt", func(t *testing.T) {
 		bot := &mockReceiptBot{}
 		r := NewMessageReceiptForReply("oc_chat", "om_user", bot)
-		// Simulate a previously-sendCard'd receipt — renderLocked's
+		// Simulate a previously-sendCard'd receipt — render's
 		// PATCH branch fires when cardMsgID is non-empty.
 		r.cardMsgID = "om_card_existing"
 
@@ -785,4 +830,172 @@ func TestStampFooterLines_FollowupF44(t *testing.T) {
 			t.Errorf("nil.StampFooterLines: %v, want nil", err)
 		}
 	})
+}
+
+// TestRender_PacingWaitDoesNotHoldTheLock pins the render path's
+// lock discipline: the pacing wait between two PATCHes must NOT run
+// with r.mu held.
+//
+// The receipt's mutex guards state; it is never held across a sleep.
+// While a render paces, the receipt's other readers — Tasks(),
+// PromptState(), SetPromptState() — must keep answering. Holding the
+// lock across the wait stalls every one of them for the remainder of
+// the 300ms window, which is how a terminal ✅ reaction ends up
+// landing seconds late.
+func TestRender_PacingWaitDoesNotHoldTheLock(t *testing.T) {
+	bot := &mockReceiptBot{}
+	r := NewMessageReceiptForReply("oc_chat", "om_user", bot)
+	r.cardMsgID = "om_card"
+	ctx := context.Background()
+
+	if err := r.AppendEntry(ctx, LogEntry{Icon: "💬", Text: "first"}); err != nil {
+		t.Fatalf("first AppendEntry: %v", err)
+	}
+	if got := bot.patchCount(); got != 1 {
+		t.Fatalf("first AppendEntry patches = %d, want 1", got)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- r.AppendEntry(ctx, LogEntry{Icon: "💬", Text: "second"})
+	}()
+
+	// The second PATCH can only land minPatchInterval after the
+	// first one, so the render paces for the whole sampling window
+	// below. Sampling across the window means the probe necessarily
+	// lands inside the wait.
+	deadline := time.Now().Add(5 * time.Second)
+	for bot.patchCount() < 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("second AppendEntry never PATCHed")
+		}
+		t0 := time.Now()
+		_ = r.Tasks()
+		_ = r.PromptState()
+		if d := time.Since(t0); d > 50*time.Millisecond {
+			t.Fatalf("receipt readers blocked for %v during the pacing wait; want < 50ms", d)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("second AppendEntry: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("second AppendEntry did not return")
+	}
+}
+
+// TestRender_ColdStartDoesNotDeadlock pins that the cold-start
+// branch (cardMsgID == "") never re-enters r.mu.
+//
+// The branch used to call SetPromptState while already holding r.mu;
+// SetPromptState locks r.mu itself and sync.Mutex is not reentrant,
+// so the branch deadlocked the whole goroutine. The test runs the
+// append on its own goroutine with a timeout so a deadlock shows up
+// as a failure instead of a hang.
+func TestRender_ColdStartDoesNotDeadlock(t *testing.T) {
+	bot := &mockReceiptBot{}
+	r := NewMessageReceiptForReply("oc_chat", "om_user", bot)
+	// cardMsgID stays empty — this is the cold-start path.
+
+	done := make(chan error, 1)
+	go func() {
+		done <- r.AppendEntry(context.Background(), LogEntry{Icon: "💬", Text: "cold start"})
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("AppendEntry: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("AppendEntry deadlocked in the cold-start path")
+	}
+
+	if got := bot.cardCount(); got != 1 {
+		t.Fatalf("cards = %d, want 1 (the cold-start render creates exactly one card)", got)
+	}
+	// The receipt is born chatsession.PromptRunning, so the cold-start
+	// state migration is a no-op — no reaction is due.
+	if got := bot.reactionCount(); got != 0 {
+		t.Fatalf("reactions = %d, want 0 (the receipt was already PromptRunning)", got)
+	}
+}
+
+// TestRender_CancelledContextStillPaces pins that the pacing wait is
+// not cancellable.
+//
+// A render that has already decided to PATCH must not abandon the
+// wait when ctx dies mid-flight: the body was committed to the
+// receipt, and dropping the PATCH loses it from the card forever.
+// The wait is bounded by minPatchInterval (300ms).
+func TestRender_CancelledContextStillPaces(t *testing.T) {
+	bot := &mockReceiptBot{}
+	r := NewMessageReceiptForReply("oc_chat", "om_user", bot)
+	r.cardMsgID = "om_card"
+	ctx := context.Background()
+
+	// Prime lastBodyPatch so the next render has to pace.
+	if err := r.AppendEntry(ctx, LogEntry{Icon: "💬", Text: "first"}); err != nil {
+		t.Fatalf("first AppendEntry: %v", err)
+	}
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := r.AppendEntry(cancelled, LogEntry{Icon: "💬", Text: "second"}); err != nil {
+		t.Fatalf("AppendEntry with a cancelled ctx: %v", err)
+	}
+	if got := bot.patchCount(); got != 2 {
+		t.Fatalf("patches = %d, want 2 (a cancelled ctx must not skip the PATCH)", got)
+	}
+}
+
+// TestRender_FailedPatchKeepsState pins the failure contract: a
+// failed PATCH returns the error, keeps the committed entry, and
+// leaves the render cache untouched so the next render ships the
+// full body again.
+func TestRender_FailedPatchKeepsState(t *testing.T) {
+	bot := &mockReceiptBot{patchErr: errors.New("patch boom")}
+	r := NewMessageReceiptForReply("oc_chat", "om_user", bot)
+	r.cardMsgID = "om_card"
+	ctx := context.Background()
+
+	err := r.AppendEntry(ctx, LogEntry{Icon: "💬", Text: "first"})
+	if err == nil {
+		t.Fatal("AppendEntry = nil, want a patch error")
+	}
+	if !strings.Contains(err.Error(), "patch card") {
+		t.Fatalf("AppendEntry err = %v, want a patch card error", err)
+	}
+
+	r.mu.Lock()
+	entryCount := len(r.entries)
+	lastBody := r.lastBody
+	r.mu.Unlock()
+	if entryCount != 1 {
+		t.Fatalf("entries len = %d, want 1 (a failed PATCH must not roll the append back)", entryCount)
+	}
+	if lastBody != "" {
+		t.Fatalf("lastBody = %q, want empty (a failed PATCH must not advance the render cache)", lastBody)
+	}
+
+	// The next render ships the full body — the entry that failed to
+	// reach the card is not lost.
+	bot.mu.Lock()
+	bot.patchErr = nil
+	bot.mu.Unlock()
+	if err := r.AppendEntry(ctx, LogEntry{Icon: "💬", Text: "second"}); err != nil {
+		t.Fatalf("AppendEntry after the failed PATCH: %v", err)
+	}
+	bodies := bot.patchBodies()
+	if len(bodies) != 1 {
+		t.Fatalf("patches = %d, want 1 (the retry after the failed PATCH)", len(bodies))
+	}
+	if !strings.Contains(bodies[0], "first") || !strings.Contains(bodies[0], "second") {
+		t.Fatalf("retry PATCH body must carry both entries: %s", bodies[0])
+	}
 }

@@ -589,13 +589,13 @@ func TestRunAgentFor_SinkNilEmitter(t *testing.T) {
 // processed every enqueued event. The dispatcher's defer
 // cancel() fires AFTER finalize() returns (defer is LIFO,
 // and finalize is deferred LATER inside runAgentFor), so
-// the terminal OutHeartbeat's renderLocked is never racing
+// the terminal OutHeartbeat's render is never racing
 // a canceled ctx.
 //
 // Pre-fix behavior: runAgentFor returned as soon as RunOnce
 // returned. The drain goroutine was still processing the
 // tail of the event stream when dispatchCommit's defer
-// cancel fired, killing renderLocked mid-throttle and
+// cancel fired, killing render mid-throttle and
 // leaving the receipt card stuck on the pre-terminal
 // ⏱ / 💭 / 🔧 header.
 //

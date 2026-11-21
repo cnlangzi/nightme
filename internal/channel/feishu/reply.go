@@ -104,7 +104,7 @@
 // (ReplyInThread, F-37 tool-thread-routing) promoted userMsgID earlier
 // in the same turn, sendResultAsReply's "new reply" gets silently
 // absorbed into that thread, defeating F-39's "final answer must stay
-// visible in main chat" goal. The receipt card (renderLocked in
+// visible in main chat" goal. The receipt card (render in
 // receipt.go) already does this correctly — first render posts via
 // Reply, every subsequent render goes through PatchMessage against the
 // same cardMsgID — sendResultAsReply should eventually follow the same

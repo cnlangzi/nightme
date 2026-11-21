@@ -63,7 +63,7 @@ chat.stopStream(channel, ts)            → 终态封口
 - `receiptMaxElements = 50` 元素预算与 `wouldReceiptOverflow` 判定
 - `ErrReceiptOverflow` bail-out + `RolloverTo` 迁卡
 - `splitMarkdownForDivs` 按 `divTextCharLimit` 拆分
-- `renderLocked` 的 same-body 短路（防重复全量 PATCH）
+- `render` 的 same-body 短路（防重复全量 PATCH）
 - `SanitizeCardMarkdown` 六步管线（URL 白名单 / fence 换行 / 图片剥离 / 代码块保护 / 标题降级）
 
 ### 1.2 为什么不移植 Telegram 的占位链
@@ -143,7 +143,7 @@ cc-connect 有一份生产在跑的 Slack 实现，但它钉在 `slack-go v0.16.
 - 3 秒的刷新率对「agent 还活着」的表达完全够用
 - 与 `OutHeartbeat` 的 2 秒节流（Feishu `heartbeatMinInterval`）量级相当
 
-实现上沿用 Feishu `renderLocked` 的模式：**最小间隔 + 定时器等待 + `ctx.Done()` 可取消**，而不是简单丢弃。
+实现上沿用 Feishu `render` 的模式：**最小间隔 + 定时器等待**，而不是简单丢弃。
 
 ### 2.4 markdown 块的原生渲染
 

@@ -30,7 +30,7 @@ UX 上必须满足:
 - **OutboundKind 枚举**(`internal/messages/outbound.go`)已是事实上的"事件总线":新增一个 kind 即可被所有 channel adapter 自动按 Kind 分发,无需改 `Channel` 接口
 - **runtime handler 的 policy 链**(`internal/runtime/handler.go`)是天然的分层点:Translate → Identity stamp → **【插入心跳观测】** → Policies → Send
 - **`outbound.emitImpl.Send`** 是单一对外出口:任何 OutboundMessage 经过它都自动获得 telemetry / git status / rate limit 等现成行为
-- **Feishu `MessageReceipt`** 已是 PATCH-friendly:同一 `cardMsgID` 上 `renderLocked` 持续更新(300ms 节流 + same-body 短路)
+- **Feishu `MessageReceipt`** 已是 PATCH-friendly:同一 `cardMsgID` 上 `render` 持续更新(300ms 节流 + same-body 短路)
 
 ---
 
@@ -315,7 +315,7 @@ type MessageReceipt struct {
 }
 
 // ApplyHeartbeat 由 Adapter.Send 的 OutHeartbeat 分支调用。
-// 写入快照后只在 think/tool 计数发生变化时触发一次 renderLocked;
+// 写入快照后只在 think/tool 计数发生变化时触发一次 render;
 // 同一快照幂等(多次 ApplyHeartbeat(snap) 不会触发多次 PATCH)。
 func (r *MessageReceipt) ApplyHeartbeat(ctx context.Context, snap messages.HeartbeatSnapshot) {
     if r == nil { return }
@@ -333,7 +333,7 @@ func (r *MessageReceipt) ApplyHeartbeat(ctx context.Context, snap messages.Heart
         return  // 下次 ApplyHeartbeat 再补
     }
 
-    if err := r.renderLocked(ctx); err != nil {
+    if err := r.render(ctx); err != nil {
         r.logger.Warn("feishu receipt: heartbeat render failed",
             "err", err, "card_msg_id", r.cardMsgID)
     }
@@ -560,7 +560,7 @@ buildReceiptCard 的 switch 仍允许它落到后半部分分支(条件已扩为
 | `heartbeat_test.go` | `TestSnapshot_TerminalVisible` | Snapshot 读到的 Status 跟 Observe 写入一致 |
 | `heartbeat_test.go` | `TestSnapshot_ZeroValueForUnknownUserMsg` | 未观测的 userMsgID → empty snapshot |
 | `heartbeat_test.go` | `TestSnapshot_DoesNotMutateInternalState` | 修改 Snapshot 返回值不影响后续 Snapshot |
-| `heartbeat_receipt_test.go` | `TestApplyHeartbeat_Idempotent` | 同 snapshot 二次调用不触发 renderLocked |
+| `heartbeat_receipt_test.go` | `TestApplyHeartbeat_Idempotent` | 同 snapshot 二次调用不触发 render |
 | `heartbeat_receipt_test.go` | `TestApplyHeartbeat_Throttled` | 2s 内连续 ApplyHeartbeat 多次只渲染 ≤1 次 |
 | `heartbeat_receipt_test.go` | `TestApplyHeartbeat_PATCHCardHasHeader` | ApplyHeartbeat 后 buildReceiptCard 输出含 header(back part),且不出现 "🤖 Working" 前缀 |
 | `heartbeat_receipt_test.go` | `TestBuildReceiptCard_HeartbeatHeader_NilSnapshot` | hb=nil + 无 entries/tasks → 渲染 front part `"🤖 Working"`,不带任何计数/时间 |
@@ -605,7 +605,7 @@ buildReceiptCard 的 switch 仍允许它落到后半部分分支(条件已扩为
 - **回滚**: 5 个 commit 任一不放心 revert 即可,无破坏性 schema 变更。
 - **风险点**:
   - `HeartbeatTracker.mu` 持锁时间需短(只做 map + slice 操作,不调外部函数)——已确认
-  - `renderLocked` 的 2s 心跳节流不能影响 entries / tasks 的 300ms 节流——已通过单独字段隔离
+  - `render` 的 2s 心跳节流不能影响 entries / tasks 的 300ms 节流——已通过单独字段隔离
   - OutHeartbeat 不能被现有任何 policy 吞——已确认(handler 显式 em.Send 绕过 policies)
 - **不发版公告**: 变更记录在 commit log 与 GitHub PR。
 

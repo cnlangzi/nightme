@@ -41,6 +41,10 @@ type Server struct {
 	cancel    context.CancelFunc
 	closeOnce sync.Once
 
+	// serverLogger carries the logger the stop handler records the
+	// stop request through.
+	serverLogger
+
 	// closed is closed by Close() and watched by Serve so the
 	// accept loop can exit between iterations. pending lists
 	// in-flight pipe HANDLEs whose ConnectNamedPipe hasn't
@@ -313,6 +317,16 @@ func (s *Server) handle(conn *pipeInstance) {
 		// a no-op once we've removed it here.
 		s.untrackPipe(conn.handle)
 		s.stopOnce.Do(func() {
+			// The record of who asked the daemon to stop. The
+			// runtime's own "daemon stopping" line names the cause
+			// (a context cancellation); only this line says the
+			// control socket asked for it.
+			//
+			// Warn, not Info: the daemon's log level defaults to
+			// Warn, so an Info record would leave the attribution
+			// out of nightme.log unless the user asked for verbose
+			// logging.
+			s.log().Warn("daemon stop requested", "source", "control socket")
 			// Mirror server_unix.go's stop handler. See
 			// stop_fastpath.go for the shared fast-path rationale
 			// and stop_fastpath_test.go for the cross-platform

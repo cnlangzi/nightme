@@ -11,7 +11,43 @@
 // guarantee only one compiles per build).
 package daemoncontrol
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"log/slog"
+	"sync"
+)
+
+// serverLogger holds the logger the server writes its own lifecycle
+// records to. It is embedded in both platform servers so the field
+// and its accessor are defined once.
+//
+// The mutex is named loggerMu because the Windows server already has
+// a `mu` of its own (the pending-pipe lock): a field named `mu` here
+// would be shadowed on Windows and unshadowed on Unix, and `s.mu`
+// would mean two different things depending on the platform.
+type serverLogger struct {
+	loggerMu sync.RWMutex
+	logger   *slog.Logger
+}
+
+// SetLogger installs the logger. Call it before Serve: the "stop"
+// handler records the stop request through it, and that record is the
+// operator's only clue about who asked the daemon to go away.
+func (l *serverLogger) SetLogger(logger *slog.Logger) {
+	l.loggerMu.Lock()
+	defer l.loggerMu.Unlock()
+	l.logger = logger
+}
+
+// log returns the installed logger, falling back to slog.Default().
+func (l *serverLogger) log() *slog.Logger {
+	l.loggerMu.RLock()
+	defer l.loggerMu.RUnlock()
+	if l.logger != nil {
+		return l.logger
+	}
+	return slog.Default()
+}
 
 // HealthSource is one running channel's contribution to the "health"
 // RPC.

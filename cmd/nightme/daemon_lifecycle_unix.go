@@ -295,6 +295,10 @@ func runDaemonChild(cmd *cobra.Command, reg *cmdRegistry) (retErr error) {
 	if err != nil {
 		return failStartup(err)
 	}
+	// The server records the stop requests it receives — the daemon
+	// log is the only place that survives a stop, so the logger has
+	// to be in place before the first request can arrive.
+	server.SetLogger(loggerFromContext(cmd.Context()))
 	defer server.Close()
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- server.Serve() }()

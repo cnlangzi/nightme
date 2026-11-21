@@ -33,8 +33,8 @@ func (s *Service) renderWorkflow(r *run) string {
 		fmt.Fprintf(&b, "\njob %s — %s\n", name, roundsText(job))
 		for _, step := range job.Steps {
 			fmt.Fprintf(&b, "  %s (%s): %s\n", step.ID, stepKind(step), s.evalText(r, stepText(step)))
-			if note := strings.TrimSpace(step.Note); note != "" {
-				fmt.Fprintf(&b, "    note: %s\n", note)
+			if description := strings.TrimSpace(step.Description); description != "" {
+				fmt.Fprintf(&b, "    description: %s\n", description)
 			}
 			if step.Final {
 				b.WriteString("    final: it runs when the round ends, however the round ends\n")
@@ -180,9 +180,9 @@ func (s *Service) renderRepository(ctx context.Context, r *run) string {
 // renderRepair renders what the model has to repair and what it has
 // left to do it with.
 //
-// The step the judgment is about, its note, the commands the policy
-// accepts now, the chances left for it and the turns the agent spent
-// without acting.
+// The step the judgment is about, its description, the commands the
+// policy accepts now, the chances left for it and the turns the agent
+// spent without acting.
 func (s *Service) renderRepair(r *run) string {
 	stepID := r.budgetStep()
 	if stepID == "" {
@@ -195,8 +195,8 @@ func (s *Service) renderRepair(r *run) string {
 	var b strings.Builder
 	b.WriteString("\nrepair:\n")
 	fmt.Fprintf(&b, "  step: %s\n", step.ID)
-	if note := strings.TrimSpace(step.Note); note != "" {
-		fmt.Fprintf(&b, "  note: %s\n", note)
+	if description := strings.TrimSpace(step.Description); description != "" {
+		fmt.Fprintf(&b, "  description: %s\n", description)
 	}
 	if left, limit := r.stepUsage(step.ID); limit > 0 {
 		fmt.Fprintf(&b, "  chances left: %d of %d\n", limit-left, limit)

@@ -18,10 +18,20 @@ setlocal EnableExtensions EnableDelayedExpansion
 REM ---- version metadata ----
 set "TMPOUT=%TEMP%\nightme-build-%RANDOM%.tmp"
 
-REM Version: use env var if set, else default to 0.1.0
+REM Version: use env var if set, else default to dev
 if defined VERSION goto got_version
-set "VERSION=0.1.0"
+set "VERSION=dev"
 :got_version
+
+REM Winres version: the Windows resource file carries a plain number,
+REM because that is what a PE resource version is. A local build has
+REM no release number, so it falls back to the plain one; a release
+REM build injects a numeric VERSION and that one is used.
+if defined WINRES_VERSION goto got_winres_version
+set "WINRES_VERSION=0.0.0"
+:got_winres_version
+set "WINRES_VER=!VERSION!"
+if "!VERSION!"=="dev" set "WINRES_VER=!WINRES_VERSION!"
 
 REM Git commit: use env var if set, else from git
 if defined GIT_COMMIT goto got_commit
@@ -83,7 +93,7 @@ exit /b 1
 :have_winres
 
 pushd cmd\nightme
-go-winres make --in assets\winres.json --out rsrc --arch 386,amd64,arm64 --product-version !VERSION! --file-version !VERSION!
+go-winres make --in assets\winres.json --out rsrc --arch 386,amd64,arm64 --product-version !WINRES_VER! --file-version !WINRES_VER!
 set "WINRES_RC=!errorlevel!"
 popd
 if !WINRES_RC! neq 0 goto winres_failed

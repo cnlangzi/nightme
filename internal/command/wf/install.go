@@ -170,7 +170,8 @@ func (f *Factory) install(ctx context.Context, list *checklist, addr Address, fo
 	// ── validate ──────────────────────────────────────────────
 	list.set(rowValidate, agent.TaskInProgress, "")
 	_ = list.send()
-	if _, err := wfe.Parse(content); err != nil {
+	wf, err := wfe.Parse(content)
+	if err != nil {
 		problem := firstDiagnostic(err)
 		list.set(rowValidate, agent.TaskFailed, problem)
 		list.set(rowInstall, agent.TaskSkipped, "")
@@ -182,6 +183,7 @@ func (f *Factory) install(ctx context.Context, list *checklist, addr Address, fo
 	sum := sha256hex(content)
 	result.SHA256 = sum
 	list.set(rowValidate, agent.TaskCompleted, "ok · sha256 "+sum[:8])
+	requirement := requirementHint(wf)
 
 	// ── install ───────────────────────────────────────────────
 	list.set(rowInstall, agent.TaskInProgress, "")
@@ -189,7 +191,7 @@ func (f *Factory) install(ctx context.Context, list *checklist, addr Address, fo
 	existing, readErr := os.ReadFile(path)
 	switch {
 	case readErr == nil && sha256hex(existing) == sum:
-		list.set(rowInstall, agent.TaskCompleted, ReasonUnchanged+" · "+displayPath(path))
+		list.set(rowInstall, agent.TaskCompleted, withRequirement(ReasonUnchanged+" · "+displayPath(path), requirement))
 		_ = list.send()
 		result.Reason = ReasonUnchanged
 		return result
@@ -205,10 +207,36 @@ func (f *Factory) install(ctx context.Context, list *checklist, addr Address, fo
 		result.Detail = err.Error()
 		return result
 	}
-	list.set(rowInstall, agent.TaskCompleted, reason+" · "+displayPath(path))
+	list.set(rowInstall, agent.TaskCompleted, withRequirement(reason+" · "+displayPath(path), requirement))
 	_ = list.send()
 	result.Reason = reason
 	return result
+}
+
+// requirementHint says which nightme the installed workflow needs.
+//
+// The install does not refuse a workflow that needs a newer nightme:
+// the operator is told what it needs, and the run refuses it when the
+// workflow starts.
+func requirementHint(wf *wfe.Workflow) string {
+	requirement := strings.TrimSpace(wf.Requires.Nightme)
+	if requirement == "" {
+		return ""
+	}
+	constraint, err := wfe.ParseConstraint(requirement)
+	if err != nil {
+		return ""
+	}
+	return "this workflow needs nightme " + constraint.String()
+}
+
+// withRequirement appends the requirement of the installed workflow
+// to the detail of the install row.
+func withRequirement(detail, requirement string) string {
+	if requirement == "" {
+		return detail
+	}
+	return detail + " · " + requirement
 }
 
 // download fetches the workflow file, tier by tier.

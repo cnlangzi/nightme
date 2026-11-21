@@ -258,7 +258,8 @@ func (p *Policy) Remaining() Remaining {
 }
 
 // Render returns the workflow as a compact text block for the agent's
-// system prompt: the title, the steps with their notes and the budget.
+// system prompt: the title, the steps with their descriptions and the
+// budget.
 func (p *Policy) Render() string {
 	var b strings.Builder
 	if p.Workflow != nil {
@@ -276,8 +277,8 @@ func (p *Policy) Render() string {
 	b.WriteString("steps:\n")
 	for i, step := range p.steps() {
 		fmt.Fprintf(&b, "%d. %s\n", i+1, stepLabel(step))
-		if step.Note != "" {
-			fmt.Fprintf(&b, "   note: %s\n", step.Note)
+		if step.Description != "" {
+			fmt.Fprintf(&b, "   description: %s\n", step.Description)
 		}
 	}
 	return b.String()

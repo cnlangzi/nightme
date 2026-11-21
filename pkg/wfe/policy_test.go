@@ -574,3 +574,24 @@ jobs:
 		t.Errorf("ConsecutiveStalls() = %d, want 0", pol.ConsecutiveStalls())
 	}
 }
+
+// TestPolicy_Render_CarriesTheDescription — the step description is
+// rendered under its own label.
+func TestPolicy_Render_CarriesTheDescription(t *testing.T) {
+	wf := mustParse(t, `
+title: described
+jobs:
+  main:
+    steps:
+      - id: fix
+        message: /gtw fix
+        description: what the step is for
+`)
+	out := NewPolicy(wf, nil).Render()
+	if !strings.Contains(out, "description: what the step is for") {
+		t.Errorf("the rendered workflow does not carry the description:\n%s", out)
+	}
+	if strings.Contains(out, "note:") {
+		t.Errorf("the rendered workflow carries a note label:\n%s", out)
+	}
+}

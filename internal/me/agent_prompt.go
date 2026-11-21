@@ -23,7 +23,7 @@ func (s *Service) systemPrompt(r *run) string {
 	b.WriteString("An outcome that carries no error is a normal result: the workflow moves on by itself, and there is nothing there for you to repair. You are here for the steps that broke.\n\n")
 
 	b.WriteString("## The workflow\n")
-	b.WriteString("The title is the objective. The steps are the owner's procedure for reaching it; each note says why a step is there and which fixes the owner uses for it. A step's note is the owner's instruction for that step: it says what the step means and what to do when it does not deliver. The note wins over the ready set and over your own judgment. Follow their order. The nightme commands are yours to run as fixes, but only a step's own run moves the work on.\n")
+	b.WriteString("The title is the objective. The steps are the owner's procedure for reaching it; each step carries a description: what the step is, which outcome is its normal branch and what to do when it is not. A step's description is the owner's instruction for that step. The description wins over the ready set and over your own judgment. Follow their order. The nightme commands are yours to run as fixes, but only a step's own run moves the work on.\n")
 	b.WriteString("A step that waits sits out a duration. A wait belongs at the start of a round: it is how a repeating job backs off when there is nothing to do. A step marked as the final step cleans up after the round: it runs when the round ends, however the round ends.\n\n")
 
 	b.WriteString("## Your tools\n")

@@ -30,12 +30,26 @@ type Workflow struct {
 	// loaded from under the workflows directory.
 	// "nightme/coder/workflow.yml" is the workflow "nightme/coder".
 	// The loader sets it; the file does not carry it.
-	Name       string         `yaml:"-" json:"name"`
-	Args       []Arg          `yaml:"args" json:"args,omitempty"`
-	Instruct   bool           `yaml:"instruct" json:"instruct"`
-	Workspaces []string       `yaml:"workspaces" json:"workspaces,omitempty"`
-	On         Trigger        `yaml:"on" json:"on"`
-	Jobs       map[string]Job `yaml:"jobs" json:"jobs"`
+	Name       string   `yaml:"-" json:"name"`
+	Args       []Arg    `yaml:"args" json:"args,omitempty"`
+	Instruct   bool     `yaml:"instruct" json:"instruct"`
+	Workspaces []string `yaml:"workspaces" json:"workspaces,omitempty"`
+	// Requires holds the versions the workflow needs to run. A
+	// workflow that names none runs on every nightme.
+	Requires Requires       `yaml:"requires,omitempty" json:"requires,omitzero"`
+	On       Trigger        `yaml:"on" json:"on"`
+	Jobs     map[string]Job `yaml:"jobs" json:"jobs"`
+}
+
+// Requires holds the versions a workflow needs.
+//
+// The key names the object the requirement is about; the only object
+// is nightme itself.
+type Requires struct {
+	// Nightme is the version constraint the running nightme has to
+	// satisfy. An empty value means the workflow needs no particular
+	// nightme.
+	Nightme string `yaml:"nightme,omitempty" json:"nightme,omitempty"`
 }
 
 // UnmarshalJSON reads a workflow, migrating the retired `goal` key
@@ -149,14 +163,15 @@ type AgentChain struct {
 // Step is one unit of work inside a job: exactly one of message,
 // shell, use or wait is set.
 //
-// Note explains why the step is there and which fixes the owner uses
-// for it.
+// Description tells the model what the step is, which outcome is the
+// normal branch and what to do when it is not. The decision model
+// and the chat model both read it.
 type Step struct {
 	ID              string            `yaml:"id,omitempty" json:"id,omitempty"`
 	If              string            `yaml:"if,omitempty" json:"if,omitempty"`
 	Env             map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
 	ContinueOnError bool              `yaml:"continue-on-error,omitempty" json:"continue-on-error,omitempty"`
-	Note            string            `yaml:"note,omitempty" json:"note,omitempty"`
+	Description     string            `yaml:"description,omitempty" json:"description,omitempty"`
 	// Final marks the step that cleans up after the round. It runs
 	// when the round ends, however the round ends.
 	Final bool `yaml:"final,omitempty" json:"final,omitempty"`

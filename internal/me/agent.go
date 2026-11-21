@@ -584,6 +584,13 @@ func (s *Service) StartWorkflow(ctx context.Context, req Request) (string, strin
 			req.Name, strings.Join(s.catalog.Names(), ", "))
 	}
 
+	// The workflow's version requirement is checked before the run
+	// starts: a workflow that needs a newer nightme does not run on
+	// this one.
+	if err := requirementError(wf); err != nil {
+		return "", "", err
+	}
+
 	values, err := mapArgValues(wf, req.Args)
 	if err != nil {
 		return "", "", err

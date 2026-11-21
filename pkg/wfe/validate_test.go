@@ -181,7 +181,7 @@ jobs:
         env:
           FOO: bar
         continue-on-error: true
-        note: a note
+        description: what the step is for
         final: false
         message: hi
       - id: two
@@ -539,5 +539,115 @@ func TestValidateDir_ReportsADuplicateUnderItsRelativeName(t *testing.T) {
 	}
 	if !strings.Contains(diags[0].Message, `duplicate workflow name "nightme/coder"`) {
 		t.Errorf("the diagnostic = %q, want the clash", diags[0].Message)
+	}
+}
+
+// TestValidate_TheRequiresIsKnown — a workflow that names the nightme
+// it needs is a valid workflow.
+func TestValidate_TheRequiresIsKnown(t *testing.T) {
+	diags := Validate([]byte(`
+title: x
+requires:
+  nightme: ">=0.10.0"
+jobs:
+  main:
+    steps: [{message: hi}]
+`))
+	if len(diags) != 0 {
+		t.Fatalf("diagnostics = %v, want none", diags)
+	}
+}
+
+// TestValidate_AnUnknownObjectUnderRequires — the object a
+// requirement is about has to be one the schema knows.
+func TestValidate_AnUnknownObjectUnderRequires(t *testing.T) {
+	diags := Validate([]byte(`
+title: x
+requires:
+  ocr: ">=1.0.0"
+jobs:
+  main:
+    steps: [{message: hi}]
+`))
+	if len(diags) != 1 {
+		t.Fatalf("diagnostics = %v, want one", diags)
+	}
+	if !strings.Contains(diags[0].Message, `unknown key "ocr"`) {
+		t.Errorf("the diagnostic = %q, want the unknown key", diags[0].Message)
+	}
+}
+
+// TestValidate_ABadConstraint — a constraint that does not parse is a
+// problem of the file, and it is reported where it stands.
+func TestValidate_ABadConstraint(t *testing.T) {
+	diags := Validate([]byte(`
+title: x
+requires:
+  nightme: "0.10.0"
+jobs:
+  main:
+    steps: [{message: hi}]
+`))
+	if len(diags) != 1 {
+		t.Fatalf("diagnostics = %v, want one", diags)
+	}
+	if !strings.Contains(diags[0].Message, "requires nightme") {
+		t.Errorf("the diagnostic = %q, want it to name the requirement", diags[0].Message)
+	}
+	if diags[0].Line != 4 {
+		t.Errorf("the diagnostic is on line %d, want 4", diags[0].Line)
+	}
+}
+
+// TestValidate_TheRetiredNoteIsAnUnknownKey — the step description used
+// to be called a note; the key is not read any more.
+func TestValidate_TheRetiredNoteIsAnUnknownKey(t *testing.T) {
+	diags := Validate([]byte(`
+title: x
+jobs:
+  main:
+    steps:
+      - id: one
+        message: hi
+        note: the old description
+`))
+	if len(diags) != 1 {
+		t.Fatalf("diagnostics = %v, want one", diags)
+	}
+	if !strings.Contains(diags[0].Message, `unknown key "note"`) {
+		t.Errorf("the diagnostic = %q, want the unknown key", diags[0].Message)
+	}
+}
+
+// TestValidate_AnEmptyRequiresNamesNoRequirement — an empty block is
+// the same as not writing it.
+func TestValidate_AnEmptyRequiresNamesNoRequirement(t *testing.T) {
+	diags := Validate([]byte(`
+title: x
+requires:
+jobs:
+  main:
+    steps: [{message: hi}]
+`))
+	if len(diags) != 0 {
+		t.Fatalf("diagnostics = %v, want none", diags)
+	}
+}
+
+// TestValidate_ARequiresThatIsNotAMapping — the block is a mapping of
+// the objects the requirements are about.
+func TestValidate_ARequiresThatIsNotAMapping(t *testing.T) {
+	diags := Validate([]byte(`
+title: x
+requires: ">=0.10.0"
+jobs:
+  main:
+    steps: [{message: hi}]
+`))
+	if len(diags) != 1 {
+		t.Fatalf("diagnostics = %v, want one", diags)
+	}
+	if !strings.Contains(diags[0].Message, "`requires:` must be a mapping") {
+		t.Errorf("the diagnostic = %q, want the shape of the block", diags[0].Message)
 	}
 }

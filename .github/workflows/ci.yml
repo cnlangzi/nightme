@@ -277,6 +277,40 @@ jobs:
         shell: bash
         run: go test -count=1 ./...
 
+      # The update prompt tests that reach the real world.
+      #
+      # The prompt has no seam: it loads the real config, downloads
+      # a release into the real data directory, installs it over
+      # the running binary and restarts the daemon. A test that
+      # accepts the offer therefore stops the developer's daemon —
+      # the install step spawns `nightme restart`, which asks the
+      # daemon to stop over its control socket.
+      #
+      # Those tests carry the `liveupdate` build tag
+      # (cmd/nightme/repl_update_live_test.go), so `make test` on
+      # a developer machine never compiles them: it must not
+      # download 20 MB into their data directory nor stop their
+      # daemon. CI runs them here instead, where no daemon is
+      # running and the data directory is a temporary one, so the
+      # live chain (check → download → verify → install) is
+      # exercised without an operator's machine anywhere near it.
+      #
+      # ubuntu only: the install half replaces the running binary,
+      # which Windows refuses to do (the file is locked by the
+      # process running it), and the release download is the same
+      # on every OS.
+      #
+      # The run is narrowed to the live tests: the data directory
+      # below is an environment override, and it would move the
+      # workflows of every other test of the package away from the
+      # directory their own config points at.
+      - name: Test (live update path)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        env:
+          NIGHTME_PATHS_DATA_DIR: ${{ runner.temp }}/nightme-live-update
+        run: go test -race -tags liveupdate -count=1 -run 'TestPrompt_LiveUpdate' ./cmd/nightme/
+
       # macOS-only race-stress sweep on the codex bridge.
       # The stderr-drain / cmd.Wait pipe race (fixed in
       # commit 7cc5a02-pre-fix codex/print.go ordering) has a

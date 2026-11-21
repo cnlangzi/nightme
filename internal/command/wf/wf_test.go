@@ -995,3 +995,46 @@ func TestUninstall_ABundleThatCannotBeReachedFails(t *testing.T) {
 		t.Errorf("the remove row is %v, want it failed", status)
 	}
 }
+
+// TestInstall_SaysWhatTheWorkflowNeeds — the install says which
+// nightme the workflow needs, and it does not refuse it.
+func TestInstall_SaysWhatTheWorkflowNeeds(t *testing.T) {
+	dir := t.TempDir()
+	body := "title: code it\nrequires:\n  nightme: \">=0.10.0\"\njobs:\n  main:\n    steps: [{message: hi}]\n"
+	tier, srv := servingTier("github", body)
+	defer srv.Close()
+
+	f := testFactory(dir, []Source{tier}, nil)
+	col := &collector{}
+	list := newChecklist("download nightme/coder", col.emit)
+
+	result := f.install(context.Background(), list, Address{Owner: "nightme", Name: "coder"}, false)
+	if result.Reason != ReasonInstalled {
+		t.Fatalf("the reason is %q (%s), want %q", result.Reason, result.Detail, ReasonInstalled)
+	}
+	_, detail := col.last(rowInstall)
+	if !strings.Contains(detail, "this workflow needs nightme >= 0.10.0") {
+		t.Errorf("the install row says %q, want the requirement", detail)
+	}
+}
+
+// TestInstall_AWorkflowWithoutARequirementSaysNothing — the row
+// carries the path and nothing else.
+func TestInstall_AWorkflowWithoutARequirementSaysNothing(t *testing.T) {
+	dir := t.TempDir()
+	tier, srv := servingTier("github", validWorkflow)
+	defer srv.Close()
+
+	f := testFactory(dir, []Source{tier}, nil)
+	col := &collector{}
+	list := newChecklist("download nightme/coder", col.emit)
+
+	result := f.install(context.Background(), list, Address{Owner: "nightme", Name: "coder"}, false)
+	if result.Reason != ReasonInstalled {
+		t.Fatalf("the reason is %q (%s), want %q", result.Reason, result.Detail, ReasonInstalled)
+	}
+	_, detail := col.last(rowInstall)
+	if strings.Contains(detail, "needs nightme") {
+		t.Errorf("the install row says %q, want no requirement", detail)
+	}
+}

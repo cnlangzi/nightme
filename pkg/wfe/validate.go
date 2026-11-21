@@ -146,6 +146,8 @@ func checkShape(root *yaml.Node) []Diagnostic {
 		switch e.key {
 		case "args":
 			diags = append(diags, checkMappingList("`args:`", e.val)...)
+		case "requires":
+			diags = append(diags, checkRequiresShape(e.val)...)
 		case "on":
 			diags = append(diags, checkTrigger(e.val)...)
 		case "jobs":
@@ -153,6 +155,20 @@ func checkShape(root *yaml.Node) []Diagnostic {
 		}
 	}
 	return diags
+}
+
+// checkRequiresShape validates the `requires:` block of a workflow.
+//
+// An empty block names no requirement: it is the same as not writing
+// it.
+func checkRequiresShape(node *yaml.Node) []Diagnostic {
+	if node.Kind == yaml.ScalarNode && node.Tag == "!!null" {
+		return nil
+	}
+	if node.Kind != yaml.MappingNode {
+		return []Diagnostic{diagnosticAt(node, fmt.Errorf("`requires:` must be a mapping (got %s)", nodeKind(node)))}
+	}
+	return nil
 }
 
 // checkMappingList checks that a node holds a list of mappings.
@@ -222,6 +238,7 @@ func checkSemantics(wf *Workflow, root *yaml.Node) []Diagnostic {
 	if !hasKey(root, "instruct") {
 		wf.Instruct = true
 	}
+	diags = append(diags, checkRequires(wf, root)...)
 
 	seenArgs := map[string]bool{}
 	for i, arg := range wf.Args {
@@ -308,6 +325,22 @@ func checkSemantics(wf *Workflow, root *yaml.Node) []Diagnostic {
 	return diags
 }
 
+// checkRequires checks the version requirements of a workflow.
+//
+// A constraint that does not parse is a problem of the file: the
+// workflow asks for a nightme that cannot be read.
+func checkRequires(wf *Workflow, root *yaml.Node) []Diagnostic {
+	requirement := strings.TrimSpace(wf.Requires.Nightme)
+	if requirement == "" {
+		return nil
+	}
+	if _, err := ParseConstraint(requirement); err != nil {
+		node := mappingValue(mappingValue(root, "requires"), "nightme")
+		return []Diagnostic{diagnosticAt(node, fmt.Errorf("requires nightme: %w", err))}
+	}
+	return nil
+}
+
 // checkArgExpressions reports every expression that names an
 // argument the workflow does not declare.
 //
@@ -351,6 +384,8 @@ func checkRootKeys(node *yaml.Node) []Diagnostic {
 			for i, item := range sequenceItems(e.val) {
 				diags = append(diags, checkKeys(item, reflect.TypeOf(Arg{}), fmt.Sprintf("argument %d", i+1))...)
 			}
+		case "requires":
+			diags = append(diags, checkKeys(e.val, reflect.TypeOf(Requires{}), "requires")...)
 		case "on":
 			diags = append(diags, checkTriggerKeys(e.val)...)
 		case "jobs":

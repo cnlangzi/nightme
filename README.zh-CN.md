@@ -462,10 +462,10 @@ agent——`/me`——在你发起它的那个 chat 里跑一个 workflow。每�
 
 | 子命令 | 作用 |
 |---|---|
-| `nightme workflow list` | 汇总每个 workflow：名称、title、workspaces、触发器、jobs。没加载成功的文件列在表格下面。`--json` 输出机器可读。 |
+| `nightme workflow list` | 汇总每个 workflow：名称、title、workspaces、触发器、jobs、版本要求。没加载成功的文件列在表格下面。`--json` 输出机器可读。 |
 | `nightme workflow show <name>` | 打印一个 workflow 的解析细节：触发器、jobs、steps。 |
 | `nightme workflow run <name>` | 打印执行计划——哪些 step 跑、什么顺序。`--workspace` 覆盖 workspace。 |
-| `nightme workflow validate [path...]` | 检查 workflow 文件，把每个问题都报出来：缺 title、一个 step 写了两种类型、schema 里没有的 key。每个问题一行——`path:line:column: message`。不是磁盘上路径的参数会当成 workflow 名字查，所以 `nightme workflow validate nightme/coder` 校验的就是那个 workflow。全部合法时退出码 `0`，有 workflow 不合法是 `8`，给的路径不存在或读不了是 `9`。`--json` 输出机器可读。 |
+| `nightme workflow validate [path...]` | 检查 workflow 文件，把每个问题都报出来：缺 title、一个 step 写了两种类型、schema 里没有的 key。每个问题一行——`path:line:column: message`。不是磁盘上路径的参数会当成 workflow 名字查，所以 `nightme workflow validate nightme/coder` 校验的就是那个 workflow。全部合法时退出码 `0`，有 workflow 不合法是 `8`，给的路径不存在或读不了是 `9`。workflow 要求的 nightme 版本这个构建满足不了时，它是一条 warning，写到 stderr，退出码不变。`--json` 输出机器可读。 |
 
 不带 owner 的名字就是项目自己的命名空间：`coder` 就是 workflow `nightme/coder`。`show`、`run`、`validate` 收全名的地方都收这个短写法。
 
@@ -503,34 +503,34 @@ jobs:
     steps:
       - id: wait
         wait: 5m
-        note: 这一轮先等 5 分钟再挑下一个。队列空时这一轮没有活干，这一步就是两轮之间的退避。
+        description: 这一轮先等 5 分钟再挑下一个。队列空时这一轮没有活干，这一步就是两轮之间的退避。
       - id: fix
         message: "/gtw fix ${{ args.issue }} -y"
-        note: 从 nightme/assigned 队列挑一个 open issue，交给 agent 在 worktree 里修。队列空时它报 no_candidate —— 这不是错误，是正常工作流的一个分支：引擎会跳过本轮后面的步、跑 wait 退避 5 分钟，再挑下一个。只有 data.issue 有值，后面的步骤才跑。
+        description: 从 nightme/assigned 队列挑一个 open issue，交给 agent 在 worktree 里修。队列空时它报 no_candidate —— 这不是错误，是正常工作流的一个分支：引擎会跳过本轮后面的步、跑 wait 退避 5 分钟，再挑下一个。只有 data.issue 有值，后面的步骤才跑。
       - id: commit
         message: "/gtw commit"
         if: ${{ steps.fix.outputs.data.issue }}
-        note: 把 agent 的改动提交成 commit。命令会告诉你修改有没有进到 git 里：提交上了是正常；没提交上但活已经干完了（agent 自己提交的）也是正常；outcome 带 error 才是异常（nothing_to_commit），那时再决定要不要让 agent 去改。
+        description: 把 agent 的改动提交成 commit。命令会告诉你修改有没有进到 git 里：提交上了是正常；没提交上但活已经干完了（agent 自己提交的）也是正常；outcome 带 error 才是异常（nothing_to_commit），那时再决定要不要让 agent 去改。
       - id: review
         message: "/review"
         if: ${{ steps.fix.outputs.data.issue }}
-        note: review 当前分支与默认分支的差异，findings 回到聊天里。中断（还有组没跑完）用 /review -c 续跑，换 agent 接手就加 -a；already_running 就等它结束。no_diff 是异常：fix 本该改出了东西，分支却和 base 一样 —— instruct 让 agent 真正改出来，再跑 commit 和 review；base_unknown 是 base 分支没解析出来，也什么都没 review，先弄清 base 再跑 review。
+        description: review 当前分支与默认分支的差异，findings 回到聊天里。中断（还有组没跑完）用 /review -c 续跑，换 agent 接手就加 -a；already_running 就等它结束。no_diff 是异常：fix 本该改出了东西，分支却和 base 一样 —— instruct 让 agent 真正改出来，再跑 commit 和 review；base_unknown 是 base 分支没解析出来，也什么都没 review，先弄清 base 再跑 review。
       - id: commit2
         message: "/gtw commit"
         if: ${{ steps.fix.outputs.data.issue }}
-        note: 把 review 之后的修改提交成 commit。findings 先评估：只有成立且必要的才修，其余驳回 —— 要修的用 instruct 把这几条 findings 交给 agent 改，改完跑 commit2 提交。outcome 不带 error 就是正常：findings 已修好并提交，或没有必须修的 findings —— 结果够用，跑 push 继续；带 error 才是异常（nothing_to_commit：工作区没有改动，findings 还没修好），先让 agent 去改。
+        description: 把 review 之后的修改提交成 commit。findings 先评估：只有成立且必要的才修，其余驳回 —— 要修的用 instruct 把这几条 findings 交给 agent 改，改完跑 commit2 提交。outcome 不带 error 就是正常：findings 已修好并提交，或没有必须修的 findings —— 结果够用，跑 push 继续；带 error 才是异常（nothing_to_commit：工作区没有改动，findings 还没修好），先让 agent 去改。
       - id: push
         message: "/gtw push"
         if: ${{ steps.fix.outputs.data.issue }}
-        note: 把分支推到远端。命令会告诉你有没有东西没推：本地已经全部在远端是正常的（可能 agent 自己推过），本地还有没推的才是异常，那时回 commit 那一步。
+        description: 把分支推到远端。命令会告诉你有没有东西没推：本地已经全部在远端是正常的（可能 agent 自己推过），本地还有没推的才是异常，那时回 commit 那一步。
       - id: pr
         message: "/gtw pr"
         if: ${{ steps.fix.outputs.data.issue }}
-        note: 给分支开 PR。pr_exists 说明这个分支的 PR 已经开过，这也是正常的，结果够用，跑 back 继续；no_remote_branch 或 no_commits 时分别先跑 push 或先跑 commit。
+        description: 给分支开 PR。pr_exists 说明这个分支的 PR 已经开过，这也是正常的，结果够用，跑 back 继续；no_remote_branch 或 no_commits 时分别先跑 push 或先跑 commit。
       - id: back
         message: "/gtw back"
         if: ${{ steps.fix.outputs.data.issue }}
-        note: 修复做完后回到主仓库目录 —— 下一轮的 fix 必须从 main 开始，worktree 里不允许开下一个 fix（/gtw fix 会报 already_active）。
+        description: 修复做完后回到主仓库目录 —— 下一轮的 fix 必须从 main 开始，worktree 里不允许开下一个 fix（/gtw fix 会报 already_active）。
 ```
 
 部署方式：把这份文件写到 `~/.nightme/workflows/fix-issue/workflow.yml`，`/me start fix-issue` 就跑它。没加载成功的文件按它自己的名字报错，旁边的 workflow 照常工作。
@@ -543,8 +543,18 @@ jobs:
 | `args` | 这个 workflow 接受的参数。一个参数规格是带 `name` 和可选 `default` 的映射：有 `default` 就是可选参数，没有就是必填参数。 |
 | `instruct` | agent 能不能发自由指令。默认 true。 |
 | `workspaces` | 这个 workflow 点名的工作区。可选——运行用的是发起它的那个 chat 的工作区。 |
+| `requires` | 这个 workflow 需要的版本。可选——不写就在每个 nightme 上都能跑。 |
 | `on` | 触发器块。它被解析和展示，目前没有东西会触发它。 |
 | `jobs` | 各个 job，每个带一份有序的 `steps`。必填。 |
+
+workflow 也可以点名它需要哪个 nightme：
+
+```yaml
+requires:
+  nightme: ">=0.10.0"
+```
+
+这个值是一段版本约束：一个比较符（`>=`、`>`、`<=`、`<`、`=`、`!=`）加一个版本，逗号表示"且"——`">=0.10.0, <0.12.0"`。运算符必须写。运行开始时检查这条要求：版本太旧的构建会拒绝这次运行，并把两边的版本都说出来。开发版构建和 CI 版构建没有发布版本号，根本不检查这条要求。
 
 一个 job 带 `needs`、`if`、`iterations` 和 `steps`。`iterations` 是这个 job 跑多少轮：不填就是一轮，`0` 是"一直跑到运行结束"，`N` 就是 `N` 轮。`/me start -i <rounds>` 在这一次运行里覆盖它：workflow 的每个 job 都跑命令行指定的那个轮数。一轮在这个 job 的 step 跑完时结束；下一轮从这个 job 的第一个 step 开始，上一轮的 step 产出被清空，每个 step 的预算也重新开始。一轮里一个 step 都没跑的 job 不会再重复——每个 step 都被跳过的这一轮什么也没做。重复的 job 最好带一个 `wait:` step，不然一轮接一轮地跑，追着 chat 的速度。一轮也可以提前结束——这一轮真的没东西可做时由 agent 结束它：这一轮没跑的 step 记成跳过，job 的 `final: true` step 顶上，然后 job 开下一轮。
 
@@ -563,7 +573,7 @@ jobs:
 | `if` | 这个 step 要跑的条件。不写就总是成立。 |
 | `env` | 这个 step 的命令拿到的环境变量。 |
 | `continue-on-error` | 这个 step 失败时链条是否继续。 |
-| `note` | 这个 step 为什么在这儿，owner 平时怎么修它。它是决策模型读的那段描述。 |
+| `description` | 这一步是什么、哪个 outcome 算正常分支、异常时怎么办。决策模型和 chat 模型都读它。 |
 | `final` | 这个 step 负责收尾：这一轮怎么结束它都跑。标了 `final: true` 的 step 在提前结束的一轮里顶上被跳过的那几步。 |
 | `agents` | 这个 step 依次用哪些 agent 干活。每一项带一个 `mode` 和它适用的 `names`。 |
 

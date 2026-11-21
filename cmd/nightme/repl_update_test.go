@@ -51,62 +51,19 @@ func precomputedChecker(c *version.Checker) *version.CheckResult {
 }
 
 // --- prompt tests ----------------------------------------
-
-// TestPrompt_OutdatedYes exercises the new flow: "y" at the
-// Update prompt triggers a download attempt (which will fail
-// against the test environment, but the transcript shape up
-// through that point is what we pin here).
-func TestPrompt_OutdatedYes(t *testing.T) {
-	// Provide two replies so the prompt can drive through to
-	// the second y/N (Install now?) if download reaches it.
-	// If the test env has no network, the second Reader call
-	// is never made — idx stays at 1. If it does, the "n"
-	// reply bails the prompt at the Install stage.
-	replies := []struct {
-		line string
-		err  error
-	}{
-		{"y\n", nil},
-		{"n\n", nil},
-	}
-	idx := 0
-	var out bytes.Buffer
-
-	err := promptForUpdateIfOutdated(context.Background(), &PromptDeps{
-		VersionCheck: &version.CheckResult{Latest: "v9.9.9", Outdated: true},
-		Out:          &out,
-		Reader: func() (string, error) {
-			r := replies[idx]
-			idx++
-			return r.line, r.err
-		},
-	})
-	if err != nil {
-		t.Fatalf("promptForUpdateIfOutdated: %v", err)
-	}
-
-	got := out.String()
-	for _, want := range []string{
-		"Update available",
-		"9.9.9",
-		"Update now?",
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("output missing %q\n--- full output ---\n%s", want, got)
-		}
-	}
-	// Either the prompt stopped at "Update now?" (no network
-	// → download failed → "Run nightme update later") or it
-	// proceeded to "Install now?" and we declined. Either
-	// path is fine; we just verify the first-stage y/N was
-	// read.
-	if idx < 1 {
-		t.Errorf("Reader called %d times, want at least 1", idx)
-	}
-}
+//
+// The tests that drive the prompt into a real download and a real
+// install live in repl_update_live_test.go, behind the `liveupdate`
+// build tag: they reach the network, the data directory and the
+// daemon, and a developer's `make test` must not.
 
 // TestPrompt_DeclineInstallKeepsStaging covers the up-to-date
 // silent path. When Outdated is false, no prompt fires.
+//
+// The reader declines: the prompt must not read a line on this
+// path, and if a future change made it read one, declining keeps
+// the update — and the daemon restart that follows it — out of
+// reach.
 func TestPrompt_DeclineInstallKeepsStaging(t *testing.T) {
 	checker, _ := stubCheckerWithTag(version.Version)
 
@@ -115,7 +72,7 @@ func TestPrompt_DeclineInstallKeepsStaging(t *testing.T) {
 	err := promptForUpdateIfOutdated(context.Background(), &PromptDeps{
 		VersionCheck: precomputedChecker(checker),
 		Out:          &out,
-		Reader:       func() (string, error) { calls++; return "y\n", nil },
+		Reader:       func() (string, error) { calls++; return "n\n", nil },
 	})
 	if err != nil {
 		t.Fatalf("prompt: %v", err)
@@ -170,24 +127,6 @@ func TestPrompt_OutdatedEnterOnly(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "Install now?") {
 		t.Errorf("empty reply should be treated as 'n', got:\n%s", out.String())
-	}
-}
-
-// TestPrompt_UpToDateIsSilent verifies the no-prompt path.
-func TestPrompt_UpToDateIsSilent(t *testing.T) {
-	checker, _ := stubCheckerWithTag("v0.0.1")
-	var out bytes.Buffer
-
-	err := promptForUpdateIfOutdated(context.Background(), &PromptDeps{
-		VersionCheck: precomputedChecker(checker),
-		Out:          &out,
-		Reader:       func() (string, error) { return "y\n", nil },
-	})
-	if err != nil {
-		t.Fatalf("promptForUpdateIfOutdated: %v", err)
-	}
-	if out.Len() != 0 {
-		t.Errorf("expected no output when up-to-date, got:\n%s", out.String())
 	}
 }
 

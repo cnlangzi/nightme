@@ -26,7 +26,7 @@ REM ---- version metadata ----
 set "TMPOUT=%TEMP%\nightme-build-stt-%RANDOM%.tmp"
 
 if defined VERSION goto got_version
-set "VERSION=0.1.0"
+set "VERSION=dev"
 :got_version
 
 if defined GIT_COMMIT goto got_commit

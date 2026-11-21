@@ -1570,6 +1570,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (msgID
 		// The line belongs to the turn's own card, so an event
 		// without an anchor has nowhere to go.
 		if msg.Subagents == nil || turnAnchor == 0 {
+			sent = false
 			return "", nil
 		}
 		return a.setRichTurnSubagents(rawChatID, topicID, turnAnchor, msg.Subagents.Tasks), nil

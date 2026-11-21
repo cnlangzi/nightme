@@ -90,9 +90,14 @@ func (s *streamState) applyBackgroundTasksChanged(tasks []backgroundTask) bool {
 //
 // The frame describes a task that just started, so the entry's status
 // is running. A task the CLI registered in the foreground is not part
-// of the background table.
+// of the background table — it is remembered as foreground, so its
+// completion frame does not put it there either.
 func (s *streamState) applyTaskStarted(ev streamEvent) bool {
-	if s == nil || !ev.IsBackgrounded {
+	if s == nil {
+		return false
+	}
+	if !ev.IsBackgrounded {
+		s.noteForegroundTask(ev.TaskID)
 		return false
 	}
 	return s.upsertBgTask(ev.TaskID, func(t *bgTask) {
@@ -135,12 +140,15 @@ func (s *streamState) applyTaskUpdated(ev streamEvent) bool {
 	}
 	p := ev.Patch
 	if p.IsBackgrounded != nil && !*p.IsBackgrounded {
+		delete(s.bgForeground, ev.TaskID)
 		return s.removeBgTask(ev.TaskID)
 	}
 	if _, known := s.bgTasks[ev.TaskID]; !known {
 		if p.IsBackgrounded == nil {
 			return false
 		}
+		// The task moved to the background: it is one now.
+		delete(s.bgForeground, ev.TaskID)
 		return s.upsertBgTask(ev.TaskID, func(t *bgTask) {
 			applyTaskPatch(t, p)
 		})
@@ -163,14 +171,40 @@ func applyTaskPatch(t *bgTask, p *taskPatch) {
 // applyTaskNotification records the terminal state of a task.
 //
 // The frame's status is one of completed / failed / stopped — all
-// terminal, so the task stops being counted as running.
+// terminal, so the task stops being counted as running. A frame
+// without a status still means the task ended: it is recorded as
+// stopped, so a task can never stay in the running count.
+//
+// A task the CLI registered in the foreground is not a background
+// task: its completion frame leaves the table alone.
 func (s *streamState) applyTaskNotification(ev streamEvent) bool {
-	if s == nil || ev.TaskID == "" || ev.Status == "" {
+	if s == nil || ev.TaskID == "" {
 		return false
 	}
+	if s.bgForeground[ev.TaskID] {
+		delete(s.bgForeground, ev.TaskID)
+		return false
+	}
+	status := ev.Status
+	if status == "" {
+		status = agent.BgTaskStatusStopped
+	}
 	return s.upsertBgTask(ev.TaskID, func(t *bgTask) {
-		t.Status = ev.Status
+		t.Status = status
 	})
+}
+
+// noteForegroundTask records a task the CLI registered in the
+// foreground, so its completion frame does not put it in the
+// background table.
+func (s *streamState) noteForegroundTask(id string) {
+	if s == nil || id == "" {
+		return
+	}
+	if s.bgForeground == nil {
+		s.bgForeground = make(map[string]bool)
+	}
+	s.bgForeground[id] = true
 }
 
 // upsertBgTask applies fn to the task's entry, creating it when the

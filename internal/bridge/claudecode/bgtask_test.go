@@ -315,11 +315,11 @@ func TestPumpStream_RealBackgroundAgents_ReportsTheRunningCount(t *testing.T) {
 		t.Errorf("running = %d, want 0 (both agents finished)", got)
 	}
 	// The background shells the agents ran are not background tasks:
-	// they never count.
+	// they never enter the table, and they never count.
 	for _, r := range reports {
 		for _, task := range r.Tasks {
-			if task.TaskType == "" && agent.SubagentRunning(task.Status) {
-				t.Errorf("a shell task counted as a running subagent: %+v", task)
+			if task.TaskType != "local_agent" {
+				t.Errorf("a non-agent task entered the background table: %+v", task)
 			}
 		}
 	}
@@ -333,4 +333,35 @@ func runningCounts(reports []*agent.SubagentEvent) []int {
 		out = append(out, agent.RunningSubagents(r.Tasks))
 	}
 	return out
+}
+
+// TestPumpStream_ForegroundTask_NotificationKeepsItOutOfTheTable: the
+// CLI's background shells (the commands a subagent runs) are tasks of
+// their own, but they are not background tasks. Their completion frame
+// must not put them in the background table.
+func TestPumpStream_ForegroundTask_NotificationKeepsItOutOfTheTable(t *testing.T) {
+	input := `{"type":"system","subtype":"task_started","task_id":"s1","run_id":"r1","description":"Sleep 15","is_backgrounded":false,"task_type":"local_bash"}` + "\n" +
+		`{"type":"system","subtype":"task_notification","task_id":"s1","run_id":"r1","status":"completed","summary":"done"}` + "\n"
+	evs := streamFromString(input)
+
+	if n := len(subagentReports(evs)); n != 0 {
+		t.Errorf("got %d reports, want 0 (a foreground task is not a background task)", n)
+	}
+}
+
+// TestPumpStream_TaskNotification_WithoutStatus_EndsTheTask: a
+// completion frame that names no status still means the task ended —
+// the task must not stay in the running count.
+func TestPumpStream_TaskNotification_WithoutStatus_EndsTheTask(t *testing.T) {
+	input := `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a1","task_type":"local_agent","description":"one"}]}` + "\n" +
+		`{"type":"system","subtype":"task_notification","task_id":"a1","tool_use_id":"call_1","summary":"done"}` + "\n"
+	evs := streamFromString(input)
+
+	reports := subagentReports(evs)
+	if len(reports) != 2 {
+		t.Fatalf("got %d reports, want 2", len(reports))
+	}
+	if got := agent.RunningSubagents(reports[1].Tasks); got != 0 {
+		t.Errorf("running = %d, want 0 (the task ended)", got)
+	}
 }

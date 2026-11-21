@@ -335,7 +335,8 @@ bridge——往上只报身份、描述、状态三样。
 实测（Claude Code 2.1.311，stdin 持有不关）里 CLI 发的是 `task_started` /
 `task_notification` 这两帧：`task_started` 把后台 agent 放进来（`is_backgrounded:
 true`），`task_notification` 收尾。agent 自己起的后台 shell 也带 task 帧，但
-`is_backgrounded: false`，不进后台表。
+`is_backgrounded: false`，不进后台表——它的收尾帧也不带 `is_backgrounded`，所以
+bridge 记住这些 id，收尾帧不会把它们塞进后台表。
 
 这些帧**不是** turn 边界：`task_started` / `task_notification` 不发
 `EventAgentResult`，也不发 `EventAgentDone`。

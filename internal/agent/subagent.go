@@ -47,14 +47,19 @@ type SubagentTask struct {
 }
 
 // SubagentRunning reports whether a background task is still running.
-// A terminal status (completed / failed / killed / stopped) means the
-// task is done; every other status means work is still in flight.
+//
+// Only the words the CLI uses for work that is still in flight count
+// as running. Every other word — a terminal one, or one a later CLI
+// revision invents — means the task is not running. The default is
+// "not running" on purpose: a word this build does not know must not
+// pin a task in the running count, because the count is what the
+// channel's line is built from.
 func SubagentRunning(status string) bool {
 	switch status {
-	case BgTaskStatusCompleted, BgTaskStatusFailed, BgTaskStatusKilled, BgTaskStatusStopped:
-		return false
+	case BgTaskStatusRunning, BgTaskStatusPending, BgTaskStatusPaused:
+		return true
 	}
-	return true
+	return false
 }
 
 // RunningSubagents counts the tasks of a table that are still running.

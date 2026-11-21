@@ -93,6 +93,12 @@ type richTurn struct {
 	// the number of running ones reaches the card.
 	subagents []agent.SubagentTask
 
+	// lastBlocksJSON is the body of the last successful edit. A flush
+	// that renders the same body sends nothing: the rich message is
+	// the full turn transcript, so a state-only event would
+	// otherwise re-PATCH an identical body on every frame.
+	lastBlocksJSON string
+
 	// footer is the most recent StatusBar footer. Set by footer-
 	// bearing events; nil until first such event.
 	footer []string
@@ -229,10 +235,20 @@ func (a *Adapter) flushRichTurn(ctx context.Context, turn *richTurn) error {
 	if err != nil {
 		return err
 	}
+	// The card already shows this body: skip the edit. The rich
+	// message is the full turn transcript, so an event that changes
+	// nothing the card renders (the background-subagent line, whose
+	// count did not move) would otherwise re-PATCH an identical body
+	// on every frame — and Telegram rate-limits the edits per chat.
+	if blocksJSON == turn.lastBlocksJSON {
+		turn.dirty = false
+		return nil
+	}
 	if err := a.trySendRichBlocksEdit(ctx,
 		turn.chatID, turn.messageID, blocksJSON); err != nil {
 		return err
 	}
+	turn.lastBlocksJSON = blocksJSON
 	if a.logger != nil {
 		a.logger.Info("telegram: rich turn flushed",
 			"chat_id", turn.chatID,
@@ -302,6 +318,19 @@ func (a *Adapter) renderRichTurnBlocksLocked(turn *richTurn) (string, error) {
 		}
 	}
 
+	// Background subagents (when present): a status line under the
+	// heartbeat header, the same place the Feishu card puts it. It
+	// shows the number of running background subagents while at least
+	// one runs and is absent when the last one finished — the table
+	// arrives with every change, so an empty table is the signal to
+	// drop the line.
+	if line := agent.SubagentRunningLine(turn.subagents); line != "" {
+		blocks = append(blocks, map[string]any{
+			"type": "paragraph",
+			"text": line,
+		})
+	}
+
 	// Heartbeat / body break — divider sits between the
 	// heartbeat line and the first body entry so the card
 	// reads as three distinct regions: [heartbeat] ─ [body] ─
@@ -328,18 +357,6 @@ func (a *Adapter) renderRichTurnBlocksLocked(turn *richTurn) (string, error) {
 		blocks = append(blocks, map[string]any{
 			"type": "paragraph",
 			"text": e.body,
-		})
-	}
-
-	// Background subagents (when present): a status line under the
-	// heartbeat header. It shows the number of running background
-	// subagents while at least one runs and is absent when the last
-	// one finished — the table arrives with every change, so an empty
-	// table is the signal to drop the line.
-	if line := agent.SubagentRunningLine(turn.subagents); line != "" {
-		blocks = append(blocks, map[string]any{
-			"type": "paragraph",
-			"text": line,
 		})
 	}
 
@@ -510,6 +527,12 @@ func (a *Adapter) OnPromptEndedRichTurn(chatID string, topicID int, userMessageI
 		turn.debounceTimer.Stop()
 		turn.debounceTimer = nil
 	}
+	// The turn is over: the background-subagent line belongs to the
+	// turn, so the finished message does not keep it. A turn that
+	// ended while a subagent was still running would otherwise leave
+	// "🔀 1 个后台 agent 在跑" on the final message.
+	turn.subagents = nil
+	turn.dirty = true
 	turn.mu.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

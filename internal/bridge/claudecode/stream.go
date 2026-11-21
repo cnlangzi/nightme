@@ -108,6 +108,12 @@ type streamState struct {
 	// Map key is the CLI's task id.
 	bgTasks     map[string]bgTask
 	bgTaskOrder []string
+
+	// bgForeground holds the ids of the tasks the CLI registered in
+	// the foreground. Their completion frame names a task that never
+	// was a background task, so the frame must not put it in the
+	// background table.
+	bgForeground map[string]bool
 }
 
 // noteBackgroundStart records a background agent the CLI started.
@@ -516,6 +522,7 @@ func pumpStream(
 		pendingTools:  make(map[string]pendingTool),
 		tasks:         make(map[string]agent.AgentTaskItem),
 		bgTasks:       make(map[string]bgTask),
+		bgForeground:  make(map[string]bool),
 		bgRuns:        make(map[string]bool),
 		notifiedRuns:  make(map[string]bool),
 		deliveredRuns: make(map[string]bool),

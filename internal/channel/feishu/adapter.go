@@ -865,9 +865,22 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string, r
 	}
 	if reason.IsError() {
 		r.SetPromptState(ctx, agentsession.PromptError)
-		return
+	} else {
+		r.SetPromptState(ctx, agentsession.PromptDone)
 	}
-	r.SetPromptState(ctx, agentsession.PromptDone)
+	// The turn is over: the background-subagent line belongs to the
+	// turn, so the finished card does not keep it. A turn that ended
+	// while a subagent was still running (an error turn, /stop, a
+	// dead CLI) would otherwise leave "🔀 1 个后台 agent 在跑" on the
+	// final card — and no later frame can reach that receipt: the
+	// anchor is gone with the prompt.
+	//
+	// The re-render is free when the table was already empty: the
+	// card body is unchanged, so no PATCH goes out.
+	if err := r.SetSubagents(ctx, nil); err != nil {
+		a.logger.Warn("feishu receipt: clear subagents at prompt end failed",
+			"err", err, "chat_id", chatID, "user_msg_id", userMsgID)
+	}
 }
 
 // ensureReceiptForTyping lazily creates a Typing-placeholder

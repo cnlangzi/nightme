@@ -732,7 +732,7 @@ DM / 群主窗口（thread_id=0）和真实 topic（thread_id > 0）走**统一�
 - `OutResult` 单独 `sendRichMessage` 走独立消息，reply-anchored 到 user message，不进 rich turn。
 - turn 状态走 **message reaction**：runtime `MessageStateBus` → `OutMessageState` 触发 `setMessageReaction(userMsgID, 👌)`（Telegram Bot 单 reaction 预算）；`OnPromptEnded` 在 result 消息（fallback rich message）上贴 🎉 / ❌。
 - `OutHeartbeat` PATCH 当前 turn 的 rich message header（`💭 N · 🔧 M · ⏱ HH:MM:SS`）—— 是 in-turn 状态 ticker，单独 paragraph block，不带 footer。
-- `OutSubagents` 在当前 turn 的 rich message 上渲染后台 agent 行（`🔀 N 个后台 agent 在跑`）—— CLI 报告的后台 task 表，一个后台 task 都不剩时这行消失。
+- `OutSubagents` 在当前 turn 的 rich message 上渲染后台 agent 行（`🔀 N 个后台 agent 在跑`）—— CLI 报告的后台 task 表，一个后台 task 都不剩时这行消失；turn 结束时这行也跟着消失（这行属于 turn，不是会话）。
 - 跨 turn：老 rich message 留作历史证据（不再被 PATCH），新 turn 创建新 rich message 独立承载新状态。
 
 详细 spec 见 §11.11。

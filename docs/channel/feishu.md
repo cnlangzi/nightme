@@ -158,7 +158,7 @@ Agent: main | Model: MiniMax-M2.7 | Provider: minimax
 
 receipt 是一张 interactive card,body 顺序固定:
 - header(可选): heartbeat 快照 —— `🤖 Working` 占位,或 `💭 N · 🔧 M · ⏱ HH:MM:SS`
-- 后台 agent 行(可选): `🔀 N 个后台 agent 在跑` —— N 是还在跑的后台 subagent 数,一个都不剩时这行消失
+- 后台 agent 行(可选): `🔀 N 个后台 agent 在跑` —— N 是还在跑的后台 subagent 数,一个都不剩时这行消失;turn 结束时这行也跟着消失(这行属于 turn,不是会话)
 - rolling-log entries: 每个 `OutReply` chunk 一条 `markdown` 元素,过长时由 `splitMarkdownForDivs` 拆成多条(每条 ≤ `divTextCharLimit` 字符)
 - task checklist(可选): `**📋 Tasks**` + 条目
 - footer(可选): `<hr>` + 一个 `markdown` 元素,每行包在 `<font color='grey'>` 里

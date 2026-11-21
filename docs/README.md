@@ -199,7 +199,7 @@ docs/
 ├── CHANNEL.md                   ← 多 channel 架构（per-channel Manager + Emitter + 懒加载 restore）
 ├── CHATSTORE.md                 ← chat_sessions.json 真相源 + ChatSession hydrate
 ├── WFE.md                       ← Workflow YAML + 引擎运行时
-├── REVIEW.md                    ← /review 设计（三层分流：native / ocr delegate）
+├── REVIEW.md                    ← /review 设计（统一 dispatcher + 两条 runner 路径）
 ├── TESTS.md                     ← 跨平台 CI agent 启动 smoke
 ├── E2E_TESTING.md               ← 手动端到端测试 + 排错
 ├── WINDOWS.md                   ← Windows bridge 陷阱 + 修复
@@ -208,6 +208,28 @@ docs/
 ├── primary-agent-detection.md   ← primary agent 解析链
 ├── REVIEWER_INSTRUCTIONS.md     ← /review 的严格接地规则
 ├── feat/                        ← Layer 4: 每个 feature 的实现
+│   ├── F-08-channel-abstraction.md
+│   ├── F-09-agent-abstraction.md
+│   ├── F-30-interactive-config.md
+│   ├── F-33-simplify-chatid-data-model.md
+│   ├── F-53-message-prompt-lifecycle.md
+│   ├── F-59-gtw-label-bootstrap.md
+│   ├── F-63-heartbeat.md
+│   ├── F-CHATSTORE-001-chat-session-persistence.md
+│   ├── F-CLAUDE-PRINT-002-statusbar-refactor.md
+│   ├── F-DSH-CHAT-001-event-state.md
+│   ├── F-OPENCODE-ACP-MIGRATION.md
+│   ├── F-PATHUTIL-001-unified-path.md
+│   ├── F-PI-PRINT-002.md
+│   ├── F-chat-session.md
+│   ├── F-gtw-fix.md
+│   ├── F-gtw.md
+│   ├── F-review-ocr-fusion.md
+│   ├── F-review.md
+│   ├── F-tray.md
+│   ├── F-version-check.md
+│   ├── F-workflow-engine.md
+│   └── slash-command-reactions.md
 ├── bridge/                      ← 各 agent bridge 协议
 │   ├── acp.md                   ← Agent Client Protocol 通用桥
 │   ├── claude.md                ← Claude Code（stream-json）

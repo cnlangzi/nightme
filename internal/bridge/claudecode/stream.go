@@ -748,7 +748,7 @@ func truncateForLog(s string, max int) string {
 // field; pct omitted because we lack the denominator).
 //
 // The bridge owns the context-window-pct calculation per
-// docs/channel/feishu.md: it reads
+// docs/channel/feishu-rendering.md §A10: it reads
 // `modelUsage.<model>.contextWindow` into a bridge-local
 // variable, divides the per-turn used tokens by it, and fills
 // `UsageInfo.ContextWindowPct`. The window value itself is
@@ -831,7 +831,7 @@ func decodeUsage(rawUsage, rawModelUsage json.RawMessage) *agent.UsageInfo {
 		// F-55: forward the window alongside X% so the footer can
 		// render `X% (window)`. Single render-side consumer; the
 		// runtime does not recompute / catalog / clamp based on
-		// this value — see docs/channel/feishu.md.
+		// this value — see docs/channel/feishu-rendering.md §A13.
 		out.ContextWindow = contextWindow
 	}
 	return out

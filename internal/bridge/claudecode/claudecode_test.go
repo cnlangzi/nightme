@@ -29,7 +29,7 @@ import (
 // F-54 dropped `ContextWindow` from UsageInfo; F-55 re-introduced
 // it so the footer can render `(window)` alongside X% (CLI Agent
 // 报什么就显示什么,错了让用户自己计算 — see
-// docs/channel/feishu.md). The window
+// docs/channel/feishu-rendering.md §A13). The window
 // value is bridge-local and passes through to UsageInfo verbatim;
 // runtime / channel do not recompute, catalog, or clamp on it.
 // Companion TestDecodeUsage_ForwardsContextWindow (below)

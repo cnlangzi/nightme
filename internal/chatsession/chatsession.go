@@ -470,7 +470,7 @@ var ErrUnknownAgent = errors.New("chatsession: unknown agent")
 // to a single pool entry during NewActiveAgentSessions so the handler
 // can render a per-agent status instead of a bare count.
 //
-// See docs/feat/F-chat-session.md §5.2.
+// See docs/feat/F-chat-session.md §A5 §5.2.
 type ResetResult struct {
 	Agent       string // e.g. "claude", "codex"
 	Cwd         string // e.g. "/code/A"
@@ -1137,7 +1137,7 @@ func (cs *ChatSession) emitMessageDropped(msg Message) {
 // fired by `endPrompt` after the Prompt's terminal fields were
 // stamped. F-54 replaced it with cs.PromptEndBus.Publish(PromptEndedEvent{...});
 // subscribers register via PromptEndBus().Subscribe. See
-// docs/SPEC.md for the migration rationale.
+// docs/SPEC.md §1.1a for where the buses live in the runtime.
 
 // Emitter returns the outbound chokepoint bound to this chat
 // session. nil when no Emitter has been wired yet (e.g. before

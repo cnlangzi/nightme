@@ -92,7 +92,7 @@ func sessionChatID(channelID string) string { return chatIDPrefix + channelID }
 2. **创建 Bot**：左侧 "Bot" tab → "Add Bot"。复制 token 备用（**只显示一次**）。
 3. **启用 Privileged Intents**：同一页 → "Privileged Gateway Intents" → 至少勾选 `MESSAGE_CONTENT`。否则夜间 100 个 server 时 Discord 会拒绝 IDENTIFY 并返回 close code 4014（`closeCodeDisallowedIntents`）。
 4. **OAuth2 邀请**：左侧 "OAuth2 → URL Generator" → scopes 勾 `bot` + `applications.commands`；Bot Permissions 至少勾 `Send Messages` / `Read Message History` / `Add Reactions` / `Use Slash Commands` / `Embed Links` / `Attach Files`。复制生成的 URL 在浏览器打开，把 bot 邀请进目标 server。
-5. **填入配置**：`nightme login discord` 交互提示输入 token（或把 `bot_token` 写入 `configs/config.yaml` 的 `discord.bot_token`）。
+5. **填入配置**：`nightme login discord` 交互提示输入 token（或把 `bot_token` 写入 `configs/nightme.example.yaml` 这样的配置文件里的 `discord.bot_token`）。
 
 `Intents` 默认值是 `MessageContent | GuildMessages | DirectMessages | Guilds` = `46593`。NightMe 写入 `internal/config.DiscordConfig.Intents`。
 

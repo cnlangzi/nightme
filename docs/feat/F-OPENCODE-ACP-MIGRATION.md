@@ -325,7 +325,10 @@ type contentBlock struct {
 
 #### 4.7.1 单元测试(纯函数)
 
-`internal/bridge/opencode/update_test.go`:
+opencode 包不再有 per-bridge 的 update 翻译层 —— 事件全部由通用 ACP bridge 的 fallback 接管。落到测试上:
+
+- `internal/bridge/acp/deliver_stamp_test.go` —— `usage_update` / `session.status` 等 vendor-neutral 事件的翻译与 stamp 行为
+- `internal/bridge/opencode/model_test.go` —— `opencode debug config` 的输出解析
 
 ```go
 func TestHandleUpdate_AgentMessageChunk(t *testing.T) { /* ... */ }
@@ -447,14 +450,14 @@ func TestE2E_OpencodeACP_ToolUse(t *testing.T) {
 执行顺序:**先双注册共存 → 验证 → 切换默认 → 删除 serve**。三个阶段已全部落地(`fix-opencode` 分支):
 
 - **Phase 0**: ✅ 准备完成 — 新建 `opencode` 包(当时路径 `opencode_acp`)+ `UpdateHandler` hook + 本 doc 全部提交
-- **Phase 1**: ✅ 默认切换完成 — `cmd/nightme/agents.go` 已注册 `opencode.NewStarter`,`agents_test.go` 期望 `Args: [acp]` 一致
+- **Phase 1**: ✅ 默认切换完成 — `cmd/nightme/agents.go` 已注册 `opencode.NewStarter`,`agentconformance_test.go` 期望 `Args: [acp]` 一致
 - **Phase 2**: ✅ 删除完成 — `internal/bridge/opencode/` 26 文件 ~12000 行已 git rm
-- **收尾**: ✅ `update.go` 从 449 行收敛到 302 行;`SessionView.StashUsage` 与 per-bridge `lastUsage` 跟踪删除
+- **收尾**: ✅ per-bridge 的 update 翻译层整体删除;`SessionView.StashUsage` 与 per-bridge `lastUsage` 跟踪删除
 
 
 ### Phase 0(原计划:本 PR):准备
 
-- 新增 `internal/bridge/opencode/acp.go` + `update.go` + `update_test.go`
+- 新增 opencode 的 ACP 接入(最终落地为 `internal/bridge/opencode/starter.go` + `opencode.go` + `model.go`;per-bridge 的 update 翻译层最终没有落地)
 - 扩展 `internal/bridge/acp/agent.go` 加 `UpdateHandler` hook(最小侵入,~30 行 diff)
 - 写 `docs/feat/F-OPENCODE-ACP-MIGRATION.md`(本文档)
 - 双注册:`agents.go` 同时注册 `NewACPStarter("opencode-acp", "opencode")` + 旧的 `NewStarter("opencode", "opencode", nil)`,`opencode` 仍是 serve,`opencode-acp` 是新路径
@@ -563,13 +566,13 @@ NIGHTME_OPENCODE_E2E=1 go test -tags 'unix opencode_real_e2e' \
   - [x] `Detect()` LookPath
   - [x] `Start()` 委派 `acp.NewStarter(...).Start()` + `drv.SetUpdateHandler(newUpdateHandler(...))`
   - [x] `RunOnce()` 委派 `print.go::runPrintMode`
-- [x] ~~`internal/bridge/opencode/update.go`~~ → **已不需要**。opencode 直接走 generic fallback（见 [docs/bridge/acp.md §2.1](../bridge/acp.md)）；`usage_update` / `session.status` / `session_info_update` / `agent_thought_chunk` 等全部由 generic 接管。仅当 opencode 引入 vendor-private 协议时才需要落地 `update.go`（§4.2 设计保留作模板）。
-- [x] ~~`internal/bridge/opencode/update_test.go`~~ → **已不需要**（原因同 update.go）。通用 fallback 的测试在 `internal/bridge/acp/deliver_stamp_test.go` 覆盖（13 个新测试）。
-- [x] ~~`internal/bridge/opencode/acp_integration_test.go`~~ → 不再需要,acp 桥本身的 `acp_test.go` 已覆盖;opencode 端的 e2e 走 `internal/bridge/opencode/starter_test.go` 的 Detect 路径
+- [x] per-bridge 的 update 翻译层 → **已不需要**。opencode 直接走 generic fallback（见 [docs/bridge/acp.md §2.1](../bridge/acp.md)）；`usage_update` / `session.status` / `session_info_update` / `agent_thought_chunk` 等全部由 generic 接管。仅当 opencode 引入 vendor-private 协议时才需要为 opencode 单独写一层（§4.2 设计保留作模板）。
+- [x] per-bridge 的 update 单测 → **已不需要**（原因同上）。通用 fallback 的测试在 `internal/bridge/acp/deliver_stamp_test.go` 覆盖。
+- [x] opencode 侧的 ACP 集成测试 → 不再需要,acp 桥本身的 `acp_test.go` 已覆盖;opencode 端的 e2e 走 `internal/bridge/opencode/starter_test.go` 的 Detect 路径
 - [x] `cmd/nightme/agents.go`:
   - [x] 改默认 `opencode` 为 `opencode.NewStarter("opencode", "opencode", []string{"acp"})`
   - [x] 注释更新:指 `https://opencode.ai/docs/acp/` "All features are supported"
-- [x] `cmd/nightme/agents_test.go`:
+- [x] `cmd/nightme/agentconformance_test.go`:
   - [x] 验证 `Args: []string{"acp"}` 期望 PASS
 - [x] ~~`docs/bridge/opencode.md`:重写~~ → 不重写;直接删除(本期随 Phase 2 一并落地)。`docs/FEATURES.md` OpenCode Bridge 行改指本文档;`docs/bridge/dsh.md` 中"HTTP+SSE 同构"姊妹链接删除(opencode 已不是 HTTP+SSE)
 - [x] `docs/feat/F-OPENCODE-ACP-MIGRATION.md`:写完(本文档,顶部 Status 已翻 ✅)

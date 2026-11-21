@@ -6,29 +6,24 @@
 #   2. Create a session via session.create and capture its sessionId.
 #   3. SIGTERM the dsh subprocess (simulates dsh crash / restart).
 #   4. Spawn a fresh dsh on the same port (simulates recovery).
-#   5. Verify session.create({sessionId, cwd}) returns the same id,
-#      session.list still lists it, and a prompt round-trips.
+#   5. Verify session.create({sessionId, cwd}) returns the same id.
+#   6. Verify session.list still lists the session.
+#   7. Verify a prompt round-trips on the re-attached session.
 #
-# See docs/bridge/dsh.md for the shared-host wire contract.
+# See docs/bridge/dsh-api.md §1.1 for the RPC envelope this script sends.
 #
-# Pre-req: dsh binary on PATH.
+# Pre-req: dsh binary on PATH, curl, jq.
 
 set -euo pipefail
 
 PORT="${DSH_TEST_PORT:-13080}"
-NIGHTME_LOG=/tmp/nightme-recovery-test.log
 DSH_PID_FILE=/tmp/dsh-recovery-test.pid
-NIGHTME_PID_FILE=/tmp/nightme-recovery-test.pid
 
 cleanup() {
   set +e
   if [[ -f "$DSH_PID_FILE" ]]; then
     kill -TERM "$(cat "$DSH_PID_FILE")" 2>/dev/null || true
     rm -f "$DSH_PID_FILE"
-  fi
-  if [[ -f "$NIGHTME_PID_FILE" ]]; then
-    kill -TERM "$(cat "$NIGHTME_PID_FILE")" 2>/dev/null || true
-    rm -f "$NIGHTME_PID_FILE"
   fi
 }
 trap cleanup EXIT

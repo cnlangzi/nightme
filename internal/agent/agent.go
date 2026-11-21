@@ -13,7 +13,7 @@
 //
 // The Mode selector (ACP / SDK / PTY) lets the Bridge pick a backend
 // without leaking protocol details to Session Manager. See
-// docs/feat/F-09-agent-abstraction.md and F-21-agent-modes.md.
+// docs/feat/F-09-agent-abstraction.md and docs/bridge/cli-transport.md.
 package agent
 
 import (
@@ -427,14 +427,15 @@ type AgentResultEvent struct {
 // the field from UsageInfo as dead (0 read / 0 write); F-55
 // re-introduced it (UsageInfo.ContextWindow below) so the
 // channel footer can render `(window)` alongside the percentage.
-// See docs/channel/feishu.md for the
+// See docs/channel/feishu-rendering.md §A13 for the
 // re-introduction rationale.
 //
 // i.e. exact wire fields divided by API-reported window — no
 // client-side model table needed. The runtime does NOT recompute
 // or overwrite these; the channel footer renders them verbatim
-// as the "X% (window)" segment. See docs/channel/feishu.md
-// and docs/bridge/pi.md.
+// as the "X% (window)" segment. See
+// docs/channel/feishu-rendering.md §A10 / §A13 and
+// docs/bridge/pi.md §A3.
 type UsageInfo struct {
 	// InputTokens is the non-cached input token count.
 	InputTokens int

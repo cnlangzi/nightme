@@ -4,7 +4,7 @@
 // ACP supplies the structured request and event layer above it.
 //
 // Lives in bridge/acp/ (not in a separate agent package) so the
-// whole ACP story is one tree. See docs/bridge/cli-transport.md.
+// whole ACP story is one tree. See docs/bridge/acp.md.
 //
 // Agent is BOTH the template (registered with agent.Builtins) and
 // the live handle (returned by Start). The template half is set once

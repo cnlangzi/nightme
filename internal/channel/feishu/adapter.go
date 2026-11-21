@@ -1867,7 +1867,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 	// "✶ Compacting conversation…" thread reply, no channel side
 	// effect. The count surfaces later via StatusBar (F-49
 	// compaction tracking removed — the runtime dropped its
-	// compactionCount bookkeeping). See docs/channel/feishu.md.
+	// compactionCount bookkeeping). See docs/channel/feishu.md §13.25.
 
 	case messages.OutInit:
 		// F-44 follow-up: OutInit is the agent's bootstrap signal —
@@ -3203,7 +3203,8 @@ func renderHeartbeatHeader(hb *messages.HeartbeatSnapshot) string {
 // receiptFor on cache miss. Removed in F-42 — receipts are now
 // lazy-created with their actual content (OutReply text or OutTask*
 // list) by ensureReceiptForReply / ensureReceiptForTask, never
-// with a placeholder. See docs/channel/feishu.md for the rationale.
+// with a placeholder. See docs/channel/feishu-rendering.md §A8 for the
+// rationale.
 
 // SetLogger swaps the structured logger used for outgoing-message
 // traces. Pass nil to fall back to slog.Default().

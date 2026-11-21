@@ -196,8 +196,8 @@ var standardRegistry = newRegistry(map[string]eventHandler{
 	"approval/asked":    handleApprovalAsked,   // session/event echo; mux approval/requested is the respondable gate
 	"approval/decided":  handleApprovalDecided, // host/dashboard settled the gate; emit PermissionSettled
 
-	// docs/bridge/dsh.md: 9 new event types discovered during
-	// the 2026-08-16 mux-demux probe against dsh 0.1.0-rc.6.
+	// docs/bridge/dsh.md §3: the session event types the mux stream
+	// carries.
 	// Most are debug-only — they describe internal dsh state that
 	// the runtime doesn't surface but operators want to see in
 	// /diagnose output. Adding them here (rather than relying on

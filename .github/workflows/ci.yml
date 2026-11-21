@@ -912,9 +912,9 @@ jobs:
           #              channel — npm install is the
           #              CI-deterministic equivalent)
           #   pi      → @earendil-works/pi-coding-agent
-          #             (per docs/bridge/pi.md:271)
+          #             (per docs/bridge/pi.md:13)
           #   dsh     → @deepseek-ai/dsh
-          #             (per internal/bridge/dsh/starter.go:82
+          #             (per internal/bridge/dsh/starter.go:78
           #              Detect() error message + docs/bridge/dsh.md).
           #             Temporarily NOT installed (2026-09-22):
           #             deepseek published @deepseek-ai/dsh-web-app@

@@ -1,6 +1,6 @@
 # Cursor CLI Bridge — 集成方案
 
-> **Status**: 设计完成，待实现
+> **Status**: implemented
 > **Scope**: `internal/bridge/cursor/` — nightme 侧的 Cursor CLI 适配器
 > **参考实现**: `internal/bridge/opencode/` — 同为 ACP 包装层
 > **姊妹文档**:
@@ -453,7 +453,7 @@ session/prompt ──> session/update* ──> session/idle ──> EventAgentRe
 | sessionUpdate 翻译器 | 需要（opencode 特定事件：user_message_chunk, agent_message_chunk, agent_thought_chunk, tool_call, tool_call_update） | **不需要**（通用 ACP fallback 即可） |
 | one-shot | 与 chat 同一份 ACP transport | 与 chat 同一份 ACP transport |
 | 本地配置 | `~/.opencode/` | `~/.cursor/` |
-| 代码量 | ~800 行（starter + update + opencode.go） | ~150 行（starter + cursor.go） |
+| 代码量 | ~800 行（starter + update + opencode.go） | ~930 行（starter + cursor.go + handler.go + stub.go） |
 
 **为什么 cursor 不需要 sessionUpdate 翻译器**：
 

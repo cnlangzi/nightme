@@ -28,8 +28,8 @@
 // same slice, so receipt PATCH / Telegram editMessageText diffs
 // stay minimal.
 //
-// See docs/channel/feishu.md for the original Feishu
-// contract; docs/channel/telegram.md §18 for the Telegram
+// See docs/channel/feishu-rendering.md §A10 for the original Feishu
+// contract; docs/channel/telegram.md §16 for the Telegram
 // adapter's per-message trailer usage.
 package statusbar
 

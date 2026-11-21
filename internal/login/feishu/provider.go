@@ -438,10 +438,10 @@ func DefaultAppPreset() *registration.AppPreset {
 //
 //	im.message.receive_v1              the canonical message-receive event
 //
-// The reaction *event* subscription is intentionally absent — nightme
-// does not design user-driven reactions as input (see
-// docs/SPEC.md §2.7), so the dispatcher swallows
-// im.message.reaction.created_v1 events.
+// The reaction *event* subscription is intentionally absent — the runtime
+// reaction router is fed by the reactions carried on the message payload
+// (SPEC §2.7), not by a separate reaction event subscription, so the
+// dispatcher swallows im.message.reaction.created_v1 events.
 func DefaultAddons() *registration.AppAddons {
 	preset := false
 	return &registration.AppAddons{

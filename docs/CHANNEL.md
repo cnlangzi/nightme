@@ -1,6 +1,6 @@
 # Multi-Channel 架构
 
-> **Status**: 设计定稿（v9 lazy 模式），待实施
+> **Status**: 已落地(v9 lazy 模式)
 > **Scope**: nightme 多 IM channel 并行接入与编排
 > **读者**: 参与 runtime / gateway / chatsession / command / channel 任一层的工程师
 > **Related docs**:
@@ -9,7 +9,7 @@
 > - [F-08-channel-abstraction.md](./feat/F-08-channel-abstraction.md) Channel 接口契约
 > - [channel/feishu.md](./channel/feishu.md) 飞书实现细节
 > - [channel/telegram.md](./channel/telegram.md) Telegram 实现细节
-> - [channel/slack.md](./channel/slack.md) Slack 接入方案（设计中）
+> - [channel/slack.md](./channel/slack.md) Slack 接入方案
 > - [WFE.md](./WFE.md) §8.1 run 在 chat 里跑（Impersonator + observe）
 
 ---
@@ -27,7 +27,7 @@
 | 3 | 每个 channel 一个 `outbound.Emitter` = 该 channel 自己 | 引入"multi emitter"伪概念 |
 | 4 | ChatSession 不需要知道 channel（无 `channelName` 字段，持久化 schema 零变更） | 持久化耦合 |
 | 9 | chatID 是 (channel, rawChatID, thread_id) 的纯函数,不带可变的 daemon state | 漂移 / 孤儿 entry |
-| 5 | restore = 懒加载：首次 `GetOrCreate(chatID)` 时 `csFile.GetByChat(chatID)` 命中就 hydrate，miss 就新建 | 启动时 I/O + partition 难题 |
+| 5 | restore = 懒加载：首次 `GetOrCreate(chatID)` 时 `csFile.Get(chatID)` 命中就 hydrate，miss 就新建 | 启动时 I/O + partition 难题 |
 | 6 | 入站：gw pump goroutine 闭包 capture `(channel, mgr)`，dispatch chain 用 mgr per call | routing 概念泄漏 |
 | 7 | 出站：`cs.emitter.Send(msg)` = `ch.Send(msg)`，无 routing 表 | 多余抽象 |
 | 8 | OCP：接入新 channel = 1 个 adapter 文件 + 1 个 `init()` 注册调用 | — |
@@ -226,7 +226,7 @@ inbound.Router.Dispatch(ctx, mgr, msg)
                │
                ├─ m.sessions[chatID] hit → return
                │
-               ├─ csFile.GetByChat(chatID) hit → hydrateFromEntry
+               ├─ csFile.Get(chatID) hit → hydrateFromEntry
                │   (恢复 selectedCwd/Agent/WatchMode/ThinkMode/ToolsMode
                │    + AgentSession 池 Detached + 清 selectedAS)
                │
@@ -261,7 +261,7 @@ Feishu API
    │
    └─ miss
       │
-      ├─ csFile.GetByChat(chatID) hit
+      ├─ csFile.Get(chatID) hit
       │   │
       │   ▼
       │   hydrateFromEntry(entry, ...)
@@ -282,7 +282,7 @@ Feishu API
       └─ miss → New(chatID, primaryAgent) (全新)
 ```
 
-`csFile` 本身在 `OpenChatSessionFile` 时已全量加载到内存的 `entries map`（`registry/chat_session_file.go:31-61`）。`GetByChat(chatID)` 是 in-memory O(N) 查表。N 通常 10-100，无压力。
+`csFile` 是 `internal/chatstore/store.go` 的 `*chatstore.Store`：构造时(`chatstore.New(path)`)已全量加载到内存的 `entries map`。`Get(chatID)` 是 in-memory 查表。N 通常 10-100，无压力。
 
 ---
 
@@ -297,10 +297,10 @@ type Builder func(*config.Config) (Channel, error)
 
 var (
     mu  sync.RWMutex
-    reg = map[string]Builder{}
+    reg = map[string]entry{}   // entry = {prefix, builder}
 )
 
-func Register(name string, b Builder)
+func Register(name, prefix string, b Builder)
 func Available() []string
 func BuildAll(cfg *config.Config) ([]Channel, error) {
     // 遍历 reg，挨个调 Builder；builder 返回 missing-creds 错误时静默跳过
@@ -310,12 +310,14 @@ func BuildAll(cfg *config.Config) ([]Channel, error) {
 ```
 
 **使用方**：
-- `internal/channel/feishu/init.go`：`channel.Register("feishu", NewAdapter)`
-- `internal/channel/telegram/init.go`：`channel.Register("telegram", NewAdapter)`
+- `internal/channel/feishu/init.go`：`channel.Register("feishu", chatIDPrefix, builder)`
+- `internal/channel/telegram/init.go`：`channel.Register("telegram", chatIDPrefix, builder)`
+- `internal/channel/slack/init.go`：`channel.Register("slack", chatIDPrefix, builder)`
+- `internal/channel/discord/init.go`：`channel.Register("discord", chatIDPrefix, builder)`
 - `cmd/nightme/...` 引入上述包触发 `init()`
 - `echo` 不入 registry（保留 `Deps.NewChannels` 测试钩子）
 
-**Channel 接口零修改**——v9 没有 `OwnsChatID`，没有 `channelName`，没有 `Channel()` 之外的任何方法。`channel.Channel` 的 9 个原有方法完全保持。
+**Channel 接口零修改**——v9 没有 `OwnsChatID`，没有 `channelName`，没有 `Channel()` 之外的任何方法。`channel.Channel` 的 10 个方法完全保持。
 
 ### 4.2 `chatsession.Manager` —— per-channel 实例
 
@@ -333,7 +335,7 @@ func (m *Manager) GetOrCreate(chatID, primaryAgent string) (*ChatSession, error)
     
     // Phase 2: lazy hydrate from csFile (NEW)
     var spawner Spawner
-    var csFile *registry.ChatSessionFile
+    var csFile *chatstore.Store
     var asFile *registry.AgentSessionFile
     var emitter outbound.Emitter
     m.mu.RLock()
@@ -341,7 +343,7 @@ func (m *Manager) GetOrCreate(chatID, primaryAgent string) (*ChatSession, error)
     m.mu.RUnlock()
     
     if csFile != nil {
-        if entry, ok := csFile.GetByChat(chatID); ok {
+        if entry, ok := csFile.Get(chatID); ok {
             cs = m.hydrateFromEntry(entry, primaryAgent, spawner, csFile, asFile, emitter)
         }
     }
@@ -450,7 +452,7 @@ func (r *Router) tryMessageDispatch(ctx context.Context, mgr *chatsession.Manage
 
 4 个 `tryXxx` 方法全部加 `mgr *chatsession.Manager` 参数。
 
-### 4.5 `command.Factory` —— Handle 接受 mgr per call
+### 4.5 `command.SlashCommandFactory` —— Handle 接受 mgr per call
 
 **文件**：`internal/command/factory.go`（改）
 
@@ -485,7 +487,7 @@ type Deps struct {
 
 ### 4.6 `shell.Dispatcher` —— Handle 接受 mgr per call
 
-**文件**：`internal/shell/dispatcher.go`（改）
+**文件**：`internal/shell/dispatch.go`（改）
 
 ```go
 type Dispatcher struct {
@@ -623,7 +625,7 @@ func LoginWith(ctx, provider, out, errOut) error {
 |---|---|---|
 | `gtw.Manager` reaction handler | `findChatSession(chatID)` 跨 mgr 扫 | 共享 gtw 实例 |
 | `gitStatusLookup` | `findChatSession(chatID)` 跨 mgr 扫 | 共享 closure |
-| `command.Factory` | 链内 mgr 透传 | 共享 registry |
+| `command.SlashCommandFactory` | 链内 mgr 透传 | 共享 registry |
 | `shell.Dispatcher` | Handle 接受 mgr per call | 单实例 |
 | `commandServices.ReactionRouter` | 已共享 | 单例 |
 | `inbound.Router` | Dispatch 接受 mgr per call | 单实例 |
@@ -677,7 +679,7 @@ cs.emitter = mgr.emitter = 该 mgr 对应的 channel 的 Emitter
 |---|---|---|
 | 接入 feishu | `channel/feishu/init.go` 注册 | 全部其它代码 |
 | 接入 telegram | `channel/telegram/init.go` 注册 | 全部其它代码 |
-| 接入 slack | `channel/slack/adapter.go` + `init.go` 注册 | 全部其它代码 |
+| 接入 slack | `internal/channel/slack/adapter.go` + `init.go` 注册 | 全部其它代码 |
 | 接入未来 webhook channel | `channel/webhook/init.go` + `cmd/nightme` 引入 | 全部其它代码 |
 | 加 `/cwd` 之类命令 | `internal/command/<name>/cmd.go` + `reg.Register` | runtime / gateway / chatsession / channel 全不动 |
 | 改 GitStatus stamping | runtime 注入的闭包 | gateway / outbound / chatsession 全不动 |
@@ -705,7 +707,7 @@ cs.emitter = mgr.emitter = 该 mgr 对应的 channel 的 Emitter
 | `internal/chatsession/manager.go` | `GetOrCreate` 加 lazy hydrate + `hydrateFromEntry` 抽出 |
 | `internal/command/factory.go` + 21 个命令包 | `Factory.Handle(ctx, mgr, input)` 改签名 |
 | `internal/command/commander.go` | `Commander.Dispatch(ctx, mgr, input)` 改签名 |
-| `internal/shell/dispatcher.go` | `NewDispatcher()` 无参；`Handle(ctx, mgr, msg)` |
+| `internal/shell/dispatch.go` | `NewDispatcher()` 无参；`Handle(ctx, mgr, msg)` |
 | `internal/gateway/inbound/inbound.go` | `New` 删 csMgr 参；`Dispatch(ctx, mgr, msg)`；4 个 try 方法加 mgr |
 | `internal/gateway/gateway.go` | 大改：删 5 字段 + 3 方法 + 加 `Pump`/`AttachPumps`/`pumpOne` |
 | `internal/runtime/runtime.go` | 4 阶段 wire + `allMgrs` + `findChatSession` + `buildStack` |
@@ -734,7 +736,7 @@ cs.emitter = mgr.emitter = 该 mgr 对应的 channel 的 Emitter
 | 新增字段 | **0** |
 | 新增持久化字段 | **0** |
 | 新增接口方法 | **0** |
-| 签名变更 | 5（`inbound.Router.Dispatch` / `command.Factory.Handle` / `command.Commander.Dispatch` / `shell.Dispatcher.Handle` / `inbound.New` / `gateway.New` / `shell.NewDispatcher`） |
+| 签名变更 | 5（`inbound.Router.Dispatch` / `command.SlashCommandFactory.Handle` / `command.Commander.Dispatch` / `shell.Dispatcher.Handle` / `inbound.New` / `gateway.New` / `shell.NewDispatcher`） |
 | 删除字段/方法 | 11（`csMgr` / `emitter` / `chatToChan` / `defaultChannel` / `channelCh` / `channels` / `pumpInbound` / `dispatchLoop` / `resolveChannel` / `WithChannel` / `SkipFeishuLogin`） |
 
 ---
@@ -755,13 +757,13 @@ cs.emitter = mgr.emitter = 该 mgr 对应的 channel 的 Emitter
 
 ### 8.3 懒加载的首次延迟
 
-首次 `GetOrCreate(chatID)` 走 `csFile.GetByChat(chatID)` 是 in-memory O(N) 遍历 csFile.entries。N=100 时纳秒级。无 I/O。
+首次 `GetOrCreate(chatID)` 走 `csFile.Get(chatID)` 是 in-memory 查表。N=100 时纳秒级。无 I/O。
 
 ### 8.4 错误恢复
 
-如果 `csFile` 在 `OpenChatSessionFile` 加载失败（`registry/chat_session_file.go:31-61`）：
+如果 `csFile` 在 `chatstore.New(path)` 加载失败（`internal/chatstore/store.go`）：
 - 备份为 `.bak`，内存 store 初始化为空
-- 懒加载时 `GetByChat` 永远返回 miss
+- 懒加载时 `Get` 永远返回 miss
 - 行为：相当于"全新启动，所有 chat 走 `New(chatID, primary)` 分支"
 - 这跟现状 `Manager.RestoreFromRegistry` 处理失败的方式一致
 
@@ -780,7 +782,7 @@ echo 不入 `channel.Registry`（`Deps.NewChannels` 仍可被测试覆盖）。�
 | 1 | `channel.Registry` + `BuildAll` + feishu/telegram `init.go` 注册 | 低 |
 | 2 | `LoginWith` 按 `provider.Name()` 分派 | 低 |
 | 3 | `Manager.GetOrCreate` 加 lazy hydrate + `hydrateFromEntry` | 中 |
-| 4 | `command.Factory` 删 mgr/registry 字段 + `Handle(ctx, mgr, input)`；`command.SetDeps` 删 Manager/Registry；commander `Dispatch(ctx, mgr, input)`；21 个命令子包同步改 | 中 |
+| 4 | `command.SlashCommandFactory` 删 mgr/registry 字段 + `Handle(ctx, mgr, input)`；`command.SetDeps` 删 Manager/Registry；commander `Dispatch(ctx, mgr, input)`；21 个命令子包同步改 | 中 |
 | 5 | `shell.Dispatcher` 删 registry + `NewDispatcher()` 无参 + `Handle(ctx, mgr, msg)` | 中 |
 | 6 | `inbound.Router` 删 csMgr + `New` 删 csMgr/em 参 + `Dispatch(ctx, mgr, msg)` + 4 个 try 加 mgr | 中 |
 | 7 | `gateway.Router` 大改：删 5 字段 + 3 方法 + 加 `Pump`/`AttachPumps`/`pumpOne` | 中 |

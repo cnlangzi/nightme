@@ -636,5 +636,5 @@ buildReceiptCard 的 switch 仍允许它落到后半部分分支(条件已扩为
 - [`F-CLAUDE-PRINT-002-statusbar-refactor`](./F-CLAUDE-PRINT-002-statusbar-refactor.md) — 相邻的"中央观测 + per-channel 渲染"模式(StatusBarStampPolicy + OutboundMessage.StatusBar)
 - [`F-53-message-prompt-lifecycle`](./F-53-message-prompt-lifecycle.md) — `Message`/`Prompt`/`endPrompt` 语义源头,确认 heartbeat 不动这套语义
 - [`../SPEC.md`](../SPEC.md) §4.3 — 并发约束与 EventCallback 切换
-- [`internal/runtime/policy.go`](../../internal/runtime/policy.go) — `ThinkModeGatePolicy` / `ToolsModeGatePolicy` 源码,验证不变量
+- [`internal/gateway/outbound/policy.go`](../../internal/gateway/outbound/policy.go) — `ThinkModeGatePolicy` / `ToolsModeGatePolicy` 源码,验证不变量
 - [`internal/channel/feishu/adapter.go`](../../internal/channel/feishu/adapter.go) — `ensureReceiptForTyping` / `buildReceiptCard` 源码

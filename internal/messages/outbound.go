@@ -21,7 +21,7 @@ const (
 	//
 	// F-40 rename from OutText: the new name better reflects that
 	// this is the agent's reply payload, not a generic "text".
-	// See docs/channel/feishu.md.
+	// See docs/channel/feishu.md §13.19.
 	OutReply OutboundKind = iota
 	// OutToolStart announces a tool invocation.
 	OutToolStart

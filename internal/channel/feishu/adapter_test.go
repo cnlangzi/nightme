@@ -630,7 +630,7 @@ func TestSend_OutToolEnd_PostsToThread(t *testing.T) {
 
 // F-49: TestSend_OutCompaction_PostsToThread deleted — the
 // OutCompaction kind no longer exists (see
-// docs/channel/feishu.md). The runtime consumes
+// docs/channel/feishu-rendering.md §A12). The runtime consumes
 // EventAgentCompaction directly via AgentSession.RecordCompaction() and
 // produces no OutboundMessage. F-49 compaction tracking was
 // removed entirely — there is no CompactionCount field on
@@ -830,7 +830,7 @@ func TestSend_ChatVisibleEvents_PassReplyInThreadFalse(t *testing.T) {
 	// TestSend_OutCommandReply_PatchesPlaceholderReceipt.
 
 	// F-49: "OutCompaction" subtest deleted — the OutCompaction kind
-	// no longer exists (see docs/channel/feishu.md
+	// no longer exists (see docs/channel/feishu-rendering.md §A12
 	// §1.9). The runtime consumes EventAgentCompaction directly via
 	// AgentSession.RecordCompaction() and produces no OutboundMessage.
 }
@@ -1529,7 +1529,7 @@ func TestSendViaLark_ReplyInBoth_Dispatch(t *testing.T) {
 	}{
 		// F-49: "OutCompaction" case deleted — the OutCompaction
 		// kind no longer exists (see
-		// docs/channel/feishu.md). The runtime
+		// docs/channel/feishu-rendering.md §A12). The runtime
 		// consumes EventAgentCompaction directly via
 		// AgentSession.RecordCompaction() and produces no
 		// OutboundMessage, so there is nothing for the channel

@@ -34,7 +34,7 @@ nightme 现有 FSM 假设"一个 AgentSession = 一个进程"；pi RPC 进程是
 - **turn**：`prompt` 提交 → 若干 event → `agent_settled`（可能跨多次 retry / compaction / follow-up）。
 - **process**：进程从 spawn 到 `cmd.Wait()` 返回；只有 process exit 才关闭 `Events` channel。
 
-`agent_settled` 与 `EventDone` 对应，**不**关闭 channel。现有 `internal/chatsession/readpump.go` 在 `EventDone` 切 Idle/flush queue 并继续循环，正好支持长驻多轮。设计选择 **复用现有 FSM**，而不是为 pi 新增 `EventTurnEnd` 单独 kind（避免 EventKind 多义扩散；契约在 EventDone 上加注释与单测锁定）。
+`agent_settled` 与 `EventDone` 对应，**不**关闭 channel。现有 `internal/agentsession/readpump.go` 在 `EventDone` 切 Idle/flush queue 并继续循环，正好支持长驻多轮。设计选择 **复用现有 FSM**，而不是为 pi 新增 `EventTurnEnd` 单独 kind（避免 EventKind 多义扩散；契约在 EventDone 上加注释与单测锁定）。
 
 首期不实现：
 
@@ -86,7 +86,7 @@ nightme 现有 FSM 假设"一个 AgentSession = 一个进程"；pi RPC 进程是
 | `tool_execution_end` | `toolCallId`, `result`, `isError` | `EventToolEnd{ToolUseID: toolCallId, Name: <from start>, Output: stringified(result), IsError: isError}` | — |
 | `message_end` `{message:{role:"assistant", stopReason}}` | `message.{content[], usage, stopReason}` | ⟪F-52⟫ **no-op（记录 `lastMessageText` / `stopReason` / `lastUsage`）** | **不切 FSM**。一个 turn 可含多条 assistant message(text → toolCall → toolResult → 下一条),原实现逐条 emit 会得到「一条 message 一个 result」而非「一轮一个」。usage **覆盖**不累加:每次 API call 的 input 侧已含全部历史,是上下文占用**快照**,累加会按调用次数倍数虚高 |
 | `message_end` `{message:{role:"toolResult"}}` | `toolCallId`, `content[]` | (log debug；合并入 tool_execution_end) | — |
-| `message_end.usage`（同 row 触发） | `usage.{input,output,cacheRead,cacheWrite,totalTokens,cost.*}` | **co-located on `EventResult.Usage`** | 不再独立 emit `EventUsage` 事件——reasoning: 见 [F-49 §1.9 bridge 抽象统一](./../channel/feishu-rendering.md) + `internal/gateway/translate.go` 注释。runtime 从 `ev.Result.Usage` 一次取齐；`AgentSession.RecordUsage()` 由 runtime handler 调用，不依赖独立 Event
+| `message_end.usage`（同 row 触发） | `usage.{input,output,cacheRead,cacheWrite,totalTokens,cost.*}` | **co-located on `EventResult.Usage`** | 不再独立 emit `EventUsage` 事件——reasoning: 见 [F-49 §1.9 bridge 抽象统一](./../channel/feishu-rendering.md) + `internal/gateway/outbound/translate.go` 注释。runtime 从 `ev.Result.Usage` 一次取齐；`AgentSession.RecordUsage()` 由 runtime handler 调用，不依赖独立 Event
 | `compaction_start` | `reason` | **（F-49: 屏蔽,`return nil, nil`）** | runtime 不需要瞬态信号;bridge 自己消化协议差异 |
 | `compaction_end` | `reason`, `result.aborted` | **（F-49）** `EventCompaction`（无 Subtype 字段） | 一个完整的压缩周期 = runtime 收到一条 `EventCompaction` |
 | `extension_ui_request` | `id`, `method` (select/confirm/input/editor/notify/setStatus/setWidget/setTitle), … | (log warning) | **首期**：自动回 `extension_ui_response{id, cancelled:true}`；不向 ChatSession 发 EventPermission |
@@ -110,7 +110,7 @@ nightme 现有 FSM 假设"一个 AgentSession = 一个进程"；pi RPC 进程是
 }
 ```
 
-bridge 只用：`sessionId`、`model.id`、`model.name`（→ `EventAgentConnected.SessionID` / `EventAgentConnected.Model`）。`sessionFile` 等文件路径字段**不**进 bridge —— `--session-id <id>` 在 spawn 时已经把文件名协商这层折过去了，不再二次引入 path abstraction（OOB 设计见 §12.2 P1 备注）。
+bridge 只用：`sessionId`、`model.id`、`model.name`（→ `EventAgentReady.SessionID` / `EventAgentReady.Model`）。`sessionFile` 等文件路径字段**不**进 bridge —— `--session-id <id>` 在 spawn 时已经把文件名协商这层折过去了，不再二次引入 path abstraction（OOB 设计见 §12.2 P1 备注）。
 
 ## 3. 进程与生命周期
 
@@ -150,7 +150,7 @@ telemetry 与 provider attribution header。它只进 child 环境——用户�
 
 `--offline` 依赖前置配置不变量：用户在 NightMe 调用 Pi 前已经安装好需要使用的 extension/package。离线模式只跳过网络安装，不应把缺失 package 静默当作已加载资源。
 
-**严禁 PTY**。参照 `internal/bridge/claudecode/session.go:71-130` 的真实 pipe 模式，但去掉 `--print --input-format stream-json --output-format stream-json --permission-mode ...` 那一组 flag。
+**严禁 PTY**。参照 `internal/bridge/claudecode/claudecode.go:71-130` 的真实 pipe 模式，但去掉 `--print --input-format stream-json --output-format stream-json --permission-mode ...` 那一组 flag。
 
 ### 3.2 Goroutine 拓扑
 
@@ -159,7 +159,7 @@ session.Spawn()
   ├─ goroutine A: readPump (stdout scanner, 解 frame → 分流 response / event / extension_ui_request)
   ├─ goroutine B: drainStderr (stderr Read, debug log, 保留有界尾部用于错误)
   ├─ goroutine C: lifecycle (cmd.Wait, capture exitCode, 失败所有 pending, 关闭 events)
-  └─ goroutine D: handshake  (sync, 启动时 GetState 超时 10s)
+  └─ goroutine D: handshake  (sync, 启动时 GetState 超时 60s)
 ```
 
 **唯一 Wait / events close owner = goroutine C**。所有 Close 路径（包括 graceful shutdown、error、异常退出）最终通过 C 写 `exitCodeSink` 并 close events。`Close()` 不直接关 events，由 C 收尾。**这修正了 claudecode 注释掉的 watchdog race，并避免 ACP `readPump` 与 `Close` 双重关闭的同形问题**。
@@ -169,11 +169,11 @@ session.Spawn()
 | 时刻 | 行为 | channel 状态 |
 |---|---|---|
 | `t0` cmd.Start | 启 A/B/C/D | open |
-| `t1` GetState 成功 | 在 C 或 A 中 emit `EventAgentConnected{SessionID, Model, AgentName:"pi", Workspace, Branch}` | open |
+| `t1` GetState 成功 | 在 C 或 A 中 emit `EventAgentReady{SessionID, Model, AgentName:"pi", Workspace, Branch}` | open |
 | `t1'` GetState 失败 / 超时 | 失败 pending + emit `EventError` + 通知 C 关闭 | 关闭 |
 | `t2` SendBlocks → `prompt` | 写 stdin 等待 `response` ack | open |
 | `t3` `prompt` ack 收到 | 等待 stream events；`SendBlocks` 返回 nil | open |
-| `t3'` `prompt` ack `success:false` | `SendBlocks` 返回 `ErrPiRejected`；不切 FSM | open |
+| `t3'` `prompt` ack `success:false` | `SendBlocks` 返回 `ErrTurnClosed`；不切 FSM | open |
 | `t4` stream events | 翻译为 AgentEvent | open |
 | `t5` `agent_settled` | emit `EventDone{Reason:"settled"}` | **仍 open** |
 | `t6` 下一轮 user msg | 重新 `prompt` | open |
@@ -181,7 +181,7 @@ session.Spawn()
 | `t7'` 异常 exit / scanner 错 / pipe 断 | C: emit `EventError` → close events | 关闭 |
 | `t8` Close() | cancel ctx；stdin flush + close；SIGINT → 2s → SIGKILL；等 C | 关闭 |
 
-`internal/chatsession/readpump.go:174-203` 在 channel close 时 `as.SetExited(0)`，与 `t7`/`t7'` 路径一致。
+`internal/agentsession/readpump.go:174-203` 在 channel close 时 `as.SetExited(0)`，与 `t7`/`t7'` 路径一致。
 
 ### 3.4 Close 幂等
 
@@ -225,7 +225,7 @@ type rpcClient struct {
 }
 ```
 
-- 启动时 `get_state` 分配 id `"boot"`，timeout 10s。
+- 启动时 `get_state` 分配 id `"boot"`，timeout 60s。
 - `SendBlocks` 分配新 id，登记到 `pending` 等待 ack；ack 到达后从 pending 删除并允许下一 prompt。**只等 ack，不等 `agent_settled`**。
 - 第二次 `SendBlocks` 在 ack 尚未到达时直接返回 `ErrTurnBusy`。
 - 关闭 / 超时 / 异常时遍历 pending 写 `ErrSessionClosed`。
@@ -249,13 +249,13 @@ else → 走 translate goroutine
 
 - 现有 `internal/agent/agent.go` 的 `AgentEvent` / `EventKind` **不动**。
 - `EventDone.Reason` 字段当前**不存在**；需在 `DoneEvent` 上加一个 `Reason string` 字段（兼容旧值零），并 `EventDone{Reason:"settled"}` 标明 turn-end。`internal/agent/agent.go:204-211` 同步注释，claudecode/pty 保持默认 `Reason:""`。
-- 现有 `internal/gateway/translate.go` 的事件翻译不需为 pi 改逻辑；`EventAgentConnected` / `EventResult` / `EventUsage` / `EventCompaction` / `EventToolStart` / `EventToolEnd` / `EventText` / `EventPermission`（本期不通过此路径走）/ `EventError` 都已存在。
+- 现有 `internal/gateway/outbound/translate.go` 的事件翻译不需为 pi 改逻辑；`EventAgentReady` / `EventAgentResult` / `EventAgentCompaction` / `EventAgentToolStart` / `EventAgentToolEnd` / `EventAgentText` / `EventAgentPermission`（本期不通过此路径走）/ `EventAgentError` 都已存在。usage 不再是独立事件,而是 co-locate 在 `EventAgentResult.Usage` 上。
 
 ### 5.2 turn 终态语义（核心改动）
 
 在 `internal/agent/agent.go:460-466` 把 `Events()` 的注释从 "channel is closed by the implementation after EventDone or a terminal EventError" 改为：
 
-并在 `internal/chatsession/readpump_test.go` 加回归测试：`EventDone` 后下一个 event 仍能到达且 pump 不退出；仅在 channel close 时 `as.SetExited`。
+并在 `internal/chatsession/readpump_pi_test.go` 加回归测试：`EventDone` 后下一个 event 仍能到达且 pump 不退出；仅在 channel close 时 `as.SetExited`。
 
 claudecode bridge 仍然"每 turn = process"，但因为 `EventDone` 之后没有新事件，所以现有行为不变。
 
@@ -310,10 +310,10 @@ pnpm add -g @earendil-works/pi-coding-agent
 | tool_call / tool_result | ✅（`EventToolStart` / `EventToolEnd`） |
 | usage（input/output/cache/cost） | ✅ |
 | compaction | ✅（F-49: `compaction_end` emit `EventCompaction` × 1;`compaction_start` 屏蔽） |
-| session state → EventAgentConnected | ✅（首次 `get_state`） |
+| session state → EventAgentReady | ✅（首次 `get_state`） |
 | 多轮长驻 | ✅（`agent_settled` 不关 channel） |
 | `/close` 终止 | ✅（Close 路径） |
-| **跨进程 Resume（daemon 重启续同会话）** | ✅（spawn-time `--session-id <id>`；`AgentSession.ResumeID` 由 `get_state.sessionId` 填入 → 写入 `agent_sessions.json` → 下次 spawn 翻译成 `--session-id`；与 claudecode 的 `--resume <id>` 同 bridge contract 各自翻译） |
+| **跨进程 Resume（daemon 重启续同会话）** | ✅（spawn-time `--session-id <id>`；`AgentSession.SessionID` 由 `get_state.sessionId` 填入 → 写入 `agent_sessions.json` → 下次 spawn 翻译成 `--session-id`；与 claudecode 的 `--resume <id>` 同 bridge contract 各自翻译） |
 | `/abort` 单 turn 取消 | ❌ 用 `/close` 替代 |
 | Extension UI 飞书回复 | ❌ 自动 cancelled，不发卡 |
 | steer / follow_up | ❌ 走 InputBuffer flush |
@@ -339,7 +339,7 @@ pnpm add -g @earendil-works/pi-coding-agent
 - `extension_ui_request` 自动回 cancelled 并 log warning。
 - 未知 type 不杀 session。
 
-### 9.3 真实子进程（`internal/bridge/pi/session_test.go`）
+### 9.3 真实子进程（`internal/bridge/pi/session_unix_test.go`）
 
 `internal/testdata/pi_mock.sh`（或 `.go`）：接收 stdin 模拟 pi，发出 get_state / 多 prompt / events；`PATH` 注入法同 `claudecode_test.go:741-756`：
 
@@ -360,7 +360,7 @@ Windows 上 pi 是 npm 装的 `pi.cmd`，spawn 走 `cmd.exe /d /c`，命令行�
 - 超过 cmd.exe 命令行上限的 prompt 仍完整到达 agent —— prompt 走协议管道，不进 argv。
 - 子进程 stderr 尾部按控制台代码页解码，`EventError` 的诊断可读而非乱码。
 
-### 9.4 ChatSession 回归（`internal/chatsession/readpump_test.go`）
+### 9.4 ChatSession 回归（`internal/chatsession/readpump_pi_test.go`）
 
 - 多个 `EventDone` 后 pump 仍读下一个 event。
 - 关闭后 `as.SetExited` 触发。
@@ -385,7 +385,7 @@ Windows 上 pi 是 npm 装的 `pi.cmd`，spawn 走 `cmd.exe /d /c`，命令行�
 - `internal/bridge/pi/agent.go`
 - `internal/bridge/pi/protocol.go`
 - `internal/bridge/pi/rpc.go`
-- `internal/bridge/pi/session.go`
+- `internal/bridge/pi/agent.go`
 - `internal/bridge/pi/translate.go`
 - `internal/bridge/pi/*_test.go`
 - `internal/testdata/pi_mock.sh` + `pi_mock.py`（或纯 Go fixture）
@@ -393,18 +393,18 @@ Windows 上 pi 是 npm 装的 `pi.cmd`，spawn 走 `cmd.exe /d /c`，命令行�
 修改：
 
 - `cmd/nightme/agents.go` — `agent.Builtins.Register(pi.New("pi", "pi", nil))`
-- `cmd/nightme/agents_test.go` — 列表断言增加 `pi`
+- `cmd/nightme/agentconformance_test.go` — 列表断言增加 `pi`
 - `internal/agent/agent.go` — `DoneEvent.Reason` 字段 + `Events()` 注释澄清
-- `internal/chatsession/readpump_test.go` — turn 完成后 pump 继续的回归
+- `internal/chatsession/readpump_pi_test.go` — turn 完成后 pump 继续的回归
 - `configs/nightme.example.yaml` — `pi` 示例
 - `docs/FEATURES.md` — 加入 F-32 索引
 
 参考（不修改）：
 
-- `internal/bridge/claudecode/session.go` — pipe、stderr、writeLine 模式
-- `internal/chatsession/spawn.go` — Detect / Start wiring
-- `internal/chatsession/readpump.go` — EventDone 后 Idle + queue flush
-- `internal/gateway/translate.go` — 现有 AgentEvent 渲染
+- `internal/bridge/claudecode/claudecode.go` — pipe、stderr、writeLine 模式
+- `internal/agentsession/spawner.go` — Detect / Start wiring
+- `internal/agentsession/readpump.go` — EventDone 后 Idle + queue flush
+- `internal/gateway/outbound/translate.go` — 现有 AgentEvent 渲染
 
 ## 11. 未来工作（明确 deferred）
 
@@ -446,7 +446,7 @@ Windows 上 pi 是 npm 装的 `pi.cmd`，spawn 走 `cmd.exe /d /c`，命令行�
 
 ### 12.2 P1 — Resume：桥接 Pi 的 `--session-id` CLI flag
 
-**问题**：原 `pi.Agent.Start` 完全忽略 `cfg.ResumeID`，daemon 重启后 pi 永远 fresh。
+**问题**：原 `pi.Agent.Start` 完全忽略 `cfg.SessionID`，daemon 重启后 pi 永远 fresh。
 
 **调研**：查 Pi 官方 `docs/rpc.md` + `pi --help` —— Pi **原生**支持 spawn-time resume：
 
@@ -456,26 +456,26 @@ Windows 上 pi 是 npm 装的 `pi.cmd`，spawn 走 `cmd.exe /d /c`，命令行�
 | `--session <path\|id>` | 按文件路径或部分 UUID 加载 |
 | `--no-session` | 不落盘 |
 
-`get_state` 响应里的 `sessionId` 就是稳定 ID。nightme 已有 `AgentSession.ResumeID` 字段 + 持久化路径（`agent_sessions.json`）——只需把 opaque `ResumeID` 在 spawn 时翻译成 `--session-id <id>`。
+`get_state` 响应里的 `sessionId` 就是稳定 ID。nightme 已有 `AgentSession.SessionID` 字段 + 持久化路径（`agent_sessions.json`）——只需把 opaque `SessionID` 在 spawn 时翻译成 `--session-id <id>`。
 
 **修法**（5 行 `buildArgs` + 1 行 `Start`）：
 
-1. `agent.go`：改 `buildArgs(extraArgs []string, cfg agent.StartConfig)` 接 cfg；当 `cfg.ResumeID != ""` → 追加 `--session-id <id>`（按约定放 argv 末尾；与 claudecode `--resume` 同位）
-2. 持久化路径不动：`EventAgentConnected.SessionID` 已由 `get_state` 写入（`emitInit`，旧实现）；runtime `SetResumeID` 已存在
+1. `agent.go`：改 `buildArgs(extraArgs []string, cfg agent.StartConfig)` 接 cfg；当 `cfg.SessionID != ""` → 追加 `--session-id <id>`（按约定放 argv 末尾；与 claudecode `--resume` 同位）
+2. 持久化路径不动：`EventAgentReady.SessionID` 已由 `get_state` 写入（`emitInit`，旧实现）；runtime `SetSessionID` 已存在
 
 **测试**（`agent_test.go`，5 个 case 全绿）：
 
 - 缺省：`{"--mode","rpc"}`
-- 带 ResumeID：`..., "--session-id", "sess-abc-123"`
+- 带 SessionID：`..., "--session-id", "sess-abc-123"`
 - Resume flag 在 cfg.Args 之后：用户传的 `--model google/gemini` 仍能在 grep 中看见
 
-**`cfg.ResumeID` 是 opaque bridge contract**：claude 翻译成 `--resume <id>`，pi 翻译成 `--session-id <id>`。同一个字段，各自翻译 —— `internal/chatsession` 层无需感知差异。
+**`cfg.SessionID` 是 opaque bridge contract**：claude 翻译成 `--resume <id>`，pi 翻译成 `--session-id <id>`。同一个字段，各自翻译 —— `internal/chatsession` 层无需感知差异。
 
 ### 12.3 P4 — 文档卫生（本节落地点）
 
 - FEATURES.md F-32 row：`📝 设计阶段` → `✅ 已实现（核心）；Extension UI + /abort 仍 deferred`
 - F-32 §2.3 EventUsage row：原文档分两行（`EventResult` + `EventUsage`），现合并 — pi 把 usage 与 text 共载在**同一** `message_end` wire event，runtime 从 `Result.Usage` 一次取齐（避免 buffer OutResult 等 EventUsage 的顺序 hazard）
-- F-32 §3.2 / §4.3 handshake timeout 5s → 10s（与代码 `handshakeTimeout = 10 * time.Second` 一致）
+- F-32 §3.2 / §4.3 handshake timeout 5s → 60s（与代码 `handshakeTimeout = 60 * time.Second` 一致）
 
 ### 12.4 仍 deferred（不进本 PR，按 §11）
 
@@ -548,7 +548,7 @@ if !t.sawTextEnd {           // ← 据此把 finalText 置空
 }
 ```
 
-流式发生过 → `finalText == ""` → `ResultEvent.Text == ""` → `internal/gateway/translate.go` 的 `Text=="" && !IsError` 判定返回 `ok=false` → **整个 OutResult 被丢弃**。用户从来没见过 pi 的 📝 最终卡片。
+流式发生过 → `finalText == ""` → `ResultEvent.Text == ""` → `internal/gateway/outbound/translate.go` 的 `Text=="" && !IsError` 判定返回 `ok=false` → **整个 OutResult 被丢弃**。用户从来没见过 pi 的 📝 最终卡片。
 
 **(2) usage / cost 跟着一起丢。**
 
@@ -694,7 +694,7 @@ if u.Total == 0 && (u.Cost == nil || u.Cost.Total == 0) { return nil }
 
 #### 2.4.4 `/new` 抑制窗口（code-review PLAUSIBLE，评估后确认为真并修复）
 
-code-review 把这条标为 PLAUSIBLE 并跳过（理由：`session.go` 注释里写明是有意的锁策略权衡）。**复评后判定为真 bug**——注释解释的是「为什么不用 translatorMu 包住 translate()」，那个权衡确实成立；但它没有覆盖「重置之后、EventAgentConnected 之前」这段时间里到达的事件。
+code-review 把这条标为 PLAUSIBLE 并跳过（理由：`session.go` 注释里写明是有意的锁策略权衡）。**复评后判定为真 bug**——注释解释的是「为什么不用 translatorMu 包住 translate()」，那个权衡确实成立；但它没有覆盖「重置之后、EventAgentReady 之前」这段时间里到达的事件。
 
 `session.New()` 的时间线：
 
@@ -703,9 +703,9 @@ new_session 响应到达
   ↓
 turnState 重置                     ← 只清掉「已经累积的」
   ↓
-get_state RPC（10s 超时）          ← readPump 全程在跑!
+get_state RPC（60s 超时）          ← readPump 全程在跑!
   ↓
-deliverInitLocked → EventAgentConnected
+deliverInitLocked → EventAgentReady
 ```
 
 而 `/new` **可以打断进行中的 turn**：`NewActiveAgentSessions`（`chatsession.go:1233`）没有任何 Busy/Idle 守卫，slash command 也不走 InputBuffer 排队。所以用户在长回复中途打 `/new` 时，旧 turn 仍在管道里的事件会落进**全新的** turnState：
@@ -757,14 +757,14 @@ type turnState struct {
 
 ### 2.7 附带收益：丢事件风险下降
 
-`session.go` 的 `deliver()` 在 events channel 满时最多阻塞 1 秒然后**静默丢弃**。改动后单轮事件数从 O(token) 降到 O(工具次数)，丢事件的概率大幅下降。
+`agent.go` 的 `deliver()` **永不超时、永不丢弃** —— events channel 容量 40960，由消费端(per-AS readpump)兜底排空。只有 session 已关闭或进程已退出时才丢弃。
 
 ## 3. 实现
 
 | 文件 | 改动 |
 |---|---|
 | `internal/bridge/pi/translate.go` | 核心。新增 `turnState` + `resetTurn` / `closeTextBlockLocked` / `closeOpenBlocksLocked` / `flushPendingTextLocked` / `finishTurnLocked` / `recordAssistantMessageLocked` / `decodeMessageUsage`；删除 `sawTextEnd` |
-| `internal/bridge/pi/session.go` | `New()` 的 `pendingTools` 重置改为 `s.translator.resetTurn()` |
+| `internal/bridge/pi/agent.go` | `New()` 的 `pendingTools` 重置改为 `s.translator.resetTurn()` |
 | `internal/bridge/pi/translate_test.go` | 改 5 个既有测试 + 新增 12 个 |
 | `internal/agent/agent.go` | 仅注释：`EventText` 补上粒度契约 |
 
@@ -868,7 +868,7 @@ turn-1 一次性拿到完整的 60 字符 canary（改动前这里是逐 token �
 
 ——这是 F-52 重构时遗留的"等 pi plumbing"债务。本 PR 关闭它。
 
-### 1.2 为什么删 `UsageEvent.ContextWindow` 字段
+### 1.2 为什么删 `UsageInfo.ContextWindow` 字段
 
 `tokensave_field_sites` 报告:整个 codebase 中
 
@@ -879,11 +879,13 @@ turn-1 一次性拿到完整的 60 字符 canary（改动前这里是逐 token �
 
 → 完全改成本地变量。Struct 不需要这个字段。
 
+**注意**:F-55 后来又把 `UsageInfo.ContextWindow` 加了回来 —— footer 要同时渲染 `X%` 和 `(window)` 两个数字,分母得跟着一起传。所以现在 `agent.UsageInfo` 上有 `ContextWindow int`,`ContextWindowPct float64` 由 bridge 侧算好一起传。
+
 ### 1.3 为什么 Pi 能填 pct
 
 Pi 的 `get_state` RPC 响应已经包含 `data.model.contextWindow`(详见 [`../bridge/pi.md`](./../bridge/pi.md) §2.4)。
 
-F-32 实施时 `get_state` 响应只在 `session.New()` 调一次,目的是拿 `sessionId` 填 `ResumeID`。`data.model.contextWindow` 字段在 nightme 这边被静默丢弃。
+F-32 实施时 `get_state` 响应只在 `session.New()` 调一次,目的是拿 `sessionId` 填 `SessionID`。`data.model.contextWindow` 字段在 nightme 这边被静默丢弃。
 
 **决策**:从 `get_state` 响应解 `data.model.contextWindow` → 存到 `translator.contextWindow`(bridge-local 状态)→ `decodeMessageUsage` 拿它算 pct。
 
@@ -922,7 +924,7 @@ type getStateModel struct {
 }
 ```
 
-`maxTokens` / cost rate table / `id` 已有但 nightme 不消费(`id` / `Name` 已用于 EventAgentConnected.Model 显示)。
+`maxTokens` / cost rate table / `id` 已有但 nightme 不消费(`id` / `Name` 已用于 EventAgentReady.Model 显示)。
 
 **`internal/bridge/pi/translate.go`** — 改 3 处:
 
@@ -1049,12 +1051,12 @@ cc-connect 早期走 `pi --mode json -p`（每条 prompt 重启一个进程，fi
 
 | 阶段 | 超时 | 说明 |
 |---|---|---|
-| handshake（`get_state`） | 10s | 冷启动含模型预热 |
+| handshake（`get_state`） | 60s | 冷启动含模型预热 |
 | prompt ack（`SendBlocks`） | 90s | 只等 ack，**不**等 `agent_settled` |
 | `Close()` SIGINT→SIGKILL | 2s | |
 | Close 等待 reap | 5s | 超时也返回，避免 wedge 住 runtime |
 
-`/new` → `new_session` + `get_state`（各 10s），**不重启进程**。
+`/new` → `new_session` + `get_state`（各 60s），**不重启进程**。
 
 ---
 
@@ -1102,7 +1104,7 @@ pi 以 **token 粒度**推 `text_delta`。若逐条翻成 `EventText`，gateway 
 |---|---|
 | `textDelivered` | pi 的 `message_end(assistant, [text, toolCall])` **先于** `tool_execution_start`，以工具结尾的一轮会让 `lastMessageText` 回退重放已 flush 的段落 |
 | `active` | `agent_settled` 也用于结算 out-of-band 路径（如 fire-and-forget 压缩），空 turn 无条件出 result 会塞一张莫名的「Done.」卡 |
-| `beginReset`/`endReset` 抑制窗口 | `/new` 可打断进行中的 turn（无 Busy 守卫、slash command 不排队），而 `get_state` 有 10s 窗口，期间旧 turn 事件会污染新 turnState |
+| `beginReset`/`endReset` 抑制窗口 | `/new` 可打断进行中的 turn（无 Busy 守卫、slash command 不排队），而 `get_state` 有 60s 窗口，期间旧 turn 事件会污染新 turnState |
 | `emptyReplyFallback = "Done."` | `gateway.Translate` 丢弃空文本 result，会连带丢掉 usage |
 
 ### 3.5 usage 语义
@@ -1131,7 +1133,7 @@ bridge 对未知字段一律宽松（`json.RawMessage` + 忽略未知 key），�
 | `NIGHTME_LOGGING_LEVEL=debug` | 打开逐事件 debug 日志（含被忽略的 event 类型 + raw） |
 | `NIGHTME_STDERR_FILE=<path>` | **捕获 daemon 的 panic 栈**。默认 `child.Stderr = devNull`，崩溃时日志表现为「突然不写了」，无任何线索 |
 
-`deliver()` 在 events channel 满时最多阻塞 1s 后**丢弃**事件，现已记录 `deliver dropped` 告警——丢一个 EventResult 等于用户的回复凭空消失。
+`deliver()` 在 events channel 满时**阻塞**而不丢弃(events channel 容量 40960，由消费端排空);只有 session 关闭 / 进程退出才丢弃并记 `deliver dropped` 告警——丢一个 EventAgentResult 等于用户的回复凭空消失。
 
 ---
 

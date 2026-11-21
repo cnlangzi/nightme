@@ -264,9 +264,9 @@ exit path:
 
 ### Why shell package now imports chatsession + outbound
 
-Pre-refactor: `internal/shell.Sender` interface + `sender_chatsession.go`
-bridge translated `shell.Outbound` → `messages.OutboundMessage` and
-delegated to the per-chat outbound.Emitter. The bridge existed to
+The shell dispatcher used to reach the chat through a dedicated
+bridge that translated `shell.Outbound` → `messages.OutboundMessage`
+and delegated to the per-chat outbound.Emitter. The bridge existed to
 keep `internal/shell` from importing `internal/chatsession` /
 `internal/gateway/outbound`.
 
@@ -320,4 +320,4 @@ set:
 4. ✅ Remove manual emit in `/steer` — `internal/command/steer/cmd.go`
 5. ✅ Tests — `internal/command/commander_test.go`, `internal/agent/message_state_test.go`, `internal/channel/feishu/adapter_message_state_test.go`
 6. ✅ Update F-53 §8 row — see [F-53-message-prompt-lifecycle.md](F-53-message-prompt-lifecycle.md) follow-up note
-7. ✅ Shell ⏳→✅ (F-XX Sender→Emitter refactor) — `internal/shell/dispatch.go` (drop `Sender`/`Outbound`/bridge, take `outbound.Emitter` + `cs` directly), `internal/shell/sender_chatsession.go` deleted, `internal/gateway/inbound/shell.go` + `inbound.go` updated to new shape, `internal/gateway/inbound/teststubs/teststubs.go` + `internal/gateway/dispatch_slash_reply_test.go` stubs updated, `cmd/nightme/run.go:480` wires `mgr.Emitter()`.
+7. ✅ Shell ⏳→✅ (F-XX Sender→Emitter refactor) — `internal/shell/dispatch.go` (drop `Sender`/`Outbound`/bridge, take `outbound.Emitter` + `cs` directly), `internal/gateway/inbound/shell.go` + `inbound.go` updated to new shape, `internal/gateway/inbound/teststubs/teststubs.go` + `internal/gateway/dispatch_slash_reply_test.go` stubs updated, `cmd/nightme/run.go:480` wires `mgr.Emitter()`.

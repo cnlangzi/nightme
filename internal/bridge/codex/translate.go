@@ -2,7 +2,7 @@
 //
 // This file owns the F-52-style state machine that turns app-server
 // wire envelopes into agent.AgentEvent values. Design reference:
-// docs/bridge/pi.md §2.
+// docs/bridge/codex.md §4.
 //
 // All exported behavior follows the agent.Agent contract:
 //   - EventAgentDone is per-turn (Reason:"settled") and does NOT close events

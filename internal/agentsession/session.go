@@ -1242,7 +1242,7 @@ func (as *AgentSession) Submit(p *Prompt) error {
 	}
 
 	// Assign IDs / timestamps BEFORE the bridge call. These belong
-	// to AS (per the design — see wip-cs-as-boundary.md §2.2).
+	// to AS (per the design — see docs/SPEC.md §1.1a).
 	p.ID = as.NewPromptID()
 	p.AgentSessionID = as.ID
 	p.AckedAt = time.Now()

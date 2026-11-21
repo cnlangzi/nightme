@@ -276,7 +276,7 @@ type toolExecutionEnd struct {
 // marker — the Subtype field is gone). The matching start event
 // is silently dropped (no Event emitted) so the runtime
 // AgentSession counter increments by 1 per cycle. See
-// docs/channel/feishu.md.
+// docs/channel/feishu-rendering.md §A12.
 type compactionEnd struct {
 	Reason string `json:"reason"`
 	Result struct {

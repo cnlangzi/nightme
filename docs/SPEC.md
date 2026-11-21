@@ -570,7 +570,7 @@ kill 包通过 ChatSession 上的两个通用 lifecycle accessor 访问 pool / s
         │  翻译成 OutboundMessage{Kind: OutMessageState, MessageState: &MessageStatePayload{MessageID, State}}
         │  通过 Channel.Send 提交
         ▼
-[3] Channel (feishu adapter / future slack / future web ...)
+[3] Channel (feishu / telegram / slack / discord adapter)
         │  在 Send dispatcher 看到 OutMessageState case
         │  state → 平台原生视觉表达
         │  Feishu: AddReaction(userMsgID, emoji_type)
@@ -586,7 +586,7 @@ kill 包通过 ChatSession 上的两个通用 lifecycle accessor 访问 pool / s
 |---|---|---|
 | ChatSession / AgentSession | "现在消息进入 X 状态了" | 怎么传输、谁接收、长什么样 |
 | Gateway | OutboundMessage wire format；Channel interface | emoji 是什么、平台细节 |
-| Channel (feishu / future) | state → emoji_type 映射；平台 SDK | 事件从哪来、谁 emit |
+| Channel (feishu / telegram / slack / discord) | state → 平台原生视觉映射；平台 SDK | 事件从哪来、谁 emit |
 | Platform SDK | 平台原生 API | — |
 
 #### 2.5.3 抽象事件契约

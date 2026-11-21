@@ -240,9 +240,9 @@ MAY subscribe to a future `/close` event (not currently exposed; ).
 
 `MessageState` 是 nightme 对用户消息生命周期的可见性反馈机制。它回答 3 个问题：
 
-1. **ChatSession 收到消息没有？** — `StateReceived`
-2. **消息转给 AgentSession 了没有？** — `StateForwarded`
-3. **AgentSession 执行完成了没有？** — `StateDone` (+ 可选 `StateError`)
+1. **ChatSession 收到消息没有？** — `MessageQueued`
+2. **消息转给 AgentSession 了没有？** — `MessageSubmitted`
+3. **处理结束了没有？** — `MessageDone`(同步派发路径)/ `MessageDropped`(显式丢弃)
 
 每条普通用户消息在系统里流转时，会触发对应的 `MessageState` 事件；Channel 把它渲染成平台原生视觉表达（Feishu 渲染成 reaction emoji，Slack 渲染成 emoji 短码，Web UI 渲染成 DOM 元素，等等）。
 
@@ -300,34 +300,35 @@ package receipt
 type MessageState int
 
 const (
-    // StateReceived: ChatSession has accepted the message but not
+    // MessageQueued: ChatSession has accepted the message but not
     // yet dispatched it to an AgentSession. Triggered on
     // ChatSession.GetOrCreate.
-    StateReceived MessageState = iota
+    MessageQueued MessageState = iota
 
-    // StateForwarded: the message has been dispatched to an
+    // MessageSubmitted: the message has been dispatched to an
     // AgentSession (lazy spawn succeeded; blocks enqueued or
-    // sent to PTY stdin). Triggered on successful
+    // sent to the bridge). Triggered on successful
     // LookupSelectedAgentSession.
-    StateForwarded
+    MessageSubmitted
 
-    // StateDone: the AgentSession has finished processing this
-    // message (EventDone arrived on the readPump). Triggered by
-    // ChatSession.runReadPump on EventDone.
-    StateDone
+    // MessageDone: the dispatcher finished interacting with this
+    // user message id. No further MessageState transitions will
+    // arrive for it. Synchronous dispatch paths (slash command,
+    // shell dispatch) that have no Prompt lifecycle use it.
+    MessageDone
 
-    // StateError (optional): the AgentSession reported an error
-    // for this message (EventError arrived). Triggered by
-    // ChatSession.runReadPump on EventError.
-    StateError
+    // MessageDropped: the message was explicitly dropped. There
+    // is no MessageFailed: the terminal execution result is
+    // carried by chatsession.Prompt.EndReason.
+    MessageDropped
 )
 
 func (s MessageState) String() string {
     switch s {
-    case StateReceived:  return "received"
-    case StateForwarded: return "forwarded"
-    case StateDone:      return "done"
-    case StateError:     return "error"
+    case MessageQueued:    return "queued"
+    case MessageSubmitted: return "submitted"
+    case MessageDone:      return "done"
+    case MessageDropped:   return "dropped"
     }
     return "unknown"
 }
@@ -349,10 +350,12 @@ func (s MessageState) String() string {
 
 | 状态 | 含义 | 何时触发 | 何时结束 |
 |---|---|---|---|
-| `StateReceived` | 系统已收到消息，等待 dispatch | `ChatSession.GetOrCreate(chatID)` 成功后 | `StateForwarded` 或消息丢弃 |
-| `StateForwarded` | 消息已转给 AgentSession，正在处理 | `ChatSession.LookupSelectedAgentSession()` 成功 | `StateDone` 或 `StateError` |
-| `StateDone` | AgentSession 处理完成 | `ChatSession.runReadPump` 收到 `EventDone` | 终态 |
-| `StateError` | AgentSession 处理出错 | `ChatSession.runReadPump` 收到 `EventError` | 终态 |
+| `MessageQueued` | 系统已收到消息，等待 dispatch | `ChatSession.GetOrCreate(chatID)` 成功后 | `MessageSubmitted` 或消息丢弃 |
+| `MessageSubmitted` | 消息已转给 AgentSession，正在处理 | `ChatSession.LookupSelectedAgentSession()` 成功 | `MessageDone` |
+| `MessageDone` | dispatcher 处理完这条用户消息 | 同步派发路径完成 / `endPrompt` 落终态 | 终态 |
+| `MessageDropped` | 消息被显式丢弃 | 显式 clear 路径 | 终态 |
+
+终态的执行结果由 `chatsession.Prompt.EndReason` 承载 —— 没有 `MessageError` / `StateError` 这一档。
 
 ---
 
@@ -467,10 +470,10 @@ OutboundMessage{
 
 | 触发时机 | 状态 | 说明 |
 |---|---|---|
-| `ChatSession.GetOrCreate(chatID)` 成功后 | `StateReceived` | 消息首次进 ChatSession |
-| `ChatSession.LookupSelectedAgentSession()` 成功 | `StateForwarded` | spawn 成功或命中 running pool |
-| `ChatSession.runReadPump` 收到 `EventDone` | `StateDone` | agent 处理完 |
-| `ChatSession.runReadPump` 收到 `EventError` | `StateError` | agent 出错 |
+| `ChatSession.GetOrCreate(chatID)` 成功后 | `MessageQueued` | 消息首次进 ChatSession |
+| `ChatSession.LookupSelectedAgentSession()` 成功 | `MessageSubmitted` | spawn 成功或命中 running pool |
+| 同步派发路径完成 / `endPrompt` 落终态 | `MessageDone` | dispatcher 处理完 |
+| 显式 clear 路径 | `MessageDropped` | 消息被丢弃 |
 
 ### 6.2 触发实现机制（伪代码）
 
@@ -502,10 +505,10 @@ func (cs *ChatSession) emitMessageState(userMsgID string, state receipt.MessageS
     }
 }
 
-// 在 GetOrCreate 成功路径里调 cs.emitMessageState(userMsgID, StateReceived)
-// 在 LookupSelectedAgentSession 成功路径里调 cs.emitMessageState(userMsgID, StateForwarded)
-// 在 runReadPump EventDone 分支调 cs.emitMessageState(userMsgID, StateDone)
-// 在 runReadPump EventError 分支调 cs.emitMessageState(userMsgID, StateError)
+// 在 GetOrCreate 成功路径里调 cs.emitMessageState(userMsgID, MessageQueued)
+// 在 LookupSelectedAgentSession 成功路径里调 cs.emitMessageState(userMsgID, MessageSubmitted)
+// 在 endPrompt 落终态时调 cs.emitMessageState(userMsgID, MessageDone)
+// 显式丢弃时调 cs.emitMessageState(userMsgID, MessageDropped)
 ```
 
 ### 6.3 Runtime wiring（启动时）
@@ -583,10 +586,10 @@ func (g *gateway) OnMessageState(chatID, userMsgID string, state receipt.Message
 
 | MessageState | emoji_type（飞书预定义） | 用户视觉 |
 |---|---|---|
-| `StateReceived` | `OneSecond` | ⏳ |
-| `StateForwarded` | `OnIt` | 🔄 |
-| `StateDone` | `DONE` | ✅ |
-| `StateError` | `THUMBSUP` | ❌ (closest 预定义) |
+| `MessageQueued` | `OneSecond` | ⏳ |
+| `MessageSubmitted` | `OnIt` | 🔄 |
+| `MessageDone` | `DONE` | ✅ |
+| `MessageDropped` | (无) | 不打 reaction |
 
 **注意**：必须用飞书预定义 `emoji_type` 标识符，不是 unicode。传 unicode `⏳` 给飞书 reaction API 会返回 `99992354 data not found`。
 
@@ -680,7 +683,7 @@ E2E 飞书 DM round-trip（FEATURES.md backlog 已列）：验证用户消息从
 | 项 | 描述 |
 |---|---|
 | `OutMessageStateRemoved` 实现 | 当前 append-only 不删反应；如果未来需要（飞书 API 允许 DeleteReaction），再实现 |
-| `StateError` 的 emoji 映射细化 | 当前用 THUMBSUP 兜底，未来可加专用 emoji_type |
+| 失败态的 emoji 映射 | 失败不落在 MessageState 上(见 `Prompt.EndReason`),不需要 emoji |
 | 状态时间戳 / 序列号 / metadata | 当前只有 message_id + state；扩展字段后续可加 |
 | Receipt FSM 与 MessageState 的统一编排 | 两者独立工作，不集成；如果未来需要（如 Receipt Done 时也强制 MessageState Done）再实现 |
 | Slash command 的 MessageState | scope 明确不触发 |
@@ -886,11 +889,11 @@ Feishu adapter 包内 `summarize_tool.go` 提供 `summarizeToolEnd(name, args, o
 | `internal/bridge/pi/translate.go` | 同样填 `ToolEndEvent.Args`（如果 pi bridge 支持 tool_result） | — |
 | `internal/channel/feishu/adapter.go` `Send` | 按 Kind 分流：thinking/tool → thread；text/result/init/usage → receipt card | §3.4 |
 | `internal/channel/feishu/adapter.go` `buildReceiptCard` | 删 `Kind="thinking"` / `Kind="tool"` collapsible_panel 分支 | §3.4 |
-| `internal/channel/feishu/receipt_event.go` | `eventToEntry` 对 thinking/tool 返回 `(_, false)` | §3.4 |
+| `internal/channel/feishu/receipt_entry.go` | `eventToEntry` 对 thinking/tool 返回 `(_, false)` | §3.4 |
 | `internal/channel/feishu/summarize_tool.go` | 新文件：`summarizeToolEnd` + `countLines` + `truncate` + `countUniqueFiles` helpers | §3.5 |
 | `internal/channel/feishu/summarize_tool_test.go` | 新文件：覆盖各 tool 类型 + 错误分支 + args 缺失 fallback | — |
 | `internal/channel/feishu/adapter_test.go` | `TestSend_OutThinking_PostsToThread` + `TestSend_OutToolStart_PostsToThread` + `TestSend_OutToolEnd_PostsToThread`（**F-49 删除** `TestSend_OutCompaction_PostsToThread`） | — |
-| `internal/channel/feishu/receipt_event_test.go` | 删 thinking/tool assertion（这些走 thread 不进 receipt） | — |
+| `internal/channel/feishu/receipt_test.go` | 删 thinking/tool assertion（这些走 thread 不进 receipt） | — |
 | `internal/channel/feishu/adapter_test.go` | 删 `TestSend_OutThinking_AppendsWithPrefix`（§13.1 bug 修复不再需要 —— prefix 不再被 strip） | — |
 | `docs/channel/feishu-rendering.md` | §13.12 新增（决策反转记录）+ §15 实施计划修订 | §4.1 |
 | `docs/channel/feishu-rendering.md` | §3 contract 表更新 + §X.Y Thread reply path | §4.2 |
@@ -1232,7 +1235,7 @@ F-thread-route 方案下同一 turn：
   - `TestSend_OutToolEnd_PostsToThread`：验证收到 `OutToolEnd` 时调 Reply + body 经 `summarizeToolEnd` 生成（含 `📄 Read /foo.go → 1234 lines` 这类格式）。
   - ~~`TestSend_OutCompaction_PostsToThread`~~：**F-49 删除**（`OutCompaction` kind 已删除）。
   - `TestSend_OutText_FoldsIntoReceipt`：回归测试，确保 OutText / OutResult / OutInit / OutUsage 仍然 fold 进 receipt（不变）。
-- `internal/channel/feishu/receipt_event_test.go`：
+- `internal/channel/feishu/receipt_test.go`：
   - 删 thinking/tool 的 entry assertion（这些 event 不再生成 entry）~~+ compaction~~
   - 加 case：调用 `eventToEntry(EventText, "[思考] foo")` 返回 `(_, false)`（不再生成 thinking entry）
 - `internal/channel/feishu/receipt_test.go`：
@@ -1285,14 +1288,14 @@ F-thread-route 方案下同一 turn：
 3. **ReplyInThread 才分配独立 thread_id**（D 响应 `thread_id=omt_19141bf7110e1c89`）——之后同 root_id 的 reply-true 复用此 thread。
 4. **msg.ReplyTo 必须始终是 M0**（当前用户消息 id）—— 4 条 D 全部 reply M0，**不**chain reply 到上一条 D；这反向验证 §13.10 / F-33 "单数锚点 currentTurnUserMsgID" 不变式**真的必要**（如果链式 reply，thread 碎裂成 N 个独立 "1 reply" 指示器，UI 不再汇总）。
 
-Probe 工具代码：`cmd/_probe/feishu_thread_probe.go`（mock 版）+ `cmd/_probe/send_one/main.go`（真实发送版）。决策落地后建议删除（保留实机飞书响应记录在本节即可）。
+Probe 工具是当时临时写的脚本（mock 版 + 真实发送版），不入仓；实机飞书响应记录保留在本节即可。
 
 ---
 
 ## 7. Change log
 
 - **2026-08-04 (a)** — F-37 草案（Devin 拍板反转 §13.6 折叠方案）。Docs 落地（SPEC + 本 doc + channel/feishu §13.12 + F-25 §3 收窄 + F-08 §4 自治路由例子）。代码改动 backlog §3.1。
-- **2026-08-04 (b)** — 实机飞书群（Frtpilot-Xiage）验证 "Reply / ReplyInThread+Also send it to chat / ReplyInThread" 三种形态；用 `cmd/_probe/send_one` 直接发 8 条组合消息，把命名固化进 §2.1 表格和 §6.5 实验记录；记录 `thread_id` 分配规则（顶级 / default-reply 不分配；reply-true 分配并复用）。
+- **2026-08-04 (b)** — 实机飞书群（Frtpilot-Xiage）验证 "Reply / ReplyInThread+Also send it to chat / ReplyInThread" 三种形态；用临时 probe 脚本直接发 8 条组合消息，把命名固化进 §2.1 表格和 §6.5 实验记录；记录 `thread_id` 分配规则（顶级 / default-reply 不分配；reply-true 分配并复用）。
 - **2026-08-04 (c)** — `reply_in_thread` 字段"省略 vs 显式 false"字节差异（28B）发现：`TestSend_ChatVisibleEvents_PassReplyInThreadFalse` 单测 + 代码注释固化"if replyInThread { .ReplyInThread(true) }" 必须保持的纪律。
 
 ---
@@ -1631,7 +1634,7 @@ User msg → Receipt Card (单张)
 为避免"流式 chunk + 最终 result"在 receipt 内显示重复,`eventToEntry.EventResult` 有 dedup:
 
 ```go
-// internal/channel/feishu/receipt_event.go:113-124 (旧)
+// internal/channel/feishu/receipt_entry.go:113-124 (旧)
 if !ae.Result.IsError && lastEntry != nil &&
     lastEntry.Kind == "reply" &&
     lastEntry.Text == truncateForLog(text, perEntryMaxBytes) {
@@ -1837,7 +1840,7 @@ case gateway.OutResult:
     return a.sendResultAsReply(ctx, msg.ChatID, msg.ReplyTo, text, false)
 ```
 
-**`internal/channel/feishu/receipt_event.go`** —— 删 dedup 协调 + 删 EventResult case:
+**`internal/channel/feishu/receipt_entry.go`** —— 删 dedup 协调 + 删 EventResult case:
 
 ```go
 // (1) case agent.EventResult 整段删除 (101-140)
@@ -1897,7 +1900,7 @@ case gateway.OutResult:
 | 同上 | `TestSend_OutResult_EmptySkipped` | text="",!IsError → return nil,no send |
 | 同上 | `TestSend_OutResult_IsError_PrefixedWithIcon` | text + "❌ " 前缀 |
 | 同上 | `TestSend_OutResult_Orphan_NoUserMsgID_TopLevel` | userMsgID="" → 走 sendRawOutText fallback |
-| `internal/channel/feishu/receipt_event_test.go` | `TestEventToEntry_NoEventResultCase` | 删除后:eventToEntry 没有 EventResult 命中;`(_, false)` 验证 |
+| `internal/channel/feishu/receipt_test.go` | `TestEventToEntry_NoEventResultCase` | 删除后:eventToEntry 没有 EventResult 命中;`(_, false)` 验证 |
 | 同上 | 更新 `TestTruncateForLog_RuneAware`:删 EventResult 相关断言(只剩 EventText / EventError 用) |
 
 ### 3.2 集成测试(收尾阶段)
@@ -1936,7 +1939,7 @@ case gateway.OutResult:
 | 4 | `card_sanitize.go` 移植 | `internal/channel/feishu/result_render.go`(新) | 低 |
 | 5 | `result_render.go` 移植 | `internal/channel/feishu/result_render.go`(新) | 低 |
 | 6 | `Send(OutResult)` + `sendResultAsReply` | `internal/channel/feishu/adapter.go`(改) | 中 |
-| 7 | 删除 dedup + EventResult case | `internal/channel/feishu/receipt_event.go`(改) | 低 |
+| 7 | 删除 dedup + EventResult case | `internal/channel/feishu/receipt_entry.go`(改) | 低 |
 | 8 | `card_sanitize_test.go` 全覆盖 | 新文件 | 零 |
 | 9 | `result_render_test.go` 全覆盖 | 新文件 | 零 |
 | 10 | `adapter_test.go` 新增 OutResult 系用例 | 改 | 零 |
@@ -2413,7 +2416,7 @@ User msg → Final Result Reply (F-39 独立 reply, 锚同 userMsgID)
 `eventToEntry(EventText)` 当前对所有流式 chunk 走 `truncateForLog(text, perEntryMaxBytes=600)`:
 
 ```go
-// internal/channel/feishu/receipt_event.go:52-57 (现状)
+// internal/channel/feishu/receipt_entry.go:52-57 (现状)
 case agent.EventText:
     text := strings.TrimSpace(ae.Text)
     if text == "" { return LogEntry{}, false }
@@ -2726,7 +2729,7 @@ func (r *MessageReceipt) IsCompleted() bool {
 }
 ```
 
-**`internal/channel/feishu/receipt_event.go`** —— `eventToEntry(EventText)` 删 `truncateForLog(text, 600)`:
+**`internal/channel/feishu/receipt_entry.go`** —— `eventToEntry(EventText)` 删 `truncateForLog(text, 600)`:
 
 ```go
 // (1) case agent.EventText:删 truncateForLog
@@ -2829,7 +2832,7 @@ return r.ch.Send(ctx, gateway.OutboundMessage{
 
 | 文件 | 用例 | 断言 |
 |---|---|---|
-| `internal/channel/feishu/receipt_event_test.go` | `TestEventToEntry_Text_NoTruncate` | `EventText{Text: 1500 chars}` → entry `Text == 原始 1500 chars`(无 600B truncate) |
+| `internal/channel/feishu/receipt_test.go` | `TestEventToEntry_Text_NoTruncate` | `EventText{Text: 1500 chars}` → entry `Text == 原始 1500 chars`(无 600B truncate) |
 | 同上 | `TestEventToEntry_Text_EmptySkipped` | `EventText{Text: "  "}` → `(_, false)` |
 | 同上 | `TestEventToEntry_Text_ThinkingPrefix_Skipped` | `EventText{Text: "[思考] hello"}` → `(_, false)`(F-34 不变)|
 | `internal/channel/feishu/receipt_test.go` | `TestBuildReceiptCard_LongReply_SplitMultiDiv` | append 一条 2500 char EventText → card 含 3 个 div(≤ 1000 runes each),code block 保持 atomic |
@@ -2981,8 +2984,8 @@ Feishu receipt 在 + F-25 落地后已经形成完整 rolling-log 形态，但�
 ### 0.2 ⏳ / 🔄 reactions 跟其他 waiting 信号重复
 
 **Feishu 端已经存在的 waiting 信号**：
-1. ⏳ reaction (StateReceived) ── AddReaction(userMsgID, "OneSecond")
-2. 🔄 reaction (StateForwarded) ── AddReaction(userMsgID, "OnIt")
+1. ⏳ reaction (MessageQueued) ── AddReaction(userMsgID, "OneSecond")
+2. 🔄 reaction (MessageSubmitted) ── AddReaction(userMsgID, "OnIt")
 3. Tool / Think thread replies (F-37 thread route) ── execution 持续在 thread 报
 4. 未来可能的 OutReply / OutTaskCreate ── 一旦内容到达，card 出现
 
@@ -3062,12 +3065,12 @@ case gateway.OutMessageState:
     messageID := msg.MessageState.MessageID
     state := msg.MessageState.State
 
-    // F-42: 中间态 (StateReceived / StateForwarded) silent drop
+    // F-42: 中间态 (MessageQueued / MessageSubmitted) silent drop
     // - OutThinking / OutToolStart / OutToolEnd 已经在 thread 持续报
     // - 首 OutReply 到达时 receipt 直接出,无需前置 reaction
-    // - 终态 (StateDone / StateError) 仍渲染作为不可替代的确认
+    // - 终态 (MessageDone / MessageDropped) 仍渲染作为不可替代的确认
     switch state {
-    case agent.StateReceived, agent.StateForwarded:
+    case agent.MessageQueued, agent.MessageSubmitted:
         return nil
     }
 
@@ -3079,11 +3082,11 @@ case gateway.OutMessageState:
 ```
 
 **保留**：
-- `mapStateToFeishuEmoji` 函数（仍产 "DONE" / "THUMBSUP"）
+- `mapStateToFeishuEmoji` 函数（仍产 "DONE" / "OnIt" / "OneSecond"）
 - `messageStates map[string]agent.MessageState` idempotency 表
 - `AddReaction` 实现
 
-**删除**：StateReceived / StateForwarded 在 Send() case 中的处理分支（return nil 兜底）。
+**删除**：MessageQueued / MessageSubmitted 在 Send() case 中的处理分支（return nil 兜底）。
 
 ### 1.3 TaskList markdown 标题
 
@@ -3127,7 +3130,7 @@ func (a *Adapter) ensureReceiptForTask(
 
 // Send() OutReply case: receipt nil 时调 ensureReceiptForReply
 // Send() OutTaskCreate/OutTaskUpdate case: receipt nil 时调 ensureReceiptForTask
-// Send() OutMessageState case: StateReceived/Forwarded → return nil
+// Send() OutMessageState case: MessageQueued/MessageSubmitted → return nil
 // Send() OutInit/OutUsage case: receipt nil → silent drop (今天行为不变)
 ```
 
@@ -3166,10 +3169,10 @@ func (a *Adapter) ensureReceiptForTask(
 | `TestSend_OutTaskCreate_FirstEventCreatesReceipt` (NEW) | 首次 OutTaskCreate → ensure path + card body 含 `**📋 Tasks**` + task list |
 | `TestSend_OutInit_BeforeReceipt_SilentlyDrop` (NEW) | receipt nil 时 OutInit → return nil，`SendCard` 不调 |
 | `TestSend_OutUsage_BeforeReceipt_SilentlyDrop` (NEW) | 同上 |
-| `TestSend_OutMessageState_StateReceivedIsSilentDrop` (RENAME from `..._FirstReceivedNotSkipped`) | `StateReceived` → return nil，`AddReaction` 不调 |
-| `TestSend_OutMessageState_StateForwardedIsSilentDrop` (NEW) | `StateForwarded` → 同上 |
-| `TestSend_OutMessageState_StateDoneAddsReaction` (NEW) | `StateDone` → `AddReaction(messageID, "DONE")` 仍调 |
-| `TestSend_OutMessageState_StateErrorAddsReaction` (NEW) | `StateError` → `AddReaction(messageID, "THUMBSUP")` 仍调 |
+| `TestSend_OutMessageState_MessageQueuedIsSilentDrop` (RENAME from `..._FirstReceivedNotSkipped`) | `MessageQueued` → return nil，`AddReaction` 不调 |
+| `TestSend_OutMessageState_MessageSubmittedIsSilentDrop` (NEW) | `MessageSubmitted` → 同上 |
+| `TestSend_OutMessageState_MessageDoneAddsReaction` (NEW) | `MessageDone` → `AddReaction(messageID, "DONE")` 仍调 |
+| `TestSend_OutMessageState_MessageDroppedIsSilent` (NEW) | `MessageDropped` → return nil，不打 reaction |
 | `TestBuildTaskChecklist_AlwaysHasMarkdownTitle` (NEW) | task list 渲染首行 = `**📋 Tasks**` |
 | `TestBuildTaskChecklist_TitleWithReplyBody` (NEW) | 跟 OutReply body 共存时仍加标题 |
 
@@ -3708,9 +3711,9 @@ func (r *MessageReceipt) evictOverflowLocked()       // ← 删除(appendEntryLo
 - `promptHeaderLine` / `footerLine` 计算 (~50 行)
 - **receipt.go 段小计: ~615 行**
 
-#### **`internal/channel/feishu/receipt_event.go`**
+#### **`internal/channel/feishu/receipt_entry.go`**
 
-**整个文件删除**。
+（历史记录：本节描述的 `receipt_event.go` 已并入本文件，entry 构造与渲染都在这里。）
 
 理由：F-44 后 `MessageReceipt.Append` 整体删除，`Append` 是 `eventToEntry` 在 production 的唯一 caller（`ensureReceiptForReply` 也调它但同步删除）。`eventToEntry` 9 个 case（`EventText` / `EventToolStart` / `EventToolEnd` / `EventError` / `EventPermission` / `EventDone` / `EventUsage` / `EventCompaction` / `EventAgentConnected`）全部 unreachable：
 
@@ -3805,7 +3808,7 @@ func (r *MessageReceipt) evictOverflowLocked()       // ← 删除(appendEntryLo
 | 同上 | `TestBuildReceiptCard_NoTask_EmptyCard` | receipt 无 task → card body elements 为空（SendCard 仍可发,Feishu 接受空 elements） |
 | 同上 | `TestBuildReceiptCard_TaskSnapshotReplace` | 两次 `SetTaskList` 不同 snapshot → 第二次 PATCH 替换整段 checklist |
 | 同上 | `TestRenderLocked_TaskReceiptUpdates` | task snapshot 变化触发 PATCH;无 task → 无 PATCH |
-| `internal/channel/feishu/receipt_event_test.go` | **整个文件删除** | 覆盖 `eventToEntry` / `truncateForLog` / `formatUsageText` — 这些函数全部删除 |
+| `internal/channel/feishu/receipt_test.go` | **整个文件删除** | 覆盖 `eventToEntry` / `truncateForLog` / `formatUsageText` — 这些函数全部删除 |
 | `internal/channel/feishu/receipt_test.go`(扩) | `TestAppend_Deleted` | 删除测试:compile-time + grep 确认 `MessageReceipt.Append` 不存在 |
 | 同上 | `TestSetCompleted_SetExecuting_Deleted` | 删除测试:确认 `SetCompleted` / `SetExecuting` 不存在 |
 | 同上 | `TestLogEntry_Deleted` | 删除测试:确认 `LogEntry` struct 不存在 |
@@ -3829,8 +3832,8 @@ rg -n "ensureReceiptForReply|isOverflowingReceipt|sendReplyAsMessage" --type=go 
 rg -n "func.*MessageReceipt.*(Append|SetExecuting|SetCompleted|appendEntryLocked|lastEntryLocked|EntryCount|evictOverflowLocked)" --type=go  # 期望: 0 命中
 rg -n "type LogEntry struct" --type=go  # 期望: 0 命中
 rg -n "func eventToEntry|func formatUsageText" --type=go  # 期望: 0 命中
-ls internal/channel/feishu/receipt_event.go 2>&1  # 期望: No such file
-ls internal/channel/feishu/receipt_event_test.go 2>&1  # 期望: No such file
+ls internal/channel/feishu/receipt_entry.go 2>&1  # 期望: 存在(entry 构造已并入这里)
+ls internal/channel/feishu/receipt_test.go 2>&1  # 期望: 存在(测试已并入这里)
 
 # 验证 buildReceiptCard 不再引用 entries / agentName / workspace / branch / inputTokens / outputTokens
 rg -n "r\.entries|r\.agentName|r\.workspace|r\.branch|r\.inputTokens|r\.outputTokens" internal/channel/feishu/receipt.go  # 期望: 0 命中
@@ -3858,8 +3861,8 @@ go test ./internal/channel/feishu/... -run TestSend_OutTask
 | 3 | channel/feishu.md 渲染映射表更新 | `docs/channel/feishu-rendering.md` | 零 |
 | 4 | FEATURES.md 索引条目 | `docs/FEATURES.md` | 零 |
 | 5 | `card_sanitize.go` 合并到 `result_render.go`(`SanitizeCardMarkdown` 仍 exported,因为 `buildInteractiveCard` 也调用) | `internal/channel/feishu/` | 低 |
-| 6 | `receipt_event.go` 整个文件删除 | `internal/channel/feishu/receipt_event.go` | 中（连带删 `LogEntry` / `eventToEntry` / `formatUsageText` / `thinkingPrefix`） |
-| 7 | `receipt_event_test.go` 整个文件删除 | `internal/channel/feishu/receipt_event_test.go` | 低 |
+| 6 | `receipt_event.go` 整个文件删除 | `internal/channel/feishu/receipt_entry.go` | 中（连带删 `LogEntry` / `eventToEntry` / `formatUsageText` / `thinkingPrefix`） |
+| 7 | `receipt_event_test.go` 整个文件删除 | `internal/channel/feishu/receipt_test.go` | 低 |
 | 8 | `receipt.go` 删 `Append` / `SetExecuting` / `SetCompleted` / `appendEntryLocked` / `lastEntryLocked` / `EntryCount` / `evictOverflowLocked` + `entries` / `agentName` / `workspace` / `branch` / `inputTokens` / `outputTokens` 字段 + 简化 `buildReceiptCard` + `renderLocked` | `internal/channel/feishu/receipt.go` | 中-高 |
 | 9 | `adapter.go` 删 `ensureReceiptForReply` / `isOverflowingReceipt` / `sendReplyAsMessage` | `internal/channel/feishu/adapter.go` | 中 |
 | 10 | `adapter.go` 加 `sendReplyInThreadAndChat` helper + 新增 `perReplyMaxBytes` 常量 | `internal/channel/feishu/adapter.go` | 中 |
@@ -5544,7 +5547,7 @@ internal/gateway/gateway.go::dispatchAction
         ▼
 生产 trampoline：cs := mgr.Get(msg.ChatID) → cs.HandleAction(ctx, ev)
    ├─ cs == nil?  ── 岔路 B：return false
-   └─ cs.onReaction(ctx, ev)        ← 由 `internal/command/gtw/` 的 reaction handling 装上（原 `internal/gateway/handlers_gtw.go::wireGTWActionOnSession`；F-102 重构后 `gtw` 整体迁到 `internal/command/gtw/`，reaction 路由走 `services.ReactionRouter`，已不再走 `cs.SetActionHandler`）
+   └─ cs.onReaction(ctx, ev)        ← 由 `internal/command/gtw/` 的 reaction handling 装上（F-102 重构后 `gtw` 整体迁到 `internal/command/gtw/`，reaction 路由走 `services.ReactionRouter`，已不再走 `cs.SetActionHandler`）
         （`SetActionHandler` 仅 debug 时代使用；生产路径是 `cs.onReaction`）
         │
         ▼
@@ -5694,7 +5697,7 @@ Execute(logger)
 - `internal/bridge/claudecode/stream.go` emit `compact` / `compaction` 各一条
 - `internal/gateway/outbound/translate.go` 把 `EventCompaction` translate 成 `OutCompaction`
 - `internal/channel/feishu/adapter.go` `Send` case `OutCompaction` → `ReplyInThreadAndChat` 发 `✶ Compacting conversation…`（F-37 决策）
-- `internal/channel/feishu/receipt_event.go` `eventToEntry` 对 `EventCompaction` 返回 `(_, false)`（不进 receipt）
+- `internal/channel/feishu/receipt_entry.go` `eventToEntry` 对 `EventCompaction` 返回 `(_, false)`（不进 receipt）
 - **`runtime handler 完全不感知`**——既不累加也不持久化，只是把它当普通事件透传到 IM
 
 **问题**：count 信息全丢失，footer 显示的 cumulative 数字对用户来说**没有 compaction 这个调节变量**。
@@ -6016,7 +6019,7 @@ out.SessionContext = &gateway.SessionContext{
 **删什么**：
 - `internal/messages/outbound.go` `OutboundKind` 常量删除 `OutCompaction`
 - `internal/channel/feishu/adapter.go` `Send` case `OutCompaction` 删除
-- `internal/channel/feishu/receipt_event.go` `eventToEntry` 对 EventCompaction 的 `(_, false)` 分支删除
+- `internal/channel/feishu/receipt_entry.go` `eventToEntry` 对 EventCompaction 的 `(_, false)` 分支删除
 - `internal/channel/feishu/receipt.go` `Append` 对 EventCompaction 的 silent PATCH 分支删除
 - 文档删除所有 OutCompaction 引用（F-37 §2.1 表行；F-25 §3.1.1 thread reply 行；F-25 §2.4 silent PATCH 段）
 
@@ -6120,7 +6123,7 @@ type AgentEvent struct {
 
 **改动**：删除 `Send` case `gateway.OutCompaction` 分支（不再有 OutCompaction kind）。
 
-### 2.11 `internal/channel/feishu/receipt_event.go`
+### 2.11 `internal/channel/feishu/receipt_entry.go`
 
 **改动**：删除 `eventToEntry` 对 `agent.EventCompaction` 返回 `(_, false)` 的分支。
 
@@ -6890,10 +6893,10 @@ case gateway.OutMessageState:
 
 | `MessageState` | emoji_type(飞书预定义) | 用户视觉 |
 |---|---|---|
-| `StateReceived` | `OneSecond` | ⏳ |
-| `StateForwarded` | `OnIt` | 🔄 |
-| `StateDone` | `DONE` | ✅ |
-| `StateError` | `THUMBSUP` | ❌ (closest 预定义 indicator) |
+| `MessageQueued` | `OneSecond` | ⏳ |
+| `MessageSubmitted` | `OnIt` | 🔄 |
+| `MessageDone` | `DONE` | ✅ |
+| `MessageDropped` | (无) | 不打 reaction |
 
 **重要**:必须用飞书预定义 `emoji_type` 标识符,不是 unicode。传 unicode `⏳` 给飞书 reaction API 返回 `99992354 data not found`(reaction service 只识别预定义集合)。
 
@@ -6913,15 +6916,15 @@ case gateway.OutMessageState:
 
 #### 6.6.7 中间态 silent drop(F-42 简化)
 
-**F-42 后**：Feishu adapter 自决只渲染 `StateDone` / `StateError` 两个终态，`StateReceived` / `StateForwarded` silent drop。
+**F-42 后**：Feishu adapter 自决只渲染 `MessageDone` / `MessageDropped` 两个终态，`MessageQueued` / `MessageSubmitted` silent drop。
 
 ```go
 // Send() OutMessageState case (F-42 后)
 switch state {
-case agent.StateReceived, agent.StateForwarded:
+case agent.MessageQueued, agent.MessageSubmitted:
     return nil   // silent drop
 }
-// 仅 StateDone (✅ "DONE") / StateError (❌ "THUMBSUP") 走 AddReaction
+// 仅 MessageDone (✅ "DONE") 走 AddReaction;MessageDropped 不打 reaction
 ```
 
 **理由**:

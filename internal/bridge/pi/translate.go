@@ -467,7 +467,7 @@ func (t *translator) translate(raw []byte, logger *slog.Logger) ([]agent.AgentEv
 		// Pi cycle bumps the AgentSession counter exactly once.
 		// Reasons live in protocol.go's compactionEnd.Reason but
 		// are intentionally not propagated (no Subtype field after
-		// F-49). See docs/channel/feishu.md.
+		// F-49). See docs/channel/feishu-rendering.md §A12.
 		return nil, nil
 
 	case "compaction_end":
@@ -979,8 +979,8 @@ func (t *translator) finishTurnLocked() []agent.AgentEvent {
 // context-window-pct formula is applied when both numerator and
 // denominator are positive; otherwise the field stays at zero
 // and the channel footer omits the "X%" segment. See
-// docs/channel/feishu.md and
-// docs/bridge/pi.md §2.2.
+// docs/channel/feishu-rendering.md §A13 and
+// docs/bridge/pi.md §A3 §2.2.
 func decodeMessageUsage(u *messageUsage, ctxWindow int) *agent.UsageInfo {
 	if u == nil {
 		return nil
@@ -1009,7 +1009,7 @@ func decodeMessageUsage(u *messageUsage, ctxWindow int) *agent.UsageInfo {
 		// F-55: forward the window alongside X% so the footer can
 		// render `X% (window)`. Single render-side consumer; the
 		// runtime does not recompute / catalog / clamp based on
-		// this value — see docs/channel/feishu.md.
+		// this value — see docs/channel/feishu-rendering.md §A13.
 		out.ContextWindow = ctxWindow
 	}
 	return out

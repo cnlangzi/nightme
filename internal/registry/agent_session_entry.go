@@ -74,12 +74,14 @@ type AgentSessionEntry struct {
 	// the next spawn: the bridge sends session.create({sessionId:
 	// SessionID, cwd: Cwd}) and dsh returns the same session when the
 	// id + cwd match. A mismatch (different cwd or a stale id)
-	// returns session-conflict → the runtime clears the stale id and
-	// respawns fresh, the user's history is not lost.
-	// See docs/bridge/dsh.md.
+	// surfaces as an error to the dispatcher; the stored id is left
+	// untouched, so `/retry` replays the same id and `/new` starts
+	// fresh. See docs/bridge/dsh.md.
 	//
 	// For non-dsh bridges (claudecode / opencode / pi), SessionID
-	// remains opaque; recover skips non-dsh entries.
+	// stays opaque — only the owning bridge interprets it. Nothing
+	// replays it at boot; the daemon starts no agent process until a
+	// chat asks for one.
 }
 
 // AgentSessionFileVersion is the on-disk format version for

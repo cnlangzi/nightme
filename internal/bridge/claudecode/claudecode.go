@@ -114,7 +114,7 @@ type pendingAsk struct {
 // ─── driver struct (runtime + protocol) ───
 
 // driver is the claudecode runtime handle. After the
-// starter+driver split (P2 pilot, wip/agent.md), the template
+// starter+driver split (P2 pilot), the template
 // fields (name/command/args) live on starter; this struct holds
 // only runtime state populated by starter.Start. Implements the
 // agent.driver interface (5 methods, package-private) plus a few

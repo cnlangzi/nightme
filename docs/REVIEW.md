@@ -1,6 +1,6 @@
 # /review 设计
 
-> **Status**: 设计定稿(单一 dispatcher + 两种 Runner + ocr 路径按 rule group 拆多 job 并发 + simplify 作为并行 group + 每 group 走 agent session 路径)。所有 bridge 走 `agent.ReviewDispatch` 统一入口——`OcrAvailable() ? ReviewWithOcr : ReviewWithPrompt`。**Agent 自带 review 子命令(`claude -p code-review` / `codex review` / `cursor-agent -p /review-bugbot`)不再走 `Starter.Review` 特殊路径**,用户直接在 chat 发 slash command,nightme 透传给底层 agent。**§2.5 多 job 并发机制已实现**(`internal/agent/aggregate_sink.go` + `review_with_ocr.go::delegateReviewMultiJob`,详见 §2.5.7 实现索引)
+> **Status**: 已落地(单一 dispatcher + 两种 Runner + ocr 路径按 rule group 拆多 job 并发 + simplify 作为并行 group + 每 group 走 agent session 路径)。所有 bridge 走 `agent.ReviewDispatch` 统一入口——`OcrAvailable() ? ReviewWithOcr : ReviewWithPrompt`。**Agent 自带 review 子命令(`claude -p code-review` / `codex review` / `cursor-agent -p /review-bugbot`)不再走 `Starter.Review` 特殊路径**,用户直接在 chat 发 slash command,nightme 透传给底层 agent。**§2.5 多 job 并发机制已实现**(`internal/agent/aggregate_sink.go` + `review_with_ocr.go::delegateReviewMultiJob`,详见 §2.5.7 实现索引)
 > **Scope**: `/review` slash 命令的架构、分流、数据流、生命周期与边界
 > **读者**: 参与 command / agent / bridge / chatsession 任一层,或想理解 review 设计意图的工程师
 > **Related docs**:
@@ -179,8 +179,8 @@ ocr = alibaba 的 [open-code-review](https://github.com/alibaba/open-code-review
 | --- | --- |
 | 本地路径 | `~/code/geax/github.com/cnlangzi/open-code-review/`(与 `nightme.nightme/`、`seowatson/` 等外部 dep 镜像同款位置) |
 | clone 方式 | `git clone --depth=1 https://github.com/alibaba/open-code-review.git`(浅 clone,只保留 HEAD,够查 SKILL / 命令实现 / 当前 tag) |
-| 当前 pinned | `v1.9.10` / `66120291271b2e605e420e9f11fbd6448f06163f`(2026-08-24 确认;升级前先看 open-code-review 仓库的 `cmd/opencodereview/delegate_cmd.go` 与 `skills/open-code-review-delegate/SKILL.md` 是否改 schema) |
-| 委托入口(对应 nightme 引用) | open-code-review 仓库的 `cmd/opencodereview/delegate_cmd.go`(nightme 的 `internal/agent/review_with_ocr.go` 注释路径直接对得上) |
+| 当前 pinned | `v1.9.10` / `66120291271b2e605e420e9f11fbd6448f06163f`(2026-08-24 确认;升级前先看 `open-code-review/cmd/opencodereview/delegate_cmd.go`(open-code-review 仓库) 与 `skills/open-code-review-delegate/SKILL.md` 是否改 schema) |
+| 委托入口(对应 nightme 引用) | `open-code-review/cmd/opencodereview/delegate_cmd.go`(open-code-review 仓库)(nightme 的 `internal/agent/review_with_ocr.go` 注释路径直接对得上) |
 
 **`ocr` 子命令全清单**(以本地镜像当前 HEAD 为准,完整列表见 README):
 
@@ -191,7 +191,7 @@ ocr = alibaba 的 [open-code-review](https://github.com/alibaba/open-code-review
 - **`ocr delegate rule <files...>`** —— ocr 路径第二步:按 rule content 分组的 rules(触发多 job 拆分的依据)
 - `ocr session list` —— 会话管理(端到端路径用)
 
-**规则集确认(2026-08-24)**:官方内置多语言规则集以 **NPE / 线程安全 / XSS / SQL 注入** 四类为锚点,**未提供 `simplify` / `simpily` 类规则**。open-code-review 仓库的 `internal/config/rules/rule_docs/*.md` 全量 grep `simplify` 仅命中 `kotlin.md` 一处,且为英文单词用法(`Use = to simplify single-expression functions`,Kotlin 语法建议),非规则类别。结论:**如果 nightme 想要 simplify 行为,需要 host agent 自己出 prompt,不来自 ocr** —— 这是 v1 默认路径,符合 §2.2 "边界"。
+**规则集确认(2026-08-24)**:官方内置多语言规则集以 **NPE / 线程安全 / XSS / SQL 注入** 四类为锚点,**未提供 `simplify` / `simpily` 类规则**。`open-code-review/internal/config/rules/rule_docs/*.md`(open-code-review 仓库) 全量 grep `simplify` 仅命中 `kotlin.md` 一处,且为英文单词用法(`Use = to simplify single-expression functions`,Kotlin 语法建议),非规则类别。结论:**如果 nightme 想要 simplify 行为,需要 host agent 自己出 prompt,不来自 ocr** —— 这是 v1 默认路径,符合 §2.2 "边界"。
 
 ### 2.3 Go 复刻的 builtin 路径(ocr 未装,`ReviewWithPrompt`)
 

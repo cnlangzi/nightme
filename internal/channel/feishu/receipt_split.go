@@ -20,7 +20,7 @@
 // to non-atomic blocks — paragraphs that exceed the limit on
 // their own without paragraph boundaries).
 //
-// Reference: docs/channel/feishu.md.
+// Reference: docs/channel/feishu.md §13.3.
 package feishu
 
 import (

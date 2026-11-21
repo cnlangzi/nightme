@@ -214,7 +214,7 @@ settled 不是"命令返回时"发，是"**这条消息引发的工作全部结�
 | `/gtw commit` `/gtw pr` | `agent.RunOnce` 同步跑在命令里 | 命令返回时（agent 已跑完） |
 | `/gtw push` | 不跑回合（纯 git push） | 命令返回时 |
 | `/gtw close` `/gtw back` `/gtw config` `/gtw sync` `/gtw abort` `/gtw assign` | 不跑回合 | 命令返回时 |
-| `/cwd` `/use` `/think` `/tools` `/watch` `/format` | 不跑回合 | 命令返回时 |
+| `/cwd` `/use` `/think` `/tools` `/watch` | 不跑回合 | 命令返回时 |
 | `/new` | 重置会话上下文（不跑回合） | 命令返回时 |
 | `/stop` | 同步结束当前回合 | 被停止的**那条用户消息** settle 成 `cancelled`；`/stop` 自己结算它停掉的那次停（`ok` / `noop` / `failed`） |
 | `/close` | 同步关闭会话（内部结束当前回合） | 被关闭的那条用户消息 settle 成 `cancelled`；`/close` 自己 settle 成 `unknown` |

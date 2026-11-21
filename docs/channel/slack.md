@@ -81,7 +81,7 @@ cc-connect 有一份生产在跑的 Slack 实现，但它钉在 `slack-go v0.16.
 | cc-connect 的东西 | 是否复用 |
 |---|---|
 | Socket Mode 事件循环 + Ack 模式 | ✅ 抄 |
-| `assistantOrThreadTS`（Assistant Chat tab 路由，§5.3） | ✅ 抄 |
+| Assistant Chat tab 路由(§5.3) | ✅ 抄 |
 | 文件下载（Bearer + HTML 响应检测） | ✅ 抄 |
 | `AppMentionEvent` 缺 Files 字段的绕过 | ✅ 抄 |
 | `markdown_slack.go`（markdown → mrkdwn 手工转换） | ❌ 弃用，改用原生 `markdown_text` |
@@ -113,7 +113,7 @@ cc-connect 有一份生产在跑的 Slack 实现，但它钉在 `slack-go v0.16.
 
 > **注意**：`text` 的 4,000 是按**字节**在服务端判定的，CJK 一字 3 字节，实际约 1,300 汉字。cc-connect 因此把上限压到 3,500 字节。用 `markdown_text` 可绕开这个坑。
 
-> **⚠️ 关于 thread_ts**：Slack 官方文档将 `thread_ts` 标注为「Omit for top-level messages; only supported in channels where the whole channel is one session」。**实测与文档不符**——2026-08-31 在普通 channel（含 `#all-nightme`、`D0BTPL0K3UN`）下，不传 `thread_ts` 一律返回 `invalid_thread_ts`；传了真 ts 立即 OK。**结论**：所有 streaming 输出必须在 thread 里——普通文本用 user message ts 作 thread_ts。`$` 前缀命令的回复是短文本（OutCommandReply + `chat.postMessage` 顶层），不走 stream 路径。详见 §5.2 与 §9.2。
+> **⚠️ 关于 thread_ts**：Slack 官方文档将 `thread_ts` 标注为「Omit for top-level messages; only supported in channels where the whole channel is one session」。**实测与文档不符**——2026-08-31 在普通 channel（含 `#all-nightme`、`D0BTPL0K3UN`）下，不传 `thread_ts` 一律返回 `invalid_thread_ts`；传了真 ts 立即 OK。**结论**：所有 streaming 输出必须在 thread 里——普通文本用 user message ts 作 thread_ts。命令回复是短文本（OutCommandReply + `chat.postMessage` 顶层），不走 stream 路径。详见 §5.2 与 §9.2。
 
 ### 2.2 限流档位（已核实）
 
@@ -486,7 +486,7 @@ nightme 的 `$watch all` 语义要求群里全收，因此**必须订阅 `messag
 
 **⚠️ 同时订阅 `app_mention` 和 `message.channels`，@ 消息会被投递两次**（两个事件各来一次）。必须按 `(channel, ts)` 建短 TTL LRU 去重。cc-connect 未遇到此问题（它只订阅了 `app_mention` + `message.im`）。
 
-gate 逻辑不变：channel 只负责在 `InboundMessage.HasMention` 上打标，`$watch` 的判定仍在 `internal/chatsession/watchmode.go`。DM 恒 `true`；频道内 `<@BOT>` / `@here` / `@channel` / 回复 bot 消息 / `$` 开头均为 `true`。
+gate 逻辑不变：channel 只负责在 `InboundMessage.HasMention` 上打标，`/watch` 的判定仍在 `internal/chatsession/watchmode.go`。DM 恒 `true`；频道内 `<@BOT>` / `@here` / `@channel` / 回复 bot 消息均为 `true`。
 
 ### 5.5 chatID 命名空间
 
@@ -799,12 +799,12 @@ Slack 的 slash command 需要在 app 设置里注册才会收到 `SlashCommand`
 | 2026-08-30 | `OutChoice` 改走 `chat.postMessage` + 普通 block，不走 stream | 本文档 §4.4 |
 | 2026-08-30 | `login.Credentials` 新增 `AppToken` 字段（Slack 是唯一需要双凭证的 channel）| 落地 |
 | 2026-08-31 | （**已废**）manifest 加 `features.slash_commands` 段（12 个命令），解 Slack 客户端拦截 `/` 前缀导致 bot 收不到命令的问题 | e2e 测试发现 → 被 2026-09-01 决策取代 |
-| 2026-08-31 | （**已废**）`/close` 在 manifest 里改名为 `Slack ` | 被 `$` 前缀方案取代 |
+| 2026-08-31 | （**已废**）`/close` 在 manifest 里改名为 `Slack ` | 被 manifest 去 slash_commands 取代 |
 | 2026-08-31 | **`chat.startStream` 必须传 `thread_ts` + `recipient_team_id` + `recipient_user_id`**（Slack 文档与实测不符；文档标「可选」实测「必填」）| e2e 实测确认 |
-| 2026-08-31 | **所有 streaming 输出必须在 thread 内**。普通文本：用 `msg.ReplyTo` (user.ts) 当 thread_ts。`$` 前缀命令：adapter 在 `handleMessage` 检测 `$` 后去掉 → 走 dispatcher → 命令回复走 `OutCommandReply` + `chat.postMessage` 顶层 | e2e 实测确认 |
+| 2026-08-31 | **所有 streaming 输出必须在 thread 内**。普通文本：用 `msg.ReplyTo` (user.ts) 当 thread_ts。命令回复走 `OutCommandReply` + `chat.postMessage` 顶层 | e2e 实测确认 |
 | 2026-08-31 | `assistant.threads.setStatus` 也需要 `thread_ts`（文档标「可选」实测「必填」）| e2e 实测确认 |
 | 2026-08-31 | 保留 streaming 路径（§3），**不再采用** §9.1 的 PATCH fallback（实测 streaming API 可用） | e2e 实测结论 |
-| 2026-09-01 | **弃用 Slack slash command 机制**——改用 `$` 前缀消息匹配（adapter 在 `handleMessage` 检测 `$` 前缀，去掉后当作 `/cmd args` 走 dispatcher）。**0 Slack 改动加新命令**，消除 reinstall 痛点、消除 Slack 保留字冲突、消除 `/kclose` 这种 alias 翻译 | 设计与实现 |
+| 2026-09-01 | manifest 不再注册任何 `slash_commands` 段(`internal/login/slack/manifest.go` + `manifest_verify_test.go::TestManifestHasNoSlashCommands`)。**Slack 平台侧不再有 slash command**;`handleSlashCommand` 仍处理 socket mode 的 `EventTypeSlashCommand`,但 manifest 不注册命令时平台不会送这类事件 | 设计与实现 |
 | 2026-09-01 | Slack manifest **不再需要** `slash_commands` 段 | 落地 |
 
 ---
@@ -866,26 +866,17 @@ wiring：`internal/config/config.go`（`SlackConfig` + defaults + env）、`conf
 | `/cwd /path` 在 #all-nightme 生效（CWD 设置）| ✅ chat session `sl_T:D:...` 的 `selectedCwd` 已写入 |
 | `/cwd` 后 bot 静默（CWD 设了但无确认回复）| ❌ `invalid_thread_ts` —— Issue B（**已修** 2026-08-31）|
 | `/watch on` 后 bot 静默 | ❌ 同上（**已修**）|
-| Slash command 在 DM 被拦截（"not supported in threads"）| ❌ Slack 平台行为——**已绕过**（2026-09-01 改用 `$` 前缀）|
+| Slash command 在 DM 被拦截（"not supported in threads"）| ❌ Slack 平台行为——DM 走普通消息路径,不经过 slash command |
 | Bot 加入 #all-nightme 后正常收发 | ✅ 通过 "Channel details → Agents & apps → Add" |
 
-#### 2026-09-01 `$` 前缀方案验证
+#### 命令入口的现状
 
-| 探针 / 行为 | 实测结果（2026-09-01）|
+| 入口 | 状态 |
 |---|---|
-| `$cwd /home/...` 在 #all-nightme 生效 | ✅ chat session `selectedCwd` 已写入；OutCommandReply 回 "Workspace set to ..." |
-| `$watch on` 在 #all-nightme 生效 | ✅ OutCommandReply 回 "Watch mode set to all..." |
-| `$use claude` agent 切换 | ✅ OutCommandReply 回 "Now using claude (pid=..., source=resumed)" |
-| `$new` 重置 session | ✅ OutCommandReply 回 "Reset 1 session(s): claude @ ... — reset in-place" |
-| `$stop` 中断 turn | ✅ OutCommandReply 回 "Context cleared. Ready for the next instruction."（含完整 git status + token stats）|
-| `$cwd` 在 DM | ✅ DM 走普通消息路径，Slack 不拦截（无"not supported in threads"错）|
-| 加新命令 0 Slack 改动 | ✅（manifest 无 slash_commands 段，命令由 dispatcher 匹配）|
+| 普通消息里的 `/cwd /home/...` | ✅ dispatcher 的 `parseCommand` 命中 `/cwd`,命令走 `OutCommandReply` 回 "Workspace set to ..." |
+| 普通消息里的 `/watch on` / `/use claude` / `/new` / `/stop` | ✅ 同上,都命中 dispatcher |
+| DM 里的 `/cwd` | ✅ DM 走普通消息路径,Slack 不拦截（无 "not supported in threads" 错）|
+| `$cwd` 这种 `$` 前缀写法 | ❌ **未实现** —— adapter 把 `ev.Text` 原样发出去,没有 `$` 前缀改写;`$cwd` 会被当成普通文本发给 agent |
+| Slack 平台侧的 slash command | ❌ manifest 不注册 `slash_commands`,平台不会送这类事件 |
 
-**结论**（2026-09-01 终态）：
-1. `$` 前缀消息匹配方案完全替代 slash command 机制
-2. 0 reinstall 摩擦
-3. 跨 Slack 保留字 / 跨平台 / 跨 DM 限制全部解决
-4. streaming API + recipient info 仍是普通文本流式渲染的必需条件
-5. bot / Feishu / Telegram 全部兼容 `OutCommandReply` Kind（已修 bot.go 的 `outboundText`）
-
-详见 §5.2、§6.2.1、§9.2、§11。
+**结论**：命令的唯一入口是普通消息里的 `/xxx` 文本 —— dispatcher 负责匹配,adapter 不做任何前缀改写(见 §3.1 / §6.2.1)。streaming API + recipient info 仍是普通文本流式渲染的必需条件;Feishu / Telegram 走同一个 `OutCommandReply` Kind。

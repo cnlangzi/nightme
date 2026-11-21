@@ -23,7 +23,7 @@
 
 ## 0.1 当前 Windows 13 个测试失败的根因（不是 fix-stop 引入）
 
-PR 186 引入 Windows CI runner 后，暴露了 13 个 pre-existing 平台问题。这些**与 fix-stop 无关**，已记在 `docs/branch/fix-stop-windows-followups.md`。按根因分类：
+PR 186 引入 Windows CI runner 后，暴露了 13 个 pre-existing 平台问题。这些**与 fix-stop 无关**，按根因分类列在下表：
 
 | # | 失败 | 根因 | 归类 |
 |---|------|------|------|
@@ -139,10 +139,10 @@ cmd.Env = append(os.Environ(), env...)
 
 涉及位置（commit 修复）：
 
-- `internal/bridge/claudecode/claudecode.go:165` — 删除 `env = append(env, s.command)`
-- `internal/bridge/pi/agent.go:268` — 同上
+- `internal/bridge/claudecode/claudecode.go` 的 `childEnviron` — 只拼 `KEY=VALUE` 的 `cfg.Env`
+- `internal/bridge/pi/agent.go` 的同名 helper — 同上
 
-codex / opencode 当时没有同款 bug，无需改动。
+其余 bridge 走 `proc.NewWith` / `pty.NewTransport`，env 由 `internal/proc` 统一拼装，同样只接受 `KEY=VALUE`。
 
 ### 2.4 怎么测出来
 
@@ -175,14 +175,18 @@ err := cmd.Start() // ❌ The parameter is incorrect.
 
 ### 3.1 Windows 安装生态
 
-nightme 支持的 4 个 CLI，在 Windows 上有以下分发形式（按 PATHEXT 顺序 `.COM;.EXE;.BAT;.CMD;.VBS;.JS;.WS;.MSC`）：
+nightme 内建的 8 个 CLI，在 Windows 上有以下分发形式（按 PATHEXT 顺序 `.COM;.EXE;.BAT;.CMD;.VBS;.JS;.WS;.MSC`）：
 
 | CLI | 常见形式 | LookPath 解析结果 |
 |-----|----------|-------------------|
-| `claude` | npm 包内的 `@anthropic-ai/claude-code.cmd` + 真实 `.exe` | `claude.cmd`（先命中） |
-| `codex` | npm 包内的 `codex.cmd` + `codex.exe` | `codex.cmd`（先命中） |
-| `opencode` | npm 包内的 `opencode.cmd` + `opencode.exe`（实际就是 `node_modules\opencode-ai\bin\opencode.exe`） | `opencode.cmd`（先命中） |
+| `claude` | npm `@anthropic-ai/claude-code` 落的 `claude.cmd` + 真实 `.exe` | `claude.cmd`（先命中） |
+| `codex` | npm `@openai/codex` 落的 `codex.cmd` + `codex.exe` | `codex.cmd`（先命中） |
+| `dsh` | npm `@deepseek-ai/dsh` 落的 `dsh.cmd` shim | `dsh.cmd`（先命中） |
+| `opencode` | npm `opencode-ai` 落的 `opencode.cmd` + `opencode.exe` | `opencode.cmd`（先命中） |
+| `cursor` | 官方 PowerShell 安装器落的 `cursor-agent.cmd`（并复制一份 `agent.cmd`） | `cursor-agent.cmd`（先命中） |
 | `pi` | pi-node 的 `pi.cmd` + `pi`（无扩展的 PE 二进制） | `pi.cmd`（先命中） |
+| `copilot` | npm `@github/copilot` 落的 `copilot.cmd` | `copilot.cmd`（先命中） |
+| `omp` | 官方 PowerShell 安装器落的 `omp.exe`（binary 模式，无 shim） | `omp.exe` |
 
 **关键事实**：几乎所有分发都是「先放个 `.cmd` shim 在 PATH 顶层，shim 内部再去调 `.exe`」。所以 **LookPath 100% 返回 `.cmd` 路径**。
 
@@ -197,10 +201,25 @@ nightme 支持的 4 个 CLI，在 Windows 上有以下分发形式（按 PATHEXT
 | `.ps1` | `exec.CommandContext(powershell.exe, -NoProfile -NonInteractive -ExecutionPolicy Bypass -File resolved, args...)` | 备用 |
 | `.js` | `exec.CommandContext(node.exe, resolved, args...)` | 备用 |
 
-**所有 4 个 bridge 都通过 `proc.New` 启动**——没有「各自实现一套」的地方。
+**所有 bridge 都通过 `internal/proc` 启动**——没有「各自实现一套」的地方。两条路径：
 
 ```go
-// claudecode.go / pi/agent.go / codex/session.go / opencode/server.go
+// claude / codex / pi / omp —— 裸 stdio 管道
+// internal/bridge/claudecode/claudecode.go / codex/session.go / pi/agent.go / omp/agent.go
+child := proc.NewWith(ctx, proc.Options{HideWindow: true, Grace: proc.AgentGrace}, command, args...)
+
+// opencode / cursor / copilot —— 走通用 ACP bridge，载体是 PTY
+// internal/bridge/acp/agent.go
+transport, err := pty.NewTransport(ctx, cfg.Workspace, command, args, env, cols, rows)
+
+// dsh —— 共享 host，自己 spawn `dsh --profile web`
+// internal/bridge/dsh/host/lifecycle.go
+child := proc.New(ctx, opts.HostCmd, "--profile", "web", ...)
+```
+
+`internal/proc/exec_windows.go` 的 `launchOnWindows` 是所有路径的单一入口：
+
+```go
 cmd := proc.New(ctx, command, args...)  // ← 统一入口
 cmd.Dir = cfg.Workspace
 cmd.Env = append(os.Environ(), cfg.Env...)   // ← 注意 §2
@@ -254,11 +273,11 @@ lpCommandLine     = cmd /d /c "<resolved>" <args...>
 | pi `Start` 成功 + handshake 成功 | .cmd 包 + env 合规 | 见 §4.3 |
 | claude `Start` 成功 | 同上 | 同上 |
 | codex `Start` 成功 + initialize + thread/start | 同上 | 同上 |
-| opencode `Start` 成功 + 解析 banner | 同上 + banner regex 兼容 | 同上 |
+| opencode `Start` 成功 + ACP handshake | 同上（走 `opencode acp`） | 同上 |
 | 三 pipe（stdin/stdout/stderr）+ cmd 启动 | §2.4 的最小复现 | 见 §4.4 |
 | `ComSpec` 自定义 | fallback 不写死 `C:\Windows\...` | 单测 |
 
-### 4.3 一次性验证全部 4 个 agent
+### 4.3 一次性验证全部 8 个 agent
 
 ```go
 // cmd/repro_test/main.go（修复期临时建；CI 不入仓）
@@ -273,6 +292,10 @@ import (
     "github.com/cnlangzi/nightme/internal/agent"
     "github.com/cnlangzi/nightme/internal/bridge/claudecode"
     "github.com/cnlangzi/nightme/internal/bridge/codex"
+    "github.com/cnlangzi/nightme/internal/bridge/copilot"
+    "github.com/cnlangzi/nightme/internal/bridge/cursor"
+    "github.com/cnlangzi/nightme/internal/bridge/dsh"
+    "github.com/cnlangzi/nightme/internal/bridge/omp"
     "github.com/cnlangzi/nightme/internal/bridge/opencode"
     "github.com/cnlangzi/nightme/internal/bridge/pi"
 )
@@ -293,7 +316,11 @@ func main() {
         {"pi",       pi.NewStarter("pi", "pi", nil)},
         {"claude",   claudecode.NewStarter("claude", "claude", nil)},
         {"codex",    codex.NewStarter("codex", "codex", nil)},
-        {"opencode", opencode.NewStarter("opencode", "opencode", nil)},
+        {"omp",      omp.NewStarter("omp", "omp", nil)},
+        {"opencode", opencode.NewStarter("opencode", "opencode", []string{"acp"})},
+        {"cursor",   cursor.NewStarter("cursor", "cursor-agent", cursor.DefaultACPArgs)},
+        {"copilot",  copilot.NewStarter("copilot", "copilot", copilot.DefaultACPArgs)},
+        {"dsh",      dsh.NewStarter("dsh")},
     }
     for _, a := range agents {
         ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -309,7 +336,7 @@ func main() {
 }
 ```
 
-期望：4 个 `Start ok, pid=...`，没有 `error`。Handshake / banner / 后续事件再单独断言。
+期望：8 个 `Start ok, pid=...`，没有 `error`。Handshake / 后续事件再单独断言。
 
 ### 4.4 最小 env 复现
 
@@ -327,7 +354,7 @@ err := cmd.Start() // ✅ nil
 
 ### 4.5 CI 覆盖
 
-`internal/proc/exec_windows_test.go` 已有 5 个回归测试（`TestNew_*`），任何 CI runner 上跑 `go test ./internal/proc/...` 都会覆盖 launch matrix。**不要**靠 Unix CI 替代 Windows 真机测。
+`internal/proc/exec_windows_test.go` 已有 12 个回归测试（`TestNew_*` / `TestComspecOrDefault` / `TestIsWindowsBatchExt` / `TestHideWindow_*`），任何 CI runner 上跑 `go test ./internal/proc/...` 都会覆盖 launch matrix。**不要**靠 Unix CI 替代 Windows 真机测。
 
 ---
 
@@ -395,7 +422,7 @@ err := cmd.Start() // ✅ nil
 | pi bridge spawn 调用 | `internal/bridge/pi/agent.go` → `newDriver` |
 | claude bridge spawn 调用 | `internal/bridge/claudecode/claudecode.go` → `newDriver` |
 | codex bridge spawn 调用 | `internal/bridge/codex/session.go` → `newSession` |
-| opencode bridge spawn 调用 | `internal/bridge/opencode/server.go` → `startServer` |
+| opencode bridge spawn 调用 | `internal/bridge/opencode/opencode.go` → 通用 ACP bridge（`pty.NewTransport`） |
 | Bridge 注册表 | `cmd/nightme/agents.go` |
 | REPL console 门控（VT 检测） | `cmd/nightme/repl_console_windows.go` → `readlineUsable`；stub 在 `repl_console_unix.go` |
 | REPL 三路分发 | `cmd/nightme/repl.go` → `runREPL`（tty+VT → `runREPLInteractive` / tty 无 VT → `runREPLScanner` / non-tty → `runREPLWith`） |

@@ -45,7 +45,8 @@ const gitlabLinkIsBlockedBy = "is_blocked_by"
 // ProviderKind names a supported git hosting platform. v1 supports
 // GitHub + GitLab via the user's local `gh` / `glab` CLI; other hosts
 // (Gitea, Bitbucket, self-hosted non-GitHub-Enterprise) return
-// ErrUnsupportedProvider. See docs/feat/F-gtw.md.
+// ErrUnsupportedProvider. The supported hosts are the ProviderKind
+// constants below.
 type ProviderKind string
 
 const (
@@ -319,7 +320,8 @@ func prStateOrOpen(state string) string {
 // Bitbucket) plug in by satisfying this interface — no caller
 // change needed.
 //
-// See docs/feat/F-gtw.md for the full design.
+// The GitProvider interface is the seam the /gtw commands use; the
+// concrete implementations live in this package.
 type GitProvider interface {
 	// Kind returns ProviderGitHub or ProviderGitLab.
 	Kind() ProviderKind

@@ -66,7 +66,7 @@ import (
 // F-54: the handler takes a typed chatsession.AgentEventEnvelope
 // (delivered by cs.AgentEventBus). The legacy
 // `chatsession.EventHandler` callback signature is gone — see
-// docs/SPEC.md §3.5.
+// docs/SPEC.md §1.2.
 func NewEventHandler(
 	em messages.Emitter,
 	cs *chatsession.ChatSession,
@@ -167,7 +167,7 @@ func NewEventHandler(
 			// reads ctx.Usage directly from OutboundMessage on the
 			// OK path below. Done. Usage, if any, dies with the
 			// dropped event (channel never sees it). See
-			// docs/channel/feishu.md for
+			// docs/channel/feishu-rendering.md §A10 for
 			// the per-turn snapshot contract.
 			return
 		}

@@ -703,7 +703,7 @@ session/prompt ──> session/update (agent_message_chunk / agent_thought_chunk
 | `copilot` 不在 PATH | Detect 返回 error,nightme 提示安装 |
 | Copilot CLI < 1.0.x(老 preview) | Start 失败,错误信息 "unknown option --acp",提示升级 |
 | 未登录 | ACP 握手阶段 authMethods 报告需 `copilot login`,chat session 失败 |
-| 空 prompt | RunOnce 返回 error "copilot: empty prompt" |
+| 空 prompt | 通用 ACP bridge 的 `agent.TurnText` 累加器不产出任何文本,turn 正常结束但没有文本 |
 | workspace 为空 | Start / RunOnce 均返回 error |
 | 进程异常退出 | 通用 acp bridge 的 stderr 诊断 + EventAgentDone{Reason:"settled" 或 error path} |
 | `--acp` flag 顺序写错 | Copilot 是 flat flags,无 subcommand,顺序无关,但**必须** `--allow-all-tools` + `--acp` + `--stdio` 三件齐 |

@@ -50,7 +50,7 @@ import (
 //
 // F-48 (follow-up to F-45): runtime stamps one of these on every
 // OutboundMessage.StatusBar that flows to a main-chat footer
-// render site. See docs/channel/feishu.md.
+// render site. See docs/channel/feishu-rendering.md §A10.
 //
 // The canonical definition lives in internal/messages so the wire
 // types package does not need to import the gtw package (avoids

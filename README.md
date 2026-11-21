@@ -1105,14 +1105,17 @@ The knob is best-effort: a CLI that ignores it keeps its own behaviour, one that
 
 | Doc | What |
 |---|---|
+| [`docs/README.md`](./docs/README.md) | The doc model — which layer a new document belongs to. |
 | [`docs/PRD.md`](./docs/PRD.md) | Product definition — what / why / for whom. No tech. |
 | [`docs/SPEC.md`](./docs/SPEC.md) | Technical architecture — components, data flow, NFRs. |
 | [`docs/FEATURES.md`](./docs/FEATURES.md) | Feature index — every F-XX in one table. |
 | [`docs/CHANNEL.md`](./docs/CHANNEL.md) | Multi-channel architecture — all credentialed channels auto-start, per-channel session isolation. |
 | [`docs/CHATSTORE.md`](./docs/CHATSTORE.md) | `chat_sessions.json` source of truth, ChatSession hydrate, AgentSessionPool. |
 | [`docs/WFE.md`](./docs/WFE.md) | Workflow YAML + engine runtime architecture — triggers, steps, me↔wfe boundary. |
+| [`docs/REVIEW.md`](./docs/REVIEW.md) | `/review` design — dispatch layers and the review contract. |
+| [`docs/me.md`](./docs/me.md) | The personal agent — how a program takes part in a chat. |
 | [`docs/feat/`](./docs/feat/) | Per-feature design docs. |
-| [`docs/bridge/`](./docs/bridge/) | Per-agent bridge design: claude, codex, dsh, opencode, pi, copilot, omp. |
+| [`docs/bridge/`](./docs/bridge/) | Per-agent bridge design: acp, claude, codex, copilot, cursor, dsh, omp, pi + the shared CLI transport. |
 | [`docs/channel/feishu.md`](./docs/channel/feishu.md) | Feishu adapter reference (rendering rules, card semantics, thread routing). |
 | [`docs/flow/`](./docs/flow/) | Cross-cutting flow docs (e.g. the 3-layer doc model). |
 | [`docs/E2E_TESTING.md`](./docs/E2E_TESTING.md) | Manual Feishu round-trip + troubleshooting. |
@@ -1139,11 +1142,17 @@ CI runs on GitHub Actions (`.github/workflows/ci.yml`) for every push and pull r
 cmd/nightme/                       # cobra CLI (start / stop / restart / status / logs / doctor / test / config / list / login / kill / clean / update / workflow / version)
 configs/                           # example YAML config
 docs/
-  PRD.md SPEC.md FEATURES.md       # 3-layer doc model
-  WFE.md                           # workflow YAML + engine runtime (schema / triggers / steps / me↔wfe)
-  feat/                            # F-XX per-feature design
-  bridge/  channel/  flow/         # per-subsystem design
-  images/                          # README-served screenshots
+  README.md                         # the doc model — what belongs where
+  PRD.md SPEC.md FEATURES.md        # 3-layer doc model
+  CHANNEL.md CHATSTORE.md WFE.md    # multi-channel / persistence / workflow engine
+  REVIEW.md                         # /review design
+  TESTS.md E2E_TESTING.md WINDOWS.md # cross-platform CI smoke / manual e2e / Windows notes
+  me.md Wiki.md                     # personal agent / repo wiki
+  primary-agent-detection.md        # primary-agent resolution chain
+  REVIEWER_INSTRUCTIONS.md          # strict-grounding rules for /review
+  feat/                             # F-XX per-feature design
+  bridge/  channel/  flow/          # per-subsystem design
+  images/                           # README-served screenshots
 internal/
   agent/                           # Agent / AgentEvent / Info / Starter interface
   agentsession/                    # AgentSession + Prompt + Spawner (per-CLI-process runtime unit)
@@ -1151,13 +1160,14 @@ internal/
     acp/  claudecode/  codex/  copilot/  cursor/  dsh/  omp/  opencode/  pi/  pty/
     telemetry/                     # agent-CLI client-telemetry policy (one opt-out)
   channel/                         # Channel interface
-    echo/  feishu/  slack/  telegram/   # adapters (feishu production; telegram ready; slack in development)
+    discord/  echo/  feishu/  slack/  telegram/   # adapters
   chatsession/                     # ChatSession + pool manager + persistence
+  chatstore/                       # chat_sessions.json store (single mutex, atomic writes)
   cli/                              # shared CLI helpers (config / doctor / login)
   command/                         # Slash-command Commander / Registry / Factory
-    cwd/ close/ newcmd/ use/ think/ tools/ watch/ stop/ steer/ services/
+    cwd/ close/ newcmd/ use/ think/ tools/ watch/ stop/ steer/ services/ format/
     handoff/ resume/ review/ wiki/ queue/ me/   # task-continuity / review / wiki / queue / personal agent
-    gtw/                           # /gtw plan / new / fix / commit / push / pr / close / back / sync (Git team workflow)
+    gtw/                           # /gtw plan / new / fix / assign / close / back / commit / push / pr / config / sync / abort (Git team workflow)
   config/                          # YAML loader + env overrides
   daemoncontrol/                   # IPC for `nightme doctor` / `status`
   errors/                          # CodedError + ExitCode
@@ -1171,8 +1181,8 @@ internal/
   login/                           # IM bot registration — feishu / slack / telegram onboarding
   me/                              # the personal agent — runs the workflows in the chat they started in
   messages/                        # IM message types + dispatch
-  prcache/                         # PR metadata cache (per-F-50)
-  registry/                        # JSON-backed chat_sessions.json + agent_sessions.json (0600, atomic)
+  prcache/                         # PR metadata cache (GitHub / GitLab)
+  registry/                        # persisted ChatSessionEntry / AgentSessionEntry types + atomic file replace
   shell/                           # `!cmd` shell-mode dispatcher
   statusbar/                       # Feishu footer-card stamp runtime (per F-58, F-133)
   testdata/                        # shared test fixtures

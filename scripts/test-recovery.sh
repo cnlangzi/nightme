@@ -1,15 +1,17 @@
 #!/bin/bash
-# test-recovery.sh — verify Phase 2 (F-dsh-shared-host) restart recovery.
+# test-recovery.sh — verify dsh session re-attach after a host restart.
 #
 # Steps:
-#   1. Start nightme daemon + dsh shared host.
-#   2. Trigger a dsh chat session (writes sessionId to registry).
+#   1. Start a dsh shared host.
+#   2. Create a session via session.create and capture its sessionId.
 #   3. SIGTERM the dsh subprocess (simulates dsh crash / restart).
 #   4. Spawn a fresh dsh on the same port (simulates recovery).
-#   5. Verify RecoverAll re-attaches: same sessionId present, mux stream
-#      delivers session/subscribed for it, prompt round-trip works.
+#   5. Verify session.create({sessionId, cwd}) returns the same id,
+#      session.list still lists it, and a prompt round-trips.
 #
-# Pre-req: dsh binary on PATH, ./bin/nightme built.
+# See docs/bridge/dsh.md for the shared-host wire contract.
+#
+# Pre-req: dsh binary on PATH.
 
 set -euo pipefail
 
@@ -107,7 +109,7 @@ log "  ✓ session.prompt accepted on reattached session"
 log ""
 log "========================================="
 log "test-recovery.sh PASSED"
-log "  Phase 2 (restart recovery) verified:"
+log "  restart recovery verified:"
 log "  - sessionId stable across dsh restart"
 log "  - re-attach via session.create({sessionId, cwd})"
 log "  - session.list still returns the session"

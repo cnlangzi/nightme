@@ -1,6 +1,6 @@
 // Package services — EventBus[T] tests (F-54).
 //
-// Covers the 9 core invariants from docs/feat/F-54-event-bus.md §5:
+// Covers the 9 core invariants from docs/SPEC.md §5:
 // registration order, consume-stops-chain, panic isolation,
 // unsubscribe idempotency, in-handler unsubscribe, Clear, Close,
 // nil-safety, and concurrent Subscribe. Run with `-race` to catch

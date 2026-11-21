@@ -9,21 +9,22 @@
 
 > **Depends on**: F-104 (`/gtw push` 3 档 agent 优先级 + yml `~/.nightme/gtw.yml`)、F-120 (PR #120 `fix(gtw): harden push verification and PR cache correctness` — 本次新增的 HEAD-advance check)、`internal/command/gtw/push.go::headSHA`、`internal/command/gtw/push.go::countUnpushed`、`internal/command/gtw/push.go::listUncommittedFiles`
 
-> **Related**: [`wip/gtw-hooks.md`](../wip/gtw-hooks.md)（agent 优先级 + 3 档 chain）、`internal/command/gtw/README.md`（gtw 回复排版规约）、PR #120 commit `77a8023`（HEAD-advance check 的来源）
+> **Related**: `internal/command/gtw/README.md`（gtw 回复排版规约）、[`internal/command/gtw/push.go`](../../internal/command/gtw/push.go)（agent 优先级 + 3 档 chain）、PR #120 commit `77a8023`（HEAD-advance check 的来源）
 
 ---
 
 ## 0. TL;DR
 
-把 `/gtw push` 拆成 **3 个互斥的分支**,由初始 `git status` + `countUnpushed` 决定走哪条:
+`/gtw push` 是 **push-only** 的 dispatcher:它不 spawn agent,由一份 readiness snapshot 决定"推"还是"没什么可推"。
 
-1. **空操作分支**:worktree 干净且没有 unpushed commit → 提示用户,退出。
-2. **agent commit 分支**:worktree dirty → 调 agent 跑 prompt(只 commit,不 push) → 校验 commit 完整 → 工程化 push。
-3. **直推分支**:worktree 干净但有 unpushed → 工程化 push,agent 不参与。
+1. **空操作分支**:worktree 干净 + 上游存在 + ahead=0 → 提示用户,退出。
+2. **直推分支**:其余情况(首次 push / ahead>0)→ 工程化 push,agent 不参与。
 
-Agent 的职责从"commit + push + 报告结果"收窄到 **"把当前 working tree 的改动按相关性拆成若干条 commit"**。Push 决策、push 执行、push 失败兜底、IM 卡片拼装,全部由 nightme 工程化代码根据 git 状态完成 —— 不再读 agent 的 prose 输出作为 ground truth。
+原本落在 push 里的 "dirty → agent → commit → push" 那一段独立成了 `/gtw commit`:agent 只负责把 working tree 的改动拆成若干条 commit,nightme 校验 commit 落地,然后停在本地;push 由用户随后单独跑 `/gtw push`。push 撞到脏工作区直接拒掉并指向 `/gtw commit`。
 
-Agent prompt 从 5 步 checklist 收窄到 **role + task + 3 条硬规则** (~130 tokens)。verification 不再做 SHA-parse 比对(原本就计划上,本设计后**取消** —— agent 不 claim SHA,不需要 parse)。
+Agent 的职责是 **"把当前 working tree 的改动按相关性拆成若干条 commit"**。Push 决策、push 执行、push 失败兜底、IM 卡片拼装,全部由 nightme 工程化代码根据 git 状态完成 —— 不读 agent 的 prose 输出作为 ground truth。
+
+verification 不做 SHA-parse 比对:agent 不 claim SHA,commit 列表一律从 `git log` 拿。
 
 ---
 
@@ -46,32 +47,23 @@ PR #120 (commit `77a8023`) 加的 HEAD-advance check 已经能兜底一种 false
 
 ### 1.2 agent 职责过载的副作用
 
-当前 prompt(`internal/command/gtw/commit_push.go::buildAgentPrompt`):
+prompt(`internal/command/gtw/commit.go::buildAgentPrompt`)只让 agent 做两件事:读 diff、决定 commit 边界、写 Conventional Commits message。message 之外的所有事 —— push、PR、跑测试、改文件、回滚历史 —— 都由 nightme 工程化代码负责。
 
-```
-1. Run `git status` and `git diff` to inspect changes.
-2. Write a Conventional Commits commit message.
-   ...
-3. `git add -A && git commit -m "<msg>"` (heredoc if multi-line).
-4. `git push -u origin <branch>`.
-5. Reply with: <commit_hash> <one-line summary>
-```
+把副作用一起交给 agent 时,LLM 会在边界外产生副作用:
 
-5 步 + 5 类失败模式(LLM 都会遇到):
+| 失败模式 | 谁的责任 | 现在的兜底 |
+|---|---|---|
+| commit message 格式写错 | LLM | nightme 不解析 message 格式,用户自己改 |
+| commit hook 失败但 LLM 吞了 stderr | LLM | `verifyAgentCommitted` 兜底(HEAD 没动 → 拒) |
+| commit 失败 → LLM 跑 `git restore` 想"重置" | LLM(**静默吞用户改动**) | prompt 的 denylist 禁 revert / restore / stash |
+| push 失败 → LLM 假装 push 成功 | LLM | prompt 禁 `git push`;push 由 `/gtw push` 单独跑 |
+| LLM 把现有 SHA 当新 SHA 报 | LLM | prompt 不要求报 SHA;卡片从 `git log` 拼 |
 
-| 失败模式 | 谁的责任 |
-|---|---|
-| step 2 写错 message 格式 | LLM |
-| step 3 commit hook 失败但 LLM 吞了 stderr | LLM |
-| step 3 commit 失败 → LLM 跑 `git restore` 想"重置" | LLM(**静默吞用户改动**,本次 bug 高度疑似) |
-| step 4 push 失败 → LLM 假装 push 成功 | LLM |
-| step 5 LLM 把现有 SHA 当新 SHA 报 | LLM |
-
-5 类失败中,**只有 1 类**(step 1-2,真正需要 LLM 判断的)对 prompt 有依赖。其余 4 类都是 LLM 在边界外的副作用 —— 最好的"修复"是 **不把那些事交给 LLM**。
+只有第 1 类真正需要 LLM 判断,其余几类都是 LLM 在边界外的副作用 —— 最好的"修复"是 **不把那些事交给 LLM**。
 
 ### 1.3 三个根本性反思
 
-设计本次重构时,经过 4 轮 prompt 迭代,逐步提炼出 3 条原则:
+提炼出 3 条原则:
 
 1. **Agent = "需要 judgment 的事",nightme = "infra 副作用的事"**
    - LLM 强项:看 diff、定 commit 边界、写 message
@@ -81,194 +73,175 @@ PR #120 (commit `77a8023`) 加的 HEAD-advance check 已经能兜底一种 false
    - LLM 可以 confabulate,但 `git log` 不会
    - 因此:nightme 从 `git log` 拿真实 commit 列表,agent 说什么无所谓
 3. **Prompt = "如果 agent 是一个独立 CLI 工具,这个 prompt 就是它接收的命令"**
-   - 不该让 agent 知道"谁在调用它"、调用方会怎么处理它的输出
-   - 因此:prompt 里**没有** nightme 的 verification / push / 卡片 / "FAILED:" 输出格式
+   - 不该让 agent 替调用方做副作用(push / PR / 跑测试 / 改文件 / 回滚历史)
+   - 因此:prompt 里只有"读 diff → 定 commit 边界 → 写 message → commit",收尾只要求一行一 commit 的简短确认,成败判定全在 nightme 侧
 
 ---
 
-## 2. The 3 Branches
+## 2. The Branches
 
-`dispatchPush` 启动时拍两张快照:
+`dispatchPush`(`internal/command/gtw/push_dispatch.go`)启动时拍一张 readiness 快照:
 
 ```go
-isClean        := strings.TrimSpace(statusOut) == ""        // git status --porcelain
-unpushedBefore := countUnpushed(worktree, branch)          // git rev-list @{u}..HEAD
+snap, err := CollectReadinessForDispatch(ctx, c.Worktree, deps.Git)
 ```
 
-| Branch | `isClean` | `unpushedBefore` | 动作 | Agent? |
-|---|---|---|---|---|
-| **Branch 1 (no-op)** | ✅ | 0 | 提示用户"无活儿干",退出 | ❌ |
-| **Branch 2 (commit + push)** | ❌ | 任意 | agent commit → verify → nightme push | ✅ |
-| **Branch 3 (push only)** | ✅ | >0 | nightme 直接 push | ❌ |
+| 分支 | 条件 | 动作 | Agent? |
+|---|---|---|---|
+| **no-op** | `snap.HasNothingToPush()` | 提示用户"无活儿干",退出 | ❌ |
+| **push** | 其余(首次 push / ahead>0) | `programmaticPushWithRetry` → 从 `git log` 拼卡片 | ❌ |
 
-### 2.1 Branch 1: no-op
+push 之前还有三道硬拒:
+
+| 条件 | 回复 |
+|---|---|
+| `snap.PushBlockReason() != ""` | `❌ worktree has unmerged paths (merge/rebase conflict)` |
+| `snap.Branch == ""` | `❌ detached HEAD — checkout a named branch first` |
+| `!snap.WorkingTreeIsClean()` | `❌ worktree is dirty — /gtw push no longer auto-commits` |
+
+### 2.1 no-op
 
 ```go
-if isClean && unpushedBefore == 0 {
-    return reply(...,
-        "ℹ️ nothing to push\n"+
-        "  no uncommitted changes\n"+
-        "  no unpushed commits on " + c.Branch), nil
+if snap.HasNothingToPush() {
+    card, out := pushFallback(ctx, c, snap.Branch, deps)
+    return replyOutcome(ctx, cs.Emitter(), chatID, messageID, card, out), nil
 }
 ```
 
-不调 agent,不调 push。直接退出。这是**新增的 branch**,当前代码对这种情况返回的应该是 `pushClean` 路径(然后 push 0 commit 上去,IM 卡片错乱)。
+`pushFallback`(`internal/command/gtw/push.go`)是二次判定:远端已经握着本地全部 commit 时回 `✅ nothing to push — <branch> is already on the remote`;远端还缺 commit 时回 `❌ nothing to push`。
 
-### 2.2 Branch 2: dirty → agent → verify → push
-
-```go
-if !isClean {
-    // (1) 调 agent 跑新 prompt
-    name, agentErr := runAgentToCommit(ctx, cs, deps, c, args, ymlAgent,
-        chatID, messageID)
-    if agentErr != "" {
-        return reply(..., agentErr), nil
-    }
-    agentName = name
-
-    // (2) verify: HEAD 动了 + worktree 干净
-    if msg := verifyAgentCommitted(ctx, deps, c, headBefore); msg != "" {
-        return reply(..., msg), nil  // 失败,不 push
-    }
-
-    // (3) 重新数 unpushed(agent 也可能没 commit,看 verify 结果)
-    unpushedBefore, _ = countUnpushed(ctx, c.Worktree, c.Branch, deps)
-}
-```
-
-**`runAgentToCommit`**:单纯 spawn agent 跑 prompt(§3)。不读 agent 输出的 prose。
-
-**`verifyAgentCommitted`**:纯 git 状态校验(§4.1)。HEAD 必须动 + worktree 必须 clean。
-
-### 2.3 Branch 3 (或 Branch 2 续): worktree 干净 → push
+### 2.2 push
 
 ```go
-if unpushedBefore == 0 {
-    return reply(...,
-        "⚠️ worktree is clean but nothing to push.\n"+
-        "hint: ..."), nil  // 防御:agent 跑了但没 produce commit
-}
+originBefore, err := originBranchSHA(ctx, c.Worktree, c.Branch, deps)
+if err != nil { ... }
 
 if err := programmaticPushWithRetry(ctx, deps, c); err != nil {
-    commits := gitLogRange(ctx, c.Worktree, headBefore + "..HEAD", deps)
-    return reply(...,
-        "❌ push failed: " + err.Error() + "\n\n"+
-        "commits (local, not on origin):\n" + formatCommits(commits)), nil
+    return replyOutcome(ctx, cs.Emitter(), chatID, messageID, err.Error(), ...), nil
 }
 
-return replySuccessCard(ctx, deps, c, headBefore, agentName, isClean)
+revRange := originBefore + "..origin/" + c.Branch   // 首次 push 时走 firstPushRevRange
+card, commitCount, err := replyPushCard(ctx, c, revRange, deps)
 ```
 
-**`programmaticPushWithRetry`**:工程化 push,带 retry。封装现有 `verifyPushedAndRetry` 的 push 循环,从 commit_push.go 抽出来。
+**`programmaticPushWithRetry`**:工程化 push,带 retry(`internal/command/gtw/push.go`)。内部用 `unpushedIsZero` 做 push 后二次验证。
 
-**`replySuccessCard`**:从 git log 拼 IM 卡片,跟 agent 输出完全无关(§5)。
+**`replyPushCard`**:从 git log 拼 IM 卡片,跟 agent 输出完全无关(`internal/command/gtw/render.go`)。
+
+**rev range 的坑**:左端必须用 push **之前**的 `origin/<branch>` tip(`originBranchSHA`),不能用本地 HEAD —— push 成功后 `origin/<branch> == 本地 tip`,`headBefore..origin/<branch>` 会塌成空区间,卡片就会谎报"pushed 0 commit(s)"。首次 push 时 `originBefore` 为空,改走 `firstPushRevRange`。
+
+### 2.3 agent 那一条路在 `/gtw commit`
+
+worktree 脏的时候 `/gtw push` 不再替用户 commit,而是拒掉并指向 `/gtw commit`:
+
+```
+❌ worktree is dirty — /gtw push no longer auto-commits
+hint: run `/gtw commit` first, then `/gtw push`
+```
+
+`/gtw commit`(`internal/command/gtw/commit.go::dispatchCommit`)拥有原来的 "dirty → agent → commit" 那一段:跑 agent → `verifyAgentCommitted` → re-snapshot → 从 `git log headBefore..HEAD` 拼 commit 卡片,**不 push**。
 
 ### 2.4 状态机图
 
 ```
               ┌──────────────────────────┐
               │   dispatchPush entry     │
-              │   snapshot headBefore,   │
-              │   unpushedBefore, isClean│
+              │   snapshot (readiness)   │
               └────────────┬─────────────┘
                            │
-        ┌──────────────────┼──────────────────┐
-        │                  │                  │
-        ▼                  ▼                  ▼
-   Branch 1            Branch 2           Branch 3
-   isClean &&          !isClean            isClean &&
-   unpushed==0                             unpushed>0
-        │                  │                  │
-   ℹ️ no-op            agent commit         │
-        │                  │                  │
-        │                  ▼                  │
-        │             verify:                 │
-        │             HEAD advanced?          │
-        │             worktree clean?         │
-        │                  │                  │
-        │            ┌─────┴─────┐            │
-        │            │           │            │
-        │          FAIL         OK            │
-        │            │           │            │
-        │       ⚠️ 错误     recount unpushed   │
-        │       (no push)        │            │
-        │                        ▼            │
-        │                 ┌──────────────────┘
-        │                 │
-        │                 ▼
-        │          programmaticPushWithRetry
-        │                 │
-        │           ┌─────┴─────┐
-        │           │           │
-        │         FAIL         OK
-        │           │           │
-        │      ❌ push 失败    replySuccessCard
-        │      (列出本地)     (从 git log 拼)
-        │           │           │
-        └───────────┴───────────┘
-                    │
-                    ▼
-              return reply(...), nil
+              ┌────────────┼────────────┐
+              │            │            │
+              ▼            ▼            ▼
+        PushBlockReason  Branch=""   !WorkingTree
+        (conflict)      (detached)  IsClean (dirty)
+              │            │            │
+           ❌ 拒         ❌ 拒       ❌ 拒 + 指向
+                                         /gtw commit
+                           │
+                           ▼
+                  snap.HasNothingToPush()
+                    │            │
+                   true         false
+                    │            │
+                    ▼            ▼
+               pushFallback   originBefore = originBranchSHA
+                    │            │
+                    ▼            ▼
+                ✨ no-op    programmaticPushWithRetry
+                                 │            │
+                              FAIL         OK
+                                 │            │
+                                 ▼            ▼
+                           ❌ push 失败   replyPushCard
+                             (列出本地)    (从 git log 拼)
+                                            │         │
+                                         count==0   count>0
+                                            │         │
+                                            ▼         ▼
+                                        pushFallback  ✅ 成功卡
 ```
 
 ---
 
-## 3. Agent Prompt (Minimal)
+## 3. Agent Prompt
 
-### 3.1 完整 prompt 文本
+`/gtw commit` 的 prompt 由 `internal/command/gtw/commit.go::buildAgentPrompt(c, lang)` 渲染。commit subject / body 用配置的输出语言写,Conventional Commits 的 type 关键词和 `Issue: #<id>` trailer 保持英文。
+
+### 3.1 prompt 骨架
 
 ```
-You are a release engineer.
+You are a release engineer. Stage the current local branch's uncommitted
+changes into one or more local commits following Conventional Commits on
+that branch. Push and PR creation are handled by separate steps; you
+ONLY commit.
 
-The user has uncommitted work on branch <BRANCH> in <WORKTREE>
-[for issue #<N>]. They need it committed to local git.
+Branch: <branch>
+Worktree: <worktree>
+[Issue: #<N>]
 
-Group the changes by relevance — different concerns go in
-different commits, related changes go together. Use
-Conventional Commits for each:
-
-  <type>(<scope>): <subject>
-  types: feat, fix, chore, refactor, docs, test, build,
-         ci, perf, style, revert
-  subject: ≤72 chars, imperative, no trailing period
-  body: WHY, wrapped at 72  [<Issue: #N>] if applicable.
-
-Rules:
-- Do not push. Push is the user's decision, not yours;
-  never run `git push`.
-- Do not revert, restore, or stash the user's work.
-- `git add <specific files>`, not `git add -A`.
+## Allowed operations (strict allowlist)
+## Workflow
+## Commit message rules
+## Final reply
 ```
 
-**总长 ~130 tokens**(之前 ~250+ tokens)。三段结构:
+### 3.2 allowlist:agent 只允许跑这 4 条 git 命令
 
-| 段 | 作用 |
+| 命令 | 用途 |
 |---|---|
-| Role | 你是 release engineer |
-| Task | 拆 + commit 到本地 + Conventional Commits 格式 |
-| Rules | 3 条硬规则:不 push / 不 restore / 不 `-A` |
+| `git status` | 读 porcelain |
+| `git diff` / `git diff --staged` / `git log` | 读内容 |
+| `git add <specific files>` | **整文件** stage(不是 `git add -A`,不是 hunk 级) |
+| `git commit -m "<subject>" [-m "<body>"]` | 建 commit |
 
-### 3.2 这版 prompt 跟之前对比删了什么
+Workflow 段只要求跑一次 `git status` + `git diff`(已经 staged 过就再补一次 `git diff --staged`),然后按逻辑意图定 commit 边界 —— **一个内聚的 commit 好过硬拆成两个**。
 
-| 之前 | 现在 | 为什么删 |
-|---|---|---|
-| "OUTPUT POLICY" 段(讲 agent 怎么不输出) | 删 | nightme 怎么用 agent 输出,不该 agent 知道 |
-| "COMMIT FAILED: <reason>" 输出格式 | 删 | nightme 从 git 状态判断,不需要 agent 汇报 |
-| "If a commit fails, stop and report" | 删 | agent 用工具反馈自然知道 commit 是否成;nightme 兜底 |
-| Procedure 1-3 详细步骤 | 删 | 步骤拆太细鼓励"checklist 心态",反而不让 LLM 判断 |
-| "Verify HEAD advanced" 步骤 | 删 | nightme 在外面 verify;内部 verify 跟外面打架 |
-| "Why we hand this to an agent" 等元说明 | 删 | LLM 不需要 meta context |
-| "Stop. Do not push. Do not run any other git command." 收尾 | 删 | 跟 Rules 段重复 |
+### 3.3 denylist:agent 明确不许做的 9 件事
 
-### 3.3 为什么这 3 条 Rule 留着
+- 改 / 建 / 删工作区里的任何文件
+- `git apply`、`git apply --cached` 或任何 patch / hunk 级 surgery
+- 跑测试、构建、linter、formatter 或任何其他工具
+- 自查自己的产出(wrapper 在 agent 退出后跑 branch / clean / HEAD-advance 三道检查)
+- `git push`
+- amend / rebase / reset 或任何改历史、改 HEAD 的操作
+- checkout 到别的分支
+- revert / restore / stash 用户的工作
+- `git add -A` / `git add .`
 
-1. **"Do not push"** —— 用户明确要求。LLM 真会想"commit 完顺手 push 一下",prompt 没说就会自己加(PR #120 当天 Pi 高度疑似这么干过)
-2. **"Do not revert, restore, or stash"** —— 本次 bug 的根因。LLM 在 commit 失败时倾向用这些命令"清理"再重来,**会静默吞用户改动**。必须禁
-3. **"`git add <files>`, not `-A`"** —— `-A` 会带进 untracked 临时文件(`.DS_Store` / `*.swp` / `*.log`),LLM 不会自己过滤
+allowlist 和 denylist 两层都要:allowlist 单独留着有洞(比如"不跑测试"这条,LLM 仍能通过 Bash 工具绕),denylist 单独留着又给 LLM 留了"发明新绕法"的空间。
 
-每条 Rule 都回答一个问题:"不告诉 agent 它就不会犯这个错吗?" —— 答案是**会**,所以留着。
+### 3.4 commit message 规则
 
-### 3.4 通用 prompt 设计原则(从这次提炼)
+- subject ≤72 chars、imperative mood、不带结尾句号
+- `fix:` / `feat:` 必须带 1-3 段 body 说明 **WHY**;`chore:` body 可选
+- subject-only 的 commit 只留给不重要的事
+- 有 issue 时 body 末尾单独一行 `Issue: #<id>`
+
+### 3.5 收尾契约
+
+wrapper 从 `git log headBefore..HEAD` 渲染成功卡,agent 的文字回复只当简短确认:一行一个 commit(`<hash> <subject>`),没有 commit 就回 `(no commits)`。不允许 agent 复述自己的过程。
+
+### 3.6 通用 prompt 设计原则
 
 1. **Agent 的 prompt 应该写成"如果它是一个独立 CLI 工具,这就是它接收的命令"**。可移植、不带调用方上下文
 2. **Agent 不该知道"谁"在调用它**。verification / retry / 卡片渲染 是 nightme 自己的事
@@ -278,230 +251,249 @@ Rules:
 
 ## 4. Verification Chain
 
-### 4.1 `verifyAgentCommitted` (新)
+### 4.1 `verifyAgentCommitted`
 
-替代当前 `verifyAgentPushedAndRecover` 的 "agent 是不是 commit 了" 部分(push 那部分由 `programmaticPushWithRetry` 接管)。
+`/gtw commit` 在 agent 跑完之后做三道只读校验(branch → worktree clean → HEAD advance),任何一道不过都直接拒,不 push。
 
 ```go
 func verifyAgentCommitted(ctx, deps, c, headBefore string) string {
-    headAfter, err := headSHA(ctx, c.Worktree, deps)
-    if err != nil {
-        return "⚠️ agent finished but failed to read HEAD: " + err.Error()
+    // (1) branch:agent 必须还在 c.Branch 上
+    branchAfter, err := currentBranch(ctx, c.Worktree, deps)
+    if err != nil { return "⚠️ agent finished but failed to read current branch: ..." }
+    if branchAfter != c.Branch {
+        return "⚠️ agent finished but HEAD is on %q, expected %q.\n" + ...
     }
 
-    // (a) HEAD 必须动
-    if headAfter == headBefore {
-        return fmt.Sprintf(
-            "⚠️ agent finished but no new commit was created "+
-            "(HEAD unchanged at %s).\n"+
-            "hint: the worktree was dirty before the agent and may "+
-            "not be clean now. Inspect manually.",
-            shortSHA(headBefore))
-    }
-
-    // (b) worktree 必须干净
+    // (2) worktree 必须干净
     uncommitted, err := listUncommittedFiles(ctx, c.Worktree, deps)
-    if err != nil {
-        return "⚠️ agent finished but failed to verify clean state: " + err.Error()
-    }
+    if err != nil { return "⚠️ agent finished but failed to verify clean state: ..." }
     if len(uncommitted) > 0 {
-        return fmt.Sprintf(
-            "⚠️ agent finished but %d file(s) still uncommitted in %s:\n"+
-            "  %s\n"+
-            "hint: commit them manually, or re-run /gtw push to retry.",
-            len(uncommitted), c.Worktree,
-            strings.Join(uncommitted, "\n  "))
+        return "⚠️ agent finished but %d file(s) are still uncommitted in %s:\n" + ...
+    }
+
+    // (3) HEAD 必须动
+    headAfter, err := headSHA(ctx, c.Worktree, deps)
+    if err != nil { return "⚠️ agent finished but failed to read HEAD: ..." }
+    if headAfter == headBefore {
+        return "⚠️ agent finished but no new commit was created (HEAD unchanged at %s).\n" + ...
     }
     return ""
 }
 ```
 
-只校验"agent 真的 commit 了",**不**校验 push(push 是 nightme 自己的事)。
+`headBefore` 是必填参数:拿不到就直接返回内部错误,而不是跳过 HEAD-advance 检查 —— 那正是 false-success 类要抓的东西,不能被静默关掉。
+
+只校验"agent 真的 commit 了",**不**校验 push(push 是 `/gtw push` 自己的事)。
 
 ### 4.2 为什么不需要 SHA-parse 增强
 
-之前的 F-56 设计草稿考虑过:解析 agent reply 里的 `<sha>` claim,跟 headAfter 比对。**这个增强在当前设计下取消**,原因:
+设计草稿考虑过:解析 agent reply 里的 `<sha>` claim,跟 headAfter 比对。**这个增强在当前设计下取消**,原因:
 
 - 设计:agent claim 3 条 SHA → 必须 parse 核对
 - 新设计:agent **不 claim** 任何 SHA → `git log headBefore..HEAD` 是 ground truth → 没法不一致
 
 LLM 没法靠少报 / 错报 SHA 来骗系统,因为 **agent 根本不被要求报 SHA**。
 
-### 4.3 `programmaticPushWithRetry` (新,抽自 `verifyPushedAndRetry`)
+### 4.3 `programmaticPushWithRetry`
+
+`/gtw push` 的唯一 push 入口(`internal/command/gtw/push.go`)。`git push -u origin <branch>` 最多重试一次:
 
 ```go
 func programmaticPushWithRetry(ctx, deps, c) error {
-    // 跟当前 verifyPushedAndRetry 一致:
     // 1. git push -u origin <branch>
-    // 2. 失败再 git push -u origin HEAD
-    // 3. countUnpushed 验真
-    // 抽出来同时给 Branch 2 续 push 和 Branch 3 直推复用
+    //    push 本身报错 → 直接把真实错误透传(不重试:auth / 保护规则 / 网络类错误重试不会自愈)
+    // 2. unpushedIsZero 验真
+    //    不为 0 → 重试一次
+    // 3. 还不为 0 → 报错,附本地未推 commit 列表
 }
 ```
+
+判据是 `countUnpushed`(不是 push 命令的 exit code)—— git 可以 exit 0 但 commit 没真上去,也可以 exit non-zero 但分支本来就是 up to date。
 
 ---
 
 ## 5. IM Card 格式
 
-### 5.1 Branch 1 — no-op
+### 5.1 no-op
+
+远端已经握着本地全部 commit:
 
 ```
-ℹ️ nothing to push
-  no uncommitted changes
-  no unpushed commits on docs-readme
+✅ nothing to push — docs-readme is already on the remote
 ```
 
-emoji 用 `ℹ️`(信息,不是错误也不是警告)。这是**新增的 case**,当前代码对这种 case 的回复错乱(`pushClean` 跑完 0 commit push,IM 卡片会显示 "✅ pushed 0 commits")。
-
-### 5.2 Branch 2 — agent commit + push
+远端还缺 commit:
 
 ```
-🤖 pi committed 2 change(s) and pushed to docs-readme:
-  aabbcc1 feat(gtw): split verification into 3 branches
-  ddeeff2 fix(gtw): cancel push on agent failure
-
+❌ nothing to push
+  docs-readme still carries commits the remote does not have
 ```
 
-emoji `🤖`(agent 主导)。commit 列表来自 `git log headBefore..origin/<branch>`,不是 agent prose。
+两条都出自 `pushFallback`(`internal/command/gtw/push.go`)。
 
-### 5.3 Branch 3 — push only
+### 5.2 push 成功
 
 ```
 ✅ pushed 3 commit(s) to docs-readme:
   94c4a38 docs: add chat input routing and shell mode documentation to README
   77a8023 fix(gtw): harden push verification and PR cache correctness
   459b968 docs(README): clarify session management commands, drop stale gtw hook
-
+> docs-readme
 ```
 
-emoji `✅`(单步完成)。commit 列表同样来自 git log。
+emoji `✅`(单步完成)。commit 列表来自 `git log originBefore..origin/<branch>`,不是 agent prose。
 
-### 5.4 Branch 2 失败(agent 没 commit 全)
-
-```
-⚠️ agent finished but 2 file(s) still uncommitted in <worktree>:
-  new-secret.env
-  scratch.txt
-hint: commit them manually, or re-run /gtw push to retry.
-```
-
-不 push,直接退出。emoji `⚠️`(警告 / 部分成功)。这条跟当前 `verifyAgentPushedAndRecover` 的 uncommitted check 输出对齐。
-
-### 5.5 Branch 2/3 失败(push 自己失败)
+### 5.3 commit 成功(`/gtw commit`)
 
 ```
-❌ push failed: <error>
-
-commits (local, not on origin):
+🤖 pi committed 2 change(s) on docs-readme:
   aabbcc1 feat(gtw): split verification into 3 branches
   ddeeff2 fix(gtw): cancel push on agent failure
+> docs-readme
 ```
 
-emoji `❌`(终态失败)。列出**本地但没推上去**的 commit,让用户知道哪些需要重试。
+emoji `🤖`(agent 主导)。commit 列表来自 `git log headBefore..HEAD`。
+
+### 5.4 verify 失败(`/gtw commit`,agent 没 commit 全)
+
+```
+⚠️ agent finished but 2 file(s) are still uncommitted in <worktree>:
+  new-secret.env
+  scratch.txt
+
+💡 hint: commit them manually, or re-run /gtw commit to retry.
+```
+
+不 push,直接退出。emoji `⚠️`(警告 / 部分成功)。
+
+### 5.5 push 失败
+
+```
+❌ git push failed: <error>
+hint: check auth (`gh auth status`), remote protection rules, or network.
+raw output:
+<git 的原始输出>
+```
+
+重试之后仍未推上去时,错误里还带 **本地但没推上去** 的 commit 列表。emoji `❌`(终态失败)。
 
 ### 5.6 emoji 一致性
 
-跟 `internal/command/gtw/README.md §1.1` 的 emoji 字典保持一致:
+gtw 的 emoji 来自 `internal/command/gtw/README.md §1.1` 的闭集:
 
 | emoji | 含义 | 适用 case |
 |---|---|---|
-| `ℹ️` | 无副作用的"现状" | Branch 1 |
-| `🤖` | agent 主导 | Branch 2 |
-| `✅` | 单步动作完成 | Branch 3 |
-| `⚠️` | 警告 / 部分成功 | Branch 2 verify 失败 |
-| `❌` | 终态失败 | push 失败 |
-
-`ℹ️` 是新增(README §1.1 表里没有),**需要顺手在 README §1.1 字典里登记**。
+| `✅` | 单步动作完成 | push 成功 / 已经在远端 |
+| `🤖` | agent 主导 | `/gtw commit` 成功 |
+| `⚠️` | 警告 / 部分成功 | verify 失败 |
+| `❌` | 终态失败 | push 失败 / nothing to push / nothing to commit |
 
 ---
 
 ## 6. 不变式 Checklist
 
-- **Agent 不 push**。prompt 显式禁止;nightme 兜底 push 跟 agent 行为完全解耦
-- **Agent 不汇报**。prompt 不要求"final reply"格式;agent 输出几乎完全被忽略(仅 agent 进程崩溃时做 stderr fallback)
+- **Agent 不 push**。prompt 的 denylist 显式禁 `git push`;push 由 `/gtw push` 单独跑,跟 agent 行为完全解耦
+- **Agent 不报成败**。prompt 不要求 agent 汇报 commit 成没成;agent 的输出几乎完全被忽略,成败由 git 状态判定
 - **Git 是 source of truth**。IM 卡片、commit 列表、push 状态全部从 `git log` / `git rev-parse` 拿,不读 agent prose
-- **HEAD 校验必经**。Branch 2 必跑 `verifyAgentCommitted`,任一 case 失败 → 不 push
+- **HEAD 校验必经**。`/gtw commit` 必跑 `verifyAgentCommitted`,任一 case 失败 → 拒
 - **Push 校验必经**。`programmaticPushWithRetry` 内部 `countUnpushed` 兜底,失败 → IM 报错并列出本地未推 commit
-- **Branch 1 不能误吞**。无活儿干时必须明确告诉用户,不能假装"推了 0 条 commit"
-- **Conflict 永远先报**。`detectConflicts` 在 snapshot 之前跑,跟原 dispatchPush 一样
+- **no-op 不能误吞**。无活儿干时必须明确告诉用户,不能假装"推了 0 条 commit"
+- **Conflict 永远先报**。`snap.PushBlockReason()` 是三道硬拒里的第一道
 
 ---
 
 ## 7. 错误处理矩阵
 
+### 7.1 `/gtw push`
+
 | 触发条件 | IM 输出 | 后续动作 |
 |---|---|---|
-| 初始 `git status` 出错 | `❌ git status: <err>` | 退出 |
-| Conflict 存在 | `❌ worktree in conflicted state` | 退出 |
-| Branch 2:无 agent 选中 | `❌ no agent selected. /use <name> first` | 退出(不 push) |
-| Branch 2:agent 进程崩溃 / RunOnce 失败 | `❌ agent <name> failed: <err>` | 退出(不 push) |
-| Branch 2:agent 跑完 HEAD 没动 | `⚠️ no new commit was created (HEAD unchanged at <sha>)` | 退出(不 push) |
-| Branch 2:agent 跑完 worktree 仍 dirty | `⚠️ N file(s) still uncommitted: ...` | 退出(不 push) |
-| Branch 2/3:`programmaticPushWithRetry` 失败 | `❌ push failed: <err>` + 列出本地 commit | 退出(commit 在本地) |
-| Branch 1 | `ℹ️ nothing to push` | 退出 |
-| Branch 2 成功 | `🤖 <agent> committed N change(s) and pushed to <branch>: ...` | 退出 |
-| Branch 3 成功 | `✅ pushed N commit(s) to <branch>: ...` | 退出 |
+| readiness 快照读不出来 | `❌ read worktree status: <err>` | 退出 |
+| 不是 git 仓库 / 空仓库 | `❌ cannot read worktree git status — refusing to push` | 退出 |
+| Conflict 存在 | `❌ worktree has unmerged paths (merge/rebase conflict)` | 退出 |
+| Detached HEAD | `❌ detached HEAD — checkout a named branch first` | 退出 |
+| Worktree 脏 | `❌ worktree is dirty — /gtw push no longer auto-commits` + 指向 `/gtw commit` | 退出(不 push) |
+| 无活儿干 | `✅ nothing to push — <branch> is already on the remote` / `❌ nothing to push` | 退出 |
+| `programmaticPushWithRetry` 失败 | `❌ git push failed: <err>`(+ 本地未推 commit 列表) | 退出(commit 在本地) |
+| push 落地但卡片渲染失败 | `❌ push succeeded but couldn't render card: <err>` | 退出 |
+| 成功 | `✅ pushed N commit(s) to <branch>: ...` | 退出 |
+
+### 7.2 `/gtw commit`
+
+| 触发条件 | IM 输出 | 后续动作 |
+|---|---|---|
+| readiness 快照读不出来 | `❌ read worktree status: <err>` | 退出 |
+| 不是 git 仓库 / 空仓库 | `❌ cannot read worktree git status — refusing to commit` | 退出 |
+| Conflict 存在 | `❌ worktree has unmerged paths (merge/rebase conflict)` | 退出 |
+| Detached HEAD | `❌ detached HEAD — checkout a named branch first` | 退出 |
+| Worktree 已干净 | `✅ nothing to commit — the work was already committed` / `❌ nothing to commit` | 退出 |
+| HEAD 读不出来 | `❌ read HEAD: <err>` | 退出 |
+| 无 agent 选中 | `❌ no agent selected. Send \`/use <name>\` first or pass \`-a <name>\`.` | 退出(不 commit) |
+| agent 未注册 | `❌ unknown agent "<name>" (check \`nightme agents\` or your config)` | 退出(不 commit) |
+| agent 二进制不在 PATH | `❌ agent <name> not available: <err>` | 退出(不 commit) |
+| agent 跑完换了分支 | `⚠️ agent finished but HEAD is on <b>, expected <b>` | 退出 |
+| agent 跑完 worktree 仍 dirty | `⚠️ agent finished but N file(s) are still uncommitted in <worktree>: ...` | 退出 |
+| agent 跑完 HEAD 没动 | `⚠️ agent finished but no new commit was created (HEAD unchanged at <sha>)` | 退出 |
+| agent 跑完引入冲突 | `❌ worktree has unmerged paths (merge/rebase conflict)` | 退出 |
+| 成功 | `🤖 <agent> committed N change(s) on <branch>: ...` | 退出(不 push) |
 
 ---
 
 ## 8. 测试计划
 
-### 8.1 单元测试(`commit_push_test.go`)
+### 8.1 push 单测(`internal/command/gtw/push_test.go`)
 
 | 测试 | 覆盖 case |
 |---|---|
-| `TestDispatchPush_NoOp_BothClean` | isClean && unpushed==0 → Branch 1,IM 含 `ℹ️ nothing to push` |
-| `TestDispatchPush_Dirty_AgentCommits` | isClean=false → Branch 2,agent 跑完 HEAD 动 + worktree 干净 → push 成功 → IM 含 `🤖 ... pushed` |
-| `TestDispatchPush_Dirty_AgentNoCommit` | isClean=false → Branch 2,agent 跑完 HEAD 没动 → IM 含 `⚠️ no new commit`,**不**调 push |
-| `TestDispatchPush_Dirty_AgentPartialCommit` | isClean=false → Branch 2,agent 跑完 worktree 仍 dirty → IM 含 `⚠️ N file(s) still uncommitted`,**不**调 push |
-| `TestDispatchPush_Clean_WithUnpushed` | isClean && unpushed>0 → Branch 3,直推,IM 含 `✅ pushed N commit(s)` |
-| `TestDispatchPush_Clean_NoUnpushed` | isClean && unpushed==0 → Branch 1(同 NoOp) |
-| `TestDispatchPush_PushFails_ListsLocalCommits` | Branch 2 或 3,push 失败 → IM 含 `❌ push failed: ...` + 本地 commit 列表 |
-| `TestDispatchPush_AgentCrash_NoPush` | Branch 2,agent 进程 RunOnce 返回 err → IM 含 `❌ agent failed`,**不**调 push |
+| `TestRunPush_CleanNoUnpushed` | 干净 + 无未推 commit → no-op 卡片 |
+| `TestRunPush_CleanWithUnpushed` | 干净 + 有未推 commit → `✅ pushed N commit(s)` |
+| `TestRunPush_FirstPush_NoUpstream` | 无上游 → `git push -u origin <branch>` |
+| `TestRunPush_FirstPush_PushingDefaultBranch` | 推默认分支本身(首次)→ rev range 兜底 |
+| `TestRunPush_FirstPush_NoOriginRemote` | 没有 origin remote |
+| `TestRunPush_VerifyDetectsSilentPushFailure` | push exit 0 但 commit 没落地 → 验真抓到 |
+| `TestRunPush_PushErrorSurfaced` | push 报错 → 真实错误透传,不报 "pushed 0 commit(s)" |
+| `TestRunPush_DirtyRefused` | 工作区脏 → 拒 + 指向 `/gtw commit` |
+| `TestRunPush_ConflictState` | 冲突 → 硬拒 |
+| `TestRunPush_GoneUpstream_Pushes` | ghost upstream(`[gone]`)→ 仍然 push,不误判 nothing to push |
+| `TestDispatchPush_HardRefuse_Conflicts` | `HasConflicts=true` → 拒,**不调 push** |
+| `TestDispatchPush_NothingToPush` | `HasNothingToPush=true` → no-op 卡片 |
+| `TestDispatchPush_NoUpstreamFreshBranch` | 干净 + 无上游 → push with `-u`,**不调 agent** |
+| `TestHasNothingToPush_GoneUpstream` / `TestParseBranchHeader_GoneUpstream` | `[gone]` 解析 + 谓词短路 |
 
-### 8.2 关键不变式
+### 8.2 commit 单测(`internal/command/gtw/commit_test.go`)
 
-```go
-// pushDryBug: verifyAgentPushedAndRecover 在 agent 没真 commit 时
-// 返回 "✅ pushed" 的 false-success。新设计应该返回 "⚠️ no new commit"
-// + 不调 push。
-func TestDispatchPush_NoCommitNoFalseSuccess(t *testing.T) { ... }
+| 测试 | 覆盖 case |
+|---|---|
+| `TestBuildAgentPrompt_*`(16 个) | allowlist / denylist 逐条断言:禁改文件、禁 hunk surgery、禁跑测试、禁自查、禁 push、禁改历史、禁换分支、禁 revert-restore-stash、禁 `git add -A`、Issue trailer、terse final reply、one coherent commit |
+| `TestParseCommitArgs_*` | `-a` / `--agent` 解析,未知 flag / 位置参数拒绝 |
+| `TestRunCommit_NoWorkToDo` | 干净 → nothing to commit |
+| `TestRunCommit_DetachedHead` | detached → 拒 |
+| `TestRunCommit_ConflictState` | 冲突 → 硬拒 |
+| `TestRunCommit_HappyPath` | agent commit → `🤖 <agent> committed N change(s)` |
+| `TestRunCommit_DirtyWithAgentFlag` | `-a <name>` 指定 runner |
+| `TestRunCommit_DirtyAgentLeavesFiles` | agent 留了未提交文件 → `⚠️ ... still uncommitted` |
+| `TestRunCommit_DirtyAgentClaimsDoneButNoCommit` | agent 声称完成但 HEAD 没动 → `⚠️ no new commit was created` |
+| `TestRunCommit_DirtyAgentSwitchesBranch` | agent 换了分支 → 拒 |
+| `TestRunCommit_AgentIntroducedConflicts` | agent 引入冲突 → 拒 |
+| `TestRunCommit_NoAgentSelected` / `TestRunCommit_UnknownAgent` / `TestRunCommit_AgentBinaryMissing` / `TestRunCommit_AgentRunOnceError` | agent 侧的各类失败 |
 
-// prompt: 验证 buildAgentPrompt 不包含 "push" 命令字样
-// (除了"Do not push"这一行)
-func TestBuildAgentPrompt_NoPushCommand(t *testing.T) {
-    prompt := buildAgentPrompt(ctx)
-    if strings.Count(prompt, "git push") > 0 {
-        // 只允许"Do not push"那一行
-        // 实际检查:除"Do not push"段外,不含 "git push" 命令
-    }
-}
+### 8.3 共享 fixture
 
-// prompt: 验证不含 nightme 实现细节的词
-func TestBuildAgentPrompt_NoNightmeDetails(t *testing.T) {
-    prompt := buildAgentPrompt(ctx)
-    forbid := []string{"FAILED:", "verify", "git log", "origin/", "🤖"}
-    for _, w := range forbid {
-        if strings.Contains(prompt, w) {
-            t.Errorf("prompt leaked nightme detail: %q", w)
-        }
-    }
-}
-```
+`internal/command/gtw/readiness_test.go` 提供 `setupReadiness(rig, branch, snap)` 与 `setupPushMocks(git, branch, snap)` —— push / commit / pr 三个 dispatcher 的测试用同一份 snapshot mock 数据。
 
-### 8.3 E2E / manual smoke
+### 8.4 E2E / manual smoke
 
-- 真跑一次 `/gtw push` 在 docs-readme worktree(类似今天 case):验证 IM 卡片是从 git log 拼的(commit subject 跟 git log 完全一致),agent prose 不会出现在卡片里
-- 用 `--agent` 强制指定 pi / claude / codex,确认 3 个 agent 都按 prompt 跑
-- 故意在 agent prompt 注入 "fake commit successful" 的指令,看 verify 是否抓得到
+- 真跑一次 `/gtw commit` 在 docs-readme worktree:验证 IM 卡片是从 git log 拼的(commit subject 跟 git log 完全一致),agent prose 不会出现在卡片里
+- 用 `-a` 强制指定 pi / claude / codex,确认 3 个 agent 都按 prompt 跑
+- 故意让 agent 只跑 `git restore` 不 commit,看 verify 是否抓得到
 
 ---
 
 ## 9. 不在范围内(Out of Scope)
 
-- **`/gtw fix` 的 Assess-first dispatch + branch 硬失败**:见 [`F-gtw-fix.md`](./F-gtw-fix.md)（设计已定，待实现）
-- **`/gtw fix` / `pr` / `close` / `sync` 的其他重构**:本次 F-56 只动 `push`。`fix` 的 worktree 创建、`pr` 的 one-shot agent、`close` 的 worktree 销毁、`sync` 的 pull,各自有不同职责;fix dispatch 改造见 F-gtw-fix
-- **agent prompt 的"是否要在 commit 失败时输出 FAILED"**:本次设计选择**完全不让 agent 汇报**。如果将来调试需要,可以在 agent 跟 nightme 之间加一个 transcript 日志,但**不**让 FAILED 进 prompt
+- **`/gtw fix` 的 Assess-first dispatch + branch 硬失败**:见 [`F-gtw-fix.md`](./F-gtw-fix.md)
+- **`/gtw fix` / `pr` / `close` / `sync` 的其他重构**:`fix` 的 worktree 创建、`pr` 的 one-shot agent、`close` 的 worktree 销毁、`sync` 的 pull,各自有不同职责
+- **agent prompt 的"是否要在 commit 失败时输出 FAILED"**:设计选择**完全不让 agent 汇报**。如果将来调试需要,可以在 agent 跟 nightme 之间加一个 transcript 日志,但**不**让 FAILED 进 prompt
 - **夜间 batch commit / scheduled push**:完全无关
 - **跨 worktree 聚合 push**:每个 `/gtw push` 只管一个 worktree
 - **commit message 自动 lint / 校验**:nightme 不解析 commit message 格式,LLM 写错就让它错(用户自己改)
@@ -515,34 +507,25 @@ func TestBuildAgentPrompt_NoNightmeDetails(t *testing.T) {
 | Agent 不 push | 网络副作用是 LLM 弱项;push 决策 / retry 是 infra 责任 | 让 agent push + nightme verify |
 | Agent 不 claim SHA | git 是 source of truth,不需要 LLM 二次汇报 | 解析 agent reply 校验 |
 | `verifyAgentCommitted` 只看 git 状态 | 跟 nightme 其它 verification 一致,不读 agent prose | 解析 agent reply |
-| `programmaticPushWithRetry` 抽出来 | Branch 2 续 push 跟 Branch 3 直推共用 | 复制 pushClean 逻辑 |
-| Branch 1 新增 no-op IM | 当前 0 commit push 错误地返回 `✅ pushed 0 commits`,误导用户 | 静默 no-op(UX 差) |
-| `ℹ️` 加入 gtw emoji 字典 | Branch 1 需要"信息但非错误"标志 | 用 `✨`(含义是"无副作用的现状",勉强但不准) |
-| 删 `pushClean` 函数 | 被 Branch 3 收编,函数重命名 + 复用更清楚 | 保留 pushClean 给 Branch 3 用(代码重复) |
+| push 与 commit 拆成两条命令 | agent 的失败模式(HEAD 没动 / worktree 还脏 / 引入冲突)属于 commit 阶段,混在 push 的 IM 回复里说不清 | push 内部跑 agent 再续推 |
+| no-op 单独一张卡 | 推 0 条 commit 时静默返回会误导用户 | 静默 no-op(UX 差) |
+| `programmaticPushWithRetry` 统一入口 | push 的成败判据只有一处,retry 语义一致 | 每个调用点各写一套 |
 
 ---
 
-## 11. 实施清单
+## 11. 实现落点
 
-| Phase | 内容 | 涉及文件 |
+| 职责 | 文件 | 符号 |
 |---|---|---|
-| **Phase 0** | 本 F-56 文档 + `wip/gtw-push.md` 同步(可选) | `docs/feat/本文件`(本文件) |
-| **Phase 1** | `buildAgentPrompt` 收窄到 130 tokens(只 role + task + 3 rules) | `internal/command/gtw/commit_push.go` |
-| **Phase 2** | 抽 `programmaticPushWithRetry` 出来,从 `verifyPushedAndRetry` 复用 | `internal/command/gtw/push.go` |
-| **Phase 3** | 重写 `dispatchPush` 为 3 branch(替换 `pushClean` / `pushDirty` 分裂) | `internal/command/gtw/commit_push.go` |
-| **Phase 4** | 新增 `verifyAgentCommitted`(只校验 commit,不校验 push) | `internal/command/gtw/commit_push.go` |
-| **Phase 5** | 新增 `replySuccessCard`(从 git log 拼 IM 卡片) | `internal/command/gtw/render.go` |
-| **Phase 6** | 删 `verifyAgentPushedAndRecover` / `pushClean` / `pushDirty` | `internal/command/gtw/commit_push.go` |
-| **Phase 7** | `commit_push_test.go` 重写为 8 个 branch 覆盖测试 | `internal/command/gtw/commit_push_test.go` |
-| **Phase 8** | gtw README §1.1 emoji 字典加 `ℹ️` | `internal/command/gtw/README.md` |
-| **Phase 9** | `docs/FEATURES.md` 加 F-56 索引行 | `docs/FEATURES.md` |
-
-**总 PR 建议:拆 2 个 PR**
-
-- **PR 1 (本期)**:Phase 1-7(代码 + 测试)
-- **PR 2 (后续)**:Phase 8-9(文档同步 + emoji 字典)
-
-PR 1 不依赖 PR 2,可以独立 merge。
+| push dispatcher(2 branch + 3 道硬拒) | `internal/command/gtw/push_dispatch.go` | `dispatchPush` |
+| commit dispatcher(agent → verify → 卡片) | `internal/command/gtw/commit.go` | `dispatchCommit` |
+| agent prompt | `internal/command/gtw/commit.go` | `buildAgentPrompt` |
+| commit 后校验 | `internal/command/gtw/commit.go` | `verifyAgentCommitted` |
+| push + retry + git 原语 | `internal/command/gtw/push.go` | `programmaticPush` / `programmaticPushWithRetry` / `headSHA` / `countUnpushed` / `listUncommittedFiles` |
+| IM 卡片 | `internal/command/gtw/render.go` | `replyPushCard` / `replyCommitSuccessCard` / `nothingToPushCard` / `alreadyPushedCard` |
+| readiness 快照 | `internal/command/gtw/git_status.go` | `CollectReadiness` / `CollectReadinessForDispatch` |
+| 快照类型 + 谓词 | `internal/messages/session.go` | `GitStatusSnapshot` / `HasUpstreamBranch` / `LocalIsAtUpstreamTip` / `WorkingTreeIsClean` / `HasNothingToPush` / `PushBlockReason` |
+| 测试 | `internal/command/gtw/push_test.go` / `commit_test.go` / `readiness_test.go` | — |
 
 ---
 
@@ -552,22 +535,14 @@ PR 1 不依赖 PR 2,可以独立 merge。
 
 | 风险 | 缓解 |
 |---|---|
-| prompt 130 tokens;某些 edge case 缺少指令 | `commit_push_test.go` 8 个 branch case 覆盖;manual smoke 后再 merge |
-| `programmaticPushWithRetry` 抽出来 pushClean 删了,测试可能 break | Phase 7 重写测试,pushClean 引用全清 |
-| Branch 1 新增 no-op IM 卡片,旧用户期待"推 0 条"也回 `✅` | UX 是 bug 修复,不改;PR 描述明示"no-op case 改为 `ℹ️`" |
-| agent 在新 prompt 下不再 push,某些用户依赖"agent 自己推"的工作流 | prompt 改动是 additive breaking;PR 描述明示"agent 不再 push,nightme 接管" |
+| prompt 的 allowlist / denylist 覆盖不全,某些 edge case 缺指令 | `commit_test.go` 里 16 个 `TestBuildAgentPrompt_*` 逐条断言;manual smoke 后再 merge |
+| push 判据从"exit code"换成"countUnpushed" | `push_test.go` 的 `TestRunPush_VerifyDetectsSilentPushFailure` 覆盖 git exit 0 但 commit 没落地 |
+| push 拒绝脏工作区,依赖"agent 自己推"的工作流的用户会撞墙 | 回复里直接指向 `/gtw commit`,两步流程明确 |
+| ghost upstream(`[gone]`)被误判成"nothing to push" | `HasNothingToPush` 的 `!s.UpstreamGone` 短路;`TestRunPush_GoneUpstream_Pushes` 覆盖 |
 
 ### 12.2 回滚
 
-`dispatchPush` 重写 + `buildAgentPrompt` 收窄是单一 PR 内的原子改动,git revert 即可完整回滚到 PR 前的 `pushClean` / `pushDirty` 模型。无需数据迁移、无需 schema 改动。
-
-### 12.3 监控
-
-merge 后 1 周内观察:
-- `/gtw push` 的成功 / 失败 IM 卡片分布
-- Branch 1 (no-op) 触发频率(预期不高,但应该被正确识别)
-- Branch 2 中 `verifyAgentCommitted` 触发率(应该 < 5%,否则说明 prompt 不够好)
-- push 失败频率(Branch 2/3 共用 `programmaticPushWithRetry`)
+`dispatchPush` / `dispatchCommit` 的拆分是单一 PR 内的原子改动,git revert 即可回到"push 内跑 agent 再续推"的模型。无需数据迁移、无需 schema 改动。
 
 ---
 
@@ -575,9 +550,8 @@ merge 后 1 周内观察:
 
 | 任务 | 优先级 | 说明 |
 |---|---|---|
-| 把 `commit_push.go` 拆成 `commit_push.go`(commit 流程)+ `push.go`(push 流程),更符合 3 branch 模型 | P2 | 现在两个职责还在同一文件,Phase 3 后函数签名会变长,值得拆 |
-| `replySuccessCard` 接入 `internal/channel/feishu/card` 的 format helper,跟 footer / checklist 风格统一 | P2 | 现在 replySuccessCard 自己拼字符串,Feishu adapter 那边有现成的 format helper 没用 |
-| 把"agent transcript 日志"加进 daemond 控制台,方便调试 agent 为什么没 commit | P3 | 现在 agent 输出被忽略,出错时只能从 git log 倒推;transcript 日志能直接看 LLM 在干什么 |
+| `replyPushCard` / `replyCommitSuccessCard` 接入 `internal/channel/feishu/` 的 format helper,跟 footer / checklist 风格统一 | P2 | 现在卡片自己拼字符串,Feishu adapter 那边有现成的 format helper 没用 |
+| 把"agent transcript 日志"加进 daemon 控制台,方便调试 agent 为什么没 commit | P3 | 现在 agent 输出被忽略,出错时只能从 git log 倒推;transcript 日志能直接看 LLM 在干什么 |
 | `/gtw pr` 的 one-shot agent 同步收窄(类似 F-56 的 prompt 重写) | P3 | 现在 `/gtw pr` 的 agent 也有"commit + push + 报告"老问题,但优先级低 |
 | 整套 F-56 思路延展到 `/gtw close` / `sync`,让 agent 只做"judgment 部分" | P3 | `close` 是销毁 worktree(纯 git 命令,不需要 agent);`sync` 是 pull(也纯 git 命令)。这两条可能根本不需要 agent |
 
@@ -585,14 +559,15 @@ merge 后 1 周内观察:
 
 ## 14. 参考
 
-- [`wip/gtw-hooks.md`](../wip/gtw-hooks.md) — gtw hooks + agent 优先级 3 档 chain(F-56 复用)
+- [`internal/command/gtw/push.go`](../../internal/command/gtw/push.go) — gtw hooks + agent 优先级 3 档 chain
 - [`internal/command/gtw/README.md`](../../internal/command/gtw/README.md) — gtw IM 卡片排版规约(emoji 字典、Format 1/2/3)
-- `internal/command/gtw/commit_push.go` — 当前实现,本次重构的 source of truth
-- `internal/command/gtw/push.go::headSHA` / `countUnpushed` / `listUncommittedFiles` — git 状态查询原语(本次复用)
-- `internal/command/gtw/push.go::verifyPushedAndRetry` — 现有 push retry 逻辑,Phase 2 抽到 `programmaticPushWithRetry`
-- `internal/command/gtw/commit_push_test.go:524-580` — `TestRunPush_DirtyAgentClaimsDoneButNoCommit`,本次 bug 的 regression test 起点
-- PR #120 commit `77a8023` — HEAD-advance check 引入位置
-- 2026-08-11 docs-readme worktree 实测 case:agent 报 `94c4a38 docs: ...`,HEAD unchanged at `94c4a3866268` —— F-56 的 motivation 起点
+- [`internal/command/gtw/commit.go`](../../internal/command/gtw/commit.go) — `/gtw commit` 的 dispatcher + agent prompt + commit 后校验
+- [`internal/command/gtw/push_dispatch.go`](../../internal/command/gtw/push_dispatch.go) — `/gtw push` 的 dispatcher
+- `internal/command/gtw/push.go::headSHA` / `countUnpushed` / `listUncommittedFiles` — git 状态查询原语
+- `internal/command/gtw/push.go::programmaticPushWithRetry` — push 的唯一入口(带一次重试 + countUnpushed 验真)
+- `internal/command/gtw/git_status.go::CollectReadinessForDispatch` — readiness 快照的采集入口
+- `internal/messages/session.go::GitStatusSnapshot` — 快照类型 + 谓词(`HasUpstreamBranch` / `LocalIsAtUpstreamTip` / `WorkingTreeIsClean` / `HasNothingToPush` / `PushBlockReason`)
+- `internal/command/gtw/commit_test.go::TestRunCommit_DirtyAgentClaimsDoneButNoCommit` — false-success 类的 regression test
 
 ---
 
@@ -601,9 +576,9 @@ merge 后 1 周内观察:
 > **Source**: `F-gtw.md`
 
 
-> **Depends on**: F-56 (`/gtw push` 三分支流)、F-50 (GitHub/GitLab Provider)、F-45 (Session footer) — 后者已经在 SessionContext 里跑过 `CollectStatus`,本设计只是扩字段+补谓词
+> **Depends on**: F-56 (`/gtw push` 两分支流)、F-50 (GitHub/GitLab Provider)、F-45 (Session footer) — 后者已经在 SessionContext 里跑过 `CollectReadiness`,本设计只是扩字段+补谓词
 
-> **Related**: [`本文件 §push 三分支`](./F-gtw.md)（push 三分支的细节）、[`internal/command/gtw/git_status.go`](../../internal/command/gtw/git_status.go)（snapshot 解析层）、[`internal/messages/footer.go`](../../internal/messages/footer.go)（`GitStatusSnapshot` 类型定义）
+> **Related**: [`本文件 §The Branches`](./F-gtw.md)（push 分支的细节）、[`internal/command/gtw/git_status.go`](../../internal/command/gtw/git_status.go)（snapshot 解析层）、[`internal/messages/session.go`](../../internal/messages/session.go)（`GitStatusSnapshot` 类型定义 + 谓词）
 
 ---
 
@@ -611,12 +586,12 @@ merge 后 1 周内观察:
 
 把"本地分支已经 commit + push + 与 origin 对齐"这件事,从一个散落在 `dispatchPush` 和 `dispatchPR` 里的隐含约定,显式建模成一个**共享的 `Readiness` 概念**:
 
-1. **单一数据源**:一次 `git status --porcelain --branch --untracked-files=normal` 调用 → `GitStatusSnapshot`,扩两个字段(`BehindRemote`、`HasConflicts`)。
-2. **三个正交原子谓词**:`HasUpstreamBranch()`、`LocalIsAtUpstreamTip()`、`WorkingTreeIsClean()` —— push 和 pr 都基于这三个判定,语义不再各自为政。
-3. **业务判定分离**:`/gtw push` 用 `HasNothingToPush()` + `PushBlockReason()`;/gtw pr 用 `IsReadyForPR()` + `PRBlockReason()`。两者基于同一份 snapshot,得到的是同一份事实的不同切片。
-4. **连续性保证**:`/gtw push` 成功结束的工作区,**必**使 `/gtw pr` 的 readiness 通过(并发 race 除外)。两个命令之间不再需要用户在 IM 里手动确认"我到底有没有 push 过"。
+1. **单一数据源**:一次 `git status --porcelain --branch` 调用 → `GitStatusSnapshot`。
+2. **三个正交原子谓词**:`HasUpstreamBranch()`、`LocalIsAtUpstreamTip()`、`WorkingTreeIsClean()` —— push 和 commit 都基于这三个判定,语义不再各自为政。
+3. **业务判定分离**:`/gtw push` 和 `/gtw commit` 用 `HasNothingToPush()` + `PushBlockReason()`;`/gtw pr` 不吃这份 snapshot —— 它走 A4 的两道闸(`origin/<branch>` 存在 + 没有已开 PR)。
+4. **连续性保证**:`/gtw push` 成功结束的工作区,**必**使 `/gtw pr` 的第一道闸通过(并发 race 除外)。两个命令之间不再需要用户在 IM 里手动确认"我到底有没有 push 过"。
 
-今天撞到的 case (`Head sha can't be blank, Head ref must be a branch`) 是这一设计的直接触发:本地 `refactor-outbound` 没有 upstream(`git config branch.refactor-outbound.remote` 空),`dispatchPR` 复用 `countUnpushed` 把"无上游"误读为"零未推送",把分支从未 push 的状态当成"已对齐",直接调 `gh pr create`,被 GitHub 的 GraphQL 拒掉。新设计在 readiness gate 里把 `HasUpstream` 单独作为一条维度,这种 case 在 `/gtw pr` 入口就被显式拦截,提示用户 `/gtw push first to publish the branch`。
+今天撞到的 case (`Head sha can't be blank, Head ref must be a branch`) 是这一设计的直接触发:本地 `refactor-outbound` 没有 upstream(`git config branch.refactor-outbound.remote` 空),`dispatchPR` 复用 `countUnpushed` 把"无上游"误读为"零未推送",把分支从未 push 的状态当成"已对齐",直接调 `gh pr create`,被 GitHub 的 GraphQL 拒掉。新设计把 `HasUpstream` 单独作为一条维度,这种 case 在 `/gtw pr` 入口就被显式拦截,提示用户 `/gtw push first to publish the branch`。
 
 ---
 
@@ -634,12 +609,12 @@ No commits between main and refactor-outbound, Head ref must be a branch (create
 |---|---|---|
 | `refactor-outbound` 本地 HEAD | `fe6ed8d`(本地有 17 个 commit) | n/a |
 | `origin/refactor-outbound` | **不存在**(`git ls-remote` 找不到) | n/a |
-| `main..HEAD`(本地) | 17 commit | `countBaseAhead` 返回 17,预检通过 |
+| `main..HEAD`(本地) | 17 commit | rev-list 预检返回 17,预检通过 |
 | `refactor-outbound@{u}..HEAD` | fatal: no upstream | `countUnpushed` 返回 `(0, nil)`(把"无上游"误读为"零未推送") |
 | dispatchPR 的结论 | — | "通过,继续调 gh" |
 | gh 的结论 | — | "Head ref must be a branch",GraphQL 拒绝 |
 
-`countUnpushed` 的语义是**为 `/gtw push` 量身定制的**(`push.go:122-141` 注释里写明:"no upstream configured → our '0 unpushed' signal"),直接被 `dispatchPR` 复用是把两个命令的语义混在一起,边界破了。
+`countUnpushed`(`internal/command/gtw/push.go`)的语义是**为 `/gtw push` 量身定制的**(注释里写明:"no upstream configured → our '0 unpushed' signal"),直接被 `dispatchPR` 复用是把两个命令的语义混在一起,边界破了。
 
 ### 1.2 两个命令的语义本来就不一样
 
@@ -657,7 +632,7 @@ No commits between main and refactor-outbound, Head ref must be a branch (create
 现在的代码割裂在两处独立判定里:
 
 - `dispatchPush` 用 `isClean` (string empty) + `countUnpushed`(rev-list) 两段独立探测,合起来才覆盖"脏 / ahead / nothing"
-- `dispatchPR` 同样用 `countUnpushed` + `countBaseAhead` 两段独立探测,但取了一个不一样的 `countUnpushed` 语义
+- `dispatchPR` 同样用 `countUnpushed` + 一条 rev-list 预检两段独立探测,但取了一个不一样的 `countUnpushed` 语义
 
 两个命令各管各的 snapshot,IM 用户体验上会出现"push 提示我'已经干净',pr 提示我'未推送'"的诡异跳跃。
 
@@ -667,62 +642,54 @@ No commits between main and refactor-outbound, Head ref must be a branch (create
 
 ## 2. Readiness Snapshot
 
-### 2.1 扩展 `GitStatusSnapshot`
+### 2.1 `GitStatusSnapshot`
 
-在 `internal/messages/footer.go::GitStatusSnapshot` 加两个字段(footer 渲染层会忽略新字段,不用动渲染代码):
+快照类型定义在 `internal/messages/session.go`(runtime footer 渲染层也用它):
 
 ```go
 type GitStatusSnapshot struct {
     Branch        string
-    Uncommitted   int
+    Added         int
+    Deleted       int
+    Modified      int
     Untracked     int
+    Conflicts     int
     AheadOfRemote int
-    BehindRemote  int   // ← 新增:D4 维度
+    BehindRemote  int
     HasUpstream   bool
-    HasConflicts  bool  // ← 新增:D6 维度
+    UpstreamGone  bool
+    HasConflicts  bool
 }
 ```
 
-`parseBranchHeader` 补 `behind M` 解析(`footer.go:31` 注释里早就预留了"如果以后要 surface 'behind',在这里加")。`parsePorcelainBranchStatus` 在扫剩余行时识别 unmerged(`U*` / `*U` / `A*` / `*A` / `D*` / `*D` 且非 `??`),置 `HasConflicts`。
+`parseBranchHeader`(`internal/command/gtw/git_status.go`)解析 `behind M`,并在 `## b...origin/b [gone]` 时置 `UpstreamGone`。`parsePorcelainBranchStatus` 在扫剩余行时识别 unmerged(`U*` / `*U` / `A*` / `*A` / `D*` / `*D` 且非 `??`),置 `HasConflicts`。
 
 ### 2.2 单一数据源 `CollectReadiness`
 
-复用现有 `internal/command/gtw/git_status.go::CollectStatus`(已经跑 `git status --porcelain --branch --untracked-files=normal` 并解析为 snapshot),改名 + 文档化为:
+`internal/command/gtw/git_status.go::CollectReadiness` 跑一次 `git status --porcelain --branch --untracked-files=normal` 并解析成 snapshot:
 
 ```go
-// CollectReadiness is the single source of truth for "what is the
-// worktree's senior-dev git state right now?". One `git status
-// --porcelain --branch --untracked-files=normal` call, fully parsed.
-//
-// Both /gtw push and /gtw pr call it at entry — they MUST agree on
-// the snapshot, or the push→pr continuity breaks.
-func CollectReadiness(ctx context.Context, dir string, git GitRunner) (*GitStatusSnapshot, error) {
-    return CollectStatus(ctx, dir, git)
-}
+func CollectReadiness(ctx context.Context, dir string, git GitRunner) (*GitStatusSnapshot, error)
 ```
 
-不破坏 `CollectStatus` 现有签名(footer 渲染路径还在调它),只是补注释;旧名字继续可用。
+不是 git 仓库 / 输出为空或畸形 / git 调用失败时返回 `(nil, nil)` —— footer 渲染路径把 `(nil, nil)` 当"没有 git 段落"。
+
+dispatch 路径用的是 `CollectReadinessForDispatch`:它在 `CollectReadiness` 之上加一次 `git ls-remote --heads origin <branch>` 探测,用来抓 F-237 的 stale-cached-upstream(本地 config 认为有 upstream、远端其实已经删了分支)。探测失败时保留 porcelain 的判断,不把一个瞬时网络抖动翻转成 gate 失败。
 
 ### 2.3 6 维度 = 业务判定空间的完整展开
 
 | 维度 | snapshot 字段 | 业务含义 |
 |---|---|---|
-| **D1 真分支** | `Branch != ""` | 不能在 detached HEAD 上 PR/push |
-| **D2 上游存在** | `HasUpstream` | 分支必须在 origin 上存在 |
+| **D1 真分支** | `Branch != ""` | 不能在 detached HEAD 上 push |
+| **D2 上游存在** | `HasUpstream` | 分支在 origin 上存在 |
 | **D3 已推送** | `AheadOfRemote == 0` | 本地所有 commit 都已 push |
 | **D4 同步** | `BehindRemote == 0` | 本地拿到了 origin 上所有最新 commit |
-| **D5 工作区干净** | `Uncommitted == 0 && Untracked == 0` | 没有需要 commit 的本地改动 |
+| **D5 工作区干净** | `Added == 0 && Deleted == 0 && Modified == 0 && Untracked == 0 && Conflicts == 0` | 没有需要 commit 的本地改动 |
 | **D6 无冲突** | `!HasConflicts` | 没有未解决的 merge/rebase conflict |
-
-外加一条**与上述 6 项正交**的判断:
-
-| 维度 | 信号来源 | 业务含义 |
-|---|---|---|
-| **P1 有东西可 PR** | `rev-list --count <base>..HEAD` | 该分支在 base 上**有新增**(PR-worthiness,与卫生无关) |
 
 ### 2.4 三个正交原子谓词
 
-业务判定(2.5 节)拆成 3 个**只依赖 snapshot、不掺命令意图**的谓词。这样 push 和 pr 的差异只在"如何组合这三个谓词",不再有各自独立的 git 调用:
+业务判定(§3、§4)拆成 3 个**只依赖 snapshot、不掺命令意图**的谓词,定义在 `internal/messages/session.go`(gtw 层通过类型别名 `gtw.GitStatusSnapshot = messages.GitStatusSnapshot` 访问):
 
 ```go
 // HasUpstreamBranch: 这个分支在 origin 上存在吗?
@@ -738,7 +705,9 @@ func (s *GitStatusSnapshot) LocalIsAtUpstreamTip() bool {
 
 // WorkingTreeIsClean: 工作区没有任何需要 commit 的东西?
 func (s *GitStatusSnapshot) WorkingTreeIsClean() bool {
-    return s.Uncommitted == 0 && s.Untracked == 0 && !s.HasConflicts
+    return s.Added == 0 && s.Deleted == 0 &&
+        s.Modified == 0 && s.Untracked == 0 &&
+        s.Conflicts == 0
 }
 ```
 
@@ -766,86 +735,78 @@ func (s *GitStatusSnapshot) PushBlockReason() string {
 func (s *GitStatusSnapshot) HasNothingToPush() bool {
     return s.WorkingTreeIsClean() &&        // 啥都 commit 完了
         s.HasUpstreamBranch() &&            // 分支在 origin 存在
-        s.AheadOfRemote == 0                // 也没有 ahead
+        s.AheadOfRemote == 0 &&             // 也没有 ahead
+        !s.UpstreamGone                     // 上游不是 ghost
 }
 ```
 
 注意 **"无上游" 不进 `HasNothingToPush`** —— 没有 upstream 的干净工作区恰恰是要首次 push 的合法场景。
 
-### 3.2 dispatchPush 改写骨架
+`UpstreamGone` 也要短路:`git status --porcelain --branch` 在 `## b...origin/b [gone]` 时仍然报 `HasUpstream=true, ahead=0`,但 `refs/remotes/origin/b` 其实已经不在了。这种状态下 `HasNothingToPush` 必须返回 false,让 push 继续走 `git push -u origin <branch>` 把分支重新发布出去。
+
+### 3.2 dispatchPush 骨架
 
 ```go
-func dispatchPush(ctx, cs, deps, chatID, messageID, args, ymlAgent) (*Result, error) {
+func dispatchPush(ctx, cs, deps, chatID, messageID, args) (*Result, error) {
     c, res := loadDispatchContext(ctx, cs, deps, chatID, messageID)
     if res != nil { return res, nil }
 
-    snap, err := CollectReadiness(ctx, c.Worktree, deps.Git)
+    snap, err := CollectReadinessForDispatch(ctx, c.Worktree, deps.Git)
     if err != nil { return reply(...❌...), nil }
+    if snap == nil { return reply(...❌ not a repo...), nil }
 
     // 1. 硬拒冲突
     if reason := snap.PushBlockReason(); reason != "" {
         return reply(ctx, cs.Emitter(), chatID, messageID, reason), nil
     }
 
-    // 2. 没活可干 → 提示用户
-    if snap.HasNothingToPush() {
+    // 1b. 硬拒 detached HEAD
+    if snap.Branch == "" {
         return reply(ctx, cs.Emitter(), chatID, messageID,
-            "ℹ️ nothing to push\n"+
-                "  no uncommitted changes\n"+
-                "  no unpushed commits on "+snap.Branch), nil
+            "❌ detached HEAD — checkout a named branch first"), nil
     }
 
-    headBefore, err := headSHA(ctx, c.Worktree, deps)  // 保留: agent verify 用
-    var agentName string
-
-    // 3. 工作区脏 → 走 agent commit 路径(F-56 Branch 2)
+    // 1c. 硬拒脏工作区 —— commit 是 /gtw commit 的职责
     if !snap.WorkingTreeIsClean() {
-        name, errMsg := runAgentToCommit(ctx, cs, c, args, ymlAgent)
-        if errMsg != "" { return reply(...), nil }
-        agentName = name
-
-        if msg := verifyAgentCommitted(ctx, deps, c, headBefore); msg != "" {
-            return reply(...), nil
-        }
-
-        // agent 跑完必须重新 snapshot:不能信任原 snap
-        snap, err = CollectReadiness(ctx, c.Worktree, deps.Git)
-        if err != nil { return reply(...), nil }
-        if reason := snap.PushBlockReason(); reason != "" {
-            // agent 引入冲突? 罕见但要兜住
-            return reply(ctx, cs.Emitter(), chatID, messageID, reason), nil
-        }
-    }
-
-    // 4. 兜底: agent 跑完但 re-snapshot 后发现没活可干(agent 没真 commit 等边界)
-    if snap.HasNothingToPush() {
         return reply(ctx, cs.Emitter(), chatID, messageID,
-            "⚠️ worktree is clean but nothing to push.\n"+
-                "hint: inspect HEAD vs origin/"+snap.Branch+" manually."), nil
+            "❌ worktree is dirty — /gtw push no longer auto-commits\n"+
+                "hint: run `/gtw commit` first, then `/gtw push`"), nil
     }
 
-    // 5. 真·push(带重试 + 验证 unpushed==0)
+    // 2. 没活儿干 → 提示用户
+    if snap.HasNothingToPush() {
+        card, out := pushFallback(ctx, c, snap.Branch, deps)
+        return reply(ctx, cs.Emitter(), chatID, messageID, card), nil
+    }
+
+    // 3. push 前的 origin tip —— 成功卡片的 rev range 左端
+    originBefore, err := originBranchSHA(ctx, c.Worktree, c.Branch, deps)
+    if err != nil { return reply(...❌...), nil }
+
+    // 4. 真·push(带重试 + 验证 unpushed==0)
     if err := programmaticPushWithRetry(ctx, deps, c); err != nil {
         return reply(ctx, cs.Emitter(), chatID, messageID, err.Error()), nil
     }
 
-    // 6. 成功卡 —— 此时 snapshot: AheadOfRemote=0, HasUpstream=true, WorkingTreeIsClean=true
-    card, err := replySuccessCard(ctx, c, agentName,
-        headBefore+"..origin/"+c.Branch, deps)
-    if err != nil { return reply(...), nil }
+    // 5. 成功卡 —— 从 git log 拼,不用 agent prose
+    revRange := originBefore + "..origin/" + c.Branch
+    card, commitCount, err := replyPushCard(ctx, c, revRange, deps)
+    if err != nil { return reply(...❌...), nil }
     return reply(ctx, cs.Emitter(), chatID, messageID, card), nil
 }
 ```
+
+`/gtw commit`(`internal/command/gtw/commit.go::dispatchCommit`)用同一份快照:冲突 → detached HEAD → 已干净 → 跑 agent → `verifyAgentCommitted` → re-snapshot → `replyCommitSuccessCard`。agent 跑完的 re-snapshot 不可省 —— agent 可能引入冲突或留下 dirty 状态。
 
 ### 3.3 与 F-56 的对应关系
 
 | F-56 分支 | F-57 改写后的路径 |
 |---|---|
-| Branch 1 (no-op): clean + unpushed==0 | `snap.HasNothingToPush()` 返回 true |
-| Branch 2 (agent commit + push): dirty | `!snap.WorkingTreeIsClean()` 走 runAgentToCommit |
-| Branch 3 (push only): clean + unpushed>0 | `snap.HasNothingToPush()` false + `snap.WorkingTreeIsClean()` true → 直推 |
+| no-op:clean + 无未推 commit | `snap.HasNothingToPush()` 返回 true |
+| push:clean + 有未推 commit | `snap.HasNothingToPush()` false → 直推 |
+| (原 Branch 2)dirty | `/gtw push` 拒掉并指向 `/gtw commit`;commit 路径走 `runAgentFor` + `verifyAgentCommitted` |
 
-新增的 case:**clean + !HasUpstream**(首次 push)—— `HasNothingToPush` 因为 `!HasUpstreamBranch()` 返回 false,所以进 §3.2 第 5 步的 push;`programmaticPush` 内部走 `git push -u origin <branch>`(已有逻辑,不动)。
+**clean + !HasUpstream**(首次 push)—— `HasNothingToPush` 因为 `!HasUpstreamBranch()` 返回 false,所以进 push;`programmaticPush` 内部走 `git push -u origin <branch>`。
 
 ### 3.4 `countUnpushed` 的新定位
 
@@ -864,181 +825,130 @@ pr 的语义 = "我准备好了,请把这个本地分支在 Web 平台上开放�
 
 ### 4.1 业务判定
 
-```go
-// IsReadyForPR: senior-dev hygiene check for opening a PR.
-// /gtw push's successful exit guarantees this, modulo race.
-func (s *GitStatusSnapshot) IsReadyForPR() bool {
-    return s.HasUpstreamBranch() &&
-        s.LocalIsAtUpstreamTip() &&
-        s.WorkingTreeIsClean()
-}
+`/gtw pr` **不吃** readiness snapshot。它的 readiness 收窄到两道闸(A4):
 
-// PRBlockReason: IsReadyForPR 为 false 时,按优先级返回一条 actionable 提示
-// (硬拒在前,清理 nudge 在后,保证只回一条)
-func (s *GitStatusSnapshot) PRBlockReason() string {
-    switch {
-    case s.Branch == "":
-        return "❌ detached HEAD — checkout a named branch first"
-    case s.HasConflicts:
-        return "❌ worktree has unmerged paths (merge/rebase conflict)\n" +
-            "hint: resolve conflicts and `git add`, then /gtw pr"
-    case !s.HasUpstream:
-        // ← 本次撞到的 case:"branch has no upstream" 显式拦在 pr 入口
-        return "❌ branch has no upstream on origin\n" +
-            "hint: /gtw push first to publish the branch to origin, then /gtw pr"
-    case s.AheadOfRemote > 0:
-        return fmt.Sprintf(
-            "⚠️ %d commit(s) made locally but not pushed\n"+
-                "hint: /gtw push first, then /gtw pr", s.AheadOfRemote)
-    case s.BehindRemote > 0:
-        return fmt.Sprintf(
-            "⚠️ origin/%s is %d commit(s) ahead of your local branch\n"+
-                "hint: `git pull --rebase`, then /gtw pr", s.Branch, s.BehindRemote)
-    case s.Uncommitted > 0:
-        return fmt.Sprintf(
-            "⚠️ %d file(s) changed but not committed\n"+
-                "hint: /gtw push first to commit + push, then /gtw pr", s.Uncommitted)
-    case s.Untracked > 0:
-        return fmt.Sprintf(
-            "⚠️ %d new file(s) not added to git\n"+
-                "hint: git add them, then /gtw push, then /gtw pr", s.Untracked)
-    }
-    return ""
-}
-```
+| 闸门 | 实现 | 失败提示 |
+|---|---|---|
+| 1. `origin/<branch>` ref 存在 | `RemoteBranchExists(ctx, dir, branch, git)` → `git ls-remote --heads origin <branch>` | `❌ origin/<branch> does not exist — /gtw push first to publish the branch to origin` |
+| 2. 没有已开 PR | `provider.FindOpenPRForBranch(owner, repo, head)` → `gh pr list --head ...` / `glab mr list --source-branch ...` | `✅ branch <branch> already has an open PR (#N): <url>` |
 
-### 4.2 dispatchPR 入口收紧
+ahead / behind / dirty / conflicts / detached / 无 tracking ref 都不是硬拒条件 —— 这些是 gh/glab 自己会处理的领域。
+
+### 4.2 dispatchPR 入口
 
 ```go
-func dispatchPR(ctx, cs, deps, chatID, messageID, args) (*Result, error) {
+func dispatchPR(ctx, cs, deps, chatID, messageID, args, cfg) (*Result, error) {
     c, res := loadDispatchContext(ctx, cs, deps, chatID, messageID)
     if res != nil { return res, nil }
 
     baseBranch, err := DefaultBranch(ctx, c.RepoRoot, deps.Git)
     if err != nil { return reply(...❌...), nil }
 
-    // (NEW) 单一 readiness gate
-    snap, err := CollectReadiness(ctx, c.Worktree, deps.Git)
+    // 闸 1: origin/<branch> ref 存在
+    headExists, err := RemoteBranchExists(ctx, c.Worktree, c.Branch, deps.Git)
     if err != nil { return reply(...❌...), nil }
-    if reason := snap.PRBlockReason(); reason != "" {
-        return reply(ctx, cs.Emitter(), chatID, messageID, reason), nil
-    }
-
-    // (KEPT) PR-worthiness check —— 与 readiness 正交
-    ahead, err := countBaseAhead(ctx, c.Worktree, baseBranch, deps)
-    if err != nil { return reply(...❌...), nil }
-    if ahead == 0 {
+    if !headExists {
         return reply(ctx, cs.Emitter(), chatID, messageID,
             fmt.Sprintf(
-                "✅ branch %s is in sync with %s — nothing new to PR yet\n"+
-                    "hint: make some changes, then /gtw push, then /gtw pr.",
-                c.Branch, baseBranch)), nil
+                "❌ origin/%s does not exist — /gtw push first to publish the branch to origin",
+                c.Branch)), nil
     }
 
-    // agent + provider.CreatePR 完全保留
+    // provider 必须在闸 2 之前解析
+    provider, owner, repo, err := resolveProvider(ctx, c, deps)
+    if err != nil { return reply(...❌...), nil }
+
+    // 闸 2: 没有已开的 PR
+    existing, err := provider.FindOpenPRForBranch(ctx, owner, repo, c.Branch)
+    if err != nil { return reply(...❌...), nil }
+    if existing != nil {
+        return reply(ctx, cs.Emitter(), chatID, messageID,
+            fmt.Sprintf(
+                "✅ branch %s already has an open PR (#%d): %s",
+                c.Branch, existing.Number, existing.URL)), nil
+    }
+
+    // agent + provider.CreatePR
     ...
 }
 ```
 
 ### 4.3 取消的旧逻辑
 
-- **删除** `countUnpushed` 调用 + "⚠️ N unpushed" 提示(`PRBlockReason` 已覆盖)
-- **删除** 旧的内嵌 uncommitted / untracked 嵌套 if(`PRBlockReason` 已统一处理)
-- **保留** `countBaseAhead` 和"nothing new to PR yet"分支(语义独立,不在 readiness 维度)
+`/gtw pr` 的 readiness 收窄到两道闸,连同被取消的旧逻辑(`countUnpushed` 调用、"⚠️ N unpushed" 提示、内嵌的 uncommitted / untracked 判断、`countBaseAhead` + "nothing new to PR yet" 分支、`PRBlockReason` / `IsReadyForPR`),见 A4 §A4.3。
 
 ---
 
 ## 5. Continuity Proof
 
-把"push 成功, pr readiness 必通过"写成不变式:
+把"push 成功, pr 的第一道闸必通过"写成不变式:
 
 设 `snap` 是某工作区在时刻 T 的 readiness 快照,`ProgrammaticPush` 表示成功执行 `git push -u origin <branch>` 后的瞬间状态。
 
 ```
 T0:   用户敲 /gtw push
-T1:   snap_push = CollectReadiness(T0)
+T1:   snap_push = CollectReadinessForDispatch(T0)
 T2:   若 snap_push.PushBlockReason() != "" → 拒绝(返回)
-T3:   若 snap_push.HasNothingToPush() → 提示(返回)
-T4:   若 !snap_push.WorkingTreeIsClean() → runAgentToCommit → re-snapshot
-      snap_push = CollectReadiness(T_commit)
+T3:   若 !snap_push.WorkingTreeIsClean() → 拒绝,指向 /gtw commit(返回)
+T4:   若 snap_push.HasNothingToPush() → no-op(返回)
 T5:   ProgrammaticPush 成功
       此时:snap_push 必有:
         - HasUpstreamBranch() == true  (T5 -u 设了)
         - LocalIsAtUpstreamTip() == true  (T5 推到对齐)
-        - WorkingTreeIsClean() == true   (T4 commit 把脏收掉了)
+        - WorkingTreeIsClean() == true   (T3 保证了工作区干净)
 T6:   用户敲 /gtw pr
-T7:   snap_pr = CollectReadiness(T6)
-T8:   若 T5 → T7 之间没有第三方动 origin/<branch> 或本地工作区:
-        snap_pr == snap_push
-        即 snap_pr.IsReadyForPR() == true ✓
+T7:   闸 1: RemoteBranchExists(origin/<branch>) == true  (T5 建立了这个 ref)
 ```
 
-唯一会让 pr 在 push 成功之后仍 readiness 失败的:**外部并发**修改了 `origin/<branch>` 或本地工作区。这种 race 本身就需要用户介入 —— 不可消除,但语义上"pr 仍能兜住"。
+唯一会让 pr 在 push 成功之后仍被闸 1 挡住的是:**外部并发**动了 `origin/<branch>`(远端分支被删 / 别人抢推)。这种 race 本身就需要用户介入 —— 不可消除,但闸 1 仍能兜住。
 
 ### 5.1 形式化对比
 
-| 维度 | `/gtw push` 成功后 | `/gtw pr` readiness 要求 | 一致 |
+| 维度 | `/gtw push` 成功后 | `/gtw pr` 闸 1 要求 | 一致 |
 |---|---|---|---|
-| `HasUpstreamBranch()` | true(`-u` 已设) | true | ✓ |
-| `LocalIsAtUpstreamTip()` | true(`AheadOfRemote`=0) | true | ✓ |
-| `WorkingTreeIsClean()` | true(commit 把脏收掉) | true | ✓ |
-
-三个维度一一对应。这就是"为什么两个命令读同一份 snapshot"的结构性保证 —— **不存在 push 干净而 pr 仍 dirty 的快照漂移**。
+| `HasUpstreamBranch()` | true(`-u` 已设) | true(`RemoteBranchExists`) | ✓ |
+| `LocalIsAtUpstreamTip()` | true(`AheadOfRemote`=0) | — | — |
+| `WorkingTreeIsClean()` | true(push 硬拒脏工作区) | — | — |
 
 ---
 
 ## 6. 不变式 Checklist
 
-- **Snapshot 单一来源**。`/gtw push` 和 `/gtw pr` 入口都从 `CollectReadiness` 取,不再有 `git status --porcelain` 单独调用或 `countUnpushed` 直调
+- **Snapshot 单一来源**。`/gtw push` 和 `/gtw commit` 入口都从 `CollectReadinessForDispatch` 取,不再有 `git status --porcelain` 单独调用或 `countUnpushed` 直调
 - **`countUnpushed` 退出 dispatch 顶层**。仅留在 `programmaticPushWithRetry` 内部做 push 后二次验证
-- **Push 容忍 `!HasUpstreamBranch`**,pr 不容忍 —— 这是两个命令**唯一**相反的判定,刻意为之
-- **Push 容忍 `BehindRemote > 0`**(因为 push 是"我有新东西要送上去",remote 是否比我新不影响 push 本身);**pr 不容忍** —— PR 的 head tip 必须等于 origin/branch tip
-- **agent 跑完强制 re-snapshot**。`dispatchPush` 第 4 步的 `CollectReadiness` 重新调用不可省 —— agent 可能引入冲突或遗留 dirty 状态
-- **PRBlockReason 按优先级返回单条**。硬拒 → 清理 nudge,只一条 actionable 提示,避免 checklist 轰炸用户
-- **冲突永远先报**。`HasConflicts` 在 push 的 `PushBlockReason` 和 pr 的 `PRBlockReason` 里都是首条
-- **底层 git 调用次数不增**。snapshot 解析仍是 `CollectStatus` 一次 `git status`;`countBaseAhead` 在 pr 里仍是 `rev-list`(per-snapshot 之外的"是否有 PR 内容"判断)
+- **Push 容忍 `!HasUpstreamBranch`** —— 没有上游的干净工作区正是首次 push 的合法场景;pr 的闸 1 则要求这个 ref 存在
+- **agent 跑完强制 re-snapshot**。`dispatchCommit` 的 re-snapshot 不可省 —— agent 可能引入冲突或遗留 dirty 状态
+- **冲突永远先报**。`HasConflicts` 在 push 和 commit 的 `PushBlockReason` 里都是首条
+- **底层 git 调用次数不增**。snapshot 解析仍是 `CollectReadiness` 一次 `git status`
 
 ---
 
 ## 7. 错误处理矩阵
 
-### 7.1 `/gtw push`
+### 7.1 `/gtw push` 与 `/gtw commit`
 
-| 触发条件 | IM 输出 | 后续动作 |
-|---|---|---|
-| `CollectReadiness` 调用失败 | `❌ read worktree status: <err>` | 退出 |
-| `snap.HasConflicts` | `❌ worktree has unmerged paths...` | 退出(**不调 agent 不调 push**) |
-| `snap.HasNothingToPush()` | `ℹ️ nothing to push` | 退出 |
-| `!snap.WorkingTreeIsClean()` + 无 agent | `❌ no agent selected. /use <name> first` | 退出(不 push) |
-| agent 跑完 HEAD 没动 | `⚠️ no new commit was created (HEAD unchanged at <sha>)` | 退出(不 push) |
-| agent 跑完 worktree 仍 dirty | `⚠️ N file(s) still uncommitted: ...` | 退出(不 push) |
-| agent 跑完 re-snapshot 出冲突 | `❌ worktree has unmerged paths...` | 退出(不 push,agent 引入的冲突要用户处理) |
-| `programmaticPushWithRetry` 失败 | `❌ push failed: <err>` + 列出本地 commit | 退出(commit 在本地) |
-| 全部成功 | `🤖 <agent> committed N change(s) and pushed...` 或 `✅ pushed N commit(s)...` | 退出 |
+两条命令的完整错误矩阵见 A1 段的 §7。
 
 ### 7.2 `/gtw pr`
 
 | 触发条件 | IM 输出 | 后续动作 |
 |---|---|---|
-| `CollectReadiness` 调用失败 | `❌ read worktree status: <err>` | 退出 |
-| `Branch == ""` | `❌ detached HEAD — checkout a named branch first` | 退出 |
-| `HasConflicts` | `❌ worktree has unmerged paths...` | 退出 |
-| **`!HasUpstream`** | **`❌ branch has no upstream on origin\nhint: /gtw push first to publish the branch to origin, then /gtw pr`** | **退出(本次撞到的 case)** |
-| `AheadOfRemote > 0` | `⚠️ N commit(s) made locally but not pushed\nhint: /gtw push first, then /gtw pr` | 退出 |
-| `BehindRemote > 0` | `⚠️ origin/<branch> is N commit(s) ahead of your local branch\nhint: git pull --rebase, then /gtw pr` | 退出 |
-| `Uncommitted > 0` | `⚠️ N file(s) changed but not committed\nhint: /gtw push first to commit + push, then /gtw pr` | 退出 |
-| `Untracked > 0` | `⚠️ N new file(s) not added to git\nhint: git add them, then /gtw push, then /gtw pr` | 退出 |
-| `countBaseAhead == 0`(ready 但没东西可 PR) | `✅ branch X is in sync with base — nothing new to PR yet` | 退出 |
+| 默认分支探测失败 | `❌ <err>` | 退出 |
+| 闸 1:`origin/<branch>` 不存在 | `❌ origin/<branch> does not exist — /gtw push first to publish the branch to origin` | 退出(不动 agent 不动 gh) |
+| provider 解析失败(没有 origin remote / URL 非法 / 平台不支持) | `❌ <err>` | 退出 |
+| 闸 2:gh/glab 没装 | `❌ <install hint>` | 退出 |
+| 闸 2:已开 PR | `✅ branch <branch> already has an open PR (#N): <url>` | 退出 |
+| 闸 2:列 PR 失败 | `❌ check existing PR: <err>` | 退出 |
 | 全部通过 | 进入 agent + `gh/glab pr create` | 创建 PR |
 
 ### 7.3 emoji 一致性
 
-沿用 `internal/command/gtw/README.md` 规约:
+沿用 `internal/command/gtw/README.md §1.1` 的 emoji 闭集:
 
-- ❌ 错误 / 硬拒(冲突、detached HEAD)
-- ⚠️ 用户操作不当但有明确路径(未推送、未 commit、behind)
-- ℹ️ 信息性提示(nothing to push / nothing to PR)
-- ✅ 正面确认(branch in sync with base)
+- ❌ 错误 / 硬拒(冲突、detached HEAD、push 失败)
+- ⚠️ 警告 / 部分成功(verify 失败、hook 警告)
+- ✅ 正面确认(push 成功、already on the remote、PR 已存在)
+- 🤖 agent 主导(commit 成功)
 
 ---
 
@@ -1046,103 +956,86 @@ T8:   若 T5 → T7 之间没有第三方动 origin/<branch> 或本地工作区:
 
 ### 8.1 共享 fixture
 
-把 `pr_test.go::setupPRGit(rig, branch, unpushed, ahead)` 升级为 `setupReadiness(rig, snap *messages.GitStatusSnapshot)`,让 push 测试和 pr 测试用同一份 mock 数据。push 测试额外 mock `programmaticPush` 调用,pr 测试额外 mock `countBaseAhead`。
+`internal/command/gtw/readiness_test.go` 提供 `setupReadiness(rig, branch, snap)` 与 `setupPushMocks(git, branch, snap)` —— push / commit / pr 三个 dispatcher 的测试用同一份 snapshot mock 数据,再加 `git ls-remote --heads origin <branch>` 的闸 1 mock。
 
-### 8.2 `/gtw push` 用例(`commit_push_test.go`)
+### 8.2 `/gtw push` 与 `/gtw commit` 用例
 
-| 测试 | 覆盖 case |
-|---|---|
-| `TestDispatchPush_HardRefuse_Conflicts` | `HasConflicts=true` → 拒,**不调 agent 不调 push** |
-| `TestDispatchPush_NothingToPush` | Clean + `HasUpstream` + `Ahead=0` → `ℹ️ nothing to push`,不调 agent 不调 push |
-| `TestDispatchPush_DirtyNoUpstream` | Uncommitted=2 + `!HasUpstream` → agent → commit → push with `-u` |
-| `TestDispatchPush_DirtyWithUpstream` | Uncommitted=2 + `Ahead=3` → agent → commit → push |
-| `TestDispatchPush_NoUpstreamFreshBranch` | Clean + `!HasUpstream` → push with `-u`,**不调 agent** |
-| `TestDispatchPush_AgentProducedNothing` | 脏 → agent → re-snapshot 仍 `HasNothingToPush` → 兜底提示 |
-| `TestDispatchPush_AgentIntroducedConflicts` | 脏 → agent → re-snapshot `HasConflicts=true` → 拒绝 |
-| `TestDispatchPush_UpstreamSet_NoUnpushedLeft` | Clean + `HasUpstream` + `Ahead=0` 仍是 `HasNothingToPush=true`(回归:`!HasUpstreamBranch` 才会强制 push)|
+见 A1 段 §8.1 / §8.2(`internal/command/gtw/push_test.go` / `commit_test.go`)。
 
-### 8.3 `/gtw pr` 用例(`pr_test.go`)
+### 8.3 `/gtw pr` 用例(`internal/command/gtw/pr_test.go`)
 
 | 测试 | 覆盖 case |
 |---|---|
-| `TestDispatchPR_DetachedHead` | `Branch=""` → 拒(不动 agent 不动 gh)|
-| `TestDispatchPR_NoUpstream` | `!HasUpstream` → **本次撞到的 case**,IM 含 "branch has no upstream on origin" + "**/gtw push first to publish the branch**",**不动 gh** |
-| `TestDispatchPR_AheadOfUpstream` | `Ahead=3` → 拒,IM 含 "**/gtw push first**",不动 gh |
-| `TestDispatchPR_BehindUpstream` | `Behind=2` → 拒,IM 含 "git pull --rebase, then /gtw pr" |
-| `TestDispatchPR_Uncommitted` | `Uncommitted=2` → 拒,IM 含 "**/gtw push first** to commit + push" |
-| `TestDispatchPR_Untracked` | `Untracked=2` → 拒,IM 含 "git add them, then **/gtw push**" |
-| `TestDispatchPR_HasConflicts` | `HasConflicts=true` → 拒,IM 含 "resolve conflicts" |
-| `TestDispatchPR_ReadyAheadOfBase` | Ready + `main..HEAD=5` → 进 agent + `gh pr create` 被调 |
-| `TestDispatchPR_ReadyNothingNew` | Ready + `main..HEAD=0` → 提示 "nothing new to PR yet",不动 gh |
+| `TestDispatchPR_NoOriginBranch` | 闸 1:`origin/<branch>` 不存在 → 拒,IM 含 "**/gtw push first** to publish the branch",**不动 gh** |
+| `TestDispatchPR_LSRemoteAuthError` / `_NetworkError` / `_NotARepository` | 已知 stderr → 友好 hint |
+| `TestDispatchPR_LSRemoteUnknownErrorPassThrough` | 未知 stderr 原样透传 |
+| `TestRemoteBranchExists_EmptyStderr` | ls-remote 返回空 → false |
+| `TestDispatchPR_ExistingPR` | 闸 2:已开 PR → `✅ branch <b> already has an open PR (#N): <url>` |
+| `TestDispatchPR_FindOpenPRErrCLINotInstalled` / `_UnknownErrorPassThrough` | gh/glab 没装 / 未知错误 |
+| `TestDispatchPR_CreateStaleUpstreamRace` / `_GitLab` | race-window:head 在 origin 上消失 |
+| `TestDispatchPR_AlreadyExistsRace` / `TestDispatchPR_CreatePRExists` | race-window:PR 被人开了 |
+| `TestDispatchPR_CreatePR_CLINotInstalled` / `_UnknownErrorPassThrough` | CreatePR 的已知 / 未知错误分流 |
+| `TestDispatchPR_DirtyNoLongerGate` | dirty / ahead / behind / conflicts 不再 gate |
+| `TestDispatchPR_NoAgentSelected` / `TestDispatchPR_AgentRunOnceFails` / `TestDispatchPR_AgentOutputUnparsable` | agent 侧失败路径 |
+| `TestDispatchPR_MissingTitleRefusesPR` / `TestDispatchPR_NonConventionalTitleStillOpens` / `TestDispatchPR_BranchNameTitleRefusesPR` | 第三道闸:输出格式 |
+| `TestDispatchPR_RetryOpensPRFromSecondReply` / `TestDispatchPR_RetryStillFailsRefusesPR` | 格式不过时把原因回喂 agent 一次 |
+| `TestDispatchPR_IssueFetchFails_StillOpens` / `TestDispatchPR_MissingDeviationSection_Warns` / `TestDispatchPR_WarningsMerged` | issue / label / deviation 警告 |
+| `TestGitHubProvider_ClassifyCreatePRError_StaleUpstream` | provider 层的错误分类 |
+
+`internal/command/gtw/pr_ready_test.go` 覆盖 `--ready` 的 label / issue 状态迁移。
 
 ### 8.4 连续性用例(关键 — `*_test.go` 跨文件)
 
 ```go
 // TestPushThenPR_ContinuousFlow:
-// 1) mock 初始 snap = dirty + !HasUpstream
+// 1) mock 初始 snap = clean + !HasUpstream
 // 2) dispatchPush,验证 programmaticPushWithRetry 被调且 args 含 "-u origin <branch>"
 // 3) re-mock 入口 snap 为 "push 完成态":
 //      HasUpstream=true, Ahead=0, Behind=0,
-//      Uncommitted=0, Untracked=0, HasConflicts=false
+//      Added=0, Deleted=0, Modified=0, Untracked=0, Conflicts=0,
+//      HasConflicts=false
 // 4) dispatchPR,验证:
-//      - PRBlockReason 返回 ""
-//      - countBaseAhead 调用一次(main..HEAD=5)
+//      - 闸 1 通过(ls-remote 返回该分支)
 //      - agent 跑一次
 //      - gh pr create 被调一次
 ```
 
 ```go
 // TestPushFailThenPR_Refuses:
-// 1) mock 初始 snap = dirty + HasUpstream+Ahead=3
-// 2) dispatchPush,agent 跑完,programmaticPush 失败(mock stderr)
-// 3) 验证 dispatchPush 返回 "❌ push failed" + commit 列表
-// 4) snap 此刻仍 Ahead>0(dirty 已 commit 但未 push)
-// 5) dispatchPR,验证 PRBlockReason 返回 "⚠️ 3 commit(s) made locally but not pushed"
-//    + 不调 agent + 不调 gh
+// 1) mock 初始 snap = clean + HasUpstream+Ahead=3
+// 2) dispatchPush,programmaticPush 失败(mock stderr)
+// 3) 验证 dispatchPush 返回 "❌ git push failed: ..."
+// 4) snap 此刻仍 Ahead>0(commit 在本地但没推上去)
+// 5) dispatchPR —— PR 路径不再 gate on ahead,
+//    gh/glab 自己对"没有新 commit"给最终结论
 ```
 
 ### 8.5 关键不变式(单测断言)
 
 ```go
-// push.go::buildAgentPrompt 不包含 "push" 命令字样(F-56 §3 不变量)
-// —— F-57 不动 prompt,但保留回归测试
-func TestBuildAgentPrompt_NoPushCommand(t *testing.T) { ... }
+// commit.go::buildAgentPrompt 不包含 "git push" 命令(F-56 §3 不变量)
+func TestBuildAgentPrompt_AntiPush(t *testing.T) { ... }
 
-// 验证 dispatchPR 永远先看 snapshot,不再调 countUnpushed
-func TestDispatchPR_NoCountUnpushed(t *testing.T) {
-    rig := newPRTestRig(t)
-    // mock CollectReadiness 用的 git status,但 mock 不覆盖 rev-list @{u}..HEAD
-    // 如果 dispatchPR 走了 countUnpushed,这条 mock 会返回 "no mock found" 错误
-    rig.git.onArgs([]string{"status", "--porcelain", "--branch", "--untracked-files=normal"},
-        "## branch...origin/branch\n", "", nil)
-    ...
-    // 期望:即使 unreadiness 被 mock,也不会因 countUnpushed mock miss 而报错
-}
+// 验证 dispatchPR 永远先看闸 1,不调 countUnpushed
+func TestDispatchPR_NoCountUnpushed(t *testing.T) { ... }
 
 // 验证 dispatchPush 不再调用 countUnpushed 做主判定
-func TestDispatchPush_NoCountUnpushedAtEntry(t *testing.T) {
-    // mock 不覆盖 rev-list @{u}..HEAD,验证 dispatchPush 仍能基于 snapshot 走 Branch 2/3
-}
+func TestDispatchPush_NoCountUnpushedAtEntry(t *testing.T) { ... }
 ```
 
 ---
 
-## 9. 迁移步骤
+## 9. 实现落点
 
-按依赖顺序,每一步独立 commit + 测试通过:
-
-1. **`internal/messages/footer.go`**:加 `BehindRemote`、`HasConflicts` 字段。snapshot consumer(footer 渲染)忽略新字段,无副作用。
-2. **`internal/command/gtw/git_status.go`**:
-   - `parseBranchHeader` 补 `behind M` 解析(去掉"intentionally not surfaced"那段注释)
-   - `parsePorcelainBranchStatus` 在扫剩余行时计算 `HasConflicts`
-   - `CollectStatus` 改名为 `CollectReadiness`(保留旧名 alias 或保留原函数也行,推荐直接改名 + 更新所有调用方——只有 footer 渲染层在用,grep `CollectStatus` 即可定位)
-   - 加 `HasUpstreamBranch()` / `LocalIsAtUpstreamTip()` / `WorkingTreeIsClean()` / `HasNothingToPush()` / `PushBlockReason()` / `PRBlockReason()` / `IsReadyForPR()` 方法
-3. **`internal/command/gtw/pr.go::dispatchPR`**:替换 `countUnpushed` + 内嵌 uncommitted/untracked 判断 → `CollectReadiness` + `PRBlockReason`。`countBaseAhead` 和 "nothing new to PR yet" 分支保留。
-4. **`internal/command/gtw/commit_push.go::dispatchPush`**:把 `isClean` / `unpushedBefore` 两个变量换成 `snap` + 三个谓词;`countUnpushed` 入口直调移除(`programmaticPushWithRetry` 内部保留)。agent 跑完强制 re-snapshot。
-5. **`internal/command/gtw/testharness_test.go`(或新文件)**:加 `setupReadiness(rig, snap)` 共享 fixture,统一 mock 入口。
-6. **`internal/command/gtw/pr_test.go` + `commit_push_test.go`**:按 §8.2 / §8.3 / §8.4 列表补全测试。**不机械移植测试,重写时按 readiness 维度重新组织用例。
-7. **PR 描述**写明:"F-57: `/gtw push` + `/gtw pr` 统一使用 `Readiness` snapshot 做前置检测。本地分支未设 upstream / 未推送 / 与 origin 不一致 / 工作区不干净都会被显式拦截,IM 文案直接指向 `/gtw push`。"
-8. **删除 `pr_test.go::TestDispatchPR_UnpushedCommits` 等基于 `countUnpushed` 数字 mock 的旧测试** —— 它们测的是未实现的代码路径。
+| 职责 | 文件 | 符号 |
+|---|---|---|
+| 快照采集 + 解析 | `internal/command/gtw/git_status.go` | `CollectReadiness` / `CollectReadinessForDispatch` / `verifyUpstreamOnOrigin` / `parsePorcelainBranchStatus` / `parseBranchHeader` |
+| 快照类型 + 谓词 | `internal/messages/session.go` | `GitStatusSnapshot` / `HasUpstreamBranch` / `LocalIsAtUpstreamTip` / `WorkingTreeIsClean` / `HasNothingToPush` / `PushBlockReason` |
+| push 入口 | `internal/command/gtw/push_dispatch.go` | `dispatchPush` |
+| commit 入口 | `internal/command/gtw/commit.go` | `dispatchCommit` |
+| pr 入口(两道闸) | `internal/command/gtw/pr.go` | `dispatchPR` |
+| 闸 1 | `internal/command/gtw/worktree.go` | `RemoteBranchExists` |
+| provider 抽象 | `internal/command/gtw/provider.go` | `GitHubProvider` / `GitLabProvider` / `wrapCreatePRError` / `wrapListPRError` / `isExecutableNotFound` / `ErrCLINotInstalled` / `ErrStaleUpstream` / `ErrPRExists` |
 
 ---
 
@@ -1150,33 +1043,35 @@ func TestDispatchPush_NoCountUnpushedAtEntry(t *testing.T) {
 
 ### 10.1 footer 渲染层是否消费新字段
 
-当前 footer(`internal/command/gtw/render.go`)只展示 `Branch` / `Uncommitted` / `Untracked` / `AheadOfRemote`。本设计**不动** footer 渲染,只是把字段加进 struct(为后续 footer 增强留接口)。如果后续要 footer 显示 `behind N` 或 conflicts 警告,需要单独的 F-XX 提案 —— 本次只做 readiness 数据结构 + 入口判定。
+runtime footer 渲染层消费 `GitStatusSnapshot`,但只展示它关心的字段;readiness 的新维度(`BehindRemote` / `HasConflicts` / `UpstreamGone`)不改变渲染。要让 footer 显示 `behind N` 或 conflicts 警告,需要单独的提案。
 
 ### 10.2 race 兜底
 
-`/gtw push` 成功 → `/gtw pr` 期间,第三方修改 `origin/<branch>`(其他 worktree 抢推 / GitHub 上直接 merge / admin 强推)。`CollectReadiness` 的 `BehindRemote > 0` 会捕获这种情况,提示 "git pull --rebase"。本设计**不**主动重试或自动 rebase,留给用户决策。
+`/gtw push` 成功 → `/gtw pr` 期间,第三方修改 `origin/<branch>`(其他 worktree 抢推 / 远端分支被删)。闸 1 的 `ls-remote` 会捕获"ref 已经不在"这种情况。本设计**不**主动重试或自动 rebase,留给用户决策。
 
 ### 10.3 `programmaticPushWithRetry` 内的 `countUnpushed` 语义保留
 
-`push.go:122-141` 的"no upstream configured → 0 unpushed"语义**继续有效**在 `programmaticPushWithRetry` 的 verify loop 内:此时 `-u` 已经设过了,理论上不会走到"无上游"分支;但若真走到(极端 race),返回 0 是合理的"push 没产生新东西"信号,不是错误。这部分语义与 `dispatchPush` 入口的 readiness 判定**无耦合**,互不污染。
+"no upstream configured → 0 unpushed"语义**继续有效**在 `programmaticPushWithRetry` 的 verify loop 内:此时 `-u` 已经设过了,理论上不会走到"无上游"分支;但若真走到(极端 race),返回 0 是合理的"push 没产生新东西"信号,不是错误。这部分语义与 `dispatchPush` 入口的 readiness 判定**无耦合**,互不污染。
 
 ### 10.4 `ModeLocal`(没有 yml 的 worktree)
 
-`loadDispatchContext` 在无 yml 时调 `rev-parse --show-toplevel` + `rev-parse --abbrev-ref HEAD` 推导 `Branch` / `Worktree` / `RepoRoot`。这部分**不动** —— readiness gate 在入口之后,无论是否 ModeLocal 行为一致(只是少 `Repo` / `Provider` 信息,gh 调用时再 derive)。
+`loadDispatchContext` 在无 yml 时调 `rev-parse --show-toplevel` + `rev-parse --abbrev-ref HEAD` 推导 `Branch` / `Worktree` / `RepoRoot`。readiness gate 在入口之后,无论是否 ModeLocal 行为一致(只是少 `Repo` / `Provider` 信息,gh 调用时再 derive)。
 
 ### 10.5 "first-time push" UX
 
-`HasUpstreamBranch()==false` 在 push 是合法路径(pr 是非法)。但 IM 上用户能否一眼看出"这是要首次 push"?当前 `programmaticPush` 内部调 `git push -u`,不 surface "first push" 这个概念。如果想区分"首次 push"与"已有 upstream 但 ahead",需要在 push 的 IM 卡片里加一行(`🌱 first push to origin/<branch>`),那是后续 UX 增强,不在本次 F-57 范围。
+`HasUpstreamBranch()==false` 在 push 是合法路径。当前 `programmaticPush` 内部调 `git push -u`,不 surface "first push" 这个概念。如果想区分"首次 push"与"已有 upstream 但 ahead",需要在 push 的 IM 卡片里加一行。
 
 ---
 
 ## 11. References
 
-- [`本文件 §push 三分支`](./F-gtw.md):push 三分支的完整设计 —— 本 F-57 是其 readiness 维度上的扩展
-- [`docs/feat/F-50-git-provider.md`](F-50-git-provider.md):GitHub/GitLab provider 抽象,gh/glab 调用的下游
-- [`feishu-rendering.md §Footer`](../channel/feishu-rendering.md):footer 渲染层消费 `GitStatusSnapshot`,本次扩展字段不影响渲染
+- [`本文件 §The Branches`](./F-gtw.md):push 分支的完整设计 —— 本 F-57 是其 readiness 维度上的扩展
+- [`internal/command/gtw/provider.go`](../../internal/command/gtw/provider.go):GitHub/GitLab provider 抽象,gh/glab 调用的下游
+- [`internal/command/gtw/git_status.go`](../../internal/command/gtw/git_status.go):readiness 快照的采集与解析
+- [`internal/messages/session.go`](../../internal/messages/session.go):`GitStatusSnapshot` 类型定义 + 谓词
+- [`feishu-rendering.md §Footer`](../channel/feishu-rendering.md):footer 渲染层消费 `GitStatusSnapshot`,扩展字段不影响渲染
 - [`internal/command/gtw/README.md`](../../internal/command/gtw/README.md):IM 卡片排版规约(emoji 一致性等)
-- [`wip/gtw-hooks.md`](../wip/gtw-hooks.md):agent 优先级 + chain(本设计不动)
+- [`internal/command/gtw/push.go`](../../internal/command/gtw/push.go):agent 优先级 + chain
 
 ---
 
@@ -1239,8 +1134,8 @@ func TestDispatchPush_NoCountUnpushedAtEntry(t *testing.T) {
 
 | 闸门 | 实现 | 失败提示 |
 |---|---|---|
-| 1. `origin/<branch>` ref 存在 | `RemoteBranchExists(ctx, dir, branch,)` → `git ls-remote --heads origin <branch>` 直接调 | `❌ origin/<branch> does not exist — /gtw push first` |
-| 2. 没有已开 PR | `provider.FindOpenPRForBranch(owner, repo, head)` → `gh pr list --head ...` / `glab mr list --source-branch ...` | `❌ branch <branch> already has an open PR (#N): <url>` |
+| 1. `origin/<branch>` ref 存在 | `RemoteBranchExists(ctx, dir, branch,)` → `git ls-remote --heads origin <branch>` 直接调 | `❌ origin/<branch> does not exist — /gtw push first to publish the branch to origin` |
+| 2. 没有已开 PR | `provider.FindOpenPRForBranch(owner, repo, head)` → `gh pr list --head ...` / `glab mr list --source-branch ...` | `✅ branch <branch> already has an open PR (#N): <url>` |
 
 两道闸都通过 → 直接 `CreatePR`,**不再**评估 ahead/behind/dirty/conflicts/detached/no-tracking-ref。
 
@@ -1259,7 +1154,8 @@ func TestDispatchPush_NoCountUnpushedAtEntry(t *testing.T) {
 helper 实现位于:
 - `internal/command/gtw/worktree.go::RemoteBranchExists`(lsRemoteKnownErrors 表)
 - `internal/command/gtw/provider.go::wrapCreatePRError` / `wrapListPRError`
-- `internal/command/gtw/provider.go::isExecutableNotFound` / `isStaleUpstreamGH` / `isStaleUpstreamGL`
+- `internal/command/gtw/provider.go::isExecutableNotFound`
+- `internal/command/gtw/provider.go::classifyCreatePRError`(GitHub / GitLab 各一份)+ `ghStaleUpstreamSubstrings` / `glStaleUpstreamSubstrings`
 
 ### A4.3 A2 设计的哪些部分保留 / 哪些被替换
 
@@ -1271,7 +1167,7 @@ helper 实现位于:
 | `PRBlockReason` / `IsReadyForPR` | **删除** — 0 caller |
 | `dispatchPR` 的 6 维 `if reason := snap.PRBlockReason()` 分支 | **删除** |
 | `countBaseAhead` + "nothing new to PR yet" 分支 | **删除** — ahead=0 也发,gh/glab 自己说 |
-| `mapGhHeadMissingToHint` 字符串翻译 | **删除** — 替换为 sentinel-based flow + `provider.isStaleUpstream*` helper |
+| `mapGhHeadMissingToHint` 字符串翻译 | **删除** — 替换为 sentinel-based flow + `provider.classifyCreatePRError` helper |
 
 ### A4.4 为什么 PR 路径独立,不复用 push 的 `verifyUpstreamOnOrigin`
 
@@ -1289,14 +1185,14 @@ graceful-fallback-on-network-error 语义(错误路径更曲折)。
 
 ### A4.5 测试覆盖
 
-`internal/command/gtw/pr_test.go` 共 ~30 个测试,涵盖:
+`internal/command/gtw/pr_test.go` 共 149 个测试,涵盖:
 - 两道闸的 pass / fail 各路径
 - 已知 stderr 翻译(auth / network / not-a-repo)
 - 未知 stderr passthrough(关键不变量 — 不能匹配任何 known fragment)
 - race-window 兜底(branch 被删 / PR 被人开了 / gh/glab 突然没装)
 - dirty / ahead / behind / conflicts 不再 gate
 - helper 单元测试(`wrapCreatePRError` / `wrapListPRError` /
-  `isExecutableNotFound` / `isStaleUpstream*`)
+  `isExecutableNotFound` / `classifyCreatePRError`)
 - production `GitHubProvider.FindOpenPRForBranch` / `GitLabProvider.FindOpenPRForBranch` 直接单元测试(argv shape + JSON decode + empty list)
 
 ### A4.6 不在范围内

@@ -7,8 +7,7 @@
 // This makes it trivial to test against a JSON fixture per the F-32
 // acceptance matrix §9.2.
 //
-// Translation rules are documented in docs/feat/F-32-pi-rpc-bridge.md
-// §2.3, as revised by docs/feat/F-52-pi-stream-aggregation.md.
+// Translation rules are documented in docs/bridge/pi.md §2.3.
 // Anything not explicitly listed there is dropped (logged at debug)
 // so unknown upstream events do not terminate the session.
 //
@@ -468,7 +467,7 @@ func (t *translator) translate(raw []byte, logger *slog.Logger) ([]agent.AgentEv
 		// Pi cycle bumps the AgentSession counter exactly once.
 		// Reasons live in protocol.go's compactionEnd.Reason but
 		// are intentionally not propagated (no Subtype field after
-		// F-49). See docs/feat/F-49-compaction-counter.md §1.3.
+		// F-49). See docs/channel/feishu.md.
 		return nil, nil
 
 	case "compaction_end":
@@ -507,7 +506,7 @@ func (t *translator) translate(raw []byte, logger *slog.Logger) ([]agent.AgentEv
 		return nil, nil
 
 	case "state_update":
-		// Defensive: the official pi-coding-agent RPC spec (docs/rpc.md)
+		// Defensive: the official pi-coding-agent RPC spec
 		// does NOT list state_update as a server-emitted event. The
 		// F-34 reset path in pi/session.go New() does NOT rely on this
 		// case — it issues new_session + get_state synchronously and
@@ -980,8 +979,8 @@ func (t *translator) finishTurnLocked() []agent.AgentEvent {
 // context-window-pct formula is applied when both numerator and
 // denominator are positive; otherwise the field stays at zero
 // and the channel footer omits the "X%" segment. See
-// docs/feat/F-45-session-footer.md §1.5 /
-// docs/feat/F-54-pi-contextwindow-from-get-state.md §2.2.
+// docs/channel/feishu.md and
+// docs/bridge/pi.md §2.2.
 func decodeMessageUsage(u *messageUsage, ctxWindow int) *agent.UsageInfo {
 	if u == nil {
 		return nil
@@ -1010,7 +1009,7 @@ func decodeMessageUsage(u *messageUsage, ctxWindow int) *agent.UsageInfo {
 		// F-55: forward the window alongside X% so the footer can
 		// render `X% (window)`. Single render-side consumer; the
 		// runtime does not recompute / catalog / clamp based on
-		// this value — see docs/feat/F-55-footer-show-context-window.md.
+		// this value — see docs/channel/feishu.md.
 		out.ContextWindow = ctxWindow
 	}
 	return out

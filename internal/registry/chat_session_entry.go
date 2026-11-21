@@ -5,7 +5,7 @@
 //   - AgentSessionEntry (next file) — per-CLI-process handle
 //
 // See docs/SPEC.md v1.2 §1.2 (three FSMs, three owners) and
-// docs/feat/F-27-chatsession.md for the full model.
+// docs/feat/F-chat-session.md for the full model.
 package registry
 
 import (

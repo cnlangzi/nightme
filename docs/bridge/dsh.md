@@ -9,7 +9,7 @@
 > - `Starter.RunOnce` / `Starter.Review`(一次性): 与 `Start` 同一形态,但跑完 `defer a.Close()` 走 `workspace.archiveSession` 隐藏 session row(repo-scoped workspace 跨 session 持久)
 > **核心原则**: 接入底层 AI agent,**不修改 agent 本地默认配置**;nightme 只管 transport + permissions(权限默认全开)。
 > **姊妹文档**:
-> - [docs/bridge/dsh-shared-host.md](./dsh-shared-host.md) — 全局单实例 dsh,1:N 多路复用
+> - [docs/bridge/dsh-api.md](./dsh-api.md) — dsh HTTP / WS 协议契约
 > - [docs/bridge/claude.md](./claude.md) — stream-json transport,长生命周期
 > - [docs/bridge/codex.md](./codex.md) — JSON-RPC over stdio
 > - [docs/bridge/pi.md](./pi.md) — JSONL RPC over stdio

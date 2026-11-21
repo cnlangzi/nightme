@@ -1,6 +1,6 @@
 // Package agentsession — AgentSession (v1.2 per-CLI-process handle).
 //
-// See docs/SPEC.md v1.2 §1.1 and docs/feat/F-29-agent-session-pool.md
+// See docs/SPEC.md v1.2 §1.1 and docs/feat/F-chat-session.md
 // for the full model. In v1.2 the AgentSession replaces v1.1's
 // Session type for process ownership; the per-chat ChatSession owns
 // the pool of AgentSessions.
@@ -171,7 +171,7 @@ type AgentSession struct {
 	// F-53: the in-flight Prompt for this AgentSession, or nil if
 	// no Prompt is currently active. Stored on AS (not on
 	// ChatSession) because a Prompt is bound to one specific AS
-	// for its entire lifetime — see docs/feat/message_lifecycle.md
+	// for its entire lifetime — see docs/feat/F-53-message-prompt-lifecycle.md
 	// §4.2 存储归属.
 	//
 	// Concurrency (CS-AS 边界重构 Phase 1+): writes happen inside

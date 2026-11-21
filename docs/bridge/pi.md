@@ -6,7 +6,7 @@
 
 
 > **Depends on**: F-09 (Agent abstraction), F-19 (CLI Bridge), F-21 (Agent Modes), F-24 (Claude Code Bridge 模式), F-27 (ChatSession), F-28 (`/use`), F-29 (AgentSession pool)
-> **Related**: [`../bridge/claude.md`](./../bridge/claude.md), [`../bridge/cli-transport.md`](./../bridge/cli-transport.md), [`F-chat-session.md`](./F-chat-session.md)
+> **Related**: [`../bridge/claude.md`](./../bridge/claude.md), [`../bridge/cli-transport.md`](./../bridge/cli-transport.md), [`F-chat-session.md`](../feat/F-chat-session.md)
 
 ## 0. 摘要
 
@@ -43,7 +43,7 @@ nightme 现有 FSM 假设"一个 AgentSession = 一个进程"；pi RPC 进程是
 - `steer` / `follow_up`：复用现有 `InputBuffer` 在 `EventDone` 切 Idle 后 flush，避免给 pi 加双语义。
 - `set_model` / `set_thinking_level` / `cycle_*`：MVP 留给用户在 pi CLI flag 配置；后续按需开 `/use pi --model=…`。
 - `switch_session` / `fork` / `clone`：ChatSession 与 AgentSession pool 已经是 `(agent, cwd)` 维度，未要求 per-session switch；现有 `/use pi` + 换 cwd 已覆盖。
-- ✅ **后续在 F-34 启用**：`new_session` —— F-34 让 `/new` 暴露给 IM 入口，bridge 实现为 `rpc.requestAsync("new_session", nil)`；F-32 当时 defer 的原因是没有 runtime 入口，现在补上。详见 [`F-chat-session.md`](./F-chat-session.md) §3.2.2。
+- ✅ **后续在 F-34 启用**：`new_session` —— F-34 让 `/new` 暴露给 IM 入口，bridge 实现为 `rpc.requestAsync("new_session", nil)`；F-32 当时 defer 的原因是没有 runtime 入口，现在补上。详见 [`F-chat-session.md`](../feat/F-chat-session.md) §3.2.2。
 
 ## 2. Wire Protocol（来自 pi 官方 `docs/rpc.md`）
 

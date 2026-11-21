@@ -5,7 +5,7 @@
 > **Source**: `../channel/feishu-onboarding.md`
 
 
-> **Related**: [`SPEC.md`](../SPEC.md); [`F-08-channel-abstraction.md`](./F-08-channel-abstraction.md); [`../channel/feishu-rendering.md`](./../channel/feishu-rendering.md); [`F-gateway.md`](./F-gateway.md) §5
+> **Related**: [`SPEC.md`](../SPEC.md); [`F-08-channel-abstraction.md`](../feat/F-08-channel-abstraction.md); [`../channel/feishu-rendering.md`](./../channel/feishu-rendering.md); [`SPEC.md`](../SPEC.md) §5
 
 ---
 
@@ -151,7 +151,7 @@ type ContentBlock struct {
 
 ## 4.5 Wire format: blocks → Claude stream-json `content[]`
 
-`Session.SendBlocks(ctx, blocks)` 的契约(`internal/agent/agent.go:622-639`):
+`AgentSession.SendBlocks(ctx, blocks, opts ...SendBlocksOption)` 的契约(`internal/agentsession/session.go:1358`):
 
 ```text
 blocks  := [text, image, text, image, text]    // 有序 slice
@@ -180,8 +180,8 @@ claude 子进程 stdin
 
 ### 实现位置
 
-- Claude Code stream-json:`internal/bridge/claudecode/session.go::SendBlocks` (line 243-353),envelope 在 line 341-352 拼装
-- Pi RPC:`internal/bridge/pi/session.go::SendBlocks`,documented at `docs/bridge/pi.md` §6
+- Claude Code stream-json:`internal/bridge/claudecode/claudecode.go::SendBlocks` (line 519-622),envelope 在 line 610-621 拼装
+- Pi RPC:`internal/bridge/pi/agent.go::SendBlocks` (line 545),documented at `docs/bridge/pi.md` §6
 - PTY fallback:每 block 一行 text(`@<path>`)或 verbatim text,blocks 之间 `\n` 拼接
 
 ### 关键不变量
@@ -189,7 +189,7 @@ claude 子进程 stdin
 1. **顺序保持**:`[]ContentBlock` 的下标 i 直接对应 `content[i]` 的 wire 位置,中间没有 reordering
 2. **空 slice → noop**:`SendBlocks(nil)` / `SendBlocks([])` 立即返回 nil,不写 envelope
 3. **失败 block 不破坏 array**:skip 的 block 不会替换为 placeholder,而是直接从 `content[]` 剔除(避免 Claude 把"半截 array"误读)
-4. **5 MiB 是 Anthropic API 硬限制**:超过会被 API 拒绝(`bridge/claudecode/session.go:269`),降级为文本引用
+4. **5 MiB 是 Anthropic API 硬限制**:超过会被 API 拒绝(`internal/bridge/claudecode/claudecode.go:547`),降级为文本引用
 
 ---
 
@@ -265,7 +265,7 @@ claude 子进程 stdin
 ## 9. Cross-references
 
 - **ContentBlock 类型定义**：见 [`internal/agent/agent.go`](../../internal/agent/agent.go) §ContentBlock
-- **InboundMessage 形状**：见 [`internal/gateway/messages.go`](../../internal/gateway/messages.go) `InboundMessage`
+- **InboundMessage 形状**：见 [`internal/messages/inbound.go`](../../internal/messages/inbound.go) `InboundMessage`
 - **Receipt card 内容(blocks 怎么渲染到 receipt)**:见 [`../channel/feishu-rendering.md`](./../channel/feishu-rendering.md) §3.1 (Feishu 实现)
 - **InputBuffer blocks 入队**：见 [`../channel/feishu-rendering.md`](./../channel/feishu-rendering.md) §5
 - **Claude Code bridge 怎么 encoding blocks**：见 [`../bridge/claude.md`](./../bridge/claude.md)
@@ -283,13 +283,13 @@ claude 子进程 stdin
 
 > **Depends on**: F-08 (Channel)
 
-> **Related docs**: SPEC.md §1.1 (Channel), [F-08-channel-abstraction.md](./F-08-channel-abstraction.md), [F-gateway.md](./F-gateway.md)
+> **Related docs**: SPEC.md §1.1 (Channel), [F-08-channel-abstraction.md](../feat/F-08-channel-abstraction.md), [SPEC.md](../SPEC.md)
 
 ## 1. Description
 
-Feishu 官方 SDK（`lark-oapi-go/v3`）提供 `registration.RegisterApp` 函数，实现 **OAuth 2.0 Device Authorization Grant (RFC 8628)**：
+Feishu 官方 SDK（`larksuite/oapi-sdk-go/v3`）的 `scene/registration` 子包实现 **OAuth 2.0 Device Authorization Grant (RFC 8628)**：
 
-1. nightme 调 `RegisterApp` → 飞书返回 verification URL + device code
+1. nightme 调 `registration.RegisterApp` → 飞书返回 verification URL + device code
 2. nightme 在终端显示 URL + 二维码
 3. 用户用飞书 App 扫码（或打开 URL）→ 飞书显示授权确认页（含 nightme 请求的 scopes/events）
 4. 用户点确认 → 飞书**自动创建 app** 并把 credentials 返给 nightme
@@ -297,16 +297,16 @@ Feishu 官方 SDK（`lark-oapi-go/v3`）提供 `registration.RegisterApp` 函数
 
 **用户零手动**：不需要去飞书开放平台建 app，不需要复制 app_id/app_secret。
 
-**实现来源**：lark-oapi-go v3 的 `scene/registration` 子包。
+实现落在 `internal/login/`：抽象契约（`Provider` 接口 + `Credentials` + 编排入口 `LoginWith`）在 `internal/login/login.go`，飞书实现（device-authorization flow + 终端 QR 渲染 + CLI 子命令注册）在 `internal/login/feishu/`。
 
 ## 2. Interface
 
 ```go
-// internal/auth/auth.go
-package auth
+// internal/login/login.go
+package login
 
-// Provider is the interface for channel-specific auth flows.
-// only has Feishu;  may add Lark (international) etc.
+// Provider performs a channel-specific interactive login flow and
+// returns credentials suitable for storing in Config.
 type Provider interface {
     // Name returns the channel name (e.g. "feishu", "lark").
     Name() string
@@ -314,142 +314,191 @@ type Provider interface {
     // Login performs the auth flow. Blocks until user completes
     // (or timeout). Returns the credentials for storing in config.
     Login(ctx context.Context) (*Credentials, error)
+
+    // Greet dispatches the canonical NightMe greeting to the user
+    // who just completed the flow. Best-effort: a failure never
+    // rolls back the credential save.
+    Greet(ctx context.Context, messages GreetingMessages) error
 }
 
+// Credentials is the on-disk shape of a successful Login.
+// The fields are channel-specific; providers populate whichever
+// apply and leave the others empty.
 type Credentials struct {
-    AppID     string  // = result.ClientID
-    AppSecret string  // = result.ClientSecret
-    TenantAccessToken string  // optional, for app-only API calls
-    // Metadata from the registration:
-    AppName   string
-    CreatedAt time.Time
+    AppID         string    `json:"app_id,omitempty"`         // Feishu: result.ClientID
+    AppSecret     string    `json:"app_secret,omitempty"`     // Feishu: result.ClientSecret
+    BotToken      string    `json:"bot_token,omitempty"`      // Telegram / Slack / Discord
+    AppToken      string    `json:"app_token,omitempty"`      // Slack app-level token
+    ApplicationID string    `json:"application_id,omitempty"` // Discord OAuth2 application id
+    AppName       string    `json:"app_name,omitempty"`
+    CreatedAt     time.Time `json:"created_at"`
 }
 
-// internal/auth/feishu/feishu.go
-type FeishuAuth struct {
-    // Pre-configured scopes/events the user wants
-    DefaultAddons *registration.AppAddons
-    // Pre-filled app name/description (optional)
-    AppPreset *registration.AppPreset
-    // For update flow: pre-existing AppID
-    ExistingAppID string
-    // For CreateOnly mode (default false)
-    CreateOnly bool
+// Sentinel errors providers wrap so callers can errors.Is-match
+// without depending on the channel SDK.
+var ErrLoginTimeout = errors.New("login timeout")
+var ErrLoginFailed  = errors.New("login failed")
+```
+
+```go
+// internal/login/feishu/provider.go
+package feishu
+
+// Options configures a single login flow run. AppPreset and
+// DefaultAddons are merged with built-in fallbacks in New so
+// callers only need to set what they care about.
+type Options struct {
+    Addons        *registration.AppAddons // nil = DefaultAddons()
+    AppPreset     *registration.AppPreset  // nil = DefaultAppPreset()
+    ExistingAppID string                   // 复用已有 app（update flow）
+    CreateOnly    bool                     // true = 避免 update flow
+    Out           io.Writer                // nil = os.Stdout
 }
 
-func NewFeishuAuth(opts FeishuAuthOptions) *FeishuAuth { ... }
+// Provider is a login.Provider for Feishu.
+type Provider struct { /* ... */ }
 
-func (f *FeishuAuth) Login(ctx context.Context) (*Credentials, error) {
+func New(opts Options) *Provider
+func DefaultAddons() *registration.AppAddons
+func DefaultAppPreset() *registration.AppPreset
+
+func (f *Provider) Name() string { return "feishu" }
+
+func (f *Provider) Login(ctx context.Context) (*login.Credentials, error) {
     result, err := registration.RegisterApp(ctx, &registration.Options{
-        AppID:      f.ExistingAppID,  // empty = create new
-        CreateOnly: f.CreateOnly,
-        Addons:     f.DefaultAddons,
-        AppPreset:  f.AppPreset,
-        OnQRCode: func(info *registration.QRCodeInfo) {
-            // Display URL + render QR in terminal
-        },
-        OnStatusChange: func(info *registration.StatusChangeInfo) {
-            // Print polling status
-        },
+        AppID:      f.opts.ExistingAppID,
+        CreateOnly: f.opts.CreateOnly,
+        Addons:     f.addons,
+        AppPreset:  f.preset,
+        OnQRCode:       func(info *registration.QRCodeInfo) { f.printQRCode(info) },
+        OnStatusChange: func(info *registration.StatusChangeInfo) { f.printStatus(info) },
     })
     if err != nil {
+        if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+            return nil, fmt.Errorf("feishu: %w: %v", login.ErrLoginTimeout, err)
+        }
         var regErr *registration.RegisterAppError
         if errors.As(err, &regErr) {
-            return nil, fmt.Errorf("register app failed: %s - %s", regErr.Code, regErr.Description)
+            return nil, fmt.Errorf("feishu: %w: %s: %s", login.ErrLoginFailed, regErr.Code, regErr.Description)
         }
-        return nil, err
+        return nil, fmt.Errorf("feishu: register: %w", err)
     }
-    return &Credentials{
+    // ... 捕获 owner OpenID（供 Greet 用）+ 建 lark.Client ...
+    return &login.Credentials{
         AppID:     result.ClientID,
         AppSecret: result.ClientSecret,
-        AppName:   "nightme",  // 来自 AppPreset.Name
+        AppName:   f.preset.Name,
         CreatedAt: time.Now(),
     }, nil
 }
-
-func (f *FeishuAuth) Name() string { return "feishu" }
 ```
+
+`Login` 只负责拿凭证 + 捕获 owner 身份；问候消息由 CLI 编排器在 config 落盘成功之后调 `Provider.Greet` 发出。
 
 ## 3. Implementation
 
 **文件结构**：
 ```
-internal/auth/
-├── auth.go                       # Provider interface + Credentials
+internal/login/
+├── login.go                       # Provider interface + Credentials + ProviderBuilder registry + LoginWith
+├── greeting.go                    # GreetingBody / GreetingMessages / GreetingTexts
 └── feishu/
-    ├── feishu.go                 # FeishuAuth 实现
-    ├── feishu_test.go            # 单元测试
-    └── qrencode.go               # 终端 QR 渲染
+    ├── provider.go                # Provider 实现（Login / Greet / DefaultAddons / DefaultAppPreset）
+    ├── provider_unix.go           # renderQRPlatform（!windows）
+    ├── provider_windows.go        # renderQRPlatform（windows）
+    ├── qrencode.go                # QR 编码参数（qrcodeErrorLevel = qrcode.Medium）
+    ├── qrencode_unix.go           # RenderASCII（Unicode 半块）
+    ├── qrencode_windows.go        # RenderANSI + WritePNGToDesktop
+    └── register.go                # init() 注册 `nightme login feishu`
 
 cmd/nightme/
-└── login.go                      # `nightme login feishu` 子命令
+└── login.go                       # `nightme login <channel>` 子命令树
 ```
 
-**新增依赖**：
+**依赖**：
 - `github.com/skip2/go-qrcode` — 终端 QR 渲染（ASCII 字符）
+- `github.com/larksuite/oapi-sdk-go/v3/scene/registration` — device-authorization flow
+
+**注册与调用链**：
+
+- `internal/login/feishu/register.go::init()` 调 `login.RegisterProvider("feishu", builder)`，builder 返回一个 `nightme login feishu` 的 cobra 子命令（`--timeout` flag，默认 10 分钟）
+- `cmd/nightme/login.go` blank-import `internal/login/feishu`，保证进程启动时 `init()` 跑完；`newLoginCmd()` 遍历 `login.AvailableChannels()` 把各 provider 的子命令挂到 `nightme login` 下
+- `login.LoginWith(ctx, provider, out, errOut)` 是所有 channel 共用的编排入口：调 `provider.Login` → 按 `provider.Name()` 把凭证映射到对应 config 段 → `config.SaveDefault` 落盘 → `provider.Greet` 发问候 → 打印成功摘要
 
 **`nightme login feishu` CLI 流程**：
 ```
 $ nightme login feishu
-[nightme] requesting Feishu authorization...
-
 Scan this QR code with Feishu mobile, or open this URL:
 https://accounts.feishu.cn/oauth2/...   (expires in 600 seconds)
 
 [QR CODE]
 
-polling...
-status: polling, next check in 5s
-status: polling, next check in 5s
+Waiting for you to scan and confirm in Feishu...
+Sending 2 greeting DM(s)...
 ✓ App registered successfully!
-  App ID:     cli_xxxx
-  App Name:   nightme
-  Scopes:     im:message:send_as_bot, im:message:receive_v1
-  Credentials saved to: ~/.nightme/config.yaml (chmod 0600)
+  App ID:    cli_xxxx
+  App Name:  NightMe
+  Saved to:  /home/user/.nightme/config.yaml
 
-Next: run `nightme run` to start the gateway.
+Next: run `nightme start` to launch the gateway daemon.
 ```
 
-**预配置的 scopes/events**（nightme 必须的最小集）：
+**预配置的 scopes/events**（`DefaultAddons()` 申请的全集）：
 
 | 类型 | 名称 | 用途 |
 |------|------|------|
 | Scope (tenant) | `im:message:send_as_bot` | bot 发消息 |
-| Scope (tenant) | `im:message:receive_v1` (event) | 接收消息 |
-| Scope (tenant) | `im:message:readonly` | 下载消息资源 (F-14 接收图片/文件/音视频) |
-| Scope (tenant) | `im:message.reactions:write_only` | 在用户消息上加 reaction emoji (F-25 receipt) |
-| Scope (tenant) | `im:message.group_at_msg:readonly` | 群消息 @ 提及（为 Feishu 侧 server-side filter 保留）|
-| Scope (tenant) | `im:message.group_msg`（**F-watch，默认包含**） | 接收群聊全部消息；由 nightme 侧 `WatchMode` gate 决定处理还是 drop。**不带 `:readonly`** —— bot 需要回复到群里 |
+| Scope (tenant) | `im:message:update` | 更新/编辑已发出的消息（`UpdateMessage`）|
+| Scope (tenant) | `im:message:receive_v1` | 接收消息 |
+| Scope (tenant) | `im:message.reactions:write_only` | 在用户消息上加 reaction emoji（receipt 状态）|
+| Scope (tenant) | `im:message.reactions:read` | 读已有 reaction |
+| Scope (tenant) | `im:message:readonly` | 拉历史消息 + 下载入站附件资源（F-14）|
+| Scope (tenant) | `im:message.group_at_msg:readonly` | 群消息 @ 提及触发 |
+| Scope (tenant) | `im:message.group_msg`（**默认包含**） | 接收群聊全部消息；由 nightme 侧 `WatchMode` gate 决定处理还是 drop。**不带 `:readonly`** —— bot 需要回复到群里 |
+| Scope (tenant) | `im:message.p2p_msg:readonly` | 单聊触发 |
+| Scope (tenant) | `im:message.pins:read` / `im:message.pins:write_only` | 读/写置顶状态 |
+| Scope (tenant) | `im:message:recall` | 撤回 bot 发出的消息 |
+| Scope (tenant) | `im:message:send_multi_users` / `im:message:send_sys_msg` | 批量 DM / 系统通知 |
+| Scope (tenant) | `im:resource` | 上传图片/文件 |
+| Scope (tenant) | `im:chat:read` / `im:chat:update` | 读/改群资料（名称 / 话题）|
+| Scope (tenant) | `im:chat.members:bot_access` | 读 bot 所在群的成员列表 |
+| Scope (tenant) | `contact:contact.base:readonly` | 查用户基础信息（昵称 / 头像）|
+| Scope (tenant) | `cardkit:card:write` / `cardkit:card:read` | 创建/更新交互卡片、读卡片状态 |
+| Scope (tenant) | `application:application:self_manage` | 自查 app 自身已授权 scope（诊断用）|
 | Event | `im.message.receive_v1` | 收消息事件 |
+| Callback | `card.action.trigger` | 交互卡片按钮点击（权限卡按钮靠它才有响应）|
 
 **Credentials 持久化**：
-- 写入 `~/.nightme/config.yaml` 的 `feishu.app_id` / `feishu.app_secret` 顶层字段
-- 文件权限 0600
-- 原子写（temp + rename，跟 registry 一样）
+- `login.LoginWith` 按 `provider.Name()` 分发：`feishu` → `cfg.Feishu.AppID` / `cfg.Feishu.AppSecret`
+- 落盘字段是 `~/.nightme/config.yaml` 的 `feishu.app_id` / `feishu.app_secret`
+- `config.SaveDefault` 原子写（temp file + rename）；目录 0700，文件 chmod 0600
+- 落盘失败时把 in-memory credential 打到 stderr（`app_id` / `app_secret`），提示用户手动粘贴进 config.yaml
 
 **single-account**：nightme 只支持一个飞书 app（一个 CLI / 进程一个 app）。多 account 场景后续。
 - 如果 需要 multi-account，再重构为 `channels.feishu.accounts.<name>.{app_id, app_secret}` 嵌套结构
 - 届时 `F-08 Channel` 也要扩展为支持多 instance
 
-**Manual 模式 fallback**：
-- config 里已有 `appId` / `appSecret` → `nightme login feishu` **直接覆盖**（rebind 即 login，无 `--force` flag）。这是升级 scope（如新增 `im:message.reactions:write_only`）的标准操作流程。
+**Rebind 语义**：
+- config 里已有 `app_id` / `app_secret` → `nightme login feishu` **直接覆盖**。这是升级 scope（如新增 `im:message.reactions:write_only`）的标准操作流程。
 - 无需 `--force`，登录动作本身就是强制重新绑定。
 
 ## 4. Edge cases
 
 | 场景 | 处理 |
 |------|------|
-| 用户在 10 分钟内没扫码 | context timeout → 报错 "auth timeout" |
-| QR 扫描后飞书显示"权限不足" | 飞书返回 error code → nightme 提示用户检查企业权限 |
-| 凭证写到 config 失败（disk full / permission） | 保留 in-memory credential，提示用户手动复制到 config |
-| config 已有 appId | **直接覆盖**（login 即 rebind），无需 `--force` |
+| 用户在 10 分钟内没扫码 | `--timeout` 到期 → context deadline exceeded → 包装成 `login.ErrLoginTimeout` |
+| QR 扫描后飞书显示"权限不足" | 飞书返回 error code → `*registration.RegisterAppError` → 包装成 `login.ErrLoginFailed`（带 code + description）|
+| 凭证写到 config 失败（disk full / permission） | 保留 in-memory credential 并在 stderr 打印，提示用户手动复制到 config |
+| config 已有 app_id | **直接覆盖**（login 即 rebind），无需 `--force` |
 | 用户选了不存在的 tenant | 飞书返回 error，nightme 透传 |
-| Lark (international) vs Feishu (国内) | 自动检测 `tenant_brand`，用对应 `LarkDomain` 或 `Domain`（SDK 自动处理）|
-| 注册时网络断 | ctx timeout → 报错，下次重试无需重新写 config |
-| 用户想看当前凭证 | 直接 `cat ~/.nightme/config.yaml`（无 status 命令；用户可读 config）|
+| Lark (international) vs Feishu (国内) | SDK 按 `tenant_brand` 自动选 `LarkDomain` 或 `Domain`；切换时打印 "Switched to Lark international domain." |
+| 注册时网络断 | ctx 超时 → `login.ErrLoginTimeout`，重跑即可，不需重写 config |
+| SDK 没有回传 user_info | owner OpenID 为空 → `Greet` 跳过（不发问候），凭证照常写入 |
+| 问候 DM 发送失败 | best-effort：stderr 打印 warning，登录流程仍算成功 |
+| 用户想看当前凭证 | 直接 `cat ~/.nightme/config.yaml`（无 status 子命令；用户可读 config）|
 | 用户想撤销 app | 文档说明需要去飞书开放平台手动撤销 + 删 config |
-| `--update` 模式 | 用 `Options.AppID` 走 update flow，重新授权现有 app |
-| 升级 scope（如新增 reaction scope） | 重新跑 `nightme login feishu`，飞书重新创建 app，新凭证覆盖 config |
+| `--update` 模式 | 用 `Options.ExistingAppID` 走 update flow，重新授权现有 app |
+| 升级 scope（如新增 reaction scope） | 重新跑 `nightme login feishu`，新凭证覆盖 config |
 | DM 中 `/watch` 为 no-op | DM chat_type 下 `HasMention` 永远 true，`/watch on/off` 状态正常写入但不影响消息处理 —— DM 消息全收，与模式无关 |
 
 ## 5. 验收流程
@@ -459,30 +508,37 @@ Next: run `nightme run` to start the gateway.
 3. 用飞书 App 扫码
 4. 飞书显示"nightme 申请 X 权限"
 5. 点确认
-6. 终端 ✓ + config 自动更新
-7. `nightme run` → 飞书 round-trip 工作
+6. 终端 ✓ + config 自动更新 + 收到问候 DM
+7. `nightme start` → 飞书 round-trip 工作
 
 **全部不需要去飞书开发者后台**。
 
 ## 6. Test plan
 
-**单元测试**（用 mock SDK）：
-- `TestFeishuAuth_Login` 模拟注册成功 → 验证返回 credentials
-- `TestFeishuAuth_LoginTimeout` 模拟 context cancel → 验证返回 error
-- `TestFeishuAuth_LoginError` 模拟飞书返回 error code → 验证 error wrapping
-- `TestWriteCredentials_Atomic` 验证 config 写入是原子的 + 0600 权限
-- `TestLogin_AlwaysRebinds` 验证重新 login 时无条件覆盖现有凭证（无 `--force` flag）
+**`internal/login`（抽象层）**：
+- `TestProvider_Interface` / `TestProvider_Name_And_Login` — Provider 契约
+- `TestCredentials_JSON` — Credentials 序列化
+- `TestErrors_AreDistinct` — `ErrLoginTimeout` / `ErrLoginFailed` 可区分
+- `TestLoginWith_DispatchesByProviderName` — 凭证按 provider 名落到对应 config 段
+- `TestLoginWith_UnknownProvider_FailsFast` / `TestLoginWith_NilProviderErrors` / `TestLoginWith_AcceptsDiscardWriters`
+- `TestRegistry_AvailableChannels_Alphabetical` / `TestRegistry_GetBuilder_KnownAndUnknown` / `TestRegistry_RegisterProvider_OverwritesOnDuplicate`
 
-**集成测试**（需要 mock registration.RegisterApp）：
-- `TestLogin_Success` 模拟整个 QR flow → config 写入正确
-- `TestLogin_ProviderError` 验证 provider 失败时错误透传（无凭证写入磁盘）
+**`internal/login/feishu`（飞书实现）**：
+- `TestProvider_Name` — provider 名 = `feishu`
+- `TestDefaultAddons_ContainsRequiredScopes` — 申请到的 scope 集合
+- `TestNew_FillsDefaults` / `TestDefaultAppPreset` — 默认 preset / addons
+- `TestPrintStatus_FriendlyMessages` — 状态回调的文案
+- `TestBuildPostEnvelope_BothLocales` / `TestBuildPostEnvelope_QuoteSafety` — 问候 post 信封（`zh_cn` + `en_us`）
+- `TestProvider_Greet_NoSendDM_Skips` / `_EmptyMessages` / `_ForwardsAllBodies` / `_PropagatesErrorAndStops` / `_DetachedContext` — 问候发送语义
+- `TestPrintQRCode_WritesURLAndQR` — QR + URL 输出（Unix / Windows 各一份）
+- `TestQrencode_Renders` / `TestQrencode_EmptyInput` / `TestRenderANSI` / `TestRenderANSI_EmptyInput` / `TestWritePNGToDesktop` / `TestWritePNGToDesktop_EmptyInput` — QR 渲染
 
 **E2E（手动）**：
 - 在真实飞书账号上跑 `nightme login feishu`
 - 验证 QR 显示
 - 用飞书 App 扫
 - 验证 config 写入
-- 跑 `nightme run` 验证 round-trip
+- 跑 `nightme start` 验证 round-trip
 
 ## 7. 与现有功能的关系
 
@@ -491,6 +547,7 @@ Next: run `nightme run` to start the gateway.
 | F-08 Channel Abstraction | 依赖 F-22：Channel 用 F-22 拿到的 credentials 工作 |
 | F-20 Gateway | 独立——Gateway 路由 slash command，不涉及 auth |
 | 现有 `internal/config/` | F-22 写入 config.yaml 的 `feishu.app_id` / `feishu.app_secret` 顶层字段（chmod 0600）|
+| 其他 channel（telegram / slack / discord）| 同一套 `login.Provider` 契约，各自带一个 `internal/login/<channel>/` 包 |
 
 **对 F-08 的影响**：
 - F-08 Channel 启动时读 `feishu.app_id` / `feishu.app_secret` 顶层字段
@@ -498,32 +555,20 @@ Next: run `nightme run` to start the gateway.
   1. `nightme login feishu`（F-22 写入）✅ 推荐
   2. 手动编辑 config.yaml
 
-## 8. 实施顺序
+## 8. 注意事项
 
-| 阶段 | 任务 | 估时 |
-|------|------|------|
-| M2 PR #4 | F-22 实施（auth package + CLI）| 2-3 commits |
-| M2 PR #4 | F-08 Channel adapter 实施（lark-oapi-go 长连接）| 3-4 commits |
-| M2 PR #5 | 飞书 round-trip 集成 | 3-4 commits |
-
-PR #4 内部先做 F-22，再做 F-08（让 F-08 测试时用 F-22 拿到的真凭证）。
-
-## 9. 注意事项
-
-- **lark-oapi-go v3 必需**：v3 的 `registration` 是新增的，v1/v2 没有
-- **二维码显示**：用 `skip2/go-qrcode` 输出到 stdout（黑底白字）
-- **超时默认 10 分钟**：context.WithTimeout，可通过 flag 调整
+- **lark-oapi-go v3 必需**：`scene/registration` 子包只在 v3 有，v1/v2 没有
+- **二维码显示**：Unix 走 `skip2/go-qrcode` 的 `RenderASCII`（Unicode 半块字符）；Windows 走 `RenderANSI`（24-bit ANSI 色），legacy conhost 再降级到桌面 PNG
+- **超时默认 10 分钟**：`--timeout` flag 可调，超时包装成 `login.ErrLoginTimeout`
 - **不要打印 ClientSecret 到日志**：log 时 redact
 - **不存储 secret 到任何 log 文件**
 
-## 10. Open questions (resolved)
+## 9. Open questions
 
-- Lark (国际版) 是否用相同 SDK？倾向：同 SDK，自动检测 tenant_brand
-- ~~多 tenant 支持（一个 nightme 跑多个飞书 app）？不支持，考虑~~ — **2026-07-31 决议：明确 single-account，不预留 multi-account 结构。需要时重构为 `channels.feishu.accounts.<name>.{...}`。**
+- Lark (国际版) 是否用相同 SDK？同 SDK，SDK 自动检测 tenant_brand
+- 多 tenant 支持（一个 nightme 跑多个飞书 app）？不支持 —— single-account，不预留 multi-account 结构；需要时重构为 `channels.feishu.accounts.<name>.{...}`
 - 用户拒绝授权后如何清理（feishu 侧是否残留）？飞书只授权后才会创建 app，拒绝则不创建，无需清理
 - 是否支持 `nightme login export feishu` 输出可分享的 env var？考虑
-- 与 M2 现有计划的 conflicts：原 M2 假设 manual setup，新增 F-22 是增量（向后兼容）
 - registry vs config：F-22 凭证存 config.yaml（用户可读可改），不是 registry（机器管理的 runtime state）
 
 ---
-

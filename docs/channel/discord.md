@@ -1,6 +1,6 @@
 # Discord Channel - 接入设计与实现
 
-> **Scope**: nightme Discord Bot 适配器（`internal/channel/discord/*`）+ 登录提供器（`cmd/nightme/login_discord.go`）
+> **Scope**: nightme Discord Bot 适配器（`internal/channel/discord/*`）+ 登录提供器（`internal/login/discord/`）
 > **Goal**: 用 Discord Gateway v10 + REST v10 承载 per-chat 会话，对齐 nightme 已有的 `OutboundKind` / `OutboundMessage` 契约。
 > **Related docs**:
 >
@@ -8,7 +8,7 @@
 > - [telegram.md](./telegram.md) - Telegram 适配器（**F-61 attachment retry 的对照**）
 > - [feishu-reliability.md](./feishu-reliability.md) - 重试 / 限流 / WS 重连分层
 > - [F-08-channel-abstraction.md](../feat/F-08-channel-abstraction.md) - Channel 抽象与 Gateway 边界
-> - [F-message-flow.md](../feat/F-message-flow.md) - 消息生命周期
+> - [F-53-message-prompt-lifecycle.md](../feat/F-53-message-prompt-lifecycle.md) - 消息生命周期
 > - [SPEC.md](../SPEC.md) - 统一消息模型
 >
 > **Discord 官方文档**:
@@ -207,7 +207,7 @@ Discord CDN URL 无需认证（每个 URL 独立签名）；`httpREST.Download(c
 - **纯图消息**（`inbound.Text == ""`）：不 publish 到 `a.incoming`（避免幽灵消息进 dispatcher），改发 `OutError` 通知："❌ N attachment(s) failed to download after 3 attempts. Message dropped — please retry."。
 - **文本 + 附件**：publish text-only（`inbound.Attachments = nil`），同时发 `OutError` 通知："⚠️ N attachment(s) failed to download after 3 attempts; sending text only."。
 
-通知用 `context.Background()` 起 fresh ctx —— F-61 复盘确认根因就是复用已 cancel 的 inbound ctx。`AttachmentDownloadFailures` 计数器 `+1`（HealthSnapshot §10）。
+通知用 `context.Background()` 起 fresh ctx —— F-61 复盘确认根因就是复用已 cancel 的 inbound ctx。`AttachmentDownloadFails` 计数器 `+1`（HealthSnapshot §10）。
 
 ## 10. Reactions（append-only）
 
@@ -234,14 +234,14 @@ Phase 1 / Phase 2 / Phase 3 联合验收：
 5. **Login 流程**：`nightme login discord` 引导完整 OAuth + intents 启用。
 6. **Gateway lifecycle**：Hello / Heartbeat / Identify / Resume 状态机正确；session_id + last_seq 持久化；close code 4014 / 4013 / 4004 → `gw.run` 返回 terminal error（**不进入无限重连**）。
 7. **Rate limit**：X-RateLimit-* 头解析；50 req/s global cap；per-route bucket keyed on `X-RateLimit-Bucket`。
-8. **Attachment retry**：3-attempt ladder 0/5/15 s；total failure 发一次 `OutError`（或 drop pure-image）；`AttachmentDownloadFailures` 计数器累加。
+8. **Attachment retry**：3-attempt ladder 0/5/15 s；total failure 发一次 `OutError`（或 drop pure-image）；`AttachmentDownloadFails` 计数器累加。
 9. **HealthSnapshot**：返回 enriched payload 含 `reconnect_count` / `last_event_unix_ts` / `last_close_code` / `last_reconnect_unix_ts` / `attachment_download_failures_total`。
 10. **Tests**：`go test -race ./internal/channel/discord/...` 全绿；不存在 `-short` 跳过；`make build` / `make fmt` / `make lint` 全绿。
 
 ## 12. Known limits
 
 - **Voice / Activity / Rich Presence**：nightme 不发送 voice state、activity、presence。Bot 仅以 `online` 默认 presence 在线。
-- **Slash Commands**：nightme 不注册 Discord slash commands；用户发的 `/cwd` `/use` `/clear` 等由 `computeHasMention`（`adapter.go`）通过 `HasMention` 标记为 addressed，由 runtime 解析。`APPLICATION_COMMANDS` intent 在 `DefaultIntents` 外，按需开启。
+- **Slash Commands**：nightme 不注册 Discord slash commands；用户发的 `/cwd` `/use` `/clear` 等由 `computeHasMention`（`adapter.go`）通过 `HasMention` 标记为 addressed，由 runtime 解析。`APPLICATION_COMMANDS` intent 在 `defaultDiscordIntents` 外，按需开启。
 - **Pin / Unpin**：Discord 有 `pin_message` / `unpin_message` REST，nightme 不调用。
 - **Polls**：Discord 的 polls API 不可用；runtime 的 `OutPoll`（若有）会走 default 静默丢弃分支。
 - **Multi-shard**：单 bot / 单 daemon。>2 500 guild 需要 Discord 强制 sharding，超出 nightme 当前架构。Operator 配置 bot 数量受限于 1。
@@ -258,4 +258,4 @@ Phase 1 / Phase 2 / Phase 3 联合验收：
 
 ---
 
-文档对应源代码版本：`feat-discord-phase-3-reconnect-health-docs` 分支起点（Phase 2 PR #411 之后）。所有行为以本仓库代码为准；任何 Discord 官方文档与本仓库实现的差异以代码为准。
+所有行为以本仓库代码为准；任何 Discord 官方文档与本仓库实现的差异以代码为准。

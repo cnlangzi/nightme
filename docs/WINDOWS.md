@@ -3,7 +3,7 @@
 > **目的**：nightme 的 bridge 层在 Windows 上有 4 个跨 CLI 的陷阱（env 格式、.cmd/.bat shim、argv quoting、信号语义），单独踩一次排查成本极高。本文把这些坑 + 修复 + 测试方法一次性沉淀下来。
 > **关联文档**：
 > - bridge 层协议细节 → [`bridge/`](./bridge/)
-> - 单 CLI 实测约定 → [`bridge/CLAUDE.md`](./bridge/CLAUDE.md) §7（真机 vs mock）、§9（代码锚点）
+> - 单 CLI 实测约定 → [`bridge/claude.md`](./bridge/claude.md) §7（真机 vs mock）、§9（代码锚点）
 
 ## 0.0 跨平台经验规则（fix-stop 沉淀）
 
@@ -243,7 +243,7 @@ lpCommandLine     = cmd /d /c "<resolved>" <args...>
 | **真机**（spawn 真实 cli） | stream-json、resume、多轮 stdin、env 行为 | **必须** `requireReal<Name>(t)` |
 | **Mock**（`testdata/*.sh` / `.py`） | argv / 解析 / 协议单测 | **不要** skip — CI 必跑 |
 
-参考 [`bridge/CLAUDE.md §7.1`](./bridge/CLAUDE.md) 的真机守卫 pattern。
+参考 [`bridge/claude.md §7.1`](./bridge/claude.md) 的真机守卫 pattern。
 
 ### 4.2 Windows 上必须覆盖的真机场景
 
@@ -358,7 +358,7 @@ err := cmd.Start() // ✅ nil
 
 ## 6. 调试 checklist（Windows）
 
-> 复制 [`bridge/CLAUDE.md §8`](./bridge/CLAUDE.md) 之后追加。
+> 复制 [`bridge/claude.md §8`](./bridge/claude.md) 之后追加。
 
 按顺序排除：
 

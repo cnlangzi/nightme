@@ -1,6 +1,6 @@
 // lifecycle.go — process management for the shared dsh web daemon.
 //
-// In the shared-host architecture (F-dsh-shared-host), exactly ONE
+// In the shared-host architecture (docs/bridge/dsh.md), exactly ONE
 // `dsh --profile web` subprocess serves every ChatSession. This
 // file owns the lifecycle; the rest of the package (client.go,
 // stream.go, router.go) talks to dsh over HTTP + WebSocket.

@@ -196,7 +196,7 @@ var standardRegistry = newRegistry(map[string]eventHandler{
 	"approval/asked":    handleApprovalAsked,   // session/event echo; mux approval/requested is the respondable gate
 	"approval/decided":  handleApprovalDecided, // host/dashboard settled the gate; emit PermissionSettled
 
-	// F-dsh-shared-host §5: 9 new event types discovered during
+	// docs/bridge/dsh.md: 9 new event types discovered during
 	// the 2026-08-16 mux-demux probe against dsh 0.1.0-rc.6.
 	// Most are debug-only — they describe internal dsh state that
 	// the runtime doesn't surface but operators want to see in
@@ -809,7 +809,7 @@ func handleApprovalDecided(env sessionEventEnvelope, view json.RawMessage, tr *t
 	}}
 }
 
-// ─── F-dsh-shared-host §5 new event handlers ────────────────────────
+// ─── new event handlers (see docs/bridge/dsh.md) ───────────────────
 //
 // Most of these types dsh emits as part of its own bookkeeping and
 // are interesting to /diagnose but should NOT bubble up to the

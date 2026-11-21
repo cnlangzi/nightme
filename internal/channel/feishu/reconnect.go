@@ -21,7 +21,7 @@
 // burn CPU. The SDK's internal 2min default remains as a final
 // fallback in case the prober goroutine itself dies.
 //
-// See docs/feat/F-41-active-reconnect.md for design rationale.
+// See docs/channel/feishu.md for design rationale.
 package feishu
 
 import (

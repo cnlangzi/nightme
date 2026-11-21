@@ -12,43 +12,50 @@ When the user runs `nightme start`, the forked `_daemon` process
 installs a system-tray (notification-area / menu-bar) icon on the
 user's desktop.
 
-> **Platform availability.** The tray is always built in on macOS
-> and Windows. On **Linux it is opt-in** via `-tags gui` and absent
-> from the default build — see §7 for why. Everything below
-> describes the tray-enabled build.
+> **Platform availability.** The tray is built in on macOS and
+> Windows. On **Linux it is opt-in** via `-tags gui` and absent
+> from the default build — see §7 for why. The `darwin/amd64`
+> release artifact is built with `-tags notray` (CGo is disabled on
+> that cross-compile), so it carries no tray either. Everything
+> below describes the tray-enabled build.
 
-The icon carries a menu that mirrors the cobra
-subcommand tree and the REPL `Common:` list, with three primary
-items that are most useful as click actions:
+The menu is hand-grouped in `cmd/nightme/tray_gui.go` — the
+sub-command groups are not a mirror of the cobra tree:
 
 ```
 NightMe (icon)
-├─ ⓘ Status: running · feishu                  [disabled info row]
+├─ 🟢  NightMe[<name>] v<version> is running  [disabled info row]
 ├─ ──────────────
-├─ ▶  Open REPL         (spawn a new terminal)
-├─ ⟳  Restart           (v1 = stop; see §6)
-├─ ■  Stop              (SIGTERM → graceful shutdown)
+├─ >_  Console                (spawn a terminal running `nightme`)
 ├─ ──────────────
-├─ ▸  Commands          (submenu; mirrors REPL banner order)
-│     ├─ list
-│     ├─ kill
-│     ├─ agents
-│     ├─ name
-│     ├─ clean
-│     └─ version
+├─ Logs >       logs / clean
+├─ Sessions >   list / kill
+├─ Config…
+├─ About >      agents / doctor
 ├─ ──────────────
-└─ ✕  Quit              (Stop + release tray)
+├─ ⓘ  Download Update        (hidden unless a newer release exists)
+├─ ↻  Restart
+└─ ⏻  Quit
 ```
 
-Hidden cobra commands (`_daemon`) and TTY-bound commands
-(`test`, `login`, `logs`, `config`, `update`, `debug`) are
-filtered out by `cmdRegistry.addNoTray` so the menu never
-carries a click that would either block the event loop (PTY,
-log tail, interactive prompts) or read stdin (`debug`).
-Lifecycle commands (`start`, `stop`, `restart`, `status`)
-also use `addNoTray` because the menu has its own primary
-items for the same verbs; the submenu would invite a
-double-click race.
+The status row carries the daemon's configured instance name
+(`config.EffectiveName`) and the compiled-in version, so a user with
+two daemons can tell them apart at a glance.
+
+Every item in the `Logs` / `Sessions` / `About` submenus, plus
+`Console` and `Config…`, opens a **real terminal window** running
+the matching subcommand (`proc.OpenTerminal(ctx, "nightme",
+"<cliTitle>")`). A terminal is used rather than an in-process
+dispatch because these commands are interactive — they tail a log,
+they read a table, they open a menu.
+
+`cmdRegistry.addNoTray` keeps the TTY-bound commands (`test`,
+`login`, `logs`, `me`, `workflow`) and the lifecycle commands
+(`start`, `status`, `stop`, `restart`) out of the REPL banner's
+tray twin, so the tray never carries a click that would either
+block the event loop (PTY, log tail, interactive prompts) or
+duplicate a primary item. `config` and `update` are ordinary
+`reg.add()` commands and are reachable from the tray.
 
 ---
 
@@ -59,22 +66,30 @@ on a per-OS native event loop (and on macOS must run on the
 main thread — Cocoa's NSApp). The two cannot share a
 goroutine.
 
-`runTrayOwning` (cmd/nightme/tray.go) flips the model:
+`runTrayOwning` (cmd/nightme/tray_gui.go) flips the model:
 
 - The daemon runtime runs in a background goroutine.
 - `systray.Run` occupies the calling thread (main thread
   on macOS where cobra dispatches the `_daemon` subcommand).
 - The two exit paths are coupled by a single shared error
-  variable and `systray.Quit()`. The watcher goroutine that
+  channel and `systray.Quit()`. The watcher goroutine that
   sees the runtime return calls `systray.Quit`; the
   `systray.Run` block returns, the function reads the
   runtime's exit code, and `runDaemonChild` returns it as
   its own error.
 
 `runDaemonChild` in `daemon_lifecycle_{unix,windows}.go`
-now invokes `runTrayOwning` in place of `runRunWith`. On
+invokes `runTrayOwning` in place of `runRunWith`. On
 Linux/Windows the flip is cosmetic (systray can run on any
 thread); on macOS it is mandatory (Cocoa refuses otherwise).
+
+`runTrayOwning` short-circuits to `runRunWith` when
+`isHeadless()` reports no GUI session (`tray_headless_linux.go`
+on Linux, `tray_headless_other.go` elsewhere) — GTK cannot open a
+display, so the tray is skipped instead of crashing the daemon.
+A `recover()` around `systray.Run` catches the cases the
+detection misses (X server dies mid-run, partial init panic) and
+leaves the daemon running without the tray UI.
 
 ---
 
@@ -83,50 +98,47 @@ thread); on macOS it is mandatory (Cocoa refuses otherwise).
 Each click handler runs in systray's event goroutine, NOT
 the main thread. Handlers must not block the event loop:
 
-- **Open REPL** dispatches to `openrepl.Open()` (see §4)
-  in a goroutine and returns immediately.
-- **Restart** / **Stop** / **Quit** invoke a callback
-  passed in via `trayOptions`. Production default for all
-  three is `onStopRequestDefault`, which sends SIGTERM to
-  the current process. The runtime's signal channel picks
-  it up; graceful shutdown runs; the runtime returns; the
-  watcher goroutine calls `systray.Quit`; `systray.Run`
-  returns. See §6 for why v1 merges Restart with Stop.
-- **Commands** submenu items invoke
-  `internal/tray.Invoke(item.Command)` in a goroutine.
-  `Invoke` re-dispatches a `*cobra.Command` synchronously
-  via `cmd.RunE(cmd, nil)`, redirecting stdout/stderr to
-  `io.Discard` and restoring them afterwards.
+- **Console** / **Config…** / the sub-menu items call
+  `proc.OpenTerminal` in a goroutine and return immediately.
+- **Restart** / **Quit** invoke a callback passed in via
+  `trayOptions`. The Unix default for Quit is `onStopRequestDefault`
+  (SIGTERM to the current process); the Unix default for Restart
+  is `onRestartRequestDefault` (see §6). The runtime's signal
+  channel picks the stop up; graceful shutdown runs; the runtime
+  returns; the watcher goroutine calls `systray.Quit`;
+  `systray.Run` returns.
+- **Download Update** opens a terminal running `nightme update`.
 
-A 500ms debounce window (`trayDebounce` in
-`cmd/nightme/tray.go`) drops the second click on the same
-primary item. macOS touchpads in particular can register
-3-4 clicks from a single user gesture; without the
-debouncer, a single user action would spawn 3-4 REPL
-windows or send 3-4 SIGTERMs. `openrepl` has its own
-1-second debouncer for the same reason on its own click.
+A 500ms debounce window (`trayDebounce` in `cmd/nightme/tray.go`)
+drops the second click on the same menu item. macOS touchpads in
+particular can register 3-4 clicks from a single user gesture;
+without the debouncer, a single user action would spawn 3-4
+terminal windows or send 3-4 SIGTERMs. Each item carries its own
+`clickTracker`, so a click on one item never suppresses a click on
+another.
 
 ---
 
-## 4. Open REPL (`internal/tray/openrepl`)
+## 4. Opening a terminal (`internal/proc`)
 
-Spawns a fresh terminal window that runs `nightme` (bare
-invocation → REPL mode).
+`proc.OpenTerminal(ctx, name, args...)` spawns a fresh terminal
+window that runs the nightme binary with the given arguments.
+The binary is resolved through `os.Executable()`, not
+`exec.LookPath`, so a `go install`-style install outside `$PATH`
+works.
 
 | OS | Recipe |
 |----|--------|
-| macOS | AppleScript-driven Terminal.app, or iTerm2 if installed. iTerm2 is checked first because it supports `create window with default profile command`. Last-resort: `open -a Terminal` via Launch Services for machines where AppleScript is locked down. |
-| Linux | Probe `gnome-terminal / konsole / alacritty / kitty / xfce4-terminal / lxterminal / mate-terminal / xterm / foot / wezterm` in preference order; first one on `$PATH` wins. |
-| Windows | `cmd /c start "NightMe REPL" cmd /k nightme.exe`. Routed through `exec.Command` directly (NOT `proc.New`) because the user is asking for a visible terminal and `CREATE_NO_WINDOW` would defeat that. |
+| macOS | AppleScript-driven Terminal.app (`do script`), then maximise the window (`set zoomed of front window to true`), activate Terminal and bring it to the front via System Events. Terminal.app only — iTerm2 is not tried: its `create window with default profile command` does not hand the string to a shell but tokenizes it on whitespace, so a command like `nightme kill` arrives as the argument `kill;`. The spawned shell command is suffixed with `; echo ; printf 'press enter to close\n' ; read dummy` so the window survives the command's exit. |
+| Linux | Probe `gnome-terminal / konsole / alacritty / kitty / xfce4-terminal / lxterminal / mate-terminal / xterm / foot / wezterm` in preference order (`proc.LinuxTerminalProbes`); the first one on `$PATH` wins. Each probe receives `sh -c "<command>"`, and the keep-open suffix is appended. |
+| Windows | `cmd /c start "<title>" cmd /k <nightme.exe> <args…>`. Routed through `proc.NewWith` with `HideWindow: false` — the user is asking for a visible terminal and `CREATE_NO_WINDOW` would defeat that. |
 
-The package is its own module so the per-OS spawn recipe is
-unit-testable without dragging in `cmd/nightme` or the
-systray library. Three tests cover the cross-platform shape:
-the second `Open()` within the 1-second window returns nil
-(debouncer drops it); a manual `ResetDebouncer` lets the
-next call reach the open path; the debounce window is
-exactly 1 second (regression guard for the macOS-touchpad
-rationale in the package doc).
+The per-OS recipes live in `internal/proc/exec_unix.go`
+(`openTerminalMac` / `openTerminalLinux`) and
+`internal/proc/exec_windows.go`, so they are unit-testable without
+dragging in `cmd/nightme` or the systray library. The launcher
+process is reaped in a goroutine and the call returns as soon as
+the launch succeeded.
 
 ---
 
@@ -139,7 +151,7 @@ embeds them via `//go:embed` and exposes per-OS accessors:
 
 | Platform | Setter | Source asset | Notes |
 |----------|--------|--------------|-------|
-| macOS    | `systray.SetTemplateIcon(1x, 2x, 3x PNGs)` | `trayTemplate{,_@2x,_@3x}.png` | Alpha-only black mask. Cocoa auto-inverts for dark mode. |
+| macOS    | `systray.SetTemplateIcon(template, regular)` | `trayTemplate.png` (template) + `tray.png` (regular) | Alpha-only black mask; Cocoa auto-inverts for dark mode. The API takes no multi-resolution input, so the `@2x` / `@3x` PNGs are kept as regenerable sources rather than fed to systray. |
 | Linux    | `systray.SetIcon(64x64 RGBA PNG)`          | `tray.png`                          | AppIndicator re-rasterises as needed. |
 | Windows  | `systray.SetIcon(32x32 ICO)`                | `logo-32.ico`                       | Matches the PE-embedded icon from `go-winres`. |
 
@@ -154,7 +166,7 @@ Linux PNG:
   `winres` target.
 
 The three macOS template PNGs are committed to the repo
-(539 / 1003 / 1382 bytes) so the build does not require a
+(1391 / 3578 / 6091 bytes) so the build does not require a
 macOS dev box. They are ImageMagick-generated alpha
 masks — a macOS dev who wants sharper anti-aliasing runs
 `make tray-assets` (with `GOOS=darwin`) on macOS to
@@ -162,26 +174,29 @@ regenerate via `sips`+`iconutil`.
 
 ---
 
-## 6. Restart semantics (v1)
+## 6. Restart semantics
 
-`onRestartRequestDefault` is identical to
-`onStopRequestDefault` in v1: both send SIGTERM to self.
-The tooltip on the menu item tells the user to re-run
-`nightme start` to bring a fresh daemon up.
+**Unix** (`cmd/nightme/daemon_lifecycle_tray_unix.go`):
 
-The "real" restart — where the current daemon process
-spawns its own replacement and the daemon lock handoff
-is atomic — is deferred. It requires a parent-or-supervisor
-contract that nightme does not yet have; the lock handoff
-is currently the `nightme start` path's job, not the
-running daemon's, and re-implementing it mid-flight is
-racy. A follow-up PR can add a `restart` IPC command and a
-`launchd` / `systemd` supervisor hook for true zero-touch
-restart.
+- `onStopRequestDefault` sends `SIGTERM` to the current process.
+  The runtime's signal channel picks it up and runs the graceful
+  shutdown path. If the signal itself fails, the handler exits the
+  process directly so the user is never left with an icon they
+  cannot stop.
+- `onRestartRequestDefault` spawns a **detached `nightme restart`
+  child** and returns. It does not send the stop signal itself:
+  the spawned process performs the whole stop+start protocol over
+  the daemoncontrol socket, and signalling here as well would race
+  the spawn. A bare `_daemon` child would exit immediately — the
+  daemon child requires the `NIGHTME_DAEMON_LOCK_FD` /
+  `NIGHTME_READY_FD` plumbing that only `nightme start` sets up —
+  so the tray restart would silently degrade to a plain stop.
 
-This v1 simplification is **not** documented in the
-`OnRestartRequest` function name to avoid surprising the
-caller; the menu tooltip is the user-visible contract.
+**Windows** (`cmd/nightme/daemon_lifecycle_tray_windows.go`):
+Windows has no `SIGTERM` and the daemon child runs detached, so
+`onStopRequestDefault` is `os.Exit(0)` and
+`onRestartRequestDefault` is the same call. A Windows daemon is
+restarted with `nightme restart` from a shell.
 
 ---
 
@@ -199,7 +214,7 @@ the fix for [#295](https://github.com/cnlangzi/nightme/issues/295).
 
 so *importing the package at all* makes the linker record
 `libayatana-appindicator3.so.1`, `libgtk-3.so.0` and ~70 other
-`DT_NEEDED` entries. When `cmd/nightme/tray.go` did that
+`DT_NEEDED` entries. When `cmd/nightme/tray_gui.go` did that
 unconditionally, every Linux binary — including `nightme --version`
 on a headless server — died before `main()`:
 
@@ -224,14 +239,32 @@ Two properties of that failure drove the design:
 | File | Build tag | Role |
 | --- | --- | --- |
 | `tray.go` | *(none)* | `trayDebounce`, `clickTracker`, `trayOptions`, `logClickErr` — nothing that touches systray |
-| `tray_gui.go` | `darwin \|\| windows \|\| (linux && gui)` | the real implementation: `runTrayOwning`, `trayOnReady`, click helpers |
+| `tray_assets.go` | *(none)* | `//go:embed` of the icon payloads + `IconWindows` / `IconDarwin` / `IconLinux` |
+| `tray_gui.go` | `(darwin && !notray) \|\| windows \|\| (linux && gui)` | the real implementation: `runTrayOwning`, `trayOnReady`, `handleClick`, `addTerminalSubItem`, `decorateUpdateItem` |
 | `tray_stub.go` | `linux && !gui` | `runTrayOwning` → straight to `runRunWith` |
+| `tray_stub_darwin.go` | `darwin && notray` | `runTrayOwning` → straight to `runRunWith` |
+| `tray_icon_darwin.go` | `darwin && !notray` | `applyIcon` (imports systray, so it must match `tray_gui.go`) |
 | `tray_icon_linux.go` | `linux && gui` | `applyIcon` (imports systray, so it must match `tray_gui.go`) |
+| `tray_icon_windows.go` | `windows` | `applyIcon` |
+| `tray_headless_linux.go` | `linux` | `isHeadless` — X / Wayland session detection |
+| `tray_headless_other.go` | `!linux` | `isHeadless` — always false |
+
+The click callbacks live next to the daemon lifecycle that owns
+them: `cmd/nightme/daemon_lifecycle_tray_unix.go` (`!windows`) and
+`cmd/nightme/daemon_lifecycle_tray_windows.go` (`windows`).
 
 `runTrayOwning` is the only cross-file seam, so
 `daemon_lifecycle_{unix,windows}.go` need no build-tag awareness.
 `trayOptions` lives in the untagged file because both
 implementations share the signature.
+
+The `notray` tag is a **darwin-only** opt-out. It exists because
+macos-latest (Apple Silicon) cannot cross-compile CGo to
+darwin/amd64: Go disables CGo on cross-compile and systray has no
+non-CGo fallback. Setting `-tags notray` on Windows or Linux is a
+no-op — the tray stays compiled in there, and the Windows
+cross-compile problem is solved by the native `windows-11-arm`
+runner instead.
 
 Resulting defaults:
 
@@ -239,6 +272,7 @@ Resulting defaults:
 | --- | --- | --- |
 | `go build` / `make build` | no tray, no CGo | tray |
 | `go build -tags gui` / `make build-gui` | tray | *(n/a — already on)* |
+| `go build -tags notray` | *(n/a)* | no tray (darwin only) |
 
 Linux defaults to off because Linux hosts are overwhelmingly
 servers. A useful side effect: `go install
@@ -310,7 +344,9 @@ than shipping.
 
 macOS and Windows runners ship Cocoa and Win32 by
 default; the systray CGo build for those platforms
-requires no extra install.
+requires no extra install. The `darwin/amd64` release matrix entry
+carries `go_tags: notray` and `cgo_enabled: "0"`, so that
+cross-compiled artifact links cleanly without the tray.
 
 ---
 
@@ -321,8 +357,9 @@ icon falls back to the generic executable glyph. For the
 proper icon, build the .app bundle:
 
 ```bash
-make build              # bin/nightme + cmd/nightme/assets/trayTemplate.icns
-make app-bundle         # dist/NightMe.app
+make tray-assets      # cmd/nightme/assets/trayTemplate.icns
+make build            # bin/nightme
+make app-bundle       # dist/NightMe.app
 cp -R dist/NightMe.app /Applications/
 open /Applications/NightMe.app
 ```
@@ -334,12 +371,12 @@ open /Applications/NightMe.app
   `trayTemplate.icns` after `make app-bundle`)
 - `LSUIElement = true` (no Dock entry)
 - `NSHighResolutionCapable = true` (Retina-sharp)
-- `NSAppleScriptEnabled = true` (so the Open REPL click
-  can drive Terminal.app / iTerm2 via osascript)
+- `NSAppleScriptEnabled = true` (so the Console click
+  can drive Terminal.app via osascript)
 
 The .app is **not** shipped in release artifacts. The
-release tar.gz carries the bare `nightme` binary, which is
-the right payload for `brew install` / `npm install -g`
+release tar.gz carries the bare `nightme` binary, which
+is the right payload for `brew install` / `npm install -g`
 packaging. The .app is a GUI-only convenience built
 locally.
 
@@ -347,7 +384,6 @@ locally.
 
 ## 10. Known limitations / future work
 
-- **Restart**: v1 merges with Stop. See §6.
 - **Linux default has no tray**: the shipped Linux binary is built
   without `-tags gui`, so desktop Linux users only get the icon if
   they install the `-gui` release archive. Making the tray a
@@ -356,6 +392,11 @@ locally.
   Linux binary, but needs either a CGo `dlopen` shim or a pure-Go
   StatusNotifierItem D-Bus client in place of
   `getlantern/systray`. Out of scope for the #295 fix.
+- **darwin/amd64 has no tray**: the release artifact for that
+  platform is built `-tags notray`, because the cross-compile
+  cannot produce a CGo systray binary.
+- **Windows Restart is a stop**: `onRestartRequestDefault` on
+  Windows is the stop path. See §6.
 - **macOS main thread**: `systray.Run` works correctly
   only when invoked on the main thread on macOS. The
   current threading-model flip puts the daemon's `_daemon`
@@ -371,4 +412,4 @@ locally.
   `NIGHTME_DATA_DIR` daemons would get two tray icons.
   Click ambiguity (which daemon did the click fire against)
   is left to the OS; the Status info row disambiguates
-  via the channel name and PID.
+  via the instance name and the version.

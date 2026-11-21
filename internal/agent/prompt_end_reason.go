@@ -10,7 +10,7 @@ package agent
 // already talk in `agent.PromptEndReason`.
 //
 // Independent of the execution stage (`Prompt` itself has no State
-// field — see docs/feat/message_lifecycle.md §4.2).
+// field — see docs/feat/F-53-message-prompt-lifecycle.md §4.2).
 type PromptEndReason int
 
 const (
@@ -25,7 +25,7 @@ const (
 	// EventAgentDone/EventAgentError. PHASE 0 DOES NOT TRIGGER THIS —
 	// the readPump's `!ok` branch currently returns without calling
 	// endPrompt. Reserved for the "Prompt 投递稳定性优化" PR
-	// (see docs/feat/message_lifecycle.md §8).
+	// (see docs/feat/F-53-message-prompt-lifecycle.md §8).
 	PromptEndProcessDied
 
 	// PromptEndStalledKilled: endPrompt called by the stall

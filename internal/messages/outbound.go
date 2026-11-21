@@ -21,7 +21,7 @@ const (
 	//
 	// F-40 rename from OutText: the new name better reflects that
 	// this is the agent's reply payload, not a generic "text".
-	// See docs/feat/F-40-outreply-overflow.md.
+	// See docs/channel/feishu.md.
 	OutReply OutboundKind = iota
 	// OutToolStart announces a tool invocation.
 	OutToolStart
@@ -37,7 +37,7 @@ const (
 	//
 	// Distinct from receipt lifecycle: this tracks the MESSAGE's
 	// progress through the system, not the response's rendering.
-	// See docs/feat/F-31-message-state.md and SPEC §2.5.
+	// See SPEC §2.5.
 	OutMessageState
 	// OutMessageStateRemoved removes a message state marker. Not
 	// used in v1.3 (append-only); reserved for channels that

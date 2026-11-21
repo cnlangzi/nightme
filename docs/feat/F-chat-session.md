@@ -29,35 +29,46 @@ The split exists because needs:
 // internal/chatsession/chatsession.go
 
 type ChatSession struct {
-    ID              string              // derived from chatID; natural key
-    ChatID          string              // unique — gateway.bindings[ChatID] → this
-    ChatType        string              // p2p | group | topic_group | ""
+    ID     string              // derived from chatID; natural key
+    ChatID string              // unique — gateway.bindings[ChatID] → this
+
+    mu      sync.RWMutex        // guards the mutable state below
+    routeMu sync.Mutex         // serializes the store-backed routing setters
 
     // Active routing state (mutated by /cwd /use; primaryAgent is
     // captured at New() time from global config and never mutated).
-    SelectedCwd       string              // /cwd sets; immutable per AgentSession
-    SelectedAgent     string              // /use sets; immutable per AgentSession
-    PrimaryAgent    string              // snapshot of cfg.Primary at New(); read-only
+    selectedCwd   string        // /cwd sets
+    selectedAgent string        // /use sets
+    primaryAgent  string        // snapshot of cfg.Primary at New(); read-only
+
+    // Per-chat toggles (defaults: WatchModeMention / ThinkModeHide / ToolsModeHide)
+    watchMode  WatchMode
+    thinkMode  ThinkMode
+    toolsMode  ToolsMode
 
     // AgentSession pool (per-ChatSession unique on (agent, cwd))
-    poolMu          sync.RWMutex
-    pool            map[agentCwdKey]*AgentSession  // agent + cwd → AgentSession
-    selectedAS        *AgentSession                  // current active (may be nil)
+    pool       map[agentCwdKey]*AgentSession  // agent + cwd → AgentSession
+    selectedAS *AgentSession                  // current active (may be nil)
 
-    // FSMs owned by ChatSession
-    inputBuffer     *InputBuffer                   // F-25; idle ↔ busy; cross-/use shared
-    // Receipt FSM is Gateway-owned (receipts[userMsgID]); ChatSession only forwards events
+    // At-least-once submission queue (owns its own mutex)
+    queue *MessageQueue
 
     // Persistence
-    createdAt           time.Time
-    lastInteractionAt   time.Time
-    flushHook           func(blocks []agent.ContentBlock, userMsgIDs []string) error
-                                          // Gateway injects; called on InputBuffer Busy→Idle
-    eventCallback       func(s *AgentSession, ev agent.AgentEvent)
-                                          // ChatSession injects into AgentSession.readPump
+    createdAt         time.Time
+    lastInteractionAt time.Time
+    csStore           *chatstore.Store
+    asFile            *registry.AgentSessionFile
+    asPool            *AgentSessionPool
+    spawner           Spawner
+
+    // F-54 event buses — the runtime subscribes to these
+    AgentEventBus   *services.EventBus[AgentEventEnvelope]
+    MessageStateBus *services.EventBus[MessageStateEvent]
+    PromptEndBus    *services.EventBus[PromptEndedEvent]
 
     // Lifecycle
-    cancel              context.CancelFunc
+    ctx    context.Context
+    cancel context.CancelFunc
 }
 
 type agentCwdKey struct {
@@ -74,14 +85,17 @@ type agentCwdKey struct {
 type ChatSessionEntry struct {
     ID                  string    `json:"id"`
     ChatID              string    `json:"chatId"`               // UNIQUE
-    ChatType            string    `json:"chatType"`
-    SelectedCwd           string    `json:"selectedCwd"`            // empty → not yet /cwd'd
-    SelectedAgent         string    `json:"selectedAgent"`          // empty → not yet /use'd
-    PrimaryAgent        string    `json:"primaryAgent"`         // snapshot of cfg.Primary at creation; read-only
+    SelectedCwd         string    `json:"selectedCwd"`          // empty → not yet /cwd'd
+    SelectedAgent       string    `json:"selectedAgent"`        // empty → not yet /use'd
+    PrimaryAgent        string    `json:"primaryAgent,omitempty"` // snapshot of cfg.Primary at creation; read-only
     AgentSessionIDs     []string  `json:"agentSessionIds"`      // pool index
-    SelectedAgentSessionID *string   `json:"selectedAgentSessionId"` // null → no active
+    SelectedAgentSessionID *string `json:"selectedAgentSessionId,omitempty"` // null → no active
     CreatedAt           time.Time `json:"createdAt"`
     LastInteractionAt   time.Time `json:"lastInteractionAt"`
+    WatchMode           int       `json:"watchMode,omitempty"`
+    ThinkMode           int       `json:"thinkMode,omitempty"`
+    ToolsMode           int       `json:"toolsMode,omitempty"`
+    WatcherHintEmitted  bool      `json:"watcherHintEmitted,omitempty"`
 }
 ```
 
@@ -1717,7 +1731,7 @@ if ev.Kind == agent.EventAgentConnected && ev.Connected != nil && ev.Connected.S
 
 
 > **Depends on**: F-34 (`/new` slash command), F-27 (ChatSession), F-29 (AgentSession pool), F-19 (CLI Bridge), F-24 (Claude Code Bridge), F-32 (Pi RPC Bridge), F-33 (ACP Bridge)
-> **Related**: [`SPEC.md`](../SPEC.md) §3.2 状态转换触发器, [`F-runtime.md`](./F-runtime.md), [`F-chat-session.md`](./F-chat-session.md), [`F-chat-session.md`](./F-chat-session.md), [`F-chat-session.md`](./F-chat-session.md), [`../channel/feishu-rendering.md`](./../channel/feishu-rendering.md)
+> **Related**: [`SPEC.md`](../SPEC.md) §3.2 状态转换触发器, [`F-chat-session.md`](./F-chat-session.md) §A1 / §A3, [`../channel/feishu-rendering.md`](../channel/feishu-rendering.md)
 
 ---
 

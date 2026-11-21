@@ -179,8 +179,8 @@ ocr = alibaba 的 [open-code-review](https://github.com/alibaba/open-code-review
 | --- | --- |
 | 本地路径 | `~/code/geax/github.com/cnlangzi/open-code-review/`(与 `nightme.nightme/`、`seowatson/` 等外部 dep 镜像同款位置) |
 | clone 方式 | `git clone --depth=1 https://github.com/alibaba/open-code-review.git`(浅 clone,只保留 HEAD,够查 SKILL / 命令实现 / 当前 tag) |
-| 当前 pinned | `v1.9.10` / `66120291271b2e605e420e9f11fbd6448f06163f`(2026-08-24 确认;升级前先看 `cmd/opencodereview/delegate_cmd.go` 与 `skills/open-code-review-delegate/SKILL.md` 是否改 schema) |
-| 委托入口(对应 nightme 引用) | `cmd/opencodereview/delegate_cmd.go`(nightme 的 `internal/agent/review_with_ocr.go` 注释路径直接对得上) |
+| 当前 pinned | `v1.9.10` / `66120291271b2e605e420e9f11fbd6448f06163f`(2026-08-24 确认;升级前先看 open-code-review 仓库的 `cmd/opencodereview/delegate_cmd.go` 与 `skills/open-code-review-delegate/SKILL.md` 是否改 schema) |
+| 委托入口(对应 nightme 引用) | open-code-review 仓库的 `cmd/opencodereview/delegate_cmd.go`(nightme 的 `internal/agent/review_with_ocr.go` 注释路径直接对得上) |
 
 **`ocr` 子命令全清单**(以本地镜像当前 HEAD 为准,完整列表见 README):
 
@@ -191,7 +191,7 @@ ocr = alibaba 的 [open-code-review](https://github.com/alibaba/open-code-review
 - **`ocr delegate rule <files...>`** —— ocr 路径第二步:按 rule content 分组的 rules(触发多 job 拆分的依据)
 - `ocr session list` —— 会话管理(端到端路径用)
 
-**规则集确认(2026-08-24)**:官方内置多语言规则集以 **NPE / 线程安全 / XSS / SQL 注入** 四类为锚点,**未提供 `simplify` / `simpily` 类规则**。`internal/config/rules/rule_docs/*.md` 全量 grep `simplify` 仅命中 `kotlin.md` 一处,且为英文单词用法(`Use = to simplify single-expression functions`,Kotlin 语法建议),非规则类别。结论:**如果 nightme 想要 simplify 行为,需要 host agent 自己出 prompt,不来自 ocr** —— 这是 v1 默认路径,符合 §2.2 "边界"。
+**规则集确认(2026-08-24)**:官方内置多语言规则集以 **NPE / 线程安全 / XSS / SQL 注入** 四类为锚点,**未提供 `simplify` / `simpily` 类规则**。open-code-review 仓库的 `internal/config/rules/rule_docs/*.md` 全量 grep `simplify` 仅命中 `kotlin.md` 一处,且为英文单词用法(`Use = to simplify single-expression functions`,Kotlin 语法建议),非规则类别。结论:**如果 nightme 想要 simplify 行为,需要 host agent 自己出 prompt,不来自 ocr** —— 这是 v1 默认路径,符合 §2.2 "边界"。
 
 ### 2.3 Go 复刻的 builtin 路径(ocr 未装,`ReviewWithPrompt`)
 

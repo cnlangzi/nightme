@@ -226,16 +226,16 @@ internal/pathutil/path_windows_test.go  # 24 个测试
 | `worktree.go:PreflightWorktreeCreate` `EvalSymlinks` | **保留 `filepath.EvalSymlinks`** | 符号链接解析是 cwd/pathutil 的另一层语义,故意保留 |
 | `persist.go:WriteGTWYml` | `doc.Worktree/RepoRoot` 原样序列化 | 写 yml 前 `NormalizeForOS` |
 | `persist.go:ReadGTWYml` | 原样返回 Context | 读 yml 后同样 `NormalizeForOS`(防御手编 / 跨机器迁移的 yml) |
-| `persist.go:gtwYmlPath` / `EnsureGitignore` / `MkdirAll` | `filepath.Join` / `filepath.Dir` | `pathutil.Join` / `pathutil.Dir` |
+| `persist.go:gtwYmlPath` / `EnsureGitignore` | `filepath.Join` / `filepath.Dir` | `nightmedir.FilePath` / `nightmedir.EnsureGitignoreEntry`(内部走 `pathutil.Join`) |
 | `persist.go:ReadGTWYml` `IsAbs` 检查 | `filepath.IsAbs` | `pathutil.IsAbs` |
 | `close.go:RunClose` step 0.5 stat | `statPath(selectedCwd)` | 先 `NormalizeForOS(selectedCwd)` 再 stat |
 | `close.go:RunClose` step 0.5 slot 比对 | `filepath.Clean(cur.Worktree) == filepath.Clean(selectedCwd)` | `pathutil.Equal(cur.Worktree, selectedCwd)` |
 | `close.go:assertWorktreeClean` | `filepath.Join(dir, "(worktree)")` | `pathutil.Join` |
-| `fix.go:RunFix` existing-path 比较 (line 344 / 561) | `filepath.Clean(existingPath) == filepath.Clean(worktreePath)` | `pathutil.Equal(existingPath, worktreePath)` |
+| `fix.go:RunFix` 已有 gtw.yml 检测 | `filepath.Join` | `pathutil.Join` |
 | `slug.go:WorktreePath` | `filepath.Clean` + `filepath.Dir` + `filepath.Base` + `filepath.Join` | `pathutil.NormalizeForOS` + `pathutil.Dir` + `pathutil.Base` + `pathutil.Join` |
-| `preflight.go:preflightOrphanYml` | `filepath.Join` | `pathutil.Join` |
+| `back.go:isUnderPath` | `filepath` 相对路径比较 + `filepath.EvalSymlinks` | `pathutil.IsUnder`(+ `filepath.EvalSymlinks` 解析符号链接) |
 | `attachments.go::downloadAttachments` + `attachmentsDir` | `filepath.Base` / `filepath.Join` | `pathutil.Base` / `pathutil.Join` |
-| `action.go::deriveRepoFromCwd` | `filepath.Dir` / `filepath.Base` | `pathutil.Dir` / `pathutil.Base` |
+| `config.go:userConfigPath` | `filepath.Join` | `pathutil.Join` |
 | `hooks.go::Load` 用户配置路径 | `filepath.Join(home, ".nightme", "gtw.yml")` | `pathutil.Join` |
 
 ### 5.3 第二阶段附加:`internal/command/cwd/` 迁移 ✅

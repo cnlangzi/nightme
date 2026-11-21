@@ -4,7 +4,7 @@
 > **读者**: 编写驱动 nightme 的程序（`me`）的工程师
 > **Related docs**:
 > - [SPEC.md](./SPEC.md) 运行时与 gateway 架构
-> - [feat/F-gateway.md](./feat/F-gateway.md) inbound 分发链
+> - [SPEC.md §2.1](./SPEC.md) inbound 分发链
 > - [CHANNEL.md](./CHANNEL.md) 多 channel 与消息渲染
 
 ---

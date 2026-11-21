@@ -877,14 +877,17 @@ paths:
 
 | 文档 | 内容 |
 |---|---|
+| [`docs/README.md`](./docs/README.md) | 文档模型——新内容该放哪一层。 |
 | [`docs/PRD.md`](./docs/PRD.md) | 产品定义——做什么、为什么做、为谁做。不讲技术。 |
 | [`docs/SPEC.md`](./docs/SPEC.md) | 技术架构——组件、数据流、NFR。 |
 | [`docs/FEATURES.md`](./docs/FEATURES.md) | 功能索引——每个 F-XX 一行。 |
 | [`docs/CHANNEL.md`](./docs/CHANNEL.md) | 多 channel 架构——所有有凭据的 channel 自动并行启动，per-channel session 隔离。 |
 | [`docs/CHATSTORE.md`](./docs/CHATSTORE.md) | `chat_sessions.json` 真相源、ChatSession hydrate、AgentSessionPool。 |
 | [`docs/WFE.md`](./docs/WFE.md) | Workflow YAML + 引擎运行时架构——触发器、步骤、bot↔wfe 边界。 |
+| [`docs/REVIEW.md`](./docs/REVIEW.md) | `/review` 设计——分流层次与 review 契约。 |
+| [`docs/me.md`](./docs/me.md) | 个人 agent——程序如何以人的身份参与对话。 |
 | [`docs/feat/`](./docs/feat/) | 每个 feature 的设计文档。 |
-| [`docs/bridge/`](./docs/bridge/) | 每个 agent bridge 的设计：claude、codex、dsh、opencode、pi、copilot、omp。 |
+| [`docs/bridge/`](./docs/bridge/) | 每个 agent bridge 的设计：acp、claude、codex、copilot、cursor、dsh、omp、pi + 共享 CLI transport。 |
 | [`docs/channel/feishu.md`](./docs/channel/feishu.md) | 飞书 adapter 参考（渲染规则、卡片语义、线程路由）。 |
 | [`docs/flow/`](./docs/flow/) | 横切流程文档（如 3-layer doc model）。 |
 | [`docs/E2E_TESTING.md`](./docs/E2E_TESTING.md) | 飞书端到端手动测试 + 排错。 |
@@ -911,24 +914,31 @@ CI 跑在 GitHub Actions（`.github/workflows/ci.yml`），每次 push 和 PR �
 cmd/nightme/                       # cobra CLI (start / stop / restart / status / logs / doctor / test / config / list / login / kill / clean / update / workflow / version)
 configs/                           # example YAML config
 docs/
-  PRD.md SPEC.md FEATURES.md       # 3-layer doc model
-  WFE.md                           # workflow YAML + 引擎运行时（schema / 触发器 / 步骤 / bot↔wfe 边界）
-  feat/                            # F-XX per-feature design
-  bridge/  channel/  flow/         # per-subsystem design
-  images/                          # README-served screenshots
+  README.md                         # 文档模型——什么内容该放哪一层
+  PRD.md SPEC.md FEATURES.md        # 3-layer doc model
+  CHANNEL.md CHATSTORE.md WFE.md    # 多 channel / 持久化 / 工作流引擎
+  REVIEW.md                         # /review 设计
+  TESTS.md E2E_TESTING.md WINDOWS.md # 跨平台 CI smoke / 手动端到端 / Windows 注意事项
+  me.md Wiki.md                     # 个人 agent / 仓库 wiki
+  primary-agent-detection.md        # primary agent 解析链
+  REVIEWER_INSTRUCTIONS.md          # /review 的严格接地规则
+  feat/                             # F-XX per-feature design
+  bridge/  channel/  flow/          # per-subsystem design
+  images/                           # README-served screenshots
 internal/
   agent/                           # Agent / AgentEvent / Info / Starter interface
   agentsession/                    # AgentSession + Prompt + Spawner (per-CLI-process runtime unit)
   bridge/                          # Bridge abstraction, one sub-package per agent
     acp/  claudecode/  codex/  copilot/  cursor/  dsh/  omp/  opencode/  pi/  pty/
   channel/                         # Channel interface
-    bot/  echo/  feishu/  slack/  telegram/   # adapters (feishu production; telegram ready; slack in development)
+    discord/  echo/  feishu/  slack/  telegram/   # adapters
   chatsession/                     # ChatSession + pool manager + persistence
+  chatstore/                       # chat_sessions.json store（单 mutex，原子写）
   cli/                              # shared CLI helpers (config / doctor / login)
   command/                         # Slash-command Commander / Registry / Factory
-    cwd/ close/ newcmd/ use/ think/ tools/ watch/ stop/ steer/ services/
-    handoff/ resume/ review/ wiki/ queue/   # task-continuity / review / wiki / queue
-    gtw/                           # /gtw plan / new / fix / commit / push / pr / close / back / sync (Git team workflow)
+    cwd/ close/ newcmd/ use/ think/ tools/ watch/ stop/ steer/ services/ format/
+    handoff/ resume/ review/ wiki/ queue/ me/   # task-continuity / review / wiki / queue / 个人 agent
+    gtw/                           # /gtw plan / new / fix / assign / close / back / commit / push / pr / config / sync / abort (Git team workflow)
   config/                          # YAML loader + env overrides
   daemoncontrol/                   # IPC for `nightme doctor` / `status`
   errors/                          # CodedError + ExitCode
@@ -939,8 +949,8 @@ internal/
   logging/                         # slog + secret redaction
   login/                           # IM bot 注册——feishu / slack / telegram onboarding
   messages/                        # IM message types + dispatch
-  prcache/                         # PR metadata cache (per-F-50)
-  registry/                        # JSON-backed chat_sessions.json + agent_sessions.json (0600, atomic)
+  prcache/                         # PR metadata cache（GitHub / GitLab）
+  registry/                        # 落盘的 ChatSessionEntry / AgentSessionEntry 类型 + 原子替换文件
   shell/                           # `!cmd` shell-mode dispatcher
   statusbar/                       # Feishu footer-card stamp runtime (per F-58, F-133)
   testdata/                        # shared test fixtures

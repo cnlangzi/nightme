@@ -6,7 +6,7 @@
 // trailer) reuse the same rendered output.
 //
 // This file covers the public-facing footer contract — every
-// "what does the user see" rule from docs/feat/F-45-session-footer.md
+// "what does the user see" rule from docs/channel/feishu.md
 // is locked in here. Runtime-side invariants (per-turn Usage,
 // chatsession cache, etc.) are tested in internal/runtime.
 package statusbar

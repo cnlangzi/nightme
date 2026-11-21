@@ -32,12 +32,14 @@ internal/bridge/
 │   └── ...
 ├── cursor/           # cursor 包装 acp(含 vendor MethodHandler —— 反例)
 │   └── ...
-└── copilot/          # 新增:copilot 包装 acp(opencode 风格,无 handler)
+└── copilot/          # copilot 包装 acp(opencode 风格,无 handler)
     ├── starter.go    # 包装 acp.NewStarter
-    ├── copilot.go    # 包级常量 + debug 日志
+    ├── copilot.go    # 包级常量 + debug 日志 + telemetry 探针
     ├── starter_test.go       # 单元测试
     ├── start_real_unix_test.go    # 真机 Start 链路测试
-    └── acp_probe_unix_test.go     # 真机 ACP handshake 探针
+    ├── acp_probe_unix_test.go     # 真机 ACP handshake 探针
+    ├── telemetry_test.go         # telemetry knob 单元测试
+    └── telemetry_probe_unix_test.go  # 真机 telemetry flag 探针
 ```
 
 ### 1.3 协议版本约束
@@ -144,14 +146,16 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
 
 ```text
 internal/bridge/copilot/
-├── copilot.go                    # 包级常量 + debug 日志
+├── copilot.go                    # 包级常量 + debug 日志 + telemetry 探针
 ├── starter.go                    # Starter 实现(包装 acp.NewStarter)
 ├── starter_test.go               # 单元测试
 ├── start_real_unix_test.go       # 真机 Start 全链路测试
-└── acp_probe_unix_test.go        # 真机 ACP handshake 探针
+├── acp_probe_unix_test.go        # 真机 ACP handshake 探针
+├── telemetry_test.go             # telemetry knob 单元测试
+└── telemetry_probe_unix_test.go  # 真机 telemetry flag 探针
 ```
 
-### 3.2 copilot.go — 包级常量与日志
+### 3.2 copilot.go — 包级常量、telemetry 探针与日志
 
 ```go
 // Package copilot is the nightme bridge for the GitHub Copilot CLI.
@@ -189,9 +193,15 @@ internal/bridge/copilot/
 package copilot
 
 import (
+    "context"
     "log/slog"
     "os"
     "strings"
+    "sync"
+    "time"
+
+    "github.com/cnlangzi/nightme/internal/bridge/telemetry"
+    "github.com/cnlangzi/nightme/internal/proc"
 )
 
 // FullAccessArgs is the spawn-time permission flag that turns
@@ -199,15 +209,84 @@ import (
 // spawn args.
 var FullAccessArgs = []string{"--allow-all-tools"}
 
+// telemetryArgs disables the Copilot CLI's client telemetry for
+// the child the bridge spawns. `--disable-client-telemetry` is a
+// parent-level flag; it disables the telemetry the CLI sends and
+// leaves server-side telemetry alone.
+//
+// The flag is missing from older builds and the CLI rejects an
+// unknown flag outright ("error: unexpected argument"), so the
+// bridge asks the binary whether it accepts the flag before
+// adding it. See supportsTelemetryFlag.
+var telemetryArgs = []string{"--disable-client-telemetry"}
+
+// acpTransportArgs are the ACP server transport flags. They follow
+// the parent-level flags in the spawn argv.
+var acpTransportArgs = []string{"--acp", "--stdio"}
+
 // DefaultACPArgs is the argv nightme registers for the
 // copilot builtin: `--allow-all-tools` first (parent-level
 // permission flag), then `--acp --stdio` (ACP server transport).
 var DefaultACPArgs = append(
     append([]string(nil), FullAccessArgs...),
-    "--acp", "--stdio",
+    acpTransportArgs...,
 )
 
 const bridgeName = "copilot"
+
+// telemetryFlagSupport caches, per copilot binary, whether it
+// accepts --disable-client-telemetry. Keyed by the command path so
+// a cfg.Agents override is probed on its own.
+var telemetryFlagSupport sync.Map
+
+// supportsTelemetryFlag reports whether the copilot binary at command
+// accepts --disable-client-telemetry.
+func supportsTelemetryFlag(command string) bool {
+    if v, ok := telemetryFlagSupport.Load(command); ok {
+        return v.(bool)
+    }
+    supported := probeTelemetryFlag(command)
+    telemetryFlagSupport.Store(command, supported)
+    return supported
+}
+
+// probeTelemetryFlag runs `copilot --help` and looks for the flag.
+//
+// WaitDelay is what keeps the probe bounded: on Windows the CLI runs
+// under cmd.exe, which spawns node, which spawns the binary, so
+// killing the direct child leaves the grandchildren holding the
+// output pipe. The exit status is deliberately ignored — what
+// matters is whether the CLI's help lists the flag.
+func probeTelemetryFlag(command string) bool {
+    ctx, cancel := context.WithTimeout(context.Background(), telemetryFlagProbeTimeout)
+    defer cancel()
+    cmd := proc.New(ctx, command, "--help")
+    cmd.WaitDelay = telemetryFlagProbeGrace
+    out, _ := cmd.CombinedOutput()
+    return strings.Contains(string(out), "-disable-client-telemetry")
+}
+
+// telemetryFlagProbeTimeout bounds the `copilot --help` probe.
+const telemetryFlagProbeTimeout = 10 * time.Second
+
+// telemetryFlagProbeGrace is how long the probe waits for the
+// probed process's output pipes to close after the process itself is
+// gone.
+const telemetryFlagProbeGrace = 2 * time.Second
+
+// childArgs returns the argv for a spawned copilot child: the
+// telemetry knob leads the parent-level flags.
+//
+// The knob is dropped when the binary does not accept it — a build
+// that predates the flag would refuse to start at all.
+func childArgs(args []string, command string) []string {
+    if telemetry.Allowed() || !supportsTelemetryFlag(command) {
+        return args
+    }
+    out := make([]string, 0, len(args)+len(telemetryArgs))
+    out = append(out, telemetryArgs...)
+    return append(out, args...)
+}
 
 // copilotDebug toggles the bridge's detailed debug logging.
 var copilotDebug = copilotDebugEnabled()
@@ -230,6 +309,23 @@ func cLog(msg string, args ...any) {
     slog.Default().Info("[copilot] "+msg, all...)
 }
 ```
+
+**telemetry 探针注入机制**:
+
+- bridge 在 spawn 时把 `--disable-client-telemetry` 放在 parent-level flag 组的最前面
+  (transport flag `--acp --stdio` 之前)。Copilot 的 flag 解析与顺序无关,但 knob
+  领先让 `nightme config` 展示的 argv 与子进程实际收到的 argv 一致。
+- knob 只在 nightme 的 telemetry 策略允许关闭时注入 —— `internal/bridge/telemetry`
+  里的 `Allowed()` 为 false(默认)才加;用户写 `agent_telemetry: true`(或设
+  `NIGHTME_AGENT_TELEMETRY=1`)后 bridge 完全不加这个 flag,CLI 保持自己的默认行为。
+- 加 flag 之前先探一次 binary:跑 `copilot --help` 看它自己接不接受这个 flag,结果按
+  binary 路径缓存(每个 binary 每个进程只探一次)。**探不动等于不支持** —— 缺 binary、
+  CLI 卡住都算“不支持”,这时不加 flag,让那个 build 保持自己的默认 telemetry,而不是
+  整个 spawn 起不来。老 build 遇到未知 flag 会直接 `error: unexpected argument` 退出,
+  不会忽略。
+- 探针的输出管道有界:10s 超时 + 2s `WaitDelay` 宽限。Windows 上 CLI 是
+  cmd.exe → node → binary 的三层链,杀掉直接子进程后孙进程仍持有 stdout,`WaitDelay`
+  是唯一能保证探针返回的机制。
 
 ### 3.3 starter.go — 核心实现
 
@@ -265,7 +361,6 @@ import (
     "context"
     "errors"
     "fmt"
-    "os/exec"
 
     "github.com/cnlangzi/nightme/internal/agent"
     "github.com/cnlangzi/nightme/internal/bridge/acp"
@@ -279,30 +374,50 @@ import (
 // right per-mode behavior (timeout settings, event queue
 // routing, /stop propagation).
 type Starter struct {
-    name    string
-    command string
-    args    []string
+    name           string
+    command        string
+    defaultCommand string
+    args           []string
 }
 
-// NewStarter constructs the copilot spawn recipe.
+// NewStarter constructs the copilot spawn recipe. Entry point
+// used at registration time (cmd/nightme/agents.go calls it
+// from init()).
 func NewStarter(name, command string, args []string) *Starter {
     return &Starter{
-        name:    name,
-        command: command,
-        args:    append([]string(nil), args...), // defensive copy
+        name:           name,
+        command:        command,
+        defaultCommand: command,
+        args:           append([]string(nil), args...), // defensive copy
     }
 }
 
 // Info returns the fixed metadata for this starter.
+//
+// Args carry the telemetry knob the bridge adds to the child, unless
+// the user opted out of nightme's telemetry policy — the advertised
+// argv therefore matches what the child actually receives.
 func (s *Starter) Info() agent.Info {
-    return agent.NewInfo(s.name, agent.ModeACP, s.command, s.args, nil)
+    return agent.NewInfo(s.name, agent.ModeACP, s.command, childArgs(s.args, s.command), nil)
 }
 
-// Detect verifies the copilot binary resolves on PATH.
+// Detect verifies the configured command resolves to an invokable
+// binary (absolute path or PATH-relative name).
 func (s *Starter) Detect() error {
-    _, err := exec.LookPath(s.command)
-    return err
+    return agent.ResolveCommand(s.command)
 }
+
+// Init overrides the executable path used by Detect and Info.
+func (s *Starter) Init(command string) {
+    if command == "" {
+        s.command = s.defaultCommand
+        return
+    }
+    s.command = command
+}
+
+// Command returns the current executable path.
+func (s *Starter) Command() string { return s.command }
 
 // Start spawns `copilot` + s.args under a PTY (via the generic
 // acp bridge), runs the initialize + session/new handshake,
@@ -312,19 +427,26 @@ func (s *Starter) Detect() error {
 // JSON-RPC methods that the generic acp fallback does not
 // already handle, so no per-bridge translator is installed.
 //
-// cfg.SessionID, when non-empty, is reserved for future ACP
-// session/load wiring. Today the bridge always opens a fresh
-// session.
+// cfg.SessionID, when non-empty, is forwarded to the generic ACP
+// bridge, which reopens that session via session/resume or
+// session/load.
 func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agent, error) {
     if cfg.Workspace == "" {
         return nil, errors.New("copilot: workspace is required")
     }
-    acpStarter := acp.NewStarter(s.name, s.command, s.args, nil, 0, 0)
+    acpStarter := s.acpStarter()
     a, err := acpStarter.Start(ctx, cfg)
     if err != nil {
         return nil, fmt.Errorf("agent %s: spawn: %w", s.Info().Name, err)
     }
     return a, nil
+}
+
+// acpStarter builds the generic ACP starter this bridge drives. The
+// starter's argv carries the telemetry knob, so the spawned child
+// receives it.
+func (s *Starter) acpStarter() *acp.Starter {
+    return acp.NewStarter(s.name, s.command, childArgs(s.args, s.command), nil, 0, 0)
 }
 
 // RunOnce is the one-shot counterpart to Start. The turn runs over
@@ -340,6 +462,11 @@ func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...age
     return agent.ReviewDispatch(ctx, s, cfg, opts...)
 }
 ```
+
+`Starter` 实现 `internal/agent` 的 `Starter` 接口:`Info` / `Detect` / `Init` /
+`Start` / `RunOnce` / `Review`。`Init` 是 `cfg.Agents` 路径覆盖的落点 ——
+`agentregistry.Build` 覆盖 executable path,`Init("")` 把命令名复位成注册时的
+默认值。
 
 ### 3.4 one-shot turn — 走 session transport
 
@@ -403,18 +530,23 @@ func init() {
 }
 ```
 
-`nightme agents` 输出确认:
+内建 agent 的 argv 在 `nightme config` 的 **Agents 子菜单** 里列出(`cmd/nightme/agents_table.go`
+渲染的表,列是 `# / NAME / BRIDGE / COMMAND / ARGS`):
 
 ```
-NAME      COMMAND       ARGS
-claude    claude
-codex     codex
-dsh       dsh
-opencode  opencode      acp
-cursor    cursor-agent  --force --trust --sandbox disabled --approve-mcps acp
-pi        pi
-copilot   copilot       --allow-all-tools --acp --stdio
+#  NAME      BRIDGE    COMMAND       ARGS
+1  claude    json-io   claude
+2  codex     json-io   codex
+3  dsh       json-io   dsh
+4  opencode  acp       opencode      acp
+5  cursor    acp       cursor-agent  --force --trust --sandbox disabled --approve-mcps acp
+6  pi        json-io   pi            --mode rpc --approve --no-themes --offline
+7  copilot   acp       copilot       --allow-all-tools --acp --stdio
+8  omp       json-io   omp
 ```
+
+copilot 那一行的 ARGS 在 binary 支持 `--disable-client-telemetry` 时会多出这个
+flag(见 §3.2),用户关掉 nightme 的 telemetry 策略后该 flag 消失。
 
 ### 4.2 配置示例
 

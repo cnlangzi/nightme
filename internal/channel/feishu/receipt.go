@@ -233,7 +233,7 @@ func NewMessageReceiptForReply(chatID, userMsgID string, bot receiptBot) *Messag
 		heartbeatMinInterval: 2 * time.Second,
 		// F-53: initial state is chatsession.PromptRunning (was PromptPending
 		// in v1.3). The "Prompt is born running" rule from
-		// docs/feat/message_lifecycle.md §4.2 means we never need
+		// docs/feat/F-53-message-prompt-lifecycle.md §4.2 means we never need
 		// a Pending→Running transition on first SetTaskList —
 		// SetTaskListWithFooter's transition guard is removed
 		// below.
@@ -287,7 +287,7 @@ func (r *MessageReceipt) SetTaskListWithFooter(ctx context.Context, list *agent.
 	// already chatsession.PromptRunning (set at construction). Receipt never
 	// transitions to chatsession.PromptDone in Phase 0 — that value is reserved
 	// for a future UX PR that surfaces terminal state on the card
-	// (see docs/feat/message_lifecycle.md §7).
+	// (see docs/feat/F-53-message-prompt-lifecycle.md §7).
 	return r.renderLocked(ctx)
 }
 

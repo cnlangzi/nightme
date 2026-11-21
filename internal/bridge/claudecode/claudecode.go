@@ -1,6 +1,6 @@
 // Package claudecode implements a bridge to the Claude Code CLI
 // using stream-json mode over stdin/stdout. See
-// docs/feat/F-24-claudecode-bridge.md.
+// docs/bridge/claude.md.
 //
 // Agent is BOTH the template (registered with agent.Builtins) and the
 // live handle (returned by Start). The template half is set once by

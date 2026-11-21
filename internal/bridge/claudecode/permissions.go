@@ -1,5 +1,5 @@
 // Package claudecode implements bridge.Agent for Anthropic's Claude Code
-// CLI using its stream-json mode. See docs/feat/F-24-claudecode-bridge.md.
+// CLI using its stream-json mode. See docs/bridge/claude.md.
 //
 // The bridge spawns `claude --print --input-format stream-json
 // --output-format stream-json --permission-mode bypassPermissions

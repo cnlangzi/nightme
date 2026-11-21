@@ -18,7 +18,7 @@
 // tail. Rows sorted by typed priority (success → failure →
 // skipped), then by (Agent, Cwd) for stable display.
 //
-// See docs/feat/F-43-close-new-graceful-and-reset.md §6.2.
+// See docs/feat/F-chat-session.md §6.2.
 package newcmd
 
 import (

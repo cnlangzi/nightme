@@ -6,11 +6,11 @@
 
 
 > **Depends on**: F-09 (Agent abstraction), F-19 (CLI Bridge), F-21 (Agent Modes)
-> **Related**: [../bridge/cli-transport.md](./../bridge/cli-transport.md), [../bridge/cli-transport.md](./../bridge/cli-transport.md), [F-gateway.md](./F-gateway.md) §2.3 (single-consumer)
+> **Related**: [../bridge/cli-transport.md](./../bridge/cli-transport.md), [../bridge/cli-transport.md](./../bridge/cli-transport.md), [SPEC.md §1.2](../SPEC.md) (single-consumer)
 
 ## 0. 修订（bridge 与上层解耦）
 
-**实现**：Claude Code bridge 通过 `Session.Events() <-chan AgentEvent` 把事件暴露给 session 内部 readPump + Gateway 外部 pumpOutbound。两个 reader 抢同一 chan 是 bug（见 [F-26 §2.3](./F-gateway.md)）。
+**实现**：Claude Code bridge 通过 `Session.Events() <-chan AgentEvent` 把事件暴露给 session 内部 readPump + Gateway 外部 pumpOutbound。两个 reader 抢同一 chan 是 bug（见 [SPEC.md §1.2](../SPEC.md)）。
 
 **修订**：
 - `bridge.Session.Events()` chan **只有 session.readPump 一个 consumer**（单消费者修复）
@@ -150,7 +150,7 @@ telemetry。只作用于 nightme spawn 的这个子进程——用户自己手�
 }}
 ```
 
-**field 映射**（来自 `internal/bridge/claudecode/session.go::SendBlocks`,line 243-353）：
+**field 映射**（来自 `internal/bridge/claudecode/claudecode.go::SendBlocks`,line 519-624）：
 
 | `agent.ContentBlock.Type` | JSON element | 降级条件 |
 |---------------------------|--------------|----------|
@@ -163,7 +163,7 @@ telemetry。只作用于 nightme spawn 的这个子进程——用户自己手�
 1. **`content[]` 数组顺序 = `[]ContentBlock` 顺序**（i → i，1:1 映射）
 2. **空 slice → noop**：`SendBlocks([])` 立即返回，不写 envelope
 3. **失败 block omit**：`content[]` 中不会插入 placeholder（避免 Claude 把"半截 array"误读为完整 turn）
-4. **base64 转换只在 bridge 边界**：`agent.ContentBlock.Path` 永远持绝对路径，bridge 在 SendBlocks 内做 `os.ReadFile → base64.StdEncoding.EncodeToString`（`internal/bridge/claudecode/session.go:360`）
+4. **base64 转换只在 bridge 边界**：`agent.ContentBlock.Path` 永远持绝对路径，bridge 在 SendBlocks 内做 `os.ReadFile → base64.StdEncoding.EncodeToString`（`internal/bridge/claudecode/claudecode.go:626`）
 
 **为什么不用"text 里嵌 `[img:xxx]` 占位符"**:Anthropic API `content` 字段本身就是 heterogeneous array，placeholder 方案会引入解析歧义 + 类型丢失 + 协议弱化。slice 1:1 对应 wire 数组是天然选择。详见 `docs/channel/feishu-onboarding.md` §4.5。
 
@@ -382,7 +382,7 @@ claudecode — control_request{interrupt} stdin; CLI stays alive; turn ends clea
 
 五个 bridge 现在统一在"结构化 in-band 取消 + 进程保持存活"这条契约上，跟 Anthropic / OpenAI / Zed 各自的官方协议语义对齐。SIGINT / SIGKILL 只在兜底路径用——保护老版本 CLI 和 edge cases。
 
-#### 3.4.7 回归测试（`internal/bridge/claudecode/agent_interrupt_test.go`）
+#### 3.4.7 回归测试（`internal/bridge/claudecode/agent_interrupt_test.go` + `agent_interrupt_unix_test.go`）
 
 4 个测试，反向锁住"happy path 走 stdin 不走 SIGINT"这条契约：
 
@@ -451,7 +451,7 @@ CHANGELOG 显示 AskUserQuestion 在 Claude Code 2.1.220 仍存在，但某些�
 ### 5.2 路由 A: tool_use 拦截（首选）
 
 ```go
-// internal/bridge/claudecode/session.go
+// internal/bridge/claudecode/stream.go
 
 func (s *ClaudeSession) handleAssistantMessage(msg AssistantMessage) {
     for _, block := range msg.Content {
@@ -787,28 +787,35 @@ func (d *driver) SendPermission(resp string) error {
 ```
 internal/bridge/
 ├── pty/              # 兜底（任何 CLI）
-├── acp/              # Codex / OpenCode
-├── sdk/              # 占位（Anthropic 无 Go SDK）
-└── claudecode/       # 新增：JSON-IO 专用
-    ├── session.go
+├── acp/              # Codex / OpenCode / Cursor / Copilot
+└── claudecode/       # JSON-IO 专用
+    ├── claudecode.go # driver：Start / SendBlocks / SendPermission / Stop
+    ├── starter.go    # spawn 配方（NewStarter）
     ├── stream.go     # stream-json parse
     ├── permissions.go  # auto-accept
     ├── ask.go        # AskUserQuestion 拦截
-    └── session_test.go
+    └── claudecode_test.go
 ```
 
 ### 8.2 Agent 注册
 
+内置 agent 在 `cmd/nightme/agents.go` 的 `init()` 里注册进 `agent.Builtins`——每个
+agent 名一份 `Starter` 单例，注册顺序即 primary-agent 自动探测顺序：
+
 ```go
-// internal/agent/registry.go
+// cmd/nightme/agents.go
 
 func init() {
-    Register("claude", &claudecode.Agent{})  // ModeJSONIO（自定义）
-    Register("codex", &acpagent.Agent{})      // ModeACP
-    Register("opencode", &acpagent.Agent{})   // ModeACP
-    Register("/path/to/cli", &ptyagent.Agent{})  // ModePTY fallback
+    agent.Builtins.Register(claudecode.NewStarter("claude", "claude", nil))
+    agent.Builtins.Register(codex.NewStarter("codex", "codex", nil))
+    agent.Builtins.Register(opencode.NewStarter("opencode", "opencode", []string{"acp"}))
 }
 ```
+
+`internal/bridge/pty` 是共享 transport 基础设施，**不**注册进 `Builtins`。用户在
+`cfg.Agents` 里写的二进制路径由 `internal/agentregistry/agentregistry.go::Build`
+落到 `ModePTY` 兜底。
+
 
 ### 8.3 Mode 扩展
 
@@ -829,12 +836,12 @@ const (
 
 ```
 internal/bridge/claudecode/
-├── claudecode.go       # Agent impl
-├── session.go          # AgentSession impl
+├── claudecode.go       # driver：Start / SendBlocks / SendPermission / Stop / Close
+├── starter.go          # spawn 配方（NewStarter）
 ├── stream.go           # stream-json event parser
 ├── permissions.go      # --permission-mode 标志 + auto-accept
 ├── ask.go              # AskUserQuestion 拦截 + fallback
-├── format.go           # content block formatting
+├── task.go             # TaskCreate / TaskUpdate 拦截
 ├── claudecode_test.go  # unit tests
 └── testdata/           # mock JSON event fixtures
     ├── init.json
@@ -847,248 +854,106 @@ internal/bridge/claudecode/
 
 ### 9.2 关键代码
 
+bridge 拆成两半：**`Starter` 是 spawn 配方**（静态元数据，注册进 `agent.Builtins`
+的单例），**`driver` 是运行时半边**（cmd / pipes / events / pendingAsk）。外部只见
+`*agent.Agent`——`Starter.Start` 返回它。
+
+```go
+// internal/bridge/claudecode/starter.go
+
+type Starter struct {
+    name           string
+    command        string
+    defaultCommand string
+    args           []string
+}
+
+func NewStarter(name, command string, args []string) *Starter
+
+func (s *Starter) Info() agent.Info {
+    return agent.NewInfo(s.name, agent.ModeJSONIO, s.command, s.args,
+        telemetry.Env(telemetryEnv...))
+}
+
+func (s *Starter) Detect() error {
+    return agent.ResolveCommand(s.command)
+}
+
+func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agent, error) {
+    // spawn `claude` + DefaultArgs，组装 driver，交给 agent.NewAgent
+}
+```
+
 ```go
 // internal/bridge/claudecode/claudecode.go
 
-type Agent struct{}
-
-func (a *Agent) Name() string { return "claude" }
-func (a *Agent) Mode() Mode { return ModeJSONIO }
-
-func (a *Agent) Detect() error {
-    // 检查 $PATH 里 claude binary 是否存在
-    _, err := exec.LookPath("claude")
-    return err
+type driver struct {
+    cmd     *exec.Cmd
+    stdin   *bufio.Writer
+    events  chan agent.AgentEvent
+    pid     int
+    // … stderrLines / stderrTail / pumpWG / exitDone / pendingAsk …
 }
 
-func (a *Agent) Start(ctx context.Context, cfg StartConfig) (AgentSession, error) {
-    args := []string{
-        "--print",
-        "--input-format", "stream-json",
-        "--output-format", "stream-json",
-        "--permission-mode", "bypassPermissions",
-        "--verbose",
-    }
-    args = append(args, cfg.Args...)
-    
-    cmd := exec.CommandContext(ctx, "claude", args...)
-    cmd.Dir = cfg.Workspace
-    cmd.Env = cfg.Env
-    
-    stdin, err := cmd.StdinPipe()
-    if err != nil { return nil, err }
-    
-    stdout, err := cmd.StdoutPipe()
-    if err != nil { return nil, err }
-    
-    stderr, err := cmd.StderrPipe()
-    if err != nil { return nil, err }
-    
-    if err := cmd.Start(); err != nil { return nil, err }
-    
-    session := &claudeSession{
-        cmd:     cmd,
-        stdin:   stdin,
-        stdout:  stdout,
-        stderr:  stderr,
-        events:  make(chan AgentEvent, 64),
-        toolUseIDs: make(map[string]string),  // tool_use_id → question header
-    }
-    
-    go session.pumpStdout()  // parse stream-json events
-    go session.pumpStderr()  // log stderr
-    
-    return session, nil
-}
+func (d *driver) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) error
+func (d *driver) SendPermission(resp string) error
+func (d *driver) Stop(ctx context.Context) error
+func (d *driver) Close() error
 ```
 
 ```go
 // internal/bridge/claudecode/stream.go
 
-func (s *claudeSession) pumpStdout() {
-    scanner := bufio.NewScanner(s.stdout)
-    scanner.Buffer(make([]byte, 64*1024), 1024*1024)  // 1MB max line
-    
-    for scanner.Scan() {
-        line := scanner.Bytes()
-        if len(line) == 0 { continue }
-        
-        var event StreamEvent
-        if err := json.Unmarshal(line, &event); err != nil {
-            slog.Warn("claudecode: invalid json", "err", err, "line", string(line))
-            continue
-        }
-        
-        s.handleEvent(event)
-    }
-    
-    if err := scanner.Err(); err != nil {
-        s.events <- AgentEvent{Kind: EventError, Error: &ErrorEvent{Message: err.Error()}}
-    }
-    
-    // stdout EOF → session end
-    s.events <- AgentEvent{Kind: EventDone, Done: &DoneEvent{ExitCode: s.cmd.ProcessState.ExitCode()}}
-    close(s.events)
-}
+// pumpStream 逐行读 stdout，每行一个 stream-json event，交给 translate。
+func pumpStream(
+    r io.Reader,
+    events chan<- agent.AgentEvent,
+    askHandler askHandlerFunc,
+    armPendingAskFn armPendingAskFn,
+    agentName, workspace, branch string,
+    logger *slog.Logger,
+)
 
-func (s *claudeSession) handleEvent(ev StreamEvent) {
-    switch ev.Type {
-    case "system":
-        if ev.Subtype == "init" {
-            s.events <- AgentEvent{Kind: EventAgentConnected, Init: &AgentConnectedEvent{
-                SessionID: ev.SessionID,
-                Tools:     ev.Tools,
-                Model:     ev.Model,
-            }}
-        }
-        
-    case "assistant":
-        for _, block := range ev.Message.Content {
-            switch block.Type {
-            case "text":
-                s.events <- AgentEvent{Kind: EventText, Text: block.Text}
-            case "thinking":
-                // 可选：emit thinking event 或 ignore
-            case "tool_use":
-                if block.Name == "AskUserQuestion" {
-                    s.handleAskQuestion(block)
-                } else {
-                    s.events <- AgentEvent{Kind: EventToolStart, ToolStart: &ToolStartEvent{
-                        Name:   block.Name,
-                        Input:  block.Input,
-                        ToolUseID: block.ID,
-                    }}
-                }
-            }
-        }
-        
-    case "user":
-        // tool_result
-        for _, block := range ev.Message.Content {
-            if block.Type == "tool_result" {
-                s.events <- AgentEvent{Kind: EventToolEnd, ToolEnd: &ToolEndEvent{
-                    ToolUseID:  block.ToolUseID,
-                    Content:    block.Content,
-                    IsError:    block.IsError,
-                }}
-            }
-        }
-        
-    case "result":
-        s.events <- AgentEvent{Kind: EventDone, Done: &DoneEvent{
-            ExitCode: 0,
-            Result:   ev.Result,
-            Usage:    ev.Usage,
-        }}
-    }
-}
+// translate 把一个 streamEvent 翻成一串 AgentEvent（system / assistant /
+// user / result 四类）。
+func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEvent,
+    askHandler askHandlerFunc, armPendingAskFn armPendingAskFn,
+    agentName, workspace, branch string, logger *slog.Logger)
 ```
 
 ## 10. 测试用例
 
 ### 10.1 单元测试（用 mock JSON fixtures）
 
-```go
-// internal/bridge/claudecode/stream_test.go
+fixture 放在 `internal/bridge/claudecode/testdata/`，测试代码在
+`internal/bridge/claudecode/claudecode_test.go`：
 
-func TestPumpStdout_EventAgentConnected(t *testing.T) {
-    fixture := loadFixture("testdata/init.json")
-    session := newTestSession(fixture)
-    go session.pumpStdout()
+| 测试 | 断言 |
+|---|---|
+| `TestPumpStream_Init` | `system/init` → `EventAgentReady`（SessionID / Model）|
+| `TestPumpStream_TextChunk` | assistant text → `EventAgentText` |
+| `TestPumpStream_ToolUse` | `tool_use` → `EventAgentToolStart` |
+| `TestPumpStream_ToolResult` | `tool_result` → `EventAgentToolEnd`（`tool_use_id` 跨消息关联参数）|
+| `TestPumpStream_AskUserQuestion` | `AskUserQuestion` → `EventAgentPermission`；选项 = 原始 3 项 + `Other`，`(Recommended)` 后缀被剥掉 |
+| `TestPumpStream_Result` | `result` → `EventAgentResult`（带 Usage）+ `EventAgentDone` |
+| `TestEncodeUserAnswer_SingleSelect` | 单选答案 → `tool_result` 形态 |
+| `TestEncodeUserAnswer_MultiSelect_Array` | 多选 array 编码 |
+| `TestEncodeUserAnswer_MultiSelect_LegacyString` | 多选逗号分隔字符串编码 |
 
-    event := <-session.events
-    if event.Kind != EventAgentConnected {
-        t.Errorf("expected EventAgentConnected, got %v", event.Kind)
-    }
-    if event.Connected.Model != "claude-sonnet-4-5" {
-        t.Errorf("expected model claude-sonnet-4-5, got %s", event.Connected.Model)
-    }
-}
-
-func TestPumpStdout_AskUserQuestion(t *testing.T) {
-    fixture := loadFixture("testdata/ask_question.json")
-    session := newTestSession(fixture)
-    go session.pumpStdout()
-    
-    // skip init event
-    <-session.events
-    
-    event := <-session.events
-    if event.Kind != EventPermissionRequest {
-        t.Errorf("expected EventPermissionRequest, got %v", event.Kind)
-    }
-    if event.Permission.Tool != "AskUserQuestion" {
-        t.Errorf("expected tool AskUserQuestion, got %s", event.Permission.Tool)
-    }
-    if len(event.Permission.Options) != 3 {
-        t.Errorf("expected 3 options, got %d", len(event.Permission.Options))
-    }
-    // 检查第一项是 Recommended（来自 Claude Code 设计）
-    if !strings.Contains(event.Permission.Options[0], "Recommended") {
-        t.Errorf("expected first option to be Recommended")
-    }
-}
-
-func TestAnswerAsk_SingleSelect(t *testing.T) {
-    questions := []Question{{Header: "Setup", MultiSelect: false}}
-    answers := map[string]string{"Setup": "PostgreSQL"}
-    
-    json, _ := session.answerAskJSON(questions, answers)
-    
-    // 验证 wire format
-    var msg map[string]any
-    json.Unmarshal([]byte(json), &msg)
-    
-    content := msg["message"].(map[string]any)["content"].([]any)[0].(map[string]any)
-    if content["type"] != "tool_result" {
-        t.Errorf("expected tool_result, got %v", content["type"])
-    }
-    if content["content"] != "PostgreSQL" {
-        t.Errorf("expected content 'PostgreSQL', got %v", content["content"])
-    }
-}
-
-func TestAnswerAsk_MultiSelect_String(t *testing.T) {
-    questions := []Question{{Header: "Stack", MultiSelect: true}}
-    answers := map[string]string{"Stack": "PostgreSQL,Auth"}
-    
-    json, _ := session.answerAskJSON(questions, answers)
-    // 验证 content 可以是 string 或 array
-}
-
-func TestAnswerAsk_MultiSelect_Array(t *testing.T) {
-    questions := []Question{{Header: "Stack", MultiSelect: true}}
-    answers := map[string]string{"Stack": "PostgreSQL,Auth"}
-    
-    // 强制 array 模式
-    json, _ := session.answerAskJSONArray(questions, answers)
-    // 验证 content 是 array
-}
-```
+AskUserQuestion 的两条拦截路径另外覆盖在 `internal/bridge/claudecode/ask_test.go`
+与 `ask_permission_test.go`：`TestDetectAskInText_*`（markdown 表格 / 编号列表识别）、
+`TestArmPendingAsk_*`（ResponseCh 注入）、`TestSendPermission_ToolUse_WritesToolResult`
+（tool_use 路径写 `tool_result`）、`TestSendPermission_TextFallback_WritesUserText`
+（text-fallback 路径写 user-role text）。
 
 ### 10.2 集成测试（mock Claude Code binary）
 
-```go
-// internal/bridge/claudecode/integration_test.go
-
-func TestIntegration_MockClaude_RoundTrip(t *testing.T) {
-    // mock claude binary 输出预定义 JSON events
-    mock := newMockClaudeBinary(t, []string{
-        `{"type":"system","subtype":"init",...}`,
-        `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Hello"}]}}`,
-        `{"type":"result","subtype":"success",...}`,
-    })
-    defer mock.Close()
-    
-    session, err := mock.Start(ctx, StartConfig{Workspace: t.TempDir()})
-    if err != nil { t.Fatal(err) }
-    
-    session.SendText("hello")
-    
-    events := collectEvents(session, 3)
-    // 验证 init → text → result
-}
-```
+`internal/bridge/claudecode/claudecode_subprocess_unix_test.go` 用
+`internal/testdata/claude_mock.sh`（包着 `internal/testdata/claude_mock.py`）起一个
+真的子进程，走完整的 pipe / fd / buffering 语义：
+`TestClaudeCodeBridge_RealSubprocess` 连发三条消息，断言每条都拿到 init → text →
+result 的事件三元组（第三条会卡住，说明 bridge 没把多轮消息正确复用到同一根 stdin
+管道上）。
 
 ### 10.3 真 Claude 测试 prompt（5 个确定触发 AskUserQuestion）
 
@@ -1107,30 +972,32 @@ func TestIntegration_MockClaude_RoundTrip(t *testing.T) {
 
 ## 11. 配置
 
+`agents` 是**列表**（不是 map），每项一条 `AgentEntry`：
+
 ```yaml
 # configs/nightme.example.yaml
 agents:
-  claude:
-    bridge: claudecode
-    args: []
-    permission_mode: bypassPermissions  # bypassPermissions | auto | acceptEdits
-    ask_user_question:
-      dual_path: true                  # tool_use 拦截 + text fallback
-      card_first_option_recommended: true  # 高亮第一项为 Recommended
-      multi_select:
-        prefer_array: true             # 多选用 array 编码（不是 string）
-      # PreToolUse hook
-      hook_enabled: false
-      hook_path: ""
+  - name: claude
+    bridge: claude
+    command: "claude --dangerously-skip-permissions"
 
-  codex:
-    bridge: acp
-    args: []
-    
-  opencode:
-    bridge: acp
-    args: [acp]
+  - name: codex
+    bridge: codex
+    command: codex
+
+  - name: opencode
+    bridge: opencode
+    command: opencode
 ```
+
+| 字段 | 含义 |
+|---|---|
+| `name` | agent 标识（与内置 agent 同名则覆盖内置项）|
+| `bridge` | 由 nightme 按 `name` 推导，用户填的值被忽略 |
+| `command` | CLI 可执行文件的绝对路径 |
+
+权限模式、AskUserQuestion 双路兼容、卡片样式这些行为**不是配置项**——它们固定在
+bridge 里（`--permission-mode bypassPermissions` 见 `permissions.go`）。
 
 ## 12. Edge cases
 
@@ -1404,7 +1271,7 @@ bin/nightme logs --once -n 200 | grep -E "chatsession:|claudecode:|runtime:|feis
 | **真机**（spawn 真实 `claude`） | `--resume`、stream-json、MCP、多轮 stdin | **必须** `requireRealClaude(t)` |
 | **Mock**（`testdata/claude_mock.py` 等） | argv / 解析 / 协议单测 | **不要** skip — CI 必跑 |
 
-共享 helper：`internal/bridge/claudecode/testhelpers_realclaude_test.go`：
+共享 helper：`internal/bridge/claudecode/testhelpers_realclaude_unix_test.go`：
 
 ```go
 func requireRealClaude(t *testing.T) {
@@ -1423,11 +1290,11 @@ func requireRealClaude(t *testing.T) {
 
 当前真机入口（均已守卫）：
 
-- `fresh_liveness_test.go`
-- `repro_real_test.go`
-- `resume_fallback_test.go`
-- `resume_multi_turn_test.go`
-- `resume_paths_test.go`
+- `fresh_liveness_unix_test.go`
+- `repro_real_unix_test.go`
+- `resume_fallback_unix_test.go`
+- `resume_multi_turn_unix_test.go`
+- `resume_paths_unix_test.go`
 
 ### 7.2 本地环境必须完整
 
@@ -1475,17 +1342,17 @@ go test ./internal/bridge/claudecode/ -count=1 -timeout 240s \
 |------|------|
 | 默认 argv / `--print` | `internal/bridge/claudecode/permissions.go` |
 | Start + resume probe + `ErrResumeUnhealthy` | `internal/bridge/claudecode/claudecode.go` |
-| session / pumpStream / stderr | `internal/bridge/claudecode/session.go` |
+| session / pumpStream / stderr | `internal/bridge/claudecode/claudecode.go`、`internal/bridge/claudecode/stream.go` |
 | 事件解码 | `internal/bridge/claudecode/stream.go` |
-| AskUserQuestion 拦截 + `pendingAsk` + `armPendingAsk` + `SendPermission` 分支 | `internal/bridge/claudecode/claudecode.go`、`ask.go` |
+| AskUserQuestion 拦截 + `pendingAsk` + `armPendingAsk` + `SendPermission` 分支 | `internal/bridge/claudecode/claudecode.go`、`internal/bridge/claudecode/ask.go` |
 | `writeUserText`（text-fallback 应答回写） | `internal/bridge/claudecode/claudecode.go` |
 | `emitAskFromText` + `detectAskInText` | `internal/bridge/claudecode/ask.go` |
-| 运行时唯一构造器 | `internal/chatsession/agentsession.go` → `newAgentSessionRuntime` |
+| 运行时唯一构造器 | `internal/agentsession/session.go` → `newAgentSessionRuntime` |
 | restore | `FromAgentSessionEntry`（同上） |
 | Exited 接线 | `internal/chatsession/pump_events.go` |
-| 真机 skip helper | `testhelpers_realclaude_test.go` |
-| restore 回归 | `restore_respawn_test.go` → `TestFromAgentSessionEntry_InitializesEventQueue` |
-| AskUserQuestion 双路径回归 | `internal/bridge/claudecode/claudecode_test.go` → `TestPumpStream_AskUserQuestion` + `TestSendPermission_TextFallback_WritesUserText`（待补）|
+| 真机 skip helper | `testhelpers_realclaude_unix_test.go` |
+| restore 回归 | `internal/chatsession/restore_respawn_test.go` → `TestFromAgentSessionEntry_InitializesEventQueue` |
+| AskUserQuestion 双路径回归 | `internal/bridge/claudecode/claudecode_test.go` → `TestPumpStream_AskUserQuestion`；`internal/bridge/claudecode/ask_permission_test.go` → `TestSendPermission_TextFallback_WritesUserText` |
 
 ---
 

@@ -85,7 +85,7 @@ func RepoRoot(ctx context.Context, dir string, git GitRunner) (string, error) {
 // call this — local worktrees have no remote issue.
 //
 // The canonical Provider-abstraction design is in
-// docs/feat/F-50-git-provider.md.
+// docs/feat/F-gtw.md.
 func RemoteOriginURL(ctx context.Context, dir string, git GitRunner) (string, error) {
 	out, _, err := git.Run(ctx, dir, "remote", "get-url", "origin")
 	if err != nil {

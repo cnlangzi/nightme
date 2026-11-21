@@ -4,7 +4,7 @@
 // AgentSessions. It replaces v1.1's Session + Gateway BindingEntry
 // pair with a single coherent structure.
 //
-// See docs/SPEC.md v1.2 §1.1 and docs/feat/F-27-chatsession.md.
+// See docs/SPEC.md v1.2 §1.1 and docs/feat/F-chat-session.md.
 package chatsession
 
 import (
@@ -470,7 +470,7 @@ var ErrUnknownAgent = errors.New("chatsession: unknown agent")
 // to a single pool entry during NewActiveAgentSessions so the handler
 // can render a per-agent status instead of a bare count.
 //
-// See docs/feat/F-43-close-new-graceful-and-reset.md §5.2.
+// See docs/feat/F-chat-session.md §5.2.
 type ResetResult struct {
 	Agent       string // e.g. "claude", "codex"
 	Cwd         string // e.g. "/code/A"
@@ -668,7 +668,7 @@ func (cs *ChatSession) SetSelectedAgent(agent string) error {
 	// to look up the new AS on the next flush.
 	//
 	// KNOWN LIMITATION (Phase 0, deferred to "Prompt 投递稳定性
-	// 优化" PR — see docs/feat/message_lifecycle.md §8): if the old AS had an in-flight Prompt (currentPrompt
+	// 优化" PR — see docs/feat/F-53-message-prompt-lifecycle.md §8): if the old AS had an in-flight Prompt (currentPrompt
 	// != nil), it stays installed on the old AS after the switch.
 	// The new AS starts with currentPrompt=nil, so subsequent
 	// events on the new AS use the new anchor. The old Prompt's
@@ -1137,7 +1137,7 @@ func (cs *ChatSession) emitMessageDropped(msg Message) {
 // fired by `endPrompt` after the Prompt's terminal fields were
 // stamped. F-54 replaced it with cs.PromptEndBus.Publish(PromptEndedEvent{...});
 // subscribers register via PromptEndBus().Subscribe. See
-// docs/feat/F-54-event-bus.md for the migration rationale.
+// docs/SPEC.md for the migration rationale.
 
 // Emitter returns the outbound chokepoint bound to this chat
 // session. nil when no Emitter has been wired yet (e.g. before
@@ -1645,7 +1645,7 @@ const QueueMaxMsgs = 4096
 // Used by /close and /new to clear queued messages on a forced
 // buffer reset. SendBlocks failures DO NOT trigger this path —
 // failed messages stay Queued for natural retry (see
-// docs/feat/message_lifecycle.md §5.1).
+// docs/feat/F-53-message-prompt-lifecycle.md §5.1).
 func (cs *ChatSession) DropQueue() int {
 	cleared := cs.queue.Clear()
 	for _, m := range cleared {

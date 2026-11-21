@@ -294,7 +294,9 @@ The turn ends on the same terminator the chat path uses:
 
 If the process exits without `agent_end{isTerminal:true}`, the
 error message contains the agent name
-(`omp: exit without agent_end isTerminal=true...`) so /gtw
+(`agent omp: turn ended without a result event (reason=...)`;
+a non-graceful process exit surfaces as
+`omp: lifecycle exit <kind>: <err>`) so /gtw
 commit's recovery logic can attribute the failure correctly.
 
 A provider failure surfaces the same way: the translator marks

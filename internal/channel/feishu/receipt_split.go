@@ -20,7 +20,7 @@
 // to non-atomic blocks — paragraphs that exceed the limit on
 // their own without paragraph boundaries).
 //
-// Reference: docs/feat/F-37-multi-div-content-split.md.
+// Reference: docs/channel/feishu.md.
 package feishu
 
 import (

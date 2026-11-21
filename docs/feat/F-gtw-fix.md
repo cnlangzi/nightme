@@ -1,6 +1,6 @@
 # F-XX: `/gtw fix` — Assess-first dispatch + 分支硬失败
 
-> **Status**: 实现已落地（PR-A + PR-B 合并到 `fix-gtw-fix` 分支）
+> **Status**: 实现已落地
 >
 > **Related**: [`F-gtw.md`](./F-gtw.md)、[`F-59-gtw-label-bootstrap.md`](./F-59-gtw-label-bootstrap.md)、[`internal/command/gtw/README.md`](../../internal/command/gtw/README.md)（IM 排版规约）
 >

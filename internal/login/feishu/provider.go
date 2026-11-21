@@ -440,7 +440,7 @@ func DefaultAppPreset() *registration.AppPreset {
 //
 // The reaction *event* subscription is intentionally absent — nightme
 // does not design user-driven reactions as input (see
-// docs/feat/F-25-message-receipt.md), so the dispatcher swallows
+// docs/SPEC.md §2.7), so the dispatcher swallows
 // im.message.reaction.created_v1 events.
 func DefaultAddons() *registration.AppAddons {
 	preset := false

@@ -9,7 +9,7 @@
 // Why this exists: replaces the three single-observer callback fields
 // on ChatSession (eventHandler / onMessageState / onPromptEnd), which
 // were last-wins, single-subscriber, and had distinct parameter
-// shapes per event kind. See docs/feat/F-54-event-bus.md for the full
+// shapes per event kind. See docs/SPEC.md for the full
 // motivation, invariants, and migration steps.
 //
 // Semantics:

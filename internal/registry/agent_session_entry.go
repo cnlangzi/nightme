@@ -1,6 +1,6 @@
 // Package registry — AgentSessionEntry (v4 schema).
 //
-// See docs/SPEC.md v1.2 §1.2 and docs/feat/F-29-agent-session-pool.md
+// See docs/SPEC.md v1.2 §1.2 and docs/feat/F-chat-session.md
 // for the full model.
 //
 // v3 changes (SessionID rename + compaction removal):
@@ -70,14 +70,13 @@ type AgentSessionEntry struct {
 	Model         string    `json:"model,omitempty"`
 
 	// SessionID (already declared above) doubles as the dsh web
-	// sessionId for the dsh bridge. F-dsh-shared-host: at daemon
-	// restart, host.RecoverAll walks every entry, takes entries
-	// whose Agent == "dsh" with non-empty SessionID, and re-attaches
-	// each via session.create({sessionId: SessionID, cwd: Cwd}).
-	// dsh returns the same sessionId when given the original id +
-	// matching cwd (dsh-shared-host.md §2.6). Mismatch (different
-	// cwd or stale id) returns session-conflict → recovery logs +
-	// marks the session as fresh, the user's history is not lost.
+	// sessionId for the dsh bridge. The persisted id is replayed on
+	// the next spawn: the bridge sends session.create({sessionId:
+	// SessionID, cwd: Cwd}) and dsh returns the same session when the
+	// id + cwd match. A mismatch (different cwd or a stale id)
+	// returns session-conflict → the runtime clears the stale id and
+	// respawns fresh, the user's history is not lost.
+	// See docs/bridge/dsh.md.
 	//
 	// For non-dsh bridges (claudecode / opencode / pi), SessionID
 	// remains opaque; recover skips non-dsh entries.

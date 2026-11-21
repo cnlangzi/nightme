@@ -1,6 +1,6 @@
 // Package feishu — Layer 1 transient error retry
 //
-// 设计原则（详见 docs/channel/feishu.md §15.x / docs/feat/F-35-ratelimit.md §9）：
+// 设计原则（详见 docs/channel/feishu-reliability.md §9）：
 //   - 重试在 sendContent 外层做（包 send() 调用），限速在 SDK call 内层
 //   - 两层正交：F-35 limiter 防 230001；本模块防 transient 网络/超时抖动
 //   - 不重试 Feishu 业务错误码（230011/231003 terminal → 走 fallback；

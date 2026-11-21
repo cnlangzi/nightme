@@ -13,13 +13,13 @@
 
 | 功能 | 设计文档 |
 |------|----------|
-| Session 生命周期（`/cwd` 设 workspace；CLI 进程可重启）| [feat/F-runtime.md](./feat/F-runtime.md) |
-| 进程注册 / 清理 / Workspace 绑定 / Session 列表命令 | [feat/F-runtime.md](./feat/F-runtime.md) |
-| PTY 模拟 + CLI Transport + Agent Communication Modes | [feat/F-runtime.md](./feat/F-runtime.md) + [bridge/cli-transport.md](./bridge/cli-transport.md) |
-| 消息透传（Channel → AgentSession via Gateway）| [feat/F-message-flow.md](./feat/F-message-flow.md) |
-| 输出推送（AgentSession Events → Channel）| [feat/F-message-flow.md](./feat/F-message-flow.md) |
-| Command Gateway + Binding 表 + 职责隔离 | [feat/F-gateway.md](./feat/F-gateway.md) |
-| **多 channel 并行接入**（feishu + telegram + slack + ...）| [**CHANNEL.md**](./CHANNEL.md) |
+| Session 生命周期（`/cwd` 设 workspace；CLI 进程可重启）| [feat/F-chat-session.md](./feat/F-chat-session.md) |
+| 进程注册 / 清理 / Workspace 绑定 / Session 列表命令 | [feat/F-chat-session.md](./feat/F-chat-session.md) |
+| PTY 模拟 + CLI Transport + Agent Communication Modes | [bridge/cli-transport.md](./bridge/cli-transport.md) |
+| 消息透传（Channel → AgentSession via Gateway）| [feat/F-53-message-prompt-lifecycle.md](./feat/F-53-message-prompt-lifecycle.md) |
+| 输出推送（AgentSession Events → Channel）| [feat/F-53-message-prompt-lifecycle.md](./feat/F-53-message-prompt-lifecycle.md) |
+| Command Gateway + Binding 表 + 职责隔离 | [SPEC.md](./SPEC.md) |
+| **多 channel 并行接入**（feishu + telegram + slack + discord）| [**CHANNEL.md**](./CHANNEL.md) |
 | Channel interface 抽象 + Channel Registry（OCP 接入点）| [feat/F-08-channel-abstraction.md](./feat/F-08-channel-abstraction.md) + [CHANNEL.md](./CHANNEL.md) §4.1 |
 
 ## 2. ChatSession 会话模型
@@ -41,10 +41,14 @@
 |------|----------|
 | Claude Code Bridge | [bridge/claude.md](./bridge/claude.md) |
 | Codex App-Server Bridge | [bridge/codex.md](./bridge/codex.md) |
+| Generic ACP Bridge（ACP 协议通用 client 端）| [bridge/acp.md](./bridge/acp.md) |
 | OpenCode Bridge (ACP `opencode acp`) | [feat/F-OPENCODE-ACP-MIGRATION.md](./feat/F-OPENCODE-ACP-MIGRATION.md) |
 | OpenCode session 跑在用户配置的模型上（转发 opencode 自己选的模型）| [feat/F-OPENCODE-ACP-MIGRATION.md](./feat/F-OPENCODE-ACP-MIGRATION.md) |
+| Cursor CLI Bridge（ACP `cursor-agent acp`）| [bridge/cursor.md](./bridge/cursor.md) |
+| GitHub Copilot CLI Bridge（ACP `copilot --acp --stdio`）| [bridge/copilot.md](./bridge/copilot.md) |
 | Pi Coding Agent Bridge（传输 + 流式事件 + contextWindow）| [bridge/pi.md](./bridge/pi.md) |
-| dsh (DeepSeek Harness) Bridge | [feat/F-dsh-bridge.md](./feat/F-dsh-bridge.md) |
+| omp Bridge（`omp --mode rpc` NDJSON）| [bridge/omp.md](./bridge/omp.md) |
+| dsh (DeepSeek Harness) Bridge | [bridge/dsh.md](./bridge/dsh.md) |
 | dsh Chat-Session Event Translation 重构（To-dos / Tool 列表修复）| [feat/F-DSH-CHAT-001-event-state.md](./feat/F-DSH-CHAT-001-event-state.md) |
 | Channel interface 抽象 | [feat/F-08-channel-abstraction.md](./feat/F-08-channel-abstraction.md) |
 | Agent 抽象（`AgentSpec` / `Starter` interface + `Agent` runtime handle）| [feat/F-09-agent-abstraction.md](./feat/F-09-agent-abstraction.md) |
@@ -83,7 +87,26 @@
 | Telegram Polling / Webhook 双模式 | [channel/telegram.md](./channel/telegram.md) |
 | Telegram Inline Keyboard / CallbackQuery → Choice 归一化 | [channel/telegram.md](./channel/telegram.md) |
 
-### 4.3 Run 追踪（旁听出站消息）
+### 4.3 Slack IM
+
+| 功能 | 设计文档 |
+|------|----------|
+| Slack 占位体（stream）生命周期承载 rolling-log | [channel/slack.md](./channel/slack.md) §3 |
+| Slack OutboundKind → Block Kit 映射 | [channel/slack.md](./channel/slack.md) §4 |
+| Slack Thread 与群聊（`assistant.threads`）| [channel/slack.md](./channel/slack.md) §5 |
+| Slack 接入 wiring 清单 / 权限与机器人开通 | [channel/slack.md](./channel/slack.md) §6 / §7 |
+
+### 4.4 Discord IM
+
+| 功能 | 设计文档 |
+|------|----------|
+| Discord per-turn message flow（入站 + 出站）| [channel/discord.md](./channel/discord.md) §1 |
+| Discord chatID namespace（`dc_<channel_id>`）| [channel/discord.md](./channel/discord.md) §3 |
+| Discord Onboarding（`nightme login discord`）| [channel/discord.md](./channel/discord.md) §4 |
+| Discord Gateway 生命周期（Hello / Heartbeat / Identify / Resume）+ 重连策略 | [channel/discord.md](./channel/discord.md) §5 / §7 |
+| Discord OutboundKind → wire 映射 + 附件（CDN）+ reactions | [channel/discord.md](./channel/discord.md) §8 / §9 / §10 |
+
+### 4.5 Run 追踪（旁听出站消息）
 
 | 功能 | 设计文档 |
 |------|----------|
@@ -101,12 +124,12 @@
 
 | 功能 | 设计文档 |
 |------|----------|
-| `/gtw` 子命令集：`fix` / `assign` / `close` / `commit` / `push` / `pr` / `sync` | [feat/F-gtw.md](./feat/F-gtw.md) |
+| `/gtw` 子命令集：`plan` / `new` / `fix` / `assign` / `close` / `back` / `commit` / `push` / `pr` / `pr view` / `config` / `sync` / `abort` | [feat/F-gtw.md](./feat/F-gtw.md) |
 | `/gtw fix` Assess-first dispatch + `-y` 直接执行 | [feat/F-gtw-fix.md](./feat/F-gtw-fix.md) |
 | `/gtw assign` 贴上 / 摘掉队列标记 `nightme/assigned` | [feat/F-gtw-fix.md](./feat/F-gtw-fix.md) |
 | `/gtw push` 三分支流 | [feat/F-gtw.md](./feat/F-gtw.md) |
 | `/gtw push` + `/gtw pr` 联动 Readiness Gate | [feat/F-gtw.md](./feat/F-gtw.md) |
-| GitProvider 抽象 + 两阶段 Provider 探测 | [feat/F-50-git-provider.md](./feat/F-50-git-provider.md) |
+| GitProvider 抽象 + 两阶段 Provider 探测 | [feat/F-gtw.md](./feat/F-gtw.md) |
 
 ## 7. per-chat 行为开关
 
@@ -122,8 +145,8 @@
 |------|----------|
 | Workflow YAML + 引擎运行时架构（schema / 触发器 / 步骤 / 表达式 / wfe↔runtime 边界）| [WFE.md](./WFE.md) |
 | 5 类触发器：`schedule` / `pull_request` / `branch` / `issue` / `mention`（解析并展示，没有东西会触发它们）| [WFE.md](./WFE.md) §3 |
-| 三种 step：`message`（chat）/ `shell`（shell）/ `use`（action）| [WFE.md](./WFE.md) §5 |
-| 顶层字段（`name` / `args` / `goal` / `instruct` / `workspaces` / `on` / `jobs`）| [WFE.md](./WFE.md) §2 |
+| 四种 step：`message`（chat）/ `shell`（shell）/ `wait`（等待）/ `use`（action）| [WFE.md](./WFE.md) §5 |
+| 顶层字段（`title` / `args` / `instruct` / `workspaces` / `on` / `jobs`）| [WFE.md](./WFE.md) §2 |
 | `${{ ... }}` 表达式（`args.*` / `steps.*.outputs.*` / `needs.*.*` / `env.*` / `now`）| [WFE.md](./WFE.md) §6 |
 | `use` 步骤 = 扩展点（注册的 action；内置 + `~/.nightme/workflows/actions/*.sh`）| [WFE.md](./WFE.md) §5.3 |
 | `wfe` 库 = 纯库（无 I/O / 无 clock / 无 secrets；引擎算就绪集和判断点）| [WFE.md](./WFE.md) §8.2 |
@@ -139,7 +162,7 @@
 | 功能 | 设计文档 |
 |------|----------|
 | 个人 agent 分层（channel 传输 / observe 旁听 / 决策模型 / 聊天模型 / 策略）| [WFE.md](./WFE.md) §8.1 |
-| Workflow schema（`name` / `args` / `goal` / `instruct` / `workspaces` / `on` / `jobs`）| [WFE.md](./WFE.md) §2 |
+| Workflow schema（`title` / `args` / `instruct` / `workspaces` / `on` / `jobs`）| [WFE.md](./WFE.md) §2 |
 | 约束策略 `wfe.Policy`（CheckRun / CheckStep / CheckInstruct / CheckFinish / Remaining / Render）| [WFE.md](./WFE.md) §8.4 |
 | 工具（`resume` / `next` / `ntm_<command>` / `agent` / `instruct` / `answer_choice` / `ask_human` / `repo_status` / `wait` / `end_round` / `finish`）| [WFE.md](./WFE.md) §8.5 |
 | 两种模型能力：System 1 决策模型 + System 2 聊天模型 | [WFE.md](./WFE.md) §8.6 |
@@ -166,20 +189,21 @@ Workflow 文件位置：`~/.nightme/workflows/<name>/workflow.yml`，一个 bund
 详细设计见 [`CHANNEL.md`](./CHANNEL.md)。
 
 **核心能力**：
-- 所有有凭据的 channel（feishu / telegram / slack / 未来）自动并行启动，无需 `--channel` flag
+- 所有有凭据的 channel（feishu / telegram / slack / discord）自动并行启动，无需 `--channel` flag
 - 每个 channel 一个 `chatsession.Manager`（per-channel session 隔离，chatID 天然 namespaced）
 - 每个 channel 一个 `outbound.Emitter`（= 该 channel 自己，无 router 无 multi 概念）
 - ChatSession 不知道 channel（无 `channelName` 字段，持久化 schema 零变更）
-- Restore 懒加载：首次 `GetOrCreate(chatID)` 时 `csFile.GetByChat(chatID)` 命中即 hydrate
+- Restore 懒加载：首次 `GetOrCreate(chatID)` 时 `chatstore.Store.Bootstrap(chatID, primaryAgent)` create-or-load，命中即 hydrate
 - 入站 partition 隐式由 pump goroutine 闭包决定
-- 共享 components（`inbound.Router` / `command.Factory` / `shell.Dispatcher` / `gtw.Manager`）持 mgr per call
+- 共享 components（`inbound.Router` / `command.SlashCommandFactory` / `shell.Dispatcher` / `gtw.Manager`）持 mgr per call
 - OCP：接入新 channel = 1 个 adapter 文件 + 1 个 `init()` 注册到 `channel.Registry`
 
 **已实现的 channel**：
 - feishu（[channel/feishu-rendering.md](./channel/feishu-rendering.md)）
 - telegram（[channel/telegram.md](./channel/telegram.md)）
+- slack（[channel/slack.md](./channel/slack.md)）
+- discord（[channel/discord.md](./channel/discord.md)）
 
 **未来接入的 channel**（roadmap）：
-- slack
 - web (browser UI)
 - 任何符合 `channel.Channel` 接口的 IM 协议

@@ -700,9 +700,9 @@ dispatcher 检测到 `agent.ReviewRegistry.Get(name)` 报错(agent 名存在但�
 ## 7. 参考
 
 - [`F-gtw.md`](./F-gtw.md) §"agent invocation + unified reply sink" — `replyAgent` 设计的同源(架构 A 的启发)
-- [`F-dsh-bridge.md`](./F-dsh-bridge.md) — dsh 接入现状
+- [`bridge/dsh.md`](../bridge/dsh.md) — dsh 接入现状
 - [`docs/bridge/codex.md`](../bridge/codex.md) — codex `review` 子命令形态
-- [`docs/bridge/claudecode.md`](../bridge/claudecode.md) — claude `-p "/code-review"` print-mode 行为
+- [`docs/bridge/claude.md`](../bridge/claude.md) — claude `-p "/code-review"` print-mode 行为
 - [`docs/SPEC.md`](../SPEC.md) §3.1 / §3.4 — 跨层协议边界 + handle inbound 一致性
 - memory `agent-no-config-tampering` — 不注入 model / provider / credentials / 默认配置
 - memory `nightme-agent-info` — Adapter 走 struct 不走 interface

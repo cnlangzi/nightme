@@ -44,11 +44,10 @@ agents:
   - name: opencode
     bridge: opencode
     command: opencode
-    # Bridge spawns `opencode serve --hostname=127.0.0.1 --port=0`
-    # (the server picks a free port and prints the bound URL on
-    # stdout), then drives the 9 OpenAPI endpoints via plain HTTP +
-    # SSE. No PTY, no JSON-RPC envelope. See
-    # docs/feat/F-OPENCODE-opencode-bridge.md.
+    # Bridge spawns `opencode acp` under a PTY and drives the
+    # standard ACP JSON-RPC 2.0 wire (initialize / session/new /
+    # session/prompt / session/cancel / session/request_permission).
+    # See docs/bridge/acp.md.
 
   - name: pi
     bridge: pi

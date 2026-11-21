@@ -104,12 +104,12 @@ the two distinct surfaces that nightme operates on.
 `internal/command/commander.go` `commander.Dispatch`:
 
 ```go
-emitSlashState(cs, input.MessageID, agent.MessageQueued)
+chatsession.PublishMessageState(cs, input.MessageID, agent.MessageQueued)
 out, err := cmd.Handle(ctx, rt, cs, input)
-emitSlashState(cs, input.MessageID, agent.MessageDone)
+chatsession.PublishMessageState(cs, input.MessageID, agent.MessageDone)
 ```
 
-The helper (`emitSlashState`) adds the nil-guard for `cs == nil`,
+The helper (`chatsession.PublishMessageState`) adds the nil-guard for `cs == nil`,
 empty-MessageID, and `cs.MessageStateBus == nil`. The latter lets
 unit tests construct bare `&chatsession.ChatSession{}` without a
 fully-wired bus — production code always passes a session built
@@ -124,7 +124,7 @@ via `chatsession.New`, which wires the bus eagerly.
   factory matched, e.g. `/etc/passwd`): no emit. Unknown commands
   shouldn't get ⏳/✅ since they're not actually commands.
 
-These two paths return *before* the `emitSlashState` calls, so the
+These two paths return *before* the `chatsession.PublishMessageState` calls, so the
 contract falls out naturally without an explicit branch.
 
 ### Feishu rendering
@@ -247,12 +247,12 @@ ways:
 if _, matched := parseShell(ir.Text); !matched {
     return nil, false  // not a !cmd — fall through
 }
-emitShellState(cs, ir.MessageID, agent.MessageQueued)  // ⏳ synchronously, before goroutine
+chatsession.PublishMessageState(cs, ir.MessageID, agent.MessageQueued)  // ⏳ synchronously, before goroutine
 go d.runShell(cs, ir)                                  // work + reply + ✅ inside
 return &ShellOutput{Consumed: true}, true
 ```
 
-`runShell`'s first defer is `emitShellState(cs, ir.MessageID,
+`runShell`'s first defer is `chatsession.PublishMessageState(cs, ir.MessageID,
 agent.MessageDone)`. Because defers are LIFO, it runs LAST — after
 the inner panic-recovery defer. This guarantees ✅ fires on every
 exit path:
@@ -302,7 +302,7 @@ set:
 - `TestDispatcherHandle_NilCSSkipsEmit` — nil cs guard.
 - `TestDispatcherHandle_ZeroValueCSDoesNotPanic` — bare
   `&chatsession.ChatSession{}` (nil MessageStateBus) doesn't
-  crash; the nil-bus guard in `emitShellState` keeps the contract
+  crash; the nil-bus guard in `chatsession.PublishMessageState` keeps the contract
   local and test-friendly.
 - `TestDispatcherHandle_NilEmitter` — `NewDispatcher(nil)`
   doesn't panic; reply is silently dropped.

@@ -7,7 +7,7 @@
 //   - The Gateway never sees a channel-native event format.
 //   - The agent runtime doesn't know which channel is on the wire.
 //
-// See docs/feat/F-26-gateway-hub.md for the design rationale and
+// See docs/SPEC.md §1 for the design rationale and
 // the full hub-and-spoke architecture diagram.
 package messages
 

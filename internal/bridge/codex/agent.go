@@ -23,7 +23,7 @@
 // The process can carry many turns. EventAgentDone marks the end of
 // one turn but does NOT close the events channel; only process exit
 // (or Close) does that. This mirrors the contract documented in
-// docs/feat/F-32-pi-rpc-bridge.md §3.3 and lets ChatSession's
+// docs/bridge/pi.md §3.3 and lets ChatSession's
 // readpump continue reading across many turns on the same AS.
 package codex
 

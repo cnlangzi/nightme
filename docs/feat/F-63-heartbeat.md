@@ -630,8 +630,8 @@ buildReceiptCard 的 switch 仍允许它落到后半部分分支(条件已扩为
 
 ## 10. 关联文档
 
-- [`F-runtime`](./F-runtime.md) — ChatSession / AgentSession 边界,handler / policy 链所在
-- [`F-message-flow`](./F-message-flow.md) — 全链路端到端切片,确认观测点位于何处
+- [`F-chat-session`](./F-chat-session.md) — ChatSession / AgentSession 边界
+- [`F-53-message-prompt-lifecycle`](./F-53-message-prompt-lifecycle.md) — 消息 / Prompt 生命周期
 - [`F-08-channel-abstraction`](./F-08-channel-abstraction.md) — `Channel` 接口为何不变(走 OutboundMessage 主流水线)
 - [`F-CLAUDE-PRINT-002-statusbar-refactor`](./F-CLAUDE-PRINT-002-statusbar-refactor.md) — 相邻的"中央观测 + per-channel 渲染"模式(StatusBarStampPolicy + OutboundMessage.StatusBar)
 - [`F-53-message-prompt-lifecycle`](./F-53-message-prompt-lifecycle.md) — `Message`/`Prompt`/`endPrompt` 语义源头,确认 heartbeat 不动这套语义

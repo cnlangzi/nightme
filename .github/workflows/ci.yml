@@ -915,7 +915,7 @@ jobs:
           #             (per docs/bridge/pi.md:271)
           #   dsh     → @deepseek-ai/dsh
           #             (per internal/bridge/dsh/starter.go:82
-          #              Detect() error message + F-dsh-bridge.md).
+          #              Detect() error message + docs/bridge/dsh.md).
           #             Temporarily NOT installed (2026-09-22):
           #             deepseek published @deepseek-ai/dsh-web-app@
           #             0.1.5-rc.3 which transitively depends on

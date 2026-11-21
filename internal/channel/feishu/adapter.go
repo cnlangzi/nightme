@@ -152,7 +152,7 @@ type Adapter struct {
 
 	// limiter 全局共享 token bucket（F-35）。所有出口 SDK call 前
 	// 都过 Wait()，预防触发飞书 230001 / 230020 限流错误码。
-	// 默认 5 QPS / burst 1（保守）。详见 docs/feat/F-35-ratelimit.md。
+	// 默认 5 QPS / burst 1（保守）。详见 docs/channel/feishu-reliability.md。
 	limiter *Limiter
 
 	// mu is the adapter's state mutex. It guards:
@@ -1867,8 +1867,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 	// "✶ Compacting conversation…" thread reply, no channel side
 	// effect. The count surfaces later via StatusBar (F-49
 	// compaction tracking removed — the runtime dropped its
-	// compactionCount bookkeeping). See docs/feat/F-49-compaction-counter.md
-	// §1.3 / §1.9.
+	// compactionCount bookkeeping). See docs/channel/feishu.md.
 
 	case messages.OutInit:
 		// F-44 follow-up: OutInit is the agent's bootstrap signal —
@@ -3204,8 +3203,7 @@ func renderHeartbeatHeader(hb *messages.HeartbeatSnapshot) string {
 // receiptFor on cache miss. Removed in F-42 — receipts are now
 // lazy-created with their actual content (OutReply text or OutTask*
 // list) by ensureReceiptForReply / ensureReceiptForTask, never
-// with a placeholder. See docs/feat/F-42-lazy-receipt-creation.md
-// §1.1 for the rationale.
+// with a placeholder. See docs/channel/feishu.md for the rationale.
 
 // SetLogger swaps the structured logger used for outgoing-message
 // traces. Pass nil to fall back to slog.Default().

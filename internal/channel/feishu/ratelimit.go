@@ -4,7 +4,7 @@
 // 出口 API（send / reply / patch / reaction / upload）。所有出口
 // SDK call 前都过 Wait()，预防触发飞书 230001 / 230020 等限流错误码。
 //
-// 设计原则（详见 docs/feat/F-35-ratelimit.md）：
+// 设计原则（详见 docs/channel/feishu-reliability.md）：
 //   - 单桶覆盖所有 API（5 类文档限速完全一致：50 QPS / 1000 QPM per app）
 //   - 默认 burst=1，无突发（贴飞书硬上限，不留弹性）
 //   - 默认 rate_per_sec=5（per-user 硬限；nightme 热路径受此约束）

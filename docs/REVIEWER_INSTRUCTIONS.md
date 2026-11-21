@@ -1,7 +1,6 @@
 # Reviewer strict-grounding rules (drop into `/review` prompt)
 
-> For `dsh /review` on `/Users/geax/code/geax/github.com/cnlangzi/nightme.nightme/fix-gtw-fix`
-> (gtw F-XX branch, fix-gtw-fix).
+> For `dsh /review` on the branch under review.
 
 A finding is ONLY valid when all three are true:
 

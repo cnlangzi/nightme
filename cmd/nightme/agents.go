@@ -134,7 +134,7 @@ func init() {
 
 	// pi — the long-lived `pi --mode rpc` JSONL bridge. The agent
 	// driver is the @earendil-works/pi-coding-agent CLI; see
-	// docs/feat/F-32-pi-rpc-bridge.md for wire details and the
+	// docs/bridge/pi.md for wire details and the
 	// F-32 MVP scope. User config can override the command path;
 	// the structured bridge only works for builtin registration,
 	// not for the PTY fallback in agentregistry.Build.

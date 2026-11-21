@@ -1,6 +1,6 @@
 // Package pty wraps aymanbagabas/go-pty behind a minimal Transport
 // interface so the rest of nightme does not depend on the underlying
-// library. See docs/feat/F-04-pty-simulation.md and F-19-cli-bridge.md.
+// library. See docs/bridge/cli-transport.md.
 package pty
 
 import (

@@ -110,7 +110,7 @@ type muxQuestionRequested struct {
 // request. `Header` is the short label; `Question` is
 // the full text; `Options` are the multiple-choice options.
 //
-// BUG FIX (F-dsh-shared-host §6 #4): pre-fix this used
+// BUG FIX (see docs/bridge/dsh.md): pre-fix this used
 // `[]string` (just labels). Canonical wire shape is
 // `[]AskUserQuestionOption{label,description?}` per dsh-api.md
 // §3.4.9 — objects, not bare strings. dsh 0.1.0-rc.6 happened to
@@ -534,7 +534,7 @@ type ToolEventView struct {
 type projectionEnvelope struct {
 	SessionID string `json:"sessionId,omitempty"`
 	Seq       int64  `json:"seq,omitempty"`
-	// BUG FIX (F-dsh-shared-host §6 #1): the wire field is "key"
+	// BUG FIX (see docs/bridge/dsh.md): the wire field is "key"
 	// (dsh-api.md §3.4.3), not "projection". Pre-fix this struct
 	// used `json:"projection"` so dsh's mux frames never matched
 	// the decoder (dsh 0.1.0-rc.6 happened to also accept the

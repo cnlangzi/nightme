@@ -817,7 +817,7 @@ echo 不入 `channel.Registry`（`Deps.NewChannels` 仍可被测试覆盖）。�
 - `summary`：跨 channel 归一化的健康视图（`channel.HealthSummary`）：连接状态、链路是否已验证、最后错误、最后一次成功入站/出站时间。
 - `health`：该 channel 自己的 `HealthSnapshot()` 原始载荷，未做任何改写，供排障查看 channel 特有细节。
 
-`nightme doctor` 按 channel 分节渲染 `summary`；`--json` 同时输出 `summary` 与原始载荷。CLI 只依赖归一化视图，不解析任何 channel 特有的结构。
+`nightme doctor` 先渲染 CONFIG 段（config.yaml 的检查结果），再按 channel 分节渲染 `summary`；`--json` 输出一个对象，含 `config` / `daemon` 两节和顶层的 `channels` 数组（每个元素带 `summary` 与原始载荷）。CLI 只依赖归一化视图，不解析任何 channel 特有的结构。
 
 ### 11.3 Channel 动态启停
 

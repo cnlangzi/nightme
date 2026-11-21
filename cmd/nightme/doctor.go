@@ -1,11 +1,12 @@
 // Package main — `nightme doctor` subcommand.
 //
-// Reads the health of every running channel from the daemon via the
-// daemoncontrol "health" RPC, then prints a human-readable status
-// report — one section per channel. Designed to be the first stop
-// when a user reports "消息nightme没收到" — it shows whether the
-// channel is connected, whether the link was ever verified, when the
-// last inbound event arrived, and the most recent error if any.
+// Checks the config file, reads the health of every running channel
+// from the daemon via the daemoncontrol "health" RPC, then prints a
+// human-readable status report — a CONFIG section and one section per
+// channel. Designed to be the first stop when a user reports "消息nightme没收到"
+// — it shows whether the config file is sane, whether the channel is
+// connected, whether the link was ever verified, when the last
+// inbound event arrived, and the most recent error if any.
 //
 // Usage:
 //
@@ -33,17 +34,29 @@ import (
 	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/daemoncontrol"
+	nmerrors "github.com/cnlangzi/nightme/internal/errors"
 )
+
+// configRestartNote tells the user that the file they just fixed is
+// not the file the running daemon reads.
+const configRestartNote = "the running daemon keeps the config it loaded at start — restart it after fixing the file"
 
 func newDoctorCmd() *cobra.Command {
 	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "doctor",
-		Short: "Diagnose the running daemon (per-channel link state, inbound/outbound liveness)",
-		Long: `Print the health of every running channel. Connects to the running
-daemon via its IPC socket (paths.Socket under cfg.Paths.DataDir) and
-asks for the "health" RPC. If the daemon is not running, prints a
-one-line error.
+		Short: "Diagnose the config file and the running daemon (per-channel link state, inbound/outbound liveness)",
+		Long: `Print the health of every running channel and check the config file.
+
+The report starts with a CONFIG section: the config file is parsed and
+checked against the schema. A YAML syntax error, a value of the wrong
+type and a key the schema does not know are all reported with the line
+they are on. The check is read-only — doctor never writes the config
+file. A config file with problems makes the command exit with code 2.
+
+Then the daemon is asked for the health of every running channel
+through its IPC socket (paths.Socket under cfg.Paths.DataDir). If the
+daemon is not running, a DAEMON section says so.
 
 Each channel gets its own section:
   - status: connected, started (link not verified) or disconnected
@@ -58,6 +71,9 @@ The channel-specific payload (WS lifecycle events, gateway session,
 poll offset, …) is adapter-specific; --json prints it verbatim next
 to the normalized summary.
 
+--json prints the whole report as one object: the "config" and
+"daemon" sections, and the "channels" array.
+
 Examples:
   nightme doctor
   nightme doctor --json`,
@@ -69,12 +85,28 @@ Examples:
 	return cmd
 }
 
+// runDoctor is the command's entry point: it checks the config file,
+// asks the daemon for the health of every running channel and reports
+// both.
+//
+// The config file is read, never written — a diagnostic command has no
+// business changing the thing it diagnoses. That is why the config is
+// loaded with config.Load and not with config.LoadDefault: the latter
+// probes the built-in agents and writes the one it finds back into the
+// file.
 func runDoctor(out io.Writer, jsonOut bool) error {
-	cfg, paths, err := loadLifecyclePaths()
+	path := config.DefaultPath()
+	report := config.Inspect(path)
+	// A config file that does not parse leaves nothing to configure
+	// the daemon with — the shipped defaults stand in so doctor can
+	// still look for a socket. The CONFIG section says what is wrong
+	// with the file.
+	cfg, _ := loadConfigOrDefaults(path)
+	paths, err := daemoncontrol.ResolvePaths(cfg.Paths.DataDir)
 	if err != nil {
 		return err
 	}
-	return runDoctorWith(out, jsonOut, cfg, paths, defaultDoctorRPCs())
+	return runDoctorWith(out, jsonOut, report, cfg, paths, defaultDoctorRPCs())
 }
 
 // doctorRPCs are the daemoncontrol calls doctor makes. Tests swap in
@@ -92,24 +124,41 @@ func defaultDoctorRPCs() doctorRPCs {
 }
 
 // runDoctorWith is the testable core of runDoctor: it takes the
-// config, the resolved paths and the RPC seams instead of reaching
-// for them itself.
-func runDoctorWith(out io.Writer, jsonOut bool, cfg *config.Config, paths daemoncontrol.Paths, rpcs doctorRPCs) error {
+// config check, the config, the resolved paths and the RPC seams
+// instead of reaching for them itself.
+func runDoctorWith(out io.Writer, jsonOut bool, report config.Report, cfg *config.Config, paths daemoncontrol.Paths, rpcs doctorRPCs) error {
 	payload, err := rpcs.health(paths.Socket, 5*time.Second)
 	if err != nil {
 		// The daemon is unreachable — which is precisely when the
 		// crash capture is worth reading. Print it BEFORE returning
 		// the RPC error, otherwise the one command a user runs when
 		// "the daemon is gone" tells them nothing about why.
-		if summary, ok := crashCaptureSummary(cfg, time.Time{}); ok {
-			fmt.Fprint(out, summary)
+		if jsonOut {
+			// The JSON document is the whole of stdout: a capture
+			// section after it would make the output unparseable.
+			if jerr := writeDoctorJSON(out, report, false, err.Error(), daemoncontrol.HealthPayload{}); jerr != nil {
+				return jerr
+			}
+		} else {
+			if werr := writeConfigSection(out, report); werr != nil {
+				return werr
+			}
+			if werr := writeDaemonSection(out, err); werr != nil {
+				return werr
+			}
+			if summary, ok := crashCaptureSummary(cfg, time.Time{}); ok {
+				fmt.Fprint(out, summary)
+			}
 		}
-		return fmt.Errorf("daemon health RPC: %w", err)
+		return doctorError(report, fmt.Errorf("daemon health RPC: %w", err))
 	}
 	if jsonOut {
-		return writeDoctorJSON(out, payload)
+		if err := writeDoctorJSON(out, report, true, "", payload); err != nil {
+			return err
+		}
+		return doctorError(report, nil)
 	}
-	if err := writeDoctorText(out, payload); err != nil {
+	if err := writeDoctorText(out, report, payload); err != nil {
 		return err
 	}
 	// A live daemon can still be the survivor of an earlier crash
@@ -128,7 +177,22 @@ func runDoctorWith(out io.Writer, jsonOut bool, cfg *config.Config, paths daemon
 		}
 		fmt.Fprint(out, renderCrashCapture(path, info, startedAt))
 	}
-	return nil
+	return doctorError(report, nil)
+}
+
+// doctorError is what the command ends with.
+//
+// A broken config file and an absent daemon are two failures and the
+// exit code can only carry one. The config file wins: it is the thing
+// the user has to fix, and the daemon's absence is in the report
+// either way — the DAEMON section in text, the "daemon" object in
+// JSON.
+func doctorError(report config.Report, daemonErr error) error {
+	if len(report.Diagnostics) > 0 {
+		return nmerrors.New(nmerrors.CodeConfigError,
+			fmt.Sprintf("doctor: the config file has %s", configStatus(report)))
+	}
+	return daemonErr
 }
 
 // captureFile returns the crash capture's path and file info when it
@@ -256,26 +320,73 @@ func crashHeadline(path string) string {
 	return first
 }
 
-// writeDoctorJSON pretty-prints the payload. The Health field of
-// every entry is a json.RawMessage; we don't round-trip decode so the
-// user sees the field shape the daemon actually emitted.
-func writeDoctorJSON(out io.Writer, payload daemoncontrol.HealthPayload) error {
-	enc := json.NewEncoder(out)
-	enc.SetIndent("", "  ")
-	return enc.Encode(payload)
+// doctorJSON is the --json shape of the report.
+//
+// The channels stay at the top level: a consumer that reads
+// `jq .channels[]` keeps working, and the two new sections are what
+// the doctor knows when the daemon does not answer.
+type doctorJSON struct {
+	Config   doctorConfigJSON              `json:"config"`
+	Daemon   doctorDaemonJSON              `json:"daemon"`
+	Channels []daemoncontrol.ChannelHealth `json:"channels"`
 }
 
-// writeDoctorText prints one section per running channel. Every
-// section is rendered from the channel's normalized health summary —
-// the raw payload behind it is adapter-specific and is only available
-// through --json.
-func writeDoctorText(out io.Writer, payload daemoncontrol.HealthPayload) error {
-	if len(payload.Channels) == 0 {
-		fmt.Fprintln(out, "NO CHANNELS RUNNING")
-		return nil
+// doctorConfigJSON is the state of the config file: where it is,
+// whether it is healthy and every problem it has.
+type doctorConfigJSON struct {
+	Path        string              `json:"path"`
+	Status      string              `json:"status"`
+	Diagnostics []config.Diagnostic `json:"diagnostics"`
+}
+
+// doctorDaemonJSON says whether the daemon answered the health RPC.
+type doctorDaemonJSON struct {
+	Reachable bool   `json:"reachable"`
+	Error     string `json:"error"`
+}
+
+// writeDoctorJSON pretty-prints the report. The Health field of
+// every channel entry is a json.RawMessage; we don't round-trip decode
+// so the user sees the field shape the daemon actually emitted.
+func writeDoctorJSON(out io.Writer, report config.Report, reachable bool, daemonErr string, payload daemoncontrol.HealthPayload) error {
+	channels := payload.Channels
+	if channels == nil {
+		channels = []daemoncontrol.ChannelHealth{}
 	}
+	diagnostics := report.Diagnostics
+	if diagnostics == nil {
+		diagnostics = []config.Diagnostic{}
+	}
+	doc := doctorJSON{
+		Config: doctorConfigJSON{
+			Path:        report.Path,
+			Status:      configJSONStatus(report),
+			Diagnostics: diagnostics,
+		},
+		Daemon:   doctorDaemonJSON{Reachable: reachable, Error: daemonErr},
+		Channels: channels,
+	}
+	enc := json.NewEncoder(out)
+	enc.SetIndent("", "  ")
+	return enc.Encode(doc)
+}
+
+// writeDoctorText prints the report: the config check first, then one
+// section per running channel. Every section is rendered from the
+// channel's normalized health summary — the raw payload behind it is
+// adapter-specific and is only available through --json.
+func writeDoctorText(out io.Writer, report config.Report, payload daemoncontrol.HealthPayload) error {
+	if err := writeConfigSection(out, report); err != nil {
+		return err
+	}
+	fmt.Fprintln(out)
 
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	if len(payload.Channels) == 0 {
+		fmt.Fprintln(tw, "NO CHANNELS RUNNING")
+		return tw.Flush()
+	}
+
 	now := time.Now()
 	for i, entry := range payload.Channels {
 		if i > 0 {
@@ -301,6 +412,80 @@ func writeDoctorText(out io.Writer, payload daemoncontrol.HealthPayload) error {
 		}
 	}
 	return tw.Flush()
+}
+
+// writeConfigSection prints the CONFIG section: the state of the
+// config file and every problem it has.
+func writeConfigSection(out io.Writer, report config.Report) error {
+	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	fmt.Fprintf(tw, "CONFIG %s\n", report.Path)
+	fmt.Fprintf(tw, "  status:\t%s\n", configStatus(report))
+	for _, d := range report.Diagnostics {
+		if label := diagnosticLabel(d); label != "" {
+			fmt.Fprintf(tw, "  %s\t%s\n", label, d.Message)
+			continue
+		}
+		// A problem without a place in the file has no line to
+		// point at — the message says it all.
+		fmt.Fprintf(tw, "  %s\n", d.Message)
+	}
+	if len(report.Diagnostics) > 0 {
+		fmt.Fprintf(tw, "  note:\t%s\n", configRestartNote)
+	}
+	return tw.Flush()
+}
+
+// writeDaemonSection prints the DAEMON section: the daemon is not
+// there, and why the doctor could not reach it.
+func writeDaemonSection(out io.Writer, err error) error {
+	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "")
+	fmt.Fprintln(tw, "DAEMON")
+	fmt.Fprintf(tw, "  status:\tunreachable\n")
+	fmt.Fprintf(tw, "  error:\t%s\n", err)
+	return tw.Flush()
+}
+
+// configStatus renders the state of the config file: a missing file
+// is not a problem, and a file with problems says how many.
+func configStatus(report config.Report) string {
+	switch {
+	case !report.Exists:
+		return "not found"
+	case len(report.Diagnostics) == 0:
+		return "ok"
+	case len(report.Diagnostics) == 1:
+		return "1 problem"
+	default:
+		return fmt.Sprintf("%d problems", len(report.Diagnostics))
+	}
+}
+
+// configJSONStatus renders the state of the config file for the JSON
+// output: a fixed word, not the count the text output shows.
+func configJSONStatus(report config.Report) string {
+	switch {
+	case !report.Exists:
+		return "not found"
+	case len(report.Diagnostics) == 0:
+		return "ok"
+	default:
+		return "error"
+	}
+}
+
+// diagnosticLabel renders where a problem is: "line 12:" or
+// "line 12:5:" — the column is only there when the problem has one.
+// A problem without a place in the file has no label.
+func diagnosticLabel(d config.Diagnostic) string {
+	switch {
+	case d.Line <= 0:
+		return ""
+	case d.Column <= 0:
+		return fmt.Sprintf("line %d:", d.Line)
+	default:
+		return fmt.Sprintf("line %d:%d:", d.Line, d.Column)
+	}
 }
 
 // decodeHealthSummary decodes one channel's normalized summary. A

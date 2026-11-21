@@ -40,10 +40,13 @@ func init() {
 }
 
 func main() {
-	cfg, err := config.LoadDefault()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "Error:", err)
-		os.Exit(1)
+	cfg, loadErr := loadConfigOrDefaults(config.DefaultPath())
+	if loadErr != nil && !isDaemonChild(os.Args) {
+		// A config file that does not parse is what `nightme doctor`
+		// exists to report: the process has to reach the command. The
+		// daemon child keeps its stderr quiet — that stream is the
+		// crash capture.
+		fmt.Fprintln(os.Stderr, "Warning:", loadErr)
 	}
 	// The agent CLIs nightme spawns keep their client telemetry off
 	// unless the config says otherwise. See internal/bridge/telemetry.
@@ -73,4 +76,28 @@ func main() {
 	slog.SetDefault(logger)
 	defer func() { _ = logging.Close(logger) }()
 	Execute(logger)
+}
+
+// loadConfigOrDefaults loads the config at path. A file that cannot be
+// parsed is not the end of the road: the shipped defaults stand in and
+// the error that made them necessary comes back with them. The
+// commands that need a valid config load it themselves and fail with
+// the parse error; the ones that only look at it — `nightme doctor`
+// above all — report it and carry on.
+//
+// The config is loaded, not loaded-and-defaulted: LoadDefault probes
+// the built-in agents and writes the one it finds into the user's
+// config file, and a diagnostic must not change the thing it
+// diagnoses. The commands that need a primary agent (the daemon start,
+// the daemon child, `nightme run`, `nightme login`) load the config
+// themselves and persist the agent they picked.
+func loadConfigOrDefaults(path string) (*config.Config, error) {
+	cfg, err := config.Load(path)
+	if err == nil {
+		return cfg, nil
+	}
+	// Load("") applies the shipped defaults and reads no file, so it
+	// cannot fail.
+	fallback, _ := config.Load("")
+	return fallback, err
 }

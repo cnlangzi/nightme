@@ -157,7 +157,7 @@ func TestRunDoctor_CaptureOwnerFollowsTheRunningDaemon(t *testing.T) {
 				fake.healthErr = errors.New("nightme daemon is not running")
 			}
 			var out strings.Builder
-			err := runDoctorWith(&out, false, cfgWithDataDir(dir), daemoncontrol.Paths{}, fake.rpcs())
+			err := runDoctorWith(&out, false, healthyConfigReport(), cfgWithDataDir(dir), daemoncontrol.Paths{}, fake.rpcs())
 			if tc.daemonUp && err != nil {
 				t.Fatalf("doctor returned %v, want nil", err)
 			}
@@ -180,7 +180,7 @@ func TestRunDoctor_AsksForTheDaemonStartTimeOnlyWithACapture(t *testing.T) {
 
 	fake := &fakeDoctorRPCs{startedAt: time.Now()}
 	var out strings.Builder
-	if err := runDoctorWith(&out, false, cfgWithDataDir(dir), daemoncontrol.Paths{}, fake.rpcs()); err != nil {
+	if err := runDoctorWith(&out, false, healthyConfigReport(), cfgWithDataDir(dir), daemoncontrol.Paths{}, fake.rpcs()); err != nil {
 		t.Fatalf("doctor returned %v, want nil", err)
 	}
 	if fake.healthCalls != 1 || fake.statusCalls != 0 {
@@ -193,7 +193,7 @@ func TestRunDoctor_AsksForTheDaemonStartTimeOnlyWithACapture(t *testing.T) {
 	}
 	fake = &fakeDoctorRPCs{startedAt: time.Now()}
 	out.Reset()
-	if err := runDoctorWith(&out, false, cfgWithDataDir(dir), daemoncontrol.Paths{}, fake.rpcs()); err != nil {
+	if err := runDoctorWith(&out, false, healthyConfigReport(), cfgWithDataDir(dir), daemoncontrol.Paths{}, fake.rpcs()); err != nil {
 		t.Fatalf("doctor returned %v, want nil", err)
 	}
 	if fake.healthCalls != 1 || fake.statusCalls != 1 {
@@ -266,7 +266,7 @@ func TestRunDoctor_HeadlineMatchesTheTitledRun(t *testing.T) {
 	}
 	fake := &fakeDoctorRPCs{startedAt: now.Add(-time.Minute)}
 	var out strings.Builder
-	if err := runDoctorWith(&out, false, cfgWithDataDir(dir), daemoncontrol.Paths{}, fake.rpcs()); err != nil {
+	if err := runDoctorWith(&out, false, healthyConfigReport(), cfgWithDataDir(dir), daemoncontrol.Paths{}, fake.rpcs()); err != nil {
 		t.Fatalf("doctor returned %v, want nil", err)
 	}
 	if !strings.Contains(out.String(), "CRASH CAPTURE (the running daemon wrote this") {

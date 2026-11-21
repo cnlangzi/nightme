@@ -90,7 +90,7 @@ func newRootCmd() (*cobra.Command, *cmdRegistry) {
 	reg.add(newSTTCmd(), "stt ...         inspect the nightme-stt worker")
 
 	addLifecycleCommands(reg)
-	addUnixOnlyCommands(reg)
+	reg.add(newDoctorCmd(), "doctor          diagnose the running daemon")
 	return root, reg
 }
 
@@ -103,8 +103,7 @@ func newRootCmd() (*cobra.Command, *cmdRegistry) {
 // the matching files in internal/daemoncontrol.
 //
 // Kept here in root.go so a single edit point covers both Unix
-// and Windows; root_unix.go and root_windows.go only differ in
-// what they add on top (Unix: doctor; Windows: nothing extra).
+// and Windows.
 //
 // All four lifecycle commands go through addNoTray: the tray has
 // its own Restart / Stop / Status items that operate on the

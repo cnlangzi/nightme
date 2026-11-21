@@ -293,6 +293,17 @@ func TestInspect_DuplicateKey(t *testing.T) {
 	}
 }
 
+// TestInspect_MergeKeyIsNotAnUnknownKey asserts a merge key is yaml's
+// own and not a mistake of the user: the loader resolves it, so the
+// check must not call the file broken.
+func TestInspect_MergeKeyIsNotAnUnknownKey(t *testing.T) {
+	path := writeInspectConfig(t, "agents:\n  - &base\n    name: a\n    bridge: claude\n  - <<: *base\n    name: c\n")
+	report := Inspect(path)
+	if len(report.Diagnostics) != 0 {
+		t.Errorf("diagnostics = %v, want none", report.Diagnostics)
+	}
+}
+
 // TestInspect_ReportsEveryProblem asserts the report carries all of
 // them — a user fixes the file in one pass.
 func TestInspect_ReportsEveryProblem(t *testing.T) {

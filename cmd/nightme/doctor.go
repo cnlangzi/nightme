@@ -97,16 +97,11 @@ Examples:
 func runDoctor(out io.Writer, jsonOut bool) error {
 	path := config.DefaultPath()
 	report := config.Inspect(path)
-	cfg, err := config.Load(path)
-	if err != nil {
-		// A config file that does not parse leaves nothing to
-		// configure the daemon with — fall back to the defaults so
-		// doctor can still look for a socket.
-		cfg, err = config.Load("")
-		if err != nil {
-			return err
-		}
-	}
+	// A config file that does not parse leaves nothing to configure
+	// the daemon with — the shipped defaults stand in so doctor can
+	// still look for a socket. The CONFIG section says what is wrong
+	// with the file.
+	cfg, _ := loadConfigOrDefaults(path)
 	paths, err := daemoncontrol.ResolvePaths(cfg.Paths.DataDir)
 	if err != nil {
 		return err
@@ -139,6 +134,8 @@ func runDoctorWith(out io.Writer, jsonOut bool, report config.Report, cfg *confi
 		// the RPC error, otherwise the one command a user runs when
 		// "the daemon is gone" tells them nothing about why.
 		if jsonOut {
+			// The JSON document is the whole of stdout: a capture
+			// section after it would make the output unparseable.
 			if jerr := writeDoctorJSON(out, report, false, err.Error(), daemoncontrol.HealthPayload{}); jerr != nil {
 				return jerr
 			}
@@ -149,9 +146,9 @@ func runDoctorWith(out io.Writer, jsonOut bool, report config.Report, cfg *confi
 			if werr := writeDaemonSection(out, err); werr != nil {
 				return werr
 			}
-		}
-		if summary, ok := crashCaptureSummary(cfg, time.Time{}); ok {
-			fmt.Fprint(out, summary)
+			if summary, ok := crashCaptureSummary(cfg, time.Time{}); ok {
+				fmt.Fprint(out, summary)
+			}
 		}
 		return doctorError(report, fmt.Errorf("daemon health RPC: %w", err))
 	}
@@ -183,9 +180,13 @@ func runDoctorWith(out io.Writer, jsonOut bool, report config.Report, cfg *confi
 	return doctorError(report, nil)
 }
 
-// doctorError is what the command ends with: the config problems
-// first — they are the thing the user has to fix — and the daemon's
-// absence second.
+// doctorError is what the command ends with.
+//
+// A broken config file and an absent daemon are two failures and the
+// exit code can only carry one. The config file wins: it is the thing
+// the user has to fix, and the daemon's absence is in the report
+// either way — the DAEMON section in text, the "daemon" object in
+// JSON.
 func doctorError(report config.Report, daemonErr error) error {
 	if len(report.Diagnostics) > 0 {
 		return nmerrors.New(nmerrors.CodeConfigError,

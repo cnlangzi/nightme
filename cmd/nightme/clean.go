@@ -75,10 +75,7 @@ func runCleanWithOptions(out io.Writer, all bool) error {
 		}
 		// --all must still be useful when config.yaml is corrupt. Fall back
 		// to the shipped defaults, then continue using the default paths.
-		cfg, err = config.Load("")
-		if err != nil {
-			return fmt.Errorf("clean: load default config after corrupt config: %w", err)
-		}
+		cfg, _ = loadConfigOrDefaults(config.DefaultPath())
 	}
 
 	logPath, err := logging.Path(cfg)

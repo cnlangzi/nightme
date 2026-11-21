@@ -35,6 +35,88 @@ func brokenConfigReport() config.Report {
 	}
 }
 
+// TestLoadConfigOrDefaults_SurvivesABrokenConfigFile asserts the
+// process-wide config load does not take the process down when the
+// file is broken: `nightme doctor` exists to report exactly that file,
+// and it has to reach the command to do it.
+func TestLoadConfigOrDefaults_SurvivesABrokenConfigFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("primary: a\nfeishu:\n  app_id: x\n   app_secret: y\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("NIGHTME_CONFIG", path)
+
+	cfg, err := loadConfigOrDefaults(path)
+	if err == nil {
+		t.Fatal("a broken config file reported no error")
+	}
+	if cfg == nil {
+		t.Fatal("no config to fall back to")
+	}
+	if cfg.Paths.DataDir == "" {
+		t.Error("the fallback config has no data dir")
+	}
+}
+
+// TestRunDoctor_ReportsABrokenConfigFile is the payoff of the
+// tolerant load: a config file that does not parse is reported with
+// the line the parser gave up on, and the command ends with the
+// config's exit code — not with a dead process.
+func TestRunDoctor_ReportsABrokenConfigFile(t *testing.T) {
+	t.Setenv(daemonStderrEnv, "")
+	// A short data dir: the socket path has a length limit and the
+	// temp dir of the test runner is not short enough on every OS.
+	dataDir, err := os.MkdirTemp("", "nm-doctor")
+	if err != nil {
+		t.Fatalf("temp dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dataDir) })
+	t.Setenv("NIGHTME_PATHS_DATA_DIR", dataDir)
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("primary: a\nfeishu:\n  app_id: x\n   app_secret: y\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("NIGHTME_CONFIG", path)
+
+	var out strings.Builder
+	err = runDoctor(&out, false)
+	if err == nil {
+		t.Fatal("doctor returned nil, want the config error")
+	}
+	if got := nmerrors.ExitCode(err); got != nmerrors.CodeConfigError {
+		t.Errorf("exit code = %d, want %d", got, nmerrors.CodeConfigError)
+	}
+	text := out.String()
+	if !strings.Contains(text, "1 problem") {
+		t.Errorf("the report does not count the problem:\n%s", text)
+	}
+	if !strings.Contains(text, "line 4:") {
+		t.Errorf("the report does not point at the line:\n%s", text)
+	}
+}
+
+// TestRunDoctor_JSONStaysValidJSON asserts the JSON document is the
+// whole of stdout — a crash capture after it would make the output
+// unparseable, and the crash capture is exactly what there is when
+// the daemon is gone.
+func TestRunDoctor_JSONStaysValidJSON(t *testing.T) {
+	t.Setenv(daemonStderrEnv, "")
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, daemonStderrName), []byte("panic: boom\n"), 0o600); err != nil {
+		t.Fatalf("seed capture: %v", err)
+	}
+	fake := &fakeDoctorRPCs{healthErr: errDaemonNotRunning}
+
+	var out strings.Builder
+	if err := runDoctorWith(&out, true, healthyConfigReport(), cfgWithDataDir(dir), daemoncontrol.Paths{}, fake.rpcs()); err == nil {
+		t.Fatal("doctor returned nil, want the health RPC error")
+	}
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(out.String()), &decoded); err != nil {
+		t.Fatalf("the JSON output does not parse: %v\n%s", err, out.String())
+	}
+}
+
 // TestDoctor_IsRegisteredOnEveryPlatform asserts the doctor command is
 // in the cobra tree and last in the REPL banner. It used to be
 // registered on Unix only, which left Windows users without a way to

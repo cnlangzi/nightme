@@ -118,21 +118,31 @@ func checkUnknownKeys(node *yaml.Node, t reflect.Type, prefix string) []Diagnost
 	if node.Kind != yaml.MappingNode {
 		return nil
 	}
-	fields := configFields(t)
+	fields, free := configFields(t)
 	var diags []Diagnostic
 	for i := 0; i+1 < len(node.Content); i += 2 {
 		keyNode, valNode := node.Content[i], node.Content[i+1]
 		if keyNode.Kind != yaml.ScalarNode {
 			continue
 		}
+		// A merge key ("<<") is yaml's own: it brings the keys of
+		// another mapping in, and the loader resolves it. It is not
+		// a key of the schema and not a mistake of the user.
+		if keyNode.Tag == "!!merge" {
+			continue
+		}
 		name := keyNode.Value
 		field, ok := fields[name]
 		if !ok {
-			diags = append(diags, Diagnostic{
-				Line:    keyNode.Line,
-				Column:  keyNode.Column,
-				Message: fmt.Sprintf("unknown key %q", prefix+name),
-			})
+			// A level with an inline map takes any key — the map's
+			// keys are the user's own.
+			if !free {
+				diags = append(diags, Diagnostic{
+					Line:    keyNode.Line,
+					Column:  keyNode.Column,
+					Message: fmt.Sprintf("unknown key %q", prefix+name),
+				})
+			}
 			continue
 		}
 		diags = append(diags, checkValueKeys(valNode, field.typ, prefix+name)...)
@@ -181,32 +191,51 @@ type configField struct {
 	typ reflect.Type
 }
 
-// configFields returns the keys a struct type defines: the yaml tags
-// of its fields.
+// configFields returns the keys a struct type defines, and whether the
+// struct takes free keys.
 //
-// A field with no tag or a tag of "-" is not a key. An inline struct
-// contributes its own keys — they live at the level of the struct
-// that holds it.
-func configFields(t reflect.Type) map[string]configField {
-	out := map[string]configField{}
+// The rules are yaml.v3's, so the check accepts exactly what the
+// loader accepts: the yaml tag names the key, a field without a tag
+// is keyed by its lowercased name, a field tagged `,inline` adds its
+// own keys at this level, and a field tagged `,inline` that is a map
+// lets any key through.
+func configFields(t reflect.Type) (fields map[string]configField, free bool) {
+	fields = map[string]configField{}
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
+		if f.PkgPath != "" && !f.Anonymous {
+			continue // unexported
+		}
 		tag := f.Tag.Get("yaml")
 		if tag == "-" {
 			continue
 		}
 		name, opts, _ := strings.Cut(tag, ",")
-		if name != "" {
-			out[name] = configField{typ: f.Type}
-			continue
+		if strings.Contains(opts, "inline") {
+			switch f.Type.Kind() {
+			case reflect.Map:
+				free = true
+				continue
+			case reflect.Struct, reflect.Pointer:
+				inner := f.Type
+				for inner.Kind() == reflect.Pointer {
+					inner = inner.Elem()
+				}
+				if inner.Kind() != reflect.Struct {
+					continue
+				}
+				innerFields, innerFree := configFields(inner)
+				maps.Copy(fields, innerFields)
+				free = free || innerFree
+				continue
+			}
 		}
-		// A struct without a name of its own holds its keys at the
-		// level of the struct that holds it.
-		if (f.Anonymous || strings.Contains(opts, "inline")) && f.Type.Kind() == reflect.Struct {
-			maps.Copy(out, configFields(f.Type))
+		if name == "" {
+			name = strings.ToLower(f.Name)
 		}
+		fields[name] = configField{typ: f.Type}
 	}
-	return out
+	return fields, free
 }
 
 // yamlDiagnostic turns the error of the parser into a diagnostic.

@@ -30,14 +30,14 @@ import (
 // package doesn't have to import outbound (which would create
 // a cycle).
 type emitterLike interface {
-	Send(ctx context.Context, msg messages.OutboundMessage) error
+	Send(ctx context.Context, msg messages.OutboundMessage) (string, error)
 }
 
 // NoopEmitter is a do-nothing implementation that satisfies
 // messages.Emitter. Tests use it as the emitter of an
 // inbound.Router (so replies are swallowed) or bind it to a
 // ChatSession without exercising the outbound path. Send
-// returns nil.
+// returns an empty id and no error.
 type NoopEmitter struct{}
 
 // Compile-time guard: NoopEmitter must satisfy the local
@@ -47,6 +47,6 @@ type NoopEmitter struct{}
 var _ emitterLike = NoopEmitter{}
 
 // Send is a no-op.
-func (NoopEmitter) Send(context.Context, messages.OutboundMessage) error {
-	return nil
+func (NoopEmitter) Send(context.Context, messages.OutboundMessage) (string, error) {
+	return "", nil
 }

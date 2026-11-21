@@ -304,7 +304,7 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 				"final", final)
 			return
 		}
-		if err := em.Send(context.Background(), messages.OutboundMessage{
+		if _, err := em.Send(context.Background(), messages.OutboundMessage{
 			ChatID: input.ChatID, ReplyTo: input.MessageID,
 			Kind: messages.OutReply, Text: final,
 		}); err != nil {

@@ -162,7 +162,7 @@ func TestMergeToolReply_PatchesSameMessage(t *testing.T) {
 	}
 
 	// OutToolStart
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:    messages.OutToolStart,
 		ChatID:  "oc_test",
 		ReplyTo: "om_user_1",
@@ -172,7 +172,7 @@ func TestMergeToolReply_PatchesSameMessage(t *testing.T) {
 	}
 
 	// OutToolEnd — should PATCH the start, not post a new reply.
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:    messages.OutToolEnd,
 		ChatID:  "oc_test",
 		ReplyTo: "om_user_1",
@@ -213,7 +213,7 @@ func TestMergeToolReply_PATCHFailureFallsBackToFreshReply(t *testing.T) {
 	}
 
 	// OutToolStart
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:    messages.OutToolStart,
 		ChatID:  "oc_test",
 		ReplyTo: "om_user_1",
@@ -226,7 +226,7 @@ func TestMergeToolReply_PATCHFailureFallsBackToFreshReply(t *testing.T) {
 	// reply with the result body. Send should NOT return the
 	// PATCH error to the caller (the data was preserved via the
 	// fallback).
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:    messages.OutToolEnd,
 		ChatID:  "oc_test",
 		ReplyTo: "om_user_1",
@@ -265,7 +265,7 @@ func TestMergeToolReply_OrphanEndFallsBackToFreshReply(t *testing.T) {
 
 	// OutToolEnd with no preceding OutToolStart — buffer is
 	// empty, popToolStart returns miss, fallback posts fresh.
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:    messages.OutToolEnd,
 		ChatID:  "oc_test",
 		ReplyTo: "om_user_1",
@@ -314,7 +314,7 @@ func TestMergeToolReply_ParallelToolUse(t *testing.T) {
 
 	// Two parallel tool_use blocks: Start A, Start B, End A, End B.
 	for _, name := range []string{"Read", "Bash"} {
-		if err := a.Send(context.Background(), messages.OutboundMessage{
+		if _, err := a.Send(context.Background(), messages.OutboundMessage{
 			Kind:    messages.OutToolStart,
 			ChatID:  "oc_test",
 			ReplyTo: "om_user_1",
@@ -324,7 +324,7 @@ func TestMergeToolReply_ParallelToolUse(t *testing.T) {
 		}
 	}
 	// End for first tool (Read). Should PATCH om_msg_A.
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:    messages.OutToolEnd,
 		ChatID:  "oc_test",
 		ReplyTo: "om_user_1",
@@ -333,7 +333,7 @@ func TestMergeToolReply_ParallelToolUse(t *testing.T) {
 		t.Fatalf("Send(OutToolEnd Read): %v", err)
 	}
 	// End for second tool (Bash). Should PATCH om_msg_B.
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:    messages.OutToolEnd,
 		ChatID:  "oc_test",
 		ReplyTo: "om_user_1",
@@ -373,7 +373,7 @@ func TestMergeToolReply_DifferentUserMsgIDsAreIndependent(t *testing.T) {
 	}
 
 	// Start on turn 1 (userMsgID = om_turn_1).
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:    messages.OutToolStart,
 		ChatID:  "oc_test",
 		ReplyTo: "om_turn_1",
@@ -385,7 +385,7 @@ func TestMergeToolReply_DifferentUserMsgIDsAreIndependent(t *testing.T) {
 	// End on turn 2 (userMsgID = om_turn_2) — orphan for this
 	// buffer, falls back to fresh post. Must NOT PATCH the turn-1
 	// start's message_id.
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:    messages.OutToolEnd,
 		ChatID:  "oc_test",
 		ReplyTo: "om_turn_2",

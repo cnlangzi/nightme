@@ -51,7 +51,7 @@ func sendHeartbeatFollowUp(
 		ReplyTo:   userMsgID,
 		Heartbeat: &snap,
 	}
-	if err := em.Send(context.Background(), hb); err != nil && logger != nil {
+	if _, err := em.Send(context.Background(), hb); err != nil && logger != nil {
 		logger.Warn("heartbeat follow-up send failed",
 			"chat_id", chatID,
 			"user_msg_id", userMsgID,

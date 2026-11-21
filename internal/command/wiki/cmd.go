@@ -189,7 +189,7 @@ func (f *Factory) runInit(ctx context.Context, rt command.RuntimeServices, cs *c
 		if em == nil {
 			return
 		}
-		if err := em.Send(context.Background(), messages.OutboundMessage{
+		if _, err := em.Send(context.Background(), messages.OutboundMessage{
 			ChatID:  input.ChatID,
 			ReplyTo: input.MessageID,
 			Kind:    messages.OutReply,

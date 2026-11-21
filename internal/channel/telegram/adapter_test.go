@@ -193,7 +193,7 @@ func TestE2E_RichTurnLifecycle(t *testing.T) {
 	//    rich mode is always on, no RichMode gate. The walker may
 	//    or may not produce ok=true (markdown syntax dependent) —
 	//    the e2e invariant is that SOMETHING rich-flavored happens.
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "tg_100",
 		Kind:   messages.OutReply,
 		Text:   "**bold** reply",
@@ -202,7 +202,7 @@ func TestE2E_RichTurnLifecycle(t *testing.T) {
 	}
 
 	// 3. OutHeartbeat → updateRichTurnHeader → scheduleFlushDebounced
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "tg_100",
 		Kind:   messages.OutHeartbeat,
 		Heartbeat: &messages.HeartbeatSnapshot{
@@ -215,7 +215,7 @@ func TestE2E_RichTurnLifecycle(t *testing.T) {
 
 	// 4. OutResult — sendRichMessage path. The result message_id
 	//    is recorded on richTurn.resultMessageID for the 🎉 anchor.
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "tg_100",
 		Kind:   messages.OutResult,
 		Text:   "final answer",
@@ -269,6 +269,109 @@ func TestE2E_RichTurnLifecycle(t *testing.T) {
 	}
 }
 
+// TestSend_OrphanMessageIsAddressedByItsOwnId — a message the chat
+// opens for an event that names no card is addressed by its own
+// message id: the events that follow land on that message instead of
+// opening another one.
+func TestSend_OrphanMessageIsAddressedByItsOwnId(t *testing.T) {
+	a, api := newTestAdapter(t)
+	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 0, UserMessageID: "77"})
+
+	id, err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "tg_100",
+		Kind:   messages.OutReply,
+		Text:   "rounds: 1",
+	})
+	if err != nil {
+		t.Fatalf("OutReply Send: %v", err)
+	}
+	if id == "" {
+		t.Fatal("the chat named no message for the card it opened")
+	}
+	if sends := len(findCalls(api.snapshotCalls(), "sendRichMessage")); sends != 1 {
+		t.Fatalf("sendRichMessage calls = %d, want 1", sends)
+	}
+
+	// The checklist of the round lands on the same message.
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID:  "tg_100",
+		Kind:    messages.OutTaskUpdate,
+		ReplyTo: id,
+		TaskList: &agent.AgentTaskListEvent{
+			Items: []agent.AgentTaskItem{{Subject: "fix"}},
+		},
+	}); err != nil {
+		t.Fatalf("OutTaskUpdate Send: %v", err)
+	}
+	if sends := len(findCalls(api.snapshotCalls(), "sendRichMessage")); sends != 1 {
+		t.Errorf("sendRichMessage calls = %d, want 1 (the checklist lands on the same message)", sends)
+	}
+
+	// The flush PATCHes the message the card opened.
+	deadline := time.Now().Add(2 * time.Second)
+	var patched string
+	for time.Now().Before(deadline) {
+		for _, c := range api.snapshotCalls() {
+			if c.Method != "editMessageText" {
+				continue
+			}
+			patched = fmt.Sprint(c.Params["message_id"])
+		}
+		if patched != "" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if patched != id {
+		t.Errorf("the checklist patched %q, want the message the card opened (%q)", patched, id)
+	}
+}
+
+// TestSend_OrphanTaskListOpensACard — a checklist that names no card
+// opens a card of its own: the checklist has content, and a turn
+// without a card has nowhere to put it.
+func TestSend_OrphanTaskListOpensACard(t *testing.T) {
+	a, api := newTestAdapter(t)
+	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 0, UserMessageID: "77"})
+
+	id, err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "tg_100",
+		Kind:   messages.OutTaskUpdate,
+		TaskList: &agent.AgentTaskListEvent{
+			Items: []agent.AgentTaskItem{{Subject: "fix"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("OutTaskUpdate Send: %v", err)
+	}
+	if id == "" {
+		t.Fatal("the chat named no message for the card it opened")
+	}
+	if sends := len(findCalls(api.snapshotCalls(), "sendRichMessage")); sends != 1 {
+		t.Fatalf("sendRichMessage calls = %d, want 1", sends)
+	}
+
+	// The checklist reaches the card.
+	deadline := time.Now().Add(2 * time.Second)
+	var blocks []map[string]any
+	for time.Now().Before(deadline) {
+		if b, ok := lastEditBlocks(api.snapshotCalls()); ok {
+			blocks = b
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	var found bool
+	for _, b := range blocks {
+		if b["type"] == "heading" && b["text"] == "📋 Tasks" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the card carries no checklist: %+v", blocks)
+	}
+}
+
 // TestE2E_RichPathFailureSurfaces ensures that when sendRichMessage
 // errors (e.g., pre-10.1 client returning 400, or transient
 // network failure), the error surfaces to the caller rather than
@@ -278,7 +381,7 @@ func TestE2E_RichPathFailureSurfaces(t *testing.T) {
 	a, api := newTestAdapter(t)
 	api.callErr = errors.New("simulated sendRichMessage 400")
 
-	err := a.Send(context.Background(), messages.OutboundMessage{
+	_, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "tg_200",
 		Kind:   messages.OutReply,
 		Text:   "this should fail",
@@ -383,7 +486,7 @@ func TestAdapter_Incoming(t *testing.T) {
 
 func TestAdapter_Send_EmptyChatID(t *testing.T) {
 	a, _ := newTestAdapter(t)
-	err := a.Send(context.Background(), messages.OutboundMessage{ChatID: "", Kind: messages.OutReply})
+	_, err := a.Send(context.Background(), messages.OutboundMessage{ChatID: "", Kind: messages.OutReply})
 	if err == nil {
 		t.Fatal("empty chatID must error")
 	}
@@ -391,7 +494,7 @@ func TestAdapter_Send_EmptyChatID(t *testing.T) {
 
 func TestAdapter_Send_OutCommandReply(t *testing.T) {
 	a, _ := newTestAdapter(t)
-	err := a.Send(context.Background(), messages.OutboundMessage{
+	_, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutCommandReply,
 		Text:   "cmd reply",
@@ -403,7 +506,7 @@ func TestAdapter_Send_OutCommandReply(t *testing.T) {
 
 func TestAdapter_Send_OutInit(t *testing.T) {
 	a, _ := newTestAdapter(t)
-	err := a.Send(context.Background(), messages.OutboundMessage{
+	_, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID:    "100",
 		Kind:      messages.OutInit,
 		AgentName: "claude",
@@ -417,7 +520,7 @@ func TestAdapter_Send_OutInit(t *testing.T) {
 
 func TestAdapter_Send_OutError_Diagnostic(t *testing.T) {
 	a, _ := newTestAdapter(t)
-	err := a.Send(context.Background(), messages.OutboundMessage{
+	_, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutError,
 		Text:   "boom",
@@ -432,7 +535,7 @@ func TestAdapter_Send_OutError_Diagnostic(t *testing.T) {
 
 func TestAdapter_Send_OutTool(t *testing.T) {
 	a, _ := newTestAdapter(t)
-	err := a.Send(context.Background(), messages.OutboundMessage{
+	_, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutToolStart,
 		Tool:   &messages.ToolInfo{Name: "read", Args: "{\"path\":\"/x\"}"},
@@ -440,7 +543,7 @@ func TestAdapter_Send_OutTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	err = a.Send(context.Background(), messages.OutboundMessage{
+	_, err = a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutToolEnd,
 		Tool:   &messages.ToolInfo{Name: "read", Output: "ok"},
@@ -452,7 +555,7 @@ func TestAdapter_Send_OutTool(t *testing.T) {
 
 func TestAdapter_Send_OutTask(t *testing.T) {
 	a, _ := newTestAdapter(t)
-	err := a.Send(context.Background(), messages.OutboundMessage{
+	_, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutTaskCreate,
 		TaskList: &agent.AgentTaskListEvent{
@@ -469,7 +572,7 @@ func TestAdapter_Send_OutTask(t *testing.T) {
 
 func TestAdapter_Send_OutMessageState(t *testing.T) {
 	a, api := newTestAdapter(t)
-	err := a.Send(context.Background(), messages.OutboundMessage{
+	_, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutMessageState,
 		MessageState: &messages.MessageStatePayload{
@@ -495,7 +598,7 @@ func TestAdapter_Send_OutMessageState(t *testing.T) {
 
 func TestAdapter_Send_OutMessageStateRemoved(t *testing.T) {
 	a, api := newTestAdapter(t)
-	err := a.Send(context.Background(), messages.OutboundMessage{
+	_, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutMessageStateRemoved,
 		MessageState: &messages.MessageStatePayload{
@@ -518,7 +621,7 @@ func TestAdapter_Send_OutMessageStateRemoved(t *testing.T) {
 
 func TestAdapter_Send_OutMessageState_BadID(t *testing.T) {
 	a, _ := newTestAdapter(t)
-	err := a.Send(context.Background(), messages.OutboundMessage{
+	_, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutMessageState,
 		MessageState: &messages.MessageStatePayload{
@@ -563,7 +666,7 @@ func TestMapStateToTelegramEmoji(t *testing.T) {
 // slot.
 func TestAdapter_Send_OutMessageState_QueuedRenders(t *testing.T) {
 	a, api := newTestAdapter(t)
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutMessageState,
 		MessageState: &messages.MessageStatePayload{
@@ -590,7 +693,7 @@ func TestAdapter_Send_OutMessageState_QueuedRenders(t *testing.T) {
 // the entire async turn.
 func TestAdapter_Send_OutMessageState_DoneRenders(t *testing.T) {
 	a, api := newTestAdapter(t)
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutMessageState,
 		MessageState: &messages.MessageStatePayload{
@@ -609,7 +712,7 @@ func TestAdapter_Send_OutMessageState_DoneRenders(t *testing.T) {
 
 func TestAdapter_Send_OutMessageState_UnknownStateDrops(t *testing.T) {
 	a, api := newTestAdapter(t)
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutMessageState,
 		MessageState: &messages.MessageStatePayload{
@@ -647,15 +750,15 @@ func TestAdapter_Send_OutMessageState_TracksStateIdempotency(t *testing.T) {
 	}
 	// 第一次 Submitted → 触发 API
 	msg.MessageState.State = agent.MessageSubmitted
-	if err := a.Send(ctx, msg); err != nil {
+	if _, err := a.Send(ctx, msg); err != nil {
 		t.Fatalf("send 1: %v", err)
 	}
 	// 第二次 Submitted → 同 state skip
-	if err := a.Send(ctx, msg); err != nil {
+	if _, err := a.Send(ctx, msg); err != nil {
 		t.Fatalf("send 2: %v", err)
 	}
 	// 第三次 Submitted (再试一次) → 还是 dedup
-	if err := a.Send(ctx, msg); err != nil {
+	if _, err := a.Send(ctx, msg); err != nil {
 		t.Fatalf("send 3: %v", err)
 	}
 	if got := len(findCalls(api.Calls, "setMessageReaction")); got != 1 {
@@ -669,7 +772,7 @@ func TestAdapter_Send_OutMessageState_TracksStateIdempotency(t *testing.T) {
 // uses MessageSubmitted since Queued is a silent drop.
 func TestAdapter_Send_OutMessageState_FirstReceivedNotSkipped(t *testing.T) {
 	a, api := newTestAdapter(t)
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutMessageState,
 		MessageState: &messages.MessageStatePayload{
@@ -692,7 +795,7 @@ func TestAdapter_Send_OutMessageState_DroppedSilentDrops(t *testing.T) {
 	// decision so a future contributor adding "❌ for dropped" gets a
 	// failing test that forces an explicit discussion.
 	a, api := newTestAdapter(t)
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutMessageState,
 		MessageState: &messages.MessageStatePayload{
@@ -733,11 +836,11 @@ func TestAdapter_Send_OutMessageStateRemoved_DoesNotPolluteLRU(t *testing.T) {
 	}
 	// 1) Render Submitted → API call #1, LRU = {5: Submitted}
 	msg.MessageState.State = agent.MessageSubmitted
-	if err := a.Send(ctx, msg); err != nil {
+	if _, err := a.Send(ctx, msg); err != nil {
 		t.Fatalf("send 1: %v", err)
 	}
 	// 2) Removed → API call #2 (empty reaction), LRU untouched
-	if err := a.Send(ctx, messages.OutboundMessage{
+	if _, err := a.Send(ctx, messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutMessageStateRemoved,
 		MessageState: &messages.MessageStatePayload{
@@ -749,7 +852,7 @@ func TestAdapter_Send_OutMessageStateRemoved_DoesNotPolluteLRU(t *testing.T) {
 	// 3) Same state again (Submitted) — must dedup against the LRU
 	// record from step 1, proving Removed did not clear or poison
 	// the LRU.
-	if err := a.Send(ctx, msg); err != nil {
+	if _, err := a.Send(ctx, msg); err != nil {
 		t.Fatalf("send 3 (Submitted again): %v", err)
 	}
 	if got := len(findCalls(api.Calls, "setMessageReaction")); got != 2 {
@@ -759,7 +862,7 @@ func TestAdapter_Send_OutMessageStateRemoved_DoesNotPolluteLRU(t *testing.T) {
 
 func TestAdapter_Send_OutHeartbeat_NoTopic(t *testing.T) {
 	a, _ := newTestAdapter(t)
-	err := a.Send(context.Background(), messages.OutboundMessage{
+	_, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID:    "100",
 		Kind:      messages.OutHeartbeat,
 		Heartbeat: &messages.HeartbeatSnapshot{ThinkCount: 2, ToolCount: 1},
@@ -777,7 +880,7 @@ func TestAdapter_Send_OutHeartbeat_NoTopic(t *testing.T) {
 func TestAdapter_Send_OutHeartbeat_WithTopic(t *testing.T) {
 	a, _ := newTestAdapter(t)
 	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 1, PlaceholderMessageID: 50})
-	err := a.Send(context.Background(), messages.OutboundMessage{
+	_, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID:    "100",
 		Kind:      messages.OutHeartbeat,
 		Heartbeat: &messages.HeartbeatSnapshot{ThinkCount: 2, ToolCount: 1},
@@ -803,7 +906,7 @@ func TestAdapter_Send_OutHeartbeat_AppendsTimestamp(t *testing.T) {
 	// topic=1) for the state key + thread_id.
 	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 1, PlaceholderMessageID: 50, UserMessageID: "10"})
 	now := time.Date(2026, 8, 22, 15, 18, 8, 0, time.UTC)
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID:    "tg_100:1",
 		Kind:      messages.OutHeartbeat,
 		Heartbeat: &messages.HeartbeatSnapshot{ThinkCount: 5, ToolCount: 7, LastBeatAt: now},
@@ -823,7 +926,7 @@ func TestAdapter_Send_OutHeartbeat_AppendsTimestamp(t *testing.T) {
 
 func TestAdapter_Send_OutChoice_Valid(t *testing.T) {
 	a, _ := newTestAdapter(t)
-	err := a.Send(context.Background(), messages.OutboundMessage{
+	_, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutChoice,
 		Choice: &messages.Choice{
@@ -849,7 +952,7 @@ func TestAdapter_Send_OutChoice_Valid(t *testing.T) {
 // API. Same shape as the sendChoice fix but on the PATCH path.
 func TestAdapter_Send_OutChoicePatch_NamespacedChatID_StripsTGPrefix(t *testing.T) {
 	a, api := newTestAdapter(t)
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "tg_100:42", // runtime form: namespaced + thread suffix
 		Kind:   messages.OutChoice,
 		Choice: &messages.Choice{
@@ -861,7 +964,7 @@ func TestAdapter_Send_OutChoicePatch_NamespacedChatID_StripsTGPrefix(t *testing.
 	}); err != nil {
 		t.Fatalf("send choice: %v", err)
 	}
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "tg_100:42",
 		Kind:   messages.OutChoicePatch,
 		Choice: &messages.Choice{
@@ -892,7 +995,7 @@ func TestAdapter_Send_OutChoicePatch_NamespacedChatID_StripsTGPrefix(t *testing.
 // real runtime for every OutChoice.
 func TestAdapter_Send_OutChoice_NamespacedChatID_StripsTGPrefix(t *testing.T) {
 	a, api := newTestAdapter(t)
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "tg_100:42", // runtime-form: namespaced + thread suffix
 		Kind:   messages.OutChoice,
 		Choice: &messages.Choice{
@@ -928,7 +1031,7 @@ func TestAdapter_Send_OutChoice_NamespacedChatID_StripsTGPrefix(t *testing.T) {
 
 func TestAdapter_Send_OutChoice_MissingRequestID(t *testing.T) {
 	a, _ := newTestAdapter(t)
-	err := a.Send(context.Background(), messages.OutboundMessage{
+	_, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutChoice,
 		Choice: &messages.Choice{Kind: messages.ChoiceKindPermission},
@@ -940,7 +1043,7 @@ func TestAdapter_Send_OutChoice_MissingRequestID(t *testing.T) {
 
 func TestAdapter_Send_OutChoice_NilChoice(t *testing.T) {
 	a, _ := newTestAdapter(t)
-	err := a.Send(context.Background(), messages.OutboundMessage{
+	_, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutChoice,
 	})
@@ -951,7 +1054,7 @@ func TestAdapter_Send_OutChoice_NilChoice(t *testing.T) {
 
 func TestAdapter_Send_OutChoicePatch_NoState(t *testing.T) {
 	a, _ := newTestAdapter(t)
-	err := a.Send(context.Background(), messages.OutboundMessage{
+	_, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutChoicePatch,
 		Choice: &messages.Choice{
@@ -966,7 +1069,7 @@ func TestAdapter_Send_OutChoicePatch_NoState(t *testing.T) {
 
 func TestAdapter_Send_OutChoicePatch_WithState(t *testing.T) {
 	a, _ := newTestAdapter(t)
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutChoice,
 		Choice: &messages.Choice{
@@ -978,7 +1081,7 @@ func TestAdapter_Send_OutChoicePatch_WithState(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("send choice: %v", err)
 	}
-	err := a.Send(context.Background(), messages.OutboundMessage{
+	_, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutChoicePatch,
 		Choice: &messages.Choice{
@@ -994,7 +1097,7 @@ func TestAdapter_Send_OutChoicePatch_WithState(t *testing.T) {
 
 func TestAdapter_Send_OutChoice_QuestionKind(t *testing.T) {
 	a, _ := newTestAdapter(t)
-	err := a.Send(context.Background(), messages.OutboundMessage{
+	_, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutChoice,
 		Choice: &messages.Choice{
@@ -1015,7 +1118,7 @@ func TestAdapter_Send_OutChoice_QuestionKind(t *testing.T) {
 
 func TestAdapter_Send_OutChoice_DecisionKind(t *testing.T) {
 	a, _ := newTestAdapter(t)
-	err := a.Send(context.Background(), messages.OutboundMessage{
+	_, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutChoice,
 		Choice: &messages.Choice{
@@ -1035,7 +1138,7 @@ func TestAdapter_Send_DropsLongText(t *testing.T) {
 	t.Skip("v9 chain rolling log: rewrite to chain-buffer split assertions; tracked in docs/channel/telegram.md §11.12.16 backlog")
 	a, api := newTestAdapter(t)
 	long := strings.Repeat("x", 10000)
-	err := a.Send(context.Background(), messages.OutboundMessage{
+	_, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutReply,
 		Text:   long,
@@ -1142,7 +1245,7 @@ func TestAdapter_Send_DM_RepliesToUserMessage(t *testing.T) {
 		messages.OutToolStart,
 		messages.OutResult,
 	} {
-		if err := a.Send(context.Background(), messages.OutboundMessage{
+		if _, err := a.Send(context.Background(), messages.OutboundMessage{
 			ChatID: "100",
 			Kind:   kind,
 			Text:   "body for " + kind.String(),
@@ -1192,7 +1295,7 @@ func TestAdapter_Send_DM_OutHeartbeat_PATCHesPlaceholder(t *testing.T) {
 	t.Skip("v9 chain rolling log: rewrite to chain-headerLine assertions; tracked in docs/channel/telegram.md §11.12.16 backlog")
 	a, api := newTestAdapter(t)
 	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 0, PlaceholderMessageID: 777})
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID:    "100",
 		Kind:      messages.OutHeartbeat,
 		Heartbeat: &messages.HeartbeatSnapshot{ThinkCount: 2, ToolCount: 1},
@@ -1232,7 +1335,7 @@ func TestAdapter_Send_Topic_ReplyToUserMessageToo(t *testing.T) {
 		messages.OutToolStart,
 		messages.OutResult,
 	} {
-		if err := a.Send(context.Background(), messages.OutboundMessage{
+		if _, err := a.Send(context.Background(), messages.OutboundMessage{
 			ChatID: "tg_100:42",
 			Kind:   kind,
 			Text:   "body for " + kind.String(),
@@ -1258,7 +1361,7 @@ func TestAdapter_Send_Topic_ReplyToUserMessageToo(t *testing.T) {
 		}
 	}
 	// Sanity: heartbeat in topic still PATCHes the placeholder.
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID:    "tg_100:42",
 		Kind:      messages.OutHeartbeat,
 		Heartbeat: &messages.HeartbeatSnapshot{ThinkCount: 1},
@@ -1635,7 +1738,7 @@ func TestAdapter_HandleCallback_Permission(t *testing.T) {
 	defer cancel()
 	defer func() { _ = a.Stop(context.Background()) }()
 	_ = a.Start(ctx)
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutChoice,
 		Choice: &messages.Choice{
@@ -1681,7 +1784,7 @@ func TestAdapter_HandleCallback_FlatQuestionClickIsTheAnswer(t *testing.T) {
 	defer func() { _ = a.Stop(context.Background()) }()
 	_ = a.Start(ctx)
 
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutChoice,
 		Choice: &messages.Choice{
@@ -1721,7 +1824,7 @@ func TestAdapter_HandleCallback_QuestionWizard(t *testing.T) {
 	defer cancel()
 	defer func() { _ = a.Stop(context.Background()) }()
 	_ = a.Start(ctx)
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutChoice,
 		Choice: &messages.Choice{
@@ -1777,7 +1880,7 @@ func TestAdapter_HandleCallback_Decision(t *testing.T) {
 	defer cancel()
 	defer func() { _ = a.Stop(context.Background()) }()
 	_ = a.Start(ctx)
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutChoice,
 		Choice: &messages.Choice{
@@ -1853,7 +1956,7 @@ func TestAdapter_HandleCallback_Settled(t *testing.T) {
 
 func TestAdapter_HandleCallback_BadOptionIndex(t *testing.T) {
 	a, _ := newTestAdapter(t)
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutChoice,
 		Choice: &messages.Choice{
@@ -1885,7 +1988,7 @@ func TestAdapter_HandleInputClick_ForceReply(t *testing.T) {
 	defer cancel()
 	defer func() { _ = a.Stop(context.Background()) }()
 	_ = a.Start(ctx)
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutChoice,
 		Choice: &messages.Choice{
@@ -1935,7 +2038,7 @@ func TestAdapter_HandleForceReply_Permission(t *testing.T) {
 	defer cancel()
 	defer func() { _ = a.Stop(context.Background()) }()
 	_ = a.Start(ctx)
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutChoice,
 		Choice: &messages.Choice{
@@ -2214,7 +2317,7 @@ func TestAdapter_ConcurrentSend(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_ = a.Send(context.Background(), messages.OutboundMessage{
+			_, _ = a.Send(context.Background(), messages.OutboundMessage{
 				ChatID: "100",
 				Kind:   messages.OutReply,
 				Text:   "hello",
@@ -2237,7 +2340,7 @@ func TestAdapter_ChoiceCallbackData_Short(t *testing.T) {
 		},
 	}
 	_ = a.state.putChoice(state)
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutChoice,
 		Choice: state.Choice,
@@ -2256,7 +2359,7 @@ func TestAdapter_StatePersistAcrossReload(t *testing.T) {
 	if a == nil {
 		t.Fatal("NewAdapterWithClient nil")
 	}
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutChoice,
 		Choice: &messages.Choice{
@@ -2334,7 +2437,7 @@ func TestAdapter_SessionTopicID_Stable(t *testing.T) {
 
 func TestAdapter_Send_OutReplyEmptyText(t *testing.T) {
 	a, api := newTestAdapter(t)
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutReply,
 		Text:   "   \n\t  ",
@@ -2348,7 +2451,7 @@ func TestAdapter_Send_OutReplyEmptyText(t *testing.T) {
 
 func TestAdapter_Send_OutResultEmptyText(t *testing.T) {
 	a, api := newTestAdapter(t)
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutResult,
 		Text:   "",
@@ -2377,7 +2480,7 @@ func TestAdapter_ApiCall_AppliesRateLimitAndRetry(t *testing.T) {
 
 func TestAdapter_Send_OutInitSilentDrop(t *testing.T) {
 	a, api := newTestAdapter(t)
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID:    "100",
 		Kind:      messages.OutInit,
 		SessionID: "sess-1",
@@ -2396,7 +2499,7 @@ func TestAdapter_Send_OutInitDropEvenWithText(t *testing.T) {
 	a, api := newTestAdapter(t)
 	// Even if text is provided, OutInit must be dropped — matches
 	// feishu F-44 silent-drop semantics.
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutInit,
 		Text:   "this text should be discarded",
@@ -2501,14 +2604,14 @@ func TestPatchChainHeader_EmptyRunningKeepsColdBanner(t *testing.T) {
 		PlaceholderMessageID: 1300, UserMessageID: "60"})
 
 	// Seed the chain with one OutReply so a chunk exists.
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "600", Kind: messages.OutReply, Text: "seed",
 	}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
 	// Empty running snapshot — must NOT flip hasHeartbeat.
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "600", Kind: messages.OutHeartbeat,
 		Heartbeat: &messages.HeartbeatSnapshot{
 			Status: messages.HeartbeatRunning,
@@ -2520,7 +2623,7 @@ func TestPatchChainHeader_EmptyRunningKeepsColdBanner(t *testing.T) {
 	// Now terminal-only (zero counters, no LastBeatAt, Error).
 	// Per the gate, terminal status DOES flip hasHeartbeat so
 	// the user sees the ❌ prefix on the chunk header.
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "600", Kind: messages.OutHeartbeat,
 		Heartbeat: &messages.HeartbeatSnapshot{
 			Status: messages.HeartbeatError,
@@ -2606,7 +2709,7 @@ func TestAdapter_Send_DM_OutThinking_GoesThroughUnifiedPath(t *testing.T) {
 	raw := setupDMState(t, a, 100)
 
 	for i := 1; i <= 5; i++ {
-		if err := a.Send(context.Background(), messages.OutboundMessage{
+		if _, err := a.Send(context.Background(), messages.OutboundMessage{
 			ChatID: "tg_" + raw,
 			Kind:   messages.OutThinking,
 			Text:   fmt.Sprintf("DM thought %d", i),
@@ -2674,13 +2777,13 @@ func TestAdapter_Send_DM_OutResult_EndsLiveDraftProcess(t *testing.T) {
 	a, api := newTestAdapter(t)
 	raw := setupDMState(t, a, 100)
 
-	_ = a.Send(context.Background(), messages.OutboundMessage{
+	_, _ = a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "tg_" + raw,
 		Kind:   messages.OutToolStart,
 		Tool:   &messages.ToolInfo{Name: "Read", Args: "/tmp/foo.go"},
 		Text:   "● Read(/tmp/foo.go)",
 	})
-	_ = a.Send(context.Background(), messages.OutboundMessage{
+	_, _ = a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "tg_" + raw,
 		Kind:   messages.OutResult,
 		Text:   "final answer",

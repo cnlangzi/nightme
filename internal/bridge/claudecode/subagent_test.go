@@ -12,6 +12,7 @@ package claudecode
 import (
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -327,5 +328,28 @@ func TestPumpStream_HeldOpenTurn_SumsUsage(t *testing.T) {
 	}
 	if usage.OutputTokens != 15 {
 		t.Errorf("OutputTokens = %d, want 15 (10 withheld + 5 reported)", usage.OutputTokens)
+	}
+}
+
+// TestPumpStream_HeldTurn_KeepsTheTurnFlag pins the turn bookkeeping
+// the fatal-stderr path depends on: a result frame the bridge
+// withholds does not end the turn — the CLI is still working on it —
+// so the flag stays set.
+//
+// The init frame the CLI re-emits when it opens the turn for a
+// finished background task must not end the turn either: that frame
+// is not a conversation boundary.
+func TestPumpStream_HeldTurn_KeepsTheTurnFlag(t *testing.T) {
+	turnActive := &atomic.Bool{}
+	turnActive.Store(true)
+	events := make(chan agent.AgentEvent, 8)
+
+	stream := `{"type":"system","subtype":"task_started","task_id":"t1","run_id":"r1","is_backgrounded":true}` + "\n" +
+		`{"type":"result","subtype":"success","result":"launched","subagent_stats":{"spawned":1,"completed":0,"killed":{"parent":0,"user":0,"system":0}}}` + "\n" +
+		`{"type":"system","subtype":"init","session_id":"s1"}` + "\n"
+	pumpStream(strings.NewReader(stream), events, nil, nil, turnActive, "claude", "/tmp", "main", nil)
+
+	if !turnActive.Load() {
+		t.Error("turn flag cleared while the bridge holds the turn open")
 	}
 }

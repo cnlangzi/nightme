@@ -54,11 +54,11 @@ func (s *stubChannel) Start(_ context.Context) error            { return nil }
 func (s *stubChannel) Stop(_ context.Context) error             { return nil }
 func (s *stubChannel) Incoming() <-chan messages.InboundMessage { return s.in }
 func (s *stubChannel) Inject(m messages.InboundMessage)         { s.in <- m }
-func (s *stubChannel) Send(_ context.Context, msg messages.OutboundMessage) error {
+func (s *stubChannel) Send(_ context.Context, msg messages.OutboundMessage) (string, error) {
 	if s.sends != nil {
 		s.sends.add(msg)
 	}
-	return nil
+	return "", nil
 }
 func (s *stubChannel) Patch(_ context.Context, _ messages.OutboundMessage) error             { return nil }
 func (s *stubChannel) OnPromptEnded(_ context.Context, _, _ string, _ agent.PromptEndReason) {}

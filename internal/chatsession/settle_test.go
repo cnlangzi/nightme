@@ -17,11 +17,11 @@ type recordingEmitter struct {
 	sent []messages.OutboundMessage
 }
 
-func (e *recordingEmitter) Send(_ context.Context, msg messages.OutboundMessage) error {
+func (e *recordingEmitter) Send(_ context.Context, msg messages.OutboundMessage) (string, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.sent = append(e.sent, msg)
-	return nil
+	return "", nil
 }
 
 func (e *recordingEmitter) settled() []messages.OutboundMessage {

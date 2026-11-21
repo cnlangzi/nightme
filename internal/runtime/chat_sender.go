@@ -48,9 +48,10 @@ func (s *chatSender) Send(ctx context.Context, chatID, text string) error {
 	if em == nil {
 		return fmt.Errorf("runtime: ChatSender: chat %q has no emitter", chatID)
 	}
-	return em.Send(ctx, messages.OutboundMessage{
+	_, err := em.Send(ctx, messages.OutboundMessage{
 		ChatID: chatID,
 		Kind:   messages.OutCommandReply,
 		Text:   text,
 	})
+	return err
 }

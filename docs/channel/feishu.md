@@ -633,6 +633,7 @@ Feishu IM API 官方支持的顶层 `msg_type`(参考 [create_json 文档](https
 - **OutChoice 走独立 card(非 receipt)** -- 权限卡是单轮交互,需要按钮 + callback,不适合进 rolling log
 - **OutCommandReply 折进 receipt** -- 命令回复与本轮的其它内容属于同一张卡,用户看到的是一条连续的滚动日志而不是占位卡 + 独立气泡
 - **OutResult 走独立卡** -- 最终答案是用户等着看的东西,顶层可见;正文为空时只更新 footer,不重复开卡
+- **每张卡按自己的 message id 登记** -- `receiptsByUserMsgID` 里除了用户消息 id,也存卡片自己的 message id。程序拿到发送接口回传的 id 后用它当 `ReplyTo`,后续事件落回同一张卡(原地 PATCH),不再另开一张。`postOrphanReplyCard` / `postOrphanTaskCard` 发出的顶层卡同样按这个规则登记(带上建卡时的 entries / tasks / footer),所以无锚点开出的卡也能被后续事件接着写。
 
 ### 12.2 未来扩展槽位(不实现,但留位)
 

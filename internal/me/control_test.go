@@ -1350,9 +1350,10 @@ jobs:
 	}
 }
 
-// TestTheRoundCardHangsUnderTheMessageThatStartedTheRun — the round
-// is the run's work, one level below the message that started the run.
-func TestTheRoundCardHangsUnderTheMessageThatStartedTheRun(t *testing.T) {
+// TestTheRoundOpensItsCardBeforeItsFirstCommand — the round opens
+// its own card, and the card is a message of the chat in its own
+// right: not a reply to the message that started the run.
+func TestTheRoundOpensItsCardBeforeItsFirstCommand(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 
@@ -1370,8 +1371,8 @@ func TestTheRoundCardHangsUnderTheMessageThatStartedTheRun(t *testing.T) {
 	if len(cards) != 1 {
 		t.Fatalf("the run published %d cards, want the card of the round", len(cards))
 	}
-	if cards[0].ReplyTo != "om_start" {
-		t.Errorf("the round card hangs under %q, want the start message om_start", cards[0].ReplyTo)
+	if cards[0].ReplyTo != "" {
+		t.Errorf("the round card hangs under %q, want a card of its own", cards[0].ReplyTo)
 	}
 }
 
@@ -1623,7 +1624,7 @@ func TestACardTheChatRefusedIsPublishedLater(t *testing.T) {
 	}
 	waitRun(t, svc, "obs-1")
 
-	if !logged(logger, "the session placeholder could not be posted") {
+	if !logged(logger, "the run's event could not be published") {
 		t.Errorf("the failure was not logged: %v", logger.Lines())
 	}
 	if posted := op.Posted(); posted < 2 {
@@ -1701,7 +1702,7 @@ func TestACardThatCannotBePublishedDoesNotStopTheRun(t *testing.T) {
 	if posted := op.Posted(); posted != 1 {
 		t.Errorf("the run published %d cards, want the one the chat took", posted)
 	}
-	if !logged(logger, "the session placeholder could not be posted") {
+	if !logged(logger, "the run's event could not be published") {
 		t.Errorf("the failure was not logged: %v", logger.Lines())
 	}
 }

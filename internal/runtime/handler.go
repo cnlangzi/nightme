@@ -267,7 +267,7 @@ func NewEventHandler(
 			}
 		}
 
-		if err := em.Send(context.Background(), out); err != nil && logger != nil {
+		if _, err := em.Send(context.Background(), out); err != nil && logger != nil {
 			logger.Warn("channel send failed",
 				"chat_id", chatID,
 				"user_msg_id", userMsgID,

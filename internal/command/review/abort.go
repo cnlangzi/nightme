@@ -125,7 +125,7 @@ func reportAborted(ctx context.Context, work *chatsession.Work, emitter messages
 	// review closes on the abort instead of on a failure. The run's
 	// context is cancelled, so the send runs on a context that
 	// carries its values but not its cancellation.
-	_ = emitter.Send(context.WithoutCancel(ctx), messages.OutboundMessage{
+	_, _ = emitter.Send(context.WithoutCancel(ctx), messages.OutboundMessage{
 		ChatID:  chatID,
 		Kind:    messages.OutReply,
 		ReplyTo: replyTo,

@@ -553,7 +553,7 @@ func TestStop_ClosesLiveStreams(t *testing.T) {
 	a := newTestAdapter(t, api, newFakeSocket())
 	ctx := context.Background()
 
-	if err := a.Send(ctx, outbound(messages.OutReply, "mid-turn")); err != nil {
+	if _, err := a.Send(ctx, outbound(messages.OutReply, "mid-turn")); err != nil {
 		t.Fatalf("send: %v", err)
 	}
 	if err := a.Stop(ctx); err != nil {

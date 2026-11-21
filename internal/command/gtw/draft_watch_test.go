@@ -31,17 +31,17 @@ type watchEmitter struct {
 	block chan struct{}
 }
 
-func (e *watchEmitter) Send(_ context.Context, m messages.OutboundMessage) error {
+func (e *watchEmitter) Send(_ context.Context, m messages.OutboundMessage) (string, error) {
 	if e.block != nil {
 		<-e.block
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.err != nil {
-		return e.err
+		return "", e.err
 	}
 	e.sends = append(e.sends, m)
-	return nil
+	return "", nil
 }
 
 func (e *watchEmitter) count() int {

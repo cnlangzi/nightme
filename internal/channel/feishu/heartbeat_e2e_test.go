@@ -100,7 +100,7 @@ func buildHandler(em messages.Emitter, cs *chatsession.ChatSession, thinkMode ch
 			if cs.Heartbeat().Observe(env.UserMsgID, out) {
 				snap := cs.Heartbeat().Snapshot(env.UserMsgID)
 				if !snap.Empty() {
-					_ = em.Send(context.Background(), messages.OutboundMessage{
+					_, _ = em.Send(context.Background(), messages.OutboundMessage{
 						ChatID:    env.ChatID,
 						Kind:      messages.OutHeartbeat,
 						ReplyTo:   env.UserMsgID,
@@ -119,7 +119,7 @@ func buildHandler(em messages.Emitter, cs *chatsession.ChatSession, thinkMode ch
 			return
 		}
 
-		_ = em.Send(context.Background(), out)
+		_, _ = em.Send(context.Background(), out)
 	}
 }
 

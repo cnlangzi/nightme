@@ -591,7 +591,7 @@ func sendReviewLine(ctx context.Context, em messages.Emitter, chatID, replyTo, r
 		AgentName: runner,
 		Text:      text,
 	}
-	if err := em.Send(ctx, out); err != nil {
+	if _, err := em.Send(ctx, out); err != nil {
 		slog.Default().Warn("/review: line send failed",
 			"chat_id", chatID,
 			"kind", out.Kind.String(),
@@ -647,7 +647,7 @@ func sendVerdict(ctx context.Context, em messages.Emitter, chatID, replyTo, runn
 	if em == nil {
 		return
 	}
-	if err := em.Send(ctx, out); err != nil {
+	if _, err := em.Send(ctx, out); err != nil {
 		slog.Default().Warn("/review: verdict send failed",
 			"chat_id", chatID,
 			"kind", out.Kind.String(),

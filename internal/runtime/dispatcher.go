@@ -99,18 +99,20 @@ func NewMessageDispatcher(mgr *chatsession.Manager, em messages.Emitter, ch chan
 		_, err := cs.LookupSelectedAgentSession()
 		if err != nil {
 			if errors.Is(err, chatsession.ErrNoSelectedCwd) {
-				return em.Send(ctx, messages.OutboundMessage{
+				_, err = em.Send(ctx, messages.OutboundMessage{
 					ChatID: msg.ChatID,
 					Kind:   messages.OutReply,
 					Text:   "No workspace set. Send /cwd <path> first.",
 				})
+				return err
 			}
 			// Spawn failed (binary missing, etc.); let the user know.
-			return em.Send(ctx, messages.OutboundMessage{
+			_, err = em.Send(ctx, messages.OutboundMessage{
 				ChatID: msg.ChatID,
 				Kind:   messages.OutReply,
 				Text:   fmt.Sprintf("Failed to spawn agent: %v", err),
 			})
+			return err
 		}
 
 		// F-31 / F-53: ChatSession has accepted the message. Emit
@@ -183,11 +185,12 @@ func NewMessageDispatcher(mgr *chatsession.Manager, em messages.Emitter, ch chan
 		}
 		if err := cs.QueueUserMessage(userMsg); err != nil {
 			if errors.Is(err, chatsession.ErrQueueFull) {
-				return em.Send(ctx, messages.OutboundMessage{
+				_, err := em.Send(ctx, messages.OutboundMessage{
 					ChatID: msg.ChatID,
 					Kind:   messages.OutReply,
 					Text:   "Input queue full — the agent is behind. Wait for it to catch up before sending more.",
 				})
+				return err
 			}
 			return err
 		}

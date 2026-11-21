@@ -887,5 +887,7 @@ func newNoOpMgr() *chatsession.Manager {
 // cs from GetOrCreate).
 type noOpEmitter struct{}
 
-func (noOpEmitter) Send(_ context.Context, _ messages.OutboundMessage) error  { return nil }
+func (noOpEmitter) Send(_ context.Context, _ messages.OutboundMessage) (string, error) {
+	return "", nil
+}
 func (noOpEmitter) Patch(_ context.Context, _ messages.OutboundMessage) error { return nil }

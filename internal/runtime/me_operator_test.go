@@ -23,11 +23,11 @@ type recordingEmitter struct {
 	sent []messages.OutboundMessage
 }
 
-func (e *recordingEmitter) Send(_ context.Context, msg messages.OutboundMessage) error {
+func (e *recordingEmitter) Send(_ context.Context, msg messages.OutboundMessage) (string, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.sent = append(e.sent, msg)
-	return nil
+	return "", nil
 }
 
 func (e *recordingEmitter) count() int {
@@ -61,7 +61,7 @@ func TestOperator_Emit_ReachesTheChannelWithoutAChatSession(t *testing.T) {
 	ch := newStubChannel("me_stub", sends)
 	op := newOperator(nil, []channel.Channel{ch}, slog.Default())
 
-	err := op.Emit(context.Background(), "ms_test", messages.OutboundMessage{
+	_, err := op.Emit(context.Background(), "ms_test", messages.OutboundMessage{
 		Kind: messages.OutThinking,
 		Text: "the reasoning",
 	})
@@ -92,7 +92,7 @@ func TestOperator_Emit_PublishesThroughTheChatSessionsEmitter(t *testing.T) {
 	}
 	op := newOperator(nil, []channel.Channel{ch}, slog.Default())
 
-	err := op.Emit(context.Background(), "ms_test", messages.OutboundMessage{
+	_, err := op.Emit(context.Background(), "ms_test", messages.OutboundMessage{
 		Kind: messages.OutThinking,
 		Text: "the reasoning",
 	})
@@ -119,7 +119,7 @@ func TestOperator_Emit_DropsTheThinkingWhenTheChatHidesIt(t *testing.T) {
 	}
 	op := newOperator(nil, []channel.Channel{ch}, slog.Default())
 
-	err := op.Emit(context.Background(), "ms_test", messages.OutboundMessage{
+	_, err := op.Emit(context.Background(), "ms_test", messages.OutboundMessage{
 		Kind: messages.OutThinking,
 		Text: "the reasoning",
 	})
@@ -150,7 +150,7 @@ func TestOperator_Emit_DropsTheToolEventsWhenTheChatHidesThem(t *testing.T) {
 	op := newOperator(nil, []channel.Channel{ch}, slog.Default())
 
 	for _, kind := range []messages.OutboundKind{messages.OutToolStart, messages.OutToolEnd} {
-		err := op.Emit(context.Background(), "ms_test", messages.OutboundMessage{
+		_, err := op.Emit(context.Background(), "ms_test", messages.OutboundMessage{
 			Kind: kind,
 			Tool: &messages.ToolInfo{Name: "run_step", Args: "commit"},
 		})
@@ -178,7 +178,7 @@ func TestOperator_Emit_KeepsTheToolEventsWhenTheChatShowsThem(t *testing.T) {
 	}
 	op := newOperator(nil, []channel.Channel{ch}, slog.Default())
 
-	err := op.Emit(context.Background(), "ms_test", messages.OutboundMessage{
+	_, err := op.Emit(context.Background(), "ms_test", messages.OutboundMessage{
 		Kind: messages.OutToolStart,
 		Tool: &messages.ToolInfo{Name: "run_step", Args: "commit"},
 	})
@@ -196,7 +196,7 @@ func TestOperator_Emit_RefusesAChatNoChannelOwns(t *testing.T) {
 	ch := newStubChannel("me_stub", nil)
 	op := newOperator(nil, []channel.Channel{ch}, slog.Default())
 
-	if err := op.Emit(context.Background(), "tg_test", messages.OutboundMessage{
+	if _, err := op.Emit(context.Background(), "tg_test", messages.OutboundMessage{
 		Kind: messages.OutThinking,
 	}); err == nil {
 		t.Fatal("the message was accepted")

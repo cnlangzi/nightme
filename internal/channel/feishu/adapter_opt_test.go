@@ -81,7 +81,7 @@ func TestHandleCardAction_OptPushesInboundAction(t *testing.T) {
 	var patches patchLog
 	a.updateFunc = patches.hook()
 
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:   messages.OutChoice,
 		ChatID: wantChatID,
 		Choice: &messages.Choice{
@@ -263,7 +263,7 @@ func TestHandleCardAction_QuestionWizardBatchesOnLastClick(t *testing.T) {
 	var patches patchLog
 	a.updateFunc = patches.hook()
 
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:   messages.OutChoice,
 		ChatID: wantChatID,
 		Choice: &messages.Choice{
@@ -383,7 +383,7 @@ func TestHandleCardAction_QuestionWizardSkipThenAnswer(t *testing.T) {
 	}
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:   messages.OutChoice,
 		ChatID: "oc_skip",
 		Choice: &messages.Choice{
@@ -480,7 +480,7 @@ func TestSend_OutChoicePatch_EmptyReplyToSettlesLastCard(t *testing.T) {
 	}
 	var patches patchLog
 	a.updateFunc = patches.hook()
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:   messages.OutChoice,
 		ChatID: chatID,
 		Choice: &messages.Choice{
@@ -492,7 +492,7 @@ func TestSend_OutChoicePatch_EmptyReplyToSettlesLastCard(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Send OutChoice: %v", err)
 	}
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:   messages.OutChoicePatch,
 		ChatID: chatID,
 		Choice: &messages.Choice{
@@ -525,7 +525,7 @@ func TestSend_OutChoicePatch_ByRequestID_NotLastCard(t *testing.T) {
 	}
 	var patches patchLog
 	a.updateFunc = patches.hook()
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:   messages.OutChoice,
 		ChatID: chatID,
 		Choice: &messages.Choice{
@@ -537,7 +537,7 @@ func TestSend_OutChoicePatch_ByRequestID_NotLastCard(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Send first OutChoice: %v", err)
 	}
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:   messages.OutChoice,
 		ChatID: chatID,
 		Choice: &messages.Choice{
@@ -549,7 +549,7 @@ func TestSend_OutChoicePatch_ByRequestID_NotLastCard(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Send second OutChoice: %v", err)
 	}
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:   messages.OutChoicePatch,
 		ChatID: chatID,
 		Choice: &messages.Choice{
@@ -662,7 +662,7 @@ func TestSend_OutChoicePatch_DecisionKeepsButtonsAndHighlights(t *testing.T) {
 	var patches patchLog
 	a.updateFunc = patches.hook()
 	opts := gtwDecisionOptions()
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:   messages.OutChoice,
 		ChatID: chatID,
 		Choice: &messages.Choice{
@@ -675,7 +675,7 @@ func TestSend_OutChoicePatch_DecisionKeepsButtonsAndHighlights(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Send OutChoice: %v", err)
 	}
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:   messages.OutChoicePatch,
 		ChatID: chatID,
 		Choice: &messages.Choice{
@@ -711,7 +711,7 @@ func TestHandleCardAction_OneShotSkip(t *testing.T) {
 	}
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:   messages.OutChoice,
 		ChatID: "oc_oneshot_skip",
 		Choice: &messages.Choice{
@@ -759,7 +759,7 @@ func TestHandleCardAction_OneShotCustomSubmit(t *testing.T) {
 	}
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:   messages.OutChoice,
 		ChatID: "oc_oneshot_custom",
 		Choice: &messages.Choice{
@@ -819,7 +819,7 @@ func TestHandleCardAction_CustomSubmitEmptyToasts(t *testing.T) {
 	}
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:   messages.OutChoice,
 		ChatID: "oc_empty_custom",
 		Choice: &messages.Choice{
@@ -866,7 +866,7 @@ func TestHandleCardAction_QuestionWizardCustomThenSkip(t *testing.T) {
 	}
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:   messages.OutChoice,
 		ChatID: "oc_custom_skip",
 		Choice: &messages.Choice{
@@ -948,7 +948,7 @@ func TestHandleCardAction_FormSubmitOptIndexName(t *testing.T) {
 	}
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:   messages.OutChoice,
 		ChatID: wantChatID,
 		Choice: &messages.Choice{

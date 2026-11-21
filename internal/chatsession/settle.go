@@ -225,7 +225,7 @@ func (cs *ChatSession) settle(msgID string, outcome messages.Outcome) {
 	if em == nil {
 		return
 	}
-	_ = em.Send(context.Background(), messages.OutboundMessage{
+	_, _ = em.Send(context.Background(), messages.OutboundMessage{
 		ChatID:  cs.ChatID,
 		Kind:    messages.OutMessageSettled,
 		ReplyTo: msgID,

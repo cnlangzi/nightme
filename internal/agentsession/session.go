@@ -242,6 +242,13 @@ type AgentSession struct {
 	// closed-channel panic guard).
 	shutdownOnce sync.Once
 
+	// shuttingDown marks the AS as past its lifecycle end. Shutdown
+	// closes eventQueue, and the readpump is the only writer to it —
+	// so no readpump may start once the queue is closed. A respawn
+	// that is still in flight when Shutdown lands rolls back
+	// instead of installing a bridge nobody reads.
+	shuttingDown bool
+
 	// currentPromptOverrideUserMsgID is the readpump's UserMsgID
 	// override for the in-flight prompt. See WithReplyTo.
 	currentPromptOverrideUserMsgID string
@@ -568,6 +575,11 @@ func (as *AgentSession) Background() {
 // once and stays closed).
 func (as *AgentSession) Shutdown() {
 	as.asMu.Lock()
+	// Step 0: mark the AS as past its lifecycle end. A respawn that
+	// is in flight right now must not install a bridge whose events
+	// nobody reads — eventQueue is about to close, and the readpump
+	// is its only writer.
+	as.shuttingDown = true
 	// Step 1: cancel opCtx
 	if as.opCancel != nil {
 		as.opCancel()
@@ -1063,7 +1075,11 @@ func (as *AgentSession) respawn(
 	// exec+handshake is multi-second; Close() can flip
 	// closedByUser=true between our snapshot and here. If so,
 	// roll back: close the freshly-spawned bridge, mark Exited.
-	if as.closedByUser {
+	//
+	// A Shutdown during the same window rolls back for the same
+	// reason: its eventQueue is closed, so the replacement bridge
+	// would have no reader.
+	if as.closedByUser || as.shuttingDown {
 		h := as.handle
 		as.handle = nil
 		as.pid = 0
@@ -1116,6 +1132,10 @@ func (as *AgentSession) respawn(
 	// canonical readpump start point, decoupled from Activate so
 	// tests that Activate without Spawn don't leak a polling
 	// goroutine.
+	//
+	// The replacement bridge gets a readpump of its own: the
+	// readpump of the bridge it replaces freed the slot when it
+	// saw that bridge's events channel close.
 	as.startReadPump()
 	return nil
 }
@@ -1613,7 +1633,7 @@ func (as *AgentSession) RestartFromDeath(ctx context.Context, launcher Spawner) 
 		return ErrSpawnerNotSet
 	}
 	as.asMu.Lock()
-	if as.closedByUser {
+	if as.closedByUser || as.shuttingDown {
 		as.asMu.Unlock()
 		return nil
 	}

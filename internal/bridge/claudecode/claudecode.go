@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -156,6 +157,20 @@ type driver struct {
 	// reads at exit. NOT thread-safe on its own; drainStderr is the
 	// sole writer.
 	stderrTail *agent.StderrRingBuffer
+
+	// turnActive reports whether the CLI is working on a user turn:
+	// the bridge wrote a user message and has not seen the turn's
+	// result yet. The fatal-stderr path only ends a turn that is
+	// running — a fatal line outside a turn (the startup handshake,
+	// a line printed after the turn closed) is logged and kept in
+	// the stderr tail, but ends nothing.
+	turnActive atomic.Bool
+
+	// errReported records that the bridge already reported the
+	// failure of the current turn. The fatal-stderr path and the
+	// exit path both claim it, so a CLI that prints a fatal line and
+	// exits right after reaches the chat as one error, not two.
+	errReported atomic.Bool
 
 	// pumpWG tracks the pumpStream + stderr-drain + lifecycle
 	// goroutines so Close can wait for them all to finish before
@@ -351,7 +366,8 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 		defer agent.PanicEventHandler(
 			"claudecode:stream-pump", panicDeliver,
 			"", live.agentName, live.workspace, live.branch)
-		pumpStream(stdout, live.events, handler, armPendingAskFn, live.agentName, live.workspace, live.branch, logger)
+		pumpStream(stdout, live.events, handler, armPendingAskFn, &live.turnActive,
+			live.agentName, live.workspace, live.branch, logger)
 	})
 
 	// stderr drainer — Claude Code logs to stderr; we both log
@@ -360,13 +376,15 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	// signals. Each line is also mirrored into live.stderrTail
 	// (no Debug gating) so lifecycle() can attach the last
 	// StderrTailBytes to EventAgentError.Diagnostic on non-graceful
-	// exit.
+	// exit. A line the bridge declared fatal ends the turn it
+	// interrupted — see reportFatalStderr.
 	agent.SafeGo("claudecode:stderr-drain", func() {
 		defer live.pumpWG.Done()
 		defer agent.PanicEventHandler(
 			"claudecode:stderr-drain", panicDeliver,
 			"", live.agentName, live.workspace, live.branch)
-		_ = drainStderr(stderr, logger, live.stderrLines, live.stderrTail)
+		_ = drainStderr(stderr, logger, live.stderrLines, live.stderrTail,
+			isFatalStderr, live.reportFatalStderr)
 	})
 
 	// lifecycle — single owner of child.Wait + close(events) +
@@ -416,15 +434,16 @@ func (d *driver) lifecycle() {
 
 	graceful := isClosed(d.closed)
 	exitKind := agent.ClassifyExit(waitErr, graceful)
-	if !graceful {
+	if !graceful && d.claimError() {
 		// Bridge died without our permission — emit EventAgentError
 		// with structured Diagnostic. Even when waitErr is nil
 		// (clean-exit but unrequested) we still emit so the
 		// user-visible event stream reflects the unexpected exit.
-		tail := ""
-		if d.stderrTail != nil {
-			tail = d.stderrTail.String()
-		}
+		//
+		// The claim keeps this to one error per failure: when the
+		// stderr drain already reported a fatal line, that report
+		// carries the CLI's own reason and this one is skipped.
+		tail := d.stderrTailString()
 		diag := &agent.BridgeDiagnostic{
 			ExitKind:   exitKind,
 			WaitErr:    waitErr,
@@ -458,6 +477,15 @@ func (d *driver) lifecycle() {
 	// lifecycle itself is NOT in pumpWG — it calls Wait() to wait
 	// for the 2 sibling pumps (stream-pump + stderr-drain).
 	d.pumpWG.Wait()
+}
+
+// stderrTailString returns the child's stderr tail, or "" when the
+// bridge kept none.
+func (d *driver) stderrTailString() string {
+	if d.stderrTail == nil {
+		return ""
+	}
+	return d.stderrTail.String()
 }
 
 // isClosed reports whether ch has been closed. Used by lifecycle()
@@ -617,7 +645,16 @@ func (d *driver) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) er
 	if err != nil {
 		return fmt.Errorf("claudecode: marshal user msg: %w", err)
 	}
-	return d.writeLine(data)
+	// The turn starts before the write: the CLI can reject the
+	// message and report the failure on stderr before writeLine
+	// returns, and the stderr drain must already see a turn in
+	// flight. A failed write means no turn started.
+	d.turnActive.Store(true)
+	if err := d.writeLine(data); err != nil {
+		d.turnActive.Store(false)
+		return err
+	}
+	return nil
 }
 
 // readFileAsBase64 reads the file at path and returns its contents
@@ -714,7 +751,15 @@ func (d *driver) New(ctx context.Context) error {
 	default:
 	}
 	payload := []byte(`{"type":"user","message":{"role":"user","content":"/clear"}}`)
-	return d.writeLine(payload)
+	// The reset is a turn of its own: the flag is raised before the
+	// write (the CLI can report a failure before writeLine returns)
+	// and the stream pump clears it when the reset is acknowledged.
+	d.turnActive.Store(true)
+	if err := d.writeLine(payload); err != nil {
+		d.turnActive.Store(false)
+		return err
+	}
+	return nil
 }
 
 // Stop sends a structured interrupt to the claude code child
@@ -1136,9 +1181,15 @@ func buildArgs(extraArgs []string, cfg agent.StartConfig) []string {
 // elevated to Warn so they show up in default-level daemon logs;
 // the rest stay at Debug to keep the log readable. The lines
 // channel is closed when EOF arrives.
+//
+// A line the bridge declared fatal is handed to onFatal, which ends
+// the turn the CLI abandoned. isFatal is the format the bridge
+// declares to the shared contract; onFatal is what it does about a
+// line that matches.
 func drainStderr(r interface {
 	Read(p []byte) (int, error)
-}, logger *slog.Logger, lines chan<- string, sink *agent.StderrRingBuffer) error {
+}, logger *slog.Logger, lines chan<- string, sink *agent.StderrRingBuffer,
+	isFatal agent.FatalStderr, onFatal func(line string)) error {
 	defer func() {
 		if lines != nil {
 			close(lines)
@@ -1175,6 +1226,9 @@ func drainStderr(r interface {
 				// and the dropped line still surfaces via the
 				// elevated logger level.
 			}
+		}
+		if isFatal(line) {
+			onFatal(line)
 		}
 	}
 	return nil

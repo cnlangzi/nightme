@@ -229,3 +229,53 @@ func TestCrashHeadline_PrefersFailureBanner(t *testing.T) {
 		})
 	}
 }
+
+// TestCrashHeadline_ComesFromTheLastCrash pins the headline to the
+// same end of the file as the section title. The capture file is
+// appended to across restarts, so it can hold several crashes: a
+// headline from the first one would describe a different daemon run
+// than the title, which is derived from the file's last write.
+func TestCrashHeadline_ComesFromTheLastCrash(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "capture.log")
+	content := "panic: first crash\ngoroutine 1 [running]:\n\npanic: second crash\ngoroutine 2 [running]:\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if got := crashHeadline(path); got != "panic: second crash" {
+		t.Errorf("crashHeadline = %q, want the last crash", got)
+	}
+}
+
+// TestRunDoctor_HeadlineMatchesTheTitledRun is the end-to-end
+// version: the capture holds an old crash and the running daemon
+// wrote a newer one, so the section must show the newer crash —
+// the one the title claims.
+func TestRunDoctor_HeadlineMatchesTheTitledRun(t *testing.T) {
+	t.Setenv(daemonStderrEnv, "")
+	dir := t.TempDir()
+	path := filepath.Join(dir, daemonStderrName)
+	content := "panic: the old crash\n\npanic: the new crash\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("seed capture: %v", err)
+	}
+
+	now := time.Now()
+	if err := os.Chtimes(path, now, now); err != nil {
+		t.Fatalf("set the capture mtime: %v", err)
+	}
+	fake := &fakeDoctorRPCs{startedAt: now.Add(-time.Minute)}
+	var out strings.Builder
+	if err := runDoctorWith(&out, false, cfgWithDataDir(dir), daemoncontrol.Paths{}, fake.rpcs()); err != nil {
+		t.Fatalf("doctor returned %v, want nil", err)
+	}
+	if !strings.Contains(out.String(), "CRASH CAPTURE (the running daemon wrote this") {
+		t.Errorf("doctor output missing the current-daemon title:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "the new crash") {
+		t.Errorf("doctor output missing the newest crash:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "the old crash") {
+		t.Errorf("doctor output shows the older crash:\n%s", out.String())
+	}
+}

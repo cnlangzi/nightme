@@ -28,22 +28,44 @@ import (
 // startReadPump launches the readpump goroutine if not already running.
 // Single-launch guard via `readpumpStarted`.
 //
+// The guard means "a readpump is running": the readpump frees the
+// slot when it exits, so the bridge that replaces a dead one gets a
+// reader of its own. The stop / done channels travel to the
+// goroutine as arguments — reading them from the struct here would
+// race with the next launch, which installs a fresh pair.
+//
 // Called by `Activate` on first invocation. Safe to call multiple
 // times — only the first call has effect.
 func (as *AgentSession) startReadPump() {
 	as.asMu.Lock()
-	if as.readpumpStarted {
+	if as.readpumpStarted || as.shuttingDown {
 		as.asMu.Unlock()
 		return
 	}
 	as.readpumpStarted = true
-	as.readpumpStop = make(chan struct{})
-	as.readpumpDone = make(chan struct{})
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	as.readpumpStop = stop
+	as.readpumpDone = done
 	as.asMu.Unlock()
 	// Lazily start the dispatcher too — it drains eventQueue into
 	// EventBus and must be running before any events are pushed.
 	as.startEventDispatch()
-	go as.readpumpLoop()
+	go as.readpumpLoop(stop, done)
+}
+
+// releaseReadPumpSlot frees the readpump slot, but only when this
+// readpump still owns it: a replacement readpump that already took
+// the slot keeps it.
+//
+// The owner check compares the done channel — the one this readpump
+// was launched with — against the channel the current slot holds.
+func (as *AgentSession) releaseReadPumpSlot(done chan struct{}) {
+	as.asMu.Lock()
+	if as.readpumpDone == done {
+		as.readpumpStarted = false
+	}
+	as.asMu.Unlock()
 }
 
 // readpumpLoop is the per-AS event drain loop. Single goroutine per AS.
@@ -66,8 +88,9 @@ func (as *AgentSession) startReadPump() {
 // (256 events buffered, no reader) can interrupt the readpump and
 // drain the queue. The lost event is acceptable for graceful
 // shutdown.
-func (as *AgentSession) readpumpLoop() {
-	defer close(as.readpumpDone)
+func (as *AgentSession) readpumpLoop(stop <-chan struct{}, done chan struct{}) {
+	defer close(done)
+	defer as.releaseReadPumpSlot(done)
 
 	// Phase 1: snapshot handle. Spawn guarantees it's set before
 	// startReadPump; the defensive path below handles the rare
@@ -78,7 +101,7 @@ func (as *AgentSession) readpumpLoop() {
 	as.asMu.RUnlock()
 	if handle == nil {
 		select {
-		case <-as.readpumpStop:
+		case <-stop:
 			return
 		case <-time.After(100 * time.Millisecond):
 		}
@@ -94,7 +117,7 @@ func (as *AgentSession) readpumpLoop() {
 	// Phase 2: event loop.
 	for {
 		select {
-		case <-as.readpumpStop:
+		case <-stop:
 			return
 		case ev, ok := <-events:
 			if !ok {
@@ -102,6 +125,12 @@ func (as *AgentSession) readpumpLoop() {
 				// closed the underlying handle). Either way,
 				// the in-flight Prompt needs to end — this is
 				// the F-53 deadlock fix.
+				//
+				// The slot is freed before the lifecycle event
+				// travels: the chat layer rebuilds the session
+				// on that event, and the replacement bridge
+				// needs a readpump of its own.
+				as.releaseReadPumpSlot(done)
 				as.endPrompt(agent.PromptEndProcessDied)
 				as.emitLifecycleLocked(StatusExited)
 				return
@@ -150,7 +179,7 @@ func (as *AgentSession) readpumpLoop() {
 				Kind:           KindAgentEvent,
 				AgentEvent:     &evCopy,
 			}:
-			case <-as.readpumpStop:
+			case <-stop:
 				return
 			}
 

@@ -575,6 +575,37 @@ func TestTranslate_EventError_WithDiagnostic_EmitsOutError(t *testing.T) {
 	}
 }
 
+// TestTranslate_EventError_FatalStderrLine_ReachesTheCard pins the
+// chat-facing half of the fatal-stderr contract: the CLI's own
+// failure line is the card's body, and the stderr tail travels with
+// it so the operator sees the CLI's words, not a paraphrase.
+func TestTranslate_EventError_FatalStderrLine_ReachesTheCard(t *testing.T) {
+	const line = `[claude-code:unrecognized_model] {"model":"MiniMax-M3[1m]","query_source":"sdk"}`
+	in := agent.AgentEvent{
+		Kind:      agent.EventAgentError,
+		AgentName: "claude",
+		Workspace: "/code",
+		Err:       agent.FatalStderrError(line),
+		Diagnostic: &agent.BridgeDiagnostic{
+			StderrTail: line,
+			AgentName:  "claude",
+		},
+	}
+	msg, ok := Translate("chat1", in)
+	if !ok {
+		t.Fatal("the CLI's own failure line should reach the chat, got dropped")
+	}
+	if msg.Kind != messages.OutError {
+		t.Errorf("kind = %v, want OutError", msg.Kind)
+	}
+	if msg.Text != line {
+		t.Errorf("Text = %q, want the CLI's line %q", msg.Text, line)
+	}
+	if msg.Diagnostic == nil || msg.Diagnostic.StderrTail != line {
+		t.Errorf("Diagnostic should carry the stderr tail, got %+v", msg.Diagnostic)
+	}
+}
+
 func TestTranslate_EventError_NoDiagnostic_Drops(t *testing.T) {
 	// Pre-Diagnostic-era bridges (and EventAgentError events
 	// where the lifecycle couldn't classify the exit) keep the

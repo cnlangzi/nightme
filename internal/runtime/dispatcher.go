@@ -99,7 +99,7 @@ func NewMessageDispatcher(mgr *chatsession.Manager, em messages.Emitter, ch chan
 		_, err := cs.LookupSelectedAgentSession()
 		if err != nil {
 			if errors.Is(err, chatsession.ErrNoSelectedCwd) {
-				_, err := em.Send(ctx, messages.OutboundMessage{
+				_, err = em.Send(ctx, messages.OutboundMessage{
 					ChatID: msg.ChatID,
 					Kind:   messages.OutReply,
 					Text:   "No workspace set. Send /cwd <path> first.",

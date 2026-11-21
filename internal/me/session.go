@@ -157,18 +157,20 @@ func (s *Service) openRunSession(ctx context.Context, r *run, anchor string) {
 // chat's orphan handling.
 func (s *Service) openRoundSession(ctx context.Context, r *run, it iteration) {
 	sess := &session{kind: sessionRound, id: roundIdentity(it), job: it.job, round: it.round}
-	// The run goes on with the card of the round: everything the run
-	// publishes from now on lands on it, and the card it replaces
-	// keeps what it had.
-	r.setRoundSession(sess)
 	r.resetRound()
 	// The round starts when its card opens: the first action of the
 	// round follows a moment later.
 	r.setRoundStarted(it, s.now())
-	r.rememberRoundSession(it, sess)
 	// The card of the round is opened by the tree: the chat writes a
 	// card of its own and answers with the id of that card.
 	sess.anchor = s.publishReply(ctx, r, sess, r.roundsTree(it))
+	// The run goes on with the card of the round: everything the run
+	// publishes from now on lands on it, and the card it replaces
+	// keeps what it had. The round joins the run once its card is
+	// known: a run that asks for the state in the meantime sees a
+	// round that is not there yet.
+	r.setRoundSession(sess)
+	r.rememberRoundSession(it, sess)
 	s.publishTasks(ctx, r, sess, r.roundTasks(it.job, it.round))
 }
 
@@ -470,13 +472,11 @@ func (s *Service) publishInit(ctx context.Context, r *run, sess *session) {
 //
 // The snapshot is the whole list: the chat renders it as the card's
 // checklist and replaces the previous one with it.
-//
-// It returns the id of the chat message the checklist landed on.
-func (s *Service) publishTasks(ctx context.Context, r *run, sess *session, items []agent.AgentTaskItem) string {
+func (s *Service) publishTasks(ctx context.Context, r *run, sess *session, items []agent.AgentTaskItem) {
 	if sess == nil {
-		return ""
+		return
 	}
-	return s.emit(ctx, r, sess, messages.OutboundMessage{
+	s.emit(ctx, r, sess, messages.OutboundMessage{
 		Kind:     messages.OutTaskUpdate,
 		TaskList: &agent.AgentTaskListEvent{Items: items},
 	})

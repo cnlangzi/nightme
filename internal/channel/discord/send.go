@@ -41,6 +41,8 @@ import (
 // boundary (createMessage / editMessage / addReaction /
 // removeOwnReaction), so a kind that silent-drops — an empty body,
 // a repeated message state, the heartbeat kinds — never advances it.
+// Discord has no card model of its own: the id of the message a kind
+// becomes is not handed back, so the returned id is empty.
 func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (string, error) {
 	return "", a.sendOutbound(ctx, msg)
 }

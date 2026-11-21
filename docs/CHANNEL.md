@@ -381,7 +381,6 @@ type Router struct {
     stopCh     chan struct{}
     stopOnce   sync.Once
     wg         sync.WaitGroup
-    bindings   map[string]*BindingEntry
     // 删：emitter / inbound / channels / chatToChan / defaultChannel / channelCh
 }
 

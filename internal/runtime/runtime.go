@@ -331,12 +331,11 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	// (WithOnCreate BEFORE RestoreFromRegistry) is enforced
 	// inside WireRuntimeCallbacksAndRestore — see its doc.
 	//
-	// Per-AgentSession PR / MR cache. Built before Emitter
-	// construction (the GitStatusLookup closure reads it) and
-	// before gateway.New (the Emitter flows into Gateway's
-	// outbound chokepoint). See prcache.Registry comment for
-	// why this is owned at runtime scope, not on AgentSession
-	// itself.
+	// Per-AgentSession PR / MR cache. Built before the channels
+	// start, because the GitStatusLookup closure that every
+	// channel's Emitter carries reads it. See prcache.Registry
+	// comment for why this is owned at runtime scope, not on
+	// AgentSession itself.
 	prCacheReg := &prcache.Registry{}
 
 	gtwDeps := gtw.HandlerDeps{

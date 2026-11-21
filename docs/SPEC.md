@@ -145,7 +145,7 @@ CS 通过 type aliases 暴露 AS 类型保持调用面简洁（`chatsession.Agen
 - **outbound 路由唯一耦合点**：`EventHandler` 在每个 `OutboundMessage` 上设 `out.ReplyTo = as.currentPrompt.LastMessageID`（F-53 起；F-53 前为 `cs.currentTurnUserMsgID`）。Channel 据此 key 路由。Gateway 不需要知道 Channel 内部 receipt 怎么存
 - **Task checklist 三层状态隔离（F-38）**：Claude bridge 持有 provider-session 的规范化 task map/order，并在成功 tool_result 后发完整 snapshot；Gateway 无状态 typed 透传；Channel receipt 只保存当前 userMsgID 的展示副本。任何一层都不得反向读取另一层状态
 
-- **Gateway 不持有 ChatType**：Gateway 只见 `chat_id string`，假设所有 chat 同质；`InboundMessage` / `BindingEntry` / `ChatSession` / registry schema 都不带 `ChatType` 字段
+- **Gateway 不持有 ChatType**：Gateway 只见 `chat_id string`，假设所有 chat 同质；`InboundMessage` / `ChatSession` / registry schema 都不带 `ChatType` 字段
 - **Channel 自管 chat 语义**：Channel 知道 chat 类型（DM / group / topic）、知道 thread 渲染，但只通过 `OutboundMessage` 暴露渲染能力，不污染 Gateway / ChatSession / Registry 数据模型
 - **`InboundMessage.ReplyTo = message.ParentId`**（Feishu 语义下）：thread 顶层 `RootId` 不进 nightme；`ReplyTo` 字段统一语义 = "被 reply 的那条 message_id"
 - **`OutboundMessage.ReplyTo = as.currentPrompt.LastMessageID`**（F-53 前为 `currentTurnUserMsgID`）：bot reply 永远 anchor 到 user 当前 message_id，不爬 thread 树
@@ -969,7 +969,7 @@ nightme 用 Go 的 goroutine 实现并发，结构如下：
 - **老 AgentSession 的 readPump 不主动停**：继续跑，但 EventCallback 是 noop（因为不再 active）
 
 **并发安全**：
-- Gateway.bindings / receipts：mutex 保护
+- Gateway.pumps / observer：mutex 保护
 - ChatSession.selectedCwd / selectedAgent / pool：mutex 保护
 - 每个 AgentSession 内部用 buffered channel 通信，无跨 session 共享状态
 - 无全局锁、无 errgroup、无 singleflight

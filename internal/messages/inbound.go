@@ -19,8 +19,8 @@ import (
 )
 
 // ChatType was removed in F-33. The Gateway never sees chat types;
-// ChatSession / BindingEntry / registry schema carry no ChatType
-// field. Channel adapters may classify chats internally (see
+// ChatSession / registry schema carry no ChatType field. Channel
+// adapters may classify chats internally (see
 // internal/channel.ChatTypeP2P/ChatTypeGroup) but only their
 // rendering decisions are exposed to the wider system, never the
 // classification itself. See docs/SPEC.md section 3.1 and docs/feat/F-33.

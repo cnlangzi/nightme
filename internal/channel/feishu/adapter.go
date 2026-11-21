@@ -205,6 +205,11 @@ type Adapter struct {
 	// MarkExecuting and incoming card-action callbacks find the
 	// receipt from the Feishu user message id. Same lifecycle
 	// rules as receipts (delete together when SetCompleted).
+	//
+	// It holds two kinds of key: the id of the message the card
+	// hangs under, and the id of the card itself — a card is
+	// addressed by its own message id, so an event that names it
+	// lands on that card.
 	receiptsByUserMsgID map[string]*MessageReceipt
 
 	// pendingHeartbeats (F-63.1) buffers the latest heartbeat
@@ -761,7 +766,9 @@ func (a *Adapter) Incoming() <-chan channel.Message { return a.incoming }
 // a ReplyTo that doesn't yet have a registered receipt.
 //
 // v1.3 (SPEC §2.2): each OutboundMessage{ReplyTo: userMsgID} maps
-// to exactly one receipt per userMsgID.
+// to exactly one receipt per userMsgID. The id may be the message
+// the card hangs under or the id of the card itself: a card is
+// addressed by its own message id.
 //
 // F-42: this function is now a PURE cache lookup. The v1.3 "cold-start
 // minimal ⏳ card" path is removed — receipts are now lazy-created
@@ -1261,15 +1268,16 @@ func (a *Adapter) registerCardReceipt(
 		return
 	}
 	r := NewMessageReceiptForReply(chatID, cardMsgID, a)
+	// The receipt's own lock guards its fields.
+	r.mu.Lock()
 	r.entries = entries
 	r.tasks = tasks
 	r.footerLines = footerLines
 	r.cardMsgID = cardMsgID
 	r.lastBody = body
 	r.lastBodyPatch = time.Now()
-	a.mu.Lock()
-	a.receiptsByUserMsgID[cardMsgID] = r
-	a.mu.Unlock()
+	r.mu.Unlock()
+	a.registerCardID(cardMsgID, r)
 }
 
 // postOrphanErrorCard posts a standalone error card when an

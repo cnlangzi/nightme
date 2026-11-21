@@ -108,9 +108,9 @@ type richTurn struct {
 	resultMessageID int64
 }
 
-// Append a text body to the rich turn. Returns an error if the
-// rich message cold-create fails; otherwise returns nil after the
-// entry is queued for the next debounced flush.
+// Append a text body to the rich turn. Returns the id of the
+// message the turn's card lives on, or an error if the rich message
+// cold-create failed.
 //
 // footer, when non-nil, replaces the turn's footer — same
 // "last-status-wins" semantics v9's chain.lastFooter applied.
@@ -129,7 +129,7 @@ func (a *Adapter) appendRichTurn(
 	userMessageID int,
 	entry richTurnEntry,
 	footer []string,
-) error {
+) (string, error) {
 	turn := a.richTurns.getOrCreate(chatID, topicID, userMessageID)
 
 	turn.mu.Lock()
@@ -143,7 +143,7 @@ func (a *Adapter) appendRichTurn(
 			a.logger.Warn("telegram: rich turn cold-create failed",
 				"chat_id", chatID,
 				"err", err)
-			return err
+			return "", err
 		}
 	}
 
@@ -154,7 +154,7 @@ func (a *Adapter) appendRichTurn(
 	turn.hasContent = true
 	turn.dirty = true
 	a.scheduleRichTurnFlush(turn)
-	return nil
+	return strconv.FormatInt(turn.messageID, 10), nil
 }
 
 // appendRichTurnAndFlush appends an entry and immediately flushes
@@ -171,13 +171,14 @@ func (a *Adapter) appendRichTurnAndFlush(
 	userMessageID int,
 	entry richTurnEntry,
 	footer []string,
-) error {
-	if err := a.appendRichTurn(ctx, chatID, topicID, userMessageID, entry, footer); err != nil {
-		return err
+) (string, error) {
+	msgID, err := a.appendRichTurn(ctx, chatID, topicID, userMessageID, entry, footer)
+	if err != nil {
+		return "", err
 	}
 	turn, ok := a.richTurns.lookup(chatID, topicID, userMessageID)
 	if !ok || turn == nil {
-		return nil
+		return msgID, nil
 	}
 	// Stop any pending debounce; the synchronous flush supersedes it.
 	turn.mu.Lock()
@@ -186,7 +187,10 @@ func (a *Adapter) appendRichTurnAndFlush(
 		turn.debounceTimer = nil
 	}
 	turn.mu.Unlock()
-	return a.flushRichTurn(ctx, turn)
+	if err := a.flushRichTurn(ctx, turn); err != nil {
+		return msgID, err
+	}
+	return msgID, nil
 }
 
 // scheduleRichTurnFlush arms a 250ms debounce timer that calls
@@ -378,7 +382,7 @@ func (a *Adapter) setRichTurnTaskList(
 	userMessageID int,
 	items []agent.AgentTaskItem,
 	footer []string,
-) {
+) string {
 	turn := a.richTurns.getOrCreate(chatID, topicID, userMessageID)
 	turn.mu.Lock()
 	if len(items) == 0 {
@@ -391,8 +395,13 @@ func (a *Adapter) setRichTurnTaskList(
 	}
 	turn.hasContent = true
 	turn.dirty = true
+	msgID := ""
+	if turn.messageID != 0 {
+		msgID = strconv.FormatInt(turn.messageID, 10)
+	}
 	turn.mu.Unlock()
 	a.scheduleRichTurnFlush(turn)
+	return msgID
 }
 
 // updateRichTurnHeader replaces the header line (heartbeat text).
@@ -477,6 +486,7 @@ func (a *Adapter) sendRichTurnColdCreate(turn *richTurn) error {
 		return err
 	}
 	turn.messageID = mid
+	a.richTurns.registerMessage(turn, mid)
 	return nil
 }
 
@@ -581,12 +591,30 @@ type richTurnsIndex struct {
 	cap   int
 	turns map[richTurnKey]*richTurn
 	order []richTurnKey // insertion order, head = oldest
+
+	// byMessage indexes the turns by the id of the message they own:
+	// a card is addressed by its own message id.
+	byMessage map[richTurnMsgKey]richTurnKey
+	// msgOf is the reverse of byMessage: the message a turn owns.
+	// The eviction needs it to drop the byMessage entry of a turn
+	// that goes away.
+	msgOf map[richTurnKey]int64
+
+	// orphanSeq numbers the turns that open without an anchor. Each
+	// of them is a message of its own.
+	orphanSeq int
 }
 
 type richTurnKey struct {
 	chatID        string
 	topicID       int
 	userMessageID int
+}
+
+// richTurnMsgKey names a chat message that a turn owns.
+type richTurnMsgKey struct {
+	chatID    string
+	messageID int64
 }
 
 const defaultRichTurnCap = 1000
@@ -596,16 +624,28 @@ func newRichTurnsIndex(cap int) *richTurnsIndex {
 		cap = defaultRichTurnCap
 	}
 	return &richTurnsIndex{
-		cap:   cap,
-		turns: make(map[richTurnKey]*richTurn),
+		cap:       cap,
+		turns:     make(map[richTurnKey]*richTurn),
+		byMessage: make(map[richTurnMsgKey]richTurnKey),
+		msgOf:     make(map[richTurnKey]int64),
 	}
 }
 
+// getOrCreate returns the turn the key names, creating it when it
+// does not exist yet.
+//
+// A message id that names a card is the card's own address: the
+// turn that owns the message is the turn the event belongs to. The
+// card the chat wrote is patched in place instead of a second card
+// being opened.
 func (r *richTurnsIndex) getOrCreate(chatID string, topicID int, userMessageID int) *richTurn {
-	key := richTurnKey{chatID: chatID, topicID: topicID, userMessageID: userMessageID}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	if turn, ok := r.turnByMessageLocked(chatID, userMessageID); ok {
+		return turn
+	}
+	key := richTurnKey{chatID: chatID, topicID: topicID, userMessageID: userMessageID}
 	if t, ok := r.turns[key]; ok {
 		return t
 	}
@@ -613,6 +653,10 @@ func (r *richTurnsIndex) getOrCreate(chatID string, topicID int, userMessageID i
 		oldest := r.order[0]
 		r.order = r.order[1:]
 		delete(r.turns, oldest)
+		if mid, ok := r.msgOf[oldest]; ok {
+			delete(r.byMessage, richTurnMsgKey{chatID: oldest.chatID, messageID: mid})
+			delete(r.msgOf, oldest)
+		}
 	}
 	t := &richTurn{
 		chatID:        chatID,
@@ -624,19 +668,64 @@ func (r *richTurnsIndex) getOrCreate(chatID string, topicID int, userMessageID i
 	return t
 }
 
-func (r *richTurnsIndex) lookup(chatID string, topicID int, userMessageID int) (*richTurn, bool) {
-	key := richTurnKey{chatID: chatID, topicID: topicID, userMessageID: userMessageID}
+// turnByMessageLocked returns the turn that owns the message. The
+// caller holds r.mu.
+func (r *richTurnsIndex) turnByMessageLocked(chatID string, messageID int) (*richTurn, bool) {
+	if messageID <= 0 {
+		return nil, false
+	}
+	key, ok := r.byMessage[richTurnMsgKey{chatID: chatID, messageID: int64(messageID)}]
+	if !ok {
+		return nil, false
+	}
+	t, ok := r.turns[key]
+	return t, ok
+}
+
+// registerMessage records that the turn owns the message: the card
+// is addressed by its own message id from now on.
+func (r *richTurnsIndex) registerMessage(turn *richTurn, messageID int64) {
+	if turn == nil || messageID == 0 {
+		return
+	}
+	key := richTurnKey{chatID: turn.chatID, topicID: turn.topicID, userMessageID: turn.userMessageID}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.byMessage[richTurnMsgKey{chatID: turn.chatID, messageID: messageID}] = key
+	r.msgOf[key] = messageID
+}
+
+// orphanAnchor mints the key of a turn that opens without an anchor.
+//
+// Every orphan turn is a message of its own: the events that follow
+// name the message it opened.
+func (r *richTurnsIndex) orphanAnchor() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.orphanSeq++
+	return -r.orphanSeq
+}
+
+func (r *richTurnsIndex) lookup(chatID string, topicID int, userMessageID int) (*richTurn, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if turn, ok := r.turnByMessageLocked(chatID, userMessageID); ok {
+		return turn, true
+	}
+	key := richTurnKey{chatID: chatID, topicID: topicID, userMessageID: userMessageID}
 	t, ok := r.turns[key]
 	return t, ok
 }
 
 func (r *richTurnsIndex) purge(chatID string, topicID int, userMessageID int) {
-	key := richTurnKey{chatID: chatID, topicID: topicID, userMessageID: userMessageID}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	key := richTurnKey{chatID: chatID, topicID: topicID, userMessageID: userMessageID}
 	delete(r.turns, key)
+	if mid, ok := r.msgOf[key]; ok {
+		delete(r.byMessage, richTurnMsgKey{chatID: chatID, messageID: mid})
+		delete(r.msgOf, key)
+	}
 	for i, k := range r.order {
 		if k == key {
 			r.order = append(r.order[:i], r.order[i+1:]...)

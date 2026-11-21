@@ -78,7 +78,9 @@ func (c *startFuncChannel) Incoming() <-chan messages.InboundMessage {
 	close(in)
 	return in
 }
-func (c *startFuncChannel) Send(context.Context, messages.OutboundMessage) error { return nil }
+func (c *startFuncChannel) Send(context.Context, messages.OutboundMessage) (string, error) {
+	return "", nil
+}
 func (c *startFuncChannel) OnPromptEnded(context.Context, string, string, agent.PromptEndReason) {
 }
 func (c *startFuncChannel) HealthSnapshot() (string, json.RawMessage, error) {

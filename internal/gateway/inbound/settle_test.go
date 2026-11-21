@@ -18,11 +18,11 @@ type settleEmitter struct {
 	out []messages.OutboundMessage
 }
 
-func (e *settleEmitter) Send(_ context.Context, msg messages.OutboundMessage) error {
+func (e *settleEmitter) Send(_ context.Context, msg messages.OutboundMessage) (string, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.out = append(e.out, msg)
-	return nil
+	return "", nil
 }
 
 func (e *settleEmitter) record() []messages.OutboundMessage {

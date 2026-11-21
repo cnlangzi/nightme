@@ -37,7 +37,7 @@ func TestPendingHeartbeat_StashWhenReceiptMissing(t *testing.T) {
 		ReplyTo:   "om_pending_user",
 		Heartbeat: &messages.HeartbeatSnapshot{ThinkCount: 1, ToolCount: 0, LastBeatAt: time.Now()},
 	}
-	if err := adapter.Send(context.Background(), msg); err != nil {
+	if _, err := adapter.Send(context.Background(), msg); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 
@@ -61,7 +61,7 @@ func TestPendingHeartbeat_DrainOnReceiptInstall(t *testing.T) {
 
 	// Stash a heartbeat BEFORE receipt exists.
 	now := time.Now()
-	if err := adapter.Send(context.Background(), messages.OutboundMessage{
+	if _, err := adapter.Send(context.Background(), messages.OutboundMessage{
 		ChatID:    "oc_drain",
 		Kind:      messages.OutHeartbeat,
 		ReplyTo:   "om_drain_user",
@@ -105,7 +105,7 @@ func TestPendingHeartbeat_MonotonicMerge(t *testing.T) {
 
 	// First stash: ThinkCount=5
 	t0 := time.Now()
-	if err := adapter.Send(context.Background(), messages.OutboundMessage{
+	if _, err := adapter.Send(context.Background(), messages.OutboundMessage{
 		ChatID:    "oc_mono",
 		Kind:      messages.OutHeartbeat,
 		ReplyTo:   "om_mono_user",
@@ -117,7 +117,7 @@ func TestPendingHeartbeat_MonotonicMerge(t *testing.T) {
 	// Second stash: ThinkCount=3 (out-of-order arrival) — must
 	// NOT regress to 3; highest wins.
 	t1 := t0.Add(time.Millisecond)
-	if err := adapter.Send(context.Background(), messages.OutboundMessage{
+	if _, err := adapter.Send(context.Background(), messages.OutboundMessage{
 		ChatID:    "oc_mono",
 		Kind:      messages.OutHeartbeat,
 		ReplyTo:   "om_mono_user",
@@ -159,7 +159,7 @@ func TestPendingHeartbeat_DrainIsIdempotent(t *testing.T) {
 	}
 
 	// Stash + drain = true.
-	_ = adapter.Send(context.Background(), messages.OutboundMessage{
+	_, _ = adapter.Send(context.Background(), messages.OutboundMessage{
 		ChatID:    "oc_idem",
 		Kind:      messages.OutHeartbeat,
 		ReplyTo:   "om_idem_user",
@@ -218,7 +218,7 @@ func TestPendingHeartbeat_DonePreservedOnMerge(t *testing.T) {
 	// First stash: terminal event (endPrompt fired before
 	// receipt creation). Done=true, no counters.
 	t0 := time.Now()
-	if err := adapter.Send(context.Background(), messages.OutboundMessage{
+	if _, err := adapter.Send(context.Background(), messages.OutboundMessage{
 		ChatID:    "oc_done_merge",
 		Kind:      messages.OutHeartbeat,
 		ReplyTo:   "om_done_merge_user",
@@ -230,7 +230,7 @@ func TestPendingHeartbeat_DonePreservedOnMerge(t *testing.T) {
 	// Second stash: counters-only event (handler-side Observe
 	// firing later). No Done flag set on this snapshot.
 	t1 := t0.Add(time.Millisecond)
-	if err := adapter.Send(context.Background(), messages.OutboundMessage{
+	if _, err := adapter.Send(context.Background(), messages.OutboundMessage{
 		ChatID:    "oc_done_merge",
 		Kind:      messages.OutHeartbeat,
 		ReplyTo:   "om_done_merge_user",

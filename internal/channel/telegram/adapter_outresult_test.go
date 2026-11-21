@@ -61,7 +61,7 @@ func decodeBlocks(params map[string]any) ([]map[string]any, bool) {
 // regression-guard for the plaintext-statusbar removal.
 func TestOutResult_SendsRichBlocksNotMarkdown(t *testing.T) {
 	a, api := newTestAdapter(t)
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutResult,
 		Text:   "final answer",
@@ -92,7 +92,7 @@ func TestOutResult_SendsRichBlocksNotMarkdown(t *testing.T) {
 func TestOutResult_BodyMarkdownFeaturesPreserved(t *testing.T) {
 	a, api := newTestAdapter(t)
 	body := "# Title\n\nparagraph line\n\n```go\nfmt.Println(\"hi\")\n```"
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutResult,
 		Text:   body,
@@ -133,7 +133,7 @@ func TestOutResult_BodyMarkdownFeaturesPreserved(t *testing.T) {
 // string footer.text — the all-plain fast path.
 func TestOutResult_FooterIsFooterBlockNotRenderPanel(t *testing.T) {
 	a, api := newTestAdapter(t)
-	if err := a.Send(context.Background(), richOut(messages.OutResult, "final answer")); err != nil {
+	if _, err := a.Send(context.Background(), richOut(messages.OutResult, "final answer")); err != nil {
 		t.Fatalf("OutResult Send: %v", err)
 	}
 	call := findSendRichMessage(api.snapshotCalls())
@@ -183,7 +183,7 @@ func TestOutResult_FooterPRAnchorBecomesUrlEntity(t *testing.T) {
 		Number: 284,
 		URL:    "https://github.com/cnlangzi/nightme/pull/284",
 	}
-	if err := a.Send(context.Background(), msg); err != nil {
+	if _, err := a.Send(context.Background(), msg); err != nil {
 		t.Fatalf("OutResult Send: %v", err)
 	}
 	call := findSendRichMessage(api.snapshotCalls())
@@ -220,7 +220,7 @@ func TestOutResult_FooterPRAnchorBecomesUrlEntity(t *testing.T) {
 // only the body blocks reach the wire.
 func TestOutResult_NoFooterNoDividerBlock(t *testing.T) {
 	a, api := newTestAdapter(t)
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutResult,
 		Text:   "no status data here",
@@ -248,7 +248,7 @@ func TestOutResult_NoFooterNoDividerBlock(t *testing.T) {
 // call, no chain mutation, no error.
 func TestOutResult_EmptyTextSilentDrop(t *testing.T) {
 	a, api := newTestAdapter(t)
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutResult,
 		Text:   "",
@@ -269,7 +269,7 @@ func TestOutResult_EmptyTextSilentDrop(t *testing.T) {
 func TestOutResult_ReplyToUserMessageAndThread(t *testing.T) {
 	a, api := newTestAdapter(t)
 	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 42, UserMessageID: "555"})
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "tg_100:42",
 		Kind:   messages.OutResult,
 		Text:   "topic answer",
@@ -295,7 +295,7 @@ func TestOutResult_ReplyToUserMessageAndThread(t *testing.T) {
 func TestOutResult_DMNoThreadID(t *testing.T) {
 	a, api := newTestAdapter(t)
 	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 0, UserMessageID: "42"})
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "tg_100",
 		Kind:   messages.OutResult,
 		Text:   "dm answer",
@@ -329,14 +329,14 @@ func TestOutResult_MultipleInOneTurn_LastWins(t *testing.T) {
 	// inspecting SendMessageResult, but we can assert: after
 	// OnPromptEnded, the 🎉 must NOT target the first id; it must
 	// target a different (later) one.
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "tg_100",
 		Kind:   messages.OutResult,
 		Text:   "first",
 	}); err != nil {
 		t.Fatalf("OutResult 1: %v", err)
 	}
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "tg_100",
 		Kind:   messages.OutResult,
 		Text:   "second",
@@ -394,16 +394,17 @@ func TestOutResult_ResultMessageIDAnchorsOnPromptEnded(t *testing.T) {
 	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 0, UserMessageID: "77"})
 
 	// 1. OutReply cold-creates the rich turn placeholder (101).
-	if err := a.Send(context.Background(), messages.OutboundMessage{
-		ChatID: "tg_100",
-		Kind:   messages.OutReply,
-		Text:   "starting",
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID:  "tg_100",
+		Kind:    messages.OutReply,
+		Text:    "starting",
+		ReplyTo: "77",
 	}); err != nil {
 		t.Fatalf("OutReply Send: %v", err)
 	}
 
 	// 2. OutResult → standalone sendRichMessage (102).
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "tg_100",
 		Kind:   messages.OutResult,
 		Text:   "final",
@@ -502,17 +503,18 @@ func TestOutResult_RefreshesTurnFooterWithUsage(t *testing.T) {
 	//    stamped by the runtime. We exercise the "no status
 	//    metadata on streaming event" path explicitly to lock the
 	//    delta: the streaming PATCH carries NO 💰 row.
-	if err := a.Send(context.Background(), messages.OutboundMessage{
-		ChatID: "tg_100",
-		Kind:   messages.OutReply,
-		Text:   "starting",
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID:  "tg_100",
+		Kind:    messages.OutReply,
+		Text:    "starting",
+		ReplyTo: "77",
 	}); err != nil {
 		t.Fatalf("OutReply Send: %v", err)
 	}
 
 	// 2. OutResult with Usage populated — both a standalone
 	//    sendRichMessage AND a turn.footer refresh happen here.
-	if err := a.Send(context.Background(), richOut(messages.OutResult, "final answer")); err != nil {
+	if _, err := a.Send(context.Background(), richOut(messages.OutResult, "final answer")); err != nil {
 		t.Fatalf("OutResult Send: %v", err)
 	}
 
@@ -565,10 +567,11 @@ func TestOutResult_UsageOnlyNotDropped(t *testing.T) {
 
 	// Seed the placeholder so the refresh path has something to
 	// PATCH.
-	if err := a.Send(context.Background(), messages.OutboundMessage{
-		ChatID: "tg_100",
-		Kind:   messages.OutReply,
-		Text:   "starting",
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID:  "tg_100",
+		Kind:    messages.OutReply,
+		Text:    "starting",
+		ReplyTo: "77",
 	}); err != nil {
 		t.Fatalf("OutReply Send: %v", err)
 	}
@@ -587,7 +590,7 @@ func TestOutResult_UsageOnlyNotDropped(t *testing.T) {
 			InputTokens: 1_000, OutputTokens: 200, CostUSD: 0.012,
 		},
 	}
-	if err := a.Send(context.Background(), usageOnly); err != nil {
+	if _, err := a.Send(context.Background(), usageOnly); err != nil {
 		t.Fatalf("usage-only OutResult must not error: %v", err)
 	}
 
@@ -626,7 +629,7 @@ func TestOutResult_UsageOnlyNotDropped(t *testing.T) {
 // OutThinking"; Result.Text is the OutResult body).
 func TestOutResult_ResultTextPreferredOverText(t *testing.T) {
 	a, api := newTestAdapter(t)
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutResult,
 		Text:   "stale reply text",
@@ -672,16 +675,17 @@ func TestOutResult_FooterRefreshUpdatesDebouncedFlush(t *testing.T) {
 	a, api := newTestAdapter(t)
 	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 0, UserMessageID: "77"})
 
-	if err := a.Send(context.Background(), messages.OutboundMessage{
-		ChatID: "tg_100",
-		Kind:   messages.OutReply,
-		Text:   "starting",
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID:  "tg_100",
+		Kind:    messages.OutReply,
+		Text:    "starting",
+		ReplyTo: "77",
 	}); err != nil {
 		t.Fatalf("OutReply Send: %v", err)
 	}
 	api.Calls = api.Calls[:0]
 
-	if err := a.Send(context.Background(), richOut(messages.OutResult, "final")); err != nil {
+	if _, err := a.Send(context.Background(), richOut(messages.OutResult, "final")); err != nil {
 		t.Fatalf("OutResult Send: %v", err)
 	}
 

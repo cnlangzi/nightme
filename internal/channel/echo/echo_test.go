@@ -39,14 +39,14 @@ func TestEcho_SendRecordsAndWrites(t *testing.T) {
 	var buf bytes.Buffer
 	c := New("echo", &buf)
 	ctx := context.Background()
-	if err := c.Send(ctx, messages.OutboundMessage{
+	if _, err := c.Send(ctx, messages.OutboundMessage{
 		ChatID: "oc_test",
 		Kind:   messages.OutReply,
 		Text:   "hello world",
 	}); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
-	if err := c.Send(ctx, messages.OutboundMessage{
+	if _, err := c.Send(ctx, messages.OutboundMessage{
 		ChatID: "oc_test",
 		Kind:   messages.OutToolStart,
 		Text:   "Read(/tmp)",
@@ -78,7 +78,7 @@ func TestEcho_SendRecordsAndWrites(t *testing.T) {
 
 func TestEcho_SendWithNilWriterDoesNotPanic(t *testing.T) {
 	c := New("echo", nil)
-	if err := c.Send(context.Background(), messages.OutboundMessage{
+	if _, err := c.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "oc_x", Kind: messages.OutReply, Text: "x",
 	}); err != nil {
 		t.Errorf("Send with nil writer err = %v, want nil", err)
@@ -90,7 +90,7 @@ func TestEcho_SendWithNilWriterDoesNotPanic(t *testing.T) {
 
 func TestEcho_RecordReturnsCopy(t *testing.T) {
 	c := New("echo", nil)
-	_ = c.Send(context.Background(), messages.OutboundMessage{ChatID: "x", Kind: messages.OutReply})
+	_, _ = c.Send(context.Background(), messages.OutboundMessage{ChatID: "x", Kind: messages.OutReply})
 	rec := c.Record()
 	rec[0].Text = "mutated"
 	// Mutating the returned slice must not affect the Channel.
@@ -121,7 +121,7 @@ func TestEcho_AutoHandlesNewKinds(t *testing.T) {
 		{messages.OutInit, "session initialized", "echo: init"},
 	}
 	for _, tc := range cases {
-		if err := c.Send(ctx, messages.OutboundMessage{
+		if _, err := c.Send(ctx, messages.OutboundMessage{
 			ChatID: "oc_test", Kind: tc.kind, Text: tc.text,
 		}); err != nil {
 			t.Fatalf("Send %v: %v", tc.kind, err)

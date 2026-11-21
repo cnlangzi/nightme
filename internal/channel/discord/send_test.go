@@ -205,7 +205,7 @@ func testLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard,
 func TestSend_OutReply_SendsCreate(t *testing.T) {
 	rest := &fakeREST{}
 	a := newTestAdapter(rest)
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "dc_chan1",
 		Kind:   messages.OutReply,
 		Text:   "hello back",
@@ -228,7 +228,7 @@ func TestSend_OutReply_SendsCreate(t *testing.T) {
 func TestSend_OutResult_UsesResultText(t *testing.T) {
 	rest := &fakeREST{}
 	a := newTestAdapter(rest)
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "dc_chan1",
 		Kind:   messages.OutResult,
 		Text:   "ignored",
@@ -246,7 +246,7 @@ func TestSend_OutResult_UsesResultText(t *testing.T) {
 func TestSend_OutResult_EmptyTextSilentDrops(t *testing.T) {
 	rest := &fakeREST{}
 	a := newTestAdapter(rest)
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "dc_chan1",
 		Kind:   messages.OutReply,
 		Text:   "   ",
@@ -264,7 +264,7 @@ func TestSend_OutResult_EmptyTextSilentDrops(t *testing.T) {
 func TestSend_OutMessageState_PlacesEmojiOnUserMessage(t *testing.T) {
 	rest := &fakeREST{}
 	a := newTestAdapter(rest)
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "dc_chan1",
 		Kind:   messages.OutMessageState,
 		MessageState: &messages.MessageStatePayload{
@@ -292,7 +292,7 @@ func TestSend_OutMessageState_Dedupes(t *testing.T) {
 	a := newTestAdapter(rest)
 	ms := &messages.MessageStatePayload{MessageID: "user-msg-2", State: agent.MessageSubmitted}
 	for i := 0; i < 3; i++ {
-		if err := a.Send(context.Background(), messages.OutboundMessage{
+		if _, err := a.Send(context.Background(), messages.OutboundMessage{
 			ChatID: "dc_chan1", Kind: messages.OutMessageState, MessageState: ms,
 		}); err != nil {
 			t.Fatalf("Send: %v", err)
@@ -308,7 +308,7 @@ func TestSend_OutMessageState_Dedupes(t *testing.T) {
 func TestSend_OutMessageStateRemoved_RemovesEmoji(t *testing.T) {
 	rest := &fakeREST{}
 	a := newTestAdapter(rest)
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "dc_chan1",
 		Kind:   messages.OutMessageStateRemoved,
 		MessageState: &messages.MessageStatePayload{
@@ -332,7 +332,7 @@ func TestSend_OutError_AppendsStderrTail(t *testing.T) {
 	rest := &fakeREST{}
 	a := newTestAdapter(rest)
 	tail := "boom: trace line"
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "dc_chan1",
 		Kind:   messages.OutError,
 		Text:   "agent crashed",
@@ -356,7 +356,7 @@ func TestSend_OutError_AppendsStderrTail(t *testing.T) {
 func TestSend_OutThinking_EmitsBubble(t *testing.T) {
 	rest := &fakeREST{}
 	a := newTestAdapter(rest)
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "dc_chan1", Kind: messages.OutThinking, Text: "thinking…",
 	}); err != nil {
 		t.Errorf("Send: %v", err)
@@ -375,7 +375,7 @@ func TestSend_OutThinking_EmitsBubble(t *testing.T) {
 func TestSend_OutToolStart_EmitsCallLine(t *testing.T) {
 	rest := &fakeREST{}
 	a := newTestAdapter(rest)
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "dc_chan1", Kind: messages.OutToolStart,
 		Tool: &messages.ToolInfo{Name: "Read", Args: `{"file_path": "/tmp/foo.go"}`},
 	}); err != nil {
@@ -396,7 +396,7 @@ func TestSend_OutToolEnd_EmitsResultLine(t *testing.T) {
 	rest := &fakeREST{}
 	a := newTestAdapter(rest)
 	raw := "secret-token-very-private-content"
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "dc_chan1", Kind: messages.OutToolEnd,
 		Tool: &messages.ToolInfo{Name: "mcp_unknown", Output: raw},
 	}); err != nil {
@@ -418,7 +418,7 @@ func TestSend_OutToolEnd_EmitsResultLine(t *testing.T) {
 func TestSend_OutTaskCreate_EmitsChecklist(t *testing.T) {
 	rest := &fakeREST{}
 	a := newTestAdapter(rest)
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "dc_chan1", Kind: messages.OutTaskCreate,
 		TaskList: &agent.AgentTaskListEvent{
 			Items: []agent.AgentTaskItem{
@@ -449,7 +449,7 @@ func TestSend_OutTaskCreate_EmitsChecklist(t *testing.T) {
 func TestSend_OutTaskUpdate_NilSilentDrops(t *testing.T) {
 	rest := &fakeREST{}
 	a := newTestAdapter(rest)
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "dc_chan1", Kind: messages.OutTaskUpdate,
 	}); err != nil {
 		t.Errorf("Send: %v", err)
@@ -466,7 +466,7 @@ func TestSend_OutTaskUpdate_NilSilentDrops(t *testing.T) {
 func TestSend_OutChoice_RecordsCardAndStore(t *testing.T) {
 	rest := &fakeREST{}
 	a := newTestAdapter(rest)
-	err := a.Send(context.Background(), messages.OutboundMessage{
+	_, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "dc_chan1", Kind: messages.OutChoice,
 		Choice: &messages.Choice{
 			RequestID: "req-1",
@@ -504,7 +504,7 @@ func TestSend_OutChoicePatch_UpdatesOriginal(t *testing.T) {
 		MessageID: "card-msg-1",
 		Choice:    &messages.Choice{RequestID: "req-1"},
 	})
-	err := a.Send(context.Background(), messages.OutboundMessage{
+	_, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "dc_chan1", Kind: messages.OutChoicePatch,
 		Choice: &messages.Choice{
 			RequestID:  "req-1",
@@ -531,7 +531,7 @@ func TestSend_OutChoicePatch_UpdatesOriginal(t *testing.T) {
 func TestSend_OutChoicePatch_OrphanSilentSkips(t *testing.T) {
 	rest := &fakeREST{}
 	a := newTestAdapter(rest)
-	err := a.Send(context.Background(), messages.OutboundMessage{
+	_, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "dc_chan1", Kind: messages.OutChoicePatch,
 		Choice: &messages.Choice{RequestID: "req-missing"},
 	})
@@ -548,7 +548,7 @@ func TestSend_OutChoicePatch_OrphanSilentSkips(t *testing.T) {
 func TestSend_OutMessageState_MissingFields(t *testing.T) {
 	rest := &fakeREST{}
 	a := newTestAdapter(rest)
-	err := a.Send(context.Background(), messages.OutboundMessage{
+	_, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "dc_chan1", Kind: messages.OutMessageState,
 		// MessageState nil
 	})
@@ -652,7 +652,7 @@ func TestMapStateToDiscordEmoji(t *testing.T) {
 func TestSend_RestErrorPropagates(t *testing.T) {
 	rest := &fakeREST{createErr: errors.New("boom")}
 	a := newTestAdapter(rest)
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "dc_chan1", Kind: messages.OutReply, Text: "hi",
 	}); err == nil {
 		t.Error("expected error from REST")
@@ -695,7 +695,7 @@ func TestSend_OutReply_SplitsLongBody(t *testing.T) {
 	a := newTestAdapter(rest)
 	body := strings.Repeat("review digest row\n", 300)
 
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "dc_chan1", Kind: messages.OutReply, Text: body,
 	}); err != nil {
 		t.Fatalf("Send: %v", err)
@@ -723,7 +723,7 @@ func TestSend_OutReply_SplitsLongCJKBody(t *testing.T) {
 	a := newTestAdapter(rest)
 	body := strings.Repeat("审查发现的问题描述", 300)
 
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "dc_chan1", Kind: messages.OutReply, Text: body,
 	}); err != nil {
 		t.Fatalf("Send: %v", err)
@@ -754,7 +754,7 @@ func TestSend_OutResult_SplitsAndRecordsTheLastMessage(t *testing.T) {
 	a := newTestAdapter(rest)
 	body := strings.Repeat("result line\n", 300)
 
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "dc_chan1", Kind: messages.OutResult, ReplyTo: "user-msg-1", Text: body,
 	}); err != nil {
 		t.Fatalf("Send: %v", err)
@@ -775,7 +775,7 @@ func TestSend_OutError_SplitsLongBody(t *testing.T) {
 	a := newTestAdapter(rest)
 	body := strings.Repeat("boom: trace line\n", 300)
 
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "dc_chan1", Kind: messages.OutError, Text: body,
 	}); err != nil {
 		t.Fatalf("Send: %v", err)

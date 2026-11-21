@@ -113,7 +113,7 @@ type emitImpl struct {
 	gitStatusLookup func(context.Context, string) *messages.GitStatus
 }
 
-func (e *emitImpl) Send(ctx context.Context, msg messages.OutboundMessage) error {
+func (e *emitImpl) Send(ctx context.Context, msg messages.OutboundMessage) (string, error) {
 	e.stampGitStatus(ctx, &msg)
 	return e.ch.Send(ctx, msg)
 }

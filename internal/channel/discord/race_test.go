@@ -32,7 +32,7 @@ func TestChoiceState_ConcurrentPatchAndClickNoRace(t *testing.T) {
 		wg.Add(2)
 		go func(i int) {
 			defer wg.Done()
-			_ = a.Send(context.Background(), messages.OutboundMessage{
+			_, _ = a.Send(context.Background(), messages.OutboundMessage{
 				ChatID: "dc_chan1", Kind: messages.OutChoicePatch,
 				Choice: &messages.Choice{
 					RequestID: "req-1",

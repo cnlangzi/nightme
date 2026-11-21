@@ -56,7 +56,7 @@ func emitMessageState(gw *Router, chatID, userMsgID string, state agent.MessageS
 			MessageID: userMsgID,
 		},
 	}
-	if err := ch.Send(context.Background(), out); err != nil {
+	if _, err := ch.Send(context.Background(), out); err != nil {
 		log.Printf("gateway: MessageState send failed (chat=%s, state=%s): %v", chatID, state, err)
 	}
 }

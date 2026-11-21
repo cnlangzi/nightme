@@ -309,7 +309,7 @@ func dispatchSinkEvent(
 			if hb.Observe(replyTo, out) {
 				snap := hb.Snapshot(replyTo)
 				if !snap.Empty() {
-					_ = em.Send(ctx, messages.OutboundMessage{
+					_, _ = em.Send(ctx, messages.OutboundMessage{
 						ChatID:    chatID,
 						Kind:      messages.OutHeartbeat,
 						ReplyTo:   replyTo,
@@ -336,7 +336,7 @@ func dispatchSinkEvent(
 		// user-visible surface is suppressed.
 		return
 	}
-	if err := em.Send(ctx, out); err != nil {
+	if _, err := em.Send(ctx, out); err != nil {
 		// Channel-side errors are not the caller's problem — log
 		// and continue. The bridge's RunResult carries the text
 		// independently so /gtw commit still has its outcome even

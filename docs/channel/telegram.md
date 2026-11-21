@@ -1078,7 +1078,8 @@ forum topic 视觉形态相同：用户消息 → DraftMessage (rich, message_th
 
 **实现**：
 
-- `adapter.Send()` 优先用 `msg.ReplyTo` 解析 `replyAnchor`；兜底 `state.UserMessageID`（兼容 shell / 框架 / 测试入口不 stamp `ReplyTo` 的场景，跟 Feishu orphan-fallback 行为对位）
+- `adapter.Send()` 优先用 `msg.ReplyTo` 解析 `replyAnchor`；兜底 `state.UserMessageID`（兼容 shell / 框架 / 测试入口不 stamp `ReplyTo` 的场景）
+- 带内容进卡片的 kind（`OutReply` / `OutCommandReply` / `OutTask*` / `OutError`）在没有 anchor 时另开一个 rich turn：卡片是它自己的一条消息，跟 Feishu 的 orphan 卡片对位。每张卡按自己的 message id 登记（`richTurns.byMessage`），随后带这个 id 的事件落回同一张卡，不再另开一张
 - `adapter.patchChainHeader`（OutHeartbeat）同样优先 `msg.ReplyTo`，兜底 state
 - per-turn 隔离靠两套并行的 per-`userMsgID` 索引：
   - **stream surface**：`groupDraftKey = chatID|topicID|userMsgID`（DM 与 group 共用，chat_kind 不参与 key）
@@ -1097,7 +1098,7 @@ forum topic 视觉形态相同：用户消息 → DraftMessage (rich, message_th
 | 维度 | Feishu receipt | Telegram v11.12 |
 | --- | --- | --- |
 | turn anchor 源 | `msg.ReplyTo` 唯一来源 | `msg.ReplyTo` 优先 + state 兜底 |
-| 找不到 anchor | orphan path 走独立消息 | 兜底到 `state.UserMessageID`（同 Feishu orphan 行为） |
+| 找不到 anchor | orphan path 走独立消息 | 带内容的 kind 另开一条自己的消息；其余 kind 兜底到 `state.UserMessageID` |
 | per-userMsgID 隔离 | `receiptsByUserMsgID` map | `groupDraftKey` map + `richTurns` map |
 | OnPromptEnded 清理 | `SetPromptState(terminal)` 走 receipt | 两套 endProcess safety net + rich turn 🎉 |
 | 跨 turn 串位防护 | receipt 严格 per-userMsgID | 优先 ReplyTo + 所有索引 key 都含 userMsgID |
@@ -1287,7 +1288,7 @@ sendMessage 失败 → retry 3 次 → 仍失败就返回 error，runtime 看到
 
 #### N5. 用 `msg.ReplyTo` 作为锚点（编辑消息）
 
-已实现 — `adapter.Send()` 优先用 `msg.ReplyTo` 解析 `replyAnchor`；兜底 `state.UserMessageID`。
+已实现 — `adapter.Send()` 优先用 `msg.ReplyTo` 解析 `replyAnchor`；兜底 `state.UserMessageID`。带内容进卡片的 kind 没有 anchor 时另开自己的 rich turn，卡片按自己的 message id 登记。
 
 #### N6. 心跳 header 加 session identity
 

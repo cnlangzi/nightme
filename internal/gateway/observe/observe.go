@@ -440,8 +440,8 @@ type tapEmitter struct {
 	tracker *Tracker
 }
 
-func (e *tapEmitter) Send(ctx context.Context, msg messages.OutboundMessage) error {
-	err := e.inner.Send(ctx, msg)
+func (e *tapEmitter) Send(ctx context.Context, msg messages.OutboundMessage) (string, error) {
+	id, err := e.inner.Send(ctx, msg)
 	e.tracker.Observe(msg)
-	return err
+	return id, err
 }

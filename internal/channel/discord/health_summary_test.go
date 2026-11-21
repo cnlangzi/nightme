@@ -83,7 +83,7 @@ func TestHealthSummary_ConnectedAfterReady(t *testing.T) {
 func TestHealthSummary_SilentDropDoesNotStampOutbound(t *testing.T) {
 	a := newTestAdapter(&fakeREST{})
 	// A whitespace-only reply is dropped by the sender.
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "dc_12345",
 		Kind:   messages.OutReply,
 		Text:   "   ",
@@ -99,7 +99,7 @@ func TestHealthSummary_SilentDropDoesNotStampOutbound(t *testing.T) {
 // that reaches Discord advances the clock.
 func TestHealthSummary_SendStampsOutbound(t *testing.T) {
 	a := newTestAdapter(&fakeREST{})
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "dc_12345",
 		Kind:   messages.OutReply,
 		Text:   "hello",

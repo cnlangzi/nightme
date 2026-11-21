@@ -539,7 +539,7 @@ func (a *Adapter) ingest(ctx context.Context, message *Message, origin messages.
 			if outcome.Err != nil {
 				notice := voiceFailureText(outcome)
 				if notice != "" {
-					if err := a.Send(context.Background(), messages.OutboundMessage{
+					if _, err := a.Send(context.Background(), messages.OutboundMessage{
 						ChatID: a.sessionChatID(chatID, topicID),
 						Kind:   messages.OutError,
 						Text:   notice,
@@ -999,7 +999,7 @@ func (a *Adapter) notifyDownloadFailure(rawChatID string, topicID int, res downl
 		text = fmt.Sprintf("⚠️ %d attachment(s) failed to download after %d attempts; sending text only.",
 			res.FailureCount, downloadRetryConfig.MaxAttempts)
 	}
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: sessionChatID,
 		Kind:   messages.OutError,
 		Text:   text,
@@ -1271,7 +1271,7 @@ func (a *Adapter) streamDraftEvent(ctx context.Context, rawChatID string, topicI
 	}
 }
 
-func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err error) {
+func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (msgID string, err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -1298,7 +1298,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		}
 	}()
 	if msg.ChatID == "" {
-		return errors.New("telegram: outbound ChatID is empty")
+		return "", errors.New("telegram: outbound ChatID is empty")
 	}
 	rawChatID, _, ok := splitSessionID(msg.ChatID)
 	if !ok {
@@ -1319,7 +1319,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// The structured outcome of an inbound message. It exists
 		// for programs that drive nightme, not for humans.
 		sent = false
-		return nil
+		return "", nil
 	case messages.OutReply, messages.OutCommandReply, messages.OutResult, messages.OutThinking:
 		if strings.TrimSpace(msg.Text) == "" {
 			// OutResult is permissive: a turn may legitimately end
@@ -1334,7 +1334,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 				break
 			}
 			sent = false
-			return nil
+			return "", nil
 		}
 	case messages.OutInit:
 		// OutInit is a silent-drop regardless of text — its
@@ -1343,7 +1343,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// the placeholder resolution below would still send
 		// "🤖 Working..." to Telegram.
 		sent = false
-		return nil
+		return "", nil
 	}
 	// Resolve replyAnchor up front. reply_to_message_id for OutXxx
 	// bubbles — always the user message id that triggered this
@@ -1403,11 +1403,26 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 			}
 		}
 	}
+	// turnAnchor is the rich turn the outbound belongs to.
+	//
+	// An event that names a message lands on the turn that message
+	// opened: a card is addressed by its own message id, so the
+	// events that follow land on the card the chat already wrote.
+	//
+	// An event that carries content into a card and names no card
+	// opens a turn of its own: the card is a message of its own,
+	// like Feishu's orphan card, and the events that follow name
+	// the message it opened. Without that, every round of a run
+	// would pile onto the same message.
+	turnAnchor := replyAnchor
+	if msg.ReplyTo == "" && opensOwnCard(msg.Kind) {
+		turnAnchor = a.richTurns.orphanAnchor()
+	}
 	switch msg.Kind {
 	case messages.OutChoice:
-		return a.sendChoice(ctx, msg, replyAnchor)
+		return "", a.sendChoice(ctx, msg, replyAnchor)
 	case messages.OutChoicePatch:
-		return a.patchChoice(ctx, msg)
+		return "", a.patchChoice(ctx, msg)
 	case messages.OutHeartbeat:
 		// Issue #368: heartbeat goes through the draft ticker
 		// (feedTicker on the wrapper side). The rich turn no
@@ -1416,10 +1431,10 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// visuals. patchChainHeader keeps the log line and is the
 		// historical entry point; it now does nothing functional.
 		sent = false
-		return a.patchChainHeader(msg)
+		return "", a.patchChainHeader(msg)
 	case messages.OutMessageState:
 		if msg.MessageState == nil || msg.MessageState.MessageID == "" {
-			return errors.New("telegram: OutMessageState missing MessageState or MessageID")
+			return "", errors.New("telegram: OutMessageState missing MessageState or MessageID")
 		}
 		// Channel自治: 用 State 调自己的映射函数, 不读 payload 字段。
 		// (MessageStatePayload.Emoji 已删除 — runtime 不再生产半成品 emoji,
@@ -1429,17 +1444,17 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		emoji := mapStateToTelegramEmoji(state)
 		if emoji == "" {
 			sent = false
-			return nil // 未知 state silent drop, 跟 feishu 对位
+			return "", nil // 未知 state silent drop, 跟 feishu 对位
 		}
 		// 幂等: 同 state 跳过 API 调用, 避免 Telegram API 抖动。
 		// 跟 feishu 的 messageStates LRU 行为对称。
 		if prev, ok := a.lastMessageState(msg.MessageState.MessageID); ok && prev == state {
 			sent = false
-			return nil
+			return "", nil
 		}
 		messageID, err := strconv.Atoi(msg.MessageState.MessageID)
 		if err != nil {
-			return err
+			return "", err
 		}
 		// v6.1: Telegram bots are limited to ONE reaction per
 		// message (REACTIONS_TOO_MANY if you try to set >1). Each
@@ -1454,22 +1469,22 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		//     ✅ on the per-turn placeholder instead)
 		reactions := []map[string]any{{"type": "emoji", "emoji": emoji}}
 		if err := a.setMessageReactions(ctx, rawChatID, messageID, reactions); err != nil {
-			return err
+			return "", err
 		}
 		a.rememberMessageState(msg.MessageState.MessageID, state)
-		return nil
+		return "", nil
 	case messages.OutMessageStateRemoved:
 		if msg.MessageState == nil || msg.MessageState.MessageID == "" {
-			return errors.New("telegram: OutMessageStateRemoved missing MessageState or MessageID")
+			return "", errors.New("telegram: OutMessageStateRemoved missing MessageState or MessageID")
 		}
 		messageID, err := strconv.Atoi(msg.MessageState.MessageID)
 		if err != nil {
-			return err
+			return "", err
 		}
 		// OutMessageStateRemoved clears the entire reaction list
 		// (no emoji). Caller uses this to explicitly drop reactions
 		// (e.g., MessageDropped).
-		return a.setMessageReactions(ctx, rawChatID, messageID, nil)
+		return "", a.setMessageReactions(ctx, rawChatID, messageID, nil)
 	case messages.OutToolStart:
 		// DM draft path: REPLACE semantics — OutToolStart is the
 		// "first half" of a tool display; OutToolEnd stacks below.
@@ -1477,7 +1492,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// (live_draft.go); subsequent events editMessageText in
 		// place. On cold-create failure falls through to richTurn.
 		if handled, _ := a.streamDraftEvent(ctx, rawChatID, topicID, replyAnchor, formatTool(msg), messages.OutToolStart); handled {
-			return nil
+			return "", nil
 		}
 		// L3 (§20.6.3): route through richTurn. The tool call line
 		// (`● Tool(args)`) becomes one paragraph block in the
@@ -1492,7 +1507,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// chunks — the draft_ticker wrapper handles the trailer.
 		// Pass nil to skip the now-unused footer parameter.
 		if msg.Tool == nil {
-			return a.appendSegmentForKind(ctx, msg, rawChatID, topicID, replyAnchor,
+			return a.appendSegmentForKind(ctx, msg, rawChatID, topicID, turnAnchor,
 				formatTool(msg))
 		}
 		startName := msg.Tool.Name
@@ -1500,7 +1515,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 			startName = "tool"
 		}
 		startBody := formatToolStartCall(startName, msg.Tool.Args)
-		return a.appendRichTurnAndFlush(ctx, rawChatID, topicID, replyAnchor,
+		return a.appendRichTurnAndFlush(ctx, rawChatID, topicID, turnAnchor,
 			richTurnEntry{kind: "tool", body: startBody},
 			statusbar.StatusBarLines(&msg))
 
@@ -1511,14 +1526,14 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// Group path: edits the simulated DraftMessage with the
 		// appended result line (REPLACE/ACCUMULATE per #383).
 		if handled, _ := a.streamDraftEvent(ctx, rawChatID, topicID, replyAnchor, formatTool(msg), messages.OutToolEnd); handled {
-			return nil
+			return "", nil
 		}
 		// L3: route through richTurn. The result line lands as a
 		// sibling block to the Start line in the same rich message.
 		// msg.Err vs msg.Tool.Err: gateway always sets Tool.Err;
 		// using Tool.Err is the canonical-error contract.
 		if msg.Tool == nil {
-			return a.appendSegmentForKind(ctx, msg, rawChatID, topicID, replyAnchor,
+			return a.appendSegmentForKind(ctx, msg, rawChatID, topicID, turnAnchor,
 				formatTool(msg))
 		}
 		endName := msg.Tool.Name
@@ -1533,7 +1548,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// also catch any subsequent events; this synchronous flush
 		// just ensures the result is rendered before the next
 		// OutToolStart arrives.
-		return a.appendRichTurnAndFlush(ctx, rawChatID, topicID, replyAnchor,
+		return a.appendRichTurnAndFlush(ctx, rawChatID, topicID, turnAnchor,
 			richTurnEntry{kind: "tool", body: resultBody},
 			statusbar.StatusBarLines(&msg))
 	case messages.OutTaskCreate, messages.OutTaskUpdate:
@@ -1543,10 +1558,9 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// v9 P2 contract: nil TaskList silent drops; empty Items
 		// clears the section. Pass nil for footer — issue #368.
 		if msg.TaskList == nil {
-			return nil
+			return "", nil
 		}
-		a.setRichTurnTaskList(rawChatID, topicID, replyAnchor, msg.TaskList.Items, statusbar.StatusBarLines(&msg))
-		return nil
+		return a.setRichTurnTaskList(rawChatID, topicID, turnAnchor, msg.TaskList.Items, statusbar.StatusBarLines(&msg)), nil
 	case messages.OutError:
 		// L3: route through richTurn. The error body lands as one
 		// paragraph (markdown fenced-code wrap is preserved by the
@@ -1557,10 +1571,9 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		if msg.Diagnostic != nil && msg.Diagnostic.StderrTail != "" {
 			body += "\n\n```\n" + msg.Diagnostic.StderrTail + "\n```"
 		}
-		a.appendRichTurn(ctx, rawChatID, topicID, replyAnchor,
+		return a.appendRichTurn(ctx, rawChatID, topicID, turnAnchor,
 			richTurnEntry{kind: "error", body: body},
 			statusbar.StatusBarLines(&msg))
-		return nil
 	case messages.OutInit:
 		// Silent drop — matches feishu F-44. The Init payload
 		// (session_id, model, agent name, …) is still on the
@@ -1568,7 +1581,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// "Agent: x · Model: y · Session: z" bubble in the
 		// topic. Session identity shows up via the StatusBar
 		// trailer on every subsequent outbound message (see §18).
-		return nil
+		return "", nil
 	case messages.OutThinking:
 		// DM draft path: REPLACE semantics — one thinking event
 		// displays alone as "💭 <text>". The "💭 " prefix
@@ -1579,7 +1592,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// Empty-text silent drop already happened at the top of
 		// Send, so msg.Text is non-empty here.
 		if handled, _ := a.streamDraftEvent(ctx, rawChatID, topicID, replyAnchor, "💭 "+msg.Text, messages.OutThinking); handled {
-			return nil
+			return "", nil
 		}
 		// F-think parity with feishu: prefix the reasoning body
 		// with `💭 ` so the user can scan the chat and instantly
@@ -1601,7 +1614,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// catches it (the prefix `💭 ` is non-whitespace so we
 		// can't mirror the trim here).
 		body := "💭 " + msg.Text
-		return a.appendSegmentForKind(ctx, msg, rawChatID, topicID, replyAnchor, body)
+		return a.appendSegmentForKind(ctx, msg, rawChatID, topicID, turnAnchor, body)
 	case messages.OutResult:
 		// v9 P2: OutResult is the user-facing final output of the
 		// turn. Fold it into the chain and you lose the visual
@@ -1630,7 +1643,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		if a.liveDraft != nil {
 			a.liveDraft.endProcess(ctx, rawChatID, topicID, replyAnchor)
 		}
-		return a.sendOutResultMessage(ctx, msg, rawChatID, topicID, replyAnchor)
+		return a.sendOutResultMessage(ctx, msg, rawChatID, topicID, replyAnchor, turnAnchor)
 	default:
 		// OutReply / OutCommandReply: every remaining text-emitting
 		// kind folds onto the active chain chunk (v9 §11.12).
@@ -1653,8 +1666,20 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// invariant. The walker itself (markdownToRichBlocks)
 		// is still used by appendSegmentForKind's chain-attached
 		// kinds to convert markdown bodies into rich blocks.
-		return a.appendSegmentForKind(ctx, msg, rawChatID, topicID, replyAnchor, msg.Text)
+		return a.appendSegmentForKind(ctx, msg, rawChatID, topicID, turnAnchor, msg.Text)
 	}
+}
+
+// opensOwnCard reports whether the chat writes a card of its own for
+// the message: the kinds that carry content into a card. The kinds
+// that finish a turn or stamp it belong to the turn they arrive in.
+func opensOwnCard(kind messages.OutboundKind) bool {
+	switch kind {
+	case messages.OutReply, messages.OutCommandReply, messages.OutTaskCreate,
+		messages.OutTaskUpdate, messages.OutError:
+		return true
+	}
+	return false
 }
 
 // appendSegmentForKind is the L3 richTurn ingest helper. Single
@@ -1674,9 +1699,9 @@ func (a *Adapter) appendSegmentForKind(
 	rawChatID string,
 	topicID, userMessageID int,
 	segment string,
-) error {
+) (string, error) {
 	if strings.TrimSpace(segment) == "" {
-		return nil
+		return "", nil
 	}
 
 	// L3: route through richTurn. The chain-attached kind is
@@ -1716,7 +1741,7 @@ func (a *Adapter) appendSegmentForKind(
 	// to be supported without rich messages.)
 	a.logger.Debug("telegram: appendSegmentForKind dropped (RichMode=off)",
 		"chat_id", rawChatID, "kind", msg.Kind.String())
-	return nil
+	return "", nil
 }
 
 // sendOutResultMessage emits the result body as a standalone
@@ -1773,8 +1798,8 @@ func (a *Adapter) sendOutResultMessage(
 	ctx context.Context,
 	msg messages.OutboundMessage,
 	rawChatID string,
-	topicID, userMessageID int,
-) error {
+	topicID, userMessageID, turnAnchor int,
+) (string, error) {
 	body := strings.TrimSpace(msg.Text)
 	if msg.Result != nil {
 		body = strings.TrimSpace(msg.Result.Text)
@@ -1782,13 +1807,14 @@ func (a *Adapter) sendOutResultMessage(
 
 	footerLines := statusbar.StatusBarLines(&msg)
 
+	msgID := ""
 	if body != "" {
 		blocksJSON, ok := buildResultBlocks(body, footerLines)
 		if !ok {
 			// Walker succeeded but produced 0 blocks (shouldn't
 			// happen — body is non-empty here — but defensive:
 			// silent drop rather than an empty rich message).
-			return nil
+			return "", nil
 		}
 
 		mid, err := a.trySendRichBlocks(ctx, rawChatID, topicID, userMessageID, blocksJSON)
@@ -1798,9 +1824,10 @@ func (a *Adapter) sendOutResultMessage(
 				"thread_id", topicID,
 				"blocks_len", len(blocksJSON),
 				"err", err)
-			return err
+			return "", err
 		}
-		turn := a.richTurns.getOrCreate(rawChatID, topicID, userMessageID)
+		msgID = strconv.FormatInt(mid, 10)
+		turn := a.richTurns.getOrCreate(rawChatID, topicID, turnAnchor)
 		turn.mu.Lock()
 		turn.resultMessageID = mid
 		turn.mu.Unlock()
@@ -1812,14 +1839,14 @@ func (a *Adapter) sendOutResultMessage(
 	// debounce tick — or OnPromptEndedRichTurn's synchronous flush
 	// — picks this up and emits editMessageText.
 	if len(footerLines) > 0 {
-		turn := a.richTurns.getOrCreate(rawChatID, topicID, userMessageID)
+		turn := a.richTurns.getOrCreate(rawChatID, topicID, turnAnchor)
 		turn.mu.Lock()
 		turn.footer = footerLines
 		turn.dirty = true
 		a.scheduleRichTurnFlush(turn)
 		turn.mu.Unlock()
 	}
-	return nil
+	return msgID, nil
 }
 
 // isTextEmittingKind reports whether msg.Kind flows through the

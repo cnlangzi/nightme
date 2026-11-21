@@ -102,7 +102,7 @@ func TestAdapter_Send_DM_OutChoice_NoStatusBar(t *testing.T) {
 
 	// Seed the cache so we can detect if Choice mistakenly
 	// appends it.
-	if err := a.Send(context.Background(), richOut(messages.OutReply, "seed")); err != nil {
+	if _, err := a.Send(context.Background(), richOut(messages.OutReply, "seed")); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	api.Calls = nil
@@ -124,7 +124,7 @@ func TestAdapter_Send_DM_OutChoice_NoStatusBar(t *testing.T) {
 			},
 		},
 	}
-	if err := a.Send(context.Background(), choice); err != nil {
+	if _, err := a.Send(context.Background(), choice); err != nil {
 		t.Fatalf("send choice: %v", err)
 	}
 	for _, call := range api.snapshotCalls() {
@@ -141,7 +141,7 @@ func TestAdapter_Send_DM_OutChoice_NoStatusBar(t *testing.T) {
 func TestAdapter_Send_DM_OutMessageState_NoTextChange(t *testing.T) {
 	a, api := newTestAdapter(t)
 
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutMessageState,
 		MessageState: &messages.MessageStatePayload{

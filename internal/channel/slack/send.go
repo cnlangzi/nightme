@@ -37,57 +37,60 @@ const actionValueSep = "::"
 //   - reactions — the message-state track on the user's own message
 //
 // See docs/channel/slack.md §4.
-func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error {
+//
+// Slack has no card model of its own: the id of the message a kind
+// becomes is not handed back, so the returned id is empty.
+func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (string, error) {
 	a.health.recordOutbound()
 
 	switch msg.Kind {
 	case messages.OutMessageSettled:
 		// The structured outcome of an inbound message. It exists
 		// for programs that drive nightme, not for humans.
-		return nil
+		return "", nil
 
 	case messages.OutReply, messages.OutThinking:
-		return a.sendStreamText(ctx, msg, false)
+		return "", a.sendStreamText(ctx, msg, false)
 
 	case messages.OutResult:
 		// The final answer is the payload the user is waiting for;
 		// holding it for the throttle window buys nothing.
-		return a.sendStreamText(ctx, msg, true)
+		return "", a.sendStreamText(ctx, msg, true)
 
 	case messages.OutToolStart:
-		return a.sendToolStart(ctx, msg)
+		return "", a.sendToolStart(ctx, msg)
 
 	case messages.OutToolEnd:
-		return a.sendToolEnd(ctx, msg)
+		return "", a.sendToolEnd(ctx, msg)
 
 	case messages.OutTaskCreate, messages.OutTaskUpdate:
-		return a.sendTaskList(ctx, msg)
+		return "", a.sendTaskList(ctx, msg)
 
 	case messages.OutHeartbeat:
-		return a.sendHeartbeat(ctx, msg)
+		return "", a.sendHeartbeat(ctx, msg)
 
 	case messages.OutInit:
-		return a.stampFooter(msg)
+		return "", a.stampFooter(msg)
 
 	case messages.OutChoice:
-		return a.sendChoice(ctx, msg)
+		return "", a.sendChoice(ctx, msg)
 
 	case messages.OutChoicePatch:
-		return a.patchChoice(ctx, msg)
+		return "", a.patchChoice(ctx, msg)
 
 	case messages.OutCommandReply:
-		return a.sendStandalone(ctx, msg, "❯ "+msg.Text)
+		return "", a.sendStandalone(ctx, msg, "❯ "+msg.Text)
 
 	case messages.OutError:
-		return a.sendStandalone(ctx, msg, a.formatError(msg))
+		return "", a.sendStandalone(ctx, msg, a.formatError(msg))
 
 	case messages.OutMessageState:
-		return a.applyMessageState(ctx, msg)
+		return "", a.applyMessageState(ctx, msg)
 
 	case messages.OutMessageStateRemoved:
-		return a.removeMessageState(ctx, msg)
+		return "", a.removeMessageState(ctx, msg)
 	}
-	return nil
+	return "", nil
 }
 
 // streamFor resolves (and lazily opens) the placeholder for a turn.

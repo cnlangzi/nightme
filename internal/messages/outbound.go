@@ -465,7 +465,13 @@ func (s HeartbeatSnapshot) Empty() bool {
 // package is zero, and the result is a cleaner dependency graph
 // (outbound can now legitimately import chatsession).
 type Emitter interface {
-	Send(ctx context.Context, msg OutboundMessage) error
+	// Send publishes the message and returns the id of the chat
+	// message it became — the id the caller can use as the anchor
+	// of the events that follow it.
+	//
+	// The id is empty when the chat cannot name the message: a
+	// channel that drops the kind, a chat that refuses the send.
+	Send(ctx context.Context, msg OutboundMessage) (string, error)
 }
 
 // ChatSender posts a text into a chat on any channel.

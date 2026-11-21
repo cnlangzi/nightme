@@ -228,7 +228,7 @@ func (r *replyingCommander) Dispatch(ctx context.Context, rt command.RuntimeServ
 		errText := "❌ " + err.Error()
 		ch := cs.Emitter()
 		if ch != nil {
-			_ = ch.Send(ctx, messages.OutboundMessage{
+			_, _ = ch.Send(ctx, messages.OutboundMessage{
 				ChatID:  input.ChatID,
 				Text:    errText,
 				ReplyTo: input.MessageID,
@@ -241,7 +241,7 @@ func (r *replyingCommander) Dispatch(ctx context.Context, rt command.RuntimeServ
 	}
 	ch := cs.Emitter()
 	if out.Consumed && out.Reply != "" && ch != nil {
-		_ = ch.Send(ctx, messages.OutboundMessage{
+		_, _ = ch.Send(ctx, messages.OutboundMessage{
 			ChatID:  input.ChatID,
 			Text:    out.Reply,
 			ReplyTo: input.MessageID,
@@ -251,7 +251,7 @@ func (r *replyingCommander) Dispatch(ctx context.Context, rt command.RuntimeServ
 		if ch == nil {
 			continue
 		}
-		_ = ch.Send(ctx, ob)
+		_, _ = ch.Send(ctx, ob)
 	}
 	return out, true, nil
 }
@@ -296,7 +296,7 @@ type testChannelWrap struct {
 	ch channel.Channel
 }
 
-func (w *testChannelWrap) Send(ctx context.Context, msg messages.OutboundMessage) error {
+func (w *testChannelWrap) Send(ctx context.Context, msg messages.OutboundMessage) (string, error) {
 	return w.ch.Send(ctx, msg)
 }
 
@@ -308,8 +308,8 @@ var _ messages.Emitter = (*testChannelWrap)(nil)
 // chat-session path; this one is for the gateway's own reference).
 type noopEmitter struct{}
 
-func (noopEmitter) Send(context.Context, messages.OutboundMessage) error {
-	return nil
+func (noopEmitter) Send(context.Context, messages.OutboundMessage) (string, error) {
+	return "", nil
 }
 
 // ─── Wiring helper ───────────────────────────────────────────────────

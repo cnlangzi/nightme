@@ -113,7 +113,9 @@ var _ channel.Channel = (*Channel)(nil)
 
 // Send implements channel.Channel. Writes a one-line log and
 // records the message for test assertions.
-func (c *Channel) Send(ctx context.Context, msg messages.OutboundMessage) error {
+//
+// Echo has no card model: it names no message, so the id is empty.
+func (c *Channel) Send(ctx context.Context, msg messages.OutboundMessage) (string, error) {
 	if c.out != nil {
 		switch {
 		case msg.Kind == messages.OutChoice && msg.Choice != nil:
@@ -126,7 +128,7 @@ func (c *Channel) Send(ctx context.Context, msg messages.OutboundMessage) error 
 	c.mu.Lock()
 	c.recorded = append(c.recorded, msg)
 	c.mu.Unlock()
-	return nil
+	return "", nil
 }
 
 // Record returns a snapshot of every message sent to this Channel

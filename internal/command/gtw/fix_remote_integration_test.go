@@ -105,11 +105,11 @@ type fixRemoteRecCh struct {
 	sends []messages.OutboundMessage
 }
 
-func (r *fixRemoteRecCh) Send(_ context.Context, m messages.OutboundMessage) error {
+func (r *fixRemoteRecCh) Send(_ context.Context, m messages.OutboundMessage) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.sends = append(r.sends, m)
-	return nil
+	return "", nil
 }
 func (r *fixRemoteRecCh) Patch(_ context.Context, m messages.OutboundMessage) error {
 	r.Send(context.Background(), m)

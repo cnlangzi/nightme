@@ -220,7 +220,7 @@ func (r *Router) emitCommandReply(ctx context.Context, cs *chatsession.ChatSessi
 	if text == "" || em == nil {
 		return
 	}
-	if sendErr := em.Send(ctx, messages.OutboundMessage{
+	if _, sendErr := em.Send(ctx, messages.OutboundMessage{
 		ChatID:  msg.ChatID,
 		Kind:    messages.OutCommandReply,
 		Text:    text,
@@ -242,7 +242,7 @@ func (r *Router) routeOutbound(ctx context.Context, cs *chatsession.ChatSession,
 		return
 	}
 	for _, ob := range outbound {
-		if err := em.Send(ctx, ob); err != nil {
+		if _, err := em.Send(ctx, ob); err != nil {
 			slog.Default().Warn("inbound: outbound Send failed", "kind", ob.Kind, "err", err)
 		}
 	}

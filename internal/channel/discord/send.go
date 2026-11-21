@@ -41,8 +41,8 @@ import (
 // boundary (createMessage / editMessage / addReaction /
 // removeOwnReaction), so a kind that silent-drops — an empty body,
 // a repeated message state, the heartbeat kinds — never advances it.
-func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error {
-	return a.sendOutbound(ctx, msg)
+func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (string, error) {
+	return "", a.sendOutbound(ctx, msg)
 }
 
 // createMessage posts a message to Discord and stamps the outbound

@@ -4,7 +4,7 @@
 // AgentSessions. It replaces v1.1's Session + Gateway BindingEntry
 // pair with a single coherent structure.
 //
-// See docs/SPEC.md v1.2 §1.1 and docs/feat/F-27-chatsession.md.
+// See docs/SPEC.md v1.2 §1.1 and docs/feat/F-chat-session.md.
 package chatsession
 
 import (
@@ -470,7 +470,7 @@ var ErrUnknownAgent = errors.New("chatsession: unknown agent")
 // to a single pool entry during NewActiveAgentSessions so the handler
 // can render a per-agent status instead of a bare count.
 //
-// See docs/feat/F-43-close-new-graceful-and-reset.md §5.2.
+// See docs/feat/F-chat-session.md §A5 §5.2.
 type ResetResult struct {
 	Agent       string // e.g. "claude", "codex"
 	Cwd         string // e.g. "/code/A"
@@ -668,7 +668,7 @@ func (cs *ChatSession) SetSelectedAgent(agent string) error {
 	// to look up the new AS on the next flush.
 	//
 	// KNOWN LIMITATION (Phase 0, deferred to "Prompt 投递稳定性
-	// 优化" PR — see docs/feat/message_lifecycle.md §8): if the old AS had an in-flight Prompt (currentPrompt
+	// 优化" PR — see docs/feat/F-53-message-prompt-lifecycle.md §8): if the old AS had an in-flight Prompt (currentPrompt
 	// != nil), it stays installed on the old AS after the switch.
 	// The new AS starts with currentPrompt=nil, so subsequent
 	// events on the new AS use the new anchor. The old Prompt's
@@ -853,7 +853,7 @@ func (cs *ChatSession) WithGitStatusDeps(deps GitStatusDeps) *ChatSession {
 // Unlike SetSelectedCwd, an empty value is the whole point —
 // no validation rejection. Persists unconditionally so the
 // cleared state survives daemon restart. KNOWN FOLLOW-UP:
-// persistChatEntryLocked (chatsession.go:1650-1655) does not
+// persistChatEntryLocked (chatsession.go) does not
 // dedup on unchanged state, so a clear-after-empty still
 // writes to csFile; flagged in the audit, not addressed here.
 //
@@ -965,8 +965,7 @@ func (cs *ChatSession) MarkWatcherHintEmitted() error {
 // State semantics:
 //   - ToolsModeShow — runtime forwards OutToolStart / OutToolEnd
 //     to the Channel. Feishu adapter merges each pair into a
-//     single thread reply via PATCH on the start message_id (see
-//     internal/channel/feishu/tool_thread_merge.go).
+//     single thread reply via PATCH on the start message_id (see internal/channel/feishu/tool_thread_merge.go).
 //   - ToolsModeHide — runtime drops OutToolStart and OutToolEnd
 //     at the EventHandler gate (after Translate + ReplyTo
 //     stamping, before ch.Send). Other OutboundKinds are
@@ -1137,7 +1136,7 @@ func (cs *ChatSession) emitMessageDropped(msg Message) {
 // fired by `endPrompt` after the Prompt's terminal fields were
 // stamped. F-54 replaced it with cs.PromptEndBus.Publish(PromptEndedEvent{...});
 // subscribers register via PromptEndBus().Subscribe. See
-// docs/feat/F-54-event-bus.md for the migration rationale.
+// docs/SPEC.md §1.1a for where the buses live in the runtime.
 
 // Emitter returns the outbound chokepoint bound to this chat
 // session. nil when no Emitter has been wired yet (e.g. before
@@ -1645,7 +1644,7 @@ const QueueMaxMsgs = 4096
 // Used by /close and /new to clear queued messages on a forced
 // buffer reset. SendBlocks failures DO NOT trigger this path —
 // failed messages stay Queued for natural retry (see
-// docs/feat/message_lifecycle.md §5.1).
+// docs/feat/F-53-message-prompt-lifecycle.md §5.1).
 func (cs *ChatSession) DropQueue() int {
 	cleared := cs.queue.Clear()
 	for _, m := range cleared {
@@ -2160,7 +2159,7 @@ type DropResult struct {
 // EvictAgentSessionsInCwd. Wedged bridges that bypass
 // their own SIGKILL fallback would otherwise pin the
 // goroutine indefinitely. 5s mirrors the bound used by
-// command/close's CloseAllAgents (close.go:238). Kept local
+// command/close's CloseAllAgents (close.go). Kept local
 // rather than exported to avoid cross-package coupling.
 const evictGraceTotal = 5 * time.Second
 
@@ -2242,7 +2241,7 @@ func drainCloseOutcomes(closeCh <-chan evictOutcome, alive int, timedOut bool) [
 // callers that want richer status.
 //
 // Distinct from /close's CloseAllAgents
-// (internal/command/close/close.go:190): /close keeps the
+// (internal/command/close/close.go): /close keeps the
 // pool intact so respawn can resume each conversation after
 // the user reopens it. This helper is for the
 // worktree-is-gone case where there is nothing to respawn

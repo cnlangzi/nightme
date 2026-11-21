@@ -202,8 +202,7 @@ type contentBlock struct {
 // pendingAsk with TextFallback=true, and starts an interceptor that
 // rewrites the emitted EventAgentPermission's ResponseCh. The (a)
 // tool_use path uses askHandler for the same wiring with
-// TextFallback=false. See claudecode.go::armPendingAsk and
-// docs/bridge/claude.md §5.5.
+// TextFallback=false. See claudecode.go::armPendingAsk and docs/bridge/claude.md §5.5.
 //
 // agentName + workspace are stamped onto the EventAgentReady payload by
 // translate (so channel-layer receipts can render the "Agent ·
@@ -533,7 +532,7 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 				Kind:   agent.EventAgentResult,
 				Result: result,
 			}
-			// agent.go:586-591 documents that EventAgentResult.Err is
+			// agent.go documents that EventAgentResult.Err is
 			// populated on error turns so channels can render the
 			// error indicator without parsing Subtype. pi/codex
 			// follow the same contract — without this the feishu
@@ -748,7 +747,7 @@ func truncateForLog(s string, max int) string {
 // field; pct omitted because we lack the denominator).
 //
 // The bridge owns the context-window-pct calculation per
-// docs/feat/F-45-session-footer.md §1.5 / F-54: it reads
+// docs/channel/feishu-rendering.md §A10: it reads
 // `modelUsage.<model>.contextWindow` into a bridge-local
 // variable, divides the per-turn used tokens by it, and fills
 // `UsageInfo.ContextWindowPct`. The window value itself is
@@ -831,7 +830,7 @@ func decodeUsage(rawUsage, rawModelUsage json.RawMessage) *agent.UsageInfo {
 		// F-55: forward the window alongside X% so the footer can
 		// render `X% (window)`. Single render-side consumer; the
 		// runtime does not recompute / catalog / clamp based on
-		// this value — see docs/feat/F-55-footer-show-context-window.md.
+		// this value — see docs/channel/feishu-rendering.md §A13.
 		out.ContextWindow = contextWindow
 	}
 	return out

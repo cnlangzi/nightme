@@ -232,7 +232,7 @@ type sessionConfig struct {
 // is from the Python SDK enum and the Rust CLI rejects it).
 // Together these are the app-server analogue of Claude Code's
 // --permission-mode bypassPermissions
-// (internal/bridge/claudecode/permissions.go:65); the design
+// (internal/bridge/claudecode/permissions.go); the design
 // across both bridges is "ChatOps agent defaults to acting".
 //
 // The permissions.go handler stays reachable as a downgrade

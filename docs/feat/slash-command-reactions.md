@@ -104,12 +104,12 @@ the two distinct surfaces that nightme operates on.
 `internal/command/commander.go` `commander.Dispatch`:
 
 ```go
-emitSlashState(cs, input.MessageID, agent.MessageQueued)
+chatsession.PublishMessageState(cs, input.MessageID, agent.MessageQueued)
 out, err := cmd.Handle(ctx, rt, cs, input)
-emitSlashState(cs, input.MessageID, agent.MessageDone)
+chatsession.PublishMessageState(cs, input.MessageID, agent.MessageDone)
 ```
 
-The helper (`emitSlashState`) adds the nil-guard for `cs == nil`,
+The helper (`chatsession.PublishMessageState`) adds the nil-guard for `cs == nil`,
 empty-MessageID, and `cs.MessageStateBus == nil`. The latter lets
 unit tests construct bare `&chatsession.ChatSession{}` without a
 fully-wired bus — production code always passes a session built
@@ -124,7 +124,7 @@ via `chatsession.New`, which wires the bus eagerly.
   factory matched, e.g. `/etc/passwd`): no emit. Unknown commands
   shouldn't get ⏳/✅ since they're not actually commands.
 
-These two paths return *before* the `emitSlashState` calls, so the
+These two paths return *before* the `chatsession.PublishMessageState` calls, so the
 contract falls out naturally without an explicit branch.
 
 ### Feishu rendering
@@ -143,7 +143,7 @@ routes the two events to different reaction targets, but the emoji
 glyphs match — the user sees a consistent ✅ across surfaces.
 
 The existing `case messages.OutMessageState` handler in feishu's
-`Send` switch (line 1264 in `adapter.go`) needs no new branches:
+`Send` switch ( in `adapter.go`) needs no new branches:
 `mapStateToFeishuEmoji` returning `"DONE"` flows through the same
 LRU dedup + `AddReaction` + failure-revert pipeline that
 `"OneSecond"` and `"OnIt"` already use.
@@ -247,12 +247,12 @@ ways:
 if _, matched := parseShell(ir.Text); !matched {
     return nil, false  // not a !cmd — fall through
 }
-emitShellState(cs, ir.MessageID, agent.MessageQueued)  // ⏳ synchronously, before goroutine
+chatsession.PublishMessageState(cs, ir.MessageID, agent.MessageQueued)  // ⏳ synchronously, before goroutine
 go d.runShell(cs, ir)                                  // work + reply + ✅ inside
 return &ShellOutput{Consumed: true}, true
 ```
 
-`runShell`'s first defer is `emitShellState(cs, ir.MessageID,
+`runShell`'s first defer is `chatsession.PublishMessageState(cs, ir.MessageID,
 agent.MessageDone)`. Because defers are LIFO, it runs LAST — after
 the inner panic-recovery defer. This guarantees ✅ fires on every
 exit path:
@@ -264,14 +264,14 @@ exit path:
 
 ### Why shell package now imports chatsession + outbound
 
-Pre-refactor: `internal/shell.Sender` interface + `sender_chatsession.go`
-bridge translated `shell.Outbound` → `messages.OutboundMessage` and
-delegated to the per-chat outbound.Emitter. The bridge existed to
+The shell dispatcher used to reach the chat through a dedicated
+bridge that translated `shell.Outbound` → `messages.OutboundMessage`
+and delegated to the per-chat outbound.Emitter. The bridge existed to
 keep `internal/shell` from importing `internal/chatsession` /
 `internal/gateway/outbound`.
 
 The decoupling never paid off: the only call site was
-`cmd/nightme/run.go:480` (the production wire-up) and two test
+`cmd/nightme/run.go` (the production wire-up) and two test
 wirings. There was no third-party `internal/shell` consumer that
 needed the package-import isolation.
 
@@ -302,7 +302,7 @@ set:
 - `TestDispatcherHandle_NilCSSkipsEmit` — nil cs guard.
 - `TestDispatcherHandle_ZeroValueCSDoesNotPanic` — bare
   `&chatsession.ChatSession{}` (nil MessageStateBus) doesn't
-  crash; the nil-bus guard in `emitShellState` keeps the contract
+  crash; the nil-bus guard in `chatsession.PublishMessageState` keeps the contract
   local and test-friendly.
 - `TestDispatcherHandle_NilEmitter` — `NewDispatcher(nil)`
   doesn't panic; reply is silently dropped.
@@ -320,4 +320,4 @@ set:
 4. ✅ Remove manual emit in `/steer` — `internal/command/steer/cmd.go`
 5. ✅ Tests — `internal/command/commander_test.go`, `internal/agent/message_state_test.go`, `internal/channel/feishu/adapter_message_state_test.go`
 6. ✅ Update F-53 §8 row — see [F-53-message-prompt-lifecycle.md](F-53-message-prompt-lifecycle.md) follow-up note
-7. ✅ Shell ⏳→✅ (F-XX Sender→Emitter refactor) — `internal/shell/dispatch.go` (drop `Sender`/`Outbound`/bridge, take `outbound.Emitter` + `cs` directly), `internal/shell/sender_chatsession.go` deleted, `internal/gateway/inbound/shell.go` + `inbound.go` updated to new shape, `internal/gateway/inbound/teststubs/teststubs.go` + `internal/gateway/dispatch_slash_reply_test.go` stubs updated, `cmd/nightme/run.go:480` wires `mgr.Emitter()`.
+7. ✅ Shell ⏳→✅ (F-XX Sender→Emitter refactor) — `internal/shell/dispatch.go` (drop `Sender`/`Outbound`/bridge, take `outbound.Emitter` + `cs` directly), `internal/gateway/inbound/shell.go` + `inbound.go` updated to new shape, `internal/gateway/inbound/teststubs/teststubs.go` + `internal/gateway/dispatch_slash_reply_test.go` stubs updated, `cmd/nightme/run.go` wires `mgr.Emitter()`.

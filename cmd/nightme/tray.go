@@ -46,8 +46,7 @@
 // `go install github.com/cnlangzi/nightme/cmd/nightme` produces a
 // working binary on a bare Linux box.
 //
-// Release artifacts follow the same split — see
-// .github/workflows/release.yml:
+// Release artifacts follow the same split — see .github/workflows/release.yml:
 //
 //	nightme_<v>_linux_<arch>.tar.gz       CGO_ENABLED=0, no tray, static
 //	nightme_<v>_linux_<arch>-gui.tar.gz   -tags gui, tray, needs GTK3

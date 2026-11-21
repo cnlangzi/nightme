@@ -1,7 +1,7 @@
 # Primary-Agent Resolution, Built-in Whitelist, and First-Run Prompt
 
 > **Status**: implemented
-> **Scope**: `cfg.Primary` resolution chain, `internal/agent/registry.go` insertion order, `internal/bridge/pty` exclusion from `agent.Builtins`, `cfg.Agents` path-override semantics, `cmd/nightme/firstrun.go` interactive prompt
+> **Scope**: `cfg.Primary` resolution chain, `cmd/nightme/agents.go` insertion order, `internal/bridge/pty` exclusion from `agent.Builtins`, `cfg.Agents` path-override semantics, `cmd/nightme/firstrun.go` interactive prompt
 > **Related docs**:
 > - [`SPEC.md`](./SPEC.md) §1.1 Primary Agent、§1.3 不变式
 > - [`feat/F-09-agent-abstraction.md`](./feat/F-09-agent-abstraction.md) 三层抽象(AgentSpec / Starter / Agent)

@@ -4,19 +4,24 @@
 
 > **Depends on**: F-08 (config loading), F-09 (Agent registry), F-20 (slash command pattern)
 
-> **Related docs**: [`SPEC.md`](../SPEC.md)(config), [`PRD.md`](../PRD.md)(Minimal)
+> **Related docs**: [`SPEC.md`](../SPEC.md)(config), [`PRD.md`](../PRD.md)(Minimal), [`../primary-agent-detection.md`](../primary-agent-detection.md)
 
 ---
 
 ## 1. Description
 
 `nightme config` opens an interactive menu for configuring nightme.
-The first (and currently only) submenu is **Agents**, where users
-pick which agent to set as the global primary (default).
+Two submenus are available:
+
+- **Name** — show / set the instance name (`config.Name`)
+- **Agents** — list the registered built-in agents and manage each
+  one: set it as the global primary (`config.Primary`) and set or
+  remove its binary path override (`config.Agents`)
 
 The interactive mode replaces direct YAML editing for the most
-common operation: choosing which agent to spawn when no explicit
-`/use <name>` is given.
+common operations: choosing which agent to spawn when no explicit
+`/use <name>` is given, and pointing nightme at an agent binary
+that is not on `PATH`.
 
 ---
 
@@ -26,9 +31,9 @@ common operation: choosing which agent to spawn when no explicit
 nightme config
 ```
 
-Reads `~/.nightme/config.yaml` (or whatever `NIGHTME_CONFIG`
-points at), merges built-in agents with user-configured agents, lets
-the user pick one, and writes back the new `primary` value.
+Reads `config.DefaultPath()` — `$HOME/.nightme/config.yaml`, or
+whatever `NIGHTME_CONFIG` points at — and writes back to that same
+path.
 
 ---
 
@@ -39,86 +44,146 @@ nightme config — interactive
 ===========================
 
 Main menu:
-  [1] Agents
+  [1] Name    show/set instance name
+  [2] Agents
   [q] Quit
+> 2
 
-Agents (merged: builtins + your config):
-    [1] bash        (pty)     bash
-  * [2] claude      (json-io) claude
-    [3] cc          (claude)  claude --dangerously-skip-permissions
+   #  NAME      BRIDGE   COMMAND                 ARGS
+✓  1  claude    json-io  /usr/local/bin/claude
+✓  2  codex     json-io  codex
+✓  3  dsh       json-io  dsh
+✓  4  opencode  acp      opencode               acp
+✓  5  cursor    acp      /usr/local/bin/cursor-agent  --force --trust --sandbox disabled --approve-mcps acp
+✓  6  pi        json-io  pi                     --mode rpc
+✓  7  copilot   acp      copilot                --allow-all-tools --acp --stdio
+✓  8  omp       json-io  omp                     --mode rpc --approval-mode yolo
 
 Current primary: claude
-Enter number to set as primary [1-3], q to cancel: 3
-✓ Primary set to "cc" (config)
-✓ Saved to /home/user/.nightme/config.yaml
+Enter number to manage, q to cancel:
+> 1
+
+claude — PATH
+  [1] Set as primary
+  [2] Configure path
+  [b] Back
+> 1
+✓ saved to /home/user/.nightme/config.yaml
 
 Main menu:
-  [1] Agents
+  [1] Name    show/set instance name
+  [2] Agents
   [q] Quit
-
+> q
 Bye.
 ```
 
-`*` marks the current `primary` choice. `q` cancels without saving
-at any prompt.
+The `✓` column marks the agents whose `Detect()` passes. The
+`COMMAND` cell shows the `cfg.Agents` override when one exists,
+otherwise the resolved `PATH` lookup.
+
+The per-agent sub-menu depends on the agent's state:
+
+| 状态 | 选项 |
+|------|------|
+| `Detect()` 通过，无路径覆盖 | `[1] Set as primary` / `[2] Configure path` / `[b] Back` |
+| `Detect()` 通过，有路径覆盖 | `[1] Set as primary` / `[2] Change path` / `[3] Remove path override` / `[b] Back` |
+| `Detect()` 失败，无路径覆盖 | `[2] Configure path` / `[b] Back`（没有 "Set as primary"）|
+| `Detect()` 失败，有路径覆盖 | `[2] Change path` / `[3] Remove path override` / `[b] Back` |
+
+The status line after the agent name says where the binary comes
+from: `PATH`, `cfg: <path>`, `cfg (broken): <path>` or `not found`.
+
+`[2] Configure path` prompts for an absolute path and re-runs
+`Detect()` until the path resolves:
+
+```
+Absolute path to claude binary (q to abort):
+> /usr/local/bin/claude
+```
+
+The **Name** sub-menu shows the effective instance name (the
+configured `name`, or the machine hostname when `name` is unset) and
+accepts a new one; empty input keeps the current value.
+
+```
+Current name: my-laptop
+Enter new name (empty to keep current):
+> my-box
+✓ Name set to "my-box".
+  Saved to: /home/user/.nightme/config.yaml
+```
+
+`q` cancels without saving at any prompt.
 
 ---
 
-## 4. Merge logic (`MergeAgents`)
+## 4. Registry merge (`agentregistry.Build`)
 
-```
-result = []
-seen   = {}                // name → index in result
+The agent list is not merged by the menu — it comes from
+`agentregistry.Build(cfg, "")`
+(`internal/agentregistry/agentregistry.go`), which walks the
+**registered built-ins**, not `cfg.Agents`:
 
-// 1. Built-ins first (alphabetical order).
-for a in sorted(agent.Builtins.List()):
-    result.append({Name: a.Name(),
-                   Bridge: a.Mode().String(),
-                   Command: a.Command() + " " + a.Args().join(),
-                   Source: "builtin"})
-    seen[a.Name()] = result.lastIndex
-
-// 2. User config overrides on name collision; otherwise appended.
-for entry in cfg.Agents:
-    choice = {Name, Bridge, Command, Source: "config"}
-    if entry.Name in seen:
-        result[seen[entry.Name]] = choice     // override builtin
-    else:
-        result.append(choice)
-        seen[entry.Name] = result.lastIndex
+```go
+reg := agent.New()
+for _, a := range agent.Builtins.List() {   // 注册顺序，不是字母序
+    a.Init("")                              // 先复位成 bridge 自带的默认命令
+    if cfg != nil {
+        if path := cfgAgentPath(cfg.Agents, a.Info().Name); path != "" {
+            a.Init(path)                   // 再套上 cfg.Agents 里的路径覆盖
+        }
+    }
+    reg.Register(a)
+}
 ```
 
-The result preserves insertion order: builtins alphabetical, then
-user config in YAML order. This makes the display index stable for
-the duration of one `nightme config` invocation.
+Consequences:
 
-`MergeAgents` is a **pure function** (cfg in → choices out) for
-testability. The interactive loop wraps it with display + selection
-+ save.
+- The display order is the **registration order** in
+  `cmd/nightme/agents.go` (`claude / codex / dsh / opencode /
+  cursor / pi / copilot / omp`), which is also the primary-agent
+  auto-detection priority chain — see
+  [`../primary-agent-detection.md`](../primary-agent-detection.md).
+- `cfg.Agents` entries whose `name` is not a built-in are ignored:
+  there is no PTY fallback and no shell alias.
+- A path override is stored verbatim (trimmed, not whitespace-split),
+  so Windows paths with spaces round-trip unchanged.
+- `cfg.Agents` only overrides the binary path. Bridge, mode, args
+  and env stay fixed by nightme.
 
 ---
 
 ## 5. Save semantics
 
-Selection triggers `config.SaveDefault(cfg)`, which:
+Every change goes through `config.Update(path, fn)`
+(`internal/config/config.go`), which loads the file at save time,
+applies the change, and writes it back under one lock:
+
 - Uses atomic write (temp file + rename) per NFR N-7
 - chmod 0600 on the resulting file
 - Creates parent directory if missing (0700)
 
-Cancellation (`q` at the selection prompt) leaves the file
-untouched. The in-memory `cfg` may still be mutated, but no disk
-write happens.
+Because the file is re-read at save time, a block another writer
+changed while the menu was open — the `me.llm` block `nightme me`
+writes, say — survives the save.
+
+After a successful save the menu prints `✓ saved to <path>`. If a
+daemon is running it also prints a warning that the daemon has to be
+restarted for the change to take effect.
+
+Cancellation (`q` at a prompt) leaves the file untouched.
 
 ---
 
 ## 6. Persistence interaction
 
-`nightme config` reads and writes the same file as `nightme run`,
-`nightme agents`, etc. (`config.DefaultPath()`).
+`nightme config` reads and writes the same file as the rest of the
+binary (`config.DefaultPath()`).
 
 If a user later hand-edits `config.yaml` to add a new `agents:`
-entry, the next `nightme config` will show that entry in the
-merged list (with Source="config").
+entry, the next `nightme config` shows that entry's path in the
+`COMMAND` column of the matching built-in row.
 
 ---
 
@@ -126,29 +191,38 @@ merged list (with Source="config").
 
 ### 7.1 Unit
 
-- `MergeAgents` with empty cfg → only builtins, sorted, Source="builtin"
-- `MergeAgents` with new name → appended, Source="config"
-- `MergeAgents` with collision → builtin overridden, no duplicate, Source="config"
+- `agentregistry.Build` with an empty `cfg.Agents` → every built-in
+  keeps its baked-in command
+- `agentregistry.Build` with a path override → the built-in's
+  `Command()` becomes the override
+- `agentregistry.Build` with an unknown `name` → the entry is ignored
+- `agentregistry.Build` with a path containing spaces → the path is
+  kept verbatim
+- Removing an override → the built-in reverts to its default command
 
 ### 7.2 Integration
 
 - Full menu loop: pick index → save → reload → assert primary updated
 - Cancel with `q` → no save, cfg unchanged
 - Top-level `q` → exits cleanly
+- Name sub-menu: set a new name → saved to the same path the menu was
+  loaded from
+- A `me.llm` block another writer changed on disk while the menu was
+  open survives the save
 
 ### 7.3 Manual
 
 - `nightme config` in real shell with real agents installed
 - Verify the menu looks right (column widths, ordering)
-- Verify the save persists across `nightme run` invocations
+- Verify the save persists across daemon restarts
 
 ---
 
 ## 8. Out of scope
 
 - **Other submenus** (feishu / session / logging / paths) — future F-XX
-- **Detection of binary presence** — user picks from registered list only;
-  binary-not-found surfaces later as a spawn error (existing path)
+- **User-defined agents** — the menu only manages the registered
+  built-ins; `cfg.Agents` is a path-override table, not an agent list
 - **Bubbletea TUI** — current implementation is plain stdin/stdout;
   upgrade to a full TUI later if needed
 - **Multi-select** (e.g. pick multiple favorites) — pick-one is sufficient
@@ -156,7 +230,7 @@ merged list (with Source="config").
 
 ---
 
-## 9. Open questions (draft)
+## 9. Open questions
 
 - **Q-A**: Yaml schema is `primary` (top-level scalar) + `agents:` (top-level list).
   Currently no nesting. If future versions want to group agents under a
@@ -166,10 +240,3 @@ merged list (with Source="config").
   in a future submenu, not Agents.)
 - **Q-C**: Should selection remember the last chosen index across
   invocations? (Lean: no — fresh list each time, easy mental model.)
-
----
-
-## 10. Change log
-
-  list schema; `MergeAgents` (builtin + cfg, cfg overrides); `nightme config`
-  interactive menu with Agents submenu. 7 unit tests, all green.

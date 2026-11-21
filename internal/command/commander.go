@@ -156,7 +156,7 @@ func (c *commander) Match(text string) (string, bool) {
 //   - Before invoking cmd.Handle, emit cs.EmitMessageState(input.MessageID,
 //     agent.MessageQueued) so the channel can render a ⏳ placeholder on
 //     the user's original message. This is symmetric with Manager.HandleInbound
-//     (internal/chatsession/manager.go:331) for regular messages.
+//     (internal/chatsession/manager.go) for regular messages.
 //   - After cmd.Handle returns (success or error), emit
 //     agent.MessageDone so the channel can render ✅. Symmetric with the
 //     chat-session completion indicator; orthogonal to PromptDone (which

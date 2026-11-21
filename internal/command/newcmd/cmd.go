@@ -6,7 +6,7 @@
 // pi's `new_session` RPC, or ACP's `session/new` JSON-RPC — but
 // issued from the IM channel.
 //
-// Semantics (see docs/feat/F-34-new-slash-command.md §4):
+// Semantics (see docs/feat/F-chat-session.md §A4):
 //
 //	/new         → reset all AgentSessions in selectedCwd
 //	/new <agent> → reset only the AgentSession named <agent> in selectedCwd

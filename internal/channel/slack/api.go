@@ -50,8 +50,7 @@ type apiClient interface {
 
 	// SetAssistantStatus drives the "is thinking…" indicator. An
 	// empty status clears it. threadTS is REQUIRED per Slack docs
-	// (实测 2026-08-31: 不传返回 missing required field: thread_ts);
-	// docs/channel/slack.md §2.5.
+	// (实测 2026-08-31: 不传返回 missing required field: thread_ts); docs/channel/slack.md §2.5.
 	SetAssistantStatus(ctx context.Context, channelID, threadTS, status string) error
 
 	// Download fetches a file behind url_private using the bot token.

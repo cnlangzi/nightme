@@ -4,7 +4,7 @@
 // the bridge. Only the fields we actively translate or correlate on
 // are decoded into typed structs.
 //
-// Wire shape (per Pi docs/rpc.md):
+// Wire shape (per the official pi RPC spec, see docs/bridge/pi.md §2):
 //
 //	command  : {"id":<id>, "type":<command name>, ...fields}
 //	response : {"id":<id>, "type":"response", "command":<name>, "success":<bool>, "data":<obj|absent>, "error":<string|absent>}
@@ -69,7 +69,7 @@ type eventEnvelope struct {
 //	{"type":"prompt", "message":"...", "images":[ImageContent]?}
 //
 // where ImageContent is {"data":<base64>, "mimeType":<MIME>}. The pi
-// RPC docs (docs/rpc.md) describe the canonical shape as also
+// The official pi RPC spec describes the canonical shape as also
 // carrying {"type":"image"}, but pi 0.84.x accepts the array entry
 // without the discriminator and infers the content kind from the
 // images[] membership. The bridge relies on that and does NOT emit
@@ -84,7 +84,7 @@ type promptParams struct {
 // imageAttachment is the per-image record inside promptParams. The
 // Type field is always set to "image" — pi 0.84.x accepts the entry
 // with or without the type tag (it can infer from images[] array
-// membership), but the explicit tag matches the canonical docs/rpc.md
+// membership), but the explicit tag matches the canonical pi RPC spec
 // shape and protects against future pi versions tightening the
 // schema.
 type imageAttachment struct {
@@ -261,7 +261,7 @@ type toolExecutionStart struct {
 type toolExecutionEnd struct {
 	ToolCallID string `json:"toolCallId"`
 	// ToolName is the canonical tool name on the wire
-	// (docs/rpc.md: every tool_execution_end carries a toolName).
+	// (every tool_execution_end carries a toolName).
 	// Used as a fallback when no matching tool_execution_start
 	// entry is in translator.pendingTools (orphan end, e.g. a tool
 	// that started before our translator was attached, or a wire
@@ -276,7 +276,7 @@ type toolExecutionEnd struct {
 // marker — the Subtype field is gone). The matching start event
 // is silently dropped (no Event emitted) so the runtime
 // AgentSession counter increments by 1 per cycle. See
-// docs/feat/F-49-compaction-counter.md §1.3 / §1.7.
+// docs/channel/feishu-rendering.md §A12.
 type compactionEnd struct {
 	Reason string `json:"reason"`
 	Result struct {

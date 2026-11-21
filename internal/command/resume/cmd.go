@@ -113,8 +113,7 @@ var resumeSpec = command.CmdSpec{
 //  2. Active-agent preflight (SelectedAgent + LookupSelectedAgentSession).
 //  3. Reject missing / extra args via ParseCmdArgs.
 //  4. input.MessageID guard — ChatSession.QueueUserMessage
-//     silently no-ops on empty ID; mirrors the guard at
-//     queue/cmd.go:143.
+//     silently no-ops on empty ID; mirrors the guard at queue/cmd.go.
 //  5. ValidateHandoffName — character set / length / sentinel
 //     rules. Done before Stat so a bad name short-circuits with
 //     a clean usage error instead of a confusing "not found".

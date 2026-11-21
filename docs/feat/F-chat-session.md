@@ -29,35 +29,46 @@ The split exists because needs:
 // internal/chatsession/chatsession.go
 
 type ChatSession struct {
-    ID              string              // derived from chatID; natural key
-    ChatID          string              // unique — gateway.bindings[ChatID] → this
-    ChatType        string              // p2p | group | topic_group | ""
+    ID     string              // derived from chatID; natural key
+    ChatID string              // unique — gateway.bindings[ChatID] → this
+
+    mu      sync.RWMutex        // guards the mutable state below
+    routeMu sync.Mutex         // serializes the store-backed routing setters
 
     // Active routing state (mutated by /cwd /use; primaryAgent is
     // captured at New() time from global config and never mutated).
-    SelectedCwd       string              // /cwd sets; immutable per AgentSession
-    SelectedAgent     string              // /use sets; immutable per AgentSession
-    PrimaryAgent    string              // snapshot of cfg.Primary at New(); read-only
+    selectedCwd   string        // /cwd sets
+    selectedAgent string        // /use sets
+    primaryAgent  string        // snapshot of cfg.Primary at New(); read-only
+
+    // Per-chat toggles (defaults: WatchModeMention / ThinkModeHide / ToolsModeHide)
+    watchMode  WatchMode
+    thinkMode  ThinkMode
+    toolsMode  ToolsMode
 
     // AgentSession pool (per-ChatSession unique on (agent, cwd))
-    poolMu          sync.RWMutex
-    pool            map[agentCwdKey]*AgentSession  // agent + cwd → AgentSession
-    selectedAS        *AgentSession                  // current active (may be nil)
+    pool       map[agentCwdKey]*AgentSession  // agent + cwd → AgentSession
+    selectedAS *AgentSession                  // current active (may be nil)
 
-    // FSMs owned by ChatSession
-    inputBuffer     *InputBuffer                   // F-25; idle ↔ busy; cross-/use shared
-    // Receipt FSM is Gateway-owned (receipts[userMsgID]); ChatSession only forwards events
+    // At-least-once submission queue (owns its own mutex)
+    queue *MessageQueue
 
     // Persistence
-    createdAt           time.Time
-    lastInteractionAt   time.Time
-    flushHook           func(blocks []agent.ContentBlock, userMsgIDs []string) error
-                                          // Gateway injects; called on InputBuffer Busy→Idle
-    eventCallback       func(s *AgentSession, ev agent.AgentEvent)
-                                          // ChatSession injects into AgentSession.readPump
+    createdAt         time.Time
+    lastInteractionAt time.Time
+    csStore           *chatstore.Store
+    asFile            *registry.AgentSessionFile
+    asPool            *AgentSessionPool
+    spawner           Spawner
+
+    // F-54 event buses — the runtime subscribes to these
+    AgentEventBus   *services.EventBus[AgentEventEnvelope]
+    MessageStateBus *services.EventBus[MessageStateEvent]
+    PromptEndBus    *services.EventBus[PromptEndedEvent]
 
     // Lifecycle
-    cancel              context.CancelFunc
+    ctx    context.Context
+    cancel context.CancelFunc
 }
 
 type agentCwdKey struct {
@@ -74,14 +85,17 @@ type agentCwdKey struct {
 type ChatSessionEntry struct {
     ID                  string    `json:"id"`
     ChatID              string    `json:"chatId"`               // UNIQUE
-    ChatType            string    `json:"chatType"`
-    SelectedCwd           string    `json:"selectedCwd"`            // empty → not yet /cwd'd
-    SelectedAgent         string    `json:"selectedAgent"`          // empty → not yet /use'd
-    PrimaryAgent        string    `json:"primaryAgent"`         // snapshot of cfg.Primary at creation; read-only
+    SelectedCwd         string    `json:"selectedCwd"`          // empty → not yet /cwd'd
+    SelectedAgent       string    `json:"selectedAgent"`        // empty → not yet /use'd
+    PrimaryAgent        string    `json:"primaryAgent,omitempty"` // snapshot of cfg.Primary at creation; read-only
     AgentSessionIDs     []string  `json:"agentSessionIds"`      // pool index
-    SelectedAgentSessionID *string   `json:"selectedAgentSessionId"` // null → no active
+    SelectedAgentSessionID *string `json:"selectedAgentSessionId,omitempty"` // null → no active
     CreatedAt           time.Time `json:"createdAt"`
     LastInteractionAt   time.Time `json:"lastInteractionAt"`
+    WatchMode           int       `json:"watchMode,omitempty"`
+    ThinkMode           int       `json:"thinkMode,omitempty"`
+    ToolsMode           int       `json:"toolsMode,omitempty"`
+    WatcherHintEmitted  bool      `json:"watcherHintEmitted,omitempty"`
 }
 ```
 
@@ -132,8 +146,8 @@ nightme run (startup):
 //
 // Returns ErrNoSelectedCwd if selectedCwd is empty (user has not /cwd'd yet).
 func (cs *ChatSession) LookupSelectedAgentSession() (*AgentSession, error) {
-    cs.poolMu.Lock()
-    defer cs.poolMu.Unlock()
+    cs.mu.Lock()
+    defer cs.mu.Unlock()
 
     if cs.SelectedCwd == "" {
         return nil, ErrNoSelectedCwd  // "no workspace, /cwd first"
@@ -169,7 +183,7 @@ func (cs *ChatSession) LookupSelectedAgentSession() (*AgentSession, error) {
 |---------|------------------|--------------|
 | `/cwd <path>` | Validate → `chatSession.SetSelectedCwd(abs)` | Updates `selectedCwd`; pool untouched; next message triggers `LookupSelectedAgentSession()` |
 | `/use <agent>` | Validate → `chatSession.SetSelectedAgent(name)` → `LookupSelectedAgentSession()` | May spawn new AgentSession if `(agent, selectedCwd)` not in pool |
-| `/close` | `chatSession.KillAll()` | Kills every AgentSession in pool; clears `selectedAS`; old receipts dispose |
+| `/close` | `close.CloseAllAgents` | Kills every AgentSession in pool; clears `selectedAS`; old receipts dispose |
 
 **No `/default` command**: the only user-facing Primary Agent is the global `primary` config. The `primaryAgent` field on ChatSession is captured at `New()` time (snapshot of `cfg.Primary`) and never mutated post-construction. Future feature: per-chat Primary via config (not command) — ### 3.5 SetSelectedCwd / SetSelectedAgent (state mutations)
 
@@ -178,18 +192,18 @@ func (cs *ChatSession) SetSelectedCwd(cwd string) error {
     if !isValidCwd(cwd) {
         return ErrInvalidCwd
     }
-    cs.poolMu.Lock()
+    cs.mu.Lock()
     cs.SelectedCwd = cwd
-    cs.poolMu.Unlock()
+    cs.mu.Unlock()
     cs.flushEntryToRegistry()
     // No agent respawn here — LookupSelectedAgentSession happens lazily
     return nil
 }
 
 func (cs *ChatSession) SetSelectedAgent(agent string) error {
-    cs.poolMu.Lock()
+    cs.mu.Lock()
     cs.SelectedAgent = agent
-    cs.poolMu.Unlock()
+    cs.mu.Unlock()
     cs.flushEntryToRegistry()
     return nil
 }
@@ -209,12 +223,12 @@ func (cs *ChatSession) SetSelectedAgent(agent string) error {
 
 - **`AgentSession.readPump`** (one per AgentSession in pool, running or detached)
   - Reads from `as.Events()` (single consumer)
-  - Calls `cs.eventCallback(s, ev)` if `s == cs.selectedAS` (set under poolMu read lock)
+  - Calls `cs.eventCallback(s, ev)` if `s == cs.selectedAS` (set under mu read lock)
   - Drops events from non-active AgentSession (logs at debug level)
 
 ### 4.3 Locks
 
-- `cs.poolMu` — guards `pool`, `selectedAS`, `SelectedCwd`, `SelectedAgent`
+- `cs.mu` — guards `pool`, `selectedAS`, `SelectedCwd`, `SelectedAgent`
   - **Write**: `/cwd`, `/use`, `/close`, `LookupSelectedAgentSession()`, spawn, registry flush
   - **Read**: readPump callback registration, status queries
 
@@ -223,12 +237,12 @@ func (cs *ChatSession) SetSelectedAgent(agent string) error {
 When `/use` switches active:
 ```
 1. /use claude enters LookupSelectedAgentSession
-2. Take poolMu.Lock
+2. Take mu.Lock
 3. Resolve new selectedAS (reuse or spawn)
 4. Set cs.selectedAS = newAS
-5. Release poolMu.Lock
+5. Release mu.Lock
 6. (In flight events from OLD AgentSession's readPump, if any:)
-   - Check cs.selectedAS under poolMu.RLock
+   - Check cs.selectedAS under mu.RLock
    - If old, drop event (log: "event from non-active AgentSession, dropping")
 7. New events flow through newAS.readPump → cs.eventCallback
 ```
@@ -245,7 +259,7 @@ When `/use` switches active:
 | Receipt FSM (per userMsgID) | Gateway | `Gateway.receipts[userMsgID]` (map, in-memory) | 跨 /use /cwd 不变 |
 | InputBuffer FSM (idle ↔ busy) | **ChatSession** | `ChatSession.inputBuffer` | 跨 /use 切换共享 queue |
 | AgentSession.Status (running/detached/exited) | AgentSession | AgentSession.status (atomic) | 独立于 ChatSession |
-| ChatSession.SelectedAgentSession pointer | ChatSession | `cs.selectedAS` (under poolMu) | /use 时切换 |
+| ChatSession.SelectedAgentSession pointer | ChatSession | `cs.selectedAS` (under mu) | /use 时切换 |
 
 ---
 
@@ -263,7 +277,7 @@ to life (Step 3 of `LookupSelectedAgentSession`). It is
 the production implementation.
 
 ```go
-// internal/chatsession/spawn.go
+// internal/agentsession/spawner.go
 
 type Spawner interface {
     Spawn(ctx context.Context, agentName, cwd string, args []string) (agent.AgentSession, error)
@@ -316,7 +330,7 @@ each event drained from the active AgentSession's `Events()`
 channel:
 
 ```go
-// internal/chatsession/readpump.go
+// internal/agentsession/readpump.go
 
 type EventHandler func(chatID string, s *AgentSession, ev agent.AgentEvent)
 ```
@@ -340,13 +354,13 @@ return func(chatID string, s *AgentSession, ev agent.AgentEvent) {
 ### 5.1.4 ReadPump lifecycle (commit 8c)
 
 Each ChatSession has at most **one** active readPump goroutine
-(`internal/chatsession/readpump.go`). Lifecycle:
+(`internal/agentsession/readpump.go`). Lifecycle:
 
 - **`StartReadPump()`** — start pump for `cs.selectedAS`. Captures
   `cs.eventHandler` at start time. Stops any existing pump first.
   Returns `ErrNoSelectedAgentSession` if no active AS yet.
 - **`StopReadPump()`** — signal `stop`, wait for `done`.
-  Idempotent. Called by `KillAll` (commit 8c).
+  Idempotent. Called by the `/close` command.
 - **`HasPump()`** — atomic bool, true while the pump goroutine is
   alive. Reads `false` after natural exit (channel close from
   process death) as well as explicit stop.
@@ -449,7 +463,7 @@ user simply opens a fresh chat.
 
 - `SetSelectedCwd` / `SetSelectedAgent` — pure state mutation, no spawn/close
 - `LookupSelectedAgentSession()` resolution (single path: hit → reuse, miss → spawn `(selectedAgent, selectedCwd)`; no runtime fallback to any "default" agent)
-- `KillAll()` — all AgentSessions killed, selectedAS=nil, pool emptied
+- `/close` — all AgentSessions in the pool killed, selectedAS=nil
 - `Restore()` from ChatSessionEntry + AgentSessionEntry — detached state, no process
 - Concurrent `/use` + selectedAS read — race-free (uses sync.RWMutex)
 
@@ -586,7 +600,7 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 > kept `extraArgs := args[1:]` and applied them on first spawn
 > via `as.SetArgs(extraArgs)`. That path never reached production
 > (no command path called `SetArgs`); `AgentSession.args` is still
-> the empty slice in `internal/agent/agent_session.go`. Per-spawn
+> the empty slice in `internal/agentsession/session.go`. Per-spawn
 > flags must be added through `useSpec.Flags` so they show up in
 > the strict parser — see issue #291.
 
@@ -683,7 +697,7 @@ T0: User A sends "hello"
 T1: User B sends "/use codex"
 T2: handler.cwd processing
 T3: messageDispatcher branch processing ("hello")
-T4: Both reach ChatSession; serialized via poolMu
+T4: Both reach ChatSession; serialized via mu
 ```
 
 **Outcome**: Either "hello" goes to old claude or new codex, depending on lock acquisition order. No corruption; both flows complete correctly.
@@ -881,7 +895,7 @@ type AgentSessionEntry struct {
 
 ```go
 type ChatSession struct {
-    poolMu sync.RWMutex
+    mu sync.RWMutex
     pool   map[agentCwdKey]*AgentSession  // (agent, cwd) → AgentSession
 }
 
@@ -969,19 +983,19 @@ Respawn():
 
 **Critical**: Same `AgentSession.ID` is preserved across respawn. This maintains the pool invariant and lets external observers (logs, ChatSessionEntry) see continuity.
 
-### 4.4 KillAll
+### 4.4 /close
 
 ```
-KillAll():
-  1. poolMu.Lock()
-  2. for as := range cs.pool:
-       as.Cancel() → SIGTERM to child → wait for exit (5s grace) → SIGKILL if needed
-       delete(cs.pool, as.key)
-  3. cs.selectedAS = nil
-  4. cs.inputBuffer.Clear()  // queued messages lost
-  5. poolMu.Unlock()
-  6. registry.Upsert(ChatSessionEntry{...agentSessionIds=[], selectedAgentSessionId=null})
+close.CloseAllAgents(cmd):
+  1. snapshot = cs.AgentSessionsForCwd(cs.SelectedCwd())
+  2. for as in snapshot:
+       alive? → as.Close() → 等 bridge 优雅退出(5s grace → SIGKILL)
+       否则 → "stale-cleared"
+  3. 汇总 []close.Result(每个 entry 一行)
+  4. close.FormatResults(results) → 回复文本
 ```
+
+`/close` 的实现住在 `internal/command/close/`,不在 `chatsession` 包里 —— 命令层拿到 pool 快照、发优雅关闭、渲染结果。
 
 ### 4.5 Death detection
 
@@ -1058,7 +1072,7 @@ contract and test substitution.
 
 ### 6.2 Per-pool goroutines (none directly)
 
-Pool operations happen under `cs.poolMu` from the dispatchLoop or handler goroutines. No dedicated pool goroutine.
+Pool operations happen under `cs.mu` from the dispatchLoop or handler goroutines. No dedicated pool goroutine.
 
 ### 6.3 Race scenarios
 
@@ -1067,12 +1081,12 @@ Pool operations happen under `cs.poolMu` from the dispatchLoop or handler gorout
 ```
 T0: claude_AS processing, 5 events queued in as.events
 T1: User sends /use codex
-T2: handler.use takes cs.poolMu.Lock
+T2: handler.use takes cs.mu.Lock
 T3: SetSelectedAgent("codex")
 T4: LookupSelectedAgentSession → spawn codex_AS, set cs.selectedAS = codex_AS
-T5: cs.poolMu.Unlock
+T5: cs.mu.Unlock
 T6: claude_AS.readPump picks next event from claude.events
-T7: callback(s=claude_AS, ev) → check cs.selectedAS == claude_AS (under poolMu.RLock) → NO → drop
+T7: callback(s=claude_AS, ev) → check cs.selectedAS == claude_AS (under mu.RLock) → NO → drop
 T8: codex_AS.readPump picks events from codex.events → callback → cs.selectedAS == codex_AS → YES → Translate + Send
 ```
 
@@ -1083,20 +1097,20 @@ T8: codex_AS.readPump picks events from codex.events → callback → cs.selecte
 ```
 T0: User A sends "hi"
 T1: User B sends /use codex
-T2: messageDispatcher branch ("hi") acquires poolMu.Lock
+T2: messageDispatcher branch ("hi") acquires mu.Lock
 T3: LookupSelectedAgentSession → resolves (claude, selectedCwd) → cs.selectedAS = claude_AS
-T4: poolMu.Unlock
+T4: mu.Unlock
 T5: "hi" dispatched to claude_AS
-T6: handler.use acquires poolMu.Lock
+T6: handler.use acquires mu.Lock
 T7: LookupSelectedAgentSession → spawns codex_AS → cs.selectedAS = codex_AS
-T8: poolMu.Unlock
+T8: mu.Unlock
 ```
 
 **Result**: "hi" goes to claude (correct). Future messages go to codex (correct).
 
 ### 6.4 Lock ordering
 
-`cs.poolMu` is the single lock guarding pool state. No nested locks. Event callbacks take `poolMu.RLock` for `selectedAS` check — no deadlock risk.
+`cs.mu` is the single lock guarding pool state. No nested locks. Event callbacks take `mu.RLock` for `selectedAS` check — no deadlock risk.
 
 ---
 
@@ -1132,30 +1146,18 @@ T8: poolMu.Unlock
 }
 ```
 
-**Migration ** (archive only — no transparent data lift):
+**Migration**(字段级 rename,不是整文件迁移):
 
-```go
-// internal/registry/migrate.go
+`registry.ChatSessionEntry.UnmarshalJSON`(`internal/registry/chat_session_entry.go`)在读的时候把旧字段名拷到新字段上:
 
-func MigrateV1ToV2(v1RegistryPath string) (int, error)
-``` did not persist `chat_id` on its session records (the binding
-was in-memory only — see `internal/gateway/binding.go` v1.x), so
-the chat → session mapping cannot be reconstructed from disk
-alone. **The current dev does not transparently migrate v1.x data
-to entries.** The startup flow (`cmd/nightme/run.go`)
-calls `MigrateV1ToV2(v1RegistryPath)` which:
+| 旧字段 | 当前字段 |
+|--------|----------|
+| `defaultAgent` | `PrimaryAgent` |
+| `activeCwd` | `SelectedCwd` |
+| `activeAgent` | `SelectedAgent` |
+| `activeAgentSessionId` | `SelectedAgentSessionID` |
 
-1. Reads `registry.json` if present.
-2. Copies it to `registry.json.v1.bak` (idempotent; existing
-   backup is preserved).
-3. Does **not** write any entries — the v1.x data is
-   archived only.
-4. The runtime starts with an empty `chat_sessions.json` and
-   `agent_sessions.json`.
-
-**Action required after upgrade**: re-issue `/cwd` for each chat.
-The `MigrateV1ToV2` backup file is kept on disk for forensic
-recovery only — delete it once you're confident you don't need it.
+新写入只用规范字段名。v0.1 的 `registry.json` 不再被读取 —— `cmd/nightme/clean.go` 里的 `registry.json.v1.bak` 清理项已经失效,启动路径不做整文件迁移。
 
 ---
 
@@ -1187,14 +1189,13 @@ recovery only — delete it once you're confident you don't need it.
 ```bash
 $ nightme list
 
-CHAT          CWD                  ACTIVE    AGENT        PID    STATUS
-oc_aaa        /code/bailing        *         claude       12345  running
-oc_aaa        /code/bailing                  codex        67890  running
-oc_aaa        /code/nightme                  claude       11111  exited
-oc_bbb        /code/nightme        *         claude       22222  running
+CHAT    AGENT    PID    STATUS    WORKSPACE        STARTED    SID    RESUME
+oc_aaa  claude   12345  running   /code/bailing    2m ago     as-1   sess-abc
+oc_aaa  codex    67890  running   /code/bailing    1m ago     as-2   sess-def
+oc_bbb  claude   22222  running   /code/nightme    5s ago     as-3   sess-ghi
 ```
 
-`*` marks the active AgentSession for each chat. Multiple rows per chat show the pool.
+`SID` 是 nightme 自己的 AgentSession id,`RESUME` 是 agent 侧自己的 session id —— 两者不是一回事。`STATUS` 带 exit code(`exited(2)` 之类),`WORKSPACE` / `STARTED` 原样打印不截断。
 
 ---
 
@@ -1272,7 +1273,7 @@ nightme 已有 `/close`（清空 pool + 杀全部进程）和 `/use`（切 activ
 
 1. **轻量级 reset**：与 `/close` 区分 —— 只丢对话，不丢进程 / pool 槽位 / args。
 2. **跨 agent 协议统一**：每个 bridge 暴露 `AgentSession.New(ctx) error`，把"reset conversation"的语义收敛到一个方法。
-3. **复用现有持久化链路**：bridge reset 后 emit `EventAgentConnected`（带新 SessionID）→ 现有 `cmd/nightme/run.go:467` 路径自动捕获 + 持久化。零新增 wiring。
+3. **复用现有持久化链路**：bridge reset 后 emit `EventAgentConnected`（带新 SessionID）→ 现有 `cmd/nightme/run.go` 路径自动捕获 + 持久化。零新增 wiring。
 4. **可选精修粒度**：`/new <agent>` 让用户只 reset 一个 agent 的对话，不动其他。
 
 ---
@@ -1281,7 +1282,7 @@ nightme 已有 `/close`（清空 pool + 杀全部进程）和 `/use`（切 activ
 
 ### 3.1 `AgentSession.New` 接口
 
-新增方法到 `internal/agent/agent.go:494` 的 `AgentSession` 接口：
+新增方法到 `internal/agent/agent.go` 的 `AgentSession` 接口：
 
 ```go
 type AgentSession interface {
@@ -1299,7 +1300,7 @@ type AgentSession interface {
     //
     // After New returns, the bridge MUST emit a new EventAgentConnected carrying
     // the new SessionID; the runtime's existing eventHandler captures
-    // it via SetResumeID and persists. See cmd/nightme/run.go:467.
+    // it via SetSessionID and persists. See cmd/nightme/run.go.
     //
     // Bridge-specific implementations:
     //   - claudecode: writeLine("/clear")       // stdin slash command
@@ -1316,7 +1317,7 @@ type AgentSession interface {
 #### 3.2.1 claudecode — 发送 `{"type":"user",...,"content":"/clear"}` (in-process reset)
 
 ```go
-// internal/bridge/claudecode/session.go
+// internal/bridge/claudecode/claudecode.go
 func (s *session) New(ctx context.Context) error {
     payload := []byte(`{"type":"user","message":{"role":"user","content":"/clear"}}`)
     return s.writeLine(payload)
@@ -1343,12 +1344,12 @@ func (s *session) New(ctx context.Context) error {
 - claude-code 在 stream-json 模式下确实**接受 `/clear` 作为 user-typed slash command**（跟交互模式一样会触发内部 hook + 分配新 session）
 - `{"type":"control","control":{"type":"..."}}` 各种 subtype 全部被静默丢弃 —— control 消息在 stdin 上**当前不工作**，尽管 `init.capabilities` 列了 `interrupt_receipt_v1`
 - 因此 claudecode.New **不需要**杀进程走 fallback（用户初判是错的；实测证明 in-place reset 可用）
-- bridge emit 新 `system/init{ session_id: <new> }` → runtime eventHandler 通过 `SetResumeID` + `PersistAgentSession` 持久化新 ResumeID
+- bridge emit 新 `system/init{ session_id: <new> }` → runtime eventHandler 通过 `SetSessionID` + `PersistAgentSession` 持久化新 SessionID
 
 #### 3.2.2 pi — `{"type":"new_session"}` RPC
 
 ```go
-// internal/bridge/pi/session.go
+// internal/bridge/pi/agent.go
 func (s *session) New(ctx context.Context) error {
     return s.rpc.requestAsync("new_session", nil)
 }
@@ -1364,11 +1365,11 @@ func (s *session) New(ctx context.Context) error {
 |---|---|---|---|
 | `new_session` | C→S | `type` | 丢弃当前 session 对话上下文，server 端分配新 sessionId 并 emit `state_update` 等 init 类事件。**不**杀进程。 |
 
-**Translator 补丁（F-34 Phase 3 发现）**：原 F-32 translator 没有处理 `state_update` 事件（落入 default 分支被 log debug 丢弃），runtime 拿不到新 EventAgentConnected → ResumeID 不会更新到 `agent_sessions.json`。Phase 3 在 `internal/bridge/pi/translate.go` 加了 case `"state_update"`：解析 `sessionId`（+ 可选 `modelId`/`modelName`/`sessionFile`），emit `EventAgentConnected{SessionID: <new>}`，**绕开 `initSent` 守卫**（每次 new_session 都要让 runtime 重新捕获）。runtime eventHandler（`cmd/nightme/run.go newEventHandler`）自身有 `if ev.Connected.SessionID != ""` 守卫，重复 init 是幂等的。
+**Translator 补丁（F-34 Phase 3 发现）**：原 F-32 translator 没有处理 `state_update` 事件（落入 default 分支被 log debug 丢弃），runtime 拿不到新 EventAgentConnected → SessionID 不会更新到 `agent_sessions.json`。Phase 3 在 `internal/bridge/pi/translate.go` 加了 case `"state_update"`：解析 `sessionId`（+ 可选 `modelId`/`modelName`/`sessionFile`），emit `EventAgentConnected{SessionID: <new>}`，**绕开 `initSent` 守卫**（每次 new_session 都要让 runtime 重新捕获）。runtime eventHandler（`cmd/nightme/run.go newEventHandler`）自身有 `if ev.Connected.SessionID != ""` 守卫，重复 init 是幂等的。
 
 **但**：实测 pi-coding-agent 官方 `docs/rpc.md` 二次确认 —— **`state_update` 不在官方事件列表**，`new_session` 响应也**不带新 sessionId**。唯一的获取方式是发完 `new_session` 后再调一次 `get_state`。
 
-**修正实现**（F-34 Phase 3 final，`internal/bridge/pi/session.go::New`）：
+**修正实现**（F-34 Phase 3 final，`internal/bridge/pi/agent.go::New`）：
 
 ```go
 // 1. Send new_session, wait for response.
@@ -1383,7 +1384,7 @@ translator 里保留的 `case "state_update"` 是**防御性**的（若 pi 未�
 
 #### 3.2.3 pty — `ErrRestartRequired` fallback (kill + respawn via Spawner)
 
-PTY 是协议无关的字节管道，没有 "reset conversation context" 的概念（产品澄清 2026-08-04："pty 是删掉进程, 重启进程"）。`ptySession.New(ctx)` 返回 `agent.ErrRestartRequired`；wrapper 层（`agentsession.AgentSession.New`）捕获这个 sentinel 后走 fallback 路径：关掉 handle，调 `spawner.Spawn(ctx, agent, cwd, args, "")`（resumeID 为空），把新 handle 装回 `as.handle`，并 `SetResumeID("")` 清掉 id。下次 runtime 收到新 child 的 `EventAgentConnected` 时会重新捕获新 ResumeID。
+PTY 是协议无关的字节管道，没有 "reset conversation context" 的概念（产品澄清 2026-08-04："pty 是删掉进程, 重启进程"）。`ptySession.New(ctx)` 返回 `agent.ErrRestartRequired`；wrapper 层（`agentsession.AgentSession.New`）捕获这个 sentinel 后走 fallback 路径：关掉 handle，调 `spawner.Spawn(ctx, agent, cwd, args, "")`（resumeID 为空），把新 handle 装回 `as.handle`，并 `SetSessionID("")` 清掉 id。下次 runtime 收到新 child 的 `EventAgentConnected` 时会重新捕获新 SessionID。
 
 ```go
 // internal/bridge/pty/session.go
@@ -1404,13 +1405,13 @@ newHandle, err := spawner.Spawn(ctx, as.Agent, as.Cwd, as.args, "")
 if err != nil { return err }
 as.handle = newHandle
 as.SetRunning(newHandle.PID())
-as.SetResumeID("")
+as.SetSessionID("")
 ```
 
 #### 3.2.4 acp — `session/new` JSON-RPC
 
 ```go
-// internal/bridge/acp/session.go
+// internal/bridge/acp/agent.go
 func (s *acpSession) New(ctx context.Context) error {
     result, err := s.rpc.request(ctx, "session/new", newSessionParams{
         CWD:        s.workspace,
@@ -1459,7 +1460,7 @@ func (as *AgentSession) New(ctx context.Context, spawner Spawner) error {
     }
     as.handle = newHandle
     as.SetRunning(newHandle.PID())
-    as.SetResumeID("")
+    as.SetSessionID("")
     return nil
 }
 ```
@@ -1589,11 +1590,11 @@ gw.Register(gateway.Command{
 
 ### 4.3 持久化副作用
 
-`/new` 后 bridge emit `EventAgentConnected{ SessionID: newID }` → 现有 `newEventHandler`（`cmd/nightme/run.go:467`）走：
+`/new` 后 bridge emit `EventAgentConnected{ SessionID: newID }` → 现有 `newEventHandler`（`cmd/nightme/run.go`）走：
 
 ```go
 if ev.Kind == agent.EventAgentConnected && ev.Connected != nil && ev.Connected.SessionID != "" {
-    s.SetResumeID(ev.Connected.SessionID)
+    s.SetSessionID(ev.Connected.SessionID)
     if mgr != nil {
         if err := mgr.PersistAgentSession(s); err != nil && logger != nil {
             logger.Warn("persist agent session (init) failed", ...)
@@ -1602,13 +1603,13 @@ if ev.Kind == agent.EventAgentConnected && ev.Connected != nil && ev.Connected.S
 }
 ```
 
-→ `s.SetResumeID(newID)` 覆盖旧的 `ResumeID` 字段  
-→ `mgr.PersistAgentSession(s)` 把新 `ResumeID` 写盘到 `agent_sessions.json`
+→ `s.SetSessionID(newID)` 覆盖旧的 `SessionID` 字段  
+→ `mgr.PersistAgentSession(s)` 把新 `SessionID` 写盘到 `agent_sessions.json`
 
-**零 schema 改动**。下次 daemon 重启时，spawn 携带新 `ResumeID`；各 bridge 各自翻译成自己的 CLI flag（chatsession 层只持有 opaque id，不感知 agent 差异）：
+**零 schema 改动**。下次 daemon 重启时，spawn 携带新 `SessionID`；各 bridge 各自翻译成自己的 CLI flag（chatsession 层只持有 opaque id，不感知 agent 差异）：
 
 - `claudecode`：`--resume <newID>` —— `internal/bridge/claudecode/claudecode.go::buildArgs`
-- `pi`：`--session-id <newID>` —— `internal/bridge/pi/agent.go::buildArgs`（2026-08-06 task `T-pi-bridge-align` P1 落地；之前 pi 忽略 `cfg.ResumeID` → 跨重启 pi 永远 fresh，现在 daemon 重启也能续接）
+- `pi`：`--session-id <newID>` —— `internal/bridge/pi/agent.go::buildArgs`（2026-08-06 task `T-pi-bridge-align` P1 落地；之前 pi 忽略 `cfg.SessionID` → 跨重启 pi 永远 fresh，现在 daemon 重启也能续接）
 - `acp`：`session/load` JSON-RPC（OOB 走 transport-reuse 路径）
 
 详见 [F-32 §12.2 实施记录](./../bridge/pi.md) 同款翻译契约说明。
@@ -1640,7 +1641,7 @@ if ev.Kind == agent.EventAgentConnected && ev.Connected != nil && ev.Connected.S
 | `/new <agent>` 找不到 | reply "No agent session for <agent> in current workspace. Try /agents." |
 | 单个 AS reset 失败（如 pi 还在处理 turn）| reset 计数 -1；InputBuffer **仍清空**；reply 附 "errors: <first err>" |
 | 所有 AS reset 失败 | matched > 0, reset == 0；reply "Reset 0/N agent session(s). (errors: ...)" |
-| pool 有 AS 但都未启动 (Status==Detached/Exited) | **F-43 ⚠ supersedes**: matched == 1, reset == 1, Action == `marked-fresh`; ResumeID cleared in-memory + persisted; reply 用 `FormatResetResults` per-entry list。原 F-34 "Q-N4 silently skip" 行为已被替换。 |
+| pool 有 AS 但都未启动 (Status==Detached/Exited) | **F-43 ⚠ supersedes**: matched == 1, reset == 1, Action == `marked-fresh`; SessionID cleared in-memory + persisted; reply 用 `FormatResetResults` per-entry list。原 F-34 "Q-N4 silently skip" 行为已被替换。 |
 | pool 在 selectedCwd 下完全为空 | matched == 0；reply 同上 |
 
 ---
@@ -1650,10 +1651,10 @@ if ev.Kind == agent.EventAgentConnected && ev.Connected != nil && ev.Connected.S
 | 文件 | 测试 |
 |---|---|
 | `internal/bridge/claudecode/claudecode_test.go` | `New()` 写 `/clear\n` 到 mock stdin；writeLine 锁不与 SendBlocks 竞争 |
-| `internal/bridge/pi/session_test.go` | `New()` 发 `{"type":"new_session"}`；mock RPC server 返回新 sessionId；验证后续 EventAgentConnected 带新 SessionID |
+| `internal/bridge/pi/session_unix_test.go` | `New()` 发 `{"type":"new_session"}`；mock RPC server 返回新 sessionId；验证后续 EventAgentConnected 带新 SessionID |
 | `internal/bridge/acp/acp_test.go` | `New()` 发 `session/new`；验证 `s.sessionID` 被替换 + EventAgentConnected emit |
 | `internal/chatsession/new_test.go` | `ChatSession.NewActiveAgentSessions`：filter / 计数 / InputBuffer.Clear / Status 跳过 / firstErr 聚合 |
-| `internal/chatsession/agentsession_test.go` | `AgentSession.New` delegate：handle=nil 返回 ErrNotRunning |
+| `internal/agentsession/meta_test.go` | `AgentSession.New` delegate：handle=nil 返回 ErrNotRunning |
 | `internal/command/newcmd/commands_test.go` | `Handle` 命中 + 空 pool 报错 + `/new <agent>` 找不到 + 部分失败 reply |
 
 ---
@@ -1681,7 +1682,7 @@ if ev.Kind == agent.EventAgentConnected && ev.Connected != nil && ev.Connected.S
 | Q-N6 | pi reset 协议 | **RPC command** `{"type":"new_session"}`（不是 prompt 文本 `/new`）| 2026-08-04 |
 | Q-N7 | acp reset 协议 | JSON-RPC `session/new` over existing transport | 2026-08-04 |
 | Q-N8 | `AgentSession` ID 是否换 | **不换** —— pool 槽位稳定 | 2026-08-04 |
-| Q-N9 | ResumeID 更新时机 | bridge emit EventAgentConnected 后，runtime 走现有路径自动持久化 | 2026-08-04 |
+| Q-N9 | SessionID 更新时机 | bridge emit EventAgentConnected 后，runtime 走现有路径自动持久化 | 2026-08-04 |
 | Q-N10 | handle / readPump 处理 | 不动；bridge 在原 transport 上发 reset，Events() 不关 | 2026-08-04 |
 
 ---
@@ -1691,9 +1692,9 @@ if ev.Kind == agent.EventAgentConnected && ev.Connected != nil && ev.Connected.S
 | 文件 | 改动 | 行数估算 |
 |---|---|---|
 | `internal/agent/agent.go` | `AgentSession` 接口加 `New(ctx) error` | +10 |
-| `internal/bridge/claudecode/session.go` | 实现 `New` | +6 |
-| `internal/bridge/pi/session.go` | 实现 `New`（RPC requestAsync）| +12 |
-| `internal/bridge/acp/session.go` | 实现 `New`（session/new + setSessionID）| +20 |
+| `internal/bridge/claudecode/claudecode.go` | 实现 `New` | +6 |
+| `internal/bridge/pi/agent.go` | 实现 `New`（RPC requestAsync）| +12 |
+| `internal/bridge/acp/agent.go` | 实现 `New`（session/new + setSessionID）| +20 |
 | `internal/agentsession/session.go` (F-102 重构后） | `New` delegate | +10 |
 | `internal/chatsession/chatsession.go` | `NewActiveAgentSessions` | +30 |
 | `internal/command/newcmd/cmd.go` | `Handle` 实现 + `/new` 路径 | +60 |
@@ -1711,13 +1712,13 @@ if ev.Kind == agent.EventAgentConnected && ev.Connected != nil && ev.Connected.S
 
 ---
 
-## A5. F-43: `/close` Graceful Shutdown + `/new` ResumeID Clear + 列表式回复
+## A5. F-43: `/close` Graceful Shutdown + `/new` SessionID Clear + 列表式回复
 
 > **Source**: `F-chat-session.md`
 
 
 > **Depends on**: F-34 (`/new` slash command), F-27 (ChatSession), F-29 (AgentSession pool), F-19 (CLI Bridge), F-24 (Claude Code Bridge), F-32 (Pi RPC Bridge), F-33 (ACP Bridge)
-> **Related**: [`SPEC.md`](../SPEC.md) §3.2 状态转换触发器, [`F-runtime.md`](./F-runtime.md), [`F-chat-session.md`](./F-chat-session.md), [`F-chat-session.md`](./F-chat-session.md), [`F-chat-session.md`](./F-chat-session.md), [`../channel/feishu-rendering.md`](./../channel/feishu-rendering.md)
+> **Related**: [`SPEC.md`](../SPEC.md) §3.2 状态转换触发器, [`F-chat-session.md`](./F-chat-session.md) §A1 / §A3, [`../channel/feishu-rendering.md`](../channel/feishu-rendering.md)
 
 ---
 
@@ -1726,14 +1727,14 @@ if ev.Kind == agent.EventAgentConnected && ev.Connected != nil && ev.Connected.S
 三个独立但相互关联的修复,统一打包:
 
 1. **`/close` 改成 bridge graceful shutdown** —— 当前 `ChatSession.KillAll` 只清理 nightme 侧的内存和 disk,**不向 child CLI 发任何信号**,导致进程孤儿化继续运行;同时清掉 InputBuffer 等不属于该命令管理的 state。
-2. **`/new` 对 dead/detached AgentSession 清 ResumeID** —— 当前 `NewActiveAgentSessions` 对 `StatusRunning` 之外的 entry **silently skip**,但 pool entry 里残留的 ResumeID 会在下次 spawn 时被透传,导致 `--resume <死 id>` 试图续接一个停止的 session(违背 `/new` 的语义)。
+2. **`/new` 对 dead/detached AgentSession 清 SessionID** —— 当前 `NewActiveAgentSessions` 对 `StatusRunning` 之外的 entry **silently skip**,但 pool entry 里残留的 SessionID 会在下次 spawn 时被透传,导致 `--resume <死 id>` 试图续接一个停止的 session(违背 `/new` 的语义)。
 3. **两个命令的回复文案升级为 per-entry 列表** —— 用户从 "Killed 2 agents" 升级到 "✓ claude @ /A\n✓ codex @ /B",每条 entry 都有明确归属。
 
 不变式（受 SPEC §1.3 约束）：
 
 - **slash command 边界**:`/close` 和 `/new` **只与 agent 进程交互**。`selectedCwd` / `selectedAgent` / `currentTurnUserMsgID` / `InputBuffer` 都不属于它们。
-- **graceful 优先**:每个 bridge 的 `Close()` 已有 stdin EOF + SIGINT + 2s grace + SIGKILL 兜底的本地 watchdog（见 `claudecode` `session.go:466-498`）。nightme 端**不二次升级**信号。
-- **不主动浪费资源**:`/new` **永不**为触发"reset"而 spawn 一个 dead agent。dead 状态 = 不动进程,只清 ResumeID。
+- **graceful 优先**:每个 bridge 的 `Close()` 已有 stdin EOF + SIGINT + 2s grace + SIGKILL 兜底的本地 watchdog（见 `claudecode` `session.go`）。nightme 端**不二次升级**信号。
+- **不主动浪费资源**:`/new` **永不**为触发"reset"而 spawn 一个 dead agent。dead 状态 = 不动进程,只清 SessionID。
 - **state 同步**:disk 删除必须在进程死 *之后*,不能根据"还没发生的事"提前删。
 
 ---
@@ -1742,7 +1743,7 @@ if ev.Kind == agent.EventAgentConnected && ev.Connected != nil && ev.Connected.S
 
 ### 2.1 当前 `/close` 的三个缺陷
 
-`internal/chatsession/chatsession.go:769-796` 的 `KillAll` 注释自陈 "commit 6: this is a data-only operation — no actual signal is sent (commit 7 will wire SIGTERM)",代码也确实如此:
+`internal/chatsession/chatsession.go` 的 `CloseAllAgents` 注释自陈 "commit 6: this is a data-only operation — no actual signal is sent (commit 7 will wire SIGTERM)",代码也确实如此:
 
 ```go
 func (cs *ChatSession) KillAll() error {
@@ -1770,13 +1771,13 @@ func (cs *ChatSession) KillAll() error {
 | 问题 | 后果 |
 |------|------|
 | **没真杀** | `cs.pool = make(...)` 抛弃 Go 指针,child CLI 进程孤儿化继续跑,占用 CPU/memory/PTY |
-| **没走 bridge graceful** | `AgentSession.Close()`（`agentsession.go:449`）完全没被调;每个 bridge 自带的 graceful shutdown + SIGKILL 兜底路径浪费 |
+| **没走 bridge graceful** | `AgentSession.Close()`（`agentsession.go`）完全没被调;每个 bridge 自带的 graceful shutdown + SIGKILL 兜底路径浪费 |
 | **副作用太多** | `InputBuffer.Clear()` 丢用户消息;`agent_sessions.json` entry 在进程 *未死* 时被删;`currentTurnUserMsgID` 清零 |
 | **回复撒谎** | handler 报 "Killed 2 agent session(s)",但实际 child 没杀 |
 
 ### 2.2 当前 `/new` 的一个隐藏 bug
 
-`internal/chatsession/chatsession.go:832-936` 的 `NewActiveAgentSessions` 对 dead/detached entry **silently skip**:
+`internal/chatsession/chatsession.go` 的 `NewActiveAgentSessions` 对 dead/detached entry **silently skip**:
 
 ```go
 if as.Status() != StatusRunning {
@@ -1787,7 +1788,7 @@ if as.Status() != StatusRunning {
 }
 ```
 
-但是这个 entry 还在 pool 里,**它的 `ResumeID` 也没清**。下次消息触发 `LookupSelectedAgentSession` → pool hit but Status=Exited → spawn with `as.ResumeID()` 的旧值 → Claude Code 桥拼 `--resume <旧id>` → **试图续接一个停止的 session**。这跟 `/new` 的"下一次 fresh"语义完全相反。
+但是这个 entry 还在 pool 里,**它的 `SessionID` 也没清**。下次消息触发 `LookupSelectedAgentSession` → pool hit but Status=Exited → spawn with `as.SessionID()` 的旧值 → Claude Code 桥拼 `--resume <旧id>` → **试图续接一个停止的 session**。这跟 `/new` 的"下一次 fresh"语义完全相反。
 
 ### 2.3 UX 不一致
 
@@ -1806,7 +1807,7 @@ Reset 3 session(s). Send a message to start fresh.
 ### 2.4 设计目标
 
 1. **`/close` 真正 graceful kill**:每个 bridge 走自己的 Close() 路径,等进程真死,再清 disk。
-2. **`/new` 对 dead state 也要有副作用**:清 ResumeID,让下次 spawn 必然 fresh。
+2. **`/new` 对 dead state 也要有副作用**:清 SessionID,让下次 spawn 必然 fresh。
 3. **不动 slash command 边界外的 state**:InputBuffer、selectedCwd、用户当前消息都不归 `/close` 管。
 4. **per-entry 列表回复**:每个 agent 一行,带 ✓ / ✗ / • 状态标记,失败带 error msg。
 
@@ -1853,8 +1854,8 @@ cs.NewActiveAgentSessions(ctx, agentName)
   │
   │     case StatusDetached:
   │     case StatusExited:
-  │       as.SetResumeID("")              ← 不 spawn!只清 ResumeID
-  │       cs.asFile.Upsert(as.Entry())    ← 持久化清空的 ResumeID
+  │       as.SetSessionID("")              ← 不 spawn!只清 SessionID
+  │       cs.asFile.Upsert(as.Entry())    ← 持久化清空的 SessionID
   │       matched++, reset++
   │
   ├ InputBuffer.Clear()                  ← 不变:F-34 review #1
@@ -1880,43 +1881,42 @@ cs.NewActiveAgentSessions(ctx, agentName)
 
 ### 4.2 实现位置
 
-`internal/chatsession/chatsession.go` —— `KillAll` 整体重写,新增 `KillResult` 类型 + `FormatKillResults` helper。
+`internal/command/close/close.go` —— `Result` 类型 + `CloseAgent` / `CloseAllAgents`;`internal/command/close/format.go` —— `FormatResults` helper。
 
-### 4.3 `KillResult` 类型
+### 4.3 `Result` 类型
 
 ```go
-// KillResult is one row of the /close reply. It captures what
-// happened to a single pool entry during KillAll so the handler
-// can render a per-agent status instead of a bare count.
-type KillResult struct {
-    Agent       string  // "claude", "codex", ...
-    Cwd         string  // "/code/A"
-    BeforeState Status  // StatusRunning / Detached / Exited
-    Action      string  // "killed" / "stale-cleared"
-    Error       error   // nil for success
+// Result is one row of the /close reply. It captures what
+// happened to a single pool entry during CloseAgent /
+// CloseAllAgents so the handler can render a per-agent status
+// instead of a bare count.
+type Result struct {
+    Agent       string             // e.g. "claude", "codex"
+    Cwd         string             // e.g. "/code/A"
+    BeforeState chatsession.Status // StatusRunning / StatusDetached / StatusExited
+    Action      string             // "closed" | "stale-cleared" | "close-failed"
+    Error       error              // nil for success
 }
 ```
 
-### 4.4 `KillAll` 新签名
+### 4.4 `CloseAllAgents` 签名
 
 ```go
-// Old: func (cs *ChatSession) KillAll() error
-// New:
-func (cs *ChatSession) KillAll() ([]KillResult, error)
+func CloseAllAgents(c *Cmd) ([]Result, error)
+func CloseAgent(c *Cmd, agentName string) (Result, error)
 ```
 
-返回 `[]KillResult` 让 handler 知道每条 entry 的命运。`error` 仍保留(整体性错误,比如 registry 损坏)。
+返回 `[]Result` 让 handler 知道每条 entry 的命运。`error` 仍保留(整体性错误,比如 registry 损坏)。
 
 ### 4.5 实现
 
 ```go
-// KillAll kicks every AgentSession in the pool out of the running
-// state via each bridge's graceful Close() path. After all child
-// processes have exited, their persistent entries are deleted from
-// agent_sessions.json so the next spawn won't resume the dead
-// sessions. The InputBuffer is left alone — the user's queued
-// messages are not /close's concern.
-func (cs *ChatSession) KillAll() ([]KillResult, error) {
+// CloseAllAgents closes every AgentSession in the selected cwd via
+// each bridge's graceful Close() path. Each entry gets one Result
+// row so the handler can render a per-agent status instead of a
+// bare count. The pool itself stays intact — respawn can resume
+// each conversation. The queued messages are left alone.
+func CloseAllAgents(c *Cmd) ([]Result, error) {
     // 1. snapshot pool under read lock; don't mutate pool until
     //    every bridge has confirmed shutdown.
     cs.mu.RLock()
@@ -1926,7 +1926,7 @@ func (cs *ChatSession) KillAll() ([]KillResult, error) {
     }
     cs.mu.RUnlock()
 
-    results := make([]KillResult, 0, len(snapshot))
+    results := make([]Result, 0, len(snapshot))
 
     // 2. fan out graceful shutdown. Each bridge drives its own
     //    shutdown sequence (stdin EOF + SIGINT, RPC close, etc.)
@@ -1936,7 +1936,7 @@ func (cs *ChatSession) KillAll() ([]KillResult, error) {
     //    race with the bridge's local watchdog.
     var wg sync.WaitGroup
     for _, as := range snapshot {
-        result := KillResult{
+        result := Result{
             Agent:       as.Agent,
             Cwd:         as.Cwd,
             BeforeState: as.Status(),
@@ -1980,7 +1980,7 @@ func (cs *ChatSession) KillAll() ([]KillResult, error) {
     cs.mu.Unlock()
 
     // 5. delete persistent entries. Now safe: child is dead (or
-    //    was already dead), so any stale ResumeID would point to
+    //    was already dead), so any stale SessionID would point to
     //    a corpse.
     if cs.asFile != nil {
         for _, as := range snapshot {
@@ -2003,7 +2003,7 @@ func (cs *ChatSession) KillAll() ([]KillResult, error) {
 | `agent_sessions.json` | ❌ 进程死 *前* 删 | ✅ 进程死 *后* 删 |
 | `currentTurnUserMsgID` | ❌ `= ""` | ✅ `= ""`(同) |
 | `selectedAS` | ❌ `nil` | ✅ `nil`(同) |
-| 返回值 | `error` | `([]KillResult, error)` |
+| 返回值 | `error` | `([]Result, error)` |
 | 5s 整体 timeout | ❌ | ✅ 兜底 |
 
 ---
@@ -2014,8 +2014,8 @@ func (cs *ChatSession) KillAll() ([]KillResult, error) {
 
 | 触碰 | 不触碰 |
 |------|--------|
-| pool entry.ResumeID(Running / Detached / Exited 都支持) | 进程本身 |
-| `agent_sessions.json` entry.ResumeID 字段 | InputBuffer 排队消息 |
+| pool entry.SessionID(Running / Detached / Exited 都支持) | 进程本身 |
+| `agent_sessions.json` entry.SessionID 字段 | InputBuffer 排队消息 |
 | matched / reset 计数 | 进程启动 |
 
 ### 5.2 `ResetResult` 类型
@@ -2042,7 +2042,7 @@ func (cs *ChatSession) NewActiveAgentSessions(ctx context.Context, agentName str
 
 ### 5.4 dead/detached 分支改造
 
-`internal/chatsession/chatsession.go:850-855` 替换:
+`internal/chatsession/chatsession.go` 替换:
 
 ```go
 // 改动前
@@ -2058,11 +2058,11 @@ if as.Status() != StatusRunning {
 // 改动后
 if as.Status() != StatusRunning {
     // F-34 §6 Q-N4: do NOT trigger a lazy spawn for /new.
-    // But the entry's stale ResumeID must not be replayed on the
+    // But the entry's stale SessionID must not be replayed on the
     // next spawn — that would resurrect the dead session, defeating
-    // the user's /new intent. Clear ResumeID in-memory + persist
+    // the user's /new intent. Clear SessionID in-memory + persist
     // so the next LookupSelectedAgentSession spawns fresh.
-    as.SetResumeID("")
+    as.SetSessionID("")
     if cs.asFile != nil {
         _ = cs.asFile.Upsert(as.Entry())
     }
@@ -2077,13 +2077,13 @@ if as.Status() != StatusRunning {
 | 维度 | `/stop` | `/close` | `/new` |
 |------|---------|---------|--------|
 | **目的** | 中断当前 turn,bridge 继续 | 终止 bridge 进程,会话保留 | 重置对话上下文,下次 fresh |
-| **进程状态** | `Running → Running`(可能,结构化 abort) / `Running → Exited`(可能,SIGINT) | `Running → Exited`(graceful) | `Running → Running`(in-place reset) / `Exited/Detached → Exited/Detached`(只清 ResumeID) |
+| **进程状态** | `Running → Running`(可能,结构化 abort) / `Running → Exited`(可能,SIGINT) | `Running → Exited`(graceful) | `Running → Running`(in-place reset) / `Exited/Detached → Exited/Detached`(只清 SessionID) |
 | **是否 spawn** | ❌ 永不 spawn | ❌ 永不 spawn | ❌ 永不 spawn |
 | **InputBuffer** | ✅ 保留(用户消息) | ✅ 保留(用户消息) | ❌ 清掉(旧对话的一部分) |
 | **AgentSession pool entry** | 保留(`Handle` 还在) | 保留(`Handle` 失效,sessionID 还在) | 保留 |
-| `agent_sessions.json` | 不动 | entry 保留(下次 spawn 用 `--resume <id>` 续上) | entry.ResumeID 清空(entry 保留) |
+| `agent_sessions.json` | 不动 | entry 保留(下次 spawn 用 `--resume <id>` 续上) | entry.SessionID 清空(entry 保留) |
 | `currentTurnUserMsgID` | 不动 | 不动 | 不动 |
-| **下次 spawn** | 同 AS,继续 | 同 AS ID,`--resume <id>` 续上 | fresh(无 ResumeID) |
+| **下次 spawn** | 同 AS,继续 | 同 AS ID,`--resume <id>` 续上 | fresh(无 SessionID) |
 | **bridge 调用** | `as.Stop(ctx)` | `as.Close()`(graceful) | `as.New(ctx, spawner)`(in-place);dead 分支 0 bridge 调用 |
 | **强杀兜底** | N/A | bridge 内部 2s 后 SIGKILL | N/A |
 
@@ -2152,8 +2152,8 @@ Reset 3 session(s):
 **全部死**(纯标记 fresh):
 ```
 Marked 2 session(s) fresh for next spawn:
-  ✓ claude @ /code/A — already exited, ResumeID cleared
-  ✓ codex @ /code/B — already exited, ResumeID cleared
+  ✓ claude @ /code/A — already exited, SessionID cleared
+  ✓ codex @ /code/B — already exited, SessionID cleared
 ```
 
 **部分失败**(bridge.New 出错):
@@ -2202,17 +2202,17 @@ if len(lines) > maxResultLines {
 }
 ```
 
-### 6.6 `FormatKillResults` / `FormatResetResults` helper
+### 6.6 `close.FormatResults` / `newcmd.FormatResetResults` helper
 
-放在 `internal/chatsession/chatsession.go` 末尾,handler 调用即可:
+分别在 `internal/command/close/format.go` 与 `internal/command/newcmd/format.go`,handler 调用即可:
 
 ```go
-// FormatKillResults produces a human-readable summary suitable for
-// channel.Send. Caller passes the results slice from KillAll;
-// FormatKillResults handles the per-state branching.
-func FormatKillResults(results []KillResult) string {
+// FormatResults produces a human-readable summary suitable for
+// channel.Send. Caller passes the results slice from CloseAllAgents;
+// FormatResults handles the per-state branching.
+func FormatResults(results []Result) string {
     if len(results) == 0 {
-        return "No active agents to kill."
+        return "No active agents to close."
     }
 
     var killed, stale, failed int
@@ -2273,7 +2273,7 @@ func buildKillHeader(killed, stale, failed int) string {
 - [ ] `/close` 调 `as.Close()` 而不是 `cs.pool = make(...)` 直接丢指针
 - [ ] `/close` 删 `agent_sessions.json` entry 必须在 bridge 关闭 *之后*
 - [ ] `/close` 整体 timeout 5s 是兜底,bridge 内部 2s 已 SIGKILL,几乎不触发
-- [ ] `/new` 对 dead/detached 也清 `ResumeID`,不 silently skip
+- [ ] `/new` 对 dead/detached 也清 `SessionID`,不 silently skip
 - [ ] `/new` 不 spawn 任何 dead agent
 - [ ] `/new` **不动** `currentTurnUserMsgID`(下条消息自然重新锚)
 - [ ] `/new` 仍然 `InputBuffer.Clear()`(F-34 review #1 不变)
@@ -2293,7 +2293,7 @@ func buildKillHeader(killed, stale, failed int) string {
 | bridge.Close 内部 SIGKILL 兜底触发 | `Stopped N...` (outcome 一样,error msg 由 bridge log) |
 | bridge 整体 timeout 5s | `log.Warn` + 继续清 disk,返回 best-effort 结果 |
 | 某 entry bridge.Close() 报错 | 单行 `✗ ... — error: <msg>`;其他 entry 继续 |
-| registry 写失败 | `KillAll` 返回整体 error,handler `reply "Kill failed: ..."` |
+| registry 写失败 | `CloseAllAgents` 返回整体 error,handler `reply "Kill failed: ..."` |
 
 ### 8.2 `/new`
 
@@ -2301,7 +2301,7 @@ func buildKillHeader(killed, stale, failed int) string {
 |------|------|
 | pool 空 | `Matched 0 sessions.`(沿用 F-34) |
 | 全部 Running,bridge.New OK | `Reset N session(s):` + 每行 `✓ reset in-place` |
-| 全部 dead | `Marked N session(s) fresh for next spawn:` + 每行 `✓ already exited, ResumeID cleared` |
+| 全部 dead | `Marked N session(s) fresh for next spawn:` + 每行 `✓ already exited, SessionID cleared` |
 | 混合 | `Reset N session(s):` + mixed |
 | bridge.New报错 | 单行 `✗ ... — bridge reset: <error>`;其他 entry 继续 |
 | InputBuffer 已空 | `Clear()` no-op,handler 仍 assert |
@@ -2310,7 +2310,7 @@ func buildKillHeader(killed, stale, failed int) string {
 
 ## 9. 测试计划
 
-### 9.1 `internal/chatsession/kill_test.go`(新建)
+### 9.1 `internal/command/close/commands_test.go`(新建)
 
 ```
 TestKillAll_GracefulShutdown
@@ -2347,7 +2347,7 @@ TestKillAll_OnlyExitedEntries
   - 调 KillAll
   - 断言:每条 result.Action == "stale-cleared"
   - 断言:无 bridge.Close 调用
-  - 断言:FormatKillResults 输出 "Cleared N stale agent session(s)"
+  - 断言:close.FormatResults 输出 "Cleared N stale agent session(s)"
 
 TestKillAll_ResultsSortedStable
   - 3 个 entry,(success, failure, success) 顺序构造
@@ -2358,15 +2358,15 @@ TestKillAll_ResultsSortedStable
 ### 9.2 `internal/chatsession/new_test.go`(扩展)
 
 ```
-TestNewActiveAgentSessions_ClearsResumeIDForExited
-  - pool 有 (claude, /A) Status=Exited,ResumeID="old-id"
+TestNewActiveAgentSessions_ClearsSessionIDForExited
+  - pool 有 (claude, /A) Status=Exited,SessionID="old-id"
   - 调 NewActiveAgentSessions
-  - 断言:as.ResumeID() == ""
-  - 断言:agent_sessions.json entry.ResumeID == ""
+  - 断言:as.SessionID() == ""
+  - 断言:agent_sessions.json entry.SessionID == ""
   - 断言:matched == 1, reset == 1
   - 断言:Handle() == nil(没动进程)
 
-TestNewActiveAgentSessions_ClearsResumeIDForDetached
+TestNewActiveAgentSessions_ClearsSessionIDForDetached
   - 同上,Status=Detached(daemon restart 后状态)
 
 TestNewActiveAgentSessions_DoesNotSpawn
@@ -2386,30 +2386,30 @@ TestNewActiveAgentSessions_BufferClearedEvenIfMatched0
   - 断言:inputBuffer.Len() == 0
 ```
 
-### 9.3 `internal/chatsession/format_test.go`(新建)
+### 9.3 `internal/command/newcmd/commands_test.go`(新建)
 
 ```
-TestFormatKillResults_Empty
-  - 输入:[]KillResult{}
+TestFormatResults_Empty
+  - 输入:[]close.Result{}
   - 输出:"No active agents to kill."
 
-TestFormatKillResults_AllKilled
+TestFormatResults_AllKilled
   - 2 个 KILLED
   - 输出:含 "Stopped 2" + 2 行 ✓
 
-TestFormatKillResults_AllStale
+TestFormatResults_AllStale
   - 2 个 STALE-CLEARED
   - 输出:含 "Cleared 2 stale" + 2 行 •
 
-TestFormatKillResults_Mixed
+TestFormatResults_Mixed
   - 1 killed + 1 stale + 1 failed
   - 输出:含 "Stopped 1... 1 stale entry cleared, 1 failed:" + 3 行
 
-TestFormatKillResults_SortedSuccessFirst
+TestFormatResults_SortedSuccessFirst
   - 手动构造结果,failure 在 success 前
   - 输出:success 排在前面(✓ ... ✓ ... ✗ ...)
 
-TestFormatKillResults_LongListTruncated
+TestFormatResults_LongListTruncated
   - 25 个 entry
   - 输出:首 20 行 + "  ... and 5 more"
 
@@ -2442,7 +2442,7 @@ TestFormatResetResults_AllDead
 | D-2 | `/close` 是否清 `currentTurnUserMsgID` | **是**。下一条消息该重新锚。 |
 | D-3 | `/close` 是否做 SIGKILL 兜底 | **不**。bridge 内部 2s 后已 SIGKILL,nightme 端做会和 bridge 抢信号。 |
 | D-4 | `/close` 整体 timeout | **5s**。比 bridge 内部 2s 多一倍,留 SIGKILL 余量。 |
-| D-5 | `/new` 是否 spawn dead agent | **否**。只清 ResumeID。 |
+| D-5 | `/new` 是否 spawn dead agent | **否**。只清 SessionID。 |
 | D-6 | `/new` 是否清 `currentTurnUserMsgID` | **否**。下条消息自然重新锚。 |
 | D-7 | `/new` 是否清 InputBuffer | **是**。沿用 F-34 review #1。 |
 | D-8 | `/new` 对 dead entry 是否静默 | **否**。返回 per-entry result,带 `marked-fresh` Action。 |
@@ -2457,17 +2457,17 @@ TestFormatResetResults_AllDead
 
 ### 12.1 `internal/chatsession/chatsession.go`
 
-- [ ] 新增 `KillResult` struct(Agent, Cwd, BeforeState, Action, Error)
+- [ ] 新增 `close.Result` struct(Agent, Cwd, BeforeState, Action, Error)
 - [ ] 新增 `ResetResult` struct(Agent, Cwd, BeforeState, Action, Error)
-- [ ] `KillAll` 改签名 `() ([]KillResult, error)`,实现 graceful + 5s timeout + 后置删 disk
-- [ ] `NewActiveAgentSessions` 改签名 `(...) (matched, reset int, results []ResetResult, firstErr error)`,dead/detached 分支清 ResumeID + 持久化
-- [ ] 新增 `FormatKillResults` helper
+- [ ] `CloseAllAgents` 改签名 `() ([]close.Result, error)`,实现 graceful + 5s timeout + 后置删 disk
+- [ ] `NewActiveAgentSessions` 改签名 `(...) (matched, reset int, results []ResetResult, firstErr error)`,dead/detached 分支清 SessionID + 持久化
+- [ ] 新增 `close.FormatResults` helper
 - [ ] 新增 `FormatResetResults` helper
 - [ ] 新增 `killGraceTotal = 5 * time.Second` 常量
 
 ### 12.2 `internal/command/close/close.go`
 
-- [ ] `Handle` 改用 `FormatKillResults`（位于 `internal/command/close/format.go`）
+- [ ] `Handle` 改用 `close.FormatResults`（位于 `internal/command/close/format.go`）
 
 ### 12.3 `internal/command/newcmd/cmd.go`
 
@@ -2475,9 +2475,9 @@ TestFormatResetResults_AllDead
 
 ### 12.4 测试
 
-- [ ] `internal/chatsession/kill_test.go`(新建,7 个 case)
+- [ ] `internal/command/close/commands_test.go`(新建,7 个 case)
 - [ ] `internal/chatsession/new_test.go`(扩展,5 个新 case)
-- [ ] `internal/chatsession/format_test.go`(新建,8 个 case)
+- [ ] `internal/command/newcmd/commands_test.go`(新建,8 个 case)
 
 ### 12.5 文档
 
@@ -2502,9 +2502,9 @@ TestFormatResetResults_AllDead
 | 风险 | 缓解 |
 |------|------|
 | Bridge `Close()` hang 超过 5s 导致 `/close` UX 慢 | `killGraceTotal` 可调;bridge 内部 2s 已 SIGKILL |
-| `SetResumeID("")` + 持久化 race(其它 goroutine 同时 `LookupSelectedAgentSession`) | entry 复用已有 `resumeIDMu`,Upsert 是 atomic write |
+| `SetSessionID("")` + 持久化 race(其它 goroutine 同时 `LookupSelectedAgentSession`) | entry 复用已有 `resumeIDMu`,Upsert 是 atomic write |
 | `/close` 保留 InputBuffer 但用户期望清 | 设计决策(D-1);若用户反馈,加 `/clear-buffer` 单独命令 |
-| `agent_sessions.json` 没 ResumeID 字段 | GO JSON 容忍,不破坏现有数据 |
+| `agent_sessions.json` 没 SessionID 字段 | GO JSON 容忍,不破坏现有数据 |
 
 **回滚方案**:改动都在 `internal/chatsession/` 内部,git revert 那个 commit 即可,不涉及 schema 或 wire format。
 

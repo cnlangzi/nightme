@@ -115,8 +115,7 @@ func TestResolvePath_UNC(t *testing.T) {
 // TestIsWindowsDriveRel: REMOVED in F-PATHUTIL-001. The helper
 // lived here to drive resolvePath's drive-relative rejection;
 // after F-PATHUTIL-001 it lives in internal/pathutil/
-// path_windows.go::isWindowsDriveRel (tested in
-// internal/pathutil/path_windows_test.go::TestIsWindowsDriveRel
+// path_windows.go::isWindowsDriveRel (tested in internal/pathutil/path_windows_test.go::TestIsWindowsDriveRel
 // with the same exhaustive table). Keeping it here would
 // require a parallel implementation; the test is in pathutil now.
 

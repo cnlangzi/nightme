@@ -1,6 +1,6 @@
 # F-VERSION-CHECK: REPL startup version-check + `nightme update`
 
-> **Status**: shipped (download/replace is still a stub)
+> **Status**: shipped
 
 > **Scope**: version-check is wired into `runREPL` (bare `nightme`
 > invocation). Subcommands and the daemon child do NOT trigger
@@ -11,23 +11,22 @@
 
 ## 1. Description
 
-Two new entry points give operators a way to know they are on
+Two entry points give operators a way to know they are on
 an out-of-date `nightme`:
 
 1. **REPL startup prompt.** When the user runs bare `nightme`,
    the REPL does one throttled lookup via
    `internal/updater.LookupLatestTag` (nightme.dev release
-   feed first, GitHub `/repos/.../releases/latest` fallback).
+   feed first, GitHub `/releases/latest` fallback).
    If a newer release is available it prints a single `y/N`
    prompt; any answer other than `y` (including EOF / Ctrl-C /
    read error) ends the prompt immediately and falls through
    to the interactive loop. The prompt runs at most once per
    startup.
-2. **`nightme update` subcommand.** An always-live check with
-   no caching. Same comparison logic; prints current vs
-   latest plus manual install instructions. Replaces
-   nothing in this round — it is the placeholder for the
-   future download/replace flow.
+2. **`nightme update` subcommand.** One verb that walks the
+   whole self-update flow: check → download → verify → install →
+   restart the daemon. It runs the stages unconditionally and
+   prints what each of them did.
 
 Both paths share `internal/version.Checker`, so the cache
 file format, error policy, and semver comparison are defined
@@ -62,8 +61,10 @@ the package comments of `internal/version/check.go` and
    etc. would feel noisy if every invocation paused for a
    network round-trip. Only the bare-`nightme` REPL path
    prompts.
-5. **`nightme update` is cache-bypass.** Explicit "update me
-   now" should always be a live check.
+5. **`nightme update` shares the cache.** The CLI builds the
+   same `version.Checker` over the same `<DataDir>/version-check.json`,
+   so a run right after a REPL start does not hit the release
+   feed a second time.
 
 ---
 
@@ -139,30 +140,63 @@ editing / ↑/↓ history on that one host. Restoring those needs a
 Win32-native editor (ReadConsoleInputW +
 SetConsoleCursorPosition, no ANSI), tracked as follow-up work.
 
-### 3.3 New subcommand
+### 3.3 `nightme update`
 
 ```
-nightme update [--yes]
+nightme update [--quiet] [--no-install] [--no-restart] [--yes]
 ```
 
-Prints:
+| Flag | Effect |
+|---|---|
+| `--quiet` / `-q` | Suppress the download progress bar (SHA256 is still verified). |
+| `--no-install` | Stop after the download; do not swap the binary. |
+| `--no-restart` | Skip the daemon restart after the install. |
+| `--yes` / `-y` | Skip the y/N confirmations (CI / scripted runs). |
+| `--repl` | Skip the post-install exec: the process stays alive and prints a hint to re-enter `nightme`. |
+
+The command walks three stages:
+
+1. **check** — `version.Checker` resolves the latest tag. Up to
+   date → it prints the current version and exits.
+2. **download** — `updater.DownloadTag` fetches
+   `SHA256SUMS.txt` and the release asset (GitHub first,
+   nightme.dev mirror as fallback), verifies the asset's SHA256
+   against the sums file and extracts the binary into
+   `<DataDir>/updates/<ver>/`.
+3. **install** — `updater.Install` renames the running binary
+   aside (`<target>.old`), copies the new one into place, and the
+   daemon is restarted. The command then re-execs the new binary
+   with the user's original argv. The REPL startup prompt does the
+   same: it runs before readline takes the TTY, so the exec cannot
+   lose the shell's state. `--repl` suppresses the exec and prints
+   a hint instead.
+
+Output:
 
 ```
-Current version: 0.1.0
-Latest release:  0.2.0
-Status: a newer release is available.
+  ▲  Update available
+     0.1.0 → 0.2.0
+  ✓  Staged nightme_0.2.0_linux_amd64.tar.gz  sha256=1f0c…
+  ✓  installed /usr/local/bin/nightme
+     backup /usr/local/bin/nightme.old
+  →  restarting daemon…
+  ✓  daemon restarted
 
-Automatic self-update is not implemented yet. To upgrade:
-  go install github.com/cnlangzi/nightme/cmd/nightme@latest
-Or download a binary release from:
-  https://github.com/cnlangzi/nightme/releases/latest
+  ✓  Installed 0.2.0 — restarting into the new binary.
 ```
 
-When `Latest` is empty (version API unreachable), the
-"Latest release" line reads `(could not reach the version
-API)` and the warning goes to stderr. The install hint
-still prints — a user running `nightme update` mid-debug
-should not be blocked by an offline environment.
+When the build is already current the command prints:
+
+```
+  ✓  Already up to date
+     0.2.0
+```
+
+When the version API is unreachable the "no version info
+available" line goes to stderr and the command fails; the
+install hint of the REPL prompt is a different surface and is
+still printed there — a user running the startup prompt
+mid-debug should not be blocked by an offline environment.
 
 ---
 
@@ -173,27 +207,35 @@ should not be blocked by an offline environment.
 | API 200, version older        | Prompt + y/N, full flow                   |
 | API 200, version equal/newer   | Silent (no prompt)                        |
 | API 200, malformed JSON        | Silent (decode error logged)              |
-| API 200, no usable field       | Silent (no version key error logged)      |
+| API 200, no usable field       | Silent (empty `tag_name` treated as an error) |
 | API 403 / 429 (rate-limit)     | Silent (rate-limit error logged)          |
 | API 5xx                        | Silent (status error logged)              |
 | Network unreachable            | Silent (transport error logged)           |
 | Cache hit, fresh (<24h)        | Silent (no network call)                  |
 | Cache hit, stale, no network   | Use stale cache; prompt if it says outdated|
-| Reader returns "" (EOF)        | Silent + "Run \`nightme update\`…" hint   |
-| Reader returns read error      | Silent + "read error: …" line             |
-| User types "?" / empty / "n"   | Silent (no install hint printed)          |
-| User types "y" / "yes"         | Echo "y", print install instructions      |
+| Reader returns "" (EOF)        | Silent + "Run \`nightme update\` whenever you're ready." |
+| Reader returns read error      | Silent + "(read error: …)" line           |
+| User types "?" / empty / "n" at "Update now?" | Silent (no install hint printed) |
+| User types "y" / "yes" at "Update now?" | Download starts without a second prompt |
+| User types "n" at "Install now?" | The staged archive is kept; "Run \`nightme update\` later to install." is printed |
+| User types "y" / "yes" at "Install now?" | Install + daemon restart + re-exec |
 | Non-tty path (`runREPLWith`)  | Silent (version check skipped)             |
+
+The release feed is probed twice — nightme.dev first, GitHub as
+the fallback. A failure of the first source is not fatal as long
+as the second answers.
 
 ---
 
 ## 5. Cache file
 
-`~/.nightme/version-check.json`:
+`<DataDir>/version-check.json` (the default data dir is
+`~/.nightme`):
 
 ```json
 {
-  "latest_version": "0.2.0",
+  "latest": "v0.2.0",
+  "source": "nightme.dev",
   "checked_at": "2026-08-17T00:12:34Z"
 }
 ```
@@ -207,36 +249,30 @@ for a cache.
 
 ---
 
-## 6. Follow-up work (not in this round)
+## 6. Follow-up work
 
-The actual download / verify / replace path for
-`nightme update` is the next commit. Open questions:
-
-- Asset selection: per-OS / per-arch matching against the
-  GitHub release assets (the install instructions still
-  point at github.com/cnlangzi/nightme/releases/latest as
-  the source of truth), or fall back to `go install`.
-- Verification: SHA256 of the asset, optional minisign
-  signature check against a pinned key.
-- Replace: signal the running daemon to exit, swap the
-  binary on disk, exec the new one. The daemon child
-  pattern (`_daemon` subcommand) means we do NOT have to
-  coordinate a graceful shutdown of a live process — the
-  update can simply exit and let the user restart. But
-  that's a UX call worth a follow-up doc.
-- Background polling: a goroutine in `runtime.Runner` that
-  re-checks every N hours and writes to a status struct the
-  REPL can surface. Out of scope until the manual path
-  proves itself.
+- **Signature verification**: the asset is verified against the
+  release's `SHA256SUMS.txt`, and a missing entry for our asset
+  is a hard error. A minisign signature check against a pinned
+  key is not implemented.
+- **Background polling**: there is no polling goroutine in the
+  runtime. The system tray checks the version in the background
+  when its menu is built and shows the "Download Update" row
+  only when a newer release exists; it shares the same 24h cache
+  as the REPL prompt.
+- **The daemon's own binary**: `nightme update` replaces the
+  binary of the process that runs it and restarts the daemon. A
+  daemon that was started from a different binary than the one
+  the user upgrades is out of scope.
 
 ---
 
 ## 7. Test coverage
 
-- `internal/version/check_test.go` (8 cases) — semver,
+- `internal/version/check_test.go` (15 cases) — semver,
   cache hit/miss, network failure, rate limit, fetch decode,
   `NewChecker` wiring.
-- `cmd/nightme/repl_update_test.go` (10 cases) — every
+- `cmd/nightme/repl_update_test.go` (17 cases) — every
   row of the failure-mode table above plus the
   "no re-prompt on garbage input" guard.
 - Existing `TestREPL_*` suite (9 cases) — unchanged; `runREPLWith`

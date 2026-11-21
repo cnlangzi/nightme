@@ -136,8 +136,7 @@ func (f *Provider) Name() string { return "feishu" }
 // Login does NOT itself send the greeting DM — that is the
 // orchestrator's job. Login only captures the owner ID + builds
 // the lark client so Greet is ready to fire; the orchestrator
-// calls Greet AFTER config.SaveDefault has succeeded (see
-// cmd/nightme/login.go).
+// calls Greet AFTER config.SaveDefault has succeeded (see cmd/nightme/login.go).
 func (f *Provider) Login(ctx context.Context) (*login.Credentials, error) {
 	opts := &registration.Options{
 		AppID:      f.opts.ExistingAppID,
@@ -438,10 +437,10 @@ func DefaultAppPreset() *registration.AppPreset {
 //
 //	im.message.receive_v1              the canonical message-receive event
 //
-// The reaction *event* subscription is intentionally absent — nightme
-// does not design user-driven reactions as input (see
-// docs/feat/F-25-message-receipt.md), so the dispatcher swallows
-// im.message.reaction.created_v1 events.
+// The reaction *event* subscription is intentionally absent — the runtime
+// reaction router is fed by the reactions carried on the message payload
+// (SPEC §2.7), not by a separate reaction event subscription, so the
+// dispatcher swallows im.message.reaction.created_v1 events.
 func DefaultAddons() *registration.AppAddons {
 	preset := false
 	return &registration.AppAddons{

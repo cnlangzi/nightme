@@ -5,7 +5,7 @@
 // the PTY as EventAgentText and the session manager drives them.
 //
 // Lives in bridge/pty/ (not in a separate agent package) so the
-// whole PTY story is one tree. See docs/feat/F-21-agent-modes.md §5.3.
+// whole PTY story is one tree. See docs/bridge/cli-transport.md.
 //
 // Agent is BOTH the template (registered with agent.Builtins) and
 // the live handle (returned by Start). The template half is set once

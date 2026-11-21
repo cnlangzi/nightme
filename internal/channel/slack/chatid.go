@@ -19,8 +19,7 @@ const chatIDPrefix = "sl_"
 // adapter state and never provokes Slack into creating a resource.
 // Telegram violated this once by auto-creating a sentinel topic,
 // which made the chat id depend on whether nightme had run before;
-// the whole path had to be rewritten (see
-// internal/channel/telegram/adapter.go:538-543).
+// the whole path had to be rewritten (see internal/channel/telegram/adapter.go).
 func sessionChatID(teamID, channelID, threadTS string) string {
 	if teamID == "" || channelID == "" {
 		return ""

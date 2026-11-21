@@ -4,7 +4,7 @@
 // wrapper was deleted — the runtime now calls ch.OnPromptEnded
 // directly inside the subscriber closure).
 //
-// These tests close coverage gaps that cmd/nightme/run_test.go
+// These tests close coverage gaps that the cmd/nightme wiring
 // left implicit: every exported constructor / dispatcher
 // path now has at least one regression guard at the runtime
 // layer, decoupled from the full Runner.Run lifecycle.

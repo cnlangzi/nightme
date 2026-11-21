@@ -30,7 +30,7 @@
 // `defaultPromptHookLocked`); read access from `runReadPump` is also
 // under `ChatSession.mu`. This avoids introducing a second lock on
 // AgentSession at the cost of a small coupling — accepted as the
-// simpler path for Phase 0 (see docs/feat/message_lifecycle.md §4.2
+// simpler path for Phase 0 (see docs/feat/F-53-message-prompt-lifecycle.md §4.2
 // "存储归属").
 package agentsession
 
@@ -60,7 +60,7 @@ type Prompt struct {
 	// if the user /use's mid-Prompt, the old AS still holds this
 	// Prompt as `currentPrompt` until its `endPrompt` fires
 	// (ProcessDied in a future PR; currently left dangling —
-	// see docs/feat/message_lifecycle.md §8 out-of-scope).
+	// see docs/feat/F-53-message-prompt-lifecycle.md §8 out-of-scope).
 	AgentSessionID string
 
 	// Messages is the ordered list of Message values merged into

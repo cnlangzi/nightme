@@ -13,7 +13,7 @@
 //
 // The Mode selector (ACP / SDK / PTY) lets the Bridge pick a backend
 // without leaking protocol details to Session Manager. See
-// docs/feat/F-09-agent-abstraction.md and F-21-agent-modes.md.
+// docs/feat/F-09-agent-abstraction.md and docs/bridge/cli-transport.md.
 package agent
 
 import (
@@ -49,8 +49,7 @@ const (
 	// CLI with --input-format stream-json --output-format stream-json
 	// and parses line-delimited JSON events from stdout. Provides
 	// structured events (text, tool_use, tool_result, AskUserQuestion,
-	// result) without requiring an ACP / SDK implementation. See
-	// docs/feat/F-24-claudecode-bridge.md.
+	// result) without requiring an ACP / SDK implementation. See docs/bridge/claude.md.
 	ModeJSONIO
 )
 
@@ -332,7 +331,7 @@ type AgentToolEndEvent struct {
 // aborted ones. AgentResultEvent.Usage remains populated for callers
 // that already read from the result-bearing event, but the runtime's
 // accumulation path reads from Done.Usage (single source of truth).
-// See docs/feat/F-52-pi-stream-aggregation.md.
+// See docs/bridge/pi.md.
 type AgentDoneEvent struct {
 	// ExitCode follows Unix convention: 0 = success, non-zero = error.
 	// -1 indicates an abnormal termination (e.g. PTY EOF without a
@@ -344,8 +343,7 @@ type AgentDoneEvent struct {
 	// default" (process exit for one-shot bridges). Bridges that
 	// multiplex turns over a single process set Reason to
 	// "settled" (or another agreed value) so callers can tell a
-	// turn-end EventAgentDone from a process-end one. See
-	// docs/feat/F-32-pi-rpc-bridge.md §3.
+	// turn-end EventAgentDone from a process-end one. See docs/bridge/pi.md §3.
 	Reason string
 
 	// Usage is the per-turn token usage observed on the same wire
@@ -427,16 +425,15 @@ type AgentResultEvent struct {
 // the field from UsageInfo as dead (0 read / 0 write); F-55
 // re-introduced it (UsageInfo.ContextWindow below) so the
 // channel footer can render `(window)` alongside the percentage.
-// See docs/feat/F-55-footer-show-context-window.md for the
+// See docs/channel/feishu-rendering.md §A13 for the
 // re-introduction rationale.
 //
 // i.e. exact wire fields divided by API-reported window — no
 // client-side model table needed. The runtime does NOT recompute
 // or overwrite these; the channel footer renders them verbatim
 // as the "X% (window)" segment. See
-// docs/feat/F-45-session-footer.md §1.5 / §1.6,
-// docs/feat/F-54-pi-contextwindow-from-get-state.md, and
-// docs/feat/F-55-footer-show-context-window.md.
+// docs/channel/feishu-rendering.md §A10 / §A13 and
+// docs/bridge/pi.md §A3.
 type UsageInfo struct {
 	// InputTokens is the non-cached input token count.
 	InputTokens int

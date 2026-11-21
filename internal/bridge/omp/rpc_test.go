@@ -1,6 +1,5 @@
 // Unit tests for the JSONL framing + request/response
-// correlation layer. These tests mirror the pi bridge's
-// rpc_test.go.
+// correlation layer. These tests mirror the pi bridge's rpc_test.go.
 
 package omp
 

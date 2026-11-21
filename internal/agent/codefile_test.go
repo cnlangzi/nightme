@@ -30,7 +30,7 @@ func TestIsCodePath(t *testing.T) {
 
 	notCode := []string{
 		"README.md",
-		"docs/design.md",
+		"docs/SPEC.md",
 		"notes.txt",
 		"data.json",
 		"config.yaml",
@@ -50,7 +50,7 @@ func TestIsCodePath(t *testing.T) {
 // the paths it was given — the simplify group's file list follows the
 // changeset, not the table.
 func TestCodeFiles_PreservesOrder(t *testing.T) {
-	got := codeFiles([]string{"a.go", "README.md", "b.ts", "docs/x.md", "Makefile"})
+	got := codeFiles([]string{"a.go", "README.md", "b.ts", "docs/README.md", "Makefile"})
 	want := []string{"a.go", "b.ts", "Makefile"}
 	if len(got) != len(want) {
 		t.Fatalf("codeFiles = %v, want %v", got, want)
@@ -66,7 +66,7 @@ func TestCodeFiles_PreservesOrder(t *testing.T) {
 // the changeset holds no code file — the caller uses that to skip the
 // simplify group.
 func TestCodeFiles_NoCodeFile(t *testing.T) {
-	if got := codeFiles([]string{"README.md", "docs/x.md"}); len(got) != 0 {
+	if got := codeFiles([]string{"README.md", "docs/README.md"}); len(got) != 0 {
 		t.Errorf("codeFiles = %v, want none", got)
 	}
 }

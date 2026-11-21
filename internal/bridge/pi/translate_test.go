@@ -1,7 +1,7 @@
 // Translation table tests for the Pi event -> agent.AgentEvent
 // mapper. Each table-driven case feeds one raw event JSON into the
 // translator and asserts the resulting AgentEvent stream matches
-// the contract documented in docs/feat/F-32-pi-rpc-bridge.md §2.3.
+// the contract documented in docs/bridge/pi.md §2.3.
 
 package pi
 
@@ -1173,7 +1173,7 @@ func TestTranslate_StateUpdate_NoSessionID_Ignored(t *testing.T) {
 // These drive whole wire sequences rather than single events,
 // because the F-52 invariants ("one EventAgentResult per turn", "no
 // duplicated text") are only observable across a turn.
-// See docs/feat/F-52-pi-stream-aggregation.md.
+// See docs/bridge/pi.md.
 // ---------------------------------------------------------------
 
 // TestTranslate_SimpleTurn_SingleResult is the regression lock for

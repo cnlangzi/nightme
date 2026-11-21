@@ -2,14 +2,14 @@
 
 > **Status**: 已落地 M2 — 本文档是**活文档**,包含实测踩坑 + 实战经验
 > **Scope**: `internal/bridge/codex/` — nightme 侧的 codex CLI 适配器
-> **设计稿 / 调研**: [wip/codex.md](../../wip/codex.md)
+> **设计稿 / 调研**: 本文即 codex bridge 的设计定稿(实测踩坑 + 实战经验)
 > **姊妹文档**:
 > - [docs/bridge/claude.md](./claude.md) — EventDone 不变量、生产踩坑
 > - [docs/bridge/pi.md](./pi.md) — JSON-IO 模板 + F-52 粒度契约
-> - [F-runtime §Agent 注册表](../feat/F-runtime.md) — 注册表
+> - [docs/primary-agent-detection.md](../primary-agent-detection.md) — agent 注册表与优先级
 > - [F-32](../bridge/pi.md) — clone + 模板+live 模式
 > - [F-52](../bridge/pi.md) — flush-at-tool-boundary
-> - [F-34](F-chat-session.md) — `/new` 在长生命周期 bridge 上
+> - [F-34](../feat/F-chat-session.md) — `/new` 在长生命周期 bridge 上
 
 ---
 
@@ -35,7 +35,7 @@ nightme ──stdio JSON-RPC 2.0──> codex app-server --listen stdio:// [-c m
 | 不做 | 理由 |
 |---|---|
 | **不走 ACP 中间层** | `@agentclientprotocol/codex-acp` 内部也是 spawn `codex app-server`,加一层 Node shim 只增加启动延迟 + 压平流式事件(`item/started` vs `item/completed` 边界、`turn/completed.usage` 被 ACP 抹掉)。 |
-| **chat-session 单选 `app_server`** | cc-connect 在 `codex.go::StartSession` L466–504 用了二选一,默认 `exec`。我们走单选 `app_server`,因为 `exec` 与 nightme 的多 turn + 流式事件 + 审批 IPC 三条核心契约全部不兼容。one-shot(`/gtw commit` / `/gtw pr`)也走 `app_server`——见 §1.4。**用户临时降级 `codex` 命令 → 自动落 `ModePTY` 兜底**(`cmd/nightme/buildAgentRegistry`),不会失能。 |
+| **chat-session 单选 `app_server`** | cc-connect 在 `codex.go::StartSession` L466–504 用了二选一,默认 `exec`。我们走单选 `app_server`,因为 `exec` 与 nightme 的多 turn + 流式事件 + 审批 IPC 三条核心契约全部不兼容。one-shot(`/gtw commit` / `/gtw pr`)也走 `app_server`——见 §1.4。**用户临时降级 `codex` 命令 → 自动落 `ModePTY` 兜底**(`internal/agentregistry/agentregistry.go::Build`),不会失能。 |
 | **不做模型别名表** | `-c model=…` 直接透传,由用户在 `StartConfig.Args` / chat args 写明。 |
 
 **Telemetry**：spawn 时追加 `-c analytics.enabled=false`,关掉 codex 内建的 Statsig
@@ -206,23 +206,26 @@ go func() {
 
 | 通知 | 处理 | 产出 AgentEvent |
 |---|---|---|
-| `thread/started` | set threadId | — (`EventAgentReady` 已在 handshake 完成时合成) |
-| `turn/started` | mark `t.turn.active=true` | — |
-| `item/started` (agentMessage) | begin buffering | — |
+| `thread/started` | 回显 threadId / model，握手响应里已经拿到同样的值 | — (`EventAgentReady` 已在 handshake 完成时合成) |
+| `turn/started` | reset turn state（**不**置 active——空 turn 不产生 Result / Done）| — |
+| `item/started` (agentMessage) | 只是提示，正文不在这里落 | — |
+| `item/started` (commandExecution / fileChange / webSearch / mcpToolCall / dynamicToolCall) | 先 flush 已缓存的正文（F-52 边界），再开工具 | `EventAgentToolStart` |
 | `item/completed` (agentMessage) | 缓存 pendingMsg | — |
+| `item/completed` (commandExecution / fileChange / webSearch / mcpToolCall / dynamicToolCall) | 终态 + status（失败时挂 Err）| `EventAgentToolEnd` |
+| `item/completed` (reasoning) | 吐 `thinkBuf` 里攒好的 reasoning 正文 | `EventAgentThinking` |
+| `item/completed` (contextCompaction) | 发 sentinel 文本 | `EventAgentText{Text:"[context 已压缩]"}` |
 | `item/agentMessage/delta` ❌ opt-out | — | — |
-| `turn/completed` | flush + Result + Done + `onTurnEnd()` | `EventResult` + `EventDone{Reason:"settled"}` |
-| `turn/failed` | flush + Err + Done + `onTurnEnd()` | `EventResult` + `EventAgentError` + `EventDone{Reason:"failed"}` |
-| `thread/status/changed.idle` | idem­potent Done | `EventDone{Reason:"idle"}` + `onTurnEnd()`(无 turn/completed 时兜底) |
-| `item/commandExecution/outputDelta` | append to tool block | `EventToolUpdate` |
-| `item/commandExecution/completed` | 终态 + status | `EventToolEnd` |
-| `item/fileChange/outputDelta` | patch 字符累积 | `EventToolUpdate` |
-| `item/fileChange/completed` | 终态 + status | `EventToolEnd` |
-| `item/reasoning/summaryTextDelta` / `textDelta` | 拼 `Reasoning` 块,带 `[思考]` 前缀 | `EventToolUpdate`(reasoning 工具) |
+| `item/commandExecution/outputDelta` ❌ opt-out | — | — |
+| `item/fileChange/outputDelta` ❌ opt-out | — | — |
+| `item/reasoning/summaryTextDelta` / `textDelta` ❌ opt-out | — | — |
 | `item/plan/delta` ❌ opt-out | — | — |
-| `item/contextCompaction/completed` | 发 sentinel 文本 | `EventResult{Text:"…(context compacted)…"}` |
+| `turn/completed` | flush + Result + Done + `onTurnEnd()` | `EventAgentResult` + `EventAgentDone{Reason:"settled"}` |
+| `turn/completed` (status=interrupted) | 同上，Result 挂软 Err | `EventAgentResult{Err}` + `EventAgentDone{Reason:"interrupted"}` |
+| `turn/failed` | flush + Result(挂 Err) + Done + `onTurnEnd()` | `EventAgentResult{Err}` + `EventAgentDone{Reason:"settled"}` |
+| `thread/status/changed.idle` | 幂等 Done（无 turn/completed 时兜底）| `EventAgentResult` + `EventAgentDone{Reason:"settled"}` |
 | `thread/tokenUsage/updated`(codex ≥ 0.125) | overwrite `t.turn.lastUsage` | — (下一 turn/completed 时取用) |
-| `error` (顶层) | `EventAgentError` | `EventAgentError` |
+| `account/rateLimits/updated` | 只写 debug 日志（nightme 无 quota UI）| — |
+| `error` (顶层) | 附上 stderr tail | `EventAgentError` |
 
 ### 4.2 6 条 optOut 必须全发
 
@@ -418,7 +421,7 @@ func (s *session) emitWireError(err error) {
 
 ```text
 cmd/nightme/agents.go
-  └─ agent.Builtins.Register(codex.New("codex", "codex", nil))
+  └─ agent.Builtins.Register(codex.NewStarter("codex", "codex", nil))
 
 internal/bridge/codex/
   ├── protocol.go          wire 类型 + initialize/thread/turn/permission
@@ -429,7 +432,8 @@ internal/bridge/codex/
   │                        + detectBranch + handshakeTimeout + closeDrainTimeout
   │                        + eventBufferSize=40960 + permissionTimeout=5min
   │                        + emitWireError(§8 四件套)
-  ├── agent.go             *Agent(模板+live)/Start/Events/Send*/SendPermission/New/Close
+  ├── starter.go           spawn 配方(NewStarter)+ Info/Detect/Start/RunOnce/Review
+  ├── agent.go             driver(模板+live)/Events/SendBlocks/SendPermission/New/Close
   │                        + ErrTurnBusy + pendingTurnActive + onTurnEnd 接线
   ├── translate.go         envelope → AgentEvent,F-52 状态机
   │                        + pendingMsgs + flush-at-tool-boundary
@@ -438,14 +442,18 @@ internal/bridge/codex/
   ├── permissions.go       4 类 server-request + 5min 超时
   │                        + lastPendingID 写入与清除
   │                        + spawnApproval goroutine(s.ctx.Done 兜底)
-  ├── agent_test.go        SendPermission 路由 + 单元测试
+  ├── agent_test.go        Starter / Detect / image staging / SendPermission 路由
+  ├── agent_busy_guard_test.go  pendingTurnActive 的释放路径
+  ├── agent_interrupt_test.go    turn/interrupt 停机路径
   ├── permissions_test.go  approval 流 + permissionTimeout 压缩到 200ms
-  ├── protocol_test.go     initialize params / optOut 6 条覆盖
-  ├── rpc_test.go          JSON-RPC client(11 个测试,含并发 / failPending)
-  ├── session_test.go      detectBranch + argv + SessionConfig
+  ├── rpc_test.go          JSON-RPC client(8 个测试,含并发 / failPending)
+  ├── buffer_contract_test.go    events cap 40960 + blocking deliver 契约
+  ├── handshake_budget_test.go   handshakeTimeout 覆盖冷启动
+  ├── session_unix_test.go detectBranch + argv + SessionConfig
+  ├── session_startup_test.go    子进程启动即死时带退出码 + stderr tail
   ├── translate_test.go    F-52 状态机 + 2 路 usage + CompleteTurn fallback
-  ├── testhelpers_realcodex_test.go  skip 守卫(NIGHTME_CODEX_E2E_APPROVAL)
-  └── session_real_test.go 真实 codex CLI 的 e2e(FreshThread / ResumeThread / ApprovalFlow)
+  ├── testhelpers_test.go  skip 守卫(NIGHTME_REAL_CODEX)
+  └── session_real_unix_test.go 真实 codex CLI 的 e2e(FreshThread / ResumeThread / ApprovalFlow)
 ```
 
 ### 9.1 关键不变量在文件中的位置
@@ -454,7 +462,7 @@ internal/bridge/codex/
 |---|---|
 | `close(events)` 只在 lifecycle | `session.go::lifecycle()` |
 | `closeOnce.Do` 只包 close+cancel+stdinClose | `session.go::Close()` |
-| `onTurnEnd` 接线 | `agent.go::Start`(`newTranslator` 参数) |
+| `onTurnEnd` 接线 | `agent.go::newDriver`(`newTranslator` 参数) |
 | `lastPendingID` 写入 | `permissions.go::spawnApproval` |
 | `lastPendingID` 清除 | `permissions.go::decision goroutine` + `session.go::emitWireError` |
 | `failPending(ErrSessionClosed)` 三处 | `rpc.go::readPump EOF` + `session.go::emitWireError` + `session.go::lifecycle` |
@@ -469,7 +477,7 @@ internal/bridge/codex/
 | 层 | 跑法 | 不依赖 |
 |---|---|---|
 | 单元(50+) | `go test ./internal/bridge/codex/` 默认即跑 | 不需要 codex CLI |
-| Real-CLI e2e: FreshThread | 默认 skip,设 `NIGHTME_CODEX_REAL_CODEX=1` 跑 | 需要 `codex` 在 PATH |
+| Real-CLI e2e: FreshThread | 默认 skip,设 `NIGHTME_REAL_CODEX=1` 跑 | 需要 `codex` 在 PATH |
 | Real-CLI e2e: ResumeThread | 同上 | 同上 |
 | Real-CLI e2e: ApprovalFlow | `NIGHTME_CODEX_E2E_APPROVAL=1` 才跑(默认 skip) | 同上 + 需交互 |
 
@@ -507,19 +515,31 @@ go test ./internal/bridge/codex/ -count=1
 - `[codex] initialize ok` (userAgent)
 - `[codex] session handshake complete` (threadId/model)
 - `[codex] SendBlocks enter` (blocks/threadID) — 上线后保留,排查 turn race 极有用
-- `[codex] SendText enter` — 仅调试时开,SendText 即 SendBlocks 包装
 - `[codex] server request: unknown method` (回 method not found)
 - `[codex] item/tool/call: returning tool not available` (动态工具降级)
 - `codex: approval timed out, defaulting to decline` (5min 触底)
 
-### 11.2 events channel 满的反压兜底
+### 11.2 events channel 的反压语义
 
-`agent.deliver` 在 channel 满(cap=64)时:
+codex bridge 的 events channel cap 是 **40960**(`eventBufferSize`),跟 pi /
+claudecode / pty / acp 一致。投递是**阻塞**的:
 
-1. 主动丢这一条事件
-2. emit `EventAgentError{... dropped text}`
+```go
+// internal/bridge/codex/session.go::deliverEvent
+select {
+case s.events <- ev:      // 通道满 → producer 阻塞，等 consumer 排空
+case <-s.closed:          // session 已关 → 丢弃
+case <-s.exitDone:        // lifecycle 收完进程 → 丢弃
+}
+```
 
-这是**最后兜底**,正常情况下不应该发生。如果发生,说明 runtime readpump 比 bridge produce 慢,需要查 `Chatsession.PumpEvents` 是否在读。
+**没有 `default:` 分支,也不丢事件**——producer 会一直阻塞到 consumer 把队列排空。
+`buffer_contract_test.go` 把这条契约钉住:`TestEventsBufferSize_PinnedAt40960`、
+`TestDeliver_BlocksWhenConsumerLags_NoDrop`、`TestDeliver_UnblocksOnClose`、
+`TestDeliver_UnblocksOnExitDone`。
+
+consumer 长时间不读时 bridge 会卡在投递上(而不是静默丢内容);要查的是
+`internal/chatsession` 的 `PumpEvents` 是否在读。
 
 ### 11.3 daemon / runtime 注意
 
@@ -555,28 +575,29 @@ go test ./internal/bridge/codex/ -count=1
 | 第三方 provider config.toml | 独立 PR | F-XX |
 | `item/tool/call` 动态工具 | cc-connect 也只回 not available | 等 Codex 稳定再议 |
 | `account/rateLimits/updated` UI | nightme 无 quota UI | 待有 quota UI 再说 |
-| `internal/processkill` 抽提 | CC-connect proc_unix/proc_windows 端口 | 单独 PR |
-| `internal/redactdiag` stderr 红线 | openclaw-lark 模式 | 单独 PR |
+| 进程 kill 逻辑抽提到公共包 | 现在散在 `internal/proc` 与 `internal/procsweep` | 单独 PR |
+| stderr 脱敏红线 | 现在只有 `internal/agent/stderr_tail.go` 的环形缓冲，没有脱敏层 | 单独 PR |
 
 ---
 
-## 14. 回归测试清单(下一轮 review 时跑)
+## 14. 回归测试清单
 
-放在 `session_close_test.go`,被下面这些坑逼出来的:
-
-- [ ] `TestSession_CloseAfterStart_ReturnsWithin5s` — 启动 + Close 必须在 `closeDrainTimeout` 内返回
-- [ ] `TestSession_ConcurrentClose_OnlyOneNoHang` — 两次 Close 并发,都不死锁
-- [ ] `TestAgent_PendingTurnActive_NotClearedUntilTurnEnd` — 模拟 turn/start 返回后立刻 SendBlocks,验 ErrTurnBusy;发 turn/completed 后 SendBlocks 成功
-- [ ] `TestAgent_SendPermission_RoutesToMostRecentOnly` — 两个 pending approval,SendPermission("accept") 只解最近一个
-- [ ] `TestSession_EmitWireError_UnblocksPendingRequests` — 注入 wire error,验 pending RPC 立即收到 ErrSessionClosed
-- [x] `TestEventsBufferSize_PinnedAt40960` — events channel cap 锁定 40960(对齐 pi / claudecode / pty / acp)
-- [x] `TestDeliver_BlocksWhenConsumerLags_NoDrop` — consumer lag 时不 instant drop
-- [x] `TestDeliver_UnblocksOnClose` — Close() 解 blocking deliver()
-- [x] `TestDeliver_UnblocksOnExitDone` — lifecycle 解 blocking deliver()
-- [x] `TestAgent_PendingTurnActive_ReleasedOnImageStageError` — image stage 错误后 guard 释放
-- [x] `TestAgent_PendingTurnActive_ReleasedOnEmptyInput` — 全空 input 后 guard 释放
-- [x] `TestAgent_PendingTurnActive_ReleasedByOnTurnEndCallback` — 闭包捕获 live 而非模板
-- [ ] `TestDetect_AcceptsExistingBinary`(已实现):用 `codex --version` 替换 `exec.LookPath`,坏 binary 立即失败
+| 测试 | 文件 | 守住什么 |
+|---|---|---|
+| `TestEventsBufferSize_PinnedAt40960` | `internal/bridge/codex/buffer_contract_test.go` | events channel cap 锁定 40960(对齐 pi / claudecode / pty / acp) |
+| `TestDeliver_BlocksWhenConsumerLags_NoDrop` | `internal/bridge/codex/buffer_contract_test.go` | consumer lag 时不 instant drop |
+| `TestDeliver_UnblocksOnClose` | `internal/bridge/codex/buffer_contract_test.go` | Close() 解 blocking deliver() |
+| `TestDeliver_UnblocksOnExitDone` | `internal/bridge/codex/buffer_contract_test.go` | lifecycle 解 blocking deliver() |
+| `TestAgent_PendingTurnActive_ReleasedOnImageStageError` | `internal/bridge/codex/agent_busy_guard_test.go` | image stage 错误后 guard 释放 |
+| `TestAgent_PendingTurnActive_ReleasedOnEmptyInput` | `internal/bridge/codex/agent_busy_guard_test.go` | 全空 input 后 guard 释放 |
+| `TestAgent_PendingTurnActive_ReleasedByOnTurnEndCallback` | `internal/bridge/codex/agent_busy_guard_test.go` | 闭包捕获 live 而非模板 |
+| `TestDriver_SendBlocks_ReleasesGuardOnRPCError` | `internal/bridge/codex/agent_interrupt_test.go` | turn/start RPC 报错后 guard 释放 |
+| `TestDriver_Stop_CallsTurnInterrupt` | `internal/bridge/codex/agent_interrupt_test.go` | stop 走 `turn/interrupt` |
+| `TestTranslator_TurnCompletedInterrupted` | `internal/bridge/codex/agent_interrupt_test.go` | interrupted turn 的 Done reason |
+| `TestHandshakeTimeout_OutlastsColdStart` | `internal/bridge/codex/handshake_budget_test.go` | handshakeTimeout 覆盖冷启动预算 |
+| `TestStart_ChildDiesDuringStartup_ReportsExit` | `internal/bridge/codex/session_startup_test.go` | 子进程启动即死时带退出码 + stderr tail |
+| `TestDetect_AcceptsExistingBinary` | `internal/bridge/codex/agent_test.go` | binary 能解析时 Detect 不报错 |
+| `TestE2E_FreshThread` / `TestE2E_ResumeThread` / `TestE2E_ApprovalFlow` | `internal/bridge/codex/session_real_unix_test.go` | 真 codex CLI 的多 turn / resume / 审批 |
 
 ---
 
@@ -586,7 +607,7 @@ go test ./internal/bridge/codex/ -count=1
 |---|---|---|
 | `codex: approval timed out` 频繁触发 | 用户没看到审批 UI | 查 `ChatSession.PumpEvents` 是否在读 events |
 | `turn/start` 立刻报 `ErrSessionClosed` | 上一 turn 还没完又发新 turn | 检查 `pendingTurnActive` 释放路径(§5.2) |
-| events channel 满 + drop | runtime 没在读 | 查 `internal/chatsession` 的 `PumpEvents` |
+| bridge 卡在投递上(events channel 满) | runtime 没在读 | 查 `internal/chatsession` 的 `PumpEvents` |
 | usage 永远是 0 | codex 升级到 0.125+ | 检查是否注册了 `thread/tokenUsage/updated` 处理器(§4.3) |
 | test hang | 走了代理 | unset 代理变量(§10.3) |
 | 启动后立刻 `lifecycle exit` | stdin 漏接 / binary 错 | 看 `[codex] session started` 后有没有 `initialize ok`;有就 binary 错 |

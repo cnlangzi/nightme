@@ -115,8 +115,7 @@ func main() {
 	// crashing on every retry during the test.
 	var hits atomic.Int64
 	mux := http.NewServeMux()
-	// workspace.create — the post-spawn readiness probe (see
-	// internal/bridge/dsh/host/client.go::WaitForDSHReady).
+	// workspace.create — the post-spawn readiness probe (see internal/bridge/dsh/host/client.go::WaitForDSHReady).
 	// Must return a valid typert envelope with ok=true so the
 	// probe passes; otherwise spawnAndWire's 15s context times
 	// out and the test deadlocks waiting for the fake-dsh PID

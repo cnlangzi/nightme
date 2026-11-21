@@ -11,7 +11,7 @@ Usage / DurationMs / Subtype。
 跑完真机测试后,review 阶段发现 StatusBar 装配链路不顺,需要重做。
 **本文件就是这次重做的设计记录**。
 
-## 当前实现的问题
+## 被推翻的装配方式的问题
 
 ### OutboundMessage 已有字段
 
@@ -51,22 +51,20 @@ type UsageStatusBar struct { *UsageInfo }                       // 纯 dupe
 
 | 位置 | 调用方 | 行为 |
 |---|---|---|
-| `internal/statusbar/stamp.go:33` (`StampFromAS`) | `runtime/policy.go:100` + `eventbus.go:160` | 总是覆盖 |
-| `internal/statusbar/stamp.go:78` (`AttachIfMissing`) | `gateway/outbound/outbound.go:98, 103` | 跳过 if pre-filled |
+| `StampFromAS` | runtime 的 outbound policy + `internal/runtime/eventbus.go` | 总是覆盖 |
+| `AttachIfMissing` | `internal/gateway/outbound/outbound.go` 的 emit 路径 | 跳过 if pre-filled |
 | (直接字段) | (none) | 没有直接 set 的地方 |
 
 ### StampFromAS 的乱越界
 
 ```go
-// internal/statusbar/stamp.go
-func StampFromAS(out *OutboundMessage, s *AgentSession, deps Deps) {
+func StampFromAS(out *OutboundMessage, s *AgentSession) {
     out.StatusBar = Build(
         s.Agent,         // ← 来自 AgentSession
         s.Model(),       // ← 来自 AgentSession (内部 RLock)
         s.SessionID(),   // ← 来自 AgentSession (内部 RLock)
         s.Cwd,           // ← 来自 AgentSession ← 概念错位
         out.Usage,       // ← 来自 OutboundMessage
-        deps,
     )
 }
 ```
@@ -197,12 +195,8 @@ type OutboundMessage struct {
 | `StatusBar` | wrapper,字段都已在 OutboundMessage |
 | `AgentStatusBar` | 纯复制 out.{AgentName, Model, SessionID} |
 | `UsageStatusBar` | 纯包装 out.Usage |
-| `internal/statusbar/build.go` | 整个文件删 |
-| `internal/statusbar/stamp.go` | 整个文件删 |
-| `internal/statusbar/runtime.go` | 整个文件删 |
-| `internal/statusbar/*_test.go` | 跟着删 |
 
-**`internal/statusbar` 整个包消失**。
+`internal/statusbar` 包的 **stamping 层**(stamp / build / runtime helper)整个消失 —— 该包现在只做渲染,见文末「plan-D 重生」一节。
 
 ### 保留的
 
@@ -235,12 +229,12 @@ func (cs *ChatSession) GitStatus() *messages.GitStatus {
 
 // RefreshGitStatus 主动跑 git 状态 + pr lookup,刷新缓存。
 // 触发点:启动时、/gtw commit 前后、/gtw pr 前后。
-func (cs *ChatSession) RefreshGitStatus(ctx context.Context, deps statusbar.Deps) error {
+func (cs *ChatSession) RefreshGitStatus(ctx context.Context, deps GitStatusDeps) error {
     cwd := cs.SelectedCwd()
     snap, _ := deps.CollectGit(ctx, cwd)
     var pr *messages.PR
     if deps.LookupPR != nil {
-        pr = deps.LookupPR(cs.SelectedAgentSessionID())
+        pr = deps.LookupPR(cwd)
     }
     cs.gitStatusMu.Lock()
     cs.gitStatus = &messages.GitStatus{
@@ -323,8 +317,9 @@ return agentName, ""
 ### Renderer 改写
 
 ```go
-// internal/channel/feishu/usage_footer.go
-func formatStatusBarLines(msg *messages.OutboundMessage) []string {
+// internal/statusbar/statusbar.go
+func StatusBarLines(msg *messages.OutboundMessage) []string {
+    if msg == nil { return nil }
     var lines []string
 
     // Line 1: identity — 直接读 msg 字段
@@ -342,14 +337,15 @@ func formatStatusBarLines(msg *messages.OutboundMessage) []string {
         lines = append(lines, strings.Join(idParts, " "))
     }
 
-    // Line 2: usage — 直接读 msg.Usage
+    // Line 2: usage — 直接读 msg.Usage(💰:「 new / cache / out · X% (window) · $cost 」)
     if msg.Usage != nil {
-        lines = append(lines, formatUsageLine(msg.Usage))
+        usageParts := ... // tokens(新写 / 读缓存 / 输出)+ (window) + $cost
+        lines = append(lines, "💰:「 "+strings.Join(usageParts, " · ")+" 」")
     }
 
     // Line 3: git — 直接读 msg.GitStatus
-    if msg.GitStatus != nil {
-        lines = append(lines, formatGitLine(msg.GitStatus))
+    if gl := formatGitLine(msg.GitStatus); gl != "" {
+        lines = append(lines, gl)
     }
 
     return lines
@@ -374,10 +370,10 @@ func formatStatusBarLines(msg *messages.OutboundMessage) []string {
 5. **`internal/runtime/handler.go`** — 在 bridge 事件回调里,`translate` 之后
    加 `out.GitStatus = cs.GitStatus()`。**约 +1 行**
 
-### 第 3 批:删除 statusbar 包
+### 第 3 批:删除 statusbar 包的 stamping 层
 
-6. **`git rm internal/statusbar/`** — 整个目录删除
-7. **`internal/runtime/policy.go`** — `DefaultPolicies` 不再含 `StatusBarStampPolicy`,
+6. **`internal/statusbar`** — stamp / build / runtime helper 整个删除
+7. **`internal/gateway/outbound/policy.go`** — `DefaultPolicies` 不再含 `StatusBarStampPolicy`,
    删 `StatusBarStampPolicy` 函数。**约 -20 行**
 8. **`internal/runtime/eventbus.go`** — `MessageStateBus` 改用 `chatsession.GitStatus()`
    填 `out.GitStatus`。**约 -10 / +5 行**
@@ -393,7 +389,7 @@ func formatStatusBarLines(msg *messages.OutboundMessage) []string {
 
 ### 第 5 批:渲染 + 测试
 
-13. **`internal/channel/feishu/usage_footer.go`** — `formatStatusBarLines` 直接读
+13. **`internal/statusbar/statusbar.go`** — `StatusBarLines` 直接读
     `out.{Model, SessionID, AgentName, Usage, GitStatus}`,无 StatusBar wrapper。
     **约 -30 / +30 行**
 14. **测试更新** — 删 `StatusBar` 相关断言,改读 `out.GitStatus` / `out.Model` 等。
@@ -424,7 +420,7 @@ func formatStatusBarLines(msg *messages.OutboundMessage) []string {
 |---|---|
 | `chatsession.GitStatus()` 在某些路径返回 nil | Channel 渲染 nil-safe,跳过 Line 3 |
 | 多个 outbound event 在同一 turn,GitStatus 是缓存(stale) | 接受 stale(turn 内 git 通常不变);如需新鲜,dipatcher 自己 `RefreshGitStatus()` |
-| `internal/statusbar` 包消失影响外部 import | 全仓 grep 过,只有 nightme 内部用,无外部依赖 |
+| `internal/statusbar` 包的 stamping 层消失影响外部 import | 全仓 grep 过,只有 nightme 内部用,无外部依赖 |
 | `AgentSession.Cwd` 还在(长期应该移出) | 这次**不动**;commit/pr 路径继续从 `s.Cwd` 读 |
 | 现有 `*_realpi_test.go` 拿 `RunResult{}.Text` 会不会被 `out.Model = result.Model` 影响 | 不影响,Text 字段保留;只改 AgentBar / UsageBar 装配逻辑 |
 | 测试覆盖度 | 第 5 批详细更新 mock tests + 加一个新的 end-to-end 测试覆盖 one-shot → out.GitStatus → Channel 渲染 |
@@ -468,7 +464,7 @@ func formatStatusBarLines(msg *messages.OutboundMessage) []string {
 | ChatSession 上的 gitStatus 字段 | `*messages.GitStatus` 缓存 | **删除** |
 | ChatSession 上的 gitStatusMu | `sync.RWMutex` 串行化 cache 读写 | **删除** |
 | ChatSession.RefreshGitStatus | 公共写入接口 (SetSelectedCwd / /gtw commit / /gtw pr 主动刷) | **删除** |
-| GitStatusDeps.RefreshPR | 触发后台 PR 刷新 | **删除**(无人调用,PR invalidation 走 prcache.Cache.Invalidate) |
+| GitStatusDeps 上的后台 PR 刷新入口 | 触发后台 PR 刷新 | **删除**(无人调用,PR 由 `prcache.Cache` 单独缓存) |
 | `ChatSession.GitStatus(ctx)` 行为 | RLock 读 cache,miss 时同步 3s refresh | **每次现采**(CollectGit + LookupPR 都是同步读,无状态) |
 | 主动 refresh 入口 | SetSelectedCwd / ClearSelectedCwd / /gtw commit pre-post / /gtw pr | **全部移除**:不再需要 cache 失效 |
 
@@ -489,14 +485,14 @@ footer 反映的是用户工作区「刚改完的文件」,而 cs 层 cache 在�
 
 ## 后续:2026-08-22 plan-D 重生 `internal/statusbar` 包(telegram StatusBar 全量贴附)
 
-本文档第 1-3 批描述的"**`internal/statusbar` 整个包消失**"仍然成立 —— 旧的 `stamp.go` / `build.go` / `runtime.go` 已经被删,`OutboundMessage` 直接承载 flat 字段(AgentName / Model / SessionID / Usage / GitStatus)。
+本文档第 1-3 批描述的"**`internal/statusbar` 的 stamping 层整个消失**"仍然成立 —— stamp / build / runtime helper 已经被删,`OutboundMessage` 直接承载 flat 字段(AgentName / Model / SessionID / Usage / GitStatus)。
 
-但 2026-08-22 plan-D(telegram StatusBar 全量贴附,见 `docs/channel/telegram.md` §18)把 `formatStatusBarLines` 从 `internal/channel/feishu/usage_footer.go` 抽到**新**的 `internal/statusbar` 包 —— 仅作为**纯 renderer**,无 stamp / build / runtime 逻辑:
+但 2026-08-22 plan-D(telegram StatusBar 全量贴附,见 `docs/channel/telegram.md` §16)把 footer 渲染抽到**新**的 `internal/statusbar` 包 —— 仅作为**纯 renderer**,无 stamp / build / runtime 逻辑:
 
 | 时期 | `internal/statusbar` 角色 | 文件 |
 |---|---|---|
-| F-CLAUDE-PRINT-002 之前 | 包存在:stamp / build / runtime helpers,负责"在 OutboundMessage 上 stamp StatusBar" | `stamp.go` / `build.go` / `runtime.go`(本文档第 1-3 批描述) |
-| F-CLAUDE-PRINT-002 之后 | 包**删除**,flat fields 直接上 `OutboundMessage` | (空) |
+| F-CLAUDE-PRINT-002 之前 | 包存在:stamp / build / runtime helpers,负责"在 OutboundMessage 上 stamp StatusBar" | (本文档第 1-3 批描述) |
+| F-CLAUDE-PRINT-002 之后 | stamping 层**删除**,flat fields 直接上 `OutboundMessage` | (空) |
 | 2026-08-22 plan-D 之后 | 包**重生**:纯 renderer `StatusBarLines(msg) []string`,feishu + telegram adapter 都消费它 | `statusbar.go`(单文件,无 stamp / build / runtime 概念) |
 
 **两个角色不冲突**:旧包是"stamping helper"(已经把责任推到 gateway),新包是"rendering helper"(channel 侧消费 OutboundMessage flat fields)。新包不持有任何 state,不修改 msg,纯函数 + 零依赖 `internal/messages`。
@@ -511,10 +507,10 @@ lines := statusbar.StatusBarLines(&msg) // 三行 footer,zero-omit
 
 调用方:
 
-- `internal/channel/feishu/adapter.go`(5 处 `formatStatusBarLines(&msg)` → `statusbar.StatusBarLines(&msg)`)
-- `internal/channel/telegram/adapter.go`(v8: Send switch 的所有 text 出口 + OutHeartbeat 占位 PATCH,通过 `renderBodyWithStatusBar` helper 拼 trailer;`OutError` raw 拼接分支也直接调 `statusbar.RenderPanel`. v9 chain rewrite 2026-08-22 删除了 `renderBodyWithStatusBar`,footer 语义迁到 `chain.lastFooter` + `placeholder_chain_flush.go::renderActiveChunkBody`,8 个 Out* kind 改成走 `appendSegmentForKind` 路径. 见 docs/channel/telegram.md §11.12.6 + §11.12.7)
+- `internal/channel/feishu/adapter.go`(10 处 `statusbar.StatusBarLines(&msg)`)
+- `internal/channel/telegram/adapter.go`(Send switch 的所有 text 出口 + OutHeartbeat 占位 PATCH,以及 `statusbar.RenderPanel` 的 raw 拼接分支;footer 的 last-status-wins 语义落在 `internal/channel/telegram/rich_turn.go` 的 rich turn 状态里,8 个 Out* kind 走 `appendSegmentForKind` 路径. 见 docs/channel/telegram.md §16)
 
-测试矩阵:`internal/statusbar/statusbar_test.go` 15 个 `Test*` 函数(从 feishu `usage_footer_test.go` 全量迁移)+ 1 个 8 行 table-driven `TestStatusBarLines_OmitsZeroSegments` 子用例。
+测试矩阵:`internal/statusbar/statusbar_test.go` 24 个 `Test*` 函数(覆盖 identity / usage / git 三行的 zero-omit 与格式)。
 
 ---
 
@@ -522,16 +518,16 @@ lines := statusbar.StatusBarLines(&msg) // 三行 footer,zero-omit
 
 **触发**:LLM(`claude` / `codex` / `pi`)在 worktree 里跑 `git add` / `git commit` 时反复撞到 `fatal: Unable to create '.git/index.lock': File exists`。LLM 看到 stderr 后**自行归纳**为"codegraph MCP 的子 git 进程在占着" — 这个归因是 hallucination:`pgrep -lf git` 当前查不到任何 git 进程,`codegraph` 的依赖里也没有任何 git 工具(`tree-sitter-wasms` / `web-tree-sitter` / `commander` / `sqlite` 等),其 watchdog 子进程(`PID 21396` 那条 `node -e <...>`)只 stat `.codegraph/*.db*`,**根本不接触 `.git/`**。
 
-**真凶(本仓库内已确认 call path)**:`ChatSession.GitStatus(ctx)` 每条 outbound stamp 都跑一次 `git status --porcelain --branch --untracked-files=normal`,30-event turn 触发 30 次 git 子进程。`chatsession.go:754` 给 stamp 加了 `runCtx, _ := context.WithTimeout(ctx, 3*time.Second)`,git 未在 3s 内返回时 `exec.CommandContext` 直接 SIGKILL,**`.git/index.lock` 残留**。LLM 紧接着跑 `git add` 撞锁。
+**真凶(本仓库内已确认 call path)**:`ChatSession.GitStatus(ctx)` 每条 outbound stamp 都跑一次 `git status --porcelain --branch --untracked-files=normal`,30-event turn 触发 30 次 git 子进程。`chatsession.go` 给 stamp 加了 `runCtx, cancel := context.WithTimeout(ctx, 3*time.Second)`,git 未在 3s 内返回时 `exec.CommandContext` 直接 SIGKILL,**`.git/index.lock` 残留**。LLM 紧接着跑 `git add` 撞锁。
 
 本文档前述"性能权衡"已记 `--untracked-files=no` 与 inflight fan-in 两个 follow-up。本次补刀两件事,**只这两件**:
 
-1. **过滤**:Emitter 在 stamp git status 前按 `OutboundKind` 跳过 4 类(`OutToolStart` / `OutToolEnd` / `OutThinking` / `OutHeartbeat`)
+1. **过滤**:Emitter 在 stamp git status 前按 `OutboundKind` 跳过 5 类(`OutToolStart` / `OutToolEnd` / `OutThinking` / `OutHeartbeat` / `OutMessageSettled`)
 2. **grace**:把 `gtw.runCmd` 出去的 git 子进程从 SIGKILL-on-cancel 改为 SIGTERM → 1s grace → SIGKILL,让 git 正常释放 `index.lock`
 
-`OutHeartbeat` 也加入跳过清单(F-63 设计的每回合心跳事件,长 turn 会有 N 个心跳 = N 次额外 `git status`,纯内部状态传播,不展示给用户,跳过最划算)。
+`OutHeartbeat` 也加入跳过清单(F-63 设计的每回合心跳事件,长 turn 会有 N 个心跳 = N 次额外 `git status`,纯内部状态传播,不展示给用户,跳过最划算)。`OutMessageSettled` 是入站消息的结构化结算结果(每条入站消息一个),同样不渲染。
 
-### 改动 1 — Emitter 守卫(`internal/gateway/outbound/outbound.go:131`)
+### 改动 1 — Emitter 守卫(`internal/gateway/outbound/outbound.go`)
 
 ```go
 func (e *emitImpl) stampGitStatus(ctx context.Context, msg *messages.OutboundMessage) {
@@ -544,18 +540,20 @@ func (e *emitImpl) stampGitStatus(ctx context.Context, msg *messages.OutboundMes
     //   - OutToolStart/End — Bash 可能正持有 .git/index.lock
     //   - OutThinking     — 用户看不到的 reasoning metadata
     //   - OutHeartbeat    — 每回合心跳的 progress tick(N/turn)
+    //   - OutMessageSettled — 入站消息的结算结果,不渲染
     switch msg.Kind {
     case messages.OutToolStart,
         messages.OutToolEnd,
         messages.OutThinking,
-        messages.OutHeartbeat:
+        messages.OutHeartbeat,
+        messages.OutMessageSettled:
         return
     }
     msg.GitStatus = e.gitStatusLookup(ctx, msg.ChatID)
 }
 ```
 
-用 `OutboundKind` 而不是 `EventKind`,是因为 **`EventAgentThink` 不存在**(见 `internal/agent/agent.go:99-164` 枚举),thinking 数据是从 `EventAgentText` 下游切走的(见 `internal/agent/agent.go:82-83`)。`OutboundMessage.Kind` 是现成字段,Emitter 自己看到。
+用 `OutboundKind` 而不是 `EventKind`,是因为 Emitter 看到的是 `OutboundMessage.Kind` —— 这个字段就在它手里,不用再回头查 `EventKind` 枚举(`internal/agent/agent.go`)。thinking 数据由 bridge 直接发 `EventAgentThinking`,gateway 翻译成 `OutThinking`,Emitter 按 `OutboundKind` 过滤。
 
 **不动**:`EventKind` enum、`OutboundMessage` 字段、AgentEventBus 路由。`EventAgentText → OutReply` 这条 user-visible 路径保留 stamp(用户实际看到的回复,必须带新鲜 footer)。
 
@@ -566,17 +564,19 @@ func (e *emitImpl) stampGitStatus(ctx context.Context, msg *messages.OutboundMes
 > 修订版:**直接 hook `cmd.Cancel`** — 利用 stdlib 已经为 `exec.CommandContext` 启的 `watchCtx` goroutine,无新 goroutine、无 map、无 mutex、无 race window。SIGTERM → grace → SIGKILL 路径和 stdlib `cmd.Cancel` 接口契约自然结合。
 
 ```go
-// exec_unix.go 关键片段
+// exec_common.go — SIGTERMGrace 跨平台共用
 const SIGTERMGrace = 1 * time.Second
 
-func NewWith(ctx context.Context, _ Options, name string, args ...string) *exec.Cmd {
+// exec_unix.go 关键片段
+func NewWith(ctx context.Context, opts Options, name string, args ...string) *exec.Cmd {
     cmd := exec.CommandContext(ctx, name, args...)
     cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-    armGraceCancel(cmd)
+    armGraceCancel(cmd, opts.Grace)
     return cmd
 }
 
-func armGraceCancel(cmd *exec.Cmd) {
+func armGraceCancel(cmd *exec.Cmd, grace time.Duration) {
+    if grace <= 0 { grace = SIGTERMGrace }
     cmd.Cancel = func() error {
         proc := cmd.Process
         if proc == nil { return os.ErrProcessDone }   // pre-Start: 不会到这里
@@ -587,7 +587,7 @@ func armGraceCancel(cmd *exec.Cmd) {
             _ = proc.Signal(syscall.SIGTERM)
         }
         // grace 到点 SIGKILL(同样的 pgid)
-        time.AfterFunc(SIGTERMGrace, func() {
+        time.AfterFunc(grace, func() {
             p := cmd.Process
             if p == nil { return }
             if err := syscall.Kill(-p.Pid, syscall.SIGKILL); err != nil {
@@ -660,9 +660,11 @@ lock 路径取自 git 自己的 stderr,而不是从工作目录推算:git 报的
 |---|---|
 | `internal/command/gtw/git_status.go` | `git --no-optional-locks status --porcelain --branch --untracked-files=normal`(chat footer 路径) |
 | `internal/command/gtw/worktree.go` | `git --no-optional-locks status --porcelain`(刷新前的 dirty 检查) |
+| `internal/command/gtw/work.go` | `git --no-optional-locks status --porcelain` |
 | `internal/command/gtw/persist.go` | `git --no-optional-locks status --porcelain -- .gitignore` |
 | `internal/command/gtw/push.go` | `git --no-optional-locks status --porcelain` |
 | `internal/command/gtw/close.go` | `git --no-optional-locks status --porcelain` |
+| `internal/command/review/git.go` | `git --no-optional-locks status --porcelain` |
 | `internal/me/agent_prompt.go` | `git --no-optional-locks status --porcelain --branch` |
 | `internal/command/wiki/git.go` | `git --no-optional-locks -C <cwd> status --porcelain` |
 | `internal/agent/review_with_ocr.go` | `git --no-optional-locks -C <ws> diff …` |
@@ -673,9 +675,9 @@ lock 路径取自 git 自己的 stderr,而不是从工作目录推算:git 报的
 
 | 候选 | 为何不做 |
 |---|---|
-| cwd-scoped git 单飞(`internal/command/gtw/gate.go`) | 留 v3。当前放过 `prcache` 后台刷新 + stamp 之间的并发。grace 生效后压力应显著下降 |
-| `--untracked-files=no`(`git_status.go:114`) | 已记在本文档"性能权衡"段,非本次主题 |
-| 加 `EventAgentThink` | 它当前不存在;下游 routing 已通过 `OutboundKind.OutThinking` 解决 |
+| cwd-scoped git 单飞 | 留 v3。当前放过 `prcache` 后台刷新 + stamp 之间的并发。grace 生效后压力应显著下降 |
+| `--untracked-files=no`(`internal/command/gtw/git_status.go`) | 已记在本文档"性能权衡"段,非本次主题 |
+| thinking 类 kind 的扩充 | `EventAgentThinking` 已存在;thinking 的路由与过滤都走 `OutboundKind.OutThinking` |
 
 ### 验证步骤
 
@@ -690,20 +692,17 @@ lock 路径取自 git 自己的 stderr,而不是从工作目录推算:git 报的
 
 ### Reference
 
-- 出处 commit:无(本 fix 还没合)
 - 关联文件:
-  - `internal/gateway/outbound/outbound.go:131`(改动 1 — Emitter stamp guard)
-  - `internal/proc/exec_unix.go:59-78` `NewWith` + `:80-141` `armGraceCancel` + `SIGTERMGrace` 常量(改动 2 — grace folded in)
-  - `internal/proc/exec_windows.go:120-` `NewWith` + `:armGraceCancel` stub(改动 2 副产物 — Windows 端最小兼容实现)
-  - `internal/command/gtw/exec.go:54-81 runCmd`(已删 `proc.WithGrace(cmd, proc.KillGrace)` 接线,grace 现在 default-on)
+  - `internal/gateway/outbound/outbound.go`(改动 1 — Emitter stamp guard)
+  - `internal/proc/exec_unix.go` 的 `NewWith` + `armGraceCancel`(改动 2 — grace folded in);`SIGTERMGrace` 常量在 `internal/proc/exec_common.go`
+  - `internal/proc/exec_windows.go` 的 `NewWith` + `armGraceCancel`(改动 2 副产物 — Windows 端最小兼容实现)
+  - `internal/command/gtw/exec.go` `runCmd`(grace 现在 default-on,不再单独接线)
   - `internal/command/gtw/gitlock.go`(stale-lock 自愈:冲突解析、stale 判定、删除、单次重试)
   - `internal/command/gtw/worktree.go` `ExecGitRunner.Run`(自愈接线)+ `RefreshDefaultBranch`(未完成 rebase 的守卫)
   - `internal/command/wiki/git.go`(`/wiki` 的 git 调用迁到 `internal/proc`,带 context 超时)
-  - `internal/channel/bot/bot.go:241 gitOrigin`(改动 3 — `exec.Command` 改 `proc.New`,纳入统一路径)
-  - `internal/messages/outbound.go:13-`OutboundKind 枚举(本次涉及 OutToolStart/OutToolEnd/OutThinking/OutHeartbeat)
-  - `internal/agent/agent.go:99-164` EventKind 枚举(本次**不**改,确认 EventAgentThink 不存在)
-  - 删除文件:`internal/proc/grace_unix.go`、`internal/proc/grace_windows.go`(逻辑折进 `NewWith` 后不再需要;后者的 stub 形式由 `exec_windows.go:armGraceCancel` 接替)
-  - `cmd/nightme/kill_unix.go:28-56`(参考 pattern,SIGTERM → 轮询 → SIGKILL)
+  - `internal/messages/outbound.go` 的 OutboundKind 枚举(本次涉及 OutToolStart/OutToolEnd/OutThinking/OutHeartbeat/OutMessageSettled)
+  - `internal/agent/agent.go` 的 EventKind 枚举(本次**不**改;`EventAgentThinking` 已存在)
+  - `cmd/nightme/kill.go`(参考 pattern,SIGTERM → grace → SIGKILL)
 
 ### Windows caveat(fix-git-lock-file 2026-08-29 + 2026-09-01)
 

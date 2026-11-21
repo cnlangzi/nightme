@@ -220,7 +220,7 @@ type ToolInfo struct {
 
 // UsageInfo is the typed payload for OutUsage. See agent.UsageInfo
 // for field semantics. Re-exported as a type alias here so existing
-// gateway code (translate.go:158) keeps the same symbol name; the
+// gateway code (translate.go) keeps the same symbol name; the
 // canonical definition lives in internal/agent (F-45 §2.1).
 //
 // (F-45): the comment block that used to live here was removed

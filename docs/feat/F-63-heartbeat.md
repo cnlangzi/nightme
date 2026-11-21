@@ -12,7 +12,7 @@
 2. 多次 tool 调用(每次 0.5-30s)
 3. 偶尔一轮长思考(15s+)
 
-Receipt 卡片(`internal/channel/feishu/adapter.go:786` `ensureReceiptForTyping`)在第一条 OutReply 到达前只显示 `⌨️ Working...`;到达后变成 rolling-log。**整个 turn 内 receipt 顶部没有任何"agent 还在推进"的视觉信号**,长 thinking 间隙里用户以为 bot 死了。
+Receipt 卡片(`internal/channel/feishu/adapter.go` `ensureReceiptForTyping`)在第一条 OutReply 到达前只显示 `⌨️ Working...`;到达后变成 rolling-log。**整个 turn 内 receipt 顶部没有任何"agent 还在推进"的视觉信号**,长 thinking 间隙里用户以为 bot 死了。
 
 ### 1.2 核心约束
 
@@ -28,7 +28,7 @@ UX 上必须满足:
 ### 1.3 现有架构能复用的部分
 
 - **OutboundKind 枚举**(`internal/messages/outbound.go`)已是事实上的"事件总线":新增一个 kind 即可被所有 channel adapter 自动按 Kind 分发,无需改 `Channel` 接口
-- **runtime handler 的 policy 链**(`internal/runtime/handler.go:203`)是天然的分层点:Translate → Identity stamp → **【插入心跳观测】** → Policies → Send
+- **runtime handler 的 policy 链**(`internal/runtime/handler.go`)是天然的分层点:Translate → Identity stamp → **【插入心跳观测】** → Policies → Send
 - **`outbound.emitImpl.Send`** 是单一对外出口:任何 OutboundMessage 经过它都自动获得 telemetry / git status / rate limit 等现成行为
 - **Feishu `MessageReceipt`** 已是 PATCH-friendly:同一 `cardMsgID` 上 `renderLocked` 持续更新(300ms 节流 + same-body 短路)
 
@@ -439,7 +439,7 @@ func renderHeartbeatHeader(hb *messages.HeartbeatSnapshot) string {
 | `/think off` `/tools off` (一次路径) | think × 3 + tool × 5 | (无 thinking) + (无 tool) + 💬 最终回复 | `💭 3 · 🔧 5 · ⏱ HH:MM:SS` ✓ 计数不变 |
 | 全开,单纯快速回答 (0 think + 0 tool) | 0 think + 0 tool + reply chunks | 💬 最终回复 | `🤖 Working`(前半,无 ⏱) |
 
-第 5 行:无 think/tool 活动时,头部回到前半部分静默占位。⏱ 时间戳只在后半部分出现 —— 既然"无活动"也意味头部不会持续变,⏱ 自然也无需"agent 还活着"的副信号。视觉更干净。
+无 think/tool 活动时:头部回到前半部分静默占位。⏱ 时间戳只在后半部分出现 —— 既然"无活动"也意味头部不会持续变,⏱ 自然也无需"agent 还活着"的副信号。视觉更干净。
 
 ### 3.7.1 终态(terminal)转译矩阵
 
@@ -630,11 +630,11 @@ buildReceiptCard 的 switch 仍允许它落到后半部分分支(条件已扩为
 
 ## 10. 关联文档
 
-- [`F-runtime`](./F-runtime.md) — ChatSession / AgentSession 边界,handler / policy 链所在
-- [`F-message-flow`](./F-message-flow.md) — 全链路端到端切片,确认观测点位于何处
+- [`F-chat-session`](./F-chat-session.md) — ChatSession / AgentSession 边界
+- [`F-53-message-prompt-lifecycle`](./F-53-message-prompt-lifecycle.md) — 消息 / Prompt 生命周期
 - [`F-08-channel-abstraction`](./F-08-channel-abstraction.md) — `Channel` 接口为何不变(走 OutboundMessage 主流水线)
 - [`F-CLAUDE-PRINT-002-statusbar-refactor`](./F-CLAUDE-PRINT-002-statusbar-refactor.md) — 相邻的"中央观测 + per-channel 渲染"模式(StatusBarStampPolicy + OutboundMessage.StatusBar)
 - [`F-53-message-prompt-lifecycle`](./F-53-message-prompt-lifecycle.md) — `Message`/`Prompt`/`endPrompt` 语义源头,确认 heartbeat 不动这套语义
 - [`../SPEC.md`](../SPEC.md) §4.3 — 并发约束与 EventCallback 切换
-- [`internal/runtime/policy.go`](../../internal/runtime/policy.go) — `ThinkModeGatePolicy` / `ToolsModeGatePolicy` 源码,验证不变量
+- [`internal/gateway/outbound/policy.go`](../../internal/gateway/outbound/policy.go) — `ThinkModeGatePolicy` / `ToolsModeGatePolicy` 源码,验证不变量
 - [`internal/channel/feishu/adapter.go`](../../internal/channel/feishu/adapter.go) — `ensureReceiptForTyping` / `buildReceiptCard` 源码

@@ -43,8 +43,7 @@ func Reply(_ context.Context, _ RuntimeServices, text string) *SlashOutput {
 // folds the hint into the same rolling-log card the agent is
 // streaming on — Feishu PATCHes the placeholder created at
 // MessageQueued time, Slack streams into the same turnStream
-// instead of a "❯ " standalone bubble. Mirrors /use's pattern
-// (internal/command/use/cmd.go).
+// instead of a "❯ " standalone bubble. Mirrors /use's pattern (internal/command/use/cmd.go).
 //
 // ChatID and ReplyTo are pulled from input; the runtime policy
 // chain stamps AgentName/Model/SessionID/Usage/GitStatus on

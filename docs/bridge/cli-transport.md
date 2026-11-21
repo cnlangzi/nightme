@@ -7,7 +7,7 @@
 
 > **Depends on**: F-04 (PTY), F-08 (Channel)
 
-> **Related docs**: SPEC.md(Bridge 组件), [../bridge/cli-transport.md](./../bridge/cli-transport.md) (Bridge 四层模式), [F-gateway.md §2.3](./F-gateway.md) (single-consumer), FEATURES.md
+> **Related docs**: SPEC.md(Bridge 组件), [../bridge/cli-transport.md](./../bridge/cli-transport.md) (Bridge 四层模式), [SPEC.md §1.2](../SPEC.md) (single-consumer), FEATURES.md
 
 本文档回答：**nightme 的 Bridge 在 PTY 模式下怎么把 CLI 的 TTY 字节流搬到飞书、再把飞书的字节流搬回 TTY**。
 
@@ -72,22 +72,22 @@ nightme 是 **byte pipe**，不是 **translator**：
 │     ▼                                       │
 │ raw bytes: b"\x1b[32m✓\x1b[0m Updated..."  │
 │     │                                       │
-│     │ 缓冲 + 聚合窗口（200ms 或 4KB）         │
+│     │ 每次 Read 一个 chunk → 一条 EventAgentText│
 │     ▼                                       │
 │ chunk = "\x1b[32m✓\x1b[0m Updated file..." │
 │     │                                       │
-│     │ Channel adapter.SendLongMessage()      │
-│     │ （>4KB 自动分段）                       │
+│     │ Channel adapter：追加为 receipt 卡片上的│
+│     │ 一条 rolling-log entry；超出单条上限时   │
+│     │ 按 SendLongMessage 切分                │
 │     ▼                                       │
-│ 飞书消息 1 (4KB)                             │
-│ 飞书消息 2 (剩余)                             │
+│ 飞书 receipt 卡片（滚动日志）                 │
 └─────────────────────────────────────────────┘
 ```
 
 **关键点**：
-- 飞书单条消息上限 ~4KB（markdown text 实际 4096 字符）
-- `SendLongMessage` 自动切分，保留 ANSI 码完整性（不在 escape sequence 中间断开）
-- 200ms 聚合窗口：减少消息条数，避免飞书"刷屏"触犯 QPS 限制
+- 飞书单条消息上限 ~4KB（`maxMessageBytes = 3800`，给协议开销留余量）
+- `SendLongMessage` 在换行边界切分，保留 ANSI 码完整性（不在 escape sequence 中间断开）
+- bridge 侧不做字节级聚合窗口；一次 `Read` 就是一条事件，聚合发生在 Channel 层
 
 ---
 
@@ -102,33 +102,39 @@ Claude Code 一次操作可能产生 50+ 个 stdout write（如进度更新）�
 
 ### 3.2 聚合策略
 
-```go
-type Aggregator struct {
-    buf       []byte
-    maxSize   int           // 4KB
-    maxWait   time.Duration // 200ms
-    flushCh   chan []byte
-    timer     *time.Timer
-    mu        sync.Mutex
-}
+聚合**不在 bridge 侧**。PTY bridge 的 read loop 每次 `Read` 拿到多少字节，就原样包成
+一条 `EventAgentText` 推出去，不缓冲、不合并、不改写：
 
-func (a *Aggregator) Write(p []byte) {
-    a.mu.Lock()
-    a.buf = append(a.buf, p...)
-    if len(a.buf) >= a.maxSize {
-        a.flushLocked()
-    } else if a.timer == nil {
-        a.timer = time.AfterFunc(a.maxWait, a.flushFromTimer)
+```go
+// internal/bridge/pty/agent.go::readLoop
+buf := make([]byte, 4096)
+for {
+    n, err := d.transport.Read(buf)
+    if n > 0 {
+        d.events <- agent.AgentEvent{
+            Kind: agent.EventAgentText,
+            Text: string(buf[:n]),
+        }
     }
-    a.mu.Unlock()
+    if err != nil { /* EventAgentDone + close(events) */ }
 }
 ```
 
-**触发 flush 的条件**（任一满足）：
-1. buffer ≥ 4KB（飞书单条上限）
-2. 距离上次 flush 满 200ms
-3. 检测到 PTY 空闲（无新数据 500ms）— 加
-4. 检测到 prompt / 等待输入模式 — 不做（nightme 不识别 prompt）
+Channel 层负责把这一串文本块收成用户看得到的形态：
+
+| 层 | 行为 |
+|---|---|
+| `internal/gateway/outbound/translate.go` | `EventAgentText` → `OutReply`（一条事件一块文本）|
+| `internal/channel/feishu/receipt.go` | `OutReply` 追加为 receipt 卡片的 rolling-log entry，追加后整卡重渲染 |
+| `internal/channel/feishu/adapter.go` | 单条超过 `maxMessageBytes`(3800) 时走 `SendLongMessage` 切分 |
+
+receipt 卡片的容量有硬上限：50 个元素 / 28 KB（`receiptMaxElements` /
+`resultCardEnvelopeBudget`）。超限时 `AppendEntry` 返回 `ErrReceiptOverflow`，调用方
+改成发一条新的顶层消息——不截断，也不丢用户已经看到的旧条目。
+
+**不做**：
+- 不设字节级 flush 窗口（PTY 侧没有 `Aggregator`）
+- 不识别 prompt / 等待输入模式（nightme 不解析 CLI 输出）
 
 ### 3.3 ANSI 处理
 
@@ -196,13 +202,15 @@ nightme 对密码 / API key 与普通文本一视同仁——**完全透传**，
 ```
 Claude Code crash → PTY EOF → bridge.Read() returns io.EOF
   ↓
-Session.readPump 退出
+pty driver 的 readLoop 发 EventAgentDone{ExitCode:-1}，然后 close(events)
   ↓
-readPump 标记 sess.Status → Exited + EventDone 事件
+AgentSession 的 read pump 看到 events channel 关闭
   ↓
-Manager.EventCallback 触发 → Gateway.OnSessionEvent → Translate → channel.Send(OutboundMessage{Kind: OutText, Text: "Session ended (exit code: {code})"})
+endPrompt(agent.PromptEndProcessDied) + emitLifecycleLocked(StatusExited)
   ↓
-registry.UpsertSession(StatusExited)
+chatsession 的 PumpEvents 收到 KindLifecycle{Status: StatusExited} → as.SetExited(exitCode)
+  ↓
+退出码写进 agent_sessions.json（registry.AgentSessionFile）
 ```
 
 ### 5.2 Channel 断连（飞书）
@@ -225,19 +233,17 @@ registry.UpsertSession(StatusExited)
 nightme SIGTERM
   ↓
 1. Channel.Stop() — 优雅停 WebSocket
-2. SessionManager 遍历所有 session:
-     - 不 kill PTY 子进程（默认策略）
-     - 标记 session 为 "detached"
-3. registry 持久化（包括 detached 状态）
-4. 主进程退出
+2. 取消 daemon 级进程 scope → 所有 agent 子进程随各自的 ctx 结束
+3. waitForAgentExit 等子进程上报退出事件（退出码由此落库）
+4. persistAgentSessions / persistChatStates 落盘
+5. 主进程退出
 
 下次 nightme 启动:
   ↓
-1. 加载 registry
-2. 对每个 detached session:
-     - 检查 PID 是否还活着
-     - 活着 → 自动 reattach（重建 readPump/writePump）
-     - 死了 → 删除 registry 记录
+1. ReconcileAgentSessions：PID 已经死的条目翻成 exited / ExitCodeReconciledDead(-3)
+2. SweepOrphanAgents：还活着的孤儿进程按 SIGTERM → grace → SIGKILL 收掉，
+   条目改写成 exited / ExitCodeTerminatedByNightme(-4)，session id 保留
+   （下一条用户消息用 --resume 接着聊）
 ```
 
 ---
@@ -322,28 +328,24 @@ ANSI 解析是**沉重**的活（状态机、各种 escape 变体）。在 PTY b
 
 ```go
 // internal/bridge/pty/pty_test.go
-func TestBridge_BasicEcho(t *testing.T) {
-    b, _ := pty.New(t.TempDir(), "/bin/echo", []string{"hello"})
-    defer b.Close()
-
-    buf := make([]byte, 1024)
-    n, _ := b.Read(buf)
-    assert.Equal(t, "hello\n", string(buf[:n]))
+func TestSpawnEcho(t *testing.T) {
+    b, err := NewTransport(context.Background(), t.TempDir(),
+        "/bin/echo", []string{"hello"}, nil, 80, 24)
+    ...
+    got := readWithTimeout(t, b, 2*time.Second)
+    // 断言输出里有 "hello"
 }
 ```
 
-### 8.2 集成测试：PTY → Aggregator → 飞书 mock
+`internal/bridge/pty/pty_test.go` 另外覆盖 `TestSetsize`（窗口尺寸）、
+`TestLongLineNotTruncated`（长行不被截断）、`TestCloseKillsChild`；driver 半边在
+`internal/bridge/pty/session_test.go`（readLoop / SendBlocks / SendPermission / Close），
+Starter 半边在 `internal/bridge/pty/agent_test.go`（Detect / Start 端到端）。
 
-```go
-func TestAggregator_FlushOnSize(t *testing.T) {
-    mock := &mockChannel{}
-    agg := NewAggregator(mock, 100, 0) // 100B 上限，0 等待
+### 8.2 集成测试：PTY → Channel
 
-    agg.Write(bytes.Repeat([]byte("a"), 150))
-    assert.Equal(t, 1, mock.callCount)  // 100B 一次 flush
-    assert.Equal(t, 100, len(mock.lastMsg))
-}
-```
+bridge 侧没有 Aggregator 可测——聚合发生在 Channel 层。PTY → Channel 的链路由
+`internal/bridge/pty/agent_test.go`（driver 端到端）与各 channel 包自己的测试覆盖。
 
 ### 8.3 E2E（手动）
 
@@ -373,7 +375,7 @@ func TestAggregator_FlushOnSize(t *testing.T) {
 
 
 > **Depends on**: F-09 (Agent abstraction), F-19 (CLI Bridge)
-> **Related docs**: SPEC.md §1.1 (Agent), [F-09-agent-abstraction.md](./F-09-agent-abstraction.md), [../bridge/cli-transport.md](./../bridge/cli-transport.md), [../bridge/claude.md](./../bridge/claude.md)
+> **Related docs**: SPEC.md §1.1 (Agent), [F-09-agent-abstraction.md](../feat/F-09-agent-abstraction.md), [../bridge/cli-transport.md](./../bridge/cli-transport.md), [../bridge/claude.md](./../bridge/claude.md)
 
 ## 1. Description
 
@@ -407,13 +409,13 @@ func TestAggregator_FlushOnSize(t *testing.T) {
 
 ```
 nightme 启动 session 时:
-  agent.Mode() 返回什么？
+  Starter.Info().Mode 是什么？
   ├─ ModeACP  → 用 ACP client（首选）
   │              → spawn ACP server 二进制
   │              → JSON-RPC 握手
   │              → 消费 ACP events → 转换 AgentEvent
   │              → AgentSession 包装 ACP 连接
-  ├─ ModeSDK  → 用 vendor-specific SDK
+  ├─ ModeSDK  → 用 vendor-specific SDK（当前没有实现该模式的 bridge）
   │              → 调 SDK client（如 Claude Code Agent SDK）
   │              → SDK 原生返回结构化 events
   │              → AgentSession 包装 SDK connection
@@ -421,11 +423,11 @@ nightme 启动 session 时:
   │              → spawn `claude --input-format stream-json --output-format stream-json ...`
   │              → parse JSON events（system / assistant / tool_use / tool_result / result）
   │              → AskUserQuestion 双路兼容（tool_use 拦截 + text fallback）
-  │              → AgentSession 包装 claudecode.Transport
+  │              → AgentSession 包装 agent.Agent（内部是 claudecode driver）
   └─ ModePTY  → 兜底（任何 CLI 都能用）
                  → spawn CLI 在 PTY 中
-                 → read goroutine 把 bytes 转 TextEvent
-                 → AgentSession 包装 pty.Transport
+                 → read goroutine 把 bytes 转 EventAgentText
+                 → AgentSession 包装 agent.Agent（内部是 pty.Transport）
 ```
 
 **关键**：SessionManager 跟 AgentSession 交互，**不直接**跟 PTY/ACP/SDK 交互。所有模式都返回统一的 `AgentSession` 接口。
@@ -446,25 +448,39 @@ const (
 
 type EventKind int
 const (
-    EventText EventKind = iota
-    EventPermission
-    EventToolStart
-    EventToolEnd
-    EventDone
-    EventError
+    EventAgentText EventKind = iota
+    EventAgentThinking
+    EventAgentPermission
+    EventAgentToolStart
+    EventAgentToolEnd
+    EventAgentDone
+    EventAgentError
+    EventAgentResult
+    EventAgentReady
+    EventAgentTaskCreate
+    EventAgentTaskUpdate
+    EventAgentPermissionSettled
 )
 
 type AgentEvent struct {
     Kind       EventKind
+    // bridge 侧上下文，每个事件都盖上
+    SessionID  string
+    Model      string
+    AgentName  string
+    Workspace  string
+    Branch     string
+    // 动作载荷（按 Kind 只有一个有意义）
     Text       string
-    Permission *PermissionRequest
-    ToolStart  *ToolStartEvent
-    ToolEnd    *ToolEndEvent
-    Done       *DoneEvent
-    Error      *ErrorEvent
+    Permission *AgentPermissionRequest
+    ToolStart  *AgentToolStartEvent
+    ToolEnd    *AgentToolEndEvent
+    Done       *AgentDoneEvent
+    Err        error
+    Result     *AgentResultEvent
 }
 
-type PermissionRequest struct {
+type AgentPermissionRequest struct {
     Tool       string         // "Bash" / "Write" / etc.
     Action     string         // human-readable description
     Options    []string       // ["once", "session", "reject"]
@@ -484,29 +500,38 @@ type PermissionRequest struct {
 // (../feat/F-chat-session.md)）。
 
 type Agent struct {
-    name    string  // "claude", "codex", "opencode", "pi", ...
-    command string  // CLI binary 路径（exec.LookPath 解析）
-    args    []string // 默认 argv
+    Info      Info               // 固定元数据：Name / Mode / Command / Args / Env
+    pid       int
+    events    chan AgentEvent
+    sessionID atomic.Value       // string，EventAgentReady 时写入
+    driver    driver
 }
 
 type StartConfig struct {
-    Workspace string
-    Args      []string
-    Env       []string
+    Workspace      string
+    Args           []string
+    Env            []string
+    PermissionMode string
+    SessionID      string
 }
 
 // 当前实际：Starter.Start 返回 *Agent（runtime handle）；
-// Agent 的公共方法：PID / Events / SessionID / SendBlocks /
-// SendPermission / New / Close / Stop / SetModel。
+// Agent 的公共方法：PID / Keepalive / Events / SessionID / SendBlocks /
+// SendPermission / New / Close / Driver / Stop。
+// SetModel 不在 agent.Agent 上——它挂在 AgentSession 上
+// （internal/agentsession/session.go::AgentSession.SetModel）。
 // AgentSession（chatsession 包里的另一层抽象）的接口见 F-chat-session.md。
 ```
 
 ## 6. Agent 注册表
 
-注册表由配置驱动（`cmd/nightme/test.go`）；实现选择保持在统一 `agent.Agent` 接口之后：
+内置 agent 的注册表在 `cmd/nightme/agents.go`：`init()` 里逐条
+`agent.Builtins.Register(<bridge>.NewStarter(...))`，注册顺序即 primary-agent 自动
+探测顺序（见 `docs/primary-agent-detection.md`）。用户在 `cfg.Agents` 里写的二进制
+路径由 `internal/agentregistry/agentregistry.go::Build` 落成 `ModePTY` 兜底。
 
 ```go
-// claude -> ModeSDK (SDK adapter currently returns ErrNotImplemented)
+// claude -> ModeJSONIO (claudecode bridge)
 // codex -> ModeJSONIO (codex app-server; see docs/bridge/codex.md)
 // opencode -> ModeACP (opencode acp)
 // unknown configured names and direct binary paths -> ModePTY
@@ -516,42 +541,26 @@ type StartConfig struct {
 
 Channel Adapter 接收 `AgentSession.Events()` 的统一事件流：
 
-- PTY mode sends raw `EventText` bytes, including any ANSI sequences.
-- ACP mode can render `EventPermission`, `EventToolStart`, and `EventToolEnd` as structured UI elements.
-- SDK mode has the same target event model; the current Go adapter reports its unavailable SDK explicitly.
+- PTY mode sends raw `EventAgentText` bytes, including any ANSI sequences.
+- ACP mode can render `EventAgentPermission`, `EventAgentToolStart`, and `EventAgentToolEnd` as structured UI elements.
+- 没有 SDK 模式的 bridge——`agent.ModeSDK` 只是枚举里的占位值，没有实现它的 adapter。
 
 ## 8. SessionManager 变化
-type Session struct {
-    ChatID       string
-    Workspace    string
-    AgentName    string
-    Args         []string
-    agentSession agent.AgentSession  // 统一接口，不直接持有 pty.Transport
-    cancel       context.CancelFunc
-}
 
-func (m *Manager) Create(ctx context.Context, req CreateRequest) (*Session, error) {
-    a, err := agent.Get(req.Agent)
-    if err != nil { return nil, err }
-    
-    agentSession, err := a.Start(ctx, agent.StartConfig{
-        Workspace: req.Workspace,
-        Args:      req.Args,
-    })
-    if err != nil { return nil, err }
-    
-    s := &Session{
-        ChatID:       req.ChatID,
-        Workspace:    req.Workspace,
-        AgentName:    req.Agent,
-        Args:         req.Args,
-        agentSession: agentSession,
-    }
-    
-    go s.pumpEvents(ctx)  // 消费 AgentSession.Events() → 推给 Channel
-    return s, nil
+chat session 不直接持有 pty.Transport，也不直接调 bridge。它通过 `Spawner` 这个
+seam 拿到 bridge 层的 `*agent.Agent`，再包成 `AgentSession`：
+
+```go
+// internal/agentsession/spawner.go
+type Spawner interface {
+    Spawn(ctx context.Context, agentName, cwd string, args []string, sessionID string) (*agent.Agent, error)
 }
 ```
+
+生产实现 `registrySpawner` 查 `agent.Registry`：`Get(agentName)` → `Detect()` →
+`Start(ctx, agent.StartConfig{Workspace: cwd, Args: args, SessionID: sessionID})`。
+返回的 `*agent.Agent` 上挂着 events channel、pid 和 driver；`AgentSession` 的 read
+pump 是 events channel 的唯一读者。
 
 ## 9. 实施顺序（roadmap）
 
@@ -559,13 +568,14 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (*Session, erro
 |------|------|--------|------|
 |  | **PTY** | 已完成 | 通用 byte pipe 兜底 |
 |  | **ACP** | 已完成 | stable ACP v1 JSON-RPC bridge |
-|  | **SDK** | 已完成（fallback） | Go Agent SDK 不存在，保留 ModeSDK seam |
+|  | **SDK** | 未实现 | 没有 Go Agent SDK；`agent.ModeSDK` 只是枚举里的占位值 |
 | **** | 优化 | - | ACP capability expansion, SDK when available, persistence |
 
-**已完成**：ACP session handshake/event mapping、Claude ModeSDK adapter seam、配置驱动的 Claude/Codex/OpenCode mode selection，以及 PTY fallback。
+**已完成**：ACP session handshake/event mapping、Claude 的 JSON-IO bridge、配置驱动的
+Claude/Codex/OpenCode mode selection，以及 PTY fallback。
 
 **未来可能的演进**：
-- Anthropic 发布官方 Go Claude Agent SDK → replace `internal/bridge/sdk` sentinel with native session adapter
+- Anthropic 发布官方 Go Claude Agent SDK → 为 ModeSDK 补一个真正的 session adapter
 - Claude Code 支持 ACP → prefer ACP and remove the vendor-specific path
 - Add ACP filesystem/terminal/MCP capabilities only with explicit permission and security review
 
@@ -578,23 +588,21 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (*Session, erro
 | Agent Mode=ACP 但 handshake 失败 | Start 返回 error |
 | Agent Mode=PTY 但 binary 不存在 | Detect 提前检查，Start 返回 error |
 | PTY mode 下用户需要权限确认 | 用户看到 "Allow? [Y/n]"，手动输 `Y\n` |
-| ACP mode 下用户需要权限确认 | JSON-RPC permission request 映射为 `EventPermission`，用户选择后发送 response ID |
+| ACP mode 下用户需要权限确认 | JSON-RPC permission request 映射为 `EventAgentPermission`，用户选择后发送 response ID |
 | Channel 不支持 PermissionRequest 渲染 | 降级为文本（"Permission: X，respond 'yes' or 'no'"）|
-| SDK adapter 不可用 | 返回 `sdk.ErrNotImplemented`，用户改用 PTY |
+| 配置里的 agent 名未注册 | `agent.Builtins.Get` 返回 `agent: unknown agent` |
 | nightme 重启，session 已 detach（ACP mode）| 评估 ACP session persistence |
 
 ## 11. Test plan
 
 **单元测试**：
-- ptySession.readLoop 正确把 bytes 转 TextEvent
-- ptySession.SendText / SendPermission / Close 正确
-- acpSession 把 ACP v1 events 及 legacy aliases 转 AgentEvent
-- acpSession.SendPermission 正确发给 ACP server
-- SDK adapter Detect / Mode / ErrNotImplemented
+- pty driver 的 readLoop 正确把 bytes 转 `EventAgentText`
+- pty driver 的 SendBlocks / SendPermission / Close 正确
+- acp driver 把 ACP v1 events 及 legacy aliases 转 AgentEvent
+- acp driver 的 SendPermission 正确发给 ACP server
 
 **集成测试**：
 - mock ACP server（JSON-RPC）→ initialize + session/new + prompt + event mapping
-- mock SDK fallback → ErrNotImplemented
 - mock PTY → 同上
 
 ## 12. Open questions
@@ -603,7 +611,7 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (*Session, erro
 - ACP v2 is experimental; should pin a schema version before adding v2-only methods.
 - Should an ACP failure fall back automatically to PTY, or require an explicit user/config choice?
 - How should Feishu render permission options and long-running tool progress? Separate UX work remains.
-- When Anthropic publishes an official Go Agent SDK, should nightme switch from the current sentinel to that adapter, or continue using Claude Code CLI PTY as a compatibility fallback?
+- When Anthropic publishes an official Go Agent SDK, should nightme add a ModeSDK adapter alongside the JSON-IO bridge, or keep the JSON-IO bridge as the only Claude path?
 
 ---
 

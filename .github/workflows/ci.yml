@@ -878,7 +878,7 @@ jobs:
           # publish to npm. Its only officially-supported
           # install method is the curl-pipe script at
           # https://cursor.com/install (per docs/bridge/
-          # cursor.md §2.1 + cmd/nightme/agents.go:108-113).
+          # cursor.md §2.1 + cmd/nightme/agents.go).
           # The bash installer (curl ... | bash) drops the
           # binary as `agent` (not `cursor`) into
           # ~/.local/bin/agent on Linux/macOS, alongside a
@@ -903,19 +903,18 @@ jobs:
           #             (per internal/proc/exec_windows.go +
           #              Anthropic's setup docs)
           #   codex   → @openai/codex
-          #             (per docs/WINDOWS.md:183 "npm 包内的
+          #             (per docs/WINDOWS.md "npm 包内的
           #              codex.cmd" + OpenAI's install docs)
           #   opencode→ opencode-ai
-          #             (per docs/WINDOWS.md:184; opencode also
+          #             (per docs/WINDOWS.md; opencode also
           #              publishes a curl installer at
           #              opencode.ai/install as a second official
           #              channel — npm install is the
           #              CI-deterministic equivalent)
           #   pi      → @earendil-works/pi-coding-agent
-          #             (per docs/bridge/pi.md:271)
+          #             (per docs/bridge/pi.md)
           #   dsh     → @deepseek-ai/dsh
-          #             (per internal/bridge/dsh/starter.go:82
-          #              Detect() error message + F-dsh-bridge.md).
+          #             (per docs/bridge/dsh.md).
           #             Temporarily NOT installed (2026-09-22):
           #             deepseek published @deepseek-ai/dsh-web-app@
           #             0.1.5-rc.3 which transitively depends on
@@ -941,7 +940,7 @@ jobs:
           #             >= 1.0.x — older preview builds
           #             (e.g. 0.0.361) reject `--acp` with
           #             "unknown option". Per
-          #             internal/bridge/copilot/copilot.go:7.
+          #             internal/bridge/copilot/copilot.go.
           #   cursor  → see "Install cursor CLI" step below.
           #             The official installer is the SAME URL
           #             on every platform (https://cursor.com/
@@ -953,7 +952,7 @@ jobs:
           #             Both branches install `cursor-agent`
           #             on PATH (the binary name the bridge
           #             spawns via exec.LookPath per cmd/nightme/
-          #             agents.go:108-116). The bash installer
+          #             agents.go). The bash installer
           #             creates it as a legacy symlink alongside
           #             the primary `agent`; the PowerShell
           #             installer creates it as the real entry
@@ -1491,7 +1490,7 @@ jobs:
             #
             # Observation window of 30s (was 15s, was 8s): the dsh
             # bridge's own webURLParseTimeout is 10s
-            # (internal/bridge/dsh/host/lifecycle.go:53) and
+            # (internal/bridge/dsh/host/lifecycle.go) and
             # cursor's first `cursor-agent acp` invocation on
             # macOS can take 8-12s as it loads ~/.cursor/ state
             # before the ACP initialize handshake completes.

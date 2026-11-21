@@ -101,7 +101,7 @@ func TestTranslate_EventResult_ErrorKept(t *testing.T) {
 	// Empty text + IsError=true → kept so channels can flip header
 	// to error state. Err also propagates onto the OutboundMessage
 	// so adapters can render the error indicator (claudecode /
-	// pi / codex all follow this contract; see agent.go:586-591).
+	// pi / codex all follow this contract; see agent.go).
 	in := agent.AgentEvent{
 		Kind:   agent.EventAgentResult,
 		Err:    errors.New("error"),

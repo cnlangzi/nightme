@@ -277,8 +277,7 @@ Findings must conform to the nightme review output schema (see host agent prompt
 //
 // simplify runs alongside as a parallel dimension (Pattern =
 // PatternSimplify), appended after pre.ocrGroups when the changeset has
-// code files — see PatternSimplify / simplifyGroup in
-// review_with_ocr.go.
+// code files — see PatternSimplify / simplifyGroup in review_with_ocr.go.
 func ReviewWithPrompt(ctx context.Context, s Starter, cfg StartConfig, opts ...RunOnceOption) (RunResult, error) {
 	pre := precomputeReviewWithBuiltin(ctx, cfg.Workspace)
 	// The base branch could not be determined and could not be

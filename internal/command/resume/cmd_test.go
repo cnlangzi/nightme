@@ -360,7 +360,7 @@ func TestFactory_Handle_QueuesResume(t *testing.T) {
 
 // input.MessageID == "" → reply with the missing-id diagnostic
 // and skip the QueueUserMessage (which silently no-ops on empty
-// ID). Mirrors /queue's guard at queue/cmd.go:143.
+// ID). Mirrors /queue's guard at queue/cmd.go.
 func TestFactory_Handle_NoMessageID_RepliesDiagnostic(t *testing.T) {
 	home := homeDir(t)
 	mgr := chatsession.NewManager()

@@ -30,9 +30,8 @@ import (
 // substitutes <REPO_ROOT> with the resolved repository root
 // before submitting. The Agent writes plain Markdown files
 // directly — no frontmatter, no central index, no
-// `wiki.yml`. Each file's identity is its filename.
-//
-// docs/Wiki.md §5.
+// `wiki.yml`. Each file's identity is its filename. The
+// full prompt spec lives in docs/Wiki.md.
 const initPrompt = `# /wiki init — establish the wiki module structure
 
 You are the lead architect of the repository at <REPO_ROOT>.

@@ -177,7 +177,7 @@ func seedPersistedChatSession(t *testing.T, csFile *chatstore.Store, chatID, pri
 // the exact failure mode that F-38 surfaced in production.
 //
 // Locking note: onCreate is fired while the Manager lock is held
-// (manager.go:108). Callers must NOT call mgr.Get / mgr.List from
+// (manager.go). Callers must NOT call mgr.Get / mgr.List from
 // inside the callback without care; this test uses the callback
 // only to record chatIDs, which is lock-safe.
 func TestManager_RestoreFromRegistry_FiresOnCreate(t *testing.T) {

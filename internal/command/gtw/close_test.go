@@ -726,8 +726,7 @@ func (e *fakeExitError) Error() string { return e.msg }
 // not-alive branch in EvictAgentSessionsInCwd —
 // DropAgentSession still fires, but no goroutine for as.Close()
 // is spawned, so the "closed N orphaned agent(s)" count stays
-// at 0. Real-bridge, count-asserting tests live in
-// internal/chatsession/test_close_drop_test.go.
+// at 0. Real-bridge, count-asserting tests live in internal/chatsession/test_close_drop_test.go.
 func seedAgentSession(t *testing.T, rig *closeTestRig, agentName, cwd string) {
 	t.Helper()
 	as := chatsession.NewAgentSession("as-"+agentName+"-test", rig.cs.ChatID, agentName, cwd, nil)
@@ -808,7 +807,7 @@ func TestRunClose_DanglingSelectedCwd(t *testing.T) {
 	}
 }
 
-// TestRunClose_EmptySelectedCwd defends the cmd.go:364-389
+// TestRunClose_EmptySelectedCwd defends the cmd.go
 // dispatcher (which doesn't preflight empty SelectedCwd before
 // invoking RunClose). Without the explicit empty-cwd branch in
 // step 0.5, ReadGTWYml("") would resolve to "./.nightme/gtw.yml"

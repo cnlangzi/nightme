@@ -29,7 +29,7 @@ import (
 // F-54 dropped `ContextWindow` from UsageInfo; F-55 re-introduced
 // it so the footer can render `(window)` alongside X% (CLI Agent
 // 报什么就显示什么,错了让用户自己计算 — see
-// docs/feat/F-55-footer-show-context-window.md). The window
+// docs/channel/feishu-rendering.md §A13). The window
 // value is bridge-local and passes through to UsageInfo verbatim;
 // runtime / channel do not recompute, catalog, or clamp on it.
 // Companion TestDecodeUsage_ForwardsContextWindow (below)
@@ -213,8 +213,7 @@ func streamFromFixture(t *testing.T, name string, askHandler askHandlerFunc) []a
 		// drives (a) tool_use (which uses askHandler, not
 		// armPendingAskFn). The text-fallback path requires a
 		// non-nil armPendingAskFn, and is exercised separately
-		// by TestPumpStream_TextFallback_DetectsAndArms in
-		// ask_permission_test.go.
+		// by TestPumpStream_TextFallback_DetectsAndArms in ask_permission_test.go.
 		pumpStream(strings.NewReader(string(data)), events, askHandler, nil, "claude", "/tmp", "main", nil)
 		close(events)
 	}()

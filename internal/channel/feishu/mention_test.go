@@ -270,8 +270,7 @@ func TestComputeHasMention(t *testing.T) {
 // If this test regresses, F-watch will start dropping DM messages
 // in chats that have WatchMode=WatchModeMention (the default).
 // That's a hard user-visible bug. The corresponding
-// dispatcher-side test lives in
-// internal/gateway/dispatch_watch_test.go
+// dispatcher-side test lives in internal/chatsession/watchmode_gate_test.go
 // (TestDispatchInbound_WatchModeGate_DMInvariant).
 func TestComputeHasMention_DMInvariant(t *testing.T) {
 	cases := []struct {

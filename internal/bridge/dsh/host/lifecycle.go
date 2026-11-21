@@ -1,6 +1,6 @@
 // lifecycle.go — process management for the shared dsh web daemon.
 //
-// In the shared-host architecture (F-dsh-shared-host), exactly ONE
+// In the shared-host architecture (docs/bridge/dsh.md), exactly ONE
 // `dsh --profile web` subprocess serves every ChatSession. This
 // file owns the lifecycle; the rest of the package (client.go,
 // stream.go, router.go) talks to dsh over HTTP + WebSocket.
@@ -1559,8 +1559,7 @@ func spawnAndWire(ctx context.Context, opts SharedHostOptions, port int, logger 
 	// Install the host waterfall handler BEFORE Start — dsh sends
 	// the host $events `ready` frame immediately after the WS
 	// upgrade, so the handler must be wired before we dial. The
-	// install is process-once idempotent (see
-	// internal/bridge/dsh/host_waterfall.go::installHostHandler).
+	// install is process-once idempotent (see internal/bridge/dsh/host_waterfall.go::installHostHandler).
 	// Wired via a deferred host.OnLifecycleInstall to avoid an
 	// import cycle (this package is imported by the dsh package).
 	OnLifecycleInstall(cli)

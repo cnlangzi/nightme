@@ -180,7 +180,7 @@ func (s *echoSpawner) Spawn(_ context.Context, _, _ string, _ []string, _ string
 // ─── Runtime shim (mirror of cmd/nightme/run.go) ─────────────────────
 //
 // IMPORTANT: this closure mirrors the production shim at
-// cmd/nightme/run.go:407-477 verbatim. If the production shim
+// cmd/nightme/run.go verbatim. If the production shim
 // changes (e.g., the planned cs.WithChannel fix is added), this
 // helper MUST be updated in lockstep — the whole point of the test
 // is to mirror production wiring so the regression guard tracks
@@ -189,7 +189,7 @@ func (s *echoSpawner) Spawn(_ context.Context, _, _ string, _ []string, _ string
 // The duplication is deliberate: extracting the shim into a shared
 // package would force internal/command to import internal/gateway,
 // breaking the F-51 boundary rule documented at
-// internal/command/event.go:9-12. Once the bug is fixed we can
+// internal/command/event.go. Once the bug is fixed we can
 // consider extracting; until then, the duplication is the cost of
 // the boundary.
 
@@ -389,7 +389,7 @@ func (h *wiredHarness) driveSlash(t *testing.T, msg *messages.InboundMessage, wa
 // TestSlash_E2E_NewReply_ReachesEchoChannel is the regression guard
 // for the 2026-08-09 silent-drop bug.
 //
-// The runtime shim (cmd/nightme/run.go:447-454) guards every slash
+// The runtime shim (cmd/nightme/run.go) guards every slash
 // command reply on `cs.Emitter() != nil`. With the buggy wiring
 // (`mgr.WithEmitter(testEmitter)` + no `cs.WithChannel` call), the
 // guard is false for every chat and the reply is silently dropped.
@@ -416,7 +416,7 @@ func TestSlash_E2E_NewReply_ReachesEchoChannel(t *testing.T) {
 			"This is the 2026-08-09 regression: the runtime shim never " +
 			"binds cs.WithEmitter(...) so cs.Emitter() returns nil and " +
 			"every /cmd reply is dropped by the `ch != nil` guard at " +
-			"cmd/nightme/run.go:447-454.")
+			"cmd/nightme/run.go.")
 	}
 
 	// The first /new without a workspace replies with the
@@ -466,8 +466,7 @@ func TestSlash_E2E_NewReply_WithCwd_ReachesEchoChannel(t *testing.T) {
 
 	// Drive /new. selectedCwd is set; the pool is empty;
 	// newcmd's Handle returns "No agent session in current
-	// workspace to reset. Send a message to start one." (see
-	// internal/command/newcmd/cmd.go:108-109).
+	// workspace to reset. Send a message to start one." (see internal/command/newcmd/cmd.go).
 	newMsg := &messages.InboundMessage{
 		ChatID:    chatID,
 		UserID:    "ou_e2e_user",

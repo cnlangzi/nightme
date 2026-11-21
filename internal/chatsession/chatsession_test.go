@@ -402,7 +402,7 @@ func TestCreatedAtAndID(t *testing.T) {
 // subject (`currentTurnUserMsgID` scalar) is gone. The new
 // anchor lives on `AgentSession.currentPrompt.LastMessageID` and
 // is cleared automatically by `endPrompt` / agent-switch paths.
-// See docs/feat/message_lifecycle.md §4.2 + §5.1.
+// See docs/feat/F-53-message-prompt-lifecycle.md §4.2 + §5.1.
 //
 // TestSubmit_AnchorWriteIsRaceFree exercises the concurrent-write
 // fix on the Prompt anchor.

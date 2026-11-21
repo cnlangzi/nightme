@@ -371,7 +371,7 @@ func TestMarkSDKConnectedClearsRebuildState(t *testing.T) {
 
 // TestIsStrandedTerminal_DetectsSDKMessage pins the string-match
 // assumption against future SDK changes. The SDK's errClientTerminal
-// sentinel (ws/error.go:12) is unexported, so we can't errors.Is
+// sentinel (ws/error.go) is unexported, so we can't errors.Is
 // against it; we match by exact-message. Any SDK release that
 // changes this message will surface as a test failure.
 func TestIsStrandedTerminal_DetectsSDKMessage(t *testing.T) {

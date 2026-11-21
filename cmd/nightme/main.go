@@ -35,7 +35,7 @@ func init() {
 	// REPL is the intended interaction surface for explorer-launched
 	// binaries, so the nudge is counter-productive here. Clearing
 	// MousetrapHelpText to "" turns the check off entirely (see
-	// cobra.go:68-75 — empty string disables the message).
+	// cobra.go — empty string disables the message).
 	cobra.MousetrapHelpText = ""
 }
 

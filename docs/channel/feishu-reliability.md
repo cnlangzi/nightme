@@ -231,16 +231,15 @@ if waitDur > 100*time.Millisecond {
 
 ## 5. 接入点
 
-`internal/channel/feishu/adapter.go` 的 4 个底出口，**每个 SDK call 前都过 Wait**：
+`internal/channel/feishu/adapter.go` 的出口 API 调用（send / reply / patch / reaction 四类），**每个 SDK call 前都过 Wait**：
 
 | 函数 | Wait 调用位置 |
 |---|---|
-| `sendViaLarkCreate` | `a.limiter.Wait(ctx)` 在 `client.Im.V1.Message.Create(...)` 之前 |
-| `sendViaLarkReply` | 同上，在 `Message.Reply(...)` 之前 |
+| `sendViaLark` | 按 rootID / replyInThread 分流到 `ReplyInChat` / `ReplyInBoth` / `ReplyInThread`；三个 helper 各自在自己的 SDK call 前 `a.limiter.Wait(ctx)`（`internal/channel/feishu/reply.go`）|
 | `updateViaLark` | 在 `Message.Patch(...)` 之前 |
 | `AddReaction` | 在 `MessageReaction.Create(...)` 之前 |
 
-**`sendContent` 包装层不动**：rootID fallback 路径（230011 → top-level Create）第二次走 `sendViaLarkCreate` 仍会经 Wait，**单桶自动覆盖**。
+**`sendContent` 包装层不动**：rootID fallback 路径（230011 → top-level Create）第二次走 `sendViaLark` 仍会经 Wait，**单桶自动覆盖**。
 
 **`GetBotIdentity` 不走 limiter**：启动期低频，且不走 IM 配额。
 
@@ -248,7 +247,7 @@ if waitDur > 100*time.Millisecond {
 
 ## 6. 测试
 
-`internal/channel/feishu/ratelimit_test.go` 6 个单测：
+`internal/channel/feishu/ratelimit_test.go` 7 个单测：
 
 | 用例 | 验证 |
 |---|---|
@@ -258,12 +257,7 @@ if waitDur > 100*time.Millisecond {
 | `TestLimiter_Refill` | fakeClock.Advance(200ms) → tokens 重填，下次 acquire 立即成功 |
 | `TestLimiter_ContextCancel` | Wait 阻塞中 ctx.Done() 立即返回 ctx.Err() |
 | `TestLimiter_LongRunNoOvershoot` | fakeClock 跑 10s，acquire 51 次（5/s × 10 + initial burst），实际等待总和符合配置 |
-
-集成测试（`adapter_test.go`）：
-
-| 用例 | 验证 |
-|---|---|
-| `TestAdapter_RateLimit_PATCHStormThrottled` | 配 StrictDefault；mock sendFunc 记录 timestamp；触发 20 个连续 OutText → mock 收到的 timestamp 间隔 ≥ 200ms |
+| `TestLimiter_ConcurrentAcquire` | 10 个 goroutine 并发 Wait 全部成功返回（桶在并发下不死锁、不误拒）|
 
 ---
 
@@ -274,7 +268,7 @@ if waitDur > 100*time.Millisecond {
 | `larkws.WebSocket`（SDK 内置重连） | 不变；limiter 只约束**出口** API call，不约束 inbound |
 | `sendContent` rootID fallback（230011/231003） | 不变；fallback 第二次走 Create 仍经 Wait（单桶自动覆盖） |
 | `MessageReceipt.renderLocked` mutex | 不变；5 QPS / message_id 由它天然满足，不需 limiter 介入 |
-| Layer 1 `WithTransientRetry`（未来 PR） | 正交；retry 在 sendContent 外层，limiter 在 SDK call 内层，互不感知 |
+| Layer 1 `WithTransientRetry` | 正交；retry 在 sendContent 外层，limiter 在 SDK call 内层，互不感知 |
 | Echo channel（test only） | 不走 feishu，无影响 |
 
 ---
@@ -297,7 +291,7 @@ if waitDur > 100*time.Millisecond {
 4. 改 `internal/channel/feishu/adapter.go`：
    - `Adapter` 加 `limiter *Limiter` 字段
    - `NewAdapter` 末尾 `a.limiter = NewLimiter(cfg.Feishu.RateLimit, logger)`
-   - 4 个底出口（`sendViaLarkCreate` / `sendViaLarkReply` / `updateViaLark` / `AddReaction`）首行加 `if err := a.limiter.Wait(ctx); err != nil { return ... }`
+   - 底出口（`sendViaLark` → `ReplyInChat` / `ReplyInBoth` / `ReplyInThread`、`updateViaLark`、`AddReaction`）在 SDK call 前加 `if err := a.limiter.Wait(ctx); err != nil { return ... }`
 5. 验收：`go build ./... && go test ./internal/channel/feishu/... ./internal/config/... && go vet ./...`
 
 ---
@@ -390,12 +384,11 @@ var DefaultRetryConfig = RetryConfig{
 
 ## 3. 接入点
 
-`internal/channel/feishu/adapter.go` 的 4 个底出口，每个 SDK call 前都过 `WithTransientRetry`：
+`internal/channel/feishu/adapter.go` 的出口 API 调用（send / reply / patch / reaction 四类），每个 SDK call 前都过 `WithTransientRetry`：
 
 | 函数 | Retry 包裹 | Op 名 |
 |---|---|---|
-| `sendContent` → `sendViaLarkCreate` | ✅ | `"send"` / `"send_top_level"` |
-| `sendContent` → `sendViaLarkReply` | ✅ | 同上 |
+| `sendContent` → `sendViaLark` | ✅ | `"send"` / `"send_top_level"` |
 | `updateViaLark` | ✅ | `"patch_message"` |
 | `AddReaction` | ✅ | `"add_reaction"` |
 
@@ -451,7 +444,7 @@ sendContent(ctx, chatID, msgType, content, rootID)
     └ func() (string, error) {
         return send(ctx, chatID, msgType, content, rootID)
       }
-       └ sendViaLark (rootID != "" → sendViaLarkReply, else sendViaLarkCreate)
+       └ sendViaLark (rootID == "" → ReplyInChat, 否则 ReplyInBoth / ReplyInThread)
          └ limiter.Wait(ctx)       ← F-35 内层
          └ SDK call
 ```
@@ -462,7 +455,7 @@ sendContent(ctx, chatID, msgType, content, rootID)
 
 ## 6. 测试
 
-`internal/channel/feishu/retry_test.go` 14 个单测：
+`internal/channel/feishu/retry_test.go` 17 个单测：
 
 | 类别 | 用例 | 验证 |
 |---|---|---|
@@ -498,7 +491,7 @@ sendContent(ctx, chatID, msgType, content, rootID)
 ## 8. 实施步骤
 
 1. 新增 `internal/channel/feishu/retry.go`（`RetryConfig` + `DefaultRetryConfig` + `normalize` + `IsTransient` + `logDegradation` + `RetryOpts` + `WithTransientRetry` + `WithTransientRetryMsg` + `jitter`）
-2. 新增 `internal/channel/feishu/retry_test.go`（14 单测）
+2. 新增 `internal/channel/feishu/retry_test.go`（17 单测）
 3. 改 `internal/channel/feishu/adapter.go`：
    - `sendContent` 把 `send(...)` 包进 `WithTransientRetryMsg`，fallback 也包
    - `updateViaLark` 把 SDK call 包进 `WithTransientRetry`
@@ -523,7 +516,7 @@ sendContent(ctx, chatID, msgType, content, rootID)
 
 ### 0.1 SDK 默认行为(已读源码确认)
 
-`larksuite/oapi-sdk-go/v3@v3.9.9/ws/client.go:186-190`:
+`larksuite/oapi-sdk-go/v3@v3.13.0/ws/client.go`:
 
 ```go
 autoReconnect:     true,
@@ -533,12 +526,12 @@ reconnectInterval:  2 * time.Minute,
 pingInterval:      2 * time.Minute,
 ```
 
-reconnect 触发链(`client.go:519-528`):
+reconnect 触发链(`ws/client_lifecycle.go` 的 `runCoordinator` / `reconnectAfterFailure`):
 
 ```
-receiveMessageLoop reads → 失败(err != nil) → defer → disconnect(ctx) + reconnect(ctx)
+连接建立 → waitForConnectionExit 读到失败(err != nil) → reconnectAfterFailure
 reconnect 循环:
-  首次 jitter 0-30s
+  首次 jitter 0-30s (randomReconnectDelay(reconnectNonce))
   然后每 reconnectInterval(2min) 一次
   reconnectCount = -1(无限)
 ```
@@ -550,7 +543,7 @@ reconnect 循环:
 - ❌ 没有 log(因为 SDK 静默等待 2min)
 - ❌ 用户发消息没回应
 
-F-40 加了 health 命令(可以看到断线),但**没做主动恢复** ── 用户依然要等 SDK 自己的 2min timer。
+F-40 加了 doctor 命令(可以看到断线),但**没做主动恢复** ── 用户依然要等 SDK 自己的 2min timer。
 
 ### 0.3 候选方案(已比较过)
 
@@ -622,9 +615,9 @@ prober 只有两个状态:
 
 ### 1.4 与 SDK 的交互
 
-- `Stop()` 关闭 socket + 取消 SDK 内部 goroutine(`larkws/client.go:344-352`)
-- `Start(ctx)` 重新拉 SDK connect 循环(`larkws/client.go:206-233`)
-- SDK 的 autoReconnect=true 仍然有效 ── 我们 Stop 之后如果网络短暂恢复,Start 期间 SDK 也能用 default 2min 兜底
+- prober 的 restarter 闭包调 `Adapter.ReconnectSDK(ctx)`(`internal/channel/feishu/adapter.go`):取消 SDK 的 run context(`larkws.Client.Start` 的 goroutine 随之返回)→ 等 SDK goroutine 退出 → 重新 spawn 一次 `Start(runCtx)`
+- 上一轮以 `*ws.ClientError` 结束时,`maybeRebuildClient` 会换一个全新的 `*larkws.Client`(老 client 已被 SDK 标记为 terminal)
+- SDK 的 autoReconnect=true 仍然有效 ── 我们重启期间如果网络短暂恢复,SDK 也能用 default 2min 兜底
 - 我们的 prober 跟 SDK reconnect timer **并行** ── 谁先连上谁赢
 
 ### 1.5 prober 终止
@@ -644,26 +637,34 @@ prober 只有两个状态:
 ```go
 type prober struct {
     adapter        *Adapter
-    interval       time.Duration         // 默认 30s
-    restarter      func() error           // 注入 ch.Stop() + ch.Start() 闭包
+    cfg            proberConfig          // Interval / Backoff，默认 30s / 100ms
+    restarter      func(ctx context.Context) error // 注入 ReconnectSDK 闭包
+    isConnectedFn  func() bool           // WS 是否已连通（每次 tick 后判断是否自停）
+    lifeMu         sync.Mutex
     stopCh         chan struct{}
     doneCh         chan struct{}
     startedAt      atomic.Pointer[time.Time]
     forceCount     atomic.Int64
     lastForceAt    atomic.Pointer[time.Time]
+    lastError      atomic.Pointer[string]
+    wakeKickCount  atomic.Int64
+    started        atomic.Bool
 }
 
-func newProber(adapter *Adapter, restarter func() error) *prober
-func (p *prober) Start()  // 启动 goroutine
-func (p *prober) Stop()   // 停止 goroutine (阻塞直到退出)
+func newProber(adapter *Adapter, restarter func(ctx context.Context) error) *prober
+func (p *prober) Start() bool   // 启动 goroutine；已在跑时返回 false
+func (p *prober) Stop()        // 停止 goroutine (阻塞直到退出)
+func (p *prober) Kick() bool   // 立刻触发一次 force-reconnect（OS wake 用）
 func (p *prober) Snapshot() ProberSnapshot
 
 type ProberSnapshot struct {
     Active        bool          // 是否在跑
     Interval      time.Duration // 间隔
+    StartedAt     time.Time     // 当前 cycle 开始
     ForceCount    int64         // 累计强制重启次数
     LastForceAt   time.Time     // 最近一次
-    StartedAt     time.Time     // 当前 cycle 开始
+    LastError     string        // 最近一次的错误（空 = 上次干净）
+    WakeKickCount int64         // OS-wake 触发的额外 kick 次数
 }
 ```
 
@@ -685,21 +686,43 @@ prober 字段加到 `Adapter` 结构体,跟 `health` 字段同级。
 Prober ProberSnapshot `json:"prober"`
 ```
 
-**`cmd/nightme/health.go`** ── 新 section `PROBER` 在 STATUS 和 LIVENESS 之间:
+**`cmd/nightme/doctor.go`** ── doctor 的文本输出按 channel 渲染**归一化摘要**;prober 状态在 `--json` 的原始 payload 里:
 
 ```
-PROBER
-  active:          yes
-  interval:        30s
-  force_attempts:  12         (累计)
-  last_force_at:   5s ago
-  started_at:      2m15s ago
+$ nightme doctor
+CHANNEL feishu
+  status:          disconnected
+  link verified:   no
+  last inbound:    5m ago
+  last outbound:   5m ago
+```
+
+```
+$ nightme doctor --json
+{
+  "channels": [
+    {
+      "channel": "feishu",
+      "summary": { "...": "归一化摘要" },
+      "health": {
+        "connected": false,
+        "prober": {
+          "active": true,
+          "interval": 30000000000,
+          "force_count": 12,
+          "last_force_at": "...",
+          "started_at": "..."
+        }
+      }
+    }
+  ]
+}
 ```
 
 ### 2.3 保留不变
 
-- `internal/daemoncontrol/{server,client,protocol}.go` ── 不改(health RPC 已经能传任意 JSON)
-- `internal/channel/feishu/receipt.go` / `receipt_event.go` ── 不改
+- `internal/daemoncontrol/server.go` / `protocol.go` ── 不改(health RPC 已经能传任意 JSON)
+- `internal/channel/feishu/receipt.go` ── 不改
 - `cmd/nightme/{run,daemon_lifecycle,root}.go` ── 不改
 - SDK 的 `WithAutoReconnect` 等参数 ── 不改(SDK 默认行为保持,作为兜底)
 
@@ -715,20 +738,17 @@ PROBER
 | `TestProber_TickerFires` | mock 30ms interval,2 次 ticker 内 restarter 至少被调 1 次 |
 | `TestProber_StopOnConnect` | 调用 `recordForceResult(success=true)` → prober 自动 Stop |
 | `TestProber_RetryOnFailure` | restarter 失败 → 继续 ticker,`forceCount` 累加 |
-| `TestProber_ResetOnConnect` | 多次断开/重连 → prober 正确 start/stop 多次 |
 | `TestProber_Snapshot` | Snapshot 字段反映最新状态 |
+| `TestProber_StartStopSequential` | 停掉后能再次 Start（`started` 的 CAS 语义）|
+| `TestProber_Kick` | `Kick()` 立刻触发一次 force-reconnect |
+| `TestProber_KickDormantNoop` | prober 未启动时 `Kick()` 返回 false |
+| `TestProber_KickAfterStopNoop` | Stop 之后 `Kick()` 不再触发 |
+| `TestProber_WakeKickCount` | OS-wake 的 kick 次数被记进 snapshot |
 
-### 3.2 集成测试(`adapter_test.go`)
+### 3.2 端到端
 
-| 用例 | 断言 |
-|---|---|
-| `TestAdapter_OnDisconnected_StartsProber` | mock SDK 触发 OnDisconnected → prober Active=true,30s 后 mock restarter 被调 |
-| `TestAdapter_OnReconnected_StopsProber` | OnReconnected → prober Active=false,ForceCount 累加 |
-
-### 3.3 端到端
-
-- `nightme health` 在 disconnect 期间显示 `active: yes`,connected: no
-- 网络恢复后 → prober stop → `active: no`,connected: yes,force_count 计数
+- `nightme doctor --json` 在 disconnect 期间显示 `prober.active: true`,`connected: false`
+- 网络恢复后 → prober stop → `prober.active: false`,`connected: true`,`prober.force_count` 累计
 
 ---
 
@@ -755,7 +775,7 @@ commit B: feat(feishu): F-41 30s forced reconnect prober
          internal/channel/feishu/reconnect_test.go (NEW)
          internal/channel/feishu/adapter.go (wire SDK callbacks to prober)
          internal/channel/feishu/health.go (WSHealthSnapshot.Prober field)
-         cmd/nightme/health.go (PROBER section)
+         cmd/nightme/doctor.go (prober 状态经 --json 输出)
 
 2 commits, ~150 lines new code + ~150 lines tests.
 ```
@@ -764,11 +784,11 @@ commit B: feat(feishu): F-41 30s forced reconnect prober
 
 ## 6. 与 F-40 的关系
 
-F-40 加了**观测**(health 命令 + struct log),用户能看到"WS 断了"。
+F-40 加了**观测**(doctor 命令 + struct log),用户能看到"WS 断了"。
 F-41 加了**主动恢复**(prober 让 WS 30s 内尝试重连),用户能少等。
 
 两者叠加 = 完整闭环:
-1. F-40 让你**知道**断线了(看 health)
+1. F-40 让你**知道**断线了(看 doctor)
 2. F-41 让断线**少发生** / 持续时间**短**(30s 一次强制重连)
 
 ---

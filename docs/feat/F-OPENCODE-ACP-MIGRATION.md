@@ -1,30 +1,22 @@
 # F-OPENCODE-ACP-MIGRATION — opencode bridge 迁移到 ACP 模式
 
 > **Status**: ✅ 完成 (Phase 0 / Phase 1 / Phase 2 / 收尾清理 全部落地)
-> **Scope**: `internal/bridge/opencode/`(Phase 0 期间临时叫 `opencode_acp` 以与旧 HTTP serve 包并存;Phase 2 旧包删除后改回 `opencode`)
-> **Supersedes**: `docs/bridge/opencode.md` §1.2 "三不做"(已随 Phase 2 一并删除 — 见本 doc §6)
-> **Related**: [`docs/bridge/acp.md`](./acp.md), [`docs/bridge/codex.md`](./codex.md), [`docs/bridge/pi.md`](./pi.md) — 同期 long-lived bridge 设计基线
-> [`docs/bridge/codex.md`](../bridge/codex.md), [`docs/bridge/pi.md`](../bridge/pi.md) — 同期 long-lived bridge 设计基线
+> **Scope**: `internal/bridge/opencode/`
+> **Supersedes**: 旧的 `opencode serve` HTTP 桥接(见本 doc §9)
+> **Related**: [`docs/bridge/acp.md`](../bridge/acp.md), [`docs/bridge/codex.md`](../bridge/codex.md), [`docs/bridge/pi.md`](../bridge/pi.md) — 同期 long-lived bridge 设计基线
 > **官方资料**: <https://opencode.ai/docs/acp/> ("All features are supported"), <https://agentclientprotocol.com/>
 
 ---
 
 ## 0. 动机(为什么做这次迁移)
 
-### 0.1 现状
+### 0.1 迁移前的现状
 
-nightme 的 opencode 集成(`internal/bridge/opencode/`)走 **HTTP serve** 路径:`opencode serve --hostname=127.0.0.1 --port=0` → 手写 Go HTTP client 9 个 endpoint → 自实现 SSE 解析器 → 14 种 SSE event 类型翻译为 `AgentEvent`。
+nightme 曾经的 opencode 集成走 **HTTP serve** 路径:`opencode serve --hostname=127.0.0.1 --port=0` → 手写 Go HTTP client 9 个 endpoint → 自实现 SSE 解析器 → 14 种 SSE event 类型翻译为 `AgentEvent`。
 
-**代码体量**:4 个核心文件,~3500 行 Go 代码
+**代码体量**:4 个核心文件,~3500 行 Go 代码 —— 一个负责 spawn `opencode serve` + 解析 stdout banner URL,一个负责 9 个 HTTP endpoint + `{data: Session}` 信封兼容,一个负责 14 种 SSE event → AgentEvent 翻译表 + 流式 text buffer,最后一个负责生命周期、SSE 重连、watchdog、liveness probe。这四个文件已随迁移删除。
 
-| 文件 | 行数 | 角色 |
-|---|---:|---|
-| `server.go` | 349 | spawn `opencode serve` + 解析 stdout banner URL |
-| `client.go` | 545 | 9 个 HTTP endpoint + `decodeSession` 信封兼容 |
-| `translate.go` | ~1300 | 14 种 SSE event → AgentEvent 翻译表 + 流式 text buffer |
-| `agent.go` + `driver.go` | ~1500 | 生命周期、SSE 重连、watchdog、liveness probe |
-
-**踩坑密度**(从 `docs/bridge/opencode.md` 和 git 历史整理):
+**踩坑密度**(从当时的 bridge 文档和 git 历史整理):
 - opencode 1.18 `{data: Session}` 信封(translate decode 双形态)
 - 1.18.x SSE 500 ServeError on `GET /api/session/{id}/event`(e2e 自动 skip)
 - readSSE + lifecycle 死锁(`pumpWG` + `stopDeliver` + `close(events)` 顺序)
@@ -76,19 +68,13 @@ new AgentSideConnection((conn) => agent.create(conn))             // ← @agentc
 
 ### 0.3 历史 drift 痕迹
 
-`cmd/nightme/agents_test.go:34` 写的期望就是 `Args: []string{"acp"}`:
-
-```go
-{Name: "opencode", Command: "opencode", Args: []string{"acp"}},
-```
-
-`internal/agent/interface_external_unix_test.go:43` 也有一个独立 acp 注册:
+`internal/agent/interface_external_unix_test.go` 里有一个独立的 acp 注册:
 
 ```go
 {"acp", acp.NewStarter("acp", "opencode", []string{"acp"}, nil, 0, 0)},
 ```
 
-但 `cmd/nightme/agents.go:68` 实际注册的是 `opencode.NewStarter("opencode", "opencode", nil)`(无参,触发 serve 路径)。**测试期望的 acp 路径从未真的被默认用户走通**。这是历史 drift 留下的矛盾。
+而 `cmd/nightme/agents.go` 当时注册的是 `opencode.NewStarter("opencode", "opencode", nil)`(无参,触发 serve 路径)。**测试期望的 acp 路径从未真的被默认用户走通**。这是历史 drift 留下的矛盾。
 
 ---
 
@@ -96,7 +82,7 @@ new AgentSideConnection((conn) => agent.create(conn))             // ← @agentc
 
 ### 1.1 主目标
 
-把 nightme 的 opencode 集成从私有 HTTP serve wire 切到标准 ACP wire,删除 ~3500 行 opencode-私有 SSE 翻译代码,复用 `internal/bridge/acp/` 通用设施,保留 `opencode run --format json` 的 print-mode 单转路径。
+把 nightme 的 opencode 集成从私有 HTTP serve wire 切到标准 ACP wire,删除 ~3500 行 opencode-私有 SSE 翻译代码,复用 `internal/bridge/acp/` 通用设施。长生命周期会话和 one-shot 单转都走同一条 ACP transport。
 
 ### 1.2 非目标(本期不做)
 
@@ -113,26 +99,21 @@ new AgentSideConnection((conn) => agent.create(conn))             // ← @agentc
 
 ## 2. 设计基线
 
-### 2.1 文件 layout(从 ~4000 行收到 ~1500 行)
+### 2.1 文件 layout
 
 ```
 internal/bridge/opencode/
-├── opencode.go            # 常量 + 错误 + 包级 helper + Info + Starter(~100 行)
-├── acp.go                 # thin wrapper over internal/bridge/acp (~50 行)
-├── print.go               # one-shot `opencode run --format json`(~600 行,保留)
-├── print_test.go          # 单转模式测试(~300 行,保留)
-└── (删除)
-    server.go              # 已被 acp transport 替代
-    client.go              # 已被 acp JSON-RPC 替代
-    translate.go           # 已被 acp session/update 路由替代
-    agent.go / driver.go   # 已被 acp driver + new acp.go 替代
-    transport.go           # 已被 acp JSON-RPC framing 替代
-    think_tags.go          # 已被 acp session/update 路由的 agent_thought_chunk 分支替代
-    testdata/              # 已被 acp mockTransport 替代
-    *_test.go (12 个)      # 已被 acp 现有 8 个 test 替代 + print 单转测试
+├── opencode.go        # 包级常量 + debug logger(108 行)
+├── starter.go         # Starter(spawn recipe)+ Start / RunOnce / Review(178 行)
+├── model.go           # 转发用户自己配置的模型(见 §4.6.3)(217 行)
+├── model_test.go
+├── model_unix_test.go
+├── model_real_test.go
+├── starter_test.go
+└── telemetry_test.go
 ```
 
-**总体减负**:~3500 行删除 + ~150 行新增 = **净减 ~3350 行**。这部分代码不需要重写,只是换成 ACP 标准 wire。
+~4000 行的私有实现收到 928 行(含测试):HTTP client、SSE 翻译、stream buffer、serve plumbing 全部由 `internal/bridge/acp/` 的通用实现承担,opencode 这一层只留 spawn recipe、模型转发和包级 logger。
 
 ### 2.2 复用策略
 
@@ -152,34 +133,30 @@ nightme ──spawn──> opencode acp  (PTY 走 stdin/stdout)
                     │   ├── available_commands_update → 日志(log only)
                     │   └── session.status:idle      → EventAgentDone (Reason="settled")
                     │
-                    └── (one-shot)
-                        │
-                        └── opencode run --format json <prompt>
-                            └── NDJSON 流: text / reasoning / tool_use / step_start / step_finish
-                                → RunResult
+                    └── (one-shot: /gtw commit、/gtw pr)
+                        └── 同一条 transport:Start → SendBlocks → drain → Close
+                            prompt 走协议管道,不受 argv 长度限制
 ```
 
 ### 2.3 路径分流
 
 | 调用入口 | 协议 | 物理载体 | 文件 |
 |---|---|---|---|
-| `Start()` (chat session 长生命周期) | ACP JSON-RPC 2.0 | PTY(opencode 自己的 stdin/stdout) | `acp.go` |
-| `RunOnce()` (one-shot: `/gtw` commit, buildAgentPrompt) | `opencode run --format json` NDJSON | 直接 stdout pipe | `print.go` |
-| `ListModels/Providers` 等 list 查询(本期不需要) | (deprecated) | — | — |
+| `Start()` (chat session 长生命周期) | ACP JSON-RPC 2.0 | PTY(opencode 自己的 stdin/stdout) | `starter.go` |
+| `RunOnce()` (one-shot:`/gtw commit`、`/gtw pr`) | ACP JSON-RPC 2.0(同一条 transport) | PTY | `starter.go` |
+| `Review()` (`/review`) | ACP JSON-RPC 2.0 | PTY | `starter.go` |
 
 ### 2.4 不变量(跨路径统一)
 
 1. `EventAgentDone ≠ close events channel`
-   - `acp.go` 长生命周期:PTY EOF / `Close()` → close(events);`EventAgentDone` 只标志 turn 结束
-   - `print.go` one-shot:读完 stdout EOF + cmd.Wait 完成后 → 返回 `RunResult`,无 events channel
+   - 长生命周期:PTY EOF / `Close()` → close(events);`EventAgentDone` 只标志 turn 结束
+   - one-shot:Start → SendBlocks → drain → Close,走的是同一条 events 链路
 
 2. Producer-side back-pressure contract
-   - `acp.go` 复用 `acp.deliver()` 的"events chan 40960 + 不 drop"模式
-   - `print.go` 用 buffered scanner + stdout pipe,无 producer back-pressure 概念
+   - 复用 `acp.deliver()` 的"events chan 40960 + 不 drop"模式
 
 3. `EventAgentError.Diagnostic` 永远带 `StderrTail`(让 runtime 能 surface "为什么 opencode 死了")
-   - `acp.go` 复用 `pty.Transport` 的 stderr 收集
-   - `print.go` 走原有 stderr 收集 + `cmd.Process.Wait()`
+   - 复用 `pty.Transport` 的 stderr 收集
 
 ---
 
@@ -191,19 +168,20 @@ opencode 1.18.18 acp server 实际产出的 sessionUpdate 类型(`/tmp/acp-event
 
 | ACP sessionUpdate | 含义(opencode 1.18) | AgentEvent 映射 | 处理位置 |
 |---|---|---|---|
-| `user_message_chunk` | 回放用户消息(replay) | (drop) | **generic fallback** |
-| `agent_message_chunk` | assistant 文本流 | `EventAgentText{Text}` | **generic fallback** |
-| `agent_thought_chunk` | reasoning / thinking 文本流 | `EventAgentText{Text="[思考] " + ...}` | **generic fallback** |
-| `tool_call` (status=pending) | 工具调用开始 | `EventAgentToolStart{ID, Name, Args}` | **generic fallback** |
+| `agent_message_chunk` | assistant 文本流 | 缓冲 → `EventAgentText{Text}` | **generic fallback** |
+| `agent_thought_chunk` | reasoning / thinking 文本流 | 缓冲 → `EventAgentThinking{Text}` | **generic fallback** |
+| `tool_call` | 工具调用开始 | `EventAgentToolStart{ID, Name, Args}` | **generic fallback** |
 | `tool_call_update` (status=running) | 工具运行中 | (可选)更新 output | **generic fallback**（status=running 当前 drop，飞书/tui 不渲染 mid-progress）|
 | `tool_call_update` (status=completed) | 工具完成 | `EventAgentToolEnd{ID, Name, Output}` | **generic fallback** |
 | `tool_call_update` (status=errored) | 工具失败 | `EventAgentToolEnd{ID, Name, Err}` | **generic fallback** |
+| `message_chunk` | legacy 文本流 | 同 `agent_message_chunk` | **generic fallback** |
 | `usage_update` | token 用量 / context window | stash 到 `lastUsage`; turn-end 落 `Done.Usage` | **generic fallback** |
 | `session.status` (idle) | turn-end signal | `EventAgentDone{Reason:"settled", Usage: lastUsage}` | **generic fallback** |
 | `session_info_update` | session metadata 变化 | `model` 字段写 `d.model`（其他字段 reserved）| **generic fallback** |
+| `config_option_update` | 配置变更 | 写 `d.model` | **generic fallback** |
+| `user_message_chunk` | 回放用户消息(replay) | (drop) | **generic fallback** default |
 | `available_commands_update` | 可用 slash command 列表 | log only | **generic fallback** default（v2 wire `plans/slash-command-reactions`）|
 | `current_mode_update` | 模式变更(build/plan) | log only | **generic fallback** default（opencode 1.18.18 偶发空 payload,留 v2）|
-| `config_option_update` | 配置变更 | log only | **generic fallback** default |
 | `plan` | 任务规划 | log only(v1); v2 wire `EventAgentTaskCreate/Update` | **generic fallback** default |
 
 > **更新（v0.x）**：上表所有 kind 自 [date of fix-acp-model PR] 起由 **generic fallback**（`internal/bridge/acp/agent.go::handleSessionUpdate`）接管，opencode **不再需要**写自己的 `update.go`。§4.4 的设计仍保留作为"opencode 未来如果引入 vendor-private 协议时可参照"的模板，但**当前不需要落地**。详见 `docs/bridge/acp.md` §1.1 / §2.3。
@@ -221,300 +199,92 @@ opencode 1.18.18 acp server 实际产出的 sessionUpdate 类型(`/tmp/acp-event
 | `session/update` notification | A→C | **本次新增**:完整 sessionUpdate 路由表 |
 | `session/status` event | A→C(`session.status` type=idle) | **本次新增**:`EventAgentDone{Reason="settled"}` |
 
-### 3.3 AgentEvent emission 规则（已被 generic fallback 取代）
+### 3.3 AgentEvent emission 规则
 
-> **更新（v0.x）**：本节原本描述的 opencode `update.go` 设计**不再需要落地**。所有 emission 规则已由 `internal/bridge/acp/agent.go::handleSessionUpdate` 的 generic fallback 实现。opencode 直接走 generic，不装任何 per-bridge UpdateHandler。完整 mapping 见 [docs/bridge/acp.md §2.1](../../bridge/acp.md)。
->
->下面是**历史设想**的 opencode `update.go` 实现，仅作为"未来如需 vendor-private 协议扩展"的参考模板保留：
-
-```go
-// (历史草图 — 当前不实现；保留作为扩展模板)
-// text / reasoning
-case "user_message_chunk":     // drop
-case "agent_message_chunk":    emit(EventAgentText{Text: chunk.content.text})
-case "agent_thought_chunk":    emit(EventAgentText{Text: "[思考] " + chunk.content.text})
-
-// tool calls
-case "tool_call":              emit(EventAgentToolStart{ID, Name, Args=string(rawInput)})
-case "tool_call_update":
-    switch status:
-        case "completed":      emit(EventAgentToolEnd{ID, Name, Output=string(rawOutput)})
-        case "errored":        emit(EventAgentToolEnd{ID, Name, Err: errFrom(rawOutput)})
-
-// usage
-case "usage_update":           d.lastUsage = &UsageInfo{Used, Size, Cost}; (defer to turn-end)
-
-// session status
-case "session.status:idle":    emit(EventAgentDone{Reason: "settled", Usage: d.lastUsage})
-
-// modes / config / info / plan / commands
-case "available_commands_update", "current_mode_update", "config_option_update",
-     "session_info_update", "plan":
-    oLog("[opencode/acp] update received", "kind", kind, ...)
-    // v2 routing
-```
+所有 emission 规则由 `internal/bridge/acp/agent.go::handleSessionUpdate` 的 generic fallback 实现。opencode 直接走 generic,不装任何 per-bridge UpdateHandler。完整 mapping 见 [docs/bridge/acp.md §2.1](../bridge/acp.md);vendor-private 协议的扩展点 API 见该文档 §2.3。
 
 ---
 
 ## 4. 文件-by-文件设计
 
-### 4.1 `internal/bridge/opencode/opencode.go`(包常量 + 错误)
-
-参考 `internal/bridge/opencode/opencode.go` 当前 257 行,**精简约一半**,只保留:
+### 4.1 `internal/bridge/opencode/opencode.go`(包常量 + logger)
 
 ```go
 package opencode
 
-import "time"
+// bridgeName is the AgentName stamped on every AgentEvent.
+const bridgeName = "opencode"
 
-// ─── timing ───
-const (
-    serverStartTimeout   = 10 * time.Second // shared with pty.NewTransport handshake
-    permissionTimeout    = 5 * time.Minute
-    turnWatchdogTimeout  = 10 * time.Minute
-)
+// opencodeDebug toggles the bridge's detailed debug logging.
+// Default ON; silence with NIGHTME_OPENCODE_DEBUG=0.
+var opencodeDebug = opencodeDebugEnabled()
 
-// ─── buffer / cap ───
-const (
-    eventBufferSize = 40960 // match codex/pi/claudecode/acp producer-side contract
-    maxImageBytes   = 10 * 1024 * 1024
-)
-
-// ─── errors ───
-var (
-    ErrPermissionTimeout = errors.New("opencode: permission request timed out")
-    ErrSessionClosed     = errors.New("opencode: session closed")
-)
-
-// ─── env ───
-const bridgeName = "opencode"  // agent.AgentName stamped on every event
-const version    = "0.2.0"     // bumped: migration to ACP
-
-// oLog is the bridge-side debug logger.
-func oLog(msg string, args ...any) { /* same as current */ }
+// oLog emits an info-level message tagged [opencode] when debug is enabled.
+func oLog(msg string, args ...any) { ... }
 ```
 
-### 4.2 `internal/bridge/opencode/acp.go`(~250 行)
+### 4.2 `internal/bridge/opencode/starter.go`(Starter + 三个入口)
 
 ```go
 package opencode
 
-import (
-    "context"
-    "encoding/json"
-    "sync"
-    
-    "github.com/cnlangzi/nightme/internal/agent"
-    "github.com/cnlangzi/nightme/internal/bridge/acp"
-)
-
-// acpStarter is the spawn recipe. Same shape as internal/bridge/acp.Starter,
-// but specialized to opencode's binary + default args. The wire-format
-// details (JSON-RPC framing, PTY transport, Stop fallback) all live in
-// internal/bridge/acp; this file is the opencode-specific thin wrapper.
-type acpStarter struct {
-    name    string
-    command string
-    args    []string  // ["acp"]
+// Starter is the opencode spawn recipe.
+type Starter struct {
+    name           string
+    command        string
+    defaultCommand string
+    args           []string
 }
 
-func NewACPStarter(name, command string) *acpStarter {
-    return &acpStarter{name: name, command: command, args: []string{"acp"}}
-}
-
-// Info returns agent.Info with ModeACP.
-func (s *acpStarter) Info() agent.Info {
-    return agent.NewInfo(s.name, agent.ModeACP, s.command, s.args, nil)
-}
-
-// Start delegates to internal/bridge/acp. The bridge-specific session
-// surface (text stream buffer, think tags, tool name normalization,
-// usage carry-over) lives in this file's wrapped driver.
-func (s *acpStarter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agent, error) {
-    return acp.NewStarter(s.name, s.command, s.args, nil, 0, 0).
-        Start(ctx, cfg, opencodeSessionDecorator())
-}
-
-// RunOnce delegates to print.go.
-func (s *acpStarter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
-    return runPrintMode(ctx, /* ... */)
-}
+func NewStarter(name, command string, args []string) *Starter
+func (s *Starter) Info() agent.Info    // ModeACP
+func (s *Starter) Detect() error       // ResolveCommand
+func (s *Starter) Init(command string) // cfg.Agents 覆盖
+func (s *Starter) Command() string
+func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agent, error)
+func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock, opts ...agent.RunOnceOption) (agent.RunResult, error)
+func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error)
 ```
 
-> **更新（v0.x）**：原 §4.2 设计 `internal/bridge/opencode/update.go` + `SetUpdateHandler()` 路径**不再落地**。
->
-> 经验证，opencode 1.18.x wire 实际产出的所有 sessionUpdate 类型（包括 `usage_update`、`session.status:idle`、`session_info_update` 等）都已落在 [docs/bridge/acp.md §2.1](../../bridge/acp.md) 列出的"generic fallback"覆盖范围内。直接复用 `acp.NewStarter` 就够 —— 不需要任何 per-bridge translator。
->
-> 本节保留作为"未来 opencode 引入 vendor-private 协议时可参照"的设计模板，但**当前不需要落地**。如果未来 opencode 添加 ACP spec 之外的私有 sessionUpdate kind 或 JSON-RPC method，模式如下：
->
-> ```go
-> drv.SetUpdateHandler(opencodeSessionDecorator)  // 或 SetMethodHandler
-> ```
->
-> 详见 `docs/bridge/acp.md` §2.3 / §6 的扩展点 API。
+- `Start` 委派给 `internal/bridge/acp` 的 starter:wire-level 的全部细节(JSON-RPC framing、PTY transport、Stop / Reset / Permission、sessionUpdate 路由)都在那一层。
+- `RunOnce` 走 `agent.RunSession`:开一个新 session、发一轮、关掉 —— prompt 走协议管道,不受 argv 长度限制。
+- `Review` 走 `agent.ReviewDispatch`。
 
-~~但等等,**简单复用 `acp.NewStarter` 不够** —— opencode acp server 产出的 sessionUpdate 类型(`agent_thought_chunk`、`usage_update`、`tool_call_update.status=errored` 等)需要专门翻译,而 `internal/bridge/acp/agent.go` 的 `handleSessionUpdate` 只硬编码了 4 个 case。~~（历史描述，已被上面的更新取代）
+opencode 不装任何 per-bridge UpdateHandler —— opencode 1.18.x wire 实际产出的所有 sessionUpdate 类型(including `usage_update`、`session.status:idle`、`session_info_update`)都已落在 [docs/bridge/acp.md §2.1](../bridge/acp.md) 的 generic fallback 覆盖范围内。如果将来 opencode 引入 ACP spec 之外的私有 sessionUpdate kind 或 JSON-RPC method,通过 `drv.SetUpdateHandler(...)` / `drv.SetMethodHandler(...)` 注入一个薄 translator 即可(见 `docs/bridge/acp.md` §2.3 / §6)。
 
-**两个选择**:
+### 4.3 `internal/bridge/opencode/model.go`(模型转发)
 
-**方案 A**(选这个):扩展 `internal/bridge/acp/agent.go::handleSessionUpdate`,把 sessionUpdate 路由表抽出来做成可注入的 `updateRouter`:
+见 §4.6.3。
+
+### 4.4 测试
+
+| 文件 | 覆盖 |
+|---|---|
+| `starter_test.go` | `Info` 的 mode / args / env、args 的防御性拷贝、`Detect` 的 PATH 查找 |
+| `model_test.go` | `opencode debug config` 的 JSON 解析(`parseEffectiveModel`) |
+| `model_unix_test.go` | `effectiveModel` 在 workspace 里跑命令、无模型配置、命令失败 |
+| `model_real_test.go` | 真机 e2e:`NIGHTME_OPENCODE_E2E=1` 才跑 |
+| `telemetry_test.go` | 子进程 env 里的 telemetry 开关 |
+
+### 4.6 `internal/bridge/acp/` 侧的扩展点
+
+#### 4.6.1 `driver` 的 `updateHandler` + `SetUpdateHandler`
+
+`internal/bridge/acp/agent.go` 提供三个注入点,给 vendor-private 协议用:
 
 ```go
-// internal/bridge/acp/agent.go
-type UpdateHandler func(ctx context.Context, d *driver, update json.RawMessage) error
+// UpdateHandler 收 raw session/update 的 params.update,自己负责发 AgentEvent。
+// 返回 error 只写日志,不掐断 stream —— wire-level 解码保持宽容。
+type UpdateHandler func(view *SessionView, raw json.RawMessage) error
 
-func (d *driver) SetUpdateHandler(h UpdateHandler) { d.updateHandler = h }
-
-func (d *driver) handleSessionUpdate(raw json.RawMessage) {
-    var params struct{ Update json.RawMessage `json:"update"` }
-    json.Unmarshal(raw, &params)
-    
-    var head struct{ SessionUpdate string `json:"sessionUpdate"` }
-    json.Unmarshal(params.Update, &head)
-    
-    if d.updateHandler != nil {
-        if err := d.updateHandler(context.Background(), d, params.Update); err != nil {
-            // log only — don't kill the stream
-        }
-        return
-    }
-    // fall back to existing 4-case behavior
-    switch head.SessionUpdate { /* ... */ }
-}
+func (d *driver) SetUpdateHandler(h UpdateHandler)
+func (d *driver) SetMethodHandler(h MethodHandler)
+func (d *driver) SetFlushHandler(h FlushHandler)
 ```
 
-然后 opencode 包装层注入完整的 opencode update 路由器(`handleUpdate` 闭包),保持 `internal/bridge/acp/` 的 wire-level 代码 100% 不动。
+`handleSessionUpdate` 的分派规则:装了 `updateHandler` 就 100% 交给它(避免双发);没装就走 generic fallback。`SetMethodHandler` 只接管**未识别**的 method,已识别的继续走 fallback。
 
-**方案 B**(不选):完全复制 `internal/bridge/acp/` 到 opencode 子包。重复代码 ~800 行,后期 patch acp 通用 bug 要同步两份。**否决**。
-
-### 4.3 `internal/bridge/opencode/print.go`(保留原 ~600 行)
-
-跟现有 `print.go` 一致,不变。`opencode run --format json` 是 opencode CLI 单转模式,跟 ACP 是完全不同的子命令,不会被影响。
-
-### 4.4 `internal/bridge/opencode/update.go`(~400 行,新增)
-
-```go
-package opencode
-
-// opencodeSessionDecorator returns the opencode-specific UpdateHandler
-// injected into the generic ACP driver. It implements the full
-// sessionUpdate → AgentEvent mapping table documented in §3.
-func opencodeSessionDecorator() acp.UpdateHandler {
-    return func(ctx context.Context, d *acp.driver, raw json.RawMessage) error {
-        var head struct {
-            SessionUpdate string          `json:"sessionUpdate"`
-            Content       json.RawMessage `json:"content"`
-            ToolCallID    string          `json:"toolCallId"`
-            Title         string          `json:"title"`
-            Status        string          `json:"status"`        // for tool_call_update
-            RawInput      json.RawMessage `json:"rawInput"`
-            RawOutput     json.RawMessage `json:"rawOutput"`
-        }
-        if err := json.Unmarshal(raw, &head); err != nil {
-            return err
-        }
-        switch head.SessionUpdate {
-        case "user_message_chunk":                // drop
-        case "agent_message_chunk":
-            text := decodeTextChunk(head.Content)
-            if text != "" { d.emit(agent.AgentEvent{Kind: agent.EventAgentText, Text: text}) }
-        case "agent_thought_chunk":
-            text := decodeTextChunk(head.Content)
-            if text != "" { d.emit(agent.AgentEvent{Kind: agent.EventAgentText, Text: "[思考] " + text}) }
-        case "tool_call":
-            argsJSON, _ := json.Marshal(head.RawInput)
-            d.emit(agent.AgentEvent{Kind: agent.EventAgentToolStart, ToolStart: &agent.AgentToolStartEvent{
-                ID:   head.ToolCallID,
-                Name: head.Title, // opencode uses `title` for human-readable name; rawInput has more
-                Args: string(argsJSON),
-            }})
-        case "tool_call_update":
-            switch head.Status {
-            case "completed":
-                outJSON, _ := json.Marshal(head.RawOutput)
-                d.emit(agent.AgentEvent{Kind: agent.EventAgentToolEnd, ToolEnd: &agent.AgentToolEndEvent{
-                    ID: head.ToolCallID, Name: head.Title, Output: string(outJSON),
-                }})
-            case "errored":
-                d.emit(agent.AgentEvent{Kind: agent.EventAgentToolEnd, ToolEnd: &agent.AgentToolEndEvent{
-                    ID: head.ToolCallID, Name: head.Title,
-                }, Err: fmt.Errorf("opencode: tool %s failed: %s", head.Title, string(head.RawOutput))})
-            case "running":
-                // optional: emit a second EventAgentToolStart with running progress
-                // v1: drop (飞书渲染层目前不支持 mid-progress)
-            }
-        case "usage_update":
-            var u struct {
-                Used int64   `json:"used"`
-                Size int64   `json:"size"`
-                Cost float64 `json:"cost"`
-            }
-            json.Unmarshal(raw, &u)
-            d.stashUsage(&agent.UsageInfo{
-                InputTokens: int(u.Used), // opencode reports "used" not input; v2 split
-                OutputTokens: 0,
-                CostUSD: u.Cost,
-                ContextWindow: int(u.Size),
-                ContextWindowPct: percent(u.Used, u.Size),
-            })
-        case "available_commands_update", "current_mode_update",
-             "config_option_update", "session_info_update", "plan":
-            oLog("[opencode/acp] update received", "kind", head.SessionUpdate)
-            // v2: route to runtime (F-slash-command-reactions / F-task-list etc.)
-        }
-        return nil
-    }
-}
-```
-
-### 4.5 `internal/bridge/opencode/acp_emit_helpers.go`(~150 行,新增)
-
-```go
-// decodeTextChunk extracts the text payload from a ContentChunk.
-func decodeTextChunk(raw json.RawMessage) string {
-    if len(raw) == 0 { return "" }
-    var c struct {
-        Type string `json:"type"`
-        Text string `json:"text"`
-    }
-    json.Unmarshal(raw, &c)
-    if c.Type != "text" { return "" }
-    return c.Text
-}
-
-// percent computes (used/size)*100 for usage_update, clamped to 0..100.
-func percent(used, size int64) float64 {
-    if size <= 0 { return 0 }
-    p := float64(used) / float64(size) * 100
-    if p > 100 { p = 100 }
-    if p < 0 { p = 0 }
-    return p
-}
-```
-
-### 4.6 缺失能力补丁(给 `internal/bridge/acp/agent.go`)
-
-#### 4.6.1 `acp.go::driver` 增加 `updateHandler` 字段 + `SetUpdateHandler`
-
-```go
-type driver struct {
-    /* ... existing fields ... */
-    updateHandler UpdateHandler  // nil → use built-in 4-case fallback
-}
-
-// UpdateHandler receives raw session/update params.update payloads and
-// is responsible for emitting AgentEvents. Returning an error logs the
-// error but does NOT kill the stream — wire-level decoding stays tolerant.
-type UpdateHandler func(ctx context.Context, d *driver, update json.RawMessage) error
-```
-
-**修改点**:
-- `driver` struct +1 字段
-- `(d *driver) SetUpdateHandler(h UpdateHandler)` (导出方法)
-- `handleSessionUpdate` 改成:if `d.updateHandler != nil`,route to it;else fall back to existing switch
-- export the `driver` field for access from opencode package... 或者通过 `agent.NewAgent` 出来的 wrapper 提供 setter
-
-后者更好:**给 `agent.Agent` 加一个 `OnSessionUpdate(UpdateHandler)` 配置方法**,跟 `OnText`、`OnToolStart` 之类的扩展点并列。
+opencode 不装任何 handler —— 它的所有 sessionUpdate kind 都在 fallback 覆盖范围内(§4.2)。
 
 #### 4.6.2 `agent.go::SendBlocks` 补 Image/File ACP 编码
 
@@ -555,7 +325,10 @@ type contentBlock struct {
 
 #### 4.7.1 单元测试(纯函数)
 
-`internal/bridge/opencode/update_test.go`:
+opencode 包不再有 per-bridge 的 update 翻译层 —— 事件全部由通用 ACP bridge 的 fallback 接管。落到测试上:
+
+- `internal/bridge/acp/deliver_stamp_test.go` —— `usage_update` / `session.status` 等 vendor-neutral 事件的翻译与 stamp 行为
+- `internal/bridge/opencode/model_test.go` —— `opencode debug config` 的输出解析
 
 ```go
 func TestHandleUpdate_AgentMessageChunk(t *testing.T) { /* ... */ }
@@ -677,14 +450,14 @@ func TestE2E_OpencodeACP_ToolUse(t *testing.T) {
 执行顺序:**先双注册共存 → 验证 → 切换默认 → 删除 serve**。三个阶段已全部落地(`fix-opencode` 分支):
 
 - **Phase 0**: ✅ 准备完成 — 新建 `opencode` 包(当时路径 `opencode_acp`)+ `UpdateHandler` hook + 本 doc 全部提交
-- **Phase 1**: ✅ 默认切换完成 — `cmd/nightme/agents.go` 已注册 `opencode.NewStarter`,`agents_test.go` 期望 `Args: [acp]` 一致
+- **Phase 1**: ✅ 默认切换完成 — `cmd/nightme/agents.go` 已注册 `opencode.NewStarter`,`agentconformance_test.go` 期望 `Args: [acp]` 一致
 - **Phase 2**: ✅ 删除完成 — `internal/bridge/opencode/` 26 文件 ~12000 行已 git rm
-- **收尾**: ✅ `update.go` 从 449 行收敛到 302 行;`SessionView.StashUsage` 与 per-bridge `lastUsage` 跟踪删除
+- **收尾**: ✅ per-bridge 的 update 翻译层整体删除;`SessionView.StashUsage` 与 per-bridge `lastUsage` 跟踪删除
 
 
 ### Phase 0(原计划:本 PR):准备
 
-- 新增 `internal/bridge/opencode/acp.go` + `update.go` + `update_test.go`
+- 新增 opencode 的 ACP 接入(最终落地为 `internal/bridge/opencode/starter.go` + `opencode.go` + `model.go`;per-bridge 的 update 翻译层最终没有落地)
 - 扩展 `internal/bridge/acp/agent.go` 加 `UpdateHandler` hook(最小侵入,~30 行 diff)
 - 写 `docs/feat/F-OPENCODE-ACP-MIGRATION.md`(本文档)
 - 双注册:`agents.go` 同时注册 `NewACPStarter("opencode-acp", "opencode")` + 旧的 `NewStarter("opencode", "opencode", nil)`,`opencode` 仍是 serve,`opencode-acp` 是新路径
@@ -793,13 +566,13 @@ NIGHTME_OPENCODE_E2E=1 go test -tags 'unix opencode_real_e2e' \
   - [x] `Detect()` LookPath
   - [x] `Start()` 委派 `acp.NewStarter(...).Start()` + `drv.SetUpdateHandler(newUpdateHandler(...))`
   - [x] `RunOnce()` 委派 `print.go::runPrintMode`
-- [x] ~~`internal/bridge/opencode/update.go`~~ → **已不需要**。opencode 直接走 generic fallback（见 [docs/bridge/acp.md §2.1](../../bridge/acp.md)）；`usage_update` / `session.status` / `session_info_update` / `agent_thought_chunk` 等全部由 generic 接管。仅当 opencode 引入 vendor-private 协议时才需要落地 `update.go`（§4.2 设计保留作模板）。
-- [x] ~~`internal/bridge/opencode/update_test.go`~~ → **已不需要**（原因同 update.go）。通用 fallback 的测试在 `internal/bridge/acp/deliver_stamp_test.go` 覆盖（13 个新测试）。
-- [x] ~~`internal/bridge/opencode/acp_integration_test.go`~~ → 不再需要,acp 桥本身的 `acp_test.go` 已覆盖;opencode 端的 e2e 走 `internal/bridge/opencode/starter_test.go` 的 Detect 路径
+- [x] per-bridge 的 update 翻译层 → **已不需要**。opencode 直接走 generic fallback（见 [docs/bridge/acp.md §2.1](../bridge/acp.md)）；`usage_update` / `session.status` / `session_info_update` / `agent_thought_chunk` 等全部由 generic 接管。仅当 opencode 引入 vendor-private 协议时才需要为 opencode 单独写一层（§4.2 设计保留作模板）。
+- [x] per-bridge 的 update 单测 → **已不需要**（原因同上）。通用 fallback 的测试在 `internal/bridge/acp/deliver_stamp_test.go` 覆盖。
+- [x] opencode 侧的 ACP 集成测试 → 不再需要,acp 桥本身的 `acp_test.go` 已覆盖;opencode 端的 e2e 走 `internal/bridge/opencode/starter_test.go` 的 Detect 路径
 - [x] `cmd/nightme/agents.go`:
   - [x] 改默认 `opencode` 为 `opencode.NewStarter("opencode", "opencode", []string{"acp"})`
   - [x] 注释更新:指 `https://opencode.ai/docs/acp/` "All features are supported"
-- [x] `cmd/nightme/agents_test.go`:
+- [x] `cmd/nightme/agentconformance_test.go`:
   - [x] 验证 `Args: []string{"acp"}` 期望 PASS
 - [x] ~~`docs/bridge/opencode.md`:重写~~ → 不重写;直接删除(本期随 Phase 2 一并落地)。`docs/FEATURES.md` OpenCode Bridge 行改指本文档;`docs/bridge/dsh.md` 中"HTTP+SSE 同构"姊妹链接删除(opencode 已不是 HTTP+SSE)
 - [x] `docs/feat/F-OPENCODE-ACP-MIGRATION.md`:写完(本文档,顶部 Status 已翻 ✅)

@@ -325,7 +325,7 @@ func errStr(err error) string {
 // scheduler pressure): if writeCommand ran first, the response
 // would be dispatched against an empty pending map and dropped.
 // The symmetric design -- pending-first -- is the same fix ACP
-// adopted in internal/bridge/acp/rpc.go:58-94.
+// adopted in internal/bridge/acp/rpc.go.
 func (c *rpcClient) request(ctx context.Context, name string, body any, idHint string) (responseEnvelope, error) {
 	if c.closed.Load() {
 		return responseEnvelope{}, ErrSessionClosed

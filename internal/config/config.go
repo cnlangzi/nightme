@@ -233,7 +233,7 @@ type FeishuConfig struct {
 //
 // Burst：桶容量（最大突发令牌数；1 = 无突发）。
 //
-// 详见 docs/feat/F-35-ratelimit.md。
+// 详见 docs/channel/feishu-reliability.md。
 type FeishuRateLimitConfig struct {
 	RatePerSec float64 `yaml:"rate_per_sec"`
 	Burst      int     `yaml:"burst"`

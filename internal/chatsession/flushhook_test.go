@@ -179,8 +179,7 @@ func TestFlushHook_NoActiveAgentSession(t *testing.T) {
 	// Simulate /close: kill the bridge process (Close) but DO NOT
 	// drop the AgentSession entry. The entry stays in the pool with
 	// StatusExited and its sessionID preserved. The close package's
-	// CloseAllAgents is tested separately in
-	// internal/command/close/close_test.go.
+	// CloseAllAgents is tested separately in internal/command/close/close_test.go.
 	//
 	// Production marks the AS Exited via the F-61 readpump chain:
 	// Close() closes the events channel → readpump observes !ok →
@@ -192,7 +191,7 @@ func TestFlushHook_NoActiveAgentSession(t *testing.T) {
 	// the events channel (production path) and then synchronously
 	// mark Exited + Shutdown to drain the readpump / dispatcher
 	// goroutines. The readpump's late SetExited is a no-op now
-	// (pump_events.go:128 skips the cascade when the AS is already
+	// (pump_events.go skips the cascade when the AS is already
 	// in StatusExited), so no double-write or RestartFromDeath
 	// thunderstorm.
 	snapshot := cs.AgentSessionsInCwd(cs.SelectedCwd())

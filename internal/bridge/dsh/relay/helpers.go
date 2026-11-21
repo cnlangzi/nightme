@@ -89,7 +89,7 @@ func blocksToPromptParts(blocks []agent.ContentBlock) ([]host.PromptPart, error)
 // helpers.go header for why.
 func readFileB64(path string) (string, error) {
 	// Inline import-free read to keep helpers.go dependency
-	// surface tiny; the same shape as session.go:1287.
+	// surface tiny; the same shape as session.go.
 	cmd := exec.Command("cat", path)
 	var out bytes.Buffer
 	cmd.Stdout = &out

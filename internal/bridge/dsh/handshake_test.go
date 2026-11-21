@@ -19,8 +19,7 @@ import (
 )
 
 // handshakeMock is a minimal dsh HTTP surface for handshake / Reset
-// tests. It does not speak WebSocket — those paths are covered by
-// host/host_test.go.
+// tests. It does not speak WebSocket — those paths are covered by host/host_test.go.
 type handshakeMock struct {
 	server *httptest.Server
 

@@ -1,7 +1,7 @@
 // Package feishu — WS *Client rebuild path.
 //
 // The larksuite/oapi-sdk-go v3 ws.Client sets an internal `terminal`
-// flag to true under three conditions (ws/client_lifecycle.go:125-128):
+// flag to true under three conditions (ws/client_lifecycle.go):
 //
 //   - runStopByContext — our cancel of the run context (the prober's
 //     ReconnectSDK does this on every tick; see recordLastStartErr
@@ -18,7 +18,7 @@
 //
 // The terminal flag freezes the *Client — every subsequent
 // client.Start returns errClientTerminal ("websocket client cannot
-// be restarted", ws/error.go:12) and the SDK has no reset / rearm
+// be restarted", ws/error.go) and the SDK has no reset / rearm
 // API. A brand-new *larkws.Client must be constructed.
 //
 // Two terminal signatures the rebuild path must detect:
@@ -90,7 +90,7 @@ const (
 	sdkMaxConsecutiveRebuilds = 5
 
 	// sdkErrClientTerminalMessage is the exact string the SDK's
-	// ws/error.go:12 errClientTerminal sentinel uses. The sentinel
+	// ws/error.go errClientTerminal sentinel uses. The sentinel
 	// is unexported (we can't errors.Is against it directly); the
 	// message is part of the SDK's public surface and pinned by
 	// TestIsStrandedTerminal_DetectsSDKMessage. Any SDK version
@@ -196,7 +196,7 @@ func isClientError(err error) bool {
 
 // isStrandedTerminal reports whether err is the SDK's
 // errClientTerminal sentinel ("websocket client cannot be restarted"
-// from ws/error.go:12). The sentinel is unexported, so we can't
+// from ws/error.go). The sentinel is unexported, so we can't
 // errors.Is against it — we match by exact-message. Detection
 // triggers the rebuild path (set cancelStrandedTerminal=true in
 // recordLastStartErr) but does NOT bump consecutiveFails; that

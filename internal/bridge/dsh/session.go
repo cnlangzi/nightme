@@ -1,5 +1,5 @@
 // session.go — long-lived chat session driver for the shared dsh
-// host (F-dsh-shared-host).
+// host (see docs/bridge/dsh.md).
 //
 // newDriver is the entry point. It does NOT spawn a dsh subprocess;
 // it looks up the shared *host.Client installed by cmd/nightme/main.go

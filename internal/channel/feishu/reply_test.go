@@ -88,8 +88,9 @@ func newTestAdapter(t *testing.T) *Adapter {
 		t.Skip("feishu.app_id / app_secret missing in nightme config")
 	}
 	return &Adapter{
-		larkClient: lark.NewClient(cfg.Feishu.AppID, cfg.Feishu.AppSecret),
-		limiter:    NewLimiter(nil, nil),
+		larkClient:          lark.NewClient(cfg.Feishu.AppID, cfg.Feishu.AppSecret),
+		limiter:             NewLimiter(nil, nil),
+		receiptsByUserMsgID: mustReceiptsCache(),
 	}
 }
 

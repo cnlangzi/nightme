@@ -16,6 +16,8 @@ import (
 	larkdispatcher "github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 
+	"github.com/hashicorp/golang-lru/v2"
+
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/messages"
@@ -32,6 +34,17 @@ func testAdapter(t *testing.T) *Adapter {
 	}
 	t.Cleanup(func() { _ = a.Stop(context.Background()) })
 	return a
+}
+
+// mustReceiptsCache builds the receipt index for adapters that a
+// test constructs directly instead of going through NewAdapter. The
+// size is a compile-time constant > 0, so the error cannot happen.
+func mustReceiptsCache() *lru.Cache[string, *MessageReceipt] {
+	cache, err := newReceiptsCache()
+	if err != nil {
+		panic(fmt.Errorf("feishu: mustReceiptsCache: %w", err))
+	}
+	return cache
 }
 
 func TestAdapter_Name(t *testing.T) {
@@ -1070,8 +1083,8 @@ func TestSend_OutCommandReply_PatchesPlaceholderReceipt(t *testing.T) {
 
 	// Step 1: simulate the MessageQueued path that pre-creates the
 	// placeholder receipt. Same shape as the runtime subscriber —
-	// adapter populates receiptsByUserMsgID[userMsgID] with a
-	// transient that has cardMsgID = "om_placeholder".
+	// adapter registers a transient receipt under userMsgID in
+	// receiptsByUserMsgID, with cardMsgID = "om_placeholder".
 	_, _, err := a.ensureReceiptForTyping(t.Context(), "oc_test", "om_cmd_1", nil)
 	if err != nil {
 		t.Fatalf("ensureReceiptForTyping: %v", err)
@@ -1976,7 +1989,7 @@ func TestSend_OutResult_EmptyPatchesReceiptFooter(t *testing.T) {
 	preExisting := NewMessageReceiptForReply("oc_test", "om_patch", a)
 	preExisting.cardMsgID = "oc_card_1"
 	preExisting.footerLines = []string{"old footer line"}
-	a.receiptsByUserMsgID["om_patch"] = preExisting
+	a.receiptsByUserMsgID.Add("om_patch", preExisting)
 
 	var sends int
 	a.sendFunc = func(_ context.Context, _, _, _, _ string, _ bool) (string, error) {
@@ -2019,7 +2032,7 @@ func TestSend_OutResult_EmptyWithErrPatchesReceipt(t *testing.T) {
 	a := testAdapter(t)
 	preExisting := NewMessageReceiptForReply("oc_test", "om_err", a)
 	preExisting.cardMsgID = "oc_card_err"
-	a.receiptsByUserMsgID["om_err"] = preExisting
+	a.receiptsByUserMsgID.Add("om_err", preExisting)
 
 	var sends int
 	a.sendFunc = func(_ context.Context, _, _, _, _ string, _ bool) (string, error) {
@@ -2195,8 +2208,11 @@ func TestEnsureReceiptForTask_Concurrent_OnlyOneSendCard(t *testing.T) {
 	// that PATCH must hit the winner's cardMsgID (set by the
 	// register-before-SendCard path), not any orphan card.
 	a.mu.Lock()
-	registered := a.receiptsByUserMsgID[userMsgID]
-	cardMsgID := registered.cardMsgID
+	registered, _ := a.receiptsByUserMsgID.Get(userMsgID)
+	cardMsgID := ""
+	if registered != nil {
+		cardMsgID = registered.cardMsgID
+	}
 	a.mu.Unlock()
 	if cardMsgID == "" {
 		t.Errorf("registered receipt has empty cardMsgID after the ensure path completed")
@@ -2276,7 +2292,7 @@ func TestSend_OutReply_FoldsIntoReceipt(t *testing.T) {
 	}
 	// Receipt IS created — F-44 revert: OutReply folds.
 	a.mu.RLock()
-	rcpt, ok := a.receiptsByUserMsgID["om_user"]
+	rcpt, ok := a.receiptsByUserMsgID.Get("om_user")
 	a.mu.RUnlock()
 	if !ok || rcpt == nil {
 		t.Errorf("receipt was NOT created for OutReply; F-44 revert: OutReply folds into receipt")
@@ -2323,7 +2339,7 @@ func TestSend_OutReply_MultipleChunks_PATCHesSameCard(t *testing.T) {
 	}
 	// Receipt should have all 3 entries.
 	a.mu.RLock()
-	rcpt := a.receiptsByUserMsgID["om_user"]
+	rcpt, _ := a.receiptsByUserMsgID.Get("om_user")
 	a.mu.RUnlock()
 	if rcpt == nil {
 		t.Fatalf("receipt missing")
@@ -2484,7 +2500,7 @@ func TestSend_OutReply_OverflowPlaceholderEmptyMsgID_TreatedAsFailure(t *testing
 
 	// Locate the receipt.
 	a.mu.RLock()
-	rcpt, ok := a.receiptsByUserMsgID["om_user"]
+	rcpt, ok := a.receiptsByUserMsgID.Get("om_user")
 	a.mu.RUnlock()
 	if !ok || rcpt == nil {
 		t.Fatalf("receipt not created on cold-start; F-44 revert: OutReply folds into receipt")
@@ -2574,7 +2590,7 @@ func TestSend_OutReply_OverflowPlaceholderSendError_ReceiptUntouched(t *testing.
 	}
 
 	a.mu.RLock()
-	rcpt := a.receiptsByUserMsgID["om_user"]
+	rcpt, _ := a.receiptsByUserMsgID.Get("om_user")
 	a.mu.RUnlock()
 	if rcpt == nil {
 		t.Fatalf("receipt not created on cold-start")
@@ -3204,7 +3220,7 @@ func TestSend_OutTask_ColdStartSendCardFails_StillCard(t *testing.T) {
 	// so a subsequent OutTask on the same userMsgID cold-starts
 	// cleanly (no orphan state pollution).
 	a.mu.RLock()
-	_, hasReceipt := a.receiptsByUserMsgID["om_user"]
+	_, hasReceipt := a.receiptsByUserMsgID.Get("om_user")
 	a.mu.RUnlock()
 	if hasReceipt {
 		t.Errorf("failed cold-start should clean up receipt registration")

@@ -1296,6 +1296,22 @@ per-AS readpump 拆分后，consumer 必须把 `KindLifecycle{StatusExited}` 接
 
 daemon 启动时应能看到 `runtime: handlers installed for chat`（证明该 chat 的 eventHandler / MessageState 等已挂上）。缺这条再查 WithOnCreate 路径。
 
+### 5.5 CLI 自报失败时终止本轮
+
+Claude Code 把「这个 CLI 在当前这轮上放弃了」写进 stderr，格式是它自己的结构化标记前缀 `[claude-code:`。CLI 写完就闭嘴：bridge 还活着、协议也没死，但这一轮永远挂着。
+
+bridge 在读 stderr 的那一步判定（`isFatalStderr`，字面前缀，不是「含 error / failed」这类通用词）：
+
+| 条件 | 行为 |
+|------|------|
+| 行以 `[claude-code:` 开头，**且**当前有轮次在飞 | 以 `EventAgentError` 报出**那一行原文** → 上层转成 `OutError` 卡片（正文就是 CLI 自己那句话，stderr 尾部照旧附在下面），随后关掉这个 CLI |
+| 行以 `[claude-code:` 开头，但没有轮次在飞 | 只进日志与 stderr 尾部，不结束任何东西（启动握手阶段、或轮次已经收尾） |
+| 行不是这个格式（哪怕含 "error" 字样） | 不结束任何东西 |
+
+命中后关掉 CLI 是必须的：CLI 在启动时读配置（`~/.claude/settings.json` 里的模型名就是启动时读的），配置改好后只有重起才拿得到。会话按既有的 respawn 路径用**同一个 resume id** 重起，下一条用户消息落在新 CLI 上。
+
+一轮只报一次错：CLI 连着打多行同样的失败、或打完就自己退出，都只产生一个 `EventAgentError`。
+
 ---
 
 ## 6. 可观测性与日志级别

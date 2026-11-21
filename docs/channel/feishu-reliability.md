@@ -690,6 +690,9 @@ Prober ProberSnapshot `json:"prober"`
 
 ```
 $ nightme doctor
+CONFIG /Users/me/.nightme/config.yaml
+  status:  ok
+
 CHANNEL feishu
   status:          disconnected
   link verified:   no
@@ -700,6 +703,15 @@ CHANNEL feishu
 ```
 $ nightme doctor --json
 {
+  "config": {
+    "path": "/Users/me/.nightme/config.yaml",
+    "status": "ok",
+    "diagnostics": []
+  },
+  "daemon": {
+    "reachable": true,
+    "error": ""
+  },
   "channels": [
     {
       "channel": "feishu",

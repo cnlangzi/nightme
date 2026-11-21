@@ -77,7 +77,7 @@ func TestWriteDoctorText_RendersOneSectionPerChannel(t *testing.T) {
 	}}
 
 	var sb strings.Builder
-	if err := writeDoctorText(&sb, payload); err != nil {
+	if err := writeDoctorText(&sb, healthyConfigReport(), payload); err != nil {
 		t.Fatalf("writeDoctorText: %v", err)
 	}
 	out := sb.String()
@@ -131,7 +131,7 @@ func TestWriteDoctorText_UnverifiedLinkIsNotConnected(t *testing.T) {
 	}}}
 
 	var sb strings.Builder
-	if err := writeDoctorText(&sb, payload); err != nil {
+	if err := writeDoctorText(&sb, healthyConfigReport(), payload); err != nil {
 		t.Fatalf("writeDoctorText: %v", err)
 	}
 	out := sb.String()
@@ -147,7 +147,7 @@ func TestWriteDoctorText_UnverifiedLinkIsNotConnected(t *testing.T) {
 // instead of printing a zero-valued table.
 func TestWriteDoctorText_NoChannels(t *testing.T) {
 	var sb strings.Builder
-	if err := writeDoctorText(&sb, daemoncontrol.HealthPayload{}); err != nil {
+	if err := writeDoctorText(&sb, healthyConfigReport(), daemoncontrol.HealthPayload{}); err != nil {
 		t.Fatalf("writeDoctorText: %v", err)
 	}
 	if !strings.Contains(sb.String(), "NO CHANNELS RUNNING") {
@@ -181,7 +181,7 @@ func TestWriteDoctorJSON_KeepsSummaryAndRawPayload(t *testing.T) {
 	}}
 
 	var sb strings.Builder
-	if err := writeDoctorJSON(&sb, payload); err != nil {
+	if err := writeDoctorJSON(&sb, healthyConfigReport(), true, "", payload); err != nil {
 		t.Fatalf("writeDoctorJSON: %v", err)
 	}
 	var decoded struct {
@@ -245,7 +245,7 @@ func TestWriteDoctorText_KeepsOtherChannelsWhenOneSummaryIsBroken(t *testing.T) 
 	}}
 
 	var sb strings.Builder
-	if err := writeDoctorText(&sb, payload); err != nil {
+	if err := writeDoctorText(&sb, healthyConfigReport(), payload); err != nil {
 		t.Fatalf("writeDoctorText: %v", err)
 	}
 	out := sb.String()

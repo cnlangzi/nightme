@@ -384,7 +384,7 @@ func TestPumpStream_TextFallback_DetectsAndArms(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		pumpStream(strings.NewReader(input), events, nil, armFn, "claude", "/tmp", "main", nil)
+		pumpStream(strings.NewReader(input), events, nil, armFn, nil, "claude", "/tmp", "main", nil)
 		close(events)
 	}()
 

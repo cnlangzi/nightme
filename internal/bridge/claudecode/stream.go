@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 )
@@ -25,9 +26,18 @@ import (
 // streamState is owned by pumpStream (one per session) and
 // passed by pointer into each translate() call; translate MUST
 // NOT mutate it other than through the documented hooks
-// (assistant branch → record args; user branch → read args).
+// (assistant branch → record args; user branch → read args;
+// result branch → clear the turn flag).
 type streamState struct {
 	toolUseArgs map[string]string
+
+	// turnActive is the bridge's "the CLI is working on a user turn"
+	// flag. The driver raises it when it writes a user message;
+	// translate clears it when the turn's result arrives. The stderr
+	// drain reads it to tell a turn failure apart from a line the
+	// CLI printed outside a turn. nil when the caller does not track
+	// turns.
+	turnActive *atomic.Bool
 
 	// pendingTools is keyed by tool_use_id and records the most
 	// recent pending tool call we observed. We keep the full
@@ -76,6 +86,14 @@ type streamState struct {
 	// for the session, so the per-turn view is the difference against
 	// this baseline.
 	outstandingBase int
+
+	// turnHeld marks the user turn the bridge holds open: a result
+	// frame arrived with background work still outstanding, so the
+	// turn-terminating events were withheld. The CLI is still working
+	// on that turn — it opens another turn for every background task
+	// that finishes — so a frame that bounds a turn (the init
+	// re-emit) must not end it.
+	turnHeld bool
 
 	// heldUsage is the token count of the result frames the bridge
 	// withheld. The CLI reports usage per turn, so the frames of one
@@ -182,6 +200,7 @@ func (s *streamState) endTurn(outstanding int) {
 	s.outstandingBase = outstanding
 	s.turnRuns = make(map[string]bool)
 	s.heldUsage = nil
+	s.turnHeld = false
 }
 
 // holdUsage adds the tokens of a withheld result frame to the running
@@ -443,11 +462,17 @@ type contentBlock struct {
 // translate (so channel-layer receipts can render the "Agent ·
 // name | cwd · path" foot note). They are immutable for the
 // session's lifetime and don't need a mutex.
+//
+// turnActive is the driver's "the CLI is working on a user turn" flag.
+// translate clears it when the turn's result arrives, so the stderr
+// drain can tell a turn failure apart from a line the CLI printed
+// outside a turn. nil disables the tracking.
 func pumpStream(
 	r io.Reader,
 	events chan<- agent.AgentEvent,
 	askHandler askHandlerFunc,
 	armPendingAskFn armPendingAskFn,
+	turnActive *atomic.Bool,
 	agentName, workspace, branch string,
 	logger *slog.Logger,
 ) {
@@ -473,6 +498,7 @@ func pumpStream(
 		notifiedRuns:  make(map[string]bool),
 		deliveredRuns: make(map[string]bool),
 		turnRuns:      make(map[string]bool),
+		turnActive:    turnActive,
 	}
 
 	for scanner.Scan() {
@@ -520,6 +546,19 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 		// header AND have access to SessionID for /resume. Other
 		// subtypes (e.g. status, hook_progress) are ignored.
 		if ev.Subtype == "init" {
+			// A conversation boundary: whatever turn the CLI was
+			// working on is over. The flag is raised when the
+			// bridge writes a user message and dropped when the
+			// turn's result arrives — the init frame bounds it
+			// for the turns that end without a result.
+			//
+			// A turn the bridge holds open is not over: the CLI
+			// re-emits init when it opens the turn for a finished
+			// background task, and that turn belongs to the user's
+			// turn.
+			if state.turnActive != nil && !state.turnHeld {
+				state.turnActive.Store(false)
+			}
 			// F-38: a fresh Claude session means a fresh task
 			// list. Clear any prior tasks so the next TaskCreate
 			// emits a clean snapshot rather than a stale union.
@@ -768,6 +807,7 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 		if !ev.IsError && state.backgroundWorkOutstanding(outstanding) {
 			usage := decodeUsage(ev.Usage, ev.ModelUsage)
 			state.holdUsage(usage)
+			state.turnHeld = true
 			if logger != nil {
 				logger.Debug("claudecode: result withheld, background work outstanding",
 					"outstanding", outstanding,
@@ -776,6 +816,12 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 					"pending_notifications", state.pendingNotifications())
 			}
 			return
+		}
+		// The turn is over: the CLI sends nothing more for it.
+		// Clearing the flag keeps a fatal line the CLI prints after
+		// the turn from ending a turn that already closed.
+		if state.turnActive != nil {
+			state.turnActive.Store(false)
 		}
 		// Decode usage once and share the *UsageInfo pointer
 		// across EventAgentResult (when text/error makes one) and

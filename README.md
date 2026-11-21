@@ -251,7 +251,7 @@ Most of the time you live in chat. These are the few things you do from a termin
 | `nightme update` | In-place upgrade: check, download, SHA256-verify, install, restart the daemon. |
 | `nightme clean` | Truncate logs and clear the attachment inbox; `--all` for a full local reset (stop the daemon first). |
 | `nightme workflow` | List / show / dry-run / validate the workflow YAMLs under `~/.nightme/workflows/`. |
-| `nightme doctor` | Check NightMe's health when something feels off. Unix only. |
+| `nightme doctor` | Check NightMe's health when something feels off, and check the config file for mistakes. |
 | `nightme version` | Print version info. |
 
 `nightme test` spawns a CLI in a PTY for a quick local check.

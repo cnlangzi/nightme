@@ -7,13 +7,11 @@
 //     Vendor-recommended integration mode
 //     (https://opencode.ai/docs/acp/ — "All features are supported").
 //     The actual JSON-RPC 2.0 / PTY / session lifecycle work lives in
-//     internal/bridge/acp; this package only supplies the
-//     bridge-specific sessionUpdate translator
-//     (internal/bridge/opencode/update.go).
+//     internal/bridge/acp. opencode emits no vendor-private
+//     sessionUpdate kinds, so the generic ACP fallback covers them.
 //
-//   - RunOnce (one-shot: /gtw commit, buildAgentPrompt) →
-//     `opencode run --format json <prompt>`. Mirrors
-//     codex/claudecode/pi print-mode; one process per call.
+//   - RunOnce (one-shot: /gtw commit, /gtw pr) → the same ACP
+//     transport, one fresh session per call.
 //
 // # Why ACP, not HTTP serve
 //

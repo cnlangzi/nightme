@@ -25,11 +25,11 @@ type outcomeEmitter struct {
 	sent []messages.OutboundMessage
 }
 
-func (e *outcomeEmitter) Send(_ context.Context, m messages.OutboundMessage) error {
+func (e *outcomeEmitter) Send(_ context.Context, m messages.OutboundMessage) (string, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.sent = append(e.sent, m)
-	return nil
+	return "", nil
 }
 
 func (e *outcomeEmitter) settled() *messages.Outcome {

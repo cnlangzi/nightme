@@ -212,7 +212,12 @@ type Operator interface {
 	// Emit publishes an outbound message in the chat the run works in.
 	// The kind decides how the chat renders it: thinking becomes a
 	// 💭 card, a tool call a ● line, a reply a message.
-	Emit(ctx context.Context, chatID string, msg messages.OutboundMessage) error
+	//
+	// It returns the id of the chat message the message became: the
+	// run keeps writing into that message when it names it as the
+	// anchor of the events that follow. The id is empty when the
+	// chat cannot name the message.
+	Emit(ctx context.Context, chatID string, msg messages.OutboundMessage) (string, error)
 	// OnChoice installs the handler that takes the answer of an
 	// interactive choice back into the run. The handler is called with
 	// the id of the request the choice was asked under and the option

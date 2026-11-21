@@ -37,8 +37,8 @@ func (c *feedChannel) Name() string                             { return "feed" 
 func (c *feedChannel) Start(context.Context) error              { return nil }
 func (c *feedChannel) Stop(context.Context) error               { return nil }
 func (c *feedChannel) Incoming() <-chan messages.InboundMessage { return c.in }
-func (c *feedChannel) Send(context.Context, messages.OutboundMessage) error {
-	return nil
+func (c *feedChannel) Send(context.Context, messages.OutboundMessage) (string, error) {
+	return "", nil
 }
 func (c *feedChannel) OnPromptEnded(context.Context, string, string, agent.PromptEndReason) {
 }

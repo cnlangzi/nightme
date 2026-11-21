@@ -54,9 +54,9 @@ type testEmitter struct {
 	SendErr error
 }
 
-func (t *testEmitter) Send(_ context.Context, msg messages.OutboundMessage) error {
+func (t *testEmitter) Send(_ context.Context, msg messages.OutboundMessage) (string, error) {
 	t.Sent = append(t.Sent, msg)
-	return t.SendErr
+	return "", t.SendErr
 }
 
 // pushEvent pushes an EnrichedEvent into the AS's dispatch queue

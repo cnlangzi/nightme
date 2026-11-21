@@ -198,7 +198,7 @@ func (d *Dispatcher) runShell(mgr *chatsession.Manager, cs *chatsession.ChatSess
 		return
 	}
 	if strings.TrimSpace(ir.Request.Cwd) == "" {
-		_ = emitter.Send(shellCtx, messages.OutboundMessage{
+		_, _ = emitter.Send(shellCtx, messages.OutboundMessage{
 			ChatID:  ir.ChatID,
 			Kind:    messages.OutReply,
 			Text:    "❌ shell: no CWD configured for this chat\nTry `/use <path>` first.",
@@ -208,12 +208,13 @@ func (d *Dispatcher) runShell(mgr *chatsession.Manager, cs *chatsession.ChatSess
 	}
 
 	send := func(text string) error {
-		return emitter.Send(shellCtx, messages.OutboundMessage{
+		_, err := emitter.Send(shellCtx, messages.OutboundMessage{
 			ChatID:  ir.ChatID,
 			Kind:    messages.OutReply,
 			Text:    text,
 			ReplyTo: ir.MessageID,
 		})
+		return err
 	}
 
 	if err := send(fmt.Sprintf("⌨️ $ %s\n", cmd)); err != nil {

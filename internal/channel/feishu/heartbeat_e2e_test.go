@@ -49,7 +49,7 @@ import (
 func newAdapterWithBot(bot receiptBot) *Adapter {
 	a := &Adapter{
 		logger:              slog.New(slog.NewTextHandler(io.Discard, nil)),
-		receiptsByUserMsgID: map[string]*MessageReceipt{},
+		receiptsByUserMsgID: mustReceiptsCache(),
 		pendingHeartbeats:   map[string]messages.HeartbeatSnapshot{},
 		threadReplyLimiter:  newThreadReplyLimiter(0, 0),
 	}
@@ -57,7 +57,7 @@ func newAdapterWithBot(bot receiptBot) *Adapter {
 }
 
 // installReceipt directly inserts a pre-built receipt into the
-// adapter's map, bypassing ensureReceiptForTyping (which needs
+// adapter's index, bypassing ensureReceiptForTyping (which needs
 // a live lark REST client to send the cold-start card). For
 // e2e tests the lark send is irrelevant — we only care about
 // the ApplyHeartbeat + PATCH path on the existing receipt.
@@ -65,7 +65,7 @@ func installReceipt(a *Adapter, bot receiptBot, chatID, userMsgID, msgID string)
 	r := NewMessageReceiptForReply(chatID, userMsgID, bot)
 	r.cardMsgID = msgID // pretend a card was already sent
 	a.mu.Lock()
-	a.receiptsByUserMsgID[userMsgID] = r
+	a.receiptsByUserMsgID.Add(userMsgID, r)
 	a.mu.Unlock()
 	return r
 }
@@ -100,7 +100,7 @@ func buildHandler(em messages.Emitter, cs *chatsession.ChatSession, thinkMode ch
 			if cs.Heartbeat().Observe(env.UserMsgID, out) {
 				snap := cs.Heartbeat().Snapshot(env.UserMsgID)
 				if !snap.Empty() {
-					_ = em.Send(context.Background(), messages.OutboundMessage{
+					_, _ = em.Send(context.Background(), messages.OutboundMessage{
 						ChatID:    env.ChatID,
 						Kind:      messages.OutHeartbeat,
 						ReplyTo:   env.UserMsgID,
@@ -119,7 +119,7 @@ func buildHandler(em messages.Emitter, cs *chatsession.ChatSession, thinkMode ch
 			return
 		}
 
-		_ = em.Send(context.Background(), out)
+		_, _ = em.Send(context.Background(), out)
 	}
 }
 

@@ -813,12 +813,12 @@ type blockingEmitter struct {
 	mu               sync.Mutex
 }
 
-func (b *blockingEmitter) Send(ctx context.Context, msg messages.OutboundMessage) error {
+func (b *blockingEmitter) Send(ctx context.Context, msg messages.OutboundMessage) (string, error) {
 	if msg.ChatID == "oc_A" {
 		select {
 		case <-b.releaseA:
 		case <-ctx.Done():
-			return ctx.Err()
+			return "", ctx.Err()
 		}
 	}
 	b.mu.Lock()
@@ -826,7 +826,7 @@ func (b *blockingEmitter) Send(ctx context.Context, msg messages.OutboundMessage
 		*b.defaultResult = msg
 	}
 	b.mu.Unlock()
-	return nil
+	return "", nil
 }
 
 // Compile-time guard: blockingEmitter must satisfy messages.Emitter.

@@ -51,11 +51,14 @@ const refreshInterval = 5 * time.Second
 // live log. A session without an anchor publishes without one, and
 // the chat falls back to its orphan handling.
 //
+// It returns the id of the chat message the message became: the
+// session that opened its card takes that id as its anchor.
+//
 // A message that does not reach the chat is reported and the run goes
 // on: the run's state lives in the chat, not in the run.
-func (s *Service) emit(ctx context.Context, r *run, sess *session, msg messages.OutboundMessage) {
+func (s *Service) emit(ctx context.Context, r *run, sess *session, msg messages.OutboundMessage) string {
 	if s.cfg.Operator == nil {
-		return
+		return ""
 	}
 	msg.ChatID = r.chatID
 	if sess != nil {
@@ -66,10 +69,12 @@ func (s *Service) emit(ctx context.Context, r *run, sess *session, msg messages.
 		msg.Usage = usageInfo(r.sessionUsage(sess))
 		msg.GitStatus = r.gitStatusValue()
 	}
-	if err := s.cfg.Operator.Emit(ctx, r.chatID, msg); err != nil {
+	id, err := s.cfg.Operator.Emit(ctx, r.chatID, msg)
+	if err != nil {
 		s.logger.Warn("me: the run's event could not be published",
 			"run_id", r.id, "kind", msg.Kind.String(), "err", err)
 	}
+	return id
 }
 
 // usageInfo renders what a session spent as the footer's usage line.

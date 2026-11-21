@@ -577,9 +577,9 @@ type fakeChannel struct {
 	sent []string
 }
 
-func (c *fakeChannel) Send(_ context.Context, msg messages.OutboundMessage) error {
+func (c *fakeChannel) Send(_ context.Context, msg messages.OutboundMessage) (string, error) {
 	c.sent = append(c.sent, msg.Text)
-	return nil
+	return "", nil
 }
 func (c *fakeChannel) Patch(_ context.Context, _ messages.OutboundMessage) error {
 	return nil

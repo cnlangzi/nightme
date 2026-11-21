@@ -65,6 +65,26 @@ const actionNeededTitleEmoji = "👉"
 // eviction only happens for genuinely stale ids.
 const messageStatesLRUSize = 5000
 
+// receiptsLRUSize bounds the in-memory receipt index.
+//
+// The index holds one receipt per user message that opened a card,
+// and a long-running daemon opens one per turn. A receipt stores its
+// content twice — the rendered card body (up to the 28 KB card
+// envelope cap) and the raw entries it was rendered from — plus the
+// task snapshot, so a receipt sitting at the envelope cap costs
+// ~56 KB and the worst case is a few hundred MB. The typical
+// receipt is a few KB (tens of MB in total).
+//
+// Eviction drops the receipt, not the card: the card stays in the
+// chat but stops being updated, and a later event for that id takes
+// the orphan path and opens a new card.
+const receiptsLRUSize = 5000
+
+// newReceiptsCache builds the receipt index.
+func newReceiptsCache() (*lru.Cache[string, *MessageReceipt], error) {
+	return lru.New[string, *MessageReceipt](receiptsLRUSize)
+}
+
 // sendMessageFunc is kept behind the adapter so unit tests can exercise the
 // channel without making an HTTP request to Feishu.
 //
@@ -156,7 +176,7 @@ type Adapter struct {
 	limiter *Limiter
 
 	// mu is the adapter's state mutex. It guards:
-	//   - receipts and receiptsByUserMsgID (concurrent writers:
+	//   - receiptsByUserMsgID (concurrent writers:
 	//     dispatchLoop's SendUserMessage and pumpOutbound's
 	//     receiptFor are independent goroutines per chat)
 	//   - stopped, incomingClosed (Stop vs incoming handlers)
@@ -192,20 +212,26 @@ type Adapter struct {
 	// slog.Default(); settable via SetLogger.
 	logger *slog.Logger
 
-	// Stage 3: rolling-log receipt state lives on the adapter
-	// (Channel.Send is the display strategy). The map is keyed by
-	// chatID; one receipt per chat at a time. When the gateway's
-	// per-session pump emits the first OutReply for a chat that
-	// doesn't have an active receipt, we lazily create one (this
-	// covers the case where the user message is forwarded via
-	// the gateway's messageDispatcher but the renderer path is gone).
-	receipts map[string]*MessageReceipt
-
-	// receiptsByUserMsgID is the secondary index that lets
-	// MarkExecuting and incoming card-action callbacks find the
-	// receipt from the Feishu user message id. Same lifecycle
-	// rules as receipts (delete together when SetCompleted).
-	receiptsByUserMsgID map[string]*MessageReceipt
+	// receiptsByUserMsgID is the index that lets the runtime and
+	// the incoming card-action callbacks find the receipt from the
+	// Feishu user message id.
+	//
+	// It holds two kinds of key: the id of the message the card
+	// hangs under, and the id of the card itself — a card is
+	// addressed by its own message id, so an event that names it
+	// lands on that card. One receipt per card, so a card claims
+	// two entries.
+	//
+	// Bounded by receiptsLRUSize (LRU eviction). A receipt leaves
+	// the index only when the card it opens fails to send (the
+	// ensure* helpers roll the registration back); the receipts of
+	// finished turns stay until the LRU evicts them. Eviction
+	// semantics and the memory trade-off: receiptsLRUSize.
+	//
+	// The cache is internally synchronized (the LRU has its own
+	// mutex); we additionally hold a.mu around every access so the
+	// read-modify-write sections stay atomic.
+	receiptsByUserMsgID *lru.Cache[string, *MessageReceipt]
 
 	// pendingHeartbeats (F-63.1) buffers the latest heartbeat
 	// snapshot for userMsgIDs whose receipt hasn't been created
@@ -283,8 +309,9 @@ type Adapter struct {
 	// adapter stop (clearAllToolEvents).
 	//
 	// Concurrency: reads/writes go through a.mu. Same lock as
-	// receipts / messageStates — adapter.Send is single-threaded
-	// per ChatSession (SPEC §1.3), so contention is non-issue.
+	// receiptsByUserMsgID / messageStates — adapter.Send is
+	// single-threaded per ChatSession (SPEC §1.3), so contention is
+	// non-issue.
 	toolEventBuf map[string][]toolEventEntry
 
 	// These hooks have production defaults and are intentionally kept as
@@ -328,9 +355,13 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 	if err != nil {
 		return nil, fmt.Errorf("feishu: init messageStates LRU: %w", err)
 	}
+	receipts, err := newReceiptsCache()
+	if err != nil {
+		return nil, fmt.Errorf("feishu: init receipts LRU: %w", err)
+	}
 	a := &Adapter{
 		incoming:            make(chan channel.Message, 128),
-		receiptsByUserMsgID: make(map[string]*MessageReceipt),
+		receiptsByUserMsgID: receipts,
 		pendingHeartbeats:   make(map[string]messages.HeartbeatSnapshot),
 		optCards:            make(map[string]*messages.Choice),
 		optWizards:          make(map[string]*choiceWizard),
@@ -761,7 +792,9 @@ func (a *Adapter) Incoming() <-chan channel.Message { return a.incoming }
 // a ReplyTo that doesn't yet have a registered receipt.
 //
 // v1.3 (SPEC §2.2): each OutboundMessage{ReplyTo: userMsgID} maps
-// to exactly one receipt per userMsgID.
+// to exactly one receipt per userMsgID. The id may be the message
+// the card hangs under or the id of the card itself: a card is
+// addressed by its own message id.
 //
 // F-42: this function is now a PURE cache lookup. The v1.3 "cold-start
 // minimal ⏳ card" path is removed — receipts are now lazy-created
@@ -780,7 +813,25 @@ func (a *Adapter) receiptFor(ctx context.Context, chatID, userMsgID string) *Mes
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.receiptsByUserMsgID[userMsgID] // nil on miss — caller decides
+	r, ok := a.receiptsByUserMsgID.Get(userMsgID)
+	if !ok {
+		return nil // miss — caller decides
+	}
+	return r
+}
+
+// removeTransientReceipt rolls back the registration of a receipt
+// whose card failed to open. The identity check keeps a receipt that
+// replaced the transient one in the meantime — or an entry the LRU
+// already evicted — from being dropped.
+//
+// Locking: takes a.mu; callers must not hold it.
+func (a *Adapter) removeTransientReceipt(userMsgID string, transient *MessageReceipt) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if cur, ok := a.receiptsByUserMsgID.Get(userMsgID); ok && cur == transient {
+		a.receiptsByUserMsgID.Remove(userMsgID)
+	}
 }
 
 // OnPromptEnded (F-53 follow-up; Phase 2.1 channel-ext) transitions
@@ -876,11 +927,11 @@ func (a *Adapter) ensureReceiptForTyping(ctx context.Context, chatID, userMsgID 
 	transient.initializing = true
 
 	a.mu.Lock()
-	if existing, ok := a.receiptsByUserMsgID[userMsgID]; ok && existing != nil {
+	if existing, ok := a.receiptsByUserMsgID.Get(userMsgID); ok && existing != nil {
 		a.mu.Unlock()
 		return existing, false, nil
 	}
-	a.receiptsByUserMsgID[userMsgID] = transient
+	a.receiptsByUserMsgID.Add(userMsgID, transient)
 	a.mu.Unlock()
 
 	// Snapshot transient state under r.mu: the receipt is now
@@ -896,11 +947,7 @@ func (a *Adapter) ensureReceiptForTyping(ctx context.Context, chatID, userMsgID 
 
 	body, _, err := buildReceiptCard(nil, nil, footerLinesSnap, nil)
 	if err != nil {
-		a.mu.Lock()
-		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
-			delete(a.receiptsByUserMsgID, userMsgID)
-		}
-		a.mu.Unlock()
+		a.removeTransientReceipt(userMsgID, transient)
 		return nil, false, fmt.Errorf("feishu: ensure typing receipt build card: %w", err)
 	}
 
@@ -919,11 +966,7 @@ func (a *Adapter) ensureReceiptForTyping(ctx context.Context, chatID, userMsgID 
 	// turn.
 	msgID, err := a.sendCardContent(ctx, chatID, body, userMsgID, false)
 	if err != nil {
-		a.mu.Lock()
-		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
-			delete(a.receiptsByUserMsgID, userMsgID)
-		}
-		a.mu.Unlock()
+		a.removeTransientReceipt(userMsgID, transient)
 		a.logger.Warn("feishu: ensureReceiptForTyping send card failed",
 			"err", err, "chat_id", chatID, "user_msg_id", userMsgID)
 		return nil, false, err
@@ -935,6 +978,7 @@ func (a *Adapter) ensureReceiptForTyping(ctx context.Context, chatID, userMsgID 
 	transient.cardMsgID = msgID
 	transient.initializing = false
 	transient.mu.Unlock()
+	a.registerCardID(msgID, transient)
 	// F-63.1: drain any heartbeat snapshot that was stashed
 	// BEFORE this receipt existed (first countable event
 	// landing before MessageQueued). ApplyHeartbeat folds the
@@ -1007,11 +1051,11 @@ func (a *Adapter) ensureReceiptForReplyWithFooter(ctx context.Context, chatID, u
 	// Register-before-SendCard (see ensureReceiptForTask for the
 	// full rationale — same race fix applied symmetrically here).
 	a.mu.Lock()
-	if existing, ok := a.receiptsByUserMsgID[userMsgID]; ok && existing != nil {
+	if existing, ok := a.receiptsByUserMsgID.Get(userMsgID); ok && existing != nil {
 		a.mu.Unlock()
 		return existing, false, nil
 	}
-	a.receiptsByUserMsgID[userMsgID] = transient
+	a.receiptsByUserMsgID.Add(userMsgID, transient)
 	a.mu.Unlock()
 
 	// Snapshot transient state under r.mu: the receipt is now
@@ -1029,11 +1073,7 @@ func (a *Adapter) ensureReceiptForReplyWithFooter(ctx context.Context, chatID, u
 
 	body, _, err := buildReceiptCard(entriesSnap, tasksSnap, footerLinesSnap, nil)
 	if err != nil {
-		a.mu.Lock()
-		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
-			delete(a.receiptsByUserMsgID, userMsgID)
-		}
-		a.mu.Unlock()
+		a.removeTransientReceipt(userMsgID, transient)
 		return nil, false, fmt.Errorf("feishu: ensure reply receipt build card: %w", err)
 	}
 
@@ -1063,11 +1103,7 @@ func (a *Adapter) ensureReceiptForReplyWithFooter(ctx context.Context, chatID, u
 	// postOrphanReplyCard.
 	msgID, err := a.sendCardContent(ctx, chatID, body, userMsgID, false)
 	if err != nil {
-		a.mu.Lock()
-		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
-			delete(a.receiptsByUserMsgID, userMsgID)
-		}
-		a.mu.Unlock()
+		a.removeTransientReceipt(userMsgID, transient)
 		a.logger.Warn("feishu: ensureReceiptForReply send card failed",
 			"err", err, "chat_id", chatID, "user_msg_id", userMsgID)
 		return nil, false, err
@@ -1079,6 +1115,7 @@ func (a *Adapter) ensureReceiptForReplyWithFooter(ctx context.Context, chatID, u
 	transient.cardMsgID = msgID
 	transient.initializing = false
 	transient.mu.Unlock()
+	a.registerCardID(msgID, transient)
 	a.applyPendingHeartbeat(ctx, transient)
 	return transient, true, nil
 }
@@ -1172,6 +1209,7 @@ func (a *Adapter) appendEntryToReceipt(
 			return sendErr
 		}
 		r.RolloverTo(msgID, entry, footerLines)
+		a.registerCardID(msgID, r)
 		return nil
 	}
 	return nil
@@ -1194,15 +1232,15 @@ func (a *Adapter) appendEntryToReceipt(
 // renders identically to anchored receipts — N+1 chunks → N+1 cards,
 // each carrying its own footer.
 //
-// No receipt registration: orphan replies have no parent userMsgID
-// to anchor subsequent chunks. If a later event in the same turn
-// arrives with a different reply target, it gets its own card via
-// the same helper (or a receipt if a userMsgID shows up later).
-func (a *Adapter) postOrphanReplyCard(ctx context.Context, chatID, text string, footerLines []string) error {
+// No receipt registration under a parent userMsgID: an orphan reply
+// has no parent to anchor subsequent chunks to. The card registers
+// itself instead — under its own message id — so an event that
+// carries that id lands on this card.
+func (a *Adapter) postOrphanReplyCard(ctx context.Context, chatID, text string, footerLines []string) (string, error) {
 	entries := []LogEntry{newOutReplyEntry(text)}
 	body, _, err := buildReceiptCard(entries, nil, footerLines, nil)
 	if err != nil {
-		return fmt.Errorf("feishu: build orphan reply card: %w", err)
+		return "", fmt.Errorf("feishu: build orphan reply card: %w", err)
 	}
 
 	// rootID="" → top-level Create (ReplyInChat), replyInThread=false
@@ -1214,8 +1252,60 @@ func (a *Adapter) postOrphanReplyCard(ctx context.Context, chatID, text string, 
 	// body is already a buildReceiptCard envelope; routing it through
 	// buildInteractiveCard would wrap the JSON as markdown inside a
 	// second card.
-	_, err = a.sendCardContent(ctx, chatID, body, "", false)
-	return err
+	msgID, err := a.sendCardContent(ctx, chatID, body, "", false)
+	if err != nil {
+		return "", err
+	}
+	a.registerCardReceipt(chatID, msgID, entries, nil, footerLines, body)
+	return msgID, nil
+}
+
+// registerCardID registers the receipt of a card under the card's
+// own message id.
+//
+// A card is addressed by its own message id: an event that carries
+// that id lands on the card. The parent message id addresses the
+// same card — the receipt is registered under both.
+func (a *Adapter) registerCardID(cardMsgID string, r *MessageReceipt) {
+	if cardMsgID == "" || r == nil {
+		return
+	}
+	a.mu.Lock()
+	a.receiptsByUserMsgID.Add(cardMsgID, r)
+	a.mu.Unlock()
+}
+
+// registerCardReceipt registers the receipt of a card under the
+// card's own message id.
+//
+// A card the chat opens for itself is addressed by its own message
+// id: an event that carries that id lands on the card — the chat
+// patches it in place — instead of opening another card.
+//
+// The receipt carries the content the card was built with: the
+// entries, the checklist and the footer. Without them the next
+// PATCH would empty the card.
+func (a *Adapter) registerCardReceipt(
+	chatID, cardMsgID string,
+	entries []LogEntry,
+	tasks []agent.AgentTaskItem,
+	footerLines []string,
+	body string,
+) {
+	if cardMsgID == "" {
+		return
+	}
+	r := NewMessageReceiptForReply(chatID, cardMsgID, a)
+	// The receipt's own lock guards its fields.
+	r.mu.Lock()
+	r.entries = entries
+	r.tasks = tasks
+	r.footerLines = footerLines
+	r.cardMsgID = cardMsgID
+	r.lastBody = body
+	r.lastBodyPatch = time.Now()
+	r.mu.Unlock()
+	a.registerCardID(cardMsgID, r)
 }
 
 // postOrphanErrorCard posts a standalone error card when an
@@ -1272,17 +1362,17 @@ func (a *Adapter) postOrphanErrorCard(ctx context.Context, chatID, userMsgID, er
 // the user-visible window is short. Documenting this rather than
 // special-casing it: the cross-channel rule "main chat is a card"
 // holds either way; the empty-list case is rare and self-correcting.
-func (a *Adapter) postOrphanTaskCard(ctx context.Context, chatID string, list *agent.AgentTaskListEvent, footerLines []string) error {
+func (a *Adapter) postOrphanTaskCard(ctx context.Context, chatID string, list *agent.AgentTaskListEvent, footerLines []string) (string, error) {
 	// Defensive nil-check (matches ensureReceiptForTask's guard at
 	// L1033-1035). Send() already checks at L1525, but the helper
 	// itself shouldn't trust its caller — callers from tests or
 	// future code paths could omit the check.
 	if list == nil {
-		return errors.New("feishu: postOrphanTaskCard requires non-nil AgentTaskListEvent")
+		return "", errors.New("feishu: postOrphanTaskCard requires non-nil AgentTaskListEvent")
 	}
 	body, _, err := buildReceiptCard(nil, list.Items, footerLines, nil)
 	if err != nil {
-		return fmt.Errorf("feishu: build orphan task card: %w", err)
+		return "", fmt.Errorf("feishu: build orphan task card: %w", err)
 	}
 	// rootID="" → top-level Create (ReplyInChat), replyInThread=false
 	// → main chat visible. Same wire shape as the cold-start
@@ -1292,8 +1382,14 @@ func (a *Adapter) postOrphanTaskCard(ctx context.Context, chatID string, list *a
 	// body is already a buildReceiptCard envelope; routing it through
 	// buildInteractiveCard would wrap the JSON as markdown inside a
 	// second card.
-	_, err = a.sendCardContent(ctx, chatID, body, "", false)
-	return err
+	msgID, err := a.sendCardContent(ctx, chatID, body, "", false)
+	if err != nil {
+		return "", err
+	}
+	items := make([]agent.AgentTaskItem, len(list.Items))
+	copy(items, list.Items)
+	a.registerCardReceipt(chatID, msgID, nil, items, footerLines, body)
+	return msgID, nil
 }
 
 // ensureReceiptForTask lazily creates a receipt when the FIRST event
@@ -1345,11 +1441,11 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 	// Register-before-SendCard (see ensureReceiptForReply for the
 	// full rationale — same race fix applied symmetrically here).
 	a.mu.Lock()
-	if existing, ok := a.receiptsByUserMsgID[userMsgID]; ok && existing != nil {
+	if existing, ok := a.receiptsByUserMsgID.Get(userMsgID); ok && existing != nil {
 		a.mu.Unlock()
 		return existing, false, nil
 	}
-	a.receiptsByUserMsgID[userMsgID] = transient
+	a.receiptsByUserMsgID.Add(userMsgID, transient)
 	a.mu.Unlock()
 
 	// Snapshot transient state under r.mu: the receipt is now
@@ -1366,11 +1462,7 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 
 	body, _, err := buildReceiptCard(nil, tasksSnap, footerLinesSnap, nil)
 	if err != nil {
-		a.mu.Lock()
-		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
-			delete(a.receiptsByUserMsgID, userMsgID)
-		}
-		a.mu.Unlock()
+		a.removeTransientReceipt(userMsgID, transient)
 		return nil, false, fmt.Errorf("feishu: ensure task receipt build card: %w", err)
 	}
 
@@ -1387,11 +1479,7 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 	// (returns existing, created=false).
 	msgID, err := a.sendCardContent(ctx, chatID, body, userMsgID, false)
 	if err != nil {
-		a.mu.Lock()
-		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
-			delete(a.receiptsByUserMsgID, userMsgID)
-		}
-		a.mu.Unlock()
+		a.removeTransientReceipt(userMsgID, transient)
 		a.logger.Warn("feishu: ensureReceiptForTask send card failed",
 			"err", err, "chat_id", chatID, "user_msg_id", userMsgID)
 		return nil, false, err
@@ -1403,6 +1491,7 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 	transient.cardMsgID = msgID
 	transient.initializing = false
 	transient.mu.Unlock()
+	a.registerCardID(msgID, transient)
 	// F-63.1: drain any heartbeat snapshot that was stashed
 	// BEFORE this receipt existed (first countable event
 	// landing before MessageQueued). ApplyHeartbeat folds the
@@ -1412,12 +1501,12 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 	return transient, true, nil
 }
 
-func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error {
+func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (string, error) {
 	switch msg.Kind {
 	case messages.OutMessageSettled:
 		// The structured outcome of an inbound message. It exists
 		// for programs that drive nightme, not for humans.
-		return nil
+		return "", nil
 	case messages.OutReply:
 		// F-44 revert: OutReply folds into the rolling-log receipt
 		// card (F-25 → F-40 model) for visual scan benefit (1
@@ -1462,7 +1551,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// (no divider, no grey footer).
 		text := strings.TrimSpace(msg.Text)
 		if text == "" {
-			return nil
+			return "", nil
 		}
 		// F-45 §2.8: footer is always passed per-line to
 		// buildReceiptCard (via the receipt or via the orphan
@@ -1491,11 +1580,13 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 			// card + RolloverTo) so the user sees one continuous
 			// card across the turn instead of N standalone
 			// bubbles.
-			return a.appendReplyToReceipt(ctx, msg, text, receipt)
+			if err := a.appendReplyToReceipt(ctx, msg, text, receipt); err != nil {
+				return "", err
+			}
 		}
 		// created=true — first entry was installed by ensure; no
 		// need to call AppendEntry again.
-		return nil
+		return receipt.CardMsgID(), nil
 
 	case messages.OutThinking:
 		// F-34: thinking is posted to the user message thread so
@@ -1519,17 +1610,17 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// when the chat has /think off, OutThinking is dropped
 		// before reaching this case. This case therefore assumes
 		// the chat wants thinking rendered — see docs/SPEC.md §3.1.2.
-		return a.postThreadMarkdownReply(ctx, msg.ChatID, msg.ReplyTo, "💭 "+msg.Text, true)
+		return "", a.postThreadMarkdownReply(ctx, msg.ChatID, msg.ReplyTo, "💭 "+msg.Text, true)
 
 	case messages.OutMessageState:
 		// F-31: read abstract state from typed MessageStatePayload,
 		// map to feishu emoji_type internally. Channel decides
 		// how to render.
 		if msg.MessageState == nil {
-			return errors.New("feishu: OutMessageState missing MessageState payload")
+			return "", errors.New("feishu: OutMessageState missing MessageState payload")
 		}
 		if msg.MessageState.MessageID == "" {
-			return errors.New("feishu: OutMessageState missing MessageID")
+			return "", errors.New("feishu: OutMessageState missing MessageID")
 		}
 		messageID := msg.MessageState.MessageID
 		state := msg.MessageState.State
@@ -1580,7 +1671,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		emoji := mapStateToFeishuEmoji(state)
 		if emoji == "" {
 			// Unknown state: silent drop (forward-compatible).
-			return nil
+			return "", nil
 		}
 
 		// T-alive (2026-08-07) — restore the immediate Typing
@@ -1634,7 +1725,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		}
 		a.mu.Unlock()
 		if skip {
-			return nil
+			return "", nil
 		}
 		if _, err := a.AddReaction(ctx, messageID, emoji); err != nil {
 			a.mu.Lock()
@@ -1649,34 +1740,34 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 			a.mu.Unlock()
 			a.logger.Warn("feishu: OutMessageState add reaction failed",
 				"err", err, "emoji", emoji, "user_msg_id", messageID)
-			return err
+			return "", err
 		}
-		return nil
+		return "", nil
 
 	case messages.OutMessageStateRemoved:
 		// v1.3: not used (append-only reactions). Reserved for
 		// future when channels need mutable state markers.
 		if msg.MessageState == nil {
-			return errors.New("feishu: OutMessageStateRemoved missing MessageState payload")
+			return "", errors.New("feishu: OutMessageStateRemoved missing MessageState payload")
 		}
 		if msg.MessageState.MessageID == "" {
-			return errors.New("feishu: OutMessageStateRemoved missing MessageID")
+			return "", errors.New("feishu: OutMessageStateRemoved missing MessageID")
 		}
 		if msg.MessageState.ReactionID == "" {
-			return errors.New("feishu: OutMessageStateRemoved missing ReactionID")
+			return "", errors.New("feishu: OutMessageStateRemoved missing ReactionID")
 		}
-		return a.DeleteReaction(ctx, msg.MessageState.MessageID, msg.MessageState.ReactionID)
+		return "", a.DeleteReaction(ctx, msg.MessageState.MessageID, msg.MessageState.ReactionID)
 
 	case messages.OutChoice:
 		if msg.Choice == nil {
-			return errors.New("feishu: OutChoice missing choice payload")
+			return "", errors.New("feishu: OutChoice missing choice payload")
 		}
 		if msg.Choice.RequestID == "" {
-			return errors.New("feishu: OutChoice missing RequestID")
+			return "", errors.New("feishu: OutChoice missing RequestID")
 		}
 		content, err := a.buildInteractiveCard(msg.Choice, nil)
 		if err != nil {
-			return err
+			return "", err
 		}
 		// F-44 follow-up: OutChoice → ReplyInChat (top-level Create,
 		// no anchor). Same parent-thread rationale as OutReply /
@@ -1690,13 +1781,13 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// the prompt (same pattern as 💭 for OutThinking).
 		msgID, err := a.sendContent(ctx, msg.ChatID, interactiveMessageType, content, "", false)
 		if err != nil {
-			return err
+			return "", err
 		}
 		if msgID == "" {
-			return errors.New("feishu: OutChoice send returned empty message id")
+			return "", errors.New("feishu: OutChoice send returned empty message id")
 		}
 		a.rememberOptCard(msg.ChatID, msgID, msg.Choice)
-		return nil
+		return msgID, nil
 
 	case messages.OutChoicePatch:
 		// In-place PATCH of a previously sent choice prompt.
@@ -1705,19 +1796,19 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// events may omit RequestID; those fall back to the last
 		// opt card in the chat. ReplyTo is NOT a choice handle.
 		if msg.Choice == nil {
-			return errors.New("feishu: OutChoicePatch missing choice payload")
+			return "", errors.New("feishu: OutChoicePatch missing choice payload")
 		}
 		target := a.msgIDForRequestID(msg.Choice.RequestID)
 		if target == "" {
 			target = a.lastOptMsgID(msg.ChatID)
 		}
 		if target == "" {
-			return nil
+			return "", nil
 		}
 		if err := a.patchOptCardSettled(ctx, target, msg.Choice); err != nil {
-			return err
+			return "", err
 		}
-		return nil
+		return "", nil
 
 	case messages.OutToolStart:
 		// F-34: tool_start is posted to the user message
@@ -1739,7 +1830,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		body := formatToolStartCall(toolName(msg), toolArgs(msg))
 		startMsgID, err := a.postThreadReplyWithID(ctx, msg.ChatID, msg.ReplyTo, body, true)
 		if err != nil {
-			return err
+			return "", err
 		}
 		// F-38: remember the start msg_id so OutToolEnd can
 		// PATCH it. pushToolStart is a no-op when startMsgID is
@@ -1748,7 +1839,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// buffer miss will route through the fallback path
 		// below (postThreadReply as fresh thread reply).
 		a.pushToolStart(msg.ReplyTo, startMsgID, body)
-		return nil
+		return startMsgID, nil
 
 	case messages.OutToolEnd:
 		// F-34: tool_end is posted to the user message thread
@@ -1779,7 +1870,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 			// the fresh-thread-reply fallback below.
 			mergeErr := a.mergeToolReply(ctx, entry.startMsgID, merged)
 			if mergeErr == nil {
-				return nil
+				return entry.startMsgID, nil
 			}
 			// PATCH failed (retry exhausted or non-transient).
 			// Log + fall through to fallback so the result
@@ -1794,13 +1885,13 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// Same path as pre-F-38 behaviour; preserves visibility
 		// when the merge can't happen.
 		if err := a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo, resultBody, true); err != nil {
-			return err
+			return "", err
 		}
-		return nil
+		return "", nil
 
 	case messages.OutResult:
 		if msg.Result == nil {
-			return errors.New("feishu: OutResult missing Result payload")
+			return "", errors.New("feishu: OutResult missing Result payload")
 		}
 		text := strings.TrimSpace(msg.Result.Text)
 
@@ -1822,11 +1913,11 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 			r := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo)
 			if r == nil {
 				if msg.Err == nil {
-					return nil
+					return "", nil
 				}
-				return a.postOrphanErrorCard(ctx, msg.ChatID, msg.ReplyTo, msg.Err.Error())
+				return "", a.postOrphanErrorCard(ctx, msg.ChatID, msg.ReplyTo, msg.Err.Error())
 			}
-			return r.StampFooterLines(ctx, statusbar.StatusBarLines(&msg))
+			return r.CardMsgID(), r.StampFooterLines(ctx, statusbar.StatusBarLines(&msg))
 		}
 
 		// Body present: standalone result card with body+footer.
@@ -1886,7 +1977,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// stamp via the ReplyTo branch below.
 		footerLines := statusbar.StatusBarLines(&msg)
 		if msg.ReplyTo == "" {
-			return nil
+			return "", nil
 		}
 		// Look up the existing receipt (dispatcher pre-creates one
 		// for /review and /gtw). If absent, ensureReceiptForTyping
@@ -1896,13 +1987,13 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		r, _, err := a.ensureReceiptForTyping(
 			ctx, msg.ChatID, msg.ReplyTo, footerLines)
 		if err != nil {
-			return err
+			return "", err
 		}
 		// ensureReceiptForTyping already stamps footerLines and
 		// creates the card on the cold-start path; for the
 		// pre-existing receipt case, StampFooterLines PATCHes
 		// the card with the new footer.
-		return r.StampFooterLines(ctx, footerLines)
+		return r.CardMsgID(), r.StampFooterLines(ctx, footerLines)
 
 	case messages.OutError:
 		// Bridge died ungracefully. Render as a Feishu card (not a
@@ -1922,10 +2013,10 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		title, template := errorCardChrome(msg)
 		content, err := encodeErrorCard(title, body, template)
 		if err != nil {
-			return err
+			return "", err
 		}
 		_, err = a.sendContent(ctx, msg.ChatID, interactiveMessageType, content, "", false)
-		return err
+		return "", err
 
 	case messages.OutCommandReply:
 		// Slash command response (or runtime error reply). Now
@@ -1949,7 +2040,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// postOrphanReplyCard posts a fresh top-level card with no
 		// parent anchor, matching how OutReply handles orphans.
 		if msg.Text == "" {
-			return errors.New("feishu: OutCommandReply missing text")
+			return "", errors.New("feishu: OutCommandReply missing text")
 		}
 		if msg.ReplyTo == "" {
 			return a.postOrphanReplyCard(ctx, msg.ChatID, msg.Text, statusbar.StatusBarLines(&msg))
@@ -1965,7 +2056,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// (also used by OutReply) handles AppendEntryWithFooter +
 		// the overflow rollover so the reply lands inside the same
 		// rolling-log card as the rest of the turn.
-		return a.appendReplyToReceipt(ctx, msg, msg.Text, r)
+		return "", a.appendReplyToReceipt(ctx, msg, msg.Text, r)
 
 	case messages.OutTaskCreate, messages.OutTaskUpdate:
 		// F-38 + PR #47 + F-44 follow-up: replace the per-turn
@@ -1989,7 +2080,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// gotcha as OutReply/OutResult. Subsequent SetTaskList
 		// events PATCH the existing card (preserves root_id).
 		if msg.TaskList == nil {
-			return errors.New("feishu: OutTask*/TaskList payload is nil")
+			return "", errors.New("feishu: OutTask*/TaskList payload is nil")
 		}
 		// F-47 (symmetric to F-46): orphan path (msg.ReplyTo == "")
 		// bypasses ensureReceiptForTask's "requires userMsgID"
@@ -2017,11 +2108,11 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		if !created {
 			// Receipt already exists (race or a previous OutReply
 			// created it). Push the snapshot via SetTaskList.
-			return receipt.SetTaskListWithFooter(ctx, msg.TaskList, footerLines)
+			return receipt.CardMsgID(), receipt.SetTaskListWithFooter(ctx, msg.TaskList, footerLines)
 		}
 		// created=true — tasks already installed by ensure;
 		// first card already shipped.
-		return nil
+		return receipt.CardMsgID(), nil
 
 	case messages.OutHeartbeat:
 		// F-63: per-turn heartbeat follow-up emitted by the runtime
@@ -2051,7 +2142,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		//     meaningful signal in its own right) — see
 		//     HeartbeatSnapshot.Empty.
 		if msg.Heartbeat == nil || msg.Heartbeat.Empty() {
-			return nil
+			return "", nil
 		}
 		snap := *msg.Heartbeat
 		receipt := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo)
@@ -2086,12 +2177,12 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 			}
 			a.pendingHeartbeats[msg.ReplyTo] = snap
 			a.mu.Unlock()
-			return nil
+			return "", nil
 		}
 		receipt.ApplyHeartbeat(ctx, snap)
-		return nil
+		return "", nil
 	}
-	return fmt.Errorf("feishu: unsupported outbound kind %v", msg.Kind)
+	return "", fmt.Errorf("feishu: unsupported outbound kind %v", msg.Kind)
 }
 
 // sendRawOutText is the degraded send path used when a receipt
@@ -2152,13 +2243,13 @@ func (a *Adapter) sendRawOutText(ctx context.Context, chatID, text string) error
 //     errors get exponential backoff. Final hit returns to caller for log.
 func (a *Adapter) sendResultAsReply(
 	ctx context.Context, chatID, userMsgID, text string, footerLines []string,
-) error {
+) (string, error) {
 	if strings.TrimSpace(chatID) == "" {
-		return errors.New("feishu: chat_id is required")
+		return "", errors.New("feishu: chat_id is required")
 	}
 	if strings.TrimSpace(text) == "" {
 		// Defensive: caller already filters empty non-error results.
-		return nil
+		return "", nil
 	}
 
 	// Orphan result (no userMsgID) — top-level Card 2.0. F-46
@@ -2186,7 +2277,7 @@ func (a *Adapter) sendResultAsReply(
 
 	msgType, body, err := buildResultPayload(sanitized, footerLines)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	// Envelope defensive cap. Adversarial input that survives the byte
@@ -2199,12 +2290,15 @@ func (a *Adapter) sendResultAsReply(
 		truncated := truncateForLog(sanitized, resultCardEnvelopeBudget/3)
 		msgType, body, err = buildResultPayload(truncated, footerLines)
 		if err != nil {
-			return err
+			return "", err
 		}
 	}
 
-	_, err = a.sendContent(ctx, chatID, msgType, body, "", false)
-	return err
+	msgID, err := a.sendContent(ctx, chatID, msgType, body, "", false)
+	if err != nil {
+		return "", err
+	}
+	return msgID, nil
 }
 
 // sendOrphanResultCard sends an OutResult with no parent userMsgID
@@ -2221,16 +2315,15 @@ func (a *Adapter) sendResultAsReply(
 // because the result-card heuristic makes sense when there's a
 // receipt thread to absorb the surface mismatch; orphan has no such
 // fallback and should be uniform with OutReply's orphan path.
-func (a *Adapter) sendOrphanResultCard(ctx context.Context, chatID, text string, footerLines []string) error {
+func (a *Adapter) sendOrphanResultCard(ctx context.Context, chatID, text string, footerLines []string) (string, error) {
 	body, err := buildResultCardJSON(text, footerLines)
 	if err != nil {
-		return fmt.Errorf("feishu: build orphan result card: %w", err)
+		return "", fmt.Errorf("feishu: build orphan result card: %w", err)
 	}
 	// rootID="" → top-level Create (ReplyInChat), replyInThread=false
 	// → main chat visible. Same wire shape as the anchored
 	// sendResultAsReply success path.
-	_, err = a.sendContent(ctx, chatID, larkim.MsgTypeInteractive, body, "", false)
-	return err
+	return a.sendContent(ctx, chatID, larkim.MsgTypeInteractive, body, "", false)
 }
 
 // postThreadReply posts body as a thread reply anchored at rootID.

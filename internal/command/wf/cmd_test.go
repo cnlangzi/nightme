@@ -22,11 +22,11 @@ type captureEmitter struct {
 }
 
 // Send implements messages.Emitter.
-func (e *captureEmitter) Send(_ context.Context, msg messages.OutboundMessage) error {
+func (e *captureEmitter) Send(_ context.Context, msg messages.OutboundMessage) (string, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.msgs = append(e.msgs, msg)
-	return nil
+	return "", nil
 }
 
 // tasks returns the checklists the emitter was given.

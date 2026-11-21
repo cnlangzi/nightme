@@ -64,11 +64,11 @@ func (c *recordingChannel) Incoming() <-chan messages.InboundMessage {
 	close(ch)
 	return ch
 }
-func (c *recordingChannel) Send(_ context.Context, msg messages.OutboundMessage) error {
+func (c *recordingChannel) Send(_ context.Context, msg messages.OutboundMessage) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.captured = append(c.captured, msg)
-	return nil
+	return "", nil
 }
 func (c *recordingChannel) Record() []messages.OutboundMessage {
 	c.mu.Lock()
@@ -110,7 +110,7 @@ func integrationEventHandler(ch channel.Channel, _ *chatsession.ChatSession) fun
 			return false
 		}
 		out.ReplyTo = env.UserMsgID
-		_ = ch.Send(context.Background(), out)
+		_, _ = ch.Send(context.Background(), out)
 		return false
 	}
 }
@@ -700,6 +700,6 @@ func (s *realBridgeSpawner) Spawn(ctx context.Context, _, _ string, args []strin
 // noopEmitter is a test-only messages.Emitter that does nothing.
 type noopEmitter struct{}
 
-func (noopEmitter) Send(context.Context, messages.OutboundMessage) error {
-	return nil
+func (noopEmitter) Send(context.Context, messages.OutboundMessage) (string, error) {
+	return "", nil
 }

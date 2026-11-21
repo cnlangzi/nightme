@@ -115,11 +115,11 @@ type sinkCapture struct {
 	sent []messages.OutboundMessage
 }
 
-func (c *sinkCapture) Send(_ context.Context, msg messages.OutboundMessage) error {
+func (c *sinkCapture) Send(_ context.Context, msg messages.OutboundMessage) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.sent = append(c.sent, msg)
-	return nil
+	return "", nil
 }
 
 func (c *sinkCapture) snapshot() []messages.OutboundMessage {

@@ -44,7 +44,7 @@ func TestStampGitStatus_Skips_OutToolStart(t *testing.T) {
 		ChatID: "c1", Kind: messages.OutToolStart,
 		Tool: &messages.ToolInfo{Name: "Bash", Args: "ls"},
 	}
-	if err := em.Send(context.Background(), in); err != nil {
+	if _, err := em.Send(context.Background(), in); err != nil {
 		t.Fatalf("Send err = %v", err)
 	}
 	if got := r.calls(); got != 0 {
@@ -61,7 +61,7 @@ func TestStampGitStatus_Skips_OutToolEnd(t *testing.T) {
 		ChatID: "c1", Kind: messages.OutToolEnd,
 		Tool: &messages.ToolInfo{Name: "Bash", Args: "ls"},
 	}
-	if err := em.Send(context.Background(), in); err != nil {
+	if _, err := em.Send(context.Background(), in); err != nil {
 		t.Fatalf("Send err = %v", err)
 	}
 	if got := r.calls(); got != 0 {
@@ -77,7 +77,7 @@ func TestStampGitStatus_Skips_OutThinking(t *testing.T) {
 	in := messages.OutboundMessage{
 		ChatID: "c1", Kind: messages.OutThinking, Text: "hmm...",
 	}
-	if err := em.Send(context.Background(), in); err != nil {
+	if _, err := em.Send(context.Background(), in); err != nil {
 		t.Fatalf("Send err = %v", err)
 	}
 	if got := r.calls(); got != 0 {
@@ -90,7 +90,7 @@ func TestStampGitStatus_Keeps_OutReply(t *testing.T) {
 	in := messages.OutboundMessage{
 		ChatID: "c1", Kind: messages.OutReply, Text: "hi",
 	}
-	if err := em.Send(context.Background(), in); err != nil {
+	if _, err := em.Send(context.Background(), in); err != nil {
 		t.Fatalf("Send err = %v", err)
 	}
 	if got := r.calls(); got != 1 {
@@ -103,7 +103,7 @@ func TestStampGitStatus_Keeps_OutResult(t *testing.T) {
 	in := messages.OutboundMessage{
 		ChatID: "c1", Kind: messages.OutResult, Text: "final",
 	}
-	if err := em.Send(context.Background(), in); err != nil {
+	if _, err := em.Send(context.Background(), in); err != nil {
 		t.Fatalf("Send err = %v", err)
 	}
 	if got := r.calls(); got != 1 {
@@ -120,7 +120,7 @@ func TestStampGitStatus_Skips_OutHeartbeat(t *testing.T) {
 	in := messages.OutboundMessage{
 		ChatID: "c1", Kind: messages.OutHeartbeat,
 	}
-	if err := em.Send(context.Background(), in); err != nil {
+	if _, err := em.Send(context.Background(), in); err != nil {
 		t.Fatalf("Send err = %v", err)
 	}
 	if got := r.calls(); got != 0 {
@@ -134,7 +134,7 @@ func TestStampGitStatus_NilLookup_NoCall(t *testing.T) {
 	in := messages.OutboundMessage{
 		ChatID: "c1", Kind: messages.OutReply, Text: "hi",
 	}
-	if err := em.Send(context.Background(), in); err != nil {
+	if _, err := em.Send(context.Background(), in); err != nil {
 		t.Fatalf("Send err = %v", err)
 	}
 	if fc.lastSent.GitStatus != nil {
@@ -156,7 +156,7 @@ func TestStampGitStatus_PreSet_NoCall(t *testing.T) {
 		ChatID: "c1", Kind: messages.OutReply, Text: "hi",
 		GitStatus: pre,
 	}
-	if err := em.Send(context.Background(), in); err != nil {
+	if _, err := em.Send(context.Background(), in); err != nil {
 		t.Fatalf("Send err = %v", err)
 	}
 	if got := r.calls(); got != 0 {

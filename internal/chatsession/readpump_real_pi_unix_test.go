@@ -62,11 +62,11 @@ type capturedSend struct {
 	Kind      string
 }
 
-func (c *fakeOutboundChannel) Send(ctx context.Context, msg any) error {
+func (c *fakeOutboundChannel) Send(ctx context.Context, msg any) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.sends = append(c.sends, capturedSend{})
-	return nil
+	return "", nil
 }
 
 // TestRealPi_E2E_PromptRoundTrip drives the full runtime pipeline

@@ -65,7 +65,7 @@ func TestHealthSummary_StartedButUnverified(t *testing.T) {
 // on the outbound side.
 func TestHealthSummary_SilentDropDoesNotStampOutbound(t *testing.T) {
 	a, _ := newTestAdapter(t)
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID:    "100",
 		Kind:      messages.OutInit,
 		AgentName: "claude",
@@ -83,7 +83,7 @@ func TestHealthSummary_SilentDropDoesNotStampOutbound(t *testing.T) {
 // outbound advances the clock.
 func TestHealthSummary_SendStampsOutbound(t *testing.T) {
 	a, _ := newTestAdapter(t)
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutCommandReply,
 		Text:   "cmd reply",

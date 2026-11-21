@@ -32,11 +32,11 @@ func (c *fakeChannel) Stop(_ context.Context) error  { return nil }
 func (c *fakeChannel) Incoming() <-chan messages.InboundMessage {
 	return make(<-chan messages.InboundMessage)
 }
-func (c *fakeChannel) Send(_ context.Context, m messages.OutboundMessage) error {
+func (c *fakeChannel) Send(_ context.Context, m messages.OutboundMessage) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.sends = append(c.sends, m)
-	return nil
+	return "", nil
 }
 
 // Channel-interface extensions (Phase 2.1 + 2.2). fakeChannel

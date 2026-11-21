@@ -16,6 +16,8 @@ import (
 	larkdispatcher "github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 
+	"github.com/hashicorp/golang-lru/v2"
+
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/messages"
@@ -32,6 +34,17 @@ func testAdapter(t *testing.T) *Adapter {
 	}
 	t.Cleanup(func() { _ = a.Stop(context.Background()) })
 	return a
+}
+
+// mustReceiptsCache builds the receipt index for adapters that a
+// test constructs directly instead of going through NewAdapter. The
+// size is a compile-time constant > 0, so the error cannot happen.
+func mustReceiptsCache() *lru.Cache[string, *MessageReceipt] {
+	cache, err := newReceiptsCache()
+	if err != nil {
+		panic(fmt.Errorf("feishu: mustReceiptsCache: %w", err))
+	}
+	return cache
 }
 
 func TestAdapter_Name(t *testing.T) {
@@ -463,7 +476,7 @@ func TestSend_OutThinking_PostsMarkdownCard(t *testing.T) {
 		return "om_card_test", nil
 	}
 
-	if err := a.Send(t.Context(), messages.OutboundMessage{
+	if _, err := a.Send(t.Context(), messages.OutboundMessage{
 		Kind:    messages.OutThinking,
 		ChatID:  "oc_test",
 		ReplyTo: "om_user_1",
@@ -545,7 +558,7 @@ func TestSend_OutToolStart_PostsToThread(t *testing.T) {
 		return "om_text_test", nil
 	}
 
-	if err := a.Send(t.Context(), messages.OutboundMessage{
+	if _, err := a.Send(t.Context(), messages.OutboundMessage{
 		Kind:    messages.OutToolStart,
 		ChatID:  "oc_test",
 		ReplyTo: "om_user_1",
@@ -594,7 +607,7 @@ func TestSend_OutToolEnd_PostsToThread(t *testing.T) {
 		return "om_text_test", nil
 	}
 
-	if err := a.Send(t.Context(), messages.OutboundMessage{
+	if _, err := a.Send(t.Context(), messages.OutboundMessage{
 		Kind:    messages.OutToolEnd,
 		ChatID:  "oc_test",
 		ReplyTo: "om_user_1",
@@ -732,7 +745,7 @@ func TestSend_ThreadOnlyEvents_PassReplyInThreadTrue(t *testing.T) {
 				return "om_text_t", nil
 			}
 
-			if err := a.Send(t.Context(), c.msg); err != nil {
+			if _, err := a.Send(t.Context(), c.msg); err != nil {
 				t.Fatalf("Send(%s): %v", c.name, err)
 			}
 			// OutThinking: thread-routed interactive card (F-think).
@@ -870,7 +883,7 @@ func TestSend_OutChoice_TopLevelCreate_EmojiPrefixed(t *testing.T) {
 		Options:   messages.ChoiceOptionsFromLabels([]string{"allow", "deny"}),
 		RequestID: "req-choice-test",
 	}
-	if err := a.Send(t.Context(), messages.OutboundMessage{
+	if _, err := a.Send(t.Context(), messages.OutboundMessage{
 		Kind:    messages.OutChoice,
 		ChatID:  "oc_test",
 		ReplyTo: "om_user_1", // F-44 follow-up: ReplyTo is ignored
@@ -916,7 +929,7 @@ func TestSend_OutError_RendersAsCard_NoPermissionEmoji(t *testing.T) {
 		return "om_err_test", nil
 	}
 	errIn := errors.New("dsh: lifecycle exit signal_killed: signal: killed")
-	if err := a.Send(t.Context(), messages.OutboundMessage{
+	if _, err := a.Send(t.Context(), messages.OutboundMessage{
 		Kind:      messages.OutError,
 		ChatID:    "oc_test",
 		Text:      errIn.Error(),
@@ -971,7 +984,7 @@ func TestSend_OutError_ShutdownExit_CalmCard(t *testing.T) {
 		return "om_shutdown_test", nil
 	}
 	notice := "ℹ️ NightMe is shutting down — the claude agent was stopped."
-	if err := a.Send(t.Context(), messages.OutboundMessage{
+	if _, err := a.Send(t.Context(), messages.OutboundMessage{
 		Kind:      messages.OutError,
 		ChatID:    "oc_test",
 		Text:      notice,
@@ -1016,7 +1029,7 @@ func TestSend_OutError_TruncatesLongBody(t *testing.T) {
 		return "om_err_test", nil
 	}
 	bigTail := strings.Repeat("x", 4000)
-	if err := a.Send(t.Context(), messages.OutboundMessage{
+	if _, err := a.Send(t.Context(), messages.OutboundMessage{
 		Kind:      messages.OutError,
 		ChatID:    "oc_test",
 		Text:      "dsh: lifecycle exit signal_killed: signal: killed",
@@ -1070,8 +1083,8 @@ func TestSend_OutCommandReply_PatchesPlaceholderReceipt(t *testing.T) {
 
 	// Step 1: simulate the MessageQueued path that pre-creates the
 	// placeholder receipt. Same shape as the runtime subscriber —
-	// adapter populates receiptsByUserMsgID[userMsgID] with a
-	// transient that has cardMsgID = "om_placeholder".
+	// adapter registers a transient receipt under userMsgID in
+	// receiptsByUserMsgID, with cardMsgID = "om_placeholder".
 	_, _, err := a.ensureReceiptForTyping(t.Context(), "oc_test", "om_cmd_1", nil)
 	if err != nil {
 		t.Fatalf("ensureReceiptForTyping: %v", err)
@@ -1081,7 +1094,7 @@ func TestSend_OutCommandReply_PatchesPlaceholderReceipt(t *testing.T) {
 		t.Fatalf("placeholder send count = %d, want 1 (ensureReceiptForTyping posts a fresh card)", sends)
 	}
 
-	if err := a.Send(t.Context(), messages.OutboundMessage{
+	if _, err := a.Send(t.Context(), messages.OutboundMessage{
 		Kind:    messages.OutCommandReply,
 		ChatID:  "oc_test",
 		ReplyTo: "om_cmd_1",
@@ -1132,7 +1145,7 @@ func TestSend_OutCommandReply_OrphanFallsBackToTopLevel(t *testing.T) {
 	}
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
-	if err := a.Send(t.Context(), messages.OutboundMessage{
+	if _, err := a.Send(t.Context(), messages.OutboundMessage{
 		Kind:    messages.OutCommandReply,
 		ChatID:  "oc_test",
 		ReplyTo: "", // orphan — no parent
@@ -1145,6 +1158,114 @@ func TestSend_OutCommandReply_OrphanFallsBackToTopLevel(t *testing.T) {
 	}
 }
 
+// TestSend_AnchoredCardIsAddressedByItsOwnId — a card the chat opens
+// under a parent message is registered under its own message id as
+// well: an event that carries that id lands on the card instead of
+// opening another one.
+func TestSend_AnchoredCardIsAddressedByItsOwnId(t *testing.T) {
+	a := testAdapter(t)
+
+	var sends int
+	a.sendFunc = func(_ context.Context, _, _, _, _ string, _ bool) (string, error) {
+		sends++
+		return "om_card", nil
+	}
+	var patches int
+	a.updateFunc = func(_ context.Context, _, _ string) error {
+		patches++
+		return nil
+	}
+
+	id, err := a.Send(t.Context(), messages.OutboundMessage{
+		Kind:    messages.OutReply,
+		ChatID:  "oc_test",
+		ReplyTo: "om_user",
+		Text:    "rounds: 1",
+	})
+	if err != nil {
+		t.Fatalf("Send(OutReply): %v", err)
+	}
+	if id != "om_card" {
+		t.Fatalf("the card id = %q, want the id of the message the card became", id)
+	}
+	if sends != 1 {
+		t.Fatalf("send count = %d, want 1", sends)
+	}
+
+	// The next entry names the card itself: it lands on that card.
+	if _, err := a.Send(t.Context(), messages.OutboundMessage{
+		Kind:    messages.OutReply,
+		ChatID:  "oc_test",
+		ReplyTo: id,
+		Text:    "ended: [ v ] committed",
+	}); err != nil {
+		t.Fatalf("Send(OutReply on the card): %v", err)
+	}
+	if sends != 1 {
+		t.Errorf("send count = %d, want 1 (the entry lands on the card)", sends)
+	}
+	if patches != 1 {
+		t.Errorf("patch count = %d, want 1", patches)
+	}
+}
+
+// TestSend_OrphanCardIsAddressedByItsOwnId — a card the chat opens
+// for a message that names no card is registered under its own
+// message id: an event that carries that id lands on the card
+// instead of opening another one.
+func TestSend_OrphanCardIsAddressedByItsOwnId(t *testing.T) {
+	a := testAdapter(t)
+
+	var sends int
+	a.sendFunc = func(_ context.Context, _, _, _, _ string, _ bool) (string, error) {
+		sends++
+		return "om_card", nil
+	}
+	var patches int
+	var patchedBody string
+	a.updateFunc = func(_ context.Context, _, body string) error {
+		patches++
+		patchedBody = body
+		return nil
+	}
+
+	id, err := a.Send(t.Context(), messages.OutboundMessage{
+		Kind:   messages.OutReply,
+		ChatID: "oc_test",
+		Text:   "rounds: 1",
+	})
+	if err != nil {
+		t.Fatalf("Send(OutReply orphan): %v", err)
+	}
+	if id != "om_card" {
+		t.Fatalf("the card id = %q, want the id of the message the card became", id)
+	}
+	if sends != 1 {
+		t.Fatalf("send count = %d, want 1", sends)
+	}
+
+	// The checklist of the round refreshes the same card.
+	if _, err := a.Send(t.Context(), messages.OutboundMessage{
+		Kind:    messages.OutTaskUpdate,
+		ChatID:  "oc_test",
+		ReplyTo: id,
+		TaskList: &agent.AgentTaskListEvent{
+			Items: []agent.AgentTaskItem{{Subject: "fix"}},
+		},
+	}); err != nil {
+		t.Fatalf("Send(OutTaskUpdate): %v", err)
+	}
+	if sends != 1 {
+		t.Errorf("send count = %d, want 1 (the checklist refreshes the card in place)", sends)
+	}
+	if patches != 1 {
+		t.Fatalf("patch count = %d, want 1", patches)
+	}
+	if !strings.Contains(patchedBody, "fix") {
+		t.Errorf("the patched card does not carry the checklist: %q", patchedBody)
+	}
+}
+
 // TestSend_OutCommandReply_EmptyTextRejected — OutCommandReply with
 // empty text is a programming error (caller should suppress
 // trivially-empty replies upstream). Adapter must surface it
@@ -1153,7 +1274,7 @@ func TestSend_OutCommandReply_EmptyTextRejected(t *testing.T) {
 	a := testAdapter(t)
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
-	err := a.Send(t.Context(), messages.OutboundMessage{
+	_, err := a.Send(t.Context(), messages.OutboundMessage{
 		Kind:    messages.OutCommandReply,
 		ChatID:  "oc_test",
 		ReplyTo: "om_cmd_1",
@@ -1199,7 +1320,7 @@ func TestSend_OutCommandReply_OverflowRollsToNewPlaceholder(t *testing.T) {
 
 	// Single chunk over the 28 KB envelope → would overflow.
 	oversizedText := strings.Repeat("x", 40*1024)
-	if err := a.Send(t.Context(), messages.OutboundMessage{
+	if _, err := a.Send(t.Context(), messages.OutboundMessage{
 		Kind:    messages.OutCommandReply,
 		ChatID:  "oc_test",
 		ReplyTo: "om_cmd_overflow",
@@ -1312,7 +1433,7 @@ func TestSend_OutReply_PatchesPlaceholderReceipt_SteerQueueStop(t *testing.T) {
 			}
 
 			// Step 2: emit the slash-command continuation as OutReply.
-			if err := a.Send(t.Context(), messages.OutboundMessage{
+			if _, err := a.Send(t.Context(), messages.OutboundMessage{
 				Kind:    messages.OutReply,
 				ChatID:  "oc_test",
 				ReplyTo: "om_user_msg",
@@ -1546,7 +1667,7 @@ func TestSendViaLark_ReplyInBoth_Dispatch(t *testing.T) {
 				capturedRootID = rootID
 				return "om_ok", nil
 			}
-			if err := a.Send(t.Context(), tc.msg); err != nil {
+			if _, err := a.Send(t.Context(), tc.msg); err != nil {
 				t.Fatalf("Send: %v", err)
 			}
 			if capturedRootID != tc.msg.ReplyTo {
@@ -1616,7 +1737,7 @@ func TestSendViaLark_ReplyInThread_Dispatch(t *testing.T) {
 				capturedRootID = rootID
 				return "om_ok", nil
 			}
-			if err := a.Send(t.Context(), tc.msg); err != nil {
+			if _, err := a.Send(t.Context(), tc.msg); err != nil {
 				t.Fatalf("Send: %v", err)
 			}
 			if capturedRootID != tc.msg.ReplyTo {
@@ -1721,7 +1842,7 @@ func TestSendViaLark_Dispatch(t *testing.T) {
 				return "om_ok", nil
 			}
 			a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
-			if err := a.Send(t.Context(), tc.msg); err != nil {
+			if _, err := a.Send(t.Context(), tc.msg); err != nil {
 				t.Fatalf("Send: %v", err)
 			}
 			if capturedRootID != tc.wantRootID {
@@ -1750,7 +1871,7 @@ func TestSend_OutResult_LongMarkdownUsesInteractiveCard(t *testing.T) {
 	}
 
 	longText := "intro paragraph\n\n```go\nfunc x() { return 1 }\n```\n\nbody text after"
-	if err := a.Send(t.Context(), messages.OutboundMessage{
+	if _, err := a.Send(t.Context(), messages.OutboundMessage{
 		Kind:    messages.OutResult,
 		ChatID:  "oc_test",
 		ReplyTo: "om_x",
@@ -1779,7 +1900,7 @@ func TestSend_OutResult_NoMarkdownUsesText(t *testing.T) {
 		gotContent = content
 		return "ok", nil
 	}
-	if err := a.Send(t.Context(), messages.OutboundMessage{
+	if _, err := a.Send(t.Context(), messages.OutboundMessage{
 		Kind:    messages.OutResult,
 		ChatID:  "oc_test",
 		ReplyTo: "om_x",
@@ -1809,7 +1930,7 @@ func TestSend_OutResult_LotsOfTablesUsesPost(t *testing.T) {
 		b.WriteString("| A | B |\n|---|---|\n| 1 | 2 |\n\n")
 	}
 	text := strings.TrimRight(b.String(), "\n")
-	if err := a.Send(t.Context(), messages.OutboundMessage{
+	if _, err := a.Send(t.Context(), messages.OutboundMessage{
 		Kind:    messages.OutResult,
 		ChatID:  "oc_test",
 		ReplyTo: "om_x",
@@ -1834,7 +1955,7 @@ func TestSend_OutResult_EmptySkipped(t *testing.T) {
 		sends++
 		return "ok", nil
 	}
-	if err := a.Send(t.Context(), messages.OutboundMessage{
+	if _, err := a.Send(t.Context(), messages.OutboundMessage{
 		Kind:    messages.OutResult,
 		ChatID:  "oc_test",
 		ReplyTo: "om_x_no_receipt",
@@ -1868,7 +1989,7 @@ func TestSend_OutResult_EmptyPatchesReceiptFooter(t *testing.T) {
 	preExisting := NewMessageReceiptForReply("oc_test", "om_patch", a)
 	preExisting.cardMsgID = "oc_card_1"
 	preExisting.footerLines = []string{"old footer line"}
-	a.receiptsByUserMsgID["om_patch"] = preExisting
+	a.receiptsByUserMsgID.Add("om_patch", preExisting)
 
 	var sends int
 	a.sendFunc = func(_ context.Context, _, _, _, _ string, _ bool) (string, error) {
@@ -1876,7 +1997,7 @@ func TestSend_OutResult_EmptyPatchesReceiptFooter(t *testing.T) {
 		return "ok", nil
 	}
 	usage := &agent.UsageInfo{InputTokens: 42, OutputTokens: 7}
-	err := a.Send(t.Context(), messages.OutboundMessage{
+	_, err := a.Send(t.Context(), messages.OutboundMessage{
 		Kind:    messages.OutResult,
 		ChatID:  "oc_test",
 		ReplyTo: "om_patch",
@@ -1911,14 +2032,14 @@ func TestSend_OutResult_EmptyWithErrPatchesReceipt(t *testing.T) {
 	a := testAdapter(t)
 	preExisting := NewMessageReceiptForReply("oc_test", "om_err", a)
 	preExisting.cardMsgID = "oc_card_err"
-	a.receiptsByUserMsgID["om_err"] = preExisting
+	a.receiptsByUserMsgID.Add("om_err", preExisting)
 
 	var sends int
 	a.sendFunc = func(_ context.Context, _, _, _, _ string, _ bool) (string, error) {
 		sends++
 		return "ok", nil
 	}
-	err := a.Send(t.Context(), messages.OutboundMessage{
+	_, err := a.Send(t.Context(), messages.OutboundMessage{
 		Kind:    messages.OutResult,
 		ChatID:  "oc_test",
 		ReplyTo: "om_err",
@@ -1942,7 +2063,7 @@ func TestSend_OutResult_IsErrorPrefixedWithIcon(t *testing.T) {
 		gotContent = content
 		return "ok", nil
 	}
-	if err := a.Send(t.Context(), messages.OutboundMessage{
+	if _, err := a.Send(t.Context(), messages.OutboundMessage{
 		Kind:    messages.OutResult,
 		ChatID:  "oc_test",
 		ReplyTo: "om_x",
@@ -2087,8 +2208,11 @@ func TestEnsureReceiptForTask_Concurrent_OnlyOneSendCard(t *testing.T) {
 	// that PATCH must hit the winner's cardMsgID (set by the
 	// register-before-SendCard path), not any orphan card.
 	a.mu.Lock()
-	registered := a.receiptsByUserMsgID[userMsgID]
-	cardMsgID := registered.cardMsgID
+	registered, _ := a.receiptsByUserMsgID.Get(userMsgID)
+	cardMsgID := ""
+	if registered != nil {
+		cardMsgID = registered.cardMsgID
+	}
 	a.mu.Unlock()
 	if cardMsgID == "" {
 		t.Errorf("registered receipt has empty cardMsgID after the ensure path completed")
@@ -2124,7 +2248,7 @@ func TestSend_OutReply_FoldsIntoReceipt(t *testing.T) {
 	}
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:    messages.OutReply,
 		ChatID:  "oc_test",
 		ReplyTo: "om_user",
@@ -2168,7 +2292,7 @@ func TestSend_OutReply_FoldsIntoReceipt(t *testing.T) {
 	}
 	// Receipt IS created — F-44 revert: OutReply folds.
 	a.mu.RLock()
-	rcpt, ok := a.receiptsByUserMsgID["om_user"]
+	rcpt, ok := a.receiptsByUserMsgID.Get("om_user")
 	a.mu.RUnlock()
 	if !ok || rcpt == nil {
 		t.Errorf("receipt was NOT created for OutReply; F-44 revert: OutReply folds into receipt")
@@ -2196,7 +2320,7 @@ func TestSend_OutReply_MultipleChunks_PATCHesSameCard(t *testing.T) {
 
 	chunks := []string{"first", "second", "third"}
 	for i, chunk := range chunks {
-		if err := a.Send(context.Background(), messages.OutboundMessage{
+		if _, err := a.Send(context.Background(), messages.OutboundMessage{
 			Kind:    messages.OutReply,
 			ChatID:  "oc_test",
 			ReplyTo: "om_user",
@@ -2215,7 +2339,7 @@ func TestSend_OutReply_MultipleChunks_PATCHesSameCard(t *testing.T) {
 	}
 	// Receipt should have all 3 entries.
 	a.mu.RLock()
-	rcpt := a.receiptsByUserMsgID["om_user"]
+	rcpt, _ := a.receiptsByUserMsgID.Get("om_user")
 	a.mu.RUnlock()
 	if rcpt == nil {
 		t.Fatalf("receipt missing")
@@ -2239,7 +2363,7 @@ func TestSend_OutReply_EmptyText_SilentDrop(t *testing.T) {
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
 	for _, text := range []string{"", "   ", "\n\n\t"} {
-		if err := a.Send(context.Background(), messages.OutboundMessage{
+		if _, err := a.Send(context.Background(), messages.OutboundMessage{
 			Kind:    messages.OutReply,
 			ChatID:  "oc_test",
 			ReplyTo: "om_user",
@@ -2362,7 +2486,7 @@ func TestSend_OutReply_OverflowPlaceholderEmptyMsgID_TreatedAsFailure(t *testing
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
 	// (1) Cold-start: first OutReply creates the receipt.
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:    messages.OutReply,
 		ChatID:  "oc_test",
 		ReplyTo: "om_user",
@@ -2376,7 +2500,7 @@ func TestSend_OutReply_OverflowPlaceholderEmptyMsgID_TreatedAsFailure(t *testing
 
 	// Locate the receipt.
 	a.mu.RLock()
-	rcpt, ok := a.receiptsByUserMsgID["om_user"]
+	rcpt, ok := a.receiptsByUserMsgID.Get("om_user")
 	a.mu.RUnlock()
 	if !ok || rcpt == nil {
 		t.Fatalf("receipt not created on cold-start; F-44 revert: OutReply folds into receipt")
@@ -2400,7 +2524,7 @@ func TestSend_OutReply_OverflowPlaceholderEmptyMsgID_TreatedAsFailure(t *testing
 
 	// (4) Send the overflow-triggering OutReply.
 	sendsBeforeOverflow := sends
-	err := a.Send(context.Background(), messages.OutboundMessage{
+	_, err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:    messages.OutReply,
 		ChatID:  "oc_test",
 		ReplyTo: "om_user",
@@ -2456,7 +2580,7 @@ func TestSend_OutReply_OverflowPlaceholderSendError_ReceiptUntouched(t *testing.
 	}
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:    messages.OutReply,
 		ChatID:  "oc_test",
 		ReplyTo: "om_user",
@@ -2466,7 +2590,7 @@ func TestSend_OutReply_OverflowPlaceholderSendError_ReceiptUntouched(t *testing.
 	}
 
 	a.mu.RLock()
-	rcpt := a.receiptsByUserMsgID["om_user"]
+	rcpt, _ := a.receiptsByUserMsgID.Get("om_user")
 	a.mu.RUnlock()
 	if rcpt == nil {
 		t.Fatalf("receipt not created on cold-start")
@@ -2480,7 +2604,7 @@ func TestSend_OutReply_OverflowPlaceholderSendError_ReceiptUntouched(t *testing.
 	}
 	rcpt.mu.Unlock()
 
-	err := a.Send(context.Background(), messages.OutboundMessage{
+	_, err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:    messages.OutReply,
 		ChatID:  "oc_test",
 		ReplyTo: "om_user",
@@ -2514,7 +2638,7 @@ func TestSend_OutReply_NilStatusBar_NoFooterSection(t *testing.T) {
 	}
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:    messages.OutReply,
 		ChatID:  "oc_test",
 		ReplyTo: "", // orphan path
@@ -2578,7 +2702,7 @@ func TestSend_OutInit_StampsFooterOnReceipt(t *testing.T) {
 	// Pre-register a receipt so the OutInit lands on the
 	// pre-existing-receipt branch (matches /review flow: dispatcher
 	// calls SendCardForReceipt, then bridge emits OutInit).
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:    messages.OutReply,
 		ChatID:  "oc_test",
 		ReplyTo: "om_user",
@@ -2588,7 +2712,7 @@ func TestSend_OutInit_StampsFooterOnReceipt(t *testing.T) {
 	}
 	sentCount = 0 // reset — count only the OutInit's traffic
 
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:      messages.OutInit,
 		ChatID:    "oc_test",
 		ReplyTo:   "om_user",
@@ -2622,7 +2746,7 @@ func TestSend_OutInit_OrphanSilent(t *testing.T) {
 	}
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:      messages.OutInit,
 		ChatID:    "oc_test",
 		ReplyTo:   "", // orphan — startup EventAgentReady
@@ -2652,7 +2776,7 @@ func TestSend_OutResult_CoLocatesUsage(t *testing.T) {
 	}
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:    messages.OutResult,
 		ChatID:  "oc_test",
 		ReplyTo: "om_user",
@@ -3007,7 +3131,7 @@ func TestSend_OutTask_OrphanReplyTo_StillCard(t *testing.T) {
 	}
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:    messages.OutTaskCreate,
 		ChatID:  "oc_test",
 		ReplyTo: "", // orphan — no parent user message
@@ -3067,7 +3191,7 @@ func TestSend_OutTask_ColdStartSendCardFails_StillCard(t *testing.T) {
 	}
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:    messages.OutTaskCreate,
 		ChatID:  "oc_test",
 		ReplyTo: "om_user",
@@ -3096,7 +3220,7 @@ func TestSend_OutTask_ColdStartSendCardFails_StillCard(t *testing.T) {
 	// so a subsequent OutTask on the same userMsgID cold-starts
 	// cleanly (no orphan state pollution).
 	a.mu.RLock()
-	_, hasReceipt := a.receiptsByUserMsgID["om_user"]
+	_, hasReceipt := a.receiptsByUserMsgID.Get("om_user")
 	a.mu.RUnlock()
 	if hasReceipt {
 		t.Errorf("failed cold-start should clean up receipt registration")
@@ -3113,7 +3237,7 @@ func TestSend_OutTask_NilStatusBar_NoFooter(t *testing.T) {
 	}
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:    messages.OutTaskCreate,
 		ChatID:  "oc_test",
 		ReplyTo: "", // orphan
@@ -3164,7 +3288,7 @@ func TestSend_OutTask_EmptyItems_ShowsWorkingPlaceholder(t *testing.T) {
 	}
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:    messages.OutTaskCreate,
 		ChatID:  "oc_test",
 		ReplyTo: "", // orphan

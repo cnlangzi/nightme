@@ -89,7 +89,7 @@ func TestAdapter_Send_Group_OutThinking_CreatesDraftMessage(t *testing.T) {
 	// cap-triggered flush — every event just appends. OnPromptEnded
 	// is the flush trigger.
 	for i := 1; i <= 5; i++ {
-		if err := a.Send(context.Background(), messages.OutboundMessage{
+		if _, err := a.Send(context.Background(), messages.OutboundMessage{
 			ChatID: "tg_" + raw,
 			Kind:   messages.OutThinking,
 			Text:   fmt.Sprintf("buffered thought %d", i),
@@ -144,7 +144,7 @@ func TestAdapter_Send_Group_OutThinking_SecondEvent_EDITesInPlace(t *testing.T) 
 	raw := setupGroupState(t, a, -1001, 0)
 
 	for i := 1; i <= 10; i++ {
-		_ = a.Send(context.Background(), messages.OutboundMessage{
+		_, _ = a.Send(context.Background(), messages.OutboundMessage{
 			ChatID: "tg_" + raw,
 			Kind:   messages.OutThinking,
 			Text:   fmt.Sprintf("thought %d", i),
@@ -192,13 +192,13 @@ func TestAdapter_Send_Group_OutToolEnd_ACCUMULATES_UnderStart(t *testing.T) {
 
 	// Pair: OutToolStart then OutToolEnd. Under the single-FIFO
 	// model they simply buffer as two richTurnEntry rows.
-	_ = a.Send(context.Background(), messages.OutboundMessage{
+	_, _ = a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "tg_" + raw,
 		Kind:   messages.OutToolStart,
 		Tool:   &messages.ToolInfo{Name: "Write", Args: "/tmp/bar.go"},
 		Text:   "● Write(/tmp/bar.go)",
 	})
-	_ = a.Send(context.Background(), messages.OutboundMessage{
+	_, _ = a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "tg_" + raw,
 		Kind:   messages.OutToolEnd,
 		Tool:   &messages.ToolInfo{Name: "Write", Output: "hello world"},
@@ -251,7 +251,7 @@ func TestAdapter_Send_Group_NextTurn_CreatesFreshDraftMessage(t *testing.T) {
 	// → flush (cold-create, latest 5 = events 6..10) →
 	// deleteMessage. Turn 1's entry is dropped from m.entries.
 	for i := 1; i <= 10; i++ {
-		_ = a.Send(context.Background(), messages.OutboundMessage{
+		_, _ = a.Send(context.Background(), messages.OutboundMessage{
 			ChatID: "tg_" + raw,
 			Kind:   messages.OutThinking,
 			Text:   fmt.Sprintf("turn 1 thought %d", i),
@@ -278,7 +278,7 @@ func TestAdapter_Send_Group_NextTurn_CreatesFreshDraftMessage(t *testing.T) {
 	// cold-create (sendRichMessage), not an editMessageText on
 	// the deleted id.
 	for i := 1; i <= 10; i++ {
-		_ = a.Send(context.Background(), messages.OutboundMessage{
+		_, _ = a.Send(context.Background(), messages.OutboundMessage{
 			ChatID: "tg_" + raw,
 			Kind:   messages.OutThinking,
 			Text:   fmt.Sprintf("turn 2 thought %d", i),
@@ -310,7 +310,7 @@ func TestAdapter_Send_Group_DraftMessage_RoutedThroughTopic(t *testing.T) {
 
 	// 5 events buffer silently. No cap trigger in the FIFO model.
 	for i := 1; i <= 5; i++ {
-		if err := a.Send(context.Background(), messages.OutboundMessage{
+		if _, err := a.Send(context.Background(), messages.OutboundMessage{
 			ChatID: "tg_" + raw + ":42",
 			Kind:   messages.OutThinking,
 			Text:   fmt.Sprintf("topic-scoped thought %d", i),
@@ -342,7 +342,7 @@ func TestAdapter_OnPromptEnded_Group_DeletesDraftMessage(t *testing.T) {
 	a, api := newTestAdapter(t)
 	raw := setupGroupState(t, a, -1001, 0)
 
-	_ = a.Send(context.Background(), messages.OutboundMessage{
+	_, _ = a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "tg_" + raw,
 		Kind:   messages.OutThinking,
 		Text:   "thought to be deleted",
@@ -377,12 +377,12 @@ func TestAdapter_Send_Group_OutResult_EndsDraftProcess(t *testing.T) {
 	a, api := newTestAdapter(t)
 	raw := setupGroupState(t, a, -1001, 0)
 
-	_ = a.Send(context.Background(), messages.OutboundMessage{
+	_, _ = a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "tg_" + raw,
 		Kind:   messages.OutThinking,
 		Text:   "think then result",
 	})
-	_ = a.Send(context.Background(), messages.OutboundMessage{
+	_, _ = a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "tg_" + raw,
 		Kind:   messages.OutResult,
 		Text:   "final answer",
@@ -598,7 +598,7 @@ func TestAdapter_Send_Group_ConcurrentStreamDraftEvent_NoDoubleColdCreate(t *tes
 	for i := 0; i < N; i++ {
 		go func() {
 			defer wg.Done()
-			_ = a.Send(context.Background(), messages.OutboundMessage{
+			_, _ = a.Send(context.Background(), messages.OutboundMessage{
 				ChatID: "tg_" + raw,
 				Kind:   messages.OutThinking,
 				Text:   "concurrent thought",
@@ -652,7 +652,7 @@ func TestAdapter_Send_Group_OutThinking_UsesMsgReplyTo(t *testing.T) {
 	// liveDraft.endProcess on the caller-supplied id, not on
 	// state.UserMessageID.
 	for i := 1; i <= 5; i++ {
-		if err := a.Send(context.Background(), messages.OutboundMessage{
+		if _, err := a.Send(context.Background(), messages.OutboundMessage{
 			ChatID:  "tg_" + raw,
 			Kind:    messages.OutThinking,
 			Text:    "anchored to msg.ReplyTo",
@@ -693,7 +693,7 @@ func TestAdapter_Send_Group_FallsBackToStateUserMessageID_WhenReplyToEmpty(t *te
 	// state.UserMessageID fallback (77) that the events used since
 	// ReplyTo is empty.
 	for i := 1; i <= 5; i++ {
-		if err := a.Send(context.Background(), messages.OutboundMessage{
+		if _, err := a.Send(context.Background(), messages.OutboundMessage{
 			ChatID: "tg_" + raw,
 			Kind:   messages.OutThinking,
 			Text:   "orphan thought — no ReplyTo",
@@ -736,7 +736,7 @@ func TestAdapter_Send_Group_BackToBackPrompts_DraftMessagesIsolated(t *testing.T
 	// forces the cold-create anchored to ReplyTo=10. The userMsgID
 	// in OnPromptEnded matches the event anchor (ReplyTo="10").
 	for i := 1; i <= 5; i++ {
-		if err := a.Send(context.Background(), messages.OutboundMessage{
+		if _, err := a.Send(context.Background(), messages.OutboundMessage{
 			ChatID:  "tg_" + raw,
 			Kind:    messages.OutThinking,
 			Text:    "turn 1 thought",
@@ -776,7 +776,7 @@ func TestAdapter_Send_Group_BackToBackPrompts_DraftMessagesIsolated(t *testing.T
 	// Turn 1 late OutToolEnd arrives with ReplyTo=10 (NOT state=11).
 	// It buffers into a fresh turn-1 entry — the prior one was
 	// dropped on the previous endProcess. No new flush trigger.
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID:  "tg_" + raw,
 		Kind:    messages.OutToolEnd,
 		Tool:    &messages.ToolInfo{Name: "Bash", Output: "ok"},
@@ -802,7 +802,7 @@ func TestAdapter_Send_Group_BackToBackPrompts_DraftMessagesIsolated(t *testing.T
 	// anchored to 11, not 10.
 	api.Calls = nil
 	for i := 1; i <= 5; i++ {
-		if err := a.Send(context.Background(), messages.OutboundMessage{
+		if _, err := a.Send(context.Background(), messages.OutboundMessage{
 			ChatID:  "tg_" + raw,
 			Kind:    messages.OutThinking,
 			Text:    "turn 2 thought",
@@ -847,7 +847,7 @@ func TestAdapter_Send_Group_OutResult_EndProcessUsesMsgReplyTo(t *testing.T) {
 	}
 
 	// Turn with ReplyTo=42.
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID:  "tg_" + raw,
 		Kind:    messages.OutThinking,
 		Text:    "turn anchored to 42",
@@ -859,7 +859,7 @@ func TestAdapter_Send_Group_OutResult_EndProcessUsesMsgReplyTo(t *testing.T) {
 
 	// OutResult ends the process — must delete the DraftMessage
 	// created for ReplyTo=42.
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID:  "tg_" + raw,
 		Kind:    messages.OutResult,
 		Text:    "final answer",
@@ -881,7 +881,7 @@ func TestAdapter_OnPromptEnded_Group_EndProcessSafetyNet(t *testing.T) {
 	raw := setupGroupState(t, a, -1001, 0)
 
 	// Turn creates a DraftMessage via think, no OutResult follows.
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID:  "tg_" + raw,
 		Kind:    messages.OutThinking,
 		Text:    "thinking that never finishes",
@@ -991,7 +991,7 @@ func TestAdapter_Send_Group_PatchChainHeaderUsesMsgReplyTo(t *testing.T) {
 	}
 	// First cold-create a rich turn for the ReplyTo=42 turn so
 	// patchChainHeader has something to PATCH.
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID:  "tg_" + raw,
 		Kind:    messages.OutReply,
 		Text:    "seed reply",
@@ -1003,7 +1003,7 @@ func TestAdapter_Send_Group_PatchChainHeaderUsesMsgReplyTo(t *testing.T) {
 
 	// Now send an OutHeartbeat anchored to ReplyTo=42. patchChainHeader
 	// must route the PATCH to turn 42's rich turn, NOT turn 999's.
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID:  "tg_" + raw,
 		Kind:    messages.OutHeartbeat,
 		ReplyTo: "42",

@@ -307,11 +307,12 @@ func (f *Factory) emitter(ctx context.Context, cs *chatsession.ChatSession, chat
 			kind = messages.OutTaskCreate
 			first = false
 		}
-		return emitter.Send(ctx, messages.OutboundMessage{
+		_, err := emitter.Send(ctx, messages.OutboundMessage{
 			ChatID:   chatID,
 			ReplyTo:  replyTo,
 			Kind:     kind,
 			TaskList: &agent.AgentTaskListEvent{Items: items},
 		})
+		return err
 	}
 }

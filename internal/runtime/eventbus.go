@@ -205,7 +205,7 @@ func WireRuntimeCallbacksAndRestore(
 				out.SessionID = as.SessionID()
 				out.Model = as.Model()
 			}
-			if err := em.Send(context.Background(), out); err != nil {
+			if _, err := em.Send(context.Background(), out); err != nil {
 				logger.Warn("runtime: MessageState send failed",
 					"chat_id", e.ChatID,
 					"state", e.State,

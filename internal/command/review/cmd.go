@@ -806,7 +806,7 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 			if emitter == nil {
 				return
 			}
-			_ = emitter.Send(revCtx, messages.OutboundMessage{
+			_, _ = emitter.Send(revCtx, messages.OutboundMessage{
 				ChatID:  chatID,
 				Kind:    messages.OutReply,
 				ReplyTo: replyTo,
@@ -1231,7 +1231,7 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 			if len(msg) > 800 {
 				msg = msg[:800] + "…(truncated)"
 			}
-			_ = emitter.Send(revCtx, messages.OutboundMessage{
+			_, _ = emitter.Send(revCtx, messages.OutboundMessage{
 				ChatID:  chatID,
 				Kind:    messages.OutReply,
 				ReplyTo: replyTo,

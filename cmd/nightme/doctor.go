@@ -74,13 +74,34 @@ func runDoctor(out io.Writer, jsonOut bool) error {
 	if err != nil {
 		return err
 	}
-	payload, err := daemoncontrol.GetHealth(paths.Socket, 5*time.Second)
+	return runDoctorWith(out, jsonOut, cfg, paths, defaultDoctorRPCs())
+}
+
+// doctorRPCs are the daemoncontrol calls doctor makes. Tests swap in
+// fakes so the RPC sequence can be asserted without a live daemon.
+type doctorRPCs struct {
+	health func(path string, timeout time.Duration) (daemoncontrol.HealthPayload, error)
+	status func(path string, timeout time.Duration) (daemoncontrol.Status, error)
+}
+
+func defaultDoctorRPCs() doctorRPCs {
+	return doctorRPCs{
+		health: daemoncontrol.GetHealth,
+		status: daemoncontrol.GetStatus,
+	}
+}
+
+// runDoctorWith is the testable core of runDoctor: it takes the
+// config, the resolved paths and the RPC seams instead of reaching
+// for them itself.
+func runDoctorWith(out io.Writer, jsonOut bool, cfg *config.Config, paths daemoncontrol.Paths, rpcs doctorRPCs) error {
+	payload, err := rpcs.health(paths.Socket, 5*time.Second)
 	if err != nil {
 		// The daemon is unreachable — which is precisely when the
 		// crash capture is worth reading. Print it BEFORE returning
 		// the RPC error, otherwise the one command a user runs when
 		// "the daemon is gone" tells them nothing about why.
-		if summary, ok := crashCaptureSummary(cfg); ok {
+		if summary, ok := crashCaptureSummary(cfg, time.Time{}); ok {
 			fmt.Fprint(out, summary)
 		}
 		return fmt.Errorf("daemon health RPC: %w", err)
@@ -92,12 +113,32 @@ func runDoctor(out io.Writer, jsonOut bool) error {
 		return err
 	}
 	// A live daemon can still be the survivor of an earlier crash
-	// loop, so surface the capture here too — as a footer, not an
-	// alarm.
-	if summary, ok := crashCaptureSummary(cfg); ok {
+	// loop, so surface the capture here too — a footer when it
+	// predates the running daemon, an alarm when the running daemon
+	// wrote it.
+	startedAt := time.Time{}
+	if hasCapture(cfg) {
+		// The daemon's start time is what says which run wrote the
+		// capture, and it is only worth a round trip when there is a
+		// capture to attribute.
+		if status, err := rpcs.status(paths.Socket, 5*time.Second); err == nil {
+			startedAt = status.StartedAt
+		}
+	}
+	if summary, ok := crashCaptureSummary(cfg, startedAt); ok {
 		fmt.Fprint(out, summary)
 	}
 	return nil
+}
+
+// hasCapture reports whether a non-empty crash capture exists.
+func hasCapture(cfg *config.Config) bool {
+	path, err := daemonStderrPath(cfg)
+	if err != nil {
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && info.Size() > 0
 }
 
 // crashCaptureSummary renders the CRASH CAPTURE section, or ok=false
@@ -105,7 +146,12 @@ func runDoctor(out io.Writer, jsonOut bool) error {
 // steady state). It shows the panic headline rather than the whole
 // stack: enough to recognize the failure, with the path to read the
 // rest.
-func crashCaptureSummary(cfg *config.Config) (string, bool) {
+//
+// startedAt is the running daemon's start time; the zero value means
+// "unknown" — the daemon is unreachable, or its status could not be
+// read. The capture file is appended to and survives every restart,
+// so only its mtime says which daemon run wrote it.
+func crashCaptureSummary(cfg *config.Config, startedAt time.Time) (string, bool) {
 	path, err := daemonStderrPath(cfg)
 	if err != nil {
 		return "", false
@@ -118,7 +164,7 @@ func crashCaptureSummary(cfg *config.Config) (string, bool) {
 	var sb strings.Builder
 	tw := tabwriter.NewWriter(&sb, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "")
-	fmt.Fprintln(tw, "CRASH CAPTURE (daemon stderr — non-empty means it printed something it should not have)")
+	fmt.Fprintln(tw, crashCaptureTitle(info.ModTime(), startedAt))
 	fmt.Fprintf(tw, "  file:\t%s\n", path)
 	fmt.Fprintf(tw, "  size:\t%d bytes\t(written %s ago)\n", info.Size(), formatAge(info.ModTime(), time.Now()))
 	if head := crashHeadline(path); head != "" {
@@ -126,6 +172,26 @@ func crashCaptureSummary(cfg *config.Config) (string, bool) {
 	}
 	tw.Flush()
 	return sb.String(), true
+}
+
+// crashCaptureTitle picks the section title from the capture's mtime
+// against the running daemon's start time.
+//
+// The capture file is appended to and never cleared on a normal start,
+// so "the file is not empty" says nothing about the daemon that is
+// running now — an eleven-hour-old crash reads like a fresh one. The
+// mtime does: an older capture belongs to an earlier run, a newer one
+// was written by the daemon that is running now.
+func crashCaptureTitle(capturedAt, startedAt time.Time) string {
+	switch {
+	case startedAt.IsZero():
+		return "LAST CRASH CAPTURE (the last thing a daemon wrote to stderr)"
+	case capturedAt.Before(startedAt):
+		return fmt.Sprintf("LAST CRASH CAPTURE (from an earlier daemon run; the running one started at %s)",
+			startedAt.Local().Format(time.RFC3339))
+	default:
+		return "CRASH CAPTURE (the running daemon wrote this — it should not write to stderr)"
+	}
 }
 
 // crashHeadline returns the first line that looks like a Go failure

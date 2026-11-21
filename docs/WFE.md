@@ -19,6 +19,7 @@ The personal agent (`/me`) runs a workflow in a chat. The same file is the plan 
   - [1.2 Uninstalling a workflow](#12-uninstalling-a-workflow)
   - [1.3 Checking a workflow](#13-checking-a-workflow)
 - [2. Top-level fields](#2-top-level-fields)
+  - [2.1 `requires` — the versions the workflow needs](#21-requires--the-versions-the-workflow-needs)
 - [3. Triggers (`on:`)](#3-triggers-on)
   - [3.1 `schedule`](#31-schedule)
   - [3.2 `pull_request`](#32-pull_request)
@@ -136,6 +137,7 @@ The two surfaces differ in one thing: the load path ignores the keys the schema 
 | `args` | arg[] | ❌ | — | The arguments the workflow takes. A spec is a mapping with `name` and an optional `default`. |
 | `instruct` | bool | ❌ | `true` | Whether the agent may send free-form instructions to the chat the run works in. |
 | `workspaces` | string[] | ❌ | — | The workspaces the workflow names. The run works where the chat works. |
+| `requires` | object | ❌ | — | The versions the workflow needs (see §2.1). |
 | `on` | object | ❌ | — | Trigger spec (see §3). Parsed and displayed; nothing fires it. |
 | `jobs` | map | ✅ | — | Named jobs, each with ordered `steps` (see §4). |
 
@@ -161,6 +163,9 @@ jobs:
 
 ```yaml
 title: Fix an issue and ship it as a PR.
+
+requires:
+  nightme: ">=0.10.0"               # which nightme this file needs
 
 args:
   - name: issue
@@ -208,7 +213,7 @@ jobs:
       # 3. message step that repairs the step before it
       - id: review
         message: "/review"
-        note: 没跑完就 /review -c；有改动就先 /gtw commit
+        description: 没跑完就 /review -c；有改动就先 /gtw commit
 
       # 4. wait step: sit out a duration
       - id: rest
@@ -232,6 +237,45 @@ jobs:
 ```
 
 **Why `workspaces` is optional**: a workflow runs where the chat works, and follows the chat when it moves. The list names the workspaces the workflow is meant for; it is not a filter that decides where the run happens.
+
+### 2.1 `requires` — the versions the workflow needs
+
+A workflow can say which nightme it needs:
+
+```yaml
+requires:
+  nightme: ">=0.10.0"          # which nightme this file needs
+```
+
+The key names the object the requirement is about; the only object is
+`nightme`. The value is a version constraint:
+
+```
+constraint := comparator ("," comparator)*      # a comma means "and"
+comparator := (">=" | ">" | "<=" | "<" | "=" | "!=") version
+version    := major ["." minor ["." patch]]
+```
+
+An operator is required: a bare `0.10.0` would be an exact match, and a
+workflow that pins an exact version stops working on the next patch release.
+`^` and `~` are not supported — their meaning differs under `0.x` and `1.x`,
+and a workflow is not a package.
+
+Only the numeric trunk of a version is compared: `v0.9.1-12-gabc` is `0.9.1`,
+and `0.10` is `0.10.0`.
+
+A constraint that does not parse is a problem of the file: the workflow does
+not load, and `nightme workflow validate` reports it.
+
+The requirement is checked when the run starts. A build that is too old
+refuses the run and says both versions: `this workflow needs nightme >= 0.10.0;
+this nightme is 0.9.1`. A build that carries no release version — a
+development build (`dev`, `0.9.1-dev`) or a CI build (`0.0.0`) — does not
+check the requirement at all: it is the newest code there is.
+
+`nightme workflow list`, `nightme workflow show` and `nightme workflow
+validate` show the requirement and how this build stands against it.
+`/wf install` says what the installed workflow needs; it does not refuse it.
 
 ---
 
@@ -476,7 +520,7 @@ Every step supports:
 | `if` | string | (always true) | Condition expression. A step whose condition does not hold is skipped and the chain continues. |
 | `env` | map | — | Environment variables for the step (merged on top of the run's env and the daemon's env). |
 | `continue-on-error` | bool | `false` | Whether the chain continues when this step fails. |
-| `note` | string | — | Why the step is there, and which fixes the owner uses for it. It is the description the decision model reads. |
+| `description` | string | — | What the step is, which outcome is its normal branch, and what to do when it is not. The decision model and the chat model both read it. |
 | `final` | bool | `false` | The step cleans up after the round. It runs when the round ends, however the round ends. |
 | `agents` | chain[] | — | The agents the step runs, in order (see §5.6). |
 
@@ -605,13 +649,13 @@ jobs:
     steps:
       - id: fix
         message: "/gtw fix ${{ args.issue }} -y"
-        note: 从 nightme/assigned 队列里挑一个
+        description: 从 nightme/assigned 队列里挑一个
       - id: commit
         message: "/gtw commit"
         if: ${{ steps.fix.outputs.data.issue }}
       - id: review
         message: "/review"
-        note: 没跑完就 /review -c；有改动就先 /gtw commit
+        description: 没跑完就 /review -c；有改动就先 /gtw commit
         if: ${{ steps.fix.outputs.data.issue }}
       - id: commit2
         message: "/gtw commit"
@@ -804,7 +848,7 @@ The policy is the bound on what a run may do. It is a pure function of the workf
 | `CheckInstruct()` | Whether a free-form instruction is allowed. |
 | `CheckFinish(status)` | Whether the run may end. `done` needs the last executed step's latest outcome to be `ok` or `noop`; `failed` is always allowed. |
 | `Remaining()` | The chances left per step. |
-| `Render()` | The workflow as a compact text block: the identity, the title, the steps, the notes and the limits. |
+| `Render()` | The workflow as a compact text block: the identity, the title, the steps, their descriptions and the limits. |
 | `StepCommands()` | The step messages the policy accepts right now. |
 
 A step's message belongs to that step, and a step that spent its budget leaves the list. The budget counts the actions of the current round only: the step's own execution, the agent's decision that the step is skipped, the nightme commands and the instructions issued for it, and the turns of the chat model that produced no tool call. It starts over at every round.
@@ -847,7 +891,7 @@ At a judgment point, the agent asks the decision model what comes next.
 
 | Question | Shape | Asked |
 |---|---|---|
-| `next` | choice — the steps' `message:` values, plus `done` and `escalate`; each option's description is the step's note | always |
+| `next` | choice — the steps' `message:` values, plus `done` and `escalate`; each option's description is the step's description | always |
 | `needs_human` | yes/no — does the next step need the user's judgement or credentials | always |
 | `step_succeeded` | yes/no — did the last step work | only when the last outcome is `unknown` |
 
@@ -862,9 +906,9 @@ The decision is recorded in the conversation as a synthetic assistant tool call,
 
 **System 2 — the chat model.** The standard tool-calling shape: call the model with the tools, run the tool calls, append the results, repeat until `finish` or a pause.
 
-The model is the owner's hands inside the workflow: what it runs executes exactly as if the owner had typed it. The engine is the master — it runs the steps and wakes the model only when a step raised an exception — and the model's job is to repair the gap and to give the control back. The system prompt is the role, the tools and the workflow — the title, the jobs, the steps, their notes and its limits. It does not carry the workflow's conditions, its environment or its templates: those are the engine's business, not the model's. It names the two situations that are still the model's when a step produced nothing: an outcome whose verdict nobody reported, and work that is still running in the background (wait, then look again).
+The model is the owner's hands inside the workflow: what it runs executes exactly as if the owner had typed it. The engine is the master — it runs the steps and wakes the model only when a step raised an exception — and the model's job is to repair the gap and to give the control back. The system prompt is the role, the tools and the workflow — the title, the jobs, the steps, their descriptions and its limits. It does not carry the workflow's conditions, its environment or its templates: those are the engine's business, not the model's. It names the two situations that are still the model's when a step produced nothing: an outcome whose verdict nobody reported, and work that is still running in the background (wait, then look again).
 
-The model is called with a situation report: why the run needs it, the round it is in, the state of the repository, the steps of that round and which one is ready, what every step of the round produced — its status, its summary, its error, its facts and the hint that explains its reason code — the step the judgment is about with its note, the commands the policy accepts now, the chances left for it, the turns the agent spent without acting, the directives it may take, and the transcripts of the last two actions, each cut to its last 4 KB.
+The model is called with a situation report: why the run needs it, the round it is in, the state of the repository, the steps of that round and which one is ready, what every step of the round produced — its status, its summary, its error, its facts and the hint that explains its reason code — the step the judgment is about with its description, the commands the policy accepts now, the chances left for it, the turns the agent spent without acting, the directives it may take, and the transcripts of the last two actions, each cut to its last 4 KB.
 
 The report is a user turn, and only the latest one is kept: the report is rendered again on every turn of the agent, and a conversation that holds one report per turn grows past what the chat model accepts.
 

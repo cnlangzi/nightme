@@ -22,12 +22,12 @@ jobs:
     steps:
       - id: fix
         message: "/gtw fix ${{ args.issue }} -y"
-        note: 从 nightme/assigned 队列里挑一个
+        description: 从 nightme/assigned 队列里挑一个
       - id: commit
         message: "/gtw commit"
       - id: review
         message: "/review"
-        note: 没跑完就 /review -c；有改动就先 /gtw commit
+        description: 没跑完就 /review -c；有改动就先 /gtw commit
       - id: commit2
         message: "/gtw commit"
       - id: push
@@ -527,7 +527,7 @@ jobs:
 title: x
 jobs:
   main:
-    steps: [{note: nothing to do}]
+    steps: [{description: nothing to do}]
 `,
 			wantErr: "exactly one of message / shell / use / wait must be set",
 		},
@@ -1260,5 +1260,79 @@ func TestWorkflowName_AFileInTheRootHasNoName(t *testing.T) {
 
 	if got := WorkflowName(root, path); got != "" {
 		t.Errorf("WorkflowName = %q, want no name", got)
+	}
+}
+
+// TestParse_TheRequiresIsRead — a workflow can say which nightme it
+// needs.
+func TestParse_TheRequiresIsRead(t *testing.T) {
+	wf := mustParse(t, `
+title: x
+requires:
+  nightme: ">=0.10.0"
+jobs:
+  main:
+    steps: [{message: hi}]
+`)
+	if wf.Requires.Nightme != ">=0.10.0" {
+		t.Errorf("Requires.Nightme = %q, want \">=0.10.0\"", wf.Requires.Nightme)
+	}
+}
+
+// TestParse_ABadConstraintDoesNotLoad — a constraint that does not
+// parse is a problem of the file: the workflow does not load.
+func TestParse_ABadConstraintDoesNotLoad(t *testing.T) {
+	_, err := Parse([]byte(`
+title: x
+requires:
+  nightme: "0.10.0"
+jobs:
+  main:
+    steps: [{message: hi}]
+`))
+	if err == nil {
+		t.Fatal("Parse: no error, want one")
+	}
+	if !strings.Contains(err.Error(), "requires nightme") {
+		t.Errorf("the error = %q, want it to name the requirement", err.Error())
+	}
+}
+
+// TestParse_TheRetiredNoteIsNotRead — the step description used to be
+// called a note. The load path ignores the keys the schema does not
+// have, so the file loads and the description is empty.
+func TestParse_TheRetiredNoteIsNotRead(t *testing.T) {
+	wf := mustParse(t, `
+title: x
+jobs:
+  main:
+    steps:
+      - id: one
+        message: hi
+        note: the old description
+`)
+	step := wf.Jobs["main"].Steps[0]
+	if step.Description != "" {
+		t.Errorf("Description = %q, want it to be empty", step.Description)
+	}
+}
+
+// TestBind_TheRequiresSurvivesTheBinding — a bound workflow keeps the
+// requirement of the source.
+func TestBind_TheRequiresSurvivesTheBinding(t *testing.T) {
+	wf := mustParse(t, `
+title: x
+requires:
+  nightme: ">=0.10.0"
+jobs:
+  main:
+    steps: [{message: hi}]
+`)
+	bound, err := Bind(wf, nil)
+	if err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	if bound.Requires.Nightme != ">=0.10.0" {
+		t.Errorf("Requires.Nightme = %q, want \">=0.10.0\"", bound.Requires.Nightme)
 	}
 }

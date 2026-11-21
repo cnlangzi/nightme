@@ -41,6 +41,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/config"
 	nmerrors "github.com/cnlangzi/nightme/internal/errors"
 	"github.com/cnlangzi/nightme/internal/runtime"
+	"github.com/cnlangzi/nightme/internal/version"
 	"github.com/cnlangzi/nightme/internal/wfname"
 	"github.com/cnlangzi/nightme/pkg/wfe"
 )
@@ -134,6 +135,7 @@ func printWorkflowList(w io.Writer, wfs []*wfe.Workflow, failures []wfe.Failure,
 			Workspaces []string `json:"workspaces"`
 			Triggers   []string `json:"triggers"`
 			Jobs       []string `json:"jobs"`
+			Requires   string   `json:"requires"`
 		}
 		out := make([]item, 0, len(wfs))
 		for _, wf := range wfs {
@@ -143,6 +145,7 @@ func printWorkflowList(w io.Writer, wfs []*wfe.Workflow, failures []wfe.Failure,
 				Workspaces: wf.Workspaces,
 				Triggers:   triggerSummary(wf),
 				Jobs:       jobNames(wf),
+				Requires:   requirementText(wf),
 			})
 		}
 		enc := json.NewEncoder(w)
@@ -150,14 +153,15 @@ func printWorkflowList(w io.Writer, wfs []*wfe.Workflow, failures []wfe.Failure,
 		return enc.Encode(out)
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tTITLE\tWORKSPACES\tTRIGGERS\tJOBS")
+	fmt.Fprintln(tw, "NAME\tTITLE\tWORKSPACES\tTRIGGERS\tJOBS\tREQUIRES")
 	for _, wf := range wfs {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
 			wf.Name,
 			truncate(wf.Title, 40),
 			truncate(strings.Join(wf.Workspaces, ", "), 30),
 			truncate(strings.Join(triggerSummary(wf), ", "), 30),
 			strings.Join(jobNames(wf), ", "),
+			truncate(requirementText(wf), 60),
 		)
 	}
 	if err := tw.Flush(); err != nil {
@@ -221,6 +225,31 @@ func jobNames(wf *wfe.Workflow) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// requirementText renders the version requirement of a workflow and
+// how this build stands against it.
+//
+// A build that carries no release version does not check the
+// requirement: the rendering says so instead of pretending the
+// requirement is met.
+func requirementText(wf *wfe.Workflow) string {
+	requirement := strings.TrimSpace(wf.Requires.Nightme)
+	if requirement == "" {
+		return ""
+	}
+	constraint, err := wfe.ParseConstraint(requirement)
+	if err != nil {
+		return requirement
+	}
+	switch {
+	case !version.IsRelease():
+		return fmt.Sprintf("nightme %s (not checked)", constraint)
+	case constraint.Allows(version.Version):
+		return fmt.Sprintf("nightme %s (satisfied: this nightme is %s)", constraint, version.Version)
+	default:
+		return fmt.Sprintf("nightme %s (not satisfied: this nightme is %s)", constraint, version.Version)
+	}
 }
 
 // newWorkflowShowCmd implements `nightme workflow show <name>`.
@@ -297,6 +326,9 @@ func printWorkflowShow(w io.Writer, wf *wfe.Workflow, asJSON bool) error {
 	fmt.Fprintf(w, "workspaces: %s\n", workspacesLabel(wf))
 	if len(wf.Args) > 0 {
 		fmt.Fprintf(w, "args:       %s\n", strings.Join(wf.ArgNames(), ", "))
+	}
+	if requirement := requirementText(wf); requirement != "" {
+		fmt.Fprintf(w, "requires:   %s\n", requirement)
 	}
 	fmt.Fprintln(w, "\ntriggers:")
 	for _, s := range wf.On.Schedule {
@@ -417,6 +449,9 @@ func printWorkflowRun(w io.Writer, wf *wfe.Workflow, workspace string) error {
 	} else {
 		fmt.Fprintf(w, "workspace:  %s\n", inheritedWorkspace)
 	}
+	if requirement := requirementText(wf); requirement != "" {
+		fmt.Fprintf(w, "requires:   %s\n", requirement)
+	}
 	fmt.Fprintln(w, "\ntriggers (parsed and displayed; nothing fires them):")
 	if len(wf.On.Schedule) > 0 {
 		for _, s := range wf.On.Schedule {
@@ -486,6 +521,9 @@ func newWorkflowValidateCmd() *cobra.Command {
 			"own: \"coder\" is \"nightme/coder\". The exit code " +
 			"is 0 when every workflow is valid, 8 when a workflow does not " +
 			"validate, and 9 when a path does not exist or cannot be read.\n\n" +
+			"A workflow that needs a nightme this build does not satisfy is " +
+			"a warning and not a problem: it goes to stderr, and the exit " +
+			"code does not change.\n\n" +
 			"--json swaps the lines for a JSON array.",
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -521,15 +559,20 @@ func runWorkflowValidate(out io.Writer, errOut io.Writer, args []string, asJSON 
 		paths = []string{dir}
 	}
 	var diags []wfe.Diagnostic
+	var warnings []wfe.Diagnostic
 	unreadable := false
 	for _, path := range paths {
 		isDir, err := readablePath(path)
 		if err == nil {
 			if isDir {
 				diags = append(diags, wfe.ValidateDir(path)...)
+				if files, pathErr := wfe.WorkflowPaths(path); pathErr == nil {
+					warnings = append(warnings, requirementWarnings(files)...)
+				}
 				continue
 			}
 			diags = append(diags, wfe.ValidateFile(path)...)
+			warnings = append(warnings, requirementWarnings([]string{path})...)
 			continue
 		}
 		if !os.IsNotExist(err) {
@@ -559,6 +602,7 @@ func runWorkflowValidate(out io.Writer, errOut io.Writer, args []string, asJSON 
 		for _, match := range matched {
 			diags = append(diags, wfe.ValidateFile(match)...)
 		}
+		warnings = append(warnings, requirementWarnings(matched)...)
 		if len(matched) > 1 {
 			// Two files claim the name: it is ambiguous, and neither
 			// file is the workflow of that name.
@@ -568,6 +612,9 @@ func runWorkflowValidate(out io.Writer, errOut io.Writer, args []string, asJSON 
 					resolved, matched[0], matched[1]),
 			})
 		}
+	}
+	for _, warning := range warnings {
+		fmt.Fprintf(errOut, "warning: %s\n", warning.Error())
 	}
 	if asJSON {
 		if diags == nil {
@@ -590,6 +637,46 @@ func runWorkflowValidate(out io.Writer, errOut io.Writer, args []string, asJSON 
 		return nmerrors.New(nmerrors.CodeValidationError, "workflow: a workflow does not validate")
 	}
 	return nil
+}
+
+// requirementWarnings returns the warnings of the workflow files
+// whose version requirement this build does not satisfy.
+//
+// A requirement that is not satisfied is a warning and not a
+// problem: the file is a valid workflow, and it is this build that
+// cannot run it.
+func requirementWarnings(paths []string) []wfe.Diagnostic {
+	var out []wfe.Diagnostic
+	for _, path := range paths {
+		if warning, ok := requirementWarning(path); ok {
+			out = append(out, warning)
+		}
+	}
+	return out
+}
+
+// requirementWarning returns the warning of a workflow file whose
+// version requirement this build does not satisfy.
+//
+// A build that carries no release version does not check the
+// requirement at all, and a file that does not parse as a workflow
+// has no requirement to report.
+func requirementWarning(path string) (wfe.Diagnostic, bool) {
+	if !version.IsRelease() {
+		return wfe.Diagnostic{}, false
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return wfe.Diagnostic{}, false
+	}
+	wf, err := wfe.Parse(raw)
+	if err != nil {
+		return wfe.Diagnostic{}, false
+	}
+	if err := wf.Requires.Check(version.Version); err != nil {
+		return wfe.Diagnostic{Path: path, Message: err.Error()}, true
+	}
+	return wfe.Diagnostic{}, false
 }
 
 // readablePath reports whether the path can be read, and whether it is

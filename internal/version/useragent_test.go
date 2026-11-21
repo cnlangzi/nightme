@@ -33,7 +33,7 @@ func TestUserAgent_IncludesInjectedCommit(t *testing.T) {
 	t.Cleanup(func() { GitCommit = orig })
 
 	got := UserAgent()
-	if !strings.HasPrefix(got, "nightme/0.1.0+926bbc4 (") {
+	if !strings.HasPrefix(got, "nightme/"+Normalize(Version)+"+926bbc4 (") {
 		t.Errorf("UserAgent() = %q, want a nightme/<version>+<commit> prefix", got)
 	}
 }
@@ -64,7 +64,7 @@ func TestUserAgent_EmptyCommitFallsBackToLocal(t *testing.T) {
 	t.Cleanup(func() { GitCommit = orig })
 
 	got := UserAgent()
-	if !strings.HasPrefix(got, "nightme/0.1.0+local (") {
+	if !strings.HasPrefix(got, "nightme/"+Normalize(Version)+"+local (") {
 		t.Errorf("UserAgent() = %q, want a +local commit suffix", got)
 	}
 	if strings.Contains(got, "+ ") {

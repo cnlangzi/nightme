@@ -16,7 +16,7 @@ const uaProduct = "nightme"
 // token followed by a parenthesised platform comment.
 //
 //	nightme/0.3.7+926bbc4 (darwin; arm64; go1.24.0)   release build
-//	nightme/0.1.0+local   (darwin; arm64; go1.24.0)   plain `go build`
+//	nightme/dev+local   (darwin; arm64; go1.24.0)   plain `go build`
 //
 // The platform comment carries GOOS and GOARCH because that is what
 // decides which release asset a user can actually install — a
@@ -29,9 +29,8 @@ const uaProduct = "nightme"
 // The commit suffix is always present. Builds that injected
 // GitCommit via -ldflags carry the short SHA; builds that did not
 // carry "local". Marking them rather than omitting the suffix
-// matters because Version defaults to a hardcoded release string
-// with no ldflags, so an unmarked development build would be
-// indistinguishable on the wire from that actual release.
+// matters because the version of a build with no -ldflags says
+// "dev", and the two must never look alike on the wire.
 func UserAgent() string {
 	v := uaToken(Normalize(Version))
 	if v == "" {

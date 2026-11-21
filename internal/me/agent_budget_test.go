@@ -22,7 +22,7 @@ jobs:
     steps:
       - id: commit
         message: /gtw commit
-        note: the commit comes first
+        description: the commit comes first
 `
 
 // waitPaused waits until the run of a chat waits for the operator.
@@ -437,7 +437,7 @@ func TestTheSituationReport_CarriesTheRepair(t *testing.T) {
 		"ahead of base:",
 		"repair:",
 		"step: commit",
-		"note: the commit comes first",
+		"description: the commit comes first",
 		"chances left:",
 		"turns without an action: 1",
 		"step commands now: /gtw commit",

@@ -517,10 +517,10 @@ outcome, so the agent decides the next step from facts instead of from prose.
 
 | Subcommand | What it does |
 |---|---|
-| `nightme workflow list` | Summarize every workflow: name, title, workspaces, triggers, jobs. The files that did not load are reported below the table. `--json` for machine output. |
+| `nightme workflow list` | Summarize every workflow: name, title, workspaces, triggers, jobs, requirements. The files that did not load are reported below the table. `--json` for machine output. |
 | `nightme workflow show <name>` | Print one workflow's parsed details: triggers, jobs, steps. |
 | `nightme workflow run <name>` | Print the execution plan — which steps run, in what order. `--workspace` overrides the workspace. |
-| `nightme workflow validate [path...]` | Check the workflow files and report every problem: a missing title, a step that names two kinds, a key the schema does not have. One line per problem — `path:line:column: message`. An argument that is not a path on disk is looked up as a workflow name, so `nightme workflow validate nightme/coder` validates that workflow. The exit code is `0` when every workflow is valid, `8` when one does not validate, `9` when a path does not exist or cannot be read. `--json` for machine output. |
+| `nightme workflow validate [path...]` | Check the workflow files and report every problem: a missing title, a step that names two kinds, a key the schema does not have. One line per problem — `path:line:column: message`. An argument that is not a path on disk is looked up as a workflow name, so `nightme workflow validate nightme/coder` validates that workflow. The exit code is `0` when every workflow is valid, `8` when one does not validate, `9` when a path does not exist or cannot be read. A workflow that needs a nightme this build does not satisfy is a warning on stderr; the exit code does not change. `--json` for machine output. |
 
 A name that carries no owner is the project's own namespace: `coder` is the
 workflow `nightme/coder`. `show`, `run` and `validate` take the short name
@@ -578,34 +578,34 @@ jobs:
     steps:
       - id: wait
         wait: 5m
-        note: 这一轮先等 5 分钟再挑下一个。队列空时这一轮没有活干，这一步就是两轮之间的退避。
+        description: 这一轮先等 5 分钟再挑下一个。队列空时这一轮没有活干，这一步就是两轮之间的退避。
       - id: fix
         message: "/gtw fix ${{ args.issue }} -y"
-        note: 从 nightme/assigned 队列挑一个 open issue，交给 agent 在 worktree 里修。队列空时它报 no_candidate —— 这不是错误，是正常工作流的一个分支：引擎会跳过本轮后面的步、跑 wait 退避 5 分钟，再挑下一个。只有 data.issue 有值，后面的步骤才跑。
+        description: 从 nightme/assigned 队列挑一个 open issue，交给 agent 在 worktree 里修。队列空时它报 no_candidate —— 这不是错误，是正常工作流的一个分支：引擎会跳过本轮后面的步、跑 wait 退避 5 分钟，再挑下一个。只有 data.issue 有值，后面的步骤才跑。
       - id: commit
         message: "/gtw commit"
         if: ${{ steps.fix.outputs.data.issue }}
-        note: 把 agent 的改动提交成 commit。命令会告诉你修改有没有进到 git 里：提交上了是正常；没提交上但活已经干完了（agent 自己提交的）也是正常；outcome 带 error 才是异常（nothing_to_commit），那时再决定要不要让 agent 去改。
+        description: 把 agent 的改动提交成 commit。命令会告诉你修改有没有进到 git 里：提交上了是正常；没提交上但活已经干完了（agent 自己提交的）也是正常；outcome 带 error 才是异常（nothing_to_commit），那时再决定要不要让 agent 去改。
       - id: review
         message: "/review"
         if: ${{ steps.fix.outputs.data.issue }}
-        note: review 当前分支与默认分支的差异，findings 回到聊天里。中断（还有组没跑完）用 /review -c 续跑，换 agent 接手就加 -a；already_running 就等它结束。no_diff 是异常：fix 本该改出了东西，分支却和 base 一样 —— instruct 让 agent 真正改出来，再跑 commit 和 review；base_unknown 是 base 分支没解析出来，也什么都没 review，先弄清 base 再跑 review。
+        description: review 当前分支与默认分支的差异，findings 回到聊天里。中断（还有组没跑完）用 /review -c 续跑，换 agent 接手就加 -a；already_running 就等它结束。no_diff 是异常：fix 本该改出了东西，分支却和 base 一样 —— instruct 让 agent 真正改出来，再跑 commit 和 review；base_unknown 是 base 分支没解析出来，也什么都没 review，先弄清 base 再跑 review。
       - id: commit2
         message: "/gtw commit"
         if: ${{ steps.fix.outputs.data.issue }}
-        note: 把 review 之后的修改提交成 commit。findings 先评估：只有成立且必要的才修，其余驳回 —— 要修的用 instruct 把这几条 findings 交给 agent 改，改完跑 commit2 提交。outcome 不带 error 就是正常：findings 已修好并提交，或没有必须修的 findings —— 结果够用，跑 push 继续；带 error 才是异常（nothing_to_commit：工作区没有改动，findings 还没修好），先让 agent 去改。
+        description: 把 review 之后的修改提交成 commit。findings 先评估：只有成立且必要的才修，其余驳回 —— 要修的用 instruct 把这几条 findings 交给 agent 改，改完跑 commit2 提交。outcome 不带 error 就是正常：findings 已修好并提交，或没有必须修的 findings —— 结果够用，跑 push 继续；带 error 才是异常（nothing_to_commit：工作区没有改动，findings 还没修好），先让 agent 去改。
       - id: push
         message: "/gtw push"
         if: ${{ steps.fix.outputs.data.issue }}
-        note: 把分支推到远端。命令会告诉你有没有东西没推：本地已经全部在远端是正常的（可能 agent 自己推过），本地还有没推的才是异常，那时回 commit 那一步。
+        description: 把分支推到远端。命令会告诉你有没有东西没推：本地已经全部在远端是正常的（可能 agent 自己推过），本地还有没推的才是异常，那时回 commit 那一步。
       - id: pr
         message: "/gtw pr"
         if: ${{ steps.fix.outputs.data.issue }}
-        note: 给分支开 PR。pr_exists 说明这个分支的 PR 已经开过，这也是正常的，结果够用，跑 back 继续；no_remote_branch 或 no_commits 时分别先跑 push 或先跑 commit。
+        description: 给分支开 PR。pr_exists 说明这个分支的 PR 已经开过，这也是正常的，结果够用，跑 back 继续；no_remote_branch 或 no_commits 时分别先跑 push 或先跑 commit。
       - id: back
         message: "/gtw back"
         if: ${{ steps.fix.outputs.data.issue }}
-        note: 修复做完后回到主仓库目录 —— 下一轮的 fix 必须从 main 开始，worktree 里不允许开下一个 fix（/gtw fix 会报 already_active）。
+        description: 修复做完后回到主仓库目录 —— 下一轮的 fix 必须从 main 开始，worktree 里不允许开下一个 fix（/gtw fix 会报 already_active）。
 ```
 
 Deploy it by writing the file to
@@ -623,8 +623,22 @@ the guard means "an issue was picked" and the rest of the round is skipped.
 | `args` | The arguments the workflow takes. A spec is a mapping with `name` and an optional `default`; a default makes the argument optional, no default makes it required. |
 | `instruct` | Whether the agent may send free-form instructions. Default true. |
 | `workspaces` | The workspaces the workflow names. Optional — the run works where the chat works. |
+| `requires` | The versions the workflow needs. Optional — a workflow that names none runs on every nightme. |
 | `on` | The trigger block. It is parsed and displayed; nothing fires it. |
 | `jobs` | The jobs, each with an ordered list of `steps`. Required. |
+
+A workflow can say which nightme it needs:
+
+```yaml
+requires:
+  nightme: ">=0.10.0"
+```
+
+The value is a version constraint: a comparison (`>=`, `>`, `<=`, `<`, `=`,
+`!=`) with a version, and a comma means "and" — `">=0.10.0, <0.12.0"`. An
+operator is required. The requirement is checked when the run starts: a build
+that is too old refuses the run and says both versions. A development build
+and a CI build carry no release version and do not check it at all.
 
 A job carries `needs`, `if`, `iterations` and `steps`. `iterations` is how many
 rounds the job runs: leave it out for one round, `0` for "until the run ends",
@@ -655,7 +669,7 @@ A step carries exactly one kind:
 | `if` | The condition that has to hold for the step to run. A step without one always runs. |
 | `env` | The environment the step's command gets. |
 | `continue-on-error` | Whether the chain continues when the step fails. |
-| `note` | Why the step is there, and which fixes the owner uses for it. It is the description the decision model reads. |
+| `description` | What the step is, which outcome is its normal branch, and what to do when it is not. The decision model and the chat model both read it. |
 | `final` | The step cleans up after the round: it runs when the round ends, however the round ends. A step marked `final: true` runs in the place of the steps a round that ended early cut short. |
 | `agents` | The agents the step runs, in order. Each entry has a `mode` and the `names` it applies to. |
 

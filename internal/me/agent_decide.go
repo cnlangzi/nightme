@@ -157,15 +157,15 @@ func (s *Service) decisionQuestions(r *run) []llm.Question {
 // decisionOptions returns the choices the decision model is offered:
 // the step messages the policy accepts now, plus done and escalate.
 //
-// The description of a command is the note of the step that owns it,
-// so the model reads why a step is there.
+// The description of a command is the description of the step that
+// owns it, so the model reads what the step is for.
 func (s *Service) decisionOptions(r *run) []llm.Option {
 	options := make([]llm.Option, 0, 8)
 	for _, cmd := range r.stepCommands() {
 		desc := ""
 		if idx, err := r.checkRun(cmd); err == nil {
 			if step, ok := r.stepAt(idx); ok {
-				desc = step.Note
+				desc = step.Description
 			}
 		}
 		options = append(options, llm.Option{Value: cmd, Description: desc})

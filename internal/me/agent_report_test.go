@@ -28,7 +28,7 @@ jobs:
         with:
           key: value
         continue-on-error: true
-        note: the commit comes first
+        description: the commit comes first
 `)
 	svc, _ := testService(t, dir, Config{})
 	r := testRun(t, svc, "one")
@@ -38,15 +38,20 @@ jobs:
 		"objective: Do the thing.",
 		"job main — runs once",
 		"commit (message): /gtw commit",
-		"note: the commit comes first",
+		"description: the commit comes first",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("the workflow does not carry %q:\n%s", want, out)
 		}
 	}
-	for _, unwanted := range []string{"if:", "env:", "with:", "continue-on-error", "${{", "workspaces", "on:"} {
+	for _, unwanted := range []string{"if:", "env:", "with:", "continue-on-error", "${{", "workspaces"} {
 		if strings.Contains(out, unwanted) {
 			t.Errorf("the workflow carries %q:\n%s", unwanted, out)
+		}
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "on:") {
+			t.Errorf("the workflow carries the trigger block:\n%s", out)
 		}
 	}
 }
@@ -263,9 +268,9 @@ func TestThePrompt_ANormalResultIsNothingToRepair(t *testing.T) {
 	}
 }
 
-// TestThePrompt_TheNoteOfAStepWins — the note is the owner's
-// instruction for the step.
-func TestThePrompt_TheNoteOfAStepWins(t *testing.T) {
+// TestThePrompt_TheDescriptionOfAStepWins — the description is the
+// owner's instruction for the step.
+func TestThePrompt_TheDescriptionOfAStepWins(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 	svc, _ := testService(t, dir, Config{})
@@ -273,8 +278,8 @@ func TestThePrompt_TheNoteOfAStepWins(t *testing.T) {
 
 	prompt := svc.systemPrompt(r)
 	for _, want := range []string{
-		"A step's note is the owner's instruction for that step",
-		"The note wins over the ready set and over your own judgment",
+		"A step's description is the owner's instruction for that step",
+		"The description wins over the ready set and over your own judgment",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("the prompt does not carry %q:\n%s", want, prompt)
@@ -347,7 +352,7 @@ func TestThePrompt_TheThingsThatAreNotTheAgents(t *testing.T) {
 // machinery that runs it.
 //
 // The ready set is the one name of the engine the prompt carries: the
-// step's note wins over it, and the model has to know that.
+// step's description wins over it, and the model has to know that.
 func TestThePrompt_HidesTheEngine(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)

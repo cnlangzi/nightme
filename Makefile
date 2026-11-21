@@ -2,7 +2,7 @@
 # Minimal, opinionated build/test/dev workflow.
 
 GO            ?= go
-VERSION       ?= 0.1.0
+VERSION       ?= dev
 GIT_COMMIT    ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "local")
 BUILD_DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS       := -X github.com/cnlangzi/nightme/internal/version.Version=$(VERSION) \
@@ -18,6 +18,12 @@ LDFLAGS       := -X github.com/cnlangzi/nightme/internal/version.Version=$(VERSI
 WINRES        ?= go-winres
 WINRES_JSON   ?= assets/winres.json
 SYSO_PKG      ?= cmd/nightme
+
+# The version the Windows resource file carries. It is a plain number,
+# because that is what a PE resource version is: a local build has no
+# release number to put there, and VERSION is "dev" until a release
+# pipeline injects a tag.
+WINRES_VERSION ?= 0.0.0
 
 # System-tray icon assets. Per-OS targets that produce the byte
 # payload that cmd/nightme/tray_assets.go embeds into the binary
@@ -105,8 +111,8 @@ winres: ## Embed Windows icon + manifest into cmd/nightme/rsrc_windows_*.syso (n
 			--in $(WINRES_JSON) \
 			--out rsrc \
 			--arch 386,amd64,arm64 \
-			--product-version $(VERSION) \
-			--file-version $(VERSION); \
+			--product-version $(WINRES_VERSION) \
+			--file-version $(WINRES_VERSION); \
 	else \
 		echo "[winres] GOOS=$(GOOS) != windows; skipping"; \
 	fi

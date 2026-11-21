@@ -707,7 +707,7 @@ func workflowTexts(wf *Workflow) []string {
 		job := wf.Jobs[name]
 		texts = append(texts, job.If)
 		for _, step := range job.Steps {
-			texts = append(texts, step.If, step.Message, step.Shell, step.Note, step.Use)
+			texts = append(texts, step.If, step.Message, step.Shell, step.Description, step.Use)
 			for _, v := range step.Env {
 				texts = append(texts, v)
 			}
@@ -754,6 +754,7 @@ func cloneWorkflow(wf *Workflow) *Workflow {
 		Name:       wf.Name,
 		Instruct:   wf.Instruct,
 		Workspaces: append([]string(nil), wf.Workspaces...),
+		Requires:   wf.Requires,
 		On:         wf.On,
 		Jobs:       make(map[string]Job, len(wf.Jobs)),
 	}
@@ -843,7 +844,7 @@ func expandWorkflowArgs(wf *Workflow, args map[string]string) {
 			step.If = expandArgs(step.If, args)
 			step.Message = expandArgs(step.Message, args)
 			step.Shell = expandArgs(step.Shell, args)
-			step.Note = expandArgs(step.Note, args)
+			step.Description = expandArgs(step.Description, args)
 			step.Use = expandArgs(step.Use, args)
 			for k, v := range step.Env {
 				step.Env[k] = expandArgs(v, args)

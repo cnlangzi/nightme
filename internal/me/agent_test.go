@@ -803,7 +803,7 @@ jobs:
         message: /gtw commit
       - id: review
         message: /review
-        note: If it fails or does not finish, continue with /review -c.
+        description: If it fails or does not finish, continue with /review -c.
       - id: push
         message: /gtw push
       - id: pr

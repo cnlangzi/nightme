@@ -144,9 +144,9 @@ func TestTheFoldedRoundsCountTheRoundsThatWorked(t *testing.T) {
 	}
 }
 
-// TestARoundWithoutAStatusStaysInTheTree — a run that was restored
-// from an older state file knows nothing about the status of its
-// rounds, and its rounds stay on the tree.
+// TestARoundWithoutAStatusStaysInTheTree — the status of a round is
+// optional in the record that holds it: a record that carries none
+// keeps its round on the tree.
 func TestARoundWithoutAStatusStaysInTheTree(t *testing.T) {
 	r := roundStatusRun(t)
 

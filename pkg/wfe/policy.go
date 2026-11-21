@@ -381,7 +381,8 @@ func (p *Policy) StepUsage(idx int) int {
 // The history is the record of what a round did: the run state forgets
 // the steps of a round when the job enters its next one, the history
 // keeps them. An action belongs to the round when it was taken in it
-// and when it served a step of the job.
+// — an action that names no round belongs to the first one, as the
+// budgets count it — and when it served a step of the job.
 func (p *Policy) RoundStatus(job string, round int) RoundStatus {
 	for _, rec := range p.History {
 		if rec.StepID == "" {
@@ -430,7 +431,9 @@ func (p *Policy) runWorked(rec ActionRecord) bool {
 //
 // The normal branches of the outcome contract say the request was
 // valid and there was nothing to do: a `noop`, or a `failed` without
-// an error description. Every other outcome says the world moved.
+// an error description. The error description is the axis the contract
+// names (see Outcome.Exception); every other outcome says the world
+// moved, and a breakage is worth seeing.
 func outcomeWorked(out Outcome) bool {
 	switch out.Status {
 	case OutcomeNoop:

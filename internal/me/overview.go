@@ -10,6 +10,7 @@ package me
 import (
 	"fmt"
 	"maps"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -463,21 +464,16 @@ func (r *run) finishedRounds() []string {
 //
 // A round that produced nothing stays out: it is a round that was
 // passed over or that had nothing to do, and its row would be noise.
-// A record that carries no status stays: a run that knows nothing
-// about the status of its rounds must not lose them.
+// A record that carries no status stays: a missing fact must not cost
+// a round its row.
 func (r *run) finishedRecords() ([]roundRecord, int) {
 	r.mu.Lock()
 	records := append([]roundRecord(nil), r.roundRecords...)
 	r.mu.Unlock()
 
-	kept := make([]roundRecord, 0, len(records))
-	for _, rec := range records {
-		if rec.Status == wfe.RoundStatusSilent {
-			continue
-		}
-		kept = append(kept, rec)
-	}
-	records = kept
+	records = slices.DeleteFunc(records, func(rec roundRecord) bool {
+		return rec.Status == wfe.RoundStatusSilent
+	})
 
 	folded := 0
 	if len(records) > maxTreeRounds {

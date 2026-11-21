@@ -35,10 +35,10 @@ func (f *fakeChannel) Start(_ context.Context) error            { return nil }
 func (f *fakeChannel) Stop(_ context.Context) error             { return nil }
 func (f *fakeChannel) Incoming() <-chan messages.InboundMessage { return nil }
 
-func (f *fakeChannel) Send(_ context.Context, msg messages.OutboundMessage) error {
+func (f *fakeChannel) Send(_ context.Context, msg messages.OutboundMessage) (string, error) {
 	atomic.AddInt32(&f.sendCalls, 1)
 	f.lastSent = msg
-	return f.sendErr
+	return "", f.sendErr
 }
 
 // Channel-interface extensions (Phase 2.1 + 2.2). fakeChannel
@@ -75,7 +75,7 @@ func TestEmitter_Passthrough_Send(t *testing.T) {
 		Usage:     &agent.UsageInfo{InputTokens: 10, OutputTokens: 20},
 		GitStatus: &messages.GitStatus{Workspace: "/repo"},
 	}
-	if err := em.Send(context.Background(), in); err != nil {
+	if _, err := em.Send(context.Background(), in); err != nil {
 		t.Fatalf("Send returned err = %v", err)
 	}
 	if atomic.LoadInt32(&fc.sendCalls) != 1 {
@@ -113,7 +113,7 @@ func TestEmitter_Passthrough_OutChoice(t *testing.T) {
 			RequestID: "req-1",
 		},
 	}
-	if err := em.Send(context.Background(), in); err != nil {
+	if _, err := em.Send(context.Background(), in); err != nil {
 		t.Fatalf("Send err: %v", err)
 	}
 	if atomic.LoadInt32(&fc.sendCalls) != 1 {
@@ -141,7 +141,7 @@ func TestEmitter_NoMysteryMutation(t *testing.T) {
 		Kind:   messages.OutReply,
 		Text:   "hi",
 	}
-	_ = em.Send(context.Background(), in)
+	_, _ = em.Send(context.Background(), in)
 
 	// All optional fields stay nil — Emitter didn't fill them.
 	if fc.lastSent.GitStatus != nil {
@@ -159,7 +159,7 @@ func TestEmitter_ChannelErrorPropagates(t *testing.T) {
 	em := New(fc, Options{})
 
 	in := messages.OutboundMessage{ChatID: "c1", Kind: messages.OutReply}
-	if err := em.Send(context.Background(), in); err == nil {
+	if _, err := em.Send(context.Background(), in); err == nil {
 		t.Fatal("Send returned nil, want error")
 	}
 }

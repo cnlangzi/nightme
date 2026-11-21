@@ -206,9 +206,9 @@ func TestTap_ForwardsUnchangedAndObserves(t *testing.T) {
 	tr.Register("om_1", "oc_test", "/gtw commit")
 
 	var forwarded []messages.OutboundMessage
-	inner := emitterFunc(func(_ context.Context, msg messages.OutboundMessage) error {
+	inner := emitterFunc(func(_ context.Context, msg messages.OutboundMessage) (string, error) {
 		forwarded = append(forwarded, msg)
-		return nil
+		return "", nil
 	})
 
 	em := Tap(inner, tr)
@@ -218,7 +218,7 @@ func TestTap_ForwardsUnchangedAndObserves(t *testing.T) {
 		Text:    "working",
 		ReplyTo: "om_1",
 	}
-	if err := em.Send(context.Background(), msg); err != nil {
+	if _, err := em.Send(context.Background(), msg); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 	if len(forwarded) != 1 {
@@ -236,16 +236,16 @@ func TestTap_ForwardsUnchangedAndObserves(t *testing.T) {
 // TestTap_WithoutATrackerForwardsUnchanged — a tap with nothing to
 // observe is the emitter itself.
 func TestTap_WithoutATrackerForwardsUnchanged(t *testing.T) {
-	inner := emitterFunc(func(context.Context, messages.OutboundMessage) error { return nil })
+	inner := emitterFunc(func(context.Context, messages.OutboundMessage) (string, error) { return "", nil })
 	if got := Tap(inner, nil); got == nil {
 		t.Fatal("the tap dropped the emitter")
 	}
 }
 
 // emitterFunc is a messages.Emitter backed by a function.
-type emitterFunc func(ctx context.Context, msg messages.OutboundMessage) error
+type emitterFunc func(ctx context.Context, msg messages.OutboundMessage) (string, error)
 
-func (f emitterFunc) Send(ctx context.Context, msg messages.OutboundMessage) error {
+func (f emitterFunc) Send(ctx context.Context, msg messages.OutboundMessage) (string, error) {
 	return f(ctx, msg)
 }
 

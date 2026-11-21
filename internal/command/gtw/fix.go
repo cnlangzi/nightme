@@ -858,7 +858,7 @@ func completeFixAndDispatch(
 			// falls back to postOrphanReplyCard (top-level card);
 			// Slack / Telegram / bot handle the orphan path on
 			// their own.
-			_ = cs.Emitter().Send(ctx, messages.OutboundMessage{
+			_, _ = cs.Emitter().Send(ctx, messages.OutboundMessage{
 				ChatID:  chatID,
 				Kind:    messages.OutCommandReply,
 				ReplyTo: messageID,

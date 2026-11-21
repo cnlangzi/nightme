@@ -245,7 +245,7 @@ func (a *Adapter) notifyDownloadFailure(rawChatID, userMsgID string, res downloa
 		text = fmt.Sprintf("⚠️ %d attachment(s) failed to download after %d attempts; sending text only.",
 			res.FailureCount, downloadRetryConfig.MaxAttempts)
 	}
-	if err := a.Send(context.Background(), messages.OutboundMessage{
+	if _, err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID:  chatID,
 		Kind:    messages.OutError,
 		Text:    text,

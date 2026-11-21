@@ -232,6 +232,6 @@ func replyAgent(
 		Text:    text,
 	}
 	messages.StampRunResult(&out, agentName, res)
-	_ = em.Send(ctx, out)
+	_, _ = em.Send(ctx, out)
 	return &Result{Consumed: true}
 }

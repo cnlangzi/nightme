@@ -111,10 +111,14 @@ func (o *operator) OnChoice(chatID string, handler func(requestID, option string
 // agent's: /think off hides the thinking, /tools off hides the tool
 // calls. A chat without a session has no settings, so nothing is
 // gated.
-func (o *operator) Emit(ctx context.Context, chatID string, msg messages.OutboundMessage) error {
+//
+// The id it returns is the id of the chat message the message
+// became: the caller keeps writing into that message when it names
+// it as the anchor. It is empty when the chat cannot name it.
+func (o *operator) Emit(ctx context.Context, chatID string, msg messages.OutboundMessage) (string, error) {
 	ch, err := o.channelFor(chatID)
 	if err != nil {
-		return err
+		return "", err
 	}
 	msg.ChatID = chatID
 
@@ -125,7 +129,7 @@ func (o *operator) Emit(ctx context.Context, chatID string, msg messages.Outboun
 	env := agentsession.AgentEventEnvelope{ChatID: chatID}
 	for _, p := range outbound.DefaultPolicies(chatsession.GitStatusDeps{}, cs, o.logger) {
 		if p.Apply(&msg, env) {
-			return nil
+			return "", nil
 		}
 	}
 	em := cs.Emitter()

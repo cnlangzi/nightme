@@ -29,7 +29,7 @@ func TestSend_OutReplyFoldsIntoOneStream(t *testing.T) {
 	ctx := context.Background()
 
 	for _, chunk := range []string{"one", "two", "three"} {
-		if err := a.Send(ctx, outbound(messages.OutReply, chunk)); err != nil {
+		if _, err := a.Send(ctx, outbound(messages.OutReply, chunk)); err != nil {
 			t.Fatalf("send %q: %v", chunk, err)
 		}
 	}
@@ -49,7 +49,7 @@ func TestSend_ThinkingIsPrefixed(t *testing.T) {
 	api := newFakeAPI()
 	a := newTestAdapter(t, api, newFakeSocket())
 
-	if err := a.Send(context.Background(), outbound(messages.OutThinking, "pondering")); err != nil {
+	if _, err := a.Send(context.Background(), outbound(messages.OutThinking, "pondering")); err != nil {
 		t.Fatalf("send: %v", err)
 	}
 	texts := chunkTexts(api.snapshot()[0].Chunks)
@@ -67,12 +67,12 @@ func TestSend_ToolStartAndEndShareCardID(t *testing.T) {
 
 	start := outbound(messages.OutToolStart, "")
 	start.Tool = toolInfo("Bash", "git status")
-	if err := a.Send(ctx, start); err != nil {
+	if _, err := a.Send(ctx, start); err != nil {
 		t.Fatalf("tool start: %v", err)
 	}
 	end := outbound(messages.OutToolEnd, "")
 	end.Tool = &messages.ToolInfo{Name: "Bash", Output: "clean"}
-	if err := a.Send(ctx, end); err != nil {
+	if _, err := a.Send(ctx, end); err != nil {
 		t.Fatalf("tool end: %v", err)
 	}
 
@@ -102,12 +102,12 @@ func TestSend_FailedToolEndsAsError(t *testing.T) {
 
 	start := outbound(messages.OutToolStart, "")
 	start.Tool = toolInfo("Bash", "false")
-	_ = a.Send(ctx, start)
+	_, _ = a.Send(ctx, start)
 
 	end := outbound(messages.OutToolEnd, "")
 	end.Tool = &messages.ToolInfo{Name: "Bash"}
 	end.Err = errBoom
-	if err := a.Send(ctx, end); err != nil {
+	if _, err := a.Send(ctx, end); err != nil {
 		t.Fatalf("tool end: %v", err)
 	}
 
@@ -129,7 +129,7 @@ func TestSend_UnpairedToolEndStillRenders(t *testing.T) {
 
 	end := outbound(messages.OutToolEnd, "")
 	end.Tool = &messages.ToolInfo{Name: "Bash", Output: "done"}
-	if err := a.Send(context.Background(), end); err != nil {
+	if _, err := a.Send(context.Background(), end); err != nil {
 		t.Fatalf("tool end: %v", err)
 	}
 
@@ -158,7 +158,7 @@ func TestSend_TaskListMapsStatuses(t *testing.T) {
 		{ID: "f", Subject: "not needed", Status: agent.TaskSkipped, ActiveForm: "skipped"},
 		{ID: "g", Subject: "deleted thing", Status: agent.TaskDeleted},
 	}}
-	if err := a.Send(context.Background(), msg); err != nil {
+	if _, err := a.Send(context.Background(), msg); err != nil {
 		t.Fatalf("send: %v", err)
 	}
 
@@ -197,7 +197,7 @@ func TestSend_HeartbeatUsesAssistantStatus(t *testing.T) {
 	msg := outbound(messages.OutHeartbeat, "")
 	hb := hbSnapshot(2, 3)
 	msg.Heartbeat = &hb
-	if err := a.Send(context.Background(), msg); err != nil {
+	if _, err := a.Send(context.Background(), msg); err != nil {
 		t.Fatalf("send: %v", err)
 	}
 
@@ -223,7 +223,7 @@ func TestSend_HeartbeatFallsBackToPlanChunk(t *testing.T) {
 	msg := outbound(messages.OutHeartbeat, "")
 	hb := hbSnapshot(1, 0)
 	msg.Heartbeat = &hb
-	if err := a.Send(context.Background(), msg); err != nil {
+	if _, err := a.Send(context.Background(), msg); err != nil {
 		t.Fatalf("send: %v", err)
 	}
 
@@ -239,7 +239,7 @@ func TestSend_EmptyHeartbeatIsDropped(t *testing.T) {
 	msg := outbound(messages.OutHeartbeat, "")
 	hb := hbSnapshot(0, 0)
 	msg.Heartbeat = &hb
-	if err := a.Send(context.Background(), msg); err != nil {
+	if _, err := a.Send(context.Background(), msg); err != nil {
 		t.Fatalf("send: %v", err)
 	}
 	if len(api.methods()) != 0 {
@@ -264,7 +264,7 @@ func TestSend_ChoiceIsStandaloneAndImmediate(t *testing.T) {
 			{ID: "deny", Label: "Deny"},
 		},
 	}
-	if err := a.Send(context.Background(), msg); err != nil {
+	if _, err := a.Send(context.Background(), msg); err != nil {
 		t.Fatalf("send: %v", err)
 	}
 
@@ -292,7 +292,7 @@ func TestSend_ChoicePatchUpdatesInPlace(t *testing.T) {
 	}
 	msg := outbound(messages.OutChoice, "")
 	msg.Choice = choice
-	if err := a.Send(ctx, msg); err != nil {
+	if _, err := a.Send(ctx, msg); err != nil {
 		t.Fatalf("send choice: %v", err)
 	}
 	postTS := api.snapshot()[0].TS
@@ -303,7 +303,7 @@ func TestSend_ChoicePatchUpdatesInPlace(t *testing.T) {
 		Settled: true, SelectedID: "allow",
 		Options: choice.Options,
 	}
-	if err := a.Send(ctx, patch); err != nil {
+	if _, err := a.Send(ctx, patch); err != nil {
 		t.Fatalf("send patch: %v", err)
 	}
 
@@ -324,7 +324,7 @@ func TestSend_CommandReplyIsStandaloneWithMarker(t *testing.T) {
 	api := newFakeAPI()
 	a := withThrottle(newTestAdapter(t, api, newFakeSocket()), time.Hour)
 
-	if err := a.Send(context.Background(), outbound(messages.OutCommandReply, "cwd set")); err != nil {
+	if _, err := a.Send(context.Background(), outbound(messages.OutCommandReply, "cwd set")); err != nil {
 		t.Fatalf("send: %v", err)
 	}
 	calls := api.snapshot()
@@ -342,7 +342,7 @@ func TestSend_ErrorCarriesStderrTail(t *testing.T) {
 
 	msg := outbound(messages.OutError, "bridge died")
 	msg.Diagnostic = &agent.BridgeDiagnostic{StderrTail: "panic: nil map"}
-	if err := a.Send(context.Background(), msg); err != nil {
+	if _, err := a.Send(context.Background(), msg); err != nil {
 		t.Fatalf("send: %v", err)
 	}
 	text := api.snapshot()[0].Text
@@ -363,7 +363,7 @@ func TestSend_ErrorShutdownExit_NoErrorMarker(t *testing.T) {
 		ExitKind:   agent.BridgeExitShutdown,
 		StderrTail: "unrecognized_model",
 	}
-	if err := a.Send(context.Background(), msg); err != nil {
+	if _, err := a.Send(context.Background(), msg); err != nil {
 		t.Fatalf("send: %v", err)
 	}
 	text := api.snapshot()[0].Text
@@ -391,7 +391,7 @@ func TestSend_MessageStateReplacesPreviousReaction(t *testing.T) {
 			Kind:         messages.OutMessageState,
 			MessageState: &messages.MessageStatePayload{State: state, MessageID: "1000.1"},
 		}
-		if err := a.Send(ctx, msg); err != nil {
+		if _, err := a.Send(ctx, msg); err != nil {
 			t.Fatalf("send %v: %v", state, err)
 		}
 	}
@@ -424,8 +424,8 @@ func TestSend_RepeatedMessageStateIsDeduped(t *testing.T) {
 		Kind:         messages.OutMessageState,
 		MessageState: &messages.MessageStatePayload{State: agent.MessageQueued, MessageID: "1000.1"},
 	}
-	_ = a.Send(ctx, msg)
-	_ = a.Send(ctx, msg)
+	_, _ = a.Send(ctx, msg)
+	_, _ = a.Send(ctx, msg)
 
 	if n := api.countOf("AddReaction"); n != 1 {
 		t.Fatalf("repeated identical state should short-circuit, got %d AddReaction calls", n)
@@ -437,7 +437,7 @@ func TestSend_UnparseableChatIDIsRejectedNotSilent(t *testing.T) {
 	a := newTestAdapter(t, api, newFakeSocket())
 
 	msg := messages.OutboundMessage{ChatID: "tg_-100", Kind: messages.OutCommandReply, Text: "hi"}
-	if err := a.Send(context.Background(), msg); err == nil {
+	if _, err := a.Send(context.Background(), msg); err == nil {
 		t.Fatal("a foreign chat id should surface an error, not be silently dropped")
 	}
 }
@@ -449,7 +449,7 @@ func TestOnPromptEnded_ClosesStreamAndMarksDone(t *testing.T) {
 	a := newTestAdapter(t, api, newFakeSocket())
 	ctx := context.Background()
 
-	if err := a.Send(ctx, outbound(messages.OutReply, "answer")); err != nil {
+	if _, err := a.Send(ctx, outbound(messages.OutReply, "answer")); err != nil {
 		t.Fatalf("send: %v", err)
 	}
 	a.OnPromptEnded(ctx, testChatID, "1000.1", agent.PromptEndClean)
@@ -476,7 +476,7 @@ func TestOnPromptEnded_ClearsAssistantStatus(t *testing.T) {
 	a := newTestAdapter(t, api, newFakeSocket())
 	ctx := context.Background()
 
-	_ = a.Send(ctx, outbound(messages.OutReply, "answer"))
+	_, _ = a.Send(ctx, outbound(messages.OutReply, "answer"))
 	a.OnPromptEnded(ctx, testChatID, "1000.1", agent.PromptEndClean)
 
 	cleared := false
@@ -497,13 +497,13 @@ func TestSend_AfterPromptEndedFallsBackToStandalone(t *testing.T) {
 	a := newTestAdapter(t, api, newFakeSocket())
 	ctx := context.Background()
 
-	_ = a.Send(ctx, outbound(messages.OutReply, "answer"))
+	_, _ = a.Send(ctx, outbound(messages.OutReply, "answer"))
 	stream, _ := a.streams.lookup(testChatID, "1000.1")
 	if err := stream.finish(ctx); err != nil {
 		t.Fatalf("finish: %v", err)
 	}
 
-	if err := a.Send(ctx, outbound(messages.OutReply, "late")); err != nil {
+	if _, err := a.Send(ctx, outbound(messages.OutReply, "late")); err != nil {
 		t.Fatalf("late send: %v", err)
 	}
 	posted := false

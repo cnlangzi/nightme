@@ -651,12 +651,12 @@ type fakeEmitter struct {
 	gotReply atomic.Bool
 }
 
-func (f *fakeEmitter) Send(_ context.Context, msg messages.OutboundMessage) error {
+func (f *fakeEmitter) Send(_ context.Context, msg messages.OutboundMessage) (string, error) {
 	f.mu.Lock()
 	f.calls = append(f.calls, msg)
 	f.mu.Unlock()
 	f.gotReply.Store(true)
-	return f.sendErr
+	return "", f.sendErr
 }
 
 func (f *fakeEmitter) callsCopy() []messages.OutboundMessage {
@@ -1129,7 +1129,7 @@ func TestDispatcherHandle_ReplySendFailed(t *testing.T) {
 // to lock the LIFO defer ordering.
 type panickingEmitter struct{}
 
-func (panickingEmitter) Send(_ context.Context, _ messages.OutboundMessage) error {
+func (panickingEmitter) Send(_ context.Context, _ messages.OutboundMessage) (string, error) {
 	panic("panickingEmitter: simulating dispatcher-side panic")
 }
 

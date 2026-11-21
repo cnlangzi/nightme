@@ -41,8 +41,10 @@ import (
 //     OutChoice, OutChoicePatch, receipt, reaction, …) goes
 //     through here. Channel routes by Kind; interactive-choice
 //     correlation is Channel-private via Choice.RequestID.
-//     Callers never see a platform message id and never pick a
-//     second send method.
+//     Send returns the id of the chat message the message became:
+//     the id a caller uses to address that message again. It is
+//     empty when the channel drops the kind or cannot name the
+//     message.
 //
 // Impersonator is a different contract: what a program says in a
 // chat has to come back into the daemon as an inbound message, so
@@ -93,7 +95,7 @@ type Channel interface {
 	Start(ctx context.Context) error
 	Stop(ctx context.Context) error
 	Incoming() <-chan messages.InboundMessage
-	Send(ctx context.Context, msg messages.OutboundMessage) error
+	Send(ctx context.Context, msg messages.OutboundMessage) (string, error)
 
 	OnPromptEnded(ctx context.Context, chatID, userMsgID string, reason agent.PromptEndReason)
 	HealthSnapshot() (name string, payload json.RawMessage, err error)

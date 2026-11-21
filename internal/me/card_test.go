@@ -196,25 +196,76 @@ func TestTheRoundCardCarriesTheTreeOfTheRounds(t *testing.T) {
 	if len(cards) < 1 {
 		t.Fatalf("the run published %d cards, want the card of the round", len(cards))
 	}
-	entries := op.Entries(cards[0].ID)
-	if len(entries) == 0 {
-		t.Fatal("the card of the round carries no entry")
-	}
-	if !strings.HasPrefix(entries[0], "rounds: ") {
-		t.Errorf("the card of the round does not open with the tree of the rounds: %q", entries[0])
+	if !strings.HasPrefix(cards[0].Body, "rounds: ") {
+		t.Errorf("the card of the round does not open with the tree of the rounds: %q", cards[0].Body)
 	}
 	// The card of the round carries no identity of its own: the status
 	// bar names the run and the round.
-	for _, entry := range entries {
+	for _, entry := range op.Entries(cards[0].ID) {
 		if strings.Contains(entry, "main · round 1") {
 			t.Errorf("the card of the round carries the identity of the round: %q", entry)
 		}
 	}
 }
 
-// TestThePlaceholderSaysWhatIsComing — the placeholder is a message
-// of the chat: it says in one line what the card below it is about.
-func TestThePlaceholderSaysWhatIsComing(t *testing.T) {
+// TestTheRoundGoesOnWithItsOwnCard — the round opens its card and
+// goes on with it: the checklist of the round and the lines that
+// close it land on that card.
+func TestTheRoundGoesOnWithItsOwnCard(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+	svc, op := testService(t, dir, noModels())
+	op.steps = []fakeStep{okStep("committed")}
+
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work", MessageID: "om_start",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitRun(t, svc, "obs-1")
+
+	cards := op.Cards()
+	if len(cards) != 1 {
+		t.Fatalf("the run opened %d cards, want the card of the round", len(cards))
+	}
+	card := cards[0].ID
+
+	// The checklist of the round refreshes the card of the round.
+	var tasks int
+	for _, m := range op.EmittedOf(messages.OutTaskUpdate) {
+		if m.ReplyTo == card {
+			tasks++
+		}
+	}
+	if tasks == 0 {
+		t.Errorf("the checklist of the round does not hang under the card of the round: %v",
+			op.EmittedOf(messages.OutTaskUpdate))
+	}
+
+	// The lines that close the round land on the same card.
+	entries := op.Entries(card)
+	var ended, decisions bool
+	for _, entry := range entries {
+		if strings.HasPrefix(entry, "ended: ") {
+			ended = true
+		}
+		if strings.HasPrefix(entry, "decisions: ") {
+			decisions = true
+		}
+	}
+	if !ended {
+		t.Errorf("the round did not close on its own card: %v", entries)
+	}
+	if !decisions {
+		t.Errorf("the round did not write its decisions on its own card: %v", entries)
+	}
+}
+
+// TestTheRoundPostsNoPlaceholderOfItsOwn — a round opens its own
+// card: the run posts no message to open it. A decision and the
+// state of the run still say in one line what the card below them is
+// about.
+func TestTheRoundPostsNoPlaceholderOfItsOwn(t *testing.T) {
 	svc, op := sessionService(t)
 
 	if _, _, err := svc.StartWorkflow(context.Background(), Request{
@@ -224,12 +275,15 @@ func TestThePlaceholderSaysWhatIsComing(t *testing.T) {
 	}
 	waitRun(t, svc, "obs-1")
 
-	cards := op.Cards()
-	if len(cards) == 0 {
-		t.Fatal("the run opened no card")
+	for _, m := range op.Asked() {
+		if strings.Contains(m.Text, "round") {
+			t.Errorf("the run asked %q, want no placeholder of the round", m.Text)
+		}
 	}
-	if cards[0].Body != "main · round 1 is starting…" {
-		t.Errorf("the placeholder says %q, want the round that starts", cards[0].Body)
+	for _, c := range op.Cards() {
+		if strings.Contains(c.Body, "is starting") {
+			t.Errorf("the run posted %q, want no placeholder of the round", c.Body)
+		}
 	}
 }
 
@@ -257,6 +311,12 @@ func TestEveryEventOfASessionCarriesItsCard(t *testing.T) {
 	}
 	for _, m := range emitted {
 		if m.ReplyTo == "om_start" {
+			// The chat already holds a card for the message that
+			// started the run.
+			continue
+		}
+		if m.ReplyTo == "" {
+			// The event opens the card of its session.
 			continue
 		}
 		if !cards[m.ReplyTo] {
@@ -265,9 +325,10 @@ func TestEveryEventOfASessionCarriesItsCard(t *testing.T) {
 	}
 }
 
-// TestTheRoundCardHangsUnderTheStartMessage — the round is the run's
-// work, one level below the message that started the run.
-func TestTheRoundCardHangsUnderTheStartMessage(t *testing.T) {
+// TestTheRoundCardIsACardOfItsOwn — the round opens its own card:
+// the card is a message of the chat in its own right, not a reply to
+// the message that started the run.
+func TestTheRoundCardIsACardOfItsOwn(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkflow(t, dir, "one", oneStepWorkflow)
 	svc, op := testService(t, dir, noModels())
@@ -284,8 +345,8 @@ func TestTheRoundCardHangsUnderTheStartMessage(t *testing.T) {
 	if len(cards) < 1 {
 		t.Fatalf("the run published %d cards, want the card of the round", len(cards))
 	}
-	if cards[0].ReplyTo != "om_start" {
-		t.Errorf("the round card hangs under %q, want the start message om_start", cards[0].ReplyTo)
+	if cards[0].ReplyTo != "" {
+		t.Errorf("the round card hangs under %q, want a card of its own", cards[0].ReplyTo)
 	}
 }
 

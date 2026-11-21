@@ -690,11 +690,12 @@ func (m *Manager) sendError(ctx context.Context, chatID, text string) error {
 			"chat_id", chatID, "text", text)
 		return nil
 	}
-	return em.Send(ctx, messages.OutboundMessage{
+	_, err := em.Send(ctx, messages.OutboundMessage{
 		ChatID: chatID,
 		Kind:   messages.OutReply,
 		Text:   text,
 	})
+	return err
 }
 
 // hintLockFor returns the per-chat *sync.Mutex for hint
@@ -808,7 +809,7 @@ func (m *Manager) maybeEmitWatcherHint(ctx context.Context, msg *messages.Inboun
 	}
 	hint := "💡 I'm in /watch mention mode and only respond when @-mentioned. " +
 		"Run /watch on if you'd like me to respond to every message in this chat."
-	if err := em.Send(ctx, messages.OutboundMessage{
+	if _, err := em.Send(ctx, messages.OutboundMessage{
 		ChatID: msg.ChatID,
 		Kind:   messages.OutReply,
 		Text:   hint,

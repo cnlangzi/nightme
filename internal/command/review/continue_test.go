@@ -233,7 +233,7 @@ func newRecordingEmitter() *recordingEmitter {
 	return &recordingEmitter{sent: make(chan messages.OutboundMessage, 64)}
 }
 
-func (e *recordingEmitter) Send(_ context.Context, msg messages.OutboundMessage) error {
+func (e *recordingEmitter) Send(_ context.Context, msg messages.OutboundMessage) (string, error) {
 	e.mu.Lock()
 	e.msgs = append(e.msgs, msg)
 	e.mu.Unlock()
@@ -241,7 +241,7 @@ func (e *recordingEmitter) Send(_ context.Context, msg messages.OutboundMessage)
 	case e.sent <- msg:
 	default:
 	}
-	return nil
+	return "", nil
 }
 
 // messages returns every outbound message the emitter received.

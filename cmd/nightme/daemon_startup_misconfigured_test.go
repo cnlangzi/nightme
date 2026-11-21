@@ -55,8 +55,8 @@ func (c *misconfiguredChannel) Incoming() <-chan messages.InboundMessage {
 	close(in)
 	return in
 }
-func (c *misconfiguredChannel) Send(context.Context, messages.OutboundMessage) error {
-	return nil
+func (c *misconfiguredChannel) Send(context.Context, messages.OutboundMessage) (string, error) {
+	return "", nil
 }
 func (c *misconfiguredChannel) OnPromptEnded(context.Context, string, string, agent.PromptEndReason) {
 }

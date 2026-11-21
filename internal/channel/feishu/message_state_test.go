@@ -18,7 +18,7 @@ func TestSend_OutMessageState_MissingPayload(t *testing.T) {
 	a := testAdapter(t)
 
 	// Missing MessageState payload entirely.
-	err := a.Send(context.Background(), messages.OutboundMessage{
+	_, err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:   messages.OutMessageState,
 		ChatID: "oc_chat",
 	})
@@ -27,7 +27,7 @@ func TestSend_OutMessageState_MissingPayload(t *testing.T) {
 	}
 
 	// Missing MessageID.
-	err = a.Send(context.Background(), messages.OutboundMessage{
+	_, err = a.Send(context.Background(), messages.OutboundMessage{
 		Kind:   messages.OutMessageState,
 		ChatID: "oc_chat",
 		MessageState: &messages.MessageStatePayload{
@@ -45,7 +45,7 @@ func TestSend_OutMessageState_MissingPayload(t *testing.T) {
 // channels).
 func TestSend_OutMessageState_UnknownStateDrops(t *testing.T) {
 	a := testAdapter(t)
-	err := a.Send(context.Background(), messages.OutboundMessage{
+	_, err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:   messages.OutMessageState,
 		ChatID: "oc_chat",
 		MessageState: &messages.MessageStatePayload{
@@ -69,7 +69,7 @@ func TestSend_OutMessageState_TracksStateIdempotency(t *testing.T) {
 
 	// First emit: larkClient is nil → AddReaction returns error,
 	// messageStates reverts (per F-31 failure semantics).
-	_ = a.Send(ctx, messages.OutboundMessage{
+	_, _ = a.Send(ctx, messages.OutboundMessage{
 		Kind:   messages.OutMessageState,
 		ChatID: "oc_chat",
 		MessageState: &messages.MessageStatePayload{
@@ -96,7 +96,7 @@ func TestSend_OutMessageState_TracksStateIdempotency(t *testing.T) {
 	// AddReaction would fail anyway; but the skip happens first,
 	// so we assert no error from the Send dispatcher when
 	// messageStates already has the state.
-	err := a.Send(ctx, messages.OutboundMessage{
+	_, err := a.Send(ctx, messages.OutboundMessage{
 		Kind:   messages.OutMessageState,
 		ChatID: "oc_chat",
 		MessageState: &messages.MessageStatePayload{
@@ -139,7 +139,7 @@ func TestSend_OutMessageState_FirstReceivedNotSkipped(t *testing.T) {
 	// the idempotency check. It proceeds to AddReaction, which
 	// fails with nil larkClient. The dispatcher reverts the
 	// messageStates entry so a later retry can re-attempt.
-	err := a.Send(ctx, messages.OutboundMessage{
+	_, err := a.Send(ctx, messages.OutboundMessage{
 		Kind:   messages.OutMessageState,
 		ChatID: "oc_chat",
 		MessageState: &messages.MessageStatePayload{
@@ -171,7 +171,7 @@ func TestSend_OutMessageState_QueuedRenders(t *testing.T) {
 	// MessageQueued emit must proceed to AddReaction (not
 	// silently dropped). AddReaction against nil larkClient
 	// returns an error; the dispatcher reverts messageStates.
-	err := a.Send(ctx, messages.OutboundMessage{
+	_, err := a.Send(ctx, messages.OutboundMessage{
 		Kind:   messages.OutMessageState,
 		ChatID: "oc_chat",
 		MessageState: &messages.MessageStatePayload{
@@ -206,7 +206,7 @@ func TestSend_OutMessageState_SubmittedRenders(t *testing.T) {
 	// MessageSubmitted emit must proceed to AddReaction (not
 	// silently dropped). AddReaction against nil larkClient
 	// returns an error; the dispatcher reverts messageStates.
-	err := a.Send(ctx, messages.OutboundMessage{
+	_, err := a.Send(ctx, messages.OutboundMessage{
 		Kind:   messages.OutMessageState,
 		ChatID: "oc_chat",
 		MessageState: &messages.MessageStatePayload{
@@ -303,7 +303,7 @@ func TestMessageStatesLRU_TerminalGuardSurvivesEviction(t *testing.T) {
 	// AddReaction (which fails against nil larkClient), then
 	// reverts. We verify the cache ends up empty for this key
 	// — the post-failure revert is intact under LRU.
-	err := a.Send(context.Background(), messages.OutboundMessage{
+	_, err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:   messages.OutMessageState,
 		ChatID: "oc_chat",
 		MessageState: &messages.MessageStatePayload{

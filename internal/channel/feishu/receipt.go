@@ -343,6 +343,22 @@ func (r *MessageReceipt) Tasks() []agent.AgentTaskItem {
 	return r.tasks
 }
 
+// CardMsgID returns the id of the chat message the receipt's card
+// lives on.
+//
+// The id is empty until the card has been sent. A caller that needs
+// to address the card — to keep writing into it — reads it here.
+//
+// Nil-safe: returns "" on a nil receiver.
+func (r *MessageReceipt) CardMsgID() string {
+	if r == nil {
+		return ""
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.cardMsgID
+}
+
 // SetPromptState (F-53 follow-up) transitions the receipt's
 // `promptState` to `state` and, when transitioning for the first
 // time to that state, adds the corresponding reaction on the

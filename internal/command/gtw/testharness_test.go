@@ -24,11 +24,11 @@ type recordingCh struct {
 	sends []messages.OutboundMessage
 }
 
-func (r *recordingCh) Send(_ context.Context, m messages.OutboundMessage) error {
+func (r *recordingCh) Send(_ context.Context, m messages.OutboundMessage) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.sends = append(r.sends, m)
-	return nil
+	return "", nil
 }
 
 // lastText returns the most recent captured message's Text field,

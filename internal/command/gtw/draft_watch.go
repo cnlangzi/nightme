@@ -126,7 +126,7 @@ func (w *draftWatcher) render(anchorMsgID string) {
 		ReplyTo: anchorMsgID,
 		Text:    renderPendingDrafts(drafts),
 	}
-	if err := w.em.Send(w.ctx, out); err != nil {
+	if _, err := w.em.Send(w.ctx, out); err != nil {
 		slog.Default().Warn("gtw: could not send the rendered issue drafts",
 			"dir", w.draftDir, "err", err)
 		return

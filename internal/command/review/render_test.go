@@ -614,8 +614,8 @@ type failingEmitter struct {
 	err error
 }
 
-func (e *failingEmitter) Send(_ context.Context, _ messages.OutboundMessage) error {
-	return e.err
+func (e *failingEmitter) Send(_ context.Context, _ messages.OutboundMessage) (string, error) {
+	return "", e.err
 }
 
 // TestSendVerdict_LogsAFailedSend: a channel that refuses the

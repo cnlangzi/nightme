@@ -303,8 +303,8 @@ func (c *capturingChannel) Stop(_ context.Context) error  { return nil }
 func (c *capturingChannel) Incoming() <-chan messages.InboundMessage {
 	return make(<-chan messages.InboundMessage)
 }
-func (c *capturingChannel) Send(_ context.Context, _ messages.OutboundMessage) error {
-	return nil
+func (c *capturingChannel) Send(_ context.Context, _ messages.OutboundMessage) (string, error) {
+	return "", nil
 }
 func (c *capturingChannel) OnPromptEnded(_ context.Context, chatID, msgID string, reason agent.PromptEndReason) {
 	c.mu.Lock()

@@ -45,13 +45,15 @@ type fakeExec struct {
 //
 // A card is a message of the chat: the run posts it to open a
 // session, and the chat renders the session onto the card of that
-// message.
+// message. A round opens its card itself: the chat writes it when
+// the first event of the round goes out.
 type cardRecord struct {
 	// ID is the id of the message the card became.
 	ID string
-	// Body is the one line the placeholder carries.
+	// Body is what the card carries.
 	Body string
-	// ReplyTo names the message the card hangs under.
+	// ReplyTo names the message the card hangs under. Empty for a
+	// card of its own.
 	ReplyTo string
 }
 
@@ -128,7 +130,7 @@ type fakeOperator struct {
 	// failCommand is the command that cannot be sent at all, the way
 	// a dead chat cannot take it.
 	failCommand string
-	// failCard makes the chat refuse every placeholder the run posts.
+	// failCard makes the chat refuse every card the run opens.
 	failCard bool
 	// failCardAfter makes the chat refuse the cards after it has
 	// published that many of them.
@@ -147,6 +149,9 @@ type fakeOperator struct {
 	// roundSessions are the names of the round sessions the run
 	// opened.
 	roundSessions []string
+	// sessionCards are the cards the chat opened for the sessions
+	// that named no card of their own.
+	sessionCards map[string]string
 	// choiceGen counts the handlers that were installed, so that the
 	// removal of a handler does not take a newer one with it.
 	choiceGen int
@@ -156,7 +161,7 @@ type fakeOperator struct {
 }
 
 func newFakeOperator(steps ...fakeStep) *fakeOperator {
-	return &fakeOperator{steps: steps, execs: map[string]*fakeExec{}}
+	return &fakeOperator{steps: steps, execs: map[string]*fakeExec{}, sessionCards: map[string]string{}}
 }
 
 // spokenMessage is one thing the run said in the chat.
@@ -334,13 +339,63 @@ func (f *fakeOperator) Pick(requestID, option string) bool {
 }
 
 // Emit publishes an outbound message in the chat.
-func (f *fakeOperator) Emit(_ context.Context, _ string, msg messages.OutboundMessage) error {
+//
+// The chat answers with the id of the message the message became: a
+// message that carries no anchor opens the card of its session, and
+// the events that follow land on that card.
+func (f *fakeOperator) Emit(_ context.Context, _ string, msg messages.OutboundMessage) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.dropOutbound {
 		// The chat hides the run's events.
-		return nil
+		return "", nil
 	}
+	f.emitted = append(f.emitted, emittedOf(msg))
+	id := msg.ReplyTo
+	if id != "" || !opensCard(msg.Kind) {
+		return id, nil
+	}
+	if card := f.sessionCards[msg.SessionID]; card != "" {
+		// The session has a card of its own: the message lands on it.
+		return card, nil
+	}
+	// The chat opens a card of its own.
+	f.cardAttempts++
+	if f.failCard ||
+		f.refuseAttempt == f.cardAttempts ||
+		(f.failCardAfter > 0 && len(f.cards) >= f.failCardAfter) {
+		return "", errors.New("the chat cannot take the card")
+	}
+	f.seq++
+	id = fmt.Sprintf("msg-%d", f.seq)
+	f.cards = append(f.cards, cardRecord{ID: id, Body: msg.Text, ReplyTo: msg.ReplyTo})
+	f.log = append(f.log, "card:"+id)
+	if msg.SessionID != "" {
+		if f.sessionCards == nil {
+			f.sessionCards = map[string]string{}
+		}
+		f.sessionCards[msg.SessionID] = id
+	}
+	if strings.Contains(msg.SessionID, " · round ") {
+		f.roundSessions = append(f.roundSessions, msg.SessionID)
+	}
+	return id, nil
+}
+
+// opensCard reports whether the chat writes a card of its own for the
+// message: the kinds that carry content into a card. The kinds that
+// stamp a footer, a reaction or a thread reply do not.
+func opensCard(kind messages.OutboundKind) bool {
+	switch kind {
+	case messages.OutReply, messages.OutCommandReply, messages.OutTaskCreate,
+		messages.OutTaskUpdate, messages.OutResult, messages.OutError:
+		return true
+	}
+	return false
+}
+
+// emittedOf renders the outbound message the way the run sent it.
+func emittedOf(msg messages.OutboundMessage) emittedMessage {
 	emitted := emittedMessage{
 		Kind:      msg.Kind,
 		Text:      msg.Text,
@@ -355,11 +410,7 @@ func (f *fakeOperator) Emit(_ context.Context, _ string, msg messages.OutboundMe
 	if msg.SessionResult != "" {
 		emitted.Result = msg.SessionResult
 	}
-	f.emitted = append(f.emitted, emitted)
-	if msg.Kind == messages.OutInit && strings.Contains(msg.SessionID, " · round ") {
-		f.roundSessions = append(f.roundSessions, msg.SessionID)
-	}
-	return nil
+	return emitted
 }
 
 // Emitted returns the outbound messages the run published, in the

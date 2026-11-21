@@ -118,9 +118,7 @@ type trayOptions struct {
 	// SIGTERM to self; tests substitute a no-op or a channel
 	// notification.
 	onStopRequest func()
-	// onRestartRequest is the handler the "Restart" menu
-	// item fires. The default production handler spawns a
-	// new _daemon child then sends SIGTERM to self.
+	// onRestartRequest is the platform-specific handler for the "Restart" menu item.
 	onRestartRequest func()
 }
 

@@ -193,10 +193,15 @@ regenerate via `sips`+`iconutil`.
   so the tray restart would silently degrade to a plain stop.
 
 **Windows** (`cmd/nightme/daemon_lifecycle_tray_windows.go`):
-Windows has no `SIGTERM` and the daemon child runs detached, so
-`onStopRequestDefault` is `os.Exit(0)` and
-`onRestartRequestDefault` is the same call. A Windows daemon is
-restarted with `nightme restart` from a shell.
+
+- Quit exits the daemon with `os.Exit(0)`.
+- Restart launches a separate `nightme restart` process without a
+  console window. That process owns the stop/start handoff and waits
+  for the replacement daemon to become ready.
+- If resolving the executable or launching the restart command fails,
+  the daemon logs the error and stays running. Once launched, the
+  command writes errors to `<DataDir>/daemon-stderr.log` or the path
+  set by `NIGHTME_STDERR_FILE`, if capture is available.
 
 ---
 

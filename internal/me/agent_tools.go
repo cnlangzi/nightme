@@ -563,7 +563,7 @@ func (s *Service) runStep(ctx context.Context, r *run, command string) (stepResu
 		}
 		out := failedOutcome(err.Error(), nil)
 		if !hasStep {
-			r.record(actionKind(owned), command, "", out)
+			r.record(actionKind(owned), command, r.budgetStep(), out)
 			return stepResult{}, toolErrorf("%s", err.Error())
 		}
 		r.record(actionKind(owned), command, step.ID, out)
@@ -573,6 +573,9 @@ func (s *Service) runStep(ctx context.Context, r *run, command string) (stepResu
 		}
 		return stepResult{}, toolErrorf("%s", err.Error())
 	}
+	// No chain covers this command: its result is the run's own, so it
+	// is the result that may hold the run up.
+	s.pauseForRateLimit(ctx, r, res)
 	if res.Status == statusWaiting {
 		// The command is still running: the step has no verdict yet.
 		// A repair changes nothing: the command it started is picked
@@ -594,8 +597,10 @@ func (s *Service) runStep(ctx context.Context, r *run, command string) (stepResu
 	}
 	if !hasStep {
 		// The action still happened, so it is recorded — the budget
-		// has to know about it.
-		r.record(actionKind(owned), command, "", out)
+		// has to know about it. The command belongs to no step, so it
+		// counts against the step the run is on: the step whose
+		// command is in flight has none of its own yet.
+		r.record(actionKind(owned), command, r.budgetStep(), out)
 		return res, nil
 	}
 	r.record(actionKind(owned), command, step.ID, out)
@@ -656,6 +661,9 @@ func (s *Service) toolInstruct(ctx context.Context, r *run, call pendingCall) (s
 	if err != nil {
 		return stepResult{}, err
 	}
+	// No chain covers the instruction: its result is the run's own, so
+	// it is the result that may hold the run up.
+	s.pauseForRateLimit(ctx, r, res)
 	if res.Status != statusWaiting {
 		// The instruction is a repair: it is work the agent causes, so
 		// it costs a chance of the step the run is on.
@@ -927,23 +935,34 @@ func outcomeSucceeded(status string) bool {
 // so a step that came back early — waiting for a prompt, or stalled —
 // can be resumed instead of run twice.
 //
-// A command the agent could not take because it is rate limited pauses
-// the run: the agent is throttled, and running the command again
-// makes it worse.
+// The command does not decide to pause the run: the layer that owns the
+// result does. A chain of agents swallows a broken attempt and tries
+// the next one, so only the chain's final result can hold the run up.
 func (s *Service) runCommand(ctx context.Context, r *run, command string, instruct bool) (stepResult, error) {
 	res, err := s.runCommandInner(ctx, r, command, instruct)
 	if err != nil {
 		return res, err
 	}
 	s.reportOutcome(r, command, res)
-	if throttled(res) {
-		r.requestPause(rateLimitReason)
-		// The run stops: it publishes the state of the round on a card
-		// of its own.
-		s.showState(ctx, r)
-		s.announcePause(ctx, r, rateLimitReason)
-	}
 	return res, nil
+}
+
+// pauseForRateLimit holds the run up when the result says the agent is
+// throttled.
+//
+// The agent is throttled and running the command again makes it worse,
+// so the run waits for the operator. Only the owner of the result
+// decides: a chain that swallowed a broken attempt goes on with the
+// next agent, and a command no chain covers pauses on its own.
+func (s *Service) pauseForRateLimit(ctx context.Context, r *run, res stepResult) {
+	if !throttled(res) {
+		return
+	}
+	r.requestPause(rateLimitReason)
+	// The run stops: it publishes the state of the round on a card of
+	// its own.
+	s.showState(ctx, r)
+	s.announcePause(ctx, r, rateLimitReason)
 }
 
 // reportOutcome records how a command ended and refreshes the run's

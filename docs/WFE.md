@@ -492,7 +492,7 @@ A step may name the agents that do its work. The chain is a list of entries, and
       names: [omp, claude]
 ```
 
-The step runs the agents in the order they are declared, and the names of an entry in the order they are declared. The first agent that does not break is the step's outcome; an attempt that breaks hands over to the next one. When every attempt broke, the step fails and the decision model is asked what happens next — the same path a single failed step takes.
+The step runs the agents in the order they are declared, and the names of an entry in the order they are declared. The first agent that does not break is the step's outcome; an attempt that breaks hands over to the next one. An attempt the chain absorbs leaves no trace in the run: its error is not the step's error — the step's error is the error of the attempt the chain ends on. When every attempt broke, the step fails and the decision model is asked what happens next — the same path a single failed step takes.
 
 | Field | Type | Required | Purpose |
 |---|---|---|---|
@@ -535,7 +535,7 @@ The `use` mode has no handover: the message goes to the chat as it is, and there
 
 A workflow that names no `agents` sends its message once, unchanged.
 
-Every attempt is recorded in the run's action history as the step's own run, and every attempt costs one chance of the step's budget. The `args` attempt records the command that ran (`/review -a omp`, or `/review --continue -a omp` when it took the work of the attempt before it over); the `use` attempt records the step's message with the agent noted (`/review [agent: omp]`), because the command itself does not name the agent.
+One execution of the step is one run of it: when it concludes, it is recorded in the run's action history once, and it costs one chance of the step's budget however many agents its chain tried. The record carries the command of the attempt the chain ended on — the `args` attempt's own command (`/review -a omp`, or `/review --continue -a omp` when it took the work of the attempt before it over), or the step's message with the agent noted (`/review [agent: omp]`) in the `use` mode, because the command itself does not name the agent — and the outcome of the chain. An attempt the chain absorbed is not recorded: the operator reads the result of the chain, not the failures it swallowed.
 
 ### 5.7 `final` — the step that cleans up after the round
 
@@ -1212,7 +1212,7 @@ The wake log holds the model decisions only: the workflow's own fast path is not
 | Step budget | `me.max_judgments` chances at one step in one round, counted per round. |
 | Rounds | `iterations` for a job — the number of rounds it runs. `/me start -i <rounds>` sets it for that run. |
 | Compaction | Every tool result but the last keeps its status and summary; the last one keeps its transcript. |
-| Rate limit | A command the agent answered 429 pauses the run; the operator continues it. |
+| Rate limit | A command the agent answered 429 pauses the run; the operator continues it. A chain of agents absorbs the throttle it can — the next agent takes the work over — and only the throttle the chain cannot absorb pauses the run. |
 
 A text-only answer — words without a tool call — does not end the run. The words stay in the conversation, the turn costs one chance of the step the judgment was about, and the run asks the agent again with a fresh situation report.
 
@@ -1220,7 +1220,7 @@ A chat model that failed or that never answered costs the same one chance. The w
 
 One turn of the chat model lasts at most five minutes: the chat model call carries that deadline, so the run does not wait for the client's own timeout.
 
-A command the underlying agent answered 429 pauses the run: the agent is throttled, and running the command again makes it worse. The run waits for the operator, who sets it going again with `/me resume`. The pause is the run's own: the model is not asked to think about a throttle.
+A command the underlying agent answered 429 pauses the run: the agent is throttled, and running the command again makes it worse. A chain of agents absorbs the throttle it can — the next agent takes the work over and the run goes on — so the run waits for the operator only when the throttle reaches it. The operator sets it going again with `/me resume`. The pause is the run's own: the model is not asked to think about a throttle.
 
 The run has no clock of its own. Every command it issues carries its own budget — the agent behind the command reports its own outcome when that budget runs out — and the run acts on that outcome. A timeout is the agent's timeout, never the run's. The run watches: it stops when the command reports, when the operator stops it, or when the daemon shuts down.
 

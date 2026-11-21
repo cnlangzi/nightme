@@ -55,6 +55,7 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/chatsession"
@@ -93,6 +94,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/prcache"
 	"github.com/cnlangzi/nightme/internal/shell"
+	"github.com/cnlangzi/nightme/internal/version"
 	// dsh is intentionally NOT imported here: the runtime no
 	// longer touches the shared dsh host. The dsh bridge handles
 	// lazy-start on first use via host.EnsureSharedHost in
@@ -608,19 +610,39 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	// on platforms without a wake detector.
 	startWakeWatcher(ctx, startedChannels, logger)
 
+	// The daemon identifies itself here: pid, build and the data
+	// directory it owns. Without them the log cannot tell two
+	// daemons on one machine apart — the released build and a local
+	// `go run` write to the same lines, and the operator has to
+	// infer which one is running from the wording.
 	logger.Info("daemon running",
 		"channels", len(startedChannels),
 		"configured", len(chs),
-		"primary", cfg.Primary)
+		"primary", cfg.Primary,
+		"pid", os.Getpid(),
+		"version", version.String(),
+		"data_dir", cfg.Paths.DataDir)
 
 	// Block on signal or context cancellation.
+	//
+	// The two branches are recorded separately because their origins
+	// differ: a signal came from outside the process, while a context
+	// cancellation is normally the control socket's "stop" RPC (the
+	// daemoncontrol server records that request on its own). Folding
+	// them into one line would throw the attribution away.
 	select {
 	case <-ctx.Done():
+		logger.Info("daemon stopping", "reason", "context cancelled", "err", ctx.Err())
 	case sig, ok := <-sigCh:
 		if ok && sig != nil {
 			fmt.Fprintf(out, "[nightme] received %s\n", sig)
+			logger.Info("daemon stopping", "reason", "signal", "signal", sig.String())
+		} else {
+			logger.Info("daemon stopping", "reason", "signal channel closed")
 		}
 	}
+
+	shutdownStart := time.Now()
 
 	// The personal agent stops before the channels do: a run that is
 	// still going needs its chat to settle on.
@@ -634,7 +656,20 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	// early-return paths.
 	reaper.Stop()
 
-	return ShutdownRunMulti(out, startedChannels, csFile, asFile, prCacheReg, logger, cancelProcs)
+	shutdownErr := ShutdownRunMulti(out, startedChannels, csFile, asFile, prCacheReg, logger, cancelProcs)
+
+	// The shutdown is only complete once every channel stopped, every
+	// agent child is gone and the state is persisted. The record says
+	// so — a daemon that was killed outright never reaches this line,
+	// and the last line in the log is then the clue.
+	duration := time.Since(shutdownStart)
+	if shutdownErr != nil {
+		logger.Error("daemon stopped", "duration", duration.String(), "err", shutdownErr)
+	} else {
+		logger.Info("daemon stopped", "duration", duration.String())
+	}
+
+	return shutdownErr
 }
 
 // Ensure unused imports stay declared (some are referenced in

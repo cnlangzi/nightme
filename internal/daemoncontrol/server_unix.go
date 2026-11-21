@@ -28,6 +28,10 @@ type Server struct {
 	cancel    context.CancelFunc
 	closeOnce sync.Once
 
+	// serverLogger carries the logger the stop handler records the
+	// stop request through.
+	serverLogger
+
 	// healthSources holds one entry per started channel. The "health"
 	// RPC collects them all, so every running channel is reported —
 	// not just the last one registered.
@@ -114,6 +118,11 @@ func (s *Server) handle(conn *net.UnixConn) {
 		_ = WriteResult(conn, s.healthPayload())
 	case "stop":
 		s.stopOnce.Do(func() {
+			// The record of who asked the daemon to stop. The
+			// runtime's own "daemon stopping" line names the cause
+			// (a context cancellation); only this line says the
+			// control socket asked for it.
+			s.log().Info("daemon stop requested", "source", "control socket")
 			// CAS "starting" → "stopping". If the CAS succeeds we
 			// are still in the window where SetReady() has NOT
 			// fired — cancel() would be unconsumed by runDaemon's

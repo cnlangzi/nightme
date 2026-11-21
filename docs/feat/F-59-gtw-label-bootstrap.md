@@ -596,7 +596,7 @@ label 就失败）。
 
 - [`F-gtw-fix.md`](./F-gtw-fix.md) — `/gtw fix` 主流程、Assess/Execute dispatch、branch 硬失败
 - [`F-gtw.md`](./F-gtw.md) — gtw 命令索引
-- [`docs/feat/F-50-git-provider.md`](./F-50-git-provider.md) —
+- [`internal/command/gtw/provider.go`](../../internal/command/gtw/provider.go) —
   `GitProvider` 接口设计，`ListLabels` / `CreateLabel` 是其扩展
 - [`internal/command/gtw/types.go`](../../internal/command/gtw/types.go) —
   `AllLabels` + `LabelMeta` + `LabelMetaFor`

@@ -1,409 +1,276 @@
-# F-CHATSTORE-001: chat_sessions.json — Extract `chatstore`, Eliminate Lost-Update Race
+# F-CHATSTORE-001: chat_sessions.json — `chatstore` 单一存储
 
-> **Status**: designing → implementation (this doc is the landing page; tests + diff land in subsequent PRs)
-
-> **Depends on**: F-chat-session (per-chat session context), F-27 (ChatSession persistence split), F-29 (AgentSession pool)
-> **Related docs**: [`SPEC.md`](../SPEC.md) §1.2, [`F-chat-session.md`](./F-chat-session.md), [`F-runtime.md`](./F-runtime.md) §4
+> **Status**: 已落地
+>
+> **Depends on**: F-chat-session (per-chat session context)
+>
+> **Related docs**: [`SPEC.md`](../SPEC.md) §1.2, [`F-chat-session.md`](./F-chat-session.md) §6, [`CHATSTORE.md`](../CHATSTORE.md)
 
 ---
 
 ## 0. 摘要
 
-chat_sessions.json 的当前写入路径(`ChatSession.persistChatEntry` 7 个 setter)有一个**lost-update race**:cs.mu 释放后才走 Upsert,中间窗口内另一个 goroutine 可以写新字段并抢先 Upsert,导致后到的旧 snapshot 把新值覆盖回磁盘。
-
-修复分两层:
+`chat_sessions.json` 的全部读写集中在 `internal/chatstore.Store`。Store 持**一把** mutex，entry 的内存态与磁盘态在同一临界区内更新 —— 「改内存 + 落盘」是一个原子步骤。
 
 | # | 决策 | 理由 |
 |---|------|------|
-| **D1** | 抽出 `internal/chatstore.Store`,封装所有 chat_sessions.json 操作 | 持久化路径与 ChatSession 解耦,SetX 不再有"我自己写字段 + 自己落盘"的杂职责 |
-| **D2** | 每个 setter 自己持 record.mu.Lock 全程到 Upsert 完成 | 消除 release-then-persist 窗口,修掉 lost-update |
-| **D3** | 删除 entry 字段 `AgentSessionIDs` / `SelectedAgentSessionID`(只有写没有读) + `ChatSession` 的死 getter(`PrimaryAgent` / `LastInteractionAt` / `CreatedAt` / `Entry`) | 写但不被读 = 死代码,删干净 |
+| **D1** | `internal/chatstore.Store` 封装 chat_sessions.json 的所有 read/write | 持久化路径与 ChatSession 解耦 |
+| **D2** | Store 单 mutex；字段 setter 在锁内完成「改内存 + 落盘」 | lost-update 窗口 = 0 |
 
-不引入任何抽象(没有 `mutate` / `structuralChange` / debounce / timer / FlushAll / SyncPool / Touch)。KISS。
+不引入抽象层：没有 debounce / timer / FlushAll / mutator wrapper / SyncPool / Touch。每个 setter 自己判断「值变了才写盘」，同步落盘。
 
 ---
 
-## 1. Motivation
+## 1. lost-update 的机制
 
-### 1.1 现场复现
-
-某 chat session `cs_oc_09ef553...` 在 2026-08-19 凌晨到早上之间,反复跑 `/gtw fix -n ...`、`/cwd ...` 一连串命令。daemon 重启后,该 chat 的磁盘 `selectedCwd` 指向一个**已经被删除的工作树** `fix-app-icon`,但用户实际在 `fix-pi-stop` 工作树里跑 claude(UI 上显示 `30eaafa2-...` 的 fix-pi-stop AS session ID)。
-
-**用户输入"继续"**,daemon 报错:
+setter 释放自己的锁之后才落盘时，落盘的 snapshot 可能已经陈旧：
 
 ```
-Failed to spawn agent: chatsession: spawn failed (selectedAgent="claude",
-cwd="/Users/.../nightme.nightme/fix-app-icon"): chatsession: respawn claude at
-/Users/.../fix-app-icon: claudecode: start: fork/exec
-/Users/geax/.local/bin/claude: no such file or directory
+T1: G1.Lock → 写 selectedCwd=A → G1.Unlock
+T2: G2.Lock → 写 selectedCwd=B → G2.Unlock
+T3: G2.RLock → snapshot{B} → 写盘 B
+T4: G1.RLock → snapshot{A} → 写盘 A   ← 旧值覆盖新值
 ```
 
-错误信息归因到二进制不存在,但 `/Users/geax/.local/bin/claude` 实际是 symlink,daemon 直接 exec 时仍存在。fork/exec 失败的真因是 `child.Dir` 指向已删除的 fix-app-icon 目录(macOS + `SysProcAttr.Setsid: true` 下,chdir 失败被错误归到 binary 路径上 — 详见 daemon 日志 `fork/exec /Users/geax/.local/bin/claude` 段)。
+G1 的 snapshot 取自它自己 Unlock 的那一刻，但 G1 后到写盘的那一步，于是 G1 赢 —— 磁盘留下旧值。
 
-不管 fork/exec 错误归因细节,**根因是 chat_sessions.json 上的 selectedCwd 是 fix-app-icon,跟用户实际工作的 fix-pi-stop 不一致**。
-
-### 1.2 根因
-
-`ChatSession.SetXxx` 系列方法(`SetSelectedCwd`、`SetSelectedAgent`、`SetWatchMode`、`SetThinkMode`、`SetToolsMode`、`ClearSelectedCwd`、`MarkWatcherHintEmitted`)统一模式:
-
-```go
-func (cs *ChatSession) SetSelectedCwd(cwd string) error {
-    cs.mu.Lock()
-    cs.selectedCwd = cwd
-    cs.lastInteractionAt = time.Now()
-    cs.mu.Unlock()        // ← 释放
-    cs.persistChatEntry() // ← 然后 RLock + Upsert
-    return nil
-}
-
-func (cs *ChatSession) persistChatEntry() {
-    cs.mu.RLock()
-    defer cs.mu.RUnlock()
-    cs.persistChatEntryLocked()
-}
-
-func (cs *ChatSession) persistChatEntryLocked() {
-    if cs.csFile == nil { return }
-    _ = cs.csFile.Upsert(cs.entryLocked())  // ← entryLocked 读 cs 字段
-}
-```
-
-`entryLocked()` 在 RLock 下读 `cs.pool` / `cs.selectedCwd` / `cs.selectedAS` 等构建 entry,snapshot 是**一致**的。但 `csFile.Upsert(snapshot)` 走 `csFile.mu.Lock()`,**跟 `cs.mu` 互相独立**。
-
-### 1.3 Lost-update 交错(可重现)
-
-时间线:
-
-```
-T1: G1.Lock → write selectedCwd=A → G1.Unlock
-T2: G1.RLock → snapshot{A} → Upsert A  (拿 csFile.mu,写盘 A,放锁)
-T3: G2.Lock → write selectedCwd=B → G2.Unlock (B 是更新的值)
-T4: G2.RLock → snapshot{B} → Upsert B  (拿 csFile.mu,写盘 B) ✓
-```
-
-这是 happy path,B 赢。但交错反过来:
-
-```
-T1: G1.Lock → write selectedCwd=A → G1.Unlock
-T2: G2.Lock → write selectedCwd=B → G2.Unlock
-T3: G2.RLock → snapshot{B} → Upsert B  (写盘 B)
-T4: G1.RLock → snapshot{A} → Upsert A  (写盘 A,覆盖 B) ✗ LOST UPDATE
-```
-
-G1 的 snapshot 是**陈旧**的(从它自己 Unlock 那一刻算起),但因为 G1 后到 csFile.mu,**G1 赢**。磁盘留下旧值。
-
-### 1.4 真实触发场景
-
-对单一 chat 并发来源不止一个:
+同一个 chat 的并发来源不止一个：
 
 | 来源 | 路径 |
 |---|---|
-| 命令路径 | /cwd / /use / /watch / /think / /tools |
-| gtw 工作流 | /gtw fix -n / /gtw close |
-| 命令 watcher hint | `Manager.maybeEmitWatcherHint` 写 `MarkWatcherHintEmitted` |
-| shutdown | `runtime.persistChatStates` 在 daemon 退出时遍历所有 cs 强制 SetSelectedAgent 触发一次落盘 |
+| 命令路径 | `/cwd` / `/use` / `/watch` / `/think` / `/tools` |
+| gtw 工作流 | `/gtw fix` / `/gtw close` |
+| 命令 watcher hint | `MarkWatcherHintEmitted` 写 hint tombstone |
+| shutdown | `runtime.persistChatStates` 在 daemon 退出时回写各 chat 的状态 |
 
-任何两个 setter 同 chatID 并发,**就可能**就触发 lost-update。
+任何两个 setter 并发写同一个 chatID 就能触发。
 
-### 1.5 entry 字段审计(发现死代码)
-
-为决策 D3 做证据收集:
-
-| entry 字段 | 写入位置 | 生产读取者 |
-|---|---|---|
-| `SelectedCwd` | `entryLocked:2279` | `cs.SelectedCwd()`(多)|
-| `SelectedAgent` | `entryLocked:2280` | `cs.SelectedAgent()`(多)|
-| `PrimaryAgent` | `entryLocked:2281` | `cs.PrimaryAgent()`(**无**)|
-| `AgentSessionIDs` | `entryLocked:2282` | **无** |
-| `SelectedAgentSessionID` | `entryLocked:2283` | **无**(只有 `UnmarshalJSON` 兼容旧字段名)|
-| `CreatedAt` | `entryLocked:2284` | `cs.CreatedAt()`(**无**)|
-| `LastInteractionAt` | `entryLocked:2285` | `cs.LastInteractionAt()`(**无**)|
-| `WatchMode` / `ThinkMode` / `ToolsMode` / `WatcherHintEmitted` | 各 setter | 各 getter(多)|
-
-`AgentSessionIDs` 和 `SelectedAgentSessionID` **被持久化但永远不被读**。`PrimaryAgent` / `LastInteractionAt` / `CreatedAt` getter **没人调**。
+**修法**：改内存与落盘放进同一把锁的同一临界区。锁内先比对（值没变就短路，不写盘），变了就改内存并立刻落盘 —— 落盘期间没有别的 goroutine 能改内存，快照因此不可能陈旧。
 
 ---
 
-## 2. 设计
+## 2. Store 的组成
 
-### D1:抽出 `internal/chatstore`
-
-职责单一:封装 chat_sessions.json 的所有 read/write。ChatSession 通过 `cs.Store()` 拿 store,所有 entry字段写入通过 `store.SetXxx(chatID, value)`。
+### 2.1 结构
 
 ```go
 // internal/chatstore/store.go
 
 type Store struct {
-    file *registry.ChatSessionFile
-    mu   sync.Mutex                // 保护 records map
-    recs map[string]*record
+    path string
+
+    mu      sync.Mutex
+    entries map[string]*registry.ChatSessionEntry
+    dropped map[string]json.RawMessage
 }
+```
 
-type record struct {
-    mu    sync.Mutex               // per-chat 写锁
-    entry *registry.ChatSessionEntry
-}
+- `entries` —— 已知 chatID 前缀的 entry，是权威状态。
+- `dropped` —— 未知前缀的 entry，按**原始 JSON 字节**保留，`save()` 原样写回。
+- 两张 map 合起来等于磁盘上的 `chatSessions` 对象。
 
-// ——构造 ——
-func New(file *registry.ChatSessionFile) *Store
+### 2.2 构造与加载
 
-// —— Bootstrap ——
-func (s *Store) Bootstrap(chatID, primaryAgent string) (*registry.ChatSessionEntry, error)
-// - 内存有 → 返回
-// - 内存没有 disk 有 → 从 disk 加载进内存,返回
-// - 都没有 → 创建新 entry, sync Upsert 进 disk,返回
+```go
+func New(path string) (*Store, error)
+```
 
-// —— 字段 setter ——
-func (s *Store) SetSelectedCwd(chatID, cwd string) error        // cwd=="" 合法
-func (s *Store) SetSelectedAgent(chatID, agent string) error    // agent=="" 报错
+`New` 读 `path`：
+
+| 情况 | 行为 |
+|---|---|
+| 文件不存在 | 空 store（正常启动路径） |
+| 文件损坏（JSON 解析失败） | 原字节备份到 `<path>.bak`，store 重置为空 |
+| 读取失败（非 NotExist） | 返回错误 |
+| entry 的 map key ≠ `entry.ChatID` | 返回错误 —— 结构损坏，loader 无法代为修复 |
+| entry 的 chatID 前缀未注册 | 原始字节进 `dropped`，warn 日志，`save()` 时原样保留 |
+| 有 entry 但一个 channel 都没注册 | 返回错误 —— 否则所有 entry 都会被丢掉且没有有用的反馈 |
+
+前缀集合来自 `channel.ChatIDPrefixes()`（每个 channel adapter 在 `init()` 里通过 `channel.Register` 声明）。空前缀被跳过，不会接受任意 key。新增 channel 只需在自己的 `init()` 里声明前缀，Store 的校验自动跟上，不需要改 `store.go`。
+
+### 2.3 落盘
+
+```go
+func (s *Store) save() error
+```
+
+调用方必须持 `s.mu`。写入是原子的：临时文件 → `fsync` → `rename` → `chmod 0600`。`entries` 里的 entry 走 typed struct marshal，`dropped` 里的走 raw JSON 原样写回。
+
+### 2.4 公开 API
+
+| 方法 | 语义 |
+|---|---|
+| `New(path)` | 加载（或初始化）store |
+| `Bootstrap(chatID, primaryAgent)` | chatID 不在盘上 → 建 entry（seed `SelectedAgent = primaryAgent`）并落盘；已在盘上 → 只 bump `LastInteractionAt` 再落盘。返回深拷贝 |
+| `Get(chatID)` | 返回 entry 的**深拷贝**（指针字段也拷贝），未知 chatID 返回 `(nil, false)` |
+| `List()` | 返回全部 entry 的深拷贝快照，顺序不定 |
+| `Save(entry)` | 整表写一个 entry（map 写 + 落盘在同一把锁内） |
+| `Path()` | store 打开时的文件路径 |
+| `Dropped()` | 被原样保留的未知前缀 chatID 列表与数量 |
+
+`Save` 的生产调用方为零 —— 生产路径走 `Bootstrap` 与字段 setter；`Save` 只在测试里给 store seed 数据。
+
+### 2.5 字段 setter
+
+```go
+func (s *Store) SetSelectedCwd(chatID, cwd string) error
+func (s *Store) SetSelectedAgent(chatID, agent string) error
 func (s *Store) SetWatchMode(chatID string, mode int) error
 func (s *Store) SetThinkMode(chatID string, mode int) error
 func (s *Store) SetToolsMode(chatID string, mode int) error
 func (s *Store) SetWatcherHintEmitted(chatID string, v bool) error
-
-// —— 读 ——
-func (s *Store) Get(chatID string) (*registry.ChatSessionEntry, bool)
-func (s *Store) List() []*registry.ChatSessionEntry
 ```
 
-**9 个公开方法**,每个 setter 5-10 行。
+每个 setter 的契约一致：
 
-**没有**:debounce / timer / FlushAll / mutator wrapper / structuralChange / SyncPool / Touch / Flush。每个 setter 自己决定 sync 写盘 + 自己 if-changed 短路。
+1. 取 `s.mu`。
+2. chatID 没有 entry → 报错 `entry not initialized; call Bootstrap first`（`SetSelectedAgent` 另外拒绝空 agent 名）。
+3. 值与盘上相同 → 直接返回，不写盘。
+4. 改内存字段 + bump `LastInteractionAt`（`SetWatcherHintEmitted` 除外：hint 是系统事件不是用户交互）→ `save()`。
+5. 放锁。
 
-### D2:每个 setter 自己持 record.mu.Lock 全程
+`SetSelectedCwd` 接受空 cwd（清空语义）。`SetWatchMode` / `SetThinkMode` / `SetToolsMode` 的入参是裸 `int` —— enum 类型住在 chatsession 侧，registry / chatstore 层不依赖它们。
 
-```go
-func (s *Store) SetSelectedCwd(chatID, cwd string) error {
-    if chatID == "" { return errors.New("chatstore: empty chatID") }
-    
-    r, err := s.load(chatID)  // 内部:内存 → disk,都没有就报错(Caller 应调 Bootstrap)
-    if err != nil { return err }
-    r.mu.Lock()
-    defer r.mu.Unlock()
-    
-    if r.entry.SelectedCwd == cwd { return nil }  // self-changed 短路,无 IO
-    r.entry.SelectedCwd = cwd
-    r.entry.LastInteractionAt = time.Now()
-    return s.file.Upsert(r.entry)
+### 2.6 并发契约
+
+- Store 只有一把 mutex，读（`Get` / `List`）也走它。
+- 所有 setter 在同一临界区内完成「改内存 + 落盘」，所以并发读者看到的要么是改动前、要么是改动后的状态，不会看到半应用的状态。
+- 跨 chatID 同样串行：这是刻意的 —— 落盘写的是整张表，两个 chat 的写盘在同一个临界区里排队，代价是一次 `git`-free 的小 JSON 序列化，换掉整表覆盖的 lost-update。
+- `Get` / `List` 返回深拷贝，调用方拿到手改不会影响 store 内部状态。
+
+---
+
+## 3. chat_sessions.json 的磁盘格式
+
+```json
+{
+  "version": 1,
+  "chatSessions": {
+    "oc_xxx": {
+      "id": "cs_oc_xxx",
+      "chatId": "oc_xxx",
+      "selectedCwd": "/path/to/worktree",
+      "selectedAgent": "claude",
+      "primaryAgent": "claude",
+      "agentSessionIds": [],
+      "selectedAgentSessionId": "as_...",
+      "createdAt": "2026-08-19T02:11:00Z",
+      "lastInteractionAt": "2026-08-19T03:40:00Z",
+      "watchMode": 0,
+      "thinkMode": 0,
+      "toolsMode": 0,
+      "watcherHintEmitted": false
+    }
+  }
 }
 ```
 
-**关键**:每个 setter 持 `record.mu.Lock` 全程,**包括 `s.file.Upsert`**。csFile 内部的 `csFile.mu.Lock()` 串行化跨 chat 写盘,**两层锁互不干涉**:
+- `version` 取 `registry.ChatSessionFileVersion`（当前为 1）。
+- `chatSessions` 的 key 必须是 entry 自己的 `chatId`。
+- 旧字段名在读时透明迁移（`internal/registry/chat_session_entry.go` 的 `UnmarshalJSON`）：`defaultAgent` → `PrimaryAgent`、`activeCwd` → `SelectedCwd`、`activeAgent` → `SelectedAgent`、`activeAgentSessionId` → `SelectedAgentSessionID`。写时只出规范字段名。
+- Go 的 JSON unmarshal 默认忽略未知字段，旧文件继续能读。
 
-- record.mu(per-chat):序列化该 chat 的所有 setter
-- csFile.mu(全局):序列化磁盘写操作
+---
 
-lost-update 窗口 = 0。
+## 4. ChatSession / Manager / runtime 侧的接线
 
-### D3:删除死代码
-
-#### entry 字段
-
-```diff
- type ChatSessionEntry struct {
-     ID                     string
-     ChatID                 string
-     SelectedCwd            string
-     SelectedAgent          string
-     PrimaryAgent           string
--    AgentSessionIDs        []string
--    SelectedAgentSessionID *string
-     CreatedAt              time.Time
-     LastInteractionAt      time.Time
-     WatchMode              int
-     ThinkMode              int
-     ToolsMode              int
-     WatcherHintEmitted     bool
- }
-```
-
-`UnmarshalJSON` 里 `LegacyActiveAgentSessID` 兼容逻辑同步删(目标字段没了)。
-
-#### ChatSession 字段
-
-```diff
- type ChatSession struct {
-     ID     string
-     ChatID string
-
--    selectedCwd   string
--    selectedAgent string
--    primaryAgent  string
--    watchMode WatchMode
--    thinkMode ThinkMode
--    toolsMode ToolsMode
--    watcherHintEmitted bool
--    lastInteractionAt time.Time
--    createdAt time.Time
--    csFile *registry.ChatSessionFile
-+    store *chatstore.Store
-
-     // 保留:runtime state(pool / queue / buses / ctx / etc.)
- }
-```
-
-#### ChatSession 方法
-
-```diff
--// —— entry 字段 setter(全部走 store)——
--func (cs *ChatSession) SetSelectedCwd(cwd string) error
--func (cs *ChatSession) ClearSelectedCwd()
--func (cs *ChatSession) SetSelectedAgent(agent string) error
--func (cs *ChatSession) SetWatchMode(mode WatchMode) error
--func (cs *ChatSession) SetThinkMode(mode ThinkMode) error
--func (cs *ChatSession) SetToolsMode(mode ToolsMode) error
--func (cs *ChatSession) MarkWatcherHintEmitted() error
-
--// —— 死 getter ——
--func (cs *ChatSession) PrimaryAgent() string
--func (cs *ChatSession) LastInteractionAt() time.Time
--func (cs *ChatSession) CreatedAt() time.Time
--func (cs *ChatSession) Entry() *registry.ChatSessionEntry
-
--// —— 内部 helper(chatstore 接管持久化)——
--func (cs *ChatSession) persistChatEntry()
--func (cs *ChatSession) persistChatEntryLocked()
--func (cs *ChatSession) entryLocked()
-```
-
-`SetToolsMode` 的 `*ToolsMode` 是 typed enum,getter 在 store 入口转 `int`:
+### 4.1 ChatSession
 
 ```go
-// caller 改造:
-cs.Store().SetToolsMode(cs.ChatID, int(mode))
+// internal/chatsession/chatsession.go
+
+type ChatSession struct {
+    ...
+    csStore *chatstore.Store
+}
+
+func (cs *ChatSession) WithPersistence(csFile *chatstore.Store, asFile *registry.AgentSessionFile) *ChatSession
 ```
 
-#### Manager
+ChatSession 保留自己的内存副本（`selectedCwd` / `selectedAgent` / `watchMode` / `thinkMode` / `toolsMode` / `watcherHintEmitted` / `lastInteractionAt` / `createdAt`），setter 的顺序固定：
 
-```diff
- type Manager struct {
-     mu sync.RWMutex
-     sessions map[string]*ChatSession
-     spawner Spawner
--    csFile  *registry.ChatSessionFile
-+    store   *chatstore.Store
-     asFile  *registry.AgentSessionFile  // 不动
-     ...
- }
+1. `ensureStoreBootstrapped()` —— store 里还没有这个 chatID 时先 `Bootstrap`（生产路径由 `Manager.GetOrCreate` 保证已 Bootstrap，这一步是给没显式 Bootstrap 的调用方兜底）。
+2. 调 store 的同名 setter 写盘。
+3. 拿 `cs.mu` 更新内存副本。
 
--func (m *Manager) hydrateFromEntry(...)        // 删,并入 GetOrCreate
--func (m *Manager) RestoreFromRegistry()       // 删
--func persistChatStates(...)                  // 删
+`cs.mu` 在写盘期间**不**持有 —— 落盘发生在锁外，避免把 IO 拖进热路径的临界区。
+
+`ClearSelectedCwd()` 走 `store.SetSelectedCwd(chatID, "")`（空值合法），并 detach 当前主动工作集、清队列。
+
+`LastInteractionAt()` 优先从 store 读；store 没接上时才回落到内存字段。
+
+### 4.2 Manager
+
+```go
+// internal/chatsession/manager.go
+
+type Manager struct {
+    ...
+    csFile *chatstore.Store
+    asFile *registry.AgentSessionFile
+}
+
+func (m *Manager) WithPersistence(csFile *chatstore.Store, asFile *registry.AgentSessionFile) *Manager
 ```
 
-`Manager.GetOrCreate` 走 `store.Bootstrap(chatID, primaryAgent)`,自动处理内存 / disk / 新建三分支。`Manager.Store()` accessor 暴露给 runtime 在 shutdown 时用(实际上不需要 — 每次 SetX 已 sync Upsert,daemon 退出磁盘自然一致)。
+`Manager.GetOrCreate` → `constructChatSession` → `csFile.Bootstrap(chatID, primaryAgent)`（create-or-load），并以 entry 里的 `PrimaryAgent` / `SelectedAgent` 作为 seed。AgentSession 不在这里挂载 —— 那是 `LookupSelectedAgentSession` 的按需职责（见 [`CHATSTORE.md`](../CHATSTORE.md) §7.2）。
 
-#### runtime/shutdown.go
+`Manager.RestoreFromRegistry()` 仍在：它从 store 的 entry 重建内存里的 ChatSession 表。
 
-```diff
--func ShutdownRun(out, ch, mgr, csFile, asFile, ...) error
-+func ShutdownRun(out, ch, mgr, asFile, ...) error
+### 4.3 runtime
 
--func ShutdownRunMulti(out, chs, csFile, asFile, ...) error
-+func ShutdownRunMulti(out, chs, asFile, ...) error
-
--func persistChatStates(mgr, csFile)   // 删
+```go
+// internal/runtime/deps.go
+func defaultOpenChatSessions(cfg *config.Config) (*chatstore.Store, error) {
+    ...
+    return chatstore.New(path)
+}
 ```
 
-#### caller 迁移(grep + sed)
+daemon 启动时打开一次 store，共享给所有 channel 的 Manager。shutdown 路径的 `persistChatStates(mgr, csFile)`（`internal/runtime/shutdown.go`）在退出时把各 chat 的状态回写 store。
 
-| 改前 | 改后 |
+`cmd/nightme list` / `cmd/nightme kill` 直接对同一个 JSON store 操作（`cmd/nightme/list.go` 的 `openV12Stores`）。
+
+---
+
+## 5. 仍存在的死代码
+
+以下符号在代码里，但生产路径没有读者：
+
+| 符号 | 位置 | 说明 |
+|---|---|---|
+| `entry.AgentSessionIDs` | `internal/registry/chat_session_entry.go` | 落盘但生产路径不读 |
+| `entry.SelectedAgentSessionID` | `internal/registry/chat_session_entry.go` | 落盘但生产路径不读；`UnmarshalJSON` 的 `activeAgentSessionId` 兼容分支仍指向它 |
+| `ChatSession.PrimaryAgent()` | `internal/chatsession/chatsession.go` | 无调用方 |
+| `ChatSession.CreatedAt()` | `internal/chatsession/chatsession.go` | 无调用方 |
+| `ChatSession.LastInteractionAt()` | `internal/chatsession/chatsession.go` | 无调用方 |
+| `ChatSession.Entry()` | `internal/chatsession/chatsession.go` | 无调用方 |
+
+`ChatSession.entryLocked()` 组装的 entry 也不写 `AgentSessionIDs` / `SelectedAgentSessionID` —— 那两个字段在磁盘上只可能来自旧文件或外部写入。
+
+---
+
+## 6. 防回归
+
+`internal/chatstore/store_test.go`：
+
+| 测试 | 守住的不变量 |
 |---|---|
-| `cs.SetSelectedCwd(x)` | `cs.Store().SetSelectedCwd(cs.ChatID, x)` |
-| `cs.ClearSelectedCwd()` | `cs.Store().SetSelectedCwd(cs.ChatID, "")` |
-| `cs.SetSelectedAgent(a)` | `cs.Store().SetSelectedAgent(cs.ChatID, a)` |
-| `cs.SetWatchMode(m)` | `cs.Store().SetWatchMode(cs.ChatID, int(m))` |
-| `cs.SetThinkMode(m)` | `cs.Store().SetThinkMode(cs.ChatID, int(m))` |
-| `cs.SetToolsMode(m)` | `cs.Store().SetToolsMode(cs.ChatID, int(m))` |
-| `cs.MarkWatcherHintEmitted()` | `cs.Store().SetWatcherHintEmitted(cs.ChatID, true)` |
-| `cs.PrimaryAgent()` | `cs.Store().Get(cs.ChatID).PrimaryAgent` |
-| `cs.LastInteractionAt()` | `cs.Store().Get(cs.ChatID).LastInteractionAt` |
-| `cs.CreatedAt()` | `cs.Store().Get(cs.ChatID).CreatedAt` |
-| `cs.Entry()` | `cs.Store().Get(cs.ChatID)` |
+| `TestSetter_NoLostUpdate` | 并发 setter 之后，磁盘上的 entry 是某一次完整 setter 的结果，不是 torn / stale |
+| `TestSetter_PersistsLastWriter` | 并发写 A / B，磁盘只能是 A 或 B |
+| `TestSetter_NoChange` | 值没变不写盘 |
+| `TestBootstrap_NewChat` / `_ExistingChat` / `_MissingFromDisk` | Bootstrap 的三条分支 |
+| `TestGet_CopyReturned` / `TestGet_DeepCopyPointerField` | 读返回深拷贝 |
+| `TestConcurrent_DifferentChats` | 跨 chat 并发写不互相破坏 |
+| `TestNew_SkipsUnknownPrefix` / `TestNew_DroppedEntriesSurviveSave` | 未知前缀条目被原样保留 |
+| `TestNew_RejectsLegacyIDKeyedFormat` | key ≠ ChatID 的旧格式被拒 |
 
-副作用编排由 caller 编排,Store 层只负责持久化。
+CI 的 `go test -race ./...` 覆盖 `internal/chatstore/...` 与 `internal/chatsession/...`。
 
 ---
 
-## 3. chat_sessions.json schema 变化
+## 7. 后续
 
-**删除字段**(不再写入):
-
-```diff
- {
-   "id": "cs_...",
-   "chatId": "...",
-   "selectedCwd": "...",
-   "selectedAgent": "...",
-   "primaryAgent": "...",
--  "agentSessionIds": ["as_..."],
--  "selectedAgentSessionId": "as_...",
-   "createdAt": "...",
-   "lastInteractionAt": "...",
-   "watchMode": 0,
-   "thinkMode": 0,
-   "toolsMode": 0,
-   "watcherHintEmitted": false
- }
-```
-
-**向后兼容**:Go JSON unmarshal 默认忽略未知字段。旧文件继续能 unmarshal,只是这俩字段被丢弃。
-
----
-
-## 4. 防回归
-
-### 4.1 回归测试 `TestSetter_NoLostUpdate`
-
-`internal/chatstore/store_test.go`:
-
-```go
-func TestSetter_NoLostUpdate(t *testing.T) {
-    // N 个 goroutine 并发跑 SetXxx,断言 on-disk entry 是某个完整 setter 的结果
-    // (不是 torn,不是 stale)。任何把 setter 改回 release-then-persist 的 PR 都让这个测试 fail
-}
-
-func TestSetter_PersistsLastWriter(t *testing.T) {
-    // 直接复现 bug 场景:100 个 goroutine 并发写 SetSelectedCwd("A") vs "B"
-    // 修完后断言 disk 一定是 "A" 或 "B",不可能是其他值(包括空)
-}
-```
-
-### 4.2 chatstore.SetXxx 的 doc 注释
-
-每个 setter 函数顶部加:
-
-```go
-// SetXxx mutates the entry for chatID and persists it. Holds record.mu.Lock
-// through the Upsert to prevent the lost-update race — release-then-persist
-// (Unlock before Upsert) lets a concurrent setter overwrite the in-memory
-// state while a stale snapshot is still queued for disk, producing an
-// older-value-wins disk state. See F-CHATSTORE-001 §1.3.
-```
-
-### 4.3 CI 跑 `go test -race`
-
-`internal/chatsession/...` 和 `internal/chatstore/...` 都跑 -race,捕到任何同步原语写错。
-
----
-
-## 5. 改动量
-
-| 维度 | 数字 |
-|---|---|
-| 新增包 | 1 (`internal/chatstore`) |
-| 新增公开方法 | 9(setter6 + Bootstrap + Get + List)|
-| 删除公开方法 | `cs.SetSelectedCwd` / `ClearSelectedCwd` / `SetSelectedAgent` / `SetWatchMode` / `SetThinkMode` / `SetToolsMode` / `MarkWatcherHintEmitted` / `PrimaryAgent` / `LastInteractionAt` / `CreatedAt` / `Entry` + `Manager.hydrateFromEntry` / `RestoreFromRegistry` / `persistChatStates` |
-| 删除字段 | `cs.{selectedCwd, selectedAgent, primaryAgent, watchMode, thinkMode, toolsMode, watcherHintEmitted, lastInteractionAt, createdAt, csFile}` + `entry.{AgentSessionIDs, SelectedAgentSessionID}` |
-| caller 改动点 | ~10 处 grep + sed |
-| 测试 | 1 个回归测试 + 1 个并发测试 + Bootstrap 三分支测试 + nop-change 短路测试 |
-
-预计总 diff < 600 行(包含测试)。
-
----
-
-## 6. 后续(本轮不修)
-
-- `agent_sessions.json` 持久化也有类似 race 风险(`AgentSessionFile.Upsert` 同样内部 Lock,但多个 caller 通过不同路径并发写同 AS 的 entry),但 asFile 是另一个边界,本轮不动。
-- `cs.Pool()` 是 in-memory runtime state,不被 `chatstore` 持有,直接读 cs 即可。
-- 如果未来要批量落盘(每 N 秒 flush dirty),再加 chatstore 的 `FlushAll` — 当前 sync 写盘够用,debounce / timer 是 over-engineering。
+- `agent_sessions.json` 的持久化是另一个边界（`internal/registry/agent_session_file.go`），不在这套 Store 契约内。
+- `cs.Pool()` 是进程内的 runtime state，Store 不持有，直接读 cs 即可。
+- 批量落盘（每 N 秒 flush dirty）当前不做：同步写盘够用，debounce / timer 是 over-engineering。

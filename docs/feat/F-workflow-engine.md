@@ -1,67 +1,73 @@
-# nightme Workflow 引擎（wfe 库 + bot subsystem host）
+# nightme Workflow 引擎（wfe 库 + personal agent host）
 
-> **Source**: 新功能（2026-08-18），无历史 F-XX 来源
-> **Depends on**: F-08 (Channel interface), F-09 (Agent abstraction), F-20 (Gateway), F-50 (GitProvider)
-> **Related docs**: [`../WFE.md`](../WFE.md)（用户参考——YAML schema / 触发器 / step 形式）；[`../SPEC.md`](../SPEC.md) §2 数据流
+> **Source**: 无历史 F-XX 来源
+> **Related docs**: [`../WFE.md`](../WFE.md)（用户参考——YAML schema / 触发器 / step 形式 / 运行时架构）；[`../me.md`](../me.md)（personal agent）；[`../SPEC.md`](../SPEC.md) §2 数据流
 
-本文件是 workflow 引擎的**实现设计**。YAML 怎么写、step 长啥样、`${{ }}` 怎么求值——这些都在 `WFE.md`。本文件回答的是：包怎么拆、接口怎么定、状态怎么存、测试怎么写、灰度怎么上。
+本文件是 workflow 引擎的**实现设计**。YAML 怎么写、step 长啥样、`${{ }}` 怎么求值——这些都在 `WFE.md`。本文件回答的是：包怎么拆、计划怎么算、状态怎么存、判断点怎么判、测试怎么写。
 
 ---
 
 ## 1. 设计目标
 
-构建一个 GitHub-Actions-风格的本地工作流引擎，跑在 nightme 自己的 runtime 上。核心约束：
+构建一个 GitHub-Actions-风格的本地工作流引擎，跑在 nightme 自己的 personal agent（`/me`）上。核心约束：
 
-- **不能绕过 Gateway 直接调 agent**。`prompt` 步骤必须走 `bot → gw → ChatSession → AgentSession`。
-- **wfe 是纯库**。无 I/O、无 clock、无 secrets——所有外部能力由 host（bot）注入。
-- **bot 是 host**。加载 workflow、装 trigger、驱动 Tick 循环、注入 Runtime、持久化状态。
-- **可扩展**。`run` / `prompt` 是默认必带；`use` 是 bot 注入 action 的扩展点。
+- **wfe 是纯库**。无 I/O、无 clock、无 secrets——所有外部能力由 host（`internal/me`）注入。
+- **host 是 personal agent**。加载 workflow、持有 run 状态、驱动循环、注入 shell / action 能力、渲染 run 的卡片。
+- **两层推进**。快路径：plan 能决定 → step 照跑，不问模型。判断点：plan 决定不了 → agent 决定。
+- **可扩展**。`message` / `shell` 是默认必带；`use` 是 host 注入 action 的扩展点；`wait` 让 run 等一段时间。
 
 ---
 
 ## 2. 包布局
 
 ```
-internal/
-├── wfe/                              # 纯库（无 I/O）
-│   ├── types.go                      # Workflow / Step / Event / RunState / Spec 类型
-│   ├── load.go                       # YAML 解析 + schema 校验
-│   ├── match.go                      # Event -> *Workflow 匹配（纯函数）
-│   ├── tick.go                       # 状态机：Tick(state, runtime) -> (state', error)
-│   ├── expr.go                       # ${{ }} 求值
-│   ├── runtime.go                    # Runtime interface（4 方法 = 4 channel 入口）
-│   ├── errors.go                     # 错误类型（ValidationError / UnknownActionError / …）
-│   └── internal_test.go              # 纯单元测试
-│
-└── channel/bot/                      # Channel 实现（跟 feishu/echo 平级，注册到 gateway）
-    ├── bot.go                        # Channel interface 实现（Name/Start/Stop/Incoming/Send）
-    ├── workflow.go                   # fireWorkflow + driveRun（per-run 编排）
-    ├── runtime.go                    # botRuntime（implements wfe.Runtime, channel router）
-    ├── trigger.go                    # TriggerManager（cron + git events, 3 阶段管线）
-    ├── ws_map.go                     # WorkspaceRepoMap（repo URL → workspace path）
-    ├── action.go                     # ActionRegistry + Action interface
-    ├── action_builtin.go             # 内置 actions（notify / email / github_* / slack / webhook）
-    ├── action_shell.go               # ShellAction（user-script channel）
-    ├── state.go                      # StateStore（state dir 持久化）
-    └── *                              # 集成测试
+pkg/wfe/                          # 纯库（无 I/O）
+├── types.go                      # Workflow / Job / Step / Trigger / Event / RunState / Outcome
+├── load.go                       # bundle 发现 + YAML 解析 + 校验
+├── validate.go                   # schema 校验 → []Diagnostic
+├── match.go                      # Event -> *Workflow 匹配（纯函数）
+├── engine.go                     # 计划引擎：Decide / ReadySet / EndRound
+├── expr.go                       # ${{ }} 求值
+├── policy.go                     # Policy：一次 run 能做多少事的边界
+├── runtime.go                    # 外部能力的词汇（ShellSpec / ActionSpec / ExprCtx）
+├── errors.go                     # 错误哨兵
+└── diagnostics.go                # Diagnostic / ValidationError
+
+internal/me/                      # host：personal agent
+├── agent.go                      # Service：目录 / action registry / run 表 + 宿主接口
+├── catalog.go                    # workflows 目录的视图（按文件指纹缓存）
+├── agent_run.go                  # run 的状态、事件与工具调用
+├── agent_loop.go                 # 驱动循环
+├── agent_decide.go               # System 1：决策模型
+├── agent_system2.go              # System 2：chat 模型
+├── agent_tools.go                # 工具（resume / next / instruct / …）
+├── agent_brain.go                # agent 工具：owner 的思考
+├── agent_prompt.go               # system prompt
+├── agent_report.go               # 情况报告
+├── directive.go                  # 判断点的答复
+├── step.go                       # 四种 step 的执行
+├── shell.go                      # ExecShell：RunShell
+├── action.go                     # ActionRegistry + 内置 action + 用户脚本
+├── session.go                    # run 的会话
+├── overview.go / summary.go / card.go / answer.go
+└── inbound.go / commands.go / outcome.go / ratelimit.go / directive.go
+
+cmd/nightme/workflow.go           # nightme workflow list / show / run / validate
+internal/command/wf/              # /wf install / /wf uninstall
+internal/llm/                     # 两种模型能力：Provider（chat）/ Decider（决策）
 ```
 
 依赖方向严格单向：
 
 ```
-pkg/wfe ── (no deps on bot)
-▲
-│ uses Runtime interface (4 methods, all channel entries)
-│
-internal/channel/bot ──► internal/gateway (bot 注册到 AttachChannels)
-                       └► internal/gitprovider (借, trigger events)
-                       └► internal/registry (state dir)
-                       └► internal/channels (借, notify action)
+pkg/wfe ◄── internal/me ◄── internal/llm
+                      ◄── internal/channel（run 说话的通道）
+                      ◄── internal/gateway/observe（daemon 回给 run 的旁路）
 ```
 
-**关键**：bot **不依赖** `internal/chatsession` 和 `internal/agentsession`。这些由 nightme gateway 内部使用；bot 走 channel 协议，gateway 负责把这些都搞定。
+**关键**：`internal/me` **不依赖** `internal/chatsession` 和 `internal/agentsession`。run 说的每句话都是那个 chat 里的一条真消息——经 channel 协议进去，再经同一个 channel 回来。回执、表情和交互式提问因此像锚在一条真人的消息上一样锚在 run 的消息上。
 
-wfe 不 import bot 的任何东西。bot import wfe + nightme 的 channel/gateway 体系。这是单测无敌干净的关键。
+wfe 不 import nightme 的任何东西。`internal/me` import wfe + nightme 的 channel / llm 体系。这是 wfe 单测干净的原因。
 
 ---
 
@@ -72,282 +78,137 @@ wfe 不 import bot 的任何东西。bot import wfe + nightme 的 channel/gatewa
 ```go
 // Workflow 是解析+校验后的工作流定义。
 type Workflow struct {
-    Name       string         `yaml:"name" validate:"required"`
-    Workspaces []string       `yaml:"workspaces" validate:"required,min=1"`
-    Worker     int            `yaml:"worker" default:"1"`
-    On         Trigger        `yaml:"on" validate:"required"`
-    Jobs       map[string]Job `yaml:"jobs" validate:"required,min=1"`
-
-    // 解析期填充，运行期不读
-    _order     []string       // jobs 解析序
+    Title      string         `yaml:"title" json:"title"`
+    Name       string         `yaml:"-" json:"name"`
+    Args       []Arg          `yaml:"args" json:"args,omitempty"`
+    Instruct   bool           `yaml:"instruct" json:"instruct"`
+    Workspaces []string       `yaml:"workspaces" json:"workspaces,omitempty"`
+    On         Trigger        `yaml:"on" json:"on"`
+    Jobs       map[string]Job `yaml:"jobs" json:"jobs"`
 }
 
 type Job struct {
-    Needs  []string `yaml:"needs"`
-    If     string   `yaml:"if"`
-    Steps  []Step   `yaml:"steps" validate:"required,min=1"`
+    Needs      []string `yaml:"needs" json:"needs,omitempty"`
+    If         string   `yaml:"if" json:"if,omitempty"`
+    Iterations *int     `yaml:"iterations,omitempty" json:"iterations,omitempty"`
+    Sleep      string   `yaml:"sleep,omitempty" json:"sleep,omitempty"`
+    Steps      []Step   `yaml:"steps" json:"steps"`
 }
 
 type Step struct {
-    Name             string            `yaml:"name"`
-    ID               string            `yaml:"id"`
-    If               string            `yaml:"if"`
-    Env              map[string]string `yaml:"env"`
-    ContinueOnError  bool              `yaml:"continue-on-error"`
+    ID              string            `yaml:"id,omitempty" json:"id,omitempty"`
+    If              string            `yaml:"if,omitempty" json:"if,omitempty"`
+    Env             map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
+    ContinueOnError bool              `yaml:"continue-on-error,omitempty" json:"continue-on-error,omitempty"`
+    Note            string            `yaml:"note,omitempty" json:"note,omitempty"`
+    Final           bool              `yaml:"final,omitempty" json:"final,omitempty"`
 
-    // 互斥三选一
-    Run     string            `yaml:"run"`
-    Prompt  string            `yaml:"prompt"`
-    Use     string            `yaml:"use"`
-    With    map[string]any    `yaml:"with"`
-    Agent   string            `yaml:"agent"`        // 仅 prompt
-    Shell   string            `yaml:"shell"`        // 仅 run
+    // 四选一
+    Message string         `yaml:"message,omitempty" json:"message,omitempty"`
+    Shell   string         `yaml:"shell,omitempty" json:"shell,omitempty"`
+    Use     string         `yaml:"use,omitempty" json:"use,omitempty"`
+    With    map[string]any `yaml:"with,omitempty" json:"with,omitempty"`
+    Wait    string         `yaml:"wait,omitempty" json:"wait,omitempty"`
+
+    Agents []AgentChain `yaml:"agents,omitempty" json:"agents,omitempty"`
 }
-
-type Trigger struct {
-    Schedule    []ScheduleEntry  `yaml:"schedule"`
-    PullRequest *PRTrigger       `yaml:"pull_request"`
-    Branch      *BranchTrigger   `yaml:"branch"`
-    Issue       *EventFilter     `yaml:"issue"`
-    Mention     *MentionTrigger  `yaml:"mention"`
-}
-
-type PRTrigger struct {
-    Branches []string `yaml:"branches"`
-    Events   []string `yaml:"events"`
-}
-
-// ... 其余 Trigger 字段见 WFE.md §3
-
-type Event struct {
-    Kind string         // "schedule" | "pull_request" | "branch" | "issue" | "mention"
-    Time time.Time      // 注入自 Runtime.Now()
-    Data map[string]any // 各 trigger 原始 payload
-}
-
-// RunState 是 Tick 的输入+输出。Bot 持有并持久化。
-type RunState struct {
-    RunID         string                       `json:"run_id"`
-    WorkflowName  string                       `json:"workflow"`
-    Workspace     string                       `json:"workspace"`     // 当前 run 的 workspace path（从 wf.Workspaces 挑出）
-    Status        Status                       `json:"status"`        // running | succeeded | failed | cancelled
-    CurrentJob    string                       `json:"current_job"`
-    CurrentStep   string                       `json:"current_step"`
-    Env           map[string]string            `json:"env"`           // 含 bot 注入的 secrets
-    StepOutputs   map[string]map[string]string `json:"step_outputs"`  // step_id -> outputs
-    Event         Event                        `json:"event"`
-    ChatID        string                       `json:"chat_id"`
-    StartedAt     time.Time                    `json:"started_at"`
-    UpdatedAt     time.Time                    `json:"updated_at"`
-    Attempts      map[string]int               `json:"attempts"`      // step_id -> attempt count
-}
-
-type Status string
-
-const (
-    StatusRunning   Status = "running"
-    StatusSucceeded Status = "succeeded"
-    StatusFailed    Status = "failed"
-    StatusCancelled Status = "cancelled"
-)
 ```
+
+`Title` 说这个 workflow 是做什么的；`Name` 是它的身份——bundle 在 workflows 目录下的相对路径（`nightme/coder/workflow.yml` 就是 workflow `nightme/coder`），由 loader 填，文件里不写。旧文件里的 `goal` 键在反序列化时迁进 `Title`（`Workflow.UnmarshalJSON`）。
+
+`Step` 有**四种** kind：`message` / `shell` / `use` / `wait`。`Step.Kind()`（`types.go`）按 Message → Shell → Use → Wait 的顺序判定，四种都没写就是 `StepKindNone`。
+
+`Job.Iterations` 是这个 job 跑几轮：缺省 1，0 表示一直跑到 run 结束，N 就是 N 轮。`Job.Sleep` 是两轮之间的间隔。`Step.Final` 标记收尾 step——它在这一轮怎么结束都会跑。
+
+`RunState` 是 run 的进度：
+
+```go
+type RunState struct {
+    RunID        string                `json:"run_id"`
+    WorkflowName string                `json:"workflow"`
+    Workspace    string                `json:"workspace"`
+    Status       Status                `json:"status"`
+    Env          map[string]string     `json:"env,omitempty"`
+    Rounds       map[string]int        `json:"rounds,omitempty"`
+    EndedRounds  map[string]EndedRound `json:"ended_rounds,omitempty"`
+    Steps        []StepState           `json:"steps"`
+    StartedAt    time.Time             `json:"started_at"`
+    UpdatedAt    time.Time             `json:"updated_at"`
+}
+```
+
+`StepState` 记每一个跑过的 step：它的 `ID`、所属的 `Job`、第几 `Round`、`Outcome`，以及两个标志——`Skipped`（`if:` 不成立）、`Pending`（开始了但还没落定）。
+
+`Outcome` 是 step 的裁决：`Status` 是 `ok` / `noop` / `incomplete` / `failed` / `cancelled` / `timeout` / `unknown`，`Summary` 是一句话，`Data` 是事实。`Data["error"]`（`OutcomeKeyError`）是错误描述——**plan 靠它区分"正常结果"和"异常"**，状态本身不说：一个因为"有活儿要干"才跑起来的命令可能什么都没做就报了 `failed`。
 
 ### 3.2 Loader（`load.go`）
 
 ```go
-func LoadDir(dir string) ([]*Workflow, error) {
-    files, err := filepath.Glob(filepath.Join(dir, "*.yaml"))
-    if err != nil { return nil, err }
-    
-    var out []*Workflow
-    seen := map[string]string{} // name -> 文件名，用于重名检测
-    for _, f := range files {
-        wf, err := Load(f)
-        if err != nil { return nil, fmt.Errorf("%s: %w", f, err) }
-        if prev, ok := seen[wf.Name]; ok {
-            return nil, fmt.Errorf("duplicate workflow name %q in %s and %s", wf.Name, prev, f)
-        }
-        seen[wf.Name] = f
-        out = append(out, wf)
-    }
-    return out, nil
-}
-
-func Load(path string) (*Workflow, error) {
-    raw, err := os.ReadFile(path)
-    if err != nil { return nil, err }
-    return Parse(raw)
-}
-
-func Parse(raw []byte) (*Workflow, error) {
-    var wf Workflow
-    if err := yaml.Unmarshal(raw, &wf); err != nil { return nil, err }
-    if err := validate(&wf); err != nil { return nil, err }
-    wf._order = topoSort(wf.Jobs)  // jobs 解析序（needs 反向拓扑）
-    return &wf, nil
-}
+func LoadDir(dir string) ([]*Workflow, []Failure)
+func LoadFile(root, path string) (*Workflow, error)
+func Parse(raw []byte) (*Workflow, error)
+func Bind(wf *Workflow, args map[string]string) (*Workflow, error)
+func WorkflowPaths(dir string) ([]string, error)
+func WorkflowName(root, path string) string
 ```
 
-`validate()` 用 `go-playground/validator`（nightme 已用）做：
-- 必填字段
-- `step.run` / `step.prompt` / `step.use` 三选一（不能同时多个）
-- `step.agent` 仅在 `prompt` 下出现
-- `step.shell` 仅在 `run` 下出现
-- `use` 名字以字母开头、只含 `[a-z0-9_-]`
-- `cron` 5 字段合法
-- `event` 名字在白名单内
+一个 workflow 是一个 **bundle**：目录下一个 `workflow.yml`（`workflow.yaml` 也认）。bundle 在目录下的路径就是它的名字。`LoadDir` 返回加载成功的 workflow 和每个坏 bundle 的 `Failure`（`Name` / `Path` / `Err`）——一个坏文件不会把旁边的文件一起拖下去。两个文件认领同一个名字时，两个都不在这个名字下挂，loader 报一条 `duplicate workflow name` 的 `Failure`。
 
-### 3.3 Matcher（`match.go`）
+workflows 目录下的 `actions` 和 `runs` 是保留目录，loader 不往里走。`actions` 放用户的 action 脚本。
 
-纯函数：给定 `Event` 和 `*Workflow`，决定是否触发。
+`Bind` 把 run 的实参绑到 workflow 上：没有默认值的 `args` 是必填的。
+
+### 3.3 校验（`validate.go`）
 
 ```go
-func Match(wf *Workflow, ev Event) bool {
-    switch ev.Kind {
-    case "schedule":
-        return wf.On.Schedule != nil  // cron 已经在 trigger 阶段评估
-    case "pull_request":
-        t := wf.On.PullRequest
-        if t == nil { return false }
-        return matchList(t.Branches, ev.Data["branch"]) &&
-               matchList(t.Events,   ev.Data["action"])
-    case "branch":
-        t := wf.On.Branch
-        if t == nil { return false }
-        return matchGlobs(t.Patterns, ev.Data["name"]) &&
-               matchList(t.Events,   ev.Data["action"])
-    case "issue":
-        if wf.On.Issue == nil { return false }
-        return matchList(wf.On.Issue.Events, ev.Data["action"])
-    case "mention":
-        if wf.On.Mention == nil { return false }
-        cmds := wf.On.Mention.Commands  // []string
-        if len(cmds) == 0 { return true }   // 无白名单 = 任意
-        return slices.Contains(cmds, ev.Data["command"])
-    }
-    return false
-}
+func Validate(raw []byte) []Diagnostic
+func ValidateFile(path string) []Diagnostic
+func ValidateDir(dir string) []Diagnostic
 ```
 
-### 3.4 Tick 状态机（`tick.go`）
+`Diagnostic` 带行号、列号和一句话说明。校验的内容：必填字段、step 的 kind 互斥、`if:` 表达式能解析、`args` 的形状、`agents` chain 的形状、trigger 的形状，以及**文件里出现但 schema 不认的键**（`checkRootKeys` / `checkJobKeys` / `checkAgentChainKeys` / `checkTriggerKeys`）。
 
-**这是 wfe 唯一会改变 state 的地方。** 每步：state in → state out。
+`Parse` / `LoadFile` / `LoadDir` 返回的是 `*ValidationError`——它包着 `ErrValidationFailed`，并带着所有找到的问题。
+
+### 3.4 Matcher（`match.go`）
+
+纯函数：给定 `Event` 和 `*Workflow`，决定它是否该被这个 event 点着。
 
 ```go
-type TickResult int
-
-const (
-    TickAdvanced TickResult = iota
-    TickDone
-    TickWaiting  // prompt 步骤的 SendPrompt 在异步等回复（v0 不开，纯同步）
-)
-
-func Tick(ctx context.Context, state *RunState, wf *Workflow, rt Runtime) (*RunState, error) {
-    state.UpdatedAt = rt.Now()
-    
-    // 1. 已失败 / 已完成 → no-op
-    if state.Status != StatusRunning {
-        return state, nil
-    }
-    
-    // 2. 找下一个该跑的 step
-    step, jobName, ok := nextStep(wf, state)
-    if !ok {
-        state.Status = StatusSucceeded
-        return state, nil
-    }
-    
-    state.CurrentJob = jobName
-    
-    // 3. 表达式求值上下文
-    ec := ExprCtx{
-        Event: state.Event.Data,
-        Steps: state.StepOutputs,
-        Needs: collectNeedsOutputs(wf, state),
-        Env:   state.Env,
-        Now:   rt.Now(),
-    }
-    
-    // 4. if 条件
-    if step.If != "" {
-        ok, err := EvalCond(step.If, ec, rt)
-        if err != nil { return state, wrapStepErr(step.ID, err) }
-        if !ok {
-            state.Advance(step.ID)  // 跳过
-            return state, nil
-        }
-    }
-    
-    state.CurrentStep = step.ID
-    
-    // 5. step env 覆盖
-    stepEnv := mergeEnv(state.Env, step.Env)
-    
-    // 6. 分发
-    var (
-        outputs map[string]string
-        err     error
-    )
-    switch {
-    case step.Run != "":
-        cmd := EvalString(step.Run, ec, rt)
-        var r *ShellResult
-        r, err = rt.RunShell(ctx, ShellSpec{
-            Cwd:     state.Env["WORKSPACE_CWD"],
-            Command: cmd,
-            Env:     stepEnv,
-            Shell:   step.Shell,
-        })
-        if r != nil { outputs = r.Outputs }
-        
-    case step.Prompt != "":
-        prompt := EvalString(step.Prompt, ec, rt)
-        var r *Reply
-        r, err = rt.SendPrompt(ctx, PromptSpec{
-            ChatID:  state.ChatID,
-            Agent:   pickAgent(step.Agent, state.Env),
-            Prompt:  prompt,
-            Env:     stepEnv,
-        })
-        if r != nil { outputs = r.Outputs }
-        
-    case step.Use != "":
-        with := EvalMap(step.With, ec, rt)
-        var r *ActionResult
-        r, err = rt.RunAction(ctx, ActionSpec{
-            Name: step.Use,
-            With: with,
-            Env:  stepEnv,
-        })
-        if r != nil { outputs = stringifyMap(r.Outputs) }
-    }
-    
-    // 7. 处理结果
-    if err != nil {
-        if step.ContinueOnError {
-            // 记录错误为输出，不 fail
-            if outputs == nil { outputs = map[string]string{} }
-            outputs["error"] = err.Error()
-        } else {
-            state.Status = StatusFailed
-            state.StepOutputs[step.ID] = map[string]string{"error": err.Error()}
-            return state, wrapStepErr(step.ID, err)
-        }
-    }
-    
-    if outputs != nil {
-        if state.StepOutputs == nil { state.StepOutputs = map[string]map[string]string{} }
-        state.StepOutputs[step.ID] = outputs
-    }
-    state.Attempts[step.ID]++
-    
-    return state, nil
-}
+func Match(wf *Workflow, ev Event) bool
 ```
 
-`nextStep` 实现：按 job 顺序、同 job 内按 step 顺序，忽略 `if: false` 已跳过的、忽略 `needs` 未满足的。
+按 `ev.Kind` 分派到 `matchSchedule` / `matchPR` / `matchBranch` / `matchIssue` / `matchMention`。workspace 的过滤不归它管——那是触发管线的事。
 
-### 3.5 表达式（`expr.go`）
+### 3.5 计划引擎（`engine.go`）
+
+**这是 wfe 唯一会改变 state 的地方。**
+
+```go
+func Decide(state *RunState, wf *Workflow) (Decision, error)
+func ReadySet(state *RunState, wf *Workflow) ([]Step, error)
+func EndRound(state *RunState, wf *Workflow, job string) error
+func RecordStep(state *RunState, job string, step Step, out Outcome, skipped bool)
+func RecordPending(state *RunState, job string, step Step)
+func IsPending(state *RunState, stepID string) bool
+```
+
+`Decide` 算出 run 下一步做什么，结论有两种：
+
+| `Decision.Kind` | 什么时候 | 之后 |
+|---|---|---|
+| `DecisionRun` | ready set 只有一个 step，且上一个 outcome 是正常结果 | step 照跑（`Decision.Step` / `Decision.Job`） |
+| `DecisionJudgment` | ready set 为空 / ready set 分叉 / 上一个 outcome 抛了异常 / step 还在跑 | agent 决定（`Decision.Reason` / `Decision.Subject`） |
+
+还没跑过任何东西的 run 算"正常结果"，所以第一个 step 走快路径。
+
+`Decision` 上还有三个标志：`Exhausted`（plan 已经没有东西可跑）、`Over`（workflow 结束——重复 job 的轮数用尽且最后一个 step 没坏，run 自己结束，不问模型）、`Gap`（上一轮结束到下一轮开始的间隔，也就是 `sleep:`）。
+
+`ReadySet` 是 run 下一步可以跑的 step：job 的 `needs` 都满足、`if:` 成立、且还没跑过。同一个 job 里只有第一个这样的 step算数——job 的 step 是顺序的。`ReadySet` 不推进轮次，也不记录被跳过的 step；`Decide` 才做这两件事。
+
+`EndRound` 是提前结束一轮的**唯一**入口：这一轮没跑的 step 记为 skipped（`final:` 的 step 除外——它顶替它们跑），并把这一轮标记为已结束。plan 接着走那个 final step，没有 final step 就走下一轮。还在跑的 step 会让 `EndRound` 报错——一个没落定的命令下面不能收摊。
+
+### 3.6 表达式（`expr.go`）
 
 ```go
 type ExprCtx struct {
@@ -355,877 +216,300 @@ type ExprCtx struct {
     Steps map[string]map[string]string
     Needs map[string]map[string]string
     Env   map[string]string
+    Args  map[string]string
     Now   time.Time
 }
 
-type Runtime interface {
-    // 表达式用到的两样外部能力
-    Secret(ctx, key string) (string, error)  // 实际从 Env 读，不做 secret 区分
-    Now() time.Time
-}
-
-func EvalString(s string, ec ExprCtx, rt Runtime) string { ... }
-func EvalMap(m map[string]any, ec ExprCtx, rt Runtime) map[string]any { ... }  // 递归
-func EvalCond(s string, ec ExprCtx, rt Runtime) (bool, error) { ... }
+func EvalString(s string, ec ExprCtx) string
+func EvalMap(m map[string]any, ec ExprCtx) map[string]any
+func EvalCond(cond string, ec ExprCtx) (bool, error)
 ```
 
-实现用 `text/template`（标准库），自定义 func：
+支持的写法：
 
-| Func | 返回 |
+| 写法 | 取值 |
 |------|------|
-| `event.X` | `ec.Event["X"]` |
-| `steps.foo.outputs.bar` | `ec.Steps["foo"]["bar"]` |
-| `needs.review.outputs.bar` | `ec.Needs["review"]["bar"]` |
-| `env.GH_TOKEN` | `ec.Env["GH_TOKEN"]`（含 bot 注入的 secrets）|
-| `success()` | 当前 job 的所有 needs 都成功 |
-| `failure()` | 至少一个 need 失败 |
-| `always()` | true |
+| `event.X` | `ec.Event["X"]`（支持嵌套） |
+| `steps.ID.K` / `steps.ID.outputs.K` | `ec.Steps["ID"]["K"]`（`outputs` 段可省） |
+| `needs.JOB.K` | `ec.Needs["JOB"]["K"]` |
+| `env.X` | `ec.Env["X"]` |
+| `args.X` | `ec.Args["X"]` |
+| `success()` / `always()` | `true` |
+| `failure()` / `cancelled()` | `false` |
 
-wfe **不做 secret 区分**——`${{ env.GH_TOKEN }}` 和 `${{ env.WORKDIR }}` 走完全一样的 lookup。Secret 的 redaction 在 bot 的 logger 层做。
+`$` 是分隔符的一部分（跟 GitHub Actions 一样）。认不出来的标识符求值为空串。
 
-### 3.6 Runtime interface（`runtime.go`）—— resource channels
+`EvalCond` 把求值结果当布尔读：空串、`false`、`0` 是假，其余是真；条件为空串时恒为真。
+
+wfe **不做 secret 区分**——`${{ env.GH_TOKEN }}` 和 `${{ env.WORKDIR }}` 走完全一样的 lookup。
+
+### 3.7 外部能力的词汇（`runtime.go`）
 
 ```go
-package wfe
-
-// Runtime 是 wfe 看外部世界的"channel 集合"。
-// 每个方法是 bot 到一个具体资源的 channel：
-//   RunShell   → shell channel   → os/exec
-//   SendPrompt → nightme channel → bot.Incoming() (gateway does the rest)
-//   RunAction  → action channels → ActionRegistry (按 name 解析)
-//   Now        → clock           → time.Now (非 channel，仅解 clock 依赖)
-type Runtime interface {
-    RunShell(ctx context.Context, spec ShellSpec) (*ShellResult, error)
-    SendPrompt(ctx context.Context, spec PromptSpec) (*Reply, error)
-    RunAction(ctx context.Context, spec ActionSpec) (*ActionResult, error)
-    Now() time.Time
-}
-
-type ShellSpec struct {
-    Cwd     string
-    Command string
-    Env     map[string]string
-    Shell   string            // "bash" / "sh" / "" (host default)
-}
-
-type PromptSpec struct {
-    ChatID string
-    Agent  string
-    Prompt string
-    Env    map[string]string
-}
-
-type ActionSpec struct {
-    Name string
-    With map[string]any
-    Env  map[string]string
-}
-
-type ShellResult struct {
-    ExitCode int
-    Stdout   string
-    Stderr   string
-    Outputs  map[string]string  // 当前 v0：只支持从 stdout 解析 `key=value` 行
-}
-
-type Reply struct {
-    Text    string
-    Outputs map[string]string
-}
-
-type ActionResult struct {
-    Outputs map[string]any
-}
+type ShellSpec struct { Cwd, Command string; Env map[string]string; Shell string }
+type ShellResult struct { ExitCode int; Stdout, Stderr string; Outputs map[string]string }
+type ActionSpec struct { Name string; With map[string]any; Env map[string]string }
+type ActionResult struct { Outputs map[string]any }
 ```
 
-wfe 不知道这些 Spec 的实现——可能是 os/exec，可能是 nightme client，可能啥都没有（mock 测试）。这就是单测无敌干净的关键。
+wfe 不知道这些 Spec 的实现——可能是 os/exec，可能是 nightme client，可能是 mock。纯库单测就是这么干净的原因。
 
-**为什么 nightme 是一条 channel 而不是 wfe 内部事**：nightme 只是 bot 用来执行 LLM 任务的一种资源。bot 还用 shell、github、slack 等其他资源。wfe 把这些一视同仁——都是通过 Runtime interface 注入的 channel。nightme 不比其它 channel 特殊，只是最重（跨进程、跑 LLM）。
+### 3.8 Policy（`policy.go`）
+
+```go
+func NewPolicy(wf *Workflow, history []ActionRecord) *Policy
+```
+
+Policy 是"一次 run 能做多少事"的边界，是 workflow 和已发生的动作的纯函数：
+
+| 方法 | 报什么 |
+|---|---|
+| `CheckRun(command)` | 这个命令现在能不能跑、算在哪个 step 上 |
+| `CheckStep(index)` | 这个 step 现在能不能动作（当前轮次的预算） |
+| `CheckInstruct()` | 允不允许自由文本的指令 |
+| `CheckFinish(status)` | 允不允许结束 run |
+| `Remaining()` | 每个 step 还剩几次机会 |
+| `Render()` | workflow 的紧凑文本块 |
+| `StepCommands()` | policy 现在接受的 step 消息 |
+
+预算按轮次计：step 自己的执行、agent 决定跳过它、发给它的 nightme 命令和指令、以及没产出工具调用的 chat 模型回合，都算在这个 step 上。每一轮重新开始算。
 
 ---
 
-## 4. bot channel（`internal/channel/bot/`）
+## 4. host（`internal/me/`）
 
-> **🔒 Design invariant (locked)**: bot does **not** import `internal/chatsession`, `internal/agentsession`, `internal/gateway` (as a caller), or any other nightme internal package. bot's **only** nightme-facing surface is `channel.Channel` — specifically, pushing messages into `bot.Incoming()` and receiving them via `bot.Send()`. `/gtw fix`, `/cwd`, `/use agent` are all invoked by sending the corresponding slash-command messages; bot never calls them as Go functions.
->
-> **Outgoing side-effects** (`notify`, `email`, `github_*`, `webhook`) are bot's **own** resource channels — they call external APIs directly. The constraint only covers bot → nightme runtime; bot → external is free.
-
-**关键定位**：`bot` **实现 `channel.Channel` interface**，跟 `feishu` / `echo` 平级。bot 注册到 `gateway.AttachChannels`，通过完整的 channel 协议（Incoming → gateway → ChatSession → agent → reply → Emitter → Send）与 nightme 交互。bot **不直接接触** `chatsession.Manager` 或 `ChatSession`——这些都通过 channel 协议间接使用。
-
-| nightme 子系统 | 类型 | 跟 gw 的关系 |
-|---|---|---|
-| `feishu` | `Channel` 实现 | gw 泵 Incoming → dispatch chain → 真人 feishu 用户 |
-| `echo` | `Channel` 实现（test）| 同上 → 测试驱动 |
-| `bot` | **`Channel` 实现** | 同上 → **workflow YAML 触发器** |
-| `/gtw` | command subsystem | 持 `chatsession.Manager` 引用（`/gtw` 是 nightme 的内部 client，**跟 bot 不是一类**）|
-
-**bot 跟 feishu / echo 走完全一样的协议**——gateway 不知道 feishu 和 bot 的区别，只知道"又有一个 channel 发消息过来了"。
-
-### 4.1 Bot implements channel.Channel（`bot.go`）
+### 4.1 Service（`agent.go`）
 
 ```go
-// Bot is a channel.Channel implementation. It feeds workflow
-// trigger events into its own Incoming(); the gateway's
-// dispatchLoop reads them and routes through inbound.Dispatch.
-// Agent replies come back through bot.Send (called by the
-// gateway's outbound.Emitter).
-type Bot struct {
-    workflows []*wfe.Workflow
-    triggers  *TriggerManager        // cron + git events, all internal
-    actions   *ActionRegistry
-    stateStore *StateStore
+type Service struct {
+    cfg    Config
+    logger *slog.Logger
 
-    // per-run state, indexed by chatID for reply routing
-    runsByChatID map[string]*botRun
-
-    // channel protocol (we ARE a channel)
-    incoming chan channel.Message    // bot pushes synthesized msgs here
-    log      *slog.Logger
-
-    // borrowed dependencies
-    gitProvider GitProvider            // 4 个 git 触发器
-    channels    *channel.Registry      // for notify action
-}
-
-// Compile-time check: Bot satisfies channel.Channel
-var _ channel.Channel = (*Bot)(nil)
-
-// --- channel.Channel interface ---
-
-func (b *Bot) Name() string { return "bot" }
-
-func (b *Bot) Start(ctx context.Context) error {
-    // 1. load workflows
-    wfs, err := wfe.LoadDir(b.cfg.WorkflowsDir)
-    if err != nil { return err }
-    b.workflows = wfs
-
-    // 2. build workspace → repo map (for trigger filtering)
-    b.wsMap = NewWorkspaceRepoMap()
-    if err := b.wsMap.Build(wfs); err != nil { return err }
-
-    // 3. register action channels
-    b.actions.Register(builtin.NewNotify(b.channels))
-    b.actions.Register(builtin.NewEmail(b.smtp))
-    b.actions.Register(builtin.NewGitHub(b.gitProvider))
-    // ... etc
-    if err := b.actions.ScanUserScripts(filepath.Join(b.cfg.WorkflowsDir, "actions")); err != nil {
-        return err
-    }
-
-    // 4. start trigger manager
-    return b.triggers.Start(ctx)
-}
-
-func (b *Bot) Stop(ctx context.Context) error {
-    return b.triggers.Stop(ctx)
-}
-
-// Incoming returns the channel from which the gateway's pumpInbound
-// reads. bot pushes synthesized messages (workflow prompts, /cwd
-// setups, /use agent calls, etc.) here. gateway treats them like
-// any other channel's messages.
-func (b *Bot) Incoming() <-chan channel.Message {
-    return b.incoming
-}
-
-// Send is called by the gateway's outbound.Emitter when an agent
-// reply is ready. bot looks up the botRun that owns chatID and
-// delivers the reply to that run's reply channel.
-func (b *Bot) Send(ctx context.Context, msg messages.OutboundMessage) error {
-    r, ok := b.runsByChatID[msg.ChatID]
-    if !ok {
-        // Stale reply (run already finished). Drop.
-        return nil
-    }
-    select {
-    case r.reply <- msg.Text:
-    default:
-        // reply channel full; drop and log
-        b.log.Warnf("bot: reply channel full for chatID=%s", msg.ChatID)
-    }
-    return nil
+    catalog *Catalog
+    mu      sync.Mutex
+    runs    map[string]*run
+    active  map[string]*run
+    started bool
+    actions *ActionRegistry
+    wg      sync.WaitGroup
 }
 ```
 
-### 4.2 Per-run state（`workflow.go`）
+`Service` 拥有 workflow 目录、action registry 和所有 run。**一个 chat 同时只有一个 run**：起 run 的那个 chat 就是 run 干活的 chat，也是 run 汇报的那个 chat。
+
+宿主能力由 daemon 注入（`Config`）：`Operator`（在 chat 里说话）、`Shell`（跑 shell 命令）、`Git`（读仓库事实）、`Cwd`（chat 当前的工作目录）、`AgentOpener`（owner 的思考会话）、`AgentSwitcher`（临时换 agent）、`Provider`（chat 模型）、`Decider`（决策模型）。
+
+`Start` 刷新 workflow 目录、注册内置 action、扫描用户脚本；`Shutdown` 停掉每个 run 并等它们结束。
+
+### 4.2 Catalog（`catalog.go`）
+
+目录是**用到时才读**的：改过的文件在下一次 `/me start` 时生效，中间没有 watcher。每个文件按指纹（大小 + 修改时间）记住，只重新解析变了的东西。`Lookup(name)` 给出 workflow，`Failures()` 给出每个用不了的名字的原因。
+
+### 4.3 run 的状态（`agent_run.go`）
+
+run 持有 `wfe.RunState`（引擎的账本）、动作历史（`[]wfe.ActionRecord`）、当前的 step、模型会话、以及它发出去的消息的 id。所有对 `RunState` 的写都经引擎——agent 自己不写状态。
+
+### 4.4 驱动循环（`agent_loop.go`）
 
 ```go
-// botRun is the per-workflow-run state. Lives in bot.runsByChatID
-// for the lifetime of one run.
-type botRun struct {
-    runID    string
-    chatID   string
-    workspace string              // local main directory this run operates in
-    workflow  *wfe.Workflow
-    env      map[string]string    // merged env (bot defaults + workflow env + step env)
-
-    // reply channel: workflow run goroutine blocks on this;
-    // bot.Send delivers the agent reply here.
-    reply    chan string
-}
-
-func (b *Bot) fireWorkflow(ctx context.Context, wf *wfe.Workflow, ev wfe.Event, workspace string) {
-    runID := makeRunID(wf.Name, ev, workspace)
-    chatID := "bot:wf:" + runID                  // unique per run
-
-    // worker pool
-    if !b.workerPool.Acquire(wf.Name, runID) {
-        b.log.Warnf("worker pool full for %s, dropping trigger %s", wf.Name, runID)
-        return
-    }
-
-    // 1. 装 chat setup messages: /cwd + (optionally) /use agent + /gtw fix or first prompt
-    setupMsgs := b.buildSetupMessages(wf, workspace, ev)
-    // (see §4.5 for the details)
-
-    r := &botRun{
-        runID:     runID,
-        chatID:    chatID,
-        workspace: workspace,
-        workflow:  wf,
-        env:       mergeEnv(b.defaultEnv(), wf.Env),
-        reply:     make(chan string, 1),
-    }
-    b.runsByChatID[chatID] = r
-    defer func() {
-        delete(b.runsByChatID, chatID)
-        b.workerPool.Release(wf.Name, runID)
-    }()
-
-    // 2. push setup messages to bot.Incoming() — gateway will dispatch
-    for _, m := range setupMsgs {
-        b.incoming <- m
-    }
-
-    // 3. drive wfe.Tick
-    b.driveRun(ctx, r)
-
-    // 4. cleanup
-    // Note: bot does NOT call /gtw close. The worktree is the
-    // workflow's responsibility — the workflow can include a step
-    // that sends "/gtw close <key>" as a prompt body, or the user
-    // can manually run /gtw close after the workflow finishes. bot
-    // has no opinion on this; its only job is to deliver messages
-    // through the channel.
-}
+func (s *Service) drive(ctx context.Context, r *run)
 ```
 
-### 4.3 botRuntime（`runtime.go`）—— channel router
+一轮一轮地推（`agent_loop.go` 的 `turn`）：
 
-`botRuntime` 实现 `wfe.Runtime` 4 个方法，**每个方法都是 bot 端对应 channel 的入口**：
+```
+turn:
+   1. 先执行上一轮留下的 directive（resume / next / instruct / …）
+   2. decision := wfe.Decide(state, wf)
+      - DecisionRun:
+           查这个 step 的预算
+           够   → 跑它（message / shell / use / wait），把 outcome 记进 state
+           不够 → 降级成判断点
+      - DecisionJudgment:
+           exhausted 且每一步都以 ok 收尾 → run 自己结束（不问模型）
+           Over（重复 job 的轮数用尽）   → workflow 结束，run 自己结束（不问模型）
+           这个 step 的预算花完           → 暂停，等人（/me resume）
+           否则 → System 1 决策模型 → 不确定就 System 2 chat 模型 → 还没有就问用户
+   3. 刷新 run 的卡片
+```
+
+快路径上一次模型调用都没有：workflow 每一步都以 `ok` 收尾的 run，全流程零调用。
+
+run 没有自己的时钟：每条命令带自己的预算，超时是 agent 的超时，不是 run 的。run 负责看着。
+
+### 4.5 四种 step（`step.go`）
 
 ```go
-type botRuntime struct {
-    bot    *Bot
-    run    *botRun   // current run, for reply channel + workspace lookup
-}
-
-func (r *botRuntime) Now() time.Time { return time.Now() }
-
-func (r *botRuntime) RunShell(ctx context.Context, spec wfe.ShellSpec) (*wfe.ShellResult, error) {
-    cwd := spec.Cwd
-    if cwd == "" { cwd = r.run.workspace }
-
-    shellBin, shellArg := pickShell(spec.Shell)
-    cmd := exec.CommandContext(ctx, shellBin, shellArg, spec.Command)
-    cmd.Dir = cwd
-    cmd.Env = envToUnix(spec.Env)
-
-    var stdout, stderr bytes.Buffer
-    cmd.Stdout = &stdout
-    cmd.Stderr = &stderr
-
-    err := cmd.Run()
-    res := &wfe.ShellResult{
-        Stdout:  stdout.String(),
-        Stderr:  stderr.String(),
-        Outputs: parseKVOutput(stdout.String()),
-    }
-    if exitErr, ok := err.(*exec.ExitError); ok {
-        res.ExitCode = exitErr.ExitCode()
-        return res, err
-    }
-    res.ExitCode = 0
-    return res, nil
-}
-
-// SendPrompt is the nightme channel entry: push the prompt into
-// bot.Incoming(), then block on the per-run reply channel.
-// When bot.Send delivers the agent's reply, this returns.
-func (r *botRuntime) SendPrompt(ctx context.Context, spec wfe.PromptSpec) (*wfe.Reply, error) {
-    // 1. push the prompt message into bot.Incoming()
-    msg := channel.Message{
-        ChatID: spec.ChatID,
-        Body:   spec.Prompt,
-    }
-    select {
-    case r.bot.incoming <- msg:
-    case <-ctx.Done():
-        return nil, ctx.Err()
-    }
-
-    // 2. block on the per-run reply channel (delivered by bot.Send)
-    select {
-    case text := <-r.run.reply:
-        return &wfe.Reply{Text: text}, nil
-    case <-ctx.Done():
-        return nil, ctx.Err()
-    case <-time.After(spec.Timeout):
-        return nil, wfe.ErrPromptTimeout
-    }
-}
-
-func (r *botRuntime) RunAction(ctx context.Context, spec wfe.ActionSpec) (*wfe.ActionResult, error) {
-    return r.bot.actions.Run(ctx, spec)
-}
+func (s *Service) executeStep(ctx context.Context, r *run, job string, step wfe.Step) (stepVerdict, error)
 ```
 
-`botRuntime` 是 wfe 的视角——它看到的是 4 个 channel 入口。**实际 channel 怎么实现（os/exec / nightme channel / action channels）由 bot 的字段决定**，不在 wfe 关心范围内。
+按 `step.Kind()` 分派：
 
-### 4.4 Per-run drive loop（`workflow.go`）
+- **message** — 把文本发进 chat，等它的结果。step 可以带一条 `agents` chain：多个 agent 按顺序试，一个断了就交给下一个；第一个没断的就是这个 step 的裁决。chain 试完还断 → step 判 failed，plan 决定不了，交给 agent。
+- **shell** — `cfg.Shell.RunShell` 在 chat 当前的工作目录里跑命令。daemon 没有 shell runner 时，这个 step 直接判 failed。
+- **use** — `cfg.actions.Run` 按名字找注册的 action 跑。没有 shell runner 就没有 shell step；没有注册的 action 名字就是 `wfe.ErrUnknownAction`。
+- **wait** — 等一段 Go duration。
 
-```go
-func (b *Bot) driveRun(ctx context.Context, r *botRun) {
-    // Load or init state
-    state, err := b.stateStore.Load(r.runID)
-    if errors.Is(err, os.ErrNotExist) {
-        state = wfe.NewRunState(r.runID, r.workflow.Name, r.runID, r.chatID, r.workspace, r.env, time.Now())
-    } else if err != nil {
-        b.log.Errorf("load state %s: %v", r.runID, err)
-        return
-    }
+每个 step 的结果都是一个 `wfe.Outcome`：`ok` / `failed` / …，外加 `Summary` 和事实。命令还在跑的时候 step 记为 pending，plan 把它当成判断点。
 
-    // Tick loop: bot owns this, wfe only advances one step per call
-    for state.Status == wfe.StatusRunning {
-        newState, err := wfe.Tick(ctx, state, r.workflow, &botRuntime{bot: b, run: r})
-        if err != nil {
-            b.log.Errorf("tick %s: %v", r.runID, err)
-        }
-        state = newState
-        if perr := b.stateStore.Save(state); perr != nil {
-            b.log.Errorf("save state %s: %v", r.runID, perr)
-        }
-        if ctx.Err() != nil {
-            state.Status = wfe.StatusCancelled
-            b.stateStore.Save(state)
-            return
-        }
-    }
-}
-```
+### 4.6 外部能力（`shell.go` / `action.go`）
 
-### 4.5 Setup messages（`workflow.go`）
+`ExecShell`（`shell.go`）实现 `RunShell`：在 `Cwd` 里跑命令，收 stdout / stderr / exit code，并把 stdout 里的 `key=value` 行解析成 outputs。
 
-When a run starts, bot synthesizes a sequence of "messages" to send through `bot.Incoming()` to set up the chat:
-
-```go
-func (b *Bot) buildSetupMessages(wf *wfe.Workflow, workspace string, ev wfe.Event) []channel.Message {
-    msgs := []channel.Message{
-        // 1. /cwd sets the chat's CWD (first step of any chat session)
-        {ChatID: chatID, Body: "/cwd " + workspace},
-    }
-    // 2. /use agent sets the agent (if workflow-level agent is configured)
-    if wf.Agent != "" {
-        msgs = append(msgs, channel.Message{
-            ChatID: chatID, Body: "/use agent " + wf.Agent,
-        })
-    }
-    return msgs
-}
-```
-
-The first `prompt` step (or `/gtw fix`) of the workflow will then be pushed into `bot.Incoming()` by `SendPrompt` (or by the trigger pipeline if using `/gtw fix`).
-
-### 4.6 TriggerManager（`trigger.go`）—— 3 阶段管线：receive → filter → trigger
-
-**Important**: trigger detection is **not** nightme's responsibility. bot implements all trigger sources + filter logic itself. The code below lives entirely in `internal/channel/bot/trigger.go` and **does not** depend on nightme's event bus / channel interface / gateway.
-
-#### 4.6.1 Stage 1 — Receive (passive)
-
-```go
-type TriggerManager struct {
-    workflows []*wfe.Workflow
-    cronSched *cron.Scheduler             // robfig/cron
-    gitSub    GitSubscription             // single subscription to gitProvider
-    wsMap     *WorkspaceRepoMap           // repo URL → workspace path
-    bot       *Bot
-}
-
-func (t *TriggerManager) Start(ctx context.Context) error {
-    // 1. cron: bot-internal timer
-    for _, wf := range t.workflows {
-        for _, s := range wf.On.Schedule {
-            cronExpr := s.Cron
-            t.cronSched.AddFunc(cronExpr, func() {
-                t.onEvent(ctx, GitEvent{
-                    Kind: "schedule",
-                    Time: time.Now(),
-                    Data: map[string]any{"cron": cronExpr},
-                })
-            })
-        }
-    }
-
-    // 2. build workspace → repo map (startup, one-time)
-    t.wsMap = NewWorkspaceRepoMap()
-    if err := t.wsMap.Build(t.workflows); err != nil {
-        return err
-    }
-
-    // 3. git events: single subscription, all event types
-    if anyNeedsGitEvents(t.workflows) {
-        t.gitSub = t.bot.gitProvider.Subscribe(t.onEvent)
-    }
-
-    t.cronSched.Start()
-    return nil
-}
-```
-
-#### 4.6.2 WorkspaceRepoMap（`ws_map.go`）
-
-```go
-// WorkspaceRepoMap is built at bot startup by reading
-// `git -C <workspace> remote get-url origin` for every workspace.
-type WorkspaceRepoMap struct {
-    byRepo map[string]string  // "cnlangzi/nightme" → "~/work/nightme"
-    byPath map[string]string  // "~/work/nightme" → "cnlangzi/nightme"
-}
-
-func (m *WorkspaceRepoMap) Build(workflows []*wfe.Workflow) error {
-    seen := map[string]bool{}
-    for _, wf := range workflows {
-        for _, ws := range wf.Workspaces {
-            if seen[ws] { continue }
-            seen[ws] = true
-
-            out, err := exec.Command("git", "-C", ws, "remote", "get-url", "origin").Output()
-            if err != nil {
-                return fmt.Errorf("workspace %s: %w", ws, err)
-            }
-            repo := canonicalRepoURL(strings.TrimSpace(string(out)))
-            m.byRepo[repo] = ws
-            m.byPath[ws] = repo
-        }
-    }
-    return nil
-}
-```
-
-#### 4.6.3 Stage 2 — Filter (by workflow.workspaces)
-
-```go
-func (t *TriggerManager) onEvent(ctx context.Context, ev GitEvent) {
-    // 1. cron event: no event.repo; fires all workspaces
-    if ev.Kind == "schedule" {
-        for _, wf := range t.workflows {
-            if !wfe.HasSchedule(wf, ev.Cron) { continue }
-            for _, ws := range wf.Workspaces {
-                t.bot.fireWorkflow(ctx, wf, ev, ws)
-            }
-        }
-        return
-    }
-
-    // 2. git event: reverse-lookup repo → workspace
-    workspace, ok := t.wsMap.byRepo[ev.Repo]
-    if !ok {
-        // event from a repo not in bot's workspaces; log warn and drop
-        t.bot.log.Warnf("trigger event for unknown repo: %s", ev.Repo)
-        return
-    }
-
-    // 3. match against workflows
-    for _, wf := range t.workflows {
-        if !contains(wf.Workspaces, workspace) { continue }
-        if !wfe.Match(wf, convertToWfeEvent(ev)) { continue }
-        t.bot.fireWorkflow(ctx, wf, ev, workspace)
-    }
-}
-```
-
-**Key behaviors**:
-
-- bot startup builds `byRepo` once by reading `git remote get-url origin` for every workspace.
-- git events use `event.repo` to reverse-lookup the workspace.
-- **Cron triggers all workspaces** in the workflow (no event.repo → no filter).
-- A single event can fire **multiple workflows** if multiple workflows include the workspace.
-- A single event **does not** repeat for multiple workspace matches (event.repo → single workspace).
-- bot is **client-side filtering** — no per-workflow gitProvider subscription, single subscription handles all.
-
-### 4.7 ActionRegistry（`action.go`）
+`ActionRegistry`（`action.go`）是 `use:` step 的扩展点：
 
 ```go
 type Action interface {
     Name() string
     Execute(ctx context.Context, args map[string]any, env map[string]string) (*wfe.ActionResult, error)
 }
-
-type ActionRegistry struct {
-    mu      sync.RWMutex
-    actions map[string]Action
-}
-
-func (r *ActionRegistry) Register(a Action) {
-    r.mu.Lock()
-    defer r.mu.Unlock()
-    r.actions[a.Name()] = a
-}
-
-func (r *ActionRegistry) Run(ctx context.Context, spec wfe.ActionSpec) (*wfe.ActionResult, error) {
-    r.mu.RLock()
-    a, ok := r.actions[spec.Name]
-    r.mu.RUnlock()
-    if !ok {
-        return nil, fmt.Errorf("unknown action %q — registered: %v", spec.Name, r.list())
-    }
-    return a.Execute(ctx, spec.With, spec.Env)
-}
-
-func (r *ActionRegistry) list() []string { ... }   // 给错误用
 ```
 
-`ScanUserScripts` 扫目录：
+`ScanUserScripts(dir)` 把 `<workflows dir>/actions` 下每个可执行文件注册成一个 action（`ShellAction`）：`with:` 的参数写进一个临时 JSON 文件，通过 `ACTION_ARGS_FILE` 环境变量交给脚本；脚本 stdout 是 JSON 就用它当结果，否则包成 `stdout` / `stderr` / `exit` 三个事实。
 
-```go
-func (r *ActionRegistry) ScanUserScripts(dir string) error {
-    files, err := filepath.Glob(filepath.Join(dir, "*"))
-    if err != nil { return err }
-    for _, f := range files {
-        if info, err := os.Stat(f); err != nil || info.IsDir() { continue }
-        if !isExecutable(f) { continue }
-        ext := filepath.Ext(f)
-        name := strings.TrimSuffix(filepath.Base(f), ext)
-        r.Register(&ShellAction{ScriptPath: f, Name: name})
-    }
-    return nil
-}
-```
+内置 action 四个：`notify`、`email`、`github_pr_comment`、`github_issue`——都还是桩，返回 `stub: true`。
 
-`ShellAction`：
+### 4.7 触发器（`types.go` / `match.go`）
 
-```go
-type ShellAction struct {
-    ScriptPath string
-    Name       string
-}
+`on:` 块被解析、被校验、也被显示，但**还没有任何东西点得着它**：没有 cron 调度器，没有 git provider 的订阅。`wfe.Match` 是匹配 `on:` 规格的纯函数，触发管线是留给它的接口。
 
-func (a *ShellAction) Execute(ctx, args, env) (*wfe.ActionResult, error) {
-    merged := mergeEnv(env, flattenArgs(args))
-    argsFile, _ := os.CreateTemp("", "action-args-*.json")
-    json.NewEncoder(argsFile).Encode(args)
-    argsFile.Close()
-    merged["ACTION_ARGS_FILE"] = argsFile.Name()
-    defer os.Remove(argsFile.Name())
-
-    cmd := exec.CommandContext(ctx, a.ScriptPath)
-    cmd.Env = envToUnix(merged)
-    var stdout, stderr bytes.Buffer
-    cmd.Stdout = &stdout
-    cmd.Stderr = &stderr
-    err := cmd.Run()
-
-    out := stdout.Bytes()
-    var result wfe.ActionResult
-    if json.Unmarshal(out, &result) == nil && result.Outputs != nil {
-        return &result, nil
-    }
-    return &wfe.ActionResult{Outputs: map[string]any{
-        "stdout": stdout.String(),
-        "stderr": stderr.String(),
-        "exit":   exitCode(err),
-    }}, err
-}
-```
-
-### 4.8 内置 action（`action_builtin.go`）
-
-```go
-// notify
-type NotifyAction struct {
-    channels *channel.Registry
-}
-
-func (a *NotifyAction) Name() string { return "notify" }
-
-func (a *NotifyAction) Execute(ctx, args, env) (*wfe.ActionResult, error) {
-    ch := cast.ToString(args["channel"])
-    target := cast.ToString(args["target"])
-    msg := cast.ToString(args["message"])
-    if ch == "" || target == "" || msg == "" {
-        return nil, errors.New("notify: channel, target, message are required")
-    }
-    if err := a.channels.Send(ctx, ch, target, msg); err != nil {
-        return nil, err
-    }
-    return &wfe.ActionResult{Outputs: map[string]any{"sent": true}}, nil
-}
-```
-
-`/gtw fix` is invoked through the channel mechanism (bot sends a `/gtw fix <key>` message). bot does not need a special `gtw_fix` action — the existing `/gtw fix` command handler in nightme processes the message.
-
+---
 
 ## 5. 数据流走查
 
-### 5.1 `prompt` 步骤（走 channel 协议）
+### 5.1 `message` 步骤
 
 ```
-[bot] trigger fires (e.g. mention in PR #42)
+[me] plan: wfe.Decide(state, wf) → DecisionRun{Step: "ai"}
    ↓
-[bot] TriggerManager.onEvent → match workflow + workspace
+[me] step.runAttempts: chain = step.Agents（没写就是一次）
    ↓
-[bot] fireWorkflow(wf, ev, workspace):
-   │
-   │  1. 派生 chatID = "bot:wf:" + runID
-   │  2. 装 botRun (含 reply channel)
-   │  3. setup messages 推入 bot.Incoming():
-   │       "/cwd <workspace>"
-   │       "/use agent <wf.agent>" (if set)
-   │  4. 注册 runsByChatID[chatID] = botRun
-   │  5. go driveRun(r)
+[me] AgentSwitcher.SwitchAgent(chatID, agent)（use 模式才切）
    ↓
-[bot.driveRun] load state, start Tick loop
+[me] Operator.Speak(chatID, "/gtw fix 42")  ← 这就是 chat 里的一条真消息
    ↓
-loop:
+[channel] gateway → chatsession → agentsession → bridge → coding agent
    ↓
-   [bot] wfe.Tick(ctx, state, wf, rt=botRuntime{run: r})
-                ↓
-            [wfe] 找 step "ai" (prompt, agent=codex)
-                ↓
-            [wfe] ec = build ExprCtx(state)
-                ↓
-            [wfe] prompt = EvalString("Review ${{ event.title }}", ec, rt)
-                ↓
-            [wfe] rt.SendPrompt(ctx, PromptSpec{ChatID, Agent, Prompt, Env})
-                ↓
-            [bot] botRuntime.SendPrompt:
-                  1. 合成 message, 推入 bot.Incoming()
-                  2. 在 r.reply channel 上 block 等 reply
+[agent] 干活 → 结果回到 daemon
    ↓
-   [gateway] pumpInbound 读 bot.Incoming() → channelCh
+[me] runCommand 拿到结果 → wfe.RecordStep(state, job, step, outcome)
    ↓
-   [gateway] dispatchLoop → inbound.Dispatch
-   ↓
-   [inbound] tryMessageDispatch (普通 prompt) → ChatSession(chatID)
-   ↓
-   [chatsession] (已经 /cwd 完, /use agent 完)
-                → AgentSession (codex) → agent 跑
-                → agent reply → AgentSession → outbound.Emitter
-   ↓
-   [gateway] outbound.Emitter → Channel.Send
-   ↓
-   [bot] bot.Send(ctx, msg):
-         1. 查 runsByChatID[msg.ChatID] = r
-         2. r.reply <- msg.Text
-   ↓
-   [bot] botRuntime.SendPrompt 收到 reply
-                ↓
-            [wfe] state.StepOutputs["ai"] = parse(reply)
-                ↓
-            [wfe] state.Advance("ai")
-   ↓
-   [bot] state = newState
-   [bot] stateStore.Save(state)
-   ↓
-   loop (if state.Status == running)
-   ↓
-[bot] state.Status = succeeded → cleanup (delete runsByChatID entry, /gtw close if used)
+[me] 下一次 Decide
 ```
 
-**关键点**：
+关键点：
 
-- `prompt` 步骤**走完整 channel 协议**：bot.Incoming() → gateway → ChatSession → agent → reply → outbound.Emitter → bot.Send
-- 这条路跟 feishu 用户敲键盘走的是**完全相同**的 pipeline
-- `botRuntime.SendPrompt` 是 bot goroutine 在 `r.reply` 上**同步阻塞**，直到 `bot.Send` 被 Emitter 调用投递 reply
-- reply routing 是**隐式的**：通过 `runsByChatID[msg.ChatID]` 找到对应的 botRun
-- 整个 run 生命周期内，bot 持有 goroutine，`runsByChatID` 是 in-process 状态
+- `message` 步骤走的是**和真人打字完全一样的通道**——run 没有特权路径。
+- run 的回复挂在它自己那条消息下（`session.go`）：回执、表情、交互式提问都锚在那条消息上。
+- 命令还在跑 → step 记为 pending → plan 把它变成判断点，agent 决定是等、是跳过还是结束这一轮。
 
-### 5.2 `run` 步骤（不走 channel）
+### 5.2 `shell` 步骤
 
 ```
-[wfe] Tick: step "lint" (run)
+[me] plan: DecisionRun{Step: "lint"}
    ↓
-[wfe] cmd = EvalString("npm run lint", ec, rt)
+[me] EvalString("npm run lint", ec) → 命令
    ↓
-[wfe] rt.RunShell(ctx, ShellSpec{Cwd, Command, Env})
+[me] ExecShell.RunShell(ShellSpec{Cwd: chat 的当前目录, Command, Env})
    ↓
-[bot] botRuntime.RunShell:
-      1. cwd = r.run.workspace (or spec.Cwd)
-      2. exec.CommandContext("sh", "-c", cmd).Dir = cwd
-      3. 收集 stdout/stderr/exit
-   ↓
-[wfe] state.StepOutputs["lint"] = {exit: "0", stdout: "..."}
+[me] wfe.RecordStep(..., Outcome{Status: ok, Data: {exit, stdout, stderr}})
 ```
 
 完全本地，**不经 Gateway / Channel**。跟用户在 shell 里手敲 `make test` 等价。
 
-### 5.3 `use` 步骤（不走 channel）
+### 5.3 `use` 步骤
 
 ```
-[wfe] Tick: step "notify-feishu" (use: notify)
+[me] plan: DecisionRun{Step: "notify"}
    ↓
-[wfe] with = EvalMap({channel, target, message}, ec, rt)
-                ↓ 表达式求值
-            message = "PR 42 done"
+[me] EvalMap(step.With, ec) → with
    ↓
-[wfe] rt.RunAction(ctx, ActionSpec{Name: "notify", With, Env})
+[me] ActionRegistry.Run(ActionSpec{Name, With, Env})
    ↓
-[bot] botRuntime.RunAction → ActionRegistry.Run
-   ↓
-[bot] lookup "notify" → NotifyAction
-   ↓
-[bot] channels.Send("feishu", "oc_xxx", "PR 42 done")
-   ↓
-[wfe] state.StepOutputs["notify-feishu"] = {sent: "true"}
+[me] wfe.RecordStep(..., Outcome{Status: ok, Data: outputs})
 ```
 
-不经 Gateway / Channel，但经 channel adapter（bot 内部组件）。
+不经 Gateway / Channel，但经 host 自己的 action registry。
 
-### 5.4 `/gtw fix` 步骤（走 channel，作为 slash command）
+### 5.4 判断点
 
 ```
-[wfe] Tick: step "fix-it" (use ... 实际上 /gtw fix 是 prompt step, 发的消息是 /gtw fix)
+[me] plan: wfe.Decide → DecisionJudgment{Reason, Subject}
    ↓
-[bot] rt.SendPrompt → 推 "/gtw fix <key>" 消息到 bot.Incoming()
-   ↓
-[gateway] → inbound → tryCommandDispatch("/gtw fix ...")
-   ↓
-[chatsession] 命令处理: 调 /gtw fix 内部
-   - git worktree add (worktree = workspace/.gtw/fix-<key>/)
-   - 设 chat.cwd = worktree
-   - 派发 issue 给 agent
-   - agent 在 worktree 里跑
-   ↓
-[agent] → reply → outbound.Emitter → bot.Send
-   ↓
-[bot] botRun.reply 收到, wfe 推进
+[me] System 1：决策模型（me.decider）
+   │   问三件事：next（choice）/ needs_human（yes-no）/ step_succeeded（yes-no）
+   │   置信度够、不是 escalate、policy 允许 → 直接照办
+   ↓（不够确定）
+[me] System 2：chat 模型（me.llm）带工具循环
+   │   工具：resume / next / ntm_<command> / agent / instruct /
+   │        answer_choice / ask_human / repo_status / wait / end_round / finish
+   ↓（没有 chat 模型）
+[me] 问用户（/me reply <text>）
 ```
 
-`/gtw fix` **不是 bot 自己调的**。bot 只是发了一条 `/gtw fix <key>` 消息。nightme 现有的 `/gtw fix` command handler 处理它。**bot 不知道也不关心 `/gtw fix` 内部**。
-
-### 5.5 Workflow pattern for `/gtw fix` and `/gtw close`
-
-Workflows use `/gtw fix` and `/gtw close` by **sending the corresponding slash-command messages** in `prompt` steps. The workflow body is the slash command; the existing nightme command handler does the work. bot has no special API for these commands.
-
-**Example workflow that fixes an issue and posts a notification:**
-
-```yaml
-name: issue-fixer
-workspaces: [~/work/nightme]
-on:
-  issue:
-    events: [opened, labeled]
-
-jobs:
-  fix:
-    steps:
-      # Step 1: send "/gtw fix" to the chat. The command handler
-      # creates a worktree and dispatches the issue to the agent.
-      # The reply is the agent's fix summary.
-      - id: fix-it
-        prompt: "/gtw fix ${{ event.issue.number }}"
-        agent: codex
-
-      # Step 2: ask the agent to write a PR description for the fix.
-      # (Same chat, same worktree, same agent session.)
-      - id: write-pr-desc
-        prompt: "Write a PR description for the fix you just made."
-        if: ${{ steps.fix-it.outputs.text != '' }}
-        agent: codex
-
-      # Step 3: send "/gtw close" to clean up the worktree.
-      - id: cleanup
-        run: echo "/gtw close ${{ steps.fix-it.outputs.worktree }}"
-        # Note: this is a shell echo, not a prompt. v0 doesn't
-        # dispatch via SendPrompt; if you want it to run through
-        # the channel, use a prompt step.
-```
-
-**Why this is the right pattern:**
-
-- `/gtw fix` and `/gtw close` are **existing nightme slash commands** registered in nightme's command dispatcher.
-- bot has **no special handling** for them. It pushes the message into `bot.Incoming()`, the gateway routes it via `tryCommandDispatch`, the existing handler runs.
-- The workflow author decides when to invoke these commands by including a `prompt` (or `run`) step with the right message body.
-- Cleanup (`/gtw close`) is **the workflow's responsibility**, not bot's. The workflow can include a cleanup step or rely on the user to run it manually.
-
-**What bot knows vs. doesn't know:**
-
-| Knows | Doesn't know |
-|---|---|
-| The chatID (run-scoped unique) | That `/gtw fix` was invoked |
-| The workspace (from workflow) | What worktree path was created |
-| The workflow's prompt body (sends it) | The agent's response content (only delivers to reply chan) |
-| When agent replies come back | When the worktree is cleaned up |
-
-bot is a transparent message pipe. The workflow + existing nightme slash commands + agent are the active participants.
+答复由 `directive.go` 执行。`resume` 把出问题的 step 再跑一遍（先查它的预算），`next` 把它记为跳过并让 plan 继续，`finish(status, summary)` 结束 run。
 
 ---
 
 ## 6. Edge cases
 
-### 6.1 workflow 重名
+### 6.1 workflow 名冲突
 
-- 启动时 `LoadDir` 检测 `wf.Name` 重复 → fail fast。
-- 重名时哪个文件赢不确定（glob 顺序），所以必须 fail。
+- 名字是 bundle 在目录下的路径，所以两个不同的 bundle 不会撞名。
+- 同一个名字被两个文件认领 → 两个都不在这个名字下挂，报一条 `duplicate workflow name` 的 `Failure`。
+- 直接躺在 workflows 目录里的 `*.yml` 不是 workflow；bundle 里 `workflow.yml` 旁边的文件也不是。
 
-### 6.2 同 trigger 短时间内多次触发
+### 6.2 同一个 trigger 短时间内多次触发
 
-- `runID = workflow:trigger-key:started-at`（秒级粒度）。
-- 同一 trigger-key 在 1 秒内多次触发 → runID 相同 → StateStore Load 拿已有 state → 续跑。
-- 1 秒后的新触发 → 新 runID → 新 state。
+- 触发器还没有接线，所以这一条目前不成立。
+- 名字的粒度是 bundle 路径（`nightme/coder`），不是时间戳。
 
-### 6.3 daemon restart
+### 6.3 daemon 重启
 
-- 启动时 `StateStore.List()` 拿到所有非终态的 run。
-- 对每个：`onTrigger` 重入 → Load state → 调 `Tick` 续跑。
-- 续跑时 `if:` 重新求值；幂等 step 重跑；非幂等 step（`prompt`）继续（如果 session 还活着）。
+- run 的状态在内存里，daemon 重启后不恢复。
+- workflow 文件不用重读就能生效：目录是用到时才刷新的。
 
 ### 6.4 workflow YAML 语法错误
 
-- Load 时 fail → 不启动 → 错误回显。
-- 已启动后热改文件出错 → 不自动 reload（v0 行为），需 `nightme reload` 或重启。
+- 加载失败的 bundle 记成一条 `Failure`，不影响旁边的 bundle。
+- daemon 启动时这些失败会记进日志；`nightme workflow list` 会把它们列出来。
 
 ### 6.5 mention 触发但 mention 不在白名单
 
-- `Match` 返回 false → 不 dispatch → 静默忽略。
-- 日志记一条 debug。
+- `Match` 返回 false → 不触发。
+- 触发管线还没接线，所以这一条目前不成立。
 
 ### 6.6 `use: <unknown>`
 
-- `ActionRegistry.Run` 返回 `unknown action "foo" — registered: [notify, email, ...]`。
-- Tick 包成 step error → 状态变 failed。
+- `ActionRegistry.Run` 返回包着 `wfe.ErrUnknownAction` 的错误，并列出已注册的名字。
+- step 判 failed，plan 把它变成判断点。
 
-### 6.7 step `env:` 包含恶意值
+### 6.7 step `env:` 包含敏感值
 
 - 用户的 YAML 是 trusted input（自己写的），不做隔离。
-- 用户脚本是 trusted input（`~/.nightme/workflows/actions/*.sh`），不做隔离。
-- bot 默认 env（含 nightme config secrets）跟用户 env **在同一 map 里**，不做命名空间区分。
-- 日志 redaction 由 logger 名字匹配处理（已存在）。
+- 用户脚本是 trusted input（`<workflows dir>/actions/*.sh`），不做隔离。
+- host 的默认 env 跟用户 env 在同一个 map 里，不做命名空间区分。
 
-### 6.8 prompt 超时
+### 6.8 命令超时
 
-- `defaultPromptTimeout = 30min`（v0 写死，跟 agent session 默认 timeout 对齐）。
-- 超时 → `ErrPromptTimeout` → step error → state failed。
+- 每条命令带自己的预算，超时是 agent 的超时，不是 run 的超时。
+- 超时 → step 没有自己的裁决 → plan 把它变成判断点。
 
-### 6.9 run 的 working dir
+### 6.9 shell 步骤的工作目录
 
-- 来源：bot 在 `/gtw fix` 返回的 worktree 路径，写进 `state.Env["WORKSPACE_CWD"]`。
-- 用户可在 workflow / job / step env 覆盖。
-- v0 不做 path traversal 校验（trusted input）。
-- **`workspaces:` 字段** 决定 run 的"哪个 workspace"被激活——trigger 命中后 bot 从 `workspaces` 列表里挑出对应的那个，写进 `state.Workspace`，再派生 worktree。
+- 来源是 chat 当前的工作目录（`CwdProvider`）——chat 被 `/gtw fix` 挪进 worktree，shell 步骤就跟着挪。
+- daemon 报不出 chat 的目录时，回落到 run 起手时的 workspace。
 
-### 6.10 concurrent trigger 风暴
+### 6.10 预算
 
-- `worker: N` 是每 workflow 上限，bot 用 semaphore 实现。
-- 超出的 trigger 排队（FIFO）or 丢弃（v0 选哪个？——见 §9）。
+- 每个 step、每一轮的预算是一个数，由 `me.max_judgments`（默认 50）定，workflow 文件里不写。
+- 预算花完时 run 暂停，并在 chat 里说清楚；操作员用 `/me resume` 重跑，那一步的预算重新开始算。
 
-### 6.11 mention 文本解析
+### 6.11 两个模型都没有
 
-- 来源是 gitProvider（PR/issue 评论），不是 feishu 聊天。bot 自己实现 parser。
-- 形式 `@<owner> <command> [<args>...]`：第一个 token 是 `command`，剩余部分是 `args`。
-- 取第一个 token 作为 `command`（`@owner review this PR` → `command: review`，`args: "this PR"`）。
-- 边界条件：多空格、斜杠命令风格（`@owner/foo`）、单独 `@owner` 无 command 时的处理。
+- `me.llm` 和 `me.decider` 都没配 → personal agent 不可用，`/me start` 直接拒绝并说明原因。
+- 只有 `me.decider` → 置信度够的决定直接做，其余问用户。
+- 只有 `me.llm` → 每个判断点都走 chat 模型的工具循环。
 
 ---
 
@@ -1233,135 +517,68 @@ bot is a transparent message pipe. The workflow + existing nightme slash command
 
 ### 7.1 wfe 单元测试（`pkg/wfe/*_test.go`）
 
-| Test | 覆盖 |
+| 文件 | 覆盖 |
 |------|------|
-| `TestLoad_ValidYAML` | 正常 workflow 解析 |
-| `TestLoad_InvalidYAML` | 缺字段 / 类型错 / 多选 step |
-| `TestLoad_DuplicateName` | 跨文件重名 |
-| `TestMatch_Schedule` | schedule trigger |
-| `TestMatch_PullRequest` | branch + event 双过滤 |
-| `TestMatch_Mention` | command 白名单 |
-| `TestTick_RunStep` | RunShell 被调，outputs 落 state |
-| `TestTick_PromptStep` | SendPrompt 被调，outputs 落 state |
-| `TestTick_UseStep` | RunAction 被调，按 name 派发 |
-| `TestTick_StepFailure` | err 流转，状态变 failed |
-| `TestTick_ContinueOnError` | err 流转，状态仍 running，outputs 含 error |
-| `TestTick_IfFalse` | 跳过 step |
-| `TestTick_NeedsNotMet` | 跨 job 等待 |
-| `TestEvalString_*` | ${{ }} 各场景 |
-| `TestEvalCond_*` | success() / failure() / always() |
-| `TestEvalMap_Recursive` | with: 嵌套结构求值 |
+| `load_test.go` | bundle 发现、名字、重名、坏文件、实参绑定 |
+| `validate_test.go` | 必填字段、kind 互斥、未知键、表达式、`args` |
+| `match_test.go` | schedule / PR / branch / issue / mention 的过滤 |
+| `engine_test.go` | 快路径、分叉、`EndRound`、plan 的各个出口 |
+| `rounds_test.go` | 轮次与轮次之间的间隔 |
+| `sleep_test.go` | `sleep:` 的解析、绑定、JSON 往返与 plan 里的 gap |
+| `exception_test.go` | 异常与判断点 |
+| `agents_test.go` | agent chain 的解析与绑定 |
+| `expr_test.go` | `${{ }}` 的各种写法 |
+| `policy_test.go` | 预算、检查、渲染 |
 
-mock Runtime：
+mock 很简单：wfe 不做 I/O，测试里只需要构造 `RunState` 和 `Workflow`。
 
-```go
-type mockRT struct {
-    shellCalls   []ShellSpec
-    promptCalls  []PromptSpec
-    actionCalls  []ActionSpec
-    now          time.Time
-    // 每个方法的预设返回值
-}
+### 7.2 host 集成测试（`internal/me/*_test.go`）
 
-func (m *mockRT) RunShell(ctx, s) (*ShellResult, error) { m.shellCalls = append(...); return m.shellRet, m.shellErr }
-```
-
-每个 Tick 测试在 30 行内，零 I/O、零 sleep、零依赖。
-
-### 7.2 bot subsystem 集成测试
-
-| Test | 覆盖 |
+| 文件 | 覆盖 |
 |------|------|
-| `TestBot_Start_LoadsWorkflows` | 加载 + action 注册 |
-| `TestBot_TriggerCron_Fires` | mock clock + cron |
-| `TestBot_TriggerMention_ResolvesChat` | mention 路径 |
-| `TestBot_TriggerPullRequest_ResolvesChat` | PR 路径 |
-| `TestBot_WorkerPool_LimitsConcurrency` | 同一 workflow N+1 个 trigger |
-| `TestBot_StateStore_RestartRecovery` | Save → kill → Load → Tick 续跑 |
-| `TestBot_ActionRegistry_UserScript` | 写一个测试脚本到 tmp，verify 注册 + 执行 |
-| `TestBot_ActionRegistry_UnknownAction` | error message 正确 |
+| `step_test.go` | 四种 step 的执行与裁决 |
+| `action_test.go` | action registry、未知 action、用户脚本 |
+| `agent_test.go` / `control_test.go` | run 的生命周期与控制 |
+| `state_test.go` | run 状态的读写 |
+| `agent_workflows_test.go` | workflow 相关的 agent 行为 |
+| `agent_budget_test.go` | 预算的边界 |
 
-### 7.3 E2E（v0 不强求）
+### 7.3 CLI（`cmd/nightme/workflow_test.go`）
 
-需要真飞书 / 真 GitHub：
-
-- 配置一个最小 workflow，cron 触发
-- 验证 state file 出现，run 成功
-- 验证 notify action 真的发到飞书
-
-### 7.4 性能 / 并发
-
-- 1000 个并行 run 的 StateStore 写盘（v0 用单 goroutine per run，瓶颈在 fs）
-- ActionRegistry 的 RWMutex 竞争（read 远多于 write，问题不大）
+`nightme workflow list / show / run / validate` 的输出。
 
 ---
 
-## 8. 上线分阶段
+## 8. CLI 与安装面
 
-### Phase 0: wfe 库 only（无 bot 集成）
+| 入口 | 做什么 |
+|---|---|
+| `nightme workflow list` | 列出 workflows 目录里的 workflow，以及加载失败的 bundle（`--json` 给机器读） |
+| `nightme workflow show <name>` | 展示一个 workflow 解析后的细节（`--json` 给机器读） |
+| `nightme workflow run <name>` | dry-run：打印会执行什么，不真跑 |
+| `nightme workflow validate [path...]` | 只做校验，报诊断 |
+| `/wf install <owner>/<name>` | 从发布源装一个 workflow（`internal/command/wf`） |
+| `/wf uninstall <owner>/<name>` | 卸掉它 |
+| `/me start <workflow> [args...] [-i <rounds>]` | 在当前 chat 里跑一个 workflow |
 
-- 写完 `pkg/wfe/` 全套 + 单测
-- 用 `go test ./pkg/wfe/...` 100% 覆盖
-- **没有** bot subsystem 集成——纯库
-- 持续 1 周
-
-### Phase 1: bot subsystem 骨架 + cron only
-
-- 写完 `internal/channel/bot/` 但只接 cron trigger
-- 不接 PR / issue / mention
-- 不接 ActionRegistry 用户脚本（只内置）
-- 一个 `notify` action
-- 一个示例 workflow：每天 9 点发飞书 hello
-- 持续 1 周
-
-### Phase 2: 全 trigger
-
-- 接入 git provider events（PR / issue / branch / mention 全部 4 个）
-- 接入 action 用户脚本
-- 跑几个真 workflow（PR review / issue triage / mention fix）
-- 持续 2 周
-
-### Phase 3: 稳定性 + v0 完成
-
-- daemon restart 恢复测试
-- 长跑 workflow（跨小时）测试
-- 错误恢复（run state 损坏、action 脚本 fail、prompt 超时）
-- 文档补全（CLI 命令、`nightme workflow list` / `logs` / `retry`）
-- 持续 2 周
-
-Phase 3 结束 → 内部 release。
+workflows 目录由配置给出；action 脚本住在同一个目录下的 `actions/`。
 
 ---
 
 ## 9. Open questions
 
-1. **trigger 排队 vs 丢弃**：`worker: N` 满了之后，新 trigger 排队（FIFO 等 worker）还是直接丢弃记 metric？倾向排队（不丢用户的请求），但要看存储成本。
-
-2. **mention 文本解析的边界条件**：bot 自己的 parser 怎么处理 `@owner/foo`（斜杠命令风格）、`@owner  fix`（多个空格）、`@owner` 单独一个名字（没 command）？
-
-3. **多 workflow 共享 chat**：两个 workflow 都 trigger 同一个 PR，是不是同一个 ChatSession？v0 倾向"按 workflow 拆 chat"（更隔离），但这意味着 PR 关联 chat 多份。
-
-4. **action 脚本的执行用户**：跟 nightme daemon 同用户？要不要降权到 nobody？v0 假设同用户。
-
-5. **workflow 文件热加载**：v0 不做（restart 才能改）。要不要在 Phase 3 加？
-
-6. **action 脚本签名验证**：用户写的 `~/.nightme/workflows/actions/*.sh` 不签名就执行。如果用户改了脚本，bot 知道。v0 接受这个风险。
-
-7. **state 清理策略**：state 文件会一直累积。要做 `nightme clean`（已有，参考 `nightme clean` 命令）覆盖？还是按 `mtime > 30d` 自动清？
-
-8. **跨 daemon 共享 state**：现在 state 写到 `~/.nightme/`。多 daemon 部署（不常见但可能）会冲突。v0 假设单 daemon。
+1. **触发器什么时候接线**：`on:` 的规格已经解析、校验、匹配，但还没有 cron 调度器和 git 事件源。接线时 workspace 的过滤、`runID` 的粒度和触发风暴的去重都要定。
+2. **内置 action 什么时候不是桩**：`notify` / `email` / `github_*` 现在都返回 `stub: true`。真做的时候要定的是认证从哪来、失败怎么落成 outcome。
+3. **run 状态要不要落盘**：现在 run 的状态只在内存里，daemon 重启就没了。落盘的话，跨 daemon 重启续跑需要解决工作目录和 chat 会话的对不上。
+4. **用户 action 脚本的权限**：现在跟 daemon 同用户跑，没有降权。
 
 ---
 
 ## 10. Cross-references
 
-- **用户参考**：[`../WFE.md`](../WFE.md) §5 (steps) §6 (expressions) §7 (examples) §8 (runtime architecture overview)
+- **用户参考**：[`../WFE.md`](../WFE.md) §5 (steps) §6 (expressions) §7 (examples) §8 (runtime architecture)
+- **personal agent**：[`../me.md`](../me.md)
 - **Channel 抽象**：[`./F-08-channel-abstraction.md`](./F-08-channel-abstraction.md)
 - **Agent 抽象**：[`./F-09-agent-abstraction.md`](./F-09-agent-abstraction.md)
-- **Gateway 分发**：[`./F-gateway.md`](./F-gateway.md) §3 inbound dispatch
-- **GitProvider 抽象**：[`./F-50-git-provider.md`](./F-50-git-provider.md)（用于 github_* actions + PR/issue events）
-- **State 持久化风格**：[`./F-runtime.md`](./F-runtime.md) §A3（JSON 0600 原子写）
-
-## 11. Change log
-
-- 2026-08-18：初版。涵盖 wfe 库 + bot subsystem 两个包的设计。
+- **Gateway 分发**：[`../SPEC.md`](../SPEC.md) §2.1 inbound dispatch
+- **状态持久化风格**：[`../CHATSTORE.md`](../CHATSTORE.md)

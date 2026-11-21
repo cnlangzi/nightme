@@ -1,6 +1,6 @@
 // keepalive_test.go — pins the per-driver d.cli keepalive contract.
 //
-// Context (per docs/bridge/dsh-shared-host.md §7.6 and the fix
+// Context (per docs/bridge/dsh.md and the fix
 // tracked in this PR): dsh.driver.Keepalive used to read
 // host.GetGlobal() to check whether the dsh backend was alive.
 // After the foreign-dsh-attached fallback path replaces the

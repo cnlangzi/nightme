@@ -174,8 +174,7 @@ func toolTitle(tool *messages.ToolInfo) string {
 // {Name, Args, Output, Err}), so the pairing is positional: the
 // adapter keeps a per-turn FIFO of started tools and pops it on the
 // matching end. That is exactly how the Feishu adapter solves the
-// same problem (pushToolStart / popToolStart in
-// internal/channel/feishu/tool_thread_merge.go).
+// same problem (pushToolStart / popToolStart in internal/channel/feishu/tool_thread_merge.go).
 func toolTaskID(seq int) string {
 	return fmt.Sprintf("tool-%d", seq)
 }

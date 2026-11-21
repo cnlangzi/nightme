@@ -4,7 +4,7 @@
 // ACP supplies the structured request and event layer above it.
 //
 // Lives in bridge/acp/ (not in a separate agent package) so the
-// whole ACP story is one tree. See docs/feat/F-21-agent-modes.md §5.3.
+// whole ACP story is one tree. See docs/bridge/acp.md.
 //
 // Agent is BOTH the template (registered with agent.Builtins) and
 // the live handle (returned by Start). The template half is set once
@@ -2253,7 +2253,7 @@ func (d *driver) deliver(ev agent.AgentEvent) agent.AgentEvent {
 	// output beyond its banner; pre-fix this was satisfied by
 	// Go's panic stack trace landing on stderr. Without the
 	// log here, an agent that terminates before SendBlocks
-	// returns "send: EOF" (cmd/nightme/test.go:202) with no
+	// returns "send: EOF" (cmd/nightme/test.go) with no
 	// other stderr noise — sub-150 bytes total — fails the
 	// "agent acknowledged within window" check. A single slog
 	// line keeps the diagnostic AND passes the gate.

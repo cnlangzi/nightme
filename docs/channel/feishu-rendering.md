@@ -5,7 +5,7 @@
 > **Source**: `../channel/feishu-rendering.md`
 
 
-> **Related**: [`SPEC.md`](../SPEC.md)§2.4 + §0.3 F-thread-route; [`F-08-channel-abstraction.md`](./F-08-channel-abstraction.md); [`F-gateway.md`](./F-gateway.md); [`../channel/feishu-rendering.md`](./../channel/feishu-rendering.md); [`../channel/feishu-rendering.md`](./../channel/feishu-rendering.md) — F-37 解决 `OutResult` 600 B 截断 backlog
+> **Related**: [`SPEC.md`](../SPEC.md)§2.4 + §0.3 F-thread-route; [`F-08-channel-abstraction.md`](../feat/F-08-channel-abstraction.md); [`SPEC.md`](../SPEC.md); [`../channel/feishu-rendering.md`](./../channel/feishu-rendering.md); [`../channel/feishu-rendering.md`](./../channel/feishu-rendering.md) — F-37 解决 `OutResult` 600 B 截断 backlog
 
 ---
 
@@ -234,15 +234,15 @@ MAY subscribe to a future `/close` event (not currently exposed; ).
 
 > **Depends on**: F-08 (Channel abstraction), F-26 (Gateway), F-27 (ChatSession), F-29 (AgentSession pool)
 
-> **Related docs**: [`SPEC.md`](../SPEC.md)[`F-gateway.md`](./F-gateway.md), [`channel/feishu-rendering.md`](../channel/feishu-rendering.md), [`../channel/feishu-rendering.md`](./../channel/feishu-rendering.md)
+> **Related docs**: [`SPEC.md`](../SPEC.md)[`SPEC.md`](../SPEC.md), [`channel/feishu-rendering.md`](../channel/feishu-rendering.md), [`../channel/feishu-rendering.md`](./../channel/feishu-rendering.md)
 
 ## 1. Description
 
 `MessageState` 是 nightme 对用户消息生命周期的可见性反馈机制。它回答 3 个问题：
 
-1. **ChatSession 收到消息没有？** — `StateReceived`
-2. **消息转给 AgentSession 了没有？** — `StateForwarded`
-3. **AgentSession 执行完成了没有？** — `StateDone` (+ 可选 `StateError`)
+1. **ChatSession 收到消息没有？** — `MessageQueued`
+2. **消息转给 AgentSession 了没有？** — `MessageSubmitted`
+3. **处理结束了没有？** — `MessageDone`(同步派发路径)/ `MessageDropped`(显式丢弃)
 
 每条普通用户消息在系统里流转时，会触发对应的 `MessageState` 事件；Channel 把它渲染成平台原生视觉表达（Feishu 渲染成 reaction emoji，Slack 渲染成 emoji 短码，Web UI 渲染成 DOM 元素，等等）。
 
@@ -290,7 +290,7 @@ MAY subscribe to a future `/close` event (not currently exposed; ).
 ### 3.1 MessageState 定义
 
 ```go
-// internal/receipt/state.go (新文件)
+// internal/agent/message_state.go (新文件)
 package receipt
 
 // MessageState is the lifecycle stage of one inbound user message
@@ -300,34 +300,35 @@ package receipt
 type MessageState int
 
 const (
-    // StateReceived: ChatSession has accepted the message but not
+    // MessageQueued: ChatSession has accepted the message but not
     // yet dispatched it to an AgentSession. Triggered on
     // ChatSession.GetOrCreate.
-    StateReceived MessageState = iota
+    MessageQueued MessageState = iota
 
-    // StateForwarded: the message has been dispatched to an
+    // MessageSubmitted: the message has been dispatched to an
     // AgentSession (lazy spawn succeeded; blocks enqueued or
-    // sent to PTY stdin). Triggered on successful
+    // sent to the bridge). Triggered on successful
     // LookupSelectedAgentSession.
-    StateForwarded
+    MessageSubmitted
 
-    // StateDone: the AgentSession has finished processing this
-    // message (EventDone arrived on the readPump). Triggered by
-    // ChatSession.runReadPump on EventDone.
-    StateDone
+    // MessageDone: the dispatcher finished interacting with this
+    // user message id. No further MessageState transitions will
+    // arrive for it. Synchronous dispatch paths (slash command,
+    // shell dispatch) that have no Prompt lifecycle use it.
+    MessageDone
 
-    // StateError (optional): the AgentSession reported an error
-    // for this message (EventError arrived). Triggered by
-    // ChatSession.runReadPump on EventError.
-    StateError
+    // MessageDropped: the message was explicitly dropped. There
+    // is no MessageFailed: the terminal execution result is
+    // carried by chatsession.Prompt.EndReason.
+    MessageDropped
 )
 
 func (s MessageState) String() string {
     switch s {
-    case StateReceived:  return "received"
-    case StateForwarded: return "forwarded"
-    case StateDone:      return "done"
-    case StateError:     return "error"
+    case MessageQueued:    return "queued"
+    case MessageSubmitted: return "submitted"
+    case MessageDone:      return "done"
+    case MessageDropped:   return "dropped"
     }
     return "unknown"
 }
@@ -349,10 +350,12 @@ func (s MessageState) String() string {
 
 | 状态 | 含义 | 何时触发 | 何时结束 |
 |---|---|---|---|
-| `StateReceived` | 系统已收到消息，等待 dispatch | `ChatSession.GetOrCreate(chatID)` 成功后 | `StateForwarded` 或消息丢弃 |
-| `StateForwarded` | 消息已转给 AgentSession，正在处理 | `ChatSession.LookupSelectedAgentSession()` 成功 | `StateDone` 或 `StateError` |
-| `StateDone` | AgentSession 处理完成 | `ChatSession.runReadPump` 收到 `EventDone` | 终态 |
-| `StateError` | AgentSession 处理出错 | `ChatSession.runReadPump` 收到 `EventError` | 终态 |
+| `MessageQueued` | 系统已收到消息，等待 dispatch | `ChatSession.GetOrCreate(chatID)` 成功后 | `MessageSubmitted` 或消息丢弃 |
+| `MessageSubmitted` | 消息已转给 AgentSession，正在处理 | `ChatSession.LookupSelectedAgentSession()` 成功 | `MessageDone` |
+| `MessageDone` | dispatcher 处理完这条用户消息 | 同步派发路径完成 / `endPrompt` 落终态 | 终态 |
+| `MessageDropped` | 消息被显式丢弃 | 显式 clear 路径 | 终态 |
+
+终态的执行结果由 `chatsession.Prompt.EndReason` 承载 —— 没有 `MessageError` / `StateError` 这一档。
 
 ---
 
@@ -407,7 +410,7 @@ func (s MessageState) String() string {
 ### 5.1 OutboundKind 枚举
 
 ```go
-// internal/gateway/messages.go — 替换现有 OutReaction
+// internal/messages/outbound.go — 替换现有 OutReaction
 type OutboundKind int
 
 const (
@@ -467,10 +470,10 @@ OutboundMessage{
 
 | 触发时机 | 状态 | 说明 |
 |---|---|---|
-| `ChatSession.GetOrCreate(chatID)` 成功后 | `StateReceived` | 消息首次进 ChatSession |
-| `ChatSession.LookupSelectedAgentSession()` 成功 | `StateForwarded` | spawn 成功或命中 running pool |
-| `ChatSession.runReadPump` 收到 `EventDone` | `StateDone` | agent 处理完 |
-| `ChatSession.runReadPump` 收到 `EventError` | `StateError` | agent 出错 |
+| `ChatSession.GetOrCreate(chatID)` 成功后 | `MessageQueued` | 消息首次进 ChatSession |
+| `ChatSession.LookupSelectedAgentSession()` 成功 | `MessageSubmitted` | spawn 成功或命中 running pool |
+| 同步派发路径完成 / `endPrompt` 落终态 | `MessageDone` | dispatcher 处理完 |
+| 显式 clear 路径 | `MessageDropped` | 消息被丢弃 |
 
 ### 6.2 触发实现机制（伪代码）
 
@@ -502,10 +505,10 @@ func (cs *ChatSession) emitMessageState(userMsgID string, state receipt.MessageS
     }
 }
 
-// 在 GetOrCreate 成功路径里调 cs.emitMessageState(userMsgID, StateReceived)
-// 在 LookupSelectedAgentSession 成功路径里调 cs.emitMessageState(userMsgID, StateForwarded)
-// 在 runReadPump EventDone 分支调 cs.emitMessageState(userMsgID, StateDone)
-// 在 runReadPump EventError 分支调 cs.emitMessageState(userMsgID, StateError)
+// 在 GetOrCreate 成功路径里调 cs.emitMessageState(userMsgID, MessageQueued)
+// 在 LookupSelectedAgentSession 成功路径里调 cs.emitMessageState(userMsgID, MessageSubmitted)
+// 在 endPrompt 落终态时调 cs.emitMessageState(userMsgID, MessageDone)
+// 显式丢弃时调 cs.emitMessageState(userMsgID, MessageDropped)
 ```
 
 ### 6.3 Runtime wiring（启动时）
@@ -583,10 +586,10 @@ func (g *gateway) OnMessageState(chatID, userMsgID string, state receipt.Message
 
 | MessageState | emoji_type（飞书预定义） | 用户视觉 |
 |---|---|---|
-| `StateReceived` | `OneSecond` | ⏳ |
-| `StateForwarded` | `OnIt` | 🔄 |
-| `StateDone` | `DONE` | ✅ |
-| `StateError` | `THUMBSUP` | ❌ (closest 预定义) |
+| `MessageQueued` | `OneSecond` | ⏳ |
+| `MessageSubmitted` | `OnIt` | 🔄 |
+| `MessageDone` | `DONE` | ✅ |
+| `MessageDropped` | (无) | 不打 reaction |
 
 **注意**：必须用飞书预定义 `emoji_type` 标识符，不是 unicode。传 unicode `⏳` 给飞书 reaction API 会返回 `99992354 data not found`。
 
@@ -680,7 +683,7 @@ E2E 飞书 DM round-trip（FEATURES.md backlog 已列）：验证用户消息从
 | 项 | 描述 |
 |---|---|
 | `OutMessageStateRemoved` 实现 | 当前 append-only 不删反应；如果未来需要（飞书 API 允许 DeleteReaction），再实现 |
-| `StateError` 的 emoji 映射细化 | 当前用 THUMBSUP 兜底，未来可加专用 emoji_type |
+| 失败态的 emoji 映射 | 失败不落在 MessageState 上(见 `Prompt.EndReason`),不需要 emoji |
 | 状态时间戳 / 序列号 / metadata | 当前只有 message_id + state；扩展字段后续可加 |
 | Receipt FSM 与 MessageState 的统一编排 | 两者独立工作，不集成；如果未来需要（如 Receipt Done 时也强制 MessageState Done）再实现 |
 | Slash command 的 MessageState | scope 明确不触发 |
@@ -694,10 +697,10 @@ E2E 飞书 DM round-trip（FEATURES.md backlog 已列）：验证用户消息从
 ## 13. References
 
 - [`SPEC.md`](../SPEC.md)— high-level architecture
-- [`F-08-channel-abstraction.md`](./F-08-channel-abstraction.md) — Channel interface
-- [`F-gateway.md`](./F-gateway.md) — Gateway architecture
-- [`F-chat-session.md`](./F-chat-session.md) — ChatSession lifecycle
-- [`F-chat-session.md`](./F-chat-session.md) — AgentSession pool
+- [`F-08-channel-abstraction.md`](../feat/F-08-channel-abstraction.md) — Channel interface
+- [`SPEC.md`](../SPEC.md) — Gateway architecture
+- [`F-chat-session.md`](../feat/F-chat-session.md) — ChatSession lifecycle
+- [`F-chat-session.md`](../feat/F-chat-session.md) — AgentSession pool
 - [`channel/feishu-rendering.md`](../channel/feishu-rendering.md) — feishu-specific implementation
 
 ---
@@ -886,11 +889,11 @@ Feishu adapter 包内 `summarize_tool.go` 提供 `summarizeToolEnd(name, args, o
 | `internal/bridge/pi/translate.go` | 同样填 `ToolEndEvent.Args`（如果 pi bridge 支持 tool_result） | — |
 | `internal/channel/feishu/adapter.go` `Send` | 按 Kind 分流：thinking/tool → thread；text/result/init/usage → receipt card | §3.4 |
 | `internal/channel/feishu/adapter.go` `buildReceiptCard` | 删 `Kind="thinking"` / `Kind="tool"` collapsible_panel 分支 | §3.4 |
-| `internal/channel/feishu/receipt_event.go` | `eventToEntry` 对 thinking/tool 返回 `(_, false)` | §3.4 |
+| `internal/channel/feishu/receipt_entry.go` | `eventToEntry` 对 thinking/tool 返回 `(_, false)` | §3.4 |
 | `internal/channel/feishu/summarize_tool.go` | 新文件：`summarizeToolEnd` + `countLines` + `truncate` + `countUniqueFiles` helpers | §3.5 |
 | `internal/channel/feishu/summarize_tool_test.go` | 新文件：覆盖各 tool 类型 + 错误分支 + args 缺失 fallback | — |
 | `internal/channel/feishu/adapter_test.go` | `TestSend_OutThinking_PostsToThread` + `TestSend_OutToolStart_PostsToThread` + `TestSend_OutToolEnd_PostsToThread`（**F-49 删除** `TestSend_OutCompaction_PostsToThread`） | — |
-| `internal/channel/feishu/receipt_event_test.go` | 删 thinking/tool assertion（这些走 thread 不进 receipt） | — |
+| `internal/channel/feishu/receipt_test.go` | 删 thinking/tool assertion（这些走 thread 不进 receipt） | — |
 | `internal/channel/feishu/adapter_test.go` | 删 `TestSend_OutThinking_AppendsWithPrefix`（§13.1 bug 修复不再需要 —— prefix 不再被 strip） | — |
 | `docs/channel/feishu-rendering.md` | §13.12 新增（决策反转记录）+ §15 实施计划修订 | §4.1 |
 | `docs/channel/feishu-rendering.md` | §3 contract 表更新 + §X.Y Thread reply path | §4.2 |
@@ -1232,7 +1235,7 @@ F-thread-route 方案下同一 turn：
   - `TestSend_OutToolEnd_PostsToThread`：验证收到 `OutToolEnd` 时调 Reply + body 经 `summarizeToolEnd` 生成（含 `📄 Read /foo.go → 1234 lines` 这类格式）。
   - ~~`TestSend_OutCompaction_PostsToThread`~~：**F-49 删除**（`OutCompaction` kind 已删除）。
   - `TestSend_OutText_FoldsIntoReceipt`：回归测试，确保 OutText / OutResult / OutInit / OutUsage 仍然 fold 进 receipt（不变）。
-- `internal/channel/feishu/receipt_event_test.go`：
+- `internal/channel/feishu/receipt_test.go`：
   - 删 thinking/tool 的 entry assertion（这些 event 不再生成 entry）~~+ compaction~~
   - 加 case：调用 `eventToEntry(EventText, "[思考] foo")` 返回 `(_, false)`（不再生成 thinking entry）
 - `internal/channel/feishu/receipt_test.go`：
@@ -1241,7 +1244,7 @@ F-thread-route 方案下同一 turn：
 
 **Gateway 层**：
 
-- `internal/gateway/translate_test.go`：
+- `internal/gateway/outbound/translate_test.go`：
   - 加 case：`Translate(EventToolEnd{Name: "Read", Args: "/foo.go", Output: "..."})` 返回 `OutboundMessage{Kind: OutToolEnd, Meta["args"]: "/foo.go"}`
 
 ### 5.2 集成
@@ -1285,14 +1288,14 @@ F-thread-route 方案下同一 turn：
 3. **ReplyInThread 才分配独立 thread_id**（D 响应 `thread_id=omt_19141bf7110e1c89`）——之后同 root_id 的 reply-true 复用此 thread。
 4. **msg.ReplyTo 必须始终是 M0**（当前用户消息 id）—— 4 条 D 全部 reply M0，**不**chain reply 到上一条 D；这反向验证 §13.10 / F-33 "单数锚点 currentTurnUserMsgID" 不变式**真的必要**（如果链式 reply，thread 碎裂成 N 个独立 "1 reply" 指示器，UI 不再汇总）。
 
-Probe 工具代码：`cmd/_probe/feishu_thread_probe.go`（mock 版）+ `cmd/_probe/send_one/main.go`（真实发送版）。决策落地后建议删除（保留实机飞书响应记录在本节即可）。
+Probe 工具是当时临时写的脚本（mock 版 + 真实发送版），不入仓；实机飞书响应记录保留在本节即可。
 
 ---
 
 ## 7. Change log
 
 - **2026-08-04 (a)** — F-37 草案（Devin 拍板反转 §13.6 折叠方案）。Docs 落地（SPEC + 本 doc + channel/feishu §13.12 + F-25 §3 收窄 + F-08 §4 自治路由例子）。代码改动 backlog §3.1。
-- **2026-08-04 (b)** — 实机飞书群（Frtpilot-Xiage）验证 "Reply / ReplyInThread+Also send it to chat / ReplyInThread" 三种形态；用 `cmd/_probe/send_one` 直接发 8 条组合消息，把命名固化进 §2.1 表格和 §6.5 实验记录；记录 `thread_id` 分配规则（顶级 / default-reply 不分配；reply-true 分配并复用）。
+- **2026-08-04 (b)** — 实机飞书群（Frtpilot-Xiage）验证 "Reply / ReplyInThread+Also send it to chat / ReplyInThread" 三种形态；用临时 probe 脚本直接发 8 条组合消息，把命名固化进 §2.1 表格和 §6.5 实验记录；记录 `thread_id` 分配规则（顶级 / default-reply 不分配；reply-true 分配并复用）。
 - **2026-08-04 (c)** — `reply_in_thread` 字段"省略 vs 显式 false"字节差异（28B）发现：`TestSend_ChatVisibleEvents_PassReplyInThreadFalse` 单测 + 代码注释固化"if replyInThread { .ReplyInThread(true) }" 必须保持的纪律。
 
 ---
@@ -1535,8 +1538,8 @@ The card element calculation must reserve one element when a checklist is presen
 ### Agent / Gateway
 
 - `internal/agent/agent.go`: task types, event kinds and payload.
-- `internal/gateway/messages.go`: outbound kinds and typed payload.
-- `internal/gateway/translate.go`: pure mappings.
+- `internal/messages/outbound.go`: outbound kinds and typed payload.
+- `internal/gateway/outbound/translate.go`: pure mappings.
 
 ### Claude bridge
 
@@ -1631,7 +1634,7 @@ User msg → Receipt Card (单张)
 为避免"流式 chunk + 最终 result"在 receipt 内显示重复,`eventToEntry.EventResult` 有 dedup:
 
 ```go
-// internal/channel/feishu/receipt_event.go:113-124 (旧)
+// internal/channel/feishu/receipt_entry.go (旧)
 if !ae.Result.IsError && lastEntry != nil &&
     lastEntry.Kind == "reply" &&
     lastEntry.Text == truncateForLog(text, perEntryMaxBytes) {
@@ -1777,7 +1780,7 @@ OutResult 经 `perEntryMaxRunes = 8000` cap(CJK 3 B/char ≈ 24 KB,远低于 30 
 
 ### 2.1 新文件
 
-**`internal/channel/feishu/card_sanitize.go`** —— markdown sanitize pipeline(移植 cc-connect):
+**`internal/channel/feishu/result_render.go`** —— markdown sanitize pipeline(移植 cc-connect):
 
 ```go
 // SanitizeCardMarkdown 是 result reply 内容的统一入口处理。Pipeline:
@@ -1787,7 +1790,7 @@ OutResult 经 `perEntryMaxRunes = 8000` cap(CJK 3 B/char ≈ 24 KB,远低于 30 
 //   4. Heading demotion — H1 → H4, H2-H6 → H5 (lark_md heading 范围窄)
 //   5. Code-block protect — ```block``` 在所有变换中保护不动
 //
-// 来自 cc-connect platform/feishu/feishu.go:3017-3104 (preprocessFeishuMarkdown / 
+// 来自 cc-connect platform/feishu/feishu.go (preprocessFeishuMarkdown /
 // sanitizeMarkdownURLs / stripInvalidFeishuCardImages / optimizeFeishuCardMarkdown)。
 // Nightme 不需要 cc-connect 的 `<at>` 处理(已在 Gateway 层 / mention.go 解决)。
 func SanitizeCardMarkdown(text string) string
@@ -1837,7 +1840,7 @@ case gateway.OutResult:
     return a.sendResultAsReply(ctx, msg.ChatID, msg.ReplyTo, text, false)
 ```
 
-**`internal/channel/feishu/receipt_event.go`** —— 删 dedup 协调 + 删 EventResult case:
+**`internal/channel/feishu/receipt_entry.go`** —— 删 dedup 协调 + 删 EventResult case:
 
 ```go
 // (1) case agent.EventResult 整段删除 (101-140)
@@ -1897,7 +1900,7 @@ case gateway.OutResult:
 | 同上 | `TestSend_OutResult_EmptySkipped` | text="",!IsError → return nil,no send |
 | 同上 | `TestSend_OutResult_IsError_PrefixedWithIcon` | text + "❌ " 前缀 |
 | 同上 | `TestSend_OutResult_Orphan_NoUserMsgID_TopLevel` | userMsgID="" → 走 sendRawOutText fallback |
-| `internal/channel/feishu/receipt_event_test.go` | `TestEventToEntry_NoEventResultCase` | 删除后:eventToEntry 没有 EventResult 命中;`(_, false)` 验证 |
+| `internal/channel/feishu/receipt_test.go` | `TestEventToEntry_NoEventResultCase` | 删除后:eventToEntry 没有 EventResult 命中;`(_, false)` 验证 |
 | 同上 | 更新 `TestTruncateForLog_RuneAware`:删 EventResult 相关断言(只剩 EventText / EventError 用) |
 
 ### 3.2 集成测试(收尾阶段)
@@ -1933,10 +1936,10 @@ case gateway.OutResult:
 | 1 | **本文档**(`../channel/feishu-rendering.md`) | `docs/feat/` | 零 |
 | 2 | SPEC.md §0.x + §12 更新 | `docs/SPEC.md` | 零 |
 | 3 | channel/feishu.md + §12 更新 | `docs/channel/feishu-rendering.md` | 零 |
-| 4 | `card_sanitize.go` 移植 | `internal/channel/feishu/card_sanitize.go`(新) | 低 |
+| 4 | `card_sanitize.go` 移植 | `internal/channel/feishu/result_render.go`(新) | 低 |
 | 5 | `result_render.go` 移植 | `internal/channel/feishu/result_render.go`(新) | 低 |
 | 6 | `Send(OutResult)` + `sendResultAsReply` | `internal/channel/feishu/adapter.go`(改) | 中 |
-| 7 | 删除 dedup + EventResult case | `internal/channel/feishu/receipt_event.go`(改) | 低 |
+| 7 | 删除 dedup + EventResult case | `internal/channel/feishu/receipt_entry.go`(改) | 低 |
 | 8 | `card_sanitize_test.go` 全覆盖 | 新文件 | 零 |
 | 9 | `result_render_test.go` 全覆盖 | 新文件 | 零 |
 | 10 | `adapter_test.go` 新增 OutResult 系用例 | 改 | 零 |
@@ -2323,7 +2326,7 @@ becomes two thread replies again (pre-F-38 UX).
 
 | File | Change |
 |------|--------|
-| `internal/chatsession/tools_mode.go` | NEW — `ToolsMode` enum + `ParseToolsMode` + `String`（F-102 重构后从 `internal/registry/tools_mode.go` 搬过来；不再有 alias 文件） |
+| `internal/chatsession/tools_mode.go` | NEW — `ToolsMode` enum + `ParseToolsMode` + `String`（F-102 重构后从 `internal/chatsession/tools_mode.go` 搬过来；不再有 alias 文件） |
 | `internal/chatsession/tools_mode_test.go` | NEW — round-trip, missing-field default, omitempty on zero, type-safety |
 | `internal/registry/chat_session_entry.go` | Add `ToolsMode int` field with `omitempty`（F-102 后由 `agent.ToolsMode` 改为裸 int） |
 | `internal/chatsession/chatsession.go` | Add `toolsMode` field, default `ToolsModeHide` in `New()`, `SetToolsMode` / `ToolsMode()`, persistence cast `int(cs.toolsMode)` |
@@ -2413,7 +2416,7 @@ User msg → Final Result Reply (F-39 独立 reply, 锚同 userMsgID)
 `eventToEntry(EventText)` 当前对所有流式 chunk 走 `truncateForLog(text, perEntryMaxBytes=600)`:
 
 ```go
-// internal/channel/feishu/receipt_event.go:52-57 (现状)
+// internal/channel/feishu/receipt_entry.go (现状)
 case agent.EventText:
     text := strings.TrimSpace(ae.Text)
     if text == "" { return LogEntry{}, false }
@@ -2618,7 +2621,7 @@ F-40 删了 600 字节 entry-level 截断,允许单 entry 占多个 div。一个
 
 ### 2.1 改动的文件
 
-**`internal/gateway/messages.go`** —— `OutText` 常量改名为 `OutReply`:
+**`internal/messages/outbound.go`** —— `OutText` 常量改名为 `OutReply`:
 
 ```go
 const (
@@ -2635,7 +2638,7 @@ const (
 )
 ```
 
-**`internal/gateway/translate.go`** —— `EventText` 翻译路径里 `Kind: OutText` → `Kind: OutReply`:
+**`internal/gateway/outbound/translate.go`** —— `EventText` 翻译路径里 `Kind: OutText` → `Kind: OutReply`:
 
 ```go
 case agent.EventText:
@@ -2726,7 +2729,7 @@ func (r *MessageReceipt) IsCompleted() bool {
 }
 ```
 
-**`internal/channel/feishu/receipt_event.go`** —— `eventToEntry(EventText)` 删 `truncateForLog(text, 600)`:
+**`internal/channel/feishu/receipt_entry.go`** —— `eventToEntry(EventText)` 删 `truncateForLog(text, 600)`:
 
 ```go
 // (1) case agent.EventText:删 truncateForLog
@@ -2829,7 +2832,7 @@ return r.ch.Send(ctx, gateway.OutboundMessage{
 
 | 文件 | 用例 | 断言 |
 |---|---|---|
-| `internal/channel/feishu/receipt_event_test.go` | `TestEventToEntry_Text_NoTruncate` | `EventText{Text: 1500 chars}` → entry `Text == 原始 1500 chars`(无 600B truncate) |
+| `internal/channel/feishu/receipt_test.go` | `TestEventToEntry_Text_NoTruncate` | `EventText{Text: 1500 chars}` → entry `Text == 原始 1500 chars`(无 600B truncate) |
 | 同上 | `TestEventToEntry_Text_EmptySkipped` | `EventText{Text: "  "}` → `(_, false)` |
 | 同上 | `TestEventToEntry_Text_ThinkingPrefix_Skipped` | `EventText{Text: "[思考] hello"}` → `(_, false)`(F-34 不变)|
 | `internal/channel/feishu/receipt_test.go` | `TestBuildReceiptCard_LongReply_SplitMultiDiv` | append 一条 2500 char EventText → card 含 3 个 div(≤ 1000 runes each),code block 保持 atomic |
@@ -2847,7 +2850,7 @@ return r.ch.Send(ctx, gateway.OutboundMessage{
 | 同上 | `TestSend_OutReply_LongText_TruncatesToEnvelope` | text 15000 runes → 进入 28 KB budget 路径,log warn + truncate |
 | 同上 | `TestSend_OutReply_Orphan_NoUserMsgID_TopLevel` | `userMsgID == ""` → fail-safe `sendRawOutText` |
 | 同上 | `TestSend_OutReply_SanitizeApplied` | text 含 `[x](relative)` → sanitize 后 plain text(`230001 invalid href` 防御) |
-| `internal/gateway/translate_test.go`(若存在) | `TestTranslate_EventText_OutReply` | `Translate(EventText{Text: "hello"})` → `OutboundMessage{Kind: OutReply, Text: "hello"}` |
+| `internal/gateway/outbound/translate_test.go`(若存在) | `TestTranslate_EventText_OutReply` | `Translate(EventText{Text: "hello"})` → `OutboundMessage{Kind: OutReply, Text: "hello"}` |
 | `cmd/nightme/run_test.go`(若存在) | `TestResponderSend_OutReply` | 验证 `Kind: gateway.OutReply`(compile-time + runtime) |
 
 ### 3.2 集成测试(回归)
@@ -2981,8 +2984,8 @@ Feishu receipt 在 + F-25 落地后已经形成完整 rolling-log 形态，但�
 ### 0.2 ⏳ / 🔄 reactions 跟其他 waiting 信号重复
 
 **Feishu 端已经存在的 waiting 信号**：
-1. ⏳ reaction (StateReceived) ── AddReaction(userMsgID, "OneSecond")
-2. 🔄 reaction (StateForwarded) ── AddReaction(userMsgID, "OnIt")
+1. ⏳ reaction (MessageQueued) ── AddReaction(userMsgID, "OneSecond")
+2. 🔄 reaction (MessageSubmitted) ── AddReaction(userMsgID, "OnIt")
 3. Tool / Think thread replies (F-37 thread route) ── execution 持续在 thread 报
 4. 未来可能的 OutReply / OutTaskCreate ── 一旦内容到达，card 出现
 
@@ -3062,12 +3065,12 @@ case gateway.OutMessageState:
     messageID := msg.MessageState.MessageID
     state := msg.MessageState.State
 
-    // F-42: 中间态 (StateReceived / StateForwarded) silent drop
+    // F-42: 中间态 (MessageQueued / MessageSubmitted) silent drop
     // - OutThinking / OutToolStart / OutToolEnd 已经在 thread 持续报
     // - 首 OutReply 到达时 receipt 直接出,无需前置 reaction
-    // - 终态 (StateDone / StateError) 仍渲染作为不可替代的确认
+    // - 终态 (MessageDone / MessageDropped) 仍渲染作为不可替代的确认
     switch state {
-    case agent.StateReceived, agent.StateForwarded:
+    case agent.MessageQueued, agent.MessageSubmitted:
         return nil
     }
 
@@ -3079,11 +3082,11 @@ case gateway.OutMessageState:
 ```
 
 **保留**：
-- `mapStateToFeishuEmoji` 函数（仍产 "DONE" / "THUMBSUP"）
+- `mapStateToFeishuEmoji` 函数（仍产 "DONE" / "OnIt" / "OneSecond"）
 - `messageStates map[string]agent.MessageState` idempotency 表
 - `AddReaction` 实现
 
-**删除**：StateReceived / StateForwarded 在 Send() case 中的处理分支（return nil 兜底）。
+**删除**：MessageQueued / MessageSubmitted 在 Send() case 中的处理分支（return nil 兜底）。
 
 ### 1.3 TaskList markdown 标题
 
@@ -3127,7 +3130,7 @@ func (a *Adapter) ensureReceiptForTask(
 
 // Send() OutReply case: receipt nil 时调 ensureReceiptForReply
 // Send() OutTaskCreate/OutTaskUpdate case: receipt nil 时调 ensureReceiptForTask
-// Send() OutMessageState case: StateReceived/Forwarded → return nil
+// Send() OutMessageState case: MessageQueued/MessageSubmitted → return nil
 // Send() OutInit/OutUsage case: receipt nil → silent drop (今天行为不变)
 ```
 
@@ -3166,10 +3169,10 @@ func (a *Adapter) ensureReceiptForTask(
 | `TestSend_OutTaskCreate_FirstEventCreatesReceipt` (NEW) | 首次 OutTaskCreate → ensure path + card body 含 `**📋 Tasks**` + task list |
 | `TestSend_OutInit_BeforeReceipt_SilentlyDrop` (NEW) | receipt nil 时 OutInit → return nil，`SendCard` 不调 |
 | `TestSend_OutUsage_BeforeReceipt_SilentlyDrop` (NEW) | 同上 |
-| `TestSend_OutMessageState_StateReceivedIsSilentDrop` (RENAME from `..._FirstReceivedNotSkipped`) | `StateReceived` → return nil，`AddReaction` 不调 |
-| `TestSend_OutMessageState_StateForwardedIsSilentDrop` (NEW) | `StateForwarded` → 同上 |
-| `TestSend_OutMessageState_StateDoneAddsReaction` (NEW) | `StateDone` → `AddReaction(messageID, "DONE")` 仍调 |
-| `TestSend_OutMessageState_StateErrorAddsReaction` (NEW) | `StateError` → `AddReaction(messageID, "THUMBSUP")` 仍调 |
+| `TestSend_OutMessageState_MessageQueuedIsSilentDrop` (RENAME from `..._FirstReceivedNotSkipped`) | `MessageQueued` → return nil，`AddReaction` 不调 |
+| `TestSend_OutMessageState_MessageSubmittedIsSilentDrop` (NEW) | `MessageSubmitted` → 同上 |
+| `TestSend_OutMessageState_MessageDoneAddsReaction` (NEW) | `MessageDone` → `AddReaction(messageID, "DONE")` 仍调 |
+| `TestSend_OutMessageState_MessageDroppedIsSilent` (NEW) | `MessageDropped` → return nil，不打 reaction |
 | `TestBuildTaskChecklist_AlwaysHasMarkdownTitle` (NEW) | task list 渲染首行 = `**📋 Tasks**` |
 | `TestBuildTaskChecklist_TitleWithReplyBody` (NEW) | 跟 OutReply body 共存时仍加标题 |
 
@@ -3537,7 +3540,7 @@ func (a *Adapter) sendReplyInThreadAndChat(
 - `splitMarkdownForDivs` — 已在 `receipt_split.go`
 - `buildResultPayload` — F-39 已存在，三段 dispatch（text / post+md / card）
 - `sendContent` — 底层 send，复用 F-37 / F-39
-- `truncateForLog` — `receipt_event.go:176` 原始 helper；`result_render.go::truncateRunes` 是 thin alias（F-39 加的）。F-44 后统一调 `truncateForLog`，`truncateRunes` 删除（仅 OutResult 一处用，无 caller）
+- `truncateForLog` — `receipt_event.go` 原始 helper；`result_render.go::truncateRunes` 是 thin alias（F-39 加的）。F-44 后统一调 `truncateForLog`，`truncateRunes` 删除（仅 OutResult 一处用，无 caller）
 
 **新增常量**：
 - `perReplyMaxBytes = 6 * 1024`（与 `perResultMaxBytes` 同值，独立常量保证语义清晰）— 在 `result_render.go` 定义
@@ -3708,9 +3711,9 @@ func (r *MessageReceipt) evictOverflowLocked()       // ← 删除(appendEntryLo
 - `promptHeaderLine` / `footerLine` 计算 (~50 行)
 - **receipt.go 段小计: ~615 行**
 
-#### **`internal/channel/feishu/receipt_event.go`**
+#### **`internal/channel/feishu/receipt_entry.go`**
 
-**整个文件删除**。
+（历史记录：本节描述的 `receipt_event.go` 已并入本文件，entry 构造与渲染都在这里。）
 
 理由：F-44 后 `MessageReceipt.Append` 整体删除，`Append` 是 `eventToEntry` 在 production 的唯一 caller（`ensureReceiptForReply` 也调它但同步删除）。`eventToEntry` 9 个 case（`EventText` / `EventToolStart` / `EventToolEnd` / `EventError` / `EventPermission` / `EventDone` / `EventUsage` / `EventCompaction` / `EventAgentConnected`）全部 unreachable：
 
@@ -3728,14 +3731,14 @@ func (r *MessageReceipt) evictOverflowLocked()       // ← 删除(appendEntryLo
 **连带删除**：
 - `LogEntry` struct（仅 `eventToEntry` / `appendEntryLocked` 用，0 caller）
 - `formatUsageText`（仅 `eventToEntry(EventUsage)` / test 用，0 caller）
-- `truncateForLog`（原始 helper；但 `receipt_event_test.go` 仍有测试，且 `internal/bridge/claudecode/stream.go:584` 有同名 duplicate。F-44 后 `truncateForLog` 留在 `result_render.go` 作为唯一实现；claudecode duplicate 是另一包，**不动**）
+- `truncateForLog`（原始 helper；但 `receipt_event_test.go` 仍有测试，且 `internal/bridge/claudecode/stream.go` 有同名 duplicate。F-44 后 `truncateForLog` 留在 `result_render.go` 作为唯一实现；claudecode duplicate 是另一包，**不动**）
 - `thinkingPrefix` 常量（仅 `eventToEntry(EventText)` 用，0 caller）
 - **receipt_event.go 段小计: ~210 行**（整个文件）
 
 **连带删除测试文件**：
 - `receipt_event_test.go` ~ 全文件删除（覆盖 `eventToEntry` / `truncateForLog` / `formatUsageText`，这些都删了）
 
-#### **`internal/channel/feishu/card_sanitize.go`**
+#### **`internal/channel/feishu/result_render.go`**
 
 整个文件**合并进 `result_render.go`** 作为私有函数。当前 OutReply + OutResult 都用 `SanitizeCardMarkdown`，F-44 后只剩 OutReply + OutResult 两个 caller（都是 `buildResultPayload` 路径），不需要独立文件。
 
@@ -3747,11 +3750,11 @@ func (r *MessageReceipt) evictOverflowLocked()       // ← 删除(appendEntryLo
 
 **不变**。`buildTaskChecklistChunks` / `renderTaskLine` / `renderTaskFallbackText` 继续为 task receipt 服务。`renderTaskFallbackText` **保留** — 作为 `ensureReceiptForTask` SendCard 失败时的降级路径（F-44 不动 task receipt，失败路径仍可用）。
 
-#### **`internal/gateway/messages.go`**
+#### **`internal/messages/outbound.go`**
 
 **不变**。`OutboundMessage` 字段（`Init` / `Usage` typed field）保持；F-44 仅在 Channel 层 silent drop，wire format 不变。
 
-#### **`internal/gateway/translate.go`**
+#### **`internal/gateway/outbound/translate.go`**
 
 **不变**。`EventAgentConnected` / `EventUsage` 仍翻译为 `OutboundMessage{Init: ...}` / `{Usage: ...}`；footer PR 会用。
 
@@ -3805,7 +3808,7 @@ func (r *MessageReceipt) evictOverflowLocked()       // ← 删除(appendEntryLo
 | 同上 | `TestBuildReceiptCard_NoTask_EmptyCard` | receipt 无 task → card body elements 为空（SendCard 仍可发,Feishu 接受空 elements） |
 | 同上 | `TestBuildReceiptCard_TaskSnapshotReplace` | 两次 `SetTaskList` 不同 snapshot → 第二次 PATCH 替换整段 checklist |
 | 同上 | `TestRenderLocked_TaskReceiptUpdates` | task snapshot 变化触发 PATCH;无 task → 无 PATCH |
-| `internal/channel/feishu/receipt_event_test.go` | **整个文件删除** | 覆盖 `eventToEntry` / `truncateForLog` / `formatUsageText` — 这些函数全部删除 |
+| `internal/channel/feishu/receipt_test.go` | **整个文件删除** | 覆盖 `eventToEntry` / `truncateForLog` / `formatUsageText` — 这些函数全部删除 |
 | `internal/channel/feishu/receipt_test.go`(扩) | `TestAppend_Deleted` | 删除测试:compile-time + grep 确认 `MessageReceipt.Append` 不存在 |
 | 同上 | `TestSetCompleted_SetExecuting_Deleted` | 删除测试:确认 `SetCompleted` / `SetExecuting` 不存在 |
 | 同上 | `TestLogEntry_Deleted` | 删除测试:确认 `LogEntry` struct 不存在 |
@@ -3829,14 +3832,14 @@ rg -n "ensureReceiptForReply|isOverflowingReceipt|sendReplyAsMessage" --type=go 
 rg -n "func.*MessageReceipt.*(Append|SetExecuting|SetCompleted|appendEntryLocked|lastEntryLocked|EntryCount|evictOverflowLocked)" --type=go  # 期望: 0 命中
 rg -n "type LogEntry struct" --type=go  # 期望: 0 命中
 rg -n "func eventToEntry|func formatUsageText" --type=go  # 期望: 0 命中
-ls internal/channel/feishu/receipt_event.go 2>&1  # 期望: No such file
-ls internal/channel/feishu/receipt_event_test.go 2>&1  # 期望: No such file
+ls internal/channel/feishu/receipt_entry.go 2>&1  # 期望: 存在(entry 构造已并入这里)
+ls internal/channel/feishu/receipt_test.go 2>&1  # 期望: 存在(测试已并入这里)
 
 # 验证 buildReceiptCard 不再引用 entries / agentName / workspace / branch / inputTokens / outputTokens
 rg -n "r\.entries|r\.agentName|r\.workspace|r\.branch|r\.inputTokens|r\.outputTokens" internal/channel/feishu/receipt.go  # 期望: 0 命中
 
 # 验证 card_sanitize.go 已删除,SanitizeCardMarkdown 移到 result_render.go
-ls internal/channel/feishu/card_sanitize.go 2>&1  # 期望: No such file
+ls internal/channel/feishu/result_render.go 2>&1  # 期望: No such file
 rg -n "func SanitizeCardMarkdown" --type=go  # 期望: 1 命中 (in result_render.go)
 
 # 验证 OutReply / OutResult / OutTask* 路径独立可测
@@ -3858,8 +3861,8 @@ go test ./internal/channel/feishu/... -run TestSend_OutTask
 | 3 | channel/feishu.md 渲染映射表更新 | `docs/channel/feishu-rendering.md` | 零 |
 | 4 | FEATURES.md 索引条目 | `docs/FEATURES.md` | 零 |
 | 5 | `card_sanitize.go` 合并到 `result_render.go`(`SanitizeCardMarkdown` 仍 exported,因为 `buildInteractiveCard` 也调用) | `internal/channel/feishu/` | 低 |
-| 6 | `receipt_event.go` 整个文件删除 | `internal/channel/feishu/receipt_event.go` | 中（连带删 `LogEntry` / `eventToEntry` / `formatUsageText` / `thinkingPrefix`） |
-| 7 | `receipt_event_test.go` 整个文件删除 | `internal/channel/feishu/receipt_event_test.go` | 低 |
+| 6 | `receipt_event.go` 整个文件删除 | `internal/channel/feishu/receipt_entry.go` | 中（连带删 `LogEntry` / `eventToEntry` / `formatUsageText` / `thinkingPrefix`） |
+| 7 | `receipt_event_test.go` 整个文件删除 | `internal/channel/feishu/receipt_test.go` | 低 |
 | 8 | `receipt.go` 删 `Append` / `SetExecuting` / `SetCompleted` / `appendEntryLocked` / `lastEntryLocked` / `EntryCount` / `evictOverflowLocked` + `entries` / `agentName` / `workspace` / `branch` / `inputTokens` / `outputTokens` 字段 + 简化 `buildReceiptCard` + `renderLocked` | `internal/channel/feishu/receipt.go` | 中-高 |
 | 9 | `adapter.go` 删 `ensureReceiptForReply` / `isOverflowingReceipt` / `sendReplyAsMessage` | `internal/channel/feishu/adapter.go` | 中 |
 | 10 | `adapter.go` 加 `sendReplyInThreadAndChat` helper + 新增 `perReplyMaxBytes` 常量 | `internal/channel/feishu/adapter.go` | 中 |
@@ -3999,17 +4002,17 @@ F-44 在 `internal/channel/feishu/receipt.go` 把 receipt 简化为只装 Task c
 ### 0.2 现状
 
 **token 数据已经到达 Gateway，但不被消费**：
-- `internal/agent/agent.go:296` `UsageEvent`（4 个 token 字段 + CostUSD）
-- `internal/bridge/claudecode/stream.go:601` `decodeUsage` 解析 Anthropic API 字段
-- `internal/gateway/translate.go:158` `Translate(EventUsage)` 产出 `OutboundMessage{Kind: OutUsage, Usage: *UsageInfo}`
+- `internal/agent/agent.go` `UsageEvent`（4 个 token 字段 + CostUSD）
+- `internal/bridge/claudecode/stream.go` `decodeUsage` 解析 Anthropic API 字段
+- `internal/gateway/outbound/translate.go` `Translate(EventUsage)` 产出 `OutboundMessage{Kind: OutUsage, Usage: *UsageInfo}`
 - `internal/channel/feishu/adapter.go::Send` case `OutUsage`：**silent drop**（F-44 §0.11 落地）
 
 **model 数据已经到达 Gateway，也不被消费**：
-- `agent.AgentConnectedEvent.Model` 字段已存在（`internal/agent/agent.go:341`）
-- `internal/gateway/translate.go:205` 拼字符串 `"session initialized (model: %s)"`，但这个字符串随 `OutInit` 一起被 silent drop
+- `agent.AgentConnectedEvent.Model` 字段已存在（`internal/agent/agent.go`）
+- `internal/gateway/outbound/translate.go` 拼字符串 `"session initialized (model: %s)"`，但这个字符串随 `OutInit` 一起被 silent drop
 
 **AgentSession wrapper 完全不感知这些**：
-- `internal/chatsession/agentsession.go:43` `AgentSession` struct 只有 ID / ChatSessionID / Agent / Cwd / pid / status / args / 时间戳 / ExitCode / ResumeID / handle / handleEventsClosed
+- `internal/agentsession/session.go` `AgentSession` struct 只有 ID / ChatSessionID / Agent / Cwd / pid / status / args / 时间戳 / ExitCode / ResumeID / handle / handleEventsClosed
 - **没有任何 token / model / cost 字段**
 
 ### 0.3 设计迭代（两轮收紧）
@@ -4137,7 +4140,7 @@ case gateway.OutReply, gateway.OutResult,
 ### 1.3 StatusBar 字段语义
 
 ```go
-// internal/gateway/messages.go (NEW)
+// internal/messages/outbound.go (NEW)
 type StatusBar struct {
     // Agent is the registry name of the agent that produced this
     // outbound event (e.g. "claude", "codex"). Sourced from
@@ -4177,7 +4180,7 @@ type StatusBar struct {
 ### 1.4 AgentSession 元数据（runtime 自管）
 
 ```go
-// internal/chatsession/agentsession.go
+// internal/agentsession/session.go
 type AgentSession struct {
     // ... 既有字段 ...
     Agent         string  // 已有，immutable
@@ -4368,14 +4371,14 @@ type GitStatusSnapshot struct {
 }
 ```
 
-**Render 路径**（`internal/statusbar/statusbar.go::StatusBarLines`,原 `internal/channel/feishu/usage_footer.go::formatStatusBarLines`,2026-08-22 plan-D 抽到共享包）：
+**Render 路径**（`internal/statusbar/statusbar.go::StatusBarLines`,原 `internal/statusbar/statusbar.go::formatStatusBarLines`,2026-08-22 plan-D 抽到共享包）：
 - 现有 line 1 / line 2 不变
 - 新增 line 3：`formatGitLine(ctx)` 返回非空时 append
 - `formatGitLine` 内部调 `formatWorkspacePath`（无 HOME 处理、≤ 2 组件完整、> 2 截尾）
 
 **测试覆盖**：
-- `internal/gtw/git_status_test.go` (NEW) — 12 case：clean / dirty / detached HEAD (3 sub) / no upstream / ahead+behind / conflicts / ignored / empty output / not-a-repo
-- `internal/channel/feishu/usage_footer_test.go` — 新增 `TestFormatWorkspacePath`（17 case）+ `TestFormatGitLine_*`（8 case）+ `TestFormatSessionFooterLines_WithGitLine` / `_GitOnly`
+- `internal/command/gtw/git_status_test.go` (NEW) — 12 case：clean / dirty / detached HEAD (3 sub) / no upstream / ahead+behind / conflicts / ignored / empty output / not-a-repo
+- `internal/statusbar/statusbar_test.go` — 新增 `TestFormatWorkspacePath`（17 case）+ `TestFormatGitLine_*`（8 case）+ `TestFormatSessionFooterLines_WithGitLine` / `_GitOnly`
 
 **不变式**：
 - `formatStatusBarLines` 已存在测试全部通过（line 1/2 行为不变）
@@ -4384,12 +4387,12 @@ type GitStatusSnapshot struct {
 - 无生产代码注入：测试用真实 mock git output + 直接构造 `StatusBar` 输入，不引入 test-only 变量
 
 **F-48 PR scope**：
-- `internal/gtw/git_status.go` (NEW)
-- `internal/gtw/git_status_test.go` (NEW)
-- `internal/gateway/messages.go` — `StatusBar` 加 2 个字段
+- `internal/command/gtw/git_status.go` (NEW)
+- `internal/command/gtw/git_status_test.go` (NEW)
+- `internal/messages/outbound.go` — `StatusBar` 加 2 个字段
 - `cmd/nightme/run.go::newEventHandler` — stamp 时调用 `gtw.CollectStatus`
-- `internal/channel/feishu/usage_footer.go` — line 3 渲染 + `formatWorkspacePath`
-- `internal/channel/feishu/usage_footer_test.go` — 扩展测试
+- `internal/statusbar/statusbar.go` — line 3 渲染 + `formatWorkspacePath`
+- `internal/statusbar/statusbar_test.go` — 扩展测试
 
 ### 1.8 Compaction Counter (F-49 follow-up)
 
@@ -4624,7 +4627,7 @@ type StatusBar struct {
 }
 ```
 
-**Render 路径**（`internal/statusbar/statusbar.go::StatusBarLines`,原 `internal/channel/feishu/usage_footer.go::formatStatusBarLines`,2026-08-22 plan-D 抽到共享包）：
+**Render 路径**（`internal/statusbar/statusbar.go::StatusBarLines`,原 `internal/statusbar/statusbar.go::formatStatusBarLines`,2026-08-22 plan-D 抽到共享包）：
 - Line 1 idParts：`["🤖:", ctx.Agent, "·", ctx.Model, "·", ctx.SessionID]`（Agent / Model / SessionID 各自独立 omit）
 - Line 3 formatGitLine：`parts := []string{"📁: " + ws, ...}`（emoji 头部加 `:`）
 - Line 2 不变
@@ -4645,7 +4648,7 @@ if s.Agent != "" || s.Model() != "" || s.SessionID() != "" || hasGit ||
 }
 ```
 
-**测试覆盖**（`internal/channel/feishu/usage_footer_test.go`）：
+**测试覆盖**（`internal/statusbar/statusbar_test.go`）：
 - 既有 27 case 全部更新 `🤖` → `🤖:`、`📁 ` → `📁: `（byte-level snapshot 测试需要同步）
 - 新增 `TestFormatSessionFooterLines_IdentityWithSessionID`：渲染 `🤖: claude · opus-4-5 · <sid>`
 - 新增 `TestFormatSessionFooterLines_SessionIDOnly`：锁定 leading-separator caveat（`🤖: · <sid>`）
@@ -4658,10 +4661,10 @@ if s.Agent != "" || s.Model() != "" || s.SessionID() != "" || hasGit ||
 - `pty`：pty 没有 init 事件，SessionID 为空，footer 跳过该 segment（既有 `each segment omitted independently` 规则自然处理）
 
 **F-56 PR scope**：
-- `internal/gateway/messages.go` — `StatusBar` 加 1 个字段
+- `internal/messages/outbound.go` — `StatusBar` 加 1 个字段
 - `cmd/nightme/run.go::stampFromAS` — 填充 + materialize条件
-- `internal/channel/feishu/usage_footer.go` — Line 1 加 sessionid 段 + emoji `:` 后缀 + Line 3 emoji `:` 后缀
-- `internal/channel/feishu/usage_footer_test.go` — 同步既有 fixture + 新增 2 个 case
+- `internal/statusbar/statusbar.go` — Line 1 加 sessionid 段 + emoji `:` 后缀 + Line 3 emoji `:` 后缀
+- `internal/statusbar/statusbar_test.go` — 同步既有 fixture + 新增 2 个 case
 - `docs/channel/feishu-rendering.md` — 本节
 
 ---
@@ -4670,7 +4673,7 @@ if s.Agent != "" || s.Model() != "" || s.SessionID() != "" || hasGit ||
 
 ### 2.1 `internal/agent/agent.go`
 
-**改动 A**：`UsageInfo` 从 `internal/gateway/messages.go` 搬到 `internal/agent/agent.go`（紧挨 `UsageEvent`）。
+**改动 A**：`UsageInfo` 从 `internal/messages/outbound.go` 搬到 `internal/agent/agent.go`（紧挨 `UsageEvent`）。
 
 ```go
 // 原因：chatsession 包要 import UsageInfo，但不应反向 import gateway。
@@ -4693,7 +4696,7 @@ type UsageInfo struct {
 InputTokens int
 ```
 
-### 2.2 `internal/gateway/messages.go`
+### 2.2 `internal/messages/outbound.go`
 
 **改动 A**：定义 `StatusBar` typed struct（见 §1.3）。
 
@@ -4731,7 +4734,7 @@ type AgentSessionEntry struct {
 
 **JSON 兼容**：Go 默认 JSON unmarshal 容忍缺失字段——`agent_sessions.json` 无 `cumulativeUsage` / `model` 时安全 fallback 到零值。
 
-### 2.4 `internal/chatsession/agentsession.go`
+### 2.4 `internal/agentsession/session.go`
 
 **改动 A**：struct 加 3 个字段（`modelMu` / `Model` / `cumulativeUsageMu` / `cumulativeUsage` / `cumulativeDirty`）。
 
@@ -4840,7 +4843,7 @@ _ = mgr.PersistAgentSession(as)
 - `/new <agent>`：只重建单个 AgentSession
 - `/new`：重建 selectedCwd 下所有 AgentSession（pool 内）
 
-### 2.7 `internal/channel/feishu/usage_footer.go` (NEW)
+### 2.7 `internal/statusbar/statusbar.go` (NEW)
 
 **新文件**：
 
@@ -4936,7 +4939,7 @@ if footer != "" {
 
 1. **`refactor(agent): move UsageInfo to agent package (alias in gateway)`**
    - `internal/agent/agent.go` 新增 `UsageInfo` struct
-   - `internal/gateway/messages.go` 改为 `type UsageInfo = agent.UsageInfo`
+   - `internal/messages/outbound.go` 改为 `type UsageInfo = agent.UsageInfo`
    - 修 `UsageInfo.InputTokens` 注释（§2.1 改动 B）
 
 2. **`feat(registry): AgentSessionEntry add Model + CumulativeUsage fields`**
@@ -4949,7 +4952,7 @@ if footer != "" {
    - `Entry()` / `FromAgentSessionEntry` 同步
 
 4. **`feat(gateway): StatusBar typed field on OutboundMessage`**
-   - `internal/gateway/messages.go` 新增 `StatusBar` struct
+   - `internal/messages/outbound.go` 新增 `StatusBar` struct
    - `OutboundMessage` 加 `StatusBar *StatusBar` 字段
 
 5. **`feat(runtime): newEventHandler accumulate + capture + stamp StatusBar + PersistIfDirty`**
@@ -4959,7 +4962,7 @@ if footer != "" {
    - `internal/command/newcmd/cmd.go::Handle` 加 2 行（原 `internal/gateway/handlers_chatsession.go::handleNew`；F-102 之后 slash command 已统一迁移到 `internal/command/<name>/`）
 
 7. **`feat(feishu): formatStatusBar helper + 3 main-chat case 渲染 footer`**
-   - 新文件 `internal/channel/feishu/usage_footer.go`
+   - 新文件 `internal/statusbar/statusbar.go`
    - `internal/channel/feishu/adapter.go` 改 `Send` 3 case + 改 `buildReceiptCard` 签名 + 改 `sendReplyInThreadAndChat` / `sendResultAsReply` 签名
 
 8. **`docs(SPEC): §0.12 F-45 footer + cumulative persistence`**
@@ -4977,14 +4980,14 @@ if footer != "" {
 
 | 测试 | 文件 | 覆盖 |
 |------|------|------|
-| `TestSetModel_Idempotent` | `internal/chatsession/agentsession_test.go` (NEW) | 第一次 SetModel 设值，第二次空值不覆盖，第二次非空值仍允许覆盖（用于 --model 切换场景） |
-| `TestAccumulateUsage_Race` | `internal/chatsession/agentsession_test.go` | 100 goroutine × 1000 increments，验证最终 sum 正确 + race detector 无 warning |
-| `TestResetCumulative_Clears` | `internal/chatsession/agentsession_test.go` | 累加 → ResetCumulative → CumulativeUsage() 全零 + dirty=true |
-| `TestPersistIfDirty_NoOpWhenClean` | `internal/chatsession/agentsession_test.go` | dirty=false 时 PersistIfDirty 不调 persist callback |
-| `TestPersistIfDirty_DirtyResets` | `internal/chatsession/agentsession_test.go` | dirty=true 时调一次 callback，dirty 立即重置（不会双重落盘） |
-| `TestEntry_RoundtripPreserves` | `internal/chatsession/agentsession_test.go` | `Entry() → JSON marshal → unmarshal → FromAgentSessionEntry` 字段全相等 |
+| `TestSetModel_Idempotent` | `internal/agentsession/meta_test.go` (NEW) | 第一次 SetModel 设值，第二次空值不覆盖，第二次非空值仍允许覆盖（用于 --model 切换场景） |
+| `TestAccumulateUsage_Race` | `internal/agentsession/meta_test.go` | 100 goroutine × 1000 increments，验证最终 sum 正确 + race detector 无 warning |
+| `TestResetCumulative_Clears` | `internal/agentsession/meta_test.go` | 累加 → ResetCumulative → CumulativeUsage() 全零 + dirty=true |
+| `TestPersistIfDirty_NoOpWhenClean` | `internal/agentsession/meta_test.go` | dirty=false 时 PersistIfDirty 不调 persist callback |
+| `TestPersistIfDirty_DirtyResets` | `internal/agentsession/meta_test.go` | dirty=true 时调一次 callback，dirty 立即重置（不会双重落盘） |
+| `TestEntry_RoundtripPreserves` | `internal/agentsession/meta_test.go` | `Entry() → JSON marshal → unmarshal → FromAgentSessionEntry` 字段全相等 |
 | ~~`TestHandleNew_ResetsCumulative`~~ | ~~`internal/gateway/handlers_new_test.go`~~ (OBSOLETE, **F-102 重构已删**） | F-102 之后 `ResetCumulative` / `CumulativeUsage` API 不再存在 —— usage 累积改走 `internal/agentsession/` accumulator + `AgentResultEvent.Usage`。此 case 已被 `TestHandleNew_PersistsAgentSession`（在 `internal/command/newcmd/commands_test.go`）取代，只断言 `/new` 后持久化路径 |
-| `TestFormatSessionFooter_*` | `internal/channel/feishu/usage_footer_test.go` (NEW) | nil / all-zero / 仅 in / 含 cost / cache 标记 / 大数缩写 |
+| `TestFormatSessionFooter_*` | `internal/statusbar/statusbar_test.go` (NEW) | nil / all-zero / 仅 in / 含 cost / cache 标记 / 大数缩写 |
 | `TestSend_OutReply_AppendsFooter` | `internal/channel/feishu/adapter_test.go` (EXTEND) | msg.StatusBar 非 nil 时，sendContent 收到 body 包含 footer 行 |
 | `TestSend_OutResult_AppendsFooter` | 同上 | 同上 for OutResult |
 | `TestBuildReceiptCard_WithFooter` | `internal/channel/feishu/receipt_test.go` (EXTEND) | footer 字符串出现在 card body 的最后 div element |
@@ -5411,7 +5414,7 @@ func (a *Adapter) handleActCardAction(ctx context.Context, event *larkcallback.C
 ### 4.2 gateway Card 字段
 
 ```go
-// internal/gateway/messages.go
+// internal/messages/outbound.go
 type Card struct {
     Title      string
     Body       string
@@ -5444,7 +5447,7 @@ const (
 ### 4.4 决策卡入口
 
 ```go
-// internal/gtw/fix.go
+// internal/command/gtw/fix.go
 // emitBranchExistsDraft / emitWorktreeFailDraft 改为构造 gateway.Card 而不是纯文本
 func emitBranchExistsDraft(...) (*Result, error) {
     card := buildDecisionCard(payload, existingPath)  // F-46
@@ -5464,7 +5467,7 @@ func emitBranchExistsDraft(...) (*Result, error) {
 
 ### 5.2 集成测试
 
-- `internal/gateway/dispatch_action_test.go::TestDispatch_CardAction_RoutesToGTW`：合成 `card.action.trigger` → 走完 `gtw.HandleAction` → 验证 dispatched `ReactionEvent`
+- `internal/gateway/inbound/dispatch_action_test.go::TestDispatch_CardAction_RoutesToGTW`：合成 `card.action.trigger` → 走完 `gtw.HandleAction` → 验证 dispatched `ReactionEvent`
 
 ### 5.3 手动验证
 
@@ -5544,7 +5547,7 @@ internal/gateway/gateway.go::dispatchAction
         ▼
 生产 trampoline：cs := mgr.Get(msg.ChatID) → cs.HandleAction(ctx, ev)
    ├─ cs == nil?  ── 岔路 B：return false
-   └─ cs.onReaction(ctx, ev)        ← 由 `internal/command/gtw/` 的 reaction handling 装上（原 `internal/gateway/handlers_gtw.go::wireGTWActionOnSession`；F-102 重构后 `gtw` 整体迁到 `internal/command/gtw/`，reaction 路由走 `services.ReactionRouter`，已不再走 `cs.SetActionHandler`）
+   └─ cs.onReaction(ctx, ev)        ← 由 `internal/command/gtw/` 的 reaction handling 装上（F-102 重构后 `gtw` 整体迁到 `internal/command/gtw/`，reaction 路由走 `services.ReactionRouter`，已不再走 `cs.SetActionHandler`）
         （`SetActionHandler` 仅 debug 时代使用；生产路径是 `cs.onReaction`）
         │
         ▼
@@ -5688,13 +5691,13 @@ Execute(logger)
 ### 0.2 现状
 
 **EventCompaction 已存在但 runtime 完全不消费**：
-- `internal/agent/agent.go:109` `EventCompaction` Kind 定义存在
-- `internal/agent/agent.go:374` `CompactionEvent{Subtype string}` payload
+- `internal/agent/agent.go` `EventCompaction` Kind 定义存在
+- `internal/agent/agent.go` `CompactionEvent{Subtype string}` payload
 - `internal/bridge/pi/translate.go` emit `compaction_start` + `compaction_end` 各一条
 - `internal/bridge/claudecode/stream.go` emit `compact` / `compaction` 各一条
-- `internal/gateway/translate.go` 把 `EventCompaction` translate 成 `OutCompaction`
+- `internal/gateway/outbound/translate.go` 把 `EventCompaction` translate 成 `OutCompaction`
 - `internal/channel/feishu/adapter.go` `Send` case `OutCompaction` → `ReplyInThreadAndChat` 发 `✶ Compacting conversation…`（F-37 决策）
-- `internal/channel/feishu/receipt_event.go` `eventToEntry` 对 `EventCompaction` 返回 `(_, false)`（不进 receipt）
+- `internal/channel/feishu/receipt_entry.go` `eventToEntry` 对 `EventCompaction` 返回 `(_, false)`（不进 receipt）
 - **`runtime handler 完全不感知`**——既不累加也不持久化，只是把它当普通事件透传到 IM
 
 **问题**：count 信息全丢失，footer 显示的 cumulative 数字对用户来说**没有 compaction 这个调节变量**。
@@ -5801,7 +5804,7 @@ Execute(logger)
 ### 1.4 AgentSession 新增 API
 
 ```go
-// internal/chatsession/agentsession.go
+// internal/agentsession/session.go
 
 type AgentSession struct {
     // ... 既有字段 ...
@@ -5890,7 +5893,7 @@ as.compactionCount = e.CompactionCount  // ← NEW：JSON 默认零值兼容老�
 ### 1.5 SessionContext 扩展
 
 ```go
-// internal/gateway/messages.go
+// internal/messages/outbound.go
 type SessionContext struct {
     // ... 既有字段（Agent / Model / CumulativeUsage / Workspace / GitStatus）...
 
@@ -5909,7 +5912,7 @@ type SessionContext struct {
 ### 1.6 Footer Line 1 渲染规则
 
 ```go
-// internal/channel/feishu/usage_footer.go
+// internal/statusbar/statusbar.go
 // Line 1: identity (🤖 Agent · Model · 🗜 N).
 idParts := []string{"🤖"}
 if ctx.Agent != "" {
@@ -6014,9 +6017,9 @@ out.SessionContext = &gateway.SessionContext{
 - 没有任何 producer，自然没有 consumer
 
 **删什么**：
-- `internal/gateway/messages.go` `OutboundKind` 常量删除 `OutCompaction`
+- `internal/messages/outbound.go` `OutboundKind` 常量删除 `OutCompaction`
 - `internal/channel/feishu/adapter.go` `Send` case `OutCompaction` 删除
-- `internal/channel/feishu/receipt_event.go` `eventToEntry` 对 EventCompaction 的 `(_, false)` 分支删除
+- `internal/channel/feishu/receipt_entry.go` `eventToEntry` 对 EventCompaction 的 `(_, false)` 分支删除
 - `internal/channel/feishu/receipt.go` `Append` 对 EventCompaction 的 silent PATCH 分支删除
 - 文档删除所有 OutCompaction 引用（F-37 §2.1 表行；F-25 §3.1.1 thread reply 行；F-25 §2.4 silent PATCH 段）
 
@@ -6084,7 +6087,7 @@ type AgentEvent struct {
 
 **改动**：emit `EventCompaction` 时不再赋值 `Compaction: &CompactionEvent{Subtype: ...}`。
 
-### 2.4 `internal/chatsession/agentsession.go`
+### 2.4 `internal/agentsession/session.go`
 
 **改动 A**：struct 加 `compactionCount int` 字段（由 `cumulativeUsageMu` 守护）。
 **改动 B**：加 `RecordCompaction()` 和 `CompactionCount() int` 方法。
@@ -6097,12 +6100,12 @@ type AgentEvent struct {
 **改动 A**：`AgentSessionEntry` 加 `CompactionCount int json:"compactionCount,omitempty"`。
 **改动 B**：`AgentSessionFileVersion` +1。
 
-### 2.6 `internal/gateway/messages.go`
+### 2.6 `internal/messages/outbound.go`
 
 **改动 A**：`SessionContext` 加 `CompactionCount int json:"compactionCount,omitempty"`。
 **改动 B**：`OutboundKind` 删除 `OutCompaction` 常量。
 
-### 2.7 `internal/gateway/translate.go`
+### 2.7 `internal/gateway/outbound/translate.go`
 
 **改动**：删除 `case agent.EventCompaction:` 分支（不再产生 OutboundMessage）。
 
@@ -6112,7 +6115,7 @@ type AgentEvent struct {
 **改动 B**：`sessionContextInto` stamp `CompactionCount`。
 **改动 C**：stamp condition 加 `|| s.CompactionCount() > 0`（理论上不会触发但保持对称）。
 
-### 2.9 `internal/channel/feishu/usage_footer.go`
+### 2.9 `internal/statusbar/statusbar.go`
 
 **改动**：Line 1 末尾追加 `· 🗜 N`（仅 N>0）。需要 import `strconv`。
 
@@ -6120,7 +6123,7 @@ type AgentEvent struct {
 
 **改动**：删除 `Send` case `gateway.OutCompaction` 分支（不再有 OutCompaction kind）。
 
-### 2.11 `internal/channel/feishu/receipt_event.go`
+### 2.11 `internal/channel/feishu/receipt_entry.go`
 
 **改动**：删除 `eventToEntry` 对 `agent.EventCompaction` 返回 `(_, false)` 的分支。
 
@@ -6136,17 +6139,17 @@ type AgentEvent struct {
 
 | 测试 | 文件 | 覆盖 |
 |------|------|------|
-| `TestRecordCompaction_BumpsCount` | `internal/chatsession/agentsession_meta_test.go` (EXTEND) | 调一次 RecordCompaction → CompactionCount() == 1；调两次 → == 2 |
+| `TestRecordCompaction_BumpsCount` | `internal/agentsession/meta_test.go` (EXTEND) | 调一次 RecordCompaction → CompactionCount() == 1；调两次 → == 2 |
 | `TestRecordCompaction_ResetsTokens` | 同上 | 先 AccumulateUsage(5k in + 2k cache + 1k out + $0.05) → RecordCompaction → CumulativeUsage().InputTokens=0, CacheCreation=0, CacheRead=0, Output=0, **CostUSD=$0.05** |
 | `TestRecordCompaction_Race` | 同上 | 100 goroutine × 1000 RecordCompaction → 最终 CompactionCount() == 100000 + race detector clean |
 | `TestResetCumulative_ClearsCount` | 同上 | 累加 + RecordCompaction → ResetCumulative → CompactionCount() == 0 + CumulativeUsage 全零 |
 | `TestEntry_RoundtripPreservesCount` | 同上 | Entry() → JSON marshal → unmarshal → FromAgentSessionEntry → CompactionCount() == 原值 |
-| `TestFormatSessionFooter_Line1_WithClamp` | `internal/channel/feishu/usage_footer_test.go` (EXTEND) | SessionContext{Agent:"claude", Model:"opus", CompactionCount:3} → line 1 == "🤖 claude · opus-4-5 · 🗜 3" |
+| `TestFormatSessionFooter_Line1_WithClamp` | `internal/statusbar/statusbar_test.go` (EXTEND) | SessionContext{Agent:"claude", Model:"opus", CompactionCount:3} → line 1 == "🤖 claude · opus-4-5 · 🗜 3" |
 | `TestFormatSessionFooter_Line1_NoClamp` | 同上 | CompactionCount:0 → line 1 == "🤖 claude · opus-4-5"（无 � 段） |
 | `TestFormatSessionFooter_Line1_CostAfterReset` | 同上 | 模拟累积后压缩：footer line 2 = "💰 ↓ 5k · ↻ 2k · ↑ 0.8k · 7.8k · $1.245"（cost 保留，token 归零） |
 | `TestPiBridge_SuppressesCompactionStart` | `internal/bridge/pi/translate_test.go` (EXTEND) | 输入 `compaction_start` event → 返回 `nil, nil`；输入 `compaction_end` → 返回 1 条 EventCompaction |
 | `TestClaudeCodeBridge_EmitsEmptyCompaction` | `internal/bridge/claudecode/stream_test.go` (EXTEND) | result subtype "compact" → emit 1 条 EventCompaction（无 Subtype 字段可断言） |
-| `TestTranslate_NoOutboundForCompaction` | `internal/gateway/translate_test.go` (EXTEND) | 调 Translate(EventCompaction) → 返回 `nil, nil`（无 Outbound 产生） |
+| `TestTranslate_NoOutboundForCompaction` | `internal/gateway/outbound/translate_test.go` (EXTEND) | 调 Translate(EventCompaction) → 返回 `nil, nil`（无 Outbound 产生） |
 | `TestFeishuAdapter_NoOutCompactionCase` | `internal/channel/feishu/adapter_test.go` (EXTEND) | 验证 `OutCompaction` case 已删除（grep 反向断言） |
 | `TestNewEventHandler_BumpsOnCompaction` | `cmd/nightme/run_test.go` (EXTEND) | 注入 EventCompaction → s.CompactionCount() == 1 + 无 Outbound 发送到 channel |
 
@@ -6339,7 +6342,7 @@ type AgentEvent struct {
 
 ### 1.1 现状
 
-`internal/agent/agent.go:400` 上 `UsageEvent.ContextWindowPct` 是 bridge-local 算出来的:
+`internal/agent/agent.go` 上 `UsageEvent.ContextWindowPct` 是 bridge-local 算出来的:
 
 ```text
 pct = (input + output + cache_creation + cache_read) / contextWindow * 100
@@ -6347,8 +6350,8 @@ pct = (input + output + cache_creation + cache_read) / contextWindow * 100
 
 `contextWindow` 来自子进程 wire 字段:
 
-- ClaudeCode:`result.modelUsage[<model>].contextWindow` (`internal/bridge/claudecode/stream.go:685`)
-- Pi:`get_state.data.model.contextWindow` (`internal/bridge/pi/protocol.go:111`)
+- ClaudeCode:`result.modelUsage[<model>].contextWindow` (`internal/bridge/claudecode/stream.go`)
+- Pi:`get_state.data.model.contextWindow` (`internal/bridge/pi/protocol.go`)
 
 F-54 §1.2 明确把 `agent.UsageEvent.ContextWindow` 字段删了,理由是"全 codebase 0 read / 0 write,bridge-local 算完即丢"。但 footer 渲染时用户其实**想知道**这个分母——`pct = 101.6%` 时,如果不显示分母,用户无法判断是模型真的吃满了 200K,还是 MiniMax 这种兼容端把 1M 模型错报成 200K。
 
@@ -6366,7 +6369,7 @@ F-54 §1.2 明确把 `agent.UsageEvent.ContextWindow` 字段删了,理由是"全
 
 ### 1.3 受影响的显示格式
 
-**当前 footer 第二行**(`internal/channel/feishu/usage_footer.go:183`):
+**当前 footer 第二行**(`internal/statusbar/statusbar.go`):
 
 ```text
 💰:「 in / out · X% · $cost 」
@@ -6403,7 +6406,7 @@ F-54 §1.2 明确把 `agent.UsageEvent.ContextWindow` 字段删了,理由是"全
 
 ### 2.2 Bridge 改动
 
-**`internal/bridge/claudecode/stream.go decodeUsage`**(`stream.go:643`):
+**`internal/bridge/claudecode/stream.go decodeUsage`**(`stream.go`):
 
 当前把 `contextWindow` 当本地变量用完即丢:
 
@@ -6425,7 +6428,7 @@ F-54 §1.2 明确把 `agent.UsageEvent.ContextWindow` 字段删了,理由是"全
      }
 ```
 
-**`internal/bridge/pi/translate.go decodeMessageUsage`**(`translate.go:837`):
+**`internal/bridge/pi/translate.go decodeMessageUsage`**(`translate.go`):
 
 ```diff
 -    if ctxWindow > 0 {
@@ -6447,7 +6450,7 @@ F-54 §1.2 明确把 `agent.UsageEvent.ContextWindow` 字段删了,理由是"全
 
 ### 2.3 Footer 渲染
 
-**`internal/channel/feishu/usage_footer.go formatSessionFooterLines`**(`usage_footer.go:183`):
+**`internal/statusbar/statusbar.go formatSessionFooterLines`**(`usage_footer.go`):
 
 当前:
 
@@ -6465,7 +6468,7 @@ if u.ContextWindowPct > 0 {
 }
 ```
 
-**新 helper `abbrevWindow`**(同 `usage_footer.go:242 abbrevTokens` 口径):
+**新 helper `abbrevWindow`**(同 `usage_footer.go abbrevTokens` 口径):
 
 ```go
 // abbrevWindow 格式化模型上下文窗口:
@@ -6561,8 +6564,8 @@ out   = output_tokens
 - nightme 不查表、不 override、不重算
 
 **改动**:
-- `internal/channel/feishu/usage_footer.go` `formatSessionFooterLines`: 行内 `in` 拆 `new` + `cache`
-- `internal/channel/feishu/usage_footer_test.go`: `TestFormatSessionFooterLines_OmitsZeroSegments` 等几个 case 更新 + 加 2 个新 case(cache-only / cache+out)
+- `internal/statusbar/statusbar.go` `formatSessionFooterLines`: 行内 `in` 拆 `new` + `cache`
+- `internal/statusbar/statusbar_test.go`: `TestFormatSessionFooterLines_OmitsZeroSegments` 等几个 case 更新 + 加 2 个新 case(cache-only / cache+out)
 - `docs/channel/feishu-rendering.md` Line 2 表格: 把 `in / out` 一行拆 `new` + `cache` + `out`
 - `docs/SPEC.md`: Line 2 段规则同步
 
@@ -6576,8 +6579,8 @@ out   = output_tokens
 ## 1. 背景:为什么从 text 切到 card
 
 当前 nightme 的 receipt 走纯文本路径(`msg_type: "text"`):
-- `internal/channel/feishu/adapter.go:890 SendMessageText` 编码为 `{"text": "..."}` 后 `sendContent` 发出
-- `internal/channel/feishu/receipt.go:515 renderLocked` 每个事件 `SendMessageText` 发一条新消息
+- `internal/channel/feishu/adapter.go SendMessageText` 编码为 `{"text": "..."}` 后 `sendContent` 发出
+- `internal/channel/feishu/receipt.go renderLocked` 每个事件 `SendMessageText` 发一条新消息
 - 没有 footer / 没有按钮 / 表格需要 markdown hack 才能近似
 
 切到 interactive card 可以:
@@ -6606,9 +6609,9 @@ Agent: main | Model: glm-5 | Provider: tencentcodingplan
   - 硬编码拼接 `Agent: <name>` + ` | Model: <model>` + ` | Provider: <provider>`
   - **不可配置**(issue #59360 指明: "There is no configuration to disable it")
 - **传入路径**:
-  - 流式卡 start/close: `reply-dispatcher.ts:393, :437` 接收/重算 `note`
+  - 流式卡 start/close: `reply-dispatcher.ts` 接收/重算 `note`
   - 结构化卡: 传入 `sendStructuredCardFeishu(..., { note: cardNote })`
-- **渲染位置**: `extensions/feishu/src/send.ts:768`
+- **渲染位置**: `extensions/feishu/src/send.ts`
   ```ts
   if (options?.note) {
     elements.push({ tag: "hr" });
@@ -6696,14 +6699,14 @@ Agent: main | Model: MiniMax-M2.7 | Provider: minimax
 
 | 文件 | 作用 |
 |---|---|
-| `internal/channel/feishu/adapter.go:890 SendMessageText` | 发 `msg_type: "text"` 消息,返回 messageID |
-| `internal/channel/feishu/adapter.go:765 buildInteractiveCard` | 已有的 OutChoice 卡片构建(permission card),仅用于 OutChoice 路径 |
-| `internal/channel/feishu/adapter.go:1066 sendContent` | 透传到 lark client,支持任意 msgType |
-| `internal/channel/feishu/receipt.go:515 renderLocked` | 每个事件 `SendMessageText` 发新消息 |
-| `internal/channel/feishu/receipt.go:455 formatLocked` | 构造 plain text body(header + entries) |
-| `internal/channel/feishu/receipt.go:188 headerLine` | 单行 header(⏳ / 🔄 / ✅) |
-| `internal/gateway/messages.go:162 OutChoice` / `:254 Card` | 已存在 interactive card 的抽象类型 |
-| `internal/gateway/messages.go:182 OutInit` | 携带 `session_id` + `model`(无 `agent_name` / `provider`) |
+| `internal/channel/feishu/adapter.go SendMessageText` | 发 `msg_type: "text"` 消息,返回 messageID |
+| `internal/channel/feishu/adapter.go buildInteractiveCard` | 已有的 OutChoice 卡片构建(permission card),仅用于 OutChoice 路径 |
+| `internal/channel/feishu/adapter.go sendContent` | 透传到 lark client,支持任意 msgType |
+| `internal/channel/feishu/receipt.go renderLocked` | 每个事件 `SendMessageText` 发新消息 |
+| `internal/channel/feishu/receipt.go formatLocked` | 构造 plain text body(header + entries) |
+| `internal/channel/feishu/receipt.go headerLine` | 单行 header(⏳ / 🔄 / ✅) |
+| `internal/messages/outbound.go OutChoice` / `:254 Card` | 已存在 interactive card 的抽象类型 |
+| `internal/messages/outbound.go OutInit` | 携带 `session_id` + `model`(无 `agent_name` / `provider`) |
 
 ### 4.2 现状(切到 card 之前)
 
@@ -6890,10 +6893,10 @@ case gateway.OutMessageState:
 
 | `MessageState` | emoji_type(飞书预定义) | 用户视觉 |
 |---|---|---|
-| `StateReceived` | `OneSecond` | ⏳ |
-| `StateForwarded` | `OnIt` | 🔄 |
-| `StateDone` | `DONE` | ✅ |
-| `StateError` | `THUMBSUP` | ❌ (closest 预定义 indicator) |
+| `MessageQueued` | `OneSecond` | ⏳ |
+| `MessageSubmitted` | `OnIt` | 🔄 |
+| `MessageDone` | `DONE` | ✅ |
+| `MessageDropped` | (无) | 不打 reaction |
 
 **重要**:必须用飞书预定义 `emoji_type` 标识符,不是 unicode。传 unicode `⏳` 给飞书 reaction API 返回 `99992354 data not found`(reaction service 只识别预定义集合)。
 
@@ -6913,15 +6916,15 @@ case gateway.OutMessageState:
 
 #### 6.6.7 中间态 silent drop(F-42 简化)
 
-**F-42 后**：Feishu adapter 自决只渲染 `StateDone` / `StateError` 两个终态，`StateReceived` / `StateForwarded` silent drop。
+**F-42 后**：Feishu adapter 自决只渲染 `MessageDone` / `MessageDropped` 两个终态，`MessageQueued` / `MessageSubmitted` silent drop。
 
 ```go
 // Send() OutMessageState case (F-42 后)
 switch state {
-case agent.StateReceived, agent.StateForwarded:
+case agent.MessageQueued, agent.MessageSubmitted:
     return nil   // silent drop
 }
-// 仅 StateDone (✅ "DONE") / StateError (❌ "THUMBSUP") 走 AddReaction
+// 仅 MessageDone (✅ "DONE") 走 AddReaction;MessageDropped 不打 reaction
 ```
 
 **理由**:
@@ -6951,7 +6954,7 @@ Card 2.0 官方组件列表**没有 `tag: "note"`**。我们走 v2 风格（`<hr
 @_user_1 /cwd /tmp
 ```
 
-`ParseCommand` 要求 `strings.HasPrefix(trimmed, "/")`（`internal/gateway/parser.go:36`），这条文本会以 `@` 开头，被判为 `ErrParseFailure` → slash command **拦截失败**。
+`ParseCommand` 要求 `strings.HasPrefix(trimmed, "/")`（`internal/gateway/parser.go`），这条文本会以 `@` 开头，被判为 `ErrParseFailure` → slash command **拦截失败**。
 
 **方案**：`handleMessage` 构造 `channel.Message` 前，strip 开头的 mention 前缀。
 
@@ -6985,7 +6988,7 @@ text, hasMention := stripAndDetectMention(
 
 > **DM 不变式（锁死）**：DM 消息 `HasMention` 必须永远是 `true`。这是 F-watch 的核心不变式 ——只有这条不变式成立，gateway dispatcher 才能放心地 drop 非 mention 群消息而不误伤 DM。由 `TestComputeHasMention_DMInvariant` （adapter 层）+ `TestDispatchInbound_WatchModeGate_DMInvariant`（gateway 层）两个测试锁死，任一 regressed 都会被 CI 拦住。
 
-**bot open_id 获取**：调 SDK `a.larkClient.GetBotIdentity(ctx)`（`channel/channel.go:152`），30 分钟 TTL cache 由 SDK 内部管理。第一次消息进来 cache miss → 同步 fetch；后续命中 cache，零延迟。fetch 失败 → 记 log，`HasMention` 退化为 `false`（保守策略：DM/group 都当 group 处理）。
+**bot open_id 获取**：调 SDK `a.larkClient.GetBotIdentity(ctx)`（`channel/channel.go`），30 分钟 TTL cache 由 SDK 内部管理。第一次消息进来 cache miss → 同步 fetch；后续命中 cache，零延迟。fetch 失败 → 记 log，`HasMention` 退化为 `false`（保守策略：DM/group 都当 group 处理）。
 
 **ChatSession 侧接入**：`/watch on` / `/watch off` 控制 `ChatSession.WatchMode()`；Gateway dispatcher 拿 `Message.HasMention` + `cs.WatchMode()` 决定 drop 或 pass。Channel adapter **不读** `ChatSession` —— 详细职责划分见 `docs/SPEC.md §3.1.1`。
 
@@ -7060,7 +7063,7 @@ text, hasMention := stripAndDetectMention(
 | `internal/channel/feishu/receipt_test.go` | `mockReceiptBot` 加 stubs;新增 / 重写 §7 列出的测试 |
 | `internal/channel/feishu/adapter_test.go` | 加 SendCard / PatchMessage 走通测试 |
 
-**不改**: `internal/agent/agent.go`、`internal/bridge/claudecode/stream.go`、`internal/gateway/translate.go`、`internal/gateway/messages.go`、`internal/bridge/acp/*`、`internal/bridge/pty/*`、`internal/bridge/sdk/*`、`cmd/nightme/*`。
+**不改**: `internal/agent/agent.go`、`internal/bridge/claudecode/stream.go`、`internal/gateway/outbound/translate.go`、`internal/messages/outbound.go`、`internal/bridge/acp/*`、`internal/bridge/pty/*`、`internal/bridge/sdk/*`、`cmd/nightme/*`。
 
 ### 9.2 关键代码契约
 
@@ -7125,7 +7128,7 @@ func (a *Adapter) UpdateMessage(ctx context.Context, messageID, content string) 
 所有 `key: value` 段必须用中点 `·`(防 hoisting,见 §6.1)。**留给下一份 PR 的契约**:
 - `agent.AgentConnectedEvent` 新增 `AgentName` / `Provider` 字段
 - `internal/bridge/claudecode/stream.go` 在 system/init 翻译处填充
-- `internal/gateway/translate.go` 写 `Meta["agent_name"]` / `Meta["provider"]`
+- `internal/gateway/outbound/translate.go` 写 `Meta["agent_name"]` / `Meta["provider"]`
 - `MessageReceipt` 新增对应字段,`Append(AgentConnectedEvent)` 写入
 - `footLine` 拼上 ` · Agent · X · Provider · Y`(model 已有,补中点)
 
@@ -7135,7 +7138,7 @@ func (a *Adapter) UpdateMessage(ctx context.Context, messageID, content string) 
 
 | Limit | 值 | 来源 |
 |---|---|---|
-| card body 字节数 | 30 KB(Create / PATCH 相同) | SDK `resource.go:1381` 注释 |
+| card body 字节数 | 30 KB(Create / PATCH 相同) | SDK `resource.go` 注释 |
 | card elements 数 | 50 | Feishu card 文档 |
 | `lark_md` 单行 | 1000 chars | Feishu card 文档 |
 | `lark_md` 总长 | 4000 chars | Feishu card 文档 |
@@ -7195,7 +7198,7 @@ Feishu IM API 官方支持的顶层 `msg_type`(参考 [create_json 文档](https
 
 ## 12. OutboundKind → Feishu 渲染映射表(当前状态)
 
-每行 = 一个 `gateway.OutboundKind`(定义见 [`internal/gateway/messages.go`](../../internal/gateway/messages.go)),描述 adapter 怎么渲染。`Receipt` 列指是否进 rolling-log card 路径。
+每行 = 一个 `gateway.OutboundKind`(定义见 [`internal/messages/outbound.go`](../../internal/messages/outbound.go)),描述 adapter 怎么渲染。`Receipt` 列指是否进 rolling-log card 路径。
 
 | OutboundKind | 源 AgentEvent | 触发点 | Feishu 渲染 | msg_type / API | Receipt? |
 |--------------|---------------|--------|-------------|----------------|----------|

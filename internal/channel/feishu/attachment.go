@@ -11,7 +11,7 @@ package feishu
 //     (extractAttachments, called from adapter.handleMessage).
 //  2. Download the binary content into a per-session inbox directory
 //     (DownloadAttachments). The download is synchronous with the
-//     inbound event — see docs/feat/F-14-attachment-passthrough.md
+//     inbound event — see docs/SPEC.md §2.1
 //     for the rationale (one Feishu message = one agent turn).
 //  3. Translate the downloaded attachments into agent.ContentBlock
 //     values (BuildBlocks) and forward via SendBlocks — the

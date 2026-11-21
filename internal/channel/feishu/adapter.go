@@ -152,7 +152,7 @@ type Adapter struct {
 
 	// limiter 全局共享 token bucket（F-35）。所有出口 SDK call 前
 	// 都过 Wait()，预防触发飞书 230001 / 230020 限流错误码。
-	// 默认 5 QPS / burst 1（保守）。详见 docs/feat/F-35-ratelimit.md。
+	// 默认 5 QPS / burst 1（保守）。详见 docs/channel/feishu-reliability.md。
 	limiter *Limiter
 
 	// mu is the adapter's state mutex. It guards:
@@ -747,7 +747,7 @@ func (a *Adapter) Incoming() <-chan channel.Message { return a.incoming }
 //	                       /gtw receipt headers now show "🤖: agent ·
 //	                       model · session").
 //	OutUsage             → deprecated kind; usage is now co-located
-//	                       on OutResult.Usage (translate.go:280-283)
+//	                       on OutResult.Usage (translate.go)
 //	                       and surfaces through OutResult's
 //	                       sendResultAsReply footer path.
 //
@@ -1518,8 +1518,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// Runtime gate (cmd/nightme/run.go::newEventHandler):
 		// when the chat has /think off, OutThinking is dropped
 		// before reaching this case. This case therefore assumes
-		// the chat wants thinking rendered — see docs/SPEC.md
-		// §3.1.2.
+		// the chat wants thinking rendered — see docs/SPEC.md §3.1.2.
 		return a.postThreadMarkdownReply(ctx, msg.ChatID, msg.ReplyTo, "💭 "+msg.Text, true)
 
 	case messages.OutMessageState:
@@ -1867,8 +1866,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 	// "✶ Compacting conversation…" thread reply, no channel side
 	// effect. The count surfaces later via StatusBar (F-49
 	// compaction tracking removed — the runtime dropped its
-	// compactionCount bookkeeping). See docs/feat/F-49-compaction-counter.md
-	// §1.3 / §1.9.
+	// compactionCount bookkeeping). See docs/channel/feishu.md §13.25.
 
 	case messages.OutInit:
 		// F-44 follow-up: OutInit is the agent's bootstrap signal —
@@ -2148,7 +2146,7 @@ func (a *Adapter) sendRawOutText(ctx context.Context, chatID, text string) error
 //
 // RATE-LIMIT / RETRY layering:
 //   - layer 1: F-35 global limiter (`a.limiter.Wait`) inside ReplyInChat
-//     (reply.go:205) and inside sendContent's retry wrap; prevents the
+//     (reply.go) and inside sendContent's retry wrap; prevents the
 //     SDK hitting Feishu's 230001 / 230020 throttle codes.
 //   - layer 2: F-36 transient retry wraps sendContent; transient network
 //     errors get exponential backoff. Final hit returns to caller for log.
@@ -3204,8 +3202,8 @@ func renderHeartbeatHeader(hb *messages.HeartbeatSnapshot) string {
 // receiptFor on cache miss. Removed in F-42 — receipts are now
 // lazy-created with their actual content (OutReply text or OutTask*
 // list) by ensureReceiptForReply / ensureReceiptForTask, never
-// with a placeholder. See docs/feat/F-42-lazy-receipt-creation.md
-// §1.1 for the rationale.
+// with a placeholder. See docs/channel/feishu-rendering.md §A8 for the
+// rationale.
 
 // SetLogger swaps the structured logger used for outgoing-message
 // traces. Pass nil to fall back to slog.Default().
@@ -4207,7 +4205,7 @@ func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageRece
 	// F-61: wrap in downloadWithRetry — outer ladder (3 attempts,
 	// 0/5s/15s backoff) handles transient infra failures. Inner
 	// per-attachment retry lives in downloadOneWithRetry
-	// (attachment.go:397). Only after both layers exhaust do we
+	// (attachment.go). Only after both layers exhaust do we
 	// declare AllFailed and degrade to text-only publish.
 	if len(attachments) > 0 {
 		result := a.downloadWithRetry(ctx, messageID, attachments, chatID)
@@ -5174,8 +5172,7 @@ func messageText(content string) string {
 // (Feishu threads) is intentionally treated identically to plain
 // groups — both share the same chat_id space (oc_xxx) and the
 // thread is a Feishu-side rendering detail handled by the adapter
-// via the Reply API path parameter. See docs/SPEC.md §3.1 and
-// docs/channel/feishu.md §13.11.
+// via the Reply API path parameter. See docs/SPEC.md §3.1 and docs/channel/feishu.md §13.11.
 
 func messageTime(value *string) time.Time {
 	if value != nil {

@@ -280,7 +280,7 @@ func dispatchSinkEvent(
 	// still increment counters in the receipt header (F-63 §3.2)
 	// — even when the gate drops the rendering, the counter
 	// reflects the agent's real activity. Mirrors the runtime
-	// handler's order exactly (runtime/handler.go:219-250).
+	// handler's order exactly (runtime/handler.go).
 	if cs != nil {
 		env := agentsession.AgentEventEnvelope{
 			ChatID:    chatID,

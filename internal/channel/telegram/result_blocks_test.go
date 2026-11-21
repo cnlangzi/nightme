@@ -166,8 +166,7 @@ func TestBuildResultBlocks_FooterTextPreservesPRAnchor(t *testing.T) {
 
 // TestBuildResultBlocks_FooterTextDoesNotCoerceUnsafeScheme verifies
 // that `[click](javascript:alert)` stays as literal text inside the
-// footer (entity is dropped), mirroring safeLink's contract from
-// rich_walker.go.
+// footer (entity is dropped), mirroring safeLink's contract from rich_walker.go.
 func TestBuildResultBlocks_FooterTextDoesNotCoerceUnsafeScheme(t *testing.T) {
 	footer := []string{
 		"📁: evil · [click](javascript:alert(1))",

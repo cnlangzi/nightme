@@ -6,7 +6,7 @@
 >
 > - [feishu.md](./feishu.md) - 飞书 receipt、reply-in-thread 和交互卡实现
 > - [F-08-channel-abstraction.md](../feat/F-08-channel-abstraction.md) - Channel 抽象与 Gateway 边界
-> - [F-message-flow.md](../feat/F-message-flow.md) - 消息生命周期
+> - [F-53-message-prompt-lifecycle.md](../feat/F-53-message-prompt-lifecycle.md) - 消息生命周期
 > - [SPEC.md](../SPEC.md) - 统一消息模型
 >
 > **Telegram 官方文档**:

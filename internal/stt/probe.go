@@ -28,7 +28,7 @@ var ErrWorkerNotReachable = errors.New("stt: worker not reachable on endpoint")
 // Endpoint is what stt.DefaultEndpoint(dataDir) returns. On
 // Unix this is `<dataDir>/stt/stt.sock`; on Windows it is
 // `\\.\pipe\nightme-stt`. The default 2s timeout mirrors
-// `nightme status`'s ping window (daemon_lifecycle.go:178)
+// `nightme status`'s ping window (daemon_lifecycle.go)
 // so neither CLI holds the user hostage on a stuck worker.
 func ProbeWorkerStatus(ctx context.Context, endpoint Endpoint) (WorkerStatus, error) {
 	if endpoint == "" {

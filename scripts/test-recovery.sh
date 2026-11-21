@@ -1,32 +1,29 @@
 #!/bin/bash
-# test-recovery.sh — verify Phase 2 (F-dsh-shared-host) restart recovery.
+# test-recovery.sh — verify dsh session re-attach after a host restart.
 #
 # Steps:
-#   1. Start nightme daemon + dsh shared host.
-#   2. Trigger a dsh chat session (writes sessionId to registry).
+#   1. Start a dsh shared host.
+#   2. Create a session via session.create and capture its sessionId.
 #   3. SIGTERM the dsh subprocess (simulates dsh crash / restart).
 #   4. Spawn a fresh dsh on the same port (simulates recovery).
-#   5. Verify RecoverAll re-attaches: same sessionId present, mux stream
-#      delivers session/subscribed for it, prompt round-trip works.
+#   5. Verify session.create({sessionId, cwd}) returns the same id.
+#   6. Verify session.list still lists the session.
+#   7. Verify a prompt round-trips on the re-attached session.
 #
-# Pre-req: dsh binary on PATH, ./bin/nightme built.
+# See docs/bridge/dsh-api.md §1.1 for the RPC envelope this script sends.
+#
+# Pre-req: dsh binary on PATH, curl, jq.
 
 set -euo pipefail
 
 PORT="${DSH_TEST_PORT:-13080}"
-NIGHTME_LOG=/tmp/nightme-recovery-test.log
 DSH_PID_FILE=/tmp/dsh-recovery-test.pid
-NIGHTME_PID_FILE=/tmp/nightme-recovery-test.pid
 
 cleanup() {
   set +e
   if [[ -f "$DSH_PID_FILE" ]]; then
     kill -TERM "$(cat "$DSH_PID_FILE")" 2>/dev/null || true
     rm -f "$DSH_PID_FILE"
-  fi
-  if [[ -f "$NIGHTME_PID_FILE" ]]; then
-    kill -TERM "$(cat "$NIGHTME_PID_FILE")" 2>/dev/null || true
-    rm -f "$NIGHTME_PID_FILE"
   fi
 }
 trap cleanup EXIT
@@ -107,7 +104,7 @@ log "  ✓ session.prompt accepted on reattached session"
 log ""
 log "========================================="
 log "test-recovery.sh PASSED"
-log "  Phase 2 (restart recovery) verified:"
+log "  restart recovery verified:"
 log "  - sessionId stable across dsh restart"
 log "  - re-attach via session.create({sessionId, cwd})"
 log "  - session.list still returns the session"

@@ -1,7 +1,6 @@
 # Reviewer strict-grounding rules (drop into `/review` prompt)
 
-> For `dsh /review` on `/Users/geax/code/geax/github.com/cnlangzi/nightme.nightme/fix-gtw-fix`
-> (gtw F-XX branch, fix-gtw-fix).
+> For `dsh /review` on the branch under review.
 
 A finding is ONLY valid when all three are true:
 
@@ -71,14 +70,14 @@ a Low-style cleanup, not a Medium bug.
 
 > Severity: High
 >
-> Path: `internal/command/gtw/fix.go:503`
+> Path: `internal/command/gtw/fix.go`
 > Content: `runFixLocal` returns `fmt.Sprintf("âĜ git show-ref failed: %v", err)` to the
 > user when `BranchExists(ctx, repoRoot, branch, deps.Git)` fails
 > in local mode. The bytes `c3 a2 c2 9d c2 8c` are mojibake for
 > ❌ (correct UTF-8 `e2 9d 8c`). The user sees `âĜ git show-ref
 > failed: …` instead of `❌ git show-ref failed: …`.
 >
-> Comparison: `runFixRemote` at `fix.go:309` uses the correct
+> Comparison: `runFixRemote` at `fix.go` uses the correct
 > bytes, so this is a one-line copy-paste slip.
 
 ### Bad finding (not grounded)
@@ -95,7 +94,7 @@ will catch; no user is impacted. Don't raise.
 ### Borderline (mark Low + cleanup)
 
 > Severity: Low (style / cleanup)
-> Path: `internal/command/gtw/slug.go:183-184`
+> Path: `internal/command/gtw/slug.go`
 > Content: Two trailing blank lines after the closing brace.
 > `gofmt -d internal/command/gtw/slug.go` flags this.
 

@@ -7,19 +7,19 @@
 > - ❌ **设计层面不支持 / 平台限制** — 已记录原因
 > - ⏸ **暂缓** — 需要专门环境或前置条件
 >
-> **2026-09-01 重大变更**：所有命令改用 `$` 前缀消息匹配（详见 `slack.md` §6.2.1）。manifest 不再含 `slash_commands` 段；加新命令 = 0 Slack 改动。
+> **命令入口**：普通消息里的 `/xxx` 文本。dispatcher(`internal/command/commander.go`)负责匹配,adapter 不做前缀改写(详见 `slack.md` §3.1 / §6.2.1)。manifest 不含 `slash_commands` 段 —— Slack 平台侧没有 slash command;`$` 前缀写法也未实现。
 
 ## 1. Manifest 与 App 安装（doc §6）
 
 | # | 检查项 | 状态 | 备注 |
 |---|---|---|---|
-| 1.1 | manifest **不包含** `slash_commands` 段（2026-09-01 改用 `$` 前缀）| ✅ | `internal/login/slack/manifest.go` 已删 |
+| 1.1 | manifest **不包含** `slash_commands` 段 | ✅ | `internal/login/slack/manifest.go` 无该段 |
 | 1.2 | OAuth scope 全齐（`chat:write` + 19 项）| ✅ | auth.test 错码中实测 |
 | 1.3 | `assistant_view` manifest feature 开启 | ✅ | manifest |
 | 1.4 | Slack app install | ✅ | bsk 操作完成 |
 | 1.5 | `internal/login/slack/manifest_verify_test.go` 防止回归 | ✅ | `TestManifestHasNoSlashCommands`（反向断言）|
-| 1.6 | manifest 注册一次后，**0 reinstall 加新命令** | ✅ | `$cwd` / `$use` / `$gtw` 等都是 dispatcher 识别 |
-| 1.7 | ~~`/close` 改为 `/kclose`~~ | ✅ **已消除** | `$close` 直接就是 `close`，Slack 不再拦截 |
+| 1.6 | manifest 注册一次后，**0 reinstall 加新命令** | ✅ | `/cwd` / `/use` / `/gtw` 等都是 dispatcher 识别 |
+| 1.7 | ~~`/close` 改为 `/kclose`~~ | ✅ **已消除** | `/kclose` 在 `handleSlashCommand` 里翻译成 `/close` |
 | 1.8 | ~~`TestManifestHasSlashCommands`~~ | ✅ **已废** | 改为 `TestManifestHasNoSlashCommands` |
 
 ## 2. ChatSession / ChatStore（doc §3.1 + 之前 Issue A）
@@ -30,8 +30,8 @@
 | 2.2 | chatstore 保留未知前缀 key（向后兼容） | ✅ | PR #316 含 |
 | 2.3 | daemon 重启不丢 `sl_` session | ✅ | 之前重启炸，现在 OK |
 | 2.4 | `sl_<team>:<channel>` chatID 生成（普通 channel） | ✅ | `#all-nightme` 测试 |
-| 2.5 | `sl_<team>:<channel>:<thread_ts>` chatID 生成（DM） | ⏸ | 暂未测 DM（DM 中 `$cwd` 正常工作（不走 slash command 机制），DM 普通文本需要测） |
-| 2.6 | `cs.selectedCwd` 在 `$cwd` 后正确写入 | ✅ | `chat_sessions.json` 验证 |
+| 2.5 | `sl_<team>:<channel>:<thread_ts>` chatID 生成（DM） | ⏸ | 暂未测 DM（DM 走普通消息路径，不走 slash command 机制；DM 普通文本需要测） |
+| 2.6 | `cs.selectedCwd` 在 `/cwd` 后正确写入 | ✅ | `chat_sessions.json` 验证 |
 
 ## 3. Slack 流式 API（doc §3 / §5.2 — 核心）
 
@@ -89,20 +89,20 @@
 | 5.11 | Reply-in-thread 不破坏 command parser（保留 `/` 前缀） | 🟡 | 见 5.9 |
 | 5.12 | 文件附件下载（Bearer + HTML 响应检测） | 🟡 | 单元测试覆盖，e2e 未测 |
 
-## 6. `$` 前缀命令调用（doc §6.2.1）
+## 6. 命令调用（doc §3.1 / §6.2.1）
 
 | # | 检查项 | 状态 | 备注 |
 |---|---|---|---|
 | 6.1 | `nightme login slack --manifest` 输出 manifest | ✅ | 测试输出 |
-| 6.2 | manifest **不**注册 slash command（`$` 前缀消息匹配） | ✅ | Slack Commands 页验证 |
-| 6.3 | `$cwd /home/...` 在 channel 中 | ✅ | 实测，回复"Workspace set to ..." |
-| 6.4 | `$cwd /nonexistent` 错误路径 | 🟡 | 没测 |
-| 6.5 | `$cwd` 缺参数（Usage 提示） | 🟡 | 没测 |
-| 6.6 | `$use claude` agent 切换 | 🟡 | 没测 |
-| 6.7 | `$watch on` / `$watch off` / `$watch all` | 🟡 | 只测了 on |
-| 6.8 | `$stop` 中断 in-flight turn | 🟡 | 没测 |
-| 6.9 | `$steer` 抢断并入队 | 🟡 | 没测 |
-| 6.10 | `$queue` 追加独立 prompt | 🟡 | 没测 |
+| 6.2 | manifest **不**注册 slash command | ✅ | Slack Commands 页验证 |
+| 6.3 | `/cwd /home/...` 在 channel 中 | ✅ | 实测，回复"Workspace set to ..." |
+| 6.4 | `/cwd /nonexistent` 错误路径 | 🟡 | 没测 |
+| 6.5 | `/cwd` 缺参数（Usage 提示） | 🟡 | 没测 |
+| 6.6 | `/use claude` agent 切换 | 🟡 | 没测 |
+| 6.7 | `/watch on` / `/watch off` / `/watch all` | 🟡 | 只测了 on |
+| 6.8 | `/stop` 中断 in-flight turn | 🟡 | 没测 |
+| 6.9 | `/steer` 抢断并入队 | 🟡 | 没测 |
+| 6.10 | `/queue` 追加独立 prompt | 🟡 | 没测 |
 | 6.11 | `$new` 新 session | 🟡 | 没测 |
 | 6.12 | `$close claude` 关闭 session | 🟡 | 翻译逻辑有单元测试，但没真实跑 |
 | 6.13 | `$think on` / `$think off` 切换 thinking 显示 | 🟡 | 没测 |

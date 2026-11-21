@@ -173,8 +173,7 @@ func (r *Router) EnumerateSubscriptions() []Subscription {
 // subscriptions from the dying Client's Router into the new
 // Client's Router so the daemon's mux dispatch keeps routing
 // frames to the same driver across respawns (otherwise every
-// respawn would orphan every active session — see
-// host/lifecycle.go::tryRespawn).
+// respawn would orphan every active session — see host/lifecycle.go::tryRespawn).
 //
 // The returned slice is a copy; the caller may iterate without
 // holding the router lock.
@@ -222,7 +221,7 @@ func (r *Router) SetHostHandler(h HostFrameHandler) {
 // payload's top-level `sessionId` field (the wire discriminator for
 // all session-scoped mux methods). Frames whose payload has no
 // sessionId — currently only mux-frame-level `approval/asked`
-// per dsh/handle_mux.go:131-143 — are dropped at debug level.
+// per dsh/handle_mux.go — are dropped at debug level.
 // Subscribers receive raw payload bytes and decode per-method
 // themselves.
 func (r *Router) DispatchMux(method, rpcID string, payload json.RawMessage) {
@@ -350,8 +349,7 @@ func (r *Router) SubscriberCount() int {
 // question/resolved) put sessionId at the payload top level — see
 // the field comments on muxSessionEvent, muxSessionSubscribed,
 // muxApprovalRequested, muxApprovalResolved, muxQuestionRequested
-// in dsh/protocol.go and the wire shapes documented in
-// docs/bridge/dsh-api.md §3.4.
+// in dsh/protocol.go and the wire shapes documented in docs/bridge/dsh-api.md §3.4.
 //
 // Returns "" if the payload doesn't carry sessionId. The caller
 // logs and drops those frames.

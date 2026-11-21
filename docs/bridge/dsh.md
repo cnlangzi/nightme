@@ -9,7 +9,7 @@
 > - `Starter.RunOnce` / `Starter.Review`(一次性): 与 `Start` 同一形态,但跑完 `defer a.Close()` 走 `workspace.archiveSession` 隐藏 session row(repo-scoped workspace 跨 session 持久)
 > **核心原则**: 接入底层 AI agent,**不修改 agent 本地默认配置**;nightme 只管 transport + permissions(权限默认全开)。
 > **姊妹文档**:
-> - [docs/bridge/dsh-shared-host.md](./dsh-shared-host.md) — 全局单实例 dsh,1:N 多路复用
+> - [docs/bridge/dsh-api.md](./dsh-api.md) — dsh HTTP / WS 协议契约
 > - [docs/bridge/claude.md](./claude.md) — stream-json transport,长生命周期
 > - [docs/bridge/codex.md](./codex.md) — JSON-RPC over stdio
 > - [docs/bridge/pi.md](./pi.md) — JSONL RPC over stdio
@@ -1110,7 +1110,7 @@ for {
 
 **踩坑**:早期假设 dsh-auth 走 launch token exchange(GET `/?token=...` 拿 303 + Set-Cookie),以为 cookie 是不可伪造的 — 所以 nightme 不能 attach 到用户自启的 dsh。
 
-**实测推翻**:`@deepseek-ai/dsh-client-connection/lib/index.js:272-277` 的 `encodeCookie`:
+**实测推翻**:`@deepseek-ai/dsh-client-connection/lib/index.js` 的 `encodeCookie`:
 
 ```js
 cookieName(authority) = "dsh-auth-" + base64url(sha256(authority))
@@ -1144,7 +1144,7 @@ if attached, h := tryAttachExistingDSH(ctx, logger); attached {
 
 **踩坑**(2026-09-11 实测):`tryAttachExistingDSH` 里用 `probeCtx` (10s timeout) 调用 `cli.Start(probeCtx)`。attach 成功后,Hub 的 WS pump 收到 10s 超时 → exit → session events 停止回。
 
-**修复**(`lifecycle.go:383`):`cli.Start(ctx)` 用 `ctx`(StartSharedHost 的 caller ctx,daemon lifetime),**不用** `probeCtx`。`probeCtx` 只给 cookie 探测用,attach 成功后立刻 cancel。
+**修复**(`lifecycle.go`):`cli.Start(ctx)` 用 `ctx`(StartSharedHost 的 caller ctx,daemon lifetime),**不用** `probeCtx`。`probeCtx` 只给 cookie 探测用,attach 成功后立刻 cancel。
 
 ```go
 // WRONG:
@@ -1184,7 +1184,7 @@ INFO dsh.host: mux ready client_id=<uuid> host=...
 
 `dsh.host: mux ready` 带 `client_id` 是关键 —— 它意味着 `$events` 首帧 `ready` 已被 `host/stream.go::dispatch` 的 host-stream item 路径捕获并写入 `host/host_state.go::SetHostClientID`,`SendPermission` 的 `/api/$events/result` 才有 `clientId` 可填。
 
-`ready` 帧**不**走 `hostWaterfallHandler`(`host_waterfall.go:116` 的 handler 只处理 `emit` / `waterfall` / `cancel`,`ready` 在 dispatch 站点直接 `SetHostClientID + invokeOnHost("ready", ...)` 就 return)。所以 attach 成功的稳态日志就是上面两行,没有 `hostWaterfallHandler invoked` 行。如果只看到 `mux stream connected` 却没有 `mux ready`,说明 WS 握手通了但 `$events` 流没被服务端推送 —— 通常 dsh 内部 plugin 未就绪或 cookie 被拒。`installHostHandler` 本身不打日志(幂等,装在 `host.OnLifecycleInstall` 钩子里);要看它是否注册过,看 `host_waterfall.go::init` 是否执行(import 链)。
+`ready` 帧**不**走 `hostWaterfallHandler`(`host_waterfall.go` 的 handler 只处理 `emit` / `waterfall` / `cancel`,`ready` 在 dispatch 站点直接 `SetHostClientID + invokeOnHost("ready", ...)` 就 return)。所以 attach 成功的稳态日志就是上面两行,没有 `hostWaterfallHandler invoked` 行。如果只看到 `mux stream connected` 却没有 `mux ready`,说明 WS 握手通了但 `$events` 流没被服务端推送 —— 通常 dsh 内部 plugin 未就绪或 cookie 被拒。`installHostHandler` 本身不打日志(幂等,装在 `host.OnLifecycleInstall` 钩子里);要看它是否注册过,看 `host_waterfall.go::init` 是否执行(import 链)。
 
 ### 7.7 多 worktree 共享 ~/.dsh/.credentials.yaml
 
@@ -1342,7 +1342,7 @@ realpath $(which dsh)
 
 ### 13.1 P0 — WS Pong handler(`host/stream.go::connectAndServe`)
 
-**根因**:dsh server 端 `RemoteStreamMuxServer.startHeartbeat()`(`stream-server.ts:73`)每 2s 发 Ping,`MAX_MISSED_HEARTBEATS=2`,missed ≥ 2 → `socket.terminate()`(无 close frame,client 看到 1006 abnormal closure)。bridge 当前用 gorilla `websocket.NewClient` 默认配置,没装 PingHandler。
+**根因**:dsh server 端 `RemoteStreamMuxServer.startHeartbeat()`(`stream-server.ts`)每 2s 发 Ping,`MAX_MISSED_HEARTBEATS=2`,missed ≥ 2 → `socket.terminate()`(无 close frame,client 看到 1006 abnormal closure)。bridge 当前用 gorilla `websocket.NewClient` 默认配置,没装 PingHandler。
 
 **改动**:
 
@@ -1453,7 +1453,7 @@ for _, sub := range c.Router.EnumerateSubscriptions() {
 }
 ```
 
-**为什么 Hub.Subscribe 之后 Router 不会双订**:`Hub.Subscribe` 是 last-wins(见 `stream.go:222-224` — 旧的 `streamID` 被 `queueCancelLocked` 取消,新的 streamId 在当前 generation 重新 mint);Router.Subscribe 也是 last-wins。所以 `RecoverSubscriptions` 多次调用幂等。
+**为什么 Hub.Subscribe 之后 Router 不会双订**:`Hub.Subscribe` 是 last-wins(见 `stream.go` — 旧的 `streamID` 被 `queueCancelLocked` 取消,新的 streamId 在当前 generation 重新 mint);Router.Subscribe 也是 last-wins。所以 `RecoverSubscriptions` 多次调用幂等。
 
 **测试**:
 - `host_test.go::TestRouter_SnapshotTransfersActiveSubs` — Snapshot 含 Handler + 跨 Router 移植后还能 dispatch
@@ -1521,7 +1521,7 @@ func isSessionEventType(method string) bool {
 }
 ```
 
-`system/message` / `request/header` 都没 dispatcher handler,`dispatcher.dispatch` 会走 unknownCount + warn(无害)。或者直接给它们一个 `handleDebugOnly` dispatcher(`dispatch.go:211` 已经有),完全静默。
+`system/message` / `request/header` 都没 dispatcher handler,`dispatcher.dispatch` 会走 unknownCount + warn(无害)。或者直接给它们一个 `handleDebugOnly` dispatcher(`dispatch.go` 已经有),完全静默。
 
 **测试**:`dispatch_test.go` 加两个 case。
 

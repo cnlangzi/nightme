@@ -452,7 +452,7 @@ func (a *Adapter) onReady(u User) {
 // dispatcher reads from a.incoming on its own goroutine, so the
 // async publish still lands in arrival order.
 //
-// The F-14 invariant (messages/inbound.go:42-46) — LocalPath
+// The F-14 invariant (messages/inbound.go) — LocalPath
 // populated before the InboundMessage reaches the dispatcher —
 // is upheld because downloadAndPublish only publishes after the
 // downloads complete.

@@ -94,7 +94,7 @@ func TestTodoWriteRealWireShape(t *testing.T) {
 				"todos": [
 					{"content": "Read docs/SPEC.md", "status": "completed"},
 					{"content": "Read docs/bridge/dsh.md", "status": "completed"},
-					{"content": "Read docs/feat/F-dsh-bridge.md", "status": "in_progress"},
+					{"content": "Read docs/bridge/dsh-api.md", "status": "in_progress"},
 					{"content": "Read all bridge/dsh/*.go", "status": "pending"},
 					{"content": "Cross-check spec vs implementation", "status": "pending"}
 				]

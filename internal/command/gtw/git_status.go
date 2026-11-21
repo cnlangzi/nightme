@@ -50,7 +50,7 @@ import (
 //
 // F-48 (follow-up to F-45): runtime stamps one of these on every
 // OutboundMessage.StatusBar that flows to a main-chat footer
-// render site. See docs/feat/F-45-session-footer.md §1.7.
+// render site. See docs/channel/feishu-rendering.md §A10.
 //
 // The canonical definition lives in internal/messages so the wire
 // types package does not need to import the gtw package (avoids
@@ -97,7 +97,7 @@ type GitStatusSnapshot = messages.GitStatusSnapshot
 //
 // F-57: this is the single source of truth for the /gtw commit,
 // /gtw push, and /gtw pr readiness gates. All three commands call
-// it at entry; see docs/feat/F-57-gtw-push-pr-readiness.md §2.2.
+// it at entry; see docs/feat/F-gtw.md §A2 §2.2.
 // so push and commit gate on the same git truth.
 //
 // Note (F-237): the porcelain header trusts local config and

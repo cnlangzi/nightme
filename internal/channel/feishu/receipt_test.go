@@ -135,7 +135,7 @@ func (m *mockReceiptBot) PatchMessage(_ context.Context, messageID, body string)
 // stay running for their lifetime (chatsession.PromptDone is reserved but
 // never assigned in Phase 0).
 //
-// See docs/feat/message_lifecycle.md §7 (chatsession.PromptState shrink to
+// See docs/feat/F-53-message-prompt-lifecycle.md §7 (chatsession.PromptState shrink to
 // Running/Done).
 func TestSetTaskList_ReceiptBornRunning(t *testing.T) {
 	bot := &mockReceiptBot{}

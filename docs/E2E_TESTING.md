@@ -75,13 +75,13 @@ agent output is rendered back to the chat.
 
    | # | User sends | Bot replies |
    |---|------------|-------------|
-   | 1 | `/cwd /tmp` | `Workspace set to /tmp.` |
+   | 1 | `/cwd /tmp` | `Workspace set to /tmp.` + `Session is ready (active agent: …).` |
    | 2 | `hello` | `hello` (from the agent's PTY echo) |
    | 3 | `/use claude` | `Switched to claude` (or new spawn if not yet started) |
    | 4 | `/use codex` | `Switched to codex` (new spawn, claude process kept alive in pool) |
    | 5 | `/use claude` | `Switched to claude` (reuses prior claude process; conversation context preserved) |
    | 6 | `/close` | per-entry list of killed sessions |
-   | 7 | `/list` | session table (active / detached status, workspace, pid) |
+   | 7 | `nightme list`(CLI 子命令,不是 slash command) | session table |
 
    > If you don't have API keys for the real CLIs, register an
    > `echo` binary as an agent (`command: /bin/echo`) for steps 2-5.

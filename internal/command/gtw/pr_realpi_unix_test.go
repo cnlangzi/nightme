@@ -81,8 +81,7 @@ func TestRealPi_PRPromptV2(t *testing.T) {
 
 	// Register pi on demand so this test is self-sufficient when
 	// the gtw package is tested in isolation (no cmd/nightme
-	// init() to register Builtins). Mirrors the pattern in
-	// internal/chatsession/new_real_pi_test.go.
+	// init() to register Builtins). Mirrors the pattern in internal/chatsession/new_real_pi_unix_test.go.
 	reg := agent.New()
 	reg.Register(pibridge.NewStarter("pi", "pi", nil))
 

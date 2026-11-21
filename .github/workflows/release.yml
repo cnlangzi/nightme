@@ -448,7 +448,7 @@ jobs:
       # Mint the same version metadata as the main `nightme`
       # binary so `nightme-stt --version` matches byte-for-byte.
       # `${GITHUB_REF_NAME#v}` matches the main job's derivation
-      # (release.yml line 265) — `git describe --tags` would
+      # — `git describe --tags` would
       # leave the `v` prefix on the tag, drifting the STT
       # version string from the main binary's. The release
       # workflow only fires on `push: tags: v*`, so this

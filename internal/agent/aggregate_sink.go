@@ -640,7 +640,7 @@ func (a *eventAggregator) handleBuffering(ev AgentEvent, state *perJobState) {
 				// before this case ran; we just emitted it; pop it
 				// back off so replay skips it). Done under a.mu so
 				// the mutation has a happens-before with the
-				// transition's snapshot at handleBuffering line 485
+				// transition's snapshot at handleBuffering
 				// — without this the race detector flags a read
 				// of state.initBuffer concurrent with this write
 				// (Ubuntu CI, fix-git-lock-file).

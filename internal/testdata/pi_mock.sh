@@ -3,7 +3,7 @@
 # just enough of `pi --mode rpc` to drive a full Start -> SendBlocks
 # -> agent_settled -> SendBlocks (second turn) -> Close round trip.
 #
-# Wire protocol (LF-delimited JSON; see docs/feat/F-32-pi-rpc-bridge.md):
+# Wire protocol (LF-delimited JSON; see docs/bridge/pi.md):
 #   - First line on stdin MUST be a get_state command. We reply
 #     with a single response carrying session metadata.
 #   - Subsequent prompt commands get an immediate response, then a

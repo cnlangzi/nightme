@@ -30,8 +30,8 @@ import (
 // invisible: no logs, no channel.Send, no reactions).
 //
 // Bundling both calls in one helper makes the order impossible
-// to get wrong at the call site. See cmd/nightme/run_test.go
-// for the regression coverage that pins this contract.
+// to get wrong at the call site. The regression coverage that
+// pins this contract lives in internal/runtime/runtime_test.go.
 //
 // Bug history: F-think (commit 5725a90) introduced the
 // WithOnCreate wiring but called it AFTER RestoreFromRegistry —
@@ -153,8 +153,7 @@ func WireRuntimeCallbacksAndRestore(
 			// denormalize fields onto MessageStateEvent): the
 			// dispatcher now resolves the AS BEFORE emitting
 			// MessageQueued / MessageSubmitted (see
-			// internal/runtime/dispatcher.go and
-			// internal/chatsession/manager.go::HandleInbound),
+			// internal/runtime/dispatcher.go and internal/chatsession/manager.go::HandleInbound),
 			// so cs.selectedAS is set by the time this
 			// subscriber runs. The Feishu adapter then calls
 			// statusbar.StatusBarLines(&msg) (instead of the pre-fix

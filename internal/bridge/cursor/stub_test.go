@@ -2,8 +2,7 @@
 //
 // These tests verify the embedded stub itself is a valid SQLite
 // database with cursor's schema. The e2e probe (gated on
-// NIGHTME_CURSOR_E2E=1) drives a real cursor-agent and is in
-// resume_e2e_test.go.
+// NIGHTME_CURSOR_E2E=1) drives a real cursor-agent and is in resume_e2e_test.go.
 package cursor
 
 import (

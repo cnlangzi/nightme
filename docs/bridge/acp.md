@@ -52,10 +52,10 @@ claudecode / codex / dsh / pi 是**独立的 transport 实现**，不走 acp bri
 
 | 阶段 | 预算 | 覆盖什么 |
 |---|---|---|
-| `initialize` | 10s (`initializeTimeout`) | spawn + server boot + protocolVersion 握手。与 pi/codex `handshakeTimeout` 对齐；3s 对 cursor-agent 冷启动和低配机器不够。 |
+| `initialize` | 60s (`initializeTimeout`) | spawn + server boot + protocolVersion 握手。与 `session/new` 的预算同级；cursor-agent 的 Node 冷启动、opencode 在低配机器上的首启经常要 20–30s。 |
 | `session/new` | 45s (`newSessionTimeout`) | ACP server 真正干活（opencode 内部 HTTP backend + loadDirectorySnapshot 等）。 |
 
-超时错误带阶段名和预算，例如 `bridge/acp: initialize (timeout=10s): context deadline exceeded`。
+超时错误带阶段名和预算，例如 `bridge/acp: initialize (timeout=60s): context deadline exceeded`。
 
 ### 1.5 Telemetry
 
@@ -84,8 +84,8 @@ CLI 保持自己的默认行为。
 
 | `sessionUpdate` | Wire 字段 | 处理 | 出处 |
 |---|---|---|---|
-| `agent_message_chunk` | `content.text` | 缓冲到 textBuf；**滑动空闲** `flushDebounce`(800ms)：每个 token 重置计时。静默后分别检查 text/thought，ready 的一侧独立 flush（互不阻塞）。真断句：≥160 rune + 中文 `。！？` / ASCII `.?!`+空白（排除 `e.g.`/`Mr.` 等缩写与 `session.idle_timeout`）；列表 `"4."` 不断。tool / turn-end / Close **立即** drain | ACP spec |
-| `agent_thought_chunk` | `content.text` | 同 textBuf 规则，flush 时带 `[思考]` 前缀 | ACP spec |
+| `agent_message_chunk` | `content.text` | 缓冲到 textBuf；**滑动空闲** `flushDebounce`(1500ms)：每个 token 重置计时。静默后分别检查 text/thought，ready 的一侧独立 flush（互不阻塞）。真断句：≥160 rune + 中文 `。！？` / ASCII `.?!`+空白（排除 `e.g.`/`Mr.` 等缩写与 `session.idle_timeout`）；列表 `"4."` 不断。tool / turn-end / Close **立即** drain | ACP spec |
+| `agent_thought_chunk` | `content.text` | 同 textBuf 规则，flush 时发 `EventAgentThinking`（正文不带前缀标记） | ACP spec |
 | `tool_call` | `toolCallId / title / rawInput` | EventAgentToolStart | ACP spec |
 | `tool_call_update` | `toolCallId / status / rawOutput` | EventAgentToolEnd | ACP spec |
 | `message_chunk` | `content.text` | legacy，同 textBuf 规则 | legacy |
@@ -191,7 +191,7 @@ d.modelMu.Unlock()
 
 ### 3.4 runtime 端的配合
 
-`internal/runtime/handler.go:117` 已放开 SetModel 捕获条件：
+`internal/runtime/handler.go` 已放开 SetModel 捕获条件：
 
 ```go
 if ev.Model != "" {
@@ -297,6 +297,8 @@ driver.SetFlushHandler(h FlushHandler)
 // SessionView：通过 View() 拿到，只暴露 driver 的有限表面
 type SessionView struct {
     Emit         func(ev agent.AgentEvent)
+    AskUser      func(req *agent.AgentPermissionRequest,
+                       encode func(answer string) (any, error)) bool
     SessionID    func() string
     AgentName    string
     Workspace    string
@@ -324,7 +326,7 @@ driver.SetConfigOption(id, value string) (json.RawMessage, error)
 - ✅ `deliver()` 自动盖 SessionID / Model / AgentName / Workspace
 - ✅ runtime `SetModel` 捕获条件放开
 - ✅ `SetConfigOption`（`session/set_config_option`）：opencode bridge 把用户配置的模型转发到 session
-- ✅ 13 个新单元测试（`deliver_stamp_test.go`）
+- ✅ 27 个单元测试（`deliver_stamp_test.go`）
 
 ### 7.2 v2+ 留待 issue
 

@@ -11,7 +11,7 @@
 
 ## 1. 产品定义
 
-**nightme** 是一个运行在用户电脑上的"AI Coding CLI 远程遥控桥"——让用户从手机 / IM 端远程驱动本地 Claude Code / Codex / OpenCode，在多项目之间无缝切换。
+**nightme** 是一个运行在用户电脑上的"AI Coding CLI 远程遥控桥"——让用户从手机 / IM 端远程驱动本地 Claude Code / Codex / DSH / OpenCode / Cursor / GitHub Copilot CLI / Pi / OMP，在多项目之间无缝切换。
 
 nightme 自己**不调用 LLM、不做任务编排、不做代码审查**。它只是一个 I/O 搬运工：把 IM 消息搬到本地 CLI 的 TTY 输入框，再把 CLI 的屏幕输出搬回 IM。
 
@@ -25,7 +25,7 @@ nightme 自己**不调用 LLM、不做任务编排、不做代码审查**。它�
 
 nightme 为以下用户设计：
 
-- **使用 AI Coding CLI 的开发者**：Claude Code / Codex / OpenCode 的活跃用户
+- **使用 AI Coding CLI 的开发者**：Claude Code / Codex / DSH / OpenCode / Cursor / GitHub Copilot CLI / Pi / OMP 的活跃用户
 - **手机办公者**：通勤、出差、躺床上时也想继续跟 agent 协作
 - **多项目并行者**：同时维护 2~5 个项目，需要在不同 context 间切换
 - **IM 重度用户**：把飞书 / WhatsApp 当作主要沟通工具
@@ -92,7 +92,7 @@ nightme **不调** Claude Code 的 non-interactive 模式（`--print` / `-p`）�
 - 当前活跃 agent 类型（`/use <agent>` 设）
 - 一个 AgentSession 池
 
-**AgentSession** 是 ChatSession 池里的一项，对应一对 `(agent, cwd)` 组合，是实际跑 CLI 子进程（Claude Code / Codex / OpenCode）的会话句柄。
+**AgentSession** 是 ChatSession 池里的一项，对应一对 `(agent, cwd)` 组合，是实际跑 CLI 子进程（Claude Code / Codex / DSH / OpenCode / Cursor / GitHub Copilot CLI / Pi / OMP）的会话句柄。
 
 **关键规则**：
 - **1 chat = 1 ChatSession**（永久绑定，跨重启）
@@ -142,12 +142,12 @@ nightme 把"会话上下文"和"CLI 进程"分开：
 
 ## 5. 功能范围
 
-完整功能列表（F-01 ~ F-56）见 [`FEATURES.md`](./FEATURES.md)。每个功能的设计细节见 [`feat/`](./feat/)。
+功能索引见 [`FEATURES.md`](./FEATURES.md)。每个功能的设计细节见 [`feat/`](./feat/)。
 
 **核心模型**：
-- **ChatSession**（F-27）：chat ↔ AgentSession 间的会话上下文
-- **`/use <agent>` 命令**（F-28）：切换 ChatSession 的 selectedAgent；复用或新建 AgentSession
-- **AgentSession 池**（F-29）：ChatSession 内 `(agent, cwd)` 1:1 池化；切换 cwd/agent 不杀进程
+- **ChatSession**（F-27）：chat ↔ AgentSession 间的会话上下文 — 见 [`feat/F-chat-session.md`](./feat/F-chat-session.md) §A1
+- **`/use <agent>` 命令**（F-28）：切换 ChatSession 的 selectedAgent；复用或新建 AgentSession — 见 [`feat/F-chat-session.md`](./feat/F-chat-session.md) §A2
+- **AgentSession 池**（F-29）：ChatSession 内 `(agent, cwd)` 1:1 池化；切换 cwd/agent 不杀进程 — 见 [`feat/F-chat-session.md`](./feat/F-chat-session.md) §A3
 
 **范围外**（明确不做）：
 - 多 AgentSession 并行协作

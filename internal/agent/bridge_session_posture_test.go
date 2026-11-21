@@ -12,8 +12,7 @@ package agent_test
 // The bridges without a spawn-time flag are pinned elsewhere:
 //
 //   - codex — the app-server argv (approval_policy="never",
-//     sandbox_mode="danger-full-access") is pinned by
-//     internal/bridge/codex/session_unix_test.go.
+//     sandbox_mode="danger-full-access") is pinned by internal/bridge/codex/session_unix_test.go.
 //   - dsh — the shared host's permission mode defaults to
 //     danger-full-access; pinned by internal/bridge/dsh/handshake_test.go.
 //   - opencode / acp — no spawn flag exists; approvals arrive over the

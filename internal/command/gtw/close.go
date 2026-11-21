@@ -154,7 +154,7 @@ func RunClose(
 	//       the user never ran /gtw fix here.
 	//
 	//   (c) selectedCwd is empty — short-circuited separately
-	//       at lines 129-132 (just below) with
+	//       just below, with
 	//       command.NoActiveCwdReply; never reaches the
 	//       dangling-dir cleanup below.
 	//
@@ -376,7 +376,7 @@ func RunClose(
 	// branch was created by /gtw fix and the user is asking for
 	// a full close, so a "branch not merged" refusal would be
 	// hostile. Recovery remains possible via reflog if needed.
-	// Mirrors the rollback path in fix.go:440.
+	// Mirrors the rollback path in fix.go.
 	if _, brStderr, brErr := deps.Git.Run(ctx, c.RepoRoot, "branch", "-D", c.Branch); brErr != nil {
 		body := fmt.Sprintf(
 			"❌ git branch -D %s failed: %v\n"+

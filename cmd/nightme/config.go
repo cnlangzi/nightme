@@ -311,8 +311,7 @@ func configNameMenu(cfg *config.Config, path string, in *bufio.Reader, out io.Wr
 // ahead from the underlying io.Reader — a new Scanner or
 // bufio.Reader over the same underlying source loses bytes
 // between calls. Tests wrap their synthetic input in
-// bufio.NewReader; production wraps os.Stdin in
-// cmd/nightme/run.go.
+// bufio.NewReader; production wraps os.Stdin in cmd/nightme/run.go.
 func readLine(br *bufio.Reader) string {
 	line, _ := readAnswer(br)
 	return line

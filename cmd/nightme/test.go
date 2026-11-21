@@ -10,7 +10,7 @@
 //	nightme test --workspace /home/devin/code/bailing --agent claude
 //	nightme test --workspace /tmp/foo --agent /bin/echo --args hello
 //
-// Design notes (docs/feat/F-19-cli-bridge.md, F-10 §1):
+// Design notes (docs/bridge/cli-transport.md):
 //   - The agent registry is populated from cfg.Agents. Agents
 //     whose command resolves on PATH are registered as PTY. Agents
 //     not in the registry are auto-registered when their command

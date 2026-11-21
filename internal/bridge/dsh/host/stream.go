@@ -506,7 +506,7 @@ func (h *StreamHub) connectAndServe(ctx context.Context) error {
 	// WITHOUT making ReadMessage return, so the data-frame reset
 	// in readLoop is a no-op for idle sessions. Without this
 	// reset an idle mux (no business frames, only 2s pings) hits
-	// the absolute 60s deadline from line 483 / 578, ReadMessage
+	// the absolute 60s deadline in readLoop, ReadMessage
 	// returns i/o-timeout, and the connection tears down +
 	// reconnects even though dsh is perfectly healthy. Refresh on
 	// every ping keeps the deadline aligned with "last network

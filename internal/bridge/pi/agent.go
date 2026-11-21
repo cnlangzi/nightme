@@ -8,7 +8,7 @@
 // request/response correlation, and translates Pi events into
 // agent.AgentEvent values consumed by the rest of nightme.
 //
-// Design reference: docs/feat/F-32-pi-rpc-bridge.md.
+// Design reference: docs/bridge/pi.md.
 //
 // Agent is BOTH the template (registered with agent.Builtins) and
 // the live handle (returned by Start). The template half is set

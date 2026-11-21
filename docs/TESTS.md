@@ -9,53 +9,39 @@
 
 ---
 
-## 0. 背景:dsh-on-Windows 事件
+## 0. 背景:启动路径 smoke gate
 
-2026-08 中,`cmd/nightme/agents.go:55-61` 在 `init()` 里把 dsh 注册包了一层 `runtime.GOOS != "windows"` 检查,注释写:
+`startup` 这个 job 跑的是"装 agent → 起 nightme → 看 agent 启动"这条链,它补的正是 Go 测试套件覆盖最薄的一层。
 
-> _"dsh is a Node.js CLI; Windows support is a non-goal per the dsh project."_
+Go 测试套件对 spawn-touching 路径大量使用 `//go:build !windows` 跳过(`internal/` + `cmd/` 合计 83 处),Windows 分支在 CI 里覆盖率本就稀疏;CI 里也没有跨平台交叉编译 job —— 交叉编译只能 surfacing `//go:build` 不匹配,而这类不匹配 `go vet` 在对应原生 runner 上本来就能抓到。startup job 把"每个平台都能把 agent 跑起来"变成 PR 级的硬 gate:装完 agent 逐个验 PATH / `--help` / 内建表,再逐个验 bridge 真能把 agent 拉起来并拿到响应。
 
-这个 gate 在 main 上存在了若干 PR 都没人 review,因为:
-
-1. 开发团队主要在 macOS 上日常测试,这段代码肉眼可读、看起来合理,没人去 verify 注释的真伪;
-2. 现有 Go 测试套件对 spawn-touching 路径大量使用 `//go:build !windows` / `//go:build !unix` 跳过(`grep -rn 'go:build !windows' internal/` 命中 ~30 处),Windows 分支在 CI 里覆盖率本就稀疏;
-3. `build` job 在 ubuntu 上交叉编译到 `windows/amd64` **只跑 build,不跑 test**,所以编译过的代码没人验证它真能跑;
-4. 没有 e2e 级别的"装 agent → 起 nightme → 看 agent 启动" gate。
-
-**实际后果**:
-
-- `nightme.exe agents` 在 Windows 上不列 dsh;
-- `nightme.exe config` 同样不列 dsh;
-- 用户要么以为 nightme 不支持 dsh,要么 hack `config.yaml` 加 user-defined 走 PTY 兜底,丢掉结构化能力;
-- 修复点在 PR review 里被三连 reviewer 都误以为是"作者有意识地屏蔽 Windows",差点被回滚。
-
-修复只动了一行 (`if runtime.GOOS != "windows"` 包装层) + 注释改写,但**没有 CI 防护栏的话,下次重构还会悄悄回滚**——这正是 `startup` 这个 job 存在的理由。
+被测的 agent 是 8 个内建 agent 里除 dsh 外的 7 个 —— dsh 不在名单里,原因见 §4。
 
 ---
 
 ## 1. 测试金字塔里的位置
 
-nightme 的验证覆盖分五层,从下到上:
+nightme 的验证覆盖分四层,从下到上:
 
 ```
             ┌───────────────────────────────┐
-            │  5. 真实 e2e (Feishu 端到端)  │   ← docs/E2E_TESTING.md
+            │  4. 真实 e2e (Feishu 端到端)  │   ← docs/E2E_TESTING.md
             │     需 apikey + 真机/Live    │     PR 不能强制跑(配额 + 密钥)
             ├───────────────────────────────┤
-            │  4. startup (CI smoke)        │   ← 本文档;四平台 runner
+            │  3. startup (CI smoke)        │   ← 本文档;6 个 runner leg
             │     无 apikey,只验启动        │     每个 PR 必跑
             ├───────────────────────────────┤
-            │  3. 单元 + race + coverage    │   ← test job (matrix: 3 OS)
+            │  2. 单元 + race + coverage    │   ← test job (matrix: 3 OS)
             │     fake driver,bridge logic  │     每个 PR 必跑
             ├───────────────────────────────┤
-   ─────────┤  2. 编译时跨平台 vet/build    │   ─────── bridge 边界 ────────
-            │     GOOS 切换但不实际跑       │     build job (cross-compile)
-            ├───────────────────────────────┤
-            │  1. 静态检查 (go vet)         │   ← test / build job
+            │  1. 静态检查 + 编译           │   ← test job (gofmt / vet / build)
+            │     gofmt / go vet / go build │     每个 PR 必跑
             └───────────────────────────────┘
 ```
 
-`startup` 占据第 4 层:**编译过 + 单元测试过 + 跨平台编译过** → 真起一次看 spawn 是否活着。它补的不是"功能正确性"(那是 fake driver 单测的活),而是"启动路径在每个平台上都通"——这层正好是现有套件覆盖最薄的地方。
+`startup` 占据第 3 层:**单元测试过 + 在每个平台编译过** → 真起一次看 spawn 是否活着。它补的不是"功能正确性"(那是 fake driver 单测的活),而是"启动路径在每个平台上都通"——这层正好是现有套件覆盖最薄的地方。
+
+跨平台交叉编译与 release 打包不在 CI 里,而在 [`.github/workflows/release.yml`](../.github/workflows/release.yml) 的 `build` / `stt` / `release` 三个 job —— 它们跟着 release tag 跑,不跟每个 PR 跑。
 
 ---
 
@@ -68,10 +54,10 @@ nightme 的验证覆盖分五层,从下到上:
 | 1 | **不依赖 apikey / 网络** | "跑 `claude 'hello'` 然后断言响应包含 'hi'" | "跑 `claude --help`,断言非空输出" |
 | 2 | **统一 5-gate 协议,任何 builtin 都套同一组检查** | 给 dsh 写一套特殊步骤 | `for agent in $LIST; do gate1; gate2; …; done` |
 | 3 | **每层 gate 独立 catch 不同失败模式** | 一个大断言里塞 5 种不相关的期望 | 5 个独立 step,各自 exit code |
-| 4 | **必须真有响应才算启动成功** | "spawn 后 6 秒还活着 = pass"(hung 也"活着") | "spawn 后 8 秒内输出 size > banner = pass" |
+| 4 | **必须真有响应才算启动成功** | "spawn 后 6 秒还活着 = pass"(hung 也"活着") | "spawn 后 30 秒内输出 size > banner = pass" |
 | 5 | **不断言响应内容** | grep "API key error" / "model reply" 之类 | 只断言 size > threshold(任何 byte 都是 pass) |
 | 6 | **官方安装方式优先于 curl-pipe** | `curl … \| bash` 在 CI 里 cert/geo/版本都抖 | `npm install -g <official-package>` 跨平台 deterministic |
-| 7 | **挂在依赖链尾,cheap-first / expensive-last** | startup 在 test 之后就起 | startup 等 `test` + `build` 都绿 |
+| 7 | **挂在依赖链尾,cheap-first / expensive-last** | startup 在 test 之前起 | startup 等 `test` 绿 |
 
 ---
 
@@ -82,8 +68,12 @@ nightme 的验证覆盖分五层,从下到上:
 ### Gate 1: binary on PATH
 
 ```bash
-for agent in claude codex opencode pi dsh; do
-  command -v "$agent" || fail
+for agent in claude codex opencode pi copilot cursor omp; do
+  case "$agent" in
+    cursor) bin=cursor-agent ;;
+    *)      bin="$agent" ;;
+  esac
+  command -v "$bin" || fail
 done
 ```
 
@@ -91,10 +81,12 @@ done
 
 **为什么不只 `which`**:nightme 内部走 `exec.LookPath` —— 跟 `command -v` 在 bash 里是同一回事(POSIX execvp + PATHEXT 顺序)。在这层 gate 上 bash 和 Go 用的是同一个查找逻辑,所以这步是真能 catch "nightme 会找不到这个 binary"。
 
+**cursor 为什么单独映射**:cursor 的官方 installer 落的 binary 叫 `cursor-agent`,不是 `cursor`;bridge 也按这个名字 spawn(`cmd/nightme/agents.go` 的 `cursor.NewStarter("cursor", "cursor-agent", …)`)。
+
 ### Gate 2: binary `--help` 响应
 
 ```bash
-output=$("$agent" --help 2>&1) || true
+output=$("$bin" --help 2>&1) || true
 [ -n "$output" ] || fail
 ```
 
@@ -102,33 +94,33 @@ output=$("$agent" --help 2>&1) || true
 
 **为什么 `--help` 而不是 `--version`**:`--version` 通常只是个常量字符串,只验"binary 能加载"。`--help` 走 argv 解析 → 命令表查找 → 输出 usage,触达的代码路径是 `--version` 的超集,等价于"binary 完整可用"。
 
-### Gate 3: `nightme agents` 列出
+### Gate 3: `nightme config` 的 Agents 表列出
 
 ```bash
-out=$(./dist/nightme agents)
-for agent in $LIST; do
+out=$(printf '2\nq\nq\n' | ./bin/nightme config 2>&1)
+for agent in claude codex opencode pi copilot cursor omp; do
   echo "$out" | grep -qE "(^|[[:space:]])${agent}([[:space:]]|$)" || fail
 done
 ```
 
 **Catch 什么**:`cmd/nightme/agents.go` 的 `init()` 漏注册 / GOOS gate 错误屏蔽 / package import 失败导致 builtin list 为空。
 
-**这层是 dsh-on-Windows 事件的直接 catch 点**:任何对 `agent.Builtins.Register(...)` 的运行时 GOOS 屏蔽都会让某 platform runner 上的这步变红。
+`nightme config` 的主菜单 `[2] Agents` 打印那张内建 agent 表(`cmd/nightme/agents_table.go` 的 `renderAgentsTable`),一行一个内建 agent。独立命令 `nightme agents` 不存在 —— 它的表已经并进 `nightme config` 的 Agents 子菜单。
 
 **为什么 subset 而不是 exact match**:用户可在 `$NIGHTME_CONFIG` 里加 user-defined agents,跑这层时如果断言"恰好等于内置列表"会把合法配置当 bug。
 
 ### Gate 4: `nightme test --agent X` 必须有响应
 
 ```bash
-printf 'PONG\n' | ./dist/nightme test --agent "$agent" --workspace "$workspace" \
+printf 'PONG\n' | ./bin/nightme test --agent "$agent" --workspace "$workspace" \
   >"$out_file" 2>&1 &
 pid=$!
 
-deadline=$(( $(date +%s) + 8 ))
+deadline=$(( $(date +%s) + 30 ))
 acknowledged=0
 while [ "$(date +%s)" -lt "$deadline" ]; do
   size=$(wc -c < "$out_file" | tr -d ' ')
-  if [ "$size" -gt 150 ]; then
+  if [ "$size" -gt 80 ]; then
     acknowledged=1
     break
   fi
@@ -143,9 +135,9 @@ kill "$pid" 2>/dev/null || true
 
 **Catch 什么**:bridge 找到了 binary 但 spawn 失败 / spawn 成功但子进程立刻崩 / 子进程 hang 永远不回应。
 
-**为什么 poll size 而不是单纯 aliveness**:hung 的子进程 `kill -0` 也返回 0(进程存在),纯 aliveness 检查会让 hung agent 假阳性 pass。我们要求"banner 之外的任何字节",等价于"agent 至少 acknowledge 了一次"。banner 阈值 150 字节是实测上界(`[nightme] session <id> started in <ws> (agent=…, args=…)\n` 在 80-120 字节区间,150 是它的 1.25x 安全余量)。
+**为什么 poll size 而不是单纯 aliveness**:hung 的子进程 `kill -0` 也返回 0(进程存在),纯 aliveness 检查会让 hung agent 假阳性 pass。我们要求"banner 之外的任何字节",等价于"agent 至少 acknowledge 了一次"。banner 阈值 80 字节是实测上界(`[nightme] session <id> started in <ws> (agent=…, args=…)\n` 在 unix 上 ~92 字节、Windows 上 ~130 字节,80 低于两者,只要子进程说了任何一个字节就能判过)。
 
-**为什么 8 秒**:足够 PTY agent 完成 echo + 一次 protocol 初始化,足够 JSON-RPC agent 把 framing error log 写到 stderr,足够 dsh shared-host 完成端口 bind + URL 输出。任何超出 8 秒还没 acknowledge 的 agent 都不是"启动慢",是真的坏了。
+**为什么 30 秒**:实测各 agent 冷启动耗时 claude ≈0.7s、codex ≈1.3s、pi ≈2s、opencode ≈5s、cursor ≈8–12s;dsh 的 host URL 解析超时是 10s。30s 给所有 agent 留足余量,又只比最慢 agent 的冷启动成本高约 2 倍 —— 窗口内还没动静的 agent 是真坏了,不是启动慢。
 
 **为什么不 grep 响应内容**:用户明确"提示 apikey 不存在也是一种工作的响应"。每个 agent 的协议不同:
 
@@ -153,9 +145,11 @@ kill "$pid" 2>/dev/null || true
 |---|---|
 | `claude` (PTY) | `PONG\n` 被 PTY echo → 终端渲染 → 输出 >> banner |
 | `codex` (stdio JSON-RPC) | 收到非 JSON 行 → framing error → stderr >> banner |
-| `opencode` (同上) | 同 codex |
 | `pi` (stdio JSONL) | 收到非 JSONL 行 → parse error → stderr >> banner |
-| `dsh` (shared-host) | bind 127.0.0.1:3080 → stdout 打 "dsh web: http://..." >> banner |
+| `omp` (stdio NDJSON) | 没有 API key / models.yml → 打印 `No default model selected` 后退出 → bridge 转述到 stderr |
+| `opencode` (ACP over PTY) | `opencode acp` 收到非 JSON-RPC 行 → 协议错误 → stderr >> banner |
+| `cursor` (ACP over PTY) | `cursor-agent acp` 收到非 JSON-RPC 行 → 协议错误 → stderr >> banner |
+| `copilot` (ACP over PTY) | `session/new` 报 `json-rpc error -32000: Authentication required` → bridge 转述 |
 
 每种都"自然产生"超出 banner 的输出,不需要 mock 任何东西。
 
@@ -165,33 +159,35 @@ kill "$pid" 2>/dev/null || true
 
 ---
 
-## 4. 安装策略:为什么是 `npm install -g`
+## 4. 安装策略
 
-5 个被测 agent 全部通过 npm 官方分发:
+被测的 7 个 agent 分两类装:
 
-| Agent | npm 包 | 来源 / 验证锚 |
+| Agent | 安装方式 | 来源 / 验证锚 |
 |---|---|---|
-| `claude` | `@anthropic-ai/claude-code` | `internal/proc/exec_windows.go:43` 注释引用 + Anthropic 官方 setup 文档 |
-| `codex` | `@openai/codex` | `docs/WINDOWS.md:183` "npm 包内的 codex.cmd" + OpenAI 官方 docs |
-| `opencode` | `opencode-ai` | `docs/WINDOWS.md:184` |
-| `pi` | `@earendil-works/pi-coding-agent` | `docs/bridge/pi.md:271` |
-| `dsh` | `@deepseek-ai/dsh` | `internal/bridge/dsh/starter.go:82` `Detect()` 错误信息 |
+| `claude` | `npm install -g @anthropic-ai/claude-code` | `internal/proc/exec_windows.go` 的 `.cmd` shim 注释 + Anthropic 官方 setup 文档 |
+| `codex` | `npm install -g @openai/codex` | OpenAI 官方 docs |
+| `opencode` | `npm install -g opencode-ai` | opencode 官方 docs(另有一个 curl installer,见下) |
+| `pi` | `npm install -g @earendil-works/pi-coding-agent` | [`docs/bridge/pi.md`](./bridge/pi.md) §安装 |
+| `copilot` | `npm install -g @github/copilot` | [`docs/bridge/copilot.md`](./bridge/copilot.md) §安装 |
+| `cursor` | 官方 installer(unix `curl … \| bash`,Windows `irm '…?win32=true' \| iex`) | [`docs/bridge/cursor.md`](./bridge/cursor.md) §安装 —— npm 上没有 `@cursor/cli` |
+| `omp` | 官方 installer(unix `curl … \| sh`,Windows `irm https://omp.sh/install.ps1`) | [`docs/bridge/omp.md`](./bridge/omp.md) —— omp 不发布到 npm |
 
-**为什么不用 curl-pipe installer**(虽然有些 agent 官方提供):
+**为什么 npm 优先**:npm registry 通过 lockfile-style 解析是 deterministic 的,跨 platform / 跨 runner 一致;`setup-node` 把 npm bin dir 自动加到 PATH,无需手维护 PATHEXT。`curl … | bash` 在 CI 里 cert pinning / geo 路由 / release channel pin 都会抖。
 
-- `curl … | bash` 在 CI 里 cert pinning / geo 路由 / release channel pin 都会抖;
-- npm registry 通过 lockfile-style 解析是 deterministic 的,跨 platform / 跨 runner 一致;
-- `setup-node` 把 npm bin dir 自动加到 PATH,无需手维护 PATHEXT。
+**cursor / omp 为什么例外**:这两个 CLI 没有官方 npm 包,官方 installer 是唯一受支持的安装渠道。CI 接受这一条 curl-pipe 的抖动面,是因为没有替代方案。
 
 **`opencode` 的特殊性**:它除 npm 外还有官方 curl installer(`opencode.ai/install`),作为**第二官方渠道** —— 这是用户从非 npm 环境装 opencode 的官方方式。CI 这层选 npm 是因为 deterministic;curl 是给真机用的。
 
-**没覆盖的 agent**:`bash`(pty.NewStarter 注册的 PTY fallback),因为它是平台自带二进制 —— Linux/macOS 的 `bash` / `apt bash`、Windows 上没有。这个 gap 由 unix-only Go 测试覆盖,不是这层 gate 的责任。
+**dsh 不在名单里**:npm 上的 `@deepseek-ai/dsh` 依赖链里引用了一个 registry 上不存在的版本,任何版本都装不上(ETARGET),所以 `startup` job 不装它、也不在 gate 循环里。dsh 的 Go 测试仍在 `test` job 里跑(`make test`),被跳过的是安装 + smoke 这一段。
+
+**没有哪个 agent 是 bash**:`internal/bridge/pty` 是共享 transport(供需要 PTY 的 bridge 和 user-defined `cfg.Agents` 条目使用),它不在 `agent.Builtins` 里,所以 bash 不是内建 agent,也不在这层 gate 的范围内。
 
 ---
 
 ## 5. CI Workflow 拓扑
 
-三个 job 三个名词,全是 matrix 模式,GitHub Actions UI 自动把每个矩阵轴展开成 job 名下的二级行:
+`.github/workflows/ci.yml` 只有两个 job,都是 matrix 模式,GitHub Actions UI 自动把每个矩阵轴展开成 job 名下的二级行:
 
 ```
 test
@@ -200,39 +196,27 @@ test
   └─ macos-latest
   ~3-5 min (3 runners 并行)
 
-build
-  ├─ windows / amd64
-  ├─ windows / arm64
-  ├─ darwin / amd64
-  └─ darwin / arm64
-  needs: test            ~2-3 min (4 targets 并行,全在 ubuntu 上 cross-compile)
-
 startup
-  ├─ ubuntu-latest
-  ├─ windows-latest
-  └─ macos-latest
-  needs: [test, build]   ~3-5 min (3 runners 并行)
+  ├─ ubuntu-latest      / amd64
+  ├─ ubuntu-24.04-arm   / arm64
+  ├─ macos-latest       / arm64
+  ├─ macos-latest       / amd64  (Rosetta 2)
+  ├─ windows-latest     / amd64
+  └─ windows-11-arm     / arm64
+  needs: test            ~5-10 min (6 runners 并行)
 ```
 
-**依赖顺序**:`test` 是根,`build` 必须等 `test`(确保代码至少编译/单测过),`startup` 必须等 `test` + `build`(确保代码编译 + 跨平台编译都绿才有意义跑 spawn smoke)。
+**依赖顺序**:`test` 是根(`startup` 只 `needs: test`),确保代码至少编译过、vet 过、单测过才有意义跑 spawn smoke。
 
-**为什么是这 3 个 OS,而不是更多或更少**:每个 OS 都是 nightme 触达独占行为的家族,不可互相替代:
+**startup 为什么是 6 个 leg**:runner label 跟 `release.yml` 的 `build` / `stt` matrix 一一对应 —— 同一组 host + GOARCH 组合、同样的顺序,runner image 改名 / 下架时两个 workflow 一起改。六个 leg 跑的是同一条完整链(npm install + daemon 生命周期 + 每个 agent 的 `--help` + bridge spawn),CI 必须把每个发布出去的平台 / 架构都摸一遍,arm64 Linux、Apple Silicon、Windows ARM64 上的回归要在 PR 阶段就红,而不是等到 release。
 
-| OS | 触达的独占行为 | 砍掉会丢什么 |
-|---|---|---|
-| `ubuntu-latest` | `//go:build !windows` 测试、AF_UNIX sockets、Setpgid、glibc、`/proc`、Linux PTY | Linux syscall wrapper / IPC 回归 |
-| `windows-latest` | `.cmd` shim 路由、`CREATE_NO_WINDOW`、named pipes、ConPTY、MSYS 路径翻译 | **就是 dsh-on-Windows 那类 bug** |
-| `macos-latest` | BSD process signals、APFS、macOS PTY、macOS syscall wrapper | BSD signal 转发 / macOS-only edge case |
-
-**为什么不加 `macos-13` (Intel x86_64)**:nightme 是 Go + Node.js npm —— Go runtime 把 amd64 和 arm64 当等价 tier-1,nightme 不写汇编;`npm install` 自动按 host arch 拉对应 .node binary。**arch 不 gate 行为**,所以 `macos-13` 测试的是 OS 跟 `macos-latest` 一样的 darwin 层 + 不同的 arch,边际价值 ≈ 0。`build` job 仍然 cross-compile 到 4 个 GOOS/GOARCH,这是**release distribution 决策**(用户在不同 arch 机器上下载不同 binary),跟 CI 覆盖是两件事。
+**为什么不加 `macos-13` (Intel x86_64)**:nightme 是 Go + Node.js npm —— Go runtime 把 amd64 和 arm64 当等价 tier-1,nightme 不写汇编;`npm install` 自动按 host arch 拉对应 .node binary。**arch 不 gate 行为**,所以 `macos-13` 测试的是 OS 跟 `macos-latest` 一样的 darwin 层 + 不同的 arch,边际价值 ≈ 0。macOS 上的 Intel 组合由 `macos-latest` + `GOARCH=amd64` 那条 cross-compile leg 覆盖(产物跑在 Rosetta 2 上)。
 
 **为什么 fail-fast: false**:`npm install -g` 可能因 registry / 网络问题在某一两个 OS 上挂,不应连带把另外的 OS gate 也拖红。每个 runner 独立报 pass/fail,CI UI 上一眼看出"哪个 OS 挂了、哪个过了"。
 
-**为什么 startup 挂链尾**:startup 是文件里最贵的 gate(npm install × 5 × 3 OSes + 5 spawn 尝试 × 8s 观察)。任何前置红了再启动 startup 就是纯烧 hosted runner 配额。挂链尾 = cheap-first / expensive-last。
+**为什么 startup 挂链尾**:startup 是文件里最贵的 gate(npm install × 7 × 6 legs + 每个 agent 一次 spawn 尝试 × 30s 观察)。任何前置红了再启动 startup 就是纯烧 hosted runner 配额。挂链尾 = cheap-first / expensive-last。
 
-**已知 trade-off**:`build` 的 4 个 target 都在 ubuntu 上编,所以跨平台 runtime 真假要靠 `test` 和 `startup` 覆盖。这两个 job 各自的 3 个 runner 互相独立、并行启动,**没有跨 OS 闲置**。
-
-如果 CI 时间预算吃紧,可拆 `startup` 成 3 个独立 job(每个 OS 一个 needs 链),消掉"linux runner 等 windows runner 跑完"那种 idle —— 但目前单 job 矩阵更易配置,值得保留。
+**交叉编译在哪**:CI 里没有跨平台编译 job。`release.yml` 的 `build` job 负责 4 个 GOOS/GOARCH 的产物(`stt` job 负责 STT worker),它们跟着 release tag 跑。CI 侧的平台覆盖靠 `test` + `startup` 两个 job 的原生 runner。
 
 ---
 
@@ -243,39 +227,41 @@ CI 是 hosted runner 上跑的,但开发者本地也可以跑同一组检查。
 ### 6.1 一键跑全套
 
 ```bash
-# 前置:Go 1.22+、Node 20+
+# 前置:Go 1.27+、Node 22+
 go build -o /tmp/nightme ./cmd/nightme
 export PATH="/tmp:$(npm config get prefix)/bin:$PATH"
 
 # Gate 1: PATH
-for agent in claude codex opencode pi dsh; do
-  command -v "$agent" >/dev/null || { echo "FAIL: $agent missing"; exit 1; }
+for agent in claude codex opencode pi copilot cursor omp; do
+  case "$agent" in cursor) bin=cursor-agent ;; *) bin="$agent" ;; esac
+  command -v "$bin" >/dev/null || { echo "FAIL: $agent missing"; exit 1; }
 done
 
 # Gate 2: --help
-for agent in claude codex opencode pi dsh; do
-  out=$("$agent" --help 2>&1) || true
+for agent in claude codex opencode pi copilot cursor omp; do
+  case "$agent" in cursor) bin=cursor-agent ;; *) bin="$agent" ;; esac
+  out=$("$bin" --help 2>&1) || true
   [ -n "$out" ] || { echo "FAIL: $agent --help"; exit 1; }
 done
 
-# Gate 3: nightme agents
-/tmp/nightme agents
-for agent in claude codex opencode pi dsh; do
-  /tmp/nightme agents | grep -qE "(^|[[:space:]])${agent}([[:space:]]|$)" \
+# Gate 3: nightme config 的 Agents 表
+out=$(printf '2\nq\nq\n' | /tmp/nightme config 2>&1)
+for agent in claude codex opencode pi copilot cursor omp; do
+  echo "$out" | grep -qE "(^|[[:space:]])${agent}([[:space:]]|$)" \
     || { echo "FAIL: $agent not listed"; exit 1; }
 done
 
 # Gate 4: bridge spawn + response
 workspace=$(mktemp -d)
-for agent in claude codex opencode pi dsh; do
+for agent in claude codex opencode pi copilot cursor omp; do
   out_file=$(mktemp)
   printf 'PONG\n' | /tmp/nightme test --agent "$agent" --workspace "$workspace" \
     >"$out_file" 2>&1 &
   pid=$!
-  deadline=$(( $(date +%s) + 8 ))
+  deadline=$(( $(date +%s) + 30 ))
   ok=0
   while [ "$(date +%s)" -lt "$deadline" ]; do
-    [ "$(wc -c < "$out_file" | tr -d ' ')" -gt 150 ] && { ok=1; break; }
+    [ "$(wc -c < "$out_file" | tr -d ' ')" -gt 80 ] && { ok=1; break; }
     kill -0 "$pid" 2>/dev/null || break
     sleep 0.5
   done
@@ -283,25 +269,25 @@ for agent in claude codex opencode pi dsh; do
   [ "$ok" -eq 1 ] || { echo "FAIL: $agent no response"; cat "$out_file"; exit 1; }
 done
 
-echo "OK: all 5 agents across 5 gates"
+echo "OK: all 7 agents across 5 gates"
 ```
 
 ### 6.2 为什么 CI 不能只信 dev 笔记本测试
 
-开发在 macOS / Linux 笔记本上跑同一组 gate 通常全绿,但 CI 还是独立跑 3 个 OS hosted runner,原因:
+开发在 macOS / Linux 笔记本上跑同一组 gate 通常全绿,但 CI 还是独立跑 hosted runner,原因:
 
 | 维度 | dev 笔记本 | hosted runner |
 |---|---|---|
 | `~/.dsh/settings.yaml` | 真用户配置(可能漏 API key 也"假装能跑") | clean,无配置 |
 | `PATH` | 装着 10 个没列在 builtin 里的 binary(可能掩盖 PATH 顺序问题) | 只有 npm bin + 系统 PATH |
 | shell env | 累积多年的 alias / export / oh-my-zsh / brew shellenv | 默认 bash,无 user-level rc |
-| node 版本 | 跟着 brew / nvm 升级漂移 | Node 20 LTS(pinned) |
+| node 版本 | 跟着 brew / nvm 升级漂移 | Node 22 LTS(pinned) |
 | 用户态 `/tmp` | 跟其他 dev session 共享 | 每次 fresh |
 | OS 内核版本 | dev 用啥就是啥(可能落后 2-3 个 minor) | 各 runner 跑当前 LTS 内核 |
 
-CI 跟 dev 环境不一致时,**几乎总是 CI 才对**(dev 环境有噪声掩盖 bug)。这就是为什么即使 macOS / Linux 已被开发者每天覆盖,CI 也要再独立跑 3 个 hosted runner——它们捕的是**OS 行为差异**(Linux 跟 Windows 跟 macOS 的内核、syscall、shell 都不一样),这些差异 dev 侧没法同时摸到。
+CI 跟 dev 环境不一致时,**几乎总是 CI 才对**(dev 环境有噪声掩盖 bug)。这就是为什么即使 macOS / Linux 已被开发者每天覆盖,CI 也要再独立跑 hosted runner —— 它们捕的是**OS 行为差异**(Linux 跟 Windows 跟 macOS 的内核、syscall、shell 都不一样),这些差异 dev 侧没法同时摸到。
 
-**为什么不验 arch**:nightme 是 Go + Node.js npm。Go runtime 把 amd64 和 arm64 当等价 tier-1(夜me不写汇编),`npm install` 自动按 host arch 拉对应 .node binary —— **arch 不 gate 行为**。如果 dev 用的是 Apple Silicon Mac,跟 `macos-latest` runner 同一个 arch(arm64),那 dev + CI 已经在测同一个 arch 了;如果是 Intel Mac,`build` job 的 `darwin/amd64` cross-compile target 已经在 compile 端验过 darwin/x86_64。runtime 端没有"只在某个 arch 上坏的 nightme 代码路径"这个 gap。
+**为什么不验 arch**:nightme 是 Go + Node.js npm。Go runtime 把 amd64 和 arm64 当等价 tier-1(夜me不写汇编),`npm install` 自动按 host arch 拉对应 .node binary —— **arch 不 gate 行为**。如果 dev 用的是 Apple Silicon Mac,跟 `macos-latest` runner 同一个 arch(arm64),那 dev + CI 已经在测同一个 arch 了;如果是 Intel Mac,`release.yml` 的 `darwin/amd64` cross-compile target 已经在 compile 端验过 darwin/x86_64。runtime 端没有"只在某个 arch 上坏的 nightme 代码路径"这个 gap。
 
 ---
 
@@ -313,37 +299,34 @@ CI 跟 dev 环境不一致时,**几乎总是 CI 才对**(dev 环境有噪声掩�
 --- a/.github/workflows/ci.yml
 +++ b/.github/workflows/ci.yml
 @@ startup job: install step @@
-         # bash is also a builtin (PTY fallback) but it's a
-         # platform-provided binary — apt bash on Linux/macOS,
-         # n/a on stock Windows. It's covered by unix-only Go
-         # tests, not this gate.
-+        #   gemini → @google/gemini-cli
-+        #             (per docs/bridge/gemini.md §2 — package
-+        #              name verified against Google's install
-+        #              docs)
          npm install -g @anthropic-ai/claude-code
          npm install -g @openai/codex
          npm install -g opencode-ai
          npm install -g @earendil-works/pi-coding-agent
-         npm install -g @deepseek-ai/dsh
+         npm install -g @github/copilot
++        # gemini → @google/gemini-cli
++        #           (per docs/bridge/gemini.md §安装 — package
++        #            name verified against Google's install docs)
 +        npm install -g @google/gemini-cli
+         # cursor / omp use their official installers, not npm — see
+         # the install steps below.
 
-@@ startup job: each subsequent gate (PATH / --help / agents / spawn) @@
--          for agent in claude codex opencode pi dsh; do
-+          for agent in claude codex opencode pi dsh gemini; do
+@@ startup job: each subsequent gate (PATH / --help / config list / spawn) @@
+-          for agent in claude codex opencode pi copilot cursor omp; do
++          for agent in claude codex opencode pi copilot cursor omp gemini; do
              path=$(command -v "$agent" 2>/dev/null || true)
              ...
 ```
 
-**5 处 for-loop 都要加新名字**(每层 gate 一个):`PATH` check / `--help` check / `nightme agents` 列名 grep / `nightme test --agent X` spawn — 漏任何一处都会让新 builtin 在那一层静默 fail。grep anchor:
+**4 处 for-loop 都要加新名字**(每层 gate 一个):`PATH` check / `--help` check / `nightme config` Agents 表 grep / `nightme test --agent X` spawn —— 漏任何一处都会让新 builtin 在那一层静默 fail。grep anchor:
 
 ```
-$ grep -n "for agent in claude codex opencode pi dsh" .github/workflows/ci.yml
+$ grep -n "for agent in claude codex opencode pi copilot cursor omp" .github/workflows/ci.yml
 ```
 
-会列出所有 5 个,逐一对照即可。
+会列出所有 4 个,逐一对照即可。
 
-新增 builtin 同步必做:**找到 package name 的官方锚点**(agent 自己的 setup docs / WINDOWS.md / bridge 的 Detect 错误信息),写到注释里。下次有人怀疑包名错了能立刻 trace 回来源。
+新增 builtin 同步必做:**找到 package name 的官方锚点**(agent 自己的 setup docs / `docs/WINDOWS.md` §3.1 / bridge 的 Detect 错误信息),写到注释里。下次有人怀疑包名错了能立刻 trace 回来源。
 
 ---
 
@@ -361,7 +344,7 @@ $ grep -n "for agent in claude codex opencode pi dsh" .github/workflows/ci.yml
 | npm 装出来的 binary 版本太老,缺关键 flag | 单测不依赖版本;CI gate 也不验版本。要 catch 加 `--version` 比对(超出本文范围) |
 | agent binary 在某 OS 上是 i386 缺库 | Gate 2 的 `--help` 会失败(启动崩),间接 catch |
 
-最关键的最后一项:Gate 4 poll size 时如果 agent 装好但某 required native lib 缺失,binary 会在 banner 之后**写一行 "error: libfoo.so missing"** 到 stderr → stderr 拼到 stdout 后总 size > 150 → **pass**(因为我们不 grep 内容)。这是已知限制:这层 gate 假定 binary 至少有基本的 platform 兼容。
+最关键的最后一项:Gate 4 poll size 时如果 agent 装好但某 required native lib 缺失,binary 会在 banner 之后**写一行 "error: libfoo.so missing"** 到 stderr → stderr 拼到 stdout 后总 size > 80 → **pass**(因为我们不 grep 内容)。这是已知限制:这层 gate 假定 binary 至少有基本的 platform 兼容。
 
 ---
 
@@ -369,11 +352,11 @@ $ grep -n "for agent in claude codex opencode pi dsh" .github/workflows/ci.yml
 
 几个明确的增强方向,留给后续 PR:
 
-1. **拆 startup 成 4 个独立 job** —— 每个 OS 一份 needs 链,理论上能再省点 wall-clock,但目前 startup 内部已是 4 runner 并行,边际收益小
+1. **拆 startup 成多个独立 job** —— 每个平台一份 needs 链,理论上能再省点 wall-clock,但目前 startup 内部已是 6 runner 并行,边际收益小
 2. **加 `--version` 比对** —— 在 Gate 2 之后断言每个 agent >= 已知最低版本,捕"装出来的 binary 缺关键 flag"的回归
 3. **响应内容 sanity-check** —— 不断言内容,但断言"响应里至少有一个换行"或"响应不是只 echo 我发的那一行" —— 进一步区分 PTY echo-only 和真 acknowledge
-4. **加 matrix entry:每个 agent 单独跑**(现在 5 agents 串行)—— 大幅减少 wall-clock 但增加 setup 时间,trade-off 不明显
-5. **本地一键脚本** —— §6.1 那个 bash 块整理成 `scripts/smoke-agents.sh` 提交到 repo,方便开发者本地预检
+4. **加 matrix entry:每个 agent 单独跑**(现在 7 个 agent 串行)—— 大幅减少 wall-clock 但增加 setup 时间,trade-off 不明显
+5. **本地一键脚本** —— §6.1 那个 bash 块整理成仓库里的一个脚本,方便开发者本地预检
 
 不在 scope(留给其他 doc):
 

@@ -2,7 +2,7 @@
 
 > **Source of truth**: `@deepseek-ai/dsh-host-apiproxy` 0.1.0-rc.6 (TypeScript contracts) — vendored at `~/.nvm/.../@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-host-apiproxy/lib/types/`. All shapes below are mirrored verbatim from the `.d.ts` files there.
 >
-> **Bridge cross-check**: `internal/bridge/dsh/{protocol.go,http.go,ws.go,session.go,handle_mux.go,permissions.go,dispatch.go}` — Go mirrors of the TS contracts. Where the Go bridge and the TS contract diverge, the TS contract wins (this doc tracks the wire; a `❌ BRIDGE BUG` tag marks places where the bridge code does not yet match).
+> **Bridge cross-check**: `internal/bridge/dsh/{protocol.go,session.go,handle_mux.go,permissions.go,dispatch.go}` + `internal/bridge/dsh/host/{client.go,stream.go,lifecycle.go,router.go}` — Go mirrors of the TS contracts. Where the Go bridge and the TS contract diverge, the TS contract wins (this doc tracks the wire; a `❌ BRIDGE BUG` tag marks places where the bridge code does not yet match).
 >
 > **Runtime cross-check**: probed `dsh 0.1.0-rc.6 --profile web` on 2026-08-15 against the live server (`docs/probe/dsh-2026-08-15.sh` referenced in commit notes). Field-level probes verified `session.list.items`, `session.create.sessionId`, mux event envelope shape, mux `approval/requested.approvalId`.
 >
@@ -19,8 +19,9 @@
 ```
 nightme (Go bridge)                       dsh web (Node daemon, v0.1.0-rc.6)
 ┌──────────────────────────────┐         ┌────────────────────────────┐
-│ cmd: dsh --profile web       │         │  HTTP :PORT (--port 0 →   │
-│   --port 0                   │────────▶│   OS-assigned free port)  │
+│ cmd: dsh --profile web       │         │  HTTP :3080 (canonical    │
+│   --port 3080                │────────▶│   port, port reclaim on   │
+│                              │         │   conflict)               │
 │   DSH_PERMISSION_MODE=...    │         │                            │
 └──────────────────────────────┘         │  /api/{dotted.method}      │
             │                            │    POST  → RPC envelope    │
@@ -424,7 +425,7 @@ Probe-verified discriminators (docs/bridge/dsh.md §1.4):
 | `{type:"document", ...}` | ❌ rejected at discriminator |
 | empty `content[]` | ❌ rejected — must be non-empty |
 
-**Bridge `contentBlocksToDTO` mapping** (`session.go:1024-1077`):
+**Bridge `contentBlocksToDTO` mapping** (`session.go`):
 
 | `agent.ContentBlock.Type` | Wire shape |
 |---|---|
@@ -941,7 +942,7 @@ Sec-WebSocket-Accept: <base64>
 <binary or text frames, each one full ServerRequest JSON envelope>
 ```
 
-The bridge dials WS (`ws.go:dialWS`) because it was the path of least surprise for gorilla/websocket; SSE is equally valid and would let the bridge drop the gorilla/websocket dependency.
+The bridge dials WS (`host/client.go`) because it was the path of least surprise for gorilla/websocket; SSE is equally valid and would let the bridge drop the gorilla/websocket dependency.
 
 ### 3.3 Frame envelope
 
@@ -1127,7 +1128,7 @@ Pure push. Bridge drops the matching local pending (by `approvalId`) and emits `
 
 #### 3.4.8 `approval/asked` — model-side approval (alt path)
 
-Synthesised routing key: `"evt-" + toolCallID` (`permissions.go:112-130`). Same plumbing as `approval/requested`. Distinct from `approval/requested`: this one comes through the mux method-level dispatch rather than as a `session/event` envelope.
+Synthesised routing key: `"evt-" + toolCallID` (`permissions.go`). Same plumbing as `approval/requested`. Distinct from `approval/requested`: this one comes through the mux method-level dispatch rather than as a `session/event` envelope.
 
 #### 3.4.9 `question/requested` — AskUserQuestion-style prompt (pre-0.1.2-rc.1)
 
@@ -1168,7 +1169,7 @@ interface AskUserQuestionItem {
 }
 ```
 
-**Routing key** for the answer: the frame's **rpcId** (NOT any session id concat). The question's logical id IS the rpcId minted when the host accepts `ask()`. `permissions.go:142-187` documents the trap.
+**Routing key** for the answer: the frame's **rpcId** (NOT any session id concat). The question's logical id IS the rpcId minted when the host accepts `ask()`. `permissions.go` documents the trap.
 
 dsh 0.1.2-rc.1+ does not emit this frame: user-questions arrive on the host `$events` waterfall as `user-questions/request` and are answered with `POST /api/$events/result` (§3.7). A mux frame under this name reaches the bridge's unknown-method path — recorded, counted, never a permission.
 
@@ -1209,7 +1210,7 @@ Emitted when the impl throws mid-stream; the stream then closes. The client must
 
 ### 3.5 Unknown mux methods
 
-`handleMuxFrame`'s `default` branch (`handle_mux.go:145-156`):
+`handleMuxFrame`'s `default` branch (`handle_mux.go`):
 
 1. Increments `wireState.unknownCount` (P4 observability)
 2. Warns once per unknown: `"dsh: mux unknown method"`
@@ -1244,7 +1245,7 @@ Same dual transport as mux (SSE or WS upgrade). Frames describe **host-container
 
 `remote-event` forwards allowlisted host cordis events verbatim (`@deepseek-ai/dsh-api-remotes` owns the allowlist). Delivery lands on `ctx.remote.$on`, not on a per-event frame variant.
 
-`handleHostFrame` (`handle_mux.go:163-167`) currently logs every host frame without emitting `AgentEvent`. Future PR may surface `session/removed` / `agent-error` for runtime cleanup.
+`handleHostFrame` (`handle_mux.go`) currently logs every host frame without emitting `AgentEvent`. Future PR may surface `session/removed` / `agent-error` for runtime cleanup.
 
 ---
 
@@ -1292,7 +1293,7 @@ Full `RpcErrorDetailsMap` (`rpc.d.ts`) — closed set. Bridge behaviour grouped 
 | `credential-rejected` | `{ref}` | credentials.set/unset (read-only shadow) | `EventAgentError` |
 | `model-discovery-failed` | `{settingsNs, baseURL?}` | llm.discoverModels | `EventAgentError` (fallback to hand-entry) |
 | `title-invalid` | `{sessionId}` | session.rename (empty after normalize) | `EventAgentError` |
-| `fork-unavailable` | `{sessionId}` | session.fork (no completed turn / mid-turn anchor) | `ErrResumeUnhealthy` |
+| `session-conflict` | `{sessionId}` | session.create 带的 id 与 cwd 不匹配 | `ErrResumeUnhealthy` |
 | `subagent-parent-unavailable` | `{parentSessionId}` | subagent.* (parent not available) | `EventAgentError` |
 | `subagent-not-found` | `{parentSessionId, childSessionId}` | subagent.* | `EventAgentError` |
 | `subagent-catalog-diagnostic` | `{parentSessionId, childSessionId, reason}` | subagent.list (diagnostic entries) | debug log |
@@ -1320,7 +1321,7 @@ cmd.Env = append(os.Environ(), "DSH_PERMISSION_MODE=danger-full-access")
 | Arg / Env | Purpose | Why |
 |---|---|---|
 | `--profile web` | launch the web harness (vs `--profile headless` for one-shot print mode) | selects the HTTP+SSE/WS surface |
-| `--port 0` | OS picks a free port | avoids collisions on shared hosts |
+| `--port 3080` | 固定规范端口 | 端口被占时走 reclaim / attach 既有 host |
 | `cmd.Dir` = workspace | dsh's session cwd | runtime context (no other model/provider injection) |
 | `DSH_PERMISSION_MODE=danger-full-access` | process env for sandbox-policy plugin default | per `[[agent-no-config-tampering]]` — only inject transport + permissions |
 | ~~`/permission danger-full-access` after `session.create`~~ | ~~per-session Full access slash~~ | **Dropped (#282)**: host forwards leading-`/` to the model (no intercept). Chat sessions answer via Feishu cards; RunOnce / Review auto-`Allow once` in `drainForRunResult` when `approval/requested` fires. |
@@ -1333,7 +1334,7 @@ dsh web prints its bound URL on the first stdout line:
 dsh web: http://127.0.0.1:3080
 ```
 
-The regex (`session.go:97`):
+The regex (`session.go`):
 
 ```go
 var dshURLPattern = regexp.MustCompile(`dsh web:\s+http://([^:\s]+):(\d+)`)
@@ -1344,7 +1345,7 @@ var dshURLPattern = regexp.MustCompile(`dsh web:\s+http://([^:\s]+):(\d+)`)
 ### 7.3 Handshake
 
 ```
-1. POST /api/session.fork  { sessionId: cfg.SessionID }   // if cfg.SessionID != ""
+1. POST /api/session.create  { sessionId: cfg.SessionID, cwd }   // if cfg.SessionID != ""
    └─ ok            → use returned sessionId; resumed=true
    └─ any failure   → return ErrResumeUnhealthy (strict refusal, no fallback)
 
@@ -1353,7 +1354,7 @@ var dshURLPattern = regexp.MustCompile(`dsh web:\s+http://([^:\s]+):(\d+)`)
    └─ failure       → bridge error
 ```
 
-Each call has its own 15 s `handshakeTimeout` ctx, derived from the spawn ctx. The fork/create are independent budgets.
+Each call has its own 30 s `handshakeTimeout` ctx, derived from the spawn ctx. The calls are independent budgets.
 
 `session.models` is **not** part of the handshake — the bridge queries it lazily after `EventAgentReady` to stamp `Model` on the event.
 
@@ -1429,17 +1430,17 @@ When `cmd.Wait()` returns:
 
 | Limit | Value | Source |
 |---|---|---|
-| HTTP body read | 16 MiB | `http.go:103` |
-| HTTP body error context | 1 KiB | `http.go:99` |
-| WS per-frame read limit | 10 MiB | `ws.go` `wsFrameReadLimit` |
+| HTTP body read | 16 MiB | `host/client.go` |
+| HTTP body error context | 1 KiB | `host/client.go` |
+| WS per-frame read limit | 10 MiB | `host/stream.go` |
 | HTTP client timeout (default) | 30 s | `httpClientTimeout` |
-| Handshake per-call timeout | 15 s | `handshakeTimeout` |
+| Handshake per-call timeout | 30 s | `handshakeTimeout`(`internal/bridge/dsh/session.go`) |
 | Web URL parse timeout | 90 s | `webURLParseTimeout` |
 | Permission timeout | 5 min | `permissionTimeout` |
 | Cancel RPC timeout | 3 s | `session.go:Close` |
 | Lifecycle SIGINT grace | 5 s | `session.go:Close` |
 | Lifecycle SIGKILL grace | 5 s | `session.go:Close` |
-| Watchdog timeout | 5 min | `lifecycleWatchdogTimeout` |
+| Watchdog timeout | 5 min | `host/lifecycle.go` |
 | Events channel buffer | 131072 (~26 MiB at ~200 B/event) | `eventBufferSize` |
 | stderr tail ring buffer | `StderrTailBytes` (4 KiB default) | `agent.StderrRingBuffer` |
 | Wire frame ring buffer | 64 entries | `wireRingBuffer` (P4 observability) |
@@ -1447,7 +1448,7 @@ When `cmd.Wait()` returns:
 
 **Backpressure**: `deliver()` is non-blocking — drops on full buffer with a debug-log warning.
 
-**Strict refusal on resume**: `session.fork` failure surfaces `ErrResumeUnhealthy` (not silent fallback). The runtime's chatsession.go §1624 path then clears the stale id and starts fresh on the user's next message — preventing "user lost their history forever" + "operator can't see why".
+**Strict refusal on resume**: `session.create`(带旧 sessionId)失败时 surface `ErrResumeUnhealthy`(不是静默回退)。nightme 从不调 `session.fork` —— fork 会把子 session 从父 session 摘走。 The runtime's chatsession.go §1624 path then clears the stale id and starts fresh on the user's next message — preventing "user lost their history forever" + "operator can't see why".
 
 **FIFO routing for pending approvals**: `pendingOrder` slice tracks insertion order; `SendPermission` pops `pendingOrder[0]` so the runtime's answer goes to the oldest pending request.
 
@@ -1456,7 +1457,7 @@ When `cmd.Wait()` returns:
 ## 9. End-to-End Example (single turn)
 
 ```
-t0   shell> dsh --profile web --port 0
+t0   shell> dsh --profile web --port 3080
         stdout: "dsh web: http://127.0.0.1:51823"
 
 t1   bridge → parseWebURL → baseURL = "http://127.0.0.1:51823"
@@ -1598,7 +1599,7 @@ The Go bridge was implemented before the TS source was accessible for verificati
 | 3 | `session.go:SendPermission` outcome vocabulary: `"approved"` \| `"declined"` | `ApprovalOutcome`: `"allowed-once"` \| `"rejected"` (client-giveable subset) | ✅ fixed |
 | 4 | `protocol.go:questionPayload.Options` uses `[]string` | `AskUserQuestionItem.options` is `[]AskUserQuestionOption` (objects) | ✅ fixed |
 | 5 | `permissions.go:handleQuestionRequested` registers `pendingApprovals[frameRpcID]` and the `respond` payload uses `{rpcId: approvalID, outcome}` | Question response is `{sessionId, answer: {answers: [{id, selected, custom}]}}`; `rpcId` is the envelope-level echo of server-frame | ✅ fixed — `questionPayload.ID` decoded; `SendPermission` emits `QuestionResponse`; Feishu one-shot `opt:` click → inbound `Action` → `Manager.SendPermission`. Multi-question cards page in-card (`· i/n`); last click POSTs `nm-q:` batch so `matchesQuestions` sees every id. Text replies still enqueue a new prompt (do not answer a pending question). |
-| 6 | Bridge dials WebSocket (`ws.go:dialWS`) | Server supports BOTH SSE GET and WebSocket upgrade | ✅ OK (both valid); could simplify by switching to SSE and dropping gorilla/websocket |
+| 6 | Bridge dials WebSocket (`host/client.go`) | Server supports BOTH SSE GET and WebSocket upgrade | ✅ OK (both valid); could simplify by switching to SSE and dropping gorilla/websocket |
 | 7 | `sessions.d.ts` lists 50+ methods across 11 domains; bridge only calls ~8 | All 50+ available | ⚠ Bridge doesn't yet wire host/workspace/skills/agentPresets/goals/settings/credentials/llm; runtime doesn't ask for them yet |
 | 8 | Bridge opens mux+host as 2 separate WS dials | `events.mux` aggregates ALL sessions on one stream (subscription baseline per attached session); host is single stream | ✅ OK semantically |
 
@@ -1633,7 +1634,7 @@ For future maintainers picking up this protocol or extending it:
    - `ApprovalOutcome` enum: `allowed-once`/`rejected` (client-giveable) + `cancelled`/`unavailable` (host-side)
    - `question/requested.options[]` is objects (`{label, description?}`) not strings
 
-6. **Strict refusal on resume** — `session.fork` failing should propagate `ErrResumeUnhealthy`, not silently fall through to `session.create`. The runtime handles `ErrResumeUnhealthy` uniformly across bridges (`chatsession.go §1624`); falling through would silently lose user history.
+6. **Strict refusal on resume** — 带旧 sessionId 的 `session.create` 失败必须 propagate `ErrResumeUnhealthy`,不能静默回退到新建 session。 The runtime handles `ErrResumeUnhealthy` uniformly across bridges (`chatsession.go §1624`); falling through would silently lose user history.
 
 7. **Frame `rpcId` is the answer key** — the server correlates answers on the frame's `rpcId` (for both approval/requested and question/requested). We key `pendingApprovals[frame.RPCID]` and pass `frame.RPCID` as the `eventId` of `POST /api/$events/result`. Using the payload's `approvalId` (audit-only) as the correlation key would route answers to nothing.
 

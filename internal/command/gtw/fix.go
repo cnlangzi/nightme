@@ -916,8 +916,7 @@ func dispatchIssueToChatSession(
 	// can stamp AgentBar onto the placeholder card (it reads
 	// cs.SelectedAgentSession() at publish time — see
 	// internal/runtime/eventbus.go). Mirrors the swap applied
-	// to internal/runtime/dispatcher.go and
-	// internal/chatsession/manager.go::HandleInbound.
+	// to internal/runtime/dispatcher.go and internal/chatsession/manager.go::HandleInbound.
 	//
 	// On error (no workspace / spawn failed) we deliberately do
 	// NOT emit MessageQueued — the caller already surfaces the

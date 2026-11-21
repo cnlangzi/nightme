@@ -233,7 +233,7 @@ func isSessionEventType(method string) bool {
 		// turn-state machine never sees seq=0/seq=1 (which arrive
 		// before the respawn-fix in §13.3, but after a healthy
 		// dsh has had time to push them). Both are routed to the
-		// dispatcher's "debug-only" sink (dispatch.go:211) which
+		// dispatcher's "debug-only" sink (dispatch.go) which
 		// silently consumes them.
 		"system/message",
 		"request/header",

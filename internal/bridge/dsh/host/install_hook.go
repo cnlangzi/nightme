@@ -6,8 +6,7 @@
 //
 // The hook is a process-once function variable — the parent dsh
 // package registers it during init (importing the host package
-// triggers the side effect via the `import _` in dsh/doc.go or
-// dsh/host_waterfall.go).
+// triggers the side effect via the `import _` in dsh/doc.go or dsh/host_waterfall.go).
 package host
 
 // OnLifecycleInstall runs the package-level host handler install

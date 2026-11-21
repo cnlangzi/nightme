@@ -3,20 +3,26 @@
 > **Status**: implemented
 
 > **Depends on**: (none — interface)
-> **Related docs**: [`SPEC.md`](../SPEC.md); [`F-gateway.md`](./F-gateway.md) §5; [`../bridge/cli-transport.md`](./../bridge/cli-transport.md) (Mode 决策)
+> **Related docs**: [`SPEC.md`](../SPEC.md); [`SPEC.md`](../SPEC.md) §1.1; [`../bridge/cli-transport.md`](./../bridge/cli-transport.md) (Mode 决策)
 
 ---
 
 ## 1. Description
 
-定义 `Agent` interface 让 nightme 支持多种 AI Coding CLI。MVP 注册：
-- `codex` → ModeACP（Codex CLI 支持 ACP）
-- `opencode` → ModeACP（如支持）
-- `claude` → ModeJSONIO
+定义 `AgentSpec` / `Starter` 让 nightme 支持多种 AI Coding CLI。内置 agent（8 个，注册表见 `cmd/nightme/agents.go`）：
 
-每个 Starter 实现自己的 Mode（ACP / SDK / PTY / JSON-IO），通过 `Info().Mode` 暴露，nightme 在 spawn session 时根据 Mode 选择对应的 bridge backend（见 [bridge/cli-transport.md](../bridge/cli-transport.md)）。
+| agent | Mode | 传输 |
+|---|---|---|
+| `claude` | ModeJSONIO | Claude Code stream-json |
+| `codex` | ModeJSONIO | `codex app-server --listen stdio://` 的 JSON-RPC over stdio |
+| `dsh` | ModeJSONIO | 共享的 `dsh --profile web` host |
+| `opencode` | ModeACP | `opencode acp` |
+| `cursor` | ModeACP | `cursor-agent acp` |
+| `pi` | ModeJSONIO | `pi --mode rpc` |
+| `copilot` | ModeACP | `copilot --acp --stdio` |
+| `omp` | ModeJSONIO | `omp --mode rpc` |
 
-**调用路径**：
+每个 Starter 实现自己的 Mode（ACP / SDK / PTY / JSON-IO），通过 `Info().Mode` 暴露，nightme 在 spawn session 时根据 Mode 选择对应的 bridge backend（见 [bridge/cli-transport.md](../bridge/cli-transport.md)）。注册顺序同时是 primary agent 自动探测的优先级顺序，见 [`../primary-agent-detection.md`](../primary-agent-detection.md)。
 
 ---
 
@@ -47,8 +53,10 @@ type AgentSpec interface {
 type Starter interface {
     Info() Info
     Detect() error
+    Init(string)                                   // 覆盖可执行文件路径（cfg.Agents 覆盖走这里）
     Start(ctx context.Context, cfg StartConfig) (*Agent, error)
     RunOnce(ctx context.Context, cfg StartConfig, blocks []ContentBlock, opts ...RunOnceOption) (RunResult, error)
+    Review(ctx context.Context, cfg StartConfig, opts ...RunOnceOption) (RunResult, error)
 }
 
 // TurnText 是 bridge driver 可以实现的可选能力：报告当前 turn 的
@@ -69,6 +77,7 @@ type Agent struct {
 
 // Agent 的公共方法：
 func (a *Agent) PID() int
+func (a *Agent) Keepalive(ctx context.Context, onRecover func(context.Context) error) error
 func (a *Agent) Events() <-chan AgentEvent
 func (a *Agent) SessionID() string
 func (a *Agent) SendBlocks(ctx context.Context, blocks []ContentBlock) error
@@ -76,44 +85,55 @@ func (a *Agent) SendPermission(resp string) error
 func (a *Agent) New(ctx context.Context) error             // 重置对话上下文（保留进程）
 func (a *Agent) Close() error
 func (a *Agent) Stop(ctx context.Context) error
-func (a *Agent) SetModel(ctx context.Context, providerID, modelID string) error
 ```
+
+`Agent` 上没有"设置模型"的入口：模型名由 bridge 从 agent 事件里读出来，
+runtime 在 `internal/runtime/handler.go` 里调
+`AgentSession.SetModel(m string)`（`internal/agentsession/session.go`）
+写进 session —— `SetModel` 幂等，空值不覆盖已有模型。
 
 ### Registry
 
 ```go
-// Registry 是 Starter 的注册表（按 name 查找）。
-type Registry struct{ /* map + mutex */ }
+// internal/agent/registry.go
+package agent
 
-func NewRegistry() *Registry
+// Registry 是 Starter 的注册表（按 name 查找），带首次插入顺序。
+type Registry struct{ /* map + mutex + order slice */ }
+
+func New() *Registry
 func (r *Registry) Register(s Starter) (replaced bool)
 func (r *Registry) Get(name string) (Starter, error)
 func (r *Registry) List() []Starter
 
-var (
-    ErrUnknownAgent = errors.New("agent: unknown agent")
-)
-
 // Builtins 是与 nightme 二进制一起发布的 agent registry。
-// 每个 bridge 包的 init() 注册自己。
-var Builtins = NewRegistry()
+// 注册发生在 cmd/nightme/agents.go 的 init()。
+var Builtins = New()
 ```
+
+`ErrUnknownAgent` 定义在 `internal/agent/agent.go`。
+
+`List()` 按**首次注册顺序**返回。同名重复注册只替换实例、不改变位置 —— 顺序因此稳定，也是 primary agent 自动探测的优先级链（见 [`../primary-agent-detection.md`](../primary-agent-detection.md)）。
 
 ---
 
 ## 3. Implementation
 
 **文件**：
-- `internal/agent/agent.go` — AgentSpec / Starter interface + Agent struct + Event / EventKind / ContentBlock
+- `internal/agent/agent.go` — Mode 常量 + AgentSpec / Starter interface + Info + Agent struct + Event / EventKind / ContentBlock
 - `internal/agent/run_session.go` — 共享的 one-shot turn 驱动（`RunSession` / `ResumeSession` / `DrainSession`）
 - `internal/agent/registry.go` — Registry 实现
 - `internal/agent/registry_test.go`
-- `internal/agent/mode_string.go` — Mode ↔ string 转换
-- `internal/bridge/claudecode/claudecode.go` — Claude Code Starter 实现（ModeJSONIO）
-- `internal/bridge/codex/` — Codex Starter 实现
-- `internal/bridge/opencode/` — OpenCode Starter 实现
-- `internal/bridge/pi/` — Pi Coding Agent Starter 实现
-- `internal/bridge/pty/` — PTY Starter 实现（通用 byte pipe）
+- `cmd/nightme/agents.go` — 内置 agent 的注册表（`agent.Builtins.Register`）
+- `internal/bridge/claudecode/starter.go` — Claude Code Starter 实现（ModeJSONIO）
+- `internal/bridge/codex/starter.go` — Codex Starter 实现
+- `internal/bridge/dsh/starter.go` — DSH Starter 实现
+- `internal/bridge/opencode/starter.go` — OpenCode Starter 实现
+- `internal/bridge/cursor/starter.go` — Cursor Starter 实现
+- `internal/bridge/pi/starter.go` — Pi Coding Agent Starter 实现
+- `internal/bridge/copilot/starter.go` — Copilot Starter 实现
+- `internal/bridge/omp/starter.go` — OMP Starter 实现
+- `internal/bridge/pty/starter.go` — PTY Starter 实现（通用 byte pipe；共享基础设施，不注册进 `Builtins`）
 
 **Claude Code 实现示例**：
 ```go
@@ -121,25 +141,31 @@ package claudecode
 
 import "github.com/cnlangzi/nightme/internal/agent"
 
-// Driver 满足 Starter interface（+ 私有 driver 接口约束 Agent 操作）。
-type Driver struct {
-    name    string
-    command string
-    args    []string
+// Starter 满足 Starter interface（+ 私有 driver 接口约束 Agent 操作）。
+type Starter struct {
+    name           string
+    command        string
+    defaultCommand string
+    args           []string
 }
 
-func init() {
-    agent.Builtins.Register(New("claude", "claude", nil))
+func NewStarter(name, command string, args []string) *Starter {
+    return &Starter{name: name, command: command, defaultCommand: command, args: args}
 }
 
-func (d *Driver) Info() agent.Info {
-    return agent.Info{Name: d.name, Mode: agent.ModeJSONIO, Command: d.command, Args: d.args}
+func (s *Starter) Info() agent.Info {
+    return agent.NewInfo(s.name, agent.ModeJSONIO, s.command, s.args, telemetry.Env(telemetryEnv...))
 }
 
-func (d *Driver) Detect() error {
-    _, err := exec.LookPath(d.command)
-    return err
+func (s *Starter) Detect() error {
+    return agent.ResolveCommand(s.command)
 }
+```
+
+注册发生在 `cmd/nightme/agents.go`：
+
+```go
+agent.Builtins.Register(claudecode.NewStarter("claude", "claude", nil))
 ```
 
 **配置选择默认 agent**：
@@ -148,37 +174,40 @@ func (d *Driver) Detect() error {
 primary: claude
 agents:
   - name: claude
-    command: claude
+    bridge: claude
+    command: /usr/local/bin/claude
 ```
+
+`primary` 是顶层标量；`agents:` 是顶层列表，每项是一个内置 agent 的路径覆盖（`name` 必须是内置 agent 名，`command` 是可执行文件的绝对路径，整串取用不做分词）。见 [`../primary-agent-detection.md`](../primary-agent-detection.md) §2。
 
 ---
 
 ## 4. 调用路径
 
+入站消息先经 `gateway.Router` 的 pump 交给 `internal/gateway/inbound` 的 dispatch chain，slash command 由 `internal/command/commander.go` 分派到对应 factory。
+
 ```
-gateway.handler.cwd(ctx, msg, [path])
-  ├ workspace.Validate(abs)
-  ├ agentName := (existing binding.Agent) || (agents.List()[0].Name()) || "claude"
-  ├ manager.Create(ctx, CreateRequest{Workspace: abs, Agent: agentName, ...})
-  │     └ chatsession.Manager 内部:
-  │         ├ reg.Get(agentName) → Starter interface
-  │         ├ agents.Detect() → 验证二进制
-  │         └ Agent.Start(ctx, StartConfig{Workspace: abs, ...}) → *agent.Agent
-  │             └ Bridge（PTY/ACP/SDK/JSON-IO）实际 spawn 子进程
-  └ gateway.Bind(msg.ChatID, msg.ChatType, sess.ID, abs, agentName)
+/use claude
+  ├ command.ParseCmdArgs → 恰好 1 个位置参数（多一个就报错）
+  ├ command.RequireActiveCwd(cs) → 没有 selectedCwd 就回复 "No active workspace. Send /cwd <path> first."
+  ├ cs.SetSelectedAgent("claude")
+  ├ cs.LookupSelectedAgentSession()          ← 懒 spawn（已存在的 session 复用）
+  │   └ Spawner.Spawn(ctx, "claude", cwd, args, sessionID)   (internal/agentsession/spawner.go)
+  │       ├ reg.Get("claude")     → Starter（ErrUnknownAgent → "agent: unknown agent"）
+  │       ├ starter.Detect()      → 验证二进制
+  │       └ starter.Start(ctx, agent.StartConfig{Workspace: cwd, ...}) → *agent.Agent
+  │           └ Bridge（PTY/ACP/SDK/JSON-IO）实际 spawn 子进程
+  └ 回复 "now using claude"
 ```
 
 ```
-gateway.handler.run(ctx, msg, [agentName, args...])
-  ├ agents.Get(agentName) → 校验存在
-  ├ agents.Detect() → 校验二进制
-  ├ binding := gw.LookupByChat(msg.ChatID)
-  ├ sess := manager.Get(binding.SessionID)
-  ├ sess.Status == Running → Reply "already running"
-  └ 否则 manager.Create(...)
+/cwd /home/user/proj
+  ├ ~ / $HOME 相对路径展开 + 目录存在性检查
+  ├ cs.SetSelectedCwd(abs)
+  └ cs 侧清空 cwd 边界上的待发队列（clearQueueOnCwdBoundary）
 ```
 
-`chatsession.Manager` 持有 `*agent.Registry` 引用，用于 `LookupSelectedAgentSession` 时通过 `Spawner.Spawn` 取 `Starter`。session 层只通过 `Starter` interface 调 `Start` 拿 `*agent.Agent`，不 import `bridge/*`。
+`chatsession.Manager` 持有 `Spawner` 接口（`internal/chatsession/manager.go` 的 `Manager.WithSpawner` 注入），生产实现是 `agentsession.NewRegistrySpawner(reg, scope)`（`internal/agentsession/spawner.go`），由它把 `agentName` 解析成 `Starter`。session 层只通过 `Starter` interface 调 `Start` 拿 `*agent.Agent`，不 import `bridge/*`。
 
 ---
 
@@ -186,56 +215,54 @@ gateway.handler.run(ctx, msg, [agentName, args...])
 
 | 场景 | 处理 |
 |------|------|
-| 用户指定未知 agent | `reg.Get(name)` 返回 ErrUnknownAgent → Reply "unknown agent: <name>" |
-| agent 不在 PATH | Detect 返回 error → handler Reply "claude not found, please install" |
+| 用户指定未知 agent | `reg.Get(name)` 返回 `ErrUnknownAgent` → `/use` 回复 "Failed to activate agent: agent: unknown agent" |
+| agent 不在 PATH | `Starter.Detect()` 返回 error（`exec.LookPath` 失败 / 绝对路径 stat 失败）→ `/use` 回复 "Failed to activate agent: ..." |
 | agent 二进制存在但版本不兼容 | 不检查版本（用户自管兼容性）|
 | 多个 agent binary 同名 | exec.LookPath 用 PATH 第一个，不去重 |
-| agent 启动需要 env vars（ANTHROPIC_API_KEY）| 用户在 shell 配置（zshrc / bashrc）；不注入 |
-| 用户想用绝对路径的 agent | 配置覆盖：`agent.claude.command: /usr/local/bin/claude` |
-| agent 启动参数（如 `--model opus`）| 配置化：`/run claude --model opus` → cfg.Args |
-| 同一个 name 注册两次 | `Registry.Register` 返回 `replaced=true`；latest-wins |
+| agent 启动需要 env vars（ANTHROPIC_API_KEY）| 用户在 shell 配置（zshrc / bashrc）；bridge 不注入凭据 |
+| 用户想用绝对路径的 agent | 配置覆盖：`agents: [{name: claude, command: /usr/local/bin/claude}]`（`agentregistry.Build` → `Starter.Init(path)`）|
+| agent 启动参数（如 `--model opus`）| 各 bridge 的 argv 固定；`/use` 只接受一个 agent 名，多余参数直接报错 |
+| 同一个 name 注册两次 | `Registry.Register` 返回 `replaced=true`；latest-wins，位置不变 |
 
 ---
 
 ## 6. Test plan
 
 **单元测试**：
-- `claudecode.Driver.Info().Name == "claude"`
-- `claudecode.Driver.Info().Mode == agent.ModeJSONIO`
-- `claudecode.Driver.Detect()` 在有 claude 的环境返回 nil
+- `claudecode.Starter.Info().Name == "claude"`
+- `claudecode.Starter.Info().Mode == agent.ModeJSONIO`
+- `claudecode.Starter.Detect()` 在有 claude 的环境返回 nil
 - `agent.Builtins.Get("claude")` 返回非 nil（Starter）
 - `agent.Builtins.Get("nonexistent")` 返回 ErrUnknownAgent
 - `Registry` 并发 Register/Get 无 race
+- `Registry.List()` 保留首次注册顺序
 
 **集成测试**：
 - 注册多个 mock agent → `List()` 返回所有
-- Spawn session with unknown agent → Reply "unknown agent"
-- `gateway.handler.cwd` 用不存在的 agentName → Reply "unknown agent"
+- Spawn session with unknown agent → Reply "Failed to activate agent: agent: unknown agent"
+- `/use` 用不存在的 agentName → Reply "Failed to activate agent: agent: unknown agent"
 
 **手动 E2E**：
-- `nightme agents` → 列出所有注册的 agents
-- `nightme run --channel=echo` → `/run claude -> 启动 claude 子进程
-- PATH 里没有 claude -> /run claude -> Reply "claude not found"
+- `nightme config` → Agents 子菜单列出所有注册的 agent
+- `/use claude` → 启动 claude 子进程
+- PATH 里没有 claude → `/use claude` → Reply "Failed to activate agent: ..."
 
 ---
 
-## 7. Open questions
+## 7. Design decisions
 
-- 加 Codex / OpenCode 时是否需要自动 detect 用户装了哪些？倾向：可以（`Detect()` 试 spawn 一下）
-- 是否需要 agent-specific 预处理（如 Claude Code 需要特定 env）？不需要
-- 用户是否能 runtime 切换 agent（同 session 内）？不支持，session 锁 agent
-- Bridge 选 Mode 是 Starter 内部决策；用户/配置能否 override？不能（每个 Starter 决定自己的 Mode）
+- **自动探测已安装的 agent**：primary agent 未配置时按 `agent.Builtins` 的注册顺序逐个 `Detect()`，取第一个成功的；见 [`../primary-agent-detection.md`](../primary-agent-detection.md)。
+- **agent-specific 预处理**：bridge 只注入传输与权限相关的参数（permission bypass、telemetry 开关）；模型 / provider / 凭据由用户自己的 CLI 配置决定，nightme 不写用户的 agent 配置。
+- **运行时切换 agent**：支持 —— `/use <agent>` 在同一个 chat 内切换当前 agent（见 §4）。
+- **Mode 由 Starter 决定**：用户与配置都不能 override `Info().Mode`。
 
 ---
 
 ## 8. Cross-references
 
 - **Mode 决策（ACP/SDK/PTY/JSON-IO）**：见 [`../bridge/cli-transport.md`](./../bridge/cli-transport.md)
-- **Claude Code Bridge 细节**：见 [`F-claude.md -> bridge/claude.md`](./F-claude.md -> bridge/claude.md)
-- **Agent.Session 事件流 → Gateway**：见 [`F-gateway.md`](./F-gateway.md) §2.3
-- **Manager 调用 Starter 的代码**：见 [`internal/chatsession/manager.go`](../../internal/chatsession/manager.go) `Manager.WithSpawner`
-
----
-
-## 9. Change log
-
+- **Claude Code Bridge 细节**：见 [`bridge/claude.md`](../bridge/claude.md)
+- **Agent.Session 事件流 → Gateway**：见 [`SPEC.md`](../SPEC.md) §1.2
+- **Manager 注入 Spawner**：见 [`internal/chatsession/manager.go`](../../internal/chatsession/manager.go) `Manager.WithSpawner`
+- **Spawner 把 agent 名解析成 Starter**：见 [`internal/agentsession/spawner.go`](../../internal/agentsession/spawner.go)
+- **内置 agent 注册表与 primary 探测**：见 [`../primary-agent-detection.md`](../primary-agent-detection.md)

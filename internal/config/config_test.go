@@ -255,7 +255,7 @@ func TestEnvOverrideInvalidNumber(t *testing.T) {
 // (package main), which is not transitively imported here. So the
 // test must register its own starter — otherwise detection always
 // returns "" and the persist branch is never exercised. Mirror the
-// pattern from internal/command/gtw/hooks_test.go:512-521.
+// pattern from internal/command/gtw/hooks_test.go.
 func TestLoadDefault_AutoDetectsPersistsAndIsIdempotent(t *testing.T) {
 	// Seed a uniquely-named starter. Detect() succeeds unconditionally
 	// so this starter is guaranteed to win the Builtins.List() probe.

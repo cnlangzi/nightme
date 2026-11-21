@@ -77,7 +77,8 @@ Q1: 这是关于产品的（用户、场景、价值、范围），还是关于�
 
 ### 4.1 顶层文档
 
-- 全大写 + `.md` 后缀：`PRD.md`、`SPEC.md`、`FEATURES.md`
+- 三层文档全大写 + `.md` 后缀：`PRD.md`、`SPEC.md`、`FEATURES.md`
+- 其余顶层文档按主题命名（kebab-case 或 PascalCase）：`CHANNEL.md`、`CHATSTORE.md`、`WFE.md`、`REVIEW.md`、`TESTS.md`、`E2E_TESTING.md`、`WINDOWS.md`、`me.md`、`Wiki.md`、`primary-agent-detection.md`、`REVIEWER_INSTRUCTIONS.md`
 - 不带日期 / 版本号（版本号在文档内部的"更新日志"维护）
 
 ### 4.2 Feature 文档
@@ -92,7 +93,7 @@ Q1: 这是关于产品的（用户、场景、价值、范围），还是关于�
 **合并文档**（多个 F-XX 内容相关时合并到一个文件）：
 
 - `feat/F-<theme>.md`（无编号，纯主题名）
-- 例：`F-runtime.md` / `F-chat-session.md` / `F-message-flow.md` / `F-gateway.md` / `F-gtw.md`
+- 例：`F-chat-session.md` / `F-gtw.md` / `F-review.md` / `F-workflow-engine.md`
 - 例：`bridge/cli-transport.md` / `bridge/claude.md` / `channel/feishu-rendering.md`
 - 合并时保留每个原文件的章节结构 + 溯源标注 `> **Source**: 原文件名`
 
@@ -100,8 +101,9 @@ Q1: 这是关于产品的（用户、场景、价值、范围），还是关于�
 
 | 编号段 | 用途 |
 |--------|------|
-| F-01 ~ F-19 | 已分配（见 FEATURES.md） |
-| F-20+ | 新增 feature 时续编，**不能复用已用编号** |
+| F-01 ~ F-99 | 两位数字编号（01-99），保证字典序 = 逻辑序 |
+| 已分配的编号 | `feat/` 目录里带 `F-NN-` 前缀的文件名 |
+| 新增 feature | 续编未用过的编号，**不能复用已用编号** |
 
 **调整编号**（删除/合并 feature）：一旦 feature 落地，**禁止重排**（commit 链接、PR 描述会引用编号）。
 
@@ -114,7 +116,7 @@ Q1: 这是关于产品的（用户、场景、价值、范围），还是关于�
 | 引用类型 | 语法 | 示例 |
 | ---------- | ------ | ------ |
 | 同目录文件 | `[NAME.md](./NAME.md)` | `[FEATURES.md](./FEATURES.md)` |
-| 子目录文件 | `[NAME.md](./feat/NAME.md)` | `[F-01](./feat/F-runtime.md)` |
+| 子目录文件 | `[NAME.md](./feat/NAME.md)` | `[F-53](./feat/F-53-message-prompt-lifecycle.md)` |
 | 同目录文件 + 节 | `[NAME.md](./NAME.md) §X` | `[SPEC.md](./SPEC.md) §2.1` |
 | 父目录 | `[NAME.md](../NAME.md)` | （docs/ 子目录引用仓库根时） |
 
@@ -190,18 +192,63 @@ docs: <简短描述>
 
 ```
 docs/
-├── README.md              ← 本文件（元文档）
-├── PRD.md                 ← Layer 1: 产品
-├── SPEC.md                ← Layer 2: 技术架构
-├── FEATURES.md            ← Layer 3: 功能索引
-├── CHANNEL.md             ← 多 channel 架构定稿（per-channel Manager + Emitter + 懒加载 restore）
-├── REVIEW.md              ← /review 设计定稿（三层分流：native / ocr delegate / StandardPrompt）
-├── feat/                  ← Layer 4: 每个 feature 的实现
-├── bridge/                ← 各 agent bridge 协议（claude / dsh / …）
-└── channel/               ← 渠道 playbook（飞书渲染 / 可靠性 / **交互卡踩坑** / Telegram Topic）
-    ├── feishu-cards.md    ← 改按钮 / form / AskUserQuestion 先读这份
-    ├── telegram.md        ← Telegram Forum Supergroup Topic 方案
-    └── slack.md           ← Slack 接入方案（原生流式协议，设计中）
+├── README.md                    ← 本文件（元文档）
+├── PRD.md                       ← Layer 1: 产品
+├── SPEC.md                      ← Layer 2: 技术架构
+├── FEATURES.md                  ← Layer 3: 功能索引
+├── CHANNEL.md                   ← 多 channel 架构（per-channel Manager + Emitter + 懒加载 restore）
+├── CHATSTORE.md                 ← chat_sessions.json 真相源 + ChatSession hydrate
+├── WFE.md                       ← Workflow YAML + 引擎运行时
+├── REVIEW.md                    ← /review 设计（统一 dispatcher + 两条 runner 路径）
+├── TESTS.md                     ← 跨平台 CI agent 启动 smoke
+├── E2E_TESTING.md               ← 手动端到端测试 + 排错
+├── WINDOWS.md                   ← Windows bridge 陷阱 + 修复
+├── me.md                        ← 个人 agent（程序以人的身份参与对话）
+├── Wiki.md                      ← /wiki init 设计
+├── primary-agent-detection.md   ← primary agent 解析链
+├── REVIEWER_INSTRUCTIONS.md     ← /review 的严格接地规则
+├── feat/                        ← Layer 4: 每个 feature 的实现
+│   ├── F-08-channel-abstraction.md
+│   ├── F-09-agent-abstraction.md
+│   ├── F-30-interactive-config.md
+│   ├── F-33-simplify-chatid-data-model.md
+│   ├── F-53-message-prompt-lifecycle.md
+│   ├── F-59-gtw-label-bootstrap.md
+│   ├── F-63-heartbeat.md
+│   ├── F-CHATSTORE-001-chat-session-persistence.md
+│   ├── F-CLAUDE-PRINT-002-statusbar-refactor.md
+│   ├── F-DSH-CHAT-001-event-state.md
+│   ├── F-OPENCODE-ACP-MIGRATION.md
+│   ├── F-PATHUTIL-001-unified-path.md
+│   ├── F-PI-PRINT-002.md
+│   ├── F-chat-session.md
+│   ├── F-gtw-fix.md
+│   ├── F-gtw.md
+│   ├── F-review-ocr-fusion.md
+│   ├── F-review.md
+│   ├── F-tray.md
+│   ├── F-version-check.md
+│   ├── F-workflow-engine.md
+│   └── slash-command-reactions.md
+├── bridge/                      ← 各 agent bridge 协议
+│   ├── acp.md                   ← Agent Client Protocol 通用桥
+│   ├── claude.md                ← Claude Code（stream-json）
+│   ├── cli-transport.md         ← 共享 CLI transport（PTY byte pipe + agent 模式）
+│   ├── codex.md  copilot.md  cursor.md
+│   ├── dsh.md  dsh-api.md       ← dsh 共享 host + HTTP/WS 协议
+│   └── omp.md  pi.md
+├── channel/                     ← 渠道 playbook
+│   ├── feishu.md                ← 飞书渲染规则 / card 语义 / thread 路由
+│   ├── feishu-cards.md          ← 改按钮 / form / AskUserQuestion 先读这份
+│   ├── feishu-onboarding.md     ← 附件透传 + App 注册
+│   ├── feishu-reliability.md    ← 限速 / 重试 / WS 重连
+│   ├── feishu-rendering.md      ← 飞书渲染全量规格
+│   ├── slack.md  slack-checklist.md
+│   ├── telegram.md              ← Telegram Forum Supergroup Topic
+│   └── discord.md
+├── flow/                        ← 横切流程
+│   └── three-layer-sync.md
+└── images/                      ← README 截图
 ```
 
 ---
@@ -211,7 +258,7 @@ docs/
 按这个顺序自检：
 
 1. **这是什么内容？**（产品 / 架构 / feature 实现 / 实施计划）
-2. **现有 5 个顶层文件 + feat/，哪一个最匹配？**
+2. **现有顶层文档（见 §8 目录示意）+ feat/，哪一个最匹配？**
 3. **它是否含有代码 / schema？**  → 如果是，去 feat/
 4. **它是新内容还是迭代？**  → 决定改 FEATURES 还是改 feat/
 5. **检查交叉引用是否需要更新**

@@ -533,7 +533,7 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 				Kind:   agent.EventAgentResult,
 				Result: result,
 			}
-			// agent.go:586-591 documents that EventAgentResult.Err is
+			// agent.go documents that EventAgentResult.Err is
 			// populated on error turns so channels can render the
 			// error indicator without parsing Subtype. pi/codex
 			// follow the same contract — without this the feishu

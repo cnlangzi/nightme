@@ -220,7 +220,7 @@ var handoffSpec = command.CmdSpec{
 //  3. Reject missing / extra args via ParseCmdArgs.
 //  4. input.MessageID guard — ChatSession.QueueUserMessage
 //     silently no-ops on empty ID; /queue has the same guard at
-//     queue/cmd.go:143. Without it, a synthetic inbound would
+//     queue/cmd.go. Without it, a synthetic inbound would
 //     get the ack while enqueuing nothing.
 //  5. ValidateHandoffName — character set / length / sentinel
 //     rules. Done before EnsureHandoffDir so a bad name never

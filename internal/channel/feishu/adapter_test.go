@@ -2352,7 +2352,7 @@ func TestSend_OutReply_OverflowPlaceholderEmptyMsgID_TreatedAsFailure(t *testing
 		// receipt's first card is set up correctly. Every later
 		// call simulates the ReplyInChat empty-MessageId
 		// fall-through (resp.Success() == true but
-		// resp.Data.MessageId == nil, reply.go:294-297) — this is
+		// resp.Data.MessageId == nil, reply.go) — this is
 		// the case the overflow handler must reject.
 		if sends == 1 {
 			return "om_card_test", nil

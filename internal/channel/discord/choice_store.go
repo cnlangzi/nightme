@@ -110,7 +110,7 @@ func (s *choiceStore) GetByShortID(short string) (*choiceState, bool) {
 
 // GetByMessageID returns the entry whose MessageID equals messageID.
 // Used as a disambiguator when a short id maps to multiple candidates
-// (mirrors telegram/callback.go:301-304).
+// (mirrors telegram/callback.go).
 func (s *choiceStore) GetByMessageID(messageID string) (*choiceState, bool) {
 	if s == nil || messageID == "" {
 		return nil, false
@@ -134,7 +134,7 @@ func (s *choiceStore) GetByMessageID(messageID string) (*choiceState, bool) {
 // well under Discord's 100-char custom_id ceiling even with the
 // "c:" / "i:" prefix.
 //
-// Mirrors internal/channel/telegram/topic.go:243.
+// Mirrors internal/channel/telegram/topic.go.
 func shortID(value string) string {
 	if len(value) <= 16 {
 		return value
@@ -164,7 +164,7 @@ const maxOptionButtons = 20
 
 // cloneChoiceValue deep-copies a *messages.Choice so the store's
 // snapshot is independent of upstream mutations. Mirrors
-// internal/channel/telegram/adapter.go:2087+.
+// internal/channel/telegram/adapter.go+.
 func cloneChoiceValue(choice *messages.Choice) *messages.Choice {
 	if choice == nil {
 		return nil

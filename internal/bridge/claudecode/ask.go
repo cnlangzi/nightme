@@ -44,7 +44,7 @@ type armPendingAskFn func(blockID string, multi bool, textFallback bool) (armedE
 // the user's answer in the right wire format.
 //
 // Schema source: chenhg5/cc-connect internal/agent/claudecode/
-// claudecode_test.go:55-94 and Piebald-AI/claude-code-system-prompts
+// claudecode_test.go and Piebald-AI/claude-code-system-prompts
 // tool-description-askuserquestion.md (ccVersion 2.1.154).
 type Question struct {
 	Question    string   `json:"question"`
@@ -69,7 +69,7 @@ type Option struct {
 // We always include a synthetic "Other" option so the user can type
 // a custom answer; Claude Code does this automatically in the CLI but
 // the stream-json wire format doesn't expose it (cc-connect's parse
-// confirms: see session.go:928-930).
+// confirms: see session.go).
 func defaultAskHandler(block contentBlock, events chan<- agent.AgentEvent, logger *slog.Logger) {
 	var input struct {
 		Questions []Question `json:"questions"`
@@ -193,7 +193,7 @@ func formatQuestionAction(q Question) string {
 // encodeUserAnswer constructs the JSON payload to write to Claude
 // Code's stdin in response to one or more AskUserQuestion prompts.
 //
-// Per Anthropic API convention and cc-connect's session.go:943, the
+// Per Anthropic API convention and cc-connect's session.go, the
 // answer is a user-role message whose content is a tool_result block
 // referencing the tool_use_id. The content field can be a string
 // (single-select) or an array of strings (multi-select); we always

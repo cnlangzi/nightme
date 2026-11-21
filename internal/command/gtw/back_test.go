@@ -355,7 +355,7 @@ func TestFactory_Handle_Back_RejectsExtraArgs(t *testing.T) {
 // preflight (review finding #10): when cs.SelectedCwd() is
 // empty, /gtw back must short-circuit with the canonical
 // "No active workspace" reply before RunBack is even called.
-// Mirrors runSync's pattern (cmd.go:858).
+// Mirrors runSync's pattern (cmd.go).
 //
 // Without this gate, RunBack would receive an empty cwd, hit
 // ReadGTWYml("") → gtwYmlPath("") → "./.nightme/gtw.yml" under

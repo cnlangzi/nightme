@@ -79,7 +79,7 @@ func (a *Adapter) fetchBotOpenID(ctx context.Context) string {
 // Implementation: GET /open-apis/bot/v3/info with tenant access
 // token. This is the same call the SDK's internal
 // Channel.GetBotIdentity makes (see
-// larksuite/oapi-sdk-go/v3@v3.9.9/channel/channel.go:210). We
+// larksuite/oapi-sdk-go/v3@v3.9.9/channel/channel.go). We
 // replicate it here because nightme uses lark.NewClient (the
 // standard REST client), not lark.NewChatBot (which exposes the
 // SDK's Channel type with GetBotIdentity). The raw REST path is

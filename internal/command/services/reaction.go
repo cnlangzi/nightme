@@ -13,7 +13,7 @@ import (
 //
 // This type was moved from chatsession (where it was a F-45
 // bridge to gtw) and from internal/gtw (where it was a
-// separate struct at types.go:163) as part of F-51. After
+// separate struct at types.go) as part of F-51. After
 // F-51 lands, both `chatsession.ReactionEvent` and
 // `gtw.ReactionEvent` are deleted; all callers reference this
 // type directly or via the command.ReactionEvent alias.

@@ -136,7 +136,7 @@ func TestBuildChoiceComponents_InputButtonForQuestionsOnly(t *testing.T) {
 }
 
 // TestShortID_Truncation verifies the "8 + 8 with hyphen" shape
-// (mirrors telegram/topic.go:243).
+// (mirrors telegram/topic.go).
 func TestShortID_Truncation(t *testing.T) {
 	cases := []struct {
 		in   string

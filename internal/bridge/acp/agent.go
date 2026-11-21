@@ -2253,7 +2253,7 @@ func (d *driver) deliver(ev agent.AgentEvent) agent.AgentEvent {
 	// output beyond its banner; pre-fix this was satisfied by
 	// Go's panic stack trace landing on stderr. Without the
 	// log here, an agent that terminates before SendBlocks
-	// returns "send: EOF" (cmd/nightme/test.go:202) with no
+	// returns "send: EOF" (cmd/nightme/test.go) with no
 	// other stderr noise — sub-150 bytes total — fails the
 	// "agent acknowledged within window" check. A single slog
 	// line keeps the diagnostic AND passes the gate.

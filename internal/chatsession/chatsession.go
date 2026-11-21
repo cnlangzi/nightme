@@ -853,7 +853,7 @@ func (cs *ChatSession) WithGitStatusDeps(deps GitStatusDeps) *ChatSession {
 // Unlike SetSelectedCwd, an empty value is the whole point —
 // no validation rejection. Persists unconditionally so the
 // cleared state survives daemon restart. KNOWN FOLLOW-UP:
-// persistChatEntryLocked (chatsession.go:1650-1655) does not
+// persistChatEntryLocked (chatsession.go) does not
 // dedup on unchanged state, so a clear-after-empty still
 // writes to csFile; flagged in the audit, not addressed here.
 //
@@ -2160,7 +2160,7 @@ type DropResult struct {
 // EvictAgentSessionsInCwd. Wedged bridges that bypass
 // their own SIGKILL fallback would otherwise pin the
 // goroutine indefinitely. 5s mirrors the bound used by
-// command/close's CloseAllAgents (close.go:238). Kept local
+// command/close's CloseAllAgents (close.go). Kept local
 // rather than exported to avoid cross-package coupling.
 const evictGraceTotal = 5 * time.Second
 
@@ -2242,7 +2242,7 @@ func drainCloseOutcomes(closeCh <-chan evictOutcome, alive int, timedOut bool) [
 // callers that want richer status.
 //
 // Distinct from /close's CloseAllAgents
-// (internal/command/close/close.go:190): /close keeps the
+// (internal/command/close/close.go): /close keeps the
 // pool intact so respawn can resume each conversation after
 // the user reopens it. This helper is for the
 // worktree-is-gone case where there is nothing to respawn

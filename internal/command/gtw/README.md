@@ -124,7 +124,7 @@ issue 标题的 ASCII 是 `DeriveBranchFromTitle` 产出可读分支名的前提
 
 | 部分 | 来源 | 说明 |
 |---|---|---|
-| `❯` | **feishu adapter** (`adapter.go:1588`) | 每个 `OutCommandReply` 自动加在首行,gtw **不写** |
+| `❯` | **feishu adapter** (`adapter.go`) | 每个 `OutCommandReply` 自动加在首行,gtw **不写** |
 | `<emoji>` | gtw | 状态/动作标志;见 §1.1 |
 | `<title text>` | gtw | 简短陈述句,imperative mood;典型 2–5 个词 |
 
@@ -308,7 +308,7 @@ Shell 失败 (`❌ exit N` 注入):
 > ./run-tests.sh
   ❌ exit 1
   --- FAIL: TestFoo
-  foo_test.go:42: expected x, got y
+  foo_test.go: expected x, got y
   --- FAIL: 1 of 5 tests passed
 ```
 

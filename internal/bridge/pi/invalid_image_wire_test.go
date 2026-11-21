@@ -383,7 +383,7 @@ func TestTranslateMessageEnd_NoErrorMessage_HappyPath(t *testing.T) {
 
 // TestEncodeImage_RejectsUnsupportedMime locks the mime whitelist
 // at the bridge boundary. Telegram hard-codes "image/jpeg" for
-// every Photo (telegram/adapter.go:677) and would otherwise ship a
+// every Photo (telegram/adapter.go) and would otherwise ship a
 // declared "image/jpeg" / actual PNG payload to pi — which the
 // provider then rejects with an ambiguous error. The bridge rejects
 // it pre-send with a precise error.

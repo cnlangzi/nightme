@@ -425,7 +425,7 @@ Probe-verified discriminators (docs/bridge/dsh.md §1.4):
 | `{type:"document", ...}` | ❌ rejected at discriminator |
 | empty `content[]` | ❌ rejected — must be non-empty |
 
-**Bridge `contentBlocksToDTO` mapping** (`session.go:1024-1077`):
+**Bridge `contentBlocksToDTO` mapping** (`session.go`):
 
 | `agent.ContentBlock.Type` | Wire shape |
 |---|---|
@@ -1128,7 +1128,7 @@ Pure push. Bridge drops the matching local pending (by `approvalId`) and emits `
 
 #### 3.4.8 `approval/asked` — model-side approval (alt path)
 
-Synthesised routing key: `"evt-" + toolCallID` (`permissions.go:112-130`). Same plumbing as `approval/requested`. Distinct from `approval/requested`: this one comes through the mux method-level dispatch rather than as a `session/event` envelope.
+Synthesised routing key: `"evt-" + toolCallID` (`permissions.go`). Same plumbing as `approval/requested`. Distinct from `approval/requested`: this one comes through the mux method-level dispatch rather than as a `session/event` envelope.
 
 #### 3.4.9 `question/requested` — AskUserQuestion-style prompt (pre-0.1.2-rc.1)
 
@@ -1169,7 +1169,7 @@ interface AskUserQuestionItem {
 }
 ```
 
-**Routing key** for the answer: the frame's **rpcId** (NOT any session id concat). The question's logical id IS the rpcId minted when the host accepts `ask()`. `permissions.go:142-187` documents the trap.
+**Routing key** for the answer: the frame's **rpcId** (NOT any session id concat). The question's logical id IS the rpcId minted when the host accepts `ask()`. `permissions.go` documents the trap.
 
 dsh 0.1.2-rc.1+ does not emit this frame: user-questions arrive on the host `$events` waterfall as `user-questions/request` and are answered with `POST /api/$events/result` (§3.7). A mux frame under this name reaches the bridge's unknown-method path — recorded, counted, never a permission.
 
@@ -1210,7 +1210,7 @@ Emitted when the impl throws mid-stream; the stream then closes. The client must
 
 ### 3.5 Unknown mux methods
 
-`handleMuxFrame`'s `default` branch (`handle_mux.go:145-156`):
+`handleMuxFrame`'s `default` branch (`handle_mux.go`):
 
 1. Increments `wireState.unknownCount` (P4 observability)
 2. Warns once per unknown: `"dsh: mux unknown method"`
@@ -1245,7 +1245,7 @@ Same dual transport as mux (SSE or WS upgrade). Frames describe **host-container
 
 `remote-event` forwards allowlisted host cordis events verbatim (`@deepseek-ai/dsh-api-remotes` owns the allowlist). Delivery lands on `ctx.remote.$on`, not on a per-event frame variant.
 
-`handleHostFrame` (`handle_mux.go:163-167`) currently logs every host frame without emitting `AgentEvent`. Future PR may surface `session/removed` / `agent-error` for runtime cleanup.
+`handleHostFrame` (`handle_mux.go`) currently logs every host frame without emitting `AgentEvent`. Future PR may surface `session/removed` / `agent-error` for runtime cleanup.
 
 ---
 
@@ -1334,7 +1334,7 @@ dsh web prints its bound URL on the first stdout line:
 dsh web: http://127.0.0.1:3080
 ```
 
-The regex (`session.go:97`):
+The regex (`session.go`):
 
 ```go
 var dshURLPattern = regexp.MustCompile(`dsh web:\s+http://([^:\s]+):(\d+)`)

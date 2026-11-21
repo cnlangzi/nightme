@@ -177,7 +177,7 @@ func CloseAgent(c *Cmd, agentName string) (Result, error) {
 	// `if as.Status() == StatusExited { return }` guard short-
 	// circuits the readpump's late cascade, so we don't
 	// double-persist agent_sessions.json. Matches the comment at
-	// pump_events.go:128 describing the desired "/close path
+	// pump_events.go describing the desired "/close path
 	// does `as.Close(); as.SetExited(0)`" semantics.
 	as.SetExited(0)
 	return result, nil

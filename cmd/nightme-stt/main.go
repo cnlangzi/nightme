@@ -204,7 +204,7 @@ func runServe() error {
 }
 
 // resolveDataDir mirrors the precedence used by nightme core
-// (internal/config/config.go:418 + applyEnvOverrides):
+// (internal/config/config.go + applyEnvOverrides):
 // NIGHTME_PATHS_DATA_DIR env > ~/.nightme. nightme core resolves
 // the same way at startup, so both binaries agree on the data
 // dir without any flag handshake at spawn time. ~ expansion

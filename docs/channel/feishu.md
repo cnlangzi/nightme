@@ -48,9 +48,9 @@ Agent: main | Model: glm-5 | Provider: tencentcodingplan
   - 硬编码拼接 `Agent: <name>` + ` | Model: <model>` + ` | Provider: <provider>`
   - **不可配置**(issue #59360 指明: "There is no configuration to disable it")
 - **传入路径**:
-  - 流式卡 start/close: `reply-dispatcher.ts:393, :437` 接收/重算 `note`
+  - 流式卡 start/close: `reply-dispatcher.ts, :437` 接收/重算 `note`
   - 结构化卡: 传入 `sendStructuredCardFeishu(..., { note: cardNote })`
-- **渲染位置**: `extensions/feishu/src/send.ts:768`
+- **渲染位置**: `extensions/feishu/src/send.ts`
   ```ts
   if (options?.note) {
     elements.push({ tag: "hr" });
@@ -360,7 +360,7 @@ Card 2.0 官方组件列表**没有 `tag: "note"`**。我们走 v2 风格（`<hr
 @_user_1 /cwd /tmp
 ```
 
-`ParseCommand` 要求 `strings.HasPrefix(trimmed, "/")`（`internal/command/commander.go:36`），这条文本会以 `@` 开头，被判为 `ErrParseFailure` → slash command **拦截失败**。
+`ParseCommand` 要求 `strings.HasPrefix(trimmed, "/")`（`internal/command/commander.go`），这条文本会以 `@` 开头，被判为 `ErrParseFailure` → slash command **拦截失败**。
 
 **方案**：`handleMessage` 构造 `channel.Message` 前，strip 开头的 mention 前缀。
 
@@ -394,7 +394,7 @@ text, hasMention := stripAndDetectMention(
 
 > **DM 不变式（锁死）**：DM 消息 `HasMention` 必须永远是 `true`。这是 F-watch 的核心不变式 ——只有这条不变式成立，gateway dispatcher 才能放心地 drop 非 mention 群消息而不误伤 DM。由 `TestComputeHasMention_DMInvariant` （adapter 层）+ `TestDispatchInbound_WatchModeGate_DMInvariant`（gateway 层）两个测试锁死，任一 regressed 都会被 CI 拦住。
 
-**bot open_id 获取**：调 SDK `a.larkClient.GetBotIdentity(ctx)`（`channel/channel.go:152`），30 分钟 TTL cache 由 SDK 内部管理。第一次消息进来 cache miss → 同步 fetch；后续命中 cache，零延迟。fetch 失败 → 记 log，`HasMention` 退化为 `false`（保守策略：DM/group 都当 group 处理）。
+**bot open_id 获取**：调 SDK `a.larkClient.GetBotIdentity(ctx)`（`channel/channel.go`），30 分钟 TTL cache 由 SDK 内部管理。第一次消息进来 cache miss → 同步 fetch；后续命中 cache，零延迟。fetch 失败 → 记 log，`HasMention` 退化为 `false`（保守策略：DM/group 都当 group 处理）。
 
 **ChatSession 侧接入**：`/watch on` / `/watch off` 控制 `ChatSession.WatchMode()`；Gateway dispatcher 拿 `Message.HasMention` + `cs.WatchMode()` 决定 drop 或 pass。Channel adapter **不读** `ChatSession` —— 详细职责划分见 `docs/SPEC.md §3.1.1`。
 
@@ -544,7 +544,7 @@ func (a *Adapter) UpdateMessage(ctx context.Context, messageID, content string) 
 
 | Limit | 值 | 来源 |
 |---|---|---|
-| card body 字节数 | 30 KB(Create / PATCH 相同) | SDK `resource.go:1381` 注释 |
+| card body 字节数 | 30 KB(Create / PATCH 相同) | SDK `resource.go` 注释 |
 | card elements 数 | 50 | Feishu card 文档 |
 | `lark_md` 单行 | 1000 chars | Feishu card 文档 |
 | `lark_md` 总长 | 4000 chars | Feishu card 文档 |
@@ -653,7 +653,7 @@ Feishu IM API 官方支持的顶层 `msg_type`(参考 [create_json 文档](https
 **证据链**(可逐行复现):
 
 ```go
-// internal/gateway/outbound/translate.go:54-58
+// internal/gateway/outbound/translate.go
 if strings.HasPrefix(text, thinkingPrefix) {  // "[思考] "
     return OutboundMessage{
         Kind:   OutThinking,
@@ -663,7 +663,7 @@ if strings.HasPrefix(text, thinkingPrefix) {  // "[思考] "
 ```
 
 ```go
-// internal/channel/feishu/adapter.go:435-441
+// internal/channel/feishu/adapter.go
 case gateway.OutThinking:
     receipt := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo)
     if receipt == nil { return nil }
@@ -674,7 +674,7 @@ case gateway.OutThinking:
 ```
 
 ```go
-// internal/channel/feishu/receipt_entry.go:45
+// internal/channel/feishu/receipt_entry.go
 case agent.EventText:
     text := strings.TrimSpace(ae.Text)
     if text == "" { return LogEntry{}, false }
@@ -701,11 +701,11 @@ if e.Kind == "thinking" {  // ← 永远不会为真
 - **B. agent 包加 `EventThinking` 枚举值** + receipt 直接 case;`translate.go` 改发 `EventThinking`,adapter 也直接转发。**代价**:跨 5 个文件动(agent / translate / adapter / receipt / receipt_event);但语义最清晰
 - **C. receipt 加 `appendThinkingLocked`,adapter 走专用路径** -- 与 B 类似,但不污染 agent 层
 
-**附议**(无论选哪种方案):`receipt_entry.go:40-53` 加注释明确 "prefix MUST be present;Gateway/Caller 负责保证"。否则后人改 transport 又踩一遍。
+**附议**(无论选哪种方案):`receipt_entry.go` 加注释明确 "prefix MUST be present;Gateway/Caller 负责保证"。否则后人改 transport 又踩一遍。
 
 ### 13.2 ⚠️ 待澄清: `OutInit` 的 Meta 字段全部丢失
 
-`translate.go:144-156` 把以下字段写到 Meta:
+`translate.go` 把以下字段写到 Meta:
 
 ```go
 Meta: {
@@ -717,7 +717,7 @@ Meta: {
 }
 ```
 
-`adapter.go:600-616` 也读到了 `agent.AgentConnectedEvent` 字段里。但:
+`adapter.go` 也读到了 `agent.AgentConnectedEvent` 字段里。但:
 
 - `MessageReceipt` 结构体没有存这些字段
 - `buildReceiptCard.footLine()` 只拼 `state + N entries + HH:MM:SS`,**session_id / model / agent_name / workspace / branch 全部丢失**
@@ -743,7 +743,7 @@ Meta: {
 - 设计: 本文件 §13.3(F-37 决策)
 - 配置: `perEntryMaxRunes = 8000` (从 600 B 上调)
 
-> **🔁 反转 (F-39, 2026-08-04)** — F-37 修"OutResult 进入 receipt card 被 600 B 截掉一半",但暴露了**更基础的 bug**:`OutResult` dedup 协调逻辑(`receipt_entry.go:113-124`)对长答复(> 600 字)总是触发,导致完整最终答复整段静默丢失。F-39 反转 OutResult 路径——不再 fold 进 receipt,改为独立 reply 投递到 userMsgID。**`splitMarkdownForDivs` 函数仍服务于 `buildResultCardJSON`(F-39 新增 helper),只是不再被 receipt 调用**。详见本文件 §13.16(F-39 决策)。本节 (`§13.3`) backlog 由 F-37 + F-39 共同 resolve。
+> **🔁 反转 (F-39, 2026-08-04)** — F-37 修"OutResult 进入 receipt card 被 600 B 截掉一半",但暴露了**更基础的 bug**:`OutResult` dedup 协调逻辑(`receipt_entry.go`)对长答复(> 600 字)总是触发,导致完整最终答复整段静默丢失。F-39 反转 OutResult 路径——不再 fold 进 receipt,改为独立 reply 投递到 userMsgID。**`splitMarkdownForDivs` 函数仍服务于 `buildResultCardJSON`(F-39 新增 helper),只是不再被 receipt 调用**。详见本文件 §13.16(F-39 决策)。本节 (`§13.3`) backlog 由 F-37 + F-39 共同 resolve。
 
 ### 13.4 i️ 未来关注: 没有 OutboundAttachment kind
 
@@ -753,7 +753,7 @@ MVP 不阻塞(Claude Code 不生成媒体),但 Channel 抽象层对外非对称�
 
 ### 13.5 i️ 已知接受: `OutChoice` RequestID 临时生成
 
-`adapter.go:530-533` 用 `fmt.Sprintf("%s:%d", msg.ChatID, time.Now().UnixNano())` 拼 RequestID:
+`adapter.go` 用 `fmt.Sprintf("%s:%d", msg.ChatID, time.Now().UnixNano())` 拼 RequestID:
 
 - 同 chatID 同 ns 内理论可重复(纳秒精度在某些平台受限于时钟粒度)
 - chatID 前缀降低了碰撞面
@@ -923,16 +923,16 @@ MVP 不阻塞(Claude Code 不生成媒体),但 Channel 抽象层对外非对称�
 
 **证据链**:
 
-1. `internal/agentsession/readpump.go:198` -- `readpump` 读 `cs.currentTurnUserMsgID` 并以 `userMsgID` 参数调用 gateway 的 event handler
-2. gateway 的 event handler 把它写到 `OutboundMessage.ReplyTo`(参考 `internal/gateway/binding.go:8` 与 `messages.go:48`)
-3. `internal/channel/feishu/adapter.go:424/436/525/535/550/571/581/591` -- 8 处都只调用 `a.receiptFor(ctx, msg.ChatID, msg.ReplyTo)`,**只用 `ReplyTo` 查 `receiptsByUserMsgID` map**
-4. `sendViaLark` (`adapter.go:1295-1324`) 构造的 `CreateMessageReqBody` 只有 `ReceiveId / MsgType / Content`,**没有 `RootId` 字段**
+1. `internal/agentsession/readpump.go` -- `readpump` 读 `cs.currentTurnUserMsgID` 并以 `userMsgID` 参数调用 gateway 的 event handler
+2. gateway 的 event handler 把它写到 `OutboundMessage.ReplyTo`(参考 `internal/gateway/binding.go` 与 `messages.go`)
+3. `internal/channel/feishu/adapter.go/436/525/535/550/571/581/591` -- 8 处都只调用 `a.receiptFor(ctx, msg.ChatID, msg.ReplyTo)`,**只用 `ReplyTo` 查 `receiptsByUserMsgID` map**
+4. `sendViaLark` (`adapter.go`) 构造的 `CreateMessageReqBody` 只有 `ReceiveId / MsgType / Content`,**没有 `RootId` 字段**
 5. `larkim.NewCreateMessageReqBuilder` SDK 调用 `Message.Create`(顶层创建 API,非 Reply)
-6. `PatchMessage` (`adapter.go:1387`) PATCH `/im/v1/messages/{id}` 也不传 root_id -- PATCH 会**保留**被 PATCH 消息的原始 root_id,但因为原始 create 没设,结果依然无 root_id
-7. `larkim.CreateMessageReqBody.RootId` 字段在 SDK 中存在(`oapi-sdk-go/v3@v3.5.3/service/im/v1/model.go:2125`),**SDK 完全支持,代码没用而已**
-8. `larkim.ReplyMessageReq{RootId?, ReplyInThread, ...}` **也存在**(`model.go:11385+`),是专门回复的 endpoint
+6. `PatchMessage` (`adapter.go`) PATCH `/im/v1/messages/{id}` 也不传 root_id -- PATCH 会**保留**被 PATCH 消息的原始 root_id,但因为原始 create 没设,结果依然无 root_id
+7. `larkim.CreateMessageReqBody.RootId` 字段在 SDK 中存在(`oapi-sdk-go/v3@v3.5.3/service/im/v1/model.go`),**SDK 完全支持,代码没用而已**
+8. `larkim.ReplyMessageReq{RootId?, ReplyInThread, ...}` **也存在**(`model.go+`),是专门回复的 endpoint
 
-**与历史设计的关系**: `docs/feat/F-26-gateway-hub.md:223-225`(已被 v1.3 标 SUPERSEDED,但语义依然适用)写过:
+**与历史设计的关系**: `docs/feat/F-26-gateway-hub.md`(已被 v1.3 标 SUPERSEDED,但语义依然适用)写过:
 
 > ReplyTo 非空 → 必须镇定到该 userMsgID(**用 ReplyMessage API 或已有 receipt**)
 
@@ -987,11 +987,11 @@ PATCH 路径不动 -- Feishu 的 PATCH 接口会自动保留被 PATCH 消息的�
 **待 Devin 拍板(开 PR 前)**:
 
 1. **修复范围**:A / B / C?
-2. **OutCommandReply 同步 thread**?(B/C 方案下,slash command 的回复会变 threaded;`adapter.go:608-619` 注释需要更新)
+2. **OutCommandReply 同步 thread**?(B/C 方案下,slash command 的回复会变 threaded;`adapter.go` 注释需要更新)
 3. **OutChoice(权限卡)同步 thread**?(B/C 方案下,权限请求与用户原消息连接)
 4. **`reply_in_thread` 模式是否需要**?(C 方案专属;默认 false 走 main chat,保持 discoverable;用户可选 true 移入 thread)
 
-**附议**: 落地后 `adapter.go:608-619` 的 "no ReplyTo threading" 注释需要更新;`docs/feat/F-26-gateway-hub.md:223` 已经描述了这条约束,可以作为权威参考,无需修改 F-26(它是 v1.1 文档,已 superseded,但语义对 v1.3 仍生效)。
+**附议**: 落地后 `adapter.go` 的 "no ReplyTo threading" 注释需要更新;`docs/feat/F-26-gateway-hub.md` 已经描述了这条约束,可以作为权威参考,无需修改 F-26(它是 v1.1 文档,已 superseded,但语义对 v1.3 仍生效)。
 
 **✅ 决议(2026-08-03,Devin "按你的建议修改")**: 采用 **方案 B**,同步 thread OutChoice 与 OutCommandReply。**不**实现 `reply_in_thread` 模式(属未来 P2)。
 
@@ -1073,7 +1073,7 @@ emoji 都是 channel 装饰（不在抽象 gateway 类型上），让用户在�
 #### 13.11.1 三个核心决策
 
 **D1: ChatType 不进 Gateway**
-- 删除 `internal/messages/outbound.go:18-27` 的 `ChatType` 类型 + 4 个常量(`ChatTypeP2P/Group/Thread/Other`)
+- 删除 `internal/messages/outbound.go` 的 `ChatType` 类型 + 4 个常量(`ChatTypeP2P/Group/Thread/Other`)
 - 删除 `InboundMessage.ChatType` 字段 + `IsDM()` 方法
 - 删除 `BindingEntry.ChatType` / `ChatSession.ChatType` / `ChatSessionEntry.ChatType` 持久化字段
 - `/status` 命令不再展示 "DM/Group" 标签
@@ -1106,7 +1106,7 @@ emoji 都是 channel 装饰（不在抽象 gateway 类型上），让用户在�
 
 #### 13.11.3 当前 inbound bug:`msg.ReplyTo` 永远是空字符串
 
-`handleMessage`(`internal/channel/feishu/adapter.go:1593-1617`)构造 `channel.Message` 时**不读 `event.Message.RootId`,也不读 `event.Message.ParentId`**:
+`handleMessage`(`internal/channel/feishu/adapter.go`)构造 `channel.Message` 时**不读 `event.Message.RootId`,也不读 `event.Message.ParentId`**:
 ```go
 msg := channel.Message{
     ChatID:      chatID,                        // ✅ 已填
@@ -1489,7 +1489,7 @@ WebSearch  -> 10 results
 
 **决策状态：已决议。**
 
-**背景**:§13.3 F-37 决议后,OutResult 进入 receipt card 体,带 dedup 协调逻辑(`receipt_entry.go:113-124`)。实机验证发现 dedup 是次优解——Claude Code stream-json 的 `result.result` 与最后一条 `assistant.event` 内容字节级相等,经 `truncateForLog(text, 600)` 砍后两侧必撞,**长答复(> 600 字)的最终答复整段静默丢失**。Receipt 内只剩 N 条碎裂的"前 600 字 + …" 💬 行。
+**背景**:§13.3 F-37 决议后,OutResult 进入 receipt card 体,带 dedup 协调逻辑(`receipt_entry.go`)。实机验证发现 dedup 是次优解——Claude Code stream-json 的 `result.result` 与最后一条 `assistant.event` 内容字节级相等,经 `truncateForLog(text, 600)` 砍后两侧必撞,**长答复(> 600 字)的最终答复整段静默丢失**。Receipt 内只剩 N 条碎裂的"前 600 字 + …" 💬 行。
 
 **新决议**：OutResult 不再 fold 进 rolling-log receipt card，改为**独立 reply 投递到 userMsgID thread**。两个职责清晰分离:
 
@@ -1574,8 +1574,8 @@ nightme 额外需要的:**lark_md 似乎需要 escape 某些字符以保证表�
 - 简化掉 HTTP probe ── 让 SDK 内部去试,我们只负责"每 30s 杀一次重来"
 
 **与 SDK 的交互**:
-- `Stop()` 关闭 socket + 取消 SDK 内部 goroutine(`larkws/client.go:344-352`)
-- `Start(ctx)` 重新拉 SDK connect 循环(`larkws/client.go:206-233`)
+- `Stop()` 关闭 socket + 取消 SDK 内部 goroutine(`larkws/client.go`)
+- `Start(ctx)` 重新拉 SDK connect 循环(`larkws/client.go`)
 - SDK 的 autoReconnect=true 仍然有效 ── 我们 Stop 之后如果网络短暂恢复,Start 期间 SDK 也能用 default 2min 兜底
 - 我们的 prober 跟 SDK reconnect timer **并行** ── 谁先连上谁赢
 
@@ -2350,7 +2350,7 @@ func (a *Adapter) SendCard(ctx context.Context, chatID, content, rootID string) 
 
 **`sendViaLark` dispatch 到 Reply / Create(SDK 修正版)**:
 
-最初计划是设 `body.RootId = &rootID`(SDK 字段 `larkim.CreateMessageReqBody.RootId`,参考 `oapi-sdk-go/v3@v3.5.3/service/im/v1/model.go:2125`)。**修正**: `CreateMessageReqBody` **没有** `RootId` 字段--只有 `ReplyMessageResp` 数据结构有 `RootId`(响应体)。真正能设 root_id 的 API 是 `POST /im/v1/messages/{message_id}/reply`(path 参数即 root_id),所以 `sendViaLark` 拆成两条:
+最初计划是设 `body.RootId = &rootID`(SDK 字段 `larkim.CreateMessageReqBody.RootId`,参考 `oapi-sdk-go/v3@v3.5.3/service/im/v1/model.go`)。**修正**: `CreateMessageReqBody` **没有** `RootId` 字段--只有 `ReplyMessageResp` 数据结构有 `RootId`(响应体)。真正能设 root_id 的 API 是 `POST /im/v1/messages/{message_id}/reply`(path 参数即 root_id),所以 `sendViaLark` 拆成两条:
 
 ```go
 func (a *Adapter) sendViaLark(ctx, chatID, msgType, content, rootID string) (string, error) {

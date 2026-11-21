@@ -365,7 +365,7 @@ func (m *Manager) GetOrCreate(chatID, primaryAgent string) (*ChatSession, error)
 }
 ```
 
-`hydrateFromEntry` 把现有 `Manager.RestoreFromRegistry`（`manager.go:738-818`）里的 entry 恢复代码抽出为独立函数（selectedCwd/Agent/WatchMode/ThinkMode/ToolsMode/AgentSession 池）。
+`hydrateFromEntry` 把现有 `Manager.RestoreFromRegistry`（`manager.go`）里的 entry 恢复代码抽出为独立函数（selectedCwd/Agent/WatchMode/ThinkMode/ToolsMode/AgentSession 池）。
 
 `Manager.RestoreFromRegistry` **方法保留**（21 个测试 caller 不破），但 `runtime.runDaemon` **不再调它**。行为等价于"首次 GetOrCreate 时 hydrate"。
 
@@ -536,7 +536,7 @@ func buildStack(ch channel.Channel, opts buildStackOpts) *chatsession.Manager {
 ```
 
 **删除**：
-- `runtime.go:183-185` feishu 凭据 prefix check
+- `internal/runtime/handler.go` feishu 凭据 prefix check
 - `runDaemon` 里的 `Manager.RestoreFromRegistry` 调用
 - 单 channel 假设的所有代码（`ch := deps.NewChannel(cfg)` 等）
 

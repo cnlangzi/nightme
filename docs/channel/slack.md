@@ -379,7 +379,7 @@ Feishu 侧的附件处理在 `internal/channel/feishu/attachment.go`（27.6 KB�
 
 **接收**：message 事件带 `files: [...]` 数组（`id` / `name` / `mimetype` / `url_private` / `url_private_download` / `size`）。下载必须带 `Authorization: Bearer xoxb-…` 头——**光有 URL 不够**。
 
-cc-connect 的防御值得抄（`platform/slack/slack.go:586-588`）：若 `files:read` scope 缺失，Slack 返回的是 HTML 登录页而非文件内容，需检测 `<!DOCTYPE` / `<html` 前缀并报明确错误，否则会把一页 HTML 当成图片喂给 agent。
+cc-connect 的防御值得抄（`platform/slack/slack.go`）：若 `files:read` scope 缺失，Slack 返回的是 HTML 登录页而非文件内容，需检测 `<!DOCTYPE` / `<html` 前缀并报明确错误，否则会把一页 HTML 当成图片喂给 agent。
 
 **发送**：`files.upload` **已于 2025-11-12 正式下线**，必须走三步流程：
 
@@ -461,7 +461,7 @@ scope 均为 `files:write`。已知坑：`completeUploadExternal` 返回时频�
 
 ### 5.3 Assistant Chat tab 路由陷阱
 
-cc-connect 用血标出来的坑（`platform/slack/slack.go:423-449`，注释很长）：
+cc-connect 用血标出来的坑（`platform/slack/slack.go`，注释很长）：
 
 > 若 app 开启了 Assistant/Agent 模式，用户在「Chat」tab 里打的字会带上 assistant thread 的 `ThreadTimeStamp`。**回复必须带上同一个 `thread_ts`**，否则会落到 DM root、出现在 History tab，整个对话 UX 断裂。
 
@@ -496,7 +496,7 @@ sl_<team>:<channel>[:<thread_ts>]
 
 硬约束（[CHANNEL.md](../CHANNEL.md) §5.5）：chatID 必须是 `(team, channel, thread_ts)` 的**纯函数**，不依赖 daemon 状态。
 
-**绝不自动创建任何资源（频道 / thread / canvas）并把它编进 chatID。** Telegram 早期版本因自动创建 sentinel topic 导致 chatID 取决于「nightme 有没有建过」，违反稳定性契约，2026-08 整体重写（见 `internal/channel/telegram/adapter.go:538-543`）。
+**绝不自动创建任何资源（频道 / thread / canvas）并把它编进 chatID。** Telegram 早期版本因自动创建 sentinel topic 导致 chatID 取决于「nightme 有没有建过」，违反稳定性契约，2026-08 整体重写（见 `internal/channel/telegram/adapter.go`）。
 
 ---
 
@@ -631,23 +631,23 @@ Slack 无法做到 Feishu 那种「扫码零手动」——没有第三方代注
 
 ## 7. 接入 wiring 清单
 
-runtime / gateway / chatsession / dispatcher **零改动**——这是 [CHANNEL.md](../CHANNEL.md) 承诺的 OCP 扩展点（`internal/runtime/runtime.go:39-46`）。
+runtime / gateway / chatsession / dispatcher **零改动**——这是 [CHANNEL.md](../CHANNEL.md) 承诺的 OCP 扩展点（`internal/runtime/runtime.go`）。
 
 ### 7.1 配置层
 
 | # | 文件 | 动作 |
 |---|---|---|
-| 1 | `internal/config/config.go:70` | `Config` 加 `Slack SlackConfig` |
-| 2 | `internal/config/config.go:124-127` | 照 `TelegramConfig` 加 `SlackConfig`（`BotToken` / `AppToken`） |
-| 3 | `internal/config/config.go:383-385` | `applyDefaults` |
-| 4 | `internal/config/config.go:404-411` | `applyEnvOverrides` 加 `NIGHTME_SLACK_*` |
+| 1 | `internal/config/config.go` | `Config` 加 `Slack SlackConfig` |
+| 2 | `internal/config/config.go` | 照 `TelegramConfig` 加 `SlackConfig`（`BotToken` / `AppToken`） |
+| 3 | `internal/config/config.go` | `applyDefaults` |
+| 4 | `internal/config/config.go` | `applyEnvOverrides` 加 `NIGHTME_SLACK_*` |
 | 5 | `configs/nightme.example.yaml` | 加 `slack:` 段 |
 
 ### 7.2 适配器包 `internal/channel/slack/`
 
 | 文件 | 对照 |
 |---|---|
-| `init.go` | 5 行，照 `telegram/init.go:13-17` 调 `channel.Register("slack", ...)` |
+| `init.go` | 5 行，照 `telegram/init.go` 调 `channel.Register("slack", ...)` |
 | `adapter.go` | 实现 `Channel` 十方法 + Socket Mode 事件循环 + 入站解析（`handleAppMention` / `handleMessage` / `handleSlashCommand` / `handleInteractive`） |
 | `api.go` | slack-go 的窄接口封装（见 §7.5） |
 | `send.go` | `Send` 分发表、`OnPromptEnded`、Choice 渲染、MessageState 状态机 |
@@ -666,25 +666,25 @@ runtime / gateway / chatsession / dispatcher **零改动**——这是 [CHANNEL.
 
 | # | 文件 | 动作 |
 |---|---|---|
-| 6 | `internal/login/slack/register.go` | 照 `login/telegram/register.go:20-69` |
+| 6 | `internal/login/slack/register.go` | 照 `login/telegram/register.go` |
 | 7 | `internal/login/slack/provider.go` | 实现 `login.Provider`（Name / Login / Greet） |
-| 8 | `internal/login/login.go:243-254` | 加 `case "slack":` 写凭证（当前落 `default:` 报 unknown provider） |
-| 9 | `internal/login/login.go:266-272` | 保存失败时的凭证回显分支 |
-| 10 | `internal/login/login.go:288-296` | 成功摘要分支 |
+| 8 | `internal/login/login.go` | 加 `case "slack":` 写凭证（当前落 `default:` 报 unknown provider） |
+| 9 | `internal/login/login.go` | 保存失败时的凭证回显分支 |
+| 10 | `internal/login/login.go` | 成功摘要分支 |
 
 ### 7.4 二进制装配
 
 | # | 文件 | 动作 |
 |---|---|---|
-| 11 | `cmd/nightme/root.go:16-17` | 加 `_ ".../internal/channel/slack"` |
-| 12 | `cmd/nightme/login.go:37-38` | 加 `_ ".../internal/login/slack"` |
+| 11 | `cmd/nightme/root.go` | 加 `_ ".../internal/channel/slack"` |
+| 12 | `cmd/nightme/login.go` | 加 `_ ".../internal/login/slack"` |
 
 ### 7.5 SDK 隔离（可测性硬约束）
 
 现有两个 adapter 都把外部 SDK 挡在窄接口后：
 
 - Feishu：`sendFunc` / `updateFunc` / `mergeTextFunc` 函数字段
-- Telegram：`apiClient` interface（仅 `call` + `download` 两方法，`telegram/api.go:15-33`）
+- Telegram：`apiClient` interface（仅 `call` + `download` 两方法，`telegram/api.go`）
 
 **slack-go 只允许出现在 `api.go` 一个文件里**，其余代码依赖自定义窄接口。否则 `adapter_test.go` 无法 mock。
 
@@ -756,7 +756,7 @@ Slack 的 slash command 需要在 app 设置里注册才会收到 `SlashCommand`
 
 | ID | 严重度 | 描述 | 状态（2026-09-01）|
 |---|---|---|---|
-| A | CRITICAL | `chatstore/store.go:87` 验证只接受 `tg_` / `oc_` 前缀，**不认 `sl_`**。daemon 重启加载旧 `sl_` session 时炸 → 自动备份 + 清空 chat_sessions.json | ✅ 已修（PR #316 from main）|
+| A | CRITICAL | `chatstore/store.go` 验证只接受 `tg_` / `oc_` 前缀，**不认 `sl_`**。daemon 重启加载旧 `sl_` session 时炸 → 自动备份 + 清空 chat_sessions.json | ✅ 已修（PR #316 from main）|
 | B | CRITICAL | `send.go:streamFor` 的 `anchor` 兜底用 `msg.ReplyTo`。**slash command** 时 `msg.ReplyTo = cmd.TriggerID`（不是 Slack message ts），`chat.startStream(thread_ts=TriggerID)` → `invalid_thread_ts`。**普通文本** 时 `msg.ReplyTo = user.ts`（真 ts）但代码没传 `recipient_team_id` / `recipient_user_id` → `missing_recipient_team_id` | ✅ **已修**（`handleSlashCommand` 先 `chat.postMessage` 建 parent thread + `turnStream` 透传 recipient）|
 | C | MEDIUM | `mention.go:publishInbound` 把 Slack DM 的 `thread_ts` 编进 chatID（`sl_<team>:<channel>:<greeting_ts>`），违反 §5.5 不变量 | 待修（独立 issue）|
 | D | HIGH | ~~Slack DM 客户端拦截所有 `/xxx` slash command——"not supported in threads"~~ | ✅ **已绕过**：普通消息路径不经过 Slack 的命令菜单，DM 里直接发 `/cwd` 不会被客户端拦截 |

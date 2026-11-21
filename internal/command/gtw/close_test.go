@@ -808,7 +808,7 @@ func TestRunClose_DanglingSelectedCwd(t *testing.T) {
 	}
 }
 
-// TestRunClose_EmptySelectedCwd defends the cmd.go:364-389
+// TestRunClose_EmptySelectedCwd defends the cmd.go
 // dispatcher (which doesn't preflight empty SelectedCwd before
 // invoking RunClose). Without the explicit empty-cwd branch in
 // step 0.5, ReadGTWYml("") would resolve to "./.nightme/gtw.yml"

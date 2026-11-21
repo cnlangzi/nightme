@@ -150,7 +150,7 @@ telemetry 与 provider attribution header。它只进 child 环境——用户�
 
 `--offline` 依赖前置配置不变量：用户在 NightMe 调用 Pi 前已经安装好需要使用的 extension/package。离线模式只跳过网络安装，不应把缺失 package 静默当作已加载资源。
 
-**严禁 PTY**。参照 `internal/bridge/claudecode/claudecode.go:71-130` 的真实 pipe 模式，但去掉 `--print --input-format stream-json --output-format stream-json --permission-mode ...` 那一组 flag。
+**严禁 PTY**。参照 `internal/bridge/claudecode/claudecode.go` 的真实 pipe 模式，但去掉 `--print --input-format stream-json --output-format stream-json --permission-mode ...` 那一组 flag。
 
 ### 3.2 Goroutine 拓扑
 
@@ -181,7 +181,7 @@ session.Spawn()
 | `t7'` 异常 exit / scanner 错 / pipe 断 | C: emit `EventError` → close events | 关闭 |
 | `t8` Close() | cancel ctx；stdin flush + close；SIGINT → 2s → SIGKILL；等 C | 关闭 |
 
-`internal/agentsession/readpump.go:174-203` 在 channel close 时 `as.SetExited(0)`，与 `t7`/`t7'` 路径一致。
+`internal/agentsession/readpump.go` 在 channel close 时 `as.SetExited(0)`，与 `t7`/`t7'` 路径一致。
 
 ### 3.4 Close 幂等
 
@@ -248,12 +248,12 @@ else → 走 translate goroutine
 ### 5.1 复用与差异
 
 - 现有 `internal/agent/agent.go` 的 `AgentEvent` / `EventKind` **不动**。
-- `EventDone.Reason` 字段当前**不存在**；需在 `DoneEvent` 上加一个 `Reason string` 字段（兼容旧值零），并 `EventDone{Reason:"settled"}` 标明 turn-end。`internal/agent/agent.go:204-211` 同步注释，claudecode/pty 保持默认 `Reason:""`。
+- `EventDone.Reason` 字段当前**不存在**；需在 `DoneEvent` 上加一个 `Reason string` 字段（兼容旧值零），并 `EventDone{Reason:"settled"}` 标明 turn-end。`internal/agent/agent.go` 同步注释，claudecode/pty 保持默认 `Reason:""`。
 - 现有 `internal/gateway/outbound/translate.go` 的事件翻译不需为 pi 改逻辑；`EventAgentReady` / `EventAgentResult` / `EventAgentCompaction` / `EventAgentToolStart` / `EventAgentToolEnd` / `EventAgentText` / `EventAgentPermission`（本期不通过此路径走）/ `EventAgentError` 都已存在。usage 不再是独立事件,而是 co-locate 在 `EventAgentResult.Usage` 上。
 
 ### 5.2 turn 终态语义（核心改动）
 
-在 `internal/agent/agent.go:460-466` 把 `Events()` 的注释从 "channel is closed by the implementation after EventDone or a terminal EventError" 改为：
+在 `internal/agent/agent.go` 把 `Events()` 的注释从 "channel is closed by the implementation after EventDone or a terminal EventError" 改为：
 
 并在 `internal/chatsession/readpump_pi_test.go` 加回归测试：`EventDone` 后下一个 event 仍能到达且 pump 不退出；仅在 channel close 时 `as.SetExited`。
 
@@ -341,7 +341,7 @@ pnpm add -g @earendil-works/pi-coding-agent
 
 ### 9.3 真实子进程（`internal/bridge/pi/session_unix_test.go`）
 
-`internal/testdata/pi_mock.sh`（或 `.go`）：接收 stdin 模拟 pi，发出 get_state / 多 prompt / events；`PATH` 注入法同 `claudecode_test.go:741-756`：
+`internal/testdata/pi_mock.sh`（或 `.go`）：接收 stdin 模拟 pi，发出 get_state / 多 prompt / events；`PATH` 注入法同 `claudecode_test.go`：
 
 - Start handshake、PID、workspace / env / args 正确。
 - 两轮 prompt 复用同一 PID。
@@ -410,7 +410,7 @@ Windows 上 pi 是 npm 装的 `pi.cmd`，spawn 走 `cmd.exe /d /c`，命令行�
 
 1. **Extension UI → 飞书**：在 bridge 内 keyed-by-id `uiPending map[string]chan string`；补 Feishu card action → `AgentSession.SendPermission(option)` 回环（需要 gateway 加 pending permission 列表与 ChatSession 的 lookup）。
 2. **`/abort` + `agent.Abortable`**：可选接口 `Abort(ctx context.Context) error`；ChatSession 增 `/abort` 路由，readpump 在 abort 后把当前 turn 的 userMsgIDs 标 `StateError`。
-3. **`/use pi --model=…`**：把 `/use` 多余 args 透传到 `agent.StartConfig.Args`（修 `chatsession.go:496` 写死的 `nil`），bridge 把 `--model` 转 `set_model` 命令。
+3. **`/use pi --model=…`**：把 `/use` 多余 args 透传到 `agent.StartConfig.Args`（修 `chatsession.go` 写死的 `nil`），bridge 把 `--model` 转 `set_model` 命令。
 4. **steer / follow_up**：在 `EventDone` 前若 InputBuffer 收到新 user msg，改用 `{"type":"steer","message":"..."}` 而非排队等下轮。
 5. **真实 ACP 桥抽取**：等 ACP 修掉当前 `requestAsync` 丢响应 / `tool_call_update` 误当 ToolEnd / PTY 通道问题，与 pi 一起抽公共 JSONL transport package。
 
@@ -524,7 +524,7 @@ text_delta ──> EventText ──> gateway.Translate ──> OutReply ──> 
 
 | bridge | 一个 EventText | 是否符合下游预期 |
 |---|---|---|
-| claudecode | 一个完整 content block（`stream.go:257` 遍历 `Message.Content` 逐块 emit） | ✅ |
+| claudecode | 一个完整 content block（`stream.go` 遍历 `Message.Content` 逐块 emit） | ✅ |
 | pi | 一个 token | ❌ |
 | acp | 一个 chunk | ❌（未在生产暴露） |
 | pty | 一坨裸字节 | N/A（raw 语义） |
@@ -538,11 +538,11 @@ text_delta ──> EventText ──> gateway.Translate ──> OutReply ──> 
 **(1) pi 永远不产生 OutResult。**
 
 ```go
-// 改动前 translate.go:325
+// 改动前 translate.go
 case "text_end":
     t.sawTextEnd = true      // ← 置位
 
-// 改动前 translate.go:434
+// 改动前 translate.go
 if !t.sawTextEnd {           // ← 据此把 finalText 置空
     for _, b := range msg.Content { ... }
 }
@@ -569,14 +569,14 @@ pi 的 usage 挂在同一个被丢弃的 `ResultEvent` 上，所以 **pi 每一�
 
 ### 1.1 它们也逐 token 产生内部事件
 
-cc-connect `agent/pi/session.go:778`：
+cc-connect `agent/pi/session.go`：
 
 ```go
 case "text_delta":
     evt := core.Event{Type: core.EventText, Content: delta}   // 逐 token，不聚合
 ```
 
-**差别全在下游**：cc-connect 在 `core/engine.go:4683 processInteractiveEvents` 用 turn 作用域的 `textParts` / `partialText` 累加，只在 `EventResult` 时 join 后发一次消息。openclaw 在 reply pipeline 累加（openclaw-lark 插件收到的 `onPartialReply` 已经是累积全文）。
+**差别全在下游**：cc-connect 在 `core/engine.go processInteractiveEvents` 用 turn 作用域的 `textParts` / `partialText` 累加，只在 `EventResult` 时 join 后发一次消息。openclaw 在 reply pipeline 累加（openclaw-lark 插件收到的 `onPartialReply` 已经是累积全文）。
 
 **没有任何一个把 delta 直接当成一条消息。** 我们是唯一既不在传输层聚合、消费端也没有累加器的。
 
@@ -708,14 +708,14 @@ get_state RPC（60s 超时）          ← readPump 全程在跑!
 deliverInitLocked → EventAgentReady
 ```
 
-而 `/new` **可以打断进行中的 turn**：`NewActiveAgentSessions`（`chatsession.go:1233`）没有任何 Busy/Idle 守卫，slash command 也不走 InputBuffer 排队。所以用户在长回复中途打 `/new` 时，旧 turn 仍在管道里的事件会落进**全新的** turnState：
+而 `/new` **可以打断进行中的 turn**：`NewActiveAgentSessions`（`chatsession.go`）没有任何 Busy/Idle 守卫，slash command 也不走 InputBuffer 排队。所以用户在长回复中途打 `/new` 时，旧 turn 仍在管道里的事件会落进**全新的** turnState：
 
 - `message_end` 把 usage 盖到新会话上——直接污染「上下文占用」数字，还跟 `handleNew` 紧随其后的 `ResetCumulative()` 抢先后；
 - `agent_settled` 把**已被放弃的回复**当作新会话的 result 卡片发出去。
 
 修法：`beginReset()` / `endReset()` 取代原来的 `resetTurn()`。`beginReset` 在重置 turnState 的同时打开抑制窗口，`translate()` 在窗口内直接丢弃所有事件。
 
-窗口内丢弃是**无条件正确**的：新会话还没收到任何 prompt，此刻到达的东西不可能属于它。命令响应走 response 分支，`extension_ui_request` 的自动 cancel 和畸形帧的 EventError 都在 `readPump` 里、在 `translate()` **之前**处理（`session.go:812-817`），三者都不受影响。
+窗口内丢弃是**无条件正确**的：新会话还没收到任何 prompt，此刻到达的东西不可能属于它。命令响应走 response 分支，`extension_ui_request` 的自动 cancel 和畸形帧的 EventError 都在 `readPump` 里、在 `translate()` **之前**处理（`session.go`），三者都不受影响。
 
 `endReset` 用 `defer` 挂在 `New()` 上，确保任何错误返回路径都不会把 session 永久静音。
 
@@ -864,7 +864,7 @@ turn-1 一次性拿到完整的 60 字符 canary（改动前这里是逐 token �
 | ClaudeCode | ✅ | `decodeUsage` 从 `modelUsage[<model>].contextWindow` 解出,同一函数算 pct 填 `out.ContextWindowPct` |
 | Pi | ❌ | `decodeMessageUsage` 只填 `CostUSD`,pct 字段永远 0,footer 永远省略 X% 段 |
 
-代码注释 `internal/bridge/pi/translate.go:809-811` 自己写明:
+代码注释 `internal/bridge/pi/translate.go` 自己写明:
 
 ——这是 F-52 重构时遗留的"等 pi plumbing"债务。本 PR 关闭它。
 
@@ -875,7 +875,7 @@ turn-1 一次性拿到完整的 60 字符 canary（改动前这里是逐 token �
 - **0 个 read site** (外部)
 - **0 个 write site** (外部)
 
-唯一一处写入它的代码是 `internal/bridge/claudecode/stream.go:642 decodeUsage`,但紧接的 6 行后它就被 `out.ContextWindowPct = float64(used) / float64(out.ContextWindow) * 100` 读完用了——**从没穿出 `decodeUsage` 函数边界**。它不是"传递中间值",而是"函数内用完即丢的临时存放"。
+唯一一处写入它的代码是 `internal/bridge/claudecode/stream.go decodeUsage`,但紧接的 6 行后它就被 `out.ContextWindowPct = float64(used) / float64(out.ContextWindow) * 100` 读完用了——**从没穿出 `decodeUsage` 函数边界**。它不是"传递中间值",而是"函数内用完即丢的临时存放"。
 
 → 完全改成本地变量。Struct 不需要这个字段。
 

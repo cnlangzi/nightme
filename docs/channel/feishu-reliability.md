@@ -516,7 +516,7 @@ sendContent(ctx, chatID, msgType, content, rootID)
 
 ### 0.1 SDK 默认行为(已读源码确认)
 
-`larksuite/oapi-sdk-go/v3@v3.13.0/ws/client.go:219-223`:
+`larksuite/oapi-sdk-go/v3@v3.13.0/ws/client.go`:
 
 ```go
 autoReconnect:     true,

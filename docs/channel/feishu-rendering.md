@@ -1634,7 +1634,7 @@ User msg → Receipt Card (单张)
 为避免"流式 chunk + 最终 result"在 receipt 内显示重复,`eventToEntry.EventResult` 有 dedup:
 
 ```go
-// internal/channel/feishu/receipt_entry.go:113-124 (旧)
+// internal/channel/feishu/receipt_entry.go (旧)
 if !ae.Result.IsError && lastEntry != nil &&
     lastEntry.Kind == "reply" &&
     lastEntry.Text == truncateForLog(text, perEntryMaxBytes) {
@@ -1790,7 +1790,7 @@ OutResult 经 `perEntryMaxRunes = 8000` cap(CJK 3 B/char ≈ 24 KB,远低于 30 
 //   4. Heading demotion — H1 → H4, H2-H6 → H5 (lark_md heading 范围窄)
 //   5. Code-block protect — ```block``` 在所有变换中保护不动
 //
-// 来自 cc-connect platform/feishu/feishu.go:3017-3104 (preprocessFeishuMarkdown / 
+// 来自 cc-connect platform/feishu/feishu.go (preprocessFeishuMarkdown /
 // sanitizeMarkdownURLs / stripInvalidFeishuCardImages / optimizeFeishuCardMarkdown)。
 // Nightme 不需要 cc-connect 的 `<at>` 处理(已在 Gateway 层 / mention.go 解决)。
 func SanitizeCardMarkdown(text string) string
@@ -2416,7 +2416,7 @@ User msg → Final Result Reply (F-39 独立 reply, 锚同 userMsgID)
 `eventToEntry(EventText)` 当前对所有流式 chunk 走 `truncateForLog(text, perEntryMaxBytes=600)`:
 
 ```go
-// internal/channel/feishu/receipt_entry.go:52-57 (现状)
+// internal/channel/feishu/receipt_entry.go (现状)
 case agent.EventText:
     text := strings.TrimSpace(ae.Text)
     if text == "" { return LogEntry{}, false }
@@ -3540,7 +3540,7 @@ func (a *Adapter) sendReplyInThreadAndChat(
 - `splitMarkdownForDivs` — 已在 `receipt_split.go`
 - `buildResultPayload` — F-39 已存在，三段 dispatch（text / post+md / card）
 - `sendContent` — 底层 send，复用 F-37 / F-39
-- `truncateForLog` — `receipt_event.go:176` 原始 helper；`result_render.go::truncateRunes` 是 thin alias（F-39 加的）。F-44 后统一调 `truncateForLog`，`truncateRunes` 删除（仅 OutResult 一处用，无 caller）
+- `truncateForLog` — `receipt_event.go` 原始 helper；`result_render.go::truncateRunes` 是 thin alias（F-39 加的）。F-44 后统一调 `truncateForLog`，`truncateRunes` 删除（仅 OutResult 一处用，无 caller）
 
 **新增常量**：
 - `perReplyMaxBytes = 6 * 1024`（与 `perResultMaxBytes` 同值，独立常量保证语义清晰）— 在 `result_render.go` 定义
@@ -3731,7 +3731,7 @@ func (r *MessageReceipt) evictOverflowLocked()       // ← 删除(appendEntryLo
 **连带删除**：
 - `LogEntry` struct（仅 `eventToEntry` / `appendEntryLocked` 用，0 caller）
 - `formatUsageText`（仅 `eventToEntry(EventUsage)` / test 用，0 caller）
-- `truncateForLog`（原始 helper；但 `receipt_event_test.go` 仍有测试，且 `internal/bridge/claudecode/stream.go:584` 有同名 duplicate。F-44 后 `truncateForLog` 留在 `result_render.go` 作为唯一实现；claudecode duplicate 是另一包，**不动**）
+- `truncateForLog`（原始 helper；但 `receipt_event_test.go` 仍有测试，且 `internal/bridge/claudecode/stream.go` 有同名 duplicate。F-44 后 `truncateForLog` 留在 `result_render.go` 作为唯一实现；claudecode duplicate 是另一包，**不动**）
 - `thinkingPrefix` 常量（仅 `eventToEntry(EventText)` 用，0 caller）
 - **receipt_event.go 段小计: ~210 行**（整个文件）
 
@@ -4002,17 +4002,17 @@ F-44 在 `internal/channel/feishu/receipt.go` 把 receipt 简化为只装 Task c
 ### 0.2 现状
 
 **token 数据已经到达 Gateway，但不被消费**：
-- `internal/agent/agent.go:296` `UsageEvent`（4 个 token 字段 + CostUSD）
-- `internal/bridge/claudecode/stream.go:601` `decodeUsage` 解析 Anthropic API 字段
-- `internal/gateway/outbound/translate.go:158` `Translate(EventUsage)` 产出 `OutboundMessage{Kind: OutUsage, Usage: *UsageInfo}`
+- `internal/agent/agent.go` `UsageEvent`（4 个 token 字段 + CostUSD）
+- `internal/bridge/claudecode/stream.go` `decodeUsage` 解析 Anthropic API 字段
+- `internal/gateway/outbound/translate.go` `Translate(EventUsage)` 产出 `OutboundMessage{Kind: OutUsage, Usage: *UsageInfo}`
 - `internal/channel/feishu/adapter.go::Send` case `OutUsage`：**silent drop**（F-44 §0.11 落地）
 
 **model 数据已经到达 Gateway，也不被消费**：
-- `agent.AgentConnectedEvent.Model` 字段已存在（`internal/agent/agent.go:341`）
-- `internal/gateway/outbound/translate.go:205` 拼字符串 `"session initialized (model: %s)"`，但这个字符串随 `OutInit` 一起被 silent drop
+- `agent.AgentConnectedEvent.Model` 字段已存在（`internal/agent/agent.go`）
+- `internal/gateway/outbound/translate.go` 拼字符串 `"session initialized (model: %s)"`，但这个字符串随 `OutInit` 一起被 silent drop
 
 **AgentSession wrapper 完全不感知这些**：
-- `internal/agentsession/session.go:43` `AgentSession` struct 只有 ID / ChatSessionID / Agent / Cwd / pid / status / args / 时间戳 / ExitCode / ResumeID / handle / handleEventsClosed
+- `internal/agentsession/session.go` `AgentSession` struct 只有 ID / ChatSessionID / Agent / Cwd / pid / status / args / 时间戳 / ExitCode / ResumeID / handle / handleEventsClosed
 - **没有任何 token / model / cost 字段**
 
 ### 0.3 设计迭代（两轮收紧）
@@ -5691,8 +5691,8 @@ Execute(logger)
 ### 0.2 现状
 
 **EventCompaction 已存在但 runtime 完全不消费**：
-- `internal/agent/agent.go:109` `EventCompaction` Kind 定义存在
-- `internal/agent/agent.go:374` `CompactionEvent{Subtype string}` payload
+- `internal/agent/agent.go` `EventCompaction` Kind 定义存在
+- `internal/agent/agent.go` `CompactionEvent{Subtype string}` payload
 - `internal/bridge/pi/translate.go` emit `compaction_start` + `compaction_end` 各一条
 - `internal/bridge/claudecode/stream.go` emit `compact` / `compaction` 各一条
 - `internal/gateway/outbound/translate.go` 把 `EventCompaction` translate 成 `OutCompaction`
@@ -6342,7 +6342,7 @@ type AgentEvent struct {
 
 ### 1.1 现状
 
-`internal/agent/agent.go:400` 上 `UsageEvent.ContextWindowPct` 是 bridge-local 算出来的:
+`internal/agent/agent.go` 上 `UsageEvent.ContextWindowPct` 是 bridge-local 算出来的:
 
 ```text
 pct = (input + output + cache_creation + cache_read) / contextWindow * 100
@@ -6350,8 +6350,8 @@ pct = (input + output + cache_creation + cache_read) / contextWindow * 100
 
 `contextWindow` 来自子进程 wire 字段:
 
-- ClaudeCode:`result.modelUsage[<model>].contextWindow` (`internal/bridge/claudecode/stream.go:685`)
-- Pi:`get_state.data.model.contextWindow` (`internal/bridge/pi/protocol.go:111`)
+- ClaudeCode:`result.modelUsage[<model>].contextWindow` (`internal/bridge/claudecode/stream.go`)
+- Pi:`get_state.data.model.contextWindow` (`internal/bridge/pi/protocol.go`)
 
 F-54 §1.2 明确把 `agent.UsageEvent.ContextWindow` 字段删了,理由是"全 codebase 0 read / 0 write,bridge-local 算完即丢"。但 footer 渲染时用户其实**想知道**这个分母——`pct = 101.6%` 时,如果不显示分母,用户无法判断是模型真的吃满了 200K,还是 MiniMax 这种兼容端把 1M 模型错报成 200K。
 
@@ -6369,7 +6369,7 @@ F-54 §1.2 明确把 `agent.UsageEvent.ContextWindow` 字段删了,理由是"全
 
 ### 1.3 受影响的显示格式
 
-**当前 footer 第二行**(`internal/statusbar/statusbar.go:183`):
+**当前 footer 第二行**(`internal/statusbar/statusbar.go`):
 
 ```text
 💰:「 in / out · X% · $cost 」
@@ -6406,7 +6406,7 @@ F-54 §1.2 明确把 `agent.UsageEvent.ContextWindow` 字段删了,理由是"全
 
 ### 2.2 Bridge 改动
 
-**`internal/bridge/claudecode/stream.go decodeUsage`**(`stream.go:643`):
+**`internal/bridge/claudecode/stream.go decodeUsage`**(`stream.go`):
 
 当前把 `contextWindow` 当本地变量用完即丢:
 
@@ -6428,7 +6428,7 @@ F-54 §1.2 明确把 `agent.UsageEvent.ContextWindow` 字段删了,理由是"全
      }
 ```
 
-**`internal/bridge/pi/translate.go decodeMessageUsage`**(`translate.go:837`):
+**`internal/bridge/pi/translate.go decodeMessageUsage`**(`translate.go`):
 
 ```diff
 -    if ctxWindow > 0 {
@@ -6450,7 +6450,7 @@ F-54 §1.2 明确把 `agent.UsageEvent.ContextWindow` 字段删了,理由是"全
 
 ### 2.3 Footer 渲染
 
-**`internal/statusbar/statusbar.go formatSessionFooterLines`**(`usage_footer.go:183`):
+**`internal/statusbar/statusbar.go formatSessionFooterLines`**(`usage_footer.go`):
 
 当前:
 
@@ -6468,7 +6468,7 @@ if u.ContextWindowPct > 0 {
 }
 ```
 
-**新 helper `abbrevWindow`**(同 `usage_footer.go:242 abbrevTokens` 口径):
+**新 helper `abbrevWindow`**(同 `usage_footer.go abbrevTokens` 口径):
 
 ```go
 // abbrevWindow 格式化模型上下文窗口:
@@ -6579,8 +6579,8 @@ out   = output_tokens
 ## 1. 背景:为什么从 text 切到 card
 
 当前 nightme 的 receipt 走纯文本路径(`msg_type: "text"`):
-- `internal/channel/feishu/adapter.go:890 SendMessageText` 编码为 `{"text": "..."}` 后 `sendContent` 发出
-- `internal/channel/feishu/receipt.go:515 renderLocked` 每个事件 `SendMessageText` 发一条新消息
+- `internal/channel/feishu/adapter.go SendMessageText` 编码为 `{"text": "..."}` 后 `sendContent` 发出
+- `internal/channel/feishu/receipt.go renderLocked` 每个事件 `SendMessageText` 发一条新消息
 - 没有 footer / 没有按钮 / 表格需要 markdown hack 才能近似
 
 切到 interactive card 可以:
@@ -6609,9 +6609,9 @@ Agent: main | Model: glm-5 | Provider: tencentcodingplan
   - 硬编码拼接 `Agent: <name>` + ` | Model: <model>` + ` | Provider: <provider>`
   - **不可配置**(issue #59360 指明: "There is no configuration to disable it")
 - **传入路径**:
-  - 流式卡 start/close: `reply-dispatcher.ts:393, :437` 接收/重算 `note`
+  - 流式卡 start/close: `reply-dispatcher.ts` 接收/重算 `note`
   - 结构化卡: 传入 `sendStructuredCardFeishu(..., { note: cardNote })`
-- **渲染位置**: `extensions/feishu/src/send.ts:768`
+- **渲染位置**: `extensions/feishu/src/send.ts`
   ```ts
   if (options?.note) {
     elements.push({ tag: "hr" });
@@ -6699,14 +6699,14 @@ Agent: main | Model: MiniMax-M2.7 | Provider: minimax
 
 | 文件 | 作用 |
 |---|---|
-| `internal/channel/feishu/adapter.go:890 SendMessageText` | 发 `msg_type: "text"` 消息,返回 messageID |
-| `internal/channel/feishu/adapter.go:765 buildInteractiveCard` | 已有的 OutChoice 卡片构建(permission card),仅用于 OutChoice 路径 |
-| `internal/channel/feishu/adapter.go:1066 sendContent` | 透传到 lark client,支持任意 msgType |
-| `internal/channel/feishu/receipt.go:515 renderLocked` | 每个事件 `SendMessageText` 发新消息 |
-| `internal/channel/feishu/receipt.go:455 formatLocked` | 构造 plain text body(header + entries) |
-| `internal/channel/feishu/receipt.go:188 headerLine` | 单行 header(⏳ / 🔄 / ✅) |
-| `internal/messages/outbound.go:162 OutChoice` / `:254 Card` | 已存在 interactive card 的抽象类型 |
-| `internal/messages/outbound.go:182 OutInit` | 携带 `session_id` + `model`(无 `agent_name` / `provider`) |
+| `internal/channel/feishu/adapter.go SendMessageText` | 发 `msg_type: "text"` 消息,返回 messageID |
+| `internal/channel/feishu/adapter.go buildInteractiveCard` | 已有的 OutChoice 卡片构建(permission card),仅用于 OutChoice 路径 |
+| `internal/channel/feishu/adapter.go sendContent` | 透传到 lark client,支持任意 msgType |
+| `internal/channel/feishu/receipt.go renderLocked` | 每个事件 `SendMessageText` 发新消息 |
+| `internal/channel/feishu/receipt.go formatLocked` | 构造 plain text body(header + entries) |
+| `internal/channel/feishu/receipt.go headerLine` | 单行 header(⏳ / 🔄 / ✅) |
+| `internal/messages/outbound.go OutChoice` / `:254 Card` | 已存在 interactive card 的抽象类型 |
+| `internal/messages/outbound.go OutInit` | 携带 `session_id` + `model`(无 `agent_name` / `provider`) |
 
 ### 4.2 现状(切到 card 之前)
 
@@ -6954,7 +6954,7 @@ Card 2.0 官方组件列表**没有 `tag: "note"`**。我们走 v2 风格（`<hr
 @_user_1 /cwd /tmp
 ```
 
-`ParseCommand` 要求 `strings.HasPrefix(trimmed, "/")`（`internal/gateway/parser.go:36`），这条文本会以 `@` 开头，被判为 `ErrParseFailure` → slash command **拦截失败**。
+`ParseCommand` 要求 `strings.HasPrefix(trimmed, "/")`（`internal/gateway/parser.go`），这条文本会以 `@` 开头，被判为 `ErrParseFailure` → slash command **拦截失败**。
 
 **方案**：`handleMessage` 构造 `channel.Message` 前，strip 开头的 mention 前缀。
 
@@ -6988,7 +6988,7 @@ text, hasMention := stripAndDetectMention(
 
 > **DM 不变式（锁死）**：DM 消息 `HasMention` 必须永远是 `true`。这是 F-watch 的核心不变式 ——只有这条不变式成立，gateway dispatcher 才能放心地 drop 非 mention 群消息而不误伤 DM。由 `TestComputeHasMention_DMInvariant` （adapter 层）+ `TestDispatchInbound_WatchModeGate_DMInvariant`（gateway 层）两个测试锁死，任一 regressed 都会被 CI 拦住。
 
-**bot open_id 获取**：调 SDK `a.larkClient.GetBotIdentity(ctx)`（`channel/channel.go:152`），30 分钟 TTL cache 由 SDK 内部管理。第一次消息进来 cache miss → 同步 fetch；后续命中 cache，零延迟。fetch 失败 → 记 log，`HasMention` 退化为 `false`（保守策略：DM/group 都当 group 处理）。
+**bot open_id 获取**：调 SDK `a.larkClient.GetBotIdentity(ctx)`（`channel/channel.go`），30 分钟 TTL cache 由 SDK 内部管理。第一次消息进来 cache miss → 同步 fetch；后续命中 cache，零延迟。fetch 失败 → 记 log，`HasMention` 退化为 `false`（保守策略：DM/group 都当 group 处理）。
 
 **ChatSession 侧接入**：`/watch on` / `/watch off` 控制 `ChatSession.WatchMode()`；Gateway dispatcher 拿 `Message.HasMention` + `cs.WatchMode()` 决定 drop 或 pass。Channel adapter **不读** `ChatSession` —— 详细职责划分见 `docs/SPEC.md §3.1.1`。
 
@@ -7138,7 +7138,7 @@ func (a *Adapter) UpdateMessage(ctx context.Context, messageID, content string) 
 
 | Limit | 值 | 来源 |
 |---|---|---|
-| card body 字节数 | 30 KB(Create / PATCH 相同) | SDK `resource.go:1381` 注释 |
+| card body 字节数 | 30 KB(Create / PATCH 相同) | SDK `resource.go` 注释 |
 | card elements 数 | 50 | Feishu card 文档 |
 | `lark_md` 单行 | 1000 chars | Feishu card 文档 |
 | `lark_md` 总长 | 4000 chars | Feishu card 文档 |

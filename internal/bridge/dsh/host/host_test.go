@@ -961,7 +961,7 @@ func TestRouter_DispatchNoSessionIDDropsFrame(t *testing.T) {
 		called.Add(1)
 	})
 
-	// mux-frame-level approval/asked has no sessionId (per dsh/handle_mux.go:131)
+	// mux-frame-level approval/asked has no sessionId (per dsh/handle_mux.go)
 	r.DispatchMux("approval/asked", "rpc-no-sid", json.RawMessage(`{"toolName":"Bash"}`))
 
 	if called.Load() != 0 {

@@ -192,7 +192,7 @@ func TestFlushHook_NoActiveAgentSession(t *testing.T) {
 	// the events channel (production path) and then synchronously
 	// mark Exited + Shutdown to drain the readpump / dispatcher
 	// goroutines. The readpump's late SetExited is a no-op now
-	// (pump_events.go:128 skips the cascade when the AS is already
+	// (pump_events.go skips the cascade when the AS is already
 	// in StatusExited), so no double-write or RestartFromDeath
 	// thunderstorm.
 	snapshot := cs.AgentSessionsInCwd(cs.SelectedCwd())

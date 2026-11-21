@@ -1008,7 +1008,7 @@ func parseSecondWorktree(porcelain string, underPrefix string) string {
 // Without this test, the integration of "provider populates
 // Attachments → dispatcher reads it → downloader fetches" was
 // uncovered — TestFixRemote_HappyPath uses Attachments: nil,
-// and SetIssueAttachments in fake_provider_test.go:133 had no
+// and SetIssueAttachments in fake_provider_test.go had no
 // callers. This test closes that gap.
 func TestFixRemote_WithAttachments_EndToEnd(t *testing.T) {
 	// Local HTTP server for attachment downloads. Real GitHub
@@ -1032,7 +1032,7 @@ func TestFixRemote_WithAttachments_EndToEnd(t *testing.T) {
 	// (*GitHubProvider).GetIssue would return after the body
 	// parser populated Attachments. The fake's GetIssue returns
 	// the pre-seeded Issue verbatim (defensive copy at
-	// fake_provider_test.go:308-311).
+	// fake_provider_test.go).
 	rig.prov.SetIssue(issueID, &Issue{
 		ID:    issueID,
 		Title: "Crash on login — see attached",

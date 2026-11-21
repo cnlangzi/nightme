@@ -1273,7 +1273,7 @@ nightme 已有 `/close`（清空 pool + 杀全部进程）和 `/use`（切 activ
 
 1. **轻量级 reset**：与 `/close` 区分 —— 只丢对话，不丢进程 / pool 槽位 / args。
 2. **跨 agent 协议统一**：每个 bridge 暴露 `AgentSession.New(ctx) error`，把"reset conversation"的语义收敛到一个方法。
-3. **复用现有持久化链路**：bridge reset 后 emit `EventAgentConnected`（带新 SessionID）→ 现有 `cmd/nightme/run.go:467` 路径自动捕获 + 持久化。零新增 wiring。
+3. **复用现有持久化链路**：bridge reset 后 emit `EventAgentConnected`（带新 SessionID）→ 现有 `cmd/nightme/run.go` 路径自动捕获 + 持久化。零新增 wiring。
 4. **可选精修粒度**：`/new <agent>` 让用户只 reset 一个 agent 的对话，不动其他。
 
 ---
@@ -1282,7 +1282,7 @@ nightme 已有 `/close`（清空 pool + 杀全部进程）和 `/use`（切 activ
 
 ### 3.1 `AgentSession.New` 接口
 
-新增方法到 `internal/agent/agent.go:494` 的 `AgentSession` 接口：
+新增方法到 `internal/agent/agent.go` 的 `AgentSession` 接口：
 
 ```go
 type AgentSession interface {
@@ -1300,7 +1300,7 @@ type AgentSession interface {
     //
     // After New returns, the bridge MUST emit a new EventAgentConnected carrying
     // the new SessionID; the runtime's existing eventHandler captures
-    // it via SetSessionID and persists. See cmd/nightme/run.go:467.
+    // it via SetSessionID and persists. See cmd/nightme/run.go.
     //
     // Bridge-specific implementations:
     //   - claudecode: writeLine("/clear")       // stdin slash command
@@ -1590,7 +1590,7 @@ gw.Register(gateway.Command{
 
 ### 4.3 持久化副作用
 
-`/new` 后 bridge emit `EventAgentConnected{ SessionID: newID }` → 现有 `newEventHandler`（`cmd/nightme/run.go:467`）走：
+`/new` 后 bridge emit `EventAgentConnected{ SessionID: newID }` → 现有 `newEventHandler`（`cmd/nightme/run.go`）走：
 
 ```go
 if ev.Kind == agent.EventAgentConnected && ev.Connected != nil && ev.Connected.SessionID != "" {
@@ -1733,7 +1733,7 @@ if ev.Kind == agent.EventAgentConnected && ev.Connected != nil && ev.Connected.S
 不变式（受 SPEC §1.3 约束）：
 
 - **slash command 边界**:`/close` 和 `/new` **只与 agent 进程交互**。`selectedCwd` / `selectedAgent` / `currentTurnUserMsgID` / `InputBuffer` 都不属于它们。
-- **graceful 优先**:每个 bridge 的 `Close()` 已有 stdin EOF + SIGINT + 2s grace + SIGKILL 兜底的本地 watchdog（见 `claudecode` `session.go:466-498`）。nightme 端**不二次升级**信号。
+- **graceful 优先**:每个 bridge 的 `Close()` 已有 stdin EOF + SIGINT + 2s grace + SIGKILL 兜底的本地 watchdog（见 `claudecode` `session.go`）。nightme 端**不二次升级**信号。
 - **不主动浪费资源**:`/new` **永不**为触发"reset"而 spawn 一个 dead agent。dead 状态 = 不动进程,只清 SessionID。
 - **state 同步**:disk 删除必须在进程死 *之后*,不能根据"还没发生的事"提前删。
 
@@ -1743,7 +1743,7 @@ if ev.Kind == agent.EventAgentConnected && ev.Connected != nil && ev.Connected.S
 
 ### 2.1 当前 `/close` 的三个缺陷
 
-`internal/chatsession/chatsession.go:769-796` 的 `CloseAllAgents` 注释自陈 "commit 6: this is a data-only operation — no actual signal is sent (commit 7 will wire SIGTERM)",代码也确实如此:
+`internal/chatsession/chatsession.go` 的 `CloseAllAgents` 注释自陈 "commit 6: this is a data-only operation — no actual signal is sent (commit 7 will wire SIGTERM)",代码也确实如此:
 
 ```go
 func (cs *ChatSession) KillAll() error {
@@ -1771,13 +1771,13 @@ func (cs *ChatSession) KillAll() error {
 | 问题 | 后果 |
 |------|------|
 | **没真杀** | `cs.pool = make(...)` 抛弃 Go 指针,child CLI 进程孤儿化继续跑,占用 CPU/memory/PTY |
-| **没走 bridge graceful** | `AgentSession.Close()`（`agentsession.go:449`）完全没被调;每个 bridge 自带的 graceful shutdown + SIGKILL 兜底路径浪费 |
+| **没走 bridge graceful** | `AgentSession.Close()`（`agentsession.go`）完全没被调;每个 bridge 自带的 graceful shutdown + SIGKILL 兜底路径浪费 |
 | **副作用太多** | `InputBuffer.Clear()` 丢用户消息;`agent_sessions.json` entry 在进程 *未死* 时被删;`currentTurnUserMsgID` 清零 |
 | **回复撒谎** | handler 报 "Killed 2 agent session(s)",但实际 child 没杀 |
 
 ### 2.2 当前 `/new` 的一个隐藏 bug
 
-`internal/chatsession/chatsession.go:832-936` 的 `NewActiveAgentSessions` 对 dead/detached entry **silently skip**:
+`internal/chatsession/chatsession.go` 的 `NewActiveAgentSessions` 对 dead/detached entry **silently skip**:
 
 ```go
 if as.Status() != StatusRunning {
@@ -2042,7 +2042,7 @@ func (cs *ChatSession) NewActiveAgentSessions(ctx context.Context, agentName str
 
 ### 5.4 dead/detached 分支改造
 
-`internal/chatsession/chatsession.go:850-855` 替换:
+`internal/chatsession/chatsession.go` 替换:
 
 ```go
 // 改动前

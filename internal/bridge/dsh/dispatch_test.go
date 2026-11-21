@@ -226,7 +226,7 @@ func TestIsSessionEventType_AcceptsNewTypes(t *testing.T) {
 		}
 	}
 	for _, typ := range []string{
-		"approval/requested", // legacy mux frame; see handle_mux.go:134
+		"approval/requested", // legacy mux frame; see handle_mux.go
 		"session/projection",
 		"future/event",
 	} {

@@ -91,7 +91,7 @@ func TestSessionConfig_ResumeFlagFromSessionID(t *testing.T) {
 // the front of the -c list, ahead of any per-session model /
 // effort overrides. This mirrors claudecode's --permission-mode
 // bypassPermissions default (see internal/bridge/claudecode/
-// permissions.go:65) and is the app-server analogue of
+// permissions.go) and is the app-server analogue of
 // --dangerously-bypass-approvals-and-sandbox on the `codex exec`
 // subcommand.
 func argvForSession(cfg sessionConfig) []string {

@@ -151,7 +151,7 @@ type ContentBlock struct {
 
 ## 4.5 Wire format: blocks → Claude stream-json `content[]`
 
-`AgentSession.SendBlocks(ctx, blocks, opts ...SendBlocksOption)` 的契约(`internal/agentsession/session.go:1358`):
+`AgentSession.SendBlocks(ctx, blocks, opts ...SendBlocksOption)` 的契约(`internal/agentsession/session.go`):
 
 ```text
 blocks  := [text, image, text, image, text]    // 有序 slice
@@ -180,8 +180,8 @@ claude 子进程 stdin
 
 ### 实现位置
 
-- Claude Code stream-json:`internal/bridge/claudecode/claudecode.go::SendBlocks` (line 519-622),envelope 在 line 610-621 拼装
-- Pi RPC:`internal/bridge/pi/agent.go::SendBlocks` (line 545),documented at `docs/bridge/pi.md` §6
+- Claude Code stream-json:`internal/bridge/claudecode/claudecode.go::SendBlocks`,envelope 在该函数里拼装
+- Pi RPC:`internal/bridge/pi/agent.go::SendBlocks`,documented at `docs/bridge/pi.md` §6
 - PTY fallback:每 block 一行 text(`@<path>`)或 verbatim text,blocks 之间 `\n` 拼接
 
 ### 关键不变量
@@ -189,7 +189,7 @@ claude 子进程 stdin
 1. **顺序保持**:`[]ContentBlock` 的下标 i 直接对应 `content[i]` 的 wire 位置,中间没有 reordering
 2. **空 slice → noop**:`SendBlocks(nil)` / `SendBlocks([])` 立即返回 nil,不写 envelope
 3. **失败 block 不破坏 array**:skip 的 block 不会替换为 placeholder,而是直接从 `content[]` 剔除(避免 Claude 把"半截 array"误读)
-4. **5 MiB 是 Anthropic API 硬限制**:超过会被 API 拒绝(`internal/bridge/claudecode/claudecode.go:547`),降级为文本引用
+4. **5 MiB 是 Anthropic API 硬限制**:超过会被 API 拒绝(`internal/bridge/claudecode/claudecode.go`),降级为文本引用
 
 ---
 

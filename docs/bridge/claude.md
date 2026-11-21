@@ -150,7 +150,7 @@ telemetry。只作用于 nightme spawn 的这个子进程——用户自己手�
 }}
 ```
 
-**field 映射**（来自 `internal/bridge/claudecode/claudecode.go::SendBlocks`,line 519-624）：
+**field 映射**（来自 `internal/bridge/claudecode/claudecode.go::SendBlocks`）：
 
 | `agent.ContentBlock.Type` | JSON element | 降级条件 |
 |---------------------------|--------------|----------|
@@ -163,7 +163,7 @@ telemetry。只作用于 nightme spawn 的这个子进程——用户自己手�
 1. **`content[]` 数组顺序 = `[]ContentBlock` 顺序**（i → i，1:1 映射）
 2. **空 slice → noop**：`SendBlocks([])` 立即返回，不写 envelope
 3. **失败 block omit**：`content[]` 中不会插入 placeholder（避免 Claude 把"半截 array"误读为完整 turn）
-4. **base64 转换只在 bridge 边界**：`agent.ContentBlock.Path` 永远持绝对路径，bridge 在 SendBlocks 内做 `os.ReadFile → base64.StdEncoding.EncodeToString`（`internal/bridge/claudecode/claudecode.go:626`）
+4. **base64 转换只在 bridge 边界**：`agent.ContentBlock.Path` 永远持绝对路径，bridge 在 SendBlocks 内做 `os.ReadFile → base64.StdEncoding.EncodeToString`（`internal/bridge/claudecode/claudecode.go`）
 
 **为什么不用"text 里嵌 `[img:xxx]` 占位符"**:Anthropic API `content` 字段本身就是 heterogeneous array，placeholder 方案会引入解析歧义 + 类型丢失 + 协议弱化。slice 1:1 对应 wire 数组是天然选择。详见 `docs/channel/feishu-onboarding.md` §4.5。
 
@@ -333,7 +333,7 @@ ANTHROPIC_BASE_URL=... ANTHROPIC_DEFAULT_SONNET_MODEL=... \
 
 #### 3.4.4 修复方案（落地的 `Stop()`）
 
-**核心改动**（`internal/bridge/claudecode/claudecode.go::Stop`，line 498 起）：
+**核心改动**（`internal/bridge/claudecode/claudecode.go::Stop`）：
 
 ```go
 func (d *driver) Stop(ctx context.Context) error {

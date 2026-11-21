@@ -3,7 +3,7 @@
 // Why this file exists (F-CLAUDE-PRINT-002 follow-up):
 //
 // The runtime event pipeline stamps AgentName/Model/SessionID/Usage
-// onto every OutboundMessage via internal/runtime/handler.go:184-195
+// onto every OutboundMessage via internal/runtime/handler.go
 // (per-event stamping from AgentSession state) + gateway.Translate
 // (Usage from EventAgentResult.Usage). The footer renderer in
 // internal/statusbar/statusbar.go reads those flat fields back off

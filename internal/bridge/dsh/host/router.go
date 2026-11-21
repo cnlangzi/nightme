@@ -222,7 +222,7 @@ func (r *Router) SetHostHandler(h HostFrameHandler) {
 // payload's top-level `sessionId` field (the wire discriminator for
 // all session-scoped mux methods). Frames whose payload has no
 // sessionId — currently only mux-frame-level `approval/asked`
-// per dsh/handle_mux.go:131-143 — are dropped at debug level.
+// per dsh/handle_mux.go — are dropped at debug level.
 // Subscribers receive raw payload bytes and decode per-method
 // themselves.
 func (r *Router) DispatchMux(method, rpcID string, payload json.RawMessage) {

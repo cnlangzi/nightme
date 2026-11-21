@@ -518,7 +518,7 @@ lines := statusbar.StatusBarLines(&msg) // 三行 footer,zero-omit
 
 **触发**:LLM(`claude` / `codex` / `pi`)在 worktree 里跑 `git add` / `git commit` 时反复撞到 `fatal: Unable to create '.git/index.lock': File exists`。LLM 看到 stderr 后**自行归纳**为"codegraph MCP 的子 git 进程在占着" — 这个归因是 hallucination:`pgrep -lf git` 当前查不到任何 git 进程,`codegraph` 的依赖里也没有任何 git 工具(`tree-sitter-wasms` / `web-tree-sitter` / `commander` / `sqlite` 等),其 watchdog 子进程(`PID 21396` 那条 `node -e <...>`)只 stat `.codegraph/*.db*`,**根本不接触 `.git/`**。
 
-**真凶(本仓库内已确认 call path)**:`ChatSession.GitStatus(ctx)` 每条 outbound stamp 都跑一次 `git status --porcelain --branch --untracked-files=normal`,30-event turn 触发 30 次 git 子进程。`chatsession.go:817` 给 stamp 加了 `runCtx, cancel := context.WithTimeout(ctx, 3*time.Second)`,git 未在 3s 内返回时 `exec.CommandContext` 直接 SIGKILL,**`.git/index.lock` 残留**。LLM 紧接着跑 `git add` 撞锁。
+**真凶(本仓库内已确认 call path)**:`ChatSession.GitStatus(ctx)` 每条 outbound stamp 都跑一次 `git status --porcelain --branch --untracked-files=normal`,30-event turn 触发 30 次 git 子进程。`chatsession.go` 给 stamp 加了 `runCtx, cancel := context.WithTimeout(ctx, 3*time.Second)`,git 未在 3s 内返回时 `exec.CommandContext` 直接 SIGKILL,**`.git/index.lock` 残留**。LLM 紧接着跑 `git add` 撞锁。
 
 本文档前述"性能权衡"已记 `--untracked-files=no` 与 inflight fan-in 两个 follow-up。本次补刀两件事,**只这两件**:
 
@@ -527,7 +527,7 @@ lines := statusbar.StatusBarLines(&msg) // 三行 footer,zero-omit
 
 `OutHeartbeat` 也加入跳过清单(F-63 设计的每回合心跳事件,长 turn 会有 N 个心跳 = N 次额外 `git status`,纯内部状态传播,不展示给用户,跳过最划算)。`OutMessageSettled` 是入站消息的结构化结算结果(每条入站消息一个),同样不渲染。
 
-### 改动 1 — Emitter 守卫(`internal/gateway/outbound/outbound.go:158`)
+### 改动 1 — Emitter 守卫(`internal/gateway/outbound/outbound.go`)
 
 ```go
 func (e *emitImpl) stampGitStatus(ctx context.Context, msg *messages.OutboundMessage) {
@@ -676,7 +676,7 @@ lock 路径取自 git 自己的 stderr,而不是从工作目录推算:git 报的
 | 候选 | 为何不做 |
 |---|---|
 | cwd-scoped git 单飞 | 留 v3。当前放过 `prcache` 后台刷新 + stamp 之间的并发。grace 生效后压力应显著下降 |
-| `--untracked-files=no`(`internal/command/gtw/git_status.go:117`) | 已记在本文档"性能权衡"段,非本次主题 |
+| `--untracked-files=no`(`internal/command/gtw/git_status.go`) | 已记在本文档"性能权衡"段,非本次主题 |
 | thinking 类 kind 的扩充 | `EventAgentThinking` 已存在;thinking 的路由与过滤都走 `OutboundKind.OutThinking` |
 
 ### 验证步骤
@@ -693,15 +693,15 @@ lock 路径取自 git 自己的 stderr,而不是从工作目录推算:git 报的
 ### Reference
 
 - 关联文件:
-  - `internal/gateway/outbound/outbound.go:158`(改动 1 — Emitter stamp guard)
-  - `internal/proc/exec_unix.go:83` `NewWith` + `:133` `armGraceCancel`(改动 2 — grace folded in);`SIGTERMGrace` 常量在 `internal/proc/exec_common.go:26`
-  - `internal/proc/exec_windows.go:129` `NewWith` + `:182` `armGraceCancel`(改动 2 副产物 — Windows 端最小兼容实现)
-  - `internal/command/gtw/exec.go:54` `runCmd`(grace 现在 default-on,不再单独接线)
+  - `internal/gateway/outbound/outbound.go`(改动 1 — Emitter stamp guard)
+  - `internal/proc/exec_unix.go` 的 `NewWith` + `armGraceCancel`(改动 2 — grace folded in);`SIGTERMGrace` 常量在 `internal/proc/exec_common.go`
+  - `internal/proc/exec_windows.go` 的 `NewWith` + `armGraceCancel`(改动 2 副产物 — Windows 端最小兼容实现)
+  - `internal/command/gtw/exec.go` `runCmd`(grace 现在 default-on,不再单独接线)
   - `internal/command/gtw/gitlock.go`(stale-lock 自愈:冲突解析、stale 判定、删除、单次重试)
   - `internal/command/gtw/worktree.go` `ExecGitRunner.Run`(自愈接线)+ `RefreshDefaultBranch`(未完成 rebase 的守卫)
   - `internal/command/wiki/git.go`(`/wiki` 的 git 调用迁到 `internal/proc`,带 context 超时)
-  - `internal/messages/outbound.go:13`OutboundKind 枚举(本次涉及 OutToolStart/OutToolEnd/OutThinking/OutHeartbeat/OutMessageSettled)
-  - `internal/agent/agent.go:102` EventKind 枚举(本次**不**改;`EventAgentThinking` 已存在)
+  - `internal/messages/outbound.go` 的 OutboundKind 枚举(本次涉及 OutToolStart/OutToolEnd/OutThinking/OutHeartbeat/OutMessageSettled)
+  - `internal/agent/agent.go` 的 EventKind 枚举(本次**不**改;`EventAgentThinking` 已存在)
   - `cmd/nightme/kill.go`(参考 pattern,SIGTERM → grace → SIGKILL)
 
 ### Windows caveat(fix-git-lock-file 2026-08-29 + 2026-09-01)

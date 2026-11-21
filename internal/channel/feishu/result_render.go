@@ -27,7 +27,7 @@
 // cap would otherwise return error 11310.
 //
 // envelopeBudget is a defensive ceiling just below the Feishu 30 KB card body
-// envelope (larkim NewPatchMessageReqBody etc. SDK resource.go:1381). OutResult
+// envelope (larkim NewPatchMessageReqBody etc. SDK resource.go). OutResult
 // is naturally ≤ ~26 KB after the perResultMaxBytes cap; this is a guard for
 // adversarial inputs, not a hot path.
 //
@@ -53,7 +53,7 @@ import (
 const (
 	// resultCardTableLimit is the Feishu Card 2.0 hard cap on table components
 	// (5 tables). Beyond this we fall back to MsgTypePost which has no such
-	// limit. Mirrors cc-connect `feishu.go:2980` maxCardTables.
+	// limit. Mirrors cc-connect `feishu.go` maxCardTables.
 	resultCardTableLimit = 5
 
 	// resultCardEnvelopeBudget is the safe upper byte size for a Card 2.0
@@ -81,7 +81,7 @@ const (
 // a run of consecutive lines where each line (trimmed) starts and ends with
 // `|`. Returns the count of distinct table groups.
 //
-// Mirrors cc-connect `feishu.go:2982-2998`.
+// Mirrors cc-connect `feishu.go`.
 func countMarkdownTables(s string) int {
 	if !strings.Contains(s, "|") {
 		return 0
@@ -214,7 +214,7 @@ func tableDelimiterRow(line string) bool {
 //
 // Used as fallback when Card 2.0's 5-table hard limit kicks in.
 //
-// Mirrors cc-connect `feishu.go:3000-3015` buildPostMdJSON.
+// Mirrors cc-connect `feishu.go` buildPostMdJSON.
 func buildPostMdJSON(content string) (string, error) {
 	post := map[string]any{
 		"zh_cn": map[string]any{
@@ -350,7 +350,7 @@ func cardFooterElements(footerLines []string) []map[string]any {
 
 // buildResultPayload selects the rendering surface and returns msg_type +
 // body bytes ready to hand to SDK. Mirrors cc-connect `buildReplyContent`
-// (lines 2941-2960). Caller (sendResultAsReply) is responsible for
+// (). Caller (sendResultAsReply) is responsible for
 // the 30 KB envelope guard.
 //
 // F-46: footerLines is plumbed through to buildResultCardJSON so
@@ -387,7 +387,6 @@ func buildResultPayload(sanitized string, footerLines []string) (msgType string,
 // sanitizeMarkdownURLs, preprocessFeishuMarkdown, stripInvalidFeishuCardImages,
 // optimizeFeishuCardMarkdown, protectFencedCodeBlocks / restoreFencedCodeBlocks).
 // See https://github.com/chenhg5/cc-connect/blob/main/platform/feishu/feishu.go
-// (lines 3017-3104, 5978-6075).
 //
 // Pipeline order:
 //   1. URL sanitize     — non-HTTP(S) link → plain text (avoids 230001 invalid href)
@@ -435,7 +434,7 @@ var mdLinkRe = regexp.MustCompile(`\[([^\]]*)\]\(([^)]+)\)`)
 // Image references `![alt](key)` are skipped — those have a separate
 // `stripInvalidFeishuCardImages` pass.
 //
-// Mirrors cc-connect `feishu.go:3122-3148` sanitizeMarkdownURLs.
+// Mirrors cc-connect `feishu.go` sanitizeMarkdownURLs.
 func sanitizeMarkdownURLs(md string) string {
 	var b strings.Builder
 	last := 0
@@ -469,7 +468,7 @@ func sanitizeMarkdownURLs(md string) string {
 // Currently only http:// and https:// pass; Feishu rejects other schemes
 // with error code 230001 ("invalid href").
 //
-// Mirrors cc-connect `feishu.go:3114-3118`.
+// Mirrors cc-connect `feishu.go`.
 func isValidFeishuHref(u string) bool {
 	return strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://")
 }
@@ -520,7 +519,7 @@ var feishuCardImagePattern = regexp.MustCompile(`!\[([^\]]*)\]\(([^)]+)\)`)
 // Feishu card markdown supports `![alt](img_xxx)` as inline image rendering;
 // other refs would render as broken or be rejected by the API.
 //
-// Mirrors cc-connect `feishu.go:5993-6004` stripInvalidFeishuCardImages.
+// Mirrors cc-connect `feishu.go` stripInvalidFeishuCardImages.
 func stripInvalidFeishuCardImages(text string) string {
 	if !strings.Contains(text, "![") {
 		return text
@@ -546,7 +545,7 @@ const fencedCodeBlockPlaceholder = "\x00NM_FEISHU_CODE_BLOCK_%d\x00"
 // restored via restoreFencedCodeBlocks.
 //
 // Tolerates unclosed fences (returns the rest as-is) — same behavior as
-// cc-connect `feishu.go:6014-6042`.
+// cc-connect `feishu.go`.
 func protectFencedCodeBlocks(text string) (string, []string) {
 	var blocks []string
 	var b strings.Builder
@@ -599,7 +598,7 @@ var (
 // Code blocks are protected via placeholders before transforms and restored
 // after, so ```foo``` / ``` # not a heading ``` is never demoted.
 //
-// Mirrors cc-connect `feishu.go:6045-6063` optimizeFeishuCardMarkdown.
+// Mirrors cc-connect `feishu.go` optimizeFeishuCardMarkdown.
 func optimizeFeishuCardMarkdown(text string) string {
 	protected, blocks := protectFencedCodeBlocks(text)
 	if h1to3TriggerRe.MatchString(protected) {

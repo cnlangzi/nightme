@@ -14,7 +14,7 @@
 // This is the "治根" of a class of bugs where the bridge silently
 // died mid-turn and the chat user had no visibility. Before this
 // struct existed, the same info was either dropped (Debug-gated
-// dLog) or stuck in the nightme.log at line 152 with the misleading
+// dLog) or stuck in the nightme.log with the misleading
 // "claude process exited" hardcoded message. With Diagnostic attached
 // to EventAgentError, every layer of the pipeline (gateway translate,
 // channel renderer, recovery policy) can act on it without having to

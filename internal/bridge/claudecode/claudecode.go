@@ -275,7 +275,7 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	// same channel the bridge consumed from.
 	//
 	// The (a) tool_use path uses armPendingAsk(block.ID, multi, false).
-	// The (b) text-fallback path lives in pumpStream (stream.go:322)
+	// The (b) text-fallback path lives in pumpStream (stream.go)
 	// and uses armPendingAsk("", q.MultiSelect, true); same helper,
 	// different origin flag. See docs/bridge/claude.md §5.5.
 	handler := func(block contentBlock, events chan<- agent.AgentEvent, logger *slog.Logger) {
@@ -945,7 +945,7 @@ func (d *driver) writeLine(data []byte) error {
 // guards d.closed — if the bridge dies mid-pump and lifecycle has
 // already closed d.events, the goroutine drops the event instead
 // of panicking on send-to-closed-channel. Mirrors the panicDeliver
-// pattern at lines 311-322.
+// pattern.
 //
 // textFallback distinguishes the two interception paths (see
 // pendingAsk doc). The wire shape of the eventual reply is decided

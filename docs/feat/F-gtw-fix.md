@@ -838,7 +838,7 @@ label catalog 检查在 worktree 创建之前跑，所以 `rollbackLabelStep` �
 
 共享解析器 `parseMarkdownAttachmentLinks` + 共享解析器输出到 `IssueAttachment` 的 helper `attachmentsFromHints` 都落在 `attachments.go`（与 `mimeFromExt` 同侧，util 一侧），跟 per-provider method 形成「util 共用 / strategy per-provider」的二分。
 
-`Issue.Attachments` 文档（`provider.go:43-53`）同步重写：之前声称 GitLab 有 native `attachment_links` API，但代码里没有任何这条路径；现在文档与代码一致——v1 GitLab 跟 GitHub 共享 body 解析，未来 native API 路径在 `(*GitLabProvider).attachmentsFromBody` 的 TODO 里追。
+`Issue.Attachments` 文档（`provider.go`）同步重写：之前声称 GitLab 有 native `attachment_links` API，但代码里没有任何这条路径；现在文档与代码一致——v1 GitLab 跟 GitHub 共享 body 解析，未来 native API 路径在 `(*GitLabProvider).attachmentsFromBody` 的 TODO 里追。
 
 为什么**不**用「`ListIssueAttachments` 独立接口方法」方案（issue #294 提议）：
 

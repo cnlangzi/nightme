@@ -98,7 +98,7 @@ type Options struct {
 // gateway/outbound. Without this move, adding gateway/outbound
 // → chatsession dependency (for the policy move) would re-open
 // the import cycle that the original closure-based wiring
-// worked around (see outbound.go:73-75 historical comment).
+// worked around (see outbound.go historical comment).
 // The implementation `emitImpl` stays here; only the interface
 // declaration moved.
 

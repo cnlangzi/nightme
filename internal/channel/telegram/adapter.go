@@ -1063,7 +1063,7 @@ type downloadResult struct {
 
 // downloadRetryConfig controls the outer ladder wrapping
 // downloadAttachments. Matches feishu's downloadRetryConfig in
-// attachment.go:402 — 3 attempts, 0s / 5s / 15s backoff. The
+// attachment.go — 3 attempts, 0s / 5s / 15s backoff. The
 // inner per-attachment retry (downloadOneWithRetry in feishu,
 // downloadAttachment's single-shot here — kept simple for now)
 // catches transport blips; this outer ladder catches longer

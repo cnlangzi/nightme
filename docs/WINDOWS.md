@@ -454,7 +454,7 @@ err := cmd.Start() // ✅ nil
   - 新增 §0.0 七条跨平台经验规则（按重要度排序）
   - 新增 §0.1 当前 Windows 13 个测试失败的根因分类（pre-existing，不在 fix-stop scope）
   - 新增 §0.1.1 cmd.Dir 契约测试详细案例（为什么用 sentinel file 而不是 pwd）
-  - §0 一句话速查新增第 5 行（MSYS getcwd 翻译）
+  - §0 一句话速查新增 MSYS getcwd 翻译一条
   - 包含 fix-stop 的 cmd.Dir / MSYS / platform-split 修复
 
 - 2026-08-13：建立本文档

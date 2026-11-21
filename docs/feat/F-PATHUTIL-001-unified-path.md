@@ -26,14 +26,14 @@
 | 步骤 | 路径来源 | 形态 (Windows) |
 |------|---------|---------------|
 | 1. 用户 `/cwd F:\foo` | `cwd/cmd.go:Handle` | 经 `path_windows.go::resolvePath` → **`filepath.Clean` + `filepath.Abs`** → 反斜杠 |
-| 2. `cs.SetSelectedCwd` 存入 | `chatsession/chatsession.go:468` | 原样存(已是反斜杠) |
-| 3. `gtw/fix.go::RunFix` 调 `RepoRoot` | `worktree.go:48` | 跑 `git rev-parse --show-toplevel` → **git for Windows 原生返回 POSIX 风格(前斜杠)** |
-| 4. `WorktreePath(repoRoot, slug)` | `slug.go:168` | `filepath.Clean` + `filepath.Join` → 反斜杠 |
-| 5. `WriteGTWYml` 序列化 | `persist.go:212` | **原样写入,无规范化** |
+| 2. `cs.SetSelectedCwd` 存入 | `chatsession/chatsession.go` | 原样存(已是反斜杠) |
+| 3. `gtw/fix.go::RunFix` 调 `RepoRoot` | `worktree.go` | 跑 `git rev-parse --show-toplevel` → **git for Windows 原生返回 POSIX 风格(前斜杠)** |
+| 4. `WorktreePath(repoRoot, slug)` | `slug.go` | `filepath.Clean` + `filepath.Join` → 反斜杠 |
+| 5. `WriteGTWYml` 序列化 | `persist.go` | **原样写入,无规范化** |
 | 6. yml 在磁盘上 | (文件) | 可能前斜杠 / 反斜杠(取决于 step 4 是否完全覆盖) |
-| 7. `ReadGTWYml` 读回 | `persist.go:249` | **原样读回,无规范化** |
-| 8. `RunClose` 传给 `WorktreeRemove` | `close.go:239` | 原样透传 |
-| 9. `WorktreeRemove` 传给 git argv | `worktree.go:378` | 原样透传 |
+| 7. `ReadGTWYml` 读回 | `persist.go` | **原样读回,无规范化** |
+| 8. `RunClose` 传给 `WorktreeRemove` | `close.go` | 原样透传 |
+| 9. `WorktreeRemove` 传给 git argv | `worktree.go` | 原样透传 |
 | 10. git 内部 Win32 syscall | (git 内部) | **可能把 `F:/foo` 转成 `F:\foo` 时失败** |
 
 **关键缺陷**:
@@ -121,8 +121,8 @@ func NormalizeForGit(p string) (string, error)
 // 因为后者在 Windows 上大小写敏感,会把 `C:\Foo` 和 `c:\foo` 判成不等。
 //
 // 已知可立即受益的调用点:
-//   - gtw/fix.go:344   `existingPath != "" && filepath.Clean(existingPath) == filepath.Clean(worktreePath)`
-//   - gtw/fix.go:560   同上
+//   - gtw/fix.go   `existingPath != "" && filepath.Clean(existingPath) == filepath.Clean(worktreePath)`
+//   - gtw/fix.go   同上
 //   - gtw/close.go     stat / slot 比对
 func Equal(a, b string) bool
 ```
@@ -217,7 +217,7 @@ internal/pathutil/path_windows_test.go  # 24 个测试
 
 ### 5.2 第二阶段:gtw 调用点切换 ✅
 
-| 文件:行 | 当前 | 改后 |
+| 文件:符号 | 当前 | 改后 |
 |---------|------|------|
 | `worktree.go:WorktreeRemove` | `args = append(args, path)` | `np, err := pathutil.NormalizeForGit(path); if err != nil { return WorktreeError }; path = np; args = append(args, path)` |
 | `worktree.go:WorktreeAdd` | 同上 | 同上(同样有 NormalizeForGit 错误处理) |
@@ -242,7 +242,7 @@ internal/pathutil/path_windows_test.go  # 24 个测试
 
 cwd 包原本自己实现 `isWindowsDriveRel` / `htmlLinkTag` 正则 / IME 映射 / root-relative 驱动器补全,这些全部迁到 pathutil:
 
-| 文件:行 | 当前 | 改后 |
+| 文件:符号 | 当前 | 改后 |
 |---------|------|------|
 | `cwd/normalize.go::normalizePathInput` | 自有 IME 映射表 | `pathutil.NormalizeInput` 一行 delegate |
 | `cwd/normalize.go::stripIMRichText` | 自有 `<a>` 标签正则 | 删除(pathutil `NormalizeIMRichText` 接管) |

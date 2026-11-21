@@ -747,7 +747,7 @@ func (a *Adapter) Incoming() <-chan channel.Message { return a.incoming }
 //	                       /gtw receipt headers now show "🤖: agent ·
 //	                       model · session").
 //	OutUsage             → deprecated kind; usage is now co-located
-//	                       on OutResult.Usage (translate.go:280-283)
+//	                       on OutResult.Usage (translate.go)
 //	                       and surfaces through OutResult's
 //	                       sendResultAsReply footer path.
 //
@@ -2147,7 +2147,7 @@ func (a *Adapter) sendRawOutText(ctx context.Context, chatID, text string) error
 //
 // RATE-LIMIT / RETRY layering:
 //   - layer 1: F-35 global limiter (`a.limiter.Wait`) inside ReplyInChat
-//     (reply.go:205) and inside sendContent's retry wrap; prevents the
+//     (reply.go) and inside sendContent's retry wrap; prevents the
 //     SDK hitting Feishu's 230001 / 230020 throttle codes.
 //   - layer 2: F-36 transient retry wraps sendContent; transient network
 //     errors get exponential backoff. Final hit returns to caller for log.
@@ -4206,7 +4206,7 @@ func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageRece
 	// F-61: wrap in downloadWithRetry — outer ladder (3 attempts,
 	// 0/5s/15s backoff) handles transient infra failures. Inner
 	// per-attachment retry lives in downloadOneWithRetry
-	// (attachment.go:397). Only after both layers exhaust do we
+	// (attachment.go). Only after both layers exhaust do we
 	// declare AllFailed and degrade to text-only publish.
 	if len(attachments) > 0 {
 		result := a.downloadWithRetry(ctx, messageID, attachments, chatID)

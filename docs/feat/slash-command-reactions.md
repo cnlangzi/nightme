@@ -143,7 +143,7 @@ routes the two events to different reaction targets, but the emoji
 glyphs match — the user sees a consistent ✅ across surfaces.
 
 The existing `case messages.OutMessageState` handler in feishu's
-`Send` switch (line 1264 in `adapter.go`) needs no new branches:
+`Send` switch ( in `adapter.go`) needs no new branches:
 `mapStateToFeishuEmoji` returning `"DONE"` flows through the same
 LRU dedup + `AddReaction` + failure-revert pipeline that
 `"OneSecond"` and `"OnIt"` already use.
@@ -271,7 +271,7 @@ keep `internal/shell` from importing `internal/chatsession` /
 `internal/gateway/outbound`.
 
 The decoupling never paid off: the only call site was
-`cmd/nightme/run.go:480` (the production wire-up) and two test
+`cmd/nightme/run.go` (the production wire-up) and two test
 wirings. There was no third-party `internal/shell` consumer that
 needed the package-import isolation.
 
@@ -320,4 +320,4 @@ set:
 4. ✅ Remove manual emit in `/steer` — `internal/command/steer/cmd.go`
 5. ✅ Tests — `internal/command/commander_test.go`, `internal/agent/message_state_test.go`, `internal/channel/feishu/adapter_message_state_test.go`
 6. ✅ Update F-53 §8 row — see [F-53-message-prompt-lifecycle.md](F-53-message-prompt-lifecycle.md) follow-up note
-7. ✅ Shell ⏳→✅ (F-XX Sender→Emitter refactor) — `internal/shell/dispatch.go` (drop `Sender`/`Outbound`/bridge, take `outbound.Emitter` + `cs` directly), `internal/gateway/inbound/shell.go` + `inbound.go` updated to new shape, `internal/gateway/inbound/teststubs/teststubs.go` + `internal/gateway/dispatch_slash_reply_test.go` stubs updated, `cmd/nightme/run.go:480` wires `mgr.Emitter()`.
+7. ✅ Shell ⏳→✅ (F-XX Sender→Emitter refactor) — `internal/shell/dispatch.go` (drop `Sender`/`Outbound`/bridge, take `outbound.Emitter` + `cs` directly), `internal/gateway/inbound/shell.go` + `inbound.go` updated to new shape, `internal/gateway/inbound/teststubs/teststubs.go` + `internal/gateway/dispatch_slash_reply_test.go` stubs updated, `cmd/nightme/run.go` wires `mgr.Emitter()`.

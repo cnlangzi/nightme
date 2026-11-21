@@ -423,7 +423,7 @@ func (r *MessageReceipt) StampFooterLines(ctx context.Context, footerLines []str
 	// P1 follow-up: hold r.mu through renderLocked. renderLocked
 	// reads entries / tasks / footerLines / heartbeat / cardMsgID
 	// / lastBody / lastBodyPatch (see its docstring at
-	// receipt.go:628-629 and the buildReceiptCard call inside).
+	// receipt.go and the buildReceiptCard call inside).
 	// Releasing the lock between the footerLines update and the
 	// render lets a concurrent goroutine — e.g. the runtime
 	// dispatching an OutReply AppendEntryWithFooter while the

@@ -191,7 +191,7 @@ d.modelMu.Unlock()
 
 ### 3.4 runtime 端的配合
 
-`internal/runtime/handler.go:131` 已放开 SetModel 捕获条件：
+`internal/runtime/handler.go` 已放开 SetModel 捕获条件：
 
 ```go
 if ev.Model != "" {

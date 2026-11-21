@@ -342,6 +342,21 @@ func Translate(chatID string, ev agent.AgentEvent) (messages.OutboundMessage, bo
 			Kind:     messages.OutTaskUpdate,
 			TaskList: ev.TaskList,
 		}, true
+
+	case agent.EventAgentSubagents:
+		// The session's background-task table: the background
+		// subagents the agent is running. The payload is the whole
+		// table, so the Channel renders the running count from one
+		// snapshot. An empty table is a valid "nothing is running"
+		// signal — the Channel drops its running-subagent line.
+		if ev.Subagents == nil {
+			return messages.OutboundMessage{}, false
+		}
+		return messages.OutboundMessage{
+			ChatID:    chatID,
+			Kind:      messages.OutSubagents,
+			Subagents: ev.Subagents,
+		}, true
 	}
 	return messages.OutboundMessage{}, false
 }

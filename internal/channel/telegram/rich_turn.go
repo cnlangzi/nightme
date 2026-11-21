@@ -88,6 +88,11 @@ type richTurn struct {
 	// as chain.chunks[0].taskList.
 	taskList []agent.AgentTaskItem
 
+	// subagents is the most recent background-task table of the
+	// session: the background subagents the agent is running. Only
+	// the number of running ones reaches the card.
+	subagents []agent.SubagentTask
+
 	// footer is the most recent StatusBar footer. Set by footer-
 	// bearing events; nil until first such event.
 	footer []string
@@ -326,6 +331,18 @@ func (a *Adapter) renderRichTurnBlocksLocked(turn *richTurn) (string, error) {
 		})
 	}
 
+	// Background subagents (when present): a status line under the
+	// heartbeat header. It shows the number of running background
+	// subagents while at least one runs and is absent when the last
+	// one finished — the table arrives with every change, so an empty
+	// table is the signal to drop the line.
+	if line := agent.SubagentRunningLine(turn.subagents); line != "" {
+		blocks = append(blocks, map[string]any{
+			"type": "paragraph",
+			"text": line,
+		})
+	}
+
 	// Task list (when present): emit a heading + native list so
 	// the rich renderer can use Telegram's first-class list blocks.
 	// The heading is a small but critical visual anchor — without
@@ -406,6 +423,41 @@ func (a *Adapter) setRichTurnTaskList(
 	if footer != nil {
 		turn.footer = footer
 	}
+	turn.hasContent = true
+	turn.dirty = true
+	msgID := ""
+	if turn.messageID != 0 {
+		msgID = strconv.FormatInt(turn.messageID, 10)
+	}
+	turn.mu.Unlock()
+	a.scheduleRichTurnFlush(turn)
+	return msgID
+}
+
+// setRichTurnSubagents replaces the turn's view of the session's
+// background-task table. The table is the CLI's own state, so the
+// turn shows the number of running background subagents while at
+// least one runs and drops the line when the last one finished.
+func (a *Adapter) setRichTurnSubagents(
+	chatID string,
+	topicID int,
+	userMessageID int,
+	tasks []agent.SubagentTask,
+) string {
+	turn := a.richTurns.getOrCreate(chatID, topicID, userMessageID)
+	turn.mu.Lock()
+	if turn.messageID == 0 {
+		// The line is content: a turn that has no card yet gets one,
+		// the way a reply opens a card of its own.
+		if err := a.sendRichTurnColdCreate(turn); err != nil {
+			turn.mu.Unlock()
+			a.logger.Warn("telegram: rich turn cold-create failed",
+				"chat_id", chatID,
+				"err", err)
+			return ""
+		}
+	}
+	turn.subagents = tasks
 	turn.hasContent = true
 	turn.dirty = true
 	msgID := ""

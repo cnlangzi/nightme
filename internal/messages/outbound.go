@@ -159,6 +159,17 @@ const (
 	// Channels drop it silently — it exists for programs that
 	// drive nightme (internal/me), not for humans.
 	OutMessageSettled
+
+	// OutSubagents carries the session's live background-task table:
+	// the background subagents the agent is running. The payload
+	// holds the whole table, so the receiving Channel renders the
+	// count of running subagents from one snapshot instead of
+	// tracking deltas.
+	//
+	// Emitted whenever the table changes — including when the last
+	// background task finished, so the Channel drops its
+	// running-subagent line.
+	OutSubagents
 )
 
 // String renders OutboundKind for log lines.
@@ -198,6 +209,8 @@ func (k OutboundKind) String() string {
 		return "prompt_ended"
 	case OutMessageSettled:
 		return "message_settled"
+	case OutSubagents:
+		return "subagents"
 	}
 	return "unknown"
 }
@@ -236,6 +249,11 @@ type OutboundMessage struct {
 	// current task list; an Items slice with length 0 is a valid
 	// "clear the checklist" signal. nil for other Kinds.
 	TaskList *agent.AgentTaskListEvent
+	// Subagents carries the typed payload for OutSubagents: the
+	// session's whole background-task table. An empty Tasks slice is
+	// a valid "no background task is running" signal. nil for other
+	// Kinds.
+	Subagents *agent.SubagentEvent
 	// Result carries the typed payload for OutResult. nil for
 	// other Kinds. Gateway populates from AgentEvent.Result; the
 	// channel reads directly instead of round-tripping the

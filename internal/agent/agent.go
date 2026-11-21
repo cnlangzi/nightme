@@ -175,6 +175,13 @@ const (
 	// Feishu answering; this event only PATCHes the outstanding
 	// Action Needed card so it does not linger.
 	EventAgentPermissionSettled
+
+	// EventAgentSubagents carries the session's live background-task
+	// table — the background subagents the agent CLI is running. The
+	// payload is the whole table, not a delta, so a consumer replaces
+	// its view wholesale. Emitted whenever the table changes; it says
+	// nothing about the turn's own progress.
+	EventAgentSubagents
 )
 
 // String renders an EventKind for logs.
@@ -204,6 +211,8 @@ func (k EventKind) String() string {
 		return "task_update"
 	case EventAgentPermissionSettled:
 		return "permission_settled"
+	case EventAgentSubagents:
+		return "subagents"
 	default:
 		return fmt.Sprintf("event(%d)", int(k))
 	}
@@ -570,6 +579,7 @@ type AgentTaskListEvent struct {
 //	EventAgentTaskCreate -> TaskList
 //	EventAgentTaskUpdate -> TaskList
 //	EventAgentPermissionSettled -> PermissionSettled
+//	EventAgentSubagents   -> Subagents
 //
 // Bridge-side session context fields (SessionID / Model / AgentName /
 // Workspace / Branch) are stamped on every event by the bridge's
@@ -627,6 +637,11 @@ type AgentEvent struct {
 
 	// PermissionSettled is the payload for EventAgentPermissionSettled.
 	PermissionSettled *AgentPermissionSettled
+
+	// Subagents is the payload for EventAgentSubagents. It carries the
+	// whole background-task table of the session (not a delta) so
+	// consumers can replace their view wholesale.
+	Subagents *SubagentEvent
 
 	// Diagnostic carries structured info about a bridge child
 	// process exit when Kind == EventAgentError. Populated by the

@@ -154,6 +154,12 @@ type MessageReceipt struct {
 	// element list (split by divTextCharLimit).
 	tasks []agent.AgentTaskItem
 
+	// subagents is the latest background-task table of the session:
+	// the background subagents the agent is running. The bridge sends
+	// the whole table, so we copy it verbatim on every event. Only the
+	// number of running subagents reaches the card.
+	subagents []agent.SubagentTask
+
 	// footerLines (F-45) is the rendered StatusBar footer
 	// split into one entry per output line. Each entry maps to
 	// one <plain_text> element inside the bottom-of-card <div>
@@ -297,6 +303,27 @@ func (r *MessageReceipt) SetTaskListWithFooter(ctx context.Context, list *agent.
 	// transitions to chatsession.PromptDone in Phase 0 — that value is reserved
 	// for a future UX PR that surfaces terminal state on the card
 	// (see docs/feat/F-53-message-prompt-lifecycle.md §7).
+	return r.render(ctx)
+}
+
+// SetSubagents replaces the receipt's view of the session's
+// background-task table and re-renders the card. The table is the
+// CLI's own state, so the card shows the number of running background
+// subagents while at least one runs and drops the line when the last
+// one finished.
+func (r *MessageReceipt) SetSubagents(ctx context.Context, sub *agent.SubagentEvent) error {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	if sub == nil {
+		r.subagents = nil
+	} else {
+		items := make([]agent.SubagentTask, len(sub.Tasks))
+		copy(items, sub.Tasks)
+		r.subagents = items
+	}
+	r.mu.Unlock()
 	return r.render(ctx)
 }
 
@@ -592,7 +619,7 @@ func (r *MessageReceipt) AppendEntryWithFooter(ctx context.Context, entry LogEnt
 	// so a subsequent successful append is a no-op (buildReceiptCard
 	// returns the same body, render skips the PATCH).
 	//
-	// buildReceiptCard takes (entries, tasks, footerLines) directly
+	// buildReceiptCard takes the receipt's snapshot pieces directly
 	// — no struct copy — so we don't bypass the r.mu lock
 	// semantics. The proposed slice is a fresh slice that we only
 	// commit to r.entries AFTER the overflow check passes.
@@ -600,7 +627,7 @@ func (r *MessageReceipt) AppendEntryWithFooter(ctx context.Context, entry LogEnt
 	if len(footerLines) > 0 {
 		r.footerLines = footerLines
 	}
-	body, elementCount, err := buildReceiptCard(proposed, r.tasks, r.footerLines, &r.heartbeat)
+	body, elementCount, err := buildReceiptCard(proposed, r.tasks, r.subagents, r.footerLines, &r.heartbeat)
 	if err != nil {
 		r.mu.Unlock()
 		return fmt.Errorf("feishu receipt: build card for overflow check: %w", err)
@@ -724,9 +751,9 @@ func (r *MessageReceipt) render(ctx context.Context) error {
 		}
 
 		// Build the card body. buildReceiptCard is in adapter.go.
-		// The four inputs are read in the same critical section, so one
+		// The inputs are read in the same critical section, so one
 		// render sees one self-consistent snapshot.
-		body, _, err := buildReceiptCard(r.entries, r.tasks, r.footerLines, &r.heartbeat)
+		body, _, err := buildReceiptCard(r.entries, r.tasks, r.subagents, r.footerLines, &r.heartbeat)
 		if err != nil {
 			state := r.promptState
 			r.mu.Unlock()
@@ -787,7 +814,7 @@ func (r *MessageReceipt) render(ctx context.Context) error {
 		r.mu.Lock()
 		// Rebuild from the current state: a PATCH must never ship a body
 		// older than what the card already shows.
-		body, _, err = buildReceiptCard(r.entries, r.tasks, r.footerLines, &r.heartbeat)
+		body, _, err = buildReceiptCard(r.entries, r.tasks, r.subagents, r.footerLines, &r.heartbeat)
 		if err != nil {
 			state := r.promptState
 			r.mu.Unlock()

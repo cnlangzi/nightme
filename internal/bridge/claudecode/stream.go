@@ -100,6 +100,14 @@ type streamState struct {
 	// user turn add up — without this the receipt footer would
 	// report the last turn only.
 	heldUsage *agent.UsageInfo
+
+	// bgTasks is the session's background-task table: the background
+	// subagents the CLI is running. The CLI publishes the whole set
+	// in one frame and the per-task frames as deltas, so the table is
+	// kept here and reported upward as a whole (see bgtask.go).
+	// Map key is the CLI's task id.
+	bgTasks     map[string]bgTask
+	bgTaskOrder []string
 }
 
 // noteBackgroundStart records a background agent the CLI started.
@@ -294,6 +302,19 @@ type streamEvent struct {
 	RunID          string `json:"run_id,omitempty"`
 	IsBackgrounded bool   `json:"is_backgrounded,omitempty"`
 	Status         string `json:"status,omitempty"`
+
+	// Description / TaskType name the task on the per-task frames and
+	// on the entries of the background_tasks_changed frame.
+	Description string `json:"description,omitempty"`
+	TaskType    string `json:"task_type,omitempty"`
+
+	// Tasks is the whole set of live background tasks, carried by the
+	// background_tasks_changed frame (REPLACE semantics).
+	Tasks []backgroundTask `json:"tasks,omitempty"`
+
+	// Patch is the changed-field subset of a task's state, carried by
+	// the task_updated frame.
+	Patch *taskPatch `json:"patch,omitempty"`
 
 	// conversation_reset only — the id assigned to the freshly
 	// cleared transcript. Diagnostic; the authoritative SessionID
@@ -494,6 +515,7 @@ func pumpStream(
 		toolUseArgs:   make(map[string]string),
 		pendingTools:  make(map[string]pendingTool),
 		tasks:         make(map[string]agent.AgentTaskItem),
+		bgTasks:       make(map[string]bgTask),
 		bgRuns:        make(map[string]bool),
 		notifiedRuns:  make(map[string]bool),
 		deliveredRuns: make(map[string]bool),
@@ -579,13 +601,32 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 		// starts (task_started), announces its completion
 		// (task_notification) and the turn the CLI opens for that
 		// announcement reports the same run id on its result frame.
+		//
+		// The same frames also describe the session's background-task
+		// table: the table changes, the bridge reports it. A task
+		// frame is not a turn boundary — it ends nothing.
+		changed := false
 		switch ev.Subtype {
 		case "task_started":
 			if ev.IsBackgrounded {
 				state.noteBackgroundStart(ev.RunID)
 			}
+			changed = state.applyTaskStarted(ev)
 		case "task_notification":
 			state.noteBackgroundNotification(ev.RunID)
+			changed = state.applyTaskNotification(ev)
+		case "task_progress":
+			changed = state.applyTaskProgress(ev)
+		case "task_updated":
+			changed = state.applyTaskUpdated(ev)
+		case "background_tasks_changed":
+			changed = state.applyBackgroundTasksChanged(ev.Tasks)
+		}
+		if changed {
+			events <- agent.AgentEvent{
+				Kind:      agent.EventAgentSubagents,
+				Subagents: state.bgTaskSnapshot(),
+			}
 		}
 
 	case "assistant":

@@ -1561,6 +1561,18 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (msgID
 			return "", nil
 		}
 		return a.setRichTurnTaskList(rawChatID, topicID, turnAnchor, msg.TaskList.Items, statusbar.StatusBarLines(&msg)), nil
+	case messages.OutSubagents:
+		// L3: route through richTurn. The session's background-task
+		// table is a status line, not a log entry: the turn shows the
+		// number of running background subagents while at least one
+		// runs and drops the line when the last one finished.
+		//
+		// The line belongs to the turn's own card, so an event
+		// without an anchor has nowhere to go.
+		if msg.Subagents == nil || turnAnchor == 0 {
+			return "", nil
+		}
+		return a.setRichTurnSubagents(rawChatID, topicID, turnAnchor, msg.Subagents.Tasks), nil
 	case messages.OutError:
 		// L3: route through richTurn. The error body lands as one
 		// paragraph (markdown fenced-code wrap is preserved by the

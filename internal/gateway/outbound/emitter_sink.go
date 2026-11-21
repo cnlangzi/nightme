@@ -234,6 +234,13 @@ func dispatchSinkEvent(
 ) {
 	out, ok := Translate(chatID, ev)
 	if !ok {
+		// The one-shot path has no other trace for a dropped event.
+		if logger != nil {
+			logger.Debug("outbound: Translate dropped event",
+				"chat_id", chatID,
+				"kind", ev.Kind.String(),
+				"session_id", ev.SessionID)
+		}
 		return // Translate drops events that don't surface to the channel
 	}
 	out.ReplyTo = replyTo

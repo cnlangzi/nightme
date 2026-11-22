@@ -212,7 +212,7 @@ func dispatchPR(
 	}
 
 	// --- pick provider (must precede gate 2) ------------------------
-	provider, owner, repo, err := resolveProvider(ctx, c, deps)
+	provider, owner, repo, err := resolveProvider(ctx, c, deps, c.Worktree)
 	if err != nil {
 		// resolveProvider already produces friendly messages
 		// (no `origin` remote / invalid URL / unsupported
@@ -473,8 +473,10 @@ func dispatchPR(
 		}
 		// prcache is keyed by cwd (per-workspace), so /gtw pr
 		// -a codex in a chat whose primary is claude makes the
-		// link visible to claude's next StatusBar stamp.
-		deps.PRCache.WritePR(c.Worktree, newPR)
+		// link visible to claude's next StatusBar stamp. The
+		// branch travels with it: /gtw close reads the entry
+		// back through the branch-scoped port.
+		deps.PRCache.WritePR(c.Worktree, newPR, c.Branch)
 	}
 
 	// Success path: forward the run result so the footer (agentbar
@@ -1638,6 +1640,11 @@ func stripPRNoise(text string) string {
 // resolveProvider picks a GitProvider for the current chat and
 // returns the (owner, repo) split CreatePR needs.
 //
+// dir is the directory the provider's CLI runs in. The caller
+// decides it: the worktree for the commands that run inside one,
+// the repository root for the ones that outlive it (/gtw close
+// finalizes the pull request after the worktree is gone).
+//
 // Two-stage resolution (matches the design doc's "Provider
 // 二段式解析" §4.5):
 //
@@ -1654,9 +1661,9 @@ func stripPRNoise(text string) string {
 //
 // Errors are reformatted with redactForDisplay so we don't
 // echo credentials; the bucket split mirrors runFixRemote.
-func resolveProvider(ctx context.Context, c Context, deps HandlerDeps) (GitProvider, string, string, error) {
+func resolveProvider(ctx context.Context, c Context, deps HandlerDeps, dir string) (GitProvider, string, string, error) {
 	if c.Repo != "" && c.Provider != "" {
-		prov, err := NewProvider(ProviderKind(c.Provider), "", c.Worktree)
+		prov, err := NewProvider(ProviderKind(c.Provider), "", dir)
 		if err != nil {
 			return nil, "", "", fmt.Errorf("provider %q from gtw.yml unsupported: %w", c.Provider, err)
 		}
@@ -1675,7 +1682,7 @@ func resolveProvider(ctx context.Context, c Context, deps HandlerDeps) (GitProvi
 	if err != nil || remoteURL == "" {
 		return nil, "", "", fmt.Errorf("no `origin` remote — add one with `git remote add origin <url>`")
 	}
-	prov, err := detectProvider(ctx, deps, remoteURL, c.Worktree)
+	prov, err := detectProvider(ctx, deps, remoteURL, dir)
 	if err != nil {
 		redacted := redactForDisplay(remoteURL)
 		switch {

@@ -4,10 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os/exec"
 	"strings"
-	"syscall"
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
@@ -2659,7 +2657,7 @@ func TestDispatchPR_ResolveProvider_FromYml(t *testing.T) {
 		Repo:     "octocat/hello",
 		Provider: "github",
 	}
-	prov, owner, repo, err := resolveProvider(context.Background(), c, rig.deps)
+	prov, owner, repo, err := resolveProvider(context.Background(), c, rig.deps, c.Worktree)
 	if err != nil {
 		t.Fatalf("resolveProvider: %v", err)
 	}
@@ -3548,31 +3546,6 @@ func equalStrings(a, b []string) bool {
 	return true
 }
 
-// TestIsExecutableNotFound — the helper must distinguish
-// "binary missing" from generic subprocess errors. We test
-// both the *exec.Error path (LookPath miss) and *fs.PathError
-// path (Start miss).
-func TestIsExecutableNotFound(t *testing.T) {
-	cases := []struct {
-		name string
-		err  error
-		want bool
-	}{
-		{"nil", nil, false},
-		{"exec.LookPath miss", &exec.Error{Name: "gh", Err: exec.ErrNotFound}, true},
-		{"PathError ENOENT", &fs.PathError{Op: "fork/exec", Path: "/usr/bin/gh", Err: syscall.ENOENT}, true},
-		{"generic error", errors.New("exit 1"), false},
-		{"wrapped exec.LookPath miss", fmt.Errorf("outer: %w", &exec.Error{Name: "glab", Err: exec.ErrNotFound}), true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := isExecutableNotFound(tc.err); got != tc.want {
-				t.Fatalf("isExecutableNotFound(%v): got %v, want %v", tc.err, got, tc.want)
-			}
-		})
-	}
-}
-
 // TestResolveProvider_FromYml_SplitOwnerRepo covers the
 // Provider+Repo path: when both fields are populated in
 // Context (set by /gtw fix's worktree creation), resolveProvider
@@ -3582,7 +3555,7 @@ func TestResolveProvider_FromYml_SplitOwnerRepo(t *testing.T) {
 	rig := newPRTestRig(t)
 	rig.deps = HandlerDeps{Git: rig.git}
 	c := Context{Repo: "octocat/hello", Provider: "github"}
-	prov, owner, repo, err := resolveProvider(context.Background(), c, rig.deps)
+	prov, owner, repo, err := resolveProvider(context.Background(), c, rig.deps, c.Worktree)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -3609,7 +3582,7 @@ func TestResolveProvider_Detect_NestedGitLab(t *testing.T) {
 		Detect: fakeDetect(newFakeGitProvider(ProviderGitLab, "gitlab.acme.internal")),
 	}
 	c := Context{RepoRoot: mustPwd(t)}
-	_, owner, repo, err := resolveProvider(context.Background(), c, rig.deps)
+	_, owner, repo, err := resolveProvider(context.Background(), c, rig.deps, c.Worktree)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -3813,7 +3786,7 @@ func TestDispatchPR_NonWorktree_HappyPath(t *testing.T) {
 	// Detect fallback fires because c.Repo is empty.
 	detectedProv, owner, repo, derr := resolveProvider(context.Background(), Context{
 		RepoRoot: tmp,
-	}, deps)
+	}, deps, tmp)
 	if derr != nil {
 		t.Fatalf("resolveProvider: %v", derr)
 	}
@@ -3930,7 +3903,7 @@ func TestPRCacheApply_HappyPath(t *testing.T) {
 	deps := HandlerDeps{PRCache: reg}
 	// Mirror dispatchPR's success path: write to c.Worktree.
 	if deps.PRCache != nil {
-		deps.PRCache.WritePR("/w1", newPR)
+		deps.PRCache.WritePR("/w1", newPR, "feature/x")
 	}
 
 	for _, cwd := range []string{"/w1", "/w2", "/w3"} {
@@ -3957,7 +3930,7 @@ func TestPRCacheApply_HappyPath(t *testing.T) {
 func TestPRCacheApply_WritePRAllocatesOnUnknownCwd(t *testing.T) {
 	reg := &prcache.Registry{}
 	pr := &messages.PR{Number: 1, URL: "https://example/pr/1", State: "open"}
-	reg.WritePR("/work/never-stamped", pr)
+	reg.WritePR("/work/never-stamped", pr, "feature/x")
 
 	got := reg.GetOrCreate("/work/never-stamped").PR()
 	if got == nil || got.Number != 1 {
@@ -3973,11 +3946,11 @@ func TestPRCacheApply_ClearOnClose(t *testing.T) {
 
 	// Pre-populate two cwds so we can confirm the clear actually
 	// clears only the targeted one.
-	reg.GetOrCreate("/w1").WritePR(&messages.PR{Number: 9, URL: "https://example/pr/9", State: "open"})
-	reg.GetOrCreate("/w2").WritePR(&messages.PR{Number: 7, URL: "https://example/pr/7", State: "open"})
+	reg.GetOrCreate("/w1").WritePR(&messages.PR{Number: 9, URL: "https://example/pr/9", State: "open"}, "feature/w1")
+	reg.GetOrCreate("/w2").WritePR(&messages.PR{Number: 7, URL: "https://example/pr/7", State: "open"}, "feature/w2")
 
 	// Mirror dispatchClose: write nil to c.Worktree only.
-	reg.WritePR("/w1", nil)
+	reg.WritePR("/w1", nil, "")
 
 	if got := reg.GetOrCreate("/w1").PR(); got != nil {
 		t.Errorf("/w1 after clear: PR = %+v, want nil", got)
@@ -4014,7 +3987,7 @@ func TestPRCacheApply_EmptyPool(t *testing.T) {
 	// Mirror dispatchClose's success path on a fresh chat:
 	// nothing in the pool, no workspace ever stamped. The
 	// WritePR call would have no upstream lookup to clear.
-	reg.WritePR("/w/untouched", nil)
+	reg.WritePR("/w/untouched", nil, "")
 
 	if c := reg.GetOrCreate("/w/untouched"); c.PR() != nil {
 		t.Errorf("clearing an empty cache should leave PR nil; got %+v", c.PR())

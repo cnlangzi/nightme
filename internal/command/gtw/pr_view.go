@@ -62,7 +62,7 @@ func dispatchPRView(
 		return res, nil
 	}
 
-	provider, owner, repo, err := resolveProvider(ctx, c, deps)
+	provider, owner, repo, err := resolveProvider(ctx, c, deps, c.Worktree)
 	if err != nil {
 		// resolveProvider already produces friendly messages
 		// (no `origin` remote / invalid URL / unsupported

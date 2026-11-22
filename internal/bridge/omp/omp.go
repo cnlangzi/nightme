@@ -7,6 +7,13 @@
 // request/response correlation, event translation, and turn-end
 // resolution.
 //
+// The liveness probe (driver.Ping) asks for `get_state` — the same
+// command the boot handshake uses. omp answers it while a prompt is
+// in flight, and the answer never reaches the model's context. The
+// probe rides the RPC client's own pending map, so it stays
+// answerable even when the event channel the runtime drains is
+// wedged.
+//
 // omp wire shape (per https://omp.sh):
 //
 //	command  : {"id":<id>, "type":<command name>, ...fields}

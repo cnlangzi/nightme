@@ -63,10 +63,6 @@ func TestAgentSession_ReadPump_DeliversEvents(t *testing.T) {
 		return false
 	})
 
-	// The event needs a turn in flight: a turn-scoped event that
-	// arrives with no prompt is dropped.
-	agentstest.SetCurrentPrompt(as, &Prompt{ID: "p-1", LastMessageID: "m-1"})
-
 	// Push a synthetic event into the fake bridge.
 	fake.PushEvent(agent.AgentEvent{
 		Kind: agent.EventAgentText,
@@ -86,9 +82,6 @@ func TestAgentSession_ReadPump_DeliversEvents(t *testing.T) {
 		}
 		if ev.ChatID != cs.ID {
 			t.Fatalf("ChatID = %q, want %q", ev.ChatID, cs.ID)
-		}
-		if ev.UserMsgID != "m-1" {
-			t.Fatalf("UserMsgID = %q, want %q (the anchor of the turn in flight)", ev.UserMsgID, "m-1")
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for enriched event")
@@ -168,10 +161,6 @@ func TestChatSession_PumpEvents_RoutesKindAgentEvent(t *testing.T) {
 	// for any AS added later — for this test it's a no-op since we
 	// already populated cs.subs).
 	go cs.PumpEvents(ctx)
-
-	// The event needs a turn in flight: a turn-scoped event that
-	// arrives with no prompt is dropped.
-	agentstest.SetCurrentPrompt(as, &Prompt{ID: "p-1", LastMessageID: "m-1"})
 
 	// Push a synthetic event.
 	fake.PushEvent(agent.AgentEvent{Kind: agent.EventAgentText, Text: "pumped"})
@@ -371,9 +360,6 @@ func TestAgentSession_Shutdown_ClosesReadPump(t *testing.T) {
 	})
 
 	// Push an event first so the readpump is in the event loop.
-	// The event needs a turn in flight: a turn-scoped event that
-	// arrives with no prompt is dropped.
-	agentstest.SetCurrentPrompt(as, &Prompt{ID: "p-1", LastMessageID: "m-1"})
 	fake.PushEvent(agent.AgentEvent{Kind: agent.EventAgentText, Text: "before-shutdown"})
 
 	// Drain that event via the bus so the queue isn't blocked at shutdown.

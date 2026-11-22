@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
-	"github.com/cnlangzi/nightme/internal/agentsession/agentstest"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
@@ -310,9 +309,6 @@ func TestFromAgentSessionEntry_InitializesEventQueue(t *testing.T) {
 	if fake == nil {
 		t.Fatal("spawner did not capture a handle")
 	}
-	// The event needs a turn in flight: a turn-scoped event that
-	// arrives with no prompt is dropped.
-	agentstest.SetCurrentPrompt(live, &Prompt{ID: "p_probe", LastMessageID: "m_probe"})
 	fake.PushEvent(agent.AgentEvent{Kind: agent.EventAgentText, Text: "hello-after-restore"})
 
 	select {

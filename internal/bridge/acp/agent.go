@@ -1321,6 +1321,48 @@ func (d *driver) Keepalive(ctx context.Context, onRecover func(context.Context) 
 	return nil
 }
 
+// probeMethod is the JSON-RPC method the acp probe sends. The ACP
+// spec has no ping, and a method the agent does not implement is
+// answered with a JSON-RPC "method not found" error — which is
+// exactly the answer the probe is after: the agent's request loop
+// is alive and answered.
+const probeMethod = "__nightme_probe__"
+
+// Ping is the driver.Ping implementation for the acp bridge. It
+// sends a JSON-RPC request for a method the agent does not
+// implement and waits for the answer.
+//
+// An error response counts as an answer: the agent received the
+// request, dispatched it and replied. Only the absence of a reply
+// (a transport failure, or the deadline firing) means "not
+// responding".
+//
+// The probe rides the bridge's own pending-request map, so it never
+// travels the event channel the runtime drains — the probe has to
+// stay answerable even when that path is wedged.
+//
+// cursor, copilot and opencode share this driver and inherit the
+// probe unchanged.
+func (d *driver) Ping(ctx context.Context) error {
+	if d.rpc == nil {
+		return errors.New("acp: no rpc client")
+	}
+	// The request carries an empty params object: the agents the
+	// probe was measured against answer a request whose params
+	// field is missing with a different error, and the probe should
+	// ask a question the agent can answer properly.
+	_, err := d.rpc.request(ctx, probeMethod, map[string]any{})
+	if err == nil {
+		return nil
+	}
+	var rpcErr *rpcError
+	if errors.As(err, &rpcErr) {
+		// The agent answered — with a "method not found" error.
+		return nil
+	}
+	return fmt.Errorf("acp: ping: %w", err)
+}
+
 // ─── per-bridge extension hooks ──────────────────────────────────
 
 // SetUpdateHandler installs a per-bridge translator for

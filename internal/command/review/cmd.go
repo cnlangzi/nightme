@@ -95,6 +95,9 @@ type Factory struct {
 	records map[string]reviewRecord
 	running map[string]int
 	runs    map[string][]*runHandle
+	// nextID numbers the review rounds: a round's id says how old it
+	// is, so an older round never overwrites a newer one's state.
+	nextID uint64
 }
 
 // init self-registers the /review command. Each command package's
@@ -601,6 +604,9 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 	// goroutine starts, so an abort that arrives right after the
 	// command returned cannot race the registration.
 	revCtx, handle := f.newRun(chatID, cs.Context(), runnerName, "review")
+	// The round this run belongs to: a run that started earlier does
+	// not overwrite the state a newer round found.
+	round := f.newRound()
 
 	go func() {
 		// The defer order is the run's shutdown contract: the
@@ -685,12 +691,12 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 		var rec reviewRecord
 		if len(groupOutcomes) > 0 {
 			rec = f.record(chatID, runnerName, workspace, reviewRun{
+				id:            round,
+				notes:         result.Notes,
 				outcomes:      groupOutcomes,
 				contributions: collector.said(),
 				plan:          collector.plan(),
 			})
-		} else {
-			rec, _ = f.lookup(chatID)
 		}
 		finish()
 
@@ -853,7 +859,6 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 			sendBlocks: sendBlocks,
 			rec:        rec,
 			result:     result,
-			notes:      result.Notes,
 			data:       timeoutOutcomeData(data, groupOutcomes),
 			notice:     reviewTimeoutNotice(groupOutcomes, timeout),
 		})
@@ -1006,6 +1011,9 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 	// goroutine starts, so an abort that arrives right after the
 	// command returned cannot race the registration.
 	revCtx, handle := f.newRun(chatID, cs.Context(), runnerName, "continue")
+	// The round this run belongs to: a run that started earlier does
+	// not overwrite the state a newer round found.
+	round := f.newRound()
 
 	go func() {
 		// The defer order is the run's shutdown contract: the
@@ -1100,6 +1108,8 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 		// agent.
 		carryPrompts(groupOutcomes, rec.outcomes)
 		merged := f.record(chatID, runnerName, workspace, reviewRun{
+			id:            round,
+			notes:         result.Notes,
 			outcomes:      groupOutcomes,
 			contributions: collector.said(),
 			plan:          collector.plan(),
@@ -1163,7 +1173,6 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 			sendBlocks: sendBlocks,
 			rec:        merged,
 			result:     result,
-			notes:      result.Notes,
 			data:       timeoutOutcomeData(data, groupOutcomes),
 			notice:     reviewTimeoutNotice(groupOutcomes, timeout),
 		})

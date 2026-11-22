@@ -303,7 +303,13 @@ func (v verdict) line() string {
 // hint renders the verdict as the thread's end hint — the same
 // counts and the same failure block as the card's verdict, in
 // Markdown, so the thread closes on the outcome.
+//
+// A review that is not over yet says so: the thread must not claim
+// the review is done while the card says it is not.
 func (v verdict) hint() string {
+	if v.pending {
+		return v.icon() + " **review pending** · " + v.body()
+	}
 	return v.icon() + " **review done** · " + v.body()
 }
 

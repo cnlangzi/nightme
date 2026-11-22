@@ -53,9 +53,6 @@ type reviewDelivery struct {
 	// result is the fan-out's result — the run metadata the verdict
 	// message is stamped with.
 	result agent.RunResult
-	// notes are the run-level notices — the base-branch repair, for
-	// instance.
-	notes []string
 	// data is the outcome data of the run.
 	data map[string]string
 	// notice is the notice the run sends on its own message — the
@@ -106,7 +103,7 @@ func (f *Factory) deliver(d reviewDelivery) {
 		// The review is over: the record knows it before the card
 		// goes out. The user reads the card and may ask for a
 		// continuation right away — there is nothing left to pick up.
-		f.markDelivered(d.chatID, d.rec.findings)
+		f.markDelivered(d.chatID, d.rec.findings, d.rec.deliveredContributions())
 	}
 	if d.ctx.Err() == nil {
 		sendVerdict(d.ctx, d.emitter, d.chatID, d.replyTo, d.runner, d.result,
@@ -123,9 +120,11 @@ func (f *Factory) deliver(d reviewDelivery) {
 	}
 
 	// The merged document — rebuilt from the record, so it carries
-	// every group's findings, not only this run's.
+	// every group's findings, not only this run's. The notices of
+	// every round of the review ride along: the agent reads them with
+	// the findings.
 	formatted := agent.FormatReviewMessage(d.rec.workspace, d.runner,
-		d.rec.mergedDocument(), d.notes...)
+		d.rec.mergedDocument(), d.rec.notes...)
 	blocks := []agent.ContentBlock{{
 		Type: agent.ContentText,
 		Text: formatted + reviewPromptFrame(threadShowsFindings(d.cs)),
@@ -149,10 +148,15 @@ func (f *Factory) deliver(d reviewDelivery) {
 		// The findings were produced but never reached the agent —
 		// the review is not complete. The findings stay in the
 		// record: the next review command delivers them.
+		//
+		// The report says the findings were not delivered: the
+		// delivery's own report said the opposite, and the two merge.
 		d.work.Report(messages.Outcome{
 			Status:  messages.OutcomeIncomplete,
 			Summary: "review findings could not be delivered to the agent",
-			Data:    map[string]string{"agent": d.runner, "reason": "inject_failed"},
+			Data: map[string]string{
+				"agent": d.runner, "reason": "inject_failed", "delivered": "false",
+			},
 		})
 		injectWork.Release()
 		// No turn will run, so nothing was fixed: give the share of
@@ -160,7 +164,7 @@ func (f *Factory) deliver(d reviewDelivery) {
 		selfVerdict.release()
 		// The findings never reached the agent: they go back into the
 		// cache, and the next review command delivers them.
-		f.restoreFindings(d.chatID, d.rec.findings)
+		f.restoreFindings(d.chatID, d.rec.findings, d.rec.deliveredContributions())
 		return
 	}
 }
@@ -196,10 +200,11 @@ func (d reviewDelivery) report(verdict verdict, pending bool) {
 }
 
 // markDelivered empties the chat's cache of the findings that were
-// delivered and marks the record as delivered.
+// delivered, marks the outputs that reached the agent and marks the
+// record as delivered.
 //
 // The groups' states stay: they are what a later `--continue` reads.
-func (f *Factory) markDelivered(chatID string, delivered []reviewFinding) {
+func (f *Factory) markDelivered(chatID string, delivered []reviewFinding, outputs []reviewContribution) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	rec, ok := f.records[chatID]
@@ -207,6 +212,7 @@ func (f *Factory) markDelivered(chatID string, delivered []reviewFinding) {
 		return
 	}
 	rec.findings = withoutFindings(rec.findings, delivered)
+	rec.contributions = markContributions(rec.contributions, outputs, true)
 	rec.delivered = len(rec.findings) == 0
 	f.records[chatID] = rec
 }
@@ -214,7 +220,7 @@ func (f *Factory) markDelivered(chatID string, delivered []reviewFinding) {
 // restoreFindings puts the findings that never reached the agent back
 // into the chat's cache: the review is not over, and the next review
 // command delivers them.
-func (f *Factory) restoreFindings(chatID string, findings []reviewFinding) {
+func (f *Factory) restoreFindings(chatID string, findings []reviewFinding, outputs []reviewContribution) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	rec, ok := f.records[chatID]
@@ -227,8 +233,28 @@ func (f *Factory) restoreFindings(chatID string, findings []reviewFinding) {
 		}
 		rec.findings = append(rec.findings, f)
 	}
+	rec.contributions = markContributions(rec.contributions, outputs, false)
 	rec.delivered = false
 	f.records[chatID] = rec
+}
+
+// markContributions marks the given outputs as delivered (or not) in
+// the record's contributions.
+func markContributions(contributions, outputs []reviewContribution, delivered bool) []reviewContribution {
+	if len(outputs) == 0 {
+		return contributions
+	}
+	marked := make([]reviewContribution, 0, len(contributions))
+	for _, c := range contributions {
+		for _, o := range outputs {
+			if c.source == o.source && c.pattern == o.pattern && c.text == o.text {
+				c.delivered = delivered
+				break
+			}
+		}
+		marked = append(marked, c)
+	}
+	return marked
 }
 
 // withoutFindings returns the findings that are not in the delivered

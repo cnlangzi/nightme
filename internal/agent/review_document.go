@@ -1,5 +1,3 @@
-package agent
-
 // review_document.go — the merged review document: one section per
 // review group, the group's own output under its header.
 //
@@ -11,6 +9,8 @@ package agent
 // document of a run with it, and the command layer rebuilds the same
 // document from the findings it has cached — a delivery that spans
 // several runs must look exactly like the one a single run produces.
+
+package agent
 
 import (
 	"fmt"

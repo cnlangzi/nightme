@@ -338,6 +338,33 @@ func TestVerdictHint_CarriesTheSameBody(t *testing.T) {
 	}
 }
 
+// TestVerdictHint_SaysTheReviewIsPending: a review that is not over
+// yet does not claim it is done — the thread and the card must say
+// the same thing.
+func TestVerdictHint_SaysTheReviewIsPending(t *testing.T) {
+	rec := testRecord(
+		[]reviewOutcome{
+			{pattern: "**/*.go"},
+			{pattern: "**/*.ts", err: errors.New("boom"), sessionID: "sess-ts"},
+		},
+		[]reviewContribution{testContribution("**/*.go")},
+		nil,
+	)
+
+	hint := newVerdict(rec, true).hint()
+	if !strings.Contains(hint, "**review pending**") {
+		t.Errorf("the end hint does not say the review is pending: %s", hint)
+	}
+	if strings.Contains(hint, "review done") {
+		t.Errorf("the end hint claims the review is done: %s", hint)
+	}
+
+	done := newVerdict(rec, false).hint()
+	if !strings.Contains(done, "**review done**") {
+		t.Errorf("the end hint of a delivered review does not say it is done: %s", done)
+	}
+}
+
 // TestVerdictLine_UnparsedGroups: a group whose output matched no
 // known shape is reported as unparsed.
 func TestVerdictLine_UnparsedGroups(t *testing.T) {

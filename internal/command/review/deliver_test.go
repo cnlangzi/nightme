@@ -18,6 +18,9 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/agentsession"
+	"github.com/cnlangzi/nightme/internal/agentsession/agentstest"
+	"github.com/cnlangzi/nightme/internal/chatsession"
 )
 
 // reviewFanoutStarter runs the review's groups on the session path: the
@@ -33,6 +36,9 @@ type reviewFanoutStarter struct {
 	reply string
 	// failAgain makes a resumed session fail instead of answering.
 	failAgain bool
+	// suffix is appended to every group's output — the text of the
+	// round that produced it.
+	suffix string
 
 	mu      sync.Mutex
 	started []agent.StartConfig
@@ -67,7 +73,7 @@ func (s *reviewFanoutStarter) Review(_ context.Context, _ agent.StartConfig, opt
 		if i < s.failed {
 			section.Err = fmt.Errorf("group %d failed", i+1)
 		} else {
-			section.Texts = []string{fmt.Sprintf("the findings of group %d", i+1)}
+			section.Texts = []string{s.groupText(i + 1)}
 		}
 		sections = append(sections, section)
 	}
@@ -92,11 +98,21 @@ func (s *reviewFanoutStarter) Review(_ context.Context, _ agent.StartConfig, opt
 				Files:     g.Files,
 				SessionID: fmt.Sprintf("sess-%d", i+1),
 				Report:    report,
-				Text:      fmt.Sprintf("the findings of group %d", i+1),
+				Text:      s.groupText(i + 1),
 			}, err)
 		}
 	}
 	return agent.RunResult{Text: agent.MergeReviewDocument(sections)}, nil
+}
+
+// groupText is the output of the nth group: what the group said,
+// with the round it belongs to.
+func (s *reviewFanoutStarter) groupText(n int) string {
+	text := fmt.Sprintf("the findings of group %d", n)
+	if s.suffix == "" {
+		return text
+	}
+	return text + " " + s.suffix
 }
 
 // startedConfigs returns the StartConfig each Start call received.
@@ -311,5 +327,111 @@ func TestHandle_ReviewDeliversTheDocumentTheFanOutProduced(t *testing.T) {
 	})
 	if !strings.Contains(injected, want) {
 		t.Errorf("the injected document is not the one the fan-out produced:\n%s\nwant:\n%s", injected, want)
+	}
+}
+
+// TestHandle_DeliveryMarksTheOutputAsDelivered: the output the
+// delivery handed the agent does not go into the next delivery — the
+// agent already has it.
+func TestHandle_DeliveryMarksTheOutputAsDelivered(t *testing.T) {
+	agents := newTestAgents(t)
+	starter := &reviewFanoutStarter{
+		name:   "review-rounds-agent",
+		groups: []agent.ReviewPlanGroup{{Pattern: "**/*.go", Label: "**/*.go", Files: []string{"a.go"}}},
+		suffix: "of the first round",
+	}
+	agents.registry.Register(starter)
+
+	em := newRecordingEmitter()
+	const chatID = "review-rounds-chat"
+	cs, asDriver := newContinueChatSession(t, chatID, starter.name, t.TempDir(), em)
+
+	f := NewFactory()
+	dispatchContinue(t, f, cs, chatID, "review")
+	first := waitForBlocks(t, asDriver, 1)[0].Text
+	if !strings.Contains(first, "of the first round") {
+		t.Fatalf("the first delivery does not carry the first round's output:\n%s", first)
+	}
+
+	rec, ok := f.lookup(chatID)
+	if !ok {
+		t.Fatal("the review kept no record")
+	}
+	if len(rec.contributions) != 1 {
+		t.Fatalf("the record holds %d contributions, want 1", len(rec.contributions))
+	}
+	if !rec.contributions[0].delivered {
+		t.Error("the output the agent received is not marked as delivered")
+	}
+	if doc := rec.mergedDocument(); strings.Contains(doc, "of the first round") {
+		t.Errorf("the delivered output is in the next document again:\n%s", doc)
+	}
+}
+
+// failingDriver refuses every prompt — the injection into the chat's
+// agent fails.
+type failingDriver struct{}
+
+func (d *failingDriver) SendBlocks(context.Context, []agent.ContentBlock) error {
+	return errors.New("failingDriver: the prompt was refused")
+}
+func (d *failingDriver) SendPermission(string) error { return nil }
+func (d *failingDriver) Reset(context.Context) error { return nil }
+func (d *failingDriver) Close() error                { return nil }
+func (d *failingDriver) Stop(context.Context) error  { return agent.ErrNotSupported }
+func (d *failingDriver) Keepalive(context.Context, func(context.Context) error) error {
+	return nil
+}
+
+// TestHandle_FailedInjectionReportsNotDelivered: the findings that
+// did not reach the agent are not reported as delivered — and they
+// stay in the record, so the next review command hands them over.
+func TestHandle_FailedInjectionReportsNotDelivered(t *testing.T) {
+	agents := newTestAgents(t)
+	starter := &reviewFanoutStarter{
+		name:   "review-inject-fail-agent",
+		groups: []agent.ReviewPlanGroup{{Pattern: "**/*.go", Label: "**/*.go", Files: []string{"a.go"}}},
+	}
+	agents.registry.Register(starter)
+
+	em := newRecordingEmitter()
+	const chatID = "review-inject-fail-chat"
+	mgr := chatsession.NewManager()
+	cs, err := mgr.GetOrCreate(chatID, starter.name)
+	if err != nil {
+		t.Fatalf("GetOrCreate: %v", err)
+	}
+	if err := cs.SetSelectedCwd(t.TempDir()); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
+	}
+	cs.WithEmitter(em)
+	as := chatsession.NewAgentSession("as-"+chatID, cs.ID, starter.name, t.TempDir(), nil)
+	agentstest.SetHandle(as, liveAgent(starter.name, &failingDriver{}))
+	agentstest.SetStatus(as, agentsession.StatusRunning)
+	cs.AttachAgentSessionForTest(as)
+	cs.SelectedAgentSessionForTest(as)
+
+	f := NewFactory()
+	dispatchContinue(t, f, cs, chatID, "review")
+
+	got := waitOutcome(t, em, 5*time.Second)
+	if got.Data["delivered"] != "false" {
+		t.Errorf("the outcome says delivered=%q, want false", got.Data["delivered"])
+	}
+	if got.Data["reason"] != "inject_failed" {
+		t.Errorf("the outcome reason = %q, want inject_failed", got.Data["reason"])
+	}
+
+	// The findings stay in the record: the next review command hands
+	// them over.
+	rec, ok := f.lookup(chatID)
+	if !ok {
+		t.Fatal("the review kept no record")
+	}
+	if len(rec.findings) != 1 {
+		t.Errorf("the record holds %d findings, want the one that was not delivered", len(rec.findings))
+	}
+	if rec.delivered {
+		t.Error("the record says the findings were delivered")
 	}
 }

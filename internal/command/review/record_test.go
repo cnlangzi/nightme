@@ -9,6 +9,7 @@ package review
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -164,10 +165,10 @@ func TestRecord_MergedDocumentRebuildsTheReview(t *testing.T) {
 	}
 }
 
-// TestRecord_ContributingTextsSkipsTheRepeatedOutput: an output that
-// only repeats what the agent already heard does not go into the
-// document again.
-func TestRecord_ContributingTextsSkipsTheRepeatedOutput(t *testing.T) {
+// TestRecord_ContributingOutputsKeepTheLatestWord: the group's
+// latest output is its current word, and an earlier output that only
+// repeats it does not go into the document again.
+func TestRecord_ContributingOutputsKeepTheLatestWord(t *testing.T) {
 	finding := agent.ReviewFinding{Path: "a.go", Content: "the problem"}
 	rec := testRecord(
 		[]reviewOutcome{{pattern: "**/*.go"}},
@@ -183,9 +184,96 @@ func TestRecord_ContributingTextsSkipsTheRepeatedOutput(t *testing.T) {
 		},
 	})
 
-	texts := rec.contributingTexts("", "**/*.go")
-	if len(texts) != 1 || texts[0] != "the first output" {
-		t.Errorf("the contributing outputs are %v, want the first one alone", texts)
+	outputs := rec.contributingOutputs("", "**/*.go")
+	if len(outputs) != 1 || outputs[0].text != "the same output again" {
+		t.Errorf("the contributing outputs are %v, want the latest one alone", outputs)
+	}
+}
+
+// TestRecord_ContributingOutputsKeepTheUniqueFinding: an earlier
+// output that carries a finding the later one does not have stays in
+// the document — the agent needs to know what that finding says.
+func TestRecord_ContributingOutputsKeepTheUniqueFinding(t *testing.T) {
+	rec := testRecord(
+		[]reviewOutcome{{pattern: "**/*.go"}},
+		[]reviewContribution{
+			{pattern: "**/*.go", text: "the first output", findings: []agent.ReviewFinding{
+				{Path: "a.go", Content: "the problem"},
+			}},
+		},
+		nil,
+	)
+	rec.merge(reviewRun{
+		outcomes: []reviewOutcome{{pattern: "**/*.go"}},
+		contributions: []reviewContribution{
+			{pattern: "**/*.go", text: "the later output", findings: []agent.ReviewFinding{
+				{Path: "b.go", Content: "another problem"},
+			}},
+		},
+	})
+
+	outputs := rec.contributingOutputs("", "**/*.go")
+	if len(outputs) != 2 {
+		t.Fatalf("the contributing outputs are %v, want both", outputs)
+	}
+	if outputs[0].text != "the first output" || outputs[1].text != "the later output" {
+		t.Errorf("the contributing outputs are %v, want them in the order they arrived", outputs)
+	}
+}
+
+// TestRecord_DeliveredOutputDoesNotComeBack: an output the agent
+// already has does not go into the merged document again.
+func TestRecord_DeliveredOutputDoesNotComeBack(t *testing.T) {
+	rec := testRecord(
+		[]reviewOutcome{{pattern: "**/*.go"}},
+		[]reviewContribution{
+			{pattern: "**/*.go", text: "the first output", findings: []agent.ReviewFinding{
+				{Path: "a.go", Content: "the problem"},
+			}},
+		},
+		nil,
+	)
+	rec.merge(reviewRun{
+		outcomes: []reviewOutcome{{pattern: "**/*.go"}},
+		contributions: []reviewContribution{
+			{pattern: "**/*.go", text: "the later output", findings: []agent.ReviewFinding{
+				{Path: "b.go", Content: "another problem"},
+			}},
+		},
+	})
+	// The delivery hands the first output to the agent.
+	rec.contributions = markContributions(rec.contributions, []reviewContribution{rec.contributions[0]}, true)
+
+	outputs := rec.contributingOutputs("", "**/*.go")
+	if len(outputs) != 1 || outputs[0].text != "the later output" {
+		t.Errorf("the contributing outputs are %v, want the undelivered one alone", outputs)
+	}
+	doc := rec.mergedDocument()
+	if strings.Contains(doc, "the first output") {
+		t.Errorf("the delivered output is in the document again:\n%s", doc)
+	}
+}
+
+// TestRecord_AnOlderRoundDoesNotOverwriteTheNewerState: a run that
+// started before the round that wrote the states does not overwrite
+// them — it only adds what it found.
+func TestRecord_AnOlderRoundDoesNotOverwriteTheNewerState(t *testing.T) {
+	rec := testRecord(
+		[]reviewOutcome{{pattern: "**/*.go", err: errors.New("boom"), sessionID: "sess-go"}},
+		nil,
+		nil,
+	)
+	rec.generation = 2
+	rec.merge(reviewRun{
+		id:       1,
+		outcomes: []reviewOutcome{{pattern: "**/*.go", err: errors.New("boom"), sessionID: "sess-go"}},
+	})
+
+	if len(rec.outcomes) != 1 {
+		t.Fatalf("the record holds %d outcomes, want 1", len(rec.outcomes))
+	}
+	if rec.outcomes[0].err == nil {
+		t.Error("the older round's state replaced the newer one")
 	}
 }
 

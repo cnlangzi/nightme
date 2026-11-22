@@ -64,8 +64,20 @@ func (d *recordingDriver) blocks() []agent.ContentBlock {
 	return append([]agent.ContentBlock(nil), d.sent...)
 }
 
-// liveAgent wraps a recordingDriver in a live *agent.Agent.
-func liveAgent(name string, d *recordingDriver) *agent.Agent {
+// agentDriver is the driver an agent.Agent drives. The agent package
+// keeps the interface unexported — these are the methods a bridge
+// implements.
+type agentDriver interface {
+	SendBlocks(context.Context, []agent.ContentBlock) error
+	SendPermission(string) error
+	Reset(context.Context) error
+	Close() error
+	Stop(context.Context) error
+	Keepalive(context.Context, func(context.Context) error) error
+}
+
+// liveAgent wraps a driver in a live *agent.Agent.
+func liveAgent(name string, d agentDriver) *agent.Agent {
 	return agent.NewAgent(
 		agent.NewInfo(name, agent.ModeACP, "fake", nil, nil),
 		0, make(chan agent.AgentEvent, 8), d)

@@ -297,6 +297,10 @@ merge 步骤只有两步:
 
 合并文本的**格式只有一份**:`agent.MergeReviewDocument`(段头、段体、`Reviewed N groups.` 首行都在那里)。fan-out 用它拼这一轮的合并文本;命令层在交付时用同一个函数从 record 里**重建**合并文本(§2.7)—— 一轮跑出来的合并文本与攒了几轮之后交付的合并文本必须同形,两处各写一份格式就会各自腐烂。
 
+一个 group 在合并文本里占**一段**:它最近一次的输出是它当下的话,一定在;更早的输出
+只有在带着后面几次没有的 finding 时才跟着进去(只重复 agent 已经听过的话,只会把它的
+输入翻倍)。已经交付过的输出不再进去 —— agent 已经读过了。
+
 partial failure 路径:**不**升级为 merge 整体错误,失败组以 inline marker 出现在合并文本里;all-failed 才返回 first error wrapped with agent name。
 
 **每组 findings 解析(与 merge 分离)**:verdict 行要报"多少 findings、按 severity 怎么分布",digest 要列每一条 finding,两者都来自**每组自己的输出**(`agent.ParseReviewFindings`),不来自合并文本 —— 合并文本是写给 LLM 看的自由文本,解析它没有稳定边界。解析器分层读,读到有 findings 的那一层就停:
@@ -674,13 +678,18 @@ workspace / 每个 group 的最新状态 / 累积的 group 清单 / 每个 group
 一轮 run 结束时,记录这样合并:
 
 - **group 的状态**按 `(source, pattern)` 合并:新一轮对某个 group 的说法**整条替换**
-  旧的那条 —— 新一轮把它审成了成功就是成功,失败了就是失败。
+  旧的那条 —— 新一轮把它审成了成功就是成功,失败了就是失败。每一轮有编号(按开始的
+  先后),**先开始的那一轮不覆盖后开始的那一轮的状态** —— 它只把自己找到的东西添
+  加进来。
 - **group 清单**(plan)按 `(source, pattern)` 合并:先出现的标签与位置为准。
 - **contribution**(每个成功 group 每轮一条)只追加,不替换 —— 同一 group 跑过两遍,
-  两条 contribution 都留着。
+  两条 contribution 都留着。交付时进了合并文本的那些**标成已交付**,不再进下一次
+  的合并文本 —— agent 已经读过了。
 - **findings** 只追加,按 `(group key, path, content)` 去重:三者全同算同一条,只留
   第一份(第一份的 line / severity / category 就是缓存里那份的值)。不同 group 报同一个
   path + content **不合并** —— 两个 group 的独立判断各算一条。
+- **run 级备注**(比如补写了 `refs/remotes/origin/HEAD`)跟着记录走,交付时一起进
+  合并文本 —— 备注说的是这次 review 做过什么。
 - **交付标志**:这一轮往缓存里加了新的 contribution,记录就回到"还没交付"。
 
 一个 group 都没跑出来的 review(没有 diff 可 review、bridge 不支持 review)不动记录:
@@ -705,6 +714,7 @@ workspace / 每个 group 的最新状态 / 累积的 group 清单 / 每个 group
 | 所有 group 都失败 | 不是硬失败:review 还是 pending,card 给失败块 + 续跑提示,不注入 findings |
 | pending 期间又跑了一次 `/review` | 两轮的 findings 都留在记录里;门槛到了时一次交付,两轮的结果合到一张表 |
 | 交付之后又跑 `--continue` | `ℹ️ the last review completed — nothing to continue` |
+| 交付之后又跑 `/review` | 缓存是空的:新一轮的 findings 不带上一次的;已交付的输出不再进合并文本;上一轮的 group 状态仍在记录里(组计数可能仍含它们) |
 | `--continue` 带的 `--agent` 是另一个 agent | 接管:那几组拿存下来的 prompt 在新 agent 上重放(旧 session 不重开) |
 | 接管时某组没有存下 prompt | `ℹ️ the unfinished group has no prompt to re-run on another agent — nothing to resume`(session 属于旧 agent,迁不动,没有 prompt 就重放不了) |
 | 失败的 group 的恢复机会已经用完(操作者自己 `-c` 过) | 接管也不捡它:恢复额度是操作者自己的重试,接管不消费它,也不绕过它 |

@@ -218,7 +218,7 @@ type reviewFinding struct {
 }
 
 // reviewContribution is what one group produced in one run: its own
-// output and the findings that were new when it arrived.
+// output and the findings that output carried.
 type reviewContribution struct {
 	// source is the rule's source — the area the group came from.
 	source string
@@ -228,11 +228,14 @@ type reviewContribution struct {
 	files []string
 	// text is the group's own output.
 	text string
-	// findings are the findings this contribution brought into the
-	// cache — the ones the cache did not hold yet.
+	// findings are the findings the output carried — what the output
+	// is about. The cache holds the ones it did not have yet.
 	findings []agent.ReviewFinding
 	// parsed reports whether the group's output was readable.
 	parsed bool
+	// delivered marks an output the agent already has: it does not go
+	// into the merged document a second time.
+	delivered bool
 }
 
 // reviewRecord is the review a chat is in the middle of: the runner,
@@ -254,9 +257,17 @@ type reviewRecord struct {
 	// contributions holds what every run of every group produced —
 	// one entry per successful group per run.
 	contributions []reviewContribution
+	// notes are the run-level notices of the review — the base
+	// branch repair, for instance. They belong to the document the
+	// agent reads, so they wait here until the delivery.
+	notes []string
 	// delivered reports whether the findings of this record have
 	// been delivered to the chat's agent.
 	delivered bool
+	// generation is the id of the newest round that wrote the states
+	// below. A run that started before that round does not overwrite
+	// them: it may only add what it found.
+	generation uint64
 }
 
 // resumable returns the groups a continuation can finish: the ones
@@ -391,6 +402,7 @@ func (r *reviewRecord) merge(run reviewRun) {
 		r.delivered = false
 	}
 	r.plan = mergeReviewPlan(r.plan, run.plan)
+	r.notes = append(r.notes, run.notes...)
 
 	// The record travels by value: whoever holds a copy must not see
 	// the merge write into the slices it shares with the record it
@@ -399,17 +411,21 @@ func (r *reviewRecord) merge(run reviewRun) {
 	findings := slices.Clone(r.findings)
 	contributions := slices.Clone(r.contributions)
 
-	for _, o := range run.outcomes {
-		if i := groupIndex(outcomes, o.source, o.pattern); i >= 0 {
-			outcomes[i] = o
-		} else {
-			outcomes = append(outcomes, o)
+	// The states come from the newest round: a run that started
+	// before the round that wrote them does not overwrite what that
+	// round found. What it found itself still joins the record.
+	if run.id >= r.generation {
+		for _, o := range run.outcomes {
+			if i := groupIndex(outcomes, o.source, o.pattern); i >= 0 {
+				outcomes[i] = o
+			} else {
+				outcomes = append(outcomes, o)
+			}
 		}
+		r.generation = run.id
 	}
 	for _, c := range run.contributions {
-		var added []agent.ReviewFinding
-		findings, added = addFindings(findings, groupKey(c.source, c.pattern), c.findings)
-		c.findings = added
+		findings = addFindings(findings, groupKey(c.source, c.pattern), c.findings)
 		contributions = append(contributions, c)
 	}
 	r.outcomes = outcomes
@@ -434,24 +450,22 @@ func groupIndex(outcomes []reviewOutcome, source, pattern string) int {
 	return -1
 }
 
-// addFindings adds the findings the cache does not hold yet. It
-// returns the new cache and the findings it took.
+// addFindings adds the findings the cache does not hold yet and
+// returns the new cache.
 //
 // A finding's identity is the group that reported it, the path and
 // the content. The line and the severity are not part of it: the
 // same problem reported again with a different line is the same
 // problem. Two groups reporting the same path and content are two
 // findings — each group's word is its own.
-func addFindings(findings []reviewFinding, key string, add []agent.ReviewFinding) ([]reviewFinding, []agent.ReviewFinding) {
-	var added []agent.ReviewFinding
+func addFindings(findings []reviewFinding, key string, add []agent.ReviewFinding) []reviewFinding {
 	for _, f := range add {
 		if holdsFinding(findings, key, f) {
 			continue
 		}
 		findings = append(findings, reviewFinding{groupKey: key, finding: f})
-		added = append(added, f)
 	}
-	return findings, added
+	return findings
 }
 
 // holdsFinding reports whether the cache already holds the finding.
@@ -544,7 +558,7 @@ func (r reviewRecord) unparsedGroups() int {
 		contributions := 0
 		readable := false
 		for _, c := range r.contributions {
-			if c.source != o.source || c.pattern != o.pattern {
+			if c.source != o.source || c.pattern != o.pattern || c.delivered {
 				continue
 			}
 			contributions++
@@ -559,86 +573,144 @@ func (r reviewRecord) unparsedGroups() int {
 	return n
 }
 
-// groupOrder returns the identities of the record's groups in the
-// order the merged document lists them: the plan's order first, the
-// groups the plan did not name last.
-func (r reviewRecord) groupOrder() []string {
-	var keys []string
+// groupOrder returns the record's groups in the order the merged
+// document lists them: the plan's order first, the groups the plan
+// did not name last.
+func (r reviewRecord) groupOrder() []groupRef {
+	var groups []groupRef
 	seen := make(map[string]bool, len(r.outcomes))
-	for _, g := range r.plan {
-		key := groupKey(g.Source, g.Pattern)
-		if seen[key] || r.indexOfGroup(g.Source, g.Pattern) < 0 {
-			continue
+	add := func(source, pattern string) {
+		key := groupKey(source, pattern)
+		if seen[key] {
+			return
 		}
 		seen[key] = true
-		keys = append(keys, key)
+		groups = append(groups, groupRef{source: source, pattern: pattern})
+	}
+	for _, g := range r.plan {
+		add(g.Source, g.Pattern)
 	}
 	for _, o := range r.outcomes {
-		key := groupKey(o.source, o.pattern)
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		keys = append(keys, key)
+		add(o.source, o.pattern)
 	}
-	return keys
+	for _, c := range r.contributions {
+		add(c.source, c.pattern)
+	}
+	return groups
 }
 
-// contributingTexts returns the outputs of a group that belong in
-// the merged document: the group's first output, and every output
-// after it that brought a finding the cache did not hold yet.
+// groupRef names one group of the record.
+type groupRef struct {
+	source  string
+	pattern string
+}
+
+// contributingOutputs returns the outputs of a group that belong in
+// the merged document.
 //
-// An output that only repeats what the agent already heard would
-// double the agent's input without adding anything.
-func (r reviewRecord) contributingTexts(source, pattern string) []string {
-	var texts []string
-	first := true
+// The group's latest output is its current word and always belongs in.
+// An earlier output joins it only when it carries a finding the later
+// outputs do not have: an output that only repeats what the agent
+// already heard would double the agent's input without adding
+// anything.
+//
+// A delivered output belongs nowhere: the agent has it.
+func (r reviewRecord) contributingOutputs(source, pattern string) []reviewContribution {
+	var undelivered []reviewContribution
 	for _, c := range r.contributions {
-		if c.source != source || c.pattern != pattern {
+		if c.source != source || c.pattern != pattern || c.delivered {
 			continue
 		}
-		if !first && len(c.findings) == 0 {
-			continue
-		}
-		first = false
-		texts = append(texts, c.text)
+		undelivered = append(undelivered, c)
 	}
-	return texts
+	var kept []reviewContribution
+	for i, c := range undelivered {
+		if i < len(undelivered)-1 && !carriesOwnFinding(undelivered[i+1:], c.findings) {
+			continue
+		}
+		kept = append(kept, c)
+	}
+	return kept
+}
+
+// carriesOwnFinding reports whether the findings include one the
+// later outputs do not carry.
+func carriesOwnFinding(later []reviewContribution, findings []agent.ReviewFinding) bool {
+	for _, f := range findings {
+		carried := false
+		for _, c := range later {
+			for _, g := range c.findings {
+				if g.Path == f.Path && g.Content == f.Content {
+					carried = true
+				}
+			}
+		}
+		if !carried {
+			return true
+		}
+	}
+	return false
 }
 
 // mergedDocument renders the review's merged document from the
 // record: one section per group, the group's own output under its
 // header.
 func (r reviewRecord) mergedDocument() string {
-	sections := make([]agent.ReviewGroupSection, 0, len(r.outcomes))
-	for _, key := range r.groupOrder() {
-		i := r.indexOfGroupByKey(key)
-		if i < 0 {
-			continue
-		}
-		o := r.outcomes[i]
-		section := agent.ReviewGroupSection{
-			Pattern: o.pattern,
-			Files:   o.files,
-			Err:     o.err,
-		}
-		if o.err == nil {
-			section.Texts = r.contributingTexts(o.source, o.pattern)
-		}
-		sections = append(sections, section)
-	}
-	return agent.MergeReviewDocument(sections)
+	return agent.MergeReviewDocument(r.sections())
 }
 
-// indexOfGroupByKey returns the position of the group with the given
-// identity in the record, or -1 when the record does not know it.
-func (r reviewRecord) indexOfGroupByKey(key string) int {
-	for i, o := range r.outcomes {
-		if groupKey(o.source, o.pattern) == key {
-			return i
+// sections builds the merged document's sections: one per group that
+// has something to say.
+//
+// A group that finished carries the outputs the agent has not seen
+// yet; a group that failed carries the error that ended it. A group
+// whose output already reached the agent carries nothing — the agent
+// has it.
+func (r reviewRecord) sections() []agent.ReviewGroupSection {
+	var sections []agent.ReviewGroupSection
+	for _, g := range r.groupOrder() {
+		outputs := r.contributingOutputs(g.source, g.pattern)
+		state, known := r.stateOf(g.source, g.pattern)
+		switch {
+		case len(outputs) > 0:
+			texts := make([]string, 0, len(outputs))
+			for _, c := range outputs {
+				texts = append(texts, c.text)
+			}
+			sections = append(sections, agent.ReviewGroupSection{
+				Pattern: g.pattern,
+				Files:   state.files,
+				Texts:   texts,
+			})
+		case known && state.err != nil:
+			sections = append(sections, agent.ReviewGroupSection{
+				Pattern: g.pattern,
+				Files:   state.files,
+				Err:     state.err,
+			})
 		}
 	}
-	return -1
+	return sections
+}
+
+// deliveredContributions returns the contributions the merged document
+// carries: they are the ones that reach the agent.
+func (r reviewRecord) deliveredContributions() []reviewContribution {
+	var delivered []reviewContribution
+	for _, g := range r.groupOrder() {
+		delivered = append(delivered, r.contributingOutputs(g.source, g.pattern)...)
+	}
+	return delivered
+}
+
+// stateOf returns the state of a group, and whether the record knows
+// the group at all.
+func (r reviewRecord) stateOf(source, pattern string) (reviewOutcome, bool) {
+	i := groupIndex(r.outcomes, source, pattern)
+	if i < 0 {
+		return reviewOutcome{}, false
+	}
+	return r.outcomes[i], true
 }
 
 // mergeReviewPlan merges a run's plan into the accumulated plan.
@@ -669,12 +741,26 @@ func mergeReviewPlan(base, add []agent.ReviewPlanGroup) []agent.ReviewPlanGroup 
 // every group it ran, what the groups that finished said, and the
 // plan that named them.
 type reviewRun struct {
+	// id is the round the run belongs to. The rounds are numbered in
+	// the order they started, so a run that started earlier never
+	// overwrites the state a newer round found.
+	id uint64
+	// notes are the run-level notices of the run.
+	notes []string
 	// outcomes holds one entry per group the run ran.
 	outcomes []reviewOutcome
 	// contributions holds one entry per group that finished.
 	contributions []reviewContribution
 	// plan is the group list the run reported.
 	plan []agent.ReviewPlanGroup
+}
+
+// newRound numbers a review round: the id says how old the round is.
+func (f *Factory) newRound() uint64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nextID++
+	return f.nextID
 }
 
 // record folds a run's results into the chat's review record and

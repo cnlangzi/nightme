@@ -90,10 +90,14 @@ func (f *Factory) deliver(d reviewDelivery) {
 		sendReviewLine(d.ctx, d.emitter, d.chatID, d.replyTo, d.runner, d.notice)
 	}
 
-	// The verdict line — the last thing the review itself sends. It
-	// goes out BEFORE the injected turn: the main agent starts
-	// answering as soon as the turn is injected, and the verdict
-	// must not land after the answer it summarizes.
+	// The verdict line — the review's own report of the run. It goes
+	// out BEFORE the injected turn: the main agent starts answering
+	// as soon as the turn is injected, and the verdict must not land
+	// after the answer it summarizes.
+	//
+	// A failed injection sends one more line after it: the verdict
+	// says the review found its findings, the delivery line says the
+	// agent never received them.
 	//
 	// A review that is not over yet carries no table: the table is
 	// the review's report, and a partial report reads as a final
@@ -179,20 +183,26 @@ func (f *Factory) deliver(d reviewDelivery) {
 // injectionRefusalLine renders the reason the injection was refused,
 // for the chat.
 //
-// Only a refusal that names a way out earns a line: a turn that is
-// merely busy is worth waiting out and says nothing the user can
-// act on, while a turn that has stopped making progress is worth
-// ending and the user needs to know which commands end it.
+// Every refusal earns a line: the findings were produced and the
+// agent never received them, and the structured outcome is not
+// rendered to humans — messages.OutMessageSettled never reaches the
+// chat. A silent failure would leave the user believing the agent
+// is already fixing what the review found.
 //
-// The line rides the review's own chat path (messages.OutReply)
-// because the structured outcome is not rendered to humans —
-// messages.OutMessageSettled never reaches the chat.
+// A stalled turn names the commands that end it; a busy one says the
+// turn is worth waiting out.
+//
+// The line rides the review's own chat path (messages.OutReply).
 func injectionRefusalLine(err error) string {
 	var refused *agentsession.InjectionRefused
-	if !errors.As(err, &refused) || !refused.Stalled {
+	if !errors.As(err, &refused) {
 		return ""
 	}
-	return "The findings were not delivered: " + refused.Reason + "."
+	if !refused.Stalled {
+		return "The findings were not delivered to the agent: " + refused.Reason +
+			". They stay in the review record — run /review again to hand them over."
+	}
+	return "The findings were not delivered to the agent: " + refused.Reason + "."
 }
 
 // report tells the message what the run did.

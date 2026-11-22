@@ -120,13 +120,22 @@ func TestHandle_StalledInjectionNamesTheWayOut(t *testing.T) {
 
 // TestHandle_BusyInjectionNamesNoCommand — a busy turn is worth
 // waiting out, so the review does not send the user chasing a
-// command.
+// command. It still says the findings did not reach the agent: the
+// verdict line reports the review, and the delivery line reports the
+// delivery.
 func TestHandle_BusyInjectionNamesNoCommand(t *testing.T) {
 	em := runReviewWithDriver(t, &busyDriver{}, "review-busy-chat")
 
+	said := false
 	for _, msg := range em.messages() {
 		if strings.Contains(msg.Text, "/stop") {
 			t.Fatalf("a busy turn produced a line naming /stop: %q", msg.Text)
 		}
+		if msg.Kind == messages.OutReply && strings.Contains(msg.Text, "not delivered") {
+			said = true
+		}
+	}
+	if !said {
+		t.Fatalf("the busy refusal told the user nothing: %+v", em.messages())
 	}
 }

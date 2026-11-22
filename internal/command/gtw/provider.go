@@ -617,7 +617,8 @@ var ErrCLINotInstalled = errors.New("gtw: provider CLI not installed")
 // Distinct from ErrCLINotInstalled on purpose. The binary IS on the
 // machine, so the "brew install gh" hint sends the user after the
 // wrong thing — and the spawn failure it hides reads as a missing
-// file, because the ENOENT it carries names the binary.
+// file, because it is an ENOENT about a path that exists: the
+// working directory the CLI was bound to.
 var ErrCLICannotStart = errors.New("gtw: provider CLI cannot start")
 
 // ErrStaleUpstream is returned by GitHub/GitLab providers when
@@ -1145,8 +1146,8 @@ func redactForDisplay(remoteURL string) string {
 // `prober` may be nil; production uses ExecHTTPProber{} with a
 // defaultProbeTimeout budget per scheme attempt. Tests inject a fake
 // that returns canned JSON.
-func Detect(ctx context.Context, remoteURL string, prober HTTPProber, worktree string) (GitProvider, error) {
-	prov, _, err := detect(ctx, remoteURL, prober, worktree)
+func Detect(ctx context.Context, remoteURL string, prober HTTPProber, dir string) (GitProvider, error) {
+	prov, _, err := detect(ctx, remoteURL, prober, dir)
 	return prov, err
 }
 
@@ -1156,7 +1157,7 @@ func Detect(ctx context.Context, remoteURL string, prober HTTPProber, worktree s
 // credential containing "gitlab" decides it — so it is not a property
 // of the host and must not be memoised host-wide. Only Stage B
 // answers, which is what ProviderCache stores.
-func detect(ctx context.Context, remoteURL string, prober HTTPProber, worktree string) (GitProvider, bool, error) {
+func detect(ctx context.Context, remoteURL string, prober HTTPProber, dir string) (GitProvider, bool, error) {
 	if prober == nil {
 		prober = &ExecHTTPProber{}
 	}
@@ -1173,9 +1174,9 @@ func detect(ctx context.Context, remoteURL string, prober HTTPProber, worktree s
 	lower := strings.ToLower(remoteURL)
 	switch {
 	case strings.Contains(lower, "github.com"):
-		return &GitHubProvider{host: host, Worktree: worktree}, false, nil
+		return &GitHubProvider{host: host, CLIDir: dir}, false, nil
 	case strings.Contains(lower, "gitlab"):
-		return &GitLabProvider{host: host, Worktree: worktree}, false, nil
+		return &GitLabProvider{host: host, CLIDir: dir}, false, nil
 	}
 
 	// Stage B · Live API probe (only when Stage A was ambiguous).
@@ -1191,7 +1192,7 @@ func detect(ctx context.Context, remoteURL string, prober HTTPProber, worktree s
 			Revision string `json:"revision"`
 		}
 		if json.Unmarshal(body, &v) == nil && (v.Version != "" || v.Revision != "") {
-			return &GitLabProvider{host: host, version: v.Version, Worktree: worktree}, true, nil
+			return &GitLabProvider{host: host, version: v.Version, CLIDir: dir}, true, nil
 		}
 		// Soft fingerprint: GitLab's auth/permission error envelope.
 		// /api/v4 is GitLab-only — GitHub Enterprise uses /api/v3, so
@@ -1204,7 +1205,7 @@ func detect(ctx context.Context, remoteURL string, prober HTTPProber, worktree s
 			Message string `json:"message"`
 		}
 		if json.Unmarshal(body, &env) == nil && env.Message != "" {
-			return &GitLabProvider{host: host, Worktree: worktree}, true, nil
+			return &GitLabProvider{host: host, CLIDir: dir}, true, nil
 		}
 	} else {
 		probeErrs = append(probeErrs, err)
@@ -1219,7 +1220,7 @@ func detect(ctx context.Context, remoteURL string, prober HTTPProber, worktree s
 			// GitLab answers 404 with a JSON envelope on
 			// /api/v3/meta, which would misclassify as GitHub.
 			if _, hasGH := meta["verifiable_password_authentication"]; hasGH {
-				return &GitHubProvider{host: host, Worktree: worktree}, true, nil
+				return &GitHubProvider{host: host, CLIDir: dir}, true, nil
 			}
 		}
 	} else {
@@ -1280,12 +1281,12 @@ func (e *unreachableError) Unwrap() []error {
 // and binds host + version in one call. Use NewProvider only when
 // the caller has already identified the kind (e.g. tests, or a
 // future "force provider" override flag).
-func NewProvider(kind ProviderKind, host, worktree string) (GitProvider, error) {
+func NewProvider(kind ProviderKind, host, dir string) (GitProvider, error) {
 	switch kind {
 	case ProviderGitHub:
-		return &GitHubProvider{host: host, Worktree: worktree}, nil
+		return &GitHubProvider{host: host, CLIDir: dir}, nil
 	case ProviderGitLab:
-		return &GitLabProvider{host: host, Worktree: worktree}, nil
+		return &GitLabProvider{host: host, CLIDir: dir}, nil
 	default:
 		return nil, ErrUnsupportedProvider
 	}
@@ -1515,9 +1516,10 @@ func probeOnce(ctx context.Context, cli *http.Client, url string) ([]byte, error
 // inject a fake; production delegates to runCmd (see exec.go).
 //
 // Note: this interface does NOT take a dir argument. Callers that
-// have a known worktree path should bind it via a wrapper (see
-// resolveProvider) so ExecCLIRunner.Dir is non-empty when invoked
-// — otherwise gh will inherit the daemon CWD, which can be stale.
+// know the directory the CLI belongs in should bind it via a wrapper
+// (see resolveProvider) so ExecCLIRunner.Dir is non-empty when
+// invoked — otherwise gh will inherit the daemon CWD, which can be
+// stale.
 type CLIRunner interface {
 	Run(ctx context.Context, name string, args ...string) (stdout, stderr string, err error)
 }
@@ -1535,10 +1537,11 @@ type ExecCLIRunner struct {
 // known workspace yet.
 //
 // A CLI that cannot start is reported as ErrCLICannotStart, naming
-// the directory it was bound to. The spawn failure it wraps says
-// "no such file or directory" about the BINARY, which reads as a
-// missing installation; the directory is the real cause, and the
-// caller needs to see it to know the CLI is installed.
+// the directory it was bound to. The spawn failure it wraps is an
+// ENOENT about a path that exists — Go 1.20 and later name the
+// directory ("chdir /gone: no such file or directory"), older
+// toolchains named the binary ("fork/exec /usr/bin/gh: no such file
+// or directory"), which is what read as a missing installation.
 func (e ExecCLIRunner) Run(ctx context.Context, name string, args ...string) (string, string, error) {
 	stdout, stderr, err := runCmd(ctx, e.Dir, name, args...)
 	if err == nil || !isCLIStartFailure(err) {
@@ -1560,14 +1563,17 @@ func (e ExecCLIRunner) Run(ctx context.Context, name string, args ...string) (st
 type GitHubProvider struct {
 	Runner CLIRunner
 
-	// Worktree is the working directory spawned gh/glab processes
-	// should run in. Set by resolveProvider from c.Worktree so gh
-	// doesn't fall back to the daemon CWD (which may have been
+	// CLIDir is the working directory spawned gh/glab processes
+	// should run in. The caller of resolveProvider decides it: the
+	// worktree for the commands that run inside one, the repository
+	// root for the ones that outlive it (/gtw close finalizes the
+	// pull request after the worktree is gone). Binding it keeps gh
+	// from falling back to the daemon CWD (which may have been
 	// stale'd since startup — see exec.go for the full rationale).
 	// Empty means "inherit parent CWD", matching the pre-fix
 	// behavior for callers that haven't yet discovered their
 	// workspace.
-	Worktree string
+	CLIDir string
 
 	host string
 
@@ -1592,7 +1598,7 @@ func (c *GitHubProvider) runner() CLIRunner {
 	if c.Runner != nil {
 		return c.Runner
 	}
-	return ExecCLIRunner{Dir: c.Worktree}
+	return ExecCLIRunner{Dir: c.CLIDir}
 }
 
 // GetIssue runs `gh issue view <id> --repo <owner>/<repo> --json ...`
@@ -2045,7 +2051,7 @@ func (c *GitHubProvider) FindOpenPRForBranch(ctx context.Context, owner, repo, h
 func (c *GitHubProvider) GetPR(ctx context.Context, owner, repo, head string) (*PR, error) {
 	stdout, stderr, err := c.listPRsForBranch(ctx, owner, repo, head, "open")
 	if err != nil {
-		return nil, fmt.Errorf("gh pr list --head %s: %v: %s", head, err, strings.TrimSpace(stderr))
+		return nil, fmt.Errorf("gh pr list --head %s: %w: %s", head, err, strings.TrimSpace(stderr))
 	}
 	return decodeGitHubPRList(stdout)
 }
@@ -2096,7 +2102,7 @@ func (c *GitHubProvider) ListPRLabels(ctx context.Context, owner, repo string, n
 	}
 	stdout, stderr, err := c.runner().Run(ctx, "gh", args...)
 	if err != nil {
-		return nil, fmt.Errorf("gh pr view --json labels: %v: %s", err, strings.TrimSpace(stderr))
+		return nil, fmt.Errorf("gh pr view --json labels: %w: %s", err, strings.TrimSpace(stderr))
 	}
 	var raw struct {
 		Labels []struct {
@@ -2122,7 +2128,7 @@ func (c *GitHubProvider) RemovePRLabel(ctx context.Context, owner, repo string, 
 		"--remove-label", label,
 	)
 	if err != nil {
-		return fmt.Errorf("gh pr edit --remove-label: %v: %s", err, stderr)
+		return fmt.Errorf("gh pr edit --remove-label: %w: %s", err, stderr)
 	}
 	return nil
 }
@@ -2276,9 +2282,9 @@ func isGHPRNotFound(stderr string) bool {
 type GitLabProvider struct {
 	Runner CLIRunner
 
-	// Worktree is the working directory spawned gh/glab processes
-	// should run in. See GitHubProvider.Worktree for the rationale.
-	Worktree string
+	// CLIDir is the working directory spawned gh/glab processes
+	// should run in. See GitHubProvider.CLIDir for the rationale.
+	CLIDir string
 
 	host    string
 	version string
@@ -2340,7 +2346,7 @@ func (c *GitLabProvider) GetPR(ctx context.Context, owner, repo, head string) (*
 	}
 	stdout, stderr, err := c.runner().Run(ctx, "glab", args...)
 	if err != nil {
-		return nil, fmt.Errorf("glab mr list --source-branch %s: %v: %s", head, err, strings.TrimSpace(stderr))
+		return nil, fmt.Errorf("glab mr list --source-branch %s: %w: %s", head, err, strings.TrimSpace(stderr))
 	}
 	return decodeGitLabMRList(stdout)
 }
@@ -2378,7 +2384,7 @@ func (c *GitLabProvider) ListPRLabels(ctx context.Context, owner, repo string, n
 	path := fmt.Sprintf("projects/%s/merge_requests/%d", projectPath, number)
 	stdout, stderr, err := c.runner().Run(ctx, "glab", "api", path)
 	if err != nil {
-		return nil, fmt.Errorf("glab api merge request %d: %v: %s", number, err, strings.TrimSpace(stderr))
+		return nil, fmt.Errorf("glab api merge request %d: %w: %s", number, err, strings.TrimSpace(stderr))
 	}
 	var raw struct {
 		Labels []string `json:"labels"`
@@ -2398,7 +2404,7 @@ func (c *GitLabProvider) RemovePRLabel(ctx context.Context, owner, repo string, 
 		"--unlabel", label,
 	)
 	if err != nil {
-		return fmt.Errorf("glab mr update --unlabel: %v: %s", err, stderr)
+		return fmt.Errorf("glab mr update --unlabel: %w: %s", err, stderr)
 	}
 	return nil
 }
@@ -2550,7 +2556,7 @@ func (c *GitLabProvider) runner() CLIRunner {
 	if c.Runner != nil {
 		return c.Runner
 	}
-	return ExecCLIRunner{Dir: c.Worktree}
+	return ExecCLIRunner{Dir: c.CLIDir}
 }
 
 // GetIssue runs `glab issue view <id> --output json`. Older glab

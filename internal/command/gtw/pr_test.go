@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os/exec"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
@@ -1789,6 +1791,43 @@ func TestDispatchPR_FindOpenPRErrCLINotInstalled(t *testing.T) {
 	}
 }
 
+// TestDispatchPR_FindOpenPRErrCLICannotStart — the CLI is there but
+// cannot start (the directory it was bound to is gone) →
+// ErrCLICannotStart → the reply names the directory, and must NOT
+// claim the CLI is missing.
+func TestDispatchPR_FindOpenPRErrCLICannotStart(t *testing.T) {
+	rig := newPRTestRig(t)
+	setupPRWorktree(t, rig, Context{Branch: "wt-no-gh"})
+	setupReadiness(rig, "wt-no-gh", messages.GitStatusSnapshot{
+		Branch:      "wt-no-gh",
+		HasUpstream: true,
+	})
+	rig.git.on("remote", "git@github.com:octocat/hello.git", "", nil)
+	rig.prov.SetFindOpenPRErr(fmt.Errorf("%w: gh (in /gone/worktree): %w", ErrCLICannotStart,
+		&fs.PathError{Op: "chdir", Path: "/gone/worktree", Err: syscall.ENOENT}))
+	rig.installDeps()
+
+	cs := rig.cs
+	s := captureCh(t, cs)
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, Config{})
+	if err != nil {
+		t.Fatalf("dispatchPR err: %v", err)
+	}
+	r := s.lastText()
+	if !strings.Contains(r, "cannot start") {
+		t.Fatalf("expected the CLI-cannot-start reason, got:\n%s", r)
+	}
+	if !strings.Contains(r, "/gone/worktree") {
+		t.Fatalf("expected the directory the CLI was bound to, got:\n%s", r)
+	}
+	if strings.Contains(r, "install via") {
+		t.Fatalf("the reply must not carry the install hint — the CLI is installed:\n%s", r)
+	}
+	if strings.Contains(r, "check existing PR") {
+		t.Fatalf("the reply must not blame the PR listing — the CLI never ran:\n%s", r)
+	}
+}
+
 // TestDispatchPR_FindOpenPRUnknownErrorPassThrough — unknown
 // FindOpenPRForBranch error propagates verbatim. The reply must
 // contain the raw err string and must NOT add a friendly hint
@@ -3222,7 +3261,7 @@ func (r *runGH) Run(_ context.Context, _ string, args ...string) (string, string
 
 func TestGitHubFindOpenPRForBranch_Success(t *testing.T) {
 	gh := &runGH{out: `[{"number":42,"url":"https://github.com/o/r/pull/42","state":"OPEN"}]`}
-	p := &GitHubProvider{Worktree: "/w", Runner: gh}
+	p := &GitHubProvider{CLIDir: "/w", Runner: gh}
 	pr, err := p.FindOpenPRForBranch(context.Background(), "octocat", "hello", "feat")
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -3244,7 +3283,7 @@ func TestGitHubFindOpenPRForBranch_Success(t *testing.T) {
 
 func TestGitHubFindOpenPRForBranch_EmptyList(t *testing.T) {
 	gh := &runGH{out: "[]"}
-	p := &GitHubProvider{Worktree: "/w", Runner: gh}
+	p := &GitHubProvider{CLIDir: "/w", Runner: gh}
 	pr, err := p.FindOpenPRForBranch(context.Background(), "octocat", "hello", "feat")
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -3256,7 +3295,7 @@ func TestGitHubFindOpenPRForBranch_EmptyList(t *testing.T) {
 
 func TestGitHubFindOpenPRForBranch_CLINotInstalled(t *testing.T) {
 	gh := &runGH{fail: &exec.Error{Name: "gh", Err: exec.ErrNotFound}}
-	p := &GitHubProvider{Worktree: "/w", Runner: gh}
+	p := &GitHubProvider{CLIDir: "/w", Runner: gh}
 	_, err := p.FindOpenPRForBranch(context.Background(), "octocat", "hello", "feat")
 	if !errors.Is(err, ErrCLINotInstalled) {
 		t.Fatalf("expected ErrCLINotInstalled, got %v", err)
@@ -3269,7 +3308,7 @@ func TestGitHubFindOpenPRForBranch_CLINotInstalled(t *testing.T) {
 // the GitLab side: argv shape + empty-list short-circuit.
 func TestGitLabFindOpenPRForBranch_EmptyList(t *testing.T) {
 	gh := &runGH{out: "[]"}
-	p := &GitLabProvider{Worktree: "/w", Runner: gh}
+	p := &GitLabProvider{CLIDir: "/w", Runner: gh}
 	pr, err := p.FindOpenPRForBranch(context.Background(), "acme", "demo", "feat")
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -3294,7 +3333,7 @@ func TestGitLabFindOpenPRForBranch_EmptyList(t *testing.T) {
 // opened MR is returned with the platform-normalised state.
 func TestGitLabFindOpenPRForBranch_Success(t *testing.T) {
 	gh := &runGH{out: `[{"iid":144062,"web_url":"https://gitlab.com/gitlab-com/www-gitlab-com/-/merge_requests/144062","state":"opened"}]`}
-	p := &GitLabProvider{Worktree: "/w", Runner: gh}
+	p := &GitLabProvider{CLIDir: "/w", Runner: gh}
 	pr, err := p.FindOpenPRForBranch(context.Background(), "gitlab-com", "www-gitlab-com", "workday-sync-team-page-2026-08-21-74")
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -3325,7 +3364,7 @@ func TestGitLabFindOpenPRForBranch_MultipleRows(t *testing.T) {
 		{"iid":100,"web_url":"https://gitlab.com/o/r/-/merge_requests/100","state":"opened"},
 		{"iid":101,"web_url":"https://gitlab.com/o/r/-/merge_requests/101","state":"opened"}
 	]`}
-	p := &GitLabProvider{Worktree: "/w", Runner: gh}
+	p := &GitLabProvider{CLIDir: "/w", Runner: gh}
 	pr, err := p.FindOpenPRForBranch(context.Background(), "o", "r", "feat")
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -3340,7 +3379,7 @@ func TestGitLabFindOpenPRForBranch_MultipleRows(t *testing.T) {
 // the same way the GitHub path does.
 func TestGitLabFindOpenPRForBranch_CLINotInstalled(t *testing.T) {
 	gh := &runGH{fail: &exec.Error{Name: "glab", Err: exec.ErrNotFound}}
-	p := &GitLabProvider{Worktree: "/w", Runner: gh}
+	p := &GitLabProvider{CLIDir: "/w", Runner: gh}
 	_, err := p.FindOpenPRForBranch(context.Background(), "o", "r", "feat")
 	if !errors.Is(err, ErrCLINotInstalled) {
 		t.Fatalf("expected ErrCLINotInstalled, got %v", err)
@@ -3351,7 +3390,7 @@ func TestGitLabFindOpenPRForBranch_CLINotInstalled(t *testing.T) {
 // with no error.
 func TestGitLabGetPR_EmptyList(t *testing.T) {
 	gh := &runGH{out: "[]"}
-	p := &GitLabProvider{Worktree: "/w", Runner: gh}
+	p := &GitLabProvider{CLIDir: "/w", Runner: gh}
 	pr, err := p.GetPR(context.Background(), "o", "r", "feat")
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -3365,7 +3404,7 @@ func TestGitLabGetPR_EmptyList(t *testing.T) {
 // platform-normalised state.
 func TestGitLabGetPR_Success(t *testing.T) {
 	gh := &runGH{out: `[{"iid":144062,"web_url":"https://gitlab.com/gitlab-com/www-gitlab-com/-/merge_requests/144062","state":"opened"}]`}
-	p := &GitLabProvider{Worktree: "/w", Runner: gh}
+	p := &GitLabProvider{CLIDir: "/w", Runner: gh}
 	pr, err := p.GetPR(context.Background(), "gitlab-com", "www-gitlab-com", "workday-sync-team-page-2026-08-21-74")
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -3387,7 +3426,7 @@ func TestGitLabGetPR_Success(t *testing.T) {
 // default to "open" so the footer doesn't render an empty state.
 func TestGitLabFindOpenPRForBranch_BlankStateDefaultsToOpen(t *testing.T) {
 	gh := &runGH{out: `[{"iid":7,"web_url":"https://gitlab.com/o/r/-/merge_requests/7","state":""}]`}
-	p := &GitLabProvider{Worktree: "/w", Runner: gh}
+	p := &GitLabProvider{CLIDir: "/w", Runner: gh}
 	pr, err := p.FindOpenPRForBranch(context.Background(), "o", "r", "feat")
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -3412,7 +3451,7 @@ func TestGitLabArgv_NoStateFlag(t *testing.T) {
 	for _, name := range []string{"FindOpenPRForBranch", "GetPR"} {
 		t.Run(name, func(t *testing.T) {
 			gh := &runGH{out: "[]"}
-			p := &GitLabProvider{Worktree: "/w", Runner: gh}
+			p := &GitLabProvider{CLIDir: "/w", Runner: gh}
 			var err error
 			switch name {
 			case "FindOpenPRForBranch":
@@ -3473,7 +3512,7 @@ func TestGitLabParseMRList_SchemaPinFromGlab182(t *testing.T) {
 		}
 	]`
 	gh := &runGH{out: sample}
-	p := &GitLabProvider{Worktree: "/w", Runner: gh}
+	p := &GitLabProvider{CLIDir: "/w", Runner: gh}
 	pr, err := p.FindOpenPRForBranch(context.Background(), "gitlab-com", "www-gitlab-com", "workday-sync-team-page-2026-08-21-74")
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -3518,7 +3557,7 @@ func TestGitLabParseMRList_SchemaPinFromGlab182(t *testing.T) {
 // NIGHTME_REAL_GLAB=1).
 func TestGitLabArgvPin_NoStateFlag_AgainstWWWGitLabComOwnerRepo(t *testing.T) {
 	gh := &runGH{out: "[]"}
-	p := &GitLabProvider{Worktree: "/w", Runner: gh}
+	p := &GitLabProvider{CLIDir: "/w", Runner: gh}
 	_, err := p.FindOpenPRForBranch(context.Background(), "gitlab-com", "www-gitlab-com", "chore-docs-init")
 	if err != nil {
 		t.Fatalf("err: %v", err)

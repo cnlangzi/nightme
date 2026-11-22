@@ -251,13 +251,20 @@ func dispatchPR(
 	existing, err := provider.FindOpenPRForBranch(ctx, owner, repo, c.Branch)
 	if err != nil {
 		// FindOpenPRForBranch can return ErrCLINotInstalled (when
-		// gh/glab is missing) — the "check existing PR" prefix
-		// would mislead the user about the actual problem, so
-		// surface the install hint without a gate-2 prefix.
+		// gh/glab is missing) or ErrCLICannotStart (when the CLI
+		// is there but cannot start — the directory it was bound to
+		// is gone) — the "check existing PR" prefix would mislead
+		// the user about the actual problem, so surface the cause
+		// without a gate-2 prefix.
 		if errors.Is(err, ErrCLINotInstalled) {
 			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 				withWarning(fmt.Sprintf("❌ %v", err)),
 				command.FailedOutcome("error", "the git host CLI is not installed")), nil
+		}
+		if errors.Is(err, ErrCLICannotStart) {
+			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+				withWarning(fmt.Sprintf("❌ %v", err)),
+				command.FailedOutcome("error", "the git host CLI could not start")), nil
 		}
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			withWarning(fmt.Sprintf("❌ check existing PR: %v", err)),
@@ -435,6 +442,10 @@ func dispatchPR(
 			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 				withWarning(fmt.Sprintf("❌ %v", err)),
 				command.FailedOutcome("error", "the git host CLI is not installed")), nil
+		case errors.Is(err, ErrCLICannotStart):
+			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+				withWarning(fmt.Sprintf("❌ %v", err)),
+				command.FailedOutcome("error", "the git host CLI could not start")), nil
 		default:
 			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 				withWarning(fmt.Sprintf("❌ create PR failed: %v", err)),

@@ -363,3 +363,34 @@ silence the bridge's `[omp]` breadcrumb trail. Default ON.
 docs/primary-agent-detection.md §"Why PTY is not in Builtins").
 omp's transport is real stdio pipes, never PTY — `agent.go`
 spawns through `proc.New` and bypasses the pty bridge.
+
+---
+
+## 11. Liveness probe
+
+`driver.Ping` issues the `get_state` command — the same command the
+boot handshake uses:
+
+```json
+{"id":"req-000007","type":"get_state"}
+```
+
+omp answers it on the RPC envelope while a prompt is in flight:
+
+```json
+{"id":"req-000007","type":"response","command":"get_state","success":true,"data":{...}}
+```
+
+A rejected `get_state` (`success:false`) still counts as an answer:
+the CLI received the command and replied. Only the absence of a reply
+means "not responding".
+
+The answer is resolved from the RPC client's own pending map, so it
+never travels the event channel the runtime drains, and it never
+reaches the model's context.
+
+Measured against the real CLI (2026-11-22): 70 ms round trip.
+
+Tests: `internal/bridge/omp/ping_test.go` (fake CLI, probe answered
+mid-turn), `internal/bridge/omp/ping_real_unix_test.go` (real CLI,
+opt-in via `NIGHTME_REAL_OMP=1`).

@@ -336,3 +336,41 @@ driver.SetConfigOption(id, value string) (json.RawMessage, error)
 - `current_mode_update` / `config_option_update` 路由（等 opencode 1.19+ 稳定）
 - `Plan` → `EventAgentTaskCreate/Update` 路由
 - ACP spec v2 兼容（用 negotiated `protocolVersion` 分支）
+
+---
+
+## 8. Liveness probe
+
+`driver.Ping` asks the agent for a method it does not implement:
+
+```json
+{"jsonrpc":"2.0","id":7,"method":"__nightme_probe__","params":{}}
+```
+
+The agent answers with a JSON-RPC error — that error IS the answer:
+
+```json
+{"jsonrpc":"2.0","id":7,"error":{"code":-32601,"message":"\"Method not found\": __nightme_probe__"}}
+```
+
+The probe answers the question "is the agent still responsive", and
+only the absence of a reply means "not responding". An error response
+means the agent received the request, dispatched it and replied.
+
+The answer is resolved from the bridge's own pending-request map, so
+it never travels the event channel the runtime drains — the probe has
+to stay answerable when that channel is wedged. It never reaches the
+model's context.
+
+cursor, copilot and opencode share this driver and inherit the probe
+unchanged. Measured against the real CLIs (2026-11-22):
+
+| CLI | Probe answer | Round trip |
+|---|---|---|
+| `cursor-agent --force acp` | `-32601 "Method not found": __nightme_probe__` | 3 ms |
+| `copilot --allow-all-tools --acp --stdio` | `-32601 "Method not found": __nightme_probe__` | 1 ms |
+| `opencode acp` | `-32601 "Method not found": __nightme_probe__` | 1 ms |
+
+Tests: `internal/bridge/acp/ping_test.go` (fake agent over a pipe),
+`internal/bridge/{copilot,opencode,cursor}/ping_real_unix_test.go`
+(real CLIs, opt-in).

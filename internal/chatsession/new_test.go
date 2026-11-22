@@ -56,6 +56,10 @@ func (d *callRecordingASDriver) Keepalive(ctx context.Context, _ func(context.Co
 	return nil
 }
 
+// Ping answers the daemon's liveness probe. The fake is
+// responsive unless the test says otherwise.
+func (d *callRecordingASDriver) Ping(context.Context) error { return nil }
+
 // failingNewAS is a fake whose New always returns errInjected. Used to
 // exercise the partial-failure path.
 type failingNewAS struct {
@@ -86,6 +90,10 @@ func (d *failingNewASDriver) Close() error                    { return d.inner.C
 func (d *failingNewASDriver) Keepalive(ctx context.Context, _ func(context.Context) error) error {
 	return nil
 }
+
+// Ping answers the daemon's liveness probe. The fake is
+// responsive unless the test says otherwise.
+func (d *failingNewASDriver) Ping(context.Context) error { return nil }
 
 func (f *failingNewAS) New(_ context.Context) error { return errInjected }
 
@@ -510,6 +518,10 @@ func (d *restartErrASDriver) Close() error                    { return d.inner.C
 func (d *restartErrASDriver) Keepalive(ctx context.Context, _ func(context.Context) error) error {
 	return nil
 }
+
+// Ping answers the daemon's liveness probe. The fake is
+// responsive unless the test says otherwise.
+func (d *restartErrASDriver) Ping(context.Context) error { return nil }
 
 // fakeRestartSpawner is a minimal chatsession.Spawner that returns a
 // pre-built handle. The wrapper only needs Spawn(ctx, name, cwd, args,

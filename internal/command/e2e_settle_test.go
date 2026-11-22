@@ -195,6 +195,10 @@ func (d *settleDriver) Keepalive(context.Context, func(context.Context) error) e
 	return nil
 }
 
+// Ping answers the daemon's liveness probe. The fake is
+// responsive unless the test says otherwise.
+func (d *settleDriver) Ping(context.Context) error { return nil }
+
 // settleSpawner hands out agents that share one bridge.
 type settleSpawner struct {
 	bridge *settleBridge

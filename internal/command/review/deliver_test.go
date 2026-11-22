@@ -159,6 +159,10 @@ func (d *fanoutDriver) Keepalive(context.Context, func(context.Context) error) e
 	return nil
 }
 
+// Ping answers the daemon's liveness probe. The fake is
+// responsive unless the test says otherwise.
+func (d *fanoutDriver) Ping(context.Context) error { return nil }
+
 // TestHandle_ReviewWithAFailedGroupDeliversNothing: a group that
 // failed holds the review back — the card says what is missing, and
 // nothing reaches the agent.
@@ -382,6 +386,10 @@ func (d *failingDriver) Stop(context.Context) error  { return agent.ErrNotSuppor
 func (d *failingDriver) Keepalive(context.Context, func(context.Context) error) error {
 	return nil
 }
+
+// Ping answers the daemon's liveness probe. The fake is
+// responsive unless the test says otherwise.
+func (d *failingDriver) Ping(context.Context) error { return nil }
 
 // TestHandle_FailedInjectionReportsNotDelivered: the findings that
 // did not reach the agent are not reported as delivered — and they

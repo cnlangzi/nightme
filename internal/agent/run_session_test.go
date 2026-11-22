@@ -73,6 +73,10 @@ func (d *sessionFakeDriver) Keepalive(context.Context, func(context.Context) err
 	return nil
 }
 
+// Ping answers the daemon's liveness probe. The fake is
+// responsive unless the test says otherwise.
+func (d *sessionFakeDriver) Ping(context.Context) error { return nil }
+
 // sentBlocks returns the blocks the driver received.
 func (d *sessionFakeDriver) sentBlocks() []ContentBlock {
 	d.mu.Lock()

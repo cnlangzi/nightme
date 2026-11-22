@@ -49,6 +49,10 @@ func (d *recordingSendBlocksDriver) Keepalive(context.Context, func(context.Cont
 	return nil
 }
 
+// Ping answers the daemon's liveness probe. The fake is
+// responsive unless the test says otherwise.
+func (d *recordingSendBlocksDriver) Ping(context.Context) error { return nil }
+
 func (r *recordingSendBlocksAS) buildLive() *agent.Agent {
 	r.inner = &recordingSendBlocksDriver{inner: r}
 	return agent.NewAgent(

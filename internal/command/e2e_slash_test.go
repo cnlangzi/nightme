@@ -159,6 +159,10 @@ func (d *echoDriver) Keepalive(ctx context.Context, _ func(context.Context) erro
 	return nil
 }
 
+// Ping answers the daemon's liveness probe. The fake is
+// responsive unless the test says otherwise.
+func (d *echoDriver) Ping(context.Context) error { return nil }
+
 // echoSpawner is a Spawner that hands out fresh echoAgent instances.
 type echoSpawner struct {
 	mu      sync.Mutex

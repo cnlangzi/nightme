@@ -1163,3 +1163,7 @@ func (d *sessionDriver) Stop(context.Context) error  { return agent.ErrNotSuppor
 func (d *sessionDriver) Keepalive(context.Context, func(context.Context) error) error {
 	return nil
 }
+
+// Ping answers the daemon's liveness probe. The fake is
+// responsive unless the test says otherwise.
+func (d *sessionDriver) Ping(context.Context) error { return nil }

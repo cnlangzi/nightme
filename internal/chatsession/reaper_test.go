@@ -218,6 +218,10 @@ func (d *barrierDriver) Keepalive(context.Context, func(context.Context) error) 
 	return nil
 }
 
+// Ping answers the daemon's liveness probe. The fake is
+// responsive unless the test says otherwise.
+func (d *barrierDriver) Ping(context.Context) error { return nil }
+
 func (d *barrierDriver) Close() error {
 	d.barrier.enter()
 	return nil

@@ -132,6 +132,10 @@ func (d *timeoutFakeDriver) Keepalive(context.Context, func(context.Context) err
 	return nil
 }
 
+// Ping answers the daemon's liveness probe. The fake is
+// responsive unless the test says otherwise.
+func (d *timeoutFakeDriver) Ping(context.Context) error { return nil }
+
 // timeoutGroups are the two groups of the fan-out: one answers, one
 // never says a word.
 func timeoutGroups() []reviewGroup {

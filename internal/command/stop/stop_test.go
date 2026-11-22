@@ -41,6 +41,10 @@ func (s *stubStoppable) Close() error                  { return nil }
 func (s *stubStoppable) Keepalive(_ context.Context, _ func(context.Context) error) error {
 	return nil
 }
+
+// Ping answers the daemon's liveness probe. The fake is
+// responsive unless the test says otherwise.
+func (s *stubStoppable) Ping(context.Context) error { return nil }
 func (s *stubStoppable) Stop(_ context.Context) error {
 	s.stopped++
 	return s.stopErr

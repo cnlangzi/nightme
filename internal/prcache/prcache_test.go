@@ -39,7 +39,7 @@ func TestCache_WritePR_NilClears(t *testing.T) {
 	c.expiresAt = time.Now().Add(TTL)
 	c.mu.Unlock()
 
-	c.WritePR(nil)
+	c.WritePR(nil, "")
 
 	c.mu.Lock()
 	gotPR := c.pr
@@ -58,12 +58,12 @@ func TestCache_WritePR_NilClears(t *testing.T) {
 }
 
 // TestCache_WritePR_NonNilSets verifies the non-nil branch:
-// pr is stored, expiresAt is reset to now+TTL, branch is
-// intentionally left untouched.
+// pr is stored, expiresAt is reset to now+TTL, and the branch the
+// PR belongs to is recorded with it.
 func TestCache_WritePR_NonNilSets(t *testing.T) {
 	c := &Cache{}
-	// Pre-populate branch + an old expiresAt to confirm
-	// WritePR only touches pr + expiresAt.
+	// Pre-populate branch + an old expiresAt to confirm WritePR
+	// replaces both pr and branch.
 	c.mu.Lock()
 	c.branch = "feature/old"
 	c.expiresAt = time.Time{}
@@ -71,7 +71,7 @@ func TestCache_WritePR_NonNilSets(t *testing.T) {
 
 	newPR := &messages.PR{Number: 42, URL: "https://example/pr/42", State: "open"}
 	before := time.Now()
-	c.WritePR(newPR)
+	c.WritePR(newPR, "feature/new")
 	after := time.Now()
 
 	c.mu.Lock()
@@ -82,14 +82,75 @@ func TestCache_WritePR_NonNilSets(t *testing.T) {
 	if gotPR == nil || gotPR.Number != 42 {
 		t.Errorf("after WritePR, PR = %+v, want {Number:42}", gotPR)
 	}
-	if gotBranch != "feature/old" {
-		t.Errorf("WritePR touched branch = %q, want unchanged %q", gotBranch, "feature/old")
+	if gotBranch != "feature/new" {
+		t.Errorf("after WritePR, branch = %q, want %q", gotBranch, "feature/new")
 	}
 	// expiresAt must be in (before+TTL - slop, after+TTL + slop).
 	low := before.Add(TTL)
 	high := after.Add(TTL)
 	if gotExpires.Before(low) || gotExpires.After(high.Add(50*time.Millisecond)) {
 		t.Errorf("expiresAt = %v, want within [%v, %v]", gotExpires, low, high)
+	}
+}
+
+// TestCache_PRForBranch_MatchesItsOwnBranch covers the branch
+// bookkeeping: a write records the branch the PR belongs to, and
+// the branch-scoped read hands the PR back to that branch.
+func TestCache_PRForBranch_MatchesItsOwnBranch(t *testing.T) {
+	c := &Cache{}
+	c.WritePR(&messages.PR{Number: 42, URL: "https://example/pr/42", State: "open"}, "feature/x")
+
+	got := c.PRForBranch("feature/x")
+	if got == nil || got.Number != 42 {
+		t.Errorf("PRForBranch(feature/x) = %+v, want {Number:42}", got)
+	}
+}
+
+// TestCache_PRForBranch_RejectsAnotherBranch covers the other
+// half: the PR of another branch does not answer for this one.
+//
+// /gtw close reads through this port, and a workspace whose cached
+// PR belongs to another branch must not have that PR's labels taken
+// off when a different branch is closed.
+func TestCache_PRForBranch_RejectsAnotherBranch(t *testing.T) {
+	c := &Cache{}
+	c.WritePR(&messages.PR{Number: 42, URL: "https://example/pr/42", State: "open"}, "feature/x")
+
+	if got := c.PRForBranch("feature/y"); got != nil {
+		t.Errorf("PRForBranch(feature/y) = %+v, want nil — the cached PR is feature/x's", got)
+	}
+	if got := c.PRForBranch(""); got != nil {
+		t.Errorf("PRForBranch(\"\") = %+v, want nil", got)
+	}
+}
+
+// TestRegistry_PRForBranch_DoesNotAllocate pins that the read port
+// leaves no cache entry behind: a lookup that misses must not
+// create a workspace nobody stamped.
+func TestRegistry_PRForBranch_DoesNotAllocate(t *testing.T) {
+	r := &Registry{}
+
+	if got := r.PRForBranch("/never/stamped", "feature/x"); got != nil {
+		t.Errorf("PRForBranch on an unknown cwd = %+v, want nil", got)
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if len(r.caches) != 0 {
+		t.Errorf("PRForBranch allocated %d cache entries, want 0", len(r.caches))
+	}
+}
+
+// TestRegistry_PRForBranch_ReadsTheWrittenEntry covers the write /
+// read round-trip through the Registry.
+func TestRegistry_PRForBranch_ReadsTheWrittenEntry(t *testing.T) {
+	r := &Registry{}
+	r.WritePR("/w", &messages.PR{Number: 7, URL: "https://example/pr/7", State: "open"}, "feature/x")
+
+	if got := r.PRForBranch("/w", "feature/x"); got == nil || got.Number != 7 {
+		t.Errorf("PRForBranch = %+v, want {Number:7}", got)
+	}
+	if got := r.PRForBranch("/w", "feature/y"); got != nil {
+		t.Errorf("PRForBranch for another branch = %+v, want nil", got)
 	}
 }
 
@@ -148,7 +209,7 @@ func TestCache_WritePR_CancelsInflightRefresh(t *testing.T) {
 
 	// T2: simulate /gtw pr's WritePR.
 	newPR := &messages.PR{Number: 42, URL: "https://example/pr/42", State: "open"}
-	c.WritePR(newPR)
+	c.WritePR(newPR, "feature/new")
 
 	// T3/T4: release the resolver — it should observe
 	// ctx.Err() (cancelled) and bail without writing.
@@ -190,7 +251,7 @@ func TestCache_WritePR_NilCancelsInflightRefresh(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 
 	// /gtw close's WritePR(nil).
-	c.WritePR(nil)
+	c.WritePR(nil, "")
 
 	close(release)
 	time.Sleep(50 * time.Millisecond)
@@ -368,8 +429,8 @@ func TestRegistry_GetOrCreate_AllocatesOnce(t *testing.T) {
 // docstring for the rationale.
 func TestRegistry_WritePR_AllocatesOnUnknown(t *testing.T) {
 	r := &Registry{}
-	r.WritePR("/work/never-stamped", &messages.PR{Number: 1, URL: "https://example/pr/1", State: "open"})
-	r.WritePR("/work/never-stamped-2", nil)
+	r.WritePR("/work/never-stamped", &messages.PR{Number: 1, URL: "https://example/pr/1", State: "open"}, "main")
+	r.WritePR("/work/never-stamped-2", nil, "")
 
 	// Both cwd-keyed entries must exist; the second WritePR
 	// must clear the freshly-allocated cache so PR() is nil.
@@ -391,15 +452,15 @@ func TestRegistry_WritePR_AllocatesOnUnknown(t *testing.T) {
 func TestRegistry_WritePR_RoutesToAllocatedCache(t *testing.T) {
 	r := &Registry{}
 	c := r.GetOrCreate("as-1")
-	c.WritePR(&messages.PR{Number: 9, URL: "https://example/pr/9", State: "open"})
+	c.WritePR(&messages.PR{Number: 9, URL: "https://example/pr/9", State: "open"}, "as-branch")
 
-	r.WritePR("as-1", &messages.PR{Number: 11, URL: "https://example/pr/11", State: "open"})
+	r.WritePR("as-1", &messages.PR{Number: 11, URL: "https://example/pr/11", State: "open"}, "as-branch")
 
 	if got := c.PR(); got == nil || got.Number != 11 {
 		t.Errorf("after Registry.WritePR, c.PR() = %+v, want {Number:11}", got)
 	}
 
-	r.WritePR("as-1", nil)
+	r.WritePR("as-1", nil, "")
 	if got := c.PR(); got != nil {
 		t.Errorf("after Registry.WritePR(nil), c.PR() = %+v, want nil", got)
 	}
@@ -435,9 +496,9 @@ func TestCache_ConcurrentGetAndWritePR(t *testing.T) {
 			defer wg.Done()
 			for j := 0; j < 50; j++ {
 				if i%2 == 0 {
-					c.WritePR(&messages.PR{Number: i*1000 + j, URL: "x", State: "open"})
+					c.WritePR(&messages.PR{Number: i*1000 + j, URL: "x", State: "open"}, "main")
 				} else {
-					c.WritePR(nil)
+					c.WritePR(nil, "")
 				}
 				ops.Add(1)
 			}

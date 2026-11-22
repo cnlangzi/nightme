@@ -169,10 +169,7 @@ func TestPumpStream_TaskNotification_MissingStatus_Stopped(t *testing.T) {
 // at most bgTaskTableSize tasks and drops the least recently used one
 // to make room.
 func TestBgTaskTable_Capacity(t *testing.T) {
-	table, err := newBgTaskTable()
-	if err != nil {
-		t.Fatalf("newBgTaskTable: %v", err)
-	}
+	table := newBgTaskTable()
 	for i := range bgTaskTableSize + 1 {
 		table.put(bgTask{
 			ID:          fmt.Sprintf("task-%03d", i),
@@ -195,10 +192,7 @@ func TestBgTaskTable_Capacity(t *testing.T) {
 // task whose table entry was evicted: the notice names the task by
 // its id.
 func TestBgTaskFinished_EvictedTask_UsesTaskID(t *testing.T) {
-	table, err := newBgTaskTable()
-	if err != nil {
-		t.Fatalf("newBgTaskTable: %v", err)
-	}
+	table := newBgTaskTable()
 	state := &streamState{bgTasks: table}
 	for i := range bgTaskTableSize + 1 {
 		table.put(bgTask{

@@ -127,11 +127,9 @@ type streamEvent struct {
 	// delegates. task_started opens a task, task_notification closes
 	// it. TaskID names the task across the two frames.
 	TaskID         string `json:"task_id,omitempty"`
-	RunID          string `json:"run_id,omitempty"`
 	IsBackgrounded bool   `json:"is_backgrounded,omitempty"`
 	Status         string `json:"status,omitempty"`
 	Description    string `json:"description,omitempty"`
-	TaskType       string `json:"task_type,omitempty"`
 
 	// Summary is the CLI's one-line report of what the task did. It
 	// arrives with the task's completion frame.
@@ -161,8 +159,7 @@ type assistantMsg struct {
 // turn for every background task that finished and marks that turn's
 // result with kind "task-notification".
 type resultOrigin struct {
-	Kind  string `json:"kind,omitempty"`
-	RunID string `json:"runId,omitempty"`
+	Kind string `json:"kind,omitempty"`
 }
 
 // notificationOriginKind is the origin kind of the turn the CLI opens
@@ -294,16 +291,9 @@ func pumpStream(
 		pendingTools: make(map[string]pendingTool),
 		tasks:        make(map[string]agent.AgentTaskItem),
 		turnActive:   turnActive,
-	}
-	// The task table names a task in the notice that reports it
-	// finished. A table the library refuses leaves the bridge
-	// without notices rather than with a broken table.
-	if table, err := newBgTaskTable(); err != nil {
-		if logger != nil {
-			logger.Warn("claudecode: background task table unavailable", "err", err)
-		}
-	} else {
-		state.bgTasks = table
+		// The task table names a task in the notice that reports it
+		// finished.
+		bgTasks: newBgTaskTable(),
 	}
 
 	for scanner.Scan() {
@@ -383,17 +373,11 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 		switch ev.Subtype {
 		case "task_started":
 			if notice, ok := state.bgTaskStarted(ev); ok {
-				events <- agent.AgentEvent{
-					Kind: agent.EventAgentNotice,
-					Text: notice,
-				}
+				emitNotice(events, notice)
 			}
 		case "task_notification":
 			if notice, ok := state.bgTaskFinished(ev); ok {
-				events <- agent.AgentEvent{
-					Kind: agent.EventAgentNotice,
-					Text: notice,
-				}
+				emitNotice(events, notice)
 			}
 		}
 
@@ -715,6 +699,16 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 		if logger != nil {
 			logger.Debug("claudecode: unknown event type", "type", ev.Type)
 		}
+	}
+}
+
+// emitNotice posts a notice about the session to the chat. A notice
+// is the bridge's own report — a background subagent having started,
+// say — and it says nothing about the turn in flight.
+func emitNotice(events chan<- agent.AgentEvent, text string) {
+	events <- agent.AgentEvent{
+		Kind: agent.EventAgentNotice,
+		Text: text,
 	}
 }
 

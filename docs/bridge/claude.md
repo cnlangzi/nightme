@@ -297,9 +297,9 @@ bridge 把后台 subagent 报成 chat 里两条普通回复（`EventAgentNotice`
 任何时候都不扣主回合的帧。
 
 **task 表**：bridge 内存里一张 task 表（`internal/bridge/claudecode/bgtask.go`），键是
-task id，值是 description / task_type / status / run_id，以及这个 task 是不是后台跑的。
-收尾帧不带 description，结束行要指名是哪个 subagent，只能从表里取。表是容量 500 的
-LRU（满了踢掉最久没用的那一项）；表项被踢掉后，结束行用 task id 指名。
+task id，值是 task 的 description，以及这个 task 是不是后台跑的。收尾帧不带
+description，结束行要指名是哪个 subagent，只能从表里取。表是容量 500 的 LRU（满了踢掉
+最久没用的那一项）；表项被踢掉后，结束行用 task id 指名。
 
 **前台任务不报**：CLI 用同一族帧报告 agent 自己跑的命令（`is_backgrounded: false`，
 比如 subagent 起的 shell），这类帧不产生任何回复。

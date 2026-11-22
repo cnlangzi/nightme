@@ -1,4 +1,5 @@
-// The bridge's table of the tasks the CLI reported.
+// The bridge's table of the tasks the CLI reported, and the notices
+// built from it.
 //
 // Claude Code describes the work it delegates in a family of `system`
 // frames: task_started opens a task, task_notification closes it, and
@@ -21,23 +22,15 @@ import (
 // bgTaskTableSize is how many tasks the bridge remembers per session.
 const bgTaskTableSize = 500
 
-// bgTaskStatusRunning is the status of a task the CLI reported as
-// started.
-const bgTaskStatusRunning = "running"
-
 // bgTaskStatusStopped is the status a task that ended without one gets.
 // The CLI's notification frame names the outcome it saw ("completed",
 // "failed", ...); a frame without one still means the task is over.
 const bgTaskStatusStopped = "stopped"
 
-// bgTask is one entry of the session's task table. It records what
-// the CLI reported about the task.
+// bgTask is one entry of the session's task table.
 type bgTask struct {
 	ID          string
 	Description string
-	TaskType    string
-	Status      string
-	RunID       string
 
 	// Background tells whether the CLI ran the task in the
 	// background. A foreground task — a bash command the agent ran
@@ -52,29 +45,23 @@ type bgTaskTable struct {
 }
 
 // newBgTaskTable returns the session's task table.
-func newBgTaskTable() (*bgTaskTable, error) {
-	cache, err := lru.New[string, bgTask](bgTaskTableSize)
-	if err != nil {
-		return nil, err
-	}
-	return &bgTaskTable{cache: cache}, nil
+//
+// The library raises an error only for a non-positive size, and the
+// size is a constant, so the table is always usable.
+func newBgTaskTable() *bgTaskTable {
+	cache, _ := lru.New[string, bgTask](bgTaskTableSize)
+	return &bgTaskTable{cache: cache}
 }
 
 // put records a task, evicting the least recently used entry when the
 // table is full.
 func (t *bgTaskTable) put(task bgTask) {
-	if t == nil || t.cache == nil {
-		return
-	}
 	t.cache.Add(task.ID, task)
 }
 
 // get returns the task the table knows under id. The lookup marks the
 // entry as recently used.
 func (t *bgTaskTable) get(id string) (bgTask, bool) {
-	if t == nil || t.cache == nil {
-		return bgTask{}, false
-	}
 	return t.cache.Get(id)
 }
 
@@ -88,9 +75,6 @@ func (s *streamState) bgTaskStarted(ev streamEvent) (string, bool) {
 	task := bgTask{
 		ID:          ev.TaskID,
 		Description: ev.Description,
-		TaskType:    ev.TaskType,
-		Status:      bgTaskStatusRunning,
-		RunID:       ev.RunID,
 		Background:  ev.IsBackgrounded,
 	}
 	s.bgTasks.put(task)
@@ -117,13 +101,9 @@ func (s *streamState) bgTaskFinished(ev streamEvent) (string, bool) {
 	if status == "" {
 		status = bgTaskStatusStopped
 	}
-	if known {
-		task.Status = status
-		s.bgTasks.put(task)
-	}
 	name := ev.TaskID
-	if known && task.Description != "" {
-		name = task.Description
+	if known {
+		name = bgTaskName(task)
 	}
 	return bgFinishedLine(name, status, ev.Summary), true
 }

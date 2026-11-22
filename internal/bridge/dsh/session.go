@@ -966,6 +966,26 @@ func (d *driver) Keepalive(ctx context.Context, onRecover func(context.Context) 
 	}
 }
 
+// Ping is the driver.Ping implementation for the dsh bridge. The
+// shared host exposes session.list — the cheapest auth-gated call,
+// independent of session and agent state — which the host's own
+// health probe already uses to decide whether the host is wedged.
+//
+// The call goes to the shared host, not to the session: a dsh
+// session can be busy with a turn while the host answers
+// session.list, and the question the probe asks is whether the
+// host still answers at all.
+func (d *driver) Ping(ctx context.Context) error {
+	cli := d.cli
+	if cli == nil || cli.RPC == nil {
+		return errors.New("dsh: no host client")
+	}
+	if _, err := cli.RPC.SessionList(ctx); err != nil {
+		return fmt.Errorf("dsh: ping: %w", err)
+	}
+	return nil
+}
+
 // ─── wire content blocks ──────────────────────────────────────────────
 
 // contentBlocksToDTO converts nightme's ContentBlock slice to

@@ -7,7 +7,7 @@
 // (repo, branch) — the workspace — so the same cwd always sees
 // the same PR regardless of which AgentSession or chat
 // session is asking. /gtw {pr, close} writes via
-// Registry.WritePR(cwd, pr); the runtime's LookupPR closure
+// Registry.WritePR(cwd, pr, branch); the runtime's LookupPR closure
 // (passed into the Emitter's GitStatusLookup) reads via
 // GetOrCreate(cwd).MaybeRefresh + PR(). PR() is strict-synchronous
 // and never blocks on network I/O; the worst-case stamp cost
@@ -22,6 +22,13 @@
 // `gh pr create`, or "branch deleted, drop the entry"). No
 // goroutine spawn, just a synchronous overwrite. nil pr =
 // clear the entry.
+//
+// A write names the branch the PR belongs to, and the branch-
+// scoped read (Cache.PRForBranch / Registry.PRForBranch) hands
+// the PR back only when it is the branch's own. /gtw close reads
+// through that port: the number it needs is the branch's, and a
+// workspace whose cached PR belongs to another branch must not
+// answer for it.
 //
 // Why this lives in its own package: gtw already imports
 // chatsession (for dispatch*), so anything that wants to call
@@ -50,13 +57,18 @@
 //	  → cache.MaybeRefresh(cwd, resolver) (sync, no I/O)
 //	  → cache.PR()                          (sync, no I/O)
 //	/gtw pr success
-//	  → Registry.WritePR(cwd, newPR) (we already know the
-//	    number from `gh pr create`; no refresh needed; the next
-//	    stamp will lazy-refresh and correct any branch
+//	  → Registry.WritePR(cwd, newPR, branch) (we already know
+//	    the number from `gh pr create`; no refresh needed; the
+//	    next stamp will lazy-refresh and correct any branch
 //	    mismatch within 60 s)
-//	/gtw close success
-//	  → Registry.WritePR(cwd, nil) (the branch is being
-//	    deleted; no refresh needed; the next stamp will
+//	/gtw close
+//	  → Registry.PRForBranch(cwd, branch) reads the branch's own
+//	    PR back (the number is already known — asking the
+//	    platform again is a wasted round-trip)
+//	  → Registry.WritePR(cwd, pr, branch) writes back what the
+//	    platform answered when the cache had nothing
+//	  → Registry.WritePR(cwd, nil, "") on success (the branch is
+//	    being deleted; no refresh needed; the next stamp will
 //	    lazy-refresh from scratch)
 //	Per cache teardown
 //	  → Cache.Cancel is defined but NOT currently wired into
@@ -106,7 +118,7 @@ const TTL = 60 * time.Second
 // 5 s is a reasonable compromise: short enough that a
 // transient `git` failure (e.g. mid-checkout race) recovers
 // within a handful of stamps; long enough that a workspace
-// that simply has no git PR / MR stops trying. WritePR(pr)
+// that simply has no git PR / MR stops trying. WritePR(pr, branch)
 // resets expiresAt to now+TTL so a freshly created PR surfaces
 // on the next stamp even inside the backoff window.
 const failureBackoff = 5 * time.Second
@@ -143,12 +155,12 @@ type Resolver func(ctx context.Context, dir string) (pr *messages.PR, branch str
 //	            this branch, OR the branch has no PR). The
 //	            footer render path treats nil as "omit the
 //	            PR tail segment".
-//	branch    — the head-branch name pr was resolved
-//	            against. The current refresh writes whatever
-//	            branch the Resolver reports; WritePR leaves
-//	            this untouched (the caller doesn't know which
-//	            branch each AS is pinned to; the next
-//	            MaybeRefresh will overwrite).
+//	branch    — the head-branch name pr belongs to. The
+//	            refresh writes whatever branch the Resolver
+//	            reports; a direct write names the branch it
+//	            wrote for. The two always agree with pr, so
+//	            the branch-scoped read (PRForBranch) can tell
+//	            a workspace's PR from another branch's.
 //	expiresAt — wall-clock deadline beyond which PR() treats
 //	            the cache as stale and the next stamp's
 //	            MaybeRefresh spawns a refresh. Zero value =
@@ -188,6 +200,26 @@ type Cache struct {
 func (c *Cache) PR() *messages.PR {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.pr
+}
+
+// PRForBranch returns the cached PR only when it belongs to
+// branch. A workspace whose cached PR is another branch's answers
+// nil — the caller asked about a branch this workspace does not
+// speak for.
+//
+// The branch is part of the entry's identity, not decoration: a
+// workspace can be pointed at another branch (the user checked
+// one out), and the PR the workspace still remembers then names a
+// different pull request. /gtw close reads through this port so it
+// never finalizes the labels of a pull request the branch being
+// closed did not open.
+func (c *Cache) PRForBranch(branch string) *messages.PR {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.pr == nil || c.branch != branch {
+		return nil
+	}
 	return c.pr
 }
 
@@ -290,16 +322,18 @@ func (c *Cache) refresh(ctx context.Context, dir string, resolver Resolver) {
 	c.expiresAt = time.Now().Add(TTL)
 }
 
-// WritePR overwrites the cache entry with pr. nil pr clears
-// the entry (pr=nil, branch="", expiresAt=zero so the next
-// MaybeRefresh kicks a fresh refresh from scratch); non-nil
-// pr sets pr, leaves branch untouched, resets expiresAt to
-// now+TTL. Sync, no I/O, no goroutine spawn.
+// WritePR overwrites the cache entry with pr and the branch it
+// belongs to. nil pr clears the entry (pr=nil, branch="",
+// expiresAt=zero so the next MaybeRefresh kicks a fresh refresh
+// from scratch) and ignores the branch argument; a non-nil pr
+// sets pr and branch, and resets expiresAt to now+TTL. Sync, no
+// I/O, no goroutine spawn.
 //
 // Used by /gtw dispatchers where we already know the answer:
-//   - /gtw pr success: WritePR(&messages.PR{...}) — the new
-//     PR number from `gh pr create`.
-//   - /gtw close success: WritePR(nil) — the branch is being
+//   - /gtw pr success: WritePR(&messages.PR{...}, branch) — the
+//     new PR number from `gh pr create`, for the branch it was
+//     opened from.
+//   - /gtw close: WritePR(nil, "") — the branch is being
 //     deleted; the next stamp's lazy MaybeRefresh will fetch
 //     fresh (or stay nil if the workspace has no PR).
 //
@@ -314,14 +348,11 @@ func (c *Cache) refresh(ctx context.Context, dir string, resolver Resolver) {
 // observes the cancellation without ever acquiring c.mu to
 // write its result.
 //
-// branch is intentionally NOT touched: the caller (gtw
-// dispatch walking the chat pool) doesn't know which branch
-// each AS is pinned to, and writing a wrong branch would
-// produce a transient inconsistency on the footer that
-// self-corrects within 60 s on the next MaybeRefresh.
-// Cache.PR() reads only the pr field, so the footer renders
-// the new pr immediately.
-func (c *Cache) WritePR(pr *messages.PR) {
+// The branch argument names the branch pr belongs to, so the
+// branch-scoped read (PRForBranch) can hand the PR to the
+// caller that asks about that branch and withhold it from the
+// ones that do not.
+func (c *Cache) WritePR(pr *messages.PR, branch string) {
 	c.mu.Lock()
 	cancel := c.cancel
 	c.cancel = nil
@@ -331,6 +362,7 @@ func (c *Cache) WritePR(pr *messages.PR) {
 		c.expiresAt = time.Time{}
 	} else {
 		c.pr = pr
+		c.branch = branch
 		c.expiresAt = time.Now().Add(TTL)
 	}
 	c.mu.Unlock()
@@ -388,14 +420,15 @@ type Registry struct {
 	caches map[string]*Cache
 }
 
-// WritePR stores pr in the cache for cwd. nil clears the
-// entry. Allocates the cache if it doesn't exist yet — the
-// key is a workspace (cwd), and a /gtw pr or /gtw close
-// success path that names a real workspace must propagate
-// its known-good result so the next status stamp sees it
-// immediately rather than waiting for the lazy MaybeRefresh
-// (which would spawn a goroutine, hit the network, and only
-// converge on the same answer we already have).
+// WritePR stores pr in the cache for cwd, together with the
+// branch it belongs to. nil clears the entry. Allocates the
+// cache if it doesn't exist yet — the key is a workspace
+// (cwd), and a /gtw pr or /gtw close success path that names a
+// real workspace must propagate its known-good result so the
+// next status stamp sees it immediately rather than waiting
+// for the lazy MaybeRefresh (which would spawn a goroutine,
+// hit the network, and only converge on the same answer we
+// already have).
 //
 // Pre-cwd-keying this was a no-op for unallocated keys; that
 // guarded against an AS-keyed world where /gtw pr would have
@@ -403,8 +436,25 @@ type Registry struct {
 // per cwd there is no such surface: the cwd will be read by
 // the very next outbound stamp, so allocating proactively
 // costs one map entry and saves a network round-trip.
-func (r *Registry) WritePR(cwd string, pr *messages.PR) {
-	r.GetOrCreate(cwd).WritePR(pr)
+func (r *Registry) WritePR(cwd string, pr *messages.PR, branch string) {
+	r.GetOrCreate(cwd).WritePR(pr, branch)
+}
+
+// PRForBranch returns the PR the cache for cwd holds for
+// branch, or nil when the workspace has no entry, holds no PR,
+// or holds the PR of another branch.
+//
+// Unlike GetOrCreate it never allocates: a lookup that misses
+// must not leave a cache entry behind for a workspace nobody
+// stamped.
+func (r *Registry) PRForBranch(cwd, branch string) *messages.PR {
+	r.mu.RLock()
+	c, ok := r.caches[cwd]
+	r.mu.RUnlock()
+	if !ok {
+		return nil
+	}
+	return c.PRForBranch(branch)
 }
 
 // GetOrCreate returns the Cache for cwd, allocating a fresh

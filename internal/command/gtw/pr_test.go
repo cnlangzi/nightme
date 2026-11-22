@@ -1791,6 +1791,43 @@ func TestDispatchPR_FindOpenPRErrCLINotInstalled(t *testing.T) {
 	}
 }
 
+// TestDispatchPR_FindOpenPRErrCLICannotStart — the CLI is there but
+// cannot start (the directory it was bound to is gone) →
+// ErrCLICannotStart → the reply names the directory, and must NOT
+// claim the CLI is missing.
+func TestDispatchPR_FindOpenPRErrCLICannotStart(t *testing.T) {
+	rig := newPRTestRig(t)
+	setupPRWorktree(t, rig, Context{Branch: "wt-no-gh"})
+	setupReadiness(rig, "wt-no-gh", messages.GitStatusSnapshot{
+		Branch:      "wt-no-gh",
+		HasUpstream: true,
+	})
+	rig.git.on("remote", "git@github.com:octocat/hello.git", "", nil)
+	rig.prov.SetFindOpenPRErr(fmt.Errorf("%w: gh (in /gone/worktree): %w", ErrCLICannotStart,
+		&fs.PathError{Op: "chdir", Path: "/gone/worktree", Err: syscall.ENOENT}))
+	rig.installDeps()
+
+	cs := rig.cs
+	s := captureCh(t, cs)
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, Config{})
+	if err != nil {
+		t.Fatalf("dispatchPR err: %v", err)
+	}
+	r := s.lastText()
+	if !strings.Contains(r, "cannot start") {
+		t.Fatalf("expected the CLI-cannot-start reason, got:\n%s", r)
+	}
+	if !strings.Contains(r, "/gone/worktree") {
+		t.Fatalf("expected the directory the CLI was bound to, got:\n%s", r)
+	}
+	if strings.Contains(r, "install via") {
+		t.Fatalf("the reply must not carry the install hint — the CLI is installed:\n%s", r)
+	}
+	if strings.Contains(r, "check existing PR") {
+		t.Fatalf("the reply must not blame the PR listing — the CLI never ran:\n%s", r)
+	}
+}
+
 // TestDispatchPR_FindOpenPRUnknownErrorPassThrough — unknown
 // FindOpenPRForBranch error propagates verbatim. The reply must
 // contain the raw err string and must NOT add a friendly hint
@@ -2659,7 +2696,7 @@ func TestDispatchPR_ResolveProvider_FromYml(t *testing.T) {
 		Repo:     "octocat/hello",
 		Provider: "github",
 	}
-	prov, owner, repo, err := resolveProvider(context.Background(), c, rig.deps)
+	prov, owner, repo, err := resolveProvider(context.Background(), c, rig.deps, c.Worktree)
 	if err != nil {
 		t.Fatalf("resolveProvider: %v", err)
 	}
@@ -3224,7 +3261,7 @@ func (r *runGH) Run(_ context.Context, _ string, args ...string) (string, string
 
 func TestGitHubFindOpenPRForBranch_Success(t *testing.T) {
 	gh := &runGH{out: `[{"number":42,"url":"https://github.com/o/r/pull/42","state":"OPEN"}]`}
-	p := &GitHubProvider{Worktree: "/w", Runner: gh}
+	p := &GitHubProvider{CLIDir: "/w", Runner: gh}
 	pr, err := p.FindOpenPRForBranch(context.Background(), "octocat", "hello", "feat")
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -3246,7 +3283,7 @@ func TestGitHubFindOpenPRForBranch_Success(t *testing.T) {
 
 func TestGitHubFindOpenPRForBranch_EmptyList(t *testing.T) {
 	gh := &runGH{out: "[]"}
-	p := &GitHubProvider{Worktree: "/w", Runner: gh}
+	p := &GitHubProvider{CLIDir: "/w", Runner: gh}
 	pr, err := p.FindOpenPRForBranch(context.Background(), "octocat", "hello", "feat")
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -3258,7 +3295,7 @@ func TestGitHubFindOpenPRForBranch_EmptyList(t *testing.T) {
 
 func TestGitHubFindOpenPRForBranch_CLINotInstalled(t *testing.T) {
 	gh := &runGH{fail: &exec.Error{Name: "gh", Err: exec.ErrNotFound}}
-	p := &GitHubProvider{Worktree: "/w", Runner: gh}
+	p := &GitHubProvider{CLIDir: "/w", Runner: gh}
 	_, err := p.FindOpenPRForBranch(context.Background(), "octocat", "hello", "feat")
 	if !errors.Is(err, ErrCLINotInstalled) {
 		t.Fatalf("expected ErrCLINotInstalled, got %v", err)
@@ -3271,7 +3308,7 @@ func TestGitHubFindOpenPRForBranch_CLINotInstalled(t *testing.T) {
 // the GitLab side: argv shape + empty-list short-circuit.
 func TestGitLabFindOpenPRForBranch_EmptyList(t *testing.T) {
 	gh := &runGH{out: "[]"}
-	p := &GitLabProvider{Worktree: "/w", Runner: gh}
+	p := &GitLabProvider{CLIDir: "/w", Runner: gh}
 	pr, err := p.FindOpenPRForBranch(context.Background(), "acme", "demo", "feat")
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -3296,7 +3333,7 @@ func TestGitLabFindOpenPRForBranch_EmptyList(t *testing.T) {
 // opened MR is returned with the platform-normalised state.
 func TestGitLabFindOpenPRForBranch_Success(t *testing.T) {
 	gh := &runGH{out: `[{"iid":144062,"web_url":"https://gitlab.com/gitlab-com/www-gitlab-com/-/merge_requests/144062","state":"opened"}]`}
-	p := &GitLabProvider{Worktree: "/w", Runner: gh}
+	p := &GitLabProvider{CLIDir: "/w", Runner: gh}
 	pr, err := p.FindOpenPRForBranch(context.Background(), "gitlab-com", "www-gitlab-com", "workday-sync-team-page-2026-08-21-74")
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -3327,7 +3364,7 @@ func TestGitLabFindOpenPRForBranch_MultipleRows(t *testing.T) {
 		{"iid":100,"web_url":"https://gitlab.com/o/r/-/merge_requests/100","state":"opened"},
 		{"iid":101,"web_url":"https://gitlab.com/o/r/-/merge_requests/101","state":"opened"}
 	]`}
-	p := &GitLabProvider{Worktree: "/w", Runner: gh}
+	p := &GitLabProvider{CLIDir: "/w", Runner: gh}
 	pr, err := p.FindOpenPRForBranch(context.Background(), "o", "r", "feat")
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -3342,7 +3379,7 @@ func TestGitLabFindOpenPRForBranch_MultipleRows(t *testing.T) {
 // the same way the GitHub path does.
 func TestGitLabFindOpenPRForBranch_CLINotInstalled(t *testing.T) {
 	gh := &runGH{fail: &exec.Error{Name: "glab", Err: exec.ErrNotFound}}
-	p := &GitLabProvider{Worktree: "/w", Runner: gh}
+	p := &GitLabProvider{CLIDir: "/w", Runner: gh}
 	_, err := p.FindOpenPRForBranch(context.Background(), "o", "r", "feat")
 	if !errors.Is(err, ErrCLINotInstalled) {
 		t.Fatalf("expected ErrCLINotInstalled, got %v", err)
@@ -3353,7 +3390,7 @@ func TestGitLabFindOpenPRForBranch_CLINotInstalled(t *testing.T) {
 // with no error.
 func TestGitLabGetPR_EmptyList(t *testing.T) {
 	gh := &runGH{out: "[]"}
-	p := &GitLabProvider{Worktree: "/w", Runner: gh}
+	p := &GitLabProvider{CLIDir: "/w", Runner: gh}
 	pr, err := p.GetPR(context.Background(), "o", "r", "feat")
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -3367,7 +3404,7 @@ func TestGitLabGetPR_EmptyList(t *testing.T) {
 // platform-normalised state.
 func TestGitLabGetPR_Success(t *testing.T) {
 	gh := &runGH{out: `[{"iid":144062,"web_url":"https://gitlab.com/gitlab-com/www-gitlab-com/-/merge_requests/144062","state":"opened"}]`}
-	p := &GitLabProvider{Worktree: "/w", Runner: gh}
+	p := &GitLabProvider{CLIDir: "/w", Runner: gh}
 	pr, err := p.GetPR(context.Background(), "gitlab-com", "www-gitlab-com", "workday-sync-team-page-2026-08-21-74")
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -3389,7 +3426,7 @@ func TestGitLabGetPR_Success(t *testing.T) {
 // default to "open" so the footer doesn't render an empty state.
 func TestGitLabFindOpenPRForBranch_BlankStateDefaultsToOpen(t *testing.T) {
 	gh := &runGH{out: `[{"iid":7,"web_url":"https://gitlab.com/o/r/-/merge_requests/7","state":""}]`}
-	p := &GitLabProvider{Worktree: "/w", Runner: gh}
+	p := &GitLabProvider{CLIDir: "/w", Runner: gh}
 	pr, err := p.FindOpenPRForBranch(context.Background(), "o", "r", "feat")
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -3414,7 +3451,7 @@ func TestGitLabArgv_NoStateFlag(t *testing.T) {
 	for _, name := range []string{"FindOpenPRForBranch", "GetPR"} {
 		t.Run(name, func(t *testing.T) {
 			gh := &runGH{out: "[]"}
-			p := &GitLabProvider{Worktree: "/w", Runner: gh}
+			p := &GitLabProvider{CLIDir: "/w", Runner: gh}
 			var err error
 			switch name {
 			case "FindOpenPRForBranch":
@@ -3475,7 +3512,7 @@ func TestGitLabParseMRList_SchemaPinFromGlab182(t *testing.T) {
 		}
 	]`
 	gh := &runGH{out: sample}
-	p := &GitLabProvider{Worktree: "/w", Runner: gh}
+	p := &GitLabProvider{CLIDir: "/w", Runner: gh}
 	pr, err := p.FindOpenPRForBranch(context.Background(), "gitlab-com", "www-gitlab-com", "workday-sync-team-page-2026-08-21-74")
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -3520,7 +3557,7 @@ func TestGitLabParseMRList_SchemaPinFromGlab182(t *testing.T) {
 // NIGHTME_REAL_GLAB=1).
 func TestGitLabArgvPin_NoStateFlag_AgainstWWWGitLabComOwnerRepo(t *testing.T) {
 	gh := &runGH{out: "[]"}
-	p := &GitLabProvider{Worktree: "/w", Runner: gh}
+	p := &GitLabProvider{CLIDir: "/w", Runner: gh}
 	_, err := p.FindOpenPRForBranch(context.Background(), "gitlab-com", "www-gitlab-com", "chore-docs-init")
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -3548,31 +3585,6 @@ func equalStrings(a, b []string) bool {
 	return true
 }
 
-// TestIsExecutableNotFound — the helper must distinguish
-// "binary missing" from generic subprocess errors. We test
-// both the *exec.Error path (LookPath miss) and *fs.PathError
-// path (Start miss).
-func TestIsExecutableNotFound(t *testing.T) {
-	cases := []struct {
-		name string
-		err  error
-		want bool
-	}{
-		{"nil", nil, false},
-		{"exec.LookPath miss", &exec.Error{Name: "gh", Err: exec.ErrNotFound}, true},
-		{"PathError ENOENT", &fs.PathError{Op: "fork/exec", Path: "/usr/bin/gh", Err: syscall.ENOENT}, true},
-		{"generic error", errors.New("exit 1"), false},
-		{"wrapped exec.LookPath miss", fmt.Errorf("outer: %w", &exec.Error{Name: "glab", Err: exec.ErrNotFound}), true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := isExecutableNotFound(tc.err); got != tc.want {
-				t.Fatalf("isExecutableNotFound(%v): got %v, want %v", tc.err, got, tc.want)
-			}
-		})
-	}
-}
-
 // TestResolveProvider_FromYml_SplitOwnerRepo covers the
 // Provider+Repo path: when both fields are populated in
 // Context (set by /gtw fix's worktree creation), resolveProvider
@@ -3582,7 +3594,7 @@ func TestResolveProvider_FromYml_SplitOwnerRepo(t *testing.T) {
 	rig := newPRTestRig(t)
 	rig.deps = HandlerDeps{Git: rig.git}
 	c := Context{Repo: "octocat/hello", Provider: "github"}
-	prov, owner, repo, err := resolveProvider(context.Background(), c, rig.deps)
+	prov, owner, repo, err := resolveProvider(context.Background(), c, rig.deps, c.Worktree)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -3609,7 +3621,7 @@ func TestResolveProvider_Detect_NestedGitLab(t *testing.T) {
 		Detect: fakeDetect(newFakeGitProvider(ProviderGitLab, "gitlab.acme.internal")),
 	}
 	c := Context{RepoRoot: mustPwd(t)}
-	_, owner, repo, err := resolveProvider(context.Background(), c, rig.deps)
+	_, owner, repo, err := resolveProvider(context.Background(), c, rig.deps, c.Worktree)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -3813,7 +3825,7 @@ func TestDispatchPR_NonWorktree_HappyPath(t *testing.T) {
 	// Detect fallback fires because c.Repo is empty.
 	detectedProv, owner, repo, derr := resolveProvider(context.Background(), Context{
 		RepoRoot: tmp,
-	}, deps)
+	}, deps, tmp)
 	if derr != nil {
 		t.Fatalf("resolveProvider: %v", derr)
 	}
@@ -3930,7 +3942,7 @@ func TestPRCacheApply_HappyPath(t *testing.T) {
 	deps := HandlerDeps{PRCache: reg}
 	// Mirror dispatchPR's success path: write to c.Worktree.
 	if deps.PRCache != nil {
-		deps.PRCache.WritePR("/w1", newPR)
+		deps.PRCache.WritePR("/w1", newPR, "feature/x")
 	}
 
 	for _, cwd := range []string{"/w1", "/w2", "/w3"} {
@@ -3957,7 +3969,7 @@ func TestPRCacheApply_HappyPath(t *testing.T) {
 func TestPRCacheApply_WritePRAllocatesOnUnknownCwd(t *testing.T) {
 	reg := &prcache.Registry{}
 	pr := &messages.PR{Number: 1, URL: "https://example/pr/1", State: "open"}
-	reg.WritePR("/work/never-stamped", pr)
+	reg.WritePR("/work/never-stamped", pr, "feature/x")
 
 	got := reg.GetOrCreate("/work/never-stamped").PR()
 	if got == nil || got.Number != 1 {
@@ -3973,11 +3985,11 @@ func TestPRCacheApply_ClearOnClose(t *testing.T) {
 
 	// Pre-populate two cwds so we can confirm the clear actually
 	// clears only the targeted one.
-	reg.GetOrCreate("/w1").WritePR(&messages.PR{Number: 9, URL: "https://example/pr/9", State: "open"})
-	reg.GetOrCreate("/w2").WritePR(&messages.PR{Number: 7, URL: "https://example/pr/7", State: "open"})
+	reg.GetOrCreate("/w1").WritePR(&messages.PR{Number: 9, URL: "https://example/pr/9", State: "open"}, "feature/w1")
+	reg.GetOrCreate("/w2").WritePR(&messages.PR{Number: 7, URL: "https://example/pr/7", State: "open"}, "feature/w2")
 
 	// Mirror dispatchClose: write nil to c.Worktree only.
-	reg.WritePR("/w1", nil)
+	reg.WritePR("/w1", nil, "")
 
 	if got := reg.GetOrCreate("/w1").PR(); got != nil {
 		t.Errorf("/w1 after clear: PR = %+v, want nil", got)
@@ -4014,7 +4026,7 @@ func TestPRCacheApply_EmptyPool(t *testing.T) {
 	// Mirror dispatchClose's success path on a fresh chat:
 	// nothing in the pool, no workspace ever stamped. The
 	// WritePR call would have no upstream lookup to clear.
-	reg.WritePR("/w/untouched", nil)
+	reg.WritePR("/w/untouched", nil, "")
 
 	if c := reg.GetOrCreate("/w/untouched"); c.PR() != nil {
 		t.Errorf("clearing an empty cache should leave PR nil; got %+v", c.PR())

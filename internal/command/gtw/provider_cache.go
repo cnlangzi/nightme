@@ -23,18 +23,18 @@ type providerIdentity struct {
 }
 
 // provider rebuilds a provider from a cached identity, bound to
-// the worktree of the call that hit the cache.
+// the directory the CLI of the call that hit the cache runs in.
 //
 // It deliberately does not hand back the instance that was cached:
-// providers carry a per-call Worktree field so gh / glab don't
+// providers carry a per-call directory field so gh / glab don't
 // inherit the daemon's stale CWD, and a memoised instance would
 // pin every later call to the first caller's directory.
-func (id providerIdentity) provider(worktree string) GitProvider {
+func (id providerIdentity) provider(dir string) GitProvider {
 	switch id.kind {
 	case ProviderGitHub:
-		return &GitHubProvider{host: id.host, Worktree: worktree}
+		return &GitHubProvider{host: id.host, CLIDir: dir}
 	case ProviderGitLab:
-		return &GitLabProvider{host: id.host, version: id.version, Worktree: worktree}
+		return &GitLabProvider{host: id.host, version: id.version, CLIDir: dir}
 	}
 	return nil
 }
@@ -93,13 +93,18 @@ func (c *ProviderCache) store(host string, id providerIdentity) {
 // resolveProvider, runFixRemote and CollectPR all go through it, so
 // the nil-Detect / nil-Prober fallbacks and the host-keyed cache
 // live in one place instead of being re-derived per call site.
-func detectProvider(ctx context.Context, deps HandlerDeps, remoteURL, worktree string) (GitProvider, error) {
+//
+// dir is the directory the provider's CLI runs in. It must exist
+// when the CLI is spawned: a bound directory that is gone makes the
+// spawn fail with an ENOENT that names the binary rather than the
+// directory.
+func detectProvider(ctx context.Context, deps HandlerDeps, remoteURL, dir string) (GitProvider, error) {
 	// An injected Detect owns its own behaviour: its providers need
 	// not be the built-in GitHub/GitLab ones, and a cache hit has to
-	// rebuild from an identity to rebind the worktree — which would
+	// rebuild from an identity to rebind the directory — which would
 	// silently swap the caller's implementation out from under it.
 	if deps.Detect != nil {
-		return deps.Detect(ctx, remoteURL, deps.prober(), worktree)
+		return deps.Detect(ctx, remoteURL, deps.prober(), dir)
 	}
 	// Lexical and cheap: a malformed URL fails here, before the cache
 	// lookup and before any network work.
@@ -108,11 +113,11 @@ func detectProvider(ctx context.Context, deps HandlerDeps, remoteURL, worktree s
 		return nil, err
 	}
 	if id, ok := deps.ProviderCache.lookup(host); ok {
-		if prov := id.provider(worktree); prov != nil {
+		if prov := id.provider(dir); prov != nil {
 			return prov, nil
 		}
 	}
-	prov, probed, err := detect(ctx, remoteURL, deps.prober(), worktree)
+	prov, probed, err := detect(ctx, remoteURL, deps.prober(), dir)
 	if err != nil || prov == nil {
 		return prov, err
 	}

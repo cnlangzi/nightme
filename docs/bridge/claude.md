@@ -258,9 +258,88 @@ telemetry。只作用于 nightme spawn 的这个子进程——用户自己手�
   "session_id": "uuid",
   "duration_ms": 12345,
   "result": "[final text]",
-  "usage": {"input_tokens": 100, "output_tokens": 200}
+  "usage": {"input_tokens": 100, "output_tokens": 200},
+  // 后台 subagent 计数器（会话累计）
+  "subagent_stats": {
+    "spawned": 2,
+    "completed": 1,
+    "failed": 0,
+    "killed": {"parent": 0, "user": 0, "system": 0}
+  }
 }
 ```
+
+`result` 帧是 CLI 的一轮结束，但一轮不一定是一个用户消息的结束：Agent 工具
+起后台 subagent 时，subagent 跑完会带一个 `task_notification` turn，turn 自己
+还有一帧 `result`。bridge 要判断的是"CLI 还欠着用户几轮"，两个信号合起来才答得出来。
+
+**信号一：`result.subagent_stats` 计数器**（会话累计）
+
+```
+outstanding = spawned - (completed + failed + killed.parent + killed.user + killed.system)
+```
+
+计数器是会话累计的，所以看的是它跟"上一个 turn 结束时的值"之差——上一个 turn
+留下的还在跑的 subagent 不该拖住下一个 turn。计数缺失（老版本 CLI）按 0 算；
+`/clear` 之后计数器可能大于 `spawned`，所以结果要夹到 0。
+
+**信号二：CLI 的 task 账本**
+
+- `system{task_started, is_backgrounded: true, run_id}` —— 起了一个后台 agent
+- `system{task_notification, run_id}` —— 它跑完了，CLI 接下来会为它开一个 turn
+- `result{origin: {kind: "task-notification", runId}}` —— 那个 turn 的 result
+
+`run_id` 把三者串起来：CLI 先宣布"跑完了"（= 还有一个 turn 在排队），再开那个
+turn，turn 的 result 上带着同一个 `run_id`。所以"CLI 还欠几轮"= 已宣布但还没
+被 turn 报告的 agent 数。
+
+只用计数器不够：CLI 在 turn 的模型循环结束时就写 `result` 帧，所以帧里的计数器
+可能是"全都跑完了"，而它们开的 turn 还排在后面。实测（Claude Code 2.1.311，
+stdin 持有不关）：起两个后台 agent、两个几乎同时跑完时，launch turn 的 `result`
+带 `spawned=2, completed=2`（没有 outstanding），后面却还有两个
+task-notification turn —— 只看计数器会在那里把用户的 turn 结束掉，后两个 turn
+就成了没有 anchor 的孤儿卡片。stdin 关掉时 CLI 自己会压住这一帧直到后台跑完，
+所以 bridge 侧的判断只在 stdin 持有（nightme 的生产模型）时才会命中。
+
+任何一个信号说"还有活儿"，这一帧就**不是** turn 结束：bridge 不发
+`EventAgentResult` / `EventAgentDone`，prompt 一直挂着，后面的 turn 才有 anchor。
+被压住的帧的 usage 要累加回最后那一帧——CLI 的 usage 是按 turn 报的，不累加的
+话收据 footer 只报最后一个 turn 的 token。`is_error` 的帧无条件结束 turn：turn
+失败了，藏住错误只会让调用方一直等一个不会来的成功。
+
+subagent 一直不回来时 turn 会一直挂着：CLI 死了由 readpump 的 channel-close 分支
+收尾（`PromptEndProcessDied`），CLI 还活着就由用户 `/stop` 收尾——reaper 不动
+in-flight 的 turn。
+
+#### 3.3.1 后台 task 表：CLI 报告的后台工作量
+
+CLI 用一族 `system` 帧描述会话的后台工作量，其中一帧带全集，其余各帧描述单个
+task：
+
+- `system{background_tasks_changed, tasks: [...]}` —— 全部还活着的后台 task，
+  **替换语义**：消费方拿这份 payload 换掉自己那份集合
+- `system{task_started, task_id, is_backgrounded, description, task_type}` ——
+  起了一个 task；`is_backgrounded: true` 的进表
+- `system{task_progress, task_id, description}` —— 进度；不带状态，不把已经
+  结束的 task 变回 running
+- `system{task_updated, task_id, patch: {status, description, end_time,
+  is_backgrounded}}` —— 状态变化；`patch.is_backgrounded` 决定进出表
+- `system{task_notification, task_id, status}` —— task 收尾，`status` 是终态
+
+bridge 把这张表留在自己这边（`internal/bridge/claudecode/bgtask.go`），表变了就
+发一个 `EventAgentSubagents`，payload 是整张表。表留在 bridge 而不是 runtime：
+per-task 帧是增量，全集帧是整张整张地报，放在 runtime 就得让每个消费方各存一
+份 CLI 已经公布的集合。帧里还带着 subagent 的 prompt 和输出文件路径，这些不出
+bridge——往上只报身份、描述、状态三样。
+
+实测（Claude Code 2.1.311，stdin 持有不关）里 CLI 发的是 `task_started` /
+`task_notification` 这两帧：`task_started` 把后台 agent 放进来（`is_backgrounded:
+true`），`task_notification` 收尾。agent 自己起的后台 shell 也带 task 帧，但
+`is_backgrounded: false`，不进后台表——它的收尾帧也不带 `is_backgrounded`，所以
+bridge 记住这些 id，收尾帧不会把它们塞进后台表。
+
+这些帧**不是** turn 边界：`task_started` / `task_notification` 不发
+`EventAgentResult`，也不发 `EventAgentDone`。
 
 ### 3.4 In-flight 取消：`/stop` 的真实协议
 
@@ -946,6 +1025,20 @@ AskUserQuestion 的两条拦截路径另外覆盖在 `internal/bridge/claudecode
 （tool_use 路径写 `tool_result`）、`TestSendPermission_TextFallback_WritesUserText`
 （text-fallback 路径写 user-role text）。
 
+后台 subagent 的 turn 边界覆盖在 `internal/bridge/claudecode/subagent_test.go`：
+`TestPumpStream_Result_SubagentsOutstanding_KeepsTurnOpen`（还有 subagent 在跑 →
+不发 `EventAgentResult` / `EventAgentDone`）、`TestPumpStream_Result_SubagentsSettled_EndsTurn`
+（跑完 → turn 结束）、`TestPumpStream_Result_Error_EndsTurnWithSubagentsOutstanding`
+（`is_error` → 无条件结束 turn）、`TestPumpStream_Result_WithoutSubagentStats_EndsTurn`
+（老版本 CLI 没有这个字段 → 照常结束）、
+`TestPumpStream_RealBackgroundSubagentTurns_OneTurn` / `TestPumpStream_TwoBackgroundAgents_OneTurn`
+（真机抓的两轮 / 三个 turn → 一个 turn 只结束一次）、
+`TestPumpStream_StaleBackgroundAgent_DoesNotHoldNextTurn`（上个 turn 留下的后台
+agent 不拖住下一个 turn）、
+`TestPumpStream_Result_MalformedSubagentStats_StillEndsTurn`（看不懂的计数器形状
+不能把整帧丢掉）、
+`TestPumpStream_HeldOpenTurn_SumsUsage`（被压住的帧的 token 累加回最后一帧）。
+
 ### 10.2 集成测试（mock Claude Code binary）
 
 `internal/bridge/claudecode/claudecode_subprocess_unix_test.go` 用
@@ -1116,7 +1209,7 @@ Spawn(claude --print …)          ← 一个 bridge session / 一个 OS 进程
 | 传输 | stream-json stdout/stdin | `--mode rpc` JSONL |
 | 进程/轮次 | 一进程多轮（held stdin） | 一进程多轮（RPC session） |
 | 恢复 | `--resume <id>` | `--session-id` / `new_session` |
-| 终态信号 | `result` → `EventResult`/`EventDone`；进程退出 → `KindLifecycle` | `agent_settled` → `EventResult`/`EventDone` |
+| 终态信号 | `result` → `EventResult`/`EventDone`（后台 subagent 未跑完的 `result` 不算）；进程退出 → `KindLifecycle` | `agent_settled` → `EventResult`/`EventDone` |
 
 两边共性：**`EventDone` ≠ 关 events channel**；只有进程退出或 `Close()` 才关。上层 PumpEvents 依赖这点跨 turn 持续读。
 

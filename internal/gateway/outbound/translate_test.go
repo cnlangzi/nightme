@@ -812,3 +812,74 @@ func TestTranslate_EventTaskCreate_NilTaskList(t *testing.T) {
 		t.Error("nil TaskList should drop, not emit (defensive against bridge bugs)")
 	}
 }
+
+// TestTranslate_EventAgentSubagents_ToOutSubagents pins the
+// EventAgentSubagents → OutSubagents translation: the background-task
+// table of the session reaches the channel with its tasks intact.
+func TestTranslate_EventAgentSubagents_ToOutSubagents(t *testing.T) {
+	tasks := []agent.SubagentTask{
+		{TaskID: "a1", Description: "Run sleep 25 echo one", TaskType: "local_agent", Status: agent.BgTaskStatusRunning},
+		{TaskID: "a2", Description: "Run sleep 25 echo two", TaskType: "local_agent", Status: agent.BgTaskStatusRunning},
+	}
+	msg, ok := Translate("chat1", agent.AgentEvent{
+		Kind:      agent.EventAgentSubagents,
+		Subagents: &agent.SubagentEvent{Tasks: tasks},
+	})
+	if !ok {
+		t.Fatal("EventAgentSubagents should translate to a message")
+	}
+	if msg.Kind != messages.OutSubagents {
+		t.Errorf("Kind = %v, want %v", msg.Kind, messages.OutSubagents)
+	}
+	if msg.Subagents == nil {
+		t.Fatal("Subagents payload is nil (channel will treat this as no-op)")
+	}
+	if len(msg.Subagents.Tasks) != 2 {
+		t.Fatalf("len(Tasks) = %d, want 2", len(msg.Subagents.Tasks))
+	}
+	want := tasks
+	for i, w := range want {
+		got := msg.Subagents.Tasks[i]
+		if got.TaskID != w.TaskID || got.Description != w.Description ||
+			got.TaskType != w.TaskType || got.Status != w.Status {
+			t.Errorf("Tasks[%d] = %+v, want %+v", i, got, w)
+		}
+	}
+	if msg.ChatID != "chat1" {
+		t.Errorf("ChatID = %q, want chat1", msg.ChatID)
+	}
+}
+
+// TestTranslate_EventAgentSubagents_EmptyTable pins the "nothing is
+// running any more" signal: the empty table is a valid report that
+// makes the channel drop its running-subagent line.
+func TestTranslate_EventAgentSubagents_EmptyTable(t *testing.T) {
+	msg, ok := Translate("chat1", agent.AgentEvent{
+		Kind:      agent.EventAgentSubagents,
+		Subagents: &agent.SubagentEvent{Tasks: []agent.SubagentTask{}},
+	})
+	if !ok {
+		t.Fatal("an empty table is the valid 'nothing is running' signal; must emit")
+	}
+	if msg.Kind != messages.OutSubagents {
+		t.Errorf("Kind = %v, want OutSubagents", msg.Kind)
+	}
+	if msg.Subagents == nil {
+		t.Fatal("Subagents must be non-nil even when empty")
+	}
+	if len(msg.Subagents.Tasks) != 0 {
+		t.Errorf("len(Tasks) = %d, want 0", len(msg.Subagents.Tasks))
+	}
+}
+
+// TestTranslate_EventAgentSubagents_NilPayload pins the defensive
+// guard: a nil payload must drop, not emit an empty message.
+func TestTranslate_EventAgentSubagents_NilPayload(t *testing.T) {
+	in := agent.AgentEvent{
+		Kind:      agent.EventAgentSubagents,
+		Subagents: nil,
+	}
+	if _, ok := Translate("chat1", in); ok {
+		t.Error("nil Subagents should drop, not emit (defensive against bridge bugs)")
+	}
+}

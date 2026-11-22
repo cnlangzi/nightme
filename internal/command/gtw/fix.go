@@ -55,7 +55,7 @@ type HandlerDeps struct {
 	// override to inject a fakeProvider without running real
 	// Detect logic (see F-50 §1.4 for the injection pattern).
 	// A non-nil Detect bypasses ProviderCache — see detectProvider.
-	Detect func(ctx context.Context, remoteURL string, prober HTTPProber, worktree string) (GitProvider, error)
+	Detect func(ctx context.Context, remoteURL string, prober HTTPProber, dir string) (GitProvider, error)
 	// ProviderCache memoises platform detection per remote host so
 	// the many /gtw entry points that need a provider (and the
 	// per-stamp CollectPR) don't re-probe the same host on every

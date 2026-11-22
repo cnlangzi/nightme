@@ -386,8 +386,8 @@ func TestDetectProvider_CacheHitRebindsWorktree(t *testing.T) {
 		if !ok {
 			t.Fatalf("detect: want *GitLabProvider, got %T", prov)
 		}
-		if gl.Worktree != want {
-			t.Fatalf("Worktree = %q, want %q", gl.Worktree, want)
+		if gl.CLIDir != want {
+			t.Fatalf("Worktree = %q, want %q", gl.CLIDir, want)
 		}
 	}
 }
@@ -443,7 +443,7 @@ func TestResolveProvider_UnreachableNamesTheNetworkFailure(t *testing.T) {
 	g.on([]string{"remote", "get-url", "origin"}, "ssh://git@10.0.0.9/f9/f9netcore.git\n", "", nil)
 	deps := HandlerDeps{Git: g, Prober: unreachable(), ProviderCache: &ProviderCache{}}
 
-	_, _, _, err := resolveProvider(context.Background(), Context{RepoRoot: "/tmp/a", Worktree: "/tmp/a"}, deps)
+	_, _, _, err := resolveProvider(context.Background(), Context{RepoRoot: "/tmp/a", Worktree: "/tmp/a"}, deps, "/tmp/a")
 	if err == nil {
 		t.Fatal("resolveProvider: want error, got nil")
 	}
@@ -478,7 +478,7 @@ func TestResolveProviderAndCollectPR_ShareOneDetection(t *testing.T) {
 		t.Fatalf("CollectPR: %v", err)
 	}
 	_, _, _, err := resolveProvider(context.Background(),
-		Context{RepoRoot: "/tmp/a", Worktree: "/tmp/a"}, deps)
+		Context{RepoRoot: "/tmp/a", Worktree: "/tmp/a"}, deps, "/tmp/a")
 	if err == nil {
 		t.Fatal("resolveProvider: want error from the unparsable repo path, got nil")
 	}

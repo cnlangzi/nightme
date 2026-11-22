@@ -314,9 +314,13 @@ claim 保留自己的措辞：
 
 `/gtw close` 会摘状态 label —— 默认把 `nightme/wip`、`nightme/ready` 都摘掉，贴上 `nightme/done`；`--reset` 只摘不贴。close 收的是这一轮 fix 的本地会话，PR 还开不开着不改变它把 issue 标成「做完了」这件事。
 
-`/gtw close` 同时收尾 PR 上的 label：按分支找到这个 PR，把它上面除 `nightme/assigned` 以外的 `nightme/*` 全部摘掉，只摘不贴 —— PR 的完成状态由平台上的 merged 表达。查询不限状态（close 的正常时机在 merge 之后，merged 的 PR 已经不在 open 里），并且发生在删掉分支之前：分支删掉之后平台就查不到这个 PR 了。分支没开过 PR 时不做任何事，也不告警。
+`/gtw close` 同时收尾 PR 上的 label：把它上面除 `nightme/assigned` 以外的 `nightme/*` 全部摘掉，只摘不贴 —— PR 的完成状态由平台上的 merged 表达。查询不限状态（close 的正常时机在 merge 之后，merged 的 PR 已经不在 open 里）。分支没开过 PR 时不做任何事，也不告警。
 
-**PR 侧收尾排在 worktree 删除之后**：PR 靠分支名找，删分支之前必须做完；但它排在 worktree 删除之后，所以 close 在脏 worktree、或者 worktree 删除失败时中止（那条路径把 issue 的 label 还原）不会动到 PR —— PR 侧因此不需要还原，中止的 close 让 PR 保持原样。
+**PR 的编号在拆本地之前取**：编号先从这个工作区的 PR 缓存里读 —— `/gtw pr` 开完 PR 就把它写进了缓存，而缓存里的 PR 只有在属于要关的那个分支、而且属于同一个仓库时才算数；缓存没有再问平台，问到了写回缓存（这样下一次 close 不用再问一遍）。取编号必须赶在本地拆除之前：分支删掉之后平台就查不到这个 PR 了。
+
+**close 期间 provider 的 CLI 跑在仓库根目录**，不在 worktree 里 —— 拆除之后 worktree 没了，绑在它上面的 CLI 起不来；而它报出来的「no such file or directory」指的是二进制，读起来像是 CLI 没装。
+
+**PR 侧的 label 摘除排在 worktree 删除之后**：编号已经取到了，摘 label 只需要编号。但它排在 worktree 删除之后，所以 close 在脏 worktree、或者 worktree 删除失败时中止（那条路径把 issue 的 label 还原）不会动到 PR —— PR 侧因此不需要还原，中止的 close 让 PR 保持原样。
 
 **PR 侧失败只警告**：PR 上的 label 是记账，没有任何逻辑读它，所以摘不掉也只给一行 `⚠️`，close 的本地清理照常跑完。摘不掉的 label 在卡片上用 `!` 标出 —— 它还在 PR 上，不和摘掉的 label 混在一列。这跟 issue 侧相反 —— issue 的 label 是队列状态的来源，它摘不掉就必须中止 close，否则 worktree 和分支被拆掉之后无法恢复。
 

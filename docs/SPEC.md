@@ -385,6 +385,8 @@ mgr.HandleInbound(ctx, msg)
 
 **核心语义：1 turn : 1 anchor, n events**。每个 agent turn 由 AgentSession 锚定到单一 `as.currentPrompt.LastMessageID`（buffered batch 时锚到最后一条 userMsgID；F-53 前为 `cs.currentTurnUserMsgID` 字符串标量）；EventHandler 在每个 OutboundMessage 上设 `out.ReplyTo = as.currentPrompt.LastMessageID`；Channel 据此路由到对应 receipt（card / thread / DOM 节点）。`ReplyTo == ""` 是仅有的"无锚" case（启动期 EventAgentConnected、系统日志、内部事件），Channel 走 plain text / 跳过。
 
+**无 in-flight prompt 的事件不属于任何 turn**。readpump 收到事件时若 `currentPrompt` 为空且没有 reply-to override，该事件没有锚点：turn-scoped 事件（text / thinking / tool / result / task）被丢弃，terminal 事件不结束任何 prompt（`endPrompt` 在无 prompt 时会造出 `<as>-end` 记录）。session identity（`EventAgentReady`）、bridge failure（`EventAgentError`）和 permission 生命周期（`EventAgentPermission` + `EventAgentPermissionSettled`）例外——它们携带任何 turn 都不拥有的信息，继续放行。
+
 ```
 Claude Code 进程 (PTY child, cwd = chatSession.selectedCwd)
   ↓ stdout 是 stream-json 行

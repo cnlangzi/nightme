@@ -865,22 +865,9 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string, r
 	}
 	if reason.IsError() {
 		r.SetPromptState(ctx, agentsession.PromptError)
-	} else {
-		r.SetPromptState(ctx, agentsession.PromptDone)
+		return
 	}
-	// The turn is over: the background-subagent line belongs to the
-	// turn, so the finished card does not keep it. A turn that ended
-	// while a subagent was still running (an error turn, /stop, a
-	// dead CLI) would otherwise leave "🔀 1 个后台 agent 在跑" on the
-	// final card — and no later frame can reach that receipt: the
-	// anchor is gone with the prompt.
-	//
-	// The re-render is free when the table was already empty: the
-	// card body is unchanged, so no PATCH goes out.
-	if err := r.SetSubagents(ctx, nil); err != nil {
-		a.logger.Warn("feishu receipt: clear subagents at prompt end failed",
-			"err", err, "chat_id", chatID, "user_msg_id", userMsgID)
-	}
+	r.SetPromptState(ctx, agentsession.PromptDone)
 }
 
 // ensureReceiptForTyping lazily creates a Typing-placeholder
@@ -958,7 +945,7 @@ func (a *Adapter) ensureReceiptForTyping(ctx context.Context, chatID, userMsgID 
 	footerLinesSnap := transient.footerLines
 	transient.mu.Unlock()
 
-	body, _, err := buildReceiptCard(nil, nil, nil, footerLinesSnap, nil)
+	body, _, err := buildReceiptCard(nil, nil, footerLinesSnap, nil)
 	if err != nil {
 		a.removeTransientReceipt(userMsgID, transient)
 		return nil, false, fmt.Errorf("feishu: ensure typing receipt build card: %w", err)
@@ -1084,7 +1071,7 @@ func (a *Adapter) ensureReceiptForReplyWithFooter(ctx context.Context, chatID, u
 	footerLinesSnap := transient.footerLines
 	transient.mu.Unlock()
 
-	body, _, err := buildReceiptCard(entriesSnap, tasksSnap, nil, footerLinesSnap, nil)
+	body, _, err := buildReceiptCard(entriesSnap, tasksSnap, footerLinesSnap, nil)
 	if err != nil {
 		a.removeTransientReceipt(userMsgID, transient)
 		return nil, false, fmt.Errorf("feishu: ensure reply receipt build card: %w", err)
@@ -1202,7 +1189,6 @@ func (a *Adapter) appendEntryToReceipt(
 		body, _, buildErr := buildReceiptCard(
 			[]LogEntry{entry},
 			r.Tasks(),
-			nil,
 			footerLines,
 			nil,
 		)
@@ -1252,7 +1238,7 @@ func (a *Adapter) appendEntryToReceipt(
 // carries that id lands on this card.
 func (a *Adapter) postOrphanReplyCard(ctx context.Context, chatID, text string, footerLines []string) (string, error) {
 	entries := []LogEntry{newOutReplyEntry(text)}
-	body, _, err := buildReceiptCard(entries, nil, nil, footerLines, nil)
+	body, _, err := buildReceiptCard(entries, nil, footerLines, nil)
 	if err != nil {
 		return "", fmt.Errorf("feishu: build orphan reply card: %w", err)
 	}
@@ -1334,7 +1320,7 @@ func (a *Adapter) postOrphanErrorCard(ctx context.Context, chatID, userMsgID, er
 	// No footer: an orphan cold-error has no receipt state to
 	// stamp (the agent never produced a session_id / model
 	// snapshot for this turn). The ❌ body is the signal.
-	body, _, err := buildReceiptCard([]LogEntry{newOutReplyEntry("❌ " + errMsg)}, nil, nil, nil, nil)
+	body, _, err := buildReceiptCard([]LogEntry{newOutReplyEntry("❌ " + errMsg)}, nil, nil, nil)
 	if err != nil {
 		return fmt.Errorf("feishu: build orphan error card: %w", err)
 	}
@@ -1384,7 +1370,7 @@ func (a *Adapter) postOrphanTaskCard(ctx context.Context, chatID string, list *a
 	if list == nil {
 		return "", errors.New("feishu: postOrphanTaskCard requires non-nil AgentTaskListEvent")
 	}
-	body, _, err := buildReceiptCard(nil, list.Items, nil, footerLines, nil)
+	body, _, err := buildReceiptCard(nil, list.Items, footerLines, nil)
 	if err != nil {
 		return "", fmt.Errorf("feishu: build orphan task card: %w", err)
 	}
@@ -1474,7 +1460,7 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 	footerLinesSnap := transient.footerLines
 	transient.mu.Unlock()
 
-	body, _, err := buildReceiptCard(nil, tasksSnap, nil, footerLinesSnap, nil)
+	body, _, err := buildReceiptCard(nil, tasksSnap, footerLinesSnap, nil)
 	if err != nil {
 		a.removeTransientReceipt(userMsgID, transient)
 		return nil, false, fmt.Errorf("feishu: ensure task receipt build card: %w", err)
@@ -2127,27 +2113,6 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (strin
 		// created=true — tasks already installed by ensure;
 		// first card already shipped.
 		return receipt.CardMsgID(), nil
-
-	case messages.OutSubagents:
-		// The session's background-task table: the background
-		// subagents the agent is running. The receipt shows the
-		// number of running ones while at least one runs, and drops
-		// the line when the last one finished — the table arrives
-		// with every change, so the empty table is the signal to
-		// remove it.
-		//
-		// The receipt is created when the chat forwards the user's
-		// message, so it exists for every event of the turn. An
-		// orphan event (no anchor) has no receipt to carry the
-		// line: drop it.
-		if msg.Subagents == nil || msg.ReplyTo == "" {
-			return "", nil
-		}
-		receipt := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo)
-		if receipt == nil {
-			return "", nil
-		}
-		return receipt.CardMsgID(), receipt.SetSubagents(ctx, msg.Subagents)
 
 	case messages.OutHeartbeat:
 		// F-63: per-turn heartbeat follow-up emitted by the runtime
@@ -3082,10 +3047,6 @@ func encodeCardJSON(v any) ([]byte, error) {
 // to check the overflow budget, but doing so via a struct copy
 // would silently bypass the lock semantics.
 //
-// subagents is the session's background-task table. The card renders
-// the number of running background subagents while at least one runs
-// and drops the line when the last one finished.
-//
 // hb (F-63) is the per-turn heartbeat snapshot. nil means "no
 // heartbeat observed yet" (first render of a fresh receipt); a
 // populated snapshot (ThinkCount > 0 || ToolCount > 0) drives
@@ -3100,7 +3061,7 @@ func encodeCardJSON(v any) ([]byte, error) {
 // guarantees the two stay in lock-step: any future section
 // added to this function automatically participates in the
 // overflow guard without a parallel update.
-func buildReceiptCard(entries []LogEntry, tasks []agent.AgentTaskItem, subagents []agent.SubagentTask, footerLines []string, hb *messages.HeartbeatSnapshot) (string, int, error) {
+func buildReceiptCard(entries []LogEntry, tasks []agent.AgentTaskItem, footerLines []string, hb *messages.HeartbeatSnapshot) (string, int, error) {
 
 	elements := make([]map[string]any, 0, len(entries)+6)
 	elementCount := 0
@@ -3178,19 +3139,6 @@ func buildReceiptCard(entries []LogEntry, tasks []agent.AgentTaskItem, subagents
 		elements = append(elements, map[string]any{
 			"tag":     "markdown",
 			"content": "🤖 Working",
-		})
-		elementCount++
-	}
-
-	// Section 0.5: the running background subagents. The line sits
-	// under the heartbeat header because it is the same kind of
-	// signal — the state of the turn right now. It appears while at
-	// least one background subagent runs and is dropped entirely when
-	// the last one finished.
-	if line := agent.SubagentRunningLine(subagents); line != "" {
-		elements = append(elements, map[string]any{
-			"tag":     "markdown",
-			"content": line,
 		})
 		elementCount++
 	}

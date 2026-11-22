@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
-	"github.com/cnlangzi/nightme/internal/agentsession/agentstest"
 )
 
 // TestChatSession_BridgeFailure_RespawnsTheSameSession pins the
@@ -78,9 +77,6 @@ func TestChatSession_BridgeFailure_RespawnsTheSameSession(t *testing.T) {
 	}
 
 	// The replacement has to be usable: its events reach the chat.
-	// The probe needs a turn in flight: a turn-scoped event that
-	// arrives with no prompt is dropped.
-	agentstest.SetCurrentPrompt(as, &Prompt{ID: "p_probe", LastMessageID: "m_probe"})
 	second.PushEvent(agent.AgentEvent{Kind: agent.EventAgentText, Text: "from the new CLI"})
 	select {
 	case got := <-replies:

@@ -70,10 +70,6 @@ func TestRespawn_StartsAReaderForTheReplacementBridge(t *testing.T) {
 		t.Fatal("the respawn reused the dead bridge")
 	}
 
-	// The probe needs a turn in flight: a turn-scoped event that
-	// arrives with no prompt is dropped.
-	as.SetCurrentPrompt(&Prompt{ID: "p_probe", LastMessageID: "m_probe"})
-
 	bridge.PushEvent(agent.AgentEvent{Kind: agent.EventAgentText, Text: "from the new CLI"})
 
 	select {

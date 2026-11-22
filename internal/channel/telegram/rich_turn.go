@@ -88,17 +88,6 @@ type richTurn struct {
 	// as chain.chunks[0].taskList.
 	taskList []agent.AgentTaskItem
 
-	// subagents is the most recent background-task table of the
-	// session: the background subagents the agent is running. Only
-	// the number of running ones reaches the card.
-	subagents []agent.SubagentTask
-
-	// lastBlocksJSON is the body of the last successful edit. A flush
-	// that renders the same body sends nothing: the rich message is
-	// the full turn transcript, so a state-only event would
-	// otherwise re-PATCH an identical body on every frame.
-	lastBlocksJSON string
-
 	// footer is the most recent StatusBar footer. Set by footer-
 	// bearing events; nil until first such event.
 	footer []string
@@ -235,20 +224,10 @@ func (a *Adapter) flushRichTurn(ctx context.Context, turn *richTurn) error {
 	if err != nil {
 		return err
 	}
-	// The card already shows this body: skip the edit. The rich
-	// message is the full turn transcript, so an event that changes
-	// nothing the card renders (the background-subagent line, whose
-	// count did not move) would otherwise re-PATCH an identical body
-	// on every frame — and Telegram rate-limits the edits per chat.
-	if blocksJSON == turn.lastBlocksJSON {
-		turn.dirty = false
-		return nil
-	}
 	if err := a.trySendRichBlocksEdit(ctx,
 		turn.chatID, turn.messageID, blocksJSON); err != nil {
 		return err
 	}
-	turn.lastBlocksJSON = blocksJSON
 	if a.logger != nil {
 		a.logger.Info("telegram: rich turn flushed",
 			"chat_id", turn.chatID,
@@ -316,19 +295,6 @@ func (a *Adapter) renderRichTurnBlocksLocked(turn *richTurn) (string, error) {
 				headerEmitted = true
 			}
 		}
-	}
-
-	// Background subagents (when present): a status line under the
-	// heartbeat header, the same place the Feishu card puts it. It
-	// shows the number of running background subagents while at least
-	// one runs and is absent when the last one finished — the table
-	// arrives with every change, so an empty table is the signal to
-	// drop the line.
-	if line := agent.SubagentRunningLine(turn.subagents); line != "" {
-		blocks = append(blocks, map[string]any{
-			"type": "paragraph",
-			"text": line,
-		})
 	}
 
 	// Heartbeat / body break — divider sits between the
@@ -451,41 +417,6 @@ func (a *Adapter) setRichTurnTaskList(
 	return msgID
 }
 
-// setRichTurnSubagents replaces the turn's view of the session's
-// background-task table. The table is the CLI's own state, so the
-// turn shows the number of running background subagents while at
-// least one runs and drops the line when the last one finished.
-func (a *Adapter) setRichTurnSubagents(
-	chatID string,
-	topicID int,
-	userMessageID int,
-	tasks []agent.SubagentTask,
-) string {
-	turn := a.richTurns.getOrCreate(chatID, topicID, userMessageID)
-	turn.mu.Lock()
-	if turn.messageID == 0 {
-		// The line is content: a turn that has no card yet gets one,
-		// the way a reply opens a card of its own.
-		if err := a.sendRichTurnColdCreate(turn); err != nil {
-			turn.mu.Unlock()
-			a.logger.Warn("telegram: rich turn cold-create failed",
-				"chat_id", chatID,
-				"err", err)
-			return ""
-		}
-	}
-	turn.subagents = tasks
-	turn.hasContent = true
-	turn.dirty = true
-	msgID := ""
-	if turn.messageID != 0 {
-		msgID = strconv.FormatInt(turn.messageID, 10)
-	}
-	turn.mu.Unlock()
-	a.scheduleRichTurnFlush(turn)
-	return msgID
-}
-
 // updateRichTurnHeader replaces the header line (heartbeat text).
 // Coalesces with the next debounce flush so a burst of heartbeat
 // ticks results in one PATCH to Telegram, not one per snapshot.
@@ -527,12 +458,6 @@ func (a *Adapter) OnPromptEndedRichTurn(chatID string, topicID int, userMessageI
 		turn.debounceTimer.Stop()
 		turn.debounceTimer = nil
 	}
-	// The turn is over: the background-subagent line belongs to the
-	// turn, so the finished message does not keep it. A turn that
-	// ended while a subagent was still running would otherwise leave
-	// "🔀 1 个后台 agent 在跑" on the final message.
-	turn.subagents = nil
-	turn.dirty = true
 	turn.mu.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

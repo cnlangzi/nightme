@@ -81,18 +81,25 @@ func TestRenderPlanLine_OneSubagent(t *testing.T) {
 // and their severities, names the groups that failed and points at
 // the command that resumes them.
 func TestVerdictLine(t *testing.T) {
-	reports := []agent.ReviewReport{
-		{Parsed: true, Findings: []agent.ReviewFinding{
-			{Severity: agent.SeverityCritical},
-			{Severity: agent.SeverityHigh},
-			{Severity: agent.SeverityHigh},
-		}},
-		{Parsed: true, Findings: []agent.ReviewFinding{
-			{Severity: agent.SeverityLow},
-		}},
-	}
+	rec := testRecord(
+		[]reviewOutcome{
+			{pattern: "**/*.go"},
+			{pattern: "**/*.ts"},
+			{pattern: "**/*.rs"},
+		},
+		[]reviewContribution{
+			testContribution("**/*.go",
+				agent.ReviewFinding{Path: "a.go", Severity: agent.SeverityCritical},
+				agent.ReviewFinding{Path: "b.go", Severity: agent.SeverityHigh},
+				agent.ReviewFinding{Path: "c.go", Severity: agent.SeverityHigh}),
+			testContribution("**/*.ts",
+				agent.ReviewFinding{Path: "d.ts", Severity: agent.SeverityLow}),
+			testContribution("**/*.rs"),
+		},
+		nil,
+	)
 
-	got := newVerdict(3, reports, nil).line()
+	got := newVerdict(rec, false).line()
 	for _, want := range []string{
 		"3 subagents",
 		"4 findings",
@@ -112,10 +119,18 @@ func TestVerdictLine(t *testing.T) {
 		t.Errorf("the verdict line shows an empty severity bucket: %s", got)
 	}
 
-	failed := newVerdict(3, reports, []failedGroup{{label: "**/*.ts", state: failedResumable}}).line()
+	failed := testRecord(
+		[]reviewOutcome{
+			{pattern: "**/*.go"},
+			{pattern: "**/*.ts", err: errors.New("boom"), sessionID: "sess-ts"},
+		},
+		[]reviewContribution{testContribution("**/*.go")},
+		nil,
+	)
+	line := newVerdict(failed, false).line()
 	for _, want := range []string{"`**/*.ts`", "💡 hint: run `/review --continue` to continue the failed groups"} {
-		if !strings.Contains(failed, want) {
-			t.Errorf("the verdict line does not carry %q: %s", want, failed)
+		if !strings.Contains(line, want) {
+			t.Errorf("the verdict line does not carry %q: %s", want, line)
 		}
 	}
 }
@@ -124,17 +139,25 @@ func TestVerdictLine(t *testing.T) {
 // not finish leave the counts line and stand on their own under it —
 // the counts line carries counts and nothing else.
 func TestVerdictLine_FailedGroupsAreTheirOwnBlock(t *testing.T) {
-	reports := []agent.ReviewReport{
-		{Parsed: true, Findings: []agent.ReviewFinding{{Severity: agent.SeverityHigh}}},
-	}
+	rec := testRecord(
+		[]reviewOutcome{
+			{pattern: "**/*.go", source: "system"},
+			{pattern: "**/*.ts", source: "system", err: errors.New("boom"), sessionID: "sess-ts"},
+		},
+		[]reviewContribution{
+			testContribution("**/*.go", agent.ReviewFinding{Path: "a.go", Severity: agent.SeverityHigh}),
+		},
+		[]agent.ReviewPlanGroup{
+			{Pattern: "**/*.go", Source: "system", Label: "system / **/*.go · Go"},
+			{Pattern: "**/*.ts", Source: "system", Label: "system / **/*.ts · Go"},
+		},
+	)
 
-	got := newVerdict(2, reports, []failedGroup{
-		{label: "system / **/*.go · Go", state: failedResumable},
-	}).line()
+	got := newVerdict(rec, false).line()
 
 	want := "⚠️ review · 2 subagents · 1 finding · 1 high\n\n" +
 		"❌ **1 of 2 subagents failed**\n" +
-		"- `system / **/*.go · Go`\n\n" +
+		"- `system / **/*.ts · Go`\n\n" +
 		"💡 hint: run `/review --continue` to continue the failed groups"
 	if got != want {
 		t.Errorf("the verdict line is:\n%s\nwant:\n%s", got, want)
@@ -146,10 +169,16 @@ func TestVerdictLine_FailedGroupsAreTheirOwnBlock(t *testing.T) {
 // item's continuation, so the hint would end up inside the last
 // group's bullet.
 func TestVerdictLine_HintStandsOnItsOwn(t *testing.T) {
-	got := newVerdict(2, nil, []failedGroup{
-		{label: "a", state: failedResumable},
-		{label: "b", state: failedNeverStarted},
-	}).line()
+	rec := testRecord(
+		[]reviewOutcome{
+			{pattern: "a", err: errors.New("boom"), sessionID: "sess-a"},
+			{pattern: "b", err: errors.New("boom"), prompt: "the prompt"},
+		},
+		nil,
+		nil,
+	)
+
+	got := newVerdict(rec, true).line()
 
 	if !strings.Contains(got, "\n\n💡 hint:") {
 		t.Errorf("the hint is not a paragraph of its own: %s", got)
@@ -157,32 +186,46 @@ func TestVerdictLine_HintStandsOnItsOwn(t *testing.T) {
 }
 
 // TestVerdictLine_FailureBlockCountsTheGroups: the block's header
-// names how many groups failed out of the run's subagents, and the
+// names how many groups failed out of the review's subagents, and the
 // noun follows the count.
 func TestVerdictLine_FailureBlockCountsTheGroups(t *testing.T) {
-	got := newVerdict(2, nil, []failedGroup{
-		{label: "a", state: failedResumable},
-		{label: "b", state: failedNeverStarted},
-	}).line()
+	two := testRecord(
+		[]reviewOutcome{
+			{pattern: "a", err: errors.New("boom"), sessionID: "sess-a"},
+			{pattern: "b", err: errors.New("boom"), prompt: "the prompt"},
+		},
+		nil,
+		nil,
+	)
+	got := newVerdict(two, true).line()
 	if !strings.Contains(got, "❌ **2 of 2 subagents failed**") {
 		t.Errorf("the block does not count the failed groups: %s", got)
 	}
 
-	one := newVerdict(1, nil, []failedGroup{{label: "a", state: failedResumable}}).line()
-	if !strings.Contains(one, "❌ **1 of 1 subagent failed**") {
-		t.Errorf("the block pluralized the single subagent: %s", one)
+	one := testRecord(
+		[]reviewOutcome{{pattern: "a", err: errors.New("boom"), sessionID: "sess-a"}},
+		nil,
+		nil,
+	)
+	line := newVerdict(one, true).line()
+	if !strings.Contains(line, "❌ **1 of 1 subagent failed**") {
+		t.Errorf("the block pluralized the single subagent: %s", line)
 	}
 }
 
 // TestVerdictLine_ListsEveryFailedGroup: the block names every group
 // that failed — the list is not capped.
 func TestVerdictLine_ListsEveryFailedGroup(t *testing.T) {
-	var failed []failedGroup
+	var outcomes []reviewOutcome
 	for i := 0; i < 5; i++ {
-		failed = append(failed, failedGroup{label: fmt.Sprintf("group-%d", i), state: failedResumable})
+		outcomes = append(outcomes, reviewOutcome{
+			pattern:   fmt.Sprintf("group-%d", i),
+			sessionID: fmt.Sprintf("sess-%d", i),
+			err:       errors.New("boom"),
+		})
 	}
 
-	got := newVerdict(5, nil, failed).line()
+	got := newVerdict(testRecord(outcomes, nil, nil), true).line()
 	for i := 0; i < 5; i++ {
 		want := fmt.Sprintf("- group-%d\n", i)
 		if !strings.Contains(got, want) {
@@ -197,24 +240,33 @@ func TestVerdictLine_ListsEveryFailedGroup(t *testing.T) {
 // name is left alone, and a name carrying a backtick is left alone
 // too: a code span would break on it.
 func TestVerdictLine_CodeSpansTheGroupName(t *testing.T) {
-	glob := newVerdict(1, nil, []failedGroup{{label: "system / **/*.go", state: failedResumable}}).line()
-	if !strings.Contains(glob, "- `system / **/*.go`") {
-		t.Errorf("the glob is not code-spanned: %s", glob)
+	cases := []struct {
+		name  string
+		label string
+		want  string
+	}{
+		{"a glob", "system / **/*.go", "- `system / **/*.go`"},
+		{"an underscored name", "internal/me/my_file.go", "- `internal/me/my_file.go`"},
+		{"a plain name", "nightme code reviewer", "- nightme code reviewer\n"},
+		{"a name with a backtick", "a `b` c", "- a `b` c\n"},
 	}
-
-	italic := newVerdict(1, nil, []failedGroup{{label: "internal/me/my_file.go", state: failedResumable}}).line()
-	if !strings.Contains(italic, "- `internal/me/my_file.go`") {
-		t.Errorf("the underscored name is not code-spanned: %s", italic)
-	}
-
-	plain := newVerdict(1, nil, []failedGroup{{label: "nightme code reviewer", state: failedResumable}}).line()
-	if !strings.Contains(plain, "- nightme code reviewer\n") {
-		t.Errorf("the plain name was code-spanned: %s", plain)
-	}
-
-	ticked := newVerdict(1, nil, []failedGroup{{label: "a `b` c", state: failedResumable}}).line()
-	if !strings.Contains(ticked, "- a `b` c\n") {
-		t.Errorf("the name with a backtick was code-spanned: %s", ticked)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := testRecord(
+				[]reviewOutcome{{
+					pattern:   tc.label,
+					source:    "system",
+					sessionID: "sess-1",
+					err:       errors.New("boom"),
+				}},
+				nil,
+				[]agent.ReviewPlanGroup{{Pattern: tc.label, Source: "system", Label: tc.label}},
+			)
+			got := newVerdict(rec, true).line()
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("the verdict does not carry %q: %s", tc.want, got)
+			}
+		})
 	}
 }
 
@@ -222,10 +274,20 @@ func TestVerdictLine_CodeSpansTheGroupName(t *testing.T) {
 // groups are a count, so they stay on the counts line — and the
 // failure block is unaffected by them.
 func TestVerdictLine_KeepsTheUnparsedCountOnTheCountsLine(t *testing.T) {
-	got := newVerdict(2, []agent.ReviewReport{
-		{Parsed: false},
-		{Parsed: false},
-	}, []failedGroup{{label: "a", state: failedResumable}}).line()
+	rec := testRecord(
+		[]reviewOutcome{
+			{pattern: "a"},
+			{pattern: "b"},
+			{pattern: "c", err: errors.New("boom"), sessionID: "sess-c"},
+		},
+		[]reviewContribution{
+			{pattern: "a", parsed: false},
+			{pattern: "b", parsed: false},
+		},
+		nil,
+	)
+
+	got := newVerdict(rec, true).line()
 
 	counts, block, ok := strings.Cut(got, "\n\n")
 	if !ok {
@@ -237,7 +299,7 @@ func TestVerdictLine_KeepsTheUnparsedCountOnTheCountsLine(t *testing.T) {
 	if strings.Contains(counts, "failed") {
 		t.Errorf("the counts line carries the failure: %s", counts)
 	}
-	if !strings.Contains(block, "❌ **1 of 2 subagents failed**") {
+	if !strings.Contains(block, "❌ **1 of 3 subagents failed**") {
 		t.Errorf("the failure block does not count the failed group: %s", block)
 	}
 }
@@ -246,14 +308,25 @@ func TestVerdictLine_KeepsTheUnparsedCountOnTheCountsLine(t *testing.T) {
 // the same counts and the same failure block as the card's verdict —
 // the two differ only in their lead.
 func TestVerdictHint_CarriesTheSameBody(t *testing.T) {
-	v := newVerdict(2, []agent.ReviewReport{
-		{Parsed: true, Findings: []agent.ReviewFinding{{Severity: agent.SeverityHigh}}},
-	}, []failedGroup{{label: "system / **/*.go", state: failedResumable}})
+	rec := testRecord(
+		[]reviewOutcome{
+			{pattern: "**/*.go", source: "system"},
+			{pattern: "**/*.ts", source: "system", err: errors.New("boom"), sessionID: "sess-ts"},
+		},
+		[]reviewContribution{
+			testContribution("**/*.go", agent.ReviewFinding{Path: "a.go", Severity: agent.SeverityHigh}),
+		},
+		[]agent.ReviewPlanGroup{
+			{Pattern: "**/*.go", Source: "system", Label: "system / **/*.go · Go"},
+			{Pattern: "**/*.ts", Source: "system", Label: "system / **/*.ts · Go"},
+		},
+	)
+	v := newVerdict(rec, false)
 
 	hint := v.hint()
 	want := "⚠️ **review done** · 2 subagents · 1 finding · 1 high\n\n" +
 		"❌ **1 of 2 subagents failed**\n" +
-		"- `system / **/*.go`\n\n" +
+		"- `system / **/*.ts · Go`\n\n" +
 		"💡 hint: run `/review --continue` to continue the failed groups"
 	if hint != want {
 		t.Errorf("the end hint is:\n%s\nwant:\n%s", hint, want)
@@ -268,10 +341,16 @@ func TestVerdictHint_CarriesTheSameBody(t *testing.T) {
 // TestVerdictLine_UnparsedGroups: a group whose output matched no
 // known shape is reported as unparsed.
 func TestVerdictLine_UnparsedGroups(t *testing.T) {
-	got := newVerdict(2, []agent.ReviewReport{
-		{Parsed: true},
-		{Parsed: false},
-	}, nil).line()
+	rec := testRecord(
+		[]reviewOutcome{{pattern: "a"}, {pattern: "b"}},
+		[]reviewContribution{
+			testContribution("a"),
+			{pattern: "b", parsed: false},
+		},
+		nil,
+	)
+
+	got := newVerdict(rec, false).line()
 	if !strings.Contains(got, "1 unparsed subagent") {
 		t.Errorf("the verdict line does not report the unparsed subagent: %s", got)
 	}
@@ -280,16 +359,19 @@ func TestVerdictLine_UnparsedGroups(t *testing.T) {
 // TestReviewVerdict_FailedGroupsAreNotUnparsed: a group that failed
 // is counted as failed — never as unparsed.
 func TestReviewVerdict_FailedGroupsAreNotUnparsed(t *testing.T) {
-	outcomes := []reviewOutcome{
-		{pattern: "**/*.go", report: agent.ReviewReport{Parsed: true}},
-		{pattern: "**/*.ts", err: errors.New("boom"), prompt: "the group's prompt"},
-	}
-	plan := []agent.ReviewPlanGroup{
-		{Pattern: "**/*.go", Label: "**/*.go"},
-		{Pattern: "**/*.ts", Label: "**/*.ts"},
-	}
+	rec := testRecord(
+		[]reviewOutcome{
+			{pattern: "**/*.go"},
+			{pattern: "**/*.ts", err: errors.New("boom"), prompt: "the group's prompt"},
+		},
+		[]reviewContribution{testContribution("**/*.go")},
+		[]agent.ReviewPlanGroup{
+			{Pattern: "**/*.go", Label: "**/*.go"},
+			{Pattern: "**/*.ts", Label: "**/*.ts"},
+		},
+	)
 
-	got := reviewVerdict(outcomes, plan)
+	got := newVerdict(rec, true).line()
 	if !strings.Contains(got, "2 subagents") {
 		t.Errorf("the verdict does not count both subagents: %s", got)
 	}
@@ -305,16 +387,19 @@ func TestReviewVerdict_FailedGroupsAreNotUnparsed(t *testing.T) {
 // over the same glob are two groups — the verdict names the one that
 // failed, not the other.
 func TestReviewVerdict_NamesTheFailedGroupByItsIdentity(t *testing.T) {
-	outcomes := []reviewOutcome{
-		{pattern: "**/*.go", source: "security", err: errors.New("boom")},
-		{pattern: "**/*.go", source: "performance", report: agent.ReviewReport{Parsed: true}},
-	}
-	plan := []agent.ReviewPlanGroup{
-		{Pattern: "**/*.go", Source: "security", Label: "security / **/*.go · Go"},
-		{Pattern: "**/*.go", Source: "performance", Label: "performance / **/*.go · Go"},
-	}
+	rec := testRecord(
+		[]reviewOutcome{
+			{pattern: "**/*.go", source: "security", err: errors.New("boom")},
+			{pattern: "**/*.go", source: "performance"},
+		},
+		[]reviewContribution{testContribution("**/*.go")},
+		[]agent.ReviewPlanGroup{
+			{Pattern: "**/*.go", Source: "security", Label: "security / **/*.go · Go"},
+			{Pattern: "**/*.go", Source: "performance", Label: "performance / **/*.go · Go"},
+		},
+	)
 
-	got := reviewVerdict(outcomes, plan)
+	got := newVerdict(rec, true).line()
 	if !strings.Contains(got, "security / **/*.go") {
 		t.Errorf("the verdict does not name the failed group: %s", got)
 	}
@@ -327,11 +412,13 @@ func TestReviewVerdict_NamesTheFailedGroupByItsIdentity(t *testing.T) {
 // not name is still named by its identity — the source travels with
 // the pattern.
 func TestReviewVerdict_FallsBackToTheGroupsName(t *testing.T) {
-	outcomes := []reviewOutcome{
-		{pattern: "**/*.go", source: "system", err: errors.New("boom")},
-	}
+	rec := testRecord(
+		[]reviewOutcome{{pattern: "**/*.go", source: "system", err: errors.New("boom")}},
+		nil,
+		nil,
+	)
 
-	got := reviewVerdict(outcomes, nil)
+	got := newVerdict(rec, true).line()
 	if !strings.Contains(got, "system / **/*.go") {
 		t.Errorf("the verdict does not name the failed group: %s", got)
 	}
@@ -340,16 +427,15 @@ func TestReviewVerdict_FallsBackToTheGroupsName(t *testing.T) {
 // TestReviewVerdictHint: the thread's end hint carries the same
 // numbers as the card's verdict, in Markdown.
 func TestReviewVerdictHint(t *testing.T) {
-	outcomes := []reviewOutcome{
-		{pattern: "**/*.go", report: agent.ReviewReport{Parsed: true, Findings: []agent.ReviewFinding{
-			{Severity: agent.SeverityHigh},
-		}}},
-	}
-	plan := []agent.ReviewPlanGroup{
-		{Pattern: "**/*.go", Label: "**/*.go"},
-	}
+	rec := testRecord(
+		[]reviewOutcome{{pattern: "**/*.go"}},
+		[]reviewContribution{
+			testContribution("**/*.go", agent.ReviewFinding{Severity: agent.SeverityHigh}),
+		},
+		[]agent.ReviewPlanGroup{{Pattern: "**/*.go", Label: "**/*.go"}},
+	)
 
-	got := reviewVerdictHint(outcomes, plan)
+	got := reviewVerdictHint(rec, false)
 	for _, want := range []string{"**review done**", "1 subagent", "1 finding", "1 high"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("the end hint does not carry %q: %s", want, got)
@@ -361,21 +447,22 @@ func TestReviewVerdictHint(t *testing.T) {
 // severity bucket, from the most severe to the least, and a bucket
 // with no findings produces no table at all.
 func TestReviewDigest_GroupsBySeverity(t *testing.T) {
-	outcomes := []reviewOutcome{
-		{pattern: "**/*.go", report: agent.ReviewReport{Parsed: true, Findings: []agent.ReviewFinding{
-			{Path: "a.go", Line: "42", Severity: agent.SeverityHigh, Content: "first"},
-			{Path: "b.go", Line: "7", Severity: agent.SeverityHigh, Content: "second"},
-		}}},
-		{pattern: "**/*.ts", report: agent.ReviewReport{Parsed: true, Findings: []agent.ReviewFinding{
-			{Path: "c.ts", Line: "3", Severity: agent.SeverityLow, Content: "third"},
-		}}},
-	}
-	plan := []agent.ReviewPlanGroup{
-		{Pattern: "**/*.go", Label: "**/*.go"},
-		{Pattern: "**/*.ts", Label: "**/*.ts"},
-	}
+	rec := testRecord(
+		[]reviewOutcome{{pattern: "**/*.go"}, {pattern: "**/*.ts"}},
+		[]reviewContribution{
+			testContribution("**/*.go",
+				agent.ReviewFinding{Path: "a.go", Line: "42", Severity: agent.SeverityHigh, Content: "first"},
+				agent.ReviewFinding{Path: "b.go", Line: "7", Severity: agent.SeverityHigh, Content: "second"}),
+			testContribution("**/*.ts",
+				agent.ReviewFinding{Path: "c.ts", Line: "3", Severity: agent.SeverityLow, Content: "third"}),
+		},
+		[]agent.ReviewPlanGroup{
+			{Pattern: "**/*.go", Label: "**/*.go"},
+			{Pattern: "**/*.ts", Label: "**/*.ts"},
+		},
+	)
 
-	got := reviewDigest(outcomes, plan)
+	got := reviewDigest(rec)
 	want := "**high** · 2\n" +
 		"| path |\n" +
 		"| --- |\n" +
@@ -395,20 +482,21 @@ func TestReviewDigest_GroupsBySeverity(t *testing.T) {
 // the plan — the group that comes first in the plan comes first in the
 // digest, whatever order the groups finished in.
 func TestReviewDigest_OrdersRowsByThePlan(t *testing.T) {
-	outcomes := []reviewOutcome{
-		{pattern: "**/*.ts", report: agent.ReviewReport{Parsed: true, Findings: []agent.ReviewFinding{
-			{Path: "c.ts", Line: "3", Severity: agent.SeverityHigh, Content: "the ts finding"},
-		}}},
-		{pattern: "**/*.go", report: agent.ReviewReport{Parsed: true, Findings: []agent.ReviewFinding{
-			{Path: "a.go", Line: "42", Severity: agent.SeverityHigh, Content: "the go finding"},
-		}}},
-	}
-	plan := []agent.ReviewPlanGroup{
-		{Pattern: "**/*.go", Label: "**/*.go"},
-		{Pattern: "**/*.ts", Label: "**/*.ts"},
-	}
+	rec := testRecord(
+		[]reviewOutcome{{pattern: "**/*.go"}, {pattern: "**/*.ts"}},
+		[]reviewContribution{
+			testContribution("**/*.ts",
+				agent.ReviewFinding{Path: "c.ts", Line: "3", Severity: agent.SeverityHigh, Content: "the ts finding"}),
+			testContribution("**/*.go",
+				agent.ReviewFinding{Path: "a.go", Line: "42", Severity: agent.SeverityHigh, Content: "the go finding"}),
+		},
+		[]agent.ReviewPlanGroup{
+			{Pattern: "**/*.go", Label: "**/*.go"},
+			{Pattern: "**/*.ts", Label: "**/*.ts"},
+		},
+	)
 
-	got := reviewDigest(outcomes, plan)
+	got := reviewDigest(rec)
 	goRow := strings.Index(got, "a.go:42")
 	tsRow := strings.Index(got, "c.ts:3")
 	if goRow < 0 || tsRow < 0 {
@@ -423,13 +511,16 @@ func TestReviewDigest_OrdersRowsByThePlan(t *testing.T) {
 // when some finding of the run named a category — and a finding
 // without one shows the em dash.
 func TestReviewDigest_CategoryColumn(t *testing.T) {
-	plain := []reviewOutcome{
-		{pattern: "**/*.go", report: agent.ReviewReport{Parsed: true, Findings: []agent.ReviewFinding{
-			{Path: "a.go", Line: "42", Severity: agent.SeverityHigh, Content: "first"},
-		}}},
-	}
+	plain := testRecord(
+		[]reviewOutcome{{pattern: "**/*.go"}},
+		[]reviewContribution{
+			testContribution("**/*.go",
+				agent.ReviewFinding{Path: "a.go", Line: "42", Severity: agent.SeverityHigh, Content: "first"}),
+		},
+		nil,
+	)
 
-	got := reviewDigest(plain, nil)
+	got := reviewDigest(plain)
 	if !strings.Contains(got, "| path |\n| --- |\n") {
 		t.Errorf("the table has no path column:\n%s", got)
 	}
@@ -437,14 +528,17 @@ func TestReviewDigest_CategoryColumn(t *testing.T) {
 		t.Errorf("the table has a category column although no finding named one:\n%s", got)
 	}
 
-	mixed := []reviewOutcome{
-		{pattern: "**/*.go", report: agent.ReviewReport{Parsed: true, Findings: []agent.ReviewFinding{
-			{Path: "a.go", Line: "42", Severity: agent.SeverityHigh, Category: "error-handling", Content: "first"},
-			{Path: "b.go", Line: "7", Severity: agent.SeverityHigh, Content: "second"},
-		}}},
-	}
+	mixed := testRecord(
+		[]reviewOutcome{{pattern: "**/*.go"}},
+		[]reviewContribution{
+			testContribution("**/*.go",
+				agent.ReviewFinding{Path: "a.go", Line: "42", Severity: agent.SeverityHigh, Category: "error-handling", Content: "first"},
+				agent.ReviewFinding{Path: "b.go", Line: "7", Severity: agent.SeverityHigh, Content: "second"}),
+		},
+		nil,
+	)
 
-	got = reviewDigest(mixed, nil)
+	got = reviewDigest(mixed)
 	if !strings.Contains(got, "| category | path |\n") {
 		t.Errorf("the table has no category column:\n%s", got)
 	}
@@ -462,14 +556,17 @@ func TestReviewDigest_CategoryColumn(t *testing.T) {
 // TestReviewDigest_Sanitizes: a cell stays one line — a pipe becomes
 // a slash, a line break or a tab a space — and the cell is trimmed.
 func TestReviewDigest_Sanitizes(t *testing.T) {
-	outcomes := []reviewOutcome{
-		{pattern: "**/*.go", report: agent.ReviewReport{Parsed: true, Findings: []agent.ReviewFinding{
-			{Path: "a.go|", Line: "42", Severity: agent.SeverityHigh, Category: "error | handling\nx\ty"},
-			{Path: " b.go ", Severity: agent.SeverityHigh},
-		}}},
-	}
+	rec := testRecord(
+		[]reviewOutcome{{pattern: "**/*.go"}},
+		[]reviewContribution{
+			testContribution("**/*.go",
+				agent.ReviewFinding{Path: "a.go|", Line: "42", Severity: agent.SeverityHigh, Category: "error | handling\nx\ty"},
+				agent.ReviewFinding{Path: " b.go ", Severity: agent.SeverityHigh}),
+		},
+		nil,
+	)
 
-	got := reviewDigest(outcomes, nil)
+	got := reviewDigest(rec)
 	if !strings.Contains(got, "| error / handling x y | a.go/:42 |") {
 		t.Errorf("the cell was not sanitized:\n%s", got)
 	}
@@ -478,29 +575,36 @@ func TestReviewDigest_Sanitizes(t *testing.T) {
 	}
 }
 
-// TestReviewDigest_NoFindings: a run without findings produces no
+// TestReviewDigest_NoFindings: a review without findings produces no
 // digest — the verdict message is the verdict line alone.
 func TestReviewDigest_NoFindings(t *testing.T) {
-	outcomes := []reviewOutcome{
-		{pattern: "**/*.go", report: agent.ReviewReport{Parsed: true}},
-	}
+	rec := testRecord(
+		[]reviewOutcome{{pattern: "**/*.go"}},
+		[]reviewContribution{testContribution("**/*.go")},
+		nil,
+	)
 
-	if got := reviewDigest(outcomes, nil); got != "" {
-		t.Errorf("a run without findings produced a digest:\n%s", got)
+	if got := reviewDigest(rec); got != "" {
+		t.Errorf("a review without findings produced a digest:\n%s", got)
 	}
 }
 
-// TestReviewDigest_SkipsFailedGroups: a group that failed produced
-// no report, so it contributes no rows.
+// TestReviewDigest_SkipsFailedGroups: a group that failed produced no
+// contribution, so it contributes no rows.
 func TestReviewDigest_SkipsFailedGroups(t *testing.T) {
-	outcomes := []reviewOutcome{
-		{pattern: "**/*.go", err: errors.New("boom")},
-		{pattern: "**/*.ts", report: agent.ReviewReport{Parsed: true, Findings: []agent.ReviewFinding{
-			{Path: "c.ts", Line: "3", Severity: agent.SeverityHigh, Content: "the ts finding"},
-		}}},
-	}
+	rec := testRecord(
+		[]reviewOutcome{
+			{pattern: "**/*.go", err: errors.New("boom")},
+			{pattern: "**/*.ts"},
+		},
+		[]reviewContribution{
+			testContribution("**/*.ts",
+				agent.ReviewFinding{Path: "c.ts", Line: "3", Severity: agent.SeverityHigh, Content: "the ts finding"}),
+		},
+		nil,
+	)
 
-	got := reviewDigest(outcomes, nil)
+	got := reviewDigest(rec)
 	if strings.Contains(got, "**/*.go") {
 		t.Errorf("the failed group reached the digest:\n%s", got)
 	}
@@ -510,7 +614,7 @@ func TestReviewDigest_SkipsFailedGroups(t *testing.T) {
 }
 
 // TestReviewDigest_KeepsEveryFinding: the digest carries every
-// finding of the run — no row is dropped, and no tail names the
+// finding of the review — no row is dropped, and no tail names the
 // findings that were left out.
 func TestReviewDigest_KeepsEveryFinding(t *testing.T) {
 	var findings []agent.ReviewFinding
@@ -521,11 +625,13 @@ func TestReviewDigest_KeepsEveryFinding(t *testing.T) {
 			Content:  strings.Repeat("错", 80),
 		})
 	}
-	outcomes := []reviewOutcome{
-		{pattern: "**/*.go", report: agent.ReviewReport{Parsed: true, Findings: findings}},
-	}
+	rec := testRecord(
+		[]reviewOutcome{{pattern: "**/*.go"}},
+		[]reviewContribution{testContribution("**/*.go", findings...)},
+		nil,
+	)
 
-	got := reviewDigest(outcomes, nil)
+	got := reviewDigest(rec)
 	rows := strings.Count(got, "| internal/agent/review.go:")
 	if rows != len(findings) {
 		t.Errorf("the digest holds %d of %d rows:\n%s", rows, len(findings), got)
@@ -536,7 +642,7 @@ func TestReviewDigest_KeepsEveryFinding(t *testing.T) {
 }
 
 // TestSendVerdict_CarriesTheWholeDigest: the verdict message carries
-// the whole digest — one message, every finding of the run.
+// the whole digest — one message, every finding of the review.
 func TestSendVerdict_CarriesTheWholeDigest(t *testing.T) {
 	var findings []agent.ReviewFinding
 	for i := 0; i < 60; i++ {
@@ -547,12 +653,15 @@ func TestSendVerdict_CarriesTheWholeDigest(t *testing.T) {
 			Content:  strings.Repeat("错", 80),
 		})
 	}
-	outcomes := []reviewOutcome{
-		{pattern: "**/*.go", report: agent.ReviewReport{Parsed: true, Findings: findings}},
-	}
+	rec := testRecord(
+		[]reviewOutcome{{pattern: "**/*.go"}},
+		[]reviewContribution{testContribution("**/*.go", findings...)},
+		nil,
+	)
 
 	em := newRecordingEmitter()
-	sendVerdict(context.Background(), em, "chat", "msg", "codex", agent.RunResult{}, outcomes, nil)
+	sendVerdict(context.Background(), em, "chat", "msg", "codex", agent.RunResult{},
+		newVerdict(rec, false), reviewDigest(rec))
 
 	msgs := em.messages()
 	if len(msgs) != 1 {
@@ -586,12 +695,15 @@ func TestSendVerdict_CarriesEveryLocationAndNoProse(t *testing.T) {
 			Content:  fmt.Sprintf("finding %d: %s", i, strings.Repeat("细节", 30)),
 		})
 	}
-	outcomes := []reviewOutcome{
-		{pattern: "**/*.go", report: agent.ReviewReport{Parsed: true, Findings: findings}},
-	}
+	rec := testRecord(
+		[]reviewOutcome{{pattern: "**/*.go"}},
+		[]reviewContribution{testContribution("**/*.go", findings...)},
+		nil,
+	)
 
 	em := newRecordingEmitter()
-	sendVerdict(context.Background(), em, "chat", "msg", "codex", agent.RunResult{}, outcomes, nil)
+	sendVerdict(context.Background(), em, "chat", "msg", "codex", agent.RunResult{},
+		newVerdict(rec, false), reviewDigest(rec))
 
 	msgs := em.messages()
 	if len(msgs) != 1 {
@@ -627,14 +739,17 @@ func TestSendVerdict_LogsAFailedSend(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
 	defer slog.SetDefault(prev)
 
-	outcomes := []reviewOutcome{
-		{pattern: "**/*.go", report: agent.ReviewReport{Parsed: true, Findings: []agent.ReviewFinding{
-			{Path: "a.go", Line: "42", Severity: agent.SeverityHigh, Content: "the finding"},
-		}}},
-	}
+	rec := testRecord(
+		[]reviewOutcome{{pattern: "**/*.go"}},
+		[]reviewContribution{
+			testContribution("**/*.go",
+				agent.ReviewFinding{Path: "a.go", Line: "42", Severity: agent.SeverityHigh, Content: "the finding"}),
+		},
+		nil,
+	)
 
 	sendVerdict(context.Background(), &failingEmitter{err: errors.New("channel said no")},
-		"chat", "msg", "codex", agent.RunResult{}, outcomes, nil)
+		"chat", "msg", "codex", agent.RunResult{}, newVerdict(rec, false), reviewDigest(rec))
 
 	if !strings.Contains(logs.String(), "channel said no") {
 		t.Errorf("the failed verdict send was not logged:\n%s", logs.String())
@@ -665,17 +780,21 @@ func TestSendReviewLine_LogsAFailedSend(t *testing.T) {
 }
 
 // TestSendVerdict_CarriesTheDigest: the digest rides inside the
-// verdict message — one message, one card entry — and a run without
-// findings leaves the message as the verdict line alone.
+// verdict message — one message, one card entry — and a review
+// without findings leaves the message as the verdict line alone.
 func TestSendVerdict_CarriesTheDigest(t *testing.T) {
-	outcomes := []reviewOutcome{
-		{pattern: "**/*.go", report: agent.ReviewReport{Parsed: true, Findings: []agent.ReviewFinding{
-			{Path: "a.go", Line: "42", Severity: agent.SeverityHigh, Category: "error-handling", Content: "the finding"},
-		}}},
-	}
+	rec := testRecord(
+		[]reviewOutcome{{pattern: "**/*.go"}},
+		[]reviewContribution{
+			testContribution("**/*.go",
+				agent.ReviewFinding{Path: "a.go", Line: "42", Severity: agent.SeverityHigh, Category: "error-handling", Content: "the finding"}),
+		},
+		nil,
+	)
 
 	em := newRecordingEmitter()
-	sendVerdict(context.Background(), em, "chat", "msg", "codex", agent.RunResult{}, outcomes, nil)
+	sendVerdict(context.Background(), em, "chat", "msg", "codex", agent.RunResult{},
+		newVerdict(rec, false), reviewDigest(rec))
 
 	msgs := em.messages()
 	if len(msgs) != 1 {
@@ -694,15 +813,20 @@ func TestSendVerdict_CarriesTheDigest(t *testing.T) {
 	}
 
 	empty := newRecordingEmitter()
+	clean := testRecord(
+		[]reviewOutcome{{pattern: "**/*.go"}},
+		[]reviewContribution{testContribution("**/*.go")},
+		nil,
+	)
 	sendVerdict(context.Background(), empty, "chat", "msg", "codex", agent.RunResult{},
-		[]reviewOutcome{{pattern: "**/*.go", report: agent.ReviewReport{Parsed: true}}}, nil)
+		newVerdict(clean, false), reviewDigest(clean))
 
 	msgs = empty.messages()
 	if len(msgs) != 1 {
 		t.Fatalf("the review sent %d messages, want the one verdict message: %+v", len(msgs), msgs)
 	}
 	if text := msgs[0].Text; strings.Contains(text, "|") || strings.HasSuffix(text, "\n") {
-		t.Errorf("the verdict message of a run without findings changed:\n%q", text)
+		t.Errorf("the verdict message of a review without findings changed:\n%q", text)
 	}
 }
 
@@ -710,15 +834,24 @@ func TestSendVerdict_CarriesTheDigest(t *testing.T) {
 // the card message reads as the counts, the failure and the digest —
 // the failure block sits under the counts line and above the digest.
 func TestSendVerdict_PutsTheFailureBlockBetweenTheCountsAndTheDigest(t *testing.T) {
-	outcomes := []reviewOutcome{
-		{pattern: "**/*.go", report: agent.ReviewReport{Parsed: true, Findings: []agent.ReviewFinding{
-			{Path: "a.go", Line: "42", Severity: agent.SeverityHigh, Content: "the finding"},
-		}}},
-		{pattern: "**/*.ts", source: "system", err: errors.New("boom"), sessionID: "sess-ts"},
-	}
+	rec := testRecord(
+		[]reviewOutcome{
+			{pattern: "**/*.go"},
+			{pattern: "**/*.ts", source: "system", err: errors.New("boom"), sessionID: "sess-ts"},
+		},
+		[]reviewContribution{
+			testContribution("**/*.go",
+				agent.ReviewFinding{Path: "a.go", Line: "42", Severity: agent.SeverityHigh, Content: "the finding"}),
+		},
+		[]agent.ReviewPlanGroup{
+			{Pattern: "**/*.go", Label: "**/*.go"},
+			{Pattern: "**/*.ts", Source: "system", Label: "system / **/*.ts"},
+		},
+	)
 
 	em := newRecordingEmitter()
-	sendVerdict(context.Background(), em, "chat", "msg", "codex", agent.RunResult{}, outcomes, nil)
+	sendVerdict(context.Background(), em, "chat", "msg", "codex", agent.RunResult{},
+		newVerdict(rec, false), reviewDigest(rec))
 
 	msgs := em.messages()
 	if len(msgs) != 1 {
@@ -770,8 +903,10 @@ type planReviewStarter struct {
 	name   string
 	groups []agent.ReviewPlanGroup
 	failed int
-	merged string
-	reply  string
+	// texts are the groups' own outputs — what the merged document
+	// carries under each group's header.
+	texts []string
+	reply string
 	// prompt is the prompt every group ran — the record keeps it, so
 	// a group that never reached the agent can be re-run with it.
 	prompt string
@@ -838,16 +973,22 @@ func (s *planReviewStarter) Review(_ context.Context, _ agent.StartConfig, opts 
 					Content:  fmt.Sprintf("issue %d in group %d", i+1, i+1),
 				}}
 			}
+			text := fmt.Sprintf("the findings of group %d", i+1)
+			if i < len(s.texts) {
+				text = s.texts[i]
+			}
 			cfg.OnReviewJob(agent.ReviewJob{
 				Pattern:   g.Pattern,
+				Source:    g.Source,
 				Files:     g.Files,
 				SessionID: fmt.Sprintf("sess-%d", i+1),
 				Prompt:    s.prompt,
 				Report:    report,
+				Text:      text,
 			}, err)
 		}
 	}
-	return agent.RunResult{Text: s.merged}, nil
+	return agent.RunResult{Text: "the merged review"}, nil
 }
 
 // outReplies returns the OutReply messages the emitter received — the
@@ -948,8 +1089,7 @@ func TestHandle_ReviewDeliversThePlanAndTheVerdict(t *testing.T) {
 			{Pattern: "**/*.go", Label: "**/*.go", Files: []string{"a.go", "b.go"}},
 			{Pattern: "_nightme_simplify", Label: "simplify lens", Files: []string{"a.go"}},
 		},
-		merged: "### Group: pattern **/*.go — files: a.go, b.go\n\nthe go findings\n\n" +
-			"### Group: pattern _nightme_simplify — files: a.go\n\nthe simplify findings\n\n",
+		texts: []string{"the go findings", "the simplify findings"},
 	}
 	agents.registry.Register(starter)
 
@@ -1015,7 +1155,7 @@ func TestHandle_ReviewFrameFollowsTheChat(t *testing.T) {
 	starter := &planReviewStarter{
 		name:   "review-frame-agent",
 		groups: []agent.ReviewPlanGroup{{Pattern: "**/*.go", Label: "**/*.go", Files: []string{"a.go"}}},
-		merged: "### Group: pattern **/*.go — files: a.go\n\nthe go findings\n\n",
+		texts:  []string{"the go findings"},
 	}
 	agents.registry.Register(starter)
 
@@ -1064,8 +1204,7 @@ func TestHandle_ReviewDeliversTheFindingsToTheThread(t *testing.T) {
 			{Pattern: agent.PatternSimplify, Label: "Simplify review lens · Go", Files: []string{"a.go"}},
 		},
 		reply: "the findings",
-		merged: "### Group: pattern **/*.go — files: a.go, b.go\n\nthe go findings\n\n" +
-			"### Group: pattern _nightme_simplify — files: a.go\n\nthe simplify findings\n\n",
+		texts: []string{"the go findings", "the simplify findings"},
 	}
 	agents.registry.Register(starter)
 
@@ -1142,7 +1281,7 @@ func TestHandle_ReviewVerdictCarriesTheDigest(t *testing.T) {
 			{Pattern: "**/*.go", Label: "**/*.go", Files: []string{"a.go"}},
 			{Pattern: agent.PatternSimplify, Label: "simplify lens", Files: []string{"a.go"}},
 		},
-		merged: "### Group: pattern **/*.go — files: a.go\n\nthe go findings\n\n",
+		texts: []string{"the go findings"},
 	}
 	agents.registry.Register(starter)
 
@@ -1192,8 +1331,7 @@ func TestHandle_ReviewNamesTheFailedGroup(t *testing.T) {
 			{Pattern: "**/*.ts", Label: "**/*.ts", Files: []string{"c.ts"}},
 		},
 		failed: 1,
-		merged: "### Group: pattern **/*.go — failed: boom\n\n" +
-			"### Group: pattern **/*.ts — files: c.ts\n\nthe ts findings\n\n",
+		texts:  []string{"the go findings", "the ts findings"},
 	}
 	agents.registry.Register(starter)
 
@@ -1220,9 +1358,18 @@ func TestHandle_ReviewNamesTheFailedGroup(t *testing.T) {
 // count is incomplete (a group's output could not be parsed) must not
 // read as a clean "nothing found".
 func TestVerdictLine_UnparsedGroupsAreNotGreen(t *testing.T) {
-	got := newVerdict(2, []agent.ReviewReport{{Parsed: false}}, nil).line()
+	rec := testRecord(
+		[]reviewOutcome{{pattern: "a"}, {pattern: "b"}},
+		[]reviewContribution{
+			testContribution("a"),
+			{pattern: "b", parsed: false},
+		},
+		nil,
+	)
+
+	got := newVerdict(rec, false).line()
 	if !strings.Contains(got, "⚠️") {
-		t.Errorf("the verdict of an unparsed run is not marked: %s", got)
+		t.Errorf("the verdict of an unparsed review is not marked: %s", got)
 	}
 	if !strings.Contains(got, "1 unparsed subagent") {
 		t.Errorf("the verdict does not report the unparsed subagent: %s", got)

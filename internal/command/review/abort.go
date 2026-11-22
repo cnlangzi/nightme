@@ -112,7 +112,7 @@ func reportAborted(ctx context.Context, work *chatsession.Work, emitter messages
 	chatID, replyTo, runner, kind string, outcomes []reviewOutcome,
 ) {
 	groups, unfinished := groupCounts(outcomes)
-	data := unfinishedData(map[string]string{"agent": runner, "reason": "aborted"}, outcomes)
+	data := unfinishedData(map[string]string{"agent": runner, "reason": "aborted", "delivered": "false"}, outcomes)
 	work.Report(messages.Outcome{
 		Status:  messages.OutcomeCancelled,
 		Summary: fmt.Sprintf("the %s was aborted (%d of %d groups unfinished)", kind, unfinished, groups),

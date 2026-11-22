@@ -172,15 +172,3 @@ func judgeReview(before, after workspaceState, findings int, runner string) mess
 	return command.FailedOutcomeData("not_fixed", "the review's findings were not addressed", data,
 		"the review found "+strconv.Itoa(findings)+" finding(s) and the workspace carries neither a new commit nor a new change")
 }
-
-// countFindings counts the findings the review's groups reported.
-//
-// The count comes from the parsed reports the fan-out handed the
-// collector — never from the review text.
-func countFindings(outcomes []reviewOutcome) int {
-	n := 0
-	for _, o := range outcomes {
-		n += len(o.report.Findings)
-	}
-	return n
-}

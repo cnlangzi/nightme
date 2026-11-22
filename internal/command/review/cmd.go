@@ -70,7 +70,6 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
-	"github.com/cnlangzi/nightme/internal/agentsession"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/config"
@@ -96,7 +95,6 @@ type Factory struct {
 	records map[string]reviewRecord
 	running map[string]int
 	runs    map[string][]*runHandle
-	nextID  uint64
 }
 
 // init self-registers the /review command. Each command package's
@@ -674,19 +672,25 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 		// stop, so the delivery below runs undisturbed.
 		f.finishFanout(chatID, handle)
 
-		// The record is replaced with this run's outcomes BEFORE the
-		// result is delivered: by the time the user sees the
-		// findings, the state a later `--continue` reads is already
-		// this run's.
+		// The record is updated with this run's results BEFORE the
+		// result is delivered: the findings of the groups that
+		// finished wait there until every group is in, and the state
+		// a later `--continue` reads is already this run's.
 		//
 		// A run that produced no group outcomes — the review found
 		// no diff, or the bridge cannot review at all — leaves the
-		// chat's resume state alone: there is nothing new to resume
-		// from, and the previous run's unfinished groups are still
-		// unfinished.
+		// chat's record alone: there is nothing new to add, and the
+		// previous run's unfinished groups are still unfinished.
 		groupOutcomes := collector.results()
+		var rec reviewRecord
 		if len(groupOutcomes) > 0 {
-			f.record(chatID, runnerName, workspace, groupOutcomes)
+			rec = f.record(chatID, runnerName, workspace, reviewRun{
+				outcomes:      groupOutcomes,
+				contributions: collector.said(),
+				plan:          collector.plan(),
+			})
+		} else {
+			rec, _ = f.lookup(chatID)
 		}
 		finish()
 
@@ -706,40 +710,22 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 			return
 		}
 
-		// The end hint goes into the sink BEFORE the drain: the sink
-		// is a queue, so the hint lands after the groups' findings,
-		// which the fan-out already queued. Sending it through the
-		// sink is what puts it under the chat's /think setting — the
-		// same visibility the findings have.
-		if err == nil {
-			sendVerdictHint(sink, reviewVerdictHint(groupOutcomes, collector.plan()))
-		}
-
-		// The sink is drained now: the groups' findings are still
-		// queued behind its drain goroutine, and the review's own
-		// lines must land after them.
-		drain()
-
-		// The timeout notice names the groups that went silent — the
-		// one thing the user must act on. It goes out as a reply of
-		// its own, so it is visible whatever the chat's /think setting
-		// says, and before the verdict line that summarizes the run.
-		if notice := reviewTimeoutNotice(groupOutcomes, timeout); notice != "" {
-			sendReviewLine(revCtx, emitter, chatID, replyTo, runnerName, notice)
-		}
-
-		if err != nil {
+		// A run that failed before the fan-out — no diff, an unknown
+		// base, an agent that cannot review — has no groups and
+		// nothing to deliver. A run whose groups all failed is not
+		// this case: the review is pending, and the card says what is
+		// still missing.
+		if err != nil && len(groupOutcomes) == 0 {
 			// The review failed — say so in the machine-readable
 			// channel too. A driver that only reads the settled
 			// message must not see "unknown" for a review that
 			// visibly failed.
 			var text string
-			// The fan-out ran: the groups it ran are the work that
-			// is left, and the count of them says how much. A failure
-			// before the fan-out — no diff, an unknown base, an agent
-			// that cannot review — leaves no key behind: there is no
-			// work to pick up.
-			data := unfinishedData(map[string]string{"agent": runnerName}, groupOutcomes)
+			// The failure happened before the fan-out — no diff, an
+			// unknown base, an agent that cannot review — so there is
+			// no group and no work to pick up: the outcome carries no
+			// unfinished count.
+			data := unfinishedData(map[string]string{"agent": runnerName, "delivered": "false"}, groupOutcomes)
 			switch {
 			case errors.Is(err, agent.ErrNoDiff):
 				// Pre-compute found zero reviewable files in the
@@ -815,117 +801,62 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 			return
 		}
 
-		// Success: the merged text goes to the main agent, the
-		// channel gets the verdict.
+		if len(groupOutcomes) == 0 {
+			// The run produced no group: there is nothing to deliver.
+			// The review the chat is in the middle of keeps its
+			// findings, and they wait for the round that completes
+			// it.
+			work.Report(messages.Outcome{
+				Status:  messages.OutcomeOK,
+				Summary: "the review found nothing to review",
+				Data:    map[string]string{"agent": runnerName, "delivered": "false"},
+			})
+			return
+		}
+
+		// Every group of the run failed. That is not the end of the
+		// review — the groups that failed can still be picked up by
+		// a continuation, and the card says so.
+		if err != nil {
+			slog.Default().Warn("/review: every group failed",
+				"agent", runnerName,
+				"err", err,
+			)
+		}
+
+		// The delivery: the review is handed to the chat — once the
+		// findings are in and every group is in.
 		//
-		// The merged text is the agent's input — it is complete, it
-		// carries the failed-group markers, and "fix the blockers"
-		// reads it. The channel does NOT get it: the findings
-		// already reached the chat through the coalesced stream, and
-		// a second copy would say the same thing twice.
+		// The merged document is the agent's input — it is complete,
+		// it carries the failed-group markers, and "fix the
+		// blockers" reads it. The channel does NOT get it: the
+		// findings already reached the chat through the coalesced
+		// stream, and a second copy would say the same thing twice.
 		//
 		// The card's digest carries only the locations, so the
 		// agent's answer is where the findings' text reaches the
 		// reader when /think keeps the thread empty.
-		formatted := agent.FormatReviewMessage(workspace, runnerName, result.Text, result.Notes...)
-		blocks := []agent.ContentBlock{{
-			Type: agent.ContentText,
-			Text: formatted + reviewPromptFrame(threadShowsFindings(cs)),
-		}}
-
-		// The review itself succeeded. The outcome the consumer
-		// ends up with is the delivered one: a failed injection
-		// outranks this, and the injected turn's own end decides
-		// the rest.
-		//
-		// A group that failed does not fail the review — the
-		// surviving groups' findings are still useful — but it is
-		// not a clean success either. The group counts come from
-		// the collector, never from the review text.
-		groups, unfinished := groupCounts(groupOutcomes)
-		status := messages.OutcomeOK
-		summary := "review delivered"
-		if unfinished > 0 {
-			status = messages.OutcomeIncomplete
-			summary = fmt.Sprintf("%d of %d groups unfinished", unfinished, groups)
-		}
-		data := unfinishedData(map[string]string{"agent": runnerName}, groupOutcomes)
-		if groups > 0 {
+		data := map[string]string{"agent": runnerName}
+		if groups := len(rec.outcomes); groups > 0 {
 			data["groups"] = fmt.Sprintf("%d", groups)
 		}
-		work.Report(messages.Outcome{
-			Status:  status,
-			Summary: summary,
-			Data:    timeoutOutcomeData(data, groupOutcomes),
+		f.deliver(reviewDelivery{
+			ctx:        revCtx,
+			cs:         cs,
+			work:       work,
+			emitter:    emitter,
+			sink:       sink,
+			drain:      drain,
+			chatID:     chatID,
+			replyTo:    replyTo,
+			runner:     runnerName,
+			sendBlocks: sendBlocks,
+			rec:        rec,
+			result:     result,
+			notes:      result.Notes,
+			data:       timeoutOutcomeData(data, groupOutcomes),
+			notice:     reviewTimeoutNotice(groupOutcomes, timeout),
 		})
-
-		// 1) The verdict line — what the run found, in one line:
-		//    the group count, the finding count, the severity
-		//    distribution, the groups that failed and the groups
-		//    whose output could not be parsed.
-		//
-		//    It is the last thing the review itself sends. It goes
-		//    out BEFORE the injected turn: the main agent starts
-		//    answering as soon as the turn is injected, and the
-		//    verdict must not land after the answer it summarizes.
-		if revCtx.Err() == nil {
-			sendVerdict(revCtx, emitter, chatID, replyTo, runnerName, result, groupOutcomes, collector.plan())
-		}
-
-		// 2) Inject into AS as a user turn — main agent sees
-		//    the review and can act on follow-ups.
-		//
-		// WithReplyTo(replyTo) tells the readpump to stamp the
-		// /review slash command's message_id onto every AgentEvent
-		// the main agent emits in response to this injected turn.
-		// Without the override, those events anchor to the prior
-		// prompt's LastMessageID (whatever the user message was
-		// before /review), and the chat channel renders the fix
-		// replies as a separate rolling card instead of folding
-		// them into the /review placeholder.
-		//
-		// The injected turn is agent work of its own, and it can
-		// run for a long time after the review is done. Hold the
-		// message until that turn ends — the turn's prompt-end
-		// carries replyTo (the WithReplyTo override becomes the
-		// prompt's anchor), so the hold releases on exactly that
-		// event.
-		//
-		// A failed injection means no turn will run, so the hold
-		// is released right away instead of waiting for a turn
-		// that never comes.
-		//
-		// The verdict waits for that same turn: it is where the
-		// fixes the findings asked for land. Its watcher is set up
-		// BEFORE the injection so its subscriber runs before the
-		// queue's own — the bus calls its subscribers in
-		// registration order.
-		//
-		// The baseline is read HERE — right before the findings go
-		// out — so only the injected turn's effect is measured. A
-		// change the user made while the review ran is not credited
-		// to the review.
-		before := readBaseline(revCtx, workspace)
-		verdict := watchSelfVerdict(revCtx, cs, replyTo, workspace, runnerName,
-			before, countFindings(groupOutcomes))
-		injectWork := cs.HoldUntilPromptEnd(replyTo)
-		if err := sendBlocks(revCtx, blocks, agentsession.WithReplyTo(replyTo)); err != nil {
-			slog.Default().Warn("/review: AS inject failed",
-				"agent", runnerName,
-				"err", err,
-			)
-			// The findings were produced but never reached the
-			// agent — the review is not complete.
-			work.Report(messages.Outcome{
-				Status:  messages.OutcomeIncomplete,
-				Summary: "review findings could not be delivered to the agent",
-				Data:    map[string]string{"agent": runnerName, "reason": "inject_failed"},
-			})
-			injectWork.Release()
-			// No turn will run, so nothing was fixed: give the
-			// share of the message's work back.
-			verdict.release()
-		}
 	}()
 
 	// Return Consumed=true. The chat session is now free: readpump
@@ -1132,7 +1063,7 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 		// abort to stop, so the delivery below runs undisturbed.
 		f.finishFanout(chatID, handle)
 
-		// The record is replaced with this run's outcomes BEFORE the
+		// The record is updated with this run's results BEFORE the
 		// result is delivered, so a second `--continue` finds
 		// nothing left to resume. A group that fails again has
 		// spent its one recovery attempt — the failure stays in the
@@ -1145,10 +1076,6 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 		// An ABORTED continuation is the exception too: the groups
 		// were stopped, not exhausted, so they keep their resume
 		// attempt and stay resumable.
-		//
-		// The write is conditional on the record still being the one
-		// this continuation resumed from: a review that finished in
-		// the meantime owns the chat's resume state.
 		abortedRun := aborted(revCtx)
 		groupOutcomes := collector.results()
 		switch {
@@ -1172,7 +1099,11 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 		// came from — it is the only way to run the group on another
 		// agent.
 		carryPrompts(groupOutcomes, rec.outcomes)
-		f.recordIfCurrent(chatID, rec.id, runnerName, workspace, groupOutcomes)
+		merged := f.record(chatID, runnerName, workspace, reviewRun{
+			outcomes:      groupOutcomes,
+			contributions: collector.said(),
+			plan:          collector.plan(),
+		})
 		finish()
 
 		// The user aborted this run: the resumed sessions are closed
@@ -1191,129 +1122,51 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 			return
 		}
 
-		// The end hint goes into the sink BEFORE the drain, so it
-		// lands after the continued groups' findings — same contract
-		// as a plain review.
-		if err == nil {
-			sendVerdictHint(sink, reviewVerdictHint(groupOutcomes, collector.plan()))
-		}
-
-		// The sink is drained now: the groups' findings are still
-		// queued behind its drain goroutine, and the continuation's
-		// own lines must land after them.
-		drain()
-
-		// The timeout notice names the groups that went silent — the
-		// one thing the user must act on. It goes out as a reply of
-		// its own, so it is visible whatever the chat's /think setting
-		// says, and before the verdict line that summarizes the run.
-		if notice := reviewTimeoutNotice(groupOutcomes, timeout); notice != "" {
-			sendReviewLine(revCtx, emitter, chatID, replyTo, runnerName, notice)
-		}
-
+		// The continuation failed as a run: every group it continued
+		// failed again. That is not the end of the review — the
+		// groups that survived are still worth delivering, and the
+		// groups that died are named in the card.
 		if err != nil {
 			slog.Default().Warn("/review --continue failed",
 				"agent", runnerName,
 				"err", err,
 			)
-			// The count rides along even here: the continuation fanned
-			// out over groups, and the ones that failed again are the
-			// work that is left. A chain that hands the step over
-			// reads the count — a continuation that fails without it
-			// would send the next agent back to the beginning.
-			work.Report(command.FailedOutcomeData("error", err.Error(),
-				timeoutOutcomeData(unfinishedData(map[string]string{"agent": runnerName}, groupOutcomes), groupOutcomes),
-				"the continuation failed: "+err.Error()))
-			if emitter == nil {
-				return
-			}
-			msg := err.Error()
-			if len(msg) > 800 {
-				msg = msg[:800] + "…(truncated)"
-			}
-			_, _ = emitter.Send(revCtx, messages.OutboundMessage{
-				ChatID:  chatID,
-				Kind:    messages.OutReply,
-				ReplyTo: replyTo,
-				Text: fmt.Sprintf("❌ /review continue failed (agent=%s):\n%s",
-					runnerName, msg),
-			})
-			return
 		}
 
-		// Success: the merged text goes to the main agent, the
-		// channel gets the verdict — the same delivery a normal
-		// review gets.
-		formatted := agent.FormatReviewMessage(workspace, runnerName, result.Text, result.Notes...)
-		blocks := []agent.ContentBlock{{
-			Type: agent.ContentText,
-			Text: formatted + reviewPromptFrame(threadShowsFindings(cs)),
-		}}
-
-		// A continued group that failed again did not finish its
-		// work — the continuation is not a clean success. The
-		// counts come from the collector, never from the text.
+		// The delivery: the review is handed to the chat — once the
+		// findings are in and every group is in.
+		//
+		// The merged document is the agent's input — it is complete,
+		// it carries the failed-group markers, and "fix the
+		// blockers" reads it. The channel does NOT get it: the
+		// findings already reached the chat through the coalesced
+		// stream, and a second copy would say the same thing twice.
 		//
 		// A continuation fans out over the groups it CONTINUED, not
-		// over every group of the review it continues — so its
-		// count goes under `continued_groups`, and `groups` keeps
-		// meaning "the groups of the review".
-		continued, unfinished := groupCounts(groupOutcomes)
-		status := messages.OutcomeOK
-		summary := "review continued"
-		if unfinished > 0 {
-			status = messages.OutcomeIncomplete
-			summary = fmt.Sprintf("%d of %d continued groups unfinished", unfinished, continued)
-		}
-		data := unfinishedData(map[string]string{"agent": runnerName}, groupOutcomes)
+		// over every group of the review it continues — so its count
+		// goes under `continued_groups`.
+		continued, _ := groupCounts(groupOutcomes)
+		data := map[string]string{"agent": runnerName}
 		if continued > 0 {
 			data["continued_groups"] = fmt.Sprintf("%d", continued)
 		}
-		work.Report(messages.Outcome{
-			Status:  status,
-			Summary: summary,
-			Data:    timeoutOutcomeData(data, groupOutcomes),
+		f.deliver(reviewDelivery{
+			ctx:        revCtx,
+			cs:         cs,
+			work:       work,
+			emitter:    emitter,
+			sink:       sink,
+			drain:      drain,
+			chatID:     chatID,
+			replyTo:    replyTo,
+			runner:     runnerName,
+			sendBlocks: sendBlocks,
+			rec:        merged,
+			result:     result,
+			notes:      result.Notes,
+			data:       timeoutOutcomeData(data, groupOutcomes),
+			notice:     reviewTimeoutNotice(groupOutcomes, timeout),
 		})
-
-		// The verdict line — the same contract as a plain review: it
-		// is the last thing the review itself sends, and it goes out
-		// before the injected turn so it never lands after the main
-		// agent's answer.
-		if revCtx.Err() == nil {
-			sendVerdict(revCtx, emitter, chatID, replyTo, runnerName, result, groupOutcomes, collector.plan())
-		}
-
-		// Same contract as a plain review: the injected turn is
-		// agent work of its own, so the message settles when that
-		// turn ends — and immediately when the injection fails.
-		//
-		// The verdict waits for that same turn, exactly as a plain
-		// review's does: the fixes the findings asked for land
-		// there.
-		//
-		// The baseline is read HERE — right before the findings go
-		// out — so only the injected turn's effect is measured. A
-		// change the user made while the review ran is not credited
-		// to the review.
-		before := readBaseline(revCtx, workspace)
-		verdict := watchSelfVerdict(revCtx, cs, replyTo, workspace, runnerName,
-			before, countFindings(groupOutcomes))
-		injectWork := cs.HoldUntilPromptEnd(replyTo)
-		if err := sendBlocks(revCtx, blocks, agentsession.WithReplyTo(replyTo)); err != nil {
-			slog.Default().Warn("/review --continue: AS inject failed",
-				"agent", runnerName,
-				"err", err,
-			)
-			work.Report(messages.Outcome{
-				Status:  messages.OutcomeIncomplete,
-				Summary: "review findings could not be delivered to the agent",
-				Data:    map[string]string{"agent": runnerName, "reason": "inject_failed"},
-			})
-			injectWork.Release()
-			// No turn will run, so nothing was fixed: give the
-			// share of the message's work back.
-			verdict.release()
-		}
 	}()
 
 	return replyWith(ctx, rt, notices, ""), nil

@@ -214,9 +214,9 @@ func newOutcomeChat(t *testing.T, chatID, agentName string) (*chatsession.ChatSe
 	return cs, em
 }
 
-// TestReviewOutcome covers the four review verdicts a program
-// branches on: every group finished, some group failed, there was no
-// diff, and the agent cannot review at all.
+// TestReviewOutcome covers the review verdicts a program branches on:
+// every group finished, some group failed, every group failed, there
+// was no diff, and the agent cannot review at all.
 func TestReviewOutcome(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -239,7 +239,9 @@ func TestReviewOutcome(t *testing.T) {
 			name:   "all groups finished",
 			groups: 3,
 			want:   messages.OutcomeOK,
-			data:   map[string]string{"groups": "3", "unfinished": "0", "agent": "reviewer"},
+			data: map[string]string{
+				"groups": "3", "unfinished": "0", "agent": "reviewer", "delivered": "true",
+			},
 		},
 		{
 			name:   "one group failed",
@@ -247,9 +249,7 @@ func TestReviewOutcome(t *testing.T) {
 			failed: 1,
 			want:   messages.OutcomeIncomplete,
 			data: map[string]string{
-				"groups":     "3",
-				"unfinished": "1",
-				"agent":      "reviewer",
+				"groups": "3", "unfinished": "1", "agent": "reviewer", "delivered": "false",
 			},
 		},
 		{
@@ -257,19 +257,16 @@ func TestReviewOutcome(t *testing.T) {
 			groups:        2,
 			failed:        2,
 			allGroupsFail: true,
-			want:          messages.OutcomeFailed,
+			want:          messages.OutcomeIncomplete,
 			data: map[string]string{
-				"reason":     "error",
-				"unfinished": "2",
-				"agent":      "reviewer",
+				"unfinished": "2", "agent": "reviewer", "delivered": "false",
 			},
-			wantErr: true,
 		},
 		{
 			name:         "no diff",
 			err:          agent.ErrNoDiff,
 			want:         messages.OutcomeFailed,
-			data:         map[string]string{"reason": "no_diff", "agent": "reviewer"},
+			data:         map[string]string{"reason": "no_diff", "agent": "reviewer", "delivered": "false"},
 			wantErr:      true,
 			noUnfinished: true,
 		},
@@ -277,7 +274,7 @@ func TestReviewOutcome(t *testing.T) {
 			name:         "not supported",
 			err:          agent.ErrReviewNotSupported,
 			want:         messages.OutcomeFailed,
-			data:         map[string]string{"reason": "not_supported", "agent": "reviewer"},
+			data:         map[string]string{"reason": "not_supported", "agent": "reviewer", "delivered": "false"},
 			wantErr:      true,
 			noUnfinished: true,
 		},
@@ -331,9 +328,9 @@ func TestReviewOutcome(t *testing.T) {
 	}
 }
 
-// TestReviewContinueOutcome covers the three continuation verdicts:
-// the resumed groups finished, one of them did not, and there was
-// nothing to resume at all.
+// TestReviewContinueOutcome covers the continuation verdicts: the
+// resumed groups finished, one of them did not, every one of them
+// failed again, and there was nothing to resume at all.
 func TestReviewContinueOutcome(t *testing.T) {
 	t.Run("resumed groups finished", func(t *testing.T) {
 		set := newTestAgents(t)
@@ -341,9 +338,9 @@ func TestReviewContinueOutcome(t *testing.T) {
 
 		cs, em := newOutcomeChat(t, "review-continue-ok", "reviewer")
 		f := NewFactory()
-		f.record(cs.ChatID, "reviewer", cs.SelectedCwd(), []reviewOutcome{
+		f.record(cs.ChatID, "reviewer", cs.SelectedCwd(), reviewRun{outcomes: []reviewOutcome{
 			{pattern: "group-1", files: []string{"a.go"}, sessionID: "sess-1", err: errors.New("boom")},
-		})
+		}})
 
 		hold := cs.Hold("msg-1")
 		ctx := chatsession.WithWork(context.Background(), hold)
@@ -364,21 +361,23 @@ func TestReviewContinueOutcome(t *testing.T) {
 		assertOutcome(t, got, messages.OutcomeOK, map[string]string{
 			"continued_groups": "1",
 			"agent":            "reviewer",
+			"delivered":        "true",
 		})
 	})
 
 	t.Run("a resumed group failed again", func(t *testing.T) {
 		// Two groups failed the first time; one of them recovers,
-		// the other does not — the run is partial, not a failure.
+		// the other does not — the review is delivered with the
+		// group that died named in it.
 		set := newTestAgents(t)
 		set.registry.Register(&resumeStarter{name: "reviewer", failCount: 1})
 
 		cs, em := newOutcomeChat(t, "review-continue-fail", "reviewer")
 		f := NewFactory()
-		f.record(cs.ChatID, "reviewer", cs.SelectedCwd(), []reviewOutcome{
+		f.record(cs.ChatID, "reviewer", cs.SelectedCwd(), reviewRun{outcomes: []reviewOutcome{
 			{pattern: "group-1", files: []string{"a.go"}, sessionID: "sess-1", err: errors.New("boom")},
 			{pattern: "group-2", files: []string{"b.go"}, sessionID: "sess-2", err: errors.New("boom")},
-		})
+		}})
 
 		hold := cs.Hold("msg-1")
 		ctx := chatsession.WithWork(context.Background(), hold)
@@ -400,23 +399,23 @@ func TestReviewContinueOutcome(t *testing.T) {
 			"continued_groups": "2",
 			"unfinished":       "1",
 			"agent":            "reviewer",
+			"delivered":        "true",
 		})
 	})
 
 	t.Run("every continued group failed again", func(t *testing.T) {
-		// The continuation itself fails: no group survived. The count
-		// of what is left still rides along — a chain that hands the
-		// step over reads it, and a continuation that fails without
-		// it would send the next agent back to the beginning.
+		// The groups failed again: their recovery attempt is spent,
+		// so the review is over. The card names the groups that
+		// died.
 		set := newTestAgents(t)
 		set.registry.Register(&resumeStarter{name: "reviewer", failCount: 2})
 
 		cs, em := newOutcomeChat(t, "review-continue-all-fail", "reviewer")
 		f := NewFactory()
-		f.record(cs.ChatID, "reviewer", cs.SelectedCwd(), []reviewOutcome{
+		f.record(cs.ChatID, "reviewer", cs.SelectedCwd(), reviewRun{outcomes: []reviewOutcome{
 			{pattern: "group-1", files: []string{"a.go"}, sessionID: "sess-1", err: errors.New("boom")},
 			{pattern: "group-2", files: []string{"b.go"}, sessionID: "sess-2", err: errors.New("boom")},
-		})
+		}})
 
 		hold := cs.Hold("msg-1")
 		ctx := chatsession.WithWork(context.Background(), hold)
@@ -434,9 +433,10 @@ func TestReviewContinueOutcome(t *testing.T) {
 		}
 		hold.Release()
 		got := waitOutcome(t, em, 5*time.Second)
-		assertOutcome(t, got, messages.OutcomeFailed, map[string]string{
+		assertOutcome(t, got, messages.OutcomeIncomplete, map[string]string{
 			"unfinished": "2",
 			"agent":      "reviewer",
+			"delivered":  "true",
 		})
 	})
 
@@ -446,9 +446,9 @@ func TestReviewContinueOutcome(t *testing.T) {
 
 		cs, em := newOutcomeChat(t, "review-continue-nothing", "reviewer")
 		f := NewFactory()
-		f.record(cs.ChatID, "reviewer", cs.SelectedCwd(), []reviewOutcome{
+		f.record(cs.ChatID, "reviewer", cs.SelectedCwd(), reviewRun{outcomes: []reviewOutcome{
 			{pattern: "group-1", files: []string{"a.go"}, sessionID: "sess-1"},
-		})
+		}})
 
 		hold := cs.Hold("msg-1")
 		ctx := chatsession.WithWork(context.Background(), hold)

@@ -101,15 +101,18 @@ func reviewRuleSet(groups []agent.ReviewPlanGroup) string {
 	return "open-code-review"
 }
 
-// verdict is what a review run found: the counts and the groups that
-// did not finish.
+// verdict is what a review found: the counts and the groups that did
+// not finish.
 //
 // The card's verdict line and the thread's end hint are two renderings
 // of the same numbers.
 type verdict struct {
-	// groups is the number of subagents the run fanned out to.
+	// groups is the number of subagents the review fanned out to.
 	groups int
-	// findings is the number of findings the groups reported.
+	// done is the number of groups that finished.
+	done int
+	// findings is the number of findings the groups reported and
+	// that have not been delivered yet.
 	findings int
 	// counts holds the findings per severity.
 	counts map[string]int
@@ -119,6 +122,10 @@ type verdict struct {
 	// failed holds every group that did not finish, with the state
 	// the continuation could still act on.
 	failed []failedGroup
+	// pending marks a review that is not over yet: a group can still
+	// be picked up by /review --continue, so the counts are a lower
+	// bound.
+	pending bool
 }
 
 // failedState is what a failed group can still be recovered by.
@@ -179,25 +186,22 @@ func (g failedGroup) actionable() bool {
 	return g.state == failedResumable || g.state == failedNeverStarted
 }
 
-// newVerdict builds the verdict of a review run.
+// newVerdict builds the verdict of a review from its record.
 //
-// reports holds one entry per group that completed; failed holds
-// every group that did not. A group that failed is counted as failed
-// — never as unparsed.
-func newVerdict(groups int, reports []agent.ReviewReport, failed []failedGroup) verdict {
+// pending says the review is not over yet: a group can still be
+// picked up by /review --continue, so the counts are a lower bound.
+func newVerdict(rec reviewRecord, pending bool) verdict {
 	v := verdict{
-		groups: groups,
-		counts: make(map[string]int),
-		failed: failed,
+		groups:   len(rec.outcomes),
+		done:     rec.finishedGroups(),
+		counts:   make(map[string]int),
+		failed:   rec.failedGroups(),
+		unparsed: rec.unparsedGroups(),
+		pending:  pending,
 	}
-	for _, r := range reports {
-		if !r.Parsed {
-			v.unparsed++
-		}
-		for _, f := range r.Findings {
-			v.findings++
-			v.counts[f.Severity]++
-		}
+	for _, f := range rec.findings {
+		v.findings++
+		v.counts[f.finding.Severity]++
 	}
 	return v
 }
@@ -205,8 +209,19 @@ func newVerdict(groups int, reports []agent.ReviewReport, failed []failedGroup) 
 // parts renders the verdict's counts: the subagent count, the finding
 // count, the severity distribution and the groups that could not be
 // parsed.
+//
+// A review that is not over yet counts what is in so far: the
+// groups that finished out of the review's groups, and the findings
+// found so far.
 func (v verdict) parts() []string {
-	parts := []string{plural(v.groups, "subagent"), plural(v.findings, "finding")}
+	var parts []string
+	if v.pending {
+		parts = append(parts, fmt.Sprintf("%d of %s done", v.done, plural(v.groups, "subagent")))
+		parts = append(parts, plural(v.findings, "finding")+" so far")
+	} else {
+		parts = append(parts, plural(v.groups, "subagent"))
+		parts = append(parts, plural(v.findings, "finding"))
+	}
 	for _, sev := range agent.SeverityOrder() {
 		if v.counts[sev] == 0 {
 			continue
@@ -219,10 +234,10 @@ func (v verdict) parts() []string {
 	return parts
 }
 
-// icon is the verdict's marker: a clean run reads as a success, an
+// icon is the verdict's marker: a clean review reads as a success, an
 // incomplete one is marked.
 func (v verdict) icon() string {
-	if len(v.failed) > 0 || v.unparsed > 0 {
+	if v.pending || len(v.failed) > 0 || v.unparsed > 0 {
 		return "⚠️"
 	}
 	return "✅"
@@ -292,20 +307,6 @@ func (v verdict) hint() string {
 	return v.icon() + " **review done** · " + v.body()
 }
 
-// reviewVerdict builds the verdict of a review run from its group
-// outcomes and the plan that named the groups.
-//
-// A failed group is counted as failed, never as unparsed. Its label
-// comes from the plan; a group the plan did not name falls back to the
-// name its identity gives.
-func reviewVerdict(outcomes []reviewOutcome, plan []agent.ReviewPlanGroup) string {
-	if len(outcomes) == 0 {
-		return ""
-	}
-	reports, failed := verdictInputs(outcomes, plan)
-	return newVerdict(len(outcomes), reports, failed).line()
-}
-
 // groupKey is a group's identity: the rule's source and the pattern
 // together. Two rules over the same glob are two groups, so the
 // pattern alone does not identify one.
@@ -313,41 +314,10 @@ func groupKey(source, pattern string) string {
 	return source + "\x00" + pattern
 }
 
-// reviewVerdictHint builds the thread's end hint of a review run: the
+// reviewVerdictHint builds the thread's end hint of a review: the
 // verdict in Markdown.
-func reviewVerdictHint(outcomes []reviewOutcome, plan []agent.ReviewPlanGroup) string {
-	if len(outcomes) == 0 {
-		return ""
-	}
-	reports, failed := verdictInputs(outcomes, plan)
-	return newVerdict(len(outcomes), reports, failed).hint()
-}
-
-// verdictInputs splits a review run's group outcomes into the reports
-// of the groups that completed and the groups that did not.
-//
-// A failed group's label comes from the plan; a group the plan did not
-// name falls back to the name its identity gives.
-func verdictInputs(outcomes []reviewOutcome, plan []agent.ReviewPlanGroup) (reports []agent.ReviewReport, failed []failedGroup) {
-	labels := make(map[string]string, len(plan))
-	for _, g := range plan {
-		labels[groupKey(g.Source, g.Pattern)] = g.Label
-	}
-	for _, o := range finishedOutcomes(outcomes) {
-		reports = append(reports, o.report)
-	}
-	for _, o := range failedOutcomes(outcomes) {
-		label := labels[groupKey(o.source, o.pattern)]
-		if label == "" {
-			label = agent.ReviewGroupName(o.source, o.pattern)
-		}
-		failed = append(failed, failedGroup{
-			label:    label,
-			state:    failedStateOf(o),
-			timedOut: isGroupTimeout(o.err),
-		})
-	}
-	return reports, failed
+func reviewVerdictHint(rec reviewRecord, pending bool) string {
+	return newVerdict(rec, pending).hint()
 }
 
 // failedStateOf names the state a failed group is in: whether it
@@ -366,42 +336,14 @@ func failedStateOf(o reviewOutcome) failedState {
 	}
 }
 
-// finishedOutcomes returns the outcomes of the groups that completed,
-// in the order they were reported.
-//
-// A group that failed produced no report: it has no findings, and it
-// is not a group the verdict counts. The verdict line and the digest
-// both take their findings from here, so the two cannot disagree.
-func finishedOutcomes(outcomes []reviewOutcome) []reviewOutcome {
-	var out []reviewOutcome
-	for _, o := range outcomes {
-		if o.err == nil {
-			out = append(out, o)
-		}
-	}
-	return out
-}
-
-// failedOutcomes returns the outcomes of the groups that did not
-// finish, in the order they were reported.
-func failedOutcomes(outcomes []reviewOutcome) []reviewOutcome {
-	var out []reviewOutcome
-	for _, o := range outcomes {
-		if o.err != nil {
-			out = append(out, o)
-		}
-	}
-	return out
-}
-
-// reviewDigest renders a review run's findings as severity-grouped
+// reviewDigest renders a review's findings as severity-grouped
 // markdown tables: one table per severity bucket, one row per
 // finding.
 //
-// The digest is the card's account of what the run found — the
-// verdict line carries the counts, the tables carry the rows. It is
-// built from the same parsed reports the verdict line counts, so the
-// two can never disagree.
+// The digest is the card's account of what the review found — the
+// verdict line carries the counts, the tables carry the rows. Both
+// take their findings from the record's cache, so the two can never
+// disagree.
 //
 // The digest is an index of the findings, not their prose: a row
 // names what kind of finding it is and where it is. The finding's text
@@ -409,10 +351,10 @@ func failedOutcomes(outcomes []reviewOutcome) []reviewOutcome {
 // thread (/think on) or the main agent's answer (/think off), so the
 // card stays proportional to the number of findings.
 //
-// A run with no findings produces no digest: the verdict message is
-// then the verdict line alone.
-func reviewDigest(outcomes []reviewOutcome, plan []agent.ReviewPlanGroup) string {
-	findings := digestFindings(outcomes, plan)
+// A review with no findings produces no digest: the verdict message
+// is then the verdict line alone.
+func reviewDigest(rec reviewRecord) string {
+	findings := digestFindings(rec)
 	if len(findings) == 0 {
 		return ""
 	}
@@ -492,41 +434,34 @@ func digestRow(f agent.ReviewFinding, hasCategory bool) string {
 	return "| " + digestPath(f) + " |\n"
 }
 
-// digestFindings returns the run's findings in the order the digest
+// digestFindings returns the record's findings in the order the digest
 // lists them: by the producing group's position in the plan, and
-// within a group by the finding's order inside that group's report.
+// within a group by the order the findings arrived in.
 //
-// A group the plan did not name sorts after the planned groups,
-// keeping its outcome order. A group that failed contributes nothing
-// — it produced no report.
-func digestFindings(outcomes []reviewOutcome, plan []agent.ReviewPlanGroup) []agent.ReviewFinding {
-	positions := make(map[string]int, len(plan))
-	for i, g := range plan {
-		positions[groupKey(g.Source, g.Pattern)] = i
-	}
-	type group struct {
-		order   int
-		outcome reviewOutcome
-	}
-	groups := make([]group, 0, len(outcomes))
-	for _, o := range finishedOutcomes(outcomes) {
-		order, planned := positions[groupKey(o.source, o.pattern)]
-		if !planned {
-			// A group the plan did not name sorts after the planned
-			// ones. The sort is stable, so the groups that share
-			// this key keep their outcome order.
-			order = len(plan)
-		}
-		groups = append(groups, group{order: order, outcome: o})
-	}
-	slices.SortStableFunc(groups, func(a, b group) int {
-		return a.order - b.order
+// A group the plan did not name sorts after the planned ones. The
+// sort is stable, so the findings of one group keep the order they
+// arrived in.
+func digestFindings(rec reviewRecord) []agent.ReviewFinding {
+	ordered := append([]reviewFinding(nil), rec.findings...)
+	slices.SortStableFunc(ordered, func(a, b reviewFinding) int {
+		return planPosition(rec, a.groupKey) - planPosition(rec, b.groupKey)
 	})
-	var findings []agent.ReviewFinding
-	for _, g := range groups {
-		findings = append(findings, g.outcome.report.Findings...)
+	findings := make([]agent.ReviewFinding, 0, len(ordered))
+	for _, f := range ordered {
+		findings = append(findings, f.finding)
 	}
 	return findings
+}
+
+// planPosition returns the position of a group in the plan. A group
+// the plan did not name sorts after the planned ones.
+func planPosition(rec reviewRecord, key string) int {
+	for i, g := range rec.plan {
+		if groupKey(g.Source, g.Pattern) == key {
+			return i
+		}
+	}
+	return len(rec.plan)
 }
 
 // digestPath renders a finding's location: the path with its line
@@ -628,13 +563,10 @@ func planObserver(ctx context.Context, em messages.Emitter, collector *outcomeCo
 // the finding text reaches the reader through the thread (/think on)
 // or the main agent's answer (/think off).
 func sendVerdict(ctx context.Context, em messages.Emitter, chatID, replyTo, runner string,
-	result agent.RunResult, outcomes []reviewOutcome, plan []agent.ReviewPlanGroup,
+	result agent.RunResult, v verdict, digest string,
 ) {
-	text := reviewVerdict(outcomes, plan)
-	if text == "" {
-		return
-	}
-	if digest := reviewDigest(outcomes, plan); digest != "" {
+	text := v.line()
+	if digest != "" {
 		text += "\n\n" + digest
 	}
 	out := messages.OutboundMessage{

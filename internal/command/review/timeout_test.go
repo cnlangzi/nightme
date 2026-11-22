@@ -286,8 +286,8 @@ func TestReviewVerdict_MarksTheTimedOutGroup(t *testing.T) {
 			},
 		},
 	}
-	got := reviewVerdict(outcomes, nil)
-	want := "⚠️ review · 1 subagent · 0 findings\n\n" +
+	got := newVerdict(testRecord(outcomes, nil, nil), true).line()
+	want := "⚠️ review · 0 of 1 subagent done · 0 findings so far\n\n" +
 		"❌ **1 of 1 subagent failed**\n" +
 		"- `system / **/*.go` (timed out)\n\n" +
 		"💡 hint: run `/review --continue` to continue the failed groups"
@@ -332,7 +332,7 @@ func TestHandle_ReviewReportsTheTimedOutGroup(t *testing.T) {
 			{Pattern: "**/*.ts", Label: "**/*.ts", Files: []string{"c.ts"}},
 		},
 		timedOut: 1,
-		merged:   "### Group: pattern **/*.go — files: a.go\n\nthe go findings\n\n",
+		texts:    []string{"the go findings"},
 	}
 	agents.registry.Register(starter)
 
@@ -392,7 +392,7 @@ func TestHandle_ContinueResumesTheTimedOutGroup(t *testing.T) {
 	enableThink(t, cs)
 
 	f := NewFactory()
-	f.record(chatID, recorded.name, "/recorded/ws", []reviewOutcome{
+	f.record(chatID, recorded.name, "/recorded/ws", reviewRun{outcomes: []reviewOutcome{
 		{
 			pattern:   "**/*.ts",
 			files:     []string{"c.ts"},
@@ -402,7 +402,7 @@ func TestHandle_ContinueResumesTheTimedOutGroup(t *testing.T) {
 				Timeout: 15 * time.Minute,
 			},
 		},
-	})
+	}})
 
 	out := dispatchContinue(t, f, cs, chatID, "review", "-c", "--timeout", "5m")
 	if out.Reply != "" {

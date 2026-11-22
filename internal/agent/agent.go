@@ -1421,6 +1421,11 @@ type ReviewJob struct {
 	// A group whose output matched no known shape yields a report
 	// with Parsed=false and no findings.
 	Report ReviewReport
+	// Text is the group's own output — the text the merged review
+	// document carries under the group's header. A caller that
+	// rebuilds the document later needs it: the merged text of the
+	// run is gone by then.
+	Text string
 }
 
 // WithEventSink returns a RunOnceOption that installs sink as the

@@ -204,6 +204,63 @@ type Context struct {
 	UpdatedAt time.Time
 }
 
+// The subcommands whose runs can be picked up again by
+// `--continue`. The name is the subcommand token the user types.
+const (
+	subCommit = "commit"
+	subPR     = "pr"
+)
+
+// continueText is the text a resumed session receives. The session
+// still holds the original prompt — including the shape the reply
+// must have — so the agent only needs to be told to carry on.
+const continueText = "continue"
+
+// gtwRecord is the memory of one subcommand's last run in one
+// chat: which agent ran it, on which workspace, with which prompt,
+// under which session, and whether it failed.
+//
+// It is what `--continue` picks up. The record lives in the gtw
+// Manager (in memory, one per chat + subcommand) and is lost when
+// the daemon restarts — the same contract /review's resume state
+// has.
+//
+// The workspace is frozen at the moment of the run: a continuation
+// works there, not in the chat's current cwd, which the user may
+// have moved since.
+type gtwRecord struct {
+	// id identifies this record. A continuation replaces the
+	// record it picked up only when that record is still the
+	// current one — a newer run owns the chat's state.
+	id uint64
+
+	// sub is the subcommand the record belongs to.
+	sub string
+
+	// agent is the agent that ran the attempt.
+	agent string
+
+	// ctx is the workspace the attempt ran in.
+	ctx Context
+
+	// prompt is the prompt of the last attempt. It is
+	// self-contained, so a takeover can replay it on another
+	// agent.
+	prompt string
+
+	// sessionID is the session the last attempt ran under. Empty
+	// when the attempt never reached the agent.
+	sessionID string
+
+	// failed marks a record whose last attempt failed. A record
+	// whose last attempt succeeded holds nothing to continue, but
+	// it is kept so `--continue` can say so.
+	failed bool
+
+	// reason is the human-readable reason the last attempt failed.
+	reason string
+}
+
 // ReactionEvent is the inbound reaction payload. Type alias to
 // services.ReactionEvent (the canonical location). Old
 // `chatsession.ReactionEvent` and the prior `gtw.ReactionEvent`

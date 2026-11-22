@@ -38,6 +38,7 @@ package gtw
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -54,12 +55,15 @@ import (
 // block in pr.go's dispatchPR.
 //
 // The agent name resolution order (CLI -a > yml <commit/pr>.agent
-// > cs.SelectedAgent()) is the caller's responsibility — pass the
-// already-resolved cliAgent / ymlAgent in. The workspace + prompt
-// are also caller's responsibility: commit builds its prompt via
+// > cs.SelectedAgent()) is ResolveAgent's business — pass the
+// CLI name and the yml name in. The workspace + prompt are the
+// caller's responsibility too: commit builds its prompt via
 // buildAgentPrompt(c) on the worktree; pr builds via
 // buildPRPrompt(c, baseBranch, lang, issue). runAgentFor doesn't
 // know about prompts — it just spawns and drains.
+//
+// A continuation does not resolve an agent: it already knows which
+// one runs the turn. It calls runAgentNamed instead.
 //
 // Returns:
 //
@@ -108,10 +112,40 @@ func runAgentFor(
 		}
 		return agent.RunResult{}, "", fmt.Errorf("%s", msg.String())
 	}
+	return runAgentNamed(ctx, cs, agentName, workspace, prompt, "", chatID, messageID, dropKinds...)
+}
 
+// errUnknownAgent is the failure of an agent name that no
+// registered starter answers to. It is a distinct failure from a
+// failed run: the name itself is wrong, so the caller reports it
+// under its own reason code.
+var errUnknownAgent = errors.New("❌ unknown agent")
+
+// runAgentNamed runs one one-shot turn with an explicitly named
+// agent.
+//
+// It is the tier-free counterpart of runAgentFor: the caller has
+// already decided which agent runs the turn. A continuation uses
+// it — the agent of the attempt it picks up, or the agent that
+// takes that attempt over.
+//
+// A non-empty sessionID reopens that session instead of opening a
+// fresh one: the bridge keeps the conversation it already had, so
+// the turn continues it rather than starting over. That is the
+// mode a continuation uses when the failed attempt reached the
+// agent.
+//
+// The workspace is the agent's cwd for the turn; the prompt travels
+// as the turn's only text block.
+func runAgentNamed(
+	ctx context.Context,
+	cs *chatsession.ChatSession,
+	agentName, workspace, prompt, sessionID, chatID, messageID string,
+	dropKinds ...messages.OutboundKind,
+) (agent.RunResult, string, error) {
 	a, err := agent.Builtins.Get(agentName)
 	if err != nil {
-		return agent.RunResult{}, agentName, fmt.Errorf("❌ unknown agent %q (check `nightme agents` or your config)", agentName)
+		return agent.RunResult{}, agentName, fmt.Errorf("%w %q (check `nightme agents` or your config)", errUnknownAgent, agentName)
 	}
 	if err := a.Detect(); err != nil {
 		return agent.RunResult{}, agentName, fmt.Errorf("❌ agent %s not available: %v", agentName, err)
@@ -146,9 +180,9 @@ func runAgentFor(
 	//     machine used by /review when ocrGroups >= 2). Touching
 	//     this sink does NOT affect /review's multi-job fan-out —
 	//     that's owned by agent.eventAggregator.
-	//   - runAgentFor is sync (blocks until RunOnce returns). The
-	//     /review dispatcher returns immediately and runs the sink
-	//     in a goroutine — that's a /review-only optimisation
+	//   - runAgentNamed is sync (blocks until the turn returns).
+	//     The /review dispatcher returns immediately and runs the
+	//     sink in a goroutine — that's a /review-only optimisation
 	//     (long 30-min review budget) we deliberately don't mirror
 	//     here; /gtw commit/pr are short enough that blocking
 	//     simplifies the dispatcher's success/failure shape.
@@ -163,17 +197,21 @@ func runAgentFor(
 	// `ctx`. finalize() closes the internal channel and blocks
 	// until the terminal OutHeartbeat's render has landed
 	// on the receipt card. If we let `ctx`'s defer cancel() fire
-	// first (it does, at runAgentFor return), render's 300ms
+	// first (it does, at runAgentNamed return), render's 300ms
 	// PATCH throttle can race it and the receipt's terminal ✅
 	// PATCH never lands.
 	sink, finalize := outbound.StreamRunOnceToEmitter(ctx, cs.Emitter(), cs, slog.Default(), chatID, messageID, agentName, dropKinds...)
 	defer finalize()
 
-	res, err := a.RunOnce(ctx,
-		agent.StartConfig{Workspace: workspace},
-		blocks,
-		agent.WithEventSink(sink),
-	)
+	cfg := agent.StartConfig{Workspace: workspace, SessionID: sessionID}
+	var res agent.RunResult
+	if sessionID != "" {
+		// The session is reopened: the bridge keeps the
+		// conversation it already had, so the turn continues it.
+		res, err = agent.ResumeSession(ctx, a, cfg, blocks, agent.WithEventSink(sink))
+	} else {
+		res, err = a.RunOnce(ctx, cfg, blocks, agent.WithEventSink(sink))
+	}
 	if err != nil {
 		return res, agentName, fmt.Errorf("❌ agent %s failed: %v", agentName, err)
 	}

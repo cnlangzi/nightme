@@ -98,7 +98,7 @@ type Outcome struct {
 | `kept` | 还没开成 issue 的草稿数 |
 | `deps` | `/gtw new -y` 建成的依赖关系数（总是出现，没有依赖时是 0） |
 | `deps_failed` | `/gtw new -y` 建不成的依赖关系数（总是出现，没有失败时是 0） |
-| `lang` / `scope` | `/gtw config` 的语言与作用域（`global` / `repo` / `default`） |
+| `lang` / `scope` | `/gtw config` 的语言与作用域（`global` / `repo` / `default`）；`/gtw commit -g --unset` / `/gtw pr -g --unset` 删掉全局默认 agent 时也是 `global` |
 | `unset` | `/gtw config --unset` 删掉了这个设置（值是 `true`） |
 | `cwd` | `/cwd` 设好的工作区路径 |
 | `workflow` | `/me start` 启动的 workflow 的名字 |
@@ -273,7 +273,7 @@ chatsession: message settled chat_id=… message_id=… status=… summary=…
 | `already_in_worktree` | chat 已经在这个分支所在的 worktree 里，没有可跳的目标 | `/gtw back` | 正常分支 |
 | `no_session` | 没有聊天会话 | `/stop` | 异常 |
 | `no_agent` | 没有选中的 agent | `/use` / `/review` / `/stop` | 异常 |
-| `unknown_agent` | agent 名没注册 | `/review` | 异常 |
+| `unknown_agent` | agent 名没注册 | `/review` / `/gtw commit -g` / `/gtw pr -g` | 异常 |
 | `not_a_repo` | 工作区不在 git 仓库里 | `/gtw` | 异常 |
 | `no_remote` | 仓库没有 `origin` remote | `/gtw fix` / `/gtw assign` | 异常 |
 | `provider_error` | git 平台解析 / 连接失败 | `/gtw fix` / `/gtw new` / `/gtw pr` / `/gtw pr view` / `/gtw assign` | 异常 |
@@ -307,8 +307,9 @@ chatsession: message settled chat_id=… message_id=… status=… summary=…
 | `no_pr` | 这个分支上没有 open 的 PR | `/gtw pr view` | 正常分支 |
 | `pr_not_found` | 这个编号没有对应的 PR | `/gtw pr view` | 异常 |
 | `no_drafts` / `invalid_draft` | 没有草稿 / 草稿不可用 | `/gtw new -y` | 异常 |
-| `config_write_failed` | 全局 review agent 没能持久化 | `/review -g` | 异常 |
+| `config_write_failed` | 全局 agent 没能持久化 | `/review -g` / `/gtw commit -g` / `/gtw pr -g` | 异常 |
 | `no_review` / `already_running` | 没有可续的 review / 已有 review 在跑 | `/review -c` | 异常 |
+| `no_continue` | 没有可续的 `/gtw commit` / `/gtw pr` | `/gtw commit -c` / `/gtw pr -c` | 异常 |
 | `not_supported` | agent 不支持这个动作 | `/stop` / `/review` | 异常 |
 | `no_diff` | 没有可 review 的 diff | `/review` | 异常 |
 | `base_unknown` | base 分支既读不出来也修不好，committed diff 没有被 review | `/review` | 异常 |

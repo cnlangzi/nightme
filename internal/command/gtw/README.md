@@ -112,6 +112,81 @@ issue 标题的 ASCII 是 `DeriveBranchFromTitle` 产出可读分支名的前提
 
 ---
 
+### 0.2 默认 agent(`/gtw commit -g` / `/gtw pr -g`)
+
+`/gtw commit` 与 `/gtw pr` 跑的是一次性 agent。跑哪个 agent 按三档取:命令行
+`-a <agent>` > `~/.nightme/gtw.yml` 里的 `commit.agent` / `pr.agent` > chat
+当前选的 agent。后两档里,yml 那档今天才有命令能写 —— `-g` 补上了这一段。
+
+| 命令 | 作用 |
+|---|---|
+| `/gtw commit -a <agent> -g` | 把 `<agent>` 写成 `commit.agent`,并照常跑这次 commit |
+| `/gtw pr -a <agent> -g` | 同上,写 `pr.agent` |
+| `/gtw commit -g --unset` | 删掉 `commit.agent`,不跑命令 |
+| `/gtw pr -g --unset` | 删掉 `pr.agent`,不跑命令 |
+
+键落在子命令自己的 section 下,和它的 hooks 并列:
+
+```yaml
+# ~/.nightme/gtw.yml
+commit:
+  agent: codex
+pr:
+  agent: codex
+```
+
+`-g` 的 agent 名必须是注册过的 agent —— 写下一个没人认的名字,之后每次
+`/gtw commit` 都得靠警告兜底。名字不认识时命令不跑,回一条错误。
+
+yml 写不了(文件损坏、权限不对)时命令照跑,卡上带一条警告,结论是
+`incomplete` + `reason=config_write_failed`。
+
+回复形状(走 §2.1 Format 1):
+
+```
+✅ commit.agent = codex (global)
+→ file: ~/.nightme/gtw.yml
+```
+
+```
+✅ commit.agent unset (global)
+→ file: ~/.nightme/gtw.yml
+```
+
+### 0.3 接着上一次跑(`/gtw commit -c` / `/gtw pr -c`)
+
+agent 阶段失败的运行会被记下来:哪个 agent、跑在哪个 worktree、给的什么
+prompt、开了哪个 session。按 **chat + 子命令**各记一条,只存在内存里 ——
+daemon 重启即失。
+
+`--continue` 把这个失败接着做:
+
+| 上一次 | `--continue` 做什么 |
+|---|---|
+| agent 跑起来了(有 session) | 重开那个 session,发一句 `continue` —— agent 那边还留着原来的 prompt,知道要交什么 |
+| agent 没起来(没有 session) | 用存的 prompt 重跑一次 |
+| 配了 `-a <别的 agent>` | 接管:session 不能换 agent,把存的 prompt 发给新 agent |
+
+续跑在**记录里那个 worktree** 上干活,不要求 chat 的 cwd 还在那里。续跑走完
+agent 阶段之后的全部流程:commit 照常验 HEAD、出成功卡,pr 照常过格式门、
+真的开出 PR。
+
+没有可续的记录时:
+
+```
+❌ no failed /gtw commit to continue — run /gtw commit first
+```
+
+上一次成功过时:
+
+```
+ℹ️ the last /gtw commit completed — nothing to continue
+```
+
+结论分别是 `failed` + `reason=no_continue` 与 `noop`。
+
+---
+
 ---
 
 ## 1. 标题

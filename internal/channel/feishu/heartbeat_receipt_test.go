@@ -44,7 +44,7 @@ func newTestReceipt(t *testing.T) (*MessageReceipt, *mockReceiptBot) {
 // placeholder (this is what the receipt shows at the moment of
 // MessageForwarded, before any event has landed on the tracker).
 func TestBuildReceiptCard_HeartbeatHeader_NilSnapshot(t *testing.T) {
-	body, _, err := buildReceiptCard(nil, nil, nil, nil, nil)
+	body, _, err := buildReceiptCard(nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("buildReceiptCard: %v", err)
 	}
@@ -60,7 +60,7 @@ func TestBuildReceiptCard_HeartbeatHeader_NilSnapshot(t *testing.T) {
 // no counters, no time. The visual transition at first
 // activity is a content add, not a style swap.
 func TestBuildReceiptCard_HeartbeatHeader_EmptySnapshot(t *testing.T) {
-	body, _, err := buildReceiptCard(nil, nil, nil, nil, &messages.HeartbeatSnapshot{})
+	body, _, err := buildReceiptCard(nil, nil, nil, &messages.HeartbeatSnapshot{})
 	if err != nil {
 		t.Fatalf("buildReceiptCard: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestBuildReceiptCard_HeartbeatHeader_EmptySnapshot(t *testing.T) {
 // thinking counter (no tools).
 func TestBuildReceiptCard_HeartbeatHeader_ThinkOnly(t *testing.T) {
 	now := time.Date(2026, 8, 15, 14, 35, 22, 0, time.UTC)
-	body, _, err := buildReceiptCard(nil, nil, nil, nil, &messages.HeartbeatSnapshot{
+	body, _, err := buildReceiptCard(nil, nil, nil, &messages.HeartbeatSnapshot{
 		ThinkCount: 3, LastBeatAt: now,
 	})
 	if err != nil {
@@ -110,7 +110,7 @@ func TestBuildReceiptCard_HeartbeatHeader_ThinkOnly(t *testing.T) {
 // "no thinking, just tool calls" shape.
 func TestBuildReceiptCard_HeartbeatHeader_ToolOnly(t *testing.T) {
 	now := time.Date(2026, 8, 15, 9, 0, 5, 0, time.UTC)
-	body, _, err := buildReceiptCard(nil, nil, nil, nil, &messages.HeartbeatSnapshot{
+	body, _, err := buildReceiptCard(nil, nil, nil, &messages.HeartbeatSnapshot{
 		ToolCount: 12, LastBeatAt: now,
 	})
 	if err != nil {
@@ -128,7 +128,7 @@ func TestBuildReceiptCard_HeartbeatHeader_ToolOnly(t *testing.T) {
 // shape: thinking + tool + lastBeat.
 func TestBuildReceiptCard_HeartbeatHeader_AllPopulated(t *testing.T) {
 	now := time.Date(2026, 8, 15, 14, 35, 22, 0, time.UTC)
-	body, _, err := buildReceiptCard(nil, nil, nil, nil, &messages.HeartbeatSnapshot{
+	body, _, err := buildReceiptCard(nil, nil, nil, &messages.HeartbeatSnapshot{
 		ThinkCount: 3, ToolCount: 12, LastBeatAt: now,
 	})
 	if err != nil {
@@ -153,7 +153,7 @@ func TestBuildReceiptCard_HeartbeatHeader_AllPopulated(t *testing.T) {
 // gate instead routes to the bare "🤖 Working" placeholder.
 func TestBuildReceiptCard_HeartbeatHeader_LastBeatOnly(t *testing.T) {
 	now := time.Date(2026, 8, 15, 14, 35, 22, 0, time.UTC)
-	body, _, err := buildReceiptCard(nil, nil, nil, nil, &messages.HeartbeatSnapshot{
+	body, _, err := buildReceiptCard(nil, nil, nil, &messages.HeartbeatSnapshot{
 		LastBeatAt: now,
 	})
 	if err != nil {
@@ -180,11 +180,12 @@ func TestBuildReceiptCard_HeartbeatHeader_LastBeatOnly(t *testing.T) {
 func TestBuildReceiptCard_HeartbeatHeader_WithEntries(t *testing.T) {
 	body, _, err := buildReceiptCard(
 		[]LogEntry{{Icon: "💬", Text: "first reply"}},
-		nil, nil, nil,
+		nil, nil,
 		&messages.HeartbeatSnapshot{
 			ThinkCount: 1, ToolCount: 1,
 			LastBeatAt: time.Now(),
-		})
+		},
+	)
 	if err != nil {
 		t.Fatalf("buildReceiptCard: %v", err)
 	}
@@ -328,7 +329,7 @@ func TestBuildReceiptCard_HeartbeatHeader_MutualExclusion(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			body, _, err := buildReceiptCard(c.entries, c.tasks, nil, nil, c.hb)
+			body, _, err := buildReceiptCard(c.entries, c.tasks, nil, c.hb)
 			if err != nil {
 				t.Fatalf("buildReceiptCard: %v", err)
 			}
@@ -656,7 +657,7 @@ func TestBuildReceiptCard_RendersReceiptHeartbeatAfterApply(t *testing.T) {
 
 	// Build the card with the receipt's own heartbeat snapshot
 	// to verify the snapshot is wired correctly.
-	body, _, err := buildReceiptCard(r.entries, r.tasks, nil, r.footerLines, &r.heartbeat)
+	body, _, err := buildReceiptCard(r.entries, r.tasks, r.footerLines, &r.heartbeat)
 	if err != nil {
 		t.Fatalf("buildReceiptCard: %v", err)
 	}
@@ -721,7 +722,7 @@ func TestRenderHeartbeatHeader_DoneOnlyNoCounters(t *testing.T) {
 // snapshot with no entries / tasks renders the bare "✅ "
 // line — NOT the "🤖 Working" front-part placeholder.
 func TestBuildReceiptCard_HeartbeatHeader_DoneOnlyRendersCheck(t *testing.T) {
-	body, _, err := buildReceiptCard(nil, nil, nil, nil, &messages.HeartbeatSnapshot{Status: messages.HeartbeatDone})
+	body, _, err := buildReceiptCard(nil, nil, nil, &messages.HeartbeatSnapshot{Status: messages.HeartbeatDone})
 	if err != nil {
 		t.Fatalf("buildReceiptCard: %v", err)
 	}
@@ -740,7 +741,7 @@ func TestBuildReceiptCard_HeartbeatHeader_DoneOnlyRendersCheck(t *testing.T) {
 // the common case: a turn that produced both activity AND
 // reached terminal state. The header carries "✅" + counter chips.
 func TestBuildReceiptCard_HeartbeatHeader_DoneWithCounters(t *testing.T) {
-	body, _, err := buildReceiptCard(nil, nil, nil, nil, &messages.HeartbeatSnapshot{
+	body, _, err := buildReceiptCard(nil, nil, nil, &messages.HeartbeatSnapshot{
 		ThinkCount: 3, ToolCount: 2, LastBeatAt: time.Now(), Status: messages.HeartbeatDone,
 	})
 	if err != nil {

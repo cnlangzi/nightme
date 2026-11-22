@@ -305,7 +305,7 @@ func TestBuildReceiptCard_TaskOnly(t *testing.T) {
 			{ID: "t2", Subject: "second task", Status: agent.TaskCompleted},
 		},
 	}
-	body, _, err := buildReceiptCard(r.entries, r.tasks, nil, r.footerLines, &r.heartbeat)
+	body, _, err := buildReceiptCard(r.entries, r.tasks, r.footerLines, &r.heartbeat)
 	if err != nil {
 		t.Fatalf("buildReceiptCard: %v", err)
 	}
@@ -357,7 +357,7 @@ func TestBuildReceiptCard_NoTasksEmptyBody(t *testing.T) {
 		chatID:    "oc_chat",
 		userMsgID: "om_user",
 	}
-	body, _, err := buildReceiptCard(r.entries, r.tasks, nil, r.footerLines, &r.heartbeat)
+	body, _, err := buildReceiptCard(r.entries, r.tasks, r.footerLines, &r.heartbeat)
 	if err != nil {
 		t.Fatalf("buildReceiptCard: %v", err)
 	}
@@ -499,7 +499,7 @@ func TestAppendEntry_OverflowRolloverPatchesNewCard(t *testing.T) {
 	r.mu.Lock()
 	currentTasks := r.tasks
 	r.mu.Unlock()
-	body, _, err := buildReceiptCard([]LogEntry{overflowEntry}, currentTasks, nil, nil, nil)
+	body, _, err := buildReceiptCard([]LogEntry{overflowEntry}, currentTasks, nil, nil)
 	if err != nil {
 		t.Fatalf("buildReceiptCard for overflow placeholder: %v", err)
 	}

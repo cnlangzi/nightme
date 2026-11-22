@@ -35,11 +35,19 @@ import (
 // trade-off is fixed, and a user with an unusually slow agent can
 // still end the turn with /stop.
 //
-//   - The silence threshold is generous because a healthy turn was
-//     observed to produce no events for 5.4 seconds; a much shorter
-//     threshold would fire on legitimate work.
+//   - The silence threshold is half an hour because a healthy turn
+//     can be quiet for a long time: a turn that runs a long tool
+//     call or a long generation produces no events while it works
+//     (a healthy turn was observed to produce no events for 5.4
+//     seconds, and a 30-minute generation is possible). A turn that
+//     has been quiet for half an hour is not doing visible work.
+//     The 60-second threshold the removed readpump stall detector
+//     used was sized for an early signal, not for a termination
+//     condition.
 //   - The probe deadline suits the millisecond answers the real
-//     CLIs give, with room for a loaded machine.
+//     CLIs give (measured: 90 ms for a warm Claude Code, 89 ms for
+//     the codex app-server, 1-70 ms for the rest), with room for a
+//     loaded machine.
 const (
 	// stallSilenceThreshold is how long the in-flight prompt may go
 	// without an event before the monitor probes the bridge.
@@ -118,6 +126,12 @@ func (as *AgentSession) checkStall() {
 	window := as.stallWindow()
 	silent := now.Sub(progressSince(p))
 	if silent < window {
+		// The turn is making progress again. Whatever the last
+		// probe concluded no longer holds: the agent is visibly
+		// working, so the "not responding" verdict must not outlive
+		// the silence that produced it.
+		as.stallProbeFailed = false
+		as.stallSilentSince = 0
 		as.asMu.Unlock()
 		return
 	}
@@ -131,6 +145,7 @@ func (as *AgentSession) checkStall() {
 	promptID := p.ID
 	anchor := p.LastMessageID
 	progressAt := progressSince(p)
+	stop := as.stallStop
 	as.asMu.Unlock()
 
 	if h == nil {
@@ -145,7 +160,7 @@ func (as *AgentSession) checkStall() {
 	as.asMu.Unlock()
 
 	ctx, cancel := context.WithTimeout(as.OpContext(), as.stallDeadline())
-	err := h.Ping(ctx)
+	err := as.runProbe(ctx, h, stop)
 	cancel()
 
 	switch {
@@ -197,6 +212,28 @@ func (as *AgentSession) checkStall() {
 
 	if report {
 		as.publishStallNotice(promptID, anchor, silent)
+	}
+}
+
+// runProbe asks the bridge whether it still answers.
+//
+// The probe runs in its own goroutine so the monitor never blocks on
+// it: a bridge whose stdin pipe is full can wedge the probe's write
+// (a pipe write is not context-aware), and the monitor has to be
+// able to stop when the session shuts down — a blocked probe would
+// otherwise hang /close. The abandoned goroutine ends when the
+// bridge closes its transport.
+//
+// A shutdown during the probe reads as context.Canceled: the probe
+// was cut short, not answered badly.
+func (as *AgentSession) runProbe(ctx context.Context, h *agent.Agent, stop <-chan struct{}) error {
+	answered := make(chan error, 1)
+	go func() { answered <- h.Ping(ctx) }()
+	select {
+	case err := <-answered:
+		return err
+	case <-stop:
+		return context.Canceled
 	}
 }
 
@@ -270,12 +307,24 @@ func (as *AgentSession) injectionRefusal(stalled bool, silent time.Duration) err
 		return &InjectionRefused{Reason: "a turn is still in flight"}
 	}
 	return &InjectionRefused{
-		Reason: fmt.Sprintf(
-			"the previous turn has made no progress for %s and the agent is not responding. "+
-				"Run /stop to end it, or /close and send your message again",
-			stallDurationText(silent)),
+		Reason:  "the previous turn " + stallClause(silent) + ". " + stallAdvice,
 		Stalled: true,
 	}
+}
+
+// stallAdvice is what the user can do about a turn that stopped
+// making progress. Both user-facing texts end with it: the notice
+// the monitor publishes and the refusal the injection path returns.
+const stallAdvice = "Run /stop to end the turn, or /close and send your message again."
+
+// stallClause renders the shared clause: how long the turn has been
+// silent, and that the agent is not answering.
+//
+// The notice and the refusal say the same thing about the turn, so
+// they share the wording.
+func stallClause(silent time.Duration) string {
+	return fmt.Sprintf("has made no progress for %s and the agent is not responding",
+		stallDurationText(silent))
 }
 
 // stallNoticeText renders the notice the user reads when the turn
@@ -285,10 +334,7 @@ func (as *AgentSession) injectionRefusal(stalled bool, silent time.Duration) err
 // its users, and the notice travels channels that render it
 // verbatim.
 func stallNoticeText(silent time.Duration) string {
-	return fmt.Sprintf(
-		"This turn has made no progress for %s and the agent is not responding. "+
-			"It may be stuck. Run /stop to end the turn, or /close and send your message again.",
-		stallDurationText(silent))
+	return "This turn " + stallClause(silent) + ". It may be stuck. " + stallAdvice
 }
 
 // stallDurationText renders a silence duration in whole minutes. The
@@ -305,30 +351,31 @@ func stallDurationText(d time.Duration) string {
 	return fmt.Sprintf("%d minutes", minutes)
 }
 
+// orDefault returns v when it is set, and the production value
+// otherwise. The monitor's timings are zero until a test installs
+// them; zero means "use the default".
+func orDefault(v, def time.Duration) time.Duration {
+	if v > 0 {
+		return v
+	}
+	return def
+}
+
 // stallWindow is how long the in-flight prompt may go without an
 // event before the monitor probes the bridge. Zero means the
 // production threshold.
 func (as *AgentSession) stallWindow() time.Duration {
-	if as.stallSilence > 0 {
-		return as.stallSilence
-	}
-	return stallSilenceThreshold
+	return orDefault(as.stallSilence, stallSilenceThreshold)
 }
 
 // stallDeadline bounds one probe round-trip. Zero means the
 // production deadline.
 func (as *AgentSession) stallDeadline() time.Duration {
-	if as.stallProbeTimeout > 0 {
-		return as.stallProbeTimeout
-	}
-	return stallProbeTimeout
+	return orDefault(as.stallProbeTimeout, stallProbeTimeout)
 }
 
 // stallPeriod is how often the monitor looks at the progress clock.
 // Zero means the production period.
 func (as *AgentSession) stallPeriod() time.Duration {
-	if as.stallCheckInterval > 0 {
-		return as.stallCheckInterval
-	}
-	return stallCheckInterval
+	return orDefault(as.stallCheckInterval, stallCheckInterval)
 }

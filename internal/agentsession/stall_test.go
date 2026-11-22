@@ -345,6 +345,58 @@ func TestInjectionRefusal_NamesTheWayOutWhenStalled(t *testing.T) {
 	}
 }
 
+// TestInjectionRefusal_ATurnThatResumedKeepsTheBusyWording — a
+// failed probe's verdict does not outlive the silence that produced
+// it: once the agent is visibly working again, the refusal goes back
+// to the busy wording. Otherwise the user is told to /stop a turn
+// that is streaming output.
+func TestInjectionRefusal_ATurnThatResumedKeepsTheBusyWording(t *testing.T) {
+	as, _ := stalledSession(t, errors.New("no answer"), 10*time.Millisecond, time.Hour)
+	as.checkStall()
+
+	// The turn resumes making progress.
+	as.asMu.Lock()
+	as.currentPrompt.LastProgressAt = time.Now()
+	as.asMu.Unlock()
+	as.checkStall()
+
+	err := as.SendBlocks(context.Background(), nil, WithReplyTo("u_review"))
+	var refused *InjectionRefused
+	if !errors.As(err, &refused) {
+		t.Fatalf("err = %v, want an *InjectionRefused", err)
+	}
+	if refused.Stalled {
+		t.Fatalf("the refusal still reports the stall: %q", refused.Reason)
+	}
+}
+
+// TestInjectionRefusal_ANewTurnDoesNotInheritTheStall — the stall
+// verdict belongs to the episode of the turn that is in flight. A
+// turn that started after a stalled one ended must not be refused
+// with the previous turn's stall text.
+func TestInjectionRefusal_ANewTurnDoesNotInheritTheStall(t *testing.T) {
+	as, _ := stalledSession(t, errors.New("no answer"), 10*time.Millisecond, time.Hour)
+	as.checkStall()
+
+	// The stalled turn ends; a new one starts and is in flight.
+	as.endPrompt(agent.PromptEndClean)
+	as.SetCurrentPrompt(&Prompt{
+		ID:             "p_new",
+		LastMessageID:  "u_new",
+		LastProgressAt: time.Now(),
+	})
+	as.SetIsReady(false)
+
+	err := as.SendBlocks(context.Background(), nil, WithReplyTo("u_review"))
+	var refused *InjectionRefused
+	if !errors.As(err, &refused) {
+		t.Fatalf("err = %v, want an *InjectionRefused", err)
+	}
+	if refused.Stalled {
+		t.Fatalf("the new turn inherited the previous episode's stall: %q", refused.Reason)
+	}
+}
+
 // TestInjectionRefusal_BusyTurnKeepsTheOldWording — a turn that is
 // merely busy is worth waiting out; the refusal names no command.
 func TestInjectionRefusal_BusyTurnKeepsTheOldWording(t *testing.T) {

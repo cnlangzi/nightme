@@ -1487,7 +1487,13 @@ func (as *AgentSession) SendBlocks(ctx context.Context, blocks []agent.ContentBl
 		// cannot interleave their anchors.
 		as.asMu.RLock()
 		turnInFlight := as.currentPrompt != nil && !as.isReady.Load()
-		stalled := as.stallProbeFailed
+		// The stall verdict belongs to the episode of the turn that
+		// is in flight. A turn that started after a stalled one
+		// ended must not inherit the previous turn's verdict — the
+		// monitor has not seen the new prompt yet.
+		stalled := as.stallProbeFailed &&
+			as.currentPrompt != nil &&
+			as.stallPromptID == as.currentPrompt.ID
 		silent := as.stallSilentSince
 		as.asMu.RUnlock()
 		if turnInFlight {

@@ -69,6 +69,10 @@ func (d *recordingDriver) Close() error                    { return d.inner.Clos
 func (d *recordingDriver) Keepalive(ctx context.Context, _ func(context.Context) error) error {
 	return nil
 }
+
+// Ping answers the daemon's liveness probe. The fake is
+// responsive unless the test says otherwise.
+func (d *recordingDriver) Ping(context.Context) error { return nil }
 func (r *recordingAgentSession) SendBlocks(_ context.Context, blocks []agent.ContentBlock) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

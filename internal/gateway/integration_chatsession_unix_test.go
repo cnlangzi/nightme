@@ -372,6 +372,10 @@ func (d *integrationFakeDriver) Close() error                    { return d.inne
 func (d *integrationFakeDriver) Keepalive(ctx context.Context, _ func(context.Context) error) error {
 	return nil
 }
+
+// Ping answers the daemon's liveness probe. The fake is
+// responsive unless the test says otherwise.
+func (d *integrationFakeDriver) Ping(context.Context) error { return nil }
 func (f *integrationFake) SendBlocks(context.Context, []agent.ContentBlock) error {
 	return nil
 }

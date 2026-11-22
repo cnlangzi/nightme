@@ -57,6 +57,10 @@ func (d *recordingDriver) Keepalive(context.Context, func(context.Context) error
 	return nil
 }
 
+// Ping answers the daemon's liveness probe. The fake is
+// responsive unless the test says otherwise.
+func (d *recordingDriver) Ping(context.Context) error { return nil }
+
 // blocks returns the blocks the driver received.
 func (d *recordingDriver) blocks() []agent.ContentBlock {
 	d.mu.Lock()
@@ -74,6 +78,7 @@ type agentDriver interface {
 	Close() error
 	Stop(context.Context) error
 	Keepalive(context.Context, func(context.Context) error) error
+	Ping(context.Context) error
 }
 
 // liveAgent wraps a driver in a live *agent.Agent.
@@ -223,6 +228,10 @@ func (d *sessionReplyDriver) Stop(context.Context) error  { return agent.ErrNotS
 func (d *sessionReplyDriver) Keepalive(context.Context, func(context.Context) error) error {
 	return nil
 }
+
+// Ping answers the daemon's liveness probe. The fake is
+// responsive unless the test says otherwise.
+func (d *sessionReplyDriver) Ping(context.Context) error { return nil }
 
 // reviewReply is a review output the parser can read: a reply that
 // already is one is kept as it is, an unreadable one is wrapped — so

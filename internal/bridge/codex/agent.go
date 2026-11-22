@@ -25,6 +25,18 @@
 // (or Close) does that. This mirrors the contract documented in
 // docs/bridge/codex.md §2.3 and lets ChatSession's
 // readpump continue reading across many turns on the same AS.
+//
+// The liveness probe (driver.Ping) asks for `getAuthStatus` — the
+// cheapest call in the protocol, which reads the auth state and
+// touches neither the thread nor the turn, so the app-server answers
+// it while a turn is running. The request carries an empty params
+// object: the app-server rejects a request whose params field is
+// missing. The answer never reaches the model's context. The probe
+// rides the session's own pending-request map: the answer is not
+// published as an event, so the probe does not wait for the event
+// pipeline to deliver anything. The protocol loop that reads the
+// answer also reads the events, so a fully blocked event channel can
+// still delay it.
 package codex
 
 import (
@@ -632,6 +644,41 @@ func (d *driver) Keepalive(ctx context.Context, onRecover func(context.Context) 
 		return fmt.Errorf("codex: bridge process dead (pid=%d) and no recovery callback", d.PID())
 	}
 	return onRecover(ctx)
+}
+
+// Ping is the driver.Ping implementation for the codex bridge. The
+// app-server speaks JSON-RPC 2.0; getAuthStatus is the cheapest
+// call in the protocol — it reads the auth state and touches
+// neither the thread nor the turn — so it answers while a turn is
+// running.
+//
+// The request carries an empty params object: the app-server
+// rejects a request whose params field is missing ("Invalid
+// request: missing field `params`"), and a rejection would still
+// count as an answer — but the probe should ask a question the
+// agent can answer properly.
+//
+// An error response counts as an answer: the app-server received
+// the request and replied. Only the absence of a reply (a
+// transport failure, or the deadline firing) means "not
+// responding".
+//
+// The probe rides the session's own pending-request map, so it
+// never travels the event channel the runtime drains.
+func (d *driver) Ping(ctx context.Context) error {
+	if d.session == nil || d.session.rpc == nil {
+		return errors.New("codex: no rpc session")
+	}
+	err := d.session.rpc.request(ctx, "getAuthStatus", map[string]any{}, nil)
+	if err == nil {
+		return nil
+	}
+	var rpcErr *rpcError
+	if errors.As(err, &rpcErr) {
+		// The app-server answered — with a JSON-RPC error.
+		return nil
+	}
+	return fmt.Errorf("codex: ping: %w", err)
 }
 
 // ─── deliver ───

@@ -51,6 +51,28 @@ def emit(envelope: str) -> None:
     text = extract_text(envelope)
     log(f"got envelope, text={text!r}")
 
+    # control_request — the bridge's liveness probe. The real CLI
+    # answers it on the control channel with a control_response that
+    # echoes the request_id. The mock does the same, so the probe
+    # resolves against the mock exactly as it does against the real
+    # CLI.
+    if '"control_request"' in envelope:
+        try:
+            request = json.loads(envelope)
+        except json.JSONDecodeError:
+            request = {}
+        sys.stdout.write(json.dumps({
+            "type": "control_response",
+            "response": {
+                "subtype": "success",
+                "request_id": request.get("request_id", ""),
+                "response": {"session": {}},
+            },
+        }) + "\n")
+        sys.stdout.flush()
+        log("emitted control_response")
+        return
+
     # F-34: /clear is honored as a slash command by real claude-code
     # in stream-json mode (verified 2026-08-04). When the bridge
     # sends {"type":"user","message":{"role":"user","content":"/clear"}},

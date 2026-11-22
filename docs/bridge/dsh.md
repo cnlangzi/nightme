@@ -1611,3 +1611,25 @@ HTTP 404 on /health                                       ← 验证 §11 health
 
 第二次 `/code-review` 抓到 §13.1 的 high-severity bug:**read deadline 只在 `readLoop` 顶 reset,不在 `SetPingHandler` 里 reset**。gorilla 把控制帧(ping/pong/close)直接 dispatch 到 handler,`ReadMessage` 不会返回 — 所以 idle session(只有 2s ping,没有业务帧)60s 后 deadline 过期,`ReadMessage` 返 i/o-timeout,`connectAndServe` 自杀重连。**修法**:`SetPingHandler` 闭包首行加 `conn.SetReadDeadline(time.Now().Add(wsReadDeadline))`。**回归锁**:`TestStreamHub_PingHandlerResetsReadDeadline` 验证 idle 200ms 后 mux 连接不重连。另外两条 finding(健康探测 stale doc + `EnumerateSubscriptions`/`Snapshot` DRY)已在 `health.go:run` 注释和 `router.go::snapshot` 私有 helper 里一并处理。
 
+
+---
+
+## 15. Liveness probe
+
+`driver.Ping` goes through the capability surface (`api.Bridge.Health`),
+where the relay implements `session.list` — the cheapest auth-gated
+call, independent of session and agent state, which the shared host's
+own health probe already makes (`internal/bridge/dsh/host/health.go`).
+
+The question the probe asks is whether the host still answers at all:
+a dsh session can be busy with a turn while the host answers, and a
+wedged host answers nothing. The answer never reaches the model's
+context.
+
+A host that is not answering is what the probe exists to catch: the
+host's `sessionController` being unavailable surfaces as
+`gateway/service-unavailable`, and the probe reports it like any
+other missing answer.
+
+Tests: `internal/bridge/dsh/ping_test.go` (a capability surface whose
+health probe speaks the session.list protocol against a fake host).

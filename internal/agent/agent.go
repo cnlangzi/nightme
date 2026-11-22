@@ -924,6 +924,17 @@ func (a *Agent) Keepalive(ctx context.Context, onRecover func(context.Context) e
 	return a.driver.Keepalive(ctx, onRecover)
 }
 
+// Ping asks the bridge whether its control channel still answers.
+// Thin shim around driver.Ping(ctx) — see the driver interface for
+// the contract.
+//
+// The daemon calls it when an in-flight turn has stopped making
+// progress: a bridge that answers is busy, a bridge that does not
+// is stuck. The answer never reaches the model's context.
+func (a *Agent) Ping(ctx context.Context) error {
+	return a.driver.Ping(ctx)
+}
+
 // Events streams AgentEvent values until the session ends. The
 // channel is closed by the bridge implementation only when the
 // underlying process (or transport) terminates — NOT after every
@@ -1050,7 +1061,7 @@ func ImplementsDriver(d interface{}) bool {
 // client / Transport / pump goroutines). It is package-private —
 // external code interacts only with *Agent.
 //
-// The 6 methods capture exactly what bridges expose at runtime;
+// The 7 methods capture exactly what bridges expose at runtime;
 // the static metadata is on Starter.Info, the spawning logic
 // is on Starter.Start, the close machinery is on Agent.Close.
 type driver interface {
@@ -1099,6 +1110,21 @@ type driver interface {
 	// dsh). Recovery only fires when dead and is bounded to one
 	// attempt — persistent failure is surfaced, not retried.
 	Keepalive(ctx context.Context, onRecover func(context.Context) error) error
+
+	// Ping asks the bridge whether its control channel still
+	// answers. It returns nil when the bridge answered within the
+	// caller's deadline and a non-nil error otherwise.
+	//
+	// A ping is not a user message: it never reaches the model's
+	// context and it never opens a turn. It exists because a
+	// queued message cannot tell "the agent is busy" apart from
+	// "the agent is gone" — only the bridge's own protocol can.
+	//
+	// Every driver implements it. A bridge with no usable protocol
+	// answers with the most precise signal it has (a process
+	// liveness check, for instance) rather than refusing the
+	// call: the daemon depends on the answer.
+	Ping(ctx context.Context) error
 }
 
 // TurnText is implemented by bridge drivers that can report the exact

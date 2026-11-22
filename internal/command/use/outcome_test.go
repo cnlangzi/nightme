@@ -56,6 +56,10 @@ func (d *quietDriver) Keepalive(context.Context, func(context.Context) error) er
 	return nil
 }
 
+// Ping answers the daemon's liveness probe. The fake is
+// responsive unless the test says otherwise.
+func (d *quietDriver) Ping(context.Context) error { return nil }
+
 // runUse runs /use with the given argv and returns the outcome it
 // reported.
 func runUse(t *testing.T, argv ...string) *messages.Outcome {

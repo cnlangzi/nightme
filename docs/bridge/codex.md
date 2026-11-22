@@ -621,3 +621,35 @@ consumer 长时间不读时 bridge 会卡在投递上(而不是静默丢内容);
 - **最低 codex CLI 版本**:≥ 0.95(`thread/started` 通知 + `initialize` 三步握手 + 6 条 optOut 生效)
 - **已知兼容**:codex 0.95–0.145(含 `thread/tokenUsage/updated` 0.125+)
 - **不兼容**:`< 0.95` 的旧 CLI(没用 app-server 子命令)— 用户应 `codex login` 升级
+
+---
+
+## 17. Liveness probe
+
+`driver.Ping` issues the JSON-RPC `getAuthStatus` request — the
+cheapest call in the protocol. It reads the auth state and touches
+neither the thread nor the turn, so the app-server answers it while a
+turn is running:
+
+```json
+{"jsonrpc":"2.0","id":10,"method":"getAuthStatus","params":{}}
+{"id":10,"result":{"authMethod":"apikey","authToken":null,"requiresOpenaiAuth":true}}
+```
+
+The `params` field must be present: the app-server rejects a request
+without it (`Invalid request: missing field \`params\``). A rejection
+still counts as an answer — the app-server received the request and
+replied — but the probe should ask a question the agent can answer
+properly.
+
+The answer is resolved from the session's own pending-request map and
+is not published as an event: the probe does not wait for the event
+pipeline to deliver anything. The protocol loop that reads the answer
+also reads the events, so a fully blocked event channel can still
+delay it. The answer never reaches the model's context.
+
+Measured against the real app-server (2026-11-22): 89 ms round trip.
+
+Tests: `internal/bridge/codex/ping_test.go` (fake app-server),
+`internal/bridge/codex/ping_real_unix_test.go` (real CLI, opt-in via
+`NIGHTME_REAL_CODEX=1`).

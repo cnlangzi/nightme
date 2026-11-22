@@ -499,6 +499,28 @@ func (d *driver) Keepalive(ctx context.Context, onRecover func(context.Context) 
 	return onRecover(ctx)
 }
 
+// Ping is the driver.Ping implementation for the omp bridge. omp
+// speaks the same RPC envelope as pi; get_state is the command the
+// boot handshake already uses, and omp answers it while a prompt is
+// in flight.
+//
+// A rejected get_state (success:false) still counts as an answer:
+// the CLI received the command and replied. Only the absence of a
+// reply — a closed session, a broken pipe, or the deadline firing —
+// means "not responding".
+//
+// The probe rides the RPC client's own pending map, so it never
+// travels the event channel the runtime drains.
+func (d *driver) Ping(ctx context.Context) error {
+	if d.rpc == nil {
+		return errors.New("omp: no rpc client")
+	}
+	if _, err := d.rpc.request(ctx, "get_state", map[string]any{}, ""); err != nil {
+		return fmt.Errorf("omp: ping: %w", err)
+	}
+	return nil
+}
+
 // alive reports whether the omp subprocess is still running AND
 // its RPC session has not already been torn down. The PID probe
 // covers the process-exit case; the RPC client's closed flag

@@ -69,6 +69,10 @@ func (d *fakeDriver) Keepalive(ctx context.Context, onRecover func(context.Conte
 	return nil
 }
 
+// Ping answers the daemon's liveness probe. The fake is
+// responsive unless the test says otherwise.
+func (d *fakeDriver) Ping(context.Context) error { return nil }
+
 func (f *fakeAgentSession) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -156,6 +160,10 @@ func (d *callRecordingASDriver) Stop(_ context.Context) error    { return nil }
 func (d *callRecordingASDriver) Keepalive(_ context.Context, _ func(context.Context) error) error {
 	return nil
 }
+
+// Ping answers the daemon's liveness probe. The fake is
+// responsive unless the test says otherwise.
+func (d *callRecordingASDriver) Ping(context.Context) error { return nil }
 
 // --- Spawner fakes ---------------------------------------------------
 

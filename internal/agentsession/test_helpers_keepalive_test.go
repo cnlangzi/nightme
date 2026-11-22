@@ -56,6 +56,10 @@ func (d *testKeepaliveDriver) Keepalive(ctx context.Context, onRecover func(cont
 	return nil
 }
 
+// Ping answers the daemon's liveness probe. The fake is
+// responsive unless the test says otherwise.
+func (d *testKeepaliveDriver) Ping(context.Context) error { return nil }
+
 // makeKeepaliveTestAS constructs an AS whose driver's Keepalive
 // reports pid as alive. recovery is invoked if pid is dead and
 // returns nil (so the second call sees a fresh, "live" driver

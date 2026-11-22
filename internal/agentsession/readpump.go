@@ -51,6 +51,10 @@ func (as *AgentSession) startReadPump() {
 	// Lazily start the dispatcher too — it drains eventQueue into
 	// EventBus and must be running before any events are pushed.
 	as.startEventDispatch()
+	// The stall monitor watches the in-flight prompt's progress
+	// clock and asks the bridge whether it still answers when the
+	// turn goes quiet for too long.
+	as.startStallMonitor()
 	go as.readpumpLoop(stop, done)
 }
 

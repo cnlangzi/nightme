@@ -30,6 +30,13 @@ import (
 // Stop() must write the documented control_request payload
 // — NOT SIGINT.
 //
+// The payload is the one reverse-engineered test runs confirmed
+// Claude Code 2.1.220 accepts as an in-flight turn interrupt:
+// `{"type":"control_request","request":{"subtype":"interrupt"}}`.
+// The bridge adds a top-level request_id (minted per call), so
+// the wire assertion is structural rather than an exact-string
+// comparison.
+//
 // We model the bridge's stdin pipe manually (parent holds
 // the write end; a `sleep` child holds the read end). The
 // test reads back exactly the bytes Stop() wrote and parses
@@ -79,8 +86,8 @@ func TestStop_WritesControlRequestInterruptOnStdin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read stdin: %v", err)
 	}
-	if got != interruptPayload {
-		t.Errorf("stdin payload = %q; want %q", got, interruptPayload)
+	if got == "" {
+		t.Fatal("Stop wrote nothing to stdin")
 	}
 
 	// Parse as JSON and assert on structure.
@@ -94,6 +101,13 @@ func TestStop_WritesControlRequestInterruptOnStdin(t *testing.T) {
 	req, _ := msg["request"].(map[string]any)
 	if req == nil || req["subtype"] != "interrupt" {
 		t.Errorf("request.subtype = %v; want interrupt", req)
+	}
+	// The request carries a top-level request_id: the CLI echoes it
+	// back, and an answer without an id could be mistaken for the
+	// answer to the liveness probe.
+	id, _ := msg["request_id"].(string)
+	if id == "" {
+		t.Errorf("stdin payload carries no top-level request_id: %s", got)
 	}
 }
 

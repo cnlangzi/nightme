@@ -7,6 +7,13 @@
 // Lives in bridge/pty/ (not in a separate agent package) so the
 // whole PTY story is one tree. See docs/bridge/cli-transport.md.
 //
+// The liveness probe (driver.Ping) falls back to the child's process
+// liveness: a PTY carries raw bytes with no protocol to ask, so this
+// is the most precise signal the transport can give. It is weaker
+// than the protocol bridges' answers — a live process whose CLI
+// stopped reading its stdin still passes — but it settles the case
+// the daemon cannot see otherwise: the child is gone.
+//
 // Agent is BOTH the template (registered with agent.Builtins) and
 // the live handle (returned by Start). The template half is set once
 // by NewAgent and is immutable thereafter; Start clones the receiver
@@ -17,10 +24,12 @@ package pty
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/agent/procutil"
 )
 
 // sessionBufferSize is the capacity of the AgentEvent channel. The
@@ -257,6 +266,26 @@ func (d *driver) Keepalive(ctx context.Context, onRecover func(context.Context) 
 			return fmt.Errorf("pty: transport nil and no recovery callback")
 		}
 		return onRecover(ctx)
+	}
+	return nil
+}
+
+// Ping is the driver.Ping implementation for the pty bridge. A PTY
+// carries raw bytes with no protocol to ask, so the bridge answers
+// with the most precise signal it has: the child's process
+// liveness.
+//
+// It is a weaker answer than the protocol bridges give — a live
+// process whose CLI has stopped reading its stdin still passes the
+// probe — but it is the only one a protocol-less transport can
+// give, and it settles the case the daemon cannot see otherwise:
+// the child is gone.
+func (d *driver) Ping(ctx context.Context) error {
+	if d.transport == nil {
+		return errors.New("pty: no transport")
+	}
+	if err := procutil.AlivePID(d.transport.PID()); err != nil {
+		return fmt.Errorf("pty: ping: %w", err)
 	}
 	return nil
 }

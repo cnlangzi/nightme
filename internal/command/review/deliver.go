@@ -14,6 +14,7 @@ package review
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -89,10 +90,14 @@ func (f *Factory) deliver(d reviewDelivery) {
 		sendReviewLine(d.ctx, d.emitter, d.chatID, d.replyTo, d.runner, d.notice)
 	}
 
-	// The verdict line — the last thing the review itself sends. It
-	// goes out BEFORE the injected turn: the main agent starts
-	// answering as soon as the turn is injected, and the verdict
-	// must not land after the answer it summarizes.
+	// The verdict line — the review's own report of the run. It goes
+	// out BEFORE the injected turn: the main agent starts answering
+	// as soon as the turn is injected, and the verdict must not land
+	// after the answer it summarizes.
+	//
+	// A failed injection sends one more line after it: the verdict
+	// says the review found its findings, the delivery line says the
+	// agent never received them.
 	//
 	// A review that is not over yet carries no table: the table is
 	// the review's report, and a partial report reads as a final
@@ -145,6 +150,12 @@ func (f *Factory) deliver(d reviewDelivery) {
 			"agent", d.runner,
 			"err", err,
 		)
+		// The refusal reaches the user through the review's own chat
+		// line: the structured outcome is not a candidate, because
+		// messages.OutMessageSettled is never rendered to humans.
+		if line := injectionRefusalLine(err); line != "" {
+			sendReviewLine(d.ctx, d.emitter, d.chatID, d.replyTo, d.runner, line)
+		}
 		// The findings were produced but never reached the agent —
 		// the review is not complete. The findings stay in the
 		// record: the next review command delivers them.
@@ -167,6 +178,31 @@ func (f *Factory) deliver(d reviewDelivery) {
 		f.restoreFindings(d.chatID, d.rec.findings, d.rec.deliveredContributions())
 		return
 	}
+}
+
+// injectionRefusalLine renders the reason the injection was refused,
+// for the chat.
+//
+// Every refusal earns a line: the findings were produced and the
+// agent never received them, and the structured outcome is not
+// rendered to humans — messages.OutMessageSettled never reaches the
+// chat. A silent failure would leave the user believing the agent
+// is already fixing what the review found.
+//
+// A stalled turn names the commands that end it; a busy one says the
+// turn is worth waiting out.
+//
+// The line rides the review's own chat path (messages.OutReply).
+func injectionRefusalLine(err error) string {
+	var refused *agentsession.InjectionRefused
+	if !errors.As(err, &refused) {
+		return ""
+	}
+	if !refused.Stalled {
+		return "The findings were not delivered to the agent: " + refused.Reason +
+			". They stay in the review record — run /review again to hand them over."
+	}
+	return "The findings were not delivered to the agent: " + refused.Reason + "."
 }
 
 // report tells the message what the run did.

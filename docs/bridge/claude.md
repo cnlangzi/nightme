@@ -1421,8 +1421,70 @@ go test ./internal/bridge/claudecode/ -count=1 -timeout 240s \
 | 真机 skip helper | `testhelpers_realclaude_unix_test.go` |
 | restore 回归 | `internal/chatsession/restore_respawn_test.go` → `TestFromAgentSessionEntry_InitializesEventQueue` |
 | AskUserQuestion 双路径回归 | `internal/bridge/claudecode/claudecode_test.go` → `TestPumpStream_AskUserQuestion`；`internal/bridge/claudecode/ask_permission_test.go` → `TestSendPermission_TextFallback_WritesUserText` |
+| liveness probe（`control_request` / `get_usage`） | `internal/bridge/claudecode/claudecode.go` → `Ping`、`resolveControlResponse`；`internal/bridge/claudecode/stream.go` → `control_response` 分支 |
+| liveness probe 回归 | `internal/bridge/claudecode/ping_test.go`；真机 `internal/bridge/claudecode/ping_real_unix_test.go` |
 
 ---
+
+## 10. Liveness probe（`control_request`）
+
+daemon 用它回答一个问题：**这一轮还有没有在动？** 当一轮用户 turn 长时间没有任何事件时，
+daemon 向 bridge 的控制通道发一个 probe；bridge 回答了说明 CLI 还活着（只是忙），
+没回答说明 CLI 卡死了，用户需要知道。
+
+probe **不是**用户消息：它不进模型的 context，不产生 result frame，不开启 turn。
+一个排队中的用户消息做不到这件事 —— 它分不清「CLI 在忙」和「CLI 死了」。
+
+### 10.1 wire 格式
+
+写入 stdin 的一行：
+
+```json
+{"type":"control_request","request":{"subtype":"get_usage"},"request_id":"nightme-probe-1"}
+```
+
+CLI 回一行：
+
+```json
+{"type":"control_response","response":{"subtype":"success","request_id":"nightme-probe-1","response":{"session":{...}}}}
+```
+
+**`request_id` 必须放在顶层**（和 `type`、`request` 平级）。CLI 只从顶层回显它；
+塞进 `request` 里的 id 回不来，答案就无法关联。多个 probe 并发时靠 `request_id` 一一对应。
+
+### 10.2 实测（Claude Code 2.1.322）
+
+| 写入 stdin | stdout 回答 |
+|---|---|
+| `{"type":"control_request","request":{"subtype":"get_usage"},"request_id":"probe-9"}` | `{"type":"control_response","response":{"subtype":"success","request_id":"probe-9","response":{"session":{...}}}}` |
+| 同样的帧，`subtype` 换成 `get_context_usage` | 同样被回答 |
+| 同样的帧，`subtype` 换成 `ping`（未知） | `{"type":"control_response","response":{"subtype":"error","error":"Unsupported control request subtype: ping"}}` |
+| 同样的帧，`subtype` 换成 `interrupt` | 会中断当前 turn —— **不能**用作 probe |
+
+三条结论：
+
+1. **未知 subtype 的错误回答也算「回答」**：CLI 收到了请求、派发了它、回了它。
+   只有「没有回答」才意味着「不响应」。
+2. **turn 进行中也会被回答**：实测在 `Bash(sleep 12)` 工具调用期间 probe 12ms 返回，
+   turn 随后正常结束，模型输出里没有 probe 的痕迹。
+3. **`interrupt` 绝不能用作 probe**：它会取消当前 turn —— 正是这个特性要避免的破坏性行为。
+
+### 10.3 答案不走 event 通道
+
+`control_response` 由 bridge 自己的 pending-probe map 解析（`resolveControlResponse`），
+**不进** `d.events`：probe 不等事件通道投递任何东西。
+
+但读答案的循环和读事件的循环是同一个（`pumpStream`）：事件通道彻底堵死时，
+答案同样会被拖住。probe 的价值在于「CLI 还活着吗」这个问题的答案不依赖
+事件投递 —— 不是在于事件通道堵死时 probe 仍然能回答。
+
+### 10.4 回归测试
+
+- `internal/bridge/claudecode/ping_test.go` —— 帧形状（顶层 `request_id`）、关联、
+  错误回答也算回答、`control_response` 不进 event 通道。
+- `internal/bridge/claudecode/ping_subprocess_unix_test.go` —— 对着 fake CLI，
+  turn 在飞时 probe 仍被回答。
+- `internal/bridge/claudecode/ping_real_unix_test.go` —— 真机（`NIGHTME_REAL_CLAUDE=1`）。
 
 ---
 

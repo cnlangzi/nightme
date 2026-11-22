@@ -65,6 +65,24 @@ type streamState struct {
 	// (see bgtask.go). It maps a task id to the task's description
 	// so the notice that a task finished can name it.
 	bgTasks *bgTaskTable
+
+	// onControlResponse resolves a control_response frame against
+	// the bridge's pending-probe map. nil when the caller has no
+	// probe path (the fixture-driven tests); the frame is then
+	// dropped.
+	//
+	// The answer is not published as an event: the probe does not
+	// wait for the event pipeline to deliver anything.
+	onControlResponse func(streamEvent)
+}
+
+// streamOption customizes the per-session state pumpStream builds.
+type streamOption func(*streamState)
+
+// withControlResponder installs the callback that resolves
+// control_response frames against the bridge's pending-probe map.
+func withControlResponder(fn func(streamEvent)) streamOption {
+	return func(state *streamState) { state.onControlResponse = fn }
 }
 
 // pendingTool records a tool_use block that has not yet been
@@ -146,6 +164,23 @@ type streamEvent struct {
 	// agent.UsageInfo when translate() emits EventUsage.
 	Usage      json.RawMessage `json:"usage,omitempty"`
 	ModelUsage json.RawMessage `json:"modelUsage,omitempty"`
+
+	// control_response only — the answer to a control_request the
+	// bridge sent. The request_id inside it names the probe the
+	// answer belongs to.
+	Response *controlResponse `json:"response,omitempty"`
+}
+
+// controlResponse is the payload of a control_response frame.
+//
+// The CLI echoes the request_id of the control_request it answers,
+// but only when the id sat at the top level of the request —
+// nested inside "request" the answer carries no id at all.
+type controlResponse struct {
+	Subtype   string          `json:"subtype,omitempty"`
+	RequestID string          `json:"request_id,omitempty"`
+	Error     string          `json:"error,omitempty"`
+	Result    json.RawMessage `json:"response,omitempty"`
 }
 
 type assistantMsg struct {
@@ -263,6 +298,9 @@ type contentBlock struct {
 // translate clears it when the turn's result arrives, so the stderr
 // drain can tell a turn failure apart from a line the CLI printed
 // outside a turn. nil disables the tracking.
+//
+// opts carry the session-scoped hooks the driver installs — today
+// the control_response resolver that answers the liveness probe.
 func pumpStream(
 	r io.Reader,
 	events chan<- agent.AgentEvent,
@@ -271,6 +309,7 @@ func pumpStream(
 	turnActive *atomic.Bool,
 	agentName, workspace, branch string,
 	logger *slog.Logger,
+	opts ...streamOption,
 ) {
 	scanner := bufio.NewScanner(r)
 	// Allow long lines (Claude Code may emit large content blocks).
@@ -294,6 +333,11 @@ func pumpStream(
 		// The task table names a task in the notice that reports it
 		// finished.
 		bgTasks: newBgTaskTable(),
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(state)
+		}
 	}
 
 	for scanner.Scan() {
@@ -659,6 +703,19 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 		// will hook this case to emit EventAgentPermission.
 		if logger != nil {
 			logger.Debug("claudecode: control_request received (unhandled under bypassPermissions)")
+		}
+
+	case "control_response":
+		// The answer to a control_request the bridge sent — today
+		// the liveness probe's get_usage request.
+		//
+		// The frame is handed to the bridge's pending-probe map and
+		// is NOT published to the event channel: the probe must not
+		// wait for the event pipeline to deliver anything. The
+		// stream loop that reads the answer also reads the events,
+		// so a fully blocked event channel can still delay it.
+		if state.onControlResponse != nil {
+			state.onControlResponse(ev)
 		}
 
 	case "conversation_reset":

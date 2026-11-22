@@ -10,6 +10,15 @@
 //
 // Design reference: docs/bridge/pi.md.
 //
+// The liveness probe (driver.Ping) asks for `get_state` — the same
+// command the boot handshake uses. Pi answers it while a prompt is
+// in flight, and the answer never reaches the model's context. The
+// probe rides the RPC client's own pending map: the answer is not
+// published as an event, so the probe does not wait for the event
+// pipeline to deliver anything. The protocol loop that reads the
+// answer also reads the events, so a fully blocked event channel can
+// still delay it.
+//
 // Agent is BOTH the template (registered with agent.Builtins) and
 // the live handle (returned by Start). The template half is set
 // once by New and is immutable thereafter; Start clones the
@@ -950,6 +959,28 @@ func (d *driver) Keepalive(ctx context.Context, onRecover func(context.Context) 
 		return fmt.Errorf("pi: bridge process dead (pid=%d) and no recovery callback", d.PID())
 	}
 	return onRecover(ctx)
+}
+
+// Ping is the driver.Ping implementation for the pi bridge. pi
+// speaks its own RPC envelope over stdio; get_state is the command
+// the boot handshake already uses, and pi answers it while a prompt
+// is in flight.
+//
+// A rejected get_state (success:false) still counts as an answer:
+// the CLI received the command and replied. Only the absence of a
+// reply — a closed session, a broken pipe, or the deadline firing —
+// means "not responding".
+//
+// The probe rides the RPC client's own pending map, so it never
+// travels the event channel the runtime drains.
+func (d *driver) Ping(ctx context.Context) error {
+	if d.rpc == nil {
+		return errors.New("pi: no rpc client")
+	}
+	if _, err := d.rpc.request(ctx, "get_state", map[string]any{}, ""); err != nil {
+		return fmt.Errorf("pi: ping: %w", err)
+	}
+	return nil
 }
 
 // ─── internals ───

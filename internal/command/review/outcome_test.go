@@ -162,6 +162,10 @@ func (d *resumeDriver) Keepalive(context.Context, func(context.Context) error) e
 	return nil
 }
 
+// Ping answers the daemon's liveness probe. The fake is
+// responsive unless the test says otherwise.
+func (d *resumeDriver) Ping(context.Context) error { return nil }
+
 // waitOutcome waits for the settled message of a review and returns
 // the outcome it carries.
 func waitOutcome(t *testing.T, em *recordingEmitter, within time.Duration) *messages.Outcome {

@@ -169,6 +169,10 @@ func (*reuseTestDriver) Keepalive(_ context.Context, _ func(context.Context) err
 	return nil
 }
 
+// Ping answers the daemon's liveness probe. The fake is
+// responsive unless the test says otherwise.
+func (*reuseTestDriver) Ping(context.Context) error { return nil }
+
 // itoa is a local strconv-free integer → string helper.
 func itoa(i int) string {
 	if i == 0 {

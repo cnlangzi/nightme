@@ -155,7 +155,7 @@ func TestSendBlocks_WithReplyTo_RefusesDuringUserTurn(t *testing.T) {
 	as.SetIsReady(false)
 
 	err := as.SendBlocks(context.TODO(), nil, WithReplyTo("u_review"))
-	if err != ErrInjectionDuringTurn {
+	if !errors.Is(err, ErrInjectionDuringTurn) {
 		t.Fatalf("got %v; want ErrInjectionDuringTurn", err)
 	}
 
@@ -182,6 +182,10 @@ func (d *endingInjectDriver) Stop(context.Context) error  { return nil }
 func (d *endingInjectDriver) Keepalive(context.Context, func(context.Context) error) error {
 	return nil
 }
+
+// Ping answers the daemon's liveness probe. The fake is
+// responsive unless the test says otherwise.
+func (d *endingInjectDriver) Ping(context.Context) error { return nil }
 
 func TestEndPrompt_WithoutCurrentPromptStillPublishes(t *testing.T) {
 	as := makeBareAgentSession(t, "cursor", "/tmp")
@@ -273,3 +277,7 @@ func (d *failingInjectDriver) Stop(context.Context) error  { return nil }
 func (d *failingInjectDriver) Keepalive(context.Context, func(context.Context) error) error {
 	return nil
 }
+
+// Ping answers the daemon's liveness probe. The fake is
+// responsive unless the test says otherwise.
+func (d *failingInjectDriver) Ping(context.Context) error { return nil }

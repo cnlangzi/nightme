@@ -39,6 +39,10 @@ func (c *captureAgent) Keepalive(context.Context, func(context.Context) error) e
 	return nil
 }
 
+// Ping answers the daemon's liveness probe. The fake is
+// responsive unless the test says otherwise.
+func (c *captureAgent) Ping(context.Context) error { return nil }
+
 // sent returns the turns the agent received.
 func (c *captureAgent) sent() [][]agent.ContentBlock {
 	c.mu.Lock()

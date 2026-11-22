@@ -52,6 +52,10 @@ func (d *scopeDriver) Close() error                                             
 func (d *scopeDriver) Stop(context.Context) error                                   { return nil }
 func (d *scopeDriver) Keepalive(context.Context, func(context.Context) error) error { return nil }
 
+// Ping answers the daemon's liveness probe. The fake is
+// responsive unless the test says otherwise.
+func (d *scopeDriver) Ping(context.Context) error { return nil }
+
 // waitForPIDGone waits until pid can no longer be signalled.
 func waitForPIDGone(t *testing.T, pid int, budget time.Duration) {
 	t.Helper()

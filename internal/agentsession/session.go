@@ -252,6 +252,41 @@ type AgentSession struct {
 	// currentPromptOverrideUserMsgID is the readpump's UserMsgID
 	// override for the in-flight prompt. See WithReplyTo.
 	currentPromptOverrideUserMsgID string
+
+	// Stall detection state (guarded by asMu). See stall.go.
+	//
+	// stallPromptID names the prompt the current stall episode
+	// belongs to; a different prompt means a new episode, and the
+	// "already told the user" flag does not carry over.
+	stallPromptID string
+	// stallReported records that the user was already told about
+	// this stall. One notice per episode.
+	stallReported bool
+	// stallProbeFailed records that the last probe got no answer.
+	// A successful probe clears it.
+	stallProbeFailed bool
+	// stallLastProbeAt is when the last probe was issued.
+	stallLastProbeAt time.Time
+	// stallSilentSince is how long the in-flight prompt had been
+	// silent when the last probe was issued.
+	stallSilentSince time.Duration
+
+	// stallSilence is how long the in-flight prompt may go without
+	// an event before the monitor probes the bridge. Zero means the
+	// production threshold.
+	stallSilence time.Duration
+	// stallProbeTimeout bounds one probe round-trip. Zero means the
+	// production deadline.
+	stallProbeTimeout time.Duration
+	// stallCheckInterval is how often the monitor looks at the
+	// progress clock. Zero means the production period.
+	stallCheckInterval time.Duration
+
+	// stallStop / stallDone coordinate the stall monitor goroutine.
+	// Stop is closed by Shutdown; Done is closed by the monitor on
+	// exit.
+	stallStop chan struct{}
+	stallDone chan struct{}
 }
 
 // sendBlocksOpts is the variadic-arguments receiver for
@@ -588,6 +623,11 @@ func (as *AgentSession) Shutdown() {
 	// Step 2: snapshot readpumpStop / readpumpDone under lock
 	stop := as.readpumpStop
 	done := as.readpumpDone
+	// The stall monitor stops with the readpump. It is a writer of
+	// eventQueue (it publishes the stall notice), so it has to be
+	// fully stopped before the queue closes below.
+	stallStop := as.stallStop
+	stallDone := as.stallDone
 	// Closing the stop chan wakes the readpump select. The
 	// check-and-close runs under asMu so a concurrent Close() (a
 	// user /close, or the daemon's idle-CLI reaper) cannot close
@@ -600,6 +640,14 @@ func (as *AgentSession) Shutdown() {
 			close(stop)
 		}
 	}
+	if stallStop != nil {
+		select {
+		case <-stallStop:
+			// already closed
+		default:
+			close(stallStop)
+		}
+	}
 	as.asMu.Unlock()
 
 	// Wait for readpump to drain remaining work and exit.
@@ -607,9 +655,16 @@ func (as *AgentSession) Shutdown() {
 		<-done
 	}
 
+	// Wait for the stall monitor to exit. A probe in flight is cut
+	// short by the opCtx cancellation above, so this wait is short.
+	if stallDone != nil {
+		<-stallDone
+	}
+
 	// Step 3: close eventQueue. Safe to do here because readpump
-	// has exited and won't push more. After this, the dispatcher's
-	// `for ev := range eventQueue` returns `!ok` and exits.
+	// and the stall monitor have exited and won't push more. After
+	// this, the dispatcher's `for ev := range eventQueue` returns
+	// `!ok` and exits.
 	//
 	// Note: we close but do NOT nil-out eventQueue. Callers that
 	// captured a reference to the channel before Shutdown
@@ -739,9 +794,17 @@ func (as *AgentSession) LastEventAt() time.Time {
 
 // noteEvent records the arrival of a bridge event. The readpump is
 // the only writer.
+//
+// The in-flight prompt's progress clock is refreshed in the same
+// critical section: the clock belongs to the turn, not to the
+// session, so an event that arrives with no prompt installed leaves
+// it alone — a stray notice must not make a wedged turn look alive.
 func (as *AgentSession) noteEvent() {
 	as.asMu.Lock()
 	as.lastEventAt = time.Now()
+	if p := as.currentPrompt; p != nil {
+		p.LastProgressAt = as.lastEventAt
+	}
 	as.asMu.Unlock()
 }
 
@@ -924,7 +987,36 @@ func (as *AgentSession) Entry() *registry.AgentSessionEntry {
 // the wrong card. Callers should drop the injection (the main
 // agent will see the prior turn settle before the next user
 // message arrives).
+//
+// The concrete error is an *InjectionRefused, which unwraps to this
+// sentinel: callers that only care that the injection was refused
+// keep matching on it, while callers that surface a reason to the
+// user read it off the refusal.
 var ErrInjectionDuringTurn = errors.New("agentsession: SendBlocks(WithReplyTo) refused: user turn in flight")
+
+// InjectionRefused is the error SendBlocks(WithReplyTo) returns when
+// it refuses an injection because a user turn is in flight.
+//
+// Reason says what the user can do about it — a turn that is merely
+// busy is worth waiting out, a turn that has stopped making progress
+// is worth ending.
+type InjectionRefused struct {
+	// Reason is the user-facing sentence explaining the refusal.
+	Reason string
+
+	// Stalled reports that the in-flight turn had stopped making
+	// progress and the bridge had stopped answering the probe.
+	// A stalled turn is one /stop or /close can end; a busy one is
+	// not.
+	Stalled bool
+}
+
+func (e *InjectionRefused) Error() string {
+	return "agentsession: SendBlocks(WithReplyTo) refused: " + e.Reason
+}
+
+// Unwrap keeps errors.Is(err, ErrInjectionDuringTurn) true.
+func (e *InjectionRefused) Unwrap() error { return ErrInjectionDuringTurn }
 
 // ErrNotRunning is returned by SendBlocks/Close when called
 // before Spawn() succeeds.
@@ -1395,9 +1487,17 @@ func (as *AgentSession) SendBlocks(ctx context.Context, blocks []agent.ContentBl
 		// cannot interleave their anchors.
 		as.asMu.RLock()
 		turnInFlight := as.currentPrompt != nil && !as.isReady.Load()
+		// The stall verdict belongs to the episode of the turn that
+		// is in flight. A turn that started after a stalled one
+		// ended must not inherit the previous turn's verdict — the
+		// monitor has not seen the new prompt yet.
+		stalled := as.stallProbeFailed &&
+			as.currentPrompt != nil &&
+			as.stallPromptID == as.currentPrompt.ID
+		silent := as.stallSilentSince
 		as.asMu.RUnlock()
 		if turnInFlight {
-			return ErrInjectionDuringTurn
+			return as.injectionRefusal(stalled, silent)
 		}
 	}
 	as.asMu.RLock()
@@ -1421,6 +1521,7 @@ func (as *AgentSession) SendBlocks(ctx context.Context, blocks []agent.ContentBl
 			Blocks:         blocks,
 			CreatedAt:      now,
 			AckedAt:        now,
+			LastProgressAt: now,
 			Messages:       []Message{{ID: cfg.replyTo, ChatID: as.ChatSessionID}},
 		}
 		as.asMu.Lock()

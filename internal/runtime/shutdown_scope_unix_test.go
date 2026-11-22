@@ -61,6 +61,10 @@ func (d *shutdownDriver) Close() error                                          
 func (d *shutdownDriver) Stop(context.Context) error                                   { return nil }
 func (d *shutdownDriver) Keepalive(context.Context, func(context.Context) error) error { return nil }
 
+// Ping answers the daemon's liveness probe. The fake is
+// responsive unless the test says otherwise.
+func (d *shutdownDriver) Ping(context.Context) error { return nil }
+
 // TestShutdownRunMulti_TerminatesAgentChildren is the daemon's
 // end-to-end shutdown contract: after the shutdown sequence, the
 // agent child process is gone and agent_sessions.json records the

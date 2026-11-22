@@ -47,6 +47,10 @@ func (d *failingSendBlocksDriver) Keepalive(context.Context, func(context.Contex
 	return nil
 }
 
+// Ping answers the daemon's liveness probe. The fake is
+// responsive unless the test says otherwise.
+func (d *failingSendBlocksDriver) Ping(context.Context) error { return nil }
+
 // TestSubmit_FailureLeavesCleanState asserts the rollback contract:
 // when SendBlocks fails after the commit, currentPrompt must be
 // nil and IsReady must be true so the chat layer can retry on the

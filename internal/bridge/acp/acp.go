@@ -1,6 +1,17 @@
 // Package acp implements the Agent Client Protocol client transport.
 // ACP uses JSON-RPC 2.0 messages over a line-oriented stdio stream. The
 // production session uses the PTY bridge as that stream's physical carrier.
+//
+// The liveness probe (driver.Ping) asks for a method the agent does
+// not implement. The agent's "method not found" error IS the answer:
+// it proves the agent received the request, dispatched it and replied.
+// Only the absence of a reply means "not responding". The probe rides
+// the bridge's own pending-request map, so it stays answerable even
+// when the event channel the runtime drains is wedged — and its
+// answer never reaches the model's context.
+//
+// cursor, copilot and opencode share this driver and inherit the
+// probe unchanged.
 package acp
 
 import (

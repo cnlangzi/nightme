@@ -343,6 +343,10 @@ func (d *fakeBuilderDriver) Close() error                    { return d.inner.Cl
 func (d *fakeBuilderDriver) Keepalive(ctx context.Context, _ func(context.Context) error) error {
 	return nil
 }
+
+// Ping answers the daemon's liveness probe. The fake is
+// responsive unless the test says otherwise.
+func (d *fakeBuilderDriver) Ping(context.Context) error                                { return nil }
 func (b *fakeAgentBuilder) Events() <-chan agent.AgentEvent                            { return b.events }
 func (b *fakeAgentBuilder) PID() int                                                   { return 99999 }
 func (b *fakeAgentBuilder) SendBlocks(_ context.Context, _ []agent.ContentBlock) error { return nil }

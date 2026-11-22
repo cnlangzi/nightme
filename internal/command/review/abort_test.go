@@ -246,6 +246,10 @@ func (d *abortDriver) Keepalive(context.Context, func(context.Context) error) er
 	return nil
 }
 
+// Ping answers the daemon's liveness probe. The fake is
+// responsive unless the test says otherwise.
+func (d *abortDriver) Ping(context.Context) error { return nil }
+
 // isClosed reports whether the session was closed.
 func (d *abortDriver) isClosed() bool {
 	d.mu.Lock()

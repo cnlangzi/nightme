@@ -148,7 +148,7 @@ Agent: main | Model: MiniMax-M2.7 | Provider: minimax
 
 ### 4.2 用户看到什么
 
-- receipt 是**一张可原地 PATCH 的 interactive card**:heartbeat header(`🤖 Working` / `💭 N · 🔧 M · ⏱ HH:MM:SS`)+ 后台 agent 行(`🔀 N 个后台 agent 在跑`)+ rolling-log entries + `**📋 Tasks**` checklist + `<hr>` + 灰色 footer
+- receipt 是**一张可原地 PATCH 的 interactive card**:heartbeat header(`🤖 Working` / `💭 N · 🔧 M · ⏱ HH:MM:SS`)+ rolling-log entries + `**📋 Tasks**` checklist + `<hr>` + 灰色 footer
 - 消息进度(`⏳` / `🔄` / `✅`)走 reaction 打在用户消息上(`OutMessageState`),不占 card body
 - `OutChoice` 走独立卡(`buildInteractiveCard` → `sendContent`),不进 receipt
 
@@ -158,7 +158,6 @@ Agent: main | Model: MiniMax-M2.7 | Provider: minimax
 
 receipt 是一张 interactive card,body 顺序固定:
 - header(可选): heartbeat 快照 —— `🤖 Working` 占位,或 `💭 N · 🔧 M · ⏱ HH:MM:SS`
-- 后台 agent 行(可选): `🔀 N 个后台 agent 在跑` —— N 是还在跑的后台 subagent 数,一个都不剩时这行消失;turn 结束时这行也跟着消失(这行属于 turn,不是会话)
 - rolling-log entries: 每个 `OutReply` chunk 一条 `markdown` 元素,过长时由 `splitMarkdownForDivs` 拆成多条(每条 ≤ `divTextCharLimit` 字符)
 - task checklist(可选): `**📋 Tasks**` + 条目
 - footer(可选): `<hr>` + 一个 `markdown` 元素,每行包在 `<font color='grey'>` 里
@@ -622,7 +621,6 @@ Feishu IM API 官方支持的顶层 `msg_type`(参考 [create_json 文档](https
 | `OutCommandReply` | (slash cmd / runtime error) | `/cwd` `/use` `/close` `/help` 等 | 折进同一张 receipt 卡(`appendReplyToReceipt`);没有 receipt 时 `postOrphanReplyCard` 发顶层卡 | `interactive` PATCH / Create | ✅ |
 | `OutTaskCreate` | `EventAgentTaskCreate` | Claude TaskCreate 成功结果 | receipt 卡内 `**📋 Tasks**` checklist:`ensureReceiptForTask` lazy create,后续 `SetTaskListWithFooter` 反复 PATCH 同一份 snapshot | `interactive` Create / PATCH | ✅ |
 | `OutTaskUpdate` | `EventAgentTaskUpdate` | Claude TaskUpdate / delete 成功结果 | 同上;空 snapshot 清除 checklist | `interactive` PATCH | ✅ |
-| `OutSubagents` | `EventAgentSubagents` | CLI 报告的后台 task 表 | receipt 卡内 `🔀 N 个后台 agent 在跑` 一行(`SetSubagents` 原地 PATCH);没有后台 task 时这行消失 | `interactive` PATCH | ✅ |
 | `OutError` | `EventAgentError`(带 `Diagnostic`) | bridge 非正常退出 | 独立错误卡(`errorCardChrome` + `encodeErrorCard`):标题 + 正文 + stderr tail;daemon 主动停止的退出不带 stderr | `interactive` Create | ❌ |
 | `OutHeartbeat` | runtime handler(F-63) | 每轮进度(思考 / 工具计数) | `ApplyHeartbeat` 原地 PATCH receipt 卡头;receipt 尚未建时先缓存到 `pendingHeartbeats`,建卡时补上 | `interactive` PATCH | ✅ |
 | `OutPromptEnded` | runtime handler(PromptEndBus) | turn 终态 | adapter 无对应分支,不渲染;终态由 `HeartbeatTracker.Observe` 观察后经 `OutHeartbeat` 落到卡头 | — | ❌ |

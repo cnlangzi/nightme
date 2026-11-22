@@ -107,9 +107,10 @@ func TestBuildReceiptCard_FooterUsesMarkdownFontGrey(t *testing.T) {
 	footer := []string{"🤖 claude · opus-4-5", "💰 ↓ 1.0k · ↻ 0 · ↑ 0 · 1.0k · $0.001"}
 	body, _, err := buildReceiptCard(
 		[]LogEntry{{Icon: "💬", Text: "hello"}},
-		nil, nil,
+		nil,
 		footer,
-		nil)
+		nil,
+	)
 	if err != nil {
 		t.Fatalf("buildReceiptCard: %v", err)
 	}

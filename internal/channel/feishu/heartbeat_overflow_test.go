@@ -120,9 +120,10 @@ func TestReceiptBodyStats_ElementCountFromBuildReceiptCard(t *testing.T) {
 	hb := &messages.HeartbeatSnapshot{ThinkCount: 2, LastBeatAt: time.Now()}
 	body, elementCount, err := buildReceiptCard(
 		[]LogEntry{{Icon: "💬", Text: "a"}, {Icon: "💬", Text: "b"}},
-		nil, nil,
+		nil,
 		[]string{"footer-line-1", "footer-line-2"},
-		hb)
+		hb,
+	)
 	if err != nil {
 		t.Fatalf("buildReceiptCard: %v", err)
 	}
@@ -159,7 +160,7 @@ func TestReceiptBodyStats_ElementCountFromBuildReceiptCard(t *testing.T) {
 // header section is skipped (legacy placeholder instead), so
 // elementCount does NOT include the heartbeat header.
 func TestBuildReceiptCard_EmptySnapshot_NoHeartbeatElement(t *testing.T) {
-	body, elementCount, err := buildReceiptCard(nil, nil, nil, nil, &messages.HeartbeatSnapshot{})
+	body, elementCount, err := buildReceiptCard(nil, nil, nil, &messages.HeartbeatSnapshot{})
 	if err != nil {
 		t.Fatalf("buildReceiptCard: %v", err)
 	}

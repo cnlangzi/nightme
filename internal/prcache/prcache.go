@@ -7,7 +7,7 @@
 // (repo, branch) — the workspace — so the same cwd always sees
 // the same PR regardless of which AgentSession or chat
 // session is asking. /gtw {pr, close} writes via
-// Registry.WritePR(cwd, pr); the runtime's LookupPR closure
+// Registry.WritePR(cwd, pr, branch); the runtime's LookupPR closure
 // (passed into the Emitter's GitStatusLookup) reads via
 // GetOrCreate(cwd).MaybeRefresh + PR(). PR() is strict-synchronous
 // and never blocks on network I/O; the worst-case stamp cost
@@ -118,7 +118,7 @@ const TTL = 60 * time.Second
 // 5 s is a reasonable compromise: short enough that a
 // transient `git` failure (e.g. mid-checkout race) recovers
 // within a handful of stamps; long enough that a workspace
-// that simply has no git PR / MR stops trying. WritePR(pr)
+// that simply has no git PR / MR stops trying. WritePR(pr, branch)
 // resets expiresAt to now+TTL so a freshly created PR surfaces
 // on the next stamp even inside the backoff window.
 const failureBackoff = 5 * time.Second

@@ -119,8 +119,8 @@ func TestRealGLAB_WWWGitLabCom_MRListArgs(t *testing.T) {
 	branch := "__nonexistent_branch_for_realglab_test_" + nonce + "__"
 
 	p := &GitLabProvider{
-		Worktree: "",
-		Runner:   &ExecCLIRunner{Dir: ""},
+		CLIDir: "",
+		Runner: &ExecCLIRunner{Dir: ""},
 	}
 	pr, err := p.FindOpenPRForBranch(context.Background(), "gitlab-com", "www-gitlab-com", branch)
 	if err != nil {
@@ -145,8 +145,8 @@ func TestRealGLAB_WWWGitLabCom_GetPR_NoMatch(t *testing.T) {
 	branch := "__nonexistent_branch_for_realglab_test_" + nonce + "__"
 
 	p := &GitLabProvider{
-		Worktree: "",
-		Runner:   &ExecCLIRunner{Dir: ""},
+		CLIDir: "",
+		Runner: &ExecCLIRunner{Dir: ""},
 	}
 	pr, err := p.GetPR(context.Background(), "gitlab-com", "www-gitlab-com", branch)
 	if err != nil {

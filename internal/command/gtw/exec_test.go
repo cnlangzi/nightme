@@ -243,15 +243,15 @@ func TestExecCLIRunner_DirPropagates(t *testing.T) {
 // TestGitHubProvider_RunnerBindsWorktree is the regression test
 // for the original `gtw pr` ENOENT bug end-to-end:
 //
-//	GitHubProvider.Worktree (set by resolveProvider from
-//	c.Worktree) → provider.runner() returns ExecCLIRunner{Dir:
-//	Worktree} → spawned gh process runs in that directory
-//	instead of inheriting the daemon's possibly-stale CWD.
+//	GitHubProvider.CLIDir (set by resolveProvider from the
+//	caller's directory) → provider.runner() returns
+//	ExecCLIRunner{Dir: CLIDir} → spawned gh process runs in that
+//	directory instead of inheriting the daemon's possibly-stale CWD.
 //
-// Any future refactor that drops the Worktree → Dir binding
+// Any future refactor that drops the CLIDir → Dir binding
 // re-introduces the bug; this test fails immediately.
 //
-// We verify via sentinel file in the Worktree, not pwd output
+// We verify via sentinel file in the directory, not pwd output
 // (see TestRunCmd_DirBinding's MSYS rationale).
 func TestGitHubProvider_RunnerBindsWorktree(t *testing.T) {
 	dir := t.TempDir()
@@ -271,16 +271,16 @@ func TestGitHubProvider_RunnerBindsWorktree(t *testing.T) {
 		cmdArgs = []string{"-c", "echo " + sentinelName + " > " + sentinelName}
 	}
 
-	p := &GitHubProvider{Worktree: real}
+	p := &GitHubProvider{CLIDir: real}
 	// Pull the production runner (Runner is nil by default → falls
-	// through to ExecCLIRunner{Dir: p.Worktree}).
+	// through to ExecCLIRunner{Dir: p.CLIDir}).
 	r := p.runner()
 
 	if _, _, err := r.Run(context.Background(), cmdName, cmdArgs...); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(real, sentinelName)); err != nil {
-		t.Fatalf("gh-equivalent sentinel not at %s: %v (Worktree → Dir binding broken)",
+		t.Fatalf("gh-equivalent sentinel not at %s: %v (CLIDir → Dir binding broken)",
 			filepath.Join(real, sentinelName), err)
 	}
 }
@@ -307,14 +307,14 @@ func TestGitLabProvider_RunnerBindsWorktree(t *testing.T) {
 		cmdArgs = []string{"-c", "echo " + sentinelName + " > " + sentinelName}
 	}
 
-	p := &GitLabProvider{Worktree: real}
+	p := &GitLabProvider{CLIDir: real}
 	r := p.runner()
 
 	if _, _, err := r.Run(context.Background(), cmdName, cmdArgs...); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(real, sentinelName)); err != nil {
-		t.Fatalf("glab-equivalent sentinel not at %s: %v (Worktree → Dir binding broken)",
+		t.Fatalf("glab-equivalent sentinel not at %s: %v (CLIDir → Dir binding broken)",
 			filepath.Join(real, sentinelName), err)
 	}
 }

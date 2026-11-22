@@ -386,8 +386,8 @@ func TestDetectProvider_CacheHitRebindsWorktree(t *testing.T) {
 		if !ok {
 			t.Fatalf("detect: want *GitLabProvider, got %T", prov)
 		}
-		if gl.Worktree != want {
-			t.Fatalf("Worktree = %q, want %q", gl.Worktree, want)
+		if gl.CLIDir != want {
+			t.Fatalf("Worktree = %q, want %q", gl.CLIDir, want)
 		}
 	}
 }

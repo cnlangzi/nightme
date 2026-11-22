@@ -149,7 +149,10 @@ func RunNewDraft(
 			"❌ Not in a git repository. Run /cwd <inside a repo> first.",
 			command.FailedOutcome("not_a_repo", "the workspace is not inside a git repository")), nil
 	}
-	if _, _, _, err := resolveProvider(ctx, Context{RepoRoot: repoRoot, Worktree: cwd}, deps, cwd); err != nil {
+	// The provider's CLI runs in the workspace's own directory —
+	// the same one the context names, so the two cannot drift.
+	providerCtx := Context{RepoRoot: repoRoot, Worktree: cwd}
+	if _, _, _, err := resolveProvider(ctx, providerCtx, deps, providerCtx.Worktree); err != nil {
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, "❌ "+err.Error(),
 			command.FailedOutcome("provider_error", "the git host could not be resolved")), nil
 	}
@@ -221,8 +224,11 @@ func RunNewCreate(
 	// resolve closure, so it only runs when there is an issue to
 	// create.
 	labelWarning := ""
+	// The provider's CLI runs in the workspace's own directory —
+	// the same one the context names, so the two cannot drift.
+	providerCtx := Context{RepoRoot: repoRoot, Worktree: cwd}
 	resolve := func() (GitProvider, string, string, error) {
-		prov, owner, repo, err := resolveProvider(ctx, Context{RepoRoot: repoRoot, Worktree: cwd}, deps, cwd)
+		prov, owner, repo, err := resolveProvider(ctx, providerCtx, deps, providerCtx.Worktree)
 		if err != nil {
 			return nil, "", "", err
 		}

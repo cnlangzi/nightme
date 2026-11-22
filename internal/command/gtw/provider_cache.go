@@ -32,9 +32,9 @@ type providerIdentity struct {
 func (id providerIdentity) provider(dir string) GitProvider {
 	switch id.kind {
 	case ProviderGitHub:
-		return &GitHubProvider{host: id.host, Worktree: dir}
+		return &GitHubProvider{host: id.host, CLIDir: dir}
 	case ProviderGitLab:
-		return &GitLabProvider{host: id.host, version: id.version, Worktree: dir}
+		return &GitLabProvider{host: id.host, version: id.version, CLIDir: dir}
 	}
 	return nil
 }

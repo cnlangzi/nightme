@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/messages"
@@ -40,10 +41,15 @@ import (
 //  8. Render the commit success card from git log.
 //
 // Agent selection (CLI -a > yml cfg.Commit.Agent >
-// cs.SelectedAgent()) is handled inside runAgentToCommit's
+// cs.SelectedAgent()) is handled inside runAgentFor's
 // ResolveAgent call. The yml-loader lives in cmd.go's runCommit
 // wrapper so loadNotes (ymalformed yml / read errors) ride along
 // in the consolidated reply per wip/gtw-hooks.md.
+//
+// A continuation (`--continue`) runs the same flow on the
+// workspace the failed attempt ran in — not on the chat's current
+// cwd, which the user may have moved since — and its agent turn
+// resumes the recorded session or replays the recorded prompt.
 //
 // cfg carries the user-level gtw config: the default agent name
 // (cfg.Commit.Agent) and the output-language scopes. The
@@ -58,9 +64,31 @@ func dispatchCommit(
 	args commitArgs,
 	cfg Config,
 ) (*Result, error) {
-	c, res := loadDispatchContext(ctx, cs, deps, chatID, messageID)
-	if res != nil {
-		return res, nil
+	// The workspace of this run. A continuation works on the
+	// workspace of the attempt it picks up; a fresh run works on
+	// the chat's own.
+	var c Context
+	var cont *gtwRecord
+	if args.Continue {
+		rec, ok := deps.records.Lookup(chatID, subCommit)
+		if !ok {
+			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+				"❌ no failed /gtw commit to continue — run /gtw commit first",
+				command.FailedOutcome("no_continue", "this chat has no failed /gtw commit to continue")), nil
+		}
+		if !rec.failed {
+			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+				"ℹ️ the last /gtw commit completed — nothing to continue",
+				command.NoopOutcome("the last /gtw commit completed — nothing to continue", nil)), nil
+		}
+		cont = &rec
+		c = rec.ctx
+	} else {
+		var res *Result
+		c, res = loadDispatchContext(ctx, cs, deps, chatID, messageID)
+		if res != nil {
+			return res, nil
+		}
 	}
 
 	// F-57: same single readiness snapshot push uses. Sharing the
@@ -127,19 +155,28 @@ func dispatchCommit(
 	//
 	// The language is resolved before the agent clock starts: the
 	// lookup shells out to git, and its latency must not eat the
-	// agent's budget.
-	lang := resolveLanguage(ctx, cfg, c.Worktree, deps.Git)
+	// agent's budget. A continuation has no prompt to build — the
+	// recorded one is replayed verbatim — so it resolves nothing.
+	phase, recordPrompt := commitAgentPhase(ctx, cs, deps, chatID, messageID, c, cont, args, cfg)
 
 	ctx, cancel := context.WithTimeout(ctx, timeouts.Agent)
 	defer cancel()
-	runRes, agentName, err := runAgentFor(ctx, cs, c.Worktree,
-		buildAgentPrompt(c, lang), chatID, messageID, args.Agent, cfg.Commit.Agent,
-		// Drop OutResult; replyAgent below is the only result card.
-		messages.OutResult)
+	runRes, agentName, err := phase(ctx)
 	if err != nil {
+		recordRun(ctx, deps, chatID, subCommit, recordID(cont), gtwRecord{
+			agent:     agentName,
+			ctx:       c,
+			prompt:    recordPrompt,
+			sessionID: runRes.SessionID,
+			failed:    true,
+		})
+		reason := "agent_error"
+		if errors.Is(err, agent.ErrUnknownAgent) {
+			reason = "unknown_agent"
+		}
 		return replyAgentOutcome(ctx, cs.Emitter(), chatID, messageID,
 			err.Error(), agentName, runRes,
-			command.FailedOutcomeData("agent_error", "the agent did not commit the work",
+			command.FailedOutcomeData(reason, "the agent did not commit the work",
 				map[string]string{"agent": agentName})), nil
 	}
 
@@ -151,6 +188,13 @@ func dispatchCommit(
 	// 5. Verify the agent actually committed (HEAD advance +
 	// worktree clean + branch still on c.Branch).
 	if msg := verifyAgentCommitted(ctx, deps, c, headBefore); msg != "" {
+		recordRun(ctx, deps, chatID, subCommit, recordID(cont), gtwRecord{
+			agent:     agentName,
+			ctx:       c,
+			prompt:    recordPrompt,
+			sessionID: runRes.SessionID,
+			failed:    true,
+		})
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, msg,
 			command.FailedOutcome("not_committed", "the agent did not commit the work")), nil
 	}
@@ -190,6 +234,13 @@ func dispatchCommit(
 			fmt.Sprintf("❌ commit landed but couldn't render card: %v", err),
 			command.FailedOutcome("error", "the commit landed but its result could not be read")), nil
 	}
+	// The work is committed: there is nothing left to continue. The
+	// record says so, so a later `--continue` can tell the user
+	// the last commit completed.
+	recordRun(ctx, deps, chatID, subCommit, recordID(cont), gtwRecord{
+		agent: agentName,
+		ctx:   c,
+	})
 	// Success path: forward runRes so the footer (agentbar +
 	// usagebar) renders. Failure paths above stay on the no-stamp
 	// reply — the user just got an error message, not an agent
@@ -206,6 +257,90 @@ func dispatchCommit(
 				"agent":     agentName,
 			},
 		}), nil
+}
+
+// agentPhase runs the one-shot agent turn of a gtw command. It
+// returns the turn's result and the name of the agent that ran it.
+type agentPhase func(ctx context.Context) (agent.RunResult, string, error)
+
+// recordID returns the id of the record a run picked up, or 0 when
+// the run is a fresh one (which owns the chat's state outright).
+func recordID(rec *gtwRecord) uint64 {
+	if rec == nil {
+		return 0
+	}
+	return rec.id
+}
+
+// commitAgentPhase builds the agent turn of a /gtw commit run and
+// the prompt the record keeps.
+//
+// A fresh run sends the commit prompt to the resolved agent (CLI
+// -a > yml `commit.agent` > the chat's selected agent). A
+// continuation has three shapes:
+//
+//   - the recorded agent and a session id: the session is reopened
+//     and sent the text "continue" — the agent still holds the
+//     original prompt, so it knows what it owes;
+//   - the recorded agent without a session id: the failed attempt
+//     never reached the agent, so there is no conversation to
+//     continue — the recorded prompt is replayed in a fresh session;
+//   - another agent (the takeover): a session belongs to the agent
+//     that ran it and cannot be moved, so the recorded prompt is
+//     replayed on the new agent.
+//
+// The prompt the record keeps is always the one the work was asked
+// with — a resumed session is sent the text "continue", but a
+// takeover must replay the real prompt.
+func commitAgentPhase(
+	ctx context.Context,
+	cs *chatsession.ChatSession,
+	deps HandlerDeps,
+	chatID, messageID string,
+	c Context,
+	cont *gtwRecord,
+	args commitArgs,
+	cfg Config,
+) (agentPhase, string) {
+	if cont == nil {
+		// The language is resolved before the agent clock starts:
+		// the lookup shells out to git, and its latency must not
+		// eat the agent's budget.
+		lang := resolveLanguage(ctx, cfg, c.Worktree, deps.Git)
+		prompt := buildAgentPrompt(c, lang)
+		return func(ctx context.Context) (agent.RunResult, string, error) {
+			return runAgentFor(ctx, cs, c.Worktree, prompt, chatID, messageID,
+				args.Agent, cfg.Commit.Agent,
+				// Drop OutResult; replyAgent below is the only result card.
+				messages.OutResult)
+		}, prompt
+	}
+
+	name := cont.agent
+	sessionID := cont.sessionID
+	if args.Agent != "" && args.Agent != cont.agent {
+		// The takeover: the new agent gets the recorded prompt.
+		name = args.Agent
+		sessionID = ""
+	}
+	if name == "" {
+		// The failed attempt named no agent — there was none to
+		// run. The tiers decide now, exactly as a fresh run does:
+		// the chat may have selected an agent since, and the yml
+		// may carry a default.
+		return func(ctx context.Context) (agent.RunResult, string, error) {
+			return runAgentFor(ctx, cs, cont.ctx.Worktree, cont.prompt, chatID, messageID,
+				args.Agent, cfg.Commit.Agent, messages.OutResult)
+		}, cont.prompt
+	}
+	prompt := cont.prompt
+	if sessionID != "" {
+		prompt = continueText
+	}
+	return func(ctx context.Context) (agent.RunResult, string, error) {
+		return runAgentNamed(ctx, cs, name, cont.ctx.Worktree, prompt, sessionID,
+			chatID, messageID, messages.OutResult)
+	}, cont.prompt
 }
 
 // runAgentFor (in agent_reply.go) is the shared one-shot agent

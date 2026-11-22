@@ -27,8 +27,13 @@ type activeRun struct {
 	cancel context.CancelCauseFunc
 }
 
-// Manager owns the per-chat run lock used to serialise /gtw
-// subcommand execution. v1.5 stripped the rest:
+// Manager owns the per-chat state of the /gtw command family:
+// the run lock that serialises subcommand execution, the registry
+// of the run holding each chat's chain, the draft watcher /gtw new
+// arms, and the record store the `--continue` flags pick their run
+// up from.
+//
+// v1.5 stripped the rest:
 //
 //   - Manager.states (per-chat "active fix" Context map) was
 //     removed. /gtw fix / close now key off the cwd-scoped yml
@@ -40,17 +45,15 @@ type activeRun struct {
 //     §5.3.3 worktree-fail card) was retired. Failure paths now
 //     reply with the error text directly.
 //
-// What survives: the per-chat run lock, because F-59 made every
-// slash command async (a fresh goroutine per inbound) and two
-// /gtw fix / push / pr calls landing in quick succession would
-// still race on the worktree directory, cs.SelectedCwd, and the
-// agent session. The chatID is the natural serialisation
-// boundary — two chats must remain independent.
+// The run lock survives because F-59 made every slash command async
+// (a fresh goroutine per inbound) and two /gtw fix / push / pr calls
+// landing in quick succession would still race on the worktree
+// directory, cs.SelectedCwd, and the agent session. The chatID is
+// the natural serialisation boundary — two chats must remain
+// independent.
 //
 // The runtime instantiates one Manager per process and shares
-// it across all chats. Per-chat state: the run lock map, the
-// active-run registry that names the command holding each chat's
-// chain, and the draft watcher /gtw new armed.
+// it across all chats.
 type Manager struct {
 	// runs is the per-chat run lock that serialises /gtw
 	// subcommand execution. Acquired at the top of
@@ -93,13 +96,21 @@ type Manager struct {
 	// store-new sequence, so one chat never has two active
 	// watchers.
 	watcherMu sync.Mutex
+
+	// records holds the last run's memory per chat + subcommand —
+	// the state `/gtw commit --continue` and `/gtw pr --continue`
+	// pick up.
+	//
+	// The memory is per process: a daemon restart loses it, like
+	// /review's resume state.
+	records *recordStore
 }
 
 // NewManager returns an empty Manager. The run lock map is
 // lazy-allocated (LoadOrStore on first use), so the constructor
 // has nothing to initialise.
 func NewManager() *Manager {
-	return &Manager{}
+	return &Manager{records: newRecordStore()}
 }
 
 // --- run lock (per-chat serialisation) ---
@@ -186,4 +197,125 @@ func (m *Manager) abortRun(chatID string) (sub string, elapsed time.Duration, ok
 		run.cancel(ErrAborted)
 	}
 	return run.sub, elapsed, true
+}
+
+// --- resume records (per chat + subcommand) ---
+
+// recordStore holds the last run's memory per chat + subcommand —
+// the state `/gtw commit --continue` and `/gtw pr --continue` pick
+// up.
+//
+// The store is owned by the Manager (one per process) and reaches
+// the dispatchers through HandlerDeps.
+//
+// Its methods are nil-safe: a dispatcher that runs without a store
+// — a test that does not wire one — has no continuation state, and
+// a `--continue` there finds nothing to continue.
+type recordStore struct {
+	mu      sync.Mutex
+	records map[string]*gtwRecord
+	nextID  uint64
+}
+
+// newRecordStore returns an empty store.
+func newRecordStore() *recordStore {
+	return &recordStore{records: make(map[string]*gtwRecord)}
+}
+
+// recordKey is the store key of one chat + subcommand pair. The
+// separator cannot appear in a chat id, so two different pairs can
+// never collide on one key.
+func recordKey(chatID, sub string) string {
+	return chatID + "\x00" + sub
+}
+
+// Lookup returns the record of a chat + subcommand. The returned
+// copy is the caller's to keep — the store hands out no pointer into
+// its own state.
+func (s *recordStore) Lookup(chatID, sub string) (gtwRecord, bool) {
+	if s == nil {
+		return gtwRecord{}, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, ok := s.records[recordKey(chatID, sub)]
+	if !ok || rec == nil {
+		return gtwRecord{}, false
+	}
+	return *rec, true
+}
+
+// Set stores the record of a chat + subcommand, replacing whatever
+// was there.
+//
+// A fresh run owns the chat's state for that subcommand: when it
+// writes a record, that record replaces the one before it. A run
+// that ends before the agent phase writes none — the git-layer
+// refusals have no work to continue.
+func (s *recordStore) Set(chatID, sub string, rec gtwRecord) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.store(chatID, sub, rec)
+}
+
+// SetIfCurrent stores the record of a chat + subcommand only when
+// the record the caller picked up is still the current one.
+//
+// A continuation must not overwrite a newer run's record: the newer
+// run owns the chat's state, even when the older run finishes
+// later.
+func (s *recordStore) SetIfCurrent(chatID, sub string, id uint64, rec gtwRecord) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cur, ok := s.records[recordKey(chatID, sub)]; ok && cur.id != id {
+		return
+	}
+	s.store(chatID, sub, rec)
+}
+
+// store writes the record under its key and gives it the next
+// generation id.
+//
+// The caller holds the store's lock.
+func (s *recordStore) store(chatID, sub string, rec gtwRecord) {
+	s.nextID++
+	rec.id = s.nextID
+	if s.records == nil {
+		s.records = make(map[string]*gtwRecord)
+	}
+	stored := rec
+	s.records[recordKey(chatID, sub)] = &stored
+}
+
+// RecordRun stores the outcome of one run of a subcommand.
+//
+// id is the id of the record the run picked up, or 0 for a fresh
+// run: the new record replaces that one only when it is still the
+// current one.
+func (s *recordStore) RecordRun(chatID, sub string, id uint64, rec gtwRecord) {
+	if id == 0 {
+		s.Set(chatID, sub, rec)
+		return
+	}
+	s.SetIfCurrent(chatID, sub, id, rec)
+}
+
+// recordRun stores the outcome of one run in the record store —
+// unless the run was cancelled.
+//
+// A cancellation is not a failure: a run the user stopped neither
+// writes a record nor clears the one that is there. The work it
+// was doing is still unfinished, and the record that says so must
+// survive.
+func recordRun(ctx context.Context, deps HandlerDeps, chatID, sub string, id uint64, rec gtwRecord) {
+	if aborted(ctx) {
+		return
+	}
+	deps.records.RecordRun(chatID, sub, id, rec)
 }

@@ -122,6 +122,18 @@ type prArgs struct {
 	// on, `nightme/wip` comes off, and the pull request itself
 	// gains `nightme/ready`. Comes from `--ready`.
 	Ready bool
+
+	// Continue picks the last failed /gtw pr of this chat back up:
+	// the session it ran under is resumed, or the prompt it was
+	// given is replayed.
+	Continue bool
+
+	// Global persists the agent of this invocation as the
+	// subcommand's default (`pr.agent` in ~/.nightme/gtw.yml).
+	Global bool
+
+	// Unset removes that persisted default. It starts no PR.
+	Unset bool
 }
 
 // dispatchPR implements /gtw pr. The readiness contract is
@@ -175,9 +187,31 @@ func dispatchPR(
 	args prArgs,
 	cfg Config,
 ) (*Result, error) {
-	c, res := loadDispatchContext(ctx, cs, deps, chatID, messageID)
-	if res != nil {
-		return res, nil
+	// The workspace of this run. A continuation works on the
+	// workspace of the attempt it picks up; a fresh run works on
+	// the chat's own.
+	var c Context
+	var cont *gtwRecord
+	if args.Continue {
+		rec, ok := deps.records.Lookup(chatID, subPR)
+		if !ok {
+			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+				"❌ no failed /gtw pr to continue — run /gtw pr first",
+				command.FailedOutcome("no_continue", "this chat has no failed /gtw pr to continue")), nil
+		}
+		if !rec.failed {
+			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
+				"ℹ️ the last /gtw pr completed — nothing to continue",
+				command.NoopOutcome("the last /gtw pr completed — nothing to continue", nil)), nil
+		}
+		cont = &rec
+		c = rec.ctx
+	} else {
+		var res *Result
+		c, res = loadDispatchContext(ctx, cs, deps, chatID, messageID)
+		if res != nil {
+			return res, nil
+		}
 	}
 
 	baseBranch, err := DefaultBranch(ctx, c.RepoRoot, deps.Git)
@@ -317,30 +351,57 @@ func dispatchPR(
 	// put back to the agent once — with the reason — before the
 	// command gives up.
 	//
-	// The language is resolved before the agent clock starts: the
-	// lookup shells out to git, and its latency must not eat the
-	// agent's budget.
-	lang := resolveLanguage(ctx, cfg, c.Worktree, deps.Git)
-
-	run, err := runPRAgent(ctx, cs, c, cfg, args, chatID, messageID,
-		buildPRPrompt(c, baseBranch, lang, linkedIssue))
+	// A continuation runs the same loop on the recorded prompt: the
+	// recorded session is resumed, or the recorded prompt is
+	// replayed. The language is resolved before the agent clock
+	// starts: the lookup shells out to git, and its latency must
+	// not eat the agent's budget. A continuation has no prompt to
+	// build — the recorded one is replayed verbatim — so it
+	// resolves nothing.
+	var run prAgentRun
+	if cont != nil {
+		run, err = runPRContinuation(ctx, cs, cfg, cont, args.Agent, chatID, messageID)
+	} else {
+		lang := resolveLanguage(ctx, cfg, c.Worktree, deps.Git)
+		run, err = runPRAgent(ctx, cs, c, cfg, args, chatID, messageID,
+			buildPRPrompt(c, baseBranch, lang, linkedIssue))
+	}
 	if err != nil {
 		// The agent itself failed — no agent selected, the binary
 		// is missing, the run crashed. That is not a format
 		// problem, so there is no second attempt.
+		recordRun(ctx, deps, chatID, subPR, recordID(cont), gtwRecord{
+			agent:     run.AgentName,
+			ctx:       c,
+			prompt:    run.Prompt,
+			sessionID: run.Res.SessionID,
+			failed:    true,
+		})
+		reason := "agent_error"
+		if errors.Is(err, agent.ErrUnknownAgent) {
+			reason = "unknown_agent"
+		}
 		return replyAgentOutcome(ctx, cs.Emitter(), chatID, messageID,
 			withWarning(err.Error()), run.AgentName, run.Res,
-			command.FailedOutcomeData("agent_error", "the agent did not produce a pull request",
+			command.FailedOutcomeData(reason, "the agent did not produce a pull request",
 				map[string]string{"agent": run.AgentName})), nil
 	}
 	if run.Failure != nil {
 		// The reply did not carry the format the PR needs, twice.
 		// No PR is opened: the user reads why, sees the reply the
 		// agent produced, and gets the hint.
+		recordRun(ctx, deps, chatID, subPR, recordID(cont), gtwRecord{
+			agent:     run.AgentName,
+			ctx:       c,
+			prompt:    run.Prompt,
+			sessionID: run.Res.SessionID,
+			failed:    true,
+		})
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			withWarning(fmt.Sprintf(
-				"❌ %v (after %d attempts) — agent output was:\n%s\n↳ re-run `/gtw pr` to retry (or try another agent with `-a <name>`)",
-				run.Failure.Reason, run.Attempts, indentLines(run.Rejected, "  "))),
+				"❌ %v (after %d attempts) — agent output was:\n%s\n↳ %s",
+				run.Failure.Reason, run.Attempts, indentLines(run.Rejected, "  "),
+				prRetryHint(cont != nil))),
 			command.FailedOutcomeData("agent_error", "the agent reply did not match the pull request format",
 				map[string]string{
 					"agent":    run.AgentName,
@@ -504,6 +565,13 @@ func dispatchPR(
 	if number > 0 {
 		prData["pr_number"] = fmt.Sprintf("%d", number)
 	}
+	// The pull request is open: there is nothing left to continue.
+	// The record says so, so a later `--continue` can tell the user
+	// the last PR completed.
+	recordRun(ctx, deps, chatID, subPR, recordID(cont), gtwRecord{
+		agent: run.AgentName,
+		ctx:   c,
+	})
 	return replyAgentOutcome(ctx, cs.Emitter(), chatID, messageID,
 		card, run.AgentName, run.Res,
 		messages.Outcome{
@@ -511,6 +579,16 @@ func dispatchPR(
 			Summary: "opened the pull request",
 			Data:    prData,
 		}), nil
+}
+
+// prRetryHint is the next step the format gate names when it
+// refuses a reply. A continuation is picked up again with
+// `--continue`; a fresh run is simply re-issued.
+func prRetryHint(continuation bool) string {
+	if continuation {
+		return "re-run `/gtw pr --continue` to retry (or take it over with `-a <name>`)"
+	}
+	return "re-run `/gtw pr` to retry (or try another agent with `-a <name>`)"
 }
 
 // applyReadyLabels performs the --ready bookkeeping: the linked issue
@@ -612,7 +690,14 @@ type prAgentRun struct {
 	Rejected string
 	// Attempts counts the agent calls that were made.
 	Attempts int
+	// Prompt is the prompt of the last attempt — what a takeover
+	// would replay, and what the record keeps.
+	Prompt string
 }
+
+// prAttempt runs one agent turn of the PR phase. It returns the
+// turn's result and the name of the agent that ran it.
+type prAttempt func(ctx context.Context, prompt string) (agent.RunResult, string, error)
 
 // runPRAgent runs the PR agent until it produces a reply that
 // passes the format gate, or the attempt budget runs out.
@@ -642,19 +727,97 @@ func runPRAgent(
 	chatID, messageID string,
 	basePrompt string,
 ) (prAgentRun, error) {
-	out := prAgentRun{}
-	prompt := basePrompt
-	for attempt := 1; attempt <= 2; attempt++ {
-		attemptCtx, cancel := context.WithTimeout(ctx, timeouts.Agent)
-		res, name, err := runAgentFor(attemptCtx, cs, c.Worktree, prompt, chatID, messageID,
+	// Both attempts reach the agent the same way: the correction
+	// round differs in its prompt, not in how it runs.
+	run := func(ctx context.Context, prompt string) (agent.RunResult, string, error) {
+		return runAgentFor(ctx, cs, c.Worktree, prompt, chatID, messageID,
 			args.Agent, cfg.PR.Agent,
 			// Drop OutResult; the dispatcher's card is the only
 			// result surface.
 			messages.OutResult)
+	}
+	return runPRAttempts(ctx, basePrompt, run, run)
+}
+
+// runPRContinuation runs the agent turn of a /gtw pr continuation.
+//
+// The turn is a resume — the recorded session is reopened and sent
+// the text "continue" — when the failed attempt reached the agent
+// and no other agent took it over. Otherwise the recorded prompt is
+// replayed in a fresh session: a session belongs to the agent that
+// ran it and cannot be moved, and an attempt that never reached the
+// agent left no conversation to continue.
+//
+// The correction round is the same one a fresh run gets: it is
+// built on the recorded prompt — which already carries what the
+// agent was told the last time — and names what was wrong with
+// this reply.
+func runPRContinuation(
+	ctx context.Context,
+	cs *chatsession.ChatSession,
+	cfg Config,
+	cont *gtwRecord,
+	takeoverAgent, chatID, messageID string,
+) (prAgentRun, error) {
+	name := cont.agent
+	sessionID := cont.sessionID
+	if takeoverAgent != "" && takeoverAgent != cont.agent {
+		// The takeover: the new agent gets the recorded prompt.
+		name = takeoverAgent
+		sessionID = ""
+	}
+	if name == "" {
+		// The failed attempt named no agent — there was none to
+		// run. The tiers decide now, exactly as a fresh run does:
+		// the chat may have selected an agent since, and the yml
+		// may carry a default.
+		run := func(ctx context.Context, prompt string) (agent.RunResult, string, error) {
+			return runAgentFor(ctx, cs, cont.ctx.Worktree, prompt, chatID, messageID,
+				takeoverAgent, cfg.PR.Agent, messages.OutResult)
+		}
+		return runPRAttempts(ctx, cont.prompt, run, run)
+	}
+	first := func(ctx context.Context, prompt string) (agent.RunResult, string, error) {
+		if sessionID != "" {
+			return runAgentNamed(ctx, cs, name, cont.ctx.Worktree, continueText, sessionID,
+				chatID, messageID, messages.OutResult)
+		}
+		return runAgentNamed(ctx, cs, name, cont.ctx.Worktree, prompt, "",
+			chatID, messageID, messages.OutResult)
+	}
+	correct := func(ctx context.Context, prompt string) (agent.RunResult, string, error) {
+		return runAgentNamed(ctx, cs, name, cont.ctx.Worktree, prompt, "",
+			chatID, messageID, messages.OutResult)
+	}
+	return runPRAttempts(ctx, cont.prompt, first, correct)
+}
+
+// runPRAttempts drives the PR agent phase: the first attempt runs
+// the turn, and a reply that fails the format gate gets one
+// correction round.
+//
+// The two attempts differ in how they reach the agent — the first
+// may resume a session, the correction always opens a fresh one —
+// so each is a function of its own.
+func runPRAttempts(
+	ctx context.Context,
+	basePrompt string,
+	first, correct prAttempt,
+) (prAgentRun, error) {
+	out := prAgentRun{}
+	prompt := basePrompt
+	for attempt := 1; attempt <= 2; attempt++ {
+		attemptCtx, cancel := context.WithTimeout(ctx, timeouts.Agent)
+		run := first
+		if attempt == 2 {
+			run = correct
+		}
+		res, name, err := run(attemptCtx, prompt)
 		cancel()
 		out.Res = res
 		out.AgentName = name
 		out.Attempts++
+		out.Prompt = prompt
 		if err != nil {
 			if out.Failure != nil {
 				return out, nil

@@ -230,6 +230,43 @@ func unsetRepoLang(repo string) error {
 	})
 }
 
+// agentKey is the config key that holds a subcommand's default
+// agent.
+const agentKey = "agent"
+
+// setGlobalAgent writes the user-scope default agent of a
+// subcommand (`commit.agent` / `pr.agent`).
+//
+// The subcommand's section is created when it does not exist yet;
+// an existing section keeps its hooks and its other keys.
+func setGlobalAgent(sub, agentName string) error {
+	return writeUserConfig(func(root *yaml.Node) error {
+		section, err := yamlfile.MapValueOrCreate(root, sub)
+		if err != nil {
+			return fmt.Errorf("`%s` is not a mapping", sub)
+		}
+		yamlfile.SetMapValue(section, agentKey, agentName)
+		return nil
+	})
+}
+
+// unsetGlobalAgent removes the user-scope default agent of a
+// subcommand. A section left empty is dropped too, so the file
+// does not accumulate `commit: {}` shells.
+func unsetGlobalAgent(sub string) error {
+	return writeUserConfig(func(root *yaml.Node) error {
+		section := yamlfile.MapValue(root, sub)
+		if section == nil || section.Kind != yaml.MappingNode {
+			return nil
+		}
+		yamlfile.DeleteMapKey(section, agentKey)
+		if len(section.Content) == 0 {
+			yamlfile.DeleteMapKey(root, sub)
+		}
+		return nil
+	})
+}
+
 // --- /gtw config ---
 
 var configCmdSpec = command.CmdSpec{

@@ -1205,3 +1205,100 @@ graceful-fallback-on-network-error 语义(错误路径更曲折)。
   (`Branch == ""` reject)和非 worktree 路径(`branch == "HEAD"`
   reject)仍守住 dispatchPR 入口
 - F-237 的 `verifyUpstreamOnOrigin` 不删 — push/commit 仍在用
+
+---
+
+## A5. `/gtw commit` · `/gtw pr` 的 `--continue` / `-g` / `--unset`
+
+### A5.1 旗标面
+
+```
+/gtw commit [-a|--agent <name>] [-c|--continue] [-g|--global] [--unset]
+/gtw pr    [-a|--agent <name>] [-c|--continue] [-g|--global] [--unset] [--ready]
+```
+
+三个新旗标照抄 `/review` 的那一套(`-a` 选 agent、`-g` 持久化、`--unset` 删掉、
+`-c` 接着上次没做完的跑),组合校验也照 `/review` 的 `validateReviewFlags` 写,
+只去掉 gtw 没有的两个概念(`--abort` / `--timeout`):
+
+| 组合 | 报什么 |
+|---|---|
+| `--continue` + `--global` | `--continue and --global are mutually exclusive` |
+| `--continue` + `--unset` | `--continue and --unset are mutually exclusive` |
+| `--unset` + `--agent` | `--unset and --agent are mutually exclusive` |
+| `--unset` 不带 `--global` | `--unset requires --global` |
+| `--global` 不带 `--agent` | `--global requires --agent <name>` |
+| `--continue` + `--agent` | 允许 —— 这就是接管 |
+| `--continue` + `--ready` | 允许 —— `--ready` 正交 |
+
+旗标的词法分析走共享的 `command.ParseCmdArgs`:未声明的旗标仍然是
+`unknown flag`,位置参数仍然被拒。
+
+### A5.2 记录(last run)
+
+每个 **chat + 子命令**记一条"上次运行":
+
+| 字段 | 是什么 |
+|---|---|
+| `agent` | 跑它的 agent 名(那次没有 agent 可跑时为空) |
+| `ctx` | 失败那一刻冻结的工作区上下文(worktree / branch / repoRoot / issue) |
+| `prompt` | 最后一次尝试的 prompt(自包含) |
+| `sessionID` | 最后一次尝试的 session id(到过 agent 才有) |
+| `failed` | 上一次是不是失败 |
+
+存在 gtw 的 `Manager` 里(`recordStore`),**只在内存** —— daemon 重启即失,
+和 `/review` 的续跑状态同款。`HandlerDeps` 把这个 store 递给 dispatcher,
+所以 dispatcher 不需要 manager 本身。
+
+什么时候写:agent 阶段失败时。commit 的两种是 `agent_error`(agent 没跑起来)
+与 `not_committed`(agent 跑了但没提交);pr 的两种是 `agent_error` 与格式门
+失败(`agent_error` + `format` / `attempts`)。git 层的拒绝(冲突、游离 HEAD、
+工作树干净)不进记录 —— 那些没有"接着干"的活,重打命令就行。
+
+记录里的 `agent` 可能是空的:那次失败就是"没有 agent 可跑"(用户还没 `/use`)。
+续跑这时不拿空名字去查注册表(那只会回一句 `unknown agent ""`),而是按
+正常的三档重新解析一次 —— 用户这中间可能已经选好了 agent。
+
+什么时候清:该子命令这次跑成功时,记录换成一条"成功"的 —— `--continue`
+因此能说出"上次已经跑完了",而不是"没有可续的"。
+
+### A5.3 续跑
+
+| 上一次的状态 | `--continue` 做什么 | 为什么 |
+|---|---|---|
+| 有 session id | `agent.ResumeSession` 重开那个 session,发一句 `continue` | session 那边还留着原始 prompt(含输出格式要求),agent 知道要交什么 |
+| 没有 session id | 用存的 prompt 跑一次新 session | agent 没起来过,没有对话可续 |
+| 配了 `-a <别的 agent>` | 在新 agent 上重放存的 prompt | session 不能换 agent,只能重放 prompt |
+
+续跑用记录里冻结的 `ctx`,不要求 chat 的 cwd 还在那里 —— session 属于那个
+工作区。续跑同步执行(gtw 的命令本来就是同步的),照常走
+`commit.before` / `commit.after`(pr 同理)与超时(`timeouts.Command` +
+`timeouts.Agent`),并走完 agent 阶段之后的全部流程:commit 照常验 HEAD、
+出成功卡;pr 照常过格式门、真的开出 PR。
+
+不搬 `/review` 的"只许续一次"(`spent`)规则:commit 的活还在工作树上,再续
+一次合理。每次续跑更新记录,形成一条链。
+
+### A5.4 全局档
+
+`-g` 把这次的 agent 写进 `~/.nightme/gtw.yml` 的 `commit.agent` /
+`pr.agent`(走 `writeUserConfig` + `yamlfile` 的节点编辑,hooks 与未知键不动);
+`--unset` 删掉它(section 空了也删)。这两个键本来就在 `Config` 的 schema 里
+(`CmdConfig.Agent`),只是没有命令能写。
+
+`-g` 的名字必须是注册过的 agent(`agent.Builtins.Get`):写下一个没人认的名字,
+之后每次 `/gtw commit` 都得靠警告兜底。名字不认识 → `unknown_agent`,
+不写,命令不跑。yml 写不了 → 只出警告,命令照跑,结论是 `incomplete` +
+`reason=config_write_failed`。
+
+### A5.5 原因码
+
+`no_continue`:没有可续的记录(失败 + `Data["reason"] == "no_continue"`)。
+"上次跑完了,没东西可续"是 noop,不带原因码。
+
+### A5.6 不在范围内
+
+- `/review` 的 `--abort` / `--timeout` —— gtw 没有这两个概念
+- `/gtw push` / `/gtw fix` 等其它 gtw 子命令的旗标
+- gtw.yml 的 `lang` 与 `repos` 档位、`/gtw config` 的旗标面
+- `/gtw pr view`(只读,不跑 agent)

@@ -88,7 +88,7 @@ func TestSpecUsage_NamesTheReadyFlag(t *testing.T) {
 		if sub.Name != "pr" {
 			continue
 		}
-		if sub.Usage != "/gtw pr [-a <agent>] [--ready]" {
+		if !strings.Contains(sub.Usage, "[--ready]") {
 			t.Errorf("pr subcommand usage = %q, want it to name the flag", sub.Usage)
 		}
 		return

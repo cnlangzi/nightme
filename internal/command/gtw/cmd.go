@@ -2,9 +2,11 @@ package gtw
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
+	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/messages"
@@ -91,7 +93,9 @@ func NewFactory(mgr *Manager) *Factory {
 // NewFactoryWithDeps constructs a Factory and primes it with
 // the runtime's HandlerDeps.
 func NewFactoryWithDeps(mgr *Manager, deps HandlerDeps) *Factory {
-	return &Factory{mgr: mgr, deps: deps}
+	f := &Factory{mgr: mgr}
+	f.SetHandlerDeps(deps)
+	return f
 }
 
 // init self-registers the gtw command. Phase 2.3: each
@@ -116,8 +120,34 @@ func init() {
 }
 
 // SetHandlerDeps primes the factory with runtime deps.
+//
+// The record store comes from the manager the factory owns: the
+// `--continue` flags of /gtw commit and /gtw pr pick their run up
+// from it.
 func (f *Factory) SetHandlerDeps(deps HandlerDeps) {
+	if deps.records == nil {
+		deps.records = f.mgr.records
+	}
 	f.deps = deps
+}
+
+// hookContext derives the hook context of one gtw run.
+//
+// A continuation works on the workspace of the attempt it picks up
+// — the chat's cwd may have moved since — so its hooks see that
+// workspace rather than the chat's current one.
+func (f *Factory) hookContext(ctx context.Context, cs *chatsession.ChatSession, chatID, command string, cont bool) HookContext {
+	if cont {
+		if rec, ok := f.deps.records.Lookup(chatID, command); ok {
+			return HookContext{
+				Command:  command,
+				RepoRoot: rec.ctx.RepoRoot,
+				Worktree: rec.ctx.Worktree,
+				Branch:   rec.ctx.Branch,
+			}
+		}
+	}
+	return f.deriveHookContext(ctx, cs, command)
 }
 
 // deriveHookContext best-effort populates a HookContext from
@@ -304,9 +334,12 @@ func (f *Factory) Spec() command.Spec {
 			"/gtw back                           exit the fix worktree (cwd → repoRoot) and sync main — worktree preserved\n" +
 			"/gtw back <branch>                  enter the worktree whose branch starts with <branch> (cwd → worktree); repairs a missing .nightme/gtw.yml\n" +
 			"/gtw commit [-a <agent>]            commit uncommitted work via the configured agent (no push)\n" +
+			"/gtw commit -c                      continue the last failed /gtw commit of this chat\n" +
+			"/gtw commit -a codex -g             make codex the default agent for /gtw commit\n" +
 			"/gtw push                           push the worktree branch (clean only — refuses dirty)\n" +
 			"/gtw pr [-a <agent>] [--ready]      generate PR title+body, then open the PR\n" +
 			"/gtw pr -a claude                   override which agent runs the one-shot\n" +
+			"/gtw pr -c                          continue the last failed /gtw pr of this chat\n" +
 			"/gtw pr view [number]               read the merge state of a pull request (read-only)\n" +
 			"/gtw config lang [value]            show or set the output language for this repository\n" +
 			"/gtw config -g lang [value]         show or set the user-level output language\n" +
@@ -335,9 +368,9 @@ func (f *Factory) Spec() command.Spec {
 			},
 			{Name: "close", Summary: "finalize the issue labels, tear down the worktree, delete the branch, and sync main", Usage: closeCmdSpec.Usage},
 			{Name: "back", Summary: "exit the fix worktree (cwd → repoRoot) and sync main; `/gtw back <branch>` jumps into the worktree of that branch", Usage: "/gtw back [<branch>]"},
-			{Name: "commit", Summary: "commit uncommitted work via the configured agent", Usage: "/gtw commit [-a <agent>]"},
+			{Name: "commit", Summary: "commit uncommitted work via the configured agent", Usage: commitCmdSpec.Usage},
 			{Name: "push", Summary: "push the worktree branch (clean only — refuses dirty)"},
-			{Name: "pr", Summary: "generate PR title+body, then open the PR", Usage: "/gtw pr [-a <agent>] [--ready]"},
+			{Name: "pr", Summary: "generate PR title+body, then open the PR", Usage: prCmdSpec.Usage},
 			{
 				Name:    "pr view",
 				Summary: "read the merge state of a pull request (read-only)",
@@ -1107,6 +1140,11 @@ func (f *Factory) runPush(ctx context.Context, _ command.RuntimeServices, cs *ch
 // Mirror of runPush with the Agent plumbed through to the
 // dispatcher. Doesn't touch gtw state or reaction cards, so no
 // draft shim is needed.
+//
+// The three scope flags work the way /review's do: `--continue`
+// picks the last failed commit of this chat back up, `-g` persists
+// the agent of this invocation as `commit.agent`, and `--unset`
+// removes it again (and starts no commit).
 func (f *Factory) runCommit(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 	args, err := parseCommitArgs(input.Args[2:])
 	if err != nil {
@@ -1116,17 +1154,67 @@ func (f *Factory) runCommit(ctx context.Context, _ command.RuntimeServices, cs *
 			Consumed: true,
 		}, nil
 	}
+	if err := validateGTWFlags(args.Agent, args.Global, args.Unset, args.Continue); err != nil {
+		reportOutcome(ctx, command.FailedOutcome("usage", "the flag combination is not valid"))
+		return &command.SlashOutput{
+			Reply:    fmt.Sprintf("❌ %v%s", err, commitCmdSpec.UsageTail()),
+			Consumed: true,
+		}, nil
+	}
+
+	// The global scope: `-g` persists the agent, `--unset` removes
+	// it. The write happens before the command runs — the persisted
+	// setting is machine-wide and does not depend on the chat's
+	// workspace.
+	notices, done, writeFailed, err := applyGlobalScope(subCommit, args.Agent, args.Global, args.Unset, "committing")
+	if err != nil {
+		reason := "config_error"
+		summary := "the commit agent could not be persisted"
+		if errors.Is(err, agent.ErrUnknownAgent) {
+			reason = "unknown_agent"
+			summary = "the commit agent is not a registered agent"
+		}
+		reportOutcome(ctx, command.FailedOutcome(reason, summary))
+		return &command.SlashOutput{
+			Reply:    fmt.Sprintf("❌ %v", err),
+			Consumed: true,
+		}, nil
+	}
+	if writeFailed {
+		// The commit still runs, but persisting the agent did not
+		// happen — half of what was asked.
+		reportOutcome(ctx, messages.Outcome{
+			Status:  messages.OutcomeIncomplete,
+			Summary: "the commit agent could not be persisted",
+			Data:    map[string]string{"reason": "config_write_failed"},
+		})
+	}
+	if len(notices) > 0 {
+		reply(ctx, cs.Emitter(), input.ChatID, input.MessageID, strings.Join(notices, "\n"))
+	}
+	if done {
+		// --unset: the persisted default is gone and no commit runs.
+		reportOutcome(ctx, messages.Outcome{
+			Status:  messages.OutcomeOK,
+			Summary: "the global commit agent was removed",
+			Data:    map[string]string{"scope": "global"},
+		})
+		return &command.SlashOutput{Consumed: true}, nil
+	}
 
 	cfg, loadNotes := Load()
 
-	hc := f.deriveHookContext(ctx, cs, "commit")
+	hc := f.hookContext(ctx, cs, input.ChatID, "commit", args.Continue)
 	hcFn := func() HookContext { return hc }
 	err = f.withHooks(ctx, cs, input.ChatID, input.MessageID,
 		loadNotes, hcFn, cfg.Commit.Hooks.Before, cfg.Commit.Hooks.After,
 		func() error {
 			res, e := dispatchCommit(ctx, cs, f.deps, input.ChatID, input.MessageID, args, cfg)
 			_ = res // dispatchCommit already sent the reply via cs.Emitter()
-			if e == nil {
+			// A continuation works in the recorded workspace, so its
+			// after-hook keeps that workspace — re-deriving from the
+			// chat's cwd would point the hook at the wrong tree.
+			if e == nil && !args.Continue {
 				hc = f.deriveHookContext(ctx, cs, "commit")
 			}
 			return e
@@ -1285,29 +1373,38 @@ func parsePushArgs(argv []string) (pushArgs, error) {
 }
 
 // commitArgs bundles the parsed argv tail of `/gtw commit
-// <...>`. Shape mirrors pushArgs — a single Agent override
-// from `-a <name>` / `--agent <name>`. Empty means
-// `cs.SelectedAgent()` / `yml.Commit.Agent` apply.
+// <...>`. Shape mirrors pushArgs — an Agent override plus the
+// three flags /review established for the same job.
 type commitArgs struct {
+	// Agent, when non-empty, overrides the agent that runs the
+	// one-shot commit. Empty means `cs.SelectedAgent()` /
+	// `yml.Commit.Agent` apply.
 	Agent string
+
+	// Continue picks the last failed /gtw commit of this chat back
+	// up: the session it ran under is resumed, or the prompt it
+	// was given is replayed.
+	Continue bool
+
+	// Global persists the agent of this invocation as the
+	// subcommand's default (`commit.agent` in ~/.nightme/gtw.yml).
+	Global bool
+
+	// Unset removes that persisted default. It starts no commit.
+	Unset bool
 }
 
 // parseAgentOnlyFlag implements the CLI lexer for
-// /gtw commit / /gtw push — two subcommands that accept exactly
-// one flag (`-a <name>` / `--agent <name>`) and no positional arg.
+// /gtw push — a subcommand that accepts exactly one flag
+// (`-a <name>` / `--agent <name>`) and no positional arg.
 //
-// Extracted as a helper because both parsers were byte-identical
-// except for the surrounding struct type (pushArgs / commitArgs).
-// Issue #291 then moved the lexer core itself into
+// Issue #291 moved the lexer core itself into
 // command.ParseCmdArgs so the whole /<cmd> surface shares one
 // implementation of the contract (docs/feat/F-gtw-fix.md §1.2 +
 // §10) — this function is now just the spec declaration plus the
 // "no positional args" arity, and the "unknown flag" /
 // "positional" / "missing value" wording comes from the shared
 // lexer.
-//
-// /gtw pr has its own spec (prCmdSpec) because it also takes
-// `--ready`.
 //
 // name is the user-facing subcommand ("/gtw push") echoed in
 // error messages.
@@ -1330,16 +1427,117 @@ func parseAgentOnlyFlag(name string, argv []string) (string, error) {
 	return parsed.Value("agent"), nil
 }
 
+// commitCmdSpec is the argv grammar for /gtw commit.
+//
+// The flags are the ones /review established for the same job:
+// -a/--agent names the agent that runs the one-shot, -c/--continue
+// picks the last failed run of this chat back up, -g/--global
+// persists that agent as the subcommand's default, and --unset
+// removes it again.
+//
+// The lexer (command.ParseCmdArgs) enforces the "unknown flag" /
+// arity contract; the combinations the lexer cannot express are
+// checked by validateGTWFlags.
+var commitCmdSpec = command.CmdSpec{
+	Name:  "/gtw commit",
+	Usage: "/gtw commit [-a|--agent <name>] [-c|--continue] [-g|--global] [--unset]",
+	Flags: map[string]command.FlagSpec{
+		"-a":         {Name: "agent", TakesValue: true},
+		"--agent":    {Name: "agent", TakesValue: true},
+		"-c":         {Name: "continue"},
+		"--continue": {Name: "continue"},
+		"-g":         {Name: "global"},
+		"--global":   {Name: "global"},
+		"--unset":    {Name: "unset"},
+	},
+	MinArgs: 0,
+	MaxArgs: 0,
+}
+
 // parseCommitArgs implements the CLI lexer for /gtw commit.
-// See parseAgentOnlyFlag for the shared lexer core; this
-// wrapper just packs the agent string into the commitArgs
-// struct.
 func parseCommitArgs(argv []string) (commitArgs, error) {
-	agent, err := parseAgentOnlyFlag("/gtw commit", argv)
+	parsed, err := command.ParseCmdArgs(argv, commitCmdSpec)
 	if err != nil {
 		return commitArgs{}, err
 	}
-	return commitArgs{Agent: agent}, nil
+	return commitArgs{
+		Agent:    strings.TrimSpace(parsed.Value("agent")),
+		Continue: parsed.Bool("continue"),
+		Global:   parsed.Bool("global"),
+		Unset:    parsed.Bool("unset"),
+	}, nil
+}
+
+// validateGTWFlags rejects the flag combinations /gtw commit and
+// /gtw pr cannot act on. Each combination gets its own message so
+// the user knows which flag to fix.
+//
+// It is /review's rule set (validateReviewFlags) without the two
+// flags gtw has no concept of — --abort and --timeout.
+//
+// --continue and --agent are not in the way: naming another agent
+// takes the failed run over. A session belongs to the agent that
+// ran it, so the takeover replays the stored prompt instead of
+// reopening the session.
+func validateGTWFlags(agentName string, global, unset, cont bool) error {
+	switch {
+	case cont && global:
+		return errors.New("--continue and --global are mutually exclusive")
+	case cont && unset:
+		return errors.New("--continue and --unset are mutually exclusive")
+	case unset && agentName != "":
+		return errors.New("--unset and --agent are mutually exclusive")
+	case unset && !global:
+		return errors.New("--unset requires --global")
+	case global && !unset && agentName == "":
+		return errors.New("--global requires --agent <name>")
+	}
+	return nil
+}
+
+// applyGlobalScope performs the global-scope write of one
+// /gtw commit / /gtw pr invocation: `-g` persists the agent as the
+// subcommand's default, `--unset` removes it.
+//
+// It returns the notices for the reply and whether the command is
+// done — the unset path starts no command. A failed write is a
+// notice, not an error: the command itself is the primary action
+// and must still run.
+//
+// verb is the wording of the warning a failed write produces
+// ("committing with codex anyway").
+func applyGlobalScope(sub, agentName string, global, unset bool, verb string) (notices []string, done bool, writeFailed bool, err error) {
+	if !global && !unset {
+		return nil, false, false, nil
+	}
+	switch {
+	case unset:
+		if err := unsetGlobalAgent(sub); err != nil {
+			return nil, false, false, fmt.Errorf("failed to unset %s.agent: %w", sub, err)
+		}
+		return []string{
+			fmt.Sprintf("✅ %s.agent unset (global)", sub),
+			"→ file: " + userConfigRelPath,
+		}, true, false, nil
+	case global:
+		// The name must be a registered agent — a persisted name
+		// that no agent answers to would only fail later, on
+		// every run of the subcommand.
+		if _, err := agent.Builtins.Get(agentName); err != nil {
+			return nil, false, false, unknownAgentError{name: agentName}
+		}
+		if err := setGlobalAgent(sub, agentName); err != nil {
+			return []string{fmt.Sprintf(
+				"⚠️ failed to save %s.agent: %v — %s with %s anyway",
+				sub, err, verb, agentName,
+			)}, false, true, nil
+		}
+		return []string{
+			fmt.Sprintf("✅ %s.agent = %s (global)", sub, agentName),
+			"→ file: " + userConfigRelPath,
+		}, false, false, nil
+	}
+	return nil, false, false, nil
 }
 
 // runPR handles `/gtw pr`. Reads the yml at the current CWD
@@ -1359,10 +1557,57 @@ func (f *Factory) runPR(ctx context.Context, _ command.RuntimeServices, cs *chat
 			Consumed: true,
 		}, nil
 	}
+	if err := validateGTWFlags(args.Agent, args.Global, args.Unset, args.Continue); err != nil {
+		reportOutcome(ctx, command.FailedOutcome("usage", "the flag combination is not valid"))
+		return &command.SlashOutput{
+			Reply:    fmt.Sprintf("❌ %v%s", err, prCmdSpec.UsageTail()),
+			Consumed: true,
+		}, nil
+	}
+
+	// The global scope: `-g` persists the agent, `--unset` removes
+	// it. The write happens before the command runs — the persisted
+	// setting is machine-wide and does not depend on the chat's
+	// workspace.
+	notices, done, writeFailed, err := applyGlobalScope(subPR, args.Agent, args.Global, args.Unset, "writing the PR")
+	if err != nil {
+		reason := "config_error"
+		summary := "the PR agent could not be persisted"
+		if errors.Is(err, agent.ErrUnknownAgent) {
+			reason = "unknown_agent"
+			summary = "the PR agent is not a registered agent"
+		}
+		reportOutcome(ctx, command.FailedOutcome(reason, summary))
+		return &command.SlashOutput{
+			Reply:    fmt.Sprintf("❌ %v", err),
+			Consumed: true,
+		}, nil
+	}
+	if writeFailed {
+		// The PR still runs, but persisting the agent did not
+		// happen — half of what was asked.
+		reportOutcome(ctx, messages.Outcome{
+			Status:  messages.OutcomeIncomplete,
+			Summary: "the PR agent could not be persisted",
+			Data:    map[string]string{"reason": "config_write_failed"},
+		})
+	}
+	if len(notices) > 0 {
+		reply(ctx, cs.Emitter(), input.ChatID, input.MessageID, strings.Join(notices, "\n"))
+	}
+	if done {
+		// --unset: the persisted default is gone and no PR runs.
+		reportOutcome(ctx, messages.Outcome{
+			Status:  messages.OutcomeOK,
+			Summary: "the global PR agent was removed",
+			Data:    map[string]string{"scope": "global"},
+		})
+		return &command.SlashOutput{Consumed: true}, nil
+	}
 
 	cfg, loadNotes := Load()
 
-	hc := f.deriveHookContext(ctx, cs, "pr")
+	hc := f.hookContext(ctx, cs, input.ChatID, "pr", args.Continue)
 	hcFn := func() HookContext { return hc }
 	err = f.withHooks(ctx, cs, input.ChatID, input.MessageID,
 		loadNotes, hcFn, cfg.PR.Hooks.Before, cfg.PR.Hooks.After,
@@ -1371,8 +1616,10 @@ func (f *Factory) runPR(ctx context.Context, _ command.RuntimeServices, cs *chat
 			// dispatchPR loads the dispatch context internally
 			// (worktree/branch from yml). Re-derive so any
 			// future change that mutates cwd during PR
-			// dispatch flows to the post-hook env.
-			if e == nil {
+			// dispatch flows to the post-hook env. A continuation
+			// works in the recorded workspace, so its after-hook
+			// keeps that one.
+			if e == nil && !args.Continue {
 				hc = f.deriveHookContext(ctx, cs, "pr")
 			}
 			return e
@@ -1425,9 +1672,8 @@ func (f *Factory) runConfig(ctx context.Context, cs *chatsession.ChatSession, in
 
 // prCmdSpec is the argv grammar for /gtw pr.
 //
-// /gtw pr gets its own spec instead of the shared parseAgentOnlyFlag
-// because it is the only one of the three agent-flag commands that
-// takes a second flag: `--ready` moves the linked issue from
+// /gtw pr gets its own spec because it takes two flags beyond the
+// ones /gtw commit has: `--ready` moves the linked issue from
 // "claimed" to "waiting for review" once the pull request exists, and
 // labels the pull request itself `nightme/ready`.
 //
@@ -1435,11 +1681,16 @@ func (f *Factory) runConfig(ctx context.Context, cs *chatsession.ChatSession, in
 // whole argument and `/gtw pr --ready -a codex` reads both.
 var prCmdSpec = command.CmdSpec{
 	Name:  "/gtw pr",
-	Usage: "/gtw pr [-a <agent>] [--ready]",
+	Usage: "/gtw pr [-a|--agent <name>] [-c|--continue] [-g|--global] [--unset] [--ready]",
 	Flags: map[string]command.FlagSpec{
-		"-a":      {Name: "agent", TakesValue: true},
-		"--agent": {Name: "agent", TakesValue: true},
-		"--ready": {Name: "ready"},
+		"-a":         {Name: "agent", TakesValue: true},
+		"--agent":    {Name: "agent", TakesValue: true},
+		"-c":         {Name: "continue"},
+		"--continue": {Name: "continue"},
+		"-g":         {Name: "global"},
+		"--global":   {Name: "global"},
+		"--unset":    {Name: "unset"},
+		"--ready":    {Name: "ready"},
 	},
 	MinArgs: 0,
 	MaxArgs: 0,
@@ -1449,8 +1700,11 @@ var prCmdSpec = command.CmdSpec{
 // Recognised flags:
 //
 //	-a / --agent <name>   override one-shot agent
-//	--ready                move the linked issue to `nightme/ready`
-//	                       and label the pull request `nightme/ready`
+//	-c / --continue       continue the last failed /gtw pr of this chat
+//	-g / --global         persist the agent as `pr.agent`
+//	--unset               remove the persisted `pr.agent`
+//	--ready               move the linked issue to `nightme/ready`
+//	                      and label the pull request `nightme/ready`
 //
 // Unknown tokens are hard-rejected with "unknown flag";
 // positional args are rejected too (/gtw pr takes none).
@@ -1460,5 +1714,11 @@ func parsePRArgs(argv []string) (prArgs, error) {
 	if err != nil {
 		return prArgs{}, err
 	}
-	return prArgs{Agent: parsed.Value("agent"), Ready: parsed.Bool("ready")}, nil
+	return prArgs{
+		Agent:    strings.TrimSpace(parsed.Value("agent")),
+		Continue: parsed.Bool("continue"),
+		Global:   parsed.Bool("global"),
+		Unset:    parsed.Bool("unset"),
+		Ready:    parsed.Bool("ready"),
+	}, nil
 }

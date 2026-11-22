@@ -86,6 +86,14 @@ type HandlerDeps struct {
 	// cache.
 	PRCache *prcache.Registry
 
+	// records is the store of the last run's memory per chat +
+	// subcommand — the state `/gtw commit --continue` and
+	// `/gtw pr --continue` pick up. The Factory fills it from the
+	// Manager it owns. nil → the dispatchers have no continuation
+	// state: the commands still run, but there is nothing to
+	// continue.
+	records *recordStore
+
 	// SkipRefreshDefaultBranch, when true, causes RunFix to
 	// skip the RefreshDefaultBranch step (no `git checkout
 	// <default>` / `git pull --rebase origin <default>`).

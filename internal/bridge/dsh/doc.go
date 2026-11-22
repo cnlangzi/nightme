@@ -54,12 +54,13 @@
 // defaults at `~/.dsh/settings.yaml` + `~/.dsh/.credentials.yaml`.
 // See docs/bridge/dsh.md for the full rationale.
 //
-// The liveness probe (driver.Ping) reuses `session.list` — the
-// cheapest auth-gated call, independent of session and agent state,
-// which the shared host's own health probe already makes. The
-// question the probe asks is whether the host still answers at all:
-// a dsh session can be busy with a turn while the host answers.
-// The answer never reaches the model's context.
+// The liveness probe (driver.Ping) goes through the capability
+// surface (api.Bridge.Health), where the relay implements
+// `session.list` — the cheapest auth-gated call, independent of
+// session and agent state, which the shared host's own health probe
+// already makes. The question the probe asks is whether the host
+// still answers at all: a dsh session can be busy with a turn while
+// the host answers. The answer never reaches the model's context.
 //
 // # Internal architecture (F-DSH-CHAT-001)
 //

@@ -971,16 +971,14 @@ func (d *driver) Keepalive(ctx context.Context, onRecover func(context.Context) 
 // independent of session and agent state — which the host's own
 // health probe already uses to decide whether the host is wedged.
 //
-// The call goes to the shared host, not to the session: a dsh
-// session can be busy with a turn while the host answers
-// session.list, and the question the probe asks is whether the
-// host still answers at all.
+// The probe goes through the capability surface (api.Bridge.Health),
+// which is where every other dsh interaction goes: the relay
+// implements it as exactly this session.list call.
 func (d *driver) Ping(ctx context.Context) error {
-	cli := d.cli
-	if cli == nil || cli.RPC == nil {
-		return errors.New("dsh: no host client")
+	if d.bridge == nil {
+		return errors.New("dsh: no host bridge")
 	}
-	if _, err := cli.RPC.SessionList(ctx); err != nil {
+	if err := d.bridge.Health(ctx); err != nil {
 		return fmt.Errorf("dsh: ping: %w", err)
 	}
 	return nil

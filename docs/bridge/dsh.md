@@ -1616,9 +1616,10 @@ HTTP 404 on /health                                       ← 验证 §11 health
 
 ## 15. Liveness probe
 
-`driver.Ping` reuses `session.list` — the cheapest auth-gated call,
-independent of session and agent state, which the shared host's own
-health probe already makes (`internal/bridge/dsh/host/health.go`).
+`driver.Ping` goes through the capability surface (`api.Bridge.Health`),
+where the relay implements `session.list` — the cheapest auth-gated
+call, independent of session and agent state, which the shared host's
+own health probe already makes (`internal/bridge/dsh/host/health.go`).
 
 The question the probe asks is whether the host still answers at all:
 a dsh session can be busy with a turn while the host answers, and a
@@ -1630,5 +1631,5 @@ host's `sessionController` being unavailable surfaces as
 `gateway/service-unavailable`, and the probe reports it like any
 other missing answer.
 
-Tests: `internal/bridge/dsh/ping_test.go` (fake host speaking the
-session.list protocol).
+Tests: `internal/bridge/dsh/ping_test.go` (a capability surface whose
+health probe speaks the session.list protocol against a fake host).

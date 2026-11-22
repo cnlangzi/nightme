@@ -5,9 +5,9 @@ package dsh
 // The shared dsh host exposes session.list — the cheapest
 // auth-gated call, independent of session and agent state — which
 // the host's own health probe already uses to decide whether the
-// host is wedged. The bridge's probe reuses that call: the
-// question is whether the host still answers at all, and a dsh
-// session can be busy with a turn while the host answers.
+// host is wedged. The bridge's probe goes through the capability
+// surface (api.Bridge.Health), where the relay implements exactly
+// that call.
 
 import (
 	"context"
@@ -17,13 +17,27 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cnlangzi/nightme/internal/bridge/dsh/api"
 	"github.com/cnlangzi/nightme/internal/bridge/dsh/host"
 )
 
-// fakeHost answers session.list with the envelope the host's RPC
-// client expects: the rpcId has to come back unchanged, or the
+// fakeBridge is an api.Bridge whose Health call answers from a fake
+// host. The other methods are inherited from the embedded (nil)
+// interface — the probe never calls them.
+type fakeBridge struct {
+	api.Bridge
+	health func(context.Context) error
+}
+
+func (f *fakeBridge) Health(ctx context.Context) error { return f.health(ctx) }
+
+// fakeHostBridge returns a capability surface whose health probe
+// speaks the session.list protocol against a fake host.
+//
+// The handler answers /api/session/list with the envelope the host's
+// RPC client expects: the rpcId has to come back unchanged, or the
 // client treats the answer as a mismatch.
-func fakeHost(t *testing.T, ok bool) *host.Client {
+func fakeHostBridge(t *testing.T, ok bool) api.Bridge {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/session/list" {
@@ -50,12 +64,17 @@ func fakeHost(t *testing.T, ok bool) *host.Client {
 		})
 	}))
 	t.Cleanup(server.Close)
-	return host.New(server.URL, nil)
+
+	cli := host.New(server.URL, nil)
+	return &fakeBridge{health: func(ctx context.Context) error {
+		_, err := cli.RPC.SessionList(ctx)
+		return err
+	}}
 }
 
 // TestPing_FakeHostAnswers — the probe resolves against a fake host.
 func TestPing_FakeHostAnswers(t *testing.T) {
-	d := &driver{cli: fakeHost(t, true)}
+	d := &driver{bridge: fakeHostBridge(t, true)}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -67,7 +86,7 @@ func TestPing_FakeHostAnswers(t *testing.T) {
 // TestPing_AHostThatRefusesFails — a host that answers with a
 // failure envelope is not answering: the probe reports it.
 func TestPing_AHostThatRefusesFails(t *testing.T) {
-	d := &driver{cli: fakeHost(t, false)}
+	d := &driver{bridge: fakeHostBridge(t, false)}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -76,11 +95,11 @@ func TestPing_AHostThatRefusesFails(t *testing.T) {
 	}
 }
 
-// TestPing_WithoutAHostFails — a driver with no host client has
-// nothing to probe.
-func TestPing_WithoutAHostFails(t *testing.T) {
+// TestPing_WithoutABridgeFails — a driver with no capability surface
+// has nothing to probe.
+func TestPing_WithoutABridgeFails(t *testing.T) {
 	d := &driver{}
 	if err := d.Ping(context.Background()); err == nil {
-		t.Fatal("Ping() = nil, want an error without a host client")
+		t.Fatal("Ping() = nil, want an error without a host bridge")
 	}
 }

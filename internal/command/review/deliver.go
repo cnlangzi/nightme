@@ -14,6 +14,7 @@ package review
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -145,6 +146,12 @@ func (f *Factory) deliver(d reviewDelivery) {
 			"agent", d.runner,
 			"err", err,
 		)
+		// The refusal reaches the user through the review's own chat
+		// line: the structured outcome is not a candidate, because
+		// messages.OutMessageSettled is never rendered to humans.
+		if line := injectionRefusalLine(err); line != "" {
+			sendReviewLine(d.ctx, d.emitter, d.chatID, d.replyTo, d.runner, line)
+		}
 		// The findings were produced but never reached the agent —
 		// the review is not complete. The findings stay in the
 		// record: the next review command delivers them.
@@ -167,6 +174,25 @@ func (f *Factory) deliver(d reviewDelivery) {
 		f.restoreFindings(d.chatID, d.rec.findings, d.rec.deliveredContributions())
 		return
 	}
+}
+
+// injectionRefusalLine renders the reason the injection was refused,
+// for the chat.
+//
+// Only a refusal that names a way out earns a line: a turn that is
+// merely busy is worth waiting out and says nothing the user can
+// act on, while a turn that has stopped making progress is worth
+// ending and the user needs to know which commands end it.
+//
+// The line rides the review's own chat path (messages.OutReply)
+// because the structured outcome is not rendered to humans —
+// messages.OutMessageSettled never reaches the chat.
+func injectionRefusalLine(err error) string {
+	var refused *agentsession.InjectionRefused
+	if !errors.As(err, &refused) || !refused.Stalled {
+		return ""
+	}
+	return "The findings were not delivered: " + refused.Reason + "."
 }
 
 // report tells the message what the run did.

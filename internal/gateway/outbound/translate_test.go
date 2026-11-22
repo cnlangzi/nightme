@@ -51,6 +51,33 @@ func TestTranslate_EventText_EmptyDropped(t *testing.T) {
 	}
 }
 
+// TestTranslate_EventNotice pins that a notice the bridge raises
+// about the session (e.g. a background subagent having started) is an
+// ordinary reply in the chat — no new outbound kind, no channel
+// change.
+func TestTranslate_EventNotice(t *testing.T) {
+	msg, ok := Translate("chat1", agent.AgentEvent{
+		Kind: agent.EventAgentNotice,
+		Text: "🔀 Subagent started: Sleep then reply OK",
+	})
+	if !ok || msg.Kind != messages.OutReply {
+		t.Fatalf("got kind=%v ok=%v, want OutReply", msg.Kind, ok)
+	}
+	if msg.Text != "🔀 Subagent started: Sleep then reply OK" {
+		t.Errorf("text = %q, want the notice verbatim", msg.Text)
+	}
+	if msg.ChatID != "chat1" {
+		t.Errorf("ChatID = %q, want chat1", msg.ChatID)
+	}
+}
+
+func TestTranslate_EventNotice_EmptyDropped(t *testing.T) {
+	_, ok := Translate("chat1", agent.AgentEvent{Kind: agent.EventAgentNotice, Text: "  "})
+	if ok {
+		t.Error("empty / whitespace-only notice should drop, not emit")
+	}
+}
+
 func TestTranslate_EventResult(t *testing.T) {
 	in := agent.AgentEvent{
 		Kind: agent.EventAgentResult,

@@ -74,6 +74,21 @@ func Translate(chatID string, ev agent.AgentEvent) (messages.OutboundMessage, bo
 			Text:   text,
 		}, true
 
+	case agent.EventAgentNotice:
+		// A notice the bridge raises about the session (e.g. a
+		// background subagent having started). It is an ordinary
+		// reply in the chat: no new outbound kind, no channel
+		// change.
+		text := strings.TrimSpace(ev.Text)
+		if text == "" {
+			return messages.OutboundMessage{}, false
+		}
+		return messages.OutboundMessage{
+			ChatID: chatID,
+			Kind:   messages.OutReply,
+			Text:   text,
+		}, true
+
 	case agent.EventAgentToolStart:
 		if ev.ToolStart == nil {
 			return messages.OutboundMessage{}, false

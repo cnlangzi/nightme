@@ -5,9 +5,11 @@
 // get_usage subtype and waits for the matching control_response. The
 // request_id sits at the top level of the request — the only place
 // the CLI echoes it back. The answer is resolved from the bridge's
-// own pending-probe map and never travels the event channel: the
-// probe has to stay answerable when that channel is wedged. The
-// probe never reaches the model's context.
+// own pending-probe map and is not published as an event: the probe
+// does not wait for the event pipeline to deliver anything. The
+// stream loop that reads the answer also reads the events, so a
+// fully blocked event channel can still delay it. The probe never
+// reaches the model's context.
 //
 // Agent is BOTH the template (registered with agent.Builtins) and the
 // live handle (returned by Start). The template half is set once by
@@ -215,11 +217,12 @@ type driver struct {
 	// flight, keyed by their request_id. The stream pump resolves
 	// them from the control_response frames it reads.
 	pendingProbes map[string]chan struct{}
-	// nextProbeID mints the request_id of each probe. The id sits
-	// at the top level of the request — next to "type" and
+	// nextControlID mints the request_id of each control_request
+	// the bridge sends (the liveness probe, the interrupt). The id
+	// sits at the top level of the request — next to "type" and
 	// "request" — because that is the only place the CLI echoes it
 	// back.
-	nextProbeID atomic.Int64
+	nextControlID atomic.Int64
 
 	closeOnce sync.Once
 	closed    chan struct{}
@@ -872,8 +875,19 @@ func (d *driver) Stop(ctx context.Context) error {
 	// pattern as codex's turn/interrupt and acp's
 	// session/cancel — see the file-level comment at the
 	// top of this method for the full wire format.
-	payload := []byte(`{"type":"control_request","request":{"subtype":"interrupt"}}`)
-	if err := d.writeLine(payload); err == nil {
+	//
+	// The request carries a top-level request_id like every other
+	// control_request the bridge sends: the CLI echoes it back,
+	// and an answer without an id could be mistaken for the answer
+	// to the liveness probe.
+	payload, err := json.Marshal(controlRequestFrame{
+		Type:    "control_request",
+		Request: map[string]any{"subtype": "interrupt"},
+		// The interrupt is fire-and-forget: nothing waits for the
+		// answer, but the id keeps it out of the probe's way.
+		RequestID: fmt.Sprintf("nightme-interrupt-%d", d.nextControlID.Add(1)),
+	})
+	if err == nil && d.writeLine(payload) == nil {
 		// translator will release IsReady when
 		// result{error_during_execution} lands; chat
 		// layer's TryFlush picks up the next queued
@@ -948,10 +962,10 @@ type controlRequestFrame struct {
 // It writes a control_request with the get_usage subtype and waits
 // for the matching control_response.
 //
-// The answer is resolved from the bridge's own pending-probe map,
-// not from the event channel: the probe exists to answer "is the
-// CLI still responsive", and it has to stay answerable when that
-// channel is wedged.
+// The answer is resolved from the bridge's own pending-probe map
+// and is not published as an event: the probe exists to answer "is
+// the CLI still responsive", and it must not wait for the event
+// pipeline to deliver anything.
 //
 // The probe never reaches the model's context — the CLI answers it
 // on its control channel and emits no result frame for it.
@@ -959,7 +973,7 @@ func (d *driver) Ping(ctx context.Context) error {
 	if d.stdin == nil {
 		return errors.New("claudecode: no stdin")
 	}
-	requestID := fmt.Sprintf("nightme-probe-%d", d.nextProbeID.Add(1))
+	requestID := fmt.Sprintf("nightme-probe-%d", d.nextControlID.Add(1))
 	answered := make(chan struct{}, 1)
 
 	d.probeMu.Lock()
@@ -1003,6 +1017,10 @@ func (d *driver) Ping(ctx context.Context) error {
 // A frame that carries no request_id is matched against the single
 // pending probe when there is exactly one — a CLI revision that
 // drops the id would otherwise leave every probe to time out.
+//
+// Every control_request the bridge sends carries a top-level
+// request_id (the CLI echoes it back), so an answer without an id
+// can only come from a CLI that stopped echoing it.
 func (d *driver) resolveControlResponse(ev streamEvent) {
 	if ev.Response == nil {
 		return

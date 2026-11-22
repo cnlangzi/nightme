@@ -36,13 +36,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 )
 
-// interruptPayload is the canonical stdin payload that
-// reverse-engineered test runs confirmed Claude Code 2.1.220
-// accepts as an in-flight turn interrupt. Same shape as
-// codex turn/interrupt and acp session/cancel — a single
-// message carrying an action verb.
-const interruptPayload = `{"type":"control_request","request":{"subtype":"interrupt"}}`
-
 // TestStop_NoCmdReturnsErrNotSupported covers the pre-Start /
 // post-Close contract. The driver has no cmd — Stop must
 // return ErrNotSupported and not panic. Cross-platform: no

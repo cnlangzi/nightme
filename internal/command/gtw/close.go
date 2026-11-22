@@ -75,16 +75,18 @@ const maxDirtyFilesReported = 10
 //     a retry cannot converge and a restore would only wedge the
 //     issue.
 //
-//     The pull request's labels are finalised in step 4.5, between
-//     the worktree removal and the branch deletion. They only WARN:
-//     the pull request's labels are bookkeeping that nothing reads,
-//     so a failure there must not keep the branch behind. The PR is
-//     looked up by head branch, so this runs BEFORE the branch is
-//     deleted — once the branch is gone, the platform no longer maps
-//     it to a PR. Running it after the worktree removal means a
-//     close that aborts earlier (step 3 / step 4) leaves the pull
-//     request's labels alone, so they need no compensation. A branch
-//     without a PR has nothing to finalize and nothing to say.
+//     2.7. Look up the pull request the branch opened.
+//
+//     The number comes from the workspace's PR cache first (the
+//     branch's own entry — /gtw pr already wrote it) and from the
+//     platform only when the cache has nothing for that branch.
+//     What the platform answers is written back to the cache.
+//
+//     It runs BEFORE the local teardown: the platform maps a branch
+//     to its pull request only while the branch exists, and the
+//     provider's CLI has to run in a directory that exists — the
+//     close runs it in the repository root, which outlives the
+//     worktree.
 //
 //  3. Refuse if the worktree has uncommitted changes (`git
 //     status --porcelain` non-empty). Close is intentionally
@@ -96,6 +98,16 @@ const maxDirtyFilesReported = 10
 //     repo (git refuses to run that command from inside a
 //     worktree itself). The yml file goes away with the
 //     worktree — no explicit unlink needed.
+//
+//     4.5. Finalise the pull request's labels, between the worktree
+//     removal (4) and the branch deletion (5). They only WARN:
+//     the pull request's labels are bookkeeping that nothing reads,
+//     so a failure there must not keep the branch behind. The
+//     number comes from step 2.7, so this step only needs the
+//     number. Running it after the worktree removal means a close
+//     that aborts earlier (step 3 / step 4) leaves the pull
+//     request's labels alone, so they need no compensation. A branch
+//     without a PR has nothing to finalize and nothing to say.
 //
 //  5. `git branch -D <branch>` from repoRoot (always force-
 //     delete — close is a "tear down the experiment" action
@@ -281,11 +293,12 @@ func RunClose(
 	// wherever the close ends. The sync card that follows is a
 	// separate step and does not repeat it.
 	//
-	// prWarning is filled in by the PR-side finalization further
-	// down (step 4.5); the closure reads it when it runs.
-	var prWarning string
+	// prLookupWarning is filled in by the PR lookup (step 2.7) and
+	// prLabelWarning by the PR-side finalization further down
+	// (step 4.5); the closure reads them when it runs.
+	var prLookupWarning, prLabelWarning string
 	withWarning := func(body string) string {
-		return prependWarning(body, labelWarning, prWarning)
+		return prependWarning(body, labelWarning, prLookupWarning, prLabelWarning)
 	}
 
 	// --- step 2.6: close ASes pinned to the about-to-be-gone worktree ---
@@ -308,6 +321,20 @@ func RunClose(
 	// applicable; the no-agents happy path keeps its existing
 	// 4-line card body.
 	droppedN, _ := cs.EvictAgentSessionsInCwd(c.Worktree)
+
+	// --- step 2.7: the pull request, before the teardown ----------
+	// The number of the pull request the branch opened is fetched
+	// HERE, while the worktree is still there and the branch still
+	// exists.
+	//
+	// It used to be fetched at step 4.5, after `git worktree
+	// remove` had taken the worktree away — the provider's CLI was
+	// bound to that worktree, so the spawn failed and the close
+	// reported "provider CLI not installed" for a CLI that was
+	// installed. Fetching it up front also spares the platform a
+	// round-trip: /gtw pr already wrote the number into the
+	// workspace's PR cache.
+	pr, prLookupWarning := lookupClosePR(ctx, c, plat, deps)
 
 	// --- step 3: dirty check --------------------------------------
 	// Close is intentionally all-or-nothing — the user must
@@ -356,19 +383,19 @@ func RunClose(
 	// sides.
 	//
 	// It runs here, between the worktree removal and the branch
-	// deletion: the branch is what maps to the pull request, so the
-	// lookup must happen before the branch is deleted (step 5). It
-	// runs after the local cleanup succeeded, so a close that aborts
-	// on a dirty worktree (step 3) or a failed removal (step 4)
-	// leaves the pull request's labels alone — the issue's labels
-	// are restored on those paths, and the PR's need no
-	// restoration, because they are only touched once there is
-	// nothing left to abort.
+	// deletion, and it works on the pull request step 2.7 already
+	// found — the lookup ran while the branch still existed, the
+	// label calls only need the number. It runs after the local
+	// cleanup succeeded, so a close that aborts on a dirty worktree
+	// (step 3) or a failed removal (step 4) leaves the pull
+	// request's labels alone — the issue's labels are restored on
+	// those paths, and the PR's need no restoration, because they
+	// are only touched once there is nothing left to abort.
 	//
 	// A failure here only WARNs: the PR's labels are bookkeeping
 	// that nothing reads, and the local teardown must not wait for
 	// them.
-	prLabels, prWarning := finalizePRLabels(ctx, c, plat)
+	prLabels, prLabelWarning := finalizePRLabels(ctx, plat, pr)
 
 	// --- step 5: delete the local branch --------------------------
 	// `-D` (uppercase) is force-delete — refuses to keep the
@@ -427,7 +454,7 @@ func RunClose(
 		// prcache is keyed by cwd (per-workspace). Clearing
 		// the workspace's PR entry applies to every AS that
 		// has ever stamped on this path.
-		deps.PRCache.WritePR(c.Worktree, nil)
+		deps.PRCache.WritePR(c.Worktree, nil, "")
 	}
 
 	// --- step 8: close's own success card -------------------------
@@ -616,8 +643,13 @@ type closePlatform struct {
 //
 // The resolution is shared by the issue-side and the PR-side
 // finalization, so the close probes the host at most once.
+//
+// The provider's CLI runs in the repository root, not in the
+// worktree: the close finalizes the pull request AFTER the worktree
+// is gone, and a CLI bound to a directory that no longer exists
+// cannot start.
 func resolveClosePlatform(ctx context.Context, c Context, deps HandlerDeps) closePlatform {
-	prov, owner, repo, err := resolveProvider(ctx, c, deps)
+	prov, owner, repo, err := resolveProvider(ctx, c, deps, c.RepoRoot)
 	if err != nil {
 		return closePlatform{err: err}
 	}
@@ -846,6 +878,67 @@ func (p prLabelFinalize) cardLine() string {
 		row("pr", p.owner, p.repo, p.number)
 }
 
+// lookupClosePR resolves the pull request the branch opened, before
+// the local teardown takes the worktree away.
+//
+// It runs while the worktree is still there for two reasons: the
+// platform maps a branch to its pull request only while the branch
+// exists, and the provider's CLI has to run in a directory that
+// exists.
+//
+// The workspace's PR cache answers first. /gtw pr already knows the
+// number and wrote it there, so asking the platform again is a
+// wasted round-trip. The cache only answers for the branch being
+// closed: a workspace whose cached PR belongs to another branch must
+// not have that PR's labels taken off.
+//
+// A miss falls back to the platform, and what the platform says is
+// written back — a close that then aborts (dirty worktree, failed
+// removal) leaves the number in the cache, so the retry does not ask
+// again.
+//
+// Returns the pull request (nil when the branch never had one) and
+// the warning to ride along on the close's replies. A branch without
+// a PR yields neither: the close's subject is the issue.
+func lookupClosePR(
+	ctx context.Context,
+	c Context,
+	plat closePlatform,
+	deps HandlerDeps,
+) (*messages.PR, string) {
+	// No platform to ask, or no branch to ask about: the close has
+	// no PR to finalize. Silent — the close's subject is the issue.
+	if plat.err != nil || c.Branch == "" {
+		return nil, ""
+	}
+
+	if deps.PRCache != nil {
+		// A cached PR without a number names no pull request (the
+		// platform's URL did not carry one) — the labels of PR #0
+		// are nothing. Such an entry falls through to the platform,
+		// which knows the number.
+		if pr := deps.PRCache.PRForBranch(c.Worktree, c.Branch); pr != nil && pr.Number > 0 {
+			return pr, ""
+		}
+	}
+
+	pr, err := plat.prov.FindPRForBranch(ctx, plat.owner, plat.repo, c.Branch)
+	if err != nil {
+		return nil, fmt.Sprintf(
+			"⚠️ could not look up the PR of branch %s: %v", c.Branch, err)
+	}
+	if pr == nil {
+		// The branch never had a PR: nothing to finalize, nothing to
+		// say.
+		return nil, ""
+	}
+
+	if deps.PRCache != nil {
+		deps.PRCache.WritePR(c.Worktree, pr, c.Branch)
+	}
+	return pr, ""
+}
+
 // finalizePRLabels drives the PR half of the close: it takes the
 // `nightme/*` state labels off the pull request the branch opened.
 //
@@ -865,32 +958,22 @@ func (p prLabelFinalize) cardLine() string {
 // to put on.
 //
 // The caller runs it after the worktree removal and before the branch
-// deletion: the branch is what maps to the pull request, and after the
-// local cleanup there is nothing left that could abort — so the PR's
-// labels need no compensation.
+// deletion: after the local cleanup there is nothing left that could
+// abort — so the PR's labels need no compensation. The pull request
+// itself is the one the caller found before the teardown; this step
+// only takes the labels off it.
 //
 // Returns what the step did and the warning to ride along on the
 // close's replies. A branch without a PR yields neither — the close's
 // subject is the issue.
 func finalizePRLabels(
 	ctx context.Context,
-	c Context,
 	plat closePlatform,
+	pr *messages.PR,
 ) (prLabelFinalize, string) {
-	// No platform to ask, or no branch to ask about: the close has
-	// no PR to finalize. Silent — the close's subject is the issue.
-	if plat.err != nil || c.Branch == "" {
-		return prLabelFinalize{}, ""
-	}
-
-	pr, err := plat.prov.FindPRForBranch(ctx, plat.owner, plat.repo, c.Branch)
-	if err != nil {
-		return prLabelFinalize{}, fmt.Sprintf(
-			"⚠️ could not look up the PR of branch %s: %v", c.Branch, err)
-	}
-	if pr == nil {
-		// The branch never had a PR: nothing to finalize, nothing to
-		// say.
+	// No platform to ask, or no pull request: the close has no PR to
+	// finalize. Silent — the close's subject is the issue.
+	if plat.err != nil || pr == nil {
 		return prLabelFinalize{}, ""
 	}
 

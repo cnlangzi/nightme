@@ -15,7 +15,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/messages"
@@ -611,6 +610,16 @@ var ErrPRExists = errors.New("gtw: PR already exists")
 // preserves the provider name so the hint can be platform-specific.
 var ErrCLINotInstalled = errors.New("gtw: provider CLI not installed")
 
+// ErrCLICannotStart is returned when the provider CLI is installed
+// but the process cannot be started: the directory it was bound to
+// is gone, or its interpreter is missing.
+//
+// Distinct from ErrCLINotInstalled on purpose. The binary IS on the
+// machine, so the "brew install gh" hint sends the user after the
+// wrong thing — and the spawn failure it hides reads as a missing
+// file, because the ENOENT it carries names the binary.
+var ErrCLICannotStart = errors.New("gtw: provider CLI cannot start")
+
 // ErrStaleUpstream is returned by GitHub/GitLab providers when
 // the platform rejects CreatePR because the head branch is
 // missing on the origin (or the cached SHA is stale). It is the
@@ -650,15 +659,19 @@ var ErrNoCommitsBetween = errors.New("gtw: no commits between base and head")
 
 // isExecutableNotFound reports whether err originates from
 // os/exec failing to find the binary on PATH (the common case
-// when `gh` / `glab` isn't installed). Covers both the modern
-// *exec.Error wrapping exec.ErrNotFound (returned by
-// os/exec.Command.Start / LookPath) and the *fs.PathError with
-// syscall.ENOENT that some Go runtimes surface.
+// when `gh` / `glab` isn't installed). That is exec.ErrNotFound —
+// the sentinel os/exec.LookPath returns.
+//
+// A spawn failure is NOT this: it surfaces as a *fs.PathError,
+// which names a path that exists (the working directory the CLI
+// was bound to, or the binary's interpreter). Reporting it as
+// "not installed" sends the user to install a binary they
+// already have — see isCLIStartFailure.
 //
 // We deliberately do NOT match generic "command not found"
 // substrings inside stderr — the stderr-based detection is
-// unreliable across shells / i18n. The exec.Error /
-// fs.PathError unwrap is the only stable signal.
+// unreliable across shells / i18n. The exec.Error unwrap is the
+// only stable signal.
 func isExecutableNotFound(err error) bool {
 	if err == nil {
 		return false
@@ -667,11 +680,25 @@ func isExecutableNotFound(err error) bool {
 	if errors.As(err, &execErr) && errors.Is(execErr.Err, exec.ErrNotFound) {
 		return true
 	}
-	var pathErr *fs.PathError
-	if errors.As(err, &pathErr) && errors.Is(pathErr.Err, syscall.ENOENT) {
-		return true
-	}
 	return false
+}
+
+// isCLIStartFailure reports whether err is a spawn failure: the
+// process never started. The working directory the CLI was bound
+// to is gone, the binary's interpreter is missing, the platform
+// refused to create the process.
+//
+// The errno behind it differs per platform and per Go version
+// (ENOENT on Unix, ERROR_PATH_NOT_FOUND on Windows), so the
+// signal is the *fs.PathError itself. A binary that is not on
+// PATH never reaches the spawn — os/exec reports that as
+// exec.ErrNotFound instead — so the two cases do not overlap.
+func isCLIStartFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	var pathErr *fs.PathError
+	return errors.As(err, &pathErr)
 }
 
 // wrapCLINotInstalled translates a missing provider binary into
@@ -1506,8 +1533,21 @@ type ExecCLIRunner struct {
 // through transparently — empty means "inherit parent CWD", which
 // preserves the pre-refactor behavior for callers that have no
 // known workspace yet.
+//
+// A CLI that cannot start is reported as ErrCLICannotStart, naming
+// the directory it was bound to. The spawn failure it wraps says
+// "no such file or directory" about the BINARY, which reads as a
+// missing installation; the directory is the real cause, and the
+// caller needs to see it to know the CLI is installed.
 func (e ExecCLIRunner) Run(ctx context.Context, name string, args ...string) (string, string, error) {
-	return runCmd(ctx, e.Dir, name, args...)
+	stdout, stderr, err := runCmd(ctx, e.Dir, name, args...)
+	if err == nil || !isCLIStartFailure(err) {
+		return stdout, stderr, err
+	}
+	if e.Dir == "" {
+		return stdout, stderr, fmt.Errorf("%w: %s: %w", ErrCLICannotStart, name, err)
+	}
+	return stdout, stderr, fmt.Errorf("%w: %s (in %s): %w", ErrCLICannotStart, name, e.Dir, err)
 }
 
 // GitHubProvider wraps the `gh` CLI. Auth is delegated to

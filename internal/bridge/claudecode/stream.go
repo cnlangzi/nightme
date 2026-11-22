@@ -60,164 +60,6 @@ type streamState struct {
 	// EventAgentTaskUpdate. Map key is the provider-assigned task ID.
 	tasks     map[string]agent.AgentTaskItem
 	taskOrder []string
-
-	// bgRuns holds the run ids of the background agents the CLI
-	// started. A background shell the CLI ran for a subagent is not
-	// one of them: it never gets a turn of its own.
-	bgRuns map[string]bool
-
-	// notifiedRuns holds the run ids of the background agents whose
-	// completion the CLI announced. The announcement comes before the
-	// turn that reports it, so it is what says "another turn is
-	// coming".
-	notifiedRuns map[string]bool
-
-	// deliveredRuns holds the run ids of the background agents whose
-	// turn already reported.
-	deliveredRuns map[string]bool
-
-	// turnRuns holds the run ids of the background agents started
-	// during the turn in flight. The agents that outlive a turn
-	// belong to the session, not to the next turn.
-	turnRuns map[string]bool
-
-	// outstandingBase is the outstanding-subagent count the CLI
-	// reported when the last turn ended. The counters are cumulative
-	// for the session, so the per-turn view is the difference against
-	// this baseline.
-	outstandingBase int
-
-	// turnHeld marks the user turn the bridge holds open: a result
-	// frame arrived with background work still outstanding, so the
-	// turn-terminating events were withheld. The CLI is still working
-	// on that turn — it opens another turn for every background task
-	// that finishes — so a frame that bounds a turn (the init
-	// re-emit) must not end it.
-	turnHeld bool
-
-	// heldUsage is the token count of the result frames the bridge
-	// withheld. The CLI reports usage per turn, so the frames of one
-	// user turn add up — without this the receipt footer would
-	// report the last turn only.
-	heldUsage *agent.UsageInfo
-}
-
-// noteBackgroundStart records a background agent the CLI started.
-func (s *streamState) noteBackgroundStart(runID string) {
-	if s == nil || runID == "" {
-		return
-	}
-	s.bgRuns[runID] = true
-	s.turnRuns[runID] = true
-}
-
-// noteBackgroundNotification records the completion of a background
-// agent. The CLI announces it before the turn that reports it.
-func (s *streamState) noteBackgroundNotification(runID string) {
-	if s == nil || runID == "" {
-		return
-	}
-	if !s.bgRuns[runID] {
-		// A task the CLI never announced as a background agent — a
-		// background shell, say. It gets no turn of its own.
-		return
-	}
-	s.notifiedRuns[runID] = true
-}
-
-// noteNotificationTurn records that the CLI opened the turn for a
-// finished background agent.
-func (s *streamState) noteNotificationTurn(origin *resultOrigin) {
-	if s == nil || origin == nil || origin.Kind != notificationOriginKind {
-		return
-	}
-	s.deliveredRuns[origin.RunID] = true
-}
-
-// pendingNotifications is the number of background agents whose
-// completion the CLI announced but whose turn has not reported yet.
-// Each of them opens a turn of its own, so the user's turn is not
-// over until they are done.
-func (s *streamState) pendingNotifications() int {
-	if s == nil {
-		return 0
-	}
-	n := 0
-	for runID := range s.notifiedRuns {
-		if !s.deliveredRuns[runID] {
-			n++
-		}
-	}
-	return n
-}
-
-// runningAgents is the number of background agents started during the
-// turn in flight that have not completed yet.
-func (s *streamState) runningAgents() int {
-	if s == nil {
-		return 0
-	}
-	n := 0
-	for runID := range s.turnRuns {
-		if !s.notifiedRuns[runID] {
-			n++
-		}
-	}
-	return n
-}
-
-// backgroundWorkOutstanding reports whether the CLI still owes the
-// user a turn: a background agent of this turn is still running, or a
-// finished agent's notification is still queued for its own turn.
-//
-// The counters alone cannot answer that. They are the session's
-// running totals at the moment the frame was written, and the CLI
-// writes a result frame as soon as the turn's model loop ends — a
-// frame can therefore report every subagent completed while the turns
-// their completions opened are still queued. The task bookkeeping
-// answers what the counters cannot: which agents are running, and
-// which of them still owe the user a turn.
-func (s *streamState) backgroundWorkOutstanding(outstanding int) bool {
-	if s == nil {
-		return false
-	}
-	if outstanding-s.outstandingBase > 0 {
-		return true
-	}
-	if s.runningAgents() > 0 {
-		return true
-	}
-	return s.pendingNotifications() > 0
-}
-
-// endTurn records the end of the user turn: the counters' baseline
-// moves to the value the CLI reported, and the agents started during
-// the turn leave the per-turn bookkeeping.
-func (s *streamState) endTurn(outstanding int) {
-	if s == nil {
-		return
-	}
-	s.outstandingBase = outstanding
-	s.turnRuns = make(map[string]bool)
-	s.heldUsage = nil
-	s.turnHeld = false
-}
-
-// holdUsage adds the tokens of a withheld result frame to the running
-// total the turn reports. The cost and the window are not carried:
-// the CLI reports them cumulatively, so the frame that ends the turn
-// has the final numbers.
-func (s *streamState) holdUsage(u *agent.UsageInfo) {
-	if s == nil || u == nil {
-		return
-	}
-	if s.heldUsage == nil {
-		s.heldUsage = &agent.UsageInfo{}
-	}
-	s.heldUsage.InputTokens += u.InputTokens
-	s.heldUsage.OutputTokens += u.OutputTokens
-	s.heldUsage.CacheCreationInputTokens += u.CacheCreationInputTokens
-	s.heldUsage.CacheReadInputTokens += u.CacheReadInputTokens
 }
 
 // pendingTool records a tool_use block that has not yet been
@@ -271,30 +113,6 @@ type streamEvent struct {
 	DurationMs int64  `json:"duration_ms,omitempty"`
 	IsError    bool   `json:"is_error,omitempty"`
 
-	// subagent_stats carries the session's running totals for the
-	// subagents started through the Agent tool. The CLI reports it on
-	// every result frame; a CLI without the Agent tool leaves it
-	// absent, which reads as "no subagent was ever spawned".
-	//
-	// Kept as RawMessage like Usage / ModelUsage: a shape the bridge
-	// does not know must not make the whole frame undecodable — a
-	// dropped result frame is a turn that never ends.
-	SubagentStats json.RawMessage `json:"subagent_stats,omitempty"`
-
-	// origin tags the turn a result frame belongs to. The CLI opens a
-	// turn for every background task that finished and marks that
-	// turn's result with kind "task-notification".
-	Origin *resultOrigin `json:"origin,omitempty"`
-
-	// task frames (system): the CLI's background agent bookkeeping.
-	// A background agent starts (task_started), announces its
-	// completion (task_notification) and the turn the CLI opens for
-	// that announcement reports the same run id on its result frame.
-	TaskID         string `json:"task_id,omitempty"`
-	RunID          string `json:"run_id,omitempty"`
-	IsBackgrounded bool   `json:"is_backgrounded,omitempty"`
-	Status         string `json:"status,omitempty"`
-
 	// conversation_reset only — the id assigned to the freshly
 	// cleared transcript. Diagnostic; the authoritative SessionID
 	// arrives in the immediately-following system/init.
@@ -313,68 +131,6 @@ type assistantMsg struct {
 	Role    string         `json:"role,omitempty"`
 	Model   string         `json:"model,omitempty"`
 	Content []contentBlock `json:"content,omitempty"`
-}
-
-// resultOrigin is the origin tag of a result frame. The CLI marks the
-// turns it opens for a finished background task with kind
-// "task-notification" and names the task in RunID.
-type resultOrigin struct {
-	Kind  string `json:"kind,omitempty"`
-	RunID string `json:"runId,omitempty"`
-}
-
-// notificationOriginKind is the origin kind of the turn the CLI opens
-// for a background task that finished.
-const notificationOriginKind = "task-notification"
-
-// subagentStats is the result frame's subagent_stats object: the
-// session's running totals for the subagents started through the
-// Agent tool. Only the counters the turn decision needs are decoded —
-// the permissive decoder drops the rest of the object.
-type subagentStats struct {
-	Spawned   int `json:"spawned"`
-	Completed int `json:"completed"`
-	Failed    int `json:"failed"`
-	Killed    struct {
-		Parent int `json:"parent"`
-		User   int `json:"user"`
-		System int `json:"system"`
-	} `json:"killed"`
-}
-
-// decodeSubagentStats shapes the result frame's subagent_stats
-// payload. A payload the bridge cannot read counts as "no subagent",
-// the way a CLI without the Agent tool reports it: a shape the bridge
-// does not know must not end the turn, and it must not end it early
-// either — the counters are a signal, not the only one.
-func decodeSubagentStats(raw json.RawMessage) subagentStats {
-	var s subagentStats
-	if len(raw) == 0 {
-		return s
-	}
-	if err := json.Unmarshal(raw, &s); err != nil {
-		return subagentStats{}
-	}
-	return s
-}
-
-// outstanding reports how many subagents the session started but has
-// not seen finish.
-//
-// A subagent reaches a terminal state through completed / failed /
-// killed, and the CLI counts a subagent that was stopped as killed
-// rather than completed — so the three counters never double-count the
-// same subagent.
-//
-// The counters are cumulative and can outrun `spawned`: a /clear zeroes
-// them while a background subagent that outlives the /clear still
-// records its outcome. The result is clamped at zero for that reason.
-func (s subagentStats) outstanding() int {
-	n := s.Spawned - s.Completed - s.Failed - s.Killed.Parent - s.Killed.User - s.Killed.System
-	if n < 0 {
-		return 0
-	}
-	return n
 }
 
 // syntheticModel is the model name Claude Code stamps on messages it
@@ -491,14 +247,10 @@ func pumpStream(
 	// in user-message N can look up the args recorded when its
 	// matching tool_use was seen in assistant-message N-1.
 	state := &streamState{
-		toolUseArgs:   make(map[string]string),
-		pendingTools:  make(map[string]pendingTool),
-		tasks:         make(map[string]agent.AgentTaskItem),
-		bgRuns:        make(map[string]bool),
-		notifiedRuns:  make(map[string]bool),
-		deliveredRuns: make(map[string]bool),
-		turnRuns:      make(map[string]bool),
-		turnActive:    turnActive,
+		toolUseArgs:  make(map[string]string),
+		pendingTools: make(map[string]pendingTool),
+		tasks:        make(map[string]agent.AgentTaskItem),
+		turnActive:   turnActive,
 	}
 
 	for scanner.Scan() {
@@ -551,12 +303,7 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 			// bridge writes a user message and dropped when the
 			// turn's result arrives — the init frame bounds it
 			// for the turns that end without a result.
-			//
-			// A turn the bridge holds open is not over: the CLI
-			// re-emits init when it opens the turn for a finished
-			// background task, and that turn belongs to the user's
-			// turn.
-			if state.turnActive != nil && !state.turnHeld {
+			if state.turnActive != nil {
 				state.turnActive.Store(false)
 			}
 			// F-38: a fresh Claude session means a fresh task
@@ -574,18 +321,6 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 				Workspace: workspace,
 				Branch:    branch,
 			}
-		}
-		// The CLI's background agent bookkeeping. A background agent
-		// starts (task_started), announces its completion
-		// (task_notification) and the turn the CLI opens for that
-		// announcement reports the same run id on its result frame.
-		switch ev.Subtype {
-		case "task_started":
-			if ev.IsBackgrounded {
-				state.noteBackgroundStart(ev.RunID)
-			}
-		case "task_notification":
-			state.noteBackgroundNotification(ev.RunID)
 		}
 
 	case "assistant":
@@ -757,7 +492,7 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 		}
 
 	case "result":
-		// A result event has four sub-shapes — handled in order:
+		// A result event has three sub-shapes — handled in order:
 		//
 		//   1. subtype "compact" / "compaction" — MID-TURN context
 		//      compaction. NOT a turn end: subsequent assistant /
@@ -777,44 +512,11 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 		//   3. terminal — EventAgentDone{ExitCode: 0}. ExitCode stays
 		//      zero on the wire; IsError travels on the
 		//      EventAgentResult payload instead.
-		//
-		//   4. background work still outstanding — shapes 2 and 3 do
-		//      not end the turn either: the CLI opens another turn
-		//      when a subagent reports back. See the guard below.
 		if ev.Subtype == "compact" || ev.Subtype == "compaction" {
 			// F-49 compaction tracking removed: bridges no longer emit a
 			// dedicated event for context compaction. Runtime is a
 			// pure pass-through; the per-cycle counter / footer 🗜 N
 			// rendering was dropped across the runtime.
-			return
-		}
-		// A result frame closes the CLI's turn — but a turn that
-		// started background subagents is not over yet: the CLI opens
-		// another turn when a subagent reports back, and that turn
-		// ends with a result frame of its own. Ending the turn here
-		// would orphan those turns — no prompt in flight, so their
-		// events carry no anchor, land as standalone cards and stop
-		// the receipt card's ticker. Withhold the turn-terminating
-		// events until the last subagent finished; the assistant text
-		// of a held-open turn already went out as EventAgentText.
-		//
-		// An error result terminates the turn even with background
-		// work outstanding: the turn failed, so the agent's work
-		// stopped, and withholding the error would hide the failure.
-		state.noteNotificationTurn(ev.Origin)
-		stats := decodeSubagentStats(ev.SubagentStats)
-		outstanding := stats.outstanding()
-		if !ev.IsError && state.backgroundWorkOutstanding(outstanding) {
-			usage := decodeUsage(ev.Usage, ev.ModelUsage)
-			state.holdUsage(usage)
-			state.turnHeld = true
-			if logger != nil {
-				logger.Debug("claudecode: result withheld, background work outstanding",
-					"outstanding", outstanding,
-					"spawned", stats.Spawned,
-					"running_agents", state.runningAgents(),
-					"pending_notifications", state.pendingNotifications())
-			}
 			return
 		}
 		// The turn is over: the CLI sends nothing more for it.
@@ -836,11 +538,6 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 		// EventAgentDone here marks process exit; for long-lived
 		// bridges it marks turn end.
 		usage := decodeUsage(ev.Usage, ev.ModelUsage)
-		// The frames the bridge withheld are part of this turn: the
-		// CLI reports usage per turn, so their tokens are added to
-		// the frame that ends it. The cost and the window stay with
-		// the last frame — the CLI reports them cumulatively.
-		usage = mergeUsage(state.heldUsage, usage)
 		if ev.Result != "" || ev.IsError {
 			// Text dup fix: assistant text blocks already streamed
 			// the reply as EventAgentText; result.result would be
@@ -884,7 +581,6 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 				Usage:    usage,
 			},
 		}
-		state.endTurn(outstanding)
 
 	case "control_request":
 		// Claude Code emits control_request (subtype: can_use_tool)
@@ -1169,35 +865,6 @@ func decodeUsage(rawUsage, rawModelUsage json.RawMessage) *agent.UsageInfo {
 		out.ContextWindow = contextWindow
 	}
 	return out
-}
-
-// mergeUsage sums the token counts of the result frames the bridge
-// withheld into the frame that ends the turn.
-//
-// The CLI reports usage per turn, so the frames of one user turn add
-// up. The cost and the context window are NOT summed: the CLI
-// reports those cumulatively for the session, so the frame that ends
-// the turn already carries the final numbers.
-func mergeUsage(held, frame *agent.UsageInfo) *agent.UsageInfo {
-	if held == nil {
-		return frame
-	}
-	if frame == nil {
-		return held
-	}
-	out := *frame
-	out.InputTokens += held.InputTokens
-	out.OutputTokens += held.OutputTokens
-	out.CacheCreationInputTokens += held.CacheCreationInputTokens
-	out.CacheReadInputTokens += held.CacheReadInputTokens
-	if out.ContextWindow > 0 {
-		used := out.InputTokens + out.OutputTokens +
-			out.CacheCreationInputTokens + out.CacheReadInputTokens
-		if used > 0 {
-			out.ContextWindowPct = float64(used) / float64(out.ContextWindow) * 100
-		}
-	}
-	return &out
 }
 
 // strings.HasPrefix shim so we don't import strings just for one call.

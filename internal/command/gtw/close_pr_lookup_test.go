@@ -204,6 +204,38 @@ func TestRunClose_PRCacheHoldsANumberlessPR_FallsBackToThePlatform(t *testing.T)
 	}
 }
 
+// TestRunClose_PRCacheHoldsAnotherReposPR_FallsBackToThePlatform
+// pins that a cached pull request from another repository does not
+// answer: the close applies its own repository to the number, and
+// the same number in that repository is a different pull request.
+func TestRunClose_PRCacheHoldsAnotherReposPR_FallsBackToThePlatform(t *testing.T) {
+	wt := t.TempDir()
+	repoRoot := t.TempDir()
+
+	rig := newCloseRig(t)
+	prov := newFakeGitProvider(ProviderGitHub, "github.com")
+	seedFixRemote(t, rig, prov, wt, repoRoot)
+	rig.deps.PRCache = &prcache.Registry{}
+	rig.deps.PRCache.WritePR(wt, &messages.PR{
+		Number: 7, URL: "https://github.com/someone-else/nightme-fork/pull/7", State: "open",
+	}, "fix/42-test")
+	seedPR(t, prov, "fix/42-test", 7, LabelReady)
+
+	if _, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1", false); err != nil {
+		t.Fatalf("RunClose: %v", err)
+	}
+
+	if n := prLookupCalls(prov); n != 1 {
+		t.Errorf("FindPRForBranch calls = %d, want 1 — the cached PR came from another repository", n)
+	}
+	// The pull request that got finalized is the platform's own.
+	assertPRLabels(t, prov, 7)
+	card := rig.rec.lastText()
+	if want := "→ pr: cnlangzi/nightme#7 -" + LabelReady; !strings.Contains(card, want) {
+		t.Errorf("card missing %q:\n%s", want, card)
+	}
+}
+
 // TestRunClose_ProviderCLIRunsInTheRepoRoot pins the directory the
 // provider's CLI runs in: the repository root, which outlives the
 // worktree the close removes.
@@ -257,8 +289,8 @@ func TestResolveClosePlatform_BindsTheRepoRoot(t *testing.T) {
 	if !ok {
 		t.Fatalf("provider = %T, want *GitHubProvider", plat.prov)
 	}
-	if gh.Worktree != repoRoot {
-		t.Errorf("provider Worktree = %q, want the repo root %q", gh.Worktree, repoRoot)
+	if gh.CLIDir != repoRoot {
+		t.Errorf("provider Worktree = %q, want the repo root %q", gh.CLIDir, repoRoot)
 	}
 	if plat.owner != "cnlangzi" || plat.repo != "nightme" {
 		t.Errorf("owner/repo = %q/%q, want cnlangzi/nightme", plat.owner, plat.repo)

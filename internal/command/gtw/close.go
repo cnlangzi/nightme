@@ -890,7 +890,15 @@ func (p prLabelFinalize) cardLine() string {
 // number and wrote it there, so asking the platform again is a
 // wasted round-trip. The cache only answers for the branch being
 // closed: a workspace whose cached PR belongs to another branch must
-// not have that PR's labels taken off.
+// not have that PR's labels taken off. Its repository has to agree
+// with the close's platform too — the cached number belongs to the
+// repository the cache read it from, and the close applies the
+// yml's repository to it.
+//
+// The cached number is taken as it stands. The cache is refreshed by
+// the stamp path, and a number the platform has since replaced (the
+// branch's PR was closed and a new one opened under another number)
+// is the rare case: the close would finalise the old pull request.
 //
 // A miss falls back to the platform, and what the platform says is
 // written back — a close that then aborts (dirty worktree, failed
@@ -917,7 +925,8 @@ func lookupClosePR(
 		// platform's URL did not carry one) — the labels of PR #0
 		// are nothing. Such an entry falls through to the platform,
 		// which knows the number.
-		if pr := deps.PRCache.PRForBranch(c.Worktree, c.Branch); pr != nil && pr.Number > 0 {
+		if pr := deps.PRCache.PRForBranch(c.Worktree, c.Branch); pr != nil &&
+			pr.Number > 0 && prRepoMatches(pr, plat.owner, plat.repo) {
 			return pr, ""
 		}
 	}
@@ -937,6 +946,35 @@ func lookupClosePR(
 		deps.PRCache.WritePR(c.Worktree, pr, c.Branch)
 	}
 	return pr, ""
+}
+
+// prRepoMatches reports whether the pull request's URL names the
+// repository the close's platform is bound to.
+//
+// The cached pull request carries a number and a URL, no repository
+// of its own — the close applies the repository it resolved (the
+// yml's, or the live remote) to that number. When the origin was
+// moved to a fork after the fix, the cached number belongs to the
+// fork and the same number in the yml's repository is a different
+// pull request. Comparing the URL keeps the close on one
+// repository.
+//
+// The URL is the platform's own — "…/<owner>/<repo>/pull/<n>" on
+// GitHub, "…/<owner>/<repo>/-/merge_requests/<n>" on GitLab — so
+// the owner and the repository are the path segments right before
+// the pull request's own path.
+//
+// A pull request without a URL carries no evidence either way, and
+// matches: the platforms report one, so an entry without one says
+// nothing about which repository it came from.
+func prRepoMatches(pr *messages.PR, owner, repo string) bool {
+	if pr == nil || pr.URL == "" {
+		return true
+	}
+	if owner == "" || repo == "" {
+		return true
+	}
+	return strings.Contains(pr.URL, "/"+owner+"/"+repo+"/")
 }
 
 // finalizePRLabels drives the PR half of the close: it takes the
@@ -971,9 +1009,9 @@ func finalizePRLabels(
 	plat closePlatform,
 	pr *messages.PR,
 ) (prLabelFinalize, string) {
-	// No platform to ask, or no pull request: the close has no PR to
-	// finalize. Silent — the close's subject is the issue.
-	if plat.err != nil || pr == nil {
+	// No platform to talk to, or no pull request: the close has no PR
+	// to finalize. Silent — the close's subject is the issue.
+	if plat.prov == nil || pr == nil {
 		return prLabelFinalize{}, ""
 	}
 

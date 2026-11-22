@@ -1,6 +1,14 @@
 // Package claudecode implements a bridge to the Claude Code CLI
 // using stream-json mode over stdin/stdout. See docs/bridge/claude.md.
 //
+// The liveness probe (driver.Ping) writes a control_request with the
+// get_usage subtype and waits for the matching control_response. The
+// request_id sits at the top level of the request — the only place
+// the CLI echoes it back. The answer is resolved from the bridge's
+// own pending-probe map and never travels the event channel: the
+// probe has to stay answerable when that channel is wedged. The
+// probe never reaches the model's context.
+//
 // Agent is BOTH the template (registered with agent.Builtins) and the
 // live handle (returned by Start). The template half is set once by
 // New and is immutable thereafter; Start clones the receiver and
@@ -201,6 +209,18 @@ type driver struct {
 	pendingMu  sync.Mutex
 	pendingAsk *pendingAsk
 
+	// probeMu guards pendingProbes.
+	probeMu sync.Mutex
+	// pendingProbes holds the control_request probes that are in
+	// flight, keyed by their request_id. The stream pump resolves
+	// them from the control_response frames it reads.
+	pendingProbes map[string]chan struct{}
+	// nextProbeID mints the request_id of each probe. The id sits
+	// at the top level of the request — next to "type" and
+	// "request" — because that is the only place the CLI echoes it
+	// back.
+	nextProbeID atomic.Int64
+
 	closeOnce sync.Once
 	closed    chan struct{}
 }
@@ -367,7 +387,8 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 			"claudecode:stream-pump", panicDeliver,
 			"", live.agentName, live.workspace, live.branch)
 		pumpStream(stdout, live.events, handler, armPendingAskFn, &live.turnActive,
-			live.agentName, live.workspace, live.branch, logger)
+			live.agentName, live.workspace, live.branch, logger,
+			withControlResponder(live.resolveControlResponse))
 	})
 
 	// stderr drainer — Claude Code logs to stderr; we both log
@@ -906,6 +927,103 @@ func (d *driver) Keepalive(ctx context.Context, onRecover func(context.Context) 
 		return fmt.Errorf("claudecode: bridge process dead (pid=%d) and no recovery callback", d.pid)
 	}
 	return onRecover(ctx)
+}
+
+// probeSubtype is the control_request subtype the liveness probe
+// sends. get_usage is answered by the CLI while a turn is running,
+// and — unlike interrupt — it changes nothing about the turn.
+const probeSubtype = "get_usage"
+
+// controlRequestFrame is the wire shape of the probe. The
+// request_id sits at the top level, next to "type" and "request":
+// that is the only place the CLI echoes it back, so an id nested
+// inside "request" would leave the answer uncorrelatable.
+type controlRequestFrame struct {
+	Type      string         `json:"type"`
+	Request   map[string]any `json:"request"`
+	RequestID string         `json:"request_id"`
+}
+
+// Ping is the driver.Ping implementation for the claudecode bridge.
+// It writes a control_request with the get_usage subtype and waits
+// for the matching control_response.
+//
+// The answer is resolved from the bridge's own pending-probe map,
+// not from the event channel: the probe exists to answer "is the
+// CLI still responsive", and it has to stay answerable when that
+// channel is wedged.
+//
+// The probe never reaches the model's context — the CLI answers it
+// on its control channel and emits no result frame for it.
+func (d *driver) Ping(ctx context.Context) error {
+	if d.stdin == nil {
+		return errors.New("claudecode: no stdin")
+	}
+	requestID := fmt.Sprintf("nightme-probe-%d", d.nextProbeID.Add(1))
+	answered := make(chan struct{}, 1)
+
+	d.probeMu.Lock()
+	if d.pendingProbes == nil {
+		d.pendingProbes = make(map[string]chan struct{})
+	}
+	d.pendingProbes[requestID] = answered
+	d.probeMu.Unlock()
+	defer func() {
+		d.probeMu.Lock()
+		delete(d.pendingProbes, requestID)
+		d.probeMu.Unlock()
+	}()
+
+	payload, err := json.Marshal(controlRequestFrame{
+		Type:      "control_request",
+		Request:   map[string]any{"subtype": probeSubtype},
+		RequestID: requestID,
+	})
+	if err != nil {
+		return fmt.Errorf("claudecode: ping: %w", err)
+	}
+	if err := d.writeLine(payload); err != nil {
+		return fmt.Errorf("claudecode: ping: %w", err)
+	}
+
+	select {
+	case <-answered:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("claudecode: ping: %w", ctx.Err())
+	}
+}
+
+// resolveControlResponse matches a control_response frame against the
+// pending probes and hands the answer to the waiting probe.
+//
+// The answer itself does not matter: an error answer ("Unsupported
+// control request subtype") still proves the CLI is responsive.
+//
+// A frame that carries no request_id is matched against the single
+// pending probe when there is exactly one — a CLI revision that
+// drops the id would otherwise leave every probe to time out.
+func (d *driver) resolveControlResponse(ev streamEvent) {
+	if ev.Response == nil {
+		return
+	}
+	d.probeMu.Lock()
+	var answered chan struct{}
+	if id := ev.Response.RequestID; id != "" {
+		answered = d.pendingProbes[id]
+	} else if len(d.pendingProbes) == 1 {
+		for _, ch := range d.pendingProbes {
+			answered = ch
+		}
+	}
+	d.probeMu.Unlock()
+	if answered == nil {
+		return
+	}
+	select {
+	case answered <- struct{}{}:
+	default:
+	}
 }
 
 // and exits cleanly), waits briefly for graceful shutdown, then

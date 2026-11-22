@@ -1240,20 +1240,24 @@ graceful-fallback-on-network-error 语义(错误路径更曲折)。
 
 | 字段 | 是什么 |
 |---|---|
-| `agent` | 跑它的 agent 名 |
+| `agent` | 跑它的 agent 名(那次没有 agent 可跑时为空) |
 | `ctx` | 失败那一刻冻结的工作区上下文(worktree / branch / repoRoot / issue) |
 | `prompt` | 最后一次尝试的 prompt(自包含) |
 | `sessionID` | 最后一次尝试的 session id(到过 agent 才有) |
 | `failed` | 上一次是不是失败 |
 
-存在 gtw 的 `Manager` 里(`RecordStore`),**只在内存** —— daemon 重启即失,
-和 `/review` 的续跑状态同款。`HandlerDeps.Records` 把这个 store 递给
-dispatcher,所以 dispatcher 不需要 manager 本身。
+存在 gtw 的 `Manager` 里(`recordStore`),**只在内存** —— daemon 重启即失,
+和 `/review` 的续跑状态同款。`HandlerDeps` 把这个 store 递给 dispatcher,
+所以 dispatcher 不需要 manager 本身。
 
 什么时候写:agent 阶段失败时。commit 的两种是 `agent_error`(agent 没跑起来)
 与 `not_committed`(agent 跑了但没提交);pr 的两种是 `agent_error` 与格式门
 失败(`agent_error` + `format` / `attempts`)。git 层的拒绝(冲突、游离 HEAD、
 工作树干净)不进记录 —— 那些没有"接着干"的活,重打命令就行。
+
+记录里的 `agent` 可能是空的:那次失败就是"没有 agent 可跑"(用户还没 `/use`)。
+续跑这时不拿空名字去查注册表(那只会回一句 `unknown agent ""`),而是按
+正常的三档重新解析一次 —— 用户这中间可能已经选好了 agent。
 
 什么时候清:该子命令这次跑成功时,记录换成一条"成功"的 —— `--continue`
 因此能说出"上次已经跑完了",而不是"没有可续的"。

@@ -7,7 +7,10 @@ package gtw
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -500,7 +503,7 @@ func TestDispatchCommit_ContinueWithoutARecord(t *testing.T) {
 	withAgent(t, &recordingAgent{name: "claude", runOnceText: "committed"})
 
 	_, err := dispatchCommit(p.ctx, p.cs,
-		HandlerDeps{Git: git, Records: NewRecordStore()},
+		HandlerDeps{Git: git, records: newRecordStore()},
 		"chat", "msg-1", commitArgs{Continue: true}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchCommit: %v", err)
@@ -519,11 +522,11 @@ func TestDispatchCommit_ContinueAfterSuccess(t *testing.T) {
 	git := commitContinueRig(t, "wt-continue-done")
 	withAgent(t, &recordingAgent{name: "claude", runOnceText: "committed"})
 
-	records := NewRecordStore()
+	records := newRecordStore()
 	records.Set("chat", subCommit, gtwRecord{agent: "claude", ctx: Context{Branch: "wt-continue-done"}})
 
 	_, err := dispatchCommit(p.ctx, p.cs,
-		HandlerDeps{Git: git, Records: records},
+		HandlerDeps{Git: git, records: records},
 		"chat", "msg-1", commitArgs{Continue: true}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchCommit: %v", err)
@@ -555,9 +558,9 @@ func TestDispatchCommit_FailureIsRecorded(t *testing.T) {
 		t.Fatalf("SetSelectedCwd: %v", err)
 	}
 
-	records := NewRecordStore()
+	records := newRecordStore()
 	_, err := dispatchCommit(p.ctx, p.cs,
-		HandlerDeps{Git: git, Records: records},
+		HandlerDeps{Git: git, records: records},
 		"chat", "msg-1", commitArgs{}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchCommit: %v", err)
@@ -589,7 +592,7 @@ func TestDispatchCommit_ContinueReplaysThePrompt(t *testing.T) {
 	claude := &recordingAgent{name: "claude", runOnceText: "committed"}
 	withAgent(t, claude)
 
-	records := NewRecordStore()
+	records := newRecordStore()
 	records.Set("chat", subCommit, gtwRecord{
 		agent:  "claude",
 		ctx:    Context{Worktree: "/w", Branch: "wt-replay"},
@@ -598,7 +601,7 @@ func TestDispatchCommit_ContinueReplaysThePrompt(t *testing.T) {
 	})
 
 	_, err := dispatchCommit(p.ctx, p.cs,
-		HandlerDeps{Git: git, Records: records},
+		HandlerDeps{Git: git, records: records},
 		"chat", "msg-1", commitArgs{Continue: true}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchCommit: %v", err)
@@ -630,7 +633,7 @@ func TestDispatchCommit_ContinueResumesTheSession(t *testing.T) {
 	starter := &sessionStarter{name: "claude", text: "committed", sessionID: "sess-1"}
 	withStarters(t, starter)
 
-	records := NewRecordStore()
+	records := newRecordStore()
 	records.Set("chat", subCommit, gtwRecord{
 		agent:     "claude",
 		ctx:       Context{Worktree: "/w", Branch: "wt-resume"},
@@ -640,7 +643,7 @@ func TestDispatchCommit_ContinueResumesTheSession(t *testing.T) {
 	})
 
 	_, err := dispatchCommit(p.ctx, p.cs,
-		HandlerDeps{Git: git, Records: records},
+		HandlerDeps{Git: git, records: records},
 		"chat", "msg-1", commitArgs{Continue: true}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchCommit: %v", err)
@@ -672,7 +675,7 @@ func TestDispatchCommit_ContinueTakeoverReplaysOnTheNewAgent(t *testing.T) {
 	codex := &recordingAgent{name: "codex", runOnceText: "committed"}
 	withAgent(t, claude, codex)
 
-	records := NewRecordStore()
+	records := newRecordStore()
 	records.Set("chat", subCommit, gtwRecord{
 		agent:     "claude",
 		ctx:       Context{Worktree: "/w", Branch: "wt-takeover"},
@@ -682,7 +685,7 @@ func TestDispatchCommit_ContinueTakeoverReplaysOnTheNewAgent(t *testing.T) {
 	})
 
 	_, err := dispatchCommit(p.ctx, p.cs,
-		HandlerDeps{Git: git, Records: records},
+		HandlerDeps{Git: git, records: records},
 		"chat", "msg-1", commitArgs{Continue: true, Agent: "codex"}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchCommit: %v", err)
@@ -712,7 +715,7 @@ func TestDispatchCommit_ContinueUsesTheRecordedWorktree(t *testing.T) {
 	git := commitContinueRig(t, "wt-frozen")
 	withAgent(t, &recordingAgent{name: "claude", runOnceText: "committed"})
 
-	records := NewRecordStore()
+	records := newRecordStore()
 	records.Set("chat", subCommit, gtwRecord{
 		agent:  "claude",
 		ctx:    Context{Worktree: "/frozen/worktree", Branch: "wt-frozen"},
@@ -726,7 +729,7 @@ func TestDispatchCommit_ContinueUsesTheRecordedWorktree(t *testing.T) {
 	}
 
 	_, err := dispatchCommit(p.ctx, p.cs,
-		HandlerDeps{Git: git, Records: records},
+		HandlerDeps{Git: git, records: records},
 		"chat", "msg-1", commitArgs{Continue: true}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchCommit: %v", err)
@@ -751,7 +754,7 @@ func TestDispatchPR_ContinueWithoutARecord(t *testing.T) {
 	p := newOutcomeProbe(t)
 	rig := newPRTestRig(t)
 	rig.installDeps()
-	rig.deps.Records = NewRecordStore()
+	rig.deps.records = newRecordStore()
 
 	_, err := dispatchPR(p.ctx, p.cs, rig.deps,
 		"chat", "msg-1", prArgs{Continue: true}, Config{})
@@ -773,7 +776,7 @@ func TestDispatchPR_FormatFailureIsRecorded(t *testing.T) {
 	p := newOutcomeProbe(t)
 	rig := newPRTestRig(t)
 	rig.installDeps()
-	rig.deps.Records = NewRecordStore()
+	rig.deps.records = newRecordStore()
 	dir := setupPRWorktree(t, rig, Context{Branch: "wt-pr-fail"})
 	if err := p.cs.SetSelectedCwd(dir); err != nil {
 		t.Fatalf("SetSelectedCwd: %v", err)
@@ -791,7 +794,7 @@ func TestDispatchPR_FormatFailureIsRecorded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dispatchPR: %v", err)
 	}
-	rec, ok := rig.deps.Records.Lookup("chat", subPR)
+	rec, ok := rig.deps.records.Lookup("chat", subPR)
 	if !ok {
 		t.Fatalf("the failed run left no record")
 	}
@@ -814,7 +817,7 @@ func TestDispatchPR_ContinueReplaysTheStoredPrompt(t *testing.T) {
 	p := newOutcomeProbe(t)
 	rig := newPRTestRig(t)
 	rig.installDeps()
-	rig.deps.Records = NewRecordStore()
+	rig.deps.records = newRecordStore()
 	dir := setupPRWorktree(t, rig, Context{Branch: "wt-pr-continue"})
 	if err := p.cs.SetSelectedCwd(dir); err != nil {
 		t.Fatalf("SetSelectedCwd: %v", err)
@@ -825,7 +828,7 @@ func TestDispatchPR_ContinueReplaysTheStoredPrompt(t *testing.T) {
 	setupPRGit(rig, "wt-pr-continue", 0)
 
 	// The stored prompt is what the failed attempt was given.
-	rig.deps.Records.Set("chat", subPR, gtwRecord{
+	rig.deps.records.Set("chat", subPR, gtwRecord{
 		agent:  "claude",
 		ctx:    Context{Worktree: dir, Branch: "wt-pr-continue", RepoRoot: dir},
 		prompt: "the stored prompt",
@@ -867,7 +870,7 @@ func TestDispatchCommit_ContinueUpdatesTheRecord(t *testing.T) {
 	git.onArgs([]string{"rev-parse", "HEAD"}, "aaaa\n", "", nil)
 	withAgent(t, &recordingAgent{name: "claude", runOnceErr: errBoom})
 
-	records := NewRecordStore()
+	records := newRecordStore()
 	records.Set("chat", subCommit, gtwRecord{
 		agent:  "claude",
 		ctx:    Context{Worktree: "/w", Branch: "wt-chain"},
@@ -876,7 +879,7 @@ func TestDispatchCommit_ContinueUpdatesTheRecord(t *testing.T) {
 	})
 
 	_, err := dispatchCommit(p.ctx, p.cs,
-		HandlerDeps{Git: git, Records: records},
+		HandlerDeps{Git: git, records: records},
 		"chat", "msg-1", commitArgs{Continue: true}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchCommit: %v", err)
@@ -901,7 +904,7 @@ func TestDispatchCommit_AbortedRunKeepsTheRecord(t *testing.T) {
 	git := commitContinueRig(t, "wt-abort")
 	withAgent(t, &recordingAgent{name: "claude", runOnceText: "committed"})
 
-	records := NewRecordStore()
+	records := newRecordStore()
 	records.Set("chat", subCommit, gtwRecord{
 		agent:  "claude",
 		ctx:    Context{Worktree: "/w", Branch: "wt-abort"},
@@ -913,7 +916,7 @@ func TestDispatchCommit_AbortedRunKeepsTheRecord(t *testing.T) {
 	cancel(ErrAborted)
 
 	_, err := dispatchCommit(ctx, p.cs,
-		HandlerDeps{Git: git, Records: records},
+		HandlerDeps{Git: git, records: records},
 		"chat", "msg-1", commitArgs{}, Config{})
 	if err != nil {
 		t.Fatalf("dispatchCommit: %v", err)
@@ -927,6 +930,133 @@ func TestDispatchCommit_AbortedRunKeepsTheRecord(t *testing.T) {
 	}
 	if rec.prompt != "the recorded prompt" {
 		t.Errorf("the aborted run overwrote the record: %+v", rec)
+	}
+}
+
+// TestDispatchCommit_ContinueStopsWhenTheWorkIsDone covers the
+// stale record of a failed attempt whose work the user finished by
+// hand: the continuation re-runs the readiness gate first, so it
+// reports the finished work instead of resuming the old session.
+func TestDispatchCommit_ContinueStopsWhenTheWorkIsDone(t *testing.T) {
+	p := newOutcomeProbe(t)
+	// A clean worktree: the user committed by hand.
+	git := newPushGit()
+	git.onArgs(statusCmd, "## wt-done...origin/wt-done\n", "", nil)
+	claude := &recordingAgent{name: "claude", runOnceText: "should-not-be-called"}
+	withAgent(t, claude)
+
+	records := newRecordStore()
+	records.Set("chat", subCommit, gtwRecord{
+		agent:     "claude",
+		ctx:       Context{Worktree: "/w", Branch: "wt-done"},
+		prompt:    "the recorded prompt",
+		sessionID: "sess-1",
+		failed:    true,
+	})
+
+	_, err := dispatchCommit(p.ctx, p.cs,
+		HandlerDeps{Git: git, records: records},
+		"chat", "msg-1", commitArgs{Continue: true}, Config{})
+	if err != nil {
+		t.Fatalf("dispatchCommit: %v", err)
+	}
+	if len(claude.calls) != 0 {
+		t.Errorf("the agent ran %d time(s); want 0 (the work is already done)", len(claude.calls))
+	}
+	if !strings.Contains(p.ch.lastText(), "nothing to commit") {
+		t.Errorf("reply = %q, want it to report the finished work", p.ch.lastText())
+	}
+}
+
+// TestDispatchCommit_ContinueWithNoRecordedAgentResolvesOne covers
+// the failed attempt that named no agent: there was none to run, so
+// the record carries no name. The continuation resolves one now —
+// the tiers decide, exactly as a fresh run does — instead of
+// refusing with an empty name.
+func TestDispatchCommit_ContinueWithNoRecordedAgentResolvesOne(t *testing.T) {
+	p := newOutcomeProbe(t)
+	git := commitContinueRig(t, "wt-no-agent")
+	claude := &recordingAgent{name: "claude", runOnceText: "committed"}
+	withAgent(t, claude)
+	if err := p.cs.SetSelectedAgent("claude"); err != nil {
+		t.Fatalf("SetSelectedAgent: %v", err)
+	}
+
+	records := newRecordStore()
+	records.Set("chat", subCommit, gtwRecord{
+		ctx:    Context{Worktree: "/w", Branch: "wt-no-agent"},
+		prompt: "the recorded prompt",
+		failed: true,
+	})
+
+	_, err := dispatchCommit(p.ctx, p.cs,
+		HandlerDeps{Git: git, records: records},
+		"chat", "msg-1", commitArgs{Continue: true}, Config{})
+	if err != nil {
+		t.Fatalf("dispatchCommit: %v", err)
+	}
+	claude.mu.Lock()
+	calls := len(claude.calls)
+	claude.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("the agent ran %d time(s), want 1", calls)
+	}
+	if strings.Contains(p.ch.lastText(), "unknown agent") {
+		t.Errorf("the continuation refused with an unknown agent: %q", p.ch.lastText())
+	}
+	got := p.settle(t)
+	assertOutcome(t, got, messages.OutcomeOK, nil)
+}
+
+// TestRunCommit_ContinueHooksSeeTheRecordedWorkspace covers the
+// hook context of a continuation: the before- and the after-hook
+// both see the worktree the continuation works in — not the chat's
+// current cwd.
+func TestRunCommit_ContinueHooksSeeTheRecordedWorkspace(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the hook uses sh-style env expansion")
+	}
+	home := sandboxHome(t)
+	marker := filepath.Join(t.TempDir(), "hooks.txt")
+	writeUserYml(t, home, fmt.Sprintf(
+		"commit:\n  hooks:\n    before:\n      - run: 'echo before $GTW_WORKTREE >> %s'\n    after:\n      - run: 'echo after $GTW_WORKTREE >> %s'\n",
+		marker, marker))
+
+	withAgent(t, &recordingAgent{name: "claude", runOnceText: "committed"})
+	git := newPushGit() // no response: the continuation stops at the readiness gate
+
+	// The chat's cwd is a workspace of its own; the continuation
+	// works in the recorded one.
+	withCwd(t, t.TempDir())
+	cs := newPushChatSession(t)
+
+	records := newRecordStore()
+	records.Set("chat", subCommit, gtwRecord{
+		agent:  "claude",
+		ctx:    Context{Worktree: "/recorded/worktree", Branch: "wt-recorded"},
+		prompt: "the recorded prompt",
+		failed: true,
+	})
+
+	f := NewFactoryWithDeps(NewManager(), HandlerDeps{Git: git, records: records})
+	if _, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs, command.SlashInput{
+		ChatID:    "chat",
+		MessageID: "msg",
+		Text:      "/gtw commit --continue",
+		Args:      []string{"gtw", "commit", "--continue"},
+	}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("read the hook marker: %v", err)
+	}
+	got := string(data)
+	for _, want := range []string{"before /recorded/worktree", "after /recorded/worktree"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the hook output lacks %q:\n%s", want, got)
+		}
 	}
 }
 

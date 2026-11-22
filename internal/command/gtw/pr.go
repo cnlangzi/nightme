@@ -193,7 +193,7 @@ func dispatchPR(
 	var c Context
 	var cont *gtwRecord
 	if args.Continue {
-		rec, ok := deps.Records.Lookup(chatID, subPR)
+		rec, ok := deps.records.Lookup(chatID, subPR)
 		if !ok {
 			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 				"❌ no failed /gtw pr to continue — run /gtw pr first",
@@ -360,7 +360,7 @@ func dispatchPR(
 	// resolves nothing.
 	var run prAgentRun
 	if cont != nil {
-		run, err = runPRContinuation(ctx, cs, cont, args.Agent, chatID, messageID)
+		run, err = runPRContinuation(ctx, cs, cfg, cont, args.Agent, chatID, messageID)
 	} else {
 		lang := resolveLanguage(ctx, cfg, c.Worktree, deps.Git)
 		run, err = runPRAgent(ctx, cs, c, cfg, args, chatID, messageID,
@@ -376,10 +376,9 @@ func dispatchPR(
 			prompt:    run.Prompt,
 			sessionID: run.Res.SessionID,
 			failed:    true,
-			reason:    err.Error(),
 		})
 		reason := "agent_error"
-		if errors.Is(err, errUnknownAgent) {
+		if errors.Is(err, agent.ErrUnknownAgent) {
 			reason = "unknown_agent"
 		}
 		return replyAgentOutcome(ctx, cs.Emitter(), chatID, messageID,
@@ -397,7 +396,6 @@ func dispatchPR(
 			prompt:    run.Prompt,
 			sessionID: run.Res.SessionID,
 			failed:    true,
-			reason:    run.Failure.Reason.Error(),
 		})
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 			withWarning(fmt.Sprintf(
@@ -729,18 +727,16 @@ func runPRAgent(
 	chatID, messageID string,
 	basePrompt string,
 ) (prAgentRun, error) {
-	first := func(ctx context.Context, prompt string) (agent.RunResult, string, error) {
+	// Both attempts reach the agent the same way: the correction
+	// round differs in its prompt, not in how it runs.
+	run := func(ctx context.Context, prompt string) (agent.RunResult, string, error) {
 		return runAgentFor(ctx, cs, c.Worktree, prompt, chatID, messageID,
 			args.Agent, cfg.PR.Agent,
 			// Drop OutResult; the dispatcher's card is the only
 			// result surface.
 			messages.OutResult)
 	}
-	correct := func(ctx context.Context, prompt string) (agent.RunResult, string, error) {
-		return runAgentFor(ctx, cs, c.Worktree, prompt, chatID, messageID,
-			args.Agent, cfg.PR.Agent, messages.OutResult)
-	}
-	return runPRAttempts(ctx, basePrompt, first, correct)
+	return runPRAttempts(ctx, basePrompt, run, run)
 }
 
 // runPRContinuation runs the agent turn of a /gtw pr continuation.
@@ -759,6 +755,7 @@ func runPRAgent(
 func runPRContinuation(
 	ctx context.Context,
 	cs *chatsession.ChatSession,
+	cfg Config,
 	cont *gtwRecord,
 	takeoverAgent, chatID, messageID string,
 ) (prAgentRun, error) {
@@ -768,6 +765,17 @@ func runPRContinuation(
 		// The takeover: the new agent gets the recorded prompt.
 		name = takeoverAgent
 		sessionID = ""
+	}
+	if name == "" {
+		// The failed attempt named no agent — there was none to
+		// run. The tiers decide now, exactly as a fresh run does:
+		// the chat may have selected an agent since, and the yml
+		// may carry a default.
+		run := func(ctx context.Context, prompt string) (agent.RunResult, string, error) {
+			return runAgentFor(ctx, cs, cont.ctx.Worktree, prompt, chatID, messageID,
+				takeoverAgent, cfg.PR.Agent, messages.OutResult)
+		}
+		return runPRAttempts(ctx, cont.prompt, run, run)
 	}
 	first := func(ctx context.Context, prompt string) (agent.RunResult, string, error) {
 		if sessionID != "" {

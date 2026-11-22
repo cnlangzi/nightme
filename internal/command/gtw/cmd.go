@@ -125,7 +125,9 @@ func init() {
 // `--continue` flags of /gtw commit and /gtw pr pick their run up
 // from it.
 func (f *Factory) SetHandlerDeps(deps HandlerDeps) {
-	deps.Records = f.mgr.Records()
+	if deps.records == nil {
+		deps.records = f.mgr.records
+	}
 	f.deps = deps
 }
 
@@ -134,9 +136,9 @@ func (f *Factory) SetHandlerDeps(deps HandlerDeps) {
 // A continuation works on the workspace of the attempt it picks up
 // — the chat's cwd may have moved since — so its hooks see that
 // workspace rather than the chat's current one.
-func (f *Factory) hookContext(ctx context.Context, cs *chatsession.ChatSession, chatID, command, sub string, cont bool) HookContext {
+func (f *Factory) hookContext(ctx context.Context, cs *chatsession.ChatSession, chatID, command string, cont bool) HookContext {
 	if cont {
-		if rec, ok := f.deps.Records.Lookup(chatID, sub); ok {
+		if rec, ok := f.deps.records.Lookup(chatID, command); ok {
 			return HookContext{
 				Command:  command,
 				RepoRoot: rec.ctx.RepoRoot,
@@ -1168,7 +1170,7 @@ func (f *Factory) runCommit(ctx context.Context, _ command.RuntimeServices, cs *
 	if err != nil {
 		reason := "config_error"
 		summary := "the commit agent could not be persisted"
-		if errors.Is(err, errUnknownGTWAgent) {
+		if errors.Is(err, agent.ErrUnknownAgent) {
 			reason = "unknown_agent"
 			summary = "the commit agent is not a registered agent"
 		}
@@ -1202,14 +1204,17 @@ func (f *Factory) runCommit(ctx context.Context, _ command.RuntimeServices, cs *
 
 	cfg, loadNotes := Load()
 
-	hc := f.hookContext(ctx, cs, input.ChatID, "commit", subCommit, args.Continue)
+	hc := f.hookContext(ctx, cs, input.ChatID, "commit", args.Continue)
 	hcFn := func() HookContext { return hc }
 	err = f.withHooks(ctx, cs, input.ChatID, input.MessageID,
 		loadNotes, hcFn, cfg.Commit.Hooks.Before, cfg.Commit.Hooks.After,
 		func() error {
 			res, e := dispatchCommit(ctx, cs, f.deps, input.ChatID, input.MessageID, args, cfg)
 			_ = res // dispatchCommit already sent the reply via cs.Emitter()
-			if e == nil {
+			// A continuation works in the recorded workspace, so its
+			// after-hook keeps that workspace — re-deriving from the
+			// chat's cwd would point the hook at the wrong tree.
+			if e == nil && !args.Continue {
 				hc = f.deriveHookContext(ctx, cs, "commit")
 			}
 			return e
@@ -1490,11 +1495,6 @@ func validateGTWFlags(agentName string, global, unset, cont bool) error {
 	return nil
 }
 
-// errUnknownGTWAgent is the failure of a -g flag that names an
-// agent no registered starter answers to. It is distinct from a
-// failed write: nothing was written, and the name itself is wrong.
-var errUnknownGTWAgent = errors.New("unknown agent")
-
 // applyGlobalScope performs the global-scope write of one
 // /gtw commit / /gtw pr invocation: `-g` persists the agent as the
 // subcommand's default, `--unset` removes it.
@@ -1524,7 +1524,7 @@ func applyGlobalScope(sub, agentName string, global, unset bool, verb string) (n
 		// that no agent answers to would only fail later, on
 		// every run of the subcommand.
 		if _, err := agent.Builtins.Get(agentName); err != nil {
-			return nil, false, false, fmt.Errorf("%w %q", errUnknownGTWAgent, agentName)
+			return nil, false, false, unknownAgentError{name: agentName}
 		}
 		if err := setGlobalAgent(sub, agentName); err != nil {
 			return []string{fmt.Sprintf(
@@ -1573,7 +1573,7 @@ func (f *Factory) runPR(ctx context.Context, _ command.RuntimeServices, cs *chat
 	if err != nil {
 		reason := "config_error"
 		summary := "the PR agent could not be persisted"
-		if errors.Is(err, errUnknownGTWAgent) {
+		if errors.Is(err, agent.ErrUnknownAgent) {
 			reason = "unknown_agent"
 			summary = "the PR agent is not a registered agent"
 		}
@@ -1607,7 +1607,7 @@ func (f *Factory) runPR(ctx context.Context, _ command.RuntimeServices, cs *chat
 
 	cfg, loadNotes := Load()
 
-	hc := f.hookContext(ctx, cs, input.ChatID, "pr", subPR, args.Continue)
+	hc := f.hookContext(ctx, cs, input.ChatID, "pr", args.Continue)
 	hcFn := func() HookContext { return hc }
 	err = f.withHooks(ctx, cs, input.ChatID, input.MessageID,
 		loadNotes, hcFn, cfg.PR.Hooks.Before, cfg.PR.Hooks.After,
@@ -1616,8 +1616,10 @@ func (f *Factory) runPR(ctx context.Context, _ command.RuntimeServices, cs *chat
 			// dispatchPR loads the dispatch context internally
 			// (worktree/branch from yml). Re-derive so any
 			// future change that mutates cwd during PR
-			// dispatch flows to the post-hook env.
-			if e == nil {
+			// dispatch flows to the post-hook env. A continuation
+			// works in the recorded workspace, so its after-hook
+			// keeps that one.
+			if e == nil && !args.Continue {
 				hc = f.deriveHookContext(ctx, cs, "pr")
 			}
 			return e

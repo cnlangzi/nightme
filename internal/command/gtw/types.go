@@ -234,9 +234,6 @@ type gtwRecord struct {
 	// current one — a newer run owns the chat's state.
 	id uint64
 
-	// sub is the subcommand the record belongs to.
-	sub string
-
 	// agent is the agent that ran the attempt.
 	agent string
 
@@ -256,9 +253,6 @@ type gtwRecord struct {
 	// whose last attempt succeeded holds nothing to continue, but
 	// it is kept so `--continue` can say so.
 	failed bool
-
-	// reason is the human-readable reason the last attempt failed.
-	reason string
 }
 
 // ReactionEvent is the inbound reaction payload. Type alias to

@@ -38,9 +38,9 @@ package gtw
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -115,11 +115,25 @@ func runAgentFor(
 	return runAgentNamed(ctx, cs, agentName, workspace, prompt, "", chatID, messageID, dropKinds...)
 }
 
-// errUnknownAgent is the failure of an agent name that no
-// registered starter answers to. It is a distinct failure from a
-// failed run: the name itself is wrong, so the caller reports it
-// under its own reason code.
-var errUnknownAgent = errors.New("❌ unknown agent")
+// unknownAgentError is the failure of an agent name that no
+// registered starter answers to.
+//
+// It is a distinct failure from a failed run: the name itself is
+// wrong, so the caller reports it under its own reason code. It
+// unwraps to the agent package's canonical sentinel, so a caller
+// matches one thing — agent.ErrUnknownAgent — wherever the failure
+// came from.
+type unknownAgentError struct {
+	name string
+}
+
+func (e unknownAgentError) Error() string {
+	return "unknown agent " + strconv.Quote(e.name)
+}
+
+func (e unknownAgentError) Unwrap() error {
+	return agent.ErrUnknownAgent
+}
 
 // runAgentNamed runs one one-shot turn with an explicitly named
 // agent.
@@ -145,7 +159,7 @@ func runAgentNamed(
 ) (agent.RunResult, string, error) {
 	a, err := agent.Builtins.Get(agentName)
 	if err != nil {
-		return agent.RunResult{}, agentName, fmt.Errorf("%w %q (check `nightme agents` or your config)", errUnknownAgent, agentName)
+		return agent.RunResult{}, agentName, fmt.Errorf("❌ %w (check `nightme agents` or your config)", unknownAgentError{name: agentName})
 	}
 	if err := a.Detect(); err != nil {
 		return agent.RunResult{}, agentName, fmt.Errorf("❌ agent %s not available: %v", agentName, err)

@@ -70,7 +70,7 @@ func dispatchCommit(
 	var c Context
 	var cont *gtwRecord
 	if args.Continue {
-		rec, ok := deps.Records.Lookup(chatID, subCommit)
+		rec, ok := deps.records.Lookup(chatID, subCommit)
 		if !ok {
 			return replyOutcome(ctx, cs.Emitter(), chatID, messageID,
 				"❌ no failed /gtw commit to continue — run /gtw commit first",
@@ -169,10 +169,9 @@ func dispatchCommit(
 			prompt:    recordPrompt,
 			sessionID: runRes.SessionID,
 			failed:    true,
-			reason:    err.Error(),
 		})
 		reason := "agent_error"
-		if errors.Is(err, errUnknownAgent) {
+		if errors.Is(err, agent.ErrUnknownAgent) {
 			reason = "unknown_agent"
 		}
 		return replyAgentOutcome(ctx, cs.Emitter(), chatID, messageID,
@@ -195,7 +194,6 @@ func dispatchCommit(
 			prompt:    recordPrompt,
 			sessionID: runRes.SessionID,
 			failed:    true,
-			reason:    msg,
 		})
 		return replyOutcome(ctx, cs.Emitter(), chatID, messageID, msg,
 			command.FailedOutcome("not_committed", "the agent did not commit the work")), nil
@@ -324,6 +322,16 @@ func commitAgentPhase(
 		// The takeover: the new agent gets the recorded prompt.
 		name = args.Agent
 		sessionID = ""
+	}
+	if name == "" {
+		// The failed attempt named no agent — there was none to
+		// run. The tiers decide now, exactly as a fresh run does:
+		// the chat may have selected an agent since, and the yml
+		// may carry a default.
+		return func(ctx context.Context) (agent.RunResult, string, error) {
+			return runAgentFor(ctx, cs, cont.ctx.Worktree, cont.prompt, chatID, messageID,
+				args.Agent, cfg.Commit.Agent, messages.OutResult)
+		}, cont.prompt
 	}
 	prompt := cont.prompt
 	if sessionID != "" {

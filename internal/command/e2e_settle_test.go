@@ -146,11 +146,25 @@ func (a *settleAgent) RunOnce(ctx context.Context, _ agent.StartConfig, blocks [
 }
 
 // Review returns findings without touching the chat session's agent
-// — /review runs its review on separate one-shot sessions.
-func (a *settleAgent) Review(_ context.Context, _ agent.StartConfig, _ ...agent.RunOnceOption) (agent.RunResult, error) {
+// — /review runs its review on separate one-shot sessions. The group
+// is reported through the observer, the way the fan-out reports it.
+func (a *settleAgent) Review(_ context.Context, _ agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	select {
 	case a.bridge.reviewCalls <- struct{}{}:
 	default:
+	}
+	cfg := agent.ParseRunOnceOptions(opts)
+	if cfg.OnReviewPlan != nil {
+		cfg.OnReviewPlan([]agent.ReviewPlanGroup{{Pattern: "**/*.go", Label: "**/*.go", Files: []string{"a.go"}}})
+	}
+	if cfg.OnReviewJob != nil {
+		cfg.OnReviewJob(agent.ReviewJob{
+			Pattern:   "**/*.go",
+			Files:     []string{"a.go"},
+			SessionID: "sess-settle",
+			Report:    agent.ReviewReport{Parsed: true},
+			Text:      "## Review\n\none finding",
+		}, nil)
 	}
 	return agent.RunResult{Text: "## Review\n\none finding"}, nil
 }

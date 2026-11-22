@@ -90,6 +90,7 @@ type Outcome struct {
 | `findings` | review 收集到的 findings 条数（`/review`） |
 | `continued_groups` | 续跑完成了几组（`/review --continue` 只跑没完成的那几组：跑到 agent 的那几组续跑，没跑到的那几组重跑） |
 | `unfinished` | 没跑完的项数（`/review` 的 fan-out 跑过就有：全部跑完时是 `0`；fan-out 之前就失败就没有这个键） |
+| `delivered` | `/review` 的 findings 有没有交付给 agent（`"false"` = 这次 review 还没到齐，findings 还在等；`"true"` = 已经注入 agent） |
 | `subcommand` | 被 `/gtw abort` 取消的子命令 |
 | `elapsed` | 被取消的子命令（`/gtw abort`）或 review（`/review --abort`）已经跑了多久 |
 | `kind` | 被 `/review --abort` 取消的是哪一次 run：`review`（review 本体）或 `continue`（续跑） |

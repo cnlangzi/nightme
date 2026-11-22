@@ -114,9 +114,9 @@ func TestReviewContinueVerdict(t *testing.T) {
 			enableThink(t, cs)
 
 			f := NewFactory()
-			f.record(chatID, recorded.name, dir, []reviewOutcome{
+			f.record(chatID, recorded.name, dir, reviewRun{outcomes: []reviewOutcome{
 				{pattern: "**/*.go", files: []string{"a.go"}, sessionID: "sess-go", err: errors.New("boom")},
-			})
+			}})
 
 			hold := cs.Hold("msg-1")
 			ctx := chatsession.WithWork(context.Background(), hold)

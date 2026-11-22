@@ -47,7 +47,7 @@ func TestHandle_ReviewKeepsTheGroupPrompt(t *testing.T) {
 			{Pattern: "**/*.go", Label: "**/*.go", Files: []string{"a.go"}},
 		},
 		prompt: "the group's prompt",
-		merged: "### Group: pattern **/*.go — files: a.go\n\nthe findings\n\n",
+		texts:  []string{"the findings"},
 	}
 	agents.registry.Register(starter)
 
@@ -87,7 +87,7 @@ func TestHandle_ContinueRerunsTheGroupThatNeverStarted(t *testing.T) {
 	enableThink(t, cs)
 
 	f := NewFactory()
-	f.record(chatID, starter.name, "/recorded/ws", []reviewOutcome{
+	f.record(chatID, starter.name, "/recorded/ws", reviewRun{outcomes: []reviewOutcome{
 		{pattern: "**/*.go", files: []string{"a.go"}},
 		{
 			pattern: "**/*.ts",
@@ -95,7 +95,7 @@ func TestHandle_ContinueRerunsTheGroupThatNeverStarted(t *testing.T) {
 			err:     errors.New("spawn failed"),
 			prompt:  "the stored prompt",
 		},
-	})
+	}})
 
 	dispatchContinue(t, f, cs, chatID, "review", "-c")
 	em.waitForOutThinking(t, "the re-run findings")
@@ -133,17 +133,19 @@ func TestHandle_ContinueRecoversAGroupOnlyOnce(t *testing.T) {
 	cs, _ := newContinueChatSession(t, chatID, starter.name, t.TempDir(), em)
 
 	f := NewFactory()
-	f.record(chatID, starter.name, "/recorded/ws", []reviewOutcome{
+	f.record(chatID, starter.name, "/recorded/ws", reviewRun{outcomes: []reviewOutcome{
 		{pattern: "**/*.ts", files: []string{"c.ts"}, sessionID: "sess-ts", err: errors.New("boom")},
-	})
+	}})
 
 	dispatchContinue(t, f, cs, chatID, "review", "-c")
-	em.waitForOutReply(t, "/review continue failed")
+	em.waitForOutReply(t, "already retried")
 	started := len(starter.startedConfigs())
 
 	out := dispatchContinue(t, f, cs, chatID, "review", "-c")
 
-	if !strings.Contains(out.Reply, "already retried") {
+	// The review is over — it was delivered with the group that died
+	// named in it — so there is nothing to continue.
+	if !strings.Contains(out.Reply, "the last review completed") {
 		t.Fatalf("unexpected reply: %q", out.Reply)
 	}
 	if got := len(starter.startedConfigs()); got != started {
@@ -206,7 +208,7 @@ func TestReviewVerdict_NamesTheFailedGroupsState(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := reviewVerdict(tc.outcomes, nil)
+			got := newVerdict(testRecord(tc.outcomes, nil, nil), true).line()
 			for _, want := range tc.want {
 				if !strings.Contains(got, want) {
 					t.Errorf("the verdict does not carry %q: %s", want, got)
@@ -310,10 +312,10 @@ func TestReviewContinueOutcome_SpeaksOfContinuedGroups(t *testing.T) {
 
 	cs, em := newOutcomeChat(t, "review-continue-summary", "reviewer")
 	f := NewFactory()
-	f.record(cs.ChatID, "reviewer", cs.SelectedCwd(), []reviewOutcome{
+	f.record(cs.ChatID, "reviewer", cs.SelectedCwd(), reviewRun{outcomes: []reviewOutcome{
 		{pattern: "group-1", files: []string{"a.go"}, sessionID: "sess-1", err: errors.New("boom")},
 		{pattern: "group-2", files: []string{"b.go"}, sessionID: "sess-2", err: errors.New("boom")},
-	})
+	}})
 
 	hold := cs.Hold("msg-1")
 	ctx := chatsession.WithWork(context.Background(), hold)
@@ -334,9 +336,10 @@ func TestReviewContinueOutcome_SpeaksOfContinuedGroups(t *testing.T) {
 	assertOutcome(t, got, messages.OutcomeIncomplete, map[string]string{
 		"continued_groups": "2",
 		"unfinished":       "1",
+		"delivered":        "true",
 	})
-	if got.Summary != "1 of 2 continued groups unfinished" {
-		t.Errorf("the summary = %q, want %q", got.Summary, "1 of 2 continued groups unfinished")
+	if got.Summary != "1 of 2 groups unfinished" {
+		t.Errorf("the summary = %q, want %q", got.Summary, "1 of 2 groups unfinished")
 	}
 }
 
@@ -349,7 +352,7 @@ func TestReviewVerdict_NamesTheUnrecoverableGroup(t *testing.T) {
 		{pattern: "**/*.ts", source: "system", sessionID: "sess-ts", err: errors.New("boom")},
 	}
 
-	got := reviewVerdict(outcomes, nil)
+	got := newVerdict(testRecord(outcomes, nil, nil), true).line()
 	if !strings.Contains(got, "- `system / **/*.go` (not recoverable)") {
 		t.Errorf("the verdict does not name the unrecoverable group: %s", got)
 	}

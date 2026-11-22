@@ -64,8 +64,20 @@ func (d *recordingDriver) blocks() []agent.ContentBlock {
 	return append([]agent.ContentBlock(nil), d.sent...)
 }
 
-// liveAgent wraps a recordingDriver in a live *agent.Agent.
-func liveAgent(name string, d *recordingDriver) *agent.Agent {
+// agentDriver is the driver an agent.Agent drives. The agent package
+// keeps the interface unexported — these are the methods a bridge
+// implements.
+type agentDriver interface {
+	SendBlocks(context.Context, []agent.ContentBlock) error
+	SendPermission(string) error
+	Reset(context.Context) error
+	Close() error
+	Stop(context.Context) error
+	Keepalive(context.Context, func(context.Context) error) error
+}
+
+// liveAgent wraps a driver in a live *agent.Agent.
+func liveAgent(name string, d agentDriver) *agent.Agent {
 	return agent.NewAgent(
 		agent.NewInfo(name, agent.ModeACP, "fake", nil, nil),
 		0, make(chan agent.AgentEvent, 8), d)
@@ -350,10 +362,10 @@ func TestFactory_RecordIsInMemory(t *testing.T) {
 	dir := t.TempDir()
 	f := NewFactory()
 
-	f.record("chat-a", "agent-x", dir, []reviewOutcome{
+	f.record("chat-a", "agent-x", dir, reviewRun{outcomes: []reviewOutcome{
 		{pattern: "**/*.go", files: []string{"a.go"}},
 		{pattern: "**/*.ts", files: []string{"c.ts"}, sessionID: "sess-ts", err: errors.New("boom")},
-	})
+	}})
 
 	rec, ok := f.lookup("chat-a")
 	if !ok {
@@ -432,10 +444,10 @@ func TestHandle_ContinueResumesTheFailedGroup(t *testing.T) {
 	enableThink(t, cs)
 
 	f := NewFactory()
-	f.record(chatID, recorded.name, "/recorded/ws", []reviewOutcome{
+	f.record(chatID, recorded.name, "/recorded/ws", reviewRun{outcomes: []reviewOutcome{
 		{pattern: "**/*.go", files: []string{"a.go"}},
 		{pattern: "**/*.ts", files: []string{"c.ts"}, sessionID: "sess-ts", err: errors.New("boom")},
-	})
+	}})
 
 	out := dispatchContinue(t, f, cs, chatID, "review", "-c")
 	if out.Reply != "" {
@@ -529,9 +541,9 @@ func TestHandle_ContinueWithAnUnknownAgent(t *testing.T) {
 	cs, _ := newContinueChatSession(t, chatID, starter.name, t.TempDir(), em)
 
 	f := NewFactory()
-	f.record(chatID, "review-never-registered", "/recorded/ws", []reviewOutcome{
+	f.record(chatID, "review-never-registered", "/recorded/ws", reviewRun{outcomes: []reviewOutcome{
 		{pattern: "**/*.ts", files: []string{"c.ts"}, sessionID: "sess-ts", err: errors.New("boom")},
-	})
+	}})
 
 	out := dispatchContinue(t, f, cs, chatID, "review", "-c")
 
@@ -561,10 +573,10 @@ func TestHandle_ContinueWithAnotherAgentTakesTheGroupsOver(t *testing.T) {
 
 	const prompt = "the stored prompt of the group"
 	f := NewFactory()
-	f.record(chatID, recorded.name, "/recorded/ws", []reviewOutcome{
+	f.record(chatID, recorded.name, "/recorded/ws", reviewRun{outcomes: []reviewOutcome{
 		{pattern: "**/*.go", files: []string{"a.go"}},
 		{pattern: "**/*.ts", files: []string{"c.ts"}, sessionID: "sess-ts", prompt: prompt, err: errors.New("boom")},
-	})
+	}})
 
 	out := dispatchContinue(t, f, cs, chatID, "review", "-c", "-a", taker.name)
 	if out.Reply != "" {
@@ -602,6 +614,10 @@ func TestHandle_ContinueWithAnotherAgentTakesTheGroupsOver(t *testing.T) {
 // TestHandle_TakeoverFailureKeepsTheRecoveryAttempt — the takeover is
 // another agent's attempt: the operator's own recovery attempt is
 // still theirs to spend.
+//
+// The takeover failed, so the review is not over: the card names the
+// group that failed and offers the continuation, and nothing is
+// delivered to the agent.
 func TestHandle_TakeoverFailureKeepsTheRecoveryAttempt(t *testing.T) {
 	agents := newTestAgents(t)
 	recorded := &reviewSessionStarter{name: "review-takeover-fail-old-agent"}
@@ -611,16 +627,21 @@ func TestHandle_TakeoverFailureKeepsTheRecoveryAttempt(t *testing.T) {
 
 	em := newRecordingEmitter()
 	const chatID = "review-takeover-fail-chat"
-	cs, _ := newContinueChatSession(t, chatID, recorded.name, t.TempDir(), em)
+	cs, asDriver := newContinueChatSession(t, chatID, recorded.name, t.TempDir(), em)
 
 	f := NewFactory()
-	f.record(chatID, recorded.name, "/recorded/ws", []reviewOutcome{
+	f.record(chatID, recorded.name, "/recorded/ws", reviewRun{outcomes: []reviewOutcome{
 		{pattern: "**/*.ts", files: []string{"c.ts"}, sessionID: "sess-ts", prompt: "the stored prompt", err: errors.New("boom")},
-	})
+	}})
 
 	dispatchContinue(t, f, cs, chatID, "review", "-c", "-a", taker.name)
-	em.waitForOutReply(t, "/review continue failed")
+	em.waitForOutReply(t, "/review --continue")
 	waitUntilIdle(t, f, chatID)
+
+	// Nothing was delivered: the review is not over yet.
+	if blocks := asDriver.blocks(); len(blocks) != 0 {
+		t.Errorf("the pending review injected %d blocks, want none", len(blocks))
+	}
 
 	rec, ok := f.lookup(chatID)
 	if !ok {
@@ -664,7 +685,7 @@ func TestHandle_TakeoverAfterAContinuationReplaysTheStoredPrompt(t *testing.T) {
 
 	const prompt = "the stored prompt of the group"
 	f := NewFactory()
-	f.record(chatID, recorded.name, "/recorded/ws", []reviewOutcome{
+	f.record(chatID, recorded.name, "/recorded/ws", reviewRun{outcomes: []reviewOutcome{
 		{
 			pattern:   "**/*.ts",
 			files:     []string{"c.ts"},
@@ -675,7 +696,7 @@ func TestHandle_TakeoverAfterAContinuationReplaysTheStoredPrompt(t *testing.T) {
 				Timeout: time.Minute,
 			},
 		},
-	})
+	}})
 
 	dispatchContinue(t, f, cs, chatID, "review", "-c", "--timeout", "1ms")
 	waitUntilIdle(t, f, chatID)
@@ -730,7 +751,7 @@ func TestHandle_TakeoverDoesNotReachPastASpentGroup(t *testing.T) {
 	cs, _ := newContinueChatSession(t, chatID, recorded.name, t.TempDir(), em)
 
 	f := NewFactory()
-	f.record(chatID, recorded.name, "/recorded/ws", []reviewOutcome{
+	f.record(chatID, recorded.name, "/recorded/ws", reviewRun{outcomes: []reviewOutcome{
 		{
 			pattern:   "**/*.ts",
 			files:     []string{"c.ts"},
@@ -739,7 +760,7 @@ func TestHandle_TakeoverDoesNotReachPastASpentGroup(t *testing.T) {
 			err:       errors.New("boom"),
 			spent:     true,
 		},
-	})
+	}})
 
 	out := dispatchContinue(t, f, cs, chatID, "review", "-c", "-a", taker.name)
 
@@ -788,7 +809,7 @@ func TestHandle_ContinueWithNothingToResume(t *testing.T) {
 			cs, _ := newContinueChatSession(t, chatID, starter.name, t.TempDir(), em)
 
 			f := NewFactory()
-			f.record(chatID, starter.name, "/recorded/ws", tc.outcomes)
+			f.record(chatID, starter.name, "/recorded/ws", reviewRun{outcomes: tc.outcomes})
 
 			out := dispatchContinue(t, f, cs, chatID, "review", "-c")
 
@@ -815,9 +836,9 @@ func TestHandle_ContinueRejectedWhileAReviewRuns(t *testing.T) {
 	cs, _ := newContinueChatSession(t, chatID, runner.name, t.TempDir(), em)
 
 	f := NewFactory()
-	f.record(chatID, runner.name, "/recorded/ws", []reviewOutcome{
+	f.record(chatID, runner.name, "/recorded/ws", reviewRun{outcomes: []reviewOutcome{
 		{pattern: "**/*.ts", files: []string{"c.ts"}, sessionID: "sess-ts", err: errors.New("boom")},
-	})
+	}})
 
 	// Start a review for this chat and hold it running.
 	dispatchContinue(t, f, cs, chatID, "review")
@@ -843,9 +864,9 @@ func TestHandle_ContinueTwiceReportsNothingLeft(t *testing.T) {
 	cs, _ := newContinueChatSession(t, chatID, starter.name, t.TempDir(), em)
 
 	f := NewFactory()
-	f.record(chatID, starter.name, "/recorded/ws", []reviewOutcome{
+	f.record(chatID, starter.name, "/recorded/ws", reviewRun{outcomes: []reviewOutcome{
 		{pattern: "**/*.ts", files: []string{"c.ts"}, sessionID: "sess-ts", err: errors.New("boom")},
-	})
+	}})
 
 	dispatchContinue(t, f, cs, chatID, "review", "-c")
 	// The group's findings reach the chat while the run is still in
@@ -892,9 +913,9 @@ func TestHandle_ContinuationOrdersTheLines(t *testing.T) {
 	enableThink(t, cs)
 
 	f := NewFactory()
-	f.record(chatID, starter.name, "/recorded/ws", []reviewOutcome{
+	f.record(chatID, starter.name, "/recorded/ws", reviewRun{outcomes: []reviewOutcome{
 		{pattern: "**/*.ts", files: []string{"c.ts"}, sessionID: "sess-ts", err: errors.New("boom")},
-	})
+	}})
 
 	dispatchContinue(t, f, cs, chatID, "review", "-c")
 	em.waitForOutReply(t, "review")
@@ -956,9 +977,9 @@ func TestHandle_ContinuationVerdictCarriesTheDigest(t *testing.T) {
 	cs, _ := newContinueChatSession(t, chatID, starter.name, t.TempDir(), em)
 
 	f := NewFactory()
-	f.record(chatID, starter.name, "/recorded/ws", []reviewOutcome{
+	f.record(chatID, starter.name, "/recorded/ws", reviewRun{outcomes: []reviewOutcome{
 		{pattern: "**/*.ts", files: []string{"c.ts"}, sessionID: "sess-ts", err: errors.New("boom")},
-	})
+	}})
 
 	dispatchContinue(t, f, cs, chatID, "review", "-c")
 
@@ -978,6 +999,9 @@ func TestHandle_ContinuationVerdictCarriesTheDigest(t *testing.T) {
 // the group that failed a second time: its one resume attempt is
 // spent, so the next `--continue` says so — the group did reach the
 // agent, it was already retried.
+//
+// A spent group does not hold the review back any more: the review is
+// delivered, and the card names the group that died.
 func TestHandle_ContinueAfterAFailedRetryReportsTheSpentAttempt(t *testing.T) {
 	agents := newTestAgents(t)
 	starter := &reviewSessionStarter{name: "review-retried-agent", fail: true}
@@ -988,12 +1012,15 @@ func TestHandle_ContinueAfterAFailedRetryReportsTheSpentAttempt(t *testing.T) {
 	cs, _ := newContinueChatSession(t, chatID, starter.name, t.TempDir(), em)
 
 	f := NewFactory()
-	f.record(chatID, starter.name, "/recorded/ws", []reviewOutcome{
+	f.record(chatID, starter.name, "/recorded/ws", reviewRun{outcomes: []reviewOutcome{
 		{pattern: "**/*.ts", files: []string{"c.ts"}, sessionID: "sess-ts", err: errors.New("boom")},
-	})
+	}})
 
 	dispatchContinue(t, f, cs, chatID, "review", "-c")
-	em.waitForOutReply(t, "/review continue failed")
+	verdict := em.waitForOutReply(t, "already retried")
+	if !strings.Contains(verdict.Text, "❌ **1 of 1 subagent failed**") {
+		t.Errorf("the verdict does not name the group that died:\n%s", verdict.Text)
+	}
 	waitUntilIdle(t, f, chatID)
 
 	// The group's one recovery attempt is spent: the failure stays in
@@ -1011,7 +1038,9 @@ func TestHandle_ContinueAfterAFailedRetryReportsTheSpentAttempt(t *testing.T) {
 
 	out := dispatchContinue(t, f, cs, chatID, "review", "-c")
 
-	if !strings.Contains(out.Reply, "already retried") {
+	// The review was delivered with the group that died named in it:
+	// there is nothing left to continue.
+	if !strings.Contains(out.Reply, "the last review completed") {
 		t.Fatalf("unexpected reply: %q", out.Reply)
 	}
 	if strings.Contains(out.Reply, "never reached the agent") {
@@ -1034,9 +1063,9 @@ func TestHandle_ReviewWithoutGroupsKeepsTheResumeState(t *testing.T) {
 	cs, _ := newContinueChatSession(t, chatID, starter.name, t.TempDir(), em)
 
 	f := NewFactory()
-	f.record(chatID, starter.name, "/recorded/ws", []reviewOutcome{
+	f.record(chatID, starter.name, "/recorded/ws", reviewRun{outcomes: []reviewOutcome{
 		{pattern: "**/*.ts", files: []string{"c.ts"}, sessionID: "sess-ts", err: errors.New("boom")},
-	})
+	}})
 
 	dispatchContinue(t, f, cs, chatID, "review")
 	em.waitForOutReply(t, "no diff to review")
@@ -1053,10 +1082,10 @@ func TestHandle_ReviewWithoutGroupsKeepsTheResumeState(t *testing.T) {
 	}
 }
 
-// TestHandle_ContinuationDoesNotClobberANewerRecord: a continuation
-// that finishes after a newer review ran must not overwrite the
-// newer review's resume state — the newer run owns the chat.
-func TestHandle_ContinuationDoesNotClobberANewerRecord(t *testing.T) {
+// TestHandle_ContinuationAddsItsGroupToTheRecord: a continuation that
+// finishes after a newer review ran does not overwrite the newer run's
+// state — the record holds the groups of both.
+func TestHandle_ContinuationAddsItsGroupToTheRecord(t *testing.T) {
 	agents := newTestAgents(t)
 	starter := &reviewSessionStarter{
 		name:  "review-clobber-agent",
@@ -1071,30 +1100,40 @@ func TestHandle_ContinuationDoesNotClobberANewerRecord(t *testing.T) {
 	enableThink(t, cs)
 
 	f := NewFactory()
-	f.record(chatID, starter.name, "/recorded/ws", []reviewOutcome{
+	f.record(chatID, starter.name, "/recorded/ws", reviewRun{outcomes: []reviewOutcome{
 		{pattern: "**/*.ts", files: []string{"c.ts"}, sessionID: "sess-ts", err: errors.New("boom")},
-	})
+	}})
 
 	dispatchContinue(t, f, cs, chatID, "review", "-c")
 	waitForStart(t, starter)
 
 	// A newer review finished while the continuation was still
-	// running: it owns the chat's resume state.
-	f.record(chatID, starter.name, "/newer/ws", []reviewOutcome{
+	// running: it brought a group of its own.
+	f.record(chatID, starter.name, "/newer/ws", reviewRun{outcomes: []reviewOutcome{
 		{pattern: "**/*.go", files: []string{"a.go"}, sessionID: "sess-go", err: errors.New("boom")},
-	})
+	}})
 	close(starter.block)
 	em.waitForOutThinking(t, "resumed findings")
+	// The message settles when the continuation is handed over: the
+	// record holds both runs' groups by then.
+	waitOutcome(t, em, 5*time.Second)
 
 	rec, ok := f.lookup(chatID)
 	if !ok {
 		t.Fatal("the record is gone")
 	}
-	if rec.workspace != "/newer/ws" {
-		t.Errorf("the record workspace = %q, want the newer run's %q", rec.workspace, "/newer/ws")
+	if len(rec.outcomes) != 2 {
+		t.Fatalf("the record carries %d outcomes, want the groups of both runs", len(rec.outcomes))
 	}
-	if len(rec.outcomes) != 1 || rec.outcomes[0].sessionID != "sess-go" {
-		t.Errorf("the newer run's outcomes were lost: %+v", rec.outcomes)
+	sessions := map[string]string{}
+	for _, o := range rec.outcomes {
+		sessions[o.pattern] = o.sessionID
+	}
+	if sessions["**/*.go"] != "sess-go" {
+		t.Errorf("the newer run's group was lost: %+v", rec.outcomes)
+	}
+	if sessions["**/*.ts"] != "sess-new" {
+		t.Errorf("the continuation's group is missing: %+v", rec.outcomes)
 	}
 }
 

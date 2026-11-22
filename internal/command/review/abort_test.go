@@ -641,9 +641,9 @@ func TestHandle_AbortStopsARunningContinuation(t *testing.T) {
 	cs, _ := newContinueChatSession(t, chatID, starter.name, t.TempDir(), em)
 
 	f := NewFactory()
-	f.record(chatID, starter.name, "/recorded/ws", []reviewOutcome{
+	f.record(chatID, starter.name, "/recorded/ws", reviewRun{outcomes: []reviewOutcome{
 		{pattern: "**/*.go", files: []string{"a.go"}, sessionID: "sess-go", err: errors.New("boom")},
-	})
+	}})
 
 	hold := cs.Hold("msg-1")
 	dispatchWithMessage(t, f, cs, chatID, "msg-1", "review", "-c")
@@ -799,7 +799,7 @@ func TestHandle_AbortedContinuationKeepsTheSessionIds(t *testing.T) {
 	}
 
 	f := NewFactory()
-	f.record(chatID, starter.name, "/recorded/ws", outcomes)
+	f.record(chatID, starter.name, "/recorded/ws", reviewRun{outcomes: outcomes})
 
 	hold := cs.Hold("msg-1")
 	dispatchWithMessage(t, f, cs, chatID, "msg-1", "review", "-c")

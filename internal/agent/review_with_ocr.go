@@ -323,6 +323,7 @@ func runReviewGroups(
 					SessionID: res.SessionID,
 					Prompt:    groups[i].Prompt,
 					Report:    report,
+					Text:      res.Text,
 				}, err)
 			}
 		}(i)
@@ -1260,15 +1261,20 @@ func mergeRunResults(agentName string, groups []reviewGroup, results []RunResult
 	// Successful merge: concatenate group-by-group. Top line is a
 	// quick human-readable summary; per-group headers let the main
 	// agent reference findings by pattern in fix-up follow-ups.
-	var b strings.Builder
-	fmt.Fprintf(&b, "Reviewed %d groups.\n\n", len(groups))
+	//
+	// The document's format lives in MergeReviewDocument: the
+	// command layer rebuilds the same document from the findings it
+	// has cached, and one format has to serve both.
+	sections := make([]ReviewGroupSection, len(groups))
 	for i, g := range groups {
-		if errs[i] != nil {
-			fmt.Fprintf(&b, "### Group: pattern %s — failed: %v\n\n", g.Pattern, errs[i])
-			continue
+		sections[i] = ReviewGroupSection{
+			Pattern: g.Pattern,
+			Files:   g.Files,
+			Err:     errs[i],
 		}
-		fmt.Fprintf(&b, "### Group: pattern %s — files: %s\n\n%s\n\n",
-			g.Pattern, strings.Join(g.Files, ", "), results[i].Text)
+		if errs[i] == nil {
+			sections[i].Texts = []string{results[i].Text}
+		}
 	}
 
 	// Audit metadata: propagate the FIRST successful job's session /
@@ -1280,7 +1286,7 @@ func mergeRunResults(agentName string, groups []reviewGroup, results []RunResult
 	// primary reference (subsequent jobs may have different
 	// sessionIds, and `Reviewed N groups.` already tells the caller
 	// there were multiple).
-	merged := RunResult{Text: strings.TrimSpace(b.String())}
+	merged := RunResult{Text: MergeReviewDocument(sections)}
 	for i, err := range errs {
 		if err != nil {
 			continue

@@ -71,9 +71,8 @@ type streamState struct {
 	// probe path (the fixture-driven tests); the frame is then
 	// dropped.
 	//
-	// The answer never travels the event channel: the probe is the
-	// one signal that has to stay answerable when that channel is
-	// wedged.
+	// The answer is not published as an event: the probe does not
+	// wait for the event pipeline to deliver anything.
 	onControlResponse func(streamEvent)
 }
 
@@ -711,9 +710,10 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 		// the liveness probe's get_usage request.
 		//
 		// The frame is handed to the bridge's pending-probe map and
-		// is NOT published to the event channel. The probe is the
-		// one signal that has to stay answerable when the event
-		// path is wedged, so its answer must not travel that path.
+		// is NOT published to the event channel: the probe must not
+		// wait for the event pipeline to deliver anything. The
+		// stream loop that reads the answer also reads the events,
+		// so a fully blocked event channel can still delay it.
 		if state.onControlResponse != nil {
 			state.onControlResponse(ev)
 		}

@@ -1337,9 +1337,11 @@ const probeMethod = "__nightme_probe__"
 // (a transport failure, or the deadline firing) means "not
 // responding".
 //
-// The probe rides the bridge's own pending-request map, so it never
-// travels the event channel the runtime drains — the probe has to
-// stay answerable even when that path is wedged.
+// The probe rides the bridge's own pending-request map: the answer is
+// not published as an event, so the probe does not wait for the event
+// pipeline to deliver anything. The protocol loop that reads the
+// answer also reads the events, so a fully blocked event channel can
+// still delay it.
 //
 // cursor, copilot and opencode share this driver and inherit the
 // probe unchanged.

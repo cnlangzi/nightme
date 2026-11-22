@@ -1181,9 +1181,11 @@ A rejected `get_state` (`success:false`) still counts as an answer:
 the CLI received the command and replied. Only the absence of a reply
 means "not responding".
 
-The answer is resolved from the RPC client's own pending map, so it
-never travels the event channel the runtime drains, and it never
-reaches the model's context.
+The answer is resolved from the RPC client's own pending map and is
+not published as an event: the probe does not wait for the event
+pipeline to deliver anything. The protocol loop that reads the answer
+also reads the events, so a fully blocked event channel can still
+delay it. The answer never reaches the model's context.
 
 Measured against the real CLI (2026-11-22): 14 ms round trip.
 

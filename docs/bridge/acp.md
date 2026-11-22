@@ -357,10 +357,11 @@ The probe answers the question "is the agent still responsive", and
 only the absence of a reply means "not responding". An error response
 means the agent received the request, dispatched it and replied.
 
-The answer is resolved from the bridge's own pending-request map, so
-it never travels the event channel the runtime drains — the probe has
-to stay answerable when that channel is wedged. It never reaches the
-model's context.
+The answer is resolved from the bridge's own pending-request map and
+is not published as an event: the probe does not wait for the event
+pipeline to deliver anything. The protocol loop that reads the answer
+also reads the events, so a fully blocked event channel can still
+delay it. The answer never reaches the model's context.
 
 cursor, copilot and opencode share this driver and inherit the probe
 unchanged. Measured against the real CLIs (2026-11-22):

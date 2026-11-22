@@ -642,9 +642,11 @@ still counts as an answer — the app-server received the request and
 replied — but the probe should ask a question the agent can answer
 properly.
 
-The answer is resolved from the session's own pending-request map, so
-it never travels the event channel the runtime drains, and it never
-reaches the model's context.
+The answer is resolved from the session's own pending-request map and
+is not published as an event: the probe does not wait for the event
+pipeline to deliver anything. The protocol loop that reads the answer
+also reads the events, so a fully blocked event channel can still
+delay it. The answer never reaches the model's context.
 
 Measured against the real app-server (2026-11-22): 89 ms round trip.
 

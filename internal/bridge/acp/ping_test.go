@@ -7,9 +7,11 @@ package acp
 // the answer: the agent received the request, dispatched it and
 // replied. Only the absence of a reply means "not responding".
 //
-// The probe rides the bridge's own pending-request map, so it stays
-// answerable even when the event channel the runtime drains is
-// wedged.
+// The probe rides the bridge's own pending-request map: the answer is
+// not published as an event, so the probe does not wait for the event
+// pipeline to deliver anything. The protocol loop that reads the
+// answer also reads the events, so a fully blocked event channel can
+// still delay it.
 
 import (
 	"bufio"

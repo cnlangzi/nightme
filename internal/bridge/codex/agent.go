@@ -31,10 +31,12 @@
 // touches neither the thread nor the turn, so the app-server answers
 // it while a turn is running. The request carries an empty params
 // object: the app-server rejects a request whose params field is
-// missing. The answer never reaches the model's context, and the
-// probe rides the session's own pending-request map so it stays
-// answerable even when the event channel the runtime drains is
-// wedged.
+// missing. The answer never reaches the model's context. The probe
+// rides the session's own pending-request map: the answer is not
+// published as an event, so the probe does not wait for the event
+// pipeline to deliver anything. The protocol loop that reads the
+// answer also reads the events, so a fully blocked event channel can
+// still delay it.
 package codex
 
 import (

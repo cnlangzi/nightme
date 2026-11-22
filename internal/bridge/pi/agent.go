@@ -13,9 +13,11 @@
 // The liveness probe (driver.Ping) asks for `get_state` — the same
 // command the boot handshake uses. Pi answers it while a prompt is
 // in flight, and the answer never reaches the model's context. The
-// probe rides the RPC client's own pending map, so it stays
-// answerable even when the event channel the runtime drains is
-// wedged.
+// probe rides the RPC client's own pending map: the answer is not
+// published as an event, so the probe does not wait for the event
+// pipeline to deliver anything. The protocol loop that reads the
+// answer also reads the events, so a fully blocked event channel can
+// still delay it.
 //
 // Agent is BOTH the template (registered with agent.Builtins) and
 // the live handle (returned by Start). The template half is set

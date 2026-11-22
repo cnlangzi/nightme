@@ -13,9 +13,9 @@ package claudecode
 //     from there; nested inside "request" the answer carries no id
 //     and cannot be correlated.
 //   - The answer is resolved from the bridge's own pending-probe
-//     map, not from the event channel. The probe exists to answer
-//     "is the CLI still responsive", so its answer must not travel
-//     the path that can be wedged.
+//     map and is not published as an event: the probe exists to
+//     answer "is the CLI still responsive", and it must not wait
+//     for the event pipeline to deliver anything.
 
 import (
 	"bufio"
@@ -214,8 +214,8 @@ func TestPing_AnUnansweredProbeFails(t *testing.T) {
 
 // TestControlResponse_NeverReachesTheEventChannel — the answer to
 // the probe is resolved from the bridge's pending-probe map. It is
-// not published to the event channel: the probe has to stay
-// answerable when that channel is wedged.
+// not published to the event channel: the probe must not wait for
+// the event pipeline to deliver anything.
 func TestControlResponse_NeverReachesTheEventChannel(t *testing.T) {
 	resolved := make(chan streamEvent, 1)
 	events := make(chan agent.AgentEvent, 8)

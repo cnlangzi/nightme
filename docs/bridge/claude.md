@@ -1472,8 +1472,11 @@ CLI 回一行：
 ### 10.3 答案不走 event 通道
 
 `control_response` 由 bridge 自己的 pending-probe map 解析（`resolveControlResponse`），
-**不进** `d.events`。原因：probe 要回答的正是「事件通道是不是卡死了」，
-如果答案也走那条通道，通道一卡 probe 就一起失效。
+**不进** `d.events`：probe 不等事件通道投递任何东西。
+
+但读答案的循环和读事件的循环是同一个（`pumpStream`）：事件通道彻底堵死时，
+答案同样会被拖住。probe 的价值在于「CLI 还活着吗」这个问题的答案不依赖
+事件投递 —— 不是在于事件通道堵死时 probe 仍然能回答。
 
 ### 10.4 回归测试
 

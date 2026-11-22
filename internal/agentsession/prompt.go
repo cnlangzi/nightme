@@ -97,9 +97,13 @@ type Prompt struct {
 	AckedAt time.Time
 
 	// LastProgressAt is the most recent observed-progress time
-	// (touched by `runReadPump` on every AgentEvent). Reserved for
-	// future stall-detection work (L2 in the original WIP design).
-	// Phase 0 maintains the field but does not act on it.
+	// (touched by `runReadPump` on every AgentEvent that arrives
+	// while this prompt is installed). The stall monitor reads it
+	// to decide when the turn has gone quiet for too long.
+	//
+	// The clock belongs to the turn: an event that arrives with no
+	// prompt installed does not refresh it, so a stray out-of-turn
+	// notice cannot make a wedged turn look alive.
 	LastProgressAt time.Time
 
 	// EndedAt is when `endPrompt` was called. Zero value while

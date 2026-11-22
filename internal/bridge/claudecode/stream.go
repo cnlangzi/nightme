@@ -60,6 +60,11 @@ type streamState struct {
 	// EventAgentTaskUpdate. Map key is the provider-assigned task ID.
 	tasks     map[string]agent.AgentTaskItem
 	taskOrder []string
+
+	// bgTasks is the session's table of the tasks the CLI reported
+	// (see bgtask.go). It maps a task id to the task's description
+	// so the notice that a task finished can name it.
+	bgTasks *bgTaskTable
 }
 
 // pendingTool records a tool_use block that has not yet been
@@ -113,6 +118,23 @@ type streamEvent struct {
 	DurationMs int64  `json:"duration_ms,omitempty"`
 	IsError    bool   `json:"is_error,omitempty"`
 
+	// Origin tags the turn a result frame belongs to. The CLI opens
+	// a turn for every background task that finished and marks that
+	// turn's result with kind "task-notification".
+	Origin *resultOrigin `json:"origin,omitempty"`
+
+	// task frames (system): the CLI's report of the work it
+	// delegates. task_started opens a task, task_notification closes
+	// it. TaskID names the task across the two frames.
+	TaskID         string `json:"task_id,omitempty"`
+	IsBackgrounded bool   `json:"is_backgrounded,omitempty"`
+	Status         string `json:"status,omitempty"`
+	Description    string `json:"description,omitempty"`
+
+	// Summary is the CLI's one-line report of what the task did. It
+	// arrives with the task's completion frame.
+	Summary string `json:"summary,omitempty"`
+
 	// conversation_reset only — the id assigned to the freshly
 	// cleared transcript. Diagnostic; the authoritative SessionID
 	// arrives in the immediately-following system/init.
@@ -131,6 +153,24 @@ type assistantMsg struct {
 	Role    string         `json:"role,omitempty"`
 	Model   string         `json:"model,omitempty"`
 	Content []contentBlock `json:"content,omitempty"`
+}
+
+// resultOrigin is the origin tag of a result frame. The CLI opens a
+// turn for every background task that finished and marks that turn's
+// result with kind "task-notification".
+type resultOrigin struct {
+	Kind string `json:"kind,omitempty"`
+}
+
+// notificationOriginKind is the origin kind of the turn the CLI opens
+// for a background task that finished.
+const notificationOriginKind = "task-notification"
+
+// isNotificationTurn reports whether a result frame belongs to the
+// turn the CLI opened for a finished background task — a turn of its
+// own, not the user's.
+func isNotificationTurn(origin *resultOrigin) bool {
+	return origin != nil && origin.Kind == notificationOriginKind
 }
 
 // syntheticModel is the model name Claude Code stamps on messages it
@@ -251,6 +291,9 @@ func pumpStream(
 		pendingTools: make(map[string]pendingTool),
 		tasks:        make(map[string]agent.AgentTaskItem),
 		turnActive:   turnActive,
+		// The task table names a task in the notice that reports it
+		// finished.
+		bgTasks: newBgTaskTable(),
 	}
 
 	for scanner.Scan() {
@@ -320,6 +363,21 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 				AgentName: agentName,
 				Workspace: workspace,
 				Branch:    branch,
+			}
+		}
+
+		// The CLI's report of the work it delegates. A task that
+		// starts and a task that finishes are each one ordinary
+		// notice in the chat — they say nothing about the turn in
+		// flight, so they end nothing.
+		switch ev.Subtype {
+		case "task_started":
+			if notice, ok := state.bgTaskStarted(ev); ok {
+				emitNotice(events, notice)
+			}
+		case "task_notification":
+			if notice, ok := state.bgTaskFinished(ev); ok {
+				emitNotice(events, notice)
 			}
 		}
 
@@ -492,6 +550,15 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 		}
 
 	case "result":
+		// A result frame the CLI opened for a background task that
+		// finished belongs to that task, not to the user's turn.
+		// The frame is dropped whole — no result card, no turn end —
+		// so the background line never meets the main turn. The
+		// main turn's own result frame ends the turn as it always
+		// did; the bridge withholds nothing.
+		if isNotificationTurn(ev.Origin) {
+			return
+		}
 		// A result event has three sub-shapes — handled in order:
 		//
 		//   1. subtype "compact" / "compaction" — MID-TURN context
@@ -632,6 +699,16 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 		if logger != nil {
 			logger.Debug("claudecode: unknown event type", "type", ev.Type)
 		}
+	}
+}
+
+// emitNotice posts a notice about the session to the chat. A notice
+// is the bridge's own report — a background subagent having started,
+// say — and it says nothing about the turn in flight.
+func emitNotice(events chan<- agent.AgentEvent, text string) {
+	events <- agent.AgentEvent{
+		Kind: agent.EventAgentNotice,
+		Text: text,
 	}
 }
 

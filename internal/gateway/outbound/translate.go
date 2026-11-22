@@ -63,7 +63,13 @@ func Translate(chatID string, ev agent.AgentEvent) (messages.OutboundMessage, bo
 			Text:   text,
 		}, true
 
-	case agent.EventAgentText:
+	case agent.EventAgentText, agent.EventAgentNotice:
+		// EventAgentText is the agent's own reply; EventAgentNotice
+		// is a notice the bridge raises about the session (e.g. a
+		// background subagent having started). They are the same
+		// thing on the wire — an ordinary reply in the chat — and
+		// they are distinct agent kinds only so the session drain
+		// does not join a notice into the turn's text.
 		text := strings.TrimSpace(ev.Text)
 		if text == "" {
 			return messages.OutboundMessage{}, false

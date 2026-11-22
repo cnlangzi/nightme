@@ -175,6 +175,17 @@ const (
 	// Feishu answering; this event only PATCHes the outstanding
 	// Action Needed card so it does not linger.
 	EventAgentPermissionSettled
+
+	// EventAgentNotice is a notice the bridge raises about the
+	// session itself — e.g. the claudecode bridge's line about a
+	// background subagent having started. The Text field carries
+	// the rendered notice.
+	//
+	// Distinct from EventAgentText: the text events are the reply
+	// the model produced, and the session drain joins them into the
+	// turn's result. A notice is not part of that reply, so it must
+	// not end up in the answer the model wrote.
+	EventAgentNotice
 )
 
 // String renders an EventKind for logs.
@@ -204,6 +215,8 @@ func (k EventKind) String() string {
 		return "task_update"
 	case EventAgentPermissionSettled:
 		return "permission_settled"
+	case EventAgentNotice:
+		return "notice"
 	default:
 		return fmt.Sprintf("event(%d)", int(k))
 	}
@@ -560,6 +573,7 @@ type AgentTaskListEvent struct {
 // Exactly one action-payload field is meaningful per Kind:
 //
 //	EventAgentText       -> Text
+//	EventAgentNotice     -> Text
 //	EventAgentPermission -> Permission
 //	EventAgentToolStart  -> ToolStart
 //	EventAgentToolEnd    -> ToolEnd (failure also sets top-level Err)
@@ -601,7 +615,8 @@ type AgentEvent struct {
 	Source string
 
 	// ───── Action payload (per Kind; usually exactly one is meaningful) ─────
-	// Text is the payload for EventAgentText. Other Kinds leave it empty.
+	// Text is the payload for EventAgentText and EventAgentNotice.
+	// Other Kinds leave it empty.
 	Text string
 
 	Permission *AgentPermissionRequest

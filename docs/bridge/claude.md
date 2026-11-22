@@ -262,6 +262,48 @@ telemetry。只作用于 nightme spawn 的这个子进程——用户自己手�
 }
 ```
 
+#### 3.3.1 后台 subagent：两条普通聊天回复
+
+CLI 用一族 `system` 帧报告它派出去的工作，`result` 帧上另有一个 `origin` 标记，
+两者合起来描述后台线：
+
+```json
+// 后台 agent 起跑
+{"type":"system","subtype":"task_started","task_id":"a0cf…","run_id":"0mwq…",
+ "description":"Sleep then reply OK","task_type":"local_agent","is_backgrounded":true,
+ "prompt":"run the bash command `sleep 15` and then reply OK","session_id":"…"}
+
+// 后台 agent 收尾
+{"type":"system","subtype":"task_notification","task_id":"a0cf…","run_id":"0mwq…",
+ "status":"completed","output_file":"/tmp/…/tasks/a0cf….output","summary":"OK",
+ "usage":{"total_tokens":6952,"tool_uses":1,"duration_ms":20308},"session_id":"…"}
+
+// CLI 为跑完的后台 agent 另开的那一轮
+{"type":"result","subtype":"success","result":"",
+ "origin":{"kind":"task-notification","producer":"session-task","runId":"0mwq…"}}
+```
+
+bridge 把后台 subagent 报成 chat 里两条普通回复（`EventAgentNotice` → `OutReply`）：
+
+- `🔀 Subagent started: <description>`
+- `🔀 Subagent finished: <description> (<status>)` ＋ CLI 给的 `summary`
+
+`summary` 是 CLI 自己给的一行摘要（`OK`、`Sleep for 15 seconds`）；bridge 不读
+`output_file` 指向的文件。帧里没有 description 时用 task id 指名。
+
+**后台线不与主回合交汇**：CLI 为每个跑完的后台 agent 另开一轮，那一轮的 `result` 帧
+带 `origin.kind == "task-notification"`。bridge 把这帧整个丢掉——不发结果卡，也不发
+回合结束信号——所以主回合的结果帧一到就结束回合，跟没有后台 agent 时一样。bridge
+任何时候都不扣主回合的帧。
+
+**task 表**：bridge 内存里一张 task 表（`internal/bridge/claudecode/bgtask.go`），键是
+task id，值是 task 的 description，以及这个 task 是不是后台跑的。收尾帧不带
+description，结束行要指名是哪个 subagent，只能从表里取。表是容量 500 的 LRU（满了踢掉
+最久没用的那一项）；表项被踢掉后，结束行用 task id 指名。
+
+**前台任务不报**：CLI 用同一族帧报告 agent 自己跑的命令（`is_backgrounded: false`，
+比如 subagent 起的 shell），这类帧不产生任何回复。
+
 ### 3.4 In-flight 取消：`/stop` 的真实协议
 
 **2026-08-15 fix-stop**：用户报"第二次 /stop 后发送消息卡死在 Working…"。审计发现 claudecode bridge 用 `SignalProcessGroup(SIGINT)` 走 PTY，这跟 codex 老的 SIGINT 路径同款——子进程死了，聊天层 `--resume` 重启，撞上"幽灵 turn"。本文档记录**反向工程**过程、实际 wire 格式、以及最终方案。
@@ -946,6 +988,15 @@ AskUserQuestion 的两条拦截路径另外覆盖在 `internal/bridge/claudecode
 （tool_use 路径写 `tool_result`）、`TestSendPermission_TextFallback_WritesUserText`
 （text-fallback 路径写 user-role text）。
 
+后台 subagent 的两条回复覆盖在 `internal/bridge/claudecode/bgtask_test.go`：
+`TestPumpStream_BackgroundTask_Notices`（起跑 + 收尾各一条，前台任务不报）、
+`TestPumpStream_TaskNotification_EmptySummary_NoSummarySegment`（summary 为空时结束行
+没有摘要段）、`TestPumpStream_TaskNotification_UnknownTask_UsesTaskID`（表里没有这个
+task 时用 task id 指名）、`TestBgTaskTable_Capacity` 与
+`TestBgTaskFinished_EvictedTask_UsesTaskID`（LRU 容量 500，踢掉后用 task id 指名）、
+`TestPumpStream_NotificationTurnResult_Dropped`（通知轮的 `result` 帧被丢掉）、
+`TestPumpStream_MainTurnResult_EndsTurn`（主回合的结果帧照常结束回合）。
+
 ### 10.2 集成测试（mock Claude Code binary）
 
 `internal/bridge/claudecode/claudecode_subprocess_unix_test.go` 用
@@ -1116,7 +1167,7 @@ Spawn(claude --print …)          ← 一个 bridge session / 一个 OS 进程
 | 传输 | stream-json stdout/stdin | `--mode rpc` JSONL |
 | 进程/轮次 | 一进程多轮（held stdin） | 一进程多轮（RPC session） |
 | 恢复 | `--resume <id>` | `--session-id` / `new_session` |
-| 终态信号 | `result` → `EventResult`/`EventDone`；进程退出 → `KindLifecycle` | `agent_settled` → `EventResult`/`EventDone` |
+| 终态信号 | `result` → `EventResult`/`EventDone`（后台 agent 的通知轮不算）；进程退出 → `KindLifecycle` | `agent_settled` → `EventResult`/`EventDone` |
 
 两边共性：**`EventDone` ≠ 关 events channel**；只有进程退出或 `Close()` 才关。上层 PumpEvents 依赖这点跨 turn 持续读。
 
@@ -1360,6 +1411,7 @@ go test ./internal/bridge/claudecode/ -count=1 -timeout 240s \
 | Start + resume probe + `ErrResumeUnhealthy` | `internal/bridge/claudecode/claudecode.go` |
 | session / pumpStream / stderr | `internal/bridge/claudecode/claudecode.go`、`internal/bridge/claudecode/stream.go` |
 | 事件解码 | `internal/bridge/claudecode/stream.go` |
+| 后台 subagent 的两条回复 + task 表 | `internal/bridge/claudecode/bgtask.go` |
 | AskUserQuestion 拦截 + `pendingAsk` + `armPendingAsk` + `SendPermission` 分支 | `internal/bridge/claudecode/claudecode.go`、`internal/bridge/claudecode/ask.go` |
 | `writeUserText`（text-fallback 应答回写） | `internal/bridge/claudecode/claudecode.go` |
 | `emitAskFromText` + `detectAskInText` | `internal/bridge/claudecode/ask.go` |

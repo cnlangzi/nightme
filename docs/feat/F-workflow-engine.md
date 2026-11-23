@@ -45,7 +45,7 @@ internal/me/                      # host：personal agent
 ├── agent_prompt.go               # system prompt
 ├── agent_report.go               # 情况报告
 ├── directive.go                  # 判断点的答复
-├── step.go                       # 四种 step 的执行
+├── step.go                       # 五种 step 的执行
 ├── shell.go                      # ExecShell：RunShell
 ├── action.go                     # ActionRegistry + 内置 action + 用户脚本
 ├── session.go                    # run 的会话
@@ -116,7 +116,7 @@ type Step struct {
 
 `Title` 说这个 workflow 是做什么的；`Name` 是它的身份——bundle 在 workflows 目录下的相对路径（`nightme/coder/workflow.yml` 就是 workflow `nightme/coder`），由 loader 填，文件里不写。旧文件里的 `goal` 键在反序列化时迁进 `Title`（`Workflow.UnmarshalJSON`）。
 
-`Step` 有**四种** kind：`message` / `shell` / `use` / `wait`。`Step.Kind()`（`types.go`）按 Message → Shell → Use → Wait 的顺序判定，四种都没写就是 `StepKindNone`。
+`Step` 有**五种** kind：`message` / `shell` / `use` / `wait` / `cmd`。`Step.Kind()`（`types.go`）先看 `Cmd` 是不是有值——有就是 `StepKindCmd`；否则按 Message → Shell → Use → Wait 的顺序判定，五种都没写就是 `StepKindNone`。
 
 `Job.Iterations` 是这个 job 跑几轮：缺省 1，0 表示一直跑到 run 结束，N 就是 N 轮。`Job.Sleep` 是两轮之间的间隔。`Step.Final` 标记收尾 step——它在这一轮怎么结束都会跑。
 
@@ -208,7 +208,7 @@ func IsPending(state *RunState, stepID string) bool
 
 `EndRound` 是提前结束一轮的**唯一**入口：这一轮没跑的 step 记为 skipped（`final:` 的 step 除外——它顶替它们跑），并把这一轮标记为已结束。plan 接着走那个 final step，没有 final step 就走下一轮。还在跑的 step 会让 `EndRound` 报错——一个没落定的命令下面不能收摊。
 
-### 3.6 表达式（`expr.go`）
+### 3.6 表达式（`expr_parse.go` / `expr_eval.go` / `expr.go`）
 
 ```go
 type ExprCtx struct {
@@ -218,12 +218,17 @@ type ExprCtx struct {
     Env   map[string]string
     Args  map[string]string
     Now   time.Time
+    Last  map[string]string
 }
 
 func EvalString(s string, ec ExprCtx) string
 func EvalMap(m map[string]any, ec ExprCtx) map[string]any
 func EvalCond(cond string, ec ExprCtx) (bool, error)
 ```
+
+条件是一棵表达式树，不是插值出来的字符串：tokenizer 切词，递归下降的 parser 产出解析树，求值器走这棵树。这样条件才能比较——"上一轮是不是 429"这种问题，字符串插值答不了。
+
+值只有四种：null、bool、number、string。路径查不到东西就是 null。
 
 支持的写法：
 
@@ -234,12 +239,20 @@ func EvalCond(cond string, ec ExprCtx) (bool, error)
 | `needs.JOB.K` | `ec.Needs["JOB"]["K"]` |
 | `env.X` | `ec.Env["X"]` |
 | `args.X` | `ec.Args["X"]` |
-| `success()` / `always()` | `true` |
-| `failure()` / `cancelled()` | `false` |
+| `now` | `ec.Now` 的 RFC 3339 写法 |
+| `success()` | 最后一个跑过的 step 的裁决；还没跑过 step 时为真 |
+| `always()` | `true` |
+| `empty(X)` | `X` 是 null，或是去空白后为空的字符串 |
 
-`$` 是分隔符的一部分（跟 GitHub Actions 一样）。认不出来的标识符求值为空串。
+运算符从低到高：`||` → `&&` → `==` / `=` / `!=` → `<` / `<=` / `>` / `>=` → `!`。`!` 比比较紧，所以 `!a == b` 是 `(!a) == b`。
 
-`EvalCond` 把求值结果当布尔读：空串、`false`、`0` 是假，其余是真；条件为空串时恒为真。
+比较按自动转换做，运行期不报类型错误：两边都是字符串就比字符串，恰好一边是 bool 就比真值，一边是 null 就只有两边都是 null 才相等，其余比数字。`<` 这类比较：两边都读得出数字就比数字，否则两边都是字符串就比字典序，其余为假。
+
+`$` 是分隔符的一部分（跟 GitHub Actions 一样）。引号里的 `}`、`}}`、`,`、`(`、`)` 都是普通字符——插值的扫描器跳过引号里的内容。
+
+`EvalCond` 把求值结果当布尔读：null 是假，bool 是自身，number 不等于 0 是真，字符串空串 / `false` / `0` 是假；条件为空串时恒为真。
+
+`if:` 既接受裸表达式，也接受整个值就是一个 `${{ ... }}`——两种写法等价。别的形态（两个 `${{ }}` 拼在一起、`${{ }}` 前后有别的字）是语法错误，加载文件时就报出来，诊断指到那个 `if:` 的位置。
 
 wfe **不做 secret 区分**——`${{ env.GH_TOKEN }}` 和 `${{ env.WORKDIR }}` 走完全一样的 lookup。
 
@@ -337,7 +350,7 @@ turn:
 
 run 没有自己的时钟：每条命令带自己的预算，超时是 agent 的超时，不是 run 的。run 负责看着。
 
-### 4.5 四种 step（`step.go`）
+### 4.5 五种 step（`step.go`）
 
 ```go
 func (s *Service) executeStep(ctx context.Context, r *run, job string, step wfe.Step) (stepVerdict, error)
@@ -349,6 +362,7 @@ func (s *Service) executeStep(ctx context.Context, r *run, job string, step wfe.
 - **shell** — `cfg.Shell.RunShell` 在 chat 当前的工作目录里跑命令。daemon 没有 shell runner 时，这个 step 直接判 failed。
 - **use** — `cfg.actions.Run` 按名字找注册的 action 跑。没有 shell runner 就没有 shell step；没有注册的 action 名字就是 `wfe.ErrUnknownAction`。
 - **wait** — 等一段 Go duration。
+- **cmd** — 跑引擎自己的 builtin command。step 可以带一条 `message:`：消息先发进 chat，它的裁决就是这个 step 的裁决；消息失败就不跑 command，交给 agent。command 跑在引擎里：`skip` 结束这一轮，并把这一轮记成被跳过的轮次。
 
 每个 step 的结果都是一个 `wfe.Outcome`：`ok` / `failed` / …，外加 `Summary` 和事实。命令还在跑的时候 step 记为 pending，plan 把它当成判断点。
 
@@ -536,7 +550,7 @@ mock 很简单：wfe 不做 I/O，测试里只需要构造 `RunState` 和 `Workf
 
 | 文件 | 覆盖 |
 |------|------|
-| `step_test.go` | 四种 step 的执行与裁决 |
+| `step_test.go` | 五种 step 的执行与裁决 |
 | `action_test.go` | action registry、未知 action、用户脚本 |
 | `agent_test.go` / `control_test.go` | run 的生命周期与控制 |
 | `state_test.go` | run 状态的读写 |

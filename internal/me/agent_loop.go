@@ -306,6 +306,7 @@ func (s *Service) plan(ctx context.Context, r *run) (wfe.Decision, error) {
 		return decision, err
 	}
 	r.policy.SetRounds(r.state.Rounds)
+	r.policy.SetSkippedRounds(r.state.SkippedRounds)
 	it := targetIteration(r, decision, before)
 	r.mu.Unlock()
 
@@ -377,7 +378,9 @@ func (s *Service) runPlanStep(ctx context.Context, r *run, decision wfe.Decision
 		// on with the next step.
 		return nil
 	}
-	r.recordStep(decision.Job, decision.Step, verdict.Outcome)
+	if err := r.settleStep(decision.Job, decision.Step, verdict.Outcome); err != nil {
+		return err
+	}
 	s.refreshRun(r)
 	return nil
 }
@@ -472,11 +475,10 @@ func (s *Service) loopDeciderOnly(ctx context.Context, r *run) error {
 			return err
 		}
 		r.recordWake(wakeRecord{
-			Who:   decisionDecider,
-			What:  decisionWhat(dec),
-			Why:   r.judgmentReason(),
-			Round: r.currentRound(),
-			At:    s.now(),
+			Who:  decisionDecider,
+			What: decisionWhat(dec),
+			Why:  r.judgmentReason(),
+			At:   s.now(),
 		})
 		if s.canAct(dec) {
 			action, err := s.actOnDecision(ctx, r, dec)
@@ -545,11 +547,10 @@ func (s *Service) system1(ctx context.Context, r *run) (sys1Action, error) {
 		return sys1None, err
 	}
 	r.recordWake(wakeRecord{
-		Who:   decisionDecider,
-		What:  decisionWhat(dec),
-		Why:   r.judgmentReason(),
-		Round: r.currentRound(),
-		At:    s.now(),
+		Who:  decisionDecider,
+		What: decisionWhat(dec),
+		Why:  r.judgmentReason(),
+		At:   s.now(),
 	})
 	if !s.canAct(dec) {
 		// The decision is not sure enough to act on: the chat model

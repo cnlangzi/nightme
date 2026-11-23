@@ -80,11 +80,10 @@ func (s *Service) system2(ctx context.Context, r *run) (bool, error) {
 	// that hides them does not change what the run did.
 	r.countThink(s.now())
 	r.recordWake(wakeRecord{
-		Who:   decisionChat,
-		What:  toolCallsLine(resp.Message.ToolCalls()),
-		Why:   r.judgmentReason(),
-		Round: r.currentRound(),
-		At:    s.now(),
+		Who:  decisionChat,
+		What: toolCallsLine(resp.Message.ToolCalls()),
+		Why:  r.judgmentReason(),
+		At:   s.now(),
 	})
 	// The model's own words are the decision's own: they go on the
 	// decision's card, where the operator reads them.

@@ -448,6 +448,12 @@ func requireWholeNumber(key string, node *yaml.Node) error {
 
 // validateStep checks that a step names exactly one kind.
 func validateStep(s *Step) error {
+	if s.Cmd != nil {
+		if err := validateCmd(s); err != nil {
+			return err
+		}
+		return validateStepAgents(s)
+	}
 	n := 0
 	if s.Message != "" {
 		n++
@@ -470,6 +476,25 @@ func validateStep(s *Step) error {
 		}
 	}
 	return validateStepAgents(s)
+}
+
+// validateCmd checks a step that runs a builtin command.
+//
+// A cmd step may carry a message: the message is what it does in the
+// chat, not a second kind. It may not carry a shell, an action or a
+// wait: the command is the kind of the step.
+func validateCmd(s *Step) error {
+	if s.Shell != "" || s.Use != "" || s.Wait != "" {
+		return fmt.Errorf("a cmd step does not take shell / use / wait")
+	}
+	name := strings.TrimSpace(s.Cmd.Name)
+	if name == "" && s.Message == "" {
+		return fmt.Errorf("a cmd step needs a name or a message")
+	}
+	if name == "" {
+		return nil
+	}
+	return validateBuiltin(&CmdSpec{Name: name, Args: s.Cmd.Args})
 }
 
 // validateStepAgents checks the chain of agents a step declares.
@@ -653,7 +678,9 @@ var argExpr = regexp.MustCompile(`^\s*args\.([A-Za-z0-9_-]+)\s*$`)
 // value nor a default is an error.
 //
 // Every other expression is left alone: it can only be resolved once
-// the run knows what the earlier steps produced.
+// the run knows what the earlier steps produced. The conditions keep
+// their references too: a condition is an expression, and the run reads
+// its arguments from its own context.
 func Bind(wf *Workflow, args map[string]string) (*Workflow, error) {
 	if wf == nil {
 		return nil, fmt.Errorf("wfe: workflow is nil")
@@ -685,6 +712,10 @@ func Bind(wf *Workflow, args map[string]string) (*Workflow, error) {
 	}
 
 	out := cloneWorkflow(wf)
+	// The bound workflow carries the values it was bound to: a
+	// condition reads them, and a condition reads the default of an
+	// argument the run was not given like any other value.
+	out.Values = values
 	expandWorkflowArgs(out, values)
 
 	// A bound step may have lost its kind to an empty argument.
@@ -701,13 +732,15 @@ func Bind(wf *Workflow, args map[string]string) (*Workflow, error) {
 
 // workflowTexts returns every string of a workflow that may hold an
 // expression.
+//
+// The conditions are not among them: they are expressions of their
+// own, and the check of the arguments reads them as such.
 func workflowTexts(wf *Workflow) []string {
 	texts := []string{wf.Title}
 	for _, name := range wf.JobOrder() {
 		job := wf.Jobs[name]
-		texts = append(texts, job.If)
 		for _, step := range job.Steps {
-			texts = append(texts, step.If, step.Message, step.Shell, step.Description, step.Use)
+			texts = append(texts, step.Message, step.Shell, step.Description, step.Use)
 			for _, v := range step.Env {
 				texts = append(texts, v)
 			}
@@ -758,6 +791,13 @@ func cloneWorkflow(wf *Workflow) *Workflow {
 		On:         wf.On,
 		Jobs:       make(map[string]Job, len(wf.Jobs)),
 	}
+	if len(wf.Values) > 0 {
+		values := make(map[string]string, len(wf.Values))
+		for k, v := range wf.Values {
+			values[k] = v
+		}
+		out.Values = values
+	}
 	for _, a := range wf.Args {
 		arg := Arg{Name: a.Name}
 		if a.Default != nil {
@@ -779,6 +819,11 @@ func cloneWorkflow(wf *Workflow) *Workflow {
 			}
 			if len(step.With) > 0 {
 				steps[i].With = cloneAnyMap(step.With)
+			}
+			if step.Cmd != nil {
+				cmd := *step.Cmd
+				cmd.Args = append([]string(nil), step.Cmd.Args...)
+				steps[i].Cmd = &cmd
 			}
 			if len(step.Agents) > 0 {
 				steps[i].Agents = cloneAgentChains(step.Agents)
@@ -834,14 +879,16 @@ func cloneAgentChains(chains []AgentChain) []AgentChain {
 //
 // Every other expression is left as it is: it can only be resolved
 // once the run knows what the earlier steps produced.
+//
+// The conditions keep their references: a condition is an expression,
+// and the run reads its arguments from its own context — a condition
+// compares values instead of strings.
 func expandWorkflowArgs(wf *Workflow, args map[string]string) {
 	wf.Title = expandArgs(wf.Title, args)
 	for name := range wf.Jobs {
 		job := wf.Jobs[name]
-		job.If = expandArgs(job.If, args)
 		for i := range job.Steps {
 			step := &job.Steps[i]
-			step.If = expandArgs(step.If, args)
 			step.Message = expandArgs(step.Message, args)
 			step.Shell = expandArgs(step.Shell, args)
 			step.Description = expandArgs(step.Description, args)

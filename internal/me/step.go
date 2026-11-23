@@ -31,9 +31,10 @@ type stepVerdict struct {
 
 // executeStep runs one step of the workflow.
 //
-// The four kinds answer to four places: a message goes to the the
+// The five kinds answer to five places: a message goes to the the
 // chat, a shell command runs in the chat's directory, an action
-// runs through the action registry, and a wait runs out the clock.
+// runs through the action registry, a wait runs out the clock, and a
+// builtin command runs in the engine itself.
 func (s *Service) executeStep(ctx context.Context, r *run, job string, step wfe.Step) (stepVerdict, error) {
 	// The run knows which step is running: the operator's commands act
 	// on the step the run is on.
@@ -51,6 +52,8 @@ func (s *Service) executeStep(ctx context.Context, r *run, job string, step wfe.
 		return s.executeUse(ctx, r, job, step)
 	case wfe.StepKindWait:
 		return s.executeWait(ctx, r, job, step)
+	case wfe.StepKindCmd:
+		return s.executeCmd(ctx, r, job, step)
 	}
 	return stepVerdict{}, fmt.Errorf("the step %q names no kind", step.ID)
 }
@@ -504,6 +507,39 @@ func (s *Service) executeUse(ctx context.Context, r *run, job string, step wfe.S
 		out = failedOutcome(err.Error(), data)
 	}
 	r.record(wfe.ActionKindRun, name, step.ID, out)
+	s.refreshRun(r)
+	return stepVerdict{Outcome: out, Settled: true}, nil
+}
+
+// executeCmd runs the step's builtin command.
+//
+// The step may carry a message: the message goes to the chat first, and
+// its outcome is the step's outcome. The builtin runs only when the
+// message worked — a message that failed is the step's failure, and the
+// agent decides what comes next.
+//
+// The command runs when the step settles, wherever that happens: the
+// run records the outcome and the command follows it.
+func (s *Service) executeCmd(ctx context.Context, r *run, job string, step wfe.Step) (stepVerdict, error) {
+	name := strings.TrimSpace(step.Cmd.Name)
+	out := outcome.Outcome{
+		Success:    true,
+		Status:     http.StatusOK,
+		StatusText: "the command " + name + " ran",
+	}
+	if step.Message != "" {
+		base := s.evalText(r, step.Message)
+		verdict, _, err := s.runMessage(ctx, r, job, step, base)
+		if err != nil {
+			return stepVerdict{}, err
+		}
+		if !verdict.Settled {
+			// The message is still running: the command waits for it.
+			return verdict, nil
+		}
+		return verdict, nil
+	}
+	r.record(wfe.ActionKindRun, "cmd "+name, step.ID, out)
 	s.refreshRun(r)
 	return stepVerdict{Outcome: out, Settled: true}, nil
 }

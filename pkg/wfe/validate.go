@@ -322,6 +322,76 @@ func checkSemantics(wf *Workflow, root *yaml.Node) []Diagnostic {
 		}
 	}
 	diags = append(diags, checkArgExpressions(wf, root)...)
+	diags = append(diags, checkConditions(wf, root)...)
+	return diags
+}
+
+// checkConditions parses the conditions of the jobs and the steps.
+//
+// A condition is an expression, and the plan cannot decide on a
+// condition it cannot read: a condition that does not parse is a
+// problem of the file, and the diagnostic points at the condition.
+func checkConditions(wf *Workflow, root *yaml.Node) []Diagnostic {
+	declared := map[string]bool{}
+	for _, a := range wf.Args {
+		declared[a.Name] = true
+	}
+	names := wf.ArgNames()
+	var diags []Diagnostic
+	for _, name := range sortedJobNames(wf.Jobs) {
+		job := wf.Jobs[name]
+		jobMapping := jobNode(root, name)
+		if job.If != "" {
+			diags = append(diags, conditionDiagnostics(mappingValue(jobMapping, "if"), job.If,
+				fmt.Sprintf("job %q", name), declared, names)...)
+		}
+		for i := range job.Steps {
+			step := &job.Steps[i]
+			if step.If == "" {
+				continue
+			}
+			stepMapping := stepNode(root, name, i)
+			diags = append(diags, conditionDiagnostics(mappingValue(stepMapping, "if"), step.If,
+				fmt.Sprintf("job %q step %d", name, i+1), declared, names)...)
+		}
+	}
+	return diags
+}
+
+// conditionDiagnostics reports the problems of one condition.
+//
+// The condition is parsed and the arguments it names are checked: an
+// argument the workflow does not declare is a problem of the file.
+//
+// The context says where the condition stands, the way the other
+// diagnostics of a job and its steps do.
+func conditionDiagnostics(node *yaml.Node, text, ctx string, declared map[string]bool, names []string) []Diagnostic {
+	parsed, err := parseCondition(text)
+	if err != nil {
+		return []Diagnostic{diagnosticAt(node, fmt.Errorf("%s: the condition does not parse: %w", ctx, err))}
+	}
+	if parsed == nil {
+		return nil
+	}
+	var diags []Diagnostic
+	reported := map[string]bool{}
+	for _, arg := range conditionArgs(parsed) {
+		if declared[arg] || reported[arg] {
+			continue
+		}
+		reported[arg] = true
+		diags = append(diags, diagnosticAt(node,
+			fmt.Errorf("%s: unknown argument %q (declared: %s)", ctx, arg, describeArgs(names))))
+	}
+	for _, path := range conditionPaths(parsed) {
+		root := path.segments[0]
+		if exprPathRoots[root] {
+			continue
+		}
+		diags = append(diags, diagnosticAt(node,
+			fmt.Errorf("%s: %q is not a path of the run: a condition reads env, args, event, steps, needs or now",
+				ctx, root)))
+	}
 	return diags
 }
 

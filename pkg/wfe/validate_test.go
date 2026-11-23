@@ -651,3 +651,142 @@ jobs:
 		t.Errorf("the diagnostic = %q, want the shape of the block", diags[0].Message)
 	}
 }
+
+// TestValidate_AConditionThatDoesNotParseIsReported — the condition of
+// a step is an expression: a condition the engine cannot read is a
+// problem of the file, and the diagnostic points at it.
+func TestValidate_AConditionThatDoesNotParseIsReported(t *testing.T) {
+	diags := Validate([]byte(`
+title: x
+jobs:
+  main:
+    steps:
+      - id: one
+        message: "/one"
+        if: steps.fix.outputs.status ==
+`))
+	if len(diags) == 0 {
+		t.Fatal("the condition was accepted")
+	}
+	// The diagnostic points at the condition.
+	if diags[0].Line != 8 || diags[0].Column == 0 {
+		t.Errorf("the diagnostic does not point at the condition: %+v", diags[0])
+	}
+	if _, err := Parse([]byte(`
+title: x
+jobs:
+  main:
+    steps:
+      - id: one
+        message: "/one"
+        if: steps.fix.outputs.status ==
+`)); err == nil {
+		t.Error("the workflow loaded, want it refused")
+	}
+}
+
+// TestValidate_TheConditionOfAJobIsParsed — the condition of a job is
+// an expression too.
+func TestValidate_TheConditionOfAJobIsParsed(t *testing.T) {
+	diags := Validate([]byte(`
+title: x
+jobs:
+  main:
+    if: failure()
+    steps: [{message: hi}]
+`))
+	if len(diags) == 0 {
+		t.Fatal("the condition was accepted")
+	}
+	if !strings.Contains(diags[0].Message, "unknown function") {
+		t.Errorf("the diagnostic = %q, want it to name the function", diags[0].Message)
+	}
+}
+
+// TestValidate_TheFunctionsOfTheLanguageAreKnown — the language has
+// three functions, and the others are refused.
+func TestValidate_TheFunctionsOfTheLanguageAreKnown(t *testing.T) {
+	for _, cond := range []string{"success()", "always()", "empty(steps.one.outputs.status)"} {
+		diags := Validate([]byte(`
+title: x
+jobs:
+  main:
+    steps:
+      - id: one
+        message: "/one"
+        if: ` + cond + `
+`))
+		if len(diags) != 0 {
+			t.Errorf("%s was refused: %v", cond, diags)
+		}
+	}
+	for _, cond := range []string{"failure()", "cancelled()"} {
+		diags := Validate([]byte(`
+title: x
+jobs:
+  main:
+    steps:
+      - id: one
+        message: "/one"
+        if: ` + cond + `
+`))
+		if len(diags) == 0 {
+			t.Errorf("%s was accepted, want it refused", cond)
+		}
+	}
+}
+
+// TestValidate_AnUnknownArgumentOfAConditionIsReported — a condition
+// may not name an argument the workflow does not declare.
+func TestValidate_AnUnknownArgumentOfAConditionIsReported(t *testing.T) {
+	for _, cond := range []string{"args.nope", "${{ args.nope }}"} {
+		diags := Validate([]byte(`
+title: x
+args:
+  - name: issue
+jobs:
+  main:
+    steps:
+      - id: one
+        message: "/one"
+        if: ` + cond + `
+`))
+		if len(diags) == 0 {
+			t.Errorf("%s was accepted, want it refused", cond)
+			continue
+		}
+		if !strings.Contains(diags[0].Message, "unknown argument") {
+			t.Errorf("the diagnostic = %q, want it to name the argument", diags[0].Message)
+		}
+	}
+}
+
+// TestAConditionThatNamesNoPathIsRefused — a condition reads the run
+// through its paths: a word is not a path.
+func TestAConditionThatNamesNoPathIsRefused(t *testing.T) {
+	for _, cond := range []string{"always", "bogus.x", "steps.fix.outputs.status == 429"} {
+		diags := Validate([]byte(`
+title: x
+jobs:
+  main:
+    steps:
+      - id: one
+        message: "/one"
+        if: ` + cond + `
+`))
+		switch cond {
+		case "steps.fix.outputs.status == 429":
+			if len(diags) != 0 {
+				t.Errorf("%s was refused: %v", cond, diags)
+			}
+		default:
+			if len(diags) == 0 {
+				t.Errorf("%s was accepted, want it refused", cond)
+				continue
+			}
+			if !strings.Contains(diags[0].Message, "not a path of the run") {
+				t.Errorf("the diagnostic = %q, want it to name the path", diags[0].Message)
+			}
+		}
+	}
+}

@@ -49,4 +49,10 @@ type ExprCtx struct {
 	Env   map[string]string
 	Args  map[string]string
 	Now   time.Time
+	// Last holds the outputs of the last step that ran.
+	//
+	// It is what `success()` reads: the verdict of the step the run is
+	// on. A run that ran no step yet has none, and the verdict is
+	// true.
+	Last map[string]string
 }

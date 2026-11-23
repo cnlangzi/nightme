@@ -8,7 +8,11 @@ import (
 )
 
 // EvalString evaluates ${{ }} expressions in s. Pure function.
-// Supports:
+//
+// An interpolation holds an expression, and the expression is evaluated
+// as one: it reads the context of the run and it may compare what it
+// reads.
+//
 //   - ${{ env.X }}        → ec.Env["X"]
 //   - ${{ args.X }}       → ec.Args["X"]
 //   - ${{ event.X }}      → nested map lookup ec.Event["X"]
@@ -16,14 +20,14 @@ import (
 //   - ${{ steps.ID.outputs.K }} → the same, with the optional
 //     `outputs` segment written out
 //   - ${{ needs.JOB.K }}  → ec.Needs["JOB"]["K"]
-//   - ${{ success() }}    → true
-//   - ${{ failure() }}    → false
+//   - ${{ now }}          → the current time
+//   - ${{ success() }}    → the verdict of the last step that ran
 //   - ${{ always() }}     → true
-//   - ${{ cancelled() }}  → false
+//   - ${{ empty(X) }}     → whether X is nothing
 //
 // The `$` is part of the syntax delimiter (matches GitHub Actions).
-// Unknown identifiers become empty strings. v0; richer
-// expressions can come later.
+// An expression that does not parse renders as nothing: the text it
+// stood for is not there to be read.
 func EvalString(s string, ec ExprCtx) string {
 	if !strings.Contains(s, "${{") {
 		return s
@@ -31,22 +35,31 @@ func EvalString(s string, ec ExprCtx) string {
 	var out strings.Builder
 	i := 0
 	for i < len(s) {
-		if i+2 < len(s) && s[i] == '$' && s[i+1] == '{' && s[i+2] == '{' {
-			end := strings.Index(s[i+3:], "}}")
+		if strings.HasPrefix(s[i:], "${{") {
+			end := scanExpr(s, i+3)
 			if end < 0 {
 				out.WriteByte(s[i])
 				i++
 				continue
 			}
-			expr := strings.TrimSpace(s[i+3 : i+3+end])
-			out.WriteString(evalOne(expr, ec))
-			i = i + 3 + end + 2
+			out.WriteString(evalInterpolated(s[i+3:end], ec))
+			i = end + 2
 			continue
 		}
 		out.WriteByte(s[i])
 		i++
 	}
 	return out.String()
+}
+
+// evalInterpolated renders the expression of an interpolation as a
+// string.
+func evalInterpolated(src string, ec ExprCtx) string {
+	node, err := parseExpression(strings.TrimSpace(src))
+	if err != nil {
+		return ""
+	}
+	return evalExpr(node, ec).toString()
 }
 
 // EvalMap evaluates ${{ }} expressions in every string value of m
@@ -79,119 +92,22 @@ func evalValue(v any, ec ExprCtx) any {
 	return v
 }
 
-// EvalCond evaluates a boolean condition. Returns true if the
-// condition is empty (vacuously true) or evaluates to a truthy value.
+// EvalCond evaluates a boolean condition.
+//
+// The condition is an expression, written bare or wrapped in one
+// `${{ ... }}`. It is true when the value it comes to is true; a
+// condition that names nothing is true when the value reads as true,
+// and a condition that cannot be parsed is an error the caller reports.
 func EvalCond(cond string, ec ExprCtx) (bool, error) {
-	cond = strings.TrimSpace(cond)
-	if cond == "" {
+	node, err := parseCondition(cond)
+	if err != nil {
+		return false, err
+	}
+	if node == nil {
+		// An empty condition holds: the step runs.
 		return true, nil
 	}
-	v := EvalString(cond, ec)
-	if v == "" {
-		return false, nil
-	}
-	// Truthy: any non-empty, non-"false" string.
-	if v == "false" || v == "0" {
-		return false, nil
-	}
-	return true, nil
-}
-
-func evalOne(expr string, ec ExprCtx) string {
-	// Function call: foo()
-	if idx := strings.Index(expr, "("); idx > 0 && strings.HasSuffix(expr, ")") {
-		name := strings.TrimSpace(expr[:idx])
-		switch name {
-		case "success":
-			return "true"
-		case "failure":
-			return "false"
-		case "always":
-			return "true"
-		case "cancelled":
-			return "false"
-		}
-		// Unknown function — return empty
-		return ""
-	}
-	// Dotted path: ns.key.subkey
-	parts := strings.Split(expr, ".")
-	if len(parts) < 2 {
-		return ""
-	}
-	switch parts[0] {
-	case "env":
-		return ec.Env[parts[1]]
-	case "args":
-		return ec.Args[parts[1]]
-	case "event":
-		return lookupMap(ec.Event, parts[1:])
-	case "steps":
-		if len(parts) < 3 {
-			return ""
-		}
-		stepOut, ok := ec.Steps[parts[1]]
-		if !ok {
-			return ""
-		}
-		return lookupOutput(stepOut, parts[2:])
-	case "needs":
-		if len(parts) < 3 {
-			return ""
-		}
-		jobOut, ok := ec.Needs[parts[1]]
-		if !ok {
-			return ""
-		}
-		return lookupOutput(jobOut, parts[2:])
-	}
-	return ""
-}
-
-// lookupOutput resolves the path of an output.
-//
-// The `outputs` segment is optional: the rest of the path is joined
-// with "." into one key. A key the outputs do not hold falls back to
-// the data namespace, so `steps.fix.outputs.issue` finds the outcome's
-// `issue` fact.
-func lookupOutput(out map[string]string, path []string) string {
-	if len(path) == 0 {
-		return ""
-	}
-	if path[0] == "outputs" {
-		path = path[1:]
-	}
-	if len(path) == 0 {
-		return ""
-	}
-	key := strings.Join(path, ".")
-	if v, ok := out[key]; ok {
-		return v
-	}
-	if !strings.HasPrefix(key, "data.") {
-		if v, ok := out["data."+key]; ok {
-			return v
-		}
-	}
-	return ""
-}
-
-func lookupMap(m map[string]any, path []string) string {
-	if len(path) == 0 {
-		return ""
-	}
-	v, ok := m[path[0]]
-	if !ok {
-		return ""
-	}
-	if len(path) == 1 {
-		return toString(v)
-	}
-	sub, ok := v.(map[string]any)
-	if !ok {
-		return ""
-	}
-	return lookupMap(sub, path[1:])
+	return evalExpr(node, ec).toBool(), nil
 }
 
 func toString(v any) string {

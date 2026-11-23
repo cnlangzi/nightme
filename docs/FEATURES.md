@@ -145,7 +145,7 @@
 |------|----------|
 | Workflow YAML + 引擎运行时架构（schema / 触发器 / 步骤 / 表达式 / wfe↔runtime 边界）| [WFE.md](./WFE.md) |
 | 5 类触发器：`schedule` / `pull_request` / `branch` / `issue` / `mention`（解析并展示，没有东西会触发它们）| [WFE.md](./WFE.md) §3 |
-| 四种 step：`message`（chat）/ `shell`（shell）/ `wait`（等待）/ `use`（action）| [WFE.md](./WFE.md) §5 |
+| 五种 step：`message`（chat）/ `shell`（shell）/ `wait`（等待）/ `use`（action）/ `cmd`（builtin command）| [WFE.md](./WFE.md) §5 |
 | 顶层字段（`title` / `args` / `instruct` / `workspaces` / `on` / `jobs`）| [WFE.md](./WFE.md) §2 |
 | `${{ ... }}` 表达式（`args.*` / `steps.*.outputs.*` / `needs.*.*` / `env.*` / `now`）| [WFE.md](./WFE.md) §6 |
 | `use` 步骤 = 扩展点（注册的 action；内置 + `~/.nightme/workflows/actions/*.sh`）| [WFE.md](./WFE.md) §5.3 |

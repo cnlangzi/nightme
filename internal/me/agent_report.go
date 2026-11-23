@@ -68,6 +68,8 @@ func stepKind(step wfe.Step) string {
 		return "action"
 	case wfe.StepKindWait:
 		return "wait"
+	case wfe.StepKindCmd:
+		return "cmd"
 	}
 	return "none"
 }
@@ -83,6 +85,12 @@ func stepText(step wfe.Step) string {
 		return step.Use
 	case wfe.StepKindWait:
 		return step.Wait
+	case wfe.StepKindCmd:
+		if step.Message != "" {
+			return step.Message
+		}
+		// A cmd step that says nothing names the command it runs.
+		return step.Cmd.Name
 	}
 	return ""
 }

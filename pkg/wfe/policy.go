@@ -41,6 +41,9 @@ type Policy struct {
 	// rounds holds the round every job is in. The per-step budgets
 	// count the actions of the current round only.
 	rounds map[string]int
+	// skipped holds the rounds that ended quietly. They stay out of
+	// the run's report.
+	skipped SkippedRounds
 }
 
 // NewPolicy returns a policy over wf with the given action history.
@@ -81,6 +84,19 @@ func (p *Policy) SetRounds(rounds map[string]int) {
 	for job, round := range rounds {
 		p.rounds[job] = round
 	}
+}
+
+// SetSkippedRounds records the rounds that ended quietly.
+//
+// A skipped round stays out of the run's report: it produced nothing
+// worth reading, and its row would be noise in the tree of the rounds.
+func (p *Policy) SetSkippedRounds(rounds []SkippedRound) {
+	p.skipped = NewSkippedRounds(rounds)
+}
+
+// skippedRound reports whether the round of the job ended quietly.
+func (p *Policy) skippedRound(job string, round int) bool {
+	return p.skipped.Has(job, round)
 }
 
 // Round returns the round the job is in. A job that has not started
@@ -297,8 +313,24 @@ func stepLabel(step Step) string {
 		return "(use) " + step.Use
 	case StepKindWait:
 		return "(wait) " + step.Wait
+	case StepKindCmd:
+		return cmdLabel(step)
 	}
 	return "(no kind)"
+}
+
+// cmdLabel renders a cmd step for the model: the command it runs and
+// the message it sends.
+func cmdLabel(step Step) string {
+	name := strings.TrimSpace(step.Cmd.Name)
+	switch {
+	case name == "":
+		return "(cmd) " + step.Message
+	case step.Message == "":
+		return "(cmd) " + name
+	default:
+		return "(cmd) " + name + " · " + step.Message
+	}
 }
 
 // stepFor returns the index of the step whose message is the command,
@@ -386,7 +418,13 @@ func (p *Policy) StepUsage(idx int) int {
 // keeps them. An action belongs to the round when it was taken in it
 // — an action that names no round belongs to the first one, as the
 // budgets count it — and when it served a step of the job.
+//
+// A round that ended quietly is silent whatever it did: it stays out
+// of the report of the run.
 func (p *Policy) RoundStatus(job string, round int) RoundStatus {
+	if p.skippedRound(job, round) {
+		return RoundStatusSilent
+	}
 	for _, rec := range p.History {
 		if rec.StepID == "" {
 			continue

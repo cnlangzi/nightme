@@ -475,6 +475,9 @@ func (s *Service) stepCommand(r *run, step wfe.Step) string {
 	if step.Kind() == wfe.StepKindWait {
 		return "wait " + step.Wait
 	}
+	if step.Kind() == wfe.StepKindCmd && step.Message == "" {
+		return "cmd " + step.Cmd.Name
+	}
 	if command := s.evalText(r, stepText(step)); command != "" {
 		return command
 	}
@@ -621,8 +624,11 @@ func (s *Service) runStep(ctx context.Context, r *run, command string) (stepResu
 	}
 	r.record(actionKind(owned), command, step.ID, out)
 	if owned {
-		// The step ran: the run state carries the outcome.
-		r.recordStep(wfe.JobOf(r.workflow, step.ID), step, out)
+		// The step ran: the run state carries the outcome, and a cmd
+		// step runs its command now that it settled.
+		if err := r.settleStep(wfe.JobOf(r.workflow, step.ID), step, out); err != nil {
+			return stepResult{}, err
+		}
 	}
 	return res, nil
 }

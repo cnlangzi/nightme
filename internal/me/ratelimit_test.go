@@ -2,6 +2,7 @@ package me
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -325,4 +326,44 @@ func testRun(t *testing.T, svc *Service, name string) *run {
 		t.Fatalf("bind: %v", err)
 	}
 	return newRun(svc, Request{Name: name, ChatID: "obs-1", Cwd: "/tmp/work"}, bound, nil)
+}
+
+// TestARateLimitedStepHoldsTheRunWithoutAWakeUp — a throttle is the
+// run's own business: the run pauses instead of waking the agent, and
+// no model is asked while it waits.
+func TestARateLimitedStepHoldsTheRunWithoutAWakeUp(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "one", oneStepWorkflow)
+
+	provider := &scriptedProvider{err: errors.New("the chat model must not be called")}
+	decider := &scriptedDecider{err: errors.New("the decision model must not be called")}
+	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
+	op.steps = []fakeStep{{outcome: outcome.Outcome{
+		Success:    false,
+		Status:     http.StatusTooManyRequests,
+		StatusText: "the upstream refused the request",
+	}}}
+
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "one", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitForStatus(t, svc, "obs-1", PhasePaused)
+
+	// The run waits for the operator: it did not open a decision
+	// session, and it did not ask a model what to do.
+	for _, card := range op.Cards() {
+		for _, entry := range op.Entries(card.ID) {
+			if strings.Contains(entry, decisionLine) {
+				t.Errorf("the run opened a decision session while it was paused: %q", entry)
+			}
+		}
+	}
+	if n := provider.Calls(); n != 0 {
+		t.Errorf("the chat model was called %d times, want none", n)
+	}
+	if n := decider.Calls(); n != 0 {
+		t.Errorf("the decision model was called %d times, want none", n)
+	}
 }

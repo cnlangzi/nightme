@@ -594,7 +594,10 @@ agent 的预算是一个数字，对每个 step、每一轮都一样，由 `me.m
 
 表达式有 `${{ args.NAME }}`、`${{ steps.<id>.outputs.status }}`、
 `${{ steps.<id>.outputs.data.<key> }}`、`${{ needs.<job>.* }}`、`${{ env.NAME }}`
-和 `${{ now }}`；`outputs` 这一段可以省略。表达式里出现 workflow 没声明的参数，在加载文件时就会被拒绝。
+和 `${{ now }}`；`outputs` 这一段可以省略。条件也可以直接写表达式——
+`if: steps.fix.outputs.status == 429`——并且可以比较读到的值：运算符有 `==`、`!=`、
+`<`、`<=`、`>`、`>=`、`&&`、`||` 和 `!`，函数有 `success()`、`always()` 和
+`empty(x)`。表达式里出现 workflow 没声明的参数，在加载文件时就会被拒绝。
 
 ### 配置模型
 

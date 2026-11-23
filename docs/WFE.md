@@ -32,10 +32,17 @@ The personal agent (`/me`) runs a workflow in a chat. The same file is the plan 
   - [5.2 `shell` — execute shell](#52-shell--execute-shell)
   - [5.3 `wait` — sit out a duration](#53-wait--sit-out-a-duration)
   - [5.4 `use` — invoke a registered action](#54-use--invoke-a-registered-action)
-  - [5.5 Common step fields](#55-common-step-fields)
-  - [5.6 `agents` — the chain of agents the step runs](#56-agents--the-chain-of-agents-the-step-runs)
-  - [5.7 `final` — the step that cleans up after the round](#57-final--the-step-that-cleans-up-after-the-round)
-- [6. Expressions (`${{ ... }}`)](#6-expressions--)
+  - [5.5 `cmd` — run a builtin command](#55-cmd--run-a-builtin-command)
+  - [5.6 Common step fields](#56-common-step-fields)
+  - [5.7 `agents` — the chain of agents the step runs](#57-agents--the-chain-of-agents-the-step-runs)
+  - [5.8 `final` — the step that cleans up after the round](#58-final--the-step-that-cleans-up-after-the-round)
+- [6. Expressions](#6-expressions)
+  - [6.1 The forms of an expression](#61-the-forms-of-an-expression)
+  - [6.2 The paths](#62-the-paths)
+  - [6.3 The operators](#63-the-operators)
+  - [6.4 The truth of a value](#64-the-truth-of-a-value)
+  - [6.5 The functions](#65-the-functions)
+  - [6.6 What is refused](#66-what-is-refused)
 - [7. Complete examples](#7-complete-examples)
 - [8. Runtime architecture](#8-runtime-architecture)
   - [8.1 The layering](#81-the-layering)
@@ -396,7 +403,7 @@ The gap is not a step: it shows up nowhere in the chat and nowhere on the card o
 
 A round in which no step ran does not repeat: a job whose every step is skipped had nothing to do, so it does not start another round. The plan is exhausted and the agent decides whether the run is over.
 
-A round can also end **early**: the agent ends it when there is genuinely nothing left to do in it. The steps of the round that did not run are recorded as skipped, the job's final step (see §5.7) runs in their place, and the job starts its next round. A job that names no final step just starts its next round.
+A round can also end **early**: the agent ends it when there is genuinely nothing left to do in it. The steps of the round that did not run are recorded as skipped, the job's final step (see §5.8) runs in their place, and the job starts its next round. A job that names no final step just starts its next round.
 
 A job waits for the jobs it `needs` — a repeating needed job releases the waiting job after its first round, because a job that repeats until the run ends never finishes.
 
@@ -406,7 +413,7 @@ A workflow runs one job graph in one chat: the branches of the graph express ord
 
 ## 5. Steps
 
-Each step carries exactly one of four kinds. A step with two kinds, or with none, is refused when the file is loaded.
+Each step carries exactly one of five kinds. A step with two kinds, or with none, is refused when the file is loaded.
 
 | Kind | Field | Use case | Where it runs |
 |---|---|---|---|
@@ -414,6 +421,7 @@ Each step carries exactly one of four kinds. A step with two kinds, or with none
 | `shell` | `shell: <cmd>` | Execute shell | the chat's current directory |
 | `use` | `use: <action>` + `with: <args>` | Invoke a registered action | the action registry |
 | `wait` | `wait: <duration>` | Sit out a duration | the run |
+| `cmd` | `cmd: {name: <builtin>}` | Run a builtin command of the engine | the engine |
 
 `message` and `shell` are **default-supported** — they work in every workflow. `use` is the **extension point** — the agent registers which action names are valid.
 
@@ -468,7 +476,7 @@ The step's outputs carry what the command produced: `data.exit_code`, `data.stdo
 
 The step waits five minutes and then reports a success. The duration is a Go duration (`30s`, `5m`, `1h30m`); a value that does not parse is refused when the file is loaded. A wait carries no command.
 
-A wait is a step of a round: it waits inside the round, and it runs only when the round reaches it — the expression language has no negation, so a wait that runs only when the queue was empty cannot be written as a condition on the step's outcome. The gap between two rounds of a job is the job's own `sleep` (see §4): the engine keeps it however the round ended, so the back-off of a repeating job survives the round the agent ended early.
+A wait is a step of a round: it waits inside the round, and it runs only when the round reaches it — a wait that runs only when the queue was empty is a condition on the outcome of the step before it. The gap between two rounds of a job is the job's own `sleep` (see §4): the engine keeps it however the round ended, so the back-off of a repeating job survives the round the agent ended early.
 
 `/me stop` ends a wait at once: the wait belongs to the run. The same goes for the gap between two rounds.
 
@@ -510,7 +518,39 @@ A wait is a step of a round: it waits inside the round, and it runs only when th
 
 An unknown `use:` name fails the step with a clear error: `unknown action: "foo" (registered: [notify, email, github_pr_comment, github_issue])`.
 
-### 5.5 Common step fields
+### 5.5 `cmd` — run a builtin command
+
+`cmd` runs a command of the engine itself. There is one of them today:
+
+```yaml
+- id: quiet
+  cmd:
+    name: skip
+```
+
+| Field | Type | Required | Purpose |
+|---|---|---|---|
+| `name` | string | ❌ | The builtin command the step runs. |
+| `args` | string[] | ❌ | The arguments the command takes. |
+
+A `cmd` step may carry a `message:` — the message is what the step does in the chat, not a second kind:
+
+```yaml
+- id: quiet
+  cmd:
+    name: skip
+  message: "/gtw back"
+```
+
+The message goes to the chat first and its outcome is the step's outcome. The command runs only when the message worked: a message that failed is the step's failure, and the agent decides what comes next.
+
+**`skip` ends the round quietly.** The steps of the round that did not run are recorded as skipped, the job starts its next round, and the round leaves nothing behind in the report of the run: no row in the tree of the rounds, no error, no decision and no count. Its card carries the verdict and nothing else. The tokens it spent are counted — they were spent.
+
+A `cmd` step is a step of the plan like any other: it has its place in the list of the job, it has an `if:`, and the failure of the step before it keeps it from running.
+
+A `cmd` step that names no command and carries no message does nothing, and it is refused when the file is loaded. So is a `cmd` step that names a command the engine does not have, or that gives a command an argument it does not take.
+
+### 5.6 Common step fields
 
 Every step supports:
 
@@ -522,9 +562,9 @@ Every step supports:
 | `continue-on-error` | bool | `false` | Whether the chain continues when this step fails. |
 | `description` | string | — | What the step is, which outcome is its normal branch, and what to do when it is not. The decision model and the chat model both read it. |
 | `final` | bool | `false` | The step cleans up after the round. It runs when the round ends, however the round ends. |
-| `agents` | chain[] | — | The agents the step runs, in order (see §5.6). |
+| `agents` | chain[] | — | The agents the step runs, in order (see §5.7). |
 
-### 5.6 `agents` — the chain of agents the step runs
+### 5.7 `agents` — the chain of agents the step runs
 
 A step may name the agents that do its work. The chain is a list of entries, and each entry has a `mode` and the `names` it applies to:
 
@@ -581,7 +621,7 @@ A workflow that names no `agents` sends its message once, unchanged.
 
 One execution of the step is one run of it: when it concludes, it is recorded in the run's action history once, and it costs one chance of the step's budget however many agents its chain tried. The record carries the command of the attempt the chain ended on — the `args` attempt's own command (`/review -a omp`, or `/review --continue -a omp` when it took the work of the attempt before it over), or the step's message with the agent noted (`/review [agent: omp]`) in the `use` mode, because the command itself does not name the agent — and the outcome of the chain. An attempt the chain absorbed is not recorded: the operator reads the result of the chain, not the failures it swallowed.
 
-### 5.7 `final` — the step that cleans up after the round
+### 5.8 `final` — the step that cleans up after the round
 
 ```yaml
 jobs:
@@ -605,32 +645,91 @@ A final step is a step like any other: when it fails, the agent is asked again.
 
 ---
 
-## 6. Expressions (`${{ ... }}`)
+## 6. Expressions
 
-Any string value can embed expressions. Expressions are evaluated when the step runs, except the `${{ args.* }}` ones, which are resolved when the run starts.
+An expression reads the run: what the earlier steps produced, what the workflow was asked for, what the environment holds. A condition is an expression, and an expression may compare what it reads.
 
-| Expression | Resolves to |
+### 6.1 The forms of an expression
+
+Any string value can embed an expression in `${{ ... }}`. The expression is evaluated when the step runs, except the `${{ args.* }}` ones, which are resolved when the run starts.
+
+A condition may also be written bare. The two forms below are the same condition:
+
+```yaml
+- id: commit
+  message: "/gtw commit"
+  if: ${{ steps.fix.outputs.data.issue }}
+- id: pr
+  message: "/gtw pr"
+  if: steps.fix.outputs.data.issue
+```
+
+A condition is one expression: two `${{ ... }}` in one value, or text around one, are refused when the file is loaded.
+
+### 6.2 The paths
+
+| Path | Reads |
 |---|---|
-| `${{ args.NAME }}` | The value of the argument `NAME`. |
-| `${{ steps.<id>.outputs.success }}` | Whether the step `<id>` did its job — `true` or `false`. |
-| `${{ steps.<id>.outputs.status }}` | The HTTP status of the step `<id>` — `200`, `409`, `500`, … |
-| `${{ steps.<id>.outputs.statusText }}` | The one line that says what happened to the step `<id>`. |
-| `${{ steps.<id>.outputs.data.<key> }}` | One of the facts the step `<id>` reported. |
-| `${{ needs.<job>.* }}` | The outputs of the last step of the job `<job>`. |
-| `${{ env.NAME }}` | The value of the environment variable `NAME`. |
-| `${{ now }}` | The current time. |
-| `${{ success() }}` | `true`. |
-| `${{ failure() }}` | `false`. |
-| `${{ always() }}` | `true`. |
-| `${{ cancelled() }}` | `false`. |
+| `steps.<id>.outputs.success` | Whether the step `<id>` did its job — `true` or `false`. |
+| `steps.<id>.outputs.status` | The HTTP status of the step `<id>` — `200`, `409`, `429`, … |
+| `steps.<id>.outputs.statusText` | The one line that says what happened to the step `<id>`. |
+| `steps.<id>.outputs.data.<key>` | One of the facts the step `<id>` reported. |
+| `needs.<job>.*` | The outputs of the last step of the job `<job>`. |
+| `args.<name>` | The value of the argument `<name>`. |
+| `env.<name>` | The value of the environment variable `<name>`. |
+| `event.<key>` | One of the facts of the event that started the run. |
+| `now` | The current time, in RFC 3339. |
 
 The `outputs` segment is optional: the rest of the path is joined with `.` into one key. `${{ steps.fix.outputs.data.issue }}` and `${{ steps.fix.data.issue }}` read the same fact, and a key that is not an output falls back to the data namespace, so `${{ steps.fix.outputs.issue }}` finds the `issue` fact of the outcome.
 
+A path that names nothing is null: the step that did not run yet, the fact it did not report, the argument the workflow does not declare.
+
 Every fact is a fact: the plan reads the status to tell a normal result from a breakage (see §8.2), and the facts say which case it was.
 
-A condition is true when the value it resolves to is neither empty, `false` nor `0`.
+### 6.3 The operators
 
-An expression that names an argument the workflow does not declare is refused when the file is loaded.
+From the loosest to the tightest:
+
+| Operator | Means |
+|---|---|
+| `\|\|` | Either side is true. |
+| `&&` | Both sides are true. |
+| `==`, `=`, `!=` | The same, the same, not the same. |
+| `<`, `<=`, `>`, `>=` | Ordered. |
+| `!` | Not. |
+
+`!` binds tighter than a comparison, so `!a == b` reads as `(!a) == b`. A comparison needs parentheses around it: `!(a == b)`.
+
+The values compare themselves. Two strings are the same when they read the same, a string that reads as a number is compared as a number, and a comparison that cannot be made is false. One side being a bool makes the comparison a question of truth: `"true" == true`, `"false" == false` and `null == false` hold. A null is not a number and not a string: `null == 0` and `null == ''` are false.
+
+| Comparison | Result |
+|---|---|
+| `"200" == 200` | true — the string reads as the number. |
+| `"true" == true` | true — one side is a bool, so both are read as truth. |
+| `null == 0` | false — a null is nothing else. |
+| `"1000" > "400"` | true — both read as numbers. |
+| `"zebra" > "m"` | true — neither reads as a number, so they are compared as text. |
+| `"abc" > 3` | false — there is no way to compare them. |
+
+### 6.4 The truth of a value
+
+A condition holds when the value it comes to is true. A null is false, a bool is itself, a number is true when it is not zero, and a string is false when it is empty, `false` or `0`.
+
+### 6.5 The functions
+
+| Function | Answers |
+|---|---|
+| `success()` | Whether the last step that ran did its job. A run that ran no step yet has nothing that broke: the answer is true. |
+| `always()` | Always true. |
+| `empty(x)` | Whether `x` is nothing: null, or a string with nothing but spaces in it. |
+
+`failure()` and `cancelled()` are not functions of the language, and a condition that calls one is refused when the file is loaded. Write `!success()` and `steps.<id>.outputs.status == 499` instead.
+
+### 6.6 What is refused
+
+- An expression that names an argument the workflow does not declare.
+- A condition that does not parse.
+- A function the language does not have.
 
 ---
 
@@ -1269,6 +1368,10 @@ A chat model that failed or that never answered costs the same one chance. The w
 One turn of the chat model lasts at most five minutes: the chat model call carries that deadline, so the run does not wait for the client's own timeout.
 
 A command the underlying agent answered 429 pauses the run: the agent is throttled, and running the command again makes it worse. A chain of agents absorbs the throttle it can — the next agent takes the work over and the run goes on — so the run waits for the operator only when the throttle reaches it. The operator sets it going again with `/me resume`. The pause is the run's own: the model is not asked to think about a throttle.
+
+**What the 429 means.** The status of the outcome is the fact: a command that answers 429 is throttled, whatever its words say. The words are the fallback for the bridges that do not report a status yet — `rate_limit_error`, `too many requests` and a number in the transcript of the turn all say the same thing.
+
+**What a throttle does to the run.** The chain of agents of the step is the fallback: the next agent of the chain takes the work over, and the run goes on. When the chain is exhausted and the status is 429, the run pauses — the agent is not woken up, because a throttle is not a judgment to make. Every other failure is a judgment point: the decision model is asked what happens next (see §8.3).
 
 The run has no clock of its own. Every command it issues carries its own budget — the agent behind the command reports its own outcome when that budget runs out — and the run acts on that outcome. A timeout is the agent's timeout, never the run's. The run watches: it stops when the command reports, when the operator stops it, or when the daemon shuts down.
 

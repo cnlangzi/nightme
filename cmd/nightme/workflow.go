@@ -381,6 +381,8 @@ func describeStep(s wfe.Step) string {
 			s.Use, s.ID, len(s.With))
 	case wfe.StepKindWait:
 		return fmt.Sprintf("wait: %s (id=%s)", s.Wait, s.ID)
+	case wfe.StepKindCmd:
+		return fmt.Sprintf("cmd: %s (id=%s)", s.Cmd.Name, s.ID)
 	}
 	return fmt.Sprintf("? (id=%s)", s.ID)
 }

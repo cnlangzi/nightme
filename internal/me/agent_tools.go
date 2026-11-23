@@ -475,6 +475,9 @@ func (s *Service) stepCommand(r *run, step wfe.Step) string {
 	if step.Kind() == wfe.StepKindWait {
 		return "wait " + step.Wait
 	}
+	if step.Kind() == wfe.StepKindCmd && step.Message == "" {
+		return "cmd " + step.Cmd.Name
+	}
 	if command := s.evalText(r, stepText(step)); command != "" {
 		return command
 	}

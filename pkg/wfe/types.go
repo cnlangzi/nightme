@@ -163,7 +163,7 @@ type AgentChain struct {
 }
 
 // Step is one unit of work inside a job: exactly one of message,
-// shell, use or wait is set.
+// shell, use, wait or cmd is set.
 //
 // Description tells the model what the step is, which outcome is the
 // normal branch and what to do when it is not. The decision model
@@ -187,10 +187,24 @@ type Step struct {
 	With map[string]any `yaml:"with,omitempty" json:"with,omitempty"`
 	// Wait is the duration the step waits before it reports ok.
 	Wait string `yaml:"wait,omitempty" json:"wait,omitempty"`
+	// Cmd is the builtin command the step runs.
+	Cmd *CmdSpec `yaml:"cmd,omitempty" json:"cmd,omitempty"`
 
 	// Agents are the agents the step runs, in order. The first agent
 	// that does not break is the step's.
 	Agents []AgentChain `yaml:"agents,omitempty" json:"agents,omitempty"`
+}
+
+// CmdSpec is a builtin command a step runs.
+//
+// The engine owns the table of the commands: a name the table does not
+// hold is refused when the file is loaded.
+type CmdSpec struct {
+	// Name is the command the step runs. It may be empty: a cmd step
+	// that carries a message is a message step with a command.
+	Name string `yaml:"name,omitempty" json:"name,omitempty"`
+	// Args are the arguments the command takes.
+	Args []string `yaml:"args,omitempty" json:"args,omitempty"`
 }
 
 // StepKind is the dispatch category of a Step.
@@ -207,11 +221,15 @@ const (
 	StepKindUse
 	// StepKindWait waits for a duration.
 	StepKindWait
+	// StepKindCmd runs a builtin command of the engine.
+	StepKindCmd
 )
 
 // Kind returns the kind of the step.
 func (s Step) Kind() StepKind {
 	switch {
+	case s.Cmd != nil:
+		return StepKindCmd
 	case s.Message != "":
 		return StepKindMessage
 	case s.Shell != "":
@@ -289,6 +307,11 @@ type RunState struct {
 	Status Status `json:"status"`
 	// Env holds the run's environment.
 	Env map[string]string `json:"env,omitempty"`
+	// Args holds the arguments the run was started with.
+	//
+	// A condition reads them: the run knows what it was asked for, and
+	// an expression may ask about it.
+	Args map[string]string `json:"args,omitempty"`
 	// Rounds holds the round every job is in. A job that has not
 	// started yet is not in the map.
 	Rounds map[string]int `json:"rounds,omitempty"`
@@ -296,6 +319,10 @@ type RunState struct {
 	// The plan goes on with the final step of such a job or with its
 	// next round — not with a judgment point.
 	EndedRounds map[string]EndedRound `json:"ended_rounds,omitempty"`
+	// SkippedRounds holds the rounds that ended quietly. Such a round
+	// leaves nothing behind in the run's report: no row, no error and
+	// no decision.
+	SkippedRounds []SkippedRound `json:"skipped_rounds,omitempty"`
 	// Steps holds every step that ran, in the order it ran.
 	Steps []StepState `json:"steps"`
 	// StartedAt is when the run started.
@@ -310,6 +337,18 @@ type EndedRound struct {
 	Round int `json:"round"`
 	// Step is the step whose failure ended it.
 	Step string `json:"step"`
+}
+
+// SkippedRound names a round that ended quietly.
+//
+// The round happened and it cost what it cost, but it leaves nothing
+// behind in the run's report: an empty round of a polling job would
+// otherwise fill the panel with rows nobody reads.
+type SkippedRound struct {
+	// Job is the job the round belongs to.
+	Job string `json:"job"`
+	// Round is the number of the round.
+	Round int `json:"round"`
 }
 
 // StepState is the record of one step that ran.

@@ -1138,7 +1138,7 @@ jobs:
 	if runs[0].Command != "/review -a codex" {
 		t.Errorf("the history records %q, want the command of the attempt the chain ended on", runs[0].Command)
 	}
-	if lines := errorLines(runHistory(r)); len(lines) != 0 {
+	if lines := errorLines(runHistory(r), reportFilter{}); len(lines) != 0 {
 		t.Errorf("the record lists the errors %v, want none", lines)
 	}
 	out, ok := stepOutcome(r, "review")

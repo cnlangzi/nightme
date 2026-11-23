@@ -87,15 +87,60 @@ func isErrorStatus(status int) bool {
 	return status >= 400
 }
 
+// reportFilter says what stays in the record of a finished run.
+//
+// A round that ended quietly stays out of it: no action of it, no
+// decision of it and no row of it. The round happened and it cost what
+// it cost — the tokens are counted either way — but a row of an empty
+// round is noise on the panel.
+type reportFilter struct {
+	wf      *wfe.Workflow
+	skipped []wfe.SkippedRound
+}
+
+// skippedRound reports whether the round of the job ended quietly.
+func (f reportFilter) skippedRound(job string, round int) bool {
+	for _, skipped := range f.skipped {
+		if skipped.Job == job && skipped.Round == round {
+			return true
+		}
+	}
+	return false
+}
+
+// action reports whether the action stays in the record.
+//
+// The job of an action is the job of the step it belongs to. An action
+// that belongs to no step stays: it is the run's own bookkeeping.
+func (f reportFilter) action(rec wfe.ActionRecord) bool {
+	if rec.StepID == "" || f.wf == nil {
+		return true
+	}
+	round := rec.Round
+	if round <= 0 {
+		// An action that names no round belongs to the first one.
+		round = 1
+	}
+	return !f.skippedRound(wfe.JobOf(f.wf, rec.StepID), round)
+}
+
+// decision reports whether the decision stays in the record.
+func (f reportFilter) decision(rec wakeRecord) bool {
+	return !f.skippedRound(rec.Job, rec.Round)
+}
+
 // errorLines renders the actions that went wrong.
 //
 // The actions that went well are counted, not listed: a row per step
 // of a long workflow is noise, and what went wrong is what the
 // operator needs.
-func errorLines(history []wfe.ActionRecord) []string {
+func errorLines(history []wfe.ActionRecord, f reportFilter) []string {
 	failed := make([]wfe.ActionRecord, 0, len(history))
 	for _, rec := range history {
 		if !isErrorStatus(rec.Outcome.Status) {
+			continue
+		}
+		if !f.action(rec) {
 			continue
 		}
 		failed = append(failed, rec)
@@ -131,23 +176,30 @@ func errorLine(rec wfe.ActionRecord) string {
 }
 
 // decisionLines renders the decisions the models made at the wake-ups.
-func decisionLines(wakes []wakeRecord) []string {
-	if len(wakes) == 0 {
+func decisionLines(wakes []wakeRecord, f reportFilter) []string {
+	kept := make([]wakeRecord, 0, len(wakes))
+	for _, rec := range wakes {
+		if !f.decision(rec) {
+			continue
+		}
+		kept = append(kept, rec)
+	}
+	if len(kept) == 0 {
 		return nil
 	}
 	heading := "decisions:"
-	if len(wakes) > maxSummaryDecisions {
-		heading = fmt.Sprintf("decisions (last %d of %d):", maxSummaryDecisions, len(wakes))
-		wakes = wakes[len(wakes)-maxSummaryDecisions:]
+	if len(kept) > maxSummaryDecisions {
+		heading = fmt.Sprintf("decisions (last %d of %d):", maxSummaryDecisions, len(kept))
+		kept = kept[len(kept)-maxSummaryDecisions:]
 	}
-	lines := make([]string, 0, len(wakes)+1)
+	lines := make([]string, 0, len(kept)+1)
 	lines = append(lines, heading)
-	for i, rec := range wakes {
+	for i, rec := range kept {
 		line := rec.Who + " — " + clipLine(rec.What, maxSummaryCommand)
 		if rec.Why != "" {
 			line += " · because: " + clipLine(rec.Why, maxSummaryText)
 		}
-		lines = append(lines, treeRow(i, len(wakes), clipLine(line, maxSummaryLine)))
+		lines = append(lines, treeRow(i, len(kept), clipLine(line, maxSummaryLine)))
 	}
 	return lines
 }

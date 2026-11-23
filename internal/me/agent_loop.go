@@ -306,6 +306,7 @@ func (s *Service) plan(ctx context.Context, r *run) (wfe.Decision, error) {
 		return decision, err
 	}
 	r.policy.SetRounds(r.state.Rounds)
+	r.policy.SetSkippedRounds(r.state.SkippedRounds)
 	it := targetIteration(r, decision, before)
 	r.mu.Unlock()
 

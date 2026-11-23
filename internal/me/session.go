@@ -317,6 +317,9 @@ func (s *Service) switchRoundSession(ctx context.Context, r *run, it iteration) 
 //
 // The round's card says what the round came to, and the verdict of
 // the round rides in its footer.
+//
+// A round that ended quietly says nothing else: it leaves the tree and
+// the checklist of the card open, and the verdict is all it has.
 func (s *Service) closeRoundSession(ctx context.Context, r *run) {
 	sess := r.roundSessionRef()
 	if sess == nil {
@@ -324,8 +327,10 @@ func (s *Service) closeRoundSession(ctx context.Context, r *run) {
 	}
 	rec := r.closeRound(sess.job, sess.round, s.now())
 	ctx = context.WithoutCancel(r.ctx)
-	s.publishReply(ctx, r, sess, roundEndedLine(rec))
-	s.publishReply(ctx, r, sess, decisionsText(rec))
+	if !r.skippedRound(sess.job, sess.round) {
+		s.publishReply(ctx, r, sess, roundEndedLine(rec))
+		s.publishReply(ctx, r, sess, decisionsText(rec))
+	}
 	s.publishResult(ctx, r, sess, strconv.Itoa(rec.Outcome.Status))
 	r.setRoundSession(nil)
 }

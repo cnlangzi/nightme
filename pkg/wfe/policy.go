@@ -41,6 +41,9 @@ type Policy struct {
 	// rounds holds the round every job is in. The per-step budgets
 	// count the actions of the current round only.
 	rounds map[string]int
+	// skipped holds the rounds that ended quietly. They stay out of
+	// the run's report.
+	skipped []SkippedRound
 }
 
 // NewPolicy returns a policy over wf with the given action history.
@@ -81,6 +84,24 @@ func (p *Policy) SetRounds(rounds map[string]int) {
 	for job, round := range rounds {
 		p.rounds[job] = round
 	}
+}
+
+// SetSkippedRounds records the rounds that ended quietly.
+//
+// A skipped round stays out of the run's report: it produced nothing
+// worth reading, and its row would be noise in the tree of the rounds.
+func (p *Policy) SetSkippedRounds(rounds []SkippedRound) {
+	p.skipped = append([]SkippedRound(nil), rounds...)
+}
+
+// skippedRound reports whether the round of the job ended quietly.
+func (p *Policy) skippedRound(job string, round int) bool {
+	for _, skipped := range p.skipped {
+		if skipped.Job == job && skipped.Round == round {
+			return true
+		}
+	}
+	return false
 }
 
 // Round returns the round the job is in. A job that has not started
@@ -297,6 +318,8 @@ func stepLabel(step Step) string {
 		return "(use) " + step.Use
 	case StepKindWait:
 		return "(wait) " + step.Wait
+	case StepKindCmd:
+		return "(cmd) " + step.Cmd.Name
 	}
 	return "(no kind)"
 }
@@ -386,7 +409,13 @@ func (p *Policy) StepUsage(idx int) int {
 // keeps them. An action belongs to the round when it was taken in it
 // — an action that names no round belongs to the first one, as the
 // budgets count it — and when it served a step of the job.
+//
+// A round that ended quietly is silent whatever it did: it stays out
+// of the report of the run.
 func (p *Policy) RoundStatus(job string, round int) RoundStatus {
+	if p.skippedRound(job, round) {
+		return RoundStatusSilent
+	}
 	for _, rec := range p.History {
 		if rec.StepID == "" {
 			continue

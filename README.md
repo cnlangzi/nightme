@@ -692,8 +692,12 @@ The budget of the agent is one number for every step and every round, set by
 
 The expressions are `${{ args.NAME }}`, `${{ steps.<id>.outputs.status }}`,
 `${{ steps.<id>.outputs.data.<key> }}`, `${{ needs.<job>.* }}`, `${{ env.NAME }}`
-and `${{ now }}`. The `outputs` segment is optional. An expression that names
-an argument the workflow does not declare is refused when the file is loaded.
+and `${{ now }}`. The `outputs` segment is optional. A condition may also be
+written bare — `if: steps.fix.outputs.status == 429` — and it may compare
+what it reads: `==`, `!=`, `<`, `<=`, `>`, `>=`, `&&`, `||` and `!` are there,
+and the functions are `success()`, `always()` and `empty(x)`. An expression
+that names an argument the workflow does not declare is refused when the file
+is loaded.
 
 ### Configure the models
 

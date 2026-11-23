@@ -460,7 +460,7 @@ func TestTheRecordCapsTheErrorsAndTheDecisions(t *testing.T) {
 		chatID:   "obs-1",
 		workflow: wf,
 		policy:   wfe.NewPolicy(wf, nil),
-		state:    newRunState("one-1", wf.Name, "/tmp/work", time.Now()),
+		state:    newRunState("one-1", wf.Name, "/tmp/work", nil, time.Now()),
 		phase:    PhaseStopped,
 	}
 	for i := 0; i < 6; i++ {
@@ -541,7 +541,7 @@ func TestTheRecordClipsItsRows(t *testing.T) {
 		chatID:   "obs-1",
 		workflow: wf,
 		policy:   wfe.NewPolicy(wf, nil),
-		state:    newRunState("one-1", wf.Name, "/tmp/work", time.Now()),
+		state:    newRunState("one-1", wf.Name, "/tmp/work", nil, time.Now()),
 		phase:    PhaseStopped,
 	}
 	r.policy.History = []wfe.ActionRecord{{

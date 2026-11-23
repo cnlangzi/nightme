@@ -315,6 +315,16 @@ func roundEnded(state *RunState, prev StepState) bool {
 //
 // The engine owns the state: this is the only way a round ends early.
 func EndRound(state *RunState, wf *Workflow, job string) error {
+	return endRound(state, wf, job, lastRunStep(state, job))
+}
+
+// endRound ends the current round of a job, and the step that ended it
+// is the one the plan reads.
+//
+// The step is named because the agent ends a round from the step that
+// broke, while a builtin command ends it from the step that ran: the
+// plan has to know which step closed the round.
+func endRound(state *RunState, wf *Workflow, job, ending string) error {
 	if state == nil {
 		return errors.New("wfe: nil state")
 	}
@@ -333,8 +343,7 @@ func EndRound(state *RunState, wf *Workflow, job string) error {
 		}
 	}
 	round := state.RoundOf(job)
-	ended := lastRunStep(state, job)
-	if prev, ok := state.EndedRounds[job]; ok && prev.Round == round && prev.Step == ended {
+	if prev, ok := state.EndedRounds[job]; ok && prev.Round == round && prev.Step == ending {
 		// The round is already over at this very point: ending it
 		// again would change nothing, and the plan would ask the
 		// agent the same question forever.
@@ -342,6 +351,11 @@ func EndRound(state *RunState, wf *Workflow, job string) error {
 	}
 	for _, step := range spec.Steps {
 		if HasRun(state, step.ID) {
+			continue
+		}
+		if step.ID == ending {
+			// The step that ends the round is not among the steps it
+			// cuts short.
 			continue
 		}
 		if step.Final {
@@ -358,7 +372,7 @@ func EndRound(state *RunState, wf *Workflow, job string) error {
 	if state.EndedRounds == nil {
 		state.EndedRounds = map[string]EndedRound{}
 	}
-	state.EndedRounds[job] = EndedRound{Round: round, Step: ended}
+	state.EndedRounds[job] = EndedRound{Round: round, Step: ending}
 	return nil
 }
 
@@ -721,6 +735,7 @@ func buildExprCtx(state *RunState) ExprCtx {
 		Steps: map[string]map[string]string{},
 		Needs: map[string]map[string]string{},
 		Env:   state.Env,
+		Args:  state.Args,
 		Now:   state.UpdatedAt,
 	}
 	for _, st := range state.Steps {
@@ -730,6 +745,11 @@ func buildExprCtx(state *RunState) ExprCtx {
 	// is the job's last step.
 	for _, st := range state.Steps {
 		ec.Needs[st.Job] = outcomeOutputs(st.Outcome)
+	}
+	// The verdict of the step the run is on: it is what `success()`
+	// reads, and it is the same everywhere in the round.
+	if prev, ok := lastRun(state); ok {
+		ec.Last = outcomeOutputs(prev.Outcome)
 	}
 	return ec
 }

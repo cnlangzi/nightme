@@ -177,11 +177,13 @@ func (r *run) recordCard() string {
 	started := r.state.StartedAt
 	rounds := maps.Clone(r.state.Rounds)
 	history := append([]wfe.ActionRecord(nil), r.policy.History...)
+	skipped := append([]wfe.SkippedRound(nil), r.state.SkippedRounds...)
 	inflight := r.inflight
 	phase := r.phase
 	reason := r.errMsg
 	r.mu.Unlock()
 	wakes := r.wakeRecords()
+	filter := reportFilter{wf: r.workflow, skipped: skipped}
 
 	lines := make([]string, 0, 24)
 	lines = append(lines, "■ [ "+r.workflow.Name+" ] "+string(phase))
@@ -202,8 +204,8 @@ func (r *run) recordCard() string {
 		facts = append(facts, fact{key: "jobs", value: jobs})
 	}
 	facts = append(facts,
-		fact{key: "actions", value: actionsValue(history)},
-		fact{key: "steps", value: stepsValue(workflowStepIDs(r.workflow), history)},
+		fact{key: "actions", value: actionsValue(history, filter)},
+		fact{key: "steps", value: stepsValue(workflowStepIDs(r.workflow), history, filter)},
 	)
 	lines = append(lines, factLines(facts)...)
 
@@ -211,11 +213,11 @@ func (r *run) recordCard() string {
 		lines = append(lines, "")
 		lines = append(lines, treeBlock("rounds:", finished))
 	}
-	if errs := errorLines(history); len(errs) > 0 {
+	if errs := errorLines(history, filter); len(errs) > 0 {
 		lines = append(lines, "")
 		lines = append(lines, errs...)
 	}
-	if decs := decisionLines(wakes); len(decs) > 0 {
+	if decs := decisionLines(wakes, filter); len(decs) > 0 {
 		lines = append(lines, "")
 		lines = append(lines, decs...)
 	}
@@ -244,9 +246,17 @@ func jobsValue(jobs []string, rounds map[string]int) string {
 //
 // An action that reported no verdict — a budget reset, a turn without
 // a tool call — is neither: it is the run's own bookkeeping.
-func actionsValue(history []wfe.ActionRecord) string {
+//
+// The actions of a round that ended quietly are not counted: the round
+// left nothing behind.
+func actionsValue(history []wfe.ActionRecord, f reportFilter) string {
 	ok, failed, cancelled := 0, 0, 0
+	total := 0
 	for _, rec := range history {
+		if !f.action(rec) {
+			continue
+		}
+		total++
 		switch {
 		case rec.Outcome.Status == outcome.StatusClientClosedRequest:
 			cancelled++
@@ -266,7 +276,7 @@ func actionsValue(history []wfe.ActionRecord) string {
 	if cancelled > 0 {
 		parts = append(parts, fmt.Sprintf("%d cancelled", cancelled))
 	}
-	value := strconv.Itoa(len(history))
+	value := strconv.Itoa(total)
 	if len(parts) > 0 {
 		value += " (" + strings.Join(parts, " · ") + ")"
 	}
@@ -277,12 +287,19 @@ func actionsValue(history []wfe.ActionRecord) string {
 //
 // A step whose condition did not hold is recorded in the run state but
 // not in the history, so it counts as a step that did not run.
-func stepsValue(stepIDs []string, history []wfe.ActionRecord) string {
+//
+// The steps of a round that ended quietly do not count: the round left
+// nothing behind.
+func stepsValue(stepIDs []string, history []wfe.ActionRecord, f reportFilter) string {
 	ran := map[string]bool{}
 	for _, rec := range history {
-		if rec.Kind == wfe.ActionKindRun && rec.StepID != "" {
-			ran[rec.StepID] = true
+		if rec.Kind != wfe.ActionKindRun || rec.StepID == "" {
+			continue
 		}
+		if !f.action(rec) {
+			continue
+		}
+		ran[rec.StepID] = true
 	}
 	count := 0
 	for _, id := range stepIDs {
@@ -400,9 +417,9 @@ func jobHeader(wf *wfe.Workflow, name string) string {
 
 // stepCommand renders the command a step runs.
 //
-// A step is one of four things: a message to the chat, a shell
-// command, a registered action or a wait. The kind is part of the
-// command, so the reader knows what the step does.
+// A step is one of five things: a message to the chat, a shell
+// command, a registered action, a wait or a builtin command. The kind
+// is part of the command, so the reader knows what the step does.
 func stepCommand(step wfe.Step) string {
 	switch step.Kind() {
 	case wfe.StepKindMessage:
@@ -413,8 +430,24 @@ func stepCommand(step wfe.Step) string {
 		return cutText("(use) "+step.Use, maxStepCommand)
 	case wfe.StepKindWait:
 		return cutText("(wait) "+step.Wait, maxStepCommand)
+	case wfe.StepKindCmd:
+		return cutText(cmdCommand(step), maxStepCommand)
 	}
 	return ""
+}
+
+// cmdCommand renders what a cmd step does: the builtin it runs and the
+// message it sends to the chat.
+func cmdCommand(step wfe.Step) string {
+	name := strings.TrimSpace(step.Cmd.Name)
+	switch {
+	case name == "":
+		return "(cmd) " + step.Message
+	case step.Message == "":
+		return "(cmd) " + name
+	default:
+		return "(cmd) " + name + " · " + step.Message
+	}
 }
 
 // roundsTree renders the tree of the rounds of the run: the rounds

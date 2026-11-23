@@ -32,10 +32,17 @@ type Workflow struct {
 	// loaded from under the workflows directory.
 	// "nightme/coder/workflow.yml" is the workflow "nightme/coder".
 	// The loader sets it; the file does not carry it.
-	Name       string   `yaml:"-" json:"name"`
-	Args       []Arg    `yaml:"args" json:"args,omitempty"`
-	Instruct   bool     `yaml:"instruct" json:"instruct"`
-	Workspaces []string `yaml:"workspaces" json:"workspaces,omitempty"`
+	Name string `yaml:"-" json:"name"`
+	Args []Arg  `yaml:"args" json:"args,omitempty"`
+	// Values holds the values the run bound to the declared arguments:
+	// the ones the run was given, and the default of every argument it
+	// was not given.
+	//
+	// A workflow that is not bound has none: the file declares the
+	// arguments, the run binds them.
+	Values     map[string]string `yaml:"-" json:"values,omitempty"`
+	Instruct   bool              `yaml:"instruct" json:"instruct"`
+	Workspaces []string          `yaml:"workspaces" json:"workspaces,omitempty"`
 	// Requires holds the versions the workflow needs to run. A
 	// workflow that names none runs on every nightme.
 	Requires Requires       `yaml:"requires,omitempty" json:"requires,omitzero"`
@@ -349,6 +356,34 @@ type SkippedRound struct {
 	Job string `json:"job"`
 	// Round is the number of the round.
 	Round int `json:"round"`
+}
+
+// SkippedRounds is the set of the rounds that ended quietly.
+//
+// The lookup is by job and round: a run that skips a round of a
+// polling job skips one after another, and the report asks about every
+// round it holds.
+type SkippedRounds struct {
+	rounds map[string]map[int]bool
+}
+
+// NewSkippedRounds returns the set of the rounds that ended quietly.
+func NewSkippedRounds(rounds []SkippedRound) SkippedRounds {
+	s := SkippedRounds{rounds: make(map[string]map[int]bool, len(rounds))}
+	for _, round := range rounds {
+		job, ok := s.rounds[round.Job]
+		if !ok {
+			job = map[int]bool{}
+			s.rounds[round.Job] = job
+		}
+		job[round.Round] = true
+	}
+	return s
+}
+
+// Has reports whether the round of the job ended quietly.
+func (s SkippedRounds) Has(job string, round int) bool {
+	return s.rounds[job][round]
 }
 
 // StepState is the record of one step that ran.

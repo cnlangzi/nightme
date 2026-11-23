@@ -97,6 +97,9 @@ func TestEvalCond_ComparesByConversion(t *testing.T) {
 		{"'1000' > '400'", true},
 		{"'zebra' > 'm'", true},
 		{"'abc' > 3", false},
+		{"null < 5", false},
+		{"null > 5", false},
+		{"null <= null", false},
 		{"'abc' == 'abc'", true},
 		{"'abc' == 'abd'", false},
 		{"2 == 2.0", true},
@@ -528,5 +531,48 @@ jobs:
 	}
 	if decision.Kind != DecisionRun || decision.Step.ID != "one" {
 		t.Fatalf("the plan runs %q (kind %v), want the first step", decision.Step.ID, decision.Kind)
+	}
+}
+
+// TestTheConditionReadsTheDefaultOfAnArgument — the run binds the
+// default of every argument it was not given, and a condition reads it
+// like any other value.
+func TestTheConditionReadsTheDefaultOfAnArgument(t *testing.T) {
+	wf := mustParse(t, `
+title: t
+args:
+  - name: mode
+    default: fast
+jobs:
+  main:
+    steps:
+      - id: one
+        message: "/one"
+        if: args.mode == "fast"
+`)
+	bound, err := Bind(wf, map[string]string{})
+	if err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	if bound.Values["mode"] != "fast" {
+		t.Errorf("the bound workflow holds %q, want fast", bound.Values["mode"])
+	}
+	state := newRunState(wf)
+	state.Args = bound.Values
+
+	decision, err := Decide(state, bound)
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if decision.Kind != DecisionRun || decision.Step.ID != "one" {
+		t.Fatalf("the plan runs %q (kind %v), want the first step", decision.Step.ID, decision.Kind)
+	}
+}
+
+// TestEndRoundWithoutAStateIsAnError — the guard comes before the
+// state is read.
+func TestEndRoundWithoutAStateIsAnError(t *testing.T) {
+	if err := EndRound(nil, &Workflow{}, "main"); err == nil {
+		t.Error("ending a round without a state was accepted")
 	}
 }

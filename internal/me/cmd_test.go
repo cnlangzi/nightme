@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cnlangzi/nightme/internal/llm"
+	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/pkg/outcome"
 	"github.com/cnlangzi/nightme/pkg/wfe"
 )
@@ -184,6 +186,24 @@ func TestTheRecordLeavesOutTheRoundThatEndedQuietly(t *testing.T) {
 	}
 }
 
+// waitPending waits until the step of the run waits for an answer.
+func waitPending(t *testing.T, svc *Service, chatID, stepID string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		svc.mu.Lock()
+		r := svc.active[chatID]
+		svc.mu.Unlock()
+		if r != nil {
+			if st, ok := r.stepState(stepID); ok && st.Pending {
+				return
+			}
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("the step %q did not wait for an answer", stepID)
+}
+
 // cardCarries reports whether the chat saw the given text under any
 // card of the run.
 func cardCarries(t *testing.T, op *fakeOperator, text string) bool {
@@ -196,4 +216,40 @@ func cardCarries(t *testing.T, op *fakeOperator, text string) bool {
 		}
 	}
 	return false
+}
+
+// TestTheCmdStepRunsItsCommandWhenItSettlesLate — a step whose
+// message waits for an answer settles later: the command runs then,
+// and the round ends quietly.
+func TestTheCmdStepRunsItsCommandWhenItSettlesLate(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkflow(t, dir, "cmd", cmdWorkflow)
+
+	provider := &scriptedProvider{err: errors.New("the chat model must not be called")}
+	decider := &scriptedDecider{answers: []llm.DecisionResponse{
+		decisionResp("test", "/gtw back", 1, 0),
+	}}
+	svc, op := testService(t, dir, Config{Provider: provider, Decider: decider})
+	// The chat asks something: the command waits for the answer.
+	op.steps = []fakeStep{{open: true, choices: []messages.Choice{{Title: "which one?"}}}}
+
+	if _, _, err := svc.StartWorkflow(context.Background(), Request{
+		Name: "cmd", ChatID: "obs-1", Cwd: "/tmp/work",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitSent(t, op, "/gtw back")
+	// The step waits for the answer: the run holds it as pending.
+	waitPending(t, svc, "obs-1", "quiet")
+	// The operator answers: the command settles.
+	if err := op.answer("obs-1", "", ""); err != nil {
+		t.Fatalf("answer: %v", err)
+	}
+	waitRun(t, svc, "obs-1")
+
+	for _, cmd := range op.Sent() {
+		if cmd == "/gtw commit" {
+			t.Errorf("the chat got %q, want the round to end at the cmd step", cmd)
+		}
+	}
 }

@@ -383,6 +383,15 @@ func conditionDiagnostics(node *yaml.Node, text, ctx string, declared map[string
 		diags = append(diags, diagnosticAt(node,
 			fmt.Errorf("%s: unknown argument %q (declared: %s)", ctx, arg, describeArgs(names))))
 	}
+	for _, path := range conditionPaths(parsed) {
+		root := path.segments[0]
+		if exprPathRoots[root] {
+			continue
+		}
+		diags = append(diags, diagnosticAt(node,
+			fmt.Errorf("%s: %q is not a path of the run: a condition reads env, args, event, steps, needs or now",
+				ctx, root)))
+	}
 	return diags
 }
 

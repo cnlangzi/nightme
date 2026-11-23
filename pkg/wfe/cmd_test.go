@@ -301,3 +301,22 @@ func TestTheCmdStepWaitsForTheStepBeforeIt(t *testing.T) {
 		t.Fatalf("Kind = %v, want a judgment (the reason was %q)", decision.Kind, decision.Reason)
 	}
 }
+
+// TestTheBoundWorkflowDoesNotShareTheCommandOfAStep — the bound copy
+// is the run's own: it does not share the command of a step with the
+// workflow it came from.
+func TestTheBoundWorkflowDoesNotShareTheCommandOfAStep(t *testing.T) {
+	wf := mustParse(t, cmdWorkflowYAML)
+	bound, err := Bind(wf, map[string]string{})
+	if err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	step := bound.Jobs["main"].Steps[1]
+	if step.Cmd == nil {
+		t.Fatal("the bound step has no command")
+	}
+	step.Cmd.Name = "changed"
+	if wf.Jobs["main"].Steps[1].Cmd.Name == "changed" {
+		t.Error("the bound workflow shares the command of a step with the workflow it came from")
+	}
+}

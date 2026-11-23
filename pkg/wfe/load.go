@@ -712,6 +712,10 @@ func Bind(wf *Workflow, args map[string]string) (*Workflow, error) {
 	}
 
 	out := cloneWorkflow(wf)
+	// The bound workflow carries the values it was bound to: a
+	// condition reads them, and a condition reads the default of an
+	// argument the run was not given like any other value.
+	out.Values = values
 	expandWorkflowArgs(out, values)
 
 	// A bound step may have lost its kind to an empty argument.
@@ -787,6 +791,13 @@ func cloneWorkflow(wf *Workflow) *Workflow {
 		On:         wf.On,
 		Jobs:       make(map[string]Job, len(wf.Jobs)),
 	}
+	if len(wf.Values) > 0 {
+		values := make(map[string]string, len(wf.Values))
+		for k, v := range wf.Values {
+			values[k] = v
+		}
+		out.Values = values
+	}
 	for _, a := range wf.Args {
 		arg := Arg{Name: a.Name}
 		if a.Default != nil {
@@ -808,6 +819,11 @@ func cloneWorkflow(wf *Workflow) *Workflow {
 			}
 			if len(step.With) > 0 {
 				steps[i].With = cloneAnyMap(step.With)
+			}
+			if step.Cmd != nil {
+				cmd := *step.Cmd
+				cmd.Args = append([]string(nil), step.Cmd.Args...)
+				steps[i].Cmd = &cmd
 			}
 			if len(step.Agents) > 0 {
 				steps[i].Agents = cloneAgentChains(step.Agents)

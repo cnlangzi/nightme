@@ -183,7 +183,7 @@ func (r *run) recordCard() string {
 	reason := r.errMsg
 	r.mu.Unlock()
 	wakes := r.wakeRecords()
-	filter := reportFilter{wf: r.workflow, skipped: skipped}
+	filter := newReportFilter(r.workflow, skipped)
 
 	lines := make([]string, 0, 24)
 	lines = append(lines, "■ [ "+r.workflow.Name+" ] "+string(phase))

@@ -496,6 +496,17 @@ func (p *exprParser) parsePath(first string) (exprNode, error) {
 	return &pathNode{segments: segments}, nil
 }
 
+// exprPathRoots are the roots a path may have: the namespaces of the
+// context, and the clock.
+var exprPathRoots = map[string]bool{
+	"env":   true,
+	"args":  true,
+	"event": true,
+	"steps": true,
+	"needs": true,
+	"now":   true,
+}
+
 // conditionArgs returns the arguments a condition names.
 //
 // A condition is an expression, and an argument it names is a path
@@ -504,6 +515,35 @@ func conditionArgs(node exprNode) []string {
 	var out []string
 	collectArgs(node, &out)
 	return out
+}
+
+// conditionPaths returns the paths a condition names.
+//
+// A condition is an expression, and it reads the run through its paths:
+// a path that names a namespace the run does not have is a condition
+// the engine cannot read.
+func conditionPaths(node exprNode) []*pathNode {
+	var out []*pathNode
+	collectPaths(node, &out)
+	return out
+}
+
+// collectPaths walks an expression's tree and collects the paths it
+// names.
+func collectPaths(node exprNode, out *[]*pathNode) {
+	switch n := node.(type) {
+	case *pathNode:
+		*out = append(*out, n)
+	case *callNode:
+		for _, arg := range n.args {
+			collectPaths(arg, out)
+		}
+	case *unaryNode:
+		collectPaths(n.operand, out)
+	case *binaryNode:
+		collectPaths(n.left, out)
+		collectPaths(n.right, out)
+	}
 }
 
 // collectArgs walks an expression's tree and collects the arguments it

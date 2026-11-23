@@ -760,3 +760,33 @@ jobs:
 		}
 	}
 }
+
+// TestAConditionThatNamesNoPathIsRefused — a condition reads the run
+// through its paths: a word is not a path.
+func TestAConditionThatNamesNoPathIsRefused(t *testing.T) {
+	for _, cond := range []string{"always", "bogus.x", "steps.fix.outputs.status == 429"} {
+		diags := Validate([]byte(`
+title: x
+jobs:
+  main:
+    steps:
+      - id: one
+        message: "/one"
+        if: ` + cond + `
+`))
+		switch cond {
+		case "steps.fix.outputs.status == 429":
+			if len(diags) != 0 {
+				t.Errorf("%s was refused: %v", cond, diags)
+			}
+		default:
+			if len(diags) == 0 {
+				t.Errorf("%s was accepted, want it refused", cond)
+				continue
+			}
+			if !strings.Contains(diags[0].Message, "not a path of the run") {
+				t.Errorf("the diagnostic = %q, want it to name the path", diags[0].Message)
+			}
+		}
+	}
+}

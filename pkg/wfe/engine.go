@@ -315,6 +315,9 @@ func roundEnded(state *RunState, prev StepState) bool {
 //
 // The engine owns the state: this is the only way a round ends early.
 func EndRound(state *RunState, wf *Workflow, job string) error {
+	if state == nil {
+		return errors.New("wfe: nil state")
+	}
 	return endRound(state, wf, job, lastRunStep(state, job))
 }
 

@@ -336,7 +336,14 @@ func valuesEqual(a, b exprValue) bool {
 //
 // Two numbers are compared as numbers, two strings as text. Anything
 // else cannot be compared: the comparison is false.
+//
+// A null is one of the things that cannot be compared: a path that
+// names nothing says nothing about the order of two values, so the
+// comparison is false rather than a comparison of nothing with zero.
 func compareValues(op string, a, b exprValue) bool {
+	if a.kind == valueNull || b.kind == valueNull {
+		return false
+	}
 	x, y := a.toNumber(), b.toNumber()
 	if !math.IsNaN(x) && !math.IsNaN(y) {
 		return compareNumbers(op, x, y)

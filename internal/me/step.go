@@ -518,8 +518,8 @@ func (s *Service) executeUse(ctx context.Context, r *run, job string, step wfe.S
 // message worked — a message that failed is the step's failure, and the
 // agent decides what comes next.
 //
-// The command runs in the engine: it ends the round when that is what
-// it does.
+// The command runs when the step settles, wherever that happens: the
+// run records the outcome and the command follows it.
 func (s *Service) executeCmd(ctx context.Context, r *run, job string, step wfe.Step) (stepVerdict, error) {
 	name := strings.TrimSpace(step.Cmd.Name)
 	out := outcome.Outcome{
@@ -537,22 +537,10 @@ func (s *Service) executeCmd(ctx context.Context, r *run, job string, step wfe.S
 			// The message is still running: the command waits for it.
 			return verdict, nil
 		}
-		if !verdict.Outcome.Succeeded() {
-			// The message failed: the step failed with it, and the
-			// command does not run.
-			return verdict, nil
-		}
-		out = verdict.Outcome
-	} else {
-		r.record(wfe.ActionKindRun, "cmd "+name, step.ID, out)
-		s.refreshRun(r)
+		return verdict, nil
 	}
-	// The step ran: the run state records it before the round ends, so
-	// the engine does not count it among the steps the round cut short.
-	r.recordStep(job, step, out)
-	if err := r.runBuiltin(job, step); err != nil {
-		return stepVerdict{}, err
-	}
+	r.record(wfe.ActionKindRun, "cmd "+name, step.ID, out)
+	s.refreshRun(r)
 	return stepVerdict{Outcome: out, Settled: true}, nil
 }
 

@@ -95,17 +95,17 @@ func isErrorStatus(status int) bool {
 // round is noise on the panel.
 type reportFilter struct {
 	wf      *wfe.Workflow
-	skipped []wfe.SkippedRound
+	skipped wfe.SkippedRounds
+}
+
+// newReportFilter returns the filter of the rounds the run left out.
+func newReportFilter(wf *wfe.Workflow, skipped []wfe.SkippedRound) reportFilter {
+	return reportFilter{wf: wf, skipped: wfe.NewSkippedRounds(skipped)}
 }
 
 // skippedRound reports whether the round of the job ended quietly.
 func (f reportFilter) skippedRound(job string, round int) bool {
-	for _, skipped := range f.skipped {
-		if skipped.Job == job && skipped.Round == round {
-			return true
-		}
-	}
-	return false
+	return f.skipped.Has(job, round)
 }
 
 // action reports whether the action stays in the record.

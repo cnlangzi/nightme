@@ -546,7 +546,9 @@ The message goes to the chat first and its outcome is the step's outcome. The co
 
 **`skip` ends the round quietly.** The steps of the round that did not run are recorded as skipped, the job starts its next round, and the round leaves nothing behind in the report of the run: no row in the tree of the rounds, no error, no decision and no count. Its card carries the verdict and nothing else. The tokens it spent are counted — they were spent.
 
-A `cmd` step is a step of the plan like any other: it has its place in the list of the job, it has an `if:`, and the failure of the step before it keeps it from running.
+A `cmd` step is a step of the plan like any other: it has its place in the list of the job, it has an `if:`, and the failure of the step before it keeps it from running. It names no agents: the message it sends is the chat's own.
+
+The name of a command is fixed: it is not an expression, and a file that holds one is refused when it is loaded.
 
 A `cmd` step that names no command and carries no message does nothing, and it is refused when the file is loaded. So is a `cmd` step that names a command the engine does not have, or that gives a command an argument it does not take.
 
@@ -677,7 +679,7 @@ A condition is one expression: two `${{ ... }}` in one value, or text around one
 | `needs.<job>.*` | The outputs of the last step of the job `<job>`. |
 | `args.<name>` | The value of the argument `<name>`. |
 | `env.<name>` | The value of the environment variable `<name>`. |
-| `event.<key>` | One of the facts of the event that started the run. |
+| `event.<key>` | One of the facts of the event that started the run. No trigger fires yet, so the event is empty. |
 | `now` | The current time, in RFC 3339. |
 
 The `outputs` segment is optional: the rest of the path is joined with `.` into one key. `${{ steps.fix.outputs.data.issue }}` and `${{ steps.fix.data.issue }}` read the same fact, and a key that is not an output falls back to the data namespace, so `${{ steps.fix.outputs.issue }}` finds the `issue` fact of the outcome.
@@ -700,7 +702,7 @@ From the loosest to the tightest:
 
 `!` binds tighter than a comparison, so `!a == b` reads as `(!a) == b`. A comparison needs parentheses around it: `!(a == b)`.
 
-The values compare themselves. Two strings are the same when they read the same, a string that reads as a number is compared as a number, and a comparison that cannot be made is false. One side being a bool makes the comparison a question of truth: `"true" == true`, `"false" == false` and `null == false` hold. A null is not a number and not a string: `null == 0` and `null == ''` are false.
+The values compare themselves. Two strings are the same when they read the same, a string that reads as a number is compared as a number, and a comparison that cannot be made is false. One side being a bool makes the comparison a question of truth: `"true" == true`, `"false" == false` and `null == false` hold. A null is not a number and not a string: `null == 0` and `null == ''` are false, and a comparison a null takes part in is false — a path that names nothing says nothing about the order of two values.
 
 | Comparison | Result |
 |---|---|

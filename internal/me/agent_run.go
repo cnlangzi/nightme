@@ -357,7 +357,7 @@ func newRun(svc *Service, req Request, wf *wfe.Workflow, args map[string]string)
 		argVals:       args,
 		workflow:      wf,
 		policy:        policy,
-		state:         newRunState(id, wf.Name, req.Cwd, args, now),
+		state:         newRunState(id, wf.Name, req.Cwd, wf.Values, now),
 		registry:      req.Commands,
 		commands:      commands,
 		agentName:     svc.agentName(req.Agent),
@@ -1037,6 +1037,20 @@ func (r *run) recordStep(job string, step wfe.Step, out outcome.Outcome) {
 	r.svc.refreshRoundTasks(r)
 }
 
+// settleStep records the outcome of a step that ran, and runs what the
+// step does besides its message.
+//
+// A cmd step runs its builtin command when it settles: the command is
+// the step's other half. A message that failed is the step's failure,
+// and the command does not run.
+func (r *run) settleStep(job string, step wfe.Step, out outcome.Outcome) error {
+	r.recordStep(job, step, out)
+	if step.Kind() != wfe.StepKindCmd || !out.Succeeded() {
+		return nil
+	}
+	return r.runBuiltin(job, step)
+}
+
 // recordPending records that a step started and has not settled.
 func (r *run) recordPending(job string, step wfe.Step) {
 	r.mu.Lock()
@@ -1180,12 +1194,7 @@ func (r *run) exprCtx() wfe.ExprCtx {
 func (r *run) skippedRound(job string, round int) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for _, skipped := range r.state.SkippedRounds {
-		if skipped.Job == job && skipped.Round == round {
-			return true
-		}
-	}
-	return false
+	return wfe.NewSkippedRounds(r.state.SkippedRounds).Has(job, round)
 }
 
 // runBuiltin runs the builtin command of a step.
@@ -1789,10 +1798,14 @@ func (r *run) roundStartLocked(job string, round int) time.Time {
 //
 // The decision belongs to the round the run is on: a round that ended
 // quietly leaves no decision behind.
+//
+// The job and the round come from the same place: the pair names the
+// round of the job, and a pair that names two rounds is no round at
+// all.
 func (r *run) recordWake(rec wakeRecord) {
 	r.mu.Lock()
 	if rec.Job == "" {
-		rec.Job, _ = r.brainIterationLocked()
+		rec.Job, rec.Round = r.brainIterationLocked()
 	}
 	r.wakes = append(r.wakes, rec)
 	r.mu.Unlock()
@@ -1835,19 +1848,6 @@ func (r *run) stopAnchorValue() string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.stopAnchor
-}
-
-// currentRound returns the round of the job the run is on.
-//
-// The run's iteration is the job it entered and the round of that job;
-// a run that has entered no job yet is in the first round.
-func (r *run) currentRound() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.roundSession == nil || r.roundSession.round <= 0 {
-		return 1
-	}
-	return r.roundSession.round
 }
 
 // setTranscript keeps the transcript of an action.

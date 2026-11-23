@@ -15,8 +15,11 @@ import (
 type builtin struct {
 	// name is the name the workflow file uses.
 	name string
-	// args are the arguments the command takes.
+	// args are the arguments the command takes. A command that takes
+	// none refuses every argument.
 	args []string
+	// run is what the command does to the run.
+	run func(state *RunState, wf *Workflow, job string, step Step) error
 }
 
 // builtins are the commands the engine runs itself.
@@ -25,7 +28,7 @@ type builtin struct {
 // run is a thing the engine has to know about, and every one of them
 // is a rule the operator has to learn.
 var builtins = []builtin{
-	{name: "skip"},
+	{name: "skip", run: skipRound},
 }
 
 // builtinNames renders the names of the builtin commands.
@@ -52,6 +55,9 @@ func builtinByName(name string) (builtin, bool) {
 // The check belongs to the load path: a workflow that names a command
 // the engine does not have is a workflow that cannot run.
 func validateBuiltin(cmd *CmdSpec) error {
+	if strings.Contains(cmd.Name, "${{") {
+		return fmt.Errorf("a builtin command name cannot be an expression")
+	}
 	b, ok := builtinByName(cmd.Name)
 	if !ok {
 		return fmt.Errorf("unknown builtin command %q (known: %s)", cmd.Name, builtinNames())
@@ -86,14 +92,15 @@ func RunBuiltin(state *RunState, wf *Workflow, job string, step Step) error {
 	if step.Cmd == nil {
 		return nil
 	}
-	switch name := strings.TrimSpace(step.Cmd.Name); name {
-	case "":
+	name := strings.TrimSpace(step.Cmd.Name)
+	if name == "" {
 		return nil
-	case "skip":
-		return skipRound(state, wf, job, step)
-	default:
+	}
+	b, ok := builtinByName(name)
+	if !ok {
 		return fmt.Errorf("wfe: unknown builtin command %q", name)
 	}
+	return b.run(state, wf, job, step)
 }
 
 // skipRound ends the round of a job quietly.
@@ -104,14 +111,25 @@ func RunBuiltin(state *RunState, wf *Workflow, job string, step Step) error {
 // polling job would otherwise fill the panel with rows nobody reads.
 func skipRound(state *RunState, wf *Workflow, job string, step Step) error {
 	round := state.RoundOf(job)
+	if ended, ok := state.EndedRounds[job]; ok && ended.Round == round {
+		// The round is already over: there is nothing left to end. It
+		// is quiet all the same — it leaves nothing behind.
+		markSkipped(state, job, round)
+		return nil
+	}
 	if err := endRound(state, wf, job, step.ID); err != nil {
 		return err
 	}
+	markSkipped(state, job, round)
+	return nil
+}
+
+// markSkipped records that the round of the job ended quietly.
+func markSkipped(state *RunState, job string, round int) {
 	for _, skipped := range state.SkippedRounds {
 		if skipped.Job == job && skipped.Round == round {
-			return nil
+			return
 		}
 	}
 	state.SkippedRounds = append(state.SkippedRounds, SkippedRound{Job: job, Round: round})
-	return nil
 }

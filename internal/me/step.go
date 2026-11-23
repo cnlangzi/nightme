@@ -452,9 +452,9 @@ func shellOutputs(res *wfe.ShellResult) map[string]string {
 	for k, v := range res.Outputs {
 		out[k] = v
 	}
-	out["exit_code"] = strconv.Itoa(res.ExitCode)
-	out["stdout"] = truncate(res.Stdout, maxShellOutput)
-	out["stderr"] = truncate(res.Stderr, maxShellOutput)
+	out[KeyExitCode] = strconv.Itoa(res.ExitCode)
+	out[KeyStdout] = truncate(res.Stdout, maxShellOutput)
+	out[KeyStderr] = truncate(res.Stderr, maxShellOutput)
 	return out
 }
 

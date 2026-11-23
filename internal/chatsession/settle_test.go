@@ -408,6 +408,33 @@ func TestReportPromptEnd_FailedEndOverwritesAVerdict(t *testing.T) {
 	}
 }
 
+// TestReportPromptEnd_AFailureIsMergedEvenWhenTheWorkHasAVerdict —
+// the bridge ends a failed turn with the same event it ends a
+// successful one with, so the failure the turn carried must reach
+// the program even when the command already reported its own verdict.
+func TestReportPromptEnd_AFailureIsMergedEvenWhenTheWorkHasAVerdict(t *testing.T) {
+	cs, em := newSettleSession(t)
+
+	w := cs.Hold("m1")
+	w.Report(outcome.Outcome{Success: true, Status: http.StatusOK, StatusText: "the worktree is ready"})
+	w.ReportPromptEnd(agent.PromptEndClean, &agent.APIError{
+		Status:  http.StatusTooManyRequests,
+		Message: "Request rejected",
+	})
+	w.Release()
+
+	got := em.settled()
+	if len(got) != 1 {
+		t.Fatalf("settled emitted %d times, want 1", len(got))
+	}
+	if got[0].Outcome.Status != http.StatusTooManyRequests {
+		t.Errorf("settled status = %d, want %d", got[0].Outcome.Status, http.StatusTooManyRequests)
+	}
+	if got[0].Outcome.StatusText != "Request rejected" {
+		t.Errorf("settled words = %q, want the upstream's own", got[0].Outcome.StatusText)
+	}
+}
+
 // TestDropQueue_ReleasesEveryHold checks that a dropped message
 // settles even when more than one participant holds its work.
 //

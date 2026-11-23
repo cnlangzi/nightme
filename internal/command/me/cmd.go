@@ -168,7 +168,7 @@ func (f *Factory) start(ctx context.Context, rt command.RuntimeServices,
 	}
 	data := map[string]string{KeyWorkflow: workflow, KeyRunID: runID}
 	if iterations != nil {
-		data["iterations"] = strconv.Itoa(*iterations)
+		data[KeyIterations] = strconv.Itoa(*iterations)
 	}
 	chatsession.ReportOutcome(ctx, outcome.Outcome{
 		Success:    true,

@@ -43,7 +43,6 @@ import (
 // remove the worktree.
 func reportOutcome(ctx context.Context, o outcome.Outcome) {
 	if aborted(ctx) && !o.Success && o.Status != outcome.StatusClientClosedRequest {
-		o.Success = false
 		o.Status = outcome.StatusClientClosedRequest
 		o.StatusText = "the command was cancelled by /gtw abort"
 	}

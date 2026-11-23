@@ -10,7 +10,6 @@ package me
 import (
 	"fmt"
 	"maps"
-	"net/http"
 	"slices"
 	"strconv"
 	"strings"
@@ -237,42 +236,21 @@ func jobsValue(jobs []string, rounds map[string]int) string {
 	return strings.Join(parts, " · ")
 }
 
-// outcomeStatusOrder is the order the counts of the actions follow.
-//
-// The status is the HTTP status of the outcome; the zero status is the
-// one nobody reported.
-var outcomeStatusOrder = []int{
-	http.StatusOK,
-	http.StatusCreated,
-	http.StatusAccepted,
-	http.StatusNoContent,
-	http.StatusBadRequest,
-	http.StatusUnauthorized,
-	http.StatusForbidden,
-	http.StatusNotFound,
-	http.StatusConflict,
-	http.StatusRequestTimeout,
-	http.StatusTooManyRequests,
-	http.StatusInternalServerError,
-	http.StatusBadGateway,
-	http.StatusServiceUnavailable,
-	http.StatusGatewayTimeout,
-	outcome.StatusClientClosedRequest,
-	0,
-}
-
 // actionsValue renders what the run did and how the actions ended.
 //
 // The counts say how many actions broke and how many were stopped:
 // the status of every action is in the record, and the card wants the
 // two numbers an operator reads.
+//
+// An action that reported no verdict — a budget reset, a turn without
+// a tool call — is neither: it is the run's own bookkeeping.
 func actionsValue(history []wfe.ActionRecord) string {
 	ok, failed, cancelled := 0, 0, 0
 	for _, rec := range history {
 		switch {
 		case rec.Outcome.Status == outcome.StatusClientClosedRequest:
 			cancelled++
-		case rec.Outcome.Exception():
+		case isErrorStatus(rec.Outcome.Status):
 			failed++
 		default:
 			ok++

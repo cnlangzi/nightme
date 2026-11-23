@@ -21,7 +21,7 @@ import (
 // consumer sees is the merge of everything that reported.
 //
 // A message nobody reported on settles with the zero outcome: no
-// status, no words, no facts.
+// status and no facts, and the words that say so.
 type Work struct {
 	cs    *ChatSession
 	msgID string
@@ -87,6 +87,11 @@ func (w *Work) Report(o outcome.Outcome) {
 // to a plain "ok". It applies only when the work carries no verdict
 // yet.
 //
+// A turn that reported a failure always applies, even when it ended
+// cleanly: the bridge ends a failed turn with the same event it ends
+// a successful one with, and the failure it carried is new
+// information whatever the command said.
+//
 // A non-clean end always applies: it outranks every successful
 // verdict, and the turn failing is new information regardless of
 // what the command said.
@@ -99,7 +104,7 @@ func (w *Work) ReportPromptEnd(reason agent.PromptEndReason, err error) {
 	if w.released {
 		return
 	}
-	if reason == agent.PromptEndClean && w.verdict.Reported() {
+	if reason == agent.PromptEndClean && err == nil && w.verdict.Reported() {
 		return
 	}
 	w.verdict = outcome.Merge(w.verdict, outcomeForPromptEnd(reason, err))

@@ -117,7 +117,7 @@ func reviewTimeoutNotice(outcomes []reviewOutcome, timeout time.Duration) string
 // data. A run without a timed-out group carries no key.
 func timeoutOutcomeData(data map[string]string, outcomes []reviewOutcome) map[string]string {
 	if n := len(timedOutGroupNames(outcomes)); n > 0 {
-		data["timed_out_groups"] = fmt.Sprintf("%d", n)
+		data[KeyTimedOutGroups] = fmt.Sprintf("%d", n)
 	}
 	return data
 }

@@ -2,6 +2,7 @@ package gtw
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"net/http"
@@ -95,7 +96,7 @@ func watchFixVerdict(
 		if e.UserMsgID != messageID {
 			return false
 		}
-		v.once.Do(func() { v.report(e.Reason) })
+		v.once.Do(func() { v.report(e.Reason, e.Err) })
 		return false
 	})
 	return v
@@ -131,10 +132,25 @@ func (v *fixVerdict) unsubscribe() {
 // a cancelled turn is a cancellation, not a verdict about the work.
 // The facts the fix produced still have to reach the program, so
 // they ride along without a verdict of their own.
-func (v *fixVerdict) report(reason agent.PromptEndReason) {
+//
+// An upstream failure says more than the worktree does: the turn died
+// before the agent could work, so the status the upstream reported is
+// the verdict — a worktree that carries no change is what a dead turn
+// looks like, not what a broken one looks like.
+func (v *fixVerdict) report(reason agent.PromptEndReason, err error) {
 	go func() {
 		defer v.unsubscribe()
 		defer v.work.Release()
+		var apiErr *agent.APIError
+		if errors.As(err, &apiErr) {
+			v.work.Report(outcome.Outcome{
+				Success:    false,
+				Status:     apiErr.Status,
+				StatusText: apiErr.Message,
+				Data:       maps.Clone(v.data),
+			})
+			return
+		}
 		if reason != agent.PromptEndClean {
 			v.work.Report(outcome.Outcome{
 				Success: false,
@@ -168,15 +184,11 @@ func judgeFixWork(
 
 	counts, err := countWorktreeChanges(ctx, worktree, deps)
 	if err != nil {
-		return fixWorkException(data, "error",
-			"the worktree could not be read after the agent's turn",
-			err.Error())
+		return fixWorkException(data, "the worktree could not be read after the agent's turn: "+err.Error())
 	}
 	commits, known, err := countAgentCommits(ctx, deps, worktree, repoRoot, base)
 	if err != nil {
-		return fixWorkException(data, "error",
-			"the worktree could not be read after the agent's turn",
-			err.Error())
+		return fixWorkException(data, "the worktree could not be read after the agent's turn: "+err.Error())
 	}
 	counts.commits = len(commits)
 
@@ -184,21 +196,19 @@ func judgeFixWork(
 	if facts == nil {
 		facts = map[string]string{}
 	}
-	facts["changes"] = fmt.Sprintf("%d", counts.total())
-	facts["paths"] = fmt.Sprintf("%d", counts.paths)
-	facts["staged"] = fmt.Sprintf("%d", counts.staged)
-	facts["unstaged"] = fmt.Sprintf("%d", counts.unstaged)
-	facts["untracked"] = fmt.Sprintf("%d", counts.untracked)
-	facts["commits"] = fmt.Sprintf("%d", counts.commits)
+	facts[KeyChanges] = fmt.Sprintf("%d", counts.total())
+	facts[KeyPaths] = fmt.Sprintf("%d", counts.paths)
+	facts[KeyStaged] = fmt.Sprintf("%d", counts.staged)
+	facts[KeyUnstaged] = fmt.Sprintf("%d", counts.unstaged)
+	facts[KeyUntracked] = fmt.Sprintf("%d", counts.untracked)
+	facts[KeyCommits] = fmt.Sprintf("%d", counts.commits)
 
 	if counts.total() == 0 {
 		if !known {
 			// The worktree is clean and the branch's commits could
 			// not be counted: the agent may well have committed
 			// everything.
-			return fixWorkException(data, "error",
-				"the worktree could not be read after the agent's turn",
-				"the worktree is clean and the branch's history could not be counted")
+			return fixWorkException(data, "the worktree is clean and the branch's history could not be counted")
 		}
 		return command.FailedOutcomeData(http.StatusInternalServerError,
 			"the agent left the worktree unchanged", facts)
@@ -235,12 +245,12 @@ func countAgentCommits(ctx context.Context, deps HandlerDeps, worktree, repoRoot
 }
 
 // fixWorkException builds the outcome of a fix whose work could not
-// be judged — the facts the fix produced ride along, the error
-// description says what broke.
-func fixWorkException(data map[string]string, reason, summary, desc string) outcome.Outcome {
+// be judged — the facts the fix produced ride along, the one line
+// says what broke.
+func fixWorkException(data map[string]string, what string) outcome.Outcome {
 	facts := maps.Clone(data)
 	if facts == nil {
 		facts = map[string]string{}
 	}
-	return command.FailedOutcomeData(http.StatusInternalServerError, desc, facts)
+	return command.FailedOutcomeData(http.StatusInternalServerError, what, facts)
 }

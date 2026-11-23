@@ -227,12 +227,12 @@ func (d reviewDelivery) report(verdict verdict, pending bool) {
 		data = map[string]string{}
 	}
 	if verdict.groups > 0 {
-		data["unfinished"] = strconv.Itoa(len(verdict.failed))
+		data[KeyUnfinished] = strconv.Itoa(len(verdict.failed))
 	}
 	if verdict.findings > 0 {
-		data["findings"] = strconv.Itoa(verdict.findings)
+		data[KeyFindings] = strconv.Itoa(verdict.findings)
 	}
-	data["delivered"] = strconv.FormatBool(!pending)
+	data[BoolKeyDelivered] = strconv.FormatBool(!pending)
 	d.work.Report(outcome.Outcome{
 		Success:    success,
 		Status:     status,

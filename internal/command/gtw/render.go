@@ -30,10 +30,10 @@ func (s *syncOutcome) data() map[string]string {
 	}
 	data := map[string]string{}
 	if s.branch != "" {
-		data["branch"] = s.branch
+		data[KeyBranch] = s.branch
 	}
 	if s.head != "" {
-		data["head"] = s.head
+		data[KeyHead] = s.head
 	}
 	return data
 }

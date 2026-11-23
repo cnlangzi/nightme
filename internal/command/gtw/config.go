@@ -432,14 +432,14 @@ func configWriteReply(
 	if unset {
 		// An unset removes the entry — nothing was "changed" into
 		// a new value, and an empty `lang` alone cannot say so.
-		data["lang"] = ""
-		data["unset"] = "true"
+		data[KeyLang] = ""
+		data[BoolKeyUnset] = "true"
 		summary = "the gtw output language was unset"
 	} else {
-		data["lang"] = value
+		data[KeyLang] = value
 	}
 	if repo != "" {
-		data["repo"] = repo
+		data[KeyRepo] = repo
 	}
 	return replyOutcome(ctx, cs.Emitter(), chatID, messageID, strings.Join(lines, "\n"),
 		outcome.Outcome{

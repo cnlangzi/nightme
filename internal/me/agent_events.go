@@ -162,7 +162,7 @@ func (s *Service) publishToolEnd(ctx context.Context, r *run, sess *session, cal
 	case cause != nil:
 		tool.Err = cause
 	case outcomeFailed(res):
-		tool.Err = errors.New(res.StatusText)
+		tool.Err = errors.New(failureText(res))
 	default:
 		tool.Summary = res.StatusText
 	}
@@ -172,6 +172,17 @@ func (s *Service) publishToolEnd(ctx context.Context, r *run, sess *session, cal
 	})
 }
 
+// failureText is the line a failed call carries.
+//
+// A failure always says something: an outcome that carries a status
+// but no words would render as an empty error.
+func failureText(res stepResult) string {
+	if res.StatusText != "" {
+		return res.StatusText
+	}
+	return "the command failed"
+}
+
 // outcomeFailed reports whether a tool result is a failure.
 //
 // The verdict of a call that did not go through is an error, not a
@@ -179,7 +190,7 @@ func (s *Service) publishToolEnd(ctx context.Context, r *run, sess *session, cal
 // reported no verdict at all is not a failure — nobody said anything
 // about it.
 func outcomeFailed(res stepResult) bool {
-	if res.phase != phaseSettled {
+	if res.phase != phaseSettled || res.Status == 0 {
 		return false
 	}
 	return !res.Success

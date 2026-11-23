@@ -529,7 +529,7 @@ func (s *Service) toolAgent(ctx context.Context, r *run, call pendingCall) (step
 	summary, transcript := brainSummary(reply)
 	data := map[string]string{}
 	if reply.Model != "" {
-		data["model"] = reply.Model
+		data[KeyModel] = reply.Model
 	}
 	return stepResult{
 		Outcome: outcome.Outcome{
@@ -780,14 +780,14 @@ func (s *Service) toolRepoStatus(ctx context.Context, r *run, _ pendingCall) (st
 		KeyCwd:           dir,
 	}
 	if facts.Upstream != "" {
-		data["upstream"] = facts.Upstream
-		data["ahead_of_upstream"] = strconv.Itoa(facts.AheadOfUpstream)
-		data["behind_upstream"] = strconv.Itoa(facts.BehindUpstream)
+		data[KeyUpstream] = facts.Upstream
+		data[KeyAheadOfUpstream] = strconv.Itoa(facts.AheadOfUpstream)
+		data[KeyBehindUpstream] = strconv.Itoa(facts.BehindUpstream)
 	}
 	if facts.Base != "" {
-		data["base"] = facts.Base
-		data["ahead_of_base"] = strconv.Itoa(facts.AheadOfBase)
-		data["behind_base"] = strconv.Itoa(facts.BehindBase)
+		data[KeyBase] = facts.Base
+		data[KeyAheadOfBase] = strconv.Itoa(facts.AheadOfBase)
+		data[KeyBehindBase] = strconv.Itoa(facts.BehindBase)
 	}
 	summary := facts.Branch
 	if facts.Dirty {

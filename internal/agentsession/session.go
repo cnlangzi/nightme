@@ -1382,6 +1382,9 @@ func (as *AgentSession) Submit(p *Prompt) error {
 	as.asMu.Lock()
 	as.currentPrompt = p
 	as.currentPromptOverrideUserMsgID = ""
+	// The failure the previous turn reported belongs to that turn:
+	// the new one starts without it.
+	as.promptErr = nil
 	as.asMu.Unlock()
 	as.isReady.Store(false)
 

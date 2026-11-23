@@ -219,10 +219,10 @@ func (f *Factory) runUninstall(ctx context.Context, cs *chatsession.ChatSession,
 func (f *Factory) report(ctx context.Context, addr Address, result Result) {
 	data := outcomeData(result)
 	if result.Source != "" {
-		data["source"] = result.Source
+		data[KeySource] = result.Source
 	}
 	if result.SHA256 != "" {
-		data["sha256"] = result.SHA256
+		data[KeySHA256] = result.SHA256
 	}
 	switch result.Reason {
 	case ReasonInstalled, ReasonUpdated:
@@ -308,7 +308,7 @@ func uninstallStatus(reason string) int {
 func outcomeData(result Result) map[string]string {
 	data := map[string]string{}
 	if result.Path != "" {
-		data["path"] = result.Path
+		data[KeyPath] = result.Path
 	}
 	return data
 }

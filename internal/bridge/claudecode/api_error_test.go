@@ -94,6 +94,42 @@ func TestPumpStream_TheCamelCaseSpellingIsRead(t *testing.T) {
 	}
 }
 
+// TestPumpStream_AFailureDoesNotCarryIntoTheNextTurn — the status a
+// turn reported belongs to that turn.
+//
+// The CLI reports an API failure on the assistant frame of the turn
+// that hit it, and the result frame that closes the turn reads it
+// back. A turn that comes after must not inherit it.
+func TestPumpStream_AFailureDoesNotCarryIntoTheNextTurn(t *testing.T) {
+	input := `{"type":"assistant","is_api_error_message":true,"api_error_status":429,"message":{"id":"m1","role":"assistant","content":[]}}` + "\n" +
+		`{"type":"result","subtype":"error_during_execution","is_error":true,"result":"rate limited"}` + "\n" +
+		`{"type":"result","subtype":"error_max_turns","is_error":true,"result":"the turn ran out of turns"}` + "\n"
+
+	var results []error
+	for _, ev := range streamEvents(t, input) {
+		if ev.Kind != agent.EventAgentResult {
+			continue
+		}
+		results = append(results, ev.Err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("the stream produced %d results, want 2", len(results))
+	}
+	var first, second *agent.APIError
+	if !errors.As(results[0], &first) || first.Status != 429 {
+		t.Fatalf("the first turn's error is %v, want a 429", results[0])
+	}
+	if !errors.As(results[1], &second) {
+		t.Fatalf("the second turn's error is %v, want an API error", results[1])
+	}
+	if second.Status != 0 {
+		t.Errorf("the second turn's status = %d, want none — it inherits the first turn's", second.Status)
+	}
+	if second.Code == first.Code {
+		t.Errorf("the second turn's code = %q, want none — it inherits the first turn's", second.Code)
+	}
+}
+
 // TestPumpStream_AResultWithoutAStatusStillFails — a CLI that reports
 // no status leaves the error without one; the caller falls back to the
 // reason the turn ended.

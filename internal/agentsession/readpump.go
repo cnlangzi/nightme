@@ -191,7 +191,12 @@ func (as *AgentSession) readpumpLoop(stop <-chan struct{}, done chan struct{}) {
 			// layer that settles the message needs to know what the
 			// upstream said — a 429 from the API is a fact, not a
 			// line of prose.
-			if ev.Kind == agent.EventAgentResult && ev.Err != nil {
+			//
+			// A result frame carries the failure of a turn that
+			// ended badly; an error frame carries the failure of a
+			// turn that died. A tool frame's failure belongs to the
+			// tool, not to the turn.
+			if (ev.Kind == agent.EventAgentResult || ev.Kind == agent.EventAgentError) && ev.Err != nil {
 				as.rememberPromptErr(ev.Err)
 			}
 
@@ -237,6 +242,24 @@ func (as *AgentSession) emitLifecycleLocked(status Status) {
 	}
 }
 
+// rememberPromptErr keeps the failure the turn reported.
+//
+// The error belongs to the prompt that is running: the readpump
+// reads it back when the prompt ends. A failure that arrives when no
+// prompt is in flight belongs to no turn — the turn it came from is
+// over — and is dropped.
+func (as *AgentSession) rememberPromptErr(err error) {
+	if as == nil || err == nil {
+		return
+	}
+	as.asMu.Lock()
+	defer as.asMu.Unlock()
+	if as.currentPrompt == nil {
+		return
+	}
+	as.promptErr = err
+}
+
 // endPrompt (CS-AS 边界重构 Phase 1) is the AS-internal Prompt
 // terminator. Called by:
 //
@@ -258,19 +281,6 @@ func (as *AgentSession) emitLifecycleLocked(status Status) {
 // currentPrompt is installed. /review injects via WithReplyTo
 // and the completion has to reach the channel either way. The
 // reply-to override is the anchor in that case.
-// rememberPromptErr keeps the failure the turn reported.
-//
-// The error belongs to the prompt that is running: the readpump
-// reads it back when the prompt ends.
-func (as *AgentSession) rememberPromptErr(err error) {
-	if as == nil || err == nil {
-		return
-	}
-	as.asMu.Lock()
-	as.promptErr = err
-	as.asMu.Unlock()
-}
-
 func (as *AgentSession) endPrompt(reason agent.PromptEndReason) {
 	as.asMu.Lock()
 	now := time.Now()

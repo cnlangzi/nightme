@@ -1122,16 +1122,7 @@ func (r *run) renderPolicy() string {
 // The record carries the round the step's job is in: the per-step
 // budgets count the actions of the current round only.
 func (r *run) record(kind wfe.ActionKind, command, stepID string, verdict outcome.Outcome) {
-	r.mu.Lock()
-	r.policy.Record(wfe.ActionRecord{
-		Kind:    kind,
-		Command: command,
-		StepID:  stepID,
-		Round:   r.roundOf(stepID),
-		Outcome: verdict,
-		At:      r.svc.now(),
-	})
-	r.mu.Unlock()
+	r.recordAction(kind, command, stepID, verdict, false)
 }
 
 // recordSkipped appends a step that was passed over to the policy's
@@ -1140,14 +1131,22 @@ func (r *run) record(kind wfe.ActionKind, command, stepID string, verdict outcom
 // The history has to agree with the run state: the step was skipped,
 // and the run says so.
 func (r *run) recordSkipped(command, stepID string, verdict outcome.Outcome) {
+	r.recordAction(wfe.ActionKindRun, command, stepID, verdict, true)
+}
+
+// recordAction appends an action to the policy's history.
+//
+// The record carries the round the step's job is in: the per-step
+// budgets count the actions of the current round only.
+func (r *run) recordAction(kind wfe.ActionKind, command, stepID string, verdict outcome.Outcome, skipped bool) {
 	r.mu.Lock()
 	r.policy.Record(wfe.ActionRecord{
-		Kind:    wfe.ActionKindRun,
+		Kind:    kind,
 		Command: command,
 		StepID:  stepID,
 		Round:   r.roundOf(stepID),
 		Outcome: verdict,
-		Skipped: true,
+		Skipped: skipped,
 		At:      r.svc.now(),
 	})
 	r.mu.Unlock()

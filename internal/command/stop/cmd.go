@@ -137,7 +137,7 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 func stopOutcome(result Result) outcome.Outcome {
 	data := map[string]string{}
 	if result.Agent != "" {
-		data["agent"] = result.Agent
+		data[KeyAgent] = result.Agent
 	}
 	switch result.Action {
 	case "stopped":

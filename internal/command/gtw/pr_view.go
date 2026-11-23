@@ -150,9 +150,10 @@ func readPRMergeState(
 // replyPRViewOutcome turns a merge state into the card and the
 // structured outcome.
 //
-// The card and the outcome are two faces of the same decision: a 2xx
-// says the pull request can be merged and the card says the same
-// thing. A pull request that cannot be merged is a conclusion, not a
+// The card and the outcome are two faces of the same decision. A
+// pull request that cannot be merged is a conclusion, not a
+// breakdown: the status is a 2xx either way, and the facts —
+// merge_state and conflict — say which case it is. A pull request that cannot be merged is a conclusion, not a
 // breakdown — the status is a success, so a workflow keeps going and
 // branches on the facts instead.
 //
@@ -192,7 +193,7 @@ func replyPRViewOutcome(
 			renderPRViewCard(prViewTitle(state), state, ""),
 			command.SuccessOutcome(prViewSummary(state), data))
 	case PRMergeConflicting:
-		data["conflict"] = "true"
+		data[BoolKeyConflict] = "true"
 		return replyOutcome(ctx, em, chatID, messageID,
 			renderPRViewCard(prViewTitle(state), state, prViewHint(state)),
 			command.SuccessOutcome(prViewSummary(state), data))

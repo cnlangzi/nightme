@@ -191,7 +191,7 @@ func dispatchPush(
 		KeyCommits: fmt.Sprintf("%d", commitCount),
 	}
 	if remoteHead != "" {
-		data["remote_head"] = remoteHead
+		data[KeyRemoteHead] = remoteHead
 	}
 	return replyOutcome(ctx, cs.Emitter(), chatID, messageID, card,
 		outcome.Outcome{

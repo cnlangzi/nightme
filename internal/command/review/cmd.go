@@ -846,7 +846,7 @@ func (f *Factory) handleReview(ctx context.Context, rt command.RuntimeServices,
 		// reader when /think keeps the thread empty.
 		data := map[string]string{KeyAgent: runnerName}
 		if groups := len(rec.outcomes); groups > 0 {
-			data["groups"] = fmt.Sprintf("%d", groups)
+			data[KeyGroups] = fmt.Sprintf("%d", groups)
 		}
 		f.deliver(reviewDelivery{
 			ctx:        revCtx,
@@ -1160,7 +1160,7 @@ func (f *Factory) handleContinue(ctx context.Context, rt command.RuntimeServices
 		continued, _ := groupCounts(groupOutcomes)
 		data := map[string]string{KeyAgent: runnerName}
 		if continued > 0 {
-			data["continued_groups"] = fmt.Sprintf("%d", continued)
+			data[KeyContinuedGroups] = fmt.Sprintf("%d", continued)
 		}
 		f.deliver(reviewDelivery{
 			ctx:        revCtx,

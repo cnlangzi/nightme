@@ -412,11 +412,11 @@ func commitNothingFacts(ctx context.Context, c Context, branch string, deps Hand
 	if err != nil {
 		return facts
 	}
-	facts["changes"] = fmt.Sprintf("%d", counts.total())
-	facts["paths"] = fmt.Sprintf("%d", counts.paths)
-	facts["staged"] = fmt.Sprintf("%d", counts.staged)
-	facts["unstaged"] = fmt.Sprintf("%d", counts.unstaged)
-	facts["untracked"] = fmt.Sprintf("%d", counts.untracked)
+	facts[KeyChanges] = fmt.Sprintf("%d", counts.total())
+	facts[KeyPaths] = fmt.Sprintf("%d", counts.paths)
+	facts[KeyStaged] = fmt.Sprintf("%d", counts.staged)
+	facts[KeyUnstaged] = fmt.Sprintf("%d", counts.unstaged)
+	facts[KeyUntracked] = fmt.Sprintf("%d", counts.untracked)
 	return facts
 }
 

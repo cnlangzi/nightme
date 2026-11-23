@@ -348,13 +348,13 @@ func issueCreateOutcome(opened []*Issue, owner, repo string, kept int, runErr er
 	}
 	data := map[string]string{KeyRepo: owner + "/" + repo}
 	if len(numbers) > 0 {
-		data["issues"] = strings.Join(numbers, ",")
+		data[KeyIssues] = strings.Join(numbers, ",")
 	}
 	if kept > 0 {
-		data["kept"] = fmt.Sprintf("%d", kept)
+		data[KeyKept] = fmt.Sprintf("%d", kept)
 	}
-	data["deps"] = fmt.Sprintf("%d", len(deps.created))
-	data["deps_failed"] = fmt.Sprintf("%d", len(deps.failures))
+	data[KeyDeps] = fmt.Sprintf("%d", len(deps.created))
+	data[KeyDepsFailed] = fmt.Sprintf("%d", len(deps.failures))
 	switch {
 	case runErr != nil && len(opened) == 0:
 		return command.FailedOutcomeData(http.StatusInternalServerError, "no issue could be created", data)

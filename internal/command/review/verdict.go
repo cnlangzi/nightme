@@ -154,7 +154,7 @@ func (v *selfVerdict) report() {
 func judgeReview(before, after workspaceState, findings int, runner string) outcome.Outcome {
 	data := map[string]string{KeyAgent: runner}
 	if findings > 0 {
-		data["findings"] = strconv.Itoa(findings)
+		data[KeyFindings] = strconv.Itoa(findings)
 	}
 	if findings == 0 {
 		return outcome.Outcome{

@@ -253,6 +253,24 @@ func (f apiErrorFields) apiError() *agent.APIError {
 	}
 }
 
+// richerAPIError picks the failure that says more.
+//
+// The CLI reports the API failure either on the frame or inside the
+// message it carries, and the two do not always carry the same
+// fields: one may name the status while the other only says that
+// there was an error.
+func richerAPIError(a, b *agent.APIError) *agent.APIError {
+	switch {
+	case a == nil:
+		return b
+	case b == nil:
+		return a
+	case a.Status != 0:
+		return a
+	}
+	return b
+}
+
 // apiErrorOf builds the error an error result frame reports.
 //
 // The frame carries the upstream's own status when the CLI knew it;
@@ -260,6 +278,9 @@ func (f apiErrorFields) apiError() *agent.APIError {
 // so the remembered one is the fallback. The CLI's own words are the
 // message when it sent no details of its own, and its own code — the
 // result's subtype — is the code when it named no other.
+//
+// The remembered failure belongs to the turn that reported it: it is
+// consumed here, so the next turn does not inherit it.
 func apiErrorOf(ev streamEvent, state *streamState) error {
 	status := ev.apiErrorFields.status()
 	code := ev.apiErrorFields.code()
@@ -274,6 +295,7 @@ func apiErrorOf(ev streamEvent, state *streamState) error {
 		if details == "" {
 			details = state.apiErr.Message
 		}
+		state.apiErr = nil
 	}
 	if code == "" {
 		code = ev.Subtype
@@ -553,10 +575,7 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 		// The CLI reports an upstream failure on the assistant frame
 		// of the turn that hit it. The status is kept for the result
 		// frame that closes the turn.
-		if apiErr := ev.Message.apiErrorFields.apiError(); apiErr != nil {
-			state.apiErr = apiErr
-		}
-		if apiErr := ev.apiErrorFields.apiError(); apiErr != nil {
+		if apiErr := richerAPIError(ev.Message.apiErrorFields.apiError(), ev.apiErrorFields.apiError()); apiErr != nil {
 			state.apiErr = apiErr
 		}
 		for _, block := range ev.Message.Content {
